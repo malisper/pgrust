@@ -1,0 +1,40 @@
+[package]
+name = "catalog_catalog"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "catalog_catalog"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_cluster = { path = "../../../_support/types/types_cluster" }
+types_core = { path = "../../../_support/types/types_core" }
+datum = { path = "../../../_support/types/datum" }
+types_error = { path = "../../../_support/types/types_error" }
+fmgr = { path = "../../../_support/types/fmgr" }
+rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+snapshot = { path = "../../../_support/types/snapshot" }
+types_storage = { path = "../../../_support/types/types_storage" }
+utils_error = { path = "../../utils/utils_error" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+scankey = { path = "../../access/common/scankey" }
+catalog_namespace = { path = "../catalog_namespace" }
+catalog_seams = { path = "../catalog_seams" }
+genam_seams = { path = "../../access/index/genam_seams" }
+indexam_seams = { path = "../../access/index/indexam_seams" }
+table_seams = { path = "../../access/table/table_seams" }
+varsup_seams = { path = "../../access/transam/varsup_seams" }
+parallel_rt_seams = { path = "../../access/transam/parallel_rt_seams" }
+backend_common_relpath_seams = { path = "../../common/backend_common_relpath_seams" }
+fd_seams = { path = "../../storage/file/fd_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+superuser_seams = { path = "../../utils/misc/superuser_seams" }

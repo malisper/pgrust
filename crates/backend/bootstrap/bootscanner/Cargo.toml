@@ -1,0 +1,15 @@
+[package]
+name = "bootscanner"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "bootscanner"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+types_error = { path = "../../../_support/types/types_error" }
+utils_error = { path = "../../utils/utils_error" }
+guc_file = { path = "../../utils/misc/guc_file" }

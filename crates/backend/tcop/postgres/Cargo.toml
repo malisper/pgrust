@@ -1,0 +1,143 @@
+[package]
+name = "postgres"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "postgres"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+matview_deps_seams = { path = "../../commands/matview_deps_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_dest = { path = "../../../_support/types/types_dest" }
+types_guc = { path = "../../../_support/types/types_guc" }
+types_timeout = { path = "../../../_support/types/types_timeout" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_pgstat = { path = "../../../_support/types/types_pgstat" }
+stringinfo = { path = "../../../_support/types/stringinfo" }
+types_startup = { path = "../../../_support/types/types_startup" }
+
+utils_error = { path = "../../utils/utils_error" }
+init_small = { path = "../../utils/init/init_small" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+misc_timeout = { path = "../../utils/misc/misc_timeout" }
+
+# Ported owner crates of cross-unit callees (acyclic: each depends only on
+# `backend-tcop-postgres-seams`, never on this owner crate).
+procsignal = { path = "../../storage/ipc/procsignal" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+transam_parallel = { path = "../../access/transam/transam_parallel" }
+applyparallelworker = { path = "../../replication/logical/applyparallelworker" }
+commands_async = { path = "../../commands/commands_async" }
+sinval = { path = "../../storage/ipc/sinval" }
+pqcomm = { path = "../../libpq/pqcomm" }
+pmsignal = { path = "../../storage/ipc/pmsignal" }
+libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
+transam_xact = { path = "../../access/transam/transam_xact" }
+prng = { path = "../../../_support/pg/prng" }
+
+# Owner crates of the simple-Query (F1) entry points that have no consumable
+# seam: the parser driver (raw_parser), parse-analysis (parse_analyze_*,
+# analyze_requires_snapshot), the portal-run driver (PortalRun /
+# PortalSetResultFormat), and the command-tag classifier. Acyclic: each depends
+# only on `*-seams` leaves, never on this owner crate.
+driver = { path = "../../parser/driver" }
+parser_analyze = { path = "../../parser/parser_analyze" }
+pquery = { path = "../pquery" }
+cmdtag = { path = "../cmdtag" }
+
+# Vocabulary types the F1 pipeline threads.
+nodes = { path = "../../../_support/types/nodes" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+portal = { path = "../../../_support/types/portal" }
+snapshot = { path = "../../../_support/types/snapshot" }
+
+# F0a: the main-loop drivers' owner callees (acyclic — none deps this owner).
+pqformat = { path = "../../libpq/pqformat" }
+fastpath = { path = "../fastpath" }
+interrupt = { path = "../../postmaster/interrupt" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+portalmem = { path = "../../utils/mmgr/portalmem" }
+miscinit = { path = "../../utils/init/miscinit" }
+misc_guc = { path = "../../utils/misc/misc_guc" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
+
+# Seam crates (leaf; never create cycles).
+postgres_seams = { path = "../postgres_seams" }
+execParallel_support_seams = { path = "../../executor/execParallel_support_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+guc_tables_seams = { path = "../../utils/misc/guc_tables_seams" }
+parallel_rt_seams = { path = "../../access/transam/parallel_rt_seams" }
+guc_seams = { path = "../../utils/misc/guc_seams" }
+timeout_seams = { path = "../../utils/misc/timeout_seams" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
+# pathnode.c's CHECK_FOR_INTERRUPTS() is the miscadmin macro owned here; the
+# optimizer reaches it through pathnode-seams' infallible () variant.
+pathnode_seams = { path = "../../optimizer/util/pathnode_seams" }
+lmgr_proc_seams = { path = "../../storage/lmgr/lmgr_proc_seams" }
+lock_seams = { path = "../../storage/lmgr/lock_seams" }
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+mcxt_seams = { path = "../../utils/mmgr/mcxt_seams" }
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+autovacuum_seams = { path = "../../postmaster/autovacuum_seams" }
+launcher_seams = { path = "../../replication/logical/launcher_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+main_seams = { path = "../../main/main_seams" }
+user_seams = { path = "../../commands/user_seams" }
+walsender_seams = { path = "../../replication/walsender_seams" }
+event_trigger_seams = { path = "../../commands/event_trigger_seams" }
+pgstrcasecmp = { path = "../../../port/pgstrcasecmp" }
+
+# F1 simple-Query pipeline seams.
+rewritehandler_seams = { path = "../../rewrite/rewritehandler_seams" }
+planner_seams = { path = "../../optimizer/plan/planner_seams" }
+dest_seams = { path = "../dest_seams" }
+utility_seams = { path = "../utility_seams" }
+status_seams = { path = "../../utils/activity/status_seams" }
+portalmem_seams = { path = "../../utils/mmgr/portalmem_seams" }
+snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }
+more_seams = { path = "../../utils/misc/more_seams" }
+parser_analyze_seams = { path = "../../parser/parser_analyze_seams" }
+
+# F2 extended-query (Parse/Bind/Describe/Execute) pipeline. The plancache /
+# prepared-statement store / type-I/O / param-store / RowDescription owners and
+# seams. Acyclic: prepare and the seam leaves never depend on this owner.
+prepare = { path = "../../commands/prepare" }
+plancache_seams = { path = "../../utils/cache/plancache_seams" }
+params_seams = { path = "../../nodes/params_seams" }
+printtup_seams = { path = "../../access/common/printtup_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_plancache = { path = "../../../_support/types/types_plancache" }
+
+# F0b: the single-user standalone bootstrap (PostgresSingleUserMain) callees.
+postinit_seams = { path = "../../utils/init/postinit_seams" }
+ipci_seams = { path = "../../storage/ipc/ipci_seams" }
+pmchild_seams = { path = "../../postmaster/pmchild_seams" }
+fd_seams = { path = "../../storage/file/fd_seams" }
+
+# Per-backend signal-handler install in PostgresMain (postgres.c:4213-4252):
+# the `pqsignal(...)` block, in particular `pqsignal(SIGUSR1,
+# procsignal_sigusr1_handler)` which lets a backend absorb its own (and
+# others') ProcSignalBarrier — required for DROP DATABASE / DROP TABLESPACE
+# (EmitProcSignalBarrier + WaitForProcSignalBarrier) to terminate.
+port_pqsignal_seams = { path = "../../../port/port_pqsignal_seams" }
+signal = { path = "../../../_support/types/signal" }
+# sigprocmask(SIG_SETMASK, &UnBlockSig) in PostgresMain (postgres.c:4264): the
+# backend inherits BlockSig from InitPostmasterChild and must unblock signals
+# so the self-SIGUSR1 from EmitProcSignalBarrier is actually delivered.
+libpq_pqsignal_seams = { path = "../../libpq/libpq_pqsignal_seams" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

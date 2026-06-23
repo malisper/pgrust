@@ -1,0 +1,79 @@
+[package]
+name = "adt_numeric"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_numeric"
+path = "src/lib.rs"
+
+[dependencies]
+# Keystone carrier: on-disk ABI + in-memory NumericVar<'mcx> + agg states.
+types_numeric = { path = "../../../../_support/types/types_numeric" }
+types_core = { path = "../../../../_support/types/types_core" }
+mcx = { path = "../../../../_support/mcx" }
+datum = { path = "../../../../_support/types/datum" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_error = { path = "../../../../_support/types/types_error" }
+
+# Externals this crate REACHES OUT to (real, already-ported owners): the
+# Jenkins/lookup3 byte hashers (hashfn.c hash_any/hash_any_extended) used by
+# hash_numeric/hash_numeric_extended.
+hashfn = { path = "../../../../common/hashfn" }
+
+# The HyperLogLog cardinality estimator (hyperloglog.c). numeric_sortsupport's
+# abbreviated-key state (NumericSortSupport.abbr_card) holds the counter by
+# value, exactly as C holds `hyperLogLogState abbr_card` inline; the
+# init/add/estimate ops are called directly on it (mirrors varlena's sort state).
+hyperloglog = { path = "../../../lib/hyperloglog" }
+
+# The int8[2] {count,sum} transition array of avg(int2)/avg(int4) is built and
+# read back with construct_array / ARR_* over the real arrayfuncs foundation
+# (mirrors backend-utils-adt-float's float8[] aggregate model).
+arrayfuncs = { path = "../arrayfuncs" }
+
+# numerictypmodin's cstring[] arg is decoded via ArrayGetIntegerTypmods, which
+# lives in arrayutils; reached through its seam to avoid a dependency cycle.
+arrayutils_seams = { path = "../arrayutils_seams" }
+
+# Inward seams this crate OWNS and installs from init_seams().
+numeric_seams = { path = "../numeric_seams" }
+
+# The numeric->integer cast boundary (numeric_int2/4/8) is a numeric.c function
+# that jsonb.c reaches; the slots are declared in jsonb-seams but numeric.c is
+# their true owner, so this crate installs them cross-crate from init_seams().
+jsonb_seams = { path = "../jsonb_seams" }
+
+# make_const's numeric (T_Float oversize) arm reaches numeric_in via a seam slot
+# declared in parser-small1-seams (parse_node.c is the consumer); numeric.c owns
+# and installs it cross-crate from init_seams().
+small1_seams = { path = "../../../parser/small1_seams" }
+
+# The real backend PRNG (xoroshiro128**) for random_numeric/random_var. The
+# `pg_prng_state` threaded in by the SQL random() setup is `pg_prng::PgPrng`.
+prng = { path = "../../../../_support/pg/prng" }
+
+# seam_core::seam! for the OUTBOUND, owner-unported call frames the SRF /
+# planner-support / sort-support setup reach (the planner Node vocabulary, the
+# SRF FuncCallContext / multi-call context, and the tuplesort abbreviation
+# slots). Declared inline; NOT installed here (no owned X-seams crate -> they do
+# not trip the recurrence guard; they panic until each owner lands).
+seam_core = { path = "../../../../_support/seam/seam_core" }
+
+# The real (merged) trimmed SortSupportData node numeric_sortsupport fills.
+types_sortsupport = { path = "../../../../_support/types/types_sortsupport" }
+
+# The fmgr Datum/call-frame boundary + the builtin table registration: each
+# SQL-callable numeric.c function is registered here as a `fc_<name>` adapter.
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+
+# The real planner node vocabulary the numeric()/generate_series() planner
+# support fns run over (Expr/Const/PlannerInfo) + the real exprTypmod /
+# relabel_to_typmod (nodeFuncs.c) and estimate_expression_value (clauses.c)
+# owners they call directly (acyclic: none of these depend on numeric).
+nodes = { path = "../../../../_support/types/nodes" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+clauses = { path = "../../../optimizer/util/clauses" }

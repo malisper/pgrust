@@ -1,0 +1,49 @@
+[package]
+name = "copyto"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "copyto"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+datum = { path = "../../../_support/types/datum" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+rel = { path = "../../../_support/types/rel" }
+nodes = { path = "../../../_support/types/nodes" }
+types_copy = { path = "../../../_support/types/types_copy" }
+stringinfo = { path = "../../../_support/types/stringinfo" }
+types_pgstat = { path = "../../../_support/types/types_pgstat" }
+types_dest = { path = "../../../_support/types/types_dest" }
+
+# Direct deps (no cycle): error vocabulary, libpq message assembly, table-slot
+# creation, and this crate's own inward seam crate.
+utils_error = { path = "../../utils/utils_error" }
+pqformat = { path = "../../libpq/pqformat" }
+table_tableam = { path = "../../access/table/table_tableam" }
+copyto_seams = { path = "../copyto_seams" }
+# The tcop-dest receiver router: CreateCopyDestReceiver registers copyto's
+# vtable here (no cycle — dest depends only on copyto-*seams*).
+tcop_dest = { path = "../../tcop/tcop_dest" }
+
+# Outward seams (would cycle as direct deps).
+commands_copy_seams = { path = "../commands_copy_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+execTuples_seams = { path = "../../executor/execTuples_seams" }
+execMain_seams = { path = "../../executor/execMain_seams" }
+backend_progress_seams = { path = "../../utils/activity/backend_progress_seams" }
+fd_seams = { path = "../../storage/file/fd_seams" }
+pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+parser_analyze_seams = { path = "../../parser/parser_analyze_seams" }
+planner_seams = { path = "../../optimizer/plan/planner_seams" }
+snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }
+table_tableam_seams = { path = "../../access/table/table_tableam_seams" }
+port_path_seams = { path = "../../../port/port_path_seams" }

@@ -1,0 +1,61 @@
+[package]
+name = "commands_async"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "commands_async"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_guc = { path = "../../../_support/types/types_guc" }
+types_async = { path = "../../../_support/types/types_async" }
+snapshot = { path = "../../../_support/types/snapshot" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_dest = { path = "../../../_support/types/types_dest" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+
+# Direct (acyclic) owner deps.
+utils_error = { path = "../../utils/utils_error" }
+init_small = { path = "../../utils/init/init_small" }
+slru = { path = "../../access/transam/slru" }
+lwlock = { path = "../../storage/lmgr/lwlock" }
+pqformat = { path = "../../libpq/pqformat" }
+hashfn = { path = "../../../common/hashfn" }
+mcx = { path = "../../../_support/mcx" }
+
+# Inward seams this crate owns + installs.
+async_seams = { path = "../async_seams" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+
+# fmgr builtin registration (pg_notify / pg_notification_queue_usage).
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+fmgr = { path = "../../../_support/types/fmgr" }
+datum = { path = "../../../_support/types/datum" }
+
+# ProcessUtility dispatch arms (installs the NOTIFY/LISTEN/UNLISTEN seams).
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+# Parallel-worker NotifyMyFrontEnd forwarding (parallel.c HandleParallelMessage).
+parallel_rt_seams = { path = "../../access/transam/parallel_rt_seams" }
+
+# Outward seams (cycle partners / unported owners).
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+transam_seams = { path = "../../access/transam/transam_seams" }
+transam_parallel = { path = "../../access/transam/transam_parallel" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
+dsm_core_seams = { path = "../../storage/ipc/dsm_core_seams" }
+ipc_shmem_seams = { path = "../../storage/ipc/ipc_shmem_seams" }
+snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }
+snapmgr_pc_seams = { path = "../../utils/time/snapmgr_pc_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+ps_status_seams = { path = "../../utils/misc/ps_status_seams" }
+pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+utility_seams = { path = "../../tcop/utility_seams" }

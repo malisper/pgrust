@@ -1,0 +1,89 @@
+[package]
+name = "heap"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "heap"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+# stringToNode for cooked CHECK constraints (CREATE TABLE … LIKE INCLUDING
+# CONSTRAINTS feeds AddRelationNewConstraints a cooked_expr). Leaf seam crate.
+read_seams = { path = "../../nodes/read_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+rel = { path = "../../../_support/types/rel" }
+types_cluster = { path = "../../../_support/types/types_cluster" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+array = { path = "../../../_support/types/array" }
+nodes = { path = "../../../_support/types/nodes" }
+types_scan = { path = "../../../_support/types/types_scan" }
+
+utils_error = { path = "../../utils/utils_error" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+format_type_seams = { path = "../../utils/adt/format_type_seams" }
+stack_depth = { path = "../../utils/misc/stack_depth" }
+common_relation = { path = "../../access/common/common_relation" }
+heaptuple = { path = "../../access/common/heaptuple" }
+tupdesc = { path = "../../access/common/tupdesc" }
+scankey = { path = "../../access/common/scankey" }
+table = { path = "../../access/table/table" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
+
+# Constraint-cooker producers (real owners).
+parse_expr = { path = "../../parser/parse_expr" }
+coerce = { path = "../../parser/coerce" }
+parse_collate = { path = "../../parser/parse_collate" }
+parser_relation = { path = "../../parser/parser_relation" }
+small1 = { path = "../../parser/small1" }
+vars = { path = "../../optimizer/util/vars" }
+clauses = { path = "../../optimizer/util/clauses" }
+pg_constraint = { path = "../pg_constraint" }
+pg_attrdef = { path = "../pg_attrdef" }
+indexing = { path = "../indexing" }
+outfuncs = { path = "../../nodes/outfuncs" }
+nodes_core = { path = "../../nodes/nodes_core" }
+nodeFuncs_seams = { path = "../../nodes/nodeFuncs_seams" }
+transam_xact = { path = "../../access/transam/transam_xact" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+
+# Catalog-write producers + scan/syscache (real owners).
+catalog_catalog = { path = "../catalog_catalog" }
+pg_type = { path = "../pg_type" }
+typecmds = { path = "../../commands/typecmds" }
+dependency = { path = "../dependency" }
+pg_depend = { path = "../pg_depend" }
+objectaccess = { path = "../objectaccess" }
+relcache = { path = "../../utils/cache/relcache" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+miscinit = { path = "../../utils/init/miscinit" }
+
+# Seam crates (owner unported / would-cycle).
+heap_seams = { path = "../heap_seams" }
+indexing_seams = { path = "../indexing_seams" }
+pg_shdepend_seams = { path = "../pg_shdepend_seams" }
+aclchk_seams = { path = "../aclchk_seams" }
+binary_upgrade_seams = { path = "../binary_upgrade_seams" }
+catalog_seams = { path = "../catalog_seams" }
+catalog_storage_seams = { path = "../catalog_storage_seams" }
+table_tableam_seams = { path = "../../access/table/table_tableam_seams" }
+table_seams = { path = "../../access/table/table_seams" }
+index_seams = { path = "../index_seams" }
+genam_seams = { path = "../../access/index/genam_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+tablespace_globals_seams = { path = "../../commands/tablespace_globals_seams" }
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+tablecmds_seams = { path = "../../commands/tablecmds_seams" }
+plancat_ext_seams = { path = "../../optimizer/util/plancat_ext_seams" }
+catalog_partition = { path = "../catalog_partition" }
+partdesc = { path = "../../partitioning/partdesc" }
+pg_subscription_seams = { path = "../pg_subscription_seams" }
+predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
+inval = { path = "../../utils/cache/inval" }

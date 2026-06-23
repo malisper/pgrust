@@ -1,0 +1,37 @@
+[package]
+name = "minmax"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "minmax"
+path = "src/lib.rs"
+
+[dependencies]
+reloptions_seams = { path = "../../common/reloptions_seams" }
+common_reloptions = { path = "../../common/common_reloptions" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+brin = { path = "../../../../_support/types/brin" }
+rel = { path = "../../../../_support/types/rel" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+datum = { path = "../../../../_support/types/datum" }
+types_typcache = { path = "../../../../_support/types/types_typcache" }
+utils_error = { path = "../../../utils/utils_error" }
+brin_entry_seams = { path = "../brin_entry_seams" }
+inclusion = { path = "../inclusion" }
+bloom = { path = "../bloom" }
+minmax_multi = { path = "../minmax_multi" }
+indexam_seams = { path = "../../index/indexam_seams" }
+lsyscache_seams = { path = "../../../utils/cache/lsyscache_seams" }
+typcache_seams = { path = "../../../utils/cache/typcache_seams" }
+fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
+fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+scalar_seams = { path = "../../../utils/adt/scalar_seams" }
+
+[dev-dependencies]
+types_storage = { path = "../../../../_support/types/types_storage" }

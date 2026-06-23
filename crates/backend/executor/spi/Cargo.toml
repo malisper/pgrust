@@ -1,0 +1,53 @@
+[package]
+name = "spi"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "spi"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
+matview_deps_seams = { path = "../../commands/matview_deps_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+snapshot = { path = "../../../_support/types/snapshot" }
+types_ri_triggers = { path = "../../../_support/types/types_ri_triggers" }
+nodes = { path = "../../../_support/types/nodes" }
+types_dest = { path = "../../../_support/types/types_dest" }
+portal = { path = "../../../_support/types/portal" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_xml = { path = "../../../_support/types/types_xml" }
+types_resowner = { path = "../../../_support/types/types_resowner" }
+spi_seams = { path = "../spi_seams" }
+# ts_stat SPI cursor leg: the exec_stat_query seam (homed on the tsvector ext
+# seam crate) + the one-tsvector-column type check.
+tsvector_ext_seams = { path = "../../utils/adt/tsvector_ext_seams" }
+coerce_seams = { path = "../../parser/coerce_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+heaptuple = { path = "../../access/common/heaptuple" }
+heap = { path = "../../catalog/heap" }
+utils_error = { path = "../../utils/utils_error" }
+cmdtag = { path = "../../tcop/cmdtag" }
+tcop_dest = { path = "../../tcop/tcop_dest" }
+dest_seams = { path = "../../tcop/dest_seams" }
+pquery = { path = "../../tcop/pquery" }
+utility_seams = { path = "../../tcop/utility_seams" }
+driver = { path = "../../parser/driver" }
+parser_analyze = { path = "../../parser/parser_analyze" }
+execMain = { path = "../execMain" }
+rewritehandler = { path = "../../rewrite/rewritehandler" }
+execTuples_seams = { path = "../execTuples_seams" }
+cache_plancache = { path = "../../utils/cache/cache_plancache" }
+plancache_seams = { path = "../../utils/cache/plancache_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+portalmem_seams = { path = "../../utils/mmgr/portalmem_seams" }
+snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }
+xml_libxml_seams = { path = "../../utils/adt/xml_libxml_seams" }

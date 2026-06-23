@@ -1,0 +1,58 @@
+[package]
+name = "fd"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "fd"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_catalog = { path = "../../../../_support/types/types_catalog" }
+wal = { path = "../../../../_support/types/wal" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+mcx = { path = "../../../../_support/mcx" }
+libc = "0.2"
+prng = { path = "../../../../_support/pg/prng" }
+utils_error = { path = "../../../utils/utils_error" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+startup_seams = { path = "../../../postmaster/startup_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+# Seam crates this unit OWNS (installs every decl from its own init_seams()).
+file_seams = { path = "../file_seams" }
+fd_seams = { path = "../fd_seams" }
+# tblspc.c raw-POSIX primitive decls (no separate owner; installed here as
+# they are fd.c/`src/port` primitives — sanctioned cross-crate install).
+tblspc_fs_seams = { path = "../tblspc_fs_seams" }
+postmaster_seams = { path = "../../../postmaster/postmaster_seams" }
+# LOAD's closeAllVfds (utility.c) — fd.c owns closeAllVfds (sanctioned install).
+utility_out_seams = { path = "../../../tcop/utility_out_seams" }
+fileperm_seams = { path = "../fileperm_seams" }
+# `io_direct_data()` (bufmgr's read of fd.c's `io_direct_flags & IO_DIRECT_DATA`)
+# — fd.c owns the `io_direct_flags` GUC, so the bufmgr seam reading it is
+# installed here as a sanctioned cross-crate install (live read per call).
+bufmgr_seams = { path = "../../buffer/bufmgr_seams" }
+# Seam crates for UNPORTED neighbors (calls panic loudly until the owner lands).
+aio_seams_2 = { path = "../../aio/aio_seams_2" }
+dsm_core_seams = { path = "../../ipc/dsm_core_seams" }
+aio_seams = { path = "../../aio/aio_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+stat_seams = { path = "../../../utils/activity/stat_seams" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+aio_core_seams = { path = "../../aio/aio_core_seams" }
+error_seams = { path = "../../../utils/error/error_seams" }
+# misc.c `pg_tablespace_location` resolution seam (lstat S_ISLNK + readlink +
+# tablespace-OID guards) — installed here because the body is fd-coupled.
+misc_seams = { path = "../../../utils/adt/misc_seams" }
+# basebackup.c `readlink(pg_tblspc/<oid>)` — the fd-coupled OS readlink primitive
+# (always-erroring contract: PgResult<String>, no missing-ok).
+backup_basebackup_seams = { path = "../../../backup/backup_basebackup_seams" }

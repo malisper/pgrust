@@ -1,0 +1,23 @@
+[package]
+name = "heapam_seams"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "heapam_seams"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+mcx = { path = "../../../../_support/mcx" }
+datum = { path = "../../../../_support/types/datum" }
+rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_nbtree = { path = "../../../../_support/types/types_nbtree" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+xlog_records = { path = "../../../../_support/types/xlog_records" }

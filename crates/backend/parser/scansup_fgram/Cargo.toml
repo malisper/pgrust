@@ -1,0 +1,17 @@
+[package]
+name = "scansup_fgram"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "scansup_fgram"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+error_fgram = { path = "../../utils/error/error_fgram" }
+mmgr_fgram = { path = "../../utils/mmgr/mmgr_fgram" }
+mb_fgram = { path = "../../utils/mb/mb_fgram" }
+pg_ffi_fgram = { path = "../../../_support/pgrust/pg_ffi_fgram" }
+libc = { version = "0.2", default-features = false }

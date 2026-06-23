@@ -1,0 +1,28 @@
+[package]
+name = "tsquery_core"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "tsquery_core"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+tsearch = { path = "../../../../_support/types/tsearch" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+utils_error = { path = "../../utils_error" }
+ts_small = { path = "../ts_small" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+tsvector_core_seams = { path = "../tsvector_core_seams" }
+hash_small_seams = { path = "../../hash/hash_small_seams" }
+mbutils_seams = { path = "../../mb/mbutils_seams" }
+ts_locale_seams = { path = "../../../tsearch/ts_locale_seams" }
+pqformat = { path = "../../../libpq/pqformat" }
+pgstrcasecmp = { path = "../../../../port/pgstrcasecmp" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }

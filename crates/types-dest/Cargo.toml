@@ -1,9 +1,0 @@
-[package]
-name = "types-dest"
-version = "0.0.0"
-edition.workspace = true
-publish.workspace = true
-
-[lib]
-name = "types_dest"
-path = "src/lib.rs"

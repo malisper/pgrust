@@ -1,0 +1,37 @@
+[package]
+name = "seclabel"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "seclabel"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+user_seams = { path = "../user_seams" }
+utils_error = { path = "../../utils/utils_error" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+catalog_catalog = { path = "../../catalog/catalog_catalog" }
+pg_class = { path = "../../catalog/pg_class" }
+objectaddress_seams = { path = "../../catalog/objectaddress_seams" }
+indexing = { path = "../../catalog/indexing" }
+seclabel_seams = { path = "../seclabel_seams" }
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+parse_type = { path = "../../parser/parse_type" }
+heaptuple = { path = "../../access/common/heaptuple" }
+scankey = { path = "../../access/common/scankey" }
+genam_seams = { path = "../../access/index/genam_seams" }
+table = { path = "../../access/table/table" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_scan = { path = "../../../_support/types/types_scan" }

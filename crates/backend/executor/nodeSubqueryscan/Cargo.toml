@@ -1,0 +1,21 @@
+[package]
+name = "nodeSubqueryscan"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nodeSubqueryscan"
+path = "src/lib.rs"
+
+[dependencies]
+execAmi_seams = { path = "../execAmi_seams" }
+execExpr_seams = { path = "../execExpr_seams" }
+execProcnode_seams = { path = "../execProcnode_seams" }
+execScan_seams = { path = "../execScan_seams" }
+execTuples_seams = { path = "../execTuples_seams" }
+execUtils_seams = { path = "../execUtils_seams" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+mcx = { path = "../../../_support/mcx" }

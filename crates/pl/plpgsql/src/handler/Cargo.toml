@@ -1,0 +1,105 @@
+[package]
+name = "handler"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "handler"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+plpgsql = { path = "../../../../_support/types/plpgsql" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+parsenodes = { path = "../../../../_support/types/parsenodes" }
+
+# The three plpgsql layers this handler drives.
+comp = { path = "../comp" }
+exec = { path = "../exec" }
+plpgsql_exec_seams = { path = "../plpgsql_exec_seams" }
+funcs = { path = "../funcs" }
+
+# SPI_connect_ext / SPI_finish bracketing (spi.c) — direct (top layer, no cycle).
+spi = { path = "../../../../backend/executor/spi" }
+
+# FetchDirection for the cursor FETCH/MOVE seam install (maps the executor's
+# CursorFetchDirection onto the SPI cursor surface's types_portal direction).
+portal = { path = "../../../../_support/types/portal" }
+
+# BeginInternalSubTransaction / ReleaseCurrentSubTransaction /
+# RollbackAndReleaseCurrentSubTransaction (xact.c) for the exec_stmt_block
+# EXCEPTION leg — direct (top layer, no cycle).
+transam_xact = { path = "../../../../backend/access/transam/transam_xact" }
+
+# CurrentResourceOwner get/set for the exec_stmt_block EXCEPTION leg's
+# `oldowner = CurrentResourceOwner` snapshot+restore around the internal
+# subtransaction (pl_exec.c) — direct (top layer, no cycle).
+resowner_seams = { path = "../../../../backend/utils/resowner/resowner_seams" }
+
+# The fmgr built-in registry: register the three handler PGFunctions so a
+# C-language pg_proc row (prosrc = "plpgsql_call_handler" / ...) resolves here.
+fmgr_core = { path = "../../../../backend/utils/fmgr/fmgr_core" }
+
+# resolve_polymorphic_argtypes (funcapi.c) — the full polymorphic IN+OUT
+# argument-type deduction over the call's FuncExpr that
+# cfunc_resolve_polymorphic_argtypes (funccache.c) runs; drives the
+# plpgsql_compile OUT-polymorphic argument resolution.
+funcapi = { path = "../../../../backend/utils/fmgr/funcapi" }
+
+# The in-process ported-library loader registry: register `$libdir/plpgsql` so
+# fmgr resolves the LANGUAGE C call handler / inline handler / validator without
+# the OS dynamic loader (the Rust backend exposes no C ABI).
+dfmgr_seams = { path = "../../../../backend/utils/fmgr/dfmgr_seams" }
+
+# The DO-block dispatch seam this crate installs (execute_inline_handler) +
+# the InlineCodeBlock carrier.
+functioncmds_seams = { path = "../../../../backend/commands/functioncmds_seams" }
+
+# SplitIdentifierString for the extra_warnings/extra_errors GUC check hook
+# (utils/adt/varlena.c) — direct.
+varlena = { path = "../../../../backend/utils/adt/varlena" }
+
+# plpgsql_validator substrate: CheckFunctionValidatorAccess (pg_proc access
+# gate), the pg_proc row read, get_typtype (pseudotype reject), format_type_be
+# (error text), and the check_function_bodies GUC.
+pg_proc_seams = { path = "../../../../backend/catalog/pg_proc_seams" }
+syscache_seams = { path = "../../../../backend/utils/cache/syscache_seams" }
+lsyscache_seams = { path = "../../../../backend/utils/cache/lsyscache_seams" }
+
+# convert_value_to_string (getTypeOutputInfo + OidOutputFunctionCall) for RAISE
+# % substitution / USING text, and the I/O-coercion exec_cast_value fallback
+# (output via source typoutput + input via target typinput).
+fmgr_seams = { path = "../../../../backend/utils/fmgr/fmgr_seams" }
+
+# find_coercion_pathway under COERCION_PLPGSQL for exec_cast_value: resolve a
+# function-based cast (e.g. a SQL-function cast) so the cast function actually
+# runs, instead of a plain I/O coercion (pl_exec.c get_cast_hashentry).
+coerce_seams = { path = "../../../../backend/parser/coerce_seams" }
+
+# The elog report cycle (ereport / ThrowErrorData) for the RAISE statement: a
+# NOTICE/WARNING/INFO/LOG is reported to the client; an ERROR is thrown.
+utils_error = { path = "../../../../backend/utils/utils_error" }
+format_type_seams = { path = "../../../../backend/utils/adt/format_type_seams" }
+guc_tables = { path = "../../../../backend/utils/misc/guc_tables" }
+# DefineCustom*Variable / MarkGUCPrefixReserved for _PG_init's custom GUCs.
+misc_guc = { path = "../../../../backend/utils/misc/misc_guc" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_catalog = { path = "../../../../_support/types/types_catalog" }
+
+# construct_array for the TG_ARGV text[] promise (plpgsql_fulfill_promise);
+# array iteration for exec_stmt_foreach_a (foreach_iterate_via_array).
+arrayfuncs = { path = "../../../../backend/utils/adt/arrayfuncs" }
+detoast_seams = { path = "../../../../backend/access/common/detoast_seams" }
+
+# exec_eval_datum DTYPE_ROW: make_tuple_from_row (heap_form_tuple) +
+# HeapTupleGetDatum (heap_copy_tuple_as_datum) and BlessTupleDesc, over the
+# compiler's backend-lifetime rowtupdesc table. The handler is the top layer
+# above all three; it installs form_row_composite_datum.
+heaptuple = { path = "../../../../backend/access/common/heaptuple" }
+execTuples = { path = "../../../../backend/executor/execTuples" }
+typcache_seams = { path = "../../../../backend/utils/cache/typcache_seams" }

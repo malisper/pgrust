@@ -1,0 +1,33 @@
+[package]
+name = "be_secure_openssl"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "be_secure_openssl"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_error = { path = "../../../_support/types/types_error" }
+net = { path = "../../../_support/types/net" }
+types_storage = { path = "../../../_support/types/types_storage" }
+utils_error = { path = "../../utils/utils_error" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+
+# This unit installs the be_tls_get_* accessors of the be-secure seam contract
+# (consumed by postinit / backend-startup). The be_tls_init/open_server/read/
+# write/close/destroy entry points are called directly by be-secure.c (which
+# depends on this crate), so they need no seam.
+be_secure_seams = { path = "../be_secure_seams" }
+
+# be-secure-common.c helpers (run_ssl_passphrase_command / check_ssl_key_file_permissions).
+be_secure_common_seams = { path = "../be_secure_common_seams" }
+
+# guc.c GetConfigOption (the "%s setting %s not supported" reports).
+guc_seams = { path = "../../utils/misc/guc_seams" }
+
+# The OpenSSL C library FFI boundary: panic-until-bound (no openssl owner).
+be_secure_openssl_ffi_seams = { path = "../be_secure_openssl_ffi_seams" }

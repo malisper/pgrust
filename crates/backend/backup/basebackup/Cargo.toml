@@ -1,0 +1,58 @@
+[package]
+name = "basebackup"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "basebackup"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+wal = { path = "../../../_support/types/wal" }
+types_storage = { path = "../../../_support/types/types_storage" }
+replication = { path = "../../../_support/types/replication" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+compression = { path = "../../../_support/types/compression" }
+
+utils_error = { path = "../../utils/utils_error" }
+
+sink = { path = "../sink" }
+sink_support = { path = "../sink_support" }
+backup_copy = { path = "../backup_copy" }
+basebackup_target = { path = "../basebackup_target" }
+throttle = { path = "../throttle" }
+gzip = { path = "../gzip" }
+lz4 = { path = "../lz4" }
+zstd = { path = "../zstd" }
+manifest = { path = "../manifest" }
+incremental = { path = "../incremental" }
+
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+xlogbackup = { path = "../../access/transam/xlogbackup" }
+page = { path = "../../storage/page" }
+checksum = { path = "../../storage/page/checksum" }
+reinit = { path = "../../storage/file/reinit" }
+fd = { path = "../../storage/file/fd" }
+checksum_helper = { path = "../../../common/checksum_helper" }
+
+backup_basebackup_seams = { path = "../backup_basebackup_seams" }
+replication_basebackup_seams = { path = "../../replication/replication_basebackup_seams" }
+walsender_seams = { path = "../../replication/walsender_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+fd_seams = { path = "../../storage/file/fd_seams" }
+ps_status_seams = { path = "../../utils/misc/ps_status_seams" }
+scalar_seams = { path = "../../utils/adt/scalar_seams" }
+define = { path = "../../commands/define" }
+compression_seams = { path = "../../../common/compression_seams" }
+walsummarizer_seams = { path = "../../postmaster/walsummarizer_seams" }
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+pgstrcasecmp = { path = "../../../port/pgstrcasecmp" }
+
+[dev-dependencies]
+mcx = { path = "../../../_support/mcx" }

@@ -1,0 +1,26 @@
+[package]
+name = "tsvector_typanalyze"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "tsvector_typanalyze"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+statistics = { path = "../../../../_support/types/statistics" }
+types_selfuncs = { path = "../../../../_support/types/types_selfuncs" }
+
+hashfn = { path = "../../../../common/hashfn" }
+tsvector_core = { path = "../tsvector_core" }
+
+tsvector_typanalyze_seams = { path = "../tsvector_typanalyze_seams" }
+detoast_seams = { path = "../../../access/common/detoast_seams" }
+vacuumlazy_seams = { path = "../../../access/heap/vacuumlazy_seams" }
+vacuum_seams = { path = "../../../commands/vacuum_seams" }
+guc_tables = { path = "../../misc/guc_tables" }

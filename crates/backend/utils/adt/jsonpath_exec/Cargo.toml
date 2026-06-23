@@ -1,0 +1,74 @@
+[package]
+name = "jsonpath_exec"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "jsonpath_exec"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+utils_error = { path = "../../utils_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+types_jsonb = { path = "../../../../_support/types/types_jsonb" }
+types_jsonpath = { path = "../../../../_support/types/types_jsonpath" }
+types_datetime = { path = "../../../../_support/types/types_datetime" }
+pgtime = { path = "../../../../_support/types/pgtime" }
+state_pgtz = { path = "../../../../_support/state/state_pgtz" }
+# date/time/timestamp cast + compare core (date.c/time.c/timetz.c/timestamp.c):
+# the `executeDateTimeMethod` cast switch and `compareDatetime` call these
+# directly (leaf adt deps, no cycle), exactly like the numeric helpers.
+adt_datetime = { path = "../adt_datetime" }
+# `parse_datetime` (formatting.c) — the jsonpath datetime methods parse the
+# input text through the real formatting engine (leaf adt dep, no cycle).
+formatting = { path = "../formatting" }
+# jsonpath TYPE + reader API (JsonPathItem, jsp* readers) — direct dep.
+adt_jsonpath = { path = "../adt_jsonpath" }
+# jsonb substrate (iterators, container search, JsonbValue<->Jsonb) — direct dep.
+jsonb_util = { path = "../jsonb_util" }
+# JsonbExtractScalar / JsonbTypeName — direct dep.
+adt_jsonb = { path = "../adt_jsonb" }
+# numeric ops (add/sub/mul/div/mod, abs/ceil/floor/trunc/uminus, in/out, casts).
+adt_numeric = { path = "../adt_numeric" }
+# The fmgr type-input soft-parse helpers reached by the item methods
+# (`DirectInputFunctionCallSafe(int4in/int8in/numeric_in, ...)`,
+# `float8in_internal`, `parse_bool`) call their owning adt unit's real input
+# function directly (a leaf adt dep, no cycle), exactly like the numeric helpers.
+int = { path = "../int" }
+int8 = { path = "../int8" }
+float = { path = "../float" }
+adt_scalar_bool = { path = "../../../../_support/probe/adt_scalar_bool" }
+# Owner-seams for genuine cross-subsystem externals (route through the owner,
+# not this unit's own seams): RE_compile_and_execute (regexp.c), format_type_be
+# (format_type.c), pg_server_to_any/GetDatabaseEncoding (mbutils.c),
+# JsonEncodeDateTime (json.c).
+regexp_seams = { path = "../regexp_seams" }
+format_type_seams = { path = "../format_type_seams" }
+mbutils_seams = { path = "../../mb/mbutils_seams" }
+json_seams = { path = "../json_seams" }
+# This unit's own jsonpath_exec-specific seams + JSON_TABLE node boundary.
+jsonpath_exec_seams = { path = "../jsonpath_exec_seams" }
+# The TableFuncRoutine vtable seams: JsonbTableRoutine lives in this unit
+# (jsonpath_exec.c), so this unit installs the JSON_TABLE half of the dispatch
+# (XmlTableRoutine's half belongs to the unported xml.c owner). `types-nodes`
+# supplies TableFuncScanState / TableFuncRoutineKind / Opaque.
+tablefuncRoutine_seams = { path = "../../../executor/tablefuncRoutine_seams" }
+nodes = { path = "../../../../_support/types/nodes" }
+# The recursion / interrupt guards are genuine cross-subsystem externals owned
+# by tcop/postgres.c (CHECK_FOR_INTERRUPTS) and utils/misc/stack_depth.c
+# (check_stack_depth) — reached through their canonical owner-seams, not
+# re-declared on this unit's own seams crate.
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+stack_depth_seams = { path = "../../misc/stack_depth_seams" }
+
+[dev-dependencies]
+jsonpath_gram_seams = { path = "../jsonpath_gram_seams" }
+numeric_seams = { path = "../numeric_seams" }
+varlena_seams = { path = "../varlena_seams" }

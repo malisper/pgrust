@@ -1,0 +1,40 @@
+[package]
+name = "object"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "object"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_acl = { path = "../../../../_support/types/types_acl" }
+types_catalog = { path = "../../../../_support/types/types_catalog" }
+types_cluster = { path = "../../../../_support/types/types_cluster" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+rel = { path = "../../../../_support/types/rel" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+utils_error = { path = "../../../utils/utils_error" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+scankey = { path = "../../../access/common/scankey" }
+table = { path = "../../../access/table/table" }
+indexam_seams = { path = "../../../access/index/indexam_seams" }
+genam_seams = { path = "../../../access/index/genam_seams" }
+pg_largeobject = { path = "../../../catalog/pg_largeobject" }
+pg_shdepend_seams = { path = "../../../catalog/pg_shdepend_seams" }
+dependency_seams = { path = "../../../catalog/dependency_seams" }
+objectaccess = { path = "../../../catalog/objectaccess" }
+indexing_seams = { path = "../../../catalog/indexing_seams" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+object_seams = { path = "../object_seams" }

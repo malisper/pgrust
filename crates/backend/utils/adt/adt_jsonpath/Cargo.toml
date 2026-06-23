@@ -1,0 +1,38 @@
+[package]
+name = "adt_jsonpath"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_jsonpath"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_jsonpath = { path = "../../../../_support/types/types_jsonpath" }
+# jsp_is_mutable inward seam — clauses.c's contain_mutable_functions JsonExpr
+# arm; this unit (jsonpath.c) owns jspIsMutable and installs it here.
+clauses_seams = { path = "../../../optimizer/util/clauses_seams" }
+# escape_json_with_len (json.c) — owner crate, reached through its seam.
+json_seams = { path = "../json_seams" }
+# numeric_out (numeric.c) — direct dep (no cycle).
+adt_numeric = { path = "../adt_numeric" }
+# datetime_format_has_tz (formatting.c) — direct dep (no cycle).
+formatting = { path = "../formatting" }
+# REG_* cflag constants for jspConvertRegexFlags.
+regex_core = { path = "../../../regex/regex_core" }
+# exprType (nodeFuncs.c) — owner crate, reached through its seam.
+nodeFuncs_seams = { path = "../../../nodes/nodeFuncs_seams" }
+# parsejsonpath (jsonpath_gram.y/jsonpath_scan.l) — unported owner, seamed.
+jsonpath_gram_seams = { path = "../jsonpath_gram_seams" }
+# fmgr_builtins[] registry — register the jsonpath I/O fmgr entries.
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+
+[dev-dependencies]

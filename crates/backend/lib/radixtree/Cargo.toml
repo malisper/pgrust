@@ -1,0 +1,22 @@
+[package]
+name = "radixtree"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "radixtree"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_dsa = { path = "../../../_support/types/types_dsa" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_vacuum = { path = "../../../_support/types/types_vacuum" }
+radixtree_seams = { path = "../radixtree_seams" }
+dsa_seams = { path = "../../utils/mmgr/dsa_seams" }
+lwlock_seams = { path = "../../storage/lmgr/lwlock_seams" }
+lmgr_proc_seams = { path = "../../storage/lmgr/lmgr_proc_seams" }

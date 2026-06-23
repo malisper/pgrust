@@ -1,0 +1,184 @@
+[package]
+name = "tablecmds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "tablecmds"
+path = "src/lib.rs"
+
+[dependencies]
+execMain_seams = { path = "../../executor/execMain_seams" }
+catalog_partition = { path = "../../catalog/catalog_partition" }
+predtest_seams = { path = "../../optimizer/util/predtest_seams" }
+prepqual_seams = { path = "../../optimizer/prep/prepqual_seams" }
+inval = { path = "../../utils/cache/inval" }
+read_seams = { path = "../../nodes/read_seams" }
+outfuncs = { path = "../../nodes/outfuncs" }
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+rel = { path = "../../../_support/types/rel" }
+nodes = { path = "../../../_support/types/nodes" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+pathnodes = { path = "../../../_support/types/pathnodes" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_acl = { path = "../../../_support/types/types_acl" }
+types_cluster = { path = "../../../_support/types/types_cluster" }
+utils_error = { path = "../../utils/utils_error" }
+tablecmds_seams = { path = "../tablecmds_seams" }
+snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }
+snapmgr_pc_seams = { path = "../../utils/time/snapmgr_pc_seams" }
+multixact_seams = { path = "../../access/transam/multixact_seams" }
+event_trigger_seams = { path = "../event_trigger_seams" }
+# TimestampTimestampTzRequiresRewrite for ATColumnChangeRequiresRewrite.
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+# ProcessUtility dispatch arms (installs TRUNCATE + DROP-relations forwarding seams).
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+# raw_parser() for ATPostAlterTypeParse (re-parse saved index/constraint defs).
+driver = { path = "../../parser/driver" }
+common_relation = { path = "../../access/common/common_relation" }
+indexam_seams = { path = "../../access/index/indexam_seams" }
+genam_seams = { path = "../../access/index/genam_seams" }
+heapam_seams = { path = "../../access/heap/heapam_seams" }
+nodes_core = { path = "../../nodes/nodes_core" }
+table_seams = { path = "../../access/table/table_seams" }
+trigger_seams = { path = "../trigger_seams" }
+predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
+tupdesc = { path = "../../access/common/tupdesc" }
+transam_xact = { path = "../../access/transam/transam_xact" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
+heap_seams = { path = "../../catalog/heap_seams" }
+# ATExecAddColumn: CheckAttributeType + InsertPgAttributeTuples. Cycle-free:
+# backend-catalog-heap depends only on backend-commands-tablecmds-seams.
+heap = { path = "../../catalog/heap" }
+# ATParseTransformCmd: transformAlterTableStmt inward seam (decls only).
+parse_utilcmd_seams = { path = "../../parser/parse_utilcmd_seams" }
+# ATExecAddColumn / ATExecDropColumn: check_stack_depth.
+stack_depth = { path = "../../utils/misc/stack_depth" }
+dependency_seams = { path = "../../catalog/dependency_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+objectaddress_seams = { path = "../../catalog/objectaddress_seams" }
+pg_type_seams = { path = "../../catalog/pg_type_seams" }
+pg_inherits_seams = { path = "../../catalog/pg_inherits_seams" }
+partition_seams = { path = "../../catalog/partition_seams" }
+index_seams = { path = "../../catalog/index_seams" }
+index = { path = "../../catalog/index" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+inval_seams = { path = "../../utils/cache/inval_seams" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+catalog_seams = { path = "../../catalog/catalog_seams" }
+catalog_storage_seams = { path = "../../catalog/catalog_storage_seams" }
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+tablespace_seams = { path = "../tablespace_seams" }
+tablespace_globals_seams = { path = "../tablespace_globals_seams" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+datum = { path = "../../../_support/types/datum" }
+pg_attrdef = { path = "../../catalog/pg_attrdef" }
+pg_class_seams = { path = "../../catalog/pg_class_seams" }
+pg_inherits = { path = "../../catalog/pg_inherits" }
+scankey = { path = "../../access/common/scankey" }
+types_scan = { path = "../../../_support/types/types_scan" }
+adt_ri_triggers = { path = "../../utils/adt/adt_ri_triggers" }
+catalog_catalog = { path = "../../catalog/catalog_catalog" }
+toasting = { path = "../../catalog/toasting" }
+common_reloptions = { path = "../../access/common/common_reloptions" }
+foreigncmds_seams = { path = "../foreigncmds_seams" }
+foreign_seams = { path = "../../foreign/foreign_seams" }
+types_foreigncmds = { path = "../../../_support/types/types_foreigncmds" }
+heaptuple = { path = "../../access/common/heaptuple" }
+define_seams = { path = "../define_seams" }
+arrayfuncs_seams = { path = "../../utils/adt/arrayfuncs_seams" }
+# create_ctas_relation: createas.c's create_ctas_internal builds the relation
+# (DefineRelation, owned here) then for a matview calls StoreViewQuery (view.c,
+# which depends on tablecmds — crosses the view-seams store_view_query seam).
+createas_seams = { path = "../createas_seams" }
+view_seams = { path = "../view_seams" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+# GetAttributeCompression (tablecmds.c:22044) resolves a column's
+# attcompression from its compression name + type toastability.
+toast_compression = { path = "../../access/common/toast_compression" }
+format_type_seams = { path = "../../utils/adt/format_type_seams" }
+miscinit = { path = "../../utils/init/miscinit" }
+acl_seams = { path = "../../utils/adt/acl_seams" }
+indexing_seams = { path = "../../catalog/indexing_seams" }
+cluster_seams = { path = "../cluster_seams" }
+sequence_seams_2 = { path = "../sequence_seams_2" }
+pg_publication_seams = { path = "../../catalog/pg_publication_seams" }
+statistics = { path = "../../../_support/types/statistics" }
+# MergeAttributes legacy-inheritance merge path:
+# RelationGetNotNullConstraints (pg_constraint.c), make_attrmap/AttrMap
+# (attmap.c), map_variable_attnos (rewriteManip.c, via seam), equal_node
+# (equalfuncs.c, via seam).
+pg_constraint = { path = "../../catalog/pg_constraint" }
+next = { path = "../../access/common/next" }
+rewritemanip_seams = { path = "../../rewrite/rewritemanip_seams" }
+# ALTER TABLE ENABLE/DISABLE RULE → EnableDisableRule (rewriteDefine.c:691);
+# direct call, same as backend-commands-alter's RenameRewriteRule. No cycle:
+# rewriteDefine does not depend on tablecmds.
+rewriteDefine = { path = "../../rewrite/rewriteDefine" }
+equalfuncs_seams = { path = "../../nodes/equalfuncs_seams" }
+adt_format_type = { path = "../../utils/adt/adt_format_type" }
+# ATExecAddIndex: DefineIndex (indexcmds.c) inward seam (decls only; owner installs).
+indexcmds_seams = { path = "../indexcmds_seams" }
+# ATAddCheckNNConstraint: ObjectAddressSet(ConstraintRelationId, ...).
+objectaddress = { path = "../../catalog/objectaddress" }
+# Phase-3 NOT NULL verification scan (the NOT-NULL-only path of ATRewriteTable):
+# full table scan + slot deform.
+execTuples = { path = "../../executor/execTuples" }
+# ALTER DOMAIN ADD/VALIDATE CONSTRAINT validation scan (domain_validate.rs):
+# CreateExecutorState / ExecPrepareExpr / ExecEvalExpr / GetPerTupleExprContext.
+execExpr_seams = { path = "../../executor/execExpr_seams" }
+execUtils_seams = { path = "../../executor/execUtils_seams" }
+# installs the typecmds OUTWARD validate_domain_* seams.
+typecmds_seams = { path = "../typecmds_seams" }
+table_tableam = { path = "../../access/table/table_tableam" }
+table_tableam_seams = { path = "../../access/table/table_tableam_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+# DefineRelation partition-key (partspec) branch (tablecmds.c:1210-1249):
+# transformPartitionSpec / ComputePartitionAttrs / StorePartitionKey.
+indexcmds = { path = "../indexcmds" }
+small1 = { path = "../../parser/small1" }
+parser_relation = { path = "../../parser/parser_relation" }
+parse_expr = { path = "../../parser/parse_expr" }
+parse_collate = { path = "../../parser/parse_collate" }
+partcache = { path = "../../utils/cache/partcache" }
+partcache_seams = { path = "../../utils/cache/partcache_seams" }
+parse_utilcmd_outward_seams = { path = "../../parser/parse_utilcmd_outward_seams" }
+partdesc = { path = "../../partitioning/partdesc" }
+partbounds_seams = { path = "../../partitioning/partbounds_seams" }
+types_partition = { path = "../../../_support/types/types_partition" }
+vars = { path = "../../optimizer/util/vars" }
+clauses = { path = "../../optimizer/util/clauses" }
+planner = { path = "../../optimizer/plan/planner" }
+# ADD FOREIGN KEY (ATAddForeignKeyConstraint): trigger creation, FK validation,
+# dependency records, opclass/coercion lookups for the equality operators.
+commands_trigger = { path = "../commands_trigger" }
+pg_depend_seams = { path = "../../catalog/pg_depend_seams" }
+amapi_seams = { path = "../../access/index/amapi_seams" }
+coerce = { path = "../../parser/coerce" }
+rewritehandler_seams = { path = "../../rewrite/rewritehandler_seams" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
+parse_type = { path = "../../parser/parse_type" }
+ruleutils = { path = "../../utils/adt/ruleutils" }
+coerce_seams = { path = "../../parser/coerce_seams" }
+table = { path = "../../access/table/table" }
+pg_constraint_seams = { path = "../../catalog/pg_constraint_seams" }
+relcache = { path = "../../utils/cache/relcache" }
+cache = { path = "../../../_support/types/cache" }
+# ATExecChangeOwner (at_owner.rs): changeDependencyOnOwner (pg_shdepend writes the
+# owner pg_shdepend row) + InvokeObjectPostAlterHook. Both are cycle-free: shdepend
+# and objectaccess depend only on backend-commands-tablecmds-seams.
+pg_shdepend = { path = "../../catalog/pg_shdepend" }
+objectaccess_seams = { path = "../../catalog/objectaccess_seams" }

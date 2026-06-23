@@ -1,0 +1,16 @@
+[package]
+name = "geo_selfuncs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "geo_selfuncs"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+types_error = { path = "../../../../_support/types/types_error" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }

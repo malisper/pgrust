@@ -1,0 +1,32 @@
+[package]
+name = "syncrep"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "syncrep"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+replication = { path = "../../../_support/types/replication" }
+utils_error = { path = "../../utils/utils_error" }
+syncrep_seams = { path = "syncrep_seams" }
+syncrep_gram = { path = "syncrep_gram" }
+scanner_seams = { path = "scanner_seams" }
+walsender = { path = "../walsender" }
+lmgr_proc_seams = { path = "../../storage/lmgr/lmgr_proc_seams" }
+lwlock_seams = { path = "../../storage/lmgr/lwlock_seams" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
+ps_status_seams = { path = "../../utils/misc/ps_status_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+misc_guc = { path = "../../utils/misc/misc_guc" }
+types_guc = { path = "../../../_support/types/types_guc" }
+
+[dev-dependencies]

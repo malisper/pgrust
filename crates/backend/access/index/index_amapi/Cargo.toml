@@ -1,0 +1,43 @@
+[package]
+name = "index_amapi"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "index_amapi"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+opclass = { path = "../../../../_support/types/opclass" }
+hash = { path = "../../../../_support/types/hash" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_nbtree = { path = "../../../../_support/types/types_nbtree" }
+mcx = { path = "../../../../_support/mcx" }
+
+amapi_seams = { path = "../amapi_seams" }
+amutils_seams = { path = "../../../utils/adt/amutils_seams" }
+indexam = { path = "../indexam" }
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+nbtree_nbtree = { path = "../../nbtree/nbtree_nbtree" }
+nbtree_core = { path = "../../nbtree/nbtree_core" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+entry = { path = "../../hash/entry" }
+hash_core = { path = "../../hash/hash_core" }
+brin_scan = { path = "../../brin/brin_scan" }
+gist_core = { path = "../../gist/gist_core" }
+ginutil = { path = "../../gin/ginutil" }
+spgist_core = { path = "../../spgist/spgist_core" }
+nbt_validate = { path = "../../nbtree/nbt_validate" }
+hashvalidate = { path = "../../hashvalidate" }
+core_probe = { path = "../../gin/core_probe" }
+brin_validate = { path = "../../brin/brin_validate" }
+gist_validate = { path = "../../gist/gist_validate" }
+spg_validate = { path = "../../spgist/spg_validate" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }

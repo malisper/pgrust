@@ -1,0 +1,63 @@
+[package]
+name = "backend_startup"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_startup"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+net = { path = "../../../_support/types/net" }
+types_dest = { path = "../../../_support/types/types_dest" }
+signal = { path = "../../../_support/types/signal" }
+types_startup = { path = "../../../_support/types/types_startup" }
+types_timeout = { path = "../../../_support/types/types_timeout" }
+
+# Direct deps (acyclic): error/elog, pqformat wire assembly, pqsignal masks,
+# cancel-request forwarder.
+utils_error = { path = "../../utils/utils_error" }
+pqformat = { path = "../../libpq/pqformat" }
+libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
+procsignal = { path = "../../storage/ipc/procsignal" }
+
+# Own inward seams.
+backend_startup_seams = { path = "../backend_startup_seams" }
+
+# GUC table slots: this unit owns the `Trace_connection_negotiation` and
+# `log_connections_string` GUC variables, so it installs their var accessors
+# and the `log_connections` check/assign hook slots.
+guc_tables = { path = "../../utils/misc/guc_tables" }
+guc_seams = { path = "../../utils/misc/guc_seams" }
+types_guc = { path = "../../../_support/types/types_guc" }
+
+# Outward seams (owner not directly dependable, or not yet ported).
+pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
+be_secure_seams = { path = "../../libpq/be_secure_seams" }
+timeout_seams = { path = "../../utils/misc/timeout_seams" }
+more_seams = { path = "../../utils/misc/more_seams" }
+ps_status_seams = { path = "../../utils/misc/ps_status_seams" }
+postmaster_seams = { path = "../../postmaster/postmaster_seams" }
+auth_seams = { path = "../../libpq/auth/auth_seams" }
+lmgr_proc_seams = { path = "../../storage/lmgr/lmgr_proc_seams" }
+dsm_core_seams = { path = "../../storage/ipc/dsm_core_seams" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
+file_seams = { path = "../../storage/file/file_seams" }
+postgres_seams = { path = "../postgres_seams" }
+walsender_seams = { path = "../../replication/walsender_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
+varlena_seams = { path = "../../utils/adt/varlena_seams" }
+scalar_seams = { path = "../../utils/adt/scalar_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+ip_seams = { path = "../../../common/ip_seams" }
+string_seams = { path = "../../../common/string_seams" }
+pgsleep_seams = { path = "../../../port/pgsleep_seams" }
+port_pqsignal_seams = { path = "../../../port/port_pqsignal_seams" }

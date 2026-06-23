@@ -1,0 +1,47 @@
+[package]
+name = "pg_shdepend"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_shdepend"
+path = "src/lib.rs"
+
+[dependencies]
+heaptuple = { path = "../../access/common/heaptuple" }
+user_seams = { path = "../../commands/user_seams" }
+scankey = { path = "../../access/common/scankey" }
+genam_seams = { path = "../../access/index/genam_seams" }
+table = { path = "../../access/table/table" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+aclchk_seams = { path = "../aclchk_seams" }
+catalog_seams = { path = "../catalog_seams" }
+dependency_seams = { path = "../dependency_seams" }
+indexing_seams = { path = "../indexing_seams" }
+objectaddress_seams = { path = "../objectaddress_seams" }
+pg_shdepend_seams = { path = "../pg_shdepend_seams" }
+alter_seams = { path = "../../commands/alter_seams" }
+dbcommands_seams = { path = "../../commands/dbcommands_seams" }
+event_trigger_seams = { path = "../../commands/event_trigger_seams" }
+foreigncmds_seams = { path = "../../commands/foreigncmds_seams" }
+policy_seams = { path = "../../commands/policy_seams" }
+publicationcmds_seams = { path = "../../commands/publicationcmds_seams" }
+schemacmds_seams = { path = "../../commands/schemacmds_seams" }
+subscriptioncmds_seams = { path = "../../commands/subscriptioncmds_seams" }
+tablecmds_seams = { path = "../../commands/tablecmds_seams" }
+tablespace_seams = { path = "../../commands/tablespace_seams" }
+typecmds_seams = { path = "../../commands/typecmds_seams" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+mcx = { path = "../../../_support/mcx" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_tuple = { path = "../../../_support/types/types_tuple" }

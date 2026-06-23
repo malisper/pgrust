@@ -1,0 +1,31 @@
+[package]
+name = "activity_pgstat"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "activity_pgstat"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+types_dsa = { path = "../../../../_support/types/types_dsa" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+activity_small = { path = "../activity_small" }
+guc_tables = { path = "../../misc/guc_tables" }
+dshash = { path = "../../../lib/dshash" }
+dsa_seams = { path = "../../mmgr/dsa_seams" }
+lwlock_seams = { path = "../../../storage/lmgr/lwlock_seams" }
+lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
+timestamp_seams = { path = "../../adt/timestamp_seams" }
+dsm_core_seams = { path = "../../../storage/ipc/dsm_core_seams" }
+fd_seams = { path = "../../../storage/file/fd_seams" }
+ipc_shmem_seams = { path = "../../../storage/ipc/ipc_shmem_seams" }
+pgstat_seams = { path = "../pgstat_seams" }
+activity_shmem_seams = { path = "../activity_shmem_seams" }
+init_small_seams = { path = "../../init/init_small_seams" }
+pgstrcasecmp = { path = "../../../../port/pgstrcasecmp" }

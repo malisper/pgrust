@@ -1,0 +1,12 @@
+[package]
+name = "control"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "control"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../types_core" }

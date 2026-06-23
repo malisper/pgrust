@@ -1,0 +1,25 @@
+[package]
+name = "utils_error"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "utils_error"
+path = "src/lib.rs"
+
+[dependencies]
+guc_tables = { path = "../misc/guc_tables" }
+types_core = { path = "../../../_support/types/types_core" }
+init_small_seams = { path = "../init/init_small_seams" }
+types_error = { path = "../../../_support/types/types_error" }
+types_dest = { path = "../../../_support/types/types_dest" }
+error_seams = { path = "../error/error_seams" }
+postmaster_seams = { path = "../../postmaster/postmaster_seams" }
+elog_seams = { path = "../error/elog_seams" }
+error_small_seams = { path = "../error/error_small_seams" }
+syslogger_seams = { path = "../../postmaster/syslogger_seams" }
+dsm_core_seams = { path = "../../storage/ipc/dsm_core_seams" }
+pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
+stat_seams = { path = "../activity/stat_seams" }
+libc = "0.2"

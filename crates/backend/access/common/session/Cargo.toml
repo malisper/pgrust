@@ -1,0 +1,26 @@
+[package]
+name = "session"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "session"
+path = "src/lib.rs"
+
+[dependencies]
+session_seams = { path = "../session_seams" }
+mcx = { path = "../../../../_support/mcx" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+execparallel = { path = "../../../../_support/types/execparallel" }
+types_core = { path = "../../../../_support/types/types_core" }
+utils_error = { path = "../../../utils/utils_error" }
+dsm_core = { path = "../../../storage/ipc/dsm_core" }
+shm_toc = { path = "../../../storage/ipc/shm_toc" }
+dsa_seams = { path = "../../../utils/mmgr/dsa_seams" }
+mcxt_seams = { path = "../../../utils/mmgr/mcxt_seams" }
+dshash_seams = { path = "../../../lib/dshash_seams" }
+parallel_rt_seams = { path = "../../transam/parallel_rt_seams" }
+typcache_seams = { path = "../../../utils/cache/typcache_seams" }

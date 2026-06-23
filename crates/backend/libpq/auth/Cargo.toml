@@ -1,0 +1,33 @@
+[package]
+name = "auth"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "auth"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+auth_seams = { path = "auth_seams" }
+user_seams = { path = "../../commands/user_seams" }
+pqcomm = { path = "../pqcomm" }
+pqformat = { path = "../pqformat" }
+walsender_seams = { path = "../../replication/walsender_seams" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+utils_error = { path = "../../utils/utils_error" }
+miscinit = { path = "../../utils/init/miscinit" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+ip = { path = "../../../common/ip" }
+libc = "0.2"
+mcx = { path = "../../../_support/mcx" }
+pg_strong_random_seams = { path = "../../../port/pg_strong_random_seams" }
+authid = { path = "../../../_support/types/authid" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+net = { path = "../../../_support/types/net" }
+types_network = { path = "../../../_support/types/types_network" }
+stringinfo = { path = "../../../_support/types/stringinfo" }

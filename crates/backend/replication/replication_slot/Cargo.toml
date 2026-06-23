@@ -1,0 +1,51 @@
+[package]
+name = "replication_slot"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "replication_slot"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+condvar = { path = "../../../_support/types/condvar" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_guc = { path = "../../../_support/types/types_guc" }
+types_pgstat = { path = "../../../_support/types/types_pgstat" }
+replication_slot_2 = { path = "../../../_support/types/replication_slot_2" }
+types_logical = { path = "../../../_support/types/types_logical" }
+utils_error = { path = "../../utils/utils_error" }
+s_lock = { path = "../../storage/lmgr/s_lock" }
+transam = { path = "../../access/transam/transam" }
+interrupt = { path = "../../postmaster/interrupt" }
+slot_seams = { path = "../slot_seams" }
+lwlock_seams = { path = "../../storage/lmgr/lwlock_seams" }
+condition_variable_seams = { path = "../../storage/lmgr/condition_variable_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
+dsm_core_seams = { path = "../../storage/ipc/dsm_core_seams" }
+fd_seams = { path = "../../storage/file/fd_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+procarray_seams = { path = "../../storage/ipc/procarray_seams" }
+walsender_seams = { path = "../walsender_seams" }
+slotsync_seams = { path = "../logical/slotsync_seams" }
+pgstat_replslot_seams = { path = "../../utils/activity/pgstat_replslot_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+more_seams = { path = "../../utils/misc/more_seams" }
+dbcommands_seams = { path = "../../commands/dbcommands_seams" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+guc_file_seams = { path = "../../utils/misc/guc_file_seams" }
+pg_crc32c_seams = { path = "../../../port/pg_crc32c_seams" }
+varlena_seams = { path = "../../utils/adt/varlena_seams" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+libc = "0.2"
+
+[dev-dependencies]

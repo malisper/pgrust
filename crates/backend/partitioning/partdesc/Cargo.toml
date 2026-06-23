@@ -1,0 +1,37 @@
+[package]
+name = "partdesc"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "partdesc"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+types_core = { path = "../../../_support/types/types_core" }
+nodes = { path = "../../../_support/types/nodes" }
+rel = { path = "../../../_support/types/rel" }
+
+# Seams I install (the partition-directory + partdesc surface).
+partitioning_core_seams = { path = "../partitioning_core_seams" }
+
+# Real ported dependencies (no cycle): the pg_inherits child scan, the default-
+# partition OID lookup, and get_rel_relkind.
+pg_inherits = { path = "../../catalog/pg_inherits" }
+catalog_partition = { path = "../../catalog/catalog_partition" }
+
+# This unit's own inward seam crate (RelationGetPartitionDesc, installed below).
+partdesc_seams = { path = "../partdesc_seams" }
+
+# Boundary seams consumed by the build/lookup paths.
+partbounds_seams = { path = "../partbounds_seams" }
+partcache_seams = { path = "../../utils/cache/partcache_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }
+inval_seams = { path = "../../utils/cache/inval_seams" }
+read_seams = { path = "../../nodes/read_seams" }

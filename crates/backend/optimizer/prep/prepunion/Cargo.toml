@@ -1,0 +1,48 @@
+[package]
+name = "prepunion"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "prepunion"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+
+# Owner of the plan_set_operations seam this crate installs.
+prepunion_seams = { path = "../prepunion_seams" }
+
+# Relnode constructors (setup_simple_rel_arrays / build_simple_rel /
+# fetch_upper_rel / find_base_rel) — concrete deps, relnode has no optimizer
+# owner deps so no cycle.
+relnode = { path = "../../util/relnode" }
+# Path constructors + add_path/set_cheapest + import_path_from_subroot.
+pathnode = { path = "../../util/pathnode" }
+# set_subquery_size_estimates.
+costsize = { path = "../../path/costsize" }
+# Pathkey machinery for sorted set-op paths.
+pathkeys = { path = "../../path/pathkeys" }
+# tlist helpers (make_pathtarget_from_tlist, grouping_is_*, get_tlist_exprs,
+# make_tlist_from_pathtarget).
+vars = { path = "../../util/vars" }
+# makeVar / makeTargetEntry / exprType / exprTypmod / exprCollation /
+# applyRelabelType.
+nodes_core = { path = "../../../nodes/nodes_core" }
+# add_setop_child_rel_equivalences (sorted set-op child equivalences). No cycle:
+# equivclass does not depend (transitively) on prepunion.
+equivclass = { path = "../../path/equivclass" }
+# enable_incremental_sort GUC for the sorted-child-path branch.
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+
+# Cross-cycle seams.
+planner_seams = { path = "../../plan/planner_seams" }
+selfuncs_seams = { path = "../../../utils/adt/selfuncs_seams" }
+coerce_seams = { path = "../../../parser/coerce_seams" }
+relnode_seams = { path = "../../util/relnode_seams" }

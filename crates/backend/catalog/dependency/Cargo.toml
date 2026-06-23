@@ -1,0 +1,66 @@
+[package]
+name = "dependency"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "dependency"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+nodes = { path = "../../../_support/types/nodes" }
+rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+snapshot = { path = "../../../_support/types/snapshot" }
+
+# Own inward seams.
+dependency_seams = { path = "../dependency_seams" }
+
+# Direct deps (acyclic): table open/close, scankey init, heap deform, node walkers.
+table = { path = "../../access/table/table" }
+scankey = { path = "../../access/common/scankey" }
+heaptuple = { path = "../../access/common/heaptuple" }
+nodes_core = { path = "../../nodes/nodes_core" }
+utils_error = { path = "../../utils/utils_error" }
+
+# Outward seams.
+genam_seams = { path = "../../access/index/genam_seams" }
+indexing_seams = { path = "../indexing_seams" }
+catalog_seams = { path = "../catalog_seams" }
+objectaddress_seams = { path = "../objectaddress_seams" }
+objectaccess_seams = { path = "../objectaccess_seams" }
+pg_depend_seams = { path = "../pg_depend_seams" }
+pg_shdepend_seams = { path = "../pg_shdepend_seams" }
+index_seams = { path = "../index_seams" }
+heap_seams = { path = "../heap_seams" }
+pg_constraint_seams = { path = "../pg_constraint_seams" }
+pg_operator_seams = { path = "../pg_operator_seams" }
+pg_attrdef_seams = { path = "../pg_attrdef_seams" }
+pg_largeobject_seams = { path = "../pg_largeobject_seams" }
+rewriteRemove_seams = { path = "../../rewrite/rewriteRemove_seams" }
+sequence_seams_2 = { path = "../../commands/sequence_seams_2" }
+typecmds_seams = { path = "../../commands/typecmds_seams" }
+trigger_seams = { path = "../../commands/trigger_seams" }
+statscmds_seams = { path = "../../commands/statscmds_seams" }
+tsearchcmds_seams = { path = "../../commands/tsearchcmds_seams" }
+extension_seams = { path = "../../commands/extension_seams" }
+policy_seams = { path = "../../commands/policy_seams" }
+publicationcmds_seams = { path = "../../commands/publicationcmds_seams" }
+comment_seams = { path = "../../commands/comment_seams" }
+seclabel_seams = { path = "../../commands/seclabel_seams" }
+event_trigger_seams = { path = "../../commands/event_trigger_seams" }
+functioncmds_seams = { path = "../../commands/functioncmds_seams" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+funcapi_seams = { path = "../../utils/fmgr/funcapi_seams" }
+stack_depth_seams = { path = "../../utils/misc/stack_depth_seams" }

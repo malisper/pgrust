@@ -1,0 +1,25 @@
+[package]
+name = "tstoreReceiver"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "tstoreReceiver"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+tstorereceiver_seams = { path = "../tstorereceiver_seams" }
+tcop_dest = { path = "../../tcop/tcop_dest" }
+dest_seams = { path = "../../tcop/dest_seams" }
+sort_storage_seams = { path = "../../utils/sort/sort_storage_seams" }
+execTuples_seams = { path = "../execTuples_seams" }
+detoast_seams = { path = "../../access/common/detoast_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_dest = { path = "../../../_support/types/types_dest" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+portal = { path = "../../../_support/types/portal" }
+types_tuple = { path = "../../../_support/types/types_tuple" }

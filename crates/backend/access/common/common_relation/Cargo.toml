@@ -1,0 +1,31 @@
+[package]
+name = "common_relation"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "common_relation"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+rel = { path = "../../../../_support/types/rel" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+common_relation_seams = { path = "../common_relation_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+inval_seams = { path = "../../../utils/cache/inval_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+lmgr_seams = { path = "../../../storage/lmgr/lmgr_seams" }
+namespace_seams = { path = "../../../catalog/namespace_seams" }
+transam_xact_seams = { path = "../../transam/transam_xact_seams" }
+
+[dev-dependencies]
+# The test fixture builds a shared relcache cell (Rc<RefCell<RelationData>>)
+# for the `relation_id_get_relation_shared` seam.
+relcache_entry = { path = "../../../../_support/types/relcache_entry" }

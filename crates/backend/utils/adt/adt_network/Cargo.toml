@@ -1,0 +1,33 @@
+[package]
+name = "adt_network"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_network"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_network = { path = "../../../../_support/types/types_network" }
+# Outward seams for the external substrate of inet_client_addr / sortsupport /
+# planner support; called here, installed by the (unported) owner subsystems.
+network_seams = { path = "../network_seams" }
+# pg_strtoint32 (numutils.c, int4in path): owner ported, depend directly.
+numutils = { path = "../numutils" }
+# fmgr builtin table registration (C: fmgr_builtins[]) for the SQL-callable
+# session-info functions; their call frame lives in types-fmgr.
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+# hash_any / hash_any_extended for hashinet (network.c hashes VARDATA_ANY);
+# owner ported, depend directly.
+hashfn = { path = "../../../../common/hashfn" }
+# PG_DETOAST_DATUM_PACKED for the `datum_get_inet_pp` selectivity detoast edge;
+# owner ported, depend directly (no cycle).
+detoast = { path = "../../../access/common/detoast" }
+# Canonical unified `Datum` (the by-reference inet varlena image) the
+# `datum_get_inet_pp` seam carries.
+types_tuple = { path = "../../../../_support/types/types_tuple" }

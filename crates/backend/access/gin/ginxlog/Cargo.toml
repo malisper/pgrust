@@ -1,0 +1,47 @@
+[package]
+name = "ginxlog"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ginxlog"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+wal = { path = "../../../../_support/types/wal" }
+gin = { path = "../../../../_support/types/gin" }
+
+# Owns these rmgr-table callbacks (gin_redo / gin_xlog_startup /
+# gin_xlog_cleanup / gin_mask); installs them on landing.
+gin_core_seams = { path = "../gin_core_seams" }
+
+# Critical-section count / ereport (miscadmin.h, elog.c).
+utils_error = { path = "../../../utils/utils_error" }
+
+# Page-byte primitives (bufpage.c): PageAddItemExtended / PageIndexTupleDelete /
+# PageGetItem / PageGetItemId / PageSetLSN / PageIsEmpty.
+page = { path = "../../../storage/page" }
+
+# GIN page-byte substrate (already-merged sibling crates).
+gindatapage = { path = "../gindatapage" }
+ginutil = { path = "../ginutil" }
+core_probe = { path = "../core_probe" }
+
+# WAL-recovery substrate.
+xlogutils = { path = "../../transam/xlogutils" }
+xlogreader_seams = { path = "../../transam/xlogreader_seams" }
+
+# Buffer manager (bufmgr.c) — page access during redo.
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+
+# Page masking for WAL consistency checking (bufmask.c).
+bufmask_seams = { path = "../../common/bufmask_seams" }
+
+[dev-dependencies]
+init = { path = "../../../../_support/seam/init" }

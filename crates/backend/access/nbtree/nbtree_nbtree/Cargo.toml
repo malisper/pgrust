@@ -1,0 +1,51 @@
+[package]
+name = "nbtree_nbtree"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nbtree_nbtree"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_amapi = { path = "../../../../_support/types/types_amapi" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+types_nbtree = { path = "../../../../_support/types/types_nbtree" }
+rel = { path = "../../../../_support/types/rel" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+tidbitmap = { path = "../../../../_support/types/tidbitmap" }
+
+# Own seam crate (inward parallel seams installed from init_seams()).
+nbtree_seams = { path = "../nbtree_seams" }
+
+# Outward seam crates (callees not yet ported).
+nbtree_core_seams = { path = "../nbtree_core_seams" }
+# btbuild (the AM ambuild) lives in nbtsort, ABOVE this crate; the vtable's
+# ambuild adapter bridges to it through this build-dispatch seam (#341).
+build_seams = { path = "../build_seams" }
+indextuple_seams = { path = "../../common/indextuple_seams" }
+indexam_seams = { path = "../../index/indexam_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+lmgr_seams = { path = "../../../storage/lmgr/lmgr_seams" }
+# btvacuumscan drives the real look-ahead read stream directly (the owner is
+# below nbtree in the dep graph; no seam, no handle).
+read_stream = { path = "../../../storage/aio/read_stream" }
+freespace_seams = { path = "../../../storage/freespace/freespace_seams" }
+vacuum_seams = { path = "../../../commands/vacuum_seams" }
+nodes_core_seams = { path = "../../../nodes/nodes_core_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+lwlock_seams = { path = "../../../storage/lmgr/lwlock_seams" }
+condition_variable_seams = { path = "../../../storage/lmgr/condition_variable_seams" }
+datum_seams = { path = "../../../utils/adt/datum_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+
+# Ported owner, direct dep (progress-update is already in backend-utils-activity-small).
+activity_small = { path = "../../../utils/activity/activity_small" }

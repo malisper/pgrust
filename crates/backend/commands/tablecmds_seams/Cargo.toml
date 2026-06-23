@@ -1,0 +1,22 @@
+[package]
+name = "tablecmds_seams"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "tablecmds_seams"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+mcx = { path = "../../../_support/mcx" }
+rel = { path = "../../../_support/types/rel" }
+nodes = { path = "../../../_support/types/nodes" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_cluster = { path = "../../../_support/types/types_cluster" }

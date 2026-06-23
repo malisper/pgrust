@@ -1,0 +1,33 @@
+[package]
+name = "to_tsany"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "to_tsany"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+datum = { path = "../../../_support/types/datum" }
+fmgr = { path = "../../../_support/types/fmgr" }
+tsearch = { path = "../../../_support/types/tsearch" }
+cache = { path = "../../../_support/types/cache" }
+define_seams = { path = "../../commands/define_seams" }
+utils_error = { path = "../../utils/utils_error" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+ts_cache = { path = "../../utils/cache/ts_cache" }
+adt_jsonfuncs = { path = "../../utils/adt/adt_jsonfuncs" }
+tsearchcmds_seams = { path = "../../commands/tsearchcmds_seams" }
+parse = { path = "../parse" }
+parse_seams = { path = "../parse_seams" }
+dict = { path = "../dict" }
+dict_seams = { path = "../dict_seams" }
+ispell_regis = { path = "../ispell_regis" }
+dict_snowball = { path = "../../snowball/dict_snowball" }
+tsvector_core = { path = "../../utils/adt/tsvector_core" }
+tsquery_core = { path = "../../utils/adt/tsquery_core" }

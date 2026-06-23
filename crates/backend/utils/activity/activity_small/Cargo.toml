@@ -1,0 +1,35 @@
+[package]
+name = "activity_small"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "activity_small"
+path = "src/lib.rs"
+
+[dependencies]
+# Lazy-vacuum driver progress seams (start/update/end/multi/read-param) home in
+# vacuumlazy-seams; backend_progress.c owns the bodies.
+vacuumlazy_seams = { path = "../../../access/heap/vacuumlazy_seams" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+activity_small_seams = { path = "../activity_small_seams" }
+backend_progress_seams = { path = "../backend_progress_seams" }
+transam_parallel = { path = "../../../access/transam/transam_parallel" }
+# Parallel-worker progress forwarding (parallel.c pgstat_progress_incr_param).
+parallel_rt_seams = { path = "../../../access/transam/parallel_rt_seams" }
+pqcomm_seams = { path = "../../../libpq/pqcomm_seams" }
+pqformat = { path = "../../../libpq/pqformat" }
+lwlock_seams = { path = "../../../storage/lmgr/lwlock_seams" }
+init_small_seams = { path = "../../init/init_small_seams" }
+pgstat_seams = { path = "../pgstat_seams" }
+stat_seams = { path = "../stat_seams" }
+status_seams = { path = "../status_seams" }
+timestamp_seams = { path = "../../adt/timestamp_seams" }

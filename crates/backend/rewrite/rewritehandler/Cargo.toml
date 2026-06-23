@@ -1,0 +1,60 @@
+[package]
+name = "rewritehandler"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "rewritehandler"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_acl = { path = "../../../_support/types/types_acl" }
+types_trigger = { path = "../../../_support/types/types_trigger" }
+
+# Direct (acyclic) owners.
+nodes_core = { path = "../../nodes/nodes_core" }
+rewrite_core = { path = "../rewrite_core" }
+rowsecurity = { path = "../rowsecurity" }
+rewriteSearchCycle = { path = "../rewriteSearchCycle" }
+parser_relation = { path = "../../parser/parser_relation" }
+small1 = { path = "../../parser/small1" }
+coerce = { path = "../../parser/coerce" }
+pg_depend = { path = "../../catalog/pg_depend" }
+table = { path = "../../access/table/table" }
+types_storage = { path = "../../../_support/types/types_storage" }
+tupdesc = { path = "../../access/common/tupdesc" }
+adt_format_type = { path = "../../utils/adt/adt_format_type" }
+parser_analyze = { path = "../../parser/parser_analyze" }
+execUtils = { path = "../../executor/execUtils" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+equalfuncs = { path = "../../nodes/equalfuncs" }
+vars = { path = "../../optimizer/util/vars" }
+guc_tables_seams = { path = "../../utils/misc/guc_tables_seams" }
+
+# Inward seam crates this unit owns / installs into.
+rewritehandler_seams = { path = "../rewritehandler_seams" }
+view_seams = { path = "../../commands/view_seams" }
+# plancat.c's get_relation_constraints reaches expand_generated_columns_in_expr
+# over a planner-arena node list; this owner installs the plancat-ext-seam.
+plancat_ext_seams = { path = "../../optimizer/util/plancat_ext_seams" }
+pathnodes = { path = "../../../_support/types/pathnodes" }
+ruleutils_seams = { path = "../../utils/adt/ruleutils_seams" }
+
+# Cross-cycle externals consumed through owner -seams crates.
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+common_relation_seams = { path = "../../access/common/common_relation_seams" }
+foreign_seams = { path = "../../foreign/foreign_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+common_reloptions = { path = "../../access/common/common_reloptions" }
+types_reloptions = { path = "../../../_support/types/types_reloptions" }

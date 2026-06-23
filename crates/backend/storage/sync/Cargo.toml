@@ -1,0 +1,31 @@
+[package]
+name = "sync"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sync"
+path = "src/lib.rs"
+
+[dependencies]
+libc = { version = "0.2", default-features = false }
+utils_error = { path = "../../utils/utils_error" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+
+# Own inward seams (installed by init_seams()).
+sync_seams = { path = "sync_seams" }
+
+# Outward owner seams (calls that would cycle).
+checkpointer_seams = { path = "../../postmaster/checkpointer_seams" }
+file_seams = { path = "../file/file_seams" }
+latch_seams = { path = "../ipc/latch_seams" }
+md_seams = { path = "../smgr/md_seams" }
+clog_seams = { path = "../../access/transam/clog_seams" }
+commit_ts_seams = { path = "../../access/transam/commit_ts_seams" }
+multixact_seams = { path = "../../access/transam/multixact_seams" }
+
+[dev-dependencies]
+libc = { version = "0.2", default-features = false }
+types_core = { path = "../../../_support/types/types_core" }

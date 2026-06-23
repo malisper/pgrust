@@ -1,0 +1,15 @@
+[package]
+name = "types_numeric"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "types_numeric"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../datum" }
+# In-memory NumericVar<'mcx> / aggregate states carry charged digit buffers
+# (PgVec<'mcx, NumericDigit>); the lifetime threads through every family.
+mcx = { path = "../../mcx" }

@@ -1,0 +1,15 @@
+[package]
+name = "rmgrdesc_small_seams"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "rmgrdesc_small_seams"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../_support/seam/seam_core" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+mcx = { path = "../../_support/mcx" }

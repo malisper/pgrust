@@ -1,0 +1,71 @@
+[package]
+name = "objectaddress"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "objectaddress"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+snapshot = { path = "../../../_support/types/snapshot" }
+types_acl = { path = "../../../_support/types/types_acl" }
+common_relation_seams = { path = "../../access/common/common_relation_seams" }
+heaptuple = { path = "../../access/common/heaptuple" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+sinval_seams = { path = "../../storage/ipc/sinval_seams" }
+catalog_seams = { path = "../catalog_seams" }
+aclchk_seams = { path = "../aclchk_seams" }
+heap_seams = { path = "../heap_seams" }
+pg_parameter_acl_seams = { path = "../pg_parameter_acl_seams" }
+amcmds_seams = { path = "../../commands/amcmds_seams" }
+functioncmds_seams = { path = "../../commands/functioncmds_seams" }
+proclang_seams = { path = "../../commands/proclang_seams" }
+opclasscmds_seams = { path = "../../commands/opclasscmds_seams" }
+event_trigger_seams = { path = "../../commands/event_trigger_seams" }
+policy_seams = { path = "../../commands/policy_seams" }
+trigger_seams = { path = "../../commands/trigger_seams" }
+rewritesupport_seams = { path = "../../rewrite/rewritesupport_seams" }
+oid_seams = { path = "../../utils/adt/oid_seams" }
+parse_func_seams = { path = "../../parser/parse_func_seams" }
+parse_oper_seams = { path = "../../parser/parse_oper_seams" }
+parse_type_seams = { path = "../../parser/parse_type_seams" }
+nodes = { path = "../../../_support/types/nodes" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+rel = { path = "../../../_support/types/rel" }
+types_storage = { path = "../../../_support/types/types_storage" }
+array = { path = "../../../_support/types/array" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+cache = { path = "../../../_support/types/cache" }
+datum = { path = "../../../_support/types/datum" }
+fmgr = { path = "../../../_support/types/fmgr" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+pg_constraint_seams = { path = "../pg_constraint_seams" }
+objectaddress_seams = { path = "../objectaddress_seams" }
+indexing_seams = { path = "../indexing_seams" }
+arrayfuncs_seams = { path = "../../utils/adt/arrayfuncs_seams" }
+funcapi_seams = { path = "../../utils/fmgr/funcapi_seams" }
+# F1 getObjectDescription cross-crate description helpers (called via -seams).
+types_namespace = { path = "../../../_support/types/types_namespace" }
+utils_error = { path = "../../utils/utils_error" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+namespace_seams = { path = "../namespace_seams" }
+regproc_seams = { path = "../../utils/adt/regproc_seams" }
+format_type_seams = { path = "../../utils/adt/format_type_seams" }
+ruleutils_seams = { path = "../../utils/adt/ruleutils_seams" }
+misc2_seams = { path = "../../utils/adt/misc2_seams" }
+dbcommands_seams = { path = "../../commands/dbcommands_seams" }
+tablespace_seams = { path = "../../commands/tablespace_seams" }
+extension_seams = { path = "../../commands/extension_seams" }
+user_seams = { path = "../../commands/user_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+foreign_seams = { path = "../../foreign/foreign_seams" }
+pg_largeobject_seams = { path = "../pg_largeobject_seams" }

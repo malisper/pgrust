@@ -1,0 +1,41 @@
+[package]
+name = "fmgr_core"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "fmgr_core"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+pg_proc_seams = { path = "../../../catalog/pg_proc_seams" }
+arrayfuncs_seams = { path = "../../adt/arrayfuncs_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_reloptions = { path = "../../../../_support/types/types_reloptions" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+types_acl = { path = "../../../../_support/types/types_acl" }
+nodes = { path = "../../../../_support/types/nodes" }
+cache = { path = "../../../../_support/types/cache" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+array = { path = "../../../../_support/types/array" }
+
+# inward seam crate (this unit installs these)
+fmgr_seams = { path = "../fmgr_seams" }
+
+# outward seam crates (callees; panic until owners land)
+syscache_seams = { path = "../../cache/syscache_seams" }
+lsyscache_seams = { path = "../../cache/lsyscache_seams" }
+dfmgr_seams = { path = "../dfmgr_seams" }
+miscinit_seams = { path = "../../init/miscinit_seams" }
+guc_seams = { path = "../../misc/guc_seams" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+nodeFuncs_seams = { path = "../../../nodes/nodeFuncs_seams" }
+functions_seams = { path = "../../../executor/functions_seams" }
+clauses_seams = { path = "../../../optimizer/util/clauses_seams" }
+detoast_seams = { path = "../../../access/common/detoast_seams" }
+pgstat_function_seams = { path = "../../activity/pgstat_function_seams" }

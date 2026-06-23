@@ -1,0 +1,338 @@
+//! Seam declarations for the `backend-utils-sort-tuplesort` unit
+//! (`utils/sort/tuplesort.c` + `utils/sort/tuplesortvariants.c`): the
+//! `tuplesort_*` access method nodeSort drives.
+//!
+//! The owning unit installs these from its `init_seams()` when it lands; until
+//! then a call panics loudly. `Tuplesortstate` is type-erased
+//! ([`nodes::Tuplesortstate`]); only the tuplesort owner downcasts.
+//!
+//! nodeSort never passes a parallel `SortCoordinate` (it always supplies the C
+//! `NULL`), so the begin seams omit that parameter — the parallel-coordinated
+//! path is a separate concern when its callers land (narrowest capability).
+
+#![allow(non_snake_case)]
+
+use types_core::{AttrNumber, Oid};
+use types_error::PgResult;
+use nodes::{SlotData, TupleTableSlot, Tuplesortstate, TuplesortInstrumentation};
+use types_tuple::heaptuple::Datum;
+use types_tuple::heaptuple::{ItemPointerData, TupleDescData};
+
+seam_core::seam!(
+    /// `bool optimize_bounded_sort` (tuplesort.c): the GUC controlling whether
+    /// the top-N (bounded) heapsort optimization is used. C reads this `bool`
+    /// straight from the variable (no ControlFile; it is a plain PGC_USERSET
+    /// bool in guc_tables.c with no check/assign/show hooks). The
+    /// `backend-utils-misc-guc-tables` port has no slot for this variable, so
+    /// the owner exposes it through this read seam instead; the owner's
+    /// `thread_local` backing store is the C global's Rust home. Pure read of
+    /// backend-local state.
+    pub fn optimize_bounded_sort() -> bool
+);
+
+seam_core::seam!(
+    /// `tuplesort_begin_index_hash(heapRel, indexRel, high_mask, low_mask,
+    /// max_buckets, workMem, coordinate=NULL, sortopt)` (tuplesortvariants.c):
+    /// begin a hash-index tuple sort keyed by bucket number (the masks feed
+    /// `_hash_hashkey2bucket`). Allocates the sort state in `mcx`, fallible on
+    /// OOM.
+    pub fn tuplesort_begin_index_hash<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        heap_rel: &rel::Relation<'mcx>,
+        index_rel: &rel::Relation<'mcx>,
+        high_mask: u32,
+        low_mask: u32,
+        max_buckets: u32,
+        work_mem: i32,
+        sortopt: i32,
+    ) -> PgResult<Tuplesortstate<'mcx>>
+);
+
+seam_core::seam!(
+    /// `tuplesort_putindextuplevalues(state, rel, self, values, isnull)`
+    /// (tuplesortvariants.c): form an index tuple from `values`/`isnull` with
+    /// heap TID `self` and feed it into the sort. Can allocate, fallible.
+    pub fn tuplesort_putindextuplevalues<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
+        rel: &rel::Relation<'mcx>,
+        self_tid: ItemPointerData,
+        values: &[Datum<'mcx>],
+        isnull: &[bool],
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplesort_getindextuple(state, forward=true)` (tuplesortvariants.c):
+    /// fetch the next sorted IndexTuple as its on-disk bytes; `None` at end of
+    /// sort. Can allocate, fallible.
+    pub fn tuplesort_getindextuple<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
+        forward: bool,
+    ) -> PgResult<Option<mcx::PgVec<'mcx, u8>>>
+);
+
+seam_core::seam!(
+    /// `tuplesort_begin_heap(tupDesc, nkeys, attNums, sortOperators,
+    /// sortCollations, nullsFirstFlags, workMem, coordinate=NULL, sortopt)`
+    /// (tuplesortvariants.c): begin a multi-column heap-tuple sort. Allocates
+    /// the sort state in `mcx` (C: palloc in `CurrentMemoryContext`), so
+    /// fallible on OOM.
+    pub fn tuplesort_begin_heap<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        tup_desc: &TupleDescData<'mcx>,
+        nkeys: i32,
+        att_nums: &[AttrNumber],
+        sort_operators: &[Oid],
+        sort_collations: &[Oid],
+        nulls_first_flags: &[bool],
+        work_mem: i32,
+        sortopt: i32,
+    ) -> PgResult<Tuplesortstate<'mcx>>
+);
+
+seam_core::seam!(
+    /// `tuplesort_begin_datum(datumType, sortOperator, sortCollation,
+    /// nullsFirstFlag, workMem, coordinate=NULL, sortopt)`
+    /// (tuplesortvariants.c): begin a single-column Datum sort. Allocates in
+    /// `mcx`, fallible on OOM.
+    pub fn tuplesort_begin_datum<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        datum_type: Oid,
+        sort_operator: Oid,
+        sort_collation: Oid,
+        nulls_first_flag: bool,
+        work_mem: i32,
+        sortopt: i32,
+    ) -> PgResult<Tuplesortstate<'mcx>>
+);
+
+seam_core::seam!(
+    /// `tuplesort_set_bound(state, bound)` (tuplesort.c): set the bound for a
+    /// bounded (top-N) sort.
+    pub fn tuplesort_set_bound<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
+        bound: i64,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplesort_puttupleslot(state, slot)` (tuplesortvariants.c): copy the
+    /// slot's tuple into the sort. Allocates the stored tuple, fallible on OOM.
+    pub fn tuplesort_puttupleslot<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
+        slot: &TupleTableSlot,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplesort_putdatum(state, val, isNull)` (tuplesortvariants.c): feed one
+    /// Datum to a Datum sort. Allocates (copies pass-by-ref data), fallible.
+    pub fn tuplesort_putdatum<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
+        val: Datum<'mcx>,
+        is_null: bool,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplesort_performsort(state)` (tuplesort.c): all tuples have been
+    /// supplied; complete the sort. May spill to disk / allocate, fallible.
+    pub fn tuplesort_performsort<'mcx>(state: &mut Tuplesortstate<'mcx>) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplesort_gettupleslot(state, forward, copy, slot, abbrev=NULL)`
+    /// (tuplesortvariants.c): fetch the next tuple into `slot`. Returns `false`
+    /// (and stores an empty slot) at end of sort. Can detoast/allocate,
+    /// fallible.
+    pub fn tuplesort_gettupleslot<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
+        forward: bool,
+        copy: bool,
+        slot: &mut SlotData<'mcx>,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `tuplesort_getdatum(state, forward, copy, &val, &isNull, abbrev=NULL)`
+    /// (tuplesortvariants.c): fetch the next Datum. Returns `(found, val,
+    /// isNull)`; `found == false` means end of sort. Can allocate, fallible.
+    pub fn tuplesort_getdatum<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
+        forward: bool,
+        copy: bool,
+    ) -> PgResult<(bool, Datum<'mcx>, bool)>
+);
+
+seam_core::seam!(
+    /// `tuplesort_skiptuples(state, ntuples, forward)` (tuplesort.c): advance
+    /// `ntuples` tuples in the output without returning them, used by the
+    /// ordered-set percentile finalfns to jump to the target sample row.
+    /// Returns `false` if it ran off the end of the sort. Can read tapes,
+    /// fallible.
+    pub fn tuplesort_skiptuples<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
+        ntuples: i64,
+        forward: bool,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `tuplesort_reset(state)` (tuplesort.c): reset the sort state to its
+    /// initial empty condition, freeing any in-progress sort but keeping the
+    /// allocated sort metadata so a fresh batch can be loaded (the incremental
+    /// sort's per-group reuse). Releasing temp files can `elog(ERROR)`, carried
+    /// on `Err`.
+    pub fn tuplesort_reset<'mcx>(state: &mut Tuplesortstate<'mcx>) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplesort_used_bound(state)` (tuplesort.c): true if the sort actually
+    /// switched into bounded (top-N heapsort) mode, so only the top-N tuples
+    /// were retained. Infallible (a flag read).
+    pub fn tuplesort_used_bound<'mcx>(state: &Tuplesortstate<'mcx>) -> bool
+);
+
+seam_core::seam!(
+    /// `tuplesort_puttupleslot(state, slot)` (tuplesortvariants.c) for a
+    /// standalone slot (`MakeSingleTupleTableSlot`, not in `es_tupleTable`) held
+    /// as the payload-bearing [`SlotData`] — the incremental-sort `group_pivot`/
+    /// `transfer_tuple` form. (The `&TupleTableSlot` variant above is the same C
+    /// op reached through a pool slot's header; this carries the standalone
+    /// slot's full payload.) Allocates the stored tuple, fallible on OOM.
+    pub fn tuplesort_puttupleslot_standalone<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
+        slot: &SlotData<'mcx>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplesort_gettupleslot(state, forward, copy, slot, abbrev=NULL)`
+    /// (tuplesortvariants.c) into a standalone [`SlotData`] (the incremental
+    /// sort's `transfer_tuple`). Returns `false` (and stores an empty slot) at
+    /// end of sort. Can detoast/allocate, fallible.
+    pub fn tuplesort_gettupleslot_standalone<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
+        forward: bool,
+        copy: bool,
+        slot: &mut SlotData<'mcx>,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `tuplesort_get_stats(state, stats)` (tuplesort.c): report sort
+    /// algorithm / space statistics into a `TuplesortInstrumentation`.
+    pub fn tuplesort_get_stats<'mcx>(
+        state: &Tuplesortstate<'mcx>,
+    ) -> TuplesortInstrumentation
+);
+
+seam_core::seam!(
+    /// `tuplesort_end(state)` (tuplesort.c): release all the sort's resources
+    /// (temp files, memory). Closing temp files can `elog(ERROR)`, carried on
+    /// `Err`.
+    pub fn tuplesort_end<'mcx>(state: mcx::PgBox<'mcx, Tuplesortstate<'mcx>>) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplesort_rescan(state)` (tuplesort.c): rewind a randomAccess sort to
+    /// the start so the output can be re-read.
+    pub fn tuplesort_rescan<'mcx>(state: &mut Tuplesortstate<'mcx>) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplesort_markpos(state)` (tuplesort.c): save the current sort-output
+    /// position (randomAccess only).
+    pub fn tuplesort_markpos<'mcx>(state: &mut Tuplesortstate<'mcx>) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplesort_restorepos(state)` (tuplesort.c): restore the last saved
+    /// sort-output position (randomAccess only).
+    pub fn tuplesort_restorepos<'mcx>(state: &mut Tuplesortstate<'mcx>) -> PgResult<()>
+);
+
+// === index-btree build sort (tuplesortvariants.c) ==========================
+//
+// Consumed by `backend-access-nbtree-nbtsort` (`_bt_leafbuild` / `_bt_load`).
+// The nbtree build never passes a parallel `SortCoordinate` from the grounded
+// (serial) path, so the begin seam omits that parameter like the heap/datum
+// variants above. Owned by the (still-`todo`) tuplesort unit; panics until it
+// lands and installs them from `init_seams()`.
+
+seam_core::seam!(
+    /// `tuplesort_begin_index_btree(heapRel, indexRel, enforceUnique,
+    /// uniqueNullsNotDistinct, workMem, coordinate=NULL, sortopt)`
+    /// (tuplesortvariants.c): begin a btree-index build sort keyed by the
+    /// index's sort operators (with heap TID as the implicit final tiebreaker).
+    /// Allocates the sort state in `mcx`; fallible on OOM.
+    pub fn tuplesort_begin_index_btree<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        heap_rel: &rel::Relation<'mcx>,
+        index_rel: &rel::Relation<'mcx>,
+        enforce_unique: bool,
+        unique_nulls_not_distinct: bool,
+        work_mem: i32,
+        sortopt: i32,
+    ) -> PgResult<Tuplesortstate<'mcx>>
+);
+
+seam_core::seam!(
+    /// `tuplesort_begin_cluster(tupDesc, indexRel, workMem, coordinate=NULL,
+    /// sortopt)` (tuplesortvariants.c): begin a full-HeapTuple sort ordered by a
+    /// btree index definition, used by CLUSTER / VACUUM FULL's
+    /// `heapam_relation_copy_for_cluster`. `tupDesc` is the *heap* descriptor;
+    /// the index's btree scankeys + opclass SortSupport drive the comparison.
+    /// Allocates the sort state in `mcx`; fallible on OOM.
+    pub fn tuplesort_begin_cluster<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        tup_desc: &TupleDescData<'mcx>,
+        index_rel: &rel::Relation<'mcx>,
+        work_mem: i32,
+        sortopt: i32,
+    ) -> PgResult<Tuplesortstate<'mcx>>
+);
+
+seam_core::seam!(
+    /// `tuplesort_putheaptuple(state, tup)` (tuplesortvariants.c): copy a full
+    /// `HeapTuple` into the CLUSTER sort. Allocates the stored tuple, fallible.
+    pub fn tuplesort_putheaptuple<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
+        tup: &types_tuple::heaptuple::FormedTuple<'mcx>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplesort_getheaptuple(state, forward=true)` (tuplesortvariants.c): fetch
+    /// the next sorted `HeapTuple` from the CLUSTER sort; `None` at end of sort.
+    /// Can allocate, fallible.
+    pub fn tuplesort_getheaptuple<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
+        forward: bool,
+    ) -> PgResult<Option<types_tuple::heaptuple::FormedTuple<'mcx>>>
+);
+
+// === index-GiST sorted build sort (tuplesortvariants.c) ====================
+//
+// Consumed by the sorted GiST build (`gist_indexsortbuild` →
+// `tuplesort_begin_index_gist`). Unlike the btree variant there are no
+// uniqueness flags: GiST sets `enforceUnique`/`uniqueNullsNotDistinct` to
+// `false` and keys the sort by the opclass' sortsupport
+// (`PrepareSortSupportFromGistIndexRel`). The build never passes a parallel
+// `SortCoordinate` (always the C `NULL`), so the begin seam omits it like the
+// other build variants. Owned by the still-`todo` tuplesort unit; a call
+// panics loudly until that unit lands and installs it from `init_seams()`.
+seam_core::seam!(
+    /// `tuplesort_begin_index_gist(heapRel, indexRel, workMem,
+    /// coordinate=NULL, sortopt)` (tuplesortvariants.c): begin a GiST-index
+    /// build sort keyed by the index opclass' sortsupport. Allocates the sort
+    /// state in `mcx`; fallible on OOM.
+    pub fn tuplesort_begin_index_gist<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        heap_rel: &rel::Relation<'mcx>,
+        index_rel: &rel::Relation<'mcx>,
+        work_mem: i32,
+        sortopt: i32,
+    ) -> PgResult<Tuplesortstate<'mcx>>
+);
+

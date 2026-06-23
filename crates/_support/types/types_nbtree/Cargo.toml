@@ -1,0 +1,21 @@
+[package]
+name = "types_nbtree"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "types_nbtree"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../types_core" }
+types_tableam = { path = "../types_tableam" }
+snapshot = { path = "../snapshot" }
+types_scan = { path = "../types_scan" }
+types_storage = { path = "../types_storage" }
+condvar = { path = "../condvar" }
+types_parallel = { path = "../types_parallel" }
+types_tuple = { path = "../types_tuple" }
+types_sortsupport = { path = "../types_sortsupport" }
+mcx = { path = "../../mcx" }

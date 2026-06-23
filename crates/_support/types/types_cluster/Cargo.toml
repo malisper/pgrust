@@ -1,0 +1,16 @@
+[package]
+name = "types_cluster"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "types_cluster"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../types_core" }
+types_tuple = { path = "../types_tuple" }
+nodes = { path = "../nodes" }
+rel = { path = "../rel" }
+types_vacuum = { path = "../types_vacuum" }

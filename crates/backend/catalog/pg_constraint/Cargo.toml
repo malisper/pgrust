@@ -1,0 +1,47 @@
+[package]
+name = "pg_constraint"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_constraint"
+path = "src/lib.rs"
+
+[dependencies]
+heaptuple = { path = "../../access/common/heaptuple" }
+scankey = { path = "../../access/common/scankey" }
+genam_seams = { path = "../../access/index/genam_seams" }
+table = { path = "../../access/table/table" }
+dependency_seams = { path = "../dependency_seams" }
+indexing_seams = { path = "../indexing_seams" }
+objectaccess_seams = { path = "../objectaccess_seams" }
+pg_constraint_seams = { path = "../pg_constraint_seams" }
+pg_depend_seams = { path = "../pg_depend_seams" }
+indexcmds_seams = { path = "../../commands/indexcmds_seams" }
+nodes_core = { path = "../../nodes/nodes_core" }
+read_seams = { path = "../../nodes/read_seams" }
+equalfuncs_seams = { path = "../../nodes/equalfuncs_seams" }
+utils_error = { path = "../../utils/utils_error" }
+domains_seams = { path = "../../utils/adt/domains_seams" }
+format_type_seams = { path = "../../utils/adt/format_type_seams" }
+varlena_seams = { path = "../../utils/adt/varlena_seams" }
+ruleutils_seams = { path = "../../utils/adt/ruleutils_seams" }
+inval_pc_seams = { path = "../../utils/cache/inval_pc_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+next = { path = "../../access/common/next" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+ri_triggers_seams = { path = "../../utils/adt/ri_triggers_seams" }
+mcx = { path = "../../../_support/mcx" }
+types_amapi = { path = "../../../_support/types/types_amapi" }
+cache = { path = "../../../_support/types/cache" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+rel = { path = "../../../_support/types/rel" }
+types_ri_triggers = { path = "../../../_support/types/types_ri_triggers" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_syscache = { path = "../../../_support/types/types_syscache" }
+types_tuple = { path = "../../../_support/types/types_tuple" }

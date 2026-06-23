@@ -1,0 +1,21 @@
+[package]
+name = "nodeNamedtuplestorescan"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nodeNamedtuplestorescan"
+path = "src/lib.rs"
+
+[dependencies]
+execExpr_seams = { path = "../execExpr_seams" }
+execScan_seams = { path = "../execScan_seams" }
+execTuples_seams = { path = "../execTuples_seams" }
+execUtils_seams = { path = "../execUtils_seams" }
+queryenvironment = { path = "../../utils/misc/queryenvironment" }
+sort_storage_seams = { path = "../../utils/sort/sort_storage_seams" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+mcx = { path = "../../../_support/mcx" }

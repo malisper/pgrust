@@ -1,0 +1,23 @@
+[package]
+name = "execScan"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "execScan"
+path = "src/lib.rs"
+
+[dependencies]
+execScan_seams = { path = "../execScan_seams" }
+execExpr_seams = { path = "../execExpr_seams" }
+execTuples_seams = { path = "../execTuples_seams" }
+execUtils_seams = { path = "../execUtils_seams" }
+nodeTidscan_seams = { path = "../nodeTidscan_seams" }
+nodeTidrangescan_seams = { path = "../nodeTidrangescan_seams" }
+nodeSamplescan_seams = { path = "../nodeSamplescan_seams" }
+execMain_seams = { path = "../execMain_seams" }
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+nodes = { path = "../../../_support/types/nodes" }
+types_error = { path = "../../../_support/types/types_error" }

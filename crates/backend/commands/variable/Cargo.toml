@@ -1,0 +1,60 @@
+[package]
+name = "variable"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "variable"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_guc = { path = "../../../_support/types/types_guc" }
+types_datetime = { path = "../../../_support/types/types_datetime" }
+string = { path = "../../../common/string" }
+utils_error = { path = "../../utils/utils_error" }
+
+# GUC framework: error-recording helpers + the typed hook/var slots this unit
+# installs into. (Acyclic: guc/guc-tables do not depend on this crate.)
+misc_guc = { path = "../../utils/misc/misc_guc" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+
+# This unit's own cross-subsystem adapter seams.
+variable_seams = { path = "../variable_seams" }
+
+# Owner seam crates this unit calls into directly.
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+transam_parallel = { path = "../../access/transam/transam_parallel" }
+acl_seams = { path = "../../utils/adt/acl_seams" }
+superuser_seams = { path = "../../utils/misc/superuser_seams" }
+varlena_seams = { path = "../../utils/adt/varlena_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+mbutils = { path = "../../utils/mb/mbutils" }
+encnames_seams = { path = "../../../common/encnames_seams" }
+extra_encnames_fgram = { path = "../../../common/extra_encnames_fgram" }
+common_path_seams = { path = "../../../common/common_path_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+# Effective `io_combine_limit` global lives in bufmgr.c; the assign-hooks store
+# the recomputed clamp through its setter seam. (Acyclic: bufmgr-seams is a pure
+# seam-declaration crate and does not depend on this unit.)
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+
+# Ported owners this unit's adapter seams delegate to in init_seams().
+timezone_pgtz = { path = "../../timezone/timezone_pgtz" }
+localtime = { path = "../../timezone/localtime" }
+# timezone_abbreviations: load_tzoffsets (tzparser.c) + InstallTimeZoneAbbrevs
+# (datetime.c) — fused into the load_and_install_tz_abbrevs owner seam.
+misc_timeout = { path = "../../utils/misc/misc_timeout" }
+adt_datetime = { path = "../../utils/adt/adt_datetime" }
+state_pgtz = { path = "../../../_support/state/state_pgtz" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+miscinit = { path = "../../utils/init/miscinit" }
+init_small = { path = "../../utils/init/init_small" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+xlogprefetcher = { path = "../../access/transam/xlogprefetcher" }
+syslogger = { path = "../../postmaster/syslogger" }
+pqcomm = { path = "../../libpq/pqcomm" }

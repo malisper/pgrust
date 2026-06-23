@@ -1,0 +1,60 @@
+[package]
+name = "comp"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "comp"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+tupdesc = { path = "../../../../backend/access/common/tupdesc" }
+types_error = { path = "../../../../_support/types/types_error" }
+# The live error path — scoped emit-time error-context callbacks
+# (push/pop_emit_context_callback) so the `plpgsql_compile_error_callback`
+# transposition reaches inline WARNINGs raised during the body parse.
+utils_error = { path = "../../../../backend/utils/utils_error" }
+datum = { path = "../../../../_support/types/datum" }
+plpgsql = { path = "../../../../_support/types/plpgsql" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+# FunctionCallInfoBaseData for the plpgsql_compile entry signature.
+nodes = { path = "../../../../_support/types/nodes" }
+
+# Inward seams this crate installs (the scanner/grammar callbacks).
+comp_seams = { path = "../comp_seams" }
+# Namespace stack + tree-walker teardown (pl_funcs.c) — direct (no cycle).
+funcs = { path = "../funcs" }
+# The grammar this compiler runs (plpgsql_yyparse) + the scanner it drives.
+plpgsql_gram = { path = "../plpgsql_gram" }
+plpgsql_scanner = { path = "../plpgsql_scanner" }
+# Arm the core-scanner string-literal WARNING replay for the validator compile
+# (plpgsql_body_warnings_armed) — see parse_function_body.
+scan_seams = { path = "../../../../backend/parser/scan_seams" }
+
+# Namespace name resolution (catalog/namespace.c) — RangeVarGetRelid for
+# %TYPE/%ROWTYPE over a table (plpgsql_parse_{c,}word{type,rowtype}).
+namespace_seams = { path = "../../../../backend/catalog/namespace_seams" }
+# typcache composite-tupdesc projection (utils/cache/typcache.c) — build_datatype
+# records a named composite type's tupDesc_identifier for change detection.
+typcache_seams = { path = "../../../../backend/utils/cache/typcache_seams" }
+# Catalog / syscache reads (utils/cache/{syscache,lsyscache}.c).
+syscache_seams = { path = "../../../../backend/utils/cache/syscache_seams" }
+lsyscache_seams = { path = "../../../../backend/utils/cache/lsyscache_seams" }
+# format_type_be (utils/adt/format_type.c) for diagnostics.
+format_type_seams = { path = "../../../../backend/utils/adt/format_type_seams" }
+# format_procedure (utils/adt/regproc.c) — fn_signature for the error-context line.
+regproc_seams = { path = "../../../../backend/utils/adt/regproc_seams" }
+# quote_identifier (utils/adt/ruleutils.c) — pl_gram.y's cursor-arg list uses it.
+ruleutils_seams = { path = "../../../../backend/utils/adt/ruleutils_seams" }
+# cached_function_compile driver (utils/cache/funccache.c) — plpgsql_compile entry.
+funccache_seams = { path = "../../../../backend/utils/cache/funccache_seams" }
+# raw_parser syntax-only drive (parser/parser.c) for check_sql_expr (pl_gram.y).
+driver_seams = { path = "../../../../backend/parser/driver_seams" }
+# typeStringToTypeName + typenameTypeIdAndMod (parser/parse_type.c) for
+# parse_datatype (pl_gram.y) — the plpgsql-mode raw type-name parser.
+parse_type = { path = "../../../../backend/parser/parse_type" }
+# check_function_bodies GUC read (guc.c) for the inline (DO) compile path.
+guc_tables = { path = "../../../../backend/utils/misc/guc_tables" }

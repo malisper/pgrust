@@ -1,0 +1,23 @@
+[package]
+name = "tablesample_core"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "tablesample_core"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+samplescan = { path = "../../../../_support/types/samplescan" }
+hashfn = { path = "../../../../common/hashfn" }
+costsize = { path = "../../../optimizer/path/costsize" }
+clauses = { path = "../../../optimizer/util/clauses" }
+tablesample_core_seams = { path = "../tablesample_core_seams" }

@@ -1,0 +1,55 @@
+[package]
+name = "init_subselect"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "init_subselect"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+
+# Seam homes this crate installs INTO (it owns these initsplan.c functions):
+plan_small_seams = { path = "../plan_small_seams" }
+equivclass_ext_seams = { path = "../../path/equivclass_ext_seams" }
+joininfo_ext_seams = { path = "../../util/joininfo_ext_seams" }
+
+# Inward seams of ported owners this crate calls (installed at runtime):
+relnode_seams = { path = "../../util/relnode_seams" }
+equivclass_seams = { path = "../../path/equivclass_seams" }
+path_small_seams = { path = "../../path/path_small_seams" }
+pathnode_seams = { path = "../../util/pathnode_seams" }
+lsyscache_seams = { path = "../../../utils/cache/lsyscache_seams" }
+nodeFuncs_seams = { path = "../../../nodes/nodeFuncs_seams" }
+# createplan.c consumes SS_attach_initplans + resolve_cte_subplan/resolve_worktable_param
+# (subselect.c-owned); installed here.
+createplan_seams = { path = "../createplan_seams" }
+# setrefs.c consumes multiexpr_param_lookup (subselect.c populates multiexpr_params); installed here.
+setrefs_seams = { path = "../setrefs_seams" }
+
+# Outward seams for unported / not-acyclically-reachable callees this crate
+# declares + uses (loud-panic until installed):
+init_subselect_ext_seams = { path = "../init_subselect_ext_seams" }
+
+# Directly-depended ported owners (acyclic: nothing depends on this new crate):
+relnode = { path = "../../util/relnode" }
+equivclass = { path = "../../path/equivclass" }
+pathkeys = { path = "../../path/pathkeys" }
+joininfo = { path = "../../util/joininfo" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+rewrite_core = { path = "../../../rewrite/rewrite_core" }
+
+# subselect.c (SubPlan-building half) dependencies:
+paramassign = { path = "../../util/paramassign" }
+clauses = { path = "../../util/clauses" }
+vars = { path = "../../util/vars" }
+prepqual = { path = "../../prep/prepqual" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }

@@ -1,0 +1,55 @@
+[package]
+name = "view"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "view"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+rel = { path = "../../../_support/types/rel" }
+nodes = { path = "../../../_support/types/nodes" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_storage = { path = "../../../_support/types/types_storage" }
+
+# Error vocabulary.
+utils_error = { path = "../../utils/utils_error" }
+
+# This crate's seam crate (inward `define_view` + the outward
+# rewriteHandler `view_query_is_auto_updatable` seam it owns the declaration of).
+view_seams = { path = "../view_seams" }
+
+# The tcop/utility dispatcher's outward `define_view` seam — view.c is its
+# owner and installs it (marshals the `Node::ViewStmt` into `DefineView`).
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+
+# Direct deps (no cycle): node construction / inspection, the relcache/table
+# access layer, the rewriter's `DefineQueryRewrite`, parse analysis, the
+# temp-relation walker, the catalog/namespace lookups, dependency recording,
+# format-type / collation lookups, and `CommandCounterIncrement`.
+nodes_core = { path = "../../nodes/nodes_core" }
+common_relation = { path = "../../access/common/common_relation" }
+rewriteDefine = { path = "../../rewrite/rewriteDefine" }
+parser_analyze = { path = "../../parser/parser_analyze" }
+parser_relation = { path = "../../parser/parser_relation" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+pg_depend = { path = "../../catalog/pg_depend" }
+adt_format_type = { path = "../../utils/adt/adt_format_type" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+transam_xact = { path = "../../access/transam/transam_xact" }
+
+# Outward seam: `CheckTableNotInUse` (tablecmds.c) is declared on tablecmds' own
+# seam crate; the replace path calls it across the cycle.
+tablecmds_seams = { path = "../tablecmds_seams" }
+
+# `DefineRelation` (via the `define_relation` seam) and `AlterTableInternal`
+# (the CREATE OR REPLACE VIEW column-add / reloptions-replace legs). tablecmds
+# does not depend on view, so this is a direct (acyclic) edge.
+tablecmds = { path = "../tablecmds" }

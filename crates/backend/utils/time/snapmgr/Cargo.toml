@@ -1,0 +1,48 @@
+[package]
+name = "snapmgr"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "snapmgr"
+path = "src/lib.rs"
+
+[dependencies]
+utils_error = { path = "../../utils_error" }
+# fmgr builtin table registration (C: fmgr_builtins[]).
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+# Its own outward seams, installed from init_seams().
+snapmgr_seams = { path = "../snapmgr_seams" }
+# plancache/xact/standby/subtrans's split slice of snapmgr's active-snapshot +
+# TransactionXmin contract — same inward seams, installed from init_seams().
+snapmgr_pc_seams = { path = "../snapmgr_pc_seams" }
+# parallel.c's runtime-service snapshot slots (serialize/restore the leader's
+# snapshot into the parallel DSM) — snapmgr owns the bodies and the serialized
+# byte layout, so it installs these from init_seams().
+parallel_rt_seams = { path = "../../../access/transam/parallel_rt_seams" }
+# Transaction-state predicates snapmgr consults directly (acyclic: xact depends
+# on snapmgr-seams, not on snapmgr itself), plus GetCurrentCommandId.
+transam_xact = { path = "../../../access/transam/transam_xact" }
+# RelationInvalidatesSnapshotsOnly / RelationHasSysCache (ported, acyclic).
+cache_syscache = { path = "../../cache/cache_syscache" }
+# Per-backend identity globals (MyProcPid / MyDatabaseId).
+init_small_seams = { path = "../../init/init_small_seams" }
+# Not-yet-ported owners snapmgr calls across (panic until they land).
+subtrans_seams = { path = "../../../access/transam/subtrans_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
+lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
+fd_seams = { path = "../../../storage/file/fd_seams" }
+
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+# Owns the historic-snapshot tuplecid map types (`ReorderBufferTupleCidKey/Ent`,
+# `TupleCidHash`) — the real owned value behind C's `static HTAB *tuplecid_data`,
+# homed in `types-logical` so snapmgr can store it without depending on the
+# reorderbuffer crate (which depends on snapmgr, not the reverse).
+types_logical = { path = "../../../../_support/types/types_logical" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+types_storage = { path = "../../../../_support/types/types_storage" }

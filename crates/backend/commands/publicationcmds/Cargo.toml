@@ -1,0 +1,81 @@
+[package]
+name = "publicationcmds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "publicationcmds"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+utils_error = { path = "../../utils/utils_error" }
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_acl = { path = "../../../_support/types/types_acl" }
+cache = { path = "../../../_support/types/cache" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+datum = { path = "../../../_support/types/datum" }
+nodes = { path = "../../../_support/types/nodes" }
+rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_syscache = { path = "../../../_support/types/types_syscache" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+wal = { path = "../../../_support/types/wal" }
+relcache_entry = { path = "../../../_support/types/relcache_entry" }
+
+# Directly ported foundation crates (acyclic).
+table = { path = "../../access/table/table" }
+heaptuple = { path = "../../access/common/heaptuple" }
+scankey = { path = "../../access/common/scankey" }
+catalog_catalog = { path = "../../catalog/catalog_catalog" }
+indexing = { path = "../../catalog/indexing" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+dependency = { path = "../../catalog/dependency" }
+pg_shdepend = { path = "../../catalog/pg_shdepend" }
+pg_publication = { path = "../../catalog/pg_publication" }
+aclchk = { path = "../../catalog/aclchk" }
+define_seams = { path = "../define_seams" }
+nodes_core = { path = "../../nodes/nodes_core" }
+equalfuncs = { path = "../../nodes/equalfuncs" }
+parser_relation = { path = "../../parser/parser_relation" }
+small1_seams = { path = "../../parser/small1_seams" }
+clause = { path = "../../parser/clause" }
+parse_collate = { path = "../../parser/parse_collate" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+transam_xact = { path = "../../access/transam/transam_xact" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+inval = { path = "../../utils/cache/inval" }
+miscinit = { path = "../../utils/init/miscinit" }
+name = { path = "../../utils/adt/name" }
+adt_acl = { path = "../../utils/adt/adt_acl" }
+pgstrcasecmp = { path = "../../../port/pgstrcasecmp" }
+
+# Inward seams owned by this unit.
+publicationcmds_seams = { path = "../publicationcmds_seams" }
+
+# Cross-subsystem externals via their owners' -seams crates.
+genam_seams = { path = "../../access/index/genam_seams" }
+pg_publication_seams = { path = "../../catalog/pg_publication_seams" }
+pg_inherits_seams = { path = "../../catalog/pg_inherits_seams" }
+objectaccess_seams = { path = "../../catalog/objectaccess_seams" }
+event_trigger_seams = { path = "../event_trigger_seams" }
+dbcommands_seams = { path = "../dbcommands_seams" }
+tablespace_globals_seams = { path = "../tablespace_globals_seams" }
+nodeFuncs_seams = { path = "../../nodes/nodeFuncs_seams" }
+read_seams = { path = "../../nodes/read_seams" }
+parser_analyze_seams = { path = "../../parser/parser_analyze_seams" }
+rewritehandler_seams = { path = "../../rewrite/rewritehandler_seams" }
+acl_seams = { path = "../../utils/adt/acl_seams" }
+varlena_seams = { path = "../../utils/adt/varlena_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }

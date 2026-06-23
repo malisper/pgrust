@@ -1,0 +1,52 @@
+[package]
+name = "nodeModifyTable"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nodeModifyTable"
+path = "src/lib.rs"
+
+[dependencies]
+nodeModifyTable_seams = { path = "../nodeModifyTable_seams" }
+execMain_seams = { path = "../execMain_seams" }
+execJunk = { path = "../execJunk" }
+heaptuple = { path = "../../access/common/heaptuple" }
+heapam_handler_dml_seams = { path = "../../access/heap/heapam_handler_dml_seams" }
+execExpr_seams = { path = "../execExpr_seams" }
+execTuples_seams = { path = "../execTuples_seams" }
+datum_seams = { path = "../../utils/adt/datum_seams" }
+execUtils_seams = { path = "../execUtils_seams" }
+execProcnode_seams = { path = "../execProcnode_seams" }
+execAmi_seams = { path = "../execAmi_seams" }
+execReplication_seams = { path = "../execReplication_seams" }
+execPartition_seams = { path = "../execPartition_seams" }
+instrument_seams = { path = "../instrument_seams" }
+trigger_seams = { path = "../../commands/trigger_seams" }
+indexing_seams = { path = "../../catalog/indexing_seams" }
+execIndexing_seams = { path = "../execIndexing_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+table_tableam = { path = "../../access/table/table_tableam" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }
+nodeFuncs_seams = { path = "../../nodes/nodeFuncs_seams" }
+rewritehandler_seams = { path = "../../rewrite/rewritehandler_seams" }
+var_seams = { path = "../../optimizer/util/var_seams" }
+partition_seams = { path = "../../catalog/partition_seams" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+next_seams = { path = "../../access/common/next_seams" }
+rewritemanip_seams = { path = "../../rewrite/rewritemanip_seams" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+datum = { path = "../../../_support/types/datum" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_tableam = { path = "../../../_support/types/types_tableam" }
+rel = { path = "../../../_support/types/rel" }
+nodes = { path = "../../../_support/types/nodes" }
+snapshot = { path = "../../../_support/types/snapshot" }
+mcx = { path = "../../../_support/mcx" }

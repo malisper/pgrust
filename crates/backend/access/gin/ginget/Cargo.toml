@@ -1,0 +1,46 @@
+[package]
+name = "ginget"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ginget"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+gin = { path = "../../../../_support/types/gin" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+tidbitmap = { path = "../../../../_support/types/tidbitmap" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+
+# owned engine layers (direct deps — acyclic)
+ginutil = { path = "../ginutil" }
+ginscan = { path = "../ginscan" }
+ginbtree = { path = "../ginbtree" }
+gindatapage = { path = "../gindatapage" }
+ginentrypage = { path = "../ginentrypage" }
+core_probe = { path = "../core_probe" }
+tupdesc = { path = "../../common/tupdesc" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+page = { path = "../../../storage/page" }
+prng = { path = "../../../../_support/pg/prng" }
+
+# cross-owner seam crates
+ginutil_seams = { path = "../ginutil_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+utils_error = { path = "../../../utils/utils_error" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+
+[dev-dependencies]

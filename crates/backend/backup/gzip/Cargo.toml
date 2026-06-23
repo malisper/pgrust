@@ -1,0 +1,18 @@
+[package]
+name = "gzip"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "gzip"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+compression = { path = "../../../_support/types/compression" }
+utils_error = { path = "../../utils/utils_error" }
+mcx = { path = "../../../_support/mcx" }
+sink = { path = "../sink" }
+gzip_seams = { path = "../gzip_seams" }

@@ -1,0 +1,51 @@
+[package]
+name = "snapbuild"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "snapbuild"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+types_logical = { path = "../../../../_support/types/types_logical" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+xlog_records = { path = "../../../../_support/types/xlog_records" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+nodes = { path = "../../../../_support/types/nodes" }
+mcx = { path = "../../../../_support/mcx" }
+
+# own inward seams (two seam crates declare snapbuild's inward seams)
+logical_snapbuild_seams = { path = "../logical_snapbuild_seams" }
+replication_snapbuild_seams = { path = "../../replication_snapbuild_seams" }
+
+# transaction-id helpers (direct deps, no cycle)
+transam = { path = "../../../access/transam/transam" }
+varsup = { path = "../../../access/transam/varsup" }
+
+# error reporting
+utils_error = { path = "../../../utils/utils_error" }
+
+# CRC32C for the on-disk snapshot serialization
+crc32c_seams = { path = "../../../../port/crc32c_seams" }
+
+# outward owner seams
+reorderbuffer_seams = { path = "../reorderbuffer_seams" }
+logical_seams = { path = "../logical_seams" }
+slot_seams = { path = "../../slot_seams" }
+snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+origin_extern_seams = { path = "../origin_extern_seams" }
+lmgr_seams = { path = "../../../storage/lmgr/lmgr_seams" }
+lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
+fd_seams = { path = "../../../storage/file/fd_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+resowner_seams = { path = "../../../utils/resowner/resowner_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }

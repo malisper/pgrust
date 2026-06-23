@@ -1,0 +1,38 @@
+[package]
+name = "proclang"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "proclang"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+nodes = { path = "../../../_support/types/nodes" }
+types_storage = { path = "../../../_support/types/types_storage" }
+
+# Catalog write + dependency recording (direct deps, no cycle: proclang is a
+# leaf command that nothing in the catalog layer depends on).
+table = { path = "../../access/table/table" }
+dependency = { path = "../../catalog/dependency" }
+pg_depend = { path = "../../catalog/pg_depend" }
+pg_shdepend = { path = "../../catalog/pg_shdepend" }
+
+# Own seam crate (installed by init_seams).
+proclang_seams = { path = "../proclang_seams" }
+
+# Cross-cycle externals, consumed through the owners' seam crates.
+indexing_seams = { path = "../../catalog/indexing_seams" }
+objectaccess_seams = { path = "../../catalog/objectaccess_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+superuser_seams = { path = "../../utils/misc/superuser_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+parse_func_seams = { path = "../../parser/parse_func_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }

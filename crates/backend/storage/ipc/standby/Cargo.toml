@@ -1,0 +1,45 @@
+[package]
+name = "standby"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "standby"
+path = "src/lib.rs"
+
+[dependencies]
+transam_seams = { path = "../../../access/transam/transam_seams" }
+twophase_seams = { path = "../../../access/transam/twophase_seams" }
+varsup_seams = { path = "../../../access/transam/varsup_seams" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+xloginsert_seams = { path = "../../../access/transam/xloginsert_seams" }
+xlogrecovery_seams = { path = "../../../access/transam/xlogrecovery_seams" }
+xlogutils_seams = { path = "../../../access/transam/xlogutils_seams" }
+slot_seams = { path = "../../../replication/slot_seams" }
+bufmgr_seams = { path = "../../buffer/bufmgr_seams" }
+procarray_seams = { path = "../procarray_seams" }
+sinval_seams = { path = "../sinval_seams" }
+standby_seams = { path = "../standby_seams" }
+lock_seams = { path = "../../lmgr/lock_seams" }
+lwlock_seams = { path = "../../lmgr/lwlock_seams" }
+lmgr_proc_seams = { path = "../../lmgr/lmgr_proc_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
+inval_seams = { path = "../../../utils/cache/inval_seams" }
+utils_error = { path = "../../../utils/utils_error" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+ps_status_seams = { path = "../../../utils/misc/ps_status_seams" }
+timeout_seams = { path = "../../../utils/misc/timeout_seams" }
+snapmgr_pc_seams = { path = "../../../utils/time/snapmgr_pc_seams" }
+mcx = { path = "../../../../_support/mcx" }
+pgsleep_seams = { path = "../../../../port/pgsleep_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_timeout = { path = "../../../../_support/types/types_timeout" }
+wal = { path = "../../../../_support/types/wal" }

@@ -1,0 +1,83 @@
+[package]
+name = "extension"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "extension"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+functioncmds_seams = { path = "../functioncmds_seams" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+cache = { path = "../../../_support/types/cache" }
+datum = { path = "../../../_support/types/datum" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_scan = { path = "../../../_support/types/types_scan" }
+rel = { path = "../../../_support/types/rel" }
+types_storage = { path = "../../../_support/types/types_storage" }
+nodes = { path = "../../../_support/types/nodes" }
+
+utils_error = { path = "../../utils/utils_error" }
+scalar_seams = { path = "../../utils/adt/scalar_seams" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+guc_file = { path = "../../utils/misc/guc_file" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+init_small = { path = "../../utils/init/init_small" }
+scankey = { path = "../../access/common/scankey" }
+indexing = { path = "../../catalog/indexing" }
+
+heaptuple = { path = "../../access/common/heaptuple" }
+catalog_catalog = { path = "../../catalog/catalog_catalog" }
+pg_shdepend = { path = "../../catalog/pg_shdepend" }
+pg_shdepend_seams = { path = "../../catalog/pg_shdepend_seams" }
+name = { path = "../../utils/adt/name" }
+arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+schemacmds = { path = "../schemacmds" }
+comment = { path = "../comment" }
+alter = { path = "../alter" }
+miscinit = { path = "../../utils/init/miscinit" }
+types_acl = { path = "../../../_support/types/types_acl" }
+relcache_entry = { path = "../../../_support/types/relcache_entry" }
+
+extension_seams = { path = "../extension_seams" }
+genam_seams = { path = "../../access/index/genam_seams" }
+table_seams = { path = "../../access/table/table_seams" }
+fd_seams = { path = "../../storage/file/fd_seams" }
+varlena_seams = { path = "../../utils/adt/varlena_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+tablespace_globals_seams = { path = "../tablespace_globals_seams" }
+dependency_seams = { path = "../../catalog/dependency_seams" }
+pg_depend_seams = { path = "../../catalog/pg_depend_seams" }
+objectaccess_seams = { path = "../../catalog/objectaccess_seams" }
+objectaddress_seams = { path = "../../catalog/objectaddress_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+format_type_seams = { path = "../../utils/adt/format_type_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+common_path_seams = { path = "../../../common/common_path_seams" }
+extra_encnames_fgram = { path = "../../../common/extra_encnames_fgram" }
+
+# Extension install/update SCRIPT-EXECUTION pipeline (extension.c 870-1458 +
+# ApplyExtensionUpdates 3554-3702): parser/analyzer/planner/executor/utility
+# drive + the security-context/GUC switch + text substitutions.
+postgres = { path = "../../tcop/postgres" }
+execMain = { path = "../../executor/execMain" }
+dest_seams = { path = "../../tcop/dest_seams" }
+utility_seams = { path = "../../tcop/utility_seams" }
+snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }
+misc_guc = { path = "../../utils/misc/misc_guc" }
+superuser_seams = { path = "../../utils/misc/superuser_seams" }
+ruleutils = { path = "../../utils/adt/ruleutils" }
+mbutils = { path = "../../utils/mb/mbutils" }
+types_guc = { path = "../../../_support/types/types_guc" }
+regex = { path = "../../../_support/types/regex" }
+types_dest = { path = "../../../_support/types/types_dest" }
+portal = { path = "../../../_support/types/portal" }

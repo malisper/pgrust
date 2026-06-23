@@ -1,0 +1,31 @@
+[package]
+name = "pgstatfuncs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgstatfuncs"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+activity_pgstat = { path = "../../activity/activity_pgstat" }
+pgstat_slru = { path = "../../activity/pgstat_slru" }
+pgstat_replslot = { path = "../../activity/pgstat_replslot" }
+xlogprefetcher = { path = "../../../access/transam/xlogprefetcher" }
+catalog_seams = { path = "../../../catalog/catalog_seams" }
+init_small_seams = { path = "../../init/init_small_seams" }
+status = { path = "../../activity/status" }
+pgstat_backend = { path = "../../activity/pgstat_backend" }
+pgstat_subscription = { path = "../../activity/pgstat_subscription" }
+funcapi_seams = { path = "../../fmgr/funcapi_seams" }
+varlena_seams = { path = "../varlena_seams" }
+replication = { path = "../../../../_support/types/replication" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+mcx = { path = "../../../../_support/mcx" }

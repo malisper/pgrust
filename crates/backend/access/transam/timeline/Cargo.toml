@@ -1,0 +1,24 @@
+[package]
+name = "timeline"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "timeline"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+utils_error = { path = "../../../utils/utils_error" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+wal = { path = "../../../../_support/types/wal" }
+
+timeline_seams = { path = "../timeline_seams" }
+xlogarchive_seams = { path = "../xlogarchive_seams" }
+fd_seams = { path = "../../../storage/file/fd_seams" }
+file_seams = { path = "../../../storage/file/file_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+libc = "0.2"

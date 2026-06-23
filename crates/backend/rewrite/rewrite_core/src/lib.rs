@@ -1,0 +1,298 @@
+//! Port of `src/backend/rewrite/rewriteManip.c` — the `Var`-manipulation engine
+//! the rewriter and the planner's `prepjointree`/`subselect` depend on.
+//!
+//! # Scope
+//!
+//! The full rewriteManip.c surface, over the canonical `Expr` / `Query<'mcx>`
+//! model and the central `Node`-level tree-walker engine
+//! ([`nodes_core::node_walker`]):
+//!
+//! * [`walkers`] — the read-only predicates: `contain_aggs_of_level`,
+//!   `locate_agg_of_level`, `contain_windowfuncs`, `locate_windowfunc`,
+//!   `checkExprHasSubLink`, `contains_multiexpr_param`, `rangeTableEntry_used`.
+//! * [`offset`] — `OffsetVarNodes` (+ `offset_relid_set`) and
+//!   `CombineRangeTables` analogue.
+//! * [`change`] — `ChangeVarNodes` / `ChangeVarNodesExtended` /
+//!   `ChangeVarNodesWalkExpression` and `adjust_relid_set`.
+//! * [`increment`] — `IncrementVarSublevelsUp` (+ `_rtable`) and
+//!   `SetVarReturningType`.
+//! * [`nulling`] — `add_nulling_relids`, `remove_nulling_relids`.
+//! * [`replace`] — `replace_rte_variables` (+ mutator), `map_variable_attnos`,
+//!   `ReplaceVarsFromTargetList` (+ callback), `ReplaceVarFromTargetList`.
+//! * [`relids`] — the inline `ExprRelids` word-vector set algebra.
+//!
+//! # Rule-action manipulation primitives
+//!
+//! [`manip_rule`] holds the rule-action node-manipulation helpers the RIR / DML
+//! rule engine (`rewriteHandler.c`, sibling lane) consumes: `AddQual`,
+//! `AddInvertedQual`, `CombineRangeTables` (rewriteManip.c) and the one
+//! jointree-list helper `adjustJoinTreeList` (rewriteHandler.c). They are
+//! defined over the owned `Query<'mcx>` / `Expr` model.
+//!
+//! `getInsertSelectQuery` lives in [`insert_select`]; its C `Query
+//! ***subquery_ptr` out-parameter is always `NULL` at the rewriteDefine.c call
+//! sites, so the owned form returns a plain borrow.
+//!
+//! `CombineRangeTables` (rewriteManip.c:347) is given its faithful home here.
+//! `backend-optimizer-plan-subselect-pullup` still carries a private
+//! `combine_range_tables` copy (a `&mut Query`-shaped specialization); folding it
+//! onto this one is a follow-up that touches that audited sibling crate.
+//!
+//! `contain_vars_of_level` is an `optimizer/util/var.c` function, already
+//! faithfully ported and exported as
+//! `vars::var::contain_vars_of_level`; it is intentionally
+//! NOT duplicated here (the rule engine calls the var.c owner directly).
+//!
+//! # The C "cheat and modify in-place" mutators
+//!
+//! Several C functions (`OffsetVarNodes`/`ChangeVarNodes`/
+//! `IncrementVarSublevelsUp`/`SetVarReturningType`) document that they "cheat
+//! and modify the nodes in-place" — the caller copies the tree first. This is
+//! exactly the repo's mutator model (`&mut Node -> bool`), so they map directly
+//! onto the `*_mut` walker / `query_tree_mutator` family. The copy-mutators
+//! (`add_nulling_relids`/`remove_nulling_relids`/`replace_rte_variables`/
+//! `map_variable_attnos`) return a fresh node in C; over the owned in-place tree
+//! that is the same as editing/overwriting the node through `*node`.
+//!
+//! # Installed seams
+//!
+//! `init_seams()` installs the three rewriteManip.c-owned seams declared in
+//! `backend-rewrite-rewritemanip-seams` and consumed by the parser
+//! (`parse_agg`/`parse_clause`): `contain_windowfuncs`, `locate_windowfunc`,
+//! `locate_agg_of_level`. The fourth declared seam, `flatten_join_alias_vars`,
+//! lives in `optimizer/util/var.c` (NOT rewriteManip.c) and is owned/installed
+//! by `backend-optimizer-util-vars` (now ported there); it is intentionally not
+//! installed here.
+
+#![allow(non_snake_case)]
+#![no_std]
+
+extern crate alloc;
+
+pub mod change;
+pub mod increment;
+pub mod insert_select;
+pub mod manip_rule;
+pub mod nulling;
+pub mod offset;
+pub mod relids;
+pub mod replace;
+pub mod support;
+pub mod walkers;
+
+#[cfg(test)]
+mod tests;
+
+pub use change::{
+    adjust_relid_set, ChangeVarNodes, ChangeVarNodesContext, ChangeVarNodesExtended,
+    ChangeVarNodesWalkExpression,
+};
+pub use increment::{IncrementVarSublevelsUp, IncrementVarSublevelsUp_rtable, SetVarReturningType};
+pub use insert_select::{getInsertSelectQuery, getInsertSelectQueryIndex};
+pub use manip_rule::{adjustJoinTreeList, AddInvertedQual, AddQual, CombineRangeTables};
+pub use nulling::{add_nulling_relids, remove_nulling_relids, remove_nulling_relids_in_query};
+pub use offset::OffsetVarNodes;
+pub use replace::{
+    map_variable_attnos, map_variable_attnos_expr_list, replace_rte_variables,
+    ReplaceVarFromTargetList, ReplaceVarsFromTargetList, ReplaceVarsNoMatchOption,
+};
+pub use support::{get_rewrite_oid, IsDefinedRewriteRule, SetRelationRuleStatus};
+pub use walkers::{
+    checkExprHasSubLink, contain_aggs_of_level, contain_windowfuncs, contains_multiexpr_param,
+    locate_agg_of_level, locate_windowfunc, rangeTableEntry_used,
+};
+
+/// Install the rewriteManip.c- and rewriteSupport.c-owned seams.
+pub fn init_seams() {
+    use rewritemanip_seams as s;
+    use mcx::MemoryContext;
+    s::contain_aggs_of_level::set(|node, levelsup| walkers::contain_aggs_of_level(node, levelsup));
+    s::contain_windowfuncs::set(|node| walkers::contain_windowfuncs(node));
+    s::check_expr_has_sub_link::set(|node| walkers::checkExprHasSubLink(node));
+    s::locate_windowfunc::set(|node| walkers::locate_windowfunc(node));
+    s::locate_agg_of_level::set(|node, levelsup| walkers::locate_agg_of_level(node, levelsup));
+
+    s::map_variable_attnos_expr_list::set(|mcx, exprs, attmap| {
+        replace::map_variable_attnos_expr_list(mcx, exprs, attmap)
+    });
+
+    s::map_variable_attnos_expr_list_varno::set(
+        |mcx, exprs, target_varno, attmap, to_rowtype| {
+            replace::map_variable_attnos_expr_list_varno(
+                mcx,
+                exprs,
+                target_varno,
+                attmap,
+                to_rowtype,
+            )
+        },
+    );
+
+    s::map_variable_attnos_targetentry_list::set(
+        |mcx, tlist, target_varno, attmap, to_rowtype| {
+            replace::map_variable_attnos_targetentry_list(
+                mcx,
+                tlist,
+                target_varno,
+                attmap,
+                to_rowtype,
+            )
+        },
+    );
+
+    s::map_variable_attnos_node::set(
+        |mcx, mut node, target_varno, sublevels_up, attmap, to_rowtype| {
+            let mut found_whole_row = false;
+            replace::map_variable_attnos(
+                &mut *node,
+                target_varno,
+                sublevels_up,
+                attmap,
+                to_rowtype,
+                &mut found_whole_row,
+                mcx,
+            )?;
+            Ok((node, found_whole_row))
+        },
+    );
+
+    // rewriteSupport.c
+    rewritesupport_seams::get_rewrite_oid::set(support::get_rewrite_oid);
+    rewritesupport_seams::SetRelationRuleStatus::set(support::SetRelationRuleStatus);
+    // The C `IsDefinedRewriteRule(Oid, char*)` is infallible and allocates in
+    // `CurrentMemoryContext`; the owner body threads an `Mcx` into the catcache
+    // existence probe, so wrap it in a scratch context (the result is a bare
+    // bool — nothing is returned through the arena).
+    rewritesupport_seams::IsDefinedRewriteRule::set(|owning_rel, rule_name| {
+        let ctx = MemoryContext::new("IsDefinedRewriteRule");
+        support::IsDefinedRewriteRule(ctx.mcx(), owning_rel, rule_name)
+    });
+
+    // `ChangeVarNodes((Node *) exprs, 1, varno, 0)` (rewriteManip.c) — consumed by
+    // `optimizer/util/plancat.c`'s index-expression / predicate / constraint-
+    // expression / partition-expression re-stamping. The arena-resident node list
+    // is a `&[NodeId]`; each handle resolves to a lifetime-free `Expr`, which we
+    // wrap as a `Node::Expr` for the standalone in-place walker (mirroring the C
+    // in-place `ChangeVarNodes_walker` over `(Node *) exprs`) and store back. The
+    // handles are unchanged (in-place mutation), so the same `Vec<NodeId>` is
+    // returned.
+    plancat_ext_seams::change_var_nodes::set(
+        |mcx, root: &mut pathnodes::PlannerInfo, nodes, rt_index, new_index| {
+            for &id in nodes {
+                // Deep-copy the arena node into the caller-provided run arena `mcx`,
+                // re-stamp its Var refs in place, then re-intern into the
+                // `node_arena` `'static` handle-space. The clone lives in `mcx`
+                // (which owns the planner run), so the arena-intern erasure is sound
+                // (no function-local scratch escape).
+                let cloned = root
+                    .node(id)
+                    .clone_in(mcx)
+                    .expect("change_var_nodes: clone_in failed (OOM)");
+                let mut node = nodes::nodes::Node::mk_expr(mcx, cloned)
+                    .expect("change_var_nodes: opaque Node alloc failed (OOM)");
+                change::ChangeVarNodes(&mut node, rt_index, new_index, 0, mcx);
+                let walked = match node.into_expr() {
+                    Some(e) => e,
+                    // ChangeVarNodes never changes the top-level node kind for an
+                    // Expr input.
+                    None => unreachable!("ChangeVarNodes returned a non-Expr for an Expr input"),
+                };
+                *root.node_mut(id) = walked.erase_lifetime();
+            }
+            nodes.to_vec()
+        },
+    );
+
+    // `add_nulling_relids((Node *) quals, target, added)` (rewriteManip.c) over a
+    // single owned-arena `Expr` conjunct — consumed by `deconstruct_distribute_
+    // oj_quals` in init-subselect. The owner walker works over `&mut Node`; wrap
+    // the input `Expr` as `Node::Expr`, run the in-place mutator, and unwrap. The
+    // `Relids` carriers (pathnodes `Option<Box<Bitmapset>>`) map word-for-word to
+    // the `ExprRelids` the walker reads; `target = None` is the C NULL "modify all
+    // level-zero Vars" case.
+    init_subselect_ext_seams::add_nulling_relids_expr::set(
+        |mcx, expr, target, added| {
+            let target_er = target.map(|b| nodes::primnodes::ExprRelids { words: b.words });
+            let added_er = added
+                .map(|b| nodes::primnodes::ExprRelids { words: b.words })
+                .unwrap_or_default();
+            // The walker consumes and rebuilds the node tree into the caller-
+            // provided arena `mcx`; the result is `'mcx`-branded (no scratch escape).
+            let mut node = nodes::nodes::Node::mk_expr(mcx, expr)
+                .expect("add_nulling_relids: opaque Node alloc failed (OOM)");
+            nulling::add_nulling_relids(&mut node, target_er.as_ref(), &added_er, mcx);
+            match node.into_expr() {
+                Some(e) => e,
+                None => unreachable!("add_nulling_relids returned a non-Expr for an Expr input"),
+            }
+        },
+    );
+
+    // `IncrementVarSublevelsUp((Node *) expr, delta, min)` (rewriteManip.c) over a
+    // single owned-arena `Expr` — consumed by `extract_lateral_references` in
+    // init-subselect for upper-level LATERAL PlaceHolderVars. Same `&mut Node`
+    // wrap/unwrap as above; the walker is fallible (catalog lookups), propagated.
+    init_subselect_ext_seams::increment_var_sublevels_up_expr::set(
+        |mcx, expr, delta_sublevels_up, min_sublevels_up| {
+            // The walker consumes and rebuilds the node tree into the caller-
+            // provided arena `mcx`; the result is `'mcx`-branded (no scratch escape).
+            let mut node = nodes::nodes::Node::mk_expr(mcx, expr)?;
+            increment::IncrementVarSublevelsUp(&mut node, delta_sublevels_up, min_sublevels_up, mcx)?;
+            Ok(match node.into_expr() {
+                Some(e) => e,
+                None => unreachable!(
+                    "IncrementVarSublevelsUp returned a non-Expr for an Expr input"
+                ),
+            })
+        },
+    );
+
+    // `remove_nulling_relids((Node *) expr, removable_relids, except_relids)`
+    // (nodeFuncs.c) over a single owned-arena `Expr` — consumed by
+    // make_pathkeys_for_sortclauses_extended when stripping the group RTE index.
+    // Same `&mut Node` wrap/unwrap as above; `except_relids == None` is the C NULL.
+    nodeFuncs_seams::remove_nulling_relids::set(
+        |mcx, expr, removable_relids, except_relids| {
+            let removable_er = removable_relids
+                .as_ref()
+                .map(|b| nodes::primnodes::ExprRelids { words: b.words.clone() })
+                .unwrap_or_default();
+            let except_er = except_relids
+                .as_ref()
+                .map(|b| nodes::primnodes::ExprRelids { words: b.words.clone() })
+                .unwrap_or_default();
+            // The walker consumes and rebuilds the node tree into the caller-
+            // provided arena `mcx`; the result is `'mcx`-branded (no scratch escape).
+            let mut node = nodes::nodes::Node::mk_expr(mcx, expr)
+                .expect("remove_nulling_relids: opaque Node alloc failed (OOM)");
+            nulling::remove_nulling_relids(&mut node, &removable_er, &except_er, mcx);
+            match node.into_expr() {
+                Some(e) => e,
+                None => unreachable!("remove_nulling_relids returned a non-Expr for an Expr input"),
+            }
+        },
+    );
+
+    // `remove_nulling_relids((Node *) expr, removable, except)` (var.c) reached
+    // by-value from equivclass.c and other planner sites through the
+    // equivclass-ext consumer seam. Same wrap/unwrap; the `Relids` (Bitmapset)
+    // sets convert to `ExprRelids` by their word storage.
+    equivclass_ext_seams::remove_nulling_relids::set(
+        |mcx, expr, removable, except| {
+            let to_er = |r: &pathnodes::Relids| nodes::primnodes::ExprRelids {
+                words: r.as_ref().map(|b| b.words.clone()).unwrap_or_default(),
+            };
+            let removable_er = to_er(&removable);
+            let except_er = to_er(&except);
+            // The walker consumes and rebuilds the node tree into the caller-
+            // provided arena `mcx`; the result is `'mcx`-branded (no scratch escape).
+            let mut node = nodes::nodes::Node::mk_expr(mcx, expr)
+                .expect("remove_nulling_relids: opaque Node alloc failed (OOM)");
+            nulling::remove_nulling_relids(&mut node, &removable_er, &except_er, mcx);
+            match node.into_expr() {
+                Some(e) => e,
+                None => unreachable!("remove_nulling_relids returned a non-Expr for an Expr input"),
+            }
+        },
+    );
+}

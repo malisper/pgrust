@@ -1,0 +1,31 @@
+[package]
+name = "plan_small"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "plan_small"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+
+# Real, already-landed callees (direct deps — no cycle).
+parallel_rt_seams = { path = "../../../access/transam/parallel_rt_seams" }
+relnode = { path = "../../util/relnode" }
+pathnode = { path = "../../util/pathnode" }
+clauses = { path = "../../util/clauses" }
+joininfo = { path = "../../util/joininfo" }
+equivclass = { path = "../../path/equivclass" }
+allpaths = { path = "../../path/allpaths" }
+rte_seams = { path = "../../rte_seams" }
+
+# Unported callees reached through their owners' seam crates (loud-panic until owner lands).
+plan_small_seams = { path = "../plan_small_seams" }
+init_subselect_seams = { path = "../init_subselect_seams" }
+appendinfo_seams = { path = "../../util/appendinfo_seams" }

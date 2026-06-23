@@ -1,0 +1,29 @@
+[package]
+name = "varchar"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "varchar"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+types_sortsupport = { path = "../../../../_support/types/types_sortsupport" }
+hashfn = { path = "../../../../common/hashfn" }
+varlena = { path = "../varlena" }
+varlena_seams = { path = "../varlena_seams" }
+arrayutils = { path = "../arrayutils" }
+mbutils_seams = { path = "../../mb/mbutils_seams" }
+pg_locale_seams = { path = "../pg_locale_seams" }
+pqformat = { path = "../../../libpq/pqformat" }
+nodes = { path = "../../../../_support/types/nodes" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+clauses = { path = "../../../optimizer/util/clauses" }

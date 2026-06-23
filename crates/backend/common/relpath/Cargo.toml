@@ -1,0 +1,18 @@
+[package]
+name = "relpath"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "relpath"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_error = { path = "../../../_support/types/types_error" }
+backend_common_relpath_seams = { path = "../backend_common_relpath_seams" }
+common_relpath_seams = { path = "../../../common/common_relpath_seams" }

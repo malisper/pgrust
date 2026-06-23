@@ -1,0 +1,61 @@
+[package]
+name = "cache_syscache"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "cache_syscache"
+path = "src/lib.rs"
+
+[dependencies]
+trace = { path = "../../../../_support/pgrust/trace" }
+functioncmds_seams = { path = "../../../commands/functioncmds_seams" }
+pg_proc_seams = { path = "../../../catalog/pg_proc_seams" }
+funccache_seams = { path = "../funccache_seams" }
+types_funccache = { path = "../../../../_support/types/types_funccache" }
+oid = { path = "../../adt/oid" }
+mcx = { path = "../../../../_support/mcx" }
+cache = { path = "../../../../_support/types/cache" }
+types_namespace = { path = "../../../../_support/types/types_namespace" }
+types_acl = { path = "../../../../_support/types/types_acl" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+hash = { path = "../../../../_support/types/hash" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_format_type = { path = "../../../../_support/types/types_format_type" }
+types_selfuncs = { path = "../../../../_support/types/types_selfuncs" }
+statistics = { path = "../../../../_support/types/statistics" }
+heaptuple = { path = "../../../access/common/heaptuple" }
+detoast_seams = { path = "../../../access/common/detoast_seams" }
+statistics_core_seams = { path = "../../../statistics/statistics_core_seams" }
+rel = { path = "../../../../_support/types/rel" }
+lock_seams = { path = "../../../storage/lmgr/lock_seams" }
+catcache_seams = { path = "../catcache_seams" }
+inval_seams = { path = "../inval_seams" }
+lsyscache_seams = { path = "../lsyscache_seams" }
+clauses_seams = { path = "../../../optimizer/util/clauses_seams" }
+vacuum_seams = { path = "../../../commands/vacuum_seams" }
+syscache_seams = { path = "../syscache_seams" }
+varlena_seams = { path = "../../adt/varlena_seams" }
+prepagg_seams = { path = "../../../optimizer/prep/prepagg_seams" }
+parse_agg_seams = { path = "../../../parser/parse_agg_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+arrayfuncs_seams = { path = "../../adt/arrayfuncs_seams" }
+amutils_seams = { path = "../../adt/amutils_seams" }
+guc_seams = { path = "../../misc/guc_seams" }
+utils_error = { path = "../../utils_error" }
+read_seams = { path = "../../../nodes/read_seams" }
+types_catalog = { path = "../../../../_support/types/types_catalog" }
+types_partition = { path = "../../../../_support/types/types_partition" }
+types_cluster = { path = "../../../../_support/types/types_cluster" }
+nodes = { path = "../../../../_support/types/nodes" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+types_plancache = { path = "../../../../_support/types/types_plancache" }
+syscache_pc_seams = { path = "../syscache_pc_seams" }
+init_small_seams = { path = "../../init/init_small_seams" }
+pg_locale_catalog_seams = { path = "../../adt/pg_locale_catalog_seams" }
+collationcmds_seams = { path = "../../../commands/collationcmds_seams" }
+dbcommands_seams = { path = "../../../commands/dbcommands_seams" }

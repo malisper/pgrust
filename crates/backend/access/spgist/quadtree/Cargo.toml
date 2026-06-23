@@ -1,0 +1,25 @@
+[package]
+name = "quadtree"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "quadtree"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+spgist = { path = "../../../../_support/types/spgist" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+mcx = { path = "../../../../_support/mcx" }
+geo_ops_seams = { path = "../../../utils/adt/geo_ops_seams" }
+spg_proc_seams = { path = "../spg_proc_seams" }
+spg_core_seams = { path = "../spg_core_seams" }
+kdtree = { path = "../kdtree" }
+text = { path = "../text" }
+network_spgist = { path = "../../../utils/adt/network_spgist" }
+rangetypes_spgist = { path = "../../../utils/adt/rangetypes_spgist" }
+geo_spgist_only = { path = "../../../utils/adt/geo_spgist_only" }

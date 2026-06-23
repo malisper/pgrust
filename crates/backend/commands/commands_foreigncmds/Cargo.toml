@@ -1,0 +1,44 @@
+[package]
+name = "commands_foreigncmds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "commands_foreigncmds"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+foreigncmds_seams = { path = "../foreigncmds_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_acl = { path = "../../../_support/types/types_acl" }
+nodes = { path = "../../../_support/types/nodes" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_foreigncmds = { path = "../../../_support/types/types_foreigncmds" }
+utils_error = { path = "../../utils/utils_error" }
+
+# Seam crates for the owners foreigncmds calls into (each panics until its
+# owner lands).
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+acl_seams = { path = "../../utils/adt/acl_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
+objectaccess_seams = { path = "../../catalog/objectaccess_seams" }
+pg_depend_seams = { path = "../../catalog/pg_depend_seams" }
+pg_shdepend_seams = { path = "../../catalog/pg_shdepend_seams" }
+dependency_seams = { path = "../../catalog/dependency_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+parse_func_seams = { path = "../../parser/parse_func_seams" }
+small1_seams = { path = "../../parser/small1_seams" }
+parse_type_seams = { path = "../../parser/parse_type_seams" }
+foreign_seams = { path = "../../foreign/foreign_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+utility_fc_seams = { path = "../../tcop/utility_fc_seams" }
+
+# ProcessUtilitySlow out-seams: foreigncmds installs the FDW/server/user-mapping/
+# import-foreign-schema dispatch arms (rich types_nodes -> flat types_foreigncmds
+# decode adapters) here.
+utility_out_seams = { path = "../../tcop/utility_out_seams" }

@@ -1,0 +1,17 @@
+[package]
+name = "saslprep"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "saslprep"
+path = "src/lib.rs"
+
+[dependencies]
+scram_seams = { path = "../../backend/libpq/auth/scram_seams" }
+unicode_norm_bitfields = { path = "../unicode_norm_bitfields" }
+common_wchar = { path = "../common_wchar" }
+mcx = { path = "../../_support/mcx" }
+types_error = { path = "../../_support/types/types_error" }
+types_wchar = { path = "../../_support/types/types_wchar" }

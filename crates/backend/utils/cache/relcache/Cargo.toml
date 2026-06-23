@@ -1,0 +1,166 @@
+[package]
+name = "relcache"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "relcache"
+path = "src/lib.rs"
+
+[dependencies]
+trace = { path = "../../../../_support/pgrust/trace" }
+# Inward seam crate this unit owns + installs.
+relcache_seams = { path = "../relcache_seams" }
+# `top_memory_context()` — `CacheMemoryContext` is created as a child of
+# `TopMemoryContext` (CreateCacheMemoryContext) so it is reachable from the live
+# `MemoryContext` tree pg_get_backend_memory_contexts() walks.
+mcxt_seams = { path = "../../mmgr/mcxt_seams" }
+# Lazy-vacuum driver's relcache-field read seams (RelationGetNamespace /
+# RelationGetRelationName / relisshared / reltuples / RelationNeedsWAL /
+# RelationUsesLocalBuffers / RelationGetNumberOfBlocks) home in vacuumlazy-seams
+# (re-signed off `&Relation<'mcx>`); the relcache is their real owner.
+vacuumlazy_seams = { path = "../../../access/heap/vacuumlazy_seams" }
+# hio.c's RelationGetTargetPageFreeSpace (heap insertion target-page free-space
+# lookup) reads the relcache entry's rd_options fillfactor; the relcache is its
+# real owner. Re-signed off the relation OID.
+hio_seams = { path = "../../../access/heap/hio_seams" }
+
+# freespace.c FSM seams (&Relation-keyed); relcache projects a transient read
+# handle off the owned entry to bridge the OID-keyed hio-seam to the FSM owner.
+freespace_seams = { path = "../../../storage/freespace/freespace_seams" }
+
+# tablecmds.c's CheckTableNotInUse / truncate read rel.h fields
+# (rd_isnailed / rd_refcnt / rd_createSubid) declared on `&Relation` in
+# tablecmds-seams; the relcache is their real owner (resolves off the owned
+# entry by OID).
+tablecmds_seams = { path = "../../../commands/tablecmds_seams" }
+
+# matview.c's RefreshMatViewByOid reads the matview's rd_rules rewrite-rule
+# shape (matview_rule_info) and its stored dataQuery (matview_data_query) off
+# the open matview handle; RelationData models rd_rules (the RuleLock carrier),
+# so the relcache is their real owner.
+matview_deps_seams = { path = "../../../commands/matview_deps_seams" }
+types_matview = { path = "../../../../_support/types/types_matview" }
+
+# bufmgr / visibilitymap &Relation-keyed seams: relcache projects a transient
+# read handle off the owned entry to bridge the OID-keyed hio.c seams (the heap
+# insertion read/extend buffer path) to their real owners.
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+visibilitymap_seams = { path = "../../../access/heap/visibilitymap_seams" }
+
+# The RelationIdCache is a real dynahash table (merged C-faithful raw-pointer
+# dynahash) — the substrate, not a stand-in. Acyclic: dynahash depends only on
+# types/error/storage/core.
+dynahash = { path = "../../hash/dynahash" }
+
+# Memory contexts (CacheMemoryContext analog) + allocation.
+mcx = { path = "../../../../_support/mcx" }
+
+# Error / ereport surface.
+utils_error = { path = "../../utils_error" }
+types_error = { path = "../../../../_support/types/types_error" }
+
+# Type vocabulary embedded in the owned RelationData entry / crossed at seams.
+types_core = { path = "../../../../_support/types/types_core" }
+# pg_class / pg_class_oid_index OIDs used by the RelationCacheInvalidate
+# two-phase rebuild ordering.
+types_catalog = { path = "../../../../_support/types/types_catalog" }
+rel = { path = "../../../../_support/types/rel" }
+# `rd_trigdesc` value types (Trigger / TriggerDesc) built by RelationBuildTriggers.
+types_trigger = { path = "../../../../_support/types/types_trigger" }
+# The owned relcache entry-store type family (`RelationData` + companions),
+# relocated to its own crate in F0' so the relcache seams crate can name it.
+relcache_entry = { path = "../../../../_support/types/relcache_entry" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+nodes = { path = "../../../../_support/types/nodes" }
+# Named (not constructed) in the plancat-ext `get_index_expressions`/
+# `get_index_predicate` installs: `&mut PlannerInfo` + arena `NodeId`. A pure
+# types crate (no backend deps), so no cycle.
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+types_partition = { path = "../../../../_support/types/types_partition" }
+types_reloptions = { path = "../../../../_support/types/types_reloptions" }
+hash = { path = "../../../../_support/types/hash" }
+spgist = { path = "../../../../_support/types/spgist" }
+cache = { path = "../../../../_support/types/cache" }
+wal = { path = "../../../../_support/types/wal" }
+
+# Tuple-descriptor construction (access/common/tupdesc.c) — a lower-level
+# utility relcache layers on (CreateTupleDesc / populate_compact_attribute when
+# materializing the cross-unit rd_att slice). Acyclic: tupdesc does not depend
+# on relcache.
+tupdesc = { path = "../../../access/common/tupdesc" }
+
+# Outward seams for the genuine cross-unit catalog primitives the index family
+# routes through their owners (panic until each owner installs them).
+syscache_seams = { path = "../syscache_seams" }
+amapi_seams = { path = "../../../access/index/amapi_seams" }
+genam_seams = { path = "../../../access/index/genam_seams" }
+indexam_seams = { path = "../../../access/index/indexam_seams" }
+reloptions_seams = { path = "../../../access/common/reloptions_seams" }
+
+# `stringToNode` for the rule-tree build (`RelationBuildRuleLock` parses
+# `pg_rewrite.ev_qual`/`ev_action` into `Query<'static>` in the cache arena).
+# Seam crate (leaf): acyclic.
+read_seams = { path = "../../../nodes/read_seams" }
+# `checkExprHasSubLink` (rewriteManip.c) for RelationBuildRowSecurity's
+# RowSecurityPolicy.hassublinks. Seam crate (leaf): acyclic.
+rewritemanip_seams = { path = "../../../rewrite/rewritemanip_seams" }
+# `equal()` over node trees (equalfuncs.c) for equalRSDesc's per-policy
+# qual/with_check_qual comparison in the relcache-rebuild keep_policies test.
+# Seam crate (leaf): acyclic.
+equalfuncs_seams = { path = "../../../nodes/equalfuncs_seams" }
+# setRuleCheckAsUser: stamp checkAsUser on a loaded rule's RTEPermissionInfos
+# (view ON SELECT rules check underlying-rel perms as the view owner).
+rewriteDefine_seams = { path = "../../../rewrite/rewriteDefine_seams" }
+table_tableam_seams = { path = "../../../access/table/table_tableam_seams" }
+relmapper_seams = { path = "../relmapper_seams" }
+snapmgr_seams = { path = "../../time/snapmgr_seams" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+transam_parallel = { path = "../../../access/transam/transam_parallel" }
+catalog_seams = { path = "../../../catalog/catalog_seams" }
+namespace_seams = { path = "../../../catalog/namespace_seams" }
+binary_upgrade_seams = { path = "../../../catalog/binary_upgrade_seams" }
+catalog_storage_seams = { path = "../../../catalog/catalog_storage_seams" }
+smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
+init_small_seams = { path = "../../init/init_small_seams" }
+
+# initfile xunit cross-unit primitives (relcache bring-up + init-file IO):
+# bootstrap/DatabasePath/MyProcPid (miscinit), IsCatalogNamespace (namespace),
+# the RelCacheInitLock LWLock (lwlock), LockRelationOid (lmgr),
+# InitCatalogCachePhase2 (syscache, already a dep), AcceptInvalidationMessages
+# (inval), the AllocateFile/AllocateDir file API (fd), and the temp-rel proc
+# number (parallel-rt). Each panics until its owner installs the seam.
+miscinit_seams = { path = "../../init/miscinit_seams" }
+lmgr_seams = { path = "../../../storage/lmgr/lmgr_seams" }
+# infer_arbiter_indexes' `infer_collation_opclass_match` looks up the specified
+# opclass's opfamily / input type (lsyscache get_opclass_*) when matching index
+# attribute opclass/collation.
+lsyscache_seams = { path = "../lsyscache_seams" }
+lwlock_seams = { path = "../../../storage/lmgr/lwlock_seams" }
+inval_seams = { path = "../inval_seams" }
+fd_seams = { path = "../../../storage/file/fd_seams" }
+parallel_rt_seams = { path = "../../../access/transam/parallel_rt_seams" }
+# smgr (RelationGetNumberOfBlocks) is already declared above; bitmapset encode
+# (identity key), fmgr resolve (index_getprocinfo lazy init), ruleutils (opclass
+# name in the missing-options error).
+nodes_core_seams = { path = "../../../nodes/nodes_core_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+ruleutils_seams = { path = "../../adt/ruleutils_seams" }
+# Genuine cross-unit primitives the derived family routes through their owners
+# (panic until each owner installs them): the genam catalog scans
+# (RelationGetIndexList/StatExtList/FKeyList/ExclusionInfo) and the raw
+# rd_indextuple node-tree transforms (index expressions/predicate/dummy-Consts,
+# attribute-bitmap index_open + pull_varattnos, publication/rule build,
+# opclass per-column index options). genam-seams is already declared above.
+relcache_nodexform_seams = { path = "../relcache_nodexform_seams" }
+
+# Consumer-side seam crate for the externals `optimizer/util/plancat.c`'s
+# `get_relation_info` calls; relcache OWNS the relcache reads in that family
+# (RelationGetParallelWorkers / RelationGetIndexList / the per-index catalog
+# detoast / index block count) and installs them here. No owner directory exists
+# for this crate; each relcache read installs from this crate's real owner.
+plancat_ext_seams = { path = "../../../optimizer/util/plancat_ext_seams" }

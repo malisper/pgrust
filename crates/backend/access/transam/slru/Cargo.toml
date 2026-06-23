@@ -1,0 +1,28 @@
+[package]
+name = "slru"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "slru"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+utils_error = { path = "../../../utils/utils_error" }
+lwlock = { path = "../../../storage/lmgr/lwlock" }
+transam = { path = "../transam" }
+activity_small = { path = "../../../utils/activity/activity_small" }
+file_seams = { path = "../../../storage/file/file_seams" }
+sync_seams = { path = "../../../storage/sync/sync_seams" }
+stat_seams = { path = "../../../utils/activity/stat_seams" }
+transam_xlog_seams = { path = "../transam_xlog_seams" }
+xlogrecovery_seams = { path = "../xlogrecovery_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+ipc_shmem_seams = { path = "../../../storage/ipc/ipc_shmem_seams" }
+libc = "0.2"

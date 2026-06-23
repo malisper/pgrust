@@ -1,0 +1,64 @@
+[package]
+name = "catalog_namespace"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "catalog_namespace"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+types_guc = { path = "../../../_support/types/types_guc" }
+utils_error = { path = "../../utils/utils_error" }
+
+transam_parallel = { path = "../../access/transam/transam_parallel" }
+# Parallel-worker bring-up: SetTempNamespaceState (parallel.c).
+parallel_rt_seams = { path = "../../access/transam/parallel_rt_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+aclchk_seams = { path = "../aclchk_seams" }
+catalog_seams = { path = "../catalog_seams" }
+dependency_seams = { path = "../dependency_seams" }
+tablecmds_seams = { path = "../../commands/tablecmds_seams" }
+namespace_seams = { path = "../namespace_seams" }
+vacuum_seams = { path = "../../commands/vacuum_seams" }
+matview_deps_seams = { path = "../../commands/matview_deps_seams" }
+objectaccess_seams = { path = "../objectaccess_seams" }
+index_seams = { path = "../index_seams" }
+objectaddress_seams = { path = "../objectaddress_seams" }
+pg_namespace_seams = { path = "../pg_namespace_seams" }
+dbcommands_seams = { path = "../../commands/dbcommands_seams" }
+procarray_seams = { path = "../../storage/ipc/procarray_seams" }
+dsm_core_seams = { path = "../../storage/ipc/dsm_core_seams" }
+sinval_seams = { path = "../../storage/ipc/sinval_seams" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+lmgr_proc_seams = { path = "../../storage/lmgr/lmgr_proc_seams" }
+ruleutils_seams = { path = "../../utils/adt/ruleutils_seams" }
+varlena_seams = { path = "../../utils/adt/varlena_seams" }
+inval_seams = { path = "../../utils/cache/inval_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+mcxt_seams = { path = "../../utils/mmgr/mcxt_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+funcapi_seams = { path = "../../utils/fmgr/funcapi_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+guc_seams = { path = "../../utils/misc/guc_seams" }
+snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }
+
+types_acl = { path = "../../../_support/types/types_acl" }
+types_cluster = { path = "../../../_support/types/types_cluster" }
+types_core = { path = "../../../_support/types/types_core" }
+datum = { path = "../../../_support/types/datum" }
+types_error = { path = "../../../_support/types/types_error" }
+fmgr = { path = "../../../_support/types/fmgr" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+types_namespace = { path = "../../../_support/types/types_namespace" }
+nodes = { path = "../../../_support/types/nodes" }
+types_syscache = { path = "../../../_support/types/types_syscache" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+pg_conversion_seams = { path = "../pg_conversion_seams" }
+types_storage = { path = "../../../_support/types/types_storage" }

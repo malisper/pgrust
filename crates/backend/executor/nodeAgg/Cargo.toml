@@ -1,0 +1,53 @@
+[package]
+name = "nodeAgg"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nodeAgg"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+nodeAgg_pq_seams = { path = "../nodeAgg_pq_seams" }
+nodeAgg_aggapi_seams = { path = "../nodeAgg_aggapi_seams" }
+fmgr = { path = "../../../_support/types/fmgr" }
+execExpr_seams = { path = "../execExpr_seams" }
+execProcnode_seams = { path = "../execProcnode_seams" }
+execTuples_seams = { path = "../execTuples_seams" }
+execUtils_seams = { path = "../execUtils_seams" }
+execGrouping_seams = { path = "../execGrouping_seams" }
+execAmi_seams = { path = "../execAmi_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+datum_seams = { path = "../../utils/adt/datum_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+parse_agg_seams = { path = "../../parser/parse_agg_seams" }
+coerce_seams = { path = "../../parser/coerce_seams" }
+format_type_seams = { path = "../../utils/adt/format_type_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+objectaccess_seams = { path = "../../catalog/objectaccess_seams" }
+nodeFuncs_seams = { path = "../../nodes/nodeFuncs_seams" }
+types_acl = { path = "../../../_support/types/types_acl" }
+datum = { path = "../../../_support/types/datum" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+sort_storage_seams = { path = "../../utils/sort/sort_storage_seams" }
+tuplesort_seams = { path = "../../utils/sort/tuplesort_seams" }
+hyperloglog = { path = "../../lib/hyperloglog" }
+heaptuple = { path = "../../access/common/heaptuple" }
+hashfn = { path = "../../../common/hashfn" }
+nodeHash_seams = { path = "../nodeHash_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+transam_parallel = { path = "../../access/transam/transam_parallel" }
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+nodes = { path = "../../../_support/types/nodes" }
+execparallel = { path = "../../../_support/types/execparallel" }
+types_parallel = { path = "../../../_support/types/types_parallel" }
+mcx = { path = "../../../_support/mcx" }
+costsize_seams = { path = "../../optimizer/path/costsize_seams" }

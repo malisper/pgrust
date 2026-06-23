@@ -1,0 +1,32 @@
+[package]
+name = "cache_evtcache"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "cache_evtcache"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_evtcache = { path = "../../../../_support/types/types_evtcache" }
+nodes = { path = "../../../../_support/types/nodes" }
+rel = { path = "../../../../_support/types/rel" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+datum = { path = "../../../../_support/types/datum" }
+
+evtcache_seams = { path = "../evtcache_seams" }
+heaptuple = { path = "../../../access/common/heaptuple" }
+table = { path = "../../../access/table/table" }
+indexam_seams = { path = "../../../access/index/indexam_seams" }
+genam_seams = { path = "../../../access/index/genam_seams" }
+nodes_core_seams = { path = "../../../nodes/nodes_core_seams" }
+cmdtag = { path = "../../../tcop/cmdtag" }
+arrayfuncs_seams = { path = "../../adt/arrayfuncs_seams" }
+inval_seams = { path = "../inval_seams" }
+cache_syscache = { path = "../cache_syscache" }

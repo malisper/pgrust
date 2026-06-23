@@ -1,0 +1,22 @@
+[package]
+name = "float"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "float"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+ryu = { path = "../../../../common/ryu" }
+utils_error = { path = "../../utils_error" }
+arrayfuncs = { path = "../arrayfuncs" }
+float_seams = { path = "../float_seams" }
+guc_tables = { path = "../../misc/guc_tables" }

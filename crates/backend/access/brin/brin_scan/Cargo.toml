@@ -1,0 +1,39 @@
+[package]
+name = "brin_scan"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "brin_scan"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+rel = { path = "../../../../_support/types/rel" }
+brin = { path = "../../../../_support/types/brin" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+types_amapi = { path = "../../../../_support/types/types_amapi" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+tidbitmap = { path = "../../../../_support/types/tidbitmap" }
+
+# owned engine layers (direct deps — acyclic: scan owns brin.c, consumes pageops/tuple)
+pageops = { path = "../pageops" }
+brin_tuple = { path = "../brin_tuple" }
+reloptions_seams = { path = "../../common/reloptions_seams" }
+
+# cross-owner seam crates
+brin_entry_seams = { path = "../brin_entry_seams" }
+insert_vacuum_seams = { path = "../insert_vacuum_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+table_seams = { path = "../../table/table_seams" }
+index_seams = { path = "../../../catalog/index_seams" }
+nodes_core_seams = { path = "../../../nodes/nodes_core_seams" }
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+utils_error = { path = "../../../utils/utils_error" }

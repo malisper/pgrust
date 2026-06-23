@@ -1,0 +1,97 @@
+[package]
+name = "execExprInterp"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "execExprInterp"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+datum = { path = "../../../_support/types/datum" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+nodes = { path = "../../../_support/types/nodes" }
+mcx = { path = "../../../_support/mcx" }
+# item_pointer_bytes: build the ctid Datum for EEOP_*_SYSVAR ctid fetch;
+# heap_getattr for the EEOP_FIELDSELECT field extraction over a composite Datum.
+heaptuple = { path = "../../access/common/heaptuple" }
+# lookup_rowtype_tupdesc for the EEOP_FIELDSELECT rowtype descriptor (the typcache
+# TupleDesc model); a leaf seam-declaration crate, so no dependency cycle.
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
+# toast_build_flattened_tuple for EEOP_WHOLEROW (build a composite Datum whose
+# external/by-ref fields are detoasted). A leaf access unit (types-* deps only),
+# so the edge is acyclic.
+heaptoast = { path = "../../access/heap/heaptoast" }
+# detoast_attr (PG_DETOAST_DATUM) for DatumGetHeapTupleHeader: a composite Datum
+# stored into a table column can itself be TOASTed (external/compressed) when the
+# whole row image exceeds the toast threshold; the composite-Datum bridge must
+# detoast it before decoding the flat HeapTupleHeader image. Leaf seam crate.
+detoast_seams = { path = "../../access/common/detoast_seams" }
+# convert_tuples_by_name + execute_attr_map_tuple for EEOP_CONVERT_ROWTYPE; a
+# leaf seam-declaration crate, so no dependency cycle.
+next_seams = { path = "../../access/common/next_seams" }
+# format_type_be for the WHOLEROW type-mismatch ereport details; leaf seam crate.
+format_type_seams = { path = "../../utils/adt/format_type_seams" }
+# nextval_internal seam: ExecEvalNextValueExpr advances the sequence behind a
+# column's implicit NextValueExpr default (SERIAL / GENERATED AS IDENTITY).
+sequence_seams_2 = { path = "../../commands/sequence_seams_2" }
+
+# Own seam crate: the interpreter installs the dispatch entry points
+# (ExecReadyInterpretedExpr / ExecEvalExprSwitchContext) that execExpr + the
+# executor nodes reach through these seams.
+execExprInterp_seams = { path = "../execExprInterp_seams" }
+
+# Seams into unported owners the interpreter calls.
+execExpr_seams = { path = "../execExpr_seams" }
+# Scalar dispatch of the non-set json/jsonb record functions
+# (json[b]_populate_record / json[b]_to_record / jsonb_populate_record_valid):
+# these reach their worker only through execSRF's record protocol, not the
+# fmgr-core builtin table, so the scalar EEOP_FUNCEXPR step routes them via this
+# seam. Seam crate only (execSRF itself transitively deps this interp crate).
+execSRF_seams = { path = "../execSRF_seams" }
+# AggStateData + AggStatePer* now live in their real owner nodeAgg (relocated out
+# of types-nodes for the logtape registry retire). nodeAgg deps only the SEAM
+# crates of execExpr*/execProcnode etc., not these owner crates, so no cycle.
+nodeAgg = { path = "../nodeAgg" }
+execTuples_seams = { path = "../execTuples_seams" }
+# execJunk's ExecFilterJunk strips resjunk columns from a SubqueryScan whole-row
+# Var result (EEOP_WHOLEROW junk-filter path).
+execJunk = { path = "../execJunk" }
+# MakeExpandedObjectReadOnlyInternal (expandeddatum.c) for EEOP_ASSIGN_TMP_MAKE_RO.
+misc2_seams = { path = "../../utils/adt/misc2_seams" }
+nodeSubplan_seams = { path = "../nodeSubplan_seams" }
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }
+varlena_seams = { path = "../../utils/adt/varlena_seams" }
+stack_depth_seams = { path = "../../utils/misc/stack_depth_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+pgstat_function_seams = { path = "../../utils/activity/pgstat_function_seams" }
+types_pgstat = { path = "../../../_support/types/types_pgstat" }
+tuplesort_seams = { path = "../../utils/sort/tuplesort_seams" }
+datum_seams = { path = "../../utils/adt/datum_seams" }
+# Hashed-SAOP build path: deconstruct the array const and read its element
+# type's storage attributes (arrayfuncs / lsyscache owners).
+arrayfuncs_seams = { path = "../../utils/adt/arrayfuncs_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+# jsonb subscripting execution bodies (jsonbsubs.c) reached per-callback.
+jsonbsubs_seams = { path = "../../utils/adt/jsonbsubs_seams" }
+# SQL/JSON path evaluation (jsonpath_exec.c) for EEOP_JSONEXPR_PATH:
+# JsonPathExists/Query/Value + JsonbValueToJsonb + json_populate_type coercion.
+# These are leaf adt units with no executor deps, so the edges are acyclic.
+jsonpath_exec = { path = "../../utils/adt/jsonpath_exec" }
+jsonb_util = { path = "../../utils/adt/jsonb_util" }
+adt_jsonb = { path = "../../utils/adt/adt_jsonb" }
+adt_json = { path = "../../utils/adt/adt_json" }
+adt_numeric = { path = "../../utils/adt/adt_numeric" }
+adt_jsonfuncs = { path = "../../utils/adt/adt_jsonfuncs" }
+# EEOP_SQLVALUEFUNCTION date/time arms: GetSQLCurrent*/GetSQLLocal* helpers
+# (the role/user/catalog/schema arms go through function_call_invoke_datum).
+adt_datetime = { path = "../../utils/adt/adt_datetime" }
+# xml.c value workers (xmlconcat/xmlserialize/xmlparse/xmlpi/xmlroot/
+# xml_is_document) for EEOP_XMLEXPR. A leaf adt unit (types-* only deps).
+adt_xml = { path = "../../utils/adt/adt_xml" }
+# exprType() of XMLELEMENT content args (seam crate; acyclic).
+nodeFuncs_seams = { path = "../../nodes/nodeFuncs_seams" }
+types_jsonb = { path = "../../../_support/types/types_jsonb" }

@@ -1,0 +1,16 @@
+[package]
+name = "extra_encnames_fgram"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "extra_encnames_fgram"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+pg_ffi_fgram = { path = "../../_support/pgrust/pg_ffi_fgram" }
+encnames_seams = { path = "../encnames_seams" }
+mbutils_seams = { path = "../../backend/utils/mb/mbutils_seams" }
+collationcmds_seams = { path = "../../backend/commands/collationcmds_seams" }

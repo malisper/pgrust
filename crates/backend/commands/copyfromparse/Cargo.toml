@@ -1,0 +1,25 @@
+[package]
+name = "copyfromparse"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "copyfromparse"
+path = "src/lib.rs"
+
+[dependencies]
+copyfrom_seams = { path = "../copyfrom_seams" }
+utils_error = { path = "../../utils/utils_error" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+types_copy = { path = "../../../_support/types/types_copy" }
+types_core = { path = "../../../_support/types/types_core" }
+datum = { path = "../../../_support/types/datum" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_error = { path = "../../../_support/types/types_error" }
+rel = { path = "../../../_support/types/rel" }
+
+[dev-dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_tuple = { path = "../../../_support/types/types_tuple" }

@@ -1,0 +1,20 @@
+[package]
+name = "replication_libpqwalreceiver"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "replication_libpqwalreceiver"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_walreceiver = { path = "../../../_support/types/types_walreceiver" }
+types_libpqwalreceiver = { path = "../../../_support/types/types_libpqwalreceiver" }
+types_pgstat = { path = "../../../_support/types/types_pgstat" }
+utils_error = { path = "../../utils/utils_error" }
+fe_seams = { path = "../../../interfaces/libpq/fe_seams" }
+libpqwalreceiver_seams = { path = "../libpqwalreceiver_seams" }

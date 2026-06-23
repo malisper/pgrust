@@ -1,0 +1,32 @@
+[package]
+name = "nodeGatherMerge"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nodeGatherMerge"
+path = "src/lib.rs"
+
+[dependencies]
+transam_parallel = { path = "../../access/transam/transam_parallel" }
+execAmi_seams = { path = "../execAmi_seams" }
+execExpr_seams = { path = "../execExpr_seams" }
+execParallel_seams = { path = "../execParallel_seams" }
+execProcnode_seams = { path = "../execProcnode_seams" }
+execTuples_seams = { path = "../execTuples_seams" }
+execUtils = { path = "../execUtils" }
+execUtils_seams = { path = "../execUtils_seams" }
+tqueue_seams = { path = "../tqueue_seams" }
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+sortsupport_seams = { path = "../../utils/sort/sortsupport_seams" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+execparallel = { path = "../../../_support/types/execparallel" }
+nodes = { path = "../../../_support/types/nodes" }
+types_sortsupport = { path = "../../../_support/types/types_sortsupport" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+heaptuple = { path = "../../access/common/heaptuple" }

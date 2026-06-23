@@ -1,0 +1,13 @@
+[package]
+name = "libpq_pqsignal"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "libpq_pqsignal"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+libpq_pqsignal_seams = { path = "../libpq_pqsignal_seams" }

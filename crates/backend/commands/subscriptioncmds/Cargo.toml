@@ -1,0 +1,68 @@
+[package]
+name = "subscriptioncmds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "subscriptioncmds"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+utils_error = { path = "../../utils/utils_error" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_acl = { path = "../../../_support/types/types_acl" }
+cache = { path = "../../../_support/types/cache" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+datum = { path = "../../../_support/types/datum" }
+nodes = { path = "../../../_support/types/nodes" }
+rel = { path = "../../../_support/types/rel" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_syscache = { path = "../../../_support/types/types_syscache" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+
+# Directly ported foundation crates (acyclic).
+table = { path = "../../access/table/table" }
+heaptuple = { path = "../../access/common/heaptuple" }
+indexing = { path = "../../catalog/indexing" }
+catalog_catalog = { path = "../../catalog/catalog_catalog" }
+pg_shdepend = { path = "../../catalog/pg_shdepend" }
+aclchk = { path = "../../catalog/aclchk" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+objectaccess = { path = "../../catalog/objectaccess" }
+objectaddress = { path = "../../catalog/objectaddress" }
+origin = { path = "../../replication/logical/origin" }
+replication_libpqwalreceiver = { path = "../../replication/replication_libpqwalreceiver" }
+slot_seams = { path = "../../replication/slot_seams" }
+lsn_trigfuncs = { path = "../../utils/adt/lsn_trigfuncs" }
+pgstat_subscription = { path = "../../utils/activity/pgstat_subscription" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+miscinit = { path = "../../utils/init/miscinit" }
+types_guc = { path = "../../../_support/types/types_guc" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+types_walreceiver = { path = "../../../_support/types/types_walreceiver" }
+
+# Inward seams owned by this unit.
+subscriptioncmds_seams = { path = "../subscriptioncmds_seams" }
+
+# Cross-subsystem externals via their owners' -seams crates.
+objectaccess_seams = { path = "../../catalog/objectaccess_seams" }
+dbcommands_seams = { path = "../dbcommands_seams" }
+tablespace_globals_seams = { path = "../tablespace_globals_seams" }
+acl_seams = { path = "../../utils/adt/acl_seams" }
+superuser_seams = { path = "../../utils/misc/superuser_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+launcher_seams = { path = "../../replication/logical/launcher_seams" }
+worker_seams = { path = "../../replication/logical/worker_seams" }
+pg_subscription_seams = { path = "../../catalog/pg_subscription_seams" }
+define_seams = { path = "../define_seams" }
+event_trigger_seams = { path = "../event_trigger_seams" }
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+arrayfuncs_seams = { path = "../../utils/adt/arrayfuncs_seams" }
+guc_seams = { path = "../../utils/misc/guc_seams" }

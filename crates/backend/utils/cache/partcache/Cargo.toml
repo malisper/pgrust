@@ -1,0 +1,37 @@
+[package]
+name = "partcache"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "partcache"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+
+# Inward seam this unit OWNS and installs (RelationGetPartitionKey).
+partcache_seams = { path = "../partcache_seams" }
+
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+hash = { path = "../../../../_support/types/hash" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_partition = { path = "../../../../_support/types/types_partition" }
+rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+
+# Outward seams (owners not ported yet — calls panic until they land).
+syscache_seams = { path = "../syscache_seams" }
+lsyscache_seams = { path = "../lsyscache_seams" }
+relcache_seams = { path = "../relcache_seams" }
+format_type_seams = { path = "../../adt/format_type_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+stack_depth_seams = { path = "../../misc/stack_depth_seams" }
+partition_seams = { path = "../../../catalog/partition_seams" }
+partbounds_seams = { path = "../../../partitioning/partbounds_seams" }
+nodeFuncs_seams = { path = "../../../nodes/nodeFuncs_seams" }
+makefuncs_seams = { path = "../../../nodes/makefuncs_seams" }
+common_relation_seams = { path = "../../../access/common/common_relation_seams" }

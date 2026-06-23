@@ -1,0 +1,20 @@
+[package]
+name = "sink_support"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sink_support"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_pgstat = { path = "../../../_support/types/types_pgstat" }
+sink = { path = "../sink" }
+activity_small = { path = "../../utils/activity/activity_small" }
+
+[dev-dependencies]
+status_seams = { path = "../../utils/activity/status_seams" }

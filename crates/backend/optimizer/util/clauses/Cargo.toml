@@ -1,0 +1,50 @@
+[package]
+name = "clauses"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "clauses"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+datum = { path = "../../../../_support/types/datum" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+lsyscache_seams = { path = "../../../utils/cache/lsyscache_seams" }
+typcache_seams = { path = "../../../utils/cache/typcache_seams" }
+costsize_seams = { path = "../../path/costsize_seams" }
+clauses_seams = { path = "../clauses_seams" }
+init_subselect_ext_seams = { path = "../../plan/init_subselect_ext_seams" }
+equivclass_ext_seams = { path = "../../path/equivclass_ext_seams" }
+joininfo_ext_seams = { path = "../joininfo_ext_seams" }
+var_seams = { path = "../var_seams" }
+prepqual_seams = { path = "../../prep/prepqual_seams" }
+arrayfuncs_seams = { path = "../../../utils/adt/arrayfuncs_seams" }
+# clauses.c's is_pseudo_constant_clause{,_relids} predicates — declared in
+# path-small-seams (path-small.c's clause-classification consumers), owned here.
+path_small_seams = { path = "../../path/path_small_seams" }
+# clauses.c's contain_mutable_functions(root, node) — declared in plancat-ext-seams
+# (relation_excluded_by_constraints qual ops), owned here.
+plancat_ext_seams = { path = "../plancat_ext_seams" }
+# joinpath.c's contain_volatile_functions(node/reltarget/rinfo) legs — declared
+# in joinpath-seams; clauses.c owns the predicate.
+joinpath_seams = { path = "../../path/joinpath_seams" }
+# clauses.c's is_parallel_safe(root, node) — declared in pathnode-seams (the
+# pathnode create_*_path/gather parallel-safety checks ride it), owned here.
+pathnode_seams = { path = "../pathnode_seams" }
+# inline_set_returning_function's EXECUTE-privilege / current-user / fmgr-hook
+# gates (clauses.c:5135-5141).
+types_acl = { path = "../../../../_support/types/types_acl" }
+types_catalog = { path = "../../../../_support/types/types_catalog" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+# record_plan_function_dependency for the inlined-away SRF (clauses.c:5331);
+# the setrefs owner installs it (cycle-free: setrefs-seams deps only types-*).
+setrefs_seams = { path = "../../plan/setrefs_seams" }

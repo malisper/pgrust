@@ -1,0 +1,18 @@
+[package]
+name = "controldata_utils"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "controldata_utils"
+path = "src/lib.rs"
+
+[dependencies]
+controldata_utils_seams = { path = "../controldata_utils_seams" }
+fd_seams = { path = "../../backend/storage/file/fd_seams" }
+utils_error = { path = "../../backend/utils/utils_error" }
+crc32c = { path = "../../port/crc32c" }
+control = { path = "../../_support/types/control" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }

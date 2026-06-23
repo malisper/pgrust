@@ -1,0 +1,31 @@
+[package]
+name = "discard"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "discard"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+types_error = { path = "../../../_support/types/types_error" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+nodes = { path = "../../../_support/types/nodes" }
+
+# Outward seam this crate installs: the ProcessUtility DISCARD dispatch slot.
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+
+# Ported owners called directly (no cycle: nothing depends on discard).
+portalmem = { path = "../../utils/mmgr/portalmem" }
+prepare = { path = "../prepare" }
+cache_plancache = { path = "../../utils/cache/cache_plancache" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+
+# Unported owners reached through their seam crates (panic until owner lands).
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+lock_seams = { path = "../../storage/lmgr/lock_seams" }
+guc_seams = { path = "../../utils/misc/guc_seams" }
+async_seams = { path = "../async_seams" }
+sequence_seams_2 = { path = "../sequence_seams_2" }

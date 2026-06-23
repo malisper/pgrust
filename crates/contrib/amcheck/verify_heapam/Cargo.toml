@@ -1,0 +1,49 @@
+[package]
+name = "verify_heapam"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "verify_heapam"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+rel = { path = "../../../_support/types/rel" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_scan = { path = "../../../_support/types/types_scan" }
+snapshot = { path = "../../../_support/types/snapshot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+datum = { path = "../../../_support/types/datum" }
+nodes = { path = "../../../_support/types/nodes" }
+
+# Direct (acyclic) library deps.
+read_stream = { path = "../../../backend/storage/aio/read_stream" }
+support = { path = "../../../backend/storage/buffer/support" }
+heapam_visibility = { path = "../../../backend/access/heap/heapam_visibility" }
+scankey = { path = "../../../backend/access/common/scankey" }
+heaptuple = { path = "../../../backend/access/common/heaptuple" }
+varlena_seams = { path = "../../../backend/utils/adt/varlena_seams" }
+
+# Seam crates consumed across cycles / for not-yet-installed neighbours.
+bufmgr_seams = { path = "../../../backend/storage/buffer/bufmgr_seams" }
+visibilitymap_seams = { path = "../../../backend/access/heap/visibilitymap_seams" }
+hio_seams = { path = "../../../backend/access/heap/hio_seams" }
+common_relation_seams = { path = "../../../backend/access/common/common_relation_seams" }
+table_seams = { path = "../../../backend/access/table/table_seams" }
+genam_seams = { path = "../../../backend/access/index/genam_seams" }
+toast_internals_seams = { path = "../../../backend/access/common/toast_internals_seams" }
+varsup_seams = { path = "../../../backend/access/transam/varsup_seams" }
+transam_seams = { path = "../../../backend/access/transam/transam_seams" }
+transam_xact_seams = { path = "../../../backend/access/transam/transam_xact_seams" }
+multixact_seams = { path = "../../../backend/access/transam/multixact_seams" }
+procarray_seams = { path = "../../../backend/storage/ipc/procarray_seams" }
+snapmgr_seams = { path = "../../../backend/utils/time/snapmgr_seams" }
+transam_xlog_seams = { path = "../../../backend/access/transam/transam_xlog_seams" }
+elog_seams = { path = "../../../backend/utils/error/elog_seams" }
+funcapi_seams = { path = "../../../backend/utils/fmgr/funcapi_seams" }
+postgres_seams = { path = "../../../backend/tcop/postgres_seams" }

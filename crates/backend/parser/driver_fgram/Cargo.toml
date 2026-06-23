@@ -1,0 +1,22 @@
+[package]
+name = "driver_fgram"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "driver_fgram"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+scan_fgram = { path = "../scan_fgram" }
+scansup_fgram = { path = "../scansup_fgram" }
+error_fgram = { path = "../../utils/error/error_fgram" }
+# The live client error path (the non-fgram error crate whose report sink the
+# backend wires to the frontend) — used to surface the deferred scanner warnings
+# (`check_string_escape_warning`) the same way `ereport(WARNING)` does elsewhere.
+utils_error = { path = "../../utils/utils_error" }
+types-error-live = { package = "types_error", path = "../../../_support/types/types_error" }
+mb_fgram = { path = "../../utils/mb/mb_fgram" }
+pg_ffi_fgram = { path = "../../../_support/pgrust/pg_ffi_fgram" }

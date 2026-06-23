@@ -1,0 +1,70 @@
+[package]
+name = "bgwriter"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "bgwriter"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_startup = { path = "../../../_support/types/types_startup" }
+types_pgstat = { path = "../../../_support/types/types_pgstat" }
+types_storage = { path = "../../../_support/types/types_storage" }
+signal = { path = "../../../_support/types/signal" }
+
+# ereport/elog and the error-report helpers (grounded leaf).
+utils_error = { path = "../../utils/utils_error" }
+# ConfigReloadPending / ShutdownRequestPending + ProcessMainLoopInterrupts +
+# the SignalHandlerForConfigReload / SignalHandlerForShutdownRequest installed
+# into this process' SIGHUP/SIGTERM slots.
+interrupt = { path = "../interrupt" }
+# procsignal_sigusr1_handler_signal — the SIGUSR1 handler this process must
+# install so it absorbs ProcSignalBarriers (ALTER/DROP DATABASE SET TABLESPACE).
+procsignal = { path = "../../storage/ipc/procsignal" }
+# pqsignal(signo, handler) installer.
+port_pqsignal_seams = { path = "../../../port/port_pqsignal_seams" }
+# unblock_signals() — restore UnBlockSig (postmaster forks us with BlockSig).
+libpq_pqsignal_seams = { path = "../../libpq/libpq_pqsignal_seams" }
+
+# Real, fully-ported owners the bgwriter genuinely drives (no cycle — the
+# bgwriter is a top-level leaf process):
+#   * the buffer-manager LRU pass (BgBufferSync / WritebackContextInit /
+#     StrategyNotifyBgWriter) — BgBufferSyncState is designed to be owned by
+#     this main loop and threaded back in each cycle.
+bufmgr = { path = "../../storage/buffer/bufmgr" }
+#   * FirstCallSinceLastCheckpoint (checkpointer).
+checkpointer = { path = "../checkpointer" }
+#   * pgstat_report_bgwriter (cumulative-stats bgwriter report).
+activity_small = { path = "../../utils/activity/activity_small" }
+
+# GUC table/slots — bgwriter owns the `BgWriterDelay` (bgwriter.c:58) backing
+# the GUC engine reads through `vars::BgWriterDelay` (`conf->variable`).
+guc_tables = { path = "../../utils/misc/guc_tables" }
+
+# Its own inward seams (installed by init_seams).
+bgwriter_seams = { path = "../bgwriter_seams" }
+
+# Outward owner seam crates (panic-until-owner where the owner is unported).
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
+dsm_core_seams = { path = "../../storage/ipc/dsm_core_seams" }
+lwlock_seams = { path = "../../storage/lmgr/lwlock_seams" }
+condition_variable_seams = { path = "../../storage/lmgr/condition_variable_seams" }
+aio_seams = { path = "../../storage/aio/aio_seams" }
+fd_seams = { path = "../../storage/file/fd_seams" }
+smgr_seams = { path = "../../storage/smgr/smgr_seams" }
+auxprocess_seams = { path = "../auxprocess_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+resowner_seams_2 = { path = "../../utils/resowner/resowner_seams_2" }
+dynahash_seams = { path = "../../utils/hash/dynahash_seams" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+pgstat_wal_seams = { path = "../../utils/activity/pgstat_wal_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+pgsleep_seams = { path = "../../../port/pgsleep_seams" }

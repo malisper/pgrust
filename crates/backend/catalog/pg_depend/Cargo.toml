@@ -1,0 +1,34 @@
+[package]
+name = "pg_depend"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_depend"
+path = "src/lib.rs"
+
+[dependencies]
+heaptuple = { path = "../../access/common/heaptuple" }
+scankey = { path = "../../access/common/scankey" }
+genam_seams = { path = "../../access/index/genam_seams" }
+table = { path = "../../access/table/table" }
+catalog_seams = { path = "../catalog_seams" }
+dependency_seams = { path = "../dependency_seams" }
+indexing_seams = { path = "../indexing_seams" }
+objectaddress_seams = { path = "../objectaddress_seams" }
+partition_seams = { path = "../partition_seams" }
+pg_depend_seams = { path = "../pg_depend_seams" }
+extension_seams = { path = "../../commands/extension_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+mcx = { path = "../../../_support/mcx" }
+types_storage = { path = "../../../_support/types/types_storage" }
+rel = { path = "../../../_support/types/rel" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_tuple = { path = "../../../_support/types/types_tuple" }

@@ -1,0 +1,33 @@
+[package]
+name = "proto"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "proto"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+cache = { path = "../../../../_support/types/cache" }
+types_catalog = { path = "../../../../_support/types/types_catalog" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+rel = { path = "../../../../_support/types/rel" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+wal = { path = "../../../../_support/types/wal" }
+pqformat = { path = "../../../libpq/pqformat" }
+cache_syscache = { path = "../../../utils/cache/cache_syscache" }
+execTuples_seams = { path = "../../../executor/execTuples_seams" }
+nodes_core_seams = { path = "../../../nodes/nodes_core_seams" }
+lsyscache_seams = { path = "../../../utils/cache/lsyscache_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
+
+[dev-dependencies]
+pqcomm_seams = { path = "../../../libpq/pqcomm_seams" }
+mbutils_seams = { path = "../../../utils/mb/mbutils_seams" }

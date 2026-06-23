@@ -1,0 +1,54 @@
+[package]
+name = "commands_copy"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "commands_copy"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+rel = { path = "../../../_support/types/rel" }
+nodes = { path = "../../../_support/types/nodes" }
+types_copy = { path = "../../../_support/types/types_copy" }
+types_acl = { path = "../../../_support/types/types_acl" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+
+utils_error = { path = "../../utils/utils_error" }
+nodes_core = { path = "../../nodes/nodes_core" }
+
+# Direct owner deps (acyclic — none of these reach commands-copy/copyto).
+table = { path = "../../access/table/table" }
+parser_relation = { path = "../../parser/parser_relation" }
+execMain = { path = "../../executor/execMain" }
+clauses = { path = "../../optimizer/util/clauses" }
+vars = { path = "../../optimizer/util/vars" }
+var_seams = { path = "../../optimizer/util/var_seams" }
+prepqual = { path = "../../optimizer/prep/prepqual" }
+parse_collate = { path = "../../parser/parse_collate" }
+coerce = { path = "../../parser/coerce" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+adt_acl = { path = "../../utils/adt/adt_acl" }
+more = { path = "../../utils/misc/more" }
+miscinit = { path = "../../utils/init/miscinit" }
+numutils = { path = "../../utils/adt/numutils" }
+extra_encnames_fgram = { path = "../../../common/extra_encnames_fgram" }
+copyto = { path = "../copyto" }
+copyfrom = { path = "../copyfrom" }
+
+# Inward seam crates we own + install.
+commands_copy_seams = { path = "../commands_copy_seams" }
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+
+# Outward seams (would cycle as direct deps).
+define_seams = { path = "../define_seams" }
+small1_seams = { path = "../../parser/small1_seams" }
+parse_expr_seams = { path = "../../parser/parse_expr_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+lmgr_proc_seams = { path = "../../storage/lmgr/lmgr_proc_seams" }

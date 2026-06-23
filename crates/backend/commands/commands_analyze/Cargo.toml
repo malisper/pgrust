@@ -1,0 +1,88 @@
+[package]
+name = "commands_analyze"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "commands_analyze"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+mcx = { path = "../../../_support/mcx" }
+
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_storage = { path = "../../../_support/types/types_storage" }
+nodes = { path = "../../../_support/types/nodes" }
+types_slot = { path = "../../../_support/types/types_slot" }
+statistics = { path = "../../../_support/types/statistics" }
+types_vacuum = { path = "../../../_support/types/types_vacuum" }
+types_tableam = { path = "../../../_support/types/types_tableam" }
+types_sortsupport = { path = "../../../_support/types/types_sortsupport" }
+types_pgstat = { path = "../../../_support/types/types_pgstat" }
+
+utils_error = { path = "../../utils/utils_error" }
+
+# own inward seam crates
+commands_analyze_seams = { path = "../commands_analyze_seams" }
+# own outward seam crate (unported / unreachable externals)
+analyze_rt_seams = { path = "../analyze_rt_seams" }
+
+# landed dependencies called directly
+table = { path = "../../access/table/table" }
+table_tableam = { path = "../../access/table/table_tableam" }
+table_tableam_seams = { path = "../../access/table/table_tableam_seams" }
+heaptuple = { path = "../../access/common/heaptuple" }
+detoast_seams = { path = "../../access/common/detoast_seams" }
+next = { path = "../../access/common/next" }
+visibilitymap = { path = "../../access/heap/visibilitymap" }
+transam_xact = { path = "../../access/transam/transam_xact" }
+indexing = { path = "../../catalog/indexing" }
+index_seams = { path = "../../catalog/index_seams" }
+# index_open(indexoid, lockmode) — indexam.c; analyze's vac_open_indexes.
+indexam_seams = { path = "../../access/index/indexam_seams" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+pg_inherits = { path = "../../catalog/pg_inherits" }
+execExpr_seams = { path = "../../executor/execExpr_seams" }
+execTuples_seams = { path = "../../executor/execTuples_seams" }
+execUtils_seams = { path = "../../executor/execUtils_seams" }
+parse_oper = { path = "../../parser/parse_oper" }
+procarray_seams = { path = "../../storage/ipc/procarray_seams" }
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
+scalar_datum_core = { path = "../../utils/adt/scalar_datum_core" }
+attoptcache = { path = "../../utils/cache/attoptcache" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+miscinit = { path = "../../utils/init/miscinit" }
+misc_guc = { path = "../../utils/misc/misc_guc" }
+sampling = { path = "../../utils/misc/sampling" }
+sort_sortsupport = { path = "../../utils/sort/sort_sortsupport" }
+activity_small_seams = { path = "../../utils/activity/activity_small_seams" }
+prng = { path = "../../../_support/pg/prng" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+types_reloptions = { path = "../../../_support/types/types_reloptions" }
+parser_relation = { path = "../../parser/parser_relation" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+indexing_seams = { path = "../../catalog/indexing_seams" }
+tupdesc_seams = { path = "../../access/common/tupdesc_seams" }
+nodeFuncs_seams = { path = "../../nodes/nodeFuncs_seams" }
+sortsupport_seams = { path = "../../utils/sort/sortsupport_seams" }
+hio_seams = { path = "../../access/heap/hio_seams" }
+vacuumlazy_seams = { path = "../../access/heap/vacuumlazy_seams" }
+vacuum_seams = { path = "../vacuum_seams" }
+rangetypes_typanalyze_seams = { path = "../../utils/adt/rangetypes_typanalyze_seams" }
+array_typanalyze_seams = { path = "../../utils/adt/array_typanalyze_seams" }
+tsvector_typanalyze_seams = { path = "../../utils/adt/tsvector_typanalyze_seams" }
+guc_seams = { path = "../../utils/misc/guc_seams" }
+datum = { path = "../../../_support/types/datum" }
+cache = { path = "../../../_support/types/cache" }
+types_cluster = { path = "../../../_support/types/types_cluster" }
+execTuples = { path = "../../executor/execTuples" }
+tablecmds_seams = { path = "../tablecmds_seams" }

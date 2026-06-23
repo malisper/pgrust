@@ -1,0 +1,17 @@
+[package]
+name = "fork_process"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "fork_process"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+types_core = { path = "../../../_support/types/types_core" }
+fork_process_seams = { path = "../fork_process_seams" }
+libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
+init_small = { path = "../../utils/init/init_small" }
+pg_strong_random_seams = { path = "../../../port/pg_strong_random_seams" }

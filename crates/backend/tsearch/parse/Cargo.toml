@@ -1,0 +1,21 @@
+[package]
+name = "parse"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "parse"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+utils_error = { path = "../../utils/utils_error" }
+parse_seams = { path = "../parse_seams" }
+tsearchcmds_seams = { path = "../../commands/tsearchcmds_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+mbutils = { path = "../../utils/mb/mbutils" }
+pg_locale = { path = "../../utils/adt/pg_locale" }
+libc = "0.2"

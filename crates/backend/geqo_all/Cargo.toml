@@ -1,0 +1,16 @@
+[package]
+name = "geqo_all"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "geqo_all"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../_support/types/types_core" }
+pathnodes = { path = "../../_support/types/pathnodes" }
+prng = { path = "../../_support/pg/prng" }
+geqo_all_seams = { path = "../geqo_all_seams" }
+guc_tables = { path = "../utils/misc/guc_tables" }

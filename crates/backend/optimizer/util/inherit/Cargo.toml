@@ -1,0 +1,63 @@
+[package]
+name = "inherit"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "inherit"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+rel = { path = "../../../../_support/types/rel" }
+nodes = { path = "../../../../_support/types/nodes" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+types_partition = { path = "../../../../_support/types/types_partition" }
+
+# build_simple_rel (child RelOptInfo construction) + expand_planner_arrays — direct dep.
+relnode = { path = "../relnode" }
+# make_append_rel_info / adjust_appendrel_attrs / add_row_identity_columns.
+appendinfo = { path = "../appendinfo" }
+appendinfo_seams = { path = "../appendinfo_seams" }
+# make_var / make_target_entry / make_alias / make_ands_implicit / make_string node.
+nodes_core = { path = "../../../nodes/nodes_core" }
+# make_restrictinfo — direct dep, no cycle.
+joininfo = { path = "../joininfo" }
+joininfo_ext_seams = { path = "../joininfo_ext_seams" }
+# eval_const_expressions / contain_volatile_functions.
+clauses = { path = "../clauses" }
+# contain_vars_of_level.
+vars = { path = "../vars" }
+# get_dependent_generated_columns.
+plancat = { path = "../plancat" }
+# has_partition_attrs.
+catalog_partition = { path = "../../../catalog/catalog_partition" }
+# relids_* bitmapset primitives + rte_inh reader seam.
+relnode_seams = { path = "../relnode_seams" }
+rte_seams = { path = "../../rte_seams" }
+# find_all_inheritors (catalog scan).
+pg_inherits_seams = { path = "../../../catalog/pg_inherits_seams" }
+# table_open / try_table_open / Relation::close.
+table_seams = { path = "../../../access/table/table_seams" }
+# getRTEPermissionInfo (perminfoindex -> RTEPermissionInfo).
+parser_relation_seams = { path = "../../../parser/parser_relation_seams" }
+# add_vars_to_targetlist (initsplan, cyclic owner).
+equivclass_ext_seams = { path = "../../path/equivclass_ext_seams" }
+# select_rowmark_type / make_whole_row_var (planner.c, cyclic owner).
+planner_seams = { path = "../../plan/planner_seams" }
+# RELATION_IS_OTHER_TEMP -> rd_islocaltemp (relcache, cyclic owner).
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+# PartitionDirectoryLookup (partdesc) + prune_append_rel_partitions (partprune).
+partitioning_core_seams = { path = "../../../partitioning/partitioning_core_seams" }
+partprune_seams = { path = "../../../partitioning/partprune_seams" }
+# relids_del_members — bms_del_member over a planner Relids.
+pathnode_seams = { path = "../pathnode_seams" }
+
+# The seams this unit owns + installs (declared in consumer ext-seam crates).
+init_subselect_ext_seams = { path = "../../plan/init_subselect_ext_seams" }
+relnode_ext_seams = { path = "../relnode_ext_seams" }

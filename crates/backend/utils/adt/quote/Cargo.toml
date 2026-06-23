@@ -1,0 +1,19 @@
+[package]
+name = "quote"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "quote"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+quote_seams = { path = "../quote_seams" }
+ruleutils_seams = { path = "../ruleutils_seams" }

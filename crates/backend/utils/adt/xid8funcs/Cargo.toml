@@ -1,0 +1,37 @@
+[package]
+name = "xid8funcs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "xid8funcs"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+
+# fmgr builtin table (C: fmgr_builtins[]); register_builtins / BuiltinFunction.
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+
+# ReadNextFullTransactionId / TransamVariables->oldestClogXid (varsup.c owner).
+varsup_seams = { path = "../../../access/transam/varsup_seams" }
+# GetTopFullTransactionId / GetTopFullTransactionIdIfAny (xact.c owner).
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+# TransactionIdDidCommit (transam.c owner).
+transam_seams = { path = "../../../access/transam/transam_seams" }
+# TransactionIdIsInProgress (procarray.c owner).
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+# GetActiveSnapshot (snapmgr.c owner).
+snapmgr_seams = { path = "../../time/snapmgr_seams" }
+# TransactionXmin global, threaded into TransactionIdDidCommit (snapmgr.c owner).
+snapmgr_pc_seams = { path = "../../time/snapmgr_pc_seams" }
+# PreventCommandDuringRecovery (utility.c owner).
+utility_seams = { path = "../../../tcop/utility_seams" }
+# LWLockAcquire(XactTruncationLock, LW_SHARED) (lwlock.c owner).
+lwlock_seams = { path = "../../../storage/lmgr/lwlock_seams" }

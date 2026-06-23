@@ -1,0 +1,34 @@
+[package]
+name = "adt_enum"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_enum"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+utils_error = { path = "../../utils_error" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_catalog = { path = "../../../../_support/types/types_catalog" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+pqformat = { path = "../../../libpq/pqformat" }
+arrayfuncs = { path = "../arrayfuncs" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+snapmgr = { path = "../../time/snapmgr" }
+pg_enum_seams = { path = "../../../catalog/pg_enum_seams" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+typcache_seams = { path = "../../cache/typcache_seams" }
+format_type_seams = { path = "../format_type_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+transam_seams = { path = "../../../access/transam/transam_seams" }
+
+[dev-dependencies]

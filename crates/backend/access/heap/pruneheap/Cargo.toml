@@ -1,0 +1,41 @@
+[package]
+name = "pruneheap"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pruneheap"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+rel = { path = "../../../../_support/types/rel" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+types_vacuum = { path = "../../../../_support/types/types_vacuum" }
+wal = { path = "../../../../_support/types/wal" }
+xlog_records = { path = "../../../../_support/types/xlog_records" }
+page = { path = "../../../storage/page" }
+rmgrdesc_next = { path = "../../../rmgrdesc_next" }
+# The freeze machinery (heap_prepare_freeze_tuple / heap_freeze_prepared_tuples
+# / heap_pre_freeze_checks / HeapTupleHeaderAdvanceConflictHorizon) + the shared
+# HeapTupleHeader accessors live in the heap AM owner — direct dep, one way.
+heapam = { path = "../heapam" }
+heapam_visibility = { path = "../heapam_visibility" }
+# Inward seams this crate owns + installs.
+pruneheap_seams = { path = "../pruneheap_seams" }
+# Outward owners reached across the dependency cycle.
+vacuumlazy_seams = { path = "../vacuumlazy_seams" }
+transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
+xloginsert_seams = { path = "../../transam/xloginsert_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+hio_seams = { path = "../hio_seams" }
+catalog_seams = { path = "../../../catalog/catalog_seams" }

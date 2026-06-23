@@ -1,0 +1,17 @@
+[package]
+name = "bipartite_match"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "bipartite_match"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+
+[dev-dependencies]

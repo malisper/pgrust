@@ -1,0 +1,37 @@
+[package]
+name = "amcmds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "amcmds"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+# tablecmds DefineRelation resolves the table AM name to its OID via
+# get_table_am_oid (owned here). Seam crate -> no cycle.
+tablecmds_seams = { path = "../tablecmds_seams" }
+
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+nodes = { path = "../../../_support/types/nodes" }
+types_storage = { path = "../../../_support/types/types_storage" }
+
+utils_error = { path = "../../utils/utils_error" }
+table = { path = "../../access/table/table" }
+
+amcmds_seams = { path = "../amcmds_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+format_type_seams = { path = "../../utils/adt/format_type_seams" }
+parse_func_seams = { path = "../../parser/parse_func_seams" }
+pg_depend_seams = { path = "../../catalog/pg_depend_seams" }
+objectaccess_seams = { path = "../../catalog/objectaccess_seams" }
+indexing_seams = { path = "../../catalog/indexing_seams" }

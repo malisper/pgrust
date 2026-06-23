@@ -1,0 +1,28 @@
+[package]
+name = "name"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "name"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+types_sortsupport = { path = "../../../../_support/types/types_sortsupport" }
+utils_error = { path = "../../utils_error" }
+pqformat = { path = "../../../libpq/pqformat" }
+varlena = { path = "../varlena" }
+mbutils_seams = { path = "../../mb/mbutils_seams" }
+namespace_seams = { path = "../../../catalog/namespace_seams" }
+lsyscache_seams = { path = "../../cache/lsyscache_seams" }
+miscinit_seams = { path = "../../init/miscinit_seams" }
+arrayfuncs_seams = { path = "../arrayfuncs_seams" }

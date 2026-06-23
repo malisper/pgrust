@@ -1,0 +1,26 @@
+[package]
+name = "array_typanalyze"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "array_typanalyze"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+statistics = { path = "../../../../_support/types/statistics" }
+types_selfuncs = { path = "../../../../_support/types/types_selfuncs" }
+
+array_typanalyze_seams = { path = "../array_typanalyze_seams" }
+commands_analyze_seams = { path = "../../../commands/commands_analyze_seams" }
+typcache_seams = { path = "../../cache/typcache_seams" }
+lsyscache_seams = { path = "../../cache/lsyscache_seams" }
+detoast_seams = { path = "../../../access/common/detoast_seams" }
+arrayfuncs_seams = { path = "../arrayfuncs_seams" }
+vacuumlazy_seams = { path = "../../../access/heap/vacuumlazy_seams" }
+vacuum_seams = { path = "../../../commands/vacuum_seams" }

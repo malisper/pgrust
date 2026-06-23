@@ -1,0 +1,164 @@
+[package]
+name = "gist_core"
+version = "0.1.0"
+edition = "2021"
+
+# Every fallible function here returns the project-wide `types_error::PgResult`.
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+rel = { path = "../../../../_support/types/rel" }
+gist = { path = "../../../../_support/types/gist" }
+
+# fmgr builtin fast-path registration (the GiST stratnum-translate support proc).
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
+
+# ereport / elog (miscadmin.h, elog.c).
+utils_error = { path = "../../../utils/utils_error" }
+
+# Page-byte primitives (bufpage.c): PageInit / PageAddItemExtended /
+# PageGetSpecialPointer / PageGetSpecialSize / PageIsNew / PageXLogRecPtr*.
+page = { path = "../../../storage/page" }
+
+# Buffer manager (bufmgr.c): with_buffer_page / buffer_get_block_number.
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+
+# Index-tuple formation (indextuple.c): index_form_tuple_desc.
+indextuple_seams = { path = "../../common/indextuple_seams" }
+
+# Tuple-descriptor truncation (tupdesc.c): CreateTupleDescTruncatedCopy.
+tupdesc = { path = "../../common/tupdesc" }
+
+# Index AM support-procedure resolution (indexam.c): index_getprocinfo /
+# index_getprocid (resolved FmgrInfo / proc OID per index column).
+indexam_seams = { path = "../../index/indexam_seams" }
+
+# GiST opclass support-procedure dispatch (per-opclass typed seams installed by
+# backend-access-gist-proc): gist_compress / gist_decompress / gist_union ...
+dispatch_seams = { path = "../dispatch_seams" }
+
+# Single-attribute index-tuple deform (indextuple.c): nocache_index_getattr.
+indextuple = { path = "../../common/indextuple" }
+
+# Heap-tuple formation (heaptuple.c): heap_form_tuple for gistFetchTuple.
+heaptuple = { path = "../../common/heaptuple" }
+
+# Index FSM (indexfsm.c): GetFreeIndexPage for gistNewBuffer recycling.
+freespace_seams = { path = "../../../storage/freespace/freespace_seams" }
+
+# WAL state (xlog.c): XLogStandbyInfoActive (gistNewBuffer recycle WAL leg).
+transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
+
+# Relcache (rel.h): RelationNeedsWAL (gistNewBuffer recycle WAL leg).
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+
+# Visibility horizons (procarray.c): GlobalVisCheckRemovableFullXid for
+# gistPageRecyclable.
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+
+# Backend PRNG (pg_prng.c): pg_prng_bool for gistchoose's tie-break.
+prng = { path = "../../../../_support/pg/prng" }
+
+# Predicate locking (predicate.c): CheckForSerializableConflictIn /
+# PredicateLockPageSplit (insert spine conflict points).
+predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
+
+# Heap AM (heapam_visibility / heapam.c): index_compute_xid_horizon_for_tuples
+# (gistprunepage snapshot conflict horizon).
+heapam_seams = { path = "../../heap/heapam_seams" }
+
+# Recursion guard (postgres.c): check_stack_depth (gistSplit recursion).
+stack_depth_seams = { path = "../../../utils/misc/stack_depth_seams" }
+
+# --- F2-scan deps (gistscan.c / gistget.c) ---
+
+# Unified index-AM vocabulary (amapi.h): IndexAmRoutine, IndexScanDescData,
+# AmOpaque carrier, ScanKeyData, ScanDirection, IndexOrderByDistance.
+types_amapi = { path = "../../../../_support/types/types_amapi" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+tidbitmap = { path = "../../../../_support/types/tidbitmap" }
+
+# Search-queue pairing heap (lib/pairingheap.h).
+pairingheap = { path = "../../../lib/pairingheap" }
+
+# GiST opclass consistent/distance dispatch is already deps'd above
+# (backend-access-gist-dispatch-seams).
+
+# GiST AM insert/vacuum vtable callbacks (unported owners): gistinsert /
+# gistbulkdelete / gistvacuumcleanup.
+am_seams = { path = "../am_seams" }
+
+# tidbitmap (tidbitmap.c): tbm_add_tuples for gistgetbitmap.
+nodes_core_seams = { path = "../../../nodes/nodes_core_seams" }
+
+# Predicate page lock (predicate.c): PredicateLockPage for gistScanPage.
+# (predicate-seams already deps'd above.)
+
+# pgstat (pgstat.h): pgstat_count_index_scan.
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+
+# lsyscache (lsyscache.c): get_func_rettype for gistrescan order-by types;
+# get_opfamily_proc / get_index_column_opclass / get_opclass_opfamily_and_input_type
+# for gistproperty / gisttranslatecmptype.
+lsyscache_seams = { path = "../../../utils/cache/lsyscache_seams" }
+
+# reloptions (reloptions.c): build_reloptions_gist for gistoptions.
+reloptions_seams = { path = "../../common/reloptions_seams" }
+
+# fmgr (fmgr.c): OidFunctionCall1Coll for gisttranslatecmptype.
+fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
+
+# --- F5-vacuum deps (gistvacuum.c) ---
+
+# IntegerSet (lib/integerset.c): the internal/empty leaf page sets.
+integerset = { path = "../../../lib/integerset" }
+
+# VACUUM delay (vacuum.c via heap vacuum lazy): vacuum_delay_point.
+vacuumlazy_seams = { path = "../../heap/vacuumlazy_seams" }
+
+# ReadNextFullTransactionId (varsup.c): the deleted-page recycle XID stamp.
+varsup_seams = { path = "../../transam/varsup_seams" }
+
+# IndexBulkDeleteCallback dead-TID test (vacuum.c): vacuum_tid_is_dead.
+vacuum_seams = { path = "../../../commands/vacuum_seams" }
+
+# Relation-extension lock (lmgr.c): Lock/UnlockRelationForExtension.
+lmgr_seams = { path = "../../../storage/lmgr/lmgr_seams" }
+
+# RELATION_IS_LOCAL (hio.c): relation_is_local for the extension-lock skip.
+hio_seams = { path = "../../heap/hio_seams" }
+
+# ereport(LOG) for the legacy invalid-inner-tuple notice (elog.c).
+elog_seams = { path = "../../../utils/error/elog_seams" }
+
+# --- F7-xlog deps (gistxlog.c WAL redo + record builders) ---
+
+# Decoded WAL record carrier (XLogReaderState) and the InHotStandby helper.
+wal = { path = "../../../../_support/types/wal" }
+
+# Page masking for WAL consistency checking (bufmask.c).
+bufmask_seams = { path = "../../common/bufmask_seams" }
+
+# WAL-recovery substrate (xlogutils.c): XLogReadBufferForRedo /
+# XLogInitBufferForRedo + the standbyState global accessor.
+xlogutils = { path = "../../transam/xlogutils" }
+
+# Decoded-record block-tag accessor (xlogreader.c).
+xlogreader_seams = { path = "../../transam/xlogreader_seams" }
+
+# WAL-insert side (xloginsert.c): XLogBeginInsert / XLogRegister* / XLogInsert /
+# XLogSetRecordFlags for the record builders.
+xloginsert_seams = { path = "../../transam/xloginsert_seams" }
+
+# Hot-Standby recovery-conflict resolution (standby.c): the delete / page-reuse
+# redo legs reach ResolveRecoveryConflictWithSnapshot{,FullXid}.
+standby_seams = { path = "../../../storage/ipc/standby_seams" }
+
+[dev-dependencies]

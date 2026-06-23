@@ -1,0 +1,18 @@
+[package]
+name = "queryenvironment"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "queryenvironment"
+path = "src/lib.rs"
+
+[dependencies]
+table = { path = "../../../access/table/table" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+mcx = { path = "../../../../_support/mcx" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_storage = { path = "../../../../_support/types/types_storage" }

@@ -1,0 +1,20 @@
+[package]
+name = "stack_depth"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "stack_depth"
+path = "src/lib.rs"
+
+[dependencies]
+utils_error = { path = "../../utils_error" }
+stack_depth_seams = { path = "../stack_depth_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+utility_out_seams = { path = "../../../tcop/utility_out_seams" }
+guc_seams = { path = "../guc_seams" }
+guc_tables = { path = "../guc_tables" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+libc = "0.2"

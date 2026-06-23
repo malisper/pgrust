@@ -1,0 +1,38 @@
+[package]
+name = "pqmq"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pqmq"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+datum = { path = "../../../_support/types/datum" }
+types_dest = { path = "../../../_support/types/types_dest" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_pgstat = { path = "../../../_support/types/types_pgstat" }
+types_parallel = { path = "../../../_support/types/types_parallel" }
+execparallel = { path = "../../../_support/types/execparallel" }
+applyparallel = { path = "../../../_support/types/applyparallel" }
+
+# Direct (acyclic) owner deps.
+pqcomm = { path = "../pqcomm" }
+utils_error = { path = "../../utils/utils_error" }
+init_small = { path = "../../utils/init/init_small" }
+dsm_core = { path = "../../storage/ipc/dsm_core" }
+
+# Inward seams this crate owns + installs.
+pqmq_seams = { path = "../pqmq_seams" }
+parallel_rt_seams = { path = "../../access/transam/parallel_rt_seams" }
+
+# Outward seams (unported / cycle-partner owners).
+shm_mq_seams = { path = "../../storage/ipc/shm_mq_seams" }
+procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
+mcxt_seams = { path = "../../utils/mmgr/mcxt_seams" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }

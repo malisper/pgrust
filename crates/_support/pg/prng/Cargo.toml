@@ -1,0 +1,12 @@
+[package]
+name = "prng"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "prng"
+path = "src/lib.rs"
+
+[dependencies]
+prng_seams = { path = "../prng_seams" }

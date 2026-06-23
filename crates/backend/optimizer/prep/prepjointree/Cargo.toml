@@ -1,0 +1,47 @@
+[package]
+name = "prepjointree"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "prepjointree"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+nodeFuncs_seams = { path = "../../../nodes/nodeFuncs_seams" }
+rewrite_core = { path = "../../../rewrite/rewrite_core" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+clauses = { path = "../../util/clauses" }
+# FAMILY 6 (preprocess_function_rtes): inline_set_returning_function seam.
+clauses_seams = { path = "../../util/clauses_seams" }
+# FAMILY 6 (pull_up_constant_function): get_expr_result_type.
+funcapi = { path = "../../../utils/fmgr/funcapi" }
+
+# FAMILY 1 (pull_up_sublinks) calls the re-keyed SubLink → join conversions.
+subselect_pullup_seams = { path = "../../plan/subselect_pullup_seams" }
+
+# FAMILY 2 (pull_up_subqueries): pull_varnos/contain_vars_of_level, PlaceHolderVar
+# creation, flatten_join_alias_vars, and CombineRangeTables/replace_empty_jointree.
+vars = { path = "../../util/vars" }
+placeholder_seams = { path = "../../util/placeholder_seams" }
+rewritemanip_seams = { path = "../../../rewrite/rewritemanip_seams" }
+subselect_pullup = { path = "../../plan/subselect_pullup" }
+
+# expand_virtual_generated_columns relcache leg: table_open + RelationGetDescr,
+# then build_generation_expression (rewriteHandler.c, via its seam) + makeVar to
+# build the virtual-generated-column replacement targetlist.
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+rewritehandler_seams = { path = "../../../rewrite/rewritehandler_seams" }
+rel = { path = "../../../../_support/types/rel" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+
+# Inward seams this unit owns + installs.
+prepjointree_seams = { path = "../prepjointree_seams" }

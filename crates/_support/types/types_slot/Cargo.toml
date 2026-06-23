@@ -1,0 +1,16 @@
+[package]
+name = "types_slot"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "types_slot"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../types_core" }
+types_tuple = { path = "../types_tuple" }
+types_storage = { path = "../types_storage" }
+types_error = { path = "../types_error" }
+mcx = { path = "../../mcx" }

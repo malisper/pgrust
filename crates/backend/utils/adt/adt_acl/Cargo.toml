@@ -1,0 +1,54 @@
+[package]
+name = "adt_acl"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_acl"
+path = "src/lib.rs"
+
+[dependencies]
+acl_seams = { path = "../acl_seams" }
+user_seams = { path = "../../../commands/user_seams" }
+authid = { path = "../../../../_support/types/authid" }
+bloomfilter_seams = { path = "../../../lib/bloomfilter_seams" }
+catalog_seams = { path = "../../../catalog/catalog_seams" }
+inval_seams = { path = "../../cache/inval_seams" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+miscinit = { path = "../../init/miscinit" }
+miscinit_seams = { path = "../../init/miscinit_seams" }
+init_small_seams = { path = "../../init/init_small_seams" }
+superuser_seams = { path = "../../misc/superuser_seams" }
+guc_funcs_seams = { path = "../../misc/guc_funcs_seams" }
+mcx = { path = "../../../../_support/mcx" }
+types_acl = { path = "../../../../_support/types/types_acl" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+arrayfuncs = { path = "../arrayfuncs" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+elog_seams = { path = "../../error/elog_seams" }
+cache = { path = "../../../../_support/types/cache" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+parsenodes = { path = "../../../../_support/types/parsenodes" }
+types_syscache = { path = "../../../../_support/types/types_syscache" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+pgstrcasecmp = { path = "../../../../port/pgstrcasecmp" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+catalog_perm_seams = { path = "../catalog_perm_seams" }
+namespace_seams = { path = "../../../catalog/namespace_seams" }
+pg_largeobject_seams = { path = "../../../catalog/pg_largeobject_seams" }
+dbcommands_seams = { path = "../../../commands/dbcommands_seams" }
+proclang_seams = { path = "../../../commands/proclang_seams" }
+tablespace_seams = { path = "../../../commands/tablespace_seams" }
+foreign_seams = { path = "../../../foreign/foreign_seams" }
+regproc_seams = { path = "../regproc_seams" }
+varlena_seams = { path = "../varlena_seams" }
+lsyscache_seams = { path = "../../cache/lsyscache_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+guc_tables = { path = "../../misc/guc_tables" }
+snapmgr_seams = { path = "../../time/snapmgr_seams" }
+utility_out_seams = { path = "../../../tcop/utility_out_seams" }

@@ -1,0 +1,76 @@
+[package]
+name = "adt_selfuncs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_selfuncs"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+nodes = { path = "../../../../_support/types/nodes" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+types_selfuncs = { path = "../../../../_support/types/types_selfuncs" }
+# pathnode.c `create_unique_path` reaches `estimate_num_groups` via the
+# pathnode-side outward seam. pathnode-seams is a leaf seam crate — no cycle.
+pathnode_seams = { path = "../../../optimizer/util/pathnode_seams" }
+statistics = { path = "../../../../_support/types/statistics" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_acl = { path = "../../../../_support/types/types_acl" }
+selfuncs_seams = { path = "../selfuncs_seams" }
+insert_vacuum_seams = { path = "../../../access/brin/insert_vacuum_seams" }
+brin = { path = "../../../../_support/types/brin" }
+indexam_seams = { path = "../../../access/index/indexam_seams" }
+ginutil_seams = { path = "../../../access/gin/ginutil_seams" }
+gin = { path = "../../../../_support/types/gin" }
+rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+lsyscache_seams = { path = "../../cache/lsyscache_seams" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+miscinit = { path = "../../init/miscinit" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+equalfuncs_seams = { path = "../../../nodes/equalfuncs_seams" }
+nodeFuncs_seams = { path = "../../../nodes/nodeFuncs_seams" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+parser_relation = { path = "../../../parser/parser_relation" }
+clause = { path = "../../../parser/clause" }
+clauses = { path = "../../../optimizer/util/clauses" }
+equivclass_seams = { path = "../../../optimizer/path/equivclass_seams" }
+equivclass_ext_seams = { path = "../../../optimizer/path/equivclass_ext_seams" }
+mvdistinct = { path = "../../../statistics/mvdistinct" }
+relnode_seams = { path = "../../../optimizer/util/relnode_seams" }
+var_seams = { path = "../../../optimizer/util/var_seams" }
+clauses_seams = { path = "../../../optimizer/util/clauses_seams" }
+joinpath_seams = { path = "../../../optimizer/path/joinpath_seams" }
+plancat_ext_seams = { path = "../../../optimizer/util/plancat_ext_seams" }
+path_small_seams = { path = "../../../optimizer/path/path_small_seams" }
+costsize_seams = { path = "../../../optimizer/path/costsize_seams" }
+predtest_seams = { path = "../../../optimizer/util/predtest_seams" }
+adt_datetime = { path = "../adt_datetime" }
+range_selfuncs = { path = "../range_selfuncs" }
+network_selfuncs = { path = "../network_selfuncs" }
+array_selfuncs = { path = "../array_selfuncs" }
+typcache_seams = { path = "../../cache/typcache_seams" }
+arrayfuncs_seams = { path = "../arrayfuncs_seams" }
+geo_selfuncs = { path = "../geo_selfuncs" }
+regexp_seams = { path = "../regexp_seams" }
+varlena_seams = { path = "../varlena_seams" }
+pg_locale_seams = { path = "../pg_locale_seams" }
+mbutils_seams = { path = "../../mb/mbutils_seams" }
+mbutils = { path = "../../mb/mbutils" }
+stack_depth = { path = "../../misc/stack_depth" }
+fmgr_support_seams = { path = "../../fmgr/fmgr_support_seams" }
+ts_small = { path = "../ts_small" }
+detoast_seams = { path = "../../../access/common/detoast_seams" }
+locale = { path = "../../../../_support/types/locale" }
+tsearch = { path = "../../../../_support/types/tsearch" }
+amapi_seams = { path = "../../../access/index/amapi_seams" }
+indxpath_seams = { path = "../../../optimizer/path/indxpath_seams" }
+common_relation_seams = { path = "../../../access/common/common_relation_seams" }

@@ -1,0 +1,47 @@
+[package]
+name = "schemacmds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "schemacmds"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+utils_error = { path = "../../utils/utils_error" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_acl = { path = "../../../_support/types/types_acl" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+nodes = { path = "../../../_support/types/nodes" }
+types_storage = { path = "../../../_support/types/types_storage" }
+
+# Inward seam this unit owns.
+schemacmds_seams = { path = "../schemacmds_seams" }
+
+# Directly ported foundation crates (no cycle).
+catalog_catalog = { path = "../../catalog/catalog_catalog" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+pg_namespace = { path = "../../catalog/pg_namespace" }
+pg_depend = { path = "../../catalog/pg_depend" }
+
+# Cross-subsystem externals via their owners' -seams crates.
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+guc_seams = { path = "../../utils/misc/guc_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+acl_seams = { path = "../../utils/adt/acl_seams" }
+ruleutils_seams = { path = "../../utils/adt/ruleutils_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+objectaccess_seams = { path = "../../catalog/objectaccess_seams" }
+indexing_seams = { path = "../../catalog/indexing_seams" }
+pg_shdepend_seams = { path = "../../catalog/pg_shdepend_seams" }
+dbcommands_seams = { path = "../dbcommands_seams" }
+event_trigger_seams = { path = "../event_trigger_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+utility_fc_seams = { path = "../../tcop/utility_fc_seams" }
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+parse_utilcmd_seams = { path = "../../parser/parse_utilcmd_seams" }

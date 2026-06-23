@@ -1,0 +1,44 @@
+[package]
+name = "adt_ri_triggers"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_ri_triggers"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+rel = { path = "../../../../_support/types/rel" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+types_ri_triggers = { path = "../../../../_support/types/types_ri_triggers" }
+types_catalog = { path = "../../../../_support/types/types_catalog" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+table = { path = "../../../access/table/table" }
+trigger_seams = { path = "../../../commands/trigger_seams" }
+spi_seams = { path = "../../../executor/spi_seams" }
+pg_constraint_seams = { path = "../../../catalog/pg_constraint_seams" }
+ruleutils_seams = { path = "../ruleutils_seams" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+lsyscache_seams = { path = "../../cache/lsyscache_seams" }
+miscinit_seams = { path = "../../init/miscinit_seams" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+snapmgr_seams = { path = "../../time/snapmgr_seams" }
+guc_seams = { path = "../../misc/guc_seams" }
+acl_seams = { path = "../acl_seams" }
+execMain_seams = { path = "../../../executor/execMain_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+coerce_seams = { path = "../../../parser/coerce_seams" }
+format_type_seams = { path = "../format_type_seams" }
+ri_triggers_seams = { path = "../ri_triggers_seams" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+more_seams = { path = "../../misc/more_seams" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+types_acl = { path = "../../../../_support/types/types_acl" }

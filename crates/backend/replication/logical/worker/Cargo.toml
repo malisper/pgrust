@@ -1,0 +1,25 @@
+[package]
+name = "worker"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "worker"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+replication_launcher = { path = "../../../../_support/types/replication_launcher" }
+
+# Inward seams this crate owns and installs.
+worker_seams = { path = "../worker_seams" }
+
+# Outward owner seam crates.
+lwlock_seams = { path = "../../../storage/lmgr/lwlock_seams" }
+
+# Real launcher API (find/wakeup live here).
+launcher = { path = "../launcher" }
+launcher_seams = { path = "../launcher_seams" }

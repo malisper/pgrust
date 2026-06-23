@@ -1,0 +1,38 @@
+[package]
+name = "main_main"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "main_main"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_startup = { path = "../../../_support/types/types_startup" }
+utils_error = { path = "../../utils/utils_error" }
+
+# Inward seam this unit OWNS (parse_dispatch_option).
+main_seams = { path = "../main_seams" }
+
+# Process globals home (stores `progname` for the read-only `progname` seam).
+init_small = { path = "../../utils/init/init_small" }
+
+# Real ported subprograms reached by the dispatch switch.
+bootstrap = { path = "../../bootstrap/bootstrap" }
+help_config = { path = "../../utils/misc/help_config" }
+more = { path = "../../utils/misc/more" }
+
+# Owner seams for callees whose owning unit is not yet ported (panic until
+# the owner lands — mirror-pg-and-panic).
+postmaster_seams = { path = "../../postmaster/postmaster_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+mcxt_seams = { path = "../../utils/mmgr/mcxt_seams" }
+common_exec_seams = { path = "../../common/common_exec_seams" }
+common_path_seams = { path = "../../../common/common_path_seams" }
+username_seams = { path = "../../../common/username_seams" }
+pg_locale_seams = { path = "../../utils/adt/pg_locale_seams" }

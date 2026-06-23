@@ -1,0 +1,55 @@
+[package]
+name = "execPartition"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "execPartition"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+datum = { path = "../../../_support/types/datum" }
+nodes = { path = "../../../_support/types/nodes" }
+rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_acl = { path = "../../../_support/types/types_acl" }
+
+# This unit's own seam crate — its run-time-pruning entry points are installed
+# here (init_seams) and reached across the Append/MergeAppend dependency cycle.
+execPartition_seams = { path = "../execPartition_seams" }
+
+# Seam crates for the unported owners this unit calls (bodies dispatch through
+# these; they panic until the owner lands).
+execUtils = { path = "../execUtils" }
+table_tableam = { path = "../../access/table/table_tableam" }
+partitioning_core_seams = { path = "../../partitioning/partitioning_core_seams" }
+partbounds_seams = { path = "../../partitioning/partbounds_seams" }
+partprune_seams = { path = "../../partitioning/partprune_seams" }
+partcache_seams = { path = "../../utils/cache/partcache_seams" }
+partition_seams = { path = "../../catalog/partition_seams" }
+execExpr_seams = { path = "../execExpr_seams" }
+execTuples_seams = { path = "../execTuples_seams" }
+execMain_seams = { path = "../execMain_seams" }
+execIndexing_seams = { path = "../execIndexing_seams" }
+execUtils_seams = { path = "../execUtils_seams" }
+nodeModifyTable_seams = { path = "../nodeModifyTable_seams" }
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }
+tupconvert_seams = { path = "../../access/common/tupconvert_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+acl_seams = { path = "../../utils/adt/acl_seams" }
+ruleutils_seams = { path = "../../utils/adt/ruleutils_seams" }
+stack_depth_seams = { path = "../../utils/misc/stack_depth_seams" }
+common_relation_seams = { path = "../../access/common/common_relation_seams" }
+next_seams = { path = "../../access/common/next_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+more_seams = { path = "../../utils/misc/more_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }

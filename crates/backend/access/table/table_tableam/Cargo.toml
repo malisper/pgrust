@@ -1,0 +1,42 @@
+[package]
+name = "table_tableam"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "table_tableam"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+# tablecmds reads the default_table_access_method GUC (owned here) to pick a
+# table AM in DefineRelation. Seam crate -> no cycle.
+tablecmds_seams = { path = "../../../commands/tablecmds_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+nodes = { path = "../../../../_support/types/nodes" }
+rel = { path = "../../../../_support/types/rel" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+table_tableam_seams = { path = "../table_tableam_seams" }
+tableam_bm_seams = { path = "../tableam_bm_seams" }
+createas_seams = { path = "../../../commands/createas_seams" }
+matview_deps_seams = { path = "../../../commands/matview_deps_seams" }
+transam_xact_seams = { path = "../../transam/transam_xact_seams" }
+syncscan_seams = { path = "../../common/syncscan_seams" }
+execTuples_seams = { path = "../../../executor/execTuples_seams" }
+costsize_seams = { path = "../../../optimizer/path/costsize_seams" }
+plancat_seams = { path = "../../../optimizer/util/plancat_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+s_lock = { path = "../../../storage/lmgr/s_lock" }
+smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+guc_seams = { path = "../../../utils/misc/guc_seams" }
+snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }

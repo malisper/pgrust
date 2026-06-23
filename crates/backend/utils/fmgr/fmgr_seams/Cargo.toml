@@ -1,0 +1,23 @@
+[package]
+name = "fmgr_seams"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "fmgr_seams"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_reloptions = { path = "../../../../_support/types/types_reloptions" }
+cache = { path = "../../../../_support/types/cache" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+mcx = { path = "../../../../_support/mcx" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_bgworker = { path = "../../../../_support/types/types_bgworker" }
+types_ri_triggers = { path = "../../../../_support/types/types_ri_triggers" }
+array = { path = "../../../../_support/types/array" }
+nodes = { path = "../../../../_support/types/nodes" }

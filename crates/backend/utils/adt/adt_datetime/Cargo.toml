@@ -1,0 +1,51 @@
+[package]
+name = "adt_datetime"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_datetime"
+path = "src/lib.rs"
+
+[dependencies]
+# Lazy-vacuum driver timestamp seams (GetCurrentTimestamp / TimestampDifference /
+# TimestampDifferenceExceeds) home in vacuumlazy-seams; timestamp.c is their owner.
+vacuumlazy_seams = { path = "../../../access/heap/vacuumlazy_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_datetime = { path = "../../../../_support/types/types_datetime" }
+types_error = { path = "../../../../_support/types/types_error" }
+pgtime = { path = "../../../../_support/types/pgtime" }
+types_numeric = { path = "../../../../_support/types/types_numeric" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+misc_more2 = { path = "../../../../_support/types/misc_more2" }
+mcx = { path = "../../../../_support/mcx" }
+adt_numeric = { path = "../adt_numeric" }
+numutils = { path = "../numutils" }
+localtime = { path = "../../../timezone/localtime" }
+timezone_pgtz = { path = "../../../timezone/timezone_pgtz" }
+state_pgtz = { path = "../../../../_support/state/state_pgtz" }
+transam_xact = { path = "../../../access/transam/transam_xact" }
+hashfn = { path = "../../../../common/hashfn" }
+timestamp_seams = { path = "../timestamp_seams" }
+isoweek_seams = { path = "../isoweek_seams" }
+strftime_seams = { path = "../../../timezone/strftime_seams" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+arrayutils_seams = { path = "../arrayutils_seams" }
+
+[dev-dependencies]
+transam_parallel = { path = "../../../access/transam/transam_parallel" }
+# The `get_share_path` (`common/path.c`) seam, installed by the test harness
+# (`test_install_seams`) so the tzdb-backed timezone tests resolve
+# `<sharedir>/timezone` exactly as the server does. The production owner
+# (`backend-utils-init-miscinit`) is far higher in the stack, so the unit-test
+# harness installs a faithful local `get_share_path` body (a port of
+# `make_relative_path`) against the build-baked `PGRUST_PGSHAREDIR`/`PGRUST_PGBINDIR`.
+common_path_seams = { path = "../../../../common/common_path_seams" }
+# `read_dir_names_logged` (`storage/fd.c`): pgtz scans `<sharedir>/timezone`
+# case-insensitively through this seam. Production owner is
+# `backend-storage-file-fd`; the test harness installs a `std::fs::read_dir`
+# body (the same OS call) so the tzdb scan resolves.
+fd_seams = { path = "../../../storage/file/fd_seams" }

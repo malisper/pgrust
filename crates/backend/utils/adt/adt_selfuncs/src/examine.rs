@@ -1,0 +1,1120 @@
+//! The variable-recognition layer of selfuncs.c — `examine_variable`,
+//! `examine_simple_variable`, `get_restriction_variable`, `get_join_variables`,
+//! `all_rows_selectable`, and `ReleaseVariableStats`.
+//!
+//! ## What this layer does
+//!
+//! These functions locate the `pg_statistic` data for an expression. The
+//! statistics-acquisition core, `examine_simple_variable`, reads
+//! `planner_rt_fetch(varno, root)` (resolved through the [`PlannerRun`] RTE
+//! store), dispatches on `rte->rtekind`, and for `RTE_RELATION` runs
+//! `SearchSysCache3(STATRELATTINH, ...)` to pin a `pg_statistic` `HeapTuple`;
+//! for `RTE_SUBQUERY`/`RTE_CTE` it recurses into the subquery's `subroot`.
+//!
+//! The PlannerRun-through-costing keystone threads `&PlannerRun<'mcx>` to the
+//! restriction/join-selectivity call sites, so `examine_simple_variable` can
+//! call [`planner_rt_fetch`] over `simple_rte_array` and resolve each
+//! `RangeTblEntry`. The arena-mutating `&mut PlannerInfo` is threaded here too
+//! (from `call_oprrest`/`call_oprjoin`), so the PlaceHolderVar/RelabelType
+//! stripping can re-intern the stripped expression into the planner node arena.
+//!
+//! ## Remaining seam-and-panic boundaries (genuinely unported owners)
+//!
+//! * `SearchSysCache3(STATRELATTINH, ...)` — the `pg_statistic` catcache probe
+//!   ([`search_statrelattinh`](syscache_seams::search_statrelattinh)).
+//!   The seam is declared by the (ported) syscache owner but is not installed
+//!   yet, so a relation-column stats lookup raises the owner's loud panic until
+//!   the catcache wiring lands (mirror-PG-and-panic). With no live `statsTuple`,
+//!   the stats-absent / default-estimate paths are the live common case.
+//! * `statext_expressions_load` — extended-statistics per-expression tuple load
+//!   (unported; reached only after an `equal()` match on an EXPRESSIONS stat).
+//! * the CTE-subroot recursion (`cte_plan_ids` / `glob->subroots`) is live: the
+//!   referenced CTE's subroot is located via the `parent_root` walk +
+//!   `cte_plan_ids` index + the run's subroot store (populated by
+//!   `SS_process_ctes`); see [`examine_cte_subroot`].
+
+use mcx::Mcx;
+use types_core::primitive::{AttrNumber, Index, InvalidOid, Oid, OidIsValid};
+use types_error::{PgError, PgResult};
+use nodes::bitmapset::Bitmapset;
+use nodes::parsenodes::RTEKind;
+use nodes::primnodes::{Expr, Var};
+use pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
+use pathnodes::{NodeId, PlanId, PlannerInfo, RelId, Relids, SpecialJoinInfo};
+use types_selfuncs::{StatsTuple, StatsTupleFreeFunc, VariableStatData};
+
+use aclchk_seams as aclchk;
+use nodes_core::bitmapset as colbms;
+use equalfuncs_seams as eq;
+use nodeFuncs_seams as nf;
+use joinpath_seams as jp;
+use relnode_seams as rel_seams;
+use var_seams as var_seams;
+use syscache_seams as syscache;
+
+use crate::FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER;
+
+/// `STATS_EXT_EXPRESSIONS` (pg_statistic_ext.h) — the per-expression extended
+/// statistics kind, `'e'`, matched against [`StatisticExtInfo::kind`].
+const STATS_EXT_EXPRESSIONS: i8 = b'e' as i8;
+
+/* ===========================================================================
+ * strip_all_phvs_deep (selfuncs.c) — deeply strip all PlaceHolderVars.
+ * ========================================================================= */
+
+/// `contain_placeholder_walker(node)` (selfuncs.c) — lightweight check for any
+/// `PlaceHolderVar` anywhere in the expression. `PlaceHolderVar` is an `Expr`
+/// variant in this model but is not handled by the generic
+/// [`expression_tree_walker`](nodes_core::nodefuncs::expression_tree_walker),
+/// so the PHV test is done here and the walker recurses into the rest.
+fn contain_placeholder(node: &Expr<'_>) -> bool {
+    if node.is_placeholdervar() {
+        return true;
+    }
+    let mut found = false;
+    nodes_core::nodefuncs::expression_tree_walker(Some(node), &mut |child: &Expr<'_>| {
+        if contain_placeholder(child) {
+            found = true;
+            return true; // abort
+        }
+        false
+    });
+    found
+}
+
+/// `strip_all_phvs_mutator(node)` (selfuncs.c) — replace every `PlaceHolderVar`
+/// with its contained `phexpr`, recursively. Operates on an owned [`Expr`]
+/// (matching the C mutator returning a fresh `Node *`).
+fn strip_all_phvs_mutator<'mcx>(node: Expr<'mcx>) -> Expr<'mcx> {
+    if let Expr::PlaceHolderVar(phv) = node {
+        let inner = phv
+            .phexpr
+            .map(|b| *b)
+            .expect("strip_all_phvs_mutator: PlaceHolderVar has no phexpr");
+        return strip_all_phvs_mutator(inner);
+    }
+    nodes_core::nodefuncs::expression_tree_mutator(node, &mut strip_all_phvs_mutator)
+}
+
+/// `strip_all_phvs_deep(root, node)` (selfuncs.c) — deeply strip all
+/// PlaceHolderVars. The lightweight walker first checks for any PHV (avoiding a
+/// tree copy in the common case); the expensive mutator runs only when one is
+/// present. Returns an owned [`Expr`] (a clone of `node` when nothing changed).
+fn strip_all_phvs_deep<'mcx>(
+    root: &PlannerInfo,
+    node: &Expr<'mcx>,
+    mcx: Mcx<'mcx>,
+) -> PgResult<Expr<'mcx>> {
+    let last_ph_id = root.glob.as_ref().map(|g| g.last_ph_id).unwrap_or(0);
+    if last_ph_id == 0 {
+        return node.clone_in(mcx);
+    }
+    if !contain_placeholder(node) {
+        return node.clone_in(mcx);
+    }
+    Ok(strip_all_phvs_mutator(node.clone_in(mcx)?))
+}
+
+/* ===========================================================================
+ * examine_variable (selfuncs.c)
+ * ========================================================================= */
+
+/// `examine_variable(root, node, varRelid, &vardata)` (selfuncs.c) — look up
+/// statistical data about an expression. Strips PlaceHolderVars and
+/// binary-compatible RelabelTypes, takes the fast path for a simple `Var`, and
+/// otherwise determines variable membership to match index expressions /
+/// extended statistics. 1:1 with the C body.
+pub(crate) fn examine_variable<'mcx, 'run>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'run>,
+    root: &mut PlannerInfo,
+    node_id: NodeId,
+    var_relid: i32,
+) -> PgResult<VariableStatData> {
+    // Make sure we don't return dangling pointers in vardata.
+    let mut vardata = VariableStatData::zeroed(node_id);
+
+    // Save the exposed type of the expression. clone_in: the examined node may
+    // be an Aggref (e.g. a HAVING `count(*) > 1`), whose context-allocated
+    // TargetEntry args a bare derived `.clone()` panics on.
+    let node_expr = root.node(node_id).clone_in(mcx)?;
+    vardata.vartype = nodes_core::nodefuncs::expr_type(Some(&node_expr))?;
+
+    // PlaceHolderVars are transparent for statistics lookup; strip them first.
+    let mut basenode = strip_all_phvs_deep(root, &node_expr, mcx)?;
+
+    // Look inside any binary-compatible relabeling (handle nested RelabelTypes).
+    while let Some(rt) = basenode.as_relabeltype() {
+        let arg = rt
+            .arg
+            .as_deref()
+            .expect("examine_variable: RelabelType has no arg")
+            .clone_in(mcx)?;
+        basenode = arg;
+    }
+
+    // Fast path for a simple Var.
+    if let Some(var) = basenode.as_var() {
+        if var_relid == 0 || var_relid == var.varno {
+            let var = var.clone();
+            // Re-intern the stripped Var so vardata->var is a handle to the Var
+            // without phvs or relabeling (C: vardata->var = basenode).
+            vardata.var = root.alloc_node(Expr::Var(var.clone()));
+            vardata.rel = Some(rel_seams::find_base_rel::call(root, var.varno));
+            vardata.atttype = var.vartype;
+            vardata.atttypmod = var.vartypmod;
+            vardata.isunique = has_unique_index(root, vardata.rel.unwrap(), var.varattno);
+
+            // Try to locate some stats.
+            examine_simple_variable(mcx, run, root, &var, &mut vardata)?;
+
+            return Ok(vardata);
+        }
+    }
+
+    // A more complicated expression. Determine variable membership; when
+    // varRelid isn't zero, only vars of that relation are considered "real".
+    // pull_varnos(root, basenode): intern the stripped node and use the
+    // root-aware NodeId form (varlevelsup-correct).
+    let basenode_id = root.alloc_node(basenode.clone_in(mcx)?);
+    let varnos: Relids = jp::pull_varnos::call(root, basenode_id);
+    let outer_join_rels = root.outer_join_rels.clone();
+    let basevarnos: Relids = rel_seams::relids_difference::call(&varnos, &outer_join_rels);
+
+    let mut onerel: Option<RelId> = None;
+    // The expression vardata->var ends up pointing at (the stripped basenode,
+    // when recognized to a relation).
+    let mut node_for_var: Option<Expr> = None;
+
+    if rel_seams::relids_is_empty::call(&basevarnos) {
+        // No Vars at all ... must be pseudo-constant clause.
+    } else if let Some(relid) = rel_seams::relids_get_singleton_member::call(&basevarnos) {
+        if var_relid == 0 || var_relid == relid {
+            let r = rel_seams::find_base_rel::call(root, relid);
+            onerel = Some(r);
+            vardata.rel = Some(r);
+            node_for_var = Some(basenode.clone_in(mcx)?);
+        }
+        // else treat it as a constant
+    } else if var_relid == 0 {
+        // Treat it as a variable of a join relation.
+        vardata.rel = rel_seams::find_join_rel::call(root, &varnos);
+        node_for_var = Some(basenode.clone_in(mcx)?);
+    } else if rel_seams::relids_is_member::call(var_relid, &varnos) {
+        // Ignore the vars belonging to other relations.
+        vardata.rel = Some(rel_seams::find_base_rel::call(root, var_relid));
+        node_for_var = Some(basenode.clone_in(mcx)?);
+        // note: no point in expressional-index search here
+    }
+    // else treat it as a constant
+
+    // vardata->var = node (the recognized stripped node, else the original).
+    let final_node = match node_for_var {
+        Some(n) => n,
+        None => node_expr.clone_in(mcx)?,
+    };
+    vardata.var = root.alloc_node(final_node.clone_in(mcx)?);
+    vardata.atttype = nodes_core::nodefuncs::expr_type(Some(&final_node))?;
+    vardata.atttypmod = nodes_core::nodefuncs::expr_typmod(Some(&final_node))?;
+
+    if let Some(onerel) = onerel {
+        // We have an expression in vars of a single relation. Try to match it
+        // to expressional index columns / extended statistics.
+        examine_expression_stats(mcx, run, root, onerel, &varnos, &basenode, &mut vardata)?;
+    }
+
+    Ok(vardata)
+}
+
+/// The "expression in vars of a single relation" tail of `examine_variable`:
+/// match `node` against expressional index columns and extended-statistics
+/// expressions, pinning a `pg_statistic` tuple when an expression matches.
+fn examine_expression_stats<'mcx, 'run>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'run>,
+    root: &mut PlannerInfo,
+    onerel: RelId,
+    varnos: &Relids,
+    basenode: &Expr,
+    vardata: &mut VariableStatData,
+) -> PgResult<()> {
+    // The nullingrels bits could prevent matching; strip them when the
+    // expression overlaps any outer join. clone_in (deep): the matched node may
+    // be an Aggref (e.g. a HAVING `max(b) > 15`), whose context-allocated
+    // TargetEntry args a bare derived `.clone()` panics on.
+    let mut node = basenode.clone_in(mcx)?;
+    let outer_join_rels = root.outer_join_rels.clone();
+    if rel_seams::relids_overlap::call(varnos, &outer_join_rels) {
+        let none: Relids = None;
+        node = nf::remove_nulling_relids::call(mcx, node, &outer_join_rels, &none);
+    }
+
+    // Snapshot the per-rel index + stat lists (immutable reads) so we can match
+    // and then acquire stats through &mut root without aliasing.
+    let rel = root.rel(onerel);
+    let onerel_relid = rel.relid;
+    let indexlist = rel.indexlist.clone();
+    let statlist = rel.statlist.clone();
+
+    // --- expressional index columns ---
+    for index in indexlist.iter() {
+        if index.indexprs.is_empty() {
+            continue; // no expressions here...
+        }
+        let mut indexpr_iter = index.indexprs.iter();
+        for pos in 0..(index.ncolumns as usize) {
+            if index.indexkeys.get(pos).copied() != Some(0) {
+                continue;
+            }
+            let indexkey_id = *indexpr_iter
+                .next()
+                .ok_or_else(|| PgError::error("too few entries in indexprs list"))?;
+            let mut indexkey = root.node(indexkey_id).clone();
+            if let Some(rt) = indexkey.as_relabeltype() {
+                indexkey = *rt
+                    .arg
+                    .clone()
+                    .expect("examine_variable: index RelabelType has no arg");
+            }
+            if eq::equal_expr::call(&node, &indexkey) {
+                // Found a match ... is it a unique index?
+                if index.unique
+                    && index.nkeycolumns == 1
+                    && pos == 0
+                    && (index.indpred.is_empty() || index.predOK)
+                {
+                    vardata.isunique = true;
+                }
+                // Has it got stats? Only for non-partial indexes.
+                if index.indpred.is_empty() {
+                    vardata.stats_tuple =
+                        search_statrelattinh(mcx, index.indexoid, (pos + 1) as AttrNumber, false)?;
+                    vardata.freefunc = Some(StatsTupleFreeFunc::ReleaseSysCache);
+
+                    if vardata.stats_tuple.is_some() {
+                        // SELECT privilege on the whole index's table.
+                        let index_rel_relid = index
+                            .rel
+                            .map(|r| root.rel(r).relid as i32)
+                            .unwrap_or(onerel_relid as i32);
+                        vardata.acl_ok =
+                            all_rows_selectable(mcx, run, root, index_rel_relid as u32, None)?;
+                    } else {
+                        vardata.acl_ok = true; // suppress leakproofness checks later
+                    }
+                }
+                if vardata.stats_tuple.is_some() {
+                    break;
+                }
+            }
+        }
+        if vardata.stats_tuple.is_some() {
+            break;
+        }
+    }
+
+    // --- extended statistics with a matching expression ---
+    for &stat_id in statlist.iter() {
+        if vardata.stats_tuple.is_some() {
+            break;
+        }
+        let info = root.statistic_ext(stat_id);
+        if info.kind != STATS_EXT_EXPRESSIONS {
+            continue; // skip stats without per-expression stats
+        }
+        let rte_inh = planner_rt_fetch(run, root, onerel_relid).inh;
+        if info.inherit != rte_inh {
+            continue; // skip stats with mismatching stxdinherit value
+        }
+        let stat_oid = info.stat_oid;
+        let exprs = info.exprs.clone();
+        for (pos, &expr_id) in exprs.iter().enumerate() {
+            let mut expr = root.node(expr_id).clone();
+            if let Some(rt) = expr.as_relabeltype() {
+                expr = *rt
+                    .arg
+                    .clone()
+                    .expect("examine_variable: extstats RelabelType has no arg");
+            }
+            if eq::equal_expr::call(&node, &expr) {
+                vardata.stats_tuple = statext_expressions_load(mcx, stat_oid, rte_inh, pos)?;
+                vardata.freefunc = Some(StatsTupleFreeFunc::ReleaseDummy);
+                vardata.acl_ok = all_rows_selectable(mcx, run, root, onerel_relid, None)?;
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/* ===========================================================================
+ * examine_simple_variable (selfuncs.c)
+ * ========================================================================= */
+
+/// `examine_simple_variable(root, var, vardata)` (selfuncs.c) — handle a simple
+/// `Var` for `examine_variable`, recursing to deal with Vars referencing
+/// subqueries (sub-SELECT-in-FROM or CTE style). 1:1 with the C body.
+fn examine_simple_variable<'mcx, 'run>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'run>,
+    root: &PlannerInfo,
+    var: &Var,
+    vardata: &mut VariableStatData,
+) -> PgResult<()> {
+    let rte = planner_rt_fetch(run, root, var.varno as Index);
+    let rtekind = rte.rtekind;
+    let rte_relid = rte.relid;
+    let rte_inh = rte.inh;
+    let rte_self_reference = rte.self_reference;
+
+    if rtekind == RTEKind::RTE_RELATION {
+        // Plain table or parent of an inheritance appendrel: look up the column
+        // in pg_statistic.
+        vardata.stats_tuple = search_statrelattinh(mcx, rte_relid, var.varattno, rte_inh)?;
+        vardata.freefunc = Some(StatsTupleFreeFunc::ReleaseSysCache);
+
+        if vardata.stats_tuple.is_some() {
+            // Test if user has permission to read all rows from this column.
+            let attset = colbms::bms_make_singleton(
+                mcx,
+                (var.varattno - FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER) as i32,
+            )?;
+            vardata.acl_ok = all_rows_selectable(mcx, run, root, var.varno as u32, Some(&attset))?;
+        } else {
+            vardata.acl_ok = true; // suppress any leakproofness checks later
+        }
+    } else if (rtekind == RTEKind::RTE_SUBQUERY && !rte_inh)
+        || (rtekind == RTEKind::RTE_CTE && !rte_self_reference)
+    {
+        examine_subquery_variable(mcx, run, root, var, rtekind, vardata)?;
+    } else {
+        // Otherwise the Var comes from a FUNCTION or VALUES RTE; nothing to do.
+    }
+    Ok(())
+}
+
+/// `examine_indexcol_variable(root, index, indexcol, vardata)` (selfuncs.c) —
+/// look up statistical data about an index column/expression and fill
+/// `*vardata` (1:1 with the C body). For a simple index column we look to the
+/// stats for the underlying table column; for an expression column we look to
+/// the index's own pg_statistic rows. (The `get_relation_stats_hook` /
+/// `get_index_stats_hook` extension hooks are not modeled — they are always
+/// NULL in the repo.)
+pub(crate) fn examine_indexcol_variable<'mcx, 'run>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'run>,
+    root: &PlannerInfo,
+    index: &pathnodes::IndexOptInfo,
+    indexcol: usize,
+    vardata: &mut VariableStatData,
+) -> PgResult<()> {
+    if index.indexkeys[indexcol] != 0 {
+        // Simple variable --- look to stats for the underlying table.
+        let index_rel = index
+            .rel
+            .expect("examine_indexcol_variable: index.rel must be set");
+        let onerel_relid = root.rel(index_rel).relid as Index;
+        let rte = planner_rt_fetch(run, root, onerel_relid);
+        debug_assert!(rte.rtekind == RTEKind::RTE_RELATION);
+        let relid = rte.relid;
+        let rte_inh = rte.inh;
+        debug_assert!(OidIsValid(relid));
+        let colnum = index.indexkeys[indexcol] as AttrNumber;
+        vardata.rel = Some(index_rel);
+
+        vardata.stats_tuple = search_statrelattinh(mcx, relid, colnum, rte_inh)?;
+        vardata.freefunc = Some(StatsTupleFreeFunc::ReleaseSysCache);
+    } else {
+        // Expression --- maybe there are stats for the index itself.
+        let relid = index.indexoid;
+        let colnum = (indexcol + 1) as AttrNumber;
+
+        vardata.stats_tuple = search_statrelattinh(mcx, relid, colnum, false)?;
+        vardata.freefunc = Some(StatsTupleFreeFunc::ReleaseSysCache);
+    }
+    Ok(())
+}
+
+/// The `RTE_SUBQUERY` / `RTE_CTE` recursion branch of [`examine_simple_variable`].
+fn examine_subquery_variable<'mcx, 'run>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'run>,
+    root: &PlannerInfo,
+    var: &Var,
+    rtekind: RTEKind,
+    vardata: &mut VariableStatData,
+) -> PgResult<()> {
+    use types_core::primitive::InvalidAttrNumber;
+
+    // Punt if it's a whole-row var rather than a plain column reference.
+    if var.varattno == InvalidAttrNumber {
+        return Ok(());
+    }
+
+    // Find the subquery's planner subroot.
+    let subroot: &PlannerInfo = if rtekind == RTEKind::RTE_SUBQUERY {
+        // Fetch RelOptInfo for subquery. Note that we don't change the rel
+        // returned in vardata, since caller expects it to be a rel of the
+        // caller's query level. Because we might already be recursing, we can't
+        // use that rel pointer either, but have to look up the Var's rel afresh.
+        let relid = rel_seams::find_base_rel::call(root, var.varno);
+        match root.rel(relid).subroot.0.as_deref() {
+            Some(sr) => sr,
+            None => return Ok(()), // subquery hasn't been planned yet
+        }
+    } else {
+        // CTE case is more difficult: find the referenced CTE, and locate the
+        // subroot previously made for it (`list_nth(root->glob->subroots,
+        // plan_id - 1)`).
+        match examine_cte_subroot(run, root, var)? {
+            Some(sr) => sr,
+            None => return Ok(()), // subquery hasn't been planned yet
+        }
+    };
+
+    // Use the subquery parsetree as mangled by the planner (subroot->parse).
+    let subquery = run.resolve(subroot.parse);
+
+    // Punt if subquery uses set operations or grouping sets.
+    if subquery.setOperations.is_some() || !subquery.groupingSets.is_empty() {
+        return Ok(());
+    }
+
+    // Get the subquery output expression referenced by the upper Var.
+    let subtlist = if !subquery.returningList.is_empty() {
+        subquery.returningList.as_slice()
+    } else {
+        subquery.targetList.as_slice()
+    };
+    let ste = match parser_relation::get_tle_by_resno(subtlist, var.varattno) {
+        Some(t) if !t.resjunk => t,
+        _ => {
+            return Err(PgError::error(alloc::format!(
+                "subquery does not have attribute {}",
+                var.varattno
+            )))
+        }
+    };
+    // C borrows `tle->expr` (no copy); we only ever read a plain Var out of it.
+    // Extract the inner Var by value if and only if the target is a simple
+    // current-level Var, avoiding a deep `Expr::clone` (which panics on an
+    // owned-subtree child such as an Aggref/SubLink/SubPlan target expr).
+    let inner_simple_var = ste
+        .expr
+        .as_ref()
+        .and_then(|e| e.as_var())
+        .filter(|v| v.varlevelsup == 0)
+        .cloned();
+
+    // DISTINCT: can't use stats; but the only DISTINCT column is unique.
+    if !subquery.distinctClause.is_empty() {
+        let distinct = sort_group_list(&subquery.distinctClause);
+        if distinct.len() == 1
+            && clause::targetIsInSortList(ste, InvalidOid, &distinct)
+        {
+            vardata.isunique = true;
+        }
+        return Ok(());
+    }
+
+    // The same idea works for a GROUP-BY too.
+    if !subquery.groupClause.is_empty() {
+        let group = sort_group_list(&subquery.groupClause);
+        if group.len() == 1 && clause::targetIsInSortList(ste, InvalidOid, &group) {
+            vardata.isunique = true;
+        }
+        return Ok(());
+    }
+
+    // If the sub-query originated from a security_barrier view, don't dig down.
+    if planner_rt_fetch(run, root, var.varno as Index).security_barrier {
+        return Ok(());
+    }
+
+    // Can only handle a simple Var of subquery's query level.
+    if let Some(inner_var) = inner_simple_var {
+        examine_simple_variable(mcx, run, subroot, &inner_var, vardata)?;
+    }
+
+    Ok(())
+}
+
+/// The CTE-subroot lookup arm of [`examine_subquery_variable`] (the `else`
+/// branch of selfuncs.c's `examine_simple_variable` `RTE_CTE` case).
+///
+/// Walks `cteroot` up `rte->ctelevelsup` via `parent_root`, finds the
+/// referenced CTE's index `ndx` by matching `rte->ctename` against
+/// `cteroot->parse->cteList`, reads `plan_id = list_nth_int(cteroot->
+/// cte_plan_ids, ndx)`, and returns `subroot = list_nth(root->glob->subroots,
+/// plan_id - 1)`. The subroot PlannerInfos live in the run's subroot store
+/// (`glob->subroots` carries the parallel [`PlanId`] handles), so the C
+/// `list_nth(root->glob->subroots, plan_id - 1)` becomes
+/// `run.resolve_subroot(PlanId(plan_id - 1))`.
+///
+/// `cte_plan_ids` and the run's subroot store are populated by `SS_process_ctes`
+/// (backend-optimizer-plan-init-subselect), which runs during planning, so this
+/// is reachable for the common non-recursive-CTE case. Returns `Ok(None)` only
+/// where C punts (subroot not yet planned — `subroot == NULL`).
+fn examine_cte_subroot<'mcx, 'run, 'a>(
+    run: &'a PlannerRun<'run>,
+    root: &PlannerInfo,
+    var: &Var,
+) -> PgResult<Option<&'a PlannerInfo>> {
+    let rte = planner_rt_fetch(run, root, var.varno as Index);
+    let ctename = rte.ctename.as_ref().map(|s| s.as_str()).unwrap_or("");
+
+    // Find the referenced CTE, and locate the subroot previously made for it.
+    //
+    // levelsup = rte->ctelevelsup; cteroot = root;
+    // while (levelsup-- > 0) { cteroot = cteroot->parent_root; ... }
+    //
+    // C's `cteroot->parent_root` is a back-pointer that lives for the whole
+    // planning run, so this walk always completes. In this owned PlannerInfo
+    // model the subroot does NOT retain its `parent_root` after the CTE's own
+    // create_plan finished (it was moved back to restore the parent — see
+    // plan_sublink_subquery; PlannerInfo is not `Clone`). So when selectivity
+    // for a side-reference to a sibling CTE is re-estimated from inside the
+    // referencing CTE's subroot at a *later* point (e.g. top-level join cost
+    // estimation reaching down through subroot->parse), the parent_root chain
+    // is severed and we cannot reach the level that owns the CTE's plan_id.
+    // This is a stats-only path: C itself punts with empty vardata when the
+    // subroot isn't available yet (`if (subroot == NULL) return;`). Treat a
+    // severed parent_root chain the same way — punt (no stats refinement),
+    // which yields the correct plan, never a spurious "bad levelsup" error.
+    let mut cteroot: &PlannerInfo = root;
+    let mut levelsup = rte.ctelevelsup;
+    while levelsup > 0 {
+        levelsup -= 1;
+        cteroot = match cteroot.parent_root.as_deref() {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+    }
+
+    // ndx = index of the matching CTE in cteroot->parse->cteList.
+    //
+    // Note: cte_plan_ids can be shorter than cteList, if we are still working on
+    // planning the CTEs (ie, this is a side-reference from another CTE). So we
+    // mustn't use forboth here.
+    let mut ndx: usize = 0;
+    let mut found = false;
+    {
+        let parse = run.resolve(cteroot.parse);
+        for cte_node in parse.cteList.iter() {
+            let cte = cte_node
+                .as_commontableexpr()
+                .ok_or_else(|| PgError::error("cteList element is not a CommonTableExpr"))?;
+            let this_name = cte.ctename.as_ref().map(|s| s.as_str()).unwrap_or("");
+            if this_name == ctename {
+                found = true;
+                break;
+            }
+            ndx += 1;
+        }
+    }
+    if !found {
+        // shouldn't happen
+        return Err(PgError::error(alloc::format!(
+            "could not find CTE \"{ctename}\""
+        )));
+    }
+    if ndx >= cteroot.cte_plan_ids.len() {
+        // shouldn't happen
+        return Err(PgError::error(alloc::format!(
+            "could not find plan for CTE \"{ctename}\""
+        )));
+    }
+    let plan_id = cteroot.cte_plan_ids[ndx];
+    if plan_id <= 0 {
+        // shouldn't happen
+        return Err(PgError::error(alloc::format!(
+            "no plan was made for CTE \"{ctename}\""
+        )));
+    }
+
+    // subroot = list_nth(root->glob->subroots, plan_id - 1). The owned subroot
+    // PlannerInfos live in the run's parallel subroot store, keyed by the same
+    // 1-based plan_id (here converted to the 0-based PlanId handle).
+    Ok(Some(run.resolve_subroot(PlanId(plan_id as u32 - 1))))
+}
+
+/* ===========================================================================
+ * all_rows_selectable (selfuncs.c)
+ * ========================================================================= */
+
+/// `all_rows_selectable(root, varno, varattnos)` (selfuncs.c) — whether the user
+/// may read all rows for the given relation/columns (table-level or per-column
+/// SELECT privilege, and no security barrier / RLS quals). 1:1 with the C body.
+fn all_rows_selectable<'mcx, 'run>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'run>,
+    root: &PlannerInfo,
+    varno: u32,
+    varattnos: Option<&Bitmapset<'mcx>>,
+) -> PgResult<bool> {
+    use types_acl::acl::{AclMaskHow, AclResult, ACL_SELECT};
+
+    // find_base_rel_noerr(root, varno) == simple_rel_array[varno].
+    let rel = root
+        .simple_rel_array
+        .get(varno as usize)
+        .copied()
+        .flatten();
+
+    // Determine the user ID for privilege checks.
+    let userid = if let Some(relid) = rel {
+        root.rel(relid).userid
+    } else {
+        // RETURNING Var for an INSERT target relation: use the RTEPermissionInfo
+        // associated with the RTE.
+        let perminfoindex = planner_rt_fetch(run, root, varno).perminfoindex;
+        getrte_perminfo_checkasuser(run, root, perminfoindex)?
+    };
+    let userid = if OidIsValid(userid) {
+        userid
+    } else {
+        miscinit::GetUserId()
+    };
+
+    // Navigate to the inheritance root parent if this is a child.
+    let mut cur_varno = varno;
+    // varattnos is owned locally because the inheritance walk rewrites it.
+    let mut cur_attnos: Option<Bitmapset<'mcx>> = match colbms::bms_copy(mcx, varattnos)? {
+        Some(b) => Some((*b).clone_in(mcx)?),
+        None => None,
+    };
+    if !root.append_rel_array.is_empty() {
+        match navigate_to_inh_root(mcx, run, root, cur_varno, cur_attnos)? {
+            None => return Ok(false), // attr is local to child
+            Some((vn, an)) => {
+                cur_varno = vn;
+                cur_attnos = an;
+            }
+        }
+    }
+
+    let rte = planner_rt_fetch(run, root, cur_varno);
+    let rte_relid = rte.relid;
+
+    // No securityQuals from security barrier views or RLS policies.
+    if !rte.securityQuals.is_empty() {
+        return Ok(false);
+    }
+
+    // Table-level SELECT privilege is sufficient for the requested attributes.
+    if aclchk::pg_class_aclcheck::call(rte_relid, userid, ACL_SELECT)? == AclResult::AclcheckOk {
+        return Ok(true);
+    }
+
+    if cur_attnos.is_none() {
+        return Ok(false); // whole-table access requested
+    }
+
+    // Check per-column privileges.
+    let attset = cur_attnos.as_ref();
+    let mut varattno = -1i32;
+    loop {
+        varattno = colbms::bms_next_member(attset, varattno);
+        if varattno < 0 {
+            break;
+        }
+        let attno = varattno + FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER as i32;
+        if attno == 0 {
+            // Whole-row reference: must have access to all columns.
+            if aclchk::pg_attribute_aclcheck_all::call(
+                rte_relid,
+                userid,
+                ACL_SELECT,
+                AclMaskHow::AclmaskAll,
+            )? != AclResult::AclcheckOk
+            {
+                return Ok(false);
+            }
+        } else if aclchk::pg_attribute_aclcheck::call(
+            rte_relid,
+            attno as AttrNumber,
+            userid,
+            ACL_SELECT,
+        )? != AclResult::AclcheckOk
+        {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+/// The inheritance-root navigation loop of `all_rows_selectable`. Returns
+/// `None` when a required attribute is local to the child (C `return false`),
+/// else `Some((final_varno, mapped_attnos))`.
+fn navigate_to_inh_root<'mcx, 'run>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'run>,
+    root: &PlannerInfo,
+    mut varno: u32,
+    mut attnos: Option<Bitmapset<'mcx>>,
+) -> PgResult<Option<(u32, Option<Bitmapset<'mcx>>)>> {
+    loop {
+        let appinfo = match root
+            .append_rel_array
+            .get(varno as usize)
+            .and_then(|a| a.as_ref())
+        {
+            Some(a) => a,
+            None => break,
+        };
+        if planner_rt_fetch(run, root, appinfo.parent_relid).rtekind != RTEKind::RTE_RELATION {
+            break;
+        }
+        let num_child_cols = appinfo.num_child_cols;
+        let parent_colnos = appinfo.parent_colnos.clone();
+        let parent_relid = appinfo.parent_relid;
+
+        let mut parent_varattnos: Option<mcx::PgBox<'mcx, Bitmapset<'mcx>>> = None;
+        let mut varattno = -1i32;
+        loop {
+            varattno = colbms::bms_next_member(attnos.as_ref(), varattno);
+            if varattno < 0 {
+                break;
+            }
+            let attno = varattno + FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER as i32;
+            if attno == 0 {
+                // Whole-row reference: map each child column to the parent.
+                for a in 1..=num_child_cols {
+                    let parent_attno = parent_colnos[(a - 1) as usize];
+                    if parent_attno == 0 {
+                        return Ok(None); // attr is local to child
+                    }
+                    parent_varattnos = Some(colbms::bms_add_member(
+                        mcx,
+                        parent_varattnos,
+                        parent_attno as i32 - FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER as i32,
+                    )?);
+                }
+            } else {
+                let parent_attno = if attno < 0 {
+                    attno // system attnos are the same in all tables
+                } else {
+                    if attno > num_child_cols {
+                        return Ok(None); // safety check
+                    }
+                    let pa = parent_colnos[(attno - 1) as usize] as i32;
+                    if pa == 0 {
+                        return Ok(None); // attr is local to child
+                    }
+                    pa
+                };
+                parent_varattnos = Some(colbms::bms_add_member(
+                    mcx,
+                    parent_varattnos,
+                    parent_attno - FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER as i32,
+                )?);
+            }
+        }
+
+        varno = parent_relid;
+        attnos = match parent_varattnos {
+            Some(b) => Some((*b).clone_in(mcx)?),
+            None => None,
+        };
+    }
+    Ok(Some((varno, attnos)))
+}
+
+/* ===========================================================================
+ * get_restriction_variable / get_join_variables / ReleaseVariableStats
+ * ========================================================================= */
+
+/// `get_restriction_variable(root, args, varRelid, &vardata, &other,
+/// &varonleft)` (selfuncs.c) — recognize a `(var op const)` / `(const op var)`
+/// restriction clause. Returns `None` when the clause has the wrong structure
+/// (C: `false`), else `(vardata, other, varonleft)`. 1:1 with the C body.
+pub(crate) fn get_restriction_variable<'mcx, 'run>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'run>,
+    root: &mut PlannerInfo,
+    args: &[NodeId],
+    var_relid: i32,
+) -> PgResult<Option<(VariableStatData, Expr<'mcx>, bool)>> {
+    // Fail if not a binary opclause (probably shouldn't happen).
+    if args.len() != 2 {
+        return Ok(None);
+    }
+    let left = args[0];
+    let right = args[1];
+
+    let vardata = examine_variable(mcx, run, root, left, var_relid)?;
+    let rdata = examine_variable(mcx, run, root, right, var_relid)?;
+
+    // If one side is a variable and the other not, we win.
+    if vardata.rel.is_some() && rdata.rel.is_none() {
+        let other = estimate_other(mcx, root, rdata.var)?;
+        return Ok(Some((vardata, other, true)));
+    }
+    if vardata.rel.is_none() && rdata.rel.is_some() {
+        let other = estimate_other(mcx, root, vardata.var)?;
+        release_variable_stats(vardata);
+        return Ok(Some((rdata, other, false)));
+    }
+
+    // Oops, clause has wrong structure (probably var op var).
+    release_variable_stats(vardata);
+    release_variable_stats(rdata);
+    Ok(None)
+}
+
+/// `estimate_expression_value(root, node)` over an arena node handle — fold the
+/// node to a `Const` if possible (the ported clauses.c folder).
+fn estimate_other<'mcx>(mcx: Mcx<'mcx>, root: &PlannerInfo, node: NodeId) -> PgResult<Expr<'mcx>> {
+    // copyObject shape: a bare `.clone()` recurses into the panicking `Expr::clone`
+    // arm when the operand carries a SubPlan/SubLink/Aggref (a correlated scalar
+    // subselect on the non-Var side), so deep-copy through `clone_in`.
+    let expr = root.node(node).clone_in(mcx)?;
+    clauses::estimate_expression_value(mcx, expr)
+}
+
+/// `get_join_variables(root, args, sjinfo, &vardata1, &vardata2,
+/// &join_is_reversed)` (selfuncs.c) — examine the two operands of a join
+/// clause. 1:1 with the C body.
+pub(crate) fn get_join_variables<'mcx, 'run>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'run>,
+    root: &mut PlannerInfo,
+    args: &[NodeId],
+    sjinfo: &SpecialJoinInfo,
+) -> PgResult<(VariableStatData, VariableStatData, bool)> {
+    if args.len() != 2 {
+        return Err(PgError::error("join operator should take two arguments"));
+    }
+    let left = args[0];
+    let right = args[1];
+
+    let vardata1 = examine_variable(mcx, run, root, left, 0)?;
+    let vardata2 = examine_variable(mcx, run, root, right, 0)?;
+
+    let reversed_1 = match vardata1.rel {
+        Some(rel1) => {
+            let relids1 = root.rel(rel1).relids.clone();
+            rel_seams::relids_is_subset::call(&relids1, &sjinfo.syn_righthand)
+        }
+        None => false,
+    };
+    let join_is_reversed = if reversed_1 {
+        true
+    } else {
+        match vardata2.rel {
+            Some(rel2) => {
+                let relids2 = root.rel(rel2).relids.clone();
+                rel_seams::relids_is_subset::call(&relids2, &sjinfo.syn_lefthand)
+            }
+            None => false,
+        }
+    };
+
+    Ok((vardata1, vardata2, join_is_reversed))
+}
+
+/// `ReleaseVariableStats(vardata)` (selfuncs.h) — run `vardata.freefunc` on the
+/// pinned `statsTuple`. A no-op when there is no tuple, else dispatches the
+/// closed `freefunc` enum.
+pub(crate) fn release_variable_stats(vardata: VariableStatData) {
+    let stats_tuple = match vardata.stats_tuple {
+        None => return, // HeapTupleIsValid(statsTuple) is false — nothing to free.
+        Some(t) => t,
+    };
+    match vardata.freefunc {
+        Some(StatsTupleFreeFunc::ReleaseSysCache) => {
+            syscache::release_stats_tuple::call(stats_tuple);
+        }
+        Some(StatsTupleFreeFunc::ReleaseDummy) => release_dummy_stats_tuple(stats_tuple),
+        None => { /* freefunc == NULL but a tuple is present: C requires a freefunc. */ }
+    }
+}
+
+/* ===========================================================================
+ * Seam-and-panic shims into genuinely-unported owners.
+ * ========================================================================= */
+
+/// `SearchSysCache3(STATRELATTINH, ...)` — the `pg_statistic` catcache probe.
+/// Owned by the (ported) syscache unit but not installed yet, so `::call`
+/// raises the owner's panic until the catcache wiring lands.
+fn search_statrelattinh<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    attnum: AttrNumber,
+    inherit: bool,
+) -> PgResult<Option<StatsTuple>> {
+    syscache::search_statrelattinh::call(mcx, relid, attnum, inherit)
+}
+
+/// `statext_expressions_load(statOid, inh, pos)` (extended_stats.c) — load the
+/// `pos`-th per-expression `pg_statistic` tuple for an extended-statistics
+/// object's EXPRESSIONS stats. Delegated to the syscache owner, which reads the
+/// `stxdexpr` `pg_statistic[]` array off `STATEXTDATASTXOID` and rebuilds a
+/// standalone (copied) `pg_statistic` tuple from its `pos`-th element. The
+/// returned tuple is paired with [`StatsTupleFreeFunc::ReleaseDummy`].
+fn statext_expressions_load<'mcx>(
+    mcx: Mcx<'mcx>,
+    stat_oid: Oid,
+    inh: bool,
+    pos: usize,
+) -> PgResult<Option<StatsTuple>> {
+    syscache::statext_expressions_load::call(mcx, stat_oid, inh, pos)
+}
+
+/// C `ReleaseDummy(tuple)` = `pfree(tuple)` — frees a copied tuple produced by
+/// [`statext_expressions_load`]; delegated to the syscache owner that minted it.
+fn release_dummy_stats_tuple(stats_tuple: StatsTuple) {
+    syscache::release_dummy_stats_tuple::call(stats_tuple);
+}
+
+/// `getRTEPermissionInfo(root->parse->rteperminfos, rte)->checkAsUser` — the
+/// RETURNING-Var user fallback in `all_rows_selectable`.
+fn getrte_perminfo_checkasuser<'run>(
+    run: &PlannerRun<'run>,
+    root: &PlannerInfo,
+    perminfoindex: u32,
+) -> PgResult<Oid> {
+    let parse = run.resolve(root.parse);
+    let idx = (perminfoindex as usize)
+        .checked_sub(1)
+        .expect("getRTEPermissionInfo: invalid perminfoindex 0");
+    let perminfo = parse
+        .rteperminfos
+        .get(idx)
+        .expect("getRTEPermissionInfo: perminfoindex out of range");
+    Ok(perminfo.checkAsUser)
+}
+
+/* ===========================================================================
+ * Local helpers.
+ * ========================================================================= */
+
+/// Extract the `SortGroupClause` list from a `Query`'s
+/// `distinctClause`/`groupClause` (stored as boxed `Node`s in this model) so it
+/// can be passed to `targetIsInSortList(&[SortGroupClause])`. C carries these as
+/// `List *` of `SortGroupClause` directly; here each entry is a
+/// `Node::SortGroupClause`.
+fn sort_group_list(
+    nodes: &[mcx::PgBox<'_, nodes::nodes::Node<'_>>],
+) -> alloc::vec::Vec<nodes::rawnodes::SortGroupClause> {
+    nodes
+        .iter()
+        .map(|n| match n.as_sortgroupclause() {
+            Some(s) => *s,
+            None => panic!("expected SortGroupClause in group/distinct clause, got {n:?}"),
+        })
+        .collect()
+}
+
+/// `has_unique_index(rel, attno)` (plancat.c) — is there a single-column unique
+/// index on the attribute? Re-implemented over the planner's per-rel
+/// `indexlist` (pulling plancat into the selectivity deps would form a cycle).
+fn has_unique_index(root: &PlannerInfo, rel: RelId, attno: AttrNumber) -> bool {
+    for index in root.rel(rel).indexlist.iter() {
+        if index.unique
+            && index.nkeycolumns == 1
+            && index.indexkeys.first().copied() == Some(attno as i32)
+            && (index.indpred.is_empty() || index.predOK)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/* ===========================================================================
+ * Seam bodies.
+ * ========================================================================= */
+
+/// Seam body for `examine_variable`.
+pub fn seam_examine_variable<'mcx, 'run>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'run>,
+    root: &mut PlannerInfo,
+    node: NodeId,
+    var_relid: i32,
+) -> PgResult<VariableStatData> {
+    examine_variable(mcx, run, root, node, var_relid)
+}
+
+/// Seam body for `get_restriction_variable`.
+pub fn seam_get_restriction_variable<'mcx, 'run>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'run>,
+    root: &mut PlannerInfo,
+    args: &[NodeId],
+    var_relid: i32,
+) -> PgResult<Option<(VariableStatData, Expr<'mcx>, bool)>> {
+    get_restriction_variable(mcx, run, root, args, var_relid)
+}
+
+/// Seam body for `get_join_variables`.
+pub fn seam_get_join_variables<'mcx, 'run>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'run>,
+    root: &mut PlannerInfo,
+    args: &[NodeId],
+    sjinfo: &SpecialJoinInfo,
+) -> PgResult<(VariableStatData, VariableStatData, bool)> {
+    get_join_variables(mcx, run, root, args, sjinfo)
+}
+
+/// Seam body for `release_variable_stats`.
+pub fn seam_release_variable_stats(vardata: VariableStatData) {
+    release_variable_stats(vardata)
+}
+
+/// Seam body for `statext_clause_attnums_selectable` — the non-leakproof
+/// permission tail of `statext_is_compatible_clause` (extended_stats.c:1626).
+///
+/// C:
+/// ```c
+/// Bitmapset *clause_attnums = NULL;
+/// int attnum = -1;
+/// while ((attnum = bms_next_member(*attnums, attnum)) >= 0)
+///     clause_attnums = bms_add_member(clause_attnums,
+///                          attnum - FirstLowInvalidHeapAttributeNumber);
+/// if (*exprs != NIL)
+///     pull_varattnos((Node *) *exprs, relid, &clause_attnums);
+/// if (!all_rows_selectable(root, relid, clause_attnums))
+///     return false;
+/// ```
+///
+/// `attnums` carries the *non*-offset individual-Var attribute numbers (the
+/// values stored in the clause walk's `Relids`); we offset each by
+/// `FirstLowInvalidHeapAttributeNumber` to build `clause_attnums`. We then run
+/// `pull_varattnos(expr, relid)` over each matched sub-expression and union the
+/// (already-offset) results in, exactly as C feeds the whole `*exprs` list to
+/// `pull_varattnos`.
+pub fn seam_statext_clause_attnums_selectable<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    root: &PlannerInfo,
+    relid: u32,
+    attnums: &[i32],
+    exprs: &[Expr<'mcx>],
+) -> PgResult<bool> {
+    use mcx::PgBox;
+
+    // Build clause_attnums in the offset (pull_varattnos) style from the
+    // individual-Var attnums.
+    let mut clause_attnums: Option<PgBox<'mcx, Bitmapset<'mcx>>> = None;
+    for &attnum in attnums {
+        let offset = attnum - FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER as i32;
+        clause_attnums = Some(colbms::bms_add_member(mcx, clause_attnums.take(), offset)?);
+    }
+
+    // Merge attnums referenced inside the matched sub-expressions. C calls
+    // pull_varattnos on the whole *exprs List; the owned seam works per-Expr, so
+    // union each result (pull_varattnos already returns offset-style attnums).
+    for expr in exprs {
+        if let Some(more) = var_seams::pull_varattnos::call(mcx, expr, relid)? {
+            clause_attnums =
+                colbms::bms_union(mcx, clause_attnums.as_deref(), Some(&more))?;
+        }
+    }
+
+    all_rows_selectable(mcx, run, root, relid, clause_attnums.as_deref())
+}

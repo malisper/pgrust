@@ -1,0 +1,19 @@
+[package]
+name = "pgstat_subscription"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgstat_subscription"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+replication = { path = "../../../../_support/types/replication" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+activity_pgstat = { path = "../activity_pgstat" }
+pgstat_seams = { path = "../pgstat_seams" }
+stat_seams = { path = "../stat_seams" }
+activity_xact = { path = "../activity_xact" }

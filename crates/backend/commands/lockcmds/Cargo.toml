@@ -1,0 +1,39 @@
+[package]
+name = "lockcmds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "lockcmds"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+utils_error = { path = "../../utils/utils_error" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_acl = { path = "../../../_support/types/types_acl" }
+nodes = { path = "../../../_support/types/nodes" }
+rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_namespace = { path = "../../../_support/types/types_namespace" }
+
+nodes_core = { path = "../../nodes/nodes_core" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+pg_class = { path = "../../catalog/pg_class" }
+
+lockcmds_seams = { path = "../lockcmds_seams" }
+objectaddress_seams = { path = "../../catalog/objectaddress_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+pg_inherits_seams = { path = "../../catalog/pg_inherits_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+table_seams = { path = "../../access/table/table_seams" }
+rewritehandler_seams = { path = "../../rewrite/rewritehandler_seams" }

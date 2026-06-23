@@ -1,0 +1,21 @@
+[package]
+name = "timezone_pgtz"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "timezone_pgtz"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+pgtime = { path = "../../../_support/types/pgtime" }
+state_pgtz = { path = "../../../_support/state/state_pgtz" }
+localtime = { path = "../localtime" }
+pgtz_seams = { path = "../pgtz_seams" }
+fd_seams = { path = "../../storage/file/fd_seams" }
+init_small = { path = "../../utils/init/init_small" }
+common_path_seams = { path = "../../../common/common_path_seams" }
+pgstrcasecmp = { path = "../../../port/pgstrcasecmp" }

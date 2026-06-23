@@ -1,0 +1,41 @@
+[package]
+name = "toasting"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "toasting"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+datum = { path = "../../../_support/types/datum" }
+types_error = { path = "../../../_support/types/types_error" }
+rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+nodes = { path = "../../../_support/types/nodes" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_cluster = { path = "../../../_support/types/types_cluster" }
+
+# This unit's own inward seam declarations (installed by `init_seams`).
+toasting_seams = { path = "../toasting_seams" }
+
+# Direct deps (no cycle): table open/close, namespace lookups, the
+# binary-upgrade backend globals, and recordDependencyOn.
+table = { path = "../../access/table/table" }
+catalog_namespace = { path = "../catalog_namespace" }
+init_small = { path = "../../utils/init/init_small" }
+pg_depend = { path = "../pg_depend" }
+
+# Seam crates for not-yet-ported (or cyclic) owners.
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+catalog_seams = { path = "../catalog_seams" }
+heap_seams = { path = "../heap_seams" }
+index_seams = { path = "../index_seams" }
+indexing_seams = { path = "../indexing_seams" }
+toastdesc_seams = { path = "../../access/common/toastdesc_seams" }
+table_tableam_seams = { path = "../../access/table/table_tableam_seams" }

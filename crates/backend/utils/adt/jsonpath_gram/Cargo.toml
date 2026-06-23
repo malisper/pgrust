@@ -1,0 +1,24 @@
+[package]
+name = "jsonpath_gram"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "jsonpath_gram"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_jsonpath = { path = "../../../../_support/types/types_jsonpath" }
+regex = { path = "../../../../_support/types/regex" }
+mcx = { path = "../../../../_support/mcx" }
+jsonpath_scan = { path = "../jsonpath_scan" }
+jsonpath_gram_seams = { path = "../jsonpath_gram_seams" }
+adt_numeric = { path = "../adt_numeric" }
+numutils = { path = "../numutils" }
+mbutils = { path = "../../mb/mbutils" }
+regex_core = { path = "../../../regex/regex_core" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+seam_core = { path = "../../../../_support/seam/seam_core" }

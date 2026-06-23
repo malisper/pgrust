@@ -1,0 +1,22 @@
+[package]
+name = "shell_archive"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "shell_archive"
+path = "src/lib.rs"
+
+[dependencies]
+shell_archive_seams = { path = "../shell_archive_seams" }
+types_pgarch = { path = "../../../_support/types/types_pgarch" }
+types_error = { path = "../../../_support/types/types_error" }
+utils_error = { path = "../../utils/utils_error" }
+mcx = { path = "../../../_support/mcx" }
+percentrepl = { path = "../../../common/percentrepl" }
+wait_error_seams = { path = "../../../common/wait_error_seams" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+postmaster_pgarch = { path = "../../postmaster/postmaster_pgarch" }
+libc = "0.2"

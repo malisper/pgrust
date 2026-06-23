@@ -1,0 +1,51 @@
+[package]
+name = "lsyscache"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "lsyscache"
+path = "src/lib.rs"
+
+[dependencies]
+# Lazy-vacuum driver's get_namespace_name seam homes in vacuumlazy-seams;
+# lsyscache.c is its owner.
+vacuumlazy_seams = { path = "../../../access/heap/vacuumlazy_seams" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+functioncmds_seams = { path = "../../../commands/functioncmds_seams" }
+mcx = { path = "../../../../_support/mcx" }
+collationcmds_seams = { path = "../../../commands/collationcmds_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+cache = { path = "../../../../_support/types/cache" }
+types_selfuncs = { path = "../../../../_support/types/types_selfuncs" }
+array = { path = "../../../../_support/types/array" }
+opclass = { path = "../../../../_support/types/opclass" }
+hash = { path = "../../../../_support/types/hash" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+# Seam crate this unit OWNS (installs every decl from its own init_seams()).
+lsyscache_seams = { path = "../lsyscache_seams" }
+# Owner seam crates this unit's lookups route through until those owners land.
+syscache_seams = { path = "../syscache_seams" }
+# get_type_io_data's IsBootstrapProcessingMode() branch -> bootstrap.c's
+# boot_get_type_io_data, reached across the bootstrap<->lsyscache cycle.
+bootstrap_seams = { path = "../../../bootstrap/bootstrap_seams" }
+miscinit_seams = { path = "../../init/miscinit_seams" }
+amapi_seams = { path = "../../../access/index/amapi_seams" }
+typcache_seams = { path = "../typcache_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+copyfuncs_pc_seams = { path = "../../../nodes/copyfuncs_pc_seams" }
+format_type_seams = { path = "../../adt/format_type_seams" }
+arrayfuncs_seams = { path = "../../adt/arrayfuncs_seams" }
+namespace_seams = { path = "../../../catalog/namespace_seams" }
+nodes = { path = "../../../../_support/types/nodes" }
+makefuncs_seams = { path = "../../../nodes/makefuncs_seams" }
+read_seams = { path = "../../../nodes/read_seams" }
+# costsize.c reaches get_typavgwidth/get_attavgwidth (lsyscache.c, this owner)
+# through these costsize-seams. Leaf seam crate — no cycle.
+costsize_seams = { path = "../../../optimizer/path/costsize_seams" }
+# relnode.c reaches `get_mergejoin_opfamilies_first` (lsyscache owner) through
+# this no-owner ext seam crate. Leaf seam crate — no cycle.
+relnode_ext_seams = { path = "../../../optimizer/util/relnode_ext_seams" }

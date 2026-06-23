@@ -1,0 +1,18 @@
+[package]
+name = "combocid"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "combocid"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+parallel_rt_seams = { path = "../../../access/transam/parallel_rt_seams" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+combocid_seams = { path = "../combocid_seams" }

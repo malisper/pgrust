@@ -1,0 +1,109 @@
+[package]
+name = "parser_analyze"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "parser_analyze"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_acl = { path = "../../../_support/types/types_acl" }
+rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_storage = { path = "../../../_support/types/types_storage" }
+utils_error = { path = "../../utils/utils_error" }
+nodes_core = { path = "../../nodes/nodes_core" }
+outfuncs = { path = "../../nodes/outfuncs" }
+
+# Query-jumble (queryId) machinery: IsQueryIdEnabled() + JumbleQuery() over the
+# canonical Query, called at the end of parse analysis (analyze.c) under
+# compute_query_id. Seam decls only (impl is the queryjumble unit).
+queryjumble_seams = { path = "../../nodes/queryjumble_seams" }
+
+# Inward seam contract owned by this crate.
+parser_analyze_seams = { path = "../parser_analyze_seams" }
+
+# functioncmds' interpret_sql_body seam (the inline SQL-function body
+# interpreter), installed by this crate — it owns transformStmt + nodeToString +
+# the dependency-reference walker.
+functioncmds_seams = { path = "../../commands/functioncmds_seams" }
+pg_proc_seams = { path = "../../catalog/pg_proc_seams" }
+dependency = { path = "../../catalog/dependency" }
+
+# CreateCommandTag classification (utility.c) for the "%s is not yet supported
+# in unquoted SQL function body" error message; get_command_tag_name renders it.
+utility_seams = { path = "../../tcop/utility_seams" }
+cmdtag = { path = "../../tcop/cmdtag" }
+
+# Merged sibling owners called directly (cycle-free; they depend on the
+# analyze *-seams* decls, never on this impl crate).
+clause = { path = "../clause" }
+parse_target = { path = "../parse_target" }
+parser_relation = { path = "../parser_relation" }
+cte = { path = "../cte" }
+parse_expr = { path = "../parse_expr" }
+func = { path = "../func" }
+coerce = { path = "../coerce" }
+parse_oper = { path = "../parse_oper" }
+parse_collate = { path = "../parse_collate" }
+agg = { path = "../agg" }
+small1 = { path = "../small1" }
+# defGetBoolean for the EXPLAIN (GENERIC_PLAN) option (transformExplainStmt).
+define_seams = { path = "../../commands/define_seams" }
+vars = { path = "../../optimizer/util/vars" }
+# errdetail_relkind_not_supported (the MERGE relkind-not-supported detail);
+# cycle-free (pg-class has no parser dep).
+pg_class = { path = "../../catalog/pg_class" }
+
+# transformPLAssignStmt: the ISCOMPLEX composite-type test (get_typtype) and the
+# datatype-mismatch error's type-name formatting (format_type_be). Reached via
+# the callee seams (cycle-free; their owners do not depend on this impl crate).
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+format_type_seams = { path = "../../utils/adt/format_type_seams" }
+
+# The SQL-function inliner body (clauses.c inline_function) installed by this
+# crate: the parser driver + the fold crate's contain_*/coercion deps. All are
+# cycle-free (none depends on this impl crate).
+parsenodes = { path = "../../../_support/types/parsenodes" }
+driver = { path = "../driver" }
+clauses = { path = "../../optimizer/util/clauses" }
+clauses_seams = { path = "../../optimizer/util/clauses_seams" }
+
+# The set-returning SQL-function inliner body
+# (clauses.c inline_set_returning_function SQL leg) installed by this crate:
+# the rewriter (pg_rewrite_query / AcquireRewriteLocks), IncrementVarSublevelsUp,
+# get_expr_result_type, BuildDescFromLists, and a Const datum builder. All are
+# cycle-free (none depends on this impl crate).
+rewritehandler_seams = { path = "../../rewrite/rewritehandler_seams" }
+rewrite_core = { path = "../../rewrite/rewrite_core" }
+funcapi_seams = { path = "../../utils/fmgr/funcapi_seams" }
+tupdesc = { path = "../../access/common/tupdesc" }
+pathnodes = { path = "../../../_support/types/pathnodes" }
+datum = { path = "../../../_support/types/datum" }
+
+# Outward dependency seams (callees whose owners are not yet ported).
+stack_depth_seams = { path = "../../utils/misc/stack_depth_seams" }
+# The per-backend query-environment home: an AFTER trigger's transition-table
+# ENRs (OLD/NEW TABLE) are read off it to populate pstate->p_queryEnv.
+queryenvironment_home = { path = "../../utils/misc/queryenvironment_home" }
+# Inward seam this crate installs: the CTAS query-jumble + post-parse-analyze
+# preamble (createas.c 244-249). Owned by the queryjumble / post-parse-analyze
+# layer, which lives here.
+createas_seams = { path = "../../commands/createas_seams" }
+
+[dev-dependencies]
+# Focused seam owners installed by the milestone test (see tests.rs).
+adt_format_type = { path = "../../utils/adt/adt_format_type" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+cache_typcache = { path = "../../utils/cache/cache_typcache" }
+parse_type = { path = "../parse_type" }
+gram_core = { path = "../gram_core" }

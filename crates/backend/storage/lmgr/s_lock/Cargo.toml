@@ -1,0 +1,18 @@
+[package]
+name = "s_lock"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "s_lock"
+path = "src/lib.rs"
+
+[dependencies]
+utils_error = { path = "../../../utils/utils_error" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+prng = { path = "../../../../_support/pg/prng" }
+pgsleep_seams = { path = "../../../../port/pgsleep_seams" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+types_storage = { path = "../../../../_support/types/types_storage" }

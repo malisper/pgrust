@@ -1,0 +1,61 @@
+[package]
+name = "parse_expr"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "parse_expr"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+types_sortsupport = { path = "../../../_support/types/types_sortsupport" }
+types_cluster = { path = "../../../_support/types/types_cluster" }
+utils_error = { path = "../../utils/utils_error" }
+nodes_core = { path = "../../nodes/nodes_core" }
+
+# GUC engine variable-accessor table — parse_expr.c owns the `Transform_null_equals`
+# bool GUC backing storage and installs its accessors at init_seams() time.
+guc_tables = { path = "../../utils/misc/guc_tables" }
+
+# Owner of the inward seams this crate installs.
+parse_expr_seams = { path = "../parse_expr_seams" }
+
+# Outward dependency seams (catalog / cache / sibling-parser callees).
+parse_agg_seams = { path = "../parse_agg_seams" }
+clause_seams = { path = "../clause_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
+coerce_seams = { path = "../coerce_seams" }
+small1_seams = { path = "../small1_seams" }
+# parse_sub_analyze (analyze.c) — transformSubLink runs the sub-SELECT through
+# the analyze owner via its seam (decl-only crate, cycle-free).
+parser_analyze_seams = { path = "../parser_analyze_seams" }
+
+# Merged sibling owners called directly (cycle-free).
+small1 = { path = "../small1" }
+parse_oper = { path = "../parse_oper" }
+parse_type = { path = "../parse_type" }
+parse_collate = { path = "../parse_collate" }
+adt_format_type = { path = "../../utils/adt/adt_format_type" }
+adt_xml = { path = "../../utils/adt/adt_xml" }
+
+# Sibling parser owners now landed (downward calls; they depend only on
+# backend-parser-parse-expr-seams, so these impl deps stay cycle-free).
+parser_relation = { path = "../parser_relation" }
+func = { path = "../func" }
+parse_target = { path = "../parse_target" }
+vars = { path = "../../optimizer/util/vars" }
+
+# Cross-database catalog-name check in transformColumnRef (4-part name).
+dbcommands_seams = { path = "../../commands/dbcommands_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+
+[dev-dependencies]

@@ -1,0 +1,18 @@
+[package]
+name = "ilist"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ilist"
+path = "src/lib.rs"
+
+[features]
+# Mirrors PostgreSQL's ILIST_DEBUG: compiles the list-integrity walks
+# (dlist_check / dlist_member_check / slist_check). Without it, like the C
+# macros, those expand to no-ops returning Ok(()).
+ilist_debug = []
+
+[dependencies]
+types_error = { path = "../../../_support/types/types_error" }

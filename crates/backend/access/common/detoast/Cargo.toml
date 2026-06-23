@@ -1,0 +1,22 @@
+[package]
+name = "detoast"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "detoast"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+detoast_seams = { path = "../detoast_seams" }
+toast_internals_seams = { path = "../toast_internals_seams" }
+toast_compression_seams = { path = "../toast_compression_seams" }
+misc2_seams = { path = "../../../utils/adt/misc2_seams" }
+pglz_seams = { path = "../../../../common/pglz_seams" }

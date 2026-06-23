@@ -1,0 +1,42 @@
+[package]
+name = "portalmem"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "portalmem"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+portal = { path = "../../../../_support/types/portal" }
+nodes = { path = "../../../../_support/types/nodes" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+utils_error = { path = "../../utils_error" }
+dsm_core = { path = "../../../storage/ipc/dsm_core" }
+
+# `InterruptPending` / `MyProcPid` substrate for the mcxt-interrupt seam trio
+# (HandleLogMemoryContextInterrupt / ProcessLogMemoryContextInterrupt).
+init_small_seams = { path = "../../init/init_small_seams" }
+
+# inward seams installed by this crate
+portalmem_seams = { path = "../portalmem_seams" }
+
+# The materialized-SRF protocol for `pg_cursor` (the `pg_cursors` view SRF):
+# `InitMaterializedSRF`/`tuplestore_putvalues` and the `text` result Datums.
+funcapi_seams = { path = "../../fmgr/funcapi_seams" }
+varlena_seams = { path = "../../adt/varlena_seams" }
+
+# outward seams to not-yet-ported (or cyclic) owners
+mcxt_seams = { path = "../mcxt_seams" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+snapmgr_seams = { path = "../../time/snapmgr_seams" }
+resowner_seams_2 = { path = "../../resowner/resowner_seams_2" }
+resowner_seams = { path = "../../resowner/resowner_seams" }
+plancache_portal_seams = { path = "../../cache/plancache_portal_seams" }
+portalcmds_seams = { path = "../../../commands/portalcmds_seams" }
+tuplestore_hold_seams = { path = "../../sort/tuplestore_hold_seams" }

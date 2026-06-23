@@ -1,0 +1,58 @@
+[package]
+name = "replication_walreceiver"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "replication_walreceiver"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_startup = { path = "../../../_support/types/types_startup" }
+wal = { path = "../../../_support/types/wal" }
+types_walreceiver = { path = "../../../_support/types/types_walreceiver" }
+types_pgstat = { path = "../../../_support/types/types_pgstat" }
+datum = { path = "../../../_support/types/datum" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_guc = { path = "../../../_support/types/types_guc" }
+
+utils_error = { path = "../../utils/utils_error" }
+interrupt = { path = "../../postmaster/interrupt" }
+libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
+
+# own seam crate
+walreceiver_seams = { path = "../walreceiver_seams" }
+
+# outward owner-seam crates
+walreceiverfuncs_seams = { path = "../walreceiverfuncs_seams" }
+replication_libpqwalreceiver = { path = "../replication_libpqwalreceiver" }
+walsender_seams = { path = "../walsender_seams" }
+auxprocess_seams = { path = "../../postmaster/auxprocess_seams" }
+dsm_core_seams = { path = "../../storage/ipc/dsm_core_seams" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
+procarray_seams = { path = "../../storage/ipc/procarray_seams" }
+procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+guc_file_seams = { path = "../../utils/misc/guc_file_seams" }
+guc_tables_seams = { path = "../../utils/misc/guc_tables_seams" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+ps_status_seams = { path = "../../utils/misc/ps_status_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+acl_seams = { path = "../../utils/adt/acl_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+pgstat_wal_seams = { path = "../../utils/activity/pgstat_wal_seams" }
+pgstat_io_seams = { path = "../../utils/activity/pgstat_io_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
+xlogarchive_seams = { path = "../../access/transam/xlogarchive_seams" }
+timeline_seams = { path = "../../access/transam/timeline_seams" }
+varsup_seams = { path = "../../access/transam/varsup_seams" }
+port_pqsignal_seams = { path = "../../../port/port_pqsignal_seams" }
+signal = { path = "../../../_support/types/signal" }
+libc = "0.2"

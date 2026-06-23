@@ -1,0 +1,35 @@
+[package]
+name = "pg_db_role_setting"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_db_role_setting"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+pg_db_role_setting_seams = { path = "../pg_db_role_setting_seams" }
+user_seams = { path = "../../commands/user_seams" }
+utils_error = { path = "../../utils/utils_error" }
+scankey = { path = "../../access/common/scankey" }
+genam_seams = { path = "../../access/index/genam_seams" }
+table = { path = "../../access/table/table" }
+indexing_seams = { path = "../indexing_seams" }
+objectaccess_seams = { path = "../objectaccess_seams" }
+guc_seams = { path = "../../utils/misc/guc_seams" }
+guc_funcs_seams = { path = "../../utils/misc/guc_funcs_seams" }
+snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }
+mcx = { path = "../../../_support/mcx" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_guc = { path = "../../../_support/types/types_guc" }
+nodes = { path = "../../../_support/types/nodes" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+snapshot = { path = "../../../_support/types/snapshot" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_tuple = { path = "../../../_support/types/types_tuple" }

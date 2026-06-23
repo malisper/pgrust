@@ -1,0 +1,105 @@
+[package]
+name = "dbcommands"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "dbcommands"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+# Inward seams this unit owns + installs.
+dbcommands_seams = { path = "../dbcommands_seams" }
+# Lazy-vacuum driver's get_database_name seam homes in vacuumlazy-seams;
+# dbcommands.c is its owner.
+vacuumlazy_seams = { path = "../../access/heap/vacuumlazy_seams" }
+# xml.c's get_database_name(MyDatabaseId) seam (table_to_xmlschema family);
+# dbcommands.c owns get_database_name + the pg_database syscache lookup.
+xml_libxml_seams = { path = "../../utils/adt/xml_libxml_seams" }
+
+# pg_database read/mutate substrate (the landed keystone owner's seams).
+pg_database_seams = { path = "../../catalog/pg_database_seams" }
+
+# Outward owner crates / -seams consumed by F0 + dbase_redo.
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+superuser_seams = { path = "../../utils/misc/superuser_seams" }
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+standby_seams = { path = "../../storage/ipc/standby_seams" }
+fd_seams = { path = "../../storage/file/fd_seams" }
+tablespace_globals_seams = { path = "../tablespace_globals_seams" }
+xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
+
+# Real ported owners called directly.
+relpath = { path = "../../common/relpath" }
+copydir = { path = "../../storage/file/copydir" }
+md = { path = "../../storage/smgr/md" }
+procsignal = { path = "../../storage/ipc/procsignal" }
+xlogutils = { path = "../../access/transam/xlogutils" }
+replication_slot = { path = "../../replication/replication_slot" }
+
+# Heavy-half (createdb/dropdb/movedb/Rename/AlterDatabase*) outward owners.
+pg_tablespace_seams = { path = "../../catalog/pg_tablespace_seams" }
+catalog_storage_seams = { path = "../../catalog/catalog_storage_seams" }
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+pg_subscription_seams = { path = "../../catalog/pg_subscription_seams" }
+slot_seams = { path = "../../replication/slot_seams" }
+pg_locale_seams = { path = "../../utils/adt/pg_locale_seams" }
+collationcmds_seams = { path = "../collationcmds_seams" }
+user_seams = { path = "../user_seams" }
+pg_locale_env_seams = { path = "../../utils/adt/pg_locale_env_seams" }
+ruleutils_seams = { path = "../../utils/adt/ruleutils_seams" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+fd = { path = "../../storage/file/fd" }
+table = { path = "../../access/table/table" }
+relmapper = { path = "../../utils/cache/relmapper" }
+pg_locale = { path = "../../utils/adt/pg_locale" }
+libc = "0.2"
+tablespace = { path = "../tablespace" }
+catalog_catalog = { path = "../../catalog/catalog_catalog" }
+aclchk = { path = "../../catalog/aclchk" }
+objectaccess = { path = "../../catalog/objectaccess" }
+pg_shdepend = { path = "../../catalog/pg_shdepend" }
+comment = { path = "../comment" }
+seclabel = { path = "../seclabel" }
+pg_db_role_setting = { path = "../../catalog/pg_db_role_setting" }
+pg_db_role_setting_seams = { path = "../../catalog/pg_db_role_setting_seams" }
+procarray = { path = "../../storage/ipc/procarray" }
+adt_acl = { path = "../../utils/adt/adt_acl" }
+miscinit = { path = "../../utils/init/miscinit" }
+transam_xact = { path = "../../access/transam/transam_xact" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+# ScanSourceDatabasePgClass's cross-database raw buffered pg_class scan: the
+# smgr block count (smgr-seams), the per-block buffer read/lock/page-walk
+# (bufmgr-seams + storage-page), and the tuple-visibility gate (heapam-visibility).
+smgr_seams = { path = "../../storage/smgr/smgr_seams" }
+page = { path = "../../storage/page" }
+heapam_visibility = { path = "../../access/heap/heapam_visibility" }
+# CHECK_FOR_INTERRUPTS() inside the per-block source-pg_class scan loop.
+postgres_seams = { path = "../../tcop/postgres_seams" }
+xloginsert = { path = "../../access/transam/xloginsert" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+checkpointer = { path = "../../postmaster/checkpointer" }
+extra_encnames_fgram = { path = "../../../common/extra_encnames_fgram" }
+types_wchar = { path = "../../../_support/types/types_wchar" }
+
+# ProcessUtility dispatch arms (installs the database-global forwarding seams).
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+
+utils_error = { path = "../../utils/utils_error" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+fmgr = { path = "../../../_support/types/fmgr" }
+datum = { path = "../../../_support/types/datum" }
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+wal = { path = "../../../_support/types/wal" }
+nodes = { path = "../../../_support/types/nodes" }
+types_acl = { path = "../../../_support/types/types_acl" }

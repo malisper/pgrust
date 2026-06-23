@@ -1,0 +1,23 @@
+[package]
+name = "xid"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "xid"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+hashfn = { path = "../../../../common/hashfn" }
+pqformat = { path = "../../../libpq/pqformat" }
+numutils = { path = "../numutils" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+multixact_seams = { path = "../../../access/transam/multixact_seams" }

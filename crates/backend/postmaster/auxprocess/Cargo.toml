@@ -1,0 +1,38 @@
+[package]
+name = "auxprocess"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "auxprocess"
+path = "src/lib.rs"
+
+[dependencies]
+types_error = { path = "../../../_support/types/types_error" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+
+# Memory-context handle (TopMemoryContext for the InitAuxiliaryProcess context).
+mcx = { path = "../../../_support/mcx" }
+
+# Its own inward seam (installed by init_seams).
+auxprocess_seams = { path = "../auxprocess_seams" }
+
+# Directly-callable ported crates (genuine reuse, acyclic — auxprocess sits
+# above proc / procsignal in the bring-up order).
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+procsignal = { path = "../../storage/ipc/procsignal" }
+
+# Outward owner seam crates (calls routed through installed seams).
+postmaster_seams = { path = "../postmaster_seams" }
+more_seams = { path = "../../utils/misc/more_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+postinit_seams = { path = "../../utils/init/postinit_seams" }
+resowner_seams = { path = "../../utils/resowner/resowner_seams" }
+status_seams = { path = "../../utils/activity/status_seams" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+mcxt_seams = { path = "../../utils/mmgr/mcxt_seams" }
+dsm_core_seams = { path = "../../storage/ipc/dsm_core_seams" }
+lwlock_seams = { path = "../../storage/lmgr/lwlock_seams" }
+condition_variable_seams = { path = "../../storage/lmgr/condition_variable_seams" }

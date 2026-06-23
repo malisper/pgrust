@@ -1,0 +1,16 @@
+[package]
+name = "guc_tables"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "guc_tables"
+path = "src/lib.rs"
+
+[dependencies]
+guc_tables_seams = { path = "../guc_tables_seams" }
+backend_port_path_seams = { path = "../../../port/backend_port_path_seams" }
+guc_file_seams = { path = "../guc_file_seams" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_guc = { path = "../../../../_support/types/types_guc" }

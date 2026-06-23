@@ -1,0 +1,37 @@
+[package]
+name = "relmapper"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "relmapper"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+wal = { path = "../../../../_support/types/wal" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+
+# Own seam declarations (installed by init_seams()).
+relmapper_seams = { path = "../relmapper_seams" }
+
+# Outward calls through owner -seams crates (all panic until the owner lands).
+lwlock_seams = { path = "../../../storage/lmgr/lwlock_seams" }
+fd_seams = { path = "../../../storage/file/fd_seams" }
+xloginsert_seams = { path = "../../../access/transam/xloginsert_seams" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+crc32c_seams = { path = "../../../../port/crc32c_seams" }
+error_seams = { path = "../../error/error_seams" }
+inval_seams = { path = "../inval_seams" }
+catalog_storage_seams = { path = "../../../catalog/catalog_storage_seams" }
+common_relpath_seams = { path = "../../../../common/common_relpath_seams" }
+waitevent_seams = { path = "../../activity/waitevent_seams" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+parallel_rt_seams = { path = "../../../access/transam/parallel_rt_seams" }
+init_small_seams = { path = "../../init/init_small_seams" }
+miscinit_seams = { path = "../../init/miscinit_seams" }
+guc_seams = { path = "../../misc/guc_seams" }

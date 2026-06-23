@@ -1,0 +1,18 @@
+[package]
+name = "dynloader"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "dynloader"
+path = "src/lib.rs"
+
+[dependencies]
+dynloader_seams = { path = "../dynloader_seams" }
+types_dfmgr = { path = "../../_support/types/types_dfmgr" }
+types_error = { path = "../../_support/types/types_error" }
+fmgr = { path = "../../_support/types/fmgr" }
+types_logical = { path = "../../_support/types/types_logical" }
+utils_error = { path = "../../backend/utils/utils_error" }
+libc = { version = "0.2", default-features = false }

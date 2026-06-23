@@ -1,0 +1,55 @@
+[package]
+name = "nodeBitmapHeapscan"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nodeBitmapHeapscan"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+datum = { path = "../../../_support/types/datum" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+nodes = { path = "../../../_support/types/nodes" }
+rel = { path = "../../../_support/types/rel" }
+types_tableam = { path = "../../../_support/types/types_tableam" }
+tidbitmap = { path = "../../../_support/types/tidbitmap" }
+condvar = { path = "../../../_support/types/condvar" }
+types_storage = { path = "../../../_support/types/types_storage" }
+execparallel = { path = "../../../_support/types/execparallel" }
+# The keystone `shared_dsm_object` carries its `'seg` lifetime via
+# `types_parallel::DsmSegmentHandle`; `pcxt_seg` hands us the execParallel
+# `DsmSegmentHandle` whose `.0` is the same segment id (the parallel crate's own
+# `pcxt_seg`/`seg_to_exec` bridge it identically).
+types_parallel = { path = "../../../_support/types/types_parallel" }
+
+# Inward seam crate: the executor parallel dispatch reaches this node's
+# parallel methods through these declarations.
+nodeBitmapHeapscan_seams = { path = "../nodeBitmapHeapscan_seams" }
+
+# Outward seam crates (callees owned by other units, reached across a cycle).
+execProcnode_seams = { path = "../execProcnode_seams" }
+execAmi_seams = { path = "../execAmi_seams" }
+execExpr_seams = { path = "../execExpr_seams" }
+execTuples_seams = { path = "../execTuples_seams" }
+execUtils_seams = { path = "../execUtils_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+tableam_bm_seams = { path = "../../access/table/tableam_bm_seams" }
+core_tidbitmap_seams = { path = "../../nodes/core_tidbitmap_seams" }
+
+# Direct deps on ported owners (acyclic).
+# The execParallel keystone's typed-shared-DSM-object primitive
+# (`shared_dsm_object`) lives in this crate's impl; the parallel subsystem sits
+# below the executor (it depends only on `types-nodes`), so this edge is acyclic.
+transam_parallel = { path = "../../access/transam/transam_parallel" }
+execUtils = { path = "../execUtils" }
+table_tableam = { path = "../../access/table/table_tableam" }
+condition_variable = { path = "../../storage/lmgr/condition_variable" }
+s_lock = { path = "../../storage/lmgr/s_lock" }
+
+[dev-dependencies]
+mcx = { path = "../../../_support/mcx" }

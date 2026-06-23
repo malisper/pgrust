@@ -1,0 +1,21 @@
+[package]
+name = "copy_dest"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "copy_dest"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_dest = { path = "../../../_support/types/types_dest" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+nodes = { path = "../../../_support/types/nodes" }
+mcx = { path = "../../../_support/mcx" }
+backup_copy_seams = { path = "../backup_copy_seams" }
+dest_seams = { path = "../../tcop/dest_seams" }
+execTuples_seams = { path = "../../executor/execTuples_seams" }
+tupdesc = { path = "../../access/common/tupdesc" }
+varlena_seams = { path = "../../utils/adt/varlena_seams" }

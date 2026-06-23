@@ -1,0 +1,12 @@
+[package]
+name = "prng_base64"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "prng_base64"
+path = "src/lib.rs"
+
+[dependencies]
+prng = { path = "../../_support/pg/prng" }

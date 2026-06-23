@@ -1,0 +1,53 @@
+[package]
+name = "ginfast"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ginfast"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+gin = { path = "../../../../_support/types/gin" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+types_acl = { path = "../../../../_support/types/types_acl" }
+types_catalog = { path = "../../../../_support/types/types_catalog" }
+nodes = { path = "../../../../_support/types/nodes" }
+
+# owned engine layers (direct deps — acyclic)
+rbtree = { path = "../../../lib/rbtree" }
+ginbulk = { path = "../ginbulk" }
+ginutil = { path = "../ginutil" }
+ginentrypage = { path = "../ginentrypage" }
+gininsert = { path = "../gininsert" }
+core_probe = { path = "../core_probe" }
+page = { path = "../../../storage/page" }
+lmgr = { path = "../../../storage/lmgr/lmgr" }
+utils_error = { path = "../../../utils/utils_error" }
+
+# cross-owner seam crates
+gininsert_seams = { path = "../gininsert_seams" }
+ginvacuum_seams = { path = "../ginvacuum_seams" }
+ginutil_seams = { path = "../ginutil_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
+freespace_seams = { path = "../../../storage/freespace/freespace_seams" }
+xloginsert_seams = { path = "../../transam/xloginsert_seams" }
+transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
+vacuumlazy_seams = { path = "../../heap/vacuumlazy_seams" }
+guc_seams = { path = "../../../utils/misc/guc_seams" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+indexam_seams = { path = "../../index/indexam_seams" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }

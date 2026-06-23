@@ -1,0 +1,36 @@
+[package]
+name = "varsup"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "varsup"
+path = "src/lib.rs"
+
+[dependencies]
+# Lazy-vacuum driver's ReadNextTransactionId seam homes in vacuumlazy-seams;
+# varsup.c/transam.h is its owner.
+vacuumlazy_seams = { path = "../../heap/vacuumlazy_seams" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+mcx = { path = "../../../../_support/mcx" }
+utils_error = { path = "../../../utils/utils_error" }
+lwlock = { path = "../../../storage/lmgr/lwlock" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+varsup_seams = { path = "../varsup_seams" }
+vacuum_seams = { path = "../../../commands/vacuum_seams" }
+transam_xact_seams = { path = "../transam_xact_seams" }
+clog_seams = { path = "../clog_seams" }
+subtrans_seams = { path = "../subtrans_seams" }
+commit_ts_seams = { path = "../commit_ts_seams" }
+transam_xlog_seams = { path = "../transam_xlog_seams" }
+lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
+ipc_shmem_seams = { path = "../../../storage/ipc/ipc_shmem_seams" }
+pmsignal_seams = { path = "../../../storage/ipc/pmsignal_seams" }
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+dbcommands_seams = { path = "../../../commands/dbcommands_seams" }

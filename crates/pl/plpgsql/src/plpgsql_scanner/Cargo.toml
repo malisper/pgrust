@@ -1,0 +1,29 @@
+[package]
+name = "plpgsql_scanner"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "plpgsql_scanner"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+plpgsql = { path = "../../../../_support/types/plpgsql" }
+# Core SQL scanner (scan.l): the plpgsql scanner is a wrapper around it.
+scan_fgram = { path = "../../../../backend/parser/scan_fgram" }
+scan_seams = { path = "../../../../backend/parser/scan_seams" }
+# pg_mbstrlen_with_len (byte-offset -> character cursor for error positions).
+mbutils_seams = { path = "../../../../backend/utils/mb/mbutils_seams" }
+# pg_strtoint32_safe — re-derive the ICONST integer value (core_yylex's ival is
+# not carried across the CoreToken seam) for K_SLICE / array-subscript ICONST.
+numutils = { path = "../../../../backend/utils/adt/numutils" }
+utils_error = { path = "../../../../backend/utils/utils_error" }
+# plpgsql_parse_word/dblword/tripword (pl_comp.c — not yet ported; via seam).
+comp_seams = { path = "../comp_seams" }
+
+[dev-dependencies]
+gram_core = { path = "../../../../backend/parser/gram_core" }

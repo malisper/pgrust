@@ -1,0 +1,23 @@
+[package]
+name = "gist_validate"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "gist_validate"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_amvalidate = { path = "../../../../_support/types/types_amvalidate" }
+hash = { path = "../../../../_support/types/hash" }
+gist = { path = "../../../../_support/types/gist" }
+opclass = { path = "../../../../_support/types/opclass" }
+amvalidate_seams = { path = "../../index/amvalidate_seams" }
+regproc_seams = { path = "../../../utils/adt/regproc_seams" }
+lsyscache_seams = { path = "../../../utils/cache/lsyscache_seams" }
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+error_seams = { path = "../../../utils/error/error_seams" }

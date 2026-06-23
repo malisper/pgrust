@@ -1,0 +1,98 @@
+[package]
+name = "heapam_handler_core"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "heapam_handler_core"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+# CLUSTER seqscan+sort path: the tuplesort seams (begin_cluster / putheaptuple /
+# getheaptuple / performsort / end) + maintenance_work_mem. Routed through the
+# seam crate (not the concrete tuplesort owner) so the edge stays acyclic.
+tuplesort_seams = { path = "../../../utils/sort/tuplesort_seams" }
+vacuumlazy_seams = { path = "../vacuumlazy_seams" }
+rel = { path = "../../../../_support/types/rel" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_slot = { path = "../../../../_support/types/types_slot" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_typcache = { path = "../../../../_support/types/types_typcache" }
+# Heap modify + scan + fetch core (direct dep — handler is the owner above heapam,
+# acyclic): scan_begin/getnextslot/rescan/endscan, heap_fetch, heap_hot_search_buffer,
+# heap_get_latest_tid live here.
+heapam = { path = "../heapam" }
+heapam_seams = { path = "../heapam_seams" }
+pruneheap_seams = { path = "../pruneheap_seams" }
+heaptoast = { path = "../heaptoast" }
+page = { path = "../../../storage/page" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+execTuples_seams = { path = "../../../executor/execTuples_seams" }
+format_type_seams = { path = "../../../utils/adt/format_type_seams" }
+# Provider-facing seams installed here: get_table_am_routine, table_relation_toast_am,
+# table_relation_needs_toast_table, table_parallelscan_reinitialize.
+table_tableam_seams = { path = "../../table/table_tableam_seams" }
+table_tableam = { path = "../../table/table_tableam" }
+# relation_copy_for_cluster (CLUSTER / VACUUM FULL heap rewrite) deps:
+#   rewriteheap       — begin/rewrite/dead/end_heap_rewrite (the rewrite engine)
+#   common-heaptuple  — heap_deform_tuple / heap_form_tuple (reform_and_rewrite_tuple)
+#   execTuples        — ExecFetchSlotHeapTuple / ExecDropSingleTupleTableSlot
+#   transam-xact      — TransactionIdIsCurrentTransactionId (in-progress warnings)
+#   catalog-catalog   — IsSystemRelation
+#   types-cluster     — CopyForClusterResult out-params
+rewriteheap = { path = "../rewriteheap" }
+heaptuple = { path = "../../common/heaptuple" }
+execTuples = { path = "../../../executor/execTuples" }
+transam_xact = { path = "../../transam/transam_xact" }
+catalog_catalog = { path = "../../../catalog/catalog_catalog" }
+types_cluster = { path = "../../../../_support/types/types_cluster" }
+# The table_relation_copy_for_cluster seam installed here.
+access_tableam_seams = { path = "../../access_tableam_seams" }
+indexam = { path = "../../index/indexam" }
+# DML callbacks delegate here (seam-and-panic until the dml stage lands).
+heapam_handler_dml_seams = { path = "../heapam_handler_dml_seams" }
+catalog_storage_seams = { path = "../../../catalog/catalog_storage_seams" }
+# index_build_range_scan provider deps (heapam_index_build_range_scan +
+# table_index_build_range_scan install). All acyclic: this crate is the
+# table-AM provider one layer above the heap scan/visibility core.
+#   visibility   — HeapTupleSatisfiesVacuum + HOT header bit getters
+#   procarray    — GetOldestNonRemovableTransactionId
+#   snapmgr      — Register/Get/Unregister snapshot (serial-build snapshot)
+#   xact         — TransactionIdIsCurrentTransactionId
+#   lmgr         — XactLockTableWait (uniqueness recheck)
+#   catalog      — IsSystemRelation (seam)
+#   miscinit     — IsBootstrapProcessingMode
+#   execExpr     — CreateExecutorState/FreeExecutorState, ExecPrepareQual,
+#                  ExecQual, ExecEvalExprSwitchContext (FormIndexDatum eval)
+#   execUtils    — GetPerTupleExprContext / ResetExprContext
+#   activity     — pgstat_progress_update_param
+heapam_visibility = { path = "../heapam_visibility" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
+transam_xact_seams = { path = "../../transam/transam_xact_seams" }
+lmgr_seams = { path = "../../../storage/lmgr/lmgr_seams" }
+catalog_seams = { path = "../../../catalog/catalog_seams" }
+miscinit = { path = "../../../utils/init/miscinit" }
+execExpr_seams = { path = "../../../executor/execExpr_seams" }
+execUtils_seams = { path = "../../../executor/execUtils_seams" }
+activity_small_seams = { path = "../../../utils/activity/activity_small_seams" }
+utils_error = { path = "../../../utils/utils_error" }
+# table_relation_estimate_size (heapam_estimate_rel_size / table_block_relation_
+# estimate_size): the planner-facing table-AM size estimator this crate installs.
+#   plancat-ext-seams — the seam declaration installed here
+#   relcache-seams    — table_open (RelationIdGetRelation) + RelationGetNumberOfBlocks
+#   plancat-seams     — get_rel_data_width (never-vacuumed tuple-width estimate)
+#   costsize-seams    — clamp_row_est
+plancat_ext_seams = { path = "../../../optimizer/util/plancat_ext_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+plancat_seams = { path = "../../../optimizer/util/plancat_seams" }
+costsize_seams = { path = "../../../optimizer/path/costsize_seams" }

@@ -1,0 +1,61 @@
+[package]
+name = "clause"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "clause"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+types_acl = { path = "../../../_support/types/types_acl" }
+types_storage = { path = "../../../_support/types/types_storage" }
+rel = { path = "../../../_support/types/rel" }
+utils_error = { path = "../../utils/utils_error" }
+nodes_core = { path = "../../nodes/nodes_core" }
+
+# Inward seam contract owned by this crate.
+clause_seams = { path = "../clause_seams" }
+
+# Merged sibling owners called directly (cycle-free).
+parse_expr = { path = "../parse_expr" }
+parse_oper = { path = "../parse_oper" }
+coerce = { path = "../coerce" }
+parser_relation = { path = "../parser_relation" }
+parse_collate = { path = "../parse_collate" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+vars = { path = "../../optimizer/util/vars" }
+table = { path = "../../access/table/table" }
+samplescan = { path = "../../../_support/types/samplescan" }
+
+# F3a (window-defs + on-conflict) direct sibling owners (cycle-free).
+catalog_catalog = { path = "../../catalog/catalog_catalog" }
+pg_constraint = { path = "../../catalog/pg_constraint" }
+parse_type = { path = "../parse_type" }
+opclasscmds = { path = "../../commands/opclasscmds" }
+adt_format_type = { path = "../../utils/adt/adt_format_type" }
+opclass = { path = "../../../_support/types/opclass" }
+
+# Outward dependency seams (callees whose owners are not yet ported).
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+target_seams = { path = "../target_seams" }
+rewritemanip_seams = { path = "../../rewrite/rewritemanip_seams" }
+small1_seams = { path = "../small1_seams" }
+parser_analyze_seams = { path = "../parser_analyze_seams" }
+parse_func_seams = { path = "../parse_func_seams" }
+tablesample_core_seams = { path = "../../access/tablesample/tablesample_core_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+equalfuncs_seams = { path = "../../nodes/equalfuncs_seams" }
+copyfuncs_seams = { path = "../../nodes/copyfuncs_seams" }
+adt_jsonpath = { path = "../../utils/adt/adt_jsonpath" }
+adt_json = { path = "../../utils/adt/adt_json" }
+
+[dev-dependencies]

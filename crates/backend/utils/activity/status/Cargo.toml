@@ -1,0 +1,43 @@
+[package]
+name = "status"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "status"
+path = "src/lib.rs"
+
+[dependencies]
+variable_seams = { path = "../../../commands/variable_seams" }
+postmaster_seams = { path = "../../../postmaster/postmaster_seams" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+net = { path = "../../../../_support/types/net" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+
+utils_error = { path = "../../utils_error" }
+ascii = { path = "../../adt/ascii" }
+mbutils = { path = "../../mb/mbutils" }
+init_small = { path = "../../init/init_small" }
+guc_tables = { path = "../../misc/guc_tables" }
+ipc_shmem = { path = "../../../storage/ipc/ipc_shmem" }
+pgstat_backend = { path = "../pgstat_backend" }
+
+# Inward seams (this crate installs them).
+status_seams = { path = "../status_seams" }
+execParallel_support_seams = { path = "../../../executor/execParallel_support_seams" }
+
+# Outward seams into owners that would cycle or are not yet ported.
+miscinit_seams = { path = "../../init/miscinit_seams" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+timestamp_seams = { path = "../../adt/timestamp_seams" }
+dsm_core_seams = { path = "../../../storage/ipc/dsm_core_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+be_secure_seams = { path = "../../../libpq/be_secure_seams" }
+pgstat_database_seams = { path = "../pgstat_database_seams" }
+pgstat_seams = { path = "../pgstat_seams" }
+waitevent_seams = { path = "../waitevent_seams" }

@@ -1,0 +1,17 @@
+[package]
+name = "repl_gram"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "repl_gram"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+replication = { path = "../../../_support/types/replication" }
+utils_error = { path = "../../utils/utils_error" }
+repl_scanner_seams = { path = "../repl_scanner_seams" }

@@ -1,0 +1,43 @@
+[package]
+name = "inval"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "inval"
+path = "src/lib.rs"
+
+[dependencies]
+parallel_rt_seams = { path = "../../../access/transam/parallel_rt_seams" }
+mcx = { path = "../../../../_support/mcx" }
+guc_tables = { path = "../../misc/guc_tables" }
+cache = { path = "../../../../_support/types/cache" }
+types_cluster = { path = "../../../../_support/types/types_cluster" }
+types_plancache = { path = "../../../../_support/types/types_plancache" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_syscache = { path = "../../../../_support/types/types_syscache" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+wal = { path = "../../../../_support/types/wal" }
+# Inward seam crates (this unit's own public API, called by siblings).
+inval_seams = { path = "../inval_seams" }
+inval_pc_seams = { path = "../inval_pc_seams" }
+# Outward seams to other owners.
+catalog_seams = { path = "../../../catalog/catalog_seams" }
+common_relpath_seams = { path = "../../../../common/common_relpath_seams" }
+sinval_seams = { path = "../../../storage/ipc/sinval_seams" }
+smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
+catcache_seams = { path = "../catcache_seams" }
+relcache_seams = { path = "../relcache_seams" }
+relmapper_seams = { path = "../relmapper_seams" }
+syscache_seams = { path = "../syscache_seams" }
+init_small_seams = { path = "../../init/init_small_seams" }
+miscinit_seams = { path = "../../init/miscinit_seams" }
+snapmgr_seams = { path = "../../time/snapmgr_seams" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+xloginsert_seams = { path = "../../../access/transam/xloginsert_seams" }

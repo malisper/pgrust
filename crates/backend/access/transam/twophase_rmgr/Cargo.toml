@@ -1,0 +1,19 @@
+[package]
+name = "twophase_rmgr"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "twophase_rmgr"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+# Every non-NULL table slot is a callback owned by another subsystem; each is
+# reached through its owner's seam crate (the owners install on landing).
+lock_seams = { path = "../../../storage/lmgr/lock_seams" }
+multixact_seams = { path = "../multixact_seams" }
+stat_seams = { path = "../../../utils/activity/stat_seams" }
+predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }

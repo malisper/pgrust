@@ -1,0 +1,33 @@
+[package]
+name = "multirangetypes"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "multirangetypes"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+cache = { path = "../../../../_support/types/cache" }
+types_rangetypes = { path = "../../../../_support/types/types_rangetypes" }
+multirangetypes_seams = { path = "../multirangetypes_seams" }
+rangetypes_seams = { path = "../rangetypes_seams" }
+typcache_seams = { path = "../../cache/typcache_seams" }
+lsyscache_seams = { path = "../../cache/lsyscache_seams" }
+detoast = { path = "../../../access/common/detoast" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+nodeAgg_aggapi_seams = { path = "../../../executor/nodeAgg_aggapi_seams" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+format_type_seams = { path = "../format_type_seams" }
+hashfn_seams = { path = "../../../../common/hashfn_seams" }
+arrayfuncs_seams = { path = "../arrayfuncs_seams" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+
+[dev-dependencies]
+types_tuple = { path = "../../../../_support/types/types_tuple" }

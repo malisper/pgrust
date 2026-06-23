@@ -1,0 +1,29 @@
+[package]
+name = "rowsecurity"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "rowsecurity"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_acl = { path = "../../../_support/types/types_acl" }
+nodes = { path = "../../../_support/types/nodes" }
+types_storage = { path = "../../../_support/types/types_storage" }
+
+nodes_core = { path = "../../nodes/nodes_core" }
+equalfuncs = { path = "../../nodes/equalfuncs" }
+rewrite_core = { path = "../rewrite_core" }
+rewriteDefine = { path = "../rewriteDefine" }
+parser_relation = { path = "../../parser/parser_relation" }
+table = { path = "../../access/table/table" }
+more = { path = "../../utils/misc/more" }
+adt_acl = { path = "../../utils/adt/adt_acl" }
+miscinit = { path = "../../utils/init/miscinit" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }

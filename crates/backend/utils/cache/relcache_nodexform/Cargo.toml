@@ -1,0 +1,42 @@
+[package]
+name = "relcache_nodexform"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "relcache_nodexform"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+rel = { path = "../../../../_support/types/rel" }
+types_catalog = { path = "../../../../_support/types/types_catalog" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+
+utils_error = { path = "../../utils_error" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+
+# Inward seams (owned by this unit).
+relcache_nodexform_seams = { path = "../relcache_nodexform_seams" }
+
+# Outward seams.
+common_relation_seams = { path = "../../../access/common/common_relation_seams" }
+indexam_seams = { path = "../../../access/index/indexam_seams" }
+spg_core_seams = { path = "../../../access/spgist/spg_core_seams" }
+read_seams = { path = "../../../nodes/read_seams" }
+var_seams = { path = "../../../optimizer/util/var_seams" }
+prepqual_seams = { path = "../../../optimizer/prep/prepqual_seams" }
+init_subselect_ext_seams = { path = "../../../optimizer/plan/init_subselect_ext_seams" }
+syscache_seams = { path = "../syscache_seams" }
+relcache_seams = { path = "../relcache_seams" }
+pg_publication_seams = { path = "../../../catalog/pg_publication_seams" }
+partition_seams = { path = "../../../catalog/partition_seams" }
+publicationcmds_seams = { path = "../../../commands/publicationcmds_seams" }
+lsyscache_seams = { path = "../lsyscache_seams" }

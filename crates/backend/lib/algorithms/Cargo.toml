@@ -1,0 +1,13 @@
+[package]
+name = "algorithms"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "algorithms"
+path = "src/lib.rs"
+
+[dependencies]
+binaryheap = { path = "../binaryheap" }
+ilist = { path = "../ilist" }

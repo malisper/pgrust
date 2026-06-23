@@ -1,0 +1,56 @@
+[package]
+name = "nodes_core"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nodes_core"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+mcx = { path = "../../../_support/mcx" }
+hashfn = { path = "../../../common/hashfn" }
+types_core = { path = "../../../_support/types/types_core" }
+datum = { path = "../../../_support/types/datum" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_storage = { path = "../../../_support/types/types_storage" }
+tidbitmap = { path = "../../../_support/types/tidbitmap" }
+# GIN scan consumer carrier (ginget.c fills types_gin::TBMIterateResult).
+gin = { path = "../../../_support/types/gin" }
+execparallel = { path = "../../../_support/types/execparallel" }
+pathnodes = { path = "../../../_support/types/pathnodes" }
+fmgr = { path = "../../../_support/types/fmgr" }
+utils_error = { path = "../../utils/utils_error" }
+nodes_core_seams = { path = "../nodes_core_seams" }
+execParallel_support_seams = { path = "../../executor/execParallel_support_seams" }
+makefuncs_seams = { path = "../makefuncs_seams" }
+detoast_seams = { path = "../../access/common/detoast_seams" }
+core_tidbitmap_seams = { path = "../core_tidbitmap_seams" }
+# Parallel (DSA-backed) shared TIDBitmap iterator: dsa_allocate/get_address/free
+# of the TBMSharedIteratorState/PTEntryArray/PTIterationArray, the iterator
+# LWLock, and MyProcNumber for LWLockAcquire. Leaf seam crates — no cycle.
+dsa_seams = { path = "../../utils/mmgr/dsa_seams" }
+lwlock_seams = { path = "../../storage/lmgr/lwlock_seams" }
+lmgr_proc_seams = { path = "../../storage/lmgr/lmgr_proc_seams" }
+params_seams = { path = "../params_seams" }
+datum_seams = { path = "../../utils/adt/datum_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+ruleutils_seams = { path = "../../utils/adt/ruleutils_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+read_seams = { path = "../read_seams" }
+readfuncs_seams = { path = "../readfuncs_seams" }
+nodeFuncs_seams = { path = "../nodeFuncs_seams" }
+format_type_seams = { path = "../../utils/adt/format_type_seams" }
+# costsize.c calls exprType/exprTypmod over arena-resolved planner nodes; the
+# `(root, NodeId)` seams resolve via PlannerInfo and dispatch to nodeFuncs.c
+# (this owner). Leaf seam crate — no cycle.
+costsize_seams = { path = "../../optimizer/path/costsize_seams" }
+equivclass_ext_seams = { path = "../../optimizer/path/equivclass_ext_seams" }
+joininfo_ext_seams = { path = "../../optimizer/util/joininfo_ext_seams" }
+relnode_ext_seams = { path = "../../optimizer/util/relnode_ext_seams" }

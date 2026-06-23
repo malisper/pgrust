@@ -1,0 +1,13 @@
+[package]
+name = "legacy_pqsignal"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "legacy_pqsignal"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+signal = { path = "../../../_support/types/signal" }

@@ -1,0 +1,34 @@
+[package]
+name = "paramassign"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "paramassign"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+
+paramassign_seams = { path = "../paramassign_seams" }
+
+# Owners reached by direct edge (no cycle): joininfo owns placeholder.c
+# (find_placeholder_info / get_placeholder_nulling_relids); backend-rewrite-core
+# owns rewriteManip.c (IncrementVarSublevelsUp).
+joininfo = { path = "../joininfo" }
+rewrite_core = { path = "../../../rewrite/rewrite_core" }
+
+# Seam edges for node operators / set algebra whose owners would cycle.
+nodeFuncs_seams = { path = "../../../nodes/nodeFuncs_seams" }
+equalfuncs_seams = { path = "../../../nodes/equalfuncs_seams" }
+relnode_seams = { path = "../relnode_seams" }
+
+[dev-dependencies]
+# Install the equal_expr seam (owned by equalfuncs) so the reuse test, which
+# compares a Var against the recorded NestLoopParam paramval, can run.
+equalfuncs = { path = "../../../nodes/equalfuncs" }

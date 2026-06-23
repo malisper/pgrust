@@ -1,0 +1,25 @@
+[package]
+name = "plpgsql_gram"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "plpgsql_gram"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+plpgsql = { path = "../../../../_support/types/plpgsql" }
+parsenodes = { path = "../../../../_support/types/parsenodes" }
+utils_error = { path = "../../../../backend/utils/utils_error" }
+# The scanner this grammar drives (two-level lexer + token codes).
+plpgsql_scanner = { path = "../plpgsql_scanner" }
+# Non-keyword token codes shared with the core grammar (ICONST/SCONST/DOT_DOT/...).
+scan_fgram = { path = "../../../../backend/parser/scan_fgram" }
+# Compiler builder/resolver callbacks (panic until pl_comp.c lands).
+comp_seams = { path = "../comp_seams" }
+# Namespace stack (pl_funcs.c) — direct (no cycle: funcs does not depend on gram).
+funcs = { path = "../funcs" }

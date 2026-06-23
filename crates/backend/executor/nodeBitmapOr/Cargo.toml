@@ -1,0 +1,27 @@
+[package]
+name = "nodeBitmapOr"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nodeBitmapOr"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+tidbitmap = { path = "../../../_support/types/tidbitmap" }
+execparallel = { path = "../../../_support/types/execparallel" }
+
+# Outward seam crates (callees owned by other units, reached across the
+# executor-dispatch cycle).
+execProcnode_seams = { path = "../execProcnode_seams" }
+execAmi_seams = { path = "../execAmi_seams" }
+execUtils_seams = { path = "../execUtils_seams" }
+instrument_seams = { path = "../instrument_seams" }
+nodeBitmapIndexscan_seams = { path = "../nodeBitmapIndexscan_seams" }
+core_tidbitmap_seams = { path = "../../nodes/core_tidbitmap_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }

@@ -1,0 +1,31 @@
+[package]
+name = "formatting"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "formatting"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+locale = { path = "../../../../_support/types/locale" }
+types_wchar = { path = "../../../../_support/types/types_wchar" }
+pgtime = { path = "../../../../_support/types/pgtime" }
+types_datetime = { path = "../../../../_support/types/types_datetime" }
+types_numeric = { path = "../../../../_support/types/types_numeric" }
+types_cash = { path = "../../../../_support/types/types_cash" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+datum = { path = "../../../../_support/types/datum" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+formatting_seams = { path = "../formatting_seams" }
+adt_numeric = { path = "../adt_numeric" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+pg_locale_seams = { path = "../pg_locale_seams" }
+adt_datetime = { path = "../adt_datetime" }
+isoweek_seams = { path = "../isoweek_seams" }
+timestamp_seams = { path = "../timestamp_seams" }
+mbutils_seams = { path = "../../mb/mbutils_seams" }

@@ -1,0 +1,33 @@
+[package]
+name = "ipc_shmem"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ipc_shmem"
+path = "src/lib.rs"
+
+[dependencies]
+sysv_shmem_seams = { path = "../../../port/sysv/sysv_shmem_seams" }
+ipc_shmem_seams = { path = "../ipc_shmem_seams" }
+lwlock = { path = "../../lmgr/lwlock" }
+s_lock = { path = "../../lmgr/s_lock" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+varlena_seams = { path = "../../../utils/adt/varlena_seams" }
+utils_error = { path = "../../../utils/utils_error" }
+fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
+funcapi_seams = { path = "../../../utils/fmgr/funcapi_seams" }
+dynahash_seams = { path = "../../../utils/hash/dynahash_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+libc = "0.2"
+mcx = { path = "../../../../_support/mcx" }
+pg_numa_seams = { path = "../../../../port/pg_numa_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+hash = { path = "../../../../_support/types/hash" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }

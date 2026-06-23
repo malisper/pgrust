@@ -1,0 +1,13 @@
+[package]
+name = "fsm"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "fsm"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../types_core" }
+types_storage = { path = "../types_storage" }

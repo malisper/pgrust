@@ -1,0 +1,25 @@
+[package]
+name = "define"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "define"
+path = "src/lib.rs"
+
+[dependencies]
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+define_seams = { path = "../define_seams" }
+functioncmds_seams = { path = "../functioncmds_seams" }
+vacuum_seams = { path = "../vacuum_seams" }
+makefuncs_seams = { path = "../../nodes/makefuncs_seams" }
+parse_type_seams = { path = "../../parser/parse_type_seams" }
+small1_seams = { path = "../../parser/small1_seams" }
+numutils = { path = "../../utils/adt/numutils" }
+utils_error = { path = "../../utils/utils_error" }
+mcx = { path = "../../../_support/mcx" }
+types_cluster = { path = "../../../_support/types/types_cluster" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+parsenodes = { path = "../../../_support/types/parsenodes" }

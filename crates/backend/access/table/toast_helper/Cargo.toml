@@ -1,0 +1,21 @@
+[package]
+name = "toast_helper"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "toast_helper"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+rel = { path = "../../../../_support/types/rel" }
+toast_helper_seams = { path = "../toast_helper_seams" }
+detoast_seams = { path = "../../common/detoast_seams" }
+toast_internals_seams = { path = "../../common/toast_internals_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }

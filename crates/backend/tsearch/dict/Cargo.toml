@@ -1,0 +1,26 @@
+[package]
+name = "dict"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "dict"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+tsearch = { path = "../../../_support/types/tsearch" }
+datum = { path = "../../../_support/types/datum" }
+utils_error = { path = "../../utils/utils_error" }
+dict_seams = { path = "../dict_seams" }
+ts_utils_seams = { path = "../ts_utils_seams" }
+ts_locale_seams = { path = "../ts_locale_seams" }
+formatting_seams = { path = "../../utils/adt/formatting_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+arrayfuncs_seams = { path = "../../utils/adt/arrayfuncs_seams" }
+define_seams = { path = "../../commands/define_seams" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+fmgr = { path = "../../../_support/types/fmgr" }

@@ -1,0 +1,19 @@
+[package]
+name = "gram_c2rust_fgram"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "gram_c2rust_fgram"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+backend-nodes-types = { package = "types_fgram", path = "../../../backend/nodes/types_fgram" }
+backend-nodes-list = { package = "list_fgram", path = "../../../backend/nodes/list_fgram" }
+backend-nodes-value = { package = "value_fgram", path = "../../../backend/nodes/value_fgram" }
+scan_fgram = { path = "../../../backend/parser/scan_fgram" }
+driver_fgram = { path = "../../../backend/parser/driver_fgram" }
+pg_ffi_fgram = { path = "../pg_ffi_fgram" }
+libc = "0.2"

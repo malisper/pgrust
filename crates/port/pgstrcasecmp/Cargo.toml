@@ -1,0 +1,12 @@
+[package]
+name = "pgstrcasecmp"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgstrcasecmp"
+path = "src/lib.rs"
+
+[dependencies]
+libc = { version = "0.2", default-features = false }

@@ -1,0 +1,28 @@
+[package]
+name = "adt_format_type"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_format_type"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_format_type = { path = "../../../../_support/types/types_format_type" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+format_type_seams = { path = "../format_type_seams" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+lsyscache_seams = { path = "../../cache/lsyscache_seams" }
+namespace_seams = { path = "../../../catalog/namespace_seams" }
+ruleutils_seams = { path = "../ruleutils_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+mbutils_seams = { path = "../../mb/mbutils_seams" }
+numeric_seams = { path = "../numeric_seams" }

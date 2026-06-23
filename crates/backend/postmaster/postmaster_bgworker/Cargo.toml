@@ -1,0 +1,58 @@
+[package]
+name = "postmaster_bgworker"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "postmaster_bgworker"
+path = "src/lib.rs"
+
+[dependencies]
+types_tuple = { path = "../../../_support/types/types_tuple" }
+transam_parallel = { path = "../../access/transam/transam_parallel" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_bgworker = { path = "../../../_support/types/types_bgworker" }
+datum = { path = "../../../_support/types/datum" }
+types_startup = { path = "../../../_support/types/types_startup" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_pgstat = { path = "../../../_support/types/types_pgstat" }
+
+# Owner -seams crates this unit calls across dependency cycles.
+bgworker_seams = { path = "../bgworker_seams" }
+# Parallel-worker bring-up: BackgroundWorkerInitializeConnectionByOid (parallel.c).
+parallel_rt_seams = { path = "../../access/transam/parallel_rt_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+postinit_seams = { path = "../../utils/init/postinit_seams" }
+ps_status_seams = { path = "../../utils/misc/ps_status_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+ipc_shmem_seams = { path = "../../storage/ipc/ipc_shmem_seams" }
+pmsignal_seams = { path = "../../storage/ipc/pmsignal_seams" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
+dsm_core_seams = { path = "../../storage/ipc/dsm_core_seams" }
+lwlock_seams = { path = "../../storage/lmgr/lwlock_seams" }
+lmgr_proc_seams = { path = "../../storage/lmgr/lmgr_proc_seams" }
+postmaster_seams = { path = "../postmaster_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+libpq_pqsignal_seams = { path = "../../libpq/libpq_pqsignal_seams" }
+pgsleep_seams = { path = "../../../port/pgsleep_seams" }
+
+# Direct deps (acyclic): error reporting.
+utils_error = { path = "../../utils/utils_error" }
+error_seams = { path = "../../utils/error/error_seams" }
+
+# BackgroundWorkerMain's inline signal-handler block (bgworker.c:775-802):
+# the `pqsignal()` installer + the per-signal handler bodies it references.
+# Nothing depends on this crate, so these owner deps are acyclic.
+signal = { path = "../../../_support/types/signal" }
+port_pqsignal = { path = "../../../port/port_pqsignal" }
+libc = "0.2"
+postgres = { path = "../../tcop/postgres" }
+procsignal = { path = "../../storage/ipc/procsignal" }
+misc_timeout = { path = "../../utils/misc/misc_timeout" }
+# Core bgworker entry points dispatched by `call_bgworker_entrypoint` (acyclic:
+# these subsystem crates depend only on bgworker's *-seams, not this crate).
+launcher = { path = "../../replication/logical/launcher" }
+applyparallelworker = { path = "../../replication/logical/applyparallelworker" }

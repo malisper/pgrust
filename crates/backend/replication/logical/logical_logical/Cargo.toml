@@ -1,0 +1,36 @@
+[package]
+name = "logical_logical"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "logical_logical"
+path = "src/lib.rs"
+
+[dependencies]
+utils_error = { path = "../../../utils/utils_error" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_logical = { path = "../../../../_support/types/types_logical" }
+
+# Own inward seams.
+logical_seams = { path = "../logical_seams" }
+
+# Outward seams (owners not yet ported; calls panic until they land).
+slot_seams = { path = "../../slot_seams" }
+logical_snapbuild_seams = { path = "../logical_snapbuild_seams" }
+reorderbuffer_seams = { path = "../reorderbuffer_seams" }
+decode_seams = { path = "../decode_seams" }
+walsender_seams = { path = "../../walsender_seams" }
+slotsync_seams = { path = "../slotsync_seams" }
+replication_slot_2 = { path = "../../../../_support/types/replication_slot_2" }
+xlogreader_seams = { path = "../../../access/transam/xlogreader_seams" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+inval_seams = { path = "../../../utils/cache/inval_seams" }
+resowner_seams = { path = "../../../utils/resowner/resowner_seams" }
+mcxt_seams = { path = "../../../utils/mmgr/mcxt_seams" }
+dfmgr_seams = { path = "../../../utils/fmgr/dfmgr_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }

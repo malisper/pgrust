@@ -1,0 +1,31 @@
+[package]
+name = "smgr"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "smgr"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+mcx = { path = "../../../../_support/mcx" }
+utils_error = { path = "../../../utils/utils_error" }
+
+# md is BELOW smgr (fd <- md <- smgr): a direct dep, no seam.
+md = { path = "../md" }
+
+# Seam crates this unit OWNS (installs every decl from its own init_seams()).
+smgr_seams = { path = "../smgr_seams" }
+
+# Outward owner seams (calls that would cycle / cross unported neighbors).
+bufmgr_seams = { path = "../../buffer/bufmgr_seams" }
+inval_seams = { path = "../../../utils/cache/inval_seams" }
+xlogutils_seams = { path = "../../../access/transam/xlogutils_seams" }
+
+[dev-dependencies]
+types_core = { path = "../../../../_support/types/types_core" }

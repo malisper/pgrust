@@ -1,0 +1,102 @@
+[package]
+name = "methods"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "methods"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_resowner = { path = "../../../../_support/types/types_resowner" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+condvar = { path = "../../../../_support/types/condvar" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+# StartupData (the io_worker_main entry-point arg).
+types_startup = { path = "../../../../_support/types/types_startup" }
+utils_error = { path = "../../../utils/utils_error" }
+# Inward seams this crate installs (aio_shmem_size/aio_shmem_init/pgaio_init_backend).
+aio_seams_2 = { path = "../aio_seams_2" }
+# The io_worker_main seam this crate installs (IoWorkerMain aux-process entry).
+methods_seams = { path = "../methods_seams" }
+postmaster_seams = { path = "../../../postmaster/postmaster_seams" }
+# Size arithmetic (add_size/mul_size), faithfully overflow-checked.
+ipc_shmem_seams = { path = "../../ipc/ipc_shmem_seams" }
+# MaxBackends / NBuffers / MyProcNumber / MyBackendType / MyProc presence.
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+# SetConfigOption (io_max_concurrency dynamic-default forcing).
+guc_seams = { path = "../../../utils/misc/guc_seams" }
+# Live GUC store reads (io_max_concurrency / io_max_combine_limit / io_method),
+# returning the boot value before any owner installs its variable accessor.
+misc_guc = { path = "../../../utils/misc/misc_guc" }
+# The io_method / io_max_concurrency GUC-table variable accessor + hook slots
+# this unit owns (mirroring aio.c's `int io_method` / `int io_max_concurrency`).
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+# before_shmem_exit (pgaio_shutdown registration at backend init).
+dsm_core_seams = { path = "../../ipc/dsm_core_seams" }
+# The aio.c engine seams this unit now owns + installs (pgaio_closing_fd /
+# pgaio_error_cleanup / at_eoxact_aio / pgaio_io_start_readv /
+# pgaio_io_release_resowner) across the three per-consumer seam crates the
+# fd.c / xact.c / resowner.c call sites import.
+aio_seams = { path = "../aio_seams" }
+aio_core_seams = { path = "../aio_core_seams" }
+# Outward seams of the aio_funcs.c SQL SRF (pg_get_aios): the GetPGProcByNumber
+# pid lookup (proc.c) + the InitMaterializedSRF tuplestore_putvalues (funcapi /
+# tuplestore.c), which the genuinely-external owners install.
+funcs_seams = { path = "../funcs_seams" }
+# HOLD_INTERRUPTS / RESUME_INTERRUPTS / START_CRIT_SECTION / END_CRIT_SECTION
+# (the interrupt-holdoff + critical-section counters the state machine wraps).
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+# ConditionVariable broadcast / prepare-to-sleep / sleep / cancel-sleep used by
+# the per-handle completion CV in the wait path.
+condition_variable = { path = "../../lmgr/condition_variable" }
+# The genuinely-unported completion-callback / sync-perform / resowner-AIO
+# leaves the engine seams into (owners: bufmgr/md/localbuf, smgr/fd, resowner).
+completion_seams = { path = "../completion_seams" }
+# The buffer manager's explicit multi-block read pipeline AIO handle seams
+# (pgaio_io_acquire / pgaio_register_callbacks / start_read_buffers /
+# wait_read_buffers / wref_check_done), which this engine installs over the
+# real PgAioHandle lifecycle (bufmgr.c AsyncReadBuffers / WaitReadBuffers).
+bufmgr_seams = { path = "../../buffer/bufmgr_seams" }
+
+# --- method_worker.c (the worker IO method + IoWorkerMain aux process) ---
+# wait-event constants (WAIT_EVENT_IO_WORKER_MAIN) + PG_WAIT_* bases.
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+# The AioWorkerSubmissionQueue built-in LWLock (real cross-process MainLWLockArray).
+lwlock = { path = "../../lmgr/lwlock" }
+# ShmemInitStruct (the AioWorkerSubmissionQueue + AioWorkerControl shmem).
+# (the seam crate `backend-storage-ipc-shmem-seams` is already a dependency.)
+# Latch wakeups: WaitLatch(MyLatch)/ResetLatch + SetLatch on a worker's procLatch
+# by procno (the C `worker->latch = MyLatch` is the aux proc's shared procLatch).
+latch_seams = { path = "../../ipc/latch_seams" }
+# WL_LATCH_SET / WL_EXIT_ON_PM_DEATH flags + LWLockMode + MAX_IO_WORKERS sizing.
+# (types-storage is already a dependency.)
+# ShutdownRequestPending / ConfigReloadPending flags (the worker loop predicate).
+interrupt = { path = "../../../postmaster/interrupt" }
+# AuxiliaryProcessMainCommon (the aux-process bootstrap IoWorkerMain runs first).
+auxprocess_seams = { path = "../../../postmaster/auxprocess_seams" }
+# pqsignal(signo, handler) installer + UnBlockSig (the worker's signal setup).
+port_pqsignal_seams = { path = "../../../../port/port_pqsignal_seams" }
+libpq_pqsignal_seams = { path = "../../../libpq/libpq_pqsignal_seams" }
+# procsignal_sigusr1_handler (SIGUSR1 disposition for ProcSignalBarriers).
+procsignal = { path = "../../ipc/procsignal" }
+# die (SIGINT disposition — "to allow manually triggering worker restart").
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+# SignalHandlerForConfigReload / SignalHandlerForShutdownRequest are in interrupt.
+# proc_exit / on_shmem_exit (worker registration + normal/error exit).
+# (backend-storage-ipc-dsm-core-seams is already a dependency.)
+# ProcessConfigFile(PGC_SIGHUP) on a config reload.
+# (backend-utils-misc-guc-seams is already a dependency.)
+# set_ps_display(cmd) (the "%d" worker-id display).
+ps_status_seams = { path = "../../../utils/misc/ps_status_seams" }
+# SigHandler enum for pqsignal dispositions.
+signal = { path = "../../../../_support/types/signal" }
+# libc (SIGHUP/SIGINT/... constants for pqsignal + ENOENT).
+libc = "0.2"
+
+[dev-dependencies]

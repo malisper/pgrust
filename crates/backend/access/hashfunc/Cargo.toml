@@ -1,0 +1,21 @@
+[package]
+name = "hashfunc"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "hashfunc"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+fmgr = { path = "../../../_support/types/fmgr" }
+datum = { path = "../../../_support/types/datum" }
+hashfn = { path = "../../../common/hashfn" }
+utils_error = { path = "../../utils/utils_error" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+oid_seams = { path = "../../utils/adt/oid_seams" }
+pg_locale_seams = { path = "../../utils/adt/pg_locale_seams" }
+mcx = { path = "../../../_support/mcx" }

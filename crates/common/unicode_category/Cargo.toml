@@ -1,0 +1,13 @@
+[package]
+name = "unicode_category"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "unicode_category"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../_support/types/types_core" }
+unicode_category_seams = { path = "../unicode_category_seams" }

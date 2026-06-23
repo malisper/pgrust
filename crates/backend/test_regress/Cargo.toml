@@ -1,0 +1,46 @@
+[package]
+name = "test_regress"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "test_regress"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+datum = { path = "../../_support/types/datum" }
+fmgr = { path = "../../_support/types/fmgr" }
+coerce_seams = { path = "../parser/coerce_seams" }
+dfmgr_seams = { path = "../utils/fmgr/dfmgr_seams" }
+catalog_catalog = { path = "../catalog/catalog_catalog" }
+geo_ops = { path = "../utils/adt/geo_ops" }
+extra_encnames_fgram = { path = "../../common/extra_encnames_fgram" }
+common_path_seams = { path = "../../common/common_path_seams" }
+relpath = { path = "../common/relpath" }
+types_storage = { path = "../../_support/types/types_storage" }
+init_small_seams = { path = "../utils/init/init_small_seams" }
+elog_seams = { path = "../utils/error/elog_seams" }
+superuser_seams = { path = "../utils/misc/superuser_seams" }
+mcx = { path = "../../_support/mcx" }
+types_tuple = { path = "../../_support/types/types_tuple" }
+types_wchar = { path = "../../_support/types/types_wchar" }
+common_wchar = { path = "../../common/common_wchar" }
+mbutils = { path = "../utils/mb/mbutils" }
+mbutils_seams = { path = "../utils/mb/mbutils_seams" }
+arrayfuncs = { path = "../utils/adt/arrayfuncs" }
+funcapi_seams = { path = "../utils/fmgr/funcapi_seams" }
+execUtils = { path = "../executor/execUtils" }
+commands_trigger = { path = "../commands/commands_trigger" }
+parallel_rt_seams = { path = "../access/transam/parallel_rt_seams" }
+libc = "0.2"
+pgsleep = { path = "../../port/pgsleep" }
+heaptuple = { path = "../access/common/heaptuple" }
+detoast = { path = "../access/common/detoast" }
+toast_internals_seams = { path = "../access/common/toast_internals_seams" }
+typcache_seams = { path = "../utils/cache/typcache_seams" }
+clauses = { path = "../optimizer/util/clauses" }
+costsize_seams = { path = "../optimizer/path/costsize_seams" }
+nodes = { path = "../../_support/types/nodes" }

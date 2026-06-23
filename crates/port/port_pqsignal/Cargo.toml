@@ -1,0 +1,15 @@
+[package]
+name = "port_pqsignal"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "port_pqsignal"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+port_pqsignal_seams = { path = "../port_pqsignal_seams" }
+init_small_seams = { path = "../../backend/utils/init/init_small_seams" }
+signal = { path = "../../_support/types/signal" }

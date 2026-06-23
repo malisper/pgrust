@@ -1,0 +1,38 @@
+[package]
+name = "xml_libxml_ffi"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[lib]
+name = "xml_libxml_ffi"
+path = "src/lib.rs"
+
+[features]
+# Mirrors PostgreSQL's `--with-libxml` configure option (`#ifdef USE_LIBXML`).
+# When OFF, this crate binds nothing and installs only `have_libxml` (returning
+# `false`), so the in-crate xml.c bodies raise `NO_XML_SUPPORT()` and never
+# touch the parse/serialize seams. When ON, `init_seams` binds the system
+# libxml2 and installs every libxml2 FFI seam.
+default = ["with-libxml"]
+with-libxml = ["dep:elog_seams"]
+
+[dependencies]
+libc = "0.2"
+# WARNING channel for buffered libxml warnings (xml_errorHandler ereport(WARNING),
+# xml.c:2253); only needed when the libxml provider is compiled.
+elog_seams = { path = "../../error/elog_seams", optional = true }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_xml = { path = "../../../../_support/types/types_xml" }
+
+# The outward libxml2 FFI seams this provider binds + installs.
+xml_libxml_seams = { path = "../xml_libxml_seams" }
+
+# The ported pure-logic owner whose helpers (escape_xml, xml_doctype_in_content,
+# parse_xml_decl) the libxml2 parse/serialize paths must reuse to stay faithful
+# to xml.c's CONTENT/DOCUMENT detection and node-to-text escaping.
+adt_xml = { path = "../adt_xml" }

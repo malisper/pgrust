@@ -1,0 +1,52 @@
+[package]
+name = "createas"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "createas"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+rel = { path = "../../../_support/types/rel" }
+nodes = { path = "../../../_support/types/nodes" }
+types_dest = { path = "../../../_support/types/types_dest" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+portal = { path = "../../../_support/types/portal" }
+types_tableam = { path = "../../../_support/types/types_tableam" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_acl = { path = "../../../_support/types/types_acl" }
+types_matview = { path = "../../../_support/types/types_matview" }
+
+# This crate's inward seam crate.
+createas_seams = { path = "../createas_seams" }
+# The utility dispatcher's inward entry seam for ExecCreateTableAs.
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+
+# Error vocabulary.
+utils_error = { path = "../../utils/utils_error" }
+
+# Direct deps (no cycle): node construction, the table/heap access layer, the
+# catalog/namespace lookups, the dest router (the DR_intorel vtable owner
+# registers here, mirroring copyto), and the toast/transaction helpers.
+nodes_core = { path = "../../nodes/nodes_core" }
+tcop_dest = { path = "../../tcop/tcop_dest" }
+table = { path = "../../access/table/table" }
+table_tableam = { path = "../../access/table/table_tableam" }
+heapam = { path = "../../access/heap/heapam" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+pg_depend = { path = "../../catalog/pg_depend" }
+transam_xact = { path = "../../access/transam/transam_xact" }
+
+# Outward seams (would cycle / not-yet-ported owners).
+nodeFuncs_seams = { path = "../../nodes/nodeFuncs_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+format_type_seams = { path = "../../utils/adt/format_type_seams" }
+more_seams = { path = "../../utils/misc/more_seams" }
+matview_seams = { path = "../matview_seams" }

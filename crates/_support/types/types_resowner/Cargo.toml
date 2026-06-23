@@ -1,0 +1,13 @@
+[package]
+name = "types_resowner"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "types_resowner"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../types_core" }
+datum = { path = "../datum" }

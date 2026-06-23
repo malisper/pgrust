@@ -1,0 +1,25 @@
+[package]
+name = "postmaster_autovacuum"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "postmaster_autovacuum"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_reloptions = { path = "../../../_support/types/types_reloptions" }
+types_vacuum = { path = "../../../_support/types/types_vacuum" }
+types_autovacuum = { path = "../../../_support/types/types_autovacuum" }
+types_startup = { path = "../../../_support/types/types_startup" }
+utils_error = { path = "../../utils/utils_error" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+autovacuum_seams = { path = "../autovacuum_seams" }
+vacuum_seams = { path = "../../commands/vacuum_seams" }
+postmaster_seams = { path = "../postmaster_seams" }
+autovacuum_ext_seams = { path = "../autovacuum_ext_seams" }
+snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }

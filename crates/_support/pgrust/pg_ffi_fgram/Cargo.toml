@@ -1,0 +1,13 @@
+[package]
+name = "pg_ffi_fgram"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_ffi_fgram"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+libc = { version = "0.2", default-features = false }

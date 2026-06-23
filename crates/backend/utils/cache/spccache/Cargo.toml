@@ -1,0 +1,21 @@
+[package]
+name = "spccache"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "spccache"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+cache = { path = "../../../../_support/types/cache" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_reloptions = { path = "../../../../_support/types/types_reloptions" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+reloptions_seams = { path = "../../../access/common/reloptions_seams" }
+inval_seams = { path = "../inval_seams" }
+cache_syscache = { path = "../cache_syscache" }

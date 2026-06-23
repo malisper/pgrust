@@ -1,0 +1,30 @@
+[package]
+name = "waiteventset"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "waiteventset"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+waiteventset_seams = { path = "../waiteventset_seams" }
+latch_seams = { path = "../latch_seams" }
+pmsignal_seams = { path = "../pmsignal_seams" }
+ipc_seams = { path = "../ipc_seams" }
+file_seams = { path = "../../file/file_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+port_pqsignal_seams = { path = "../../../../port/port_pqsignal_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+signal = { path = "../../../../_support/types/signal" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+
+# Linux-only (WAIT_USE_EPOLL + WAIT_USE_SIGNALFD path): the death-watch pipe fd
+# and the UnBlockSig SIGURG manipulation. The kqueue build does not use these.
+[target.'cfg(target_os = "linux")'.dependencies]
+postmaster_seams = { path = "../../../postmaster/postmaster_seams" }
+libpq_pqsignal_seams = { path = "../../../libpq/libpq_pqsignal_seams" }

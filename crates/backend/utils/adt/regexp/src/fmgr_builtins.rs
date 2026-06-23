@@ -1,0 +1,754 @@
+//! The fmgr builtin layer (`Datum fn(PG_FUNCTION_ARGS)`) for the SQL-callable
+//! functions of `regexp.c`: the `~`/`!~`/`~*`/`!~*` operator family (over
+//! `text` and `name`), `substring(string from pattern)`, the SQL-spec
+//! `SIMILAR TO` escape converters, and the `regexp_replace` / `regexp_count` /
+//! `regexp_instr` / `regexp_like` / `regexp_substr` scalar families.
+//!
+//! Each entry is a `fc_<name>` adapter that reads its arguments off the fmgr
+//! call frame (a `text` arg arrives as its detoasted `VARDATA_ANY` payload on
+//! the by-ref lane — the boundary strips the varlena header; a `name` arg
+//! arrives as its fixed `NAMEDATALEN` buffer bytes, which the adapter NUL-trims
+//! the way C's `NameStr()` does; scalar `int4` args read off the by-value word;
+//! the optional trailing args of the variadic families are present iff the
+//! frame `nargs` covers them). It then calls the matching value core and writes
+//! back the result (`bool`/`int4` by value, `text` on the by-ref `Varlena`
+//! lane, `PG_RETURN_NULL()` via `set_result_null`). The collation is read from
+//! `fcinfo.fncollation` (C: `PG_GET_COLLATION()`).
+//!
+//! [`register_regexp_builtins`] registers every row into the fmgr-core builtin
+//! table (C: `fmgr_builtins[]`); it is invoked from this crate's `init_seams()`.
+//! OIDs / nargs / strict / retset are transcribed exactly from `pg_proc.dat`
+//! (all are strict except `similar_escape` (oid 1623, `proisstrict => 'f'`);
+//! none are retset — the set-returning `regexp_matches` / `regexp_split_to_table`
+//! are NOT registered here).
+
+use types_core::Oid;
+use datum::Datum;
+use types_error::PgResult;
+use fmgr::boundary::RefPayload;
+use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+
+use mcx::{Mcx, PgVec};
+
+// ---------------------------------------------------------------------------
+// Argument readers / result writers.
+// ---------------------------------------------------------------------------
+
+/// `VARHDRSZ` — the 4-byte uncompressed varlena length word.
+const VARHDRSZ: usize = 4;
+
+/// `VARDATA_ANY` of an inline (non-compressed, non-external) varlena image: skip
+/// ONE header byte for a short (1-byte) header, else `VARHDRSZ`. A small stored
+/// value arrives short-headed once `SHORT_VARLENA_PACKING` is on; a fixed
+/// `VARHDRSZ` strip would drop three payload bytes. No-op while packing is off.
+#[inline]
+fn varlena_payload(image: &[u8]) -> &[u8] {
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= VARHDRSZ => &image[VARHDRSZ..],
+        _ => &[],
+    }
+}
+
+/// A `text` arg's `VARDATA_ANY` content. Under the header-ful-everywhere
+/// convention the by-ref lane carries the full varlena image (4-byte length
+/// word + payload); this skips the header.
+#[inline]
+fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    varlena_payload(
+        fcinfo
+            .ref_arg(i)
+            .and_then(|p| p.as_varlena())
+            .expect("regexp fn: text arg missing from by-ref lane"),
+    )
+}
+
+/// A `name` arg's value bytes trimmed at the first NUL (C: `NameStr(name)`).
+/// A `name` is a fixed-length (typlen 64) pass-by-reference type that is NOT a
+/// varlena: it crosses the by-ref lane as its raw NUL-padded `NameData` buffer
+/// with NO length-word header. It must be read VERBATIM — running it through
+/// `varlena_payload` would misread the first buffer byte as a varlena header
+/// and chop leading characters off the name.
+#[inline]
+fn arg_name<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    let buf = fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("regexp fn: name arg missing from by-ref lane");
+    match buf.iter().position(|&b| b == 0) {
+        Some(n) => &buf[..n],
+        None => buf,
+    }
+}
+
+/// `PG_GETARG_INT32(i)`: the low 32 bits of arg `i`'s by-value word.
+#[inline]
+fn arg_i32(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i32 {
+    fcinfo.arg(i).expect("regexp fn: missing int4 arg").value.as_i32()
+}
+
+/// `PG_GET_COLLATION()`: the collation the function was invoked under.
+#[inline]
+fn collation(fcinfo: &FunctionCallInfoBaseData) -> Oid {
+    fcinfo.fncollation
+}
+
+#[inline]
+fn ret_bool(v: bool) -> PgResult<Datum> {
+    Ok(Datum::from_bool(v))
+}
+#[inline]
+fn ret_i32(v: i32) -> PgResult<Datum> {
+    Ok(Datum::from_i32(v))
+}
+
+/// Set a `text` result on the by-ref `Varlena` lane. The core's result lives in
+/// `m`; copy its bytes out before `m` drops. Under the header-ful-everywhere
+/// convention this stamps the 4-byte uncompressed varlena length word in front
+/// of the payload (`SET_VARSIZE`), symmetric with how `arg_text` reads args
+/// back.
+#[inline]
+fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, v: PgVec<'_, u8>) -> PgResult<Datum> {
+    let payload = v.as_slice();
+    let mut image = Vec::with_capacity(payload.len() + VARHDRSZ);
+    image.extend_from_slice(&datum::varlena::set_varsize_4b(payload.len() + VARHDRSZ));
+    image.extend_from_slice(payload);
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
+    Ok(Datum::from_usize(0))
+}
+
+/// Set `PG_RETURN_NULL()` and return the dummy word.
+#[inline]
+fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    fcinfo.set_result_null(true);
+    Ok(Datum::from_usize(0))
+}
+
+/// A scratch context for cores that allocate their result / scratch through
+/// `Mcx`. The owning `MemoryContext` is dropped by the caller after the bytes
+/// are copied out.
+fn scratch_mcx() -> mcx::MemoryContext {
+    mcx::MemoryContext::new("regexp fmgr scratch")
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters — operator family (~, !~, ~*, !~*).
+// ---------------------------------------------------------------------------
+//
+// For the `name`-first operators arg0 is the `name`, arg1 the `text` pattern;
+// the cores take both as raw bytes (the engine treats them as database-encoding
+// byte strings).
+
+fn fc_nameregexeq(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    ret_bool((crate::nameregexeq(m.mcx(), arg_name(fcinfo, 0), arg_text(fcinfo, 1), c))?)
+}
+fn fc_nameregexne(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    ret_bool((crate::nameregexne(m.mcx(), arg_name(fcinfo, 0), arg_text(fcinfo, 1), c))?)
+}
+fn fc_nameicregexeq(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    ret_bool((crate::nameicregexeq(m.mcx(), arg_name(fcinfo, 0), arg_text(fcinfo, 1), c))?)
+}
+fn fc_nameicregexne(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    ret_bool((crate::nameicregexne(m.mcx(), arg_name(fcinfo, 0), arg_text(fcinfo, 1), c))?)
+}
+fn fc_textregexeq(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    ret_bool((crate::textregexeq(m.mcx(), arg_text(fcinfo, 0), arg_text(fcinfo, 1), c))?)
+}
+fn fc_textregexne(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    ret_bool((crate::textregexne(m.mcx(), arg_text(fcinfo, 0), arg_text(fcinfo, 1), c))?)
+}
+fn fc_texticregexeq(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    ret_bool((crate::texticregexeq(m.mcx(), arg_text(fcinfo, 0), arg_text(fcinfo, 1), c))?)
+}
+fn fc_texticregexne(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    ret_bool((crate::texticregexne(m.mcx(), arg_text(fcinfo, 0), arg_text(fcinfo, 1), c))?)
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters — bpchar regex operators.
+// ---------------------------------------------------------------------------
+//
+// `bpchar` shares `text`'s physical varlena representation, and C reuses the
+// `text` cores by name (pg_proc.dat `prosrc => 'textregexeq'` etc.); the
+// bpchar payload bytes are passed straight through (no trailing-blank trim),
+// exactly as the `text*` functions receive them.
+
+fn fc_bpcharregexeq(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    ret_bool((crate::textregexeq(m.mcx(), arg_text(fcinfo, 0), arg_text(fcinfo, 1), c))?)
+}
+fn fc_bpcharregexne(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    ret_bool((crate::textregexne(m.mcx(), arg_text(fcinfo, 0), arg_text(fcinfo, 1), c))?)
+}
+fn fc_bpcharicregexeq(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    ret_bool((crate::texticregexeq(m.mcx(), arg_text(fcinfo, 0), arg_text(fcinfo, 1), c))?)
+}
+fn fc_bpcharicregexne(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    ret_bool((crate::texticregexne(m.mcx(), arg_text(fcinfo, 0), arg_text(fcinfo, 1), c))?)
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters — substring(string from pattern).
+// ---------------------------------------------------------------------------
+
+fn fc_textregexsubstr(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    let r = (crate::textregexsubstr(m.mcx(), arg_text(fcinfo, 0), arg_text(fcinfo, 1), c))?;
+    match r {
+        Some(v) => ret_text(fcinfo, v),
+        None => ret_null(fcinfo),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters — SIMILAR TO escape converters.
+// ---------------------------------------------------------------------------
+
+fn fc_similar_to_escape_2(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let v = (crate::similar_to_escape_2(m.mcx(), arg_text(fcinfo, 0), arg_text(fcinfo, 1)))?;
+    ret_text(fcinfo, v)
+}
+fn fc_similar_to_escape_1(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let v = (crate::similar_to_escape_1(m.mcx(), arg_text(fcinfo, 0)))?;
+    ret_text(fcinfo, v)
+}
+
+/// `similar_escape(text, text)` — NON-strict (C: `proisstrict => 'f'`). A NULL
+/// pattern returns NULL; a NULL escape selects the default escape character.
+fn fc_similar_escape(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    // pattern (arg0): may be NULL → the core returns NULL.
+    let pat: Option<&[u8]> = if fcinfo.arg(0).map(|d| d.isnull).unwrap_or(true) {
+        None
+    } else {
+        Some(arg_text(fcinfo, 0))
+    };
+    // escape (arg1): may be NULL → select the default escape.
+    let esc: Option<&[u8]> = if fcinfo.arg(1).map(|d| d.isnull).unwrap_or(true) {
+        None
+    } else {
+        Some(arg_text(fcinfo, 1))
+    };
+    let r = (crate::similar_escape(m.mcx(), pat, esc))?;
+    match r {
+        Some(v) => ret_text(fcinfo, v),
+        None => ret_null(fcinfo),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters — regexp_replace family.
+// ---------------------------------------------------------------------------
+
+fn fc_textregexreplace_noopt(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    let v = (crate::textregexreplace_noopt(
+        m.mcx(),
+        arg_text(fcinfo, 0),
+        arg_text(fcinfo, 1),
+        arg_text(fcinfo, 2),
+        c,
+    ))?;
+    ret_text(fcinfo, v)
+}
+fn fc_textregexreplace(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    let v = (crate::textregexreplace(
+        m.mcx(),
+        arg_text(fcinfo, 0),
+        arg_text(fcinfo, 1),
+        arg_text(fcinfo, 2),
+        arg_text(fcinfo, 3),
+        c,
+    ))?;
+    ret_text(fcinfo, v)
+}
+fn fc_textregexreplace_extended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    // (string, pattern, replacement, start, N, flags)
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    let flags = arg_text(fcinfo, 5);
+    let v = (crate::textregexreplace_extended(
+        m.mcx(),
+        arg_text(fcinfo, 0),
+        arg_text(fcinfo, 1),
+        arg_text(fcinfo, 2),
+        Some(arg_i32(fcinfo, 3)),
+        Some(arg_i32(fcinfo, 4)),
+        Some(flags),
+        c,
+    ))?;
+    ret_text(fcinfo, v)
+}
+fn fc_textregexreplace_extended_no_flags(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    // (string, pattern, replacement, start, N)
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    let v = (crate::textregexreplace_extended_no_flags(
+        m.mcx(),
+        arg_text(fcinfo, 0),
+        arg_text(fcinfo, 1),
+        arg_text(fcinfo, 2),
+        arg_i32(fcinfo, 3),
+        arg_i32(fcinfo, 4),
+        c,
+    ))?;
+    ret_text(fcinfo, v)
+}
+fn fc_textregexreplace_extended_no_n(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    // (string, pattern, replacement, start)
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    let v = (crate::textregexreplace_extended_no_n(
+        m.mcx(),
+        arg_text(fcinfo, 0),
+        arg_text(fcinfo, 1),
+        arg_text(fcinfo, 2),
+        arg_i32(fcinfo, 3),
+        None,
+        c,
+    ))?;
+    ret_text(fcinfo, v)
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters — regexp_count family.
+// ---------------------------------------------------------------------------
+
+fn fc_regexp_count_no_start(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    ret_i32((crate::regexp_count_no_start(
+        m.mcx(),
+        arg_text(fcinfo, 0),
+        arg_text(fcinfo, 1),
+        None,
+        c,
+    ))?)
+}
+fn fc_regexp_count_no_flags(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    ret_i32((crate::regexp_count_no_flags(
+        m.mcx(),
+        arg_text(fcinfo, 0),
+        arg_text(fcinfo, 1),
+        arg_i32(fcinfo, 2),
+        c,
+    ))?)
+}
+fn fc_regexp_count(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    // (string, pattern, start, flags)
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    let flags = arg_text(fcinfo, 3);
+    ret_i32((crate::regexp_count(
+        m.mcx(),
+        arg_text(fcinfo, 0),
+        arg_text(fcinfo, 1),
+        Some(arg_i32(fcinfo, 2)),
+        Some(flags),
+        c,
+    ))?)
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters — regexp_instr family.
+// ---------------------------------------------------------------------------
+
+fn fc_regexp_instr_no_start(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    ret_i32((crate::regexp_instr_no_start(
+        m.mcx(),
+        arg_text(fcinfo, 0),
+        arg_text(fcinfo, 1),
+        c,
+    ))?)
+}
+fn fc_regexp_instr_no_n(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    ret_i32((crate::regexp_instr_no_n(
+        m.mcx(),
+        arg_text(fcinfo, 0),
+        arg_text(fcinfo, 1),
+        arg_i32(fcinfo, 2),
+        c,
+    ))?)
+}
+fn fc_regexp_instr_no_endoption(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    ret_i32((crate::regexp_instr_no_endoption(
+        m.mcx(),
+        arg_text(fcinfo, 0),
+        arg_text(fcinfo, 1),
+        arg_i32(fcinfo, 2),
+        arg_i32(fcinfo, 3),
+        c,
+    ))?)
+}
+fn fc_regexp_instr_no_flags(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    ret_i32((crate::regexp_instr_no_flags(
+        m.mcx(),
+        arg_text(fcinfo, 0),
+        arg_text(fcinfo, 1),
+        arg_i32(fcinfo, 2),
+        arg_i32(fcinfo, 3),
+        arg_i32(fcinfo, 4),
+        c,
+    ))?)
+}
+fn fc_regexp_instr_no_subexpr(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    // (string, pattern, start, N, endoption, flags)
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    let flags = arg_text(fcinfo, 5);
+    ret_i32((crate::regexp_instr_no_subexpr(
+        m.mcx(),
+        arg_text(fcinfo, 0),
+        arg_text(fcinfo, 1),
+        arg_i32(fcinfo, 2),
+        arg_i32(fcinfo, 3),
+        arg_i32(fcinfo, 4),
+        Some(flags),
+        c,
+    ))?)
+}
+fn fc_regexp_instr(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    // (string, pattern, start, N, endoption, flags, subexpr)
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    let flags = arg_text(fcinfo, 5);
+    ret_i32((crate::regexp_instr(
+        m.mcx(),
+        arg_text(fcinfo, 0),
+        arg_text(fcinfo, 1),
+        Some(arg_i32(fcinfo, 2)),
+        Some(arg_i32(fcinfo, 3)),
+        Some(arg_i32(fcinfo, 4)),
+        Some(flags),
+        Some(arg_i32(fcinfo, 6)),
+        c,
+    ))?)
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters — regexp_like family.
+// ---------------------------------------------------------------------------
+
+fn fc_regexp_like_no_flags(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    ret_bool((crate::regexp_like_no_flags(
+        m.mcx(),
+        arg_text(fcinfo, 0),
+        arg_text(fcinfo, 1),
+        c,
+    ))?)
+}
+fn fc_regexp_like(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    // (string, pattern, flags)
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    let flags = arg_text(fcinfo, 2);
+    ret_bool((crate::regexp_like(
+        m.mcx(),
+        arg_text(fcinfo, 0),
+        arg_text(fcinfo, 1),
+        Some(flags),
+        c,
+    ))?)
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters — regexp_substr family.
+// ---------------------------------------------------------------------------
+
+fn fc_regexp_substr_no_start(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    let r = (crate::regexp_substr_no_start(m.mcx(), arg_text(fcinfo, 0), arg_text(fcinfo, 1), c))?;
+    match r {
+        Some(v) => ret_text(fcinfo, v),
+        None => ret_null(fcinfo),
+    }
+}
+fn fc_regexp_substr_no_n(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    let r = (crate::regexp_substr_no_n(
+        m.mcx(),
+        arg_text(fcinfo, 0),
+        arg_text(fcinfo, 1),
+        arg_i32(fcinfo, 2),
+        c,
+    ))?;
+    match r {
+        Some(v) => ret_text(fcinfo, v),
+        None => ret_null(fcinfo),
+    }
+}
+fn fc_regexp_substr_no_flags(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    let r = (crate::regexp_substr_no_flags(
+        m.mcx(),
+        arg_text(fcinfo, 0),
+        arg_text(fcinfo, 1),
+        arg_i32(fcinfo, 2),
+        arg_i32(fcinfo, 3),
+        c,
+    ))?;
+    match r {
+        Some(v) => ret_text(fcinfo, v),
+        None => ret_null(fcinfo),
+    }
+}
+fn fc_regexp_substr_no_subexpr(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    // (string, pattern, start, N, flags)
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    let flags = arg_text(fcinfo, 4);
+    let r = (crate::regexp_substr_no_subexpr(
+        m.mcx(),
+        arg_text(fcinfo, 0),
+        arg_text(fcinfo, 1),
+        arg_i32(fcinfo, 2),
+        arg_i32(fcinfo, 3),
+        Some(flags),
+        c,
+    ))?;
+    match r {
+        Some(v) => ret_text(fcinfo, v),
+        None => ret_null(fcinfo),
+    }
+}
+fn fc_regexp_substr(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    // (string, pattern, start, N, flags, subexpr)
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    let flags = arg_text(fcinfo, 4);
+    let r = (crate::regexp_substr(
+        m.mcx(),
+        arg_text(fcinfo, 0),
+        arg_text(fcinfo, 1),
+        Some(arg_i32(fcinfo, 2)),
+        Some(arg_i32(fcinfo, 3)),
+        Some(flags),
+        Some(arg_i32(fcinfo, 5)),
+        c,
+    ))?;
+    match r {
+        Some(v) => ret_text(fcinfo, v),
+        None => ret_null(fcinfo),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters — regexp_match (non-set-returning; returns text[]).
+// ---------------------------------------------------------------------------
+
+/// Set a `text[]` result on the by-ref `Varlena` lane: build the `ArrayType`
+/// varlena image (header-ful, per-element NULLs preserved) from the value core's
+/// `Vec<Option<payload>>`, then cross it verbatim. `None` for the whole result
+/// (no match) is `PG_RETURN_NULL()`.
+fn ret_text_array(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    m: &mcx::MemoryContext,
+    result: Option<PgVec<'_, Option<PgVec<'_, u8>>>>,
+) -> PgResult<Datum> {
+    match result {
+        None => ret_null(fcinfo),
+        Some(elems) => {
+            // Borrow each element's payload bytes (None => SQL NULL element).
+            let views: Vec<Option<&[u8]>> =
+                elems.iter().map(|e| e.as_ref().map(|p| p.as_slice())).collect();
+            let image = (arrayfuncs::construct::build_text_array_nullable(
+                m.mcx(),
+                &views,
+            ))?;
+            fcinfo.set_ref_result(RefPayload::Varlena(image.as_slice().to_vec()));
+            Ok(Datum::from_usize(0))
+        }
+    }
+}
+
+/// `regexp_match(text, text, text) -> text[]` (OID 3397).
+fn fc_regexp_match(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    let s = arg_text(fcinfo, 0);
+    let p = arg_text(fcinfo, 1);
+    let flags = arg_text(fcinfo, 2);
+    let r = (crate::regexp_match(m.mcx(), s, p, Some(flags), c))?;
+    ret_text_array(fcinfo, &m, r)
+}
+
+/// `regexp_match(text, text) -> text[]` (OID 3396, `regexp_match_no_flags`).
+fn fc_regexp_match_no_flags(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    let s = arg_text(fcinfo, 0);
+    let p = arg_text(fcinfo, 1);
+    let r = (crate::regexp_match_no_flags(m.mcx(), s, p, c))?;
+    ret_text_array(fcinfo, &m, r)
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters — regexp_split_to_array (non-set-returning; returns text[]).
+// ---------------------------------------------------------------------------
+
+/// Set a non-nullable `text[]` result on the by-ref `Varlena` lane from the
+/// value core's `Vec<payload>`. Unlike `regexp_match`, the split functions never
+/// return a NULL whole result and never produce NULL array elements, so each
+/// element payload is wrapped as a non-NULL element.
+fn ret_text_array_nonnull(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    m: &mcx::MemoryContext,
+    elems: PgVec<'_, PgVec<'_, u8>>,
+) -> PgResult<Datum> {
+    let views: Vec<Option<&[u8]>> = elems.iter().map(|e| Some(e.as_slice())).collect();
+    let image = (arrayfuncs::construct::build_text_array_nullable(
+        m.mcx(),
+        &views,
+    ))?;
+    fcinfo.set_ref_result(RefPayload::Varlena(image.as_slice().to_vec()));
+    Ok(Datum::from_usize(0))
+}
+
+/// `regexp_split_to_array(text, text, text) -> text[]` (OID 2768).
+fn fc_regexp_split_to_array(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    let s = arg_text(fcinfo, 0);
+    let p = arg_text(fcinfo, 1);
+    let flags = arg_text(fcinfo, 2);
+    let r = (crate::regexp_split_to_array(m.mcx(), s, p, Some(flags), c))?;
+    ret_text_array_nonnull(fcinfo, &m, r)
+}
+
+/// `regexp_split_to_array(text, text) -> text[]` (OID 2767,
+/// `regexp_split_to_array_no_flags`).
+fn fc_regexp_split_to_array_no_flags(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    let s = arg_text(fcinfo, 0);
+    let p = arg_text(fcinfo, 1);
+    let r = (crate::regexp_split_to_array_no_flags(m.mcx(), s, p, c))?;
+    ret_text_array_nonnull(fcinfo, &m, r)
+}
+
+// ---------------------------------------------------------------------------
+// Registration.
+// ---------------------------------------------------------------------------
+
+fn builtin(
+    foid: u32,
+    name: &str,
+    nargs: i16,
+    strict: bool,
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset: false,
+            func: None,
+        },
+        native,
+    )
+}
+
+/// Register every scalar `regexp.c` builtin (C: their `fmgr_builtins[]` rows).
+/// Called from this crate's `init_seams()`. OIDs/nargs/strict transcribed
+/// exactly from `pg_proc.dat`; none are retset.
+pub fn register_regexp_builtins() {
+    fmgr_core::register_builtins_native([
+        // ---- operator family (~ / !~ / ~* / !~*) ----
+        builtin(79, "nameregexeq", 2, true, fc_nameregexeq),
+        builtin(1252, "nameregexne", 2, true, fc_nameregexne),
+        builtin(1254, "textregexeq", 2, true, fc_textregexeq),
+        builtin(1256, "textregexne", 2, true, fc_textregexne),
+        builtin(1238, "texticregexeq", 2, true, fc_texticregexeq),
+        builtin(1239, "texticregexne", 2, true, fc_texticregexne),
+        builtin(1240, "nameicregexeq", 2, true, fc_nameicregexeq),
+        builtin(1241, "nameicregexne", 2, true, fc_nameicregexne),
+        // ---- bpchar regex operators (C reuses the text* cores) ----
+        builtin(1656, "texticregexeq", 2, true, fc_bpcharicregexeq),
+        builtin(1657, "texticregexne", 2, true, fc_bpcharicregexne),
+        builtin(1658, "textregexeq", 2, true, fc_bpcharregexeq),
+        builtin(1659, "textregexne", 2, true, fc_bpcharregexne),
+        // ---- substring(string from pattern) ----
+        builtin(2073, "textregexsubstr", 2, true, fc_textregexsubstr),
+        // ---- SIMILAR TO escape converters ----
+        builtin(1623, "similar_escape", 2, false, fc_similar_escape),
+        builtin(1986, "similar_to_escape_2", 2, true, fc_similar_to_escape_2),
+        builtin(1987, "similar_to_escape_1", 1, true, fc_similar_to_escape_1),
+        // ---- regexp_replace ----
+        builtin(2284, "textregexreplace_noopt", 3, true, fc_textregexreplace_noopt),
+        builtin(2285, "textregexreplace", 4, true, fc_textregexreplace),
+        builtin(6251, "textregexreplace_extended", 6, true, fc_textregexreplace_extended),
+        builtin(6252, "textregexreplace_extended_no_flags", 5, true, fc_textregexreplace_extended_no_flags),
+        builtin(6253, "textregexreplace_extended_no_n", 4, true, fc_textregexreplace_extended_no_n),
+        // ---- regexp_count ----
+        builtin(6254, "regexp_count_no_start", 2, true, fc_regexp_count_no_start),
+        builtin(6255, "regexp_count_no_flags", 3, true, fc_regexp_count_no_flags),
+        builtin(6256, "regexp_count", 4, true, fc_regexp_count),
+        // ---- regexp_instr ----
+        builtin(6257, "regexp_instr_no_start", 2, true, fc_regexp_instr_no_start),
+        builtin(6258, "regexp_instr_no_n", 3, true, fc_regexp_instr_no_n),
+        builtin(6259, "regexp_instr_no_endoption", 4, true, fc_regexp_instr_no_endoption),
+        builtin(6260, "regexp_instr_no_flags", 5, true, fc_regexp_instr_no_flags),
+        builtin(6261, "regexp_instr_no_subexpr", 6, true, fc_regexp_instr_no_subexpr),
+        builtin(6262, "regexp_instr", 7, true, fc_regexp_instr),
+        // ---- regexp_like ----
+        builtin(6263, "regexp_like_no_flags", 2, true, fc_regexp_like_no_flags),
+        builtin(6264, "regexp_like", 3, true, fc_regexp_like),
+        // ---- regexp_substr ----
+        builtin(6265, "regexp_substr_no_start", 2, true, fc_regexp_substr_no_start),
+        builtin(6266, "regexp_substr_no_n", 3, true, fc_regexp_substr_no_n),
+        builtin(6267, "regexp_substr_no_flags", 4, true, fc_regexp_substr_no_flags),
+        builtin(6268, "regexp_substr_no_subexpr", 5, true, fc_regexp_substr_no_subexpr),
+        builtin(6269, "regexp_substr", 6, true, fc_regexp_substr),
+        // ---- regexp_match (non-set-returning -> text[]) ----
+        builtin(3396, "regexp_match_no_flags", 2, true, fc_regexp_match_no_flags),
+        builtin(3397, "regexp_match", 3, true, fc_regexp_match),
+        builtin(2767, "regexp_split_to_array_no_flags", 2, true, fc_regexp_split_to_array_no_flags),
+        builtin(2768, "regexp_split_to_array", 3, true, fc_regexp_split_to_array),
+    ]);
+}

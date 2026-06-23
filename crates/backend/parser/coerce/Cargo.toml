@@ -1,0 +1,32 @@
+[package]
+name = "coerce"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "coerce"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+functioncmds_seams = { path = "../../commands/functioncmds_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+datum = { path = "../../../_support/types/datum" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+nodes = { path = "../../../_support/types/nodes" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+utils_error = { path = "../../utils/utils_error" }
+nodes_core = { path = "../../nodes/nodes_core" }
+parse_type = { path = "../parse_type" }
+coerce_seams = { path = "../coerce_seams" }
+small1_seams = { path = "../small1_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
+format_type_seams = { path = "../../utils/adt/format_type_seams" }
+pg_inherits_seams = { path = "../../catalog/pg_inherits_seams" }
+
+[dev-dependencies]

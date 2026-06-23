@@ -1,0 +1,36 @@
+[package]
+name = "launch_backend"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "launch_backend"
+path = "src/lib.rs"
+
+[dependencies]
+launch_backend_seams = { path = "../launch_backend_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+net = { path = "../../../_support/types/net" }
+types_startup = { path = "../../../_support/types/types_startup" }
+sysv_shmem_seams = { path = "../../port/sysv/sysv_shmem_seams" }
+autovacuum_seams = { path = "../autovacuum_seams" }
+bgworker_seams = { path = "../bgworker_seams" }
+bgwriter_seams = { path = "../bgwriter_seams" }
+checkpointer_seams = { path = "../checkpointer_seams" }
+fork_process_seams = { path = "../fork_process_seams" }
+pgarch_seams = { path = "../pgarch_seams" }
+postmaster_seams = { path = "../postmaster_seams" }
+startup_seams = { path = "../startup_seams" }
+syslogger_seams = { path = "../syslogger_seams" }
+walsummarizer_seams = { path = "../walsummarizer_seams" }
+walwriter_seams = { path = "../walwriter_seams" }
+slotsync_seams = { path = "../../replication/logical/slotsync_seams" }
+walreceiver_seams = { path = "../../replication/walreceiver_seams" }
+methods_seams = { path = "../../storage/aio/methods_seams" }
+dsm_core_seams = { path = "../../storage/ipc/dsm_core_seams" }
+backend_startup_seams = { path = "../../tcop/backend_startup_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+mcxt_seams = { path = "../../utils/mmgr/mcxt_seams" }

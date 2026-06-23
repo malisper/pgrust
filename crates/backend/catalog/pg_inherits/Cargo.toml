@@ -1,0 +1,40 @@
+[package]
+name = "pg_inherits"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_inherits"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+utils_error = { path = "../../utils/utils_error" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_storage = { path = "../../../_support/types/types_storage" }
+
+# Real catalog scanner + scankey + tuple deform.
+genam_seams = { path = "../../access/index/genam_seams" }
+scankey = { path = "../../access/common/scankey" }
+heaptuple = { path = "../../access/common/heaptuple" }
+table = { path = "../../access/table/table" }
+
+# parse_type (typeOrDomainTypeRelid / typeidTypeRelid) — direct dep, acyclic.
+parse_type = { path = "../../parser/parse_type" }
+
+# Cross-cycle boundary seams.
+indexing_seams = { path = "../indexing_seams" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }
+
+# This unit's own inward seams (installed from init_seams).
+pg_inherits_seams = { path = "../pg_inherits_seams" }

@@ -1,0 +1,16 @@
+[package]
+name = "seam_core"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "seam_core"
+path = "src/lib.rs"
+
+[features]
+default = []
+trace-seams = ["dep:trace"]
+
+[dependencies]
+trace = { path = "../../pgrust/trace", optional = true }

@@ -1,0 +1,24 @@
+[package]
+name = "common_reloptions"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "common_reloptions"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_reloptions = { path = "../../../../_support/types/types_reloptions" }
+reloptions_seams = { path = "../reloptions_seams" }
+fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
+arrayfuncs_seams = { path = "../../../utils/adt/arrayfuncs_seams" }
+guc_seams = { path = "../../../utils/misc/guc_seams" }
+define_seams = { path = "../../../commands/define_seams" }
+amapi_seams = { path = "../../index/amapi_seams" }

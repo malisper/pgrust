@@ -1,0 +1,95 @@
+[package]
+name = "postmaster"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "postmaster"
+path = "src/lib.rs"
+
+[dependencies]
+# Its own inward seam crate (installed by init_seams).
+postmaster_seams = { path = "../postmaster_seams" }
+
+# Directly-callable ported crate: pmchild owns ActiveChildList + the PMChild
+# slab; postmaster.c iterates/mutates those entries through its access
+# primitives. Acyclic: postmaster sits above pmchild in the bring-up order.
+pmchild = { path = "../pmchild" }
+
+# Real fork()/dispatch chokepoint: postmaster_child_launch forks a child and
+# dispatches to its Main function (the child path is fully wired). Acyclic:
+# launch-backend depends only on the postmaster *seams* crate, not this one.
+launch_backend = { path = "../launch_backend" }
+
+# Sockets: ListenServerPort / AcceptConnection / TouchSocketFiles.
+pqcomm = { path = "../../libpq/pqcomm" }
+
+# WaitEventSet (the postmaster main-loop poll set) + the owning wrapper.
+waiteventset = { path = "../../storage/ipc/waiteventset" }
+waiteventset_seams = { path = "../../storage/ipc/waiteventset_seams" }
+
+# The postmaster's own latch (MyLatch) — set/reset, and read for the wait set.
+latch = { path = "../../storage/ipc/latch" }
+
+# pmsignal: CheckPostmasterSignal / SetQuitSignalReason / IsPostmasterChildWalSender.
+pmsignal = { path = "../../storage/ipc/pmsignal" }
+# pmsignal-seams: install set_postmaster_death_watch_cloexec (postmaster owns the
+# death-watch fd; the cloexec set is consumed by miscinit's InitPostmasterChild).
+pmsignal_seams = { path = "../../storage/ipc/pmsignal_seams" }
+
+# portalmem (mmgr owner): the per-process TopMemoryContext/PostmasterContext
+# substrate. PostmasterMain creates PostmasterContext (create_postmaster_context)
+# and installs delete_postmaster_context delegating here.
+portalmem = { path = "../../utils/mmgr/portalmem" }
+
+# ereport surface.
+utils_error = { path = "../../utils/utils_error" }
+
+# Shared types.
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+net = { path = "../../../_support/types/net" }
+types_startup = { path = "../../../_support/types/types_startup" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_bgworker = { path = "../../../_support/types/types_bgworker" }
+types_guc = { path = "../../../_support/types/types_guc" }
+
+# Real installed init seams (the same surface single_user.rs drives).
+guc_seams = { path = "../../utils/misc/guc_seams" }
+# guc_tables.c GUC variable slots — postmaster.c reads its own GUC globals
+# (EnableSSL/ListenAddresses/PostPortNumber/...) through these `conf->variable`
+# slots, exactly as the C postmaster reads the globals declared in postmaster.c.
+guc_tables = { path = "../../utils/misc/guc_tables" }
+postinit_seams = { path = "../../utils/init/postinit_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+ipci_seams = { path = "../../storage/ipc/ipci_seams" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+pmchild_seams = { path = "../pmchild_seams" }
+bgworker_seams = { path = "../bgworker_seams" }
+status_seams = { path = "../../utils/activity/status_seams" }
+# The shared host/GUC/config/shmem bring-up seams the single-user driver also
+# uses (real owners installed). Seams crate — acyclic.
+postgres_seams = { path = "../../tcop/postgres_seams" }
+common_exec_seams = { path = "../../common/common_exec_seams" }
+init_small = { path = "../../utils/init/init_small" }
+fd_seams = { path = "../../storage/file/fd_seams" }
+# Postmaster-owned signal-handler + process-local-latch setup.
+port_pqsignal = { path = "../../../port/port_pqsignal" }
+libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
+miscinit = { path = "../../utils/init/miscinit" }
+signal = { path = "../../../_support/types/signal" }
+mcx = { path = "../../../_support/mcx" }
+launcher = { path = "../../replication/logical/launcher" }
+
+# Direct syscall chokepoint (waitpid/kill/time/close/pipe), mirroring how
+# fork-process calls libc::fork directly.
+libc = "0.2"
+
+[dev-dependencies]
+walsender_seams = { path = "../../replication/walsender_seams" }
+autovacuum_seams = { path = "../autovacuum_seams" }
+launch_backend_seams = { path = "../launch_backend_seams" }

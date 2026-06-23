@@ -1,0 +1,37 @@
+[package]
+name = "adt_jsonb"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_jsonb"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+datum = { path = "../../../../_support/types/datum" }
+types_json = { path = "../../../../_support/types/types_json" }
+types_jsonb = { path = "../../../../_support/types/types_jsonb" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+clauses_seams = { path = "../../../optimizer/util/clauses_seams" }
+parse_expr_seams = { path = "../../../parser/parse_expr_seams" }
+jsonb_util = { path = "../jsonb_util" }
+jsonb_op = { path = "../jsonb_op" }
+adt_numeric = { path = "../adt_numeric" }
+jsonb_seams = { path = "../jsonb_seams" }
+jsonfuncs_seams = { path = "../jsonfuncs_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+detoast_seams = { path = "../../../access/common/detoast_seams" }
+timestamp_seams = { path = "../timestamp_seams" }
+stack_depth_seams = { path = "../../misc/stack_depth_seams" }
+varlena_seams = { path = "../varlena_seams" }
+
+[dev-dependencies]
+hashfn_seams = { path = "../../../../common/hashfn_seams" }
+numeric_seams = { path = "../numeric_seams" }
+varlena_seams = { path = "../varlena_seams" }

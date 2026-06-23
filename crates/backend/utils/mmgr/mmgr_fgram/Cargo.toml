@@ -1,0 +1,20 @@
+[package]
+name = "mmgr_fgram"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "mmgr_fgram"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[features]
+memory-context-checking = []
+clobber-freed-memory = []
+randomize-allocated-memory = []
+
+[dependencies]
+error_fgram = { path = "../../error/error_fgram" }
+libc = { version = "0.2", default-features = false }
+pg_ffi_fgram = { path = "../../../../_support/pgrust/pg_ffi_fgram" }

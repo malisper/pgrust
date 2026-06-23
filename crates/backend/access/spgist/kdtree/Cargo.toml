@@ -1,0 +1,15 @@
+[package]
+name = "kdtree"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "kdtree"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+geo_ops_seams = { path = "../../../utils/adt/geo_ops_seams" }
+spg_proc_seams = { path = "../spg_proc_seams" }

@@ -1,0 +1,74 @@
+//! Seam declarations for the `backend-commands-dbcommands` unit (`dbcommands.c`): the rmgr-table
+//! callbacks it owns (slots of `RmgrTable`, populated from
+//! `access/rmgrlist.h` by `access/transam/rmgr.c`).
+//!
+//! The owning unit installs these from its `init_seams()` when it lands;
+//! until then a call panics loudly.
+
+#![allow(non_snake_case)]
+
+use mcx::{Mcx, PgString};
+use types_core::Oid;
+use types_error::PgResult;
+
+seam_core::seam!(
+    /// `dbase_redo(record)` (dbcommands.c) — WAL redo for this resource manager's
+    /// records (`rm_redo` slot). Can `ereport(ERROR)`, carried on `Err`.
+    pub fn dbase_redo(record: &mut wal::rmgr::XLogReaderState<'_>) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `get_database_name(dbid)` (dbcommands.c): the database's name copied
+    /// out of the syscache into `mcx` (C: `pstrdup` in the current context),
+    /// or `None` if there is no such database. `Err` includes OOM from the
+    /// copy.
+    pub fn get_database_name<'mcx>(mcx: Mcx<'mcx>, dbid: Oid) -> PgResult<Option<PgString<'mcx>>>
+);
+
+// --- backend-utils-init-postinit consumer (dbcommands.c) ---
+
+seam_core::seam!(
+    /// `database_is_invalid_form(datform)` (dbcommands.c): is the pg_database
+    /// row in the "invalid" state (a failed/interrupted CREATE DATABASE)? The
+    /// C reads `datform->datconnlimit == DATCONNLIMIT_INVALID_DB`, so only
+    /// `datconnlimit` crosses.
+    pub fn database_is_invalid_form(datconnlimit: i32) -> bool
+);
+
+seam_core::seam!(
+    /// `get_database_oid(dbname, missing_ok)` (dbcommands.c): look up the OID
+    /// of the database named `dbname`. With `missing_ok` false, `ereport(ERROR)`
+    /// if it does not exist (carried on `Err`); with it true, returns
+    /// `InvalidOid`.
+    pub fn get_database_oid(dbname: &str, missing_ok: bool) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `RenameDatabase(const char *oldname, const char *newname)`
+    /// (dbcommands.c) — ALTER DATABASE RENAME TO. Returns the database's
+    /// [`ObjectAddress`](types_catalog::catalog_dependency::ObjectAddress).
+    pub fn RenameDatabase(
+        oldname: &str,
+        newname: &str,
+    ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress>
+);
+
+seam_core::seam!(
+    /// `AlterDatabaseOwner(const char *dbname, Oid newOwnerId)` (dbcommands.c)
+    /// — ALTER DATABASE OWNER TO.
+    pub fn AlterDatabaseOwner(
+        dbname: &str,
+        new_owner_id: Oid,
+    ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(AUTHOID, ObjectIdGetDatum(roleid))` +
+    /// `((Form_pg_authid) GETSTRUCT(utup))->rolcreatedb` (dbcommands.c
+    /// `have_createdb_privilege`): read the role's `rolcreatedb` flag from the
+    /// `pg_authid` syscache. `None` when the role is not found (C's
+    /// `!HeapTupleIsValid`). The locale/tuple decode is catalog-read-owned, so
+    /// this stays a seam until the syscache/pg_authid read lands; installed by
+    /// that owner, not by dbcommands itself.
+    pub fn user_rolcreatedb<'mcx>(mcx: Mcx<'mcx>, roleid: Oid) -> PgResult<Option<bool>>
+);

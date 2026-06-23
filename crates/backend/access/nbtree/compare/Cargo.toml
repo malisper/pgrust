@@ -1,0 +1,28 @@
+[package]
+name = "compare"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "compare"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_sortsupport = { path = "../../../../_support/types/types_sortsupport" }
+
+# fmgr builtin fast-path registration (the btree BTORDER_PROC comparators).
+fmgr = { path = "../../../../_support/types/fmgr" }
+types_error = { path = "../../../../_support/types/types_error" }
+fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
+
+# Outward seam crate: the sort/skip substrate installs the comparator /
+# increment / decrement field writes; nbtcompare only calls them.
+compare_seams = { path = "../compare_seams" }
+
+[dev-dependencies]
+# Tests build a `SortSupportData` (needs a memory context) and install
+# recording stubs into the OUTWARD seams to verify dispatch.
+mcx = { path = "../../../../_support/mcx" }

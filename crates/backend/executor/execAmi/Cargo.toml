@@ -1,0 +1,74 @@
+[package]
+name = "execAmi"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "execAmi"
+path = "src/lib.rs"
+
+[dependencies]
+amapi_seams = { path = "../../access/index/amapi_seams" }
+execAmi_seams = { path = "../execAmi_seams" }
+init_subselect_ext_seams = { path = "../../optimizer/plan/init_subselect_ext_seams" }
+joinpath_seams = { path = "../../optimizer/path/joinpath_seams" }
+execUtils = { path = "../execUtils" }
+instrument_seams = { path = "../instrument_seams" }
+nodeLimit = { path = "../nodeLimit" }
+nodeLockRows = { path = "../nodeLockRows" }
+nodeMaterial = { path = "../nodeMaterial" }
+nodeSubplan_seams = { path = "../nodeSubplan_seams" }
+# Landed node units this ExecReScan/ExecMarkPos/ExecRestrPos dispatch routes to
+# directly. Each owner depends only on backend-executor-execAmi-seams, never on
+# this crate, so routing to them is acyclic.
+nodeAppend = { path = "../nodeAppend" }
+nodeBitmapAnd = { path = "../nodeBitmapAnd" }
+nodeBitmapHeapscan = { path = "../nodeBitmapHeapscan" }
+nodeBitmapIndexscan = { path = "../nodeBitmapIndexscan" }
+nodeBitmapOr = { path = "../nodeBitmapOr" }
+nodeCtescan = { path = "../nodeCtescan" }
+nodeCustom = { path = "../nodeCustom" }
+nodeForeignscan = { path = "../nodeForeignscan" }
+nodeGather = { path = "../nodeGather" }
+nodeGatherMerge = { path = "../nodeGatherMerge" }
+nodeGroup = { path = "../nodeGroup" }
+nodeAgg = { path = "../nodeAgg" }
+nodeHash = { path = "../nodeHash" }
+nodeHashjoin = { path = "../nodeHashjoin" }
+nodeIndexonlyscan = { path = "../nodeIndexonlyscan" }
+nodeIndexscan = { path = "../nodeIndexscan" }
+nodeMemoize = { path = "../nodeMemoize" }
+nodeMergeAppend = { path = "../nodeMergeAppend" }
+nodeMergejoin = { path = "../nodeMergejoin" }
+nodeModifyTable = { path = "../nodeModifyTable" }
+nodeNamedtuplestorescan = { path = "../nodeNamedtuplestorescan" }
+nodeNestloop = { path = "../nodeNestloop" }
+nodeProjectSet = { path = "../nodeProjectSet" }
+nodeRecursiveunion = { path = "../nodeRecursiveunion" }
+nodeResult = { path = "../nodeResult" }
+nodeSeqscan = { path = "../nodeSeqscan" }
+nodeSetOp = { path = "../nodeSetOp" }
+nodeSort = { path = "../nodeSort" }
+nodeIncrementalSort = { path = "../nodeIncrementalSort" }
+nodeSubqueryscan = { path = "../nodeSubqueryscan" }
+nodeTableFuncscan = { path = "../nodeTableFuncscan" }
+nodeFunctionscan = { path = "../nodeFunctionscan" }
+nodeTidscan = { path = "../nodeTidscan" }
+nodeSamplescan = { path = "../nodeSamplescan" }
+nodeTidrangescan = { path = "../nodeTidrangescan" }
+nodeWorktablescan = { path = "../nodeWorktablescan" }
+nodeUnique = { path = "../nodeUnique" }
+nodeValuesscan = { path = "../nodeValuesscan" }
+nodeWindowAgg = { path = "../nodeWindowAgg" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+utils_error = { path = "../../utils/utils_error" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+samplescan = { path = "../../../_support/types/samplescan" }
+
+[dev-dependencies]
+execTuples_seams = { path = "../execTuples_seams" }
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }

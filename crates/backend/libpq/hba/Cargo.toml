@@ -1,0 +1,50 @@
+[package]
+name = "hba"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "hba"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+# Inward seam crates (this crate installs their seams).
+auth_seams = { path = "../auth/auth_seams" }
+hba_seams = { path = "../hba_seams" }
+postmaster_seams = { path = "../../postmaster/postmaster_seams" }
+oauth_seams = { path = "../oauth_seams" }
+
+# Outward seam crates / owner crates.
+utils_error = { path = "../../utils/utils_error" }
+acl_seams = { path = "../../utils/adt/acl_seams" }
+user_seams = { path = "../../commands/user_seams" }
+walsender_seams = { path = "../../replication/walsender_seams" }
+misc_guc = { path = "../../utils/misc/misc_guc" }
+regex_core_seams = { path = "../../regex/regex_core_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+varlena = { path = "../../utils/adt/varlena" }
+varlena_seams = { path = "../../utils/adt/varlena_seams" }
+arrayfuncs_seams = { path = "../../utils/adt/arrayfuncs_seams" }
+adt_network = { path = "../../utils/adt/adt_network" }
+funcapi_seams = { path = "../../utils/fmgr/funcapi_seams" }
+miscinit = { path = "../../utils/init/miscinit" }
+# Parallel-worker bring-up: maybe_initialize_system_user (parallel.c).
+parallel_rt_seams = { path = "../../access/transam/parallel_rt_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+ifaddr = { path = "../ifaddr" }
+fd_seams = { path = "../../storage/file/fd_seams" }
+conffiles_seams = { path = "../../utils/misc/conffiles_seams" }
+ip = { path = "../../../common/ip" }
+
+# Type vocabulary.
+types_core = { path = "../../../_support/types/types_core" }
+net = { path = "../../../_support/types/net" }
+types_error = { path = "../../../_support/types/types_error" }
+regex = { path = "../../../_support/types/regex" }
+nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+mcx = { path = "../../../_support/mcx" }
+allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
+libc = "0.2"

@@ -1,0 +1,20 @@
+[package]
+name = "xlogdesc"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "xlogdesc"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+wal = { path = "../../../../_support/types/wal" }
+# This crate's own inward seam (xlog_desc / xlog_identify rm_desc slots).
+xlogdesc_seams = { path = "../xlogdesc_seams" }
+# timestamptz_to_str (END_OF_RECOVERY / OVERWRITE_CONTRECORD); owner
+# utils/adt/timestamp.c unported, through its seam.
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }

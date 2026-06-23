@@ -1,0 +1,30 @@
+[package]
+name = "pg_enum"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_enum"
+path = "src/lib.rs"
+
+[dependencies]
+heaptuple = { path = "../../access/common/heaptuple" }
+scankey = { path = "../../access/common/scankey" }
+genam_seams = { path = "../../access/index/genam_seams" }
+indexam_seams = { path = "../../access/index/indexam_seams" }
+table = { path = "../../access/table/table" }
+parallel_rt_seams = { path = "../../access/transam/parallel_rt_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+binary_upgrade_seams = { path = "../binary_upgrade_seams" }
+indexing_seams = { path = "../indexing_seams" }
+pg_enum_seams = { path = "../pg_enum_seams" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+mcx = { path = "../../../_support/mcx" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_tuple = { path = "../../../_support/types/types_tuple" }

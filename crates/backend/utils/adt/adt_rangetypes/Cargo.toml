@@ -1,0 +1,43 @@
+[package]
+name = "adt_rangetypes"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_rangetypes"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+cache = { path = "../../../../_support/types/cache" }
+types_rangetypes = { path = "../../../../_support/types/types_rangetypes" }
+nodes = { path = "../../../../_support/types/nodes" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+# Planner-support up-call owners (range-planner-support seam wiring): the range
+# `<@`/`@>` support functions fabricate/analyze planner nodes through these
+# already-real owners (makefuncs / clauses / costsize / lsyscache). The same
+# direct-dep-on-optimizer pattern `backend-utils-adt-selfuncs` already uses.
+nodes_core = { path = "../../../nodes/nodes_core" }
+clauses = { path = "../../../optimizer/util/clauses" }
+costsize = { path = "../../../optimizer/path/costsize" }
+lsyscache = { path = "../../cache/lsyscache" }
+allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
+rangetypes_seams = { path = "../rangetypes_seams" }
+detoast_seams = { path = "../../../access/common/detoast_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+typcache_seams = { path = "../../cache/typcache_seams" }
+lsyscache_seams = { path = "../../cache/lsyscache_seams" }
+nodeAgg_aggapi_seams = { path = "../../../executor/nodeAgg_aggapi_seams" }
+format_type_seams = { path = "../format_type_seams" }
+numeric_seams = { path = "../numeric_seams" }
+hashfn_seams = { path = "../../../../common/hashfn_seams" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+varlena_seams = { path = "../varlena_seams" }

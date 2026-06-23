@@ -1,0 +1,36 @@
+[package]
+name = "catcache"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "catcache"
+path = "src/lib.rs"
+
+[dependencies]
+trace = { path = "../../../../_support/pgrust/trace" }
+mcx = { path = "../../../../_support/mcx" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+hashfn_seams = { path = "../../../../common/hashfn_seams" }
+cache = { path = "../../../../_support/types/cache" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+rel = { path = "../../../../_support/types/rel" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+catcache_seams = { path = "../catcache_seams" }
+relcache_seams = { path = "../relcache_seams" }
+inval_seams = { path = "../inval_seams" }
+common_relation = { path = "../../../access/common/common_relation" }
+tupdesc = { path = "../../../access/common/tupdesc" }
+indexam_seams = { path = "../../../access/index/indexam_seams" }
+lmgr_seams = { path = "../../../storage/lmgr/lmgr_seams" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+miscinit_seams = { path = "../../init/miscinit_seams" }
+genam_seams = { path = "../../../access/index/genam_seams" }
+heaptuple = { path = "../../../access/common/heaptuple" }
+heaptoast_seams = { path = "../../../access/heap/heaptoast_seams" }
+init_small_seams = { path = "../../init/init_small_seams" }

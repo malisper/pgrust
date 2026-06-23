@@ -1,0 +1,40 @@
+[package]
+name = "syslogger"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "syslogger"
+path = "src/lib.rs"
+
+[dependencies]
+guc_tables = { path = "../../utils/misc/guc_tables" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_dest = { path = "../../../_support/types/types_dest" }
+types_guc = { path = "../../../_support/types/types_guc" }
+signal = { path = "../../../_support/types/signal" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_pgstat = { path = "../../../_support/types/types_pgstat" }
+pgtime = { path = "../../../_support/types/pgtime" }
+syslogger_seams = { path = "../syslogger_seams" }
+postmaster_seams = { path = "../postmaster_seams" }
+utils_error = { path = "../../utils/utils_error" }
+interrupt = { path = "../interrupt" }
+libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
+guc_file_seams = { path = "../../utils/misc/guc_file_seams" }
+dsm_core_seams = { path = "../../storage/ipc/dsm_core_seams" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
+latch = { path = "../../storage/ipc/latch" }
+waiteventset_seams = { path = "../../storage/ipc/waiteventset_seams" }
+fd_seams = { path = "../../storage/file/fd_seams" }
+launch_backend_seams = { path = "../launch_backend_seams" }
+pgtz_seams = { path = "../../timezone/pgtz_seams" }
+strftime_seams = { path = "../../timezone/strftime_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+init_small = { path = "../../utils/init/init_small" }
+more_seams = { path = "../../utils/misc/more_seams" }
+types_startup = { path = "../../../_support/types/types_startup" }
+port_pqsignal_seams = { path = "../../../port/port_pqsignal_seams" }
+libc = "0.2"

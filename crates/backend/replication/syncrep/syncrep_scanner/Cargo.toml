@@ -1,0 +1,14 @@
+[package]
+name = "syncrep_scanner"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "syncrep_scanner"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_error = { path = "../../../../_support/types/types_error" }
+scanner_seams = { path = "../scanner_seams" }

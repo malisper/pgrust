@@ -1,0 +1,31 @@
+[package]
+name = "setrefs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "setrefs"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+init_subselect_ext_seams = { path = "../init_subselect_ext_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+# expression_tree_mutator / expression_tree_walker over the Expr tree,
+# query_tree_walker over the Node tree, set_opfuncid/set_sa_opfuncid,
+# expr_type/expr_typmod/expr_collation, makefuncs, bitmapset ops, equal/copyObject.
+nodes_core = { path = "../../../nodes/nodes_core" }
+# equal() over Expr (search_indexed_tlist_for_sortgroupref / tlist_member).
+equalfuncs = { path = "../../../nodes/equalfuncs" }
+# This unit's own outward seams (cross-subsystem externals that would cycle).
+setrefs_seams = { path = "../setrefs_seams" }
+# GetSysCacheHashValue1(PROCOID, funcid) for record_plan_function_dependency's
+# VALUE form (the extract_query_dependencies path).
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+# remove_nulling_relids (rewriteManip.c) for the grouping-sets nullingrels strip
+# in set_upper_references; owner-installed by backend-rewrite-core.
+nodeFuncs_seams = { path = "../../../nodes/nodeFuncs_seams" }

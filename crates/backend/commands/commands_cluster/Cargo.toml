@@ -1,0 +1,70 @@
+[package]
+name = "commands_cluster"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "commands_cluster"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+matview_deps_seams = { path = "../matview_deps_seams" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+multixact_seams = { path = "../../access/transam/multixact_seams" }
+
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+rel = { path = "../../../_support/types/rel" }
+types_cluster = { path = "../../../_support/types/types_cluster" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+nodes = { path = "../../../_support/types/nodes" }
+rusage = { path = "../../../_support/types/rusage" }
+
+utils_error = { path = "../../utils/utils_error" }
+define_seams = { path = "../define_seams" }
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+
+# own seam crate (inward)
+cluster_seams = { path = "../cluster_seams" }
+
+# owner seam crates (outward) — one per owning unit (AGENTS.md §2)
+dependency_seams = { path = "../../catalog/dependency_seams" }
+small1_seams = { path = "../../parser/small1_seams" }
+table_seams = { path = "../../access/table/table_seams" }
+indexam_seams = { path = "../../access/index/indexam_seams" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+indexing_seams = { path = "../../catalog/indexing_seams" }
+inval_seams = { path = "../../utils/cache/inval_seams" }
+catalog_seams = { path = "../../catalog/catalog_seams" }
+heap_seams = { path = "../../catalog/heap_seams" }
+toasting_seams = { path = "../../catalog/toasting_seams" }
+toastdesc_seams = { path = "../../access/common/toastdesc_seams" }
+index_seams = { path = "../../catalog/index_seams" }
+pg_inherits_seams = { path = "../../catalog/pg_inherits_seams" }
+tablecmds_seams = { path = "../tablecmds_seams" }
+vacuum_seams = { path = "../vacuum_seams" }
+planner_seams = { path = "../../optimizer/plan/planner_seams" }
+predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
+heapam_seams = { path = "../../access/heap/heapam_seams" }
+access_tableam_seams = { path = "../../access/access_tableam_seams" }
+relmapper_seams = { path = "../../utils/cache/relmapper_seams" }
+objectaccess_seams = { path = "../../catalog/objectaccess_seams" }
+catalog_perm_seams = { path = "../../utils/adt/catalog_perm_seams" }
+activity_small_seams = { path = "../../utils/activity/activity_small_seams" }
+snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }
+clean_seams = { path = "../../utils/misc/clean_seams" }
+elog_seams = { path = "../../utils/error/elog_seams" }
+pg_depend_seams = { path = "../../catalog/pg_depend_seams" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+guc_seams = { path = "../../utils/misc/guc_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }

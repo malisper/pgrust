@@ -1,0 +1,18 @@
+[package]
+name = "zstd"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "zstd"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+compression = { path = "../../../_support/types/compression" }
+mcx = { path = "../../../_support/mcx" }
+sink = { path = "../sink" }
+zstd_seams = { path = "../zstd_seams" }
+utils_error = { path = "../../utils/utils_error" }

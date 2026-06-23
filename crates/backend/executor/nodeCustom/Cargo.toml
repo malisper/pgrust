@@ -1,0 +1,21 @@
+[package]
+name = "nodeCustom"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nodeCustom"
+path = "src/lib.rs"
+
+[dependencies]
+execExpr_seams = { path = "../execExpr_seams" }
+execTuples_seams = { path = "../execTuples_seams" }
+execUtils_seams = { path = "../execUtils_seams" }
+extensible_seams = { path = "../../nodes/extensible_seams" }
+ipc_shm_toc_seams = { path = "../../storage/ipc/ipc_shm_toc_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+mcx = { path = "../../../_support/mcx" }

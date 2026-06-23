@@ -1,0 +1,24 @@
+[package]
+name = "array_selfuncs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "array_selfuncs"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+nodes = { path = "../../../../_support/types/nodes" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+types_selfuncs = { path = "../../../../_support/types/types_selfuncs" }
+selfuncs_seams = { path = "../selfuncs_seams" }
+lsyscache_seams = { path = "../../cache/lsyscache_seams" }
+typcache_seams = { path = "../../cache/typcache_seams" }
+arrayfuncs_seams = { path = "../arrayfuncs_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }

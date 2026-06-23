@@ -1,0 +1,36 @@
+[package]
+name = "pathnode"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pathnode"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+joinpath_seams = { path = "../../path/joinpath_seams" }
+pathnode_seams = { path = "../pathnode_seams" }
+relnode_seams = { path = "../relnode_seams" }
+# create_unique_path (pathnode.c:1730) reaches lsyscache's
+# get_ordering_op_for_equality_op / get_equality_op_for_ordering_op. lsyscache is
+# below pathnode in the DAG — no cycle.
+lsyscache_seams = { path = "../../../utils/cache/lsyscache_seams" }
+costsize_seams = { path = "../../path/costsize_seams" }
+# apply_projection_to_path (pathnode.c) compares two PathTarget tlists with
+# equal() (equalfuncs.c). Leaf seam crate — no cycle.
+equalfuncs_seams = { path = "../../../nodes/equalfuncs_seams" }
+# reparameterize_path_by_child (pathnode.c:4408) drives appendinfo.c's
+# parent->child attribute translation (adjust_appendrel_attrs_multilevel and the
+# multilevel restrictinfo/node/indexclause list specializations) +
+# adjust_child_relids_multilevel. appendinfo is below pathnode in the DAG.
+appendinfo_seams = { path = "../appendinfo_seams" }
+
+[dev-dependencies]
+types_tuple = { path = "../../../../_support/types/types_tuple" }

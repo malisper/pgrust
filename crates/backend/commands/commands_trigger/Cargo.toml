@@ -1,0 +1,106 @@
+[package]
+name = "commands_trigger"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "commands_trigger"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+tablecmds_seams = { path = "../tablecmds_seams" }
+table_seams = { path = "../../access/table/table_seams" }
+execExpr_seams = { path = "../../executor/execExpr_seams" }
+execUtils_seams = { path = "../../executor/execUtils_seams" }
+execTuples_seams = { path = "../../executor/execTuples_seams" }
+read_seams = { path = "../../nodes/read_seams" }
+nodes_core = { path = "../../nodes/nodes_core" }
+rewritehandler_seams = { path = "../../rewrite/rewritehandler_seams" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+datum = { path = "../../../_support/types/datum" }
+fmgr = { path = "../../../_support/types/fmgr" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+rel = { path = "../../../_support/types/rel" }
+snapshot = { path = "../../../_support/types/snapshot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_trigger = { path = "../../../_support/types/types_trigger" }
+types_ri_triggers = { path = "../../../_support/types/types_ri_triggers" }
+nodes = { path = "../../../_support/types/nodes" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+types_tableam = { path = "../../../_support/types/types_tableam" }
+trigger_seams = { path = "../trigger_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+heapam_seams = { path = "../../access/heap/heapam_seams" }
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+# FK phase-3 validation scan (validate_foreign_key_constraint): the registered
+# MVCC snapshot for the scan + the RI set-based check / per-row check trigger.
+snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }
+ri_triggers_seams = { path = "../../utils/adt/ri_triggers_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+# AfterTriggerSetState (SET CONSTRAINTS): constraint-name resolution via the
+# search path + cross-database catalogname guard.
+namespace_seams = { path = "../../catalog/namespace_seams" }
+dbcommands_seams = { path = "../dbcommands_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+# assign_session_replication_role flushes the plan cache when the role changes.
+cache_plancache = { path = "../../utils/cache/cache_plancache" }
+# CreateTrigger catalog-write DDL leg (create.rs).
+types_acl = { path = "../../../_support/types/types_acl" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_scan = { path = "../../../_support/types/types_scan" }
+heaptuple = { path = "../../access/common/heaptuple" }
+heapam_visibility = { path = "../../access/heap/heapam_visibility" }
+datum_seams = { path = "../../utils/adt/datum_seams" }
+scankey = { path = "../../access/common/scankey" }
+genam_seams = { path = "../../access/index/genam_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+catalog_catalog = { path = "../../catalog/catalog_catalog" }
+indexing_seams = { path = "../../catalog/indexing_seams" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+objectaccess_seams = { path = "../../catalog/objectaccess_seams" }
+objectaddress = { path = "../../catalog/objectaddress" }
+pg_constraint_seams = { path = "../../catalog/pg_constraint_seams" }
+pg_depend = { path = "../../catalog/pg_depend" }
+pg_inherits = { path = "../../catalog/pg_inherits" }
+partition_seams = { path = "../../catalog/partition_seams" }
+partdesc = { path = "../../partitioning/partdesc" }
+pg_class_seams = { path = "../../catalog/pg_class_seams" }
+inval = { path = "../../utils/cache/inval" }
+init_small = { path = "../../utils/init/init_small" }
+func = { path = "../../parser/func" }
+parser_relation = { path = "../../parser/parser_relation" }
+# CreateTrigger WHEN-clause transform (transform_trigger_when in create.rs).
+small1 = { path = "../../parser/small1" }
+clause_seams = { path = "../../parser/clause_seams" }
+parse_collate = { path = "../../parser/parse_collate" }
+vars = { path = "../../optimizer/util/vars" }
+outfuncs = { path = "../../nodes/outfuncs" }
+dependency_seams = { path = "../../catalog/dependency_seams" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+miscinit = { path = "../../utils/init/miscinit" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+utils_error = { path = "../../utils/utils_error" }
+# Transition-table tuplestores (MakeTransitionCaptureState / TransitionTableAddTuple).
+sort_storage = { path = "../../utils/sort/sort_storage" }
+# Transition-table ENR registration (SPI_register_trigger_data, owned model) + the
+# per-backend query-environment home the SPI read path borrows.
+queryenvironment = { path = "../../utils/misc/queryenvironment" }
+queryenvironment_home = { path = "../../utils/misc/queryenvironment_home" }
+# ExecGetChildToRootMap (TransitionTableAddTuple child→root conversion gate).
+execMain_seams = { path = "../../executor/execMain_seams" }
+next_seams = { path = "../../access/common/next_seams" }
+# tsvector_update_trigger carrier seams + make_tsvector / ParsedText for the
+# BEFORE-trigger rebuild-and-deposit of the tsvector column.
+tsvector_ext_seams = { path = "../../utils/adt/tsvector_ext_seams" }
+to_tsany = { path = "../../tsearch/to_tsany" }
+parse = { path = "../../tsearch/parse" }

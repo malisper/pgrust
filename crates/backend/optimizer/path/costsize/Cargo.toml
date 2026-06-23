@@ -1,0 +1,45 @@
+[package]
+name = "costsize"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "costsize"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+pathnode_seams = { path = "../../util/pathnode_seams" }
+joinpath_seams = { path = "../joinpath_seams" }
+costsize_seams = { path = "../costsize_seams" }
+relnode_seams = { path = "../../util/relnode_seams" }
+relnode_ext_seams = { path = "../../util/relnode_ext_seams" }
+joininfo_ext_seams = { path = "../../util/joininfo_ext_seams" }
+planner_pc_seams = { path = "../../plan/planner_pc_seams" }
+init_subselect_ext_seams = { path = "../../plan/init_subselect_ext_seams" }
+selfuncs_seams = { path = "../../../utils/adt/selfuncs_seams" }
+types_selfuncs = { path = "../../../../_support/types/types_selfuncs" }
+# cost_qual_eval_walker dispatches on the Expr node vocabulary (nodeFuncs.c
+# expression_tree_walker / exprType), resolves opfuncid via get_opcode and type
+# I/O funcs (lsyscache.c), and reads array lengths (clauses.c
+# estimate_array_length over an inline &Expr). These owners depend only on
+# *-seams leaves of costsize, never on this owner crate — no cycle.
+nodes_core = { path = "../../../nodes/nodes_core" }
+lsyscache_seams = { path = "../../../utils/cache/lsyscache_seams" }
+clauses = { path = "../../util/clauses" }
+# costsize.c owns the scan/join `enable_*` cost GUCs; this crate installs their
+# guc-table slots (process-private backing cells) so allpaths.c/joinrels.c can
+# read them through `vars::enable_*.read()`.
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+# costsize.c owns the `random_page_cost`/`seq_page_cost` GUC defaults that
+# spccache.c's `get_tablespace_page_costs` falls back to; this crate installs
+# the `get_tablespace_page_costs` cost seam, delegating to spccache with those
+# defaults + `MyDatabaseTableSpace` (init-small global).
+spccache = { path = "../../../utils/cache/spccache" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }

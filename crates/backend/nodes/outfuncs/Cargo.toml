@@ -1,0 +1,24 @@
+[package]
+name = "outfuncs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "outfuncs"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+typecmds_seams = { path = "../../commands/typecmds_seams" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+# The `node_to_string_with_locations` inward seam this unit owns is declared on
+# the `backend-nodes-core` owner's seam crate (it was re-homed there so the
+# install guard can track it); installing it here retires the live panic the
+# `print` family drives it through.
+nodes_core_seams = { path = "../nodes_core_seams" }
+# `ExecSerializePlan` worker plan-shipping serializer is installed here over the
+# execParallel-support seam (an executor->outfuncs direct dep would cycle).
+execParallel_support_seams = { path = "../../executor/execParallel_support_seams" }

@@ -1,0 +1,102 @@
+[package]
+name = "indexing"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "indexing"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+mcx = { path = "../../../_support/mcx" }
+matview_deps_seams = { path = "../../commands/matview_deps_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+nodes = { path = "../../../_support/types/nodes" }
+types_tableam = { path = "../../../_support/types/types_tableam" }
+types_storage = { path = "../../../_support/types/types_storage" }
+
+# Own inward-seam declarations (installed by this crate's init_seams()).
+indexing_seams = { path = "../indexing_seams" }
+
+# index_update_stats (catalog/index.c) dependency seams: IsBinaryUpgrade
+# (init-small), AutoVacuumingActive (autovacuum), visibilitymap_count
+# (vacuumlazy), all leaf seam crates with no edge back to this crate.
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+pg_shdepend_seams = { path = "../pg_shdepend_seams" }
+autovacuum_seams = { path = "../../postmaster/autovacuum_seams" }
+vacuumlazy_seams = { path = "../../access/heap/vacuumlazy_seams" }
+
+# Engine callees — direct deps (the C indexing.c includes executor.h /
+# access/heapam.h / access/genam.h / catalog/index.h, calling these directly).
+indexam = { path = "../../access/index/indexam" }
+execTuples = { path = "../../executor/execTuples" }
+
+# Engine callees crossed as seams (owners are sibling-spine deps).
+index_seams = { path = "../index_seams" }
+# SetRelationHasSubclass pg_class write (tablecmds.c): the relhassubclass-column
+# catalog write, declared on tablecmds-seams, installed from this write layer.
+tablecmds_seams = { path = "../../commands/tablecmds_seams" }
+# SetRelationNumChecks pg_class `relchecks` write (heap.c): declared on
+# heap-seams, installed from this pg_class-write layer.
+heap_seams = { path = "../heap_seams" }
+heapam_seams = { path = "../../access/heap/heapam_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+
+# F1 per-catalog typed-insert seam bodies: form the catalog tuple from the
+# crossed *InsertRow (heap_form_tuple over the catalog tupdesc), allocate row
+# OIDs (GetNewOidWithIndex), then call the F0 engine above. The catalog-row
+# constant/carrier types live in types-catalog. No dependency cycle: neither
+# backend-catalog-catalog nor backend-access-common-heaptuple depends on this
+# crate (verified via cargo tree).
+heaptuple = { path = "../../access/common/heaptuple" }
+authid = { path = "../../../_support/types/authid" }
+catalog_catalog = { path = "../catalog_catalog" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+
+# CreateStatistics' variable-length pg_statistic_ext columns: the char[] stxkind
+# array (construct_array) and the buildint2vector / CStringGetTextDatum image
+# bytes. arrayfuncs depends only on lsyscache-seams (no cycle).
+arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
+datum = { path = "../../../_support/types/datum" }
+
+# F2 syscache-copy / array-decode / owner-change seam bodies: the genam
+# systable scan iterator (re-fetch a tuple by OID over the caller's open
+# relation — the SearchSysCacheCopy1 stand-in for a catalog held open), the
+# ScanKeyInit eager-fmgr key build, the table-AM relation open (sequence DML
+# opens its own pg_sequence), the aclnewowner ACL rewrite for the owner-change
+# legs, the pg_class relcache invalidation (SetRelationRuleStatus), and the
+# InvokeObjectPostAlterHook object-access hook. The deformed-row carriers live
+# in types-foreigncmds / types-cluster / types-acl. None of these owners
+# depends on backend-catalog-indexing (verified: acl/arrayfuncs/genam/table/
+# inval-seams/objectaccess-seams carry no edge to this crate).
+genam_seams = { path = "../../access/index/genam_seams" }
+scankey = { path = "../../access/common/scankey" }
+table = { path = "../../access/table/table" }
+common_relation_seams = { path = "../../access/common/common_relation_seams" }
+detoast_seams = { path = "../../access/common/detoast_seams" }
+functioncmds_seams = { path = "../../commands/functioncmds_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+pgstat_function = { path = "../../utils/activity/pgstat_function" }
+adt_acl = { path = "../../utils/adt/adt_acl" }
+# Heavyweight tuple-tag lock for get_catalog_object_by_oid_extended's locktuple
+# path + the generic owner-tuple write's UnlockTuple (lmgr.c LockTuple/UnlockTuple).
+# lmgr-seams carries no edge to this crate (verified: no cycle).
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+# pg_get_acl's pg_attribute (objsubid) branch: SearchSysCache2(ATTNUM) +
+# SysCacheGetAttr(attacl). syscache carries no edge to this crate (no cycle).
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+cache = { path = "../../../_support/types/cache" }
+inval_seams = { path = "../../utils/cache/inval_seams" }
+objectaccess_seams = { path = "../objectaccess_seams" }
+types_foreigncmds = { path = "../../../_support/types/types_foreigncmds" }
+types_cluster = { path = "../../../_support/types/types_cluster" }
+types_acl = { path = "../../../_support/types/types_acl" }
+array = { path = "../../../_support/types/array" }
+types_scan = { path = "../../../_support/types/types_scan" }
+snapshot = { path = "../../../_support/types/snapshot" }

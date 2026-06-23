@@ -1,0 +1,13 @@
+[package]
+name = "types_jsonpath"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "types_jsonpath"
+path = "src/lib.rs"
+
+[dependencies]
+types_jsonb = { path = "../types_jsonb" }
+datum = { path = "../datum" }

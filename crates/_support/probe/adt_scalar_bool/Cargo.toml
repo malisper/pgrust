@@ -1,0 +1,21 @@
+[package]
+name = "adt_scalar_bool"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_scalar_bool"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../mcx" }
+datum = { path = "../../types/datum" }
+types_error = { path = "../../types/types_error" }
+stringinfo = { path = "../../types/stringinfo" }
+hashfn = { path = "../../../common/hashfn" }
+pqformat = { path = "../../../backend/libpq/pqformat" }
+varlena_seams = { path = "../../../backend/utils/adt/varlena_seams" }
+scalar_seams = { path = "../../../backend/utils/adt/scalar_seams" }
+fmgr = { path = "../../types/fmgr" }
+fmgr_core = { path = "../../../backend/utils/fmgr/fmgr_core" }

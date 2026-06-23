@@ -1,0 +1,22 @@
+[package]
+name = "nodeMaterial"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nodeMaterial"
+path = "src/lib.rs"
+
+[dependencies]
+execAmi_seams = { path = "../execAmi_seams" }
+execProcnode_seams = { path = "../execProcnode_seams" }
+execTuples_seams = { path = "../execTuples_seams" }
+execUtils_seams = { path = "../execUtils_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+sort_storage_seams = { path = "../../utils/sort/sort_storage_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+mcx = { path = "../../../_support/mcx" }

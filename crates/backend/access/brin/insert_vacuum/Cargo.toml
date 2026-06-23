@@ -1,0 +1,57 @@
+[package]
+name = "insert_vacuum"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "insert_vacuum"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+rel = { path = "../../../../_support/types/rel" }
+brin = { path = "../../../../_support/types/brin" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+types_acl = { path = "../../../../_support/types/types_acl" }
+types_catalog = { path = "../../../../_support/types/types_catalog" }
+
+# Page-byte primitives (bufpage.c) for brinGetStats / PageGetFreeSpace.
+page = { path = "../../../storage/page" }
+
+# Owned engine layers (direct deps — acyclic): the page/revmap layer and the
+# tuple codec, plus the F2 scan crate for brin_build_desc / brin_free_desc /
+# BrinScan (brin.c's own desc builder; we do NOT close a cycle because the scan
+# crate reaches us only through the brin-insert-vacuum-seams it dispatches).
+pageops = { path = "../pageops" }
+brin_tuple = { path = "../brin_tuple" }
+brin_scan = { path = "../brin_scan" }
+
+# Inward seams this crate owns + installs.
+insert_vacuum_seams = { path = "../insert_vacuum_seams" }
+
+# Cross-owner seam crates.
+brin_entry_seams = { path = "../brin_entry_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+freespace_seams = { path = "../../../storage/freespace/freespace_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+table_seams = { path = "../../table/table_seams" }
+table_tableam_seams = { path = "../../table/table_tableam_seams" }
+indexam_seams = { path = "../../index/indexam_seams" }
+index_seams = { path = "../../../catalog/index_seams" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+guc_seams = { path = "../../../utils/misc/guc_seams" }
+transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
+scalar_seams = { path = "../../../utils/adt/scalar_seams" }
+utils_error = { path = "../../../utils/utils_error" }
+
+# fmgr-core builtin table registration (register_builtins).
+fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }

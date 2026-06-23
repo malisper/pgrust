@@ -1,0 +1,84 @@
+[package]
+name = "alter"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "alter"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+utils_error = { path = "../../utils/utils_error" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_acl = { path = "../../../_support/types/types_acl" }
+cache = { path = "../../../_support/types/cache" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+nodes = { path = "../../../_support/types/nodes" }
+rel = { path = "../../../_support/types/rel" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+datum = { path = "../../../_support/types/datum" }
+
+# Directly ported foundation crates (no cycle).
+table = { path = "../../access/table/table" }
+common_relation = { path = "../../access/common/common_relation" }
+heaptuple = { path = "../../access/common/heaptuple" }
+objectaddress = { path = "../../catalog/objectaddress" }
+indexing = { path = "../../catalog/indexing" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+pg_depend = { path = "../../catalog/pg_depend" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+
+# Per-type ALTER subroutines that ARE ported (called directly; acyclic).
+user = { path = "../user" }
+schemacmds = { path = "../schemacmds" }
+tablespace = { path = "../tablespace" }
+commands_foreigncmds = { path = "../commands_foreigncmds" }
+functioncmds = { path = "../functioncmds" }
+collationcmds = { path = "../collationcmds" }
+opclasscmds = { path = "../opclasscmds" }
+rewriteDefine = { path = "../../rewrite/rewriteDefine" }
+adt_acl = { path = "../../utils/adt/adt_acl" }
+more = { path = "../../utils/misc/more" }
+miscinit = { path = "../../utils/init/miscinit" }
+aclchk = { path = "../../catalog/aclchk" }
+objectaccess = { path = "../../catalog/objectaccess" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+
+# Cross-subsystem externals via their owners' -seams crates (owners unported or
+# would cycle): the per-type ALTER subroutines living in other command files,
+# the generic owner-tuple catalog mutator, the shdepend owner-dep update, the
+# publication/subscription post-rename tasks, and MyDatabaseId.
+indexing_seams = { path = "../../catalog/indexing_seams" }
+pg_shdepend_seams = { path = "../../catalog/pg_shdepend_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+tablecmds_seams = { path = "../tablecmds_seams" }
+typecmds_seams = { path = "../typecmds_seams" }
+dbcommands_seams = { path = "../dbcommands_seams" }
+extension_seams = { path = "../extension_seams" }
+trigger_seams = { path = "../trigger_seams" }
+policy_seams = { path = "../policy_seams" }
+event_trigger_seams = { path = "../event_trigger_seams" }
+publicationcmds_seams = { path = "../publicationcmds_seams" }
+subscriptioncmds_seams = { path = "../subscriptioncmds_seams" }
+worker_seams = { path = "../../replication/logical/worker_seams" }
+tablespace_globals_seams = { path = "../tablespace_globals_seams" }
+arrayfuncs_seams = { path = "../../utils/adt/arrayfuncs_seams" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+
+# ProcessUtility / ProcessUtilitySlow RENAME-and-ALTER dispatch arms install the
+# ALTER drivers (ExecRenameStmt, ExecAlterObjectDependsStmt, …) into the tcop
+# utility out-seams. Pure seam crate (depends only on types/seam-core) — no cycle.
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+# `rich_node_to_parse` converts the owned `types_nodes` `object` sub-node of a
+# RenameStmt into the `types_parsenodes::Node` the ALTER drivers consume (only
+# -seams deps below it — no cycle).
+parse_type = { path = "../../parser/parse_type" }
+
+# Inward seam this unit owns (consumed by pg_shdepend's shdepReassignOwned).
+alter_seams = { path = "../alter_seams" }

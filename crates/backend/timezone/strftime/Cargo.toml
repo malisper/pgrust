@@ -1,0 +1,13 @@
+[package]
+name = "strftime"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "strftime"
+path = "src/lib.rs"
+
+[dependencies]
+strftime_seams = { path = "../strftime_seams" }
+pgtime = { path = "../../../_support/types/pgtime" }

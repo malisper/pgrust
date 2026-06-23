@@ -1,0 +1,40 @@
+[package]
+name = "toast_internals"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "toast_internals"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+rel = { path = "../../../../_support/types/rel" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+toast_internals_seams = { path = "../toast_internals_seams" }
+toastdesc_seams = { path = "../toastdesc_seams" }
+toast_compression = { path = "../toast_compression" }
+heaptuple = { path = "../heaptuple" }
+heaptoast = { path = "../../heap/heaptoast" }
+scankey = { path = "../scankey" }
+table_seams = { path = "../../table/table_seams" }
+indexam = { path = "../../index/indexam" }
+indexam_seams = { path = "../../index/indexam_seams" }
+genam_seams = { path = "../../index/genam_seams" }
+heapam_seams = { path = "../../heap/heapam_seams" }
+catalog_catalog = { path = "../../../catalog/catalog_catalog" }
+plancat_ext_seams = { path = "../../../optimizer/util/plancat_ext_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
+transam_xact_seams = { path = "../../transam/transam_xact_seams" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }

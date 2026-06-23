@@ -1,0 +1,64 @@
+[package]
+name = "postmaster_pgarch"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "postmaster_pgarch"
+path = "src/lib.rs"
+
+[dependencies]
+# own seam crate (inward)
+pgarch_seams = { path = "../pgarch_seams" }
+postmaster_seams = { path = "../postmaster_seams" }
+
+# direct deps (acyclic leaf subsystems)
+interrupt = { path = "../interrupt" }
+activity_small = { path = "../../utils/activity/activity_small" }
+utils_error = { path = "../../utils/utils_error" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+
+# outward seam crates (cyclic / not-yet-ported owners)
+shell_archive_seams = { path = "../../archive/shell_archive_seams" }
+auxprocess_seams = { path = "../auxprocess_seams" }
+aio_core_seams = { path = "../../storage/aio/aio_core_seams" }
+fd_seams = { path = "../../storage/file/fd_seams" }
+file_seams = { path = "../../storage/file/file_seams" }
+pmsignal_seams = { path = "../../storage/ipc/pmsignal_seams" }
+procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
+dsm_core_seams = { path = "../../storage/ipc/dsm_core_seams" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
+condition_variable_seams = { path = "../../storage/lmgr/condition_variable_seams" }
+lwlock_seams = { path = "../../storage/lmgr/lwlock_seams" }
+lmgr_proc_seams = { path = "../../storage/lmgr/lmgr_proc_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+dfmgr_seams = { path = "../../utils/fmgr/dfmgr_seams" }
+dynahash_seams = { path = "../../utils/hash/dynahash_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+guc_file_seams = { path = "../../utils/misc/guc_file_seams" }
+ps_status_seams = { path = "../../utils/misc/ps_status_seams" }
+timeout_seams = { path = "../../utils/misc/timeout_seams" }
+mcxt_seams = { path = "../../utils/mmgr/mcxt_seams" }
+all_seams = { path = "../../utils/resowner/all_seams" }
+pgsleep_seams = { path = "../../../port/pgsleep_seams" }
+port_pqsignal_seams = { path = "../../../port/port_pqsignal_seams" }
+libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
+libc = "0.2"
+
+# shared types
+types_core = { path = "../../../_support/types/types_core" }
+datum = { path = "../../../_support/types/datum" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_error = { path = "../../../_support/types/types_error" }
+types_guc = { path = "../../../_support/types/types_guc" }
+types_logical = { path = "../../../_support/types/types_logical" }
+types_pgarch = { path = "../../../_support/types/types_pgarch" }
+types_pgstat = { path = "../../../_support/types/types_pgstat" }
+signal = { path = "../../../_support/types/signal" }
+types_startup = { path = "../../../_support/types/types_startup" }
+types_storage = { path = "../../../_support/types/types_storage" }
+wal = { path = "../../../_support/types/wal" }
+
+[dev-dependencies]

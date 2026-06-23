@@ -1,0 +1,18 @@
+[package]
+name = "objectaccess"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "objectaccess"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_error = { path = "../../../_support/types/types_error" }
+objectaccess_seams = { path = "../objectaccess_seams" }
+guc_funcs_seams = { path = "../../utils/misc/guc_funcs_seams" }
+tablecmds_seams = { path = "../../commands/tablecmds_seams" }
+user_seams = { path = "../../commands/user_seams" }

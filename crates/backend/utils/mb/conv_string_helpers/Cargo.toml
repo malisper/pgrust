@@ -1,0 +1,27 @@
+[package]
+name = "conv_string_helpers"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "conv_string_helpers"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_wchar = { path = "../../../../_support/types/types_wchar" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+utils_error = { path = "../../utils_error" }
+pqformat = { path = "../../../libpq/pqformat" }
+common_wchar = { path = "../../../../common/common_wchar" }
+mbutils_seams = { path = "../mbutils_seams" }
+encnames_seams = { path = "../../../../common/encnames_seams" }
+wstrcmp = { path = "../wstrcmp" }
+wstrncmp = { path = "../wstrncmp" }
+# The fmgr-builtin shim adapter for registering ported encoding-conversion
+# procedures by OID (so fmgr resolves them in-process, no dlopen).
+fmgr = { path = "../../../../_support/types/fmgr" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }

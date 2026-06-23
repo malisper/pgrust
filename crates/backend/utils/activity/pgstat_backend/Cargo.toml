@@ -1,0 +1,25 @@
+[package]
+name = "pgstat_backend"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgstat_backend"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+instrument = { path = "../../../executor/instrument" }
+activity_pgstat = { path = "../activity_pgstat" }
+pgstat_seams = { path = "../pgstat_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
+status_seams = { path = "../status_seams" }
+pgstat_io = { path = "../pgstat_io" }
+pgstat_io_seams = { path = "../pgstat_io_seams" }
+pgstat_wal_seams = { path = "../pgstat_wal_seams" }
+init_small_seams = { path = "../../init/init_small_seams" }
+guc_tables = { path = "../../misc/guc_tables" }

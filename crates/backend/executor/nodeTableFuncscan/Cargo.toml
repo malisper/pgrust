@@ -1,0 +1,34 @@
+[package]
+name = "nodeTableFuncscan"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nodeTableFuncscan"
+path = "src/lib.rs"
+
+[dependencies]
+toastdesc_seams = { path = "../../access/common/toastdesc_seams" }
+execExpr_seams = { path = "../execExpr_seams" }
+execScan_seams = { path = "../execScan_seams" }
+execTuples_seams = { path = "../execTuples_seams" }
+execUtils_seams = { path = "../execUtils_seams" }
+tablefuncRoutine_seams = { path = "../tablefuncRoutine_seams" }
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }
+nodeFuncs_seams = { path = "../../nodes/nodeFuncs_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+jsonpath_exec = { path = "../../utils/adt/jsonpath_exec" }
+jsonpath_exec_seams = { path = "../../utils/adt/jsonpath_exec_seams" }
+varlena_seams = { path = "../../utils/adt/varlena_seams" }
+adt_xml = { path = "../../utils/adt/adt_xml" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+sort_storage_seams = { path = "../../utils/sort/sort_storage_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+datum = { path = "../../../_support/types/datum" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+mcx = { path = "../../../_support/mcx" }

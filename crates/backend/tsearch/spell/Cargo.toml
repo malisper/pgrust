@@ -1,0 +1,25 @@
+[package]
+name = "spell"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "spell"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+regex = { path = "../../../_support/types/regex" }
+tsearch = { path = "../../../_support/types/tsearch" }
+utils_error = { path = "../../utils/utils_error" }
+ispell_regis = { path = "../ispell_regis" }
+spell_seams = { path = "../spell_seams" }
+ts_locale_seams = { path = "../ts_locale_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+formatting_seams = { path = "../../utils/adt/formatting_seams" }
+regex_core_seams = { path = "../../regex/regex_core_seams" }
+stack_depth_seams = { path = "../../utils/misc/stack_depth_seams" }

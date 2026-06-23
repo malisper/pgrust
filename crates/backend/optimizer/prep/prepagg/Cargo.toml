@@ -1,0 +1,38 @@
+[package]
+name = "prepagg"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "prepagg"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+datum = { path = "../../../../_support/types/datum" }
+
+# Inward seams this unit owns + installs (preprocess_aggrefs /
+# get_agg_clause_costs) + the two outward boundary seams it declares & calls
+# (get_agg_catalog_info / get_agg_init_val / datum_is_equal).
+prepagg_seams = { path = "../prepagg_seams" }
+
+# Already-ported subsystems called directly (below prep; no cycle, no seam):
+# nodeFuncs (expr_type/expr_typmod/expression_tree_walker), clauses
+# (contain_volatile_functions), lsyscache (get_typlenbyval/get_typavgwidth).
+nodes_core = { path = "../../../nodes/nodes_core" }
+clauses = { path = "../../util/clauses" }
+lsyscache = { path = "../../../utils/cache/lsyscache" }
+
+# Cross-unit seams this unit consumes: equalfuncs equal() lists (installed),
+# parse_agg argtypes/sendreceive (installed), costsize cost helpers
+# (add_function_cost / cost_qual_eval_walker, owner uninstalled-until-costsize).
+equalfuncs_seams = { path = "../../../nodes/equalfuncs_seams" }
+parse_agg_seams = { path = "../../../parser/parse_agg_seams" }
+costsize_seams = { path = "../../path/costsize_seams" }
+joininfo_ext_seams = { path = "../../util/joininfo_ext_seams" }

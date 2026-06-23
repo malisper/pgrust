@@ -1,0 +1,95 @@
+[package]
+name = "commands_vacuum"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "commands_vacuum"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_vacuum = { path = "../../../_support/types/types_vacuum" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_storage = { path = "../../../_support/types/types_storage" }
+rel = { path = "../../../_support/types/rel" }
+nodes = { path = "../../../_support/types/nodes" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+types_cluster = { path = "../../../_support/types/types_cluster" }
+
+utils_error = { path = "../../utils/utils_error" }
+# GUC `conf->variable` slots: vacuum.c owns these globals, so it installs the
+# GucVarAccessors over its own backing store.
+guc_tables = { path = "../../utils/misc/guc_tables" }
+
+# own seam crate (inward)
+vacuum_seams = { path = "../vacuum_seams" }
+# autovacuum.c's VacuumUpdateCosts() reads/writes the vacuum.c cost working vars
+# + the globals.c cost-source GUCs through this ext-seam set; vacuum.c owns the
+# backing globals, so it installs these accessors here.
+autovacuum_ext_seams = { path = "../../postmaster/autovacuum_ext_seams" }
+snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }
+
+# ProcessUtility dispatch arm (installs the VacuumStmt forwarding seam).
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+
+# vacuum_delay_point / vacuum_rel interrupt + config-reload checks: route the
+# vacuum-seams copies to their real owners (CHECK_FOR_INTERRUPTS in postgres.c,
+# the InterruptPending / ConfigReloadPending globals).
+postgres_seams = { path = "../../tcop/postgres_seams" }
+interrupt = { path = "../../postmaster/interrupt" }
+# vacuum_rel's `rel->rd_rel->relkind` vacuumable-kind check (by OID).
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+# RelationGetIndexList(rel) by OID — vacuum.c's vac_open_indexes index inventory
+# (the vacuum-seams `relation_get_index_list` this crate both calls and owns).
+relcache = { path = "../../utils/cache/relcache" }
+
+# owner seam crates (outward / inward-install targets)
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+vacuumlazy_seams = { path = "../../access/heap/vacuumlazy_seams" }
+tidstore_seams = { path = "../../access/common/tidstore_seams" }
+commands_analyze_seams = { path = "../commands_analyze_seams" }
+define_seams = { path = "../define_seams" }
+small1_seams = { path = "../../parser/small1_seams" }
+
+# L1 re-home targets (rebind to already-installed owners)
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+table_seams = { path = "../../access/table/table_seams" }
+async_seams = { path = "../async_seams" }
+cluster_seams = { path = "../cluster_seams" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+lwlock_seams = { path = "../../storage/lmgr/lwlock_seams" }
+procarray_seams = { path = "../../storage/ipc/procarray_seams" }
+varsup_seams = { path = "../../access/transam/varsup_seams" }
+pg_inherits_seams = { path = "../../catalog/pg_inherits_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+types_acl = { path = "../../../_support/types/types_acl" }
+guc_seams = { path = "../../utils/misc/guc_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+
+# L4 export+rehome targets (xact owners)
+clog_seams = { path = "../../access/transam/clog_seams" }
+commit_ts_seams = { path = "../../access/transam/commit_ts_seams" }
+multixact_seams = { path = "../../access/transam/multixact_seams" }
+
+# Catalog SCAN + inplace-WRITE substrate for the vac_update_relstats /
+# vac_update_datfrozenxid pg_class/pg_database loops (vacuum.c's own seqscans
+# and systable_inplace_update_begin/finish): table_open + the genam systable
+# scan/inplace seams + heap_deform_tuple + the tupdesc alignment walk.
+table = { path = "../../access/table/table" }
+heaptuple = { path = "../../access/common/heaptuple" }
+scankey = { path = "../../access/common/scankey" }
+common_relation_seams = { path = "../../access/common/common_relation_seams" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+genam_seams = { path = "../../access/index/genam_seams" }
+indexam_seams = { path = "../../access/index/indexam_seams" }
+arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
+# (backend-utils-cache-relcache-seams already declared above — relation_rules)
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_scan = { path = "../../../_support/types/types_scan" }

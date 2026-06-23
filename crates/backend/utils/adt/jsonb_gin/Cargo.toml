@@ -1,0 +1,29 @@
+[package]
+name = "jsonb_gin"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "jsonb_gin"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_jsonb = { path = "../../../../_support/types/types_jsonb" }
+types_jsonpath = { path = "../../../../_support/types/types_jsonpath" }
+hashfn = { path = "../../../../common/hashfn" }
+jsonb_util = { path = "../jsonb_util" }
+adt_jsonpath = { path = "../adt_jsonpath" }
+adt_numeric = { path = "../adt_numeric" }
+stack_depth_seams = { path = "../../misc/stack_depth_seams" }
+jsonb_gin_seams = { path = "../jsonb_gin_seams" }
+# fmgr builtin fast-path registration (gin_compare_jsonb).
+fmgr = { path = "../../../../_support/types/fmgr" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+
+[dev-dependencies]
+hashfn_seams = { path = "../../../../common/hashfn_seams" }

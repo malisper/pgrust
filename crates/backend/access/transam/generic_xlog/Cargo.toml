@@ -1,0 +1,33 @@
+[package]
+name = "generic_xlog"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "generic_xlog"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+wal = { path = "../../../../_support/types/wal" }
+
+# Owns these rmgr-table callbacks; installs them on landing.
+generic_xlog_seams = { path = "../generic_xlog_seams" }
+
+# Critical-section count (miscadmin.h START/END_CRIT_SECTION); stored in elog.c.
+utils_error = { path = "../../../utils/utils_error" }
+
+# Outward calls to not-yet-ported owners go through their seam crates.
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+xloginsert_seams = { path = "../xloginsert_seams" }
+xlogutils_seams = { path = "../xlogutils_seams" }
+bufmask_seams = { path = "../../common/bufmask_seams" }
+
+[dev-dependencies]
+init = { path = "../../../../_support/seam/init" }

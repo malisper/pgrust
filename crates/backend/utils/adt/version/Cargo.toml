@@ -1,0 +1,23 @@
+[package]
+name = "version"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "version"
+path = "src/lib.rs"
+
+[dependencies]
+# Carrier types.
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+mcx = { path = "../../../../_support/mcx" }
+
+# `cstring_to_text` (varlena.c) — builds the `text` result `Datum`.
+varlena_seams = { path = "../varlena_seams" }
+
+# fmgr builtin boundary: the call frame + builtin-table registration.
+fmgr = { path = "../../../../_support/types/fmgr" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }

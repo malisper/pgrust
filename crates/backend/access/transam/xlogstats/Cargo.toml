@@ -1,0 +1,16 @@
+[package]
+name = "xlogstats"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "xlogstats"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+wal = { path = "../../../../_support/types/wal" }
+
+[dev-dependencies]
+mcx = { path = "../../../../_support/mcx" }

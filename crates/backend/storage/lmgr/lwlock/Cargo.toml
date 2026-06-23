@@ -1,0 +1,24 @@
+[package]
+name = "lwlock"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "lwlock"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+s_lock = { path = "../s_lock" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+utils_error = { path = "../../../utils/utils_error" }
+ipc_shmem_seams = { path = "../../ipc/ipc_shmem_seams" }
+lwlock_seams = { path = "../lwlock_seams" }
+tablespace_globals_seams = { path = "../../../commands/tablespace_globals_seams" }
+lmgr_proc_seams = { path = "../lmgr_proc_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }

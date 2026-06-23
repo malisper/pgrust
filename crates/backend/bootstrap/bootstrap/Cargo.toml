@@ -1,0 +1,47 @@
+[package]
+name = "bootstrap"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "bootstrap"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+datum = { path = "../../../_support/types/datum" }
+types_error = { path = "../../../_support/types/types_error" }
+types_guc = { path = "../../../_support/types/types_guc" }
+nodes = { path = "../../../_support/types/nodes" }
+rel = { path = "../../../_support/types/rel" }
+signal = { path = "../../../_support/types/signal" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_startup = { path = "../../../_support/types/types_startup" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+utils_error = { path = "../../utils/utils_error" }
+table = { path = "../../access/table/table" }
+heapam_seams = { path = "../../access/heap/heapam_seams" }
+indexam_seams = { path = "../../access/index/indexam_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+bootparse_seams = { path = "../bootparse_seams" }
+# Seam crate this unit OWNS (installs boot_get_type_io_data so lsyscache.c's
+# get_type_io_data can reach it across the bootstrap<->lsyscache cycle).
+bootstrap_seams = { path = "../bootstrap_seams" }
+index_seams = { path = "../../catalog/index_seams" }
+link_canary_seams = { path = "../../common/link_canary_seams" }
+main_seams = { path = "../../main/main_seams" }
+pmchild_seams = { path = "../../postmaster/pmchild_seams" }
+fd_seams = { path = "../../storage/file/fd_seams" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+ipci_seams = { path = "../../storage/ipc/ipci_seams" }
+lmgr_proc_seams = { path = "../../storage/lmgr/lmgr_proc_seams" }
+relmapper_seams = { path = "../../utils/cache/relmapper_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+postinit_seams = { path = "../../utils/init/postinit_seams" }
+guc_seams = { path = "../../utils/misc/guc_seams" }
+port_pqsignal_seams = { path = "../../../port/port_pqsignal_seams" }

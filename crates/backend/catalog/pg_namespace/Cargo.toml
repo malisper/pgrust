@@ -1,0 +1,28 @@
+[package]
+name = "pg_namespace"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_namespace"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+nodes = { path = "../../../_support/types/nodes" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+utils_error = { path = "../../utils/utils_error" }
+table = { path = "../../access/table/table" }
+pg_namespace_seams = { path = "../pg_namespace_seams" }
+aclchk_seams = { path = "../aclchk_seams" }
+indexing_seams = { path = "../indexing_seams" }
+objectaccess_seams = { path = "../objectaccess_seams" }
+pg_depend_seams = { path = "../pg_depend_seams" }
+pg_shdepend_seams = { path = "../pg_shdepend_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }

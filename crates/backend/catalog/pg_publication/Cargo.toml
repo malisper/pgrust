@@ -1,0 +1,45 @@
+[package]
+name = "pg_publication"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_publication"
+path = "src/lib.rs"
+
+[dependencies]
+heaptuple = { path = "../../access/common/heaptuple" }
+scankey = { path = "../../access/common/scankey" }
+genam_seams = { path = "../../access/index/genam_seams" }
+table_seams = { path = "../../access/table/table_seams" }
+catalog_catalog = { path = "../catalog_catalog" }
+dependency = { path = "../dependency" }
+indexing = { path = "../indexing" }
+namespace_seams = { path = "../namespace_seams" }
+partition_seams = { path = "../partition_seams" }
+pg_depend_seams = { path = "../pg_depend_seams" }
+pg_inherits_seams = { path = "../pg_inherits_seams" }
+pg_class_seams = { path = "../pg_class_seams" }
+pg_publication_seams = { path = "../pg_publication_seams" }
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }
+outfuncs = { path = "../../nodes/outfuncs" }
+inval = { path = "../../utils/cache/inval" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+utils_error = { path = "../../utils/utils_error" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+cache = { path = "../../../_support/types/cache" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_core = { path = "../../../_support/types/types_core" }
+datum = { path = "../../../_support/types/datum" }
+types_error = { path = "../../../_support/types/types_error" }
+fmgr = { path = "../../../_support/types/fmgr" }
+nodes = { path = "../../../_support/types/nodes" }
+rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_syscache = { path = "../../../_support/types/types_syscache" }
+types_tuple = { path = "../../../_support/types/types_tuple" }

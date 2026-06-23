@@ -1,0 +1,51 @@
+[package]
+name = "predicate"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "predicate"
+path = "src/lib.rs"
+
+[dependencies]
+parallel_rt_seams = { path = "../../../access/transam/parallel_rt_seams" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+mcx = { path = "../../../../_support/mcx" }
+predicate_seams = { path = "../predicate_seams" }
+
+# pg_safe_snapshot_blocking_pids: the seam is declared in lock-seams (reached
+# through lock.c's view function) but predicate.c owns the body; install here.
+lock_seams = { path = "../lock_seams" }
+
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+hash = { path = "../../../../_support/types/hash" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+rel = { path = "../../../../_support/types/rel" }
+relcache_entry = { path = "../../../../_support/types/relcache_entry" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+
+ilist = { path = "../../../lib/ilist" }
+lwlock = { path = "../lwlock" }
+ipc_shmem = { path = "../../ipc/ipc_shmem" }
+dynahash = { path = "../../../utils/hash/dynahash" }
+slru = { path = "../../../access/transam/slru" }
+transam = { path = "../../../access/transam/transam" }
+twophase_rmgr = { path = "../../../access/transam/twophase_rmgr" }
+transam_parallel = { path = "../../../access/transam/transam_parallel" }
+
+# -seams crates for unported / cross-layer owners
+lmgr_proc_seams = { path = "../lmgr_proc_seams" }
+procarray_seams = { path = "../../ipc/procarray_seams" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+varsup_seams = { path = "../../../access/transam/varsup_seams" }
+twophase_seams = { path = "../../../access/transam/twophase_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }

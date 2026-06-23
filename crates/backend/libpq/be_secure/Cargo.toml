@@ -1,0 +1,41 @@
+[package]
+name = "be_secure"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "be_secure"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_error = { path = "../../../_support/types/types_error" }
+net = { path = "../../../_support/types/net" }
+types_storage = { path = "../../../_support/types/types_storage" }
+utils_error = { path = "../../utils/utils_error" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+
+# This unit owns the secure_*/ssl_*/be_tls_get_* inward seam contract.
+be_secure_seams = { path = "../be_secure_seams" }
+
+# auth.c reads `secure_loaded_verify_locations()` (be-secure.c) across this
+# seam; be-secure.c owns that function, so it installs the seam here.
+auth_seams = { path = "../auth/auth_seams" }
+
+# The #ifdef USE_SSL TLS backend (be-secure-openssl.c). be-secure.c calls its
+# be_tls_init/open_server/read/write/close/destroy directly. Acyclic: the
+# openssl crate does not depend on this one.
+be_secure_openssl = { path = "../be_secure_openssl" }
+
+# FeBeWaitSet modify + combined wait (pqcomm owns FeBeWaitSet).
+pqcomm_seams = { path = "../pqcomm_seams" }
+
+# ResetLatch(MyLatch).
+latch_seams = { path = "../../storage/ipc/latch_seams" }
+
+# ProcessClientReadInterrupt / ProcessClientWriteInterrupt (tcop/postgres.c).
+postgres_seams = { path = "../../tcop/postgres_seams" }
+
+libc = "0.2"

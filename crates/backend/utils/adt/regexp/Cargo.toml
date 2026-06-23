@@ -1,0 +1,23 @@
+[package]
+name = "regexp"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "regexp"
+path = "src/lib.rs"
+
+[dependencies]
+regex_core_seams = { path = "../../../regex/regex_core_seams" }
+arrayfuncs = { path = "../arrayfuncs" }
+regexp_seams = { path = "../regexp_seams" }
+varlena_seams = { path = "../varlena_seams" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+mbutils_seams = { path = "../../mb/mbutils_seams" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+regex = { path = "../../../../_support/types/regex" }

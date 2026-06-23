@@ -1,0 +1,26 @@
+[package]
+name = "funcs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "funcs"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_error = { path = "../../../../_support/types/types_error" }
+plpgsql = { path = "../../../../_support/types/plpgsql" }
+types_logical = { path = "../../../../_support/types/types_logical" }
+types_ri_triggers = { path = "../../../../_support/types/types_ri_triggers" }
+# Real Bitmapset for mark_local_assignment_targets (nodes/bitmapset.c).
+nodes = { path = "../../../../_support/types/nodes" }
+nodes_core = { path = "../../../../backend/nodes/nodes_core" }
+# SPI_freeplan (spi.c — via owner seam).
+spi_seams = { path = "../../../../backend/executor/spi_seams" }
+# MemoryContextDelete (mcxt.c — via owner seam).
+mcxt_seams = { path = "../../../../backend/utils/mmgr/mcxt_seams" }
+# cfunc->use_count read through plpgsql's opaque CachedFunction header (via
+# funccache's seam; uninstalled until the plpgsql/funccache header model unifies).
+funccache_seams = { path = "../../../../backend/utils/cache/funccache_seams" }

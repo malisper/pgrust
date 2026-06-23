@@ -1,0 +1,23 @@
+[package]
+name = "copyfuncs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "copyfuncs"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+copyfuncs_seams = { path = "../copyfuncs_seams" }
+copyfuncs_pc_seams = { path = "../copyfuncs_pc_seams" }
+
+[dev-dependencies]
+# The node-tree runtime traits + the `#[derive(PgNode)]` proc-macro, so the
+# location-vs-scalar equality test can stand up a small derived node struct and
+# exercise the macro's `COMPARE_LOCATION_FIELD` (no-op) generation directly.
+node_support = { path = "../node_support" }
+macros = { path = "../macros" }

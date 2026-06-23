@@ -1,0 +1,19 @@
+[package]
+name = "index_amvalidate"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "index_amvalidate"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_amvalidate = { path = "../../../../_support/types/types_amvalidate" }
+amvalidate_seams = { path = "../amvalidate_seams" }
+lsyscache_seams = { path = "../../../utils/cache/lsyscache_seams" }
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+coerce_seams = { path = "../../../parser/coerce_seams" }

@@ -1,0 +1,63 @@
+[package]
+name = "slotsync"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "slotsync"
+path = "src/lib.rs"
+
+[dependencies]
+postmaster_seams = { path = "../../../postmaster/postmaster_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+wal = { path = "../../../../_support/types/wal" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+datum = { path = "../../../../_support/types/datum" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+replication = { path = "../../../../_support/types/replication" }
+replication_slot_2 = { path = "../../../../_support/types/replication_slot_2" }
+types_walreceiver = { path = "../../../../_support/types/types_walreceiver" }
+types_startup = { path = "../../../../_support/types/types_startup" }
+mcx = { path = "../../../../_support/mcx" }
+
+# own inward seams
+slotsync_seams = { path = "../slotsync_seams" }
+
+# spinlock + shmem for the SlotSyncCtx control area (owned here)
+s_lock = { path = "../../../storage/lmgr/s_lock" }
+ipc_shmem_seams = { path = "../../../storage/ipc/ipc_shmem_seams" }
+interrupt = { path = "../../../postmaster/interrupt" }
+
+# outward owner seams
+slot_seams = { path = "../../slot_seams" }
+replication_libpqwalreceiver = { path = "../../replication_libpqwalreceiver" }
+walreceiver_seams = { path = "../../walreceiver_seams" }
+walsender_seams = { path = "../../walsender_seams" }
+replication_snapbuild_seams = { path = "../../replication_snapbuild_seams" }
+logical_seams = { path = "../logical_seams" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+xlogrecovery_seams = { path = "../../../access/transam/xlogrecovery_seams" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+dsm_core_seams = { path = "../../../storage/ipc/dsm_core_seams" }
+latch_seams = { path = "../../../storage/ipc/latch_seams" }
+lmgr_seams = { path = "../../../storage/lmgr/lmgr_seams" }
+lwlock_seams = { path = "../../../storage/lmgr/lwlock_seams" }
+dbcommands_seams = { path = "../../../commands/dbcommands_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+guc_seams = { path = "../../../utils/misc/guc_seams" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+error_seams = { path = "../../../utils/error/error_seams" }
+quote_seams = { path = "../../../utils/adt/quote_seams" }
+procsignal_seams = { path = "../../../storage/ipc/procsignal_seams" }
+
+# signal-handler install block (ReplSlotSyncWorkerMain, slotsync.c:1413-1421)
+port_pqsignal_seams = { path = "../../../../port/port_pqsignal_seams" }
+signal = { path = "../../../../_support/types/signal" }
+libc = "0.2"

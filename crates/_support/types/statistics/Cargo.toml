@@ -1,0 +1,15 @@
+[package]
+name = "statistics"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "statistics"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../types_core" }
+datum = { path = "../datum" }
+types_tuple = { path = "../types_tuple" }
+mcx = { path = "../../mcx" }

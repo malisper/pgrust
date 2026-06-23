@@ -1,0 +1,20 @@
+[package]
+name = "xlogbackup"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "xlogbackup"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+wal = { path = "../../../../_support/types/wal" }
+utils_error = { path = "../../../utils/utils_error" }
+localtime = { path = "../../../timezone/localtime" }
+strftime = { path = "../../../timezone/strftime" }
+state_pgtz = { path = "../../../../_support/state/state_pgtz" }
+
+[dev-dependencies]
+pgtime = { path = "../../../../_support/types/pgtime" }

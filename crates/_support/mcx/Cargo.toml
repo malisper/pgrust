@@ -1,0 +1,15 @@
+[package]
+name = "mcx"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "mcx"
+path = "src/lib.rs"
+
+[dependencies]
+types_error = { path = "../types/types_error" }
+allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
+hashbrown = { version = "0.14", default-features = false, features = ["allocator-api2", "ahash", "inline-more"] }
+bumpalo = { version = "3", default-features = false, features = ["allocator-api2"] }

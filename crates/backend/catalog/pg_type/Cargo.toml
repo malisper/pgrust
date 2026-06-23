@@ -1,0 +1,47 @@
+[package]
+name = "pg_type"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_type"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+utils_error = { path = "../../utils/utils_error" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+array = { path = "../../../_support/types/array" }
+types_acl = { path = "../../../_support/types/types_acl" }
+nodes = { path = "../../../_support/types/nodes" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+
+# Direct deps (acyclic — all sit below pg_type.c in the catalog layering).
+table = { path = "../../access/table/table" }
+scankey = { path = "../../access/common/scankey" }
+heaptuple = { path = "../../access/common/heaptuple" }
+genam_seams = { path = "../../access/index/genam_seams" }
+types_scan = { path = "../../../_support/types/types_scan" }
+dependency = { path = "../dependency" }
+pg_depend = { path = "../pg_depend" }
+pg_shdepend = { path = "../pg_shdepend" }
+objectaccess = { path = "../objectaccess" }
+
+# Seam crates (owner unported or would-cycle).
+pg_type_seams = { path = "../pg_type_seams" }
+indexing_seams = { path = "../indexing_seams" }
+aclchk_seams = { path = "../aclchk_seams" }
+binary_upgrade_seams = { path = "../binary_upgrade_seams" }
+pg_depend_seams = { path = "../pg_depend_seams" }
+functioncmds_seams = { path = "../../commands/functioncmds_seams" }
+read_seams = { path = "../../nodes/read_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+indexcmds_seams = { path = "../../commands/indexcmds_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }

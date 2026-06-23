@@ -1,0 +1,45 @@
+[package]
+name = "foreign"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "foreign"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+plancat_ext_seams = { path = "../../optimizer/util/plancat_ext_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+datum = { path = "../../../_support/types/datum" }
+fmgr = { path = "../../../_support/types/fmgr" }
+cache = { path = "../../../_support/types/cache" }
+nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_foreigncmds = { path = "../../../_support/types/types_foreigncmds" }
+rel = { path = "../../../_support/types/rel" }
+pathnodes = { path = "../../../_support/types/pathnodes" }
+pathkeys = { path = "../../optimizer/path/pathkeys" }
+
+foreign_seams = { path = "../foreign_seams" }
+fdwapi_seams = { path = "../fdwapi_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+guc_tables_seams = { path = "../../utils/misc/guc_tables_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+funcapi_seams = { path = "../../utils/fmgr/funcapi_seams" }
+common_reloptions = { path = "../../access/common/common_reloptions" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+arrayfuncs_seams = { path = "../../utils/adt/arrayfuncs_seams" }
+define_seams = { path = "../../commands/define_seams" }
+varlena = { path = "../../utils/adt/varlena" }
+table = { path = "../../access/table/table" }
+catalog_catalog = { path = "../../catalog/catalog_catalog" }
+indexing_seams = { path = "../../catalog/indexing_seams" }
+pg_depend_seams = { path = "../../catalog/pg_depend_seams" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_catalog = { path = "../../../_support/types/types_catalog" }

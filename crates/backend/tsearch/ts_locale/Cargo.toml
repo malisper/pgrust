@@ -1,0 +1,16 @@
+[package]
+name = "ts_locale"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ts_locale"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+ts_locale_seams = { path = "../ts_locale_seams" }
+parse_seams = { path = "../parse_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+fd = { path = "../../storage/file/fd" }

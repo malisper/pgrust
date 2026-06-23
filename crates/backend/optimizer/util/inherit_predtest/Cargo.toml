@@ -1,0 +1,30 @@
+[package]
+name = "inherit_predtest"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "inherit_predtest"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+datum = { path = "../../../../_support/types/datum" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+types_syscache = { path = "../../../../_support/types/types_syscache" }
+equalfuncs_seams = { path = "../../../nodes/equalfuncs_seams" }
+predtest_seams = { path = "../predtest_seams" }
+inherit_predtest_seams = { path = "../inherit_predtest_seams" }
+# predtest.c owns predicate_refuted_by, declared in plancat-ext-seams
+# (relation_excluded_by_constraints).
+plancat_ext_seams = { path = "../plancat_ext_seams" }
+relnode_seams = { path = "../relnode_seams" }
+lsyscache_seams = { path = "../../../utils/cache/lsyscache_seams" }
+arrayfuncs_seams = { path = "../../../utils/adt/arrayfuncs_seams" }
+pathnode_seams = { path = "../pathnode_seams" }
+inval_seams = { path = "../../../utils/cache/inval_seams" }

@@ -1,0 +1,20 @@
+[package]
+name = "sema"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sema"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+pg_sema_seams = { path = "../../pg_sema_seams" }
+ipc_shmem_seams = { path = "../../../storage/ipc/ipc_shmem_seams" }
+dsm_core_seams = { path = "../../../storage/ipc/dsm_core_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }

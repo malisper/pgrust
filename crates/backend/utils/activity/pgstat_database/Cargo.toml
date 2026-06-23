@@ -1,0 +1,34 @@
+[package]
+name = "pgstat_database"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgstat_database"
+path = "src/lib.rs"
+
+[dependencies]
+# Lazy-vacuum driver's pgStatBlockReadTime/WriteTime read seams home in
+# vacuumlazy-seams; pgstat_database.c owns those backend-local accumulators.
+vacuumlazy_seams = { path = "../../../access/heap/vacuumlazy_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_autovacuum = { path = "../../../../_support/types/types_autovacuum" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+status = { path = "../status" }
+activity_pgstat = { path = "../activity_pgstat" }
+pgstat_seams = { path = "../pgstat_seams" }
+pgstat_database_seams = { path = "../pgstat_database_seams" }
+stat_seams = { path = "../stat_seams" }
+activity_xact = { path = "../activity_xact" }
+init_small_seams = { path = "../../init/init_small_seams" }
+guc_tables = { path = "../../misc/guc_tables" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+autovacuum_ext_seams = { path = "../../../postmaster/autovacuum_ext_seams" }
+timestamp_seams = { path = "../../adt/timestamp_seams" }

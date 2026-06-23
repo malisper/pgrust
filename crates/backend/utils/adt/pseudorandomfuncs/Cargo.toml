@@ -1,0 +1,21 @@
+[package]
+name = "pseudorandomfuncs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pseudorandomfuncs"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+prng = { path = "../../../../_support/pg/prng" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+adt_numeric = { path = "../adt_numeric" }
+timestamp_seams = { path = "../timestamp_seams" }
+init_small_seams = { path = "../../init/init_small_seams" }
+variable_seams = { path = "../../../commands/variable_seams" }

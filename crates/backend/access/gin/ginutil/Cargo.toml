@@ -1,0 +1,35 @@
+[package]
+name = "ginutil"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ginutil"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+gin = { path = "../../../../_support/types/gin" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+page = { path = "../../../storage/page" }
+tupdesc = { path = "../../common/tupdesc" }
+common_reloptions = { path = "../../common/common_reloptions" }
+utils_error = { path = "../../../utils/utils_error" }
+format_type_seams = { path = "../../../utils/adt/format_type_seams" }
+indexam_seams = { path = "../../index/indexam_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+typcache_seams = { path = "../../../utils/cache/typcache_seams" }
+fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+indextuple = { path = "../../common/indextuple" }
+ginutil_seams = { path = "../ginutil_seams" }
+
+[dev-dependencies]

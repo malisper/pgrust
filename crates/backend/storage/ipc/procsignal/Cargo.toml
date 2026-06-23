@@ -1,0 +1,35 @@
+[package]
+name = "procsignal"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "procsignal"
+path = "src/lib.rs"
+
+[dependencies]
+transam_parallel = { path = "../../../access/transam/transam_parallel" }
+parallel_rt_seams = { path = "../../../access/transam/parallel_rt_seams" }
+async_seams = { path = "../../../commands/async_seams" }
+applyparallelworker_seams = { path = "../../../replication/logical/applyparallelworker_seams" }
+walsender_seams = { path = "../../../replication/walsender_seams" }
+latch_seams = { path = "../latch_seams" }
+procsignal_seams = { path = "../procsignal_seams" }
+dsm_core_seams = { path = "../dsm_core_seams" }
+ipc_shmem_seams = { path = "../ipc_shmem_seams" }
+sinval_seams = { path = "../sinval_seams" }
+condition_variable_seams = { path = "../../lmgr/condition_variable_seams" }
+s_lock = { path = "../../lmgr/s_lock" }
+smgr_seams = { path = "../../smgr/smgr_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+utils_error = { path = "../../../utils/utils_error" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+mcxt_seams = { path = "../../../utils/mmgr/mcxt_seams" }
+libc = "0.2"
+condvar = { path = "../../../../_support/types/condvar" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }

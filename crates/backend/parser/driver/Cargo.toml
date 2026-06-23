@@ -1,0 +1,22 @@
+[package]
+name = "driver"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "driver"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+scan_seams = { path = "../scan_seams" }
+gram_seams = { path = "../gram_seams" }
+scansup_seams = { path = "../scansup_seams" }
+driver_seams = { path = "../driver_seams" }

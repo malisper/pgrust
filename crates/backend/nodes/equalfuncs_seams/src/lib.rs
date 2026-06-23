@@ -1,0 +1,69 @@
+//! Seam declarations for `src/backend/nodes/equalfuncs.c` — the generic
+//! structural node-equality routine `equal()`.
+//!
+//! `equal((Node *) a, (Node *) b)` is owned by the not-yet-ported equalfuncs.c.
+//! The optimizer's tlist routines (`tlist_member`, `tlist_same_exprs`,
+//! `add_to_flat_tlist`, the PathTarget de-dup) compare expression sub-trees with
+//! it. indxpath.c's `find_list_position` and the expression-index-column branch
+//! of `match_index_to_operand` also compare two clause nodes via `equal()`.
+//! The owned-tree analogue takes two `&Expr` and returns whether they are
+//! structurally equal. Until equalfuncs.c lands, a call panics loudly.
+
+#![allow(non_snake_case)]
+
+seam_core::seam!(
+    /// `equal((Node *) a, (Node *) b)` (equalfuncs.c) — structural equality of
+    /// two expression sub-trees.
+    pub fn equal_expr<'a, 'b>(a: &nodes::primnodes::Expr<'a>, b: &nodes::primnodes::Expr<'b>) -> bool
+);
+
+seam_core::seam!(
+    /// `equal((Node *) a, (Node *) b)` (equalfuncs.c) — structural equality of
+    /// two arbitrary nodes (used by `transformWindowFuncCall` to de-duplicate
+    /// WINDOW definitions: PARTITION BY / ORDER BY clause lists and frame
+    /// offset expressions are general nodes, not bare `Expr`s).
+    pub fn equal_node<'a, 'b>(a: &nodes::nodes::Node<'a>, b: &nodes::nodes::Node<'b>) -> bool
+);
+
+seam_core::seam!(
+    /// `equal((Node *) a, (Node *) b)` over two whole `Query` trees
+    /// (`_equalQuery`). Used by relcache.c's `equalRuleLocks` to compare the
+    /// cached `RewriteRule.actions` (each a whole post-analysis `Query`) when
+    /// deciding whether a rebuilt relcache entry's rule tree changed (the
+    /// CREATE OR REPLACE VIEW in-transaction redefinition path).
+    pub fn equal_query<'a, 'b>(
+        a: &nodes::copy_query::Query<'a>,
+        b: &nodes::copy_query::Query<'b>
+    ) -> bool
+);
+
+seam_core::seam!(
+    /// `equal((List *) a, (List *) b)` over two `List *` of `Expr *` — the
+    /// generic `_equalList` form for an expression list (`COMPARE_NODE_FIELD`
+    /// over a `List<Expr>`). Used by prepagg's `find_compatible_agg` to compare
+    /// `Aggref.aggdirectargs` (an `Expr` list) and by any prep-layer dedup that
+    /// compares two owned `Vec<Expr>`. Length then element-wise `equal()`.
+    pub fn equal_expr_list<'a, 'b>(a: &[nodes::primnodes::Expr<'a>], b: &[nodes::primnodes::Expr<'b>]) -> bool
+);
+
+seam_core::seam!(
+    /// `equal((List *) a, (List *) b)` over two `List *` of `TargetEntry *` —
+    /// the `_equalList`/`_equalTargetEntry` form for a target list. Used by
+    /// prepagg's `find_compatible_agg` to compare `Aggref.args` (analyzed
+    /// aggregate argument target lists). Length then element-wise `equal()`.
+    pub fn equal_targetentry_list<'a, 'b>(
+        a: &[nodes::primnodes::TargetEntry<'a>],
+        b: &[nodes::primnodes::TargetEntry<'b>]
+    ) -> bool
+);
+
+seam_core::seam!(
+    /// `equal((List *) a, (List *) b)` over two `List *` of `SortGroupClause *`
+    /// — the `_equalList`/`_equalSortGroupClause` form. Used by prepagg's
+    /// `find_compatible_agg` to compare `Aggref.aggorder` / `Aggref.aggdistinct`
+    /// (ORDER BY / DISTINCT sort-group clause lists). Length then element-wise.
+    pub fn equal_sortgroupclause_list(
+        a: &[nodes::rawnodes::SortGroupClause],
+        b: &[nodes::rawnodes::SortGroupClause]
+    ) -> bool
+);

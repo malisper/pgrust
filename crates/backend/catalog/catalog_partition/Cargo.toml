@@ -1,0 +1,40 @@
+[package]
+name = "catalog_partition"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "catalog_partition"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+rel = { path = "../../../_support/types/rel" }
+nodes = { path = "../../../_support/types/nodes" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+pathnodes = { path = "../../../_support/types/pathnodes" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+
+utils_error = { path = "../../utils/utils_error" }
+heaptuple = { path = "../../access/common/heaptuple" }
+scankey = { path = "../../access/common/scankey" }
+table = { path = "../../access/table/table" }
+next = { path = "../../access/common/next" }
+rewrite_core = { path = "../../rewrite/rewrite_core" }
+nodes_core = { path = "../../nodes/nodes_core" }
+vars = { path = "../../optimizer/util/vars" }
+clauses = { path = "../../optimizer/util/clauses" }
+prepqual = { path = "../../optimizer/prep/prepqual" }
+
+partition_seams = { path = "../partition_seams" }
+genam_seams = { path = "../../access/index/genam_seams" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+partcache_seams = { path = "../../utils/cache/partcache_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }

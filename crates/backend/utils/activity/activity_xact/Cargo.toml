@@ -1,0 +1,22 @@
+[package]
+name = "activity_xact"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "activity_xact"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+wal = { path = "../../../../_support/types/wal" }
+utils_error = { path = "../../utils_error" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+pgstat_seams = { path = "../pgstat_seams" }
+activity_shmem_seams = { path = "../activity_shmem_seams" }
+stat_seams = { path = "../stat_seams" }
+activity_xact_seams = { path = "../activity_xact_seams" }

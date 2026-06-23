@@ -1,0 +1,25 @@
+[package]
+name = "rangetypes_gist"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "rangetypes_gist"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+types_rangetypes = { path = "../../../../_support/types/types_rangetypes" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+cache = { path = "../../../../_support/types/cache" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+gist = { path = "../../../../_support/types/gist" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+adt_rangetypes = { path = "../adt_rangetypes" }
+multirangetypes = { path = "../multirangetypes" }
+float = { path = "../float" }
+allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }

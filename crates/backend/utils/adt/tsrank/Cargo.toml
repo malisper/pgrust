@@ -1,0 +1,21 @@
+[package]
+name = "tsrank"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "tsrank"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+tsearch = { path = "../../../../_support/types/tsearch" }
+tsvector_core_seams = { path = "../tsvector_core_seams" }
+array_more_seams = { path = "../array_more_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }

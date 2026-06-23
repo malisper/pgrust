@@ -1,0 +1,16 @@
+[package]
+name = "md5"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "md5"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+seam_core = { path = "../../_support/seam/seam_core" }
+types_error = { path = "../../_support/types/types_error" }
+crypt_seams = { path = "../../backend/libpq/crypt_seams" }
+auth_seams = { path = "../../backend/libpq/auth/auth_seams" }

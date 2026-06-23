@@ -1,0 +1,83 @@
+[package]
+name = "xlogrecovery"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "xlogrecovery"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+wal = { path = "../../../../_support/types/wal" }
+control = { path = "../../../../_support/types/control" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+condvar = { path = "../../../../_support/types/condvar" }
+types_error = { path = "../../../../_support/types/types_error" }
+mcx = { path = "../../../../_support/mcx" }
+
+utils_error = { path = "../../../utils/utils_error" }
+
+xlogrecovery_seams = { path = "../xlogrecovery_seams" }
+xlogprefetcher_seams = { path = "../xlogprefetcher_seams" }
+xlogreader_seams = { path = "../xlogreader_seams" }
+xlogreader = { path = "../xlogreader" }
+# The recovery reader/prefetcher holder (walrecovery.rs) owns a live
+# XLogPrefetcher wrapping the reader and drives it on the ReadRecord loop.
+xlogprefetcher = { path = "../xlogprefetcher" }
+# XLogPrefetcherReadRecord reads maintenance_io_concurrency (bufmgr GUC) and
+# io_direct_flags (fd global); sourced off those owners.
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+fd = { path = "../../../storage/file/fd" }
+transam_xlog_seams = { path = "../transam_xlog_seams" }
+timeline_seams = { path = "../timeline_seams" }
+xlogarchive_seams = { path = "../xlogarchive_seams" }
+startup_seams = { path = "../../../postmaster/startup_seams" }
+postmaster_seams = { path = "../../../postmaster/postmaster_seams" }
+checkpointer_seams = { path = "../../../postmaster/checkpointer_seams" }
+walreceiver_seams = { path = "../../../replication/walreceiver_seams" }
+ipc_shmem_seams = { path = "../../../storage/ipc/ipc_shmem_seams" }
+latch = { path = "../../../storage/ipc/latch" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+s_lock = { path = "../../../storage/lmgr/s_lock" }
+condition_variable_seams = { path = "../../../storage/lmgr/condition_variable_seams" }
+fd_seams = { path = "../../../storage/file/fd_seams" }
+walreceiverfuncs_seams = { path = "../../../replication/walreceiverfuncs_seams" }
+pgstat_io_seams = { path = "../../../utils/activity/pgstat_io_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+more_seams = { path = "../../../utils/misc/more_seams" }
+latch_seams = { path = "../../../storage/ipc/latch_seams" }
+# FinishWalRecovery: kill the WAL receiver / slot-sync worker and turn off
+# streaming before writing end-of-recovery WAL.
+slotsync_seams = { path = "../../../replication/logical/slotsync_seams" }
+
+# Recovery-target GUC check/assign hooks (guc.rs): slot-name validation,
+# pg_lsn / timestamp parsing, and the GUC check-error reporting protocol.
+slot_seams = { path = "../../../replication/slot_seams" }
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
+guc_seams = { path = "../../../utils/misc/guc_seams" }
+lsn_trigfuncs = { path = "../../../utils/adt/lsn_trigfuncs" }
+# GUC `conf->variable` accessor slots for this unit's file-static recovery /
+# streaming GUC globals (gucvars.rs installs `GucVarAccessors` on the matching
+# `vars::*` slots from `init_seams`).
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+
+# Replay family (replay.rs): the rmgr redo-dispatch table + the cross-owner
+# seams the redo loop drives (varsup nextXid advance, standby/procarray
+# KnownAssignedXids, xlogutils invalid-page check, pmsignal recovery signals,
+# walsender wakeup, ipc proc_exit, variable-seams prefetch reconfigure,
+# tablespace allow_in_place GUC, pg_rusage timing).
+rmgr = { path = "../rmgr" }
+xactdesc = { path = "../../rmgrdesc/xactdesc" }
+varsup_seams = { path = "../varsup_seams" }
+xlogutils_seams = { path = "../xlogutils_seams" }
+ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
+pmsignal_seams = { path = "../../../storage/ipc/pmsignal_seams" }
+walsender_seams = { path = "../../../replication/walsender_seams" }
+variable_seams = { path = "../../../commands/variable_seams" }
+tablespace_globals_seams = { path = "../../../commands/tablespace_globals_seams" }
+pg_rusage = { path = "../../../utils/misc/pg_rusage" }

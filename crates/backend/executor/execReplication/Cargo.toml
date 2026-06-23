@@ -1,0 +1,65 @@
+[package]
+name = "execReplication"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "execReplication"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+rel = { path = "../../../_support/types/rel" }
+nodes = { path = "../../../_support/types/nodes" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_scan = { path = "../../../_support/types/types_scan" }
+snapshot = { path = "../../../_support/types/snapshot" }
+types_tableam = { path = "../../../_support/types/types_tableam" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+replication = { path = "../../../_support/types/replication" }
+types_sortsupport = { path = "../../../_support/types/types_sortsupport" }
+
+utils_error = { path = "../../utils/utils_error" }
+
+# Direct (acyclic) callees.
+table_tableam = { path = "../../access/table/table_tableam" }
+table_tableam_seams = { path = "../../access/table/table_tableam_seams" }
+indexam = { path = "../../access/index/indexam" }
+scankey = { path = "../../access/common/scankey" }
+execTuples = { path = "../execTuples" }
+logical_relation = { path = "../../replication/logical/logical_relation" }
+conflict = { path = "../../replication/logical/conflict" }
+relcache = { path = "../../utils/cache/relcache" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+adt_format_type = { path = "../../utils/adt/adt_format_type" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+
+# Inward seams (owned by this unit).
+execReplication_seams = { path = "../execReplication_seams" }
+
+# Outward seams.
+execIndexing_seams = { path = "../execIndexing_seams" }
+execMain_seams = { path = "../execMain_seams" }
+nodeModifyTable_seams = { path = "../nodeModifyTable_seams" }
+catalog_seams = { path = "../../catalog/catalog_seams" }
+pg_class_seams = { path = "../../catalog/pg_class_seams" }
+execTuples_seams = { path = "../execTuples_seams" }
+trigger_seams = { path = "../../commands/trigger_seams" }
+index_seams = { path = "../../catalog/index_seams" }
+amapi_seams = { path = "../../access/index/amapi_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+relcache_nodexform_seams = { path = "../../utils/cache/relcache_nodexform_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+commit_ts_seams = { path = "../../access/transam/commit_ts_seams" }
+worker_seams = { path = "../../replication/logical/worker_seams" }

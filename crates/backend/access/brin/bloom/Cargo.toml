@@ -1,0 +1,33 @@
+[package]
+name = "bloom"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "bloom"
+path = "src/lib.rs"
+
+[dependencies]
+common_reloptions = { path = "../../common/common_reloptions" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+brin = { path = "../../../../_support/types/brin" }
+rel = { path = "../../../../_support/types/rel" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+datum = { path = "../../../../_support/types/datum" }
+reloptions_seams = { path = "../../common/reloptions_seams" }
+types_reloptions = { path = "../../../../_support/types/types_reloptions" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+utils_error = { path = "../../../utils/utils_error" }
+indexam_seams = { path = "../../index/indexam_seams" }
+typcache_seams = { path = "../../../utils/cache/typcache_seams" }
+fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
+hashfn_seams = { path = "../../../../common/hashfn_seams" }
+
+[dev-dependencies]
+types_typcache = { path = "../../../../_support/types/types_typcache" }
+hashfn = { path = "../../../../common/hashfn" }

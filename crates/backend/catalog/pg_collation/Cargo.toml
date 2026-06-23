@@ -1,0 +1,55 @@
+[package]
+name = "pg_collation"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_collation"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+utils_error = { path = "../../utils/utils_error" }
+rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+cache = { path = "../../../_support/types/cache" }
+datum = { path = "../../../_support/types/datum" }
+types_storage = { path = "../../../_support/types/types_storage" }
+
+# The inward seam this crate INSTALLS (CollationCreate), declared alongside
+# collationcmds' other externals.
+collationcmds_seams = { path = "../../commands/collationcmds_seams" }
+
+# The catalog-mutation engine (F0, indexing.c) — CatalogTupleInsert keystone,
+# consumed as `pub` functions exactly as the pg_database / indexing F1 family
+# does (no dependency cycle).
+indexing = { path = "../indexing" }
+
+# heap_form_tuple (forming the pg_collation tuple) — direct call into the common
+# heaptuple unit.
+heaptuple = { path = "../../access/common/heaptuple" }
+
+# GetNewOidWithIndex (catalog.c) — direct dep on the catalog OID-allocation
+# owner.
+catalog_catalog = { path = "../catalog_catalog" }
+
+# Duplicate-name probe: GetSysCacheOid3(COLLNAMEENCNSP, ...).
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+
+# Dependency recording (recordDependencyOn / recordDependencyOnCurrentExtension /
+# checkMembershipInCurrentExtension / recordDependencyOnOwner) — direct calls, as
+# pg_database does. No cycle: these crates do not depend on this one.
+pg_depend = { path = "../pg_depend" }
+pg_shdepend = { path = "../pg_shdepend" }
+
+# Outward callees crossed as seams.
+table_seams = { path = "../../access/table/table_seams" }
+objectaccess_seams = { path = "../objectaccess_seams" }
+varlena_seams = { path = "../../utils/adt/varlena_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+encnames_seams = { path = "../../../common/encnames_seams" }

@@ -1,0 +1,39 @@
+[package]
+name = "ts_cache"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ts_cache"
+path = "src/lib.rs"
+
+[dependencies]
+guc_tables = { path = "../../misc/guc_tables" }
+mcx = { path = "../../../../_support/mcx" }
+cache = { path = "../../../../_support/types/cache" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+heaptuple = { path = "../../../access/common/heaptuple" }
+scankey = { path = "../../../access/common/scankey" }
+genam_seams = { path = "../../../access/index/genam_seams" }
+indexam_seams = { path = "../../../access/index/indexam_seams" }
+table = { path = "../../../access/table/table" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+namespace_seams = { path = "../../../catalog/namespace_seams" }
+tsearchcmds_seams = { path = "../../../commands/tsearchcmds_seams" }
+# tsvector_update_trigger config-name resolution (lookup_ts_config seam).
+tsvector_ext_seams = { path = "../../adt/tsvector_ext_seams" }
+regproc_seams = { path = "../../adt/regproc_seams" }
+ruleutils_seams = { path = "../../adt/ruleutils_seams" }
+inval_seams = { path = "../inval_seams" }
+lsyscache_seams = { path = "../lsyscache_seams" }
+cache_syscache = { path = "../cache_syscache" }
+error_seams = { path = "../../error/error_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+init_small_seams = { path = "../../init/init_small_seams" }

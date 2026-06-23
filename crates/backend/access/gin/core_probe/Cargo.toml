@@ -1,0 +1,36 @@
+[package]
+name = "core_probe"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "core_probe"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_jsonb = { path = "../../../../_support/types/types_jsonb" }
+gin = { path = "../../../../_support/types/gin" }
+tsearch = { path = "../../../../_support/types/tsearch" }
+hash = { path = "../../../../_support/types/hash" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_amvalidate = { path = "../../../../_support/types/types_amvalidate" }
+tidbitmap = { path = "../../../../_support/types/tidbitmap" }
+core_probe_seams = { path = "../core_probe_seams" }
+ginutil_seams = { path = "../ginutil_seams" }
+fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+nodes_core_seams = { path = "../../../nodes/nodes_core_seams" }
+lsyscache_seams = { path = "../../../utils/cache/lsyscache_seams" }
+arrayfuncs_seams = { path = "../../../utils/adt/arrayfuncs_seams" }
+tsginidx = { path = "../../../utils/adt/tsginidx" }
+jsonb_gin_seams = { path = "../../../utils/adt/jsonb_gin_seams" }
+amvalidate_seams = { path = "../../index/amvalidate_seams" }
+regproc_seams = { path = "../../../utils/adt/regproc_seams" }
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+error_seams = { path = "../../../utils/error/error_seams" }

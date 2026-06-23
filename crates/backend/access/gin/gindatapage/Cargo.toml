@@ -1,0 +1,39 @@
+[package]
+name = "gindatapage"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "gindatapage"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+gin = { path = "../../../../_support/types/gin" }
+page = { path = "../../../storage/page" }
+utils_error = { path = "../../../utils/utils_error" }
+# posting-list codec / item-pointer compare (audited gin-core-probe).
+core_probe = { path = "../core_probe" }
+# TIDBitmap carrier + tbm_add_tuples (GinDataLeafPageGetItemsToTbm).
+tidbitmap = { path = "../../../../_support/types/tidbitmap" }
+nodes_core_seams = { path = "../../../nodes/nodes_core_seams" }
+# ginbtree.c descent/insert spine (ginFindLeafPage / ginInsertValue).
+ginbtree = { path = "../ginbtree" }
+# bufmgr (bufmgr.c) — page access / mark-dirty / new buffer / lsn.
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+# relcache (utils/rel.h) — RelationNeedsWAL.
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+# xloginsert (xloginsert.c) — XLogBeginInsert / XLogRegister* / XLogInsert.
+xloginsert_seams = { path = "../../transam/xloginsert_seams" }
+# predicate (predicate.c) — PredicateLockPageSplit.
+predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
+# ginutil (ginutil.c) — GinNewBuffer.
+ginutil_seams = { path = "../ginutil_seams" }
+
+[dev-dependencies]

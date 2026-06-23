@@ -1,0 +1,32 @@
+[package]
+name = "nodeSubplan"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nodeSubplan"
+path = "src/lib.rs"
+
+[dependencies]
+nodeSubplan_seams = { path = "../nodeSubplan_seams" }
+execParallel_support_seams = { path = "../execParallel_support_seams" }
+execAmi_seams = { path = "../execAmi_seams" }
+execProcnode_seams = { path = "../execProcnode_seams" }
+execMain_seams = { path = "../execMain_seams" }
+execTuples_seams = { path = "../execTuples_seams" }
+execExpr_seams = { path = "../execExpr_seams" }
+execGrouping_seams = { path = "../execGrouping_seams" }
+execUtils_seams = { path = "../execUtils_seams" }
+tupdesc_seams = { path = "../../access/common/tupdesc_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+arrayfuncs_seams = { path = "../../utils/adt/arrayfuncs_seams" }
+costsize_seams = { path = "../../optimizer/path/costsize_seams" }
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+datum = { path = "../../../_support/types/datum" }
+nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+mcx = { path = "../../../_support/mcx" }

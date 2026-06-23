@@ -1,0 +1,26 @@
+[package]
+name = "waitevent"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "waitevent"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+hash = { path = "../../../../_support/types/hash" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+utils_error = { path = "../../utils_error" }
+ipc_shmem = { path = "../../../storage/ipc/ipc_shmem" }
+s_lock = { path = "../../../storage/lmgr/s_lock" }
+dynahash_seams = { path = "../../hash/dynahash_seams" }
+lwlock_seams = { path = "../../../storage/lmgr/lwlock_seams" }
+lmgr_seams = { path = "../../../storage/lmgr/lmgr_seams" }
+lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
+init_small_seams = { path = "../../init/init_small_seams" }
+waitevent_seams = { path = "../waitevent_seams" }
+pgstat_seams = { path = "../pgstat_seams" }

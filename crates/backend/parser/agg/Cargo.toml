@@ -1,0 +1,38 @@
+[package]
+name = "agg"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "agg"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+utils_error = { path = "../../utils/utils_error" }
+
+# Owner of the inward seams this crate installs.
+parse_agg_seams = { path = "../parse_agg_seams" }
+
+# Direct (no-cycle) callees.
+nodes_core = { path = "../../nodes/nodes_core" }
+vars = { path = "../../optimizer/util/vars" }
+pg_constraint = { path = "../../catalog/pg_constraint" }
+parser_relation = { path = "../parser_relation" }
+coerce = { path = "../coerce" }
+# parse_clause.c landed as a real owner; clause depends on parse-agg-seams (not
+# on this crate), so a direct agg->clause edge is acyclic.
+clause = { path = "../clause" }
+
+# Outward dependency seams (sibling-parser / rewriter / catalog callees).
+parse_expr_seams = { path = "../parse_expr_seams" }
+rewritemanip_seams = { path = "../../rewrite/rewritemanip_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+format_type_seams = { path = "../../utils/adt/format_type_seams" }
+small1_seams = { path = "../small1_seams" }
+equalfuncs_seams = { path = "../../nodes/equalfuncs_seams" }

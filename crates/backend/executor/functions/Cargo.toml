@@ -1,0 +1,59 @@
+[package]
+name = "functions"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "functions"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+types_core = { path = "../../../_support/types/types_core" }
+datum = { path = "../../../_support/types/datum" }
+fmgr = { path = "../../../_support/types/fmgr" }
+nodes = { path = "../../../_support/types/nodes" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_dest = { path = "../../../_support/types/types_dest" }
+snapshot = { path = "../../../_support/types/snapshot" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_slot = { path = "../../../_support/types/types_slot" }
+
+# own inward seam crate (installed from init_seams)
+functions_seams = { path = "../functions_seams" }
+# cross-crate seam install: fmgr_sql_validator's body-check (pg_proc.c)
+pg_proc_seams = { path = "../../catalog/pg_proc_seams" }
+
+# direct deps (no cycle: none of these depend on this crate or its seam)
+execMain = { path = "../execMain" }
+execTuples = { path = "../execTuples" }
+heaptuple = { path = "../../access/common/heaptuple" }
+parser_analyze = { path = "../../parser/parser_analyze" }
+driver = { path = "../../parser/driver" }
+nodes_core = { path = "../../nodes/nodes_core" }
+tcop_dest = { path = "../../tcop/tcop_dest" }
+
+# outward seam crates (cyclic owners)
+planner_seams = { path = "../../optimizer/plan/planner_seams" }
+rewritehandler_seams = { path = "../../rewrite/rewritehandler_seams" }
+clauses_seams = { path = "../../optimizer/util/clauses_seams" }
+snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
+utility_seams = { path = "../../tcop/utility_seams" }
+portal = { path = "../../../_support/types/portal" }
+# get_call_expr_argtype_expr: resolve polymorphic SQL-function argtypes from the call frame
+nodeFuncs_seams = { path = "../../nodes/nodeFuncs_seams" }
+# format_type_be for the "could not determine actual type" diagnostic
+format_type_seams = { path = "../../utils/adt/format_type_seams" }
+# get_expr_result_type: resolve the call-time (polymorphic) result tupdesc for check_sql_fn_retval
+funcapi_seams = { path = "../../utils/fmgr/funcapi_seams" }
+# Build a RECORD result tupdesc from the FunctionScan coldeflist (carried on the
+# materialize sink as expected_desc_cols) when get_expr_result_type returns the
+# indeterminate TYPEFUNC_RECORD — the call-time rettupdesc for check_sql_fn_retval.
+tupdesc = { path = "../../access/common/tupdesc" }

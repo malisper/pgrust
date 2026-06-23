@@ -1,0 +1,134 @@
+[package]
+name = "planner"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "planner"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+statistics = { path = "../../../../_support/types/statistics" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+# Datum (Const.constvalue for the LIMIT-1 const in the all-redundant DISTINCT leg).
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+parsenodes = { path = "../../../../_support/types/parsenodes" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+# stringToNode of a check-constraint ccbin (get_relation_constraints).
+read_seams = { path = "../../../nodes/read_seams" }
+# canonicalize_qual of a check-constraint expr (get_relation_constraints).
+prepqual_seams = { path = "../../prep/prepqual_seams" }
+# Bipartite matching (extract_rollup_sets) + discrete knapsack
+# (consider_groupingsets_paths) for GROUPING SETS.
+bipartite_match = { path = "../../../lib/bipartite_match" }
+knapsack = { path = "../../../lib/knapsack" }
+# equal() over PathTarget expr handles (scanjoin_target_same_exprs test).
+equalfuncs_seams = { path = "../../../nodes/equalfuncs_seams" }
+# This unit's own inward seams (pg_plan_query / plan_cluster_use_sort).
+planner_seams = { path = "../planner_seams" }
+# plancache's slice of the planner (expression_planner_with_deps value seam).
+planner_pc_seams = { path = "../planner_pc_seams" }
+types_plancache = { path = "../../../../_support/types/types_plancache" }
+# plan_set_operations (prepunion.c — no crate yet).
+prepunion_seams = { path = "../../prep/prepunion_seams" }
+# create_plan dispatch spine.
+createplan = { path = "../createplan" }
+# create_plan-tail apply_tlist_labeling seam (createplan calls it on the topmost plan).
+createplan_seams = { path = "../createplan_seams" }
+# set_plan_references.
+setrefs = { path = "../setrefs" }
+# record_inval_item seam: planner installs it (computes the syscache hash, pushes
+# the concrete PlanInvalItem onto glob->invalItems for the PlannedStmt producer).
+setrefs_seams = { path = "../setrefs_seams" }
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+# query_planner.
+plan_small = { path = "../plan_small" }
+# SS_* (subselect.c) incl. SS_process_ctes.
+init_subselect = { path = "../init_subselect" }
+# replace_empty_jointree (prepjointree.c, ported in subselect-pullup).
+subselect_pullup = { path = "../subselect_pullup" }
+# ExecSupportsBackwardScan / materialize_finished_plan outward seams.
+init_subselect_ext_seams = { path = "../init_subselect_ext_seams" }
+# prepjointree spine (pull_up_*, reduce_outer_joins, remove_useless_result_rtes, ...).
+prepjointree = { path = "../../prep/prepjointree" }
+# prepjointree per-fn seams: preprocess_function_rtes / pull_up_subqueries /
+# expand_virtual_generated_columns / flatten_simple_union_all are exposed only
+# through the seam crate (planner is a consumer, not the owner).
+prepjointree_seams = { path = "../../prep/prepjointree_seams" }
+# preprocess_targetlist.
+preptlist = { path = "../../prep/preptlist" }
+# preprocess_aggrefs.
+prepagg = { path = "../../prep/prepagg" }
+planagg = { path = "../planagg" }
+# IncrementVarSublevelsUp — build_minmax_path's subquery Var-level bump (planagg.c).
+rewrite_core = { path = "../../../rewrite/rewrite_core" }
+# canonicalize_qual / make_ands_implicit live in prepqual / nodes-core.
+prepqual = { path = "../../prep/prepqual" }
+# fetch_upper_rel.
+relnode = { path = "../../util/relnode" }
+# set_cheapest.
+pathnode = { path = "../../util/pathnode" }
+# assign_special_exec_param (ModifyTable epqParam).
+paramassign_seams = { path = "../../util/paramassign_seams" }
+# AggClauseCostsLite carrier (create_agg_path / cost_agg cost input).
+pathnode_seams = { path = "../../util/pathnode_seams" }
+# get_cheapest_fractional_path (allpaths seam).
+allpaths = { path = "../../path/allpaths" }
+# apply_scanjoin_target_to_paths partitioned branch: adjust_appendrel_attrs +
+# find_appinfos_by_relids (target translation per child) and is_dummy_rel.
+appendinfo = { path = "../../util/appendinfo" }
+joinrels = { path = "../../path/joinrels" }
+# make_pathkeys_for_sortclauses.
+pathkeys = { path = "../../path/pathkeys" }
+# eval_const_expressions / estimate_expression_value / contain_* / is_parallel_safe / convert_saop.
+clauses = { path = "../../util/clauses" }
+# get_sortgroupref_clause / make_pathtarget_from_tlist / copy_pathtarget.
+vars = { path = "../../util/vars" }
+# flatten_join_alias_vars seam (installed by backend-optimizer-util-vars).
+rewritemanip_seams = { path = "../../../rewrite/rewritemanip_seams" }
+# set_pathtarget_cost_width (the create_pathtarget macro tail).
+costsize = { path = "../../path/costsize" }
+# windowfunc_cost / windowclause_cost_info install (cost_windowagg).
+costsize_seams = { path = "../../path/costsize_seams" }
+# get_func_support (optimize_window_clauses) + get_typavgwidth (create_one_window_path).
+lsyscache = { path = "../../../utils/cache/lsyscache" }
+# add_function_cost (windowfunc_cost).
+plancat = { path = "../../util/plancat" }
+# set_relation_partition_info / set_baserel_partition_constraint owner bodies
+# (plancat.c). plancat-the-crate declares these ext-seams but can't reach the
+# partcache/partdesc/expression_planner/fmgr substrate without a dependency
+# cycle, so the planner (which sits above plancat and owns expression_planner)
+# installs them here.
+plancat_ext_seams = { path = "../../util/plancat_ext_seams" }
+partcache = { path = "../../../utils/cache/partcache" }
+partitioning_core_seams = { path = "../../../partitioning/partitioning_core_seams" }
+common_relation_seams = { path = "../../../access/common/common_relation_seams" }
+rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+# get_sortgroupclause_expr (get_number_of_groups GROUP BY estimate).
+nodeFuncs_seams = { path = "../../../nodes/nodeFuncs_seams" }
+# estimate_num_groups (get_number_of_groups GROUP BY estimate).
+selfuncs_seams = { path = "../../../utils/adt/selfuncs_seams" }
+# CheckSelectLocking.
+parser_analyze = { path = "../../../parser/parser_analyze" }
+# has_subclass.
+pg_inherits = { path = "../../../catalog/pg_inherits" }
+# GetFdwRoutineByRelId (select_rowmark_type FDW branch).
+foreign = { path = "../../../foreign/foreign" }
+# guc consts (DEBUG_PARALLEL_OFF / DEFAULT_CURSOR_TUPLE_FRACTION).
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+init_small = { path = "../../../utils/init/init_small" }
+index_seams = { path = "../../../catalog/index_seams" }
+# expand_grouping_sets (GROUPING SETS expansion in subquery_planner).
+parse_agg_seams = { path = "../../../parser/parse_agg_seams" }
+# subquery_planner view-permission ACL loop (planner.c:866-882):
+# getRTEPermissionInfo (parse_relation.c) + ExecCheckOneRelPerms (execMain.c).
+parser_relation_seams = { path = "../../../parser/parser_relation_seams" }
+# addRTEPermissionInfo for plan_cluster_use_sort's dummy Query.
+parser_relation = { path = "../../../parser/parser_relation" }
+execMain_seams = { path = "../../../executor/execMain_seams" }

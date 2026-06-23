@@ -1,0 +1,124 @@
+[package]
+name = "misc2"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "misc2"
+path = "src/lib.rs"
+
+[dependencies]
+# Carrier types.
+types_core = { path = "../../../../_support/types/types_core" }
+cache = { path = "../../../../_support/types/cache" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+# The fmgr call-frame boundary + builtin-table registry (fmgr_builtins layer).
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+nodes = { path = "../../../../_support/types/nodes" }
+mcx = { path = "../../../../_support/mcx" }
+
+# Real owners the expandedrecord family reuses (the adt-infra confirmed
+# available on main): the tuple form/deform/copy core, and the typcache
+# rowtype-tupdesc lookup seam.
+# Composite (RECORD) I/O / compare / hash (rowtypes family) substrate crosses
+# to its real owner via that owner's seam crate (typcache, fmgr, format_type,
+# datum, pqformat message helpers). The `domains` family reaches the typcache
+# domain-constraint engine and the base type's fmgr I/O via those same seams.
+heaptuple = { path = "../../../access/common/heaptuple" }
+# detoast / heaptoast owners reached by expandedrecord's flatten path (real
+# seams, signature-identical).
+detoast_seams = { path = "../../../access/common/detoast_seams" }
+heaptoast_seams = { path = "../../../access/heap/heaptoast_seams" }
+pqformat = { path = "../../../libpq/pqformat" }
+# hashtid/hashtidextended hash the ItemPointer byte image via the merged
+# common/hashfn owner (pure, no-alloc; no seam install needed).
+hashfn = { path = "../../../../common/hashfn" }
+typcache_seams = { path = "../../cache/typcache_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+# `domains` family: the typcache->domains.c outward seams this unit OWNS and
+# installs (catalog scan / planner / context lifecycle for domain CHECK
+# constraints), plus the string_to_node + value-typed expression_planner seams
+# `plan_check_expr` composes (thin seam crates, no cycle).
+domains_seams = { path = "../domains_seams" }
+read_seams = { path = "../../../nodes/read_seams" }
+planner_pc_seams = { path = "../../../optimizer/plan/planner_pc_seams" }
+format_type_seams = { path = "../format_type_seams" }
+datum_seams = { path = "../datum_seams" }
+stack_depth_seams = { path = "../../misc/stack_depth_seams" }
+
+# Inward seam crates this unit owns. The expandeddatum EOH surface (consumed
+# by backend-access-common-heaptuple) and the regproc.c printable-name /
+# name-parsing helpers (consumed by funcapi etc.); both installed from
+# init_seams().
+misc2_seams = { path = "../misc2_seams" }
+regproc_seams = { path = "../regproc_seams" }
+
+# Outward seam crate for the per-type ExpandedObjectMethods table that the
+# keystone EOH_get_flat_size / EOH_flatten_into dispatch through. Owned by the
+# concrete expanded types (expanded record / expanded array), still unported.
+expanded_methods_seams = { path = "../expanded_methods_seams" }
+
+# Outward seams the regproc family reaches its (genuinely-unported or
+# cross-unit-cycle) catalog / type / role owners through.
+namespace_seams = { path = "../../../catalog/namespace_seams" }
+dict_seams = { path = "../../../tsearch/dict_seams" }
+# SystemAttributeByName (catalog/heap.c) for record system-column field refs.
+heap_seams = { path = "../../../catalog/heap_seams" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+lsyscache_seams = { path = "../../cache/lsyscache_seams" }
+ruleutils_seams = { path = "../ruleutils_seams" }
+varlena_seams = { path = "../varlena_seams" }
+acl_seams = { path = "../acl_seams" }
+oid_seams = { path = "../oid_seams" }
+# The reg* binary wire codecs (reg*recv/reg*send) are byte-for-byte oidrecv /
+# oidsend (regproc.c: `return oidrecv/oidsend(fcinfo)`); we register them under
+# the reg* OIDs pointing at the real oid.c value cores (no cycle — oid.c does
+# not depend on this unit).
+oid = { path = "../oid" }
+miscinit_seams = { path = "../../init/miscinit_seams" }
+# currtid_byrelname (tid.c) reaches table-AM open/scan, snapshot mgr, acl,
+# objectaddress, and the view rewrite-rule reader. No cycle: cargo tree -i shows
+# this unit is absent from the table-AM crates' dependency trees.
+table = { path = "../../../access/table/table" }
+table_tableam = { path = "../../../access/table/table_tableam" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+objectaddress_seams = { path = "../../../catalog/objectaddress_seams" }
+snapmgr_seams = { path = "../../time/snapmgr_seams" }
+relcache_seams = { path = "../../cache/relcache_seams" }
+parser_relation = { path = "../../../parser/parser_relation" }
+rel = { path = "../../../../_support/types/rel" }
+types_acl = { path = "../../../../_support/types/types_acl" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+mbutils_seams = { path = "../../mb/mbutils_seams" }
+parse_type_seams = { path = "../../../parser/parse_type_seams" }
+pgstrcasecmp = { path = "../../../../port/pgstrcasecmp" }
+
+# Outward seams the `admin` family consumes (real owners; genuinely-unported
+# owners panic until they land).
+backend_common_path_seams = { path = "../../../common/backend_common_path_seams" }
+fd_seams = { path = "../../../storage/file/fd_seams" }
+lock_seams = { path = "../../../storage/lmgr/lock_seams" }
+predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
+# pg_isolation_test_session_is_blocked: PID->proc (procarray), the proc's
+# wait_event_info (proc), and the wait-event-type taxonomy (waitevent).
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
+waitevent = { path = "../../activity/waitevent" }
+funcapi_seams = { path = "../../fmgr/funcapi_seams" }
+arrayfuncs_seams = { path = "../arrayfuncs_seams" }
+# pg_isolation_test_session_is_blocked: split the int4[] argument into elements.
+arrayfuncs = { path = "../arrayfuncs" }
+partition_seams = { path = "../../../catalog/partition_seams" }
+binary_upgrade_seams = { path = "../../../catalog/binary_upgrade_seams" }
+hba_seams = { path = "../../../libpq/hba_seams" }
+slot_seams = { path = "../../../replication/slot_seams" }
+init_small = { path = "../../init/init_small" }
+# xml.c's table_to_xml_internal regclassout-name seam; misc2 owns regclassout.
+xml_libxml_seams = { path = "../xml_libxml_seams" }

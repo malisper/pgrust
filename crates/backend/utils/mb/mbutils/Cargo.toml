@@ -1,0 +1,52 @@
+[package]
+name = "mbutils"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "mbutils"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_wchar = { path = "../../../../_support/types/types_wchar" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+datum = { path = "../../../../_support/types/datum" }
+
+# fmgr builtin-table registration (C: fmgr_builtins[]) for this crate's
+# SQL-callable encoding functions.
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+
+common_wchar = { path = "../../../../common/common_wchar" }
+utils_error = { path = "../../utils_error" }
+
+# FindDefaultConversionProc owner (acyclic: namespace deps only seam crates).
+catalog_namespace = { path = "../../../catalog/catalog_namespace" }
+# OidFunctionCall6 conversion-proc dispatch via the fmgr-owned seam.
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+# namein, for the name-returning SQL entry points (acyclic: name deps only the seam crate).
+name = { path = "../../adt/name" }
+
+# inward seams this crate owns + installs
+mbutils_seams = { path = "../mbutils_seams" }
+# libpq's get_database_encoding_name resolves through the encoding subsystem
+# (mbutils) — install that seam here, its authoritative owner.
+fe_seams = { path = "../../../../interfaces/libpq/fe_seams" }
+# SetMessageEncoding/pg_any_to_server are mbutils.c routines, but pg_locale.c's
+# seam crate homes their declarations; this crate (their real owner) installs them.
+pg_locale_env_seams = { path = "../../adt/pg_locale_env_seams" }
+# Parallel-worker bring-up: GetDatabaseEncoding/SetClientEncoding (parallel.c).
+parallel_rt_seams = { path = "../../../access/transam/parallel_rt_seams" }
+
+# outward seam crates (callees; panic until owners land)
+encnames_seams = { path = "../../../../common/encnames_seams" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+
+[dev-dependencies]

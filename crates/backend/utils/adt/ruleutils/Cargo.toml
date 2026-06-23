@@ -1,0 +1,61 @@
+[package]
+name = "ruleutils"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ruleutils"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+typecmds_seams = { path = "../../../commands/typecmds_seams" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+keywords = { path = "../../../../common/keywords" }
+
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+read_seams = { path = "../../../nodes/read_seams" }
+var_seams = { path = "../../../optimizer/util/var_seams" }
+common_relation_seams = { path = "../../../access/common/common_relation_seams" }
+genam_seams = { path = "../../../access/index/genam_seams" }
+rewrite_core = { path = "../../../rewrite/rewrite_core" }
+ruleutils_seams = { path = "../ruleutils_seams" }
+partbounds_seams = { path = "../../../partitioning/partbounds_seams" }
+guc_funcs_seams = { path = "../../misc/guc_funcs_seams" }
+lsyscache_seams = { path = "../../cache/lsyscache_seams" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+partcache_seams = { path = "../../cache/partcache_seams" }
+typcache_seams = { path = "../../cache/typcache_seams" }
+namespace_seams = { path = "../../../catalog/namespace_seams" }
+pg_depend_seams = { path = "../../../catalog/pg_depend_seams" }
+parse_func_seams = { path = "../../../parser/parse_func_seams" }
+arrayfuncs_seams = { path = "../arrayfuncs_seams" }
+varlena_seams = { path = "../varlena_seams" }
+amapi_seams = { path = "../../../access/index/amapi_seams" }
+tablespace_seams = { path = "../../../commands/tablespace_seams" }
+cache = { path = "../../../../_support/types/cache" }
+types_catalog = { path = "../../../../_support/types/types_catalog" }
+types_matview = { path = "../../../../_support/types/types_matview" }
+matview_deps_seams = { path = "../../../commands/matview_deps_seams" }
+nodes_core_seams = { path = "../../../nodes/nodes_core_seams" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+nodeFuncs_seams = { path = "../../../nodes/nodeFuncs_seams" }
+format_type_seams = { path = "../format_type_seams" }
+xml_seams = { path = "../xml_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+guc_seams = { path = "../../misc/guc_seams" }
+guc_tables = { path = "../../misc/guc_tables" }
+mbutils_seams = { path = "../../mb/mbutils_seams" }
+types_partition = { path = "../../../../_support/types/types_partition" }
+funcapi_seams = { path = "../../fmgr/funcapi_seams" }
+functioncmds_seams = { path = "../../../commands/functioncmds_seams" }

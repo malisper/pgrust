@@ -1,0 +1,35 @@
+[package]
+name = "misc_timeout"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "misc_timeout"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+signal = { path = "../../../../_support/types/signal" }
+types_timeout = { path = "../../../../_support/types/types_timeout" }
+timeout_seams = { path = "../timeout_seams" }
+more2_seams = { path = "../more2_seams" }
+timestamp_seams = { path = "../../adt/timestamp_seams" }
+init_small_seams = { path = "../../init/init_small_seams" }
+latch_seams = { path = "../../../storage/ipc/latch_seams" }
+port_pqsignal_seams = { path = "../../../../port/port_pqsignal_seams" }
+# conffiles.c / injection_point.c / pg_config.c / tzparser.c support
+utils_error = { path = "../../utils_error" }
+misc_more2 = { path = "../../../../_support/types/misc_more2" }
+conffiles_seams = { path = "../conffiles_seams" }
+injection_point_seams = { path = "../../../storage/ipc/injection_point_seams" }
+# The INJECTION_POINT(name) macro seam (no-op in this build), reached by typcache.c.
+domains_seams = { path = "../../adt/domains_seams" }
+port_path_seams = { path = "../../../../port/port_path_seams" }
+adt_datetime = { path = "../../adt/adt_datetime" }
+config_info_seams = { path = "../../../../common/config_info_seams" }
+# read_tz_file owner support: share-path derivation + my_exec_path global.
+common_path_seams = { path = "../../../../common/common_path_seams" }
+init_small = { path = "../../init/init_small" }

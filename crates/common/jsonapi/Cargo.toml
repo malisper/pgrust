@@ -1,0 +1,27 @@
+[package]
+name = "jsonapi"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "jsonapi"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../_support/mcx" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+types_tuple = { path = "../../_support/types/types_tuple" }
+types_json = { path = "../../_support/types/types_json" }
+common_wchar = { path = "../common_wchar" }
+mbutils = { path = "../../backend/utils/mb/mbutils" }
+adt_jsonb = { path = "../../backend/utils/adt/adt_jsonb" }
+jsonb_util = { path = "../../backend/utils/adt/jsonb_util" }
+jsonb_seams = { path = "../../backend/utils/adt/jsonb_seams" }
+adt_jsonfuncs = { path = "../../backend/utils/adt/adt_jsonfuncs" }
+adt_json = { path = "../../backend/utils/adt/adt_json" }
+json_seams = { path = "../../backend/utils/adt/json_seams" }
+utils_error = { path = "../../backend/utils/utils_error" }
+stack_depth_seams = { path = "../../backend/utils/misc/stack_depth_seams" }
+jsonapi_seams = { path = "../jsonapi_seams" }

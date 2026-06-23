@@ -1,0 +1,45 @@
+[package]
+name = "test_decoding"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "test_decoding"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+seam_core = { path = "../../_support/seam/seam_core" }
+mcx = { path = "../../_support/mcx" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+datum = { path = "../../_support/types/datum" }
+types_logical = { path = "../../_support/types/types_logical" }
+types_tuple = { path = "../../_support/types/types_tuple" }
+rel = { path = "../../_support/types/rel" }
+types_storage = { path = "../../_support/types/types_storage" }
+utils_error = { path = "../../backend/utils/utils_error" }
+
+# The builtin output-plugin registry (Phase 0) we register into.
+dfmgr_seams = { path = "../../backend/utils/fmgr/dfmgr_seams" }
+
+# `ctx->out` StringInfo backing store (appendStringInfo / resetStringInfo).
+mcxt_seams = { path = "../../backend/utils/mmgr/mcxt_seams" }
+
+# Output-plugin helpers driven from logical.c (OutputPluginPrepareWrite/Write).
+logical_logical = { path = "../../backend/replication/logical/logical_logical" }
+
+# Resolve the change/txn/relation/message handles the callback carries.
+reorderbuffer_seams = { path = "../../backend/replication/logical/reorderbuffer_seams" }
+
+# Tuple deform / column formatting substrate.
+heaptuple = { path = "../../backend/access/common/heaptuple" }
+common_relation_seams = { path = "../../backend/access/common/common_relation_seams" }
+detoast_seams = { path = "../../backend/access/common/detoast_seams" }
+relcache_seams = { path = "../../backend/utils/cache/relcache_seams" }
+lsyscache_seams = { path = "../../backend/utils/cache/lsyscache_seams" }
+format_type_seams = { path = "../../backend/utils/adt/format_type_seams" }
+ruleutils_seams = { path = "../../backend/utils/adt/ruleutils_seams" }
+fmgr_seams = { path = "../../backend/utils/fmgr/fmgr_seams" }
+timestamp_seams = { path = "../../backend/utils/adt/timestamp_seams" }

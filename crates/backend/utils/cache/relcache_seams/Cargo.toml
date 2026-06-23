@@ -1,0 +1,28 @@
+[package]
+name = "relcache_seams"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "relcache_seams"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+mcx = { path = "../../../../_support/mcx" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_partition = { path = "../../../../_support/types/types_partition" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+# F0': the owned relcache entry-store type family, so this seam crate can name
+# `RelationData` (+ companions) for the forthcoming cross-crate shared-Rc seam.
+relcache_entry = { path = "../../../../_support/types/relcache_entry" }
+# Hash AM's rd_amcache stores a HashMetaPageData; the relcache owns that slot.
+hash = { path = "../../../../_support/types/hash" }
+# SP-GiST's rd_amcache stores a SpGistCache; the relcache owns that slot.
+spgist = { path = "../../../../_support/types/spgist" }

@@ -1,0 +1,26 @@
+[package]
+name = "server"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "server"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_error = { path = "../../../_support/types/types_error" }
+utils_error = { path = "../../utils/utils_error" }
+sink = { path = "../sink" }
+fd = { path = "../../storage/file/fd" }
+fd_seams = { path = "../../storage/file/fd_seams" }
+mcx = { path = "../../../_support/mcx" }
+acl_seams = { path = "../../utils/adt/acl_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+pgcheckdir_seams = { path = "../../../common/pgcheckdir_seams" }
+port_path_seams = { path = "../../../port/port_path_seams" }
+libc = "0.2"

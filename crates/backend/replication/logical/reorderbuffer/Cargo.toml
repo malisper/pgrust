@@ -1,0 +1,66 @@
+[package]
+name = "reorderbuffer"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "reorderbuffer"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+types_logical = { path = "../../../../_support/types/types_logical" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+mcx = { path = "../../../../_support/mcx" }
+
+# cross-crate seams the snapshot-management family consumes
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+# SetupHistoricSnapshot/TeardownHistoricSnapshot/HistoricSnapshotGetTupleCids —
+# the snapmgr half of the historic (logical-decoding) snapshot. snapmgr owns the
+# active tuplecid map; reorderbuffer installs/reads it across these seams.
+snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
+
+# change-replay family deps: the k-way merge binary heap + the inval seam that
+# ReorderBufferExecuteInvalidations applies decoded invalidations through.
+binaryheap = { path = "../../../lib/binaryheap" }
+inval_seams = { path = "../../../utils/cache/inval_seams" }
+# ReorderBufferImmediateInvalidation forces invalidations to apply outside a
+# valid (sub)transaction: IsTransactionOrTransactionBlock / BeginInternalSubTransaction
+# / AbortCurrentTransaction / RollbackAndReleaseCurrentSubTransaction.
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+
+# spill-to-disk family deps: the slot directory + spill filename
+# (ReorderBufferSerializedPath reads MyReplicationSlot's name), the fd / VFD
+# layer the segment files are written/read through, and wal_segment_size for the
+# LSN -> segment mapping (XLByteToSeg / XLogSegNoOffsetToRecPtr).
+slot_seams = { path = "../../slot_seams" }
+fd_seams = { path = "../../../storage/file/fd_seams" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+libc = "0.2"
+
+# GUC slots: reorderbuffer.c owns the backing storage for the
+# `logical_decoding_work_mem` / `debug_logical_replication_streaming` GUC
+# variables (the `int logical_decoding_work_mem;` /
+# `int debug_logical_replication_streaming;` globals), so it installs their
+# `conf->variable` accessors here.
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+
+# own inward seams
+reorderbuffer_seams = { path = "../reorderbuffer_seams" }
+
+# output-plugin dispatch: ReorderBufferProcessTXN re-enters logical decoding
+# through this inward seam (the `rb->private_data == ctx` bridge) to drive the
+# begin/commit/message/prepare/stream/update_progress output-plugin callbacks.
+logical_seams = { path = "../logical_seams" }
+
+# change-replay relcache resolution: ReorderBufferProcessTXN resolves each
+# decoded change's relation from its relfilenumber (RelidByRelfilenumber) and
+# screens it (RelationIsLogicallyLogged / IsToastRelation / relrewrite /
+# relkind) before dispatching to the output plugin.
+relfilenumbermap = { path = "../../../utils/cache/relfilenumbermap" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }

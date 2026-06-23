@@ -1,0 +1,54 @@
+[package]
+name = "rewriteDefine"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "rewriteDefine"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+nodes = { path = "../../../_support/types/nodes" }
+rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_acl = { path = "../../../_support/types/types_acl" }
+types_storage = { path = "../../../_support/types/types_storage" }
+
+# Direct deps (acyclic: rewriteDefine is a leaf command nothing in these layers
+# depends on).
+table = { path = "../../access/table/table" }
+common_relation = { path = "../../access/common/common_relation" }
+catalog_catalog = { path = "../../catalog/catalog_catalog" }
+dependency = { path = "../../catalog/dependency" }
+pg_depend = { path = "../../catalog/pg_depend" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+objectaddress = { path = "../../catalog/objectaddress" }
+pg_class = { path = "../../catalog/pg_class" }
+nodes_core = { path = "../../nodes/nodes_core" }
+outfuncs = { path = "../../nodes/outfuncs" }
+rewrite_core = { path = "../rewrite_core" }
+adt_format_type = { path = "../../utils/adt/adt_format_type" }
+inval = { path = "../../utils/cache/inval" }
+miscinit = { path = "../../utils/init/miscinit" }
+init_small = { path = "../../utils/init/init_small" }
+
+# Cross-cycle externals, consumed through the owners' seam crates.
+indexing_seams = { path = "../../catalog/indexing_seams" }
+objectaccess_seams = { path = "../../catalog/objectaccess_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+parse_utilcmd_seams = { path = "../../parser/parse_utilcmd_seams" }
+rewritesupport_seams = { path = "../rewritesupport_seams" }
+
+# Inward dispatch seam this crate installs (ProcessUtilitySlow CREATE RULE leg).
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+# This unit's own inward seam (setRuleCheckAsUser, called by relcache's
+# RelationBuildRuleLock when a view's ON SELECT rule is loaded).
+rewriteDefine_seams = { path = "../rewriteDefine_seams" }

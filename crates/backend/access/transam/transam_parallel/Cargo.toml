@@ -1,0 +1,63 @@
+[package]
+name = "transam_parallel"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "transam_parallel"
+path = "src/lib.rs"
+
+[dependencies]
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+bgworker_seams = { path = "../../../postmaster/bgworker_seams" }
+libc = "0.2"
+execParallel_seams = { path = "../../../executor/execParallel_seams" }
+dsm_core_seams = { path = "../../../storage/ipc/dsm_core_seams" }
+signal = { path = "../../../../_support/types/signal" }
+legacy_pqsignal = { path = "../../../../interfaces/libpq/legacy_pqsignal" }
+planner_seams = { path = "../../../optimizer/plan/planner_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_error = { path = "../../../../_support/types/types_error" }
+execparallel = { path = "../../../../_support/types/execparallel" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_parallel = { path = "../../../../_support/types/types_parallel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+mcx = { path = "../../../../_support/mcx" }
+utils_error = { path = "../../../utils/utils_error" }
+# GetCurrentSubTransactionId(): the parallel rt-seam delegates to the xact-owned
+# accessor seam (installed by backend-access-transam-xact in production).
+transam_xact_seams = { path = "../transam_xact_seams" }
+# HoldInterrupts/ResumeInterrupts/INTERRUPTS_CAN_BE_PROCESSED: the parallel
+# rt-seams delegate to the init-small-owned accessor seams (installed in
+# production by backend-utils-init-small).
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+dsm_core = { path = "../../../storage/ipc/dsm_core" }
+shm_toc = { path = "../../../storage/ipc/shm_toc" }
+s_lock = { path = "../../../storage/lmgr/s_lock" }
+shm_mq_seams = { path = "../../../storage/ipc/shm_mq_seams" }
+parallel_seams = { path = "../parallel_seams" }
+parallel_rt_seams = { path = "../parallel_rt_seams" }
+session_seams = { path = "../../common/session_seams" }
+mcxt_seams = { path = "../../../utils/mmgr/mcxt_seams" }
+matview_deps_seams = { path = "../../../commands/matview_deps_seams" }
+namespace_seams = { path = "../../../catalog/namespace_seams" }
+variable_seams = { path = "../../../commands/variable_seams" }
+user_seams = { path = "../../../commands/user_seams" }
+predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
+lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
+vacuum_seams = { path = "../../../commands/vacuum_seams" }
+execParallel_support_seams = { path = "../../../executor/execParallel_support_seams" }
+execUtils_seams = { path = "../../../executor/execUtils_seams" }
+instrument = { path = "../../../executor/instrument" }
+
+[dev-dependencies]
+dsm_core = { path = "../../../storage/ipc/dsm_core", features = ["test-bringup"] }
+lwlock = { path = "../../../storage/lmgr/lwlock" }
+mmgr_freepage = { path = "../../../utils/mmgr/mmgr_freepage" }
+shm_mq = { path = "../../../storage/ipc/shm_mq" }
+latch_seams = { path = "../../../storage/ipc/latch_seams" }
+bgworker_seams = { path = "../../../postmaster/bgworker_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+types_storage = { path = "../../../../_support/types/types_storage" }

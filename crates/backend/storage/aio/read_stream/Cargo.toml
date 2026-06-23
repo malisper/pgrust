@@ -1,0 +1,33 @@
+[package]
+name = "read_stream"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "read_stream"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+rel = { path = "../../../../_support/types/rel" }
+mcx = { path = "../../../../_support/mcx" }
+# The look-ahead pipeline drives StartReadBuffer(s)/WaitReadBuffers + the
+# ReadBuffer accessors (BufferGetBlockNumber/ReleaseBuffer) directly: bufmgr is
+# below read_stream in the dependency graph.
+bufmgr = { path = "../../buffer/bufmgr" }
+# GetAccessStrategyPinLimit / GetLocalPinLimit (strategy.rs / localbuf.rs).
+support = { path = "../../buffer/support" }
+# smgr->smgr_rlocator (tablespace lookup) + smgr-temp check.
+smgr = { path = "../../smgr/smgr" }
+# get_tablespace_io_concurrency / get_tablespace_maintenance_io_concurrency.
+spccache = { path = "../../../utils/cache/spccache" }
+# IsCatalogRelation / IsCatalogRelationOid.
+catalog_catalog = { path = "../../../catalog/catalog_catalog" }
+# The GUCs read once at begin time: io_combine_limit / effective_io_concurrency /
+# maintenance_io_concurrency / io_method==sync / io_direct_data / GetPinLimit.
+bufmgr_seams = { path = "../../buffer/bufmgr_seams" }
+# MyDatabaseId / MyDatabaseTableSpace.
+init_small_seams = { path = "../../../utils/init/init_small_seams" }

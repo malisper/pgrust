@@ -1,0 +1,13 @@
+[package]
+name = "integerset"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "integerset"
+path = "src/lib.rs"
+
+[dependencies]
+types_error = { path = "../../../_support/types/types_error" }
+mcx = { path = "../../../_support/mcx" }

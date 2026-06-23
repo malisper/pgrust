@@ -1,0 +1,17 @@
+[package]
+name = "jsonpath_scan"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "jsonpath_scan"
+path = "src/lib.rs"
+
+[dependencies]
+types_error = { path = "../../../../_support/types/types_error" }
+types_jsonpath = { path = "../../../../_support/types/types_jsonpath" }
+mcx = { path = "../../../../_support/mcx" }
+mb_fgram = { path = "../../mb/mb_fgram" }
+mbutils = { path = "../../mb/mbutils" }
+pgstrcasecmp = { path = "../../../../port/pgstrcasecmp" }

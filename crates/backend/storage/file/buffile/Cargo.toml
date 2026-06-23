@@ -1,0 +1,28 @@
+[package]
+name = "buffile"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "buffile"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+utils_error = { path = "../../../utils/utils_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+execparallel = { path = "../../../../_support/types/execparallel" }
+mcx = { path = "../../../../_support/mcx" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+
+buffile_seams = { path = "../buffile_seams" }
+fd_seams = { path = "../fd_seams" }
+fileset_seams = { path = "../fileset_seams" }
+tablespace_seams = { path = "../../../commands/tablespace_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+instrument = { path = "../../../executor/instrument" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+instr_time = { path = "../../../../_support/portability/instr_time" }

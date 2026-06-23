@@ -1,0 +1,12 @@
+[package]
+name = "float_libm_ffi"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "float_libm_ffi"
+path = "src/lib.rs"
+
+[dependencies]
+float_seams = { path = "../float_seams" }

@@ -1,0 +1,36 @@
+[package]
+name = "nodeIndexonlyscan"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nodeIndexonlyscan"
+path = "src/lib.rs"
+
+[dependencies]
+indextuple_seams = { path = "../../access/common/indextuple_seams" }
+visibilitymap_seams = { path = "../../access/heap/visibilitymap_seams" }
+indexam_seams = { path = "../../access/index/indexam_seams" }
+transam_parallel = { path = "../../access/transam/transam_parallel" }
+execAmi_seams = { path = "../execAmi_seams" }
+execExpr_seams = { path = "../execExpr_seams" }
+execMain_seams = { path = "../execMain_seams" }
+execScan_seams = { path = "../execScan_seams" }
+execTuples_seams = { path = "../execTuples_seams" }
+execUtils_seams = { path = "../execUtils_seams" }
+nodeIndexscan_seams = { path = "../nodeIndexscan_seams" }
+nodeIndexonlyscan_seams = { path = "../nodeIndexonlyscan_seams" }
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+storage_shm_toc_seams = { path = "../../storage/ipc/storage_shm_toc_seams" }
+predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+execparallel = { path = "../../../_support/types/execparallel" }
+nodes = { path = "../../../_support/types/nodes" }
+rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_tuple = { path = "../../../_support/types/types_tuple" }

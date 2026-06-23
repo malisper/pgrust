@@ -1,0 +1,18 @@
+[package]
+name = "encode"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "encode"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_error = { path = "../../../../_support/types/types_error" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+encode_seams = { path = "../encode_seams" }
+mbutils_seams = { path = "../../mb/mbutils_seams" }

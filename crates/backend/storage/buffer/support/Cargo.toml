@@ -1,0 +1,32 @@
+[package]
+name = "support"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "support"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+# pg_stat_io IOOp vocabulary for the temp-relation localbuf IO counts.
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+mcx = { path = "../../../../_support/mcx" }
+hashfn = { path = "../../../../common/hashfn" }
+s_lock = { path = "../../lmgr/s_lock" }
+page = { path = "../../page" }
+bufmgr_seams = { path = "../bufmgr_seams" }
+buffer_support_seams = { path = "../buffer_support_seams" }
+transam_parallel = { path = "../../../access/transam/transam_parallel" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+ipc_shmem_seams = { path = "../../ipc/ipc_shmem_seams" }
+smgr_seams = { path = "../../smgr/smgr_seams" }
+latch_seams = { path = "../../ipc/latch_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+common_relpath_seams = { path = "../../../../common/common_relpath_seams" }
+
+[dev-dependencies]
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }

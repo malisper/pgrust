@@ -1,0 +1,28 @@
+[package]
+name = "nodeForeignscan"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nodeForeignscan"
+path = "src/lib.rs"
+
+[dependencies]
+execAmi_seams = { path = "../execAmi_seams" }
+execExpr_seams = { path = "../execExpr_seams" }
+execMain_seams = { path = "../execMain_seams" }
+execProcnode_seams = { path = "../execProcnode_seams" }
+execScan_seams = { path = "../execScan_seams" }
+execTuples_seams = { path = "../execTuples_seams" }
+execUtils_seams = { path = "../execUtils_seams" }
+nodeForeignscan_seams = { path = "../nodeForeignscan_seams" }
+foreign_seams = { path = "../../foreign/foreign_seams" }
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }
+ipc_shm_toc_seams = { path = "../../storage/ipc/ipc_shm_toc_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+execparallel = { path = "../../../_support/types/execparallel" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+mcx = { path = "../../../_support/mcx" }

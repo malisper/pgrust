@@ -1,0 +1,68 @@
+[package]
+name = "lmgr_proc"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "lmgr_proc"
+path = "src/lib.rs"
+
+[dependencies]
+libc = { version = "0.2", default-features = false }
+parallel_rt_seams = { path = "../../../access/transam/parallel_rt_seams" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_deadlock = { path = "../../../../_support/types/types_deadlock" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+types_timeout = { path = "../../../../_support/types/types_timeout" }
+wal = { path = "../../../../_support/types/wal" }
+
+# Inward seams this unit owns and installs from init_seams().
+lmgr_proc_seams = { path = "../lmgr_proc_seams" }
+# bufmgr-side outward seam: GetStartupBufferPinWaitBufId is read by
+# HoldingBufferPinThatDelaysRecovery; proc owns and installs it.
+bufmgr_seams = { path = "../../buffer/bufmgr_seams" }
+funcs_seams = { path = "../../aio/funcs_seams" }
+
+# Outward seams: neighbors this unit calls into (panic until each owner lands).
+# globals.c (MaxBackends/MaxConnections/max_prepared_xacts/...), shmem.c
+# (add_size/mul_size), and lwlock.c (LWLockInitialize for each PGPROC's
+# fpInfoLock).
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+ipc_shmem_seams = { path = "../../ipc/ipc_shmem_seams" }
+lwlock_seams = { path = "../lwlock_seams" }
+# Outward per-owner seam crates the wait-queue family routes through.
+lock_seams = { path = "../lock_seams" }
+deadlock_seams = { path = "../deadlock_seams" }
+latch_seams = { path = "../../ipc/latch_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+standby_seams = { path = "../../ipc/standby_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+utils_error = { path = "../../../utils/utils_error" }
+timeout_seams = { path = "../../../utils/misc/timeout_seams" }
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+xlogrecovery_seams = { path = "../../../access/transam/xlogrecovery_seams" }
+xlogutils_seams = { path = "../../../access/transam/xlogutils_seams" }
+# Class-B owners reached by the lifecycle family (panic-through until each lands).
+s_lock = { path = "../s_lock" }
+walsender_seams = { path = "../../../replication/walsender_seams" }
+autovacuum_ext_seams = { path = "../../../postmaster/autovacuum_ext_seams" }
+pmsignal_seams = { path = "../../ipc/pmsignal_seams" }
+dsm_core_seams = { path = "../../ipc/dsm_core_seams" }
+procarray_seams = { path = "../../ipc/procarray_seams" }
+# Outward install: pid_get_proc of mcxtfuncs.c's pg_log_backend_memory_contexts
+# resolves to BackendPidGetProc/AuxiliaryPidGetProc + GetNumberFromPGProc, all
+# owned here / by procarray. Cross-crate install (mcxtfuncs is the consumer).
+mcxtfuncs_seams = { path = "../../../utils/adt/mcxtfuncs_seams" }
+condition_variable_seams = { path = "../condition_variable_seams" }
+syncrep_seams = { path = "../../../replication/syncrep/syncrep_seams" }
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+pg_sema_seams = { path = "../../../port/pg_sema_seams" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }

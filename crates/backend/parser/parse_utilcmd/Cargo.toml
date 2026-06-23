@@ -1,0 +1,130 @@
+[package]
+name = "parse_utilcmd"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "parse_utilcmd"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+utils_error = { path = "../../utils/utils_error" }
+nodes_core = { path = "../../nodes/nodes_core" }
+
+# Inward seam contract owned by this crate.
+parse_utilcmd_seams = { path = "../parse_utilcmd_seams" }
+
+# The tcop/utility.c ProcessUtilitySlow fan-out reaches these parse-analysis
+# transforms (transformCreateStmt / transformIndexStmt / transformStatsStmt)
+# through outward seams this crate installs (cycle-free: out-seams is a leaf).
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+
+# Outward dependency seams (catalog/relcache/partcache-bound leaves).
+parse_utilcmd_outward_seams = { path = "../parse_utilcmd_outward_seams" }
+
+# SystemAttributeByName lookup for index-constraint column resolution
+# (decls-only seam crate: leaf, cycle-free).
+plancat_ext_seams = { path = "../../optimizer/util/plancat_ext_seams" }
+
+# ALTER TABLE ADD CONSTRAINT ... USING INDEX validation leg
+# (transformIndexConstraint): BuildIndexInfo (expression/predicate/unique probe),
+# get_index_constraint (already-a-constraint check), GetDefaultOpClass (default
+# sorting behavior check). Decls-only seam crates: leaves, cycle-free.
+index_seams = { path = "../../catalog/index_seams" }
+pg_depend_seams = { path = "../../catalog/pg_depend_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+
+# Merged sibling owner called directly (cycle-free): node equality for the
+# index-redundancy dedup (equal()).
+equalfuncs = { path = "../../nodes/equalfuncs" }
+
+# ParseState setup (make_parsestate) — reachable owner.
+small1 = { path = "../small1" }
+
+# Relation-threading + parse-analysis substrate for the relation-carrying
+# transforms (transformIndexStmt / transformStatsStmt / transformOfType /
+# transformPartitionBound). Cycle-free: none of these depend on parse-utilcmd.
+rel = { path = "../../../_support/types/rel" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+common_relation = { path = "../../access/common/common_relation" }
+table = { path = "../../access/table/table" }
+parser_relation = { path = "../parser_relation" }
+clause = { path = "../clause" }
+parse_expr = { path = "../parse_expr" }
+parse_collate = { path = "../parse_collate" }
+parse_target = { path = "../parse_target" }
+parse_type = { path = "../parse_type" }
+
+# Creation-namespace lookup (RangeVarGetAndCheckCreationNamespace) +
+# get_namespace_name. Cycle-free leaves.
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+
+# transformOfType: composite-type rowtype read + error formatting.
+cache_typcache = { path = "../../utils/cache/cache_typcache" }
+adt_format_type = { path = "../../utils/adt/adt_format_type" }
+
+# quote_qualified_identifier for the SERIAL nextval('...') default text —
+# cycle-free leaf.
+ruleutils = { path = "../../utils/adt/ruleutils" }
+
+# generateSerialExtraStmts: ChooseRelationName for the implicit sequence name.
+# Cycle-free: indexcmds does not depend on parse-utilcmd.
+indexcmds = { path = "../../commands/indexcmds" }
+
+# transformRuleStmt: rule-action parse analysis (transformStmt) and the
+# OLD/NEW-usage walkers (rangeTableEntry_used / getInsertSelectQueryIndex).
+# Cycle-free: neither analyze nor rewrite-core depends on parse-utilcmd.
+parser_analyze = { path = "../parser_analyze" }
+rewrite_core = { path = "../../rewrite/rewrite_core" }
+
+# getIdentitySequence (transformAlterTableStmt ALTER COLUMN TYPE / SET IDENTITY
+# identity-sequence lookup). Cycle-free leaf.
+pg_depend = { path = "../../catalog/pg_depend" }
+
+# generateClonedIndexStmt: AM canorder (amapi), reloptions decode, pg_index /
+# pg_constraint / pg_operator / pg_opclass / collation syscache projections,
+# stringToNode reader, and get_tablespace_name. All cycle-free leaves.
+index_amapi = { path = "../../access/index/index_amapi" }
+common_reloptions = { path = "../../access/common/common_reloptions" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+read_seams = { path = "../../nodes/read_seams" }
+tablespace = { path = "../../commands/tablespace" }
+
+# transformTableLikeClause: parse-time LIKE expansion — relation_openrv +
+# privilege checks (aclcheck), tupledesc column copy, identity-sequence option
+# extraction (sequence_options), NOT NULL constraint copy
+# (RelationGetNotNullConstraints), and INCLUDING COMMENTS column/constraint
+# comments (GetComment). Cycle-free: none of these owners depend on
+# parse-utilcmd.
+aclchk = { path = "../../catalog/aclchk" }
+pg_class = { path = "../../catalog/pg_class" }
+pg_constraint = { path = "../../catalog/pg_constraint" }
+objectaddress = { path = "../../catalog/objectaddress" }
+miscinit = { path = "../../utils/init/miscinit" }
+commands_sequence = { path = "../../commands/commands_sequence" }
+comment = { path = "../../commands/comment" }
+toast_compression = { path = "../../access/common/toast_compression" }
+types_acl = { path = "../../../_support/types/types_acl" }
+
+# expandTableLikeClause: the post-DefineRelation LIKE legs (run from
+# ProcessUtilitySlow). build_attrmap_by_name maps parent attnos to the new
+# child's; map_variable_attnos remaps default/CHECK Var attnos; TupleDescGetDefault
+# fetches cooked defaults; RelationGetIndexList + index_open + the in-crate
+# generateClonedIndexStmt clone parent indexes; nodeToString/string_to_node bridge
+# the CHECK expression. All cycle-free leaves.
+next = { path = "../../access/common/next" }
+tupdesc = { path = "../../access/common/tupdesc" }
+indexam = { path = "../../access/index/indexam" }
+outfuncs = { path = "../../nodes/outfuncs" }
+vacuum_seams = { path = "../../commands/vacuum_seams" }
+
+[dev-dependencies]

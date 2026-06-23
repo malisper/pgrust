@@ -1,0 +1,47 @@
+[package]
+name = "pquery"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pquery"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_core = { path = "../../../_support/types/types_core" }
+nodes = { path = "../../../_support/types/nodes" }
+portal = { path = "../../../_support/types/portal" }
+snapshot = { path = "../../../_support/types/snapshot" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_dest = { path = "../../../_support/types/types_dest" }
+mcx = { path = "../../../_support/mcx" }
+
+# own inward seam crates (installed from init_seams)
+pquery_seams = { path = "../pquery_seams" }
+
+# direct deps (no cycle)
+execMain = { path = "../../executor/execMain" }
+tcop_dest = { path = "../tcop_dest" }
+cmdtag = { path = "../cmdtag" }
+portalmem = { path = "../../utils/mmgr/portalmem" }
+
+# outward seam crates (cyclic owners)
+createas_seams = { path = "../../commands/createas_seams" }
+matview_deps_seams = { path = "../../commands/matview_deps_seams" }
+rewritehandler_seams = { path = "../../rewrite/rewritehandler_seams" }
+planner_seams = { path = "../../optimizer/plan/planner_seams" }
+portalmem_seams = { path = "../../utils/mmgr/portalmem_seams" }
+pg_proc_seams = { path = "../../catalog/pg_proc_seams" }
+snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }
+dest_seams = { path = "../dest_seams" }
+tstorereceiver_seams = { path = "../../executor/tstorereceiver_seams" }
+execTuples_seams = { path = "../../executor/execTuples_seams" }
+sort_storage_seams = { path = "../../utils/sort/sort_storage_seams" }
+utility_seams = { path = "../utility_seams" }
+postgres_seams = { path = "../postgres_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }

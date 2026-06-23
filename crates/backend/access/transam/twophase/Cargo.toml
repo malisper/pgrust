@@ -1,0 +1,50 @@
+[package]
+name = "twophase"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "twophase"
+path = "src/lib.rs"
+
+[dependencies]
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_error = { path = "../../../../_support/types/types_error" }
+wal = { path = "../../../../_support/types/wal" }
+utils_error = { path = "../../../utils/utils_error" }
+transam = { path = "../transam" }
+twophase_rmgr = { path = "../twophase_rmgr" }
+twophase_seams = { path = "../twophase_seams" }
+twophase_fileio_seams = { path = "../twophase_fileio_seams" }
+fd = { path = "../../../storage/file/fd" }
+fd_seams = { path = "../../../storage/file/fd_seams" }
+libc = "0.2"
+commit_ts_seams = { path = "../commit_ts_seams" }
+syncrep_seams = { path = "../../../replication/syncrep/syncrep_seams" }
+crc32c_seams = { path = "../../../../port/crc32c_seams" }
+subtrans_seams = { path = "../subtrans_seams" }
+varsup_seams = { path = "../varsup_seams" }
+transam_xact_seams = { path = "../transam_xact_seams" }
+transam_xlog_seams = { path = "../transam_xlog_seams" }
+xlogreader_seams = { path = "../xlogreader_seams" }
+types_logical = { path = "../../../../_support/types/types_logical" }
+origin_seams = { path = "../../../replication/logical/origin_seams" }
+dsm_core_seams = { path = "../../../storage/ipc/dsm_core_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+standby_seams = { path = "../../../storage/ipc/standby_seams" }
+ipc_shmem_seams = { path = "../../../storage/ipc/ipc_shmem_seams" }
+lwlock_seams = { path = "../../../storage/lmgr/lwlock_seams" }
+predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
+lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
+catalog_storage_seams = { path = "../../../catalog/catalog_storage_seams" }
+inval_seams = { path = "../../../utils/cache/inval_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+stat_seams = { path = "../../../utils/activity/stat_seams" }
+utility_out_seams = { path = "../../../tcop/utility_out_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
+snapmgr_pc_seams = { path = "../../../utils/time/snapmgr_pc_seams" }

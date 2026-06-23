@@ -1,0 +1,29 @@
+[package]
+name = "walreceiverfuncs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "walreceiverfuncs"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_pgstat = { path = "../../../_support/types/types_pgstat" }
+condvar = { path = "../../../_support/types/condvar" }
+types_walreceiver = { path = "../../../_support/types/types_walreceiver" }
+walreceiverfuncs_seams = { path = "../walreceiverfuncs_seams" }
+walreceiver_seams = { path = "../walreceiver_seams" }
+condition_variable = { path = "../../storage/lmgr/condition_variable" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+pmsignal = { path = "../../storage/ipc/pmsignal" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
+libc = { version = "0.2" }
+
+[dev-dependencies]
+init = { path = "../../../_support/seam/init" }

@@ -1,0 +1,14 @@
+[package]
+name = "string"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "string"
+path = "src/lib.rs"
+
+[dependencies]
+string_seams = { path = "../string_seams" }
+mcx = { path = "../../_support/mcx" }
+types_error = { path = "../../_support/types/types_error" }

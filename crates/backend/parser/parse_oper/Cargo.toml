@@ -1,0 +1,38 @@
+[package]
+name = "parse_oper"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "parse_oper"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+utils_error = { path = "../../utils/utils_error" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+opclass = { path = "../../../_support/types/opclass" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+types_namespace = { path = "../../../_support/types/types_namespace" }
+# Owner of the inward seams this crate installs.
+parse_oper_seams = { path = "../parse_oper_seams" }
+# Outward dependency seams (catalog / cache / sibling-parser callees).
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
+nodes_core = { path = "../../nodes/nodes_core" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+functioncmds_seams = { path = "../../commands/functioncmds_seams" }
+# ruleutils' generate_operator_name seam (installed from here — this crate owns
+# the oper/left_oper candidate resolution its body needs) + quote_identifier.
+ruleutils_seams = { path = "../../utils/adt/ruleutils_seams" }
+adt_format_type = { path = "../../utils/adt/adt_format_type" }
+coerce_seams = { path = "../coerce_seams" }
+parse_func_seams = { path = "../parse_func_seams" }
+parse_type_seams = { path = "../parse_type_seams" }

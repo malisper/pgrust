@@ -1,0 +1,40 @@
+[package]
+name = "small1"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "small1"
+path = "src/lib.rs"
+
+[dependencies]
+libc = { version = "0.2", default-features = false }
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+datum = { path = "../../../_support/types/datum" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+nodes = { path = "../../../_support/types/nodes" }
+types_cluster = { path = "../../../_support/types/types_cluster" }
+types_storage = { path = "../../../_support/types/types_storage" }
+utils_error = { path = "../../utils/utils_error" }
+nodes_core = { path = "../../nodes/nodes_core" }
+
+# Merged owners called directly (cycle-free).
+table = { path = "../../access/table/table" }
+queryenvironment = { path = "../../utils/misc/queryenvironment" }
+adt_format_type = { path = "../../utils/adt/adt_format_type" }
+numutils = { path = "../../utils/adt/numutils" }
+
+# Owner of the inward seams this crate installs.
+small1_seams = { path = "../small1_seams" }
+collationcmds_seams = { path = "../../commands/collationcmds_seams" }
+functioncmds_seams = { path = "../../commands/functioncmds_seams" }
+scansup_seams = { path = "../scansup_seams" }
+parser_analyze_seams = { path = "../parser_analyze_seams" }
+
+# Outward dependency seams (catalog / cache / mb callees not yet ported / cyclic).
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }

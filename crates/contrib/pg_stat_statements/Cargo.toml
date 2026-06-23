@@ -1,0 +1,52 @@
+[package]
+name = "pg_stat_statements"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_stat_statements"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../_support/mcx" }
+
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+datum = { path = "../../_support/types/datum" }
+fmgr = { path = "../../_support/types/fmgr" }
+types_tuple = { path = "../../_support/types/types_tuple" }
+hash = { path = "../../_support/types/hash" }
+types_guc = { path = "../../_support/types/types_guc" }
+nodes = { path = "../../_support/types/nodes" }
+types_storage = { path = "../../_support/types/types_storage" }
+
+utils_error = { path = "../../backend/utils/utils_error" }
+miscinit = { path = "../../backend/utils/init/miscinit" }
+dynahash = { path = "../../backend/utils/hash/dynahash" }
+misc_guc = { path = "../../backend/utils/misc/misc_guc" }
+guc_tables = { path = "../../backend/utils/misc/guc_tables" }
+adt_datetime = { path = "../../backend/utils/adt/adt_datetime" }
+mb_fgram = { path = "../../backend/utils/mb/mb_fgram" }
+instrument = { path = "../../backend/executor/instrument" }
+queryjumble = { path = "../../backend/nodes/queryjumble" }
+scan_fgram = { path = "../../backend/parser/scan_fgram" }
+varlena = { path = "../../backend/utils/adt/varlena" }
+execMain = { path = "../../backend/executor/execMain" }
+instr_time = { path = "../../_support/portability/instr_time" }
+types_scan = { path = "../../_support/types/types_scan" }
+
+ipc = { path = "../../backend/storage/ipc" }
+ipc_shmem = { path = "../../backend/storage/ipc/ipc_shmem" }
+dsm_core = { path = "../../backend/storage/ipc/dsm_core" }
+lwlock = { path = "../../backend/storage/lmgr/lwlock" }
+fd = { path = "../../backend/storage/file/fd" }
+
+# Seams (consulted, not owned):
+dfmgr_seams = { path = "../../backend/utils/fmgr/dfmgr_seams" }
+init_small_seams = { path = "../../backend/utils/init/init_small_seams" }
+acl_seams = { path = "../../backend/utils/adt/acl_seams" }
+varlena_seams = { path = "../../backend/utils/adt/varlena_seams" }
+small1_seams = { path = "../../backend/parser/small1_seams" }
+funcapi_seams = { path = "../../backend/utils/fmgr/funcapi_seams" }
+execMain_seams = { path = "../../backend/executor/execMain_seams" }

@@ -1,0 +1,50 @@
+[package]
+name = "misc_guc"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "misc_guc"
+path = "src/lib.rs"
+
+[dependencies]
+# Lazy-vacuum driver's GUC-read seams (maintenance_work_mem / autovacuum_work_mem
+# / track_io_timing / track_cost_delay_timing) home in vacuumlazy-seams; guc.c
+# is their real owner.
+vacuumlazy_seams = { path = "../../../access/heap/vacuumlazy_seams" }
+# vacuum.c's ExecVacuum parses BUFFER_USAGE_LIMIT via `parse_int(.., GUC_UNIT_KB, ..)`;
+# guc.c is the real owner of parse_int. Seam crate -> no cycle.
+vacuum_seams = { path = "../../../commands/vacuum_seams" }
+# tablespace.c-family ambient-GUC reader bundle: allowSystemTableMods reads the
+# live GUC store, whose owner is guc.c. Seam crate -> no cycle.
+tablespace_globals_seams = { path = "../../../commands/tablespace_globals_seams" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+mcx = { path = "../../../../_support/mcx" }
+matview_deps_seams = { path = "../../../commands/matview_deps_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_acl = { path = "../../../../_support/types/types_acl" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+utils_error = { path = "../../utils_error" }
+guc_seams = { path = "../guc_seams" }
+guc_tables = { path = "../guc_tables" }
+guc_tables_seams = { path = "../guc_tables_seams" }
+guc_file = { path = "../guc_file" }
+guc_file_seams = { path = "../guc_file_seams" }
+scalar_seams = { path = "../../adt/scalar_seams" }
+timestamp_seams = { path = "../../adt/timestamp_seams" }
+# Outward seam crates (call out, do not install):
+init_small_seams = { path = "../../init/init_small_seams" }
+miscinit_seams = { path = "../../init/miscinit_seams" }
+pg_proc_seams = { path = "../../../catalog/pg_proc_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+superuser_seams = { path = "../superuser_seams" }
+scansup_seams = { path = "../../../parser/scansup_seams" }
+pqcomm_seams = { path = "../../../libpq/pqcomm_seams" }
+# Parallel-worker GUC-state transfer seams (declared by parallel.c's runtime
+# seam crate, consumed by parallel.c; guc.c owns + installs the bodies):
+parallel_rt_seams = { path = "../../../access/transam/parallel_rt_seams" }

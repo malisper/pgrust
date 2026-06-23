@@ -1,0 +1,17 @@
+[package]
+name = "pg_rusage"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_rusage"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+mcx = { path = "../../../../_support/mcx" }
+rusage = { path = "../../../../_support/types/rusage" }
+types_error = { path = "../../../../_support/types/types_error" }
+rusage_seams = { path = "../../../../_support/pg/rusage_seams" }
+clean_seams = { path = "../clean_seams" }

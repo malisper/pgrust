@@ -1,0 +1,87 @@
+[package]
+name = "heapam"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "heapam"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+rel = { path = "../../../../_support/types/rel" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+xlog_records = { path = "../../../../_support/types/xlog_records" }
+wal = { path = "../../../../_support/types/wal" }
+types_nbtree = { path = "../../../../_support/types/types_nbtree" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+types_catalog = { path = "../../../../_support/types/types_catalog" }
+tupdesc = { path = "../../common/tupdesc" }
+table_seams = { path = "../../table/table_seams" }
+page = { path = "../../../storage/page" }
+rmgrdesc_next = { path = "../../../rmgrdesc_next" }
+heapam_seams = { path = "../heapam_seams" }
+heapam_visibility = { path = "../heapam_visibility" }
+transam_xact_seams = { path = "../../transam/transam_xact_seams" }
+subtrans_seams = { path = "../../transam/subtrans_seams" }
+transam_seams = { path = "../../transam/transam_seams" }
+combocid_seams = { path = "../../../utils/time/combocid_seams" }
+snapmgr_pc_seams = { path = "../../../utils/time/snapmgr_pc_seams" }
+multixact_seams = { path = "../../transam/multixact_seams" }
+xloginsert_seams = { path = "../../transam/xloginsert_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+vacuumlazy_seams = { path = "../vacuumlazy_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+transam = { path = "../../transam/transam" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+types_vacuum = { path = "../../../../_support/types/types_vacuum" }
+catalog_seams = { path = "../../../catalog/catalog_seams" }
+spccache = { path = "../../../utils/cache/spccache" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+# F2 INSERT: hio page placement, toast, on-disk image, inval, pgstat, predicate,
+# relcache predicates, parallel-worker check, and the WAL error builder.
+hio = { path = "../hio" }
+heaptoast = { path = "../heaptoast" }
+heaptuple = { path = "../../common/heaptuple" }
+fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
+inval = { path = "../../../utils/cache/inval" }
+utils_error = { path = "../../../utils/utils_error" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
+transam_parallel = { path = "../../transam/transam_parallel" }
+transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
+# F3 DELETE: plain ReadBuffer (hio), bitmapset ops + node bitmap (nodes-core),
+# replica-identity bitmap (relcache), combocid AdjustCmax/SetCmax.
+hio_seams = { path = "../hio_seams" }
+nodes_core_seams = { path = "../../../nodes/nodes_core_seams" }
+core_tidbitmap_seams = { path = "../../../nodes/core_tidbitmap_seams" }
+nodes = { path = "../../../../_support/types/nodes" }
+datum = { path = "../../../../_support/types/datum" }
+# F3 UPDATE: per-attribute binary equality (datumIsEqual) for
+# HeapDetermineColumnsInfo.
+scalar_datum_core = { path = "../../../utils/adt/scalar_datum_core" }
+# F4 LOCK + SPECULATIVE + INPLACE: lmgr tuple/xact-wait seams, the lock-method
+# conflict table, the log_lock_failures GUC, snapshot invalidation, the
+# bootstrap-mode probe, and the snapmgr-pc TransactionXmin accessor.
+lmgr_seams = { path = "../../../storage/lmgr/lmgr_seams" }
+lock_seams = { path = "../../../storage/lmgr/lock_seams" }
+lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
+# SEQUENTIAL-SCAN core (scan.rs): syncscan reporting, page pruning, the table-AM
+# parallel-block helpers + synchronize_seqscans GUC, the slot store/clear seams,
+# and the scan-key / TID-range vocabulary.
+syncscan_seams = { path = "../../common/syncscan_seams" }
+pruneheap_seams = { path = "../pruneheap_seams" }
+table_tableam = { path = "../../table/table_tableam" }
+execTuples_seams = { path = "../../../executor/execTuples_seams" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+tidbitmap = { path = "../../../../_support/types/tidbitmap" }

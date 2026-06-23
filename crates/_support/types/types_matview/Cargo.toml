@@ -1,0 +1,14 @@
+[package]
+name = "types_matview"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "types_matview"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../types_core" }
+types_tuple = { path = "../types_tuple" }
+types_catalog = { path = "../types_catalog" }

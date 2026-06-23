@@ -1,0 +1,26 @@
+[package]
+name = "fileset"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "fileset"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+execparallel = { path = "../../../../_support/types/execparallel" }
+hashfn = { path = "../../../../common/hashfn" }
+
+fd = { path = "../fd" }
+fileset_seams = { path = "../fileset_seams" }
+sharedfileset_seams = { path = "../sharedfileset_seams" }
+dsm_core = { path = "../../ipc/dsm_core" }
+s_lock = { path = "../../lmgr/s_lock" }
+tablespace_seams = { path = "../../../commands/tablespace_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+mcxt_seams = { path = "../../../utils/mmgr/mcxt_seams" }

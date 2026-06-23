@@ -1,0 +1,18 @@
+[package]
+name = "macros"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "macros"
+path = "src/lib.rs"
+# The FIRST proc-macro crate in the workspace. There is no
+# `[workspace.dependencies]` table, so the proc-macro toolchain deps are
+# declared directly here (mirroring src-idiomatic's backend-nodes-macros).
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full", "visit-mut"] }
+quote = "1"
+proc-macro2 = "1"

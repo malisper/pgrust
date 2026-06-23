@@ -1,0 +1,27 @@
+[package]
+name = "subselect_pullup"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "subselect_pullup"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+vars = { path = "../../util/vars" }
+clauses = { path = "../../util/clauses" }
+rewrite_core = { path = "../../../rewrite/rewrite_core" }
+parser_relation = { path = "../../../parser/parser_relation" }
+small1 = { path = "../../../parser/small1" }
+
+# Inward seams this unit owns + installs.
+subselect_pullup_seams = { path = "../subselect_pullup_seams" }

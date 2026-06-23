@@ -1,0 +1,53 @@
+[package]
+name = "funcapi"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "funcapi"
+path = "src/lib.rs"
+
+[dependencies]
+allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_namespace = { path = "../../../../_support/types/types_namespace" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+utils_error = { path = "../../utils_error" }
+# Inward seam crate this unit OWNS and installs from init_seams().
+funcapi_seams = { path = "../funcapi_seams" }
+# Real ported neighbours.
+rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+tupdesc = { path = "../../../access/common/tupdesc" }
+# The composite/record-Datum carrier bridge (HeapTupleGetDatum) + heap_form_tuple
+# for record_from_values (task #161).
+heaptuple = { path = "../../../access/common/heaptuple" }
+# Neighbor seam crates this unit calls (owned by their respective units).
+init_small_seams = { path = "../../init/init_small_seams" }
+sort_storage_seams = { path = "../../sort/sort_storage_seams" }
+varlena_seams = { path = "../../adt/varlena_seams" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+typcache_seams = { path = "../../cache/typcache_seams" }
+lsyscache_seams = { path = "../../cache/lsyscache_seams" }
+fmgr_seams = { path = "../fmgr_seams" }
+nodeFuncs_seams = { path = "../../../nodes/nodeFuncs_seams" }
+nodes_core_seams = { path = "../../../nodes/nodes_core_seams" }
+pg_proc_seams = { path = "../../../catalog/pg_proc_seams" }
+execTuples_seams = { path = "../../../executor/execTuples_seams" }
+functioncmds_seams = { path = "../../../commands/functioncmds_seams" }
+format_type_seams = { path = "../../adt/format_type_seams" }
+arrayfuncs_seams = { path = "../../adt/arrayfuncs_seams" }
+regproc_seams = { path = "../../adt/regproc_seams" }
+namespace_seams = { path = "../../../catalog/namespace_seams" }
+common_relation_seams = { path = "../../../access/common/common_relation_seams" }
+tupdesc_seams = { path = "../../../access/common/tupdesc_seams" }
+toastdesc_seams = { path = "../../../access/common/toastdesc_seams" }
+# PG_GETARG_*_PP detoast (pg_detoast_datum_packed) applied by the SRF varlena
+# arg reader, mirroring the regular dispatch's detoast_ref_arg_if_toasted.
+detoast_seams = { path = "../../../access/common/detoast_seams" }

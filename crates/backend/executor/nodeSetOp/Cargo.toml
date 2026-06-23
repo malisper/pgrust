@@ -1,0 +1,24 @@
+[package]
+name = "nodeSetOp"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nodeSetOp"
+path = "src/lib.rs"
+
+[dependencies]
+execAmi_seams = { path = "../execAmi_seams" }
+execGrouping_seams = { path = "../execGrouping_seams" }
+execProcnode_seams = { path = "../execProcnode_seams" }
+execTuples_seams = { path = "../execTuples_seams" }
+execUtils_seams = { path = "../execUtils_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+sortsupport_seams = { path = "../../utils/sort/sortsupport_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_sortsupport = { path = "../../../_support/types/types_sortsupport" }
+nodes = { path = "../../../_support/types/nodes" }
+mcx = { path = "../../../_support/mcx" }

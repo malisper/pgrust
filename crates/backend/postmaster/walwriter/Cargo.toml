@@ -1,0 +1,59 @@
+[package]
+name = "walwriter"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "walwriter"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_pgstat = { path = "../../../_support/types/types_pgstat" }
+wal = { path = "../../../_support/types/wal" }
+types_startup = { path = "../../../_support/types/types_startup" }
+signal = { path = "../../../_support/types/signal" }
+
+# procsignal_sigusr1_handler_signal — the SIGUSR1 handler this process must
+# install so it absorbs ProcSignalBarriers (ALTER/DROP DATABASE SET TABLESPACE).
+procsignal = { path = "../../storage/ipc/procsignal" }
+# pqsignal(signo, handler) installer.
+port_pqsignal_seams = { path = "../../../port/port_pqsignal_seams" }
+# unblock_signals() — restore UnBlockSig (postmaster forks us with BlockSig).
+libpq_pqsignal_seams = { path = "../../libpq/libpq_pqsignal_seams" }
+
+# ereport/elog and the error-report helpers (EmitErrorReport / FlushErrorState).
+utils_error = { path = "../../utils/utils_error" }
+# ConfigReloadPending / ShutdownRequestPending / ProcessMainLoopInterrupts (ported).
+interrupt = { path = "../interrupt" }
+# XLogBackgroundFlush (real, ported) + SetWalWriterSleeping (xlog-driver owner).
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+
+# Its own inward seams (installed by init_seams).
+walwriter_seams = { path = "../walwriter_seams" }
+
+# GUC var slots for the WalWriterDelay / WalWriterFlushAfter int GUCs this crate backs.
+guc_tables = { path = "../../utils/misc/guc_tables" }
+
+# Outward owner seam crates.
+dsm_core_seams = { path = "../../storage/ipc/dsm_core_seams" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
+lwlock_seams = { path = "../../storage/lmgr/lwlock_seams" }
+condition_variable_seams = { path = "../../storage/lmgr/condition_variable_seams" }
+lmgr_proc_seams = { path = "../../storage/lmgr/lmgr_proc_seams" }
+aio_seams = { path = "../../storage/aio/aio_seams" }
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+fd_seams = { path = "../../storage/file/fd_seams" }
+smgr_seams = { path = "../../storage/smgr/smgr_seams" }
+auxprocess_seams = { path = "../auxprocess_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+resowner_seams_2 = { path = "../../utils/resowner/resowner_seams_2" }
+dynahash_seams = { path = "../../utils/hash/dynahash_seams" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+pgstat_wal_seams = { path = "../../utils/activity/pgstat_wal_seams" }
+pgsleep_seams = { path = "../../../port/pgsleep_seams" }

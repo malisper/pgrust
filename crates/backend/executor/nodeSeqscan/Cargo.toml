@@ -1,0 +1,38 @@
+[package]
+name = "nodeSeqscan"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nodeSeqscan"
+path = "src/lib.rs"
+
+[dependencies]
+# This crate's own inward seams (the parallel-scan entry points other units
+# call into).
+nodeSeqscan_seams = { path = "../nodeSeqscan_seams" }
+
+# Outward calls through per-owner seam crates (owners not yet ported / cyclic).
+table_tableam_seams = { path = "../../access/table/table_tableam_seams" }
+execScan_seams = { path = "../execScan_seams" }
+execTuples_seams = { path = "../execTuples_seams" }
+execUtils_seams = { path = "../execUtils_seams" }
+execExpr_seams = { path = "../execExpr_seams" }
+execAmi_seams = { path = "../execAmi_seams" }
+execMain_seams = { path = "../execMain_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+transam_parallel = { path = "../../access/transam/transam_parallel" }
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }
+
+# Direct cargo deps (acyclic): the table-AM crate's parallel-scan helpers and
+# slot-callbacks, plus the shared type stack.
+table_tableam = { path = "../../access/table/table_tableam" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+rel = { path = "../../../_support/types/rel" }
+types_tableam = { path = "../../../_support/types/types_tableam" }
+snapshot = { path = "../../../_support/types/snapshot" }
+execparallel = { path = "../../../_support/types/execparallel" }
+mcx = { path = "../../../_support/mcx" }

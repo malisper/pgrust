@@ -1,0 +1,38 @@
+[package]
+name = "pg_subscription"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_subscription"
+path = "src/lib.rs"
+
+[dependencies]
+heaptuple = { path = "../../access/common/heaptuple" }
+scankey = { path = "../../access/common/scankey" }
+genam_seams = { path = "../../access/index/genam_seams" }
+table_seams = { path = "../../access/table/table_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+indexing = { path = "../indexing" }
+pg_subscription_seams = { path = "../pg_subscription_seams" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+arrayfuncs_seams = { path = "../../utils/adt/arrayfuncs_seams" }
+varlena_seams = { path = "../../utils/adt/varlena_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+utils_error = { path = "../../utils/utils_error" }
+superuser_seams = { path = "../../utils/misc/superuser_seams" }
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+cache = { path = "../../../_support/types/cache" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_core = { path = "../../../_support/types/types_core" }
+datum = { path = "../../../_support/types/datum" }
+types_error = { path = "../../../_support/types/types_error" }
+rel = { path = "../../../_support/types/rel" }
+replication_launcher = { path = "../../../_support/types/replication_launcher" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_syscache = { path = "../../../_support/types/types_syscache" }
+types_tuple = { path = "../../../_support/types/types_tuple" }

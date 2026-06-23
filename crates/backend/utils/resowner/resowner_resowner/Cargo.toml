@@ -1,0 +1,43 @@
+[package]
+name = "resowner_resowner"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "resowner_resowner"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+types_resowner = { path = "../../../../_support/types/types_resowner" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+portal = { path = "../../../../_support/types/portal" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_logical = { path = "../../../../_support/types/types_logical" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_plancache = { path = "../../../../_support/types/types_plancache" }
+hashfn = { path = "../../../../common/hashfn" }
+utils_error = { path = "../../utils_error" }
+
+# Inward seam declarations this crate installs.
+resowner_seams = { path = "../resowner_seams" }
+resowner_seams_2 = { path = "../resowner_seams_2" }
+all_seams = { path = "../all_seams" }
+pc_seams = { path = "../pc_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+completion_seams = { path = "../../../storage/aio/completion_seams" }
+relcache_seams = { path = "../../cache/relcache_seams" }
+snapmgr_seams = { path = "../../time/snapmgr_seams" }
+
+# Outward calls (resowner.c -> lock/proc/predicate/aio/ipc). These owners
+# depend on resowner's *seam-decl* crates, not on this crate, so depending on
+# them directly is acyclic.
+lock = { path = "../../../storage/lmgr/lock" }
+lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
+predicate = { path = "../../../storage/lmgr/predicate" }
+dsm_core_seams = { path = "../../../storage/ipc/dsm_core_seams" }
+aio_seams = { path = "../../../storage/aio/aio_seams" }

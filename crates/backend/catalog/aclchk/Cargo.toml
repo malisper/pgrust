@@ -1,0 +1,62 @@
+[package]
+name = "aclchk"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "aclchk"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_acl = { path = "../../../_support/types/types_acl" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+array = { path = "../../../_support/types/array" }
+nodes = { path = "../../../_support/types/nodes" }
+rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+snapshot = { path = "../../../_support/types/snapshot" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+utils_error = { path = "../../utils/utils_error" }
+aclchk_seams = { path = "../aclchk_seams" }
+functioncmds_seams = { path = "../../commands/functioncmds_seams" }
+collationcmds_seams = { path = "../../commands/collationcmds_seams" }
+adt_acl = { path = "../../utils/adt/adt_acl" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+objectaddress = { path = "../objectaddress" }
+catalog_seams = { path = "../catalog_seams" }
+pg_largeobject_seams = { path = "../pg_largeobject_seams" }
+pg_shdepend_seams = { path = "../pg_shdepend_seams" }
+user_seams = { path = "../../commands/user_seams" }
+format_type_seams = { path = "../../utils/adt/format_type_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+namespace_seams = { path = "../namespace_seams" }
+misc_guc = { path = "../../utils/misc/misc_guc" }
+guc_funcs_seams = { path = "../../utils/misc/guc_funcs_seams" }
+table = { path = "../../access/table/table" }
+scankey = { path = "../../access/common/scankey" }
+genam_seams = { path = "../../access/index/genam_seams" }
+heaptuple = { path = "../../access/common/heaptuple" }
+cache = { path = "../../../_support/types/cache" }
+datum = { path = "../../../_support/types/datum" }
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+indexing = { path = "../indexing" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+extension_seams = { path = "../../commands/extension_seams" }
+detoast_seams = { path = "../../access/common/detoast_seams" }
+catalog_catalog = { path = "../catalog_catalog" }
+dependency_seams = { path = "../dependency_seams" }
+pg_depend_seams = { path = "../pg_depend_seams" }
+objectaccess_seams = { path = "../objectaccess_seams" }
+objectaddress_seams = { path = "../objectaddress_seams" }
+makefuncs_seams = { path = "../../nodes/makefuncs_seams" }
+parse_type = { path = "../../parser/parse_type" }
+parsenodes = { path = "../../../_support/types/parsenodes" }

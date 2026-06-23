@@ -1,0 +1,44 @@
+[package]
+name = "pgstat_relation"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgstat_relation"
+path = "src/lib.rs"
+
+[dependencies]
+# Lazy-vacuum driver's pgstat_report_vacuum seam homes in vacuumlazy-seams;
+# pgstat_relation.c owns it.
+vacuumlazy_seams = { path = "../../../access/heap/vacuumlazy_seams" }
+# pgstat_report_analyze seam homes in analyze-rt-seams (analyze.c call site);
+# pgstat_relation.c owns the body.
+analyze_rt_seams = { path = "../../../commands/analyze_rt_seams" }
+# pgstat_count_truncate is owned here; its tablecmds caller crosses by a
+# `&Relation` seam on backend-commands-tablecmds-seams (the relid/relisshared/
+# pgstat_enabled adapter lives here).
+tablecmds_seams = { path = "../../../commands/tablecmds_seams" }
+rel = { path = "../../../../_support/types/rel" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+activity_pgstat = { path = "../activity_pgstat" }
+pgstat_seams = { path = "../pgstat_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+pgstat_database = { path = "../pgstat_database" }
+pgstat_backend = { path = "../pgstat_backend" }
+stat_seams = { path = "../stat_seams" }
+activity_xact = { path = "../activity_xact" }
+init_small_seams = { path = "../../init/init_small_seams" }
+guc_tables = { path = "../../misc/guc_tables" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+timestamp_seams = { path = "../../adt/timestamp_seams" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+twophase_seams = { path = "../../../access/transam/twophase_seams" }
+twophase_rmgr = { path = "../../../access/transam/twophase_rmgr" }
+catalog_seams = { path = "../../../catalog/catalog_seams" }
+# fmgr builtin registry for the pgstatfuncs.c per-relation SQL accessors.
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+datum = { path = "../../../../_support/types/datum" }

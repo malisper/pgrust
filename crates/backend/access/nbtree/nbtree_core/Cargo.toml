@@ -1,0 +1,98 @@
+[package]
+name = "nbtree_core"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+# Port of the mutually-recursive B-tree core cluster: nbtsearch.c +
+# nbtinsert.c + nbtpage.c + nbtutils.c + nbtsplitloc.c + nbtpreprocesskeys.c
+# (PostgreSQL 18.3). Installs the seams declared in
+# backend-access-nbtree-core-seams (except bt_form_posting, owned by nbtdedup).
+
+[lib]
+name = "nbtree_core"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+prng = { path = "../../../../_support/pg/prng" }
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_nbtree = { path = "../../../../_support/types/types_nbtree" }
+rel = { path = "../../../../_support/types/rel" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+wal = { path = "../../../../_support/types/wal" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+types_amapi = { path = "../../../../_support/types/types_amapi" }
+
+page = { path = "../../../storage/page" }
+dedup = { path = "../dedup" }
+utils_error = { path = "../../../utils/utils_error" }
+
+# This crate owns these seams (installs them in init_seams()).
+nbtree_core_seams = { path = "../nbtree_core_seams" }
+# Inward seams the search loop calls for parallel-scan coordination (installed by
+# the sibling backend-access-nbtree-nbtree unit across the module cycle).
+nbtree_seams = { path = "../nbtree_seams" }
+# This crate also owns the nbtsort.c build-helper seams (nbtutils.c bodies).
+build_seams = { path = "../build_seams" }
+
+# Outward seam crates (callees in not-yet-ported owners).
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+# `table_index_fetch_tuple_check` (tableam dispatch) — `_bt_check_unique`'s
+# heap-visibility probe; owner = backend-access-table-tableam (depending on it
+# directly would cycle, as the dispatch reaches the heap AM which depends on
+# nbtree).
+table_tableam_seams = { path = "../../table/table_tableam_seams" }
+# SSI predicate-locking hooks: nbtree manages its own predicate locks
+# (`ampredlocks = true`). `_bt_search`/`_bt_first`/`_bt_readnextpage` take
+# `PredicateLockRelation`/`PredicateLockPage`; `_bt_doinsert`/`_bt_check_unique`
+# take `CheckForSerializableConflictIn`; page split takes
+# `PredicateLockPageSplit`. Seam-only dep (predicate.c body installs them).
+predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
+# `IsolationIsSerializable()` (== `XactIsoLevel == XACT_SERIALIZABLE`) — gates
+# the empty-index relation-lock retry in `_bt_first`. Reached via `xact_iso_level`.
+transam_xact_seams = { path = "../../transam/transam_xact_seams" }
+# `BTreeShmemSize`/`BTreeShmemInit` (nbtutils.c) seams summed/called by ipci.c.
+nbtree_seams_2 = { path = "../nbtree_seams_2" }
+xloginsert_seams = { path = "../../transam/xloginsert_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
+indextuple_seams = { path = "../../common/indextuple_seams" }
+genam_seams = { path = "../../index/genam_seams" }
+freespace_seams = { path = "../../../storage/freespace/freespace_seams" }
+lmgr_seams = { path = "../../../storage/lmgr/lmgr_seams" }
+smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
+lsyscache_seams = { path = "../../../utils/cache/lsyscache_seams" }
+indexam_seams = { path = "../../index/indexam_seams" }
+arrayfuncs_seams = { path = "../../../utils/adt/arrayfuncs_seams" }
+datum_seams = { path = "../../../utils/adt/datum_seams" }
+# `PrepareSkipSupportFromOpclass` (utils/adt/skipsupport.c) — skip-array support.
+skipsupport_seams = { path = "../../../utils/adt/skipsupport_seams" }
+# `sksup->increment(...)` / `sksup->decrement(...)` skip-support callbacks
+# (utils/sort/sortsupport.c substrate; called by the skip-array strategy code).
+compare_seams = { path = "../compare_seams" }
+types_sortsupport = { path = "../../../../_support/types/types_sortsupport" }
+# btoptions: build_reloptions(RELOPT_KIND_BTREE, BTOptions) dispatch (nbtutils.c).
+reloptions_seams = { path = "../../common/reloptions_seams" }
+datum = { path = "../../../../_support/types/datum" }
+
+# nbtpage.c outward seams.
+varsup_seams = { path = "../../transam/varsup_seams" }
+transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+bulkwrite_seams = { path = "../../../storage/smgr/bulkwrite_seams" }
+elog_seams = { path = "../../../utils/error/elog_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+# nbtutils.c BTVacInfo shared state: BtreeVacuumLock interlock (lwlock) +
+# "BTree Vacuum State" ShmemInitStruct / add_size / mul_size carving.
+lwlock = { path = "../../../storage/lmgr/lwlock" }
+ipc_shmem_seams = { path = "../../../storage/ipc/ipc_shmem_seams" }
+# BTreeShmemInit seeds the cycle counter with time(NULL).
+libc = "0.2"

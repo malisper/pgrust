@@ -1,0 +1,37 @@
+[package]
+name = "xlogarchive"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "xlogarchive"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+utils_error = { path = "../../../utils/utils_error" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+wal = { path = "../../../../_support/types/wal" }
+
+# This crate's own inward seams (installed in init_seams).
+xlogarchive_seams = { path = "../xlogarchive_seams" }
+
+# Outward seam crates (panic until each owner lands).
+archive_seams = { path = "../../../../common/archive_seams" }
+percentrepl = { path = "../../../../common/percentrepl" }
+wait_error_seams = { path = "../../../../common/wait_error_seams" }
+transam_xlog_seams = { path = "../transam_xlog_seams" }
+xlogrecovery_seams = { path = "../xlogrecovery_seams" }
+pgarch_seams = { path = "../../../postmaster/pgarch_seams" }
+startup_seams = { path = "../../../postmaster/startup_seams" }
+walsender_seams = { path = "../../../replication/walsender_seams" }
+fd_seams = { path = "../../../storage/file/fd_seams" }
+file_seams = { path = "../../../storage/file/file_seams" }
+ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+
+libc = "0.2"

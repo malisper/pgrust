@@ -1,0 +1,12 @@
+[package]
+name = "tidbitmap"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "tidbitmap"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../types_core" }

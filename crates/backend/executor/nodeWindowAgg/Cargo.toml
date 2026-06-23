@@ -1,0 +1,41 @@
+[package]
+name = "nodeWindowAgg"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nodeWindowAgg"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+execExpr_seams = { path = "../execExpr_seams" }
+execProcnode_seams = { path = "../execProcnode_seams" }
+execTuples_seams = { path = "../execTuples_seams" }
+execGrouping_seams = { path = "../execGrouping_seams" }
+execUtils_seams = { path = "../execUtils_seams" }
+execAmi_seams = { path = "../execAmi_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+sort_storage_seams = { path = "../../utils/sort/sort_storage_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+objectaccess_seams = { path = "../../catalog/objectaccess_seams" }
+parse_agg_seams = { path = "../../parser/parse_agg_seams" }
+coerce_seams = { path = "../../parser/coerce_seams" }
+nodeFuncs_seams = { path = "../../nodes/nodeFuncs_seams" }
+datum_seams = { path = "../../utils/adt/datum_seams" }
+path_small_seams = { path = "../../optimizer/path/path_small_seams" }
+clauses_seams = { path = "../../optimizer/util/clauses_seams" }
+regproc_seams = { path = "../../utils/adt/regproc_seams" }
+types_acl = { path = "../../../_support/types/types_acl" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+datum = { path = "../../../_support/types/datum" }
+nodes = { path = "../../../_support/types/nodes" }
+mcx = { path = "../../../_support/mcx" }

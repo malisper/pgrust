@@ -1,0 +1,53 @@
+[package]
+name = "launcher"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "launcher"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+signal = { path = "../../../../_support/types/signal" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_bgworker = { path = "../../../../_support/types/types_bgworker" }
+replication_launcher = { path = "../../../../_support/types/replication_launcher" }
+replication_applyparallel = { path = "../../../../_support/types/replication_applyparallel" }
+
+utils_error = { path = "../../../utils/utils_error" }
+interrupt = { path = "../../../postmaster/interrupt" }
+legacy_pqsignal = { path = "../../../../interfaces/libpq/legacy_pqsignal" }
+libc = "0.2"
+
+# Inward seams this crate owns and installs.
+launcher_seams = { path = "../launcher_seams" }
+
+# Outward owner seam crates (panic until each owner lands).
+lwlock_seams = { path = "../../../storage/lmgr/lwlock_seams" }
+lock_seams = { path = "../../../storage/lmgr/lock_seams" }
+latch_seams = { path = "../../../storage/ipc/latch_seams" }
+dsm_core_seams = { path = "../../../storage/ipc/dsm_core_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+bgworker_seams = { path = "../../../postmaster/bgworker_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
+funcapi_seams = { path = "../../../utils/fmgr/funcapi_seams" }
+guc_file_seams = { path = "../../../utils/misc/guc_file_seams" }
+dsa_seams = { path = "../../../utils/mmgr/dsa_seams" }
+dshash_seams = { path = "../../../lib/dshash_seams" }
+pg_subscription_seams = { path = "../../../catalog/pg_subscription_seams" }
+walreceiver_seams = { path = "../../walreceiver_seams" }
+origin_seams = { path = "../origin_seams" }
+worker_seams = { path = "../worker_seams" }
+applyparallelworker_seams = { path = "../applyparallelworker_seams" }

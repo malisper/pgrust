@@ -1,0 +1,23 @@
+[package]
+name = "jsonbsubs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "jsonbsubs"
+path = "src/lib.rs"
+
+[dependencies]
+jsonbsubs_seams = { path = "../jsonbsubs_seams" }
+adt_jsonfuncs = { path = "../adt_jsonfuncs" }
+jsonb_util = { path = "../jsonb_util" }
+types_jsonb = { path = "../../../../_support/types/types_jsonb" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+mcx = { path = "../../../../_support/mcx" }
+# DatumGetJsonbP detoasts its argument (PG_DETOAST_DATUM); apply the same
+# PG_DETOAST_DATUM_PACKED step before reading a (possibly toasted) jsonb
+# container/replace-value off the canonical by-reference lane.
+detoast_seams = { path = "../../../access/common/detoast_seams" }

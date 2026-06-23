@@ -1,0 +1,74 @@
+[package]
+name = "copyfrom"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "copyfrom"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_pgstat = { path = "../../../_support/types/types_pgstat" }
+types_error = { path = "../../../_support/types/types_error" }
+datum = { path = "../../../_support/types/datum" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+rel = { path = "../../../_support/types/rel" }
+nodes = { path = "../../../_support/types/nodes" }
+types_copy = { path = "../../../_support/types/types_copy" }
+fmgr = { path = "../../../_support/types/fmgr" }
+types_slot = { path = "../../../_support/types/types_slot" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+types_tableam = { path = "../../../_support/types/types_tableam" }
+
+# The COPY-FROM input parser (its only caller is this driver — acyclic).
+copyfromparse = { path = "../copyfromparse" }
+# This driver's own inward seam crate (installed from init_seams).
+copyfrom_seams = { path = "../copyfrom_seams" }
+
+# Direct deps (no cycle): error vocabulary, executor state lifecycle, table AM,
+# heap bulk-insert state, index/constraint machinery reachable directly.
+utils_error = { path = "../../utils/utils_error" }
+activity_small = { path = "../../utils/activity/activity_small" }
+execUtils = { path = "../../executor/execUtils" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+nodes_core = { path = "../../nodes/nodes_core" }
+execTuples = { path = "../../executor/execTuples" }
+transam_xact = { path = "../../access/transam/transam_xact" }
+
+table_tableam = { path = "../../access/table/table_tableam" }
+heapam = { path = "../../access/heap/heapam" }
+
+# libpq frontend: COPY FROM STDIN over the wire (ReceiveCopyBegin CopyInResponse
+# + the COPY_FRONTEND CopyData/CopyDone receive leg).
+pqcomm = { path = "../../libpq/pqcomm" }
+pqformat = { path = "../../libpq/pqformat" }
+types_dest = { path = "../../../_support/types/types_dest" }
+stringinfo = { path = "../../../_support/types/stringinfo" }
+
+# Outward seams (would cycle as direct deps).
+commands_copy_seams = { path = "../commands_copy_seams" }
+execMain_seams = { path = "../../executor/execMain_seams" }
+execUtils_seams = { path = "../../executor/execUtils_seams" }
+execTuples_seams = { path = "../../executor/execTuples_seams" }
+execExpr_seams = { path = "../../executor/execExpr_seams" }
+execIndexing_seams = { path = "../../executor/execIndexing_seams" }
+execPartition_seams = { path = "../../executor/execPartition_seams" }
+nodeModifyTable_seams = { path = "../../executor/nodeModifyTable_seams" }
+trigger_seams = { path = "../trigger_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+tablecmds_seams = { path = "../tablecmds_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+encnames_seams = { path = "../../../common/encnames_seams" }
+rewritehandler_seams = { path = "../../rewrite/rewritehandler_seams" }
+planner_seams = { path = "../../optimizer/plan/planner_seams" }
+planner_pc_seams = { path = "../../optimizer/plan/planner_pc_seams" }
+clauses_seams = { path = "../../optimizer/util/clauses_seams" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
+fd_seams = { path = "../../storage/file/fd_seams" }
+backend_progress_seams = { path = "../../utils/activity/backend_progress_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }

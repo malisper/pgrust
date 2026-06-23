@@ -1,0 +1,38 @@
+[package]
+name = "comment"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "comment"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+comment_seams = { path = "../comment_seams" }
+tablecmds_seams = { path = "../tablecmds_seams" }
+user_seams = { path = "../user_seams" }
+objectaddress_seams = { path = "../../catalog/objectaddress_seams" }
+dbcommands_seams = { path = "../dbcommands_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+pg_class = { path = "../../catalog/pg_class" }
+utils_error = { path = "../../utils/utils_error" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+collationcmds_seams = { path = "../collationcmds_seams" }
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+parse_type = { path = "../../parser/parse_type" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+heaptuple = { path = "../../access/common/heaptuple" }
+scankey = { path = "../../access/common/scankey" }
+genam_seams = { path = "../../access/index/genam_seams" }
+table = { path = "../../access/table/table" }
+indexing = { path = "../../catalog/indexing" }

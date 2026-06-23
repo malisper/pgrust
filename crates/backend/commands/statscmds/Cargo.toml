@@ -1,0 +1,62 @@
+[package]
+name = "statscmds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "statscmds"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_acl = { path = "../../../_support/types/types_acl" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+rel = { path = "../../../_support/types/rel" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_typcache = { path = "../../../_support/types/types_typcache" }
+
+utils_error = { path = "../../utils/utils_error" }
+
+# Own inward-seam declarations (installed by this crate's init_seams()).
+statscmds_seams = { path = "../statscmds_seams" }
+
+# Direct-callable ported siblings (no cycle).
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+catalog_catalog = { path = "../../catalog/catalog_catalog" }
+dependency = { path = "../../catalog/dependency" }
+indexing = { path = "../../catalog/indexing" }
+table = { path = "../../access/table/table" }
+heaptuple = { path = "../../access/common/heaptuple" }
+inval = { path = "../../utils/cache/inval" }
+comment = { path = "../comment" }
+outfuncs = { path = "../../nodes/outfuncs" }
+nodes_core = { path = "../../nodes/nodes_core" }
+pg_class = { path = "../../catalog/pg_class" }
+
+# Outward seam crates (callees; panic until their owners land).
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+common_relation_seams = { path = "../../access/common/common_relation_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+pg_depend_seams = { path = "../../catalog/pg_depend_seams" }
+pg_shdepend_seams = { path = "../../catalog/pg_shdepend_seams" }
+objectaddress_seams = { path = "../../catalog/objectaddress_seams" }
+objectaccess_seams = { path = "../../catalog/objectaccess_seams" }
+indexing_seams = { path = "../../catalog/indexing_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
+guc_seams = { path = "../../utils/misc/guc_seams" }
+format_type_seams = { path = "../../utils/adt/format_type_seams" }
+indexcmds_seams = { path = "../indexcmds_seams" }
+var_seams = { path = "../../optimizer/util/var_seams" }
+nodeFuncs_seams = { path = "../../nodes/nodeFuncs_seams" }
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }

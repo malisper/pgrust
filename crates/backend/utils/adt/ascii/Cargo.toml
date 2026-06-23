@@ -1,0 +1,18 @@
+[package]
+name = "ascii"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ascii"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_wchar = { path = "../../../../_support/types/types_wchar" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+encnames_seams = { path = "../../../../common/encnames_seams" }
+mbutils_seams = { path = "../../mb/mbutils_seams" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }

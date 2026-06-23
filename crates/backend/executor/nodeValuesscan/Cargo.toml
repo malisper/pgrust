@@ -1,0 +1,27 @@
+[package]
+name = "nodeValuesscan"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nodeValuesscan"
+path = "src/lib.rs"
+
+[dependencies]
+execExpr_seams = { path = "../execExpr_seams" }
+execMain_seams = { path = "../execMain_seams" }
+execScan_seams = { path = "../execScan_seams" }
+execTuples_seams = { path = "../execTuples_seams" }
+execUtils_seams = { path = "../execUtils_seams" }
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }
+clauses_seams = { path = "../../optimizer/util/clauses_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+misc2_seams = { path = "../../utils/adt/misc2_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+datum = { path = "../../../_support/types/datum" }
+execparallel = { path = "../../../_support/types/execparallel" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+mcx = { path = "../../../_support/mcx" }

@@ -1,0 +1,17 @@
+[package]
+name = "cryptohash"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "cryptohash"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+cryptohash_seams = { path = "../cryptohash_seams" }
+md5 = { path = "../md5" }
+sha2 = { path = "../sha2" }
+types_core = { path = "../../_support/types/types_core" }
+crypto = { path = "../../_support/types/crypto" }

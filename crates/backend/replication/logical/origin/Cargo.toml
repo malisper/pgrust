@@ -1,0 +1,49 @@
+[package]
+name = "origin"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "origin"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
+mcx = { path = "../../../../_support/mcx" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+condvar = { path = "../../../../_support/types/condvar" }
+wal = { path = "../../../../_support/types/wal" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+lwlock = { path = "../../../storage/lmgr/lwlock" }
+lwlock_seams = { path = "../../../storage/lmgr/lwlock_seams" }
+lmgr = { path = "../../../storage/lmgr/lmgr" }
+condition_variable_seams = { path = "../../../storage/lmgr/condition_variable_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+origin_seams = { path = "../origin_seams" }
+origin_extern_seams = { path = "../origin_extern_seams" }
+fd_seams = { path = "../../../storage/file/fd_seams" }
+file_seams = { path = "../../../storage/file/file_seams" }
+pg_crc32c_seams = { path = "../../../../port/pg_crc32c_seams" }
+types_catalog = { path = "../../../../_support/types/types_catalog" }
+cache = { path = "../../../../_support/types/cache" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+heaptuple = { path = "../../../access/common/heaptuple" }
+scankey = { path = "../../../access/common/scankey" }
+genam_seams = { path = "../../../access/index/genam_seams" }
+table = { path = "../../../access/table/table" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+indexing = { path = "../../../catalog/indexing" }
+comment_seams = { path = "../../../commands/comment_seams" }
+vacuum_seams = { path = "../../../commands/vacuum_seams" }
+varlena_seams = { path = "../../../utils/adt/varlena_seams" }
+cache_syscache = { path = "../../../utils/cache/cache_syscache" }

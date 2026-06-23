@@ -1,0 +1,47 @@
+[package]
+name = "genam"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "genam"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+rel = { path = "../../../../_support/types/rel" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_catalog = { path = "../../../../_support/types/types_catalog" }
+types_acl = { path = "../../../../_support/types/types_acl" }
+
+utils_error = { path = "../../../utils/utils_error" }
+table = { path = "../../table/table" }
+heaptuple = { path = "../../common/heaptuple" }
+heapam_seams = { path = "../../heap/heapam_seams" }
+heapam_handler_dml_seams = { path = "../../heap/heapam_handler_dml_seams" }
+lsyscache_seams = { path = "../../../utils/cache/lsyscache_seams" }
+varlena_seams = { path = "../../../utils/adt/varlena_seams" }
+arrayfuncs_seams = { path = "../../../utils/adt/arrayfuncs_seams" }
+fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
+transam_xact_seams = { path = "../../transam/transam_xact_seams" }
+parallel_rt_seams = { path = "../../transam/parallel_rt_seams" }
+genam_seams = { path = "../genam_seams" }
+indexam = { path = "../indexam" }
+table_tableam = { path = "../../table/table_tableam" }
+common_relation_seams = { path = "../../common/common_relation_seams" }
+index_seams = { path = "../../../catalog/index_seams" }
+execTuples_seams = { path = "../../../executor/execTuples_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+relcache_nodexform_seams = { path = "../../../utils/cache/relcache_nodexform_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+more_seams = { path = "../../../utils/misc/more_seams" }

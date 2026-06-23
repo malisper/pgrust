@@ -1,0 +1,32 @@
+[package]
+name = "fastpath"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "fastpath"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+datum = { path = "../../../_support/types/datum" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_acl = { path = "../../../_support/types/types_acl" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+stringinfo = { path = "../../../_support/types/stringinfo" }
+utils_error = { path = "../../utils/utils_error" }
+pqformat = { path = "../../libpq/pqformat" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+objectaccess_seams = { path = "../../catalog/objectaccess_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+postgres_seams = { path = "../postgres_seams" }

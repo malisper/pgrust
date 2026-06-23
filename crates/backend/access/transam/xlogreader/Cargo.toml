@@ -1,0 +1,27 @@
+[package]
+name = "xlogreader"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "xlogreader"
+path = "src/lib.rs"
+
+[dependencies]
+varsup_seams = { path = "../varsup_seams" }
+xlogreader_seams = { path = "../xlogreader_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+fd_seams = { path = "../../../storage/file/fd_seams" }
+types_walsummarizer = { path = "../../../../_support/types/types_walsummarizer" }
+mcx = { path = "../../../../_support/mcx" }
+crc32c = { path = "../../../../port/crc32c" }
+pglz = { path = "../../../../common/pglz" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_logical = { path = "../../../../_support/types/types_logical" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+wal = { path = "../../../../_support/types/wal" }
+
+[dev-dependencies]

@@ -1,0 +1,25 @@
+[package]
+name = "tcop_dest"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "tcop_dest"
+path = "src/lib.rs"
+
+[dependencies]
+copyto_seams = { path = "../../commands/copyto_seams" }
+printtup_seams = { path = "../../access/common/printtup_seams" }
+spi_seams = { path = "../../executor/spi_seams" }
+mcx = { path = "../../../_support/mcx" }
+dest_seams = { path = "../dest_seams" }
+types_dest = { path = "../../../_support/types/types_dest" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+portal = { path = "../../../_support/types/portal" }
+cmdtag = { path = "../cmdtag" }
+pqformat = { path = "../../libpq/pqformat" }
+pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }

@@ -1,0 +1,18 @@
+[package]
+name = "latin_and_mic"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "latin_and_mic"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+utils_error = { path = "../../../utils_error" }
+mbutils_seams = { path = "../../mbutils_seams" }
+conv_string_helpers = { path = "../../conv_string_helpers" }
+fmgr_core = { path = "../../../fmgr/fmgr_core" }
+types_wchar = { path = "../../../../../_support/types/types_wchar" }
+types_error = { path = "../../../../../_support/types/types_error" }

@@ -1,0 +1,43 @@
+[package]
+name = "cache_plancache"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "cache_plancache"
+path = "src/lib.rs"
+
+[dependencies]
+plancache_seams = { path = "../plancache_seams" }
+plancache_portal_seams = { path = "../plancache_portal_seams" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_namespace = { path = "../../../../_support/types/types_namespace" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_plancache = { path = "../../../../_support/types/types_plancache" }
+portal = { path = "../../../../_support/types/portal" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+
+# Value-producer seams (the de-handled pipeline).
+namespace_seams = { path = "../../../catalog/namespace_seams" }
+execTuples_seams = { path = "../../../executor/execTuples_seams" }
+planner_pc_seams = { path = "../../../optimizer/plan/planner_pc_seams" }
+setrefs_seams = { path = "../../../optimizer/plan/setrefs_seams" }
+parser_analyze_seams = { path = "../../../parser/parser_analyze_seams" }
+rewritehandler_seams = { path = "../../../rewrite/rewritehandler_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+pquery_seams = { path = "../../../tcop/pquery_seams" }
+utility_seams = { path = "../../../tcop/utility_seams" }
+tupdesc_seams = { path = "../../../access/common/tupdesc_seams" }
+
+# Seams that stay handle/scalar-shaped.
+lmgr_pc_seams = { path = "../../../storage/lmgr/lmgr_pc_seams" }
+inval_pc_seams = { path = "../inval_pc_seams" }
+syscache_pc_seams = { path = "../syscache_pc_seams" }
+pc_seams = { path = "../../resowner/pc_seams" }
+backendstate_pc_seams = { path = "../../misc/backendstate_pc_seams" }
+guc_tables = { path = "../../misc/guc_tables" }
+snapmgr_pc_seams = { path = "../../time/snapmgr_pc_seams" }

@@ -1,0 +1,40 @@
+[package]
+name = "bootparse"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "bootparse"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_cluster = { path = "../../../_support/types/types_cluster" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+rel = { path = "../../../_support/types/rel" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+utils_error = { path = "../../utils/utils_error" }
+# Own seam crate: installs boot_yylex_init / boot_yyparse.
+bootparse_seams = { path = "../bootparse_seams" }
+# Direct (leaf) lexer dependency.
+bootscanner = { path = "../bootscanner" }
+# Loader callbacks + per-backend bootstrap globals.
+bootstrap = { path = "../bootstrap" }
+# catalog/heap.c heap_create + heap_create_with_catalog (seam) + args struct.
+heap = { path = "../../catalog/heap" }
+heap_seams = { path = "../../catalog/heap_seams" }
+# access/common/tupdesc.c CreateTupleDesc.
+tupdesc = { path = "../../access/common/tupdesc" }
+# access/common/relation.c relation_open (to re-open the just-created heap rel).
+common_relation = { path = "../../access/common/common_relation" }
+# catalog/namespace.c RangeVarGetRelid (seam).
+namespace_seams = { path = "../../catalog/namespace_seams" }
+# catalog/toasting.c BootstrapToastTable.
+toasting = { path = "../../catalog/toasting" }
+# commands/indexcmds.c DefineIndex (seam; owner not yet ported).
+indexcmds_seams = { path = "../../commands/indexcmds_seams" }

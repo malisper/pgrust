@@ -1,0 +1,40 @@
+[package]
+name = "ginvacuum"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ginvacuum"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+gin = { path = "../../../../_support/types/gin" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+page = { path = "../../../storage/page" }
+utils_error = { path = "../../../utils/utils_error" }
+
+ginbtree = { path = "../ginbtree" }
+gindatapage = { path = "../gindatapage" }
+ginentrypage = { path = "../ginentrypage" }
+ginutil = { path = "../ginutil" }
+core_probe = { path = "../core_probe" }
+
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+xloginsert_seams = { path = "../../transam/xloginsert_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+lmgr_seams = { path = "../../../storage/lmgr/lmgr_seams" }
+freespace_seams = { path = "../../../storage/freespace/freespace_seams" }
+vacuumlazy_seams = { path = "../../heap/vacuumlazy_seams" }
+hio_seams = { path = "../../heap/hio_seams" }
+vacuum_seams = { path = "../../../commands/vacuum_seams" }
+ginutil_seams = { path = "../ginutil_seams" }
+ginvacuum_seams = { path = "../ginvacuum_seams" }
+predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }

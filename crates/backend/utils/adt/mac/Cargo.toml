@@ -1,0 +1,27 @@
+[package]
+name = "mac"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "mac"
+path = "src/lib.rs"
+
+[dependencies]
+types_error = { path = "../../../../_support/types/types_error" }
+types_network = { path = "../../../../_support/types/types_network" }
+# hash_any / hash_any_extended for hashmacaddr; owner ported, depend directly.
+hashfn = { path = "../../../../common/hashfn" }
+# Outward seam for the external sortsupport substrate (node mutation +
+# HyperLogLog + trace_sort), called here, installed by the unported owner.
+mac_seams = { path = "../mac_seams" }
+# fmgr-ABI wrapper layer: register the by-ref `macaddr` builtins. Their call
+# frame lives in types-fmgr; by-OID dispatch resolves them in fmgr-core.
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+# `macaddr_send` frames its `bytea` result through the same pq_*typsend path C
+# uses (the body returns the wire bytes; the adapter adds the varlena header).
+mcx = { path = "../../../../_support/mcx" }
+pqformat = { path = "../../../libpq/pqformat" }

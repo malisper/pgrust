@@ -1,0 +1,46 @@
+[package]
+name = "partitioning_core"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "partitioning_core"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+types_core = { path = "../../../_support/types/types_core" }
+nodes = { path = "../../../_support/types/nodes" }
+pathnodes = { path = "../../../_support/types/pathnodes" }
+rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+
+partprune_seams = { path = "../partprune_seams" }
+partbounds_seams = { path = "../partbounds_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+execExpr_seams = { path = "../../executor/execExpr_seams" }
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+arrayfuncs_seams = { path = "../../utils/adt/arrayfuncs_seams" }
+partcache_seams = { path = "../../utils/cache/partcache_seams" }
+table_seams = { path = "../../access/table/table_seams" }
+makefuncs_seams = { path = "../../nodes/makefuncs_seams" }
+copyfuncs_seams = { path = "../../nodes/copyfuncs_seams" }
+nodeFuncs_seams = { path = "../../nodes/nodeFuncs_seams" }
+var_seams = { path = "../../optimizer/util/var_seams" }
+path_small_seams = { path = "../../optimizer/path/path_small_seams" }
+relnode = { path = "../../optimizer/util/relnode" }
+appendinfo = { path = "../../optimizer/util/appendinfo" }
+appendinfo_seams = { path = "../../optimizer/util/appendinfo_seams" }
+hash = { path = "../../../_support/types/hash" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_partition = { path = "../../../_support/types/types_partition" }
+types_storage = { path = "../../../_support/types/types_storage" }
+partdesc = { path = "../partdesc" }
+nodes_core = { path = "../../nodes/nodes_core" }
+prepqual_seams = { path = "../../optimizer/prep/prepqual_seams" }
+predtest_seams = { path = "../../optimizer/util/predtest_seams" }
+partcache = { path = "../../utils/cache/partcache" }
+guc_tables = { path = "../../utils/misc/guc_tables" }

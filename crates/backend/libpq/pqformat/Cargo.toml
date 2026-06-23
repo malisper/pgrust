@@ -1,0 +1,17 @@
+[package]
+name = "pqformat"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pqformat"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_error = { path = "../../../_support/types/types_error" }
+stringinfo = { path = "../../../_support/types/stringinfo" }
+pqcomm_seams = { path = "../pqcomm_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }

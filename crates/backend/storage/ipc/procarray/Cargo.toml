@@ -1,0 +1,50 @@
+[package]
+name = "procarray"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "procarray"
+path = "src/lib.rs"
+
+[dependencies]
+procarray_seams = { path = "../procarray_seams" }
+ipc_shmem_seams = { path = "../ipc_shmem_seams" }
+transam_seams = { path = "../../../access/transam/transam_seams" }
+varsup_seams = { path = "../../../access/transam/varsup_seams" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+snapmgr_pc_seams = { path = "../../../utils/time/snapmgr_pc_seams" }
+lwlock_seams = { path = "../../lmgr/lwlock_seams" }
+lmgr_proc_seams = { path = "../../lmgr/lmgr_proc_seams" }
+subtrans_seams = { path = "../../../access/transam/subtrans_seams" }
+xlogutils_seams = { path = "../../../access/transam/xlogutils_seams" }
+twophase_seams = { path = "../../../access/transam/twophase_seams" }
+standby_seams = { path = "../standby_seams" }
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
+wal = { path = "../../../../_support/types/wal" }
+utils_error = { path = "../../../utils/utils_error" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+catalog_seams = { path = "../../../catalog/catalog_seams" }
+vacuumlazy_seams = { path = "../../../access/heap/vacuumlazy_seams" }
+rel = { path = "../../../../_support/types/rel" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+init_small = { path = "../../../utils/init/init_small" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+procsignal_seams = { path = "../procsignal_seams" }
+superuser_seams = { path = "../../../utils/misc/superuser_seams" }
+acl_seams = { path = "../../../utils/adt/acl_seams" }
+dbcommands_seams = { path = "../../../commands/dbcommands_seams" }
+pgsleep_seams = { path = "../../../../port/pgsleep_seams" }
+libc = "0.2"
+mcx = { path = "../../../../_support/mcx" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_vacuum = { path = "../../../../_support/types/types_vacuum" }

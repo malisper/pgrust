@@ -1,0 +1,39 @@
+[package]
+name = "parse_type"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "parse_type"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+datum = { path = "../../../_support/types/datum" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_cluster = { path = "../../../_support/types/types_cluster" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+nodes = { path = "../../../_support/types/nodes" }
+opclass = { path = "../../../_support/types/opclass" }
+utils_error = { path = "../../utils/utils_error" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+format_type_seams = { path = "../../utils/adt/format_type_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+arrayfuncs_seams = { path = "../../utils/adt/arrayfuncs_seams" }
+small1_seams = { path = "../small1_seams" }
+driver_seams = { path = "../driver_seams" }
+parse_type_seams = { path = "../parse_type_seams" }
+# tablecmds (BuildDescForRelation) resolves each column's TypeName to (typid,
+# typmod) via parse_type.c's typenameTypeIdAndMod / GetColumnDefCollation; this
+# crate is their real owner. Seam crate -> no cycle.
+tablecmds_seams = { path = "../../commands/tablecmds_seams" }
+# functioncmds.c (CreateFunction / CreateCast) resolves type names via
+# parse_type.c (typenameTypeId / TypeNameToString / LookupTypeName); this crate
+# is their real owner. Seam crate -> no cycle.
+functioncmds_seams = { path = "../../commands/functioncmds_seams" }

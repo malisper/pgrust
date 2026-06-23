@@ -1,0 +1,11 @@
+[package]
+name = "compression"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "compression"
+path = "src/lib.rs"
+
+[dependencies]

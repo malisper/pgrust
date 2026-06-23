@@ -1,0 +1,25 @@
+[package]
+name = "pgstat_io"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgstat_io"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+activity_pgstat = { path = "../activity_pgstat" }
+pgstat_io_seams = { path = "../pgstat_io_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+pgstat_seams = { path = "../pgstat_seams" }
+stat_seams = { path = "../stat_seams" }
+init_small_seams = { path = "../../init/init_small_seams" }
+lwlock_seams = { path = "../../../storage/lmgr/lwlock_seams" }
+instrument = { path = "../../../executor/instrument" }
+guc_tables = { path = "../../misc/guc_tables" }
+instr_time = { path = "../../../../_support/portability/instr_time" }

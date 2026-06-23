@@ -1,0 +1,33 @@
+[package]
+name = "incremental"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "incremental"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+wal = { path = "../../../_support/types/wal" }
+types_walsummarizer = { path = "../../../_support/types/types_walsummarizer" }
+types_blkreftable = { path = "../../../_support/types/types_blkreftable" }
+parse_manifest = { path = "../../../_support/types/parse_manifest" }
+utils_error = { path = "../../utils/utils_error" }
+relpath = { path = "../../common/relpath" }
+hashfn = { path = "../../../common/hashfn" }
+common_blkreftable = { path = "../../../common/common_blkreftable" }
+parse_manifest_seams = { path = "../../../common/parse_manifest_seams" }
+walsummary = { path = "../walsummary" }
+walsummary_seams = { path = "../walsummary_seams" }
+walsummarizer_seams = { path = "../../postmaster/walsummarizer_seams" }
+timeline_seams = { path = "../../access/transam/timeline_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+mcx = { path = "../../../_support/mcx" }
+
+[dev-dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_catalog = { path = "../../../_support/types/types_catalog" }

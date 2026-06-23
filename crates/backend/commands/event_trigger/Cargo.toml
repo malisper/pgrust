@@ -1,0 +1,61 @@
+[package]
+name = "event_trigger"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "event_trigger"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_evtcache = { path = "../../../_support/types/types_evtcache" }
+nodes = { path = "../../../_support/types/nodes" }
+opclass = { path = "../../../_support/types/opclass" }
+evtcache_seams = { path = "../../utils/cache/evtcache_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+extension_seams = { path = "../extension_seams" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+event_trigger_fire_seams = { path = "../event_trigger_fire_seams" }
+event_trigger_seams = { path = "../event_trigger_seams" }
+tablecmds_seams = { path = "../tablecmds_seams" }
+tsearchcmds_seams = { path = "../tsearchcmds_seams" }
+objectaddress_seams = { path = "../../catalog/objectaddress_seams" }
+funcapi_seams = { path = "../../utils/fmgr/funcapi_seams" }
+varlena_seams = { path = "../../utils/adt/varlena_seams" }
+arrayfuncs_seams = { path = "../../utils/adt/arrayfuncs_seams" }
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+utils_error = { path = "../../utils/utils_error" }
+miscinit = { path = "../../utils/init/miscinit" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+func = { path = "../../parser/func" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+indexing_seams = { path = "../../catalog/indexing_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+objectaccess_seams = { path = "../../catalog/objectaccess_seams" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }
+tablespace_globals_seams = { path = "../tablespace_globals_seams" }
+pg_depend = { path = "../../catalog/pg_depend" }
+pg_shdepend = { path = "../../catalog/pg_shdepend" }
+pg_database_seams = { path = "../../catalog/pg_database_seams" }
+table_seams = { path = "../../access/table/table_seams" }
+cmdtag = { path = "../../tcop/cmdtag" }
+utility_seams = { path = "../../tcop/utility_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+nodes_core = { path = "../../nodes/nodes_core" }
+fmgr = { path = "../../../_support/types/fmgr" }
+datum = { path = "../../../_support/types/datum" }
+types_acl = { path = "../../../_support/types/types_acl" }
+types_storage = { path = "../../../_support/types/types_storage" }
+portal = { path = "../../../_support/types/portal" }
+rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }

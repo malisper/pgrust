@@ -1,0 +1,12 @@
+[package]
+name = "pg_numa"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_numa"
+path = "src/lib.rs"
+
+[dependencies]
+pg_numa_seams = { path = "../pg_numa_seams" }

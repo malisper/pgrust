@@ -1,0 +1,12 @@
+[package]
+name = "adt_misc"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_misc"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../types_core" }

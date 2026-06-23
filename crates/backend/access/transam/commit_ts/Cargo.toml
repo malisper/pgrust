@@ -1,0 +1,34 @@
+[package]
+name = "commit_ts"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "commit_ts"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+wal = { path = "../../../../_support/types/wal" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
+utils_error = { path = "../../../utils/utils_error" }
+slru = { path = "../slru" }
+transam = { path = "../transam" }
+lwlock = { path = "../../../storage/lmgr/lwlock" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+# seams (callers OUT of this crate into unported / cycle owners)
+commit_ts_seams = { path = "../commit_ts_seams" }
+varsup_seams = { path = "../varsup_seams" }
+xloginsert_seams = { path = "../xloginsert_seams" }
+transam_xlog_seams = { path = "../transam_xlog_seams" }
+xlogrecovery_seams = { path = "../xlogrecovery_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+guc_seams = { path = "../../../utils/misc/guc_seams" }

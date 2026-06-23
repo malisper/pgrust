@@ -1,0 +1,69 @@
+//! Seam declarations for the bitmap-scan table-AM entry points
+//! (`access/tableam.h` inline wrappers around the AM's `scan_begin` /
+//! `scan_bitmap_next_tuple` / `scan_rescan` / `scan_end` callbacks).
+//!
+//! These dispatch through `rel->rd_tableam` to the concrete access method
+//! (heapam), which the `backend-access-table-tableam` / heap AM units own and
+//! have not ported the bitmap path of yet. Consumers reach them here; a call
+//! panics loudly until the heap AM installs them.
+
+#![allow(non_snake_case)]
+
+use types_error::PgResult;
+use nodes::tuptable::SlotData;
+use rel::Relation;
+use types_tableam::relscan::{TableScanDesc, TableScanDescData};
+
+seam_core::seam!(
+    /// `table_beginscan_bm(rel, snapshot, 0, NULL)` (access/tableam.h): set up
+    /// a `TableScanDesc` for a bitmap heap scan
+    /// (`SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE`). The descriptor is allocated
+    /// by the AM (`palloc`), so the call is fallible on OOM.
+    pub fn table_beginscan_bm<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: Relation<'mcx>,
+        snapshot: Option<std::rc::Rc<snapshot::SnapshotData>>,
+    ) -> PgResult<TableScanDesc<'mcx>>
+);
+
+seam_core::seam!(
+    /// `table_scan_bitmap_next_tuple(scan, slot, &recheck, &lossy_pages,
+    /// &exact_pages)` (access/tableam.h): fetch the next visible tuple of a
+    /// bitmap table scan into `slot`. Returns `Ok(true)` when a tuple was
+    /// stored (the C `true`), `Ok(false)` at end of scan (the C `false`).
+    ///
+    /// `recheck`, `lossy_pages`, and `exact_pages` are caller-owned
+    /// out-parameters (C: `bool *recheck`, `uint64 *lossy_pages`,
+    /// `uint64 *exact_pages`). They are written ONLY when the AM advances to a
+    /// new block (`BitmapHeapScanNextBlock`); per-tuple calls within a block
+    /// leave them untouched, so the per-block `recheck` flag and the page
+    /// counters persist across the multiple per-tuple fetches on that block.
+    /// They must NOT be reset by this routine. Fallible — the AM `ereport`s
+    /// (e.g. unexpected call during logical decoding) and the heap fetch can
+    /// error.
+    pub fn table_scan_bitmap_next_tuple<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        scan: &mut TableScanDescData<'mcx>,
+        slot: &mut SlotData<'mcx>,
+        recheck: &mut bool,
+        lossy_pages: &mut u64,
+        exact_pages: &mut u64,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `table_rescan(scan, NULL)` (access/tableam.h): restart the scan,
+    /// releasing any page pin. The leading `mcx` (convention A) is the arena the
+    /// AM reinitializes the scan in. Fallible — the AM's `scan_rescan` can error.
+    pub fn table_rescan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        scan: &mut TableScanDescData<'mcx>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `table_endscan(scan)` (access/tableam.h): close the scan, releasing the
+    /// descriptor and its resources. Consumes the descriptor box. Fallible —
+    /// the AM's `scan_end` runs cleanup that can error.
+    pub fn table_endscan<'mcx>(scan: TableScanDesc<'mcx>) -> PgResult<()>
+);

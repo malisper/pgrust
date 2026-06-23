@@ -1,0 +1,43 @@
+[package]
+name = "logical_relation"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "logical_relation"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+mcx = { path = "../../../../_support/mcx" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+
+# Vocabulary
+rel = { path = "../../../../_support/types/rel" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+nodes = { path = "../../../../_support/types/nodes" }
+cache = { path = "../../../../_support/types/cache" }
+datum = { path = "../../../../_support/types/datum" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+
+# Merged dependencies, called directly
+proto = { path = "../proto" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+table = { path = "../../../access/table/table" }
+indexam = { path = "../../../access/index/indexam" }
+relcache = { path = "../../../utils/cache/relcache" }
+lsyscache = { path = "../../../utils/cache/lsyscache" }
+
+# Seam crates (outward calls into not-yet-ported owners)
+next_seams = { path = "../../../access/common/next_seams" }
+pg_subscription_seams = { path = "../../../catalog/pg_subscription_seams" }
+namespace_seams = { path = "../../../catalog/namespace_seams" }
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+typcache_seams = { path = "../../../utils/cache/typcache_seams" }
+amapi_seams = { path = "../../../access/index/amapi_seams" }
+inval_seams = { path = "../../../utils/cache/inval_seams" }
+mcxt_seams = { path = "../../../utils/mmgr/mcxt_seams" }
+worker_seams = { path = "../worker_seams" }

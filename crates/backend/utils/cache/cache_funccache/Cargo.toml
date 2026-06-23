@@ -1,0 +1,26 @@
+[package]
+name = "cache_funccache"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "cache_funccache"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_funccache = { path = "../../../../_support/types/types_funccache" }
+plpgsql = { path = "../../../../_support/types/plpgsql" }
+
+utils_error = { path = "../../utils_error" }
+hashfn = { path = "../../../../common/hashfn" }
+
+funcapi = { path = "../../fmgr/funcapi" }
+tupdesc = { path = "../../../access/common/tupdesc" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+funccache_seams = { path = "../funccache_seams" }

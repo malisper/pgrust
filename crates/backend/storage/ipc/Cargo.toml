@@ -1,0 +1,76 @@
+[package]
+name = "ipc"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ipc"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_guc = { path = "../../../_support/types/types_guc" }
+types_storage = { path = "../../../_support/types/types_storage" }
+utils_error = { path = "../../utils/utils_error" }
+# shmem index sizing type/constant (no cycle: shmem.c does not call ipci.c)
+ipc_shmem = { path = "ipc_shmem" }
+# IsUnderPostmaster (globals.c) — the !IsUnderPostmaster InitProcGlobal gate
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+# this unit's own inward seam declarations (ipci.c), installed by init_seams()
+ipci_seams = { path = "ipci_seams" }
+
+# ipci-core boundary owners
+sysv_shmem_seams = { path = "../../port/sysv/sysv_shmem_seams" }
+pg_sema_seams = { path = "../../port/pg_sema_seams" }
+dynahash_seams = { path = "../../utils/hash/dynahash_seams" }
+guc_seams = { path = "../../utils/misc/guc_seams" }
+ipc_shmem_seams = { path = "ipc_shmem_seams" }
+dsm_core_seams = { path = "dsm_core_seams" }
+dsm_registry_seams = { path = "dsm_registry_seams" }
+lwlock_seams = { path = "../lmgr/lwlock_seams" }
+lmgr_proc_seams = { path = "../lmgr/lmgr_proc_seams" }
+postinit_seams = { path = "../../utils/init/postinit_seams" }
+
+# ipci-seams-storage-access owners
+bufmgr_seams = { path = "../buffer/bufmgr_seams" }
+lock_seams = { path = "../lmgr/lock_seams" }
+predicate_seams = { path = "../lmgr/predicate_seams" }
+procarray_seams = { path = "procarray_seams" }
+sinval_seams = { path = "sinval_seams" }
+pmsignal_seams = { path = "pmsignal_seams" }
+procsignal_seams = { path = "procsignal_seams" }
+aio_seams_2 = { path = "../aio/aio_seams_2" }
+syncscan_seams = { path = "../../access/common/syncscan_seams" }
+nbtree_seams_2 = { path = "../../access/nbtree/nbtree_seams_2" }
+
+# ipci-seams-xlog-clog owners
+varsup_seams = { path = "../../access/transam/varsup_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+xlogprefetcher_seams = { path = "../../access/transam/xlogprefetcher_seams" }
+xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
+clog_seams = { path = "../../access/transam/clog_seams" }
+commit_ts_seams = { path = "../../access/transam/commit_ts_seams" }
+subtrans_seams = { path = "../../access/transam/subtrans_seams" }
+multixact_seams = { path = "../../access/transam/multixact_seams" }
+twophase_seams = { path = "../../access/transam/twophase_seams" }
+
+# ipci-seams-bgworker-repl-stats owners
+checkpointer_seams = { path = "../../postmaster/checkpointer_seams" }
+autovacuum_seams = { path = "../../postmaster/autovacuum_seams" }
+bgworker_seams = { path = "../../postmaster/bgworker_seams" }
+walsummarizer_seams = { path = "../../postmaster/walsummarizer_seams" }
+pgarch_seams = { path = "../../postmaster/pgarch_seams" }
+walsender_seams = { path = "../../replication/walsender_seams" }
+walreceiverfuncs_seams = { path = "../../replication/walreceiverfuncs_seams" }
+slot_seams = { path = "../../replication/slot_seams" }
+origin_seams = { path = "../../replication/logical/origin_seams" }
+launcher_seams = { path = "../../replication/logical/launcher_seams" }
+slotsync_seams = { path = "../../replication/logical/slotsync_seams" }
+async_seams = { path = "../../commands/async_seams" }
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+status_seams = { path = "../../utils/activity/status_seams" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+injection_point_seams = { path = "injection_point_seams" }

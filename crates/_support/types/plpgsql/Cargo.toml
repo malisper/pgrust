@@ -1,0 +1,15 @@
+[package]
+name = "plpgsql"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "plpgsql"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../types_core" }
+datum = { path = "../datum" }
+types_error = { path = "../types_error" }
+parsenodes = { path = "../parsenodes" }

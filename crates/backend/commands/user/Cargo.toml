@@ -1,0 +1,30 @@
+[package]
+name = "user"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "user"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+utils_error = { path = "../../utils/utils_error" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+user_seams = { path = "../user_seams" }
+catalog_seams = { path = "../../catalog/catalog_seams" }
+superuser_seams = { path = "../../utils/misc/superuser_seams" }
+acl_seams = { path = "../../utils/adt/acl_seams" }
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+binary_upgrade_seams = { path = "../../catalog/binary_upgrade_seams" }
+varlena_seams = { path = "../../utils/adt/varlena_seams" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+authid = { path = "../../../_support/types/authid" }
+types_guc = { path = "../../../_support/types/types_guc" }
+types_catalog = { path = "../../../_support/types/types_catalog" }

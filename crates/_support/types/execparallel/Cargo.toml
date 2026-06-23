@@ -1,0 +1,15 @@
+[package]
+name = "execparallel"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "execparallel"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../types_core" }
+types_bgworker = { path = "../types_bgworker" }
+types_tuple = { path = "../types_tuple" }
+mcx = { path = "../../mcx" }

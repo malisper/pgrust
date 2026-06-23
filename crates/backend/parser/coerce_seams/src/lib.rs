@@ -1,0 +1,279 @@
+//! Seam declarations for the `backend-parser-coerce` unit
+//! (`parser/parse_coerce.c`), the type-coercion catalog lookups.
+//!
+//! The owning unit installs these from its `init_seams()` when it lands; until
+//! then a call panics loudly.
+
+use types_core::Oid;
+use types_error::PgResult;
+use nodes::parsestmt::ParseState;
+use nodes::primnodes::{CoercionForm, Expr};
+use parsenodes::CoercionContext;
+
+/// `CoercionPathType` (parser/parse_coerce.h): the kind of coercion pathway
+/// `find_coercion_pathway` resolved between two types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
+pub enum CoercionPathType {
+    /// `COERCION_PATH_NONE` (0) — failed to find any coercion pathway.
+    None = 0,
+    /// `COERCION_PATH_FUNC` (1) — apply the specified coercion function.
+    Func = 1,
+    /// `COERCION_PATH_RELABELTYPE` (2) — binary-compatible cast, no function.
+    Relabeltype = 2,
+    /// `COERCION_PATH_ARRAYCOERCE` (3) — need an `ArrayCoerceExpr` node.
+    Arraycoerce = 3,
+    /// `COERCION_PATH_COERCEVIAIO` (4) — need a `CoerceViaIO` node.
+    Coerceviaio = 4,
+}
+
+seam_core::seam!(
+    /// `find_coercion_pathway(targetTypeId, sourceTypeId, COERCION_IMPLICIT,
+    /// &funcid)` (parse_coerce.c): determine how to coerce `source_type_id`
+    /// to `target_type_id` under implicit context. Returns the pathway kind
+    /// and (for `Func`) the coercion function OID, else `InvalidOid`. `Err`
+    /// carries catcache-path `ereport(ERROR)`s.
+    pub fn find_coercion_pathway_implicit(
+        target_type_id: Oid,
+        source_type_id: Oid,
+    ) -> PgResult<(CoercionPathType, Oid)>
+);
+
+seam_core::seam!(
+    /// `find_coercion_pathway(targetTypeId, sourceTypeId, COERCION_PLPGSQL,
+    /// &funcid)` (parse_coerce.c): the pathway resolution plpgsql's
+    /// `get_cast_hashentry` uses (pl_exec.c) when it builds a cast expression
+    /// under `COERCION_PLPGSQL`. Unlike the implicit form, this accepts both
+    /// implicit- and assignment-level pg_cast entries (COERCION_PLPGSQL ranks
+    /// above COERCION_ASSIGNMENT), so a function-based ASSIGNMENT cast resolves
+    /// to `Func` here and the cast function (e.g. a SQL-function cast) is run,
+    /// rather than being bypassed by a plain I/O coercion. `Err` carries
+    /// catcache-path `ereport(ERROR)`s.
+    pub fn find_coercion_pathway_plpgsql(
+        target_type_id: Oid,
+        source_type_id: Oid,
+    ) -> PgResult<(CoercionPathType, Oid)>
+);
+
+seam_core::seam!(
+    /// `IsBinaryCoercible(srctype, targettype)` (parse_coerce.c): whether
+    /// `srctype` is binary-coercible to `targettype` (identical types, an
+    /// existing binary-coercible pg_cast entry, or `targettype` being a
+    /// polymorphic/ANY pseudo-type that accepts `srctype`). `Err` carries
+    /// catcache-path `ereport(ERROR)`s.
+    pub fn is_binary_coercible(srctype: Oid, targettype: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `enforce_generic_type_consistency(actual_arg_types, declared_arg_types,
+    /// nargs, rettype, allow_poly)` (parse_coerce.c): resolve any polymorphic
+    /// (`ANY*`) entries in `declared_arg_types` against the concrete
+    /// `actual_arg_types`, mutating `declared_arg_types` in place (the C output
+    /// array used by `make_fn_arguments` as the cast destination) and returning
+    /// the actual result type the polymorphic `rettype` resolves to.
+    /// `allow_poly` is the C trailing `bool` (parse_oper.c always passes
+    /// `false`). `Err` carries the inconsistent-polymorphic-types
+    /// `ereport(ERROR)` surface.
+    pub fn enforce_generic_type_consistency(
+        actual_arg_types: &[types_core::Oid],
+        declared_arg_types: &mut [types_core::Oid],
+        nargs: i32,
+        rettype: types_core::Oid,
+        allow_poly: bool,
+    ) -> PgResult<types_core::Oid>
+);
+
+seam_core::seam!(
+    /// `check_valid_polymorphic_signature(ret_type, declared_arg_types, nargs)`
+    /// (parse_coerce.c): if `ret_type` is polymorphic, verify the argument types
+    /// include a matching polymorphic input so the actual return type is
+    /// deducible. Returns `None` (C `NULL`) when the signature is valid, else
+    /// `Some(detail)` — the human-readable detail message the caller passes to
+    /// `errdetail_internal`. `AggregateCreate` consumes it for the transtype /
+    /// mtranstype / result-type validations.
+    pub fn check_valid_polymorphic_signature(
+        ret_type: types_core::Oid,
+        declared_arg_types: &[types_core::Oid],
+        nargs: i32,
+    ) -> PgResult<Option<String>>
+);
+
+seam_core::seam!(
+    /// `check_valid_internal_signature(ret_type, declared_arg_types, nargs)`
+    /// (parse_coerce.c): verify that a function returning `internal` has at least
+    /// one `internal` argument. Returns `None` (C `NULL`) when valid, else
+    /// `Some(detail)`. `AggregateCreate` consumes it for the result-type check.
+    pub fn check_valid_internal_signature(
+        ret_type: types_core::Oid,
+        declared_arg_types: &[types_core::Oid],
+        nargs: i32,
+    ) -> PgResult<Option<String>>
+);
+
+// ---------------------------------------------------------------------------
+// High-level coercion entry points consumed by parse_expr.c. These are the
+// `parse_coerce.c` public surface (`coerce_to_boolean`, `coerce_to_specific_type`,
+// `coerce_to_common_type`, `select_common_type`, `coerce_to_target_type`). The
+// owning `backend-parser-coerce` unit is not yet ported; until it lands every
+// call panics loudly.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `coerce_to_boolean(pstate, node, constructName)` (parse_coerce.c): coerce
+    /// an expression to `bool`, raising the construct-named datatype-mismatch
+    /// error if it cannot be. Returns the (possibly coerced) expression.
+    pub fn coerce_to_boolean<'mcx>(
+        pstate: &mut ParseState<'mcx>,
+        node: Expr<'static>,
+        construct_name: &str,
+    ) -> PgResult<Expr<'static>>
+);
+
+seam_core::seam!(
+    /// `coerce_to_specific_type(pstate, node, targetTypeId, constructName)`
+    /// (parse_coerce.c): coerce to a specific built-in type for a named
+    /// construct.
+    pub fn coerce_to_specific_type<'mcx>(
+        pstate: &mut ParseState<'mcx>,
+        node: Expr<'static>,
+        target_type_id: Oid,
+        construct_name: &str,
+    ) -> PgResult<Expr<'static>>
+);
+
+seam_core::seam!(
+    /// `coerce_to_common_type(pstate, node, targetTypeId, context)`
+    /// (parse_coerce.c): coerce a node to a previously-selected common type
+    /// (CASE/COALESCE/GREATEST/LEAST/ARRAY/IN). `context` is the construct name
+    /// for error text.
+    pub fn coerce_to_common_type<'mcx>(
+        pstate: &mut ParseState<'mcx>,
+        node: Expr<'static>,
+        target_type_id: Oid,
+        context: &str,
+    ) -> PgResult<Expr<'static>>
+);
+
+seam_core::seam!(
+    /// `coerce_to_common_type(NULL, node, targetTypeId, context)` (parse_coerce.c)
+    /// with a `NULL` `ParseState` — the form used by `generate_setop_tlist`
+    /// (prepunion.c), where the set-op branch columns are coerced to the
+    /// already-selected common type with no parse state for error location.
+    /// Behaves exactly like `coerce_to_common_type` with `pstate == NULL`.
+    pub fn coerce_to_common_type_no_pstate<'mcx>(
+        node: Expr<'static>,
+        target_type_id: Oid,
+        context: &str,
+    ) -> PgResult<Expr<'static>>
+);
+
+seam_core::seam!(
+    /// `select_common_type(pstate, exprs, context, which_expr)` (parse_coerce.c):
+    /// determine the common supertype of a list of already-transformed
+    /// expressions. The C `Node **which_expr` out-parameter is dropped (the
+    /// parse_expr.c call sites pass `NULL`). `context` is `None` when the C
+    /// passes `NULL` (a no-common-type failure yields `InvalidOid` instead of an
+    /// error — the `transformAExprIn` ScalarArrayOp probe).
+    pub fn select_common_type<'mcx>(
+        pstate: &mut ParseState<'mcx>,
+        exprs: &[Expr<'static>],
+        context: Option<&str>,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `verify_common_type(common_type, exprs)` (parse_coerce.c): verify the
+    /// selected common type actually works for every expression (the
+    /// `transformAExprIn` ScalarArrayOp probe). Returns `false` when the type is
+    /// unusable (fall through to the boolean tree), without raising.
+    pub fn verify_common_type(common_type: Oid, exprs: &[Expr<'static>]) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `coerce_to_target_type(pstate, expr, exprtype, targettype, targettypmod,
+    /// ccontext, cformat, location)` (parse_coerce.c): the general explicit /
+    /// assignment / implicit coercion driver. Returns `None` when no coercion is
+    /// possible (the C NULL return — the caller raises the cannot-cast error).
+    pub fn coerce_to_target_type<'mcx>(
+        pstate: &mut ParseState<'mcx>,
+        expr: Expr<'static>,
+        exprtype: Oid,
+        targettype: Oid,
+        targettypmod: i32,
+        ccontext: CoercionContext,
+        cformat: CoercionForm,
+        location: i32,
+    ) -> PgResult<Option<Expr<'static>>>
+);
+
+seam_core::seam!(
+    /// `can_coerce_type(nargs, input_typeids, target_typeids, ccontext)`
+    /// (parse_coerce.c): can a set of input values be coerced to the desired
+    /// target types? Used by `func_match_argtypes`/`func_select_candidate`
+    /// (parse_func.c) to filter and rank candidate functions. `Err` carries the
+    /// catcache-path `ereport(ERROR)`s.
+    pub fn can_coerce_type(
+        nargs: i32,
+        input_typeids: &[Oid],
+        target_typeids: &[Oid],
+        ccontext: CoercionContext,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `coerce_type(pstate, node, inputTypeId, targetTypeId, targetTypeMod,
+    /// ccontext, cformat, location)` (parse_coerce.c): the low-level
+    /// type-coercion worker that actually inserts the needed cast/relabel node.
+    /// `pstate` is `None` when the C passes `NULL` (no special unknown-Param
+    /// handling). The caller has already verified (via `can_coerce_type`) that
+    /// the coercion is possible, so this raises on an impossible coercion.
+    /// `Err` carries that `ereport(ERROR)` surface.
+    pub fn coerce_type<'mcx>(
+        pstate: Option<&mut ParseState<'mcx>>,
+        node: Expr<'static>,
+        input_type_id: Oid,
+        target_type_id: Oid,
+        target_type_mod: i32,
+        ccontext: CoercionContext,
+        cformat: CoercionForm,
+        location: i32,
+    ) -> PgResult<Expr<'static>>
+);
+
+seam_core::seam!(
+    /// `find_coercion_pathway(targetTypeId, sourceTypeId, COERCION_EXPLICIT,
+    /// &funcid)` (parse_coerce.c): like [`find_coercion_pathway_implicit`] but
+    /// under the *explicit* coercion context — the form `func_get_detail`
+    /// (parse_func.c) uses to decide whether a one-argument call naming a type
+    /// is really a type coercion. Returns the pathway kind and (for `Func`) the
+    /// coercion function OID, else `InvalidOid`.
+    pub fn find_coercion_pathway_explicit(
+        target_type_id: Oid,
+        source_type_id: Oid,
+    ) -> PgResult<(CoercionPathType, Oid)>
+);
+
+seam_core::seam!(
+    /// `select_common_typmod(pstate, exprs, common_type)` (parse_coerce.c): the
+    /// common typmod across `exprs` once they share `common_type` (the
+    /// `unify_hypothetical_args` companion to `select_common_type`). The C
+    /// `pstate` argument is unused by the computation, so it is dropped.
+    pub fn select_common_typmod(exprs: &[Expr<'static>], common_type: Oid) -> PgResult<i32>
+);
+
+seam_core::seam!(
+    /// `coerce_null_to_domain(typid, typmod, collation, typlen, typbyval)`
+    /// (parse_coerce.c): build a NULL `Const` of the domain's base type and, if
+    /// `typid` is a domain, wrap it in the domain coercion so domain
+    /// constraints (e.g. NOT NULL) are applied. Used by the planner's
+    /// `expand_insert_targetlist` to fill a missing INSERT column with a NULL of
+    /// the column's (possibly domain) type.
+    pub fn coerce_null_to_domain<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        typid: Oid,
+        typmod: i32,
+        collation: Oid,
+        typlen: i32,
+        typbyval: bool,
+    ) -> PgResult<nodes::primnodes::Expr<'static>>
+);

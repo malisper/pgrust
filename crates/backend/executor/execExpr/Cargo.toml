@@ -1,0 +1,109 @@
+[package]
+name = "execExpr"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "execExpr"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+mcx = { path = "../../../_support/mcx" }
+# ExecPrepareExpr/Qual/Check reach expression_planner over the deps-less VALUE
+# seam (declared in the planner-pc-seams crate, installed from the planner unit's
+# init_seams), avoiding a direct executor->optimizer dependency.
+planner_pc_seams = { path = "../../optimizer/plan/planner_pc_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+datum = { path = "../../../_support/types/datum" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+nodes = { path = "../../../_support/types/nodes" }
+# Domain-constraint vocabulary (DomainConstraintState / DOM_CONSTRAINT_*) the
+# CoerceToDomain step builder reads back from the typcache seam.
+cache = { path = "../../../_support/types/cache" }
+# ACL vocabulary (AclResult / ACL_EXECUTE) the per-column ACL_EXECUTE check in
+# the grouping/param equality builders compares against.
+types_acl = { path = "../../../_support/types/types_acl" }
+# Seam crate this unit OWNS (installs every decl from its own init_seams()).
+execExpr_seams = { path = "../execExpr_seams" }
+# The Agg runtime state (AggStateData) now lives in its real owner nodeAgg
+# (relocated out of types-nodes for the logtape registry retire). nodeAgg deps
+# only execExpr's SEAM crate, not this owner, so there is no cycle.
+nodeAgg = { path = "../nodeAgg" }
+# Outward seams routed through owner crates (panic until the owner lands):
+#   execExprInterp (the cycle partner: ExecReadyInterpretedExpr + eval dispatch)
+#   execUtils (ResetExprContext)
+execExprInterp_seams = { path = "../execExprInterp_seams" }
+execUtils_seams = { path = "../execUtils_seams" }
+# execTuples owns the TupleTableSlot accessors (slot_getattr / natts /
+# ExecClearTuple) the SubPlan projection-slot seams route through.
+execTuples_seams = { path = "../execTuples_seams" }
+# ExecInitSubPlanExpr compiles a SubPlan reference by building its SubPlanState
+# through nodeSubplan's ExecInitSubPlan seam (installed by that owner).
+nodeSubplan_seams = { path = "../nodeSubplan_seams" }
+# lsyscache owns the catalog operator lookups (get_compatible_hash_operators /
+# get_opcode / get_op_hash_functions) the hashed-subplan combining-op
+# resolution routes through.
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+# typcache owns DomainHasConstraints (get_typtype is lsyscache) for the
+# JSON_EXISTS-coercion-to-domain path of ExecInitJsonCoercion.
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
+# format_type_be(refcontainertype) for the "cannot subscript type %s" /
+# "does not support subscripted assignment" error texts in ExecInitSubscriptingRef.
+format_type_seams = { path = "../../utils/adt/format_type_seams" }
+# fmgr_info(funcid) -> FmgrInfo (fn_strict/fn_stats/fn_addr) for the Func / agg /
+# hash / IOcoerce / rowcompare / minmax / scalararrayop opcode selection and
+# fn_addr stamp (ExecInitFunc and friends read flinfo->fn_strict after lookup).
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+# nodeFuncs owns exprType()/exprTypmod()/exprCollation() — pure node-type
+# inspections ExecBuildProjectionInfo / ExecBuildUpdateProjection read to pick
+# the ASSIGN_TMP[_MAKE_RO] opcode and to run the ExecCheckPlanOutput-equivalent
+# type-mismatch checks.
+nodeFuncs_seams = { path = "../../nodes/nodeFuncs_seams" }
+# bitmapset owns bms_add_member/bms_is_member — ExecBuildUpdateProjection builds
+# the assignedCols set to drive the old-column copy-over loop.
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }
+# make_opclause (makefuncs.c) + fix_opfuncids (nodeFuncs.c) — the const-test
+# evaluator (eval_const_test, the predtest.c operator_predicate_proof tail)
+# builds and stabilizes a boolean OpExpr from two Consts. Pure node-construction
+# helpers with no executor dep, so the owner crate is acyclic here.
+nodes_core = { path = "../../nodes/nodes_core" }
+# The predtest unit's OUTWARD seam crate: eval_const_test is declared there and
+# installed from this executor owner's init_seams() (the executor backs the test).
+inherit_predtest_seams = { path = "../../optimizer/util/inherit_predtest_seams" }
+# The clauses unit's OUTWARD evaluate_expr_fallback seam is declared there and
+# installed from this executor owner's init_seams() (evaluate_expr runs the expr
+# through the executor: CreateExecutorState → ExecInitExpr → ExecEvalExpr).
+clauses_seams = { path = "../../optimizer/util/clauses_seams" }
+# ExecPrepareExpr/ExecPrepareQual/ExecPrepareCheck run their standalone expr
+# through expression_planner() (eval_const_expressions + fix_opfuncids) before
+# the parentless ExecInitExpr compile. The planner owns expression_planner; this
+# executor reaches it over the deps-less VALUE seam (installed from the planner
+# unit's init_seams), avoiding a direct executor->optimizer dependency.
+# ExecInitFunc's permission check: object_aclcheck(ProcedureRelationId, funcid,
+# GetUserId(), ACL_EXECUTE) + aclcheck_error (catalog ACL owner), GetUserId
+# (miscinit owner), InvokeFunctionExecuteHook (objectaccess owner). The same
+# ACL+hook gate is run per-column by ExecBuildGroupingEqual / ExecBuildParamSetEqual
+# (domain_agg) — func_subscript uses the full objectaccess crate
+# (invoke_function_execute_hook), domain_agg uses the objectaccess-seams gate
+# (object_access_hook_present).
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+objectaccess = { path = "../../catalog/objectaccess" }
+objectaccess_seams = { path = "../../catalog/objectaccess_seams" }
+# types_acl (AclMode/AclResult/ACL_EXECUTE), the ProcedureRelationId catalog OID
+# and OBJECT_FUNCTION object type for the ACL check, and pgstat_track_functions /
+# TRACK_FUNC_* for the strict×fusage opcode selection (types-acl declared above).
+parsenodes = { path = "../../../_support/types/parsenodes" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+# The domains unit's OUTWARD seams (declared in domains-seams) are the
+# EState-less ExecInitExpr(check_expr, NULL) + standalone-ExprContext ExecCheck
+# the domain-constraint machinery (typcache/domains.c) runs through the
+# executor. Declared there, installed from this executor owner's init_seams()
+# (the executor backs the domain CHECK compile + eval). execExpr_domain.
+domains_seams = { path = "../../utils/adt/domains_seams" }
+# MakeExpandedObjectReadOnlyInternal (expandeddatum.c) — domain_check_exec forces
+# a possibly-multiply-read varlena domain value to read-only before ExecCheck.
+misc2_seams = { path = "../../utils/adt/misc2_seams" }

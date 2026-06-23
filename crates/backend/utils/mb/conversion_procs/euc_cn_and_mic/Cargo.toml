@@ -1,0 +1,18 @@
+[package]
+name = "euc_cn_and_mic"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "euc_cn_and_mic"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+error_fgram = { path = "../../../error/error_fgram" }
+mb_fgram = { path = "../../mb_fgram" }
+conv_string_helpers = { path = "../../conv_string_helpers" }
+types-error-real = { package = "types_error", path = "../../../../../_support/types/types_error" }
+fmgr_core = { path = "../../../fmgr/fmgr_core" }
+types_wchar = { path = "../../../../../_support/types/types_wchar" }

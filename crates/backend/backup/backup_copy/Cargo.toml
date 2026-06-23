@@ -1,0 +1,23 @@
+[package]
+name = "backup_copy"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backup_copy"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+mcx = { path = "../../../_support/mcx" }
+sink = { path = "../sink" }
+backup_copy_seams = { path = "../backup_copy_seams" }
+pqformat = { path = "../../libpq/pqformat" }
+pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+
+[dev-dependencies]
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }

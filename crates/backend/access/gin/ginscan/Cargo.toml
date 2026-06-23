@@ -1,0 +1,36 @@
+[package]
+name = "ginscan"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ginscan"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+# bufmgr (bufmgr.c) — ReleaseBuffer for posting-tree pins in ginFreeScanKeys.
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+gin = { path = "../../../../_support/types/gin" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+tidbitmap = { path = "../../../../_support/types/tidbitmap" }
+
+# owned engine layers (direct deps — acyclic: ginscan owns ginscan.c,
+# consumes ginutil/gin-core-probe which it does not call back into)
+ginutil = { path = "../ginutil" }
+core_probe = { path = "../core_probe" }
+
+# cross-owner seam crates
+ginutil_seams = { path = "../ginutil_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+utils_error = { path = "../../../utils/utils_error" }
+
+[dev-dependencies]

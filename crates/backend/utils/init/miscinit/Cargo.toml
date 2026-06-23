@@ -1,0 +1,96 @@
+[package]
+name = "miscinit"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "miscinit"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+matview_deps_seams = { path = "../../../commands/matview_deps_seams" }
+user_seams = { path = "../../../commands/user_seams" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+# Parallel-worker bring-up: Set{Authenticated,Session,CurrentRole,UserIdAndSec}*
+# identity restore (parallel.c ParallelWorkerMain).
+parallel_rt_seams = { path = "../../../access/transam/parallel_rt_seams" }
+
+# The fmgr builtin registry (this crate registers its SQL-callable builtins).
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+
+# pg_config()/get_configdata: the ConfigData row type + the seam this crate
+# installs from its get_configdata body (config_info.c is homed here next to the
+# port/path.c get_*_path helpers it calls).
+misc_more2 = { path = "../../../../_support/types/misc_more2" }
+config_info_seams = { path = "../../../../common/config_info_seams" }
+
+utils_error = { path = "../../utils_error" }
+init_small = { path = "../init_small" }
+guc_tables = { path = "../../misc/guc_tables" }
+latch = { path = "../../../storage/ipc/latch" }
+
+# Inward seams (this crate installs them).
+miscinit_seams = { path = "../miscinit_seams" }
+# ProcessUtility reaches InSecurityRestrictedOperation (CheckRestrictedOperation,
+# utility.c) through the utility-out-seams; miscinit owns the real body, so it
+# cross-installs that copy too (mirrors xact's xact_read_only cross-install).
+utility_out_seams = { path = "../../../tcop/utility_out_seams" }
+# plancache's consumer slice (GetCachedPlan plan-revalidation predicates):
+# get_user_id is miscinit-owned, row_security reads the guc-tables slot. Cross-
+# install here so EXECUTE's GetCachedPlan revalidation resolves.
+backendstate_pc_seams = { path = "../../misc/backendstate_pc_seams" }
+
+# Outward seams into owners that would cycle or are not yet ported.
+init_small_seams = { path = "../init_small_seams" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+inval_seams = { path = "../../cache/inval_seams" }
+guc_seams = { path = "../../misc/guc_seams" }
+guc_funcs_seams = { path = "../../misc/guc_funcs_seams" }
+functioncmds_seams = { path = "../../../commands/functioncmds_seams" }
+superuser_seams = { path = "../../misc/superuser_seams" }
+varlena_seams = { path = "../../adt/varlena_seams" }
+dfmgr_seams = { path = "../../fmgr/dfmgr_seams" }
+lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
+# Delegation installs for the mis-homed slot-sync worker bootstrap group
+# (declared on miscinit's seam crate by the slotsync consumer, but bodied in
+# these owners; miscinit installs them by ::calling the real owner's seam,
+# mirroring the WAL-summarizer/my_proc_pid delegation pattern below).
+postinit_seams = { path = "../postinit_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+more_seams = { path = "../../misc/more_seams" }
+timeout_seams = { path = "../../misc/timeout_seams" }
+libpq_pqsignal_seams = { path = "../../../libpq/libpq_pqsignal_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+dsm_core_seams = { path = "../../../storage/ipc/dsm_core_seams" }
+pmsignal_seams = { path = "../../../storage/ipc/pmsignal_seams" }
+waiteventset_seams = { path = "../../../storage/ipc/waiteventset_seams" }
+fileperm_seams = { path = "../../../storage/file/fileperm_seams" }
+transam_parallel = { path = "../../../access/transam/transam_parallel" }
+backend_port_path_seams = { path = "../../../port/backend_port_path_seams" }
+sysv_shmem_seams = { path = "../../../port/sysv/sysv_shmem_seams" }
+interrupt_seams = { path = "../../../postmaster/interrupt_seams" }
+# TouchSocketLockFiles / RecheckDataDirLockFile are miscinit.c bodies, but the
+# postmaster's ServerLoop calls them via its own seam declarations; miscinit
+# installs those postmaster-side seams here (delegating to its own fns).
+postmaster_seams = { path = "../../../postmaster/postmaster_seams" }
+pqcomm_seams = { path = "../../../libpq/pqcomm_seams" }
+common_exec_seams = { path = "../../../common/common_exec_seams" }
+common_path_seams = { path = "../../../../common/common_path_seams" }
+port_path_seams = { path = "../../../../port/port_path_seams" }
+# genfile.c::convert_and_check_filename — the server-file-read policy is bodied
+# here next to the path predicates it gates over (installed into
+# backend-common-path-seams). It reaches role membership via the acl seam and
+# the pg_read_server_files role OID from the catalog vocabulary.
+backend_common_path_seams = { path = "../../../common/backend_common_path_seams" }
+acl_seams = { path = "../../adt/acl_seams" }
+types_catalog = { path = "../../../../_support/types/types_catalog" }
+tablespace_globals_seams = { path = "../../../commands/tablespace_globals_seams" }
+username_seams = { path = "../../../../common/username_seams" }

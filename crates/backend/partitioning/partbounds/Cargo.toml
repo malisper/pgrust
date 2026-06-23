@@ -1,0 +1,38 @@
+[package]
+name = "partbounds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "partbounds"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+types_core = { path = "../../../_support/types/types_core" }
+nodes = { path = "../../../_support/types/nodes" }
+pathnodes = { path = "../../../_support/types/pathnodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+partbounds_seams = { path = "../partbounds_seams" }
+small1_seams = { path = "../../parser/small1_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+scalar_seams = { path = "../../utils/adt/scalar_seams" }
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+nodes_core = { path = "../../nodes/nodes_core" }
+rel = { path = "../../../_support/types/rel" }
+utils_error = { path = "../../utils/utils_error" }
+read_seams = { path = "../../nodes/read_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+partcache_seams = { path = "../../utils/cache/partcache_seams" }
+common_relation_seams = { path = "../../access/common/common_relation_seams" }
+partdesc_seams = { path = "../partdesc_seams" }
+types_storage = { path = "../../../_support/types/types_storage" }
+fmgr = { path = "../../../_support/types/fmgr" }
+datum = { path = "../../../_support/types/datum" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+coerce_seams = { path = "../../parser/coerce_seams" }
+format_type_seams = { path = "../../utils/adt/format_type_seams" }
+arrayfuncs_seams = { path = "../../utils/adt/arrayfuncs_seams" }

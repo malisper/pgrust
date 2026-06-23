@@ -1,0 +1,18 @@
+[package]
+name = "samplescan"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "samplescan"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../mcx" }
+types_core = { path = "../types_core" }
+datum = { path = "../datum" }
+nodes = { path = "../nodes" }
+rel = { path = "../rel" }
+types_tableam = { path = "../types_tableam" }
+pathnodes = { path = "../pathnodes" }

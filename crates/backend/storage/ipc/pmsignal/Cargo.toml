@@ -1,0 +1,50 @@
+[package]
+name = "pmsignal"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pmsignal"
+path = "src/lib.rs"
+
+[dependencies]
+utils_error = { path = "../../../utils/utils_error" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+condvar = { path = "../../../../_support/types/condvar" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+ipc_shmem_seams = { path = "../ipc_shmem_seams" }
+libc = "0.2"
+
+# fmgr builtin table: SQL-callable functions register here for by-OID dispatch.
+fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
+
+# Inward seam crates this unit owns and installs.
+barrier_seams = { path = "../barrier_seams" }
+pmsignal_seams = { path = "../pmsignal_seams" }
+
+# Direct dependency: spinlock primitives for the Barrier mutex.
+s_lock = { path = "../../lmgr/s_lock" }
+
+# Outward seam crates (callees owned by other units / not yet ported).
+pmchild_seams = { path = "../../../postmaster/pmchild_seams" }
+postmaster_seams = { path = "../../../postmaster/postmaster_seams" }
+syslogger_seams = { path = "../../../postmaster/syslogger_seams" }
+port_pqsignal_seams = { path = "../../../../port/port_pqsignal_seams" }
+signal = { path = "../../../../_support/types/signal" }
+dsm_core_seams = { path = "../dsm_core_seams" }
+latch_seams = { path = "../latch_seams" }
+procarray_seams = { path = "../procarray_seams" }
+condition_variable_seams = { path = "../../lmgr/condition_variable_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+status_seams = { path = "../../../utils/activity/status_seams" }
+acl_seams = { path = "../../../utils/adt/acl_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+superuser_seams = { path = "../../../utils/misc/superuser_seams" }

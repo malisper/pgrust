@@ -1,0 +1,41 @@
+[package]
+name = "execUtils"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "execUtils"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+datum = { path = "../../../_support/types/datum" }
+types_error = { path = "../../../_support/types/types_error" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+nodes = { path = "../../../_support/types/nodes" }
+rel = { path = "../../../_support/types/rel" }
+utils_error = { path = "../../utils/utils_error" }
+heaptuple = { path = "../../access/common/heaptuple" }
+execUtils_seams = { path = "../execUtils_seams" }
+execParallel_support_seams = { path = "../execParallel_support_seams" }
+execTuples_seams = { path = "../execTuples_seams" }
+# ExecCloseResultRelations -> ExecCloseIndices (execIndexing.c) via its seam.
+# execIndexing depends on execUtils, so the call goes through the seam crate.
+execIndexing_seams = { path = "../execIndexing_seams" }
+execExpr_seams = { path = "../execExpr_seams" }
+execMain_seams = { path = "../execMain_seams" }
+nodeModifyTable_seams = { path = "../nodeModifyTable_seams" }
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }
+next_seams = { path = "../../access/common/next_seams" }
+table_tableam = { path = "../../access/table/table_tableam" }
+table = { path = "../../access/table/table" }
+parser_relation_seams = { path = "../../parser/parser_relation_seams" }
+partitioning_core_seams = { path = "../../partitioning/partitioning_core_seams" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+jit_seams = { path = "../../jit/jit_seams" }
+types_storage = { path = "../../../_support/types/types_storage" }

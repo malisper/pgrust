@@ -1,0 +1,19 @@
+[package]
+name = "cryptohashfuncs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "cryptohashfuncs"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+types_error = { path = "../../../../_support/types/types_error" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+sha2 = { path = "../../../../common/sha2" }
+md5 = { path = "../../../../common/md5" }

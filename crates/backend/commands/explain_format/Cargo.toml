@@ -1,0 +1,16 @@
+[package]
+name = "explain_format"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "explain_format"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+types_explain = { path = "../../../_support/types/types_explain" }
+json_seams = { path = "../../utils/adt/json_seams" }
+xml_seams = { path = "../../utils/adt/xml_seams" }

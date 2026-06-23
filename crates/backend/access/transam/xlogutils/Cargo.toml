@@ -1,0 +1,34 @@
+[package]
+name = "xlogutils"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "xlogutils"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+wal = { path = "../../../../_support/types/wal" }
+rel = { path = "../../../../_support/types/rel" }
+types_error = { path = "../../../../_support/types/types_error" }
+utils_error = { path = "../../../utils/utils_error" }
+
+xlogutils_seams = { path = "../xlogutils_seams" }
+xlogreader_seams = { path = "../xlogreader_seams" }
+transam_xlog_seams = { path = "../transam_xlog_seams" }
+timeline_seams = { path = "../timeline_seams" }
+xlogrecovery_seams = { path = "../xlogrecovery_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
+fd_seams = { path = "../../../storage/file/fd_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+pgsleep_seams = { path = "../../../../port/pgsleep_seams" }
+common_relpath_seams = { path = "../../../../common/common_relpath_seams" }

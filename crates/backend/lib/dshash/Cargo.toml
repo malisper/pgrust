@@ -1,0 +1,22 @@
+[package]
+name = "dshash"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "dshash"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+execparallel = { path = "../../../_support/types/execparallel" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+dshash_seams = { path = "../dshash_seams" }
+dsa_seams = { path = "../../utils/mmgr/dsa_seams" }
+lwlock_seams = { path = "../../storage/lmgr/lwlock_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+hashfn_seams = { path = "../../../common/hashfn_seams" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }

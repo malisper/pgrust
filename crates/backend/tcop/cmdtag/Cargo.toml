@@ -1,0 +1,19 @@
+[package]
+name = "cmdtag"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "cmdtag"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+portal = { path = "../../../_support/types/portal" }
+
+# Leaf helpers cmdtag.c calls (acyclic direct deps): the ASCII/locale
+# case-fold comparison and the unsigned-int decimal renderer.
+pgstrcasecmp = { path = "../../../port/pgstrcasecmp" }
+numutils = { path = "../../utils/adt/numutils" }

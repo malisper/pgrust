@@ -1,0 +1,20 @@
+[package]
+name = "int8"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "int8"
+path = "src/lib.rs"
+
+[dependencies]
+types_error = { path = "../../../../_support/types/types_error" }
+# pg_strtoint64_safe / pg_lltoa (numutils.c): the int8 text I/O cores, owner ported.
+numutils = { path = "../numutils" }
+# fmgr builtin layer (Datum fn(PG_FUNCTION_ARGS)): the call frame + Datum codec +
+# the fmgr-core builtin table the int8 SQL-callable functions register into.
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }

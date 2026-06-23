@@ -1,0 +1,12 @@
+[package]
+name = "pgsleep"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgsleep"
+path = "src/lib.rs"
+
+[dependencies]
+pgsleep_seams = { path = "../pgsleep_seams" }

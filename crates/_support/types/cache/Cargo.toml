@@ -1,0 +1,17 @@
+[package]
+name = "cache"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "cache"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../mcx" }
+types_core = { path = "../types_core" }
+nodes = { path = "../nodes" }
+datum = { path = "../datum" }
+types_scan = { path = "../types_scan" }
+types_acl = { path = "../types_acl" }

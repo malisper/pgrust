@@ -1,0 +1,83 @@
+[package]
+name = "build"
+version = "0.1.0"
+edition = "2021"
+
+# Every fallible function here returns the project-wide `types_error::PgResult`.
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+rel = { path = "../../../../_support/types/rel" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+gist = { path = "../../../../_support/types/gist" }
+
+# libm: pow / rint for the buffering-switch arithmetic (math.h in C).
+libm = "0.2"
+
+# ereport / elog (miscadmin.h, elog.c).
+utils_error = { path = "../../../utils/utils_error" }
+
+# Page-byte primitives (bufpage.c): PageRef / PageMut / PageGetItem /
+# PageGetItemId / PageGetMaxOffsetNumber / PageGetFreeSpace / PageAddItemExtended.
+page = { path = "../../../storage/page" }
+
+# GiST core (gist.c / gistutil.c / gistsplit.c): gistdoinsert, gistplacetopage,
+# gistSplit, gistFormTuple, gistCompressValues, gistgetadjusted, gistDeCompressAtt,
+# gistpenalty, gistchoose, gistcheckpage, initGISTstate, gistNewBuffer,
+# GISTInitBuffer, gistinitpage, gistfillbuffer, gistextractpage, gistjoinvector,
+# gistunion, gistfillitupvec + page accessors.
+gist_core = { path = "../gist_core" }
+
+# Build-dispatch seams (gistbuild/gistbuildempty `ambuild`/`ambuildempty`): the
+# GiST AM vtable lives in the lower gist-core crate, which reaches these entries
+# (above it in the dep graph) through these seams; gist-build installs them from
+# its `init_seams`. Acyclic — gist-am-seams is a leaf seam crate (types-only
+# deps), and gist-core already sits above it.
+am_seams = { path = "../am_seams" }
+
+# Buffer manager (bufmgr.c): ReadBuffer / LockBuffer / UnlockReleaseBuffer /
+# BufferGetPage / BufferGetBlockNumber / MarkBufferDirty / PageSetLSN.
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+
+# Bulk page writer (bulk_write.c): smgr_bulk_start_rel / get_buf / write / finish.
+bulkwrite_seams = { path = "../../../storage/smgr/bulkwrite_seams" }
+
+# Buffered temp files (buffile.c): BufFileCreateTemp / Close / SeekBlock /
+# ReadExact / Write.
+buffile_seams = { path = "../../../storage/file/buffile_seams" }
+
+# WAL insert (xloginsert.c): log_newpage_range (post-build WAL emit).
+xloginsert_seams = { path = "../../transam/xloginsert_seams" }
+
+# smgr (smgr.c): smgrnblocks (auto-mode cache-fit check).
+smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
+
+# Index AM support-procedure resolution (indexam.c): index_getprocid
+# (GIST_SORTSUPPORT_PROC probe for the sorted-build mode decision).
+indexam_seams = { path = "../../index/indexam_seams" }
+
+# table-AM heap-scan provider (tableam.c): table_index_build_scan.
+table_tableam_seams = { path = "../../table/table_tableam_seams" }
+
+# Relcache (rel.h): RelationNeedsWAL (post-build WAL emit decision).
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+
+# maintenance_work_mem GUC (vacuumlazy seam carries it) + effective_cache_size.
+vacuumlazy_seams = { path = "../../heap/vacuumlazy_seams" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+
+# Critical section START/END (miscinit.c).
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+
+# CHECK_FOR_INTERRUPTS (parallel-rt seam).
+parallel_rt_seams = { path = "../../transam/parallel_rt_seams" }
+
+# tuplesort (tuplesort.c): tuplesort_begin_index_gist + putindextuplevalues +
+# performsort + getindextuple + end (sorted-build leg; uninstalled -> panics
+# until the tuplesort tower lands).
+tuplesort_seams = { path = "../../../utils/sort/tuplesort_seams" }

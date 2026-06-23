@@ -1,0 +1,131 @@
+[package]
+name = "index"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "index"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+rel = { path = "../../../_support/types/rel" }
+nodes = { path = "../../../_support/types/nodes" }
+types_tableam = { path = "../../../_support/types/types_tableam" }
+
+# This unit's own inward seam declarations (installed by `init_seams`).
+index_seams = { path = "../index_seams" }
+
+# Relcache reads (`rd_index`/`rd_rel`/`rd_indam` fields, the index-AM vtable via
+# `relation_rd_indam`, and the `pg_node_tree`-decoding `RelationGetIndex-
+# {Expressions,Predicate}` / `RelationGetExclusionInfo`) used by
+# `BuildIndexInfo` and `index_build`.
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+# Raw (non-planner-flattened) index expr/pred decode for
+# `index_concurrently_create_copy`.
+relcache_nodexform_seams = { path = "../../utils/cache/relcache_nodexform_seams" }
+# Processing-mode reads (`IsNormalProcessingMode`).
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+# `GetUserIdAndSecContext` (matview-deps owns the getter).
+matview_deps_seams = { path = "../../commands/matview_deps_seams" }
+# GUC nest level / RestrictSearchPath / AtEOXact_GUC.
+guc_seams = { path = "../../utils/misc/guc_seams" }
+# pgstat progress (CREATE INDEX phase report).
+backend_progress_seams = { path = "../../utils/activity/backend_progress_seams" }
+
+# The reindex parallel-state transfer seams (owned by parallel.c's seam crate;
+# this unit installs the index.c bodies — EstimateReindexStateSpace /
+# SerializeReindexState / RestoreReindexState).
+parallel_rt_seams = { path = "../../access/transam/parallel_rt_seams" }
+
+# `UpdateIndexRelation`: pg_index INSERT carrier + the catalog-indexing
+# `catalog_tuple_insert_pg_index` writer (keystone #341), `table_open`/
+# `table_close` of pg_index, and the `nodeToString` (outfuncs) image of the
+# index expressions / predicate (`make_ands_explicit` is a real fn in
+# backend-nodes-core).
+types_catalog = { path = "../../../_support/types/types_catalog" }
+table_seams = { path = "../../access/table/table_seams" }
+indexing_seams = { path = "../indexing_seams" }
+comment_seams = { path = "../../commands/comment_seams" }
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }
+nodes_core = { path = "../../nodes/nodes_core" }
+# `BuildSpeculativeIndexInfo`: per-key unique-operator lookup.
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+amapi_seams = { path = "../../access/index/amapi_seams" }
+indexam_seams = { path = "../../access/index/indexam_seams" }
+indexam = { path = "../../access/index/indexam" }
+table_tableam_seams = { path = "../../access/table/table_tableam_seams" }
+tuplesort_seams = { path = "../../utils/sort/tuplesort_seams" }
+vacuum_seams = { path = "../../commands/vacuum_seams" }
+page = { path = "../../storage/page" }
+
+# ConstructTupleDescriptor: index AM vtable lookup (amkeytype), the heap
+# TupleDesc reads, CheckAttributeType, CreateTemplateTupleDesc /
+# populate_compact_attribute, get_base_element_type, and AppendAttributeTuples.
+heap_seams = { path = "../heap_seams" }
+tupdesc = { path = "../../access/common/tupdesc" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+# CompareIndexInfo: map_variable_attnos over the index expression/predicate
+# lists + equal().
+rewritemanip_seams = { path = "../../rewrite/rewritemanip_seams" }
+equalfuncs_seams = { path = "../../nodes/equalfuncs_seams" }
+nodeFuncs_seams = { path = "../../nodes/nodeFuncs_seams" }
+
+# Seam crates for not-yet-ported (or cyclic) owners.
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+
+# index_create / index_constraint_create / index_set_state_flags:
+# heap_create + InsertPgClassTuple (creating the index relcache entry + pg_class
+# row), the dependency engine (column/collation/opclass/expression deps + the
+# constraint's internal dep), pg_constraint entry + name check, pg_inherits
+# (partition-index parent link), the deferrable-constraint recheck trigger, the
+# AccessExclusiveLock on the new index, relcache/object-access invalidation +
+# hooks, GetNewRelFileNumber / IsBinaryUpgrade / GLOBALTABLESPACE, the catalog
+# system-table checks, the partition parent's relhassubclass, and the
+# bootstrap-mode index_register / RelationInitIndexAccessInfo legs.
+catalog_seams = { path = "../catalog_seams" }
+dependency_seams = { path = "../dependency_seams" }
+pg_constraint_seams = { path = "../pg_constraint_seams" }
+pg_inherits_seams = { path = "../pg_inherits_seams" }
+pg_depend_seams = { path = "../pg_depend_seams" }
+partition_seams = { path = "../partition_seams" }
+trigger_seams = { path = "../../commands/trigger_seams" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+objectaccess_seams = { path = "../objectaccess_seams" }
+inval_seams = { path = "../../utils/cache/inval_seams" }
+tablecmds_seams = { path = "../../commands/tablecmds_seams" }
+tablespace_globals_seams = { path = "../../commands/tablespace_globals_seams" }
+bootstrap_seams = { path = "../../bootstrap/bootstrap_seams" }
+types_cluster = { path = "../../../_support/types/types_cluster" }
+types_storage = { path = "../../../_support/types/types_storage" }
+
+# reindex_index / reindex_relation: index/heap open+lock (index_open via indexam,
+# try_table_open via table.c), RelationSetNewRelfilenumber + RelationGetIndexList
+# (relcache), TransferPredicateLocksToHeapRelation (predicate), CheckTableNotInUse
+# (matview-deps), get_index_isvalid (tablecmds), CommandCounterIncrement (xact),
+# the toast-skip WARNING/INFO ereport channel, the EventTriggerCollectSimpleCommand
+# leg, and IsToastNamespace (catalog).
+predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
+event_trigger_seams = { path = "../../commands/event_trigger_seams" }
+error_seams = { path = "../../utils/error/error_seams" }
+types_pgstat = { path = "../../../_support/types/types_pgstat" }
+
+# index_drop: RelationDropStorage (schedule index storage unlink at commit),
+# pgstat_drop_relation (drop the per-relation stats entry transactionally), the
+# PushActiveSnapshot/GetTransactionSnapshot bracket around the pg_index delete,
+# and the DROP INDEX CONCURRENTLY session-lock / locker-drain leg.
+catalog_storage_seams = { path = "../catalog_storage_seams" }
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }
+# FormIndexDatum: slot_getattr / slot_getsysattr (execTuples), index-expression
+# eval (execExpr ExecPrepareExprList / ExecEvalExprSwitchContext), and the
+# per-tuple expression context (execUtils GetPerTupleExprContext).
+execTuples_seams = { path = "../../executor/execTuples_seams" }
+execExpr_seams = { path = "../../executor/execExpr_seams" }
+execUtils_seams = { path = "../../executor/execUtils_seams" }
+# The word-model result Datum the form_index_datum seam yields.
+datum = { path = "../../../_support/types/datum" }

@@ -1,0 +1,17 @@
+[package]
+name = "portal"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "portal"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../mcx" }
+types_core = { path = "../types_core" }
+types_resowner = { path = "../types_resowner" }
+nodes = { path = "../nodes" }
+snapshot = { path = "../snapshot" }
+types_tuple = { path = "../types_tuple" }

@@ -1,0 +1,26 @@
+[package]
+name = "heaptuple"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "heaptuple"
+path = "src/lib.rs"
+
+# `trace` (default-on) enables env-gated deform tracing via pgrust-trace.
+# Kept behind a feature because this crate is `#![no_std]`; the feature can be
+# disabled to guarantee no std linkage if ever needed.
+[features]
+default = ["trace"]
+trace = ["dep:trace"]
+
+[dependencies]
+trace = { path = "../../../../_support/pgrust/trace", optional = true }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+heaptoast_seams = { path = "../../heap/heaptoast_seams" }
+misc2_seams = { path = "../../../utils/adt/misc2_seams" }
+mcx = { path = "../../../../_support/mcx" }

@@ -1,0 +1,37 @@
+[package]
+name = "joininfo"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "joininfo"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+mcx = { path = "../../../../_support/mcx" }
+init_subselect_ext_seams = { path = "../../plan/init_subselect_ext_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+
+# Inward seams this unit owns + installs (declared in earlier consumers' seam
+# crates; this unit is the C-source owner that installs them).
+path_small_seams = { path = "../../path/path_small_seams" }
+costsize_seams = { path = "../../path/costsize_seams" }
+joinpath_seams = { path = "../../path/joinpath_seams" }
+placeholder_seams = { path = "../placeholder_seams" }
+restrictinfo_seams = { path = "../restrictinfo_seams" }
+equivclass_ext_seams = { path = "../../path/equivclass_ext_seams" }
+geqo_all_seams = { path = "../../../geqo_all_seams" }
+
+# Outward seams this unit calls.
+relnode_seams = { path = "../relnode_seams" }
+relnode_ext_seams = { path = "../relnode_ext_seams" }
+pathnode_seams = { path = "../pathnode_seams" }
+equivclass_seams = { path = "../../path/equivclass_seams" }
+lsyscache_seams = { path = "../../../utils/cache/lsyscache_seams" }
+joininfo_ext_seams = { path = "../joininfo_ext_seams" }

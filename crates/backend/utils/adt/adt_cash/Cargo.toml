@@ -1,0 +1,30 @@
+[package]
+name = "adt_cash"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_cash"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_cash = { path = "../../../../_support/types/types_cash" }
+types_error = { path = "../../../../_support/types/types_error" }
+# float8_mul / float8_div (utils/float.h): the float owner is not yet ported,
+# so they cross the owner's seam crate and panic until it lands.
+float_seams = { path = "../float_seams" }
+# PGLC_localeconv (pg_locale.c): owner not yet ported, crosses the seam.
+pg_locale_seams = { path = "../pg_locale_seams" }
+# numeric arithmetic cores (numeric.c): the owner IS ported, no cycle, so we
+# depend directly and call the real functions.
+adt_numeric = { path = "../adt_numeric" }
+types_numeric = { path = "../../../../_support/types/types_numeric" }
+# pg_toupper (port/pgstrcasecmp.c): a leaf, depend directly.
+pgstrcasecmp = { path = "../../../../port/pgstrcasecmp" }
+# fmgr builtin registration (the Datum fn(FunctionCallInfo) boundary): register
+# every cash.c builtin into fmgr-core's table for by-OID dispatch.
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }

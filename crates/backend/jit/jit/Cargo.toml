@@ -1,0 +1,26 @@
+[package]
+name = "jit"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "jit"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+datum = { path = "../../../_support/types/datum" }
+types_error = { path = "../../../_support/types/types_error" }
+fmgr = { path = "../../../_support/types/fmgr" }
+nodes = { path = "../../../_support/types/nodes" }
+execparallel = { path = "../../../_support/types/execparallel" }
+utils_error = { path = "../../utils/utils_error" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+init_small = { path = "../../utils/init/init_small" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+jit_seams = { path = "../jit_seams" }
+llvmjit_seams = { path = "../llvmjit_seams" }
+fd_seams = { path = "../../storage/file/fd_seams" }

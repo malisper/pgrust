@@ -1,0 +1,28 @@
+[package]
+name = "rangetypes_typanalyze"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "rangetypes_typanalyze"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+datum = { path = "../../../../_support/types/datum" }
+cache = { path = "../../../../_support/types/cache" }
+types_rangetypes = { path = "../../../../_support/types/types_rangetypes" }
+statistics = { path = "../../../../_support/types/statistics" }
+types_selfuncs = { path = "../../../../_support/types/types_selfuncs" }
+
+rangetypes_typanalyze_seams = { path = "../rangetypes_typanalyze_seams" }
+rangetypes_seams = { path = "../rangetypes_seams" }
+multirangetypes_seams = { path = "../multirangetypes_seams" }
+lsyscache_seams = { path = "../../cache/lsyscache_seams" }
+vacuum_seams = { path = "../../../commands/vacuum_seams" }
+guc_tables = { path = "../../misc/guc_tables" }

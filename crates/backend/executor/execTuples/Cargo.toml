@@ -1,0 +1,38 @@
+[package]
+name = "execTuples"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "execTuples"
+path = "src/lib.rs"
+
+[dependencies]
+trace = { path = "../../../_support/pgrust/trace" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+datum = { path = "../../../_support/types/datum" }
+types_error = { path = "../../../_support/types/types_error" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+nodes = { path = "../../../_support/types/nodes" }
+types_storage = { path = "../../../_support/types/types_storage" }
+utils_error = { path = "../../utils/utils_error" }
+heaptuple = { path = "../../access/common/heaptuple" }
+tupdesc = { path = "../../access/common/tupdesc" }
+# Per-owner seams routed by the slot-ops vtable callbacks.
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+# expandeddatum.c EOH_get_flat_size/EOH_flatten_into for tts_virtual_materialize.
+misc2_seams = { path = "../../utils/adt/misc2_seams" }
+# Owned seam crate this unit installs from init_seams().
+execTuples_seams = { path = "../execTuples_seams" }
+# Per-owner seams for unported neighbors reached by the tuple-output family.
+nodeFuncs_seams = { path = "../../nodes/nodeFuncs_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+heaptoast_seams = { path = "../../access/heap/heaptoast_seams" }
+varlena_seams = { path = "../../utils/adt/varlena_seams" }
+dest_seams = { path = "../../tcop/dest_seams" }
+guc_funcs_seams = { path = "../../utils/misc/guc_funcs_seams" }

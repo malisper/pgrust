@@ -1,0 +1,34 @@
+[package]
+name = "network_selfuncs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "network_selfuncs"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+# Canonical unified `Datum` (the by-reference inet varlena image) carried into
+# the detoast + element-comparison edges.
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_network = { path = "../../../../_support/types/types_network" }
+nodes = { path = "../../../../_support/types/nodes" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+types_selfuncs = { path = "../../../../_support/types/types_selfuncs" }
+adt_network = { path = "../adt_network" }
+network_seams = { path = "../network_seams" }
+selfuncs_seams = { path = "../selfuncs_seams" }
+lsyscache_seams = { path = "../../cache/lsyscache_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+# Node construction (make_const / make_opclause) for the network_subset_support
+# index-condition `OpExpr` trees; owner ported, depend directly. No cycle:
+# backend-nodes-core does not depend on the network crates.
+nodes_core = { path = "../../../nodes/nodes_core" }
+# The OID-keyed `SupportRequestIndexCondition` registry where this crate
+# registers `network_subset_support`'s decomposed kernel + installs the dispatch.
+fmgr_support_seams = { path = "../../fmgr/fmgr_support_seams" }

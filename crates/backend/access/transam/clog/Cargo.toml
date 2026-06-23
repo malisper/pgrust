@@ -1,0 +1,36 @@
+[package]
+name = "clog"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "clog"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+mcx = { path = "../../../../_support/mcx" }
+libc = "0.2"
+
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+wal = { path = "../../../../_support/types/wal" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+
+utils_error = { path = "../../../utils/utils_error" }
+init_small = { path = "../../../utils/init/init_small" }
+slru = { path = "../slru" }
+transam = { path = "../transam" }
+lwlock = { path = "../../../storage/lmgr/lwlock" }
+
+clog_seams = { path = "../clog_seams" }
+xloginsert_seams = { path = "../xloginsert_seams" }
+transam_xlog_seams = { path = "../transam_xlog_seams" }
+varsup_seams = { path = "../varsup_seams" }
+lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
+guc_seams = { path = "../../../utils/misc/guc_seams" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }

@@ -1,0 +1,20 @@
+[package]
+name = "catalog_data"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "catalog_data"
+path = "src/lib.rs"
+
+[dependencies]
+# The relcache-seams crate declares the `catalog_schema_attrs` seam this crate
+# installs (the carrier crosses there). Acyclic: this crate only deps the seam
+# decl + value types, never relcache itself.
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+
+types_core = { path = "../../../_support/types/types_core" }
+# `OwnedAttr` / `BootstrapCatalogSchema` — the value carriers the schema rows
+# and the seam result use.
+relcache_entry = { path = "../../../_support/types/relcache_entry" }

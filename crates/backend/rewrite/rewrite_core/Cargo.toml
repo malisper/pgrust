@@ -1,0 +1,36 @@
+[package]
+name = "rewrite_core"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "rewrite_core"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+cache = { path = "../../../_support/types/cache" }
+datum = { path = "../../../_support/types/datum" }
+types_storage = { path = "../../../_support/types/types_storage" }
+nodes_core = { path = "../../nodes/nodes_core" }
+# remove_nulling_relids nodeFuncs seam (owner = this crate's nulling.rs).
+nodeFuncs_seams = { path = "../../nodes/nodeFuncs_seams" }
+# equivclass.c reaches the same remove_nulling_relids (var.c) by value.
+equivclass_ext_seams = { path = "../../optimizer/path/equivclass_ext_seams" }
+parser_relation = { path = "../../parser/parser_relation" }
+coerce = { path = "../../parser/coerce" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+utils_error = { path = "../../utils/utils_error" }
+table = { path = "../../access/table/table" }
+indexing_seams = { path = "../../catalog/indexing_seams" }
+rewritemanip_seams = { path = "../rewritemanip_seams" }
+rewritesupport_seams = { path = "../rewritesupport_seams" }
+plancat_ext_seams = { path = "../../optimizer/util/plancat_ext_seams" }
+init_subselect_ext_seams = { path = "../../optimizer/plan/init_subselect_ext_seams" }
+pathnodes = { path = "../../../_support/types/pathnodes" }

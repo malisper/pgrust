@@ -1,0 +1,57 @@
+[package]
+name = "vacuumparallel"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "vacuumparallel"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_vacuum = { path = "../../../_support/types/types_vacuum" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_dsa = { path = "../../../_support/types/types_dsa" }
+execparallel = { path = "../../../_support/types/execparallel" }
+
+utils_error = { path = "../../utils/utils_error" }
+
+# own seam crate is the shared vacuum hub; inward consumer contract lives in
+# the vacuumlazy seam crate.
+vacuum_seams = { path = "../vacuum_seams" }
+vacuumlazy_seams = { path = "../../access/heap/vacuumlazy_seams" }
+
+# parallel-query infrastructure seams.
+transam_parallel = { path = "../../access/transam/transam_parallel" }
+parallel_rt_seams = { path = "../../access/transam/parallel_rt_seams" }
+
+# Outward-dependency owners for the vacuumparallel.c `*_pv` seams whose
+# subsystems have landed with real value-typed providers. Installed as thin
+# marshal+delegate wrappers from this crate's init_seams().
+tidstore = { path = "../../access/common/tidstore" }
+instrument = { path = "../../executor/instrument" }
+postgres = { path = "../../tcop/postgres" }
+init_small = { path = "../../utils/init/init_small" }
+status = { path = "../../utils/activity/status" }
+activity_small = { path = "../../utils/activity/activity_small" }
+
+# `GetAccessStrategyWithSize`/`FreeAccessStrategy` (freelist.c) — the worker's
+# own VACUUM ring.
+support = { path = "../../storage/buffer/support" }
+# `MyProc->statusFlags` PROC_IN_VACUUM accessor (proc.c).
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+
+# Value-typed Relation reopen + accessors for the 6 worker/leader seams:
+#  * `table_open(mcx, oid, lockmode)` — the worker/leader Relation reopen;
+#  * `GetIndexAmRoutineByAmId` — the index-AM options;
+#  * `RelationGetNumberOfBlocks` — relcache/smgr block count.
+# (`get_namespace_name` rides the vacuumlazy seam hub already depended on.)
+table_seams = { path = "../../access/table/table_seams" }
+amapi_seams = { path = "../../access/index/amapi_seams" }
+indexam_seams = { path = "../../access/index/indexam_seams" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }

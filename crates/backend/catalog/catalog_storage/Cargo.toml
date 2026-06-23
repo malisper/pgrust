@@ -1,0 +1,57 @@
+[package]
+name = "catalog_storage"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "catalog_storage"
+path = "src/lib.rs"
+
+[dependencies]
+# Lazy-vacuum driver's RelationTruncate seam homes in vacuumlazy-seams;
+# catalog/storage.c is its real owner.
+vacuumlazy_seams = { path = "../../access/heap/vacuumlazy_seams" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+wal = { path = "../../../_support/types/wal" }
+rel = { path = "../../../_support/types/rel" }
+types_cluster = { path = "../../../_support/types/types_cluster" }
+types_syscache = { path = "../../../_support/types/types_syscache" }
+
+# Own seam declarations (installed by init_seams()).
+catalog_storage_seams = { path = "../catalog_storage_seams" }
+
+# Cycle-safe direct deps (real fns).
+smgr = { path = "../../storage/smgr/smgr" }
+# CreateAndCopyRelationData's per-fork buffered copy
+# (RelationCopyStorageUsingBuffer) is the buffer manager's; reached via its seam.
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+xloginsert = { path = "../../access/transam/xloginsert" }
+xlogutils = { path = "../../access/transam/xlogutils" }
+freespace = { path = "../../storage/freespace" }
+visibilitymap = { path = "../../access/heap/visibilitymap" }
+page = { path = "../../storage/page" }
+relpath = { path = "../../common/relpath" }
+table = { path = "../../access/table/table" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+
+# Outward calls through owner -seams crates (panic until the owner lands).
+smgr_seams = { path = "../../storage/smgr/smgr_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+lmgr_proc_seams = { path = "../../storage/lmgr/lmgr_proc_seams" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+indexing_seams = { path = "../indexing_seams" }
+# index_build's unlogged init-fork emit leg (build_index_init_fork_if_needed)
+# homes here (catalog/storage layer); installed from init_seams().
+index_seams = { path = "../index_seams" }
+bulkwrite_seams = { path = "../../storage/smgr/bulkwrite_seams" }
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+parallel_rt_seams = { path = "../../access/transam/parallel_rt_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }

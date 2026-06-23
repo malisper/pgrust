@@ -1,0 +1,142 @@
+[package]
+name = "spgist_core"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "spgist_core"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+spgist = { path = "../../../../_support/types/spgist" }
+types_amvalidate = { path = "../../../../_support/types/types_amvalidate" }
+opclass = { path = "../../../../_support/types/opclass" }
+
+# ereport / elog.
+utils_error = { path = "../../../utils/utils_error" }
+
+# Page-byte primitives (bufpage.c).
+page = { path = "../../../storage/page" }
+
+# Tuple-form/deform cores (heaptuple.c / indextuple.c / tupdesc.c).
+heaptuple = { path = "../../common/heaptuple" }
+indextuple = { path = "../../common/indextuple" }
+tupdesc = { path = "../../common/tupdesc" }
+
+# Buffer manager (bufmgr.c).
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+
+# Free-space map (indexfsm.c): GetFreeIndexPage / RecordFreeIndexPage /
+# IndexFreeSpaceMapVacuum.
+freespace_seams = { path = "../../../storage/freespace/freespace_seams" }
+
+# --- spgvacuum.c deps ---
+# lmgr (lmgr.c): LockRelationForExtension / UnlockRelationForExtension.
+lmgr_seams = { path = "../../../storage/lmgr/lmgr_seams" }
+# procarray (procarray.c): GlobalVisTestFor / GlobalVisTestIsRemovableXid.
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+# snapmgr (snapmgr.c): GetActiveSnapshot.
+snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
+# vacuumlazy (vacuumlazy.c): vacuum_delay_point.
+vacuumlazy_seams = { path = "../../heap/vacuumlazy_seams" }
+# hio (hio.c): RELATION_IS_LOCAL.
+hio_seams = { path = "../../heap/hio_seams" }
+# snapshot vocabulary (SnapshotData.xmin).
+snapshot = { path = "../../../../_support/types/snapshot" }
+
+# reloptions (reloptions.c): build_reloptions_spgist.
+reloptions_seams = { path = "../../common/reloptions_seams" }
+
+# Transaction state (xact.c): GetTopTransactionIdIfAny.
+transam_xact_seams = { path = "../../transam/transam_xact_seams" }
+
+# Relcache accessors (rel.h / relcache.c): rd_amcache_spgist, index_getprocid.
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+
+# lsyscache lookups (lsyscache.c): lookup_pg_type, get_base_type, get_atttype,
+# get_index_column_opclass, get_opclass_opfamily_and_input_type, get_op_rettype,
+# opfamily_can_sort_type (added here).
+lsyscache_seams = { path = "../../../utils/cache/lsyscache_seams" }
+cache = { path = "../../../../_support/types/cache" }
+
+# syscache list lookups (syscache.c): search_amop_list.
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+
+# amvalidate library (amvalidate.c): opfamily_can_sort_type.
+amvalidate_seams = { path = "../../index/amvalidate_seams" }
+
+# Binary-coercibility test (parse_coerce.c): IsBinaryCoercible.
+coerce_seams = { path = "../../../parser/coerce_seams" }
+
+# This unit's own outward seams (initSpGistState / spgGetCache / page mgmt /
+# tuple builders / spgExtractNodeLabels / spgoptions / spgproperty), installed
+# from init_seams() and consumed downstream by spgdoinsert / spgscan / spgvacuum.
+spg_core_seams = { path = "../spg_core_seams" }
+
+# --- spgdoinsert.c WAL-emit + dispatch deps ---
+
+# WAL insert (xloginsert.c): XLogBeginInsert/RegisterData/RegisterBuffer/Insert,
+# plus log_newpage_range for the spgbuild post-build WAL emit.
+xloginsert_seams = { path = "../../transam/xloginsert_seams" }
+# table-AM heap-scan provider (tableam.c): table_index_build_scan for spgbuild.
+table_tableam_seams = { path = "../../table/table_tableam_seams" }
+# bulk page writer (bulk_write.c): smgr_bulk_* for spgbuildempty.
+bulkwrite_seams = { path = "../../../storage/smgr/bulkwrite_seams" }
+# REGBUF_* flag constants + spgxlog record write-side serializers.
+wal = { path = "../../../../_support/types/wal" }
+xlog_records = { path = "../../../../_support/types/xlog_records" }
+
+# Critical-section + PageSetLSN (miscinit / bufmgr already deps).
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+
+# Interrupt globals (globals.c): InterruptPending read for the descent loop.
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+# CHECK_FOR_INTERRUPTS / INTERRUPTS_CAN_BE_PROCESSED.
+parallel_rt_seams = { path = "../../transam/parallel_rt_seams" }
+
+# pg_prng_uint64_range(&pg_global_prng_state, ...) for allTheSame random node.
+prng = { path = "../../../../_support/pg/prng" }
+
+# fmgr (fmgr.c): FunctionCall1Coll for the opclass compress support proc.
+fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
+
+# detoast (detoast.c): PG_DETOAST_DATUM on varlena key/include columns.
+detoast_seams = { path = "../../common/detoast_seams" }
+
+# Datum vocabulary for canonical per-attribute values.
+datum = { path = "../../../../_support/types/datum" }
+
+# --- spgscan.c scan-driver deps ---
+
+# Unified index AM vtable / scan descriptor + AmOpaque carrier (SPGIST_SCAN tag)
+# + IndexOrderByDistance + TIDBitmap.
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+# The concrete TIDBitmap behind the amgetbitmap AmTIDBitmap payload.
+tidbitmap = { path = "../../../../_support/types/tidbitmap" }
+# The scan queue (pairingheap.c): SpGistSearchItem priority queue.
+pairingheap = { path = "../../../lib/pairingheap" }
+# pgstat_count_index_scan (pgstat.c).
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+# tbm_add_tuples (tidbitmap.c).
+nodes_core_seams = { path = "../../../nodes/nodes_core_seams" }
+# spghandler vtable (IndexAmRoutine) + F6 WAL redo (spgxlog.c).
+types_amapi = { path = "../../../../_support/types/types_amapi" }
+spg_xlog_seams = { path = "../spg_xlog_seams" }
+xlogutils = { path = "../../transam/xlogutils" }
+xlogutils_seams = { path = "../../transam/xlogutils_seams" }
+xlogreader_seams = { path = "../../transam/xlogreader_seams" }
+standby_seams = { path = "../../../storage/ipc/standby_seams" }
+bufmask_seams = { path = "../../common/bufmask_seams" }
+vacuum_seams = { path = "../../../commands/vacuum_seams" }
+
+[dev-dependencies]

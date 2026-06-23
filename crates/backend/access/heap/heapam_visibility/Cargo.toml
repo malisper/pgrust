@@ -1,0 +1,31 @@
+[package]
+name = "heapam_visibility"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "heapam_visibility"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+transam_seams = { path = "../../transam/transam_seams" }
+transam_xact_seams = { path = "../../transam/transam_xact_seams" }
+subtrans_seams = { path = "../../transam/subtrans_seams" }
+transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
+multixact_seams = { path = "../../transam/multixact_seams" }
+heapam_seams = { path = "../heapam_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+reorderbuffer_seams = { path = "../../../replication/logical/reorderbuffer_seams" }
+combocid_seams = { path = "../../../utils/time/combocid_seams" }
+snapmgr_pc_seams = { path = "../../../utils/time/snapmgr_pc_seams" }
+
+[dev-dependencies]
+mcx = { path = "../../../../_support/mcx" }

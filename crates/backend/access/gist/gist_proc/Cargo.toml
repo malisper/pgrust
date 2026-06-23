@@ -1,0 +1,36 @@
+[package]
+name = "gist_proc"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "gist_proc"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+types_error = { path = "../../../../_support/types/types_error" }
+fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
+gist = { path = "../../../../_support/types/gist" }
+types_sortsupport = { path = "../../../../_support/types/types_sortsupport" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+mcx = { path = "../../../../_support/mcx" }
+dispatch_seams = { path = "../dispatch_seams" }
+gist_proc_seams = { path = "../gist_proc_seams" }
+geo_ops_seams = { path = "../../../utils/adt/geo_ops_seams" }
+network_gist_seams = { path = "../../../utils/adt/network_gist_seams" }
+network_seams = { path = "../../../utils/adt/network_seams" }
+types_network = { path = "../../../../_support/types/types_network" }
+rangetypes_gist = { path = "../../../utils/adt/rangetypes_gist" }
+types_rangetypes = { path = "../../../../_support/types/types_rangetypes" }
+tsgistidx = { path = "../../../utils/adt/tsgistidx" }
+tsquery_core = { path = "../../../utils/adt/tsquery_core" }
+ts_small = { path = "../../../utils/adt/ts_small" }
+tsvector_core = { path = "../../../utils/adt/tsvector_core" }
+detoast_seams = { path = "../../common/detoast_seams" }
+tsearch = { path = "../../../../_support/types/tsearch" }
+allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }

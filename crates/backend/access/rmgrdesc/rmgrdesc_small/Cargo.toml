@@ -1,0 +1,24 @@
+[package]
+name = "rmgrdesc_small"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "rmgrdesc_small"
+path = "src/lib.rs"
+
+[dependencies]
+rmgrdesc_small_seams = { path = "../../../rmgrdesc_small_seams" }
+clogdesc_seams = { path = "../clogdesc_seams" }
+committsdesc_seams = { path = "../committsdesc_seams" }
+dbasedesc_seams = { path = "../dbasedesc_seams" }
+genericdesc_seams = { path = "../genericdesc_seams" }
+logicalmsgdesc_seams = { path = "../logicalmsgdesc_seams" }
+relmapdesc_seams = { path = "../relmapdesc_seams" }
+seqdesc_seams = { path = "../seqdesc_seams" }
+tblspcdesc_seams = { path = "../tblspcdesc_seams" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+wal = { path = "../../../../_support/types/wal" }

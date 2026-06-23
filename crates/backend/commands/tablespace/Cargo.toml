@@ -1,0 +1,73 @@
+[package]
+name = "tablespace"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "tablespace"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+matview_deps_seams = { path = "../matview_deps_seams" }
+utils_error = { path = "../../utils/utils_error" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_acl = { path = "../../../_support/types/types_acl" }
+types_guc = { path = "../../../_support/types/types_guc" }
+wal = { path = "../../../_support/types/wal" }
+nodes = { path = "../../../_support/types/nodes" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+
+# Real ported callees (direct deps; no cycle).
+catalog_catalog = { path = "../../catalog/catalog_catalog" }
+miscinit = { path = "../../utils/init/miscinit" }
+relpath = { path = "../../common/relpath" }
+fd = { path = "../../storage/file/fd" }
+procsignal = { path = "../../storage/ipc/procsignal" }
+standby = { path = "../../storage/ipc/standby" }
+transam_xact = { path = "../../access/transam/transam_xact" }
+xloginsert = { path = "../../access/transam/xloginsert" }
+comment = { path = "../comment" }
+seclabel = { path = "../seclabel" }
+misc_guc = { path = "../../utils/misc/misc_guc" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+init_small = { path = "../../utils/init/init_small" }
+
+# Owner's own seam crate.
+tablespace_seams = { path = "../tablespace_seams" }
+# tablecmds DefineRelation reads the default tablespace through this seam; the
+# body (GetDefaultTablespace) is owned here, so we install it here.
+tablecmds_seams = { path = "../tablecmds_seams" }
+
+# ProcessUtility dispatch arms (installs the tablespace forwarding seams).
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+
+# Seam crates for unported / cycle-breaking owners (consumed, not installed here).
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+acl_seams = { path = "../../utils/adt/acl_seams" }
+superuser_seams = { path = "../../utils/misc/superuser_seams" }
+pg_shdepend_seams = { path = "../../catalog/pg_shdepend_seams" }
+objectaccess_seams = { path = "../../catalog/objectaccess_seams" }
+common_reloptions = { path = "../../access/common/common_reloptions" }
+reloptions_seams = { path = "../../access/common/reloptions_seams" }
+table_seams = { path = "../../access/table/table_seams" }
+table_tableam = { path = "../../access/table/table_tableam" }
+heapam = { path = "../../access/heap/heapam" }
+heaptuple = { path = "../../access/common/heaptuple" }
+scankey = { path = "../../access/common/scankey" }
+indexing = { path = "../../catalog/indexing" }
+define_seams = { path = "../define_seams" }
+arrayfuncs_seams = { path = "../../utils/adt/arrayfuncs_seams" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_tableam = { path = "../../../_support/types/types_tableam" }
+rel = { path = "../../../_support/types/rel" }
+checkpointer_seams = { path = "../../postmaster/checkpointer_seams" }
+pg_tablespace_seams = { path = "../../catalog/pg_tablespace_seams" }
+tblspc_fs_seams = { path = "../../storage/file/tblspc_fs_seams" }
+tablespace_globals_seams = { path = "../tablespace_globals_seams" }

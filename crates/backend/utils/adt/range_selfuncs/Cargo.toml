@@ -1,0 +1,24 @@
+[package]
+name = "range_selfuncs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "range_selfuncs"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+cache = { path = "../../../../_support/types/cache" }
+datum = { path = "../../../../_support/types/datum" }
+nodes = { path = "../../../../_support/types/nodes" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+types_rangetypes = { path = "../../../../_support/types/types_rangetypes" }
+types_selfuncs = { path = "../../../../_support/types/types_selfuncs" }
+rangetypes_seams = { path = "../rangetypes_seams" }
+multirangetypes_seams = { path = "../multirangetypes_seams" }
+selfuncs_seams = { path = "../selfuncs_seams" }
+lsyscache_seams = { path = "../../cache/lsyscache_seams" }

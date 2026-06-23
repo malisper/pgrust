@@ -1,0 +1,53 @@
+[package]
+name = "adt_jsonfuncs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_jsonfuncs"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+nodes = { path = "../../../../_support/types/nodes" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+types_json = { path = "../../../../_support/types/types_json" }
+types_jsonb = { path = "../../../../_support/types/types_jsonb" }
+types_jsonfuncs = { path = "../../../../_support/types/types_jsonfuncs" }
+utils_error = { path = "../../utils_error" }
+adt_jsonb = { path = "../adt_jsonb" }
+jsonb_seams = { path = "../jsonb_seams" }
+adt_json = { path = "../adt_json" }
+jsonb_util = { path = "../jsonb_util" }
+adt_numeric = { path = "../adt_numeric" }
+varlena_seams = { path = "../varlena_seams" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+funcapi = { path = "../../fmgr/funcapi" }
+# SRF entry points (json[b]_object_keys) call the funcapi seams directly
+# (InitMaterializedSRF / materialized_srf_putvalues / srf_arg_varlena_bytes /
+# cstring_get_text_datum), mirroring backend-backup-walsummaryfuncs.
+funcapi_seams = { path = "../../fmgr/funcapi_seams" }
+lsyscache = { path = "../../cache/lsyscache" }
+cache_typcache = { path = "../../cache/cache_typcache" }
+arrayfuncs = { path = "../arrayfuncs" }
+sort_storage = { path = "../../sort/sort_storage" }
+heaptuple = { path = "../../../access/common/heaptuple" }
+# json_render's array path detoasts the array varlena (DatumGetArrayTypeP).
+detoast_seams = { path = "../../../access/common/detoast_seams" }
+# populate_record copies the cached composite tuple descriptor.
+tupdesc = { path = "../../../access/common/tupdesc" }
+# populate_domain enforces domain constraints via domain_check.
+misc2 = { path = "../misc2" }
+# get_fn_expr_argtype for the record argument's declared type.
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+# Inward seam crate this unit owns (json/jsonb call json_categorize_type etc.)
+jsonfuncs_seams = { path = "../jsonfuncs_seams" }
+# Outward seam crates for not-yet-ported owners.
+jsonapi_seams = { path = "../../../../common/jsonapi_seams" }
+coerce_seams = { path = "../../../parser/coerce_seams" }
+stack_depth_seams = { path = "../../misc/stack_depth_seams" }

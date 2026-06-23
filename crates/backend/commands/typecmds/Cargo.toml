@@ -1,0 +1,72 @@
+[package]
+name = "typecmds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "typecmds"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+utils_error = { path = "../../utils/utils_error" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+
+# Ported owner crates (call directly)
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+pg_type = { path = "../../catalog/pg_type" }
+pg_cast = { path = "../../catalog/pg_cast" }
+pg_enum = { path = "../../catalog/pg_enum" }
+pg_range = { path = "../../catalog/pg_range" }
+pg_proc = { path = "../../catalog/pg_proc" }
+pg_constraint = { path = "../../catalog/pg_constraint" }
+func = { path = "../../parser/func" }
+small1 = { path = "../../parser/small1" }
+parse_expr = { path = "../../parser/parse_expr" }
+coerce = { path = "../../parser/coerce" }
+parse_collate = { path = "../../parser/parse_collate" }
+var_seams = { path = "../../optimizer/util/var_seams" }
+nodes_core = { path = "../../nodes/nodes_core" }
+operatorcmds = { path = "../operatorcmds" }
+aggregatecmds = { path = "../aggregatecmds" }
+tsearchcmds = { path = "../tsearchcmds" }
+collationcmds = { path = "../collationcmds" }
+parse_type = { path = "../../parser/parse_type" }
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+
+# Per-owner seam crates
+typecmds_seams = { path = "../typecmds_seams" }
+functioncmds_seams = { path = "../functioncmds_seams" }
+define_seams = { path = "../define_seams" }
+opclasscmds_seams = { path = "../opclasscmds_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+binary_upgrade_seams = { path = "../../catalog/binary_upgrade_seams" }
+pg_type_seams = { path = "../../catalog/pg_type_seams" }
+parse_type_seams = { path = "../../parser/parse_type_seams" }
+coerce_seams = { path = "../../parser/coerce_seams" }
+format_type_seams = { path = "../../utils/adt/format_type_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+dependency_seams = { path = "../../catalog/dependency_seams" }
+pg_depend_seams = { path = "../../catalog/pg_depend_seams" }
+pg_shdepend_seams = { path = "../../catalog/pg_shdepend_seams" }
+objectaccess_seams = { path = "../../catalog/objectaccess_seams" }
+tablecmds_seams = { path = "../tablecmds_seams" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
+pg_constraint_seams = { path = "../../catalog/pg_constraint_seams" }
+acl_seams = { path = "../../utils/adt/acl_seams" }
+inval_seams = { path = "../../utils/cache/inval_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+
+# types crates
+types_core = { path = "../../../_support/types/types_core" }
+types_acl = { path = "../../../_support/types/types_acl" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+opclass = { path = "../../../_support/types/opclass" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_storage = { path = "../../../_support/types/types_storage" }

@@ -1,0 +1,35 @@
+[package]
+name = "conversioncmds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "conversioncmds"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_acl = { path = "../../../_support/types/types_acl" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_wchar = { path = "../../../_support/types/types_wchar" }
+
+utils_error = { path = "../../utils/utils_error" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+
+# outward seam crates (callees; panic until owners land)
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+encnames_seams = { path = "../../../common/encnames_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+pg_conversion_seams = { path = "../../catalog/pg_conversion_seams" }
+parse_func_seams = { path = "../../parser/parse_func_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }

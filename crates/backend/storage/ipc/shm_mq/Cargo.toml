@@ -1,0 +1,30 @@
+[package]
+name = "shm_mq"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "shm_mq"
+path = "src/lib.rs"
+
+[dependencies]
+bgworker_seams = { path = "../../../postmaster/bgworker_seams" }
+dsm_core = { path = "../dsm_core" }
+latch_seams = { path = "../latch_seams" }
+shm_mq_seams = { path = "../shm_mq_seams" }
+mcxt_seams = { path = "../../../utils/mmgr/mcxt_seams" }
+lmgr_proc_seams = { path = "../../lmgr/lmgr_proc_seams" }
+s_lock = { path = "../../lmgr/s_lock" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+utils_error = { path = "../../../utils/utils_error" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+mcx = { path = "../../../../_support/mcx" }
+types_bgworker = { path = "../../../../_support/types/types_bgworker" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+execparallel = { path = "../../../../_support/types/execparallel" }
+types_parallel = { path = "../../../../_support/types/types_parallel" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+types_storage = { path = "../../../../_support/types/types_storage" }

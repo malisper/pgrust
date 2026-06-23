@@ -1,0 +1,13 @@
+[package]
+name = "pg_strong_random"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_strong_random"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+pg_strong_random_seams = { path = "../pg_strong_random_seams" }

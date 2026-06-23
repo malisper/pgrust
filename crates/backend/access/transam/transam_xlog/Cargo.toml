@@ -1,0 +1,83 @@
+[package]
+name = "transam_xlog"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "transam_xlog"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+wal = { path = "../../../../_support/types/wal" }
+control = { path = "../../../../_support/types/control" }
+types_error = { path = "../../../../_support/types/types_error" }
+mcx = { path = "../../../../_support/mcx" }
+utils_error = { path = "../../../utils/utils_error" }
+transam_xlog_seams = { path = "../transam_xlog_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+crc32c = { path = "../../../../port/crc32c" }
+s_lock = { path = "../../../storage/lmgr/s_lock" }
+ipc_shmem_seams = { path = "../../../storage/ipc/ipc_shmem_seams" }
+fd_seams = { path = "../../../storage/file/fd_seams" }
+pgstat_io_seams = { path = "../../../utils/activity/pgstat_io_seams" }
+lwlock_seams = { path = "../../../storage/lmgr/lwlock_seams" }
+lwlock = { path = "../../../storage/lmgr/lwlock" }
+init_small = { path = "../../../utils/init/init_small" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+misc_guc = { path = "../../../utils/misc/misc_guc" }
+rmgr = { path = "../rmgr" }
+postmaster_seams = { path = "../../../postmaster/postmaster_seams" }
+varlena = { path = "../../../utils/adt/varlena" }
+pgstrcasecmp = { path = "../../../../port/pgstrcasecmp" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
+xlogarchive = { path = "../xlogarchive" }
+xlogbackup = { path = "../xlogbackup" }
+xloginsert_seams = { path = "../xloginsert_seams" }
+latch_seams = { path = "../../../storage/ipc/latch_seams" }
+dsm_core_seams = { path = "../../../storage/ipc/dsm_core_seams" }
+backup_basebackup_seams = { path = "../../../backup/backup_basebackup_seams" }
+sink = { path = "../../../backup/sink" }
+instrument_seams = { path = "../../../executor/instrument_seams" }
+checkpointer_seams = { path = "../../../postmaster/checkpointer_seams" }
+sync_seams = { path = "../../../storage/sync/sync_seams" }
+walsender_seams = { path = "../../../replication/walsender_seams" }
+walreceiverfuncs_seams = { path = "../../../replication/walreceiverfuncs_seams" }
+# StartupXLOG driver cross-subsystem seams (all -seams crates, leaf deps).
+xlogrecovery_seams = { path = "../xlogrecovery_seams" }
+clog_seams = { path = "../clog_seams" }
+multixact_seams = { path = "../multixact_seams" }
+commit_ts_seams = { path = "../commit_ts_seams" }
+subtrans_seams = { path = "../subtrans_seams" }
+snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
+reinit = { path = "../../../storage/file/reinit" }
+twophase_seams = { path = "../twophase_seams" }
+varsup_seams = { path = "../varsup_seams" }
+xlogutils = { path = "../xlogutils" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+timeline_seams = { path = "../timeline_seams" }
+vacuum_seams = { path = "../../../commands/vacuum_seams" }
+origin_seams = { path = "../../../replication/logical/origin_seams" }
+slot_seams = { path = "../../../replication/slot_seams" }
+reorderbuffer_seams = { path = "../../../replication/logical/reorderbuffer_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+ps_status_seams = { path = "../../../utils/misc/ps_status_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+timeout_seams = { path = "../../../utils/misc/timeout_seams" }
+startup_seams = { path = "../../../postmaster/startup_seams" }
+# GetOldestUnsummarizedLSN(NULL, NULL) for the KeepLogSeg WAL-retention horizon
+# (the GetWALAvailability process-singleton entry).
+walsummarizer_seams = { path = "../../../postmaster/walsummarizer_seams" }
+smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
+types_timeout = { path = "../../../../_support/types/types_timeout" }
+libc = "0.2"
+
+[dev-dependencies]
+lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }

@@ -1,0 +1,66 @@
+[package]
+name = "policy"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "policy"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+utils_error = { path = "../../utils/utils_error" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+datum = { path = "../../../_support/types/datum" }
+nodes = { path = "../../../_support/types/nodes" }
+rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+
+# Directly ported foundation crates (acyclic).
+table = { path = "../../access/table/table" }
+common_relation = { path = "../../access/common/common_relation" }
+heaptuple = { path = "../../access/common/heaptuple" }
+scankey = { path = "../../access/common/scankey" }
+catalog_catalog = { path = "../../catalog/catalog_catalog" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+pg_depend = { path = "../../catalog/pg_depend" }
+pg_shdepend = { path = "../../catalog/pg_shdepend" }
+dependency = { path = "../../catalog/dependency" }
+parser_relation = { path = "../../parser/parser_relation" }
+clause = { path = "../../parser/clause" }
+parse_collate = { path = "../../parser/parse_collate" }
+rewrite_core = { path = "../../rewrite/rewrite_core" }
+arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
+inval = { path = "../../utils/cache/inval" }
+miscinit = { path = "../../utils/init/miscinit" }
+
+# Inward seams owned by this unit.
+policy_seams = { path = "../policy_seams" }
+# ProcessUtilitySlow dispatch entry points (CREATE/ALTER POLICY) installed here.
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+
+# Cross-subsystem externals via their owners' -seams crates.
+detoast_seams = { path = "../../access/common/detoast_seams" }
+genam_seams = { path = "../../access/index/genam_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+indexing_seams = { path = "../../catalog/indexing_seams" }
+objectaddress_seams = { path = "../../catalog/objectaddress_seams" }
+objectaccess_seams = { path = "../../catalog/objectaccess_seams" }
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }
+read_seams = { path = "../../nodes/read_seams" }
+parser_analyze_seams = { path = "../../parser/parser_analyze_seams" }
+adt_acl = { path = "../../utils/adt/adt_acl" }
+transam_xact = { path = "../../access/transam/transam_xact" }
+inval_seams = { path = "../../utils/cache/inval_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+guc_seams = { path = "../../utils/misc/guc_seams" }
+types_acl = { path = "../../../_support/types/types_acl" }
+parsenodes = { path = "../../../_support/types/parsenodes" }

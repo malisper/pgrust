@@ -1,0 +1,74 @@
+[package]
+name = "checkpointer"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "checkpointer"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+wal = { path = "../../../_support/types/wal" }
+types_pgstat = { path = "../../../_support/types/types_pgstat" }
+condvar = { path = "../../../_support/types/condvar" }
+types_startup = { path = "../../../_support/types/types_startup" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+signal = { path = "../../../_support/types/signal" }
+
+# procsignal_sigusr1_handler_signal — the SIGUSR1 handler this process must
+# install so it absorbs ProcSignalBarriers (ALTER/DROP DATABASE SET TABLESPACE).
+procsignal = { path = "../../storage/ipc/procsignal" }
+# pqsignal(signo, handler) installer.
+port_pqsignal_seams = { path = "../../../port/port_pqsignal_seams" }
+# unblock_signals() — restore UnBlockSig (postmaster forks us with BlockSig).
+libpq_pqsignal_seams = { path = "../../libpq/libpq_pqsignal_seams" }
+
+# ereport/elog and the error-report helpers.
+utils_error = { path = "../../utils/utils_error" }
+# ConfigReloadPending / ShutdownRequestPending live here (ported).
+interrupt = { path = "../interrupt" }
+# Real spinlock (slock_t) — a ported crate, not a seam.
+s_lock = { path = "../../storage/lmgr/s_lock" }
+# pgstat checkpointer pending-stats accessor + report (acyclic: seams-only crate).
+activity_small = { path = "../../utils/activity/activity_small" }
+
+# Its own inward seams (installed by init_seams).
+checkpointer_seams = { path = "../checkpointer_seams" }
+
+# ProcessUtility dispatch arm (installs the CHECKPOINT forwarding seam).
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+
+# Outward owner seam crates.
+ipc_shmem_seams = { path = "../../storage/ipc/ipc_shmem_seams" }
+dsm_core_seams = { path = "../../storage/ipc/dsm_core_seams" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
+procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
+pmsignal_seams = { path = "../../storage/ipc/pmsignal_seams" }
+lwlock_seams = { path = "../../storage/lmgr/lwlock_seams" }
+condition_variable_seams = { path = "../../storage/lmgr/condition_variable_seams" }
+lmgr_proc_seams = { path = "../../storage/lmgr/lmgr_proc_seams" }
+aio_seams = { path = "../../storage/aio/aio_seams" }
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+fd_seams = { path = "../../storage/file/fd_seams" }
+smgr_seams = { path = "../../storage/smgr/smgr_seams" }
+sync_seams = { path = "../../storage/sync/sync_seams" }
+auxprocess_seams = { path = "../auxprocess_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+guc_seams = { path = "../../utils/misc/guc_seams" }
+# GUC variable slots (checkpoint_timeout / checkpoint_warning accessors install here).
+guc_tables = { path = "../../utils/misc/guc_tables" }
+mcxt_seams = { path = "../../utils/mmgr/mcxt_seams" }
+resowner_seams_2 = { path = "../../utils/resowner/resowner_seams_2" }
+dynahash_seams = { path = "../../utils/hash/dynahash_seams" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+pgstat_wal_seams = { path = "../../utils/activity/pgstat_wal_seams" }
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+syncrep_seams = { path = "../../replication/syncrep/syncrep_seams" }
+pgsleep_seams = { path = "../../../port/pgsleep_seams" }

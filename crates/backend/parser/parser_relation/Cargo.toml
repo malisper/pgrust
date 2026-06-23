@@ -1,0 +1,50 @@
+[package]
+name = "parser_relation"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "parser_relation"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_acl = { path = "../../../_support/types/types_acl" }
+types_storage = { path = "../../../_support/types/types_storage" }
+nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+rel = { path = "../../../_support/types/rel" }
+utils_error = { path = "../../utils/utils_error" }
+nodes_core = { path = "../../nodes/nodes_core" }
+varlena = { path = "../../utils/adt/varlena" }
+
+# Merged owners called directly (cycle-free: none of these dep this crate).
+table = { path = "../../access/table/table" }
+queryenvironment = { path = "../../utils/misc/queryenvironment" }
+small1 = { path = "../small1" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+
+# Owner of this crate's inward seams.
+parser_relation_seams = { path = "../parser_relation_seams" }
+
+# Cross-crate install: parser-relation owns get_rte_attribute_name's body, which
+# ruleutils' deparser reaches through this seam.
+ruleutils_seams = { path = "../../utils/adt/ruleutils_seams" }
+
+# Outward dependency seams (catalog / cache / funcapi callees not yet ported / cyclic).
+small1_seams = { path = "../small1_seams" }
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+common_relation_seams = { path = "../../access/common/common_relation_seams" }
+plancat_ext_seams = { path = "../../optimizer/util/plancat_ext_seams" }
+funcapi = { path = "../../utils/fmgr/funcapi" }
+tupdesc = { path = "../../access/common/tupdesc" }
+tablecmds_seams = { path = "../../commands/tablecmds_seams" }
+heap_seams = { path = "../../catalog/heap_seams" }
+format_type_seams = { path = "../../utils/adt/format_type_seams" }
+nodeFuncs_seams = { path = "../../nodes/nodeFuncs_seams" }

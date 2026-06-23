@@ -1,0 +1,39 @@
+[package]
+name = "postmaster_startup"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "postmaster_startup"
+path = "src/lib.rs"
+
+[dependencies]
+guc_tables = { path = "../../utils/misc/guc_tables" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
+xlogutils_seams = { path = "../../access/transam/xlogutils_seams" }
+libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
+auxprocess_seams = { path = "../auxprocess_seams" }
+startup_seams = { path = "../startup_seams" }
+pmsignal_seams = { path = "../../storage/ipc/pmsignal_seams" }
+procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
+dsm_core_seams = { path = "../../storage/ipc/dsm_core_seams" }
+standby_seams = { path = "../../storage/ipc/standby_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+guc_file_seams = { path = "../../utils/misc/guc_file_seams" }
+timeout_seams = { path = "../../utils/misc/timeout_seams" }
+mcxt_seams = { path = "../../utils/mmgr/mcxt_seams" }
+libc = "0.2"
+mcx = { path = "../../../_support/mcx" }
+port_pqsignal_seams = { path = "../../../port/port_pqsignal_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+datum = { path = "../../../_support/types/datum" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_error = { path = "../../../_support/types/types_error" }
+types_guc = { path = "../../../_support/types/types_guc" }
+signal = { path = "../../../_support/types/signal" }
+types_startup = { path = "../../../_support/types/types_startup" }
+types_timeout = { path = "../../../_support/types/types_timeout" }
+wal = { path = "../../../_support/types/wal" }

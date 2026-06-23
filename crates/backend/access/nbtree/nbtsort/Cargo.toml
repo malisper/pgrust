@@ -1,0 +1,38 @@
+[package]
+name = "nbtsort"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nbtsort"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_nbtree = { path = "../../../../_support/types/types_nbtree" }
+rel = { path = "../../../../_support/types/rel" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+
+page = { path = "../../../storage/page" }
+
+# Outward seam crates (callees in not-yet-ported sibling / owner units).
+nbtree_core_seams = { path = "../nbtree_core_seams" }
+build_seams = { path = "../build_seams" }
+tuplesort_seams = { path = "../../../utils/sort/tuplesort_seams" }
+bulkwrite_seams = { path = "../../../storage/smgr/bulkwrite_seams" }
+activity_small = { path = "../../../utils/activity/activity_small" }
+# The serial heap build scan (`table_index_build_scan`, the closure-carrying
+# build seam; provider = heap AM, installed concurrently by wf-buildscan), the
+# index-fork block-count check, and `maintenance_work_mem` for sizing the sort.
+table_tableam_seams = { path = "../../table/table_tableam_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+guc_seams = { path = "../../../utils/misc/guc_seams" }
+
+[dev-dependencies]
+types_storage = { path = "../../../../_support/types/types_storage" }

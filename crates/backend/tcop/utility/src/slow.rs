@@ -1,0 +1,670 @@
+//! `ProcessUtilitySlow` (utility.c:1085-1581, PostgreSQL 18.3) — the
+//! event-trigger-fenced half of the utility dispatch.
+//!
+//! The "Slow" variant only ever receives statements supported by the event
+//! triggers facility; the trigger support calls are therefore always performed
+//! when the context allows (`isCompleteQuery`). This ports the
+//! `switch (nodeTag(parsetree))` 1:1 over the owned [`Node`] tree, with the same
+//! `needCleanup` / `commandCollected` / `address` / `secondaryObject` tracking,
+//! the same `CommandCounterIncrement` placement, and the same event-trigger
+//! fence ordering. The C `PG_TRY` / `PG_FINALLY` that guarantees
+//! `EventTriggerEndCompleteQuery` runs becomes an explicit
+//! run-body-then-finally over the `?` error path here (the `?` is the longjmp).
+//!
+//! Every command *body* lives in another subsystem and is reached through a thin
+//! forwarding seam in [`utility_out_seams`] (`rt`). The reachable
+//! CREATE TABLE spine — `transform_create_stmt` → `define_relation` →
+//! `CommandCounterIncrement` → `create_toast_for_relation` — is installed by
+//! backend-parser-parse-utilcmd and backend-commands-tablecmds. Every other arm
+//! (and the event-trigger fences, whose owner event_trigger.c is unported) calls
+//! an uninstalled seam, which is the project's loud documented panic — never a
+//! silent stub.
+
+use mcx::Mcx;
+use types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
+use types_error::PgResult;
+use nodes::nodeindexscan::PlannedStmt;
+use nodes::nodes::Node;
+use nodes::nodes as ntag;
+use nodes::parsestmt::{ParseState, ProcessUtilityContext, PROCESS_UTILITY_SUBCOMMAND};
+use nodes::portalcmds::ParamListInfo;
+use portal::QueryCompletion;
+use types_storage::lock::{ShareLock, ShareUpdateExclusiveLock};
+use types_tuple::access::{RELKIND_FOREIGN_TABLE, RELKIND_RELATION};
+
+use utility_out_seams as rt;
+
+/// `ProcessUtilitySlow(pstate, pstmt, queryString, context, params, queryEnv,
+/// dest, qc)` (utility.c:1085-1581). `queryEnv` is folded into `pstate`
+/// (`pstate->p_queryEnv`) by the dispatch, so it is not a separate parameter
+/// here. `dest`/`qc` are threaded for the CTAS / REFRESH arms.
+#[allow(clippy::too_many_arguments)]
+pub fn process_utility_slow<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    pstmt: &PlannedStmt<'mcx>,
+    query_string: &str,
+    context: ProcessUtilityContext,
+    params: ParamListInfo,
+    _dest: nodes::parsestmt::DestReceiverHandle,
+    is_top_level: bool,
+    mut qc: Option<&mut QueryCompletion>,
+) -> PgResult<()> {
+    // `parsetree = pstmt->utilityStmt` — guaranteed non-NULL by the dispatch.
+    let parsetree: &Node<'mcx> = pstmt
+        .utilityStmt
+        .as_deref()
+        .expect("ProcessUtilitySlow: PlannedStmt.utilityStmt is NULL");
+
+    let is_complete_query = context != PROCESS_UTILITY_SUBCOMMAND;
+
+    // All event trigger calls are done only when isCompleteQuery is true.
+    let need_cleanup =
+        is_complete_query && rt::event_trigger_begin_complete_query::call()?;
+
+    // The C `PG_TRY { body } PG_FINALLY { if (needCleanup) EventTriggerEndCompleteQuery(); }`.
+    //
+    // The body can leave through three doors: a normal `Ok`, an `Err` (`?`,
+    // standing for the C longjmp), or a Rust *panic* — the unported-boundary
+    // seams (e.g. `EventTriggerAlterTableStart`) abort by panicking, which the
+    // top-level loop catches and turns into an ERROR. C's `PG_FINALLY` runs on
+    // every one of those exits, so the cleanup MUST too. A plain
+    // `if need_cleanup { ... }` after the call is skipped when the body panics,
+    // leaving the pushed `currentEventTriggerState` (and its private
+    // MemoryContext) dangling on the thread-local stack — which later faults at
+    // backend teardown (observed SIGSEGV running fast_default). Run the pop from
+    // a `Drop` guard so it fires on the unwind path as well.
+    struct EndCompleteQueryGuard {
+        need_cleanup: bool,
+    }
+    impl Drop for EndCompleteQueryGuard {
+        fn drop(&mut self) {
+            if self.need_cleanup {
+                rt::event_trigger_end_complete_query::call();
+            }
+        }
+    }
+    let _end_guard = EndCompleteQueryGuard { need_cleanup };
+
+    process_utility_slow_body(
+        mcx,
+        pstate,
+        pstmt,
+        parsetree,
+        query_string,
+        context,
+        params,
+        is_top_level,
+        is_complete_query,
+        &mut qc,
+    )
+}
+
+/// The `PG_TRY` body of `ProcessUtilitySlow`: the `EventTriggerDDLCommandStart`,
+/// the `nodeTag(parsetree)` switch, and the trailing collect / SQLDrop /
+/// DDLCommandEnd fences.
+#[allow(clippy::too_many_arguments)]
+fn process_utility_slow_body<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    pstmt: &PlannedStmt<'mcx>,
+    parsetree: &Node<'mcx>,
+    query_string: &str,
+    _context: ProcessUtilityContext,
+    params: ParamListInfo,
+    is_top_level: bool,
+    is_complete_query: bool,
+    qc: &mut Option<&mut QueryCompletion>,
+) -> PgResult<()> {
+    if is_complete_query {
+        rt::event_trigger_ddl_command_start::call(parsetree)?;
+    }
+
+    // ObjectAddress address; ObjectAddress secondaryObject = InvalidObjectAddress;
+    let mut address: ObjectAddress = InvalidObjectAddress;
+    let secondary_object: ObjectAddress = InvalidObjectAddress;
+    let mut command_collected = false;
+
+    match parsetree.node_tag() {
+        // ----- relation and attribute manipulation -----
+        t if t == ntag::T_CreateSchemaStmt => {
+            rt::create_schema_command::call(
+                mcx,
+                parsetree,
+                query_string,
+                pstmt.stmt_location,
+                pstmt.stmt_len,
+            )?;
+            // EventTriggerCollectSimpleCommand called by CreateSchemaCommand.
+            command_collected = true;
+        }
+
+        t if t == ntag::T_CreateStmt || t == ntag::T_CreateForeignTableStmt => {
+            // Run parse analysis ...
+            let parsetree_ptr =
+                mcx::alloc_in(mcx, parsetree.clone_in(mcx)?)?;
+            let mut stmts = rt::transform_create_stmt::call(mcx, parsetree_ptr, query_string)?;
+
+            // ... and do it.  We can't use foreach() because we may modify the
+            // list midway through, so pick off the elements one at a time, the
+            // hard way: front-delete from `stmts`, possibly prepend more.
+            let mut table_rv: Option<nodes::nodes::NodePtr<'mcx>> = None;
+            while !stmts.is_empty() {
+                // list_delete_first: take the head, keeping ownership.
+                let stmt: nodes::nodes::NodePtr<'mcx> = stmts.remove(0);
+
+                match (&*stmt).node_tag() {
+                    t if t == ntag::T_CreateStmt => {
+                        let cstmt = stmt.expect_createstmt();
+                        // Remember transformed RangeVar for LIKE.
+                        table_rv = match &cstmt.relation {
+                            Some(rv) => Some(mcx::alloc_in(mcx, rv.clone_in(mcx)?)?),
+                            None => None,
+                        };
+
+                        // Create the table itself.
+                        address = rt::define_relation::call(
+                            mcx,
+                            cstmt.clone_in(mcx)?,
+                            RELKIND_RELATION,
+                            types_core::primitive::InvalidOid,
+                            Some(query_string),
+                        )?;
+                        rt::event_trigger_collect_simple_command::call(
+                            address,
+                            secondary_object,
+                            &stmt,
+                        )?;
+
+                        // Let NewRelationCreateToastTable decide if this one
+                        // needs a secondary relation too.
+                        rt::command_counter_increment::call()?;
+
+                        // parse + validate toast reloptions and create the
+                        // toast table (transformRelOptions("toast") +
+                        // heap_reloptions(RELKIND_TOASTVALUE) +
+                        // NewRelationCreateToastTable), sharing the new relation OID.
+                        rt::create_toast_for_relation::call(mcx, address.objectId, &cstmt.options)?;
+                    }
+                    t if t == ntag::T_CreateForeignTableStmt => {
+                        let cstmt = stmt.expect_createforeigntablestmt();
+                        // Remember transformed RangeVar for LIKE.
+                        table_rv = match &cstmt.base.relation {
+                            Some(rv) => Some(mcx::alloc_in(mcx, rv.clone_in(mcx)?)?),
+                            None => None,
+                        };
+
+                        address = rt::define_relation::call(
+                            mcx,
+                            cstmt.base.clone_in(mcx)?,
+                            RELKIND_FOREIGN_TABLE,
+                            types_core::primitive::InvalidOid,
+                            Some(query_string),
+                        )?;
+                        rt::create_foreign_table::call(mcx, &stmt, address.objectId)?;
+                        rt::event_trigger_collect_simple_command::call(
+                            address,
+                            secondary_object,
+                            &stmt,
+                        )?;
+                    }
+                    t if t == ntag::T_TableLikeClause => {
+                        // Delayed processing of LIKE options; prepend the
+                        // resulting sub-statements to `stmts`.
+                        let heap_rv_src = table_rv
+                            .as_ref()
+                            .expect("expandTableLikeClause: table_rv is NULL");
+                        let heap_rv = mcx::alloc_in(mcx, heap_rv_src.clone_in(mcx)?)?;
+                        let morestmts =
+                            rt::expand_table_like_clause::call(mcx, heap_rv, stmt)?;
+                        // list_concat(morestmts, stmts): morestmts first.
+                        let mut combined = morestmts;
+                        for s in stmts.drain(..) {
+                            combined.push(s);
+                        }
+                        stmts = combined;
+                    }
+                    _ => {
+                        // Recurse for anything else. The recursive call will
+                        // stash the objects so created into our event-trigger
+                        // context. (wrapper PlannedStmt + None receiver.)
+                        rt::process_utility_wrapper::call(
+                            mcx,
+                            &stmt,
+                            query_string,
+                            pstmt.stmt_location,
+                            pstmt.stmt_len,
+                        )?;
+                    }
+                }
+
+                // Need CCI between commands.
+                if !stmts.is_empty() {
+                    rt::command_counter_increment::call()?;
+                }
+            }
+
+            // The multiple commands generated here are stashed individually, so
+            // disable collection below.
+            command_collected = true;
+        }
+
+        t if t == ntag::T_AlterTableStmt => {
+            // The whole DETACH-CONCURRENTLY guard + lock-level + relation lookup
+            // + EventTrigger fence + AlterTable (+ the "does not exist, skipping"
+            // NOTICE) is one tablecmds-owned step (atcontext is internal there).
+            rt::alter_table_slow::call(
+                mcx,
+                pstmt,
+                parsetree,
+                query_string,
+                params,
+                is_top_level,
+            )?;
+            // ALTER TABLE stashes commands internally.
+            command_collected = true;
+        }
+
+        t if t == ntag::T_AlterDomainStmt => {
+            // The 'T'/'N'/'O'/'C'/'X'/'V' subtype switch (typecmds.c).
+            address = rt::alter_domain::call(mcx, parsetree)?;
+        }
+
+        // ----- object creation / destruction -----
+        t if t == ntag::T_DefineStmt => {
+            // The `kind` switch (aggregate / operator / type / TS* / collation).
+            address = rt::define_stmt::call(mcx, pstate, parsetree)?;
+        }
+
+        t if t == ntag::T_CreateDomainStmt => {
+            // CREATE DOMAIN.
+            address = rt::define_domain::call(mcx, pstate, parsetree)?;
+        }
+
+        t if t == ntag::T_IndexStmt => {
+            let stmt = parsetree.expect_indexstmt();
+            // CREATE INDEX.
+            if stmt.concurrent {
+                rt::prevent_in_transaction_block::call(is_top_level, "CREATE INDEX CONCURRENTLY")?;
+            }
+
+            // Look up the relation OID just once, taking the strongest lock that
+            // will eventually be needed (matching DefineIndex).
+            let lockmode = if stmt.concurrent {
+                ShareUpdateExclusiveLock
+            } else {
+                ShareLock
+            };
+            let relation_src = stmt
+                .relation
+                .as_ref()
+                .expect("CREATE INDEX: IndexStmt.relation is NULL");
+            let relation = mcx::alloc_in(mcx, relation_src.clone_in(mcx)?)?;
+            let relid = rt::range_var_get_relid_owns_relation::call(mcx, relation, lockmode)?;
+
+            // CREATE INDEX on partitioned tables (but not regular inherited
+            // tables) recurses to partitions; lock them early, validate
+            // relkinds, and count the partitions so DefineIndex needn't redo
+            // the find_all_inheritors search. The owner reads stmt->relation->inh
+            // and stmt->unique/primary internally and returns -1 when the target
+            // is not a partitioned table.
+            let stmt_for_count = mcx::alloc_in(mcx, parsetree.clone_in(mcx)?)?;
+            let nparts: i32 =
+                rt::create_index_count_partitions::call(mcx, relid, stmt_for_count, lockmode)?;
+
+            // An already-transformed IndexStmt came from generateClonedIndexStmt
+            // (expandTableLikeClause) — treat it like ALTER TABLE ADD INDEX.
+            let is_alter_table = stmt.transformed;
+
+            // Run parse analysis ...
+            let stmt_ptr = mcx::alloc_in(mcx, parsetree.clone_in(mcx)?)?;
+            let stmt2 = rt::transform_index_stmt::call(mcx, relid, stmt_ptr, query_string)?;
+
+            // ... and do it.
+            rt::event_trigger_alter_table_start::call(parsetree)?;
+            address = rt::define_index::call(mcx, relid, stmt2, nparts, is_alter_table)?;
+
+            // Add the CREATE INDEX node itself to the stash right away; commands
+            // stashed in the ALTER TABLE code must appear after this one.
+            rt::event_trigger_collect_simple_command::call(address, secondary_object, parsetree)?;
+            command_collected = true;
+            rt::event_trigger_alter_table_end::call()?;
+        }
+
+        t if t == ntag::T_ReindexStmt => {
+            rt::exec_reindex::call(mcx, pstate, parsetree, is_top_level)?;
+            // EventTriggerCollectSimpleCommand is called directly.
+            command_collected = true;
+        }
+
+        t if t == ntag::T_CompositeTypeStmt => {
+            // CREATE TYPE (composite).
+            address = rt::define_composite_type::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_CreateEnumStmt => {
+            address = rt::define_enum::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_CreateRangeStmt => {
+            address = rt::define_range::call(mcx, pstate, parsetree)?;
+        }
+
+        t if t == ntag::T_AlterEnumStmt => {
+            address = rt::alter_enum::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_ViewStmt => {
+            // CREATE VIEW.
+            rt::event_trigger_alter_table_start::call(parsetree)?;
+            address = rt::define_view::call(
+                mcx,
+                parsetree,
+                query_string,
+                pstmt.stmt_location,
+                pstmt.stmt_len,
+            )?;
+            rt::event_trigger_collect_simple_command::call(address, secondary_object, parsetree)?;
+            // stashed internally
+            command_collected = true;
+            rt::event_trigger_alter_table_end::call()?;
+        }
+
+        t if t == ntag::T_CreateFunctionStmt => {
+            address = rt::create_function::call(mcx, pstate, parsetree)?;
+        }
+
+        t if t == ntag::T_CreateCastStmt => {
+            address = rt::create_cast::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_AlterFunctionStmt => {
+            address = rt::alter_function::call(mcx, pstate, parsetree)?;
+        }
+
+        t if t == ntag::T_RuleStmt => {
+            address = rt::define_rule::call(mcx, parsetree, query_string)?;
+        }
+
+        t if t == ntag::T_CreateSeqStmt => {
+            address = rt::define_sequence::call(mcx, pstate, parsetree)?;
+        }
+
+        t if t == ntag::T_AlterSeqStmt => {
+            address = rt::alter_sequence::call(mcx, pstate, parsetree)?;
+        }
+
+        t if t == ntag::T_CreateTableAsStmt => {
+            address = rt::exec_create_table_as::call(mcx, pstate, parsetree, params, qc.take())?;
+        }
+
+        t if t == ntag::T_RefreshMatViewStmt => {
+            // REFRESH CONCURRENTLY runs DDL internally; inhibit collection.
+            rt::event_trigger_inhibit_command_collection::call();
+            let r = rt::exec_refresh_mat_view::call(mcx, parsetree, query_string, qc.take());
+            rt::event_trigger_undo_inhibit_command_collection::call();
+            address = r?;
+        }
+
+        t if t == ntag::T_CreateTrigStmt => {
+            address = rt::create_trigger::call(mcx, parsetree, query_string)?;
+        }
+
+        t if t == ntag::T_CommentStmt => {
+            address = rt::comment_object_slow::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_GrantStmt => {
+            rt::execute_grant_stmt_slow::call(mcx, parsetree)?;
+            // commands are stashed in ExecGrantStmt_oids
+            command_collected = true;
+        }
+
+        t if t == ntag::T_AlterDefaultPrivilegesStmt => {
+            rt::exec_alter_default_privileges_stmt::call(mcx, pstate, parsetree)?;
+            rt::event_trigger_collect_alter_def_privs::call(parsetree)?;
+            command_collected = true;
+        }
+
+        t if t == ntag::T_CreatePolicyStmt => {
+            address = rt::create_policy::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_AlterPolicyStmt => {
+            address = rt::alter_policy::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_SecLabelStmt => {
+            address = rt::exec_sec_label_stmt_slow::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_DropStmt => {
+            crate::dispatch::ExecDropStmt(mcx, parsetree, is_top_level)?;
+            // no commands stashed for DROP
+            command_collected = true;
+        }
+
+        t if t == ntag::T_RenameStmt => {
+            address = rt::exec_rename_stmt_slow::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_AlterObjectDependsStmt => {
+            address = rt::exec_alter_object_depends_stmt_slow::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_AlterObjectSchemaStmt => {
+            address = rt::exec_alter_object_schema_stmt_slow::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_AlterOwnerStmt => {
+            address = rt::exec_alter_owner_stmt_slow::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_AlterOperatorStmt => {
+            address = rt::alter_operator::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_AlterTypeStmt => {
+            address = rt::alter_type::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_AlterCollationStmt => {
+            address = rt::alter_collation::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_DropOwnedStmt => {
+            rt::drop_owned_objects::call(mcx, parsetree)?;
+            // no commands stashed for DROP
+            command_collected = true;
+        }
+
+        t if t == ntag::T_CreateStatsStmt => {
+            let stmt = parsetree.expect_createstatsstmt();
+            // CREATE STATISTICS supports only relation names in FROM.
+            let rel_src = stmt
+                .relations
+                .first()
+                .expect("CREATE STATISTICS: empty relations list");
+            if !rel_src.is_rangevar() {
+                return Err(utils_error::ereport(types_error::ERROR)
+                    .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errmsg(
+                        "CREATE STATISTICS only supports relation names in the FROM clause"
+                            .to_string(),
+                    )
+                    .into_error());
+            }
+            // ShareUpdateExclusiveLock: conflicts with ANALYZE / other DDL that
+            // sets statistics, but not with normal queries.
+            let rel = mcx::alloc_in(mcx, rel_src.clone_in(mcx)?)?;
+            let relid = rt::range_var_get_relid_share_update::call(mcx, rel)?;
+
+            // Run parse analysis ...
+            let stmt_ptr = mcx::alloc_in(mcx, parsetree.clone_in(mcx)?)?;
+            let stmt2 = rt::transform_stats_stmt::call(mcx, relid, stmt_ptr, query_string)?;
+            address = rt::create_statistics::call(mcx, stmt2)?;
+        }
+
+        t if t == ntag::T_AlterStatsStmt => {
+            address = rt::alter_statistics::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_CreateOpClassStmt => {
+            rt::define_op_class::call(mcx, parsetree)?;
+            // command is stashed in DefineOpClass (EventTriggerCollectCreateOpClass).
+            command_collected = true;
+        }
+
+        t if t == ntag::T_CreateOpFamilyStmt => {
+            address = rt::define_op_family::call(mcx, parsetree)?;
+            // DefineOpFamily calls EventTriggerCollectSimpleCommand directly.
+            command_collected = true;
+        }
+
+        t if t == ntag::T_AlterOpFamilyStmt => {
+            // AlterOpFamily(stmt) — commands are stashed in AlterOpFamily
+            // (EventTriggerCollectAlterOpFam); the call also fixes the address.
+            rt::alter_op_family::call(mcx, parsetree)?;
+            command_collected = true;
+        }
+
+        t if t == ntag::T_CreateAmStmt => {
+            // address = CreateAccessMethod((CreateAmStmt *) parsetree);
+            address = rt::create_access_method::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_CreatePublicationStmt => {
+            // address = CreatePublication(pstate, (CreatePublicationStmt *) parsetree);
+            address = rt::create_publication::call(mcx, pstate, parsetree)?;
+        }
+
+        t if t == ntag::T_AlterPublicationStmt => {
+            // AlterPublication(pstate, (AlterPublicationStmt *) parsetree);
+            rt::alter_publication::call(mcx, pstate, parsetree)?;
+            // AlterPublication calls EventTriggerCollectSimpleCommand directly.
+            command_collected = true;
+        }
+
+        t if t == ntag::T_CreateExtensionStmt => {
+            // CREATE EXTENSION.
+            address = rt::create_extension::call(mcx, pstate, parsetree)?;
+        }
+
+        t if t == ntag::T_CreatePLangStmt => {
+            // CREATE LANGUAGE.
+            address = rt::create_procedural_language::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_CreateConversionStmt => {
+            // address = CreateConversionCommand((CreateConversionStmt *) parsetree);
+            address = rt::create_conversion_command::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_CreateTransformStmt => {
+            // CREATE TRANSFORM.
+            address = rt::create_transform::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_AlterTSDictionaryStmt => {
+            // ALTER TEXT SEARCH DICTIONARY.
+            address = rt::alter_ts_dictionary::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_AlterTSConfigurationStmt => {
+            // ALTER TEXT SEARCH CONFIGURATION. Commands are stashed in
+            // MakeConfigurationMapping and DropConfigurationMapping, which are
+            // called from AlterTSConfiguration; the returned address is unused.
+            let _ = rt::alter_ts_configuration::call(mcx, parsetree)?;
+            command_collected = true;
+        }
+
+        t if t == ntag::T_CreateFdwStmt => {
+            // CREATE FOREIGN DATA WRAPPER.
+            address = rt::create_foreign_data_wrapper::call(mcx, pstate, parsetree)?;
+        }
+
+        t if t == ntag::T_AlterFdwStmt => {
+            // ALTER FOREIGN DATA WRAPPER.
+            address = rt::alter_foreign_data_wrapper::call(mcx, pstate, parsetree)?;
+        }
+
+        t if t == ntag::T_CreateForeignServerStmt => {
+            // CREATE SERVER.
+            address = rt::create_foreign_server::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_AlterForeignServerStmt => {
+            // ALTER SERVER.
+            address = rt::alter_foreign_server::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_CreateUserMappingStmt => {
+            // CREATE USER MAPPING.
+            address = rt::create_user_mapping::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_AlterUserMappingStmt => {
+            // ALTER USER MAPPING.
+            address = rt::alter_user_mapping::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_DropUserMappingStmt => {
+            // DROP USER MAPPING.
+            rt::remove_user_mapping::call(mcx, parsetree)?;
+            // no commands stashed for DROP
+            command_collected = true;
+        }
+
+        t if t == ntag::T_ImportForeignSchemaStmt => {
+            // IMPORT FOREIGN SCHEMA. Commands are stashed inside
+            // ImportForeignSchema; no address is returned.
+            rt::import_foreign_schema::call(mcx, parsetree)?;
+            command_collected = true;
+        }
+
+        t if t == ntag::T_CreateSubscriptionStmt => {
+            // address = CreateSubscription(pstate, (CreateSubscriptionStmt *) parsetree, isTopLevel);
+            address = rt::create_subscription::call(mcx, pstate, parsetree, is_top_level)?;
+        }
+
+        t if t == ntag::T_AlterSubscriptionStmt => {
+            // address = AlterSubscription(pstate, (AlterSubscriptionStmt *) parsetree, isTopLevel);
+            address = rt::alter_subscription::call(mcx, pstate, parsetree, is_top_level)?;
+        }
+
+        t if t == ntag::T_DropSubscriptionStmt => {
+            // DropSubscription((DropSubscriptionStmt *) parsetree, isTopLevel);
+            // DropSubscription calls EventTriggerSQLDropAddObject directly.
+            rt::drop_subscription::call(mcx, parsetree, is_top_level)?;
+            command_collected = true;
+        }
+
+        t if t == ntag::T_AlterTableMoveAllStmt => {
+            // AlterTableMoveAll((AlterTableMoveAllStmt *) parsetree);
+            // Commands are stashed in AlterTableMoveAll.
+            rt::alter_table_move_all::call(mcx, parsetree)?;
+            command_collected = true;
+        }
+
+        // The remaining DDL arms whose owner bodies are either unported or whose
+        // ported bodies still lack the rich-node → owner-parse-form conversion
+        // layer: ALTER EXTENSION / ALTER EXTENSION … ADD|DROP, and ALTER TABLE …
+        // SET TABLESPACE … (AlterTableMoveAll). Route them to one documented
+        // seam-panic so the unported set is a single loud panic rather than many.
+        _ => {
+            address = rt::process_utility_slow_unported::call(mcx, pstate, parsetree, is_top_level)?;
+        }
+    }
+
+    // Remember the object so that ddl_command_end event triggers can reach it.
+    if !command_collected {
+        rt::event_trigger_collect_simple_command::call(address, secondary_object, parsetree)?;
+    }
+
+    if is_complete_query {
+        rt::event_trigger_sql_drop::call(parsetree)?;
+        rt::event_trigger_ddl_command_end::call(parsetree)?;
+    }
+
+    Ok(())
+}

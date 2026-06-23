@@ -1,0 +1,63 @@
+[package]
+name = "postmaster_walsummarizer"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "postmaster_walsummarizer"
+path = "src/lib.rs"
+
+[dependencies]
+guc_tables = { path = "../../utils/misc/guc_tables" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+wal = { path = "../../../_support/types/wal" }
+types_pgstat = { path = "../../../_support/types/types_pgstat" }
+condvar = { path = "../../../_support/types/condvar" }
+types_startup = { path = "../../../_support/types/types_startup" }
+types_walsummarizer = { path = "../../../_support/types/types_walsummarizer" }
+types_blkreftable = { path = "../../../_support/types/types_blkreftable" }
+
+# ereport/elog — direct dep (acyclic: the summarizer is a high-level leaf).
+utils_error = { path = "../../utils/utils_error" }
+# ConfigReloadPending / ShutdownRequestPending live here (ported).
+interrupt = { path = "../interrupt" }
+
+# Its own inward seams (installed by init_seams).
+walsummarizer_seams = { path = "../walsummarizer_seams" }
+
+# Outward owner seam crates.
+ipc_shmem_seams = { path = "../../storage/ipc/ipc_shmem_seams" }
+dsm_core_seams = { path = "../../storage/ipc/dsm_core_seams" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
+procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
+procarray_seams = { path = "../../storage/ipc/procarray_seams" }
+lwlock_seams = { path = "../../storage/lmgr/lwlock_seams" }
+condition_variable_seams = { path = "../../storage/lmgr/condition_variable_seams" }
+aio_seams = { path = "../../storage/aio/aio_seams" }
+fd_seams = { path = "../../storage/file/fd_seams" }
+auxprocess_seams = { path = "../auxprocess_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+guc_file_seams = { path = "../../utils/misc/guc_file_seams" }
+mcxt_seams = { path = "../../utils/mmgr/mcxt_seams" }
+resowner_seams_2 = { path = "../../utils/resowner/resowner_seams_2" }
+dynahash_seams = { path = "../../utils/hash/dynahash_seams" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+walstats_seams = { path = "../../utils/activity/walstats_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
+xlogreader_seams = { path = "../../access/transam/xlogreader_seams" }
+timeline_seams = { path = "../../access/transam/timeline_seams" }
+xactdesc_seams = { path = "../../access/rmgrdesc/xactdesc_seams" }
+walreceiver_seams = { path = "../../replication/walreceiver_seams" }
+walsummary_seams = { path = "../../backup/walsummary_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+common_blkreftable = { path = "../../../common/common_blkreftable" }
+types_guc = { path = "../../../_support/types/types_guc" }
+datum = { path = "../../../_support/types/datum" }
+types_tuple = { path = "../../../_support/types/types_tuple" }

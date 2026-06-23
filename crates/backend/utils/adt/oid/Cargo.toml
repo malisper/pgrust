@@ -1,0 +1,23 @@
+[package]
+name = "oid"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "oid"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+parsenodes = { path = "../../../../_support/types/parsenodes" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+pqformat = { path = "../../../libpq/pqformat" }
+numutils = { path = "../numutils" }
+arrayfuncs = { path = "../arrayfuncs" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+oid_seams = { path = "../oid_seams" }

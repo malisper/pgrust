@@ -1,0 +1,114 @@
+[package]
+name = "execMain"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "execMain"
+path = "src/lib.rs"
+
+[dependencies]
+parallel_rt_seams = { path = "../../access/transam/parallel_rt_seams" }
+# pgstat_report_query_id (execMain.c:132): advertise the running query's queryId
+# into pg_stat_activity at ExecutorStart.
+status_seams = { path = "../../utils/activity/status_seams" }
+# pgstat_update_parallel_workers_stats (execMain.c standard_ExecutorEnd): flush the
+# EState's per-plan parallel worker counts into the per-database stats.
+pgstat_database_seams = { path = "../../utils/activity/pgstat_database_seams" }
+common_relation = { path = "../../access/common/common_relation" }
+heaptuple = { path = "../../access/common/heaptuple" }
+detoast_seams = { path = "../../access/common/detoast_seams" }
+partition_seams = { path = "../../catalog/partition_seams" }
+matview_seams = { path = "../../commands/matview_seams" }
+table_tableam_seams = { path = "../../access/table/table_tableam_seams" }
+table_tableam = { path = "../../access/table/table_tableam" }
+heapam_seams = { path = "../../access/heap/heapam_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_core = { path = "../../../_support/types/types_core" }
+execparallel = { path = "../../../_support/types/execparallel" }
+execParallel_support_seams = { path = "../execParallel_support_seams" }
+nodeSubplan_seams = { path = "../nodeSubplan_seams" }
+readfuncs_seams = { path = "../../nodes/readfuncs_seams" }
+nodes = { path = "../../../_support/types/nodes" }
+rel = { path = "../../../_support/types/rel" }
+types_acl = { path = "../../../_support/types/types_acl" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+snapshot = { path = "../../../_support/types/snapshot" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_tableam = { path = "../../../_support/types/types_tableam" }
+mcx = { path = "../../../_support/mcx" }
+
+# Driver-loop dependencies: the node-dispatch seams (ExecInitNode / ExecProcNode
+# / ExecEndNode / ExecShutdownNode), the EState helpers (ExecInitRangeTable /
+# ExecResetTupleTable / ExecClose*Relations + ResetExprContext), the junk filter
+# (ExecInitJunkFilter / ExecFilterJunk), and the DestReceiver dispatch.
+execProcnode_seams = { path = "../execProcnode_seams" }
+execUtils = { path = "../execUtils" }
+execUtils_seams = { path = "../execUtils_seams" }
+execJunk = { path = "../execJunk" }
+dest_seams = { path = "../../tcop/dest_seams" }
+types_dest = { path = "../../../_support/types/types_dest" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
+
+# Seam crate this unit OWNS (the executor-driver / EvalPlanQual / constraint /
+# CteScan-leader surface). F0a installs only the self-contained
+# `exec_check_permissions_select`; the rest stay declared-but-uninstalled
+# (mirror-and-panic) until the matching family of #166 lands — the unit is
+# CATALOG `needs-decomp`, so the seam-install recurrence guard exempts them.
+execMain_seams = { path = "../execMain_seams" }
+execPartition_seams = { path = "../execPartition_seams" }
+trigger_seams = { path = "../../commands/trigger_seams" }
+
+# ExecCheckPermissions ACL/get-rel dependencies (all landed owners).
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+objectaddress_seams = { path = "../../catalog/objectaddress_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+
+# ExecutorRewind's ExecReScan(planstate) dispatch.
+execAmi_seams = { path = "../execAmi_seams" }
+
+# ExecSupportsBackwardScan body lives in execAmi (execAmi.c); execMain owns the
+# execMain-seams `exec_supports_backward_scan` decl (its caller, portalcmds,
+# passes the whole PlannedStmt) and delegates to execAmi's planTree walker.
+# execAmi does not depend on execMain(-seams), so this is acyclic.
+execAmi = { path = "../execAmi" }
+
+# ExecUpdateLockMode reads the relation's key-column bitmap via the relcache.
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+# ExecGetAllUpdatedCols / bms_overlap for ExecUpdateLockMode.
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }
+# InitResultRelInfo: IsInplaceUpdateRelation (catalog.c). catalog-catalog
+# depends on no exec(-Main/-Utils/-Replication) crate, so this is acyclic.
+catalog_catalog = { path = "../../catalog/catalog_catalog" }
+# CheckValidResultRel: CheckCmdReplicaIdentity (execReplication.c) via its seam.
+execReplication_seams = { path = "../execReplication_seams" }
+# COPY-(query)-TO start: GetActiveSnapshot() for CreateQueryDesc.
+snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }
+# ExecBuildSlotValueDescription: check_enable_rls (rls.c), getTypeOutputInfo's
+# OidOutputFunctionCall (fmgr), pg_mbcliplen (mb), GetUserId (miscinit — already
+# present). All landed owners; none depend on execMain(-seams), so acyclic.
+more_seams = { path = "../../utils/misc/more_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+
+# ExecConstraints / ExecPartitionCheck / ExecRelGenVirtualNotNull constraint
+# cluster: ExecCheck (execExpr), ExecPrepareExpr (execExpr; panics on the
+# unported expression_planner), GetPerTupleExprContext (execUtils, already a
+# dep), slot nullness (execTuples-seams slot_getallattrs_by_id),
+# RelationGetPartitionQual (partcache), expand_generated_columns_in_expr /
+# build_generation_expression (rewritehandler), build_attrmap_by_name_if_req /
+# execute_attr_map_slot (common-next tupconvert), bms_union (nodes-core). None
+# of these owners depend on execMain(-seams), so all are acyclic direct deps.
+utils_error = { path = "../../utils/utils_error" }
+execExpr = { path = "../execExpr" }
+execTuples = { path = "../execTuples" }
+execTuples_seams = { path = "../execTuples_seams" }
+partcache = { path = "../../utils/cache/partcache" }
+rewritehandler = { path = "../../rewrite/rewritehandler" }
+next = { path = "../../access/common/next" }
+nodes_core = { path = "../../nodes/nodes_core" }

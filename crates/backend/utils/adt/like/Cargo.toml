@@ -1,0 +1,27 @@
+[package]
+name = "like"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "like"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+types_error = { path = "../../../../_support/types/types_error" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+locale = { path = "../../../../_support/types/locale" }
+types_wchar = { path = "../../../../_support/types/types_wchar" }
+pgstrcasecmp = { path = "../../../../port/pgstrcasecmp" }
+formatting = { path = "../formatting" }
+varlena = { path = "../varlena" }
+pg_locale_seams = { path = "../pg_locale_seams" }
+mbutils_seams = { path = "../../mb/mbutils_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+stack_depth_seams = { path = "../../misc/stack_depth_seams" }

@@ -1,0 +1,31 @@
+[package]
+name = "adt_uuid"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_uuid"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+types_uuid = { path = "../../../../_support/types/types_uuid" }
+types_datetime = { path = "../../../../_support/types/types_datetime" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+utils_error = { path = "../../utils_error" }
+# fmgr builtin registry (fmgr.c) — by-OID dispatch table for the by-ref wrappers.
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+# Hashing (common/hashfn.c) — ported leaf, depend directly.
+hashfn = { path = "../../../../common/hashfn" }
+# HyperLogLog (lib/hyperloglog.c) — ported, depend directly.
+hyperloglog = { path = "../../../lib/hyperloglog" }
+# pqformat (libpq/pqformat.c) recv/send framing — ported, depend directly.
+pqformat = { path = "../../../libpq/pqformat" }
+# pg_strong_random + CLOCK_REALTIME read (port/) — owner unported, seam.
+pg_strong_random_seams = { path = "../../../../port/pg_strong_random_seams" }
+# timestamptz_pl_interval (timestamp.c) — owner unported, seam.
+timestamp_seams = { path = "../timestamp_seams" }

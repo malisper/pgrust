@@ -1,0 +1,52 @@
+[package]
+name = "pg_parameter_acl"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_parameter_acl"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+utils_error = { path = "../../utils/utils_error" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+cache = { path = "../../../_support/types/cache" }
+datum = { path = "../../../_support/types/datum" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+
+# The inward seams this crate INSTALLS (ParameterAclLookup / ParameterAclCreate).
+pg_parameter_acl_seams = { path = "../pg_parameter_acl_seams" }
+
+# The catalog-mutation engine (F0, indexing.c) — CatalogTupleInsert keystone,
+# consumed as `pub` functions exactly as the pg_database / pg_collation family
+# does (no dependency cycle).
+indexing = { path = "../indexing" }
+
+# heap_form_tuple (forming the pg_parameter_acl tuple).
+heaptuple = { path = "../../access/common/heaptuple" }
+
+# GetNewOidWithIndex (catalog.c) — catalog OID allocation.
+catalog_catalog = { path = "../catalog_catalog" }
+
+# GetSysCacheOid1(PARAMETERACLNAME, ...) — the name->oid probe.
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+
+# convert_GUC_name_for_parameter_acl (guc.c) — direct call, the canonical pub
+# helper the GUC crate exposes. No cycle (guc does not depend on this crate).
+misc_guc = { path = "../../utils/misc/misc_guc" }
+
+# check_GUC_name_for_parameter_acl (guc.c) — crosses as a seam (guc-internal
+# logic over find_option / assignable_custom_variable_name, installed by guc).
+guc_seams = { path = "../../utils/misc/guc_seams" }
+
+# table_open / table_close crossed as seams.
+table_seams = { path = "../../access/table/table_seams" }
+
+# cstring_to_text — build the parname text Datum.
+varlena_seams = { path = "../../utils/adt/varlena_seams" }

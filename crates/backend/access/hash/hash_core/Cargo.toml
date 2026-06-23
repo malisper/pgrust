@@ -1,0 +1,53 @@
+[package]
+name = "hash_core"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "hash_core"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_amapi = { path = "../../../../_support/types/types_amapi" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+hash = { path = "../../../../_support/types/hash" }
+rel = { path = "../../../../_support/types/rel" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+tidbitmap = { path = "../../../../_support/types/tidbitmap" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+types_reloptions = { path = "../../../../_support/types/types_reloptions" }
+
+page = { path = "../../../storage/page" }
+
+# Own seam crate (inward seams; currently a no-op installer).
+hash_core_seams = { path = "../hash_core_seams" }
+
+# Outward seam crates (substrate callees).
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+indexam_seams = { path = "../../index/indexam_seams" }
+freespace_seams = { path = "../../../storage/freespace/freespace_seams" }
+indextuple_seams = { path = "../../common/indextuple_seams" }
+fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
+lsyscache_seams = { path = "../../../utils/cache/lsyscache_seams" }
+reloptions_seams = { path = "../../common/reloptions_seams" }
+predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
+smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
+vacuum_seams = { path = "../../../commands/vacuum_seams" }
+xloginsert_seams = { path = "../../transam/xloginsert_seams" }
+transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
+heapam_seams = { path = "../../heap/heapam_seams" }
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+dynahash_seams = { path = "../../../utils/hash/dynahash_seams" }
+hash_entry_seams = { path = "../hash_entry_seams" }
+
+# Snapshot token threaded into predicate locks.
+snapshot = { path = "../../../../_support/types/snapshot" }

@@ -1,0 +1,37 @@
+[package]
+name = "pathkeys"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pathkeys"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+
+# Inward seams this crate owns + installs are declared in pathnode/joinpath seams
+# (the merged consumers' contracts) and in this crate's own -seams crate.
+path_pathkeys_seams = { path = "../path_pathkeys_seams" }
+pathnode_seams = { path = "../../util/pathnode_seams" }
+joinpath_seams = { path = "../joinpath_seams" }
+
+# Outward seams this crate calls.
+relnode_seams = { path = "../../util/relnode_seams" }
+relnode_ext_seams = { path = "../../util/relnode_ext_seams" }
+equivclass_seams = { path = "../equivclass_seams" }
+equivclass = { path = "../equivclass" }
+indxpath_seams = { path = "../indxpath_seams" }
+nodeFuncs_seams = { path = "../../../nodes/nodeFuncs_seams" }
+lsyscache_seams = { path = "../../../utils/cache/lsyscache_seams" }
+
+# The GUC slot this crate owns: `enable_group_by_reordering` (the
+# `bool enable_group_by_reordering` global defined in pathkeys.c). guc_tables.c
+# references the slot by C symbol; this crate installs the accessor over its own
+# backing store from `init_seams()`.
+guc_tables = { path = "../../../utils/misc/guc_tables" }

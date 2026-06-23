@@ -1,0 +1,437 @@
+//! Seam declarations for the `backend-storage-ipc-procarray` unit
+//! (`storage/ipc/procarray.c`), incl. the subset consumed by logical decoding.
+//! The owning unit installs these from its `init_seams()` when it lands; until
+//! then a call panics loudly.
+
+#![allow(non_snake_case)]
+
+use mcx::{Mcx, PgVec};
+use types_core::{FullTransactionId, Oid, ProcNumber, TransactionId, XLogRecPtr};
+use types_error::PgResult;
+use snapshot::SnapshotData;
+use types_storage::{
+
+    ProcSignalReason, RunningTransactionLocksHeld, RunningTransactionsData, VirtualTransactionId,
+
+};
+use types_vacuum::vacuumlazy::GlobalVisStateHandle;
+
+seam_core::seam!(
+    /// `GetSnapshotData(snapshot)` (procarray.c) — fill an MVCC snapshot's
+    /// xmin/xmax/xip/subxip from the running-transactions state. C writes into
+    /// a caller-provided static struct and also advances the per-backend
+    /// `MyProc->xmin`/`TransactionXmin`/`RecentXmin`; this seam returns only
+    /// the computed snapshot fields, and snapmgr replays the xmin updates via
+    /// the proc seam. Allocates the XID arrays and can `ereport(ERROR)`.
+    pub fn get_snapshot_data() -> PgResult<SnapshotData>
+);
+
+seam_core::seam!(
+    /// `ProcArrayInstallImportedXmin(xmin, sourcevxid)` (procarray.c) — make
+    /// our `MyProc->xmin` safe to set from an imported snapshot, verifying the
+    /// source vxid is still running. Returns false when the source vanished.
+    pub fn proc_array_install_imported_xmin(
+        xmin: TransactionId,
+        sourcevxid: VirtualTransactionId,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `ProcArrayInstallRestoredXmin(xmin, proc)` (procarray.c) — like above
+    /// but the source is identified by a PGPROC (parallel-worker restore).
+    pub fn proc_array_install_restored_xmin(
+        xmin: TransactionId,
+        source_proc: ProcNumber,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `GetMaxSnapshotXidCount()` (procarray.c) — the largest possible xip[]
+    /// length. Pure shared-config read; cannot `ereport`.
+    pub fn get_max_snapshot_xid_count() -> i32
+);
+
+seam_core::seam!(
+    /// `GetMaxSnapshotSubxidCount()` (procarray.c) — the largest possible
+    /// subxip[] length. Pure shared-config read; cannot `ereport`.
+    pub fn get_max_snapshot_subxid_count() -> i32
+);
+
+seam_core::seam!(
+    /// `GetConflictingVirtualXIDs(limitXmin, dbOid)` — VXIDs of backends whose
+    /// snapshots could still see `limitXmin`. The C
+    /// `InvalidVirtualTransactionId` terminator is dropped; the result array
+    /// is allocated in `mcx` (C reuses a TopMemoryContext-static array; the
+    /// owner copies into the caller's context instead).
+    pub fn get_conflicting_virtual_xids<'mcx>(
+        mcx: Mcx<'mcx>,
+        limit_xmin: TransactionId,
+        db_oid: Oid,
+    ) -> PgResult<PgVec<'mcx, VirtualTransactionId>>
+);
+
+seam_core::seam!(
+    /// `GetCurrentVirtualXIDs(limitXmin, excludeXmin0, allDbs, excludeVacuum,
+    /// &nvxids)` (procarray.c) — the VXIDs of currently-running backends whose
+    /// xmin is `<= limitXmin` (and which pass the `excludeVacuum` status-flag
+    /// filter / `allDbs` DB filter), used by `WaitForOlderSnapshots` during a
+    /// concurrent index build. The C terminator + out-param count are dropped;
+    /// the result vector's length is the count, allocated in `mcx`.
+    pub fn get_current_virtual_xids<'mcx>(
+        mcx: Mcx<'mcx>,
+        limit_xmin: TransactionId,
+        exclude_xmin0: bool,
+        all_dbs: bool,
+        exclude_vacuum: i32,
+    ) -> PgResult<PgVec<'mcx, VirtualTransactionId>>
+);
+
+seam_core::seam!(
+    /// `ProcArrayApplyRecoveryInfo(running)`.
+    pub fn proc_array_apply_recovery_info(running: &RunningTransactionsData<'_>) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExpireAllKnownAssignedTransactionIds()`.
+    pub fn expire_all_known_assigned_transaction_ids() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RecordKnownAssignedTransactionIds(xid)` (procarray.c) — hot-standby
+    /// KnownAssignedXids bookkeeping for as-yet-unobserved XIDs in a completion
+    /// record. (Defined in procarray.c, not standby.c — the KnownAssignedXids
+    /// shared array is procarray-owned.)
+    pub fn record_known_assigned_transaction_ids(xid: TransactionId) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExpireTreeKnownAssignedTransactionIds(xid, nsubxids, subxids,
+    /// max_xid)` (procarray.c) — remove a finished transaction tree from the
+    /// KnownAssignedXids array. (Defined in procarray.c, not standby.c.)
+    pub fn expire_tree_known_assigned_transaction_ids(
+        xid: TransactionId,
+        subxids: &[TransactionId],
+        max_xid: TransactionId,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `KnownAssignedTransactionIdsIdleMaintenance()` (procarray.c) — compress
+    /// the KnownAssignedXids array during idle periods; called by the recovery
+    /// page-read driver while waiting for WAL. (Defined in procarray.c.)
+    pub fn known_assigned_transaction_ids_idle_maintenance()
+);
+
+seam_core::seam!(
+    /// `GetRunningTransactionData()` — C returns with `ProcArrayLock` and
+    /// `XidGenLock` held and the caller releases them by hand. Here the
+    /// owner acquires the locks, builds the snapshot, and runs `f` with both
+    /// held; `locks.release_proc_array_lock()` lets the callback release
+    /// `ProcArrayLock` early (the `wal_level < logical` path). Every lock
+    /// still held when `f` returns — on success or error — is released by
+    /// the owner, so no out-of-band release contract survives the seam. The
+    /// `XLogRecPtr` is the callback's result, passed through.
+    pub fn get_running_transaction_data(
+        f: &mut dyn FnMut(
+            &RunningTransactionsData<'_>,
+            &mut dyn RunningTransactionLocksHeld,
+        ) -> PgResult<XLogRecPtr>,
+    ) -> PgResult<XLogRecPtr>
+);
+
+seam_core::seam!(
+    /// `CountDBBackends(databaseid)`.
+    pub fn count_db_backends(databaseid: Oid) -> PgResult<i32>
+);
+
+seam_core::seam!(
+    /// `CancelDBBackends(databaseid, sigmode, conflictPending)`.
+    pub fn cancel_db_backends(
+        databaseid: Oid,
+        sigmode: ProcSignalReason,
+        conflict_pending: bool,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `CancelVirtualTransaction(vxid, sigmode)` — returns the pid of the
+    /// signalled process, or 0 if not found.
+    pub fn cancel_virtual_transaction(
+        vxid: VirtualTransactionId,
+        sigmode: ProcSignalReason,
+    ) -> PgResult<i32>
+);
+
+seam_core::seam!(
+    /// `SignalVirtualTransaction(vxid, sigmode, conflictPending)` — returns
+    /// the pid of the signalled process, or 0 if not found.
+    pub fn signal_virtual_transaction(
+        vxid: VirtualTransactionId,
+        sigmode: ProcSignalReason,
+        conflict_pending: bool,
+    ) -> PgResult<i32>
+);
+
+seam_core::seam!(
+    /// `ProcNumberGetProc(procNumber)->pid` — the pid of the PGPROC in that
+    /// slot, or 0 when the slot is not active (C NULL result).
+    pub fn proc_number_get_proc_pid(proc_number: ProcNumber) -> i32
+);
+
+seam_core::seam!(
+    /// `ProcNumberGetProc(procNumber)` projected to the two PGPROC fields
+    /// `checkTempNamespaceStatus` reads: `Some((proc->databaseId,
+    /// proc->tempNamespaceId))`, or `None` when the slot is empty (backend
+    /// not alive). Shared-memory read; cannot `ereport`.
+    pub fn proc_status(proc_number: ProcNumber) -> Option<(Oid, Oid)>
+);
+
+seam_core::seam!(
+    /// `TransactionIdIsInProgress(xid)` (procarray.c) — is the given XID still
+    /// shown running in the ProcArray (or a still-running subxact)? Allocates a
+    /// scratch xids array via palloc on first use, so its OOM `ereport` surface
+    /// is carried on `Err`.
+    pub fn transaction_id_is_in_progress(xid: TransactionId) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `GlobalVisTestIsRemovableXid(state, xid)` (procarray.c) — is `xid` old
+    /// enough (below the `GlobalVisState` horizon) that a tuple deleted by it can
+    /// be removed? Used by the VACUUM / NonVacuumable visibility predicates.
+    pub fn global_vis_test_is_removable_xid(
+        state: snapshot::snapshot::GlobalVisStateHandle,
+        xid: TransactionId,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `GlobalVisCheckRemovableXid(NULL, xid)` (procarray.c) — true if no backend
+    /// could still view `xid` as in-progress, so a GIN page deleted in `xid` is
+    /// safe to recycle (`GinPageIsRecyclable`). The GIN call passes
+    /// `heaprel == NULL`, so the owner resolves the horizon for `InvalidOid`
+    /// (the shared, most-conservative `GlobalVisState`).
+    pub fn global_vis_check_removable_xid(xid: TransactionId) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `ProcArrayEndTransaction(MyProc, latestXid)` — advertise no transaction
+    /// in progress (the proc argument is always `MyProc` from xact.c).
+    pub fn proc_array_end_transaction(latest_xid: TransactionId) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ProcArrayClearTransaction(MyProc)` — PREPARE's variant.
+    pub fn proc_array_clear_transaction() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `XidCacheRemoveRunningXids(xid, nxids, xids, latestXid)` — drop aborted
+    /// subxids from PGPROC's subxid cache.
+    pub fn xid_cache_remove_running_xids(
+        xid: TransactionId,
+        children: &[TransactionId],
+        latest_xid: TransactionId,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ProcArrayApplyXidAssignment(topxid, nsubxids, subxids)` — redo-side
+    /// subxid bookkeeping for hot standby.
+    pub fn proc_array_apply_xid_assignment(
+        xtop: TransactionId,
+        subxids: &[TransactionId],
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ProcArrayAdd(GetPGProcByNumber(pgprocno))` (procarray.c) — enter the
+    /// dummy prepared-xact proc into the global ProcArray so
+    /// `TransactionIdIsInProgress` sees its XID running. Takes
+    /// `ProcArrayLock`; the `ereport(FATAL)` past `maxProcs` is carried on
+    /// `Err`.
+    pub fn proc_array_add(pgprocno: ProcNumber) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ProcArrayRemove(GetPGProcByNumber(pgprocno), latestXid)` (procarray.c)
+    /// — remove the dummy proc from the global ProcArray on COMMIT/ABORT
+    /// PREPARED, advancing the latest-completed xid to `latest_xid`. Takes
+    /// `ProcArrayLock`; cannot `ereport` at ERROR but carries the surface.
+    pub fn proc_array_remove(pgprocno: ProcNumber, latest_xid: TransactionId) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `CountUserBackends(roleid)` (`storage/ipc/procarray.c`) — number of
+    /// regular client backends running as `roleid` (used by
+    /// `InitializeSessionUserId` for the per-role connection limit). Scans
+    /// `ProcGlobal`; cannot `ereport`, but the scan crosses shmem so the seam
+    /// returns `PgResult` for the wider procarray failure surface consistency.
+    pub fn count_user_backends(roleid: Oid) -> PgResult<i32>
+);
+
+// --- NEW: GlobalVisState machinery (owned by this unit, installed in F3).
+// Consumed by backend-access-heap-vacuumlazy + heapam visibility, which today
+// only hold a `GlobalVisStateHandle` (types_vacuum) with no installed resolver.
+// `global_vis_test_for` was previously mis-declared in
+// backend-access-heap-vacuumlazy-seams; the owner-homed copy lives here. ---
+
+seam_core::seam!(
+    /// `GlobalVisTestFor(Relation rel)` (procarray.c) — return the
+    /// `GlobalVisState *` (as the whole-tree `GlobalVisStateHandle`) appropriate
+    /// for `rel`'s visibility horizon class (shared/catalog/data/temp).
+    /// `rel == InvalidOid` selects the most conservative shared state. May
+    /// recompute the horizons (`ereport(ERROR)` surface on `Err`).
+    pub fn global_vis_test_for(rel: Oid) -> PgResult<GlobalVisStateHandle>
+);
+
+seam_core::seam!(
+    /// `GlobalVisTestIsRemovableFullXid(GlobalVisState *state,
+    /// FullTransactionId fxid)` (procarray.c) — the `FullTransactionId` variant
+    /// of the removability test.
+    pub fn global_vis_test_is_removable_fullxid(
+        state: GlobalVisStateHandle,
+        fxid: FullTransactionId,
+    ) -> bool
+);
+
+seam_core::seam!(
+    /// `GetOldestNonRemovableTransactionId(Relation rel)` (procarray.c) — the
+    /// oldest xid whose tuples `rel` must not have removed (the VACUUM cutoff
+    /// for `rel`'s visibility class). `rel == InvalidOid` uses the shared
+    /// horizon. May recompute horizons (`ereport(ERROR)` surface on `Err`).
+    pub fn get_oldest_non_removable_transaction_id(rel: Oid) -> PgResult<TransactionId>
+);
+
+// --- Subset consumed by logical decoding ---
+
+seam_core::seam!(
+    /// `GetOldestSafeDecodingTransactionId(catalogOnly)`.
+    pub fn GetOldestSafeDecodingTransactionId(catalog_only: bool) -> TransactionId
+);
+
+seam_core::seam!(
+    /// `LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE)`.
+    pub fn ProcArrayLock_acquire_exclusive()
+);
+
+seam_core::seam!(
+    /// `LWLockRelease(ProcArrayLock)`.
+    pub fn ProcArrayLock_release()
+);
+
+seam_core::seam!(
+    /// `MyProc->statusFlags |= PROC_IN_LOGICAL_DECODING;
+    /// ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;`
+    /// performed while holding `ProcArrayLock`.
+    pub fn mark_proc_in_logical_decoding()
+);
+
+// --- Subset consumed by slot.c ---
+
+seam_core::seam!(
+    /// `void ProcArraySetReplicationSlotXmin(TransactionId xmin,
+    /// TransactionId catalog_xmin, bool already_locked)` (procarray.c) —
+    /// publish the aggregate slot xmin horizons into the ProcArray.
+    pub fn proc_array_set_replication_slot_xmin(
+        xmin: TransactionId,
+        catalog_xmin: TransactionId,
+        already_locked: bool,
+    )
+);
+
+seam_core::seam!(
+    /// Clear `PROC_IN_LOGICAL_DECODING` on `MyProc` and mirror it into
+    /// `ProcGlobal->statusFlags[MyProc->pgxactoff]`, under `ProcArrayLock`
+    /// exclusive (slot.c `ReplicationSlotRelease`). The acquire/release of
+    /// `ProcArrayLock` is part of this operation in the owner.
+    pub fn proc_array_clear_logical_decoding_flag()
+);
+
+seam_core::seam!(
+    /// `GetReplicationHorizons(&xmin, &catalog_xmin)` (procarray.c) — the
+    /// oldest xmins to advertise via hot-standby feedback.
+    pub fn get_replication_horizons() -> (TransactionId, TransactionId)
+);
+
+seam_core::seam!(
+    /// `void ProcArrayGetReplicationSlotXmin(TransactionId *xmin,
+    /// TransactionId *catalog_xmin)` (procarray.c) — the aggregate
+    /// replication-slot xmin horizons currently published in the ProcArray.
+    /// Returns `(replication_slot_xmin, replication_slot_catalog_xmin)`; a NULL
+    /// out-parameter in C is simply an ignored tuple element here.
+    pub fn proc_array_get_replication_slot_xmin() -> (TransactionId, TransactionId)
+);
+
+seam_core::seam!(
+    /// `IsBackendPid(pid)` (procarray.c) — is `pid` the PID of a live backend
+    /// (`BackendPidGetProc(pid) != NULL`)? Shared-memory scan; cannot
+    /// `ereport`.
+    pub fn is_backend_pid(pid: i32) -> bool
+);
+
+// --- backend-utils-init-postinit consumer (procarray.c) ---
+
+seam_core::seam!(
+    /// `CountDBConnections(databaseid)` (procarray.c): the number of backends
+    /// currently connected to `databaseid`. `Err` carries its `ereport`
+    /// surface.
+    pub fn count_db_connections(databaseid: types_core::Oid) -> types_error::PgResult<i32>
+);
+
+seam_core::seam!(
+    /// `GetOldestSafeDecodingTransactionId(catalogOnly)` (procarray.c): the
+    /// oldest xid it is safe to start decoding from. `catalogOnly` restricts
+    /// the horizon to catalog tables. Called with `ProcArrayLock` held.
+    pub fn get_oldest_safe_decoding_transaction_id(catalog_only: bool) -> TransactionId
+);
+
+seam_core::seam!(
+    /// `ProcArrayShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn proc_array_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `ProcArrayShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn proc_array_shmem_init() -> types_error::PgResult<()>
+);
+
+// --- backend-storage-ipc-signalfuncs consumer (signalfuncs.c) ---
+
+seam_core::seam!(
+    /// `BackendPidGetProc(pid)` (procarray.c) followed by `GetNumberFromPGProc(proc)`
+    /// (`storage/proc.h`): look up the live backend whose PID is `pid`, returning
+    /// the `roleId` it advertises (`proc->roleId`, `InvalidOid` if none) and its
+    /// proc number. `None` mirrors `BackendPidGetProc` returning `NULL` — the pid
+    /// is not a live backend (it may be an auxiliary process, the postmaster, or
+    /// already gone). Shared-memory scan; cannot `ereport`.
+    pub fn backend_pid_get_proc_role(pid: i32) -> Option<(Oid, ProcNumber)>
+);
+
+seam_core::seam!(
+    /// `MyProc->statusFlags |= PROC_AFFECTS_ALL_HORIZONS` via
+    /// `ProcGlobal->statusFlags[MyProc->pgxactoff]` (procarray.c) — a
+    /// database-less (physical) walsender's xmin must hold back vacuum in all
+    /// databases. Set under ProcArrayLock by the procarray owner.
+    pub fn set_proc_affects_all_horizons()
+);
+
+seam_core::seam!(
+    /// `MyProc->xmin` (the backend's advertised xmin in the proc array).
+    /// `InitWalSender`'s assertion reads it; the procarray owner returns it.
+    pub fn my_proc_xmin() -> TransactionId
+);
+
+seam_core::seam!(
+    /// `ProcNumberGetTransactionIds(ProcNumber procNumber, TransactionId *xid,
+    /// TransactionId *xmin, int *nsubxid, bool *overflowed)` (procarray.c) — the
+    /// `(xid, xmin, nsubxid, overflowed)` advertised by that slot, used by
+    /// `backend_status.c`'s `pgstat_read_current_status` to annotate each local
+    /// snapshot entry. Takes `ProcArrayLock` shared; cannot `ereport`.
+    pub fn proc_number_get_transaction_ids(
+        proc_number: ProcNumber,
+    ) -> (TransactionId, TransactionId, i32, bool)
+);

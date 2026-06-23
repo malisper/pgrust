@@ -1,0 +1,67 @@
+[package]
+name = "createplan"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "createplan"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+# expression_tree_mutator over the arena Expr tree (replace_nestloop_params).
+nodes_core = { path = "../../../nodes/nodes_core" }
+# This unit's own per-converter seam decls (the dispatch arms).
+createplan_seams = { path = "../createplan_seams" }
+# cost_qual_eval + cpu_operator_cost (order_qual_clauses); installed by costsize.
+pathnode_seams = { path = "../../util/pathnode_seams" }
+# replace_nestloop_param_var / _placeholdervar (paramassign.c, #297).
+paramassign_seams = { path = "../../util/paramassign_seams" }
+# find_placeholder_info (placeholder.c).
+placeholder_seams = { path = "../../util/placeholder_seams" }
+# relids_is_member / relids_is_subset over Relids (relnode.c).
+relnode_seams = { path = "../../util/relnode_seams" }
+# make_tlist_from_pathtarget / apply_pathtarget_labeling_to_tlist (tlist.c).
+vars = { path = "../../util/vars" }
+# extract_actual_clauses (restrictinfo.c).
+joininfo = { path = "../../util/joininfo" }
+# build_physical_tlist (plancat.c).
+plancat = { path = "../../util/plancat" }
+# CommuteOpExpr (clauses.c) — get_switched_clauses in the join converters.
+clauses = { path = "../../util/clauses" }
+# equal_expr (equalfuncs.c) — list_difference over the OR-clause in tidscan.
+equalfuncs_seams = { path = "../../../nodes/equalfuncs_seams" }
+# minmax_replacement_param (setrefs.c find_minmax_agg_replacement_param) — owned
+# here (create_minmaxagg_plan fills root.minmax_aggs); installed for setrefs.
+setrefs_seams = { path = "../setrefs_seams" }
+# is_redundant_derived_clause (equivclass.c) — tidscan single-tidqual dedup.
+equivclass_seams = { path = "../../path/equivclass_seams" }
+# adjust_appendrel_attrs_multilevel (appendinfo.c) — ADJUST_CHILD_ATTRS of a
+# child SampleScan's TABLESAMPLE clause (reparameterize_path_by_child, pathnode.c).
+equivclass_ext_seams = { path = "../../path/equivclass_ext_seams" }
+# find_ec_member_matching_expr / find_computable_ec_member (equivclass.c) —
+# prepare_sort_from_pathkeys matches pathkey ECs to tlist entries.
+equivclass = { path = "../../path/equivclass" }
+# get_opfamily_member_for_cmptype (lsyscache.c) — the sort operator for a PathKey.
+lsyscache_seams = { path = "../../../utils/cache/lsyscache_seams" }
+# CompareType (pathkey pk_cmptype) for the sort-operator lookup.
+types_amapi = { path = "../../../../_support/types/types_amapi" }
+# enable_sort GUC (make_sort disabled_nodes accounting).
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+# clamp_cardinality_to_long (costsize.c) — make_agg numGroups reduction.
+costsize_seams = { path = "../../path/costsize_seams" }
+# materialize_finished_plan install target (subselect cohort consumes it).
+init_subselect_ext_seams = { path = "../init_subselect_ext_seams" }
+# make_partition_pruneinfo (partprune.c) — ordered/partitioned Append run-time
+# pruning; keystone-blocked owner, reached only for partitioned rels w/ prunequal.
+partprune_seams = { path = "../../../partitioning/partprune_seams" }
+# predicate_implied_by (predtest.c) — create_indexscan_plan qpqual proof.
+predtest_seams = { path = "../../util/predtest_seams" }
+# ScanDirection enum (IndexScan/IndexOnlyScan indexorderdir plan-node field).
+types_scan = { path = "../../../../_support/types/types_scan" }

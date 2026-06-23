@@ -1,0 +1,45 @@
+[package]
+name = "pseudotypes"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pseudotypes"
+path = "src/lib.rs"
+
+[dependencies]
+# Carrier types + memory contexts.
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_rangetypes = { path = "../../../../_support/types/types_rangetypes" }
+
+# libpq wire format for cstring/void recv/send (non-cyclic, direct dep).
+pqformat = { path = "../../../libpq/pqformat" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+
+# fmgr/Datum boundary: the PGFunction call frame + the fmgr-core builtin table
+# (cstring I/O builtin registration). Used only by `fmgr_builtins` (std).
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+
+# Delegating output/send targets (real type I/O functions). None of these
+# units depend on this one, so a direct cargo edge is acyclic.
+arrayfuncs = { path = "../arrayfuncs" }
+varlena = { path = "../varlena" }
+# `anyarray_out`/`anyarray_send` detoast the array arg before `array_out`/
+# `array_send` (C: `PG_GETARG_ANY_ARRAY_P` == detoast), same as arrayfuncs.
+detoast_seams = { path = "../../../access/common/detoast_seams" }
+multirangetypes = { path = "../multirangetypes" }
+
+# range_out crosses a dependency cycle (rangetypes), so it is a seam.
+rangetypes_seams = { path = "../rangetypes_seams" }
+
+# enum_out: real enum.c port (direct dep, acyclic).
+adt_enum = { path = "../adt_enum" }
+
+[dev-dependencies]
+# Identity encoding-conversion mocks for the cstring recv/send ASCII paths.
+mbutils_seams = { path = "../../mb/mbutils_seams" }

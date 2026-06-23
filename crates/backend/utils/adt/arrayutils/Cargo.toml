@@ -1,0 +1,32 @@
+[package]
+name = "arrayutils"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "arrayutils"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+
+# ereport(ERROR) builder for the SQL-facing argument/limit checks.
+utils_error = { path = "../../utils_error" }
+
+# cstring parsing for ArrayGetIntegerTypmods.
+numutils = { path = "../numutils" }
+
+# Inward seams this crate OWNS and installs from init_seams().
+arrayutils_seams = { path = "../arrayutils_seams" }
+
+# array deconstruct / null-check for ArrayGetIntegerTypmods (no cycle:
+# arrayfuncs depends only on arrayutils-seams, not on this impl crate).
+arrayfuncs = { path = "../arrayfuncs" }
+
+[dev-dependencies]
+# ArrayType on-disk layout constant for the cstring[] roundtrip test.
+array = { path = "../../../../_support/types/array" }

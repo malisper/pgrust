@@ -1,0 +1,38 @@
+[package]
+name = "cte"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "cte"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+utils_error = { path = "../../utils/utils_error" }
+nodes_core = { path = "../../nodes/nodes_core" }
+
+# Merged owners called directly (cycle-free: none of these dep this crate).
+parse_expr = { path = "../parse_expr" }
+coerce = { path = "../coerce" }
+parse_collate = { path = "../parse_collate" }
+adt_format_type = { path = "../../utils/adt/adt_format_type" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+
+# Outward dependency seams.
+# parse_sub_analyze: the CTE <-> analyze recursion seam (analyze.c unported).
+parser_analyze_seams = { path = "../parser_analyze_seams" }
+# lookup_type_cache_eq_opr: typcache equality-operator lookup (cross dep cycle).
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
+# parser_errposition (parse_node.c, owned by parser-small1).
+small1_seams = { path = "../small1_seams" }
+
+[dev-dependencies]
+# Installs the real `parser_errposition` seam so the error-path tests resolve
+# their cursor positions.
+small1 = { path = "../small1" }

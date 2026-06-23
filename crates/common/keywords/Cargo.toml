@@ -1,0 +1,12 @@
+[package]
+name = "keywords"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "keywords"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../_support/types/types_core" }

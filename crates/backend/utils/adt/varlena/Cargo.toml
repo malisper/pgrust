@@ -1,0 +1,58 @@
+[package]
+name = "varlena"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "varlena"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+
+# fmgr builtin fast-path registration (text / name<->text comparators).
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+datum = { path = "../../../../_support/types/datum" }
+crc32c = { path = "../../../../port/crc32c" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_error = { path = "../../../../_support/types/types_error" }
+locale = { path = "../../../../_support/types/locale" }
+types_sortsupport = { path = "../../../../_support/types/types_sortsupport" }
+regex = { path = "../../../../_support/types/regex" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+pqformat = { path = "../../../libpq/pqformat" }
+varlena_seams = { path = "../varlena_seams" }
+comment_seams = { path = "../../../commands/comment_seams" }
+seclabel_seams = { path = "../../../commands/seclabel_seams" }
+quote_seams = { path = "../quote_seams" }
+guc_funcs_seams = { path = "../../misc/guc_funcs_seams" }
+numutils = { path = "../numutils" }
+regexp_seams = { path = "../regexp_seams" }
+regex_core_seams = { path = "../../../regex/regex_core_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+mbutils_seams = { path = "../../mb/mbutils_seams" }
+encode_seams = { path = "../encode_seams" }
+guc_tables = { path = "../../misc/guc_tables" }
+pg_locale_seams = { path = "../pg_locale_seams" }
+detoast_seams = { path = "../../../access/common/detoast_seams" }
+toast_compression = { path = "../../../access/common/toast_compression" }
+arrayfuncs_seams = { path = "../arrayfuncs_seams" }
+sort_storage_seams = { path = "../../sort/sort_storage_seams" }
+scansup_seams = { path = "../../../parser/scansup_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+lsyscache_seams = { path = "../../cache/lsyscache_seams" }
+common_path_seams = { path = "../../../../common/common_path_seams" }
+ruleutils_seams = { path = "../ruleutils_seams" }
+hyperloglog = { path = "../../../lib/hyperloglog" }
+nodes = { path = "../../../../_support/types/nodes" }
+hashfn_seams = { path = "../../../../common/hashfn_seams" }
+types_wchar = { path = "../../../../_support/types/types_wchar" }
+unicode_norm_bitfields = { path = "../../../../common/unicode_norm_bitfields" }
+unicode_category_seams = { path = "../../../../common/unicode_category_seams" }
+
+[dev-dependencies]
+quote = { path = "../quote" }

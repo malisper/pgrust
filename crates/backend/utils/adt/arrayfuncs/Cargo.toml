@@ -1,0 +1,48 @@
+[package]
+name = "arrayfuncs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "arrayfuncs"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+nodes = { path = "../../../../_support/types/nodes" }
+array = { path = "../../../../_support/types/array" }
+types_namespace = { path = "../../../../_support/types/types_namespace" }
+
+# ereport(ERROR) builder for the SQL-facing argument/limit checks.
+utils_error = { path = "../../utils_error" }
+types_typcache = { path = "../../../../_support/types/types_typcache" }
+
+# fmgr registration of the polymorphic array I/O builtins (array_in/out/recv/
+# send) so they are dispatchable by OID through the fmgr registry.
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+
+# Inward seams this crate OWNS and installs from init_seams().
+arrayfuncs_seams = { path = "../arrayfuncs_seams" }
+# The `array-more` array<->element bridges (deconstruct_array_builtin /
+# construct_array_builtin over text[]/"char"[]/int2[]) that tsvector_op.c and
+# jsonb drive; arrayfuncs owns those primitives and so installs these seams.
+array_more_seams = { path = "../array_more_seams" }
+
+# GUC slots: `array_in` reads the live `Array_nulls` GUC value from its slot.
+guc_tables = { path = "../../misc/guc_tables" }
+
+# Outward seams to unported neighbors.
+arrayutils_seams = { path = "../arrayutils_seams" }
+lsyscache_seams = { path = "../../cache/lsyscache_seams" }
+typcache_seams = { path = "../../cache/typcache_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+format_type_seams = { path = "../format_type_seams" }
+detoast_seams = { path = "../../../access/common/detoast_seams" }
+prng_seams = { path = "../../../../_support/pg/prng_seams" }
+tuplesort_seams = { path = "../../sort/tuplesort_seams" }

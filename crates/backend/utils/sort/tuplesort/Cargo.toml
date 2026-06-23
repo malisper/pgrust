@@ -1,0 +1,75 @@
+[package]
+name = "tuplesort"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "tuplesort"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+nodes = { path = "../../../../_support/types/nodes" }
+rel = { path = "../../../../_support/types/rel" }
+types_slot = { path = "../../../../_support/types/types_slot" }
+types_sortsupport = { path = "../../../../_support/types/types_sortsupport" }
+# `SK_BT_NULLS_FIRST` / `SK_BT_DESC` (the btree index begin variant reads these
+# from the `_bt_mkscankey` scankey `sk_flags`).
+types_scan = { path = "../../../../_support/types/types_scan" }
+mcx = { path = "../../../../_support/mcx" }
+# `top_memory_context()` — the process-global `TopMemoryContext` the C
+# `sortcontext` (`AllocSetContextCreate(CurrentMemoryContext, ...)`) is rooted
+# under, so the sort's contexts are reachable from the live `MemoryContext` tree
+# `pg_get_backend_memory_contexts()` walks (the "Caller tuples" bump child must
+# be observable while a cursor keeps a sort open). Seams crate (decls only).
+mcxt_seams = { path = "../../mmgr/mcxt_seams" }
+# Direct dependency on the now-landed real LogicalTapeSet engine (logtape.c).
+# `backend-utils-sort-storage` does NOT depend on tuplesort, so this edge is
+# acyclic; tuplesort calls `logtape::*` directly (no new tape seams needed).
+sort_storage = { path = "../sort_storage" }
+# Re-exports the `LogicalTapeSet` / `LogicalTape` vocabulary types (the owner
+# `backend-utils-sort-storage` implements the ops over them).
+sort_storage_seams = { path = "../sort_storage_seams" }
+# The sort-support comparator-invocation seams (ApplySortComparator etc.).
+sortsupport_seams = { path = "../sortsupport_seams" }
+# MinimalTuple flat-blob codec (writetup_heap/readtup_heap byte serialization +
+# heap_deform_minimal_tuple_flat for the readtup_heap datum1 re-extraction).
+# This crate does NOT depend on sort-storage/tuplesort, so the edge is acyclic.
+heaptuple = { path = "../../../access/common/heaptuple" }
+# `tuplesort_merge_order` is also exported to the planner's cost model
+# (cost_tuplesort) through the costsize seam crate, installed from init_seams().
+costsize_seams = { path = "../../../optimizer/path/costsize_seams" }
+# This unit's inward seams (the `tuplesort_*` access method): begin_heap/datum,
+# set_bound, put*/get*, performsort, end, rescan/markpos/restorepos, get_stats.
+# Installed from `init_seams()`.
+tuplesort_seams = { path = "../tuplesort_seams" }
+# `get_typlenbyval` (tuplesort_begin_datum's datum-type length/byval lookup).
+lsyscache_seams = { path = "../../cache/lsyscache_seams" }
+# Index-tuple ops for the index sort variants (F3b): index_form_tuple (put),
+# index_deform_tuple / nocache_index_getattr (datum1 + tiebreak extraction).
+indextuple_seams = { path = "../../../access/common/indextuple_seams" }
+# `_bt_mkscankey` — the btree-index begin variant's per-column sort-key source.
+nbtree_core_seams = { path = "../../../access/nbtree/nbtree_core_seams" }
+# `BuildIndexValueDescription` — the unique-violation error detail (cold path).
+genam_seams = { path = "../../../access/index/genam_seams" }
+# The GUC variable slots (`trace_sort` / `optimize_bounded_sort`): tuplesort.c
+# owns these two `bool` config variables; `init_seams()` installs their
+# `GucVarAccessors` so the GUC machinery reaches the backing store here.
+guc_tables = { path = "../../misc/guc_tables" }
+# CLUSTER sort variant (tuplesort_begin_cluster): BuildIndexInfo + FormIndexDatum
+# (catalog/index.c) and the per-comparison expression-eval EState/slot ops
+# (execUtils/execTuples). All are seam crates (decls only) — no dependency cycle.
+index_seams = { path = "../../../catalog/index_seams" }
+execUtils_seams = { path = "../../../executor/execUtils_seams" }
+execTuples_seams = { path = "../../../executor/execTuples_seams" }
+
+[dev-dependencies]
+# An in-memory BufFile provider for the external-merge tape tests (a leaf-crate
+# test binary cannot install the workspace's real buffile/fd seams).
+buffile_seams = { path = "../../../storage/file/buffile_seams" }
+types_storage = { path = "../../../../_support/types/types_storage" }

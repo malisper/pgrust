@@ -1,0 +1,21 @@
+[package]
+name = "regex_core"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "regex_core"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+regex = { path = "../../../_support/types/regex" }
+locale = { path = "../../../_support/types/locale" }
+regex_core_seams = { path = "../regex_core_seams" }
+pg_locale_seams = { path = "../../utils/adt/pg_locale_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+stack_depth_seams = { path = "../../utils/misc/stack_depth_seams" }

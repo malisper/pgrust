@@ -1,0 +1,51 @@
+[package]
+name = "exec"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "exec"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+# The SETOF (RETURN QUERY / RETURN NEXT) materialize sink: the live
+# ReturnSetInfo the executor-frame SRF dispatch threads across the dual-home
+# fcinfo boundary (types_fmgr::mat_srf).
+fmgr = { path = "../../../../_support/types/fmgr" }
+plpgsql = { path = "../../../../_support/types/plpgsql" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_trigger = { path = "../../../../_support/types/types_trigger" }
+rel = { path = "../../../../_support/types/rel" }
+types_ri_triggers = { path = "../../../../_support/types/types_ri_triggers" }
+
+# The expanded-record value substrate (make_/fetch_field/set_field/get_tuple).
+misc2 = { path = "../../../../backend/utils/adt/misc2" }
+# Building a transient record TupleDesc for SELECT ... INTO <record>.
+tupdesc = { path = "../../../../backend/access/common/tupdesc" }
+# coerce_function_result_tuple: declared/actual rowtype TupleDesc lookup +
+# position-based tuple conversion for a composite function result.
+cache_typcache = { path = "../../../../backend/utils/cache/cache_typcache" }
+next = { path = "../../../../backend/access/common/next" }
+# heap_deform_tuple: deconstruct a composite Datum into its field values for a
+# ROW-target assignment (exec_move_row_from_datum, plain-composite leg).
+heaptuple = { path = "../../../../backend/access/common/heaptuple" }
+execTuples = { path = "../../../../backend/executor/execTuples" }
+# The trigger-manager data accessors (tg_event / tg_trigtuple / tg_newtuple /
+# tg_relation / tg_trigger / tg_argv / tg_nargs) + the BEFORE-trigger
+# return-tuple channel (set_before_trigger_result_tuple).
+trigger_seams = { path = "../../../../backend/commands/trigger_seams" }
+# TG_EVENT / TG_TAG promises read the event trigger's event/tag off the
+# event-trigger firing side-channel.
+event_trigger_seams = { path = "../../../../backend/commands/event_trigger_seams" }
+
+# Inward seam this crate installs (plpgsql_exec_get_datum_type_info).
+plpgsql_exec_seams = { path = "../plpgsql_exec_seams" }
+# plpgsql_build_datatype: rebuild the simple-CASE temp var's datatype when the
+# test-expr's runtime type differs from the declared one (exec_stmt_case).
+comp_seams = { path = "../comp_seams" }

@@ -1,0 +1,32 @@
+[package]
+name = "catalog_perm"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "catalog_perm"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+nodes = { path = "../../../../_support/types/nodes" }
+parsenodes = { path = "../../../../_support/types/parsenodes" }
+types_catalog = { path = "../../../../_support/types/types_catalog" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+lsyscache_seams = { path = "../../cache/lsyscache_seams" }
+tuplesort_seams = { path = "../../sort/tuplesort_seams" }
+nodeAgg_aggapi_seams = { path = "../../../executor/nodeAgg_aggapi_seams" }
+arrayfuncs_seams = { path = "../arrayfuncs_seams" }
+nodeFuncs_seams = { path = "../../../nodes/nodeFuncs_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+timestamp_seams = { path = "../timestamp_seams" }
+types_datetime = { path = "../../../../_support/types/types_datetime" }
+execTuples_seams = { path = "../../../executor/execTuples_seams" }
+toastdesc_seams = { path = "../../../access/common/toastdesc_seams" }
+tupdesc_seams = { path = "../../../access/common/tupdesc_seams" }

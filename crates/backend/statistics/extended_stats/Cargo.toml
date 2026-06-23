@@ -1,0 +1,61 @@
+[package]
+name = "extended_stats"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "extended_stats"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+statistics = { path = "../../../_support/types/statistics" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_storage = { path = "../../../_support/types/types_storage" }
+utils_error = { path = "../../utils/utils_error" }
+table = { path = "../../access/table/table" }
+scankey = { path = "../../access/common/scankey" }
+genam_seams = { path = "../../access/index/genam_seams" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+analyze_rt_seams = { path = "../../commands/analyze_rt_seams" }
+heaptuple = { path = "../../access/common/heaptuple" }
+types_sortsupport = { path = "../../../_support/types/types_sortsupport" }
+datum = { path = "../../../_support/types/datum" }
+mvdistinct = { path = "../mvdistinct" }
+dependencies = { path = "../dependencies" }
+mcv = { path = "../mcv" }
+indexing = { path = "../../catalog/indexing" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+# MCV match engine: per-item operator dispatch (FunctionCall2Coll over the
+# unified Datum) and the array-Const deconstruction for ScalarArrayOpExpr.
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
+statscmds = { path = "../../commands/statscmds" }
+nodes = { path = "../../../_support/types/nodes" }
+pathnodes = { path = "../../../_support/types/pathnodes" }
+path_small_seams = { path = "../../optimizer/path/path_small_seams" }
+relnode_seams = { path = "../../optimizer/util/relnode_seams" }
+selfuncs_seams = { path = "../../utils/adt/selfuncs_seams" }
+nodeFuncs_seams = { path = "../../nodes/nodeFuncs_seams" }
+# stxexprs decode leg: stringToNode + eval_const_expressions + fix_opfuncids,
+# examine_expression (via analyze), the executor per-row eval (make_build_data /
+# compute_expr_stats) and serialize_expr_stats (pg_statistic composite array).
+read_seams = { path = "../../nodes/read_seams" }
+nodes_core = { path = "../../nodes/nodes_core" }
+init_subselect_ext_seams = { path = "../../optimizer/plan/init_subselect_ext_seams" }
+commands_analyze_seams = { path = "../../commands/commands_analyze_seams" }
+execExpr_seams = { path = "../../executor/execExpr_seams" }
+execTuples_seams = { path = "../../executor/execTuples_seams" }
+execUtils_seams = { path = "../../executor/execUtils_seams" }
+table_tableam = { path = "../../access/table/table_tableam" }
+scalar_datum_core = { path = "../../utils/adt/scalar_datum_core" }
+attoptcache = { path = "../../utils/cache/attoptcache" }
+arrayfuncs_seams = { path = "../../utils/adt/arrayfuncs_seams" }
+detoast_seams = { path = "../../access/common/detoast_seams" }

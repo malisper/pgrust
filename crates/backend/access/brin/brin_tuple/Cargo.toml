@@ -1,0 +1,27 @@
+[package]
+name = "brin_tuple"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "brin_tuple"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_typcache = { path = "../../../../_support/types/types_typcache" }
+brin = { path = "../../../../_support/types/brin" }
+heaptuple = { path = "../../common/heaptuple" }
+detoast_seams = { path = "../../common/detoast_seams" }
+toast_internals_seams = { path = "../../common/toast_internals_seams" }
+typcache_seams = { path = "../../../utils/cache/typcache_seams" }
+scalar_seams = { path = "../../../utils/adt/scalar_seams" }
+brin_entry_seams = { path = "../brin_entry_seams" }
+
+[dev-dependencies]
+rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }

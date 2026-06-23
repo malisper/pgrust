@@ -1,0 +1,50 @@
+[package]
+name = "pageops"
+version = "0.1.0"
+edition = "2021"
+
+# Every fallible function here returns the project-wide `types_error::PgResult`.
+# `PgError` is large, so the un-boxed `Err` variant is large; this is the
+# project-wide error contract these ports must match.
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+rel = { path = "../../../../_support/types/rel" }
+brin = { path = "../../../../_support/types/brin" }
+wal = { path = "../../../../_support/types/wal" }
+
+# ereport / critical-section (miscadmin.h, elog.c).
+utils_error = { path = "../../../utils/utils_error" }
+
+# START_CRIT_SECTION / END_CRIT_SECTION (miscadmin.h) — required around the
+# log_newpage_buffer WAL emit of brin_create_empty_metapage.
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+
+# Page-byte primitives (bufpage.c).
+page = { path = "../../../storage/page" }
+
+# BRIN on-disk tuple codec (brin_tuple.c): brin_copy_tuple / brin_tuples_equal.
+brin_tuple = { path = "../brin_tuple" }
+
+# Buffer manager (bufmgr.c) — pin / lock / page access.
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+
+# Relcache accessors (utils/rel.h): RelationNeedsWAL / RELATION_IS_LOCAL.
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+
+# Free-space map (freespace.c): GetPageWithFreeSpace / RecordPageWithFreeSpace /
+# RecordAndGetPageWithFreeSpace / FreeSpaceMapVacuumRange.
+freespace_seams = { path = "../../../storage/freespace/freespace_seams" }
+
+# Relation-extension lock (lmgr.c): LockRelationForExtension.
+lmgr_seams = { path = "../../../storage/lmgr/lmgr_seams" }
+
+# WAL insertion (xloginsert.c): XLogBeginInsert / XLogRegister* / XLogInsert /
+# log_newpage_buffer.
+xloginsert_seams = { path = "../../transam/xloginsert_seams" }
+
+[dev-dependencies]

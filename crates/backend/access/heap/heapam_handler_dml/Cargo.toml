@@ -1,0 +1,37 @@
+[package]
+name = "heapam_handler_dml"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "heapam_handler_dml"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+rel = { path = "../../../../_support/types/rel" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_slot = { path = "../../../../_support/types/types_slot" }
+types_tableam = { path = "../../../../_support/types/types_tableam" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+snapshot = { path = "../../../../_support/types/snapshot" }
+
+heapam = { path = "../heapam" }
+heapam_seams = { path = "../heapam_seams" }
+heapam_visibility = { path = "../heapam_visibility" }
+heapam_handler_dml_seams = { path = "../heapam_handler_dml_seams" }
+execTuples_seams = { path = "../../../executor/execTuples_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+lmgr_seams = { path = "../../../storage/lmgr/lmgr_seams" }
+catalog_storage_seams = { path = "../../../catalog/catalog_storage_seams" }
+transam_xact_seams = { path = "../../transam/transam_xact_seams" }
+multixact_seams = { path = "../../transam/multixact_seams" }
+combocid_seams = { path = "../../../utils/time/combocid_seams" }
+snapmgr = { path = "../../../utils/time/snapmgr" }
+page = { path = "../../../storage/page" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }

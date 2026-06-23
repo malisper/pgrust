@@ -1,0 +1,28 @@
+[package]
+name = "rmgrdesc_next"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "rmgrdesc_next"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../_support/mcx" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+wal = { path = "../../_support/types/wal" }
+types_storage = { path = "../../_support/types/types_storage" }
+types_tuple = { path = "../../_support/types/types_tuple" }
+xlog_records = { path = "../../_support/types/xlog_records" }
+brindesc_seams = { path = "../access/rmgrdesc/brindesc_seams" }
+gindesc_seams = { path = "../access/rmgrdesc/gindesc_seams" }
+gistdesc_seams = { path = "../access/rmgrdesc/gistdesc_seams" }
+hashdesc_seams = { path = "../access/rmgrdesc/hashdesc_seams" }
+heapdesc_seams = { path = "../access/rmgrdesc/heapdesc_seams" }
+mxactdesc_seams = { path = "../access/rmgrdesc/mxactdesc_seams" }
+nbtdesc_seams = { path = "../access/rmgrdesc/nbtdesc_seams" }
+spgdesc_seams = { path = "../access/rmgrdesc/spgdesc_seams" }
+standbydesc_seams = { path = "../access/rmgrdesc/standbydesc_seams" }
+rmgrdesc_small_seams = { path = "../rmgrdesc_small_seams" }

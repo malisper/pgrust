@@ -1,0 +1,36 @@
+[package]
+name = "aggregatecmds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "aggregatecmds"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+utils_error = { path = "../../utils/utils_error" }
+
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+define = { path = "../define" }
+functioncmds = { path = "../functioncmds" }
+functioncmds_seams = { path = "../functioncmds_seams" }
+
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+pg_aggregate_seams = { path = "../../catalog/pg_aggregate_seams" }
+parse_type_seams = { path = "../../parser/parse_type_seams" }
+format_type_seams = { path = "../../utils/adt/format_type_seams" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+
+types_core = { path = "../../../_support/types/types_core" }
+types_acl = { path = "../../../_support/types/types_acl" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+opclass = { path = "../../../_support/types/opclass" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }

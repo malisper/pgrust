@@ -1,0 +1,16 @@
+[package]
+name = "utf8_and_sjis2004"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "utf8_and_sjis2004"
+path = "src/lib.rs"
+
+[dependencies]
+types_error = { path = "../../../../../_support/types/types_error" }
+types_wchar = { path = "../../../../../_support/types/types_wchar" }
+conv_string_helpers = { path = "../../conv_string_helpers" }
+fmgr_core = { path = "../../../fmgr/fmgr_core" }
+common_wchar = { path = "../../../../../common/common_wchar" }

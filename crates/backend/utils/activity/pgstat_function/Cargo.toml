@@ -1,0 +1,28 @@
+[package]
+name = "pgstat_function"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgstat_function"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+utils_error = { path = "../../utils_error" }
+activity_pgstat = { path = "../activity_pgstat" }
+activity_xact = { path = "../activity_xact" }
+init_small_seams = { path = "../../init/init_small_seams" }
+guc_tables = { path = "../../misc/guc_tables" }
+inval_seams = { path = "../../cache/inval_seams" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+pg_proc_seams = { path = "../../../catalog/pg_proc_seams" }
+pgstat_function_seams = { path = "../pgstat_function_seams" }
+instr_time = { path = "../../../../_support/portability/instr_time" }
+# fmgr builtin registry for the pgstatfuncs.c per-function SQL accessors.
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+datum = { path = "../../../../_support/types/datum" }

@@ -1,0 +1,40 @@
+[package]
+name = "collationcmds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "collationcmds"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+utils_error = { path = "../../utils/utils_error" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+string = { path = "../../../common/string" }
+
+types_core = { path = "../../../_support/types/types_core" }
+datum = { path = "../../../_support/types/datum" }
+fmgr = { path = "../../../_support/types/fmgr" }
+types_error = { path = "../../../_support/types/types_error" }
+types_acl = { path = "../../../_support/types/types_acl" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+locale = { path = "../../../_support/types/locale" }
+nodes = { path = "../../../_support/types/nodes" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_wchar = { path = "../../../_support/types/types_wchar" }
+
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+collationcmds_seams = { path = "../collationcmds_seams" }
+define = { path = "../define" }
+define_seams = { path = "../define_seams" }
+parse_type_seams = { path = "../../parser/parse_type_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+pg_locale_seams = { path = "../../utils/adt/pg_locale_seams" }
+fd_seams = { path = "../../storage/file/fd_seams" }

@@ -1,0 +1,18 @@
+[package]
+name = "guc_file"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "guc_file"
+path = "src/lib.rs"
+
+[dependencies]
+types_error = { path = "../../../../_support/types/types_error" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+utils_error = { path = "../../utils_error" }
+guc_file_seams = { path = "../guc_file_seams" }
+guc_seams = { path = "../guc_seams" }
+conffiles_seams = { path = "../conffiles_seams" }
+init_small_seams = { path = "../../init/init_small_seams" }

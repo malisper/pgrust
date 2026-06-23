@@ -1,0 +1,21 @@
+[package]
+name = "be_secure_common"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "be_secure_common"
+path = "src/lib.rs"
+
+[dependencies]
+be_secure_common_seams = { path = "../be_secure_common_seams" }
+fd_seams = { path = "../../storage/file/fd_seams" }
+utils_error = { path = "../../utils/utils_error" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+percentrepl = { path = "../../../common/percentrepl" }
+string = { path = "../../../common/string" }
+wait_error_seams = { path = "../../../common/wait_error_seams" }
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+libc = "0.2"

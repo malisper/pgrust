@@ -1,0 +1,24 @@
+[package]
+name = "scalar_datum_core"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "scalar_datum_core"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+execparallel = { path = "../../../../_support/types/execparallel" }
+execParallel_support_seams = { path = "../../../executor/execParallel_support_seams" }
+hashfn = { path = "../../../../common/hashfn" }
+scalar_seams = { path = "../scalar_seams" }
+datum_seams = { path = "../datum_seams" }
+misc2_seams = { path = "../misc2_seams" }

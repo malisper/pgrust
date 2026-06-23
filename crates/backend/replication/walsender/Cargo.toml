@@ -1,0 +1,82 @@
+[package]
+name = "walsender"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "walsender"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_datetime = { path = "../../../_support/types/types_datetime" }
+condvar = { path = "../../../_support/types/condvar" }
+replication = { path = "../../../_support/types/replication" }
+types_storage = { path = "../../../_support/types/types_storage" }
+
+utils_error = { path = "../../utils/utils_error" }
+s_lock = { path = "../../storage/lmgr/s_lock" }
+interrupt = { path = "../../postmaster/interrupt" }
+repl_gram = { path = "../repl_gram" }
+
+# own seam crate
+walsender_seams = { path = "../walsender_seams" }
+
+# outward owner-seam crates
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
+timeline_seams = { path = "../../access/transam/timeline_seams" }
+varsup_seams = { path = "../../access/transam/varsup_seams" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+slot_seams = { path = "../slot_seams" }
+syncrep_seams = { path = "../syncrep/syncrep_seams" }
+replication_snapbuild_seams = { path = "../replication_snapbuild_seams" }
+repl_scanner_seams = { path = "../repl_scanner_seams" }
+walreceiverfuncs_seams = { path = "../walreceiverfuncs_seams" }
+slotsync_seams = { path = "../logical/slotsync_seams" }
+logical_seams = { path = "../logical/logical_seams" }
+replication_basebackup_seams = { path = "../replication_basebackup_seams" }
+procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
+procarray_seams = { path = "../../storage/ipc/procarray_seams" }
+ipc_shmem_seams = { path = "../../storage/ipc/ipc_shmem_seams" }
+dsm_core_seams = { path = "../../storage/ipc/dsm_core_seams" }
+condition_variable_seams = { path = "../../storage/lmgr/condition_variable_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+dest_seams = { path = "../../tcop/dest_seams" }
+pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
+ps_status_seams = { path = "../../utils/misc/ps_status_seams" }
+guc_file_seams = { path = "../../utils/misc/guc_file_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+acl_seams = { path = "../../utils/adt/acl_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+resowner_seams = { path = "../../utils/resowner/resowner_seams" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+postmaster_seams = { path = "../../postmaster/postmaster_seams" }
+funcapi_seams = { path = "../../utils/fmgr/funcapi_seams" }
+lwlock_seams = { path = "../../storage/lmgr/lwlock_seams" }
+fd_seams = { path = "../../storage/file/fd_seams" }
+aio_seams = { path = "../../storage/aio/aio_seams" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+pgstat_io_seams = { path = "../../utils/activity/pgstat_io_seams" }
+timeout_seams = { path = "../../utils/misc/timeout_seams" }
+libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
+port_pqsignal_seams = { path = "../../../port/port_pqsignal_seams" }
+pgsleep = { path = "../../../port/pgsleep" }
+types_guc = { path = "../../../_support/types/types_guc" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_dest = { path = "../../../_support/types/types_dest" }
+nodes = { path = "../../../_support/types/nodes" }
+signal = { path = "../../../_support/types/signal" }
+mcx = { path = "../../../_support/mcx" }
+utility_out_seams = { path = "../../tcop/utility_out_seams" }
+tupdesc = { path = "../../access/common/tupdesc" }
+varlena_seams = { path = "../../utils/adt/varlena_seams" }
+dbcommands_seams = { path = "../../commands/dbcommands_seams" }
+execTuples_seams = { path = "../../executor/execTuples_seams" }
+
+libc = "0.2"

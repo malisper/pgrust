@@ -1,0 +1,20 @@
+[package]
+name = "joinpath"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "joinpath"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+pathnodes = { path = "../../../../_support/types/pathnodes" }
+joinpath_seams = { path = "../joinpath_seams" }
+equalfuncs_seams = { path = "../../../nodes/equalfuncs_seams" }
+relnode_seams = { path = "../../util/relnode_seams" }
+lsyscache_seams = { path = "../../../utils/cache/lsyscache_seams" }

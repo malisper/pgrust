@@ -1,0 +1,65 @@
+[package]
+name = "lock"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "lock"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_deadlock = { path = "../../../../_support/types/types_deadlock" }
+mcx = { path = "../../../../_support/mcx" }
+
+# Inward seams this unit installs.
+lock_seams = { path = "../lock_seams" }
+
+# proc.c owns the wait queue (JoinWaitQueue / ProcSleep / ProcWakeup /
+# ProcLockWakeup) and the PGPROC array; lock.c calls these directly, lending
+# &mut LOCK / &mut LOCALLOCK from its ambient table.
+lmgr_proc = { path = "../lmgr_proc" }
+lmgr_proc_seams = { path = "../lmgr_proc_seams" }
+
+# Outward owner seams lock.c reaches.
+lwlock_seams = { path = "../lwlock_seams" }
+deadlock_seams = { path = "../deadlock_seams" }
+ipc_shmem_seams = { path = "../../ipc/ipc_shmem_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+dynahash_seams = { path = "../../../utils/hash/dynahash_seams" }
+hashfn_seams = { path = "../../../../common/hashfn_seams" }
+
+# lock.c owns the max_locks_per_transaction / log_lock_failures GUC storage
+# cells (installs their accessors into the GUC table).
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+
+# resowner.c bookkeeping (RememberLock / ForgetLock / GetParent /
+# CurrentResourceOwner) the LOCALLOCK grant/release paths call.
+resowner_seams_2 = { path = "../../../utils/resowner/resowner_seams_2" }
+
+# lmgr.c owns DescribeLockTag; lock.c's describe_lock_tag seam (proc.c's
+# log path) delegates to it.
+lmgr_seams = { path = "../lmgr_seams" }
+
+# Error reporting (WARNING / LOG ereports) + my_proc_pid + recovery-state +
+# DeadLockReport.
+utils_error = { path = "../../../utils/utils_error" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+xlogrecovery_seams = { path = "../../../access/transam/xlogrecovery_seams" }
+
+# 2PC: AtPrepare_Locks registers TWOPHASE_RM_LOCK_ID records; the recover /
+# postcommit / postabort callbacks reach the prepared-xact dummy PGPROC.
+twophase_seams = { path = "../../../access/transam/twophase_seams" }
+twophase_rmgr = { path = "../../../access/transam/twophase_rmgr" }
+
+# lock_twophase_standby_recover hands relation AccessExclusiveLocks to the
+# standby lock machinery.
+standby_seams = { path = "../../ipc/standby_seams" }
+
+# BackendPidGetProc (pg_blocking_pids / GetBlockerStatusData): map a PID to its
+# ProcNumber via procarray.
+procarray_seams = { path = "../../ipc/procarray_seams" }

@@ -1,0 +1,70 @@
+[package]
+name = "rmgr"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "rmgr"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+pgstrcasecmp = { path = "../../../../port/pgstrcasecmp" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+wal = { path = "../../../../_support/types/wal" }
+# Every non-NULL builtin RmgrTable slot is a callback owned by another
+# subsystem; each is reached through its owner's seam crate (the owners
+# install on landing). One dependency per rmgrlist.h callback owner.
+transam_xlog_seams = { path = "../transam_xlog_seams" }
+transam_xact_seams = { path = "../transam_xact_seams" }
+catalog_storage_seams = { path = "../../../catalog/catalog_storage_seams" }
+clog_seams = { path = "../clog_seams" }
+dbcommands_seams = { path = "../../../commands/dbcommands_seams" }
+tablespace_seams = { path = "../../../commands/tablespace_seams" }
+multixact_seams = { path = "../multixact_seams" }
+relmapper_seams = { path = "../../../utils/cache/relmapper_seams" }
+standby_seams = { path = "../../../storage/ipc/standby_seams" }
+heapam_xlog_seams = { path = "../../heap/heapam_xlog_seams" }
+nbt_xlog_seams = { path = "../../nbtree/nbt_xlog_seams" }
+hash_xlog_seams = { path = "../../hash/hash_xlog_seams" }
+gin_core_seams = { path = "../../gin/gin_core_seams" }
+gist_core = { path = "../../gist/gist_core" }
+sequence_seams_2 = { path = "../../../commands/sequence_seams_2" }
+spg_xlog_seams = { path = "../../spgist/spg_xlog_seams" }
+brin_xlog_seams = { path = "../../brin/brin_xlog_seams" }
+commit_ts_seams = { path = "../commit_ts_seams" }
+origin_seams = { path = "../../../replication/logical/origin_seams" }
+generic_xlog_seams = { path = "../generic_xlog_seams" }
+message_seams = { path = "../../../replication/logical/message_seams" }
+decode_seams = { path = "../../../replication/logical/decode_seams" }
+xlogdesc_seams = { path = "../../rmgrdesc/xlogdesc_seams" }
+xactdesc_seams = { path = "../../rmgrdesc/xactdesc_seams" }
+smgrdesc_seams = { path = "../../rmgrdesc/smgrdesc_seams" }
+clogdesc_seams = { path = "../../rmgrdesc/clogdesc_seams" }
+dbasedesc_seams = { path = "../../rmgrdesc/dbasedesc_seams" }
+tblspcdesc_seams = { path = "../../rmgrdesc/tblspcdesc_seams" }
+mxactdesc_seams = { path = "../../rmgrdesc/mxactdesc_seams" }
+relmapdesc_seams = { path = "../../rmgrdesc/relmapdesc_seams" }
+standbydesc_seams = { path = "../../rmgrdesc/standbydesc_seams" }
+heapdesc_seams = { path = "../../rmgrdesc/heapdesc_seams" }
+nbtdesc_seams = { path = "../../rmgrdesc/nbtdesc_seams" }
+hashdesc_seams = { path = "../../rmgrdesc/hashdesc_seams" }
+gindesc_seams = { path = "../../rmgrdesc/gindesc_seams" }
+gistdesc_seams = { path = "../../rmgrdesc/gistdesc_seams" }
+seqdesc_seams = { path = "../../rmgrdesc/seqdesc_seams" }
+spgdesc_seams = { path = "../../rmgrdesc/spgdesc_seams" }
+brindesc_seams = { path = "../../rmgrdesc/brindesc_seams" }
+committsdesc_seams = { path = "../../rmgrdesc/committsdesc_seams" }
+replorigindesc_seams = { path = "../../rmgrdesc/replorigindesc_seams" }
+genericdesc_seams = { path = "../../rmgrdesc/genericdesc_seams" }
+logicalmsgdesc_seams = { path = "../../rmgrdesc/logicalmsgdesc_seams" }
+# Non-table external calls.
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+funcapi_seams = { path = "../../../utils/fmgr/funcapi_seams" }
+varlena_seams = { path = "../../../utils/adt/varlena_seams" }
+error_seams = { path = "../../../utils/error/error_seams" }

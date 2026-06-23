@@ -1,0 +1,24 @@
+[package]
+name = "mac8"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "mac8"
+path = "src/lib.rs"
+
+[dependencies]
+types_error = { path = "../../../../_support/types/types_error" }
+types_network = { path = "../../../../_support/types/types_network" }
+# hash_any / hash_any_extended for hashmacaddr8; owner ported, depend directly.
+hashfn = { path = "../../../../common/hashfn" }
+# fmgr-ABI wrapper layer: register the by-ref `macaddr8` builtins. Their call
+# frame lives in types-fmgr; by-OID dispatch resolves them in fmgr-core.
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+# `macaddr8_send` frames its `bytea` result through the same pq_*typsend path C
+# uses (the body returns the wire bytes; the adapter adds the varlena header).
+mcx = { path = "../../../../_support/mcx" }
+pqformat = { path = "../../../libpq/pqformat" }

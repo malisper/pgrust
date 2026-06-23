@@ -1,0 +1,11 @@
+[package]
+name = "misc_more2"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "misc_more2"
+path = "src/lib.rs"
+
+[dependencies]

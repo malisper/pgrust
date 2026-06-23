@@ -1,0 +1,35 @@
+[package]
+name = "conflict"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "conflict"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+nodes = { path = "../../../../_support/types/nodes" }
+rel = { path = "../../../../_support/types/rel" }
+replication = { path = "../../../../_support/types/replication" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+utils_error = { path = "../../../utils/utils_error" }
+execUtils = { path = "../../../executor/execUtils" }
+table_tableam = { path = "../../../access/table/table_tableam" }
+genam_seams = { path = "../../../access/index/genam_seams" }
+indexam_seams = { path = "../../../access/index/indexam_seams" }
+commit_ts_seams = { path = "../../../access/transam/commit_ts_seams" }
+index_seams = { path = "../../../catalog/index_seams" }
+execMain_seams = { path = "../../../executor/execMain_seams" }
+execReplication_seams = { path = "../../../executor/execReplication_seams" }
+execTuples_seams = { path = "../../../executor/execTuples_seams" }
+nodes_core_seams = { path = "../../../nodes/nodes_core_seams" }
+origin_seams = { path = "../origin_seams" }
+stat_seams = { path = "../../../utils/activity/stat_seams" }
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
+lsyscache_seams = { path = "../../../utils/cache/lsyscache_seams" }

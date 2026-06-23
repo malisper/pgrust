@@ -1,0 +1,45 @@
+[package]
+name = "adt_xml"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_xml"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+types_datetime = { path = "../../../../_support/types/types_datetime" }
+pgtime = { path = "../../../../_support/types/pgtime" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_wchar = { path = "../../../../_support/types/types_wchar" }
+nodes = { path = "../../../../_support/types/nodes" }
+types_xml = { path = "../../../../_support/types/types_xml" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+adt_datetime = { path = "../adt_datetime" }
+encnames_seams = { path = "../../../../common/encnames_seams" }
+elog_seams = { path = "../../error/elog_seams" }
+xml_seams = { path = "../xml_seams" }
+xml_libxml_seams = { path = "../xml_libxml_seams" }
+lsyscache_seams = { path = "../../cache/lsyscache_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+arrayfuncs_seams = { path = "../arrayfuncs_seams" }
+guc_tables = { path = "../../misc/guc_tables" }
+
+# Real owners of the cross-subsystem (non-libxml2) dependency seams xml.c
+# reaches: the syscache/lsyscache lookups, the namespace resolution, and the
+# utils/mb encoding conversions. These are installed from `init_seams()` below
+# (the `xml.c` consumer is the only crate that deps the libxml-seams contract,
+# so it is the natural wiring point; verified no dependency cycle).
+lsyscache = { path = "../../cache/lsyscache" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+catalog_namespace = { path = "../../../catalog/catalog_namespace" }
+table = { path = "../../../access/table/table" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+mbutils = { path = "../../mb/mbutils" }

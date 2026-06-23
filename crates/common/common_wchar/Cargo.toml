@@ -1,0 +1,12 @@
+[package]
+name = "common_wchar"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "common_wchar"
+path = "src/lib.rs"
+
+[dependencies]
+types_wchar = { path = "../../_support/types/types_wchar" }

@@ -1,0 +1,22 @@
+[package]
+name = "ts_utils"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ts_utils"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+tsearch = { path = "../../../_support/types/tsearch" }
+utils_error = { path = "../../utils/utils_error" }
+ts_utils_seams = { path = "../ts_utils_seams" }
+ts_locale_seams = { path = "../ts_locale_seams" }
+formatting_seams = { path = "../../utils/adt/formatting_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+common_path_seams = { path = "../../../common/common_path_seams" }
+init_small = { path = "../../utils/init/init_small" }

@@ -1,0 +1,49 @@
+[package]
+name = "relcache_entry"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "relcache_entry"
+path = "src/lib.rs"
+
+[dependencies]
+# The vocabulary embedded in the owned RelationData entry. These are exactly
+# the crates entry.rs imports — none of which depend on relcache, so relocating
+# the owned entry here is acyclic. In particular this crate does NOT depend on
+# types-rel (the trimmed cross-unit value-slice), so types-rel can later name
+# this entry via the seam crate without a cycle.
+types_core = { path = "../types_core" }
+types_storage = { path = "../types_storage" }
+types_tableam = { path = "../types_tableam" }
+types_reloptions = { path = "../types_reloptions" }
+
+# F0'' additive: the entry now serves consumers the projected/borrowed forms
+# directly (the build family's owned->borrowed projection moved onto the entry
+# type). The materialized cross-unit `TupleDescData` is built with the same
+# `CreateTupleDesc` tupdesc utility the build family used (no logic
+# duplication), so the entry crate pulls in mcx / types-error / types-tuple
+# (the borrowed vocabulary) and backend-access-common-tupdesc (the descriptor
+# materializer). This stays acyclic: none of those reach back to
+# types-relcache-entry.
+mcx = { path = "../../mcx" }
+types_error = { path = "../types_error" }
+types_tuple = { path = "../types_tuple" }
+tupdesc = { path = "../../../backend/access/common/tupdesc" }
+
+# The full-Query cache-ownership keystone: `rd_rules` (RuleLock/RewriteRule)
+# carries whole `Query` trees (the C `RewriteRule.actions` is a `List` of
+# `Query` loaded via `stringToNode`). The entry stores them as the lifetime-free
+# `Query<'static>` allocated in the process-lifetime CacheMemoryContext arena
+# (the C `CacheMemoryContext` rendering), so this crate names the canonical full
+# `Query`/`Node` model. ACYCLIC: types-nodes does NOT depend on
+# types-relcache-entry (relcache-entry already transitively pulls types-nodes
+# via types-tuple), so a direct dep adds no cycle.
+nodes = { path = "../nodes" }
+
+# `rd_trigdesc` (the relation's TriggerDesc, built by RelationBuildTriggers and
+# CopyTriggerDesc'd into the CacheMemoryContext arena) is the value-typed
+# `types_trigger::TriggerDesc<'static>`. `types-trigger` is a leaf (mcx +
+# types-core only) and does NOT depend on relcache-entry, so this is acyclic.
+types_trigger = { path = "../types_trigger" }

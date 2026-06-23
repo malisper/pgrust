@@ -1,0 +1,118 @@
+[package]
+name = "execProcnode"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "execProcnode"
+path = "src/lib.rs"
+
+[dependencies]
+trace = { path = "../../../_support/pgrust/trace" }
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+# MultiExecProcNode's owned seam returns a TIDBitmap (the lone landed multiexec
+# consumer, nodeBitmapHeapscan, always demands one).
+tidbitmap = { path = "../../../_support/types/tidbitmap" }
+mcx = { path = "../../../_support/mcx" }
+# check_stack_depth() seam (utils/misc/stack_depth.c), unported owner.
+stack_depth_seams = { path = "../../utils/misc/stack_depth_seams" }
+# Seam crate this unit OWNS (installs every decl from its own init_seams()).
+execProcnode_seams = { path = "../execProcnode_seams" }
+# Landed node units this dispatch routes ExecInitNode/ExecEndNode (and
+# MultiExecProcNode) to directly. Each owner depends only on
+# backend-executor-execProcnode-seams (the seam crate), never on this crate, so
+# routing to them directly is acyclic — exactly as for nodeLimit.
+nodeLimit = { path = "../nodeLimit" }
+nodeAppend = { path = "../nodeAppend" }
+nodeMergeAppend = { path = "../nodeMergeAppend" }
+nodeSeqscan = { path = "../nodeSeqscan" }
+nodeIndexonlyscan = { path = "../nodeIndexonlyscan" }
+nodeTableFuncscan = { path = "../nodeTableFuncscan" }
+nodeFunctionscan = { path = "../nodeFunctionscan" }
+nodeForeignscan = { path = "../nodeForeignscan" }
+nodeNestloop = { path = "../nodeNestloop" }
+nodeMergejoin = { path = "../nodeMergejoin" }
+nodeGather = { path = "../nodeGather" }
+nodeHashjoin = { path = "../nodeHashjoin" }
+nodeMaterial = { path = "../nodeMaterial" }
+nodeSort = { path = "../nodeSort" }
+nodeIncrementalSort = { path = "../nodeIncrementalSort" }
+nodeMemoize = { path = "../nodeMemoize" }
+nodeHash = { path = "../nodeHash" }
+nodeResult = { path = "../nodeResult" }
+nodeProjectSet = { path = "../nodeProjectSet" }
+nodeModifyTable = { path = "../nodeModifyTable" }
+nodeRecursiveunion = { path = "../nodeRecursiveunion" }
+nodeBitmapAnd = { path = "../nodeBitmapAnd" }
+nodeIndexscan = { path = "../nodeIndexscan" }
+nodeBitmapIndexscan = { path = "../nodeBitmapIndexscan" }
+nodeSubqueryscan = { path = "../nodeSubqueryscan" }
+# ExecInitJunkFilter — strips a SubqueryScan subplan's resjunk columns out of a
+# whole-row Var result (deferred ExecInitWholeRowVar junk-filter build).
+execJunk = { path = "../execJunk" }
+nodeValuesscan = { path = "../nodeValuesscan" }
+nodeCtescan = { path = "../nodeCtescan" }
+nodeNamedtuplestorescan = { path = "../nodeNamedtuplestorescan" }
+queryenvironment_home = { path = "../../utils/misc/queryenvironment_home" }
+nodeCustom = { path = "../nodeCustom" }
+nodeGroup = { path = "../nodeGroup" }
+nodeAgg = { path = "../nodeAgg" }
+nodeUnique = { path = "../nodeUnique" }
+nodeGatherMerge = { path = "../nodeGatherMerge" }
+nodeSetOp = { path = "../nodeSetOp" }
+nodeBitmapOr = { path = "../nodeBitmapOr" }
+nodeBitmapHeapscan = { path = "../nodeBitmapHeapscan" }
+nodeTidscan = { path = "../nodeTidscan" }
+nodeTidrangescan = { path = "../nodeTidrangescan" }
+nodeSamplescan = { path = "../nodeSamplescan" }
+nodeSamplescan_seams = { path = "../nodeSamplescan_seams" }
+samplescan = { path = "../../../_support/types/samplescan" }
+prng = { path = "../../../_support/pg/prng" }
+hashfunc = { path = "../../access/hashfunc" }
+datum = { path = "../../../_support/types/datum" }
+nodeTidrangescan_seams = { path = "../nodeTidrangescan_seams" }
+nodeWindowAgg = { path = "../nodeWindowAgg" }
+nodeWorktablescan = { path = "../nodeWorktablescan" }
+# LockRows (nodeLockRows.c): this dispatch routes ExecInit/Proc/End/ReScan and
+# installs the node's 24 seams (the EvalPlanQual/tableam/junk substrate) from
+# lockrows_seams.rs. nodeLockRows depends only on its -seams crate (acyclic).
+nodeLockRows = { path = "../nodeLockRows" }
+nodeLockRows_seams = { path = "../nodeLockRows_seams" }
+# Substrate the LockRows seams reach: table_tuple_lock (tableam), the result
+# slot-ops / range-table-relation helpers (execUtils), the XactIsoLevel GUC.
+table_tableam = { path = "../../access/table/table_tableam" }
+execUtils_seams = { path = "../execUtils_seams" }
+execExpr_seams = { path = "../execExpr_seams" }
+tidrange = { path = "../../../_support/types/tidrange" }
+execUtils = { path = "../execUtils" }
+transam_xact = { path = "../../access/transam/transam_xact" }
+types_tableam = { path = "../../../_support/types/types_tableam" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+heaptuple = { path = "../../access/common/heaptuple" }
+rel = { path = "../../../_support/types/rel" }
+types_core = { path = "../../../_support/types/types_core" }
+# ExecInitSubPlan (nodeSubplan.c) — the ExecInitNode initPlan walk (#328) routes
+# each Plan.initPlan SubPlan to its ExecInitSubPlan. Acyclic: nodeSubplan depends
+# only on the seam crates, never on this dispatch crate.
+nodeSubplan = { path = "../nodeSubplan" }
+# Per-owner seam crates for the unported neighbours this dispatch routes through
+# (loud panic until each owner wires its init_seams()).
+postgres_seams = { path = "../../tcop/postgres_seams" }
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }
+execAmi_seams = { path = "../execAmi_seams" }
+instrument_seams = { path = "../instrument_seams" }
+# cte_leader_is_self / ExecShutdown* / planstate_tree_walker seams routed by the
+# ExecEndCteScan leader test and ExecShutdownNode walker (loud panic until owner).
+execMain_seams = { path = "../execMain_seams" }
+# The CteScan leader-aliased `cte_*` seam family (execMain-seams) is installed
+# here (cte_seams.rs): this is the node-init orchestrator that already owns the
+# `ExecInitCteScan` call site and can run the CTE subplan via exec_proc_node. The
+# shared CTE store is a real `Tuplestorestate` driven through sort-storage; the
+# subplan output slot is copied via execTuples; work_mem sizes the store. All
+# acyclic (none of these depend on this dispatch crate).
+sort_storage = { path = "../../utils/sort/sort_storage" }
+execTuples_seams = { path = "../execTuples_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }

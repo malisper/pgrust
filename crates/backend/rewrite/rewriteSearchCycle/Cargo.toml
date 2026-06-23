@@ -1,0 +1,22 @@
+[package]
+name = "rewriteSearchCycle"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "rewriteSearchCycle"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+datum = { path = "../../../_support/types/datum" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+
+nodes_core = { path = "../../nodes/nodes_core" }
+rewrite_core = { path = "../rewrite_core" }
+parser_analyze = { path = "../../parser/parser_analyze" }
+utils_error = { path = "../../utils/utils_error" }

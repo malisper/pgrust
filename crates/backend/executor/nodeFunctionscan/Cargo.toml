@@ -1,0 +1,39 @@
+[package]
+name = "nodeFunctionscan"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nodeFunctionscan"
+path = "src/lib.rs"
+
+[dependencies]
+# Outward calls through per-owner seam crates (owners not yet ported / cyclic).
+# The set-returning-function evaluation (ExecInitTableFunctionResult /
+# ExecMakeTableFunctionResult) is owned by execSRF; the generic scan driver by
+# execScan; descriptor construction by tupdesc/toastdesc; result-type lookup by
+# nodes-core; slot ops/result-type setup by execTuples/execUtils; qual init by
+# execExpr; the materialized tuplestore by sort-storage; exprCollation by
+# nodeFuncs.
+toastdesc_seams = { path = "../../access/common/toastdesc_seams" }
+tupdesc_seams = { path = "../../access/common/tupdesc_seams" }
+execExpr_seams = { path = "../execExpr_seams" }
+execScan_seams = { path = "../execScan_seams" }
+execSRF_seams = { path = "../execSRF_seams" }
+execTuples_seams = { path = "../execTuples_seams" }
+execUtils_seams = { path = "../execUtils_seams" }
+nodes_core_seams = { path = "../../nodes/nodes_core_seams" }
+nodeFuncs_seams = { path = "../../nodes/nodeFuncs_seams" }
+funcapi_seams = { path = "../../utils/fmgr/funcapi_seams" }
+sort_storage_seams = { path = "../../utils/sort/sort_storage_seams" }
+
+# Shared type stack + allocator + error.
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+mcx = { path = "../../../_support/mcx" }
+
+[dev-dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }

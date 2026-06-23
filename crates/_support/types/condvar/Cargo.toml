@@ -1,0 +1,12 @@
+[package]
+name = "condvar"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "condvar"
+path = "src/lib.rs"
+
+[dependencies]
+types_storage = { path = "../types_storage" }

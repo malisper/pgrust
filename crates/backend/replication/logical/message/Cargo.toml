@@ -1,0 +1,20 @@
+[package]
+name = "message"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "message"
+path = "src/lib.rs"
+
+[dependencies]
+message_seams = { path = "../message_seams" }
+xloginsert = { path = "../../../access/transam/xloginsert" }
+transam_xlog = { path = "../../../access/transam/transam_xlog" }
+transam_xact = { path = "../../../access/transam/transam_xact" }
+init_small = { path = "../../../utils/init/init_small" }
+utils_error = { path = "../../../utils/utils_error" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+wal = { path = "../../../../_support/types/wal" }

@@ -1,0 +1,42 @@
+[package]
+name = "pg_prewarm"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_prewarm"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../_support/mcx" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+datum = { path = "../../_support/types/datum" }
+fmgr = { path = "../../_support/types/fmgr" }
+types_acl = { path = "../../_support/types/types_acl" }
+rel = { path = "../../_support/types/rel" }
+types_storage = { path = "../../_support/types/types_storage" }
+nodes = { path = "../../_support/types/nodes" }
+types_tuple = { path = "../../_support/types/types_tuple" }
+
+utils_error = { path = "../../backend/utils/utils_error" }
+miscinit = { path = "../../backend/utils/init/miscinit" }
+relpath = { path = "../../backend/common/relpath" }
+index = { path = "../../backend/catalog/index" }
+catalog_catalog = { path = "../../backend/catalog/catalog_catalog" }
+
+common_relation = { path = "../../backend/access/common/common_relation" }
+read_stream = { path = "../../backend/storage/aio/read_stream" }
+bufmgr = { path = "../../backend/storage/buffer/bufmgr" }
+smgr = { path = "../../backend/storage/smgr/smgr" }
+
+# Seams (consulted, not owned):
+dfmgr_seams = { path = "../../backend/utils/fmgr/dfmgr_seams" }
+aclchk_seams = { path = "../../backend/catalog/aclchk_seams" }
+pg_class_seams = { path = "../../backend/catalog/pg_class_seams" }
+objectaddress_seams = { path = "../../backend/catalog/objectaddress_seams" }
+lsyscache_seams = { path = "../../backend/utils/cache/lsyscache_seams" }
+lmgr_seams = { path = "../../backend/storage/lmgr/lmgr_seams" }
+bufmgr_seams = { path = "../../backend/storage/buffer/bufmgr_seams" }
+postgres_seams = { path = "../../backend/tcop/postgres_seams" }

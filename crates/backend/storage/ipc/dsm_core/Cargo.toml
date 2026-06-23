@@ -1,0 +1,50 @@
+[package]
+name = "dsm_core"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "dsm_core"
+path = "src/lib.rs"
+
+[features]
+# Exposes `test_bringup::dsm_test_bringup()` for downstream unit tests (e.g.
+# the real-DSM re-port of the parallel crate). Pulls in the merged
+# FreePageManager owner so its real `init_seams()` can be wired.
+test-bringup = ["dep:mmgr_freepage"]
+
+[dependencies]
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+mmgr_freepage = { path = "../../../utils/mmgr/mmgr_freepage", optional = true }
+libpq_pqsignal = { path = "../../../libpq/libpq_pqsignal" }
+file_seams = { path = "../../file/file_seams" }
+dsm_core_seams = { path = "../dsm_core_seams" }
+ipc_seams = { path = "../ipc_seams" }
+# The postmaster's crash-restart state machine calls ipc.c's `shmem_exit` via
+# its own seam declaration; dsm-core owns the body, so it installs that
+# postmaster-side seam here (same pattern as the ipc_seams::proc_exit install).
+postmaster_seams = { path = "../../../postmaster/postmaster_seams" }
+ipc_shmem_seams = { path = "../ipc_shmem_seams" }
+lwlock = { path = "../../lmgr/lwlock" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+utils_error = { path = "../../../utils/utils_error" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+freepage_seams = { path = "../../../utils/mmgr/freepage_seams" }
+libc = "0.2"
+mcx = { path = "../../../../_support/mcx" }
+prng = { path = "../../../../_support/pg/prng" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_freepage = { path = "../../../../_support/types/types_freepage" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+
+# Available under cfg(test) so the in-crate gating test can use test_bringup
+# without enabling the `test-bringup` feature; the feature pulls the same crate
+# in for downstream consumers.
+[dev-dependencies]
+mmgr_freepage = { path = "../../../utils/mmgr/mmgr_freepage" }

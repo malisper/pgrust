@@ -1,0 +1,12 @@
+[package]
+name = "stringinfo"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "stringinfo"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../mcx" }

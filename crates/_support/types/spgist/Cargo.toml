@@ -1,0 +1,16 @@
+[package]
+name = "spgist"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "spgist"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../types_core" }
+types_tuple = { path = "../types_tuple" }
+types_storage = { path = "../types_storage" }
+types_scan = { path = "../types_scan" }
+mcx = { path = "../../mcx" }

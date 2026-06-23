@@ -1,0 +1,31 @@
+[package]
+name = "nodeTidscan"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nodeTidscan"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+nodes = { path = "../../../_support/types/nodes" }
+rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_tableam = { path = "../../../_support/types/types_tableam" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+datum = { path = "../../../_support/types/datum" }
+
+table_tableam = { path = "../../access/table/table_tableam" }
+
+execExpr_seams = { path = "../execExpr_seams" }
+execUtils_seams = { path = "../execUtils_seams" }
+execTuples_seams = { path = "../execTuples_seams" }
+nodeTidscan_seams = { path = "../nodeTidscan_seams" }
+execCurrent_seams = { path = "../execCurrent_seams" }
+execMain_seams = { path = "../execMain_seams" }
+arrayfuncs_seams = { path = "../../utils/adt/arrayfuncs_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }

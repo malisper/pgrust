@@ -1,0 +1,21 @@
+[package]
+name = "tsginidx"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "tsginidx"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+tsearch = { path = "../../../../_support/types/tsearch" }
+tsvector_core_seams = { path = "../tsvector_core_seams" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+
+[dev-dependencies]

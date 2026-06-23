@@ -1,0 +1,30 @@
+[package]
+name = "be_fsstubs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "be_fsstubs"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+seam_core = { path = "../../../_support/seam/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+datum = { path = "../../../_support/types/datum" }
+types_error = { path = "../../../_support/types/types_error" }
+fmgr = { path = "../../../_support/types/fmgr" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+snapshot = { path = "../../../_support/types/snapshot" }
+types_storage = { path = "../../../_support/types/types_storage" }
+utils_error = { path = "../../utils/utils_error" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+object = { path = "../../storage/large/object" }
+pg_largeobject = { path = "../../catalog/pg_largeobject" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+miscinit = { path = "../../utils/init/miscinit" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
+be_fsstubs_seams = { path = "../be_fsstubs_seams" }
+snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }

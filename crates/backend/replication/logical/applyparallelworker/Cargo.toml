@@ -1,0 +1,49 @@
+[package]
+name = "applyparallelworker"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "applyparallelworker"
+path = "src/lib.rs"
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+applyparallel = { path = "../../../../_support/types/applyparallel" }
+proto = { path = "../proto" }
+replication_applyparallel = { path = "../../../../_support/types/replication_applyparallel" }
+replication_launcher = { path = "../../../../_support/types/replication_launcher" }
+utils_error = { path = "../../../utils/utils_error" }
+
+# Own seams (installed by init_seams).
+applyparallelworker_seams = { path = "../applyparallelworker_seams" }
+
+# Direct deps (acyclic: these crates depend on our -seams crate, not on us).
+procsignal = { path = "../../../storage/ipc/procsignal" }
+interrupt = { path = "../../../postmaster/interrupt" }
+# GUC variable substrate (low leaf): the `max_parallel_apply_workers_per_subscription`
+# and `debug_logical_replication_streaming` globals are read inline here, exactly
+# as C reads the C globals (launcher.c:422 / applyparallelworker.c:1166).
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+
+# Outward seams (calls into not-yet-ported owners, or owners across a cycle).
+worker_seams = { path = "../worker_seams" }
+launcher_seams = { path = "../launcher_seams" }
+tablesync_seams = { path = "../tablesync_seams" }
+origin_seams = { path = "../origin_seams" }
+transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
+lmgr_seams = { path = "../../../storage/lmgr/lmgr_seams" }
+latch_seams = { path = "../../../storage/ipc/latch_seams" }
+dsm_core_seams = { path = "../../../storage/ipc/dsm_core_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+guc_file_seams = { path = "../../../utils/misc/guc_file_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
+status_seams = { path = "../../../utils/activity/status_seams" }
+pqmq_seams = { path = "../../../libpq/pqmq_seams" }

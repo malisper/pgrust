@@ -1,0 +1,84 @@
+[package]
+name = "dbsize"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "dbsize"
+path = "src/lib.rs"
+
+[dependencies]
+# Canonical primitive/catalog/storage types (Oid, RelFileNumber, RelFileLocator,
+# ProcNumber, ForkNumber, the tablespace OIDs + PG_TBLSPC_DIR constants).
+types_core = { path = "../../../../_support/types/types_core" }
+types_catalog = { path = "../../../../_support/types/types_catalog" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+# The Relation handle the relation-open family returns (projected to OpenRelation).
+rel = { path = "../../../../_support/types/rel" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_numeric = { path = "../../../../_support/types/types_numeric" }
+
+# Memory-context allocation lane (Mcx / PgVec) for the numeric round-trips and
+# the path/text result buffers.
+mcx = { path = "../../../../_support/mcx" }
+
+# The fmgr/Datum boundary: the call frame, by-ref payload, and the builtin-table
+# registration the SQL-callable `fc_*` adapters cross.
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+
+# The error spine (ereport builder / PgResult / SqlState constants).
+utils_error = { path = "../../utils_error" }
+
+# Directly-callable leaf owners (no cycle):
+#   common/relpath.c  — relpathbackend / forkname_to_number.
+relpath = { path = "../../../common/relpath" }
+#   utils/adt/numeric.c — the numeric arithmetic the size formatting rides on.
+adt_numeric = { path = "../adt_numeric" }
+
+# seam_core::seam! for the OUTBOUND backend services this file reaches but whose
+# owners are not directly callable here (the runtime filesystem dir-walk + stat,
+# the syscache/relcache/relmapper field-extraction touchpoints). Declared inline;
+# the value-typed, acyclic owners below are installed from `init_seams()`.
+seam_core = { path = "../../../../_support/seam/seam_core" }
+
+# Directly-callable seam owners (acyclic): the backend-global accessors
+# (MyDatabaseId / MyDatabaseTableSpace), GetUserId, has_privs_of_role, the
+# temp-namespace predicate, ProcNumberForTempRelations, and CHECK_FOR_INTERRUPTS.
+init_small = { path = "../../init/init_small" }
+miscinit = { path = "../../init/miscinit" }
+adt_acl = { path = "../adt_acl" }
+catalog_namespace = { path = "../../../catalog/catalog_namespace" }
+catalog_storage = { path = "../../../catalog/catalog_storage" }
+postgres = { path = "../../../tcop/postgres" }
+
+# Relation-open family (try_relation_open / relation_open / relation_close over
+# AccessShareLock) for the table/index size routines; the relcache index-list,
+# relmapper, and relfilenumbermap field-extraction owners; the syscache
+# Form_pg_class projection; and the lmgr lock-release seam relation_close drives.
+common_relation = { path = "../../../access/common/common_relation" }
+relcache = { path = "../../cache/relcache" }
+relmapper = { path = "../../cache/relmapper" }
+relfilenumbermap = { path = "../../cache/relfilenumbermap" }
+cache_syscache = { path = "../../cache/cache_syscache" }
+lmgr_seams = { path = "../../../storage/lmgr/lmgr_seams" }
+
+# errno-faithful stat: ENOENT discrimination on the std::fs metadata error.
+# (AccessShareLock rides on the already-present `types-storage` dep.)
+libc = "0.2"
+
+# The catalog/command seam OWNERS for the database/tablespace existence, OID,
+# name, and ACL touchpoints `pg_database_size` / `pg_tablespace_size` cross.
+# These are installed (by their owners) into the seam crates below; dbsize wires
+# its own (carrier-shaped) outbound seams to them from `init_seams()`. The seam
+# crates are tiny and do not depend back on dbsize, so no cycle is introduced.
+syscache_seams = { path = "../../cache/syscache_seams" }
+tablespace_seams = { path = "../../../commands/tablespace_seams" }
+dbcommands_seams = { path = "../../../commands/dbcommands_seams" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+# `AclResult` / `ACLCHECK_OK` for re-deriving the aclcheck_error message, and
+# `ObjectType` (OBJECT_DATABASE / OBJECT_TABLESPACE) for the owner's signature.
+types_acl = { path = "../../../../_support/types/types_acl" }
+nodes = { path = "../../../../_support/types/nodes" }

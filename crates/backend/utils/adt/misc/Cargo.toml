@@ -1,0 +1,54 @@
+[package]
+name = "misc"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "misc"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_pgstat = { path = "../../../../_support/types/types_pgstat" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+adt_misc = { path = "../../../../_support/types/adt_misc" }
+
+# fmgr boundary: the call-frame carrier (FunctionCallInfoBaseData / RefPayload),
+# the Datum word, and the builtin-table registrar this crate's fc_ adapters use.
+fmgr = { path = "../../../../_support/types/fmgr" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+
+# Real owners reached directly (no cycle: nothing depends on this leaf adt crate).
+keywords = { path = "../../../../common/keywords" }
+small1 = { path = "../../../parser/small1" }
+dbcommands = { path = "../../../commands/dbcommands" }
+relcache = { path = "../../cache/relcache" }
+# Backend global `MyDatabaseId` (current_database).
+init_small = { path = "../../init/init_small" }
+
+# Cross-unit / unported owners reached through their seam crates (panic until
+# the owner lands).
+lsyscache_seams = { path = "../../cache/lsyscache_seams" }
+format_type_seams = { path = "../format_type_seams" }
+ruleutils_seams = { path = "../ruleutils_seams" }
+parse_type_seams = { path = "../../../parser/parse_type_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+miscinit_seams = { path = "../../init/miscinit_seams" }
+timestamp_seams = { path = "../timestamp_seams" }
+latch_seams = { path = "../../../storage/ipc/latch_seams" }
+rewritehandler_seams = { path = "../../../rewrite/rewritehandler_seams" }
+# `SearchSysCache1(TYPEOID)` projection pg_basetype's domain-walk step reads.
+syscache_seams = { path = "../../cache/syscache_seams" }
+# parse_ident's text[] result assembly (build_text_array_nullable).
+arrayfuncs_seams = { path = "../arrayfuncs_seams" }
+
+# This unit's own SRF data-production seams (fd.c walk / system_fk_info table).
+misc_seams = { path = "../misc_seams" }
+
+[dev-dependencies]
+mbutils_seams = { path = "../../mb/mbutils_seams" }

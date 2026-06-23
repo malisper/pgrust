@@ -1,0 +1,60 @@
+[package]
+name = "import"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "import"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+statistics = { path = "../../../_support/types/statistics" }
+types_catalog = { path = "../../../_support/types/types_catalog" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+rel = { path = "../../../_support/types/rel" }
+nodes = { path = "../../../_support/types/nodes" }
+types_storage = { path = "../../../_support/types/types_storage" }
+cache = { path = "../../../_support/types/cache" }
+datum = { path = "../../../_support/types/datum" }
+fmgr = { path = "../../../_support/types/fmgr" }
+mcx = { path = "../../../_support/mcx" }
+
+utils_error = { path = "../../utils/utils_error" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+nodes_core = { path = "../../nodes/nodes_core" }
+nodeFuncs_seams = { path = "../../nodes/nodeFuncs_seams" }
+
+table = { path = "../../access/table/table" }
+common_relation_seams = { path = "../../access/common/common_relation_seams" }
+heaptuple = { path = "../../access/common/heaptuple" }
+transam_xact = { path = "../../access/transam/transam_xact" }
+
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+index = { path = "../../catalog/index" }
+indexing = { path = "../../catalog/indexing" }
+objectaddress = { path = "../../catalog/objectaddress" }
+aclchk = { path = "../../catalog/aclchk" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+
+arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
+jsonb_seams = { path = "../../utils/adt/jsonb_seams" }
+varlena = { path = "../../utils/adt/varlena" }
+varlena_seams = { path = "../../utils/adt/varlena_seams" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+adt_format_type = { path = "../../utils/adt/adt_format_type" }
+
+miscinit = { path = "../../utils/init/miscinit" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+pg_class = { path = "../../catalog/pg_class" }
+types_acl = { path = "../../../_support/types/types_acl" }
+types_typcache = { path = "../../../_support/types/types_typcache" }
+
+transam_xlog = { path = "../../access/transam/transam_xlog" }
