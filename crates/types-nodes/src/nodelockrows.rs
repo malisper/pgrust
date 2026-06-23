@@ -268,6 +268,25 @@ pub struct ExecAuxRowMarkData<'mcx> {
     pub wholeAttNo: AttrNumber,
 }
 
+impl<'mcx> ExecAuxRowMarkData<'mcx> {
+    /// Same-context clone (the recheck EState shares the parent's per-query
+    /// `'mcx`). `EvalPlanQualStart` clones the non-locking aux rowmarks onto the
+    /// recheck estate's `es_epq_active` marker so `EvalPlanQualFetchRowMark`
+    /// (which runs threaded with the recheck estate) can reach the `ExecRowMark`
+    /// + the resjunk column numbers. C aliases the single `ExecAuxRowMark *`.
+    pub fn clone_in(&self, mcx: mcx::Mcx<'mcx>) -> PgResult<ExecAuxRowMarkData<'mcx>> {
+        Ok(ExecAuxRowMarkData {
+            rowmark: match self.rowmark.as_deref() {
+                Some(e) => Some(mcx::alloc_in(mcx, e.clone_in(mcx)?)?),
+                None => None,
+            },
+            ctidAttNo: self.ctidAttNo,
+            toidAttNo: self.toidAttNo,
+            wholeAttNo: self.wholeAttNo,
+        })
+    }
+}
+
 /// `EPQState` (`nodes/execnodes.h`) — EvalPlanQual recheck state. The canonical
 /// owned `EPQState` lives in [`crate::execnodes`] (the same struct
 /// `ModifyTableState::mt_epqstate` holds and the execMain EPQ machinery

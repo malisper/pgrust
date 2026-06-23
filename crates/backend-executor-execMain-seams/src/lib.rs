@@ -696,6 +696,55 @@ seam_core::seam!(
     ) -> types_error::PgResult<()>
 );
 
+seam_core::seam!(
+    /// `EvalPlanQualBegin(&node->lr_epqstate)` for the LockRows path (execMain.c
+    /// / nodeLockRows.c): build (or reset) the recheck estate + plan, then bridge
+    /// the parent's locked source tuples (`epqstate.relsubs_slot[i]`) into the
+    /// recheck estate's marker so the recheck scans return them. The owned model
+    /// passes the parent EState + the LockRows node's canonical `EPQState` by
+    /// mutable reference. Fallible on `ereport(ERROR)` / OOM.
+    pub fn eval_plan_qual_begin_lockrows<'mcx>(
+        parentestate: &mut types_nodes::EStateData<'mcx>,
+        epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `EvalPlanQualSetSlot(&node->lr_epqstate, slot)` for the LockRows path
+    /// (execMain.c / nodeLockRows.c): record `origslot` and bridge the origin
+    /// output tuple into a recheck-estate slot so `EvalPlanQualFetchRowMark` can
+    /// read its junk attributes. `slot` is the LockRows node's current working
+    /// "outer" slot (a PARENT-estate slot). Fallible on `ereport(ERROR)` / OOM.
+    pub fn eval_plan_qual_set_slot_lockrows<'mcx>(
+        parentestate: &mut types_nodes::EStateData<'mcx>,
+        epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `EvalPlanQualNext(epqstate)` (execMain.c): run the recheck plan-state tree
+    /// under the recheck estate and return the next tuple (a RECHECK-estate
+    /// `SlotId`), or `Ok(None)` (the C `TupIsNull`). The owned model passes the
+    /// canonical `EPQState` by mutable reference. Fallible on `ereport(ERROR)`.
+    pub fn eval_plan_qual_next<'mcx>(
+        epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+    ) -> types_error::PgResult<Option<types_nodes::SlotId>>
+);
+
+seam_core::seam!(
+    /// `EvalPlanQualEnd(epqstate)` (execMain.c): shut down EPQ execution — end
+    /// the recheck plan-state tree + subplans, reset the recheck estate's tuple
+    /// table, close the result/trigger and range-table relations it opened, and
+    /// free the recheck estate. Idempotent (a no-op when EPQ was never started).
+    /// The owned model passes the parent EState + the canonical `EPQState` by
+    /// mutable reference. Fallible on `ereport(ERROR)` / OOM.
+    pub fn eval_plan_qual_end<'mcx>(
+        parentestate: &mut types_nodes::EStateData<'mcx>,
+        epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
 // ===========================================================================
 // CteScan leader-aliased operations (nodeCtescan.c).
 // ===========================================================================

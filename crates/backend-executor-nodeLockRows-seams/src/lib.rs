@@ -226,7 +226,7 @@ seam_core::seam!(
     /// partitioned off.
     pub fn eval_plan_qual_init<'mcx>(
         lrstate: &mut LockRowsStateData<'mcx>,
-        node: &LockRows<'mcx>,
+        node: &'mcx LockRows<'mcx>,
         estate: &mut EStateData<'mcx>,
         epq_arowmarks: mcx::PgVec<'mcx, ExecAuxRowMarkData<'mcx>>,
     ) -> PgResult<()>

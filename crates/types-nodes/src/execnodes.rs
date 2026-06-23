@@ -172,6 +172,25 @@ pub struct EPQState<'mcx> {
     /// valid by pointer; the owned `SlotId` is estate-local). `None` until first
     /// use; created lazily with the recheck output's tuple descriptor.
     pub epq_parent_result_slot: Option<SlotId>,
+    /// Owned-model only (on the `recheckestate.es_epq_active` marker): the
+    /// rti-indexed non-locking aux rowmarks, cloned by `EvalPlanQualStart` so
+    /// `EvalPlanQualFetchRowMark` (threaded with the recheck estate) can reach
+    /// the `ExecRowMark` + resjunk column numbers. C reaches them off the
+    /// canonical EPQState's `relsubs_rowmark[rti-1]` (an `ExecAuxRowMark *`);
+    /// the owned recheck estate cannot reach the canonical EPQState, so the
+    /// metadata is carried here. `None` on the canonical EPQState (only the
+    /// marker is populated). Indexed by `rti - 1`.
+    pub epq_marker_rowmarks:
+        Option<PgVec<'mcx, Option<crate::nodelockrows::ExecAuxRowMarkData<'mcx>>>>,
+    /// Owned-model only (on the `recheckestate.es_epq_active` marker): a
+    /// RECHECK-estate slot holding a copy of the original top-level output tuple
+    /// (`origslot`) being rechecked, so `EvalPlanQualFetchRowMark` can read its
+    /// junk attributes (ctid/tableoid/wholerow) from a slot addressable in the
+    /// recheck estate. C reads junk attrs directly off `epqstate->origslot` (a
+    /// shared pointer); the owned model bridges the parent origslot into this
+    /// recheck slot in `EvalPlanQualSetSlot`/the LockRows EPQ driver. `None`
+    /// until first set.
+    pub epq_marker_origslot: Option<SlotId>,
 }
 
 /// An opaque handle to a genuinely AM/extension-opaque object the executor

@@ -2262,11 +2262,19 @@ fn init_plan_rowmarks<'mcx>(estate: &mut types_nodes::EStateData<'mcx>) -> PgRes
             continue;
         }
 
-        // Ignore RowMarks for RTEs that were pruned in ExecDoInitialPruning.
-        if !backend_nodes_core_seams::bms_is_member::call(
-            rc.rti as i32,
-            estate.es_unpruned_relids.as_deref(),
-        ) {
+        // Also ignore rowmarks belonging to child tables that have been pruned
+        // in ExecDoInitialPruning(). Only RTE_RELATION entries participate in
+        // pruning; a non-relation RTE (RTE_VALUES / RTE_SUBQUERY for a
+        // ROW_MARK_COPY/REFERENCE source) is never a member of es_unpruned_relids
+        // and must NOT be skipped (C guards the bms test with
+        // `rte->rtekind == RTE_RELATION`).
+        if execUtils::exec_rt_fetch(rc.rti, estate).rtekind
+            == types_nodes::parsenodes::RTE_RELATION
+            && !backend_nodes_core_seams::bms_is_member::call(
+                rc.rti as i32,
+                estate.es_unpruned_relids.as_deref(),
+            )
+        {
             continue;
         }
 
@@ -2818,6 +2826,215 @@ fn EvalPlanQualNext<'mcx>(
     result
 }
 
+// ===========================================================================
+// LockRows EvalPlanQual driver (nodeLockRows.c's EPQ block).
+//
+// nodeLockRows.c runs, after locking every source tuple:
+//   EvalPlanQualBegin(&node->lr_epqstate);
+//   EvalPlanQualSetSlot(&node->lr_epqstate, slot);
+//   slot = EvalPlanQualNext(&node->lr_epqstate);
+//
+// In C the locked tuples live in epqstate->relsubs_slot[rti-1] (filled by
+// table_tuple_lock through EvalPlanQualSlot in the lock loop), and that array is
+// the SAME storage the recheck scans read. In the owned model the lock fills the
+// PARENT estate's lr_epqstate.relsubs_slot[rti-1], while the recheck scans read
+// recheckestate.es_epq_active.relsubs_slot[rti-1] — distinct slots in distinct
+// estates. The driver below bridges them: it copies each locked parent tuple
+// into a recheck-estate slot and records it on the marker, and copies the
+// origin output tuple into a recheck-estate slot so EvalPlanQualFetchRowMark can
+// read its junk attributes.
+// ===========================================================================
+
+/// Bridge: fetch the heap tuple out of PARENT slot `src` and force-store a
+/// recheck-context clone into the recheck-estate slot for marker index `idx`
+/// (reusing `marker.relsubs_slot[idx]` if it exists, else creating one of `rel`'s
+/// shape). Returns the recheck-estate SlotId. If the parent slot is empty, the
+/// recheck slot is left cleared.
+fn epq_bridge_parent_slot_to_recheck<'mcx>(
+    parentestate: &mut types_nodes::EStateData<'mcx>,
+    epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    idx: usize,
+    src: types_nodes::SlotId,
+) -> PgResult<types_nodes::SlotId> {
+    // Reuse the marker's existing recheck slot for this rel if present (the EPQ
+    // state can be reused across outer tuples without leaking slots).
+    let existing = epqstate
+        .recheckestate
+        .as_deref()
+        .and_then(|rc| rc.es_epq_active.as_deref())
+        .and_then(|m| m.relsubs_slot.as_ref())
+        .and_then(|v| v.get(idx).copied())
+        .flatten();
+    let dst = match existing {
+        Some(s) => {
+            // Clear any leftover tuple before re-storing.
+            let rc = epqstate
+                .recheckestate
+                .as_deref_mut()
+                .expect("epq_bridge_parent_slot_to_recheck: recheckestate present");
+            backend_executor_execTuples_seams::exec_clear_tuple::call(rc, s)?;
+            s
+        }
+        None => {
+            let rc = epqstate
+                .recheckestate
+                .as_deref_mut()
+                .expect("epq_bridge_parent_slot_to_recheck: recheckestate present");
+            let slot_data = backend_access_table_tableam::table_slot_create(rc.es_query_cxt, rel)?;
+            rc.push_slot_data(slot_data)?
+        }
+    };
+
+    // If the parent slot is empty, leave the recheck slot cleared.
+    if parentestate.slot(src).is_empty() {
+        return Ok(dst);
+    }
+
+    // Fetch the heap tuple from the parent slot, clone into the recheck context,
+    // force-store into the recheck slot.
+    let pcx = parentestate.es_query_cxt;
+    let (tuple, _should_free) = {
+        let inslot = parentestate.slot_data_mut(src);
+        backend_executor_execTuples::slot_store_fetch::ExecFetchSlotHeapTuple(pcx, inslot, true)?
+    };
+    let rc = epqstate
+        .recheckestate
+        .as_deref_mut()
+        .expect("epq_bridge_parent_slot_to_recheck: recheckestate present");
+    let rcx = rc.es_query_cxt;
+    let tuple = tuple.clone_in(rcx)?;
+    let rcslot = rc.slot_data_mut(dst);
+    backend_executor_execTuples::slot_store_fetch::ExecForceStoreHeapTuple(rcx, tuple, rcslot, true)?;
+    Ok(dst)
+}
+
+/// `EvalPlanQualBegin(&node->lr_epqstate)` for the LockRows path: build (or
+/// reset) the recheck estate/plan, then bridge the parent's locked tuples
+/// (`lr_epqstate.relsubs_slot[i]`) into the recheck estate's marker so the
+/// recheck scans return them.
+fn eval_plan_qual_begin_lockrows<'mcx>(
+    parentestate: &mut types_nodes::EStateData<'mcx>,
+    epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+) -> PgResult<()> {
+    // Build / reset the recheck estate + plan + marker.
+    EvalPlanQualBegin(parentestate, epqstate)?;
+
+    // Bridge the locked source tuples into the recheck marker. Snapshot the
+    // (idx, parent slot, relation) triples for every non-empty parent
+    // relsubs_slot entry first.
+    let mut to_bridge: alloc::vec::Vec<(usize, types_nodes::SlotId, types_rel::Relation<'mcx>)> =
+        alloc::vec::Vec::new();
+    if let Some(pslots) = epqstate.relsubs_slot.as_ref() {
+        for (i, entry) in pslots.iter().enumerate() {
+            if let Some(pslot) = *entry {
+                // The relation for rti = i+1 (an unpruned scan relation).
+                let rti = (i + 1) as types_core::primitive::Index;
+                let rel = execUtils::ExecGetRangeTableRelation(parentestate, rti, false)?;
+                to_bridge.push((i, pslot, rel));
+            }
+        }
+    }
+    for (i, pslot, rel) in to_bridge {
+        let dst = epq_bridge_parent_slot_to_recheck(parentestate, epqstate, &rel, i, pslot)?;
+        // Record the bridged tuple on the marker's relsubs_slot[i], and mark the
+        // rel as having a (not-yet-returned) EPQ tuple available.
+        let rc = epqstate
+            .recheckestate
+            .as_deref_mut()
+            .expect("eval_plan_qual_begin_lockrows: recheckestate present");
+        if let Some(m) = rc.es_epq_active.as_deref_mut() {
+            if let Some(v) = m.relsubs_slot.as_mut() {
+                if i < v.len() {
+                    v[i] = Some(dst);
+                }
+            }
+            if let Some(v) = m.relsubs_done.as_mut() {
+                if i < v.len() {
+                    v[i] = false;
+                }
+            }
+            if let Some(v) = m.relsubs_blocked.as_mut() {
+                if i < v.len() {
+                    v[i] = false;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `EvalPlanQualSetSlot(&node->lr_epqstate, slot)` for the LockRows path: record
+/// `origslot` and bridge the origin output tuple into a recheck-estate slot so
+/// `EvalPlanQualFetchRowMark` can read its junk attributes (ctid/tableoid/
+/// wholerow) from a recheck-addressable slot. `slot` is the LockRows node's
+/// current working "outer" slot (a PARENT-estate slot).
+fn eval_plan_qual_set_slot_lockrows<'mcx>(
+    parentestate: &mut types_nodes::EStateData<'mcx>,
+    epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+    slot: types_nodes::SlotId,
+) -> PgResult<()> {
+    // EvalPlanQualSetSlot(epqstate, slot) == epqstate->origslot = slot.
+    epqstate.origslot = Some(slot);
+
+    // Only bridge an origslot copy if there are non-locking aux rowmarks that
+    // will read junk attributes off it (otherwise no consumer needs it).
+    let needs_origslot = epqstate
+        .arowMarks
+        .as_ref()
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+    if !needs_origslot {
+        return Ok(());
+    }
+
+    // Materialize the parent origin slot, fetch its heap tuple, clone into the
+    // recheck context, and force-store into a recheck-estate slot whose
+    // descriptor matches the origin tuple (a generic heap slot of that desc).
+    let pcx = parentestate.es_query_cxt;
+    backend_executor_execTuples_seams::exec_materialize_slot::call(parentestate, slot)?;
+    let (tuple, _should_free) = {
+        let inslot = parentestate.slot_data_mut(slot);
+        backend_executor_execTuples::slot_store_fetch::ExecFetchSlotHeapTuple(pcx, inslot, true)?
+    };
+    let desc = parentestate
+        .slot(slot)
+        .tts_tupleDescriptor
+        .as_deref()
+        .map(|d| d.clone_in(pcx))
+        .transpose()?;
+
+    let rc = epqstate
+        .recheckestate
+        .as_deref_mut()
+        .expect("eval_plan_qual_set_slot_lockrows: recheckestate present");
+    let rcx = rc.es_query_cxt;
+    // Reuse the marker's existing origslot if present, else create one.
+    let existing = rc.es_epq_active.as_deref().and_then(|m| m.epq_marker_origslot);
+    let dst = match existing {
+        Some(s) => s,
+        None => {
+            let desc_owned = match desc.as_ref() {
+                Some(d) => Some(mcx::alloc_in(rcx, d.clone_in(rcx)?)?),
+                None => None,
+            };
+            let s = backend_executor_execTuples_seams::exec_alloc_table_slot::call(
+                rc,
+                desc_owned,
+                types_nodes::TupleSlotKind::HeapTuple,
+            )?;
+            if let Some(m) = rc.es_epq_active.as_deref_mut() {
+                m.epq_marker_origslot = Some(s);
+            }
+            s
+        }
+    };
+    let tuple = tuple.clone_in(rcx)?;
+    let rcslot = rc.slot_data_mut(dst);
+    backend_executor_execTuples::slot_store_fetch::ExecForceStoreHeapTuple(rcx, tuple, rcslot, true)?;
+    Ok(())
+}
+
 /// `EvalPlanQualBegin(epqstate)` (execMain.c): initialize or reset the EPQ state
 /// tree. First call builds the recheck estate + plan via [`EvalPlanQualStart`];
 /// a subsequent call resets the relsubs_done flags and re-copies parent params,
@@ -2898,6 +3115,44 @@ fn EvalPlanQualStart<'mcx>(
     let qcx = parentestate.es_query_cxt;
     let rtsize = parentestate.es_range_table_size;
 
+    // Force evaluation of any InitPlan outputs that could be needed by the
+    // subplan (e.g. a conditional InitPlan in a SET expression not yet run when
+    // EPQ kicks in). C does this just before copying es_param_exec_vals into the
+    // recheck estate:
+    //   if (parentestate->es_plannedstmt->paramExecTypes != NIL)
+    //       ExecSetParamPlanMulti(planTree->extParam,
+    //                             GetPerTupleExprContext(parentestate));
+    // We run it here (on the parent) before creating the recheck estate, so the
+    // forced values are present when we copy them down below.
+    {
+        let has_param_exec_types = parentestate
+            .es_plannedstmt
+            .as_deref()
+            .and_then(|p| p.paramExecTypes.as_ref())
+            .is_some_and(|t| !t.is_empty());
+        if has_param_exec_types {
+            // planTree->extParam (cloned out of the recheck plan node so the seam
+            // can take it by shared ref without aliasing the plan borrow).
+            let ext_param: Option<mcx::PgBox<'mcx, Bitmapset<'mcx>>> = match epqstate
+                .plan
+                .map(|n| n.plan_head())
+                .and_then(|ph| ph.extParam.as_deref())
+            {
+                Some(b) => Some(mcx::alloc_in(qcx, b.clone_in(qcx)?)?),
+                None => None,
+            };
+            if let Some(ext_param) = ext_param.as_deref() {
+                let econtext =
+                    backend_executor_execUtils_seams::get_per_tuple_expr_context::call(parentestate)?;
+                backend_executor_execParallel_support_seams::exec_set_param_plan_multi::call(
+                    ext_param,
+                    econtext,
+                    parentestate,
+                )?;
+            }
+        }
+    }
+
     // recheckestate = CreateExecutorState(); — a child EState in the parent's
     // per-query context (same 'mcx; the box is freed at EvalPlanQualEnd).
     let mut rc_box: mcx::PgBox<'mcx, types_nodes::EStateData<'mcx>> =
@@ -2940,21 +3195,21 @@ fn EvalPlanQualStart<'mcx>(
 
         // es_rowmarks: the parent's ExecRowMark array (C shares the pointer; the
         // owned model clones each — the recheck EState shares the parent's `'mcx`,
-        // and the Relation handles are Rc-backed aliases). Sharing them alone is
-        // not sufficient for a correct recheck: the recheck scan over a
+        // and the Relation handles are Rc-backed aliases). The recheck scan over a
         // non-locking rowmarked relation (FOR UPDATE/SHARE secondary relations /
-        // MERGE source rels) must re-fetch through `relsubs_rowmark` +
-        // `EvalPlanQualFetchRowMark`, which needs the aux-rowmark list built by
-        // `EvalPlanQualSetPlan` — the LockRows/aux-rowmark EPQ leg, not yet
-        // landed. Without it the recheck scan would re-scan the live heap and
-        // loop, so raise a clean ERROR here instead of hanging.
+        // MERGE source rels) re-fetches through `relsubs_rowmark` +
+        // `EvalPlanQualFetchRowMark`; that path reads the `ExecRowMark` off the
+        // aux-rowmark list (`arowMarks`), so cloning these is for fidelity with
+        // C's shared array (e.g. execCurrentOf readers).
         if !parentestate.es_rowmarks.is_empty() {
-            return Err(unported(
-                "EvalPlanQualStart: recheck over a non-locking rowmarked relation \
-                 (FOR UPDATE/SHARE secondary relations / MERGE source) needs the \
-                 aux-rowmark EPQ leg (EvalPlanQualSetPlan arowMarks + \
-                 EvalPlanQualFetchRowMark)",
-            ));
+            let mut rowmarks = mcx::vec_with_capacity_in(qcx, parentestate.es_rowmarks.len())?;
+            for erm in parentestate.es_rowmarks.iter() {
+                rowmarks.push(match erm.as_ref() {
+                    Some(e) => Some(e.clone_in(qcx)?),
+                    None => None,
+                });
+            }
+            rc.es_rowmarks = rowmarks;
         }
 
         // es_param_list_info shared from parent. es_param_exec_vals: a local copy
@@ -2997,14 +3252,23 @@ fn EvalPlanQualStart<'mcx>(
                 }
             }
         }
-        // Non-locking aux rowmarks (arowMarks): mark relsubs_rowmark[rti-1].
+        // Non-locking aux rowmarks (arowMarks): mark relsubs_rowmark[rti-1] and
+        // clone the aux mark onto the marker so EvalPlanQualFetchRowMark — which
+        // runs threaded with the recheck estate and reaches the EPQState only via
+        // recheckestate.es_epq_active — can find the ExecRowMark + resjunk
+        // column numbers. (C indexes relsubs_rowmark[rti-1] directly to the
+        // ExecAuxRowMark *; the owned marker carries an rti-indexed array.)
         let mut relsubs_rowmark = relsubs_rowmark;
+        let mut marker_rowmarks: mcx::PgVec<'mcx, Option<types_nodes::nodelockrows::ExecAuxRowMarkData<'mcx>>> =
+            mcx::vec_with_capacity_in(qcx, rtsize)?;
+        marker_rowmarks.resize_with(rtsize, || None);
         if let Some(arms) = epqstate.arowMarks.as_ref() {
             for earm in arms.iter() {
                 if let Some(erm) = earm.rowmark.as_deref() {
                     let i = (erm.rti - 1) as usize;
                     if i < rtsize {
                         relsubs_rowmark[i] = true;
+                        marker_rowmarks[i] = Some(earm.clone_in(qcx)?);
                     }
                 }
             }
@@ -3015,6 +3279,7 @@ fn EvalPlanQualStart<'mcx>(
             relsubs_rowmark: Some(relsubs_rowmark),
             relsubs_done: Some(relsubs_done),
             relsubs_blocked: Some(relsubs_blocked),
+            epq_marker_rowmarks: Some(marker_rowmarks),
             ..Default::default()
         };
         rc_box.es_epq_active = Some(mcx::alloc_in(qcx, marker)?);
@@ -3096,6 +3361,14 @@ fn EvalPlanQualEnd<'mcx>(
         execUtils::ExecResetTupleTable(rc, false)?;
         // Close any result and trigger target relations attached to this EState.
         execUtils::ExecCloseResultRelations(rc)?;
+        // Close the range-table relations the recheck estate opened. C shares
+        // the parent's `es_relations` array (rcestate->es_relations =
+        // parentestate->es_relations) so it never re-opens, hence never closes
+        // them here. The owned model clones the range table and the recheck
+        // leaf scans lazily re-open relations into the recheck estate's own
+        // `es_relations`; those handles must be closed or they leak (the
+        // `resource was not closed: relation with OID ...` WARNING).
+        execUtils::ExecCloseRangeTableRelations(rc)?;
     }
     // Free the recheck estate (drops rc_box, reclaiming its working memory).
     drop(rcplan);
@@ -3111,24 +3384,143 @@ fn EvalPlanQualEnd<'mcx>(
 /// the junk attributes carried on `origslot`. Returns whether a substitution
 /// tuple was found. Reached from the leaf-scan EPQ branch when
 /// `relsubs_rowmark[rti-1]` is set. `slot` is a RECHECK-estate slot.
+///
+/// The threaded `estate` is the RECHECK estate (the leaf scan runs under it).
+/// In the owned model the aux-rowmark metadata + the original output tuple are
+/// carried on the recheck estate's `es_epq_active` marker
+/// (`epq_marker_rowmarks` / `epq_marker_origslot`, populated by
+/// `EvalPlanQualStart` + the EPQ driver), so we read both off the marker rather
+/// than the C `epqstate->relsubs_rowmark[rti-1]` / `epqstate->origslot`.
 fn EvalPlanQualFetchRowMark<'mcx>(
     estate: &mut types_nodes::EStateData<'mcx>,
     rti: types_core::primitive::Index,
     slot: types_nodes::SlotId,
 ) -> PgResult<bool> {
-    // The threaded `estate` here is the RECHECK estate (the leaf scan runs under
-    // it). It carries the live marker in es_epq_active, but the aux-rowmark
-    // metadata + origslot live on the canonical EPQState held by the
-    // ModifyTable/LockRows node, which is not reachable from here in the owned
-    // model. Non-locking aux rowmarks (FOR UPDATE/SHARE secondary relations /
-    // MERGE source rels) are not yet exercised by the core UPDATE/DELETE EPQ
-    // path (es_rowmarks empty / relsubs_rowmark all false), so this only fires
-    // for the aux-rowmark feature, which lands with the LockRows EPQ leg.
-    let _ = (estate, rti, slot);
-    Err(unported(
-        "EvalPlanQualFetchRowMark: EPQ non-locking aux-rowmark refetch \
-         (ROW_MARK_REFERENCE / ROW_MARK_COPY) — lands with the LockRows EPQ leg",
-    ))
+    use types_nodes::nodelockrows::{
+        RowMarkRequiresRowShareLock, ROW_MARK_COPY, ROW_MARK_REFERENCE,
+    };
+    const RELKIND_FOREIGN_TABLE: u8 = b'f';
+
+    let idx = (rti - 1) as usize;
+
+    // ExecAuxRowMark *earm = epqstate->relsubs_rowmark[rti - 1];  erm = earm->rowmark;
+    // Snapshot the metadata (markType, relid, rti/prti, junk attnos, relation
+    // alias) off the marker so the subsequent slot reads/writes don't alias the
+    // immutable marker borrow.
+    let (mark_type, relid, erm_rti, erm_prti, ctid_attno, toid_attno, whole_attno, relation) = {
+        let earm = estate
+            .es_epq_active
+            .as_deref()
+            .and_then(|m| m.epq_marker_rowmarks.as_ref())
+            .and_then(|v| v.get(idx))
+            .and_then(|o| o.as_ref())
+            .ok_or_else(|| unported("EvalPlanQualFetchRowMark: no aux rowmark for rti"))?;
+        let erm = earm
+            .rowmark
+            .as_deref()
+            .ok_or_else(|| unported("EvalPlanQualFetchRowMark: aux rowmark has no ExecRowMark"))?;
+        (
+            erm.markType,
+            erm.relid,
+            erm.rti,
+            erm.prti,
+            earm.ctidAttNo,
+            earm.toidAttNo,
+            earm.wholeAttNo,
+            erm.relation.as_ref().map(|r| r.alias()),
+        )
+    };
+
+    // if (RowMarkRequiresRowShareLock(erm->markType)) elog(ERROR, ...);
+    if RowMarkRequiresRowShareLock(mark_type) {
+        return Err(types_error::PgError::error(
+            "EvalPlanQual doesn't support locking rowmarks",
+        )
+        .with_sqlstate(types_error::ERRCODE_INTERNAL_ERROR));
+    }
+
+    // origslot is a recheck-estate slot copy of the top-level output tuple.
+    let origslot = estate
+        .es_epq_active
+        .as_deref()
+        .and_then(|m| m.epq_marker_origslot)
+        .ok_or_else(|| unported("EvalPlanQualFetchRowMark: origslot not set"))?;
+
+    // if child rel, must check whether it produced this row
+    if erm_rti != erm_prti {
+        // datum = ExecGetJunkAttribute(origslot, earm->toidAttNo, &isNull);
+        let attr =
+            backend_executor_execTuples_seams::slot_getattr_by_id::call(estate, origslot, toid_attno)?;
+        // non-locked rels could be on the inside of outer joins
+        if attr.isnull {
+            return Ok(false);
+        }
+        let tableoid = attr.value.as_oid();
+        debug_assert!(relid != 0);
+        if tableoid != relid {
+            // this child is inactive right now
+            return Ok(false);
+        }
+    }
+
+    if mark_type == ROW_MARK_REFERENCE {
+        let rel = relation
+            .ok_or_else(|| unported("EvalPlanQualFetchRowMark: ROW_MARK_REFERENCE rel is NULL"))?;
+        // fetch the tuple's ctid
+        // datum = ExecGetJunkAttribute(origslot, earm->ctidAttNo, &isNull);
+        let attr =
+            backend_executor_execTuples_seams::slot_getattr_by_id::call(estate, origslot, ctid_attno)?;
+        // non-locked rels could be on the inside of outer joins
+        if attr.isnull {
+            return Ok(false);
+        }
+        let tid = backend_access_common_heaptuple::item_pointer_from_bytes(attr.value.as_ref_bytes());
+
+        // fetch requests on foreign tables must be passed to their FDW
+        if rel.rd_rel.relkind == RELKIND_FOREIGN_TABLE {
+            return Err(unported(
+                "EvalPlanQualFetchRowMark: foreign-table row refetch (FDW RefetchForeignRow) \
+                 not ported",
+            ));
+        }
+
+        // ordinary table, fetch the tuple
+        let mcx = estate.es_query_cxt;
+        let snapshot_any =
+            Some(types_snapshot::SnapshotData::sentinel(types_snapshot::SnapshotType::SNAPSHOT_ANY));
+        let inslot = estate.slot_data_mut(slot);
+        let found = backend_access_table_tableam::table_tuple_fetch_row_version(
+            mcx,
+            &rel,
+            &tid,
+            &snapshot_any,
+            inslot,
+        )?;
+        if !found {
+            return Err(types_error::PgError::error(
+                "failed to fetch tuple for EvalPlanQual recheck",
+            )
+            .with_sqlstate(types_error::ERRCODE_INTERNAL_ERROR));
+        }
+        Ok(true)
+    } else {
+        // Assert(erm->markType == ROW_MARK_COPY);
+        debug_assert_eq!(mark_type, ROW_MARK_COPY);
+        // fetch the whole-row Var for the relation
+        // datum = ExecGetJunkAttribute(origslot, earm->wholeAttNo, &isNull);
+        let attr =
+            backend_executor_execTuples_seams::slot_getattr_by_id::call(estate, origslot, whole_attno)?;
+        // non-locked rels could be on the inside of outer joins
+        if attr.isnull {
+            return Ok(false);
+        }
+        // ExecStoreHeapTupleDatum(datum, slot);
+        let mcx = estate.es_query_cxt;
+        let datum = attr.value.clone_in(mcx)?;
+        let inslot = estate.slot_data_mut(slot);
+        backend_executor_execTuples::slot_store_fetch::ExecStoreHeapTupleDatum(mcx, datum, inslot)?;
+        Ok(true)
+    }
 }
 
 /// `ExecBuildSlotValueDescription(reloid, slot, tupdesc, modifiedCols,
@@ -4742,6 +5134,10 @@ pub fn init_seams() {
     seams::eval_plan_qual::set(EvalPlanQual);
     seams::eval_plan_qual_slot::set(EvalPlanQualSlot);
     seams::eval_plan_qual_fetch_row_mark::set(EvalPlanQualFetchRowMark);
+    seams::eval_plan_qual_begin_lockrows::set(eval_plan_qual_begin_lockrows);
+    seams::eval_plan_qual_set_slot_lockrows::set(eval_plan_qual_set_slot_lockrows);
+    seams::eval_plan_qual_next::set(EvalPlanQualNext);
+    seams::eval_plan_qual_end::set(EvalPlanQualEnd);
     seams::link_subplan_planstate::set(link_subplan_planstate);
     seams::executor_run::set(ExecutorRun);
     seams::executor_finish::set(ExecutorFinish);

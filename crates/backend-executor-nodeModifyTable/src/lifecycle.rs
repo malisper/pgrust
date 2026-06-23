@@ -776,27 +776,6 @@ pub fn ExecLookupResultRelByOid<'mcx>(
     Ok(None)
 }
 
-/// `EvalPlanQualEnd(epqstate)` (execMain.c) — terminate EPQ execution if it was
-/// active: reset the EPQ tuple table, shut down the recheck plan and subplans,
-/// close the recheck EState's result relations, and free that EState; finally
-/// mark the EPQState idle (`origslot = NULL`).
-///
-/// The trimmed [`types_nodes::EPQState`] carries no `recheckestate` /
-/// `tuple_table` / `recheckplanstate` (those land with the execMain EvalPlanQual
-/// machinery), so the trimmed model is always in the "EPQ wasn't started"
-/// state: the early `estate == NULL` return path applies and there is no recheck
-/// EState to tear down. The faithful residue is clearing `origslot`.
-fn eval_plan_qual_end(epqstate: &mut types_nodes::EPQState<'_>) {
-    // C: if (epqstate->tuple_table != NIL) { ... } — not modeled (no tuple
-    // table on the trimmed EPQState).
-    // C: if (estate == NULL) return; — recheckestate is unmodeled, i.e. NULL,
-    // so the teardown body (ExecEndNode/ExecCloseResultRelations/
-    // FreeExecutorState) does not run.
-    // C: epqstate->origslot = NULL; — origslot is trimmed from the canonical
-    // EPQState (owned by execMain's EvalPlanQual machinery); no-op residue.
-    let _ = epqstate;
-}
-
 /// `ExecEndModifyTable(node)` — shut the node down: clean up tuple routing,
 /// close result relations and indexes, end the subplan, and free per-node
 /// resources.
@@ -849,7 +828,7 @@ pub fn ExecEndModifyTable<'mcx>(
 
     // Terminate EPQ execution if active.
     //   EvalPlanQualEnd(&node->mt_epqstate);
-    eval_plan_qual_end(&mut node.mt_epqstate);
+    backend_executor_execMain_seams::eval_plan_qual_end::call(estate, &mut node.mt_epqstate)?;
 
     // Shut down subplan.
     //   ExecEndNode(outerPlanState(node));

@@ -423,6 +423,13 @@ fn heapam_tuple_lock<'mcx>(
     // follow_updates = (flags & TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS) != 0;
     let follow_updates = (flags & TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS) != 0;
     tmfd.traversed = false;
+    // `tmfd.traversed` is owned by THIS wrapper across the `tuple_lock_retry`
+    // loop (C: heap_lock_tuple never touches `tmfd->traversed`; the wrapper sets
+    // it to true once and it survives every `goto tuple_lock_retry`). The owned
+    // model rebinds `*tmfd = lr.tmfd` each iteration (heap_lock_tuple returns a
+    // fresh TM_FailureData with traversed=false), which would clobber it, so
+    // track it locally and re-apply it after every copy-back.
+    let mut traversed = false;
 
     // C mutates `*tid` across the chase; we track the working tid locally.
     let mut cur_tid = *tid;
@@ -447,8 +454,11 @@ fn heapam_tuple_lock<'mcx>(
         )?;
         let res = lr.result;
         let buffer = lr.buffer;
-        // heap_lock_tuple fills *tmfd on the failure paths.
+        // heap_lock_tuple fills *tmfd on the failure paths. Rebind the whole
+        // struct, then re-apply the wrapper-owned `traversed` (heap_lock_tuple's
+        // fresh tmfd has it false; C never lets heap_lock_tuple touch it).
         *tmfd = lr.tmfd;
+        tmfd.traversed = traversed;
         // The header heap_lock_tuple left (t_self == cur_tid).
         let mut locked_hdr = lr.tuple;
         locked_hdr.t_self = cur_tid;
@@ -473,7 +483,11 @@ fn heapam_tuple_lock<'mcx>(
             cur_tid = tmfd.ctid;
             // updated row should have xmin matching this xmax
             let mut prior_xmax = tmfd.xmax;
-            // signal that a tuple later in the chain is getting locked
+            // signal that a tuple later in the chain is getting locked. Record it
+            // on the wrapper-owned accumulator (it survives `goto
+            // tuple_lock_retry`, where `*tmfd = lr.tmfd` would otherwise reset it)
+            // as well as on the live `*tmfd`.
+            traversed = true;
             tmfd.traversed = true;
 
             // fetch target tuple — loop to deal with updated or busy tuples.
