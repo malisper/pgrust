@@ -367,6 +367,177 @@ pub fn SPI_inside_nonatomic_context() -> bool {
     true
 }
 
+// ---------------------------------------------------------------------------
+//  Transaction control inside a non-atomic SPI context
+//  (`SPI_commit` / `SPI_rollback` family, `spi.c`)
+// ---------------------------------------------------------------------------
+
+/// Read `_SPI_current->atomic` (panics if not connected; callers are always
+/// inside a SPI context here, mirroring C's `_SPI_current` deref).
+fn current_atomic() -> bool {
+    let connected = SPI_CONNECTED.with(|c| *c.borrow());
+    SPI_STACK.with(|s| s.borrow()[connected as usize].atomic)
+}
+
+/// Set `_SPI_current->internal_xact`.
+fn set_current_internal_xact(value: bool) {
+    let connected = SPI_CONNECTED.with(|c| *c.borrow());
+    SPI_STACK.with(|s| s.borrow_mut()[connected as usize].internal_xact = value);
+}
+
+/// `_SPI_commit(bool chain)` (`spi.c`): commit the current transaction from
+/// within a non-atomic SPI context (PL `COMMIT`), immediately starting a new
+/// one (optionally restoring transaction characteristics for `AND CHAIN`).
+///
+/// The C `PG_TRY`/`PG_CATCH` longjmp model becomes a `match` on the closure's
+/// `PgResult`: on error we abort the failed transaction, start a fresh one,
+/// restore characteristics (if chaining), clear `internal_xact`, and re-throw
+/// (propagate `Err`) — faithfully matching PG 18.3's catch sequence.
+fn _SPI_commit(chain: bool) -> PgResult<()> {
+    // Complain if we are in a context that doesn't permit transaction
+    // termination. (Here and `_SPI_rollback` should be the only places that
+    // throw ERRCODE_INVALID_TRANSACTION_TERMINATION.)
+    if current_atomic() {
+        ereport(::types_error::ERROR)
+            .errcode(::types_error::ERRCODE_INVALID_TRANSACTION_TERMINATION)
+            .errmsg("invalid transaction termination")
+            .finish(loc("_SPI_commit"))?;
+    }
+
+    // The code below relies on not being within a subtransaction; PLs use
+    // subtransactions for exception blocks that must roll back together.
+    if xact_seam::is_sub_transaction::call() {
+        ereport(::types_error::ERROR)
+            .errcode(::types_error::ERRCODE_INVALID_TRANSACTION_TERMINATION)
+            .errmsg("cannot commit while a subtransaction is active")
+            .finish(loc("_SPI_commit"))?;
+    }
+
+    let savetc = if chain {
+        Some(xact_seam::save_transaction_characteristics::call())
+    } else {
+        None
+    };
+
+    // The "PG_TRY" body.
+    let result: PgResult<()> = (|| {
+        // Protect current SPI stack entry against deletion.
+        set_current_internal_xact(true);
+
+        // Hold any pinned portals that PLs might be using; must happen before
+        // changing transaction state (runs user code that might error).
+        portalmem_seams::hold_pinned_portals::call()?;
+
+        // Release snapshots associated with portals.
+        portalmem_seams::forget_portal_snapshots::call()?;
+
+        // Do the deed.
+        xact_seam::commit_transaction_command::call()?;
+
+        // Immediately start a new transaction.
+        xact_seam::start_transaction_command::call()?;
+        if let Some(tc) = savetc {
+            xact_seam::restore_transaction_characteristics::call(tc);
+        }
+
+        set_current_internal_xact(false);
+        Ok(())
+    })();
+
+    // The "PG_CATCH": abort the failed transaction, start a new one, restore
+    // characteristics, clear internal_xact, then re-throw.
+    if let Err(edata) = result {
+        // Abort the failed transaction. If this fails too, propagate that.
+        xact_seam::abort_current_transaction::call()?;
+        // ... and start a new one.
+        xact_seam::start_transaction_command::call()?;
+        if let Some(tc) = savetc {
+            xact_seam::restore_transaction_characteristics::call(tc);
+        }
+        set_current_internal_xact(false);
+        // Re-throw the original error.
+        return Err(edata);
+    }
+
+    Ok(())
+}
+
+/// `_SPI_rollback(bool chain)` (`spi.c`): same shape as [`_SPI_commit`], but
+/// aborts the current transaction instead of committing it.
+fn _SPI_rollback(chain: bool) -> PgResult<()> {
+    if current_atomic() {
+        ereport(::types_error::ERROR)
+            .errcode(::types_error::ERRCODE_INVALID_TRANSACTION_TERMINATION)
+            .errmsg("invalid transaction termination")
+            .finish(loc("_SPI_rollback"))?;
+    }
+
+    if xact_seam::is_sub_transaction::call() {
+        ereport(::types_error::ERROR)
+            .errcode(::types_error::ERRCODE_INVALID_TRANSACTION_TERMINATION)
+            .errmsg("cannot roll back while a subtransaction is active")
+            .finish(loc("_SPI_rollback"))?;
+    }
+
+    let savetc = if chain {
+        Some(xact_seam::save_transaction_characteristics::call())
+    } else {
+        None
+    };
+
+    let result: PgResult<()> = (|| {
+        set_current_internal_xact(true);
+
+        portalmem_seams::hold_pinned_portals::call()?;
+        portalmem_seams::forget_portal_snapshots::call()?;
+
+        // Do the deed.
+        xact_seam::abort_current_transaction::call()?;
+
+        // Immediately start a new transaction.
+        xact_seam::start_transaction_command::call()?;
+        if let Some(tc) = savetc {
+            xact_seam::restore_transaction_characteristics::call(tc);
+        }
+
+        set_current_internal_xact(false);
+        Ok(())
+    })();
+
+    if let Err(edata) = result {
+        // Try again to abort the failed transaction.
+        xact_seam::abort_current_transaction::call()?;
+        xact_seam::start_transaction_command::call()?;
+        if let Some(tc) = savetc {
+            xact_seam::restore_transaction_characteristics::call(tc);
+        }
+        set_current_internal_xact(false);
+        return Err(edata);
+    }
+
+    Ok(())
+}
+
+/// `SPI_commit(void)` (`spi.c`).
+pub fn SPI_commit() -> PgResult<()> {
+    _SPI_commit(false)
+}
+
+/// `SPI_commit_and_chain(void)` (`spi.c`).
+pub fn SPI_commit_and_chain() -> PgResult<()> {
+    _SPI_commit(true)
+}
+
+/// `SPI_rollback(void)` (`spi.c`).
+pub fn SPI_rollback() -> PgResult<()> {
+    _SPI_rollback(false)
+}
+
+/// `SPI_rollback_and_chain(void)` (`spi.c`).
+pub fn SPI_rollback_and_chain() -> PgResult<()> {
+    _SPI_rollback(true)
+}
+
 // ----- internal helpers (`_SPI_begin_call` / `_SPI_end_call` etc.) -----
 
 /// `_SPI_begin_call(bool use_exec)` (`spi.c`): enter a SPI op. Returns

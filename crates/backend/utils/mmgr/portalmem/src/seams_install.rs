@@ -28,6 +28,8 @@ pub fn init_seams() {
     // xact-facing lifecycle seams.
     seams::pre_commit_portals::set(crate::PreCommit_Portals);
     seams::at_abort_portals::set(crate::AtAbort_Portals);
+    seams::hold_pinned_portals::set(crate::HoldPinnedPortals);
+    seams::forget_portal_snapshots::set(crate::ForgetPortalSnapshots);
     seams::at_cleanup_portals::set(crate::AtCleanup_Portals);
     seams::at_subcommit_portals::set(at_subcommit_portals);
     seams::at_subabort_portals::set(at_subabort_portals);

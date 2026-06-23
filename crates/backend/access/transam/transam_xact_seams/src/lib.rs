@@ -182,6 +182,24 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SaveTransactionCharacteristics()` (xact.c:3136): capture the current
+    /// transaction's isolation level / read-only / deferrable settings, for
+    /// restoration across a COMMIT/ROLLBACK AND CHAIN. Pure read of
+    /// backend-local transaction state; cannot `ereport`.
+    pub fn save_transaction_characteristics() -> types_core::xact::SavedTransactionCharacteristics
+);
+
+seam_core::seam!(
+    /// `RestoreTransactionCharacteristics(&savetc)` (xact.c:3144): restore the
+    /// isolation level / read-only / deferrable settings captured by
+    /// [`save_transaction_characteristics`]. Pure write of backend-local
+    /// transaction state; cannot `ereport`.
+    pub fn restore_transaction_characteristics(
+        saved: types_core::xact::SavedTransactionCharacteristics,
+    )
+);
+
+seam_core::seam!(
     /// `BeginInternalSubTransaction(name)` (xact.c): start an internal
     /// subtransaction (the `name` is the C `const char *name`, `NULL` modeled as
     /// `None`). Used by reorder-buffer invalidation replay to isolate catalog

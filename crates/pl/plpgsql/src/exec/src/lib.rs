@@ -885,8 +885,8 @@ fn exec_stmts(estate: &mut PLpgSQL_execstate, stmts: &[PLpgSQL_stmt]) -> PLpgSQL
             PLpgSQL_stmt::Open(s) => exec_stmt_open(estate, s),
             PLpgSQL_stmt::Fetch(s) => exec_stmt_fetch(estate, s),
             PLpgSQL_stmt::Close(s) => exec_stmt_close(estate, s),
-            PLpgSQL_stmt::Commit(_) => exec_stmt_commit(estate),
-            PLpgSQL_stmt::Rollback(_) => exec_stmt_rollback(estate),
+            PLpgSQL_stmt::Commit(s) => exec_stmt_commit(estate, s),
+            PLpgSQL_stmt::Rollback(s) => exec_stmt_rollback(estate, s),
         })() {
             Ok(rc) => rc,
             Err(e) => {
@@ -4425,18 +4425,37 @@ fn exec_stmt_close(
     Ok(PLpgSQL_rc::PLPGSQL_RC_OK)
 }
 
-fn exec_stmt_commit(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc_result {
-    panic!(
-        "seam not wired: exec_stmt_commit (pl_exec.c) — SPI_commit / SPI_start_transaction + \
-         simple-expr infra rebuild (SPI + xact)"
-    );
+/// `exec_stmt_commit(estate, stmt)` (pl_exec.c) — COMMIT [AND CHAIN].
+fn exec_stmt_commit(
+    estate: &mut PLpgSQL_execstate,
+    stmt: &::plpgsql::PLpgSQL_stmt_commit,
+) -> PLpgSQL_rc_result {
+    exec_seams::spi_commit::call(stmt.chain)?;
+
+    // We need to do this whether or not we are chaining: the previous
+    // simple-expr EState / ResourceOwner are gone with the committed
+    // transaction, and `plpgsql_create_econtext` must rebuild the per-tuple
+    // eval econtext. In this port those three handles are created lazily, so
+    // resetting them to `None` lets the lazy path materialize fresh ones.
+    estate.simple_eval_estate = None;
+    estate.simple_eval_resowner = None;
+    estate.eval_econtext = None;
+
+    Ok(PLpgSQL_rc::PLPGSQL_RC_OK)
 }
 
-fn exec_stmt_rollback(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc_result {
-    panic!(
-        "seam not wired: exec_stmt_rollback (pl_exec.c) — SPI_rollback / SPI_start_transaction + \
-         simple-expr infra rebuild (SPI + xact)"
-    );
+/// `exec_stmt_rollback(estate, stmt)` (pl_exec.c) — ROLLBACK [AND CHAIN].
+fn exec_stmt_rollback(
+    estate: &mut PLpgSQL_execstate,
+    stmt: &::plpgsql::PLpgSQL_stmt_rollback,
+) -> PLpgSQL_rc_result {
+    exec_seams::spi_rollback::call(stmt.chain)?;
+
+    estate.simple_eval_estate = None;
+    estate.simple_eval_resowner = None;
+    estate.eval_econtext = None;
+
+    Ok(PLpgSQL_rc::PLPGSQL_RC_OK)
 }
 
 // ===========================================================================

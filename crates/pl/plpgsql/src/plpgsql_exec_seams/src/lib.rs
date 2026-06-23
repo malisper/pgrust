@@ -727,3 +727,19 @@ seam_core::seam!(
     /// `Err` for an invalid portal name (C: `elog(ERROR, "invalid portal …")`).
     pub fn spi_cursor_close(name: std::string::String) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `SPI_commit()` / `SPI_commit_and_chain()` (`spi.c`) — commit the current
+    /// transaction from within a non-atomic SPI context (PL `COMMIT [AND
+    /// CHAIN]`). `chain` selects the `_and_chain` variant. `Err` (carrying the
+    /// original error) on a failed COMMIT or an illegal termination context
+    /// (ERRCODE_INVALID_TRANSACTION_TERMINATION).
+    pub fn spi_commit(chain: bool) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `SPI_rollback()` / `SPI_rollback_and_chain()` (`spi.c`) — roll back the
+    /// current transaction from within a non-atomic SPI context (PL `ROLLBACK
+    /// [AND CHAIN]`). `chain` selects the `_and_chain` variant.
+    pub fn spi_rollback(chain: bool) -> PgResult<()>
+);

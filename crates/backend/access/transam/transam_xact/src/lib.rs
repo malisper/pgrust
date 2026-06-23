@@ -1818,6 +1818,8 @@ pub fn init_seams() {
     // Pure-wiring installs (assemble/seam-wiring-guard): owner bodies exist
     // with signatures matching the seam decls, they were just never set().
     seams::abort_current_transaction::set(AbortCurrentTransaction);
+    seams::save_transaction_characteristics::set(SaveTransactionCharacteristics);
+    seams::restore_transaction_characteristics::set(RestoreTransactionCharacteristics);
     seams::begin_internal_sub_transaction::set(engine::BeginInternalSubTransaction);
     seams::rollback_and_release_current_sub_transaction::set(
         engine::RollbackAndReleaseCurrentSubTransaction,

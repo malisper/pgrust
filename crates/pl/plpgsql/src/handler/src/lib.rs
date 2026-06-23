@@ -1487,6 +1487,22 @@ pub fn init_seams() {
         ::spi::spi_cursor_close_by_name(&name)
     });
 
+    // `SPI_commit` / `SPI_rollback` (PL transaction control: COMMIT / ROLLBACK).
+    ::plpgsql_exec_seams::spi_commit::set(|chain: bool| {
+        if chain {
+            ::spi::SPI_commit_and_chain()
+        } else {
+            ::spi::SPI_commit()
+        }
+    });
+    ::plpgsql_exec_seams::spi_rollback::set(|chain: bool| {
+        if chain {
+            ::spi::SPI_rollback_and_chain()
+        } else {
+            ::spi::SPI_rollback()
+        }
+    });
+
     // Install the array-iteration leg of `exec_stmt_foreach_a` (pl_exec.c). The
     // executor unit is layered below the array/lsyscache owners; the handler
     // (which depends on backend-utils-adt-arrayfuncs + lsyscache) drives the C

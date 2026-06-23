@@ -40,6 +40,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `HoldPinnedPortals()` (portalmem.c:1207) — auto-hold every pinned,
+    /// non-auto-held portal before transaction-control inside a PL. Runs user
+    /// code (materializing the cursor result); can `ereport(ERROR)`, carried on
+    /// `Err`.
+    pub fn hold_pinned_portals() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ForgetPortalSnapshots()` (portalmem.c:1256) — clear every portal's
+    /// `portalSnapshot` and pop all active snapshots, ahead of a
+    /// COMMIT/ROLLBACK inside a PL. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn forget_portal_snapshots() -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `AtCleanup_Portals()` — now safe to release portal memory.
     pub fn at_cleanup_portals() -> PgResult<()>
 );
