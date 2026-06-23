@@ -627,6 +627,12 @@ pub fn after_trigger_execute<'mcx>(
     let mut new_formed: Option<
         types_tuple::backend_access_common_heaptuple::FormedTuple<'static>,
     > = None;
+    // Buffer pins from the trigger-tuple re-fetch(es). C keeps the on-page tuple
+    // in `tg_trigslot`/`tg_newslot` (BufferHeapTupleTableSlot), pinning the page
+    // for the whole trigger call; the owned model copies the tuple out but must
+    // retain the same pin so on-access pruning sees the page as non-cleanup-lockable
+    // exactly as C does. Released after `exec_call_trigger_func` (= C's slot clear).
+    let mut held_buffers: Vec<types_storage::Buffer> = Vec::new();
     let tup_bits = event.ate_flags & AFTER_TRIGGER_TUP_BITS;
     let is_fdw = rel.relkind == RELKIND_FOREIGN_TABLE
         && (tup_bits == AFTER_TRIGGER_FDW_FETCH || tup_bits == AFTER_TRIGGER_FDW_REUSE);
@@ -640,33 +646,49 @@ pub fn after_trigger_execute<'mcx>(
         // table's rowtype where the AFTER trigger fires.
         let root_desc: types_tuple::heaptuple::TupleDescData<'_> = rel.relation.rd_att.clone_in(mcx)?;
         if item_pointer_is_valid(&event.ate_ctid1) {
-            trig_formed = Some(fetch_trigger_tuple_cp(
+            let (f, b) = fetch_trigger_tuple_cp(
                 mcx,
                 event.ate_src_part,
                 rel.relid,
                 &root_desc,
                 &event.ate_ctid1,
-            )?);
+            )?;
+            trig_formed = Some(f);
+            if types_storage::buf::BufferIsValid(b) {
+                held_buffers.push(b);
+            }
         }
         if item_pointer_is_valid(&event.ate_ctid2) {
-            new_formed = Some(fetch_trigger_tuple_cp(
+            let (f, b) = fetch_trigger_tuple_cp(
                 mcx,
                 event.ate_dst_part,
                 rel.relid,
                 &root_desc,
                 &event.ate_ctid2,
-            )?);
+            )?;
+            new_formed = Some(f);
+            if types_storage::buf::BufferIsValid(b) {
+                held_buffers.push(b);
+            }
         }
     } else {
         // Regular-table path (the C `default` case): re-fetch by ItemPointer. An
         // invalid ctid1 (the AFTER-statement / no-row case) means no trigger
         // tuple, exactly as C.
         if item_pointer_is_valid(&event.ate_ctid1) {
-            trig_formed = Some(fetch_trigger_tuple(mcx, rel.relid, &event.ate_ctid1)?);
+            let (f, b) = fetch_trigger_tuple(mcx, rel.relid, &event.ate_ctid1)?;
+            trig_formed = Some(f);
+            if types_storage::buf::BufferIsValid(b) {
+                held_buffers.push(b);
+            }
         }
         let has_ctid2 = tup_bits == AFTER_TRIGGER_2CTID;
         if has_ctid2 && item_pointer_is_valid(&event.ate_ctid2) {
-            new_formed = Some(fetch_trigger_tuple(mcx, rel.relid, &event.ate_ctid2)?);
+            let (f, b) = fetch_trigger_tuple(mcx, rel.relid, &event.ate_ctid2)?;
+            new_formed = Some(f);
+            if types_storage::buf::BufferIsValid(b) {
+                held_buffers.push(b);
+            }
         }
     }
 
@@ -813,6 +835,22 @@ pub fn after_trigger_execute<'mcx>(
         query_mcx: unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(mcx) },
     });
 
+    // Release the trigger-tuple page pins after the trigger call (C clears
+    // `tg_trigslot`/`tg_newslot`, dropping their BufferHeapTupleTableSlot pins,
+    // once the trigger has run). A Drop guard guarantees release on both the
+    // success and unwind/Err paths, matching the slot lifecycle.
+    struct PinGuard(Vec<types_storage::Buffer>);
+    impl Drop for PinGuard {
+        fn drop(&mut self) {
+            for &b in &self.0 {
+                if types_storage::buf::BufferIsValid(b) {
+                    backend_storage_buffer_bufmgr_seams::release_buffer::call(b);
+                }
+            }
+        }
+    }
+    let _pin_guard = PinGuard(held_buffers);
+
     let rettuple = exec_call_trigger_func(trigdata);
     // Drop the transition-table env guard *after* the trigger call returns: it
     // pops the env off the home and moves the tuplestores back into the query
@@ -831,18 +869,33 @@ pub fn after_trigger_execute<'mcx>(
 /// tuple1 for AFTER trigger")`.
 ///
 /// The returned `HeapTupleData` is deep-copied into `mcx` (the per-query
-/// `es_query_cxt`) and the pinned buffer is released, so no buffer pin escapes.
-/// The `'static` lifetime on the result is an extension of that `'mcx`
-/// allocation: the side-channel `TriggerData` is installed and dropped strictly
-/// within `after_trigger_execute`, which runs inside the same query context, so
-/// the tuple outlives every read of it. (The owned-events model stores the queue
-/// as a `'static` backend-global; this is the documented boundary where a
-/// per-query tuple re-enters that path.)
+/// `es_query_cxt`); the `'static` lifetime on the result is an extension of that
+/// `'mcx` allocation: the side-channel `TriggerData` is installed and dropped
+/// strictly within `after_trigger_execute`, which runs inside the same query
+/// context, so the tuple outlives every read of it. (The owned-events model
+/// stores the queue as a `'static` backend-global; this is the documented
+/// boundary where a per-query tuple re-enters that path.)
+///
+/// The pinned buffer is **returned** to the caller, not released here, mirroring
+/// C: `table_tuple_fetch_row_version` stores the on-page tuple into the
+/// `BufferHeapTupleTableSlot` `tg_trigslot`, which keeps the page pinned for the
+/// whole duration of the trigger function call (the slot's pin is dropped only
+/// when the slot is cleared after the call). That retained pin is observable: a
+/// row-level AFTER INSERT/UPDATE trigger whose function scans the same page (e.g.
+/// `UPDATE x ... WHERE ...` re-scanning the just-inserted page) sees
+/// `ConditionalLockBufferForCleanup` fail because of this extra pin, so on-access
+/// `heap_page_prune_opt` is correctly skipped — keeping pgrust's page-fill /
+/// extend trajectory identical to C (copy2's physical row order depends on it).
+/// `after_trigger_execute` holds the returned buffer across `exec_call_trigger_func`
+/// and releases it afterwards, exactly where C clears `tg_trigslot`.
 fn fetch_trigger_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
     ctid: &ItemPointerData,
-) -> PgResult<types_tuple::backend_access_common_heaptuple::FormedTuple<'static>> {
+) -> PgResult<(
+    types_tuple::backend_access_common_heaptuple::FormedTuple<'static>,
+    types_storage::Buffer,
+)> {
     let rel = backend_access_table_table_seams::table_open::call(mcx, relid, NoLock)?;
     let snapshot_any =
         types_snapshot::SnapshotData::sentinel(types_snapshot::SnapshotType::SNAPSHOT_ANY);
@@ -852,7 +905,9 @@ fn fetch_trigger_tuple<'mcx>(
 
     let result = if fetched.found {
         // ExecFetchSlotHeapTuple: the on-page tuple (header + user data area),
-        // deep-copied into mcx so it survives the buffer release below.
+        // deep-copied into mcx so it survives independently of the page, while
+        // the page stays pinned (C's BufferHeapTupleTableSlot) until the trigger
+        // call completes.
         let formed = fetched
             .tuple
             .expect("heap_fetch found==true must carry the tuple");
@@ -868,17 +923,17 @@ fn fetch_trigger_tuple<'mcx>(
         // inside the same query context, so the data outlives all reads.
         let extended: types_tuple::backend_access_common_heaptuple::FormedTuple<'static> =
             unsafe { core::mem::transmute(copied) };
-        Ok(extended)
+        Ok((extended, fetched.userbuf))
     } else {
+        // No tuple: drop any pin heap_fetch may have left, then ERROR as C does.
+        if types_storage::buf::BufferIsValid(fetched.userbuf) {
+            backend_storage_buffer_bufmgr_seams::release_buffer::call(fetched.userbuf);
+        }
         Err(PgError::error(
             "failed to fetch tuple1 for AFTER trigger".to_string(),
         ))
     };
 
-    // ReleaseBuffer(userbuf) — drop the pin heap_fetch left on success.
-    if types_storage::buf::BufferIsValid(fetched.userbuf) {
-        backend_storage_buffer_bufmgr_seams::release_buffer::call(fetched.userbuf);
-    }
     rel.close(NoLock)?;
     result
 }
@@ -899,13 +954,18 @@ fn fetch_trigger_tuple_cp<'mcx>(
     root_relid: Oid,
     root_desc: &types_tuple::heaptuple::TupleDescData<'_>,
     ctid: &ItemPointerData,
-) -> PgResult<types_tuple::backend_access_common_heaptuple::FormedTuple<'static>> {
+) -> PgResult<(
+    types_tuple::backend_access_common_heaptuple::FormedTuple<'static>,
+    types_storage::Buffer,
+)> {
     // Fetch the on-leaf tuple by ctid (SnapshotAny), exactly as the non-CP path.
-    let leaf_formed = fetch_trigger_tuple(mcx, leaf_relid, ctid)?;
+    // The leaf page stays pinned (C's `src_slot` BufferHeapTupleTableSlot) until
+    // the trigger call ends; the returned buffer is held by `after_trigger_execute`.
+    let (leaf_formed, leaf_buf) = fetch_trigger_tuple(mcx, leaf_relid, ctid)?;
 
     // src_relInfo == relInfo: no conversion — the leaf is the root table itself.
     if leaf_relid == root_relid {
-        return Ok(leaf_formed);
+        return Ok((leaf_formed, leaf_buf));
     }
 
     // map = ExecGetChildToRootMap(src_relInfo).  Build the by-name child→root
@@ -940,10 +1000,12 @@ fn fetch_trigger_tuple_cp<'mcx>(
     // Lifetime-extend to 'static for the slot side-channel, same discipline as
     // `fetch_trigger_tuple`: the FormedTuple is `mcx`-allocated (= es_query_cxt)
     // and the borrowing slot payload is installed/dropped within
-    // `after_trigger_execute`.
+    // `after_trigger_execute`. The leaf page pin (`leaf_buf`) is carried back so
+    // `after_trigger_execute` can hold it across the trigger call (C keeps
+    // `src_slot`'s pin), then release it when the slot is cleared.
     let extended: types_tuple::backend_access_common_heaptuple::FormedTuple<'static> =
         unsafe { core::mem::transmute(result) };
-    Ok(extended)
+    Ok((extended, leaf_buf))
 }
 
 // ===========================================================================
@@ -4488,8 +4550,14 @@ fn exec_ar_delete_triggers_impl<'mcx>(
             .expect("ExecARDeleteTriggers: ResultRelInfo has no relation");
         let slot =
             backend_commands_trigger_seams::exec_get_trigger_old_slot::call(estate, relinfo)?;
-        let formed = fetch_trigger_tuple(mcx, rel_oid, &old_ctid)?;
+        let (formed, fbuf) = fetch_trigger_tuple(mcx, rel_oid, &old_ctid)?;
         let formed_mcx = formed.clone_in(mcx)?;
+        // The tuple is materialized into `slot` below; this transition-capture
+        // path doesn't run a trigger function over the page, so the re-fetch pin
+        // is dropped immediately (the data already lives in `mcx`).
+        if types_storage::buf::BufferIsValid(fbuf) {
+            backend_storage_buffer_bufmgr_seams::release_buffer::call(fbuf);
+        }
         backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
             estate, slot, formed_mcx, false,
         )?;
@@ -5187,8 +5255,14 @@ fn exec_ar_update_triggers_impl<'mcx>(
             // and force-stores it into the OLD slot.  The fetch is from `tupsrc`
             // (the source leaf for a cross-partition UPDATE, else the relation).
             let octid = tupleid.expect("have_old without fdw implies a valid tupleid");
-            let formed = fetch_trigger_tuple(mcx, tupsrc_oid, octid)?;
+            let (formed, fbuf) = fetch_trigger_tuple(mcx, tupsrc_oid, octid)?;
             let formed_mcx = formed.clone_in(mcx)?;
+            // Materialized into `slot`; GetTupleForTrigger's re-fetch pin is not
+            // needed past the store here (the caller fires the trigger via its own
+            // path), so drop it now.
+            if types_storage::buf::BufferIsValid(fbuf) {
+                backend_storage_buffer_bufmgr_seams::release_buffer::call(fbuf);
+            }
             backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
                 estate, slot, formed_mcx, false,
             )?;
