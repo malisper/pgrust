@@ -201,17 +201,38 @@ struct OidVectorHeader {
     dataoffset: i32,
     elemtype: Oid,
     dim1: i32,
+    /// Byte offset (within `image`) of the `values` array — `body_off + 20`,
+    /// where `body_off` skips the size-aware varlena header.
+    values_off: usize,
 }
 
-/// Read the fixed `oidvector` header from the leading 24 bytes of its image.
-/// (`vl_len_`, `ndim`, `dataoffset`, `elemtype`, `dim1`, `lbound1`.)
+/// `VARDATA_ANY` byte offset of the `ArrayType` struct within an `oidvector`
+/// varlena image: 1 byte for a short (1-byte) header, else `VARHDRSZ` (4). The
+/// C `hashoidvector` receives the detoasted `oidvector *` (the struct past the
+/// length word); the by-ref lane delivers the raw stored image, which is
+/// short-packed under `SHORT_VARLENA_PACKING`. `oidvector` is PLAIN storage, so
+/// the only header forms are short and 4-byte (never compressed/external).
+fn oidvector_body_off(image: &[u8]) -> usize {
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => 1,
+        _ => 4,
+    }
+}
+
+/// Read the fixed `oidvector` header (`ndim`, `dataoffset`, `elemtype`, `dim1`)
+/// off the `ArrayType` struct that begins past the (size-aware) varlena header.
 fn oidvector_header(image: &[u8]) -> OidVectorHeader {
-    let rd = |off: usize| i32::from_ne_bytes(image[off..off + 4].try_into().unwrap());
+    let base = oidvector_body_off(image);
+    let rd = |off: usize| i32::from_ne_bytes(image[base + off..base + off + 4].try_into().unwrap());
     OidVectorHeader {
-        ndim: rd(4),
-        dataoffset: rd(8),
-        elemtype: rd(12) as u32,
-        dim1: rd(16),
+        ndim: rd(0),
+        dataoffset: rd(4),
+        elemtype: rd(8) as u32,
+        dim1: rd(12),
+        // `key->values` begins at `offsetof(oidvector, values)` == 20 bytes into
+        // the ArrayType struct (ndim/dataoffset/elemtype/dim1/lbound1, no null
+        // bitmap), i.e. `base + 20` in the varlena image.
+        values_off: base + 20,
     }
 }
 
@@ -220,10 +241,9 @@ fn oidvector_header(image: &[u8]) -> OidVectorHeader {
 pub fn hashoidvector(image: &[u8]) -> PgResult<u32> {
     let h = oidvector_header(image);
     check_valid_oidvector::call(h.ndim, h.dataoffset, h.elemtype)?;
-    // `key->values` begins at `sizeof(oidvector)` (24-byte header); the C hashes
-    // `dim1 * sizeof(Oid)` bytes there.
+    // the C hashes `dim1 * sizeof(Oid)` bytes at `key->values`.
     let nbytes = (h.dim1.max(0) as usize) * core::mem::size_of::<Oid>();
-    Ok(hash_any(&image[24..24 + nbytes]))
+    Ok(hash_any(&image[h.values_off..h.values_off + nbytes]))
 }
 
 /// `hashoidvectorextended` (hashfunc.c:241).
@@ -231,7 +251,7 @@ pub fn hashoidvectorextended(image: &[u8], seed: u64) -> PgResult<u64> {
     let h = oidvector_header(image);
     check_valid_oidvector::call(h.ndim, h.dataoffset, h.elemtype)?;
     let nbytes = (h.dim1.max(0) as usize) * core::mem::size_of::<Oid>();
-    Ok(hash_any_extended(&image[24..24 + nbytes], seed))
+    Ok(hash_any_extended(&image[h.values_off..h.values_off + nbytes], seed))
 }
 
 // ===========================================================================

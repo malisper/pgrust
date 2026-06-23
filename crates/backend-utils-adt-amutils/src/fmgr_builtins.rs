@@ -49,16 +49,29 @@ fn arg_int32(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i32 {
     fcinfo.arg(i).expect("amutils fn: missing arg").value.as_i32()
 }
 
-/// A `text` arg's detoasted `VARDATA_ANY` payload bytes on the by-ref lane,
-/// decoded as a `&str` (C: `text_to_cstring(PG_GETARG_TEXT_PP(i))`).
+/// A `text` arg's `VARDATA_ANY` payload bytes on the by-ref lane, decoded as a
+/// `&str` (C: `text_to_cstring(PG_GETARG_TEXT_PP(i))`). The payload must be
+/// reached via the size-aware `VARDATA_ANY` (1-byte header for a short value,
+/// else `VARHDRSZ`), not a fixed 4-byte strip: under `SHORT_VARLENA_PACKING` the
+/// property-name `text` argument (the `unnest(array['asc', ...])` element fed to
+/// `pg_index{,am,_column}_has_property`) arrives short-packed, and skipping a
+/// fixed `VARHDRSZ` drops 3 payload bytes -> `lookup_prop_name` never matches ->
+/// every property comes back NULL (the whole property table goes blank).
+/// Behavior-preserving while packing is OFF (the arg is a plain 4-byte varlena);
+/// these `text` args are small literals, never compressed/external.
 #[inline]
 fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
     let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("amutils fn: text arg missing from by-ref lane");
-    // VARDATA_ANY: skip the 4-byte varlena header on the header-ful image.
-    let bytes = &image[types_datum::varlena::VARHDRSZ..];
+    // VARDATA_ANY: a short (1-byte) header has its low bit set and is not the
+    // external sentinel 0x01; otherwise it is a 4-byte (VARHDRSZ) header.
+    let off = match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => 1,
+        _ => types_datum::varlena::VARHDRSZ,
+    };
+    let bytes = &image[off..];
     core::str::from_utf8(bytes).expect("amutils fn: text arg not valid UTF-8")
 }
 

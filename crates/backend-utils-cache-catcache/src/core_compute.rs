@@ -245,7 +245,50 @@ pub fn oidvectoreqfast(a: &[Oid], b: &[Oid]) -> bool {
 pub fn canonicalize_byref_key(kind: CCFastKind, image: &[u8]) -> alloc::vec::Vec<u8> {
     match kind {
         CCFastKind::Text => vardata_any_image(image).to_vec(),
+        // `oidvector` is normalized to a 4-byte-header (`VARATT_IS_4B_U`)
+        // `ArrayType` image. The search-key side (`buildoidvector`, the
+        // `SysCacheKey::Bytes` payload) is always a freshly-built 4-byte-header
+        // oidvector; a STORED oidvector (`pg_proc.proargtypes`, deformed out of a
+        // catalog tuple) may instead carry a 1-byte ("short") varlena header under
+        // short-varlena packing, which drops 3 header bytes from the image. Since
+        // the fast functions (`oidvectorhashfast`/`oidvectoreqfast`) chunk the
+        // WHOLE resolved payload into `Oid` words, a short-packed stored image
+        // would chunk to a different word count than the 4-byte-header search key
+        // — so a 0-arg function's `PROCNAMEARGSNSP` probe never matches its own
+        // row, and `CREATE OR REPLACE FUNCTION` re-inserts -> "duplicate key value
+        // violates unique constraint pg_proc_proname_args_nsp_index". Un-pack the
+        // short header so both sides present the identical 4-byte-header image.
+        // Behavior-preserving while short packing is OFF (the stored image is
+        // already 4-byte and passes through unchanged).
+        CCFastKind::OidVector => unpack_short_varlena_to_4b(image),
         _ => image.to_vec(),
+    }
+}
+
+/// Normalize an inline varlena image to a 4-byte-header (`VARATT_IS_4B_U`) form.
+/// A short (1-byte) header carries the total length in `header >> 1` and its
+/// payload at `[1..total]`; the 4-byte form is `SET_VARSIZE(len + VARHDRSZ)`
+/// (low two bits `00`, native-endian `(len + 4) << 2`) followed by that payload.
+/// A value that is already 4-byte (or any non-short form) passes through verbatim.
+/// Compressed/external images do not reach here (the caller flattens TOAST first).
+fn unpack_short_varlena_to_4b(image: &[u8]) -> alloc::vec::Vec<u8> {
+    if image.is_empty() {
+        return alloc::vec::Vec::new();
+    }
+    let header = image[0];
+    // VARATT_IS_1B (short inline) but not VARATT_IS_1B_E (external, exactly 0x01).
+    if header != 0x01 && (header & 0x01) == 0x01 {
+        let total = ((header >> 1) & 0x7F) as usize;
+        let total = total.min(image.len()).max(1);
+        let payload = &image[1..total];
+        // SET_VARSIZE(buf, payload.len() + VARHDRSZ): (len4 << 2), low bits 00.
+        let len4 = (payload.len() + 4) as u32;
+        let mut out = alloc::vec::Vec::with_capacity(4 + payload.len());
+        out.extend_from_slice(&(len4 << 2).to_ne_bytes());
+        out.extend_from_slice(payload);
+        out
+    } else {
+        image.to_vec()
     }
 }
 

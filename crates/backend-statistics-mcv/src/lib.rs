@@ -690,6 +690,20 @@ pub fn statext_mcv_deserialize<'mcx>(
         Some(d) => d,
     };
 
+    // mcvlist = (MCVList *) DatumGetByteaP(data) — the C deserializer always
+    // operates on a 4-byte-header (`VARATT_IS_4B_U`) `bytea`. The stored
+    // `pg_statistic_ext_data.stxdmcv` arrives short-packed (a 1-byte header
+    // instead of `VARHDRSZ`) under `SHORT_VARLENA_PACKING`, so its `VARSIZE_ANY`
+    // is 3 bytes smaller than the `size_of_mcvlist` formula (which counts
+    // `VARHDRSZ`), tripping the final `varsize != expected_size` check ("invalid
+    // MCV size 125 (expected 128)"). Un-pack a short header to the 4-byte form so
+    // the header size matches the formula. Behavior-preserving while the flag is
+    // OFF (the image is already 4-byte and passes through unchanged). External /
+    // inline-compressed images are detoasted upstream (`DatumGetByteaP` at the
+    // syscache load), exactly as before this normalization.
+    let unpacked = unpack_short_varlena_to_4b(data);
+    let data: &[u8] = &unpacked;
+
     let varsize = varsize_any(data)?;
 
     /*
@@ -1193,6 +1207,32 @@ fn set_varsize(buf: &mut [u8], len: usize) {
 /// (little-endian: low bit of the first header byte set).
 fn varatt_is_1b(data: &[u8]) -> bool {
     (data[0] & 0x01) == 0x01
+}
+
+/// Normalize an inline varlena image to a 4-byte-header (`VARATT_IS_4B_U`) form.
+/// A short (1-byte, low-bit-set, non-external) header carries the total length in
+/// `header >> 1` with its payload at `[1..total]`; the 4-byte form is
+/// `SET_VARSIZE(payload.len() + VARHDRSZ)` followed by that payload. A value that
+/// is already 4-byte (or any non-short form) is returned verbatim. `stxdmcv` is an
+/// inline `bytea` here (external/compressed images are detoasted upstream by the
+/// syscache `DatumGetByteaP`), so only the short / 4-byte forms reach this.
+fn unpack_short_varlena_to_4b(image: &[u8]) -> Vec<u8> {
+    if image.is_empty() {
+        return Vec::new();
+    }
+    let header = image[0];
+    // VARATT_IS_1B && !VARATT_IS_1B_E (external sentinel exactly 0x01).
+    if header != 0x01 && (header & 0x01) == 0x01 {
+        let total = ((header >> 1) & 0x7F) as usize;
+        let total = total.min(image.len()).max(1);
+        let payload = &image[1..total];
+        let mut out = vec![0u8; VARHDRSZ + payload.len()];
+        set_varsize(&mut out, VARHDRSZ + payload.len());
+        out[VARHDRSZ..].copy_from_slice(payload);
+        out
+    } else {
+        image.to_vec()
+    }
 }
 
 /// `VARSIZE_ANY(ptr)` — total varlena size incl. header, branching on the tag.

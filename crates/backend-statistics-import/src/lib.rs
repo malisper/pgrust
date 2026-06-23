@@ -280,6 +280,7 @@ fn stats_check_required_arg(
 /// WARNING and returns false on a problem.  The array arrives as its on-disk
 /// varlena image on the by-ref lane.
 fn stats_check_arg_array(
+    mcx: Mcx<'_>,
     args: &PositionalArgs,
     arginfo: &[StatsArgInfo],
     argnum: usize,
@@ -288,7 +289,15 @@ fn stats_check_arg_array(
         return Ok(true);
     }
 
-    let image = args.datum(argnum).as_ref_bytes();
+    // arr = DatumGetArrayTypeP(PG_GETARG_DATUM(argnum)) — C detoasts the array
+    // argument before reading ARR_NDIM / array_contains_nulls off it. The raw
+    // by-ref-lane image arrives short-packed under SHORT_VARLENA_PACKING, so its
+    // ArrayType header sits 3 bytes off; detoast (un-packs short -> 4B) and read
+    // the header/null-bitmap off the flat image. Behavior-preserving while the
+    // flag is OFF (the image is already a plain 4-byte varlena).
+    let raw = args.datum(argnum).as_ref_bytes();
+    let flat = backend_utils_adt_arrayfuncs::construct::detoast_array_image(mcx, raw)?;
+    let image: &[u8] = &flat;
 
     // ARR_NDIM(arr) != 1
     if array_ndim(image) != 1 {
@@ -958,15 +967,15 @@ fn attribute_statistics_update(mcx: Mcx<'_>, args: &PositionalArgs) -> PgResult<
 
     // Check argument sanity. If some arguments are unusable, emit a WARNING and
     // disable the corresponding stat kind.
-    if !stats_check_arg_array(args, &arginfo, MOST_COMMON_FREQS_ARG)? {
+    if !stats_check_arg_array(mcx, args, &arginfo, MOST_COMMON_FREQS_ARG)? {
         do_mcv = false;
         result = false;
     }
-    if !stats_check_arg_array(args, &arginfo, MOST_COMMON_ELEM_FREQS_ARG)? {
+    if !stats_check_arg_array(mcx, args, &arginfo, MOST_COMMON_ELEM_FREQS_ARG)? {
         do_mcelem = false;
         result = false;
     }
-    if !stats_check_arg_array(args, &arginfo, ELEM_COUNT_HISTOGRAM_ARG)? {
+    if !stats_check_arg_array(mcx, args, &arginfo, ELEM_COUNT_HISTOGRAM_ARG)? {
         do_dechist = false;
         result = false;
     }

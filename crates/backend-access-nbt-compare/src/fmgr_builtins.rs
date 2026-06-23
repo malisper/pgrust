@@ -101,29 +101,55 @@ fn fc_btboolcmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<
     Ok(ret_i32(crate::btboolcmp(arg_bool(fcinfo, 0), arg_bool(fcinfo, 1))))
 }
 
-/// Decode an `oidvector` on-disk image to its `Oid` element list. An
-/// `oidvector` is a PLAIN-storage flat `ArrayType` (no TOAST): a fixed header
+/// Decode an `oidvector` on-disk varlena image to its `Oid` element list. The
+/// `image` is the verbatim by-ref-lane varlena (header included): the C
+/// `(oidvector *) DatumGetPointer(datum)` reaches the `ArrayType` struct *past*
+/// the varlena length header (`VARDATA`), which is 4 bytes for a normal
+/// (`VARATT_IS_4B_U`) value but ONE byte for a short-packed stored image once
+/// `SHORT_VARLENA_PACKING` is on — `pg_proc.proargtypes` is stored short-packed
+/// in that mode. Reading the `ArrayType` fields at a fixed 0-offset (as if the
+/// header were absent) lands them on the wrong bytes; under packing the stored
+/// (short) and freshly-built (4-byte) images then decode to different `Oid`
+/// lists, so the `pg_proc_proname_args_nsp_index` uniqueness comparison reports a
+/// false mismatch and `CREATE OR REPLACE FUNCTION` re-inserts -> "duplicate key
+/// value violates unique constraint". Skip the size-aware varlena header first
+/// (`VARDATA_ANY`), then read the `ArrayType` struct
 /// `int32 ndim; int32 dataoffset; Oid elemtype; int32 dim1; int32 lbound1;`
-/// (20 bytes, no null bitmap because `oidvectorin` never produces NULLs)
-/// followed by `dim1` native-endian `Oid` words. A 0-dimension vector
-/// (`ndim == 0`) has no elements. This mirrors `oidvector_to_oids_bytes`
-/// inline, so the fmgr adapter needs no allocating context.
+/// (20 bytes, no null bitmap — `oidvectorin` never produces NULLs) followed by
+/// `dim1` native-endian `Oid` words. `oidvector` is PLAIN storage, so the image
+/// is never compressed/external; the only header forms are short and 4-byte.
+/// A 0-dimension vector (`ndim == 0`) has no elements. Behavior-preserving while
+/// packing is OFF (the stored image is already 4-byte). Mirrors
+/// `oidvector_to_oids_bytes` / `foundation::arr_*`.
 fn decode_oidvector(image: &[u8]) -> Vec<types_core::Oid> {
-    if image.len() < 20 {
+    // VARDATA_ANY: skip the varlena length header. A short (1-byte) header has
+    // its low bit set and is not the external sentinel 0x01; otherwise it is a
+    // 4-byte (VARHDRSZ) header.
+    let hdr = match image.first() {
+        Some(&h) => h,
+        None => return Vec::new(),
+    };
+    let body_off = if hdr != 0x01 && (hdr & 0x01) == 0x01 { 1 } else { 4 };
+    let body = match image.get(body_off..) {
+        Some(b) => b,
+        None => return Vec::new(),
+    };
+    if body.len() < 20 {
         return Vec::new();
     }
-    let ndim = i32::from_ne_bytes([image[0], image[1], image[2], image[3]]);
+    // ARR_NDIM (offset 0 within the ArrayType struct).
+    let ndim = i32::from_ne_bytes([body[0], body[1], body[2], body[3]]);
     if ndim < 1 {
         return Vec::new();
     }
-    // dim1 == ARR_DIMS(vec)[0] (the 4th int32 in the header).
-    let dim1 = i32::from_ne_bytes([image[12], image[13], image[14], image[15]]);
+    // dim1 == ARR_DIMS(vec)[0] — the 4th int32 in the header (offset 12).
+    let dim1 = i32::from_ne_bytes([body[12], body[13], body[14], body[15]]);
     let n = dim1.max(0) as usize;
     // ARR_DATA_PTR: header (5 int32 = 20 bytes), no null bitmap for oidvector.
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         let off = 20 + i * 4;
-        match image.get(off..off + 4) {
+        match body.get(off..off + 4) {
             Some(b) => out.push(types_core::Oid::from(u32::from_ne_bytes([
                 b[0], b[1], b[2], b[3],
             ]))),

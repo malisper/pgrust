@@ -64,15 +64,28 @@ fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     Datum::from_usize(0)
 }
 
-/// `PG_GETARG_TEXT_PP(i)` → `text_to_cstring`: the detoasted `VARDATA_ANY`
-/// payload of a `text` arg as a UTF-8 `&str`.
+/// `PG_GETARG_TEXT_PP(i)` → `text_to_cstring`: the `VARDATA_ANY` payload of a
+/// `text` arg as a UTF-8 `&str`. The payload must be reached via the size-aware
+/// `VARDATA_ANY` (1-byte header for a short value, else `VARHDRSZ`), not a fixed
+/// 4-byte strip: under `SHORT_VARLENA_PACKING` a `text` argument (e.g. the
+/// `objects.type` column read by `pg_get_object_address`) arrives short-packed,
+/// and skipping a fixed `VARHDRSZ` drops 3 payload bytes ("table" -> "le" ->
+/// `unrecognized object type`). Behavior-preserving while packing is OFF (the arg
+/// is a plain 4-byte varlena). `text` args here are small literals/columns, never
+/// compressed/external, so the only header forms are short and 4-byte.
 #[inline]
 fn arg_text_str<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
     let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("objectaddress fn: text arg missing from by-ref lane");
-    let payload = &image[types_datum::varlena::VARHDRSZ..];
+    // VARDATA_ANY: a short (1-byte) header has its low bit set and is not the
+    // external sentinel 0x01; otherwise it is a 4-byte (VARHDRSZ) header.
+    let off = match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => 1,
+        _ => types_datum::varlena::VARHDRSZ,
+    };
+    let payload = &image[off..];
     std::str::from_utf8(payload).expect("objectaddress fn: text arg not valid UTF-8")
 }
 

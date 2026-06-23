@@ -3165,6 +3165,19 @@ pub fn oidvector_header_and_oids_bytes<'mcx>(
     Ok((ndim, dataoffset, elemtype, values))
 }
 
+/// `DatumGetArrayTypeP(d)` — detoast an on-disk array varlena image into a flat
+/// 4-byte-header `ArrayType` image. The C array readers (`ARR_NDIM`,
+/// `array_contains_nulls`, ...) always operate on the detoasted pointer; a caller
+/// that reads array header fields off the RAW stored image at a fixed
+/// `VARHDRSZ`-relative offset breaks under `SHORT_VARLENA_PACKING`=ON (a
+/// short-packed stored array has its `ArrayType` header 3 bytes off). Detoast once
+/// (un-packs short -> 4B, decompresses, fetches external) and read header/nulls
+/// off the returned flat image. Behavior-preserving while the flag is OFF (the
+/// image is already a plain 4-byte varlena).
+pub fn detoast_array_image<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    detoast_seam::detoast_attr::call(mcx, bytes)
+}
+
 /// Seam `int2vector_to_i16s_bytes` — `(int2vector *) DatumGetPointer(datum)`
 /// then `->values[0 .. ->dim1]`, reading the on-disk `int2vector` byte image
 /// directly.
