@@ -1065,7 +1065,24 @@ pub fn init_seams() {
             // function and binary-coercible (relabel) cases are handled here;
             // everything else (no path / I/O coercion / array coercion) falls
             // through to the historical I/O coercion below.
-            {
+            //
+            // A DOMAIN target must NOT take these fast pathways. C's
+            // get_cast_hashentry passes the *un-stripped* domain dsttype to
+            // coerce_to_target_type, which wraps the base-type coercion in a
+            // CoerceToDomain node (parse_coerce.c coerce_to_domain) that enforces
+            // the domain's NOT NULL / CHECK constraints and applies the domain's
+            // base typmod at run time. find_coercion_pathway, by contrast, strips
+            // domains off both ends via get_base_type, so for e.g. `int4 ->
+            // pos_int` it returns RELABELTYPE (int4 -> int4) — and short-circuiting
+            // on that would pass the value through UNCHECKED, bypassing the
+            // domain. Route a domain target through the I/O coercion fallback
+            // below, whose target typinput is `domain_in` (it enforces exactly
+            // those constraints + typmod). This is plpgsql's documented coercion
+            // fallback and observably matches CoerceToDomain for these casts.
+            const TYPTYPE_DOMAIN: u8 = b'd';
+            let req_is_domain =
+                backend_utils_cache_lsyscache_seams::get_typtype::call(reqtype)? == TYPTYPE_DOMAIN;
+            if !req_is_domain {
                 let (pathtype, funcid) =
                     backend_parser_coerce_seams::find_coercion_pathway_plpgsql::call(
                         reqtype, valtype,
@@ -1123,9 +1140,20 @@ pub fn init_seams() {
                         };
                         return Ok(out);
                     }
-                    backend_parser_coerce_seams::CoercionPathType::Relabeltype => {
-                        // Binary-coercible: no function, the value passes through
-                        // unchanged (the RelabelType no-op in get_cast_hashentry).
+                    backend_parser_coerce_seams::CoercionPathType::Relabeltype
+                        if reqtypmod == -1 =>
+                    {
+                        // Binary-coercible AND no typmod to enforce: the value
+                        // passes through unchanged (the RelabelType no-op in
+                        // get_cast_hashentry). When reqtypmod != -1, C's
+                        // coerce_to_target_type adds a coerce_type_typmod
+                        // length-coercion FuncExpr on top of the relabel (e.g.
+                        // `numeric -> numeric(4,2)`, which rounds / overflow-checks);
+                        // that is NOT a bare RelabelType, so the no-op detection
+                        // does not fire and the typmod cast runs. Fall through to
+                        // the I/O coercion below, whose target typinput applies the
+                        // typmod (numeric_in(text, typmod) rounds + range-checks
+                        // identically), restoring the typmod enforcement.
                         return Ok(CastValueResult { value, isnull: false, byref: value_byref });
                     }
                     // None / Coerceviaio / Arraycoerce: fall through to the
