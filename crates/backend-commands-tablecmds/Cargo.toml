@@ -15,6 +15,7 @@ backend-optimizer-util-predtest-seams = { path = "../backend-optimizer-util-pred
 backend-optimizer-prep-prepqual-seams = { path = "../backend-optimizer-prep-prepqual-seams" }
 backend-utils-cache-inval = { path = "../backend-utils-cache-inval" }
 backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
+backend-nodes-outfuncs = { path = "../backend-nodes-outfuncs" }
 mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }

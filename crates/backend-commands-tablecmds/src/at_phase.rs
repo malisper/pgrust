@@ -2182,29 +2182,35 @@ fn ATExecCmd<'mcx>(
             // cmd = ATParseTransformCmd(...): transform the bound (a no-op for
             // DETACH, which carries no FOR VALUES bound) before execution, exactly
             // as C's ATExecCmd does. ATPrepCmd ensures rel is a partitioned table.
+            //
+            // ATExecDetachPartition consumes the parent relation by value (the
+            // CONCURRENTLY path closes + reopens it across a transaction
+            // boundary) and returns the (possibly reopened) parent, which we
+            // store back into tab->rel so the per-pass close releases the right
+            // relation.
             let owned_rel = wqueue[ti].rel.take().expect("ATExecCmd: tab->rel is open");
-            let res = (|| {
-                let transformed = crate::at_coladd::ATParseTransformCmd(
-                    mcx,
-                    wqueue,
-                    ti,
-                    &owned_rel,
-                    cmd.clone_in(mcx)?,
-                    false,
-                    lockmode,
-                    cur_pass,
-                    context,
-                )?
-                .expect("ATParseTransformCmd returned None for DETACH PARTITION");
-                let pc = transformed
-                    .def
-                    .as_deref()
-                    .and_then(|d| d.as_partitioncmd())
-                    .expect("AT_DetachPartition: transformed cmd.def is not a PartitionCmd");
-                crate::at_detach::ATExecDetachPartition(mcx, wqueue, &owned_rel, pc)
-            })();
-            wqueue[ti].rel = Some(owned_rel);
-            _address = res?;
+            let transformed = crate::at_coladd::ATParseTransformCmd(
+                mcx,
+                wqueue,
+                ti,
+                &owned_rel,
+                cmd.clone_in(mcx)?,
+                false,
+                lockmode,
+                cur_pass,
+                context,
+            )?
+            .expect("ATParseTransformCmd returned None for DETACH PARTITION");
+            let pc = transformed
+                .def
+                .as_deref()
+                .and_then(|d| d.as_partitioncmd())
+                .expect("AT_DetachPartition: transformed cmd.def is not a PartitionCmd")
+                .clone_in(mcx)?;
+            let (addr, reopened_rel) =
+                crate::at_detach::ATExecDetachPartition(mcx, wqueue, ti, owned_rel, &pc)?;
+            wqueue[ti].rel = Some(reopened_rel);
+            _address = addr;
         }
         AT_DetachPartitionFinalize => {
             let owned_rel = wqueue[ti].rel.take().expect("ATExecCmd: tab->rel is open");

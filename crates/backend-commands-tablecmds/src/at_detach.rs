@@ -45,19 +45,23 @@ use types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_UNDEFINED_TABLE, ERROR,
 };
-use types_nodes::ddlnodes::PartitionCmd;
+use types_nodes::ddlnodes::{Constraint, ConstrType, PartitionCmd};
+use types_nodes::nodes::Node;
+use types_nodes::partition::PartitionStrategy;
+use types_nodes::primnodes::Expr;
 use types_tuple::access::RELKIND_PARTITIONED_TABLE;
 
-use backend_access_common_relation::relation_open;
+use backend_access_common_relation::{relation_open, try_relation_open};
 use backend_access_table_table::table_openrv;
 use backend_catalog_indexing_seams as indexing_seam;
+use backend_nodes_core::makefuncs::make_ands_explicit;
 use backend_utils_cache_syscache::{
     SearchSysCacheCopyAttName, SearchSysCacheExistsAttName, SysCacheGetAttrNotNull, ATTNAME,
 };
 use backend_utils_error::ereport;
 
 use types_rel::Relation;
-use types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock};
+use types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
 
 use crate::helpers::{here, object_address_set, RelationRelationId};
 use crate::at_phase::AlteredTableInfo;
@@ -97,19 +101,25 @@ fn child_dependency_type(
 
 /// `ATExecDetachPartition(wqueue, tab, rel, name, concurrent)` (tablecmds.c:20912).
 ///
-/// `rel` is the (open, locked) partitioned parent. `cmd` carries the partition's
-/// name and the `concurrent` flag.
+/// `rel` is the (open, locked) partitioned parent, taken *by value*: on the
+/// CONCURRENTLY path the C closes both relations, commits, restarts a new
+/// transaction, and re-opens them, storing the reopened parent back into
+/// `tab->rel`. This port mirrors that by consuming `rel` and returning the
+/// (possibly reopened) parent alongside the address; the caller stores it back
+/// into `wqueue[ti].rel`. `ti` is the parent's work-queue index; `cmd` carries
+/// the partition's name and the `concurrent` flag.
 pub(crate) fn ATExecDetachPartition<'mcx>(
     mcx: Mcx<'mcx>,
-    _wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
-    rel: &Relation<'mcx>,
+    wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
+    ti: usize,
+    rel: Relation<'mcx>,
     cmd: &PartitionCmd<'mcx>,
-) -> PgResult<ObjectAddress> {
+) -> PgResult<(ObjectAddress, Relation<'mcx>)> {
     let concurrent = cmd.concurrent;
 
     // We must lock the default partition, because detaching this partition will
     // change its partition constraint.
-    let partdesc = backend_partitioning_partdesc::RelationGetPartitionDesc(mcx, rel, true)?;
+    let partdesc = backend_partitioning_partdesc::RelationGetPartitionDesc(mcx, &rel, true)?;
     let default_part_oid =
         backend_partitioning_partdesc::get_default_oid_from_partdesc(Some(&partdesc));
     if OidIsValid(default_part_oid) {
@@ -125,21 +135,9 @@ pub(crate) fn ATExecDetachPartition<'mcx>(
         backend_storage_lmgr_lmgr::LockRelationOid(default_part_oid, AccessExclusiveLock)?;
     }
 
-    if concurrent {
-        // The two-transaction CONCURRENTLY protocol (MarkInheritDetached /
-        // DetachAddConstraintIfNeeded / WaitForLockersMultiple / cross-transaction
-        // re-open) is unported.
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg(
-                "DETACH PARTITION ... CONCURRENTLY is not yet supported \
-                 (the two-transaction concurrent-detach protocol is unported)"
-                    .to_string(),
-            )
-            .into_error());
-    }
-
-    // partRel = table_openrv(name, AccessExclusiveLock);
+    // In concurrent mode, the partition is locked with share-update-exclusive in
+    // the first transaction. This allows concurrent transactions to be doing DML
+    // to the partition.
     let name_node = cmd
         .name
         .as_deref()
@@ -148,13 +146,29 @@ pub(crate) fn ATExecDetachPartition<'mcx>(
         .as_rangevar()
         .ok_or_else(|| elog("DETACH PARTITION: PartitionCmd name is not a RangeVar"))?;
     let access_rv = to_access_range_var(rv);
-    let partRel = table_openrv(mcx, &access_rv, AccessExclusiveLock)?;
+    let part_lockmode = if concurrent {
+        ShareUpdateExclusiveLock
+    } else {
+        AccessExclusiveLock
+    };
+    let partRel = table_openrv(mcx, &access_rv, part_lockmode)?;
 
-    // Delete the pg_inherits row (non-concurrent) and disinherit columns /
-    // constraints.
-    RemoveInheritance(mcx, &partRel, rel, false)?;
+    // Check inheritance conditions and either delete the pg_inherits row (in
+    // non-concurrent mode) or just set the inhdetachpending flag.
+    if !concurrent {
+        RemoveInheritance(mcx, &partRel, &rel, false)?;
+    } else {
+        backend_catalog_pg_inherits::MarkInheritDetached(
+            mcx,
+            &partRel,
+            rel.rd_id,
+            rel.rd_rel.relkind,
+            rel.rd_rel.relnamespace,
+            rel.name(),
+        )?;
+    }
 
-    // Ensure foreign keys still hold after this detach.
+    // Ensure that foreign keys still hold after this detach.
     //
     // C runs this with NO intervening CommandCounterIncrement after
     // RemoveInheritance, so the pg_inherits row it just deleted is not yet
@@ -165,6 +179,136 @@ pub(crate) fn ATExecDetachPartition<'mcx>(
     // delete and make get_partition_parent fail with "could not find tuple for
     // parent of relation".
     ATDetachCheckNoForeignKeyRefs(mcx, &partRel)?;
+
+    // Concurrent mode has to work harder; first we add a new constraint to the
+    // partition that matches the partition constraint. Then we close our
+    // existing transaction, and in a new one wait for all processes to catch up
+    // on the catalog updates we've done so far; at that point we can complete the
+    // operation.
+    if concurrent {
+        // For strategies other than hash, add a constraint to the partition
+        // being detached which supplants the partition constraint. For hash we
+        // cannot do that, because the constraint would reference the partitioned
+        // table OID, possibly causing problems later.
+        let strategy = partdesc
+            .boundinfo
+            .as_deref()
+            .map(|b| b.strategy)
+            .unwrap_or(PartitionStrategy::Hash);
+        if strategy != PartitionStrategy::Hash {
+            DetachAddConstraintIfNeeded(mcx, wqueue, &partRel)?;
+        }
+
+        // We're almost done now; the only traces that remain are the pg_inherits
+        // tuple and the partition's relpartbounds. Before we can remove those, we
+        // need to wait until all transactions that know that this is a partition
+        // are gone.
+
+        // Remember relation OIDs to re-acquire them later.
+        let partrelid = partRel.rd_id;
+        let parentrelid = rel.rd_id;
+        let parentrelname = rel.name().to_string();
+        let partrelname = partRel.name().to_string();
+
+        // Build the parent's relation locktag for WaitForLockersMultiple, using
+        // the cached LockRelId (dbId == MyDatabaseId for a non-shared relation),
+        // before we close the relation. (C: SET_LOCKTAG_RELATION(tag,
+        // MyDatabaseId, parentrelid).)
+        let lockrelid =
+            backend_utils_cache_relcache_seams::rel_lock_relid::call(parentrelid)?;
+        let tag = backend_storage_lmgr_lmgr_seams::set_locktag_relation::call(
+            lockrelid.dbId,
+            lockrelid.relId,
+        );
+
+        // Invalidate relcache entries for the parent -- must be before close.
+        backend_utils_cache_inval::cache_invalidate::CacheInvalidateRelcache(&rel)?;
+
+        // table_close(partRel, NoLock); table_close(rel, NoLock); tab->rel = NULL;
+        partRel.close(NoLock)?;
+        rel.close(NoLock)?;
+        debug_assert!(wqueue[ti].rel.is_none());
+
+        // Make updated catalog entry visible.
+        // PopActiveSnapshot(); CommitTransactionCommand();
+        backend_utils_time_snapmgr_seams::pop_active_snapshot::call()?;
+        backend_access_transam_xact_seams::commit_transaction_command::call()?;
+
+        // StartTransactionCommand();
+        backend_access_transam_xact_seams::start_transaction_command::call()?;
+
+        // Now wait. This ensures that all queries that were planned including the
+        // partition are finished before we remove the rest of catalog entries. We
+        // don't need or indeed want to acquire this lock, though -- that would
+        // block later queries.
+        let locktags = [tag];
+        backend_storage_lmgr_lmgr::WaitForLockersMultiple(
+            mcx,
+            &locktags,
+            AccessExclusiveLock,
+            false,
+        )?;
+
+        // Now acquire locks in both relations again. Note they may have been
+        // removed in the meantime, so care is required.
+        let reopened_rel = try_relation_open(mcx, parentrelid, ShareUpdateExclusiveLock)?;
+        let reopened_part = try_relation_open(mcx, partrelid, AccessExclusiveLock)?;
+
+        // If the relations aren't there, something bad happened; bail out.
+        let Some(reopened_rel) = reopened_rel else {
+            if reopened_part.is_some() {
+                // shouldn't happen
+                ereport(types_error::WARNING)
+                    .errmsg(format!(
+                        "dangling partition \"{partrelname}\" remains, can't fix"
+                    ))
+                    .finish(here("ATExecDetachPartition"))?;
+            }
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .errmsg(format!(
+                    "partitioned table \"{parentrelname}\" was removed concurrently"
+                ))
+                .into_error());
+        };
+        let Some(reopened_part) = reopened_part else {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .errmsg(format!("partition \"{partrelname}\" was removed concurrently"))
+                .into_error());
+        };
+
+        // tab->rel = rel;
+        wqueue[ti].rel = Some(reopened_rel);
+
+        // Detaching the partition might involve TOAST table access, so ensure we
+        // have a valid snapshot.
+        backend_utils_time_snapmgr_seams::push_active_snapshot_transaction::call()?;
+
+        // Do the final part of detaching (concurrent = true).
+        let rel_ref = wqueue[ti]
+            .rel
+            .as_ref()
+            .ok_or_else(|| elog("ATExecDetachPartition: tab->rel vanished after reopen"))?;
+        DetachPartitionFinalize(mcx, rel_ref, &reopened_part, true, default_part_oid)?;
+
+        backend_utils_time_snapmgr_seams::pop_active_snapshot::call()?;
+
+        let address = object_address_set(RelationRelationId, reopened_part.rd_id);
+
+        // keep our lock until commit
+        reopened_part.close(NoLock)?;
+
+        // The caller (ATExecCmd) put back wqueue[ti].rel itself; hand the reopened
+        // parent back so the per-pass loop's close releases the right relation.
+        let reopened_parent = wqueue[ti]
+            .rel
+            .take()
+            .ok_or_else(|| elog("ATExecDetachPartition: tab->rel vanished after finalize"))?;
+        return Ok((address, reopened_parent));
+    }
+
+    // --- non-concurrent path (rel stays open the whole time) ---
 
     // Make RemoveInheritance's pg_attribute updates (the per-column attinhcount
     // decrements) visible before DetachPartitionFinalize's identity-drop loop
@@ -181,7 +325,7 @@ pub(crate) fn ATExecDetachPartition<'mcx>(
     backend_utils_time_snapmgr_seams::push_active_snapshot_transaction::call()?;
 
     // Do the final part of detaching.
-    DetachPartitionFinalize(mcx, rel, &partRel, false, default_part_oid)?;
+    DetachPartitionFinalize(mcx, &rel, &partRel, false, default_part_oid)?;
 
     backend_utils_time_snapmgr_seams::pop_active_snapshot::call()?;
 
@@ -190,7 +334,108 @@ pub(crate) fn ATExecDetachPartition<'mcx>(
     // keep our lock until commit
     partRel.close(NoLock)?;
 
-    Ok(address)
+    Ok((address, rel))
+}
+
+// ===========================================================================
+// DetachAddConstraintIfNeeded (tablecmds.c:21464)
+// ===========================================================================
+
+/// `DetachAddConstraintIfNeeded(wqueue, partRel)` (tablecmds.c:21464) — create a
+/// constraint on the partition being detached that takes the place of the
+/// partition constraint, avoiding a duplicate when an existing constraint already
+/// implies the needed one.
+fn DetachAddConstraintIfNeeded<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
+    partRel: &Relation<'mcx>,
+) -> PgResult<()> {
+    // constraintExpr = RelationGetPartitionQual(partRel);
+    let constraint_expr = backend_utils_cache_partcache::RelationGetPartitionQual(mcx, partRel)?;
+
+    // constraintExpr = (List *) eval_const_expressions(NULL, (Node *) constraintExpr);
+    // (eval_const_expressions on a list recurses element-wise.)
+    let mut folded: Vec<Expr<'mcx>> = Vec::with_capacity(constraint_expr.len());
+    for n in constraint_expr.into_iter() {
+        let e = n
+            .into_expr()
+            .ok_or_else(|| elog("DetachAddConstraintIfNeeded: partition qual node is not an Expr"))?;
+        folded.push(backend_optimizer_util_clauses::eval_const_expressions(mcx, e)?);
+    }
+
+    // Avoid adding a new constraint if the needed constraint is implied by an
+    // existing constraint. PartConstraintImpliedByRelConstraint takes the
+    // implicit-AND list as Nodes.
+    let mut implied_input: Vec<Node<'mcx>> = Vec::with_capacity(folded.len());
+    for e in folded.iter() {
+        implied_input.push(Node::mk_expr(mcx, e.clone_in(mcx)?)?);
+    }
+    if crate::at_attach::PartConstraintImpliedByRelConstraint(mcx, partRel, &implied_input)? {
+        return Ok(());
+    }
+
+    // tab = ATGetQueueEntry(wqueue, partRel);
+    let tab = crate::at_phase::ATGetQueueEntry(mcx, wqueue, partRel)?;
+
+    // n->cooked_expr = nodeToString(make_ands_explicit(constraintExpr));
+    let ands = make_ands_explicit(folded);
+    let ands_node = Node::mk_expr(mcx, ands)?;
+    let cooked = backend_nodes_outfuncs::nodeToString(mcx, &ands_node)?;
+
+    // Add constraint on partition, equivalent to the partition constraint.
+    let n = Constraint {
+        contype: ConstrType::CONSTR_CHECK,
+        conname: None,
+        location: -1,
+        is_no_inherit: false,
+        raw_expr: None,
+        cooked_expr: Some(cooked),
+        is_enforced: true,
+        initially_valid: true,
+        skip_validation: true,
+        deferrable: false,
+        initdeferred: false,
+        generated_when: 0,
+        generated_kind: 0,
+        nulls_not_distinct: false,
+        keys: PgVec::new_in(mcx),
+        without_overlaps: false,
+        including: PgVec::new_in(mcx),
+        exclusions: PgVec::new_in(mcx),
+        options: PgVec::new_in(mcx),
+        indexname: None,
+        indexspace: None,
+        reset_default_tblspc: false,
+        access_method: None,
+        where_clause: None,
+        pktable: None,
+        fk_attrs: PgVec::new_in(mcx),
+        pk_attrs: PgVec::new_in(mcx),
+        fk_with_period: false,
+        pk_with_period: false,
+        fk_matchtype: 0,
+        fk_upd_action: 0,
+        fk_del_action: 0,
+        fk_del_set_cols: PgVec::new_in(mcx),
+        old_conpfeqop: PgVec::new_in(mcx),
+        old_pktable_oid: types_core::primitive::InvalidOid,
+    };
+
+    // It's a re-add, since it nominally already exists.
+    // ATAddCheckNNConstraint(wqueue, tab, partRel, n, true, false, true, ShareUpdateExclusiveLock);
+    crate::at_constraint::ATAddCheckNNConstraint(
+        mcx,
+        wqueue,
+        tab,
+        partRel,
+        &n,
+        true,                       // recurse
+        false,                      // recursing
+        true,                       // is_readd
+        ShareUpdateExclusiveLock,
+    )?;
+
+    Ok(())
 }
 
 // ===========================================================================
@@ -530,12 +775,9 @@ fn DetachPartitionFinalize<'mcx>(
     default_part_oid: Oid,
 ) -> PgResult<()> {
     if concurrent {
-        // RemoveInheritance(partRel, rel, true) — only reachable on the
-        // CONCURRENTLY path, which is rejected earlier.
-        return Err(elog(
-            "DetachPartitionFinalize: concurrent finalize reached without the unported \
-             CONCURRENTLY protocol",
-        ));
+        // We can remove the pg_inherits row now. (In the non-concurrent case,
+        // this was already done by RemoveInheritance in ATExecDetachPartition.)
+        RemoveInheritance(mcx, partRel, rel, true)?;
     }
 
     // Drop any triggers that were cloned on creation/attach.
