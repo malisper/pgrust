@@ -221,7 +221,7 @@ fn buffer_usage_accum_diff(dst: &mut BufferUsage, add: &BufferUsage, sub: &Buffe
 /// `explain.c` does.
 fn instr_time_current() -> instr_time {
     let mut t = instr_time::default();
-    instr_time::instr_time_set_current(&mut t);
+    ::instr_time::instr_time_set_current(&mut t);
     t
 }
 

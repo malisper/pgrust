@@ -15,7 +15,7 @@ use alloc::string::String;
 
 use ::mcx::Mcx;
 use ::types_core::Oid;
-use ::error_fgram::ereport;
+use ::utils_error::ereport;
 use ::types_error::{
     PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR, ERROR,
 };

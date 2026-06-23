@@ -454,7 +454,7 @@ pub fn pg_be_scram_build_secret(password: &[u8]) -> PgResult<String> {
 
     // Generate random salt.
     let mut saltbuf = [0u8; SCRAM_DEFAULT_SALT_LEN];
-    if !::pg_strong_random::pg_strong_random::call(&mut saltbuf) {
+    if !pg_strong_random::pg_strong_random::call(&mut saltbuf) {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_INTERNAL_ERROR)
             .errmsg("could not generate random salt")
@@ -1121,7 +1121,7 @@ fn verify_client_proof(state: &mut scram_state) -> PgResult<bool> {
 fn build_server_first_message(state: &mut scram_state) -> PgResult<Vec<u8>> {
     // Generate random bytes and base64-encode them for the server nonce.
     let mut raw_nonce = [0u8; SCRAM_RAW_NONCE_LEN];
-    if !::pg_strong_random::pg_strong_random::call(&mut raw_nonce) {
+    if !pg_strong_random::pg_strong_random::call(&mut raw_nonce) {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_INTERNAL_ERROR)
             .errmsg("could not generate random nonce")

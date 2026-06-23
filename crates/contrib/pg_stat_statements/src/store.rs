@@ -42,7 +42,7 @@ thread_local! {
 
 fn now() -> instr_time {
     let mut t = instr_time { ticks: 0 };
-    instr_time::instr_time_set_current(&mut t);
+    ::instr_time::instr_time_set_current(&mut t);
     t
 }
 

@@ -38,7 +38,7 @@ fn bytes_to_kilobytes(b: i64) -> i64 {
 /// `elapsed_time(starttime)` (explain.c:1163) — seconds since `starttime`.
 pub fn elapsed_time(starttime: &::types_core::instrument::instr_time) -> f64 {
     let mut endtime = ::types_core::instrument::instr_time::default();
-    instr_time::instr_time_set_current(&mut endtime);
+    ::instr_time::instr_time_set_current(&mut endtime);
     endtime.subtract(*starttime);
     endtime.get_double()
 }

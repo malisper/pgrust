@@ -66,9 +66,9 @@ mod tests;
 /// the memory-context create/switch/consume operations used by the `es->memory`
 /// leg fail only on out-of-memory (which `palloc` turns into an `ERROR` ereport
 /// anyway), so we re-raise the message under our error world.
-fn bridge_mmgr<T>(r: Result<T, mmgr_error::PgError>) -> PgResult<T> {
+fn bridge_mmgr<T>(r: Result<T, error_fgram::PgError>) -> PgResult<T> {
     r.map_err(|e| {
-        error_fgram::ereport(::types_error::ERROR)
+        utils_error::ereport(::types_error::ERROR)
             .errmsg(e.message().to_string())
             .into_error()
     })
@@ -102,7 +102,7 @@ fn explain_execute_begin(es: &ExplainState<'_>) -> PgResult<Bookkeeping> {
         bk.bufusage_start = instr::pgBufferUsage();
     }
     // INSTR_TIME_SET_CURRENT(planstart);
-    instr_time::instr_time_set_current(&mut bk.planstart);
+    ::instr_time::instr_time_set_current(&mut bk.planstart);
     Ok(bk)
 }
 
@@ -110,7 +110,7 @@ fn explain_execute_begin(es: &ExplainState<'_>) -> PgResult<Bookkeeping> {
 /// INSTR_TIME_SUBTRACT(planduration, planstart);`.
 fn explain_planduration(bk: &mut Bookkeeping) -> PgResult<()> {
     let mut now = instr_time::default();
-    instr_time::instr_time_set_current(&mut now);
+    ::instr_time::instr_time_set_current(&mut now);
     now.subtract(bk.planstart);
     bk.planduration = now;
     Ok(())
@@ -385,7 +385,7 @@ fn explain_one_plan<'mcx>(
 
     // INSTR_TIME_SET_CURRENT(starttime);
     let mut starttime = instr_time::default();
-    instr_time::instr_time_set_current(&mut starttime);
+    ::instr_time::instr_time_set_current(&mut starttime);
 
     // PushCopiedSnapshot(GetActiveSnapshot()); UpdateActiveSnapshotCommandId();
     snapmgr_s::push_copied_active_snapshot::call()?;
@@ -541,7 +541,7 @@ fn explain_one_plan<'mcx>(
     // Close down the query and free resources. Include the time for this in the
     // total execution time. INSTR_TIME_SET_CURRENT(starttime); ExecutorEnd;
     // FreeQueryDesc; PopActiveSnapshot();
-    instr_time::instr_time_set_current(&mut starttime);
+    ::instr_time::instr_time_set_current(&mut starttime);
     execmain_s::executor_end::call(&mut query_desc)?;
     execmain_s::free_query_desc::call(query_desc)?;
     snapmgr_s::pop_active_snapshot::call()?;
@@ -567,7 +567,7 @@ fn explain_one_plan<'mcx>(
 /// `*starttime`, return the difference in seconds.
 fn elapsed_time(starttime: &mut instr_time) -> f64 {
     let mut endtime = instr_time::default();
-    instr_time::instr_time_set_current(&mut endtime);
+    ::instr_time::instr_time_set_current(&mut endtime);
     endtime.subtract(*starttime);
     endtime.get_double()
 }

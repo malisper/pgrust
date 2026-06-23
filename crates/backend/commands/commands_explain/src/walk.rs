@@ -866,7 +866,7 @@ pub fn ExplainNode<'es, 'p>(
         Some(i) if es.analyze => {
             if i.running {
                 if !i.starttime.is_zero() {
-                    return Err(error_fgram::ereport(::types_error::ERROR)
+                    return Err(utils_error::ereport(::types_error::ERROR)
                         .errmsg_internal("InstrEndLoop called on running node")
                         .into_error());
                 }
@@ -2242,7 +2242,7 @@ fn show_modifytable_info<'es, 'p>(
                         Some(i) => {
                             if i.running {
                                 if !i.starttime.is_zero() {
-                                    return Err(error_fgram::ereport(
+                                    return Err(utils_error::ereport(
                                         ::types_error::ERROR,
                                     )
                                     .errmsg_internal(
