@@ -16046,10 +16046,20 @@ dependencies = [
 name = "backend-replication-logical-logicalfuncs"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogreader-seams",
+ "backend-replication-logical-decode-seams",
+ "backend-replication-logical-logical",
+ "backend-replication-logical-logical-seams",
  "backend-replication-logical-message",
+ "backend-replication-slot",
+ "backend-tcop-postgres-seams",
+ "backend-utils-cache-inval-seams",
  "backend-utils-error",
+ "backend-utils-mmgr-mcxt-seams",
  "types-core",
  "types-error",
+ "types-logical",
 ]
 
 [[package]]
@@ -25512,6 +25522,7 @@ dependencies = [
  "backend-replication-logical-decode",
  "backend-replication-logical-launcher",
  "backend-replication-logical-logical",
+ "backend-replication-logical-logicalfuncs",
  "backend-replication-logical-message",
  "backend-replication-logical-origin",
  "backend-replication-logical-proto",

@@ -381,6 +381,7 @@ backend-replication-logical-decode = { path = "../backend-replication-logical-de
 backend-replication-logical-launcher = { path = "../backend-replication-logical-launcher" }
 backend-replication-logical-worker = { path = "../backend-replication-logical-worker" }
 backend-replication-logical-logical = { path = "../backend-replication-logical-logical" }
+backend-replication-logical-logicalfuncs = { path = "../backend-replication-logical-logicalfuncs" }
 backend-replication-logical-origin = { path = "../backend-replication-logical-origin" }
 backend-replication-logical-proto = { path = "../backend-replication-logical-proto" }
 backend-replication-logical-reorderbuffer = { path = "../backend-replication-logical-reorderbuffer" }

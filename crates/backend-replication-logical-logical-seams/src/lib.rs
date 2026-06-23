@@ -196,6 +196,52 @@ seam_core::seam!(
 );
 
 // -------------------------------------------------------------------------
+// SQL-function (`OutputWriter::SqlSrf`) output-row collector.
+//
+// `LogicalOutputWrite` (logicalfuncs.c) builds one `(lsn, xid, data text)` row
+// per decoded change and `tuplestore_putvalues`es it into the SRF result. The
+// put needs the live `fcinfo->resultinfo` ReturnSetInfo (an `'mcx` value owned
+// by the SRF function's frame), which `OutputPluginWrite` — buried in the
+// decode loop — cannot reach. We collect the owned, lifetime-free row tuples in
+// a backend-local stack here for the dynamic extent of the decode loop; the SRF
+// function (`pg_logical_slot_get_changes_guts`) drains them into its tuplestore
+// after the loop. The collected payload is `(lsn: u64, xid: u32, data: Vec<u8>)`
+// — exactly the three result columns, no `'mcx` value crosses the thread-local.
+::std::thread_local! {
+    static SQL_SRF_ROWS: core::cell::RefCell<Vec<(u64, u32, alloc::vec::Vec<u8>)>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
+/// Append one decoded output row (the `LogicalOutputWrite` body's
+/// `tuplestore_putvalues` of `(lsn, xid, text(ctx->out))`). Returns the running
+/// `returned_rows` count (C's `p->returned_rows++`).
+pub fn sql_srf_push_row(lsn: u64, xid: u32, data: alloc::vec::Vec<u8>) -> i64 {
+    SQL_SRF_ROWS.with(|r| {
+        let mut r = r.borrow_mut();
+        r.push((lsn, xid, data));
+        r.len() as i64
+    })
+}
+
+/// The current number of collected rows (C's `p->returned_rows`, read by the
+/// decode loop's `upto_nchanges` bound).
+pub fn sql_srf_returned_rows() -> i64 {
+    SQL_SRF_ROWS.with(|r| r.borrow().len() as i64)
+}
+
+/// Drain the collected rows (the SRF function rebuilds them into its tuplestore
+/// after the decode loop). Also clears the collector for the next call.
+pub fn sql_srf_take_rows() -> Vec<(u64, u32, alloc::vec::Vec<u8>)> {
+    SQL_SRF_ROWS.with(|r| core::mem::take(&mut *r.borrow_mut()))
+}
+
+/// Clear the collector (the SRF function's PG_CATCH cleanup, so a failed decode
+/// does not leak rows into the next call).
+pub fn sql_srf_clear_rows() {
+    SQL_SRF_ROWS.with(|r| r.borrow_mut().clear());
+}
+
+// -------------------------------------------------------------------------
 // `ctx->output_plugin_options` (List* of DefElem) backing store.
 //
 // In C the decode caller (walsender START_REPLICATION / logicalfuncs

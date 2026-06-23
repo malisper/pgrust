@@ -387,6 +387,10 @@ pub fn init_all() {
     backend_replication_logical_launcher::init_seams();
     backend_replication_logical_worker::init_seams();
     backend_replication_logical_logical::init_seams();
+    // Installs the OutputWriter::SqlSrf write callback (LogicalOutputWrite); must
+    // run after logical-logical-seams' sql_srf_output_write decl is available
+    // (decl-only crate, order-independent).
+    backend_replication_logical_logicalfuncs::init_seams();
     backend_replication_logical_origin::init_seams();
     backend_replication_logical_proto::init_seams();
     backend_replication_logical_reorderbuffer::init_seams();
