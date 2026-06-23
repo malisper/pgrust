@@ -69,13 +69,35 @@ fn arg_cstring<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
         .expect("varbit fn: cstring arg missing from by-ref lane")
 }
 
-/// The full varlena image of arg `i` off the by-ref lane.
+/// The full varlena image of arg `i` off the by-ref lane, in canonical
+/// 4-byte-header form. `decode_varbit` reads `bit_len` at the FIXED offset 4 and
+/// `bit_dat` at `VARBIT_PREFIX` (8), so it needs a 4-byte-header base.
+/// `PG_GETARG_VARBIT_P` is `DatumGetVarBitP` == `PG_DETOAST_DATUM`, which un-packs
+/// a short (1-byte) header to 4-byte form; under `SHORT_VARLENA_PACKING` a small
+/// heap-stored `bit`/`varbit` (toastable: typlen == -1, typstorage == 'x') can be
+/// short, so un-pack it here. With the flag OFF the un-pack branch is never taken
+/// (behavior-preserving); the short case leaks one small `'static` buffer (C's
+/// PG_DETOAST_DATUM palloc's into the fn context, reclaimed at reset; here at
+/// process exit).
 #[inline]
 fn arg_varbit_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("varbit fn: varbit arg missing from by-ref lane")
+        .expect("varbit fn: varbit arg missing from by-ref lane");
+    // VARATT_IS_1B && !VARATT_IS_1B_E (short inline header).
+    if image.first().is_some_and(|&b| b != 0x01 && (b & 0x01) == 0x01) {
+        const VARHDRSZ: usize = 4;
+        const VARHDRSZ_SHORT: usize = 1;
+        let data_size = ((image[0] >> 1) & 0x7f) as usize - VARHDRSZ_SHORT;
+        let new_size = data_size + VARHDRSZ;
+        let mut out = Vec::with_capacity(new_size);
+        out.extend_from_slice(&types_datum::varlena::set_varsize_4b(new_size));
+        out.extend_from_slice(&image[VARHDRSZ_SHORT..VARHDRSZ_SHORT + data_size]);
+        Vec::leak(out)
+    } else {
+        image
+    }
 }
 
 /// Parse a full header-ful `varbit` varlena image
