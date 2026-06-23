@@ -33,8 +33,13 @@ pub mod fmgr_builtins;
 /// `"PostgreSQL " PG_VERSION " on " host ", compiled by " cc ", " bits "-bit"`.
 /// This is the value `configure` produced for the porting target (matching the
 /// c2rust rendering of this unit).
+// DELIBERATE DIVERGENCE (user-approved): the version() banner is branded
+// "pgrust" instead of the faithful "PostgreSQL". This is an intentional cosmetic
+// divergence from upstream — no regress test diffs the version() banner (the 3
+// callers only regex-match platform substrings like 'linux-gnu'), and
+// server_version / server_version_num are unchanged.
 pub const PG_VERSION_STR: &str =
-    "PostgreSQL 18.3 on aarch64-darwin, compiled by clang-21.0.0, 64-bit";
+    "pgrust 18.3 on aarch64-darwin, compiled by clang-21.0.0, 64-bit";
 
 /// `pgsql_version(PG_FUNCTION_ARGS)` (version.c) —
 /// `PG_RETURN_TEXT_P(cstring_to_text(PG_VERSION_STR))`.
