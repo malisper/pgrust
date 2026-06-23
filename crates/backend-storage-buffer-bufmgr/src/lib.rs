@@ -977,6 +977,11 @@ fn vac_read_buffer_extended<'mcx>(
     let forknum = types_core::primitive::ForkNumber::from_i32(fork)
         .expect("vacuumlazy read_buffer_extended: invalid fork number");
     let io_context = io_context_for_strategy(&strategy);
+    // Install the backend-private BufferAccessStrategy ring for the duration of
+    // this read so victim selection (StrategyGetBuffer) reuses/evicts ring
+    // members — the `strategy` argument C threads down to freelist.c. The guard
+    // restores the previous active strategy on drop.
+    let _strategy_guard = crate::bufalloc::ActiveStrategyGuard::install(&strategy);
     BufferManager::global_expect().ReadBufferExtended(
         rel,
         forknum,

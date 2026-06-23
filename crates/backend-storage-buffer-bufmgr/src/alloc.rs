@@ -25,7 +25,7 @@
 //! drop-relation path; the IO lifecycle the read/flush owners.)
 #![allow(dead_code)]
 
-use backend_storage_buffer_support::ClockSweep;
+use backend_storage_buffer_support::{BufferAccessStrategyRing, ClockSweep};
 use types_core::primitive::{BlockNumber, Buffer, ForkNumber};
 use types_error::{PgError, PgResult};
 use types_storage::buf::{
@@ -42,6 +42,51 @@ use crate::mgr::BufferManager;
 use backend_storage_buffer_bufmgr_seams as sb;
 use backend_storage_buffer_support::{buf_table_hash_code, buf_table_hash_partition};
 use backend_storage_lmgr_lwlock as lwlock;
+
+// ---------------------------------------------------------------------------
+// Backend-private "active BufferAccessStrategy" — the ring threaded into victim
+// selection (freelist.c `StrategyGetBuffer`'s `strategy` parameter).
+//
+// In C, the `BufferAccessStrategy` ring flows as an explicit argument from
+// `ReadBuffer*`/`ExtendBufferedRel` down through `BufferAlloc` →
+// `GetVictimBuffer` → `StrategyGetBuffer`. Here the ring already arrives at the
+// buffer manager's doorstep (`vac_read_buffer_extended(strategy)` etc.) but the
+// public seam signatures only carry the derived `IOContext`. Rather than churn
+// every internal signature, the caller installs the ring into this
+// backend-local thread-local for the duration of the read via
+// [`ActiveStrategyGuard`], and `strategy_get_buffer` consults it — the ring is
+// genuinely backend-private state (NOT shmem), so a thread-local is the correct
+// ownership. When `None` (the default no-ring strategy), victim selection runs
+// the plain global clock sweep, exactly as before.
+type ActiveStrategy = types_storage::buf::BufferAccessStrategy;
+
+std::thread_local! {
+    static ACTIVE_STRATEGY: core::cell::RefCell<ActiveStrategy> =
+        const { core::cell::RefCell::new(None) };
+}
+
+/// RAII guard that installs an active `BufferAccessStrategy` ring for the
+/// duration of a read/extend, restoring the previous one on drop (so nested
+/// reads — e.g. a strategy read that triggers an FSM read with NULL strategy —
+/// behave like C's explicit-argument threading).
+pub(crate) struct ActiveStrategyGuard {
+    prev: ActiveStrategy,
+}
+
+impl ActiveStrategyGuard {
+    /// Install `strategy` as the active ring; the previous value is restored on
+    /// drop. Cloning the `Option<Rc<..>>` is a cheap refcount bump.
+    pub(crate) fn install(strategy: &ActiveStrategy) -> Self {
+        let prev = ACTIVE_STRATEGY.with(|s| s.replace(strategy.clone()));
+        Self { prev }
+    }
+}
+
+impl Drop for ActiveStrategyGuard {
+    fn drop(&mut self) {
+        ACTIVE_STRATEGY.with(|s| *s.borrow_mut() = self.prev.take());
+    }
+}
 
 /// `BUF_STATE_GET_REFCOUNT(buf_state)` (buf_internals.h).
 #[inline]
@@ -109,23 +154,30 @@ impl BufferManager {
     /// reaches the state word + freeNext via the F1-installed header/freelist
     /// seams).
     ///
-    /// `has_strategy` collapses the `BufferAccessStrategy` ring to a bool, like
-    /// src-idiomatic: a real ring would be threaded as `Some(&mut strategy)` into
-    /// `ClockSweep::get_buffer` (which already returns `from_ring`); here we call
-    /// it with `None` (the default no-ring strategy) and document the collapse,
-    /// same posture as the F1 freelist note. The dirty-victim WAL-veto
-    /// (`StrategyRejectBuffer`) is unreachable while the ring is collapsed.
+    /// The `BufferAccessStrategy` ring is threaded through the backend-private
+    /// [`ACTIVE_STRATEGY`] thread-local (installed by the caller via
+    /// [`ActiveStrategyGuard`]). When a ring is active, `ClockSweep::get_buffer`
+    /// first tries to reuse the next ring member (`from_ring = true` →
+    /// `IOOP_REUSE`); only when the ring slot is empty/pinned/hot does it fall
+    /// back to the global clock sweep and record the fresh victim into the ring
+    /// (`from_ring = false` → `IOOP_EVICT`). With no active ring it is the plain
+    /// global clock sweep (`from_ring` always false).
     fn strategy_get_buffer(&self, io_context: IOContext) -> PgResult<(usize, u32, bool)> {
-        // The ring object itself is still collapsed (a real cross-call ring is a
-        // separate keystone): we pass `None` to the clock sweep, so `from_ring`
-        // is always false and every claimed valid victim is counted as an
-        // IOOP_EVICT (never IOOP_REUSE) in `io_context`. stats.sql's vacuum check
-        // sums reuses+evictions, so the eviction count alone satisfies it; the
-        // reuse-vs-evict split needs the threaded ring.
         let _ = io_context;
         let sweep = ClockSweep::new(self.strategy_control());
         let mut from_ring = false;
-        let victim = sweep.get_buffer(None, &mut from_ring)?;
+        let victim = ACTIVE_STRATEGY.with(|cell| {
+            let mut active = cell.borrow_mut();
+            match active.as_ref() {
+                Some(rc) => {
+                    // Borrow the backend-private ring mutably for the duration of
+                    // victim selection (GetBufferFromRing / AddBufferToRing).
+                    let mut ring = rc.borrow_mut();
+                    sweep.get_buffer(Some(&mut ring), &mut from_ring)
+                }
+                None => sweep.get_buffer(None, &mut from_ring),
+            }
+        })?;
         Ok((victim.buf_id as usize, victim.buf_state, from_ring))
     }
 
