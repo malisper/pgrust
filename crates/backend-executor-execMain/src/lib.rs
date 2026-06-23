@@ -3193,6 +3193,39 @@ fn EvalPlanQualStart<'mcx>(
             rc.es_plannedstmt = Some(mcx::alloc_in(qcx, ps.clone_in(qcx)?)?);
         }
 
+        // C (execMain.c EvalPlanQualStart):
+        //   rcestate->es_part_prune_infos   = parentestate->es_part_prune_infos;
+        //   rcestate->es_part_prune_states  = parentestate->es_part_prune_states;
+        //   rcestate->es_part_prune_results = parentestate->es_part_prune_results;
+        //   rcestate->es_partition_directory = parentestate->es_partition_directory;
+        // "These need to match exactly so that we initialize all the same Append
+        // and MergeAppend subplans as the parent did." The recheck plan tree's
+        // Append/MergeAppend nodes call ExecInitPartitionExecPruning, which
+        // indexes es_part_prune_infos[part_prune_index] and consumes (.take()s)
+        // es_part_prune_states[idx]; an empty recheck array panics with an
+        // index-out-of-bounds.
+        //
+        // The owned model can't alias the parent's owned es_part_prune_states
+        // PgBoxes (the parent's Append already moved them out — they're None now),
+        // so we rebuild the recheck estate's pruning state the same way InitPlan
+        // does: clone es_part_prune_infos from the recheck plannedstmt's
+        // partPruneInfos and re-run ExecDoInitialPruning. Initial pruning is
+        // deterministic given the same external/exec params (which we copy below),
+        // so the recheck results match the parent's exactly — equivalent to C's
+        // share-the-results.
+        if let Some(ps) = rc.es_plannedstmt.as_deref() {
+            if !ps.partPruneInfos.is_empty() {
+                let mut infos = mcx::vec_with_capacity_in(qcx, ps.partPruneInfos.len())?;
+                for pinfo in ps.partPruneInfos.iter() {
+                    let owned = types_nodes::partprune_carrier::partpruneinfo_into_static(
+                        pinfo.clone_in(qcx)?,
+                    );
+                    infos.push(types_nodes::Opaque(Some(alloc::boxed::Box::new(owned))));
+                }
+                rc.es_part_prune_infos = infos;
+            }
+        }
+
         // es_rowmarks: the parent's ExecRowMark array (C shares the pointer; the
         // owned model clones each — the recheck EState shares the parent's `'mcx`,
         // and the Relation handles are Rc-backed aliases). The recheck scan over a
@@ -3225,6 +3258,15 @@ fn EvalPlanQualStart<'mcx>(
                 });
             }
             rc.es_param_exec_vals = pev;
+        }
+
+        // ExecDoInitialPruning(recheckestate) — fill es_part_prune_states /
+        // es_part_prune_results parallel to the es_part_prune_infos cloned above,
+        // so the recheck Append/MergeAppend init can find the prebuilt prune state.
+        // Must run after es_param_list_info / es_param_exec_vals are copied (initial
+        // pruning may read params). Deterministic → matches the parent's results.
+        if !rc.es_part_prune_infos.is_empty() {
+            backend_executor_execPartition_seams::exec_do_initial_pruning::call(qcx, rc)?;
         }
     }
 

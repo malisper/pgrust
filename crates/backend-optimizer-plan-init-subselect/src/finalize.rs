@@ -696,12 +696,21 @@ fn finalize_node_specific<'mcx>(
         }
         types_nodes::nodes::ntag::T_LockRows => {
             // Force descendant scan nodes to reference epqParam.
+            //   locally_added_param = ((LockRows *) plan)->epqParam;
+            //   valid_params = bms_add_member(bms_copy(valid_params), locally_added_param);
+            //   scan_params  = bms_add_member(bms_copy(scan_params),  locally_added_param);
+            // Adding epqParam to scan_params is what makes every descendant scan
+            // node carry epqParam in its allParam, so an EvalPlanQual recheck
+            // (which sets chgParam |= epqParam on this LockRows node) re-scans
+            // them — e.g. forces a recheck Hash Join to rebuild its inner hash
+            // from the refetched/substituted tuple on every recheck run, instead
+            // of reusing the stale single-batch table.
             let lr = plan.as_lockrows_mut().unwrap();
             *locally_added_param = lr.epqParam;
             *valid_params_owned =
                 Some(bms::bms_add_member(mcx, valid_params_owned.take(), *locally_added_param)?);
-            // note we don't add to scan_params... that would force re-eval of
-            // every child scan, which is not what we want.
+            *scan_params_owned =
+                Some(bms::bms_add_member(mcx, scan_params_owned.take(), *locally_added_param)?);
         }
         types_nodes::nodes::ntag::T_Agg => {
             let agg = plan.as_agg_mut().unwrap();
