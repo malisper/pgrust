@@ -23,7 +23,7 @@
 use alloc::vec::Vec;
 use crate::gistxlog::{gist_get_fake_lsn, gist_xlog_delete, gist_xlog_split, gist_xlog_update};
 use ::bufmgr_seams::{
-    buffer_get_block_number, buffer_get_lsn_atomic, buffer_get_page, lock_buffer,
+    buffer_get_block_number, buffer_get_lsn_atomic, buffer_get_page, buffer_with_page, lock_buffer,
     mark_buffer_dirty, read_buffer, release_buffer, unlock_release_buffer, with_buffer_page,
 };
 use ::predicate_seams::{
@@ -167,29 +167,43 @@ pub fn gistplacetopage<'mcx>(args: PlaceToPage<'mcx, '_>) -> PgResult<PlaceToPag
     let mcx = giststate.tempCxt;
 
     let blkno = buffer_get_block_number::call(buffer);
-    let page_snap = buffer_get_page::call(mcx, buffer)?;
-    let is_leaf = GistPageIsLeaf(&page_snap)?;
+    // Read the page header + initial split decision in place (no 8 KiB copy);
+    // all results are Copy. `page_size` is always BLCKSZ.
+    let (is_leaf, follow_right, is_deleted, mut is_split, has_garbage, page_size) =
+        buffer_with_page(buffer, |page_snap| {
+            let is_leaf = GistPageIsLeaf(page_snap)?;
+            let follow_right = GistFollowRight(page_snap)?;
+            let is_deleted = GistPageIsDeleted(page_snap)?;
+            let is_split = gistnospace(page_snap, itup, oldoffnum, freespace as usize)?;
+            let has_garbage = GistPageHasGarbage(page_snap)?;
+            Ok((
+                is_leaf,
+                follow_right,
+                is_deleted,
+                is_split,
+                has_garbage,
+                page_snap.len(),
+            ))
+        })?;
 
     // Refuse to modify an incompletely-split page.
-    if GistFollowRight(&page_snap)? {
+    if follow_right {
         return Err(ereport(ERROR)
             .errmsg_internal("concurrent GiST page split was incomplete")
             .into_error());
     }
-    debug_assert!(!GistPageIsDeleted(&page_snap)?);
+    debug_assert!(!is_deleted);
 
     let mut split_info: Vec<GISTPageSplitInfo<'mcx>> = Vec::new();
     let mut new_blkno = blkno;
     let recptr;
 
-    // is_split = gistnospace(page, itup, ntup, oldoffnum, freespace);
-    let mut is_split = gistnospace(&page_snap, itup, oldoffnum, freespace as usize)?;
-
     // If a leaf page is full, try first to delete dead tuples, then re-check.
-    if is_split && is_leaf && GistPageHasGarbage(&page_snap)? {
+    if is_split && is_leaf && has_garbage {
         gistprunepage(mcx, rel, buffer, heap_rel)?;
-        let page_snap2 = buffer_get_page::call(mcx, buffer)?;
-        is_split = gistnospace(&page_snap2, itup, oldoffnum, freespace as usize)?;
+        is_split = buffer_with_page(buffer, |page_snap2| {
+            gistnospace(page_snap2, itup, oldoffnum, freespace as usize)
+        })?;
     }
 
     if is_split {
@@ -197,8 +211,10 @@ pub fn gistplacetopage<'mcx>(args: PlaceToPage<'mcx, '_>) -> PgResult<PlaceToPag
         let is_rootsplit = blkno == GIST_ROOT_BLKNO;
 
         // Form the itup vector to split. If replacing an old tuple, drop it.
-        let page_for_extract = buffer_get_page::call(mcx, buffer)?;
-        let mut itvec: Vec<PgVec<'mcx, u8>> = gistextractpage(mcx, &page_for_extract)?;
+        // gistextractpage copies each item into mcx (owned PgVecs), so the page
+        // is read in place (no 8 KiB copy) and nothing borrowing it escapes.
+        let mut itvec: Vec<PgVec<'mcx, u8>> =
+            buffer_with_page(buffer, |page_for_extract| gistextractpage(mcx, page_for_extract))?;
         if oldoffnum != INVALID_OFFSET_NUMBER {
             let pos = (oldoffnum - FIRST_OFFSET_NUMBER) as usize;
             itvec.remove(pos);
@@ -227,7 +243,7 @@ pub fn gistplacetopage<'mcx>(args: PlaceToPage<'mcx, '_>) -> PgResult<PlaceToPag
         }
 
         // Working page images, one per dist entry (parallel to `dist`).
-        let page_size = page_snap.len();
+        // `page_size` (== BLCKSZ) was read in place above.
         let mut pages: Vec<alloc::vec::Vec<u8>> = Vec::with_capacity(dist.len());
 
         let mut oldrlink = InvalidBlockNumber;
@@ -238,19 +254,22 @@ pub fn gistplacetopage<'mcx>(args: PlaceToPage<'mcx, '_>) -> PgResult<PlaceToPag
         // get fresh buffers). For a non-root split the original page's old
         // rightlink/NSN are saved and the original page becomes dist[0].
         if !is_rootsplit {
-            // save old rightlink and NSN from the original page
-            let orig = buffer_get_page::call(mcx, buffer)?;
-            oldrlink = gist_page_rightlink(&orig)?;
-            oldnsn = gist_page_get_nsn(&orig)?;
+            // save old rightlink and NSN from the original page, and form the
+            // temp-copy special area — all read in place (no 8 KiB copy);
+            // `tbytes` is an owned copy, rightlink/nsn are Copy.
+            let (rlink, nsn, mut tbytes) = buffer_with_page(buffer, |orig| {
+                let rlink = gist_page_rightlink(orig)?;
+                let nsn = gist_page_get_nsn(orig)?;
+                // dist->page = PageGetTempPageCopySpecial(BufferGetPage(buffer));
+                let pref = PageRef::new(orig)?;
+                let temp = PageGetTempPageCopySpecial(&pref)?;
+                Ok((rlink, nsn, temp.as_bytes().to_vec()))
+            })?;
+            oldrlink = rlink;
+            oldnsn = nsn;
 
             dist[0].buffer = buffer;
             dist[0].block.blkno = buffer_get_block_number::call(buffer);
-            // dist->page = PageGetTempPageCopySpecial(BufferGetPage(buffer));
-            let temp = {
-                let pref = PageRef::new(&orig)?;
-                PageGetTempPageCopySpecial(&pref)?
-            };
-            let mut tbytes = temp.as_bytes().to_vec();
             // clean all flags except F_LEAF
             set_gist_page_flags(&mut tbytes, if is_leaf { F_LEAF } else { 0 })?;
             pages.push(tbytes);
@@ -271,8 +290,8 @@ pub fn gistplacetopage<'mcx>(args: PlaceToPage<'mcx, '_>) -> PgResult<PlaceToPag
                 buffer_get_block_number::call(buffer),
                 buffer_get_block_number::call(newbuf),
             )?;
-            let np = buffer_get_page::call(mcx, newbuf)?;
-            pages.push(np.to_vec());
+            let np = buffer_with_page(newbuf, |np| Ok(np.to_vec()))?;
+            pages.push(np);
         }
         debug_assert_eq!(pages.len(), dist.len());
 
@@ -296,12 +315,12 @@ pub fn gistplacetopage<'mcx>(args: PlaceToPage<'mcx, '_>) -> PgResult<PlaceToPag
         let mut root_page_bytes: Option<alloc::vec::Vec<u8>> = None;
         if is_rootsplit {
             // rootpg.page = PageGetTempPageCopySpecial(BufferGetPage(rootpg.buffer));
-            let orig = buffer_get_page::call(mcx, buffer)?;
-            let temp = {
-                let pref = PageRef::new(&orig)?;
-                PageGetTempPageCopySpecial(&pref)?
-            };
-            let mut tbytes = temp.as_bytes().to_vec();
+            // Read in place (no 8 KiB copy); `tbytes` is an owned copy.
+            let mut tbytes = buffer_with_page(buffer, |orig| {
+                let pref = PageRef::new(orig)?;
+                let temp = PageGetTempPageCopySpecial(&pref)?;
+                Ok(temp.as_bytes().to_vec())
+            })?;
             set_gist_page_flags(&mut tbytes, 0)?;
 
             let ndownlinks = dist.len();
@@ -754,18 +773,17 @@ pub fn gistSplit<'mcx>(
 /// `gistprunepage(rel, page, buffer, heapRel)` (gist.c:1674): remove LP_DEAD
 /// items from a leaf page (buffer exclusively locked).
 pub fn gistprunepage<'mcx>(
-    mcx: Mcx<'mcx>,
+    _mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     buffer: Buffer,
     heap_rel: &Relation<'mcx>,
 ) -> PgResult<()> {
-    let page = buffer_get_page::call(mcx, buffer)?;
-    debug_assert!(GistPageIsLeaf(&page)?);
-
-    // Collect LP_DEAD offsets.
+    // Collect LP_DEAD offsets — read the page in place (no 8 KiB copy); the
+    // offsets are Copy values.
     let mut deletable: Vec<OffsetNumber> = Vec::new();
-    {
-        let pref = PageRef::new(&page)?;
+    buffer_with_page(buffer, |page| {
+        debug_assert!(GistPageIsLeaf(page)?);
+        let pref = PageRef::new(page)?;
         let maxoff = PageGetMaxOffsetNumber(&pref);
         let mut offnum = FIRST_OFFSET_NUMBER;
         while offnum <= maxoff {
@@ -775,7 +793,8 @@ pub fn gistprunepage<'mcx>(
             }
             offnum += 1;
         }
-    }
+        Ok(())
+    })?;
 
     if !deletable.is_empty() {
         let mut snapshot_conflict_horizon: TransactionId = InvalidTransactionId;
@@ -931,21 +950,38 @@ pub fn gistdoinsert<'mcx>(
             gistcheckpage(r.name(), state.stack[cur].buffer)?;
         }
 
-        let page = buffer_get_page::call(mcx, state.stack[cur].buffer)?;
+        // Read the page header fields in place (no 8 KiB copy); all Copy.
+        let (page_lsn_bytes, page_follow_right, page_nsn, page_is_deleted, page_is_leaf): (
+            XLogRecPtr,
+            bool,
+            ::gist::GistNSN,
+            bool,
+            bool,
+        ) = buffer_with_page(state.stack[cur].buffer, |page| {
+            Ok((
+                page_get_lsn_bytes(page),
+                GistFollowRight(page)?,
+                gist_page_get_nsn(page)?,
+                GistPageIsDeleted(page)?,
+                GistPageIsLeaf(page)?,
+            ))
+        })?;
         state.stack[cur].lsn = if xlocked {
-            page_get_lsn_bytes(&page)
+            page_lsn_bytes
         } else {
             buffer_get_lsn_atomic::call(state.stack[cur].buffer)?
         };
 
         // Fix an incomplete split (crashed inserter never inserted the downlink).
-        if GistFollowRight(&page)? {
+        if page_follow_right {
             if !xlocked {
                 lock_buffer::call(state.stack[cur].buffer, GIST_UNLOCK)?;
                 lock_buffer::call(state.stack[cur].buffer, GIST_EXCLUSIVE)?;
                 xlocked = true;
-                let page2 = buffer_get_page::call(mcx, state.stack[cur].buffer)?;
-                if !GistFollowRight(&page2)? {
+                let follow_right2 = buffer_with_page(state.stack[cur].buffer, |page2| {
+                    GistFollowRight(page2)
+                })?;
+                if !follow_right2 {
                     continue;
                 }
             }
@@ -962,24 +998,26 @@ pub fn gistdoinsert<'mcx>(
             .parent
             .map(|p| state.stack[p].lsn)
             .unwrap_or(0);
-        if (state.stack[cur].blkno != GIST_ROOT_BLKNO
-            && parent_lsn < gist_page_get_nsn(&page)?)
-            || GistPageIsDeleted(&page)?
-        {
+        if (state.stack[cur].blkno != GIST_ROOT_BLKNO && parent_lsn < page_nsn) || page_is_deleted {
             unlock_release_buffer::call(state.stack[cur].buffer);
             xlocked = false;
             cur = state.stack[cur].parent.expect("concurrent-split at root");
             continue;
         }
 
-        if !GistPageIsLeaf(&page)? {
+        if !page_is_leaf {
             // Internal page: walk down to the child with minimum penalty.
-            let downlinkoffnum = gistchoose(mcx, r, &page, itup, giststate)?;
-            let (childblkno, idxtuple) = {
+            // `gistchoose` dispatches the GiST penalty support function through
+            // the (RefCell-guarded) fmgr machinery, so it must not run while an
+            // in-place page read-borrow of this buffer is held — take an owned
+            // page snapshot here. `idxtuple` is copied out (owned).
+            let page = buffer_get_page::call(mcx, state.stack[cur].buffer)?;
+            let (downlinkoffnum, childblkno, idxtuple) = {
+                let downlinkoffnum = gistchoose(mcx, r, &page, itup, giststate)?;
                 let pref = PageRef::new(&page)?;
                 let id = PageGetItemId(&pref, downlinkoffnum)?;
                 let it = PageGetItem(&pref, &id)?;
-                (itup_block_number(it), it.to_vec())
+                (downlinkoffnum, itup_block_number(it), it.to_vec())
             };
 
             if gist_tuple_is_invalid(&idxtuple) {
@@ -1003,8 +1041,10 @@ pub fn gistdoinsert<'mcx>(
                     lock_buffer::call(state.stack[cur].buffer, GIST_UNLOCK)?;
                     lock_buffer::call(state.stack[cur].buffer, GIST_EXCLUSIVE)?;
                     xlocked = true;
-                    let page2 = buffer_get_page::call(mcx, state.stack[cur].buffer)?;
-                    if page_get_lsn_bytes(&page2) != state.stack[cur].lsn {
+                    let lsn2 = buffer_with_page(state.stack[cur].buffer, |page2| {
+                        Ok(page_get_lsn_bytes(page2))
+                    })?;
+                    if lsn2 != state.stack[cur].lsn {
                         // page changed while unlocked, retry
                         continue;
                     }
@@ -1041,13 +1081,28 @@ pub fn gistdoinsert<'mcx>(
                 lock_buffer::call(state.stack[cur].buffer, GIST_UNLOCK)?;
                 lock_buffer::call(state.stack[cur].buffer, GIST_EXCLUSIVE)?;
                 xlocked = true;
-                let page2 = buffer_get_page::call(mcx, state.stack[cur].buffer)?;
-                state.stack[cur].lsn = page_get_lsn_bytes(&page2);
+                // Read the leaf page header in place (no 8 KiB copy); all Copy.
+                let (lsn2, is_leaf2, follow_right2, nsn2, is_deleted2): (
+                    XLogRecPtr,
+                    bool,
+                    bool,
+                    ::gist::GistNSN,
+                    bool,
+                ) = buffer_with_page(state.stack[cur].buffer, |page2| {
+                    Ok((
+                        page_get_lsn_bytes(page2),
+                        GistPageIsLeaf(page2)?,
+                        GistFollowRight(page2)?,
+                        gist_page_get_nsn(page2)?,
+                        GistPageIsDeleted(page2)?,
+                    ))
+                })?;
+                state.stack[cur].lsn = lsn2;
 
                 if state.stack[cur].blkno == GIST_ROOT_BLKNO {
                     // The only page that can become inner instead of leaf is the
                     // root; recheck it.
-                    if !GistPageIsLeaf(&page2)? {
+                    if !is_leaf2 {
                         lock_buffer::call(state.stack[cur].buffer, GIST_UNLOCK)?;
                         xlocked = false;
                         continue;
@@ -1057,10 +1112,7 @@ pub fn gistdoinsert<'mcx>(
                         .parent
                         .map(|p| state.stack[p].lsn)
                         .unwrap_or(0);
-                    if GistFollowRight(&page2)?
-                        || parent_lsn < gist_page_get_nsn(&page2)?
-                        || GistPageIsDeleted(&page2)?
-                    {
+                    if follow_right2 || parent_lsn < nsn2 || is_deleted2 {
                         unlock_release_buffer::call(state.stack[cur].buffer);
                         xlocked = false;
                         cur = state.stack[cur].parent.expect("leaf concurrent split at root");
@@ -1089,7 +1141,7 @@ pub fn gistdoinsert<'mcx>(
 /// find the path from the root to `child`. Returns the parent chain (root-first)
 /// as a `Vec<GISTInsertStack>` plus the downlink offset in the direct parent.
 fn gistFindPath<'mcx>(
-    mcx: Mcx<'mcx>,
+    _mcx: Mcx<'mcx>,
     r: &Relation<'mcx>,
     child: BlockNumber,
 ) -> PgResult<(Vec<GISTInsertStack>, OffsetNumber)> {
@@ -1115,18 +1167,45 @@ fn gistFindPath<'mcx>(
         let buffer = read_buffer::call(r, nodes[top].blkno)?;
         lock_buffer::call(buffer, GIST_SHARE)?;
         gistcheckpage(r.name(), buffer)?;
-        let page = buffer_get_page::call(mcx, buffer)?;
+        // Read the page header fields + downlink items in place (no 8 KiB
+        // copy); all Copy except `items` which is built from copied-out values.
+        #[allow(clippy::type_complexity)]
+        let (page_is_leaf, page_is_deleted, page_follow_right, rightlink, page_nsn, items): (
+            bool,
+            bool,
+            bool,
+            BlockNumber,
+            ::gist::GistNSN,
+            Vec<(OffsetNumber, BlockNumber)>,
+        ) = buffer_with_page(buffer, |page| {
+            let is_leaf = GistPageIsLeaf(page)?;
+            let is_deleted = GistPageIsDeleted(page)?;
+            let follow_right = GistFollowRight(page)?;
+            let rightlink = gist_page_rightlink(page)?;
+            let nsn = gist_page_get_nsn(page)?;
+            let pref = PageRef::new(page)?;
+            let maxoff = PageGetMaxOffsetNumber(&pref);
+            let mut items = Vec::new();
+            let mut i = FIRST_OFFSET_NUMBER;
+            while i <= maxoff {
+                let id = PageGetItemId(&pref, i)?;
+                let it = PageGetItem(&pref, &id)?;
+                items.push((i, itup_block_number(it)));
+                i += 1;
+            }
+            Ok((is_leaf, is_deleted, follow_right, rightlink, nsn, items))
+        })?;
 
-        if GistPageIsLeaf(&page)? {
+        if page_is_leaf {
             // Top-down scan: the rest of the queue must be leaves too.
             unlock_release_buffer::call(buffer);
             break;
         }
-        debug_assert!(!GistPageIsDeleted(&page)?);
+        debug_assert!(!page_is_deleted);
 
         nodes[top].lsn = buffer_get_lsn_atomic::call(buffer)?;
 
-        if GistFollowRight(&page)? {
+        if page_follow_right {
             unlock_release_buffer::call(buffer);
             return Err(ereport(ERROR)
                 .errmsg_internal("concurrent GiST page split was incomplete")
@@ -1135,9 +1214,8 @@ fn gistFindPath<'mcx>(
 
         // Page split while we looked elsewhere: queue the right sibling first.
         let parent_lsn = nodes[top].parent.map(|p| nodes[p].lsn).unwrap_or(0);
-        let rightlink = gist_page_rightlink(&page)?;
         if nodes[top].parent.is_some()
-            && parent_lsn < gist_page_get_nsn(&page)?
+            && parent_lsn < page_nsn
             && rightlink != InvalidBlockNumber
         {
             let pidx = nodes[top].parent;
@@ -1150,21 +1228,7 @@ fn gistFindPath<'mcx>(
             fifo.push_front(nodes.len() - 1);
         }
 
-        let (maxoff, items): (OffsetNumber, Vec<(OffsetNumber, BlockNumber)>) = {
-            let pref = PageRef::new(&page)?;
-            let maxoff = PageGetMaxOffsetNumber(&pref);
-            let mut items = Vec::new();
-            let mut i = FIRST_OFFSET_NUMBER;
-            while i <= maxoff {
-                let id = PageGetItemId(&pref, i)?;
-                let it = PageGetItem(&pref, &id)?;
-                items.push((i, itup_block_number(it)));
-                i += 1;
-            }
-            (maxoff, items)
-        };
-        let _ = maxoff;
-
+        // `items` (the downlink offsets/blocks) was collected in place above.
         let mut found: Option<OffsetNumber> = None;
         for (i, blkno) in items {
             if blkno == child {
@@ -1228,10 +1292,13 @@ fn gistformdownlink<'mcx>(
     stack_idx: usize,
     is_build: bool,
 ) -> PgResult<PgVec<'mcx, u8>> {
-    let page = buffer_get_page::call(mcx, buf)?;
+    // Snapshot the page once: the loop calls `gistgetadjusted`, which dispatches
+    // the GiST union/equal support functions through the (RefCell-guarded) fmgr
+    // machinery, so it must not run while an in-place page read-borrow of this
+    // buffer is held. Each item is copied into mcx (owned `downlink`).
     let mut downlink: Option<PgVec<'mcx, u8>> = None;
-
     {
+        let page = buffer_get_page::call(mcx, buf)?;
         let pref = PageRef::new(&page)?;
         let maxoff = PageGetMaxOffsetNumber(&pref);
         let mut offset = FIRST_OFFSET_NUMBER;
@@ -1264,13 +1331,12 @@ fn gistformdownlink<'mcx>(
             gistFindCorrectParent(mcx, rel, state, stack_idx, is_build)?;
             let parent = state.stack[stack_idx].parent.expect("formdownlink: no parent");
             let off = state.stack[stack_idx].downlinkoffnum;
-            let pp = buffer_get_page::call(mcx, state.stack[parent].buffer)?;
-            let dl = {
-                let pref = PageRef::new(&pp)?;
+            let dl = buffer_with_page(state.stack[parent].buffer, |pp| {
+                let pref = PageRef::new(pp)?;
                 let id = PageGetItemId(&pref, off)?;
                 let it = PageGetItem(&pref, &id)?;
-                ::mcx::slice_in(mcx, &it[..index_tuple_size(it)])?
-            };
+                ::mcx::slice_in(mcx, &it[..index_tuple_size(it)])
+            })?;
             lock_buffer::call(state.stack[parent].buffer, GIST_UNLOCK)?;
             dl
         }
@@ -1295,48 +1361,53 @@ fn gistFindCorrectParent<'mcx>(
     gistcheckpage(r.name(), state.stack[parent_idx].buffer)?;
     let child_blkno = state.stack[child_idx].blkno;
 
-    // Is the downlink still where it was?
-    {
-        let pp = buffer_get_page::call(mcx, state.stack[parent_idx].buffer)?;
-        let pref = PageRef::new(&pp)?;
+    // Is the downlink still where it was? Read in place (no 8 KiB copy);
+    // `still_there` is a Copy bool.
+    let dlo = state.stack[child_idx].downlinkoffnum;
+    let still_there = buffer_with_page(state.stack[parent_idx].buffer, |pp| {
+        let pref = PageRef::new(pp)?;
         let maxoff = PageGetMaxOffsetNumber(&pref);
-        let dlo = state.stack[child_idx].downlinkoffnum;
+        let mut still_there = false;
         if dlo != INVALID_OFFSET_NUMBER && dlo <= maxoff {
             let id = PageGetItemId(&pref, dlo)?;
             let it = PageGetItem(&pref, &id)?;
             if itup_block_number(it) == child_blkno {
-                return Ok(()); // still there
+                still_there = true;
             }
         }
+        Ok(still_there)
+    })?;
+    if still_there {
+        return Ok(());
     }
     let _ = is_build;
 
     // Scan to re-find the downlink, following rightlinks if the page was split.
     loop {
-        let pp = buffer_get_page::call(mcx, state.stack[parent_idx].buffer)?;
-        let found = {
-            let pref = PageRef::new(&pp)?;
-            let maxoff = PageGetMaxOffsetNumber(&pref);
-            let mut found: Option<OffsetNumber> = None;
-            let mut i = FIRST_OFFSET_NUMBER;
-            while i <= maxoff {
-                let id = PageGetItemId(&pref, i)?;
-                let it = PageGetItem(&pref, &id)?;
-                if itup_block_number(it) == child_blkno {
-                    found = Some(i);
-                    break;
+        // Read the page in place (no 8 KiB copy); `found`/`rightlink` are Copy.
+        let (found, rightlink): (Option<OffsetNumber>, BlockNumber) =
+            buffer_with_page(state.stack[parent_idx].buffer, |pp| {
+                let pref = PageRef::new(pp)?;
+                let maxoff = PageGetMaxOffsetNumber(&pref);
+                let mut found: Option<OffsetNumber> = None;
+                let mut i = FIRST_OFFSET_NUMBER;
+                while i <= maxoff {
+                    let id = PageGetItemId(&pref, i)?;
+                    let it = PageGetItem(&pref, &id)?;
+                    if itup_block_number(it) == child_blkno {
+                        found = Some(i);
+                        break;
+                    }
+                    i += 1;
                 }
-                i += 1;
-            }
-            found
-        };
+                Ok((found, gist_page_rightlink(pp)?))
+            })?;
         if let Some(i) = found {
             state.stack[child_idx].downlinkoffnum = i;
             return Ok(());
         }
 
         // Move to the right sibling.
-        let rightlink = gist_page_rightlink(&pp)?;
         state.stack[parent_idx].blkno = rightlink;
         state.stack[parent_idx].downlinkoffnum = INVALID_OFFSET_NUMBER;
         unlock_release_buffer::call(state.stack[parent_idx].buffer);
@@ -1404,12 +1475,15 @@ fn gistfixsplit<'mcx>(
     let mut splitinfo: Vec<GISTPageSplitInfo<'mcx>> = Vec::new();
 
     loop {
-        let page = buffer_get_page::call(mcx, buf)?;
         let downlink = gistformdownlink(mcx, r, buf, giststate, state, stack_idx, state.is_build)?;
         splitinfo.push(GISTPageSplitInfo { buf, downlink });
 
-        if GistFollowRight(&page)? {
-            let rl = gist_page_rightlink(&page)?;
+        // Read the follow-right flag + rightlink in place (no 8 KiB copy); both
+        // Copy. `buf` is exclusively locked, so the bytes are stable.
+        let (follow_right, rl): (bool, BlockNumber) = buffer_with_page(buf, |page| {
+            Ok((GistFollowRight(page)?, gist_page_rightlink(page)?))
+        })?;
+        if follow_right {
             buf = read_buffer::call(r, rl)?;
             lock_buffer::call(buf, GIST_EXCLUSIVE)?;
         } else {

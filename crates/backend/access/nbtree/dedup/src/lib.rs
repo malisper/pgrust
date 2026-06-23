@@ -863,14 +863,21 @@ pub fn _bt_dedup_pass<'mcx>(
     newitemsz: Size,
     bottomupdedup: bool,
 ) -> PgResult<()> {
-    let page_bytes = bufmgr::buffer_get_page::call(mcx, buf)?;
-    let page = PageRef::new(&page_bytes)?;
-    let opaque = BTPageGetOpaque(&page)?;
-    let mut singlevalstrat = false;
     let nkeyatts = rel.indnkeyatts();
 
     /* Passed-in newitemsz is MAXALIGNED but does not include line pointer */
     let newitemsz = newitemsz + SIZEOF_ITEM_ID;
+
+    // Read the page in place (no copy) and build the deduplicated temp page +
+    // dedup state. Both escape as owned values (`newbytes` is its own buffer,
+    // `state` borrows nothing from the page), so the borrow stays scoped here.
+    // `None` means no items were deduplicated (newpage == original page), so the
+    // caller returns early without touching the buffer.
+    let result: Option<(BTDedupState<'mcx>, PgVec<'mcx, u8>)> =
+        bufmgr::buffer_with_page(buf, |page_bytes| {
+    let page = PageRef::new(page_bytes)?;
+    let opaque = BTPageGetOpaque(&page)?;
+    let mut singlevalstrat = false;
 
     /*
      * Initialize deduplication state.
@@ -971,7 +978,7 @@ pub fn _bt_dedup_pass<'mcx>(
      */
     if state.nintervals == 0 {
         // cannot leak memory here (newtemp / state dropped at scope exit)
-        return Ok(());
+        return Ok(None);
     }
 
     /*
@@ -983,16 +990,24 @@ pub fn _bt_dedup_pass<'mcx>(
         clear_has_garbage(newtemp.as_mut_bytes());
     }
 
-    // Drop the read snapshot of the page before re-entering bufmgr for the
-    // in-place write-back below.
-    let needs_wal = relcache::relation_needs_wal::call(rel);
+    // Copy the finished temp page out as owned bytes (the deduplicated image to
+    // write back). This cheap, faithful materialization replaces the 8 KiB
+    // *read* copy that used to precede all of the above.
     let newbytes: PgVec<'mcx, u8> = {
         let mut v = vec_with_capacity_in(mcx, newtemp.as_bytes().len())?;
         v.extend_from_slice(newtemp.as_bytes());
         v
     };
-    // The read borrow of `page` / `page_bytes` ends at its last use above; the
+    Ok(Some((state, newbytes)))
+    })?;
+
+    // The read borrow of the page ended at the seam-closure boundary above; the
     // bufmgr write-back below re-enters the buffer fresh.
+    let (state, newbytes) = match result {
+        Some(pair) => pair,
+        None => return Ok(()),
+    };
+    let needs_wal = relcache::relation_needs_wal::call(rel);
 
     miscinit::start_crit_section::call();
 
@@ -1056,16 +1071,10 @@ pub fn _bt_bottomupdel_pass<'mcx>(
     heap_rel: &Relation<'mcx>,
     newitemsz: Size,
 ) -> PgResult<bool> {
-    let page_bytes = bufmgr::buffer_get_page::call(mcx, buf)?;
-    let page = PageRef::new(&page_bytes)?;
-    let opaque = BTPageGetOpaque(&page)?;
     let nkeyatts = rel.indnkeyatts();
 
     /* Passed-in newitemsz is MAXALIGNED but does not include line pointer */
     let newitemsz = newitemsz + SIZEOF_ITEM_ID;
-
-    /* Initialize deduplication state (we're not really deduplicating) */
-    let mut state = new_dedup_state(mcx, BLCKSZ)?;
 
     /*
      * Initialize tableam state that describes bottom-up index deletion.
@@ -1084,41 +1093,49 @@ pub fn _bt_bottomupdel_pass<'mcx>(
         status,
     };
 
-    let minoff = P_FIRSTDATAKEY(&opaque);
-    let maxoff = PageGetMaxOffsetNumber(&page);
-    let mut offnum = minoff;
-    while offnum <= maxoff {
-        let itemid = PageGetItemId(&page, offnum)?;
-        let itup = PageGetItem(&page, &itemid)?;
-        debug_assert!(!ItemIdIsDead(&itemid));
+    // Read the leaf page in place (no copy) and collect the deletable TIDs into
+    // `delstate`; everything that escapes the borrow (`delstate`, `neverdedup`)
+    // is owned, not a borrow of the page.
+    let neverdedup = bufmgr::buffer_with_page(buf, |page_bytes| {
+        let page = PageRef::new(page_bytes)?;
+        let opaque = BTPageGetOpaque(&page)?;
 
-        if offnum == minoff {
-            /* itup starts first pending interval */
-            _bt_dedup_start_pending(&mut state, itup, offnum)?;
-        } else if nbtcore::bt_keep_natts_fast::call(rel, &state.base, itup)? > nkeyatts
-            && _bt_dedup_save_htid(&mut state, itup)?
-        {
-            /* Tuple is equal; just added its TIDs to pending interval */
-        } else {
-            /* Finalize interval -- move its TIDs to delete state */
-            _bt_bottomupdel_finish_pending(&page, &mut state, &mut delstate)?;
-            /* itup starts new pending interval */
-            _bt_dedup_start_pending(&mut state, itup, offnum)?;
+        /* Initialize deduplication state (we're not really deduplicating) */
+        let mut state = new_dedup_state(mcx, BLCKSZ)?;
+
+        let minoff = P_FIRSTDATAKEY(&opaque);
+        let maxoff = PageGetMaxOffsetNumber(&page);
+        let mut offnum = minoff;
+        while offnum <= maxoff {
+            let itemid = PageGetItemId(&page, offnum)?;
+            let itup = PageGetItem(&page, &itemid)?;
+            debug_assert!(!ItemIdIsDead(&itemid));
+
+            if offnum == minoff {
+                /* itup starts first pending interval */
+                _bt_dedup_start_pending(&mut state, itup, offnum)?;
+            } else if nbtcore::bt_keep_natts_fast::call(rel, &state.base, itup)? > nkeyatts
+                && _bt_dedup_save_htid(&mut state, itup)?
+            {
+                /* Tuple is equal; just added its TIDs to pending interval */
+            } else {
+                /* Finalize interval -- move its TIDs to delete state */
+                _bt_bottomupdel_finish_pending(&page, &mut state, &mut delstate)?;
+                /* itup starts new pending interval */
+                _bt_dedup_start_pending(&mut state, itup, offnum)?;
+            }
+
+            offnum = OffsetNumberNext(offnum);
         }
+        /* Finalize final interval -- move its TIDs to delete state */
+        _bt_bottomupdel_finish_pending(&page, &mut state, &mut delstate)?;
 
-        offnum = OffsetNumberNext(offnum);
-    }
-    /* Finalize final interval -- move its TIDs to delete state */
-    _bt_bottomupdel_finish_pending(&page, &mut state, &mut delstate)?;
-
-    /*
-     * We should at least avoid having our caller do a useless deduplication pass
-     * after we return in the event of zero promising tuples.
-     */
-    let neverdedup = state.nintervals == 0;
-
-    // The borrow of `page` (and thus `page_bytes`) ends at its last use above;
-    // the seam call below re-reads the buffer fresh.
+        /*
+         * We should at least avoid having our caller do a useless deduplication
+         * pass after we return in the event of zero promising tuples.
+         */
+        Ok(state.nintervals == 0)
+    })?;
 
     /* Ask tableam which TIDs are deletable, then physically delete them */
     nbtcore::bt_delitems_delete_check::call(mcx, rel, buf, heap_rel, delstate)?;
@@ -1129,9 +1146,10 @@ pub fn _bt_bottomupdel_pass<'mcx>(
     }
 
     /* Don't dedup when we won't end up back here any time soon anyway */
-    let page_bytes = bufmgr::buffer_get_page::call(mcx, buf)?;
-    let page = PageRef::new(&page_bytes)?;
-    Ok(PageGetExactFreeSpace(&page) >= (BLCKSZ / 24).max(newitemsz))
+    bufmgr::buffer_with_page(buf, |page_bytes| {
+        let page = PageRef::new(page_bytes)?;
+        Ok(PageGetExactFreeSpace(&page) >= (BLCKSZ / 24).max(newitemsz))
+    })
 }
 
 // ---------------------------------------------------------------------------

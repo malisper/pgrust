@@ -255,8 +255,9 @@ fn doPickSplit<'mcx>(
     let mut init_inner = false;
     let inner_tuple_size = inner_tuple.len();
     let parent_free_ok = if buffer_is_valid(parent.buffer) && !SpGistBlockIsRoot(parent.blkno) {
-        let ppage = bufmgr::buffer_get_page::call(mcx, parent.buffer)?;
-        SpGistPageGetFreeSpace(&ppage, 1)? >= inner_tuple_size + SIZEOF_ITEM_ID_DATA
+        bufmgr::buffer_with_page(parent.buffer, |ppage| {
+            Ok(SpGistPageGetFreeSpace(ppage, 1)? >= inner_tuple_size + SIZEOF_ITEM_ID_DATA)
+        })?
     } else {
         false
     };
@@ -387,14 +388,11 @@ fn doPickSplit<'mcx>(
     // page is reinitialized below).
     let mut redirect_tuple_pos = InvalidOffsetNumber;
     if !is_root {
-        let n_placeholder = {
-            let pg = bufmgr::buffer_get_page::call(mcx, current.buffer)?;
-            opaque_n_placeholder(&pg)
-        };
-        let cur_max = {
-            let pg = bufmgr::buffer_get_page::call(mcx, current.buffer)?;
-            PageGetMaxOffsetNumber(&PageRef::new(&pg)?)
-        };
+        let n_placeholder =
+            bufmgr::buffer_with_page(current.buffer, |pg| Ok(opaque_n_placeholder(pg)))?;
+        let cur_max = bufmgr::buffer_with_page(current.buffer, |pg| {
+            Ok(PageGetMaxOffsetNumber(&PageRef::new(pg)?))
+        })?;
         if state.isBuild && (n_to_delete + n_placeholder as usize) == cur_max as usize {
             // Just reinitialize the page.
             SpGistInitBuffer(
@@ -731,10 +729,10 @@ fn spgAddNodeAction<'mcx>(
     node_n: i32,
     node_label: &Datum<'_>,
 ) -> PgResult<()> {
-    {
-        let pg = bufmgr::buffer_get_page::call(mcx, current.buffer)?;
-        debug_assert!(!SpGistPageStoresNulls(&pg));
-    }
+    bufmgr::buffer_with_page(current.buffer, |pg| {
+        debug_assert!(!SpGistPageStoresNulls(pg));
+        Ok(())
+    })?;
     let old_size = it_size(inner_tuple);
     let new_inner_tuple = addNode(mcx, state, inner_tuple, node_label, node_n)?;
     let new_size = new_inner_tuple.len();
@@ -749,10 +747,9 @@ fn spgAddNodeAction<'mcx>(
     };
     let state_src = store_state(state);
 
-    let free_space = {
-        let pg = bufmgr::buffer_get_page::call(mcx, current.buffer)?;
-        PageGetExactFreeSpace(&PageRef::new(&pg)?)
-    };
+    let free_space = bufmgr::buffer_with_page(current.buffer, |pg| {
+        Ok(PageGetExactFreeSpace(&PageRef::new(pg)?))
+    })?;
 
     if free_space >= new_size - old_size {
         // Replace in place.
@@ -918,10 +915,10 @@ fn spgSplitNodeAction<'mcx>(
     current: &mut SPPageDesc,
     out: &spgChooseOut<'mcx>,
 ) -> PgResult<()> {
-    {
-        let pg = bufmgr::buffer_get_page::call(mcx, current.buffer)?;
-        debug_assert!(!SpGistPageStoresNulls(&pg));
-    }
+    bufmgr::buffer_with_page(current.buffer, |pg| {
+        debug_assert!(!SpGistPageStoresNulls(pg));
+        Ok(())
+    })?;
 
     let split = match &out.result {
         spgChooseOutResult::SplitTuple(s) => s,
@@ -991,9 +988,10 @@ fn spgSplitNodeAction<'mcx>(
         if SpGistBlockIsRoot(current.blkno) {
             true
         } else {
-            let pg = bufmgr::buffer_get_page::call(mcx, current.buffer)?;
-            SpGistPageGetFreeSpace(&pg, 1)? + it_size(inner_tuple)
-                < prefix_tuple.len() + postfix_tuple.len() + SIZEOF_ITEM_ID_DATA
+            bufmgr::buffer_with_page(current.buffer, |pg| {
+                Ok(SpGistPageGetFreeSpace(pg, 1)? + it_size(inner_tuple)
+                    < prefix_tuple.len() + postfix_tuple.len() + SIZEOF_ITEM_ID_DATA)
+            })?
         }
     };
     let mut new_page = false;
@@ -1258,10 +1256,9 @@ pub fn spgdoinsert<'mcx>(
         }
 
         // Check the page's nulls flag matches.
-        let (page_is_leaf, page_stores_nulls) = {
-            let pg = bufmgr::buffer_get_page::call(mcx, current.buffer)?;
-            (SpGistPageIsLeaf(&pg), SpGistPageStoresNulls(&pg))
-        };
+        let (page_is_leaf, page_stores_nulls) = bufmgr::buffer_with_page(current.buffer, |pg| {
+            Ok((SpGistPageIsLeaf(pg), SpGistPageStoresNulls(pg)))
+        })?;
         if isnull != page_stores_nulls {
             return Err(elog_error(format!(
                 "SPGiST index page {} has wrong nulls flag",
@@ -1275,10 +1272,8 @@ pub fn spgdoinsert<'mcx>(
                 spgFormLeafTuple(mcx, state, heap_ptr, &leaf_datums, isnulls)?;
             let lt_sz = leaf_tuple.len();
 
-            let free = {
-                let pg = bufmgr::buffer_get_page::call(mcx, current.buffer)?;
-                SpGistPageGetFreeSpace(&pg, 1)?
-            };
+            let free =
+                bufmgr::buffer_with_page(current.buffer, |pg| SpGistPageGetFreeSpace(pg, 1))?;
             if lt_sz + SIZEOF_ITEM_ID_DATA <= free {
                 addLeafTuple(
                     mcx, index, state, &mut leaf_tuple, &mut current, &parent, isnull, is_new,
@@ -1287,10 +1282,9 @@ pub fn spgdoinsert<'mcx>(
             }
 
             // Doesn't fit: try moveLeafs, else doPickSplit.
-            let (size_to_split, n_to_split) = {
-                let pg = bufmgr::buffer_get_page::call(mcx, current.buffer)?;
-                checkSplitConditions(state, &pg, &current)?
-            };
+            let (size_to_split, n_to_split) = bufmgr::buffer_with_page(current.buffer, |pg| {
+                checkSplitConditions(state, pg, &current)
+            })?;
             if size_to_split < SPGIST_PAGE_CAPACITY / 2
                 && n_to_split < 64
                 && lt_sz + SIZEOF_ITEM_ID_DATA + size_to_split <= SPGIST_PAGE_CAPACITY
@@ -1315,10 +1309,12 @@ pub fn spgdoinsert<'mcx>(
             }
             // doPickSplit returned false: current is now an inner tuple; fall
             // through to process it.
-            debug_assert!({
-                let pg = bufmgr::buffer_get_page::call(mcx, current.buffer)?;
-                !SpGistPageIsLeaf(&pg)
-            });
+            #[cfg(debug_assertions)]
+            {
+                let is_leaf =
+                    bufmgr::buffer_with_page(current.buffer, |pg| Ok(SpGistPageIsLeaf(pg)))?;
+                debug_assert!(!is_leaf);
+            }
         }
 
         // Inner page (or doPickSplit produced an inner tuple): process it.
@@ -1328,13 +1324,12 @@ pub fn spgdoinsert<'mcx>(
                 break;
             }
 
-            let inner_tuple: Vec<u8> = {
-                let pg = bufmgr::buffer_get_page::call(mcx, current.buffer)?;
-                let pr = PageRef::new(&pg)?;
+            let inner_tuple: Vec<u8> = bufmgr::buffer_with_page(current.buffer, |pg| {
+                let pr = PageRef::new(pg)?;
                 let iid = PageGetItemId(&pr, current.offnum)?;
                 let it = PageGetItem(&pr, &iid)?;
-                it[..it_size(it)].to_vec()
-            };
+                Ok(it[..it_size(it)].to_vec())
+            })?;
 
             let all_the_same = it_all_the_same(&inner_tuple);
             let n_nodes = it_n_nodes(&inner_tuple) as i32;

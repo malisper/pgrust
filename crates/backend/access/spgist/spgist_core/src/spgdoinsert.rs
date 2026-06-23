@@ -606,7 +606,7 @@ fn checkSplitConditions(
 /// fresh item (when not part of a chain / on a root page) or chained onto the
 /// existing head tuple.
 fn addLeafTuple<'mcx>(
-    mcx: Mcx<'mcx>,
+    _mcx: Mcx<'mcx>,
     index: &Relation<'mcx>,
     state: &SpGistState<'mcx>,
     leaf_tuple: &mut PgVec<'mcx, u8>,
@@ -649,21 +649,19 @@ fn addLeafTuple<'mcx>(
     } else {
         // Tuple must be inserted into existing chain.
         let head_off = current.offnum;
-        let head_state = {
-            let pg = bufmgr::buffer_get_page::call(mcx, current.buffer)?;
-            let pr = PageRef::new(&pg)?;
+        let head_state = bufmgr::buffer_with_page(current.buffer, |pg| {
+            let pr = PageRef::new(pg)?;
             let iid = PageGetItemId(&pr, head_off)?;
             let head = PageGetItem(&pr, &iid)?;
-            lt_tupstate(head)
-        };
+            Ok(lt_tupstate(head))
+        })?;
 
         if head_state == SPGIST_LIVE {
-            let head_next = {
-                let pg = bufmgr::buffer_get_page::call(mcx, current.buffer)?;
-                let pr = PageRef::new(&pg)?;
+            let head_next = bufmgr::buffer_with_page(current.buffer, |pg| {
+                let pr = PageRef::new(pg)?;
                 let iid = PageGetItemId(&pr, head_off)?;
-                lt_get_next_offset(PageGetItem(&pr, &iid)?)
-            };
+                Ok(lt_get_next_offset(PageGetItem(&pr, &iid)?))
+            })?;
             lt_set_next_offset(leaf_tuple, head_next);
             let mut off = InvalidOffsetNumber;
             bufmgr::with_buffer_page::call(current.buffer, &mut |pg: &mut [u8]| {

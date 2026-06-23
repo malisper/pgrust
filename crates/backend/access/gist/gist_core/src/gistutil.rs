@@ -21,8 +21,8 @@ use ::dispatch_seams::{
 };
 use ::indexam_seams::{index_getprocid, index_getprocinfo};
 use ::bufmgr_seams::{
-    buffer_get_page, conditional_lock_buffer, extend_buffered_rel, lock_buffer, read_buffer,
-    release_buffer,
+    buffer_get_page, buffer_with_page, conditional_lock_buffer, extend_buffered_rel, lock_buffer,
+    read_buffer, release_buffer,
 };
 use ::page::{
     PageGetFreeSpace, PageGetItem, PageGetItemId, PageGetMaxOffsetNumber, PageIsNew, PageRef,
@@ -965,17 +965,26 @@ pub fn gistNewBuffer<'mcx>(
 
         // Guard against someone else having recycled the page; it may be locked.
         if conditional_lock_buffer::call(buffer)? {
-            let recyclable = {
+            // `is_new` short-circuits to "OK to use"; otherwise compute
+            // recyclability. `gistcheckpage` re-enters the buffer manager on the
+            // SAME buffer (`with_buffer_page`), so the page must be read via an
+            // owned snapshot rather than a held in-place borrow. Both results are
+            // Copy values.
+            let (is_new, recyclable) = {
                 let page = buffer_get_page::call(mcx, buffer)?;
                 let pref = PageRef::new(&page)?;
                 if PageIsNew(&pref) {
-                    // Never initialized: OK to use.
-                    return Ok(buffer);
+                    (true, false)
+                } else {
+                    // Check the page looks sane before reading its special area.
+                    gistcheckpage(r.name(), buffer)?;
+                    (false, gist_page_recyclable(&page)?)
                 }
-                // Check the page looks sane before reading its special area.
-                gistcheckpage(r.name(), buffer)?;
-                gist_page_recyclable(&page)?
             };
+            if is_new {
+                // Never initialized: OK to use.
+                return Ok(buffer);
+            }
 
             if recyclable {
                 // Recycle a deleted, sufficiently-old page. If WAL is generated
@@ -983,8 +992,8 @@ pub fn gistNewBuffer<'mcx>(
                 if transam_xlog_seams::xlog_standby_info_active::call()
                     && relcache_seams::relation_needs_wal::call(r)
                 {
-                    let page = buffer_get_page::call(mcx, buffer)?;
-                    let delete_xid = GistPageGetDeleteXid(&page)?;
+                    let delete_xid =
+                        buffer_with_page(buffer, |page| GistPageGetDeleteXid(page))?;
                     crate::gistxlog::gist_xlog_page_reuse(
                         r,
                         heaprel,

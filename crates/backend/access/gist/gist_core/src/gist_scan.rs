@@ -36,8 +36,8 @@ use ::am_seams::{
 use ::dispatch_seams::{gist_consistent, gist_distance};
 use ::indexam_seams::index_getprocid;
 use ::bufmgr_seams::{
-    buffer_get_block_number, buffer_get_lsn_atomic, buffer_get_page, mark_buffer_dirty_hint,
-    read_buffer, unlock_release_buffer, with_buffer_page,
+    buffer_get_block_number, buffer_get_lsn_atomic, buffer_get_page, buffer_with_page,
+    mark_buffer_dirty_hint, read_buffer, unlock_release_buffer, with_buffer_page,
 };
 use ::predicate_seams::predicate_lock_page;
 use ::page::{
@@ -449,12 +449,23 @@ fn gistScanPage<'mcx>(
     gistcheckpage(index.name(), buffer)?;
 
     // page = BufferGetPage(buffer); opaque = GistPageGetOpaque(page);
-    let page = buffer_get_page::call(mcx, buffer)?;
-    let page_is_leaf = GistPageIsLeaf(&page)?;
-    let page_is_deleted = GistPageIsDeleted(&page)?;
-    let follow_right = crate::gist_page::GistFollowRight(&page)?;
-    let page_nsn = gist_page_get_nsn(&page)?;
-    let rightlink = crate::gist_page::gist_page_rightlink(&page)?;
+    // Read the page header fields in place (no 8 KiB copy); the per-tuple loop
+    // below re-borrows the page through a second (owned) read.
+    let (page_is_leaf, page_is_deleted, follow_right, page_nsn, rightlink): (
+        bool,
+        bool,
+        bool,
+        ::gist::GistNSN,
+        BlockNumber,
+    ) = buffer_with_page(buffer, |page| {
+        Ok((
+            GistPageIsLeaf(page)?,
+            GistPageIsDeleted(page)?,
+            crate::gist_page::GistFollowRight(page)?,
+            gist_page_get_nsn(page)?,
+            crate::gist_page::gist_page_rightlink(page)?,
+        ))
+    })?;
 
     // Check if we need to follow the rightlink (concurrent split / crash).
     if let Some(parentlsn) = page_item_parentlsn {
@@ -505,7 +516,14 @@ fn gistScanPage<'mcx>(
     let keys = scan_keys(scan);
     let order_bys = scan_order_bys(scan);
 
-    // check all tuples on page
+    // check all tuples on page. This loop re-enters the buffer manager on the
+    // SAME buffer (gistindex_keytest's consistent/distance support functions and
+    // the per-child `buffer_get_lsn_atomic::call(buffer)` below), so it must NOT
+    // run while an in-place page borrow of this buffer is held — a scoped read
+    // borrow across those calls would be a same-buffer re-entrancy. Take an owned
+    // snapshot of the page once per page-visit (the report's P1 fallback) and
+    // walk it; the header-fields read above is already borrow-migrated.
+    let page = buffer_get_page::call(mcx, buffer)?;
     let pref = PageRef::new(&page)?;
     let maxoff = PageGetMaxOffsetNumber(&pref);
     let mut i = FIRST_OFFSET_NUMBER;

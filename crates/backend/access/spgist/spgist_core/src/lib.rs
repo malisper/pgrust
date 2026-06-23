@@ -311,7 +311,7 @@ fn fillTypeDesc(type_oid: Oid) -> PgResult<SpGistTypeDesc> {
 /// receive a snapshot — the lastUsedPages updates the page-management routines
 /// perform are written back through `set_rd_amcache_spgist` (mirroring the C
 /// in-place mutation of the cached struct).
-pub fn spgGetCache<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'mcx>) -> PgResult<SpGistCache> {
+pub fn spgGetCache<'mcx>(_mcx: Mcx<'mcx>, index: &Relation<'mcx>) -> PgResult<SpGistCache> {
     if let Some(cache) = relcache_seams::rd_amcache_spgist::call(index.rd_id)? {
         // assume it's up to date
         return Ok(cache);
@@ -387,8 +387,8 @@ pub fn spgGetCache<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'mcx>) -> PgResult<SpG
             bufmgr_seams::read_buffer::call(index, SPGIST_METAPAGE_BLKNO)?;
         bufmgr_seams::lock_buffer::call(metabuffer, BUFFER_LOCK_SHARE)?;
 
-        let metapage = bufmgr_seams::buffer_get_page::call(mcx, metabuffer)?;
-        let metadata = read_meta(&metapage);
+        let metadata =
+            bufmgr_seams::buffer_with_page(metabuffer, |metapage| Ok(read_meta(metapage)))?;
 
         if metadata.magicNumber != SPGIST_MAGIC_NUMBER {
             bufmgr_seams::unlock_release_buffer::call(metabuffer);
@@ -540,7 +540,7 @@ pub fn initSpGistState<'mcx>(
 /// `SpGistNewBuffer(index)` (spgutils.c:393) — allocate a new page (by
 /// recycling, or by extending the index file). Returns a pinned,
 /// exclusive-locked buffer; caller initializes the page via `SpGistInitBuffer`.
-pub fn SpGistNewBuffer<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'mcx>) -> PgResult<Buffer> {
+pub fn SpGistNewBuffer<'mcx>(_mcx: Mcx<'mcx>, index: &Relation<'mcx>) -> PgResult<Buffer> {
     // First, try to get a page from FSM.
     loop {
         let blkno = freespace_seams::get_free_index_page::call(index)?;
@@ -560,15 +560,13 @@ pub fn SpGistNewBuffer<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'mcx>) -> PgResult
         // We have to guard against the possibility that someone else already
         // recycled this page; the buffer may be locked if so.
         if bufmgr_seams::conditional_lock_buffer::call(buffer)? {
-            let page = bufmgr_seams::buffer_get_page::call(mcx, buffer)?;
-
-            let page_ref = PageRef::new(&page)?;
-            if PageIsNew(&page_ref) {
-                return Ok(buffer); // OK to use, if never initialized
-            }
-
-            if SpGistPageIsDeleted(&page) || PageIsEmpty(&page_ref) {
-                return Ok(buffer); // OK to use
+            let ok_to_use = bufmgr_seams::buffer_with_page(buffer, |page| {
+                let page_ref = PageRef::new(page)?;
+                // OK to use, if never initialized, deleted, or empty.
+                Ok(PageIsNew(&page_ref) || SpGistPageIsDeleted(page) || PageIsEmpty(&page_ref))
+            })?;
+            if ok_to_use {
+                return Ok(buffer);
             }
 
             bufmgr_seams::lock_buffer::call(buffer, BUFFER_LOCK_UNLOCK)?;
@@ -662,10 +660,9 @@ fn allocNewBuffer<'mcx>(
         if pageflags & SPGIST_NULLS != 0 {
             blk_flags |= GBUF_NULLS;
         }
-        let free_space = {
-            let page = bufmgr_seams::buffer_get_page::call(mcx, buffer)?;
-            PageGetExactFreeSpace(&PageRef::new(&page)?)
-        };
+        let free_space = bufmgr_seams::buffer_with_page(buffer, |page| {
+            Ok(PageGetExactFreeSpace(&PageRef::new(page)?))
+        })?;
         cache.lastUsedPages.cachedPage[blk_flags as usize].blkno = blkno;
         cache.lastUsedPages.cachedPage[blk_flags as usize].freeSpace = free_space as i32;
         bufmgr_seams::unlock_release_buffer::call(buffer);
@@ -811,19 +808,20 @@ pub fn SpGistSetLastUsedPage<'mcx>(
         return Ok(());
     }
 
-    let page = bufmgr_seams::buffer_get_page::call(mcx, buffer)?;
-
-    let mut flags = if SpGistPageIsLeaf(&page) {
-        GBUF_LEAF
-    } else {
-        GBUF_INNER_PARITY(blkno)
-    };
-    if SpGistPageStoresNulls(&page) {
-        flags |= GBUF_NULLS;
-    }
+    let (flags, free_space) = bufmgr_seams::buffer_with_page(buffer, |page| {
+        let mut flags = if SpGistPageIsLeaf(page) {
+            GBUF_LEAF
+        } else {
+            GBUF_INNER_PARITY(blkno)
+        };
+        if SpGistPageStoresNulls(page) {
+            flags |= GBUF_NULLS;
+        }
+        let free_space = PageGetExactFreeSpace(&PageRef::new(page)?) as i32;
+        Ok((flags, free_space))
+    })?;
 
     let lup_idx = get_lup_index(flags);
-    let free_space = PageGetExactFreeSpace(&PageRef::new(&page)?) as i32;
 
     let lup = &mut cache.lastUsedPages.cachedPage[lup_idx];
     if lup.blkno == InvalidBlockNumber || lup.blkno == blkno || lup.freeSpace < free_space {

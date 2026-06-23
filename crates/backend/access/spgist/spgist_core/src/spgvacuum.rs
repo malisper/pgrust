@@ -227,16 +227,14 @@ fn item_pointer_get_offset_number(ip: &ItemPointerData) -> OffsetNumber {
 /// moves tuples referenced by outside links (chain heads). Concurrently-created
 /// REDIRECTs add their targets to the pending list.
 fn vacuum_leaf_page<'mcx>(
-    mcx: Mcx<'mcx>,
+    _mcx: Mcx<'mcx>,
     bds: &mut SpgBulkDeleteState<'_, 'mcx>,
     index: &Relation<'mcx>,
     buffer: Buffer,
     for_pending: bool,
 ) -> PgResult<()> {
-    let max = {
-        let page = bufmgr::buffer_get_page::call(mcx, buffer)?;
-        PageGetMaxOffsetNumber(&PageRef::new(&page)?)
-    };
+    let max =
+        bufmgr::buffer_with_page(buffer, |page| Ok(PageGetMaxOffsetNumber(&PageRef::new(page)?)))?;
 
     // predecessor[] and deletable[] are indexed by 1-based offset (index 0
     // unused); the C arrays are MaxIndexTuplesPerPage+1 long. `max` offsets fit
@@ -250,11 +248,10 @@ fn vacuum_leaf_page<'mcx>(
 
     // Scan page, identify tuples to delete, accumulate stats. Add concurrent
     // REDIRECT targets to the pending list as we go.
-    {
-        let page = bufmgr::buffer_get_page::call(mcx, buffer)?;
+    bufmgr::buffer_with_page(buffer, |page| {
         for i in FirstOffsetNumber..=max {
             let it_off = {
-                let pr = PageRef::new(&page)?;
+                let pr = PageRef::new(page)?;
                 let iid = PageGetItemId(&pr, i)?;
                 iid.lp_off() as usize
             };
@@ -302,7 +299,8 @@ fn vacuum_leaf_page<'mcx>(
                 debug_assert_eq!(lt_get_next_offset(lt), InvalidOffsetNumber);
             }
         }
-    }
+        Ok(())
+    })?;
 
     if n_deletable == 0 {
         return Ok(()); // nothing more to do
@@ -318,11 +316,10 @@ fn vacuum_leaf_page<'mcx>(
     let mut chain_src: Vec<OffsetNumber> = Vec::new();
     let mut chain_dest: Vec<OffsetNumber> = Vec::new();
 
-    {
-        let page = bufmgr::buffer_get_page::call(mcx, buffer)?;
+    bufmgr::buffer_with_page(buffer, |page| {
         for i in FirstOffsetNumber..=max {
             let head_off = {
-                let pr = PageRef::new(&page)?;
+                let pr = PageRef::new(page)?;
                 PageGetItemId(&pr, i)?.lp_off() as usize
             };
             let head = &page[head_off..];
@@ -393,7 +390,8 @@ fn vacuum_leaf_page<'mcx>(
                 chain_dest.push(InvalidOffsetNumber);
             }
         }
-    }
+        Ok(())
+    })?;
 
     let n_dead = to_dead.len();
     let n_placeholder = to_placeholder.len();
@@ -524,23 +522,20 @@ fn item_id_byte_offset(off: OffsetNumber) -> usize {
 /// `vacuumLeafRoot(bds, index, buffer)` (spgvacuum.c:408) — vacuum a root page
 /// when it is also a leaf: just delete dead leaf tuples, no fancy business.
 fn vacuum_leaf_root<'mcx>(
-    mcx: Mcx<'mcx>,
+    _mcx: Mcx<'mcx>,
     bds: &mut SpgBulkDeleteState<'_, 'mcx>,
     index: &Relation<'mcx>,
     buffer: Buffer,
 ) -> PgResult<()> {
-    let max = {
-        let page = bufmgr::buffer_get_page::call(mcx, buffer)?;
-        PageGetMaxOffsetNumber(&PageRef::new(&page)?)
-    };
+    let max =
+        bufmgr::buffer_with_page(buffer, |page| Ok(PageGetMaxOffsetNumber(&PageRef::new(page)?)))?;
 
     let mut to_delete: Vec<OffsetNumber> = Vec::new();
 
-    {
-        let page = bufmgr::buffer_get_page::call(mcx, buffer)?;
+    bufmgr::buffer_with_page(buffer, |page| {
         for i in FirstOffsetNumber..=max {
             let it_off = {
-                let pr = PageRef::new(&page)?;
+                let pr = PageRef::new(page)?;
                 PageGetItemId(&pr, i)?.lp_off() as usize
             };
             let lt = &page[it_off..];
@@ -560,7 +555,8 @@ fn vacuum_leaf_root<'mcx>(
                 )));
             }
         }
-    }
+        Ok(())
+    })?;
 
     let n_delete = to_delete.len();
     if n_delete == 0 {
@@ -608,15 +604,13 @@ fn vacuum_leaf_root<'mcx>(
 /// remove trailing PLACEHOLDERs that won't change the offsets of non-placeholder
 /// tuples. Works on both leaf and inner pages.
 fn vacuum_redirect_and_placeholder<'mcx>(
-    mcx: Mcx<'mcx>,
+    _mcx: Mcx<'mcx>,
     index: &Relation<'mcx>,
     heaprel: &Relation<'mcx>,
     buffer: Buffer,
 ) -> PgResult<()> {
-    let max = {
-        let page = bufmgr::buffer_get_page::call(mcx, buffer)?;
-        PageGetMaxOffsetNumber(&PageRef::new(&page)?)
-    };
+    let max =
+        bufmgr::buffer_with_page(buffer, |page| Ok(PageGetMaxOffsetNumber(&PageRef::new(page)?)))?;
 
     let mut first_placeholder = InvalidOffsetNumber;
     let mut has_non_placeholder = false;
@@ -753,11 +747,10 @@ fn spgvacuumpage<'mcx>(
 
     bufmgr::lock_buffer::call(buffer, BUFFER_LOCK_EXCLUSIVE)?;
 
-    let (is_new, is_empty, is_leaf) = {
-        let page = bufmgr::buffer_get_page::call(mcx, buffer)?;
-        let pr = PageRef::new(&page)?;
-        (PageIsNew(&pr), PageIsEmpty(&pr), SpGistPageIsLeaf(&page))
-    };
+    let (is_new, is_empty, is_leaf) = bufmgr::buffer_with_page(buffer, |page| {
+        let pr = PageRef::new(page)?;
+        Ok((PageIsNew(&pr), PageIsEmpty(&pr), SpGistPageIsLeaf(page)))
+    })?;
 
     if is_new {
         // We found an all-zero page, which could happen if the database crashed
@@ -825,15 +818,14 @@ fn spgprocesspending<'mcx>(
         let buffer = read_buffer_extended(&index, blkno)?;
         bufmgr::lock_buffer::call(buffer, BUFFER_LOCK_EXCLUSIVE)?;
 
-        let (is_new, is_deleted, is_leaf) = {
-            let page = bufmgr::buffer_get_page::call(mcx, buffer)?;
-            let pr = PageRef::new(&page)?;
-            (
+        let (is_new, is_deleted, is_leaf) = bufmgr::buffer_with_page(buffer, |page| {
+            let pr = PageRef::new(page)?;
+            Ok((
                 PageIsNew(&pr),
-                SpGistPageIsDeleted(&page),
-                SpGistPageIsLeaf(&page),
-            )
-        };
+                SpGistPageIsDeleted(page),
+                SpGistPageIsLeaf(page),
+            ))
+        })?;
 
         if is_new || is_deleted {
             // Probably shouldn't happen, but ignore it
