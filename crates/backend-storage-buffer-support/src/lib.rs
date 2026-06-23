@@ -190,6 +190,12 @@ fn local_buffer_block_number(
     Ok(local_mgr_get_or_create().block_number(buffer))
 }
 
+/// `pg_atomic_read_u32(&GetLocalBufferDescriptor(-buffer - 1)->state)`
+/// (localbuf.c) — the (unlocked) state word of a local buffer.
+fn local_buffer_state(buffer: types_core::primitive::Buffer) -> u32 {
+    local_mgr_get_or_create().buffer_state(buffer)
+}
+
 /// `BufferGetTag` local arm (localbuf.c).
 fn local_buffer_get_tag(
     buffer: types_core::primitive::Buffer,
@@ -373,6 +379,7 @@ pub fn init_seams() {
         incr_local_buffer_ref_count,
     );
     backend_storage_buffer_support_seams::local_buffer_block_number::set(local_buffer_block_number);
+    backend_storage_buffer_support_seams::local_buffer_state::set(local_buffer_state);
     backend_storage_buffer_support_seams::local_buffer_get_tag::set(local_buffer_get_tag);
     backend_storage_buffer_support_seams::local_buffer_get_lsn::set(local_buffer_get_lsn);
     backend_storage_buffer_support_seams::local_buffer_with_page::set(local_buffer_with_page);

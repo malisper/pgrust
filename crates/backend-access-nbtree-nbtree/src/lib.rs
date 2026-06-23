@@ -607,6 +607,12 @@ fn btadjustmembers_am<'mcx>(
 /// before each scan callback (C: the AM reads these straight off `scan`).
 fn sync_in(scan: &mut IndexScanDescData<'_>) {
     let kill = scan.kill_prior_tuple;
+    // `scan->ignore_killed_tuples` (set by RelationGetIndexScan to
+    // `!xactStartedInRecovery`) — the nbtree-core `_bt_readpage` loop reads it
+    // off the btree opaque (`so->ignore_killed_tuples`) to decide whether to
+    // skip LP_DEAD-marked items. Mirror it every AM driver entry, exactly as C
+    // reads `scan->ignore_killed_tuples` directly.
+    let ignore_killed = scan.ignore_killed_tuples;
     let want_itup = scan.xs_want_itup;
     let heap_present = scan.heap_relation.is_some();
     let snap_valid = scan
@@ -631,6 +637,7 @@ fn sync_in(scan: &mut IndexScanDescData<'_>) {
     };
     let n = nbt(scan);
     n.kill_prior_tuple = kill;
+    n.opaque.ignore_killed_tuples = ignore_killed;
     n.xs_want_itup = want_itup;
     n.heapRelation = heap_present;
     n.xs_snapshot_is_valid = snap_valid;

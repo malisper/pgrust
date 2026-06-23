@@ -200,9 +200,12 @@ struct ReadBuffersOperation {
     blocknum: BlockNumber,
     /// `operation->flags` — the `READ_BUFFERS_*` bitmask.
     flags: u32,
-    /// `operation->buffers` — the run's 0-based buf_ids (this core has no local
-    /// buffers, so all are shared ids).
-    buffers: Vec<i32>,
+    /// `operation->buffers` — the run's `Buffer` handles (1-based positive for
+    /// shared buffers, negative `-localid-1` for local/temp buffers), exactly as
+    /// C's `ReadBuffersOperation.buffers[]` stores them. Temp relations (e.g. a
+    /// VACUUM read stream over a temporary index) pin local buffers here, so the
+    /// run must NOT be flattened to shared buf_ids.
+    buffers: Vec<Buffer>,
     /// `operation->nblocks_done` — blocks already read in by this operation.
     nblocks_done: u32,
     /// `operation->io_wref` — the in-flight AIO wait reference, or the invalid
@@ -993,9 +996,7 @@ impl BufferManager {
                     *nblocks = 1;
                     // Initialize enough of the operation for the assertions.
                     operation.buffers.clear();
-                    operation
-                        .buffers
-                        .push(self.buffer_to_buf_id_pub(buffers[0])? as i32);
+                    operation.buffers.push(buffers[0]);
                     operation.blocknum = block_num;
                     operation.nblocks_done = 1;
                     self.check_read_buffers_operation(operation, true);
@@ -1026,7 +1027,7 @@ impl BufferManager {
         // Populate the operation from the pinned run.
         operation.buffers.clear();
         for &b in buffers.iter().take(actual_nblocks as usize) {
-            operation.buffers.push(self.buffer_to_buf_id_pub(b)? as i32);
+            operation.buffers.push(b);
         }
         operation.blocknum = block_num;
         operation.flags = flags;
@@ -1050,6 +1051,19 @@ impl BufferManager {
         Ok(did_start_io)
     }
 
+    /// The (unlocked) state word of a buffer, dispatching a local (temp) buffer
+    /// (negative handle) to its backend-local descriptor and a shared buffer to
+    /// the in-core state array. The `BufferIsLocal` arm of the C `bufHdr =
+    /// BufferIsLocal(buffer) ? GetLocalBufferDescriptor(...) :
+    /// GetBufferDescriptor(...)` reads in the read path.
+    fn read_buffer_state_any(&self, buffer: Buffer) -> u32 {
+        if buffer_is_local(buffer) {
+            backend_storage_buffer_support_seams::local_buffer_state::call(buffer)
+        } else {
+            self.read_state((buffer - 1) as usize)
+        }
+    }
+
     /// `CheckReadBuffersOperation(operation, is_complete)` (bufmgr.c:1527) —
     /// sanity checks on the in-flight read (assertions only).
     fn check_read_buffers_operation(&self, operation: &ReadBuffersOperation, is_complete: bool) {
@@ -1057,15 +1071,18 @@ impl BufferManager {
         debug_assert!(!is_complete || operation.buffers.len() as u32 == operation.nblocks_done);
 
         let blocknum = operation.blocknum;
-        for (i, &buf_id) in operation.buffers.iter().enumerate() {
-            let buffer = buf_id_to_buffer(buf_id);
+        for (i, &buffer) in operation.buffers.iter().enumerate() {
             debug_assert_eq!(
                 self.BufferGetBlockNumber(buffer).unwrap_or(InvalidBlockNumber),
                 blocknum.wrapping_add(i as u32)
             );
-            debug_assert!(self.read_state(buf_id as usize) & BM_TAG_VALID != 0);
+            // The state checks read the descriptor flags; route a local (temp)
+            // buffer to its backend-local descriptor via the localbuf seam, a
+            // shared buffer to the in-core state array.
+            let state = self.read_buffer_state_any(buffer);
+            debug_assert!(state & BM_TAG_VALID != 0);
             if (i as u32) < operation.nblocks_done {
-                debug_assert!(self.read_state(buf_id as usize) & BM_VALID != 0);
+                debug_assert!(state & BM_VALID != 0);
             }
         }
     }
@@ -1228,8 +1245,7 @@ impl BufferManager {
         // consulted by the page verify at completion time; no-op at this layer.)
         let _ = operation.flags & READ_BUFFERS_ZERO_ON_ERROR;
 
-        let head = operation.buffers[nblocks_done as usize];
-        let head_buffer = buf_id_to_buffer(head);
+        let head_buffer = operation.buffers[nblocks_done as usize];
 
         // Check if we can start IO on the first to-be-read buffer.  If an I/O is
         // already in progress in another backend, we want to wait for the outcome.
@@ -1262,15 +1278,13 @@ impl BufferManager {
             let mut io_buffers_len = 1i32;
             let mut idx = nblocks_done + 1;
             while idx < total {
-                let b = buf_id_to_buffer(operation.buffers[idx as usize]);
+                let b = operation.buffers[idx as usize];
                 if !self.read_buffers_can_start_io(b, true)? {
                     break;
                 }
                 // Must be consecutive block numbers.
                 debug_assert_eq!(
-                    self.BufferGetBlockNumber(buf_id_to_buffer(
-                        operation.buffers[(idx - 1) as usize]
-                    ))?,
+                    self.BufferGetBlockNumber(operation.buffers[(idx - 1) as usize])?,
                     self.BufferGetBlockNumber(b)? - 1
                 );
                 io_buffers.push(b);

@@ -55,6 +55,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pg_atomic_read_u32(&GetLocalBufferDescriptor(-buffer - 1)->state)`
+    /// (localbuf.c) — the (unlocked) state word of a local (temp) buffer. Used by
+    /// the read-path `BM_TAG_VALID`/`BM_VALID` assertions when a temp relation's
+    /// read run pins local buffers.
+    pub fn local_buffer_state(
+        buffer: types_core::primitive::Buffer,
+    ) -> u32
+);
+
+seam_core::seam!(
     /// `BufferGetTag(buffer, ...)` local arm — the relation/fork/block this
     /// local buffer holds, returned as one owned triple.
     pub fn local_buffer_get_tag(
