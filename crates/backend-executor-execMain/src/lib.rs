@@ -2592,6 +2592,14 @@ fn EvalPlanQual<'mcx>(
         // context-local clone into the recheck-estate test slot. (C aliases the
         // same TupleTableSlot pointer; the owned model bridges the two distinct
         // estate-local slots with a heap-tuple copy.)
+        // Snapshot the input slot's tts_tid (the locked tuple's ctid). C bridges
+        // inputslot -> testslot with `ExecCopySlot`, which carries tts_tid across;
+        // the owned model bridges with a fetch-heap-tuple + force-store, whose
+        // BufferHeap branch (faithful to ExecForceStoreHeapTuple) leaves tts_tid
+        // invalid. A TidScan EPQ recheck reads `slot->tts_tid` to bsearch the
+        // ctid list, so the substitute slot must carry the locked ctid or the
+        // recheck of `WHERE ctid = '(...)'` over a moved row spuriously fails.
+        let in_tts_tid = estate.slot(inputslot).tts_tid;
         let (tuple, _should_free) = {
             let inslot = estate.slot_data_mut(inputslot);
             backend_executor_execTuples::slot_store_fetch::ExecFetchSlotHeapTuple(
@@ -2608,6 +2616,8 @@ fn EvalPlanQual<'mcx>(
         backend_executor_execTuples::slot_store_fetch::ExecForceStoreHeapTuple(
             rcx, tuple, rcslot, true,
         )?;
+        // Carry tts_tid across the bridge (the C `ExecCopySlot` net effect).
+        rcslot.base_mut().tts_tid = in_tts_tid;
     }
 
     // Mark that an EPQ tuple is available for this relation. (Others remain
