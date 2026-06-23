@@ -3710,6 +3710,7 @@ dependencies = [
  "backend-postmaster-checkpointer-seams",
  "backend-postmaster-postmaster-seams",
  "backend-postmaster-startup-seams",
+ "backend-postmaster-walsummarizer-seams",
  "backend-replication-logical-origin-seams",
  "backend-replication-logical-reorderbuffer-seams",
  "backend-replication-slot-seams",
@@ -10031,6 +10032,7 @@ dependencies = [
  "backend-replication-logical-logical-seams",
  "backend-replication-logical-logicalfuncs",
  "backend-replication-slot",
+ "backend-replication-slotfuncs",
  "backend-replication-walreceiver",
  "backend-statistics-mcv",
  "backend-storage-aio-funcs-seams",
@@ -16065,9 +16067,12 @@ dependencies = [
  "backend-tcop-postgres-seams",
  "backend-utils-cache-inval-seams",
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mmgr-mcxt-seams",
  "types-core",
+ "types-datum",
  "types-error",
+ "types-fmgr",
  "types-logical",
 ]
 

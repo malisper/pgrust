@@ -83,6 +83,7 @@ mod pg_tablespace_databases;
 mod pg_ls_dir;
 mod pg_walfile;
 mod pg_listening_channels;
+mod pg_get_replication_slots;
 mod pg_get_multixact_members;
 mod pg_get_catalog_foreign_keys;
 mod pg_partition_tree;
@@ -235,6 +236,12 @@ pub fn init_seams() {
     // `text` per LISTENed channel (its collector core is
     // `backend-commands-async::pg_listening_channels_rows`).
     pg_listening_channels::register_pg_listening_channels();
+    // `pg_get_replication_slots()` (OID 3781) — the `pg_replication_slots`
+    // view's 20-column SRF over the replication-slot array (its locked
+    // snapshot-walk + per-slot projection core is
+    // `backend-replication-slotfuncs::pg_get_replication_slots`, which drives
+    // `InitMaterializedSRF`/`materialized_srf_putvalues` itself).
+    pg_get_replication_slots::register_pg_get_replication_slots();
     // `pg_get_multixact_members(xid)` (OID 3819) — the materialize-mode SRF
     // emitting one `(xid, mode text)` per MultiXact member (its resolver core is
     // `backend-access-transam-multixact::pg_get_multixact_members`).

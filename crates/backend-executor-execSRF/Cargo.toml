@@ -127,6 +127,10 @@ backend-access-transam-multixact = { path = "../backend-access-transam-multixact
 # (pg_listening_channels_rows).
 backend-commands-async = { path = "../backend-commands-async" }
 
+# pg_get_replication_slots() (OID 3781): the pg_replication_slots view's 20-col
+# SRF body (locked slot-array snapshot walk + materialized_srf_putvalues).
+backend-replication-slotfuncs = { path = "../backend-replication-slotfuncs" }
+
 # pg_options_to_table(text[]) (OID 2289): the (option_name, option_value)
 # materialize-mode SRF body (untransformRelOptions + materialized_srf_putvalues).
 backend-foreign-foreign = { path = "../backend-foreign-foreign" }

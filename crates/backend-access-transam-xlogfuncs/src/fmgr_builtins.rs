@@ -101,6 +101,17 @@ fn ret_timestamptz_opt(fcinfo: &mut FunctionCallInfoBaseData, v: Option<Timestam
     }
 }
 
+/// `PG_GETARG_LSN(i)` → `DatumGetLSN`: a `pg_lsn`/`XLogRecPtr` 8-byte by-value
+/// word.
+#[inline]
+fn arg_lsn(fcinfo: &FunctionCallInfoBaseData, i: usize) -> XLogRecPtr {
+    fcinfo
+        .arg(i)
+        .expect("xlogfuncs fn: missing pg_lsn arg")
+        .value
+        .as_u64()
+}
+
 /// `PG_GETARG_INT32(i)` → `DatumGetInt32`: the low 32 bits of arg `i`'s word.
 #[inline]
 fn arg_int32(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i32 {
@@ -117,10 +128,18 @@ fn ret_bool(v: bool) -> Datum {
 }
 
 /// Set a `text` (`PG_RETURN_TEXT_P`) result on the by-ref lane and return the
-/// dummy word. `bytes` is the full varlena image produced by `cstring_to_text`.
+/// dummy word. `bytes` is the header-LESS payload the `cstring_to_text` core
+/// returns (the keystone carrier is the bare payload); under the
+/// header-ful-everywhere `RefPayload::Varlena` convention this stamps the 4-byte
+/// uncompressed varlena length word (`SET_VARSIZE`) in front, symmetric with how
+/// `arg_text` reads a `text` arg back (skipping the header).
 #[inline]
 fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+    const VARHDRSZ: usize = 4;
+    let mut image = Vec::with_capacity(bytes.len() + VARHDRSZ);
+    image.extend_from_slice(&types_datum::varlena::set_varsize_4b(bytes.len() + VARHDRSZ));
+    image.extend_from_slice(&bytes);
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
     Datum::from_usize(0)
 }
 
@@ -244,6 +263,20 @@ fn fc_pg_log_standby_snapshot(
     Ok(ret_lsn(crate::pg_log_standby_snapshot()?))
 }
 
+/// `pg_walfile_name(lsn pg_lsn)` (xlogfuncs.c:438) — a `text` result. The core
+/// builds the WAL file name varlena (`PG_RETURN_TEXT_P(cstring_to_text(...))`)
+/// in the scratch arena; copy its image out onto the by-ref lane before the
+/// arena drops.
+fn fc_pg_walfile_name(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    // C: locationpoint = PG_GETARG_LSN(0) — a by-value uint64.
+    let locationpoint = arg_lsn(fcinfo, 0);
+    let m = scratch_mcx();
+    let bytes: Vec<u8> = crate::pg_walfile_name(m.mcx(), locationpoint)?
+        .as_slice()
+        .to_vec();
+    Ok(ret_text(fcinfo, bytes))
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -316,5 +349,7 @@ pub fn register_xlogfuncs_builtins() {
         builtin(3830, "pg_last_xact_replay_timestamp", 0, true, false, fc_pg_last_xact_replay_timestamp),
         // pg_log_standby_snapshot() -> pg_lsn
         builtin(6305, "pg_log_standby_snapshot", 0, true, false, fc_pg_log_standby_snapshot),
+        // pg_walfile_name(pg_lsn) -> text
+        builtin(2851, "pg_walfile_name", 1, true, false, fc_pg_walfile_name),
     ]);
 }

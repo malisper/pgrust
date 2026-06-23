@@ -30,6 +30,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetOldestUnsummarizedLSN(NULL, NULL)`
+    /// (`src/backend/postmaster/walsummarizer.c`) — the oldest LSN not yet WAL
+    /// summarized, as `KeepLogSeg` reads it to retain WAL pending
+    /// summarization. Returns `InvalidXLogRecPtr` when `summarize_wal` is off.
+    pub fn get_oldest_unsummarized_lsn() -> types_error::PgResult<types_core::XLogRecPtr>
+);
+
+seam_core::seam!(
     /// `WaitForWalSummarization(lsn)` (`src/backend/postmaster/walsummarizer.c`)
     /// — block until WAL summarization has reached `lsn`, throwing an error if
     /// the summarizer appears to be stuck. If summarization is disabled while

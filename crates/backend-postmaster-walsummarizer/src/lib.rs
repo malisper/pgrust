@@ -1652,6 +1652,10 @@ pub fn init_seams() {
         WaitForWalSummarization,
     );
     backend_postmaster_walsummarizer_seams::summarize_wal::set(summarize_wal_enabled);
+    // `GetOldestUnsummarizedLSN(NULL, NULL)` as `KeepLogSeg` reads it.
+    backend_postmaster_walsummarizer_seams::get_oldest_unsummarized_lsn::set(|| {
+        Ok(GetOldestUnsummarizedLSN(false, false)?.0)
+    });
     // `int wal_summary_keep_time` (walsummarizer.c GUC, boot
     // 10 * HOURS_PER_DAY * MINS_PER_HOUR) — install the guc-tables slot over
     // this crate's backing accessors.

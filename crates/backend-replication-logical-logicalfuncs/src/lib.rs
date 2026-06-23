@@ -215,10 +215,14 @@ pub fn run_changes_into_collector(
     result
 }
 
+mod fmgr_builtins;
+
 /// Install this crate's owned seams.
 pub fn init_seams() {
     // The `OutputWriter::SqlSrf` write callback (LogicalOutputWrite).
     logical_seams::sql_srf_output_write::set(install_sql_srf_output_write);
+    // Register the `pg_logical_emit_message_{text,bytea}` fmgr builtins.
+    fmgr_builtins::register_logicalfuncs_builtins();
 }
 
 // ---------------------------------------------------------------------------

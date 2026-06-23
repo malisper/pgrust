@@ -699,13 +699,52 @@ xlog_driver_deferred! {
     pub fn SetCommitTsLimit(oldest_xact: TransactionId, newest_xact: TransactionId);
 }
 
-/// `GetWALAvailability(targetLSN)` — classify a WAL position's retention state.
-/// The pure classification is [`retention::GetWALAvailability`]; this
-/// process-singleton entry reads `XLogCtl`/GUC posture, which is the deferred
-/// driver (DESIGN_DEBT.md `xlog-driver`).
+/// `GetWALAvailability(targetLSN)` (xlog.c:7936) — classify a WAL position's
+/// retention state for `pg_get_replication_slots`. The pure classification is
+/// [`retention::GetWALAvailability`]; this process-singleton entry reads the
+/// `XLogCtl` / GUC posture C reads inline (`GetXLogWriteRecPtr`, the
+/// `KeepLogSeg`-computed oldest slot segment, `XLogGetLastRemovedSegno`,
+/// `wal_segment_size`, `max_wal_size_mb`) and hands the values to the pure core.
 pub fn GetWALAvailability(target_lsn: XLogRecPtr) -> WALAvailability {
-    let _ = target_lsn;
-    panic!("xlog driver not ported (xlog-driver debt): GetWALAvailability entry requires XLogCtl/GUC posture; use retention::GetWALAvailability with the values supplied")
+    let wal_segment_size = shmem::wal_segment_size();
+
+    // currpos = GetXLogWriteRecPtr();
+    let currpos = driver::GetXLogWriteRecPtr();
+
+    // XLByteToSeg(currpos, oldestSlotSeg, wal_segment_size);
+    // KeepLogSeg(currpos, &oldestSlotSeg);
+    let oldest_slot_seg = {
+        let init_seg = XLByteToSeg(currpos, wal_segment_size);
+        retention::KeepLogSeg(
+            currpos,
+            init_seg,
+            wal_segment_size,
+            // keep = XLogGetReplicationSlotMinimumLSN();
+            driver::XLogGetReplicationSlotMinimumLSN(),
+            // max_slot_wal_keep_size_mb (GUC)
+            backend_utils_misc_guc_tables::vars::max_slot_wal_keep_size_mb.read(),
+            // IsBinaryUpgrade
+            backend_utils_init_small::globals::IsBinaryUpgrade(),
+            // keep = GetOldestUnsummarizedLSN(NULL, NULL);
+            backend_postmaster_walsummarizer_seams::get_oldest_unsummarized_lsn::call()
+                .unwrap_or(InvalidXLogRecPtr),
+            // wal_keep_size_mb (GUC)
+            backend_utils_misc_guc_tables::vars::wal_keep_size_mb.read(),
+        )
+    };
+
+    // oldestSeg = XLogGetLastRemovedSegno() + 1; (the +1 is applied inside the
+    // pure core, matching its `last_removed_segno + 1`).
+    let last_removed_segno = driver::XLogGetLastRemovedSegno();
+
+    retention::GetWALAvailability(
+        target_lsn,
+        currpos,
+        oldest_slot_seg,
+        last_removed_segno,
+        wal_segment_size,
+        backend_utils_misc_guc_tables::vars::max_wal_size_mb.read(),
+    )
 }
 
 /// `SetConfigOption(...)` as called from `ReadControlFile` (guc.c). Deferred to
@@ -910,6 +949,16 @@ pub fn init_seams() {
     s::xlog_get_last_removed_segno::set(driver::XLogGetLastRemovedSegno);
     s::xlog_get_oldest_segno::set(driver::XLogGetOldestSegno);
     s::get_xlog_write_rec_ptr::set(driver::GetXLogWriteRecPtr);
+    // `GetWALAvailability` + the `wal_keep_size` / `max_slot_wal_keep_size` GUC
+    // reads — the `pg_get_replication_slots` SRF's wal_status / safe_wal_size
+    // inputs (xlog.c). The GUC values are read through their installed
+    // `guc_tables::vars` accessors (the live `WAL_KEEP_SIZE_MB` /
+    // `MAX_SLOT_WAL_KEEP_SIZE_MB` thread-locals in `guc_vars`).
+    s::get_wal_availability::set(GetWALAvailability);
+    s::wal_keep_size_mb::set(|| backend_utils_misc_guc_tables::vars::wal_keep_size_mb.read());
+    s::max_slot_wal_keep_size_mb::set(|| {
+        backend_utils_misc_guc_tables::vars::max_slot_wal_keep_size_mb.read()
+    });
     s::get_fake_lsn_for_unlogged_rel::set(driver::GetFakeLSNForUnloggedRel);
     s::get_last_seg_switch_data::set(driver::GetLastSegSwitchData);
     s::get_last_important_rec_ptr::set(driver::GetLastImportantRecPtr);
