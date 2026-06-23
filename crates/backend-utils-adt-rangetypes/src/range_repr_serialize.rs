@@ -799,6 +799,18 @@ pub fn datum_get_range_type_p<'mcx>(mcx: Mcx<'mcx>, d: Datum) -> PgResult<RangeT
         if varatt_is_4b_u(p) {
             // VARATT_IS_4B_U: not extended -> return as-is (no copy).
             p as *const RangeType
+        } else if varatt_is_short(p) && !varatt_is_external(p) {
+            // Short (1-byte header) varlena: `pg_detoast_datum` (detoast_attr)
+            // converts it to the 4-byte-header form `range_deserialize` /
+            // `range_get_flags` require (those read `VARSIZE_4B` + the fixed
+            // `sizeof(RangeType)` header offset). Without this un-pack, a heap-
+            // stored short-header range (under SHORT_VARLENA_PACKING) would read
+            // its length word and bound offsets 3 bytes off. The exact on-disk
+            // footprint is `VARSIZE_SHORT` (1-byte header + payload).
+            let len = varsize_short(p);
+            let bytes = core::slice::from_raw_parts(p, len);
+            let copy = detoast::detoast_attr::call(mcx, bytes)?;
+            copy.leak().as_ptr() as *const RangeType
         } else {
             // Extended (compressed or external): hand the verbatim datum bytes
             // to detoast_attr, which returns a plain copy in `mcx`.
