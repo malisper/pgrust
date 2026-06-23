@@ -9,6 +9,7 @@ name = "backend_utils_error"
 path = "src/lib.rs"
 
 [dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 types-core = { path = "../types-core" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }

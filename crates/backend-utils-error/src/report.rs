@@ -725,7 +725,11 @@ pub fn send_message_to_server_log(edata: &PgError) {
 /// (no useful way to report them). The win32 UTF-16 console path is not
 /// ported.
 pub fn write_console(line: &[u8]) {
+    #[cfg(not(target_family = "wasm"))]
     let _ = std::io::stderr().write_all(line);
+    // std stderr is a no-op on wasm64-unknown-unknown; route to the host.
+    #[cfg(target_family = "wasm")]
+    wasm_libc_shim::stderr_write(line);
 }
 
 // ---------------------------------------------------------------------------
@@ -817,7 +821,8 @@ fn write_fd2(chunk: &[u8]) {
 }
 #[cfg(target_family = "wasm")]
 fn write_fd2(chunk: &[u8]) {
-    let _ = std::io::stderr().write_all(chunk);
+    // std stderr is a no-op on wasm64-unknown-unknown; route to the host.
+    wasm_libc_shim::stderr_write(chunk);
 }
 
 // ---------------------------------------------------------------------------
@@ -967,9 +972,15 @@ pub fn write_stderr(message: &str) {
 
 /// `vwrite_stderr` — va_list flavor; same preformatted-string adaptation.
 pub fn vwrite_stderr(message: &str) {
-    let mut stderr = std::io::stderr().lock();
-    let _ = stderr.write_all(message.as_bytes());
-    let _ = stderr.flush();
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let mut stderr = std::io::stderr().lock();
+        let _ = stderr.write_all(message.as_bytes());
+        let _ = stderr.flush();
+    }
+    // std stderr is a no-op on wasm64-unknown-unknown; route to the host.
+    #[cfg(target_family = "wasm")]
+    wasm_libc_shim::stderr_write(message.as_bytes());
 }
 
 /// `DebugFileOpen` — redirect stderr (and possibly stdout) into the debug

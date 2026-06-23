@@ -11,7 +11,10 @@
 #[cfg(target_family = "wasm")]
 #[allow(unused_imports)]
 use wasm_libc_shim as libc;
+#[cfg(not(target_family = "wasm"))]
 use std::fs::File as StdFile;
+#[cfg(target_family = "wasm")]
+use wasm_libc_shim::osfile::WasmFile as StdFile;
 use std::io;
 use std::mem::ManuallyDrop;
 #[cfg(not(target_family = "wasm"))]
@@ -19,6 +22,13 @@ use std::os::fd::FromRawFd;
 #[cfg(target_family = "wasm")]
 use wasm_libc_shim::osfd::FromRawFd;
 use std::path::Path;
+
+// The free `std::fs` functions perform no I/O on wasm64; route them through the
+// host VFS (`fscompat`). Natively this aliases to plain `std::fs`.
+#[cfg(not(target_family = "wasm"))]
+use std::fs as osfs_free;
+#[cfg(target_family = "wasm")]
+use wasm_libc_shim::fscompat as osfs_free;
 
 use types_core::SubTransactionId;
 use types_error::{ErrorLevel, PgError, PgResult, DEBUG1, ERROR, LOG, WARNING};
@@ -189,7 +199,7 @@ pub fn pg_fdatasync(file: &StdFile) -> PgResult<()> {
 /// is not a directory.
 pub fn pg_file_exists(name: impl AsRef<Path>) -> PgResult<bool> {
     let name = name.as_ref();
-    match std::fs::metadata(name) {
+    match osfs_free::metadata(name) {
         // fd.c:509-510 -- exists; true iff not a directory.
         Ok(meta) => Ok(!meta.is_dir()),
         Err(error) => {
@@ -229,6 +239,7 @@ pub fn pg_truncate(path: impl AsRef<Path>, length: i64) -> PgResult<()> {
     // C uses truncate(2) on non-WIN32 (fd.c:740). std has no truncate-by-name,
     // so open for writing and set_len; both the open and set_len errors surface
     // with the path-bearing message C uses at the call sites.
+    #[cfg(not(target_family = "wasm"))]
     let file = std::fs::OpenOptions::new()
         .write(true)
         .open(path)
@@ -239,6 +250,21 @@ pub fn pg_truncate(path: impl AsRef<Path>, length: i64) -> PgResult<()> {
                 &error,
             )
         })?;
+    // wasm64: open via the host VFS (O_WRONLY) and set_len through `WasmFile`.
+    #[cfg(target_family = "wasm")]
+    let file = {
+        match crate::vfd_core::BasicOpenFilePermFd(path, O_RDWR, 0o600) {
+            Ok(-1) | Err(_) => {
+                return Err(io_error_level(
+                    ERROR,
+                    format!("could not truncate file \"{}\"", path.display()),
+                    &io::Error::from_raw_os_error(libc::errno()),
+                ));
+            }
+            // SAFETY: freshly opened owned host fd.
+            Ok(raw) => unsafe { StdFile::from_raw_fd(raw) },
+        }
+    };
     file.set_len(length as u64).map_err(|error| {
         io_error_level(
             ERROR,
@@ -308,7 +334,7 @@ pub fn durable_rename(
     }
 
     // fd.c:834-841 -- the real rename.
-    if let Err(error) = std::fs::rename(oldfile, newfile) {
+    if let Err(error) = osfs_free::rename(oldfile, newfile) {
         return report_io(
             elevel,
             format!(
@@ -331,7 +357,7 @@ pub fn durable_rename(
 pub fn durable_unlink(fname: impl AsRef<Path>, elevel: ErrorLevel) -> PgResult<()> {
     let fname = fname.as_ref();
     // fd.c:874-881 -- unlink; ereport + return on failure.
-    if let Err(error) = std::fs::remove_file(fname) {
+    if let Err(error) = osfs_free::remove_file(fname) {
         return report_io(
             elevel,
             format!("could not remove file \"{}\"", fname.display()),
@@ -551,9 +577,9 @@ pub(crate) fn walkdir(
 
         // fd.c:3750-3757 -- stat (follow symlinks) or lstat (don't).
         let meta = if process_symlinks {
-            std::fs::metadata(&subpath)
+            osfs_free::metadata(&subpath)
         } else {
-            std::fs::symlink_metadata(&subpath)
+            osfs_free::symlink_metadata(&subpath)
         };
         match meta {
             // fd.c:3762-3765 -- regular file: apply action.
@@ -589,7 +615,7 @@ fn datadir_fsync_fname(fname: &Path, isdir: bool, elevel: ErrorLevel) -> PgResul
 fn unlink_if_exists_fname(fname: &Path, isdir: bool, elevel: ErrorLevel) -> PgResult<()> {
     if isdir {
         // fd.c:3841-3846 -- rmdir; ignore ENOENT, ereport otherwise.
-        if let Err(error) = std::fs::remove_dir(fname) {
+        if let Err(error) = osfs_free::remove_dir(fname) {
             if raw_errno(&error) != errno::ENOENT {
                 return report_io(
                     elevel,
@@ -675,7 +701,7 @@ pub fn SyncDataDirectory() -> PgResult<()> {
 
     // fd.c:3625-3639 -- check whether pg_wal is a symlink (a separately-mounted
     // WAL directory); on stat failure log and treat as not-a-symlink.
-    let xlog_is_symlink = match std::fs::symlink_metadata("pg_wal") {
+    let xlog_is_symlink = match osfs_free::symlink_metadata("pg_wal") {
         Ok(meta) => meta.file_type().is_symlink(),
         Err(error) => {
             elog(LOG, format!("could not stat file \"pg_wal\": {error}"));
@@ -785,11 +811,11 @@ pub fn RemovePgTempFilesInDir(
         if unlink_all || temp_de.d_name.starts_with(PG_TEMP_FILE_PREFIX) {
             // fd.c:3426-3445 -- lstat to distinguish dir vs file; recurse into
             // directories then rmdir, else unlink.
-            match std::fs::symlink_metadata(&rm_path) {
+            match osfs_free::symlink_metadata(&rm_path) {
                 Err(_) => continue,
                 Ok(meta) if meta.is_dir() => {
                     RemovePgTempFilesInDir(&rm_path, false, true)?;
-                    if let Err(err) = std::fs::remove_dir(&rm_path) {
+                    if let Err(err) = osfs_free::remove_dir(&rm_path) {
                         elog(
                             LOG,
                             format!("could not remove directory \"{}\": {err}", rm_path.display()),
@@ -797,7 +823,7 @@ pub fn RemovePgTempFilesInDir(
                     }
                 }
                 Ok(_) => {
-                    if let Err(err) = std::fs::remove_file(&rm_path) {
+                    if let Err(err) = osfs_free::remove_file(&rm_path) {
                         elog(
                             LOG,
                             format!("could not remove file \"{}\": {err}", rm_path.display()),
@@ -847,7 +873,7 @@ fn RemovePgTempRelationFilesInDbspace(dbspacedirname: &Path) -> PgResult<()> {
             continue;
         }
         let rm_path = dbspacedirname.join(&de.d_name);
-        if let Err(err) = std::fs::remove_file(&rm_path) {
+        if let Err(err) = osfs_free::remove_file(&rm_path) {
             elog(
                 LOG,
                 format!("could not remove file \"{}\": {err}", rm_path.display()),

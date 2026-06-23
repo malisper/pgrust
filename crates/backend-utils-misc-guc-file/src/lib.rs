@@ -19,6 +19,11 @@
 //! `guc.c` (routed through [`backend_utils_misc_guc_seams`]); `ProcessConfigFile`
 //! here is the thin memory-context wrapper that drives it.
 
+#[cfg(not(target_family = "wasm"))]
+use std::fs as osfs_free;
+#[cfg(target_family = "wasm")]
+use wasm_libc_shim::fscompat as osfs_free;
+
 use std::path::{Path, PathBuf};
 
 use backend_utils_error::{ereport, PgError, PgResult};
@@ -191,7 +196,7 @@ pub fn ParseConfigFile(
     // The flex scanner is `%option 8bit` and reads the file as raw bytes, so a
     // config file that is not valid UTF-8 (high-bit bytes are valid `LETTER`s,
     // \200-\377) must still parse. Read bytes, not a UTF-8 `String`.
-    let contents = match std::fs::read(&abs_path) {
+    let contents = match osfs_free::read(&abs_path) {
         Ok(contents) => contents,
         // AllocateFile() == NULL: a strict include fails, a non-strict one is
         // silently skipped (the include_if_exists case).

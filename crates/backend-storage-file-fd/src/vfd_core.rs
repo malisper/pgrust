@@ -12,7 +12,13 @@
 #[allow(unused_imports)]
 use wasm_libc_shim as libc;
 use std::cell::RefCell;
+/// The owned kernel-file carrier. Natively `std::fs::File`; on wasm64 (where
+/// `std::fs::File` is the uninhabited never type and `std::fs` performs no I/O)
+/// a real `WasmFile` carrier that routes I/O through the host VFS imports.
+#[cfg(not(target_family = "wasm"))]
 use std::fs::File as StdFile;
+#[cfg(target_family = "wasm")]
+use wasm_libc_shim::osfile::WasmFile as StdFile;
 #[cfg(not(target_family = "wasm"))]
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 #[cfg(target_family = "wasm")]
@@ -119,9 +125,16 @@ pub(crate) struct PipeHandle {
     pub stdin: Option<std::process::ChildStdin>,
 }
 
+/// The owned directory-iterator carrier: `std::fs::ReadDir` natively, a
+/// host-VFS-backed `WasmReadDir` on wasm64.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) type OsReadDir = std::fs::ReadDir;
+#[cfg(target_family = "wasm")]
+pub(crate) type OsReadDir = wasm_libc_shim::osfile::WasmReadDir;
+
 /// A live directory iterator opened with `AllocateDir`.
 pub(crate) struct DirHandle {
-    pub iter: Option<std::fs::ReadDir>,
+    pub iter: Option<OsReadDir>,
 }
 
 /// `AllocateDesc` (fd.c:258-268).
@@ -932,8 +945,15 @@ pub fn seam_init_file_access() -> PgResult<()> {
 }
 
 /// Inward-seam adapter for `last_errno` — read the current OS `errno`.
+#[cfg(not(target_family = "wasm"))]
 pub fn seam_last_errno() -> i32 {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+/// wasm64: read the host-VFS shim errno (std's `last_os_error` is always 0).
+#[cfg(target_family = "wasm")]
+pub fn seam_last_errno() -> i32 {
+    wasm_libc_shim::errno()
 }
 
 /// Inward-seam adapter for `access_f_ok` — `access(path, F_OK)` (InitPostgres).
@@ -1085,8 +1105,16 @@ fn here(funcname: &'static str) -> ErrorLocation {
 }
 
 /// The calling thread's current `errno`.
+#[cfg(not(target_family = "wasm"))]
 fn errno() -> i32 {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+/// On wasm64 the host-VFS shims set their own thread-local errno (std's
+/// `last_os_error` is always 0 there), so read the shim's errno.
+#[cfg(target_family = "wasm")]
+fn errno() -> i32 {
+    wasm_libc_shim::errno()
 }
 
 /// `pub(crate)` wrapper over [`set_errno`] for other modules (e.g. the

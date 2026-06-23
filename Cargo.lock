@@ -470,6 +470,7 @@ dependencies = [
  "types-portal",
  "types-stringinfo",
  "types-tuple",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -17522,6 +17523,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-storage",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -23087,6 +23089,7 @@ dependencies = [
  "types-core",
  "types-dest",
  "types-error",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -23660,6 +23663,7 @@ dependencies = [
  "types-error",
  "types-guc",
  "types-tuple",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -23673,6 +23677,7 @@ dependencies = [
  "backend-utils-misc-guc-seams",
  "types-error",
  "types-guc",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -23718,6 +23723,7 @@ dependencies = [
  "types-parsenodes",
  "types-storage",
  "types-tuple",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -25873,6 +25879,7 @@ dependencies = [
  "probe-adt-scalar-bool",
  "types-core",
  "types-error",
+ "wasm-libc-shim",
 ]
 
 [[package]]

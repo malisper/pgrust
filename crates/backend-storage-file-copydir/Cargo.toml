@@ -9,6 +9,7 @@ name = "backend_storage_file_copydir"
 path = "src/lib.rs"
 
 [dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }

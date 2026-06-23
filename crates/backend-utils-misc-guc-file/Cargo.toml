@@ -9,6 +9,7 @@ name = "backend_utils_misc_guc_file"
 path = "src/lib.rs"
 
 [dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }
 types-error = { path = "../types-error" }
 types-guc = { path = "../types-guc" }
 backend-utils-error = { path = "../backend-utils-error" }

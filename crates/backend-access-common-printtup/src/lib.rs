@@ -858,13 +858,21 @@ fn printtup_dest_shutdown<'mcx>(_mcx: Mcx<'mcx>, state: u64) -> PgResult<()> {
 /// Write `s` to stdout, mirroring C's `printf("...")` in `printatt`. The
 /// standalone backend's tuples land on the process stdout stream.
 fn print_to_stdout(s: &str) {
-    use std::io::Write;
-    let stdout = std::io::stdout();
-    let mut h = stdout.lock();
-    // Best-effort like C printf (which ignores the return); a closed stdout in
-    // the standalone backend is not an ereport condition.
-    let _ = h.write_all(s.as_bytes());
-    let _ = h.flush();
+    #[cfg(not(target_family = "wasm"))]
+    {
+        use std::io::Write;
+        let stdout = std::io::stdout();
+        let mut h = stdout.lock();
+        // Best-effort like C printf (which ignores the return); a closed stdout
+        // in the standalone backend is not an ereport condition.
+        let _ = h.write_all(s.as_bytes());
+        let _ = h.flush();
+    }
+    // std stdout is a no-op on wasm64-unknown-unknown; route to the host.
+    #[cfg(target_family = "wasm")]
+    {
+        wasm_libc_shim::stdout_write(s.as_bytes());
+    }
 }
 
 /// `&debugtupDR` (dest.c:75) routed into the tcop-dest router: register the

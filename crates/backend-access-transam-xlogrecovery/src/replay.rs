@@ -645,6 +645,7 @@ fn check_tablespace_directory() -> Result<(), PgError> {
     #[cfg(target_family = "wasm")]
     use wasm_libc_shim::osfs::OsStrBytesExt as OsStrExt;
 
+    #[cfg(not(target_family = "wasm"))]
     let entries = match std::fs::read_dir(PG_TBLSPC_DIR) {
         Ok(e) => e,
         // C's AllocateDir ereport(ERROR)s if the directory can't be opened; in
@@ -656,6 +657,17 @@ fn check_tablespace_directory() -> Result<(), PgError> {
             ));
         }
     };
+    #[cfg(target_family = "wasm")]
+    let entries =
+        match wasm_libc_shim::osfile::WasmReadDir::open(PG_TBLSPC_DIR.as_bytes()) {
+            Ok(e) => e,
+            Err(e) => {
+                return Err(PgError::new(
+                    types_error::ERROR,
+                    format!("could not open directory \"{PG_TBLSPC_DIR}\": {e}"),
+                ));
+            }
+        };
 
     let allow_in_place =
         backend_commands_tablespace_globals_seams::allow_in_place_tablespaces::call()?;

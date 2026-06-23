@@ -9,6 +9,7 @@ name = "backend_utils_misc_guc_funcs"
 path = "src/lib.rs"
 
 [dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }

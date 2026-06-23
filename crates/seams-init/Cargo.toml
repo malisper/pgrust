@@ -17,6 +17,7 @@ path = "src/bin/postgres.rs"
 
 # Every ported crate that exposes init_seams() gets a dependency line here.
 [dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }

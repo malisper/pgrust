@@ -584,6 +584,15 @@ mod imp {
         ERRNO_SLOT.with(|c| c.set(e));
     }
 
+    /// Read the calling thread's wasm `errno`.
+    ///
+    /// `std::io::Error::last_os_error()` reads std's own (always-0) errno on
+    /// `wasm64-unknown-unknown`, so ported code that needs the *real* errno set
+    /// by these shims (EMFILE retry loops, ENOENT tolerance, …) must call this.
+    pub fn errno() -> c_int {
+        ERRNO_SLOT.with(|c| c.get())
+    }
+
     // ====================================================================
     // malloc family — real, over Rust's global allocator. A size header word
     // precedes each block so `free`/`realloc` (which take no size in C) can
@@ -937,6 +946,357 @@ mod imp {
     // binary LINK while the VFS is wired separately. The common open/read/
     // write/stat/close path can be made real by routing these to host imports.
     // ====================================================================
+    // ====================================================================
+    // Host VFS imports.
+    //
+    // On `wasm64-unknown-unknown` there is no wasi and no `std::fs`, so the raw
+    // POSIX file syscalls are routed to *host imports* the wasm runtime (the
+    // wasmtime harness in `tools/wasm-harness`) provides. The host operates on
+    // real files under a preopened datadir. Every import returns an i64: a
+    // non-negative result on success (fd / byte count / 0), or `-errno` on
+    // failure (negated Linux errno). The shim translates `-errno` back into the
+    // POSIX `-1` + thread-local errno convention the fd.c port expects.
+    //
+    // All pointers are wasm linear-memory offsets (the host reads/writes guest
+    // memory directly). `path`/`buf` are byte pointers with explicit lengths so
+    // the host never has to scan for a NUL across the membrane.
+    // ====================================================================
+    #[link(wasm_import_module = "pgvfs")]
+    extern "C" {
+        fn host_open(path: *const u8, path_len: usize, flags: c_int, mode: mode_t) -> i64;
+        fn host_close(fd: c_int) -> i64;
+        fn host_read(fd: c_int, buf: *mut u8, n: usize) -> i64;
+        fn host_write(fd: c_int, buf: *const u8, n: usize) -> i64;
+        fn host_pread(fd: c_int, buf: *mut u8, n: usize, off: i64) -> i64;
+        fn host_pwrite(fd: c_int, buf: *const u8, n: usize, off: i64) -> i64;
+        fn host_lseek(fd: c_int, off: i64, whence: c_int) -> i64;
+        fn host_fsync(fd: c_int) -> i64;
+        fn host_ftruncate(fd: c_int, len: i64) -> i64;
+        /// Fills a fixed-layout 64-byte record:
+        /// [0]=st_mode(u32) [1]=pad [2]=st_size(i64) [3]=st_mtime(i64)
+        /// [4]=st_ino(u64) [5]=st_dev(u64) [6]=st_nlink(u64) [7]=st_blocks(i64).
+        fn host_stat(path: *const u8, path_len: usize, follow: c_int, out: *mut i64) -> i64;
+        fn host_fstat(fd: c_int, out: *mut i64) -> i64;
+        fn host_unlink(path: *const u8, path_len: usize) -> i64;
+        fn host_mkdir(path: *const u8, path_len: usize, mode: mode_t) -> i64;
+        fn host_rmdir(path: *const u8, path_len: usize) -> i64;
+        fn host_rename(from: *const u8, from_len: usize, to: *const u8, to_len: usize) -> i64;
+        fn host_access(path: *const u8, path_len: usize, mode: c_int) -> i64;
+        fn host_readlink(path: *const u8, path_len: usize, buf: *mut u8, n: usize) -> i64;
+        /// Write `n` bytes to the host stdout (fd 1) / stderr (fd 2). std's
+        /// stdout/stderr are no-ops on `wasm64-unknown-unknown`, so the single-
+        /// user query results + LOG lines route here instead.
+        fn host_stdout(buf: *const u8, n: usize) -> i64;
+        fn host_stderr(buf: *const u8, n: usize) -> i64;
+        /// Read up to `n` bytes of the SQL input stream (host stdin) into `buf`;
+        /// returns the byte count (0 = EOF) or -errno. std's stdin is a no-op on
+        /// `wasm64-unknown-unknown`.
+        fn host_stdin(buf: *mut u8, n: usize) -> i64;
+        /// Number of process arguments the host wants to pass as the guest's
+        /// `argv` (there is no WASI argv on `wasm64-unknown-unknown`).
+        fn host_argc() -> i64;
+        /// Copy argument `idx` into `buf` (max `n` bytes); returns its byte
+        /// length (which may exceed `n`, signalling truncation) or -errno.
+        fn host_argv(idx: i32, buf: *mut u8, n: usize) -> i64;
+        /// Opens a directory stream; returns a non-negative dir handle or -errno.
+        fn host_opendir(path: *const u8, path_len: usize) -> i64;
+        /// Reads the next entry name into `buf` (no NUL); returns the byte
+        /// length (0 = end of stream) or -errno.
+        fn host_readdir(handle: c_int, buf: *mut u8, n: usize) -> i64;
+        fn host_closedir(handle: c_int) -> i64;
+    }
+
+    // Public thin wrappers over the raw host imports, used by the `osfile`
+    // carrier (`WasmFile`). These return the raw host i64 (non-negative = ok,
+    // negative = `-errno`); the caller maps to `io::Error`.
+    /// # Safety
+    /// `buf` points to `n` writable bytes.
+    pub unsafe fn host_read_pub(fd: c_int, buf: *mut u8, n: usize) -> i64 {
+        unsafe { host_read(fd, buf, n) }
+    }
+    /// # Safety
+    /// `buf` points to `n` readable bytes.
+    pub unsafe fn host_write_pub(fd: c_int, buf: *const u8, n: usize) -> i64 {
+        unsafe { host_write(fd, buf, n) }
+    }
+    /// # Safety
+    /// `fd` is a live host fd.
+    pub unsafe fn host_lseek_pub(fd: c_int, off: i64, whence: c_int) -> i64 {
+        unsafe { host_lseek(fd, off, whence) }
+    }
+    /// # Safety
+    /// `fd` is a live host fd.
+    pub unsafe fn host_fsync_pub(fd: c_int) -> i64 {
+        unsafe { host_fsync(fd) }
+    }
+    /// # Safety
+    /// `fd` is a live host fd.
+    pub unsafe fn host_ftruncate_pub(fd: c_int, len: i64) -> i64 {
+        unsafe { host_ftruncate(fd, len) }
+    }
+    /// # Safety
+    /// `fd` is a live host fd.
+    pub unsafe fn host_close_pub(fd: c_int) -> i64 {
+        unsafe { host_close(fd) }
+    }
+    /// # Safety
+    /// `out` points to 8 writable i64 words.
+    pub unsafe fn host_fstat_pub(fd: c_int, out: *mut i64) -> i64 {
+        unsafe { host_fstat(fd, out) }
+    }
+
+    /// Length of a NUL-terminated C string (the host imports take explicit
+    /// lengths, so the membrane never scans guest memory).
+    unsafe fn cstr_len(p: *const c_char) -> usize {
+        if p.is_null() {
+            return 0;
+        }
+        let mut n = 0usize;
+        // SAFETY: caller guarantees `p` is NUL-terminated.
+        while unsafe { *p.add(n) } != 0 {
+            n += 1;
+        }
+        n
+    }
+
+    /// Map a host `i64` result (non-negative = ok, negative = `-errno`) onto the
+    /// POSIX `-1` + errno convention, returning the success value as `i64`.
+    fn host_ret(r: i64) -> i64 {
+        if r < 0 {
+            set_errno((-r) as c_int);
+            -1
+        } else {
+            r
+        }
+    }
+
+    pub unsafe fn open(path: *const c_char, flags: c_int, mode: mode_t) -> c_int {
+        let len = unsafe { cstr_len(path) };
+        host_ret(unsafe { host_open(path as *const u8, len, flags, mode) }) as c_int
+    }
+
+    /// Process arguments from the host (the wasm `bin`'s `argv`). On
+    /// `wasm64-unknown-unknown` `std::env::args()` is empty, so the `postgres`
+    /// entry shell calls this under `cfg(wasm)` to receive `["postgres",
+    /// "--single", "-D", …]`.
+    pub fn host_args() -> Vec<String> {
+        // SAFETY: host imports; argc is small, each arg fits in the buffer.
+        let argc = unsafe { host_argc() };
+        if argc <= 0 {
+            return Vec::new();
+        }
+        let mut out = Vec::with_capacity(argc as usize);
+        for i in 0..argc as i32 {
+            let mut buf = vec![0u8; 4096];
+            let n = unsafe { host_argv(i, buf.as_mut_ptr(), buf.len()) };
+            if n < 0 {
+                break;
+            }
+            let n = (n as usize).min(buf.len());
+            out.push(String::from_utf8_lossy(&buf[..n]).into_owned());
+        }
+        out
+    }
+
+    /// `int open(const char*, int, ...)` variadic-mode shim used by some sites.
+    /// # Safety
+    /// `path` is a valid NUL-terminated C string.
+    pub unsafe fn open3(path: *const c_char, flags: c_int, mode: mode_t) -> c_int {
+        unsafe { open(path, flags, mode) }
+    }
+
+    pub unsafe fn close(fd: c_int) -> c_int {
+        host_ret(unsafe { host_close(fd) }) as c_int
+    }
+
+    pub unsafe fn read(fd: c_int, buf: *mut c_void, n: size_t) -> ssize_t {
+        host_ret(unsafe { host_read(fd, buf as *mut u8, n) }) as ssize_t
+    }
+    pub unsafe fn write(fd: c_int, buf: *const c_void, n: size_t) -> ssize_t {
+        // Route std streams to the host stdout/stderr writers (std's stdout/
+        // stderr are no-ops on wasm64-unknown-unknown, so query results + LOG
+        // lines must cross to the host).
+        if fd == STDOUT_FILENO {
+            return host_ret(unsafe { host_stdout(buf as *const u8, n) }) as ssize_t;
+        }
+        if fd == STDERR_FILENO {
+            return host_ret(unsafe { host_stderr(buf as *const u8, n) }) as ssize_t;
+        }
+        host_ret(unsafe { host_write(fd, buf as *const u8, n) }) as ssize_t
+    }
+
+    /// Public helper: write `bytes` to host stdout (the single-user `print!`
+    /// path routes here under cfg(wasm)).
+    pub fn stdout_write(bytes: &[u8]) {
+        // SAFETY: bytes is a valid readable slice.
+        unsafe {
+            host_stdout(bytes.as_ptr(), bytes.len());
+        }
+    }
+    /// Public helper: write `bytes` to host stderr.
+    pub fn stderr_write(bytes: &[u8]) {
+        // SAFETY: bytes is a valid readable slice.
+        unsafe {
+            host_stderr(bytes.as_ptr(), bytes.len());
+        }
+    }
+    /// Public helper: read up to `buf.len()` bytes from host stdin; returns the
+    /// number read (0 = EOF).
+    pub fn stdin_read(buf: &mut [u8]) -> usize {
+        // SAFETY: buf is a valid writable slice.
+        let r = unsafe { host_stdin(buf.as_mut_ptr(), buf.len()) };
+        if r <= 0 {
+            0
+        } else {
+            (r as usize).min(buf.len())
+        }
+    }
+    pub unsafe fn pread(fd: c_int, buf: *mut c_void, n: size_t, off: off_t) -> ssize_t {
+        host_ret(unsafe { host_pread(fd, buf as *mut u8, n, off) }) as ssize_t
+    }
+    pub unsafe fn pwrite(fd: c_int, buf: *const c_void, n: size_t, off: off_t) -> ssize_t {
+        host_ret(unsafe { host_pwrite(fd, buf as *const u8, n, off) }) as ssize_t
+    }
+    pub unsafe fn preadv(fd: c_int, iov: *const iovec, cnt: c_int, mut off: off_t) -> ssize_t {
+        // Decompose into per-segment pread (the host VFS speaks pread).
+        let mut total: ssize_t = 0;
+        for i in 0..cnt as isize {
+            // SAFETY: caller guarantees `iov[0..cnt]` are valid.
+            let v = unsafe { &*iov.offset(i) };
+            if v.iov_len == 0 {
+                continue;
+            }
+            let got = unsafe { pread(fd, v.iov_base, v.iov_len, off) };
+            if got < 0 {
+                return if total > 0 { total } else { got };
+            }
+            total += got;
+            off += got as off_t;
+            if (got as size_t) < v.iov_len {
+                break; // short read
+            }
+        }
+        total
+    }
+    pub unsafe fn pwritev(fd: c_int, iov: *const iovec, cnt: c_int, mut off: off_t) -> ssize_t {
+        let mut total: ssize_t = 0;
+        for i in 0..cnt as isize {
+            // SAFETY: caller guarantees `iov[0..cnt]` are valid.
+            let v = unsafe { &*iov.offset(i) };
+            if v.iov_len == 0 {
+                continue;
+            }
+            let put = unsafe { pwrite(fd, v.iov_base, v.iov_len, off) };
+            if put < 0 {
+                return if total > 0 { total } else { put };
+            }
+            total += put;
+            off += put as off_t;
+            if (put as size_t) < v.iov_len {
+                break; // short write
+            }
+        }
+        total
+    }
+    pub unsafe fn lseek(fd: c_int, off: off_t, whence: c_int) -> off_t {
+        host_ret(unsafe { host_lseek(fd, off, whence) })
+    }
+    pub unsafe fn readlink(p: *const c_char, b: *mut c_char, s: size_t) -> ssize_t {
+        let len = unsafe { cstr_len(p) };
+        host_ret(unsafe { host_readlink(p as *const u8, len, b as *mut u8, s) }) as ssize_t
+    }
+
+    /// Decode the fixed 8-word `host_stat`/`host_fstat` record into a `stat`.
+    fn fill_stat(words: &[i64; 8], buf: *mut stat) {
+        // SAFETY: caller passes a valid, writable `stat` pointer.
+        unsafe {
+            let s = &mut *buf;
+            *s = core::mem::zeroed();
+            s.st_mode = words[0] as u32;
+            s.st_size = words[2];
+            s.st_mtime = words[3];
+            s.st_mtime_nsec = 0;
+            s.st_ino = words[4] as u64;
+            s.st_dev = words[5] as u64;
+            s.st_nlink = words[6] as u64;
+            s.st_blocks = words[7];
+            s.st_blksize = 8192;
+        }
+    }
+
+    pub unsafe fn stat(path: *const c_char, buf: *mut stat) -> c_int {
+        let len = unsafe { cstr_len(path) };
+        let mut words = [0i64; 8];
+        let r = host_ret(unsafe { host_stat(path as *const u8, len, 1, words.as_mut_ptr()) });
+        if r < 0 {
+            return -1;
+        }
+        fill_stat(&words, buf);
+        0
+    }
+    pub unsafe fn lstat(path: *const c_char, buf: *mut stat) -> c_int {
+        let len = unsafe { cstr_len(path) };
+        let mut words = [0i64; 8];
+        let r = host_ret(unsafe { host_stat(path as *const u8, len, 0, words.as_mut_ptr()) });
+        if r < 0 {
+            return -1;
+        }
+        fill_stat(&words, buf);
+        0
+    }
+    pub unsafe fn fstat(fd: c_int, buf: *mut stat) -> c_int {
+        let mut words = [0i64; 8];
+        let r = host_ret(unsafe { host_fstat(fd, words.as_mut_ptr()) });
+        if r < 0 {
+            return -1;
+        }
+        fill_stat(&words, buf);
+        0
+    }
+    pub unsafe fn unlink(path: *const c_char) -> c_int {
+        let len = unsafe { cstr_len(path) };
+        host_ret(unsafe { host_unlink(path as *const u8, len) }) as c_int
+    }
+    pub unsafe fn mkdir(path: *const c_char, mode: mode_t) -> c_int {
+        let len = unsafe { cstr_len(path) };
+        host_ret(unsafe { host_mkdir(path as *const u8, len, mode) }) as c_int
+    }
+    pub unsafe fn rmdir(path: *const c_char) -> c_int {
+        let len = unsafe { cstr_len(path) };
+        host_ret(unsafe { host_rmdir(path as *const u8, len) }) as c_int
+    }
+    pub unsafe fn rename(from: *const c_char, to: *const c_char) -> c_int {
+        let fl = unsafe { cstr_len(from) };
+        let tl = unsafe { cstr_len(to) };
+        host_ret(unsafe { host_rename(from as *const u8, fl, to as *const u8, tl) }) as c_int
+    }
+    pub unsafe fn access(path: *const c_char, mode: c_int) -> c_int {
+        let len = unsafe { cstr_len(path) };
+        host_ret(unsafe { host_access(path as *const u8, len, mode) }) as c_int
+    }
+    pub unsafe fn ftruncate(fd: c_int, len: off_t) -> c_int {
+        host_ret(unsafe { host_ftruncate(fd, len) }) as c_int
+    }
+    pub unsafe fn fsync(fd: c_int) -> c_int {
+        host_ret(unsafe { host_fsync(fd) }) as c_int
+    }
+    pub unsafe fn fdatasync(fd: c_int) -> c_int {
+        host_ret(unsafe { host_fsync(fd) }) as c_int
+    }
+
+    /// Host directory-stream handle exposed to the `osfs`/`read_dir` shims.
+    pub unsafe fn opendir_host(path: *const u8, len: usize) -> i64 {
+        host_ret(unsafe { host_opendir(path, len) })
+    }
+    pub unsafe fn readdir_host(handle: c_int, buf: *mut u8, n: usize) -> i64 {
+        host_ret(unsafe { host_readdir(handle, buf, n) })
+    }
+    pub unsafe fn closedir_host(handle: c_int) -> i64 {
+        host_ret(unsafe { host_closedir(handle) })
+    }
+
+    // The remaining file-ish syscalls have no single-user effect or are
+    // genuinely unsupported; keep them as inert/ENOSYS stubs.
     macro_rules! enosys_i32 {
         ($($name:ident ( $($a:ident : $t:ty),* $(,)? ) );* $(;)?) => {$(
             #[allow(unused_variables)]
@@ -945,22 +1305,10 @@ mod imp {
     }
 
     enosys_i32! {
-        close(fd: c_int);
-        open(path: *const c_char, flags: c_int, mode: mode_t);
-        unlink(path: *const c_char);
-        rename(from: *const c_char, to: *const c_char);
-        mkdir(path: *const c_char, mode: mode_t);
-        rmdir(path: *const c_char);
-        stat(path: *const c_char, buf: *mut stat);
-        lstat(path: *const c_char, buf: *mut stat);
-        fstat(fd: c_int, buf: *mut stat);
-        ftruncate(fd: c_int, len: off_t);
         truncate(path: *const c_char, len: off_t);
-        access(path: *const c_char, mode: c_int);
         chmod(path: *const c_char, mode: mode_t);
         chown(path: *const c_char, owner: uid_t, group: gid_t);
         symlink(target: *const c_char, link: *const c_char);
-        fsync(fd: c_int);
         syncfs(fd: c_int);
         dup(fd: c_int);
         dup2(oldfd: c_int, newfd: c_int);
@@ -971,65 +1319,6 @@ mod imp {
         utime(path: *const c_char, times: *const c_void);
         munmap(addr: *mut c_void, len: size_t);
         pipe(fds: *mut c_int);
-    }
-
-    /// `int open(const char*, int, ...)` variadic-mode shim used by some sites.
-    /// # Safety
-    /// `path` is a valid NUL-terminated C string.
-    pub unsafe fn open3(path: *const c_char, flags: c_int, mode: mode_t) -> c_int {
-        unsafe { open(path, flags, mode) }
-    }
-
-    pub unsafe fn read(_fd: c_int, _buf: *mut c_void, _n: size_t) -> ssize_t {
-        set_errno(ENOSYS);
-        -1
-    }
-    pub unsafe fn write(fd: c_int, buf: *const c_void, n: size_t) -> ssize_t {
-        // Route std streams to the host so log/error output is visible; other
-        // fds are ENOSYS until the VFS is wired.
-        if fd == STDOUT_FILENO || fd == STDERR_FILENO {
-            use std::io::Write as _;
-            // SAFETY: caller guarantees `buf` points to `n` readable bytes.
-            let slice = unsafe { core::slice::from_raw_parts(buf as *const u8, n) };
-            let res = if fd == STDOUT_FILENO {
-                std::io::stdout().write_all(slice)
-            } else {
-                std::io::stderr().write_all(slice)
-            };
-            return match res {
-                Ok(()) => n as ssize_t,
-                Err(_) => {
-                    set_errno(EIO);
-                    -1
-                }
-            };
-        }
-        set_errno(ENOSYS);
-        -1
-    }
-    pub unsafe fn pread(_fd: c_int, _buf: *mut c_void, _n: size_t, _off: off_t) -> ssize_t {
-        set_errno(ENOSYS);
-        -1
-    }
-    pub unsafe fn pwrite(_fd: c_int, _buf: *const c_void, _n: size_t, _off: off_t) -> ssize_t {
-        set_errno(ENOSYS);
-        -1
-    }
-    pub unsafe fn preadv(_fd: c_int, _iov: *const iovec, _cnt: c_int, _off: off_t) -> ssize_t {
-        set_errno(ENOSYS);
-        -1
-    }
-    pub unsafe fn pwritev(_fd: c_int, _iov: *const iovec, _cnt: c_int, _off: off_t) -> ssize_t {
-        set_errno(ENOSYS);
-        -1
-    }
-    pub unsafe fn lseek(_fd: c_int, _off: off_t, _whence: c_int) -> off_t {
-        set_errno(ENOSYS);
-        -1
-    }
-    pub unsafe fn readlink(_p: *const c_char, _b: *mut c_char, _s: size_t) -> ssize_t {
-        set_errno(ENOSYS);
-        -1
     }
     pub unsafe fn umask(_mask: mode_t) -> mode_t {
         0o022
@@ -1596,6 +1885,529 @@ pub mod osfs {
     impl OsStrBytesExt for std::ffi::OsString {
         fn as_bytes(&self) -> &[u8] {
             self.as_os_str().as_encoded_bytes()
+        }
+    }
+}
+
+/// wasm64 stand-ins for the free `std::fs::{metadata,remove_file,rename,
+/// remove_dir,create_dir_all}` functions, which perform no I/O on
+/// `wasm64-unknown-unknown`. These route to the host-VFS libc shims. The
+/// `backend-storage-file-fd` crate calls `fscompat::*` (aliased to plain
+/// `std::fs::*` natively) at the scattered direct-`std::fs` sites.
+#[cfg(target_family = "wasm")]
+pub mod fscompat {
+    use super::imp as libc;
+    use super::osfile::WasmMetadata;
+    use std::io;
+    use std::path::Path;
+
+    fn cpath(p: &Path) -> Vec<u8> {
+        use super::osfd::OsStrExt as _;
+        let mut v = p.as_os_str().as_bytes().to_vec();
+        v.push(0);
+        v
+    }
+
+    /// `std::fs::read` — open O_RDONLY, read to EOF via the host VFS.
+    pub fn read(p: impl AsRef<Path>) -> io::Result<Vec<u8>> {
+        use super::osfd::FromRawFd as _;
+        use std::io::Read as _;
+        let c = cpath(p.as_ref());
+        // SAFETY: c is NUL-terminated.
+        let fd = unsafe { libc::open(c.as_ptr() as *const i8, libc::O_RDONLY, 0) };
+        if fd < 0 {
+            return Err(io::Error::from_raw_os_error(libc::errno()));
+        }
+        // SAFETY: freshly opened owned fd → WasmFile (closes on drop).
+        let mut f = unsafe { super::osfile::WasmFile::from_raw_fd(fd) };
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf)?;
+        Ok(buf)
+    }
+    /// `std::fs::read_to_string` — `read` + UTF-8 validation.
+    pub fn read_to_string(p: impl AsRef<Path>) -> io::Result<String> {
+        let bytes = read(p)?;
+        String::from_utf8(bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "stream did not contain valid UTF-8"))
+    }
+
+    pub fn metadata(p: impl AsRef<Path>) -> io::Result<WasmMetadata> {
+        let c = cpath(p.as_ref());
+        let mut st: libc::stat = unsafe { core::mem::zeroed() };
+        // SAFETY: c is NUL-terminated; st is a valid stat.
+        if unsafe { libc::stat(c.as_ptr() as *const i8, &mut st) } < 0 {
+            return Err(io::Error::from_raw_os_error(libc::errno()));
+        }
+        Ok(WasmMetadata::from_stat(st.st_mode, st.st_size as u64))
+    }
+    pub fn symlink_metadata(p: impl AsRef<Path>) -> io::Result<WasmMetadata> {
+        let c = cpath(p.as_ref());
+        let mut st: libc::stat = unsafe { core::mem::zeroed() };
+        // SAFETY: c is NUL-terminated; st is a valid stat.
+        if unsafe { libc::lstat(c.as_ptr() as *const i8, &mut st) } < 0 {
+            return Err(io::Error::from_raw_os_error(libc::errno()));
+        }
+        Ok(WasmMetadata::from_stat(st.st_mode, st.st_size as u64))
+    }
+    pub fn remove_file(p: impl AsRef<Path>) -> io::Result<()> {
+        let c = cpath(p.as_ref());
+        // SAFETY: c is NUL-terminated.
+        if unsafe { libc::unlink(c.as_ptr() as *const i8) } < 0 {
+            return Err(io::Error::from_raw_os_error(libc::errno()));
+        }
+        Ok(())
+    }
+    pub fn remove_dir(p: impl AsRef<Path>) -> io::Result<()> {
+        let c = cpath(p.as_ref());
+        // SAFETY: c is NUL-terminated.
+        if unsafe { libc::rmdir(c.as_ptr() as *const i8) } < 0 {
+            return Err(io::Error::from_raw_os_error(libc::errno()));
+        }
+        Ok(())
+    }
+    pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
+        let f = cpath(from.as_ref());
+        let t = cpath(to.as_ref());
+        // SAFETY: both are NUL-terminated.
+        if unsafe { libc::rename(f.as_ptr() as *const i8, t.as_ptr() as *const i8) } < 0 {
+            return Err(io::Error::from_raw_os_error(libc::errno()));
+        }
+        Ok(())
+    }
+    pub fn create_dir_all(p: impl AsRef<Path>) -> io::Result<()> {
+        // Single-level mkdir is enough for the single-user paths that reach
+        // here; create parents best-effort.
+        let path = p.as_ref();
+        let c = cpath(path);
+        // SAFETY: c is NUL-terminated.
+        let r = unsafe { libc::mkdir(c.as_ptr() as *const i8, 0o700) };
+        if r < 0 && libc::errno() != libc::EEXIST {
+            return Err(io::Error::from_raw_os_error(libc::errno()));
+        }
+        Ok(())
+    }
+}
+
+/// wasm64 owned-file carrier standing in for `std::fs::File`.
+///
+/// On `wasm64-unknown-unknown` `std::fs::File` is the uninhabited never type
+/// (`File(!)`) — it cannot be constructed and `std::fs` performs no I/O. The
+/// `fd.c` port stores the kernel handle as a `std::fs::File` and bridges to the
+/// raw integer fd via `AsRawFd`/`FromRawFd`/`IntoRawFd` before doing the actual
+/// `pread`/`pwrite`/`close`. `WasmFile` is a real, constructible carrier with
+/// the same surface: it owns an integer fd from the host VFS (closing it on
+/// drop) and routes the `Read`/`Write`/`Seek`/metadata methods to the host
+/// imports. The `backend-storage-file-fd` crate aliases its `OsFile` to this on
+/// wasm and to `std::fs::File` natively.
+#[cfg(target_family = "wasm")]
+pub mod osfile {
+    use super::imp as libc;
+    use std::io::{self, Read, Seek, SeekFrom, Write};
+
+    /// Owned host file descriptor; closes on drop (unless `into_raw_fd`'d out).
+    #[derive(Debug)]
+    pub struct WasmFile {
+        fd: i32,
+    }
+
+    /// wasm64 `std::fs::OpenOptions` stand-in producing a host-VFS `WasmFile`.
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct WasmOpenOptions {
+        read: bool,
+        write: bool,
+        append: bool,
+        truncate: bool,
+        create: bool,
+        create_new: bool,
+        mode: u32,
+        custom_flags: i32,
+    }
+    impl WasmOpenOptions {
+        pub fn new() -> WasmOpenOptions {
+            WasmOpenOptions { mode: 0o666, ..Default::default() }
+        }
+        pub fn read(&mut self, v: bool) -> &mut Self {
+            self.read = v;
+            self
+        }
+        pub fn write(&mut self, v: bool) -> &mut Self {
+            self.write = v;
+            self
+        }
+        pub fn append(&mut self, v: bool) -> &mut Self {
+            self.append = v;
+            self
+        }
+        pub fn truncate(&mut self, v: bool) -> &mut Self {
+            self.truncate = v;
+            self
+        }
+        pub fn create(&mut self, v: bool) -> &mut Self {
+            self.create = v;
+            self
+        }
+        pub fn create_new(&mut self, v: bool) -> &mut Self {
+            self.create_new = v;
+            self
+        }
+        pub fn mode(&mut self, m: u32) -> &mut Self {
+            self.mode = m;
+            self
+        }
+        pub fn custom_flags(&mut self, f: i32) -> &mut Self {
+            self.custom_flags = f;
+            self
+        }
+        pub fn open(&self, path: impl AsRef<std::path::Path>) -> io::Result<WasmFile> {
+            use super::osfd::{FromRawFd as _, OsStrExt as _};
+            let mut flags = if self.read && self.write {
+                libc::O_RDWR
+            } else if self.write || self.append {
+                libc::O_WRONLY
+            } else {
+                libc::O_RDONLY
+            };
+            if self.append {
+                flags |= libc::O_APPEND;
+            }
+            if self.truncate {
+                flags |= libc::O_TRUNC;
+            }
+            if self.create_new {
+                flags |= libc::O_CREAT | libc::O_EXCL;
+            } else if self.create {
+                flags |= libc::O_CREAT;
+            }
+            flags |= self.custom_flags;
+            let mut cpath = path.as_ref().as_os_str().as_bytes().to_vec();
+            cpath.push(0);
+            // SAFETY: cpath is NUL-terminated.
+            let fd = unsafe { libc::open(cpath.as_ptr() as *const i8, flags, self.mode) };
+            if fd < 0 {
+                return Err(io::Error::from_raw_os_error(libc::errno()));
+            }
+            // SAFETY: freshly opened owned host fd.
+            Ok(unsafe { WasmFile::from_raw_fd(fd) })
+        }
+    }
+
+    impl WasmFile {
+        /// `std::fs::File::open` — open read-only via the host VFS.
+        pub fn open(path: impl AsRef<std::path::Path>) -> io::Result<WasmFile> {
+            WasmOpenOptions::new().read(true).open(path)
+        }
+        /// `std::fs::File::create` — open write/create/truncate via the host VFS.
+        pub fn create(path: impl AsRef<std::path::Path>) -> io::Result<WasmFile> {
+            WasmOpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(path)
+        }
+        /// `std::fs::File::options` — a fresh `WasmOpenOptions` builder.
+        pub fn options() -> WasmOpenOptions {
+            WasmOpenOptions::new()
+        }
+    }
+
+    impl WasmFile {
+        /// Read all remaining bytes (current offset → EOF) onto `buf`.
+        pub fn metadata(&self) -> io::Result<WasmMetadata> {
+            let mut words = [0i64; 8];
+            // SAFETY: words is a valid 8-word buffer.
+            let r = unsafe { libc::host_fstat_pub(self.fd, words.as_mut_ptr()) };
+            if r < 0 {
+                return Err(io::Error::from_raw_os_error((-r) as i32));
+            }
+            Ok(WasmMetadata { size: words[2] as u64, mode: words[0] as u32 })
+        }
+        /// `File::sync_all` → host `fsync`.
+        pub fn sync_all(&self) -> io::Result<()> {
+            // SAFETY: fd is owned and valid.
+            let r = unsafe { libc::host_fsync_pub(self.fd) };
+            if r < 0 {
+                return Err(io::Error::from_raw_os_error((-r) as i32));
+            }
+            Ok(())
+        }
+        /// `File::sync_data` → host `fsync` (no fdatasync distinction here).
+        pub fn sync_data(&self) -> io::Result<()> {
+            self.sync_all()
+        }
+        /// `File::set_len` → host `ftruncate`.
+        pub fn set_len(&self, len: u64) -> io::Result<()> {
+            // SAFETY: fd is owned and valid.
+            let r = unsafe { libc::host_ftruncate_pub(self.fd, len as i64) };
+            if r < 0 {
+                return Err(io::Error::from_raw_os_error((-r) as i32));
+            }
+            Ok(())
+        }
+        /// `File::try_clone` — duplicate by re-wrapping the SAME fd is unsafe
+        /// (double close); the host VFS has no dup, so this is unsupported.
+        pub fn try_clone(&self) -> io::Result<WasmFile> {
+            Err(io::Error::from(io::ErrorKind::Unsupported))
+        }
+        /// `FileExt::read_at` → host `pread`.
+        pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+            // SAFETY: buf is a valid writable slice.
+            let r = unsafe { libc::pread(self.fd, buf.as_mut_ptr() as *mut _, buf.len(), offset as i64) };
+            if r < 0 {
+                return Err(io::Error::from_raw_os_error(libc::errno()));
+            }
+            Ok(r as usize)
+        }
+        /// `FileExt::write_at` → host `pwrite`.
+        pub fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
+            // SAFETY: buf is a valid readable slice.
+            let r = unsafe { libc::pwrite(self.fd, buf.as_ptr() as *const _, buf.len(), offset as i64) };
+            if r < 0 {
+                return Err(io::Error::from_raw_os_error(libc::errno()));
+            }
+            Ok(r as usize)
+        }
+        /// `FileExt::write_all_at` → looped `write_at`.
+        pub fn write_all_at(&self, mut buf: &[u8], mut offset: u64) -> io::Result<()> {
+            while !buf.is_empty() {
+                match self.write_at(buf, offset) {
+                    Ok(0) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WriteZero,
+                            "failed to write whole buffer",
+                        ))
+                    }
+                    Ok(n) => {
+                        buf = &buf[n..];
+                        offset += n as u64;
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(())
+        }
+        /// `File::set_permissions` — single-user wasm has no Unix perms; no-op.
+        pub fn set_permissions(&self, _perm: WasmPermissions) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Read for WasmFile {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            // SAFETY: buf is a valid writable slice.
+            let r = unsafe { libc::host_read_pub(self.fd, buf.as_mut_ptr(), buf.len()) };
+            if r < 0 {
+                return Err(io::Error::from_raw_os_error((-r) as i32));
+            }
+            Ok(r as usize)
+        }
+    }
+    impl Write for WasmFile {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            // SAFETY: buf is a valid readable slice.
+            let r = unsafe { libc::host_write_pub(self.fd, buf.as_ptr(), buf.len()) };
+            if r < 0 {
+                return Err(io::Error::from_raw_os_error((-r) as i32));
+            }
+            Ok(r as usize)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    impl Seek for WasmFile {
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            let (off, whence) = match pos {
+                SeekFrom::Start(n) => (n as i64, 0),     // SEEK_SET
+                SeekFrom::End(n) => (n, 2),              // SEEK_END
+                SeekFrom::Current(n) => (n, 1),         // SEEK_CUR
+            };
+            // SAFETY: fd is owned and valid.
+            let r = unsafe { libc::host_lseek_pub(self.fd, off, whence) };
+            if r < 0 {
+                return Err(io::Error::from_raw_os_error((-r) as i32));
+            }
+            Ok(r as u64)
+        }
+    }
+
+    impl Drop for WasmFile {
+        fn drop(&mut self) {
+            if self.fd >= 0 {
+                // SAFETY: fd is owned; closing once on drop.
+                unsafe {
+                    libc::host_close_pub(self.fd);
+                }
+            }
+        }
+    }
+
+    impl super::osfd::AsRawFd for WasmFile {
+        fn as_raw_fd(&self) -> super::osfd::RawFd {
+            self.fd
+        }
+    }
+    impl super::osfd::FromRawFd for WasmFile {
+        unsafe fn from_raw_fd(fd: super::osfd::RawFd) -> Self {
+            WasmFile { fd }
+        }
+    }
+    impl super::osfd::IntoRawFd for WasmFile {
+        fn into_raw_fd(self) -> super::osfd::RawFd {
+            let fd = self.fd;
+            core::mem::forget(self); // ownership transferred to caller
+            fd
+        }
+    }
+
+    /// wasm64 `std::fs::ReadDir` stand-in over the host `opendir`/`readdir`
+    /// imports. Yields `io::Result<WasmDirEntry>`; closes the host stream on drop.
+    #[derive(Debug)]
+    pub struct WasmReadDir {
+        handle: i32,
+    }
+
+    /// wasm64 `std::fs::DirEntry` stand-in — carries the entry name only (all
+    /// `ReadDirExtended` reads is `file_name()`).
+    #[derive(Debug)]
+    pub struct WasmDirEntry {
+        name: std::ffi::OsString,
+    }
+    impl WasmDirEntry {
+        pub fn file_name(&self) -> std::ffi::OsString {
+            self.name.clone()
+        }
+    }
+
+    impl WasmReadDir {
+        /// `opendir(path)` — open a host directory stream (or `io::Error`).
+        pub fn open(path: &[u8]) -> io::Result<WasmReadDir> {
+            // SAFETY: path slice is valid for its length.
+            let r = unsafe { libc::opendir_host(path.as_ptr(), path.len()) };
+            if r < 0 {
+                return Err(io::Error::from_raw_os_error((-r) as i32));
+            }
+            Ok(WasmReadDir { handle: r as i32 })
+        }
+    }
+
+    impl Iterator for WasmReadDir {
+        type Item = io::Result<WasmDirEntry>;
+        fn next(&mut self) -> Option<Self::Item> {
+            let mut buf = [0u8; 512];
+            // SAFETY: buf is a valid writable 512-byte buffer.
+            let r = unsafe { libc::readdir_host(self.handle, buf.as_mut_ptr(), buf.len()) };
+            if r < 0 {
+                return Some(Err(io::Error::from_raw_os_error((-r) as i32)));
+            }
+            if r == 0 {
+                return None; // end of stream
+            }
+            let name = std::ffi::OsString::from(
+                String::from_utf8_lossy(&buf[..r as usize]).into_owned(),
+            );
+            Some(Ok(WasmDirEntry { name }))
+        }
+    }
+
+    impl Drop for WasmReadDir {
+        fn drop(&mut self) {
+            // SAFETY: handle is an owned host dir stream.
+            unsafe {
+                libc::closedir_host(self.handle);
+            }
+        }
+    }
+
+    /// Minimal `std::fs::Metadata` stand-in (size + mode are all fd.c reads).
+    #[derive(Clone, Copy, Debug)]
+    pub struct WasmMetadata {
+        size: u64,
+        mode: u32,
+    }
+    impl WasmMetadata {
+        /// Build from a `stat`'s `st_mode`/`st_size` (used by `fscompat`).
+        pub fn from_stat(mode: u32, size: u64) -> WasmMetadata {
+            WasmMetadata { size, mode }
+        }
+        pub fn len(&self) -> u64 {
+            self.size
+        }
+        pub fn is_empty(&self) -> bool {
+            self.size == 0
+        }
+        pub fn is_dir(&self) -> bool {
+            (self.mode & libc::S_IFMT) == libc::S_IFDIR
+        }
+        pub fn is_file(&self) -> bool {
+            (self.mode & libc::S_IFMT) == libc::S_IFREG
+        }
+        pub fn file_type(&self) -> WasmFileType {
+            WasmFileType { mode: self.mode }
+        }
+        // `std::os::unix::fs::MetadataExt`-shaped inherent accessors (single-user
+        // wasm has no real Unix owner/perm metadata; report neutral values so the
+        // datadir-ownership interlock in `checkDataDir` passes for the lone user).
+        pub fn uid(&self) -> u32 {
+            // Match the shim's `geteuid()` (0) so the datadir-ownership
+            // interlock in `checkDataDir` passes for the lone wasm user.
+            0
+        }
+        pub fn gid(&self) -> u32 {
+            0
+        }
+        pub fn mode(&self) -> u32 {
+            self.mode
+        }
+        pub fn ino(&self) -> u64 {
+            0
+        }
+        pub fn dev(&self) -> u64 {
+            0
+        }
+        pub fn size(&self) -> u64 {
+            self.size
+        }
+        /// `std::fs::Metadata::permissions()` stand-in.
+        pub fn permissions(&self) -> WasmPermissions {
+            WasmPermissions { mode: self.mode & 0o7777 }
+        }
+        pub fn modified(&self) -> std::io::Result<std::time::SystemTime> {
+            Ok(std::time::SystemTime::UNIX_EPOCH)
+        }
+    }
+
+    /// wasm64 `std::fs::Permissions` stand-in (only `mode()` is read here).
+    #[derive(Clone, Copy, Debug)]
+    pub struct WasmPermissions {
+        mode: u32,
+    }
+    impl WasmPermissions {
+        pub fn mode(&self) -> u32 {
+            self.mode
+        }
+        pub fn set_mode(&mut self, mode: u32) {
+            self.mode = mode;
+        }
+        pub fn readonly(&self) -> bool {
+            self.mode & 0o222 == 0
+        }
+    }
+
+    /// wasm64 `std::fs::FileType` stand-in.
+    #[derive(Clone, Copy, Debug)]
+    pub struct WasmFileType {
+        mode: u32,
+    }
+    impl WasmFileType {
+        pub fn is_symlink(&self) -> bool {
+            (self.mode & libc::S_IFMT) == libc::S_IFLNK
+        }
+        pub fn is_dir(&self) -> bool {
+            (self.mode & libc::S_IFMT) == libc::S_IFDIR
+        }
+        pub fn is_file(&self) -> bool {
+            (self.mode & libc::S_IFMT) == libc::S_IFREG
         }
     }
 }

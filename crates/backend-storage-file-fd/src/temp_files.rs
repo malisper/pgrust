@@ -11,6 +11,11 @@
 use wasm_libc_shim as libc;
 use std::path::Path;
 
+#[cfg(not(target_family = "wasm"))]
+use std::fs as osfs_free;
+#[cfg(target_family = "wasm")]
+use wasm_libc_shim::fscompat as osfs_free;
+
 use backend_utils_error::ereport;
 use types_catalog::catalog::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
 use types_core::primitive::MAXPGPATH;
@@ -289,7 +294,7 @@ pub fn PathNameCreateTemporaryDir(basedir: &str, directory: &str) -> PgResult<()
 /// `PathNameDeleteTemporaryDir(const char *dirname)` (fd.c).
 pub fn PathNameDeleteTemporaryDir(dirname: &str) -> PgResult<()> {
     // Silently ignore missing directory.
-    match std::fs::symlink_metadata(dirname) {
+    match osfs_free::symlink_metadata(dirname) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         _ => {}
     }
@@ -311,7 +316,7 @@ pub fn PathNameDeleteTemporaryDir(dirname: &str) -> PgResult<()> {
 /// (fd.c) — returns whether the file existed.
 pub fn PathNameDeleteTemporaryFile(path: &str, error_on_failure: bool) -> PgResult<bool> {
     // Get the final size for pgstat reporting.
-    let (stat_errno, filesize) = match std::fs::metadata(path) {
+    let (stat_errno, filesize) = match osfs_free::metadata(path) {
         Ok(md) => (0, md.len()),
         Err(e) => (e.raw_os_error().unwrap_or(0), 0),
     };
@@ -323,7 +328,7 @@ pub fn PathNameDeleteTemporaryFile(path: &str, error_on_failure: bool) -> PgResu
         return Ok(false);
     }
 
-    if let Err(e) = std::fs::remove_file(path) {
+    if let Err(e) = osfs_free::remove_file(path) {
         let unlink_errno = e.raw_os_error().unwrap_or(0);
         if unlink_errno != enoent() {
             ereport(if error_on_failure { ERROR } else { LOG })

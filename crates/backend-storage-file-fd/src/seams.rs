@@ -18,6 +18,17 @@ use std::os::fd::FromRawFd;
 use wasm_libc_shim::osfd::FromRawFd;
 use std::path::Path;
 
+#[cfg(not(target_family = "wasm"))]
+use std::fs as osfs_free;
+#[cfg(target_family = "wasm")]
+use wasm_libc_shim::fscompat as osfs_free;
+
+/// The owned kernel-file carrier (see `vfd_core`).
+#[cfg(not(target_family = "wasm"))]
+type OsFile = std::fs::File;
+#[cfg(target_family = "wasm")]
+type OsFile = wasm_libc_shim::osfile::WasmFile;
+
 use types_error::{ErrorLevel, PgError, PgResult, ERROR, FATAL, LOG};
 use types_storage::file::File;
 
@@ -1038,7 +1049,7 @@ pub fn seam_pg_fsync(fd: i32) -> i32 {
     let raw = allocated_desc::TransientFileRawFd(fd).unwrap_or(fd);
     // SAFETY: `raw` is a live kernel fd; ManuallyDrop ensures we never close it
     // (the owner — descriptor table or caller — closes it), matching C.
-    let file = ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(raw) });
+    let file = ManuallyDrop::new(unsafe { OsFile::from_raw_fd(raw) });
     match sync_cleanup::pg_fsync(&file) {
         Ok(()) => 0,
         Err(e) => -(e.saved_errno().unwrap_or(libc::EIO)),
@@ -1856,7 +1867,21 @@ pub fn rmtree(path: &str, rmtopdir: bool) -> bool {
     let mut result = true;
 
     // dir = OPENDIR(path); if (dir == NULL) { warning; return false; }
+    #[cfg(not(target_family = "wasm"))]
     let entries = match std::fs::read_dir(path) {
+        Ok(rd) => rd,
+        Err(e) => {
+            warn_file(format!("could not open directory \"{path}\""), &e);
+            return false;
+        }
+    };
+    #[cfg(target_family = "wasm")]
+    let entries = match wasm_libc_shim::osfile::WasmReadDir::open(
+        {
+            use wasm_libc_shim::osfd::OsStrExt as _;
+            std::path::Path::new(path).as_os_str().as_bytes()
+        },
+    ) {
         Ok(rd) => rd,
         Err(e) => {
             warn_file(format!("could not open directory \"{path}\""), &e);
@@ -1884,7 +1909,7 @@ pub fn rmtree(path: &str, rmtopdir: bool) -> bool {
             PGFILETYPE_DIR => subdirs.push(pathbuf),
             _ => {
                 // if (unlink(pathbuf) != 0 && errno != ENOENT) warning;
-                if let Err(e) = std::fs::remove_file(&pathbuf) {
+                if let Err(e) = osfs_free::remove_file(&pathbuf) {
                     if e.raw_os_error() != Some(libc::ENOENT) {
                         warn_file(format!("could not remove file \"{pathbuf}\""), &e);
                         result = false;
@@ -1903,7 +1928,7 @@ pub fn rmtree(path: &str, rmtopdir: bool) -> bool {
 
     if rmtopdir {
         // if (rmdir(path) != 0) warning;
-        if let Err(e) = std::fs::remove_dir(path) {
+        if let Err(e) = osfs_free::remove_dir(path) {
             warn_file(format!("could not remove directory \"{path}\""), &e);
             result = false;
         }
@@ -1923,7 +1948,7 @@ fn warn_file(message: String, error: &std::io::Error) {
 
 /// `path_is_dir(path)` — `stat(path) == 0 && S_ISDIR(st.st_mode)`.
 pub fn path_is_dir(path: &str) -> bool {
-    match std::fs::metadata(path) {
+    match osfs_free::metadata(path) {
         Ok(meta) => meta.is_dir(),
         Err(_) => false,
     }

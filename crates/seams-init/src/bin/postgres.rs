@@ -25,7 +25,21 @@ use backend_main_main::{pg_main, MainOutcome};
 fn main() {
     // Collect process arguments as owned strings, then borrow them as the
     // `&[&str]` slice `pg_main` expects (argv[0] is the executable name).
+    //
+    // On `wasm64-unknown-unknown` there is no WASI, so `std::env::args()` is
+    // empty; the host harness provides `argv` through a `pgvfs` import instead.
+    #[cfg(not(target_family = "wasm"))]
     let owned: Vec<String> = std::env::args().collect();
+    #[cfg(target_family = "wasm")]
+    let owned: Vec<String> = {
+        let a = wasm_libc_shim::host_args();
+        if a.is_empty() {
+            // Fall back to a bare program name so dispatch still runs.
+            vec!["postgres".to_string()]
+        } else {
+            a
+        }
+    };
     let argv: Vec<&str> = owned.iter().map(String::as_str).collect();
 
     // C's `MemoryContextInit()` builds `TopMemoryContext`; this tree's mcx model

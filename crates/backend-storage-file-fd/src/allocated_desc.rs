@@ -14,7 +14,22 @@ use wasm_libc_shim as libc;
 use std::os::fd::{AsRawFd, RawFd};
 #[cfg(target_family = "wasm")]
 use wasm_libc_shim::osfd::{AsRawFd, RawFd};
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim::osfd::FromRawFd as _;
 use std::path::Path;
+
+/// The owned kernel-file carrier (see `vfd_core`): `std::fs::File` natively, a
+/// host-VFS-backed `WasmFile` on wasm64.
+#[cfg(not(target_family = "wasm"))]
+type OsFile = std::fs::File;
+#[cfg(target_family = "wasm")]
+type OsFile = wasm_libc_shim::osfile::WasmFile;
+
+#[cfg(not(target_family = "wasm"))]
+type OsMetadata = std::fs::Metadata;
+#[cfg(target_family = "wasm")]
+type OsMetadata = wasm_libc_shim::osfile::WasmMetadata;
 
 use types_error::{
     ErrorLocation, ErrorLevel, PgError, PgResult, ERROR, LOG, ERRCODE_INSUFFICIENT_RESOURCES,
@@ -524,7 +539,7 @@ pub fn AllocateDir(dirname: impl AsRef<Path>) -> PgResult<Option<Dir>> {
     vfd_core::with_fd(vfd_core::ReleaseLruFiles)?;
 
     loop {
-        match std::fs::read_dir(dirname) {
+        match os_read_dir(dirname) {
             Ok(iter) => {
                 let create_subid = get_current_sub_transaction_id();
                 return with_fd(|fd| {
@@ -716,9 +731,22 @@ pub fn TransientFileRawFd(fd_value: i32) -> Result<RawFd, i32> {
 // Local OS helpers (the direct libc calls fd.c makes here).
 // ---------------------------------------------------------------------------
 
+/// `opendir(dirname)` — `std::fs::read_dir` natively; the host-VFS
+/// `WasmReadDir` on wasm64 (where `std::fs::read_dir` performs no I/O).
+#[cfg(not(target_family = "wasm"))]
+fn os_read_dir(dirname: &Path) -> std::io::Result<vfd_core::OsReadDir> {
+    std::fs::read_dir(dirname)
+}
+#[cfg(target_family = "wasm")]
+fn os_read_dir(dirname: &Path) -> std::io::Result<vfd_core::OsReadDir> {
+    use wasm_libc_shim::osfd::OsStrExt as _;
+    wasm_libc_shim::osfile::WasmReadDir::open(dirname.as_os_str().as_bytes())
+}
+
 /// `fopen(name, mode)` — open a buffered stdio stream. Returns the owned file
 /// or the failing errno (C returns NULL with errno set).
-fn open_stdio(name: &Path, mode: &str) -> Result<std::fs::File, i32> {
+#[cfg(not(target_family = "wasm"))]
+fn open_stdio(name: &Path, mode: &str) -> Result<OsFile, i32> {
     use std::fs::OpenOptions;
 
     // Map the fopen mode string onto OpenOptions, covering the modes the
@@ -749,6 +777,32 @@ fn open_stdio(name: &Path, mode: &str) -> Result<std::fs::File, i32> {
         }
     }
     opts.open(name).map_err(|e| e.raw_os_error().unwrap_or(0))
+}
+
+/// wasm64 `fopen`: `std::fs::OpenOptions` performs no I/O on
+/// `wasm64-unknown-unknown`, so translate the mode string to `open(2)` flags and
+/// route through the host VFS (`BasicOpenFilePermFd` → owned `WasmFile`).
+#[cfg(target_family = "wasm")]
+fn open_stdio(name: &Path, mode: &str) -> Result<OsFile, i32> {
+    let m = mode.trim_end_matches('b');
+    let flags = match m {
+        "r" => libc::O_RDONLY,
+        "w" => libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
+        "a" => libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
+        "r+" => libc::O_RDWR,
+        "w+" => libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+        "a+" => libc::O_RDWR | libc::O_CREAT | libc::O_APPEND,
+        _ => libc::O_RDONLY,
+    };
+    match vfd_core::BasicOpenFilePermFd(name, flags, vfd_core::pg_file_create_mode()) {
+        Ok(-1) => Err(libc::errno()),
+        Ok(raw) => {
+            // SAFETY: `raw` is a freshly opened owned host descriptor.
+            Ok(unsafe { OsFile::from_raw_fd(raw) })
+        }
+        // A real ereport (EMFILE retry exhausted) — surface as EMFILE.
+        Err(_) => Err(libc::EMFILE),
+    }
 }
 
 /// `popen(command, mode)` — spawn `/bin/sh -c command` with its stdin or stdout
@@ -999,7 +1053,7 @@ pub(crate) fn stream_write(index: i32, buf: &[u8]) -> Option<i32> {
 
 /// `fstat(fileno(file), &st)` against the stream at table `index` (copyto's
 /// directory check). Returns the file metadata or the failing errno.
-pub(crate) fn AllocatedFileMetadata(index: i32) -> Result<std::fs::Metadata, i32> {
+pub(crate) fn AllocatedFileMetadata(index: i32) -> Result<OsMetadata, i32> {
     with_fd(|fd| {
         let i = index as usize;
         if i >= fd.allocated_descs.len() {

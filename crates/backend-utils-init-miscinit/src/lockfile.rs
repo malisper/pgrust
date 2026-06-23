@@ -10,12 +10,21 @@
 //! their owners' seams; everything else is plain `std::fs` here.
 
 use std::cell::{Cell, RefCell};
+#[cfg(not(target_family = "wasm"))]
 use std::fs::OpenOptions;
+#[cfg(target_family = "wasm")]
+use wasm_libc_shim::osfile::WasmOpenOptions as OpenOptions;
 use std::io::{Read, Write};
 #[cfg(not(target_family = "wasm"))]
 use std::os::unix::fs::OpenOptionsExt;
 #[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
 use wasm_libc_shim::osfs::OpenOptionsExt;
+
+#[cfg(not(target_family = "wasm"))]
+use std::fs as osfs_free;
+#[cfg(target_family = "wasm")]
+use wasm_libc_shim::fscompat as osfs_free;
 
 use types_error::{PgError, PgResult, FATAL};
 
@@ -93,7 +102,7 @@ pub fn unlink_lock_files() {
         let mut files = files.borrow_mut();
         for curfile in files.iter() {
             // unlink(curfile); /* Should we complain if the unlink fails? */
-            let _ = std::fs::remove_file(curfile);
+            let _ = osfs_free::remove_file(curfile);
         }
         // lock_files = NIL;
         files.clear();
@@ -276,7 +285,7 @@ pub fn create_lock_file(
         }
 
         // Looks like nobody's home. Unlink the file and try again to create it.
-        if let Err(e) = std::fs::remove_file(filename) {
+        if let Err(e) = osfs_free::remove_file(filename) {
             return Err(file_err(
                 format!("could not remove old lock file \"{filename}\""),
                 &e,
@@ -308,7 +317,7 @@ pub fn create_lock_file(
     }
 
     if let Err(e) = file.write_all(contents.as_bytes()) {
-        let _ = std::fs::remove_file(filename);
+        let _ = osfs_free::remove_file(filename);
         return Err(file_err(
             format!("could not write lock file \"{filename}\""),
             &e,
@@ -317,7 +326,7 @@ pub fn create_lock_file(
 
     // pg_fsync(fd)
     if let Err(e) = file.sync_all() {
-        let _ = std::fs::remove_file(filename);
+        let _ = osfs_free::remove_file(filename);
         return Err(file_err(
             format!("could not write lock file \"{filename}\""),
             &e,

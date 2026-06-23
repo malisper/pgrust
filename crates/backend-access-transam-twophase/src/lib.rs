@@ -19,6 +19,13 @@
 use wasm_libc_shim as libc;
 extern crate alloc;
 
+/// The owned kernel-file carrier (`std::fs::File` natively; host-VFS `WasmFile`
+/// on wasm64, where `std::fs::File` is the uninhabited never type).
+#[cfg(not(target_family = "wasm"))]
+type OsFile = std::fs::File;
+#[cfg(target_family = "wasm")]
+type OsFile = wasm_libc_shim::osfile::WasmFile;
+
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -2425,7 +2432,7 @@ fn seam_read_twophase_file(
     let raw = fd::allocated_desc::OpenTransientFile(&path, libc::O_RDONLY)?;
     // Borrow the kernel fd as a std File without taking ownership (the close is
     // CloseTransientFile's job, mirroring C's CloseTransientFile(fd)).
-    let mut file = core::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(raw) });
+    let mut file = core::mem::ManuallyDrop::new(unsafe { OsFile::from_raw_fd(raw) });
 
     let mut read_body = || -> PgResult<Vec<u8>> {
         // C: fstat(fd, &stat) for the length; here std::fs::Metadata.
@@ -2493,7 +2500,7 @@ fn seam_recreate_twophase_file(xid: TransactionId, content: &[u8], crc: u32) -> 
             .into_error()
             .with_error_location(here())
     })?;
-    let mut file = core::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(raw) });
+    let mut file = core::mem::ManuallyDrop::new(unsafe { OsFile::from_raw_fd(raw) });
 
     let mut write_body = || -> PgResult<()> {
         // C: write(fd, content, len); write(fd, &statefile_crc, sizeof(crc)).

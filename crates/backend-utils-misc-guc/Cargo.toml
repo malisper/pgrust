@@ -9,6 +9,7 @@ name = "backend_utils_misc_guc"
 path = "src/lib.rs"
 
 [dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }
 # Lazy-vacuum driver's GUC-read seams (maintenance_work_mem / autovacuum_work_mem
 # / track_io_timing / track_cost_delay_timing) home in vacuumlazy-seams; guc.c
 # is their real owner.

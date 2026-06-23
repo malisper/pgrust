@@ -210,11 +210,11 @@ fn SocketBackend(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
 /// placed in `in_buf` and we act like a `'Q'` (simple query) message was
 /// received. Returns [`EOF`] if end-of-file input is seen (time to shut down).
 fn InteractiveBackend(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
+    #[cfg(not(target_family = "wasm"))]
     use std::io::Write;
 
     // Display a prompt and obtain input from the user.
-    print!("backend> ");
-    let _ = std::io::stdout().flush();
+    interactive_print("backend> ");
 
     in_buf.reset(); // resetStringInfo(inBuf)
 
@@ -270,11 +270,26 @@ fn InteractiveBackend(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
     if globals::echo_query() {
         // inBuf->data is NUL-terminated; print up to (but not including) it.
         let text = core::str::from_utf8(&in_buf.data[..in_buf.len() - 1]).unwrap_or("");
-        print!("statement: {text}\n");
+        interactive_print(&format!("statement: {text}\n"));
     }
-    let _ = std::io::stdout().flush();
 
     Ok(pqmsg::QUERY) // PqMsg_Query
+}
+
+/// Write a prompt/echo string to the interactive output. Natively this is
+/// `print!` + flush over std stdout; on `wasm64-unknown-unknown` std stdout is a
+/// no-op, so route to the host stdout import.
+fn interactive_print(s: &str) {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        use std::io::Write;
+        print!("{s}");
+        let _ = std::io::stdout().flush();
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        wasm_libc_shim::stdout_write(s.as_bytes());
+    }
 }
 
 /// `interactive_getc()` (postgres.c:324) — collect one character from stdin.
@@ -282,6 +297,7 @@ fn InteractiveBackend(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
 /// respond to signals, particularly SIGTERM/SIGQUIT. Returns [`EOF`] (-1) at
 /// end of file.
 fn interactive_getc() -> PgResult<i32> {
+    #[cfg(not(target_family = "wasm"))]
     use std::io::Read;
 
     // This will not process catchup interrupts or notifications while reading.
@@ -290,10 +306,17 @@ fn interactive_getc() -> PgResult<i32> {
 
     // c = getc(stdin);
     let mut byte = [0u8; 1];
+    #[cfg(not(target_family = "wasm"))]
     let c = match std::io::stdin().read(&mut byte) {
         Ok(0) => EOF,
         Ok(_) => byte[0] as i32,
         Err(_) => EOF,
+    };
+    // std stdin is a no-op on wasm64-unknown-unknown; read SQL via the host.
+    #[cfg(target_family = "wasm")]
+    let c = match wasm_libc_shim::stdin_read(&mut byte) {
+        0 => EOF,
+        _ => byte[0] as i32,
     };
 
     crate::interrupt::ProcessClientReadInterrupt(false)?;

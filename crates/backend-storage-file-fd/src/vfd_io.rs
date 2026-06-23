@@ -17,6 +17,12 @@ use std::os::unix::io::FromRawFd;
 use wasm_libc_shim::osfd::{AsRawFd, FromRawFd, RawFd};
 use std::path::Path;
 
+/// The owned kernel-file carrier (see `vfd_core`).
+#[cfg(not(target_family = "wasm"))]
+type OsFile = std::fs::File;
+#[cfg(target_family = "wasm")]
+type OsFile = wasm_libc_shim::osfile::WasmFile;
+
 use backend_utils_error::ereport;
 use types_error::{ErrorLocation, PgResult, ERROR};
 use types_storage::File;
@@ -390,8 +396,8 @@ pub fn FileWriteback(
 /// Materialize a borrowed `StdFile` view over a VFD's kernel fd without owning
 /// it (the cache keeps ownership). The caller wraps it in `ManuallyDrop` so the
 /// fd is never closed here.
-unsafe fn take_borrowed(file: i32) -> std::fs::File {
-    std::fs::File::from_raw_fd(vfd_raw_fd(file))
+unsafe fn take_borrowed(file: i32) -> OsFile {
+    OsFile::from_raw_fd(vfd_raw_fd(file))
 }
 
 // ---------------------------------------------------------------------------

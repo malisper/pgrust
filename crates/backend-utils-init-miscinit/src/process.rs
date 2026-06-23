@@ -12,6 +12,11 @@
 use wasm_libc_shim as libc;
 use std::cell::Cell;
 
+#[cfg(not(target_family = "wasm"))]
+use std::fs as osfs_free;
+#[cfg(target_family = "wasm")]
+use wasm_libc_shim::fscompat as osfs_free;
+
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, FATAL};
 use types_storage::latch::LatchHandle;
 
@@ -141,7 +146,7 @@ pub fn SwitchBackToLocalLatch() -> PgResult<()> {
 pub fn checkDataDir() -> PgResult<()> {
     let data_dir = backend_utils_init_small::globals::DataDir().expect("DataDir set");
 
-    let stat_buf = match std::fs::metadata(&data_dir) {
+    let stat_buf = match osfs_free::metadata(&data_dir) {
         Ok(m) => m,
         Err(e) => {
             // Both C exits carry errcode_for_file_access() (miscinit.c:357/362).
@@ -245,7 +250,7 @@ pub fn ValidatePgVersion(path: &str) -> PgResult<()> {
 
     let full_path = format!("{path}/PG_VERSION");
 
-    let contents = match std::fs::read_to_string(&full_path) {
+    let contents = match osfs_free::read_to_string(&full_path) {
         Ok(s) => s,
         Err(e) => {
             if e.raw_os_error() == Some(2) {
