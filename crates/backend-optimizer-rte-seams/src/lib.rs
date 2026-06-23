@@ -280,6 +280,35 @@ pub fn init_seams() {
     // physical tlist). RESULT/GROUP expose no columns, so coltypes is empty and the
     // result is an empty Var list.
     backend_optimizer_util_plancat_ext_seams::expand_rte_physical_tlist::set(|run, root, rti| {
+        // A function RTE's output columns are NOT in `rte->coltypes` (that field
+        // is populated only for VALUES/CTE/TABLEFUNC/NAMEDTUPLESTORE). C's
+        // expandRTE derives them from `rte->functions` via get_expr_result_type,
+        // so route the FUNCTION case through the expandRTE-backed seam that
+        // parser-relation installs, then allocate the returned Var values into
+        // root's arena (the borrow on `root` for planner_rt_fetch is dropped
+        // before alloc_node, same as the coltypes path below).
+        let colvars = {
+            let rte = planner_rt_fetch(run, root, rti);
+            if rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_FUNCTION {
+                Some(
+                    backend_optimizer_util_plancat_ext_seams::expand_function_rte_colvars::call(
+                        run.mcx(),
+                        rte,
+                        rti,
+                    )?,
+                )
+            } else {
+                None
+            }
+        };
+        if let Some(colvars) = colvars {
+            return Ok(colvars.map(|vals| {
+                vals.into_iter()
+                    .map(|v| root.alloc_node(types_pathnodes::Expr::Var(v)))
+                    .collect::<alloc::vec::Vec<types_pathnodes::NodeId>>()
+            }));
+        }
+
         // Snapshot the per-column type metadata while borrowing the RTE, then
         // drop that borrow before allocating Var nodes into root's arena.
         let (coltypes, coltypmods, colcollations) = {

@@ -443,6 +443,22 @@ seam_core::seam!(
         rti: Index,
     ) -> PgResult<Vec<(NodeId, AttrNumber, bool)>>
 );
+seam_core::seam!(
+    /// `expandRTE`'s RTE_FUNCTION branch (parse_relation.c:2825) for
+    /// build_physical_tlist: unlike VALUES/CTE/TABLEFUNC, a function RTE's output
+    /// columns are NOT in `rte->coltypes` — they come from `rte->functions` and
+    /// `get_expr_result_type(funcexpr)` (scalar/composite/record) plus the
+    /// optional ordinality column. parser-relation owns `expandRTE`, so it
+    /// installs this; given the function RTE and its 1-based RT index it returns
+    /// one `Var` value per output column (the caller allocates the nodes into the
+    /// planner arena), or `None` if a dropped column is encountered (expandRTE
+    /// emits a non-Var there) so build_physical_tlist punts.
+    pub fn expand_function_rte_colvars<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rte: &types_nodes::parsenodes::RangeTblEntry<'mcx>,
+        rti: Index,
+    ) -> PgResult<Option<Vec<types_nodes::primnodes::Var>>>
+);
 
 /* ---- triggers / generated columns (has_*_triggers etc.) ------------- */
 

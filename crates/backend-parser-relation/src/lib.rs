@@ -4242,6 +4242,48 @@ pub fn init_seams() {
     backend_utils_adt_ruleutils_seams::ruleutils_expand_function_rte_colnames::set(
         ruleutils_expand_function_rte_colnames,
     );
+    // Cross-crate: parser-relation owns expandRTE; plancat.c build_physical_tlist
+    // reaches its RTE_FUNCTION branch (a function's columns come from
+    // rte->functions / get_expr_result_type, not rte->coltypes) through this seam.
+    backend_optimizer_util_plancat_ext_seams::expand_function_rte_colvars::set(
+        plancat_expand_function_rte_colvars,
+    );
+}
+
+/// `build_physical_tlist`'s RTE_FUNCTION leg (plancat.c:1869-1898):
+/// `expandRTE(rte, varno, 0, VAR_RETURNING_DEFAULT, -1, true /* include dropped */,
+/// NULL, &colvars)`, then for each colvar: if it is not a Var (a dropped column),
+/// punt by returning `None`; otherwise collect the Var values (the planner-side
+/// caller allocates the nodes into its arena). parser-relation owns `expandRTE`,
+/// so it installs this for the planner's build_physical_tlist.
+fn plancat_expand_function_rte_colvars<'mcx>(
+    mcx: Mcx<'mcx>,
+    rte: &RangeTblEntry<'mcx>,
+    rti: Index,
+) -> PgResult<Option<alloc::vec::Vec<Var>>> {
+    let mut colvars: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
+    expandRTE(
+        mcx,
+        rte,
+        rti as i32,
+        0,
+        VAR_RETURNING_DEFAULT,
+        -1,
+        true, /* include dropped */
+        None,
+        Some(&mut colvars),
+    )?;
+
+    let mut out: alloc::vec::Vec<Var> = alloc::vec::Vec::new();
+    out.try_reserve(colvars.len()).map_err(|_| mcx.oom(0))?;
+    for cv in colvars.iter() {
+        // A non-Var in expandRTE's output means a dropped column ⇒ caller punts.
+        match cv.as_ref().as_var() {
+            Some(v) => out.push(v.clone()),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(out))
 }
 
 /// `set_relation_column_names`' RTE_FUNCTION branch (ruleutils.c 4434-4439):
