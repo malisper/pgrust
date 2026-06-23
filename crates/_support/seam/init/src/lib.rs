@@ -683,11 +683,34 @@ mod recurrence_guard {
     use std::path::{Path, PathBuf};
 
     fn crates_dir() -> PathBuf {
-        // CARGO_MANIFEST_DIR = .../crates/seams-init
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("crates dir")
-            .to_path_buf()
+        // CARGO_MANIFEST_DIR = .../crates/_support/seam/init — walk up to the
+        // `crates` root (the post-restructure layout nests crates at varying
+        // depths, so we can no longer assume the manifest's parent is `crates`).
+        let mut p = Path::new(env!("CARGO_MANIFEST_DIR"));
+        loop {
+            if p.file_name().map(|n| n == "crates").unwrap_or(false) {
+                return p.to_path_buf();
+            }
+            p = p.parent().expect("crates dir not found above CARGO_MANIFEST_DIR");
+        }
+    }
+
+    /// Recursively collect every crate directory (one that contains both a
+    /// `Cargo.toml` and a `src/` dir) under `crates`. Replaces the old flat
+    /// `read_dir(crates)` enumeration now that crates are nested by path.
+    fn crate_dirs(root: &Path, out: &mut Vec<PathBuf>) {
+        if root.join("Cargo.toml").is_file() && root.join("src").is_dir() {
+            out.push(root.to_path_buf());
+            return;
+        }
+        if let Ok(entries) = fs::read_dir(root) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    crate_dirs(&p, out);
+                }
+            }
+        }
     }
 
     /// Extract the balanced body of `pub fn init_seams() { ... }` from `src`.
@@ -749,6 +772,63 @@ mod recurrence_guard {
         }
     }
 
+    /// Build a `new_lib -> crate_dir` index over every crate under `crates`,
+    /// reading the real `[lib].name` (falling back to `package.name`) from each
+    /// `Cargo.toml`. The post-restructure layout no longer encodes a crate's
+    /// identity in its dir name, so seam/owner resolution must key off the lib
+    /// name, not the directory.
+    fn lib_index(crates: &Path) -> std::collections::HashMap<String, PathBuf> {
+        let mut idx = std::collections::HashMap::new();
+        let mut dirs = Vec::new();
+        crate_dirs(crates, &mut dirs);
+        for d in dirs {
+            if let Ok(cargo) = fs::read_to_string(d.join("Cargo.toml")) {
+                if let Some(lib) = lib_name(&cargo) {
+                    idx.insert(lib, d);
+                }
+            }
+        }
+        idx
+    }
+
+    /// Columns of the restructure map (`docs/crate-restructure-map.tsv`):
+    /// old_pkg, old_lib, new_dir, new_pkg, new_lib. Returns the parsed rows.
+    fn restructure_map(crates: &Path) -> Vec<[String; 5]> {
+        let mut rows = Vec::new();
+        let map_path = crates
+            .parent()
+            .expect("repo root")
+            .join("docs/crate-restructure-map.tsv");
+        if let Ok(text) = fs::read_to_string(&map_path) {
+            for (i, line) in text.lines().enumerate() {
+                if i == 0 {
+                    continue;
+                }
+                let c: Vec<&str> = line.split('\t').collect();
+                if c.len() >= 5 {
+                    rows.push([
+                        c[0].to_string(),
+                        c[1].to_string(),
+                        c[2].to_string(),
+                        c[3].to_string(),
+                        c[4].to_string(),
+                    ]);
+                }
+            }
+        }
+        rows
+    }
+
+    /// Map each crate's new dir (relative to `crates`, '/'-joined) to its
+    /// pre-restructure package name. CATALOG.tsv completeness is still keyed by
+    /// the OLD package names, so the owner-completeness check bridges new->old.
+    fn new_dir_to_old_pkg(crates: &Path) -> std::collections::HashMap<String, String> {
+        restructure_map(crates)
+            .into_iter()
+            .map(|r| (r[2].clone(), r[0].clone()))
+            .collect()
+    }
+
     /// True for a file that holds only test code (a `tests.rs` module or a file
     /// under a `tests/` dir). Such files commonly `::set(` seams to stub
     /// dependencies for unit tests — those are NOT real installs and must not be
@@ -759,32 +839,6 @@ mod recurrence_guard {
             return true;
         }
         p.components().any(|c| c.as_os_str() == "tests")
-    }
-
-    /// Map a `*-seams` crate dir name to the dir name of its OWNER crate.
-    ///
-    /// BLIND-SPOT FIX (infix-tag seam dirs): most seam crates are
-    /// `<owner>-seams`, but some carry an infix split-tag before `-seams`
-    /// (`<owner>-pc-seams`, `<owner>-pq-seams`, `<owner>-elog-seams`,
-    /// `<owner>-pre-seams`) used when a unit's seams were split out in a
-    /// post-/pre-/elog/pquery pass. A naive `strip_suffix("-seams")` yields a
-    /// nonexistent dir (`<owner>-pc`) so the whole crate was silently skipped.
-    /// Returns the first candidate that exists as a real crate dir.
-    fn seam_owner_dir(crates: &Path, seam_dir_name: &str) -> Option<String> {
-        let base = seam_dir_name.strip_suffix("-seams")?;
-        // 1) plain `<owner>-seams`.
-        if crates.join(base).join("src").is_dir() {
-            return Some(base.to_string());
-        }
-        // 2) `<owner>-<tag>-seams` for a known infix split-tag.
-        for tag in ["-pc", "-pq", "-elog", "-pre", "-post"] {
-            if let Some(owner) = base.strip_suffix(tag) {
-                if crates.join(owner).join("src").is_dir() {
-                    return Some(owner.to_string());
-                }
-            }
-        }
-        None
     }
 
     /// Parse `use <path> as <alias>;` lines and return the alias->final-segment
@@ -865,16 +919,15 @@ mod recurrence_guard {
     #[test]
     fn every_seam_installing_crate_is_wired_into_init_all() {
         let crates = crates_dir();
-        let this_lib = fs::read_to_string(crates.join("seams-init/src/lib.rs"))
+        let this_lib = fs::read_to_string(crates.join("_support/seam/init/src/lib.rs"))
             .expect("read seams-init lib.rs");
 
         let mut unwired: Vec<(String, usize)> = Vec::new();
 
-        for entry in fs::read_dir(&crates).expect("read crates dir").flatten() {
-            let cpath = entry.path();
-            if !cpath.is_dir() {
-                continue;
-            }
+        let mut all_crate_dirs = Vec::new();
+        crate_dirs(&crates, &mut all_crate_dirs);
+        for cpath in &all_crate_dirs {
+            let cpath = cpath.as_path();
             let src = cpath.join("src");
             if !src.is_dir() {
                 continue;
@@ -1957,8 +2010,10 @@ mod recurrence_guard {
     /// the regression guard only fires for seams that are actually invoked.
     fn called_seams(crates: &Path) -> std::collections::HashSet<(String, String)> {
         let mut called = std::collections::HashSet::new();
-        for entry in fs::read_dir(crates).expect("read crates dir").flatten() {
-            let src = entry.path().join("src");
+        let mut __cds = Vec::new();
+        crate_dirs(crates, &mut __cds);
+        for __cd in &__cds {
+            let src = __cd.join("src");
             if !src.is_dir() {
                 continue;
             }
@@ -1989,8 +2044,10 @@ mod recurrence_guard {
     /// legitimate install, so the by-name owner check must not flag it.
     fn installed_seams(crates: &Path) -> std::collections::HashSet<(String, String)> {
         let mut installed = std::collections::HashSet::new();
-        for entry in fs::read_dir(crates).expect("read crates dir").flatten() {
-            let src = entry.path().join("src");
+        let mut __cds = Vec::new();
+        crate_dirs(crates, &mut __cds);
+        for __cd in &__cds {
+            let src = __cd.join("src");
             if !src.is_dir() {
                 continue;
             }
@@ -2104,33 +2161,76 @@ mod recurrence_guard {
         let mut live_allow: std::collections::HashSet<(String, String)> =
             std::collections::HashSet::new();
 
-        for entry in fs::read_dir(&crates).expect("read crates dir").flatten() {
-            let cpath = entry.path();
-            if !cpath.is_dir() {
-                continue;
-            }
-            let dir_name = match cpath.file_name().and_then(|n| n.to_str()) {
-                Some(n) => n.to_string(),
-                None => continue,
-            };
-            if !dir_name.ends_with("-seams") {
-                continue; // not a seams crate
-            }
+        // Post-restructure: crates are nested and named after their `.c` leaf,
+        // so seam/owner identity keys off the LIB NAME, not the dir name. A seam
+        // crate's lib ends in `_seams`; its owner is the crate whose lib name is
+        // that prefix. Completeness (CATALOG.tsv, still keyed by OLD pkg names)
+        // is bridged through the restructure map (new_dir -> old_pkg).
+        let libs = lib_index(&crates);
+        let new2old = new_dir_to_old_pkg(&crates);
+        // Bridges keyed off the restructure map. Post-restructure a seam crate's
+        // lib and its owner's lib no longer share a prefix (e.g. seam
+        // `extensible_seams` owns `nodes_extensible`), so seam->owner is resolved
+        // through the OLD package names (where `<owner>-seams` stripping is valid):
+        //   new_seams_lib -> old_seams_pkg -> strip `-seams` -> old_owner_pkg -> new_owner_lib.
+        let rows = restructure_map(&crates);
+        let mut new_lib_to_old_pkg: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut old_pkg_to_new_lib: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for r in &rows {
+            new_lib_to_old_pkg.insert(r[4].clone(), r[0].clone());
+            old_pkg_to_new_lib.insert(r[0].clone(), r[4].clone());
+        }
+        let mut seam_dirs: Vec<(String, PathBuf)> = libs
+            .iter()
+            .filter(|(l, _)| l.ends_with("_seams"))
+            .map(|(l, p)| (l.clone(), p.clone()))
+            .collect();
+        seam_dirs.sort();
+        for (seams_lib, cpath) in &seam_dirs {
+            let seams_lib = seams_lib.clone();
+            let cpath = cpath.clone();
 
-            // (a) OWNER must exist under crates/ — else genuinely unported.
-            // BLIND-SPOT FIX (infix-tag seam dirs): resolve `<owner>-pc-seams`
-            // etc. to the real owner dir, not the nonexistent `<owner>-pc`.
-            let owner_dir_name = match seam_owner_dir(&crates, &dir_name) {
-                Some(o) => o,
+            // (a) OWNER must exist — resolve through old package names.
+            // Some seam crates carry an infix split-tag before `-seams`
+            // (`<owner>-pc-seams`, `-pq-`, `-elog-`, `-pre-`, `-post-`); resolve
+            // to the first owner pkg that actually maps to a live lib.
+            let old_seams_pkg = match new_lib_to_old_pkg.get(&seams_lib) {
+                Some(p) => p.clone(),
                 None => continue,
             };
-            let owner_path = crates.join(&owner_dir_name);
+            let base = match old_seams_pkg.strip_suffix("-seams") {
+                Some(b) => b.to_string(),
+                None => continue,
+            };
+            let mut owner_lib_opt = old_pkg_to_new_lib.get(&base).cloned();
+            if owner_lib_opt.is_none() {
+                for tag in ["-pc", "-pq", "-elog", "-pre", "-post"] {
+                    if let Some(o) = base.strip_suffix(tag) {
+                        if let Some(l) = old_pkg_to_new_lib.get(o) {
+                            owner_lib_opt = Some(l.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+            let owner_lib = match owner_lib_opt {
+                Some(o) if libs.contains_key(&o) => o,
+                _ => continue,
+            };
+            let owner_path = libs[&owner_lib].clone();
 
             // (b) OWNER unit must be COMPLETE (merged/audited) in CATALOG.tsv.
-            // A `todo`/scaffold/in-progress owner legitimately seam-and-panics
-            // on its still-unfinished surface (mirror-pg-and-panic), so it is
-            // EXEMPT — flagging it would perma-red the live port frontier.
-            if !complete.contains(&owner_dir_name) {
+            // Bridge new owner dir -> old pkg name and check the CATALOG set.
+            let owner_rel = owner_path
+                .strip_prefix(&crates)
+                .ok()
+                .and_then(|r| r.to_str())
+                .unwrap_or("")
+                .to_string();
+            let owner_old_pkg = new2old.get(&owner_rel).cloned().unwrap_or_default();
+            if !complete.contains(&owner_old_pkg) {
                 continue;
             }
 
@@ -2177,9 +2277,6 @@ mod recurrence_guard {
                 owner_src.push('\n');
                 owner_src.push_str(&txt);
             }
-
-            let owner_lib = owner_dir_name.replace('-', "_");
-            let seams_lib = dir_name.replace('-', "_");
 
             for fname in &declared {
                 let pat1 = format!("{}::set(", fname);
