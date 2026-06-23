@@ -351,9 +351,9 @@ pub fn ExecUpdatePrologue<'mcx>(
     tupleid: Option<&ItemPointerData>,
     oldtuple: Option<FormedTuple<'mcx>>,
     slot: SlotId,
-    result: Option<&mut TM_Result>,
+    mut result: Option<&mut TM_Result>,
 ) -> PgResult<bool> {
-    if let Some(r) = result {
+    if let Some(r) = result.as_deref_mut() {
         *r = TM_Result::TM_Ok;
     }
 
@@ -383,8 +383,11 @@ pub fn ExecUpdatePrologue<'mcx>(
         }
 
         let is_merge = mtstate.operation == CmdType::CMD_MERGE;
-        // The seam moves the BEFORE-trigger TM_Result back through `tmfd`'s
-        // sibling output; here we pass `None` (ExecUpdate's caller passed NULL).
+        // C passes the prologue's `result` out-param straight into
+        // ExecBRUpdateTriggers (nodeModifyTable.c). For a concurrent
+        // update detected inside GetTupleForTrigger, the trigger path writes
+        // `*result = TM_Updated`, which the MERGE driver needs to run its
+        // EvalPlanQual recheck. Plain ExecUpdate passes NULL (result == None).
         return backend_commands_trigger_seams::exec_br_update_triggers::call(
             estate,
             &mut mtstate.mt_epqstate,
@@ -392,7 +395,7 @@ pub fn ExecUpdatePrologue<'mcx>(
             tupleid,
             oldtuple,
             slot,
-            None,
+            result,
             &mut context.tmfd,
             is_merge,
         );

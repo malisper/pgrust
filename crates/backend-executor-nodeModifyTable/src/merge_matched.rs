@@ -169,6 +169,14 @@ pub fn ExecMergeMatched<'mcx>(
     // (the C sentinel + ItemPointerIsValid test).
     let mut lockedtid: Option<ItemPointerData> = None;
 
+    // C threads the target row's `tupleid` (an `ItemPointer`) through the whole
+    // `lmerge_matched` retry, and on a concurrent-update recheck `table_tuple_lock`
+    // advances `*tupleid` to the latest locked version (heapam_handler.c:
+    // `*tid = tmfd->ctid`). The owned `table_tuple_lock` takes the tid by shared
+    // ref, so we keep a mutable working copy here and advance it from the locked
+    // slot's `tts_tid` after the lock, exactly as the ExecUpdate path does.
+    let mut working_tid: Option<ItemPointerData> = tupleid.copied();
+
     let need_lock_tag_tuple = estate.result_rel(result_rel_info).ri_needLockTagTuple;
     let result_relation_oid = relation_oid(estate, result_rel_info);
     let old_tuple_slot =
@@ -185,7 +193,7 @@ pub fn ExecMergeMatched<'mcx>(
             false,
         )?;
     } else {
-        let tid = *tupleid.expect("MERGE matched row without tupleid must have oldtuple");
+        let tid = working_tid.expect("MERGE matched row without tupleid must have oldtuple");
         if need_lock_tag_tuple {
             // This locks even for CMD_DELETE, for CMD_NOTHING, and for tuples
             // that don't match mas_whenqual.  MERGE on system catalogs is a
@@ -271,7 +279,7 @@ pub fn ExecMergeMatched<'mcx>(
                     action.mas_proj = proj.take();
                 }};
             }
-            let result: TM_Result;
+            let mut result: TM_Result;
             let mut update_cxt = UpdateContext {
                 crossPartUpdate: false,
                 updateIndexes: types_tableam::tableam::TU_UpdateIndexes::TU_None,
@@ -316,7 +324,13 @@ pub fn ExecMergeMatched<'mcx>(
                 )?;
             }
 
-            // Perform stated action.
+            // Perform stated action. The C `switch (commandType)` uses `break`
+            // for the concurrent-update/delete path to fall through into the
+            // following `switch (result)`; model that as a labeled block so the
+            // prologue `break 'command_dispatch` reaches the `match result` below
+            // (a bare `break` here would exit the action loop, skipping the
+            // concurrent-update recheck entirely).
+            'command_dispatch: {
             match command_type {
                 CmdType::CMD_UPDATE => {
                     // Project the output tuple, and use that to update the
@@ -372,7 +386,7 @@ pub fn ExecMergeMatched<'mcx>(
                         mtstate,
                         estate,
                         result_rel_info,
-                        tupleid,
+                        working_tid.as_ref(),
                         None,
                         projected,
                         Some(&mut prologue_result),
@@ -381,8 +395,11 @@ pub fn ExecMergeMatched<'mcx>(
                             // "do nothing"
                             return finish(estate, result_rel_info, lockedtid, rslot);
                         }
-                        // concurrent update/delete
-                        break;
+                        // concurrent update/delete: ExecUpdatePrologue set
+                        // `result` (prologue_result); fall through to `match
+                        // result` to run the concurrent-update recheck.
+                        result = prologue_result;
+                        break 'command_dispatch;
                     }
 
                     // INSTEAD OF ROW UPDATE Triggers
@@ -407,7 +424,7 @@ pub fn ExecMergeMatched<'mcx>(
                             mtstate,
                             estate,
                             result_rel_info,
-                            tupleid,
+                            working_tid.as_ref(),
                             None,
                             projected,
                             can_set_tag,
@@ -434,7 +451,7 @@ pub fn ExecMergeMatched<'mcx>(
                             estate,
                             &update_cxt,
                             result_rel_info,
-                            tupleid,
+                            working_tid.as_ref(),
                             None,
                             projected,
                         )?;
@@ -475,7 +492,7 @@ pub fn ExecMergeMatched<'mcx>(
                         mtstate,
                         estate,
                         result_rel_info,
-                        tupleid,
+                        working_tid.as_ref(),
                         None,
                         None,
                         Some(&mut prologue_result),
@@ -484,8 +501,11 @@ pub fn ExecMergeMatched<'mcx>(
                             // "do nothing"
                             return finish(estate, result_rel_info, lockedtid, rslot);
                         }
-                        // concurrent update/delete
-                        break;
+                        // concurrent update/delete: ExecDeletePrologue set
+                        // `result` (prologue_result); fall through to `match
+                        // result` to run the concurrent-update recheck.
+                        result = prologue_result;
+                        break 'command_dispatch;
                     }
 
                     // INSTEAD OF ROW DELETE Triggers
@@ -511,7 +531,7 @@ pub fn ExecMergeMatched<'mcx>(
                         // checked ri_needLockTagTuple above
                         debug_assert!(oldtuple.is_none());
 
-                        let tid = *tupleid
+                        let tid = working_tid
                             .expect("MERGE CMD_DELETE on a table requires a target tupleid");
                         result = crate::delete::ExecDeleteAct(
                             context,
@@ -529,7 +549,7 @@ pub fn ExecMergeMatched<'mcx>(
                             mtstate,
                             estate,
                             result_rel_info,
-                            tupleid,
+                            working_tid.as_ref(),
                             None,
                             false,
                         )?;
@@ -548,6 +568,7 @@ pub fn ExecMergeMatched<'mcx>(
                     return Err(PgError::error("unknown action in MERGE WHEN clause"));
                 }
             }
+            } // 'command_dispatch
 
             match result {
                 TM_Result::TM_Ok => {
@@ -605,22 +626,13 @@ pub fn ExecMergeMatched<'mcx>(
 
                 TM_Result::TM_Updated => {
                     // The target tuple was concurrently updated by some other
-                    // transaction. The full MERGE EvalPlanQual recheck (re-fetch
-                    // the latest version, recheck the join qual, possibly switch
-                    // MATCHED → NOT MATCHED BY SOURCE, then retry the action on
-                    // the *new* version) needs the target `tupleid` to advance to
-                    // the locked version through the whole `lmerge_matched` retry
-                    // — a threading the owned MERGE driver does not yet do, so the
-                    // retry would re-lock the old TID and loop forever. Until the
-                    // MERGE EPQ tid-advance leg lands, raise a clean serialization
-                    // error rather than spin (the plain UPDATE/DELETE EPQ paths
-                    // are complete; this only affects concurrent MERGE).
-                    if true {
-                        return Err(PgError::error(
-                            "could not serialize access due to concurrent update",
-                        )
-                        .with_sqlstate(ERRCODE_T_R_SERIALIZATION_FAILURE));
-                    }
+                    // transaction. Run the full MERGE EvalPlanQual recheck:
+                    // re-fetch the latest version (following the update chain via
+                    // table_tuple_lock + FIND_LAST_VERSION), recheck the join
+                    // qual, possibly switch MATCHED → NOT MATCHED BY SOURCE, then
+                    // retry the action on the *new* version. The working target
+                    // tid is advanced from the locked slot's tts_tid below so the
+                    // `lmerge_matched` retry operates on the new row version.
                     //   was_matched = relaction->mas_action->matchKind == MERGE_WHEN_MATCHED;
                     let was_matched = action_match_kind == MERGE_WHEN_MATCHED;
                     let rti = estate.result_rel(result_rel_info).ri_RangeTableIndex;
@@ -640,7 +652,7 @@ pub fn ExecMergeMatched<'mcx>(
                         old_tuple_slot
                     };
 
-                    let tid = *tupleid
+                    let tid = working_tid
                         .expect("MERGE concurrent-update recheck requires a target tupleid");
                     let rel = relation_alias(estate, result_rel_info);
                     let snapshot = estate.es_snapshot.as_deref().cloned();
@@ -662,6 +674,16 @@ pub fn ExecMergeMatched<'mcx>(
 
                     match lock_result {
                         TM_Result::TM_Ok => {
+                            // C's table_tuple_lock advances *tupleid to the latest
+                            // locked version (heapam_handler.c: `*tid = tmfd->ctid`).
+                            // The owned lock instead leaves the latest version in the
+                            // locked slot's tts_tid; copy it back into the working
+                            // tid so the partition check, lock-tag tuple, and the
+                            // row-version fetch (and the `lmerge_matched` retry) all
+                            // operate on the new row version.
+                            let tid = estate.slot(inputslot).tts_tid;
+                            working_tid = Some(tid);
+
                             // If the tuple was updated and migrated to another
                             // partition concurrently, the current MERGE
                             // implementation can't follow.
