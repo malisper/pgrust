@@ -216,8 +216,21 @@ fn mq_putmessage(msgtype: u8, s: &[u8]) -> PgResult<i32> {
         // Immediately notify the receiver by passing force_flush as true so
         // that the shared memory value is updated before we send the parallel
         // message signal right after this.
+        //
+        // C: `shm_mq_sendv(pq_mq_handle, iov, 2, true, true)` — the `nowait`
+        // argument is TRUE. This is load-bearing: when a worker's protocol
+        // message (e.g. a long ErrorResponse) is larger than the error queue's
+        // ring, a blocking (`nowait = false`) send would park inside
+        // `shm_mq_send_bytes` waiting for the leader to drain, and would never
+        // reach the `SendProcSignal(PROCSIG_PARALLEL_MESSAGE)` below — so the
+        // leader never sets `ParallelMessagePending`, never runs
+        // `ProcessParallelMessages`, and never drains the queue → deadlock
+        // between worker (blocked sending) and leader (blocked in
+        // `gather_readnext`'s WaitLatch). With `nowait = true` the partial send
+        // returns `WOULD_BLOCK`, we signal the leader (waking it to drain),
+        // wait on our own latch, and retry — exactly as C does.
         let result =
-            shmmq::shm_mq_send::call(handle, payload.clone(), false, true)?;
+            shmmq::shm_mq_send::call(handle, payload.clone(), true, true)?;
 
         let leader_pid = PQ_MQ_PARALLEL_LEADER_PID.with(Cell::get);
         if leader_pid != 0 {
