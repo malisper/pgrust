@@ -492,15 +492,17 @@ fn check_lateral_ref_ok<'a>(
     location: i32,
 ) -> PgResult<()> {
     if nsitem.p_lateral_only && !nsitem.p_lateral_ok {
-        let rte = nsitem_rte(nsitem);
         let refname = nsitem_aliasname(nsitem);
 
-        // errhint vs errdetail per whether this is the UPDATE/DELETE target.
+        // errhint vs errdetail per whether this is the UPDATE/DELETE target
+        // (C: `rte == pstate->p_target_nsitem->p_rte`). C compares the RTE
+        // pointers, which are shared because `setTargetTable` stores the very
+        // same nsitem into both p_target_nsitem and the namespace. pgrust
+        // clones the nsitem into p_target_nsitem, so the RTE pointers differ;
+        // instead compare by p_rtindex, the RTE's stable rangetable position,
+        // which is an exact equivalent (each RTE has a unique p_rtindex).
         let is_target = match pstate.p_target_nsitem.as_deref() {
-            Some(t) => core::ptr::eq(
-                nsitem_rte(t) as *const RangeTblEntry,
-                rte as *const RangeTblEntry,
-            ),
+            Some(t) => t.p_rtindex == nsitem.p_rtindex,
             None => false,
         };
 

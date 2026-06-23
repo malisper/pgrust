@@ -800,6 +800,22 @@ impl<'mcx> ParseState<'mcx> {
             None => None,
         };
 
+        // p_target_nsitem is part of the spine an inner reference reads through
+        // `parentParseState`: a LATERAL FROM/USING subquery in an UPDATE/DELETE
+        // resolves a reference to the target table via the parent pstate and then
+        // `check_lateral_ref_ok` consults the walked-up level's `p_target_nsitem`
+        // (C: `rte == pstate->p_target_nsitem->p_rte`) to decide whether to emit
+        // the "but it cannot be referenced from this part of the query" HINT
+        // (target-table case) versus the "combining JOIN type must be INNER or
+        // LEFT" DETAIL (plain disallowed-lateral case). Without this copy the
+        // cloned ancestor's `p_target_nsitem` is None and the wrong message
+        // variant is emitted (C holds the parent by a live back-pointer).
+        // Read-only at the ancestor level, so no merge-back step is needed.
+        out.p_target_nsitem = match self.p_target_nsitem.as_deref() {
+            Some(n) => Some(PgBox::new_in(n.clone_in(mcx)?, mcx)),
+            None => None,
+        };
+
         // p_expr_kind is part of the spine an outer-level aggregate's constraint
         // check reads through `parentParseState`. `check_agglevels_and_constraints`
         // (parse_agg.c) walks `pstate` up `agglevelsup` levels and then reads the
