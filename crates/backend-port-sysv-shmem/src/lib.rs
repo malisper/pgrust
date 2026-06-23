@@ -42,12 +42,93 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::result_large_err)]
 
-use std::sync::Mutex;
-
-use backend_utils_misc_guc_tables::consts::{HUGE_PAGES_ON, HUGE_PAGES_TRY, SHMEM_TYPE_MMAP};
+use backend_utils_misc_guc_tables::consts::SHMEM_TYPE_MMAP;
 use types_core::Size;
-use types_error::{PgError, PgResult, ERROR, FATAL};
-use types_storage::storage::{dsm_handle, PGShmemHeader, PGShmemMagic};
+use types_error::PgResult;
+use types_storage::storage::PGShmemHeader;
+
+// ---------------------------------------------------------------------------
+// wasm (single-process) stub.
+//
+// wasip1 has no SysV shared memory or `mmap` (`shmget`/`shmat`/`mmap`/`stat`/
+// `getpid` and the `IPC_*`/`MAP_*`/errno families are absent from `libc`).
+// Single-process wasm has ONE address space, so "shared memory" is simply a
+// heap allocation that every (notional) backend in the same process sees. The
+// stub allocates a leaked, zeroed, MAXALIGNed `Vec<u8>` of the requested size,
+// writes the standard `PGShmemHeader` at its base, and returns the pointer.
+// Detach is a no-op (the region lives for the process lifetime, like C's
+// postmaster master mapping); the OS reclaims it at exit.
+// ---------------------------------------------------------------------------
+#[cfg(target_family = "wasm")]
+mod wasm_stub {
+    use super::*;
+    use types_storage::storage::PGShmemMagic;
+
+    /// `MAXALIGN(len)`.
+    fn maxalign(len: usize) -> usize {
+        const MAXIMUM_ALIGNOF: usize = 8;
+        (len + (MAXIMUM_ALIGNOF - 1)) & !(MAXIMUM_ALIGNOF - 1)
+    }
+
+    /// `PGSharedMemoryCreate` — heap-backed single-process "shared" segment.
+    pub fn PGSharedMemoryCreate(
+        size: Size,
+    ) -> PgResult<(*mut PGShmemHeader, *mut PGShmemHeader)> {
+        debug_assert!(size > maxalign(core::mem::size_of::<PGShmemHeader>()));
+
+        // Leak a zeroed, 8-byte-aligned region of `size` bytes. `Vec<u64>` gives
+        // 8-byte alignment (MAXIMUM_ALIGNOF); leak it so the region is valid for
+        // the process lifetime (the OS reclaims it at exit, matching C).
+        let words = size.div_ceil(core::mem::size_of::<u64>());
+        let mut backing: Vec<u64> = vec![0u64; words];
+        let base = backing.as_mut_ptr() as *mut u8;
+        core::mem::forget(backing);
+
+        let hdr = base as *mut PGShmemHeader;
+        // SAFETY: `hdr` points at a zeroed region sized for at least a header.
+        unsafe {
+            (*hdr).creatorPID = 1; // no getpid(); single process is PID 1.
+            (*hdr).magic = PGShmemMagic;
+            (*hdr).dsm_control = 0;
+            (*hdr).device = 0;
+            (*hdr).inode = 0;
+            (*hdr).totalsize = size;
+            (*hdr).freeoffset = maxalign(core::mem::size_of::<PGShmemHeader>());
+        }
+        Ok((hdr, hdr))
+    }
+
+    /// `PGSharedMemoryDetach` — no-op: the region persists for the process.
+    pub fn PGSharedMemoryDetach() {}
+
+    /// `PGSharedMemoryIsInUse` — single process, no foreign segments ever exist.
+    pub fn PGSharedMemoryIsInUse(_id1: u64, _id2: u64) -> PgResult<bool> {
+        Ok(false)
+    }
+
+    /// `GetHugePageSize` — huge pages unsupported on wasm.
+    pub fn GetHugePageSize() -> (Size, i32) {
+        (0, 0)
+    }
+}
+
+#[cfg(target_family = "wasm")]
+pub use wasm_stub::{
+    GetHugePageSize, PGSharedMemoryCreate, PGSharedMemoryDetach, PGSharedMemoryIsInUse,
+};
+
+#[cfg(not(target_family = "wasm"))]
+pub use native::{
+    GetHugePageSize, PGSharedMemoryCreate, PGSharedMemoryDetach, PGSharedMemoryIsInUse,
+};
+
+#[cfg(not(target_family = "wasm"))]
+mod native {
+use super::*;
+use std::sync::Mutex;
+use backend_utils_misc_guc_tables::consts::{HUGE_PAGES_ON, HUGE_PAGES_TRY};
+use types_error::{PgError, ERROR, FATAL};
+use types_storage::storage::{dsm_handle, PGShmemMagic};
 
 /// `IPCProtection` (`port/sysv_shmem.c`) — access/modify by user only.
 const IPC_PROTECTION: libc::c_int = 0o600;
@@ -790,6 +871,8 @@ fn stat(path: &str) -> Result<libc::stat, libc::c_int> {
         Ok(statbuf)
     }
 }
+
+} // mod native
 
 // ===========================================================================
 // sysv_shmem.c-owned GUC variable storage (the `config_*` entries in

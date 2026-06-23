@@ -24,8 +24,11 @@
 //! their declared loud seams below.
 
 use std::cell::RefCell;
+#[cfg(not(target_family = "wasm"))]
 use std::net::TcpStream;
+#[cfg(not(target_family = "wasm"))]
 use std::os::fd::AsRawFd;
+#[cfg(not(target_family = "wasm"))]
 use std::os::unix::net::UnixStream;
 
 use interfaces_libpq_fe_seams as s;
@@ -37,7 +40,9 @@ use types_libpqwalreceiver::{
 use crate::client::PgClientConn;
 use crate::protocol3::{StartupParams, PG_PROTOCOL_3_0};
 use crate::result::{ExecStatusType, PGresult};
-use crate::transport::{SocketTransport, Transport, TransportError};
+#[cfg(not(target_family = "wasm"))]
+use crate::transport::SocketTransport;
+use crate::transport::{Transport, TransportError};
 
 // ===========================================================================
 // Loud seams for the genuinely-unported legs (declared here; never installed
@@ -226,15 +231,31 @@ fn apply_option(o: &mut ResolvedOptions, k: &str, val: String) {
 }
 
 /// The default Postgres TCP port (`DEF_PGPORT`).
+// Unused on wasm: the only consumer is the cfg'd-out native `open_socket`.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 const DEF_PGPORT: u16 = 5432;
 /// The default Unix-socket directory (`DEFAULT_PGSOCKET_DIR`). Matches the
 /// compiled default of a typical install; `host` overrides it.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 const DEFAULT_PGSOCKET_DIR: &str = "/tmp";
+
+/// wasm (single-process) stub: `interfaces-libpq-fe` is the libpq *client*
+/// library, used by the walreceiver to dial out to another server. Single-user
+/// wasm has no outbound sockets (`TcpStream`/`UnixStream` are absent on wasip1)
+/// and never opens a client connection, so this path errors. The rest of the
+/// client codec/protocol logic still compiles for completeness.
+#[cfg(target_family = "wasm")]
+fn open_socket(_o: &ResolvedOptions) -> Result<Box<dyn Transport>, TransportError> {
+    Err(TransportError::Io(
+        "outbound libpq connections are not supported in single-user wasm".to_string(),
+    ))
+}
 
 /// Open the connection socket the way `fe-connect.c`'s `connectDBStart` does:
 /// a host beginning with '/' (or absent, defaulting to the socket dir) is a
 /// Unix-domain socket at `<dir>/.s.PGSQL.<port>`; otherwise a TCP connection to
 /// `host`/`hostaddr`:`port`. Returns the boxed transport + its fd.
+#[cfg(not(target_family = "wasm"))]
 fn open_socket(o: &ResolvedOptions) -> Result<Box<dyn Transport>, TransportError> {
     let port: u16 = match &o.port {
         Some(p) => p

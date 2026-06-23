@@ -15,6 +15,88 @@
 //!
 //! These functions never ereport; they return the resolver's `EAI_*` code.
 
+// ---------------------------------------------------------------------------
+// wasm (single-process) stub.
+//
+// `ip.c` is entirely a wrapper around the system resolver (`getaddrinfo` /
+// `getnameinfo`) plus AF_UNIX address handling — none of which exists on
+// wasip1, and none of which single-user wasm needs (no listener, no client
+// address resolution). The stub keeps the public API so seam-installs and the
+// few non-socket helpers (`sockaddr_family`, `sockaddr_is_all_zeros`) link, and
+// returns a resolver failure (`EAI_FAIL` == -2 on glibc) from the lookups,
+// which no single-user code path exercises.
+// ---------------------------------------------------------------------------
+#[cfg(target_family = "wasm")]
+mod wasm_stub {
+    use types_net::{AddrInfoHint, PgAddrInfo, SockAddr};
+
+    /// glibc `EAI_FAIL` numeric value (resolver "non-recoverable failure").
+    const EAI_FAIL: i32 = -2;
+    /// AF_UNIX numeric value (universal: 1).
+    const AF_UNIX: i32 = 1;
+
+    pub fn pg_getaddrinfo_all(
+        _hostname: Option<&str>,
+        _servname: Option<&str>,
+        _hint: &AddrInfoHint,
+        result: &mut alloc::vec::Vec<PgAddrInfo>,
+    ) -> i32 {
+        result.clear();
+        EAI_FAIL
+    }
+
+    pub fn pg_freeaddrinfo_all(_hint_ai_family: i32, _ai: alloc::vec::Vec<PgAddrInfo>) {}
+
+    pub fn pg_getnameinfo_all(
+        _addr: &SockAddr,
+        node: Option<&mut alloc::string::String>,
+        service: Option<&mut alloc::string::String>,
+        _flags: i32,
+    ) -> i32 {
+        if let Some(n) = node {
+            *n = "???".into();
+        }
+        if let Some(s) = service {
+            *s = "???".into();
+        }
+        EAI_FAIL
+    }
+
+    /// `addr->ss_family` — read the family from the stored sockaddr bytes. The
+    /// family is a 16-bit field at offset 0 of `sockaddr_storage`.
+    pub fn sockaddr_family(addr: &SockAddr) -> i32 {
+        if addr.addr.len() >= 2 {
+            u16::from_ne_bytes([addr.addr[0], addr.addr[1]]) as i32
+        } else {
+            AF_UNIX // arbitrary; never reached in single-user mode
+        }
+    }
+
+    pub fn sockaddr_is_all_zeros(addr: &SockAddr) -> bool {
+        addr.salen == 0 && addr.addr.iter().all(|&b| b == 0)
+    }
+
+    pub fn init_seams() {
+        common_ip_seams::pg_getaddrinfo_all::set(pg_getaddrinfo_all);
+        common_ip_seams::pg_getnameinfo_all::set(pg_getnameinfo_all);
+    }
+}
+
+#[cfg(target_family = "wasm")]
+extern crate alloc;
+#[cfg(target_family = "wasm")]
+pub use wasm_stub::{
+    init_seams, pg_freeaddrinfo_all, pg_getaddrinfo_all, pg_getnameinfo_all, sockaddr_family,
+    sockaddr_is_all_zeros,
+};
+
+#[cfg(not(target_family = "wasm"))]
+pub use native::*;
+
+#[cfg(not(target_family = "wasm"))]
+mod native {
+use super::*;
+
 use std::mem::{size_of, MaybeUninit};
 use std::ptr;
 
@@ -543,3 +625,5 @@ mod tests {
         assert_eq!(service, "80");
     }
 }
+
+} // mod native
