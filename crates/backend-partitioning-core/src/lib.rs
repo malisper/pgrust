@@ -965,8 +965,26 @@ fn collect_prune_inputs_with_clauses<'mcx>(
                 PgError::error("prune_append_rel_partitions: partitioned table has no partition key")
             })?;
 
+    // C reads `rel->boundinfo` / `rel->nparts` straight off the RelOptInfo
+    // (partprune.c:817-818). Those were filled by set_relation_partition_info
+    // from `PartitionDirectoryLookup(root->glob->partition_directory, rel)`, and
+    // the planner's partition directory is created with `omit_detached = true`
+    // (planmain.c CreatePartitionDirectory(..., true)). So `rel->nparts` and
+    // `rel->boundinfo` describe the descriptor that *excludes* a partition that
+    // is mid-DETACH CONCURRENTLY.
+    //
+    // This port can't read the real boundinfo off the (presence-only) planner
+    // RelOptInfo, so it rebuilds it here from the live relation. It MUST use the
+    // same `omit_detached = true` view, or the rebuilt boundinfo (which would
+    // then include the detaching partition) goes out of sync with `rel.nparts`
+    // and the partdesc that expand_partitioned_rtentry materialises from the
+    // omit_detached directory: prune would select a bound index that is out of
+    // range for the shorter oids[] array (DETACH-PARTITION-CONCURRENTLY: an FK
+    // INSERT against the partitioned PK table while a sibling partition is
+    // detaching pruned to the detaching partition's old index and panicked with
+    // "index out of bounds"). Pass omit_detached = true to match C.
     let mut partdesc =
-        backend_partitioning_partdesc::RelationGetPartitionDesc(mcx, &relation, false)?;
+        backend_partitioning_partdesc::RelationGetPartitionDesc(mcx, &relation, true)?;
 
     let boundinfo = partdesc
         .boundinfo
