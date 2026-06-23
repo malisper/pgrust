@@ -440,14 +440,10 @@ fn error_recovery(mcx: Mcx<'_>, err: types_error::PgError, state: &mut LoopState
     xact_seams::abort_current_transaction::call()?;
 
     // if (am_walsender) WalSndErrorCleanup(); — reached only on a replication
-    // connection (am_walsender); the WAL-sender error cleanup is a separate
-    // unported path. The simple-Query target is never a WAL sender, so this is
-    // not reached; mirror PG and panic if it is.
+    // connection (am_walsender): release LWLocks, cancel CV sleeps, close the
+    // xlogreader, and free / clean up the active replication slot.
     if backend_replication_walsender_seams::am_walsender::call() {
-        panic!(
-            "PostgresMain error recovery: WalSndErrorCleanup is unported; only \
-             reached on a replication (am_walsender) connection"
-        );
+        backend_replication_walsender_seams::wal_snd_error_cleanup::call();
     }
 
     backend_utils_mmgr_portalmem::PortalErrorCleanup()?;
@@ -693,14 +689,12 @@ fn dispatch_message<'mcx>(
             if backend_replication_walsender_seams::am_walsender::call() {
                 // if (!exec_replication_command(query_string))
                 //     exec_simple_query(query_string);
-                // exec_replication_command is the WAL-sender replication-command
-                // path; not reached on a non-replication connection. Mirror PG
-                // and panic if a WAL sender ever drives this loop.
-                panic!(
-                    "PostgresMain 'Q': exec_replication_command (WAL-sender \
-                     replication command path) is unported; only reached on an \
-                     am_walsender connection"
-                );
+                // A WAL sender first tries the replication-command grammar; if
+                // the string is not a replication command, fall back to a plain
+                // SQL query (allowed on a database-connected/logical walsender).
+                if !backend_replication_walsender_seams::exec_replication_command::call(qstr) {
+                    crate::simple_query::exec_simple_query(mcx, qstr)?;
+                }
             } else {
                 crate::simple_query::exec_simple_query(mcx, qstr)?;
             }
@@ -1081,7 +1075,14 @@ fn postgres_main_inner(dbname: Option<&str>, username: Option<&str>) -> PgResult
     // `WaitForProcSignalBarrier`.
     //
     //   if (am_walsender) WalSndSignals(); else { pqsignal(...); }
-    if !backend_replication_walsender_seams::am_walsender::call() {
+    let am_walsender_signals = backend_replication_walsender_seams::am_walsender::call();
+    if am_walsender_signals {
+        // WalSndSignals() installs the WAL-sender handler set and calls
+        // InitializeTimeouts() itself (establishing the SIGALRM handler), so the
+        // shared InitializeTimeouts() below is skipped for a walsender.
+        backend_replication_walsender_seams::wal_snd_signals::call();
+    }
+    if !am_walsender_signals {
         use types_signal::SigHandler;
         let pqsignal = port_pqsignal_seams::pqsignal::call;
 
@@ -1120,11 +1121,15 @@ fn postgres_main_inner(dbname: Option<&str>, username: Option<&str>) -> PgResult
         pqsignal(libc::SIGCHLD, SigHandler::Default);
     }
 
-    // InitializeTimeouts() (postgres.c:4232) IS run here: it establishes the
-    // timeout module's per-backend slot table (and the SIGALRM handler), which
-    // InitPostgres relies on when it RegisterTimeout()s the deadlock /
-    // statement / lock timeouts.
-    backend_utils_misc_timeout_seams::initialize_timeouts::call();
+    // InitializeTimeouts() (postgres.c:4232) IS run here for a regular backend:
+    // it establishes the timeout module's per-backend slot table (and the
+    // SIGALRM handler), which InitPostgres relies on when it RegisterTimeout()s
+    // the deadlock / statement / lock timeouts. A WAL sender already ran it from
+    // WalSndSignals() above (C: InitializeTimeouts() lives in the non-walsender
+    // else arm), so skip the duplicate here.
+    if !am_walsender_signals {
+        backend_utils_misc_timeout_seams::initialize_timeouts::call();
+    }
 
     // --- Early initialization (postgres.c:4255) ---
     // BaseInit(): open the per-backend low-level subsystems (smgr, buffers, ...).
@@ -1193,8 +1198,12 @@ fn postgres_main_inner(dbname: Option<&str>, username: Option<&str>) -> PgResult
         backend_utils_init_small_seams::my_database_id::call(),
     )?;
 
-    // if (am_walsender) InitWalSender(); — replication-only setup; the
-    // simple-Query target is not a WAL sender. Not reached.
+    // if (am_walsender) InitWalSender(); — claim this backend's per-walsender
+    // shmem slot, create the aux-process resource owner, and advertise WAL-sender
+    // status to the postmaster before the replication-command loop.
+    if backend_replication_walsender_seams::am_walsender::call() {
+        backend_replication_walsender_seams::init_wal_sender::call();
+    }
 
     // Send this backend's cancellation info to the frontend (postgres.c:4328).
     // `BackendKeyData` ('K') = int32 MyProcPid + the cancel key bytes. While the

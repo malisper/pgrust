@@ -421,7 +421,15 @@ pub fn CreateDestReceiver(dest: CommandDest) -> DestReceiverHandle {
         // via the seam, the same delegation copyto/printtup use.
         CommandDest::Spi => backend_executor_spi_seams::create_spi_dest_receiver::call(),
 
-        // DestRemoteSimple                     -> printsimpleDR             (printsimple.c)
+        // DestRemoteSimple -> &printsimpleDR (printsimple.c): the printtup owner
+        // registers the catalog-free single-row vtable into this router (the
+        // same delegation printtup/copyto use). The walsender's IDENTIFY_SYSTEM
+        // / SHOW / READ_REPLICATION_SLOT / TIMELINE_HISTORY result rows route
+        // here.
+        CommandDest::RemoteSimple => {
+            backend_access_common_printtup_seams::create_remote_simple_dest_receiver::call()
+        }
+
         // DestTuplestore                       -> CreateTuplestoreDestReceiver  (tstoreReceiver.c)
         // DestIntoRel                          -> CreateIntoRelDestReceiver (createas.c)
         // DestSqlFunction                      -> CreateSQLFunctionDestReceiver (functions.c)

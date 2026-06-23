@@ -136,6 +136,16 @@ pub fn init_seams() {
 
     ws::wal_snd_set_state::set(crate::init::WalSndSetState);
 
+    // The PostgresMain simple-Query / error-recovery entries into the WAL
+    // sender (reached only on an `am_walsender` connection).
+    ws::exec_replication_command::set(crate::command::exec_replication_command);
+    ws::wal_snd_error_cleanup::set(crate::init::WalSndErrorCleanup);
+
+    // The PostgresMain backend-bootstrap entries into the WAL sender
+    // (`am_walsender` connection): claim the shmem slot + install handlers.
+    ws::init_wal_sender::set(crate::init::InitWalSender);
+    ws::wal_snd_signals::set(crate::init::WalSndSignals);
+
     ws::handle_wal_snd_init_stopping::set(crate::wakeup::HandleWalSndInitStopping);
     ws::wal_snd_rqst_file_reload::set(|| {
         crate::wakeup::WalSndRqstFileReload();

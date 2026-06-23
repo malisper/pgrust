@@ -1541,6 +1541,13 @@ mod libc_flags {
 /// its live [`SnapBuild`].
 pub fn init_seams() {
     registry::init_seams();
+
+    // Inward seam consumed by the WAL sender's replication-command entry:
+    // `exec_replication_command` clears any exported snapshot at the top.
+    // (`snap_build_snapshot_exists` is already installed by `registry::init_seams`.)
+    backend_replication_snapbuild_seams::snap_build_clear_exported_snapshot::set(
+        snap_build_clear_exported_snapshot,
+    );
 }
 
 #[cfg(test)]

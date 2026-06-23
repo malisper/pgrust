@@ -1291,10 +1291,15 @@ pub fn init_seams() {
     backend_access_common_printtup_seams::create_debug_dest_receiver::set(
         create_debug_dest_receiver_routed,
     );
+    backend_access_common_printtup_seams::create_remote_simple_dest_receiver::set(
+        printsimple::create_remote_simple_dest_receiver_routed,
+    );
     backend_tcop_dest_seams::set_remote_dest_receiver_params::set(
         set_remote_dest_receiver_params_routed,
     );
 }
+
+mod printsimple;
 
 #[cfg(test)]
 mod tests;

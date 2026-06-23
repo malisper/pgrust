@@ -37,6 +37,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `&printsimpleDR` (printsimple.c, dest.c): build the `DestRemoteSimple`
+    /// `DestReceiver` and register it into the tcop-dest router, returning its
+    /// [`DestReceiverHandle`]. `tcop/dest.c`'s `CreateDestReceiver` returns
+    /// `unconstify(DestReceiver *, &printsimpleDR)` for `DestRemoteSimple`; the
+    /// catalog-free single-row result path (IDENTIFY_SYSTEM / SHOW /
+    /// READ_REPLICATION_SLOT / TIMELINE_HISTORY in a walsender) routes its rows
+    /// here. printtup installs the seam from its own `init_seams()`.
+    pub fn create_remote_simple_dest_receiver() -> types_nodes::parsestmt::DestReceiverHandle
+);
+
+seam_core::seam!(
     /// `SendRowDescriptionMessage(&row_description_buf, portal->tupDesc,
     /// FetchPortalTargetList(portal), portal->formats)` else
     /// `pq_putemptymessage(PqMsg_NoData)` (postgres.c `exec_describe_portal_message`).

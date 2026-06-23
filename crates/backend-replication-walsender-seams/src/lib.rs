@@ -17,6 +17,39 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `bool exec_replication_command(const char *cmd_string)` (walsender.c) —
+    /// the WAL-sender replication-command entry reached from `PostgresMain`'s
+    /// simple-Query (`'Q'`) arm when `am_walsender`. Returns `false` if the
+    /// string was not a replication command (the SQL path then takes over).
+    /// Can `ereport(ERROR)`.
+    pub fn exec_replication_command(cmd_string: &str) -> bool
+);
+
+seam_core::seam!(
+    /// `WalSndErrorCleanup(void)` (walsender.c) — the WAL-sender error-recovery
+    /// cleanup reached from `PostgresMain`'s error handler when `am_walsender`.
+    /// Releases LWLocks, cancels condition-variable sleeps, closes the
+    /// xlogreader, and frees / cleans up the active replication slot.
+    pub fn wal_snd_error_cleanup()
+);
+
+seam_core::seam!(
+    /// `InitWalSender(void)` (walsender.c) — initialize a WAL sender before the
+    /// command loop, reached from `PostgresMain` after authentication when
+    /// `am_walsender`. Claims this backend's per-walsender shmem `WalSnd` slot,
+    /// creates the aux-process resource owner, advertises WAL-sender status to
+    /// the postmaster, and sets up the lag-tracking buffer.
+    pub fn init_wal_sender()
+);
+
+seam_core::seam!(
+    /// `WalSndSignals(void)` (walsender.c) — install the WAL-sender signal
+    /// handlers, reached from `PostgresMain`'s signal setup when `am_walsender`
+    /// (in place of the regular-backend `pqsignal` block).
+    pub fn wal_snd_signals()
+);
+
+seam_core::seam!(
     /// `HandleWalSndInitStopping()` (walsender.c) — the
     /// PROCSIG_WALSND_INIT_STOPPING arm of `procsignal_sigusr1_handler`.
     /// Signal-handler-safe flag flipping; infallible.

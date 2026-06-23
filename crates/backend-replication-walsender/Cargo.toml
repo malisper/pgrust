@@ -69,6 +69,13 @@ port-pgsleep = { path = "../port-pgsleep" }
 types-guc = { path = "../types-guc" }
 types-tuple = { path = "../types-tuple" }
 types-dest = { path = "../types-dest" }
+types-nodes = { path = "../types-nodes" }
 types-signal = { path = "../types-signal" }
+mcx = { path = "../mcx" }
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-commands-dbcommands-seams = { path = "../backend-commands-dbcommands-seams" }
+backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 
 libc = "0.2"

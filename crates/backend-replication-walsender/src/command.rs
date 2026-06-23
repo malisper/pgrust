@@ -223,14 +223,114 @@ fn error_aborted_transaction() -> ! {
 // ---------------------------------------------------------------------------
 
 /// `static void IdentifySystem(void)`.
+///
+/// 1:1 port of walsender.c's `IdentifySystem`: reply with a one-row, four-column
+/// result set — system identifier (text), timeline (int8), current xlog
+/// position (text), and the database name (text, NULL for a physical
+/// walsender). The tuple is sent through the `DestRemoteSimple` receiver via the
+/// `begin/do/end_tup_output` owner seams.
 pub fn IdentifySystem() {
-    // SELECT system identifier, current TLI, and current/last-flushed LSN, and
-    // (for a db-connected walsender) the database name; emit a single-row
-    // result via the libpq tuple-description framing.
-    panic!(
-        "IdentifySystem: depends on unported libpq single-row result framing \
-         (DestRemoteSimple) + GetSystemIdentifier/GetFlushRecPtr tuple assembly"
-    );
+    use crate::core::{INT8OID, TEXTOID};
+
+    // The repo has no ambient memory context for the walsender command path, so
+    // own one for the duration of this command (as SendBaseBackup does).
+    let ctx = mcx::MemoryContext::new("IDENTIFY_SYSTEM");
+    let mcx = ctx.mcx();
+
+    // snprintf(sysid, sizeof(sysid), UINT64_FORMAT, GetSystemIdentifier());
+    let sysid = alloc::format!("{}", crate::xlog::get_system_identifier::call());
+
+    // am_cascading_walsender = RecoveryInProgress();
+    let am_cascading = crate::xlog::recovery_in_progress::call();
+    crate::core::with_proc(|p| p.am_cascading_walsender = am_cascading);
+
+    // if (am_cascading_walsender) logptr = GetStandbyFlushRecPtr(&currTLI);
+    // else                        logptr = GetFlushRecPtr(&currTLI);
+    let mut curr_tli: crate::core::TimeLineID = 0;
+    let logptr = if am_cascading {
+        crate::start_replication::GetStandbyFlushRecPtr(&mut curr_tli)
+    } else {
+        let (ptr, tli) = crate::xlog::get_flush_rec_ptr::call();
+        curr_tli = tli;
+        ptr
+    };
+
+    // snprintf(xloc, sizeof(xloc), "%X/%X", LSN_FORMAT_ARGS(logptr));
+    let xloc = alloc::format!("{:X}/{:X}", (logptr >> 32) as u32, logptr as u32);
+
+    // if (MyDatabaseId != InvalidOid) { StartTransactionCommand();
+    //   dbname = get_database_name(MyDatabaseId); ... CommitTransactionCommand(); }
+    let dbname: Option<alloc::string::String> = {
+        let dbid = crate::miscinit::my_database_id::call();
+        if dbid != crate::core::InvalidOid {
+            // syscache access needs a transaction env.
+            crate::xact::start_transaction_command::call()
+                .expect("StartTransactionCommand(IDENTIFY_SYSTEM)");
+            let name = backend_commands_dbcommands_seams::get_database_name::call(mcx, dbid)
+                .expect("get_database_name")
+                .map(|s| s.as_str().to_string());
+            crate::xact::commit_transaction_command::call()
+                .expect("CommitTransactionCommand(IDENTIFY_SYSTEM)");
+            name
+        } else {
+            None
+        }
+    };
+
+    // dest = CreateDestReceiver(DestRemoteSimple);
+    let dest = dest::create_dest_receiver::call(types_dest::CommandDest::RemoteSimple);
+
+    // need a tuple descriptor representing four columns
+    // tupdesc = CreateTemplateTupleDesc(4);
+    let mut tupdesc = backend_access_common_tupdesc::CreateTemplateTupleDesc(mcx, 4)
+        .expect("CreateTemplateTupleDesc(4)");
+    backend_access_common_tupdesc::TupleDescInitBuiltinEntry(&mut tupdesc, 1, "systemid", TEXTOID, -1, 0)
+        .expect("TupleDescInitBuiltinEntry(systemid)");
+    backend_access_common_tupdesc::TupleDescInitBuiltinEntry(&mut tupdesc, 2, "timeline", INT8OID, -1, 0)
+        .expect("TupleDescInitBuiltinEntry(timeline)");
+    backend_access_common_tupdesc::TupleDescInitBuiltinEntry(&mut tupdesc, 3, "xlogpos", TEXTOID, -1, 0)
+        .expect("TupleDescInitBuiltinEntry(xlogpos)");
+    backend_access_common_tupdesc::TupleDescInitBuiltinEntry(&mut tupdesc, 4, "dbname", TEXTOID, -1, 0)
+        .expect("TupleDescInitBuiltinEntry(dbname)");
+    let tupdesc = Some(mcx::alloc_in(mcx, tupdesc).expect("alloc tupdesc"));
+
+    // prepare for projection of tuples
+    // tstate = begin_tup_output_tupdesc(dest, tupdesc, &TTSOpsVirtual);
+    let mut tstate = backend_executor_execTuples_seams::begin_tup_output_tupdesc::call(
+        mcx,
+        dest,
+        tupdesc,
+        types_nodes::TupleSlotKind::Virtual,
+    )
+    .expect("begin_tup_output_tupdesc");
+
+    // column 1: system identifier (text)
+    // column 2: timeline (int8)
+    // column 3: wal location (text)
+    // column 4: database name, or NULL if none (text)
+    let v0 = backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, &sysid)
+        .expect("cstring_to_text(systemid)");
+    let v1 = types_tuple::Datum::from_i64(curr_tli as i64);
+    let v2 = backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, &xloc)
+        .expect("cstring_to_text(xlogpos)");
+    let (v3, null3) = match &dbname {
+        Some(name) => (
+            backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, name)
+                .expect("cstring_to_text(dbname)"),
+            false,
+        ),
+        None => (types_tuple::Datum::null(), true),
+    };
+
+    let values = [v0, v1, v2, v3];
+    let nulls = [false, false, false, null3];
+
+    // do_tup_output(tstate, values, nulls);
+    backend_executor_execTuples_seams::do_tup_output::call(mcx, &mut tstate, &values, &nulls)
+        .expect("do_tup_output");
+
+    // end_tup_output(tstate);
+    backend_executor_execTuples_seams::end_tup_output::call(mcx, tstate).expect("end_tup_output");
 }
 
 /// `static void ReadReplicationSlot(ReadReplicationSlotCmd *cmd)`.
@@ -278,9 +378,28 @@ pub fn AlterReplicationSlot(_cmd: crate::core::AlterReplicationSlotCmd) {
 }
 
 /// `GetPGVariable(name)` wrapped in Start/CommitTransactionCommand (SHOW).
-fn cmd_variable_show(_n: crate::core::VariableShowStmt) {
-    panic!(
-        "SHOW: depends on unported GetPGVariable + transaction-wrapped libpq \
-         result framing"
-    );
+///
+/// 1:1 port of the `case T_VariableShowStmt:` arm of `exec_replication_command`
+/// (walsender.c): create a `DestRemoteSimple` receiver, run the SHOW inside a
+/// transaction command (syscache access needs a transaction environment), and
+/// emit the single-row result through the `GetPGVariable` owner seam.
+fn cmd_variable_show(n: crate::core::VariableShowStmt) {
+    // dest = CreateDestReceiver(DestRemoteSimple);
+    let dest = dest::create_dest_receiver::call(types_dest::CommandDest::RemoteSimple);
+
+    // The repo has no ambient memory context for the walsender command path, so
+    // own one for the duration of this command (mirroring SendBaseBackup's
+    // inward seam entry, which owns a `MemoryContext` for its run).
+    let ctx = mcx::MemoryContext::new("SHOW");
+
+    // syscache access needs a transaction environment
+    // StartTransactionCommand();
+    crate::xact::start_transaction_command::call().expect("StartTransactionCommand(SHOW)");
+
+    // GetPGVariable(n->name, dest);
+    backend_tcop_utility_out_seams::get_pg_variable::call(ctx.mcx(), Some(&n.name), dest)
+        .expect("GetPGVariable");
+
+    // CommitTransactionCommand();
+    crate::xact::commit_transaction_command::call().expect("CommitTransactionCommand(SHOW)");
 }

@@ -20,6 +20,7 @@ backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-tcop-dest = { path = "../backend-tcop-dest" }
 backend-tcop-dest-seams = { path = "../backend-tcop-dest-seams" }
 backend-access-common-printtup-seams = { path = "../backend-access-common-printtup-seams" }
