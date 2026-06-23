@@ -941,3 +941,124 @@ seam_core::seam!(
         estate: &types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<bool>
 );
+
+// ===========================================================================
+// Executor hooks (execMain.c): ExecutorStart_hook / ExecutorRun_hook /
+// ExecutorFinish_hook / ExecutorEnd_hook.
+//
+// These are the loadable-module interposition points (e.g. pg_stat_statements).
+// In C each is a per-process function-pointer global, NULL by default; the
+// hookable entry calls `hook ? hook(...) : standard_*(...)`. They are modeled
+// exactly like `shmem_request_hook` (miscinit.c): a per-backend thread-local
+// `Cell<Option<fn>>` slot, with `set_*_hook` / `*_hook_present` accessors and a
+// `call_*_hook` dispatcher. The slots live in this `-seams` crate (a dependency
+// of both the execMain owner and any future hook-installing module, e.g.
+// pg_stat_statements) so the module can register a hook without a dependency
+// cycle. With no hook set, `*_hook_present()` is false and the owner runs the
+// `standard_*` path directly — byte-identical to today.
+// ===========================================================================
+
+use std::cell::Cell;
+use types_error::PgResult;
+use types_nodes::querydesc::QueryDesc;
+use types_scan::sdir::ScanDirection;
+
+/// `ExecutorStart_hook_type` (executor.h): `void (*)(QueryDesc *queryDesc, int
+/// eflags)`. The hook returns a bool in PG18 (`ExecutorStart`'s `bool` return);
+/// modeled here as the fallible `PgResult<()>` the owner already threads, with
+/// the C bool surfaced as the `start` field on `QueryDesc`'s started state.
+pub type ExecutorStartHook = fn(query_desc: &mut QueryDesc, eflags: i32) -> PgResult<()>;
+/// `ExecutorRun_hook_type` (executor.h): `void (*)(QueryDesc *queryDesc,
+/// ScanDirection direction, uint64 count)`.
+pub type ExecutorRunHook =
+    fn(query_desc: &mut QueryDesc, direction: ScanDirection, count: u64) -> PgResult<()>;
+/// `ExecutorFinish_hook_type` (executor.h): `void (*)(QueryDesc *queryDesc)`.
+pub type ExecutorFinishHook = fn(query_desc: &mut QueryDesc) -> PgResult<()>;
+/// `ExecutorEnd_hook_type` (executor.h): `void (*)(QueryDesc *queryDesc)`.
+pub type ExecutorEndHook = fn(query_desc: &mut QueryDesc) -> PgResult<()>;
+
+thread_local! {
+    /// `ExecutorStart_hook_type ExecutorStart_hook = NULL;` (execMain.c).
+    static EXECUTOR_START_HOOK: Cell<Option<ExecutorStartHook>> = const { Cell::new(None) };
+    /// `ExecutorRun_hook_type ExecutorRun_hook = NULL;` (execMain.c).
+    static EXECUTOR_RUN_HOOK: Cell<Option<ExecutorRunHook>> = const { Cell::new(None) };
+    /// `ExecutorFinish_hook_type ExecutorFinish_hook = NULL;` (execMain.c).
+    static EXECUTOR_FINISH_HOOK: Cell<Option<ExecutorFinishHook>> = const { Cell::new(None) };
+    /// `ExecutorEnd_hook_type ExecutorEnd_hook = NULL;` (execMain.c).
+    static EXECUTOR_END_HOOK: Cell<Option<ExecutorEndHook>> = const { Cell::new(None) };
+}
+
+/// `ExecutorStart_hook != NULL` — whether a module registered an
+/// `ExecutorStart` hook.
+pub fn executor_start_hook_present() -> bool {
+    EXECUTOR_START_HOOK.with(|c| c.get().is_some())
+}
+/// Register a module's `ExecutorStart_hook` (the `ExecutorStart_hook = my_hook`
+/// assignment in `_PG_init`). The hook wraps + calls `standard_ExecutorStart`.
+pub fn set_executor_start_hook(hook: Option<ExecutorStartHook>) -> Option<ExecutorStartHook> {
+    EXECUTOR_START_HOOK.with(|c| c.replace(hook))
+}
+/// Invoke the registered `ExecutorStart_hook(queryDesc, eflags)`. Panics if no
+/// hook is registered (the call site guards with [`executor_start_hook_present`],
+/// mirroring C's `if (ExecutorStart_hook)`).
+pub fn call_executor_start_hook(query_desc: &mut QueryDesc, eflags: i32) -> PgResult<()> {
+    match EXECUTOR_START_HOOK.with(Cell::get) {
+        Some(hook) => hook(query_desc, eflags),
+        None => panic!("call_executor_start_hook() called with no hook registered"),
+    }
+}
+
+/// `ExecutorRun_hook != NULL`.
+pub fn executor_run_hook_present() -> bool {
+    EXECUTOR_RUN_HOOK.with(|c| c.get().is_some())
+}
+/// Register a module's `ExecutorRun_hook`. The hook wraps + calls
+/// `standard_ExecutorRun`.
+pub fn set_executor_run_hook(hook: Option<ExecutorRunHook>) -> Option<ExecutorRunHook> {
+    EXECUTOR_RUN_HOOK.with(|c| c.replace(hook))
+}
+/// Invoke the registered `ExecutorRun_hook(queryDesc, direction, count)`.
+pub fn call_executor_run_hook(
+    query_desc: &mut QueryDesc,
+    direction: ScanDirection,
+    count: u64,
+) -> PgResult<()> {
+    match EXECUTOR_RUN_HOOK.with(Cell::get) {
+        Some(hook) => hook(query_desc, direction, count),
+        None => panic!("call_executor_run_hook() called with no hook registered"),
+    }
+}
+
+/// `ExecutorFinish_hook != NULL`.
+pub fn executor_finish_hook_present() -> bool {
+    EXECUTOR_FINISH_HOOK.with(|c| c.get().is_some())
+}
+/// Register a module's `ExecutorFinish_hook`. The hook wraps + calls
+/// `standard_ExecutorFinish`.
+pub fn set_executor_finish_hook(hook: Option<ExecutorFinishHook>) -> Option<ExecutorFinishHook> {
+    EXECUTOR_FINISH_HOOK.with(|c| c.replace(hook))
+}
+/// Invoke the registered `ExecutorFinish_hook(queryDesc)`.
+pub fn call_executor_finish_hook(query_desc: &mut QueryDesc) -> PgResult<()> {
+    match EXECUTOR_FINISH_HOOK.with(Cell::get) {
+        Some(hook) => hook(query_desc),
+        None => panic!("call_executor_finish_hook() called with no hook registered"),
+    }
+}
+
+/// `ExecutorEnd_hook != NULL`.
+pub fn executor_end_hook_present() -> bool {
+    EXECUTOR_END_HOOK.with(|c| c.get().is_some())
+}
+/// Register a module's `ExecutorEnd_hook`. The hook wraps + calls
+/// `standard_ExecutorEnd`.
+pub fn set_executor_end_hook(hook: Option<ExecutorEndHook>) -> Option<ExecutorEndHook> {
+    EXECUTOR_END_HOOK.with(|c| c.replace(hook))
+}
+/// Invoke the registered `ExecutorEnd_hook(queryDesc)`.
+pub fn call_executor_end_hook(query_desc: &mut QueryDesc) -> PgResult<()> {
+    match EXECUTOR_END_HOOK.with(Cell::get) {
+        Some(hook) => hook(query_desc),
+        None => panic!("call_executor_end_hook() called with no hook registered"),
+    }
+}

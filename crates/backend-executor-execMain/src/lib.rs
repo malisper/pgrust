@@ -476,8 +476,10 @@ fn InitPlan(query_desc: &mut QueryDesc, eflags: i32) -> PgResult<()> {
     })
 }
 
-/// `ExecutorStart(queryDesc, eflags)` — the hookable entry; routes to
-/// [`standard_ExecutorStart`] (no `ExecutorStart_hook` consumer yet).
+/// `ExecutorStart(queryDesc, eflags)` (execMain.c) — the hookable entry:
+///   `if (ExecutorStart_hook) ExecutorStart_hook(queryDesc, eflags);`
+///   `else standard_ExecutorStart(queryDesc, eflags);`
+/// With no hook registered this is exactly [`standard_ExecutorStart`].
 pub fn ExecutorStart(query_desc: &mut QueryDesc, eflags: i32) -> PgResult<()> {
     // execMain.c:124-132 — In some cases (an EXECUTE statement or an execute
     // message with the extended query protocol) the query_id won't have been
@@ -487,7 +489,11 @@ pub fn ExecutorStart(query_desc: &mut QueryDesc, eflags: i32) -> PgResult<()> {
     let query_id = query_desc.work.with(|w| w.plannedstmt.queryId);
     backend_utils_activity_status_seams::pgstat_report_query_id::call(query_id as u64, false);
 
-    standard_ExecutorStart(query_desc, eflags)
+    if seams::executor_start_hook_present() {
+        seams::call_executor_start_hook(query_desc, eflags)
+    } else {
+        standard_ExecutorStart(query_desc, eflags)
+    }
 }
 
 // ===========================================================================
@@ -680,14 +686,20 @@ fn ExecutePlan(
     Ok(())
 }
 
-/// `ExecutorRun(queryDesc, direction, count)` — routes to
+/// `ExecutorRun(queryDesc, direction, count)` (execMain.c) — the hookable
+/// entry: `if (ExecutorRun_hook) ExecutorRun_hook(...); else
+/// standard_ExecutorRun(...);`. With no hook registered this is exactly
 /// [`standard_ExecutorRun`].
 pub fn ExecutorRun(
     query_desc: &mut QueryDesc,
     direction: ScanDirection,
     count: u64,
 ) -> PgResult<()> {
-    standard_ExecutorRun(query_desc, direction, count)
+    if seams::executor_run_hook_present() {
+        seams::call_executor_run_hook(query_desc, direction, count)
+    } else {
+        standard_ExecutorRun(query_desc, direction, count)
+    }
 }
 
 /// `ExecutorRewind(queryDesc)` (execMain.c) — rewind the executor to the start of
@@ -836,9 +848,16 @@ fn ExecEndPlan(query_desc: &mut QueryDesc) -> PgResult<()> {
     Ok(())
 }
 
-/// `ExecutorEnd(queryDesc)` — routes to [`standard_ExecutorEnd`].
+/// `ExecutorEnd(queryDesc)` (execMain.c) — the hookable entry:
+/// `if (ExecutorEnd_hook) ExecutorEnd_hook(...); else
+/// standard_ExecutorEnd(...);`. With no hook registered this is exactly
+/// [`standard_ExecutorEnd`].
 pub fn ExecutorEnd(query_desc: &mut QueryDesc) -> PgResult<()> {
-    standard_ExecutorEnd(query_desc)
+    if seams::executor_end_hook_present() {
+        seams::call_executor_end_hook(query_desc)
+    } else {
+        standard_ExecutorEnd(query_desc)
+    }
 }
 
 /// `ExecutorFinish(queryDesc)` (execMain.c) — run the executor's after-query
@@ -934,9 +953,16 @@ pub fn standard_ExecutorFinish(query_desc: &mut QueryDesc) -> PgResult<()> {
     Ok(())
 }
 
-/// `ExecutorFinish(queryDesc)` — routes to [`standard_ExecutorFinish`].
+/// `ExecutorFinish(queryDesc)` (execMain.c) — the hookable entry:
+/// `if (ExecutorFinish_hook) ExecutorFinish_hook(...); else
+/// standard_ExecutorFinish(...);`. With no hook registered this is exactly
+/// [`standard_ExecutorFinish`].
 pub fn ExecutorFinish(query_desc: &mut QueryDesc) -> PgResult<()> {
-    standard_ExecutorFinish(query_desc)
+    if seams::executor_finish_hook_present() {
+        seams::call_executor_finish_hook(query_desc)
+    } else {
+        standard_ExecutorFinish(query_desc)
+    }
 }
 
 /// `FreeQueryDesc(queryDesc)` — free a finished `QueryDesc` (drops the owned
@@ -1024,9 +1050,11 @@ pub fn CreateQueryDescAndStartCopy(
 }
 
 /// `ExecutorRun(queryDesc, ForwardScanDirection, 0)` (copyto.c:1104) for the
-/// COPY-(query)-TO path. Installed for `executor_run_copy`.
+/// COPY-(query)-TO path. Installed for `executor_run_copy`. copyto.c calls the
+/// hookable `ExecutorRun`, so this routes through the `ExecutorRun_hook` (the
+/// `ExecutorRun` wrapper) rather than `standard_ExecutorRun` directly.
 pub fn ExecutorRunCopy(query_desc: &mut QueryDesc) -> PgResult<()> {
-    standard_ExecutorRun(query_desc, ScanDirection::ForwardScanDirection, 0)
+    ExecutorRun(query_desc, ScanDirection::ForwardScanDirection, 0)
 }
 
 /// The COPY-(query)-TO teardown (copyto.c:1010-1012): `ExecutorFinish` +

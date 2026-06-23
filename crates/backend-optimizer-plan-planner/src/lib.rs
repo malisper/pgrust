@@ -200,7 +200,19 @@ fn pg_plan_query_impl<'mcx>(
     query_string: &str,
     cursor_options: i32,
 ) -> PgResult<PlannedStmt<'mcx>> {
-    standard_planner(mcx, querytree, query_string, cursor_options, None)
+    // planner.c: `result = planner_hook ? planner_hook(...) : standard_planner(...)`.
+    // With no hook registered this is exactly `standard_planner`.
+    if backend_optimizer_plan_planner_seams::planner_hook_present() {
+        backend_optimizer_plan_planner_seams::call_planner_hook(
+            mcx,
+            querytree,
+            query_string,
+            cursor_options,
+            None,
+        )
+    } else {
+        standard_planner(mcx, querytree, query_string, cursor_options, None)
+    }
 }
 
 /// `planner(parse, query_string, cursorOptions, boundParams)` (planner.c:286)
@@ -214,12 +226,23 @@ fn pg_plan_query_params_impl<'mcx>(
     cursor_options: i32,
     bound_params: types_nodes::params::ParamListInfo,
 ) -> PgResult<PlannedStmt<'mcx>> {
-    standard_planner(mcx, querytree, query_string, cursor_options, bound_params)
+    // planner.c: `result = planner_hook ? planner_hook(...) : standard_planner(...)`.
+    if backend_optimizer_plan_planner_seams::planner_hook_present() {
+        backend_optimizer_plan_planner_seams::call_planner_hook(
+            mcx,
+            querytree,
+            query_string,
+            cursor_options,
+            bound_params,
+        )
+    } else {
+        standard_planner(mcx, querytree, query_string, cursor_options, bound_params)
+    }
 }
 
 /// `standard_planner(parse, query_string, cursorOptions, boundParams)`
 /// (planner.c:302).
-fn standard_planner<'mcx>(
+pub fn standard_planner<'mcx>(
     mcx: Mcx<'mcx>,
     parse: &Query<'mcx>,
     _query_string: &str,

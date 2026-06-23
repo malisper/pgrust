@@ -92,12 +92,69 @@ seam_core::seam!(
     /// `if (post_parse_analyze_hook) (*post_parse_analyze_hook)(pstate, query,
     /// jstate);` (the call site analyze.c owns the hook for). Runs extension
     /// code; can `ereport(ERROR)`. `jstate` is `None` when query-id is off.
+    ///
+    /// This is the inward seam every parse-analyze call site rides; the owner's
+    /// installed body consults the settable [`post_parse_analyze_hook_present`] /
+    /// [`call_post_parse_analyze_hook`] slot below (the `if (post_parse_analyze_hook)`
+    /// guard).
     pub fn run_post_parse_analyze_hook(
         pstate: &PortalcmdsParseState,
         query: &Query,
         jstate: Option<&JumbleState>,
     ) -> PgResult<()>
 );
+
+// ===========================================================================
+// `post_parse_analyze_hook` (analyze.c): the loadable-module interposition
+// point called at the end of parse analysis. In C it is a per-process
+// function-pointer global, NULL by default; the call site runs `if
+// (post_parse_analyze_hook) post_parse_analyze_hook(pstate, query, jstate);`.
+// Modeled like `shmem_request_hook` (miscinit.c): a per-backend thread-local
+// `Cell<Option<fn>>` with `set_post_parse_analyze_hook` /
+// `post_parse_analyze_hook_present` / `call_post_parse_analyze_hook`. The slot
+// lives in this `-seams` crate so a hook-installing module (e.g.
+// pg_stat_statements) can register without a dependency cycle. The owner's
+// `run_post_parse_analyze_hook` body consults this slot; with no hook set it is
+// a no-op — byte-identical to today.
+// ===========================================================================
+
+/// `post_parse_analyze_hook_type` (analyze.h): `void (*)(ParseState *pstate,
+/// Query *query, JumbleState *jstate)`.
+pub type PostParseAnalyzeHook =
+    fn(pstate: &PortalcmdsParseState, query: &Query, jstate: Option<&JumbleState>) -> PgResult<()>;
+
+thread_local! {
+    /// `post_parse_analyze_hook_type post_parse_analyze_hook = NULL;` (analyze.c).
+    static POST_PARSE_ANALYZE_HOOK: std::cell::Cell<Option<PostParseAnalyzeHook>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// `post_parse_analyze_hook != NULL` — whether a module registered a
+/// post-parse-analyze hook.
+pub fn post_parse_analyze_hook_present() -> bool {
+    POST_PARSE_ANALYZE_HOOK.with(|c| c.get().is_some())
+}
+/// Register a module's `post_parse_analyze_hook` (the `post_parse_analyze_hook =
+/// my_hook` assignment in `_PG_init`).
+pub fn set_post_parse_analyze_hook(
+    hook: Option<PostParseAnalyzeHook>,
+) -> Option<PostParseAnalyzeHook> {
+    POST_PARSE_ANALYZE_HOOK.with(|c| c.replace(hook))
+}
+/// Invoke the registered `post_parse_analyze_hook(pstate, query, jstate)`.
+/// Panics if none is registered (the caller guards with
+/// [`post_parse_analyze_hook_present`], mirroring C's `if
+/// (post_parse_analyze_hook)`).
+pub fn call_post_parse_analyze_hook(
+    pstate: &PortalcmdsParseState,
+    query: &Query,
+    jstate: Option<&JumbleState>,
+) -> PgResult<()> {
+    match POST_PARSE_ANALYZE_HOOK.with(std::cell::Cell::get) {
+        Some(hook) => hook(pstate, query, jstate),
+        None => panic!("call_post_parse_analyze_hook() called with no hook registered"),
+    }
+}
 
 seam_core::seam!(
     /// `pg_analyze_and_rewrite_varparams(parsetree, query_string, &paramTypes,

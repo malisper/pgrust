@@ -70,6 +70,61 @@ seam_core::seam!(
     ) -> PgResult<PlannedStmt<'mcx>>
 );
 
+// ===========================================================================
+// `planner_hook` (planner.c): the loadable-module interposition point for query
+// planning. In C `planner()` calls `planner_hook ? planner_hook(parse,
+// query_string, cursorOptions, boundParams) : standard_planner(...)`. Modeled
+// like `shmem_request_hook` (miscinit.c): a per-backend thread-local
+// `Cell<Option<fn>>` with `set_planner_hook` / `planner_hook_present` /
+// `call_planner_hook`. The slot lives in this `-seams` crate so a hook-installing
+// module (e.g. pg_stat_statements) can register without a dependency cycle; the
+// hook wraps + calls the owner's public `standard_planner`. With no hook set,
+// `planner_hook_present()` is false and the owner runs `standard_planner`
+// directly — byte-identical to today.
+// ===========================================================================
+
+/// `planner_hook_type` (planner.h): `PlannedStmt *(*)(Query *parse, const char
+/// *query_string, int cursorOptions, ParamListInfo boundParams)`. Higher-ranked
+/// over the planner arena lifetime so a single registered hook plans any query.
+pub type PlannerHook = for<'mcx> fn(
+    mcx: Mcx<'mcx>,
+    parse: &Query<'mcx>,
+    query_string: &str,
+    cursor_options: i32,
+    bound_params: types_nodes::params::ParamListInfo,
+) -> PgResult<PlannedStmt<'mcx>>;
+
+thread_local! {
+    /// `planner_hook_type planner_hook = NULL;` (planner.c).
+    static PLANNER_HOOK: std::cell::Cell<Option<PlannerHook>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// `planner_hook != NULL` — whether a module registered a `planner` hook.
+pub fn planner_hook_present() -> bool {
+    PLANNER_HOOK.with(|c| c.get().is_some())
+}
+/// Register a module's `planner_hook` (the `planner_hook = my_hook` assignment
+/// in `_PG_init`). The hook wraps + calls the owner's public `standard_planner`.
+pub fn set_planner_hook(hook: Option<PlannerHook>) -> Option<PlannerHook> {
+    PLANNER_HOOK.with(|c| c.replace(hook))
+}
+/// Invoke the registered `planner_hook(parse, query_string, cursorOptions,
+/// boundParams)`. Panics if none is registered (the call site guards with
+/// [`planner_hook_present`], mirroring C's `if (planner_hook)`).
+pub fn call_planner_hook<'mcx>(
+    mcx: Mcx<'mcx>,
+    parse: &Query<'mcx>,
+    query_string: &str,
+    cursor_options: i32,
+    bound_params: types_nodes::params::ParamListInfo,
+) -> PgResult<PlannedStmt<'mcx>> {
+    match PLANNER_HOOK.with(std::cell::Cell::get) {
+        Some(hook) => hook(mcx, parse, query_string, cursor_options, bound_params),
+        None => panic!("call_planner_hook() called with no hook registered"),
+    }
+}
+
 seam_core::seam!(
     /// `plan_cluster_use_sort(tableOid, indexOid)` (planner.c): whether a
     /// seqscan+sort beats an indexscan for the cluster copy. C runs in

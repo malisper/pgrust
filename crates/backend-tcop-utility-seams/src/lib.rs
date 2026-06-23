@@ -67,6 +67,86 @@ seam_core::seam!(
     ) -> PgResult<()>
 );
 
+// ===========================================================================
+// `ProcessUtility_hook` (utility.c): the loadable-module interposition point for
+// utility-command execution. In C `ProcessUtility()` calls `ProcessUtility_hook
+// ? ProcessUtility_hook(...) : standard_ProcessUtility(...)`. Modeled like
+// `shmem_request_hook` (miscinit.c): a per-backend thread-local
+// `Cell<Option<fn>>` with `set_process_utility_hook` /
+// `process_utility_hook_present` / `call_process_utility_hook`. The slot lives in
+// this `-seams` crate so a hook-installing module (e.g. pg_stat_statements) can
+// register without a dependency cycle; the hook wraps + calls the owner's public
+// `standard_ProcessUtility`. With no hook set, `process_utility_hook_present()`
+// is false and the owner runs `standard_ProcessUtility` directly —
+// byte-identical to today.
+// ===========================================================================
+
+/// `ProcessUtility_hook_type` (utility.h): `void (*)(PlannedStmt *pstmt, const
+/// char *queryString, bool readOnlyTree, ProcessUtilityContext context,
+/// ParamListInfo params, QueryEnvironment *queryEnv, DestReceiver *dest,
+/// QueryCompletion *qc)`. The owned model drops the `queryEnv` argument (as the
+/// `process_utility` seam does). Higher-ranked over the per-utility context
+/// lifetime so one registered hook handles any utility statement.
+#[allow(clippy::type_complexity)]
+pub type ProcessUtilityHook = for<'mcx> fn(
+    mcx: mcx::Mcx<'mcx>,
+    pstmt: &types_nodes::nodeindexscan::PlannedStmt<'mcx>,
+    query_string: &str,
+    read_only_tree: bool,
+    context: types_nodes::parsestmt::ProcessUtilityContext,
+    params: types_nodes::portalcmds::ParamListInfo,
+    dest: types_nodes::parsestmt::DestReceiverHandle,
+    qc: &mut types_portal::QueryCompletion,
+) -> PgResult<()>;
+
+thread_local! {
+    /// `ProcessUtility_hook_type ProcessUtility_hook = NULL;` (utility.c).
+    static PROCESS_UTILITY_HOOK: std::cell::Cell<Option<ProcessUtilityHook>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// `ProcessUtility_hook != NULL` — whether a module registered a
+/// `ProcessUtility` hook.
+pub fn process_utility_hook_present() -> bool {
+    PROCESS_UTILITY_HOOK.with(|c| c.get().is_some())
+}
+/// Register a module's `ProcessUtility_hook` (the `ProcessUtility_hook = my_hook`
+/// assignment in `_PG_init`). The hook wraps + calls the owner's public
+/// `standard_ProcessUtility`.
+pub fn set_process_utility_hook(
+    hook: Option<ProcessUtilityHook>,
+) -> Option<ProcessUtilityHook> {
+    PROCESS_UTILITY_HOOK.with(|c| c.replace(hook))
+}
+/// Invoke the registered `ProcessUtility_hook(...)`. Panics if none is
+/// registered (the call site guards with [`process_utility_hook_present`],
+/// mirroring C's `if (ProcessUtility_hook)`).
+#[allow(clippy::too_many_arguments)]
+pub fn call_process_utility_hook<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    pstmt: &types_nodes::nodeindexscan::PlannedStmt<'mcx>,
+    query_string: &str,
+    read_only_tree: bool,
+    context: types_nodes::parsestmt::ProcessUtilityContext,
+    params: types_nodes::portalcmds::ParamListInfo,
+    dest: types_nodes::parsestmt::DestReceiverHandle,
+    qc: &mut types_portal::QueryCompletion,
+) -> PgResult<()> {
+    match PROCESS_UTILITY_HOOK.with(std::cell::Cell::get) {
+        Some(hook) => hook(
+            mcx,
+            pstmt,
+            query_string,
+            read_only_tree,
+            context,
+            params,
+            dest,
+            qc,
+        ),
+        None => panic!("call_process_utility_hook() called with no hook registered"),
+    }
+}
+
 seam_core::seam!(
     /// `UtilityReturnsTuples(parsetree)` (utility.c) — does running this utility
     /// statement produce a result set? `ChoosePortalStrategy`'s `CMD_UTILITY`

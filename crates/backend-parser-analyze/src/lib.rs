@@ -1181,16 +1181,21 @@ fn jumble_and_post_analyze_impl<'mcx>(
     Ok(())
 }
 
-/// Seam impl for the post-parse-analyze hook (analyze.c:127/169/206). The hook
-/// (`post_parse_analyze_hook`) is NULL unless an extension installs it; with no
-/// extension loaded the C `if (post_parse_analyze_hook)` guard falls through, so
-/// this is a no-op. Extensions wiring their own hook is a follow-on (the hook
-/// `fn`-pointer slot is not modeled until a loadable-module consumer needs it).
+/// Seam impl for the post-parse-analyze hook (analyze.c:127/169/206):
+///   `if (post_parse_analyze_hook) (*post_parse_analyze_hook)(pstate, query,
+///   jstate);`
+/// The settable `post_parse_analyze_hook` slot lives in the `-seams` crate (so a
+/// loadable module — e.g. pg_stat_statements — can register it without a
+/// dependency cycle). With no hook registered the guard falls through and this
+/// is a no-op, byte-identical to before.
 fn run_post_parse_analyze_hook_impl(
-    _pstate: &types_nodes::portalcmds::ParseState,
-    _query: &types_nodes::portalcmds::Query,
-    _jstate: Option<&types_nodes::portalcmds::JumbleState>,
+    pstate: &types_nodes::portalcmds::ParseState,
+    query: &types_nodes::portalcmds::Query,
+    jstate: Option<&types_nodes::portalcmds::JumbleState>,
 ) -> PgResult<()> {
+    if backend_parser_analyze_seams::post_parse_analyze_hook_present() {
+        backend_parser_analyze_seams::call_post_parse_analyze_hook(pstate, query, jstate)?;
+    }
     Ok(())
 }
 

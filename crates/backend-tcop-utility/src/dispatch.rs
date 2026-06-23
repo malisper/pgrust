@@ -92,8 +92,9 @@ fn set_query_completion(qc: &mut Option<&mut QueryCompletion>, command_tag: Comm
 
 /// `ProcessUtility` (utility.c:521-545) — the general utility-command invoker.
 ///
-/// In C, `ProcessUtility_hook` may interpose; it is not modeled, so this always
-/// runs [`standard_process_utility`].
+/// In C this is the hookable entry: `if (ProcessUtility_hook)
+/// ProcessUtility_hook(...); else standard_ProcessUtility(...);`. With no hook
+/// registered this is exactly [`standard_ProcessUtility`].
 #[allow(clippy::too_many_arguments)]
 pub fn ProcessUtility<'mcx>(
     mcx: Mcx<'mcx>,
@@ -108,7 +109,20 @@ pub fn ProcessUtility<'mcx>(
     // Assert(IsA(pstmt, PlannedStmt));
     // Assert(pstmt->commandType == CMD_UTILITY);
     // Assert(qc == NULL || qc->commandTag == CMDTAG_UNKNOWN);
-    standard_ProcessUtility(mcx, pstmt, query_string, read_only_tree, context, params, dest, qc)
+    if backend_tcop_utility_seams::process_utility_hook_present() {
+        backend_tcop_utility_seams::call_process_utility_hook(
+            mcx,
+            pstmt,
+            query_string,
+            read_only_tree,
+            context,
+            params,
+            dest,
+            qc,
+        )
+    } else {
+        standard_ProcessUtility(mcx, pstmt, query_string, read_only_tree, context, params, dest, qc)
+    }
 }
 
 /// `standard_ProcessUtility` (utility.c:548-1090) — the utility-command dispatch
