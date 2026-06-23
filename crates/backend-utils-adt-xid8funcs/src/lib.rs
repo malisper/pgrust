@@ -229,7 +229,31 @@ impl PgSnapshot {
 
     /// Reconstruct from the varlena byte image produced by
     /// [`to_varlena_bytes`](Self::to_varlena_bytes).
-    pub fn from_varlena_bytes(bytes: &[u8]) -> Option<Self> {
+    ///
+    /// `pg_snapshot` is a toastable varlena (typlen == -1, typstorage == 'x'), so
+    /// a small snapshot (no in-progress xids: 24 bytes < 127) is short-packable.
+    /// `PG_GETARG_VARLENA_P` (the C arg path) is `pg_detoast_datum`, which un-packs
+    /// a short (1-byte) header to 4-byte form. The decode below reads `nxip` at the
+    /// FIXED offset 4 and `xmin`/`xmax`/`xip` relative to a 4-byte header, so a
+    /// short image must be un-packed first (under `SHORT_VARLENA_PACKING`). With
+    /// the flag OFF no stored snapshot is short (behavior-preserving).
+    pub fn from_varlena_bytes(raw_bytes: &[u8]) -> Option<Self> {
+        // VARATT_IS_1B && !VARATT_IS_1B_E: short inline header -> un-pack to 4B.
+        let owned_unpacked: Vec<u8>;
+        let bytes: &[u8] = if raw_bytes
+            .first()
+            .is_some_and(|&b| b != 0x01 && (b & 0x01) == 0x01)
+        {
+            let data_size = ((raw_bytes[0] >> 1) & 0x7f) as usize - 1;
+            let new_size = data_size + 4;
+            let mut out = Vec::with_capacity(new_size);
+            out.extend_from_slice(&((new_size as u32) << 2).to_ne_bytes());
+            out.extend_from_slice(&raw_bytes[1..1 + data_size]);
+            owned_unpacked = out;
+            &owned_unpacked
+        } else {
+            raw_bytes
+        };
         if bytes.len() < SNAPSHOT_HEADER_LEN {
             return None;
         }
