@@ -110,28 +110,20 @@ pub fn remove_useless_result_rtes<'mcx>(
     // Top level of jointree must always be a FromExpr.
     debug_assert!(parse.jointree.is_some());
 
-    // Recurse. Take the top FromExpr out, wrap as a Node, walk it, store the
-    // (possibly replaced) result back. The recursion's single-child elision is
-    // guarded by `is_top`, so the top result is still a FromExpr.
-    let jt = parse
-        .jointree
-        .take()
-        .expect("remove_useless_result_rtes: top jointree must be a FromExpr");
-    let jt_node = Node::mk_from_expr(mcx, PgBox::into_inner(jt))?;
-    let new_top = remove_useless_results_recurse(
+    // Recurse over the live `parse.jointree` in place. The top FromExpr stays
+    // wired into `parse` throughout (addressed as `JtPath::Top`), so
+    // `remove_result_refs`'s parse-wide PHV substitution and the whole-query
+    // `find_dependent_phvs` reach the in-progress jointree — matching C, which
+    // aliases the whole tree into `root->parse`. The single-child elision is
+    // guarded by `is_top` (the top stays a FromExpr).
+    remove_useless_results_recurse(
         mcx,
         root,
         parse,
-        jt_node,
+        &JtPath::Top,
         None,
         &mut dropped_outer_joins,
-        true,
     )?;
-    let f = match new_top.into_fromexpr() {
-        Some(f) => f,
-        None => panic!("remove_useless_result_rtes: top jointree node is no longer a FromExpr"),
-    };
-    parse.jointree = Some(mcx::alloc_in(mcx, f)?);
 
     // If we removed outer-join nodes, remove references to those joins as
     // nulling rels (in PHVs pulled up from the original subquery). Kosher
@@ -191,65 +183,204 @@ pub fn remove_useless_result_rtes<'mcx>(
 // ===========================================================================
 // remove_useless_results_recurse (prepjointree.c:3669)
 // ===========================================================================
+//
+// Path-addressed, in-place port. The C `remove_useless_results_recurse` keeps
+// the entire jointree wired into `root->parse->jointree` for the whole walk, so
+// `remove_result_refs`'s `substitute_phv_relids((Node *) root->parse, …)` and
+// the whole-query `find_dependent_phvs(root, varno)` reach PHVs *anywhere* in
+// the live tree — including the join quals of nodes that are ancestors of the
+// RTE_RESULT being dropped, and PHVs that an earlier substitution rewrote. An
+// earlier by-value port `take()`-d the whole jointree out of `parse` for the
+// duration; during the recursion `parse.jointree` was then `None`, so those two
+// passes silently missed the jointree (they only saw the still-attached
+// targetList and rtable). That broke (a) the substitution of PHVs living in
+// ancestor join quals (e.g. `t1.x = subq1.d1` over a pulled-up VALUES subquery)
+// and (b) the read-after-write between an earlier substitution and a later
+// `find_dependent_phvs`. We therefore keep `parse.jointree` populated with the
+// live (in-progress) tree throughout, addressing the node being processed by a
+// [`JtPath`] from the top FromExpr and re-deriving a transient `&mut`/`&` only
+// when needed (always dropped before a call that also needs `&mut parse`).
+
+/// A location of a jointree `Node` within `parse.jointree`. The `'mcx` parameter
+/// ties the path to the arena lifetime of the `parse.jointree` it addresses
+/// (carried via `PhantomData`, since the path stores only structural indices).
+enum JtPath<'p, 'mcx> {
+    /// The top `parse.jointree` FromExpr node itself.
+    Top,
+    /// `fromlist[index]` of the FromExpr at `parent`.
+    From { parent: &'p JtPath<'p, 'mcx>, index: usize },
+    /// `larg` of the JoinExpr at `parent`.
+    Larg { parent: &'p JtPath<'p, 'mcx> },
+    /// `rarg` of the JoinExpr at `parent`.
+    Rarg { parent: &'p JtPath<'p, 'mcx> },
+    /// Never constructed — pins the `'mcx` arena lifetime.
+    #[allow(dead_code)]
+    Phantom(core::marker::PhantomData<&'p Node<'mcx>>),
+}
+
+/// A location of an implicit-AND quals slot (`f->quals` / `j->quals`) within
+/// `parse.jointree` — the C `Node **parent_quals` target.
+#[derive(Clone, Copy)]
+enum QualSlot<'p, 'mcx> {
+    /// `quals` of the FromExpr at `path`.
+    FromExprQuals { path: &'p JtPath<'p, 'mcx> },
+    /// `quals` of the JoinExpr at `path`.
+    JoinExprQuals { path: &'p JtPath<'p, 'mcx> },
+}
+
+/// Resolve a `&mut Node` for `path` within `parse.jointree`. The borrow lives
+/// only as long as the returned reference; callers must drop it before touching
+/// `parse` otherwise.
+fn jt_node_at<'a, 'mcx>(parse: &'a mut Query<'mcx>, path: &JtPath<'_, 'mcx>) -> &'a mut Node<'mcx> {
+    match path {
+        JtPath::Top => {
+            unreachable!("jt_node_at(Top): the top FromExpr is addressed via its fromlist/slots")
+        }
+        JtPath::From { parent, index } => {
+            let f = jt_fromexpr_at(parse, parent);
+            &mut *f.fromlist[*index]
+        }
+        JtPath::Larg { parent } => {
+            let j = jt_joinexpr_at(parse, parent);
+            j.larg.as_deref_mut().expect("JoinExpr with NULL larg")
+        }
+        JtPath::Rarg { parent } => {
+            let j = jt_joinexpr_at(parse, parent);
+            j.rarg.as_deref_mut().expect("JoinExpr with NULL rarg")
+        }
+        JtPath::Phantom(_) => unreachable!("JtPath::Phantom is never constructed"),
+    }
+}
+
+/// Resolve a `&mut FromExpr` for the FromExpr node at `path`.
+fn jt_fromexpr_at<'a, 'mcx>(
+    parse: &'a mut Query<'mcx>,
+    path: &JtPath<'_, 'mcx>,
+) -> &'a mut types_nodes::rawnodes::FromExpr<'mcx> {
+    match path {
+        JtPath::Top => parse
+            .jointree
+            .as_deref_mut()
+            .expect("remove_useless_result_rtes: top jointree must be a FromExpr"),
+        _ => jt_node_at(parse, path)
+            .as_fromexpr_mut()
+            .unwrap_or_else(|| unreachable!("jt_fromexpr_at: node is not a FromExpr")),
+    }
+}
+
+/// Resolve a `&mut JoinExpr` for the JoinExpr node at `path`.
+fn jt_joinexpr_at<'a, 'mcx>(
+    parse: &'a mut Query<'mcx>,
+    path: &JtPath<'_, 'mcx>,
+) -> &'a mut types_nodes::rawnodes::JoinExpr<'mcx> {
+    jt_node_at(parse, path)
+        .as_joinexpr_mut()
+        .unwrap_or_else(|| unreachable!("jt_joinexpr_at: node is not a JoinExpr"))
+}
+
+
+/// Read-only resolver: `&Node` for `path`.
+fn jt_node_ref<'a, 'mcx>(parse: &'a Query<'mcx>, path: &JtPath<'_, 'mcx>) -> &'a Node<'mcx> {
+    match path {
+        JtPath::Top => {
+            unreachable!("jt_node_ref(Top): the top FromExpr is addressed via its fromlist/slots")
+        }
+        JtPath::From { parent, index } => &*jt_fromexpr_ref(parse, parent).fromlist[*index],
+        JtPath::Larg { parent } => jt_joinexpr_ref(parse, parent)
+            .larg
+            .as_deref()
+            .expect("JoinExpr with NULL larg"),
+        JtPath::Rarg { parent } => jt_joinexpr_ref(parse, parent)
+            .rarg
+            .as_deref()
+            .expect("JoinExpr with NULL rarg"),
+        JtPath::Phantom(_) => unreachable!("JtPath::Phantom is never constructed"),
+    }
+}
+
+/// Read-only resolver: `&FromExpr` for the FromExpr node at `path`.
+fn jt_fromexpr_ref<'a, 'mcx>(
+    parse: &'a Query<'mcx>,
+    path: &JtPath<'_, 'mcx>,
+) -> &'a types_nodes::rawnodes::FromExpr<'mcx> {
+    match path {
+        JtPath::Top => parse
+            .jointree
+            .as_deref()
+            .expect("remove_useless_result_rtes: top jointree must be a FromExpr"),
+        _ => jt_node_ref(parse, path)
+            .as_fromexpr()
+            .unwrap_or_else(|| unreachable!("jt_fromexpr_ref: node is not a FromExpr")),
+    }
+}
+
+/// Read-only resolver: `&JoinExpr` for the JoinExpr node at `path`.
+fn jt_joinexpr_ref<'a, 'mcx>(
+    parse: &'a Query<'mcx>,
+    path: &JtPath<'_, 'mcx>,
+) -> &'a types_nodes::rawnodes::JoinExpr<'mcx> {
+    jt_node_ref(parse, path)
+        .as_joinexpr()
+        .unwrap_or_else(|| unreachable!("jt_joinexpr_ref: node is not a JoinExpr"))
+}
+
+/// Resolve a `&mut Option<NodePtr>` for the quals slot addressed by `qs`.
+fn qual_slot_at<'a, 'mcx>(
+    parse: &'a mut Query<'mcx>,
+    qs: QualSlot<'_, 'mcx>,
+) -> &'a mut Option<NodePtr<'mcx>> {
+    match qs {
+        QualSlot::FromExprQuals { path } => &mut jt_fromexpr_at(parse, path).quals,
+        QualSlot::JoinExprQuals { path } => &mut jt_joinexpr_at(parse, path).quals,
+    }
+}
 
 /// `remove_useless_results_recurse(root, jtnode, parent_quals, dropped_outer_joins)`
-/// (prepjointree.c:3669). Recursively process the jointree and return a modified
-/// jointree; the RT indexes of removed outer-join nodes are added to
-/// `*dropped_outer_joins`.
+/// (prepjointree.c:3669), addressing the node it processes by `path` within the
+/// live `parse.jointree`. The slot at `path` is mutated in place (and may be
+/// replaced by a child via elision/collapse). RT indexes of removed outer-join
+/// nodes are added to `*dropped_outer_joins`.
 ///
 /// `parent_quals` is the (possibly several-levels-up) parent's quals slot into
-/// which child quals may be hoisted, or `None` when that is not valid. `is_top`
-/// marks the literal `root->parse->jointree` node for the elision guard.
-#[allow(clippy::too_many_arguments)]
+/// which child quals may be hoisted, or `None` when that is not valid.
 fn remove_useless_results_recurse<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     parse: &mut Query<'mcx>,
-    jtnode: Node<'mcx>,
-    parent_quals: Option<&mut Option<NodePtr<'mcx>>>,
+    path: &JtPath<'_, 'mcx>,
+    parent_quals: Option<QualSlot<'_, 'mcx>>,
     dropped_outer_joins: &mut Relids<'mcx>,
-    is_top: bool,
-) -> PgResult<Node<'mcx>> {
-    match jtnode.node_tag() {
+) -> PgResult<()> {
+    let tag = match path {
+        JtPath::Top => ntag::T_FromExpr,
+        _ => jt_node_at(parse, path).node_tag(),
+    };
+    match tag {
         ntag::T_RangeTblRef => {
             // Can't immediately do anything with a RangeTblRef.
-            Ok(jtnode)
+            Ok(())
         }
-        ntag::T_FromExpr => remove_useless_results_recurse_fromexpr(
-            mcx,
-            root,
-            parse,
-            jtnode,
-            parent_quals,
-            dropped_outer_joins,
-            is_top,
-        ),
-        ntag::T_JoinExpr => remove_useless_results_recurse_joinexpr(
-            mcx,
-            root,
-            parse,
-            jtnode,
-            parent_quals,
-            dropped_outer_joins,
-        ),
+        ntag::T_FromExpr => {
+            remove_useless_results_recurse_fromexpr(mcx, root, parse, path, parent_quals, dropped_outer_joins)
+        }
+        ntag::T_JoinExpr => {
+            remove_useless_results_recurse_joinexpr(mcx, root, parse, path, parent_quals, dropped_outer_joins)
+        }
         _ => Err(types_error::PgError::error("unrecognized node type")),
     }
 }
 
 /// The `IsA(jtnode, FromExpr)` arm of [`remove_useless_results_recurse`].
-#[allow(clippy::too_many_arguments)]
 fn remove_useless_results_recurse_fromexpr<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     parse: &mut Query<'mcx>,
-    jtnode: Node<'mcx>,
-    parent_quals: Option<&mut Option<NodePtr<'mcx>>>,
+    path: &JtPath<'_, 'mcx>,
+    parent_quals: Option<QualSlot<'_, 'mcx>>,
     dropped_outer_joins: &mut Relids<'mcx>,
-    is_top: bool,
-) -> PgResult<Node<'mcx>> {
+) -> PgResult<()> {
+    let is_top = matches!(path, JtPath::Top);
     let mut result_relids: Relids = None;
-
-    let mut f = jtnode.into_fromexpr().unwrap();
 
     // We can drop RTE_RESULT rels from the fromlist so long as at least one
     // child remains, since joining to a one-row table changes nothing. (But we
@@ -259,26 +390,35 @@ fn remove_useless_results_recurse_fromexpr<'mcx>(
     // shrinking `f` to `find_dependent_phvs_in_jointree`; we mirror that with an
     // index walk that removes the current element on a drop and does not advance.
     let mut i = 0usize;
-    while i < f.fromlist.len() {
+    loop {
+        let len = jt_fromexpr_at(parse, path).fromlist.len();
+        if i >= len {
+            break;
+        }
         // Recursively transform child, allowing it to push up quals into f.quals.
-        let child = core::mem::replace(&mut *f.fromlist[i], dummy_node(mcx)?);
-        let child = remove_useless_results_recurse(
+        let child = JtPath::From { parent: path, index: i };
+        remove_useless_results_recurse(
             mcx,
             root,
             parse,
-            child,
-            Some(&mut f.quals),
+            &child,
+            Some(QualSlot::FromExprQuals { path }),
             dropped_outer_joins,
-            false,
         )?;
-        *f.fromlist[i] = child;
 
-        let varno = get_result_relid(root, parse, &f.fromlist[i]);
-        if f.fromlist.len() > 1
+        let varno = {
+            let f = jt_fromexpr_ref(parse, path);
+            get_result_relid(root, parse, &f.fromlist[i])
+        };
+        let len = jt_fromexpr_ref(parse, path).fromlist.len();
+        let droppable = len > 1
             && varno != 0
-            && !find_dependent_phvs_in_jointree_fromexpr(mcx, root, parse, &f, varno)?
-        {
-            f.fromlist.remove(i);
+            && {
+                let f = jt_fromexpr_ref(parse, path);
+                !find_dependent_phvs_in_jointree_fromexpr(mcx, root, parse, f, varno)?
+            };
+        if droppable {
+            jt_fromexpr_at(parse, path).fromlist.remove(i);
             result_relids = Some(bms_add_member(mcx, result_relids, varno)?);
             // Do not advance; the next element shifted into index `i`.
         } else {
@@ -295,168 +435,167 @@ fn remove_useless_results_recurse_fromexpr<'mcx>(
             if varno < 0 {
                 break;
             }
-            remove_result_refs_fromexpr(mcx, root, parse, &f, varno)?;
+            // subrelids of the surviving FromExpr; compute then drop the borrow
+            // before substitute (which needs `&mut parse`).
+            let subrelids = {
+                let f = jt_fromexpr_ref(parse, path);
+                get_relids_in_fromexpr(mcx, f, true, false)?
+            };
+            remove_result_refs(mcx, root, parse, subrelids.as_deref(), varno)?;
         }
     }
 
     // If the FromExpr now has only one child, try to elide it.
-    if f.fromlist.len() == 1 && !is_top && (f.quals.is_none() || parent_quals.is_some()) {
+    let (one_child, has_quals) = {
+        let f = jt_fromexpr_at(parse, path);
+        (f.fromlist.len() == 1, f.quals.is_some())
+    };
+    if one_child && !is_top && (!has_quals || parent_quals.is_some()) {
         // Merge any quals up to parent (child quals first).
-        if f.quals.is_some() {
+        if has_quals {
             let pq = parent_quals.expect("elision requires parent_quals when quals present");
-            let merged = concat_quals(mcx, f.quals.take(), pq.take())?;
-            *pq = merged;
+            let my_quals = jt_fromexpr_at(parse, path).quals.take();
+            let parent_existing = qual_slot_at(parse, pq).take();
+            let merged = concat_quals(mcx, my_quals, parent_existing)?;
+            *qual_slot_at(parse, pq) = merged;
         }
-        // return (Node *) linitial(f->fromlist)
-        let child = core::mem::replace(&mut *f.fromlist[0], dummy_node(mcx)?);
-        return Ok(child);
+        // Replace this slot with `linitial(f->fromlist)`.
+        let child = {
+            let f = jt_fromexpr_at(parse, path);
+            core::mem::replace(&mut *f.fromlist[0], dummy_node(mcx)?)
+        };
+        store_at(parse, path, child)?;
     }
 
-    Ok(Node::mk_from_expr(mcx, f)?)
+    Ok(())
 }
 
 /// The `IsA(jtnode, JoinExpr)` arm of [`remove_useless_results_recurse`].
-#[allow(clippy::too_many_arguments)]
 fn remove_useless_results_recurse_joinexpr<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     parse: &mut Query<'mcx>,
-    jtnode: Node<'mcx>,
-    mut parent_quals: Option<&mut Option<NodePtr<'mcx>>>,
+    path: &JtPath<'_, 'mcx>,
+    parent_quals: Option<QualSlot<'_, 'mcx>>,
     dropped_outer_joins: &mut Relids<'mcx>,
-) -> PgResult<Node<'mcx>> {
-    let mut j = jtnode.into_joinexpr().unwrap();
-    let jointype = j.jointype;
+) -> PgResult<()> {
+    let jointype = jt_joinexpr_at(parse, path).jointype;
 
-    // First, recurse into larg. INNER absorbs child quals into this node; LEFT
-    // lets LHS-child quals be absorbed into the parent (if any); otherwise no
-    // child-qual movement.
-    let larg = core::mem::replace(&mut j.larg, None);
-    let larg = larg.expect("remove_useless_results_recurse: JoinExpr with NULL larg");
-    let new_larg = match jointype {
-        JoinType::JOIN_INNER => remove_useless_results_recurse(
-            mcx,
-            root,
-            parse,
-            PgBox::into_inner(larg),
-            Some(&mut j.quals),
-            dropped_outer_joins,
-            false,
-        )?,
-        JoinType::JOIN_LEFT => remove_useless_results_recurse(
-            mcx,
-            root,
-            parse,
-            PgBox::into_inner(larg),
-            parent_quals.as_deref_mut(),
-            dropped_outer_joins,
-            false,
-        )?,
-        _ => remove_useless_results_recurse(
-            mcx,
-            root,
-            parse,
-            PgBox::into_inner(larg),
-            None,
-            dropped_outer_joins,
-            false,
-        )?,
+    // Recurse into larg. INNER absorbs child quals into this node; LEFT lets
+    // LHS-child quals be absorbed into the parent (if any); otherwise none.
+    let larg = JtPath::Larg { parent: path };
+    let larg_pq = match jointype {
+        JoinType::JOIN_INNER => Some(QualSlot::JoinExprQuals { path }),
+        JoinType::JOIN_LEFT => parent_quals,
+        _ => None,
     };
-    j.larg = Some(mcx::alloc_in(mcx, new_larg)?);
+    remove_useless_results_recurse(mcx, root, parse, &larg, larg_pq, dropped_outer_joins)?;
 
-    // Then recurse into rarg. INNER/LEFT absorb RHS-child quals into this node;
-    // otherwise no movement.
-    let rarg = core::mem::replace(&mut j.rarg, None);
-    let rarg = rarg.expect("remove_useless_results_recurse: JoinExpr with NULL rarg");
-    let new_rarg = match jointype {
-        JoinType::JOIN_INNER | JoinType::JOIN_LEFT => remove_useless_results_recurse(
-            mcx,
-            root,
-            parse,
-            PgBox::into_inner(rarg),
-            Some(&mut j.quals),
-            dropped_outer_joins,
-            false,
-        )?,
-        _ => remove_useless_results_recurse(
-            mcx,
-            root,
-            parse,
-            PgBox::into_inner(rarg),
-            None,
-            dropped_outer_joins,
-            false,
-        )?,
+    // Recurse into rarg. INNER/LEFT absorb RHS-child quals into this node;
+    // otherwise none.
+    let rarg = JtPath::Rarg { parent: path };
+    let rarg_pq = match jointype {
+        JoinType::JOIN_INNER | JoinType::JOIN_LEFT => Some(QualSlot::JoinExprQuals { path }),
+        _ => None,
     };
-    j.rarg = Some(mcx::alloc_in(mcx, new_rarg)?);
+    remove_useless_results_recurse(mcx, root, parse, &rarg, rarg_pq, dropped_outer_joins)?;
 
     // Apply join-type-specific optimization rules.
-    let mut jtnode: Node<'mcx> = Node::mk_join_expr(mcx, j)?;
     match jointype {
         JoinType::JOIN_INNER => {
             // An inner join is equivalent to a FromExpr; if either side reduced
-            // to an RTE_RESULT rel, replace the join with the other side. The
-            // other input can't reference PHVs to be evaluated at the RESULT rel
-            // (only RHSes of inner/left joins may have LATERAL refs to it).
-            let j = as_joinexpr_mut(&mut jtnode);
-            let larg_ref = j.larg.as_deref().unwrap();
-            let varno_l = get_result_relid(root, parse, larg_ref);
-            if varno_l != 0
-                && !find_dependent_phvs_in_jointree_node(
-                    mcx,
-                    root,
-                    parse,
-                    j.rarg.as_deref().unwrap(),
-                    varno_l,
-                )?
-            {
-                let rarg = j.rarg.take().unwrap();
-                remove_result_refs_node(mcx, root, parse, &rarg, varno_l)?;
-                jtnode = inner_collapse(mcx, &mut jtnode, PgBox::into_inner(rarg), parent_quals)?;
+            // to an RTE_RESULT rel, replace the join with the other side.
+            let varno_l = {
+                let j = jt_joinexpr_ref(parse, path);
+                let larg = j.larg.as_deref().unwrap();
+                get_result_relid(root, parse, larg)
+            };
+            // The other input can't reference PHVs to be evaluated at the RESULT
+            // rel (only RHSes of inner/left joins may have LATERAL refs to it).
+            let larg_droppable = varno_l != 0 && {
+                let j = jt_joinexpr_ref(parse, path);
+                let rarg = j.rarg.as_deref().unwrap();
+                !find_dependent_phvs_in_jointree_node(mcx, root, parse, rarg, varno_l)?
+            };
+            if larg_droppable {
+                // remove_result_refs over the surviving rarg, then collapse to it.
+                let subrelids = {
+                    let j = jt_joinexpr_ref(parse, path);
+                    get_relids_in_jointree(mcx, j.rarg.as_deref().unwrap(), true, false)?
+                };
+                remove_result_refs(mcx, root, parse, subrelids.as_deref(), varno_l)?;
+                let side = {
+                    let j = jt_joinexpr_at(parse, path);
+                    PgBox::into_inner(j.rarg.take().unwrap())
+                };
+                inner_collapse(mcx, parse, path, side, parent_quals)?;
             } else {
-                let j = as_joinexpr_mut(&mut jtnode);
-                let rarg_ref = j.rarg.as_deref().unwrap();
-                let varno_r = get_result_relid(root, parse, rarg_ref);
+                let varno_r = {
+                    let j = jt_joinexpr_ref(parse, path);
+                    let rarg = j.rarg.as_deref().unwrap();
+                    get_result_relid(root, parse, rarg)
+                };
                 if varno_r != 0 {
-                    let larg = j.larg.take().unwrap();
-                    remove_result_refs_node(mcx, root, parse, &larg, varno_r)?;
-                    jtnode =
-                        inner_collapse(mcx, &mut jtnode, PgBox::into_inner(larg), parent_quals)?;
+                    let subrelids = {
+                        let j = jt_joinexpr_ref(parse, path);
+                        get_relids_in_jointree(mcx, j.larg.as_deref().unwrap(), true, false)?
+                    };
+                    remove_result_refs(mcx, root, parse, subrelids.as_deref(), varno_r)?;
+                    let side = {
+                        let j = jt_joinexpr_at(parse, path);
+                        PgBox::into_inner(j.larg.take().unwrap())
+                    };
+                    inner_collapse(mcx, parse, path, side, parent_quals)?;
                 }
             }
         }
         JoinType::JOIN_LEFT => {
-            // Simplify if the RHS is an RTE_RESULT. If qual is empty, the join
-            // strength-reduces to inner (each LHS row has exactly one partner),
-            // so discard the RHS. Otherwise each LHS row is still returned
-            // exactly once and the RHS yields no columns (barring PHVs), so we
-            // can ignore the qual and discard the left join.
-            let j = as_joinexpr_mut(&mut jtnode);
-            let rarg_ref = j.rarg.as_deref().unwrap();
-            let varno = get_result_relid(root, parse, rarg_ref);
-            if varno != 0 && (j.quals.is_none() || !find_dependent_phvs(mcx, root, parse, varno)?) {
-                let rtindex = j.rtindex;
-                let larg = j.larg.take().unwrap();
-                remove_result_refs_node(mcx, root, parse, &larg, varno)?;
+            // Simplify if the RHS is an RTE_RESULT. If the qual is empty the join
+            // strength-reduces to inner; otherwise each LHS row is still returned
+            // once and the RHS yields no columns (barring PHVs), so we can ignore
+            // the qual and discard the left join.
+            let varno = {
+                let j = jt_joinexpr_ref(parse, path);
+                let rarg = j.rarg.as_deref().unwrap();
+                get_result_relid(root, parse, rarg)
+            };
+            let no_quals = jt_joinexpr_ref(parse, path).quals.is_none();
+            if varno != 0 && (no_quals || !find_dependent_phvs(mcx, root, parse, varno)?) {
+                let rtindex = jt_joinexpr_at(parse, path).rtindex;
+                let subrelids = {
+                    let j = jt_joinexpr_ref(parse, path);
+                    get_relids_in_jointree(mcx, j.larg.as_deref().unwrap(), true, false)?
+                };
+                remove_result_refs(mcx, root, parse, subrelids.as_deref(), varno)?;
                 *dropped_outer_joins =
                     Some(bms_add_member(mcx, dropped_outer_joins.take(), rtindex)?);
-                jtnode = PgBox::into_inner(larg);
+                let side = {
+                    let j = jt_joinexpr_at(parse, path);
+                    PgBox::into_inner(j.larg.take().unwrap())
+                };
+                store_at(parse, path, side)?;
             }
         }
         JoinType::JOIN_SEMI => {
             // Simplify if the RHS is an RTE_RESULT; the join qual becomes a
-            // filter qual for the LHS. PHVs to be evaluated at the RHS can only
-            // appear in the semijoin qual and never go null before examination;
-            // remove_result_refs relabels them to the LHS, which is fine. The
-            // join has no rtindex to scrub.
-            let j = as_joinexpr_mut(&mut jtnode);
-            let rarg_ref = j.rarg.as_deref().unwrap();
-            let varno = get_result_relid(root, parse, rarg_ref);
+            // filter qual for the LHS. The join has no rtindex to scrub.
+            let varno = {
+                let j = jt_joinexpr_ref(parse, path);
+                let rarg = j.rarg.as_deref().unwrap();
+                get_result_relid(root, parse, rarg)
+            };
             if varno != 0 {
-                debug_assert_eq!(j.rtindex, 0);
-                let larg = j.larg.take().unwrap();
-                remove_result_refs_node(mcx, root, parse, &larg, varno)?;
-                jtnode = inner_collapse(mcx, &mut jtnode, PgBox::into_inner(larg), parent_quals)?;
+                debug_assert_eq!(jt_joinexpr_ref(parse, path).rtindex, 0);
+                let subrelids = {
+                    let j = jt_joinexpr_ref(parse, path);
+                    get_relids_in_jointree(mcx, j.larg.as_deref().unwrap(), true, false)?
+                };
+                remove_result_refs(mcx, root, parse, subrelids.as_deref(), varno)?;
+                let side = {
+                    let j = jt_joinexpr_at(parse, path);
+                    PgBox::into_inner(j.larg.take().unwrap())
+                };
+                inner_collapse(mcx, parse, path, side, parent_quals)?;
             }
         }
         JoinType::JOIN_FULL | JoinType::JOIN_ANTI => {
@@ -468,43 +607,63 @@ fn remove_useless_results_recurse_joinexpr<'mcx>(
         }
     }
 
-    Ok(jtnode)
+    Ok(())
 }
 
-/// `&mut JoinExpr` view of a `Node::JoinExpr`.
-#[inline]
-fn as_joinexpr_mut<'a, 'mcx>(n: &'a mut Node<'mcx>) -> &'a mut types_nodes::rawnodes::JoinExpr<'mcx> {
-    n.as_joinexpr_mut().unwrap_or_else(|| unreachable!("expected JoinExpr"))
+/// Store `node` into the jointree slot at `path` (the `parse.jointree` location
+/// the C `return jtnode` writes back). The `Top` slot must remain a FromExpr.
+fn store_at<'mcx>(
+    parse: &mut Query<'mcx>,
+    path: &JtPath<'_, 'mcx>,
+    node: Node<'mcx>,
+) -> PgResult<()> {
+    match path {
+        JtPath::Top => {
+            let f = node
+                .into_fromexpr()
+                .unwrap_or_else(|| panic!("remove_useless_result_rtes: top jointree node is no longer a FromExpr"));
+            *parse
+                .jointree
+                .as_deref_mut()
+                .expect("remove_useless_result_rtes: top jointree must be a FromExpr") = f;
+        }
+        _ => {
+            *jt_node_at(parse, path) = node;
+        }
+    }
+    Ok(())
 }
 
 /// The shared INNER/SEMI "collapse to the surviving side" tail (the C
-/// `makeFromExpr(list_make1(side), j->quals)` / merge-to-parent block). `jtnode`
-/// is the JoinExpr being collapsed; `side` is the surviving child. Returns the
-/// replacement node.
+/// `makeFromExpr(list_make1(side), j->quals)` / merge-to-parent block). The
+/// JoinExpr being collapsed is at `path`; `side` is the surviving child. The
+/// slot at `path` is replaced with the collapse result.
 fn inner_collapse<'mcx>(
     mcx: Mcx<'mcx>,
-    jtnode: &mut Node<'mcx>,
+    parse: &mut Query<'mcx>,
+    path: &JtPath<'_, 'mcx>,
     side: Node<'mcx>,
-    parent_quals: Option<&mut Option<NodePtr<'mcx>>>,
-) -> PgResult<Node<'mcx>> {
-    let j = as_joinexpr_mut(jtnode);
-    let quals = j.quals.take();
-    if quals.is_some() && parent_quals.is_none() {
+    parent_quals: Option<QualSlot<'_, 'mcx>>,
+) -> PgResult<()> {
+    let quals = jt_joinexpr_at(parse, path).quals.take();
+    let result = if quals.is_some() && parent_quals.is_none() {
         // makeFromExpr(list_make1(side), j->quals)
         let mut fromlist = mcx::PgVec::new_in(mcx);
         fromlist.try_reserve(1).map_err(|_| mcx.oom(1))?;
         fromlist.push(mcx::alloc_in(mcx, side)?);
-        Ok(Node::mk_from_expr(mcx, types_nodes::rawnodes::FromExpr { fromlist, quals })?)
+        Node::mk_from_expr(mcx, types_nodes::rawnodes::FromExpr { fromlist, quals })?
     } else {
         // Merge any quals up to parent, return the surviving side.
         if let Some(pq) = parent_quals {
             if quals.is_some() {
-                let merged = concat_quals(mcx, quals, pq.take())?;
-                *pq = merged;
+                let parent_existing = qual_slot_at(parse, pq).take();
+                let merged = concat_quals(mcx, quals, parent_existing)?;
+                *qual_slot_at(parse, pq) = merged;
             }
         }
-        Ok(side)
-    }
+        side
+    };
+    store_at(parse, path, result)
 }
 
 // ===========================================================================
@@ -528,40 +687,29 @@ fn get_result_relid(_root: &PlannerInfo, parse: &Query, jtnode: &Node) -> i32 {
 // remove_result_refs (prepjointree.c:3970)
 // ===========================================================================
 
-/// `remove_result_refs(root, varno, (Node *) f)` where the new jointree location
-/// is a `FromExpr` value owned by the caller (the post-drop FromExpr).
-fn remove_result_refs_fromexpr<'mcx>(
+/// `remove_result_refs(root, varno, newjtloc)` (prepjointree.c:3970). Relabel
+/// the relids of any PHVs/AppendRelInfos that referenced the RTE_RESULT `varno`
+/// so they instead reference `subrelids` — the relids of the surviving jointree
+/// location (`get_relids_in_jointree(newjtloc, …)`). The caller computes
+/// `subrelids` first (from the still-attached jointree fragment) and drops the
+/// borrow, since the parse-wide PHV substitution needs `&mut parse`.
+///
+/// Because the whole jointree stays wired into `parse` during the recursion (see
+/// [`remove_useless_results_recurse`]), `substitute_phv_relids_in_query(parse,
+/// …)` reaches the PHVs in ancestor join quals as well as the targetList/rtable
+/// — exactly as C's `substitute_phv_relids((Node *) root->parse, …)`.
+fn remove_result_refs<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     parse: &mut Query<'mcx>,
-    f: &types_nodes::rawnodes::FromExpr<'mcx>,
+    subrelids: Option<&Bitmapset>,
     varno: i32,
 ) -> PgResult<()> {
     if last_ph_id(root) != 0 {
-        let subrelids = get_relids_in_fromexpr(mcx, f, true, false)?;
-        debug_assert!(!bms_is_empty(subrelids.as_deref()));
-        let sub = relids_to_expr_relids(subrelids.as_deref());
+        debug_assert!(!bms_is_empty(subrelids));
+        let sub = relids_to_expr_relids(subrelids);
         substitute_phv_relids_in_query(mcx, parse, varno, &sub);
-        fix_append_rel_relids(mcx, root, varno, subrelids.as_deref(), &sub)?;
-    }
-    Ok(())
-}
-
-/// `remove_result_refs(root, varno, newjtloc)` where `newjtloc` is a jointree
-/// `Node` value owned by the caller (an `larg`/`rarg` of a collapsing join).
-fn remove_result_refs_node<'mcx>(
-    mcx: Mcx<'mcx>,
-    root: &mut PlannerInfo,
-    parse: &mut Query<'mcx>,
-    newjtloc: &Node<'mcx>,
-    varno: i32,
-) -> PgResult<()> {
-    if last_ph_id(root) != 0 {
-        let subrelids = get_relids_in_jointree(mcx, newjtloc, true, false)?;
-        debug_assert!(!bms_is_empty(subrelids.as_deref()));
-        let sub = relids_to_expr_relids(subrelids.as_deref());
-        substitute_phv_relids_in_query(mcx, parse, varno, &sub);
-        fix_append_rel_relids(mcx, root, varno, subrelids.as_deref(), &sub)?;
+        fix_append_rel_relids(mcx, root, varno, subrelids, &sub)?;
     }
     Ok(())
 }
