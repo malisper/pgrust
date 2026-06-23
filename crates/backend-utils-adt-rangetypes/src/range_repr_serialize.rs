@@ -1046,6 +1046,44 @@ pub fn range_p_from_varlena_bytes<'mcx>(
     mcx: Mcx<'mcx>,
     bytes: &[u8],
 ) -> PgResult<RangeTypeP<'mcx>> {
+    // A by-reference range arg crosses the boundary as the verbatim heap-deform
+    // image. Under SHORT_VARLENA_PACKING a small stored range carries a 1-byte
+    // ("short") header; `range_deserialize` / `range_get_flags` /
+    // `range_type_get_oid` read `VARSIZE_4B`, the `rangetypid` at the fixed
+    // `RangeType` offset (4), and the bound payload past `sizeof(RangeType)`, so
+    // the image MUST be in 4-byte-header form. C's `DatumGetRangeTypeP` is
+    // `PG_DETOAST_DATUM`, which un-packs short->4B; mirror that here (this is the
+    // hot arg path — `getarg_range_p` routes by-ref args through this, NOT through
+    // `datum_get_range_type_p`). Behavior-preserving with the flag OFF (no stored
+    // range is short).
+    //
+    // SAFETY: `bytes` is a fully-bounded varlena image; the header byte
+    // distinguishes the short (1B, low bit set, != 0x01) from the 4B form.
+    let short = unsafe {
+        !bytes.is_empty()
+            && varatt_is_short(bytes.as_ptr())
+            && !varatt_is_1b_e(bytes.as_ptr())
+    };
+    if short {
+        // Un-pack: SET_VARSIZE(new, data + VARHDRSZ); copy VARDATA_SHORT.
+        let data_size = unsafe { varsize_short(bytes.as_ptr()) } - VARHDRSZ_SHORT;
+        let new_size = data_size + VARHDRSZ;
+        let base = palloc0_maxaligned(mcx, new_size)?;
+        // SAFETY: `base` heads a freshly allocated, zero-filled, MAXALIGN'd image
+        // of `new_size` bytes; write the 4B header then the short payload.
+        unsafe {
+            set_varsize(base, new_size);
+            core::ptr::copy_nonoverlapping(
+                bytes.as_ptr().add(VARHDRSZ_SHORT),
+                base.add(VARHDRSZ),
+                data_size,
+            );
+        }
+        return Ok(RangeTypeP {
+            ptr: base as *const RangeType,
+            _marker: core::marker::PhantomData,
+        });
+    }
     let base = palloc0_maxaligned(mcx, bytes.len())?;
     // SAFETY: `base` heads a freshly allocated, zero-filled, `bytes.len()`-byte
     // MAXALIGN'd image; copying the verbatim varlena bytes into it yields a valid
