@@ -1176,15 +1176,13 @@ pub fn LockReleaseAll(lockmethodid: u8, all_locks: bool) -> PgResult<()> {
     // Pass 2: scan each partition's proclocks for this backend and release.
     let myproc = proc::my_proc_number::call();
     for partition in 0..NUM_LOCK_PARTITIONS {
-        // Collect this backend's proclock tags in this partition.
-        let proclock_tags: Vec<LOCKTAG> = state::with_shared(|s| {
-            s.proclock_keys_filtered(|tag, pno| {
-                pno == myproc && lock_hash_partition(LockTagHashCode(tag)) == partition
-            })
-            .into_iter()
-            .map(|(tag, _)| tag)
-            .collect()
-        });
+        // Collect this backend's proclock tags in this partition by walking its
+        // OWN per-partition myProcLocks list (C's
+        // `dlist_foreach(&MyProc->myProcLocks[partition])`) — O(held), not a
+        // full-slab seq-scan. Empty for a no-lock SELECT, so the common case is
+        // O(1) per partition instead of O(slab capacity).
+        let proclock_tags: Vec<LOCKTAG> =
+            state::with_shared(|s| s.my_proc_lock_tags(myproc, partition as i32));
         if proclock_tags.is_empty() {
             continue;
         }

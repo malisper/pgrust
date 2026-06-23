@@ -250,16 +250,10 @@ pub(crate) fn PostPrepare_Locks(xid: types_core::primitive::TransactionId) -> Pg
     // Second pass: scan each lock partition and transfer the proclocks whose
     // releaseMask is non-zero from `myproc` to `newproc`.
     for partition in 0..NUM_LOCK_PARTITIONS as i32 {
-        // Collect this partition's proclocks held by myproc.
-        let in_partition: Vec<LOCKTAG> = state::with_shared(|s| {
-            s.proclock_keys_filtered(|tag, holder| {
-                holder == myproc
-                    && lock_hash_partition(LockTagHashCode(tag)) == partition
-            })
-            .into_iter()
-            .map(|(tag, _)| tag)
-            .collect()
-        });
+        // Collect this partition's proclocks held by myproc by walking myproc's
+        // own per-partition myProcLocks list (O(held), not a full-slab scan).
+        let in_partition: Vec<LOCKTAG> =
+            state::with_shared(|s| s.my_proc_lock_tags(myproc, partition));
         if in_partition.is_empty() {
             continue;
         }

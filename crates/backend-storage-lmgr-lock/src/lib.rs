@@ -91,6 +91,17 @@ fn nlockents() -> PgResult<i64> {
     Ok(total as i64)
 }
 
+/// Total PGPROC slots = the holder `ProcNumber` range:
+/// `MaxBackends + NUM_AUXILIARY_PROCS + max_prepared_xacts` (proc_shmem's
+/// `TotalProcs`). Sizes the per-proc `myProcLocks` head array so every possible
+/// holder (regular backends, auxiliary procs, and 2PC dummy procs) has a slot.
+fn total_procs() -> usize {
+    let max_backends = backend_utils_init_small_seams::max_backends::call() as usize;
+    let max_prepared = backend_utils_init_small_seams::max_prepared_xacts::call() as usize;
+    let num_aux = types_storage::storage::NUM_AUXILIARY_PROCS as usize;
+    max_backends + num_aux + max_prepared
+}
+
 /// `LockManagerShmemInit()` (lock.c) — allocate the shared LOCK / PROCLOCK
 /// hash tables and the fast-path strong-lock struct. In the single-process
 /// model these are this backend's `thread_local`s; we simply (re)initialize
@@ -104,9 +115,10 @@ pub fn LockManagerShmemInit() -> PgResult<()> {
     let n_locks = nlockents()? as usize;
     let n_proclocks = n_locks.saturating_mul(2);
 
-    let bytes = state::arena_bytes(n_locks, n_proclocks);
+    let n_procs = total_procs();
+    let bytes = state::arena_bytes(n_locks, n_proclocks, n_procs);
     let (base, found) = shmem_init_struct::call("Lock Table Arena", bytes)?;
-    state::shmem_init(base, found, n_locks, n_proclocks);
+    state::shmem_init(base, found, n_locks, n_proclocks, n_procs);
 
     state::FP_STRONG.with(|c| *c.borrow_mut() = state::FastPathStrongRelationLockData::default());
     Ok(())
@@ -149,7 +161,7 @@ pub fn LockManagerShmemSize() -> PgResult<Size> {
     // size so ipci's accumulator covers the real allocation.
     let n_locks = max_table_size as usize;
     let n_proclocks = n_locks.saturating_mul(2);
-    let arena = state::arena_bytes(n_locks, n_proclocks);
+    let arena = state::arena_bytes(n_locks, n_proclocks, total_procs());
     size = add_size::call(size, arena)?;
     Ok(size)
 }

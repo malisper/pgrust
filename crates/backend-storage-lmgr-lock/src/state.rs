@@ -43,6 +43,7 @@ use std::collections::HashMap;
 
 use types_core::primitive::INVALID_PROC_NUMBER;
 use types_core::ProcNumber;
+use types_storage::storage::NUM_LOCK_PARTITIONS;
 use types_storage::lock::{LOCALLOCK, LOCALLOCKTAG, LOCKMASK, LOCKTAG, MAX_LOCKMODES};
 
 /// `FAST_PATH_STRONG_LOCK_HASH_BITS` / `FAST_PATH_STRONG_LOCK_HASH_PARTITIONS`
@@ -184,6 +185,14 @@ struct ShmProcLock {
     wait_next: i32,
     /// 1 when this PROCLOCK's holder is currently on its LOCK's wait queue.
     on_wait_queue: i32,
+    /// Holder's per-partition `myProcLocks[partition]` list link (next), or NIL.
+    /// Mirrors C's `PROCLOCK.procLink` (the `dlist_node` chained into
+    /// `PGPROC.myProcLocks[partition]`). The partition is
+    /// `LockHashPartition(LockTagHashCode(tag))`.
+    my_proc_next: i32,
+    /// Holder's per-partition `myProcLocks` list link (prev), or NIL. Kept so
+    /// removal is O(1) like C's doubly-linked `dlist`.
+    my_proc_prev: i32,
 }
 
 impl ShmProcLock {
@@ -206,6 +215,8 @@ impl ShmProcLock {
             holder_next: NIL,
             wait_next: NIL,
             on_wait_queue: 0,
+            my_proc_next: NIL,
+            my_proc_prev: NIL,
         }
     }
 }
@@ -223,6 +234,10 @@ struct SharedHeader {
     n_locks: i32,
     /// PROCLOCK pool capacity.
     n_proclocks: i32,
+    /// Number of PGPROC slots (the holder `ProcNumber` range:
+    /// `MaxBackends + NUM_AUXILIARY_PROCS + max_prepared_xacts`). The per-proc
+    /// `myProcLocks` head array is `n_procs * NUM_LOCK_PARTITIONS` entries.
+    n_procs: i32,
     /// Free-list head for the LOCK pool.
     lock_free_head: i32,
     /// Free-list head for the PROCLOCK pool.
@@ -256,17 +271,32 @@ const fn maxalign(x: usize) -> usize {
 struct Offsets {
     lock_buckets: usize,
     proclock_buckets: usize,
+    /// Per-proc, per-partition `myProcLocks` list heads
+    /// (`n_procs * NUM_LOCK_PARTITIONS` i32 slot indices).
+    my_proc_heads: usize,
     lock_pool: usize,
     proclock_pool: usize,
     total: usize,
 }
 
-fn compute_offsets(n_buckets: usize, n_locks: usize, n_proclocks: usize) -> Offsets {
+/// Number of per-proc `myProcLocks` head entries for `n_procs` PGPROC slots.
+fn my_proc_heads_len(n_procs: usize) -> usize {
+    n_procs * (NUM_LOCK_PARTITIONS as usize)
+}
+
+fn compute_offsets(
+    n_buckets: usize,
+    n_locks: usize,
+    n_proclocks: usize,
+    n_procs: usize,
+) -> Offsets {
     let mut off = maxalign(core::mem::size_of::<SharedHeader>());
     let lock_buckets = off;
     off += maxalign(n_buckets * core::mem::size_of::<i32>());
     let proclock_buckets = off;
     off += maxalign(n_buckets * core::mem::size_of::<i32>());
+    let my_proc_heads = off;
+    off += maxalign(my_proc_heads_len(n_procs) * core::mem::size_of::<i32>());
     let lock_pool = off;
     off += maxalign(n_locks * core::mem::size_of::<ShmLock>());
     let proclock_pool = off;
@@ -274,6 +304,7 @@ fn compute_offsets(n_buckets: usize, n_locks: usize, n_proclocks: usize) -> Offs
     Offsets {
         lock_buckets,
         proclock_buckets,
+        my_proc_heads,
         lock_pool,
         proclock_pool,
         total: off,
@@ -289,7 +320,13 @@ static SHARED_BASE: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
 /// `LockManagerShmemInit` (postmaster, pre-fork): record the arena base and, on
 /// first creation, initialize the header / bucket arrays / free lists. `found`
 /// mirrors C's `*foundPtr` (true on re-attach; only the creator initializes).
-pub(crate) fn shmem_init(base: *mut u8, found: bool, n_locks: usize, n_proclocks: usize) {
+pub(crate) fn shmem_init(
+    base: *mut u8,
+    found: bool,
+    n_locks: usize,
+    n_proclocks: usize,
+    n_procs: usize,
+) {
     SHARED_BASE.store(base, Ordering::Relaxed);
     if found {
         return;
@@ -297,13 +334,14 @@ pub(crate) fn shmem_init(base: *mut u8, found: bool, n_locks: usize, n_proclocks
     // Bucket count: round the lock capacity up to a power of two for a cheap
     // mask, with a floor so tiny configs still hash sanely.
     let n_buckets = next_pow2(n_locks.max(16));
-    let offs = compute_offsets(n_buckets, n_locks, n_proclocks);
+    let offs = compute_offsets(n_buckets, n_locks, n_proclocks, n_procs);
 
     unsafe {
         let hdr = base as *mut SharedHeader;
         (*hdr).n_buckets = n_buckets as i32;
         (*hdr).n_locks = n_locks as i32;
         (*hdr).n_proclocks = n_proclocks as i32;
+        (*hdr).n_procs = n_procs as i32;
         (*hdr).n_locks_used = 0;
         (*hdr).n_proclocks_used = 0;
         (*hdr).freelist_lock = 0;
@@ -314,6 +352,12 @@ pub(crate) fn shmem_init(base: *mut u8, found: bool, n_locks: usize, n_proclocks
         for i in 0..n_buckets {
             *lb.add(i) = NIL;
             *pb.add(i) = NIL;
+        }
+
+        // Per-proc myProcLocks heads = NIL (every proc starts holding nothing).
+        let mph = base.add(offs.my_proc_heads) as *mut i32;
+        for i in 0..my_proc_heads_len(n_procs) {
+            *mph.add(i) = NIL;
         }
 
         // LOCK pool: zero + thread free list 0 -> 1 -> ... -> NIL.
@@ -349,9 +393,9 @@ fn next_pow2(mut x: usize) -> usize {
 }
 
 /// Total arena bytes for a given capacity (used by `LockManagerShmemSize`).
-pub(crate) fn arena_bytes(n_locks: usize, n_proclocks: usize) -> usize {
+pub(crate) fn arena_bytes(n_locks: usize, n_proclocks: usize, n_procs: usize) -> usize {
     let n_buckets = next_pow2(n_locks.max(16));
-    compute_offsets(n_buckets, n_locks, n_proclocks).total
+    compute_offsets(n_buckets, n_locks, n_proclocks, n_procs).total
 }
 
 // ===========================================================================
@@ -388,8 +432,29 @@ impl SharedLockTable {
     fn n_proclocks(&self) -> usize {
         unsafe { (*self.hdr()).n_proclocks as usize }
     }
+    fn n_procs(&self) -> usize {
+        unsafe { (*self.hdr()).n_procs as usize }
+    }
     fn offsets(&self) -> Offsets {
-        compute_offsets(self.n_buckets(), self.n_locks(), self.n_proclocks())
+        compute_offsets(
+            self.n_buckets(),
+            self.n_locks(),
+            self.n_proclocks(),
+            self.n_procs(),
+        )
+    }
+    fn my_proc_heads(&self) -> *mut i32 {
+        unsafe { self.base.add(self.offsets().my_proc_heads) as *mut i32 }
+    }
+    /// Index into the `my_proc_heads` array for `(holder, partition)`.
+    fn my_proc_head_idx(&self, holder: ProcNumber, partition: i32) -> usize {
+        debug_assert!(holder >= 0 && (holder as usize) < self.n_procs());
+        debug_assert!(partition >= 0 && partition < NUM_LOCK_PARTITIONS);
+        (holder as usize) * (NUM_LOCK_PARTITIONS as usize) + (partition as usize)
+    }
+    /// The lock partition of a tag (`LockHashPartition(LockTagHashCode(tag))`).
+    fn tag_partition(tag: &LOCKTAG) -> i32 {
+        (crate::LockTagHashCode(tag) % (NUM_LOCK_PARTITIONS as u32)) as i32
     }
     fn lock_buckets(&self) -> *mut i32 {
         unsafe { self.base.add(self.offsets().lock_buckets) as *mut i32 }
@@ -635,6 +700,85 @@ impl SharedLockTable {
         }
     }
 
+    // ---- per-PGPROC myProcLocks list -----------------------------------
+    //
+    // Mirrors C's `PGPROC.myProcLocks[NUM_LOCK_PARTITIONS]` doubly-linked list
+    // (`dlist_push_tail`/`dlist_delete` of `PROCLOCK.procLink`). It lets
+    // `LockReleaseAll` walk only the proclocks THIS backend holds in a
+    // partition, instead of seq-scanning the whole shared PROCLOCK slab.
+    // Maintained under the same partition LWLock the caller already holds for
+    // the proclock's tag (the head lives logically with that partition).
+
+    /// `dlist_push_tail(&proc->myProcLocks[partition], &proclock->procLink)`.
+    /// Push tail so the list is iterated in acquisition order, like C.
+    fn my_proc_push(&mut self, holder: ProcNumber, partition: i32, pidx: i32) {
+        let head_idx = self.my_proc_head_idx(holder, partition);
+        unsafe {
+            let mph = self.my_proc_heads();
+            (*self.proclock_at(pidx)).my_proc_next = NIL;
+            let head = *mph.add(head_idx);
+            if head == NIL {
+                (*self.proclock_at(pidx)).my_proc_prev = NIL;
+                *mph.add(head_idx) = pidx;
+                return;
+            }
+            let mut cur = head;
+            while (*self.proclock_at(cur)).my_proc_next != NIL {
+                cur = (*self.proclock_at(cur)).my_proc_next;
+            }
+            (*self.proclock_at(cur)).my_proc_next = pidx;
+            (*self.proclock_at(pidx)).my_proc_prev = cur;
+        }
+    }
+
+    /// `dlist_delete(&proclock->procLink)` — unlink from the holder's
+    /// per-partition myProcLocks list. O(1) via the prev/next links.
+    fn my_proc_remove(&mut self, holder: ProcNumber, partition: i32, pidx: i32) {
+        let head_idx = self.my_proc_head_idx(holder, partition);
+        unsafe {
+            let mph = self.my_proc_heads();
+            let prev = (*self.proclock_at(pidx)).my_proc_prev;
+            let next = (*self.proclock_at(pidx)).my_proc_next;
+            if prev == NIL {
+                // Was the head (or not linked; guard via head check).
+                if *mph.add(head_idx) == pidx {
+                    *mph.add(head_idx) = next;
+                }
+            } else {
+                (*self.proclock_at(prev)).my_proc_next = next;
+            }
+            if next != NIL {
+                (*self.proclock_at(next)).my_proc_prev = prev;
+            }
+            (*self.proclock_at(pidx)).my_proc_next = NIL;
+            (*self.proclock_at(pidx)).my_proc_prev = NIL;
+        }
+    }
+
+    /// The PROCLOCK tags `holder` holds in `partition`, in list order — the C
+    /// `dlist_foreach(&MyProc->myProcLocks[partition])`. O(held), NOT O(slab).
+    pub(crate) fn my_proc_lock_tags(
+        &self,
+        holder: ProcNumber,
+        partition: i32,
+    ) -> Vec<LOCKTAG> {
+        let mut out = Vec::new();
+        if holder < 0 || (holder as usize) >= self.n_procs() {
+            return out;
+        }
+        let head_idx = self.my_proc_head_idx(holder, partition);
+        let mut cur = unsafe { *self.my_proc_heads().add(head_idx) };
+        while cur != NIL {
+            unsafe {
+                debug_assert!((*self.proclock_at(cur)).used != 0);
+                debug_assert_eq!((*self.proclock_at(cur)).holder, holder);
+                out.push((*self.proclock_at(cur)).tag);
+                cur = (*self.proclock_at(cur)).my_proc_next;
+            }
+        }
+        out
+    }
+
     /// The holder `ProcNumber`s of a LOCK, in list order.
     pub(crate) fn holders(&self, tag: &LOCKTAG) -> Vec<ProcNumber> {
         let mut out = Vec::new();
@@ -706,6 +850,9 @@ impl SharedLockTable {
         if lidx != NIL {
             self.holder_push(lidx, idx);
         }
+        // Chain into the holder's per-partition myProcLocks list (C's
+        // `dlist_push_tail(&proc->myProcLocks[partition], &proclock->procLink)`).
+        self.my_proc_push(holder, Self::tag_partition(tag), idx);
     }
 
     fn alloc_proclock(&mut self) -> i32 {
@@ -753,6 +900,9 @@ impl SharedLockTable {
                     self.holder_remove(lidx, cur);
                     self.waitq_remove_idx(lidx, cur);
                 }
+                // Unchain from the holder's per-partition myProcLocks list
+                // (C's `dlist_delete(&proclock->procLink)`).
+                self.my_proc_remove(holder, Self::tag_partition(tag), cur);
                 unsafe {
                     if prev == NIL {
                         *self.proclock_buckets().add(b) = next;
@@ -809,9 +959,18 @@ impl SharedLockTable {
         if idx == NIL {
             return false;
         }
+        // Move the proclock between the two procs' myProcLocks lists (same
+        // partition, since the tag is unchanged). Remove under the OLD holder
+        // before rewriting the holder field, then push under the NEW holder.
+        let partition = Self::tag_partition(tag);
+        self.my_proc_remove(old, partition, idx);
         let s = self.proclock_at(idx);
         unsafe {
             (*s).holder = new;
+        }
+        self.my_proc_push(new, partition, idx);
+        let s = self.proclock_at(idx);
+        unsafe {
             let mut pl = ProcLock {
                 group_leader: (*s).group_leader,
                 hold_mask: (*s).hold_mask,
