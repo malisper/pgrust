@@ -15,3 +15,5 @@ target-iso
 /wasm-datadir/
 /wasm-datadir-build/
 /wasm-datadir-clean/
+scratch_dd/
+tools/wasm-harness/target/

@@ -20172,6 +20172,7 @@ dependencies = [
  "types-numeric",
  "types-pgtime",
  "types-tuple",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -25141,6 +25142,7 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "port-pg-strong-random-seams",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -25199,6 +25201,7 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "types-core",
+ "wasm-libc-shim",
 ]
 
 [[package]]
