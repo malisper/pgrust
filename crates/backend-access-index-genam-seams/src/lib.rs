@@ -414,8 +414,16 @@ seam_core::seam!(
     /// relcache caller marshals this into its owned `FormPgClass` and
     /// `rd_id`/`rd_rel`. Can `ereport(ERROR)` (catalog read failure), carried on
     /// `Err`. (`index_ok` toggles the index-vs-heap scan; the relcache passes
-    /// it straight through to `systable_beginscan`.)
-    pub fn scan_pg_class(reloid: Oid, index_ok: bool) -> PgResult<Option<ScannedPgClass>>
+    /// it straight through to `systable_beginscan`.) `force_non_historic`
+    /// (relcache's logical-decoding relfilenumber re-read) makes the scan
+    /// register an explicit `GetNonHistoricCatalogSnapshot(RelationRelationId)`
+    /// rather than letting `systable_beginscan` pick the (possibly historic)
+    /// catalog snapshot, matching the C `ScanPgRelation` branch.
+    pub fn scan_pg_class(
+        reloid: Oid,
+        index_ok: bool,
+        force_non_historic: bool,
+    ) -> PgResult<Option<ScannedPgClass>>
 );
 
 seam_core::seam!(

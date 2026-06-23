@@ -44,6 +44,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetNonHistoricCatalogSnapshot(relid)` (snapmgr.c:405): like
+    /// [`get_catalog_snapshot`] but never returns the historic decoding
+    /// snapshot — always a current MVCC catalog snapshot. Used by the relcache
+    /// `ScanPgRelation(force_non_historic=true)` path (looking up the
+    /// relfilenumber of non-mapped system relations during logical decoding,
+    /// where the historic snapshot would hide a newer pg_class tuple). Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn get_non_historic_catalog_snapshot(
+        relid: types_core::primitive::Oid,
+    ) -> types_error::PgResult<types_snapshot::SnapshotData>
+);
+
+seam_core::seam!(
     /// `RegisterSnapshot(snapshot)` (snapmgr.c): register the snapshot on
     /// the current resource owner so it stays valid. Allocates (registered
     /// snapshots are copied), so fallible on OOM.

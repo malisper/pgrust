@@ -591,31 +591,25 @@ pub fn ScanPgRelation(
     // The `force_non_historic` snapshot toggle (RegisterSnapshot(
     // GetNonHistoricCatalogSnapshot)) is internal to the genam scan the seam
     // performs; the relcache only needs it on the historic-decoding relfilenode
-    // re-read path (RelationInitPhysicalAddr). The genam seam's signature does
-    // not surface the snapshot toggle yet, so the non-historic case is not
-    // distinguished here — it falls back to the catalog-snapshot scan the seam
-    // runs. Surface it precisely when that read is genuinely exercised.
-    if force_non_historic {
-        return Err(ereport(ERROR)
-            .errmsg_internal(
-                "relcache-build: ScanPgRelation force_non_historic (non-historic \
-                 catalog-snapshot pg_class re-read for logical decoding) is not yet \
-                 surfaced by the genam scan_pg_class seam",
-            )
-            .into_error());
-    }
+    // re-read path (RelationInitPhysicalAddr). It is now threaded through to the
+    // genam seam, which registers the non-historic catalog snapshot for the
+    // pg_class scan exactly as C's ScanPgRelation does.
 
     // table_open(RelationRelationId) + systable_beginscan(ClassOidIndexId,
-    // oid = targetRelId) + a single systable_getnext + GETSTRUCT(Form_pg_class)
-    // deform, copied out into palloc'd storage. The genam owner performs the
-    // whole scan-and-decode (forcing a heap scan when the critical relcaches
-    // are not yet built or indexOK is false) and returns the decoded row, or
-    // None for the C NULL (no matching pg_class tuple).
-    let scanned =
-        match backend_access_index_genam_seams::scan_pg_class::call(targetRelId, indexOK)? {
-            Some(s) => s,
-            None => return Ok(None),
-        };
+    // oid = targetRelId, snapshot) + a single systable_getnext +
+    // GETSTRUCT(Form_pg_class) deform, copied out into palloc'd storage. The
+    // genam owner performs the whole scan-and-decode (forcing a heap scan when
+    // the critical relcaches are not yet built or indexOK is false; registering
+    // GetNonHistoricCatalogSnapshot when force_non_historic) and returns the
+    // decoded row, or None for the C NULL (no matching pg_class tuple).
+    let scanned = match backend_access_index_genam_seams::scan_pg_class::call(
+        targetRelId,
+        indexOK,
+        force_non_historic,
+    )? {
+        Some(s) => s,
+        None => return Ok(None),
+    };
 
     // Marshal the owner-vocabulary ScannedPgClass into the owned FormPgClass
     // mirror (the C "memcpy of CLASS_TUPLE_SIZE into rd_rel"). The variable-

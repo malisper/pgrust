@@ -245,5 +245,13 @@ types-tuple = { path = "../types-tuple" }
 mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+backend-replication-logical-logicalfuncs = { path = "../backend-replication-logical-logicalfuncs" }
+backend-replication-logical-logical = { path = "../backend-replication-logical-logical" }
+backend-replication-logical-logical-seams = { path = "../backend-replication-logical-logical-seams" }
+backend-replication-slot = { path = "../backend-replication-slot" }
+backend-utils-init-small = { path = "../backend-utils-init-small" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+backend-utils-misc-backendstate-pc-seams = { path = "../backend-utils-misc-backendstate-pc-seams" }
+types-logical = { path = "../types-logical" }
 
 [dev-dependencies]

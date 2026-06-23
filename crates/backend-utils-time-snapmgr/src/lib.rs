@@ -1673,6 +1673,9 @@ pub fn init_seams() {
     use backend_utils_time_snapmgr_seams as seams;
 
     seams::get_catalog_snapshot::set(|relid| Ok(GetCatalogSnapshot(relid)?.borrow().clone()));
+    seams::get_non_historic_catalog_snapshot::set(|relid| {
+        Ok(GetNonHistoricCatalogSnapshot(relid)?.borrow().clone())
+    });
     seams::register_snapshot::set(|snapshot| {
         Ok(RegisterSnapshotOnOwner(&new_handle(snapshot)).borrow().clone())
     });

@@ -301,7 +301,13 @@ fn split_tgargs(payload: &[u8], tgnargs: i16) -> Vec<String> {
 // ===========================================================================
 
 /// `ScanPgRelation(targetRelId, indexOK, force_non_historic)` (relcache.c).
-fn scan_pg_class(reloid: Oid, index_ok: bool) -> PgResult<Option<seam::ScannedPgClass>> {
+fn scan_pg_class(
+    reloid: Oid,
+    index_ok: bool,
+    force_non_historic: bool,
+) -> PgResult<Option<seam::ScannedPgClass>> {
+    use backend_utils_time_snapmgr_seams as snapmgr;
+
     let scratch = MemoryContext::new("ScanPgRelation scan");
     let smcx = scratch.mcx();
 
@@ -315,15 +321,35 @@ fn scan_pg_class(reloid: Oid, index_ok: bool) -> PgResult<Option<seam::ScannedPg
     )?];
 
     let relation = table_open(smcx, RelationRelationId, AccessShareLock)?;
+
+    // C: if (force_non_historic) snapshot =
+    //        RegisterSnapshot(GetNonHistoricCatalogSnapshot(RelationRelationId));
+    // The caller (relcache RelationInitPhysicalAddr) needs a tuple newer than
+    // the historic decoding snapshot when looking up the relfilenumber of a
+    // non-mapped system relation. Otherwise NULL → systable_beginscan picks the
+    // catalog snapshot itself.
+    let snapshot = if force_non_historic {
+        Some(snapmgr::register_snapshot::call(
+            snapmgr::get_non_historic_catalog_snapshot::call(RelationRelationId)?,
+        )?)
+    } else {
+        None
+    };
+
     // C: systable_beginscan(pg_class_desc, ClassOidIndexId,
-    //                       indexOK && criticalRelcachesBuilt, ...).
+    //                       indexOK && criticalRelcachesBuilt, snapshot, ...).
     // Force a heap scan until the critical relcache entries (incl. the pg_class
     // index ClassOidIndexId) are nailed; otherwise opening the index here would
     // recursively try to build the still-incomplete pg_class relcache entry.
     let use_index =
         index_ok && backend_utils_cache_relcache_seams::critical_relcaches_built::call();
-    let mut scandesc =
-        systable_beginscan(&relation, ClassOidIndexId, use_index, None, &skey)?;
+    let mut scandesc = systable_beginscan(
+        &relation,
+        ClassOidIndexId,
+        use_index,
+        snapshot.as_ref(),
+        &skey,
+    )?;
 
     // pg_class_tuple = systable_getnext(pg_class_scan); if (!HeapTupleIsValid)
     // return NULL.
@@ -336,6 +362,10 @@ fn scan_pg_class(reloid: Oid, index_ok: bool) -> PgResult<Option<seam::ScannedPg
     };
 
     scandesc.end()?;
+    // C: if (snapshot) UnregisterSnapshot(snapshot);
+    if let Some(snap) = snapshot {
+        snapmgr::unregister_snapshot::call(snap);
+    }
     table_close(relation, AccessShareLock)?;
     drop(scratch);
     Ok(out)

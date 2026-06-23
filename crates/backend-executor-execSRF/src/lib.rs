@@ -90,6 +90,7 @@ mod pg_cursor;
 mod pg_event_trigger_dropped_objects;
 mod pg_event_trigger_ddl_commands;
 mod pg_get_publication_tables;
+mod pg_logical_slot_get_changes;
 mod pg_lock_status;
 mod pg_prepared_xact;
 mod pg_snapshot_xip;
@@ -279,6 +280,9 @@ pub fn init_seams() {
     // `pg_get_publication_tables(VARIADIC text[])` (OID 6119) — the published
     // tables (column lists + row filters) of one or more publications.
     pg_get_publication_tables::register_pg_get_publication_tables();
+    // `pg_logical_slot_{get,peek}[_binary]_changes` (OIDs 3782-3785) — the SQL
+    // logical-decoding change-stream SRFs (logicalfuncs.c).
+    pg_logical_slot_get_changes::register_pg_logical_slot_get_changes();
     // `pg_snapshot_xip(pg_snapshot)` (OID 5064) — the value-per-call SRF emitting
     // the snapshot's in-progress `xip[]` as `setof xid8` (its value sequence is
     // `backend-utils-adt-xid8funcs::pg_snapshot_xip`).
