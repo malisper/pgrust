@@ -354,7 +354,7 @@ pub fn log_line_prefix(buf: &mut String, edata: &PgError) {
 /// `format == None` mirrors the C NULL check (guc hasn't run yet).
 pub fn log_status_format(buf: &mut String, format: Option<&str>, edata: &PgError) {
     let context = sink::backend_log_context();
-    let my_pid = context.map_or_else(std::process::id, |c| c.process_id());
+    let my_pid = context.map_or_else(sink::current_pid, |c| c.process_id());
     let has_port = context.is_some_and(|c| c.has_client_port());
 
     // (C resets log_line_number/formatted_start_time when log_my_pid changes,
@@ -779,7 +779,7 @@ pub fn write_pipe_chunks(data: &[u8], dest: i32) {
     // Assert(len > 0)
     debug_assert!(!data.is_empty());
 
-    let pid = sink::backend_log_context().map_or_else(std::process::id, |c| c.process_id()) as i32;
+    let pid = sink::backend_log_context().map_or_else(sink::current_pid, |c| c.process_id()) as i32;
     let mut flags: u8 = 0;
     if dest == LOG_DESTINATION_STDERR {
         flags |= PIPE_PROTO_DEST_STDERR;
