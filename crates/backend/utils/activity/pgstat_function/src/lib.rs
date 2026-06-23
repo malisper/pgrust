@@ -37,7 +37,7 @@ use activity_pgstat::shmem;
 use activity_xact as xact;
 use utils_error::ereport;
 use init_small_seams::my_database_id;
-use instr_time::instr_time_set_current;
+use ::instr_time::instr_time_set_current;
 use types_core::instrument::instr_time;
 use types_core::primitive::Oid;
 use types_error::error::{ERRCODE_UNDEFINED_FUNCTION, ERROR};

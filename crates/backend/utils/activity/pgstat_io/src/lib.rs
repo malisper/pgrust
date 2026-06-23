@@ -25,7 +25,7 @@ use lwlock_seams::{
 use activity_pgstat::kind_info::KindInfoBuilder;
 use activity_pgstat::registry;
 use init_small_seams::{my_backend_type, my_proc_number};
-use instr_time::instr_time_set_current;
+use ::instr_time::instr_time_set_current;
 use types_core::instrument::instr_time;
 use types_core::init::{BackendType, BACKEND_NUM_TYPES};
 use types_core::TimestampTz;

@@ -1262,7 +1262,7 @@ fn get_collation_name(colloid: Oid) -> PgResult<String> {
     let scratch = mcx::MemoryContext::new("get_collation_name");
     let mcx = scratch.mcx();
     let name =
-        lsyscache::collation_constraint_language_cast::get_collation_name(
+        ::lsyscache::collation_constraint_language_cast::get_collation_name(
             mcx, colloid,
         )?;
     let out = match &name {

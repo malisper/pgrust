@@ -41,7 +41,7 @@ use instrument::with_pgBufferUsage;
 use fd_seams as fd;
 use fileset_seams as fileset;
 use guc_tables::vars::track_io_timing;
-use instr_time::instr_time_set_current_lazy;
+use ::instr_time::instr_time_set_current_lazy;
 use types_core::instr_time;
 
 mod seams;

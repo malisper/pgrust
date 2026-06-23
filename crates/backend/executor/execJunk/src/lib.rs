@@ -29,7 +29,7 @@
 
 extern crate alloc;
 
-use execTuples::exectype_tupoutput::ExecCleanTypeFromTL;
+use ::execTuples::exectype_tupoutput::ExecCleanTypeFromTL;
 use execTuples_seams as execTuples;
 use mcx::{alloc_in, vec_with_capacity_in, Mcx};
 use types_core::primitive::{AttrNumber, InvalidAttrNumber};

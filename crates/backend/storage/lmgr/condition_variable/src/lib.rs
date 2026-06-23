@@ -21,7 +21,7 @@ use lmgr_proc_seams as proc_seams;
 use s_lock::{s_init_lock, s_lock_macro, Spinlock};
 use postgres_seams::check_for_interrupts;
 use init_small_seams::my_proc_number;
-use instr_time::instr_time_set_current;
+use ::instr_time::instr_time_set_current;
 use condvar::ConditionVariable;
 use types_core::instrument::instr_time;
 use types_core::{ProcNumber, INVALID_PROC_NUMBER};

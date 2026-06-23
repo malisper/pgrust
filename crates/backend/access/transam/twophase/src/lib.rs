@@ -23,8 +23,8 @@ use utils_error::ereport;
 use types_error::{ErrorLocation, PgError, PgResult, ERROR, PANIC, WARNING};
 use types_core::xact::{InvalidTransactionId, InvalidXLogRecPtr, TransactionIdIsValid};
 use types_core::{Oid, ProcNumber, RepOriginId, TimestampTz, TransactionId, XLogRecPtr};
-use wal::wal::RelFileLocator;
-use wal::xact_records::{XactLogAbortRecordArgs, XactLogCommitRecordArgs, XlXactOrigin};
+use ::wal::wal::RelFileLocator;
+use ::wal::xact_records::{XactLogAbortRecordArgs, XactLogCommitRecordArgs, XlXactOrigin};
 
 #[cfg(test)]
 mod tests;
@@ -1277,8 +1277,8 @@ pub fn xlog_read_twophase_data(lsn: XLogRecPtr) -> PgResult<Vec<u8>> {
 
         let rmid = xlogreader::xlog_rec_get_rmid::call(reader);
         let info = xlogreader::xlog_rec_get_info::call(reader);
-        if rmid != wal::wal::RM_XACT_ID
-            || (info & wal::xact::XLOG_XACT_OPMASK) != wal::xact::XLOG_XACT_PREPARE
+        if rmid != ::wal::wal::RM_XACT_ID
+            || (info & ::wal::xact::XLOG_XACT_OPMASK) != ::wal::xact::XLOG_XACT_PREPARE
         {
             return raise(ereport(ERROR)
                 .errcode_for_file_access()
