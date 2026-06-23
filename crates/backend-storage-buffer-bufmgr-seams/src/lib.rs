@@ -60,6 +60,34 @@ seam_core::seam!(
     ) -> types_error::PgResult<()>
 );
 
+/// `BufferGetPage(buffer)` borrowing read accessor (`storage/bufpage.h`): run
+/// `f` over a borrowed `&[u8]` view of the buffer's live page bytes (`BLCKSZ`)
+/// and return whatever `f` computes. This is the zero-copy form of
+/// [`buffer_get_page`]: where the owned variant `palloc`s + `memcpy`s the whole
+/// 8 KiB page into `mcx` on every call (modelling a `Page` pointer the hard
+/// way), this hands `f` a borrow into the pinned shared block exactly like C's
+/// `BufferGetPage(buffer)` pointer cast — no allocation, no copy. The caller
+/// holds the pin/content lock across the callback, so the borrow is valid for
+/// the closure's duration. `f`'s `Err` (and any buffer-access `ereport`)
+/// propagates.
+///
+/// Generic over the closure result `R`, so this is a plain wrapper over the
+/// non-generic [`with_buffer_page`] seam (which the owner installs), not a seam
+/// itself. The page is read-only here; mutation still goes through
+/// `with_buffer_page`.
+#[inline]
+pub fn buffer_with_page<R>(
+    buffer: types_storage::Buffer,
+    mut f: impl FnMut(&[u8]) -> types_error::PgResult<R>,
+) -> types_error::PgResult<R> {
+    let mut out: Option<R> = None;
+    with_buffer_page::call(buffer, &mut |block: &mut [u8]| {
+        out = Some(f(block)?);
+        Ok(())
+    })?;
+    Ok(out.expect("buffer_with_page closure must run exactly once"))
+}
+
 seam_core::seam!(
     /// `MarkBufferDirty(buffer)` (bufmgr.c) — mark the buffer's contents as
     /// dirty. Called inside a critical section; the C path only `Assert`s,

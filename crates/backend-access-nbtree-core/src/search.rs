@@ -636,11 +636,10 @@ fn _bt_search_inner<'mcx>(
         )?;
 
         /* if this is a leaf page, we're done */
-        let (opaque, level) = {
-            let page_bytes = bufmgr::buffer_get_page::call(mcx, bufp)?;
-            let o = opaque_from_bytes(&page_bytes)?;
-            (o, o.btpo_level)
-        };
+        let (opaque, level) = bufmgr::buffer_with_page(bufp, |page_bytes| {
+            let o = opaque_from_bytes(page_bytes)?;
+            Ok((o, o.btpo_level))
+        })?;
         if P_ISLEAF(&opaque) {
             break;
         }
@@ -650,14 +649,13 @@ fn _bt_search_inner<'mcx>(
          * the child page that we're about to descend to.
          */
         let offnum = _bt_binsrch_inner(mcx, rel, key, bufp)?;
-        let child = {
-            let page_bytes = bufmgr::buffer_get_page::call(mcx, bufp)?;
-            let page = PageRef::new(&page_bytes)?;
+        let child = bufmgr::buffer_with_page(bufp, |page_bytes| {
+            let page = PageRef::new(page_bytes)?;
             let iid = PageGetItemId(&page, offnum)?;
             let itup = PageGetItem(&page, &iid)?;
             debug_assert!(bt_tuple_is_pivot(&index_tuple_header(itup)) || !keyd.heapkeyspace);
-            bt_tuple_get_downlink(itup)
-        };
+            Ok(bt_tuple_get_downlink(itup))
+        })?;
 
         /*
          * Save the location of the pivot tuple we chose in a new stack entry.
@@ -744,10 +742,7 @@ fn _bt_moveright_inner<'mcx>(
 
     let mut opaque;
     loop {
-        opaque = {
-            let page_bytes = bufmgr::buffer_get_page::call(mcx, buf)?;
-            opaque_from_bytes(&page_bytes)?
-        };
+        opaque = bufmgr::buffer_with_page(buf, |page_bytes| opaque_from_bytes(page_bytes))?;
 
         if P_RIGHTMOST(&opaque) {
             break;
@@ -763,10 +758,9 @@ fn _bt_moveright_inner<'mcx>(
                 _bt_lockbuf(rel, buf, BT_WRITE);
             }
 
-            let still_incomplete = {
-                let page_bytes = bufmgr::buffer_get_page::call(mcx, buf)?;
-                P_INCOMPLETE_SPLIT(&opaque_from_bytes(&page_bytes)?)
-            };
+            let still_incomplete = bufmgr::buffer_with_page(buf, |page_bytes| {
+                Ok(P_INCOMPLETE_SPLIT(&opaque_from_bytes(page_bytes)?))
+            })?;
             if still_incomplete {
                 crate::insert::_bt_finish_split(
                     mcx,
@@ -836,10 +830,7 @@ fn _bt_binsrch_inner<'mcx>(
 ) -> PgResult<OffsetNumber> {
     let keyd = key.as_ref().expect("_bt_binsrch: NULL key");
 
-    let opaque = {
-        let page_bytes = bufmgr::buffer_get_page::call(mcx, buf)?;
-        opaque_from_bytes(&page_bytes)?
-    };
+    let opaque = bufmgr::buffer_with_page(buf, |page_bytes| opaque_from_bytes(page_bytes))?;
 
     /* Requesting nextkey semantics while using scantid is nonsensical */
     debug_assert!(!keyd.nextkey || keyd.scantid.is_none());
@@ -847,11 +838,10 @@ fn _bt_binsrch_inner<'mcx>(
     debug_assert!(!P_ISLEAF(&opaque) || keyd.scantid.is_none());
 
     let mut low = P_FIRSTDATAKEY(&opaque);
-    let mut high = {
-        let page_bytes = bufmgr::buffer_get_page::call(mcx, buf)?;
-        let page = PageRef::new(&page_bytes)?;
-        PageGetMaxOffsetNumber(&page)
-    };
+    let mut high = bufmgr::buffer_with_page(buf, |page_bytes| {
+        let page = PageRef::new(page_bytes)?;
+        Ok(PageGetMaxOffsetNumber(&page))
+    })?;
 
     /*
      * If there are no keys on the page, return the first available slot.
@@ -909,10 +899,7 @@ fn _bt_binsrch_insert_inner<'mcx>(
     insertstate: &mut types_nbtree::BTInsertStateData<'mcx>,
 ) -> PgResult<OffsetNumber> {
     let buf = insertstate.buf;
-    let opaque = {
-        let page_bytes = bufmgr::buffer_get_page::call(mcx, buf)?;
-        opaque_from_bytes(&page_bytes)?
-    };
+    let opaque = bufmgr::buffer_with_page(buf, |page_bytes| opaque_from_bytes(page_bytes))?;
 
     {
         let key = insertstate.itup_key.as_ref().expect("_bt_binsrch_insert: NULL key");
@@ -921,11 +908,10 @@ fn _bt_binsrch_insert_inner<'mcx>(
         debug_assert!(insertstate.postingoff == 0);
     }
 
-    let maxoff = {
-        let page_bytes = bufmgr::buffer_get_page::call(mcx, buf)?;
-        let page = PageRef::new(&page_bytes)?;
-        PageGetMaxOffsetNumber(&page)
-    };
+    let maxoff = bufmgr::buffer_with_page(buf, |page_bytes| {
+        let page = PageRef::new(page_bytes)?;
+        Ok(PageGetMaxOffsetNumber(&page))
+    })?;
 
     let (mut low, mut high) = if !insertstate.bounds_valid {
         /* Start new binary search */
@@ -1004,51 +990,52 @@ fn _bt_binsrch_insert_inner<'mcx>(
 /// `_bt_binsrch_posting()` — posting list binary search; returns the offset into
 /// the posting list where caller's scantid belongs (or -1 for an LP_DEAD tuple).
 fn _bt_binsrch_posting<'mcx>(
-    mcx: Mcx<'mcx>,
+    _mcx: Mcx<'mcx>,
     key: &BTScanInsert<'mcx>,
     buf: Buffer,
     offnum: OffsetNumber,
 ) -> PgResult<i32> {
     let keyd = key.as_ref().expect("_bt_binsrch_posting: NULL key");
 
-    let page_bytes = bufmgr::buffer_get_page::call(mcx, buf)?;
-    let page = PageRef::new(&page_bytes)?;
-    let itemid = PageGetItemId(&page, offnum)?;
-    let itup = PageGetItem(&page, &itemid)?;
-    let hdr = index_tuple_header(itup);
+    bufmgr::buffer_with_page(buf, |page_bytes| {
+        let page = PageRef::new(page_bytes)?;
+        let itemid = PageGetItemId(&page, offnum)?;
+        let itup = PageGetItem(&page, &itemid)?;
+        let hdr = index_tuple_header(itup);
 
-    if !bt_tuple_is_posting(&hdr) {
-        return Ok(0);
-    }
-
-    debug_assert!(keyd.heapkeyspace && keyd.allequalimage);
-
-    /* LP_DEAD posting list tuple: signal caller with -1 */
-    if ItemIdIsDead(&itemid) {
-        return Ok(-1);
-    }
-
-    let scantid = keyd.scantid.as_ref().expect("_bt_binsrch_posting: scantid");
-
-    /* "high" is past end of posting list for loop invariant */
-    let mut low: i32 = 0;
-    let mut high: i32 = bt_tuple_get_nposting(&hdr) as i32;
-    debug_assert!(high >= 2);
-
-    while high > low {
-        let mid = low + ((high - low) / 2);
-        let res = ItemPointerCompare(scantid, &posting_list_n(itup, mid as usize));
-        if res > 0 {
-            low = mid + 1;
-        } else if res < 0 {
-            high = mid;
-        } else {
-            return Ok(mid);
+        if !bt_tuple_is_posting(&hdr) {
+            return Ok(0);
         }
-    }
 
-    /* Exact match not found */
-    Ok(low)
+        debug_assert!(keyd.heapkeyspace && keyd.allequalimage);
+
+        /* LP_DEAD posting list tuple: signal caller with -1 */
+        if ItemIdIsDead(&itemid) {
+            return Ok(-1);
+        }
+
+        let scantid = keyd.scantid.as_ref().expect("_bt_binsrch_posting: scantid");
+
+        /* "high" is past end of posting list for loop invariant */
+        let mut low: i32 = 0;
+        let mut high: i32 = bt_tuple_get_nposting(&hdr) as i32;
+        debug_assert!(high >= 2);
+
+        while high > low {
+            let mid = low + ((high - low) / 2);
+            let res = ItemPointerCompare(scantid, &posting_list_n(itup, mid as usize));
+            if res > 0 {
+                low = mid + 1;
+            } else if res < 0 {
+                high = mid;
+            } else {
+                return Ok(mid);
+            }
+        }
+
+        /* Exact match not found */
+        Ok(low)
+    })
 }
 
 // ===========================================================================
@@ -1192,14 +1179,13 @@ pub fn bt_compare<'mcx>(
 /// `_bt_compare(rel, key, BufferGetPage(buf), offnum)` over a buffer — reads the
 /// page bytes and delegates to [`bt_compare`].
 fn _bt_compare_inner<'mcx>(
-    mcx: Mcx<'mcx>,
+    _mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     key: &BTScanInsert<'mcx>,
     buf: Buffer,
     offnum: OffsetNumber,
 ) -> PgResult<i32> {
-    let page_bytes = bufmgr::buffer_get_page::call(mcx, buf)?;
-    bt_compare(rel, key, &page_bytes, offnum)
+    bufmgr::buffer_with_page(buf, |page_bytes| bt_compare(rel, key, page_bytes, offnum))
 }
 
 // ===========================================================================
@@ -2427,10 +2413,9 @@ fn _bt_readnextpage<'mcx>(
             }
         }
 
-        opaque = {
-            let page_bytes = bufmgr::buffer_get_page::call(mcx, so.currPos.buf)?;
-            opaque_from_bytes(&page_bytes)?
-        };
+        opaque = bufmgr::buffer_with_page(so.currPos.buf, |page_bytes| {
+            opaque_from_bytes(page_bytes)
+        })?;
         lastcurrblkno = blkno;
 
         let mut found = false;
@@ -2443,11 +2428,10 @@ fn _bt_readnextpage<'mcx>(
                     blkno = so.currPos.nextPage;
                 }
             } else {
-                let maxoff = {
-                    let page_bytes = bufmgr::buffer_get_page::call(mcx, so.currPos.buf)?;
-                    let page = PageRef::new(&page_bytes)?;
-                    PageGetMaxOffsetNumber(&page)
-                };
+                let maxoff = bufmgr::buffer_with_page(so.currPos.buf, |page_bytes| {
+                    let page = PageRef::new(page_bytes)?;
+                    Ok(PageGetMaxOffsetNumber(&page))
+                })?;
                 if _bt_readpage(mcx, rel, so, dir, maxoff, seized)? {
                     found = true;
                 } else {
@@ -2506,10 +2490,8 @@ fn _bt_lock_and_validate_left<'mcx>(
         /* check for interrupts while not holding any buffer lock */
         check_for_interrupts();
         let mut buf = _bt_getbuf(mcx, rel, *blkno, BT_READ)?;
-        let mut opaque = {
-            let page_bytes = bufmgr::buffer_get_page::call(mcx, buf)?;
-            opaque_from_bytes(&page_bytes)?
-        };
+        let mut opaque =
+            bufmgr::buffer_with_page(buf, |page_bytes| opaque_from_bytes(page_bytes))?;
 
         /*
          * If this isn't the page we want, walk right (max four hops).
@@ -2530,20 +2512,14 @@ fn _bt_lock_and_validate_left<'mcx>(
             /* step right */
             *blkno = opaque.btpo_next;
             buf = _bt_relandgetbuf(mcx, rel, buf, *blkno, BT_READ)?;
-            opaque = {
-                let page_bytes = bufmgr::buffer_get_page::call(mcx, buf)?;
-                opaque_from_bytes(&page_bytes)?
-            };
+            opaque = bufmgr::buffer_with_page(buf, |page_bytes| opaque_from_bytes(page_bytes))?;
         }
 
         /*
          * Return to lastcurrblkno to see what's up with its prev sibling link.
          */
         buf = _bt_relandgetbuf(mcx, rel, buf, lastcurrblkno, BT_READ)?;
-        opaque = {
-            let page_bytes = bufmgr::buffer_get_page::call(mcx, buf)?;
-            opaque_from_bytes(&page_bytes)?
-        };
+        opaque = bufmgr::buffer_with_page(buf, |page_bytes| opaque_from_bytes(page_bytes))?;
         if P_ISDELETED(&opaque) {
             /*
              * It was deleted. Move right to first nondeleted page; that one
@@ -2558,10 +2534,8 @@ fn _bt_lock_and_validate_left<'mcx>(
                 }
                 lastcurrblkno = opaque.btpo_next;
                 buf = _bt_relandgetbuf(mcx, rel, buf, lastcurrblkno, BT_READ)?;
-                opaque = {
-                    let page_bytes = bufmgr::buffer_get_page::call(mcx, buf)?;
-                    opaque_from_bytes(&page_bytes)?
-                };
+                opaque =
+                    bufmgr::buffer_with_page(buf, |page_bytes| opaque_from_bytes(page_bytes))?;
                 if !P_ISDELETED(&opaque) {
                     break;
                 }
@@ -2636,10 +2610,7 @@ fn _bt_get_endpoint_inner<'mcx>(
         return Ok(InvalidBuffer);
     }
 
-    let mut opaque = {
-        let page_bytes = bufmgr::buffer_get_page::call(mcx, buf)?;
-        opaque_from_bytes(&page_bytes)?
-    };
+    let mut opaque = bufmgr::buffer_with_page(buf, |page_bytes| opaque_from_bytes(page_bytes))?;
 
     loop {
         /*
@@ -2655,10 +2626,7 @@ fn _bt_get_endpoint_inner<'mcx>(
                 )));
             }
             buf = _bt_relandgetbuf(mcx, rel, buf, blkno, BT_READ)?;
-            opaque = {
-                let page_bytes = bufmgr::buffer_get_page::call(mcx, buf)?;
-                opaque_from_bytes(&page_bytes)?
-            };
+            opaque = bufmgr::buffer_with_page(buf, |page_bytes| opaque_from_bytes(page_bytes))?;
         }
 
         /* Done? */
@@ -2674,9 +2642,8 @@ fn _bt_get_endpoint_inner<'mcx>(
         }
 
         /* Descend to leftmost or rightmost child page */
-        let blkno = {
-            let page_bytes = bufmgr::buffer_get_page::call(mcx, buf)?;
-            let page = PageRef::new(&page_bytes)?;
+        let blkno = bufmgr::buffer_with_page(buf, |page_bytes| {
+            let page = PageRef::new(page_bytes)?;
             let offnum = if rightmost {
                 PageGetMaxOffsetNumber(&page)
             } else {
@@ -2684,14 +2651,11 @@ fn _bt_get_endpoint_inner<'mcx>(
             };
             let iid = PageGetItemId(&page, offnum)?;
             let itup = PageGetItem(&page, &iid)?;
-            bt_tuple_get_downlink(itup)
-        };
+            Ok(bt_tuple_get_downlink(itup))
+        })?;
 
         buf = _bt_relandgetbuf(mcx, rel, buf, blkno, BT_READ)?;
-        opaque = {
-            let page_bytes = bufmgr::buffer_get_page::call(mcx, buf)?;
-            opaque_from_bytes(&page_bytes)?
-        };
+        opaque = bufmgr::buffer_with_page(buf, |page_bytes| opaque_from_bytes(page_bytes))?;
     }
 
     Ok(buf)
@@ -2727,12 +2691,11 @@ fn _bt_endpoint<'mcx>(
         return Ok(false);
     }
 
-    let (opaque, maxoff) = {
-        let page_bytes = bufmgr::buffer_get_page::call(mcx, so.currPos.buf)?;
-        let o = opaque_from_bytes(&page_bytes)?;
-        let page = PageRef::new(&page_bytes)?;
-        (o, PageGetMaxOffsetNumber(&page))
-    };
+    let (opaque, maxoff) = bufmgr::buffer_with_page(so.currPos.buf, |page_bytes| {
+        let o = opaque_from_bytes(page_bytes)?;
+        let page = PageRef::new(page_bytes)?;
+        Ok((o, PageGetMaxOffsetNumber(&page)))
+    })?;
     debug_assert!(P_ISLEAF(&opaque));
 
     let start = if ScanDirectionIsForward(dir) {

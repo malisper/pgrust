@@ -2859,14 +2859,13 @@ fn bt_killitems_inner<'mcx>(rel: &Relation<'mcx>, so: &mut BTScanOpaqueData<'mcx
 
     // Read the page (immutable decode for offset/tuple matching). We mutate the
     // line pointers via with_buffer_page below.
-    let page_bytes = bufmgr::buffer_get_page::call(rel_mcx(rel), buf)?;
-    let opaque = {
-        let page = PageRef::new(page_bytes.as_slice())?;
-        bt_page_get_opaque(&page)?
-    };
-    let minoff = p_firstdatakey(&opaque);
-    let (maxoff, kill_offsets) = {
-        let page = PageRef::new(page_bytes.as_slice())?;
+    let (maxoff, kill_offsets) = bufmgr::buffer_with_page(buf, |page_bytes| {
+        let opaque = {
+            let page = PageRef::new(page_bytes)?;
+            bt_page_get_opaque(&page)?
+        };
+        let minoff = p_firstdatakey(&opaque);
+        let page = PageRef::new(page_bytes)?;
         let maxoff = PageGetMaxOffsetNumber(&page);
 
         // First pass: determine which line-pointer offsets to mark dead, by
@@ -2929,8 +2928,8 @@ fn bt_killitems_inner<'mcx>(rel: &Relation<'mcx>, so: &mut BTScanOpaqueData<'mcx
                 offnum = offset_number_next(offnum);
             }
         }
-        (maxoff, kill_offsets)
-    };
+        Ok((maxoff, kill_offsets))
+    })?;
     let _ = maxoff;
 
     if !kill_offsets.is_empty() {

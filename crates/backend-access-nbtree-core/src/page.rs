@@ -472,13 +472,13 @@ pub fn _bt_upgrademetapage(page: &mut [u8]) {
 
 /// `_bt_getmeta(rel, metabuf)` — read + sanity-check the metapage.
 fn _bt_getmeta<'mcx>(
-    mcx: Mcx<'mcx>,
+    _mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     metabuf: Buffer,
 ) -> PgResult<BTMetaPageData> {
-    let page_bytes = bufmgr::buffer_get_page::call(mcx, metabuf)?;
-    let metaopaque = opaque_from_page(&page_bytes)?;
-    let metad = meta_from_page(&page_bytes)?;
+    let (metaopaque, metad) = bufmgr::buffer_with_page(metabuf, |page_bytes| {
+        Ok((opaque_from_page(page_bytes)?, meta_from_page(page_bytes)?))
+    })?;
 
     if !P_ISMETA(&metaopaque) || metad.btm_magic != BTREE_MAGIC {
         return Err(PgError::error(format!(
@@ -503,8 +503,7 @@ fn _bt_getmeta<'mcx>(
 pub fn bt_vacuum_needs_cleanup<'mcx>(rel: &Relation<'mcx>) -> PgResult<bool> {
     with_temp_mcx(|mcx| {
         let metabuf = _bt_getbuf(mcx, rel, BTREE_METAPAGE, BT_READ)?;
-        let page_bytes = bufmgr::buffer_get_page::call(mcx, metabuf)?;
-        let metad = meta_from_page(&page_bytes)?;
+        let metad = bufmgr::buffer_with_page(metabuf, |page_bytes| meta_from_page(page_bytes))?;
         let btm_version = metad.btm_version;
 
         if btm_version < BTREE_NOVAC_VERSION {
@@ -529,8 +528,7 @@ pub fn bt_vacuum_needs_cleanup<'mcx>(rel: &Relation<'mcx>) -> PgResult<bool> {
 pub fn bt_set_cleanup_info<'mcx>(rel: &Relation<'mcx>, num_delpages: BlockNumber) -> PgResult<()> {
     with_temp_mcx(|mcx| {
         let metabuf = _bt_getbuf(mcx, rel, BTREE_METAPAGE, BT_READ)?;
-        let page_bytes = bufmgr::buffer_get_page::call(mcx, metabuf)?;
-        let metad = meta_from_page(&page_bytes)?;
+        let metad = bufmgr::buffer_with_page(metabuf, |page_bytes| meta_from_page(page_bytes))?;
 
         if metad.btm_version >= BTREE_NOVAC_VERSION
             && metad.btm_last_cleanup_num_delpages == num_delpages
@@ -629,10 +627,7 @@ pub fn _bt_getroot<'mcx>(
         _bt_unlockbuf(rel, metabuf);
         _bt_lockbuf(rel, metabuf, BT_WRITE);
 
-        let metad2 = {
-            let page_bytes = bufmgr::buffer_get_page::call(mcx, metabuf)?;
-            meta_from_page(&page_bytes)?
-        };
+        let metad2 = bufmgr::buffer_with_page(metabuf, |page_bytes| meta_from_page(page_bytes))?;
         if metad2.btm_root != P_NONE {
             _bt_relbuf(rel, metabuf);
             return _bt_getroot(mcx, rel, heaprel, access);
@@ -724,8 +719,8 @@ pub fn _bt_getroot<'mcx>(
         let mut rootbuf = metabuf;
         loop {
             rootbuf = _bt_relandgetbuf(mcx, rel, rootbuf, rootblkno, BT_READ)?;
-            let page_bytes = bufmgr::buffer_get_page::call(mcx, rootbuf)?;
-            let rootopaque = opaque_from_page(&page_bytes)?;
+            let rootopaque =
+                bufmgr::buffer_with_page(rootbuf, |page_bytes| opaque_from_page(page_bytes))?;
 
             if !P_IGNORE(&rootopaque) {
                 if rootopaque.btpo_level != rootlevel {
@@ -754,10 +749,9 @@ pub fn _bt_getroot<'mcx>(
 /// `_bt_gettrueroot(rel)` — get the true (not fast) root page.
 pub fn _bt_gettrueroot<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<Buffer> {
     let metabuf = _bt_getbuf(mcx, rel, BTREE_METAPAGE, BT_READ)?;
-    let (metaopaque, metad) = {
-        let page_bytes = bufmgr::buffer_get_page::call(mcx, metabuf)?;
-        (opaque_from_page(&page_bytes)?, meta_from_page(&page_bytes)?)
-    };
+    let (metaopaque, metad) = bufmgr::buffer_with_page(metabuf, |page_bytes| {
+        Ok((opaque_from_page(page_bytes)?, meta_from_page(page_bytes)?))
+    })?;
 
     if !P_ISMETA(&metaopaque) || metad.btm_magic != BTREE_MAGIC {
         return Err(PgError::error(format!(
@@ -783,8 +777,8 @@ pub fn _bt_gettrueroot<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<B
     let mut rootbuf = metabuf;
     loop {
         rootbuf = _bt_relandgetbuf(mcx, rel, rootbuf, rootblkno, BT_READ)?;
-        let page_bytes = bufmgr::buffer_get_page::call(mcx, rootbuf)?;
-        let rootopaque = opaque_from_page(&page_bytes)?;
+        let rootopaque =
+            bufmgr::buffer_with_page(rootbuf, |page_bytes| opaque_from_page(page_bytes))?;
 
         if !P_IGNORE(&rootopaque) {
             if rootopaque.btpo_level != rootlevel {
@@ -843,28 +837,29 @@ pub fn bt_metaversion<'mcx>(rel: &Relation<'mcx>) -> PgResult<(bool, bool)> {
 
 /// `_bt_checkpage(rel, buf)` — verify a freshly-read page looks sane.
 pub fn bt_checkpage<'mcx>(rel: &Relation<'mcx>, buf: Buffer) -> PgResult<()> {
-    with_temp_mcx(|mcx| {
-        let page_bytes = bufmgr::buffer_get_page::call(mcx, buf)?;
-        let page = PageRef::new(&page_bytes)?;
+    with_temp_mcx(|_mcx| {
+        bufmgr::buffer_with_page(buf, |page_bytes| {
+            let page = PageRef::new(page_bytes)?;
 
-        if PageIsNew(&page) {
-            return Err(PgError::error(format!(
-                "index \"{}\" contains unexpected zero page at block {}",
-                rel.name(),
-                bufmgr::buffer_get_block_number::call(buf)
-            )));
-        }
+            if PageIsNew(&page) {
+                return Err(PgError::error(format!(
+                    "index \"{}\" contains unexpected zero page at block {}",
+                    rel.name(),
+                    bufmgr::buffer_get_block_number::call(buf)
+                )));
+            }
 
-        if PageGetSpecialSize(&page) as usize
-            != maxalign(::core::mem::size_of::<BTPageOpaqueData>())
-        {
-            return Err(PgError::error(format!(
-                "index \"{}\" contains corrupted page at block {}",
-                rel.name(),
-                bufmgr::buffer_get_block_number::call(buf)
-            )));
-        }
-        Ok(())
+            if PageGetSpecialSize(&page) as usize
+                != maxalign(::core::mem::size_of::<BTPageOpaqueData>())
+            {
+                return Err(PgError::error(format!(
+                    "index \"{}\" contains corrupted page at block {}",
+                    rel.name(),
+                    bufmgr::buffer_get_block_number::call(buf)
+                )));
+            }
+            Ok(())
+        })
     })
 }
 
