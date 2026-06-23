@@ -2879,6 +2879,24 @@ fn decode_db_role_setting_setconfig<'mcx>(
 fn decode_text_array(mcx: Mcx<'_>, bytes: &[u8]) -> PgResult<Vec<String>> {
     use backend_utils_adt_arrayfuncs::foundation;
 
+    // C `DatumGetArrayTypeP` is `PG_DETOAST_DATUM`: a stored array column can be
+    // short-packed (1-byte header), compressed, or external. The `ARR_*` header
+    // readers below (`arr_ndim`/`arr_dims`/`arr_data_ptr_off`) read the
+    // `ArrayType` struct at FIXED offsets relative to a 4-byte varlena header, so
+    // they require a flat 4-byte-header image. `detoast_attr` fetches/decompresses
+    // and un-packs a short header to the 4-byte form (its short arm), mirroring C.
+    // While `SHORT_VARLENA_PACKING` is OFF every stored array is plain 4B_U, so we
+    // use the verbatim path and this is a behavior-preserving no-op.
+    let detoasted: Vec<u8>;
+    let bytes: &[u8] = if bytes.is_empty() || (bytes[0] & 0x03) == 0x00 {
+        // VARATT_IS_4B_U (or empty, handled by the readers): use verbatim.
+        bytes
+    } else {
+        let buf = backend_access_common_detoast_seams::detoast_attr::call(mcx, bytes)?;
+        detoasted = buf.to_vec();
+        &detoasted
+    };
+
     let ndim = foundation::arr_ndim(bytes);
     let nelems = if ndim == 0 {
         0
