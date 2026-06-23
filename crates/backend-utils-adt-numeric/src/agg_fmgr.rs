@@ -563,18 +563,32 @@ fn ret_bytea(fcinfo: &mut FunctionCallInfoBaseData, image: Vec<u8>) -> Datum {
 }
 
 /// `VARDATA_ANY(PG_GETARG_BYTEA_PP(0))` — the wire body of the `bytea`
-/// deserialize argument, with any 4-byte varlena header stripped. The state
-/// `bytea` crosses the by-ref lane; it may arrive header-ful (the result of a
-/// peer's serialize) or already header-less, so strip only when a length word
-/// matching the image length is present.
+/// deserialize argument, with any varlena header stripped (`VARDATA_ANY`
+/// semantics: header-form-agnostic). The state `bytea` crosses the by-ref lane;
+/// it may arrive header-ful with a 4-byte header (the freshly-serialized result
+/// of a peer's serialize), header-ful with a SHORT 1-byte header (the same image
+/// after `heap_form_tuple` short-packed it for a tuplestore/Gather round-trip
+/// under `SHORT_VARLENA_PACKING`), or already header-less. C's
+/// `PG_GETARG_BYTEA_PP` detoasts to a header-ful struct and reads `VARDATA_ANY`,
+/// so the deserialize body is identical regardless of which header form arrived;
+/// stripping a fixed 4-byte header off a SHORT-packed image (1-byte header) would
+/// land 3 bytes into the payload and feed `numericvar_deserialize` a garbage
+/// `ndigits` length word (`invalid memory alloc request size`).
 fn arg_bytea_body(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Vec<u8> {
     let payload = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("agg deserialize fn: by-ref `bytea` arg missing from by-ref lane");
+    // SHORT (1-byte) header: un-pack to a 4-byte-header image, then strip the
+    // canonical 4-byte header (== `VARDATA_ANY` on the short form).
+    if let Some(unpacked) = unpack_short_to_4b(payload) {
+        return unpacked[types_datum::varlena::VARHDRSZ..].to_vec();
+    }
+    // 4-byte header whose length word matches the image: strip the 4-byte header.
     if numeric_has_header(payload) {
         payload[types_datum::varlena::VARHDRSZ..].to_vec()
     } else {
+        // Already header-less wire body.
         payload.to_vec()
     }
 }
