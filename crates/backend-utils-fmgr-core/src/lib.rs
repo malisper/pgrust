@@ -4362,8 +4362,32 @@ fn pg_getarg_text_pp_seam<'mcx>(
     // or out-of-line-external varlena is fetched back / decompressed into a flat
     // in-line image; a plain (uncompressed) value is returned verbatim. Skipping
     // this step would read a compressed value's pglz payload as raw text.
+    // C's `PG_GETARG_TEXT_PP` returns `pg_detoast_datum_packed`, which keeps a
+    // 1-byte ("short") header in place — C downstream reads it via the
+    // header-form-agnostic `VARSIZE_ANY` / `VARDATA_ANY`. The owned `Bytea`
+    // representation, by contrast, requires a plain 4-byte header: every
+    // accessor (`Bytea::varsize` / `data` / `from_image`) reads/stamps at the
+    // fixed `VARHDRSZ` (4-byte) offset. `from_image` in particular overwrites
+    // the first 4 bytes with `len << 2`, which on a SHORT image clobbers the
+    // 1-byte header *and three payload bytes*, shifting the whole value (an
+    // `ArrayType`'s `ndim`/`elemtype` then mis-read). With `SHORT_VARLENA_PACKING`
+    // on, stored varlenas (e.g. `pg_foreign_data_wrapper.fdwoptions` `text[]`)
+    // come back short-packed, so we must normalize the short header to 4-byte
+    // here. `pg_detoast_datum_packed` only un-toasts compressed/external values;
+    // route a residual short value through `detoast_attr`, whose short arm
+    // correctly rebuilds the 4-byte header (`new = [4B len][vardata_short]`). On
+    // an already-plain 4-byte value both are no-ops, so behavior is identical
+    // when short-packing is off.
     let detoasted =
         backend_access_common_detoast_seams::pg_detoast_datum_packed::call(mcx, bytes)?;
+    let detoasted = if detoasted.first().is_some_and(|&b| b != 0x01 && (b & 0x01) == 0x01) {
+        // VARATT_IS_1B && !VARATT_IS_1B_E: a residual short (non-external) header.
+        // (`pg_detoast_datum_packed` already fetched any external/compressed
+        // value, so the only extended form that can remain is a short header.)
+        backend_access_common_detoast_seams::detoast_attr::call(mcx, detoasted.as_slice())?
+    } else {
+        detoasted
+    };
     Ok(types_datum::varlena::Bytea::from_image(mcx::slice_in(
         mcx,
         detoasted.as_slice(),

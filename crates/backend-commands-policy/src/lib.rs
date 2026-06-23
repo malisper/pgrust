@@ -271,8 +271,18 @@ fn polroles_to_oids(mcx: Mcx<'_>, polroles: &Datum<'_>) -> PgResult<alloc::vec::
             ))
         }
     };
+    // C: `ArrayType *policy_roles = DatumGetArrayTypeP(datum)` before
+    // `deconstruct_array_builtin`. `deconstruct_array_builtin` reads the
+    // `ArrayType` header (`ARR_NDIM`/`ARR_ELEMTYPE`/`ARR_DIMS`) at fixed
+    // 4-byte-relative offsets, valid only on a plain 4-byte-header varlena.
+    // With `SHORT_VARLENA_PACKING` on, a stored `pg_policy.polroles` (`oid[]`)
+    // comes back from the syscache 1-byte SHORT-header packed (the whole struct
+    // shifted), so `ARR_ELEMTYPE` mis-reads (e.g. 256 instead of 26/OIDOID).
+    // Detoast first (un-packs short / decompresses / fetches external), matching
+    // `DatumGetArrayTypeP`; a no-op on an already-plain 4-byte array.
+    let arr = backend_access_common_detoast_seams::detoast_attr::call(mcx, bytes)?;
     let elems = backend_utils_adt_arrayfuncs::construct::deconstruct_array_builtin(
-        mcx, bytes, OIDOID,
+        mcx, arr.as_slice(), OIDOID,
     )?;
     let mut out = alloc::vec::Vec::with_capacity(elems.len());
     for (d, _null) in elems.iter() {
