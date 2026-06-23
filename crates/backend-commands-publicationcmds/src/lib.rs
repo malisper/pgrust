@@ -258,27 +258,45 @@ fn oid_key<'mcx>(attno: i32, value: Oid) -> PgResult<ScanKeyData<'mcx>> {
     Ok(key)
 }
 
-/// `int16` element values of an on-disk `int2vector` varlena image.
+/// `int16` element values of an on-disk `int2vector` varlena image
+/// (`pg_publication_rel.prattrs`). The varlena header is 4 bytes normally but ONE
+/// byte for a short-packed stored image (C reaches it through `DatumGetArrayTypeP`
+/// / `PG_DETOAST_DATUM`, which un-packs short→4B), so the struct content begins at
+/// [`arr_content_off`] (`VARDATA_ANY`): reading `dim1` at a fixed 4-byte offset on
+/// a short-packed vector mis-reads the count. No-op while packing is off.
 fn int2vector_elems(bytes: &[u8]) -> Vec<i16> {
-    const HEADER: usize = 24;
-    if bytes.len() < HEADER {
+    let c = arr_content_off(bytes);
+    // dim1 lives 12 bytes into the struct content; data 20 bytes in.
+    let header = c + 20;
+    if bytes.len() < header {
         return Vec::new();
     }
-    let nelems = i32::from_ne_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    let nelems = i32::from_ne_bytes([bytes[c + 12], bytes[c + 13], bytes[c + 14], bytes[c + 15]]);
     if nelems < 0 {
         return Vec::new();
     }
     let nelems = nelems as usize;
-    let need = HEADER + nelems * 2;
+    let need = header + nelems * 2;
     if bytes.len() < need {
         return Vec::new();
     }
     let mut out = Vec::with_capacity(nelems);
     for i in 0..nelems {
-        let off = HEADER + i * 2;
+        let off = header + i * 2;
         out.push(i16::from_ne_bytes([bytes[off], bytes[off + 1]]));
     }
     out
+}
+
+/// The byte offset of an `int2vector` image's struct content (the `ndim` field)
+/// past its varlena length header — `VARDATA_ANY`-style. ONE byte for a short
+/// (low-bit-set, non-external) header, else `VARHDRSZ` (4). No-op while
+/// `SHORT_VARLENA_PACKING` is off (every stored image is 4-byte).
+fn arr_content_off(image: &[u8]) -> usize {
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => 1,
+        _ => 4,
+    }
 }
 
 /// Deform a freshly scanned tuple into its `(value, isnull)` columns.

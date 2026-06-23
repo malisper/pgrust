@@ -189,25 +189,45 @@ fn buildint2vector_bytes<'mcx>(mcx: Mcx<'mcx>, int2s: &[i16]) -> PgResult<PgVec<
     Ok(buf)
 }
 
+/// The byte offset of an `ArrayType`/`int2vector` image's struct content (the
+/// `ndim` field) past its varlena length header — `VARDATA_ANY`-style. C reaches
+/// `prattrs` through `DatumGetArrayTypeP` (`PG_DETOAST_DATUM`), which un-packs a
+/// SHORT (1-byte) header to the full 4-byte form so the fixed-offset header fields
+/// read correctly. A `pg_publication_rel.prattrs` int2vector read straight out of
+/// a heap tuple arrives SHORT-packed once `SHORT_VARLENA_PACKING` is on; reading
+/// the header at a fixed 4-byte offset then mis-reads `dim1`. The struct content
+/// begins ONE byte in for a short (low-bit-set, non-external) header, else
+/// `VARHDRSZ` (4) bytes in. No-op while packing is off.
+fn arr_content_off(image: &[u8]) -> usize {
+    match image.first() {
+        // VARATT_IS_1B && !VARATT_IS_1B_E: short 1-byte header.
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => 1,
+        // 4-byte uncompressed header (VARHDRSZ).
+        _ => 4,
+    }
+}
+
 /// `int16` element values of an `int2vector`, returned as a plain `Vec` (no
 /// allocator needed — these are tiny and immediately folded into a bitmapset).
 fn int2vector_elems_vec(bytes: &[u8]) -> PgResult<std::vec::Vec<i16>> {
-    const HEADER: usize = 24;
-    if bytes.len() < HEADER {
+    let c = arr_content_off(bytes);
+    // dim1 lives 12 bytes into the struct content; data 20 bytes in.
+    let header = c + 20;
+    if bytes.len() < header {
         return Err(PgError::error("int2vector image too short"));
     }
-    let nelems = i32::from_ne_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    let nelems = i32::from_ne_bytes([bytes[c + 12], bytes[c + 13], bytes[c + 14], bytes[c + 15]]);
     if nelems < 0 {
         return Err(PgError::error("int2vector has negative dim1"));
     }
     let nelems = nelems as usize;
-    let need = HEADER + nelems * 2;
+    let need = header + nelems * 2;
     if bytes.len() < need {
         return Err(PgError::error("int2vector image shorter than dim1 implies"));
     }
     let mut out = std::vec::Vec::with_capacity(nelems);
     for i in 0..nelems {
-        let off = HEADER + i * 2;
+        let off = header + i * 2;
         out.push(i16::from_ne_bytes([bytes[off], bytes[off + 1]]));
     }
     Ok(out)

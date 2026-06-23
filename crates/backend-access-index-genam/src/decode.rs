@@ -261,6 +261,26 @@ fn vardata_any(image: &[u8]) -> PgResult<&[u8]> {
     }
 }
 
+/// The byte offset of an `ArrayType` image's struct content (the `ndim` field)
+/// past its varlena length header — `VARDATA_ANY`-style. C reaches every
+/// `ArrayType` through `DatumGetArrayTypeP` (`PG_DETOAST_DATUM`), which un-packs a
+/// SHORT (1-byte) header to the full 4-byte form so the fixed-offset header fields
+/// (`ndim`/`dataoffset`/`elemtype`/dims) line up. A catalog array/vector column
+/// (`oidvector`/`int2vector`/`oid[]`/`int2[]`/`char[]`) read straight out of a
+/// heap tuple arrives SHORT-packed once `SHORT_VARLENA_PACKING` is on; reading the
+/// header at a fixed 4-byte offset then mis-reads `ndim` (the `is not a 1-D array`
+/// flip-blocker). The struct content begins ONE byte in for a short (low-bit-set,
+/// non-external) header, else `VARHDRSZ` (4) bytes in. No-op while packing is off
+/// (every stored image is 4-byte) and correct once it is on.
+fn arr_content_off(image: &[u8]) -> usize {
+    match image.first() {
+        // VARATT_IS_1B && !VARATT_IS_1B_E: short 1-byte header.
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => 1,
+        // 4-byte uncompressed header (VARHDRSZ).
+        _ => 4,
+    }
+}
+
 /// Split a `tgargs` bytea payload (`VARDATA_ANY`) into its `tgnargs` arguments.
 /// C does `p = VARDATA_ANY(val); for (i) { tgargs[i] = pstrdup(p); p += strlen(p)
 /// + 1; }` — each argument is a NUL-terminated C string laid end to end.
@@ -616,26 +636,30 @@ fn decode_pg_attribute<'mcx>(
 // ===========================================================================
 
 /// `int2vector` C struct image → the table column numbers. Layout mirrors
-/// `buildint2vector`'s output: a varlena header (4) + ndim(4) + dataoffset(4)
-/// + elemtype(4) + dim1(4) + lbound1(4) = 24-byte header, then `dim1` × `int16`
-/// elements. (`pg_index.indkey` is always a 1-D `int2vector`.)
+/// `buildint2vector`'s output: a varlena header + ndim(4) + dataoffset(4)
+/// + elemtype(4) + dim1(4) + lbound1(4) struct content, then `dim1` × `int16`
+/// elements. (`pg_index.indkey` is always a 1-D `int2vector`.) The varlena header
+/// is 4 bytes normally but ONE byte for a short-packed stored image, so the struct
+/// content starts at [`arr_content_off`] (`VARDATA_ANY`).
 fn int2vector_elems(bytes: &[u8]) -> PgResult<Vec<AttrNumber>> {
-    const HEADER: usize = 24;
-    if bytes.len() < HEADER {
+    let c = arr_content_off(bytes);
+    // dim0 lives 12 bytes into the struct content; data 20 bytes in.
+    let header = c + 20;
+    if bytes.len() < header {
         return Err(PgError::error("int2vector image too short"));
     }
-    let nelems = i32::from_ne_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    let nelems = i32::from_ne_bytes([bytes[c + 12], bytes[c + 13], bytes[c + 14], bytes[c + 15]]);
     if nelems < 0 {
         return Err(PgError::error("int2vector has negative dim1"));
     }
     let nelems = nelems as usize;
-    let need = HEADER + nelems * 2;
+    let need = header + nelems * 2;
     if bytes.len() < need {
         return Err(PgError::error("int2vector image shorter than dim1 implies"));
     }
     let mut out = Vec::with_capacity(nelems);
     for i in 0..nelems {
-        let off = HEADER + i * 2;
+        let off = header + i * 2;
         out.push(i16::from_ne_bytes([bytes[off], bytes[off + 1]]));
     }
     Ok(out)
@@ -1192,36 +1216,42 @@ fn scan_pg_constraint_truncate_fks() -> PgResult<Vec<seam::ScannedConstraintFk>>
 
 /// 1-D `Oid[]` `ArrayType` C image → its elements. Mirrors `ARR_DIMS(arr)[0]`
 /// + `memcpy(values, ARR_DATA_PTR(arr), sizeof(Oid) * nelem)` for a non-NULL,
-/// 1-D array. Header: vl_len(4) + ndim(4) + dataoffset(4) + elemtype(4) +
-/// dim0(4) + lbound0(4) = 24 bytes, then `dim0` × 4-byte Oids. (`conexclop`
-/// is always a 1-D OID array with `indnkeyatts` elements, no NULLs.)
+/// 1-D array. Struct content: ndim(4) + dataoffset(4) + elemtype(4) + dim0(4) +
+/// lbound0(4), then `dim0` × 4-byte Oids — past a varlena header that is 4 bytes
+/// normally but ONE byte for a short-packed stored image (the struct content
+/// begins at [`arr_content_off`], `VARDATA_ANY`; reading `ndim` at a fixed 4-byte
+/// offset on a short-packed `conexclop` oidvector is the `is not a 1-D array`
+/// flip-blocker). (`conexclop` is always a 1-D OID array with `indnkeyatts`
+/// elements, no NULLs.)
 fn oid_array_elems(bytes: &[u8]) -> PgResult<Vec<Oid>> {
-    const HEADER: usize = 24;
-    if bytes.len() < HEADER {
+    let c = arr_content_off(bytes);
+    let header = c + 20;
+    if bytes.len() < header {
         return Err(PgError::error("conexclop array image too short"));
     }
-    let ndim = i32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    let ndim = i32::from_ne_bytes([bytes[c], bytes[c + 1], bytes[c + 2], bytes[c + 3]]);
     if ndim != 1 {
         return Err(PgError::error("conexclop is not a 1-D array"));
     }
-    let dataoffset = i32::from_ne_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+    let dataoffset =
+        i32::from_ne_bytes([bytes[c + 4], bytes[c + 5], bytes[c + 6], bytes[c + 7]]);
     if dataoffset != 0 {
         // A non-zero dataoffset means the array carries a null bitmap; conexclop
         // never does.
         return Err(PgError::error("conexclop array unexpectedly has nulls"));
     }
-    let nelems = i32::from_ne_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    let nelems = i32::from_ne_bytes([bytes[c + 12], bytes[c + 13], bytes[c + 14], bytes[c + 15]]);
     if nelems < 0 {
         return Err(PgError::error("conexclop array has negative dim0"));
     }
     let nelems = nelems as usize;
-    let need = HEADER + nelems * 4;
+    let need = header + nelems * 4;
     if bytes.len() < need {
         return Err(PgError::error("conexclop array shorter than dim0 implies"));
     }
     let mut out = Vec::with_capacity(nelems);
     for i in 0..nelems {
-        let off = HEADER + i * 4;
+        let off = header + i * 4;
         out.push(u32::from_ne_bytes([
             bytes[off],
             bytes[off + 1],
@@ -1233,35 +1263,38 @@ fn oid_array_elems(bytes: &[u8]) -> PgResult<Vec<Oid>> {
 }
 
 /// 1-D `int2[]` `ArrayType` C image → its elements as `AttrNumber` (int16).
-/// Same `ArrayType` header layout as [`oid_array_elems`] (24-byte header, no
-/// null bitmap) but with 2-byte elements. `DeconstructFkConstraintRow` reads
+/// Same `ArrayType` content layout as [`oid_array_elems`] (no null bitmap) but
+/// with 2-byte elements, past a varlena header read header-form-agnostically via
+/// [`arr_content_off`] (`VARDATA_ANY`). `DeconstructFkConstraintRow` reads
 /// `conkey`/`confkey` this way (a non-NULL 1-D smallint array). `what` names the
 /// column for the error text.
 fn int16_array_elems(bytes: &[u8], what: &str) -> PgResult<Vec<AttrNumber>> {
-    const HEADER: usize = 24;
-    if bytes.len() < HEADER {
+    let c = arr_content_off(bytes);
+    let header = c + 20;
+    if bytes.len() < header {
         return Err(PgError::error(alloc::format!("{what} array image too short")));
     }
-    let ndim = i32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    let ndim = i32::from_ne_bytes([bytes[c], bytes[c + 1], bytes[c + 2], bytes[c + 3]]);
     if ndim != 1 {
         return Err(PgError::error(alloc::format!("{what} is not a 1-D smallint array")));
     }
-    let dataoffset = i32::from_ne_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+    let dataoffset =
+        i32::from_ne_bytes([bytes[c + 4], bytes[c + 5], bytes[c + 6], bytes[c + 7]]);
     if dataoffset != 0 {
         return Err(PgError::error(alloc::format!("{what} array unexpectedly has nulls")));
     }
-    let nelems = i32::from_ne_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    let nelems = i32::from_ne_bytes([bytes[c + 12], bytes[c + 13], bytes[c + 14], bytes[c + 15]]);
     if nelems < 0 {
         return Err(PgError::error(alloc::format!("{what} array has negative dim0")));
     }
     let nelems = nelems as usize;
-    let need = HEADER + nelems * 2;
+    let need = header + nelems * 2;
     if bytes.len() < need {
         return Err(PgError::error(alloc::format!("{what} array shorter than dim0 implies")));
     }
     let mut out = Vec::with_capacity(nelems);
     for i in 0..nelems {
-        let off = HEADER + i * 2;
+        let off = header + i * 2;
         out.push(i16::from_ne_bytes([bytes[off], bytes[off + 1]]));
     }
     Ok(out)
@@ -1416,22 +1449,25 @@ fn scan_pg_attrdef(relid: Oid) -> PgResult<Vec<seam::PgAttrdefRow>> {
 fn extract_not_null_column(row: &[DeformedColumn<'_>]) -> PgResult<AttrNumber> {
     let val = col(row, types_catalog::pg_constraint::Anum_pg_constraint_conkey, "conkey")?;
     let bytes = val.as_ref_bytes();
-    // 1-D int2 array: header(24) then one int16.
-    const HEADER: usize = 24;
-    let ndim = if bytes.len() >= 8 {
-        i32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]])
+    // 1-D int2 array: struct content (ndim@+0, dataoffset@+4, elemtype@+8,
+    // dim0@+12, lbound0@+16, data@+20) past a varlena header read header-form-
+    // agnostically via `arr_content_off` (`VARDATA_ANY`), then one int16.
+    let c = arr_content_off(bytes);
+    let header = c + 20;
+    let ndim = if bytes.len() >= c + 4 {
+        i32::from_ne_bytes([bytes[c], bytes[c + 1], bytes[c + 2], bytes[c + 3]])
     } else {
         return Err(PgError::error("conkey is not a 1-D smallint array"));
     };
-    let dim0 = if bytes.len() >= 20 {
-        i32::from_ne_bytes([bytes[16], bytes[17], bytes[18], bytes[19]])
+    let dim0 = if bytes.len() >= c + 16 {
+        i32::from_ne_bytes([bytes[c + 12], bytes[c + 13], bytes[c + 14], bytes[c + 15]])
     } else {
         return Err(PgError::error("conkey is not a 1-D smallint array"));
     };
-    if ndim != 1 || dim0 != 1 || bytes.len() < HEADER + 2 {
+    if ndim != 1 || dim0 != 1 || bytes.len() < header + 2 {
         return Err(PgError::error("conkey is not a 1-D smallint array"));
     }
-    Ok(i16::from_ne_bytes([bytes[HEADER], bytes[HEADER + 1]]))
+    Ok(i16::from_ne_bytes([bytes[header], bytes[header + 1]]))
 }
 
 /// `CheckNNConstraintFetch(relation)`'s `pg_constraint` scan (relcache.c).

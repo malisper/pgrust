@@ -258,51 +258,75 @@ fn decode_name(d: &Datum<'_>) -> String {
     String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
+/// The byte offset of an `ArrayType`/`int2vector` image's struct content (the
+/// `ndim` field) past its varlena length header — `VARDATA_ANY`-style. C reaches
+/// these through `DatumGetArrayTypeP`/`DatumGetPointer` after `PG_DETOAST_DATUM`,
+/// which un-packs a SHORT (1-byte) header to the full 4-byte form so the
+/// fixed-offset header fields read correctly. A `pg_statistic_ext.stxkeys`
+/// int2vector / `stxkind` char[] read straight out of a heap tuple arrives
+/// SHORT-packed once `SHORT_VARLENA_PACKING` is on; reading the header at a fixed
+/// 4-byte offset then mis-reads `ndim` (the `stxkind is not a 1-D char array`
+/// flip-blocker). The struct content begins ONE byte in for a short (low-bit-set,
+/// non-external) header, else `VARHDRSZ` (4) bytes in. No-op while packing is off.
+fn arr_content_off(image: &[u8]) -> usize {
+    match image.first() {
+        // VARATT_IS_1B && !VARATT_IS_1B_E: short 1-byte header.
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => 1,
+        // 4-byte uncompressed header (VARHDRSZ).
+        _ => 4,
+    }
+}
+
 /// Decode an `int2vector` (`stxkeys`) by-ref Datum into its `i32` member list.
-/// Layout (`int2vector`, c.h): 24-byte fixed header
-/// (vl_len_ 4, ndim 4, dataoffset 4, elemtype 4, dim1 4, lbound1 4) then `dim1`
-/// `int16` values.
+/// Struct content (`int2vector`, c.h): ndim 4, dataoffset 4, elemtype 4, dim1 4,
+/// lbound1 4, then `dim1` `int16` values — past a varlena header read
+/// header-form-agnostically via [`arr_content_off`] (`VARDATA_ANY`).
 fn decode_int2vector(d: &Datum<'_>) -> PgResult<Vec<i32>> {
     let b = d.as_ref_bytes();
-    if b.len() < 24 {
+    let c = arr_content_off(b);
+    // dim1 lives 12 bytes into the struct content; data 20 bytes in.
+    let data_start = c + 20;
+    if b.len() < data_start {
         return Err(PgError::error("stxkeys: short int2vector".to_string()));
     }
-    let dim1 = i32::from_ne_bytes([b[16], b[17], b[18], b[19]]);
-    if dim1 < 0 || 24 + (dim1 as usize) * 2 > b.len() {
+    let dim1 = i32::from_ne_bytes([b[c + 12], b[c + 13], b[c + 14], b[c + 15]]);
+    if dim1 < 0 || data_start + (dim1 as usize) * 2 > b.len() {
         return Err(PgError::error("stxkeys: bad int2vector dim1".to_string()));
     }
     let mut out = Vec::with_capacity(dim1 as usize);
     for i in 0..dim1 as usize {
-        let off = 24 + i * 2;
+        let off = data_start + i * 2;
         out.push(i16::from_ne_bytes([b[off], b[off + 1]]) as i32);
     }
     Ok(out)
 }
 
 /// Decode a 1-D no-nulls `char[]` `ArrayType` (`stxkind`) by-ref Datum into its
-/// `i8` element list. Layout: 16-byte ArrayType header (vl_len_ 4, ndim 4,
-/// dataoffset 4, elemtype 4) then for ndim==1 a `dims[1]`/`lbound[1]`
-/// (4 + 4 bytes), then `dims[0]` 1-byte char elements (no alignment padding for
-/// 1-byte type). Mirrors the C `ARR_NDIM == 1 && !ARR_HASNULL &&
-/// ARR_ELEMTYPE == CHAROID` validation.
+/// `i8` element list. Struct content: ndim 4, dataoffset 4, elemtype 4, then for
+/// ndim==1 a `dims[1]`/`lbound[1]` (4 + 4 bytes), then `dims[0]` 1-byte char
+/// elements (no alignment padding for 1-byte type) — past a varlena header read
+/// header-form-agnostically via [`arr_content_off`] (`VARDATA_ANY`). Mirrors the C
+/// `ARR_NDIM == 1 && !ARR_HASNULL && ARR_ELEMTYPE == CHAROID` validation.
 fn decode_char_array(d: &Datum<'_>) -> PgResult<Vec<i8>> {
     let b = d.as_ref_bytes();
-    if b.len() < 16 {
+    let c = arr_content_off(b);
+    if b.len() < c + 12 {
         return Err(PgError::error("stxkind: short array".to_string()));
     }
-    let ndim = i32::from_ne_bytes([b[4], b[5], b[6], b[7]]);
-    let dataoffset = i32::from_ne_bytes([b[8], b[9], b[10], b[11]]);
+    let ndim = i32::from_ne_bytes([b[c], b[c + 1], b[c + 2], b[c + 3]]);
+    let dataoffset = i32::from_ne_bytes([b[c + 4], b[c + 5], b[c + 6], b[c + 7]]);
     // ARR_NDIM(arr) != 1 || ARR_HASNULL(arr) (dataoffset != 0) -> error
     if ndim != 1 || dataoffset != 0 {
         return Err(PgError::error("stxkind is not a 1-D char array".to_string()));
     }
-    if b.len() < 24 {
+    // ARR_DATA_PTR for no-bitmap, no-padding 1-byte element type starts at
+    // content + ndim(4) + dataoffset(4) + elemtype(4) + 2 * ndim * sizeof(int) =
+    // content + 12 + 8 = content + 20.
+    let data_start = c + 20;
+    if b.len() < data_start {
         return Err(PgError::error("stxkind: short array dims".to_string()));
     }
-    let ndims0 = i32::from_ne_bytes([b[16], b[17], b[18], b[19]]);
-    // ARR_DATA_PTR for no-bitmap, no-padding 1-byte element type starts at
-    // sizeof(ArrayType) + 2 * ndim * sizeof(int) = 16 + 8 = 24.
-    let data_start = 24usize;
+    let ndims0 = i32::from_ne_bytes([b[c + 12], b[c + 13], b[c + 14], b[c + 15]]);
     if ndims0 < 0 || data_start + ndims0 as usize > b.len() {
         return Err(PgError::error("stxkind: bad array dims".to_string()));
     }
