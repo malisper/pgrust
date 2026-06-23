@@ -38,6 +38,9 @@ use crate::{VarBit, VarBitRef};
 /// the 4-byte `int32 bit_len`, before the `bit_dat[]` payload.
 const VARBIT_PREFIX: usize = 8;
 
+/// `VARHDRSZ` (varatt.h): the 4-byte varlena length word.
+const VARHDRSZ_4B: usize = 4;
+
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
 // ---------------------------------------------------------------------------
@@ -69,25 +72,50 @@ fn arg_cstring<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
         .expect("varbit fn: cstring arg missing from by-ref lane")
 }
 
-/// The full varlena image of arg `i` off the by-ref lane.
+/// The full varlena image of arg `i` off the by-ref lane, normalized to a
+/// 4-byte-header (`VARBIT_PREFIX`-based) form that [`decode_varbit`] can read.
 ///
-/// NOTE: this lane does NOT carry a canonical on-the-wire varlena header — the
-/// leading 4-byte word is the RAW image length (see `encode_varbit`, which writes
-/// `set_varsize_4b`, but other producers on this lane — e.g. `bit_in`/the typmod
-/// coercion path — write the raw length unshifted). A short-header (`VARATT_IS_1B`)
-/// probe of `image[0]`'s low bit therefore mis-fires on every odd-length image
-/// (an odd raw length has the low bit set), truncating the value. We do not detoast
-/// a short header here: with `SHORT_VARLENA_PACKING` OFF no by-ref `bit`/`varbit`
-/// image is ever short-packed, so this is a no-op anyway; un-packing must instead
-/// happen at the heap-detoast boundary that feeds this lane (where the image is in
-/// canonical form). Return the image verbatim — `decode_varbit` reads the 4-byte
-/// base directly.
-#[inline]
-fn arg_varbit_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
+/// This lane carries images from two source conventions:
+///  - a `heap_deform_tuple` stored value — a GENUINE varlena (4-byte header when
+///    `SHORT_VARLENA_PACKING` is OFF; a 1-byte SHORT header when ON, since `bit`
+///    /`varbit` columns are packable). The C `DatumGetVarBitP` macro is
+///    `PG_DETOAST_DATUM`, which un-packs a short header to 4-byte form before any
+///    fixed-offset struct read.
+///  - a parser/coercion-built image (e.g. `bit_in_to_varlena`) whose leading
+///    4-byte word is the RAW image length written UNSHIFTED (not `SET_VARSIZE`),
+///    and which is NEVER short-packed.
+///
+/// The earlier bare `(image[0] & 0x01) == 1` probe mis-fired on the second source
+/// (an odd raw length sets the low bit) and truncated the value. The fix is the
+/// strict `VARSIZE_1B == len` self-consistency test (the same disambiguation
+/// `ensure_headerful_varlena` uses): a genuine short varlena has
+/// `(image[0] >> 1) == image.len()`, which an unshifted-length word never
+/// satisfies (its low byte is `len & 0xFF`, so `>>1` ≠ `len`). Only a genuine
+/// short value is un-packed to the 4-byte `[VARSIZE_4B | bit_len | data]` form;
+/// every other image passes through verbatim. With `SHORT_VARLENA_PACKING` OFF no
+/// stored value is short-packed, so the un-pack branch is dead and this is a
+/// behavior-preserving copy.
+fn arg_varbit_bytes(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Vec<u8> {
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("varbit fn: varbit arg missing from by-ref lane")
+        .expect("varbit fn: varbit arg missing from by-ref lane");
+    // VARATT_IS_SHORT && VARSIZE_1B == len: a genuine 1-byte-header short varlena
+    // (low bit set, and the encoded short length matches the total image length).
+    if !image.is_empty() && (image[0] & 0x01) == 0x01 && ((image[0] >> 1) as usize) == image.len() {
+        // Un-pack short -> 4-byte header (mirror detoast_attr's short arm): the
+        // short payload is the on-disk struct body `[bit_len | data]`; prepend a
+        // 4-byte length word so the fixed-offset readers (bit_len at [4..8], data
+        // at VARBIT_PREFIX) land correctly.
+        let payload = &image[1..];
+        let total = VARHDRSZ_4B + payload.len();
+        let mut out = Vec::with_capacity(total);
+        out.extend_from_slice(&types_datum::varlena::set_varsize_4b(total));
+        out.extend_from_slice(payload);
+        out
+    } else {
+        image.to_vec()
+    }
 }
 
 /// Parse a full header-ful `varbit` varlena image
@@ -189,7 +217,7 @@ fn fc_varbit_in(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 }
 
 fn fc_bit_out(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    let image = arg_varbit_bytes(fcinfo, 0).to_vec();
+    let image = arg_varbit_bytes(fcinfo, 0);
     let arg = decode_varbit(&image);
     let m = scratch_mcx();
     let bytes = crate::bit_out(m.mcx(), arg)?.to_vec();
@@ -197,7 +225,7 @@ fn fc_bit_out(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 }
 
 fn fc_varbit_out(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    let image = arg_varbit_bytes(fcinfo, 0).to_vec();
+    let image = arg_varbit_bytes(fcinfo, 0);
     let arg = decode_varbit(&image);
     let m = scratch_mcx();
     let bytes = crate::varbit_out(m.mcx(), arg)?.to_vec();
@@ -205,7 +233,7 @@ fn fc_varbit_out(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 }
 
 fn fc_bit_send(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    let image = arg_varbit_bytes(fcinfo, 0).to_vec();
+    let image = arg_varbit_bytes(fcinfo, 0);
     let arg = decode_varbit(&image);
     let m = scratch_mcx();
     let bytes = crate::bit_send(m.mcx(), arg)?.as_bytes().to_vec();
@@ -213,7 +241,7 @@ fn fc_bit_send(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 }
 
 fn fc_varbit_send(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    let image = arg_varbit_bytes(fcinfo, 0).to_vec();
+    let image = arg_varbit_bytes(fcinfo, 0);
     let arg = decode_varbit(&image);
     let m = scratch_mcx();
     let bytes = crate::varbit_send(m.mcx(), arg)?.as_bytes().to_vec();
@@ -264,8 +292,8 @@ fn fc_varbittypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> 
 /// Decode both `varbit` args off the by-ref lane.
 macro_rules! decode_both {
     ($fcinfo:ident) => {{
-        let img1 = arg_varbit_bytes($fcinfo, 0).to_vec();
-        let img2 = arg_varbit_bytes($fcinfo, 1).to_vec();
+        let img1 = arg_varbit_bytes($fcinfo, 0);
+        let img2 = arg_varbit_bytes($fcinfo, 1);
         (img1, img2)
     }};
 }
@@ -331,14 +359,14 @@ fn fc_bitxor(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 }
 
 fn fc_bitnot(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    let image = arg_varbit_bytes(fcinfo, 0).to_vec();
+    let image = arg_varbit_bytes(fcinfo, 0);
     let m = scratch_mcx();
     let v = crate::bitnot(m.mcx(), decode_varbit(&image))?;
     Ok(ret_varbit(fcinfo, &v))
 }
 
 fn fc_bitshiftleft(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    let image = arg_varbit_bytes(fcinfo, 0).to_vec();
+    let image = arg_varbit_bytes(fcinfo, 0);
     let shft = arg_int32(fcinfo, 1);
     let m = scratch_mcx();
     let v = crate::bitshiftleft(m.mcx(), decode_varbit(&image), shft)?;
@@ -346,7 +374,7 @@ fn fc_bitshiftleft(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 }
 
 fn fc_bitshiftright(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    let image = arg_varbit_bytes(fcinfo, 0).to_vec();
+    let image = arg_varbit_bytes(fcinfo, 0);
     let shft = arg_int32(fcinfo, 1);
     let m = scratch_mcx();
     let v = crate::bitshiftright(m.mcx(), decode_varbit(&image), shft)?;
@@ -366,7 +394,7 @@ fn fc_bitcat(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 
 fn fc_bit_recv(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     // args: internal (StringInfo), oid (typioparam, unused), int4 typmod.
-    let src = arg_varbit_bytes(fcinfo, 0).to_vec();
+    let src = arg_varbit_bytes(fcinfo, 0);
     let typmod = arg_int32(fcinfo, 2);
     let m = scratch_mcx();
     let mut data = mcx::PgVec::new_in(m.mcx());
@@ -377,7 +405,7 @@ fn fc_bit_recv(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 }
 
 fn fc_varbit_recv(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    let src = arg_varbit_bytes(fcinfo, 0).to_vec();
+    let src = arg_varbit_bytes(fcinfo, 0);
     let typmod = arg_int32(fcinfo, 2);
     let m = scratch_mcx();
     let mut data = mcx::PgVec::new_in(m.mcx());
@@ -392,7 +420,7 @@ fn fc_varbit_recv(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 // ---------------------------------------------------------------------------
 
 fn fc_bit(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    let image = arg_varbit_bytes(fcinfo, 0).to_vec();
+    let image = arg_varbit_bytes(fcinfo, 0);
     let len = arg_int32(fcinfo, 1);
     let is_explicit = arg_bool(fcinfo, 2);
     let m = scratch_mcx();
@@ -401,7 +429,7 @@ fn fc_bit(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 }
 
 fn fc_varbit(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    let image = arg_varbit_bytes(fcinfo, 0).to_vec();
+    let image = arg_varbit_bytes(fcinfo, 0);
     let len = arg_int32(fcinfo, 1);
     let is_explicit = arg_bool(fcinfo, 2);
     let m = scratch_mcx();
@@ -422,7 +450,7 @@ fn fc_bitfromint4(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 }
 
 fn fc_bittoint4(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    let image = arg_varbit_bytes(fcinfo, 0).to_vec();
+    let image = arg_varbit_bytes(fcinfo, 0);
     Ok(Datum::from_i32(crate::bittoint4(decode_varbit(&image))?))
 }
 
@@ -435,7 +463,7 @@ fn fc_bitfromint8(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 }
 
 fn fc_bittoint8(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    let image = arg_varbit_bytes(fcinfo, 0).to_vec();
+    let image = arg_varbit_bytes(fcinfo, 0);
     Ok(Datum::from_i64(crate::bittoint8(decode_varbit(&image))?))
 }
 
@@ -444,13 +472,13 @@ fn fc_bittoint8(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 // ---------------------------------------------------------------------------
 
 fn fc_bitgetbit(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    let image = arg_varbit_bytes(fcinfo, 0).to_vec();
+    let image = arg_varbit_bytes(fcinfo, 0);
     let n = arg_int32(fcinfo, 1);
     Ok(Datum::from_i32(crate::bitgetbit(decode_varbit(&image), n)?))
 }
 
 fn fc_bitsetbit(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    let image = arg_varbit_bytes(fcinfo, 0).to_vec();
+    let image = arg_varbit_bytes(fcinfo, 0);
     let n = arg_int32(fcinfo, 1);
     let new_bit = arg_int32(fcinfo, 2);
     let m = scratch_mcx();
@@ -459,17 +487,17 @@ fn fc_bitsetbit(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 }
 
 fn fc_bit_bit_count(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    let image = arg_varbit_bytes(fcinfo, 0).to_vec();
+    let image = arg_varbit_bytes(fcinfo, 0);
     Ok(Datum::from_i64(crate::bit_bit_count(decode_varbit(&image))))
 }
 
 fn fc_bitlength(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    let image = arg_varbit_bytes(fcinfo, 0).to_vec();
+    let image = arg_varbit_bytes(fcinfo, 0);
     Ok(Datum::from_i32(crate::bitlength(decode_varbit(&image))))
 }
 
 fn fc_bitoctetlength(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    let image = arg_varbit_bytes(fcinfo, 0).to_vec();
+    let image = arg_varbit_bytes(fcinfo, 0);
     Ok(Datum::from_i32(crate::bitoctetlength(decode_varbit(&image))))
 }
 
@@ -479,7 +507,7 @@ fn fc_bitposition(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 }
 
 fn fc_bitsubstr(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    let image = arg_varbit_bytes(fcinfo, 0).to_vec();
+    let image = arg_varbit_bytes(fcinfo, 0);
     let s = arg_int32(fcinfo, 1);
     let l = arg_int32(fcinfo, 2);
     let m = scratch_mcx();
@@ -488,7 +516,7 @@ fn fc_bitsubstr(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 }
 
 fn fc_bitsubstr_no_len(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    let image = arg_varbit_bytes(fcinfo, 0).to_vec();
+    let image = arg_varbit_bytes(fcinfo, 0);
     let s = arg_int32(fcinfo, 1);
     let m = scratch_mcx();
     let v = crate::bitsubstr_no_len(m.mcx(), decode_varbit(&image), s)?;
@@ -496,8 +524,8 @@ fn fc_bitsubstr_no_len(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum>
 }
 
 fn fc_bitoverlay(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    let t1 = arg_varbit_bytes(fcinfo, 0).to_vec();
-    let t2 = arg_varbit_bytes(fcinfo, 1).to_vec();
+    let t1 = arg_varbit_bytes(fcinfo, 0);
+    let t2 = arg_varbit_bytes(fcinfo, 1);
     let sp = arg_int32(fcinfo, 2);
     let sl = arg_int32(fcinfo, 3);
     let m = scratch_mcx();
@@ -506,8 +534,8 @@ fn fc_bitoverlay(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 }
 
 fn fc_bitoverlay_no_len(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    let t1 = arg_varbit_bytes(fcinfo, 0).to_vec();
-    let t2 = arg_varbit_bytes(fcinfo, 1).to_vec();
+    let t1 = arg_varbit_bytes(fcinfo, 0);
+    let t2 = arg_varbit_bytes(fcinfo, 1);
     let sp = arg_int32(fcinfo, 2);
     let m = scratch_mcx();
     let v = crate::bitoverlay_no_len(m.mcx(), decode_varbit(&t1), decode_varbit(&t2), sp)?;
