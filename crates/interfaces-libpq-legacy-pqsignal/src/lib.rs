@@ -31,6 +31,7 @@ pub fn init_seams() {}
 /// targets): install with an empty signal mask; `sa_flags = SA_RESTART`
 /// unless the signal is `SIGALRM`, plus `SA_NOCLDSTOP` for `SIGCHLD` (the C
 /// `#ifdef SA_NOCLDSTOP` is always satisfied on our platforms).
+#[cfg(not(target_family = "wasm"))]
 pub fn pqsignal(signo: i32, func: SigHandler) -> SigDisposition {
     let handler: libc::sighandler_t = match func {
         SigHandler::Default => libc::SIG_DFL,
@@ -70,7 +71,17 @@ pub fn pqsignal(signo: i32, func: SigHandler) -> SigDisposition {
     }
 }
 
-#[cfg(test)]
+/// wasm: no `sigaction`/`sighandler_t`/`SIG_DFL`/`SIG_IGN`. This is a frozen
+/// legacy client-ABI shim that nothing in the single-user backend invokes;
+/// there is no kernel signal layer to install into, so record nothing and
+/// report the previous disposition as Default (the at-startup state). Mirrors
+/// the no-op `port-pqsignal` wasm stub.
+#[cfg(target_family = "wasm")]
+pub fn pqsignal(_signo: i32, _func: SigHandler) -> SigDisposition {
+    SigDisposition::Default
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     use super::*;
 

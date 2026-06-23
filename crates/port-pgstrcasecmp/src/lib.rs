@@ -77,8 +77,8 @@ pub fn pg_strncasecmp(s1: &[u8], s2: &[u8], n: usize) -> i32 {
 pub fn pg_toupper(ch: u8) -> u8 {
     if ch.is_ascii_lowercase() {
         ch - (b'a' - b'A')
-    } else if ch & HIGHBIT != 0 && unsafe { libc::islower(i32::from(ch)) } != 0 {
-        (unsafe { libc::toupper(i32::from(ch)) }) as u8
+    } else if ch & HIGHBIT != 0 && highbit_islower(ch) {
+        highbit_toupper(ch)
     } else {
         ch
     }
@@ -131,11 +131,57 @@ fn byte_at(s: &[u8], i: usize) -> u8 {
 fn fold_to_lower(ch: u8) -> u8 {
     if ch.is_ascii_uppercase() {
         ch + (b'a' - b'A')
-    } else if ch & HIGHBIT != 0 && unsafe { libc::isupper(i32::from(ch)) } != 0 {
-        (unsafe { libc::tolower(i32::from(ch)) }) as u8
+    } else if ch & HIGHBIT != 0 && highbit_isupper(ch) {
+        highbit_tolower(ch)
     } else {
         ch
     }
+}
+
+// The high-bit (>= 0x80) case rules defer to the process locale's `<ctype.h>`
+// on a hosted target. On wasm there is no locale facility (C/POSIX only), and
+// these ctype symbols are absent from libc; the C/POSIX locale never classifies
+// a high-bit byte as alpha, so the faithful single-locale answer is identity.
+#[cfg(not(target_family = "wasm"))]
+#[inline]
+fn highbit_islower(ch: u8) -> bool {
+    unsafe { libc::islower(i32::from(ch)) != 0 }
+}
+#[cfg(not(target_family = "wasm"))]
+#[inline]
+fn highbit_isupper(ch: u8) -> bool {
+    unsafe { libc::isupper(i32::from(ch)) != 0 }
+}
+#[cfg(not(target_family = "wasm"))]
+#[inline]
+fn highbit_toupper(ch: u8) -> u8 {
+    (unsafe { libc::toupper(i32::from(ch)) }) as u8
+}
+#[cfg(not(target_family = "wasm"))]
+#[inline]
+fn highbit_tolower(ch: u8) -> u8 {
+    (unsafe { libc::tolower(i32::from(ch)) }) as u8
+}
+
+#[cfg(target_family = "wasm")]
+#[inline]
+fn highbit_islower(_ch: u8) -> bool {
+    false
+}
+#[cfg(target_family = "wasm")]
+#[inline]
+fn highbit_isupper(_ch: u8) -> bool {
+    false
+}
+#[cfg(target_family = "wasm")]
+#[inline]
+fn highbit_toupper(ch: u8) -> u8 {
+    ch
+}
+#[cfg(target_family = "wasm")]
+#[inline]
+fn highbit_tolower(ch: u8) -> u8 {
+    ch
 }
 
 #[cfg(test)]

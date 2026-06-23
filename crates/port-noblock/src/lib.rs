@@ -10,6 +10,7 @@ use types_core::pgsocket;
 /// Returns true on success, false on failure. Never ereports.
 ///
 /// Faithful port of the `#if !defined(WIN32)` branch of `pg_set_noblock`.
+#[cfg(not(target_family = "wasm"))]
 pub fn pg_set_noblock(sock: pgsocket) -> bool {
     // SAFETY: fcntl on a valid socket fd; failures are reported via the return
     // value exactly as the C code checks.
@@ -23,11 +24,19 @@ pub fn pg_set_noblock(sock: pgsocket) -> bool {
     true
 }
 
+/// wasm: no `fcntl`/`O_NONBLOCK`. Single-user mode has no listener socket whose
+/// blocking mode matters, so setting non-blocking is a successful no-op.
+#[cfg(target_family = "wasm")]
+pub fn pg_set_noblock(_sock: pgsocket) -> bool {
+    true
+}
+
 /// Put socket into blocking mode.
 ///
 /// Returns true on success, false on failure. Faithful port of the
 /// `#if !defined(WIN32)` branch of `pg_set_block`. Retained for completeness
 /// (the seam crate currently only declares `pg_set_noblock`).
+#[cfg(not(target_family = "wasm"))]
 pub fn pg_set_block(sock: pgsocket) -> bool {
     // SAFETY: see `pg_set_noblock`.
     let flags = unsafe { libc::fcntl(sock, libc::F_GETFL) };
@@ -37,6 +46,13 @@ pub fn pg_set_block(sock: pgsocket) -> bool {
     if unsafe { libc::fcntl(sock, libc::F_SETFL, flags & !libc::O_NONBLOCK) } == -1 {
         return false;
     }
+    true
+}
+
+/// wasm: no `fcntl`. Single-user mode keeps fds blocking by default, so this is
+/// a successful no-op.
+#[cfg(target_family = "wasm")]
+pub fn pg_set_block(_sock: pgsocket) -> bool {
     true
 }
 

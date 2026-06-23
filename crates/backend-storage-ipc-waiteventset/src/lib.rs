@@ -434,15 +434,18 @@ pub fn WakeupMyProc() {
 }
 
 /// `WakeupOtherProc(pid)` — `kill(pid, SIGURG)` to wake another process.
-pub fn WakeupOtherProc(pid: i32) {
+pub fn WakeupOtherProc(_pid: i32) {
     // SAFETY: kill with SIGURG; errors are ignored in C.
+    // wasm: no `kill`/`SIGURG`, and single-user has no other process to wake.
+    #[cfg(not(target_family = "wasm"))]
     unsafe {
-        libc::kill(pid, libc::SIGURG);
+        libc::kill(_pid, libc::SIGURG);
     }
 }
 
 // ---- time helper (INSTR_TIME, monotonic milliseconds) ----
 
+#[cfg(not(target_family = "wasm"))]
 fn now_millis() -> i64 {
     // SAFETY: clock_gettime into a zeroed timespec.
     let mut ts: libc::timespec = unsafe { core::mem::zeroed() };
@@ -450,6 +453,16 @@ fn now_millis() -> i64 {
         libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts as *mut libc::timespec);
     }
     (ts.tv_sec as i64) * 1000 + (ts.tv_nsec as i64) / 1_000_000
+}
+
+/// wasm: no `clock_gettime`/`CLOCK_MONOTONIC`. Use a monotonic `Instant`
+/// anchored at first call.
+#[cfg(target_family = "wasm")]
+fn now_millis() -> i64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static ANCHOR: OnceLock<Instant> = OnceLock::new();
+    ANCHOR.get_or_init(Instant::now).elapsed().as_millis() as i64
 }
 
 /// Install the inward `waiteventset` seams consumed by latch / pqcomm /
