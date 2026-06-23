@@ -6431,6 +6431,7 @@ dependencies = [
  "backend-storage-ipc-dsm-core-seams",
  "backend-storage-ipc-latch-seams",
  "backend-storage-ipc-procsignal-seams",
+ "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-lmgr-seams",
  "backend-storage-lmgr-lwlock",
  "backend-tcop-postgres-seams",

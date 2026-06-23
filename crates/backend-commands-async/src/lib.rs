@@ -67,6 +67,7 @@ use backend_access_transam_parallel as parallel_seams;
 use backend_access_transam_transam_seams as transam_seams;
 use backend_access_transam_xact_seams as xact_seams;
 use backend_storage_ipc_dsm_core_seams as ipc_seams;
+use backend_storage_ipc_shmem_seams as ipc_shmem_seams;
 use backend_storage_ipc_latch_seams as latch_seams;
 use backend_storage_ipc_procsignal_seams as procsignal_seams;
 use backend_storage_lmgr_lmgr_seams as lmgr_seams;
@@ -148,30 +149,94 @@ thread_local! {
     static PENDING_NOTIFIES: RefCell<Option<Box<NotificationList>>> = const { RefCell::new(None) };
 
     /// `static AsyncQueueControl *asyncQueueControl` (async.c line 294) — the
-    /// shared-memory queue control. Owned in-crate (multixact pattern): the
-    /// fixed header scalars plus the per-backend `backend[]` array as an owned
-    /// `Vec<QueueBackendStatus>`.
-    static ASYNC_QUEUE_CONTROL: RefCell<Option<AsyncQueueControlData>> =
-        const { RefCell::new(None) };
+    /// per-process pointer at the shared "Async Queue Control" segment (the
+    /// fixed [`AsyncQueueControl`] header immediately followed by the per-backend
+    /// `QueueBackendStatus backend[FLEXIBLE_ARRAY_MEMBER]` array). The struct
+    /// lives in the main `MAP_SHARED` segment carved by [`AsyncShmemInit`] via
+    /// `ShmemInitStruct`, so the one physical struct backs every forked backend
+    /// (a NOTIFY queued by one backend is visible to the listening backends).
+    /// The pointer itself is per-process, correctly forked. Mirrors multixact's
+    /// `MultiXactState` shared-singleton pointer.
+    static ASYNC_QUEUE_CONTROL: Cell<Option<AsyncQueuePtr>> = const { Cell::new(None) };
 
     /// `static SlruCtlData NotifyCtlData` (async.c line 308) / `NotifyCtl`.
     static NOTIFY_CTL: RefCell<Option<SlruCtlData>> = const { RefCell::new(None) };
 }
 
-/// The owned `AsyncQueueControl` segment: the fixed header plus the per-backend
-/// `backend[FLEXIBLE_ARRAY_MEMBER]` array.
-struct AsyncQueueControlData {
-    header: AsyncQueueControl,
-    backend: Vec<QueueBackendStatus>,
+/// Per-process pointer at the shared "Async Queue Control" singleton: the
+/// [`AsyncQueueControl`] header at the segment base, immediately followed by the
+/// `max_backends`-entry `QueueBackendStatus` flexible array. The realization of
+/// async.c's `static AsyncQueueControl *asyncQueueControl`.
+#[derive(Clone, Copy)]
+struct AsyncQueuePtr(*mut u8);
+
+// SAFETY: the pointer addresses the cluster-wide shmem "Async Queue Control"
+// segment, valid for the process lifetime; all field access is serialized by
+// `NotifyQueueLock` / `NotifyQueueTailLock`, exactly as in C. The `Cell` that
+// holds it is per-backend.
+unsafe impl Send for AsyncQueuePtr {}
+
+impl AsyncQueuePtr {
+    /// `&mut AsyncQueueControl` — the fixed header at the segment base.
+    #[inline]
+    fn header(&self) -> &'static mut AsyncQueueControl {
+        // SAFETY: `self.0` points at the shared singleton header in shmem; the
+        // caller holds the relevant NOTIFY LWLock for the access.
+        unsafe { &mut *(self.0 as *mut AsyncQueueControl) }
+    }
+
+    /// `&mut QueueBackendStatus` for backend slot `i` — the `i`-th entry of the
+    /// flexible array immediately following the header.
+    #[inline]
+    fn backend(&self, i: ProcNumber) -> &'static mut QueueBackendStatus {
+        // SAFETY: the segment was sized for `max_backends` entries following the
+        // header (see `AsyncShmemSize`); `0 <= i < max_backends` for every live
+        // ProcNumber, and the access is serialized by the NOTIFY LWLock.
+        unsafe {
+            let base = self.0.add(ASYNC_QUEUE_CONTROL_HEADER_SIZE) as *mut QueueBackendStatus;
+            &mut *base.add(i as usize)
+        }
+    }
 }
 
-/// Run `f` with mutable access to the shared `AsyncQueueControl`.
+/// The owned-shaped view over the shared `AsyncQueueControl` segment, handed to
+/// the `with_queue` accessors. `header` and `backend[i]` reach the same physical
+/// bytes in shmem for every backend.
+struct AsyncQueueControlData {
+    ptr: AsyncQueuePtr,
+}
+
+impl AsyncQueueControlData {
+    #[inline]
+    fn header(&mut self) -> &mut AsyncQueueControl {
+        self.ptr.header()
+    }
+}
+
+/// Index access mirroring C's `asyncQueueControl->backend[i]`.
+impl core::ops::Index<ProcNumber> for AsyncQueueControlData {
+    type Output = QueueBackendStatus;
+    #[inline]
+    fn index(&self, i: ProcNumber) -> &QueueBackendStatus {
+        self.ptr.backend(i)
+    }
+}
+impl core::ops::IndexMut<ProcNumber> for AsyncQueueControlData {
+    #[inline]
+    fn index_mut(&mut self, i: ProcNumber) -> &mut QueueBackendStatus {
+        self.ptr.backend(i)
+    }
+}
+
+/// Run `f` with access to the shared `AsyncQueueControl` (header + per-backend
+/// array). The relevant `NotifyQueueLock`/`NotifyQueueTailLock` is held by the
+/// caller, exactly as in C.
 fn with_queue<R>(f: impl FnOnce(&mut AsyncQueueControlData) -> R) -> R {
-    ASYNC_QUEUE_CONTROL.with(|c| {
-        let mut b = c.borrow_mut();
-        f(b.as_mut()
-            .expect("asyncQueueControl used before AsyncShmemInit"))
-    })
+    let ptr = ASYNC_QUEUE_CONTROL
+        .with(|c| c.get())
+        .expect("asyncQueueControl used before AsyncShmemInit");
+    let mut view = AsyncQueueControlData { ptr };
+    f(&mut view)
 }
 
 /// Run `f` with mutable access to the `NotifyCtl` SLRU control.
@@ -193,58 +258,58 @@ pub fn notify_interrupt_pending() -> bool {
 // ---------------------------------------------------------------------------
 
 fn QUEUE_HEAD() -> QueuePosition {
-    with_queue(|q| q.header.head)
+    with_queue(|q| q.header().head)
 }
 fn set_QUEUE_HEAD(v: QueuePosition) {
-    with_queue(|q| q.header.head = v);
+    with_queue(|q| q.header().head = v);
 }
 fn QUEUE_TAIL() -> QueuePosition {
-    with_queue(|q| q.header.tail)
+    with_queue(|q| q.header().tail)
 }
 fn set_QUEUE_TAIL(v: QueuePosition) {
-    with_queue(|q| q.header.tail = v);
+    with_queue(|q| q.header().tail = v);
 }
 fn QUEUE_STOP_PAGE() -> i64 {
-    with_queue(|q| q.header.stopPage)
+    with_queue(|q| q.header().stopPage)
 }
 fn set_QUEUE_STOP_PAGE(v: i64) {
-    with_queue(|q| q.header.stopPage = v);
+    with_queue(|q| q.header().stopPage = v);
 }
 fn QUEUE_FIRST_LISTENER() -> ProcNumber {
-    with_queue(|q| q.header.firstListener)
+    with_queue(|q| q.header().firstListener)
 }
 fn set_QUEUE_FIRST_LISTENER(v: ProcNumber) {
-    with_queue(|q| q.header.firstListener = v);
+    with_queue(|q| q.header().firstListener = v);
 }
 fn QUEUE_LAST_FILL_WARN() -> types_core::TimestampTz {
-    with_queue(|q| q.header.lastQueueFillWarn)
+    with_queue(|q| q.header().lastQueueFillWarn)
 }
 fn set_QUEUE_LAST_FILL_WARN(v: types_core::TimestampTz) {
-    with_queue(|q| q.header.lastQueueFillWarn = v);
+    with_queue(|q| q.header().lastQueueFillWarn = v);
 }
 fn QUEUE_BACKEND_PID(i: ProcNumber) -> i32 {
-    with_queue(|q| q.backend[i as usize].pid)
+    with_queue(|q| q[i].pid)
 }
 fn set_QUEUE_BACKEND_PID(i: ProcNumber, v: i32) {
-    with_queue(|q| q.backend[i as usize].pid = v);
+    with_queue(|q| q[i].pid = v);
 }
 fn QUEUE_BACKEND_DBOID(i: ProcNumber) -> Oid {
-    with_queue(|q| q.backend[i as usize].dboid)
+    with_queue(|q| q[i].dboid)
 }
 fn set_QUEUE_BACKEND_DBOID(i: ProcNumber, v: Oid) {
-    with_queue(|q| q.backend[i as usize].dboid = v);
+    with_queue(|q| q[i].dboid = v);
 }
 fn QUEUE_NEXT_LISTENER(i: ProcNumber) -> ProcNumber {
-    with_queue(|q| q.backend[i as usize].nextListener)
+    with_queue(|q| q[i].nextListener)
 }
 fn set_QUEUE_NEXT_LISTENER(i: ProcNumber, v: ProcNumber) {
-    with_queue(|q| q.backend[i as usize].nextListener = v);
+    with_queue(|q| q[i].nextListener = v);
 }
 fn QUEUE_BACKEND_POS(i: ProcNumber) -> QueuePosition {
-    with_queue(|q| q.backend[i as usize].pos)
+    with_queue(|q| q[i].pos)
 }
 fn set_QUEUE_BACKEND_POS(i: ProcNumber, v: QueuePosition) {
-    with_queue(|q| q.backend[i as usize].pos = v);
+    with_queue(|q| q[i].pos = v);
 }
 
 // ---------------------------------------------------------------------------
@@ -441,34 +506,41 @@ fn notify_buffers() -> i32 {
 pub fn AsyncShmemInit() -> PgResult<()> {
     let max_backends = init_seams_decls::max_backends::call() as usize;
 
-    // Create or attach to the AsyncQueueControl structure. Owned in-crate as the
-    // header + per-backend Vec; "first time through" iff not yet initialized.
-    let found = ASYNC_QUEUE_CONTROL.with(|c| c.borrow().is_some());
+    // Create or attach to the AsyncQueueControl structure.
+    //   size = mul_size(MaxBackends, sizeof(QueueBackendStatus));
+    //   size = add_size(size, offsetof(AsyncQueueControl, backend));
+    //   asyncQueueControl = ShmemInitStruct("Async Queue Control", size, &found);
+    //
+    // The struct (fixed header + `max_backends` `QueueBackendStatus` flexible
+    // array) is carved from the main MAP_SHARED segment, so the one physical
+    // struct backs every forked backend: a NOTIFY queued by one backend is seen
+    // by the listening backends, serialized by `NotifyQueueLock` as in C.
+    let mut size = max_backends
+        .checked_mul(core::mem::size_of::<QueueBackendStatus>())
+        .ok_or_else(size_overflow)?;
+    size = size
+        .checked_add(ASYNC_QUEUE_CONTROL_HEADER_SIZE)
+        .ok_or_else(size_overflow)?;
+    let (addr, found) = ipc_shmem_seams::shmem_init_struct::call("Async Queue Control", size)?;
+    let ptr = AsyncQueuePtr(addr);
+    ASYNC_QUEUE_CONTROL.with(|c| c.set(Some(ptr)));
 
     if !found {
         // First time through, so initialize it (async.c 515-530).
-        let mut backend: Vec<QueueBackendStatus> = Vec::new();
-        backend
-            .try_reserve_exact(max_backends)
-            .map_err(|_| oom("AsyncShmemInit"))?;
-        for _ in 0..max_backends {
-            backend.push(QueueBackendStatus {
-                pid: InvalidPid,
-                dboid: InvalidOid,
-                nextListener: INVALID_PROC_NUMBER,
-                pos: QueuePosition { page: 0, offset: 0 },
-            });
+        let q = AsyncQueueControlData { ptr };
+        let h = q.ptr.header();
+        SET_QUEUE_POS(&mut h.head, 0, 0);
+        SET_QUEUE_POS(&mut h.tail, 0, 0);
+        h.stopPage = 0;
+        h.firstListener = INVALID_PROC_NUMBER;
+        h.lastQueueFillWarn = 0;
+        for i in 0..max_backends {
+            let b = q.ptr.backend(i as ProcNumber);
+            b.pid = InvalidPid;
+            b.dboid = InvalidOid;
+            b.nextListener = INVALID_PROC_NUMBER;
+            SET_QUEUE_POS(&mut b.pos, 0, 0);
         }
-        let header = AsyncQueueControl {
-            head: QueuePosition { page: 0, offset: 0 },
-            tail: QueuePosition { page: 0, offset: 0 },
-            stopPage: 0,
-            firstListener: INVALID_PROC_NUMBER,
-            lastQueueFillWarn: 0,
-        };
-        ASYNC_QUEUE_CONTROL.with(|c| {
-            *c.borrow_mut() = Some(AsyncQueueControlData { header, backend });
-        });
     }
 
     // Set up SLRU management of the pg_notify data.

@@ -467,6 +467,17 @@ thread_local! {
     /// `struct Port *MyProcPort;`
     static MY_PROC_PORT: RefCell<Option<Box<Port>>> = const { RefCell::new(None) };
 
+    /// Raw pointer at the live `MyProcPort` while a [`WithMyProcPort`] closure is
+    /// running. C's `MyProcPort` is a plain global pointer that the interrupt
+    /// handlers (`ProcessNotifyInterrupt` → `pq_flush` → `socket_set_nonblocking`)
+    /// dereference even while `secure_read`/`secure_write` are mid-flight on the
+    /// same `Port` (the read is blocked in a WaitEventSet at that point, so it is
+    /// not actively touching the port). This port lives behind a `Box`, so its
+    /// heap address is stable; recording it here lets a re-entrant
+    /// `WithMyProcPort` reach the same `Port` instead of seeing the cell emptied
+    /// by the outer `take()`. Null when no closure is active.
+    static MY_PROC_PORT_ACTIVE: Cell<*mut Port> = const { Cell::new(core::ptr::null_mut()) };
+
     /// `struct Latch *MyLatch;` — the latch the current process should use
     /// for signal handling: a process-local latch when the process has no
     /// PGPROC entry, else `PGPROC->procLatch`. Thus it can always be used in
@@ -531,16 +542,53 @@ pub fn TakeMyProcPort() -> Option<Box<Port>> {
 }
 
 /// Run `f` against the live `MyProcPort` value (the C idiom of mutating
-/// through the pointer), if set. The value is taken out of the cell while
-/// `f` runs and put back afterwards, so no `RefCell` borrow is held across
-/// `f` — re-entrant `MyProcPort()`/`MyProcPortIsSet()` calls inside `f` see
-/// an unset global rather than panicking, and a `SetMyProcPort` inside `f`
-/// is overwritten when the borrowed value is restored.
+/// through the pointer), if set. The boxed value is taken out of the cell while
+/// `f` runs and put back afterwards, so no `RefCell` borrow is held across `f`.
+///
+/// While `f` runs, a raw pointer at the (heap-stable) boxed `Port` is recorded
+/// in [`MY_PROC_PORT_ACTIVE`]. This makes the accessor **re-entrant**: a nested
+/// `WithMyProcPort` — as happens when a notify/catchup interrupt fires inside
+/// the `secure_read`/`secure_write` WaitEventSet block and runs
+/// `pq_flush` → `socket_set_nonblocking` against the same `Port` — reaches the
+/// live port rather than seeing the cell emptied by the outer `take()`. This
+/// mirrors C, where `MyProcPort` is a plain global pointer dereferenced freely
+/// by the interrupt path while a blocking read is parked in WaitEventSetWait.
+///
+/// `MyProcPort()`/`MyProcPortIsSet()` (the clone/presence accessors) still see
+/// the cell as emptied during `f`, matching the prior behavior; only the
+/// in-place `WithMyProcPort` mutation path is re-entrant.
 pub fn WithMyProcPort<R>(f: impl FnOnce(&mut Port) -> R) -> Option<R> {
+    // Re-entrant case: an outer WithMyProcPort already holds the box out of the
+    // cell and published its address; reach the same live Port through it.
+    let active = MY_PROC_PORT_ACTIVE.with(Cell::get);
+    if !active.is_null() {
+        // SAFETY: `active` points at the boxed `Port` owned by the outer
+        // `WithMyProcPort` frame, which stays alive (and at this fixed heap
+        // address) for the whole duration of this nested call.
+        return Some(f(unsafe { &mut *active }));
+    }
+
     let mut port = MY_PROC_PORT.take()?;
+    let ptr: *mut Port = &mut *port;
+    MY_PROC_PORT_ACTIVE.with(|c| c.set(ptr));
+    // Clear the published pointer when this frame returns OR unwinds, so a later
+    // access never dereferences a stale/dropped `Box`.
+    let _guard = ActivePortGuard;
     let result = f(&mut port);
     MY_PROC_PORT.set(Some(port));
     Some(result)
+}
+
+/// Clears [`MY_PROC_PORT_ACTIVE`] when the outer `WithMyProcPort` frame exits
+/// (normal return or unwind), so the published raw pointer never outlives the
+/// boxed `Port` it addressed. (On unwind the boxed `Port` is lost exactly as the
+/// C `MyProcPort` global would be left dangling-but-unused after a FATAL; the
+/// process is tearing down.)
+struct ActivePortGuard;
+impl Drop for ActivePortGuard {
+    fn drop(&mut self) {
+        MY_PROC_PORT_ACTIVE.with(|c| c.set(core::ptr::null_mut()));
+    }
 }
 
 /// Returns the `MyLatch` handle (the C pointer copy), if set.
@@ -640,9 +688,17 @@ pub fn EndCriticalSection() {
 /// signature `fn(&mut dyn FnMut(Option<&mut Port>))` to the internal
 /// `WithMyProcPort` which provides `Option<R>` from `FnOnce`.
 pub fn with_my_proc_port_seam(f: &mut dyn FnMut(Option<&mut types_net::Port>)) {
-    if MyProcPortIsSet() {
-        WithMyProcPort(|port| f(Some(port)));
-    } else {
+    // Drive through `WithMyProcPort`, which is re-entrant: it reaches the live
+    // `Port` both when it sits in the cell (the common case) and when an outer
+    // `WithMyProcPort` frame currently holds it out and published its address
+    // (a notify/catchup interrupt firing inside `secure_read`'s WaitEventSet).
+    // Gating on `MyProcPortIsSet()` would wrongly take the `f(None)` branch in
+    // that nested case (the cell is emptied by the outer `take()`), which is the
+    // bug behind a spurious "there is no client connection" while delivering a
+    // cross-backend NOTIFY. `WithMyProcPort` returns `None` only when there is
+    // genuinely no port (neither in the cell nor published), matching C's
+    // `MyProcPort == NULL`.
+    if WithMyProcPort(|port| f(Some(port))).is_none() {
         f(None);
     }
 }

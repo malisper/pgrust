@@ -612,12 +612,15 @@ fn ready_state(mcx: Mcx<'_>, state: &mut LoopState) -> PgResult<()> {
             )?;
         }
     } else {
-        // Process incoming notifies (including self-notifies) so the client
-        // sees them before ReadyForQuery. notifyInterruptPending /
-        // ProcessNotifyInterrupt is the async-notify path (LISTEN/NOTIFY); not
-        // reached on the simple-SELECT target (no notifies pending). The
-        // notify owner is a separate unit; faithfully nothing to flush here.
+        // Process incoming notifies (including self-notifies), if any, and send
+        // relevant messages to the client.  Doing it here helps ensure stable
+        // behavior in tests: if any notifies were received during the
+        // just-finished transaction, they'll be seen by the client before
+        // ReadyForQuery is (postgres.c:4598-4607).
         //   if (notifyInterruptPending) ProcessNotifyInterrupt(false);
+        if backend_commands_async::notify_interrupt_pending() {
+            backend_commands_async::ProcessNotifyInterrupt(false)?;
+        }
 
         // Check if we need to report stats; arm IDLE_STATS_UPDATE_TIMEOUT if
         // pgstat_report_stat() asks us to retry later.
