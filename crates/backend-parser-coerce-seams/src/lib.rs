@@ -40,6 +40,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `find_coercion_pathway(targetTypeId, sourceTypeId, COERCION_PLPGSQL,
+    /// &funcid)` (parse_coerce.c): the pathway resolution plpgsql's
+    /// `get_cast_hashentry` uses (pl_exec.c) when it builds a cast expression
+    /// under `COERCION_PLPGSQL`. Unlike the implicit form, this accepts both
+    /// implicit- and assignment-level pg_cast entries (COERCION_PLPGSQL ranks
+    /// above COERCION_ASSIGNMENT), so a function-based ASSIGNMENT cast resolves
+    /// to `Func` here and the cast function (e.g. a SQL-function cast) is run,
+    /// rather than being bypassed by a plain I/O coercion. `Err` carries
+    /// catcache-path `ereport(ERROR)`s.
+    pub fn find_coercion_pathway_plpgsql(
+        target_type_id: Oid,
+        source_type_id: Oid,
+    ) -> PgResult<(CoercionPathType, Oid)>
+);
+
+seam_core::seam!(
     /// `IsBinaryCoercible(srctype, targettype)` (parse_coerce.c): whether
     /// `srctype` is binary-coercible to `targettype` (identical types, an
     /// existing binary-coercible pg_cast entry, or `targettype` being a

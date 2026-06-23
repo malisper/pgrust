@@ -2783,6 +2783,7 @@ fn get_range_multirange(range_oid: Oid) -> PgResult<Oid> {
 pub fn init_seams() {
     use backend_parser_coerce_seams as s;
     s::find_coercion_pathway_implicit::set(seam_find_coercion_pathway_implicit);
+    s::find_coercion_pathway_plpgsql::set(seam_find_coercion_pathway_plpgsql);
     s::is_binary_coercible::set(IsBinaryCoercible);
     s::enforce_generic_type_consistency::set(seam_enforce_generic_type_consistency);
     s::coerce_to_boolean::set(seam_coerce_to_boolean);
@@ -2861,6 +2862,16 @@ fn seam_find_coercion_pathway_implicit(
     source_type_id: Oid,
 ) -> PgResult<(CoercionPathType, Oid)> {
     find_coercion_pathway(target_type_id, source_type_id, CoercionContext::COERCION_IMPLICIT)
+}
+
+/// `find_coercion_pathway(target, source, COERCION_PLPGSQL, &funcid)` — the
+/// pathway plpgsql's `get_cast_hashentry` resolves (pl_exec.c). Accepts
+/// implicit- and assignment-level pg_cast entries.
+fn seam_find_coercion_pathway_plpgsql(
+    target_type_id: Oid,
+    source_type_id: Oid,
+) -> PgResult<(CoercionPathType, Oid)> {
+    find_coercion_pathway(target_type_id, source_type_id, CoercionContext::COERCION_PLPGSQL)
 }
 
 fn seam_enforce_generic_type_consistency(

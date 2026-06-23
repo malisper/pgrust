@@ -75,6 +75,11 @@ backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache
 # (output via source typoutput + input via target typinput).
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 
+# find_coercion_pathway under COERCION_PLPGSQL for exec_cast_value: resolve a
+# function-based cast (e.g. a SQL-function cast) so the cast function actually
+# runs, instead of a plain I/O coercion (pl_exec.c get_cast_hashentry).
+backend-parser-coerce-seams = { path = "../backend-parser-coerce-seams" }
+
 # The elog report cycle (ereport / ThrowErrorData) for the RAISE statement: a
 # NOTICE/WARNING/INFO/LOG is reported to the client; an ERROR is thrown.
 backend-utils-error = { path = "../backend-utils-error" }

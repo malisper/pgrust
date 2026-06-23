@@ -14981,6 +14981,7 @@ dependencies = [
  "backend-commands-functioncmds-seams",
  "backend-executor-execTuples",
  "backend-executor-spi",
+ "backend-parser-coerce-seams",
  "backend-pl-plpgsql-comp",
  "backend-pl-plpgsql-exec",
  "backend-pl-plpgsql-exec-seams",

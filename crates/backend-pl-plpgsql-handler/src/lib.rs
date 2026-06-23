@@ -1045,18 +1045,101 @@ pub fn init_seams() {
             let cxt = mcx::MemoryContext::new("PL/pgSQL exec_cast_value");
             let mcx = cxt.mcx();
 
-            // Render the source value to its text representation. A by-reference
-            // source carries its image in `value_byref` (the bare `value` word is
-            // `0` then); rebuild a `Datum::ByRef` so the output function reads the
-            // real bytes. A by-value source is the bare scalar word.
+            // Rebuild the canonical source `Datum`: a by-reference source carries
+            // its image in `value_byref` (the bare `value` word is `0` then); a
+            // by-value source is the bare scalar word.
+            use types_tuple::backend_access_common_heaptuple::Datum as CastDatum;
+            let src_datum = match &value_byref {
+                Some(image) => CastDatum::ByRef(mcx::slice_in(mcx, image)?),
+                None => CastDatum::from_usize(value),
+            };
+
+            // get_cast_hashentry / do_cast_value (pl_exec.c): resolve the real
+            // coercion pathway under COERCION_PLPGSQL. A function-based cast
+            // (COERCION_PATH_FUNC) must run its cast function — e.g. a
+            // SQL-function cast like `sql_to_date(int)` — rather than be bypassed
+            // by a plain I/O coercion. The C path builds a FuncExpr over the
+            // value and ExecEvalExpr's it; the owned model invokes the cast
+            // function directly through fmgr (which enters fmgr_sql for SQL
+            // casts, producing the `SQL function "..."` error context). Only the
+            // function and binary-coercible (relabel) cases are handled here;
+            // everything else (no path / I/O coercion / array coercion) falls
+            // through to the historical I/O coercion below.
+            {
+                let (pathtype, funcid) =
+                    backend_parser_coerce_seams::find_coercion_pathway_plpgsql::call(
+                        reqtype, valtype,
+                    )?;
+                match pathtype {
+                    backend_parser_coerce_seams::CoercionPathType::Func => {
+                        // The cast function takes (value), (value, typmod), or
+                        // (value, typmod, isExplicit). COERCION_PLPGSQL builds an
+                        // implicit-format cast, so isExplicit is false.
+                        let finfo =
+                            backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, funcid)?;
+                        let result = if finfo.fn_nargs >= 3 {
+                            backend_utils_fmgr_fmgr_seams::function_call3_coll_datum::call(
+                                mcx,
+                                funcid,
+                                src_datum.clone(),
+                                CastDatum::from_i32(reqtypmod),
+                                CastDatum::from_i32(0), // isExplicit = false
+                            )?
+                        } else if finfo.fn_nargs == 2 {
+                            backend_utils_fmgr_fmgr_seams::function_call2_coll_datum::call(
+                                mcx,
+                                funcid,
+                                types_core::INVALID_OID,
+                                src_datum.clone(),
+                                CastDatum::from_i32(reqtypmod),
+                            )?
+                        } else {
+                            backend_utils_fmgr_fmgr_seams::function_call1_coll_datum::call(
+                                mcx,
+                                funcid,
+                                types_core::INVALID_OID,
+                                src_datum.clone(),
+                            )?
+                        };
+                        let out = match result {
+                            CastDatum::ByVal(w) => {
+                                CastValueResult { value: w, isnull: false, byref: None }
+                            }
+                            CastDatum::ByRef(b) => CastValueResult {
+                                value: 0,
+                                isnull: false,
+                                byref: Some(b.as_slice().to_vec()),
+                            },
+                            CastDatum::Cstring(ref sct) => CastValueResult {
+                                value: 0,
+                                isnull: false,
+                                byref: Some(sct.as_bytes().to_vec()),
+                            },
+                            other => CastValueResult {
+                                value: 0,
+                                isnull: false,
+                                byref: Some(other.as_varlena_bytes().into_owned()),
+                            },
+                        };
+                        return Ok(out);
+                    }
+                    backend_parser_coerce_seams::CoercionPathType::Relabeltype => {
+                        // Binary-coercible: no function, the value passes through
+                        // unchanged (the RelabelType no-op in get_cast_hashentry).
+                        return Ok(CastValueResult { value, isnull: false, byref: value_byref });
+                    }
+                    // None / Coerceviaio / Arraycoerce: fall through to the
+                    // historical I/O coercion below (faithful for I/O casts, and
+                    // plpgsql's documented fallback when no assignment cast path
+                    // exists).
+                    _ => {}
+                }
+            }
+
+            // Render the source value to its text representation, then read it
+            // back at the target type (the I/O coercion fallback).
             let (typoutput, _typisvarlena) =
                 backend_utils_cache_lsyscache_seams::get_type_output_info::call(valtype)?;
-            let src_datum = match value_byref {
-                Some(image) => types_tuple::backend_access_common_heaptuple::Datum::ByRef(
-                    mcx::slice_in(mcx, &image)?,
-                ),
-                None => types_tuple::backend_access_common_heaptuple::Datum::from_usize(value),
-            };
             let text = backend_utils_fmgr_fmgr_seams::oid_output_function_call::call(
                 mcx, typoutput, &src_datum,
             )?;
