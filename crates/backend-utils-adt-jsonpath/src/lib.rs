@@ -268,18 +268,39 @@ fn varsize(input: &[u8]) -> usize {
     input.len()
 }
 
-/// `(JsonPath *)->header` — read the version/flags word from a flattened
-/// jsonpath varlena.
+/// `VARDATA_ANY` offset for an inline (non-compressed, non-external) varlena
+/// image: a short (1-byte, low-bit-set) header skips ONE byte, an ordinary
+/// 4-byte header skips `VARHDRSZ`. A stored `jsonpath` arrives short-headed once
+/// `SHORT_VARLENA_PACKING` is on (the version word + nodes are small for most
+/// expressions); a fixed 4-byte strip would land the header read 3 bytes into
+/// the version word. No-op while the flag is off (every stored value is 4B).
+///
+/// Note `0x01` (the lone short-header byte that would otherwise have low bit set
+/// for a zero-length value) is treated as a normal 4B header, mirroring the
+/// detoast / `vardata_any` helpers elsewhere in the tree.
 #[inline]
-fn jsonpath_header(input: &[u8]) -> u32 {
-    u32::from_ne_bytes([input[4], input[5], input[6], input[7]])
+fn varlena_data_off(input: &[u8]) -> usize {
+    match input.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => 1,
+        _ => VARHDRSZ,
+    }
 }
 
-/// `js->data` — the flattened-node region of a jsonpath varlena (after the
-/// 8-byte `JSONPATH_HDRSZ`).
+/// `(JsonPath *)->header` — read the version/flags word from a flattened
+/// jsonpath varlena. The version word immediately follows the varlena length
+/// header, whose size depends on the on-disk form (1-byte short or 4-byte long).
+#[inline]
+fn jsonpath_header(input: &[u8]) -> u32 {
+    let off = varlena_data_off(input);
+    u32::from_ne_bytes([input[off], input[off + 1], input[off + 2], input[off + 3]])
+}
+
+/// `js->data` — the flattened-node region of a jsonpath varlena: the bytes after
+/// the varlena length header (1B short / 4B long) plus the 4-byte version word.
 #[inline]
 fn jsonpath_data(input: &[u8]) -> &[u8] {
-    &input[JSONPATH_HDRSZ..]
+    let off = varlena_data_off(input) + 4;
+    &input[off..]
 }
 
 /// C: `(jp->header & JSONPATH_LAX) != 0` — whether the flattened jsonpath
