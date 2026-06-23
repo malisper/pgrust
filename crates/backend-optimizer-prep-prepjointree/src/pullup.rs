@@ -727,6 +727,76 @@ fn clone_jointree_shape<'mcx>(mcx: Mcx<'mcx>, n: &Node<'mcx>) -> PgResult<Node<'
     }
 }
 
+/// Clone a JoinExpr preserving its `quals` (and the larg/rarg subtree quals).
+/// Unlike [`clone_joinexpr_shape`], which drops quals because its consumers
+/// (`get_relids_in_jointree`) only need the relid structure, this is for
+/// `jointree_contains_lateral_outer_refs`, which inspects the quals to detect
+/// upper lateral references.
+fn clone_joinexpr_with_quals<'mcx>(
+    mcx: Mcx<'mcx>,
+    j: &types_nodes::rawnodes::JoinExpr<'mcx>,
+) -> PgResult<types_nodes::rawnodes::JoinExpr<'mcx>> {
+    let larg = match j.larg.as_deref() {
+        Some(n) => Some(alloc_in(mcx, clone_jointree_with_quals(mcx, n)?)?),
+        None => None,
+    };
+    let rarg = match j.rarg.as_deref() {
+        Some(n) => Some(alloc_in(mcx, clone_jointree_with_quals(mcx, n)?)?),
+        None => None,
+    };
+    let quals = match j.quals.as_deref() {
+        Some(q) => Some(alloc_in(mcx, q.clone_in(mcx)?)?),
+        None => None,
+    };
+    Ok(types_nodes::rawnodes::JoinExpr {
+        jointype: j.jointype,
+        isNatural: j.isNatural,
+        larg,
+        rarg,
+        usingClause: PgVec::new_in(mcx),
+        join_using_alias: None,
+        quals,
+        alias: None,
+        rtindex: j.rtindex,
+    })
+}
+
+/// Clone a jointree `Node` (RangeTblRef/FromExpr/JoinExpr) preserving quals —
+/// see [`clone_joinexpr_with_quals`].
+fn clone_jointree_with_quals<'mcx>(mcx: Mcx<'mcx>, n: &Node<'mcx>) -> PgResult<Node<'mcx>> {
+    match n.node_tag() {
+        ntag::T_RangeTblRef => Ok(Node::mk_range_tbl_ref(mcx, types_nodes::rawnodes::RangeTblRef {
+            rtindex: n.expect_rangetblref().rtindex,
+        })?),
+        ntag::T_JoinExpr => Ok(Node::mk_join_expr(
+            mcx,
+            clone_joinexpr_with_quals(mcx, n.expect_joinexpr())?,
+        )?),
+        ntag::T_FromExpr => Ok(Node::mk_from_expr(
+            mcx,
+            clone_fromexpr_with_quals(mcx, n.expect_fromexpr())?,
+        )?),
+        _ => Err(types_error::PgError::error("unrecognized node type")),
+    }
+}
+
+/// Clone a FromExpr preserving its `quals` and children's quals — see
+/// [`clone_joinexpr_with_quals`].
+fn clone_fromexpr_with_quals<'mcx>(
+    mcx: Mcx<'mcx>,
+    f: &FromExpr<'mcx>,
+) -> PgResult<FromExpr<'mcx>> {
+    let mut fromlist: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
+    for l in f.fromlist.iter() {
+        fromlist.push(alloc_in(mcx, clone_jointree_with_quals(mcx, l)?)?);
+    }
+    let quals = match f.quals.as_deref() {
+        Some(q) => Some(alloc_in(mcx, q.clone_in(mcx)?)?),
+        None => None,
+    };
+    Ok(FromExpr { fromlist, quals })
+}
+
 /// A dummy placeholder jointree node used while moving a node out of a `&mut`
 /// slot (the slot is always overwritten before being read again).
 #[inline]
@@ -2276,7 +2346,16 @@ fn is_simple_subquery<'mcx>(
             safe_upper_varnos = None; // doesn't matter
         }
 
-        let sub_jt = Node::mk_from_expr(mcx, clone_fromexpr_shape(
+        // `jointree_contains_lateral_outer_refs` inspects the FromExpr/JoinExpr
+        // *quals* (via `pull_varnos_of_level(quals, 1)`), so unlike the
+        // `get_relids_in_jointree` callers we MUST preserve the quals when
+        // cloning the subquery jointree. `clone_fromexpr_shape` (used elsewhere
+        // only for relid extraction) strips quals to None, which would make the
+        // lateral-ref check always see no level-1 Vars and wrongly allow pullup
+        // of a LATERAL subquery whose JOIN/ON quals reference the parent (e.g.
+        // `int4_tbl a, lateral (... b left join c on a.f1 = q2)`), tripping
+        // `distribute_qual_to_rels`'s `Assert(sjinfo == NULL)` later.
+        let sub_jt = Node::mk_from_expr(mcx, clone_fromexpr_with_quals(
             mcx,
             subquery.jointree.as_deref().expect("subquery has no jointree"),
         )?)?;

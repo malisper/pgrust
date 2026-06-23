@@ -623,9 +623,30 @@ pub(crate) fn transformReturningClause<'mcx>(
 
 /// Set the target NSItem's `p_lateral_only`/`p_lateral_ok` flags (the C code
 /// mutates these through the `nsitem = pstate->p_target_nsitem` alias).
+///
+/// In C, `pstate->p_target_nsitem` and the namespace entry that `setTargetTable`
+/// added via `addNSItemToQuery` are the *same* `ParseNamespaceItem` pointer
+/// (parse_clause.c:216 + :233), so flipping the lateral flags here is
+/// immediately visible to `colNameToVar`'s "ignore lateral-only items" skip when
+/// it walks `pstate->p_namespace`. This repo stores `p_target_nsitem` as a clone
+/// distinct from the namespace entry, so we must mutate *both*: the
+/// `p_target_nsitem` snapshot (read later by addNSItemForReturning) and the live
+/// `p_namespace` entry for the same `p_rtindex` (the one `colNameToVar`
+/// consults). Without the namespace update the target's columns stay visible to
+/// FROM/USING subqueries, so e.g. `UPDATE xx1 ... FROM (SELECT ... WHERE f1 = x1)`
+/// wrongly resolves `x1` to the target instead of erroring as in C.
 fn set_target_lateral(pstate: &mut ParseState<'_>, lateral_only: bool, lateral_ok: bool) {
+    let target_rtindex = pstate.p_target_nsitem.as_ref().map(|ns| ns.p_rtindex);
     if let Some(ns) = pstate.p_target_nsitem.as_mut() {
         ns.p_lateral_only = lateral_only;
         ns.p_lateral_ok = lateral_ok;
+    }
+    if let Some(rti) = target_rtindex {
+        for ns in pstate.p_namespace.iter_mut() {
+            if ns.p_rtindex == rti {
+                ns.p_lateral_only = lateral_only;
+                ns.p_lateral_ok = lateral_ok;
+            }
+        }
     }
 }
