@@ -2650,19 +2650,19 @@ pub fn build_empty_metapage<'mcx>(index: &Relation<'mcx>, allequalimage: bool) -
 
 /// `PredicateLockPageCombine(rel, oldblkno, newblkno)` (predicate.c) — transfer
 /// SIREAD (predicate) locks from a page about to be unlinked onto its right
-/// sibling. SSI is not plumbed into this layer: like the sibling stubs
-/// `predicate_lock_page_split` / `predicate_lock_relation` / `predicate_lock_page`
-/// (insert.rs / search.rs), this is a behaviour-preserving no-op for the
-/// non-serializable common case — under non-SERIALIZABLE isolation
-/// `PredicateLockPageCombine` does nothing (it early-returns when SSI is not in
-/// use), so page deletion (`_bt_mark_page_halfdead`) proceeds unchanged.
+/// sibling, so a serializable reader that locked the old page still conflicts
+/// with an insert routed to the surviving sibling. Inert outside SERIALIZABLE
+/// isolation (the engine early-returns when SSI is not in use), so page deletion
+/// (`_bt_mark_page_halfdead`) proceeds unchanged on the common path.
 #[inline]
 fn predicate_lock_page_combine<'mcx>(
-    _rel: &Relation<'mcx>,
-    _oldblkno: BlockNumber,
-    _newblkno: BlockNumber,
+    rel: &Relation<'mcx>,
+    oldblkno: BlockNumber,
+    newblkno: BlockNumber,
 ) -> PgResult<()> {
-    Ok(())
+    backend_storage_lmgr_predicate_seams::predicate_lock_page_combine::call(
+        rel.rd_id, oldblkno, newblkno,
+    )
 }
 
 // ---------------------------------------------------------------------------

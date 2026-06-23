@@ -73,17 +73,32 @@ thread_local! {
     /// `static SlruCtlData SerialSlruCtlData;` — the owned SLRU control block
     /// (the repo's SimpleLruInit returns an owned value, not a shmem pointer).
     pub static SERIAL_SLRU: RefCell<Option<SlruCtlData>> = const { RefCell::new(None) };
-    /// `static SerialControl serialControl;` — the SerialControlData (shmem
-    /// struct; here a backend-local copy attached at PredicateLockShmemInit).
-    pub static SERIAL_CONTROL: RefCell<SerialControlData> = const {
-        RefCell::new(SerialControlData {
-            headPage: -1,
-            headXid: 0,
-            tailXid: 0,
-        })
-    };
+    /// `static SerialControl serialControl;` (predicate.c:354) — a pointer to the
+    /// `SerialControlData` struct in *shared* memory. C's `serialControl` is a
+    /// `SerialControlData *` it stores from `ShmemInitStruct`; mirror that here.
+    /// The pointer value itself is process-local (each forked backend caches its
+    /// own copy of the shmem address, which is identical across the fork-COW
+    /// mapping), but it dereferences to the ONE shared struct — so `headPage`/
+    /// `headXid`/`tailXid` (and therefore the cross-backend summarization that
+    /// reclaims SERIALIZABLEXACT slots) are shared, exactly as in C. A per-backend
+    /// by-value copy (the previous bug) stalled summarization and exhausted the
+    /// free-list ("out of shared memory") under heavy predicate-lock load.
+    /// All accesses are serialized by `SerialControlLock`.
+    pub static SERIAL_CONTROL: Cell<*mut SerialControlData> =
+        const { Cell::new(core::ptr::null_mut()) };
     /// Whether SERIAL_CONTROL was already found in shmem (== IsUnderPostmaster).
     pub static SERIAL_CONTROL_FOUND: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Dereference the shared `SerialControlData` pointer (`*serialControl` in C).
+/// The caller must hold `SerialControlLock` for the access mode. Panics if the
+/// pointer was never installed (a `SerialInit` ordering bug, not a runtime
+/// condition).
+#[inline]
+fn serial_control<'a>() -> &'a mut SerialControlData {
+    let p = SERIAL_CONTROL.with(|c| c.get());
+    debug_assert!(!p.is_null(), "serialControl accessed before SerialInit");
+    unsafe { &mut *p }
 }
 
 /// `SerialValue(slotno, xid) = value` — write the 8-byte SerCommitSeqNo at the
@@ -159,23 +174,25 @@ pub fn SerialInit() -> PgResult<()> {
 
     SERIAL_SLRU.with(|s| *s.borrow_mut() = Some(ctl));
 
-    // Create or attach to the SerialControl structure.
-    let (_ptr, found) = ShmemInitStruct(
+    // Create or attach to the SerialControl structure. C:
+    //   serialControl = (SerialControl) ShmemInitStruct("SerialControlData",
+    //                                       sizeof(SerialControlData), &found);
+    // Store the SHARED pointer so every backend reads/writes the one struct.
+    let (ptr, found) = ShmemInitStruct(
         "SerialControlData",
         core::mem::size_of::<SerialControlData>(),
     )?;
+    SERIAL_CONTROL.with(|c| c.set(ptr.as_ptr() as *mut SerialControlData));
     SERIAL_CONTROL_FOUND.with(|f| f.set(found));
 
     if !found {
         // Set control information to reflect empty SLRU.
         let lock = SerialControlLock();
         LWLockAcquire(lock, LW_EXCLUSIVE, my_proc_number())?;
-        SERIAL_CONTROL.with(|c| {
-            let mut c = c.borrow_mut();
-            c.headPage = -1;
-            c.headXid = InvalidTransactionId;
-            c.tailXid = InvalidTransactionId;
-        });
+        let c = serial_control();
+        c.headPage = -1;
+        c.headXid = InvalidTransactionId;
+        c.tailXid = InvalidTransactionId;
         LWLockRelease(lock)?;
     }
     Ok(())
@@ -191,13 +208,13 @@ pub fn SerialAdd(xid: TransactionId, minConflictCommitSeqNo: SerCommitSeqNo) -> 
     let lock = SerialControlLock();
     LWLockAcquire(lock, LW_EXCLUSIVE, procno)?;
 
-    let tailXid = SERIAL_CONTROL.with(|c| c.borrow().tailXid);
+    let tailXid = serial_control().tailXid;
     if !TransactionIdIsValid(tailXid) || TransactionIdPrecedes(xid, tailXid) {
         LWLockRelease(lock)?;
         return Ok(());
     }
 
-    let headPage = SERIAL_CONTROL.with(|c| c.borrow().headPage);
+    let headPage = serial_control().headPage;
     let mut firstZeroPage;
     let isNewPage;
     if headPage < 0 {
@@ -208,15 +225,15 @@ pub fn SerialAdd(xid: TransactionId, minConflictCommitSeqNo: SerCommitSeqNo) -> 
         isNewPage = SerialPagePrecedesLogically(headPage, targetPage);
     }
 
-    SERIAL_CONTROL.with(|c| {
-        let mut c = c.borrow_mut();
+    {
+        let c = serial_control();
         if !TransactionIdIsValid(c.headXid) || TransactionIdFollows(xid, c.headXid) {
             c.headXid = xid;
         }
         if isNewPage {
             c.headPage = targetPage;
         }
-    });
+    }
 
     SERIAL_SLRU.with(|s| -> PgResult<()> {
         let mut s = s.borrow_mut();
@@ -261,10 +278,10 @@ pub fn SerialGetMinConflictCommitSeqNo(xid: TransactionId) -> PgResult<SerCommit
 
     let lock = SerialControlLock();
     LWLockAcquire(lock, LW_SHARED, procno)?;
-    let (headXid, tailXid) = SERIAL_CONTROL.with(|c| {
-        let c = c.borrow();
+    let (headXid, tailXid) = {
+        let c = serial_control();
         (c.headXid, c.tailXid)
-    });
+    };
     LWLockRelease(lock)?;
 
     if !TransactionIdIsValid(headXid) {
@@ -293,32 +310,28 @@ pub fn SerialSetActiveSerXmin(xid: TransactionId) -> PgResult<()> {
     LWLockAcquire(lock, LW_EXCLUSIVE, my_proc_number())?;
 
     if !TransactionIdIsValid(xid) {
-        SERIAL_CONTROL.with(|c| {
-            let mut c = c.borrow_mut();
-            c.tailXid = InvalidTransactionId;
-            c.headXid = InvalidTransactionId;
-        });
+        let c = serial_control();
+        c.tailXid = InvalidTransactionId;
+        c.headXid = InvalidTransactionId;
         LWLockRelease(lock)?;
         return Ok(());
     }
 
     if recovery_in_progress() {
-        SERIAL_CONTROL.with(|c| {
-            let mut c = c.borrow_mut();
-            debug_assert!(c.headPage < 0);
-            if !TransactionIdIsValid(c.tailXid) || TransactionIdPrecedes(xid, c.tailXid) {
-                c.tailXid = xid;
-            }
-        });
+        let c = serial_control();
+        debug_assert!(c.headPage < 0);
+        if !TransactionIdIsValid(c.tailXid) || TransactionIdPrecedes(xid, c.tailXid) {
+            c.tailXid = xid;
+        }
         LWLockRelease(lock)?;
         return Ok(());
     }
 
-    SERIAL_CONTROL.with(|c| {
-        let mut c = c.borrow_mut();
+    {
+        let c = serial_control();
         debug_assert!(!TransactionIdIsValid(c.tailXid) || TransactionIdFollows(xid, c.tailXid));
         c.tailXid = xid;
-    });
+    }
 
     LWLockRelease(lock)?;
     Ok(())
@@ -330,13 +343,13 @@ pub fn CheckPointPredicate() -> PgResult<()> {
     let lock = SerialControlLock();
     LWLockAcquire(lock, LW_EXCLUSIVE, procno)?;
 
-    let headPage = SERIAL_CONTROL.with(|c| c.borrow().headPage);
+    let headPage = serial_control().headPage;
     if headPage < 0 {
         LWLockRelease(lock)?;
         return Ok(());
     }
 
-    let tailXid = SERIAL_CONTROL.with(|c| c.borrow().tailXid);
+    let tailXid = serial_control().tailXid;
     let truncateCutoffPage;
     if TransactionIdIsValid(tailXid) {
         let tailPage = SerialPage(tailXid);
@@ -347,7 +360,7 @@ pub fn CheckPointPredicate() -> PgResult<()> {
         }
     } else {
         truncateCutoffPage = headPage;
-        SERIAL_CONTROL.with(|c| c.borrow_mut().headPage = -1);
+        serial_control().headPage = -1;
     }
 
     LWLockRelease(lock)?;

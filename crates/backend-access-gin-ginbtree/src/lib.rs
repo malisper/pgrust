@@ -286,6 +286,8 @@ pub fn ginFindLeafPage<'mcx>(
         // CheckForSerializableConflictIn(btree->index, NULL, btree->rootBlkno)
         backend_storage_lmgr_predicate_seams::check_for_serializable_conflict_in::call(
             btree.index,
+            None,
+            btree.rootBlkno,
         )?;
     }
 

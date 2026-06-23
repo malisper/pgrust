@@ -619,6 +619,16 @@ fn sync_in(scan: &mut IndexScanDescData<'_>) {
     // AM tail via `bt_resolve_parallel_scan(base)` (== `OffsetToPointer(base,
     // ps_offset_am)`), so carry the chunk base address as the `u64` handle.
     let parallel_base = scan.parallel_scan.as_ref().map(|h| h.base_addr() as u64);
+    // `scan->xs_snapshot` mirrored onto the opaque for SSI predicate locking.
+    // Only an MVCC snapshot can drive predicate locks (`IsMVCCSnapshot` gate in
+    // `SerializationNeededForRead`); a non-MVCC scan snapshot (CLUSTER/REINDEX)
+    // stays `None`, keeping the predicate-lock calls a no-op. The clone is once
+    // per `amgettuple`/`amgetbitmap` driver entry, not per page.
+    let pred_snapshot = if snap_valid {
+        scan.xs_snapshot.as_ref().map(|s| std::rc::Rc::new(s.clone()))
+    } else {
+        None
+    };
     let n = nbt(scan);
     n.kill_prior_tuple = kill;
     n.xs_want_itup = want_itup;
@@ -628,6 +638,7 @@ fn sync_in(scan: &mut IndexScanDescData<'_>) {
     // Also mirror onto the btree-private opaque so the nbtree-core search loop
     // (which carries only `(rel, &mut so, dir)`) can drive the parallel seize.
     n.opaque.parallel_scan = parallel_base;
+    n.opaque.predicate_snapshot = pred_snapshot;
 }
 
 /// `RelationGetIndexScan(indexRelation, nkeys, norderbys)` (genam.c) — allocate

@@ -669,15 +669,37 @@ fn relation_set_target_block(_rel: &Relation, _blkno: BlockNumber) {}
 
 // --- SSI / speculative-insert / predicate-locking boundaries. --------------
 
-/// `CheckForSerializableConflictIn(rel, NULL, blkno)` — SSI is not plumbed to
-/// this layer (mirrors `search.rs`'s predicate-lock no-ops). Behaviour-preserving
-/// for the non-serializable common case.
+/// `CheckForSerializableConflictIn(rel, NULL, blkno)` (predicate.c) — the
+/// write-side rw-conflict check `_bt_doinsert`/`_bt_check_unique` perform
+/// against the predicate (SIREAD) locks a concurrent serializable reader holds
+/// on the leaf page (or the whole relation). A conflict raises the
+/// serialization-failure `ereport(ERROR)` (carried on `Err`); under any
+/// non-serializable isolation the engine short-circuits to a no-op (the
+/// `MySerializableXact == InvalidSerializableXact` / `SerializationNeededForWrite`
+/// gates), so the common path is untouched.
 #[inline]
-fn check_for_serializable_conflict_in<'mcx>(_rel: &Relation<'mcx>, _blkno: BlockNumber) {}
+fn check_for_serializable_conflict_in<'mcx>(
+    rel: &Relation<'mcx>,
+    blkno: BlockNumber,
+) -> PgResult<()> {
+    backend_storage_lmgr_predicate_seams::check_for_serializable_conflict_in::call(
+        rel.rd_id, None, blkno,
+    )
+}
 
-/// `PredicateLockPageSplit(rel, lblkno, rblkno)` — SSI not plumbed here.
+/// `PredicateLockPageSplit(rel, lblkno, rblkno)` (predicate.c) — copy the
+/// SIREAD predicate locks from the original leaf page onto the new right
+/// sibling when a leaf splits, so a serializable reader that locked the old
+/// page still conflicts with an insert routed to the new page. No-op under
+/// non-serializable isolation (engine-side gate).
 #[inline]
-fn predicate_lock_page_split<'mcx>(_rel: &Relation<'mcx>, _l: BlockNumber, _r: BlockNumber) {}
+fn predicate_lock_page_split<'mcx>(
+    rel: &Relation<'mcx>,
+    l: BlockNumber,
+    r: BlockNumber,
+) -> PgResult<()> {
+    backend_storage_lmgr_predicate_seams::predicate_lock_page_split::call(rel.rd_id, l, r)
+}
 
 /// `CHECK_FOR_INTERRUPTS()` — process-global; no-op at this layer (loops remain
 /// bounded by index size).
@@ -812,12 +834,14 @@ fn _bt_doinsert_inner<'mcx>(
 
         if check_unique != IndexUniqueCheck::Existing {
             /*
-             * Predicate-locking conflict check (SSI; no-op at this layer).
+             * Predicate-locking conflict check (SSI). Reports an rw-conflict-in
+             * against any SIREAD lock a concurrent serializable reader holds on
+             * this leaf page; a no-op outside SERIALIZABLE isolation.
              */
             check_for_serializable_conflict_in(
                 rel,
                 bufmgr::buffer_get_block_number::call(insertstate.buf),
-            );
+            )?;
 
             /* Do the insertion (reusing cached binary search bounds). */
             let newitemoff = _bt_findinsertloc(
@@ -1123,7 +1147,7 @@ fn _bt_check_unique<'mcx>(
                      */
                     let conflict_blkno =
                         bufmgr::buffer_get_block_number::call(insertstate.buf);
-                    check_for_serializable_conflict_in(rel, conflict_blkno);
+                    check_for_serializable_conflict_in(rel, conflict_blkno)?;
 
                     /*
                      * Definite conflict. Release the buffer locks we hold before
@@ -1628,7 +1652,7 @@ fn _bt_insertonpg<'mcx>(
             rel,
             bufmgr::buffer_get_block_number::call(buf),
             bufmgr::buffer_get_block_number::call(rbuf),
-        );
+        )?;
 
         /* Ready to do the parent insertion. */
         _bt_insert_parent(mcx, rel, heaprel, buf, rbuf, stack, isroot, isonly)?;

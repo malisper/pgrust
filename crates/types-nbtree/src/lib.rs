@@ -691,6 +691,16 @@ pub struct BTScanOpaqueData<'mcx> {
     /// (mirroring nbtsearch.c's `scan->parallel_scan != NULL` branches).
     pub parallel_scan: Option<u64>,
 
+    /// `scan->xs_snapshot` — the scan's MVCC snapshot, carried for SSI
+    /// predicate locking (`PredicateLockRelation`/`PredicateLockPage`). C's
+    /// `_bt_first`/`_bt_readnextpage`/`_bt_endpoint` reach `scan->xs_snapshot`
+    /// directly; the `bt_first`/`bt_next` seams here carry only
+    /// `(rel, &mut so, dir)`, so the AM driver mirrors the snapshot onto the
+    /// opaque (via `sync_in`) before each call, the same pattern as
+    /// `ignore_killed_tuples`/`parallel_scan`. `None` outside a snapshot-bearing
+    /// scan; predicate locking is a no-op then.
+    pub predicate_snapshot: Option<std::rc::Rc<types_snapshot::SnapshotData>>,
+
     /// itemIndex, or -1 if not valid
     pub markItemIndex: i32,
 
@@ -733,6 +743,7 @@ impl<'mcx> BTScanOpaqueData<'mcx> {
             dropPin: false,
             ignore_killed_tuples: false,
             parallel_scan: None,
+            predicate_snapshot: None,
             markItemIndex: -1,
             nsearches: 0,
             currTuples: None,

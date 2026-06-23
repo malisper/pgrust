@@ -2583,9 +2583,20 @@ pub fn CheckForSerializableConflictOut(
             return Ok(());
         }
 
-        let r = FlagRWConflict(mysx, sxact);
+        // C (predicate.c:4157-4158): FlagRWConflict() then
+        // LWLockRelease(SerializableXactHashLock). In C, FlagRWConflict() is
+        // `void` and its serialization-failure path `ereport(ERROR)`s — a
+        // longjmp that skips the line-4158 release; that release ran the
+        // lock-release-before-ereport itself inside
+        // OnConflict_CheckForSerializationFailure. Rust's `?` is NOT a longjmp,
+        // so propagate the Err immediately (the callee already released the lock
+        // on its failure path); the release below then runs ONLY on the Ok path,
+        // where the lock is still held. (The previous unconditional release
+        // double-freed the lock on the Err path, masking the real serialization
+        // failure with "lock SerializableXactHash is not held".)
+        FlagRWConflict(mysx, sxact)?;
         LWLockRelease(SerializableXactHashLock())?;
-        r
+        Ok(())
     }
 }
 

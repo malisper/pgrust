@@ -205,14 +205,14 @@ pub fn init_seams() {
         engine::CheckTableForSerializableConflictIn(db_id, rd_id, rd_id, uses_local_buffers)
     });
 
-    seams::check_for_serializable_conflict_in::set(|index_oid| {
+    seams::check_for_serializable_conflict_in::set(|index_oid, tid, blkno| {
         let f = rel_fields(index_oid)?;
         engine::CheckForSerializableConflictIn(
             f.db_oid,
             f.rd_id,
             f.uses_local_buffers,
-            None,
-            engine_invalid_block(),
+            tid,
+            blkno,
         )
     });
 
@@ -310,11 +310,6 @@ pub fn init_seams() {
             set: globals::set_max_predicate_locks_per_page,
         });
     }
-}
-
-#[inline]
-fn engine_invalid_block() -> BlockNumber {
-    types_core::primitive::InvalidBlockNumber
 }
 
 /// A non-MVCC sentinel snapshot for the page-lock seam's `None` case

@@ -374,8 +374,20 @@ pub fn heap_delete<'mcx>(
     /*
      * We're about to do the actual delete -- check for conflict first, to
      * avoid possibly having to roll back work we've just done.
+     *
+     * C: CheckForSerializableConflictIn(relation, tid, BufferGetBlockNumber(buffer)).
+     * Pass the deleted tuple's TID + page so a concurrent serializable reader's
+     * tuple/page-level SIREAD lock yields the write-skew serialization failure
+     * (a relation-only check would miss the finer-grained reader lock).
      */
-    predicate_seam::check_for_serializable_conflict_in::call(relation.rd_id)?;
+    predicate_seam::check_for_serializable_conflict_in::call(
+        relation.rd_id,
+        Some((
+            ItemPointerGetBlockNumber(&tid),
+            ItemPointerGetOffsetNumber(&tid),
+        )),
+        buffer_get_block_number(buffer)?,
+    )?;
 
     /* replace cid with a combo CID if necessary */
     let (new_cid, iscombo) =

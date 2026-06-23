@@ -782,8 +782,21 @@ pub fn heap_update<'mcx>(
 
     /*
      * We're about to do the actual update -- check for conflict first.
+     *
+     * C: CheckForSerializableConflictIn(relation, &oldtup.t_self,
+     * BufferGetBlockNumber(buffer)). Pass the old tuple's TID + page so a
+     * concurrent serializable reader's tuple/page-level SIREAD lock produces the
+     * write-skew serialization failure; the new tuple needs only the relation
+     * check, which the old-tuple check (same relation) already covers.
      */
-    predicate_seam::check_for_serializable_conflict_in::call(relation.rd_id)?;
+    predicate_seam::check_for_serializable_conflict_in::call(
+        relation.rd_id,
+        Some((
+            ItemPointerGetBlockNumber(&oldtup.tuple.t_self),
+            ItemPointerGetOffsetNumber(&oldtup.tuple.t_self),
+        )),
+        buffer_get_block_number(buffer)?,
+    )?;
 
     /*
      * If newbuf == buffer we might do a HOT update.

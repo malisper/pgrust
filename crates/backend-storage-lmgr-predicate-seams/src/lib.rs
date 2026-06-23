@@ -137,12 +137,28 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `CheckForSerializableConflictIn(relation, NULL, InvalidBlockNumber)`
-    /// (predicate.c): the relation-granularity rw-conflict check
-    /// `index_insert` performs when the AM does not handle predicate locks
-    /// itself. `Err` carries the serialization-failure `ereport(ERROR)`.
+    /// `CheckForSerializableConflictIn(relation, tid, blkno)` (predicate.c):
+    /// the rw-conflict check a write performs against the predicate (SIREAD)
+    /// locks held on a tuple/page/relation. The engine checks, in order, the
+    /// tuple tag (when `tid` is `Some`), the page tag (when `blkno !=
+    /// InvalidBlockNumber`), then always the relation tag — a reader's
+    /// finer-grained SIREAD lock is only seen by the matching tuple/page check,
+    /// so writes must pass the precise target:
+    ///   * `index_insert` passes `(None, InvalidBlockNumber)` (relation-only,
+    ///     when the AM does not handle predicate locks itself);
+    ///   * nbtree `_bt_doinsert`/`_bt_check_unique` pass `(None, leaf_blkno)`
+    ///     so a page-level reader lock masked by a unique violation is reported;
+    ///   * `heap_delete`/`heap_update` pass `(Some(old_tid), old_blkno)` so a
+    ///     concurrent reader's tuple-level SIREAD lock yields the write-skew
+    ///     serialization failure.
+    /// `Err` carries the serialization-failure `ereport(ERROR)`.
     pub fn check_for_serializable_conflict_in(
         index_oid: types_core::primitive::Oid,
+        tid: Option<(
+            types_core::primitive::BlockNumber,
+            types_core::primitive::OffsetNumber,
+        )>,
+        blkno: types_core::primitive::BlockNumber,
     ) -> types_error::PgResult<()>
 );
 

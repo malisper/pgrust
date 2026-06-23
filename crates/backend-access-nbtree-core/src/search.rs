@@ -427,19 +427,48 @@ fn index_getattr<'mcx>(
 //   seam below, matching the other index AMs — see its definition.)
 //   * `scan->instrument` is NULL-guarded in C; there is no instrument here.
 
-/// `PredicateLockRelation(rel, scan->xs_snapshot)` — see module note.
+/// `PredicateLockRelation(rel, scan->xs_snapshot)` (predicate.c) — take a
+/// relation-level SIREAD predicate lock for a serializable scan. The scan
+/// snapshot is mirrored onto the opaque by the AM driver (`sync_in`); `None`
+/// (non-MVCC / non-serializable scan) makes the engine short-circuit. The
+/// engine itself gates on `MySerializableXact`/`SerializationNeededForRead`, so
+/// this is inert outside SERIALIZABLE isolation.
 #[inline]
-fn predicate_lock_relation<'mcx>(_rel: &Relation<'mcx>) {}
+fn predicate_lock_relation<'mcx>(
+    rel: &Relation<'mcx>,
+    so: &BTScanOpaqueData<'mcx>,
+) -> PgResult<()> {
+    match so.predicate_snapshot.as_ref() {
+        Some(snap) => backend_storage_lmgr_predicate_seams::predicate_lock_relation::call(
+            rel.rd_id, snap,
+        ),
+        None => Ok(()),
+    }
+}
 
-/// `PredicateLockPage(rel, blkno, scan->xs_snapshot)` — see module note.
+/// `PredicateLockPage(rel, blkno, scan->xs_snapshot)` (predicate.c) — take a
+/// page-level SIREAD predicate lock as a serializable scan reads a leaf page.
+/// Inert outside SERIALIZABLE isolation (engine-side gate + `None` snapshot).
 #[inline]
-fn predicate_lock_page<'mcx>(_rel: &Relation<'mcx>, _blkno: BlockNumber) {}
+fn predicate_lock_page<'mcx>(
+    rel: &Relation<'mcx>,
+    blkno: BlockNumber,
+    so: &BTScanOpaqueData<'mcx>,
+) -> PgResult<()> {
+    backend_storage_lmgr_predicate_seams::predicate_lock_page::call(
+        rel.alias(),
+        blkno,
+        so.predicate_snapshot.clone(),
+    )
+}
 
-/// `IsolationIsSerializable()` — SSI not plumbed to this layer (see module
-/// note); the relation-lock retry in `_bt_first` is therefore never taken here.
+/// `IsolationIsSerializable()` (xact.c: `XactIsoLevel == XACT_SERIALIZABLE`) —
+/// whether the current transaction runs at SERIALIZABLE. Drives the empty-index
+/// relation-lock retry in `_bt_first`. Reached via the xact seam.
 #[inline]
 fn isolation_is_serializable() -> bool {
-    false
+    backend_access_transam_xact_seams::xact_iso_level::call()
+        == types_core::xact::XACT_SERIALIZABLE
 }
 
 /// `pgstat_count_index_scan(rel)` (pgstat.h macro): increment the relation's
@@ -1674,12 +1703,12 @@ pub fn bt_first<'mcx>(
 
         /*
          * Only get here if the index is completely empty. Take a relation-level
-         * predicate lock under serializable isolation and retry. SSI is not
-         * plumbed to this layer (isolation_is_serializable() is always false
-         * here), so this branch is never taken; left in place for fidelity.
+         * predicate lock under serializable isolation and retry: the relation
+         * lock might conflict with a concurrent insert that has not yet created
+         * the first leaf page we'd otherwise scan past.
          */
         if isolation_is_serializable() {
-            predicate_lock_relation(rel);
+            predicate_lock_relation(rel, so)?;
             let (stack2, found_buf2) = _bt_search_inner(mcx, rel, rel, &inskey_boxed, BT_READ)?;
             so.currPos.buf = found_buf2;
             bt_freestack(stack2);
@@ -1795,7 +1824,8 @@ fn _bt_readpage<'mcx>(
         }
     }
 
-    predicate_lock_page(rel, so.currPos.currPage);
+    let curr_page = so.currPos.currPage;
+    predicate_lock_page(rel, curr_page, so)?;
 
     /* initialize local variables */
     let indnatts = rel_natts(rel);
@@ -2692,7 +2722,7 @@ fn _bt_endpoint<'mcx>(
         /*
          * Empty index. Lock the whole relation (nothing finer exists).
          */
-        predicate_lock_relation(rel);
+        predicate_lock_relation(rel, so)?;
         bt_parallel_done(so)?;
         return Ok(false);
     }

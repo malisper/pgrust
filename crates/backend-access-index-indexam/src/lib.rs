@@ -633,7 +633,11 @@ pub fn index_insert<'mcx>(
 
     if !am.ampredlocks {
         // CheckForSerializableConflictIn(indexRelation, NULL, InvalidBlockNumber)
-        predicate::check_for_serializable_conflict_in::call(index_relation.rd_id)?;
+        predicate::check_for_serializable_conflict_in::call(
+            index_relation.rd_id,
+            None,
+            types_core::primitive::InvalidBlockNumber,
+        )?;
     }
 
     (am.aminsert)(

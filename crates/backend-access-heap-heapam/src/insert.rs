@@ -239,7 +239,11 @@ pub fn heap_insert<'mcx>(
      * avoid possibly having to roll back work we've just done.  For a heap
      * insert, we only need to check for table-level SSI locks (no buffer).
      */
-    predicate_seam::check_for_serializable_conflict_in::call(relation.rd_id)?;
+    predicate_seam::check_for_serializable_conflict_in::call(
+        relation.rd_id,
+        None,
+        types_core::primitive::InvalidBlockNumber,
+    )?;
 
     /* NO EREPORT(ERROR) from here till changes are logged */
     // START_CRIT_SECTION() — the crit-section bookkeeping lives behind the
@@ -514,7 +518,11 @@ pub fn heap_multi_insert<'mcx>(
      *
      * For heap inserts, we only need to check for table-level SSI locks.
      */
-    predicate_seam::check_for_serializable_conflict_in::call(relation.rd_id)?;
+    predicate_seam::check_for_serializable_conflict_in::call(
+        relation.rd_id,
+        None,
+        types_core::primitive::InvalidBlockNumber,
+    )?;
 
     let mut ndone: usize = 0;
     let mut starting_with_empty_page = false;
@@ -811,7 +819,11 @@ pub fn heap_multi_insert<'mcx>(
      * We're done with the actual inserts. Check for conflicts again, to ensure
      * that all rw-conflicts in to these inserts are detected.
      */
-    predicate_seam::check_for_serializable_conflict_in::call(relation.rd_id)?;
+    predicate_seam::check_for_serializable_conflict_in::call(
+        relation.rd_id,
+        None,
+        types_core::primitive::InvalidBlockNumber,
+    )?;
 
     /*
      * If tuples are cachable, mark them for invalidation from the caches in case

@@ -49,6 +49,15 @@ backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr
 # directly would cycle, as the dispatch reaches the heap AM which depends on
 # nbtree).
 backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
+# SSI predicate-locking hooks: nbtree manages its own predicate locks
+# (`ampredlocks = true`). `_bt_search`/`_bt_first`/`_bt_readnextpage` take
+# `PredicateLockRelation`/`PredicateLockPage`; `_bt_doinsert`/`_bt_check_unique`
+# take `CheckForSerializableConflictIn`; page split takes
+# `PredicateLockPageSplit`. Seam-only dep (predicate.c body installs them).
+backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predicate-seams" }
+# `IsolationIsSerializable()` (== `XactIsoLevel == XACT_SERIALIZABLE`) — gates
+# the empty-index relation-lock retry in `_bt_first`. Reached via `xact_iso_level`.
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 # `BTreeShmemSize`/`BTreeShmemInit` (nbtutils.c) seams summed/called by ipci.c.
 backend-access-nbtree-seams = { path = "../backend-access-nbtree-seams" }
 backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }
