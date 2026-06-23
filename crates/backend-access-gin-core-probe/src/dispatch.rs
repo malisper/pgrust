@@ -149,6 +149,48 @@ fn vardata_any(image: &[u8]) -> &[u8] {
     }
 }
 
+/// Un-pack a (possibly short-headed) inline varlena `image` to the canonical
+/// 4-byte-header form, allocating the rewritten image in `mcx` when needed.
+///
+/// The `tsvector`/`tsquery` opclass bodies (`gin_extract_tsvector`,
+/// `gin_extract_tsquery`, `gin_tsquery_consistent`) read the datum's `size` field
+/// at the fixed offset 4 and walk the `WordEntry`/`QueryItem` arrays at
+/// `DATAHDRSIZE`/`HDRSIZETQ`-relative offsets — i.e. they require the image to
+/// carry a 4-byte header. C's `PG_GETARG_TSVECTOR`/`PG_GETARG_TSQUERY` are
+/// `PG_DETOAST_DATUM`, which un-packs a short header to the 4-byte form; the GIN
+/// values reach this dispatch already-detoasted (no compressed/external image),
+/// but detoast leaves a short header packed, so a small stored value arrives
+/// short-headed once `SHORT_VARLENA_PACKING` is on. Mirror the un-pack here.
+/// No-op (returns the input slice) while the flag is off — every stored value is
+/// already 4B.
+#[inline]
+fn unpack_short_to_4b<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<mcx::PgVec<'mcx, u8>> {
+    // VARATT_IS_1B (short header) and not VARATT_IS_1B_E (0x01, external).
+    let short = matches!(image.first(), Some(&h) if h != 0x01 && (h & 0x01) == 0x01);
+    if short {
+        // VARSIZE_1B = (va_header >> 1) & 0x7F covers the 1-byte header + payload.
+        let total_1b = ((image[0] >> 1) & 0x7F) as usize;
+        let data_size = total_1b.saturating_sub(1);
+        let new_size = data_size + VARHDRSZ;
+        let mut out: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, new_size)?;
+        // SET_VARSIZE(out, new_size): a plain 4-byte header (low 2 bits 00).
+        let word = (new_size as u32) << 2;
+        for &b in &word.to_ne_bytes() {
+            out.push(b);
+        }
+        for &b in &image[1..1 + data_size] {
+            out.push(b);
+        }
+        Ok(out)
+    } else {
+        let mut out: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, image.len())?;
+        for &b in image {
+            out.push(b);
+        }
+        Ok(out)
+    }
+}
+
 /// Encode `gin_extract_tsquery`'s `map_item_operand` (the `int *` map the C code
 /// stores in every `extra_data[]` slot) as a native-endian `i32` byte blob, the
 /// per-key opclass-private `extra_data` the GIN scan carries from `extractQuery`
@@ -233,8 +275,9 @@ fn dispatch_extract_value<'mcx>(
             // ported body walks them and returns the entry `text` varlenas. C
             // leaves `nullFlags` NULL (no lexeme key is null), so `null_flags`
             // stays empty (the seam's C-`NULL` sentinel).
+            let vector = unpack_short_to_4b(mcx, value.as_ref_bytes())?;
             let entries =
-                backend_utils_adt_tsginidx::gin_extract_tsvector(mcx, value.as_ref_bytes())?;
+                backend_utils_adt_tsginidx::gin_extract_tsvector(mcx, &vector)?;
             let mut elems: PgVec<'mcx, Datum<'mcx>> = PgVec::new_in(mcx);
             for txt in entries {
                 elems.push(Datum::from_byref_bytes_in(mcx, &txt)?);
@@ -364,7 +407,8 @@ fn dispatch_extract_query<'mcx>(
             // a native-endian i32 blob — in EVERY entry's `extra_data` slot,
             // exactly as C sets `(*extra_data)[j] = (Pointer) map_item_operand`.
             let _ = strategy; // tsvector_ops ignores the strategy in extractQuery
-            let ext = backend_utils_adt_tsginidx::gin_extract_tsquery(mcx, query.as_ref_bytes())?;
+            let qimage = unpack_short_to_4b(mcx, query.as_ref_bytes())?;
+            let ext = backend_utils_adt_tsginidx::gin_extract_tsquery(mcx, &qimage)?;
 
             let mut query_values: PgVec<'mcx, Datum<'mcx>> = PgVec::new_in(mcx);
             for txt in &ext.entries {
@@ -578,10 +622,14 @@ fn dispatch_consistent_bool(key: &mut GinScanKey) -> bool {
             // Transient per-call scratch context (C's GIN scan tempCtx): the body
             // allocates getquery()/check_tri here; the result is a scalar.
             let scratch = mcx::MemoryContext::new("gin_tsquery_consistent");
+            let qimage = match unpack_short_to_4b(scratch.mcx(), key.query.as_ref_bytes()) {
+                Ok(q) => q,
+                Err(e) => std::panic::panic_any(e),
+            };
             let (res, recheck) = match backend_utils_adt_tsginidx::gin_tsquery_consistent(
                 scratch.mcx(),
                 &check,
-                key.query.as_ref_bytes(),
+                &qimage,
                 &map,
             ) {
                 Ok(r) => r,
@@ -683,10 +731,14 @@ fn dispatch_consistent_tri(key: &mut GinScanKey) -> GinTernaryValue {
                 .map(|b| decode_map_item_operand(b))
                 .unwrap_or_default();
             let scratch = mcx::MemoryContext::new("gin_tsquery_triconsistent");
+            let qimage = match unpack_short_to_4b(scratch.mcx(), key.query.as_ref_bytes()) {
+                Ok(q) => q,
+                Err(e) => std::panic::panic_any(e),
+            };
             match backend_utils_adt_tsginidx::gin_tsquery_triconsistent(
                 scratch.mcx(),
                 &check,
-                key.query.as_ref_bytes(),
+                &qimage,
                 &map,
             ) {
                 Ok(r) => r,
