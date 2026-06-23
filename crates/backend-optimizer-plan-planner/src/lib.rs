@@ -4253,8 +4253,28 @@ fn build_final_paths<'mcx>(
         backend_optimizer_util_pathnode::add_path(root, final_rel, final_path)?;
     }
 
-    // Partial paths for final_rel (C:2134-2146): final_rel->consider_parallel is
-    // false (see above), so this block is skipped.
+    // Generate partial paths for final_rel, too, if outer query levels might
+    // be able to make use of them (C:2134-2146). This is what lets a parallel-
+    // safe subquery (query_level > 1) expose its partial paths to the parent
+    // query — e.g. each arm of a UNION ALL or a subquery-in-FROM can then feed
+    // a Parallel Append / Gather above. Top-level queries (query_level == 1)
+    // and queries needing LIMIT/OFFSET are excluded. C asserts !rowMarks &&
+    // CMD_SELECT here because consider_parallel is supposed to be forced false
+    // for any query with rowMarks or a non-SELECT command; we additionally test
+    // those two flags directly (rather than asserting) so a partial path is
+    // never exposed for a FOR UPDATE/SHARE or DML subquery even if the
+    // consider_parallel propagation upstream is more permissive.
+    if root.rel(final_rel).consider_parallel
+        && root.query_level > 1
+        && !limit_needed_flag
+        && !has_rowmarks
+        && command_type == CmdType::CMD_SELECT
+    {
+        let cur_partials: Vec<PathId> = root.rel(current_rel).partial_pathlist.clone();
+        for partial_path in cur_partials {
+            backend_optimizer_util_pathnode::add_partial_path(root, final_rel, partial_path)?;
+        }
+    }
 
     // GetForeignUpperPaths / create_upper_paths_hook (C:2152-2167): no FDW
     // upper-path routine is modeled and there is no hook; nothing to add.

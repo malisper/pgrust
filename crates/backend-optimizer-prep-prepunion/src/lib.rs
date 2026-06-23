@@ -53,6 +53,12 @@ const COERCE_IMPLICIT_CAST: types_nodes::primnodes::CoercionForm =
 /// `RTE_SUBQUERY` (`parsenodes.h`).
 const RTE_SUBQUERY: u32 = 1;
 
+/// `pg_leftmost_one_pos32(word)` (pg_bitutils.h) — index of the leftmost set bit.
+fn pg_leftmost_one_pos32(word: u32) -> i32 {
+    debug_assert!(word != 0);
+    (31 - word.leading_zeros()) as i32
+}
+
 /// `TOTAL_COST` (`pathnodes.h` `CostSelector`).
 const TOTAL_COST: types_pathnodes::optimizer_plan::CostSelector =
     types_pathnodes::optimizer_plan::CostSelector::TOTAL_COST;
@@ -512,6 +518,9 @@ fn generate_union_paths<'mcx>(
     // Build path lists and relid set (C:757-802).
     let mut cheapest_pathlist: Vec<PathId> = Vec::with_capacity(rellist.len());
     let mut ordered_pathlist: Vec<PathId> = Vec::with_capacity(rellist.len());
+    let mut partial_pathlist: Vec<PathId> = Vec::with_capacity(rellist.len());
+    let mut partial_paths_valid = true;
+    let mut consider_parallel = true;
     let mut relids: Relids = None;
     for &rel in rellist.iter() {
         let cheapest = root
@@ -534,13 +543,27 @@ fn generate_union_paths<'mcx>(
             }
         }
 
+        // Accumulate partial paths for a parallel Append + Gather (C:786-797).
+        // All children must be parallel-safe and have a partial path, otherwise
+        // the parallel leg is not buildable.
+        if consider_parallel {
+            if !root.rel(rel).consider_parallel {
+                consider_parallel = false;
+                partial_paths_valid = false;
+            } else if root.rel(rel).partial_pathlist.is_empty() {
+                partial_paths_valid = false;
+            } else {
+                partial_pathlist.push(root.rel(rel).partial_pathlist[0]);
+            }
+        }
+
         relids = bms::relids_union::call(&relids, &root.rel(rel).relids);
     }
 
     // Build result relation (C:805-808).
     let result_rel = relnode::fetch_upper_rel(root, UPPERREL_SETOP, &relids);
     set_rel_reltarget_from_tlist(root, result_rel, &tlist);
-    root.rel_mut(result_rel).consider_parallel = false;
+    root.rel_mut(result_rel).consider_parallel = consider_parallel;
     root.rel_mut(result_rel).consider_startup = root.tuple_fraction > 0.0;
 
     // Append the children together using cheapest paths (C:814).
@@ -559,6 +582,55 @@ fn generate_union_paths<'mcx>(
     )?;
     let apath_rows = root.path(apath).base().rows;
     root.rel_mut(result_rel).rows = apath_rows;
+
+    // Now consider doing the same thing using the partial paths plus Append
+    // plus Gather (C:826-867).
+    let mut gpath: Option<PathId> = None;
+    if partial_paths_valid {
+        // Find the highest number of workers requested for any subpath.
+        let mut parallel_workers: i32 = 0;
+        for &subpath in &partial_pathlist {
+            parallel_workers =
+                parallel_workers.max(root.path(subpath).base().parallel_workers);
+        }
+        debug_assert!(parallel_workers > 0);
+
+        // If parallel append is permitted, always request at least
+        // log2(# of children) paths (C:843-852).
+        let enable_pa =
+            backend_utils_misc_guc_tables::vars::enable_parallel_append.read();
+        if enable_pa {
+            parallel_workers = parallel_workers
+                .max(pg_leftmost_one_pos32(partial_pathlist.len() as u32) + 1);
+            parallel_workers = parallel_workers
+                .min(backend_optimizer_path_costsize::max_parallel_workers_per_gather());
+        }
+        debug_assert!(parallel_workers > 0);
+
+        let papath = pathnode::create::create_append_path(
+            root,
+            run,
+            true,
+            result_rel,
+            Vec::new(),
+            partial_pathlist.clone(),
+            Vec::new(),
+            &None,
+            parallel_workers,
+            enable_pa,
+            -1.0,
+        )?;
+        let target = make_pathtarget(root, &tlist);
+        gpath = Some(pathnode::create::create_gather_path(
+            root,
+            run,
+            result_rel,
+            papath,
+            Some(Box::new(target)),
+            &None,
+            None,
+        )?);
+    }
 
     if !op.all {
         let d_num_groups = apath_rows;
@@ -584,6 +656,25 @@ fn generate_union_paths<'mcx>(
                 d_num_groups,
             )?;
             pathnode::add_path(root, result_rel, path)?;
+
+            // Hash-aggregate the Gather path, if valid (C:904-918).
+            if let Some(gp) = gpath {
+                let target = make_pathtarget(root, &tlist);
+                let path = pathnode::create::create_agg_path(
+                    run,
+                    root,
+                    result_rel,
+                    gp,
+                    Box::new(target),
+                    types_pathnodes::AGG_HASHED,
+                    AGGSPLIT_SIMPLE,
+                    group_list.clone(),
+                    Vec::new(),
+                    None,
+                    d_num_groups,
+                )?;
+                pathnode::add_path(root, result_rel, path)?;
+            }
         }
 
         if can_sort {
@@ -598,6 +689,18 @@ fn generate_union_paths<'mcx>(
             let path =
                 pathnode::create::create_upper_unique_path(root, result_rel, path, num_cols, d_num_groups)?;
             pathnode::add_path(root, result_rel, path)?;
+
+            // Sort -> Unique on the Gather path, if set (C:940-954).
+            if let Some(gp) = gpath {
+                let pk =
+                    pathkeys::make_pathkeys_for_sortclauses(root, mcx, &group_list, &tlist);
+                let path = pathnode::create::create_sort_path(root, result_rel, gp, pk, -1.0)?;
+                let num_cols = root.path(path).base().pathkeys.len() as i32;
+                let path = pathnode::create::create_upper_unique_path(
+                    root, result_rel, path, num_cols, d_num_groups,
+                )?;
+                pathnode::add_path(root, result_rel, path)?;
+            }
         }
 
         // Try a MergeAppend path if we found a presorted path in each union
@@ -624,8 +727,12 @@ fn generate_union_paths<'mcx>(
             )));
         }
     } else {
-        // UNION ALL (C:984-988).
+        // UNION ALL (C:982-988).
         pathnode::add_path(root, result_rel, apath)?;
+
+        if let Some(gp) = gpath {
+            pathnode::add_path(root, result_rel, gp)?;
+        }
     }
 
     Ok(result_rel)
