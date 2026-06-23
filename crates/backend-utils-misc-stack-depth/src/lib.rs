@@ -67,6 +67,11 @@ thread_local! {
     /// C: `static ssize_t val = 0;` inside `get_stack_depth_rlimit` — the
     /// cached platform rlimit. `0` is C's "not yet computed" sentinel (the
     /// genuine rlimit can never legitimately be `0`).
+    ///
+    /// `allow(dead_code)`: on wasm `get_stack_depth_rlimit` returns the constant
+    /// `-1` (no `getrlimit`), so it never reads this cache; the tests (off-wasm)
+    /// still use it.
+    #[allow(dead_code)]
     static STACK_DEPTH_RLIMIT_CACHE: Cell<isize> = const { Cell::new(0) };
 }
 
@@ -221,6 +226,7 @@ pub fn assign_max_stack_depth(newval: i32) {
 /// Folds `getrlimit(RLIMIT_STACK)` exactly as C does: failure -> `-1`,
 /// `RLIM_INFINITY` or overflow past `SSIZE_MAX` -> `SSIZE_MAX`, otherwise the
 /// finite soft limit.
+#[cfg(not(target_family = "wasm"))]
 pub fn get_stack_depth_rlimit() -> isize {
     // C: `static ssize_t val = 0; if (val == 0) { ... } return val;`
     let cached = STACK_DEPTH_RLIMIT_CACHE.with(Cell::get);
@@ -248,6 +254,16 @@ pub fn get_stack_depth_rlimit() -> isize {
 
     STACK_DEPTH_RLIMIT_CACHE.with(|c| c.set(val));
     val
+}
+
+/// wasm: there is no `getrlimit`/`RLIMIT_STACK` (no POSIX resource-limit layer).
+/// Return `-1`, C's "rlimit unknown" sentinel: `check_max_stack_depth` treats a
+/// non-positive limit as "limit unknown, accept anything", which is the correct
+/// behaviour for the single-user wasm runtime (the host bounds the stack, not a
+/// per-process rlimit).
+#[cfg(target_family = "wasm")]
+pub fn get_stack_depth_rlimit() -> isize {
+    -1
 }
 
 // ---------------------------------------------------------------------------

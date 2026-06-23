@@ -1,5 +1,9 @@
 mod builder;
 mod config;
+// wasm-only `libc` shim: errno constants + malloc/free that `libc` does not
+// expose on wasm64. Consumer modules pull it in as `libc` under cfg(wasm).
+#[cfg(target_family = "wasm")]
+mod libc_wasm;
 mod raw_transfer;
 mod report;
 mod sink;

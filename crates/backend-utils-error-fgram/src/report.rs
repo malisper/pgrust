@@ -4,6 +4,11 @@ use std::io::{self, Write};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+// wasm: shadow the extern `libc` with the crate-local errno shim (used for the
+// `EIO` fallback below).
+#[cfg(target_family = "wasm")]
+use crate::libc_wasm as libc;
+
 use pgrust_pg_ffi::{unpack_sqlstate, ErrorLevel, SqlState};
 
 use crate::{

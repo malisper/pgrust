@@ -1,5 +1,11 @@
 use std::io;
 
+// wasm: the extern `libc` exposes no errno constants on wasm64; shadow it with
+// the crate-local shim for this module (the `libc::E*` match arms below need
+// real `const`s).
+#[cfg(target_family = "wasm")]
+use crate::libc_wasm as libc;
+
 use pgrust_pg_ffi::{
     ErrorField, ErrorLevel, SqlState, ERRCODE_CONNECTION_FAILURE, ERRCODE_DISK_FULL,
     ERRCODE_DUPLICATE_FILE, ERRCODE_FILE_NAME_TOO_LONG, ERRCODE_INSUFFICIENT_PRIVILEGE,

@@ -192,15 +192,35 @@ fn is_highbit_set(ch: u8) -> bool {
 /// `isupper((unsigned char) ch)` — the locale-aware C predicate, via `libc`
 /// (the same direct-libc convention as `port-pgstrcasecmp::fold_to_lower`; no
 /// seam, exactly as the C makes a direct `isupper` call).
+#[cfg(not(target_family = "wasm"))]
 #[inline]
 fn locale_isupper(ch: u8) -> bool {
     unsafe { libc::isupper(i32::from(ch)) != 0 }
 }
 
 /// `tolower((unsigned char) ch)` — the locale-aware C fold, via `libc`.
+#[cfg(not(target_family = "wasm"))]
 #[inline]
 fn locale_tolower(ch: u8) -> u8 {
     unsafe { libc::tolower(i32::from(ch)) as u8 }
+}
+
+/// wasm: there is no locale facility (the `isupper`/`tolower` ctype symbols are
+/// absent from libc on wasm). The C/POSIX locale never classifies a high-bit
+/// byte as upper-case, so the faithful single-locale answer is `false` here,
+/// and the fold is the identity (matching the `port-pgstrcasecmp` wasm stub).
+#[cfg(target_family = "wasm")]
+#[inline]
+fn locale_isupper(_ch: u8) -> bool {
+    false
+}
+
+/// wasm: identity fold (the high-bit `isupper` branch above is never taken, so
+/// this is only reached as a no-op; see `locale_isupper`).
+#[cfg(target_family = "wasm")]
+#[inline]
+fn locale_tolower(ch: u8) -> u8 {
+    ch
 }
 
 /// `truncate_identifier(ident, len, warn)` (scansup.c) — truncate an identifier
@@ -1165,5 +1185,8 @@ fn coerce_param_hook_seam(
     }
 }
 
-#[cfg(test)]
+// The test module reaches the locale `isupper`/`tolower` ctype symbols directly
+// (to mirror the production fold); those are absent on wasm, so the tests only
+// build off-wasm (wasm64 is a no-test compile-only target here).
+#[cfg(all(test, not(target_family = "wasm")))]
 mod tests;
