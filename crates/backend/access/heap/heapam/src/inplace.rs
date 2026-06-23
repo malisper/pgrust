@@ -65,7 +65,6 @@ use ::xlog_records::heapam_xlog::{
     SizeOfHeapDelete, XLH_DELETE_IS_SUPER,
 };
 use ::types_storage::sinval::SHARED_INVALIDATION_MESSAGE_SIZE;
-use ::types_storage::bufpage::SizeofHeapTupleHeader;
 use ::types_core::primitive::BLCKSZ;
 
 /// `InvalidTransactionId`.
@@ -717,31 +716,26 @@ fn read_on_page_formed<'mcx>(
     tid: ItemPointerData,
 ) -> PgResult<::types_tuple::heaptuple::FormedTuple<'mcx>> {
     let offnum = ItemPointerGetOffsetNumber(&tid);
-    let mut out: Option<(HeapTupleHeaderData<'mcx>, ::mcx::PgVec<'mcx, u8>, u32)> = None;
+    let block = ItemPointerGetBlockNumber(&tid);
+    let mut out: Option<::types_tuple::heaptuple::FormedTuple<'mcx>> = None;
     bufmgr_seam::with_buffer_page::call(buffer, &mut |page_bytes| {
         let page = PageRef::new(page_bytes)?;
         let item_id = PageGetItemId(&page, offnum)?;
         debug_assert!(item_id.has_storage());
         let item = PageGetItem(&page, &item_id)?;
-        let hdr = HeapTupleHeaderData::read_on_page(mcx, item)?;
-        let mut data = ::mcx::PgVec::new_in(mcx);
-        for &b in &item[SizeofHeapTupleHeader..] {
-            data.push(b);
-        }
-        out = Some((hdr, data, item.len() as u32));
+        // Slice the user-data area at `item[t_hoff..]` (NOT at the fixed
+        // SizeofHeapTupleHeader): when t_hoff exceeds the fixed header — null
+        // bitmap present and/or MAXALIGN padding — the earlier code shifted
+        // every deformed column offset, landing a TOAST-pointer field
+        // mid-datum (range-out-of-bounds panic on detoast/abort). The
+        // canonical read_on_page_full also captures the null bitmap into
+        // t_bits, matching C's t_data aliasing the on-page tuple.
+        out = Some(::types_tuple::heaptuple::FormedTuple::read_on_page_full(
+            mcx, item, block, offnum, rel_id,
+        )?);
         Ok(())
     })?;
-    let (hdr, data, t_len) = out.expect("with_buffer_page closure must have run");
-    let tuple = ::mcx::alloc_in(
-        mcx,
-        HeapTupleData {
-            t_len,
-            t_self: tid,
-            t_tableOid: rel_id,
-            t_data: Some(::mcx::alloc_in(mcx, hdr)?),
-        },
-    )?;
-    Ok(::types_tuple::heaptuple::FormedTuple { tuple, data })
+    Ok(out.expect("with_buffer_page closure must have run"))
 }
 
 /// Materialize the on-page tuple header (only) at `(buffer, tid)` into a bare
