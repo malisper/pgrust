@@ -388,17 +388,54 @@ fn jointree_of<'a, 'mcx>(
 
 /// `(List *) parse->jointree->quals` deep-cloned into `root.node_arena`, as the
 /// `havingqual` list `create_group_result_path` consumes. The C `havingqual`
-/// here is `parse->jointree->quals` cast to `List *` — an
-/// implicit-AND list of clause nodes; `None`/absent quals → empty list.
+/// here is `parse->jointree->quals` cast to `List *` — an implicit-AND list of
+/// clause nodes; `None`/absent quals → empty list.
+///
+/// In this owned model `parse->jointree->quals` is held in one of two equivalent
+/// shapes (mirroring `quals_implicit_and` in init-subselect):
+///   * `Node::Expr(e)` — a single clause (the common `SELECT expr WHERE a=5`
+///     case): the havingqual is the one-element list `[e]`.
+///   * `Node::List([...])` — an already-imploded implicit-AND list, produced by
+///     `concat_quals` in `remove_useless_result_rtes` when it merges an
+///     INNER/SEMI JoinExpr's (or elided single-child FromExpr's) quals up into
+///     the parent FromExpr (e.g. `(select 1) JOIN (select 2) ON c1.f1=c2.f1`,
+///     or `1 IN (select 2)`). Here the havingqual is the cloned list, one entry
+///     per conjunct.
+/// The earlier version only handled `Node::Expr` and dropped a `Node::List`
+/// entirely, so a variable-free qual hoisted onto a single-`RTE_RESULT` jointree
+/// silently vanished — `1 IN (select 2)` / `(select 1) JOIN (select 2) ON
+/// c1.f1=c2.f1` wrongly returned the LHS row instead of 0 rows.
 fn clone_jointree_quals_list_into_arena<'mcx>(
     mcx: Mcx<'mcx>,
     run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
 ) -> PgResult<Vec<NodeId>> {
-    match clone_jointree_quals_into_arena(mcx, run, root)? {
-        Some(id) => Ok(alloc::vec![id]),
-        None => Ok(Vec::new()),
+    let quals = jointree_of(run, root).quals.as_deref();
+    let mut out: Vec<NodeId> = Vec::new();
+    match quals {
+        None => {}
+        Some(n) if n.as_list().is_some() => {
+            // Already an implicit-AND conjunct list: clone each clause out.
+            let items = n.as_list().unwrap();
+            out.reserve(items.len());
+            for it in items.iter() {
+                let e = it.as_expr().unwrap_or_else(|| {
+                    panic!(
+                        "clone_jointree_quals_list_into_arena: jointree quals List element is not an Expr: {:?}",
+                        it.node_tag()
+                    )
+                });
+                out.push(root.alloc_node(e.clone_in(mcx)?));
+            }
+        }
+        Some(n) => {
+            // A single bare clause expression ⇒ one-element havingqual.
+            if let Some(e) = n.as_expr() {
+                out.push(root.alloc_node(e.clone_in(mcx)?));
+            }
+        }
     }
+    Ok(out)
 }
 
 /// Deep-clone `parse->jointree->quals` (a parse-tree expression `Node`) into
