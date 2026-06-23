@@ -175,14 +175,34 @@ impl GistInetKey {
     }
 
     /// Decode a key from by-reference `Datum` bytes (`DatumGetInetKeyP`). The
-    /// fields sit at fixed struct offsets after the 4-byte varlena length word.
+    /// payload fields (`family`/`minbits`/`commonbits`/`ipaddr`) sit immediately
+    /// after the varlena length word.
+    ///
+    /// C's `gk_ip_family`/`gk_ip_addr` read the `GistInetKey` struct at fixed
+    /// offsets past `vl_len_[4]` (a 4-byte header), which is correct in C only
+    /// because the GiST key the support proc receives is the un-packed
+    /// (4-byte-header) form. This port stores varlenas header-ful while
+    /// `SHORT_VARLENA_PACKING` is off, so a fixed 4-byte strip is faithful there;
+    /// but `index_form_tuple` short-packs a small (23-byte) key once the flag is
+    /// on, and `nocache_index_getattr`/`fetchatt` then hand the support procs the
+    /// verbatim on-disk image with a 1-byte ("short") header. Read the payload at
+    /// `VARDATA_ANY` — skip ONE byte for a short header, else `VARHDRSZ` — so the
+    /// fields land correctly in both forms (a fixed 4-byte strip would drop three
+    /// payload bytes off a short image). No-op while the flag is off (every stored
+    /// key carries a 4-byte header).
     pub fn from_datum_bytes(b: &[u8]) -> GistInetKey {
+        // VARDATA_ANY: a short header is a single byte with the low bit set (and
+        // not the 0x01 external-pointer marker); else the 4-byte header.
+        let data = match b.first() {
+            Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &b[1..],
+            _ => &b[4..],
+        };
         let mut ipaddr = [0u8; 16];
-        ipaddr.copy_from_slice(&b[7..23]);
+        ipaddr.copy_from_slice(&data[3..19]);
         GistInetKey {
-            family: b[4],
-            minbits: b[5],
-            commonbits: b[6],
+            family: data[0],
+            minbits: data[1],
+            commonbits: data[2],
             ipaddr,
         }
     }
