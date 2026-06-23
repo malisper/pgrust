@@ -325,7 +325,7 @@ pub fn query_planner<'mcx>(
      * some information such as lateral_relids is propagated from baserels to
      * otherrels here, so we must have computed it already.
      */
-    initsplan_seam::add_other_rels_to_query::call(root, run);
+    initsplan_seam::add_other_rels_to_query::call(root, run)?;
 
     /*
      * Distribute any UPDATE/DELETE/MERGE row identity variables to the target

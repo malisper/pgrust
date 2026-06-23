@@ -220,7 +220,7 @@ pub fn init_seams() {
         fkeys::match_foreign_keys_to_quals(root)
     });
     psmall::add_other_rels_to_query::set(|root, run| {
-        baserels::add_other_rels_to_query(root, run).expect("add_other_rels_to_query")
+        baserels::add_other_rels_to_query(root, run)
     });
     // rebuild_lateral_attr_needed / rebuild_joinclause_attr_needed are ported
     // here (lateral.rs / targetlist.rs); analyzejoins calls them via these seams

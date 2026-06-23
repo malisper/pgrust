@@ -87,7 +87,7 @@ seam_core::seam!(
     /// inheritance-expansion decision reads; the inheritance branch of
     /// `expand_inherited_rtentry` interns fresh child RTEs into the run store, so
     /// it is threaded `&mut`.
-    pub fn add_other_rels_to_query<'mcx>(root: &mut PlannerInfo, run: &mut PlannerRun<'mcx>)
+    pub fn add_other_rels_to_query<'mcx>(root: &mut PlannerInfo, run: &mut PlannerRun<'mcx>) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
