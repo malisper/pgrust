@@ -42,6 +42,7 @@ use types_error::{ErrorLocation, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_ST
 use types_rel::{Relation, RelationData};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock, LOCKMODE};
+use types_tuple::access::RELKIND_PARTITIONED_TABLE;
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::{HeapTupleData, HeapTupleHeaderChoice, ItemPointerData};
 
@@ -53,6 +54,7 @@ use backend_access_table_table as table;
 use backend_catalog_indexing_seams as indexing_seams;
 use backend_parser_parse_type as parse_type;
 use backend_storage_lmgr_lmgr_seams as lmgr_seams;
+use backend_utils_cache_lsyscache_seams as lsyscache_seam;
 use backend_utils_cache_syscache_seams as syscache_seams;
 use backend_utils_time_snapmgr_seams as snapmgr_seams;
 
@@ -688,6 +690,103 @@ pub fn StoreSingleInheritance(relationId: Oid, parentOid: Oid, seqNumber: i32) -
 
     // table_close(inhRelation, RowExclusiveLock);
     inhRelation.close(RowExclusiveLock)?;
+
+    Ok(())
+}
+
+/*
+ * MarkInheritDetached
+ *
+ * Set inhdetachpending for a partition, for ATExecDetachPartition
+ * in concurrent mode.  While at it, verify that no other partition is
+ * already pending detach.
+ *
+ * `parent_relkind` / `parent_relnamespace` / `parent_name` are the caller's
+ * `parent_rel->rd_rel->relkind` / `->relnamespace` / `RelationGetRelationName`
+ * (the C reads them off the open `parent_rel`; this owner reaches them through
+ * its arguments to avoid a relcache re-open). Lives in pg_inherits.c (the C
+ * `MarkInheritDetached` is in tablecmds.c, but it is a pure pg_inherits-catalog
+ * mutator, so it is hosted with the rest of the pg_inherits writers and called
+ * directly by `ATExecDetachPartition`).
+ */
+pub fn MarkInheritDetached<'mcx>(
+    mcx: Mcx<'mcx>,
+    child_rel: &Relation<'mcx>,
+    parent_relid: Oid,
+    parent_relkind: u8,
+    parent_relnamespace: Oid,
+    parent_name: &str,
+) -> PgResult<()> {
+    // Assert(parent_rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE);
+    debug_assert_eq!(parent_relkind, RELKIND_PARTITIONED_TABLE);
+
+    /*
+     * Find pg_inherits entries by inhparent.  (We need to scan them all in
+     * order to verify that no other partition is pending detach.)
+     */
+    // catalogRelation = table_open(InheritsRelationId, RowExclusiveLock);
+    let ctx = MemoryContext::new("pg_inherits MarkInheritDetached");
+    let catalogRelation = open_inherits(ctx.mcx(), RowExclusiveLock)?;
+    let key = oid_key(Anum_pg_inherits_inhparent, parent_relid)?;
+
+    let child_relid = child_rel.rd_id;
+    let mut found = false;
+    // while (HeapTupleIsValid(inheritsTuple = systable_getnext(scan)))
+    systable_scan_foreach(&catalogRelation, InheritsParentIndexId, key, |row| {
+        if row.form.inhdetachpending {
+            let child_name = lsyscache_seam::get_rel_name::call(mcx, row.form.inhrelid)?
+                .map(|s| s.as_str().to_string())
+                .unwrap_or_default();
+            let nspname = lsyscache_seam::get_namespace_name::call(mcx, parent_relnamespace)?
+                .map(|s| s.as_str().to_string())
+                .unwrap_or_default();
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .errmsg(format!(
+                    "partition \"{child_name}\" already pending detach in partitioned table \"{nspname}.{parent_name}\""
+                ))
+                .errhint(
+                    "Use ALTER TABLE ... DETACH PARTITION ... FINALIZE to complete the pending detach operation.",
+                )
+                .into_error());
+        }
+
+        if row.form.inhrelid == child_relid {
+            // newtup = heap_copytuple(inheritsTuple);
+            // GETSTRUCT(newtup)->inhdetachpending = true;
+            // CatalogTupleUpdate(catalogRelation, &inheritsTuple->t_self, newtup);
+            let update = types_catalog::pg_inherits::PgInheritsUpdateRow {
+                inhrelid: row.form.inhrelid,
+                inhparent: row.form.inhparent,
+                inhseqno: row.form.inhseqno,
+                inhdetachpending: true,
+            };
+            indexing_seams::catalog_tuple_update_pg_inherits::call(
+                mcx,
+                &catalogRelation,
+                row.t_self,
+                &update,
+            )?;
+            found = true;
+            /* keep looking, to ensure we catch others pending detach */
+        }
+        Ok(true)
+    })?;
+
+    /* Done */
+    // systable_endscan(scan); table_close(catalogRelation, RowExclusiveLock);
+    catalogRelation.close(RowExclusiveLock)?;
+
+    if !found {
+        return Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_UNDEFINED_TABLE)
+            .errmsg(format!(
+                "relation \"{}\" is not a partition of relation \"{}\"",
+                child_rel.name(),
+                parent_name
+            ))
+            .into_error());
+    }
 
     Ok(())
 }

@@ -232,6 +232,33 @@ fn insert_pg_inherits<'mcx>(
     form_and_insert(mcx, rel, &values, &nulls)
 }
 
+/// `MarkInheritDetached`'s in-place flip of `inhdetachpending` (the C
+/// `heap_copytuple` + `GETSTRUCT(newtup)->inhdetachpending = true` +
+/// `CatalogTupleUpdate(rel, &inheritsTuple->t_self, newtup)`). Re-forms the
+/// full pg_inherits row from the carrier (all four columns are fixed-width
+/// NOT NULL, so re-forming the whole row from the scanned values with the one
+/// changed column is bit-identical to the C's in-place struct set), then
+/// updates at the scanned tuple's `tid`.
+fn update_pg_inherits<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    tid: ItemPointerData,
+    row: &cat::pg_inherits::PgInheritsUpdateRow,
+) -> PgResult<()> {
+    let values = [
+        Datum::from_oid(row.inhrelid),
+        Datum::from_oid(row.inhparent),
+        Datum::from_i32(row.inhseqno),
+        Datum::from_bool(row.inhdetachpending),
+    ];
+    let nulls = [false; cat::pg_inherits::Natts_pg_inherits];
+    // newtup = heap_form_tuple(RelationGetDescr(rel), values, nulls);
+    let tupdesc = rel.rd_att_clone_in(mcx)?;
+    let mut tup = heap_form_tuple(mcx, &tupdesc, &values, &nulls)?;
+    // CatalogTupleUpdate(rel, &inheritsTuple->t_self, newtup);
+    CatalogTupleUpdate(mcx, rel, tid, &mut tup)
+}
+
 /* ======================================================================== *
  * pg_range — RangeCreate (no OID column).
  * ======================================================================== */
@@ -1219,6 +1246,7 @@ fn update_pg_aggregate<'mcx>(
 /// OID-column catalogs). Wired from [`crate::init_seams`].
 pub fn install() {
     backend_catalog_indexing_seams::catalog_tuple_insert_pg_inherits::set(insert_pg_inherits);
+    backend_catalog_indexing_seams::catalog_tuple_update_pg_inherits::set(update_pg_inherits);
     backend_catalog_indexing_seams::catalog_tuple_insert_pg_range::set(insert_pg_range);
     backend_catalog_indexing_seams::catalog_tuple_insert_pg_cast::set(insert_pg_cast);
     backend_catalog_indexing_seams::catalog_tuple_insert_pg_transform::set(insert_pg_transform);

@@ -660,6 +660,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `MarkInheritDetached`'s in-place flip of `inhdetachpending`: the C
+    /// `heap_copytuple(inheritsTuple)` + `GETSTRUCT(newtup)->inhdetachpending =
+    /// true` + `CatalogTupleUpdate(rel, &inheritsTuple->t_self, newtup)`
+    /// (commands/tablecmds.c + catalog/indexing.c + heapam). The replacement
+    /// crosses as the full deformed row carrier (every pg_inherits column is
+    /// fixed-width NOT NULL, so re-forming the whole row from the scanned values
+    /// with the one changed column is bit-identical), applied at the scanned
+    /// tuple's `tid`. `Err` carries the heap/index mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_inherits<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        tid: ItemPointerData,
+        row: &types_catalog::pg_inherits::PgInheritsUpdateRow,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `ConversionCreate`'s tuple build + insert: `GetNewOidWithIndex(rel,
     /// ConversionOidIndexId, Anum_pg_conversion_oid)` + `namestrcpy` +
     /// `heap_form_tuple(RelationGetDescr(rel), values, nulls)` +

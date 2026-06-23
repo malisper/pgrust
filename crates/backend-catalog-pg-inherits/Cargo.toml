@@ -33,6 +33,7 @@ backend-parser-parse-type = { path = "../backend-parser-parse-type" }
 backend-catalog-indexing-seams = { path = "../backend-catalog-indexing-seams" }
 backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
 
 # This unit's own inward seams (installed from init_seams).

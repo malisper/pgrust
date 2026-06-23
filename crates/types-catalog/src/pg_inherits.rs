@@ -54,3 +54,17 @@ pub struct PgInheritsInsertRow {
     pub inhseqno: i32,
     pub inhdetachpending: bool,
 }
+
+/// The full replacement row `MarkInheritDetached` writes back via
+/// `CatalogTupleUpdate` (the C `heap_copytuple` of the scanned tuple with
+/// `inhdetachpending` flipped to `true`). Every `pg_inherits` column is
+/// fixed-width and NOT NULL, so re-forming the whole row from the scanned
+/// values (with the one changed column) is bit-identical to the C's in-place
+/// `GETSTRUCT` field set. The carrier holds the new value of every column.
+#[derive(Clone, Copy, Debug)]
+pub struct PgInheritsUpdateRow {
+    pub inhrelid: Oid,
+    pub inhparent: Oid,
+    pub inhseqno: i32,
+    pub inhdetachpending: bool,
+}
