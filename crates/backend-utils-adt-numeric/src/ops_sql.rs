@@ -469,7 +469,7 @@ pub fn numeric_abs<'mcx>(mcx: Mcx<'mcx>, num: &[u8]) -> PgResult<PgVec<'mcx, u8>
     // numeric_abs (numeric.c:1393): operate directly on the packed format.
     let mut res = duplicate_numeric(mcx, num)?;
     use types_numeric::{numeric_is_short, NUMERIC_INF_SIGN_MASK, NUMERIC_SHORT_SIGN_MASK};
-    let hdr_word = u16::from_ne_bytes([res[VARHDRSZ_U], res[VARHDRSZ_U + 1]]);
+    let hdr_word = read_header_word(&res);
     if numeric_is_short(num) {
         write_header_word(&mut res, hdr_word & !NUMERIC_SHORT_SIGN_MASK);
     } else if numeric_is_special(num) {
@@ -487,7 +487,7 @@ pub fn numeric_uminus<'mcx>(mcx: Mcx<'mcx>, num: &[u8]) -> PgResult<PgVec<'mcx, 
     // numeric_uminus (numeric.c:1420).
     let mut res = duplicate_numeric(mcx, num)?;
     use types_numeric::{numeric_is_short, NUMERIC_INF_SIGN_MASK, NUMERIC_SHORT_SIGN_MASK};
-    let hdr_word = u16::from_ne_bytes([res[VARHDRSZ_U], res[VARHDRSZ_U + 1]]);
+    let hdr_word = read_header_word(&res);
 
     if numeric_is_special(num) {
         // Flip the sign if it's Inf or -Inf.
@@ -640,7 +640,7 @@ pub fn numeric<'mcx>(mcx: Mcx<'mcx>, num: &[u8], typmod: i32) -> PgResult<PgVec<
         && (crate::convert::numeric_can_be_short(dscale, weight) || !numeric_is_short(num))
     {
         let mut new = duplicate_numeric(mcx, num)?;
-        let hw = u16::from_ne_bytes([new[VARHDRSZ_U], new[VARHDRSZ_U + 1]]);
+        let hw = read_header_word(&new);
         let new_hw = if numeric_is_short(num) {
             (hw & !NUMERIC_SHORT_DSCALE_MASK)
                 | ((dscale as u16) << NUMERIC_SHORT_DSCALE_SHIFT)
@@ -1498,13 +1498,35 @@ fn numericvar_to_double_no_overflow(mcx: Mcx<'_>, var: &NumericVar<'_>) -> PgRes
 /// `VARHDRSZ` as a `usize` index into the byte image.
 const VARHDRSZ_U: usize = types_datum::VARHDRSZ;
 
+/// The `VARDATA_ANY` offset of the numeric struct header within an on-disk byte
+/// image: 1 for a 1-byte (short) varlena header, `VARHDRSZ` (4) for a long one.
+/// A numeric reaching these in-place manipulators is always inline (detoasted).
+#[inline]
+fn numeric_vardata_off(num: &[u8]) -> usize {
+    if types_numeric::varatt_is_1b(num) {
+        types_numeric::VARHDRSZ_SHORT
+    } else {
+        VARHDRSZ_U
+    }
+}
+
+/// Read the first 16-bit header word (`choice.n_header`) from a numeric byte
+/// image, native-endian, from the header-agnostic `VARDATA_ANY` offset.
+#[inline]
+fn read_header_word(num: &[u8]) -> u16 {
+    let off = numeric_vardata_off(num);
+    u16::from_ne_bytes([num[off], num[off + 1]])
+}
+
 /// Write the first 16-bit header word (`choice.n_header`) into a numeric byte
-/// image, native-endian, at byte offset `VARHDRSZ`.
+/// image, native-endian, at the header-agnostic `VARDATA_ANY` offset (1 for a
+/// short varlena header, `VARHDRSZ` for a long one).
 #[inline]
 fn write_header_word(num: &mut [u8], word: u16) {
+    let off = numeric_vardata_off(num);
     let b = word.to_ne_bytes();
-    num[VARHDRSZ_U] = b[0];
-    num[VARHDRSZ_U + 1] = b[1];
+    num[off] = b[0];
+    num[off + 1] = b[1];
 }
 
 // ---------------------------------------------------------------------------

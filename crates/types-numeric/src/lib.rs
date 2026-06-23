@@ -172,18 +172,74 @@ pub const NUMERIC_ABBREV_NINF: i64 = i64::MAX;
 // directly from bytes, so no raw pointers are needed.
 // ---------------------------------------------------------------------------
 
-/// Read the 16-bit header word (`choice.n_header`) from a numeric byte slice.
+/// `VARHDRSZ_SHORT` (varatt.h): a short (1-byte) varlena header.
+pub const VARHDRSZ_SHORT: usize = 1;
+
+/// `VARATT_IS_1B(PTR)` (varatt.h): true when the byte image carries a 1-byte
+/// ("short") varlena header. On little-endian the tag lives in the low bit
+/// (`0x01`); on big-endian it lives in the high bit (`0x80`).
 #[inline]
-fn header_word(num: &[u8]) -> u16 {
-    debug_assert!(num.len() >= VARHDRSZ + 2);
-    u16::from_ne_bytes([num[VARHDRSZ], num[VARHDRSZ + 1]])
+pub fn varatt_is_1b(num: &[u8]) -> bool {
+    if cfg!(target_endian = "big") {
+        (num[0] & 0x80) == 0x80
+    } else {
+        (num[0] & 0x01) == 0x01
+    }
 }
 
-/// Read the long-form weight word (`choice.n_long.n_weight`).
+/// `VARDATA_ANY` offset: the byte offset of the numeric struct (`NumericChoice`)
+/// within the on-disk byte image, which is 1 for a short varlena header and
+/// `VARHDRSZ` (4) for a long one. A numeric reaching these accessors is always
+/// inline (detoasted), never compressed/external.
 #[inline]
-fn long_weight_word(num: &[u8]) -> i16 {
-    debug_assert!(num.len() >= NUMERIC_HDRSZ);
-    i16::from_ne_bytes([num[VARHDRSZ + 2], num[VARHDRSZ + 3]])
+fn vardata_off(num: &[u8]) -> usize {
+    if varatt_is_1b(num) {
+        VARHDRSZ_SHORT
+    } else {
+        VARHDRSZ
+    }
+}
+
+/// `VARSIZE_ANY(PTR)` (varatt.h): total on-disk byte length of the value,
+/// reading either the 1-byte short or the 4-byte long varlena length word.
+#[inline]
+pub fn varsize_any(num: &[u8]) -> usize {
+    if varatt_is_1b(num) {
+        // VARSIZE_1B: (header >> 1) & 0x7F (little-endian) / header & 0x7F (big).
+        if cfg!(target_endian = "big") {
+            (num[0] & 0x7F) as usize
+        } else {
+            ((num[0] >> 1) & 0x7F) as usize
+        }
+    } else {
+        // VARSIZE_4B: (header >> 2) & 0x3FFFFFFF (little-endian) /
+        // header & 0x3FFFFFFF (big).
+        let hdr = u32::from_ne_bytes([num[0], num[1], num[2], num[3]]);
+        if cfg!(target_endian = "big") {
+            (hdr & 0x3FFF_FFFF) as usize
+        } else {
+            ((hdr >> 2) & 0x3FFF_FFFF) as usize
+        }
+    }
+}
+
+/// Read the 16-bit header word (`choice.n_header`) from a numeric byte slice,
+/// indexing from the header-agnostic `VARDATA_ANY` offset (short or long
+/// varlena header).
+#[inline]
+pub fn header_word(num: &[u8]) -> u16 {
+    let off = vardata_off(num);
+    debug_assert!(num.len() >= off + 2);
+    u16::from_ne_bytes([num[off], num[off + 1]])
+}
+
+/// Read the long-form weight word (`choice.n_long.n_weight`), indexing from the
+/// header-agnostic `VARDATA_ANY` offset.
+#[inline]
+pub fn long_weight_word(num: &[u8]) -> i16 {
+    let off = vardata_off(num);
+    debug_assert!(num.len() >= off + 4);
+    i16::from_ne_bytes([num[off + 2], num[off + 3]])
 }
 
 /// `NUMERIC_FLAGBITS`: the two high sign/format bits.
@@ -287,9 +343,15 @@ pub fn numeric_weight(num: &[u8]) -> i32 {
 }
 
 /// `NUMERIC_HEADER_SIZE`: header byte count for this value's format.
+///
+/// This is the count of header bytes *before the digit array*: the varlena
+/// header (1 for a short varlena, 4 for a long one — `VARDATA_ANY` relative)
+/// plus the 2-byte `n_header`, plus the 2-byte `n_weight` for the LONG numeric
+/// form. Mirrors C's `NUMERIC_HEADER_SIZE`, whose `VARHDRSZ` term is implicit in
+/// `VARDATA_ANY(n)` (i.e. it counts from the start of the on-disk image).
 #[inline]
 pub fn numeric_header_size(num: &[u8]) -> usize {
-    VARHDRSZ
+    vardata_off(num)
         + size_of::<u16>()
         + if numeric_header_is_short(num) {
             0

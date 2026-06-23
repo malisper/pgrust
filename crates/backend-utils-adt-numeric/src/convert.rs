@@ -348,56 +348,81 @@ fn corrupt(detail: &'static str) -> PgError {
 /// its 4-byte length header) into the structured [`NumericData`], validating
 /// the layout. Bytes are never fabricated.
 pub fn numeric_data_from_bytes(num: &[u8]) -> PgResult<NumericData> {
-    if num.len() < NUMERIC_HDRSZ_SHORT {
+    if num.is_empty() {
         return Err(corrupt("numeric byte image shorter than its minimum header"));
     }
-    if u32::from_ne_bytes([num[0], num[1], num[2], num[3]]) != varsize_header(num.len()) {
+    // VARSIZE_ANY: the on-disk length word, handling both a 1-byte (short) and a
+    // 4-byte (long) varlena header. The numeric reaching here is always inline
+    // (detoasted), never compressed/external.
+    let varsize = types_numeric::varsize_any(num);
+    if varsize != num.len() {
         return Err(corrupt("numeric varlena length word disagrees with image size"));
     }
+    // numeric_header_size accounts for the varlena header (short or long) plus
+    // the numeric struct header; require at least that many bytes present.
+    if num.len() < types_numeric::numeric_header_size(num) {
+        return Err(corrupt("numeric byte image shorter than its minimum header"));
+    }
 
-    let vl_len_ = i32::from_ne_bytes([num[0], num[1], num[2], num[3]]);
-    let header = u16::from_ne_bytes([num[VARHDRSZ], num[VARHDRSZ + 1]]);
+    // The numeric struct header word (`choice.n_header`), read from the
+    // header-agnostic VARDATA_ANY offset (so a short-varlena image reads it from
+    // byte 1, a long one from byte 4).
+    let header = types_numeric::header_word(num);
 
-    let choice = if numeric_is_special(num) {
-        if num.len() != NUMERIC_HDRSZ_SHORT {
+    if numeric_is_special(num) {
+        if num.len() != types_numeric::numeric_header_size(num) {
             return Err(corrupt("special numeric carries trailing bytes"));
         }
-        NumericChoice::NHeader(header)
-    } else {
-        // Finite value: digit-count must divide evenly.
-        let hdr_size = if numeric_header_is_short(num) {
-            NUMERIC_HDRSZ_SHORT
-        } else {
-            NUMERIC_HDRSZ
-        };
-        if num.len() < hdr_size || (num.len() - hdr_size) % size_of::<NumericDigit>() != 0 {
-            return Err(corrupt("numeric digit area has a fractional digit"));
-        }
-        let ndigits = numeric_ndigits(num, num.len());
-        let digit_bytes = numeric_digits(num);
-        let mut n_data = alloc::vec::Vec::new();
-        n_data
-            .try_reserve(ndigits)
-            .map_err(|_| corrupt("out of memory parsing numeric byte image"))?;
-        for i in 0..ndigits {
-            n_data.push(numeric_digit_at(digit_bytes, i));
-        }
+        // numeric_data_to_bytes re-emits a special as a 4-byte (long) varlena
+        // header + the 2-byte special header word: record that vl_len_.
+        let vl_len_ = varsize_header(NUMERIC_HDRSZ_SHORT) as i32;
+        return Ok(NumericData {
+            vl_len_,
+            choice: NumericChoice::NHeader(header),
+        });
+    }
 
-        if numeric_header_is_short(num) {
+    // Finite value: digit-count must divide evenly.
+    let hdr_size = types_numeric::numeric_header_size(num);
+    if (num.len() - hdr_size) % size_of::<NumericDigit>() != 0 {
+        return Err(corrupt("numeric digit area has a fractional digit"));
+    }
+    let ndigits = numeric_ndigits(num, num.len());
+    let digit_bytes = numeric_digits(num);
+    let mut n_data = alloc::vec::Vec::new();
+    n_data
+        .try_reserve(ndigits)
+        .map_err(|_| corrupt("out of memory parsing numeric byte image"))?;
+    for i in 0..ndigits {
+        n_data.push(numeric_digit_at(digit_bytes, i));
+    }
+
+    // numeric_data_to_bytes re-emits with a 4-byte (long) varlena header,
+    // choosing the SHORT or LONG numeric struct form from the choice variant;
+    // record vl_len_ for that re-serialized length.
+    let (choice, reser_len) = if numeric_header_is_short(num) {
+        (
             NumericChoice::NShort(NumericShort {
                 n_header: header,
                 n_data,
-            })
-        } else {
+            }),
+            NUMERIC_HDRSZ_SHORT + ndigits * size_of::<NumericDigit>(),
+        )
+    } else {
+        (
             NumericChoice::NLong(NumericLong {
                 n_sign_dscale: header,
-                n_weight: i16::from_ne_bytes([num[VARHDRSZ + 2], num[VARHDRSZ + 3]]),
+                n_weight: types_numeric::long_weight_word(num),
                 n_data,
-            })
-        }
+            }),
+            NUMERIC_HDRSZ + ndigits * size_of::<NumericDigit>(),
+        )
     };
 
-    Ok(NumericData { vl_len_, choice })
+    Ok(NumericData {
+        vl_len_: varsize_header(reser_len) as i32,
+        choice,
+    })
 }
 
 /// `numeric_data_to_bytes`: serialize a [`NumericData`] into a fresh charged
