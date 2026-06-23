@@ -227,6 +227,18 @@ pub fn checkDataDir() -> PgResult<()> {
 /// `ChangeToDataDir()` (`miscinit.c:459`): chdir into `DataDir`.
 pub fn ChangeToDataDir() -> PgResult<()> {
     let data_dir = backend_utils_init_small::globals::DataDir().expect("DataDir set");
+    // On wasm64-unknown-unknown there is no process cwd and
+    // `std::env::set_current_dir` is unsupported (it errors). The host VFS
+    // harness maps the datadir as its preopened root and resolves every guest
+    // path (absolute or relative) under it, so the chdir is unnecessary — the
+    // data-dir-relative paths the backend forms after this point already
+    // resolve correctly. Treat the chdir as a successful no-op.
+    #[cfg(target_family = "wasm")]
+    {
+        let _ = &data_dir;
+        return Ok(());
+    }
+    #[cfg(not(target_family = "wasm"))]
     if std::env::set_current_dir(&data_dir).is_err() {
         let e = std::io::Error::last_os_error();
         // C carries errcode_for_file_access() (miscinit.c:465).
