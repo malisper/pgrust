@@ -390,6 +390,10 @@ pub fn init_all() {
     backend_replication_logical_origin::init_seams();
     backend_replication_logical_proto::init_seams();
     backend_replication_logical_reorderbuffer::init_seams();
+    // The builtin `test_decoding` output plugin (contrib/test_decoding). Registers
+    // itself into the Phase-0 builtin output-plugin registry; consulted at
+    // runtime by LoadOutputPlugin, so order-independent.
+    contrib_test_decoding::init_seams();
     backend_replication_logical_slotsync::init_seams();
     backend_replication_logical_snapbuild::init_seams();
     backend_replication_syncrep_scanner::init_seams();

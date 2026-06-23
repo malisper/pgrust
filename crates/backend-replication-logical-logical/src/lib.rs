@@ -799,6 +799,18 @@ pub fn OutputPluginUpdateProgress(
     Ok(())
 }
 
+/// The `(key, value)` DefElem pairs of `ctx->output_plugin_options` — the list
+/// the decode caller deconstructed from the `text[]` options and forwarded to
+/// the plugin's `startup_cb`. The output plugin (test_decoding / pgoutput) reads
+/// it in `pg_decode_startup` to parse `include-xids`/`skip-empty-xacts`/etc.
+pub fn output_plugin_options(
+    ctx: &LogicalDecodingContext,
+) -> Vec<(String, Option<String>)> {
+    backend_replication_logical_logical_seams::output_plugin_options_list(
+        ctx.output_plugin_options,
+    )
+}
+
 /// `LoadOutputPlugin` (logical.c:735). The shared-library load +
 /// `plugin_init(callbacks)` happen behind the dfmgr seam (it raises the
 /// "_PG_output_plugin_init symbol" error if the symbol is missing); the

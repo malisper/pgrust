@@ -466,6 +466,12 @@ pub struct ResolvedChange {
     pub newtuple: Option<DecodedTuple>,
     /// `change->data.tp.clear_toast_afterwards`.
     pub clear_toast_afterwards: bool,
+    /// `change->data.truncate.cascade` (only meaningful for `kind ==
+    /// Truncate`; `false` for heap changes).
+    pub truncate_cascade: bool,
+    /// `change->data.truncate.restart_seqs` (only meaningful for `kind ==
+    /// Truncate`).
+    pub truncate_restart_seqs: bool,
 }
 
 seam_core::seam!(
@@ -501,4 +507,32 @@ seam_core::seam!(
     /// Resolve a `MessageHandle` (the logical-message body `const char *`) to
     /// its bytes. Valid only for the duration of the in-flight message callback.
     pub fn resolve_message_handle(message: types_logical::MessageHandle) -> Vec<u8>
+);
+
+// -------------------------------------------------------------------------
+// `ReorderBufferTXN *` field accessors for the output plugin.
+//
+// The output plugin (test_decoding / pgoutput) reads a few scalar fields off
+// the `txn` handle the change/commit/begin callbacks carry: `txn->xid`,
+// `txn->gid` (2PC), and `txn->xact_time` (the commit/prepare time union, used
+// when `include-timestamp` is set). These are owner-private fields, so the
+// reorder-buffer owner projects them through these handle-keyed seams.
+// -------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `txn->xid` — the transaction id of the `TxnHandle` carried into an
+    /// output-plugin callback.
+    pub fn txn_xid(txn: types_logical::TxnHandle) -> types_core::primitive::TransactionId
+);
+seam_core::seam!(
+    /// `txn->gid` — the two-phase commit GID bytes (NUL-stripped) for a prepared
+    /// transaction, or an empty vec when unset (the plugin only reads this in the
+    /// 2PC callbacks where C guarantees it is non-NULL).
+    pub fn txn_gid(txn: types_logical::TxnHandle) -> Vec<u8>
+);
+seam_core::seam!(
+    /// `txn->xact_time.commit_time` / `prepare_time` (same union storage) — the
+    /// transaction's commit/prepare timestamp, read by the plugin when
+    /// `include-timestamp` is enabled.
+    pub fn txn_xact_time(txn: types_logical::TxnHandle) -> types_core::primitive::TimestampTz
 );

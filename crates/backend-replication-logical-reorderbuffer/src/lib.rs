@@ -1334,6 +1334,18 @@ impl ReorderBuffer {
         self.by_txn.get(&xid).map(|t| t.is_prepared()).unwrap_or(false)
     }
 
+    /// `txn->gid` — the 2PC commit GID bytes (NUL-stripped), or empty when
+    /// unset. `Some` only when `xid` names a live txn in this buffer.
+    pub fn txn_gid(&self, xid: TransactionId) -> Option<Vec<u8>> {
+        self.by_txn.get(&xid).map(|t| t.gid.clone().unwrap_or_default())
+    }
+
+    /// `txn->xact_time` (commit/prepare/abort time union). `Some` only when
+    /// `xid` names a live txn in this buffer.
+    pub fn txn_xact_time(&self, xid: TransactionId) -> Option<TimestampTz> {
+        self.by_txn.get(&xid).map(|t| t.xact_time)
+    }
+
     // -----------------------------------------------------------------------
     // Output-plugin wiring + statistics (logical.c seams)
     // -----------------------------------------------------------------------

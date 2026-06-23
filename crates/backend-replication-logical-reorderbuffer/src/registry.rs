@@ -194,6 +194,41 @@ fn seam_resolve_change_handle(_change: ChangeHandle) -> seams::ResolvedChange {
     })
 }
 
+/// `txn->gid` for a `TxnHandle`. The handle encodes the xid; we scan the live
+/// reorder buffers for the txn (in practice one buffer is active during a
+/// callback). Empty when the txn carries no GID (the plugin only reads this in
+/// the 2PC callbacks, where C guarantees a non-NULL gid).
+fn seam_txn_gid_by_handle(txn: TxnHandle) -> alloc::vec::Vec<u8> {
+    let xid = txn_handle_to_xid(txn);
+    BUFFERS.with(|b| {
+        let tab = b.borrow();
+        for slot in tab.iter() {
+            if let Some(rb) = slot {
+                if let Some(gid) = rb.txn_gid(xid) {
+                    return gid;
+                }
+            }
+        }
+        alloc::vec::Vec::new()
+    })
+}
+
+/// `txn->xact_time` (commit/prepare time union) for a `TxnHandle`.
+fn seam_txn_xact_time_by_handle(txn: TxnHandle) -> types_core::primitive::TimestampTz {
+    let xid = txn_handle_to_xid(txn);
+    BUFFERS.with(|b| {
+        let tab = b.borrow();
+        for slot in tab.iter() {
+            if let Some(rb) = slot {
+                if let Some(t) = rb.txn_xact_time(xid) {
+                    return t;
+                }
+            }
+        }
+        0
+    })
+}
+
 /// Publish the logical-message `prefix`/body bytes, run `f` with their handles,
 /// then clear the scratch. Mirrors C passing `change->data.msg.{prefix,message}`
 /// (`const char *`) straight into the synchronous message callback.
@@ -721,6 +756,11 @@ pub fn init_seams() {
     s::resolve_change_handle::set(seam_resolve_change_handle);
     s::resolve_prefix_handle::set(seam_resolve_prefix_handle);
     s::resolve_message_handle::set(seam_resolve_message_handle);
+
+    // `ReorderBufferTXN *` field accessors for the output plugin.
+    s::txn_xid::set(|txn| txn_handle_to_xid(txn));
+    s::txn_gid::set(seam_txn_gid_by_handle);
+    s::txn_xact_time::set(seam_txn_xact_time_by_handle);
 
     // WAL-startup cleanup of leftover on-disk spill files (StartupXLOG).
     s::startup_reorder_buffer::set(crate::spill::startup_reorder_buffer);

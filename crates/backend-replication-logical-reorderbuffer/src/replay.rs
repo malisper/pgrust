@@ -1018,6 +1018,13 @@ impl ReorderBuffer {
             // RelationsHandle. Use a zero locator placeholder.
             _ => (RelFileLocator::default(), None, None, false),
         };
+        // TRUNCATE flags (`change->data.truncate.{cascade,restart_seqs}`).
+        let (truncate_cascade, truncate_restart_seqs) = match &change.data {
+            ReorderBufferChangeData::Truncate { cascade, restart_seqs, .. } => {
+                (*cascade, *restart_seqs)
+            }
+            _ => (false, false),
+        };
         seams::ResolvedChange {
             lsn: change.lsn,
             kind,
@@ -1025,6 +1032,8 @@ impl ReorderBuffer {
             oldtuple,
             newtuple,
             clear_toast_afterwards,
+            truncate_cascade,
+            truncate_restart_seqs,
         }
     }
 

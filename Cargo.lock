@@ -24793,6 +24793,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "contrib-test-decoding"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-detoast-seams",
+ "backend-access-common-heaptuple",
+ "backend-access-common-relation-seams",
+ "backend-replication-logical-logical",
+ "backend-replication-logical-reorderbuffer-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-ruleutils-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-dfmgr-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-mmgr-mcxt-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-logical",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -25726,6 +25755,7 @@ dependencies = [
  "contrib-amcheck-verify-common",
  "contrib-amcheck-verify-nbtree",
  "contrib-pg-prewarm",
+ "contrib-test-decoding",
  "interfaces-libpq-fe",
  "interfaces-libpq-legacy-pqsignal",
  "mcx",

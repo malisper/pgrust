@@ -194,3 +194,47 @@ seam_core::seam!(
         xid: TransactionId,
     ) -> PgResult<()>
 );
+
+// -------------------------------------------------------------------------
+// `ctx->output_plugin_options` (List* of DefElem) backing store.
+//
+// In C the decode caller (walsender START_REPLICATION / logicalfuncs
+// pg_logical_slot_get_changes_guts) deconstructs the `text[]` options array
+// into a `List *` of `DefElem`, stored as `ctx->output_plugin_options` and
+// forwarded verbatim to the plugin's startup callback. The repo carries
+// `output_plugin_options` as an opaque `OutputPluginOptionsHandle`; this store
+// backs each handle with the parsed `(key, value)` pairs. The default handle
+// (`0`, NIL) is the empty list — every current caller that passes no options.
+// -------------------------------------------------------------------------
+
+::std::thread_local! {
+    static OPTION_LISTS: core::cell::RefCell<Vec<Vec<(alloc::string::String, Option<alloc::string::String>)>>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
+/// Register a parsed output-plugin option list and return its handle. The
+/// caller (logicalfuncs / walsender) builds this from the `text[]` options.
+pub fn register_output_plugin_options(
+    opts: Vec<(alloc::string::String, Option<alloc::string::String>)>,
+) -> types_logical::OutputPluginOptionsHandle {
+    OPTION_LISTS.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.is_empty() {
+            // Reserve slot 0 as the NIL (empty) list.
+            s.push(Vec::new());
+        }
+        s.push(opts);
+        types_logical::OutputPluginOptionsHandle(s.len() - 1)
+    })
+}
+
+/// The `(key, value)` DefElem pairs of an `OutputPluginOptionsHandle`. The
+/// default handle (`0`) is the empty list.
+pub fn output_plugin_options_list(
+    handle: types_logical::OutputPluginOptionsHandle,
+) -> Vec<(alloc::string::String, Option<alloc::string::String>)> {
+    OPTION_LISTS.with(|s| {
+        let s = s.borrow();
+        s.get(handle.0).cloned().unwrap_or_default()
+    })
+}
