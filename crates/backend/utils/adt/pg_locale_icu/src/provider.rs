@@ -678,9 +678,119 @@ pub fn non_utf8_unsupported(what: &str) -> PgError {
     .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
 }
 
+// ---------------------------------------------------------------------------
+// `PG_REGEX_STRATEGY_ICU` character classification (`regc_pg_locale.c`)
+//
+// The `pg_wc_is*`/`pg_wc_toupper`/`pg_wc_tolower` ICU legs call ICU's
+// locale-independent `uchar.h` Unicode-property functions — they take only the
+// code point (no collator). `pg_wchar` is a `u32`; ICU `UChar32` is `i32`. The
+// engine has already handled the C-strategy and the `is_default` ASCII-forcing
+// before these are reached.
+// ---------------------------------------------------------------------------
+
+/// `c as UChar32`. `pg_wchar` is a 32-bit Unicode code point; ICU's `UChar32`
+/// is a signed `int32_t`, and the `u_is*` functions return `0` for any out-of
+/// range code point, so the lossy cast is safe (a code point > `i32::MAX`
+/// cannot occur).
+#[inline]
+fn as_uchar32(c: u32) -> ffi::UChar32 {
+    c as ffi::UChar32
+}
+
+/// `u_isdigit(c)` (`PG_REGEX_STRATEGY_ICU` leg of `pg_wc_isdigit`).
+pub fn regex_isdigit_icu(c: u32) -> bool {
+    // SAFETY: u_isdigit is a pure Unicode-property probe accepting any UChar32.
+    unsafe { ffi::u_isdigit(as_uchar32(c)) != 0 }
+}
+
+/// `u_isalpha(c)` (`pg_wc_isalpha`).
+pub fn regex_isalpha_icu(c: u32) -> bool {
+    // SAFETY: pure Unicode-property probe accepting any UChar32.
+    unsafe { ffi::u_isalpha(as_uchar32(c)) != 0 }
+}
+
+/// `u_isalnum(c)` (`pg_wc_isalnum`).
+pub fn regex_isalnum_icu(c: u32) -> bool {
+    // SAFETY: pure Unicode-property probe accepting any UChar32.
+    unsafe { ffi::u_isalnum(as_uchar32(c)) != 0 }
+}
+
+/// `u_isupper(c)` (`pg_wc_isupper`).
+pub fn regex_isupper_icu(c: u32) -> bool {
+    // SAFETY: pure Unicode-property probe accepting any UChar32.
+    unsafe { ffi::u_isupper(as_uchar32(c)) != 0 }
+}
+
+/// `u_islower(c)` (`pg_wc_islower`).
+pub fn regex_islower_icu(c: u32) -> bool {
+    // SAFETY: pure Unicode-property probe accepting any UChar32.
+    unsafe { ffi::u_islower(as_uchar32(c)) != 0 }
+}
+
+/// `u_isgraph(c)` (`pg_wc_isgraph`).
+pub fn regex_isgraph_icu(c: u32) -> bool {
+    // SAFETY: pure Unicode-property probe accepting any UChar32.
+    unsafe { ffi::u_isgraph(as_uchar32(c)) != 0 }
+}
+
+/// `u_isprint(c)` (`pg_wc_isprint`).
+pub fn regex_isprint_icu(c: u32) -> bool {
+    // SAFETY: pure Unicode-property probe accepting any UChar32.
+    unsafe { ffi::u_isprint(as_uchar32(c)) != 0 }
+}
+
+/// `u_ispunct(c)` (`pg_wc_ispunct`).
+pub fn regex_ispunct_icu(c: u32) -> bool {
+    // SAFETY: pure Unicode-property probe accepting any UChar32.
+    unsafe { ffi::u_ispunct(as_uchar32(c)) != 0 }
+}
+
+/// `u_isspace(c)` (`pg_wc_isspace`).
+pub fn regex_isspace_icu(c: u32) -> bool {
+    // SAFETY: pure Unicode-property probe accepting any UChar32.
+    unsafe { ffi::u_isspace(as_uchar32(c)) != 0 }
+}
+
+/// `u_toupper(c)` (`pg_wc_toupper` ICU leg).
+pub fn regex_toupper_icu(c: u32) -> u32 {
+    // SAFETY: u_toupper is a pure case-mapping probe accepting any UChar32.
+    unsafe { ffi::u_toupper(as_uchar32(c)) as u32 }
+}
+
+/// `u_tolower(c)` (`pg_wc_tolower` ICU leg).
+pub fn regex_tolower_icu(c: u32) -> u32 {
+    // SAFETY: u_tolower is a pure case-mapping probe accepting any UChar32.
+    unsafe { ffi::u_tolower(as_uchar32(c)) as u32 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn icu_regex_classification_matches_unicode_properties() {
+        // ASCII baseline (the `regc_pg_locale.c` PG_REGEX_STRATEGY_ICU legs).
+        assert!(regex_isalpha_icu('a' as u32));
+        assert!(regex_isalpha_icu('Z' as u32));
+        assert!(!regex_isalpha_icu('1' as u32));
+        assert!(regex_isdigit_icu('7' as u32));
+        assert!(!regex_isdigit_icu('a' as u32));
+        assert!(regex_isalnum_icu('a' as u32) && regex_isalnum_icu('9' as u32));
+        assert!(regex_isupper_icu('A' as u32) && !regex_isupper_icu('a' as u32));
+        assert!(regex_islower_icu('a' as u32) && !regex_islower_icu('A' as u32));
+        assert!(regex_isspace_icu(' ' as u32) && !regex_isspace_icu('a' as u32));
+        assert!(regex_ispunct_icu('.' as u32) && !regex_ispunct_icu('a' as u32));
+        assert!(regex_isgraph_icu('a' as u32) && !regex_isgraph_icu(' ' as u32));
+        assert!(regex_isprint_icu(' ' as u32) && regex_isprint_icu('a' as u32));
+        // Non-ASCII Unicode: U+00E4 'ä' is a lowercase letter; U+00C4 'Ä' upper.
+        assert!(regex_isalpha_icu(0x00E4) && regex_islower_icu(0x00E4));
+        assert!(regex_isalpha_icu(0x00C4) && regex_isupper_icu(0x00C4));
+        // Case mapping (the `pg_wc_toupper`/`pg_wc_tolower` ICU legs).
+        assert_eq!(regex_toupper_icu('a' as u32), 'A' as u32);
+        assert_eq!(regex_tolower_icu('A' as u32), 'a' as u32);
+        assert_eq!(regex_toupper_icu(0x00E4), 0x00C4); // ä -> Ä
+        assert_eq!(regex_tolower_icu(0x00C4), 0x00E4); // Ä -> ä
+    }
 
     #[test]
     fn icu_compare_en_us_orders_case_then_letters() {

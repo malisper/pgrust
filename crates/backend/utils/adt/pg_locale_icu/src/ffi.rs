@@ -19,6 +19,9 @@ use core::ffi::c_char;
 
 /// `UChar` (`umachine.h`) — ICU's 16-bit code unit.
 pub type UChar = u16;
+/// `UChar32` (`umachine.h`) — ICU's 32-bit code point (a signed `int32_t`; the
+/// `u_is*`/`u_to*` character-property functions take and return it).
+pub type UChar32 = i32;
 /// `UErrorCode` (`utypes.h`) — `U_ZERO_ERROR == 0`; `> 0` is failure, `< 0` is a
 /// warning. `U_STRING_NOT_TERMINATED_WARNING == -124`,
 /// `U_BUFFER_OVERFLOW_ERROR == 15`.
@@ -228,6 +231,45 @@ extern "C" {
         src_length: i32,
         p_error_code: *mut UErrorCode,
     ) -> i32;
+}
+
+// The ICU `uchar.h` single-character Unicode-property functions. These are
+// locale-independent (they probe the Unicode Character Database), so they take
+// only the code point — the `PG_REGEX_STRATEGY_ICU` legs of `regc_pg_locale.c`
+// call them with no collator. Symbols carry the same version suffix.
+extern "C" {
+    #[link_name = concat!("u_isdigit_", env!("PG_ICU_VERSION_MAJOR"))]
+    pub fn u_isdigit(c: UChar32) -> UBool;
+
+    #[link_name = concat!("u_isalpha_", env!("PG_ICU_VERSION_MAJOR"))]
+    pub fn u_isalpha(c: UChar32) -> UBool;
+
+    #[link_name = concat!("u_isalnum_", env!("PG_ICU_VERSION_MAJOR"))]
+    pub fn u_isalnum(c: UChar32) -> UBool;
+
+    #[link_name = concat!("u_isupper_", env!("PG_ICU_VERSION_MAJOR"))]
+    pub fn u_isupper(c: UChar32) -> UBool;
+
+    #[link_name = concat!("u_islower_", env!("PG_ICU_VERSION_MAJOR"))]
+    pub fn u_islower(c: UChar32) -> UBool;
+
+    #[link_name = concat!("u_isgraph_", env!("PG_ICU_VERSION_MAJOR"))]
+    pub fn u_isgraph(c: UChar32) -> UBool;
+
+    #[link_name = concat!("u_isprint_", env!("PG_ICU_VERSION_MAJOR"))]
+    pub fn u_isprint(c: UChar32) -> UBool;
+
+    #[link_name = concat!("u_ispunct_", env!("PG_ICU_VERSION_MAJOR"))]
+    pub fn u_ispunct(c: UChar32) -> UBool;
+
+    #[link_name = concat!("u_isspace_", env!("PG_ICU_VERSION_MAJOR"))]
+    pub fn u_isspace(c: UChar32) -> UBool;
+
+    #[link_name = concat!("u_toupper_", env!("PG_ICU_VERSION_MAJOR"))]
+    pub fn u_toupper(c: UChar32) -> UChar32;
+
+    #[link_name = concat!("u_tolower_", env!("PG_ICU_VERSION_MAJOR"))]
+    pub fn u_tolower(c: UChar32) -> UChar32;
 }
 
 /// Opaque `UConverter`.

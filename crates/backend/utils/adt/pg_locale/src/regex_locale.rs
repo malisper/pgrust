@@ -46,8 +46,32 @@ pub fn regex_wc_isclass(collation: ::types_core::primitive::Oid, class: RegexWcC
         // Provider says builtin but info isn't (cannot happen for a resolved
         // builtin entry); C/POSIX builtin locales use posix = !casemap_full = true.
         (_, CollProvider::Builtin) => builtin::regex_wc_isclass_builtin::call(class, c, true),
-        // ICU is disabled; the C-locale strategy never crosses this seam.
+        // PG_REGEX_STRATEGY_ICU: ICU's locale-independent uchar.h probes.
+        #[cfg(feature = "icu")]
+        (LocaleInfo::Icu(_), _) => regex_wc_isclass_icu(class, c),
+        // The C-locale strategy never crosses this seam; an unhandled provider
+        // (e.g. ICU compiled out) is conservatively false.
         _ => false,
+    }
+}
+
+/// Map a `RegexWcClass` to the matching ICU `u_is*` probe
+/// (`PG_REGEX_STRATEGY_ICU` legs of `regc_pg_locale.c`). ICU's character
+/// property functions are locale-independent, so the `IcuLocale` (collator) is
+/// not consulted.
+#[cfg(feature = "icu")]
+fn regex_wc_isclass_icu(class: RegexWcClass, c: PgWChar) -> bool {
+    use pg_locale_icu::provider as icu;
+    match class {
+        RegexWcClass::Digit => icu::regex_isdigit_icu(c),
+        RegexWcClass::Alpha => icu::regex_isalpha_icu(c),
+        RegexWcClass::Alnum => icu::regex_isalnum_icu(c),
+        RegexWcClass::Upper => icu::regex_isupper_icu(c),
+        RegexWcClass::Lower => icu::regex_islower_icu(c),
+        RegexWcClass::Graph => icu::regex_isgraph_icu(c),
+        RegexWcClass::Print => icu::regex_isprint_icu(c),
+        RegexWcClass::Punct => icu::regex_ispunct_icu(c),
+        RegexWcClass::Space => icu::regex_isspace_icu(c),
     }
 }
 
@@ -64,6 +88,8 @@ pub fn regex_wc_toupper(collation: ::types_core::primitive::Oid, c: PgWChar) -> 
         (LocaleInfo::Builtin { .. }, _) | (_, CollProvider::Builtin) => {
             builtin::regex_wc_toupper_builtin::call(c)
         }
+        #[cfg(feature = "icu")]
+        (LocaleInfo::Icu(_), _) => pg_locale_icu::provider::regex_toupper_icu(c),
         _ => c,
     }
 }
@@ -81,6 +107,8 @@ pub fn regex_wc_tolower(collation: ::types_core::primitive::Oid, c: PgWChar) -> 
         (LocaleInfo::Builtin { .. }, _) | (_, CollProvider::Builtin) => {
             builtin::regex_wc_tolower_builtin::call(c)
         }
+        #[cfg(feature = "icu")]
+        (LocaleInfo::Icu(_), _) => pg_locale_icu::provider::regex_tolower_icu(c),
         _ => c,
     }
 }
