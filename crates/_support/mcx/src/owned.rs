@@ -6,9 +6,9 @@
 //! Why this needs a special type: state borrowing its sibling context field
 //! is a self-referential struct, which safe Rust rejects because moving the
 //! struct would relocate the context out from under the borrow. The fix is
-//! to heap-pin the context (`Box` — its address survives moves of the
-//! wrapper) and erase the borrow's lifetime internally; the API keeps the
-//! erasure sound by construction:
+//! to heap-allocate the context (its address survives moves of the wrapper)
+//! and erase the borrow's lifetime internally; the API keeps the erasure
+//! sound by construction:
 //!
 //! - the state can only be **built** through a closure generic over the
 //!   context lifetime (`for<'mcx>`), so it cannot borrow anything except the
@@ -19,8 +19,22 @@
 //!   arbitrary lifetime and therefore cannot smuggle borrows out;
 //! - drop order is state **then** context — load-bearing, because the
 //!   state's destructors deallocate into the context.
+//!
+//! Aliasing discipline (Miri / Stacked + Tree Borrows): the self-reference
+//! must NOT go through a tagged `&MemoryContext` derived from a local `Box`,
+//! because moving that `Box` into the wrapper performs a `Unique` retag that
+//! invalidates the borrow the state still holds (a sibling-retag violation,
+//! the same class the `BumpDrop` arena hit). Instead the boxed context's
+//! provenance is **exposed** at construction ([`core::ptr::expose_provenance`])
+//! and the long-lived `&'static MemoryContext` the state borrows is rebuilt
+//! from that exposed address ([`core::ptr::with_exposed_provenance`]) — an
+//! exposed pointer is not a tracked sibling in the borrow stack, so no later
+//! retag of the wrapper invalidates it. The wrapper stores the *raw* heap
+//! address (not a `Box`), and `Drop` reconstitutes the `Box` from it to free
+//! the context after the state.
 
 use core::mem::ManuallyDrop;
+use core::ptr::NonNull;
 
 use ::types_error::PgResult;
 
@@ -51,7 +65,24 @@ macro_rules! bind {
     };
 }
 
-/// A heap-pinned [`MemoryContext`] together with state `B::Out<'_>` allocated
+/// Rebuild a shared `&MemoryContext` from a stable heap pointer **through
+/// exposed provenance**, so the resulting reference is not a borrow-stack
+/// sibling of `p` (or of whatever field holds `p`). Used for every access path
+/// into the owned context, keeping the state's long-lived self-borrow valid
+/// across retags of the wrapper.
+///
+/// # Safety
+/// `p` must point to a live, initialized `MemoryContext` whose provenance was
+/// exposed (here, via [`core::ptr::expose_provenance`] in [`McxOwned::try_new`]),
+/// and the returned reference must not outlive that liveness (callers bound it
+/// to a borrow of `self`, or — at construction — to a frame that ends before the
+/// context is freed).
+unsafe fn ctx_from_exposed<'a>(p: *const MemoryContext) -> &'a MemoryContext {
+    let exposed = p.expose_provenance();
+    &*core::ptr::with_exposed_provenance::<MemoryContext>(exposed)
+}
+
+/// A heap-allocated [`MemoryContext`] together with state `B::Out<'_>` allocated
 /// in it — movable and storable as one value (`'static`-friendly if the state
 /// borrows nothing else).
 ///
@@ -70,10 +101,17 @@ macro_rules! bind {
 /// assert_eq!(stolen.len(), 0);
 /// ```
 pub struct McxOwned<B: Bind> {
-    /// Field order is NOT the drop mechanism (both are `ManuallyDrop`); the
-    /// explicit `Drop` impl drops state before context.
+    /// Field order is NOT the drop mechanism (both are dropped explicitly); the
+    /// `Drop` impl drops state before freeing the context.
     state: ManuallyDrop<B::Out<'static>>,
-    ctx: ManuallyDrop<alloc::boxed::Box<MemoryContext>>,
+    /// The owning context's stable heap address, held as a raw pointer with
+    /// **exposed provenance** (recorded via [`core::ptr::expose_provenance`] in
+    /// [`try_new`](McxOwned::try_new)). It is NOT a `Box`/`&` field on purpose:
+    /// a tagged owner would make the `&'static MemoryContext` the state borrows
+    /// a sibling in the borrow stack, which a retag of this field would
+    /// invalidate. The address is the sole owner of the heap allocation; `Drop`
+    /// reconstitutes the `Box` from it (after the state) to free it.
+    ctx: NonNull<MemoryContext>,
 }
 
 impl<B: Bind> McxOwned<B> {
@@ -86,15 +124,34 @@ impl<B: Bind> McxOwned<B> {
         ctx: MemoryContext,
         build: impl for<'mcx> FnOnce(Mcx<'mcx>) -> PgResult<B::Out<'mcx>>,
     ) -> PgResult<Self> {
-        let ctx = alloc::boxed::Box::new(ctx);
-        // SAFETY: extending the borrow of the boxed context to 'static.
-        // Sound because the box's heap address is stable across moves of
-        // `self`, the context is dropped only after the state (explicit Drop
-        // impl), and `Out<'static>` never escapes this module at 'static —
-        // every access path re-shortens the lifetime.
-        let mcx: Mcx<'static> = unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(ctx.mcx()) };
-        let state = build(mcx)?;
-        Ok(McxOwned { state: ManuallyDrop::new(state), ctx: ManuallyDrop::new(ctx) })
+        // Move the context onto the heap so its address is stable across moves
+        // of `self`, then take ownership as a raw pointer and **expose** its
+        // provenance. The state's long-lived borrow is rebuilt from that
+        // exposed address rather than from a box owner, so no later retag of
+        // `self.ctx` invalidates it.
+        let raw: *mut MemoryContext = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(ctx));
+        // SAFETY: `raw` is the live, initialized context just heap-allocated.
+        // `ctx_from_exposed` exposes its provenance and rebuilds an unsibling'd
+        // `&'static MemoryContext`. The `'static` is bounded in practice by the
+        // wrapper: every public access path re-shortens it, and the allocation
+        // is freed only in `Drop`, after the state.
+        let ctx_ref: &'static MemoryContext = unsafe { ctx_from_exposed(raw) };
+        match build(ctx_ref.mcx()) {
+            Ok(state) => Ok(McxOwned {
+                state: ManuallyDrop::new(state),
+                // SAFETY: `raw` came from `Box::into_raw`, hence non-null.
+                ctx: unsafe { NonNull::new_unchecked(raw) },
+            }),
+            Err(e) => {
+                // Build failed; the state was never created, so reclaim the
+                // context immediately by reconstituting the `Box`.
+                // SAFETY: `raw` is the live, sole-owner pointer just produced by
+                // `Box::into_raw`; the borrow above is dead (`build` consumed the
+                // `Mcx` and returned), so this is the unique free.
+                drop(unsafe { alloc::boxed::Box::from_raw(raw) });
+                Err(e)
+            }
+        }
     }
 
     /// Shared access through a lifetime-universal closure.
@@ -121,23 +178,29 @@ impl<B: Bind> McxOwned<B> {
     /// The owning context — for accounting (`used`/`stats`), naming, and
     /// linking it as an accounting child at creation time.
     pub fn context(&self) -> &MemoryContext {
-        &self.ctx
+        // SAFETY: `self.ctx` points to the live heap context (freed only in
+        // `Drop`); the returned borrow is reshortened to `&self`. Rebuilding
+        // through the exposed address keeps this access from invalidating the
+        // state's own long-lived borrow.
+        unsafe { ctx_from_exposed(self.ctx.as_ptr()) }
     }
 }
 
 impl<B: Bind> Drop for McxOwned<B> {
     fn drop(&mut self) {
-        // SAFETY: each ManuallyDrop is dropped exactly once, state first —
-        // its destructors deallocate into the still-live context.
+        // SAFETY: `state` is dropped exactly once, first — its destructors
+        // deallocate into the still-live context. We then reconstitute the
+        // `Box` from the heap address and drop it (the unique free of the
+        // context), exactly once, after the state.
         unsafe {
             ManuallyDrop::drop(&mut self.state);
-            ManuallyDrop::drop(&mut self.ctx);
+            drop(alloc::boxed::Box::from_raw(self.ctx.as_ptr()));
         }
     }
 }
 
 impl<B: Bind> core::fmt::Debug for McxOwned<B> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("McxOwned").field("ctx", &**self.ctx).finish_non_exhaustive()
+        f.debug_struct("McxOwned").field("ctx", self.context()).finish_non_exhaustive()
     }
 }
