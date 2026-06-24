@@ -139,7 +139,16 @@ pub fn proc_exit(code: i32, my_pid: i32) -> ! {
     // (its TLS lists may already be mid-destruction by the time it fires).
     PROC_EXIT_DONE.store(true, Ordering::SeqCst);
 
-    std::process::exit(code)
+    // `std::process::exit` traps (`unreachable`) on wasm64-unknown-unknown (no
+    // exit syscall); route to the host `proc_exit` import there.
+    #[cfg(not(target_family = "wasm"))]
+    {
+        std::process::exit(code)
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        wasm_libc_shim::proc_exit(code)
+    }
 }
 
 /// `proc_exit_prepare(int code)` — code shared between [`proc_exit`] and the
