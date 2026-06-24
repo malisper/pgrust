@@ -305,6 +305,12 @@ fn interactive_backend_regress(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
     in_buf.reset();
     let mut line: Vec<u8> = Vec::new();
     let mut saw_any = false;
+    // psql echoes leading comment lines but does NOT include them in the query
+    // string it sends to the server, so the parser's error position (and thus the
+    // `LINE n:` echo) is relative to the statement alone. Mirror that: until the
+    // first line carrying actual statement text, echo comment-only lines but do
+    // NOT add them to `in_buf`.
+    let mut stmt_started = false;
     loop {
         let c = interactive_getc()?;
         if c == EOF {
@@ -312,7 +318,9 @@ fn interactive_backend_regress(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
             // newline): echo it and, if it held statement text, run it.
             if !line.is_empty() {
                 echo_regress_line(&line);
-                in_buf.data.extend_from_slice(&line);
+                if stmt_started || !is_comment_only(&line) {
+                    in_buf.data.extend_from_slice(&line);
+                }
                 saw_any = true;
             }
             if !saw_any || in_buf.len() == 0 {
@@ -335,8 +343,16 @@ fn interactive_backend_regress(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
                 line.clear();
                 continue;
             }
-            // Echo the completed line verbatim (psql -a) and append to the buf.
+            // Echo the completed line verbatim (psql -a).
             echo_regress_line(&line);
+            // Add to the query buffer only once real statement text has begun;
+            // leading comment-only lines are echoed but not sent to the parser
+            // (so `LINE n:` is relative to the statement, as psql does).
+            if !stmt_started && is_comment_only(&line) {
+                line.clear();
+                continue;
+            }
+            stmt_started = true;
             in_buf.data.extend_from_slice(&line);
             // A statement ends when this line, ignoring trailing whitespace,
             // ends with ';' (and the accumulated buffer contains non-comment
@@ -391,6 +407,18 @@ fn in_statement_literal(buf: &[u8]) -> bool {
         i += 1;
     }
     in_quote
+}
+
+/// True if `line` (with optional trailing newline) is a single-line SQL comment
+/// — optional leading whitespace then `--` running to end of line. Used to keep
+/// leading comment lines out of the statement buffer (they're echoed but not
+/// sent to the parser, so the error LINE/caret is relative to the statement).
+fn is_comment_only(line: &[u8]) -> bool {
+    let mut i = 0;
+    while i < line.len() && (line[i] == b' ' || line[i] == b'\t') {
+        i += 1;
+    }
+    i + 1 < line.len() && line[i] == b'-' && line[i + 1] == b'-'
 }
 
 /// Echo one raw input line (already including its trailing newline if present)
