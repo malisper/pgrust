@@ -39,9 +39,22 @@ codegen-units = 1
 #                       (essential for boot-trap diagnosis). The module stays
 #                       ~42 MB; `wasm-tools strip -a` can drop them for a final
 #                       fast run once boot is clean.
-#   panic = "abort"  -> matches -Zbuild-std=std,panic_abort; no unwind tables.
-# Build with: cargo +nightly build -Zbuild-std=std,panic_abort --bin postgres \
-#   --target wasm64-unknown-unknown --profile wasm-boot
+#   panic = "abort"  -> the wasm64-unknown-unknown target spec hard-codes
+#                       "panic-strategy": "abort", so `-Cpanic=unwind` is
+#                       silently overridden — a profile-level `panic = "unwind"`
+#                       does NOT enable unwinding here (verified: a syntax error
+#                       still aborts via wasm `unreachable`). Real unwinding would
+#                       need a CUSTOM target spec with panic-strategy=unwind +
+#                       `-Ctarget-feature=+exception-handling` + wasmtime's
+#                       exceptions proposal — a separate, deeper change.
+#                       CONSEQUENCE (documented blocker): pgrust reports
+#                       ereport(ERROR)/parser errors by panicking with a sentinel
+#                       that the tcop loop's catch_unwind is meant to recover;
+#                       under abort that recovery can't run, so any SQL that
+#                       raises an error aborts the process. Error-free statements
+#                       run fine.
+# Build with: cargo +nightly build -Zbuild-std=std,panic_unwind,panic_abort \
+#   --bin postgres --target wasm64-unknown-unknown --profile wasm-boot
 [profile.wasm-boot]
 inherits = "release"
 opt-level = "z"
