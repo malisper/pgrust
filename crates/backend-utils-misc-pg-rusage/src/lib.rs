@@ -24,6 +24,7 @@
 
 #[cfg(not(target_family = "wasm"))]
 use std::mem::MaybeUninit;
+#[cfg(not(target_family = "wasm"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // `Timeval`/`PgRUsage` (`utils/pg_rusage.h`) are canonically defined in
@@ -41,11 +42,21 @@ pub fn pg_rusage_new() -> PgRUsage {
 }
 
 /// `gettimeofday(&tv, NULL)` -> `(tv_sec, tv_usec)`.
+#[cfg(not(target_family = "wasm"))]
 fn os_gettimeofday() -> (i64, i64) {
     let dur = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     (dur.as_secs() as i64, dur.subsec_micros() as i64)
+}
+
+/// wasm (single-process) stub: `std::time::SystemTime::now()` panics on
+/// `wasm64-unknown-unknown` (no clock host import), so the wall-clock snapshot
+/// reports zero. Only affects the cosmetic "elapsed" progress strings in
+/// VACUUM/ANALYZE/CLUSTER and recovery logging.
+#[cfg(target_family = "wasm")]
+fn os_gettimeofday() -> (i64, i64) {
+    (0, 0)
 }
 
 /// `getrusage(RUSAGE_SELF, &ru)` -> `(ru_utime.tv_sec, ru_utime.tv_usec,

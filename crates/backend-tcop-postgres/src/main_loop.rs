@@ -354,16 +354,19 @@ fn interactive_backend_regress(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
             }
             stmt_started = true;
             in_buf.data.extend_from_slice(&line);
-            // A statement ends when this line, ignoring trailing whitespace,
-            // ends with ';' (and the accumulated buffer contains non-comment
-            // statement text). This matches psql/regress: one statement per
-            // ';'-terminated run, with any leading comment lines attached.
-            let trimmed = line
-                .iter()
-                .rposition(|&b| !b.is_ascii_whitespace())
-                .map(|p| line[p]);
+            // A statement ends when this line carries a ';' that, ignoring any
+            // trailing `-- line comment` and trailing whitespace, is the last
+            // significant token. This matches psql/regress: one statement per
+            // ';'-terminated run, with any leading comment lines attached. The
+            // `;` may be followed on the same line by a trailing comment (e.g.
+            // `SELECT gcd(...); -- overflow`) — a bare "last non-whitespace byte
+            // is ';'" test misses that and wrongly fuses the statement with the
+            // following ones, so the parser runs them as one batch (an earlier
+            // statement's error then suppresses the rest). Scan the accumulated
+            // buffer so a ';' inside a string literal is correctly ignored.
+            let terminates = buffer_ends_statement(&in_buf.data);
             line.clear();
-            if trimmed == Some(b';') {
+            if terminates {
                 saw_any = true;
                 break;
             }
@@ -407,6 +410,71 @@ fn in_statement_literal(buf: &[u8]) -> bool {
         i += 1;
     }
     in_quote
+}
+
+/// True if the accumulated query buffer holds a complete `;`-terminated
+/// statement, i.e. there is a `;` outside any string literal / line comment and
+/// everything after it is only whitespace or a trailing `-- line comment`.
+///
+/// psql's lexer ends a statement at the `;` even when a comment follows it on
+/// the same line (`SELECT 1; -- note`). A naive "last non-whitespace byte is
+/// ';'" test fails there and fuses the statement with the following ones. This
+/// walks the buffer tracking single-quoted literals and `--` line comments so
+/// only a real top-level `;` counts, then confirms the tail is insignificant.
+fn buffer_ends_statement(buf: &[u8]) -> bool {
+    let mut in_quote = false;
+    let mut last_semi: Option<usize> = None;
+    let mut i = 0;
+    while i < buf.len() {
+        let b = buf[i];
+        if in_quote {
+            if b == b'\'' {
+                // A doubled '' is an escaped quote, not a close.
+                if i + 1 < buf.len() && buf[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                in_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' => in_quote = true,
+            b'-' if i + 1 < buf.len() && buf[i + 1] == b'-' => {
+                // Line comment: skip to end of line.
+                while i < buf.len() && buf[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            b';' => last_semi = Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let Some(pos) = last_semi else { return false };
+    // Everything after the terminating ';' must be whitespace or a trailing
+    // line comment (psql echoes it but it does not extend the statement).
+    let mut j = pos + 1;
+    while j < buf.len() {
+        let b = buf[j];
+        if b.is_ascii_whitespace() {
+            j += 1;
+            continue;
+        }
+        if b == b'-' && j + 1 < buf.len() && buf[j + 1] == b'-' {
+            while j < buf.len() && buf[j] != b'\n' {
+                j += 1;
+            }
+            continue;
+        }
+        // Real statement text after the ';' — not yet terminated (the ';' was
+        // followed by more SQL on later lines).
+        return false;
+    }
+    true
 }
 
 /// True if `line` (with optional trailing newline) is a single-line SQL comment
@@ -1632,4 +1700,41 @@ fn leak_str_in<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<&'mcx str> {
             .errmsg("invalid byte sequence in query string")
             .into_error()
     })
+}
+
+#[cfg(test)]
+mod regress_split_tests {
+    use super::buffer_ends_statement;
+
+    #[test]
+    fn semicolon_then_trailing_comment_terminates() {
+        // The int4.sql case that previously fused statements: a ';' followed by
+        // a trailing line comment must still end the statement.
+        assert!(buffer_ends_statement(b"SELECT gcd((-2147483648)::int4, 0::int4); -- overflow\n"));
+    }
+
+    #[test]
+    fn bare_semicolon_terminates() {
+        assert!(buffer_ends_statement(b"SELECT 1;\n"));
+        assert!(buffer_ends_statement(b"SELECT 1;   \n"));
+    }
+
+    #[test]
+    fn no_semicolon_does_not_terminate() {
+        assert!(!buffer_ends_statement(b"SELECT a, b, lcm(a, b)\n"));
+        assert!(!buffer_ends_statement(b"-- test lcm()\n"));
+    }
+
+    #[test]
+    fn semicolon_inside_literal_is_not_a_terminator() {
+        // The ';' is inside a string literal; the statement is not complete.
+        assert!(!buffer_ends_statement(b"SELECT ';\n"));
+        // Closed literal then a real terminator -> complete.
+        assert!(buffer_ends_statement(b"SELECT ';';\n"));
+    }
+
+    #[test]
+    fn semicolon_in_a_line_comment_is_not_a_terminator() {
+        assert!(!buffer_ends_statement(b"SELECT 1 -- a; b\n"));
+    }
 }
