@@ -20,6 +20,13 @@ types_guc = { path = "../../_support/types/types_guc" }
 # GIN opclass-support call protocol (the generic catalog-driven dispatch):
 gin = { path = "../../_support/types/gin" }
 
+# GiST opclass-support call protocol (the generic catalog-driven dispatch):
+gist = { path = "../../_support/types/gist" }
+
+# Local-reloptions parse table for the gtrgm_options opclass-options proc:
+types_reloptions = { path = "../../_support/types/types_reloptions" }
+reloptions_seams = { path = "../../backend/access/common/reloptions_seams" }
+
 # Trigram core services:
 crc32c = { path = "../../port/crc32c" }
 mbutils = { path = "../../backend/utils/mb/mbutils" }

@@ -27,6 +27,7 @@
 #![allow(non_upper_case_globals)]
 
 pub mod fmgr_builtins;
+mod extdispatch;
 
 use dispatch_seams as dispatch;
 use gist_proc_seams as gist_sortsupport_seams;
@@ -1692,7 +1693,7 @@ fn range_entryvec<'mcx>(
 fn dispatch_consistent<'mcx>(
     _mcx: Mcx<'mcx>,
     proc_oid: Oid,
-    _collation: Oid,
+    collation: Oid,
     entry: &GISTENTRY<'mcx>,
     is_leaf: bool,
     query: &Datum<'mcx>,
@@ -1748,14 +1749,16 @@ fn dispatch_consistent<'mcx>(
             let (matched, recheck) = tsqgist::gtsquery_consistent(key, q, strategy, is_leaf)?;
             Ok(GistConsistentResult { matched, recheck })
         }
-        _ => Err(unrecognized_proc(proc_oid)),
+        other => extdispatch::consistent(
+            _mcx, other, collation, entry, is_leaf, query, strategy, _subtype,
+        ),
     }
 }
 
 fn dispatch_union<'mcx>(
     mcx: Mcx<'mcx>,
     proc_oid: Oid,
-    _collation: Oid,
+    collation: Oid,
     entryvec: &GistEntryVector<'mcx>,
 ) -> PgResult<Datum<'mcx>> {
     match proc_oid {
@@ -1793,14 +1796,14 @@ fn dispatch_union<'mcx>(
             let u = tsqgist::gtsquery_union(&signs);
             Ok(Datum::from_u64(u))
         }
-        _ => Err(unrecognized_proc(proc_oid)),
+        other => extdispatch::union(mcx, other, collation, entryvec),
     }
 }
 
 fn dispatch_compress<'mcx>(
     mcx: Mcx<'mcx>,
     proc_oid: Oid,
-    _collation: Oid,
+    collation: Oid,
     entry: &GISTENTRY<'mcx>,
 ) -> PgResult<PgBox<'mcx, GISTENTRY<'mcx>>> {
     match proc_oid {
@@ -1921,14 +1924,14 @@ fn dispatch_compress<'mcx>(
         }
         // The box opclass has no compress proc (gistproc.c: "we store boxes as
         // boxes ... so we do not need compress").
-        _ => Err(unrecognized_proc(proc_oid)),
+        other => extdispatch::compress(mcx, other, collation, entry),
     }
 }
 
 fn dispatch_decompress<'mcx>(
     _mcx: Mcx<'mcx>,
     proc_oid: Oid,
-    _collation: Oid,
+    collation: Oid,
     _entry: &GISTENTRY<'mcx>,
 ) -> PgResult<PgBox<'mcx, GISTENTRY<'mcx>>> {
     // gtsvector_decompress (tsgistidx.c:242) only detoasts the stored key; on
@@ -1940,13 +1943,13 @@ fn dispatch_decompress<'mcx>(
     // The box/point opclass has no decompress proc (the AM uses the identity
     // decompress when none is registered). A registered decompress OID for
     // another opclass folds in here.
-    Err(unrecognized_proc(proc_oid))
+    extdispatch::decompress(_mcx, proc_oid, collation, _entry)
 }
 
 fn dispatch_penalty<'mcx>(
     _mcx: Mcx<'mcx>,
     proc_oid: Oid,
-    _collation: Oid,
+    collation: Oid,
     origentry: &GISTENTRY<'mcx>,
     newentry: &GISTENTRY<'mcx>,
 ) -> PgResult<f32> {
@@ -1981,14 +1984,14 @@ fn dispatch_penalty<'mcx>(
             let new_ = tsquerysign_from_key(&newentry.key);
             Ok(tsqgist::gtsquery_penalty(orig, new_))
         }
-        _ => Err(unrecognized_proc(proc_oid)),
+        other => extdispatch::penalty(other, collation, origentry, newentry),
     }
 }
 
 fn dispatch_picksplit<'mcx>(
     mcx: Mcx<'mcx>,
     proc_oid: Oid,
-    _collation: Oid,
+    collation: Oid,
     entryvec: &GistEntryVector<'mcx>,
     splitvec: &mut GIST_SPLITVEC<'mcx>,
 ) -> PgResult<()> {
@@ -2071,14 +2074,14 @@ fn dispatch_picksplit<'mcx>(
             splitvec.spl_rdatum_exists = false;
             Ok(())
         }
-        _ => Err(unrecognized_proc(proc_oid)),
+        other => extdispatch::picksplit(mcx, other, collation, entryvec, splitvec),
     }
 }
 
 fn dispatch_same<'mcx>(
     _mcx: Mcx<'mcx>,
     proc_oid: Oid,
-    _collation: Oid,
+    collation: Oid,
     a: &Datum<'mcx>,
     b: &Datum<'mcx>,
 ) -> PgResult<bool> {
@@ -2112,33 +2115,35 @@ fn dispatch_same<'mcx>(
             let kb = tsquerysign_from_key(b);
             Ok(tsqgist::gtsquery_same(ka, kb))
         }
-        _ => Err(unrecognized_proc(proc_oid)),
+        other => extdispatch::same(other, collation, a, b),
     }
 }
 
 fn dispatch_distance<'mcx>(
     _mcx: Mcx<'mcx>,
     proc_oid: Oid,
-    _collation: Oid,
+    collation: Oid,
     entry: &GISTENTRY<'mcx>,
     is_leaf: bool,
     query: &Datum<'mcx>,
     strategy: StrategyNumber,
-    _subtype: Oid,
+    subtype: Oid,
 ) -> PgResult<GistDistanceResult> {
     match proc_oid {
         F_GIST_POINT_DISTANCE => gist_point_distance(entry, is_leaf, query, strategy),
         F_GIST_BOX_DISTANCE => gist_box_distance(entry, query, strategy),
         F_GIST_CIRCLE_DISTANCE => gist_circle_distance(entry, query, strategy),
         F_GIST_POLY_DISTANCE => gist_poly_distance(entry, query, strategy),
-        _ => Err(unrecognized_proc(proc_oid)),
+        other => extdispatch::distance(
+            _mcx, other, collation, entry, is_leaf, query, strategy, subtype,
+        ),
     }
 }
 
 fn dispatch_fetch<'mcx>(
     mcx: Mcx<'mcx>,
     proc_oid: Oid,
-    _collation: Oid,
+    collation: Oid,
     entry: &GISTENTRY<'mcx>,
 ) -> PgResult<PgBox<'mcx, GISTENTRY<'mcx>>> {
     match proc_oid {
@@ -2155,18 +2160,19 @@ fn dispatch_fetch<'mcx>(
             );
             ::mcx::alloc_in(mcx, retval)
         }
-        _ => Err(unrecognized_proc(proc_oid)),
+        other => extdispatch::fetch(mcx, other, collation, entry),
     }
 }
 
 fn dispatch_options<'mcx>(
     _mcx: Mcx<'mcx>,
     proc_oid: Oid,
-    _relopts: &mut Vec<u8>,
+    relopts: &mut Vec<u8>,
 ) -> PgResult<()> {
     // box/point have no options procedure; a registered options OID for another
-    // opclass folds in here.
-    Err(unrecognized_proc(proc_oid))
+    // opclass folds in here (e.g. gtrgm_options — a no-op leaving the default
+    // siglen, see the divergence note).
+    extdispatch::options(proc_oid, relopts)
 }
 
 fn dispatch_sortsupport<'mcx>(

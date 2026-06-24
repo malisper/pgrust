@@ -25,10 +25,17 @@
 //! Strict-Word / Like / ILike / Equal strategies are fully wired; the RegExp /
 //! RegExpICase strategies still raise an "unported" error (they need the
 //! `trgm_regexp.c` NFA engine). The `gist_trgm_ops` GiST support functions
-//! (`trgm_gist.c`) remain loud-panic stubs (the heavier opclass + the regexp
-//! engine). `CREATE EXTENSION`'s C-symbol validator finds every symbol.
+//! (`trgm_gist.c`: `gtrgm_compress`/`decompress`/`consistent`/`distance`/
+//! `union`/`same`/`penalty`/`picksplit`/`options`) ARE ported (see [`trgm_gist`]),
+//! reached through pgrust's generic, catalog-driven GiST opclass dispatch
+//! (`gist-proc::extdispatch`) over the [`::gist::extproc`] internal protocol —
+//! the same non-regexp strategy set is wired (LIKE / `%` similarity / `<->`
+//! distance), with the RegExp / RegExpICase GiST strategies raising the same
+//! "unported NFA" error. `CREATE EXTENSION`'s C-symbol validator finds every
+//! symbol.
 
 mod trgm;
+mod trgm_gist;
 
 use ::datum::Datum;
 use ::fmgr::{FunctionCallInfoBaseData, LoadedExternalFunc, PGFunction};
@@ -49,6 +56,11 @@ use ::gin::extproc::{
     GIN_EXTPROC_INTERNAL_SLOT,
 };
 use ::gin::{GIN_FALSE, GIN_MAYBE, GIN_SEARCH_MODE_ALL};
+
+use ::gist::extproc::{
+    GistConsistentInOut, GistDistanceInOut, GistEntryInOut, GistPenaltyInOut, GistPicksplitInOut,
+    GistSameInOut, GistUnionInOut, GIST_EXTPROC_INTERNAL_SLOT,
+};
 
 // gin_trgm_ops strategy numbers (trgm.h).
 const SIMILARITY_STRATEGY: u16 = 1;
@@ -411,25 +423,197 @@ fn unported_index_symbol(name: &'static str) -> ! {
     )));
 }
 
-macro_rules! index_stub {
-    ($fn_name:ident, $sym:literal) => {
-        fn $fn_name(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-            unported_index_symbol($sym);
-        }
-    };
+// gtrgm_in / gtrgm_out always ereport(ERROR) in C (the gtrgm pseudo-type has no
+// text I/O); keep them as the loud-error stubs.
+fn fc_gtrgm_in(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    raise(PgError::error("cannot accept a value of type gtrgm"));
+}
+fn fc_gtrgm_out(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    raise(PgError::error("cannot display a value of type gtrgm"));
 }
 
-index_stub!(fc_gtrgm_in, "gtrgm_in");
-index_stub!(fc_gtrgm_out, "gtrgm_out");
-index_stub!(fc_gtrgm_consistent, "gtrgm_consistent");
-index_stub!(fc_gtrgm_distance, "gtrgm_distance");
-index_stub!(fc_gtrgm_compress, "gtrgm_compress");
-index_stub!(fc_gtrgm_decompress, "gtrgm_decompress");
-index_stub!(fc_gtrgm_penalty, "gtrgm_penalty");
-index_stub!(fc_gtrgm_picksplit, "gtrgm_picksplit");
-index_stub!(fc_gtrgm_union, "gtrgm_union");
-index_stub!(fc_gtrgm_same, "gtrgm_same");
-index_stub!(fc_gtrgm_options, "gtrgm_options");
+// ===========================================================================
+// gist_trgm_ops opclass support functions (trgm_gist.c).
+//
+// Reached through pgrust's GENERIC, catalog-driven GiST opclass dispatch: the
+// GiST core resolves each support proc into an `FmgrInfo` and `gist-proc`'s
+// `extdispatch` invokes this body through a real fmgr frame, passing the
+// GISTENTRY/entryvec/splitvec + the *recheck/*penalty/*size out-parameters
+// through the `gist::extproc` internal protocol struct (slot 0), and the
+// consistent/distance query `text` on the by-ref lane (slot 1).
+//
+// The RegExp / RegExpICase strategies need the trgm_regexp.c NFA engine, which
+// is not ported; those strategies raise a clear "unported" error. Every other
+// strategy (Similarity / Word / Strict-Word / Like / ILike / Equal / Distance)
+// is fully wired.
+// ===========================================================================
+
+/// Pull the boxed GiST protocol struct of type `T` out of the internal lane,
+/// run `body` on it (mutating in place), and put it back so the dispatch reads
+/// the outputs.
+fn with_gist_proto<T: ::core::any::Any>(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    body: impl FnOnce(&mut T) -> PgResult<()>,
+) -> Datum {
+    let mut state = match fcinfo.take_internal_arg(GIST_EXTPROC_INTERNAL_SLOT) {
+        Some(boxed) => match boxed.downcast::<T>() {
+            Ok(s) => s,
+            Err(_) => raise(PgError::error(
+                "pg_trgm GiST support: internal protocol state has the wrong type",
+            )),
+        },
+        None => raise(PgError::error(
+            "pg_trgm GiST support function invoked without its internal protocol \
+             state — pgrust's generic GiST opclass dispatch was bypassed",
+        )),
+    };
+    if let Err(e) = body(&mut state) {
+        // re-box so a later teardown finds the slot intact, then raise.
+        fcinfo.set_internal_arg(GIST_EXTPROC_INTERNAL_SLOT, state);
+        raise(e);
+    }
+    fcinfo.set_internal_arg(GIST_EXTPROC_INTERNAL_SLOT, state);
+    fcinfo.isnull = false;
+    Datum::from_usize(0)
+}
+
+/// `gtrgm_consistent(entry, query, strategy, subtype, recheck)`.
+fn fc_gtrgm_consistent(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // The query `text` rides the by-ref lane at slot 1 (C PG_GETARG_TEXT_P(1)).
+    let query = arg_text_bytes(fcinfo, 1);
+    with_gist_proto::<GistConsistentInOut>(fcinfo, |io| {
+        let (matched, recheck) = trgm_gist::gtrgm_consistent(
+            io.entry.leafkey,
+            &io.entry.key,
+            io.entry.key_is_null,
+            &query,
+            io.strategy,
+        )?;
+        io.matched = matched;
+        io.recheck = recheck;
+        Ok(())
+    })
+}
+
+/// `gtrgm_distance(entry, query, strategy, subtype, recheck)`.
+fn fc_gtrgm_distance(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let query = arg_text_bytes(fcinfo, 1);
+    with_gist_proto::<GistDistanceInOut>(fcinfo, |io| {
+        let (distance, recheck) = trgm_gist::gtrgm_distance(
+            io.entry.leafkey,
+            &io.entry.key,
+            io.entry.key_is_null,
+            &query,
+            io.strategy,
+        )?;
+        io.distance = distance;
+        io.recheck = recheck;
+        Ok(())
+    })
+}
+
+/// `gtrgm_compress(entry)`.
+fn fc_gtrgm_compress(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gist_proto::<GistEntryInOut>(fcinfo, |io| {
+        match trgm_gist::gtrgm_compress(io.entry.leafkey, &io.entry.key, io.entry.key_is_null)? {
+            Some(new_key) => {
+                io.passthrough = false;
+                io.retval_key = new_key;
+                io.retval_leafkey = false;
+            }
+            None => io.passthrough = true,
+        }
+        Ok(())
+    })
+}
+
+/// `gtrgm_decompress(entry)` — identity on the owned by-ref lane.
+fn fc_gtrgm_decompress(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gist_proto::<GistEntryInOut>(fcinfo, |io| {
+        match trgm_gist::gtrgm_decompress() {
+            Some(new_key) => {
+                io.passthrough = false;
+                io.retval_key = new_key;
+                io.retval_leafkey = io.entry.leafkey;
+            }
+            None => io.passthrough = true,
+        }
+        Ok(())
+    })
+}
+
+/// `gtrgm_penalty(origentry, newentry, &penalty)`.
+fn fc_gtrgm_penalty(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gist_proto::<GistPenaltyInOut>(fcinfo, |io| {
+        io.penalty = trgm_gist::gtrgm_penalty(&io.orig_key, &io.new_key)?;
+        Ok(())
+    })
+}
+
+/// `gtrgm_picksplit(entryvec, &v)`.
+fn fc_gtrgm_picksplit(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gist_proto::<GistPicksplitInOut>(fcinfo, |io| {
+        let entries: Vec<(Vec<u8>, bool)> = io
+            .entries
+            .iter()
+            .map(|e| (e.key.clone(), e.key_is_null))
+            .collect();
+        let (left, right, ldatum, rdatum) = trgm_gist::gtrgm_picksplit(&entries)?;
+        io.spl_left = left;
+        io.spl_right = right;
+        io.spl_ldatum = ldatum;
+        io.spl_rdatum = rdatum;
+        Ok(())
+    })
+}
+
+/// `gtrgm_union(entryvec, &size)`.
+fn fc_gtrgm_union(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gist_proto::<GistUnionInOut>(fcinfo, |io| {
+        let entries: Vec<(Vec<u8>, bool)> = io
+            .entries
+            .iter()
+            .map(|e| (e.key.clone(), e.key_is_null))
+            .collect();
+        io.result = trgm_gist::gtrgm_union(&entries)?;
+        Ok(())
+    })
+}
+
+/// `gtrgm_same(a, b, &result)`.
+fn fc_gtrgm_same(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gist_proto::<GistSameInOut>(fcinfo, |io| {
+        io.equal = trgm_gist::gtrgm_same(&io.a, &io.b)?;
+        Ok(())
+    })
+}
+
+/// `gtrgm_options(relopts)` — register the `siglen` opclass option. Invoked by
+/// `index_opclass_options` → `index_options_function_call`, which carries the
+/// `local_relopts` parse table in the by-ref `internal` lane at arg 0 (C's
+/// `PointerGetDatum(&relopts)`); the body fills it in place and leaves it for the
+/// caller. (The configured `siglen` value is not threaded back to the support
+/// procs — the documented default-siglen divergence — but the option must be
+/// REGISTERED so the local-reloptions build produces a well-formed buffer and
+/// `WITH (siglen=N)` parses.)
+fn fc_gtrgm_options(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let mut relopts = match fcinfo.take_ref_arg(0) {
+        Some(RefPayload::Internal(b)) => match b.downcast::<::types_reloptions::local_relopts>() {
+            Ok(r) => r,
+            Err(_) => raise(PgError::error(
+                "gtrgm_options: arg 0 internal is not a local_relopts",
+            )),
+        },
+        _ => raise(PgError::error(
+            "gtrgm_options invoked without its local_relopts internal arg — \
+             pgrust's index_options_function_call path was bypassed",
+        )),
+    };
+    trgm_gist::gtrgm_options(&mut relopts);
+    fcinfo.set_ref_arg(0, RefPayload::Internal(relopts));
+    fcinfo.isnull = false;
+    Datum::from_usize(0)
+}
 // ===========================================================================
 // gin_trgm_ops opclass support functions (trgm_gin.c).
 //
@@ -699,7 +883,7 @@ fn lookup(function: &str) -> Option<LoadedExternalFunc> {
             Some(fc_strict_word_similarity_dist_commutator_op)
         }
 
-        // GiST opclass support (unported — loud-panic stubs).
+        // GiST opclass support (ported; gtrgm_in/out always error in C too).
         "gtrgm_in" => Some(fc_gtrgm_in),
         "gtrgm_out" => Some(fc_gtrgm_out),
         "gtrgm_consistent" => Some(fc_gtrgm_consistent),
@@ -712,7 +896,7 @@ fn lookup(function: &str) -> Option<LoadedExternalFunc> {
         "gtrgm_same" => Some(fc_gtrgm_same),
         "gtrgm_options" => Some(fc_gtrgm_options),
 
-        // GIN opclass support (unported — loud-panic stubs).
+        // GIN opclass support (ported via the generic GIN dispatch).
         "gin_extract_value_trgm" => Some(fc_gin_extract_value_trgm),
         "gin_extract_query_trgm" => Some(fc_gin_extract_query_trgm),
         "gin_trgm_consistent" => Some(fc_gin_trgm_consistent),

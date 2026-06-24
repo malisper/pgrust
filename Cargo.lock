@@ -17728,13 +17728,16 @@ dependencies = [
  "fmgr",
  "formatting_seams",
  "gin",
+ "gist",
  "guc_tables",
  "mbutils",
  "mcx",
  "misc_guc",
+ "reloptions_seams",
  "ts_locale_seams",
  "types_error",
  "types_guc",
+ "types_reloptions",
  "types_tuple",
 ]
 

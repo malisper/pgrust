@@ -28,6 +28,8 @@ use ::types_tuple::heaptuple::Datum;
 use ::types_tuple::heaptuple::FormedTuple;
 use ::types_tuple::heaptuple::{ItemPointerData, TupleDesc};
 
+pub mod extproc;
+
 // ---------------------------------------------------------------------------
 // gist.h — amproc indexes
 // ---------------------------------------------------------------------------
