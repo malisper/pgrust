@@ -27,3 +27,23 @@ debug = 0
 strip = "symbols"
 lto = false
 codegen-units = 1
+
+# wasm64 single-user boot bring-up profile. The default dev profile produces a
+# ~278 MB wasm module (no opt; huge code) whose wasmtime cold-compile takes ~10
+# min, throttling boot iteration. This profile shrinks the module dramatically:
+#   opt-level = "z"  -> smallest code (size, not speed; runtime speed is
+#                       irrelevant for boot bring-up) — fewer wasm instructions
+#                       for wasmtime to compile.
+#   debug = 0        -> no DWARF (we strip it anyway via wasm-tools).
+#   strip = true     -> drop symbols.
+#   panic = "abort"  -> matches -Zbuild-std=std,panic_abort; no unwind tables.
+# Build with: cargo +nightly build -Zbuild-std=std,panic_abort --bin postgres \
+#   --target wasm64-unknown-unknown --profile wasm-boot
+[profile.wasm-boot]
+inherits = "release"
+opt-level = "z"
+debug = 0
+strip = true
+lto = false
+codegen-units = 16
+panic = "abort"
