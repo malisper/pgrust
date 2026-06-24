@@ -210,6 +210,22 @@ fn jumble_node(jstate: &mut JumbleState, node: &Node) {
         jumble_expr_fields(jstate, expr);
         return;
     }
+    if tag == ntag::T_TargetEntry {
+        // A `TargetEntry` reached as a bare `Node` (e.g. inside a MergeAction's
+        // targetList): jumble its significant fields + recurse into `expr`, the
+        // same shape `jumble_target_list` uses — so the action's constants are
+        // recorded and its column expressions distinguish the statement.
+        if let Some(te) = node.as_targetentry() {
+            jf_i32(jstate, te.resno as i32);
+            jf_u32(jstate, te.ressortgroupref);
+            jf_bool(jstate, te.resjunk);
+            match te.expr.as_deref() {
+                Some(e) => jumble_expr(jstate, e),
+                None => jstate.append_jumble_null(),
+            }
+        }
+        return;
+    }
     if tag == ntag::T_MergeAction {
         // `_jumbleMergeAction`: matchKind, commandType, qual, targetList. These
         // distinguish the WHEN clauses of otherwise-identical MERGE statements.
