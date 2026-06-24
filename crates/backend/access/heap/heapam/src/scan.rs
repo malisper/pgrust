@@ -471,13 +471,20 @@ fn page_collect_tuples(
         }
 
         let item = PageGetItem(page, &lpp)?;
-        // loctup carries the full on-page tuple image (C's loctup.t_data points
-        // into the page; loctup.t_len = ItemIdGetLength). For the visibility
-        // test only the header is consulted; for a visible tuple the offset is
-        // recorded and the materialized image is dropped (re-read in
-        // heapgettup_pagemode).
-        let mut loctup =
-            FormedTuple::read_on_page_full(mcx, &item[..ItemIdGetLength(&lpp) as usize], block, lineoff, relid)?;
+        // loctup carries the on-page tuple HEADER (C's loctup.t_data points into
+        // the page; loctup.t_len = ItemIdGetLength). For the visibility test only
+        // the header is consulted; for a visible tuple the offset is recorded and
+        // the (header-only) image is dropped — the user-data area is re-read in
+        // heapgettup_pagemode for the tuples actually returned. Reading only the
+        // header here avoids the per-tuple slice_in of the whole user-data area
+        // (the dominant per-tuple heap allocation in the scan).
+        let mut loctup = FormedTuple::read_on_page_header_only(
+            mcx,
+            &item[..ItemIdGetLength(&lpp) as usize],
+            block,
+            lineoff,
+            relid,
+        )?;
 
         let valid = if all_visible {
             true

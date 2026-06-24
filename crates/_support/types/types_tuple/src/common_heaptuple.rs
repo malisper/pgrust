@@ -569,6 +569,44 @@ impl<'mcx> FormedTuple<'mcx> {
         })
     }
 
+    /// Header-only form of [`read_on_page_full`] for the page-at-a-time
+    /// VISIBILITY scan (`page_collect_tuples`): the MVCC/serializable visibility
+    /// machinery consults ONLY the tuple header (`t_xmin`/`t_xmax`/`t_infomask`
+    /// /`t_ctid`), never the user-data area or the null bitmap. C's
+    /// `heap_prepare_pagescan` points `loctup.t_data` straight at the page and
+    /// records the offset of each visible tuple (re-read later in
+    /// `heapgettup_pagemode`); it copies NOTHING. The owned model must still parse
+    /// the header into a `HeapTupleData`, but skipping the `slice_in` of the whole
+    /// user-data area (and the `t_bits` copy) removes the dominant per-tuple heap
+    /// allocation from the scan — the user data is re-materialized only for the
+    /// tuples actually returned (`read_on_page_full` in `heapgettup_pagemode`).
+    /// The returned `FormedTuple` carries an EMPTY `data`; do NOT deform it.
+    pub fn read_on_page_header_only(
+        mcx: Mcx<'mcx>,
+        item: &[u8],
+        block: types_core::primitive::BlockNumber,
+        offset: types_core::primitive::OffsetNumber,
+        table_oid: Oid,
+    ) -> PgResult<FormedTuple<'mcx>> {
+        use crate::heaptuple::{HeapTupleData, HeapTupleHeaderData, ItemPointerData};
+
+        // Parse only the fixed header (no t_bits / user-data copy). The visibility
+        // test reads the xmin/xmax/infomask scalar fields off this owned header.
+        let hdr = HeapTupleHeaderData::read_on_page(mcx, item)?;
+
+        let tuple = HeapTupleData {
+            t_len: item.len() as u32,
+            t_self: ItemPointerData::new(block, offset),
+            t_tableOid: table_oid,
+            t_data: Some(alloc_in(mcx, hdr)?),
+        };
+
+        Ok(FormedTuple {
+            tuple: alloc_in(mcx, tuple)?,
+            data: PgVec::new_in(mcx),
+        })
+    }
+
     /// Serialize this composite value into the flat `HeapTupleHeader` varlena
     /// image C points a composite `Datum` at — a single contiguous palloc block:
     /// the fixed 23-byte header (`SizeofHeapTupleHeader`), then the `t_bits` null
