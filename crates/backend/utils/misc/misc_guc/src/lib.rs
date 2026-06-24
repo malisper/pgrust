@@ -727,6 +727,18 @@ pub fn init_seams() {
     s::process_config_file_sighup::set(|| {
         guc_file_seams::process_config_file::call(PGC_SIGHUP)
     });
+    // The postmaster's own `process_pm_reload_request` (postmaster.c:2005)
+    // calls `ProcessConfigFile(PGC_SIGHUP)` directly, then
+    // `SignalChildren(SIGHUP, ...)`. That postmaster-owned reload seam
+    // (`postmaster_seams::process_config_file_sighup`, returning void) routes
+    // to the same guc-file reload machinery installed just above. A bad
+    // postgresql.conf at SIGHUP is reported per-variable at LOG/WARNING inside
+    // ProcessConfigFile and does not abort the postmaster, mirroring C's
+    // void-returning `ProcessConfigFile`; swallow any propagated Err here so
+    // the SIGHUP reload never panics the postmaster.
+    postmaster_seams::process_config_file_sighup::set(|| {
+        let _ = guc_file_seams::process_config_file::call(PGC_SIGHUP);
+    });
     // ProcessConfigFileInternal (guc.c) — the parse-then-apply core. Parsing
     // lives in guc-file.l (called directly here, mirroring guc.c → guc-file.l);
     // the apply phase is `apply_config_variables` in this crate.

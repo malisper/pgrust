@@ -13103,6 +13103,7 @@ dependencies = [
  "miscinit_seams",
  "parallel_rt_seams",
  "pg_proc_seams",
+ "postmaster_seams",
  "pqcomm_seams",
  "scalar_seams",
  "scansup_seams",

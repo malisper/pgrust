@@ -37,6 +37,7 @@ timestamp_seams = { path = "../../adt/timestamp_seams" }
 # Outward seam crates (call out, do not install):
 init_small_seams = { path = "../../init/init_small_seams" }
 miscinit_seams = { path = "../../init/miscinit_seams" }
+postmaster_seams = { path = "../../../postmaster/postmaster_seams" }
 pg_proc_seams = { path = "../../../catalog/pg_proc_seams" }
 fmgr_seams = { path = "../../fmgr/fmgr_seams" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
