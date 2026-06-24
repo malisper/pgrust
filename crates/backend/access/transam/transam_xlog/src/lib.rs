@@ -840,11 +840,10 @@ pub fn init_seams() {
     // assign hooks during InitializeGUCOptions to seed CheckPointSegments.
     guc_state::install();
 
-    // `bool EnableHotStandby` (xlog.c:146, the `hot_standby` GUC) — xlogrecovery
-    // reads this through the seam (validateRecoveryParameters, CreateRestartPoint's
-    // TruncateSUBTRANS gate). The GUC accessor is installed by guc_state above;
-    // route the seam read at the same value.
-    s::enable_hot_standby::set(|| guc_tables::vars::EnableHotStandby.read());
+    // (`enable_hot_standby` is installed once below via
+    // `s::enable_hot_standby::set(startup::enable_hot_standby)`, which reads the
+    // same `guc_tables::vars::EnableHotStandby` value — a second install here
+    // would trip the seam framework's "installed twice" guard.)
 
     // The remaining xlog.c-owned WAL-settings GUC variable accessors
     // (full_page_writes / wal_log_hints / wal_init_zero / wal_recycle /
