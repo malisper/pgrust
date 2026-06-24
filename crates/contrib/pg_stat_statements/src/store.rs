@@ -477,8 +477,14 @@ pub(crate) fn pgss_store(
         if let Some(ref j) = jstate {
             lwlock_release(lock);
             let mut len = query_len;
+            // C passes the *post-CleanQuerytext* query_location here (the
+            // local `query_location`, updated by clean_querytext above), NOT
+            // the original stmt_location saved in jstate. When CleanQuerytext
+            // trims leading whitespace/comments it advances query_location;
+            // using the stale value mis-offsets every recorded constant by the
+            // trimmed amount (dropping the statement's leading char).
             norm_query = Some(crate::normalize::generate_normalized_query(
-                j.jstate, cleaned, j.query_loc, &mut len,
+                j.jstate, cleaned, query_location, &mut len,
             ));
             query_len = len;
             if lwlock_acquire(lock, false).is_err() {
