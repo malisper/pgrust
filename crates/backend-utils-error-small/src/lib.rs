@@ -45,14 +45,37 @@ pub fn exceptional_condition(condition_name: &str, file_name: &str, line_number:
     // Report the failure on stderr. (`PointerIsValid` cannot fail for &str.)
     let msg = format!(
         "TRAP: failed Assert(\"{condition_name}\"), File: \"{file_name}\", Line: {line_number}, PID: {}\n",
-        std::process::id()
+        assert_pid()
     );
-    let mut stderr = std::io::stderr();
-    let _ = stderr.write_all(msg.as_bytes());
-    // Usually this shouldn't be needed, but make sure the msg went out.
-    let _ = stderr.flush();
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let mut stderr = std::io::stderr();
+        let _ = stderr.write_all(msg.as_bytes());
+        // Usually this shouldn't be needed, but make sure the msg went out.
+        let _ = stderr.flush();
+        std::process::abort();
+    }
+    // wasm64: std stderr is a no-op and process::abort traps opaquely; route the
+    // message to the host stderr, then proc_exit with a nonzero code so the
+    // assertion text is actually visible.
+    #[cfg(target_family = "wasm")]
+    {
+        wasm_libc_shim::stderr_write(msg.as_bytes());
+        wasm_libc_shim::proc_exit(134) // 128 + SIGABRT
+    }
+}
 
-    std::process::abort();
+/// `getpid()` for the Assert message (`std::process::id()` panics on wasm64).
+fn assert_pid() -> u32 {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        std::process::id()
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        // SAFETY: getpid is a const-returning shim (no preconditions).
+        unsafe { wasm_libc_shim::getpid() as u32 }
+    }
 }
 
 // ===========================================================================
@@ -63,7 +86,7 @@ pub fn exceptional_condition(condition_name: &str, file_name: &str, line_number:
 /// `getpid()`, never 0, so this matches the C `MyProcPid != 0` test staying
 /// true once a backend is running).
 fn my_proc_pid() -> u32 {
-    backend_log_context().map_or_else(std::process::id, |c| c.process_id())
+    backend_log_context().map_or_else(assert_pid, |c| c.process_id())
 }
 
 /// `MyStartTime` (seconds since the Unix epoch).

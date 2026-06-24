@@ -89,9 +89,18 @@ pub(crate) fn reset_formatted_log_time() {
 // ---------------------------------------------------------------------------
 
 fn now_timeval() -> (i64, u32) {
-    match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(d) => (d.as_secs() as i64, d.subsec_micros()),
-        Err(_) => (0, 0),
+    // std's SystemTime panics on wasm64-unknown-unknown; use the host clock.
+    #[cfg(not(target_family = "wasm"))]
+    {
+        match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(d) => (d.as_secs() as i64, d.subsec_micros()),
+            Err(_) => (0, 0),
+        }
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        let ns = wasm_libc_shim::now_unix_nanos();
+        ((ns / 1_000_000_000), ((ns % 1_000_000_000) / 1_000) as u32)
     }
 }
 

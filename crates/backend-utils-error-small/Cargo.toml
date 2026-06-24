@@ -14,3 +14,7 @@ types-error = { path = "../types-error" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-error-small-seams = { path = "../backend-utils-error-small-seams" }
 backend-postmaster-syslogger-seams = { path = "../backend-postmaster-syslogger-seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+# wasm64: std process::id/stderr don't work; the Assert handler uses the shim.
+wasm-libc-shim = { path = "../wasm-libc-shim" }
