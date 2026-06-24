@@ -3126,7 +3126,7 @@ fn function_call2_coll_datum_seam<'mcx>(
         frame.args.push(a2);
         frame.nargs = 2;
         let ref_args = vec![r1, r2];
-        let out = dispatch_resolved_into_frame(mcx, &resolved, &mut frame, ref_args, None);
+        let out = dispatch_resolved_into_frame(mcx, &resolved, &mut frame, ref_args, None, None);
         fcinfo_pool_return(frame);
         return match out? {
             // C `FunctionCall2Coll`: `if (fcinfo->isnull) elog(ERROR, "function
@@ -3919,6 +3919,44 @@ fn function_call_invoke_datum_core_soft<'mcx>(
     fn_expr: Option<::types_core::fmgr::FnExprErased>,
     escontext: Option<&mut ::types_error::SoftErrorContext>,
 ) -> PgResult<Option<(::types_tuple::heaptuple::Datum<'mcx>, bool)>> {
+    // Resolve-once fast path (C: `fmgr_info` runs once at `ExecInitFunc` /
+    // `build_pertrans_for_aggref`; the resolved `FmgrInfo` is reused per call).
+    // For a BUILT-IN `fn_oid` recover the resolution memoized at first call (an
+    // `Rc` refcount bump) instead of re-`fmgr_isbuiltin`'ing — which CLONES the
+    // whole `BuiltinFunction` (a `String` heap alloc) — on every call. This is
+    // the same memo `function_call_invoke_datum_resolved_seam` uses, lifted to
+    // the shared by-OID core so EVERY by-OID caller benefits: the aggregate
+    // transition/final functions (`function_call_invoke_datum_owned*`, the
+    // profiled `count(*)` `int8inc` per-row String-clone hotspot), DISTINCT /
+    // NULLIF / ROWCOMPARE / HASHDATUM, and `FunctionCall*Coll`. A NON-built-in
+    // OID (catalog / security-definer / SQL) returns `None` and falls through to
+    // the full by-OID `fmgr_info` resolution below, so DDL invalidation, the
+    // secdef userid switch, and SQL-function dispatch are unaffected.
+    if let Some(cached) = resolved_builtin_cached(mcx, fn_oid)? {
+        // BORROW the shared cache entry directly (it carries no `fn_expr`: it is
+        // keyed by OID and shared across every call site). The per-call-site node
+        // rides separately as a cheap `Rc`-backed `FnExprErased` -> `FnExpr` Box,
+        // so the hot path never clones the `String`-bearing `BuiltinFunction`
+        // resolution per tuple. C: `fcache->flinfo.fn_expr =
+        // fcinfo->flinfo->fn_expr` (fmgr.c:658) stamps the call node onto the
+        // per-call frame, which `function_call_invoke_resolved_core_soft` does.
+        let fn_expr_box: Option<Box<FnExpr>> = fn_expr.map(|node| {
+            Box::new(FnExpr::External(::fmgr::ExternalFnExpr {
+                tag: 0,
+                node: Some(node),
+            }))
+        });
+        return function_call_invoke_resolved_core_soft(
+            mcx,
+            &cached,
+            collation,
+            nargs,
+            ref_args,
+            fn_expr_box,
+            escontext,
+        );
+    }
+
     let mut resolved = fmgr_info(mcx, fn_oid)?;
 
     // C: ExecInitFunc does `fmgr_info_set_expr((Node *) node, flinfo)`, so the
@@ -3940,7 +3978,10 @@ fn function_call_invoke_datum_core_soft<'mcx>(
         })));
     }
 
-    function_call_invoke_resolved_core_soft(mcx, &resolved, collation, nargs, ref_args, escontext)
+    let fn_expr_box = resolved.finfo.fn_expr.clone();
+    function_call_invoke_resolved_core_soft(
+        mcx, &resolved, collation, nargs, ref_args, fn_expr_box, escontext,
+    )
 }
 
 /// Shared dispatch body of [`function_call_invoke_datum_core_soft`] **after** the
@@ -3961,13 +4002,20 @@ fn function_call_invoke_resolved_core_soft<'mcx>(
     collation: Oid,
     nargs: Vec<NullableDatum>,
     ref_args: Vec<Option<RefPayload>>,
+    fn_expr: Option<Box<FnExpr>>,
     escontext: Option<&mut ::types_error::SoftErrorContext>,
 ) -> PgResult<Option<(::types_tuple::heaptuple::Datum<'mcx>, bool)>> {
     // The freshly-allocated-frame path (the non-pooled callers). Build the frame
     // via `init_fcinfo` (allocates), dispatch through the shared body, and let
-    // the frame drop at end of scope.
+    // the frame drop at end of scope. `fn_expr` (C: `fcinfo->flinfo->fn_expr`) is
+    // threaded in separately so the by-OID-builtin-cache caller can BORROW the
+    // shared cache resolution without a per-call `String`-bearing clone; stamp it
+    // onto the frame's `FmgrInfo` so a callee's `get_fn_expr_*` reads it.
     let mut fcinfo = init_fcinfo(Some(resolved.finfo.clone()), collation, nargs);
-    dispatch_resolved_into_frame(mcx, resolved, &mut fcinfo, ref_args, escontext)
+    if let Some(flinfo) = fcinfo.flinfo.as_mut() {
+        flinfo.fn_expr = fn_expr.clone();
+    }
+    dispatch_resolved_into_frame(mcx, resolved, &mut fcinfo, ref_args, fn_expr, escontext)
 }
 
 /// The shared `EEOP_FUNCEXPR`-call body once the call frame `fcinfo` is filled
@@ -3983,6 +4031,7 @@ fn dispatch_resolved_into_frame<'mcx>(
     resolved: &ResolvedFmgrInfo,
     fcinfo: &mut FunctionCallInfoBaseData,
     ref_args: Vec<Option<RefPayload>>,
+    fn_expr: Option<Box<FnExpr>>,
     escontext: Option<&mut ::types_error::SoftErrorContext>,
 ) -> PgResult<Option<(::types_tuple::heaptuple::Datum<'mcx>, bool)>> {
     // Move the by-reference side channel into the (pooled, capacity-retained)
@@ -3991,7 +4040,7 @@ fn dispatch_resolved_into_frame<'mcx>(
     fcinfo.ref_args.clear();
     fcinfo.ref_args.reserve(ref_args.len());
     fcinfo.ref_args.extend(ref_args);
-    dispatch_frame_ref_args_in_place(mcx, resolved, fcinfo, escontext)
+    dispatch_frame_ref_args_in_place(mcx, resolved, fcinfo, fn_expr, escontext)
 }
 
 /// The `EEOP_FUNCEXPR` dispatch body once BOTH `fcinfo.args` and `fcinfo.ref_args`
@@ -4003,11 +4052,17 @@ fn dispatch_frame_ref_args_in_place<'mcx>(
     mcx: Mcx<'mcx>,
     resolved: &ResolvedFmgrInfo,
     fcinfo: &mut FunctionCallInfoBaseData,
+    fn_expr: Option<Box<FnExpr>>,
     escontext: Option<&mut ::types_error::SoftErrorContext>,
 ) -> PgResult<Option<(::types_tuple::heaptuple::Datum<'mcx>, bool)>> {
     let fn_oid = resolved.finfo.fn_oid;
-    // C: fcache->flinfo.fn_expr = fcinfo->flinfo->fn_expr (fmgr.c:658).
-    let fn_expr = resolved.finfo.fn_expr.clone();
+    // C: fcache->flinfo.fn_expr = fcinfo->flinfo->fn_expr (fmgr.c:658). The
+    // per-call-site `fn_expr` is threaded in DIRECTLY (not read off `resolved`):
+    // the hot resolved/by-OID-builtin paths borrow the SHARED, cache-owned
+    // `ResolvedFmgrInfo` (which carries no `fn_expr`) and pass the call site's
+    // node alongside, so they never clone the `String`-bearing `BuiltinFunction`
+    // resolution per tuple just to stamp `fn_expr` — the profiled WHERE-clause
+    // `FmgrResolution::clone` / `String::clone` hotspot.
     // Enforce the `RefPayload::Varlena` carrier's "already-detoasted" contract at
     // the single fmgr dispatch chokepoint: a varlena arg read off a heap tuple
     // may be inline-compressed (4B-C) or out-of-line-external, and the raw-byte
@@ -4087,31 +4142,20 @@ fn function_call_invoke_datum_resolved_seam<'mcx>(
         return function_call_invoke_datum_seam(mcx, fn_oid, collation, args, args_null, fn_expr);
     };
 
-    // The cached `FmgrInfo` carries no `fn_expr` (the cache is keyed by OID and
-    // shared across every call site, while `fn_expr` is the per-call-site node
-    // `ExecInitFunc` stamped via `fmgr_info_set_expr`). A polymorphic built-in
-    // (e.g. `array_eq`, `record_eq`) reads it through `get_fn_expr_rettype/
-    // argtype`, so re-stamp the step's `fn_expr` onto a per-call `FmgrInfo` copy
-    // (a cheap clone — Copy-ish fields + an `Rc` bump for the existing
-    // `fn_expr`), leaving the shared cache entry untouched. The COMMON hot path
-    // (a non-polymorphic builtin like `int4pl`/`int4mod`) has `fn_expr == None`
-    // and borrows the shared entry with no clone at all. C's
-    // `fcache->flinfo.fn_expr = fcinfo->flinfo->fn_expr` (fmgr.c:658) likewise
-    // stamps the call-site node onto the per-call frame.
-    let resolved_for_call: std::borrow::Cow<'_, ResolvedFmgrInfo> = match fn_expr {
-        Some(node) => {
-            let mut owned = ResolvedFmgrInfo {
-                finfo: resolved.finfo.clone(),
-                resolution: resolved.resolution.clone(),
-            };
-            owned.finfo.fn_expr = Some(Box::new(FnExpr::External(::fmgr::ExternalFnExpr {
-                tag: 0,
-                node: Some(node),
-            })));
-            std::borrow::Cow::Owned(owned)
-        }
-        None => std::borrow::Cow::Borrowed(&*resolved),
-    };
+    // Build the per-call-site `fn_expr` Box (C: `flinfo->fn_expr`, stamped onto
+    // the frame's `FmgrInfo` below). The shared, cache-owned `resolved` carries
+    // no `fn_expr` (it is keyed by OID and shared across every call site), so we
+    // BORROW it directly — no `FmgrResolution`/`String` clone per tuple (the
+    // profiled WHERE-clause hotspot). The per-call node is a cheap `Rc`-backed
+    // `FnExprErased`; the COMMON non-polymorphic hot path (`int4pl`/`int4mod`,
+    // `fn_expr == None`) builds none. A polymorphic built-in (`array_eq`,
+    // `record_eq`) reads it back via `get_fn_expr_*` off the frame's flinfo.
+    let fn_expr_box: Option<Box<FnExpr>> = fn_expr.map(|node| {
+        Box::new(FnExpr::External(::fmgr::ExternalFnExpr {
+            tag: 0,
+            node: Some(node),
+        }))
+    });
 
     // Take a reusable call frame from the per-backend pool (no per-call frame
     // construction / drop — the profiled hotspot). Marshal the canonical `Datum`
@@ -4121,7 +4165,13 @@ fn function_call_invoke_datum_resolved_seam<'mcx>(
     // allocates a throwaway Vec). The by-reference side channel is gathered into
     // a local `ref_args` Vec that `dispatch_resolved_into_frame` moves into the
     // frame's (also capacity-retained) `ref_args` in place.
-    let mut frame = fcinfo_pool_take(Some(resolved_for_call.finfo.clone()), collation);
+    // The frame's `flinfo` is a cheap `FmgrInfo` clone (no `String`); stamp the
+    // per-call `fn_expr` onto it (C: `fcinfo->flinfo->fn_expr`) so a callee's
+    // `get_fn_expr_*` reads the call-site node.
+    let mut frame = fcinfo_pool_take(Some(resolved.finfo.clone()), collation);
+    if let Some(flinfo) = frame.flinfo.as_mut() {
+        flinfo.fn_expr = fn_expr_box.clone();
+    }
     // Refill the frame's `args` AND `ref_args` (both cleared by `reset_for_reuse`
     // / `fcinfo_pool_return`, capacity kept) DIRECTLY — no throwaway local
     // `ref_args` Vec, so the pooled hot path allocates nothing per call.
@@ -4138,7 +4188,7 @@ fn function_call_invoke_datum_resolved_seam<'mcx>(
     }
     frame.nargs = args.len() as i16;
 
-    let out = dispatch_frame_ref_args_in_place(mcx, &resolved_for_call, &mut frame, None);
+    let out = dispatch_frame_ref_args_in_place(mcx, &resolved, &mut frame, fn_expr_box, None);
     fcinfo_pool_return(frame);
     match out? {
         Some(pair) => Ok(pair),
