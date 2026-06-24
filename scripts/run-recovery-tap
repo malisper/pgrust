@@ -155,6 +155,22 @@ export TEMP_CONFIG="$tmpconf"
 export PG_REGRESS="$PG_SRC/src/test/regress/pg_regress"
 export PG_TEST_TIMEOUT_DEFAULT="${PG_TEST_TIMEOUT_DEFAULT:-90}"
 
+# Build-capability flags the TAP tests read to decide skips. PostgreSQL's build
+# Makefile normally exports these from the ./configure result; pgrust's build
+# doesn't go through configure, so they arrive UNSET. A test that does
+# `skip_all unless $ENV{with_icu} eq 'yes'` then trips the "uninitialized
+# $ENV{with_icu}" warning, which is FATAL under the tests' `use warnings
+# FATAL => 'all'` -> the process exits rc=1 and is counted as a FALSE FAILURE
+# instead of skipping cleanly (this is what made subscription/012_collation
+# "fail"). Set them to match pgrust's actual capabilities (no ICU/SSL/auth
+# providers) so those tests SKIP cleanly (Result: NOTESTS).
+export with_icu="${with_icu:-no}"
+export with_ssl="${with_ssl:-openssl_no}"   # any non-'openssl' value => SSL tests skip
+export with_gssapi="${with_gssapi:-no}"
+export with_ldap="${with_ldap:-no}"
+export with_pam="${with_pam:-no}"
+export with_readline="${with_readline:-no}"
+
 rundir=/tmp/pgrust_recovery_tap_data
 rm -rf "$rundir" tmp_check log
 mkdir -p "$rundir"
