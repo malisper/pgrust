@@ -23,6 +23,16 @@
 use backend_main_main::{pg_main, MainOutcome};
 
 fn main() {
+    // On wasm64-unknown-unknown std's panic message goes to std stderr, which is
+    // a no-op — so a panic (e.g. an `.expect()` on a startup PgError) aborts
+    // invisibly. Install a panic hook that routes the panic location + message to
+    // the host stderr so boot failures are diagnosable.
+    #[cfg(target_family = "wasm")]
+    std::panic::set_hook(Box::new(|info| {
+        let msg = format!("PANIC: {info}\n");
+        wasm_libc_shim::stderr_write(msg.as_bytes());
+    }));
+
     // Collect process arguments as owned strings, then borrow them as the
     // `&[&str]` slice `pg_main` expects (argv[0] is the executable name).
     //
