@@ -73,14 +73,14 @@ pub(crate) fn install_seams() {
     });
 }
 
-fn jstring(s: &str) -> JsonbValue {
+fn jstring(s: &str) -> JsonbValue<'_> {
     JsonbValue {
         typ: jbvType::jbvString,
-        val: JsonbValueData::String(s.as_bytes().to_vec()),
+        val: JsonbValueData::String(s.as_bytes()),
     }
 }
 
-fn jbool(b: bool) -> JsonbValue {
+fn jbool<'mcx>(b: bool) -> JsonbValue<'mcx> {
     JsonbValue {
         typ: jbvType::jbvBool,
         val: JsonbValueData::Bool(b),
@@ -99,13 +99,14 @@ fn to_bytes(v: &JsonbValue) -> Vec<u8> {
 fn build_array() -> Vec<u8> {
     install_seams();
     let ctx = MemoryContext::new("jsonb.test.build_array");
+    let mcx = ctx.mcx();
     let mut ps: Option<Box<jbu::JsonbParseState>> = None;
-    jbu::pushJsonbValue(&mut ps, WJB_BEGIN_ARRAY, None).unwrap();
-    jbu::pushJsonbValue(&mut ps, WJB_ELEM, Some(&jstring("a"))).unwrap();
-    jbu::pushJsonbValue(&mut ps, WJB_ELEM, Some(&jbool(true))).unwrap();
-    jbu::pushJsonbValue(&mut ps, WJB_ELEM, Some(&JsonbValue::null())).unwrap();
-    let res = jbu::pushJsonbValue(&mut ps, WJB_END_ARRAY, None).unwrap().unwrap();
-    let buf = jbu::JsonbValueToJsonb(ctx.mcx(), &res).unwrap();
+    jbu::pushJsonbValue(mcx, &mut ps, WJB_BEGIN_ARRAY, None).unwrap();
+    jbu::pushJsonbValue(mcx, &mut ps, WJB_ELEM, Some(&jstring("a"))).unwrap();
+    jbu::pushJsonbValue(mcx, &mut ps, WJB_ELEM, Some(&jbool(true))).unwrap();
+    jbu::pushJsonbValue(mcx, &mut ps, WJB_ELEM, Some(&JsonbValue::null())).unwrap();
+    let res = jbu::pushJsonbValue(mcx, &mut ps, WJB_END_ARRAY, None).unwrap().unwrap();
+    let buf = jbu::JsonbValueToJsonb(mcx, &res).unwrap();
     buf.as_slice().to_vec()
 }
 
@@ -113,13 +114,19 @@ fn build_array() -> Vec<u8> {
 fn build_object() -> Vec<u8> {
     install_seams();
     let ctx = MemoryContext::new("jsonb.test.build_object");
+    let mcx = ctx.mcx();
     let mut ps: Option<Box<jbu::JsonbParseState>> = None;
-    jbu::pushJsonbValue(&mut ps, WJB_BEGIN_OBJECT, None).unwrap();
-    jbu::pushJsonbValue(&mut ps, WJB_KEY, Some(&jstring("k"))).unwrap();
-    jbu::pushJsonbValue(&mut ps, WJB_VALUE, Some(&jstring("v"))).unwrap();
-    let res = jbu::pushJsonbValue(&mut ps, WJB_END_OBJECT, None).unwrap().unwrap();
-    let buf = jbu::JsonbValueToJsonb(ctx.mcx(), &res).unwrap();
+    jbu::pushJsonbValue(mcx, &mut ps, WJB_BEGIN_OBJECT, None).unwrap();
+    jbu::pushJsonbValue(mcx, &mut ps, WJB_KEY, Some(&jstring("k"))).unwrap();
+    jbu::pushJsonbValue(mcx, &mut ps, WJB_VALUE, Some(&jstring("v"))).unwrap();
+    let res = jbu::pushJsonbValue(mcx, &mut ps, WJB_END_OBJECT, None).unwrap().unwrap();
+    let buf = jbu::JsonbValueToJsonb(mcx, &res).unwrap();
     buf.as_slice().to_vec()
+}
+
+/// Intern owned on-disk bytes into `mcx` for the `&'mcx [u8]` read-path signatures.
+fn borrow_in<'mcx>(mcx: ::mcx::Mcx<'mcx>, bytes: &[u8]) -> &'mcx [u8] {
+    ::mcx::slice_borrow_in(mcx, bytes).unwrap()
 }
 
 fn build_scalar_string(s: &str) -> Vec<u8> {
@@ -153,21 +160,25 @@ fn out_escapes_string() {
 
 #[test]
 fn typeof_variants() {
-    assert_eq!(jsonb_typeof(&build_array()).unwrap(), "array");
-    assert_eq!(jsonb_typeof(&build_object()).unwrap(), "object");
-    assert_eq!(jsonb_typeof(&build_scalar_string("x")).unwrap(), "string");
-    assert_eq!(jsonb_typeof(&build_scalar_bool(true)).unwrap(), "boolean");
-    assert_eq!(jsonb_typeof(&to_bytes(&JsonbValue::null())).unwrap(), "null");
+    let ctx = MemoryContext::new("jsonb.test");
+    let mcx = ctx.mcx();
+    assert_eq!(jsonb_typeof(mcx, borrow_in(mcx, &build_array())).unwrap(), "array");
+    assert_eq!(jsonb_typeof(mcx, borrow_in(mcx, &build_object())).unwrap(), "object");
+    assert_eq!(jsonb_typeof(mcx, borrow_in(mcx, &build_scalar_string("x"))).unwrap(), "string");
+    assert_eq!(jsonb_typeof(mcx, borrow_in(mcx, &build_scalar_bool(true))).unwrap(), "boolean");
+    assert_eq!(jsonb_typeof(mcx, borrow_in(mcx, &to_bytes(&JsonbValue::null()))).unwrap(), "null");
 }
 
 #[test]
 fn bool_cast() {
-    assert_eq!(jsonb_bool(&build_scalar_bool(true)).unwrap(), Some(true));
-    assert_eq!(jsonb_bool(&build_scalar_bool(false)).unwrap(), Some(false));
+    let ctx = MemoryContext::new("jsonb.test");
+    let mcx = ctx.mcx();
+    assert_eq!(jsonb_bool(mcx, borrow_in(mcx, &build_scalar_bool(true))).unwrap(), Some(true));
+    assert_eq!(jsonb_bool(mcx, borrow_in(mcx, &build_scalar_bool(false))).unwrap(), Some(false));
     // jbvNull yields SQL NULL (None).
-    assert_eq!(jsonb_bool(&to_bytes(&JsonbValue::null())).unwrap(), None);
+    assert_eq!(jsonb_bool(mcx, borrow_in(mcx, &to_bytes(&JsonbValue::null()))).unwrap(), None);
     // wrong type -> cannot cast.
-    let err = jsonb_bool(&build_scalar_string("x")).unwrap_err();
+    let err = jsonb_bool(mcx, borrow_in(mcx, &build_scalar_string("x"))).unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
 }
 
@@ -273,23 +284,24 @@ fn check_string_len_limit() {
 fn semantic_actions_assemble_object_with_number() {
     install_seams();
     let ctx = MemoryContext::new("s");
+    let mcx = ctx.mcx();
     let mut st = JsonbInState::default();
 
-    jsonb_in_object_start(&mut st).unwrap();
-    jsonb_in_object_field_start(&mut st, b"a", None).unwrap();
-    jsonb_in_scalar(ctx.mcx(), &mut st, Some(b"1"), JsonTokenType::JSON_TOKEN_NUMBER, None).unwrap();
-    jsonb_in_object_field_start(&mut st, b"b", None).unwrap();
-    jsonb_in_array_start(&mut st).unwrap();
-    jsonb_in_scalar(ctx.mcx(), &mut st, None, JsonTokenType::JSON_TOKEN_TRUE, None).unwrap();
-    jsonb_in_array_end(&mut st).unwrap();
-    jsonb_in_object_end(&mut st).unwrap();
+    jsonb_in_object_start(mcx, &mut st).unwrap();
+    jsonb_in_object_field_start(mcx, &mut st, b"a", None).unwrap();
+    jsonb_in_scalar(mcx, &mut st, Some(b"1"), JsonTokenType::JSON_TOKEN_NUMBER, None).unwrap();
+    jsonb_in_object_field_start(mcx, &mut st, b"b", None).unwrap();
+    jsonb_in_array_start(mcx, &mut st).unwrap();
+    jsonb_in_scalar(mcx, &mut st, None, JsonTokenType::JSON_TOKEN_TRUE, None).unwrap();
+    jsonb_in_array_end(mcx, &mut st).unwrap();
+    jsonb_in_object_end(mcx, &mut st).unwrap();
 
-    let bytes = jbu::JsonbValueToJsonb(ctx.mcx(), st.res.as_ref().unwrap())
+    let bytes = jbu::JsonbValueToJsonb(mcx, st.res.as_ref().unwrap())
         .unwrap()
         .as_slice()
         .to_vec();
     assert_eq!(out(&bytes), r#"{"a": 1, "b": [true]}"#);
-    assert_eq!(jsonb_typeof(&bytes).unwrap(), "object");
+    assert_eq!(jsonb_typeof(mcx, borrow_in(mcx, &bytes)).unwrap(), "object");
 }
 
 /// A bare top-level scalar number assembles as a raw-scalar jsonb that renders
@@ -298,15 +310,16 @@ fn semantic_actions_assemble_object_with_number() {
 fn semantic_actions_top_level_scalar_number() {
     install_seams();
     let ctx = MemoryContext::new("s");
+    let mcx = ctx.mcx();
     let mut st = JsonbInState::default();
-    jsonb_in_scalar(ctx.mcx(), &mut st, Some(b"42"), JsonTokenType::JSON_TOKEN_NUMBER, None).unwrap();
-    let bytes = jbu::JsonbValueToJsonb(ctx.mcx(), st.res.as_ref().unwrap())
+    jsonb_in_scalar(mcx, &mut st, Some(b"42"), JsonTokenType::JSON_TOKEN_NUMBER, None).unwrap();
+    let bytes = jbu::JsonbValueToJsonb(mcx, st.res.as_ref().unwrap())
         .unwrap()
         .as_slice()
         .to_vec();
     assert_eq!(out(&bytes), "42");
-    assert_eq!(jsonb_int4(&bytes).unwrap(), Some(42));
-    assert_eq!(jsonb_typeof(&bytes).unwrap(), "number");
+    assert_eq!(jsonb_int4(mcx, borrow_in(mcx, &bytes)).unwrap(), Some(42));
+    assert_eq!(jsonb_typeof(mcx, borrow_in(mcx, &bytes)).unwrap(), "number");
 }
 
 /// Indented rendering exercises the `add_indent` / redo-switch paths.

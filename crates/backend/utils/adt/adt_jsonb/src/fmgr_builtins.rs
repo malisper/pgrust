@@ -798,10 +798,10 @@ mod tests {
         crate::tests::install_seams();
     }
 
-    fn jstring(s: &str) -> JsonbValue {
+    fn jstring(s: &str) -> JsonbValue<'_> {
         JsonbValue {
             typ: jbvType::jbvString,
-            val: JsonbValueData::String(s.as_bytes().to_vec()),
+            val: JsonbValueData::String(s.as_bytes()),
         }
     }
 
@@ -810,16 +810,17 @@ mod tests {
         install_seams();
         register_jsonb_builtins();
         let ctx = MemoryContext::new("jsonb.fmgr.test.object");
+        let mcx = ctx.mcx();
         let mut ps: Option<Box<jbu::JsonbParseState>> = None;
-        jbu::pushJsonbValue(&mut ps, WJB_BEGIN_OBJECT, None).unwrap();
+        jbu::pushJsonbValue(mcx, &mut ps, WJB_BEGIN_OBJECT, None).unwrap();
         for (k, v) in pairs {
-            jbu::pushJsonbValue(&mut ps, WJB_KEY, Some(&jstring(k))).unwrap();
-            jbu::pushJsonbValue(&mut ps, WJB_VALUE, Some(&jstring(v))).unwrap();
+            jbu::pushJsonbValue(mcx, &mut ps, WJB_KEY, Some(&jstring(k))).unwrap();
+            jbu::pushJsonbValue(mcx, &mut ps, WJB_VALUE, Some(&jstring(v))).unwrap();
         }
-        let res = jbu::pushJsonbValue(&mut ps, WJB_END_OBJECT, None)
+        let res = jbu::pushJsonbValue(mcx, &mut ps, WJB_END_OBJECT, None)
             .unwrap()
             .unwrap();
-        let buf = jbu::JsonbValueToJsonb(ctx.mcx(), &res).unwrap();
+        let buf = jbu::JsonbValueToJsonb(mcx, &res).unwrap();
         buf.as_slice().to_vec()
     }
 

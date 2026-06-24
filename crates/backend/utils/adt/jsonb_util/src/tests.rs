@@ -74,27 +74,32 @@ fn install_seams() {
 
 /// Serialize a `JsonbValue` to owned on-disk bytes, copying out of a per-call
 /// memory context (the test analog of the C `palloc`'d return value).
-fn to_jsonb(v: &JsonbValue) -> Vec<u8> {
-    let ctx = mcx::MemoryContext::new("jsonb_util.test.to_jsonb");
-    let buf = JsonbValueToJsonb(ctx.mcx(), v).unwrap();
+fn to_jsonb(mcx: mcx::Mcx<'_>, v: &JsonbValue) -> Vec<u8> {
+    let buf = JsonbValueToJsonb(mcx, v).unwrap();
     buf.as_slice().to_vec()
 }
 
-fn jstring(s: &str) -> JsonbValue {
+/// Intern owned bytes into the arena, yielding the `&'mcx [u8]` the on-disk
+/// container reader needs (the test analog of `pg_detoast_datum` into `mcx`).
+fn borrow_in<'mcx>(mcx: mcx::Mcx<'mcx>, bytes: &[u8]) -> &'mcx [u8] {
+    ::mcx::slice_borrow_in(mcx, bytes).unwrap()
+}
+
+fn jstring(s: &str) -> JsonbValue<'_> {
     JsonbValue {
         typ: jbvType::jbvString,
-        val: JsonbValueData::String(s.as_bytes().to_vec()),
+        val: JsonbValueData::String(s.as_bytes()),
     }
 }
 
-fn jbool(b: bool) -> JsonbValue {
+fn jbool<'mcx>(b: bool) -> JsonbValue<'mcx> {
     JsonbValue {
         typ: jbvType::jbvBool,
         val: JsonbValueData::Bool(b),
     }
 }
 
-fn jnull() -> JsonbValue {
+fn jnull<'mcx>() -> JsonbValue<'mcx> {
     JsonbValue {
         typ: jbvType::jbvNull,
         val: JsonbValueData::Null,
@@ -105,7 +110,7 @@ fn jnull() -> JsonbValue {
 /// `n` (0 <= n < 10000), in PostgreSQL short format: a 4-byte varlena header, a
 /// 2-byte short header word (`NUMERIC_SHORT`, dscale 0, weight 0), and a single
 /// base-10000 `i16` digit.  These bytes are exactly what `jbvNumeric` carries.
-fn build_numeric_small(n: i16) -> JsonbNumeric {
+fn build_numeric_small(n: i16) -> Vec<u8> {
     assert!((0..10000).contains(&n));
     let mut v: Vec<u8> = Vec::new();
     let total = VARHDRSZ + 2 + 2; // varhdr + short hdr + one digit
@@ -118,10 +123,10 @@ fn build_numeric_small(n: i16) -> JsonbNumeric {
     v
 }
 
-fn jnumeric(n: i16) -> JsonbValue {
+fn jnumeric<'mcx>(mcx: mcx::Mcx<'mcx>, n: i16) -> JsonbValue<'mcx> {
     JsonbValue {
         typ: jbvType::jbvNumeric,
-        val: JsonbValueData::Numeric(build_numeric_small(n)),
+        val: JsonbValueData::Numeric(borrow_in(mcx, &build_numeric_small(n))),
     }
 }
 
@@ -129,24 +134,26 @@ fn jnumeric(n: i16) -> JsonbValue {
 #[test]
 fn array_roundtrip() {
     install_seams();
+    let ctx = mcx::MemoryContext::new("jsonb_util.test");
+    let mcx = ctx.mcx();
     let mut pstate: Option<Box<JsonbParseState>> = None;
-    pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_BEGIN_ARRAY, None).unwrap();
-    pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_ELEM, Some(&jstring("a"))).unwrap();
-    pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_ELEM, Some(&jbool(true))).unwrap();
+    pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_BEGIN_ARRAY, None).unwrap();
+    pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_ELEM, Some(&jstring("a"))).unwrap();
+    pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_ELEM, Some(&jbool(true))).unwrap();
     pushJsonbValue(
-        &mut pstate,
+        mcx, &mut pstate,
         JsonbIteratorToken::WJB_ELEM,
         Some(&JsonbValue::null()),
     )
     .unwrap();
-    let res = pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_END_ARRAY, None)
+    let res = pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_END_ARRAY, None)
         .unwrap()
         .unwrap();
 
-    let bytes = to_jsonb(&res);
+    let bytes = to_jsonb(mcx, &res);
 
     // Iterate the on-disk container (skip the varlena header).
-    let mut it = JsonbIteratorInit(&bytes[VARHDRSZ..]);
+    let mut it = JsonbIteratorInit(mcx, borrow_in(mcx, &bytes[VARHDRSZ..]));
     let mut v = JsonbValue::null();
     let mut toks = Vec::new();
     let mut strings = Vec::new();
@@ -157,7 +164,7 @@ fn array_roundtrip() {
         }
         toks.push(t);
         if let JsonbValueData::String(s) = &v.val {
-            strings.push(std::string::String::from_utf8(s.clone()).unwrap());
+            strings.push(std::string::String::from_utf8(s.to_vec()).unwrap());
         }
     }
     use JsonbIteratorToken::*;
@@ -172,29 +179,31 @@ fn array_roundtrip() {
 #[test]
 fn object_roundtrip() {
     install_seams();
+    let ctx = mcx::MemoryContext::new("jsonb_util.test");
+    let mcx = ctx.mcx();
     let mut pstate: Option<Box<JsonbParseState>> = None;
-    pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_BEGIN_OBJECT, None).unwrap();
-    pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_KEY, Some(&jstring("k1"))).unwrap();
+    pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_BEGIN_OBJECT, None).unwrap();
+    pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_KEY, Some(&jstring("k1"))).unwrap();
     pushJsonbValue(
-        &mut pstate,
+        mcx, &mut pstate,
         JsonbIteratorToken::WJB_VALUE,
         Some(&jstring("v1")),
     )
     .unwrap();
-    pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_KEY, Some(&jstring("k2"))).unwrap();
+    pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_KEY, Some(&jstring("k2"))).unwrap();
     pushJsonbValue(
-        &mut pstate,
+        mcx, &mut pstate,
         JsonbIteratorToken::WJB_VALUE,
         Some(&jbool(false)),
     )
     .unwrap();
-    let res = pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_END_OBJECT, None)
+    let res = pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_END_OBJECT, None)
         .unwrap()
         .unwrap();
 
-    let bytes = to_jsonb(&res);
+    let bytes = to_jsonb(mcx, &res);
 
-    let mut it = JsonbIteratorInit(&bytes[VARHDRSZ..]);
+    let mut it = JsonbIteratorInit(mcx, borrow_in(mcx, &bytes[VARHDRSZ..]));
     let mut v = JsonbValue::null();
     let mut keys = Vec::new();
     use JsonbIteratorToken::*;
@@ -205,7 +214,7 @@ fn object_roundtrip() {
         }
         if t == WJB_KEY {
             if let JsonbValueData::String(s) = &v.val {
-                keys.push(std::string::String::from_utf8(s.clone()).unwrap());
+                keys.push(std::string::String::from_utf8(s.to_vec()).unwrap());
             }
         }
     }
@@ -216,15 +225,17 @@ fn object_roundtrip() {
 #[test]
 fn scalar_roundtrip() {
     install_seams();
+    let ctx = mcx::MemoryContext::new("jsonb_util.test");
+    let mcx = ctx.mcx();
     let v = jstring("hello");
-    let bytes = to_jsonb(&v);
+    let bytes = to_jsonb(mcx, &v);
     // Root must be a raw-scalar array.
     let header = container_header(&bytes[VARHDRSZ..]);
     assert!(json_container_is_scalar(header));
     assert!(json_container_is_array(header));
 
     // Extract the scalar back via iteration with skip_nested.
-    let mut it = JsonbIteratorInit(&bytes[VARHDRSZ..]);
+    let mut it = JsonbIteratorInit(mcx, borrow_in(mcx, &bytes[VARHDRSZ..]));
     let mut tmp = JsonbValue::null();
     use JsonbIteratorToken::*;
     assert_eq!(
@@ -244,26 +255,28 @@ fn scalar_roundtrip() {
 #[test]
 fn object_key_lookup() {
     install_seams();
+    let ctx = mcx::MemoryContext::new("jsonb_util.test");
+    let mcx = ctx.mcx();
     let mut pstate: Option<Box<JsonbParseState>> = None;
-    pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_BEGIN_OBJECT, None).unwrap();
-    pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_KEY, Some(&jstring("k1"))).unwrap();
+    pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_BEGIN_OBJECT, None).unwrap();
+    pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_KEY, Some(&jstring("k1"))).unwrap();
     pushJsonbValue(
-        &mut pstate,
+        mcx, &mut pstate,
         JsonbIteratorToken::WJB_VALUE,
         Some(&jstring("v1")),
     )
     .unwrap();
-    pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_KEY, Some(&jstring("k2"))).unwrap();
+    pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_KEY, Some(&jstring("k2"))).unwrap();
     pushJsonbValue(
-        &mut pstate,
+        mcx, &mut pstate,
         JsonbIteratorToken::WJB_VALUE,
         Some(&jbool(false)),
     )
     .unwrap();
-    let res = pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_END_OBJECT, None)
+    let res = pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_END_OBJECT, None)
         .unwrap()
         .unwrap();
-    let bytes = to_jsonb(&res);
+    let bytes = to_jsonb(mcx, &res);
     let container = &bytes[VARHDRSZ..];
 
     let v1 = getKeyJsonValueFromContainer(container, b"k1")
@@ -293,15 +306,17 @@ fn object_key_lookup() {
 #[test]
 fn array_index_and_find() {
     install_seams();
+    let ctx = mcx::MemoryContext::new("jsonb_util.test");
+    let mcx = ctx.mcx();
     let mut pstate: Option<Box<JsonbParseState>> = None;
-    pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_BEGIN_ARRAY, None).unwrap();
+    pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_BEGIN_ARRAY, None).unwrap();
     for s in ["a", "b", "c"] {
-        pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_ELEM, Some(&jstring(s))).unwrap();
+        pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_ELEM, Some(&jstring(s))).unwrap();
     }
-    let res = pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_END_ARRAY, None)
+    let res = pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_END_ARRAY, None)
         .unwrap()
         .unwrap();
-    let bytes = to_jsonb(&res);
+    let bytes = to_jsonb(mcx, &res);
     let container = &bytes[VARHDRSZ..];
 
     let e1 = getIthJsonbValueFromContainer(container, 1).unwrap().unwrap();
@@ -330,158 +345,166 @@ enum J {
 }
 
 /// Push a `J` literal into the parse state, then materialize the on-disk bytes.
-fn build(j: &J) -> Vec<u8> {
-    fn jvalue(j: &J) -> JsonbValue {
+fn build(mcx: mcx::Mcx<'_>, j: &J) -> Vec<u8> {
+    fn jvalue<'mcx>(mcx: mcx::Mcx<'mcx>, j: &J) -> JsonbValue<'mcx> {
         match j {
             J::Null => JsonbValue::null(),
             J::Bool(b) => jbool(*b),
             J::Str(s) => jstring(s),
-            J::Num(n) => jnumeric(*n),
+            J::Num(n) => jnumeric(mcx, *n),
             J::Arr(elems) => {
                 let mut pstate: Option<Box<JsonbParseState>> = None;
-                pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_BEGIN_ARRAY, None).unwrap();
+                pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_BEGIN_ARRAY, None).unwrap();
                 for e in elems {
-                    let ev = jvalue(e);
-                    pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_ELEM, Some(&ev)).unwrap();
+                    let ev = jvalue(mcx, e);
+                    pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_ELEM, Some(&ev)).unwrap();
                 }
-                pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_END_ARRAY, None)
+                pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_END_ARRAY, None)
                     .unwrap()
                     .unwrap()
             }
             J::Obj(pairs) => {
                 let mut pstate: Option<Box<JsonbParseState>> = None;
-                pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_BEGIN_OBJECT, None).unwrap();
+                pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_BEGIN_OBJECT, None).unwrap();
                 for (k, v) in pairs {
                     let kv = jstring(k);
-                    let vv = jvalue(v);
-                    pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_KEY, Some(&kv)).unwrap();
-                    pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_VALUE, Some(&vv)).unwrap();
+                    let vv = jvalue(mcx, v);
+                    pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_KEY, Some(&kv)).unwrap();
+                    pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_VALUE, Some(&vv)).unwrap();
                 }
-                pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_END_OBJECT, None)
+                pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_END_OBJECT, None)
                     .unwrap()
                     .unwrap()
             }
         }
     }
 
-    to_jsonb(&jvalue(j))
+    to_jsonb(mcx, &jvalue(mcx, j))
 }
 
 /// `compareJsonbContainers` orders arrays by element count, then element-wise.
 #[test]
 fn compare_containers() {
     install_seams();
-    let a = build(&J::Arr(vec![J::Num(1), J::Num(2)]));
-    let b = build(&J::Arr(vec![J::Num(1), J::Num(2)]));
-    let c = build(&J::Arr(vec![J::Num(1), J::Num(2), J::Num(3)]));
-    let d = build(&J::Arr(vec![J::Num(1), J::Num(3)]));
+    let ctx = mcx::MemoryContext::new("jsonb_util.test");
+    let mcx = ctx.mcx();
+    let a = build(mcx, &J::Arr(vec![J::Num(1), J::Num(2)]));
+    let b = build(mcx, &J::Arr(vec![J::Num(1), J::Num(2)]));
+    let c = build(mcx, &J::Arr(vec![J::Num(1), J::Num(2), J::Num(3)]));
+    let d = build(mcx, &J::Arr(vec![J::Num(1), J::Num(3)]));
 
     assert_eq!(
-        compareJsonbContainers(&a[VARHDRSZ..], &b[VARHDRSZ..]).unwrap(),
+        compareJsonbContainers(mcx, borrow_in(mcx, &a[VARHDRSZ..]), borrow_in(mcx, &b[VARHDRSZ..])).unwrap(),
         0
     );
     // Fewer elements sorts less.
-    assert!(compareJsonbContainers(&a[VARHDRSZ..], &c[VARHDRSZ..]).unwrap() < 0);
-    assert!(compareJsonbContainers(&c[VARHDRSZ..], &a[VARHDRSZ..]).unwrap() > 0);
+    assert!(compareJsonbContainers(mcx, borrow_in(mcx, &a[VARHDRSZ..]), borrow_in(mcx, &c[VARHDRSZ..])).unwrap() < 0);
+    assert!(compareJsonbContainers(mcx, borrow_in(mcx, &c[VARHDRSZ..]), borrow_in(mcx, &a[VARHDRSZ..])).unwrap() > 0);
     // Same count, 2 < 3 numerically.
-    assert!(compareJsonbContainers(&a[VARHDRSZ..], &d[VARHDRSZ..]).unwrap() < 0);
+    assert!(compareJsonbContainers(mcx, borrow_in(mcx, &a[VARHDRSZ..]), borrow_in(mcx, &d[VARHDRSZ..])).unwrap() < 0);
 }
 
 /// `JsonbDeepContains`: `{a:1,b:2}` contains `{a:1}` but not `{a:9}`.
 #[test]
 fn deep_contains_object() {
     install_seams();
-    fn obj(pairs: &[(&'static str, bool)]) -> Vec<u8> {
-        build(&J::Obj(
+    let ctx = mcx::MemoryContext::new("jsonb_util.test");
+    let mcx = ctx.mcx();
+    let obj = |pairs: &[(&'static str, bool)]| -> Vec<u8> {
+        build(mcx, &J::Obj(
             pairs.iter().map(|(k, v)| (*k, J::Bool(*v))).collect(),
         ))
-    }
+    };
 
     let big = obj(&[("a", true), ("b", false)]);
     let sub = obj(&[("a", true)]);
     let nope = obj(&[("a", false)]);
 
-    let mut iv = JsonbIteratorInit(&big[VARHDRSZ..]);
-    let mut ic = JsonbIteratorInit(&sub[VARHDRSZ..]);
-    assert!(JsonbDeepContains(&mut iv, &mut ic).unwrap());
+    let mut iv = JsonbIteratorInit(mcx, borrow_in(mcx, &big[VARHDRSZ..]));
+    let mut ic = JsonbIteratorInit(mcx, borrow_in(mcx, &sub[VARHDRSZ..]));
+    assert!(JsonbDeepContains(mcx, &mut iv, &mut ic).unwrap());
 
-    let mut iv = JsonbIteratorInit(&big[VARHDRSZ..]);
-    let mut ic = JsonbIteratorInit(&nope[VARHDRSZ..]);
-    assert!(!JsonbDeepContains(&mut iv, &mut ic).unwrap());
+    let mut iv = JsonbIteratorInit(mcx, borrow_in(mcx, &big[VARHDRSZ..]));
+    let mut ic = JsonbIteratorInit(mcx, borrow_in(mcx, &nope[VARHDRSZ..]));
+    assert!(!JsonbDeepContains(mcx, &mut iv, &mut ic).unwrap());
 
     // A smaller lhs cannot contain a larger rhs.
-    let mut iv = JsonbIteratorInit(&sub[VARHDRSZ..]);
-    let mut ic = JsonbIteratorInit(&big[VARHDRSZ..]);
-    assert!(!JsonbDeepContains(&mut iv, &mut ic).unwrap());
+    let mut iv = JsonbIteratorInit(mcx, borrow_in(mcx, &sub[VARHDRSZ..]));
+    let mut ic = JsonbIteratorInit(mcx, borrow_in(mcx, &big[VARHDRSZ..]));
+    assert!(!JsonbDeepContains(mcx, &mut iv, &mut ic).unwrap());
 }
 
 /// `JsonbDeepContains` over arrays: the lhs array must contain every rhs element.
 #[test]
 fn deep_contains_array() {
     install_seams();
-    fn arr(bools: &[bool]) -> Vec<u8> {
-        build(&J::Arr(bools.iter().map(|b| J::Bool(*b)).collect()))
-    }
+    let ctx = mcx::MemoryContext::new("jsonb_util.test");
+    let mcx = ctx.mcx();
+    let arr = |bools: &[bool]| -> Vec<u8> {
+        build(mcx, &J::Arr(bools.iter().map(|b| J::Bool(*b)).collect()))
+    };
 
     let big = arr(&[true, false]);
     let sub = arr(&[true]);
     let only_missing = arr(&[true, true, true]); // still all "true", contained
 
-    let mut iv = JsonbIteratorInit(&big[VARHDRSZ..]);
-    let mut ic = JsonbIteratorInit(&sub[VARHDRSZ..]);
-    assert!(JsonbDeepContains(&mut iv, &mut ic).unwrap());
+    let mut iv = JsonbIteratorInit(mcx, borrow_in(mcx, &big[VARHDRSZ..]));
+    let mut ic = JsonbIteratorInit(mcx, borrow_in(mcx, &sub[VARHDRSZ..]));
+    assert!(JsonbDeepContains(mcx, &mut iv, &mut ic).unwrap());
 
-    let mut iv = JsonbIteratorInit(&big[VARHDRSZ..]);
-    let mut ic = JsonbIteratorInit(&only_missing[VARHDRSZ..]);
-    assert!(JsonbDeepContains(&mut iv, &mut ic).unwrap());
+    let mut iv = JsonbIteratorInit(mcx, borrow_in(mcx, &big[VARHDRSZ..]));
+    let mut ic = JsonbIteratorInit(mcx, borrow_in(mcx, &only_missing[VARHDRSZ..]));
+    assert!(JsonbDeepContains(mcx, &mut iv, &mut ic).unwrap());
 
     // sub does NOT contain `false`.
-    let mut iv = JsonbIteratorInit(&sub[VARHDRSZ..]);
-    let mut ic = JsonbIteratorInit(&big[VARHDRSZ..]);
-    assert!(!JsonbDeepContains(&mut iv, &mut ic).unwrap());
+    let mut iv = JsonbIteratorInit(mcx, borrow_in(mcx, &sub[VARHDRSZ..]));
+    let mut ic = JsonbIteratorInit(mcx, borrow_in(mcx, &big[VARHDRSZ..]));
+    assert!(!JsonbDeepContains(mcx, &mut iv, &mut ic).unwrap());
 }
 
 /// Golden: nested array self-containment and the raw-scalar/array asymmetry.
 #[test]
 fn golden_containment() {
     install_seams();
-    fn contains(val_bytes: &[u8], tmpl_bytes: &[u8]) -> bool {
-        let val = &val_bytes[VARHDRSZ..];
-        let tmpl = &tmpl_bytes[VARHDRSZ..];
+    let ctx = mcx::MemoryContext::new("jsonb_util.test");
+    let mcx = ctx.mcx();
+    let contains = |val_bytes: &[u8], tmpl_bytes: &[u8]| -> bool {
+        let val = borrow_in(mcx, &val_bytes[VARHDRSZ..]);
+        let tmpl = borrow_in(mcx, &tmpl_bytes[VARHDRSZ..]);
         let val_is_obj = json_container_is_object(container_header(val));
         let tmpl_is_obj = json_container_is_object(container_header(tmpl));
         if val_is_obj != tmpl_is_obj {
             return false;
         }
-        let mut it1 = JsonbIteratorInit(val);
-        let mut it2 = JsonbIteratorInit(tmpl);
-        JsonbDeepContains(&mut it1, &mut it2).unwrap()
-    }
+        let mut it1 = JsonbIteratorInit(mcx, val);
+        let mut it2 = JsonbIteratorInit(mcx, tmpl);
+        JsonbDeepContains(mcx, &mut it1, &mut it2).unwrap()
+    };
 
     // Array containment (jsonb.out): [1,2] @> [1,2,2], [1,1,2] @> [1,2,2].
-    let a12 = build(&J::Arr(vec![J::Num(1), J::Num(2)]));
-    let a122 = build(&J::Arr(vec![J::Num(1), J::Num(2), J::Num(2)]));
-    let a112 = build(&J::Arr(vec![J::Num(1), J::Num(1), J::Num(2)]));
+    let a12 = build(mcx, &J::Arr(vec![J::Num(1), J::Num(2)]));
+    let a122 = build(mcx, &J::Arr(vec![J::Num(1), J::Num(2), J::Num(2)]));
+    let a112 = build(mcx, &J::Arr(vec![J::Num(1), J::Num(1), J::Num(2)]));
     assert!(contains(&a12, &a122));
     assert!(contains(&a112, &a122));
-    let aa12 = build(&J::Arr(vec![J::Arr(vec![J::Num(1), J::Num(2)])]));
-    let aa122 = build(&J::Arr(vec![J::Arr(vec![J::Num(1), J::Num(2), J::Num(2)])]));
+    let aa12 = build(mcx, &J::Arr(vec![J::Arr(vec![J::Num(1), J::Num(2)])]));
+    let aa122 = build(mcx, &J::Arr(vec![J::Arr(vec![J::Num(1), J::Num(2), J::Num(2)])]));
     assert!(contains(&aa12, &aa122)); // [[1,2]] @> [[1,2,2]]
 
     // Scalar / raw-scalar containment.
-    let s5 = build(&J::Num(5));
-    let arr5 = build(&J::Arr(vec![J::Num(5)]));
+    let s5 = build(mcx, &J::Num(5));
+    let arr5 = build(mcx, &J::Arr(vec![J::Num(5)]));
     assert!(contains(&arr5, &arr5)); // [5] @> [5]
     assert!(contains(&s5, &s5)); // 5 @> 5
     assert!(contains(&arr5, &s5)); // [5] @> 5
     assert!(!contains(&s5, &arr5)); // 5 @> [5] -> f (raw scalar can't contain array)
 
     // {"tags":["qu"]} is NOT contained in {"name":"Bob","tags":["enim","qui"]}.
-    let bob = build(&J::Obj(vec![
+    let bob = build(mcx, &J::Obj(vec![
         ("name", J::Str("Bob")),
         ("tags", J::Arr(vec![J::Str("enim"), J::Str("qui")])),
     ]));
-    let tags_qu = build(&J::Obj(vec![("tags", J::Arr(vec![J::Str("qu")]))]));
+    let tags_qu = build(mcx, &J::Obj(vec![("tags", J::Arr(vec![J::Str("qu")]))]));
     assert!(!contains(&bob, &tags_qu));
 }
 
@@ -491,16 +514,18 @@ fn golden_containment() {
 #[test]
 fn golden_btree_ordering() {
     install_seams();
-    fn cmp(a: &[u8], b: &[u8]) -> i32 {
-        compareJsonbContainers(&a[VARHDRSZ..], &b[VARHDRSZ..]).unwrap()
-    }
+    let ctx = mcx::MemoryContext::new("jsonb_util.test");
+    let mcx = ctx.mcx();
+    let cmp = |a: &[u8], b: &[u8]| -> i32 {
+        compareJsonbContainers(mcx, borrow_in(mcx, &a[VARHDRSZ..]), borrow_in(mcx, &b[VARHDRSZ..])).unwrap()
+    };
 
-    let obj = build(&J::Obj(vec![("k", J::Num(1))]));
-    let arr = build(&J::Arr(vec![J::Num(1), J::Num(2)])); // non-empty
-    let boolean = build(&J::Bool(true));
-    let num = build(&J::Num(1));
-    let strv = build(&J::Str("a"));
-    let nul = build(&J::Null);
+    let obj = build(mcx, &J::Obj(vec![("k", J::Num(1))]));
+    let arr = build(mcx, &J::Arr(vec![J::Num(1), J::Num(2)])); // non-empty
+    let boolean = build(mcx, &J::Bool(true));
+    let num = build(mcx, &J::Num(1));
+    let strv = build(mcx, &J::Str("a"));
+    let nul = build(mcx, &J::Null);
 
     assert!(cmp(&obj, &arr) > 0, "Object > Array");
     assert!(cmp(&arr, &boolean) > 0, "Array > Boolean");
@@ -509,22 +534,22 @@ fn golden_btree_ordering() {
     assert!(cmp(&strv, &nul) > 0, "String > null");
 
     // Object with n pairs > object with n-1 pairs.
-    let o1 = build(&J::Obj(vec![("a", J::Num(1))]));
-    let o2 = build(&J::Obj(vec![("a", J::Num(1)), ("b", J::Num(2))]));
+    let o1 = build(mcx, &J::Obj(vec![("a", J::Num(1))]));
+    let o2 = build(mcx, &J::Obj(vec![("a", J::Num(1)), ("b", J::Num(2))]));
     assert!(cmp(&o2, &o1) > 0, "object n > object n-1");
 
     // Array with n elements > array with n-1 elements.
-    let a1 = build(&J::Arr(vec![J::Num(1)]));
-    let a2 = build(&J::Arr(vec![J::Num(1), J::Num(2)]));
+    let a1 = build(mcx, &J::Arr(vec![J::Num(1)]));
+    let a2 = build(mcx, &J::Arr(vec![J::Num(1), J::Num(2)]));
     assert!(cmp(&a2, &a1) > 0, "array n > array n-1");
 
     // Equal numeric documents compare 0.
-    let e1 = build(&J::Arr(vec![J::Num(3), J::Num(4)]));
-    let e2 = build(&J::Arr(vec![J::Num(3), J::Num(4)]));
+    let e1 = build(mcx, &J::Arr(vec![J::Num(3), J::Num(4)]));
+    let e2 = build(mcx, &J::Arr(vec![J::Num(3), J::Num(4)]));
     assert_eq!(cmp(&e1, &e2), 0, "equal numeric docs compare 0");
 
     // Historical exception: an empty top-level array sorts LESS than null.
-    let empty_arr = build(&J::Arr(vec![]));
+    let empty_arr = build(mcx, &J::Arr(vec![]));
     assert!(cmp(&empty_arr, &nul) < 0, "empty top-level array < null");
 }
 
@@ -532,6 +557,8 @@ fn golden_btree_ordering() {
 #[test]
 fn hash_scalar_values() {
     install_seams();
+    let ctx = mcx::MemoryContext::new("jsonb_util.test");
+    let mcx = ctx.mcx();
     // null contributes 0x01.
     let mut h: u32 = 0;
     JsonbHashScalarValue(&JsonbValue::null(), &mut h).unwrap();
@@ -555,8 +582,8 @@ fn hash_scalar_values() {
     // Equal numerics hash equally.
     let mut hn1: u32 = 0;
     let mut hn2: u32 = 0;
-    JsonbHashScalarValue(&jnumeric(7), &mut hn1).unwrap();
-    JsonbHashScalarValue(&jnumeric(7), &mut hn2).unwrap();
+    JsonbHashScalarValue(&jnumeric(mcx, 7), &mut hn1).unwrap();
+    JsonbHashScalarValue(&jnumeric(mcx, 7), &mut hn2).unwrap();
     assert_eq!(hn1, hn2);
 
     // Extended hash, zero seed, bool path matches the 32-bit constants.
@@ -569,15 +596,17 @@ fn hash_scalar_values() {
 #[test]
 fn numeric_scalar_roundtrip() {
     install_seams();
-    let v = jnumeric(42);
+    let ctx = mcx::MemoryContext::new("jsonb_util.test");
+    let mcx = ctx.mcx();
+    let v = jnumeric(mcx, 42);
 
     // Equal numerics compare/equal as equal.
-    assert!(equalsJsonbScalarValue(&v, &jnumeric(42)).unwrap());
-    assert_eq!(compareJsonbScalarValue(&v, &jnumeric(42)).unwrap(), 0);
+    assert!(equalsJsonbScalarValue(&v, &jnumeric(mcx, 42)).unwrap());
+    assert_eq!(compareJsonbScalarValue(&v, &jnumeric(mcx, 42)).unwrap(), 0);
 
     // Serialize a numeric scalar and read it back identically.
-    let bytes = to_jsonb(&v);
-    let mut it = JsonbIteratorInit(&bytes[VARHDRSZ..]);
+    let bytes = to_jsonb(mcx, &v);
+    let mut it = JsonbIteratorInit(mcx, borrow_in(mcx, &bytes[VARHDRSZ..]));
     let mut tmp = JsonbValue::null();
     use JsonbIteratorToken::*;
     assert_eq!(
@@ -594,19 +623,21 @@ fn numeric_scalar_roundtrip() {
 #[test]
 fn duplicate_key_errors() {
     install_seams();
+    let ctx = mcx::MemoryContext::new("jsonb_util.test");
+    let mcx = ctx.mcx();
     let mut pstate: Option<Box<JsonbParseState>> = None;
-    pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_BEGIN_OBJECT, None).unwrap();
+    pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_BEGIN_OBJECT, None).unwrap();
     pstate.as_mut().unwrap().unique_keys = true;
-    pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_KEY, Some(&jstring("k"))).unwrap();
-    pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_VALUE, Some(&jbool(true))).unwrap();
-    pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_KEY, Some(&jstring("k"))).unwrap();
+    pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_KEY, Some(&jstring("k"))).unwrap();
+    pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_VALUE, Some(&jbool(true))).unwrap();
+    pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_KEY, Some(&jstring("k"))).unwrap();
     pushJsonbValue(
-        &mut pstate,
+        mcx, &mut pstate,
         JsonbIteratorToken::WJB_VALUE,
         Some(&jbool(false)),
     )
     .unwrap();
-    let err = pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_END_OBJECT, None).unwrap_err();
+    let err = pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_END_OBJECT, None).unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_DUPLICATE_JSON_OBJECT_KEY_VALUE);
 }
 
@@ -657,20 +688,21 @@ fn compare_string_scalar_uses_collation_seam() {
 #[test]
 fn charge_gate_convert_success_path_released() {
     install_seams();
+    let ctx = mcx::MemoryContext::new("charge-gate-ok");
+    let mcx = ctx.mcx();
     // A non-scalar value (object), so it goes through convertToJsonb directly.
     let v = {
         let mut pstate: Option<Box<JsonbParseState>> = None;
-        pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_BEGIN_OBJECT, None).unwrap();
-        pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_KEY, Some(&jstring("k"))).unwrap();
-        pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_VALUE, Some(&jstring("v"))).unwrap();
-        pushJsonbValue(&mut pstate, JsonbIteratorToken::WJB_END_OBJECT, None)
+        pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_BEGIN_OBJECT, None).unwrap();
+        pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_KEY, Some(&jstring("k"))).unwrap();
+        pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_VALUE, Some(&jstring("v"))).unwrap();
+        pushJsonbValue(mcx, &mut pstate, JsonbIteratorToken::WJB_END_OBJECT, None)
             .unwrap()
             .unwrap()
     };
 
-    let ctx = mcx::MemoryContext::new("charge-gate-ok");
     {
-        let buf = JsonbValueToJsonb(ctx.mcx(), &v).unwrap();
+        let buf = JsonbValueToJsonb(mcx, &v).unwrap();
         assert!(ctx.used() > 0, "the result is charged while alive");
         assert!(buf.len() > 0);
     }
@@ -683,25 +715,28 @@ fn charge_gate_convert_success_path_released() {
 #[test]
 fn charge_gate_convert_error_path_released() {
     install_seams();
+    let ctx = mcx::MemoryContext::new("charge-gate-err");
+    let mcx = ctx.mcx();
     // [ <jbvBinary> ] -- the binary element is neither scalar nor a fresh
     // array/object value, so converting it errors deterministically.
+    let mut elems = ::mcx::vec_with_capacity_in(mcx, 1).unwrap();
+    elems.push(JsonbValue {
+        typ: jbvType::jbvBinary,
+        val: JsonbValueData::Binary {
+            len: 0,
+            data: &[],
+            offset: 0,
+        },
+    });
     let bad = JsonbValue {
         typ: jbvType::jbvArray,
         val: JsonbValueData::Array {
-            elems: vec![JsonbValue {
-                typ: jbvType::jbvBinary,
-                val: JsonbValueData::Binary {
-                    len: 0,
-                    data: Vec::new(),
-                    offset: 0,
-                },
-            }],
+            elems,
             raw_scalar: false,
         },
     };
 
-    let ctx = mcx::MemoryContext::new("charge-gate-err");
-    let err = JsonbValueToJsonb(ctx.mcx(), &bad).unwrap_err();
+    let err = JsonbValueToJsonb(mcx, &bad).unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
     assert_eq!(ctx.used(), 0, "no charge may leak after an error teardown");
 }
@@ -711,9 +746,11 @@ fn charge_gate_convert_error_path_released() {
 #[test]
 fn convert_public_roundtrips_clean() {
     install_seams();
+    let ctx = mcx::MemoryContext::new("jsonb_util.test");
+    let mcx = ctx.mcx();
     let v = jstring("hello"); // raw scalar -> scalar pseudo-array -> convertToJsonb
-    let bytes = to_jsonb(&v);
-    let mut it = JsonbIteratorInit(&bytes[VARHDRSZ..]);
+    let bytes = to_jsonb(mcx, &v);
+    let mut it = JsonbIteratorInit(mcx, borrow_in(mcx, &bytes[VARHDRSZ..]));
     let mut tmp = JsonbValue::null();
     use JsonbIteratorToken::*;
     assert_eq!(
