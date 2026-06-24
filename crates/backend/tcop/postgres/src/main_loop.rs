@@ -1533,9 +1533,36 @@ fn postgres_main_inner(dbname: Option<&str>, username: Option<&str>) -> PgResult
     // keeping the latch's SIGURG self-wake working.
     libpq_pqsignal_seams::unblock_signals::call();
 
-    // Generate a random cancel key + advertise it (postgres.c:4264). The
-    // MyCancelKey storage + advertisement is owned by the proc/cancel-key unit;
-    // not threaded here. The BackendKeyData send (below) is likewise skipped.
+    // Generate a random cancel key, if this is a backend serving a connection
+    // (postgres.c:4264-4282). InitPostgres()'s ProcSignalInit advertises it in
+    // shared memory; the BackendKeyData send (below) ships it to the frontend.
+    //
+    //   len = (MyProcPort == NULL || MyProcPort->proto >= PG_PROTOCOL(3,2))
+    //          ? MAX_CANCEL_KEY_LENGTH : 4;
+    //
+    // FrontendProtocol == Min(proto, PG_PROTOCOL_LATEST), so the raw-proto
+    // check `proto >= PG_PROTOCOL(3,2)` is equivalent to
+    // `FrontendProtocol >= PG_PROTOCOL(3,2)`. A client on protocol 3.2 (the
+    // PG18 default, used by pgx/libpq 18) gets a 32-byte key; older clients
+    // (3.0) get the classic 4-byte key.
+    if globals::where_to_send_output() == CommandDest::Remote {
+        let len = if utils_error::config::frontend_protocol()
+            >= backend_startup::pg_protocol(3, 2)
+        {
+            types_core::MAX_CANCEL_KEY_LENGTH
+        } else {
+            4usize
+        };
+        let mut key = [0u8; types_core::MAX_CANCEL_KEY_LENGTH];
+        if !pg_strong_random_seams::pg_strong_random::call(&mut key[..len]) {
+            return Err(ereport(ERROR)
+                .errcode(::types_error::error::ERRCODE_INTERNAL_ERROR)
+                .errmsg("could not generate random cancel key")
+                .into_error());
+        }
+        init_small::globals::SetMyCancelKey(key);
+        init_small::globals::SetMyCancelKeyLength(len as i32);
+    }
 
     // --- General initialization (postgres.c:4289) ---
     // InitPostgres(dbname, InvalidOid, username, InvalidOid,
@@ -1598,21 +1625,20 @@ fn postgres_main_inner(dbname: Option<&str>, username: Option<&str>) -> PgResult
     }
 
     // Send this backend's cancellation info to the frontend (postgres.c:4328).
-    // `BackendKeyData` ('K') = int32 MyProcPid + the cancel key bytes. While the
-    // cancel key itself is not yet wired into a shared cancel-key registry (so
-    // query cancellation by key is a no-op), the PID it carries is load-bearing:
-    // libpq's `PQbackendPID` returns it, and tools that key off the backend PID —
-    // notably the isolation tester's `pg_isolation_test_session_is_blocked`
-    // blocked-session poll, which queries by `PQbackendPID(conn)` — get 0 (and
-    // silently never detect a lock wait, hanging every blocking permutation)
-    // without it. We send the classic protocol-3.0 form (a 4-byte key); the key
-    // value is a fixed placeholder since cancellation-by-key is not yet served.
+    // `BackendKeyData` ('K') = int32 MyProcPid + the cancel key bytes
+    // (MyCancelKey[..MyCancelKeyLength], generated above and advertised in
+    // shared memory by ProcSignalInit). The key length is protocol-dependent:
+    // 32 bytes for protocol >= 3.2 (PG18 default), 4 bytes for 3.0. The PID is
+    // load-bearing for `PQbackendPID` / the isolation tester's blocked-session
+    // poll, and the now-real key bytes match what SendCancelRequest compares
+    // against, so cancellation-by-key is actually served.
     if globals::where_to_send_output() == CommandDest::Remote {
         let my_pid = init_small_seams::my_proc_pid::call();
-        let mut body = [0u8; 8];
-        body[0..4].copy_from_slice(&my_pid.to_be_bytes());
-        // 4-byte placeholder cancel key (protocol 3.0 length).
-        body[4..8].copy_from_slice(&0u32.to_be_bytes());
+        let key_len = init_small::globals::MyCancelKeyLength() as usize;
+        let key = init_small::globals::MyCancelKey();
+        let mut body = ::alloc::vec::Vec::with_capacity(4 + key_len);
+        body.extend_from_slice(&my_pid.to_be_bytes());
+        body.extend_from_slice(&key[..key_len]);
         // PqMsg_BackendKeyData == 'K'. Need not flush; ReadyForQuery will.
         pqcomm::pq_putmessage(b'K', &body)?;
     }

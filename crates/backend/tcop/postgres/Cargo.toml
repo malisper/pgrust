@@ -23,6 +23,8 @@ stringinfo = { path = "../../../_support/types/stringinfo" }
 types_startup = { path = "../../../_support/types/types_startup" }
 
 utils_error = { path = "../../utils/utils_error" }
+backend_startup = { path = "../backend_startup" }
+pg_strong_random_seams = { path = "../../../port/pg_strong_random_seams" }
 init_small = { path = "../../utils/init/init_small" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 misc_timeout = { path = "../../utils/misc/misc_timeout" }
