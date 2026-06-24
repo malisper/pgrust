@@ -2606,6 +2606,11 @@ fn EvalPlanQual<'mcx>(
     //   EvalPlanQualBegin(epqstate);
     EvalPlanQualBegin(estate, epqstate)?;
 
+    // Lend the parent's materialized CTE shared stores to the recheck estate for
+    // the duration of this recheck so recheck CteScans read them as followers
+    // (never re-executing a data-modifying CTE's ModifyTable). Handed back below.
+    epq_cte_shared_move_in(estate, epqstate)?;
+
     // Copy the locked input tuple (a PARENT-estate slot, filled by
     // table_tuple_lock) into the recheck-estate test slot. C uses
     //   testslot = EvalPlanQualSlot(...); if (testslot != inputslot) Copy;
@@ -2751,6 +2756,13 @@ fn EvalPlanQual<'mcx>(
         execTuples_seams::exec_clear_tuple::call(rc, testslot)?;
     }
     epq_set_blocked(epqstate, idx, true);
+
+    // Hand the lent CTE shared stores back to the (now-resuming) parent. The
+    // recheck output tuple was already materialized into a parent-estate slot, so
+    // the recheck no longer needs the stores. On the error paths above the whole
+    // statement aborts and the recheck estate is abandoned, so not restoring there
+    // is harmless (the stores are reclaimed with the per-query context).
+    epq_cte_shared_move_out(estate, epqstate)?;
 
     Ok(result)
 }
@@ -3365,10 +3377,29 @@ fn EvalPlanQualStart<'mcx>(
         rc_box.es_epq_active = Some(::mcx::alloc_in(qcx, marker)?);
     }
 
+    // Size the recheck estate's es_cte_shared to match the parent so the
+    // CTE-leader handshake below has a slot to land in (see the long note on
+    // epq_cte_shared_move_in). The actual stores are lent in just before init.
+    {
+        let pn = parentestate.es_cte_shared.len();
+        while rc_box.es_cte_shared.len() < pn {
+            rc_box.es_cte_shared.push(None);
+        }
+    }
+
     // Install the recheck estate on the EPQState, then ExecInitNode the recheck
     // plan tree (it must see recheckestate via the EPQState during init: subplan
     // states, scan slots, etc. all land in the recheck estate).
     epqstate.recheckestate = Some(rc_box);
+
+    // Lend the parent's CTE leaders' shared state to the recheck estate for the
+    // duration of plan-tree init: the recheck CteScans must resolve as *followers*
+    // of the already-materialized parent CTE store and allocate their read
+    // pointers in it (see epq_cte_shared_move_in for the full rationale). The
+    // stores are handed back to the parent right after init so the suspended
+    // parent owns them again between EPQ episodes; each EvalPlanQual() re-lends
+    // them around its recheck run.
+    epq_cte_shared_move_in(parentestate, epqstate)?;
 
     let plan_node = epqstate.plan;
     let recheckplanstate = {
@@ -3404,6 +3435,78 @@ fn EvalPlanQualStart<'mcx>(
             .expect("EvalPlanQualStart: recheck plan tree must initialize")
     };
     epqstate.recheckplanstate = Some(recheckplanstate);
+
+    // Init done: hand the CTE stores back to the parent. Each EvalPlanQual()
+    // re-lends them around its recheck run (epq_cte_shared_move_in/out).
+    epq_cte_shared_move_out(parentestate, epqstate)?;
+    Ok(())
+}
+
+/// Lend the parent's per-CTE shared state (`es_cte_shared`, the materialized CTE
+/// tuplestore + `eof_cte` + `last_cte_slot`) to the recheck estate for the
+/// duration of one EPQ run.
+///
+/// In C the recheck CteScan reaches the *parent* leader's shared store through
+/// the cteParam Datum slot (`es_param_exec_vals[cteParam].value`), which EPQ
+/// copies into the recheck estate — so the recheck CteScan is a follower of the
+/// parent's already-materialized store and never re-executes the (data-modifying)
+/// CTE subplan, whose ModifyTable must not run during EPQ. The owned model keeps
+/// that shared state in `EState.es_cte_shared` (a side-table not carried by the
+/// es_param_exec_vals copy), so we hand the entries over explicitly: the whole
+/// `CteSharedState` (including `eof_cte`, which the follower consults to decide
+/// whether the CTE is drained) moves into the recheck estate. The parent is
+/// suspended for the recheck, so it does not need them meanwhile; they are
+/// returned by [`epq_cte_shared_move_out`]. A recheck follower only allocates its
+/// own read pointer + rescans, leaving the parent's read position untouched —
+/// exactly C's shared-leader-store behavior. Idempotent w.r.t. already-lent
+/// entries (only moves a parent `Some` into a recheck `None`).
+fn epq_cte_shared_move_in<'mcx>(
+    parentestate: &mut ::nodes::EStateData<'mcx>,
+    epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
+) -> PgResult<()> {
+    let rc = match epqstate.recheckestate.as_deref_mut() {
+        Some(rc) => rc,
+        None => return Ok(()),
+    };
+    let n = parentestate.es_cte_shared.len();
+    while rc.es_cte_shared.len() < n {
+        rc.es_cte_shared.push(None);
+    }
+    for i in 0..n {
+        if rc.es_cte_shared[i].is_none() {
+            if let Some(entry) = parentestate.es_cte_shared[i].take() {
+                rc.es_cte_shared[i] = Some(entry);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Return the CTE shared state lent by [`epq_cte_shared_move_in`] to the parent
+/// (mirror move). Only entries the parent does not already hold are restored.
+fn epq_cte_shared_move_out<'mcx>(
+    parentestate: &mut ::nodes::EStateData<'mcx>,
+    epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
+) -> PgResult<()> {
+    let rc = match epqstate.recheckestate.as_deref_mut() {
+        Some(rc) => rc,
+        None => return Ok(()),
+    };
+    let n = rc.es_cte_shared.len();
+    for i in 0..n {
+        if let Some(entry) = rc.es_cte_shared[i].take() {
+            while parentestate.es_cte_shared.len() <= i {
+                parentestate.es_cte_shared.push(None);
+            }
+            if parentestate.es_cte_shared[i].is_none() {
+                parentestate.es_cte_shared[i] = Some(entry);
+            } else {
+                // Parent already holds this CTE's state (it was never lent, e.g.
+                // the recheck re-created its own entry). Keep the parent's and
+                // drop the recheck's to avoid clobbering the live store.
+            }
+        }
+    }
     Ok(())
 }
 
@@ -3412,7 +3515,7 @@ fn EvalPlanQualStart<'mcx>(
 /// table, close any result/trigger relations it opened, and free the recheck
 /// estate. Mark the EPQState idle. A no-op if EPQ was never started.
 fn EvalPlanQualEnd<'mcx>(
-    _parentestate: &mut ::nodes::EStateData<'mcx>,
+    parentestate: &mut ::nodes::EStateData<'mcx>,
     epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
 ) -> PgResult<()> {
     // EPQ was never started? nothing further to do (relsubs_slot on the parent
@@ -3425,6 +3528,27 @@ fn EvalPlanQualEnd<'mcx>(
     // ExecEndNode(recheckplanstate); foreach subplanstate ExecEndNode(...).
     let mut rcplan = epqstate.recheckplanstate.take();
     let mut rc_box = epqstate.recheckestate.take().expect("recheckestate present");
+
+    // Safety: each EvalPlanQual() already handed the lent CTE stores back to the
+    // parent via epq_cte_shared_move_out, so the recheck estate normally holds no
+    // CTE shared entries here. If any remain (e.g. a recheck-only CTE leader that
+    // the parent never owned), return them to the parent before freeing rc_box so
+    // their tuplestores are not dropped with the recheck estate. Never clobber a
+    // store the parent already holds.
+    {
+        let rc_shared = &mut rc_box.es_cte_shared;
+        for (i, slot) in rc_shared.iter_mut().enumerate() {
+            if let Some(taken) = slot.take() {
+                while parentestate.es_cte_shared.len() <= i {
+                    parentestate.es_cte_shared.push(None);
+                }
+                if parentestate.es_cte_shared[i].is_none() {
+                    parentestate.es_cte_shared[i] = Some(taken);
+                }
+            }
+        }
+    }
+
     {
         let rc = &mut *rc_box;
         if let Some(p) = rcplan.as_deref_mut() {
