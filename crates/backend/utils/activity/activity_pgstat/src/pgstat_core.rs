@@ -780,14 +780,32 @@ pub fn pgstat_reset_entry(
     objid: u64,
     ts: TimestampTz,
 ) -> PgResult<()> {
-    // Acquire the entry's content lock (exclusive) and zero its stats body.
-    let entry_ref = shmem::pgstat_get_entry_ref_locked(kind, dboid, objid, false)?;
+    // C (pgstat_shmem.c):
+    //   entry_ref = pgstat_get_entry_ref(kind, dboid, objid, false, NULL);
+    //   if (!entry_ref || entry_ref->shared_entry->dropped) return;
+    //   (void) pgstat_lock_entry(entry_ref, false);
+    //   shared_stat_reset_contents(...); pgstat_unlock_entry(entry_ref);
+    // Crucially `create=false`: resetting a nonexistent object must NOT
+    // materialize a zeroed entry (else pg_stat_get_function_calls(<missing>)
+    // would later find it and return 0 instead of NULL). Do NOT use
+    // pgstat_get_entry_ref_locked here — that passes create=true.
+    let entry_ref = shmem::pgstat_get_entry_ref(kind, dboid, objid, false, None)?;
     let entry_ref = match entry_ref {
         Some(er) => er,
         None => return Ok(()),
     };
-    // SAFETY: just-resolved live, content-locked reference.
+    // SAFETY: just-resolved live reference.
     let er = unsafe { entry_ref.get() };
+
+    // Skip an entry already marked dropped (its memory may be reclaimed).
+    if er.shared_entry.is_null() || unsafe { (*er.shared_entry).dropped } {
+        return Ok(());
+    }
+
+    // (void) pgstat_lock_entry(entry_ref, false): acquire the exclusive content
+    // lock (mirrors C; pgstat_get_entry_ref does not lock, unlike the _locked
+    // variant the old code used).
+    shmem::pgstat_lock_entry(er, false)?;
 
     if !er.shared_stats.is_null() {
         let kind_info = registry::pgstat_get_kind_info(kind);
