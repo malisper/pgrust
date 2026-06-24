@@ -75,6 +75,10 @@ startup_seams = { path = "../../../postmaster/startup_seams" }
 # (the GetWALAvailability process-singleton entry).
 walsummarizer_seams = { path = "../../../postmaster/walsummarizer_seams" }
 smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
+# Hot-standby init (xlog.c:5841) + backup_label/tablespace_map durable-rename.
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+standby_seams = { path = "../../../storage/ipc/standby_seams" }
+file_seams = { path = "../../../storage/file/file_seams" }
 types_timeout = { path = "../../../../_support/types/types_timeout" }
 libc = "0.2"
 

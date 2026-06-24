@@ -167,13 +167,49 @@ pub fn XLogGetReplicationSlotMinimumLSN() -> XLogRecPtr {
 /// leg seam-and-panics; the not-in-recovery durable path (the F2 concern) is
 /// grounded here.
 pub fn XLogNeedsFlush(record: XLogRecPtr) -> PgResult<bool> {
+    // During recovery, we don't flush WAL but update minRecoveryPoint instead.
+    // So "needs flush" is taken to mean whether minRecoveryPoint would need to
+    // be updated. (xlog.c:3133)
     if shmem::RecoveryInProgress() {
-        // minRecoveryPoint update predicate — recovery-side, unported.
-        let _ = XLogRecPtrIsInvalid(record);
-        panic!(
-            "xlog recovery driver not ported: XLogNeedsFlush during recovery consults \
-             LocalMinRecoveryPoint / updateMinRecoveryPoint (owned by xlogrecovery, task #13)"
-        );
+        // An invalid minRecoveryPoint with InRecovery means we're doing crash
+        // recovery and never modify the control file's value, so we can
+        // short-circuit future checks. (xlog.c:3143)
+        let (mut local_min, _local_tli) = crate::redo::local_min_recovery_point();
+        if XLogRecPtrIsInvalid(local_min)
+            && xlogrecovery_seams::in_recovery::call()
+        {
+            crate::redo::set_update_min_recovery_point(false);
+        }
+
+        // Quick exit if already known to be updated or cannot be updated.
+        if record <= local_min || !crate::redo::update_min_recovery_point() {
+            return Ok(false);
+        }
+
+        // Update local copy of minRecoveryPoint. But if the lock is busy, just
+        // return a conservative guess. (xlog.c:3155)
+        let control_file_lock = lwlock::main_lock_ref(CONTROL_FILE_LOCK);
+        if !lwlock::LWLockConditionalAcquire(control_file_lock, LW_SHARED)? {
+            return Ok(true);
+        }
+        let cf = shmem::control_file_mut();
+        local_min = cf.minRecoveryPoint;
+        let local_tli = cf.minRecoveryPointTLI;
+        crate::redo::set_local_min_recovery_point(local_min, local_tli);
+        lwlock::LWLockRelease(control_file_lock)?;
+
+        // Check minRecoveryPoint for any other process than the startup process
+        // doing crash recovery, which should not update the control file value
+        // if crash recovery is still running. (xlog.c:3167)
+        if XLogRecPtrIsInvalid(local_min) {
+            crate::redo::set_update_min_recovery_point(false);
+        }
+
+        // check again
+        if record <= local_min || !crate::redo::update_min_recovery_point() {
+            return Ok(false);
+        }
+        return Ok(true);
     }
 
     // Quick exit if already known flushed.

@@ -570,9 +570,11 @@ fn xlog_read_buffer_extended(
     if recent_buffer != 0 && bm.ReadRecentBuffer(rlocator, forknum, blkno, recent_buffer)? {
         return Ok(recent_buffer);
     }
-    // The relation is always treated as permanent for the redo read (recovery
-    // replays WAL-logged changes); ReadBufferWithoutRelcache reads it in.
-    bm.ReadBufferWithoutRelcache(rlocator, true, forknum, blkno, mode, ::types_storage::buf::IOContext::IOCONTEXT_NORMAL)
+    // The full XLogReadBufferExtended buffer-acquisition body: smgrcreate the
+    // target fork if missing, read the page if present, else extend the fork in
+    // recovery. Without the create+extend a redo write to a not-yet-existing
+    // fork (e.g. a relation's FSM/VM fork) would fail with "could not open file".
+    bm.xlog_read_buffer_extended_core(rlocator, forknum, blkno, mode)
 }
 
 // --- F5: flush / drop seams (bufmgr.c) ------------------------------------

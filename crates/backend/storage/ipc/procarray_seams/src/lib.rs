@@ -96,6 +96,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetOldestActiveTransactionId(void)` (procarray.c) — the oldest XID still
+    /// running of any backend, recorded in the online-checkpoint record
+    /// (`checkPoint.oldestActiveXid`) so a hot standby can bound StartupSUBTRANS.
+    pub fn get_oldest_active_transaction_id() -> PgResult<TransactionId>
+);
+
+seam_core::seam!(
+    /// `ProcArrayInitRecovery(TransactionId initializedUptoXID)` (procarray.c) —
+    /// seed `latestObservedXid` at the start of hot-standby recovery, called
+    /// from `StartupXLOG` (xlog.c:5864).
+    pub fn proc_array_init_recovery(initialized_upto_xid: TransactionId)
+);
+
+seam_core::seam!(
     /// `ProcArrayApplyRecoveryInfo(running)`.
     pub fn proc_array_apply_recovery_info(running: &RunningTransactionsData<'_>) -> PgResult<()>
 );

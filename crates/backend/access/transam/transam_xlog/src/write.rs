@@ -292,7 +292,7 @@ unsafe fn inserting_at(ctl: &XLogCtlData, i: usize) -> &'static pg_atomic_uint64
 
 /// `XLogCheckpointNeeded(new_segno)` (xlog.c:2303) — would a checkpoint be due
 /// (enough WAL since the redo point) by the time `new_segno` is reached?
-fn XLogCheckpointNeeded(new_segno: XLogSegNo) -> bool {
+pub(crate) fn XLogCheckpointNeeded(new_segno: XLogSegNo) -> bool {
     let seg = wal_segment_size();
     let old_segno = XLByteToSeg(GetRedoRecPtrCached(), seg);
     new_segno >= old_segno + (check_point_segments() as u64 - 1)
@@ -526,6 +526,91 @@ pub(crate) unsafe fn XLogWrite(
 }
 
 // ===========================================================================
+// UpdateMinRecoveryPoint (xlog.c:2723).
+// ===========================================================================
+
+/// `LSN_FORMAT_ARGS(lsn)` rendering: `%X/%X` of the high/low 32 bits.
+fn lsn_str(lsn: XLogRecPtr) -> alloc::string::String {
+    std::format!("{:X}/{:X}", (lsn >> 32) as u32, lsn as u32)
+}
+
+fn umrp_loc(line: i32) -> ::types_error::ErrorLocation {
+    ::types_error::ErrorLocation::new("xlog.c", line, "UpdateMinRecoveryPoint")
+}
+
+/// `static void UpdateMinRecoveryPoint(XLogRecPtr lsn, bool force)`
+/// (xlog.c:2723) — advance the control file's `minRecoveryPoint` during
+/// recovery. The crash-recovery startup process never modifies it (it must
+/// replay all available WAL first); a hot-standby backend / the checkpointer
+/// advances it to the last record replayed.
+pub fn UpdateMinRecoveryPoint(lsn: XLogRecPtr, force: bool) -> PgResult<()> {
+    use crate::redo::{
+        local_min_recovery_point, set_local_min_recovery_point, set_update_min_recovery_point,
+        update_min_recovery_point,
+    };
+
+    // Quick check using our local copy of the variable.
+    let (mut local_min, _local_tli) = local_min_recovery_point();
+    if !update_min_recovery_point() || (!force && lsn <= local_min) {
+        return Ok(());
+    }
+
+    // An invalid minRecoveryPoint with InRecovery means crash recovery; never
+    // modify the control file's value, and don't update the local copy until
+    // crash recovery finishes (startup process only). (xlog.c:2745)
+    if crate::XLogRecPtrIsInvalid(local_min) && xlogrecovery_seams::in_recovery::call() {
+        set_update_min_recovery_point(false);
+        return Ok(());
+    }
+
+    let control_file_lock = lwlock::main_lock_ref(CONTROL_FILE_LOCK);
+    lwlock::LWLockAcquire(control_file_lock, LW_EXCLUSIVE, globals::MyProcNumber())?;
+
+    // update local copy
+    {
+        let cf = shmem::control_file_mut();
+        local_min = cf.minRecoveryPoint;
+        set_local_min_recovery_point(cf.minRecoveryPoint, cf.minRecoveryPointTLI);
+    }
+
+    if crate::XLogRecPtrIsInvalid(local_min) {
+        set_update_min_recovery_point(false);
+    } else if force || local_min < lsn {
+        // To avoid updating the control file too often, advance it all the way
+        // to the last record being replayed. (xlog.c:2766)
+        let (new_min, new_min_tli) = xlogrecovery_seams::get_xlog_replay_rec_ptr_tli::call();
+        if !force && new_min < lsn {
+            ::utils_error::ereport(::types_error::WARNING)
+                .errmsg_internal(std::format!(
+                    "xlog min recovery request {} is past current point {}",
+                    lsn_str(lsn),
+                    lsn_str(new_min)
+                ))
+                .finish(umrp_loc(2779))?;
+        }
+
+        let cf = shmem::control_file_mut();
+        if cf.minRecoveryPoint < new_min {
+            cf.minRecoveryPoint = new_min;
+            cf.minRecoveryPointTLI = new_min_tli;
+            shmem::UpdateControlFile()?;
+            set_local_min_recovery_point(new_min, new_min_tli);
+
+            ::utils_error::ereport(::types_error::DEBUG2)
+                .errmsg_internal(std::format!(
+                    "updated min recovery point to {} on timeline {}",
+                    lsn_str(new_min),
+                    new_min_tli
+                ))
+                .finish(umrp_loc(2792))?;
+        }
+    }
+
+    lwlock::LWLockRelease(control_file_lock)?;
+    Ok(())
+}
+
+// ===========================================================================
 // XLogFlush (xlog.c:2804).
 // ===========================================================================
 
@@ -545,11 +630,10 @@ pub fn XLogFlush(record: XLogRecPtr) -> PgResult<()> {
     // the not-in-recovery durable path. Mirror C: if insertion isn't allowed,
     // defer to the recovery owner.
     if !crate::insert::XLogInsertAllowed() {
-        // UpdateMinRecoveryPoint(record, false) — recovery-side, unported.
-        panic!(
-            "xlog recovery driver not ported: XLogFlush during recovery must call \
-             UpdateMinRecoveryPoint (owned by the xlogrecovery side, task #13)"
-        );
+        // During REDO we are reading not writing WAL; update minRecoveryPoint
+        // instead of flushing. (xlog.c:2790)
+        UpdateMinRecoveryPoint(record, false)?;
+        return Ok(());
     }
 
     // Quick exit if already known flushed.

@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 guc_tables = { path = "../../utils/misc/guc_tables" }
+utils_error = { path = "../../utils/utils_error" }
 transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
 xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
 xlogutils_seams = { path = "../../access/transam/xlogutils_seams" }

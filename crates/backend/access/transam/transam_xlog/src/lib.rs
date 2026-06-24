@@ -874,6 +874,10 @@ pub fn init_seams() {
     s::get_redo_rec_ptr::set(shmem::GetRedoRecPtr);
     s::get_xlog_insert_rec_ptr::set(shmem::GetXLogInsertRecPtr);
     s::get_insert_rec_ptr::set(shmem::GetInsertRecPtr);
+    // `GetXLogReplayRecPtr(NULL)` — the no-TLI replay-position variant the
+    // checkpointer's CreateRestartPoint consults; forward to the xlogrecovery
+    // owner (which returns the TLI too) and drop the TLI.
+    s::get_xlog_replay_rec_ptr::set(|| xlogrecovery_seams::get_xlog_replay_rec_ptr::call().0);
     s::get_flush_rec_ptr::set(shmem::GetFlushRecPtr);
     s::get_wal_insertion_timeline_if_set::set(shmem::GetWALInsertionTimeLineIfSet);
     s::get_system_identifier::set(shmem::GetSystemIdentifier);
@@ -953,6 +957,12 @@ pub fn init_seams() {
     // the lwlock/condvar `ereport(ERROR)` unwinds (here: PgError -> panic at the
     // void seam boundary, matching the longjmp).
     s::is_install_xlog_file_segment_active::set(write::IsInstallXLogFileSegmentActive);
+
+    // `XLogCheckpointNeeded(new_segno)` (xlog.c:2303) — the seam takes only the
+    // new segment number; the impl reads the driver-owned RedoRecPtr cache +
+    // CheckPointSegments + wal_segment_size. Reached by the recovery driver's
+    // restartpoint scheduler (CreateRestartPoint) during WAL replay.
+    s::xlog_checkpoint_needed::set(write::XLogCheckpointNeeded);
 
     // XLogCtl shmem READ accessors + small in-memory setters (xlog.c), now
     // REAL in [`crate::driver`]. These front the checkpointer / bgwriter /

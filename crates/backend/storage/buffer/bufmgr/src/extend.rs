@@ -112,7 +112,12 @@ mod eb {
 /// `&Relation` the extension-lock seam needs. Mirrors `BMR_REL(rel)` after
 /// `RelationGetSmgr` resolution.
 struct BmrRel<'a, 'mcx> {
-    rel: &'a Relation<'mcx>,
+    /// `BufferManagerRelation.rel` — `None` for a `BMR_SMGR(smgr, relpersistence)`
+    /// reference (the redo `XLogReadBufferExtended` extend path), which has no
+    /// relcache entry. Only consulted when the relation-extension lock is taken
+    /// (never under `EB_SKIP_EXTENSION_LOCK`) or on the concurrent-extension read
+    /// fallback.
+    rel: Option<&'a Relation<'mcx>>,
     rlocator: RelFileLocatorBackend,
     relpersistence: u8,
 }
@@ -122,13 +127,33 @@ impl<'a, 'mcx> BmrRel<'a, 'mcx> {
     /// (its `rd_locator` / `rd_backend` / `rd_rel->relpersistence`).
     fn new(rel: &'a Relation<'mcx>) -> Self {
         Self {
-            rel,
+            rel: Some(rel),
             rlocator: RelFileLocatorBackend {
                 locator: rel.rd_locator,
                 backend: rel.rd_backend,
             },
             relpersistence: rel.rd_rel.relpersistence,
         }
+    }
+
+    /// `BMR_SMGR(smgr, relpersistence)` — resolve directly off a physical
+    /// locator with no relcache entry. Used by the recovery redo
+    /// `XLogReadBufferExtended` extend path (always `EB_SKIP_EXTENSION_LOCK`).
+    fn from_smgr(rlocator: RelFileLocatorBackend, relpersistence: u8) -> Self {
+        Self {
+            rel: None,
+            rlocator,
+            relpersistence,
+        }
+    }
+
+    /// The `&Relation` for the lock / concurrent-read fallback paths; those are
+    /// unreachable for a `BMR_SMGR` reference (recovery skips the extension lock,
+    /// and the single-process redo never races a concurrent extension), so the
+    /// `None` case panics rather than fabricating a relcache entry.
+    fn rel(&self) -> &'a Relation<'mcx> {
+        self.rel
+            .expect("BMR_SMGR reference used where a relcache entry is required")
     }
 }
 
@@ -287,11 +312,48 @@ impl BufferManager {
         rel: &Relation,
         fork: ForkNumber,
         io_context: IOContext,
+        flags: u32,
+        extend_to: BlockNumber,
+        mode: ReadBufferMode,
+    ) -> PgResult<Buffer> {
+        self.extend_buffered_rel_to_bmr(BmrRel::new(rel), fork, io_context, flags, extend_to, mode)
+    }
+
+    /// `ExtendBufferedRelTo(BMR_SMGR(smgr, relpersistence), ...)` — the redo
+    /// `XLogReadBufferExtended` extend leg, which has only a physical locator (no
+    /// relcache entry). Always called with `EB_PERFORMING_RECOVERY |
+    /// EB_SKIP_EXTENSION_LOCK`.
+    pub(crate) fn ExtendBufferedRelToSmgr(
+        &self,
+        rlocator: RelFileLocatorBackend,
+        relpersistence: u8,
+        fork: ForkNumber,
+        io_context: IOContext,
+        flags: u32,
+        extend_to: BlockNumber,
+        mode: ReadBufferMode,
+    ) -> PgResult<Buffer> {
+        self.extend_buffered_rel_to_bmr(
+            BmrRel::from_smgr(rlocator, relpersistence),
+            fork,
+            io_context,
+            flags,
+            extend_to,
+            mode,
+        )
+    }
+
+    /// Shared body of `ExtendBufferedRelTo` over a resolved `BmrRel`
+    /// (`BMR_REL`/`BMR_SMGR`).
+    fn extend_buffered_rel_to_bmr(
+        &self,
+        bmr: BmrRel,
+        fork: ForkNumber,
+        io_context: IOContext,
         mut flags: u32,
         extend_to: BlockNumber,
         mode: ReadBufferMode,
     ) -> PgResult<Buffer> {
-        let bmr = BmrRel::new(rel);
         let mut extended_by: u32 = 0;
         let mut buffer: Buffer = INVALID_BUFFER;
         let mut buffers: [Buffer; EXTEND_TO_BATCH] = [INVALID_BUFFER; EXTEND_TO_BATCH];
@@ -309,7 +371,7 @@ impl BufferManager {
                 && !smgr::smgrexists(bmr.rlocator, fork)?
             {
                 let guard =
-                    lmgr_seams::lock_relation_for_extension::call(bmr.rel)?;
+                    lmgr_seams::lock_relation_for_extension::call(bmr.rel())?;
 
                 // recheck, fork might have been created concurrently
                 if !smgr::smgrexists(bmr.rlocator, fork)? {
@@ -392,11 +454,76 @@ impl BufferManager {
                 extend_to - 1,
                 mode,
                 io_context,
-                Some(bmr.rel),
+                bmr.rel,
             )?;
         }
 
         Ok(buffer)
+    }
+
+    /// `XLogReadBufferExtended(rlocator, forknum, blkno, mode, recent_buffer)`
+    /// (xlogutils.c:489) — the buffer-acquisition body used by recovery redo
+    /// fetchers, less the recent-buffer fast path and the RBM_NORMAL invalid-page
+    /// bookkeeping (those stay in the xlogutils consumer). Creates the target
+    /// fork if missing (so replay can write to a relation that is later deleted),
+    /// reads the page if it already exists, and otherwise — for a non-NORMAL
+    /// mode in recovery — extends the fork to cover the block. Returns
+    /// `InvalidBuffer` for the RBM_NORMAL / RBM_NORMAL_NO_LOG missing-page cases,
+    /// which the consumer turns into a `log_invalid_page`.
+    pub(crate) fn xlog_read_buffer_extended_core(
+        &self,
+        rlocator: ::types_storage::RelFileLocator,
+        forknum: ForkNumber,
+        blkno: BlockNumber,
+        mode: ReadBufferMode,
+    ) -> PgResult<Buffer> {
+        let smgr_rlocator = RelFileLocatorBackend {
+            locator: rlocator,
+            backend: ::types_core::primitive::INVALID_PROC_NUMBER,
+        };
+
+        // Open the relation at smgr level (registers the cached SMgrRelation md
+        // state that smgrcreate/smgrnblocks operate on). (xlogutils.c:502)
+        smgr::smgropen(rlocator, ::types_core::primitive::INVALID_PROC_NUMBER)?;
+
+        // Create the target file if it doesn't already exist. This lets us cope
+        // if the replay sequence contains writes to a relation that is later
+        // deleted. (is_redo = true) (xlogutils.c:512)
+        smgr::smgrcreate(smgr_rlocator, forknum, true)?;
+
+        let lastblock = smgr::smgrnblocks(smgr_rlocator, forknum)?;
+
+        if blkno < lastblock {
+            // page exists in file (xlogutils.c:524)
+            return self.read_buffer_common(
+                Some(smgr_rlocator),
+                RELPERSISTENCE_PERMANENT,
+                forknum,
+                blkno,
+                mode,
+                IOContext::IOCONTEXT_NORMAL,
+                None,
+            );
+        }
+
+        // hm, page doesn't exist in file (xlogutils.c:529)
+        if mode == ReadBufferMode::Normal || mode == ReadBufferMode::NormalNoLog {
+            // The consumer logs the invalid page for RBM_NORMAL; both modes
+            // return InvalidBuffer.
+            return Ok(INVALID_BUFFER);
+        }
+
+        // OK to extend the file. We do this in recovery only — no rel-extension
+        // lock needed. (xlogutils.c:540)
+        self.ExtendBufferedRelToSmgr(
+            smgr_rlocator,
+            RELPERSISTENCE_PERMANENT,
+            forknum,
+            IOContext::IOCONTEXT_NORMAL,
+            eb::PERFORMING_RECOVERY | eb::SKIP_EXTENSION_LOCK,
+            blkno + 1,
+            mode,
+        )
     }
 
     // -- shared driver (bufmgr.c:2561) -------------------------------------
@@ -509,7 +636,7 @@ impl BufferManager {
         let mut ext_guard = None;
         if flags & eb::SKIP_EXTENSION_LOCK == 0 {
             ext_guard =
-                Some(lmgr_seams::lock_relation_for_extension::call(bmr.rel)?);
+                Some(lmgr_seams::lock_relation_for_extension::call(bmr.rel())?);
         }
 
         // If requested, invalidate size cache, so that smgrnblocks asks the

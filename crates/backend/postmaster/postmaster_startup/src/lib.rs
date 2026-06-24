@@ -417,8 +417,24 @@ fn startup_process_main_entry(startup_data: &types_startup::StartupData) -> ! {
         types_startup::StartupData::None => &[],
         _ => panic!("startup_process_main: unexpected non-None StartupData"),
     };
-    let _ = StartupProcessMain(bytes);
-    unreachable!("StartupProcessMain ended without calling proc_exit")
+    match StartupProcessMain(bytes) {
+        Ok(()) => {
+            // StartupProcessMain ends with proc_exit(0) and never returns Ok.
+            unreachable!("StartupProcessMain ended without calling proc_exit")
+        }
+        Err(err) => {
+            // An ereport(FATAL/PANIC) escaped StartupXLOG with no PG_TRY handler
+            // (C longjmps to the postmaster sigsetjmp, which EmitErrorReport()s
+            // and exits). Report the error to the server log, then exit non-zero
+            // so the postmaster treats it as a startup failure and aborts
+            // (matching C: a FATAL in the startup process => proc_exit(1) =>
+            // "aborting startup due to startup process failure"; a PANIC would
+            // abort()). proc_exit drives the on_shmem_exit cleanup we registered.
+            ::utils_error::emit_error_report_for(&err);
+            dsm_core_seams::proc_exit::call(1, init_small_seams::my_proc_pid::call());
+            unreachable!("proc_exit(1) returned")
+        }
+    }
 }
 
 /// Install this crate's implementations into `backend-postmaster-startup-seams`.

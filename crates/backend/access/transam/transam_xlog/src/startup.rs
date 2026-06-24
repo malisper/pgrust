@@ -35,7 +35,8 @@ use alloc::string::{String, ToString};
 use ::utils_error::{ereport, PgError, PgResult};
 use ::control::{DBState, FirstNormalUnloggedLSN};
 use ::types_core::{TimeLineID, TransactionId, XLogRecPtr};
-use ::types_error::{ErrorLocation, FATAL, LOG, NOTICE, PANIC};
+use ::types_error::{ErrorLocation, DEBUG1, FATAL, LOG, NOTICE, PANIC};
+use ::types_core::xact::{InvalidTransactionId, TransactionIdIsValid};
 use ::wal::wal::RM_XLOG_ID;
 use ::wal::xlog_consts::{
     RecoveryState, WalLevel, CHECKPOINT_END_OF_RECOVERY, CHECKPOINT_FORCE, CHECKPOINT_IMMEDIATE,
@@ -70,9 +71,17 @@ use pgstat_seams as pgstat_seam;
 use relcache_seams as relcache_seam;
 use ps_status_seams as ps_seam;
 use snapmgr_seams as snapmgr_seam;
+use procarray_seams as procarray_seam;
+use standby_seams as standby_seam;
 
 const CONTROL_FILE_LOCK: usize = 9;
 const PROC_ARRAY_LOCK: usize = 4;
+
+/// Backup/tablespace label-file names (`access/xlog.h:307-311`).
+const BACKUP_LABEL_FILE: &str = "backup_label";
+const BACKUP_LABEL_OLD: &str = "backup_label.old";
+const TABLESPACE_MAP: &str = "tablespace_map";
+const TABLESPACE_MAP_OLD: &str = "tablespace_map.old";
 
 /// `xl_end_of_recovery` info opcode (`access/xlog.h`).
 const XLOG_END_OF_RECOVERY: u8 = 0x90;
@@ -680,12 +689,14 @@ pub fn SeedTransamVariablesFromCheckpoint() -> PgResult<()> {
 /// (`ArchiveRecoveryRequested == false`) it is faithfully skipped, exactly as in
 /// C. The boundary for hot standby is surfaced precisely.
 fn startup_xlog_redo_phase(
-    _check_point: &::control::CheckPoint,
-    _was_shutdown: bool,
+    check_point: &::control::CheckPoint,
+    was_shutdown: bool,
     have_backup_label: bool,
     have_tblspc_map: bool,
 ) -> PgResult<bool> {
-    let in_archive_recovery = recovery_seam::archive_recovery_requested::call();
+    // C: `if (InArchiveRecovery)` governs SharedRecoveryState; the hot-standby
+    // gate below uses `ArchiveRecoveryRequested`.
+    let in_archive_recovery = recovery_seam::in_archive_recovery::call();
 
     // Initialize state for RecoveryInProgress(). (xlog.c:5757-5763)
     unsafe {
@@ -703,20 +714,22 @@ fn startup_xlog_redo_phase(
     // checkpoint as the place we are starting from. (xlog.c:5773)
     UpdateControlFile();
 
-    // If there was a backup_label / tablespace_map file, its info has now been
-    // propagated into pg_control; rename it out of the way. (xlog.c:5782-5800)
-    // On the crash-recovery path neither is present (have_backup_label ==
-    // have_tblspc_map == false), so these legs do not run. The backup-recovery
-    // file renames go through the unported backup-label durable-rename leg; if a
-    // backup_label is ever present here, surface that boundary precisely rather
-    // than silently skipping it.
-    if have_backup_label || have_tblspc_map {
-        return Err(PgError::new(
-            PANIC,
-            "blocked: StartupXLOG backup_label / tablespace_map rename (xlog.c:5782) — \
-             durable_rename of BACKUP_LABEL_FILE / TABLESPACE_MAP is reached only on the \
-             backup-recovery path; pending recovery family fill",
-        ));
+    // If there was a backup label file, it's done its job and the info has now
+    // been propagated into pg_control. We must get rid of the label file so that
+    // if we crash during recovery, we'll pick up at the latest recovery
+    // restartpoint instead of going all the way back to the backup start point.
+    // Rename it out of the way rather than delete it. (xlog.c:5782-5786)
+    if have_backup_label {
+        let _ = std::fs::remove_file(BACKUP_LABEL_OLD);
+        file_seams::durable_rename::call(BACKUP_LABEL_FILE, BACKUP_LABEL_OLD, FATAL)?;
+    }
+
+    // If there was a tablespace_map file, it's done its job and the symlinks
+    // have been created. Rename it out of the way so that if we crash during
+    // recovery, we don't create symlinks again. (xlog.c:5793-5800)
+    if have_tblspc_map {
+        let _ = std::fs::remove_file(TABLESPACE_MAP_OLD);
+        file_seams::durable_rename::call(TABLESPACE_MAP, TABLESPACE_MAP_OLD, FATAL)?;
     }
 
     // LocalMinRecoveryPoint bookkeeping (xlog.c:5811-5819) is owned by the
@@ -736,19 +749,73 @@ fn startup_xlog_redo_phase(
     // backends. (xlog.c:5835)
     snapmgr_seam::delete_all_exported_snapshot_files::call()?;
 
-    // Initialize for Hot Standby, if enabled. (xlog.c:5841-5910) Only entered
-    // when ArchiveRecoveryRequested && EnableHotStandby; faithfully skipped on
-    // the crash-recovery path. If hot standby is ever requested here, surface the
-    // (unported InitRecoveryTransactionEnvironment / ProcArrayInitRecovery)
-    // boundary precisely.
-    if in_archive_recovery && enable_hot_standby() {
-        return Err(PgError::new(
-            PANIC,
-            "blocked: StartupXLOG hot-standby init (xlog.c:5841) — \
-             InitRecoveryTransactionEnvironment + ProcArrayInitRecovery + \
-             StartupSUBTRANS + ProcArrayApplyRecoveryInfo are owned by unported \
-             hot-standby legs; pending recovery family fill",
-        ));
+    // Initialize for Hot Standby, if enabled. We won't let backends in yet, not
+    // until we've reached the min recovery point specified in control file and
+    // we've established a recovery snapshot from a running-xacts WAL record.
+    // (xlog.c:5841-5910) Only entered when ArchiveRecoveryRequested &&
+    // EnableHotStandby; faithfully skipped on the crash-recovery path.
+    if recovery_seam::archive_recovery_requested::call() && enable_hot_standby() {
+        ereport(DEBUG1)
+            .errmsg_internal("initializing for hot standby")
+            .finish(loc(5847, "StartupXLOG"))?;
+
+        standby_seam::init_recovery_transaction_environment::call()?;
+
+        // The oldest active XID at the start of recovery: from prepared-xact
+        // prescan if we started at a shutdown checkpoint, else recorded in the
+        // checkpoint record. (xlog.c:5851-5856)
+        let oldest_active_xid = if was_shutdown {
+            let next_xid = check_point.nextXid.xid();
+            twophase_seam::prescan_prepared_transactions::call(next_xid, InvalidTransactionId)?
+        } else {
+            check_point.oldestActiveXid
+        };
+        debug_assert!(TransactionIdIsValid(oldest_active_xid));
+
+        // Tell procarray about the range of xids it has to deal with.
+        // (xlog.c:5859)
+        let next_xid = varsup_seam::read_next_full_transaction_id::call();
+        procarray_seam::proc_array_init_recovery::call(next_xid.xid());
+
+        // Startup subtrans only. CLOG, MultiXact and commit timestamp have
+        // already been started up and other SLRUs are not maintained during
+        // recovery and need not be started yet. (xlog.c:5862-5867)
+        subtrans_seam::startup_subtrans::call(oldest_active_xid)?;
+
+        // If we're beginning at a shutdown checkpoint, we know that nothing was
+        // running on the primary at this point. So fake-up an empty
+        // running-xacts record and use that here and now. Recover additional
+        // standby state for prepared transactions. (xlog.c:5869-5909)
+        if was_shutdown {
+            // Update pg_subtrans entries for any prepared transactions.
+            // (xlog.c:5878) StandbyRecoverPreparedTransactions re-scans the
+            // two-phase state files; the orig-next-xid / xmin args mirror the
+            // C globals consumed by the twophase owner.
+            twophase_seam::standby_recover_prepared_transactions::call(
+                check_point.nextXid.xid(),
+                InvalidTransactionId,
+            )?;
+
+            // Construct a RunningTransactions snapshot representing a shut-down
+            // server, with only prepared transactions still alive. We're never
+            // overflowed at this point because all subxids are listed with
+            // their parent prepared transactions. (xlog.c:5887-5908)
+            //
+            // The prescan above did not surface the prepared-xact xids list
+            // (the prescan_prepared_transactions seam returns only the oldest
+            // active xid). Reconstructing the running-xacts xids array for the
+            // shutdown-checkpoint standby start requires that list; surface the
+            // boundary precisely rather than applying an incomplete snapshot.
+            let _ = oldest_active_xid;
+            return Err(PgError::new(
+                PANIC,
+                "blocked: StartupXLOG hot-standby shutdown-checkpoint running-xacts \
+                 (xlog.c:5887) — ProcArrayApplyRecoveryInfo needs the prepared-xact \
+                 xids list from PrescanPreparedTransactions; the prescan seam returns \
+                 only oldestActiveXID. Standby started from a running (online) \
+                 checkpoint takes the wasShutdown==false path and is unaffected.",
+            ));
+        }
     }
 
     // We're all set for replaying the WAL now. Do it. (xlog.c:5913)
@@ -1005,20 +1072,71 @@ pub fn CheckRequiredParameterValues() -> PgResult<()> {
             .map(|_| ());
     }
 
-    // The hot-standby `RecoveryRequiresIntParameter` checks consult
-    // EnableHotStandby + the live GUC globals (max_connections, …) against the
-    // control file. Those GUC globals + the hot-standby gate live in unported
-    // owners; surface that boundary precisely (the clean / crash-recovery path
-    // never enters this branch).
+    // For Hot Standby, the WAL must be generated with 'replica' mode, and we
+    // must have at least as many backend slots as the primary. (xlog.c:5465)
+    // We ignore autovacuum_worker_slots when we make this test.
     if archive_recovery_requested && enable_hot_standby() {
-        return Err(PgError::new(
-            PANIC,
-            "blocked: CheckRequiredParameterValues hot-standby checks (xlog.c:5472) — \
-             RecoveryRequiresIntParameter over EnableHotStandby + the live GUC globals is \
-             owned by unported hot-standby legs; pending recovery family fill",
-        ));
+        let cf = control_file_mut();
+        RecoveryRequiresIntParameter(
+            "max_connections",
+            guc_tables::vars::MaxConnections.read(),
+            cf.MaxConnections,
+        )?;
+        RecoveryRequiresIntParameter(
+            "max_worker_processes",
+            guc_tables::vars::max_worker_processes.read(),
+            cf.max_worker_processes,
+        )?;
+        RecoveryRequiresIntParameter(
+            "max_wal_senders",
+            guc_tables::vars::max_wal_senders.read(),
+            cf.max_wal_senders,
+        )?;
+        RecoveryRequiresIntParameter(
+            "max_prepared_transactions",
+            guc_tables::vars::max_prepared_xacts.read(),
+            cf.max_prepared_xacts,
+        )?;
+        RecoveryRequiresIntParameter(
+            "max_locks_per_transaction",
+            guc_tables::vars::max_locks_per_xact.read(),
+            cf.max_locks_per_xact,
+        )?;
     }
 
+    Ok(())
+}
+
+/// `static void RecoveryRequiresIntParameter(const char *param_name, int
+/// currValue, int minValue)` (xlogrecovery.c:4701) — fail recovery if a
+/// recovery-critical GUC is set lower than on the primary.
+///
+/// When `currValue >= minValue` (the standard correctly-configured standby)
+/// this is a no-op, exactly as in C. The misconfiguration path in C first
+/// pauses recovery in a condition-variable loop (so the administrator can fix
+/// the GUC and resume) before the terminal `ereport(FATAL)`. That interactive
+/// recovery-pause loop is owned by the xlogrecovery pause machinery; here we
+/// go straight to the same terminal `ereport(FATAL)` with C's exact message —
+/// a correctly-configured standby never reaches it, and a misconfigured one
+/// still aborts with the identical diagnostic (it just does not offer the
+/// pause-and-fix grace period).
+fn RecoveryRequiresIntParameter(
+    param_name: &str,
+    curr_value: i32,
+    min_value: i32,
+) -> PgResult<()> {
+    if curr_value < min_value {
+        return ereport(FATAL)
+            .errmsg("recovery aborted because of insufficient parameter settings")
+            .errdetail(format!(
+                "{param_name} = {curr_value} is a lower setting than on the primary server, where its value was {min_value}."
+            ))
+            .errhint(
+                "You can restart the server after making the necessary configuration changes.",
+            )
+            .finish(loc(4773, "RecoveryRequiresIntParameter"))
+            .map(|_| ());
+    }
     Ok(())
 }
 

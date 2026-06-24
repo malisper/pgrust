@@ -46,7 +46,16 @@ use sync_seams as sync_seams;
 use ::init_small::globals;
 use ::guc_tables::vars;
 
+use ::wal::xlog_consts::WalLevel;
 use crate::checkpoint::checkpoint_to_bytes;
+
+/// `XLogStandbyInfoActive()` (xlog.h): `wal_level >= WAL_LEVEL_REPLICA` — whether
+/// the checkpoint must record hot-standby reconstruction info (oldestActiveXid +
+/// a running-xacts snapshot).
+#[inline]
+fn XLogStandbyInfoActive() -> bool {
+    vars::wal_level.read() >= WalLevel::Replica as i32
+}
 use crate::shmem::{self, control_file_mut, wal_segment_size, xlog_ctl};
 use crate::{InvalidXLogRecPtr, XLogSegmentOffset};
 
@@ -132,17 +141,15 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
     let mut check_point = CheckPoint::default();
     check_point.time = wallclock_time();
 
-    // C records `oldestActiveXid` here (for Hot Standby) via
-    // `GetOldestActiveTransactionId()`, and below takes a running-xacts snapshot
-    // via `LogStandbySnapshot()`. Both feed *archive recovery / hot standby*
-    // reconstruction only (`ProcArrayApplyRecoveryInfo`); single-node crash
-    // recovery never consults them. We leave `oldestActiveXid` invalid and skip
-    // the standby snapshot here: the periodic bgwriter `LogStandbySnapshot` still
-    // emits XLOG_RUNNING_XACTS, so no standby capability is lost, and this avoids
-    // a procarray/standby cross-dependency from the WAL engine. Faithful to the
-    // single-node durability contract; documented divergence on the hot-standby
-    // leg (see DESIGN_DEBT.md, xlog-checkpoint-standby).
-    check_point.oldestActiveXid = InvalidTransactionId;
+    // Get the other info we need for the checkpoint record. For Hot Standby,
+    // record the oldest XID still active so a standby can bound StartupSUBTRANS;
+    // a non-standby/shutdown checkpoint leaves it invalid. (xlog.c:7062-7066)
+    if !shutdown && XLogStandbyInfoActive() {
+        check_point.oldestActiveXid =
+            procarray_seams::get_oldest_active_transaction_id::call()?;
+    } else {
+        check_point.oldestActiveXid = InvalidTransactionId;
+    }
 
     // Location of last important record before acquiring insert locks.
     let last_important_lsn = crate::driver::GetLastImportantRecPtr();
@@ -285,8 +292,16 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
     // commit-log buffers are flushed to disk (CheckPointGuts).
     check_point_guts(check_point.redo, flags)?;
 
-    // (C's `LogStandbySnapshot()` running-xacts snapshot is omitted here — see the
-    // oldestActiveXid note above; bgwriter's periodic snapshot covers standby.)
+    // Take a snapshot of running transactions and write this to WAL. This allows
+    // us to reconstruct the state of running transactions during archive
+    // recovery, if required. Skip if shutting down or if this info is disabled.
+    // This is what lets a freshly base-backed hot standby reach a consistent
+    // recovery snapshot (STANDBY_SNAPSHOT_READY) and open for read-only
+    // connections. (xlog.c:7266-7267)
+    if !shutdown && XLogStandbyInfoActive() {
+        let cx = mcx::MemoryContext::new("CreateCheckPoint/LogStandbySnapshot");
+        standby_seams::log_standby_snapshot::call(cx.mcx())?;
+    }
 
     // Now insert the checkpoint record into XLOG.
     let cp_bytes = checkpoint_to_bytes(&check_point);

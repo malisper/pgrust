@@ -1092,6 +1092,8 @@ pub fn ExpireOldKnownAssignedTransactionIds(xid: TransactionId) -> PgResult<()> 
 pub fn init_seams() {
     use procarray_seams as seams;
 
+    seams::get_oldest_active_transaction_id::set(crate::snapshot::GetOldestActiveTransactionId);
+    seams::proc_array_init_recovery::set(ProcArrayInitRecovery);
     seams::proc_array_apply_recovery_info::set(ProcArrayApplyRecoveryInfo);
     seams::expire_all_known_assigned_transaction_ids::set(ExpireAllKnownAssignedTransactionIds);
     seams::proc_array_apply_xid_assignment::set(ProcArrayApplyXidAssignment);

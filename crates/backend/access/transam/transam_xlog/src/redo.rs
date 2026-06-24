@@ -337,6 +337,35 @@ std::thread_local! {
     /// `static bool lastFullPageWrites;` (xlog.c:242) — during recovery, tracks
     /// the `full_page_writes` state as last seen in the WAL.
     static LAST_FULL_PAGE_WRITES: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+
+    /// `static bool updateMinRecoveryPoint = true;` (xlog.c:673) — whether this
+    /// backend is allowed to update its cached `LocalMinRecoveryPoint` (set false
+    /// once the startup process learns it is doing crash recovery).
+    static UPDATE_MIN_RECOVERY_POINT: core::cell::Cell<bool> = const { core::cell::Cell::new(true) };
+}
+
+/// Read this backend's cached `(LocalMinRecoveryPoint, LocalMinRecoveryPointTLI)`.
+pub(crate) fn local_min_recovery_point() -> (XLogRecPtr, TimeLineID) {
+    (
+        LOCAL_MIN_RECOVERY_POINT.with(|c| c.get()),
+        LOCAL_MIN_RECOVERY_POINT_TLI.with(|c| c.get()),
+    )
+}
+
+/// Set this backend's cached `(LocalMinRecoveryPoint, LocalMinRecoveryPointTLI)`.
+pub(crate) fn set_local_min_recovery_point(point: XLogRecPtr, tli: TimeLineID) {
+    LOCAL_MIN_RECOVERY_POINT.with(|c| c.set(point));
+    LOCAL_MIN_RECOVERY_POINT_TLI.with(|c| c.set(tli));
+}
+
+/// `updateMinRecoveryPoint` read.
+pub(crate) fn update_min_recovery_point() -> bool {
+    UPDATE_MIN_RECOVERY_POINT.with(|c| c.get())
+}
+
+/// `updateMinRecoveryPoint` write.
+pub(crate) fn set_update_min_recovery_point(v: bool) {
+    UPDATE_MIN_RECOVERY_POINT.with(|c| c.set(v));
 }
 
 /// `XLOG_PARAMETER_CHANGE` redo arm (xlog.c:8580-8642). Update our copy of the
