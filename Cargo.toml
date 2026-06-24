@@ -34,16 +34,19 @@ codegen-units = 1
 #   opt-level = "z"  -> smallest code (size, not speed; runtime speed is
 #                       irrelevant for boot bring-up) — fewer wasm instructions
 #                       for wasmtime to compile.
-#   debug = 0        -> no DWARF (we strip it anyway via wasm-tools).
-#   strip = true     -> drop symbols.
+#   debug = "line-tables-only" + strip = false -> keep the wasm name section +
+#                       file:line so wasmtime trap backtraces are READABLE
+#                       (essential for boot-trap diagnosis). The module stays
+#                       ~42 MB; `wasm-tools strip -a` can drop them for a final
+#                       fast run once boot is clean.
 #   panic = "abort"  -> matches -Zbuild-std=std,panic_abort; no unwind tables.
 # Build with: cargo +nightly build -Zbuild-std=std,panic_abort --bin postgres \
 #   --target wasm64-unknown-unknown --profile wasm-boot
 [profile.wasm-boot]
 inherits = "release"
 opt-level = "z"
-debug = 0
-strip = true
+debug = "line-tables-only"
+strip = false
 lto = false
 codegen-units = 16
 panic = "abort"
