@@ -1289,29 +1289,31 @@ fn reset_value_and_extra(
 /// reports whether it differs from the canonicalized `newval`. String values
 /// follow the C NULL-aware comparison.
 fn current_value_differs(record: &GucVariable, newval: &config_var_val) -> bool {
+    // C's prohibitValueChange compares `*conf->variable` against newval. The
+    // record's own `c.value` is the GUC store's authoritative copy of that same
+    // storage: `apply_value` always writes the new value into BOTH `c.value` and
+    // (when installed) the backing accessor, keeping them in lockstep. We read
+    // `c.value` here rather than re-entering through `c.variable.read()` because
+    // this runs with the live GUC store already mutably borrowed: some accessors
+    // (io_method / io_max_concurrency / io_workers) resolve their value by
+    // reading the live store itself, so `.read()` would re-enter the `RefCell`
+    // and panic `already mutably borrowed`. The store copy is identical and
+    // never re-enters.
     match (record, newval) {
         (GucVariable::Bool(c), config_var_val::Boolval(nv)) => {
-            let cur = if c.variable.installed() { c.variable.read() } else { c.value.unwrap_or(c.reset_val) };
-            cur != *nv
+            c.value.unwrap_or(c.reset_val) != *nv
         }
         (GucVariable::Int(c), config_var_val::Intval(nv)) => {
-            let cur = if c.variable.installed() { c.variable.read() } else { c.value.unwrap_or(c.reset_val) };
-            cur != *nv
+            c.value.unwrap_or(c.reset_val) != *nv
         }
         (GucVariable::Real(c), config_var_val::Realval(nv)) => {
-            let cur = if c.variable.installed() { c.variable.read() } else { c.value.unwrap_or(c.reset_val) };
-            cur != *nv
+            c.value.unwrap_or(c.reset_val) != *nv
         }
         (GucVariable::Enum(c), config_var_val::Enumval(nv)) => {
-            let cur = if c.variable.installed() { c.variable.read() } else { c.value.unwrap_or(c.reset_val) };
-            cur != *nv
+            c.value.unwrap_or(c.reset_val) != *nv
         }
         (GucVariable::String(c), config_var_val::Stringval(nv)) => {
-            let cur = if c.variable.installed() {
-                c.variable.read()
-            } else {
-                c.value.clone().unwrap_or_else(|| c.reset_val.clone())
-            };
+            let cur = c.value.clone().unwrap_or_else(|| c.reset_val.clone());
             // C: (*conf->variable && newval) ? strcmp(...) != 0 : *conf->variable != newval
             match (cur, nv) {
                 (Some(a), Some(b)) => a != *b,

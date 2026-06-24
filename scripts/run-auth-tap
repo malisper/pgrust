@@ -4,15 +4,15 @@
 #
 # This is a direct adaptation of scripts/run-recovery-tap (see that script for
 # the full rationale behind the "fake install" + realpath-escape subtleties).
-# The authentication tests (001_password.pl) create roles WITH PASSWORD and
-# flip pg_hba.conf between trust/password/md5/scram-sha-256, then connect with
-# the C libpq client (psql) over a Unix-domain socket and assert the server
-# accepts/rejects. The SERVER under test is pgrust; the client tools + cluster
-# bootstrap (initdb) run on the C install.
+# The authentication tests create roles WITH PASSWORD / flip pg_hba.conf
+# between trust/password/md5/scram-sha-256/peer and rewrite pg_ident.conf, then
+# connect with the C libpq client (psql) over a Unix-domain socket and assert
+# the server accepts/rejects. The SERVER under test is pgrust; the client tools
+# + cluster bootstrap (initdb) run on the C install.
 #
 # Usage:
-#   scripts/run-auth-tap t/001_password.pl
-#   scripts/run-auth-tap                 # runs t/001_password.pl
+#   scripts/run-auth-tap t/003_peer.pl [t/004_file_inclusion.pl ...]
+#   scripts/run-auth-tap                 # runs the no-password-core group
 #
 # Environment overrides (same as run-recovery-tap):
 #   PG_SRC, PG_INSTALL, PG_TEST_TIMEOUT_DEFAULT, PGRUST_BIN
@@ -98,6 +98,10 @@ export with_gssapi="${with_gssapi:-no}"
 export with_ldap="${with_ldap:-no}"
 export with_pam="${with_pam:-no}"
 export with_readline="${with_readline:-no}"
+# 007_pre_auth does `skip_all unless $ENV{enable_injection_points} eq 'yes'`;
+# unset trips the fatal "uninitialized value" warning -> false FAIL. Set it so
+# the test SKIPs cleanly (injection_points is a build flag pgrust lacks).
+export enable_injection_points="${enable_injection_points:-no}"
 
 rundir=/tmp/pgrust_auth_tap_data
 rm -rf "$rundir" tmp_check log
@@ -105,7 +109,7 @@ mkdir -p "$rundir"
 export TESTDATADIR="$rundir"
 
 if [ "$#" -eq 0 ]; then
-    set -- t/001_password.pl
+    set -- t/003_peer.pl t/004_file_inclusion.pl t/006_login_trigger.pl t/007_pre_auth.pl
 fi
 
 exec prove -v "$@"
