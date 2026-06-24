@@ -341,19 +341,19 @@ pub enum PathExistsResult {
 }
 
 /// C: `jsonb_path_exists_internal` (jsonpath_exec.c:397).
-fn jsonb_path_exists_internal(
-    mcx: Mcx<'_>,
-    jb: &[u8],
+fn jsonb_path_exists_internal<'mcx>(
+    mcx: Mcx<'mcx>,
+    jb: &'mcx [u8],
     jp: &[u8],
     vars: Option<&[u8]>,
     silent: bool,
 ) -> PgResult<PathExistsResult> {
-    let vars = vars_from_opt_jsonb(vars);
+    let vars = vars_from_opt_jsonb(mcx, vars)?;
 
     let res = executeJsonPath(
         mcx,
         jp,
-        &vars,
+        vars,
         getJsonPathVariableFromJsonb,
         countVariablesFromJsonb,
         jb,
@@ -374,9 +374,9 @@ fn jsonb_path_exists_internal(
 }
 
 /// C: `jsonb_path_exists` (jsonpath_exec.c:425).
-pub fn jsonb_path_exists(
-    mcx: Mcx<'_>,
-    jb: &[u8],
+pub fn jsonb_path_exists<'mcx>(
+    mcx: Mcx<'mcx>,
+    jb: &'mcx [u8],
     jp: &[u8],
     vars: Option<&[u8]>,
     silent: bool,
@@ -385,18 +385,18 @@ pub fn jsonb_path_exists(
 }
 
 /// C: `jsonb_path_exists_tz` (jsonpath_exec.c:431). Identical body but `tz=true`.
-pub fn jsonb_path_exists_tz(
-    mcx: Mcx<'_>,
-    jb: &[u8],
+pub fn jsonb_path_exists_tz<'mcx>(
+    mcx: Mcx<'mcx>,
+    jb: &'mcx [u8],
     jp: &[u8],
     vars: Option<&[u8]>,
     silent: bool,
 ) -> PgResult<PathExistsResult> {
-    let vars = vars_from_opt_jsonb(vars);
+    let vars = vars_from_opt_jsonb(mcx, vars)?;
     let res = executeJsonPath(
         mcx,
         jp,
-        &vars,
+        vars,
         getJsonPathVariableFromJsonb,
         countVariablesFromJsonb,
         jb,
@@ -428,21 +428,21 @@ pub enum PathMatchResult {
 }
 
 /// C: `jsonb_path_match_internal` (jsonpath_exec.c:454).
-fn jsonb_path_match_internal(
-    mcx: Mcx<'_>,
-    jb: &[u8],
+fn jsonb_path_match_internal<'mcx>(
+    mcx: Mcx<'mcx>,
+    jb: &'mcx [u8],
     jp: &[u8],
     vars: Option<&[u8]>,
     silent: bool,
     tz: bool,
 ) -> PgResult<PathMatchResult> {
-    let vars = vars_from_opt_jsonb(vars);
+    let vars = vars_from_opt_jsonb(mcx, vars)?;
     let mut found = JsonValueList::default();
 
     let _ = executeJsonPath(
         mcx,
         jp,
-        &vars,
+        vars,
         getJsonPathVariableFromJsonb,
         countVariablesFromJsonb,
         jb,
@@ -478,9 +478,9 @@ fn jsonb_path_match_internal(
 }
 
 /// C: `jsonb_path_match` (jsonpath_exec.c:495).
-pub fn jsonb_path_match(
-    mcx: Mcx<'_>,
-    jb: &[u8],
+pub fn jsonb_path_match<'mcx>(
+    mcx: Mcx<'mcx>,
+    jb: &'mcx [u8],
     jp: &[u8],
     vars: Option<&[u8]>,
     silent: bool,
@@ -489,9 +489,9 @@ pub fn jsonb_path_match(
 }
 
 /// C: `jsonb_path_match_tz` (jsonpath_exec.c:501).
-pub fn jsonb_path_match_tz(
-    mcx: Mcx<'_>,
-    jb: &[u8],
+pub fn jsonb_path_match_tz<'mcx>(
+    mcx: Mcx<'mcx>,
+    jb: &'mcx [u8],
     jp: &[u8],
     vars: Option<&[u8]>,
     silent: bool,
@@ -506,21 +506,21 @@ pub fn jsonb_path_match_opr(mcx: Mcx<'_>, jb: &[u8], jp: &[u8]) -> PgResult<Path
 
 /// C: `jsonb_path_query_internal` (jsonpath_exec.c:524). Each element is an
 /// on-disk jsonb varlena.
-fn jsonb_path_query_internal(
-    mcx: Mcx<'_>,
-    jb: &[u8],
+fn jsonb_path_query_internal<'mcx>(
+    mcx: Mcx<'mcx>,
+    jb: &'mcx [u8],
     jp: &[u8],
     vars: Option<&[u8]>,
     silent: bool,
     tz: bool,
 ) -> PgResult<Vec<Vec<u8>>> {
-    let vars = vars_from_opt_jsonb(vars);
+    let vars = vars_from_opt_jsonb(mcx, vars)?;
     let mut found = JsonValueList::default();
 
     let _ = executeJsonPath(
         mcx,
         jp,
-        &vars,
+        vars,
         getJsonPathVariableFromJsonb,
         countVariablesFromJsonb,
         jb,
@@ -538,9 +538,9 @@ fn jsonb_path_query_internal(
 }
 
 /// C: `jsonb_path_query` (jsonpath_exec.c:572).
-pub fn jsonb_path_query(
-    mcx: Mcx<'_>,
-    jb: &[u8],
+pub fn jsonb_path_query<'mcx>(
+    mcx: Mcx<'mcx>,
+    jb: &'mcx [u8],
     jp: &[u8],
     vars: Option<&[u8]>,
     silent: bool,
@@ -549,9 +549,9 @@ pub fn jsonb_path_query(
 }
 
 /// C: `jsonb_path_query_tz` (jsonpath_exec.c:578).
-pub fn jsonb_path_query_tz(
-    mcx: Mcx<'_>,
-    jb: &[u8],
+pub fn jsonb_path_query_tz<'mcx>(
+    mcx: Mcx<'mcx>,
+    jb: &'mcx [u8],
     jp: &[u8],
     vars: Option<&[u8]>,
     silent: bool,
@@ -560,21 +560,21 @@ pub fn jsonb_path_query_tz(
 }
 
 /// C: `jsonb_path_query_array_internal` (jsonpath_exec.c:589).
-fn jsonb_path_query_array_internal(
-    mcx: Mcx<'_>,
-    jb: &[u8],
+fn jsonb_path_query_array_internal<'mcx>(
+    mcx: Mcx<'mcx>,
+    jb: &'mcx [u8],
     jp: &[u8],
     vars: Option<&[u8]>,
     silent: bool,
     tz: bool,
 ) -> PgResult<Vec<u8>> {
-    let vars = vars_from_opt_jsonb(vars);
+    let vars = vars_from_opt_jsonb(mcx, vars)?;
     let mut found = JsonValueList::default();
 
     let _ = executeJsonPath(
         mcx,
         jp,
-        &vars,
+        vars,
         getJsonPathVariableFromJsonb,
         countVariablesFromJsonb,
         jb,
@@ -587,9 +587,9 @@ fn jsonb_path_query_array_internal(
 }
 
 /// C: `jsonb_path_query_array` (jsonpath_exec.c:605).
-pub fn jsonb_path_query_array(
-    mcx: Mcx<'_>,
-    jb: &[u8],
+pub fn jsonb_path_query_array<'mcx>(
+    mcx: Mcx<'mcx>,
+    jb: &'mcx [u8],
     jp: &[u8],
     vars: Option<&[u8]>,
     silent: bool,
@@ -598,9 +598,9 @@ pub fn jsonb_path_query_array(
 }
 
 /// C: `jsonb_path_query_array_tz` (jsonpath_exec.c:611).
-pub fn jsonb_path_query_array_tz(
-    mcx: Mcx<'_>,
-    jb: &[u8],
+pub fn jsonb_path_query_array_tz<'mcx>(
+    mcx: Mcx<'mcx>,
+    jb: &'mcx [u8],
     jp: &[u8],
     vars: Option<&[u8]>,
     silent: bool,
@@ -609,21 +609,21 @@ pub fn jsonb_path_query_array_tz(
 }
 
 /// C: `jsonb_path_query_first_internal` (jsonpath_exec.c:622).
-fn jsonb_path_query_first_internal(
-    mcx: Mcx<'_>,
-    jb: &[u8],
+fn jsonb_path_query_first_internal<'mcx>(
+    mcx: Mcx<'mcx>,
+    jb: &'mcx [u8],
     jp: &[u8],
     vars: Option<&[u8]>,
     silent: bool,
     tz: bool,
 ) -> PgResult<Option<Vec<u8>>> {
-    let vars = vars_from_opt_jsonb(vars);
+    let vars = vars_from_opt_jsonb(mcx, vars)?;
     let mut found = JsonValueList::default();
 
     let _ = executeJsonPath(
         mcx,
         jp,
-        &vars,
+        vars,
         getJsonPathVariableFromJsonb,
         countVariablesFromJsonb,
         jb,
@@ -640,9 +640,9 @@ fn jsonb_path_query_first_internal(
 }
 
 /// C: `jsonb_path_query_first` (jsonpath_exec.c:641).
-pub fn jsonb_path_query_first(
-    mcx: Mcx<'_>,
-    jb: &[u8],
+pub fn jsonb_path_query_first<'mcx>(
+    mcx: Mcx<'mcx>,
+    jb: &'mcx [u8],
     jp: &[u8],
     vars: Option<&[u8]>,
     silent: bool,
@@ -651,9 +651,9 @@ pub fn jsonb_path_query_first(
 }
 
 /// C: `jsonb_path_query_first_tz` (jsonpath_exec.c:647).
-pub fn jsonb_path_query_first_tz(
-    mcx: Mcx<'_>,
-    jb: &[u8],
+pub fn jsonb_path_query_first_tz<'mcx>(
+    mcx: Mcx<'mcx>,
+    jb: &'mcx [u8],
     jp: &[u8],
     vars: Option<&[u8]>,
     silent: bool,
@@ -725,7 +725,7 @@ fn executeJsonPath<'mcx>(
 }
 
 /// C: `executeItem` (jsonpath_exec.c:732).
-fn executeItem(
+fn executeItem<'mcx>(
     cxt: &mut JsonPathExecContext<'mcx, '_>,
     jsp: &JsonPathItem<'_>,
     jb: &JsonbValue<'mcx>,
@@ -737,7 +737,7 @@ fn executeItem(
 
 /// C: `executeItemOptUnwrapTarget` (jsonpath_exec.c:744) — the big per-item
 /// switch.
-fn executeItemOptUnwrapTarget(
+fn executeItemOptUnwrapTarget<'mcx>(
     cxt: &mut JsonPathExecContext<'mcx, '_>,
     jsp: &JsonPathItem<'_>,
     jb: &JsonbValue<'mcx>,
@@ -805,13 +805,13 @@ fn executeItemOptUnwrapTarget(
         jpiAnyKey => {
             if JsonbType(jb)? == jbvType::jbvObject {
                 let next = jspGetNext(jsp);
-                let data = binary_data(jb, "invalid jsonb object type")?.to_vec();
+                let data = binary_data(jb, "invalid jsonb object type")?;
                 let data_off = binary_doc_offset(jb);
                 let unwrap2 = jspAutoUnwrap(cxt);
                 return executeAnyItem(
                     cxt,
                     next.as_ref(),
-                    &data,
+                    data,
                     data_off,
                     found,
                     1,
@@ -901,8 +901,8 @@ fn executeItemOptUnwrapTarget(
                             v = jb.clone();
                             copy = true;
                         } else {
-                            let data = binary_data(jb, "invalid jsonb array value type")?.to_vec();
-                            match getIthJsonbValueFromContainer(&data, index as u32)? {
+                            let data = binary_data(jb, "invalid jsonb array value type")?;
+                            match getIthJsonbValueFromContainer(data, index as u32)? {
                                 Some(mut found_v) => {
                                     rebase_binary_offset(&mut found_v, binary_doc_offset(jb));
                                     v = found_v;
@@ -975,12 +975,12 @@ fn executeItemOptUnwrapTarget(
             }
 
             if jb.typ == jbvType::jbvBinary {
-                let data = binary_data(jb, "invalid jsonb binary type")?.to_vec();
+                let data = binary_data(jb, "invalid jsonb binary type")?;
                 let data_off = binary_doc_offset(jb);
                 res = executeAnyItem(
                     cxt,
                     if hasNext { next.as_ref() } else { None },
-                    &data,
+                    data,
                     data_off,
                     found,
                     1,
@@ -997,10 +997,10 @@ fn executeItemOptUnwrapTarget(
                 let key_bytes = jspGetString(jsp);
                 let key = JsonbValue {
                     typ: jbvType::jbvString,
-                    val: JsonbValueData::String(key_bytes.to_vec()),
+                    val: JsonbValueData::String(::mcx::slice_borrow_in(cxt.mcx, key_bytes)?),
                 };
-                let data = binary_data(jb, "invalid jsonb object type")?.to_vec();
-                let v = findJsonbValueFromContainer(&data, JB_FOBJECT, &key)?;
+                let data = binary_data(jb, "invalid jsonb object type")?;
+                let v = findJsonbValueFromContainer(data, JB_FOBJECT, &key)?;
 
                 if let Some(mut v) = v {
                     rebase_binary_offset(&mut v, binary_doc_offset(jb));
@@ -1059,10 +1059,10 @@ fn executeItemOptUnwrapTarget(
         }
 
         jpiType => {
-            let name = JsonbTypeName(mcx, jb)?;
+            let name = JsonbTypeName(cxt.mcx, jb)?;
             let jbv = JsonbValue {
                 typ: jbvType::jbvString,
-                val: JsonbValueData::String(name.as_bytes().to_vec()),
+                val: JsonbValueData::String(::mcx::slice_borrow_in(cxt.mcx, name.as_bytes())?),
             };
             res = executeNextItem(cxt, jsp, None, &jbv, found, false)?;
         }
@@ -1091,7 +1091,7 @@ fn executeItemOptUnwrapTarget(
             let bytes = int64_to_numeric_bytes(cxt.mcx, size as i64)?;
             let jbv = JsonbValue {
                 typ: jbvType::jbvNumeric,
-                val: JsonbValueData::Numeric(bytes),
+                val: JsonbValueData::Numeric(::mcx::slice_borrow_in(cxt.mcx, &bytes)?),
             };
             res = executeNextItem(cxt, jsp, None, &jbv, found, false)?;
         }
@@ -1138,7 +1138,7 @@ fn executeItemOptUnwrapTarget(
             let bytes = int64_to_numeric_bytes(cxt.mcx, last as i64)?;
             let lastjbv = JsonbValue {
                 typ: jbvType::jbvNumeric,
-                val: JsonbValueData::Numeric(bytes),
+                val: JsonbValueData::Numeric(::mcx::slice_borrow_in(cxt.mcx, &bytes)?),
             };
 
             res = executeNextItem(cxt, jsp, next.as_ref(), &lastjbv, found, hasNext)?;
@@ -1162,7 +1162,7 @@ fn executeItemOptUnwrapTarget(
 }
 
 /// C: `executeItemUnwrapTargetArray` (jsonpath_exec.c:1672).
-fn executeItemUnwrapTargetArray(
+fn executeItemUnwrapTargetArray<'mcx>(
     cxt: &mut JsonPathExecContext<'mcx, '_>,
     jsp: Option<&JsonPathItem<'_>>,
     jb: &JsonbValue<'mcx>,
@@ -1177,13 +1177,13 @@ fn executeItemUnwrapTargetArray(
         )));
     }
 
-    let data = binary_data(jb, "invalid jsonb array value type")?.to_vec();
+    let data = binary_data(jb, "invalid jsonb array value type")?;
     let data_off = binary_doc_offset(jb);
-    executeAnyItem(cxt, jsp, &data, data_off, found, 1, 1, 1, false, unwrapElements)
+    executeAnyItem(cxt, jsp, data, data_off, found, 1, 1, 1, false, unwrapElements)
 }
 
 /// C: `executeNextItem` (jsonpath_exec.c:1692).
-fn executeNextItem(
+fn executeNextItem<'mcx>(
     cxt: &mut JsonPathExecContext<'mcx, '_>,
     cur: &JsonPathItem<'_>,
     next: Option<&JsonPathItem<'_>>,
@@ -1216,7 +1216,7 @@ fn executeNextItem(
 }
 
 /// C: `executeItemOptUnwrapResult` (jsonpath_exec.c:1723).
-fn executeItemOptUnwrapResult(
+fn executeItemOptUnwrapResult<'mcx>(
     cxt: &mut JsonPathExecContext<'mcx, '_>,
     jsp: &JsonPathItem<'_>,
     jb: &JsonbValue<'mcx>,
@@ -1248,7 +1248,7 @@ fn executeItemOptUnwrapResult(
 }
 
 /// C: `executeItemOptUnwrapResultNoThrow` (jsonpath_exec.c:1758).
-fn executeItemOptUnwrapResultNoThrow(
+fn executeItemOptUnwrapResultNoThrow<'mcx>(
     cxt: &mut JsonPathExecContext<'mcx, '_>,
     jsp: &JsonPathItem<'_>,
     jb: &JsonbValue<'mcx>,
@@ -1263,7 +1263,7 @@ fn executeItemOptUnwrapResultNoThrow(
 }
 
 /// C: `executeBoolItem` (jsonpath_exec.c:1775).
-fn executeBoolItem(
+fn executeBoolItem<'mcx>(
     cxt: &mut JsonPathExecContext<'mcx, '_>,
     jsp: &JsonPathItem<'_>,
     jb: &JsonbValue<'mcx>,
@@ -1371,7 +1371,7 @@ fn executeBoolItem(
 /// `executeItemOptUnwrapResultNoThrow` with `found == NULL` semantics for the
 /// non-strict EXISTS path: C passes `NULL` for `found`, so the executor stops at
 /// the first match and returns `jperOk`/`jperNotFound`.
-fn executeItemOptUnwrapResultNoThrowExists(
+fn executeItemOptUnwrapResultNoThrowExists<'mcx>(
     cxt: &mut JsonPathExecContext<'mcx, '_>,
     jsp: &JsonPathItem<'_>,
     jb: &JsonbValue<'mcx>,
@@ -1386,7 +1386,7 @@ fn executeItemOptUnwrapResultNoThrowExists(
 }
 
 /// C: `executeNestedBoolItem` (jsonpath_exec.c:1911).
-fn executeNestedBoolItem(
+fn executeNestedBoolItem<'mcx>(
     cxt: &mut JsonPathExecContext<'mcx, '_>,
     jsp: &JsonPathItem<'_>,
     jb: &JsonbValue<'mcx>,
@@ -1402,10 +1402,10 @@ fn executeNestedBoolItem(
 /// `jbc_doc_offset` is the byte position of `jbc` within its origin document's
 /// root container (so iterated children keep document-relative `.keyvalue()`
 /// identities — bookkeeping unique to the safe port).
-fn executeAnyItem(
+fn executeAnyItem<'mcx>(
     cxt: &mut JsonPathExecContext<'mcx, '_>,
     jsp: Option<&JsonPathItem<'_>>,
-    jbc: &[u8],
+    jbc: &'mcx [u8],
     jbc_doc_offset: i32,
     mut found: Option<&mut JsonValueList<'mcx>>,
     level: u32,
@@ -1422,7 +1422,7 @@ fn executeAnyItem(
         return Ok(res);
     }
 
-    let mut it = JsonbIteratorInitAt(jbc, jbc_doc_offset);
+    let mut it = JsonbIteratorInitAt(cxt.mcx, jbc, jbc_doc_offset);
     let mut v = JsonbValue::null();
 
     // Recursively iterate over jsonb objects/arrays
@@ -1478,12 +1478,12 @@ fn executeAnyItem(
             }
 
             if level < last && v.typ == jbvType::jbvBinary {
-                let data = binary_data(&v, "invalid jsonb binary type")?.to_vec();
+                let data = binary_data(&v, "invalid jsonb binary type")?;
                 let data_off = binary_doc_offset(&v);
                 res = executeAnyItem(
                     cxt,
                     jsp,
-                    &data,
+                    data,
                     data_off,
                     found.as_deref_mut(),
                     level + 1,
@@ -1517,7 +1517,7 @@ enum PredicateKind<'a> {
 }
 
 /// C: `executePredicate` (jsonpath_exec.c:2023).
-fn executePredicate(
+fn executePredicate<'mcx>(
     cxt: &mut JsonPathExecContext<'mcx, '_>,
     pred: &JsonPathItem<'_>,
     larg: &JsonPathItem<'_>,
@@ -1601,12 +1601,12 @@ fn executePredicate(
 }
 
 /// Dispatch a single predicate call (C: `exec(pred, lval, rval, param)`).
-fn exec_predicate_call(
+fn exec_predicate_call<'mcx>(
     cxt: &JsonPathExecContext<'mcx, '_>,
     exec: &mut PredicateKind<'_>,
     pred: &JsonPathItem<'_>,
     lval: &JsonbValue<'mcx>,
-    rval: Option<&JsonbValue>,
+    rval: Option<&JsonbValue<'mcx>>,
 ) -> PgResult<JsonPathBool> {
     match exec {
         PredicateKind::Comparison => executeComparison(pred, lval, rval.unwrap(), cxt),
@@ -1632,7 +1632,7 @@ enum UnaryOp {
 }
 
 /// C: `executeBinaryArithmExpr` (jsonpath_exec.c:2103).
-fn executeBinaryArithmExpr(
+fn executeBinaryArithmExpr<'mcx>(
     cxt: &mut JsonPathExecContext<'mcx, '_>,
     jsp: &JsonPathItem<'_>,
     jb: &JsonbValue<'mcx>,
@@ -1717,14 +1717,14 @@ fn executeBinaryArithmExpr(
 
     let lval = JsonbValue {
         typ: jbvType::jbvNumeric,
-        val: JsonbValueData::Numeric(res),
+        val: JsonbValueData::Numeric(::mcx::slice_borrow_in(cxt.mcx, &res)?),
     };
 
     executeNextItem(cxt, jsp, next.as_ref(), &lval, found, false)
 }
 
 /// C: `executeUnaryArithmExpr` (jsonpath_exec.c:2174).
-fn executeUnaryArithmExpr(
+fn executeUnaryArithmExpr<'mcx>(
     cxt: &mut JsonPathExecContext<'mcx, '_>,
     jsp: &JsonPathItem<'_>,
     jb: &JsonbValue<'mcx>,
@@ -1768,7 +1768,7 @@ fn executeUnaryArithmExpr(
         if let Some(UnaryOp::Minus) = func {
             let bytes = numeric_bytes_of(&val).to_vec();
             let var = numeric_uminus_bytes(cxt.mcx, &bytes)?;
-            val.val = JsonbValueData::Numeric(var);
+            val.val = JsonbValueData::Numeric(::mcx::slice_borrow_in(cxt.mcx, &var)?);
         }
 
         let jper2 = executeNextItem(cxt, jsp, next.as_ref(), &val, found.as_deref_mut(), false)?;
@@ -1788,7 +1788,7 @@ fn executeUnaryArithmExpr(
 }
 
 /// C: `executeStartsWith` (jsonpath_exec.c:2241).
-fn executeStartsWith(whole: &JsonbValue<'mcx>, initial: &JsonbValue) -> PgResult<JsonPathBool> {
+fn executeStartsWith(whole: &JsonbValue<'_>, initial: &JsonbValue<'_>) -> PgResult<JsonPathBool> {
     let whole = match getScalar(whole, jbvType::jbvString) {
         Some(v) => v,
         None => return Ok(jpbUnknown), // error
@@ -1809,8 +1809,8 @@ fn executeStartsWith(whole: &JsonbValue<'mcx>, initial: &JsonbValue) -> PgResult
 }
 
 /// C: `executeLikeRegex` (jsonpath_exec.c:2265).
-fn executeLikeRegex(
-    mcx: Mcx<'_>,
+fn executeLikeRegex<'mcx>(
+    mcx: Mcx<'mcx>,
     jsp: &JsonPathItem<'_>,
     str: &JsonbValue<'mcx>,
     cxt: &mut JsonLikeRegexContext,
@@ -1852,7 +1852,7 @@ enum NumericMethod {
 }
 
 /// C: `executeNumericItemMethod` (jsonpath_exec.c:2296).
-fn executeNumericItemMethod(
+fn executeNumericItemMethod<'mcx>(
     cxt: &mut JsonPathExecContext<'mcx, '_>,
     jsp: &JsonPathItem<'_>,
     jb: &JsonbValue<'mcx>,
@@ -1889,14 +1889,14 @@ fn executeNumericItemMethod(
 
     let jbv = JsonbValue {
         typ: jbvType::jbvNumeric,
-        val: JsonbValueData::Numeric(result),
+        val: JsonbValueData::Numeric(::mcx::slice_borrow_in(cxt.mcx, &result)?),
     };
 
     executeNextItem(cxt, jsp, next.as_ref(), &jbv, found, false)
 }
 
 /// C: `executeDateTimeMethod` (jsonpath_exec.c:2337).
-fn executeDateTimeMethod(
+fn executeDateTimeMethod<'mcx>(
     cxt: &mut JsonPathExecContext<'mcx, '_>,
     jsp: &JsonPathItem<'_>,
     jb: &JsonbValue<'mcx>,
@@ -2073,7 +2073,7 @@ fn executeDateTimeMethod(
 }
 
 /// C: `executeKeyValueMethod` (jsonpath_exec.c:2818).
-fn executeKeyValueMethod(
+fn executeKeyValueMethod<'mcx>(
     cxt: &mut JsonPathExecContext<'mcx, '_>,
     jsp: &JsonPathItem<'_>,
     jb: &JsonbValue<'mcx>,
@@ -2094,9 +2094,10 @@ fn executeKeyValueMethod(
         );
     }
 
-    let jbc = binary_data(jb, "invalid jsonb object type")?.to_vec();
+    let jbc: &'mcx [u8] =
+        ::mcx::slice_borrow_in(cxt.mcx, binary_data(jb, "invalid jsonb object type")?)?;
 
-    if json_container_size(container_header(&jbc)) == 0 {
+    if json_container_size(container_header(jbc)) == 0 {
         return Ok(jperNotFound); // no key-value pairs
     }
 
@@ -2105,15 +2106,15 @@ fn executeKeyValueMethod(
 
     let keystr = JsonbValue {
         typ: jbvType::jbvString,
-        val: JsonbValueData::String(b"key".to_vec()),
+        val: JsonbValueData::String(::mcx::slice_borrow_in(cxt.mcx, b"key")?),
     };
     let valstr = JsonbValue {
         typ: jbvType::jbvString,
-        val: JsonbValueData::String(b"value".to_vec()),
+        val: JsonbValueData::String(::mcx::slice_borrow_in(cxt.mcx, b"value")?),
     };
     let idstr = JsonbValue {
         typ: jbvType::jbvString,
-        val: JsonbValueData::String(b"id".to_vec()),
+        val: JsonbValueData::String(::mcx::slice_borrow_in(cxt.mcx, b"id")?),
     };
 
     // construct object id from its base object and offset inside that
@@ -2127,12 +2128,15 @@ fn executeKeyValueMethod(
 
     let idval = JsonbValue {
         typ: jbvType::jbvNumeric,
-        val: JsonbValueData::Numeric(int64_to_numeric_bytes(cxt.mcx, id)?),
+        val: JsonbValueData::Numeric(::mcx::slice_borrow_in(
+            cxt.mcx,
+            &int64_to_numeric_bytes(cxt.mcx, id)?,
+        )?),
     };
 
     // The pairs produced here are re-serialized into a fresh object, so their
     // document offsets are immaterial: iterate with offset 0.
-    let mut it = JsonbIteratorInitAt(&jbc, 0);
+    let mut it = JsonbIteratorInitAt(cxt.mcx, jbc, 0);
     let mut key = JsonbValue::null();
 
     loop {
@@ -2155,24 +2159,24 @@ fn executeKeyValueMethod(
         debug_assert_eq!(tok, JsonbIteratorToken::WJB_VALUE);
 
         let mut ps = None;
-        pushJsonbValue(&mut ps, JsonbIteratorToken::WJB_BEGIN_OBJECT, None)?;
+        pushJsonbValue(cxt.mcx, &mut ps, JsonbIteratorToken::WJB_BEGIN_OBJECT, None)?;
 
-        pushJsonbValue(&mut ps, JsonbIteratorToken::WJB_KEY, Some(&keystr))?;
-        pushJsonbValue(&mut ps, JsonbIteratorToken::WJB_VALUE, Some(&key))?;
+        pushJsonbValue(cxt.mcx, &mut ps, JsonbIteratorToken::WJB_KEY, Some(&keystr))?;
+        pushJsonbValue(cxt.mcx, &mut ps, JsonbIteratorToken::WJB_VALUE, Some(&key))?;
 
-        pushJsonbValue(&mut ps, JsonbIteratorToken::WJB_KEY, Some(&valstr))?;
-        pushJsonbValue(&mut ps, JsonbIteratorToken::WJB_VALUE, Some(&val))?;
+        pushJsonbValue(cxt.mcx, &mut ps, JsonbIteratorToken::WJB_KEY, Some(&valstr))?;
+        pushJsonbValue(cxt.mcx, &mut ps, JsonbIteratorToken::WJB_VALUE, Some(&val))?;
 
-        pushJsonbValue(&mut ps, JsonbIteratorToken::WJB_KEY, Some(&idstr))?;
-        pushJsonbValue(&mut ps, JsonbIteratorToken::WJB_VALUE, Some(&idval))?;
+        pushJsonbValue(cxt.mcx, &mut ps, JsonbIteratorToken::WJB_KEY, Some(&idstr))?;
+        pushJsonbValue(cxt.mcx, &mut ps, JsonbIteratorToken::WJB_VALUE, Some(&idval))?;
 
-        let keyval = pushJsonbValue(&mut ps, JsonbIteratorToken::WJB_END_OBJECT, None)?
+        let keyval = pushJsonbValue(cxt.mcx, &mut ps, JsonbIteratorToken::WJB_END_OBJECT, None)?
             .expect("WJB_END_OBJECT yields a container value");
 
-        let jsonb = JsonbValueToJsonb(cxt.mcx, &keyval)?;
+        let jsonb: &'mcx [u8] = ::mcx::slice_borrow_in(cxt.mcx, &JsonbValueToJsonb(cxt.mcx, &keyval)?)?;
 
         let mut obj = JsonbValue::null();
-        JsonbInitBinary(&mut obj, &jsonb);
+        JsonbInitBinary(&mut obj, jsonb);
 
         let lastid = cxt.lastGeneratedObjectId;
         cxt.lastGeneratedObjectId += 1;
@@ -2194,7 +2198,7 @@ fn executeKeyValueMethod(
 }
 
 /// C: `appendBoolResult` (jsonpath_exec.c:2928).
-fn appendBoolResult(
+fn appendBoolResult<'mcx>(
     cxt: &mut JsonPathExecContext<'mcx, '_>,
     jsp: &JsonPathItem<'_>,
     found: Option<&mut JsonValueList<'mcx>>,
@@ -2222,10 +2226,10 @@ fn appendBoolResult(
 // ===========================================================================
 
 /// C: `getJsonPathItem` (jsonpath_exec.c:2956).
-fn getJsonPathItem(
+fn getJsonPathItem<'mcx>(
     cxt: &mut JsonPathExecContext<'mcx, '_>,
     item: &JsonPathItem<'_>,
-    value: &mut JsonbValue,
+    value: &mut JsonbValue<'mcx>,
 ) -> PgResult<()> {
     match item.typ {
         jpiNull => {
@@ -2238,11 +2242,11 @@ fn getJsonPathItem(
         }
         jpiNumeric => {
             value.typ = jbvType::jbvNumeric;
-            value.val = JsonbValueData::Numeric(jspGetNumeric(item).to_vec());
+            value.val = JsonbValueData::Numeric(::mcx::slice_borrow_in(cxt.mcx, jspGetNumeric(item))?);
         }
         jpiString => {
             value.typ = jbvType::jbvString;
-            value.val = JsonbValueData::String(jspGetString(item).to_vec());
+            value.val = JsonbValueData::String(::mcx::slice_borrow_in(cxt.mcx, jspGetString(item))?);
         }
         jpiVariable => {
             getJsonPathVariable(cxt, item, value)?;
@@ -2464,10 +2468,10 @@ fn JsonItemFromDatum<'mcx>(mcx: Mcx<'mcx>, var: &JsonPathVariable) -> PgResult<J
 }
 
 /// C: `getJsonPathVariable` (jsonpath_exec.c:3139).
-fn getJsonPathVariable(
+fn getJsonPathVariable<'mcx>(
     cxt: &mut JsonPathExecContext<'mcx, '_>,
     variable: &JsonPathItem<'_>,
-    value: &mut JsonbValue,
+    value: &mut JsonbValue<'mcx>,
 ) -> PgResult<()> {
     debug_assert_eq!(variable.typ, jpiVariable);
     let var_name = jspGetString(variable);
@@ -2558,7 +2562,7 @@ fn countVariablesFromJsonb(vars: &JsonPathVars) -> PgResult<i32> {
 }
 
 /// C: `JsonbArraySize` (jsonpath_exec.c:3223).
-fn JsonbArraySize(jb: &JsonbValue) -> PgResult<i32> {
+fn JsonbArraySize(jb: &JsonbValue<'_>) -> PgResult<i32> {
     debug_assert!(jb.typ != jbvType::jbvArray);
 
     if jb.typ == jbvType::jbvBinary {
@@ -2576,7 +2580,7 @@ fn JsonbArraySize(jb: &JsonbValue) -> PgResult<i32> {
 // ===========================================================================
 
 /// C: `executeComparison` (jsonpath_exec.c:3240) — `JsonPathPredicateCallback`.
-fn executeComparison(
+fn executeComparison<'mcx>(
     cmp: &JsonPathItem<'_>,
     lv: &JsonbValue<'mcx>,
     rv: &JsonbValue<'mcx>,
@@ -2752,10 +2756,10 @@ fn copyJsonbValue<'mcx>(src: &JsonbValue<'mcx>) -> JsonbValue<'mcx> {
 }
 
 /// C: `getArrayIndex` (jsonpath_exec.c:3457).
-fn getArrayIndex(
-    cxt: &mut JsonPathExecContext<'_, '_>,
+fn getArrayIndex<'mcx>(
+    cxt: &mut JsonPathExecContext<'mcx, '_>,
     jsp: &JsonPathItem<'_>,
-    jb: &JsonbValue,
+    jb: &JsonbValue<'mcx>,
     index: &mut i32,
 ) -> PgResult<JsonPathExecResult> {
     let mut found = JsonValueList::default();
@@ -2807,14 +2811,14 @@ fn getArrayIndex(
 /// C: `setBaseObject` (jsonpath_exec.c:3492).
 fn setBaseObject(
     cxt: &mut JsonPathExecContext<'_, '_>,
-    jbv: &JsonbValue,
+    jbv: &JsonbValue<'_>,
     id: i32,
 ) -> JsonBaseObjectInfo {
     let baseObject = cxt.baseObject.clone();
 
     if jbv.typ == jbvType::jbvBinary {
         let data = match &jbv.val {
-            JsonbValueData::Binary { data, .. } => data.clone(),
+            JsonbValueData::Binary { data, .. } => data.to_vec(),
             _ => Vec::new(),
         };
         cxt.baseObject.id_addr = jbc_identity(jbv);
@@ -3191,11 +3195,11 @@ pub fn JsonPathValue<'mcx>(
             _ => false,
         };
         if is_scalar {
-            let data = match &res.val {
-                JsonbValueData::Binary { data, .. } => data.clone(),
+            let data: &'mcx [u8] = match &res.val {
+                JsonbValueData::Binary { data, .. } => data,
                 _ => unreachable!(),
             };
-            JsonbExtractScalar(&data, &mut res)?;
+            JsonbExtractScalar(mcx, data, &mut res)?;
         }
     }
 
@@ -3264,12 +3268,12 @@ fn scalar_required_error(column_name: Option<&str>) -> PgError {
 // ===========================================================================
 
 /// C: the `jpiDouble` case (jsonpath_exec.c:1141).
-fn execute_double(
-    cxt: &mut JsonPathExecContext<'_, '_>,
+fn execute_double<'mcx>(
+    cxt: &mut JsonPathExecContext<'mcx, '_>,
     jsp: &JsonPathItem<'_>,
-    jb: &JsonbValue,
+    jb: &JsonbValue<'mcx>,
     unwrap: bool,
-    found: Option<&mut JsonValueList>,
+    found: Option<&mut JsonValueList<'mcx>>,
 ) -> PgResult<JsonPathExecResult> {
     if unwrap && JsonbType(jb)? == jbvType::jbvArray {
         return executeItemUnwrapTargetArray(cxt, Some(jsp), jb, found, false);
@@ -3330,7 +3334,10 @@ fn execute_double(
                 }
                 out = JsonbValue {
                     typ: jbvType::jbvNumeric,
-                    val: JsonbValueData::Numeric(float8_to_numeric_bytes(cxt.mcx, val)?),
+                    val: JsonbValueData::Numeric(::mcx::slice_borrow_in(
+                        cxt.mcx,
+                        &float8_to_numeric_bytes(cxt.mcx, val)?,
+                    )?),
                 };
                 res = jperOk;
             }
@@ -3368,12 +3375,12 @@ fn execute_double(
 }
 
 /// C: the `jpiBigint` case (jsonpath_exec.c:1261).
-fn execute_bigint(
-    cxt: &mut JsonPathExecContext<'_, '_>,
+fn execute_bigint<'mcx>(
+    cxt: &mut JsonPathExecContext<'mcx, '_>,
     jsp: &JsonPathItem<'_>,
-    jb: &JsonbValue,
+    jb: &JsonbValue<'mcx>,
     unwrap: bool,
-    found: Option<&mut JsonValueList>,
+    found: Option<&mut JsonValueList<'mcx>>,
 ) -> PgResult<JsonPathExecResult> {
     if unwrap && JsonbType(jb)? == jbvType::jbvArray {
         return executeItemUnwrapTargetArray(cxt, Some(jsp), jb, found, false);
@@ -3444,19 +3451,22 @@ fn execute_bigint(
 
     let out = JsonbValue {
         typ: jbvType::jbvNumeric,
-        val: JsonbValueData::Numeric(int64_to_numeric_bytes(cxt.mcx, datum)?),
+        val: JsonbValueData::Numeric(::mcx::slice_borrow_in(
+            cxt.mcx,
+            &int64_to_numeric_bytes(cxt.mcx, datum)?,
+        )?),
     };
 
     executeNextItem(cxt, jsp, None, &out, found, true)
 }
 
 /// C: the `jpiBoolean` case (jsonpath_exec.c:1324).
-fn execute_boolean(
-    cxt: &mut JsonPathExecContext<'_, '_>,
+fn execute_boolean<'mcx>(
+    cxt: &mut JsonPathExecContext<'mcx, '_>,
     jsp: &JsonPathItem<'_>,
-    jb: &JsonbValue,
+    jb: &JsonbValue<'mcx>,
     unwrap: bool,
-    found: Option<&mut JsonValueList>,
+    found: Option<&mut JsonValueList<'mcx>>,
 ) -> PgResult<JsonPathExecResult> {
     if unwrap && JsonbType(jb)? == jbvType::jbvArray {
         return executeItemUnwrapTargetArray(cxt, Some(jsp), jb, found, false);
@@ -3536,12 +3546,12 @@ fn execute_boolean(
 }
 
 /// C: the `jpiDecimal`/`jpiNumber` case (jsonpath_exec.c:1396).
-fn execute_decimal_number(
-    cxt: &mut JsonPathExecContext<'_, '_>,
+fn execute_decimal_number<'mcx>(
+    cxt: &mut JsonPathExecContext<'mcx, '_>,
     jsp: &JsonPathItem<'_>,
-    jb: &JsonbValue,
+    jb: &JsonbValue<'mcx>,
     unwrap: bool,
-    found: Option<&mut JsonValueList>,
+    found: Option<&mut JsonValueList<'mcx>>,
 ) -> PgResult<JsonPathExecResult> {
     if unwrap && JsonbType(jb)? == jbvType::jbvArray {
         return executeItemUnwrapTargetArray(cxt, Some(jsp), jb, found, false);
@@ -3693,19 +3703,19 @@ fn execute_decimal_number(
 
     let out = JsonbValue {
         typ: jbvType::jbvNumeric,
-        val: JsonbValueData::Numeric(num),
+        val: JsonbValueData::Numeric(::mcx::slice_borrow_in(cxt.mcx, &num)?),
     };
 
     executeNextItem(cxt, jsp, None, &out, found, true)
 }
 
 /// C: the `jpiInteger` case (jsonpath_exec.c:1542).
-fn execute_integer(
-    cxt: &mut JsonPathExecContext<'_, '_>,
+fn execute_integer<'mcx>(
+    cxt: &mut JsonPathExecContext<'mcx, '_>,
     jsp: &JsonPathItem<'_>,
-    jb: &JsonbValue,
+    jb: &JsonbValue<'mcx>,
     unwrap: bool,
-    found: Option<&mut JsonValueList>,
+    found: Option<&mut JsonValueList<'mcx>>,
 ) -> PgResult<JsonPathExecResult> {
     if unwrap && JsonbType(jb)? == jbvType::jbvArray {
         return executeItemUnwrapTargetArray(cxt, Some(jsp), jb, found, false);
@@ -3776,19 +3786,22 @@ fn execute_integer(
 
     let out = JsonbValue {
         typ: jbvType::jbvNumeric,
-        val: JsonbValueData::Numeric(int64_to_numeric_bytes(cxt.mcx, datum as i64)?),
+        val: JsonbValueData::Numeric(::mcx::slice_borrow_in(
+            cxt.mcx,
+            &int64_to_numeric_bytes(cxt.mcx, datum as i64)?,
+        )?),
     };
 
     executeNextItem(cxt, jsp, None, &out, found, true)
 }
 
 /// C: the `jpiStringFunc` case (jsonpath_exec.c:1604).
-fn execute_string_func(
-    cxt: &mut JsonPathExecContext<'_, '_>,
+fn execute_string_func<'mcx>(
+    cxt: &mut JsonPathExecContext<'mcx, '_>,
     jsp: &JsonPathItem<'_>,
-    jb: &JsonbValue,
+    jb: &JsonbValue<'mcx>,
     unwrap: bool,
-    found: Option<&mut JsonValueList>,
+    found: Option<&mut JsonValueList<'mcx>>,
 ) -> PgResult<JsonPathExecResult> {
     if unwrap && JsonbType(jb)? == jbvType::jbvArray {
         return executeItemUnwrapTargetArray(cxt, Some(jsp), jb, found, false);
@@ -3831,7 +3844,7 @@ fn execute_string_func(
 
     let out = JsonbValue {
         typ: jbvType::jbvString,
-        val: JsonbValueData::String(tmp),
+        val: JsonbValueData::String(::mcx::slice_borrow_in(cxt.mcx, &tmp)?),
     };
 
     executeNextItem(cxt, jsp, None, &out, found, true)
@@ -3944,7 +3957,7 @@ fn jsonpath_header(js: &[u8]) -> u32 {
 }
 
 /// The container bytes of a `jbvBinary` value, or an `elog(ERROR)` invariant.
-fn binary_data<'a>(jb: &'a JsonbValue, msg: &str) -> PgResult<&'a [u8]> {
+fn binary_data<'mcx>(jb: &JsonbValue<'mcx>, msg: &str) -> PgResult<&'mcx [u8]> {
     match &jb.val {
         JsonbValueData::Binary { data, .. } => Ok(data),
         _ => Err(elog_error(&format!("{}: {}", msg, jb.typ as i32))),
@@ -3976,11 +3989,12 @@ fn JsonbValueToJsonb(mcx: Mcx<'_>, v: &JsonbValue) -> PgResult<Vec<u8>> {
 }
 
 /// Build the `JsonPathVars` for the optional `vars` jsonb argument.
-fn vars_from_opt_jsonb(vars: Option<&[u8]>) -> JsonPathVars {
-    match vars {
+fn vars_from_opt_jsonb<'mcx>(mcx: Mcx<'mcx>, vars: Option<&[u8]>) -> PgResult<&'mcx JsonPathVars> {
+    let v = match vars {
         Some(b) => JsonPathVars::Jsonb(b.to_vec()),
         None => JsonPathVars::None,
-    }
+    };
+    Ok(&*::mcx::arena_box_in(mcx, v)?)
 }
 
 // --- numeric helpers (on-disk bytes) ---------------------------------------
@@ -4174,15 +4188,15 @@ const DATETIME_FORMATS: [&str; 13] = [
 // ---------------------------------------------------------------------------
 
 /// `crate`-visible alias of [`executeJsonPath`] for the JSON_TABLE submodule.
-pub(crate) fn executeJsonPathPublic(
-    mcx: Mcx<'_>,
+pub(crate) fn executeJsonPathPublic<'mcx>(
+    mcx: Mcx<'mcx>,
     path: &[u8],
-    vars: &JsonPathVars,
+    vars: &'mcx JsonPathVars,
     getVar: JsonPathGetVarCallback,
     countVars: JsonPathCountVarsCallback,
-    json: &[u8],
+    json: &'mcx [u8],
     throwErrors: bool,
-    result: Option<&mut JsonValueList>,
+    result: Option<&mut JsonValueList<'mcx>>,
     useTz: bool,
 ) -> PgResult<JsonPathExecResult> {
     executeJsonPath(mcx, path, vars, getVar, countVars, json, throwErrors, result, useTz)

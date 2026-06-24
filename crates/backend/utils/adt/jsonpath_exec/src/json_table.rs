@@ -69,9 +69,14 @@ struct JsonTablePlanState {
     path: Vec<u8>,
     /// PASSING arguments passed to the jsonpath executor (C: `List *args`).
     args: JsonPathVars,
-    /// List + iterator of jsonpath result values (C: `found` / `iter`).
-    found: JsonValueList,
-    iter: JsonValueListIterator,
+    /// Jsonpath result values, eagerly serialized to owned on-disk `jsonb`
+    /// varlena bytes (C keeps a `JsonValueList` of `JsonbValue*` into the
+    /// per-statement context; the safe port stores the owned serialized image so
+    /// the long-lived `JsonTableExecContext` does not borrow a per-call arena —
+    /// the §3.4 store-boundary).  `iter_pos` is the next index to yield
+    /// (mirrors C's `JsonValueListIterator`).
+    found: Vec<Vec<u8>>,
+    iter_pos: usize,
     /// Currently selected row (C: `current`).
     current: JsonTablePlanRowSource,
     /// Counter for ORDINAL columns (C: `int ordinal`).
@@ -197,8 +202,8 @@ fn JsonTableInitPlan(
                 path,
                 plan: JsonTablePlan::PathScan(scan),
                 args: args.clone(),
-                found: JsonValueList::default(),
-                iter: JsonValueListInitIteratorPub(&JsonValueList::default()),
+                found: Vec::new(),
+                iter_pos: 0,
                 current: JsonTablePlanRowSource {
                     value: Vec::new(),
                     isnull: true,
@@ -225,8 +230,8 @@ fn JsonTableInitPlan(
                 path: Vec::new(),
                 plan: JsonTablePlan::SiblingJoin(join),
                 args: args.clone(),
-                found: JsonValueList::default(),
-                iter: JsonValueListInitIteratorPub(&JsonValueList::default()),
+                found: Vec::new(),
+                iter_pos: 0,
                 current: JsonTablePlanRowSource {
                     value: Vec::new(),
                     isnull: true,
@@ -269,7 +274,7 @@ fn JsonTableResetRowPattern(
         }
     };
 
-    JsonValueListClearPub(&mut planstate.found);
+    planstate.found.clear();
 
     let mut found = JsonValueList::default();
     let res = executeJsonPathPublic(
@@ -283,15 +288,21 @@ fn JsonTableResetRowPattern(
         Some(&mut found),
         true,
     )?;
-    planstate.found = found;
 
     if crate::jper_is_error(res) {
         debug_assert!(!error_on_error);
-        JsonValueListClearPub(&mut planstate.found);
+        // leave planstate.found empty
+    } else {
+        // §3.4 store-boundary: serialize each arena-borrowed result value to an
+        // owned on-disk varlena so the long-lived plan-state owns the bytes.
+        let mut it = JsonValueListInitIteratorPub(&found);
+        while let Some(v) = JsonValueListNextPub(&mut it) {
+            planstate.found.push(JsonbValueToJsonbPub(mcx, &v)?);
+        }
     }
 
     // Reset plan iterator to the beginning of the item list.
-    planstate.iter = JsonValueListInitIteratorPub(&planstate.found);
+    planstate.iter_pos = 0;
     planstate.current.value = Vec::new();
     planstate.current.isnull = true;
     planstate.ordinal = 0;
@@ -320,10 +331,13 @@ fn JsonTablePlanScanNextRow(mcx: Mcx<'_>, planstate: &mut JsonTablePlanState) ->
     }
 
     // Fetch new row from the list of found values to set as active.
-    let jbv = JsonValueListNextPub(&mut planstate.iter);
+    // (`found` already holds owned on-disk varlena images — the §3.4 store
+    // boundary was crossed in JsonTableResetRowPattern.)
+    let _ = mcx;
+    let image = planstate.found.get(planstate.iter_pos).cloned();
 
     // End of list?
-    let jbv = match jbv {
+    let image = match image {
         None => {
             planstate.current.value = Vec::new();
             planstate.current.isnull = true;
@@ -331,9 +345,10 @@ fn JsonTablePlanScanNextRow(mcx: Mcx<'_>, planstate: &mut JsonTablePlanState) ->
         }
         Some(v) => v,
     };
+    planstate.iter_pos += 1;
 
     // Set current row item for subsequent JsonTableGetValue() calls.
-    planstate.current.value = JsonbValueToJsonbPub(mcx, &jbv)?;
+    planstate.current.value = image;
     planstate.current.isnull = false;
 
     // Next row!
