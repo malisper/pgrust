@@ -669,6 +669,24 @@ pub fn ResumeInterrupts() {
     SetInterruptHoldoffCount(count - 1);
 }
 
+/// `HOLD_CANCEL_INTERRUPTS()` (miscadmin.h) — `QueryCancelHoldoffCount++`. Held
+/// across a frontend-message read so a `statement_timeout`/query-cancel does not
+/// fire mid-read and lose FE/BE protocol sync (`ProcessInterrupts` re-arms the
+/// cancel for after the read while this is non-zero).
+#[inline]
+pub fn HoldCancelInterrupts() {
+    SetQueryCancelHoldoffCount(QueryCancelHoldoffCount() + 1);
+}
+
+/// `RESUME_CANCEL_INTERRUPTS()` (miscadmin.h) — `QueryCancelHoldoffCount--` with
+/// underflow assertion.
+#[inline]
+pub fn ResumeCancelInterrupts() {
+    let count = QueryCancelHoldoffCount();
+    assert!(count > 0, "QueryCancelHoldoffCount underflow");
+    SetQueryCancelHoldoffCount(count - 1);
+}
+
 /// `START_CRIT_SECTION()` (c.h) — increment `CritSectionCount`; while
 /// non-zero any ERROR escalates to PANIC.
 #[inline]

@@ -123,9 +123,22 @@ const PQ_LARGE_MESSAGE_LIMIT: i32 = ::mcx::MAX_ALLOC_SIZE as i32 - 1;
 /// the read sequence (`pq_startmsgread`, `pq_getbyte`, validate, `pq_getmessage`)
 /// and set the extended-query / skip-till-Sync flags exactly as C does.
 fn SocketBackend(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
-    // HOLD_CANCEL_INTERRUPTS();
-    // (cancel-holdoff bracket is interrupt-machinery state; the read itself is
-    // faithful.)
+    // HOLD_CANCEL_INTERRUPTS(); ... RESUME_CANCEL_INTERRUPTS();
+    // C brackets the whole read so a query-cancel (e.g. statement_timeout) raised
+    // while we are blocked reading the next frontend message does NOT fire
+    // mid-read and lose FE/BE protocol sync. `ProcessInterrupts` checks
+    // QueryCancelHoldoffCount and re-arms the cancel for after the read. The
+    // bracket spans all early-return paths below, so a Drop guard restores the
+    // counter on every exit, matching the scope-balanced C macros.
+    struct CancelHoldoffGuard;
+    impl Drop for CancelHoldoffGuard {
+        fn drop(&mut self) {
+            ::init_small::globals::ResumeCancelInterrupts();
+        }
+    }
+    ::init_small::globals::HoldCancelInterrupts();
+    let _cancel_holdoff = CancelHoldoffGuard;
+
     pqcomm::pq_startmsgread()?;
     let qtype = pqcomm::pq_getbyte()?;
 
@@ -206,7 +219,7 @@ fn SocketBackend(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
     if pqcomm::pq_getmessage(in_buf, maxmsglen)? != 0 {
         return Ok(EOF); // suitable message already logged
     }
-    // RESUME_CANCEL_INTERRUPTS();
+    // RESUME_CANCEL_INTERRUPTS(); — performed by `_cancel_holdoff`'s Drop.
 
     Ok(qtype)
 }

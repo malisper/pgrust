@@ -51,6 +51,20 @@ fn arg_text_payload<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [
     vardata_any(image)
 }
 
+/// A `recv` function's `internal` (StringInfo) argument, delivered as its raw
+/// message-buffer bytes on the by-ref lane. Unlike `arg_text_payload`, this does
+/// NOT strip a `VARHDRSZ`/short header: the bytes are the wire message verbatim
+/// (`pq_getmsgtext` reads the StringInfo content directly), exactly as
+/// `jsonb_recv` reads its arg via `arg_jsonb_image`. Stripping four bytes here
+/// would corrupt the JSON text (e.g. COPY BINARY `{"x":1}` -> `:1}`).
+#[inline]
+fn arg_recv_payload<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("json fn: by-ref recv (StringInfo) arg missing from by-ref lane")
+}
+
 /// `VARDATA_ANY(ptr)` for an inline (non-compressed, non-external) varlena image:
 /// skip ONE header byte for a short (1-byte, low-bit-set) header, else `VARHDRSZ`.
 /// A small stored value arrives short-headed once `SHORT_VARLENA_PACKING` is on; a
@@ -184,7 +198,7 @@ fn fc_json_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<D
 
 /// `json_recv(internal) -> json` (oid 323): read + validate the message bytes.
 fn fc_json_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    let buf = arg_text_payload(fcinfo, 0);
+    let buf = arg_recv_payload(fcinfo, 0);
     let m = scratch_mcx();
     let image = crate::json_recv(m.mcx(), buf)?;
     Ok(ret_varlena(fcinfo, image.as_slice().to_vec()))
