@@ -68,15 +68,70 @@ fn pg_ucol_open(loc_str: &str) -> PgResult<*mut UCollator> {
     Ok(collator)
 }
 
-/// `create_pg_locale_icu` collator construction = `make_icu_collator(iculocstr,
-/// NULL)` = `pg_ucol_open(iculocstr)`. ICU custom-rules collations (non-NULL
-/// `collicurules`) are out of the bounded scope.
-pub fn make_icu_locale(iculocstr: &str) -> PgResult<IcuLocale> {
-    let ucol = pg_ucol_open(iculocstr)?;
+/// `make_icu_collator(iculocstr, icurules)` (`pg_locale_icu.c:320`): without
+/// rules, `pg_ucol_open(iculocstr)`; with rules, extract the standard collation's
+/// rules, append the custom rules, and reopen via `ucol_openRules`.
+pub fn make_icu_locale(iculocstr: &str, icurules: Option<&str>) -> PgResult<IcuLocale> {
+    let ucol = match icurules {
+        None => pg_ucol_open(iculocstr)?,
+        Some(rules) => make_icu_collator_with_rules(iculocstr, rules)?,
+    };
     Ok(IcuLocale {
         ucol,
         locale: iculocstr.to_string(),
     })
+}
+
+/// The `icurules`-bearing branch of `make_icu_collator` (`pg_locale_icu.c:328`).
+fn make_icu_collator_with_rules(iculocstr: &str, icurules: &str) -> PgResult<*mut UCollator> {
+    // C: icu_to_uchar(&my_rules, icurules, strlen(icurules));
+    // The rules string is in the database encoding; for the UTF-8 server
+    // encoding (the bounded scope) convert with u_strFromUTF8.
+    let my_rules = utf8_to_uchar(icurules.as_bytes())?;
+
+    // C: collator_std_rules = pg_ucol_open(iculocstr);
+    let collator_std_rules = pg_ucol_open(iculocstr)?;
+
+    // C: std_rules = ucol_getRules(collator_std_rules, &length);
+    let mut length: i32 = 0;
+    // SAFETY: collator_std_rules is owned; length is a valid out-pointer.
+    let std_rules_ptr = unsafe { ffi::ucol_get_rules(collator_std_rules, &mut length) };
+    // SAFETY: ucol_getRules returns a NUL-terminated UChar buffer owned by ICU.
+    let std_len = unsafe { ffi::u_strlen(std_rules_ptr) };
+    let std_rules: &[UChar] =
+        unsafe { core::slice::from_raw_parts(std_rules_ptr, std_len.max(0) as usize) };
+
+    // C: total = u_strlen(std_rules) + u_strlen(my_rules) + 1; u_strcpy/u_strcat.
+    let mut all_rules: Vec<UChar> = Vec::with_capacity(std_rules.len() + my_rules.len());
+    all_rules.extend_from_slice(std_rules);
+    all_rules.extend_from_slice(&my_rules);
+
+    // C: ucol_close(collator_std_rules);
+    // SAFETY: collator_std_rules is owned and no longer used.
+    unsafe { ffi::ucol_close(collator_std_rules) };
+
+    // C: ucol_openRules(all_rules, u_strlen(all_rules), UCOL_DEFAULT,
+    //                   UCOL_DEFAULT_STRENGTH, NULL, &status);
+    let mut status: UErrorCode = U_ZERO_ERROR;
+    // SAFETY: all_rules is a valid UChar buffer; NULL parseError is documented.
+    let collator = unsafe {
+        ffi::ucol_open_rules(
+            all_rules.as_ptr(),
+            all_rules.len() as i32,
+            UCOL_DEFAULT,
+            UCOL_DEFAULT_STRENGTH,
+            ptr::null_mut(),
+            &mut status,
+        )
+    };
+    if u_failure(status) {
+        return Err(PgError::error(format!(
+            "could not open collator for locale \"{iculocstr}\" with rules \"{icurules}\": {}",
+            error_name(status)
+        ))
+        .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
+    }
+    Ok(collator)
 }
 
 /// `strncoll_icu_utf8(arg1, arg2, locale)` (`pg_locale_icu.c:471`) —
@@ -630,7 +685,7 @@ mod tests {
     #[test]
     fn icu_compare_en_us_orders_case_then_letters() {
         // en-US ICU: "abc" < "abd"; case-insensitive secondary handled by locale.
-        let loc = make_icu_locale("en-US").expect("open en-US collator");
+        let loc = make_icu_locale("en-US", None).expect("open en-US collator");
         assert!(strncoll_icu(&loc, b"abc", b"abd").unwrap() < 0);
         assert!(strncoll_icu(&loc, b"abd", b"abc").unwrap() > 0);
         assert_eq!(strncoll_icu(&loc, b"abc", b"abc").unwrap(), 0);
@@ -641,13 +696,13 @@ mod tests {
         // "@colStrength=secondary" on the root locale: 'a' == 'A' (equal at the
         // collation level; the deterministic tiebreak is applied by varstr_cmp,
         // not here).
-        let loc = make_icu_locale("und-u-ks-level2").expect("open secondary collator");
+        let loc = make_icu_locale("und-u-ks-level2", None).expect("open secondary collator");
         assert_eq!(strncoll_icu(&loc, b"abc", b"ABC").unwrap(), 0);
     }
 
     #[test]
     fn icu_sort_key_roundtrips_compare_order() {
-        let loc = make_icu_locale("en-US").expect("open en-US collator");
+        let loc = make_icu_locale("en-US", None).expect("open en-US collator");
         let ka = strnxfrm_icu(&loc, b"abc").unwrap();
         let kb = strnxfrm_icu(&loc, b"abd").unwrap();
         // Sort keys compare bytewise in the same order as strncoll.
@@ -659,7 +714,7 @@ mod tests {
 
     #[test]
     fn icu_case_mapping_lower_upper_fold() {
-        let loc = make_icu_locale("en-US").expect("open en-US collator");
+        let loc = make_icu_locale("en-US", None).expect("open en-US collator");
         assert_eq!(strlower_icu(&loc, "HIJ".as_bytes()).unwrap(), b"hij");
         assert_eq!(strupper_icu(&loc, "hij".as_bytes()).unwrap(), b"HIJ");
         // German sharp-s folds to "ss".
@@ -669,7 +724,7 @@ mod tests {
     #[test]
     fn icu_turkish_lower_keeps_dotless_i() {
         // tr-TR lowercases 'I' to dotless 'ı' (U+0131).
-        let loc = make_icu_locale("tr-TR").expect("open tr collator");
+        let loc = make_icu_locale("tr-TR", None).expect("open tr collator");
         assert_eq!(strlower_icu(&loc, "I".as_bytes()).unwrap(), "ı".as_bytes());
     }
 

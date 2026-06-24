@@ -59,6 +59,19 @@ extern "C" {
     #[link_name = concat!("ucol_open_", env!("PG_ICU_VERSION_MAJOR"))]
     pub fn ucol_open(loc: *const c_char, status: *mut UErrorCode) -> *mut UCollator;
 
+    #[link_name = concat!("ucol_openRules_", env!("PG_ICU_VERSION_MAJOR"))]
+    pub fn ucol_open_rules(
+        rules: *const UChar,
+        rules_length: i32,
+        normalization_mode: i32,
+        strength: i32,
+        parse_error: *mut core::ffi::c_void,
+        status: *mut UErrorCode,
+    ) -> *mut UCollator;
+
+    #[link_name = concat!("ucol_getRules_", env!("PG_ICU_VERSION_MAJOR"))]
+    pub fn ucol_get_rules(coll: *const UCollator, length: *mut i32) -> *const UChar;
+
     #[link_name = concat!("ucol_close_", env!("PG_ICU_VERSION_MAJOR"))]
     pub fn ucol_close(coll: *mut UCollator);
 
@@ -193,10 +206,41 @@ extern "C" {
     ) -> i32;
 }
 
+extern "C" {
+    #[link_name = concat!("u_strlen_", env!("PG_ICU_VERSION_MAJOR"))]
+    pub fn u_strlen(s: *const UChar) -> i32;
+
+    // The database-encoding <-> UChar converter (`ucnv`), used by the non-UTF-8
+    // collation/sort-key path (`init_icu_converter` / `uchar_length` /
+    // `uchar_convert`).
+    #[link_name = concat!("ucnv_open_", env!("PG_ICU_VERSION_MAJOR"))]
+    pub fn ucnv_open(converter_name: *const c_char, err: *mut UErrorCode) -> *mut UConverter;
+
+    #[link_name = concat!("ucnv_close_", env!("PG_ICU_VERSION_MAJOR"))]
+    pub fn ucnv_close(converter: *mut UConverter);
+
+    #[link_name = concat!("ucnv_toUChars_", env!("PG_ICU_VERSION_MAJOR"))]
+    pub fn ucnv_to_uchars(
+        cnv: *mut UConverter,
+        dest: *mut UChar,
+        dest_capacity: i32,
+        src: *const c_char,
+        src_length: i32,
+        p_error_code: *mut UErrorCode,
+    ) -> i32;
+}
+
+/// Opaque `UConverter`.
+pub enum UConverter {}
+
 /// `U_FOLD_CASE_DEFAULT` (`uchar.h`).
 pub const U_FOLD_CASE_DEFAULT: u32 = 0;
 /// `U_FOLD_CASE_EXCLUDE_SPECIAL_I` (`uchar.h`).
 pub const U_FOLD_CASE_EXCLUDE_SPECIAL_I: u32 = 1;
+/// `UCOL_DEFAULT` (`ucol.h`).
+pub const UCOL_DEFAULT: i32 = -1;
+/// `UCOL_DEFAULT_STRENGTH` = `UCOL_TERTIARY` (`ucol.h`).
+pub const UCOL_DEFAULT_STRENGTH: i32 = UCOL_DEFAULT;
 
 /// `u_errorName(code)` as an owned Rust string (for error messages).
 pub fn error_name(code: UErrorCode) -> alloc::string::String {

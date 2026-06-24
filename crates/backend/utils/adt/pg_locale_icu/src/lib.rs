@@ -65,8 +65,12 @@ pub struct IcuLocaleResult {
 /// `UCollator`, and returns the provider state. With ICU off the live code is
 /// the `#else` arm (lines 211-218): `ERRCODE_FEATURE_NOT_SUPPORTED`.
 #[cfg(feature = "with-icu")]
-pub fn create_pg_locale_icu(iculocstr: &str, deterministic: bool) -> PgResult<IcuLocaleResult> {
-    let icu = provider::make_icu_locale(iculocstr)?;
+pub fn create_pg_locale_icu(
+    iculocstr: &str,
+    icurules: Option<&str>,
+    deterministic: bool,
+) -> PgResult<IcuLocaleResult> {
+    let icu = provider::make_icu_locale(iculocstr, icurules)?;
     Ok(IcuLocaleResult { deterministic, icu })
 }
 

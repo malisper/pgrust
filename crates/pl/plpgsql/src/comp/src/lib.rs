@@ -2455,7 +2455,12 @@ pub fn init_seams() {
     });
     comp_seams::parse_datatype::set(|string, location| seam::parse_datatype(string, location));
     comp_seams::get_collation_oid::set(|names, missing_ok| {
-        seam::get_collation_oid(names, missing_ok)
+        // `get_collation_oid(names, missing_ok)` (namespace.c) — resolve a
+        // COLLATE name list to its collation OID. The namespace owner takes a
+        // `&[&str]` + Mcx; project the owned names and run it in a scratch ctx.
+        let scratch = ::mcx::MemoryContext::new("plpgsql get_collation_oid");
+        let refs: ::std::vec::Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        namespace_seams::get_collation_oid::call(scratch.mcx(), &refs, missing_ok)
     });
     comp_seams::quote_identifier::set(seam::quote_identifier);
 }

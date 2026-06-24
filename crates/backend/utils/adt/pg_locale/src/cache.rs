@@ -328,15 +328,7 @@ fn create_pg_locale_icu(
     deterministic: bool,
     icurules: Option<&str>,
 ) -> PgResult<LocaleEntry> {
-    if icurules.is_some() {
-        // Custom ICU tailoring rules (`collicurules`) are out of the bounded
-        // scope; opening with rules needs ucol_openRules + the UConverter path.
-        return Err(PgError::error(
-            "ICU collations with custom rules are not supported in this build",
-        )
-        .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
-    }
-    let result = pg_locale_icu::create_pg_locale_icu(iculocstr, deterministic)?;
+    let result = pg_locale_icu::create_pg_locale_icu(iculocstr, icurules, deterministic)?;
     let view = PgLocaleStruct {
         provider: CollProvider::Icu,
         deterministic: result.deterministic,
