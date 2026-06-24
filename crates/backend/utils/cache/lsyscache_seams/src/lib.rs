@@ -310,6 +310,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `get_collation_name(colloid)` (lsyscache.c): the collation's name, copied
+    /// into `mcx` (C: `pstrdup`), or `None` (C: NULL) when there is no such
+    /// `pg_collation` row.
+    pub fn get_collation_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        colloid: Oid,
+    ) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
     /// `get_constraint_index(conoid)` (lsyscache.c): for a UNIQUE / PRIMARY KEY /
     /// EXCLUSION constraint, the OID of its supporting index (`conindid`); for any
     /// other constraint type, or when there is no such `pg_constraint` row,

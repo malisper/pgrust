@@ -36,7 +36,11 @@
 //! `palloc` in C can `ereport(ERROR, ERRCODE_OUT_OF_MEMORY)`.
 
 extern crate alloc;
-#[cfg(test)]
+// `std` is linked unconditionally: the costsize selectivity-seam adapters
+// (`clauselist_selectivity_nodes` et al.) re-raise a `PgError` over
+// `std::panic::panic_any` — the same `ereport`-longjmp bridge the rest of the
+// backend uses — since their C signature returns a bare `Selectivity` and cannot
+// thread a `PgResult` back to the caller.
 extern crate std;
 
 use alloc::vec::Vec;
@@ -1832,6 +1836,15 @@ fn elog_error(msg: &str) -> ::types_error::PgError {
  * clausesel.c core that the RestrictInfo-form seam uses, exactly matching the
  * C calls `clauselist_selectivity(root, list, varRelid, jointype, sjinfo)` /
  * `clause_selectivity(root, (Node *) clause, ...)`.
+ *
+ * These seams return a bare `Selectivity` (f64), mirroring the C signature, so
+ * a `PgError` raised by an inner estimator (e.g. a regex/SIMILAR-TO clause over
+ * a nondeterministic collation, which C `ereport(ERROR)`s during selectivity
+ * estimation) cannot be returned through the seam. Faithful to C's longjmp, the
+ * adapters re-raise the structured `PgError` over the `panic_any(PgError)`
+ * channel that the backend query boundary's `catch_unwind` reconstructs into the
+ * original ereport (message/sqlstate/hint preserved) — NOT a lossy `.expect()`
+ * string panic.
  * ======================================================================== */
 
 /// `clauselist_selectivity(root, clauses, varRelid, jointype, sjinfo)` over a
@@ -1850,7 +1863,7 @@ fn clauselist_selectivity_nodes<'mcx>(
         .iter()
         .map(|&id| Ok(ListEntry::Bare(root.node(id).clone_in(run.mcx())?)))
         .collect::<PgResult<Vec<ListEntry<'mcx>>>>()
-        .expect("clauselist_selectivity clone_in");
+        .unwrap_or_else(|e| std::panic::panic_any(e));
     clauselist_selectivity_ext_entries(
         run,
         root,
@@ -1860,7 +1873,7 @@ fn clauselist_selectivity_nodes<'mcx>(
         sjinfo,
         true,
     )
-    .expect("clauselist_selectivity")
+    .unwrap_or_else(|e| std::panic::panic_any(e))
 }
 
 /// `clauselist_selectivity` (clausesel.c) over a `RestrictInfo` list (the
@@ -1886,7 +1899,7 @@ fn clauselist_selectivity_rinfos<'mcx>(
         sjinfo,
         true,
     )
-    .expect("clauselist_selectivity_rinfos")
+    .unwrap_or_else(|e| std::panic::panic_any(e))
 }
 
 /// `clause_selectivity(root, (Node *) clause, varRelid, jointype, sjinfo)` over
@@ -1902,7 +1915,7 @@ fn clause_selectivity_nodes<'mcx>(
     let clause_node = root
         .node(clause)
         .clone_in(run.mcx())
-        .expect("clause_selectivity clone_in");
+        .unwrap_or_else(|e| std::panic::panic_any(e));
     clause_selectivity_ext(
         run,
         root,
@@ -1913,7 +1926,7 @@ fn clause_selectivity_nodes<'mcx>(
         sjinfo,
         true,
     )
-    .expect("clause_selectivity")
+    .unwrap_or_else(|e| std::panic::panic_any(e))
 }
 
 /// Install this unit's inward seam ([`clauselist_selectivity`]). Called once at

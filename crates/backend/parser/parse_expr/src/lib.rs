@@ -6481,9 +6481,19 @@ fn transform_json_behavior<'mcx>(
                 exprcoll = lsyscache::get_typcollation::call(expr_type(Some(&e))?)?;
             }
             if OidIsValid(targetcoll) && OidIsValid(exprcoll) && targetcoll != exprcoll {
+                let exprcoll_name: String = lsyscache::get_collation_name::call(mcx, exprcoll)?
+                    .map(|s| String::from(s.as_str()))
+                    .unwrap_or_default();
+                let targetcoll_name: String =
+                    lsyscache::get_collation_name::call(mcx, targetcoll)?
+                        .map(|s| String::from(s.as_str()))
+                        .unwrap_or_default();
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_COLLATION_MISMATCH)
                     .errmsg("collation of DEFAULT expression conflicts with RETURNING clause")
+                    .errdetail(alloc::format!(
+                        "\"{exprcoll_name}\" versus \"{targetcoll_name}\""
+                    ))
                     .errposition(parser_errposition(pstate, expr_location(Some(&e))?))
                     .into_error());
             }

@@ -7335,16 +7335,22 @@ fn group_by_has_partkey(
             let partexpr = root.node(partexpr_id).clone();
 
             for &groupexpr_id in group_expr_ids.iter() {
+                let mut groupexpr = root.node(groupexpr_id).clone();
+                // C computes groupcoll = exprCollation(groupexpr) on the
+                // *unstripped* node first (planner.c:8240), so that a
+                // `col COLLATE "C"` grouping expr (a RelabelType carrying the
+                // explicit collation) reports the explicit collation — not the
+                // inner Var's default collation. Then it strips the RelabelType
+                // for the `equal()` comparison against the partition expr.
+                let groupcoll =
+                    nodeFuncs_seams::exprCollation::call(&groupexpr);
                 // Note: we can assume there is at most one RelabelType node;
                 // eval_const_expressions() will have simplified if more than one.
-                let mut groupexpr = root.node(groupexpr_id).clone();
                 if let ::nodes::primnodes::Expr::RelabelType(rt) = &groupexpr {
                     if let Some(arg) = rt.arg.as_deref() {
                         groupexpr = arg.clone();
                     }
                 }
-                let groupcoll =
-                    nodeFuncs_seams::exprCollation::call(&groupexpr);
 
                 if equalfuncs_seams::equal_expr::call(&groupexpr, &partexpr) {
                     // Reject a match if the grouping collation does not match the

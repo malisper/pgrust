@@ -116,6 +116,7 @@ pub fn init_seams() {
     seams::get_attnum::set(attribute::get_attnum);
     seams::get_cast_oid::set(collation_constraint_language_cast::get_cast_oid);
     seams::get_constraint_name::set(collation_constraint_language_cast::get_constraint_name);
+    seams::get_collation_name::set(collation_constraint_language_cast::get_collation_name);
     seams::get_constraint_index::set(collation_constraint_language_cast::get_constraint_index);
     seams::get_attgenerated::set(attribute::get_attgenerated);
     seams::get_atttype::set(attribute::get_atttype);

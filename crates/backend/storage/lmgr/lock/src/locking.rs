@@ -1174,7 +1174,11 @@ pub fn LockReleaseAll(lockmethodid: u8, all_locks: bool) -> PgResult<()> {
             }
         }
 
-        // Tuple-lock-held-at-commit assert (warning, asserts-only in C).
+        // Tuple-lock-held-at-commit check. In C this whole block is wrapped in
+        // `#ifdef USE_ASSERT_CHECKING` (lock.c) — it only fires in assert-enabled
+        // builds. Mirror that with `debug_assertions` so release/profiling builds
+        // (which the regression expected output reflects) stay silent.
+        #[cfg(debug_assertions)]
         if localtag.lock.locktag_type == LOCKTAG_TUPLE && !all_locks {
             warning("tuple lock held at commit".into());
         }
