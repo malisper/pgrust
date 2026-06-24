@@ -1369,6 +1369,7 @@ members = [
   "crates/backend/utils/time/snapmgr_pc_seams",
   "crates/backend/utils/time/snapmgr_seams",
   "crates/backend/utils/utils_error",
+  "crates/common/archive",
   "crates/common/archive_seams",
   "crates/common/blkreftable_seams",
   "crates/common/checksum_helper",

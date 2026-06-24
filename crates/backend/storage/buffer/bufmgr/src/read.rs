@@ -313,6 +313,13 @@ impl BufferManager {
         } else {
             RELPERSISTENCE_UNLOGGED
         };
+        // SMgrRelation smgr = smgropen(rlocator, INVALID_PROC_NUMBER);
+        // (bufmgr.c:846). C resolves the SMgrRelation up front; this port's
+        // `read_buffer_common` reaches md via the thread-local smgr cache keyed
+        // by RelFileLocatorBackend, so we must register the entry first (the
+        // recovery redo fetchers have no relcache `Relation` to `RelationGetSmgr`
+        // off). `smgropen`/`cache_open` is idempotent.
+        smgr::smgropen(rlocator, INVALID_PROC_NUMBER)?;
         let rlocator_backend = RelFileLocatorBackend {
             locator: rlocator,
             backend: INVALID_PROC_NUMBER,

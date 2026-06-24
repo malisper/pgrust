@@ -896,6 +896,18 @@ pub fn init_seams() {
     s::xlog_insert_record::set(insert::XLogInsertRecord);
     s::recovery_in_progress::set(shmem::RecoveryInProgress);
 
+    // EnableHotStandby (xlog.c:146 GUC) — read by the standby startup path
+    // (CheckRequiredParameterValues / hot-standby enablement). Wire it here so
+    // the startup/recovery process (which always runs xlog init_seams) has it,
+    // independent of postmaster seam-init ordering.
+    s::enable_hot_standby::set(startup::enable_hot_standby);
+
+    // GetRecoveryState() (xlog.c:6431) — the impl lives here (XLogCtl owns
+    // SharedRecoveryState), but the seam is declared on the xlogrecovery side
+    // (its primary caller). Wire the xlog-owned impl into it. Used by
+    // do_pg_backup_stop / xlogarchive's RestoreArchivedFile.
+    xlogrecovery_seams::get_recovery_state::set(|| Ok(driver::GetRecoveryState()));
+
     // The decision inputs xloginsert.c's XLogInsert / XLogBeginInsert read
     // before they hold an insertion lock (XLogInsertAllowed / full-page-write
     // info), plus the WAL-compression / consistency-checking GUC reads its

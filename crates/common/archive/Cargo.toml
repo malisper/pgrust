@@ -1,0 +1,16 @@
+[package]
+name = "common_archive"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "common_archive"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+archive_seams = { path = "../archive_seams" }
+percentrepl = { path = "../percentrepl" }
+mcx = { path = "../../_support/mcx" }
+types_error = { path = "../../_support/types/types_error" }

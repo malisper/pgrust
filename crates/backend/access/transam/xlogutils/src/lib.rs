@@ -998,6 +998,13 @@ pub fn init_seams() {
         },
     );
     xlogutils_seams::xlog_check_invalid_pages::set(XLogCheckInvalidPages);
+    // XLogDropRelation(rlocator, forknum) (xlogutils.c:630) — DropRelationFiles
+    // calls it per fork during redo (e.g. unlogged-relation reinit / smgr drop).
+    // The impl is infallible (only updates a backend-local hash); the seam is
+    // `void`, so unwrap the PgResult.
+    xlogutils_seams::xlog_drop_relation::set(|rlocator, forknum| {
+        XLogDropRelation(rlocator, forknum).expect("XLogDropRelation")
+    });
     xlogutils_seams::xlog_read_buffer_for_redo::set(
         |record, block_id| XLogReadBufferForRedo(record, block_id),
     );

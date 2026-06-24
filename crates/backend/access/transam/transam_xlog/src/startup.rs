@@ -1022,10 +1022,10 @@ pub fn CheckRequiredParameterValues() -> PgResult<()> {
     Ok(())
 }
 
-/// `EnableHotStandby` (xlogrecovery.c GUC). Until the GUC owner exposes it the
-/// hot-standby path is unreached on the clean / crash boot; default false.
-fn enable_hot_standby() -> bool {
-    false
+/// `EnableHotStandby` (xlog.c:146 GUC) — the `hot_standby` GUC value. Reads the
+/// installed GUC var so standby startup honours the user's setting.
+pub fn enable_hot_standby() -> bool {
+    guc_tables::vars::EnableHotStandby.read()
 }
 
 // ===========================================================================

@@ -3915,6 +3915,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "common_archive"
+version = "0.0.0"
+dependencies = [
+ "archive_seams",
+ "mcx",
+ "percentrepl",
+ "types_error",
+]
+
+[[package]]
 name = "common_blkreftable"
 version = "0.0.0"
 dependencies = [
@@ -10038,6 +10048,7 @@ dependencies = [
  "commands_vacuum",
  "comment",
  "commit_ts",
+ "common_archive",
  "common_blkreftable",
  "common_relation",
  "common_reloptions",

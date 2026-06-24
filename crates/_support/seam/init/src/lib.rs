@@ -98,6 +98,7 @@ pub fn init_all() {
     transam_xact::init_seams();
     transam_xlog::init_seams();
     xlogfuncs::init_seams();
+    common_archive::init_seams();
     xlogarchive::init_seams();
     xloginsert::init_seams();
     xlogprefetcher::init_seams();
