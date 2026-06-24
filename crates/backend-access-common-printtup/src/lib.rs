@@ -1013,9 +1013,22 @@ fn debugtup_dest_shutdown<'mcx>(_mcx: Mcx<'mcx>, _state: u64) -> PgResult<()> {
     if regress_output() {
         let cols = REGRESS_COLS.with(|c| c.borrow().clone());
         let rows = REGRESS_ROWS.with(|r| r.borrow().clone());
-        // Emit the psql-aligned table for this result set.
+        // Only a real result set (a SELECT-like statement with a row
+        // description) emits a table. A utility/DML statement routed here with no
+        // columns produces nothing (psql prints no result + no trailing blank for
+        // those under -q). Guard on a non-empty column list.
+        if cols.is_empty() {
+            return Ok(());
+        }
+        // Emit the psql-aligned table for this result set, followed by ONE
+        // trailing blank line. psql prints a blank line after each query's
+        // result set (verified against the live server: every `(N rows)` footer
+        // is followed by an empty line); source blank lines are never echoed and
+        // errors get no trailing blank, so this is the sole producer of the
+        // inter-result blank lines in the regress output.
         let out = crate::psql_format::format_aligned(&cols, &rows);
         print_to_stdout(&out);
+        print_to_stdout("\n");
         REGRESS_COLS.with(|c| c.borrow_mut().clear());
         REGRESS_ROWS.with(|r| r.borrow_mut().clear());
     }
