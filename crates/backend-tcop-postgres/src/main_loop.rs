@@ -104,17 +104,18 @@ std::thread_local! {
     static REGRESS_CUR_QUERY: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
 
-    /// Regress-output mode: set true once the first non-blank input line has been
-    /// seen (process-wide). Used to skip the leading blank lines before the first
-    /// statement (psql does) while still echoing blank lines between statements.
-    static REGRESS_STARTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Regress-output mode: true while a single blank line immediately following
+    /// a just-completed statement is still eligible to be echoed (psql echoes
+    /// exactly one such blank). Set after each statement read completes; cleared
+    /// by the first following blank (which is echoed) or by any non-blank line.
+    static PREV_STMT_DONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-fn regress_started() -> bool {
-    REGRESS_STARTED.with(|f| f.get())
+fn prev_stmt_done() -> bool {
+    PREV_STMT_DONE.with(|f| f.get())
 }
-fn regress_set_started() {
-    REGRESS_STARTED.with(|f| f.set(true));
+fn set_prev_stmt_done(v: bool) {
+    PREV_STMT_DONE.with(|f| f.set(v));
 }
 
 /// `PQ_SMALL_MESSAGE_LIMIT` (libpq.h): cap for short fixed-shape messages.
@@ -338,19 +339,26 @@ fn interactive_backend_regress(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
             let content_len = line.len() - 1; // bytes before the trailing '\n'
             let is_blank = content_len == 0 && !in_statement_literal(&in_buf.data);
             if is_blank {
-                // psql echoes blank source lines (`puts(line)`) once the script
-                // has started producing output, but skips the LEADING blank lines
-                // before the first non-blank line of the whole input. Track that
-                // with a process-wide flag. Blank lines are echoed but NOT added
-                // to the query buffer (they are not part of the statement text,
-                // so the parser's error position stays relative to the statement).
-                if regress_started() {
+                // Empirical psql `-X -a -q` blank-line rule (verified against the
+                // live server): a blank source line is echoed ONLY when it is the
+                // FIRST blank immediately following a completed statement's output.
+                // Leading blanks (before any statement), consecutive blanks, and
+                // blanks after comment-only text are NOT echoed. We track "a
+                // statement just completed" in the process-wide PREV_STMT_DONE
+                // flag (set after each statement read); the first blank consumes
+                // it. Blank lines are never added to the query buffer (so the
+                // parser error position stays relative to the statement text).
+                if prev_stmt_done() {
                     echo_regress_line(&line);
+                    set_prev_stmt_done(false);
                 }
                 line.clear();
                 continue;
             }
-            regress_set_started();
+            // A non-blank line cancels any pending post-statement blank echo
+            // (e.g. a comment directly after a statement: the blank between was
+            // already handled; a non-blank means no further blank echoes here).
+            set_prev_stmt_done(false);
             // Echo the completed line verbatim (psql -a) and append to the buf.
             echo_regress_line(&line);
             in_buf.data.extend_from_slice(&line);
@@ -381,6 +389,10 @@ fn interactive_backend_regress(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
     // parser receives them).
     let stmt = String::from_utf8_lossy(&in_buf.data).into_owned();
     REGRESS_CUR_QUERY.with(|q| *q.borrow_mut() = Some(stmt));
+    // This read returned a statement that will now execute and print output; arm
+    // the post-statement blank-echo so the first following blank source line is
+    // echoed (psql's rule).
+    set_prev_stmt_done(true);
     // Add '\0' to make it look the same as the message case.
     in_buf.data.push(b'\0');
     Ok(pqmsg::QUERY)
