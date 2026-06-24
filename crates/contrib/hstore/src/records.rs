@@ -304,15 +304,15 @@ fn to_jsonb_impl(fcinfo: &mut FunctionCallInfoBaseData, loose: bool) -> PgResult
     let mcx = scratch.mcx();
 
     let mut state: Option<alloc::boxed::Box<::types_jsonb::jsonb_util::JsonbParseState>> = None;
-    jsonb_util::pushJsonbValue(&mut state, JsonbIteratorToken::WJB_BEGIN_OBJECT, None)?;
+    jsonb_util::pushJsonbValue(mcx, &mut state, JsonbIteratorToken::WJB_BEGIN_OBJECT, None)?;
 
     for i in 0..count {
         // key.
         let key = JsonbValue {
             typ: jbvType::jbvString,
-            val: JsonbValueData::String(hs.key(i).to_vec()),
+            val: JsonbValueData::String(::mcx::slice_borrow_in(mcx, hs.key(i))?),
         };
-        jsonb_util::pushJsonbValue(&mut state, JsonbIteratorToken::WJB_KEY, Some(&key))?;
+        jsonb_util::pushJsonbValue(mcx, &mut state, JsonbIteratorToken::WJB_KEY, Some(&key))?;
 
         let val = if hs.val_isnull(i) {
             JsonbValue::null()
@@ -334,19 +334,19 @@ fn to_jsonb_impl(fcinfo: &mut FunctionCallInfoBaseData, loose: bool) -> PgResult
                 let numeric = small1_seams::numeric_in::call(mcx, s)?;
                 JsonbValue {
                     typ: jbvType::jbvNumeric,
-                    val: JsonbValueData::Numeric(numeric.as_slice().to_vec()),
+                    val: JsonbValueData::Numeric(::mcx::slice_borrow_in(mcx, numeric.as_slice())?),
                 }
             } else {
                 JsonbValue {
                     typ: jbvType::jbvString,
-                    val: JsonbValueData::String(v.to_vec()),
+                    val: JsonbValueData::String(::mcx::slice_borrow_in(mcx, v)?),
                 }
             }
         };
-        jsonb_util::pushJsonbValue(&mut state, JsonbIteratorToken::WJB_VALUE, Some(&val))?;
+        jsonb_util::pushJsonbValue(mcx, &mut state, JsonbIteratorToken::WJB_VALUE, Some(&val))?;
     }
 
-    let res = jsonb_util::pushJsonbValue(&mut state, JsonbIteratorToken::WJB_END_OBJECT, None)?
+    let res = jsonb_util::pushJsonbValue(mcx, &mut state, JsonbIteratorToken::WJB_END_OBJECT, None)?
         .expect("WJB_END_OBJECT yields a container");
     let image = jsonb_util::JsonbValueToJsonb(mcx, &res)?;
     Ok(image.as_slice().to_vec())
