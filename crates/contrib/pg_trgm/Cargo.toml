@@ -17,6 +17,9 @@ types_error = { path = "../../_support/types/types_error" }
 types_tuple = { path = "../../_support/types/types_tuple" }
 types_guc = { path = "../../_support/types/types_guc" }
 
+# GIN opclass-support call protocol (the generic catalog-driven dispatch):
+gin = { path = "../../_support/types/gin" }
+
 # Trigram core services:
 crc32c = { path = "../../port/crc32c" }
 mbutils = { path = "../../backend/utils/mb/mbutils" }

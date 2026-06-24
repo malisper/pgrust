@@ -17658,6 +17658,7 @@ dependencies = [
  "dfmgr_seams",
  "fmgr",
  "formatting_seams",
+ "gin",
  "guc_tables",
  "mbutils",
  "mcx",

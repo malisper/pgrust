@@ -344,7 +344,10 @@ fn dispatch_extract_value<'mcx>(
             let elems = hash_keys_to_datums(mcx, keys)?;
             Ok(Some((elems, PgVec::new_in(mcx))))
         }
-        other => Err(unported(other, "extractValue")),
+        // Generic catalog-driven fallback: any other opclass support-proc OID
+        // (an extension opclass such as `gin_trgm_ops`) is reached through the
+        // real fmgr frame (C's `FunctionCallNColl(&extractValueFn, …)`).
+        other => crate::extdispatch::extract_value(mcx, other, _collation, value.as_ref_bytes()),
     }
 }
 
@@ -483,7 +486,10 @@ fn dispatch_extract_query<'mcx>(
         }
         F_GIN_EXTRACT_JSONB_QUERY => dispatch_jsonb_extract_query(mcx, query, strategy, false),
         F_GIN_EXTRACT_JSONB_QUERY_PATH => dispatch_jsonb_extract_query(mcx, query, strategy, true),
-        other => Err(unported(other, "extractQuery")),
+        // Generic catalog-driven fallback (extension opclass extractQuery).
+        other => {
+            crate::extdispatch::extract_query(mcx, other, _collation, query.as_ref_bytes(), strategy)
+        }
     }
 }
 
@@ -696,7 +702,31 @@ fn dispatch_consistent_bool(key: &mut GinScanKey) -> bool {
             key.recheckCurItem = recheck;
             res
         }
-        other => std::panic::panic_any(unported(other, "consistent")),
+        // Generic catalog-driven fallback (extension opclass boolean consistent).
+        other => {
+            let nkeys = key.nuserentries as usize;
+            let check: Vec<bool> = key.entryRes[..nkeys].iter().map(|&v| v != 0).collect();
+            let extra_data: Vec<Option<Vec<u8>>> =
+                (0..nkeys).map(|i| key.extra_data.get(i).cloned().flatten()).collect();
+            let query_categories: Vec<::gin::GinNullCategory> =
+                key.queryCategories[..nkeys].to_vec();
+            let query = key.query.as_ref_bytes().to_vec();
+            let (res, recheck) = match crate::extdispatch::consistent_bool(
+                other,
+                key.collation,
+                check,
+                key.strategy,
+                nkeys as i32,
+                extra_data,
+                query_categories,
+                &query,
+            ) {
+                Ok(r) => r,
+                Err(e) => std::panic::panic_any(e),
+            };
+            key.recheckCurItem = recheck;
+            res
+        }
     }
 }
 
@@ -808,7 +838,29 @@ fn dispatch_consistent_tri(key: &mut GinScanKey) -> GinTernaryValue {
                 Err(e) => std::panic::panic_any(e),
             }
         }
-        other => std::panic::panic_any(unported(other, "triConsistent")),
+        // Generic catalog-driven fallback (extension opclass triConsistent).
+        other => {
+            let nkeys = key.nuserentries as usize;
+            let check: Vec<GinTernaryValue> = key.entryRes[..nkeys].to_vec();
+            let extra_data: Vec<Option<Vec<u8>>> =
+                (0..nkeys).map(|i| key.extra_data.get(i).cloned().flatten()).collect();
+            let query_categories: Vec<::gin::GinNullCategory> =
+                key.queryCategories[..nkeys].to_vec();
+            let query = key.query.as_ref_bytes().to_vec();
+            match crate::extdispatch::consistent_tri(
+                other,
+                key.collation,
+                check,
+                key.strategy,
+                nkeys as i32,
+                extra_data,
+                query_categories,
+                &query,
+            ) {
+                Ok(r) => r,
+                Err(e) => std::panic::panic_any(e),
+            }
+        }
     }
 }
 

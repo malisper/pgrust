@@ -791,6 +791,24 @@ fn invoke_pgfunction(func: &PGFunction, fcinfo: &mut FunctionCallInfoBaseData) -
     }
 }
 
+/// Invoke a resolved [`PGFunction`] body (an `FmgrInfo.fn_addr`) through the
+/// shared `catch_unwind` bridge, given a fully-prepared call frame.
+///
+/// This is the public entry the GIN/GiST opclass generic dispatch uses to reach
+/// an EXTENSION opclass support function (C's `FunctionCallNColl(&flinfo, …)`):
+/// the AM resolved the support proc into an `FmgrInfo` whose `fn_addr` is the
+/// extension's registered body (via the dynamic-loader ported-library registry),
+/// and calls it directly with the GIN/GiST-internal arguments marshalled into
+/// the frame's by-ref / `internal` side-channels. The caller reads `fcinfo`
+/// back (its `internal_args` out-params, `isnull`) after the call. A NULL
+/// `fn_addr` is the C "function pointer is NULL" error.
+pub fn invoke_fn_addr(
+    func: &PGFunction,
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    invoke_pgfunction(func, fcinfo)
+}
+
 /// The post-call NULL check shared by the `*FunctionCallNColl` family. C uses a
 /// plain `elog(ERROR, "function %u returned NULL")` (default internal SQLSTATE).
 fn null_check(

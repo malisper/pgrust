@@ -287,6 +287,137 @@ pub fn generate_trgm(
     v
 }
 
+/// `ISWILDCARDCHAR(a)` — a LIKE wildcard meta-character (`%` or `_`).
+fn is_wildcard_char(b: u8) -> bool {
+    b == b'%' || b == b'_'
+}
+
+/// `ISESCAPECHAR(a)` — the LIKE escape character (`\`).
+fn is_escape_char(b: u8) -> bool {
+    b == b'\\'
+}
+
+/// `get_wildcard_part(str, lenstr, buf, &bytelen)` (trgm_op.c) — extract the
+/// next non-wildcard word from a LIKE pattern, bounded by `%`/`_`
+/// meta-characters, non-word characters or string end. Returns the
+/// (blank-padded, escape-stripped, not-yet-case-folded) word bytes plus the
+/// offset in `s` to resume from, or `None` at string end.
+fn get_wildcard_part(s: &[u8], start: usize, env: &TrgmEnv<'_>) -> Option<(Vec<u8>, usize)> {
+    let endstr = s.len();
+    let mut beginword = start;
+    let mut in_leading_wildcard_meta = false;
+    let mut in_escape = false;
+
+    // Find the first word character, remembering whether the preceding
+    // character was a wildcard meta-character. in_escape persists into the
+    // copy loop below.
+    while beginword < endstr {
+        let clen = (env.mblen)(&s[beginword..]) as usize;
+        if in_escape {
+            if (env.isalnum)(&s[beginword..]) {
+                break;
+            }
+            in_escape = false;
+            in_leading_wildcard_meta = false;
+        } else if is_escape_char(s[beginword]) {
+            in_escape = true;
+        } else if is_wildcard_char(s[beginword]) {
+            in_leading_wildcard_meta = true;
+        } else if (env.isalnum)(&s[beginword..]) {
+            break;
+        } else {
+            in_leading_wildcard_meta = false;
+        }
+        beginword += clen;
+    }
+
+    if beginword >= endstr {
+        return None;
+    }
+
+    let mut buf: Vec<u8> = Vec::new();
+    // Left padding spaces if the preceding char wasn't a wildcard meta-char.
+    if !in_leading_wildcard_meta {
+        for _ in 0..LPADDING {
+            buf.push(b' ');
+        }
+    }
+
+    // Copy data into buf until wildcard meta-char, non-word char or string end.
+    let mut endword = beginword;
+    let mut in_trailing_wildcard_meta = false;
+    while endword < endstr {
+        let clen = (env.mblen)(&s[endword..]) as usize;
+        if in_escape {
+            if (env.isalnum)(&s[endword..]) {
+                buf.extend_from_slice(&s[endword..endword + clen]);
+            } else {
+                // Back up endword to the escape char (single-byte) so the next
+                // call restarts there.
+                endword -= 1;
+                break;
+            }
+            in_escape = false;
+        } else if is_escape_char(s[endword]) {
+            in_escape = true;
+        } else if is_wildcard_char(s[endword]) {
+            in_trailing_wildcard_meta = true;
+            break;
+        } else if (env.isalnum)(&s[endword..]) {
+            buf.extend_from_slice(&s[endword..endword + clen]);
+        } else {
+            break;
+        }
+        endword += clen;
+    }
+
+    // Right padding spaces if the next char isn't a wildcard meta-char.
+    if !in_trailing_wildcard_meta {
+        for _ in 0..RPADDING {
+            buf.push(b' ');
+        }
+    }
+
+    Some((buf, endword))
+}
+
+/// `generate_wildcard_trgm(str, slen)` (trgm_op.c) — the sorted, de-duplicated
+/// trigrams that MUST occur in any string matching the LIKE pattern. For
+/// pattern `a%bcd%` this yields `" a"`, `"bcd"`-derived trigrams.
+pub fn generate_wildcard_trgm(
+    s: &[u8],
+    env: &TrgmEnv<'_>,
+    legacy_crc32: &dyn Fn(&[u8]) -> u32,
+) -> Vec<Trgm> {
+    let slen = s.len();
+    let mut dst: Vec<Trgm> = Vec::with_capacity(slen + 1);
+
+    if slen + LPADDING + RPADDING < 3 || slen == 0 {
+        return dst;
+    }
+
+    let mut eword = 0usize;
+    while let Some((buf, next)) = get_wildcard_part(s, eword, env) {
+        eword = next;
+        if eword <= 0 && buf.is_empty() {
+            break;
+        }
+        // IGNORECASE: case-fold the padded word before extracting trigrams.
+        // The padding spaces fold to themselves.
+        let word = (env.tolower)(&buf);
+        let bytelen = word.len();
+        make_trigrams(&mut dst, &word, bytelen, env, legacy_crc32);
+        // Guard against a non-advancing get_wildcard_part on a degenerate
+        // pattern (it always advances past at least one char in practice).
+        if eword >= slen {
+            break;
+        }
+    }
+
+    sort_unique(&mut dst);
+    dst
+}
+
 /// `cnt_sml(trg1, trg2, inexact)` — similarity of two sorted trigram arrays.
 pub fn cnt_sml(trg1: &[Trgm], trg2: &[Trgm], inexact: bool) -> f32 {
     let len1 = trg1.len() as i32;

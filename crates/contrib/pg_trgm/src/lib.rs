@@ -17,14 +17,16 @@
 //! ported-library registry (the Rust backend exposes no C ABI), and the
 //! `_PG_init` callback defines the three `pg_trgm.*_threshold` GUCs.
 //!
-//! The GIN/GiST index-access-method opclass support functions
-//! (`gin_trgm_ops` / `gist_trgm_ops`, from `trgm_gin.c` / `trgm_gist.c` /
-//! `trgm_regexp.c`) are NOT ported here — see the module docs and the port
-//! report for the index-opclass gap. The scalar functions/operators make
-//! `similarity()` + the `%`/`<%`/`<<%`/`<->` family work on sequential scans;
-//! the opclass support functions are registered as loud-panic stubs so
-//! `CREATE EXTENSION` (which validates every C symbol via `fmgr_c_validator`)
-//! succeeds, but building a trigram index or scanning one panics.
+//! The `gin_trgm_ops` GIN opclass support functions (`trgm_gin.c`:
+//! `gin_extract_value_trgm` / `gin_extract_query_trgm` / `gin_trgm_consistent` /
+//! `gin_trgm_triconsistent`) ARE ported, reached through pgrust's generic,
+//! catalog-driven GIN opclass dispatch (`gin-core-probe::extdispatch`) over the
+//! [`::gin::extproc`] internal-out-parameter protocol. The Similarity / Word /
+//! Strict-Word / Like / ILike / Equal strategies are fully wired; the RegExp /
+//! RegExpICase strategies still raise an "unported" error (they need the
+//! `trgm_regexp.c` NFA engine). The `gist_trgm_ops` GiST support functions
+//! (`trgm_gist.c`) remain loud-panic stubs (the heavier opclass + the regexp
+//! engine). `CREATE EXTENSION`'s C-symbol validator finds every symbol.
 
 mod trgm;
 
@@ -38,9 +40,25 @@ use ::types_tuple::heaptuple::DEFAULT_COLLATION_OID;
 use std::cell::Cell;
 
 use trgm::{
-    calc_word_similarity, cnt_sml, generate_trgm, trgm2int, Trgm, TrgmEnv,
+    calc_word_similarity, cnt_sml, generate_trgm, generate_wildcard_trgm, trgm2int, Trgm, TrgmEnv,
     WORD_SIMILARITY_CHECK_ONLY, WORD_SIMILARITY_STRICT,
 };
+
+use ::gin::extproc::{
+    GinConsistentInOut, GinExtractQueryOut, GinExtractValueOut, GinKey, GinTriConsistentInOut,
+    GIN_EXTPROC_INTERNAL_SLOT,
+};
+use ::gin::{GIN_FALSE, GIN_MAYBE, GIN_SEARCH_MODE_ALL};
+
+// gin_trgm_ops strategy numbers (trgm.h).
+const SIMILARITY_STRATEGY: u16 = 1;
+const LIKE_STRATEGY: u16 = 3;
+const ILIKE_STRATEGY: u16 = 4;
+const REGEXP_STRATEGY: u16 = 5;
+const REGEXP_ICASE_STRATEGY: u16 = 6;
+const WORD_SIMILARITY_STRATEGY: u16 = 7;
+const STRICT_WORD_SIMILARITY_STRATEGY: u16 = 9;
+const EQUAL_STRATEGY: u16 = 11;
 
 /// The simple (suffix-free) module name — `$libdir/pg_trgm` reduces to this.
 const LIBRARY: &str = "pg_trgm";
@@ -412,10 +430,179 @@ index_stub!(fc_gtrgm_picksplit, "gtrgm_picksplit");
 index_stub!(fc_gtrgm_union, "gtrgm_union");
 index_stub!(fc_gtrgm_same, "gtrgm_same");
 index_stub!(fc_gtrgm_options, "gtrgm_options");
-index_stub!(fc_gin_extract_value_trgm, "gin_extract_value_trgm");
-index_stub!(fc_gin_extract_query_trgm, "gin_extract_query_trgm");
-index_stub!(fc_gin_trgm_consistent, "gin_trgm_consistent");
-index_stub!(fc_gin_trgm_triconsistent, "gin_trgm_triconsistent");
+// ===========================================================================
+// gin_trgm_ops opclass support functions (trgm_gin.c).
+//
+// These are reached through pgrust's GENERIC, catalog-driven GIN opclass
+// dispatch: the GIN core resolves the opclass support proc into an `FmgrInfo`,
+// and `gin-core-probe`'s `extdispatch` invokes this body through a real fmgr
+// frame, passing the value/query on the by-ref lane (arg 0) and the
+// `internal`-out-parameter protocol struct in the internal lane
+// (`GIN_EXTPROC_INTERNAL_SLOT`), exactly as C's `FunctionCallNColl` passes the
+// by-pointer `internal` arguments. The body reads inputs and writes outputs
+// through that struct, then leaves it in the frame for the dispatch to read.
+//
+// The regex strategies (RegExp / RegExpICase) need the trgm_regexp.c NFA engine
+// (createTrgmNFA / trigramsMatchGraph), which is not ported; they raise a clear
+// "unported" error. Every other strategy (Similarity / Word / Strict-Word /
+// Like / ILike / Equal) is fully wired.
+// ===========================================================================
+
+/// Pull the boxed protocol struct of type `T` out of the internal lane, run
+/// `body` on it (mutating in place), and put it back so the GIN dispatch reads
+/// the outputs. `value`/`query` is the by-ref arg-0 payload (already detoasted).
+fn with_gin_proto<T: ::core::any::Any>(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    body: impl FnOnce(&mut T, &[u8]),
+) -> Datum {
+    let value = arg_text_bytes(fcinfo, 0);
+    let mut state = match fcinfo.take_internal_arg(GIN_EXTPROC_INTERNAL_SLOT) {
+        Some(boxed) => match boxed.downcast::<T>() {
+            Ok(s) => s,
+            Err(_) => raise(PgError::error(
+                "pg_trgm GIN support: internal protocol state has the wrong type",
+            )),
+        },
+        None => raise(PgError::error(
+            "pg_trgm GIN support function invoked without its internal protocol \
+             state — pgrust's generic GIN opclass dispatch was bypassed",
+        )),
+    };
+    body(&mut state, &value);
+    fcinfo.set_internal_arg(GIN_EXTPROC_INTERNAL_SLOT, state);
+    fcinfo.isnull = false;
+    Datum::from_usize(0)
+}
+
+/// Map each extracted trigram to its packed `int4` GIN key (`trgm2int`).
+fn trgms_to_keys(trg: &[Trgm]) -> Vec<GinKey> {
+    trg.iter().map(|t| GinKey::Int4(trgm2int(t) as i32)).collect()
+}
+
+/// `index_strategy_get_limit(strategy)` — the similarity threshold for the
+/// similarity / word / strict-word strategies.
+fn index_strategy_get_limit(strategy: u16) -> f64 {
+    match strategy {
+        SIMILARITY_STRATEGY => get_similarity_threshold(),
+        WORD_SIMILARITY_STRATEGY => get_word_similarity_threshold(),
+        STRICT_WORD_SIMILARITY_STRATEGY => get_strict_word_similarity_threshold(),
+        other => raise(PgError::error(format!(
+            "unrecognized strategy number: {other}"
+        ))),
+    }
+}
+
+/// `gin_extract_value_trgm(text, internal) RETURNS internal`.
+fn fc_gin_extract_value_trgm(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gin_proto::<GinExtractValueOut>(fcinfo, |out, val| {
+        let env = make_env();
+        let trg = generate_trgm(val, &env, &legacy_crc32);
+        out.keys = trgms_to_keys(&trg);
+    })
+}
+
+/// `gin_extract_query_trgm(text, internal, int2, ...) RETURNS internal`.
+fn fc_gin_extract_query_trgm(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gin_proto::<GinExtractQueryOut>(fcinfo, |out, payload| {
+        let env = make_env();
+        let trg = match out.strategy {
+            SIMILARITY_STRATEGY
+            | WORD_SIMILARITY_STRATEGY
+            | STRICT_WORD_SIMILARITY_STRATEGY
+            | EQUAL_STRATEGY => generate_trgm(payload, &env, &legacy_crc32),
+            LIKE_STRATEGY | ILIKE_STRATEGY => {
+                generate_wildcard_trgm(payload, &env, &legacy_crc32)
+            }
+            REGEXP_STRATEGY | REGEXP_ICASE_STRATEGY => {
+                unported_index_symbol("gin_extract_query_trgm (regexp strategy)")
+            }
+            other => raise(PgError::error(format!(
+                "unrecognized strategy number: {other}"
+            ))),
+        };
+        out.keys = trgms_to_keys(&trg);
+        // If no trigram was extracted we must scan the whole index.
+        if trg.is_empty() {
+            out.search_mode = GIN_SEARCH_MODE_ALL;
+        }
+    })
+}
+
+/// `gin_trgm_consistent(internal, int2, text, int4, ...) RETURNS bool`.
+fn fc_gin_trgm_consistent(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gin_proto::<GinConsistentInOut>(fcinfo, |io, _query| {
+        // All cases served by this function are inexact.
+        io.recheck = true;
+        let nkeys = io.nkeys;
+        let res = match io.strategy {
+            SIMILARITY_STRATEGY
+            | WORD_SIMILARITY_STRATEGY
+            | STRICT_WORD_SIMILARITY_STRATEGY => {
+                let nlimit = index_strategy_get_limit(io.strategy);
+                let ntrue = io.check.iter().filter(|&&c| c).count() as i32;
+                if nkeys == 0 {
+                    false
+                } else {
+                    (ntrue as f32 / nkeys as f32) >= nlimit as f32
+                }
+            }
+            LIKE_STRATEGY | ILIKE_STRATEGY | EQUAL_STRATEGY => {
+                // All extracted trigrams must be present.
+                io.check.iter().take(nkeys as usize).all(|&c| c)
+            }
+            REGEXP_STRATEGY | REGEXP_ICASE_STRATEGY => {
+                unported_index_symbol("gin_trgm_consistent (regexp strategy)")
+            }
+            other => raise(PgError::error(format!(
+                "unrecognized strategy number: {other}"
+            ))),
+        };
+        io.matched = res;
+    })
+}
+
+/// `gin_trgm_triconsistent(internal, int2, text, int4, ...) RETURNS "char"`.
+fn fc_gin_trgm_triconsistent(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gin_proto::<GinTriConsistentInOut>(fcinfo, |io, _query| {
+        let nkeys = io.nkeys;
+        let res = match io.strategy {
+            SIMILARITY_STRATEGY
+            | WORD_SIMILARITY_STRATEGY
+            | STRICT_WORD_SIMILARITY_STRATEGY => {
+                let nlimit = index_strategy_get_limit(io.strategy);
+                // ntrue = number of GIN_TRUE/GIN_MAYBE (check[i] != GIN_FALSE).
+                let ntrue = io.check.iter().filter(|&&c| c != GIN_FALSE).count() as i32;
+                if nkeys == 0 {
+                    GIN_FALSE
+                } else if (ntrue as f32 / nkeys as f32) >= nlimit as f32 {
+                    GIN_MAYBE
+                } else {
+                    GIN_FALSE
+                }
+            }
+            LIKE_STRATEGY | ILIKE_STRATEGY | EQUAL_STRATEGY => {
+                // GIN_MAYBE unless any extracted trigram is definitely absent.
+                if io
+                    .check
+                    .iter()
+                    .take(nkeys as usize)
+                    .any(|&c| c == GIN_FALSE)
+                {
+                    GIN_FALSE
+                } else {
+                    GIN_MAYBE
+                }
+            }
+            REGEXP_STRATEGY | REGEXP_ICASE_STRATEGY => {
+                unported_index_symbol("gin_trgm_triconsistent (regexp strategy)")
+            }
+            other => raise(PgError::error(format!(
+                "unrecognized strategy number: {other}"
+            ))),
+        };
+        io.result = res;
+    })
+}
 
 // ===========================================================================
 // _PG_init — define the three custom GUCs.

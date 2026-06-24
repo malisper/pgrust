@@ -29,6 +29,7 @@
 #![allow(clippy::result_large_err)]
 
 pub mod dispatch;
+pub mod extdispatch;
 pub mod fmgr_builtins;
 pub mod ginarrayproc;
 pub mod ginlogic;

@@ -29,6 +29,8 @@
 
 extern crate alloc;
 
+pub mod extproc;
+
 use alloc::vec::Vec;
 
 use ::mcx::Mcx;
