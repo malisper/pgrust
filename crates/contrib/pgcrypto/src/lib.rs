@@ -32,14 +32,19 @@
 
 use ::datum::Datum;
 use ::fmgr::boundary::RefPayload;
+use ::fmgr::mat_srf::{self, MatCell};
 use ::fmgr::{FunctionCallInfoBaseData, LoadedExternalFunc, PGFunction};
-use ::types_error::{PgError, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
+use ::types_error::{
+    ErrorLocation, PgError, ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_INVALID_PARAMETER_VALUE,
+    ERRCODE_NULL_VALUE_NOT_ALLOWED, ERROR, NOTICE,
+};
 use ::utils_error::ereport;
 
 mod cipher;
 mod crypt;
 mod gucs;
 mod hashing;
+mod pgp;
 
 /// The simple (suffix-free, directory-free) name of the loadable module —
 /// `$libdir/pgcrypto` reduces to this for the registry.
@@ -298,8 +303,19 @@ fn fc_pg_random_uuid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 // ===========================================================================
-// PGP suite — graceful-ERROR stubs (large self-contained subsystem, unported)
+// PGP suite — armor/dearmor, symmetric encrypt/decrypt, key-id (ported).
+// Public-key (RSA/ElGamal) encrypt/decrypt remain graceful-ERROR stubs.
 // ===========================================================================
+
+/// `ErrorLocation` for ereport in the PGP glue.
+fn here(func: &str) -> ErrorLocation {
+    ErrorLocation::new("pgcrypto/pgp", 0, func)
+}
+
+/// Emit an `ereport(NOTICE)` line (used by the `expect-*` decrypt checks).
+fn pgp_notice(msg: &str) {
+    let _ = ereport(NOTICE).errmsg(msg).finish(here("pgp_decrypt"));
+}
 
 macro_rules! pgp_stub {
     ($name:ident, $sym:literal) => {
@@ -307,24 +323,238 @@ macro_rules! pgp_stub {
             px_error(concat!(
                 "pgcrypto: ",
                 $sym,
-                " (PGP/armor subsystem) is not ported in this build"
+                " (PGP public-key subsystem) is not ported in this build"
             ));
         }
     };
 }
 
-pgp_stub!(fc_pgp_sym_encrypt_text, "pgp_sym_encrypt_text");
-pgp_stub!(fc_pgp_sym_encrypt_bytea, "pgp_sym_encrypt_bytea");
-pgp_stub!(fc_pgp_sym_decrypt_text, "pgp_sym_decrypt_text");
-pgp_stub!(fc_pgp_sym_decrypt_bytea, "pgp_sym_decrypt_bytea");
+// Public-key path: not ported (RSA/ElGamal MPI math).
 pgp_stub!(fc_pgp_pub_encrypt_text, "pgp_pub_encrypt_text");
 pgp_stub!(fc_pgp_pub_encrypt_bytea, "pgp_pub_encrypt_bytea");
 pgp_stub!(fc_pgp_pub_decrypt_text, "pgp_pub_decrypt_text");
 pgp_stub!(fc_pgp_pub_decrypt_bytea, "pgp_pub_decrypt_bytea");
-pgp_stub!(fc_pgp_key_id_w, "pgp_key_id_w");
-pgp_stub!(fc_pg_armor, "pg_armor");
-pgp_stub!(fc_pg_dearmor, "pg_dearmor");
-pgp_stub!(fc_pgp_armor_headers, "pgp_armor_headers");
+
+/// Optional args arg (the 3rd arg of `pgp_sym_*`): `None` when absent.
+fn opt_arg_bytes(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Option<Vec<u8>> {
+    if i < fcinfo.nargs() && fcinfo.arg(i).map(|a| !a.isnull).unwrap_or(false) {
+        Some(arg_bytes(fcinfo, i))
+    } else {
+        None
+    }
+}
+
+/// `pgp_sym_encrypt_text` / `pgp_sym_encrypt_bytea`. arg0=data, arg1=key,
+/// optional arg2=args. `is_text` selects the literal-data text mode.
+fn pgp_sym_encrypt(fcinfo: &mut FunctionCallInfoBaseData, is_text: bool) -> Datum {
+    let data = arg_bytes(fcinfo, 0);
+    let key = arg_bytes(fcinfo, 1);
+    let args = opt_arg_bytes(fcinfo, 2);
+    match pgp::sym_encrypt(&data, &key, args.as_deref(), is_text) {
+        Ok(out) => ret_varlena(fcinfo, &out),
+        Err(e) => px_error(&e),
+    }
+}
+
+fn fc_pgp_sym_encrypt_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    pgp_sym_encrypt(fcinfo, true)
+}
+
+fn fc_pgp_sym_encrypt_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    pgp_sym_encrypt(fcinfo, false)
+}
+
+/// `pgp_sym_decrypt_text` / `pgp_sym_decrypt_bytea`. arg0=data(bytea),
+/// arg1=key, optional arg2=args.
+fn pgp_sym_decrypt(fcinfo: &mut FunctionCallInfoBaseData, need_text: bool) -> Datum {
+    let data = arg_bytes(fcinfo, 0);
+    let key = arg_bytes(fcinfo, 1);
+    let args = opt_arg_bytes(fcinfo, 2);
+    match pgp::sym_decrypt(&data, &key, args.as_deref(), need_text) {
+        Ok(out) => {
+            for n in &out.notices {
+                pgp_notice(n);
+            }
+            ret_varlena(fcinfo, &out.plaintext)
+        }
+        Err(e) => px_error(&e),
+    }
+}
+
+fn fc_pgp_sym_decrypt_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    pgp_sym_decrypt(fcinfo, true)
+}
+
+fn fc_pgp_sym_decrypt_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    pgp_sym_decrypt(fcinfo, false)
+}
+
+/// `pgp_key_id_w(bytea) -> text` — the 16-hex / SYMKEY / ANYKEY key id.
+fn fc_pgp_key_id_w(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let data = arg_bytes(fcinfo, 0);
+    match pgp::key_id(&data) {
+        Ok(s) => ret_text(fcinfo, &s),
+        Err(e) => px_error(e),
+    }
+}
+
+/// `pg_armor(bytea [, text[], text[]]) -> text`.
+fn fc_pg_armor(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let data = arg_bytes(fcinfo, 0);
+    let (keys, values) = if fcinfo.nargs() == 3 {
+        match parse_key_value_arrays(fcinfo) {
+            Ok(kv) => kv,
+            Err(e) => raise(e),
+        }
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let out = pgp::armor::armor_encode(&data, &keys, &values);
+    ret_varlena(fcinfo, &out)
+}
+
+/// `pg_dearmor(text) -> bytea`.
+fn fc_pg_dearmor(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let data = arg_bytes(fcinfo, 0);
+    match pgp::armor::armor_decode(&data) {
+        Ok(out) => ret_varlena(fcinfo, &out),
+        Err(()) => px_error(pgp::armor::CORRUPT_ARMOR),
+    }
+}
+
+/// `pgp_armor_headers(text) -> setof (key text, value text)` — materialize SRF.
+fn fc_pgp_armor_headers(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let data = arg_bytes(fcinfo, 0);
+    let headers = match pgp::armor::extract_armor_headers(&data) {
+        Ok(h) => h,
+        Err(()) => px_error(pgp::armor::CORRUPT_ARMOR),
+    };
+    mat_srf::with_top(|sink| {
+        if let Some(sink) = sink {
+            sink.materialized = true;
+            for (k, v) in &headers {
+                sink.rows.push(vec![text_cell(k), text_cell(v)]);
+            }
+        } else {
+            raise(PgError::error(
+                "set-valued function called in context that cannot accept a set",
+            ));
+        }
+    });
+    Datum::null()
+}
+
+/// Build a header-ful `text` MatCell from payload bytes.
+fn text_cell(bytes: &[u8]) -> MatCell {
+    MatCell {
+        value: 0,
+        ref_payload: Some(RefPayload::Varlena(varlena_image(bytes))),
+        isnull: false,
+    }
+}
+
+/// `parse_key_value_arrays` — deconstruct the two `text[]` args into validated
+/// key/value byte vectors. Errors mirror pgp-pgsql.c exactly.
+fn parse_key_value_arrays(
+    fcinfo: &FunctionCallInfoBaseData,
+) -> Result<(Vec<Vec<u8>>, Vec<Vec<u8>>), PgError> {
+    let key_img = arg_bytes(fcinfo, 1);
+    let val_img = arg_bytes(fcinfo, 2);
+
+    let nkdims = array_ndim(&key_img);
+    let nvdims = array_ndim(&val_img);
+    if nkdims > 1 || nkdims != nvdims {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+            .errmsg("wrong number of array subscripts")
+            .into_error());
+    }
+    if nkdims == 0 {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let keys = deconstruct_text_array(&key_img)?;
+    let values = deconstruct_text_array(&val_img)?;
+    if keys.len() != values.len() {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+            .errmsg("mismatched array dimensions")
+            .into_error());
+    }
+
+    let mut out_keys = Vec::with_capacity(keys.len());
+    let mut out_vals = Vec::with_capacity(values.len());
+    for i in 0..keys.len() {
+        let k = keys[i].as_ref().ok_or_else(|| {
+            ereport(ERROR)
+                .errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED)
+                .errmsg("null value not allowed for header key")
+                .into_error()
+        })?;
+        if !k.iter().all(|&b| b.is_ascii()) {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg("header key must not contain non-ASCII characters")
+                .into_error());
+        }
+        if find_sub(k, b": ") {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg("header key must not contain \": \"")
+                .into_error());
+        }
+        if k.contains(&b'\n') {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg("header key must not contain newlines")
+                .into_error());
+        }
+        let v = values[i].as_ref().ok_or_else(|| {
+            ereport(ERROR)
+                .errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED)
+                .errmsg("null value not allowed for header value")
+                .into_error()
+        })?;
+        if !v.iter().all(|&b| b.is_ascii()) {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg("header value must not contain non-ASCII characters")
+                .into_error());
+        }
+        if v.contains(&b'\n') {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg("header value must not contain newlines")
+                .into_error());
+        }
+        out_keys.push(k.clone());
+        out_vals.push(v.clone());
+    }
+    Ok((out_keys, out_vals))
+}
+
+fn find_sub(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// `ARR_NDIM` from the ArrayType payload (`arg_bytes` already stripped the
+/// varlena header, so the first 4 bytes are `ndim`).
+fn array_ndim(payload: &[u8]) -> i32 {
+    if payload.len() < 4 {
+        return 0;
+    }
+    i32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]])
+}
+
+/// Deconstruct a 1-D `text[]` payload into nullable byte vectors.
+fn deconstruct_text_array(payload: &[u8]) -> Result<Vec<Option<Vec<u8>>>, PgError> {
+    let scratch = ::mcx::MemoryContext::new("pgcrypto text[] arg");
+    let mcx = scratch.mcx();
+    let v = ::arrayfuncs::construct::deconstruct_text_array_nullable(mcx, payload)?;
+    Ok(v.iter()
+        .map(|o| o.as_ref().map(|s| s.as_str().as_bytes().to_vec()))
+        .collect())
+}
 
 /// `pg_check_fipsmode()` — FIPS mode probe (1.3--1.4). Always false here.
 fn fc_pg_check_fipsmode(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {

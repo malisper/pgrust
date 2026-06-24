@@ -116,7 +116,7 @@ impl S2k {
                     md.update(key);
                 }
                 PGP_S2K_ISALTED => {
-                    let count = s2k_decode_count(self.iter) as usize;
+                    let count = s2k_decode_count(self.iter as i32) as usize;
                     md.update(&self.salt);
                     md.update(key);
                     let mut curcnt = PGP_S2K_SALT + key.len();

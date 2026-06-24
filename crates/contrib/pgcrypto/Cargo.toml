@@ -20,6 +20,10 @@ types_error = { path = "../../_support/types/types_error" }
 dfmgr_seams = { path = "../../backend/utils/fmgr/dfmgr_seams" }
 utils_error = { path = "../../backend/utils/utils_error" }
 
+# text[] array deconstruction for pg_armor's header key/value arrays
+arrayfuncs = { path = "../../backend/utils/adt/arrayfuncs" }
+mcx = { path = "../../_support/mcx" }
+
 # custom GUC registration (pgcrypto.builtin_crypto_enabled)
 misc_guc = { path = "../../backend/utils/misc/misc_guc" }
 guc_tables = { path = "../../backend/utils/misc/guc_tables" }
@@ -42,3 +46,6 @@ cipher = { version = "0.4", features = ["alloc", "block-padding"] }
 
 # Traditional DES crypt(3) + BSDI extended-DES (xdes) password hashing.
 pwhash = "1"
+
+# OpenPGP compression (ZIP = raw deflate, ZLIB = zlib-wrapped). Pure Rust.
+miniz_oxide = "0.8"

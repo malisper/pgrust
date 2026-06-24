@@ -10,6 +10,7 @@
 //! xdes (`_`) are routed but rely on [`bcrypt`]/[`xdes`] helpers; gen_salt
 //! supports des/md5/xdes/bf salt-string generation.
 
+mod cryptdes;
 mod desc;
 mod md5c;
 

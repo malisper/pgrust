@@ -149,7 +149,7 @@ fn digest_info(code: i32) -> Option<(pg_cryptohash_type, usize)> {
 /// An incremental message digest over the `cryptohash` provider — used by S2K
 /// (multi-round keyed hashing) and the MDC SHA1.
 pub struct Digest {
-    ctx: *mut ::core::ffi::c_void,
+    ctx: *mut ::crypto::pg_cryptohash_ctx,
     len: usize,
 }
 
