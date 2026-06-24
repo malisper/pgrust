@@ -3926,6 +3926,26 @@ fn dispatch_resolved_into_frame<'mcx>(
     ref_args: Vec<Option<RefPayload>>,
     escontext: Option<&mut ::types_error::SoftErrorContext>,
 ) -> PgResult<Option<(::types_tuple::heaptuple::Datum<'mcx>, bool)>> {
+    // Move the by-reference side channel into the (pooled, capacity-retained)
+    // `fcinfo.ref_args`, then dispatch over the frame in place. Kept for the
+    // callers that hand `ref_args` separately (the non-pooled resolved-core path).
+    fcinfo.ref_args.clear();
+    fcinfo.ref_args.reserve(ref_args.len());
+    fcinfo.ref_args.extend(ref_args);
+    dispatch_frame_ref_args_in_place(mcx, resolved, fcinfo, escontext)
+}
+
+/// The `EEOP_FUNCEXPR` dispatch body once BOTH `fcinfo.args` and `fcinfo.ref_args`
+/// are already filled by the caller (the pooled hot path fills `fcinfo.ref_args`
+/// directly so it never allocates a throwaway `ref_args` Vec). Detoasts the
+/// by-reference args IN PLACE in `fcinfo.ref_args`, installs the optional
+/// soft-error sink, runs `fn_addr(fcinfo)`, and reads back the result.
+fn dispatch_frame_ref_args_in_place<'mcx>(
+    mcx: Mcx<'mcx>,
+    resolved: &ResolvedFmgrInfo,
+    fcinfo: &mut FunctionCallInfoBaseData,
+    escontext: Option<&mut ::types_error::SoftErrorContext>,
+) -> PgResult<Option<(::types_tuple::heaptuple::Datum<'mcx>, bool)>> {
     let fn_oid = resolved.finfo.fn_oid;
     // C: fcache->flinfo.fn_expr = fcinfo->flinfo->fn_expr (fmgr.c:658).
     let fn_expr = resolved.finfo.fn_expr.clone();
@@ -3933,17 +3953,15 @@ fn dispatch_resolved_into_frame<'mcx>(
     // the single fmgr dispatch chokepoint: a varlena arg read off a heap tuple
     // may be inline-compressed (4B-C) or out-of-line-external, and the raw-byte
     // adt readers (md5/LIKE/etc.) would corrupt it. Detoast each toasted varlena
-    // arg here so EVERY builtin sees a flat image (C: `PG_DETOAST_DATUM_PACKED`).
-    // Detoast IN PLACE into the (pooled, capacity-retained) `fcinfo.ref_args`.
-    let skip_detoast = fn_skips_arg_detoast(fn_oid);
-    fcinfo.ref_args.clear();
-    fcinfo.ref_args.reserve(ref_args.len());
-    for refp in ref_args {
-        fcinfo.ref_args.push(if skip_detoast {
-            refp
-        } else {
-            detoast_ref_arg_if_toasted(mcx, refp)?
-        });
+    // arg IN PLACE so EVERY builtin sees a flat image (C: `PG_DETOAST_DATUM_PACKED`).
+    // The all-by-value common case (every entry None) skips the loop body entirely.
+    if !fn_skips_arg_detoast(fn_oid) {
+        for slot in fcinfo.ref_args.iter_mut() {
+            if slot.is_some() {
+                let refp = slot.take();
+                *slot = detoast_ref_arg_if_toasted(mcx, refp)?;
+            }
+        }
     }
     fcinfo.debug_assert_ref_null_consistency();
     // C: `InitFunctionCallInfoData(*fcinfo, ..., escontext, NULL)` — install the
@@ -4045,8 +4063,11 @@ fn function_call_invoke_datum_resolved_seam<'mcx>(
     // a local `ref_args` Vec that `dispatch_resolved_into_frame` moves into the
     // frame's (also capacity-retained) `ref_args` in place.
     let mut frame = fcinfo_pool_take(Some(resolved_for_call.finfo.clone()), collation);
-    // Refill the frame's `args` (cleared by `reset_for_reuse`, capacity kept).
-    let mut ref_args: Vec<Option<RefPayload>> = Vec::with_capacity(args.len());
+    // Refill the frame's `args` AND `ref_args` (both cleared by `reset_for_reuse`
+    // / `fcinfo_pool_return`, capacity kept) DIRECTLY — no throwaway local
+    // `ref_args` Vec, so the pooled hot path allocates nothing per call.
+    frame.ref_args.clear();
+    frame.ref_args.reserve(args.len());
     for (i, val) in args.iter().enumerate() {
         let is_null = args_null.get(i).copied().unwrap_or(false);
         let (mut nd, refp) = datum_to_ref_arg(val);
@@ -4054,11 +4075,11 @@ fn function_call_invoke_datum_resolved_seam<'mcx>(
             nd.isnull = true;
         }
         frame.args.push(nd);
-        ref_args.push(if is_null { None } else { refp });
+        frame.ref_args.push(if is_null { None } else { refp });
     }
     frame.nargs = args.len() as i16;
 
-    let out = dispatch_resolved_into_frame(mcx, &resolved_for_call, &mut frame, ref_args, None);
+    let out = dispatch_frame_ref_args_in_place(mcx, &resolved_for_call, &mut frame, None);
     fcinfo_pool_return(frame);
     match out? {
         Some(pair) => Ok(pair),
