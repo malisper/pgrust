@@ -74,3 +74,6 @@ backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat
 backend-utils-activity-status-seams = { path = "../backend-utils-activity-status-seams" }
 backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }
 backend-storage-ipc-injection-point-seams = { path = "../backend-storage-ipc-injection-point-seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

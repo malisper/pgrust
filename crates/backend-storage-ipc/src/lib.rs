@@ -48,8 +48,18 @@ pub mod ipci_seams_xlog_clog;
 /// in `ipc.c`, owned by `backend-storage-ipc-dsm-core`, not here.)
 pub fn init_seams() {
     backend_storage_ipc_ipci_seams::create_shared_memory_and_semaphores::set(|| {
-        ipci_core::create_shared_memory_and_semaphores()
-            .expect("CreateSharedMemoryAndSemaphores")
+        match ipci_core::create_shared_memory_and_semaphores() {
+            Ok(()) => {}
+            Err(e) => {
+                // wasm64: std panic messages are no-ops, so surface the PgError
+                // text on the host stderr before failing (C ereport(FATAL)).
+                #[cfg(target_family = "wasm")]
+                wasm_libc_shim::stderr_write(
+                    std::format!("FATAL: CreateSharedMemoryAndSemaphores: {e:?}\n").as_bytes(),
+                );
+                panic!("CreateSharedMemoryAndSemaphores: {e:?}");
+            }
+        }
     });
     backend_storage_ipc_ipci_seams::calculate_shmem_size::set(ipci_core::calculate_shmem_size);
 }
