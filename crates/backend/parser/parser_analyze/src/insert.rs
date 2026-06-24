@@ -377,7 +377,56 @@ fn transformInsertSelect<'mcx>(
     }
 
     // Prepare row for assignment to target table.
-    transformInsertRow(mcx, pstate, expr_list, &stmt.cols, icolumns, attrnos, false)
+    let result = transformInsertRow(mcx, pstate, expr_list, &stmt.cols, icolumns, attrnos, false)?;
+
+    // Owned-model fixup mirroring C's shared-Param-pointer semantics. C copies
+    // unknown-type Const/Param SELECT outputs UP into the INSERT targetlist and
+    // coerces them there; because the subquery's targetlist holds the SAME Param
+    // pointer, resolving the upper copy (the coerce hook sets `param->paramtype`)
+    // also resolves the subquery copy. In the owned model the copy-up `clone_in`s
+    // the Param, so the subquery RTE keeps a stale UNKNOWNOID clone. The final
+    // `check_parameter_resolution_walker` then sees that stale node's paramtype !=
+    // the now-resolved shared `param_types[]` entry and errors with "could not
+    // determine data type of parameter $n". Re-walk the just-added `*SELECT*`
+    // subquery RTE and refresh any still-UNKNOWNOID PARAM_EXTERN node to its
+    // resolved array type, restoring C's in-place-mutation result.
+    if let Some(parstate) = pstate.p_ref_hook_state.as_var_params() {
+        let resolved: alloc::vec::Vec<Oid> = parstate.param_types.borrow().clone();
+        if !resolved.is_empty() {
+            if let Some(rte) = pstate.p_rtable.get_mut((rtindex - 1) as usize) {
+                if let Some(subq) = rte.subquery.as_deref_mut() {
+                    refresh_unknown_extern_params(subq, &resolved);
+                }
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// Refresh stale UNKNOWNOID `PARAM_EXTERN` nodes in `subq`'s targetlist to their
+/// now-resolved type from the shared `param_types[]` array. This re-establishes
+/// the result of C's shared-Param-pointer mutation after the owned model's
+/// copy-up cloned the param (see `transformInsertSelect`). Only the targetlist is
+/// walked because that is where the copied-up unknown Const/Param outputs live.
+fn refresh_unknown_extern_params<'mcx>(
+    subq: &mut Query<'mcx>,
+    resolved: &[Oid],
+) {
+    for te in subq.targetList.iter_mut() {
+        if let Some(Expr::Param(p)) = te.expr.as_deref_mut() {
+            if p.paramkind == ::nodes::primnodes::ParamKind::PARAM_EXTERN
+                && p.paramtype == UNKNOWNOID
+            {
+                let idx = (p.paramid - 1) as usize;
+                if let Some(&rt) = resolved.get(idx) {
+                    if rt != InvalidOid && rt != UNKNOWNOID {
+                        p.paramtype = rt;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// The multi-row `INSERT ... VALUES (...), (...), ...` branch of

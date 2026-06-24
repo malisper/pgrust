@@ -18,3 +18,7 @@ types_core = { path = "../../../../_support/types/types_core" }
 datum = { path = "../../../../_support/types/datum" }
 fmgr = { path = "../../../../_support/types/fmgr" }
 fmgr_core = { path = "../../fmgr/fmgr_core" }
+# pq_begintypsend / pq_sendint64 / pq_endtypsend (pqformat.h): the binary-wire
+# bytea framing int8send produces, exactly as int4send uses it.
+pqformat = { path = "../../../libpq/pqformat" }
+mcx = { path = "../../../../_support/mcx" }

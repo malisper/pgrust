@@ -147,7 +147,18 @@ fn fc_int8out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Da
 /// fmgr boundary wraps the varlena framing.
 fn fc_int8send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let v = arg_i64(fcinfo, 0);
-    fcinfo.set_ref_result(RefPayload::Varlena(v.to_be_bytes().to_vec()));
+    // C: pq_begintypsend(&buf); pq_sendint64(&buf, arg1); pq_endtypsend(&buf).
+    // The result is a header-ful `bytea` (4-byte varlena length word + the 8
+    // big-endian payload bytes), matching int4send's framing — the wire/seam
+    // layer strips the VARHDRSZ header to recover the payload. (The previous
+    // header-less `to_be_bytes()` payload was 8 raw bytes, which the seam's
+    // unconditional VARHDRSZ strip truncated to 4 — corrupting every int8/bigint
+    // binary result, e.g. RETURNING a BIGSERIAL id over the extended protocol.)
+    let m = mcx::MemoryContext::new("int8 fmgr scratch");
+    let mut buf = ::pqformat::pq_begintypsend(m.mcx())?;
+    ::pqformat::pq_sendint64(&mut buf, v as u64)?;
+    let bytes = ::pqformat::pq_endtypsend(buf).as_bytes().to_vec();
+    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
     Ok(Datum::from_usize(0))
 }
 

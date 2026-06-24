@@ -10861,7 +10861,9 @@ dependencies = [
  "datum",
  "fmgr",
  "fmgr_core",
+ "mcx",
  "numutils",
+ "pqformat",
  "types_core",
  "types_error",
 ]
