@@ -20,6 +20,16 @@ use std::ptr;
 
 use ::net::{AddrInfoHint, PgAddrInfo, SockAddr};
 
+/// `NI_MAXSERV` — maximum length of a service name string, as defined by
+/// PostgreSQL's `src/include/getaddrinfo.h` (`#ifndef NI_MAXSERV #define
+/// NI_MAXSERV 32`). macOS/BSD expose this via libc; glibc defines it as a macro
+/// that the Rust `libc` crate does not re-export, so we provide PG's fallback
+/// value on Linux.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+const NI_MAXSERV: usize = libc::NI_MAXSERV as usize;
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+const NI_MAXSERV: usize = 32;
+
 /// `pg_getaddrinfo_all` — get address info for Unix, IPv4 and IPv6 sockets.
 ///
 /// Resolved addresses are appended to `result` (cleared first, mirroring C's
@@ -254,7 +264,7 @@ fn getnameinfo_unix(
             cstr_bytes_to_string(&path)
         };
         /* C: snprintf(service, servicelen, ...); ret >= servicelen -> EAI_MEMORY */
-        if formatted.len() >= libc::NI_MAXSERV as usize {
+        if formatted.len() >= NI_MAXSERV {
             return libc::EAI_MEMORY;
         }
         *s = formatted;
@@ -271,7 +281,7 @@ fn getnameinfo_system(
     flags: i32,
 ) -> i32 {
     let mut node_buf = vec![0 as libc::c_char; libc::NI_MAXHOST as usize];
-    let mut service_buf = vec![0 as libc::c_char; libc::NI_MAXSERV as usize];
+    let mut service_buf = vec![0 as libc::c_char; NI_MAXSERV];
 
     let node_ptr = if node.is_some() {
         node_buf.as_mut_ptr()
@@ -482,7 +492,7 @@ mod tests {
          * returns EAI_MEMORY when it doesn't fit; pg_getnameinfo_all then fills
          * "???". Build a path longer than NI_MAXSERV-1 (but within sun_path).
          */
-        let path = format!("/tmp/{}", "x".repeat(libc::NI_MAXSERV as usize));
+        let path = format!("/tmp/{}", "x".repeat(NI_MAXSERV));
         assert!(path.len() < sun_path_len());
         let mut out = Vec::new();
         pg_getaddrinfo_all(None, Some(&path), &unix_hint(libc::SOCK_STREAM), &mut out);

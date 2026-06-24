@@ -498,9 +498,15 @@ fn create_anonymous_segment(size: Size) -> PgResult<(*mut libc::c_void, Size)> {
     Ok((ptr, allocsize))
 }
 
-/// `PG_MMAP_FLAGS` (`portability/mem.h`) — `MAP_SHARED | MAP_ANONYMOUS |
-/// MAP_HASSEMAPHORE`.
+/// `PG_MMAP_FLAGS` (`portability/mem.h`) — `MAP_SHARED | MAP_ANONYMOUS`, plus
+/// `MAP_HASSEMAPHORE` only `#ifdef MAP_HASSEMAPHORE` (a BSD/macOS flag that is
+/// not defined on Linux/glibc), exactly as PostgreSQL's mem.h gates it.
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd",
+          target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly"))]
 const PG_MMAP_FLAGS: libc::c_int = libc::MAP_SHARED | libc::MAP_ANONYMOUS | libc::MAP_HASSEMAPHORE;
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd",
+              target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly")))]
+const PG_MMAP_FLAGS: libc::c_int = libc::MAP_SHARED | libc::MAP_ANONYMOUS;
 
 /// `MAP_FAILED` as a `*mut c_void` (libc exposes it as a value via the macro).
 #[inline]

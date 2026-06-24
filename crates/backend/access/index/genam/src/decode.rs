@@ -597,7 +597,10 @@ fn extract_attmissingval(
     //                             attalign, &is_null);  Assert(!is_null);
     // The single-element array is deconstructed; element 0 is the C "element 1".
     let elems = arrayfuncs_seams::deconstruct_array_values_bytes::call(
-        mcx, &bytes, atttypid, attlen, attbyval, attalign,
+        // attalign is a pg `char`; the seam takes core::ffi::c_char, which is
+        // u8 on aarch64-linux but i8 here. Cast so the call type-checks on
+        // every target (no-op where c_char == i8).
+        mcx, &bytes, atttypid, attlen, attbyval, attalign as core::ffi::c_char,
     )?;
     let (datum, is_null) = elems
         .first()

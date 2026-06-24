@@ -218,7 +218,7 @@ fn index_delete_prefetch_buffer(
             || ItemPointerGetBlockNumber(htid) != cur_hblkno
         {
             cur_hblkno = ItemPointerGetBlockNumber(htid);
-            vacuumlazy_seam::prefetch_buffer::call(rel.rd_id, MAIN_FORKNUM, cur_hblkno)?;
+            vacuumlazy_seam::prefetch_buffer::call(rel, MAIN_FORKNUM, cur_hblkno)?;
             count += 1;
         }
         i += 1;
@@ -396,12 +396,12 @@ pub fn heap_index_delete_tuples<'mcx>(
              * code that does syscache lookups, to avoid risk of deadlock.
              */
             let mut prefetch_distance = if catalog_seam::is_catalog_relation::call(rel) {
-                init_small_seams::maintenance_io_concurrency::call()
+                bufmgr_seam::maintenance_io_concurrency::call()
             } else {
                 spccache::get_tablespace_maintenance_io_concurrency(
                     rel.rd_rel.reltablespace,
                     init_small_seams::my_database_table_space::call(),
-                    init_small_seams::maintenance_io_concurrency::call(),
+                    bufmgr_seam::maintenance_io_concurrency::call(),
                 )?
             };
 

@@ -11,9 +11,37 @@ use crate::seams;
 /// end of a local socket, then run the ident usermap.
 pub fn auth_peer(port: &Port) -> PgResult<i32> {
     let mut uid: libc::uid_t = 0;
+    #[allow(unused_variables)]
     let mut gid: libc::gid_t = 0;
 
+    // C auth.c gates this on the platform credential primitive:
+    //   #if defined(SO_PEERCRED)            -> getsockopt(SO_PEERCRED, ucred)   (Linux)
+    //   #elif defined(LOCAL_PEERCRED)/HAVE_GETPEEREID -> getpeereid()          (*BSD/macOS)
+    // On Linux the Rust libc crate does not expose getpeereid; use SO_PEERCRED.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let rc = {
+        let mut peercred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut so_len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let r = unsafe {
+            libc::getsockopt(
+                port.sock,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut peercred as *mut libc::ucred).cast::<libc::c_void>(),
+                &mut so_len,
+            )
+        };
+        if r == 0 && so_len as usize == std::mem::size_of::<libc::ucred>() {
+            uid = peercred.uid;
+            gid = peercred.gid;
+            0
+        } else {
+            -1
+        }
+    };
+
     // getpeereid(port->sock, &uid, &gid)
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     let rc = unsafe { libc::getpeereid(port.sock, &mut uid, &mut gid) };
     if rc != 0 {
         let err = std::io::Error::last_os_error();
@@ -32,7 +60,10 @@ pub fn auth_peer(port: &Port) -> PgResult<i32> {
 
     // getpwuid_r(uid, &pwbuf, buf, sizeof buf, &pw)
     let mut pwbuf: libc::passwd = unsafe { std::mem::zeroed() };
-    let mut buf = [0i8; 1024];
+    // NB: getpwuid_r's buffer is `*mut c_char`; c_char is i8 on x86_64 and on
+    // aarch64-apple-darwin, but UNSIGNED (u8) on aarch64-linux. Use c_char so
+    // the buffer element type matches the FFI pointer on every target.
+    let mut buf = [0 as libc::c_char; 1024];
     let mut result: *mut libc::passwd = std::ptr::null_mut();
     let rc = unsafe {
         libc::getpwuid_r(uid, &mut pwbuf, buf.as_mut_ptr(), buf.len(), &mut result)
