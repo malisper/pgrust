@@ -1785,8 +1785,23 @@ fn query_list_get_primary_stmt<'a>(stmts: &'a [Query<'_>]) -> Option<&'a Query<'
 
 /// `AcquireExecutorLocks(stmt_list, acquire)`.
 fn AcquireExecutorLocks(plan: &PlanRc, acquire: bool) -> PgResult<()> {
-    let p = plan.borrow();
-    for stmt in p.stmt_list.iter() {
+    // Same re-entrancy hazard as `AcquirePlannerLocks`: `lock_relation_oid` runs
+    // `AcceptInvalidationMessages()`, which can fire `ResetPlanCache` →
+    // `get_plan(gplan).borrow_mut()` on THIS very plan. Holding a `RefCell`
+    // borrow of `plan` across the lock scan would make that re-entrant
+    // `borrow_mut()` panic ("RefCell already borrowed"). Snapshot a stable slice
+    // pointer to `stmt_list` under a momentary borrow and scan without holding
+    // the borrow. The list lives in the plan's owned context and is not
+    // reallocated/cleared during this scan (`ResetPlanCache` only flips
+    // `is_valid`), matching C's pointer-stable iteration.
+    let stmts: *const [PlannedStmt<'static>] = {
+        let p = plan.borrow();
+        p.stmt_list.as_slice() as *const [PlannedStmt<'static>]
+    };
+    // SAFETY: the backing `Vec<PlannedStmt<'static>>` is owned by `plan`'s arena
+    // and stays valid for the scan (see the note above); we only read it.
+    let stmts: &[PlannedStmt<'static>] = unsafe { &*stmts };
+    for stmt in stmts.iter() {
         if pstmt_is_utility(stmt) {
             // Ignore utility statements, except those that contain a query.
             if let Some(util) = &stmt.utilityStmt {
@@ -1821,8 +1836,30 @@ fn AcquireExecutorLocks(plan: &PlanRc, acquire: bool) -> PgResult<()> {
 
 /// `AcquirePlannerLocks(stmt_list, acquire)`.
 fn AcquirePlannerLocks(src: &SourceRc, acquire: bool) -> PgResult<()> {
-    let p = src.borrow();
-    for query in p.query_list.iter() {
+    // C iterates `plansource->query_list` while `ScanQueryForLocks` →
+    // `LockRelationOid` runs `AcceptInvalidationMessages()` after each new lock.
+    // That re-entrant invalidation can fire `PlanCacheSysCallback` →
+    // `ResetPlanCache`, which `borrow_mut()`s every saved `CachedPlanSource` —
+    // INCLUDING this one. So we must NOT hold a `RefCell` borrow of `src` across
+    // the lock-acquiring scan, or that re-entrant `borrow_mut()` panics with
+    // "RefCell already borrowed" (the C struct has no borrow guard).
+    //
+    // The query list lives in the source's owned `query_context` arena and is
+    // not reallocated or cleared during this scan (`ResetPlanCache` only flips
+    // `is_valid`; the only code that rebuilds `query_list` is
+    // `RevalidateCachedQuery`, which is the *caller* and is not re-entered here).
+    // So we snapshot a stable slice pointer to the queries under a momentary
+    // borrow, drop the borrow, then scan — matching C's pointer-stable iteration.
+    let queries: *const [Query<'static>] = {
+        let p = src.borrow();
+        p.query_list.as_slice() as *const [Query<'static>]
+    };
+    // SAFETY: the backing `Vec<Query<'static>>` is owned by `src`'s arena and is
+    // neither moved, reallocated, nor cleared for the duration of this scan (see
+    // the borrow-re-entrancy note above). The pointer therefore stays valid; we
+    // only read the queries (lock scanning never mutates the source's tree).
+    let queries: &[Query<'static>] = unsafe { &*queries };
+    for query in queries.iter() {
         if query_is_utility(query) {
             // Ignore utility statements, unless they contain a Query.
             if let Some(util) = &query.utilityStmt {
