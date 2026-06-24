@@ -978,6 +978,60 @@ fn jumble_node_body(jstate: &mut JumbleState, tag: NodeTag, node: &Node) {
             jf_bool(jstate, s.replace);
         }
 
+        // ===================================================================
+        // Utility statements wrapping an inner (analyzed) Query — EXPLAIN /
+        // COPY (...) / CALL / PREPARE / EXECUTE. `JUMBLE_NODE(query)` must
+        // recurse into the inner Query so its constants are recorded
+        // (normalizing `EXPLAIN SELECT 1` / `SELECT 2` to one entry with `$1`)
+        // and so distinct inner queries get distinct ids.
+        // ===================================================================
+        ntag::T_ExplainStmt => {
+            // `_jumbleExplainStmt`: query, options.
+            let s = node.expect_explainstmt();
+            jumble_view_query_child(jstate, s.query.as_deref());
+            jn_list(jstate, s.options.as_slice());
+        }
+        ntag::T_CopyStmt => {
+            // `_jumbleCopyStmt`.
+            let s = node.expect_copystmt();
+            jn_opt(jstate, s.relation.as_deref());
+            jumble_view_query_child(jstate, s.query.as_deref());
+            jn_list(jstate, s.attlist.as_slice());
+            jf_bool(jstate, s.is_from);
+            jf_bool(jstate, s.is_program);
+            jumble_opt_cstring(jstate, s.filename.as_deref());
+            jn_list(jstate, s.options.as_slice());
+            jn_opt(jstate, s.where_clause.as_deref());
+        }
+        ntag::T_CallStmt => {
+            // `_jumbleCallStmt`: funcexpr, outargs. funcexpr is the analyzed
+            // FuncExpr — recurse so the call's argument constants normalize.
+            let s = node.expect_callstmt();
+            jn_opt(jstate, s.funcexpr.as_deref());
+            jn_list(jstate, s.outargs.as_slice());
+        }
+        ntag::T_PrepareStmt => {
+            // `_jumblePrepareStmt`: name, argtypes, query.
+            let s = node.expect_preparestmt();
+            jumble_opt_cstring(jstate, s.name.as_deref());
+            jn_list(jstate, s.argtypes.as_slice());
+            jumble_view_query_child(jstate, s.query.as_deref());
+        }
+        ntag::T_ExecuteStmt => {
+            // `_jumbleExecuteStmt`: name, params.
+            let s = node.expect_executestmt();
+            jumble_opt_cstring(jstate, s.name.as_deref());
+            jn_list(jstate, s.params.as_slice());
+        }
+        ntag::T_RangeTblFunction => {
+            // `_jumbleRangeTblFunction`: JUMBLE_NODE(funcexpr). A
+            // `RangeTblEntry` of kind RTE_FUNCTION carries these; walking the
+            // funcexpr records its argument constants' locations so
+            // `generate_series(1,10)` / `generate_series(2,20)` normalize.
+            let s = node.expect_rangetblfunction();
+            jn_opt(jstate, s.funcexpr.as_deref());
+        }
+
         ntag::T_Integer
         | ntag::T_Float
         | ntag::T_Boolean
