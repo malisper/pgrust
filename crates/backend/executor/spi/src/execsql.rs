@@ -41,6 +41,70 @@ use snapmgr_seams as snapmgr;
 
 type SourceHandle = u64;
 
+/// `VARATT_IS_EXTERNAL_NON_EXPANDED(PTR)` (varatt.h) over a verbatim varlena
+/// image: a bare external (out-of-line / indirect) TOAST pointer that is **not**
+/// an expanded object. Pure header bit-twiddling on the encoded bytes:
+/// `VARATT_IS_EXTERNAL` is the 1-byte-header form `va_header == 0x01`;
+/// `VARATT_IS_EXTERNAL_EXPANDED` additionally has `va_tag` ∈ {EXPANDED_RO=2,
+/// EXPANDED_RW=3}.
+fn varatt_is_external_non_expanded(b: &[u8]) -> bool {
+    const VARTAG_EXPANDED_RO: u8 = 2;
+    const VARTAG_EXPANDED_RW: u8 = 3;
+    if b.is_empty() || b[0] != 0x01 {
+        return false;
+    }
+    !(b.len() >= 2 && (b[1] == VARTAG_EXPANDED_RO || b[1] == VARTAG_EXPANDED_RW))
+}
+
+/// The non-atomic detoast-on-store of a result row's external TOAST values
+/// (pl_exec.c `assign_simple_var`'s `!estate->atomic` leg + the expanded-record
+/// setters' `expand_external = !estate->atomic`).
+///
+/// In a non-atomic PL/pgSQL context (a procedure / DO block that may `COMMIT`
+/// mid-execution) a varlena value handed back into a variable / record must be
+/// free of external (out-of-line) TOAST references: the chunks can disappear
+/// after a later commit + VACUUM, turning a subsequent read into `missing chunk
+/// number ...`. This rewrites each external-non-expanded `byref` image to an
+/// inline detoasted copy (C: `detoast_external_attr`). It is called from inside
+/// the SPI execution window — while the query's fetch snapshot is still pushed —
+/// so the detoast can always resolve the chunks (the C detoast also happens
+/// before the statement's snapshot pops). Atomic contexts skip this (the raw
+/// image is kept, matching C + by-ref efficiency). `mcx` is the SPI working
+/// context the result is being projected in.
+fn detoast_nonatomic_result_columns<'mcx>(
+    mcx: Mcx<'mcx>,
+    rows: &mut [Vec<ExecsqlColumn>],
+) -> PgResult<()> {
+    for row in rows.iter_mut() {
+        for col in row.iter_mut() {
+            if col.isnull {
+                continue;
+            }
+            if let Some(image) = col.byref.take() {
+                col.byref = Some(detoast_external_byref_image_pub(mcx, image)?);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Detoast a single by-reference varlena image if it is an external-non-expanded
+/// TOAST pointer (see [`detoast_nonatomic_result_columns`]); a non-external
+/// image is returned unchanged. The caller decides the non-atomic gating and
+/// guarantees an active fetch snapshot. Shared with the `:=` / expression-eval
+/// path (`eval.rs`). `mcx` backs the transient fetched buffer; the result is an
+/// owned `Vec` copied out of it.
+pub(crate) fn detoast_external_byref_image_pub<'mcx>(
+    mcx: Mcx<'mcx>,
+    image: Vec<u8>,
+) -> PgResult<Vec<u8>> {
+    if !varatt_is_external_non_expanded(&image) {
+        return Ok(image);
+    }
+    let detoasted = detoast_seams::detoast_external_attr::call(mcx, &image)?;
+    Ok(detoasted.as_slice().to_vec())
+}
+
 /// One column of the first INTO result row: the bare-word datum, its is-null
 /// flag, and the source column type OID (`SPI_gettypeid`). The typmod is not
 /// carried by the SPI column descriptor, so the consumer casts at `-1` (matching
@@ -712,7 +776,7 @@ fn run_one_execsql_stmt<'mcx>(
                 .collect()
         };
 
-        let first_row: Vec<ExecsqlColumn> = if into && returns_rows {
+        let mut first_row: Vec<ExecsqlColumn> = if into && returns_rows {
             match raw_rows.first() {
                 Some(row) => project_row(row),
                 None => Vec::new(),
@@ -720,11 +784,19 @@ fn run_one_execsql_stmt<'mcx>(
         } else {
             Vec::new()
         };
-        let all_rows: Vec<Vec<ExecsqlColumn>> = if collect_all && returns_rows {
+        let mut all_rows: Vec<Vec<ExecsqlColumn>> = if collect_all && returns_rows {
             raw_rows.iter().map(project_row).collect()
         } else {
             Vec::new()
         };
+
+        // Non-atomic detoast-on-store (see the row-returning path below) — keep a
+        // row-returning utility (e.g. SHOW/EXPLAIN INTO) free of external TOAST
+        // pointers across a later COMMIT, while the fetch snapshot is still pushed.
+        if crate::backbone::SPI_inside_nonatomic_context() {
+            detoast_nonatomic_result_columns(ucx_mcx, core::slice::from_mut(&mut first_row))?;
+            detoast_nonatomic_result_columns(ucx_mcx, &mut all_rows)?;
+        }
 
         return Ok((
             SPI_OK_UTILITY,
@@ -785,7 +857,7 @@ fn run_one_execsql_stmt<'mcx>(
     };
 
     // For INTO, hand back the first row's raw columns.
-    let first_row: Vec<ExecsqlColumn> = if into && returns_rows {
+    let mut first_row: Vec<ExecsqlColumn> = if into && returns_rows {
         match raw_rows.first() {
             Some(row) => project_row(row),
             None => Vec::new(),
@@ -797,11 +869,24 @@ fn run_one_execsql_stmt<'mcx>(
     // For the FOR-loop / RETURN QUERY iteration (`exec_for_query`), hand back
     // every result row's columns (the materialize-all analogue of C's portal
     // fetch loop).
-    let all_rows: Vec<Vec<ExecsqlColumn>> = if collect_all && returns_rows {
+    let mut all_rows: Vec<Vec<ExecsqlColumn>> = if collect_all && returns_rows {
         raw_rows.iter().map(project_row).collect()
     } else {
         Vec::new()
     };
+
+    // Non-atomic detoast-on-store (see `detoast_nonatomic_result_columns`): in a
+    // procedure / DO block the fetched external TOAST values must be flattened
+    // inline here, while this statement's fetch snapshot is still pushed, so they
+    // survive a later COMMIT + VACUUM. Atomic contexts keep the raw image. The
+    // detoast result is copied out to an owned `Vec`, so a throwaway scratch
+    // context backs the transient fetched buffer.
+    if crate::backbone::SPI_inside_nonatomic_context() {
+        let dcx = MemoryContext::new("SPI Execsql detoast scratch");
+        let dmcx = dcx.mcx();
+        detoast_nonatomic_result_columns(dmcx, core::slice::from_mut(&mut first_row))?;
+        detoast_nonatomic_result_columns(dmcx, &mut all_rows)?;
+    }
 
     Ok((code, processed, returned_tuptable, first_row, all_rows))
 }

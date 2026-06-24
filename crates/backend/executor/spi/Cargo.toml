@@ -50,4 +50,9 @@ lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 portalmem_seams = { path = "../../utils/mmgr/portalmem_seams" }
 snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }
+# detoast_external_attr: the non-atomic detoast-on-store of an external
+# (out-of-line) TOAST pointer in an INTO / FOR-query result that must survive a
+# COMMIT inside a procedure / DO block (pl_exec.c assign_simple_var's
+# `!estate->atomic` leg; here applied while the fetch snapshot is still pushed).
+detoast_seams = { path = "../../access/common/detoast_seams" }
 xml_libxml_seams = { path = "../../utils/adt/xml_libxml_seams" }

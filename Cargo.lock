@@ -22175,6 +22175,7 @@ dependencies = [
  "cmdtag",
  "coerce_seams",
  "dest_seams",
+ "detoast_seams",
  "driver",
  "execMain",
  "execTuples_seams",

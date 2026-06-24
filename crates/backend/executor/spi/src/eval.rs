@@ -233,23 +233,45 @@ pub fn spi_eval_expr(
     let pushed = snapmgr::push_active_snapshot_transaction::call().is_ok();
     let advance_cid = pushed && !read_only;
     let out = run_eval(mcx, source, &param_li, maxtuples, advance_cid);
-    if pushed {
-        let _ = snapmgr::pop_active_snapshot::call();
-    }
     // A constant (datum-free) expression is const-folded — and thus its runtime
     // error is reported with the SPI context — in C; mirror that here.
     let run_phase_context = parse_state.referenced_dnos().is_empty();
-    let (processed, raw) = out.map_err(|e| spi_error_decorate(e, run_phase_context))?;
-
-    let _ = plancache::DropCachedPlan(source);
+    let (processed, raw) = match out {
+        Ok(v) => v,
+        Err(e) => {
+            if pushed {
+                let _ = snapmgr::pop_active_snapshot::call();
+            }
+            return Err(spi_error_decorate(e, run_phase_context));
+        }
+    };
 
     // SPI_getbinval(tuptab->vals[0], tupdesc, 1, &isnull): the first row's first
     // column. No rows -> a NULL result of the column type (exec_run_select with
     // maxtuples and SPI_processed == 0 leaves *isNull = true).
-    let (typeid, value, isnull, byref) = match raw.first_col() {
+    let (typeid, value, isnull, mut byref) = match raw.first_col() {
         Some((typeid, col)) => (typeid, col.value, col.isnull, col.byref),
         None => (::types_core::InvalidOid, 0usize, true, None),
     };
+
+    // Non-atomic detoast-on-store (pl_exec.c assign_simple_var's `!estate->atomic`
+    // leg): in a procedure / DO block, a `:=`/`SELECT ... INTO` value that is a
+    // bare external (out-of-line) TOAST pointer would dangle after a later COMMIT
+    // + VACUUM ("missing chunk number ..."). Flatten it inline here, while the
+    // expression's fetch snapshot is still pushed (the detoast must resolve the
+    // chunks now). Atomic contexts keep the raw image. Done before the snapshot
+    // pop below.
+    if !isnull && crate::backbone::SPI_inside_nonatomic_context() {
+        if let Some(image) = byref.take() {
+            byref = Some(super::execsql::detoast_external_byref_image_pub(mcx, image)?);
+        }
+    }
+
+    if pushed {
+        let _ = snapmgr::pop_active_snapshot::call();
+    }
+
+    let _ = plancache::DropCachedPlan(source);
 
     Ok(EvalResult {
         value,

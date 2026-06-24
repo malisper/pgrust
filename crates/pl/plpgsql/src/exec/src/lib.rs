@@ -62,6 +62,7 @@ pub(crate) fn with_query_mcx<R>(f: impl for<'mcx> FnOnce(mcx::Mcx<'mcx>) -> R) -
     f(ctx.mcx())
 }
 
+
 /// The rich, lifetime-bearing value [`Datum`] the expanded-record substrate
 /// reads/writes (`ByVal` word / `ByRef` varlena image / `Composite` / …), as
 /// distinct from PL/pgSQL's bare-word [`Datum`] (`datum::Datum`).
@@ -2179,6 +2180,13 @@ fn exec_assign_value_byref_impl(
             if !typbyval && !isnull {
                 match newbyref {
                     Some(image) => {
+                        // The non-atomic detoast-on-store of a varlena value that
+                        // arrives via INTO / `:=` (a bare external TOAST pointer
+                        // that would dangle after a later COMMIT) is performed
+                        // inside the SPI execution window (where the fetch snapshot
+                        // is still pushed), in `run_execsql` gated on
+                        // `SPI_inside_nonatomic_context()`. So the image is already
+                        // flattened here; store it verbatim.
                         // Store a flat by-reference value: a placeholder bare word
                         // (the real bytes live in `value_byref`, read by the next
                         // snapshot), plus the owned image.
@@ -2426,6 +2434,11 @@ fn exec_run_select_rows(
         false, // must_return_tuples (FOR-IN-SELECT does not require tuples)
     )?;
     estate.eval_processed = result.processed;
+    // The non-atomic detoast of each row's external TOAST values happens inside
+    // the SPI execution window (where the fetch snapshot is still pushed), in
+    // `run_execsql` gated on `SPI_inside_nonatomic_context()` — see the comment
+    // there. Doing it here (after SPI popped its snapshot) would fail for a
+    // FOR-loop body that runs `COMMIT` before a later iteration is detoasted.
     Ok(result.all_rows)
 }
 
@@ -3538,6 +3551,13 @@ fn exec_stmt_execsql(
         stmt.into,
         tcount,
     )?;
+
+    // The non-atomic detoast-on-store of the INTO result (a bare external TOAST
+    // pointer that would dangle after a later COMMIT) happens inside the SPI
+    // execution window (where the fetch snapshot is still pushed), in
+    // `run_execsql` gated on `SPI_inside_nonatomic_context()`. Doing it here —
+    // after SPI popped the query's snapshot — fails for the fetch-after-commit
+    // case ("cannot fetch toast data without an active snapshot").
 
     let code = result.code;
     let processed = result.processed;
