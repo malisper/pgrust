@@ -613,65 +613,38 @@ fn bsearch_index<'mcx>(
 /// Fallible sort of a single dimension's value `Datum`s by
 /// `compare_scalars_simple` (the serialize-side dedup sort, mcv.c:692-696).
 /// Implemented as a bottom-up merge sort so the comparator's `Err` propagates.
+/// Sort a dimension's collected values for serialization-time dedup. C uses
+/// `qsort` (in-place, unstable) with `compare_scalars_simple`, a pure comparator
+/// with no side effects, and the caller only walks the result for adjacent
+/// equality, so ordering within ties is irrelevant. We sort the slice **in
+/// place** with `sort_unstable_by` (matching C's in-place/unstable qsort) rather
+/// than the old index merge-sort, which allocated a `Vec<usize>` per recursion
+/// level and then cloned every `Datum` (a heap allocation per by-reference value)
+/// into a fresh array. The comparator can `ereport(ERROR)`; the first `Err` is
+/// captured and surfaced after the sort.
 fn sort_scalars<'mcx>(
     mcx: Mcx<'mcx>,
-    coll: &mut Vec<Datum<'mcx>>,
+    coll: &mut [Datum<'mcx>],
     lt_opr: Oid,
     collation: Oid,
 ) -> PgResult<()> {
-    let n = coll.len();
-    let mut idx: Vec<usize> = (0..n).collect();
-    merge_scalars(mcx, coll, lt_opr, collation, &mut idx)?;
-    let sorted: Vec<Datum<'mcx>> = idx.iter().map(|&i| coll[i].clone()).collect();
-    *coll = sorted;
-    Ok(())
-}
-
-fn merge_scalars<'mcx>(
-    mcx: Mcx<'mcx>,
-    coll: &[Datum<'mcx>],
-    lt_opr: Oid,
-    collation: Oid,
-    idx: &mut Vec<usize>,
-) -> PgResult<()> {
-    let n = idx.len();
-    if n <= 1 {
-        return Ok(());
-    }
-    let mid = n / 2;
-    let mut left: Vec<usize> = idx[..mid].to_vec();
-    let mut right: Vec<usize> = idx[mid..].to_vec();
-    merge_scalars(mcx, coll, lt_opr, collation, &mut left)?;
-    merge_scalars(mcx, coll, lt_opr, collation, &mut right)?;
-    let (mut i, mut j, mut k) = (0usize, 0usize, 0usize);
-    while i < left.len() && j < right.len() {
-        let cmp = core_seam::mcv_compare_scalars_simple::call(
-            mcx,
-            &coll[left[i]],
-            &coll[right[j]],
-            lt_opr,
-            collation,
-        )?;
-        if cmp <= 0 {
-            idx[k] = left[i];
-            i += 1;
-        } else {
-            idx[k] = right[j];
-            j += 1;
+    let mut err: Option<PgError> = None;
+    coll.sort_unstable_by(|a, b| {
+        if err.is_some() {
+            return core::cmp::Ordering::Equal;
         }
-        k += 1;
+        match core_seam::mcv_compare_scalars_simple::call(mcx, a, b, lt_opr, collation) {
+            Ok(c) => c.cmp(&0),
+            Err(e) => {
+                err = Some(e);
+                core::cmp::Ordering::Equal
+            }
+        }
+    });
+    match err {
+        Some(e) => Err(e),
+        None => Ok(()),
     }
-    while i < left.len() {
-        idx[k] = left[i];
-        i += 1;
-        k += 1;
-    }
-    while j < right.len() {
-        idx[k] = right[j];
-        j += 1;
-        k += 1;
-    }
-    Ok(())
 }
 
 /* ---------------------------------------------------------------------------

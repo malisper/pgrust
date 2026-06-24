@@ -2399,65 +2399,103 @@ fn sort_scalars<'mcx>(
     tupno_link: &mut [i32],
     ssup: &SortSupportData<'mcx>,
 ) -> PgResult<()> {
-    // We can't use slice::sort_by because the comparator mutates tupno_link as a
-    // side effect (the C compare_scalars does). Do an insertion-stable merge via
-    // an index sort that records equalities. Mirror C: ApplySortComparator, then
-    // on equal datums update tupno_link and order by tupno.
+    // We can't use slice::sort_by directly because `compare_scalars` mutates
+    // tupno_link[] as a side effect (mirroring C's compare_scalars), and the MCV
+    // detection downstream depends on the exact set of equal-pair comparisons the
+    // sort performs. We therefore keep the SAME top-down index merge sort (same
+    // split point, same `cmp <= 0` left-first tie rule) so the comparison
+    // sequence — and thus the tupno_link chain — is byte-for-byte identical to the
+    // previous, suite-verified implementation.
     //
-    // qsort_interruptible isn't available; use a simple O(n log n) sort by
-    // collecting comparisons. We use a Vec of indices and sort with a fallible
-    // comparator emulation: since sort_by can't return errors, resolve the
-    // comparator to a total order up front by precomputing is not feasible
-    // (comparator can ereport). Mirror C with an in-place heapsort that calls the
-    // comparator and propagates errors.
+    // The two allocation hot spots are eliminated, though: the recursion no longer
+    // allocates `left`/`right` `Vec`s per level (it reuses one scratch index
+    // buffer `tmp`), and the final reorder is an in-place cycle permutation of the
+    // `ScalarItem`s instead of cloning every element (each ScalarItem owns a
+    // by-reference `Datum`, so the old clone was a heap allocation per row). This
+    // removes the malloc/free churn that dominated compute_scalar_stats.
     let n = values.len();
-    // Bottom-up merge sort over indices with the side-effecting comparator.
-    let mut idx: Vec<usize> = (0..n).collect();
-    merge_sort_scalars(values, tupno_link, ssup, &mut idx)?;
-    // Apply the permutation.
-    let sorted: Vec<ScalarItem<'mcx>> = idx.iter().map(|&i| values[i].clone()).collect();
-    for (i, v) in sorted.into_iter().enumerate() {
-        values[i] = v;
+    if n <= 1 {
+        return Ok(());
     }
+    let mut idx: Vec<usize> = (0..n).collect();
+    let mut tmp: Vec<usize> = vec![0usize; n];
+    merge_sort_scalars(values, tupno_link, ssup, &mut idx, &mut tmp)?;
+    apply_permutation(values, &mut idx);
     Ok(())
 }
 
+/// Reorder `values` so that `values[i]` becomes the element originally at
+/// `perm[i]`, in place, by following permutation cycles (zero allocations, no
+/// element clones). `perm` is consumed (marked) during the walk.
+fn apply_permutation<T>(values: &mut [T], perm: &mut [usize]) {
+    let n = values.len();
+    const DONE: usize = usize::MAX;
+    for start in 0..n {
+        if perm[start] == DONE {
+            continue;
+        }
+        // Walk the cycle starting at `start`, rotating elements into place.
+        let mut cur = start;
+        loop {
+            let src = perm[cur];
+            perm[cur] = DONE;
+            if src == start {
+                break;
+            }
+            values.swap(cur, src);
+            cur = src;
+        }
+    }
+}
+
+/// Top-down index merge sort over `idx[lo..hi)`, using `tmp` as merge scratch.
+/// Compares via the side-effecting `compare_scalars` (which records tupno_link
+/// equalities), preserving the exact comparison order of the original recursive
+/// merge: recurse on `[lo,mid)` and `[mid,hi)`, then merge with left taken on
+/// `cmp <= 0`.
 fn merge_sort_scalars<'mcx>(
     values: &[ScalarItem<'mcx>],
     tupno_link: &mut [i32],
     ssup: &SortSupportData<'mcx>,
-    idx: &mut Vec<usize>,
+    idx: &mut [usize],
+    tmp: &mut [usize],
 ) -> PgResult<()> {
     let n = idx.len();
     if n <= 1 {
         return Ok(());
     }
     let mid = n / 2;
-    let mut left: Vec<usize> = idx[..mid].to_vec();
-    let mut right: Vec<usize> = idx[mid..].to_vec();
-    merge_sort_scalars(values, tupno_link, ssup, &mut left)?;
-    merge_sort_scalars(values, tupno_link, ssup, &mut right)?;
-    let mut i = 0;
-    let mut j = 0;
-    let mut k = 0;
-    while i < left.len() && j < right.len() {
-        let cmp = compare_scalars(values, tupno_link, ssup, left[i], right[j])?;
+    {
+        let (left, right) = idx.split_at_mut(mid);
+        let (tl, tr) = tmp.split_at_mut(mid);
+        merge_sort_scalars(values, tupno_link, ssup, left, tl)?;
+        merge_sort_scalars(values, tupno_link, ssup, right, tr)?;
+    }
+    // Copy the two sorted halves into the scratch buffer, then merge back into
+    // `idx`. Comparing `tmp[i]` (left half) vs `tmp[mid+j]` (right half) with the
+    // left taken on `cmp <= 0` reproduces the original `left[i]`/`right[j]` order.
+    tmp[..n].copy_from_slice(&idx[..n]);
+    let mut i = 0usize;
+    let mut j = mid;
+    let mut k = 0usize;
+    while i < mid && j < n {
+        let cmp = compare_scalars(values, tupno_link, ssup, tmp[i], tmp[j])?;
         if cmp <= 0 {
-            idx[k] = left[i];
+            idx[k] = tmp[i];
             i += 1;
         } else {
-            idx[k] = right[j];
+            idx[k] = tmp[j];
             j += 1;
         }
         k += 1;
     }
-    while i < left.len() {
-        idx[k] = left[i];
+    while i < mid {
+        idx[k] = tmp[i];
         i += 1;
         k += 1;
     }
-    while j < right.len() {
-        idx[k] = right[j];
+    while j < n {
+        idx[k] = tmp[j];
         j += 1;
         k += 1;
     }
