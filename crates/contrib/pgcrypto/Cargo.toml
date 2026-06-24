@@ -1,0 +1,44 @@
+[package]
+name = "pgcrypto"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgcrypto"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+# fmgr boundary + datum/varlena handling
+datum = { path = "../../_support/types/datum" }
+fmgr = { path = "../../_support/types/fmgr" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+
+# in-process ported-library registry (CREATE FUNCTION ... LANGUAGE C resolves here)
+dfmgr_seams = { path = "../../backend/utils/fmgr/dfmgr_seams" }
+utils_error = { path = "../../backend/utils/utils_error" }
+
+# custom GUC registration (pgcrypto.builtin_crypto_enabled)
+misc_guc = { path = "../../backend/utils/misc/misc_guc" }
+guc_tables = { path = "../../backend/utils/misc/guc_tables" }
+types_guc = { path = "../../_support/types/types_guc" }
+
+# PG's own crypto primitives (byte-for-byte with C):
+cryptohash = { path = "../../common/cryptohash" }
+crypto = { path = "../../_support/types/crypto" }
+pg_strong_random = { path = "../../port/pg_strong_random" }
+
+# RustCrypto symmetric ciphers (match OpenSSL output byte-for-byte):
+aes = "0.8"
+blowfish = { version = "0.9", features = ["bcrypt"] }
+des = "0.8"
+cast5 = "0.11"
+cbc = { version = "0.1", features = ["alloc", "block-padding"] }
+ecb = { version = "0.1", features = ["alloc", "block-padding"] }
+cfb-mode = "0.8"
+cipher = { version = "0.4", features = ["alloc", "block-padding"] }
+
+# Traditional DES crypt(3) + BSDI extended-DES (xdes) password hashing.
+pwhash = "1"

@@ -15,6 +15,7 @@ pub fn init_all() {
     verify_nbtree::init_seams();
     verify_common::init_seams();
     pg_prewarm::init_seams();
+    pgcrypto::init_seams();
     pg_stat_statements::init_seams();
     uuid_ossp::init_seams();
     citext::init_seams();

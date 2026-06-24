@@ -849,6 +849,13 @@ fn install_load_external_function(
 ) -> PgResult<fmgr::LoadedExternalFunc> {
     if let Some(library) = simple_library_name(probin) {
         if dfmgr_seams::builtin_library_present::call(library) {
+            // C: `load_external_function` → `internal_load_library` runs the
+            // module's `_PG_init` the first time the library is loaded this
+            // backend. Mirror that for an in-process builtin so a module whose
+            // `_PG_init` registers custom GUCs (e.g. pgcrypto's
+            // `pgcrypto.builtin_crypto_enabled`) has them defined before its
+            // first function call, not only after an explicit `LOAD`.
+            run_builtin_pg_init_once(library)?;
             return match dfmgr_seams::resolve_builtin_library_function::call(
                 library, prosrc,
             )? {
@@ -1026,25 +1033,33 @@ fn install_load_file(filename: &str, restricted: bool) -> PgResult<()> {
     // runs plpgsql's `_PG_init` (custom-GUC registration + `MarkGUCPrefixReserved`).
     if let Some(library) = simple_library_name(filename) {
         if dfmgr_seams::builtin_library_present::call(library) {
-            if let Some(pg_init) = dfmgr_seams::registry_pg_init(library) {
-                let already_inited = BUILTIN_INITED.with(|set| {
-                    let mut set = set.borrow_mut();
-                    if set.iter().any(|n| *n == library) {
-                        true
-                    } else {
-                        set.push(library.to_owned());
-                        false
-                    }
-                });
-                if !already_inited {
-                    pg_init()?;
-                }
-            }
+            run_builtin_pg_init_once(library)?;
             return Ok(());
         }
     }
     let ctx = ::mcx::MemoryContext::new("load_file");
     load_file(ctx.mcx(), filename, restricted)
+}
+
+/// Run a registered builtin module's `_PG_init`-equivalent (`pg_init`) exactly
+/// once per backend (`internal_load_library` / `call_pg_init`). A no-op if the
+/// module registered no `pg_init` or has already been initialized this backend.
+fn run_builtin_pg_init_once(library: &str) -> PgResult<()> {
+    if let Some(pg_init) = dfmgr_seams::registry_pg_init(library) {
+        let already_inited = BUILTIN_INITED.with(|set| {
+            let mut set = set.borrow_mut();
+            if set.iter().any(|n| *n == library) {
+                true
+            } else {
+                set.push(library.to_owned());
+                false
+            }
+        });
+        if !already_inited {
+            pg_init()?;
+        }
+    }
+    Ok(())
 }
 
 /// Install this crate's owned inward seams (`backend-utils-fmgr-dfmgr-seams`).
