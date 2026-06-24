@@ -287,25 +287,29 @@ pub(crate) const fn enable_gss() -> bool {
 pub(crate) const fn enable_sspi() -> bool {
     false
 }
-/// `USE_PAM` (build flag).
+/// `USE_PAM` (build flag). This build links `libpam` (the `pam_libpam_ffi`
+/// provider, `--with-pam`), so the `pam` hba method is accepted.
 pub(crate) const fn use_pam() -> bool {
-    false
+    pam_libpam_ffi::pam_available()
 }
-/// `USE_BSD_AUTH` (build flag).
+/// `USE_BSD_AUTH` (build flag). Not provided in this build.
 pub(crate) const fn use_bsd_auth() -> bool {
     false
 }
-/// `USE_LDAP` (build flag).
+/// `USE_LDAP` (build flag). This build links OpenLDAP (the `ldap_openldap_ffi`
+/// provider, `--with-ldap`), so the `ldap` hba method is accepted.
 pub(crate) const fn use_ldap() -> bool {
-    false
+    ldap_openldap_ffi::ldap_available()
 }
-/// `HAVE_LDAP_INITIALIZE` (configure probe).
+/// `HAVE_LDAP_INITIALIZE` (configure probe). True with OpenLDAP, which provides
+/// `ldap_initialize` (and thus the empty-server/SRV path the validator allows).
 pub(crate) const fn have_ldap_initialize() -> bool {
-    false
+    ldap_openldap_ffi::ldap_available()
 }
-/// `LDAP_API_FEATURE_X_OPENLDAP` (OpenLDAP build).
+/// `LDAP_API_FEATURE_X_OPENLDAP` (OpenLDAP build): provides `ldap_url_parse`
+/// for the `ldapurl` hba option.
 pub(crate) const fn ldap_api_feature_x_openldap() -> bool {
-    false
+    ldap_openldap_ffi::ldap_api_feature_x_openldap()
 }
 
 // ===========================================================================

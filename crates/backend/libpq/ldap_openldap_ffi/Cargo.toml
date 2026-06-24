@@ -1,0 +1,22 @@
+[package]
+name = "ldap_openldap_ffi"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[lib]
+name = "ldap_openldap_ffi"
+path = "src/lib.rs"
+
+[features]
+# Mirrors PostgreSQL's `--with-ldap` configure option (`#ifdef USE_LDAP`), and
+# OpenLDAP's `HAVE_LDAP_INITIALIZE`. When OFF, this crate binds nothing and
+# `ldap_available()` returns false, so the hba parser rejects the `ldap` method
+# exactly as a non-`--with-ldap` C build does. When ON, the system OpenLDAP
+# `libldap` is bound — the SAME library PostgreSQL's `--with-ldap` links.
+default = ["with-ldap"]
+with-ldap = []
+
+[dependencies]
+libc = "0.2"

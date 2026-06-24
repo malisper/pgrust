@@ -575,6 +575,14 @@ pub fn parse_hba_line(
         return Ok(None);
     }
 
+    // USE_LDAP: default ldapscope to LDAP_SCOPE_SUBTREE (hba.c:2094). Without
+    // this, a plain `ldapbasedn` search+bind searches at base scope and never
+    // finds entries below the base DN. (An `ldapurl` overrides this from the
+    // URL's scope component.)
+    if use_ldap() {
+        parsedline.ldapscope = ldap_openldap_ffi::LDAP_SCOPE_SUBTREE;
+    }
+
     // For GSS and SSPI, default include_realm to true.
     if parsedline.auth_method == uaGSS || parsedline.auth_method == uaSSPI {
         parsedline.include_realm = true;
@@ -1027,9 +1035,43 @@ pub(crate) fn parse_hba_auth_opt(
     } else if name == "ldapurl" {
         require_auth_option!(uaLDAP, "ldapurl", "ldap");
         if ldap_api_feature_x_openldap() {
-            // OpenLDAP `ldap_url_parse` arm — dead in this build (the predicate
-            // is false), so the not-supported branch below is taken.
-            unreachable!("ldap_api_feature_x_openldap is false in this build");
+            // OpenLDAP `ldap_url_parse` arm (hba.c:2203). Parse the URL and copy
+            // its components into the HbaLine fields. ldapurl is always parsed
+            // first; later ldap* options may override (the option order in the
+            // line drives that, matching C).
+            match ldap_openldap_ffi::parse_ldap_url(val) {
+                Ok(url) => {
+                    if let Some(scheme) = url.scheme {
+                        hbaline.ldapscheme = Some(scheme);
+                    }
+                    if let Some(host) = url.host {
+                        hbaline.ldapserver = Some(host);
+                    }
+                    hbaline.ldapport = url.port;
+                    if let Some(dn) = url.basedn {
+                        hbaline.ldapbasedn = Some(dn);
+                    }
+                    if let Some(attr) = url.searchattribute {
+                        hbaline.ldapsearchattribute = Some(attr);
+                    }
+                    hbaline.ldapscope = url.scope;
+                    if let Some(filter) = url.filter {
+                        hbaline.ldapsearchfilter = Some(filter);
+                    }
+                }
+                Err(msg) => {
+                    report_config(
+                        elevel,
+                        "parse_hba_auth_opt",
+                        msg.clone(),
+                        None,
+                        line_num,
+                        &file_name,
+                    )?;
+                    *err_msg = Some(msg);
+                    return Ok(false);
+                }
+            }
         } else {
             // not OpenLDAP
             report_config_feature(

@@ -11,6 +11,8 @@ crate-type = ["rlib"]
 
 [dependencies]
 auth_seams = { path = "auth_seams" }
+ldap_openldap_ffi = { path = "../ldap_openldap_ffi" }
+pam_libpam_ffi = { path = "../pam_libpam_ffi" }
 user_seams = { path = "../../commands/user_seams" }
 pqcomm = { path = "../pqcomm" }
 pqformat = { path = "../pqformat" }

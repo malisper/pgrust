@@ -1413,10 +1413,12 @@ dependencies = [
  "init_small_seams",
  "ip",
  "ipc_seams",
+ "ldap_openldap_ffi",
  "libc",
  "mcx",
  "miscinit",
  "net",
+ "pam_libpam_ffi",
  "pg_strong_random_seams",
  "postgres_seams",
  "pqcomm",
@@ -9102,6 +9104,7 @@ dependencies = [
  "ifaddr",
  "init_small_seams",
  "ip",
+ "ldap_openldap_ffi",
  "libc",
  "mbutils_seams",
  "mcx",
@@ -9110,6 +9113,7 @@ dependencies = [
  "net",
  "nodes",
  "oauth_seams",
+ "pam_libpam_ffi",
  "parallel_rt_seams",
  "postmaster_seams",
  "regex",
@@ -11967,6 +11971,13 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "ldap_openldap_ffi"
+version = "0.0.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -15726,6 +15737,13 @@ name = "pairingheap"
 version = "0.0.0"
 dependencies = [
  "types_error",
+]
+
+[[package]]
+name = "pam_libpam_ffi"
+version = "0.0.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

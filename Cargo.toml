@@ -686,6 +686,8 @@ members = [
   "crates/backend/libpq/be_secure_seams",
   "crates/backend/libpq/crypt",
   "crates/backend/libpq/crypt_seams",
+  "crates/backend/libpq/ldap_openldap_ffi",
+  "crates/backend/libpq/pam_libpam_ffi",
   "crates/backend/libpq/hba",
   "crates/backend/libpq/hba_seams",
   "crates/backend/libpq/ifaddr",

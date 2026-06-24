@@ -10,6 +10,11 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [dependencies]
+# External-auth FFI providers: their `*_available()` predicates back the
+# USE_LDAP / USE_PAM / HAVE_LDAP_INITIALIZE build flags this crate reads when
+# accepting the `ldap` / `pam` auth methods.
+ldap_openldap_ffi = { path = "../ldap_openldap_ffi" }
+pam_libpam_ffi = { path = "../pam_libpam_ffi" }
 # Inward seam crates (this crate installs their seams).
 auth_seams = { path = "../auth/auth_seams" }
 hba_seams = { path = "../hba_seams" }

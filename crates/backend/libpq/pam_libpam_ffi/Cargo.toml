@@ -1,0 +1,23 @@
+[package]
+name = "pam_libpam_ffi"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[lib]
+name = "pam_libpam_ffi"
+path = "src/lib.rs"
+
+[features]
+# Mirrors PostgreSQL's `--with-pam` configure option (`#ifdef USE_PAM`). When
+# OFF, this crate binds nothing (the `extern "C"` block is cfg'd out) and the
+# `pam_available()` predicate returns false, so the `pam` hba auth method is
+# rejected at hba parse time exactly as a non-PAM C build does. When ON, the
+# system PAM library (`libpam`) is bound — the SAME library PostgreSQL's
+# `--with-pam` links — and the CheckPAMAuth conversation runs against it.
+default = ["with-pam"]
+with-pam = []
+
+[dependencies]
+libc = "0.2"

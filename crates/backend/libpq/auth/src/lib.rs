@@ -37,6 +37,8 @@
 #[allow(unused_imports)]
 use wasm_libc_shim as libc;
 mod ident;
+mod ldap;
+mod pam;
 mod peer;
 mod radius;
 
@@ -488,13 +490,13 @@ pub fn ClientAuthentication(port: &mut Port) -> PgResult<()> {
             logdetail = ld;
         }
         m if m == uaPAM => {
-            status = seams::check_pam_auth::call()?;
+            status = pam::CheckPAMAuth(port)?;
         }
         m if m == uaBSD => {
             status = seams::check_bsd_auth::call()?;
         }
         m if m == uaLDAP => {
-            status = seams::check_ldap_auth::call()?;
+            status = ldap::CheckLDAPAuth(port)?;
         }
         m if m == uaRADIUS => {
             status = radius::CheckRADIUSAuth(port)?;
