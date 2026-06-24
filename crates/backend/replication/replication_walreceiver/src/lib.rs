@@ -37,8 +37,9 @@ use ::types_pgstat::wait_event::{
 use ::types_startup::StartupData;
 use ::wal::ArchiveMode;
 use ::types_walreceiver::{
-    WalRcvData, WalRcvState, WalRcvStreamOptions, WalRcvWakeupReason, WalReceiverActivity,
-    WalReceiverConn, MAXCONNINFO, NAMEDATALEN, NUM_WALRCV_WAKEUPS, TIMESTAMP_INFINITY,
+    walrcv_cstr_to_string, walrcv_strlcpy, WalRcvData, WalRcvState, WalRcvStreamOptions,
+    WalRcvWakeupReason, WalReceiverActivity, WalReceiverConn, MAXCONNINFO, NAMEDATALEN,
+    NUM_WALRCV_WAKEUPS, TIMESTAMP_INFINITY,
 };
 use WalRcvWakeupReason::*;
 
@@ -404,8 +405,8 @@ fn wal_receiver_main_inner() -> PgResult<()> {
 
         /* Fetch information required to start streaming */
         walrcv.ready_to_display = false;
-        conninfo = strlcpy_to_string(walrcv.conninfo.as_bytes(), MAXCONNINFO);
-        slotname = strlcpy_to_buf(walrcv.slotname.as_bytes(), NAMEDATALEN);
+        conninfo = strlcpy_to_string(&walrcv.conninfo, MAXCONNINFO);
+        slotname = strlcpy_to_buf(&walrcv.slotname, NAMEDATALEN);
         is_temp_slot = walrcv.is_temp_slot;
         startpoint = walrcv.receiveStart;
         startpointTLI = walrcv.receiveStartTLI;
@@ -477,9 +478,11 @@ fn wal_receiver_main_inner() -> PgResult<()> {
      */
     let tmp_conninfo = libpqwalrcv::walrcv_get_conninfo(conn);
     let (sender_host, sender_port) = libpqwalrcv::walrcv_get_senderinfo(conn);
+    let tmp_conninfo_bytes = tmp_conninfo.clone().unwrap_or_default().into_bytes();
+    let sender_host_bytes = sender_host.clone().unwrap_or_default().into_bytes();
     walrcvfuncs::with_walrcv::call(&mut |walrcv: &mut WalRcvData| {
-        walrcv.conninfo = tmp_conninfo.clone().unwrap_or_default();
-        walrcv.sender_host = sender_host.clone().unwrap_or_default();
+        walrcv_strlcpy(&mut walrcv.conninfo, &tmp_conninfo_bytes);
+        walrcv_strlcpy(&mut walrcv.sender_host, &sender_host_bytes);
         walrcv.sender_port = sender_port;
         walrcv.ready_to_display = true;
     });
@@ -533,9 +536,8 @@ fn wal_receiver_main_inner() -> PgResult<()> {
             );
             slotname = name_from_str(&new_slot);
             libpqwalrcv::walrcv_create_slot(conn, new_slot.clone())?;
-            let slot_for_shmem = strlcpy_to_string(slotname.as_slice(), NAMEDATALEN);
             walrcvfuncs::with_walrcv::call(&mut |walrcv: &mut WalRcvData| {
-                walrcv.slotname = slot_for_shmem.clone();
+                walrcv_strlcpy(&mut walrcv.slotname, &slotname);
             });
         }
 
@@ -1576,25 +1578,28 @@ pub fn pg_stat_get_wal_receiver() -> PgResult<Option<WalReceiverActivity>> {
     } else {
         act.latest_end_time = Some(snap.latestWalEndTime);
     }
-    if snap.slotname.is_empty() {
+    let slotname = walrcv_cstr_to_string(&snap.slotname);
+    if slotname.is_empty() {
         act.slotname = None;
     } else {
-        act.slotname = Some(snap.slotname);
+        act.slotname = Some(slotname);
     }
-    if snap.sender_host.is_empty() {
+    let sender_host = walrcv_cstr_to_string(&snap.sender_host);
+    if sender_host.is_empty() {
         act.sender_host = None;
     } else {
-        act.sender_host = Some(snap.sender_host);
+        act.sender_host = Some(sender_host);
     }
     if snap.sender_port == 0 {
         act.sender_port = None;
     } else {
         act.sender_port = Some(snap.sender_port);
     }
-    if snap.conninfo.is_empty() {
+    let conninfo = walrcv_cstr_to_string(&snap.conninfo);
+    if conninfo.is_empty() {
         act.conninfo = None;
     } else {
-        act.conninfo = Some(snap.conninfo);
+        act.conninfo = Some(conninfo);
     }
 
     Ok(Some(act))

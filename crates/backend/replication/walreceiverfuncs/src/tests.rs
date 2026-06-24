@@ -11,21 +11,24 @@ fn xlog_segment_offset_is_low_bits() {
 }
 
 #[test]
-fn strlcpy_field_truncates_and_stops_at_nul() {
-    let mut dst = String::new();
-    // Stops at the embedded NUL.
-    strlcpy_field(&mut dst, b"abc\0def", 64);
-    assert_eq!(dst, "abc");
+fn walrcv_strlcpy_truncates_and_stops_at_nul() {
+    // strlcpy into a fixed shmem `char[]` field: stop at an embedded NUL,
+    // truncate to fit cap-1 bytes, always NUL-terminate, and round-trip back
+    // through walrcv_cstr_to_string. Mirrors the C `strlcpy` the shmem
+    // WalRcvData char-array fields use.
+    let mut dst = [0xFFu8; 8];
+    walrcv_strlcpy(&mut dst, b"abc\0def");
+    assert_eq!(::types_walreceiver::walrcv_cstr_to_string(&dst), "abc");
 
-    // Truncates to size-1 bytes.
-    let mut dst2 = String::new();
-    strlcpy_field(&mut dst2, b"abcdef", 4);
-    assert_eq!(dst2, "abc");
+    // Truncates to cap-1 bytes.
+    let mut dst2 = [0xFFu8; 4];
+    walrcv_strlcpy(&mut dst2, b"abcdef");
+    assert_eq!(::types_walreceiver::walrcv_cstr_to_string(&dst2), "abc");
 
-    // Empty cap yields empty string.
-    let mut dst3 = String::from("old");
-    strlcpy_field(&mut dst3, b"xyz", 0);
-    assert_eq!(dst3, "");
+    // Empty source yields an empty string.
+    let mut dst3 = [0xFFu8; 4];
+    walrcv_strlcpy(&mut dst3, b"");
+    assert_eq!(::types_walreceiver::walrcv_cstr_to_string(&dst3), "");
 }
 
 #[test]

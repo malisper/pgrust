@@ -10,3 +10,4 @@ path = "src/lib.rs"
 
 [dependencies]
 types_error = { path = "../../../../_support/types/types_error" }
+fe_seams = { path = "../../../../interfaces/libpq/fe_seams" }

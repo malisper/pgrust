@@ -15,10 +15,11 @@
 #![allow(non_upper_case_globals)]
 
 use std::string::String;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicI32, AtomicU64};
 
-use ::types_core::{ProcNumber, TimeLineID, TimestampTz, XLogRecPtr};
+use ::condvar::ConditionVariable;
+use ::types_core::{pg_time_t, ProcNumber, TimeLineID, TimestampTz, XLogRecPtr};
+use ::types_storage::storage::Spinlock;
 
 /// Opaque libpq connection handle (`WalReceiverConn *`).  The concrete struct
 /// lives in the (separately ported) libpqwalreceiver module; here it is the
@@ -125,10 +126,18 @@ impl Default for WalRcvStreamOptions {
 ///
 /// Trimmed to the fields walreceiver.c actually reads or writes (the C struct
 /// also carries `startTime` and `walRcvStoppedCV`, both reached separately).
-/// The C `slock_t mutex` that guards these fields becomes the host [`Mutex`]
-/// wrapping a [`WalRcvData`] in [`WalRcvShared`]; the lock-free `writtenUpto`
-/// and `force_reply` words sit outside it as atomics.
-#[derive(Clone, Debug)]
+/// The C `slock_t mutex` that guards these fields is the embedded [`Spinlock`]
+/// in [`WalRcvShared`]; the lock-free `writtenUpto` and `force_reply` words sit
+/// outside it as atomics.
+///
+/// This block lives in the REAL shared-memory segment (allocated by
+/// `WalRcvShmemInit` via `ShmemInitStruct`), so the startup process and the
+/// forked walreceiver process share it.  That forces a `#[repr(C)]`,
+/// heap-pointer-free layout: the three C `char[]` fields are fixed-size,
+/// NUL-padded byte arrays here (matching the C struct exactly), not Rust
+/// `String`s.
+#[derive(Clone, Copy)]
+#[repr(C)]
 pub struct WalRcvData {
     /// `ProcNumber procno` — the active receiver's proc number.
     pub procno: ProcNumber,
@@ -154,18 +163,32 @@ pub struct WalRcvData {
     pub latestWalEnd: XLogRecPtr,
     /// `TimestampTz latestWalEndTime`.
     pub latestWalEndTime: TimestampTz,
-    /// `char conninfo[MAXCONNINFO]` — user-visible (obfuscated) conn string.
-    pub conninfo: String,
-    /// `char sender_host[NI_MAXHOST]`.
-    pub sender_host: String,
+    /// `char conninfo[MAXCONNINFO]` — user-visible (obfuscated) conn string,
+    /// NUL-terminated.
+    pub conninfo: [u8; MAXCONNINFO],
+    /// `char sender_host[NI_MAXHOST]`, NUL-terminated.
+    pub sender_host: [u8; NI_MAXHOST],
     /// `int sender_port`.
     pub sender_port: i32,
-    /// `char slotname[NAMEDATALEN]`.
-    pub slotname: String,
+    /// `char slotname[NAMEDATALEN]`, NUL-terminated.
+    pub slotname: [u8; NAMEDATALEN],
     /// `bool is_temp_slot`.
     pub is_temp_slot: bool,
     /// `bool ready_to_display`.
     pub ready_to_display: bool,
+}
+
+impl core::fmt::Debug for WalRcvData {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("WalRcvData")
+            .field("procno", &self.procno)
+            .field("pid", &self.pid)
+            .field("walRcvState", &self.walRcvState)
+            .field("receiveStart", &self.receiveStart)
+            .field("flushedUpto", &self.flushedUpto)
+            .field("receivedTLI", &self.receivedTLI)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for WalRcvData {
@@ -183,30 +206,70 @@ impl Default for WalRcvData {
             lastMsgReceiptTime: 0,
             latestWalEnd: 0,
             latestWalEndTime: 0,
-            conninfo: String::new(),
-            sender_host: String::new(),
+            conninfo: [0; MAXCONNINFO],
+            sender_host: [0; NI_MAXHOST],
             sender_port: 0,
-            slotname: String::new(),
+            slotname: [0; NAMEDATALEN],
             is_temp_slot: false,
             ready_to_display: false,
         }
     }
 }
 
-/// The whole shared-memory `WalRcvData` block: the `slock_t mutex`-guarded
-/// fields plus the two lock-free words (`pg_atomic_uint64 writtenUpto`,
-/// `sig_atomic_t force_reply`).  The owner (`walreceiverfuncs`) holds the one
-/// process-wide instance; the walreceiver port reaches it through the
-/// `with_walrcv` accessor seam, which takes the mutex around the caller's
-/// closure exactly like `SpinLockAcquire`/`SpinLockRelease` bracket the C code.
-#[derive(Debug, Default)]
+/// `strlcpy(dst, src, dst.len())` over a fixed C `char[]` field: copy `src` up
+/// to the first NUL (or its end), leaving room for a trailing NUL, and
+/// NUL-pad the rest. Mirrors the C `strlcpy(WalRcv->field, src, sizeof field)`.
+pub fn walrcv_strlcpy<const N: usize>(dst: &mut [u8; N], src: &[u8]) {
+    let src_len = src.iter().position(|&b| b == 0).unwrap_or(src.len());
+    let n = src_len.min(N - 1);
+    *dst = [0; N];
+    dst[..n].copy_from_slice(&src[..n]);
+}
+
+/// Render a fixed C `char[]` field (NUL-terminated) as an owned `String`,
+/// stopping at the first NUL. The inverse of [`walrcv_strlcpy`].
+pub fn walrcv_cstr_to_string(src: &[u8]) -> String {
+    let end = src.iter().position(|&b| b == 0).unwrap_or(src.len());
+    String::from_utf8_lossy(&src[..end]).into_owned()
+}
+
+/// The whole shared-memory `WalRcvData` control block, laid out `#[repr(C)]`
+/// for residence in the real shared-memory segment (`ShmemInitStruct`), so the
+/// startup process and the forked walreceiver share it.
+///
+/// `mutex` is the genuine `slock_t` spinlock guarding `data`, `startTime`, and
+/// the field-by-field updates of `walReceiverData`; `writtenUpto` /
+/// `force_reply` are the two lock-free words.  The walreceiver port reaches the
+/// guarded fields through the `with_walrcv` accessor seam, which takes
+/// `mutex` around the caller's closure exactly like
+/// `SpinLockAcquire`/`SpinLockRelease` bracket the C code.
+#[repr(C)]
 pub struct WalRcvShared {
-    /// `slock_t mutex` + the fields it guards.
-    pub guarded: Mutex<WalRcvData>,
+    /// `slock_t mutex` — guards `data` (and `startTime`).
+    pub mutex: Spinlock,
+    /// The spinlock-guarded fields.
+    pub data: WalRcvData,
+    /// `pg_time_t startTime` — guarded by `mutex`.
+    pub startTime: pg_time_t,
+    /// `ConditionVariable walRcvStoppedCV`.
+    pub walRcvStoppedCV: ConditionVariable,
     /// `pg_atomic_uint64 writtenUpto`.
     pub writtenUpto: AtomicU64,
     /// `sig_atomic_t force_reply` (used as a bool).
     pub force_reply: AtomicI32,
+}
+
+impl Default for WalRcvShared {
+    fn default() -> Self {
+        WalRcvShared {
+            mutex: Spinlock::new(),
+            data: WalRcvData::default(),
+            startTime: 0,
+            walRcvStoppedCV: ConditionVariable::new(),
+            writtenUpto: AtomicU64::new(0),
+            force_reply: AtomicI32::new(0),
+        }
+    }
 }
 
 /// Structured form of the `pg_stat_get_wal_receiver` result row.  `None` fields

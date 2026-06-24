@@ -44,58 +44,117 @@
 #[cfg(target_family = "wasm")]
 #[allow(unused_imports)]
 use wasm_libc_shim as libc;
+use core::cell::Cell;
+use core::mem::size_of;
 use std::sync::atomic::Ordering;
-use std::sync::{Mutex, OnceLock};
 
 use ::pmsignal::{PMSignalReason, SendPostmasterSignal};
 use ::condition_variable::{
-    ConditionVariableBroadcast, ConditionVariableCancelSleep, ConditionVariableInit,
+    ConditionVariableBroadcast, ConditionVariableCancelSleep,
     ConditionVariablePrepareToSleep, ConditionVariableSleep,
 };
-use ::condvar::ConditionVariable;
 use ::types_core::{
     pg_time_t, Size, TimeLineID, TimestampTz, XLogRecPtr, INVALID_PROC_NUMBER,
 };
 use ::types_error::PgResult;
 use ::types_pgstat::wait_event::WAIT_EVENT_WAL_RECEIVER_EXIT;
-use ::types_walreceiver::{WalRcvData, WalRcvShared, WalRcvState, MAXCONNINFO, NAMEDATALEN};
+use ::types_storage::storage::Spinlock;
+use ::types_walreceiver::{
+    walrcv_strlcpy, WalRcvData, WalRcvShared, WalRcvState, MAXCONNINFO, NAMEDATALEN,
+};
 
 use transam_xlog_seams as xlog;
 use xlogrecovery_seams as xlogrecovery;
 use latch_seams as latch;
 use walreceiverfuncs_seams as funcs_seams;
 use timestamp_seams as timestamp;
+use ipc_shmem_seams as shmem;
+use condition_variable_seams as condvar;
 
 /// `WALRCV_STARTUP_TIMEOUT` — how long to wait for walreceiver to start up
 /// after requesting postmaster to launch it, in seconds.
 /// (`walreceiverfuncs.c:40`)
 pub const WALRCV_STARTUP_TIMEOUT: pg_time_t = 10;
 
-/// The owned, process-wide `WalRcvData` control block.
-///
-/// `shared` carries the spinlock-guarded fields walreceiver.c shares plus the
-/// two lock-free atomics. `start_time` and `stopped_cv` are owner-only fields
-/// of the C struct that walreceiver.c does not access through the carrier, so
-/// they live here rather than in `WalRcvData`. They are still logically guarded
-/// by the same spinlock: every access takes `shared.guarded` first.
-struct OwnedWalRcv {
-    /// `slock_t mutex` + the guarded fields, plus `writtenUpto` / `force_reply`.
-    shared: WalRcvShared,
-    /// `pg_time_t startTime` — guarded by the same lock as `shared.guarded`.
-    start_time: Mutex<pg_time_t>,
-    /// `ConditionVariable walRcvStoppedCV`.
-    stopped_cv: ConditionVariable,
+// ===========================================================================
+// `WalRcvData *WalRcv` (`walreceiverfuncs.c:34`) — the single shared control
+// block, allocated by `WalRcvShmemInit` in the REAL shared-memory segment via
+// `ShmemInitStruct`. The C file-scope global pointer is reproduced as a
+// per-backend thread-local cell holding the genuine shmem address (each
+// backend attaches to the same segment); this mirrors the proven
+// `XLogRecoveryCtl` pattern in xlogrecovery/shmem.rs.
+// ===========================================================================
+
+std::thread_local! {
+    /// `static WalRcvData *WalRcv = NULL;` (`walreceiverfuncs.c:34`).
+    static WAL_RCV: Cell<*mut WalRcvShared> = const { Cell::new(core::ptr::null_mut()) };
 }
 
-/// `WalRcvData *WalRcv = NULL;` (`walreceiverfuncs.c:34`) — the single shared
-/// control block, allocated by [`WalRcvShmemInit`].
-static WAL_RCV: OnceLock<OwnedWalRcv> = OnceLock::new();
+/// The live `WalRcv` shmem pointer, or null before `WalRcvShmemInit`.
+#[inline]
+fn wal_rcv_ptr() -> *mut WalRcvShared {
+    let p = WAL_RCV.with(Cell::get);
+    debug_assert!(!p.is_null(), "WalRcv accessed before WalRcvShmemInit");
+    p
+}
 
-/// Borrow the shared control block (`WalRcvData *walrcv = WalRcv;`).
-fn wal_rcv() -> &'static OwnedWalRcv {
-    WAL_RCV
-        .get()
-        .expect("WalRcv accessed before WalRcvShmemInit")
+/// Borrow the shared control block (`WalRcvData *walrcv = WalRcv;`). Panics if
+/// the shmem region has not been initialized yet (the C code would dereference
+/// a NULL pointer); callers run only after `WalRcvShmemInit`.
+#[inline]
+fn wal_rcv() -> &'static WalRcvShared {
+    // SAFETY: `wal_rcv_ptr()` points at the live `ShmemInitStruct` region, which
+    // outlives the process; the guarded fields are synchronized by `mutex` at
+    // their points of use, the lock-free words by their atomics.
+    unsafe { &*wal_rcv_ptr() }
+}
+
+// ---------------------------------------------------------------------------
+// SpinLockAcquire / SpinLockRelease / SpinLockInit over `WalRcv->mutex`.
+// ---------------------------------------------------------------------------
+
+#[inline]
+fn spin_lock_acquire(lock: &Spinlock) {
+    s_lock::s_lock_macro(lock, Some(file!()), line!() as i32, None);
+}
+
+#[inline]
+fn spin_lock_release(lock: &Spinlock) {
+    s_lock::s_unlock(lock);
+}
+
+#[inline]
+fn spin_lock_init(lock: &Spinlock) {
+    s_lock::s_init_lock(lock);
+}
+
+/// `SpinLockAcquire(&WalRcv->mutex); r = f(&WalRcv->data); SpinLockRelease(...)`.
+/// The C spinlock is non-reentrant: `f` must not take the lock again.
+#[inline]
+fn with_locked<R>(f: impl FnOnce(&'static mut WalRcvData) -> R) -> R {
+    let p = wal_rcv_ptr();
+    // SAFETY: the spinlock lives in shmem; acquiring it excludes every other
+    // accessor of `data`, after which we form the exclusive `&mut` for `f`.
+    let walrcv = unsafe { &*p };
+    spin_lock_acquire(&walrcv.mutex);
+    // SAFETY: the spinlock is held, so this `&mut` to the shmem `data` field is
+    // the unique live reference; it lives only for the duration of `f`.
+    let data = unsafe { &mut (*p).data };
+    let r = f(data);
+    spin_lock_release(&walrcv.mutex);
+    r
+}
+
+/// `&mut WalRcv->startTime` under the held lock — the C `startTime` is guarded
+/// by the same spinlock as `data`. Used inside a `with_locked`-bracketed
+/// section where the lock is already held, so this only reborrows the field.
+#[inline]
+#[allow(clippy::mut_from_ref)]
+fn start_time_mut(_walrcv: &'static WalRcvShared) -> &'static mut pg_time_t {
+    // SAFETY: caller holds `WalRcv->mutex` (this is only called from within a
+    // `with_locked` closure), so this `&mut` to the shmem `startTime` field is
+    // the unique live reference.
+    unsafe { &mut (*wal_rcv_ptr()).startTime }
 }
 
 /// `XLogSegmentOffset(xlogptr, wal_segsz_bytes)` (`access/xlog_internal.h`) —
@@ -103,17 +162,6 @@ fn wal_rcv() -> &'static OwnedWalRcv {
 /// (`xlogptr & (wal_segsz_bytes - 1)`), ported in-crate exactly as the C macro.
 fn XLogSegmentOffset(xlogptr: XLogRecPtr, wal_segsz_bytes: i32) -> u32 {
     (xlogptr & (wal_segsz_bytes as u64 - 1)) as u32
-}
-
-/// `strlcpy(dst_field, src, size)` — overwrite an owned fixed-capacity field
-/// with at most `size-1` bytes of `src` (the C buffers are NUL-terminated, so
-/// the cap drops the trailing NUL slot). `src` is a NUL-terminated byte slice;
-/// copying stops at the first NUL, exactly as the C `strlcpy`.
-fn strlcpy_field(dst: &mut String, src: &[u8], size: usize) {
-    let src_len = src.iter().position(|&b| b == 0).unwrap_or(src.len());
-    let n = size.saturating_sub(1);
-    let copy = src_len.min(n);
-    *dst = String::from_utf8_lossy(&src[..copy]).into_owned();
 }
 
 /// `(pg_time_t) time(NULL)` — current wall-clock seconds since the Unix epoch.
@@ -162,27 +210,38 @@ fn add_size(s1: Size, s2: Size) -> PgResult<Size> {
 
 /// Allocate and initialize walreceiver-related shared memory.
 pub fn WalRcvShmemInit() -> PgResult<()> {
-    // ShmemInitStruct("Wal Receiver Ctl", ...) + MemSet(WalRcv, 0, ...): build
-    // the one zeroed block. `WalRcvShared::default()` is the zero state
-    // (walRcvState = WALRCV_STOPPED, atomics 0); `start_time` is 0 and the
-    // condition variable starts uninitialized, matching the MemSet. We then
-    // perform the explicit re-initialization the C does after the MemSet.
-    let _ = WAL_RCV.get_or_init(|| {
-        let owned = OwnedWalRcv {
-            shared: WalRcvShared::default(),
-            start_time: Mutex::new(0),
-            stopped_cv: ConditionVariable::default(),
-        };
-        // walrcv->walRcvState = WALRCV_STOPPED;  (already the default)
-        // ConditionVariableInit(&walrcv->walRcvStoppedCV);
-        ConditionVariableInit(&owned.stopped_cv);
-        // SpinLockInit(&WalRcv->mutex);  — the host Mutex starts unlocked.
-        // pg_atomic_init_u64(&WalRcv->writtenUpto, 0);  (already 0)
-        owned.shared.writtenUpto.store(0, Ordering::SeqCst);
+    // WalRcv = (WalRcvData *) ShmemInitStruct("Wal Receiver Ctl",
+    //                                         WalRcvShmemSize(), &found);
+    let (raw, found) = shmem::shmem_init_struct::call("Wal Receiver Ctl", WalRcvShmemSize()?)?;
+    let walrcv_ptr = raw as *mut WalRcvShared;
+    WAL_RCV.with(|c| c.set(walrcv_ptr));
+
+    if found {
+        return Ok(());
+    }
+
+    // First time through, so initialize.
+    //
+    // SAFETY: a fresh region of `WalRcvShmemSize()` bytes; single-process init
+    // (this runs in the postmaster before any backend forks).
+    unsafe {
+        // MemSet(WalRcv, 0, WalRcvShmemSize());
+        core::ptr::write_bytes(raw, 0, size_of::<WalRcvShared>());
+
+        let walrcv = &mut *walrcv_ptr;
+
+        // WalRcv->walRcvState = WALRCV_STOPPED;  (zero == WALRCV_STOPPED, but
+        // write the typed value to keep the enum discriminant well-formed).
+        walrcv.data.walRcvState = WalRcvState::WALRCV_STOPPED;
+        // ConditionVariableInit(&WalRcv->walRcvStoppedCV);
+        condvar::condition_variable_init::call(&mut walrcv.walRcvStoppedCV);
+        // SpinLockInit(&WalRcv->mutex);
+        spin_lock_init(&walrcv.mutex);
+        // pg_atomic_init_u64(&WalRcv->writtenUpto, 0);
+        walrcv.writtenUpto.store(0, Ordering::SeqCst);
         // WalRcv->procno = INVALID_PROC_NUMBER;
-        owned.shared.guarded.lock().unwrap().procno = INVALID_PROC_NUMBER;
-        owned
-    });
+        walrcv.data.procno = INVALID_PROC_NUMBER;
+    }
 
     Ok(())
 }
@@ -196,11 +255,8 @@ pub fn WalRcvRunning() -> PgResult<bool> {
     let walrcv = wal_rcv();
 
     // SpinLockAcquire / read state+startTime / SpinLockRelease.
-    let (mut state, start_time) = {
-        let guard = walrcv.shared.guarded.lock().unwrap();
-        let st = *walrcv.start_time.lock().unwrap();
-        (guard.walRcvState, st)
-    };
+    let (mut state, start_time) =
+        with_locked(|data| (data.walRcvState, *start_time_mut(walrcv)));
 
     // If it has taken too long for walreceiver to start up, give up. Setting the
     // state to STOPPED ensures that if walreceiver later does start up after
@@ -210,20 +266,19 @@ pub fn WalRcvRunning() -> PgResult<bool> {
         let now = now_seconds();
 
         if (now - start_time) > WALRCV_STARTUP_TIMEOUT {
-            let stopped = {
-                let mut guard = walrcv.shared.guarded.lock().unwrap();
+            let stopped = with_locked(|data| {
                 // Re-check the state after re-acquiring the lock.
-                if guard.walRcvState == WalRcvState::WALRCV_STARTING {
-                    guard.walRcvState = WalRcvState::WALRCV_STOPPED;
+                if data.walRcvState == WalRcvState::WALRCV_STARTING {
+                    data.walRcvState = WalRcvState::WALRCV_STOPPED;
                     state = WalRcvState::WALRCV_STOPPED;
                     true
                 } else {
                     false
                 }
-            };
+            });
 
             if stopped {
-                ConditionVariableBroadcast(&walrcv.stopped_cv);
+                ConditionVariableBroadcast(&walrcv.walRcvStoppedCV);
             }
         }
     }
@@ -240,29 +295,25 @@ pub fn WalRcvRunning() -> PgResult<bool> {
 pub fn WalRcvStreaming() -> PgResult<bool> {
     let walrcv = wal_rcv();
 
-    let (mut state, start_time) = {
-        let guard = walrcv.shared.guarded.lock().unwrap();
-        let st = *walrcv.start_time.lock().unwrap();
-        (guard.walRcvState, st)
-    };
+    let (mut state, start_time) =
+        with_locked(|data| (data.walRcvState, *start_time_mut(walrcv)));
 
     if state == WalRcvState::WALRCV_STARTING {
         let now = now_seconds();
 
         if (now - start_time) > WALRCV_STARTUP_TIMEOUT {
-            let stopped = {
-                let mut guard = walrcv.shared.guarded.lock().unwrap();
-                if guard.walRcvState == WalRcvState::WALRCV_STARTING {
-                    guard.walRcvState = WalRcvState::WALRCV_STOPPED;
+            let stopped = with_locked(|data| {
+                if data.walRcvState == WalRcvState::WALRCV_STARTING {
+                    data.walRcvState = WalRcvState::WALRCV_STOPPED;
                     state = WalRcvState::WALRCV_STOPPED;
                     true
                 } else {
                     false
                 }
-            };
+            });
 
             if stopped {
-                ConditionVariableBroadcast(&walrcv.stopped_cv);
+                ConditionVariableBroadcast(&walrcv.walRcvStoppedCV);
             }
         }
     }
@@ -289,30 +340,29 @@ pub fn ShutdownWalRcv() -> PgResult<()> {
     // Request walreceiver to stop. Walreceiver will switch to WALRCV_STOPPED
     // mode once it's finished, and will also request postmaster to not restart
     // itself.
-    {
-        let mut guard = walrcv.shared.guarded.lock().unwrap();
-        match guard.walRcvState {
+    with_locked(|data| {
+        match data.walRcvState {
             WalRcvState::WALRCV_STOPPED => {}
             WalRcvState::WALRCV_STARTING => {
-                guard.walRcvState = WalRcvState::WALRCV_STOPPED;
+                data.walRcvState = WalRcvState::WALRCV_STOPPED;
                 stopped = true;
             }
             WalRcvState::WALRCV_STREAMING
             | WalRcvState::WALRCV_WAITING
             | WalRcvState::WALRCV_RESTARTING => {
-                guard.walRcvState = WalRcvState::WALRCV_STOPPING;
+                data.walRcvState = WalRcvState::WALRCV_STOPPING;
                 // fall through
-                walrcvpid = guard.pid;
+                walrcvpid = data.pid;
             }
             WalRcvState::WALRCV_STOPPING => {
-                walrcvpid = guard.pid;
+                walrcvpid = data.pid;
             }
         }
-    }
+    });
 
     // Unnecessary but consistent.
     if stopped {
-        ConditionVariableBroadcast(&walrcv.stopped_cv);
+        ConditionVariableBroadcast(&walrcv.walRcvStoppedCV);
     }
 
     // Signal walreceiver process if it was still running.
@@ -322,9 +372,9 @@ pub fn ShutdownWalRcv() -> PgResult<()> {
 
     // Wait for walreceiver to acknowledge its death by setting state to
     // WALRCV_STOPPED.
-    ConditionVariablePrepareToSleep(&walrcv.stopped_cv);
+    ConditionVariablePrepareToSleep(&walrcv.walRcvStoppedCV);
     while WalRcvRunning()? {
-        ConditionVariableSleep(&walrcv.stopped_cv, WAIT_EVENT_WAL_RECEIVER_EXIT)?;
+        ConditionVariableSleep(&walrcv.walRcvStoppedCV, WAIT_EVENT_WAL_RECEIVER_EXIT)?;
     }
     ConditionVariableCancelSleep();
 
@@ -365,18 +415,16 @@ pub fn RequestXLogStreaming(
         recptr -= XLogSegmentOffset(recptr, wal_segment_size) as XLogRecPtr;
     }
 
-    let walrcv_proc = {
-        let mut guard = walrcv.shared.guarded.lock().unwrap();
-
+    let walrcv_proc = with_locked(|data| {
         // It better be stopped if we try to restart it.
         debug_assert!(
-            guard.walRcvState == WalRcvState::WALRCV_STOPPED
-                || guard.walRcvState == WalRcvState::WALRCV_WAITING
+            data.walRcvState == WalRcvState::WALRCV_STOPPED
+                || data.walRcvState == WalRcvState::WALRCV_WAITING
         );
 
         match conninfo {
-            Some(conninfo) => strlcpy_field(&mut guard.conninfo, conninfo, MAXCONNINFO),
-            None => guard.conninfo.clear(),
+            Some(conninfo) => walrcv_strlcpy(&mut data.conninfo, conninfo),
+            None => data.conninfo = [0; MAXCONNINFO],
         }
 
         // Use configured replication slot if present, and ignore the value of
@@ -385,35 +433,35 @@ pub fn RequestXLogStreaming(
         // create a temporary slot by itself and use it, or not.
         match slotname {
             Some(slotname) if !slotname.is_empty() && slotname[0] != 0 => {
-                strlcpy_field(&mut guard.slotname, slotname, NAMEDATALEN);
-                guard.is_temp_slot = false;
+                walrcv_strlcpy(&mut data.slotname, slotname);
+                data.is_temp_slot = false;
             }
             _ => {
-                guard.slotname.clear();
-                guard.is_temp_slot = create_temp_slot;
+                data.slotname = [0; NAMEDATALEN];
+                data.is_temp_slot = create_temp_slot;
             }
         }
 
-        if guard.walRcvState == WalRcvState::WALRCV_STOPPED {
+        if data.walRcvState == WalRcvState::WALRCV_STOPPED {
             launch = true;
-            guard.walRcvState = WalRcvState::WALRCV_STARTING;
+            data.walRcvState = WalRcvState::WALRCV_STARTING;
         } else {
-            guard.walRcvState = WalRcvState::WALRCV_RESTARTING;
+            data.walRcvState = WalRcvState::WALRCV_RESTARTING;
         }
-        *walrcv.start_time.lock().unwrap() = now;
+        *start_time_mut(walrcv) = now;
 
         // If this is the first startup of walreceiver (on this timeline),
         // initialize flushedUpto and latestChunkStart to the starting point.
-        if guard.receiveStart == 0 || guard.receivedTLI != tli {
-            guard.flushedUpto = recptr;
-            guard.receivedTLI = tli;
-            guard.latestChunkStart = recptr;
+        if data.receiveStart == 0 || data.receivedTLI != tli {
+            data.flushedUpto = recptr;
+            data.receivedTLI = tli;
+            data.latestChunkStart = recptr;
         }
-        guard.receiveStart = recptr;
-        guard.receiveStartTLI = tli;
+        data.receiveStart = recptr;
+        data.receiveStartTLI = tli;
 
-        guard.procno
-    };
+        data.procno
+    });
 
     if launch {
         // SendPostmasterSignal(PMSIGNAL_START_WALRECEIVER);
@@ -439,17 +487,16 @@ pub fn GetWalRcvFlushRecPtr(
     latest_chunk_start: Option<&mut XLogRecPtr>,
     receive_tli: Option<&mut TimeLineID>,
 ) -> XLogRecPtr {
-    let walrcv = wal_rcv();
-
-    let guard = walrcv.shared.guarded.lock().unwrap();
-    let recptr = guard.flushedUpto;
-    if let Some(latest_chunk_start) = latest_chunk_start {
-        *latest_chunk_start = guard.latestChunkStart;
-    }
-    if let Some(receive_tli) = receive_tli {
-        *receive_tli = guard.receivedTLI;
-    }
-    recptr
+    with_locked(|data| {
+        let recptr = data.flushedUpto;
+        if let Some(latest_chunk_start) = latest_chunk_start {
+            *latest_chunk_start = data.latestChunkStart;
+        }
+        if let Some(receive_tli) = receive_tli {
+            *receive_tli = data.receivedTLI;
+        }
+        recptr
+    })
 }
 
 /* ------------------------------------------------------------------------
@@ -459,9 +506,7 @@ pub fn GetWalRcvFlushRecPtr(
 /// Returns the last+1 byte position that walreceiver has written. This returns
 /// a recently written value without taking a lock.
 pub fn GetWalRcvWriteRecPtr() -> XLogRecPtr {
-    let walrcv = wal_rcv();
-
-    walrcv.shared.writtenUpto.load(Ordering::SeqCst)
+    wal_rcv().writtenUpto.load(Ordering::SeqCst)
 }
 
 /* ------------------------------------------------------------------------
@@ -471,12 +516,7 @@ pub fn GetWalRcvWriteRecPtr() -> XLogRecPtr {
 /// Returns the replication apply delay in ms, or -1 if the apply delay info is
 /// not available.
 pub fn GetReplicationApplyDelay() -> i32 {
-    let walrcv = wal_rcv();
-
-    let receive_ptr = {
-        let guard = walrcv.shared.guarded.lock().unwrap();
-        guard.flushedUpto
-    };
+    let receive_ptr = with_locked(|data| data.flushedUpto);
 
     // GetXLogReplayRecPtr(NULL): the C passes NULL for the TLI out-param.
     let (replay_ptr, _tli) = xlogrecovery::get_xlog_replay_rec_ptr::call();
@@ -504,12 +544,8 @@ pub fn GetReplicationApplyDelay() -> i32 {
 /// Returns the network latency in ms. Note that this includes any difference in
 /// clock settings between the servers, as well as timezone.
 pub fn GetReplicationTransferLatency() -> i32 {
-    let walrcv = wal_rcv();
-
-    let (last_msg_send_time, last_msg_receipt_time): (TimestampTz, TimestampTz) = {
-        let guard = walrcv.shared.guarded.lock().unwrap();
-        (guard.lastMsgSendTime, guard.lastMsgReceiptTime)
-    };
+    let (last_msg_send_time, last_msg_receipt_time): (TimestampTz, TimestampTz) =
+        with_locked(|data| (data.lastMsgSendTime, data.lastMsgReceiptTime));
 
     timestamp::timestamp_difference_milliseconds::call(last_msg_send_time, last_msg_receipt_time)
         as i32
@@ -524,19 +560,17 @@ pub fn GetReplicationTransferLatency() -> i32 {
 /// run the caller's closure with exclusive access to the spinlock-guarded
 /// fields (`with_walrcv` seam).
 fn with_walrcv(f: &mut dyn FnMut(&mut WalRcvData)) {
-    let walrcv = wal_rcv();
-    let mut guard = walrcv.shared.guarded.lock().unwrap();
-    f(&mut guard);
+    with_locked(|data| f(data));
 }
 
 /// `pg_atomic_write_u64(&WalRcv->writtenUpto, val)` (`set_written_upto` seam).
 fn set_written_upto(val: XLogRecPtr) {
-    wal_rcv().shared.writtenUpto.store(val, Ordering::SeqCst);
+    wal_rcv().writtenUpto.store(val, Ordering::SeqCst);
 }
 
 /// `pg_atomic_read_u64(&WalRcv->writtenUpto)` (`get_written_upto` seam).
 fn get_written_upto() -> XLogRecPtr {
-    wal_rcv().shared.writtenUpto.load(Ordering::SeqCst)
+    wal_rcv().writtenUpto.load(Ordering::SeqCst)
 }
 
 /// `WalRcv->force_reply = true` with a write barrier (`set_force_reply` seam).
@@ -544,20 +578,20 @@ fn set_force_reply() {
     // C: SpinLockAcquire-free store of a sig_atomic_t with pg_memory_barrier()
     // before the store, so the reader sees a consistent walreceiver state. A
     // SeqCst store provides the same ordering.
-    wal_rcv().shared.force_reply.store(1, Ordering::SeqCst);
+    wal_rcv().force_reply.store(1, Ordering::SeqCst);
 }
 
 /// Read-and-clear `WalRcv->force_reply` with the barrier (`take_force_reply`
 /// seam). Returns whether a reply was requested.
 fn take_force_reply() -> bool {
     // C: pg_memory_barrier(); then read force_reply and, if set, clear it.
-    wal_rcv().shared.force_reply.swap(0, Ordering::SeqCst) != 0
+    wal_rcv().force_reply.swap(0, Ordering::SeqCst) != 0
 }
 
 /// `ConditionVariableBroadcast(&WalRcv->walRcvStoppedCV)`
 /// (`wal_rcv_stopped_cv_broadcast` seam).
 fn wal_rcv_stopped_cv_broadcast() {
-    ConditionVariableBroadcast(&wal_rcv().stopped_cv);
+    ConditionVariableBroadcast(&wal_rcv().walRcvStoppedCV);
 }
 
 /// Seam adapter for `request_xlog_streaming` — the recovery page-read driver

@@ -88,6 +88,42 @@ thread_local! {
     /// it could be stored (so `PQerrorMessage` on a bad PGconn handle still
     /// reports something). Keyed by handle; `0` is the "last connect attempt".
     static CONN_ERRORS: RefCell<Vec<String>> = RefCell::new(vec![String::new()]);
+    /// `PgConnId` -> the explicit conninfo options the connection was made with
+    /// (the `PQconninfo(conn)` table, the slice `libpqrcv_get_conninfo` walks).
+    /// Parallel to `CONNS`; index 0 is the NULL sentinel.
+    static CONN_OPTIONS: RefCell<Vec<Option<Vec<ConninfoOption>>>> = RefCell::new(vec![None]);
+}
+
+/// `dispchar` values libpq assigns the security-sensitive keywords (the `*`
+/// fields `PQconninfoOptions` marks secret, so `libpqrcv_get_conninfo`
+/// obfuscates them). Mirrors the `"*"` dispchar entries of `PQconninfoOptions`.
+fn conninfo_dispchar(keyword: &str) -> &'static str {
+    match keyword {
+        "password" => "*",
+        _ => "",
+    }
+}
+
+/// Record (parallel to `CONNS`) the option list `PQconninfo(conn)` returns: the
+/// explicit `(keyword, value)` pairs the connection was opened with, each tagged
+/// with its `dispchar`. Empty / `None` values are kept (the reader skips them).
+fn store_conn_options(id: PgConnId, keys: &[String], vals: &[Option<String>]) {
+    let opts: Vec<ConninfoOption> = keys
+        .iter()
+        .zip(vals.iter())
+        .map(|(k, v)| ConninfoOption {
+            keyword: k.clone(),
+            val: v.clone(),
+            dispchar: conninfo_dispchar(k).to_string(),
+        })
+        .collect();
+    CONN_OPTIONS.with(|c| {
+        let mut v = c.borrow_mut();
+        if v.len() <= id {
+            v.resize_with(id + 1, || None);
+        }
+        v[id] = Some(opts);
+    });
 }
 
 /// Insert a connection, returning its handle (reusing a freed slot or pushing).
@@ -355,7 +391,11 @@ fn libpqsrv_connect_params(
     };
 
     match PgClientConn::connect(transport, &params, o.password.as_deref()) {
-        Ok(conn) => store_conn(conn),
+        Ok(conn) => {
+            let id = store_conn(conn);
+            store_conn_options(id, &keys, &vals);
+            id
+        }
         Err(e) => {
             record_connect_error(e.message());
             0
@@ -398,6 +438,12 @@ fn libpqsrv_disconnect(conn: PgConnId) {
     let taken = CONNS.with(|c| {
         let mut v = c.borrow_mut();
         v.get_mut(conn).and_then(|o| o.take())
+    });
+    CONN_OPTIONS.with(|c| {
+        let mut v = c.borrow_mut();
+        if let Some(slot) = v.get_mut(conn) {
+            *slot = None;
+        }
     });
     if let Some(c) = taken {
         c.finish();
@@ -484,10 +530,13 @@ fn pq_getlength(res: PgResultId, tup_num: i32, field_num: i32) -> i32 {
 /// a transport error to a CopyDone-with-error by leaving rawlen=-1 after
 /// recording the message.
 fn pq_get_copy_data(conn: PgConnId) -> (i32, Vec<u8>) {
+    use crate::client::CopyRecv;
     let r = with_conn(conn, |c| c.copy_receive());
     match r {
-        Ok(Some(buf)) => (buf.len() as i32, buf),
-        Ok(None) => (-1, Vec::new()),
+        // async PQgetCopyData: data ready, no data yet (0), or CopyDone (-1).
+        Ok(CopyRecv::Data(buf)) => (buf.len() as i32, buf),
+        Ok(CopyRecv::WouldBlock) => (0, Vec::new()),
+        Ok(CopyRecv::Done) => (-1, Vec::new()),
         Err(_) => (-2, Vec::new()),
     }
 }
@@ -580,11 +629,13 @@ fn pq_backend_pid(conn: PgConnId) -> i32 {
     })
 }
 
-/// `PQconninfo(conn)` — the live connection's option list. The owned model does
-/// not retain the full PQconninfoOption table (that is the conninfo parser's
-/// job, deferred); loud rather than silent-empty.
+/// `PQconninfo(conn)` — the live connection's option list. C returns the full
+/// `PQconninfoOption` table (every keyword, defaults filled in); here we return
+/// the explicit options the connection was opened with, recorded at connect.
+/// That is exactly the slice `libpqrcv_get_conninfo` walks to rebuild the
+/// user-visible connection string (it skips empty/`D` options regardless).
 fn pq_conninfo(conn: PgConnId) -> Option<Vec<ConninfoOption>> {
-    unported_conninfo::call(conn)
+    CONN_OPTIONS.with(|c| c.borrow().get(conn).and_then(|o| o.clone()))
 }
 
 /// `PQconninfoParse(conninfo, &err)` — the keyword=value conninfo parser

@@ -74,6 +74,16 @@ pub trait Transport {
     fn raw_fd(&self) -> i32 {
         -1
     }
+
+    /// Whether at least one byte can be read without blocking — the analog of
+    /// `pqReadReady` / a 0-timeout `poll(POLLIN)` on the socket. Used by the
+    /// async `PQgetCopyData`/`PQconsumeInput` path so the COPY-out reader can
+    /// return "no data yet" instead of blocking, letting the walreceiver flush
+    /// what it has and wait on the latch+socket. The default (no fd) reports
+    /// `true` so the blocking-read path is preserved for the in-process pipe.
+    fn read_ready(&self) -> bool {
+        true
+    }
 }
 
 /// A boxed transport is itself a transport (lets the registry store a
@@ -91,6 +101,9 @@ impl Transport for Box<dyn Transport> {
     }
     fn raw_fd(&self) -> i32 {
         (**self).raw_fd()
+    }
+    fn read_ready(&self) -> bool {
+        (**self).read_ready()
     }
 }
 
@@ -134,5 +147,29 @@ impl<S: Read + Write> Transport for SocketTransport<S> {
 
     fn raw_fd(&self) -> i32 {
         self.fd
+    }
+
+    fn read_ready(&self) -> bool {
+        if self.fd < 0 {
+            // No real fd to poll; fall back to the blocking-read path.
+            return true;
+        }
+        // poll(POLLIN, timeout=0): the non-blocking readability probe libpq's
+        // pqReadReady performs before an async PQgetCopyData.
+        let mut pfd = libc::pollfd {
+            fd: self.fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: pfd is a valid single pollfd; timeout 0 returns immediately.
+        let rc = unsafe { libc::poll(&mut pfd, 1, 0) };
+        // rc > 0 with POLLIN/POLLHUP/POLLERR set means a read won't block (data
+        // ready, or EOF/error which read_exact will surface). rc == 0 means no
+        // data yet; rc < 0 (EINTR etc.) — treat as "try a read" (matches C
+        // retrying), i.e. ready.
+        if rc < 0 {
+            return true;
+        }
+        rc > 0 && (pfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR)) != 0
     }
 }

@@ -35,6 +35,19 @@
 
 use crate::codec::{self, BackendMessage, MsgReader};
 use crate::protocol3;
+
+/// Outcome of an async [`PgClientConn::copy_receive`], mirroring
+/// `PQgetCopyData(conn, &buf, async=1)`: a CopyData payload, the end of the
+/// COPY (`CopyDone`), or "no data ready yet" (the C `0` return).
+pub enum CopyRecv {
+    /// A CopyData ('d') payload.
+    Data(Vec<u8>),
+    /// CopyDone ('c') — the server ended the COPY.
+    Done,
+    /// No complete message is available without blocking (`PQgetCopyData`
+    /// returning 0); the caller should wait on the socket.
+    WouldBlock,
+}
 use crate::result::{ExecStatusType, PGresult, PgResAttDesc, PgResAttValue, PgTransactionStatusType};
 use crate::transport::{Transport, TransportError};
 
@@ -413,22 +426,32 @@ impl<T: Transport> PgClientConn<T> {
         self.exec(command)
     }
 
-    /// `PQgetCopyData(conn, &buffer, async=0)` for the replication COPY-out
-    /// stream. Reads the next `CopyData` ('d') frame and returns its payload.
+    /// `PQgetCopyData(conn, &buffer, async=1)` for the replication COPY-out
+    /// stream. Reads the next `CopyData` ('d') frame and returns its payload,
+    /// without blocking when no complete message is buffered.
     ///
-    /// Returns `Ok(Some(bytes))` for a CopyData payload, `Ok(None)` for
+    /// Returns [`CopyRecv::Data`] for a CopyData payload, [`CopyRecv::Done`] for
     /// `CopyDone` (the server ended the COPY — collect the trailing result via
-    /// [`Self::end_copy`]). Mirrors `getCopyDataMessage`'s dispatch.
-    pub fn copy_receive(&mut self) -> Result<Option<Vec<u8>>, TransportError> {
+    /// [`Self::end_copy`]), or [`CopyRecv::WouldBlock`] when the socket has no
+    /// data ready (the C async `PQgetCopyData` returning 0). Mirrors
+    /// `getCopyDataMessage`'s dispatch over `pqReadReady`.
+    pub fn copy_receive(&mut self) -> Result<CopyRecv, TransportError> {
         loop {
+            // Async semantics: if nothing is ready to read, don't block — tell
+            // the caller to wait on the socket (the walreceiver's WaitLatch).
+            // Once a message header is available the rest of that message is
+            // read to completion (the peer frames whole messages).
+            if !self.transport.read_ready() {
+                return Ok(CopyRecv::WouldBlock);
+            }
             let msg = self.read_message()?;
             match msg.kind {
                 codec::B_COPY_DATA => {
                     // The whole body is the CopyData payload.
-                    return Ok(Some(msg.body));
+                    return Ok(CopyRecv::Data(msg.body));
                 }
                 codec::B_COPY_DONE => {
-                    return Ok(None);
+                    return Ok(CopyRecv::Done);
                 }
                 codec::B_NOTICE_RESPONSE => {
                     // getCopyDataMessage processes async notices inline.

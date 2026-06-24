@@ -14940,6 +14940,7 @@ dependencies = [
 name = "numutils"
 version = "0.0.0"
 dependencies = [
+ "fe_seams",
  "types_error",
 ]
 
@@ -25260,7 +25261,9 @@ dependencies = [
 name = "types_walreceiver"
 version = "0.0.0"
 dependencies = [
+ "condvar",
  "types_core",
+ "types_storage",
 ]
 
 [[package]]
@@ -26290,16 +26293,20 @@ name = "walreceiverfuncs"
 version = "0.0.0"
 dependencies = [
  "condition_variable",
+ "condition_variable_seams",
  "condvar",
  "init",
+ "ipc_shmem_seams",
  "latch_seams",
  "libc",
  "pmsignal",
+ "s_lock",
  "timestamp_seams",
  "transam_xlog_seams",
  "types_core",
  "types_error",
  "types_pgstat",
+ "types_storage",
  "types_walreceiver",
  "walreceiver_seams",
  "walreceiverfuncs_seams",

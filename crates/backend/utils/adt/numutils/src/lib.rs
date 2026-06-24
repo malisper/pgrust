@@ -697,8 +697,12 @@ fn is_space(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
 }
 
-/// This crate declares no seams; nothing to install.
-pub fn init_seams() {}
+/// Install the cross-crate seams `numutils` owns. `fe_seams::pg_strtoint32` is
+/// libpqwalreceiver's `pg_strtoint32` leaf (numutils.c) — same backing routine,
+/// erroring on overflow / bad syntax exactly like the C call.
+pub fn init_seams() {
+    fe_seams::pg_strtoint32::set(|s| pg_strtoint32(&s));
+}
 
 #[cfg(test)]
 mod tests {

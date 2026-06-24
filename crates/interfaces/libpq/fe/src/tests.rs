@@ -318,9 +318,15 @@ fn copy_both_stream() {
     let start = conn.start_replication("START_REPLICATION 0/0").unwrap();
     assert_eq!(start.result_status(), ExecStatusType::PGRES_COPY_BOTH);
 
-    assert_eq!(conn.copy_receive().unwrap().as_deref(), Some(&b"WAL-CHUNK-1"[..]));
-    assert_eq!(conn.copy_receive().unwrap().as_deref(), Some(&b"WAL-CHUNK-2"[..]));
-    assert_eq!(conn.copy_receive().unwrap(), None); // CopyDone
+    match conn.copy_receive().unwrap() {
+        crate::client::CopyRecv::Data(d) => assert_eq!(&d[..], &b"WAL-CHUNK-1"[..]),
+        _ => panic!("expected CopyData WAL-CHUNK-1"),
+    }
+    match conn.copy_receive().unwrap() {
+        crate::client::CopyRecv::Data(d) => assert_eq!(&d[..], &b"WAL-CHUNK-2"[..]),
+        _ => panic!("expected CopyData WAL-CHUNK-2"),
+    }
+    assert!(matches!(conn.copy_receive().unwrap(), crate::client::CopyRecv::Done)); // CopyDone
     let trailing = conn.end_copy().unwrap();
     assert_eq!(trailing.result_status(), ExecStatusType::PGRES_COMMAND_OK);
 }

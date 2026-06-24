@@ -10,3 +10,5 @@ path = "src/lib.rs"
 
 [dependencies]
 types_core = { path = "../types_core" }
+types_storage = { path = "../types_storage" }
+condvar = { path = "../condvar" }
