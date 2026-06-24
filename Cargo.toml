@@ -1419,6 +1419,7 @@ members = [
   "crates/contrib/amcheck/verify_heapam",
   "crates/contrib/amcheck/verify_nbtree",
   "crates/contrib/amcheck/verify_nbtree_seams",
+  "crates/contrib/citext",
   "crates/contrib/earthdistance",
   "crates/contrib/pg_prewarm",
   "crates/contrib/pg_stat_statements",

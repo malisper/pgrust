@@ -1,0 +1,23 @@
+[package]
+name = "citext"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "citext"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../_support/mcx" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+datum = { path = "../../_support/types/datum" }
+fmgr = { path = "../../_support/types/fmgr" }
+
+hashfn = { path = "../../common/hashfn" }
+
+# Seams (consulted, not owned):
+dfmgr_seams = { path = "../../backend/utils/fmgr/dfmgr_seams" }
+formatting_seams = { path = "../../backend/utils/adt/formatting_seams" }
+varlena_seams = { path = "../../backend/utils/adt/varlena_seams" }

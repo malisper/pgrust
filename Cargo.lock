@@ -2978,6 +2978,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "citext"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "dfmgr_seams",
+ "fmgr",
+ "formatting_seams",
+ "hashfn",
+ "mcx",
+ "types_core",
+ "types_error",
+ "varlena_seams",
+]
+
+[[package]]
 name = "clause"
 version = "0.0.0"
 dependencies = [
@@ -10065,6 +10080,7 @@ dependencies = [
  "checkpointer",
  "checksum",
  "checksum_helper",
+ "citext",
  "clause",
  "clauses",
  "clog",
