@@ -22,7 +22,12 @@ use ::types_core::{InvalidOid, Oid};
 use ::fmgr::resolution::FmgrResolution;
 use ::fmgr::FmgrInfo;
 use ::types_json::{JsonTokenType, JsonTypeCategory};
-use types_jsonb::jsonb_util::JsonbValue;
+// `<'static>` bridge: this crate stores a `Box<JsonbValue>` in a struct field
+// (an owned working tree) and is not yet converted to thread `'mcx`.  Naming the
+// `JsonbValueStatic` alias keeps today's owned-tree behavior unchanged.  (Also
+// on the `datum-b` jsonb migration map -- the bridge keeps the two campaigns
+// independently stageable.)
+use types_jsonb::jsonb_util::JsonbValueStatic as JsonbValue;
 use ::types_jsonb::jsonb::JsonbContainer;
 use ::types_tuple::heaptuple::TupleDesc;
 

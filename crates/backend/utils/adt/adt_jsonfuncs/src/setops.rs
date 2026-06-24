@@ -131,16 +131,16 @@ fn token_carries_value(r: JsonbIteratorToken) -> bool {
 /// A fresh `jbvNull` value (the C `JsonbValue v; v.type = jbvNull;` scratch, and
 /// the `NULL` placeholder `jsonb_delete_path` passes to `setPath`).
 #[inline]
-fn jbv_null() -> JsonbValue {
+fn jbv_null<'mcx>() -> JsonbValue<'mcx> {
     JsonbValue {
         typ: jbvType::jbvNull,
         val: JsonbValueData::Null,
     }
 }
 
-/// A `jbvString` value over the given bytes.
+/// A `jbvString` value borrowing the given arena bytes.
 #[inline]
-fn jbv_string(bytes: Vec<u8>) -> JsonbValue {
+fn jbv_string<'mcx>(bytes: &'mcx [u8]) -> JsonbValue<'mcx> {
     JsonbValue {
         typ: jbvType::jbvString,
         val: JsonbValueData::String(bytes),
@@ -188,14 +188,14 @@ fn cannot_set_path_in_scalar() -> PgError {
 /// `PG_RETURN_JSONB_P(JsonbValueToJsonb(res))`: serialise the built result value
 /// to a `jsonb` varlena (full header + container).
 #[inline]
-fn value_to_jsonb<'mcx>(mcx: Mcx<'mcx>, res: &JsonbValue) -> PgResult<PgVec<'mcx, u8>> {
+fn value_to_jsonb<'mcx>(mcx: Mcx<'mcx>, res: &JsonbValue<'mcx>) -> PgResult<PgVec<'mcx, u8>> {
     JsonbValueToJsonb(mcx, res)
 }
 
 /// `PG_RETURN_JSONB_P(in)`: return an input `jsonb` unchanged. The full varlena
 /// bytes are copied into `mcx` (the C returns the same datum it received).
 #[inline]
-fn return_jsonb<'mcx>(mcx: Mcx<'mcx>, jb: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+fn return_jsonb<'mcx>(mcx: Mcx<'mcx>, jb: &'mcx [u8]) -> PgResult<PgVec<'mcx, u8>> {
     let mut out = ::mcx::vec_with_capacity_in(mcx, jb.len())?;
     out.extend_from_slice(jb);
     Ok(out)
@@ -205,21 +205,22 @@ fn return_jsonb<'mcx>(mcx: Mcx<'mcx>, jb: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
 /// the state in place (the C `*state` write-back) and returns the produced
 /// container value when `seq` closes the outermost container, else `None`.
 #[inline]
-fn push(
-    state: &mut Option<Box<JsonbParseState>>,
+fn push<'mcx>(
+    mcx: Mcx<'mcx>,
+    state: &mut Option<Box<JsonbParseState<'mcx>>>,
     seq: JsonbIteratorToken,
-    jbval: Option<&JsonbValue>,
-) -> PgResult<Option<JsonbValue>> {
-    pushJsonbValue(state, seq, jbval)
+    jbval: Option<&JsonbValue<'mcx>>,
+) -> PgResult<Option<JsonbValue<'mcx>>> {
+    pushJsonbValue(mcx, state, seq, jbval)
 }
 
 /// `JsonbIteratorNext(it, &v, skip)` returning the owned token + scratch value;
 /// `it` is the owned iterator box, threaded in place (the C `*it` write-back).
 #[inline]
-fn iter_next(
-    it: &mut Option<Box<JsonbIterator>>,
+fn iter_next<'mcx>(
+    it: &mut Option<Box<JsonbIterator<'mcx>>>,
     skip_nested: bool,
-) -> PgResult<(JsonbIteratorToken, JsonbValue)> {
+) -> PgResult<(JsonbIteratorToken, JsonbValue<'mcx>)> {
     let mut v = jbv_null();
     let r = JsonbIteratorNext(it, &mut v, skip_nested)?;
     Ok((r, v))
@@ -228,7 +229,7 @@ fn iter_next(
 /// `JsonbToJsonbValue(newjsonb, &newval)` (jsonb_util.c): wrap a full-varlena
 /// `jsonb` as a `jbvBinary` value over its root container.
 #[inline]
-fn jsonb_to_jsonb_value(jb: &[u8]) -> PgResult<JsonbValue> {
+fn jsonb_to_jsonb_value<'mcx>(jb: &'mcx [u8]) -> PgResult<JsonbValue<'mcx>> {
     let mut v = jbv_null();
     JsonbToJsonbValue(jb, &mut v)?;
     Ok(v)
@@ -237,7 +238,7 @@ fn jsonb_to_jsonb_value(jb: &[u8]) -> PgResult<JsonbValue> {
 /// `v.type == jbvString && keylen == v.val.string.len && memcmp(...) == 0`.
 #[inline]
 fn string_is(v: &JsonbValue, key: &[u8]) -> bool {
-    matches!(&v.val, JsonbValueData::String(s) if s.as_slice() == key)
+    matches!(&v.val, JsonbValueData::String(s) if *s == key)
 }
 
 /// `v.val.string.len` for a `jbvString` value (else 0; callers guard on type).
@@ -274,13 +275,13 @@ fn token_as_int(r: JsonbIteratorToken) -> i32 {
 ///
 /// Returns the text bytes (the C `cstring_to_text_with_len(str->data, str->len)`
 /// payload; the varlena wrapping is the fmgr boundary).
-pub fn jsonb_pretty<'mcx>(mcx: Mcx<'mcx>, jb: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+pub fn jsonb_pretty<'mcx>(mcx: Mcx<'mcx>, jb: &'mcx [u8]) -> PgResult<PgVec<'mcx, u8>> {
     // JsonbToCStringIndent(str, &jb->root, VARSIZE(jb));
     JsonbToCStringIndent(mcx, vardata_any(jb), jb.len() as i32)
 }
 
 /// `jsonb_concat` (jsonfuncs.c:4623): the `||` operator.
-pub fn jsonb_concat<'mcx>(mcx: Mcx<'mcx>, jb1: &[u8], jb2: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+pub fn jsonb_concat<'mcx>(mcx: Mcx<'mcx>, jb1: &'mcx [u8], jb2: &'mcx [u8]) -> PgResult<PgVec<'mcx, u8>> {
     // If one of the jsonb is empty, just return the other if it's not scalar and
     // both are of the same kind. If it's a scalar or they are of different kinds
     // we need to perform the concatenation even if one is empty.
@@ -292,11 +293,11 @@ pub fn jsonb_concat<'mcx>(mcx: Mcx<'mcx>, jb1: &[u8], jb2: &[u8]) -> PgResult<Pg
         }
     }
 
-    let mut it1 = JsonbIteratorInit(vardata_any(jb1));
-    let mut it2 = JsonbIteratorInit(vardata_any(jb2));
-    let mut state: Option<Box<JsonbParseState>> = None;
+    let mut it1 = JsonbIteratorInit(mcx, vardata_any(jb1));
+    let mut it2 = JsonbIteratorInit(mcx, vardata_any(jb2));
+    let mut state: Option<Box<JsonbParseState<'mcx>>> = None;
 
-    let res = iterator_concat(&mut it1, &mut it2, &mut state)?;
+    let res = iterator_concat(mcx, &mut it1, &mut it2, &mut state)?;
 
     // Assert(res != NULL);
     value_to_jsonb(mcx, &res)
@@ -305,7 +306,7 @@ pub fn jsonb_concat<'mcx>(mcx: Mcx<'mcx>, jb1: &[u8], jb2: &[u8]) -> PgResult<Pg
 /// `jsonb_delete` (jsonfuncs.c:4664): delete a key/element (jsonb, text).
 ///
 /// `key` is the `text` payload bytes (the C `VARDATA_ANY(key)`/`VARSIZE_ANY_EXHDR`).
-pub fn jsonb_delete<'mcx>(mcx: Mcx<'mcx>, jb: &[u8], key: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+pub fn jsonb_delete<'mcx>(mcx: Mcx<'mcx>, jb: &'mcx [u8], key: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
     let keylen = key.len();
 
     if jb_root_is_scalar(jb) {
@@ -316,9 +317,9 @@ pub fn jsonb_delete<'mcx>(mcx: Mcx<'mcx>, jb: &[u8], key: &[u8]) -> PgResult<PgV
         return return_jsonb(mcx, jb);
     }
 
-    let mut it = JsonbIteratorInit(vardata_any(jb));
-    let mut state: Option<Box<JsonbParseState>> = None;
-    let mut res: Option<JsonbValue> = None;
+    let mut it = JsonbIteratorInit(mcx, vardata_any(jb));
+    let mut state: Option<Box<JsonbParseState<'mcx>>> = None;
+    let mut res: Option<JsonbValue<'mcx>> = None;
     let mut skip_nested = false;
 
     loop {
@@ -341,6 +342,7 @@ pub fn jsonb_delete<'mcx>(mcx: Mcx<'mcx>, jb: &[u8], key: &[u8]) -> PgResult<PgV
         }
 
         res = push(
+            mcx,
             &mut state,
             r,
             if token_carries_value(r) { Some(&v) } else { None },
@@ -356,7 +358,7 @@ pub fn jsonb_delete<'mcx>(mcx: Mcx<'mcx>, jb: &[u8], key: &[u8]) -> PgResult<PgV
 /// for an SQL NULL key); `keys_ndim` is `ARR_NDIM(keys)`.
 pub fn jsonb_delete_array<'mcx>(
     mcx: Mcx<'mcx>,
-    jb: &[u8],
+    jb: &'mcx [u8],
     keys: &[Option<Vec<u8>>],
     keys_ndim: i32,
 ) -> PgResult<PgVec<'mcx, u8>> {
@@ -378,9 +380,9 @@ pub fn jsonb_delete_array<'mcx>(
         return return_jsonb(mcx, jb);
     }
 
-    let mut it = JsonbIteratorInit(vardata_any(jb));
-    let mut state: Option<Box<JsonbParseState>> = None;
-    let mut res: Option<JsonbValue> = None;
+    let mut it = JsonbIteratorInit(mcx, vardata_any(jb));
+    let mut state: Option<Box<JsonbParseState<'mcx>>> = None;
+    let mut res: Option<JsonbValue<'mcx>> = None;
     let mut skip_nested = false;
 
     loop {
@@ -418,6 +420,7 @@ pub fn jsonb_delete_array<'mcx>(
         }
 
         res = push(
+            mcx,
             &mut state,
             r,
             if token_carries_value(r) { Some(&v) } else { None },
@@ -432,7 +435,7 @@ pub fn jsonb_delete_array<'mcx>(
 
 /// `jsonb_delete_idx` (jsonfuncs.c:4804): delete an array element by index.
 /// Negative `idx` counts back from the end.
-pub fn jsonb_delete_idx<'mcx>(mcx: Mcx<'mcx>, jb: &[u8], idx: i32) -> PgResult<PgVec<'mcx, u8>> {
+pub fn jsonb_delete_idx<'mcx>(mcx: Mcx<'mcx>, jb: &'mcx [u8], idx: i32) -> PgResult<PgVec<'mcx, u8>> {
     if jb_root_is_scalar(jb) {
         return Err(cannot_delete_from_scalar());
     }
@@ -446,8 +449,8 @@ pub fn jsonb_delete_idx<'mcx>(mcx: Mcx<'mcx>, jb: &[u8], idx: i32) -> PgResult<P
         return return_jsonb(mcx, jb);
     }
 
-    let mut it = JsonbIteratorInit(vardata_any(jb));
-    let mut state: Option<Box<JsonbParseState>> = None;
+    let mut it = JsonbIteratorInit(mcx, vardata_any(jb));
+    let mut state: Option<Box<JsonbParseState<'mcx>>> = None;
 
     let (r, v) = iter_next(&mut it, false)?;
     debug_assert_eq!(r, JsonbIteratorToken::WJB_BEGIN_ARRAY);
@@ -472,10 +475,10 @@ pub fn jsonb_delete_idx<'mcx>(mcx: Mcx<'mcx>, jb: &[u8], idx: i32) -> PgResult<P
         return return_jsonb(mcx, jb);
     }
 
-    push(&mut state, r, None)?;
+    push(mcx, &mut state, r, None)?;
 
     let mut i: u32 = 0;
-    let mut res: Option<JsonbValue> = None;
+    let mut res: Option<JsonbValue<'mcx>> = None;
     loop {
         let (r, v) = iter_next(&mut it, true)?;
         if r == JsonbIteratorToken::WJB_DONE {
@@ -489,6 +492,7 @@ pub fn jsonb_delete_idx<'mcx>(mcx: Mcx<'mcx>, jb: &[u8], idx: i32) -> PgResult<P
             }
         }
         res = push(
+            mcx,
             &mut state,
             r,
             if token_carries_value(r) { Some(&v) } else { None },
@@ -513,9 +517,9 @@ pub fn jsonb_delete_idx<'mcx>(mcx: Mcx<'mcx>, jb: &[u8], idx: i32) -> PgResult<P
 /// assign.
 pub fn jsonb_set_element<'mcx>(
     mcx: Mcx<'mcx>,
-    jb: &[u8],
+    jb: &'mcx [u8],
     path: &[Vec<u8>],
-    newval: &JsonbValue,
+    newval: &JsonbValue<'mcx>,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let path_len = path.len() as i32;
     // bool *path_nulls = palloc0(path_len * sizeof(bool)); — all false.
@@ -535,10 +539,11 @@ pub fn jsonb_set_element<'mcx>(
         }
     }
 
-    let mut it = JsonbIteratorInit(vardata_any(jb));
-    let mut state: Option<Box<JsonbParseState>> = None;
+    let mut it = JsonbIteratorInit(mcx, vardata_any(jb));
+    let mut state: Option<Box<JsonbParseState<'mcx>>> = None;
 
     let res = set_path(
+        mcx,
         &mut it,
         &path_elems,
         &path_nulls,
@@ -557,10 +562,10 @@ pub fn jsonb_set_element<'mcx>(
 /// `path` is the already-deconstructed `text[]`; `path_ndim` is `ARR_NDIM(path)`.
 pub fn jsonb_set<'mcx>(
     mcx: Mcx<'mcx>,
-    jb: &[u8],
+    jb: &'mcx [u8],
     path: &[Option<Vec<u8>>],
     path_ndim: i32,
-    newjsonb: &[u8],
+    newjsonb: &'mcx [u8],
     create: bool,
 ) -> PgResult<PgVec<'mcx, u8>> {
     // JsonbToJsonbValue(newjsonb, &newval);
@@ -574,10 +579,10 @@ pub fn jsonb_set<'mcx>(
 /// rewriting `fcinfo->args[2]`).
 fn jsonb_set_with_value<'mcx>(
     mcx: Mcx<'mcx>,
-    jb: &[u8],
+    jb: &'mcx [u8],
     path: &[Option<Vec<u8>>],
     path_ndim: i32,
-    newval: &JsonbValue,
+    newval: &JsonbValue<'mcx>,
     create: bool,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let path_len = path.len() as i32;
@@ -601,10 +606,11 @@ fn jsonb_set_with_value<'mcx>(
 
     let path_elems = path_elems_of(path);
     let path_nulls = path_nulls_of(path);
-    let mut it = JsonbIteratorInit(vardata_any(jb));
-    let mut st: Option<Box<JsonbParseState>> = None;
+    let mut it = JsonbIteratorInit(mcx, vardata_any(jb));
+    let mut st: Option<Box<JsonbParseState<'mcx>>> = None;
 
     let res = set_path(
+        mcx,
         &mut it,
         &path_elems,
         &path_nulls,
@@ -638,7 +644,7 @@ pub fn jsonb_set_lax<'mcx>(
     newjsonb: Option<&[u8]>,
     create: Option<bool>,
     handle_null: Option<&[u8]>,
-    json_null: &[u8],
+    json_null: &'mcx [u8],
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     // if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(3)) PG_RETURN_NULL();
     let (in_jb, (path_elems, path_ndim), create) = match (arg0, path, create) {
@@ -688,7 +694,7 @@ pub fn jsonb_set_lax<'mcx>(
 /// `jsonb_delete_path` (jsonfuncs.c:4984): delete the value at a path.
 pub fn jsonb_delete_path<'mcx>(
     mcx: Mcx<'mcx>,
-    jb: &[u8],
+    jb: &'mcx [u8],
     path: &[Option<Vec<u8>>],
     path_ndim: i32,
 ) -> PgResult<PgVec<'mcx, u8>> {
@@ -713,13 +719,14 @@ pub fn jsonb_delete_path<'mcx>(
 
     let path_elems = path_elems_of(path);
     let path_nulls = path_nulls_of(path);
-    let mut it = JsonbIteratorInit(vardata_any(jb));
-    let mut st: Option<Box<JsonbParseState>> = None;
+    let mut it = JsonbIteratorInit(mcx, vardata_any(jb));
+    let mut st: Option<Box<JsonbParseState<'mcx>>> = None;
 
     // setPath with newval == NULL: JB_PATH_DELETE never dereferences newval, so a
     // jbvNull placeholder reproduces the C `NULL` argument.
     let nullval = jbv_null();
     let res = set_path(
+        mcx,
         &mut it,
         &path_elems,
         &path_nulls,
@@ -736,10 +743,10 @@ pub fn jsonb_delete_path<'mcx>(
 /// `jsonb_insert` (jsonfuncs.c:5027): insert a value before/after a path target.
 pub fn jsonb_insert<'mcx>(
     mcx: Mcx<'mcx>,
-    jb: &[u8],
+    jb: &'mcx [u8],
     path: &[Option<Vec<u8>>],
     path_ndim: i32,
-    newjsonb: &[u8],
+    newjsonb: &'mcx [u8],
     after: bool,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let path_len = path.len() as i32;
@@ -760,10 +767,11 @@ pub fn jsonb_insert<'mcx>(
 
     let path_elems = path_elems_of(path);
     let path_nulls = path_nulls_of(path);
-    let mut it = JsonbIteratorInit(vardata_any(jb));
-    let mut st: Option<Box<JsonbParseState>> = None;
+    let mut it = JsonbIteratorInit(mcx, vardata_any(jb));
+    let mut st: Option<Box<JsonbParseState<'mcx>>> = None;
 
     let res = set_path(
+        mcx,
         &mut it,
         &path_elems,
         &path_nulls,
@@ -786,7 +794,7 @@ pub fn jsonb_insert<'mcx>(
 // ===========================================================================
 
 /// `push_null_elements` (jsonfuncs.c:1702): push `num` `jbvNull` array elements.
-fn push_null_elements(ps: &mut Option<Box<JsonbParseState>>, num: i32) -> PgResult<()> {
+fn push_null_elements<'mcx>(mcx: Mcx<'mcx>, ps: &mut Option<Box<JsonbParseState<'mcx>>>, num: i32) -> PgResult<()> {
     let null = jbv_null();
     let mut num = num;
     while num > 0 {
@@ -799,13 +807,14 @@ fn push_null_elements(ps: &mut Option<Box<JsonbParseState>>, num: i32) -> PgResu
 /// `IteratorConcat` (jsonfuncs.c:5076): merge two jsonb iterators into a parse
 /// state and return the resulting value. Logic copied 1:1 from the C (which
 /// itself follows hstore), including the object || object fast append.
-fn iterator_concat(
-    it1: &mut Option<Box<JsonbIterator>>,
-    it2: &mut Option<Box<JsonbIterator>>,
-    state: &mut Option<Box<JsonbParseState>>,
-) -> PgResult<JsonbValue> {
+fn iterator_concat<'mcx>(
+    mcx: Mcx<'mcx>,
+    it1: &mut Option<Box<JsonbIterator<'mcx>>>,
+    it2: &mut Option<Box<JsonbIterator<'mcx>>>,
+    state: &mut Option<Box<JsonbParseState<'mcx>>>,
+) -> PgResult<JsonbValue<'mcx>> {
     use JsonbIteratorToken::*;
-    let mut res: Option<JsonbValue> = None;
+    let mut res: Option<JsonbValue<'mcx>> = None;
 
     // JsonbIteratorNext reports raw scalars as single-element arrays, so we only
     // need to consider "object" and "array" cases here.
@@ -817,13 +826,13 @@ fn iterator_concat(
         //
         // Append all the tokens from v1 to res, except last WJB_END_OBJECT
         // (because res will not be finished yet).
-        push(state, rk1, None)?;
+        push(mcx, state, rk1, None)?;
         loop {
             let (r1, v1) = iter_next(it1, true)?;
             if r1 == WJB_END_OBJECT {
                 break;
             }
-            push(state, r1, Some(&v1))?;
+            push(mcx, state, r1, Some(&v1))?;
         }
 
         // Append all the tokens from v2 to res, including last WJB_END_OBJECT
@@ -834,11 +843,11 @@ fn iterator_concat(
             if r2 == WJB_DONE {
                 break;
             }
-            res = push(state, r2, if r2 != WJB_END_OBJECT { Some(&v2) } else { None })?;
+            res = push(mcx, state, r2, if r2 != WJB_END_OBJECT { Some(&v2) } else { None })?;
         }
     } else if rk1 == WJB_BEGIN_ARRAY && rk2 == WJB_BEGIN_ARRAY {
         // Both inputs are arrays.
-        push(state, rk1, None)?;
+        push(mcx, state, rk1, None)?;
 
         loop {
             let (r1, v1) = iter_next(it1, true)?;
@@ -846,7 +855,7 @@ fn iterator_concat(
                 break;
             }
             debug_assert_eq!(r1, WJB_ELEM);
-            push(state, r1, Some(&v1))?;
+            push(mcx, state, r1, Some(&v1))?;
         }
 
         loop {
@@ -855,23 +864,23 @@ fn iterator_concat(
                 break;
             }
             debug_assert_eq!(r2, WJB_ELEM);
-            push(state, WJB_ELEM, Some(&v2))?;
+            push(mcx, state, WJB_ELEM, Some(&v2))?;
         }
 
-        res = push(state, WJB_END_ARRAY, None /* signal to sort */)?;
+        res = push(mcx, state, WJB_END_ARRAY, None /* signal to sort */)?;
     } else if rk1 == WJB_BEGIN_OBJECT {
         // We have object || array.
         debug_assert_eq!(rk2, WJB_BEGIN_ARRAY);
 
-        push(state, WJB_BEGIN_ARRAY, None)?;
+        push(mcx, state, WJB_BEGIN_ARRAY, None)?;
 
-        push(state, WJB_BEGIN_OBJECT, None)?;
+        push(mcx, state, WJB_BEGIN_OBJECT, None)?;
         loop {
             let (r1, v1) = iter_next(it1, true)?;
             if r1 == WJB_DONE {
                 break;
             }
-            push(state, r1, if r1 != WJB_END_OBJECT { Some(&v1) } else { None })?;
+            push(mcx, state, r1, if r1 != WJB_END_OBJECT { Some(&v1) } else { None })?;
         }
 
         loop {
@@ -879,33 +888,33 @@ fn iterator_concat(
             if r2 == WJB_DONE {
                 break;
             }
-            res = push(state, r2, if r2 != WJB_END_ARRAY { Some(&v2) } else { None })?;
+            res = push(mcx, state, r2, if r2 != WJB_END_ARRAY { Some(&v2) } else { None })?;
         }
     } else {
         // We have array || object.
         debug_assert_eq!(rk1, WJB_BEGIN_ARRAY);
         debug_assert_eq!(rk2, WJB_BEGIN_OBJECT);
 
-        push(state, WJB_BEGIN_ARRAY, None)?;
+        push(mcx, state, WJB_BEGIN_ARRAY, None)?;
 
         loop {
             let (r1, v1) = iter_next(it1, true)?;
             if r1 == WJB_END_ARRAY {
                 break;
             }
-            push(state, r1, Some(&v1))?;
+            push(mcx, state, r1, Some(&v1))?;
         }
 
-        push(state, WJB_BEGIN_OBJECT, None)?;
+        push(mcx, state, WJB_BEGIN_OBJECT, None)?;
         loop {
             let (r2, v2) = iter_next(it2, true)?;
             if r2 == WJB_DONE {
                 break;
             }
-            push(state, r2, if r2 != WJB_END_OBJECT { Some(&v2) } else { None })?;
+            push(mcx, state, r2, if r2 != WJB_END_OBJECT { Some(&v2) } else { None })?;
         }
 
-        res = push(state, WJB_END_ARRAY, None)?;
+        res = push(mcx, state, WJB_END_ARRAY, None)?;
     }
 
     res.ok_or_else(|| elog_error("IteratorConcat produced no value"))
@@ -914,13 +923,14 @@ fn iterator_concat(
 /// `push_path` (jsonfuncs.c:1721): build nested empty objects/arrays for a path
 /// suffix and assign `newval` at the end. E.g. the path `[a][0][b]` with the new
 /// value `1` produces `{a: [{b: 1}]}`.
-fn push_path(
-    st: &mut Option<Box<JsonbParseState>>,
+fn push_path<'mcx>(
+    mcx: Mcx<'mcx>,
+    st: &mut Option<Box<JsonbParseState<'mcx>>>,
     level: i32,
     path_elems: &[Option<&[u8]>],
     path_nulls: &[bool],
     path_len: i32,
-    newval: &JsonbValue,
+    newval: &JsonbValue<'mcx>,
 ) -> PgResult<()> {
     // tpath contains the expected type of an empty jsonb created at each level
     // higher or equal to the current one, either jbvObject or jbvArray. It
@@ -944,15 +954,15 @@ fn push_path(
         match parse_full_i32(c) {
             None => {
                 // text, an object is expected
-                let newkey = jbv_string(c.to_vec());
-                push(st, JsonbIteratorToken::WJB_BEGIN_OBJECT, None)?;
-                push(st, JsonbIteratorToken::WJB_KEY, Some(&newkey))?;
+                let newkey = jbv_string(::mcx::slice_borrow_in(mcx, c)?);
+                push(mcx, st, JsonbIteratorToken::WJB_BEGIN_OBJECT, None)?;
+                push(mcx, st, JsonbIteratorToken::WJB_KEY, Some(&newkey))?;
                 tpath[(i - level) as usize] = jbvType::jbvObject;
             }
             Some(lindex) => {
                 // integer, an array is expected
-                push(st, JsonbIteratorToken::WJB_BEGIN_ARRAY, None)?;
-                push_null_elements(st, lindex)?;
+                push(mcx, st, JsonbIteratorToken::WJB_BEGIN_ARRAY, None)?;
+                push_null_elements(mcx, st, lindex)?;
                 tpath[(i - level) as usize] = jbvType::jbvArray;
             }
         }
@@ -961,9 +971,9 @@ fn push_path(
 
     // Insert an actual value for either an object or array.
     if tpath[((path_len - level) - 1) as usize] == jbvType::jbvArray {
-        push(st, JsonbIteratorToken::WJB_ELEM, Some(newval))?;
+        push(mcx, st, JsonbIteratorToken::WJB_ELEM, Some(newval))?;
     } else {
-        push(st, JsonbIteratorToken::WJB_VALUE, Some(newval))?;
+        push(mcx, st, JsonbIteratorToken::WJB_VALUE, Some(newval))?;
     }
 
     // Close everything up to the last but one level. The last one is closed
@@ -974,9 +984,9 @@ fn push_path(
             break;
         }
         if tpath[(i - level) as usize] == jbvType::jbvObject {
-            push(st, JsonbIteratorToken::WJB_END_OBJECT, None)?;
+            push(mcx, st, JsonbIteratorToken::WJB_END_OBJECT, None)?;
         } else {
-            push(st, JsonbIteratorToken::WJB_END_ARRAY, None)?;
+            push(mcx, st, JsonbIteratorToken::WJB_END_ARRAY, None)?;
         }
         i -= 1;
     }
@@ -991,16 +1001,17 @@ fn push_path(
 /// All path elements before the last must already exist whatever bits in
 /// `op_type` are set, or nothing is done.
 #[allow(clippy::too_many_arguments)]
-fn set_path(
-    it: &mut Option<Box<JsonbIterator>>,
+fn set_path<'mcx>(
+    mcx: Mcx<'mcx>,
+    it: &mut Option<Box<JsonbIterator<'mcx>>>,
     path_elems: &[Option<&[u8]>],
     path_nulls: &[bool],
     path_len: i32,
-    st: &mut Option<Box<JsonbParseState>>,
+    st: &mut Option<Box<JsonbParseState<'mcx>>>,
     level: i32,
-    newval: &JsonbValue,
+    newval: &JsonbValue<'mcx>,
     op_type: u32,
-) -> PgResult<JsonbValue> {
+) -> PgResult<JsonbValue<'mcx>> {
     stack_depth_seams::check_stack_depth::call()?;
 
     if path_nulls[level as usize] {
@@ -1036,26 +1047,28 @@ fn set_path(
                     ));
             }
 
-            push(st, r, None)?;
+            push(mcx, st, r, None)?;
             set_path_array(
+                mcx,
                 it, path_elems, path_nulls, path_len, st, level, newval, nelems, op_type,
             )?;
             let (r2, _v2) = iter_next(it, false)?;
             debug_assert_eq!(r2, JsonbIteratorToken::WJB_END_ARRAY);
-            push(st, r2, None)?
+            push(mcx, st, r2, None)?
         }
         JsonbIteratorToken::WJB_BEGIN_OBJECT => {
             let npairs = match &v.val {
                 JsonbValueData::Object(pairs) => pairs.len() as u32,
                 _ => 0,
             };
-            push(st, r, None)?;
+            push(mcx, st, r, None)?;
             set_path_object(
+                mcx,
                 it, path_elems, path_nulls, path_len, st, level, newval, npairs, op_type,
             )?;
             let (r2, _v2) = iter_next(it, true)?;
             debug_assert_eq!(r2, JsonbIteratorToken::WJB_END_OBJECT);
-            push(st, r2, None)?
+            push(mcx, st, r2, None)?
         }
         JsonbIteratorToken::WJB_ELEM | JsonbIteratorToken::WJB_VALUE => {
             // If instructed complain about attempts to replace within a scalar
@@ -1071,7 +1084,7 @@ fn set_path(
                         "The path assumes key is a composite object, but it is a scalar value.",
                     ));
             }
-            push(st, r, Some(&v))?
+            push(mcx, st, r, Some(&v))?
         }
         other => {
             return Err(elog_error(format!(
@@ -1087,9 +1100,10 @@ fn set_path(
 /// Walk over a nested container (`WJB_BEGIN_*`..matching `WJB_END_*`), copying
 /// every token through to the builder. Mirrors the `walking_level` loops shared
 /// by `setPathObject`/`setPathArray`.
-fn copy_nested_container(
-    it: &mut Option<Box<JsonbIterator>>,
-    st: &mut Option<Box<JsonbParseState>>,
+fn copy_nested_container<'mcx>(
+    mcx: Mcx<'mcx>,
+    it: &mut Option<Box<JsonbIterator<'mcx>>>,
+    st: &mut Option<Box<JsonbParseState<'mcx>>>,
 ) -> PgResult<()> {
     let mut walking_level = 1;
     while walking_level != 0 {
@@ -1103,6 +1117,7 @@ fn copy_nested_container(
         }
 
         push(
+            mcx,
             st,
             r,
             if token_carries_value(r) { Some(&v) } else { None },
@@ -1113,14 +1128,15 @@ fn copy_nested_container(
 
 /// `setPathObject` (jsonfuncs.c:5286): object walker for [`set_path`].
 #[allow(clippy::too_many_arguments)]
-fn set_path_object(
-    it: &mut Option<Box<JsonbIterator>>,
+fn set_path_object<'mcx>(
+    mcx: Mcx<'mcx>,
+    it: &mut Option<Box<JsonbIterator<'mcx>>>,
     path_elems: &[Option<&[u8]>],
     path_nulls: &[bool],
     path_len: i32,
-    st: &mut Option<Box<JsonbParseState>>,
+    st: &mut Option<Box<JsonbParseState<'mcx>>>,
     level: i32,
-    newval: &JsonbValue,
+    newval: &JsonbValue<'mcx>,
     npairs: u32,
     op_type: u32,
 ) -> PgResult<()> {
@@ -1138,9 +1154,9 @@ fn set_path_object(
     // empty object is a special case for create
     if npairs == 0 && (op_type & JB_PATH_CREATE_OR_INSERT) != 0 && level == path_len - 1 {
         let pe = pathelem.expect("pathelem set when not done");
-        let newkey = jbv_string(pe.to_vec());
-        push(st, JsonbIteratorToken::WJB_KEY, Some(&newkey))?;
-        push(st, JsonbIteratorToken::WJB_VALUE, Some(newval))?;
+        let newkey = jbv_string(::mcx::slice_borrow_in(mcx, pe)?);
+        push(mcx, st, JsonbIteratorToken::WJB_KEY, Some(&newkey))?;
+        push(mcx, st, JsonbIteratorToken::WJB_VALUE, Some(newval))?;
     }
 
     for i in 0..npairs {
@@ -1152,7 +1168,7 @@ fn set_path_object(
         let key_matches = !done
             && match (&k.val, pathelem) {
                 (JsonbValueData::String(ks), Some(pe)) => {
-                    ks.len() == pe.len() && ks.as_slice() == pe
+                    ks.len() == pe.len() && *ks == pe
                 }
                 _ => false,
             };
@@ -1172,12 +1188,13 @@ fn set_path_object(
                 // skip value
                 let _ = iter_next(it, true)?;
                 if (op_type & JB_PATH_DELETE) == 0 {
-                    push(st, JsonbIteratorToken::WJB_KEY, Some(&k))?;
-                    push(st, JsonbIteratorToken::WJB_VALUE, Some(newval))?;
+                    push(mcx, st, JsonbIteratorToken::WJB_KEY, Some(&k))?;
+                    push(mcx, st, JsonbIteratorToken::WJB_VALUE, Some(newval))?;
                 }
             } else {
-                push(st, r, Some(&k))?;
+                push(mcx, st, r, Some(&k))?;
                 set_path(
+                    mcx,
                     it,
                     path_elems,
                     path_nulls,
@@ -1195,22 +1212,23 @@ fn set_path_object(
                 && i == npairs - 1
             {
                 let pe = pathelem.expect("pathelem set when not done");
-                let newkey = jbv_string(pe.to_vec());
-                push(st, JsonbIteratorToken::WJB_KEY, Some(&newkey))?;
-                push(st, JsonbIteratorToken::WJB_VALUE, Some(newval))?;
+                let newkey = jbv_string(::mcx::slice_borrow_in(mcx, pe)?);
+                push(mcx, st, JsonbIteratorToken::WJB_KEY, Some(&newkey))?;
+                push(mcx, st, JsonbIteratorToken::WJB_VALUE, Some(newval))?;
             }
 
-            push(st, r, Some(&k))?;
+            push(mcx, st, r, Some(&k))?;
             let (r3, v) = iter_next(it, false)?;
             r = r3;
             push(
+                mcx,
                 st,
                 r,
                 if token_carries_value(r) { Some(&v) } else { None },
             )?;
             if r == JsonbIteratorToken::WJB_BEGIN_ARRAY || r == JsonbIteratorToken::WJB_BEGIN_OBJECT
             {
-                copy_nested_container(it, st)?;
+                copy_nested_container(mcx, it, st)?;
             }
         }
     }
@@ -1224,9 +1242,9 @@ fn set_path_object(
     // the whole chain of empty objects and insert the new value there.
     if !done && (op_type & JB_PATH_FILL_GAPS) != 0 && level < path_len - 1 {
         let pe = pathelem.expect("pathelem set when not done");
-        let newkey = jbv_string(pe.to_vec());
-        push(st, JsonbIteratorToken::WJB_KEY, Some(&newkey))?;
-        push_path(st, level, path_elems, path_nulls, path_len, newval)?;
+        let newkey = jbv_string(::mcx::slice_borrow_in(mcx, pe)?);
+        push(mcx, st, JsonbIteratorToken::WJB_KEY, Some(&newkey))?;
+        push_path(mcx, st, level, path_elems, path_nulls, path_len, newval)?;
         // Result is closed with WJB_END_OBJECT outside of this function.
     }
 
@@ -1235,14 +1253,15 @@ fn set_path_object(
 
 /// `setPathArray` (jsonfuncs.c:5425): array walker for [`set_path`].
 #[allow(clippy::too_many_arguments)]
-fn set_path_array(
-    it: &mut Option<Box<JsonbIterator>>,
+fn set_path_array<'mcx>(
+    mcx: Mcx<'mcx>,
+    it: &mut Option<Box<JsonbIterator<'mcx>>>,
     path_elems: &[Option<&[u8]>],
     path_nulls: &[bool],
     path_len: i32,
-    st: &mut Option<Box<JsonbParseState>>,
+    st: &mut Option<Box<JsonbParseState<'mcx>>>,
     level: i32,
-    newval: &JsonbValue,
+    newval: &JsonbValue<'mcx>,
     nelems: u32,
     op_type: u32,
 ) -> PgResult<()> {
@@ -1301,9 +1320,9 @@ fn set_path_array(
     {
         // Assert(newval != NULL);
         if (op_type & JB_PATH_FILL_GAPS) != 0 && nelems == 0 && idx > 0 {
-            push_null_elements(st, idx)?;
+            push_null_elements(mcx, st, idx)?;
         }
-        push(st, JsonbIteratorToken::WJB_ELEM, Some(newval))?;
+        push(mcx, st, JsonbIteratorToken::WJB_ELEM, Some(newval))?;
         done = true;
     }
 
@@ -1317,21 +1336,22 @@ fn set_path_array(
                 let (r, v) = iter_next(it, true)?;
 
                 if (op_type & (JB_PATH_INSERT_BEFORE | JB_PATH_CREATE)) != 0 {
-                    push(st, JsonbIteratorToken::WJB_ELEM, Some(newval))?;
+                    push(mcx, st, JsonbIteratorToken::WJB_ELEM, Some(newval))?;
                 }
 
                 // We should keep the current value only in case of
                 // JB_PATH_INSERT_BEFORE or JB_PATH_INSERT_AFTER because otherwise
                 // it should be deleted or replaced.
                 if (op_type & (JB_PATH_INSERT_AFTER | JB_PATH_INSERT_BEFORE)) != 0 {
-                    push(st, r, Some(&v))?;
+                    push(mcx, st, r, Some(&v))?;
                 }
 
                 if (op_type & (JB_PATH_INSERT_AFTER | JB_PATH_REPLACE)) != 0 {
-                    push(st, JsonbIteratorToken::WJB_ELEM, Some(newval))?;
+                    push(mcx, st, JsonbIteratorToken::WJB_ELEM, Some(newval))?;
                 }
             } else {
                 set_path(
+                    mcx,
                     it,
                     path_elems,
                     path_nulls,
@@ -1346,6 +1366,7 @@ fn set_path_array(
             let (r, v) = iter_next(it, false)?;
 
             push(
+                mcx,
                 st,
                 r,
                 if token_carries_value(r) { Some(&v) } else { None },
@@ -1353,7 +1374,7 @@ fn set_path_array(
 
             if r == JsonbIteratorToken::WJB_BEGIN_ARRAY || r == JsonbIteratorToken::WJB_BEGIN_OBJECT
             {
-                copy_nested_container(it, st)?;
+                copy_nested_container(mcx, it, st)?;
             }
         }
     }
@@ -1362,9 +1383,9 @@ fn set_path_array(
         // If asked to fill the gaps, idx could be bigger than nelems, so prepend
         // the new element with nulls if that's the case.
         if (op_type & JB_PATH_FILL_GAPS) != 0 && idx as u32 > nelems {
-            push_null_elements(st, idx - nelems as i32)?;
+            push_null_elements(mcx, st, idx - nelems as i32)?;
         }
-        push(st, JsonbIteratorToken::WJB_ELEM, Some(newval))?;
+        push(mcx, st, JsonbIteratorToken::WJB_ELEM, Some(newval))?;
         done = true;
     }
 
@@ -1377,9 +1398,9 @@ fn set_path_array(
     // the whole chain of empty objects and insert the new value there.
     if !done && (op_type & JB_PATH_FILL_GAPS) != 0 && level < path_len - 1 {
         if idx > 0 {
-            push_null_elements(st, idx - nelems as i32)?;
+            push_null_elements(mcx, st, idx - nelems as i32)?;
         }
-        push_path(st, level, path_elems, path_nulls, path_len, newval)?;
+        push_path(mcx, st, level, path_elems, path_nulls, path_len, newval)?;
         // Result is closed with WJB_END_OBJECT outside of this function.
     }
 
@@ -1393,8 +1414,8 @@ fn set_path_array(
 /// `parse_jsonb_index_flags` (jsonfuncs.c:5596): parse the flag array that
 /// describes which jsonb value kinds to iterate in `iterate_json(b)_values`,
 /// into the `jti*` bitmask. The information is presented in jsonb format.
-pub fn parse_jsonb_index_flags(jb: &[u8]) -> PgResult<u32> {
-    let mut it = JsonbIteratorInit(vardata_any(jb));
+pub fn parse_jsonb_index_flags<'mcx>(mcx: Mcx<'mcx>, jb: &'mcx [u8]) -> PgResult<u32> {
+    let mut it = JsonbIteratorInit(mcx, vardata_any(jb));
     let mut flags: u32 = 0;
 
     let (mut typ, _v) = iter_next(&mut it, false)?;
@@ -1423,7 +1444,7 @@ pub fn parse_jsonb_index_flags(jb: &[u8]) -> PgResult<u32> {
         }
 
         let s = match &v.val {
-            JsonbValueData::String(s) => s.as_slice(),
+            JsonbValueData::String(s) => s,
             _ => unreachable!("jbvString payload"),
         };
 

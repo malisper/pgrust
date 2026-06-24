@@ -124,23 +124,11 @@ fn oom() -> PgError {
     PgError::error("out of memory").with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
 }
 
-/// Fallibly copy a `&[u8]` to an owned `Vec<u8>`.  The length is already a
-/// sub-slice of existing in-memory bytes (validated by the slice index), so the
-/// only failure mode is allocation; we `try_reserve` and surface OOM.
-fn slice_to_vec(src: &[u8]) -> PgResult<Vec<u8>> {
-    let mut v = Vec::new();
-    v.try_reserve_exact(src.len()).map_err(|_| oom())?;
-    v.extend_from_slice(src);
-    Ok(v)
-}
-
-/// Copy a `&[u8]` into a shared, refcounted `Rc<[u8]>` document buffer (one copy
-/// at the iterator root; nested-container recursion then shares this buffer
-/// without re-copying).  Reserves fallibly via [`slice_to_vec`] so the OOM path
-/// is identical to the rest of the crate.
-fn rc_from_slice(src: &[u8]) -> PgResult<alloc::rc::Rc<[u8]>> {
-    Ok(alloc::rc::Rc::from(slice_to_vec(src)?.into_boxed_slice()))
-}
+// Under the `'mcx` zero-copy model, the read path sub-slices the source document
+// buffer directly (`&'mcx [u8]`), so the old `slice_to_vec` deep-copy primitive
+// and the Option-E `rc_from_slice`/`Rc<[u8]>` iterator-buffer-sharing mitigation
+// are both superseded by the arena and removed: the arena (not a refcount) owns
+// the buffer, and a read is a pointer sub-slice with no allocation.
 
 // ---------------------------------------------------------------------------
 // On-disk byte helpers (replace the C pointer arithmetic over JsonbContainer).
@@ -184,7 +172,7 @@ fn jsonb_vardata_off(jsonb: &[u8]) -> usize {
 /// C: `JsonbToJsonbValue(Jsonb *jsonb, JsonbValue *val)`.
 ///
 /// `jsonb` is the full on-disk varlena bytes (length header + root container).
-pub fn JsonbToJsonbValue(jsonb: &[u8], val: &mut JsonbValue) -> PgResult<()> {
+pub fn JsonbToJsonbValue<'mcx>(jsonb: &'mcx [u8], val: &mut JsonbValue<'mcx>) -> PgResult<()> {
     // val->val.binary.data = &jsonb->root; len = VARSIZE(jsonb) - VARHDRSZ.
     // The varlena header is 1 byte (short) or 4 bytes (long): strip exactly the
     // header form's size so the root container starts at the right byte and its
@@ -194,7 +182,9 @@ pub fn JsonbToJsonbValue(jsonb: &[u8], val: &mut JsonbValue) -> PgResult<()> {
     val.typ = jbvBinary;
     val.val = JsonbValueData::Binary {
         len,
-        data: slice_to_vec(&jsonb[off..])?,
+        // Zero-copy: borrow the document buffer directly (C: `&jsonb->root`,
+        // a pointer into the varlena, no copy).
+        data: &jsonb[off..],
         // Document root: its container is at offset 0 within itself.
         offset: 0,
     };
@@ -204,20 +194,20 @@ pub fn JsonbToJsonbValue(jsonb: &[u8], val: &mut JsonbValue) -> PgResult<()> {
 /// C: `JsonbValueToJsonb(JsonbValue *val)` -- serialize to an on-disk Jsonb
 /// varlena allocated in `mcx` (C: `palloc` in `CurrentMemoryContext`), returned
 /// as owned bytes including the varlena length header.
-pub fn JsonbValueToJsonb<'mcx>(mcx: Mcx<'mcx>, val: &JsonbValue) -> PgResult<PgVec<'mcx, u8>> {
+pub fn JsonbValueToJsonb<'mcx>(mcx: Mcx<'mcx>, val: &JsonbValue<'mcx>) -> PgResult<PgVec<'mcx, u8>> {
     if val.is_scalar() {
         // Scalar value: wrap in a one-element raw-scalar array.
         let mut pstate: Option<Box<JsonbParseState>> = None;
         let scalar_array = JsonbValue {
             typ: jbvArray,
             val: JsonbValueData::Array {
-                elems: Vec::new(),
+                elems: ::mcx::vec_with_capacity_in(mcx, 0)?,
                 raw_scalar: true,
             },
         };
-        pushJsonbValue(&mut pstate, WJB_BEGIN_ARRAY, Some(&scalar_array))?;
-        pushJsonbValue(&mut pstate, WJB_ELEM, Some(val))?;
-        let res = pushJsonbValue(&mut pstate, WJB_END_ARRAY, None)?
+        pushJsonbValue(mcx, &mut pstate, WJB_BEGIN_ARRAY, Some(&scalar_array))?;
+        pushJsonbValue(mcx, &mut pstate, WJB_ELEM, Some(val))?;
+        let res = pushJsonbValue(mcx, &mut pstate, WJB_END_ARRAY, None)?
             .ok_or_else(|| PgError::error("WJB_END_ARRAY yields a container value"))?;
         convertToJsonb(mcx, &res)
     } else if matches!(val.typ, jbvObject | jbvArray) {
@@ -320,13 +310,13 @@ fn child_container_start(
     }
 }
 
-fn fillJsonbValue(
-    container: &[u8],
+fn fillJsonbValue<'mcx>(
+    container: &'mcx [u8],
     index: usize,
     data_proper: usize,
     offset: u32,
     parent_doc_offset: i32,
-    result: &mut JsonbValue,
+    result: &mut JsonbValue<'mcx>,
 ) -> PgResult<()> {
     let entry = container_child(container, index);
     let base = data_proper + offset as usize;
@@ -337,17 +327,19 @@ fn fillJsonbValue(
     } else if jbe_isstring(entry) {
         let len = getJsonbLength(container, index as i32) as usize;
         result.typ = jbvString;
-        result.val = JsonbValueData::String(slice_to_vec(&container[base..base + len])?);
+        // Zero-copy: sub-slice the source container buffer (C: a `char *` into
+        // the document, no allocation).
+        result.val = JsonbValueData::String(&container[base..base + len]);
     } else if jbe_isnumeric(entry) {
         // result->val.numeric = (Numeric)(base_addr + INTALIGN(offset)).
         let nstart = data_proper + intalign(offset as usize);
-        // The numeric is itself a varlena; copy from its header through the
+        // The numeric is itself a varlena; window from its header through the
         // node's end (length minus the alignment padding).
         let total_len = getJsonbLength(container, index as i32) as usize;
         let pad = intalign(offset as usize) - offset as usize;
         let numlen = total_len - pad;
         result.typ = jbvNumeric;
-        result.val = JsonbValueData::Numeric(slice_to_vec(&container[nstart..nstart + numlen])?);
+        result.val = JsonbValueData::Numeric(&container[nstart..nstart + numlen]);
     } else if jbe_isbool_true(entry) {
         result.typ = jbvBool;
         result.val = JsonbValueData::Bool(true);
@@ -363,7 +355,8 @@ fn fillJsonbValue(
         result.typ = jbvBinary;
         result.val = JsonbValueData::Binary {
             len: clen as i32,
-            data: slice_to_vec(&container[cstart..cstart + clen])?,
+            // Zero-copy: sub-slice the source container buffer.
+            data: &container[cstart..cstart + clen],
             // Document-relative position = parent's document position plus the
             // child container's byte position within the parent container.
             // Mirrors C's pointer `base_addr + INTALIGN(offset)` being an
@@ -383,31 +376,32 @@ fn fillJsonbValue(
 ///
 /// Returns the container value when a frame is closed (mirrors the C return of
 /// `&(*pstate)->contVal`), else `None`.
-pub fn pushJsonbValue(
-    pstate: &mut Option<Box<JsonbParseState>>,
+pub fn pushJsonbValue<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut Option<Box<JsonbParseState<'mcx>>>,
     seq: JsonbIteratorToken,
-    jbval: Option<&JsonbValue>,
-) -> PgResult<Option<JsonbValue>> {
+    jbval: Option<&JsonbValue<'mcx>>,
+) -> PgResult<Option<JsonbValue<'mcx>>> {
     // Unpack jbvObject passed for WJB_ELEM / WJB_VALUE.
     if let Some(jb) = jbval {
         if (seq == WJB_ELEM || seq == WJB_VALUE) && jb.typ == jbvObject {
-            pushJsonbValue(pstate, WJB_BEGIN_OBJECT, None)?;
+            pushJsonbValue(mcx, pstate, WJB_BEGIN_OBJECT, None)?;
             if let JsonbValueData::Object(pairs) = &jb.val {
                 for pair in pairs {
-                    pushJsonbValue(pstate, WJB_KEY, Some(&pair.key))?;
-                    pushJsonbValue(pstate, WJB_VALUE, Some(&pair.value))?;
+                    pushJsonbValue(mcx, pstate, WJB_KEY, Some(&pair.key))?;
+                    pushJsonbValue(mcx, pstate, WJB_VALUE, Some(&pair.value))?;
                 }
             }
-            return pushJsonbValue(pstate, WJB_END_OBJECT, None);
+            return pushJsonbValue(mcx, pstate, WJB_END_OBJECT, None);
         }
         if (seq == WJB_ELEM || seq == WJB_VALUE) && jb.typ == jbvArray {
-            pushJsonbValue(pstate, WJB_BEGIN_ARRAY, None)?;
+            pushJsonbValue(mcx, pstate, WJB_BEGIN_ARRAY, None)?;
             if let JsonbValueData::Array { elems, .. } = &jb.val {
                 for elem in elems {
-                    pushJsonbValue(pstate, WJB_ELEM, Some(elem))?;
+                    pushJsonbValue(mcx, pstate, WJB_ELEM, Some(elem))?;
                 }
             }
-            return pushJsonbValue(pstate, WJB_END_ARRAY, None);
+            return pushJsonbValue(mcx, pstate, WJB_END_ARRAY, None);
         }
     }
 
@@ -415,28 +409,31 @@ pub fn pushJsonbValue(
     let is_binary =
         matches!(jbval, Some(jb) if (seq == WJB_ELEM || seq == WJB_VALUE) && jb.typ == jbvBinary);
     if !is_binary {
-        return pushJsonbValueScalar(pstate, seq, jbval);
+        return pushJsonbValueScalar(mcx, pstate, seq, jbval);
     }
 
-    // Unpack the binary and add each piece to the pstate.
-    let (blen, bdata) = match &jbval
+    // Unpack the binary and add each piece to the pstate.  The binary `data` is
+    // already a `&'mcx [u8]` borrow of the source document, so iterate it
+    // directly -- no intermediate owned copy (the arena already outlives the
+    // call).
+    let (blen, bdata): (i32, &'mcx [u8]) = match &jbval
         .ok_or_else(|| PgError::error("pushJsonbValue: jbval is NULL"))?
         .val
     {
-        JsonbValueData::Binary { len, data, .. } => (*len, slice_to_vec(data)?),
+        JsonbValueData::Binary { len, data, .. } => (*len, data),
         _ => unreachable!(),
     };
     let _ = blen;
-    let mut it = JsonbIteratorInit(&bdata);
+    let mut it = JsonbIteratorInit(mcx, bdata);
     let mut res: Option<JsonbValue> = None;
     let mut v = JsonbValue::null();
 
-    if (container_header(&bdata) & JB_FSCALAR) != 0 && pstate.is_some() {
+    if (container_header(bdata) & JB_FSCALAR) != 0 && pstate.is_some() {
         let tok = JsonbIteratorNext(&mut it, &mut v, true)?;
         debug_assert_eq!(tok, WJB_BEGIN_ARRAY);
         let tok = JsonbIteratorNext(&mut it, &mut v, true)?;
         debug_assert_eq!(tok, WJB_ELEM);
-        let pushed = pushJsonbValueScalar(pstate, seq, Some(&v))?;
+        let pushed = pushJsonbValueScalar(mcx, pstate, seq, Some(&v))?;
         let tok = JsonbIteratorNext(&mut it, &mut v, true)?;
         debug_assert_eq!(tok, WJB_END_ARRAY);
         debug_assert!(it.is_none());
@@ -455,24 +452,25 @@ pub fn pushJsonbValue(
         } else {
             None
         };
-        res = pushJsonbValueScalar(pstate, tok, scalar)?;
+        res = pushJsonbValueScalar(mcx, pstate, tok, scalar)?;
     }
     Ok(res)
 }
 
 /// Helper mirroring `v.val.array.rawScalar` for a `jbvArray` JsonbValue.
 #[inline]
-fn array_is_raw_scalar(v: &JsonbValue) -> bool {
+fn array_is_raw_scalar(v: &JsonbValue<'_>) -> bool {
     matches!(&v.val, JsonbValueData::Array { raw_scalar, .. } if *raw_scalar)
 }
 
 /// C: `pushJsonbValueScalar(JsonbParseState **pstate, JsonbIteratorToken seq,
 /// JsonbValue *scalarVal)`.
-fn pushJsonbValueScalar(
-    pstate: &mut Option<Box<JsonbParseState>>,
+fn pushJsonbValueScalar<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut Option<Box<JsonbParseState<'mcx>>>,
     seq: JsonbIteratorToken,
-    scalar_val: Option<&JsonbValue>,
-) -> PgResult<Option<JsonbValue>> {
+    scalar_val: Option<&JsonbValue<'mcx>>,
+) -> PgResult<Option<JsonbValue<'mcx>>> {
     let mut result: Option<JsonbValue> = None;
 
     match seq {
@@ -489,7 +487,7 @@ fn pushJsonbValueScalar(
             frame.cont_val = JsonbValue {
                 typ: jbvArray,
                 val: JsonbValueData::Array {
-                    elems: Vec::new(),
+                    elems: ::mcx::vec_with_capacity_in(mcx, 0)?,
                     raw_scalar,
                 },
             };
@@ -505,7 +503,7 @@ fn pushJsonbValueScalar(
                 .ok_or_else(|| PgError::error("pushJsonbValueScalar: parse state is empty"))?;
             frame.cont_val = JsonbValue {
                 typ: jbvObject,
-                val: JsonbValueData::Object(Vec::new()),
+                val: JsonbValueData::Object(::mcx::vec_with_capacity_in(mcx, 0)?),
             };
             frame.size = 4;
         }
@@ -562,7 +560,12 @@ fn pushJsonbValueScalar(
 
 /// Common tail of WJB_END_OBJECT / WJB_END_ARRAY: pop the stack and append the
 /// finished container into its parent.  Returns the finished container value.
-fn close_frame(pstate: &mut Option<Box<JsonbParseState>>) -> PgResult<Option<JsonbValue>> {
+///
+/// The `finished.clone()` is now an arena-cheap copy: the leaf byte runs are
+/// `&'mcx [u8]` pointer copies and the spines are arena `PgVec`s.
+fn close_frame<'mcx>(
+    pstate: &mut Option<Box<JsonbParseState<'mcx>>>,
+) -> PgResult<Option<JsonbValue<'mcx>>> {
     let mut frame = pstate
         .take()
         .ok_or_else(|| PgError::error("close_frame on empty stack"))?;
@@ -580,7 +583,7 @@ fn close_frame(pstate: &mut Option<Box<JsonbParseState>>) -> PgResult<Option<Jso
 }
 
 /// C: `pushState(JsonbParseState **pstate)`.
-fn pushState(pstate: &mut Option<Box<JsonbParseState>>) {
+fn pushState<'mcx>(pstate: &mut Option<Box<JsonbParseState<'mcx>>>) {
     let ns = JsonbParseState {
         cont_val: JsonbValue::null(),
         size: 0,
@@ -592,7 +595,7 @@ fn pushState(pstate: &mut Option<Box<JsonbParseState>>) {
 }
 
 /// C: `appendKey(JsonbParseState *pstate, JsonbValue *string)`.
-fn appendKey(pstate: &mut JsonbParseState, string: &JsonbValue) -> PgResult<()> {
+fn appendKey<'mcx>(pstate: &mut JsonbParseState<'mcx>, string: &JsonbValue<'mcx>) -> PgResult<()> {
     debug_assert_eq!(pstate.cont_val.typ, jbvObject);
     debug_assert_eq!(string.typ, jbvString);
     let JsonbValueData::Object(pairs) = &mut pstate.cont_val.val else {
@@ -616,7 +619,7 @@ fn appendKey(pstate: &mut JsonbParseState, string: &JsonbValue) -> PgResult<()> 
 }
 
 /// C: `appendValue(JsonbParseState *pstate, JsonbValue *scalarVal)`.
-fn appendValue(pstate: &mut JsonbParseState, scalar_val: &JsonbValue) {
+fn appendValue<'mcx>(pstate: &mut JsonbParseState<'mcx>, scalar_val: &JsonbValue<'mcx>) {
     debug_assert_eq!(pstate.cont_val.typ, jbvObject);
     let JsonbValueData::Object(pairs) = &mut pstate.cont_val.val else {
         unreachable!();
@@ -626,7 +629,10 @@ fn appendValue(pstate: &mut JsonbParseState, scalar_val: &JsonbValue) {
 }
 
 /// C: `appendElement(JsonbParseState *pstate, JsonbValue *scalarVal)`.
-fn appendElement(pstate: &mut JsonbParseState, scalar_val: &JsonbValue) -> PgResult<()> {
+fn appendElement<'mcx>(
+    pstate: &mut JsonbParseState<'mcx>,
+    scalar_val: &JsonbValue<'mcx>,
+) -> PgResult<()> {
     debug_assert_eq!(pstate.cont_val.typ, jbvArray);
     let JsonbValueData::Array { elems, .. } = &mut pstate.cont_val.val else {
         unreachable!();
@@ -657,10 +663,11 @@ fn appendElement(pstate: &mut JsonbParseState, scalar_val: &JsonbValue) -> PgRes
 /// path inside [`JsonbIteratorNext`].  A structurally-impossible unknown root is
 /// reported as `None` (the pre-existing `Option` contract), not silently
 /// mis-iterated.
-pub fn JsonbIteratorInit(container: &[u8]) -> Option<Box<JsonbIterator>> {
-    rc_from_slice(container)
-        .and_then(|buf| iteratorFromContainer(buf, 0, 0, None))
-        .ok()
+pub fn JsonbIteratorInit<'mcx>(
+    mcx: Mcx<'mcx>,
+    container: &'mcx [u8],
+) -> Option<Box<JsonbIterator<'mcx>>> {
+    iteratorFromContainer(mcx, container, 0, 0, None).ok()
 }
 
 /// Like [`JsonbIteratorInit`] but records `doc_offset`: the byte position of
@@ -671,16 +678,18 @@ pub fn JsonbIteratorInit(container: &[u8]) -> Option<Box<JsonbIterator>> {
 ///
 /// This entry point exists only in the safe port: C derives the position from
 /// the raw `JsonbContainer *` pointer, which is unavailable here.
-pub fn JsonbIteratorInitAt(container: &[u8], doc_offset: i32) -> Option<Box<JsonbIterator>> {
-    rc_from_slice(container)
-        .and_then(|buf| iteratorFromContainer(buf, 0, doc_offset, None))
-        .ok()
+pub fn JsonbIteratorInitAt<'mcx>(
+    mcx: Mcx<'mcx>,
+    container: &'mcx [u8],
+    doc_offset: i32,
+) -> Option<Box<JsonbIterator<'mcx>>> {
+    iteratorFromContainer(mcx, container, 0, doc_offset, None).ok()
 }
 
 /// C: `JsonbIteratorNext(JsonbIterator **it, JsonbValue *val, bool skipNested)`.
-pub fn JsonbIteratorNext(
-    it: &mut Option<Box<JsonbIterator>>,
-    val: &mut JsonbValue,
+pub fn JsonbIteratorNext<'mcx>(
+    it: &mut Option<Box<JsonbIterator<'mcx>>>,
+    val: &mut JsonbValue<'mcx>,
     skip_nested: bool,
 ) -> PgResult<JsonbIteratorToken> {
     loop {
@@ -705,7 +714,7 @@ pub fn JsonbIteratorNext(
                 // by carrying that many placeholder elements -- they are never
                 // read, only counted.  nElems is bounded by JB_CMASK.
                 val.val = JsonbValueData::Array {
-                    elems: placeholder_values(cur.n_elems)?,
+                    elems: placeholder_values(cur.mcx, cur.n_elems)?,
                     raw_scalar: cur.is_scalar,
                 };
                 cur.cur_index = 0;
@@ -730,6 +739,7 @@ pub fn JsonbIteratorNext(
                 let recurse_buf;
                 let recurse_cont_start;
                 let recurse_off;
+                let recurse_mcx;
                 {
                     let cur = it
                         .as_mut()
@@ -739,9 +749,9 @@ pub fn JsonbIteratorNext(
                     // Recursion fast path: if the child is a nested container and
                     // we will recurse into it, compute its window directly and
                     // share the document buffer -- skipping the full
-                    // `fillJsonbValue` (and its `slice_to_vec` of the whole child
-                    // container), since `val` is overwritten by the child's first
-                    // step anyway.
+                    // `fillJsonbValue`, since `val` is overwritten by the child's
+                    // first step anyway.  Both source and child window are
+                    // sub-slices of the same `&'mcx` buffer (zero copy).
                     let cstart = if skip_nested {
                         None
                     } else {
@@ -759,7 +769,8 @@ pub fn JsonbIteratorNext(
                         cur.cur_index += 1;
                         recurse_off = cur.doc_offset + cstart as i32;
                         recurse_cont_start = cur.cont_start + cstart;
-                        recurse_buf = alloc::rc::Rc::clone(&cur.buf);
+                        recurse_buf = cur.buf;
+                        recurse_mcx = cur.mcx;
                     } else {
                         fillJsonbValue(
                             cur.container(),
@@ -774,8 +785,13 @@ pub fn JsonbIteratorNext(
                         return Ok(WJB_ELEM);
                     }
                 }
-                let child_it =
-                    iteratorFromContainer(recurse_buf, recurse_cont_start, recurse_off, it.take())?;
+                let child_it = iteratorFromContainer(
+                    recurse_mcx,
+                    recurse_buf,
+                    recurse_cont_start,
+                    recurse_off,
+                    it.take(),
+                )?;
                 *it = Some(child_it);
                 continue;
             }
@@ -787,7 +803,7 @@ pub fn JsonbIteratorNext(
                 // C sets `val->val.object.nPairs = (*it)->nElems` and leaves
                 // `pairs` unset.  Expose the count via that many placeholder
                 // pairs (never read, only counted).
-                val.val = JsonbValueData::Object(placeholder_pairs(cur.n_elems)?);
+                val.val = JsonbValueData::Object(placeholder_pairs(cur.mcx, cur.n_elems)?);
                 cur.cur_index = 0;
                 cur.cur_data_offset = 0;
                 let val_off = getJsonbOffset(cur.container(), cur.n_elems as i32);
@@ -830,6 +846,7 @@ pub fn JsonbIteratorNext(
                 let recurse_buf;
                 let recurse_cont_start;
                 let recurse_off;
+                let recurse_mcx;
                 {
                     let cur = it
                         .as_mut()
@@ -859,7 +876,8 @@ pub fn JsonbIteratorNext(
                         cur.cur_index += 1;
                         recurse_off = cur.doc_offset + cstart as i32;
                         recurse_cont_start = cur.cont_start + cstart;
-                        recurse_buf = alloc::rc::Rc::clone(&cur.buf);
+                        recurse_buf = cur.buf;
+                        recurse_mcx = cur.mcx;
                     } else {
                         fillJsonbValue(
                             cur.container(),
@@ -875,8 +893,13 @@ pub fn JsonbIteratorNext(
                         return Ok(WJB_VALUE);
                     }
                 }
-                let child_it =
-                    iteratorFromContainer(recurse_buf, recurse_cont_start, recurse_off, it.take())?;
+                let child_it = iteratorFromContainer(
+                    recurse_mcx,
+                    recurse_buf,
+                    recurse_cont_start,
+                    recurse_off,
+                    it.take(),
+                )?;
                 *it = Some(child_it);
                 continue;
             }
@@ -885,11 +908,11 @@ pub fn JsonbIteratorNext(
 }
 
 /// Build `n` placeholder `jbvNull` values (only counted by callers).  `n` is the
-/// container's element count (bounded by `JB_CMASK`); we reserve fallibly.
-fn placeholder_values(n: u32) -> PgResult<Vec<JsonbValue>> {
+/// container's element count (bounded by `JB_CMASK`); we reserve fallibly into
+/// the iterator's arena.
+fn placeholder_values<'mcx>(mcx: Mcx<'mcx>, n: u32) -> PgResult<PgVec<'mcx, JsonbValue<'mcx>>> {
     let n = n as usize;
-    let mut v = Vec::new();
-    v.try_reserve_exact(n).map_err(|_| oom())?;
+    let mut v = ::mcx::vec_with_capacity_in(mcx, n)?;
     for _ in 0..n {
         v.push(JsonbValue::null());
     }
@@ -897,10 +920,9 @@ fn placeholder_values(n: u32) -> PgResult<Vec<JsonbValue>> {
 }
 
 /// Build `n` placeholder pairs (only counted by callers).
-fn placeholder_pairs(n: u32) -> PgResult<Vec<JsonbPair>> {
+fn placeholder_pairs<'mcx>(mcx: Mcx<'mcx>, n: u32) -> PgResult<PgVec<'mcx, JsonbPair<'mcx>>> {
     let n = n as usize;
-    let mut v = Vec::new();
-    v.try_reserve_exact(n).map_err(|_| oom())?;
+    let mut v = ::mcx::vec_with_capacity_in(mcx, n)?;
     for _ in 0..n {
         v.push(JsonbPair {
             key: JsonbValue::null(),
@@ -931,12 +953,13 @@ fn jbe_advance_offset(offset: &mut u32, je: JEntry) {
 /// object, exactly as C's `default:` arm `elog(ERROR, "unknown type of jsonb
 /// container")` (jsonb_util.c:1042-1043).  This is a can't-happen on validated
 /// on-disk data, but is raised rather than silently mis-iterated.
-fn iteratorFromContainer(
-    buf: alloc::rc::Rc<[u8]>,
+fn iteratorFromContainer<'mcx>(
+    mcx: Mcx<'mcx>,
+    buf: &'mcx [u8],
     cont_start: usize,
     doc_offset: i32,
-    parent: Option<Box<JsonbIterator>>,
-) -> PgResult<Box<JsonbIterator>> {
+    parent: Option<Box<JsonbIterator<'mcx>>>,
+) -> PgResult<Box<JsonbIterator<'mcx>>> {
     let container = &buf[cont_start..];
     let header = container_header(container);
     let n_elems = json_container_size(header);
@@ -961,6 +984,7 @@ fn iteratorFromContainer(
     };
 
     Ok(Box::new(JsonbIterator {
+        mcx,
         buf,
         cont_start,
         n_elems,
@@ -981,7 +1005,7 @@ fn iteratorFromContainer(
 /// Takes the iterator by value to mirror the C `pfree(it); return it->parent;`
 /// ownership transfer (the boxed-local lint does not apply to this consume).
 #[allow(clippy::boxed_local)]
-fn freeAndGetParent(it: Box<JsonbIterator>) -> Option<Box<JsonbIterator>> {
+fn freeAndGetParent<'mcx>(it: Box<JsonbIterator<'mcx>>) -> Option<Box<JsonbIterator<'mcx>>> {
     it.parent
 }
 
@@ -1059,7 +1083,7 @@ impl<'mcx> ConvertBuffer<'mcx> {
 
 /// C: `convertToJsonb(JsonbValue *val)` -- serialize into a varlena allocated in
 /// `mcx` (C: `palloc` in `CurrentMemoryContext`).
-fn convertToJsonb<'mcx>(mcx: Mcx<'mcx>, val: &JsonbValue) -> PgResult<PgVec<'mcx, u8>> {
+fn convertToJsonb<'mcx>(mcx: Mcx<'mcx>, val: &JsonbValue<'_>) -> PgResult<PgVec<'mcx, u8>> {
     debug_assert_ne!(val.typ, jbvBinary);
 
     let mut buffer = ConvertBuffer::new(mcx)?;
@@ -1082,7 +1106,7 @@ fn convertToJsonb<'mcx>(mcx: Mcx<'mcx>, val: &JsonbValue) -> PgResult<PgVec<'mcx
 fn convertJsonbValue<'mcx>(
     buffer: &mut ConvertBuffer<'mcx>,
     header: &mut JEntry,
-    val: Option<&JsonbValue>,
+    val: Option<&JsonbValue<'_>>,
     level: i32,
 ) -> PgResult<()> {
     // Guard against stack overflow due to overly complex Jsonb (C:
@@ -1108,7 +1132,7 @@ fn convertJsonbValue<'mcx>(
 fn convertJsonbArray<'mcx>(
     buffer: &mut ConvertBuffer<'mcx>,
     header: &mut JEntry,
-    val: &JsonbValue,
+    val: &JsonbValue<'_>,
     level: i32,
 ) -> PgResult<()> {
     let (elems, raw_scalar) = match &val.val {
@@ -1162,7 +1186,7 @@ fn convertJsonbArray<'mcx>(
 fn convertJsonbObject<'mcx>(
     buffer: &mut ConvertBuffer<'mcx>,
     header: &mut JEntry,
-    val: &JsonbValue,
+    val: &JsonbValue<'_>,
     level: i32,
 ) -> PgResult<()> {
     let pairs = match &val.val {
@@ -1227,7 +1251,7 @@ fn convertJsonbObject<'mcx>(
 fn convertJsonbScalar<'mcx>(
     buffer: &mut ConvertBuffer<'mcx>,
     header: &mut JEntry,
-    scalar_val: &JsonbValue,
+    scalar_val: &JsonbValue<'_>,
 ) -> PgResult<()> {
     match &scalar_val.val {
         JsonbValueData::Null => {
@@ -1287,7 +1311,7 @@ fn json_container_size_of(jc: &[u8]) -> i32 {
 
 /// Number of array elements (C: `val.array.nElems`); only valid for `jbvArray`.
 #[inline]
-fn array_n_elems(v: &JsonbValue) -> i32 {
+fn array_n_elems(v: &JsonbValue<'_>) -> i32 {
     match &v.val {
         JsonbValueData::Array { elems, .. } => elems.len() as i32,
         _ => 0,
@@ -1296,7 +1320,7 @@ fn array_n_elems(v: &JsonbValue) -> i32 {
 
 /// Number of object pairs (C: `val.object.nPairs`); only valid for `jbvObject`.
 #[inline]
-fn object_n_pairs(v: &JsonbValue) -> i32 {
+fn object_n_pairs(v: &JsonbValue<'_>) -> i32 {
     match &v.val {
         JsonbValueData::Object(pairs) => pairs.len() as i32,
         _ => 0,
@@ -1306,9 +1330,9 @@ fn object_n_pairs(v: &JsonbValue) -> i32 {
 /// The owned container bytes of a `jbvBinary` value (C: `val.binary.data`,
 /// truncated to `val.binary.len`).
 #[inline]
-fn binary_container(v: &JsonbValue) -> PgResult<Vec<u8>> {
+fn binary_container<'mcx>(v: &JsonbValue<'mcx>) -> PgResult<&'mcx [u8]> {
     match &v.val {
-        JsonbValueData::Binary { len, data, .. } => slice_to_vec(&data[..*len as usize]),
+        JsonbValueData::Binary { len, data, .. } => Ok(&data[..*len as usize]),
         _ => unreachable!("binary_container on non-binary"),
     }
 }
@@ -1316,9 +1340,9 @@ fn binary_container(v: &JsonbValue) -> PgResult<Vec<u8>> {
 /// C: `compareJsonbContainers(JsonbContainer *a, JsonbContainer *b)`.
 ///
 /// BT comparator worker: returns < 0, 0, or > 0.  `a`/`b` are container bytes.
-pub fn compareJsonbContainers(a: &[u8], b: &[u8]) -> PgResult<i32> {
-    let mut ita = JsonbIteratorInit(a);
-    let mut itb = JsonbIteratorInit(b);
+pub fn compareJsonbContainers<'mcx>(mcx: Mcx<'mcx>, a: &'mcx [u8], b: &'mcx [u8]) -> PgResult<i32> {
+    let mut ita = JsonbIteratorInit(mcx, a);
+    let mut itb = JsonbIteratorInit(mcx, b);
     let mut res: i32 = 0;
 
     // do { ... } while (res == 0);
@@ -1394,11 +1418,11 @@ pub fn compareJsonbContainers(a: &[u8], b: &[u8]) -> PgResult<i32> {
 
 /// C: `findJsonbValueFromContainer(JsonbContainer *container, uint32 flags,
 /// JsonbValue *key)`.  Returns a copy of the matching value, or `None`.
-pub fn findJsonbValueFromContainer(
-    container: &[u8],
+pub fn findJsonbValueFromContainer<'mcx>(
+    container: &'mcx [u8],
     flags: u32,
-    key: &JsonbValue,
-) -> PgResult<Option<JsonbValue>> {
+    key: &JsonbValue<'_>,
+) -> PgResult<Option<JsonbValue<'mcx>>> {
     debug_assert_eq!(flags & !(JB_FARRAY | JB_FOBJECT), 0);
 
     let count = json_container_size_of(container);
@@ -1429,8 +1453,8 @@ pub fn findJsonbValueFromContainer(
     } else if (flags & JB_FOBJECT) != 0 && json_container_is_object(container_header(container)) {
         // Object key passed by caller must be a string.
         debug_assert_eq!(key.typ, jbvString);
-        let key_bytes = match &key.val {
-            JsonbValueData::String(s) => s.as_slice(),
+        let key_bytes: &[u8] = match &key.val {
+            JsonbValueData::String(s) => s,
             _ => &[],
         };
         return getKeyJsonValueFromContainer(container, key_bytes);
@@ -1443,10 +1467,10 @@ pub fn findJsonbValueFromContainer(
 /// C: `getKeyJsonValueFromContainer(JsonbContainer *container, const char
 /// *keyVal, int keyLen, JsonbValue *res)`.  The `res` out-parameter (reused or
 /// palloc'd in C) is modeled by returning the value.
-pub fn getKeyJsonValueFromContainer(
-    container: &[u8],
+pub fn getKeyJsonValueFromContainer<'mcx>(
+    container: &'mcx [u8],
     key_val: &[u8],
-) -> PgResult<Option<JsonbValue>> {
+) -> PgResult<Option<JsonbValue<'mcx>>> {
     let count = json_container_size_of(container);
 
     debug_assert!(json_container_is_object(container_header(container)));
@@ -1498,7 +1522,10 @@ pub fn getKeyJsonValueFromContainer(
 }
 
 /// C: `getIthJsonbValueFromContainer(JsonbContainer *container, uint32 i)`.
-pub fn getIthJsonbValueFromContainer(container: &[u8], i: u32) -> PgResult<Option<JsonbValue>> {
+pub fn getIthJsonbValueFromContainer<'mcx>(
+    container: &'mcx [u8],
+    i: u32,
+) -> PgResult<Option<JsonbValue<'mcx>>> {
     if !json_container_is_array(container_header(container)) {
         return Err(elog_internal("not a jsonb array"));
     }
@@ -1529,9 +1556,10 @@ pub fn getIthJsonbValueFromContainer(container: &[u8], i: u32) -> PgResult<Optio
 // ---------------------------------------------------------------------------
 
 /// C: `JsonbDeepContains(JsonbIterator **val, JsonbIterator **mContained)`.
-pub fn JsonbDeepContains(
-    val: &mut Option<Box<JsonbIterator>>,
-    m_contained: &mut Option<Box<JsonbIterator>>,
+pub fn JsonbDeepContains<'mcx>(
+    mcx: Mcx<'mcx>,
+    val: &mut Option<Box<JsonbIterator<'mcx>>>,
+    m_contained: &mut Option<Box<JsonbIterator<'mcx>>>,
 ) -> PgResult<bool> {
     // Guard against stack overflow due to overly complex Jsonb.
     stack_depth_seams::check_stack_depth::call()?;
@@ -1567,15 +1595,15 @@ pub fn JsonbDeepContains(
             debug_assert_eq!(vcontained.typ, jbvString);
 
             // First, find value by key...
-            let key_bytes = match &vcontained.val {
-                JsonbValueData::String(s) => s.clone(),
-                _ => Vec::new(),
+            let key_bytes: &[u8] = match &vcontained.val {
+                JsonbValueData::String(s) => s,
+                _ => &[],
             };
             let val_container = val
                 .as_ref()
                 .ok_or_else(|| PgError::error("JsonbDeepContains: val iterator is NULL"))?
                 .container();
-            let lhs_val = match getKeyJsonValueFromContainer(val_container, &key_bytes)? {
+            let lhs_val = match getKeyJsonValueFromContainer(val_container, key_bytes)? {
                 Some(v) => v,
                 None => return Ok(false),
             };
@@ -1595,10 +1623,10 @@ pub fn JsonbDeepContains(
                 debug_assert_eq!(lhs_val.typ, jbvBinary);
                 debug_assert_eq!(vcontained.typ, jbvBinary);
 
-                let mut nestval = JsonbIteratorInit(&binary_container(&lhs_val)?);
-                let mut nest_contained = JsonbIteratorInit(&binary_container(&vcontained)?);
+                let mut nestval = JsonbIteratorInit(mcx, binary_container(&lhs_val)?);
+                let mut nest_contained = JsonbIteratorInit(mcx, binary_container(&vcontained)?);
 
-                if !JsonbDeepContains(&mut nestval, &mut nest_contained)? {
+                if !JsonbDeepContains(mcx, &mut nestval, &mut nest_contained)? {
                     return Ok(false);
                 }
             }
@@ -1607,7 +1635,7 @@ pub fn JsonbDeepContains(
         debug_assert_eq!(vval.typ, jbvArray);
         debug_assert_eq!(vcontained.typ, jbvArray);
 
-        let mut lhs_conts: Option<Vec<JsonbValue>> = None;
+        let mut lhs_conts: Option<Vec<JsonbValue<'mcx>>> = None;
         let mut n_lhs_elems = array_n_elems(&vval) as u32;
 
         // A raw scalar may not contain an array.
@@ -1640,7 +1668,7 @@ pub fn JsonbDeepContains(
                     // n_lhs_elems is the lhs array's element count (bounded by
                     // JB_CMASK); reserve fallibly for the worst case (all
                     // containers).
-                    let mut conts: Vec<JsonbValue> = Vec::new();
+                    let mut conts: Vec<JsonbValue<'mcx>> = Vec::new();
                     conts.try_reserve(n_lhs_elems as usize).map_err(|_| oom())?;
 
                     for _ in 0..n_lhs_elems {
@@ -1667,10 +1695,10 @@ pub fn JsonbDeepContains(
                 // XXX: Nested array containment is O(N^2)
                 let mut i: u32 = 0;
                 while i < n_lhs_elems {
-                    let mut nestval = JsonbIteratorInit(&binary_container(&conts[i as usize])?);
-                    let mut nest_contained = JsonbIteratorInit(&binary_container(&vcontained)?);
+                    let mut nestval = JsonbIteratorInit(mcx, binary_container(&conts[i as usize])?);
+                    let mut nest_contained = JsonbIteratorInit(mcx, binary_container(&vcontained)?);
 
-                    let contains = JsonbDeepContains(&mut nestval, &mut nest_contained)?;
+                    let contains = JsonbDeepContains(mcx, &mut nestval, &mut nest_contained)?;
                     if contains {
                         break;
                     }
@@ -1693,28 +1721,28 @@ pub fn JsonbDeepContains(
 // ---------------------------------------------------------------------------
 
 #[inline]
-fn jsonb_bool(v: &JsonbValue) -> bool {
+fn jsonb_bool(v: &JsonbValue<'_>) -> bool {
     matches!(&v.val, JsonbValueData::Bool(true))
 }
 
 #[inline]
-fn jsonb_numeric_bytes(v: &JsonbValue) -> &[u8] {
+fn jsonb_numeric_bytes<'mcx>(v: &JsonbValue<'mcx>) -> &'mcx [u8] {
     match &v.val {
-        JsonbValueData::Numeric(n) => n.as_slice(),
+        JsonbValueData::Numeric(n) => n,
         _ => &[],
     }
 }
 
 #[inline]
-fn jsonb_string_bytes(v: &JsonbValue) -> &[u8] {
+fn jsonb_string_bytes<'mcx>(v: &JsonbValue<'mcx>) -> &'mcx [u8] {
     match &v.val {
-        JsonbValueData::String(s) => s.as_slice(),
+        JsonbValueData::String(s) => s,
         _ => &[],
     }
 }
 
 /// C: `equalsJsonbScalarValue(JsonbValue *a, JsonbValue *b)`.
-fn equalsJsonbScalarValue(a: &JsonbValue, b: &JsonbValue) -> PgResult<bool> {
+fn equalsJsonbScalarValue(a: &JsonbValue<'_>, b: &JsonbValue<'_>) -> PgResult<bool> {
     if a.typ == b.typ {
         return match a.typ {
             jbvNull => Ok(true),
@@ -1744,7 +1772,7 @@ fn equalsJsonbScalarValue(a: &JsonbValue, b: &JsonbValue) -> PgResult<bool> {
 /// comparison for a non-C default collation, reducing to a byte compare only
 /// when the resolved locale is `collate_is_c`.  This is off the I/O path (B-tree
 /// operator support only) and does not affect `jsonb_in`/`jsonb_out`.
-fn compareJsonbScalarValue(a: &JsonbValue, b: &JsonbValue) -> PgResult<i32> {
+fn compareJsonbScalarValue(a: &JsonbValue<'_>, b: &JsonbValue<'_>) -> PgResult<i32> {
     if a.typ == b.typ {
         return match a.typ {
             jbvNull => Ok(0),
@@ -1892,7 +1920,7 @@ fn hash_numeric_extended(num: &[u8], seed: u64) -> u64 {
 }
 
 /// C: `JsonbHashScalarValue(const JsonbValue *scalarVal, uint32 *hash)`.
-pub fn JsonbHashScalarValue(scalar_val: &JsonbValue, hash: &mut u32) -> PgResult<()> {
+pub fn JsonbHashScalarValue(scalar_val: &JsonbValue<'_>, hash: &mut u32) -> PgResult<()> {
     let tmp: u32 = match scalar_val.typ {
         jbvNull => 0x01,
         jbvString => hashfn_seams::hash_bytes::call(jsonb_string_bytes(scalar_val)),
@@ -1916,7 +1944,7 @@ pub fn JsonbHashScalarValue(scalar_val: &JsonbValue, hash: &mut u32) -> PgResult
 /// C: `JsonbHashScalarValueExtended(const JsonbValue *scalarVal, uint64 *hash,
 /// uint64 seed)`.
 pub fn JsonbHashScalarValueExtended(
-    scalar_val: &JsonbValue,
+    scalar_val: &JsonbValue<'_>,
     hash: &mut u64,
     seed: u64,
 ) -> PgResult<()> {
@@ -1965,7 +1993,7 @@ fn lengthCompareJsonbString(val1: &[u8], val2: &[u8]) -> i32 {
 }
 
 /// C: `lengthCompareJsonbStringValue(const void *a, const void *b)`.
-fn lengthCompareJsonbStringValue(a: &JsonbValue, b: &JsonbValue) -> i32 {
+fn lengthCompareJsonbStringValue(a: &JsonbValue<'_>, b: &JsonbValue<'_>) -> i32 {
     let (sa, sb) = match (&a.val, &b.val) {
         (JsonbValueData::String(sa), JsonbValueData::String(sb)) => (sa, sb),
         _ => unreachable!("lengthCompareJsonbStringValue on non-string"),
@@ -1980,8 +2008,8 @@ fn lengthCompareJsonbStringValue(a: &JsonbValue, b: &JsonbValue) -> i32 {
 /// merely equivalent).  Equal-key pairs are ordered so the original order is
 /// respected (the unique algorithm prefers the first element as value).
 fn lengthCompareJsonbPair(
-    pa: &JsonbPair,
-    pb: &JsonbPair,
+    pa: &JsonbPair<'_>,
+    pb: &JsonbPair<'_>,
     binequal: &mut bool,
 ) -> core::cmp::Ordering {
     let mut res = lengthCompareJsonbStringValue(&pa.key, &pb.key);
@@ -1999,8 +2027,8 @@ fn lengthCompareJsonbPair(
 
 /// C: `uniqueifyJsonbObject(JsonbValue *object, bool unique_keys, bool
 /// skip_nulls)`.
-fn uniqueifyJsonbObject(
-    object: &mut JsonbValue,
+fn uniqueifyJsonbObject<'mcx>(
+    object: &mut JsonbValue<'mcx>,
     unique_keys: bool,
     skip_nulls: bool,
 ) -> PgResult<()> {

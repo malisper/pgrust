@@ -658,11 +658,12 @@ fn populate_array_json<'mcx, 'io, 'es>(
 /// `populate_array_dim_jsonb` (jsonfuncs.c:2825): iterate recursively through
 /// jsonb sub-array elements and accumulate result. Returns `Ok(false)` on a
 /// soft-error early-out.
-fn populate_array_dim_jsonb(
-    ctx: &mut PopulateArrayContext<'_, '_, '_>,
-    jbv: &JsonbValue,
+fn populate_array_dim_jsonb<'mcx>(
+    ctx: &mut PopulateArrayContext<'mcx, '_, '_>,
+    jbv: &JsonbValue<'mcx>,
     ndim: i32,
 ) -> PgResult<bool> {
+    let mcx = ctx.mcxt;
     // JsonbContainer *jbc = jbv->val.binary.data;
     stack_depth_seams::check_stack_depth::call()?;
 
@@ -682,8 +683,8 @@ fn populate_array_dim_jsonb(
         return Ok(false);
     }
 
-    // it = JsonbIteratorInit(jbc);
-    let mut it = JsonbIteratorInit(jbc);
+    // it = JsonbIteratorInit(mcx, jbc);
+    let mut it = JsonbIteratorInit(mcx, jbc);
     let mut val = JsonbValue::null();
 
     // tok = JsonbIteratorNext(&it, &val, true); Assert(tok == WJB_BEGIN_ARRAY);
@@ -994,14 +995,14 @@ fn populate_scalar<'mcx>(
             } else if jbv.typ == jbvType::jbvNumeric {
                 // str = DatumGetCString(DirectFunctionCall1(numeric_out, numeric));
                 let num = match &jbv.val {
-                    JsonbValueData::Numeric(n) => n.as_slice(),
+                    JsonbValueData::Numeric(n) => n,
                     _ => &[],
                 };
                 str_opt = Some(numeric_out(mcx, num)?.into_bytes());
             } else if jbv.typ == jbvType::jbvBinary {
                 // str = JsonbToCString(NULL, binary.data, binary.len);
                 let (data, len) = match &jbv.val {
-                    JsonbValueData::Binary { data, len, .. } => (data.as_slice(), *len),
+                    JsonbValueData::Binary { data, len, .. } => (data, *len),
                     _ => (&[][..], 0),
                 };
                 let s = JsonbToCString(mcx, data, len)?;

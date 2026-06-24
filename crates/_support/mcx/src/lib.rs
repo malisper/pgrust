@@ -1355,6 +1355,21 @@ pub fn slice_in<'mcx, T: Clone>(mcx: Mcx<'mcx>, src: &[T]) -> PgResult<PgVec<'mc
     Ok(v)
 }
 
+/// Copy `src` into the arena `mcx` and return it as an `&'mcx [T]` borrow tied to
+/// the context lifetime (the backing allocation lives in the arena and is
+/// bulk-freed at reset).  This is the construction-side analog of a zero-copy
+/// read: freshly-built bytes are interned into the same arena and stored as a
+/// borrow, exactly like C storing a `palloc`'d `char *` alongside
+/// document-pointing ones (the lifetime is the arena, not ownership).
+///
+/// Implemented over [`leak_in`] on a one-shot arena box of the copied `PgVec`,
+/// so the returned slice's provenance is the arena, not a stack temporary.
+pub fn slice_borrow_in<'mcx, T: Clone>(mcx: Mcx<'mcx>, src: &[T]) -> PgResult<&'mcx [T]> {
+    let v: PgVec<'mcx, T> = slice_in(mcx, src)?;
+    let boxed: &'mcx mut PgVec<'mcx, T> = leak_in(alloc_in(mcx, v)?);
+    Ok(&boxed[..])
+}
+
 #[cfg(test)]
 mod tests;
 

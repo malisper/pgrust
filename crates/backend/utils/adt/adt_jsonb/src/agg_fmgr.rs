@@ -32,7 +32,8 @@ use ::types_tuple::Datum as ValDatum;
 use crate::{
     jsonb_agg_finalfn, jsonb_agg_strict_transfn, jsonb_agg_transfn, jsonb_object_agg_finalfn,
     jsonb_object_agg_strict_transfn, jsonb_object_agg_transfn,
-    jsonb_object_agg_unique_strict_transfn, jsonb_object_agg_unique_transfn, JsonbAggState,
+    jsonb_object_agg_unique_strict_transfn, jsonb_object_agg_unique_transfn, JsonbAggOwned,
+    JsonbAggState,
 };
 
 /// `PG_ARGISNULL(i)`.
@@ -49,23 +50,41 @@ fn fn_expr_argtype(fcinfo: &FunctionCallInfoBaseData, i: i32) -> Oid {
 
 /// Take the `internal` transition state out of `args[0]`. `None` is C's
 /// `PG_ARGISNULL(0)` (first call).
-fn take_state(fcinfo: &mut FunctionCallInfoBaseData) -> Option<Box<JsonbAggState>> {
+///
+/// The state is the persistent, context-owning [`JsonbAggOwned`]: its working
+/// `JsonbValue` tree lives in its own [`McxOwned`] arena (the C aggregate
+/// context), so it survives across transition calls and is bulk-freed when the
+/// handle drops.
+fn take_state(fcinfo: &mut FunctionCallInfoBaseData) -> Option<Box<JsonbAggOwned>> {
     if arg_isnull(fcinfo, 0) {
         return None;
     }
     match fcinfo.take_ref_arg(0) {
-        Some(RefPayload::Internal(b)) => Some(b.downcast::<JsonbAggState>().unwrap_or_else(|_| {
-            panic!("jsonb_agg fn: args[0] internal state is not a JsonbAggState")
+        Some(RefPayload::Internal(b)) => Some(b.downcast::<JsonbAggOwned>().unwrap_or_else(|_| {
+            panic!("jsonb_agg fn: args[0] internal state is not a JsonbAggOwned")
         })),
         Some(other) => panic!("jsonb_agg fn: args[0] is not an internal state ({other:?})"),
         None => None,
     }
 }
 
-/// `PG_RETURN_POINTER(state)` — hand the transition state back as `internal`.
+/// Create a fresh, empty persistent aggregate state in its own context (the C
+/// aggregate context).  The working tree is built into this arena across the
+/// aggregation and bulk-freed when the handle drops.
+fn new_agg_owned() -> Box<JsonbAggOwned> {
+    let owned = JsonbAggOwned::try_new(MemoryContext::new("jsonb agg state"), |mcx| {
+        let _ = mcx;
+        Ok(JsonbAggState::default())
+    })
+    .expect("jsonb agg: allocating the aggregate-state context");
+    Box::new(owned)
+}
+
+/// `PG_RETURN_POINTER(state)` — hand the persistent transition state back as
+/// `internal`.
 fn ret_internal(
     fcinfo: &mut FunctionCallInfoBaseData,
-    state: Box<dyn core::any::Any>,
+    state: Box<JsonbAggOwned>,
 ) -> BoundaryDatum {
     fcinfo.set_ref_result(RefPayload::Internal(state));
     BoundaryDatum::from_usize(0)
@@ -77,7 +96,7 @@ fn ret_internal(
 /// frame, for the next row's forward/inverse transition (mirrors numeric's
 /// `keep_internal`).
 #[inline]
-fn keep_state(fcinfo: &mut FunctionCallInfoBaseData, state: Box<JsonbAggState>) {
+fn keep_state(fcinfo: &mut FunctionCallInfoBaseData, state: Box<JsonbAggOwned>) {
     fcinfo.set_ref_arg(0, RefPayload::Internal(state));
 }
 
@@ -129,19 +148,27 @@ fn jsonb_agg_transfn_impl(
 ) -> PgResult<BoundaryDatum> {
     let arg_type = fn_expr_argtype(fcinfo, 1);
     let val_is_null = arg_isnull(fcinfo, 1);
-    let prev_state = take_state(fcinfo).map(|b| *b);
-
-    let m = MemoryContext::new("jsonb_agg transfn scratch");
-    let mcx = m.mcx();
-    let val = arg_value(mcx, fcinfo, 1)?;
-
-    let new_state = if strict {
-        jsonb_agg_strict_transfn(mcx, prev_state, arg_type, &val, val_is_null)
-    } else {
-        jsonb_agg_transfn(mcx, prev_state, arg_type, &val, val_is_null)
-    }?;
-
-    Ok(ret_internal(fcinfo, Box::new(new_state)))
+    // The persistent state owns its arena (the C aggregate context). On the
+    // first call create it; otherwise re-enter the existing one. The argument
+    // and the working tree both live in that ONE arena, so a spliced element
+    // outlives the call exactly as C copies it into the aggregate context.
+    let (mut owned, first) = match take_state(fcinfo) {
+        Some(o) => (o, false),
+        None => (new_agg_owned(), true),
+    };
+    owned.with_mut_mcx(|mcx, state| {
+        let val = arg_value(mcx, fcinfo, 1)?;
+        // `None` drives the worker's first-call init (BEGIN_ARRAY + categorize);
+        // on later calls the accumulated `state` is threaded back in.
+        let prev = if first { None } else { Some(core::mem::take(state)) };
+        *state = if strict {
+            jsonb_agg_strict_transfn(mcx, prev, arg_type, &val, val_is_null)
+        } else {
+            jsonb_agg_transfn(mcx, prev, arg_type, &val, val_is_null)
+        }?;
+        Ok(())
+    })?;
+    Ok(ret_internal(fcinfo, owned))
 }
 
 fn fc_jsonb_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<BoundaryDatum> {
@@ -156,10 +183,14 @@ fn fc_jsonb_agg_strict_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResul
 fn fc_jsonb_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<BoundaryDatum> {
     match take_state(fcinfo) {
         None => Ok(ret_null(fcinfo)),
-        Some(state) => {
-            let m = MemoryContext::new("jsonb_agg finalfn");
-            let out: Option<Vec<u8>> =
-                jsonb_agg_finalfn(m.mcx(), Some(&state))?.map(|b| b.as_slice().to_vec());
+        Some(mut state) => {
+            // Run the finalfn inside the state's own arena so the closed-array
+            // working tree and the serialized output share its lifetime; copy
+            // the resulting varlena out to an owned `Vec` before the arena
+            // borrow ends (the by-ref result lane keeps its own owned image).
+            let out: Option<Vec<u8>> = state.with_mut_mcx(|mcx, s| {
+                Ok(jsonb_agg_finalfn(mcx, Some(s))?.map(|b| b.as_slice().to_vec()))
+            })?;
             // C `PG_GETARG_POINTER(0)` does not consume the state; restore it.
             keep_state(fcinfo, state);
             Ok(match out {
@@ -190,29 +221,32 @@ fn jsonb_object_agg_transfn_impl(
     let val_arg_type = fn_expr_argtype(fcinfo, 2);
     let key_is_null = arg_isnull(fcinfo, 1);
     let val_is_null = arg_isnull(fcinfo, 2);
-    let prev_state = take_state(fcinfo).map(|b| *b);
+    let (mut owned, first) = match take_state(fcinfo) {
+        Some(o) => (o, false),
+        None => (new_agg_owned(), true),
+    };
+    owned.with_mut_mcx(|mcx, state| {
+        let key = arg_value(mcx, fcinfo, 1)?;
+        let val = arg_value(mcx, fcinfo, 2)?;
+        let prev = if first { None } else { Some(core::mem::take(state)) };
+        *state = match kind {
+            ObjAggKind::Plain => jsonb_object_agg_transfn(
+                mcx, prev, key_arg_type, val_arg_type, &key, key_is_null, &val, val_is_null,
+            ),
+            ObjAggKind::Strict => jsonb_object_agg_strict_transfn(
+                mcx, prev, key_arg_type, val_arg_type, &key, key_is_null, &val, val_is_null,
+            ),
+            ObjAggKind::Unique => jsonb_object_agg_unique_transfn(
+                mcx, prev, key_arg_type, val_arg_type, &key, key_is_null, &val, val_is_null,
+            ),
+            ObjAggKind::UniqueStrict => jsonb_object_agg_unique_strict_transfn(
+                mcx, prev, key_arg_type, val_arg_type, &key, key_is_null, &val, val_is_null,
+            ),
+        }?;
+        Ok(())
+    })?;
 
-    let m = MemoryContext::new("jsonb_object_agg transfn scratch");
-    let mcx = m.mcx();
-    let key = arg_value(mcx, fcinfo, 1)?;
-    let val = arg_value(mcx, fcinfo, 2)?;
-
-    let new_state = match kind {
-        ObjAggKind::Plain => jsonb_object_agg_transfn(
-            mcx, prev_state, key_arg_type, val_arg_type, &key, key_is_null, &val, val_is_null,
-        ),
-        ObjAggKind::Strict => jsonb_object_agg_strict_transfn(
-            mcx, prev_state, key_arg_type, val_arg_type, &key, key_is_null, &val, val_is_null,
-        ),
-        ObjAggKind::Unique => jsonb_object_agg_unique_transfn(
-            mcx, prev_state, key_arg_type, val_arg_type, &key, key_is_null, &val, val_is_null,
-        ),
-        ObjAggKind::UniqueStrict => jsonb_object_agg_unique_strict_transfn(
-            mcx, prev_state, key_arg_type, val_arg_type, &key, key_is_null, &val, val_is_null,
-        ),
-    }?;
-
-    Ok(ret_internal(fcinfo, Box::new(new_state)))
+    Ok(ret_internal(fcinfo, owned))
 }
 
 fn fc_jsonb_object_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<BoundaryDatum> {
@@ -241,10 +275,10 @@ fn fc_jsonb_object_agg_unique_strict_transfn(
 fn fc_jsonb_object_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<BoundaryDatum> {
     match take_state(fcinfo) {
         None => Ok(ret_null(fcinfo)),
-        Some(state) => {
-            let m = MemoryContext::new("jsonb_object_agg finalfn");
-            let out: Option<Vec<u8>> =
-                jsonb_object_agg_finalfn(m.mcx(), Some(&state))?.map(|b| b.as_slice().to_vec());
+        Some(mut state) => {
+            let out: Option<Vec<u8>> = state.with_mut_mcx(|mcx, s| {
+                Ok(jsonb_object_agg_finalfn(mcx, Some(s))?.map(|b| b.as_slice().to_vec()))
+            })?;
             // C `PG_GETARG_POINTER(0)` does not consume the state; restore it.
             keep_state(fcinfo, state);
             Ok(match out {

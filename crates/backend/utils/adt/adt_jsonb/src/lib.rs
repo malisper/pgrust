@@ -70,12 +70,16 @@ use timestamp_seams as timestamp_seam;
 
 /// C: `JsonbInState` — semantic-action state while parsing text (or rendering a
 /// Datum) into a `JsonbValue` tree.
+///
+/// The working tree (`parse_state`/`res`) is arena-allocated in `'mcx`: the
+/// byte-run payloads are `&'mcx` borrows and the spines are arena `PgVec`s.
+/// The state never outlives its arena.
 #[derive(Debug, Default)]
-pub struct JsonbInState {
+pub struct JsonbInState<'mcx> {
     /// The parse-state stack (C: `JsonbParseState *parseState`).
-    pub parse_state: Option<Box<JsonbParseState>>,
+    pub parse_state: Option<Box<JsonbParseState<'mcx>>>,
     /// The resulting root value (C: `JsonbValue *res`).
-    pub res: Option<JsonbValue>,
+    pub res: Option<JsonbValue<'mcx>>,
     /// Whether to enforce unique object keys (C: `bool unique_keys`).
     pub unique_keys: bool,
 }
@@ -83,9 +87,19 @@ pub struct JsonbInState {
 /// State carried across `jsonb_agg` / `jsonb_object_agg` transitions
 /// (C: `JsonbAggState`). The element categorization is resolved once on the
 /// first call.
+// The aggregate state holds a working `JsonbValue` tree that must persist across
+// transition calls, so it lives in its OWN memory context bundled via
+// [`McxOwned`] (the C aggregate context).  `JsonbAggOwned` is the movable,
+// `'static` handle stored in the `internal` transition Datum; each transition
+// re-enters it through `with_mut_mcx` to splice the next element into the SAME
+// arena, exactly as C copies each element into the aggregate context.
+::mcx::bind!(pub JsonbAggBind => JsonbAggState<'mcx>);
+/// The persistent, context-owning aggregate-state handle (see [`JsonbAggBind`]).
+pub type JsonbAggOwned = ::mcx::McxOwned<JsonbAggBind>;
+
 #[derive(Debug, Default)]
-pub struct JsonbAggState {
-    pub res: JsonbInState,
+pub struct JsonbAggState<'mcx> {
+    pub res: JsonbInState<'mcx>,
     pub key_category: Option<JsonTypeCategory>,
     pub key_output_func: Oid,
     pub val_category: Option<JsonTypeCategory>,
@@ -268,8 +282,13 @@ fn jsonb_from_cstring<'mcx>(
 // ---------------------------------------------------------------------------
 
 /// C: `jsonb_in_object_start(void *pstate)`.
-pub fn jsonb_in_object_start(state: &mut JsonbInState) -> PgResult<()> {
-    state.res = pushJsonbValue(&mut state.parse_state, JsonbIteratorToken::WJB_BEGIN_OBJECT, None)?;
+pub fn jsonb_in_object_start<'mcx>(mcx: Mcx<'mcx>, state: &mut JsonbInState<'mcx>) -> PgResult<()> {
+    state.res = pushJsonbValue(
+        mcx,
+        &mut state.parse_state,
+        JsonbIteratorToken::WJB_BEGIN_OBJECT,
+        None,
+    )?;
     let unique = state.unique_keys;
     if let Some(ps) = state.parse_state.as_mut() {
         ps.unique_keys = unique;
@@ -278,20 +297,35 @@ pub fn jsonb_in_object_start(state: &mut JsonbInState) -> PgResult<()> {
 }
 
 /// C: `jsonb_in_object_end(void *pstate)`.
-pub fn jsonb_in_object_end(state: &mut JsonbInState) -> PgResult<()> {
-    state.res = pushJsonbValue(&mut state.parse_state, JsonbIteratorToken::WJB_END_OBJECT, None)?;
+pub fn jsonb_in_object_end<'mcx>(mcx: Mcx<'mcx>, state: &mut JsonbInState<'mcx>) -> PgResult<()> {
+    state.res = pushJsonbValue(
+        mcx,
+        &mut state.parse_state,
+        JsonbIteratorToken::WJB_END_OBJECT,
+        None,
+    )?;
     Ok(())
 }
 
 /// C: `jsonb_in_array_start(void *pstate)`.
-pub fn jsonb_in_array_start(state: &mut JsonbInState) -> PgResult<()> {
-    state.res = pushJsonbValue(&mut state.parse_state, JsonbIteratorToken::WJB_BEGIN_ARRAY, None)?;
+pub fn jsonb_in_array_start<'mcx>(mcx: Mcx<'mcx>, state: &mut JsonbInState<'mcx>) -> PgResult<()> {
+    state.res = pushJsonbValue(
+        mcx,
+        &mut state.parse_state,
+        JsonbIteratorToken::WJB_BEGIN_ARRAY,
+        None,
+    )?;
     Ok(())
 }
 
 /// C: `jsonb_in_array_end(void *pstate)`.
-pub fn jsonb_in_array_end(state: &mut JsonbInState) -> PgResult<()> {
-    state.res = pushJsonbValue(&mut state.parse_state, JsonbIteratorToken::WJB_END_ARRAY, None)?;
+pub fn jsonb_in_array_end<'mcx>(mcx: Mcx<'mcx>, state: &mut JsonbInState<'mcx>) -> PgResult<()> {
+    state.res = pushJsonbValue(
+        mcx,
+        &mut state.parse_state,
+        JsonbIteratorToken::WJB_END_ARRAY,
+        None,
+    )?;
     Ok(())
 }
 
@@ -299,8 +333,9 @@ pub fn jsonb_in_array_end(state: &mut JsonbInState) -> PgResult<()> {
 /// `fname` is the (de-escaped) field name. Returns `Ok(false)` when an
 /// over-length key was soft-recorded into `escontext` (C `return
 /// JSON_SEM_ACTION_FAILED`).
-pub fn jsonb_in_object_field_start(
-    state: &mut JsonbInState,
+pub fn jsonb_in_object_field_start<'mcx>(
+    mcx: Mcx<'mcx>,
+    state: &mut JsonbInState<'mcx>,
     fname: &[u8],
     escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<bool> {
@@ -308,11 +343,13 @@ pub fn jsonb_in_object_field_start(
     if !checkStringLen(fname.len(), escontext)? {
         return Ok(false);
     }
+    // `fname` is a transient lexer buffer; intern it into the arena so the
+    // working tree's borrow outlives the call (C palloc's the key string).
     let v = JsonbValue {
         typ: jbvType::jbvString,
-        val: JsonbValueData::String(fname.to_vec()),
+        val: JsonbValueData::String(::mcx::slice_borrow_in(mcx, fname)?),
     };
-    state.res = pushJsonbValue(&mut state.parse_state, JsonbIteratorToken::WJB_KEY, Some(&v))?;
+    state.res = pushJsonbValue(mcx, &mut state.parse_state, JsonbIteratorToken::WJB_KEY, Some(&v))?;
     Ok(true)
 }
 
@@ -322,7 +359,7 @@ pub fn jsonb_in_object_field_start(
 /// JSON_SEM_ACTION_FAILED`); `Ok(true)` on success.
 pub fn jsonb_in_scalar<'mcx>(
     mcx: Mcx<'mcx>,
-    state: &mut JsonbInState,
+    state: &mut JsonbInState<'mcx>,
     token: Option<&[u8]>,
     tokentype: JsonTokenType,
     mut escontext: Option<&mut SoftErrorContext>,
@@ -336,9 +373,10 @@ pub fn jsonb_in_scalar<'mcx>(
             if !checkStringLen(t.len(), escontext.as_deref_mut())? {
                 return Ok(false);
             }
+            // Intern the transient token into the arena (C palloc's it).
             JsonbValue {
                 typ: jbvType::jbvString,
-                val: JsonbValueData::String(t.to_vec()),
+                val: JsonbValueData::String(::mcx::slice_borrow_in(mcx, t)?),
             }
         }
         JSON_TOKEN_NUMBER => {
@@ -354,9 +392,11 @@ pub fn jsonb_in_scalar<'mcx>(
                 Some(b) => b,
                 None => return Ok(false),
             };
+            // The freshly-built numeric varlena lives in the arena; store the
+            // borrow.
             JsonbValue {
                 typ: jbvType::jbvNumeric,
-                val: JsonbValueData::Numeric(bytes),
+                val: JsonbValueData::Numeric(::mcx::slice_borrow_in(mcx, &bytes)?),
             }
         }
         JSON_TOKEN_TRUE => JsonbValue {
@@ -376,14 +416,28 @@ pub fn jsonb_in_scalar<'mcx>(
         let va = JsonbValue {
             typ: jbvType::jbvArray,
             val: JsonbValueData::Array {
-                elems: Vec::new(),
+                elems: ::mcx::vec_with_capacity_in(mcx, 0)?,
                 raw_scalar: true,
             },
         };
-        state.res =
-            pushJsonbValue(&mut state.parse_state, JsonbIteratorToken::WJB_BEGIN_ARRAY, Some(&va))?;
-        state.res = pushJsonbValue(&mut state.parse_state, JsonbIteratorToken::WJB_ELEM, Some(&v))?;
-        state.res = pushJsonbValue(&mut state.parse_state, JsonbIteratorToken::WJB_END_ARRAY, None)?;
+        state.res = pushJsonbValue(
+            mcx,
+            &mut state.parse_state,
+            JsonbIteratorToken::WJB_BEGIN_ARRAY,
+            Some(&va),
+        )?;
+        state.res = pushJsonbValue(
+            mcx,
+            &mut state.parse_state,
+            JsonbIteratorToken::WJB_ELEM,
+            Some(&v),
+        )?;
+        state.res = pushJsonbValue(
+            mcx,
+            &mut state.parse_state,
+            JsonbIteratorToken::WJB_END_ARRAY,
+            None,
+        )?;
     } else {
         let parent = state
             .parse_state
@@ -393,12 +447,20 @@ pub fn jsonb_in_scalar<'mcx>(
             .typ;
         match parent {
             jbvType::jbvArray => {
-                state.res =
-                    pushJsonbValue(&mut state.parse_state, JsonbIteratorToken::WJB_ELEM, Some(&v))?;
+                state.res = pushJsonbValue(
+                    mcx,
+                    &mut state.parse_state,
+                    JsonbIteratorToken::WJB_ELEM,
+                    Some(&v),
+                )?;
             }
             jbvType::jbvObject => {
-                state.res =
-                    pushJsonbValue(&mut state.parse_state, JsonbIteratorToken::WJB_VALUE, Some(&v))?;
+                state.res = pushJsonbValue(
+                    mcx,
+                    &mut state.parse_state,
+                    JsonbIteratorToken::WJB_VALUE,
+                    Some(&v),
+                )?;
             }
             _ => return Err(elog_internal("unexpected parent of nested structure")),
         }
@@ -412,10 +474,10 @@ pub fn jsonb_in_scalar<'mcx>(
 
 /// C: `JsonbContainerTypeName(JsonbContainer *jbc)` — container is the bytes
 /// starting at the container header word.
-pub fn JsonbContainerTypeName(jbc: &[u8]) -> PgResult<&'static str> {
+pub fn JsonbContainerTypeName<'mcx>(mcx: Mcx<'mcx>, jbc: &'mcx [u8]) -> PgResult<&'static str> {
     let mut scalar = JsonbValue::null();
-    if JsonbExtractScalar(jbc, &mut scalar)? {
-        JsonbTypeName(&scalar)
+    if JsonbExtractScalar(mcx, jbc, &mut scalar)? {
+        JsonbTypeName(mcx, &scalar)
     } else if json_container_is_array(container_header(jbc)) {
         Ok("array")
     } else if json_container_is_object(container_header(jbc)) {
@@ -430,10 +492,10 @@ pub fn JsonbContainerTypeName(jbc: &[u8]) -> PgResult<&'static str> {
 }
 
 /// C: `JsonbTypeName(JsonbValue *val)`.
-pub fn JsonbTypeName(val: &JsonbValue) -> PgResult<&'static str> {
+pub fn JsonbTypeName<'mcx>(mcx: Mcx<'mcx>, val: &JsonbValue<'mcx>) -> PgResult<&'static str> {
     match val.typ {
         jbvType::jbvBinary => match &val.val {
-            JsonbValueData::Binary { data, .. } => JsonbContainerTypeName(data),
+            JsonbValueData::Binary { data, .. } => JsonbContainerTypeName(mcx, data),
             _ => unreachable!(),
         },
         jbvType::jbvObject => Ok("object"),
@@ -461,8 +523,8 @@ pub fn JsonbTypeName(val: &JsonbValue) -> PgResult<&'static str> {
 }
 
 /// C: `jsonb_typeof(PG_FUNCTION_ARGS)` -> text. Returns the type name string.
-pub fn jsonb_typeof(jsonb: &[u8]) -> PgResult<&'static str> {
-    JsonbContainerTypeName(vardata_any(jsonb))
+pub fn jsonb_typeof<'mcx>(mcx: Mcx<'mcx>, jsonb: &'mcx [u8]) -> PgResult<&'static str> {
+    JsonbContainerTypeName(mcx, vardata_any(jsonb))
 }
 
 // ===========================================================================
@@ -521,7 +583,7 @@ fn JsonbToCStringWorker<'mcx>(
     let want = if estimated_len >= 0 { estimated_len as usize } else { 64 };
     let mut buf: PgVec<'mcx, u8> = PgVec::with_capacity_in(want, mcx);
 
-    let mut it = JsonbIteratorInit(container);
+    let mut it = JsonbIteratorInit(mcx, container);
     let mut v = JsonbValue::null();
     typ = WJB_DONE;
 
@@ -699,7 +761,7 @@ fn escape_json_with_len(buf: &mut PgVec<'_, u8>, str: &[u8]) {
 
 /// C: `JsonbExtractScalar(JsonbContainer *jbc, JsonbValue *res)` — `jbc` is the
 /// container bytes starting at the header word.
-pub fn JsonbExtractScalar(jbc: &[u8], res: &mut JsonbValue) -> PgResult<bool> {
+pub fn JsonbExtractScalar<'mcx>(mcx: Mcx<'mcx>, jbc: &'mcx [u8], res: &mut JsonbValue<'mcx>) -> PgResult<bool> {
     use JsonbIteratorToken::*;
     let header = container_header(jbc);
 
@@ -714,7 +776,7 @@ pub fn JsonbExtractScalar(jbc: &[u8], res: &mut JsonbValue) -> PgResult<bool> {
     }
 
     // A root scalar is stored as an array of one element.
-    let mut it = JsonbIteratorInit(jbc);
+    let mut it = JsonbIteratorInit(mcx, jbc);
     let mut tmp = JsonbValue::null();
 
     let tok = JsonbIteratorNext(&mut it, &mut tmp, true)?;
@@ -734,14 +796,14 @@ pub fn JsonbExtractScalar(jbc: &[u8], res: &mut JsonbValue) -> PgResult<bool> {
 }
 
 /// C: `JsonbUnquote(Jsonb *jb)` — `jb` is the full on-disk varlena bytes.
-pub fn JsonbUnquote<'mcx>(mcx: Mcx<'mcx>, jb: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+pub fn JsonbUnquote<'mcx>(mcx: Mcx<'mcx>, jb: &'mcx [u8]) -> PgResult<PgVec<'mcx, u8>> {
     let root = vardata_any(jb);
     if json_container_is_scalar(container_header(root)) {
         let mut v = JsonbValue::null();
-        JsonbExtractScalar(root, &mut v)?;
+        JsonbExtractScalar(mcx, root, &mut v)?;
 
         let bytes: Vec<u8> = match &v.val {
-            JsonbValueData::String(s) => s.clone(),
+            JsonbValueData::String(s) => s.to_vec(),
             JsonbValueData::Bool(b) => {
                 if *b {
                     b"true".to_vec()
@@ -790,9 +852,9 @@ fn cannotCastJsonbValue(typ: jbvType, sqltype: &str) -> PgError {
 
 /// Shared extract + type-gate for the scalar casts. Returns `Ok(None)` for a
 /// jbvNull (C: `PG_RETURN_NULL()`), else the extracted `JsonbValue`.
-fn cast_extract(jb: &[u8], sqltype: &str) -> PgResult<Option<JsonbValue>> {
+fn cast_extract<'mcx>(mcx: Mcx<'mcx>, jb: &'mcx [u8], sqltype: &str) -> PgResult<Option<JsonbValue<'mcx>>> {
     let mut v = JsonbValue::null();
-    if !JsonbExtractScalar(vardata_any(jb), &mut v)? {
+    if !JsonbExtractScalar(mcx, vardata_any(jb), &mut v)? {
         return Err(cannotCastJsonbValue(v.typ, sqltype));
     }
     if v.typ == jbvType::jbvNull {
@@ -802,8 +864,8 @@ fn cast_extract(jb: &[u8], sqltype: &str) -> PgResult<Option<JsonbValue>> {
 }
 
 /// C: `jsonb_bool(PG_FUNCTION_ARGS)`.
-pub fn jsonb_bool(jb: &[u8]) -> PgResult<Option<bool>> {
-    let Some(v) = cast_extract(jb, "boolean")? else {
+pub fn jsonb_bool<'mcx>(mcx: Mcx<'mcx>, jb: &'mcx [u8]) -> PgResult<Option<bool>> {
+    let Some(v) = cast_extract(mcx, jb, "boolean")? else {
         return Ok(None);
     };
     if v.typ != jbvType::jbvBool {
@@ -816,23 +878,23 @@ pub fn jsonb_bool(jb: &[u8]) -> PgResult<Option<bool>> {
 }
 
 /// Extract the on-disk `numeric` bytes from a casts' scalar, gating type.
-fn cast_numeric_bytes(jb: &[u8], sqltype: &str) -> PgResult<Option<Vec<u8>>> {
-    let Some(v) = cast_extract(jb, sqltype)? else {
+fn cast_numeric_bytes<'mcx>(mcx: Mcx<'mcx>, jb: &'mcx [u8], sqltype: &str) -> PgResult<Option<Vec<u8>>> {
+    let Some(v) = cast_extract(mcx, jb, sqltype)? else {
         return Ok(None);
     };
     if v.typ != jbvType::jbvNumeric {
         return Err(cannotCastJsonbValue(v.typ, sqltype));
     }
     match v.val {
-        JsonbValueData::Numeric(n) => Ok(Some(n)),
+        JsonbValueData::Numeric(n) => Ok(Some(n.to_vec())),
         _ => unreachable!(),
     }
 }
 
 /// C: `jsonb_numeric(PG_FUNCTION_ARGS)` — returns the on-disk numeric bytes (a
 /// copy, as the C makes via `DatumGetNumericCopy`).
-pub fn jsonb_numeric<'mcx>(mcx: Mcx<'mcx>, jb: &[u8]) -> PgResult<Option<PgVec<'mcx, u8>>> {
-    match cast_numeric_bytes(jb, "numeric")? {
+pub fn jsonb_numeric<'mcx>(mcx: Mcx<'mcx>, jb: &'mcx [u8]) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    match cast_numeric_bytes(mcx, jb, "numeric")? {
         Some(n) => {
             let mut out = PgVec::with_capacity_in(n.len(), mcx);
             out.extend_from_slice(&n);
@@ -843,40 +905,40 @@ pub fn jsonb_numeric<'mcx>(mcx: Mcx<'mcx>, jb: &[u8]) -> PgResult<Option<PgVec<'
 }
 
 /// C: `jsonb_int2(PG_FUNCTION_ARGS)`.
-pub fn jsonb_int2(jb: &[u8]) -> PgResult<Option<i16>> {
-    match cast_numeric_bytes(jb, "smallint")? {
+pub fn jsonb_int2<'mcx>(mcx: Mcx<'mcx>, jb: &'mcx [u8]) -> PgResult<Option<i16>> {
+    match cast_numeric_bytes(mcx, jb, "smallint")? {
         Some(n) => Ok(Some(jsonb_seam::numeric_int2::call(&n)?)),
         None => Ok(None),
     }
 }
 
 /// C: `jsonb_int4(PG_FUNCTION_ARGS)`.
-pub fn jsonb_int4(jb: &[u8]) -> PgResult<Option<i32>> {
-    match cast_numeric_bytes(jb, "integer")? {
+pub fn jsonb_int4<'mcx>(mcx: Mcx<'mcx>, jb: &'mcx [u8]) -> PgResult<Option<i32>> {
+    match cast_numeric_bytes(mcx, jb, "integer")? {
         Some(n) => Ok(Some(jsonb_seam::numeric_int4::call(&n)?)),
         None => Ok(None),
     }
 }
 
 /// C: `jsonb_int8(PG_FUNCTION_ARGS)`.
-pub fn jsonb_int8(jb: &[u8]) -> PgResult<Option<i64>> {
-    match cast_numeric_bytes(jb, "bigint")? {
+pub fn jsonb_int8<'mcx>(mcx: Mcx<'mcx>, jb: &'mcx [u8]) -> PgResult<Option<i64>> {
+    match cast_numeric_bytes(mcx, jb, "bigint")? {
         Some(n) => Ok(Some(jsonb_seam::numeric_int8::call(&n)?)),
         None => Ok(None),
     }
 }
 
 /// C: `jsonb_float4(PG_FUNCTION_ARGS)`.
-pub fn jsonb_float4(jb: &[u8]) -> PgResult<Option<f32>> {
-    match cast_numeric_bytes(jb, "real")? {
+pub fn jsonb_float4<'mcx>(mcx: Mcx<'mcx>, jb: &'mcx [u8]) -> PgResult<Option<f32>> {
+    match cast_numeric_bytes(mcx, jb, "real")? {
         Some(n) => Ok(Some(adt_numeric::convert::numeric_to_float4(&n)?)),
         None => Ok(None),
     }
 }
 
 /// C: `jsonb_float8(PG_FUNCTION_ARGS)`.
-pub fn jsonb_float8(jb: &[u8]) -> PgResult<Option<f64>> {
-    match cast_numeric_bytes(jb, "double precision")? {
+pub fn jsonb_float8<'mcx>(mcx: Mcx<'mcx>, jb: &'mcx [u8]) -> PgResult<Option<f64>> {
+    match cast_numeric_bytes(mcx, jb, "double precision")? {
         Some(n) => Ok(Some(adt_numeric::convert::numeric_to_float8(&n)?)),
         None => Ok(None),
     }
@@ -933,7 +995,7 @@ pub fn datum_to_jsonb_internal<'mcx>(
     mcx: Mcx<'mcx>,
     val: &Datum<'mcx>,
     is_null: bool,
-    result: &mut JsonbInState,
+    result: &mut JsonbInState<'mcx>,
     tcategory: JsonTypeCategory,
     outfuncoid: Oid,
     key_scalar: bool,
@@ -984,7 +1046,7 @@ pub fn datum_to_jsonb_internal<'mcx>(
                     let outputstr: &[u8] = if val.as_bool() { b"true" } else { b"false" };
                     jb = JsonbValue {
                         typ: jbvType::jbvString,
-                        val: JsonbValueData::String(outputstr.to_vec()),
+                        val: JsonbValueData::String(::mcx::slice_borrow_in(mcx, &outputstr)?),
                     };
                 } else {
                     jb = JsonbValue {
@@ -999,7 +1061,7 @@ pub fn datum_to_jsonb_internal<'mcx>(
                     // always quote keys
                     jb = JsonbValue {
                         typ: jbvType::jbvString,
-                        val: JsonbValueData::String(outputstr),
+                        val: JsonbValueData::String(::mcx::slice_borrow_in(mcx, &outputstr)?),
                     };
                 } else {
                     // Make it numeric if it's a valid JSON number, otherwise a
@@ -1018,12 +1080,12 @@ pub fn datum_to_jsonb_internal<'mcx>(
                             .expect("numeric_in of a numeric_out string never soft-fails");
                         jb = JsonbValue {
                             typ: jbvType::jbvNumeric,
-                            val: JsonbValueData::Numeric(bytes),
+                            val: JsonbValueData::Numeric(::mcx::slice_borrow_in(mcx, &bytes)?),
                         };
                     } else {
                         jb = JsonbValue {
                             typ: jbvType::jbvString,
-                            val: JsonbValueData::String(outputstr),
+                            val: JsonbValueData::String(::mcx::slice_borrow_in(mcx, &outputstr)?),
                         };
                     }
                 }
@@ -1032,21 +1094,21 @@ pub fn datum_to_jsonb_internal<'mcx>(
                 let s = timestamp_seam::json_encode_datetime::call(val, DATEOID, None)?;
                 jb = JsonbValue {
                     typ: jbvType::jbvString,
-                    val: JsonbValueData::String(s.into_bytes()),
+                    val: JsonbValueData::String(::mcx::slice_borrow_in(mcx, s.as_bytes())?),
                 };
             }
             JSONTYPE_TIMESTAMP => {
                 let s = timestamp_seam::json_encode_datetime::call(val, TIMESTAMPOID, None)?;
                 jb = JsonbValue {
                     typ: jbvType::jbvString,
-                    val: JsonbValueData::String(s.into_bytes()),
+                    val: JsonbValueData::String(::mcx::slice_borrow_in(mcx, s.as_bytes())?),
                 };
             }
             JSONTYPE_TIMESTAMPTZ => {
                 let s = timestamp_seam::json_encode_datetime::call(val, TIMESTAMPTZOID, None)?;
                 jb = JsonbValue {
                     typ: jbvType::jbvString,
-                    val: JsonbValueData::String(s.into_bytes()),
+                    val: JsonbValueData::String(::mcx::slice_borrow_in(mcx, s.as_bytes())?),
                 };
             }
             JSONTYPE_CAST | JSONTYPE_JSON => {
@@ -1063,12 +1125,16 @@ pub fn datum_to_jsonb_internal<'mcx>(
                 // NULL escontext into the inner parse).
                 let parsed = jsonb_seam::parse_to_jsonb::call(mcx, &json, false, None)?
                     .expect("parse_to_jsonb: hard-error path returned None");
-                splice_jsonb_tokens(result, &parsed)?;
+                let parsed = ::mcx::slice_borrow_in(mcx, &parsed)?;
+                splice_jsonb_tokens(mcx, result, parsed)?;
             }
             JSONTYPE_JSONB => {
-                let jsonb = jsonb_seam::jsonb_datum_bytes::call(mcx, val)?;
-                let root = vardata_any(&jsonb);
-                let mut it = JsonbIteratorInit(root);
+                // Intern the detoasted image into the arena so the iterator-read
+                // values spliced into `result` outlive this call (they borrow it).
+                let jsonb: &'mcx [u8] =
+                    ::mcx::slice_borrow_in(mcx, &jsonb_seam::jsonb_datum_bytes::call(mcx, val)?)?;
+                let root = vardata_any(jsonb);
+                let mut it = JsonbIteratorInit(mcx, root);
                 if json_container_is_scalar(container_header(root)) {
                     // JB_ROOT_IS_SCALAR: pull WJB_BEGIN_ARRAY then WJB_ELEM.
                     let _ = JsonbIteratorNext(&mut it, &mut jb, true)?;
@@ -1087,9 +1153,9 @@ pub fn datum_to_jsonb_internal<'mcx>(
                             typ,
                             WJB_END_ARRAY | WJB_END_OBJECT | WJB_BEGIN_ARRAY | WJB_BEGIN_OBJECT
                         ) {
-                            result.res = pushJsonbValue(&mut result.parse_state, typ, None)?;
+                            result.res = pushJsonbValue(mcx, &mut result.parse_state, typ, None)?;
                         } else {
-                            result.res = pushJsonbValue(&mut result.parse_state, typ, Some(&v))?;
+                            result.res = pushJsonbValue(mcx, &mut result.parse_state, typ, Some(&v))?;
                         }
                     }
                 }
@@ -1101,7 +1167,7 @@ pub fn datum_to_jsonb_internal<'mcx>(
                 checkStringLen(outputstr.len(), None)?;
                 jb = JsonbValue {
                     typ: jbvType::jbvString,
-                    val: JsonbValueData::String(outputstr),
+                    val: JsonbValueData::String(::mcx::slice_borrow_in(mcx, &outputstr)?),
                 };
             }
         }
@@ -1122,23 +1188,23 @@ pub fn datum_to_jsonb_internal<'mcx>(
         let va = JsonbValue {
             typ: jbvType::jbvArray,
             val: JsonbValueData::Array {
-                elems: Vec::new(),
+                elems: ::mcx::vec_with_capacity_in(mcx, 0)?,
                 raw_scalar: true,
             },
         };
         result.res =
-            pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_BEGIN_ARRAY, Some(&va))?;
+            pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_BEGIN_ARRAY, Some(&va))?;
         result.res =
-            pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_ELEM, Some(&jb))?;
+            pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_ELEM, Some(&jb))?;
         result.res =
-            pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_END_ARRAY, None)?;
+            pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_END_ARRAY, None)?;
         Ok(())
     } else {
         let parent_type = result.parse_state.as_ref().unwrap().cont_val.typ;
         match parent_type {
             jbvType::jbvArray => {
                 result.res =
-                    pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_ELEM, Some(&jb))?;
+                    pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_ELEM, Some(&jb))?;
             }
             jbvType::jbvObject => {
                 let tok = if key_scalar {
@@ -1146,7 +1212,7 @@ pub fn datum_to_jsonb_internal<'mcx>(
                 } else {
                     JsonbIteratorToken::WJB_VALUE
                 };
-                result.res = pushJsonbValue(&mut result.parse_state, tok, Some(&jb))?;
+                result.res = pushJsonbValue(mcx, &mut result.parse_state, tok, Some(&jb))?;
             }
             _ => return Err(elog_internal("unexpected parent of nested structure")),
         }
@@ -1159,7 +1225,7 @@ pub fn datum_to_jsonb_internal<'mcx>(
 /// tcategory, Oid outfuncoid)`.
 fn array_dim_to_jsonb<'mcx>(
     mcx: Mcx<'mcx>,
-    result: &mut JsonbInState,
+    result: &mut JsonbInState<'mcx>,
     dim: usize,
     ndims: usize,
     dims: &[i32],
@@ -1171,7 +1237,7 @@ fn array_dim_to_jsonb<'mcx>(
 ) -> PgResult<()> {
     debug_assert!(dim < ndims);
 
-    result.res = pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_BEGIN_ARRAY, None)?;
+    result.res = pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_BEGIN_ARRAY, None)?;
 
     let mut i = 1;
     while i <= dims[dim] {
@@ -1194,7 +1260,7 @@ fn array_dim_to_jsonb<'mcx>(
         i += 1;
     }
 
-    result.res = pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_END_ARRAY, None)?;
+    result.res = pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_END_ARRAY, None)?;
     Ok(())
 }
 
@@ -1205,7 +1271,7 @@ fn array_dim_to_jsonb<'mcx>(
 fn array_to_jsonb_internal<'mcx>(
     mcx: Mcx<'mcx>,
     array: &Datum<'mcx>,
-    result: &mut JsonbInState,
+    result: &mut JsonbInState<'mcx>,
 ) -> PgResult<()> {
     let arr = catalog_fmgr::deconstruct_array::call(mcx, array)?;
 
@@ -1224,9 +1290,9 @@ fn array_to_jsonb_internal<'mcx>(
 
     if nitems <= 0 {
         result.res =
-            pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_BEGIN_ARRAY, None)?;
+            pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_BEGIN_ARRAY, None)?;
         result.res =
-            pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_END_ARRAY, None)?;
+            pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_END_ARRAY, None)?;
         return Ok(());
     }
 
@@ -1253,11 +1319,11 @@ fn array_to_jsonb_internal<'mcx>(
 fn composite_to_jsonb<'mcx>(
     mcx: Mcx<'mcx>,
     composite: &Datum<'mcx>,
-    result: &mut JsonbInState,
+    result: &mut JsonbInState<'mcx>,
 ) -> PgResult<()> {
     let fields = catalog_fmgr::walk_composite::call(mcx, composite)?;
 
-    result.res = pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_BEGIN_OBJECT, None)?;
+    result.res = pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_BEGIN_OBJECT, None)?;
 
     for field in &fields {
         // (att->attisdropped fields are already filtered out by walk_composite,
@@ -1265,9 +1331,9 @@ fn composite_to_jsonb<'mcx>(
         let v = JsonbValue {
             typ: jbvType::jbvString,
             // don't need checkStringLen here - can't exceed maximum name length
-            val: JsonbValueData::String(field.attname.clone()),
+            val: JsonbValueData::String(::mcx::slice_borrow_in(mcx, &field.attname)?),
         };
-        result.res = pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_KEY, Some(&v))?;
+        result.res = pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_KEY, Some(&v))?;
 
         datum_to_jsonb_internal(
             mcx,
@@ -1280,7 +1346,7 @@ fn composite_to_jsonb<'mcx>(
         )?;
     }
 
-    result.res = pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_END_OBJECT, None)?;
+    result.res = pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_END_OBJECT, None)?;
     Ok(())
 }
 
@@ -1322,7 +1388,7 @@ pub fn jsonb_build_object_worker<'mcx>(
     }
 
     let mut result = JsonbInState::default();
-    result.res = pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_BEGIN_OBJECT, None)?;
+    result.res = pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_BEGIN_OBJECT, None)?;
     if let Some(ps) = result.parse_state.as_mut() {
         ps.unique_keys = unique_keys;
         ps.skip_nulls = absent_on_null;
@@ -1344,7 +1410,7 @@ pub fn jsonb_build_object_worker<'mcx>(
         i += 2;
     }
 
-    result.res = pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_END_OBJECT, None)?;
+    result.res = pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_END_OBJECT, None)?;
     JsonbValueToJsonb(
         mcx,
         result
@@ -1357,8 +1423,8 @@ pub fn jsonb_build_object_worker<'mcx>(
 /// C: `jsonb_build_object_noargs(PG_FUNCTION_ARGS)`.
 pub fn jsonb_build_object_noargs<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, u8>> {
     let mut result = JsonbInState::default();
-    pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_BEGIN_OBJECT, None)?;
-    result.res = pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_END_OBJECT, None)?;
+    pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_BEGIN_OBJECT, None)?;
+    result.res = pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_END_OBJECT, None)?;
     JsonbValueToJsonb(
         mcx,
         result
@@ -1393,7 +1459,7 @@ pub fn jsonb_build_array_worker<'mcx>(
     absent_on_null: bool,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let mut result = JsonbInState::default();
-    result.res = pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_BEGIN_ARRAY, None)?;
+    result.res = pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_BEGIN_ARRAY, None)?;
 
     for i in 0..args.len() {
         if absent_on_null && nulls[i] {
@@ -1402,7 +1468,7 @@ pub fn jsonb_build_array_worker<'mcx>(
         add_jsonb(mcx, &args[i], nulls[i], &mut result, types[i], false)?;
     }
 
-    result.res = pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_END_ARRAY, None)?;
+    result.res = pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_END_ARRAY, None)?;
     JsonbValueToJsonb(
         mcx,
         result
@@ -1415,8 +1481,8 @@ pub fn jsonb_build_array_worker<'mcx>(
 /// C: `jsonb_build_array_noargs(PG_FUNCTION_ARGS)`.
 pub fn jsonb_build_array_noargs<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, u8>> {
     let mut result = JsonbInState::default();
-    pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_BEGIN_ARRAY, None)?;
-    result.res = pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_END_ARRAY, None)?;
+    pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_BEGIN_ARRAY, None)?;
+    result.res = pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_END_ARRAY, None)?;
     JsonbValueToJsonb(
         mcx,
         result
@@ -1445,7 +1511,7 @@ fn add_jsonb<'mcx>(
     mcx: Mcx<'mcx>,
     val: &Datum<'mcx>,
     is_null: bool,
-    result: &mut JsonbInState,
+    result: &mut JsonbInState<'mcx>,
     val_type: Oid,
     key_scalar: bool,
 ) -> PgResult<()> {
@@ -1465,10 +1531,14 @@ fn add_jsonb<'mcx>(
 
 /// Splice every iterator token of a standalone jsonb varlena into `result`'s
 /// parse state (the JSONTYPE_JSON/CAST text-parse tail).
-fn splice_jsonb_tokens(result: &mut JsonbInState, jsonb: &[u8]) -> PgResult<()> {
+fn splice_jsonb_tokens<'mcx>(
+    mcx: Mcx<'mcx>,
+    result: &mut JsonbInState<'mcx>,
+    jsonb: &'mcx [u8],
+) -> PgResult<()> {
     use JsonbIteratorToken::*;
     let root = &jsonb[VARHDRSZ..];
-    let mut it = JsonbIteratorInit(root);
+    let mut it = JsonbIteratorInit(mcx, root);
     loop {
         let mut v = JsonbValue::null();
         let typ = JsonbIteratorNext(&mut it, &mut v, false)?;
@@ -1476,9 +1546,9 @@ fn splice_jsonb_tokens(result: &mut JsonbInState, jsonb: &[u8]) -> PgResult<()> 
             break;
         }
         if matches!(typ, WJB_END_ARRAY | WJB_END_OBJECT | WJB_BEGIN_ARRAY | WJB_BEGIN_OBJECT) {
-            result.res = pushJsonbValue(&mut result.parse_state, typ, None)?;
+            result.res = pushJsonbValue(mcx, &mut result.parse_state, typ, None)?;
         } else {
-            result.res = pushJsonbValue(&mut result.parse_state, typ, Some(&v))?;
+            result.res = pushJsonbValue(mcx, &mut result.parse_state, typ, Some(&v))?;
         }
     }
     Ok(())
@@ -1501,7 +1571,7 @@ pub fn jsonb_object<'mcx>(
     in_datums: &[Option<Vec<u8>>],
 ) -> PgResult<PgVec<'mcx, u8>> {
     let mut result = JsonbInState::default();
-    pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_BEGIN_OBJECT, None)?;
+    pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_BEGIN_OBJECT, None)?;
 
     match ndims {
         0 => {
@@ -1536,18 +1606,18 @@ pub fn jsonb_object<'mcx>(
             .ok_or_else(|| PgError::error("jsonb_object: key datum is NULL"))?;
         let v = JsonbValue {
             typ: jbvType::jbvString,
-            val: JsonbValueData::String(key.clone()),
+            val: JsonbValueData::String(::mcx::slice_borrow_in(mcx, key)?),
         };
-        pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_KEY, Some(&v))?;
+        pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_KEY, Some(&v))?;
 
         let v = match &in_datums[i * 2 + 1] {
             None => JsonbValue::null(),
             Some(s) => JsonbValue {
                 typ: jbvType::jbvString,
-                val: JsonbValueData::String(s.clone()),
+                val: JsonbValueData::String(::mcx::slice_borrow_in(mcx, s)?),
             },
         };
-        pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_VALUE, Some(&v))?;
+        pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_VALUE, Some(&v))?;
     }
 
     close_object(mcx, &mut result)
@@ -1562,7 +1632,7 @@ pub fn jsonb_object_two_arg<'mcx>(
     val_datums: &[Option<Vec<u8>>],
 ) -> PgResult<PgVec<'mcx, u8>> {
     let mut result = JsonbInState::default();
-    pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_BEGIN_OBJECT, None)?;
+    pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_BEGIN_OBJECT, None)?;
 
     if nkdims > 1 || nkdims != nvdims {
         return Err(PgError::error("wrong number of array subscripts")
@@ -1588,25 +1658,25 @@ pub fn jsonb_object_two_arg<'mcx>(
             .ok_or_else(|| PgError::error("jsonb_object_two_arg: key datum is NULL"))?;
         let v = JsonbValue {
             typ: jbvType::jbvString,
-            val: JsonbValueData::String(key.clone()),
+            val: JsonbValueData::String(::mcx::slice_borrow_in(mcx, key)?),
         };
-        pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_KEY, Some(&v))?;
+        pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_KEY, Some(&v))?;
 
         let v = match &val_datums[i] {
             None => JsonbValue::null(),
             Some(s) => JsonbValue {
                 typ: jbvType::jbvString,
-                val: JsonbValueData::String(s.clone()),
+                val: JsonbValueData::String(::mcx::slice_borrow_in(mcx, s)?),
             },
         };
-        pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_VALUE, Some(&v))?;
+        pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_VALUE, Some(&v))?;
     }
 
     close_object(mcx, &mut result)
 }
 
-fn close_object<'mcx>(mcx: Mcx<'mcx>, result: &mut JsonbInState) -> PgResult<PgVec<'mcx, u8>> {
-    result.res = pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_END_OBJECT, None)?;
+fn close_object<'mcx>(mcx: Mcx<'mcx>, result: &mut JsonbInState<'mcx>) -> PgResult<PgVec<'mcx, u8>> {
+    result.res = pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_END_OBJECT, None)?;
     JsonbValueToJsonb(
         mcx,
         result
@@ -1625,7 +1695,9 @@ fn close_object<'mcx>(mcx: Mcx<'mcx>, result: &mut JsonbInState) -> PgResult<PgV
 /// than once. C copies each frame's `contVal` by struct value; our
 /// `JsonbParseState` owns its children, so the structural deep clone is
 /// output-equivalent for the append-only finalfn usage.
-pub fn clone_parse_state(state: &Option<Box<JsonbParseState>>) -> Option<Box<JsonbParseState>> {
+pub fn clone_parse_state<'mcx>(
+    state: &Option<Box<JsonbParseState<'mcx>>>,
+) -> Option<Box<JsonbParseState<'mcx>>> {
     state.clone()
 }
 
@@ -1642,12 +1714,12 @@ pub fn clone_parse_state(state: &Option<Box<JsonbParseState>>) -> Option<Box<Jso
 /// C: `jsonb_agg_transfn_worker(FunctionCallInfo fcinfo, bool absent_on_null)`.
 pub fn jsonb_agg_transfn_worker<'mcx>(
     mcx: Mcx<'mcx>,
-    state: Option<JsonbAggState>,
+    state: Option<JsonbAggState<'mcx>>,
     arg_type: Oid,
     val: &Datum<'mcx>,
     val_is_null: bool,
     absent_on_null: bool,
-) -> PgResult<JsonbAggState> {
+) -> PgResult<JsonbAggState<'mcx>> {
     use JsonbIteratorToken::*;
 
     // set up the accumulator on the first go round
@@ -1658,7 +1730,7 @@ pub fn jsonb_agg_transfn_worker<'mcx>(
                     .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
             }
             let mut s = JsonbAggState::default();
-            s.res.res = pushJsonbValue(&mut s.res.parse_state, WJB_BEGIN_ARRAY, None)?;
+            s.res.res = pushJsonbValue(mcx, &mut s.res.parse_state, WJB_BEGIN_ARRAY, None)?;
             let (cat, out) = catalog_fmgr::jsonb_categorize_type::call(arg_type)?;
             s.val_category = Some(cat);
             s.val_output_func = out;
@@ -1687,16 +1759,19 @@ pub fn jsonb_agg_transfn_worker<'mcx>(
         val_output_func,
         false,
     )?;
-    let jbelem = JsonbValueToJsonb(
+    let jbelem: &'mcx [u8] = ::mcx::slice_borrow_in(
         mcx,
-        elem.res
-            .as_ref()
-            .ok_or_else(|| PgError::error("jsonb_agg_transfn_worker: elem.res is NULL"))?,
+        &JsonbValueToJsonb(
+            mcx,
+            elem.res
+                .as_ref()
+                .ok_or_else(|| PgError::error("jsonb_agg_transfn_worker: elem.res is NULL"))?,
+        )?,
     )?;
 
     // splice the rendered element into the accumulator
     let mut single_scalar = false;
-    let mut it = JsonbIteratorInit(&jbelem[VARHDRSZ..]);
+    let mut it = JsonbIteratorInit(mcx, &jbelem[VARHDRSZ..]);
     loop {
         let mut v = JsonbValue::null();
         let typ = JsonbIteratorNext(&mut it, &mut v, false)?;
@@ -1708,20 +1783,20 @@ pub fn jsonb_agg_transfn_worker<'mcx>(
                 if is_raw_scalar_array(&v) {
                     single_scalar = true;
                 } else {
-                    state.res.res = pushJsonbValue(&mut state.res.parse_state, typ, None)?;
+                    state.res.res = pushJsonbValue(mcx, &mut state.res.parse_state, typ, None)?;
                 }
             }
             WJB_END_ARRAY => {
                 if !single_scalar {
-                    state.res.res = pushJsonbValue(&mut state.res.parse_state, typ, None)?;
+                    state.res.res = pushJsonbValue(mcx, &mut state.res.parse_state, typ, None)?;
                 }
             }
             WJB_BEGIN_OBJECT | WJB_END_OBJECT => {
-                state.res.res = pushJsonbValue(&mut state.res.parse_state, typ, None)?;
+                state.res.res = pushJsonbValue(mcx, &mut state.res.parse_state, typ, None)?;
             }
             WJB_ELEM | WJB_KEY | WJB_VALUE => {
                 // string/numeric values are already owned copies in v.
-                state.res.res = pushJsonbValue(&mut state.res.parse_state, typ, Some(&v))?;
+                state.res.res = pushJsonbValue(mcx, &mut state.res.parse_state, typ, Some(&v))?;
             }
             WJB_DONE => unreachable!(),
         }
@@ -1733,22 +1808,22 @@ pub fn jsonb_agg_transfn_worker<'mcx>(
 /// C: `jsonb_agg_transfn(PG_FUNCTION_ARGS)`.
 pub fn jsonb_agg_transfn<'mcx>(
     mcx: Mcx<'mcx>,
-    state: Option<JsonbAggState>,
+    state: Option<JsonbAggState<'mcx>>,
     arg_type: Oid,
     val: &Datum<'mcx>,
     val_is_null: bool,
-) -> PgResult<JsonbAggState> {
+) -> PgResult<JsonbAggState<'mcx>> {
     jsonb_agg_transfn_worker(mcx, state, arg_type, val, val_is_null, false)
 }
 
 /// C: `jsonb_agg_strict_transfn(PG_FUNCTION_ARGS)`.
 pub fn jsonb_agg_strict_transfn<'mcx>(
     mcx: Mcx<'mcx>,
-    state: Option<JsonbAggState>,
+    state: Option<JsonbAggState<'mcx>>,
     arg_type: Oid,
     val: &Datum<'mcx>,
     val_is_null: bool,
-) -> PgResult<JsonbAggState> {
+) -> PgResult<JsonbAggState<'mcx>> {
     jsonb_agg_transfn_worker(mcx, state, arg_type, val, val_is_null, true)
 }
 
@@ -1756,7 +1831,7 @@ pub fn jsonb_agg_strict_transfn<'mcx>(
 /// case (`PG_RETURN_NULL`).
 pub fn jsonb_agg_finalfn<'mcx>(
     mcx: Mcx<'mcx>,
-    arg: Option<&JsonbAggState>,
+    arg: Option<&JsonbAggState<'mcx>>,
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     let Some(arg) = arg else {
         return Ok(None); // returns null iff no input values
@@ -1766,7 +1841,12 @@ pub fn jsonb_agg_finalfn<'mcx>(
         parse_state: clone_parse_state(&arg.res.parse_state),
         ..Default::default()
     };
-    result.res = pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_END_ARRAY, None)?;
+    result.res = pushJsonbValue(
+        mcx,
+        &mut result.parse_state,
+        JsonbIteratorToken::WJB_END_ARRAY,
+        None,
+    )?;
     Ok(Some(JsonbValueToJsonb(
         mcx,
         result
@@ -1780,7 +1860,7 @@ pub fn jsonb_agg_finalfn<'mcx>(
 /// absent_on_null, bool unique_keys)`.
 pub fn jsonb_object_agg_transfn_worker<'mcx>(
     mcx: Mcx<'mcx>,
-    state: Option<JsonbAggState>,
+    state: Option<JsonbAggState<'mcx>>,
     key_arg_type: Oid,
     val_arg_type: Oid,
     key: &Datum<'mcx>,
@@ -1789,14 +1869,14 @@ pub fn jsonb_object_agg_transfn_worker<'mcx>(
     val_is_null: bool,
     absent_on_null: bool,
     unique_keys: bool,
-) -> PgResult<JsonbAggState> {
+) -> PgResult<JsonbAggState<'mcx>> {
     use JsonbIteratorToken::*;
 
     // set up the accumulator on the first go round
     let mut state = match state {
         None => {
             let mut s = JsonbAggState::default();
-            s.res.res = pushJsonbValue(&mut s.res.parse_state, WJB_BEGIN_OBJECT, None)?;
+            s.res.res = pushJsonbValue(mcx, &mut s.res.parse_state, WJB_BEGIN_OBJECT, None)?;
             if let Some(ps) = s.res.parse_state.as_mut() {
                 ps.unique_keys = unique_keys;
                 ps.skip_nulls = absent_on_null;
@@ -1840,7 +1920,8 @@ pub fn jsonb_object_agg_transfn_worker<'mcx>(
     let key_output_func = state.key_output_func;
     let mut elem = JsonbInState::default();
     datum_to_jsonb_internal(mcx, key, false, &mut elem, key_category, key_output_func, true)?;
-    let jbkey = JsonbValueToJsonb(mcx, elem.res.as_ref().unwrap())?;
+    let jbkey: &'mcx [u8] =
+        ::mcx::slice_borrow_in(mcx, &JsonbValueToJsonb(mcx, elem.res.as_ref().unwrap())?)?;
 
     let val_category = state.val_category.expect("val_category set on first call");
     let val_output_func = state.val_output_func;
@@ -1855,11 +1936,12 @@ pub fn jsonb_object_agg_transfn_worker<'mcx>(
         val_output_func,
         false,
     )?;
-    let jbval = JsonbValueToJsonb(mcx, elem.res.as_ref().unwrap())?;
+    let jbval: &'mcx [u8] =
+        ::mcx::slice_borrow_in(mcx, &JsonbValueToJsonb(mcx, elem.res.as_ref().unwrap())?)?;
 
     // keys should be scalar, and we should have already checked for that above
     // when calling datum_to_jsonb, so we only need to look for these things.
-    let mut it = JsonbIteratorInit(&jbkey[VARHDRSZ..]);
+    let mut it = JsonbIteratorInit(mcx, &jbkey[VARHDRSZ..]);
     loop {
         let mut v = JsonbValue::null();
         let typ = JsonbIteratorNext(&mut it, &mut v, false)?;
@@ -1879,12 +1961,12 @@ pub fn jsonb_object_agg_transfn_worker<'mcx>(
                     return Err(PgError::error("object keys must be strings")
                         .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
                 }
-                state.res.res = pushJsonbValue(&mut state.res.parse_state, WJB_KEY, Some(&v))?;
+                state.res.res = pushJsonbValue(mcx, &mut state.res.parse_state, WJB_KEY, Some(&v))?;
 
                 if skip {
                     let nullv = JsonbValue::null();
                     state.res.res =
-                        pushJsonbValue(&mut state.res.parse_state, WJB_VALUE, Some(&nullv))?;
+                        pushJsonbValue(mcx, &mut state.res.parse_state, WJB_VALUE, Some(&nullv))?;
                     return Ok(state);
                 }
             }
@@ -1894,7 +1976,7 @@ pub fn jsonb_object_agg_transfn_worker<'mcx>(
     }
 
     let mut single_scalar = false;
-    let mut it = JsonbIteratorInit(&jbval[VARHDRSZ..]);
+    let mut it = JsonbIteratorInit(mcx, &jbval[VARHDRSZ..]);
     loop {
         let mut v = JsonbValue::null();
         let typ = JsonbIteratorNext(&mut it, &mut v, false)?;
@@ -1906,20 +1988,20 @@ pub fn jsonb_object_agg_transfn_worker<'mcx>(
                 if is_raw_scalar_array(&v) {
                     single_scalar = true;
                 } else {
-                    state.res.res = pushJsonbValue(&mut state.res.parse_state, typ, None)?;
+                    state.res.res = pushJsonbValue(mcx, &mut state.res.parse_state, typ, None)?;
                 }
             }
             WJB_END_ARRAY => {
                 if !single_scalar {
-                    state.res.res = pushJsonbValue(&mut state.res.parse_state, typ, None)?;
+                    state.res.res = pushJsonbValue(mcx, &mut state.res.parse_state, typ, None)?;
                 }
             }
             WJB_BEGIN_OBJECT | WJB_END_OBJECT => {
-                state.res.res = pushJsonbValue(&mut state.res.parse_state, typ, None)?;
+                state.res.res = pushJsonbValue(mcx, &mut state.res.parse_state, typ, None)?;
             }
             WJB_ELEM | WJB_KEY | WJB_VALUE => {
                 let tok = if single_scalar { WJB_VALUE } else { typ };
-                state.res.res = pushJsonbValue(&mut state.res.parse_state, tok, Some(&v))?;
+                state.res.res = pushJsonbValue(mcx, &mut state.res.parse_state, tok, Some(&v))?;
             }
             WJB_DONE => unreachable!(),
         }
@@ -1931,14 +2013,14 @@ pub fn jsonb_object_agg_transfn_worker<'mcx>(
 /// C: `jsonb_object_agg_transfn(PG_FUNCTION_ARGS)`.
 pub fn jsonb_object_agg_transfn<'mcx>(
     mcx: Mcx<'mcx>,
-    state: Option<JsonbAggState>,
+    state: Option<JsonbAggState<'mcx>>,
     key_arg_type: Oid,
     val_arg_type: Oid,
     key: &Datum<'mcx>,
     key_is_null: bool,
     val: &Datum<'mcx>,
     val_is_null: bool,
-) -> PgResult<JsonbAggState> {
+) -> PgResult<JsonbAggState<'mcx>> {
     jsonb_object_agg_transfn_worker(
         mcx, state, key_arg_type, val_arg_type, key, key_is_null, val, val_is_null, false, false,
     )
@@ -1947,14 +2029,14 @@ pub fn jsonb_object_agg_transfn<'mcx>(
 /// C: `jsonb_object_agg_strict_transfn(PG_FUNCTION_ARGS)`.
 pub fn jsonb_object_agg_strict_transfn<'mcx>(
     mcx: Mcx<'mcx>,
-    state: Option<JsonbAggState>,
+    state: Option<JsonbAggState<'mcx>>,
     key_arg_type: Oid,
     val_arg_type: Oid,
     key: &Datum<'mcx>,
     key_is_null: bool,
     val: &Datum<'mcx>,
     val_is_null: bool,
-) -> PgResult<JsonbAggState> {
+) -> PgResult<JsonbAggState<'mcx>> {
     jsonb_object_agg_transfn_worker(
         mcx, state, key_arg_type, val_arg_type, key, key_is_null, val, val_is_null, true, false,
     )
@@ -1963,14 +2045,14 @@ pub fn jsonb_object_agg_strict_transfn<'mcx>(
 /// C: `jsonb_object_agg_unique_transfn(PG_FUNCTION_ARGS)`.
 pub fn jsonb_object_agg_unique_transfn<'mcx>(
     mcx: Mcx<'mcx>,
-    state: Option<JsonbAggState>,
+    state: Option<JsonbAggState<'mcx>>,
     key_arg_type: Oid,
     val_arg_type: Oid,
     key: &Datum<'mcx>,
     key_is_null: bool,
     val: &Datum<'mcx>,
     val_is_null: bool,
-) -> PgResult<JsonbAggState> {
+) -> PgResult<JsonbAggState<'mcx>> {
     jsonb_object_agg_transfn_worker(
         mcx, state, key_arg_type, val_arg_type, key, key_is_null, val, val_is_null, false, true,
     )
@@ -1979,14 +2061,14 @@ pub fn jsonb_object_agg_unique_transfn<'mcx>(
 /// C: `jsonb_object_agg_unique_strict_transfn(PG_FUNCTION_ARGS)`.
 pub fn jsonb_object_agg_unique_strict_transfn<'mcx>(
     mcx: Mcx<'mcx>,
-    state: Option<JsonbAggState>,
+    state: Option<JsonbAggState<'mcx>>,
     key_arg_type: Oid,
     val_arg_type: Oid,
     key: &Datum<'mcx>,
     key_is_null: bool,
     val: &Datum<'mcx>,
     val_is_null: bool,
-) -> PgResult<JsonbAggState> {
+) -> PgResult<JsonbAggState<'mcx>> {
     jsonb_object_agg_transfn_worker(
         mcx, state, key_arg_type, val_arg_type, key, key_is_null, val, val_is_null, true, true,
     )
@@ -1996,7 +2078,7 @@ pub fn jsonb_object_agg_unique_strict_transfn<'mcx>(
 /// no-rows case.
 pub fn jsonb_object_agg_finalfn<'mcx>(
     mcx: Mcx<'mcx>,
-    arg: Option<&JsonbAggState>,
+    arg: Option<&JsonbAggState<'mcx>>,
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     let Some(arg) = arg else {
         return Ok(None); // returns null iff no input values
@@ -2006,7 +2088,7 @@ pub fn jsonb_object_agg_finalfn<'mcx>(
         parse_state: clone_parse_state(&arg.res.parse_state),
         ..Default::default()
     };
-    result.res = pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_END_OBJECT, None)?;
+    result.res = pushJsonbValue(mcx, &mut result.parse_state, JsonbIteratorToken::WJB_END_OBJECT, None)?;
     Ok(Some(JsonbValueToJsonb(
         mcx,
         result
@@ -2049,12 +2131,13 @@ fn numeric_in_to_bytes<'mcx>(
 }
 
 /// C: `pushJsonbValue` re-export for the SQL-facing builders.
-fn pushJsonbValue(
-    pstate: &mut Option<Box<JsonbParseState>>,
+fn pushJsonbValue<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut Option<Box<JsonbParseState<'mcx>>>,
     seq: JsonbIteratorToken,
-    jbval: Option<&JsonbValue>,
-) -> PgResult<Option<JsonbValue>> {
-    jbu_pushJsonbValue(pstate, seq, jbval)
+    jbval: Option<&JsonbValue<'mcx>>,
+) -> PgResult<Option<JsonbValue<'mcx>>> {
+    jbu_pushJsonbValue(mcx, pstate, seq, jbval)
 }
 
 /// Read the container header word from container bytes.

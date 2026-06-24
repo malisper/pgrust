@@ -13,9 +13,9 @@ types_error = { path = "../../../../_support/types/types_error" }
 types_jsonb = { path = "../../../../_support/types/types_jsonb" }
 jsonb_util = { path = "../jsonb_util" }
 array_more_seams = { path = "../array_more_seams" }
+mcx = { path = "../../../../_support/mcx" }
 
 [dev-dependencies]
-mcx = { path = "../../../../_support/mcx" }
 stack_depth_seams = { path = "../../misc/stack_depth_seams" }
 numeric_seams = { path = "../numeric_seams" }
 varlena_seams = { path = "../varlena_seams" }

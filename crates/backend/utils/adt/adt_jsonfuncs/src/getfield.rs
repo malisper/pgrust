@@ -100,7 +100,7 @@ fn varsize_jsonb(jb: &[u8]) -> i32 {
 /// `jsonb_object_field` (jsonfuncs.c:862): `jb -> key`.
 pub fn jsonb_object_field<'mcx>(
     mcx: Mcx<'mcx>,
-    jb: &[u8],
+    jb: &'mcx [u8],
     key: &[u8],
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     // if (!JB_ROOT_IS_OBJECT(jb)) PG_RETURN_NULL();
@@ -122,7 +122,7 @@ pub fn jsonb_object_field<'mcx>(
 /// `jsonb_object_field_text` (jsonfuncs.c:900): `jb ->> key`.
 pub fn jsonb_object_field_text<'mcx>(
     mcx: Mcx<'mcx>,
-    jb: &[u8],
+    jb: &'mcx [u8],
     key: &[u8],
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     // if (!JB_ROOT_IS_OBJECT(jb)) PG_RETURN_NULL();
@@ -142,7 +142,7 @@ pub fn jsonb_object_field_text<'mcx>(
 /// `jsonb_array_element` (jsonfuncs.c:937): `jb -> element`.
 pub fn jsonb_array_element<'mcx>(
     mcx: Mcx<'mcx>,
-    jb: &[u8],
+    jb: &'mcx [u8],
     element: i32,
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     // if (!JB_ROOT_IS_ARRAY(jb)) PG_RETURN_NULL();
@@ -174,7 +174,7 @@ pub fn jsonb_array_element<'mcx>(
 /// `jsonb_array_element_text` (jsonfuncs.c:980): `jb ->> element`.
 pub fn jsonb_array_element_text<'mcx>(
     mcx: Mcx<'mcx>,
-    jb: &[u8],
+    jb: &'mcx [u8],
     element: i32,
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     // if (!JB_ROOT_IS_ARRAY(jb)) PG_RETURN_NULL();
@@ -826,7 +826,7 @@ fn get_scalar(
 /// `jsonb_extract_path` (jsonfuncs.c:1488): `jb #> path`.
 pub fn jsonb_extract_path<'mcx>(
     mcx: Mcx<'mcx>,
-    jb: &[u8],
+    jb: &'mcx [u8],
     path: &[Option<Vec<u8>>],
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     get_jsonb_path_all(mcx, jb, path, false)
@@ -835,7 +835,7 @@ pub fn jsonb_extract_path<'mcx>(
 /// `jsonb_extract_path_text` (jsonfuncs.c:1494): `jb #>> path`.
 pub fn jsonb_extract_path_text<'mcx>(
     mcx: Mcx<'mcx>,
-    jb: &[u8],
+    jb: &'mcx [u8],
     path: &[Option<Vec<u8>>],
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     get_jsonb_path_all(mcx, jb, path, true)
@@ -845,7 +845,7 @@ pub fn jsonb_extract_path_text<'mcx>(
 /// `jsonb_extract_path[_text]` functions.
 fn get_jsonb_path_all<'mcx>(
     mcx: Mcx<'mcx>,
-    jb: &[u8],
+    jb: &'mcx [u8],
     path: &[Option<Vec<u8>>],
     as_text: bool,
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
@@ -872,7 +872,7 @@ fn get_jsonb_path_all<'mcx>(
 /// `Ok(None)` for the C `*isnull = true` path.
 pub fn jsonb_get_element<'mcx>(
     mcx: Mcx<'mcx>,
-    jb: &[u8],
+    jb: &'mcx [u8],
     path: &[&[u8]],
     as_text: bool,
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {

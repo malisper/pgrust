@@ -32,6 +32,7 @@ use ::jsonb_util::{
     JB_FARRAY, JB_FOBJECT,
 };
 use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::mcx::Mcx;
 
 // ---------------------------------------------------------------------------
 // Root-container helpers (C: JB_ROOT_COUNT / JB_ROOT_IS_OBJECT).
@@ -59,13 +60,14 @@ fn jb_root_is_object(root: &[u8]) -> bool {
     json_container_is_object(container_header(root))
 }
 
-/// Build a `jbvString` [`JsonbValue`] over a copy of the given key bytes
-/// (C: the `kval.type = jbvString; kval.val.string.{val,len}` assignment).
+/// Build a `jbvString` [`JsonbValue`] borrowing the given key bytes (C: the
+/// `kval.type = jbvString; kval.val.string.{val,len}` assignment -- a `char *`
+/// into the caller's buffer, no copy).  Used only as a transient search key.
 #[inline]
-fn jbv_string(bytes: &[u8]) -> JsonbValue {
+fn jbv_string(bytes: &[u8]) -> JsonbValue<'_> {
     JsonbValue {
         typ: jbvType::jbvString,
-        val: JsonbValueData::String(bytes.to_vec()),
+        val: JsonbValueData::String(bytes),
     }
 }
 
@@ -141,29 +143,29 @@ pub fn jsonb_exists_all(jb_root: &[u8], keys: &[u8]) -> PgResult<bool> {
 ///
 /// `val_root` / `tmpl_root` are the root container bytes of the two jsonb
 /// arguments.
-pub fn jsonb_contains(val_root: &[u8], tmpl_root: &[u8]) -> PgResult<bool> {
+pub fn jsonb_contains<'mcx>(mcx: Mcx<'mcx>, val_root: &'mcx [u8], tmpl_root: &'mcx [u8]) -> PgResult<bool> {
     if jb_root_is_object(val_root) != jb_root_is_object(tmpl_root) {
         return Ok(false);
     }
 
-    let mut it1 = JsonbIteratorInit(val_root);
-    let mut it2 = JsonbIteratorInit(tmpl_root);
+    let mut it1 = JsonbIteratorInit(mcx, val_root);
+    let mut it2 = JsonbIteratorInit(mcx, tmpl_root);
 
-    JsonbDeepContains(&mut it1, &mut it2)
+    JsonbDeepContains(mcx, &mut it1, &mut it2)
 }
 
 /// C: `jsonb_contained(PG_FUNCTION_ARGS)` — commutator of "contains".
 ///
 /// C arg 0 is `tmpl`, arg 1 is `val`.
-pub fn jsonb_contained(tmpl_root: &[u8], val_root: &[u8]) -> PgResult<bool> {
+pub fn jsonb_contained<'mcx>(mcx: Mcx<'mcx>, tmpl_root: &'mcx [u8], val_root: &'mcx [u8]) -> PgResult<bool> {
     if jb_root_is_object(val_root) != jb_root_is_object(tmpl_root) {
         return Ok(false);
     }
 
-    let mut it1 = JsonbIteratorInit(val_root);
-    let mut it2 = JsonbIteratorInit(tmpl_root);
+    let mut it1 = JsonbIteratorInit(mcx, val_root);
+    let mut it2 = JsonbIteratorInit(mcx, tmpl_root);
 
-    JsonbDeepContains(&mut it1, &mut it2)
+    JsonbDeepContains(mcx, &mut it1, &mut it2)
 }
 
 // ---------------------------------------------------------------------------
@@ -171,38 +173,38 @@ pub fn jsonb_contained(tmpl_root: &[u8], val_root: &[u8]) -> PgResult<bool> {
 // ---------------------------------------------------------------------------
 
 /// C: `jsonb_ne(PG_FUNCTION_ARGS)`.
-pub fn jsonb_ne(jba_root: &[u8], jbb_root: &[u8]) -> PgResult<bool> {
-    Ok(compareJsonbContainers(jba_root, jbb_root)? != 0)
+pub fn jsonb_ne<'mcx>(mcx: Mcx<'mcx>, jba_root: &'mcx [u8], jbb_root: &'mcx [u8]) -> PgResult<bool> {
+    Ok(compareJsonbContainers(mcx, jba_root, jbb_root)? != 0)
 }
 
 /// C: `jsonb_lt(PG_FUNCTION_ARGS)`.
-pub fn jsonb_lt(jba_root: &[u8], jbb_root: &[u8]) -> PgResult<bool> {
-    Ok(compareJsonbContainers(jba_root, jbb_root)? < 0)
+pub fn jsonb_lt<'mcx>(mcx: Mcx<'mcx>, jba_root: &'mcx [u8], jbb_root: &'mcx [u8]) -> PgResult<bool> {
+    Ok(compareJsonbContainers(mcx, jba_root, jbb_root)? < 0)
 }
 
 /// C: `jsonb_gt(PG_FUNCTION_ARGS)`.
-pub fn jsonb_gt(jba_root: &[u8], jbb_root: &[u8]) -> PgResult<bool> {
-    Ok(compareJsonbContainers(jba_root, jbb_root)? > 0)
+pub fn jsonb_gt<'mcx>(mcx: Mcx<'mcx>, jba_root: &'mcx [u8], jbb_root: &'mcx [u8]) -> PgResult<bool> {
+    Ok(compareJsonbContainers(mcx, jba_root, jbb_root)? > 0)
 }
 
 /// C: `jsonb_le(PG_FUNCTION_ARGS)`.
-pub fn jsonb_le(jba_root: &[u8], jbb_root: &[u8]) -> PgResult<bool> {
-    Ok(compareJsonbContainers(jba_root, jbb_root)? <= 0)
+pub fn jsonb_le<'mcx>(mcx: Mcx<'mcx>, jba_root: &'mcx [u8], jbb_root: &'mcx [u8]) -> PgResult<bool> {
+    Ok(compareJsonbContainers(mcx, jba_root, jbb_root)? <= 0)
 }
 
 /// C: `jsonb_ge(PG_FUNCTION_ARGS)`.
-pub fn jsonb_ge(jba_root: &[u8], jbb_root: &[u8]) -> PgResult<bool> {
-    Ok(compareJsonbContainers(jba_root, jbb_root)? >= 0)
+pub fn jsonb_ge<'mcx>(mcx: Mcx<'mcx>, jba_root: &'mcx [u8], jbb_root: &'mcx [u8]) -> PgResult<bool> {
+    Ok(compareJsonbContainers(mcx, jba_root, jbb_root)? >= 0)
 }
 
 /// C: `jsonb_eq(PG_FUNCTION_ARGS)`.
-pub fn jsonb_eq(jba_root: &[u8], jbb_root: &[u8]) -> PgResult<bool> {
-    Ok(compareJsonbContainers(jba_root, jbb_root)? == 0)
+pub fn jsonb_eq<'mcx>(mcx: Mcx<'mcx>, jba_root: &'mcx [u8], jbb_root: &'mcx [u8]) -> PgResult<bool> {
+    Ok(compareJsonbContainers(mcx, jba_root, jbb_root)? == 0)
 }
 
 /// C: `jsonb_cmp(PG_FUNCTION_ARGS)`.
-pub fn jsonb_cmp(jba_root: &[u8], jbb_root: &[u8]) -> PgResult<i32> {
-    compareJsonbContainers(jba_root, jbb_root)
+pub fn jsonb_cmp<'mcx>(mcx: Mcx<'mcx>, jba_root: &'mcx [u8], jbb_root: &'mcx [u8]) -> PgResult<i32> {
+    compareJsonbContainers(mcx, jba_root, jbb_root)
 }
 
 // ---------------------------------------------------------------------------
@@ -210,14 +212,14 @@ pub fn jsonb_cmp(jba_root: &[u8], jbb_root: &[u8]) -> PgResult<i32> {
 // ---------------------------------------------------------------------------
 
 /// C: `jsonb_hash(PG_FUNCTION_ARGS)`.
-pub fn jsonb_hash(jb_root: &[u8]) -> PgResult<i32> {
+pub fn jsonb_hash<'mcx>(mcx: Mcx<'mcx>, jb_root: &'mcx [u8]) -> PgResult<i32> {
     let mut hash: u32 = 0;
 
     if jb_root_count(jb_root) == 0 {
         return Ok(0);
     }
 
-    let mut it = JsonbIteratorInit(jb_root);
+    let mut it = JsonbIteratorInit(mcx, jb_root);
     let mut v = JsonbValue::null();
 
     loop {
@@ -249,14 +251,14 @@ pub fn jsonb_hash(jb_root: &[u8]) -> PgResult<i32> {
 }
 
 /// C: `jsonb_hash_extended(PG_FUNCTION_ARGS)`.
-pub fn jsonb_hash_extended(jb_root: &[u8], seed: u64) -> PgResult<u64> {
+pub fn jsonb_hash_extended<'mcx>(mcx: Mcx<'mcx>, jb_root: &'mcx [u8], seed: u64) -> PgResult<u64> {
     let mut hash: u64 = 0;
 
     if jb_root_count(jb_root) == 0 {
         return Ok(seed);
     }
 
-    let mut it = JsonbIteratorInit(jb_root);
+    let mut it = JsonbIteratorInit(mcx, jb_root);
     let mut v = JsonbValue::null();
 
     loop {

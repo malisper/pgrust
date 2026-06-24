@@ -177,8 +177,8 @@ fn each_worker_jsonb<'mcx>(
 
     let mut skip_nested = false;
 
-    // it = JsonbIteratorInit(&jb->root);
-    let mut it = JsonbIteratorInit(root);
+    // it = JsonbIteratorInit(mcx, &jb->root);
+    let mut it = JsonbIteratorInit(mcx, root);
     let mut v = JsonbValue::null();
 
     // while ((r = JsonbIteratorNext(&it, &v, skipNested)) != WJB_DONE)

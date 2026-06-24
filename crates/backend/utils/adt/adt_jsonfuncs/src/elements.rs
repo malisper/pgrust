@@ -77,8 +77,8 @@ fn elements_worker_jsonb(
 
     let mut rows: Vec<ElementRow> = Vec::new();
 
-    // it = JsonbIteratorInit(&jb->root);
-    let mut it = JsonbIteratorInit(root);
+    // it = JsonbIteratorInit(mcx, &jb->root);
+    let mut it = JsonbIteratorInit(mcx, root);
     let mut v = JsonbValue::null();
     let mut skip_nested = false;
 

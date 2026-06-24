@@ -5,82 +5,112 @@
 //! lives in [`crate::jsonb`].  This module holds the *in-memory* working types
 //! `jsonb_util.c` operates on (C: `JsonbValue`, `JsonbPair`, `JsonbParseState`,
 //! `JsonbIterator`, the `jbvDatetime` payload).  They are never stored on disk
-//! and never cross a C ABI boundary, so they are idiomatic owned-tree Rust types:
-//! the C unions become Rust enums, the `numeric`/`string` byte runs become owned
-//! `Vec<u8>`, and the raw `char *` cursors into the document buffer become byte
-//! offsets into an owned container `Vec<u8>`.
+//! and never cross a C ABI boundary.
+//!
+//! ## Memory-context lifetime (`'mcx`)
+//!
+//! The working tree carries a memory-context lifetime `'mcx` (mirroring the
+//! `Expr<'mcx>` campaign).  Leaf byte runs (`String`/`Numeric`/`Binary.data`) are
+//! `&'mcx [u8]` borrows: a **read** sub-slices the source document buffer with
+//! **zero copy**, and **construction** bump-allocates fresh bytes into the same
+//! `mcx` arena and stores the resulting borrow.  The `Array`/`Object` spines and
+//! the build-stack are arena-backed [`PgVec`].  This is exactly C/Postgres's
+//! `palloc` / `MemoryContextReset` model: the lifetime is the arena, not
+//! ownership, and the borrow checker enforces that a working tree never outlives
+//! the document/arena it points into.
 //!
 //! These live here (not in the owning crate) because the genuine externals the
 //! crate seams over -- notably the `jbvDatetime` rendering seam -- name
 //! [`JsonbDatetime`] in their signatures, and centralized seams may only
 //! reference vocabulary from the `types` crate.
+//!
+//! ## `<'static>` bridge aliases
+//!
+//! Consumer crates not yet converted to thread `'mcx` name the `…Static` aliases
+//! (`JsonbValueStatic`, `JsonbValueDataStatic`, `JsonbPairStatic`,
+//! `JsonbParseStateStatic`, `JsonbIteratorStatic`) and compile unchanged: a
+//! `'static` working tree is today's owned-tree behavior with no safety change.
+//! Converted consumers name `JsonbValue<'mcx>` and gain the borrow-check.
 
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-use alloc::boxed::Box;
-use alloc::vec::Vec;
-
 use crate::jsonb::{is_a_jsonb_scalar, jbvType, JsonbIterState};
+use ::mcx::PgVec;
 
 /// A `numeric` value carried through jsonb (C: `Numeric`, an on-disk varlena).
-/// Stored as the owned on-disk varlena bytes; the `numeric` crate provides the
-/// operations.
-pub type JsonbNumeric = Vec<u8>;
+/// The on-disk varlena bytes, borrowed from the source document or from a fresh
+/// arena allocation; the `numeric` crate provides the operations.
+pub type JsonbNumeric<'mcx> = &'mcx [u8];
+
+/// `'static` bridge alias (see module docs).
+pub type JsonbNumericStatic = JsonbNumeric<'static>;
 
 /// In-memory representation of a jsonb scalar/container value
 /// (C: `struct JsonbValue`).  The `type`-tagged union is modeled as a Rust enum
 /// payload alongside the explicit `jbvType` tag the C code branches on.
 #[derive(Clone, Debug)]
-pub struct JsonbValue {
+pub struct JsonbValue<'mcx> {
     /// Influences sort order (C: `enum jbvType type`).
     pub typ: jbvType,
     /// The tagged payload (C: the `val` union).
-    pub val: JsonbValueData,
+    pub val: JsonbValueData<'mcx>,
 }
+
+/// `'static` bridge alias for not-yet-converted consumers (see module docs).
+pub type JsonbValueStatic = JsonbValue<'static>;
 
 /// The payload union of [`JsonbValue`] (C: `JsonbValue.val`).
 #[derive(Clone, Debug)]
-pub enum JsonbValueData {
+pub enum JsonbValueData<'mcx> {
     /// `jbvNull`: no payload.
     Null,
     /// `jbvNumeric`: a `numeric` value (on-disk varlena bytes).
-    Numeric(JsonbNumeric),
+    Numeric(JsonbNumeric<'mcx>),
     /// `jbvBool`: a boolean.
     Bool(bool),
     /// `jbvString`: a string primitive (not necessarily NUL-terminated).
-    String(Vec<u8>),
+    ///
+    /// A `&'mcx [u8]` sub-slice of the source document (zero-copy read) or of a
+    /// fresh arena allocation (construction).
+    String(&'mcx [u8]),
     /// `jbvArray`: an array container (`nElems`, `elems`, `rawScalar`).
     Array {
-        elems: Vec<JsonbValue>,
+        elems: PgVec<'mcx, JsonbValue<'mcx>>,
         raw_scalar: bool,
     },
     /// `jbvObject`: an associative container of key/value pairs.
-    Object(Vec<JsonbPair>),
+    Object(PgVec<'mcx, JsonbPair<'mcx>>),
     /// `jbvBinary`: an array/object already in on-disk container form.  `data`
     /// holds the container bytes starting at the `JsonbContainer` header (C:
     /// `binary.data`); `len` is `binary.len`.
+    ///
+    /// `data` is a `&'mcx [u8]` sub-slice of the source document buffer
+    /// (zero-copy) -- replacing C's raw `char *` into the document.
     ///
     /// `offset` records this container's byte position **within the root
     /// container of its origin document**.  In C, `binary.data` is a raw
     /// pointer into the document buffer, so the document-relative position is
     /// implicit in pointer arithmetic (`(char*)a - (char*)b`).  Because the
-    /// safe port carries owned slices instead of pointers, that relationship is
-    /// preserved explicitly here: a document root has `offset == 0`, and every
+    /// safe port carries borrowed slices instead of pointers, that relationship
+    /// is preserved explicitly here: a document root has `offset == 0`, and every
     /// nested container extracted by `fillJsonbValue` / the iterator inherits
     /// its parent's offset plus the in-parent byte position of the child.  This
     /// is exactly what `.keyvalue()`'s `id` field consumes
     /// (jsonpath_exec.c:2862-2864).
     Binary {
         len: i32,
-        data: Vec<u8>,
+        data: &'mcx [u8],
         offset: i32,
     },
     /// `jbvDatetime`: a virtual datetime value used during processing.
     Datetime(JsonbDatetime),
 }
 
-impl JsonbValue {
+/// `'static` bridge alias (see module docs).
+pub type JsonbValueDataStatic = JsonbValueData<'static>;
+
+impl JsonbValue<'_> {
     /// Construct a `jbvNull` value.
     pub fn null() -> Self {
         JsonbValue {
@@ -111,50 +141,65 @@ pub struct JsonbDatetime {
 
 /// Key/value pair within an object (C: `struct JsonbPair`).
 #[derive(Clone, Debug)]
-pub struct JsonbPair {
+pub struct JsonbPair<'mcx> {
     /// Must be a `jbvString` (C: `JsonbValue key`).
-    pub key: JsonbValue,
+    pub key: JsonbValue<'mcx>,
     /// May be of any type (C: `JsonbValue value`).
-    pub value: JsonbValue,
+    pub value: JsonbValue<'mcx>,
     /// Pair's index in the original sequence, for last-observed-wins dedup.
     pub order: u32,
 }
 
+/// `'static` bridge alias (see module docs).
+pub type JsonbPairStatic = JsonbPair<'static>;
+
 /// Conversion state used when parsing Jsonb from text or coercing types
 /// (C: `struct JsonbParseState`).  Modeled as a stack of frames threaded by
-/// `next`, mirroring the C singly linked list.
+/// `next`, mirroring the C singly linked list.  The frame chain is heap-boxed on
+/// the global allocator (a small, bounded stack depth, not a hot byte-run
+/// payload); only the contained `JsonbValue` tree is arena-backed.
 #[derive(Clone, Debug)]
-pub struct JsonbParseState {
-    pub cont_val: JsonbValue,
+pub struct JsonbParseState<'mcx> {
+    pub cont_val: JsonbValue<'mcx>,
     pub size: usize,
     /// Check object key uniqueness.
     pub unique_keys: bool,
     /// Skip null object fields.
     pub skip_nulls: bool,
     /// Parent frame (C: `JsonbParseState *next`).
-    pub next: Option<Box<JsonbParseState>>,
+    pub next: Option<alloc::boxed::Box<JsonbParseState<'mcx>>>,
 }
+
+/// `'static` bridge alias (see module docs).
+pub type JsonbParseStateStatic = JsonbParseState<'static>;
+
+extern crate alloc;
 
 /// Iterator over an on-disk `JsonbContainer` (C: `struct JsonbIterator`).
 ///
 /// `dataProper` is replaced by `data_proper` (a byte offset within the
 /// container window).
 ///
-/// The backing bytes live in a shared [`Rc<[u8]>`] document buffer (`buf`) plus
-/// a `cont_start` window offset.  When the iterator recurses into a nested
-/// container, the child iterator **shares the same `Rc`** and only records the
-/// nested container's start offset in `cont_start`, instead of copying the
-/// nested sub-slice into a fresh owned `Vec`.  This mirrors C, where every
-/// nesting level's `JsonbIterator` holds a raw `JsonbContainer *` into the same
-/// document buffer, and it removes the per-recursion `malloc`/`free` of each
-/// nested container.  Use [`JsonbIterator::container`] to get the windowed
-/// `&[u8]` the call sites operate on.
+/// The backing bytes are a `&'mcx [u8]` borrow of the source document buffer
+/// (`buf`) plus a `cont_start` window offset.  When the iterator recurses into a
+/// nested container, the child iterator **shares the same borrow** and only
+/// records the nested container's start offset in `cont_start`, instead of
+/// copying the nested sub-slice.  This mirrors C, where every nesting level's
+/// `JsonbIterator` holds a raw `JsonbContainer *` into the same document buffer.
+/// The arena (not a refcount) owns the buffer; nothing is copied per recursion.
+/// Use [`JsonbIterator::container`] to get the windowed `&[u8]` the call sites
+/// operate on.
 #[derive(Clone, Debug)]
-pub struct JsonbIterator {
-    /// Shared document buffer the container bytes live in.  Shared across the
-    /// parent/child iterator chain via [`Rc`] so recursion never re-copies a
-    /// nested container (C: the document the `JsonbContainer *` points into).
-    pub buf: alloc::rc::Rc<[u8]>,
+pub struct JsonbIterator<'mcx> {
+    /// The memory context the iterator works in (C: `CurrentMemoryContext`).
+    /// The element-count placeholder spines the iterator produces for
+    /// `WJB_BEGIN_ARRAY`/`WJB_BEGIN_OBJECT` are arena-allocated here.
+    pub mcx: ::mcx::Mcx<'mcx>,
+    /// The document buffer the container bytes live in, borrowed for `'mcx`
+    /// (C: the document the `JsonbContainer *` points into).  Shared across the
+    /// parent/child iterator chain by copying the borrow so recursion never
+    /// re-copies a nested container.
+    pub buf: &'mcx [u8],
     /// Byte offset of this iterator's `JsonbContainer` header within `buf`
     /// (`0` for the document root).
     pub cont_start: usize,
@@ -177,7 +222,7 @@ pub struct JsonbIterator {
     /// Iterator phase (C: `JsonbIterState state`).
     pub state: JsonbIterState,
     /// Parent iterator (C: `struct JsonbIterator *parent`).
-    pub parent: Option<Box<JsonbIterator>>,
+    pub parent: Option<alloc::boxed::Box<JsonbIterator<'mcx>>>,
     /// Byte position of `container` within the root container of its origin
     /// document (0 for the document root).  Threaded into the `offset` field of
     /// any `jbvBinary` children so `.keyvalue()` ids stay document-relative.
@@ -186,13 +231,16 @@ pub struct JsonbIterator {
     pub doc_offset: i32,
 }
 
-impl JsonbIterator {
+/// `'static` bridge alias (see module docs).
+pub type JsonbIteratorStatic = JsonbIterator<'static>;
+
+impl<'mcx> JsonbIterator<'mcx> {
     /// The container bytes this iterator operates on, as a windowed view into
-    /// the shared document buffer (C: `JsonbContainer *container`).  All the
+    /// the document buffer (C: `JsonbContainer *container`).  All the
     /// container-relative indexing (`data_proper`, `children_off`, `JEntry`
     /// reads) is taken against this slice.
     #[inline]
-    pub fn container(&self) -> &[u8] {
+    pub fn container(&self) -> &'mcx [u8] {
         &self.buf[self.cont_start..]
     }
 }

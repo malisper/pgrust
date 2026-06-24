@@ -60,8 +60,8 @@ pub fn iterate_jsonb_values<'mcx>(
     flags: u32,
     action: &mut dyn FnMut(&[u8]) -> PgResult<()>,
 ) -> PgResult<()> {
-    // it = JsonbIteratorInit(&jb->root);
-    let mut it = JsonbIteratorInit(crate::common::vardata_any(jb));
+    // it = JsonbIteratorInit(mcx, &jb->root);
+    let mut it = JsonbIteratorInit(mcx, crate::common::vardata_any(jb));
 
     // Just recursively iterating over jsonb and call callback on all
     // corresponding elements.
@@ -290,8 +290,8 @@ pub fn transform_jsonb_string_values<'mcx>(
     let mut res: Option<JsonbValue> = None;
     let mut st = None;
 
-    // it = JsonbIteratorInit(&jsonb->root);
-    let mut it = JsonbIteratorInit(crate::common::vardata_any(jsonb));
+    // it = JsonbIteratorInit(mcx, &jsonb->root);
+    let mut it = JsonbIteratorInit(mcx, crate::common::vardata_any(jsonb));
     // is_scalar = it->isScalar;
     let is_scalar = it.as_ref().map(|i| i.is_scalar).unwrap_or(false);
 
@@ -338,7 +338,7 @@ pub fn transform_jsonb_string_values<'mcx>(
                     | JsonbIteratorToken::WJB_VALUE
                     | JsonbIteratorToken::WJB_ELEM
             );
-            res = pushJsonbValue(&mut st, typ, if pass { Some(&v) } else { None })?;
+            res = pushJsonbValue(mcx, &mut st, typ, if pass { Some(&v) } else { None })?;
         }
     }
 

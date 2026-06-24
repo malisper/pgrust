@@ -442,8 +442,8 @@ fn populate_recordset_worker<'mcx>(
                 .into_error());
         }
 
-        // it = JsonbIteratorInit(&jb->root);
-        let mut it = JsonbIteratorInit(root);
+        // it = JsonbIteratorInit(mcx, &jb->root);
+        let mut it = JsonbIteratorInit(mcx, root);
         let mut v = JsonbValue::null();
         let mut skip_nested = false;
 

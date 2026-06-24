@@ -25563,6 +25563,7 @@ name = "types_jsonb"
 version = "0.0.0"
 dependencies = [
  "datum",
+ "mcx",
 ]
 
 [[package]]

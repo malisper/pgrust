@@ -175,6 +175,30 @@ impl<B: Bind> McxOwned<B> {
         f(&mut self.state)
     }
 
+    /// Like [`with_mut`](McxOwned::with_mut) but also hands the closure the
+    /// owning context's [`Mcx`] handle, so the body can *allocate more state
+    /// into the same arena* during the call (e.g. an aggregate transition that
+    /// splices another element into a persistent working tree).
+    ///
+    /// Soundness mirrors [`with_mut`]: the closure is universal over `'mcx`, so
+    /// the supplied handle and the `&mut B::Out<'mcx>` share the SAME arbitrary
+    /// `'mcx` (the wrapper's own context), and neither the handle nor any borrow
+    /// derived from it can escape — no external lifetime can unify with `'mcx`.
+    /// Anything the body allocates through the handle lives in this context and
+    /// is freed with it (in `Drop`), exactly when the rest of the state is.
+    pub fn with_mut_mcx<R>(
+        &mut self,
+        f: impl for<'mcx> FnOnce(Mcx<'mcx>, &mut B::Out<'mcx>) -> PgResult<R>,
+    ) -> PgResult<R> {
+        // SAFETY: `self.ctx` points to the live heap context (freed only in
+        // `Drop`). Rebuild an unsibling'd `&MemoryContext` through the exposed
+        // address (as `context()` does) so deriving its `Mcx` does not
+        // invalidate the state's own long-lived self-borrow. The `'mcx` is bound
+        // by the universal closure to the state's lifetime.
+        let ctx: &MemoryContext = unsafe { ctx_from_exposed(self.ctx.as_ptr()) };
+        f(ctx.mcx(), &mut self.state)
+    }
+
     /// The owning context — for accounting (`used`/`stats`), naming, and
     /// linking it as an accounting child at creation time.
     pub fn context(&self) -> &MemoryContext {

@@ -63,7 +63,7 @@ fn container_header(root: &[u8]) -> u32 {
 /// keys of a jsonb object. `jb` is the full `jsonb` varlena; the root container
 /// starts after the varlena header (`&jb[VARHDRSZ..]`). Raises
 /// `ERRCODE_INVALID_PARAMETER_VALUE` on a scalar or array root.
-fn jsonb_object_keys_worker(jb: &[u8]) -> PgResult<Vec<Vec<u8>>> {
+fn jsonb_object_keys_worker<'mcx>(mcx: Mcx<'mcx>, jb: &'mcx [u8]) -> PgResult<Vec<Vec<u8>>> {
     let root = crate::common::vardata_any(jb);
     let header = container_header(root);
 
@@ -87,8 +87,8 @@ fn jsonb_object_keys_worker(jb: &[u8]) -> PgResult<Vec<Vec<u8>>> {
     let result_size = json_container_size(header) as usize;
     let mut result: Vec<Vec<u8>> = Vec::with_capacity(result_size);
 
-    // it = JsonbIteratorInit(&jb->root);
-    let mut it = JsonbIteratorInit(root);
+    // it = JsonbIteratorInit(mcx, &jb->root);
+    let mut it = JsonbIteratorInit(mcx, root);
     let mut v = JsonbValue::null();
     let mut skip_nested = false;
 
@@ -132,7 +132,7 @@ pub fn jsonb_object_keys<'mcx>(
     // Jsonb *jb = PG_GETARG_JSONB_P(0);
     let jb = funcapi::srf_arg_varlena_bytes::call(mcx, fcinfo, 0)?;
 
-    let keys = jsonb_object_keys_worker(&jb)?;
+    let keys = jsonb_object_keys_worker(mcx, ::mcx::slice_borrow_in(mcx, &jb)?)?;
 
     // For each key: SRF_RETURN_NEXT(funcctx, CStringGetTextDatum(nxt)).
     for key in &keys {

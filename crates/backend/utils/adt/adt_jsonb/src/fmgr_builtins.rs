@@ -332,7 +332,10 @@ macro_rules! fc_jb_cmp_bool {
         fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let a = arg_jsonb_root(fcinfo, 0);
             let b = arg_jsonb_root(fcinfo, 1);
-            Ok(ret_bool($core(a, b)?))
+            // Per-call scratch arena for the read engine's iterator placeholders;
+            // the container bytes `a`/`b` outlive it (they live in `fcinfo`).
+            let m = scratch_mcx();
+            Ok(ret_bool($core(m.mcx(), a, b)?))
         }
     };
 }
@@ -348,7 +351,8 @@ fc_jb_cmp_bool!(fc_jsonb_ge, jsonb_op::jsonb_ge);
 fn fc_jsonb_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_jsonb_root(fcinfo, 0);
     let b = arg_jsonb_root(fcinfo, 1);
-    Ok(ret_i32(jsonb_op::jsonb_cmp(a, b)?))
+    let m = scratch_mcx();
+    Ok(ret_i32(jsonb_op::jsonb_cmp(m.mcx(), a, b)?))
 }
 
 // ---------------------------------------------------------------------------
@@ -359,14 +363,16 @@ fn fc_jsonb_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<
 fn fc_jsonb_contains(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let val = arg_jsonb_root(fcinfo, 0);
     let tmpl = arg_jsonb_root(fcinfo, 1);
-    Ok(ret_bool(jsonb_op::jsonb_contains(val, tmpl)?))
+    let m = scratch_mcx();
+    Ok(ret_bool(jsonb_op::jsonb_contains(m.mcx(), val, tmpl)?))
 }
 
 /// `jsonb_contained(jsonb, jsonb) -> bool` (oid 4050): arg 0 = tmpl, arg 1 = val.
 fn fc_jsonb_contained(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let tmpl = arg_jsonb_root(fcinfo, 0);
     let val = arg_jsonb_root(fcinfo, 1);
-    Ok(ret_bool(jsonb_op::jsonb_contained(tmpl, val)?))
+    let m = scratch_mcx();
+    Ok(ret_bool(jsonb_op::jsonb_contained(m.mcx(), tmpl, val)?))
 }
 
 /// `jsonb_exists(jsonb, text) -> bool` (oid 4047).
@@ -399,14 +405,16 @@ fn fc_jsonb_exists_all(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::Pg
 /// `jsonb_hash(jsonb) -> int4` (oid 4045).
 fn fc_jsonb_hash(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_root(fcinfo, 0);
-    Ok(ret_i32(jsonb_op::jsonb_hash(jb)?))
+    let m = scratch_mcx();
+    Ok(ret_i32(jsonb_op::jsonb_hash(m.mcx(), jb)?))
 }
 
 /// `jsonb_hash_extended(jsonb, int8) -> int8` (oid 3416).
 fn fc_jsonb_hash_extended(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_root(fcinfo, 0);
     let seed = arg_int64(fcinfo, 1) as u64;
-    Ok(ret_i64(jsonb_op::jsonb_hash_extended(jb, seed)? as i64))
+    let m = scratch_mcx();
+    Ok(ret_i64(jsonb_op::jsonb_hash_extended(m.mcx(), jb, seed)? as i64))
 }
 
 // ---------------------------------------------------------------------------
@@ -419,42 +427,48 @@ fn fc_jsonb_hash_extended(fcinfo: &mut FunctionCallInfoBaseData) -> types_error:
 /// `jsonb_bool(jsonb) -> bool` (oid 3556).
 fn fc_jsonb_bool(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0);
-    let v = crate::jsonb_bool(jb)?;
+    let m = scratch_mcx();
+    let v = crate::jsonb_bool(m.mcx(), jb)?;
     Ok(ret_opt(fcinfo, v, ret_bool))
 }
 
 /// `jsonb_int2(jsonb) -> int2` (oid 3450).
 fn fc_jsonb_int2(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0);
-    let v = crate::jsonb_int2(jb)?;
+    let m = scratch_mcx();
+    let v = crate::jsonb_int2(m.mcx(), jb)?;
     Ok(ret_opt(fcinfo, v, ret_i16))
 }
 
 /// `jsonb_int4(jsonb) -> int4` (oid 3451).
 fn fc_jsonb_int4(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0);
-    let v = crate::jsonb_int4(jb)?;
+    let m = scratch_mcx();
+    let v = crate::jsonb_int4(m.mcx(), jb)?;
     Ok(ret_opt(fcinfo, v, ret_i32))
 }
 
 /// `jsonb_int8(jsonb) -> int8` (oid 3452).
 fn fc_jsonb_int8(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0);
-    let v = crate::jsonb_int8(jb)?;
+    let m = scratch_mcx();
+    let v = crate::jsonb_int8(m.mcx(), jb)?;
     Ok(ret_opt(fcinfo, v, ret_i64))
 }
 
 /// `jsonb_float4(jsonb) -> float4` (oid 3453).
 fn fc_jsonb_float4(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0);
-    let v = crate::jsonb_float4(jb)?;
+    let m = scratch_mcx();
+    let v = crate::jsonb_float4(m.mcx(), jb)?;
     Ok(ret_opt(fcinfo, v, ret_f32))
 }
 
 /// `jsonb_float8(jsonb) -> float8` (oid 2580).
 fn fc_jsonb_float8(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0);
-    let v = crate::jsonb_float8(jb)?;
+    let m = scratch_mcx();
+    let v = crate::jsonb_float8(m.mcx(), jb)?;
     Ok(ret_opt(fcinfo, v, ret_f64))
 }
 

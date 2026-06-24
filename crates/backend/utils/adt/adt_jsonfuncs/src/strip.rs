@@ -267,8 +267,8 @@ pub fn jsonb_strip_nulls<'mcx>(
         return Ok(out);
     }
 
-    // it = JsonbIteratorInit(&jb->root);
-    let mut it = JsonbIteratorInit(root);
+    // it = JsonbIteratorInit(mcx, &jb->root);
+    let mut it = JsonbIteratorInit(mcx, root);
 
     // JsonbParseState *parseState = NULL;
     let mut parse_state = None;
@@ -310,7 +310,7 @@ pub fn jsonb_strip_nulls<'mcx>(
 
             // otherwise, do a delayed push of the key
             // (void) pushJsonbValue(&parseState, WJB_KEY, &k);
-            pushJsonbValue(&mut parse_state, JsonbIteratorToken::WJB_KEY, Some(&k))?;
+            pushJsonbValue(mcx, &mut parse_state, JsonbIteratorToken::WJB_KEY, Some(&k))?;
         }
 
         // if strip_in_arrays is set, also skip null array elements
@@ -324,9 +324,9 @@ pub fn jsonb_strip_nulls<'mcx>(
         // else
         //     res = pushJsonbValue(&parseState, type, NULL);
         res = if typ == JsonbIteratorToken::WJB_VALUE || typ == JsonbIteratorToken::WJB_ELEM {
-            pushJsonbValue(&mut parse_state, typ, Some(&v))?
+            pushJsonbValue(mcx, &mut parse_state, typ, Some(&v))?
         } else {
-            pushJsonbValue(&mut parse_state, typ, None)?
+            pushJsonbValue(mcx, &mut parse_state, typ, None)?
         };
     }
 
