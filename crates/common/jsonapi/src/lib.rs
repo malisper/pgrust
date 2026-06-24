@@ -1479,7 +1479,7 @@ fn run_pg_parse_json(
 
 struct JsonbSink<'m, 'mcx> {
     mcx: Mcx<'mcx>,
-    state: &'m mut adt_jsonb::JsonbInState,
+    state: &'m mut adt_jsonb::JsonbInState<'mcx>,
     /// C `JsonbInState.escontext` — the soft-error sink threaded into the
     /// `numeric_in` / `checkStringLen` calls inside the scalar/field actions.
     escontext: Option<&'m mut ::types_error::SoftErrorContext>,
@@ -1514,19 +1514,19 @@ impl<'m, 'mcx> JsonbSink<'m, 'mcx> {
 
 impl<'m, 'mcx> SaxSink for JsonbSink<'m, 'mcx> {
     fn object_start(&mut self, _lex: &JsonLexContext) -> JsonParseErrorType {
-        let r = adt_jsonb::jsonb_in_object_start(self.state);
+        let r = adt_jsonb::jsonb_in_object_start(self.mcx, self.state);
         self.note(r)
     }
     fn object_end(&mut self, _lex: &JsonLexContext) -> JsonParseErrorType {
-        let r = adt_jsonb::jsonb_in_object_end(self.state);
+        let r = adt_jsonb::jsonb_in_object_end(self.mcx, self.state);
         self.note(r)
     }
     fn array_start(&mut self, _lex: &JsonLexContext) -> JsonParseErrorType {
-        let r = adt_jsonb::jsonb_in_array_start(self.state);
+        let r = adt_jsonb::jsonb_in_array_start(self.mcx, self.state);
         self.note(r)
     }
     fn array_end(&mut self, _lex: &JsonLexContext) -> JsonParseErrorType {
-        let r = adt_jsonb::jsonb_in_array_end(self.state);
+        let r = adt_jsonb::jsonb_in_array_end(self.mcx, self.state);
         self.note(r)
     }
     fn object_field_start(
@@ -1538,6 +1538,7 @@ impl<'m, 'mcx> SaxSink for JsonbSink<'m, 'mcx> {
         // jsonb_from_cstring uses need_escapes=true, so fname is always present.
         let name = fname.unwrap_or(&[]);
         let r = adt_jsonb::jsonb_in_object_field_start(
+            self.mcx,
             self.state,
             name,
             self.escontext.as_deref_mut(),

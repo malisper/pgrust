@@ -90,9 +90,10 @@ pub fn jsonb_subscript_fetch<'mcx>(
     // non-NULL container.
     // jsonbSource = DatumGetJsonbP(*op->resvalue);
     let jsonb_source = datum_get_jsonb_p(mcx, &container)?;
+    let jsonb_source: &'mcx [u8] = ::mcx::slice_borrow_in(mcx, &jsonb_source)?;
     let path_refs: Vec<&[u8]> = path.iter().map(|e| e.as_slice()).collect();
     // jsonb_get_element(..., as_text = false): None == *op->resnull = true.
-    match jsonb_get_element(mcx, &jsonb_source, &path_refs, false)? {
+    match jsonb_get_element(mcx, jsonb_source, &path_refs, false)? {
         Some(bytes) => Ok((DatumV::ByRef(bytes), false)),
         None => Ok((DatumV::null(), true)),
     }
@@ -123,20 +124,21 @@ pub fn jsonb_subscript_assign<'mcx>(
     expect_array: bool,
 ) -> PgResult<(DatumV<'mcx>, bool)> {
     // JsonbValue replacevalue;
-    let replace_jbv: JsonbValue = if replacenull {
+    let replace_jbv: JsonbValue<'mcx> = if replacenull {
         // replacevalue.type = jbvNull;
         JsonbValue::null()
     } else {
         // JsonbToJsonbValue(DatumGetJsonbP(sbsrefstate->replacevalue), &replacevalue);
         let mut v = JsonbValue::null();
         let replace_bytes = datum_get_jsonb_p(mcx, &replacevalue)?;
-        JsonbToJsonbValue(&replace_bytes, &mut v)?;
+        let replace_bytes: &'mcx [u8] = ::mcx::slice_borrow_in(mcx, &replace_bytes)?;
+        JsonbToJsonbValue(replace_bytes, &mut v)?;
         v
     };
 
     // jsonbSource: either an empty source (NULL input) or the input container.
     // jsonb_set_element takes the full on-disk varlena bytes.
-    let source_bytes: Vec<u8> = if container_null {
+    let source_bytes: &'mcx [u8] = if container_null {
         // To avoid surprising results, set up an empty jsonb array if an array
         // is expected (first subscript is integer), otherwise a jsonb object.
         let new_source = if expect_array {
@@ -144,7 +146,7 @@ pub fn jsonb_subscript_assign<'mcx>(
             JsonbValue {
                 typ: jbvType::jbvArray,
                 val: JsonbValueData::Array {
-                    elems: Vec::new(),
+                    elems: ::mcx::vec_with_capacity_in(mcx, 0)?,
                     raw_scalar: false,
                 },
             }
@@ -152,19 +154,21 @@ pub fn jsonb_subscript_assign<'mcx>(
             // newSource.type = jbvObject; nPairs = 0;
             JsonbValue {
                 typ: jbvType::jbvObject,
-                val: JsonbValueData::Object(Vec::new()),
+                val: JsonbValueData::Object(::mcx::vec_with_capacity_in(mcx, 0)?),
             }
         };
         // jsonbSource = JsonbValueToJsonb(&newSource); *op->resnull = false;
-        JsonbValueToJsonb(mcx, &new_source)?.as_slice().to_vec()
+        let local = JsonbValueToJsonb(mcx, &new_source)?;
+        ::mcx::slice_borrow_in(mcx, &local)?
     } else {
         // jsonbSource = DatumGetJsonbP(*op->resvalue);
-        datum_get_jsonb_p(mcx, &container)?.as_slice().to_vec()
+        let local = datum_get_jsonb_p(mcx, &container)?;
+        ::mcx::slice_borrow_in(mcx, &local)?
     };
 
     // *op->resvalue = jsonb_set_element(jsonbSource, workspace->index,
     //                                   sbsrefstate->numupper, &replacevalue);
-    let result = jsonb_set_element(mcx, &source_bytes, path, &replace_jbv)?;
+    let result = jsonb_set_element(mcx, source_bytes, path, &replace_jbv)?;
     // The result is never NULL, so no need to change *op->resnull.
     Ok((DatumV::ByRef(result), false))
 }
@@ -195,8 +199,9 @@ pub fn jsonb_subscript_fetch_old<'mcx>(
     }
     // Jsonb *jsonbSource = DatumGetJsonbP(*op->resvalue);
     let jsonb_source = datum_get_jsonb_p(mcx, &container)?;
+    let jsonb_source: &'mcx [u8] = ::mcx::slice_borrow_in(mcx, &jsonb_source)?;
     let path_refs: Vec<&[u8]> = path.iter().map(|e| e.as_slice()).collect();
-    match jsonb_get_element(mcx, &jsonb_source, &path_refs, false)? {
+    match jsonb_get_element(mcx, jsonb_source, &path_refs, false)? {
         Some(bytes) => Ok((DatumV::ByRef(bytes), false)),
         None => Ok((DatumV::null(), true)),
     }

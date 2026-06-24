@@ -583,7 +583,7 @@ fn jsonb_path_query_array_internal(
         tz,
     )?;
 
-    JsonbValueToJsonb(mcx, &wrapItemsInArray(mcx, &found)?)
+    JsonbValueToJsonb(mcx, &wrapItemsInArray(&found)?)
 }
 
 /// C: `jsonb_path_query_array` (jsonpath_exec.c:605).
@@ -726,10 +726,10 @@ fn executeJsonPath<'mcx>(
 
 /// C: `executeItem` (jsonpath_exec.c:732).
 fn executeItem(
-    cxt: &mut JsonPathExecContext<'mcx, '_>,
+    cxt: &mut JsonPathExecContext<'_, '_>,
     jsp: &JsonPathItem<'_>,
-    jb: &JsonbValue<'mcx>,
-    found: Option<&mut JsonValueList<'mcx>>,
+    jb: &JsonbValue,
+    found: Option<&mut JsonValueList>,
 ) -> PgResult<JsonPathExecResult> {
     let unwrap = jspAutoUnwrap(cxt);
     executeItemOptUnwrapTarget(cxt, jsp, jb, found, unwrap)
@@ -738,10 +738,10 @@ fn executeItem(
 /// C: `executeItemOptUnwrapTarget` (jsonpath_exec.c:744) — the big per-item
 /// switch.
 fn executeItemOptUnwrapTarget(
-    cxt: &mut JsonPathExecContext<'mcx, '_>,
+    cxt: &mut JsonPathExecContext<'_, '_>,
     jsp: &JsonPathItem<'_>,
-    jb: &JsonbValue<'mcx>,
-    mut found: Option<&mut JsonValueList<'mcx>>,
+    jb: &JsonbValue,
+    mut found: Option<&mut JsonValueList>,
     unwrap: bool,
 ) -> PgResult<JsonPathExecResult> {
     let mut res = jperNotFound;
@@ -1059,7 +1059,7 @@ fn executeItemOptUnwrapTarget(
         }
 
         jpiType => {
-            let name = JsonbTypeName(mcx, jb)?;
+            let name = JsonbTypeName(jb)?;
             let jbv = JsonbValue {
                 typ: jbvType::jbvString,
                 val: JsonbValueData::String(name.as_bytes().to_vec()),
@@ -1163,10 +1163,10 @@ fn executeItemOptUnwrapTarget(
 
 /// C: `executeItemUnwrapTargetArray` (jsonpath_exec.c:1672).
 fn executeItemUnwrapTargetArray(
-    cxt: &mut JsonPathExecContext<'mcx, '_>,
+    cxt: &mut JsonPathExecContext<'_, '_>,
     jsp: Option<&JsonPathItem<'_>>,
-    jb: &JsonbValue<'mcx>,
-    found: Option<&mut JsonValueList<'mcx>>,
+    jb: &JsonbValue,
+    found: Option<&mut JsonValueList>,
     unwrapElements: bool,
 ) -> PgResult<JsonPathExecResult> {
     if jb.typ != jbvType::jbvBinary {
@@ -1184,11 +1184,11 @@ fn executeItemUnwrapTargetArray(
 
 /// C: `executeNextItem` (jsonpath_exec.c:1692).
 fn executeNextItem(
-    cxt: &mut JsonPathExecContext<'mcx, '_>,
+    cxt: &mut JsonPathExecContext<'_, '_>,
     cur: &JsonPathItem<'_>,
     next: Option<&JsonPathItem<'_>>,
-    v: &JsonbValue<'mcx>,
-    found: Option<&mut JsonValueList<'mcx>>,
+    v: &JsonbValue,
+    found: Option<&mut JsonValueList>,
     copy: bool,
 ) -> PgResult<JsonPathExecResult> {
     let computed_next;
@@ -1217,11 +1217,11 @@ fn executeNextItem(
 
 /// C: `executeItemOptUnwrapResult` (jsonpath_exec.c:1723).
 fn executeItemOptUnwrapResult(
-    cxt: &mut JsonPathExecContext<'mcx, '_>,
+    cxt: &mut JsonPathExecContext<'_, '_>,
     jsp: &JsonPathItem<'_>,
-    jb: &JsonbValue<'mcx>,
+    jb: &JsonbValue,
     unwrap: bool,
-    found: &mut JsonValueList<'mcx>,
+    found: &mut JsonValueList,
 ) -> PgResult<JsonPathExecResult> {
     if unwrap && jspAutoUnwrap(cxt) {
         let mut seq = JsonValueList::default();
@@ -1249,11 +1249,11 @@ fn executeItemOptUnwrapResult(
 
 /// C: `executeItemOptUnwrapResultNoThrow` (jsonpath_exec.c:1758).
 fn executeItemOptUnwrapResultNoThrow(
-    cxt: &mut JsonPathExecContext<'mcx, '_>,
+    cxt: &mut JsonPathExecContext<'_, '_>,
     jsp: &JsonPathItem<'_>,
-    jb: &JsonbValue<'mcx>,
+    jb: &JsonbValue,
     unwrap: bool,
-    found: &mut JsonValueList<'mcx>,
+    found: &mut JsonValueList,
 ) -> PgResult<JsonPathExecResult> {
     let throwErrors = cxt.throwErrors;
     cxt.throwErrors = false;
@@ -1264,9 +1264,9 @@ fn executeItemOptUnwrapResultNoThrow(
 
 /// C: `executeBoolItem` (jsonpath_exec.c:1775).
 fn executeBoolItem(
-    cxt: &mut JsonPathExecContext<'mcx, '_>,
+    cxt: &mut JsonPathExecContext<'_, '_>,
     jsp: &JsonPathItem<'_>,
-    jb: &JsonbValue<'mcx>,
+    jb: &JsonbValue,
     canHaveNext: bool,
 ) -> PgResult<JsonPathBool> {
     // since this function recurses, it could be driven to stack overflow
@@ -1372,9 +1372,9 @@ fn executeBoolItem(
 /// non-strict EXISTS path: C passes `NULL` for `found`, so the executor stops at
 /// the first match and returns `jperOk`/`jperNotFound`.
 fn executeItemOptUnwrapResultNoThrowExists(
-    cxt: &mut JsonPathExecContext<'mcx, '_>,
+    cxt: &mut JsonPathExecContext<'_, '_>,
     jsp: &JsonPathItem<'_>,
-    jb: &JsonbValue<'mcx>,
+    jb: &JsonbValue,
     unwrap: bool,
 ) -> PgResult<JsonPathExecResult> {
     debug_assert!(!unwrap);
@@ -1387,9 +1387,9 @@ fn executeItemOptUnwrapResultNoThrowExists(
 
 /// C: `executeNestedBoolItem` (jsonpath_exec.c:1911).
 fn executeNestedBoolItem(
-    cxt: &mut JsonPathExecContext<'mcx, '_>,
+    cxt: &mut JsonPathExecContext<'_, '_>,
     jsp: &JsonPathItem<'_>,
-    jb: &JsonbValue<'mcx>,
+    jb: &JsonbValue,
 ) -> PgResult<JsonPathBool> {
     let prev = cxt.current.clone();
     cxt.current = jb.clone();
@@ -1403,11 +1403,11 @@ fn executeNestedBoolItem(
 /// root container (so iterated children keep document-relative `.keyvalue()`
 /// identities — bookkeeping unique to the safe port).
 fn executeAnyItem(
-    cxt: &mut JsonPathExecContext<'mcx, '_>,
+    cxt: &mut JsonPathExecContext<'_, '_>,
     jsp: Option<&JsonPathItem<'_>>,
     jbc: &[u8],
     jbc_doc_offset: i32,
-    mut found: Option<&mut JsonValueList<'mcx>>,
+    mut found: Option<&mut JsonValueList>,
     level: u32,
     first: u32,
     last: u32,
@@ -1518,11 +1518,11 @@ enum PredicateKind<'a> {
 
 /// C: `executePredicate` (jsonpath_exec.c:2023).
 fn executePredicate(
-    cxt: &mut JsonPathExecContext<'mcx, '_>,
+    cxt: &mut JsonPathExecContext<'_, '_>,
     pred: &JsonPathItem<'_>,
     larg: &JsonPathItem<'_>,
     rarg: Option<&JsonPathItem<'_>>,
-    jb: &JsonbValue<'mcx>,
+    jb: &JsonbValue,
     unwrapRightArg: bool,
     mut exec: PredicateKind<'_>,
 ) -> PgResult<JsonPathBool> {
@@ -1602,10 +1602,10 @@ fn executePredicate(
 
 /// Dispatch a single predicate call (C: `exec(pred, lval, rval, param)`).
 fn exec_predicate_call(
-    cxt: &JsonPathExecContext<'mcx, '_>,
+    cxt: &JsonPathExecContext<'_, '_>,
     exec: &mut PredicateKind<'_>,
     pred: &JsonPathItem<'_>,
-    lval: &JsonbValue<'mcx>,
+    lval: &JsonbValue,
     rval: Option<&JsonbValue>,
 ) -> PgResult<JsonPathBool> {
     match exec {
@@ -1633,11 +1633,11 @@ enum UnaryOp {
 
 /// C: `executeBinaryArithmExpr` (jsonpath_exec.c:2103).
 fn executeBinaryArithmExpr(
-    cxt: &mut JsonPathExecContext<'mcx, '_>,
+    cxt: &mut JsonPathExecContext<'_, '_>,
     jsp: &JsonPathItem<'_>,
-    jb: &JsonbValue<'mcx>,
+    jb: &JsonbValue,
     func: ArithmOp,
-    found: Option<&mut JsonValueList<'mcx>>,
+    found: Option<&mut JsonValueList>,
 ) -> PgResult<JsonPathExecResult> {
     let elem = jspGetLeftArg(jsp);
 
@@ -1725,11 +1725,11 @@ fn executeBinaryArithmExpr(
 
 /// C: `executeUnaryArithmExpr` (jsonpath_exec.c:2174).
 fn executeUnaryArithmExpr(
-    cxt: &mut JsonPathExecContext<'mcx, '_>,
+    cxt: &mut JsonPathExecContext<'_, '_>,
     jsp: &JsonPathItem<'_>,
-    jb: &JsonbValue<'mcx>,
+    jb: &JsonbValue,
     func: Option<UnaryOp>,
-    mut found: Option<&mut JsonValueList<'mcx>>,
+    mut found: Option<&mut JsonValueList>,
 ) -> PgResult<JsonPathExecResult> {
     let elem = jspGetArg(jsp);
     let mut seq = JsonValueList::default();
@@ -1788,7 +1788,7 @@ fn executeUnaryArithmExpr(
 }
 
 /// C: `executeStartsWith` (jsonpath_exec.c:2241).
-fn executeStartsWith(whole: &JsonbValue<'mcx>, initial: &JsonbValue) -> PgResult<JsonPathBool> {
+fn executeStartsWith(whole: &JsonbValue, initial: &JsonbValue) -> PgResult<JsonPathBool> {
     let whole = match getScalar(whole, jbvType::jbvString) {
         Some(v) => v,
         None => return Ok(jpbUnknown), // error
@@ -1812,7 +1812,7 @@ fn executeStartsWith(whole: &JsonbValue<'mcx>, initial: &JsonbValue) -> PgResult
 fn executeLikeRegex(
     mcx: Mcx<'_>,
     jsp: &JsonPathItem<'_>,
-    str: &JsonbValue<'mcx>,
+    str: &JsonbValue,
     cxt: &mut JsonLikeRegexContext,
 ) -> PgResult<JsonPathBool> {
     let str = match getScalar(str, jbvType::jbvString) {
@@ -1853,12 +1853,12 @@ enum NumericMethod {
 
 /// C: `executeNumericItemMethod` (jsonpath_exec.c:2296).
 fn executeNumericItemMethod(
-    cxt: &mut JsonPathExecContext<'mcx, '_>,
+    cxt: &mut JsonPathExecContext<'_, '_>,
     jsp: &JsonPathItem<'_>,
-    jb: &JsonbValue<'mcx>,
+    jb: &JsonbValue,
     unwrap: bool,
     func: NumericMethod,
-    found: Option<&mut JsonValueList<'mcx>>,
+    found: Option<&mut JsonValueList>,
 ) -> PgResult<JsonPathExecResult> {
     if unwrap && JsonbType(jb)? == jbvType::jbvArray {
         return executeItemUnwrapTargetArray(cxt, Some(jsp), jb, found, false);
@@ -1897,10 +1897,10 @@ fn executeNumericItemMethod(
 
 /// C: `executeDateTimeMethod` (jsonpath_exec.c:2337).
 fn executeDateTimeMethod(
-    cxt: &mut JsonPathExecContext<'mcx, '_>,
+    cxt: &mut JsonPathExecContext<'_, '_>,
     jsp: &JsonPathItem<'_>,
-    jb: &JsonbValue<'mcx>,
-    found: Option<&mut JsonValueList<'mcx>>,
+    jb: &JsonbValue,
+    found: Option<&mut JsonValueList>,
 ) -> PgResult<JsonPathExecResult> {
     let mut res = jperNotFound;
 
@@ -2074,10 +2074,10 @@ fn executeDateTimeMethod(
 
 /// C: `executeKeyValueMethod` (jsonpath_exec.c:2818).
 fn executeKeyValueMethod(
-    cxt: &mut JsonPathExecContext<'mcx, '_>,
+    cxt: &mut JsonPathExecContext<'_, '_>,
     jsp: &JsonPathItem<'_>,
-    jb: &JsonbValue<'mcx>,
-    mut found: Option<&mut JsonValueList<'mcx>>,
+    jb: &JsonbValue,
+    mut found: Option<&mut JsonValueList>,
 ) -> PgResult<JsonPathExecResult> {
     let mut res = jperNotFound;
 
@@ -2195,9 +2195,9 @@ fn executeKeyValueMethod(
 
 /// C: `appendBoolResult` (jsonpath_exec.c:2928).
 fn appendBoolResult(
-    cxt: &mut JsonPathExecContext<'mcx, '_>,
+    cxt: &mut JsonPathExecContext<'_, '_>,
     jsp: &JsonPathItem<'_>,
-    found: Option<&mut JsonValueList<'mcx>>,
+    found: Option<&mut JsonValueList>,
     res: JsonPathBool,
 ) -> PgResult<JsonPathExecResult> {
     let next = jspGetNext(jsp);
@@ -2223,7 +2223,7 @@ fn appendBoolResult(
 
 /// C: `getJsonPathItem` (jsonpath_exec.c:2956).
 fn getJsonPathItem(
-    cxt: &mut JsonPathExecContext<'mcx, '_>,
+    cxt: &mut JsonPathExecContext<'_, '_>,
     item: &JsonPathItem<'_>,
     value: &mut JsonbValue,
 ) -> PgResult<()> {
@@ -2465,7 +2465,7 @@ fn JsonItemFromDatum<'mcx>(mcx: Mcx<'mcx>, var: &JsonPathVariable) -> PgResult<J
 
 /// C: `getJsonPathVariable` (jsonpath_exec.c:3139).
 fn getJsonPathVariable(
-    cxt: &mut JsonPathExecContext<'mcx, '_>,
+    cxt: &mut JsonPathExecContext<'_, '_>,
     variable: &JsonPathItem<'_>,
     value: &mut JsonbValue,
 ) -> PgResult<()> {
@@ -2578,9 +2578,9 @@ fn JsonbArraySize(jb: &JsonbValue) -> PgResult<i32> {
 /// C: `executeComparison` (jsonpath_exec.c:3240) — `JsonPathPredicateCallback`.
 fn executeComparison(
     cmp: &JsonPathItem<'_>,
-    lv: &JsonbValue<'mcx>,
-    rv: &JsonbValue<'mcx>,
-    cxt: &JsonPathExecContext<'mcx, '_>,
+    lv: &JsonbValue,
+    rv: &JsonbValue,
+    cxt: &JsonPathExecContext<'_, '_>,
 ) -> PgResult<JsonPathBool> {
     compareItems(cxt.mcx, cmp.typ, lv, rv, cxt.useTz)
 }
@@ -3071,7 +3071,7 @@ pub fn JsonPathQuery(
 
     if wrap {
         return Ok(JsonPathQueryResult {
-            value: Some(JsonbValueToJsonb(mcx, &wrapItemsInArray(mcx, &found)?)?),
+            value: Some(JsonbValueToJsonb(mcx, &wrapItemsInArray(&found)?)?),
             empty: false,
             error: false,
         });
