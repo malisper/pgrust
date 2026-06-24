@@ -324,6 +324,27 @@ fn jumble_expr_fields(jstate: &mut JumbleState, expr: &Expr) {
         Expr::SQLValueFunction(s) => {
             jf_u32(jstate, s.op as u32);
         }
+        Expr::SubLink(s) => {
+            // `_jumbleSubLink`: subLinkType, subLinkId, testexpr, subselect.
+            jf_u32(jstate, s.subLinkType as u32);
+            jf_i32(jstate, s.subLinkId);
+            jumble_opt_expr(jstate, s.testexpr.as_deref());
+            match s.subselect.as_deref() {
+                Some(q) => jumble_query_node(jstate, q),
+                None => jstate.append_jumble_null(),
+            }
+        }
+        Expr::RowExpr(r) => {
+            // `_jumbleRowExpr`: JUMBLE_NODE(args).
+            for a in r.args.iter() {
+                jumble_expr(jstate, a);
+            }
+        }
+        Expr::FieldSelect(f) => {
+            // `_jumbleFieldSelect`: arg, fieldnum.
+            jumble_opt_expr(jstate, f.arg.as_deref());
+            jf_i32(jstate, f.fieldnum as i32);
+        }
         // Remaining Expr arms (Aggref/WindowFunc/SubLink/SubPlan/RowExpr/
         // FieldSelect/XmlExpr/Json*/…): the expr tag (already emitted by the
         // caller) keeps the hash structure-sensitive; their full
@@ -528,6 +549,14 @@ fn jumble_utility_node(jstate: &mut JumbleState, node: &Node) {
             // `_jumbleVariableShowStmt`: JUMBLE_STRING(name).
             let s = node.expect_variableshowstmt();
             jumble_opt_cstring(jstate, s.name.as_deref());
+        }
+        ntag::T_DeallocateStmt => {
+            // `_jumbleDeallocateStmt`: JUMBLE_FIELD(isall), JUMBLE_LOCATION.
+            // The name is query_jumble_ignore; its location is recorded so
+            // `DEALLOCATE p1` normalizes to `DEALLOCATE $1`.
+            let s = node.expect_deallocatestmt();
+            jf_bool(jstate, s.isall);
+            _record_const_location(jstate, s.location);
         }
         ntag::T_List => {
             if let Some(list) = node.as_list() {
