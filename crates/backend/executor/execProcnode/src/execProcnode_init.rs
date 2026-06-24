@@ -414,12 +414,13 @@ pub fn exec_init_node<'mcx>(
         // case T_LockRows: ExecInitLockRows((LockRows *) node, estate, eflags)
         ntag::T_LockRows => {
             let lr = node.expect_lockrows();
-            let mut lrstate = nodeLockRows::ExecInitLockRows(lr, estate, eflags)?;
-            // lrstate->ps.plan = (Plan *) node — the plan back-link (read by
-            // EXPLAIN's ExplainNode). The seam-installed init_plan_state_links
-            // only carries the &LockRows, not the enclosing &'mcx Node, so the
-            // plan-tree alias is wired here where the dispatch holds it.
-            lrstate.ps.plan = Some(node);
+            // Pass the wrapping `&Node` too so ExecInitLockRows can set
+            // `lrstate->ps.plan = (Plan *) node` at the top — before its
+            // ExecInitResultTypeTL, which reads the plan's targetlist to build
+            // the result tuple type (as C does at the top of ExecInitLockRows).
+            // Wiring the back-link only after the init returned left the result
+            // type empty for a CteScan parent reading ExecGetResultType().
+            let lrstate = nodeLockRows::ExecInitLockRows(lr, node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::LockRows(lrstate))?
         }
 

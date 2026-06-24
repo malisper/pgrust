@@ -401,12 +401,18 @@ pub fn pgstat_get_entry_ref(
         // the body before this backend's reference is counted — exactly C's
         // ordering (acquire-then-release).
         unsafe {
+            // C reports `*created_entry = true` both for a brand-new dshash slot
+            // (pgstat_shmem.c line 541-542) AND for re-activating a
+            // dropped-but-not-yet-freed entry (line 580-581). A found-and-live
+            // entry is not "created".
+            let mut newly_created = !found;
             let shheader = if !found {
                 // Brand new dshash slot: stamp the key and init the body.
                 (*shhashent).key = key;
                 pgstat_init_entry(area, kind, shhashent)?
             } else if (*shhashent).dropped {
                 // Re-activate a dropped-but-not-yet-freed (or freed) entry.
+                newly_created = true;
                 pgstat_reinit_entry(shhashent);
                 if (*shhashent).body == INVALID_DSA_POINTER {
                     pgstat_init_entry(area, kind, shhashent)?
@@ -419,7 +425,7 @@ pub fn pgstat_get_entry_ref(
             // Count this backend's new reference while still locked.
             (*shhashent).refcount.fetch_add(1, Ordering::Relaxed);
             dshash::dshash_release_lock(dsh, entry)?;
-            (shhashent, shheader, !found)
+            (shhashent, shheader, newly_created)
         }
     } else {
         // dshash_find(dsh, &key, false) — no-create lookup.

@@ -499,14 +499,22 @@ pub fn ExecModifyTable<'mcx>(
                     Some(old_slot),
                 )?);
 
-                // Now apply the update.
+                // Now apply the update. C passes `tupleid` as an in/out pointer;
+                // ExecUpdate's EPQ redo loop advances it to the latest locked row
+                // version (for ri_needLockTagTuple system catalogs), so the outer
+                // `if (tuplock) UnlockTuple(tupleid)` below releases that same TID.
+                // The UPDATE branch's `tupleid` (when non-null) always aliases
+                // `tuple_ctid`; pass a mutable borrow of it so ExecUpdate can write
+                // the advance back, matching C.
+                let upd_tupleid: Option<&mut ItemPointerData> =
+                    if tupleid.is_some() { Some(&mut tuple_ctid) } else { None };
                 slot = update::ExecUpdate(
                     mcx,
                     &mut context,
                     node,
                     estate,
                     result_rel_info,
-                    tupleid,
+                    upd_tupleid,
                     oldtuple,
                     Some(old_slot),
                     slot.unwrap(),
@@ -516,7 +524,7 @@ pub fn ExecModifyTable<'mcx>(
                     let relid = relation_relid(estate, result_rel_info);
                     lmgr_seams::unlock_tuple::call(
                         relid,
-                        *tupleid.expect("ExecUpdate: tupleid is NULL"),
+                        tuple_ctid,
                         INPLACE_UPDATE_TUPLE_LOCK,
                     )?;
                 }

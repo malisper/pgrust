@@ -1,0 +1,32 @@
+# Keep the build context small + reproducible. The Rust build needs the source
+# tree (crates/, Cargo.toml, Cargo.lock, build.rs files) but none of these.
+#
+# Patterns are anchored to the context root (leading `/`) so we never
+# accidentally drop a file a crate's build.rs/include_str! depends on deeper in
+# the tree (e.g. crate-local *.tsv golden fixtures).
+.git
+.claude
+/.dockerignore
+
+# Build artifacts / target dirs (regenerated in-image).
+/target
+/target-iso
+/.isolated-target
+/.iso-target
+/.amcheck-target
+crates/*/target
+
+# Large top-level catalogs / audits / docs not needed to compile the binary.
+/audits
+/docs
+/ops
+/tools
+/scripts
+/__pycache__
+/sock
+/*.tsv
+/*.log
+/*.patch
+
+# Editor / OS cruft.
+.DS_Store

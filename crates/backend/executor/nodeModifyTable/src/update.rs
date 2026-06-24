@@ -40,7 +40,7 @@ pub fn ExecUpdate<'mcx>(
     mtstate: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     result_rel_info: RriId,
-    tupleid: Option<&ItemPointerData>,
+    mut tupleid: Option<&mut ItemPointerData>,
     oldtuple: Option<FormedTuple<'mcx>>,
     mut old_slot: Option<SlotId>,
     mut slot: SlotId,
@@ -71,7 +71,7 @@ pub fn ExecUpdate<'mcx>(
     // it from its own EPQ advance. So ExecARUpdateTriggers re-fetches the
     // EPQ-updated OLD tuple (not the stale pre-recheck one), and the redo loop
     // targets the already-locked latest version (no redundant second recheck).
-    let mut epilogue_tid: Option<ItemPointerData> = tupleid.copied();
+    let mut epilogue_tid: Option<ItemPointerData> = tupleid.as_deref().copied();
 
     // Prepare for the update.  This includes BEFORE ROW triggers, so we're done
     // if it says we are.
@@ -81,7 +81,7 @@ pub fn ExecUpdate<'mcx>(
         mtstate,
         estate,
         result_rel_info,
-        tupleid,
+        tupleid.as_deref(),
         oldtuple.clone(),
         slot,
         None,
@@ -323,6 +323,17 @@ pub fn ExecUpdate<'mcx>(
         // Carry the (possibly EPQ-advanced) tid out for the AFTER trigger /
         // epilogue so it re-fetches the current row version's OLD tuple.
         epilogue_tid = Some(cur_tid);
+        // C threads `tupleid` as an in/out pointer: the redo loop's
+        // UnlockTuple(&lockedtid)/LockTuple(tupleid) advances the caller's
+        // `*tupleid` to the latest locked row version, so the caller's outer
+        // `if (tuplock) UnlockTuple(tupleid)` (for ri_needLockTagTuple system
+        // catalogs) releases the same TID that was re-locked here. Propagate the
+        // advance back to the caller's `tupleid` to keep that lock/unlock pair
+        // balanced (otherwise the outer unlock targets the stale original TID and
+        // warns "you don't own a lock of type ExclusiveLock").
+        if let Some(tid_ref) = tupleid.as_deref_mut() {
+            *tid_ref = cur_tid;
+        }
     }
 
     if can_set_tag {
