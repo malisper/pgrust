@@ -100,6 +100,7 @@ pub fn init_seams() {
     utility_seams::utility_tuple_descriptor::set(UtilityTupleDescriptor);
     utility_seams::prevent_command_during_recovery::set(PreventCommandDuringRecovery);
     utility_seams::process_utility::set(ProcessUtility);
+    utility_seams::standard_process_utility::set(dispatch::standard_ProcessUtility);
 
     // `RecoveryInProgress()` (xlog.c) backs both PreventCommandDuringRecovery
     // (classify.rs) and the CHECKPOINT_FORCE gate (dispatch.rs); the canonical

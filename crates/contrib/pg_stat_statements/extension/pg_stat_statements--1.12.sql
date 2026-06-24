@@ -20,6 +20,11 @@ RETURNS record
 AS 'MODULE_PATHNAME', 'pg_stat_statements_info'
 LANGUAGE C STRICT VOLATILE PARALLEL SAFE;
 
+CREATE VIEW pg_stat_statements_info AS
+  SELECT * FROM pg_stat_statements_info();
+
+GRANT SELECT ON pg_stat_statements_info TO PUBLIC;
+
 --- Define pg_stat_statements_reset
 
 CREATE FUNCTION pg_stat_statements_reset(IN userid Oid DEFAULT 0,

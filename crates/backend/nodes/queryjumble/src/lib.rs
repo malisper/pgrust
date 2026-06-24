@@ -151,6 +151,40 @@ pub fn jumble_query_compute(query: &Query) -> i64 {
     query_id
 }
 
+/// `JumbleQuery(query)` over an immutable canonical `Query` — compute the 64-bit
+/// jumble id (returned) plus the [`JumbleState`] holding the recorded constant
+/// locations, exported to the post-parse-analyze hook as a
+/// [`portalcmds::JumbleState`]. Applies the same zero-hash fixup as
+/// [`jumble_query`].
+pub fn jumble_query_canonical(query: &Query) -> (i64, ::nodes::portalcmds::JumbleState) {
+    let mut jstate = init_jumble();
+    let mut query_id = do_jumble(&mut jstate, query);
+    if query_id == 0 {
+        query_id = if query.utilityStmt.is_some() { 2 } else { 1 };
+    }
+    (query_id, into_portalcmds_jstate(&jstate))
+}
+
+/// Project the jumble owner's working [`JumbleState`] onto the
+/// [`portalcmds::JumbleState`] view consumed by `post_parse_analyze_hook`.
+fn into_portalcmds_jstate(jstate: &JumbleState) -> ::nodes::portalcmds::JumbleState {
+    use ::nodes::portalcmds::{JumbleLocationLen, JumbleState as PJumbleState};
+    PJumbleState {
+        clocations: jstate
+            .clocations
+            .iter()
+            .map(|c| JumbleLocationLen {
+                location: c.location,
+                length: c.length,
+                squashed: c.squashed,
+                extern_param: c.extern_param,
+            })
+            .collect(),
+        highest_extern_param_id: jstate.highest_extern_param_id,
+        has_squashed_lists: jstate.has_squashed_lists,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal jumble helpers shared by the walker (the `JUMBLE_FIELD` /
 // `JUMBLE_NODE` / `RecordConstLocation` primitives over the owned tree).
@@ -200,6 +234,10 @@ pub fn init_seams() {
     // `JumbleQuery(query)->queryId` over the canonical field-bearing Query
     // (the simple-query / parse-analysis tree that feeds pg_stat_activity).
     seams::jumble_query_compute::set(jumble_query_compute);
+
+    // `JumbleQuery(query)` over the canonical Query, returning queryId + the
+    // constant-location array for the post_parse_analyze hook (normalization).
+    seams::jumble_query_canonical::set(jumble_query_canonical);
 
     // `JumbleQuery(query)` over the portalcmds opaque `Query` token. That token
     // (DECLARE CURSOR's by-value pass-through) carries no walkable node tree —

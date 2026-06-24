@@ -123,10 +123,67 @@ seam_core::seam!(
 pub type PostParseAnalyzeHook =
     fn(pstate: &PortalcmdsParseState, query: &Query, jstate: Option<&JumbleState>) -> PgResult<()>;
 
+/// The subset of `Query` fields the canonical parse-analysis path exposes to a
+/// `post_parse_analyze_hook` (the by-value `portalcmds::Query` token does not
+/// carry these; the field-bearing `copy_query::Query<'mcx>` does). Mirrors the
+/// `(pstate->p_sourcetext, query)` data a hook such as pg_stat_statements reads.
+#[derive(Clone, Copy)]
+pub struct PostParseAnalyzeQueryInfo<'a> {
+    /// `pstate->p_sourcetext`.
+    pub source_text: &'a str,
+    /// `query->queryId`.
+    pub query_id: i64,
+    /// `query->stmt_location`.
+    pub stmt_location: i32,
+    /// `query->stmt_len`.
+    pub stmt_len: i32,
+    /// `query->utilityStmt != NULL` — whether this is a utility statement.
+    pub is_utility: bool,
+    /// `IsA(query->utilityStmt, ExecuteStmt)` — whether the utility statement is
+    /// an `EXECUTE` (the hook clears the queryId for these).
+    pub utility_is_execute: bool,
+}
+
+/// `post_parse_analyze_hook` over the canonical field-bearing `Query<'mcx>`
+/// path. Distinct from [`PostParseAnalyzeHook`] (the by-value portalcmds token
+/// path) because the two `Query` views are incompatible; this carries the
+/// concrete scalar fields + the real `JumbleState` clocations.
+pub type PostParseAnalyzeCanonicalHook =
+    fn(info: PostParseAnalyzeQueryInfo<'_>, jstate: Option<&JumbleState>) -> PgResult<()>;
+
 thread_local! {
     /// `post_parse_analyze_hook_type post_parse_analyze_hook = NULL;` (analyze.c).
     static POST_PARSE_ANALYZE_HOOK: std::cell::Cell<Option<PostParseAnalyzeHook>> =
         const { std::cell::Cell::new(None) };
+
+    /// Canonical-path variant of `post_parse_analyze_hook` (the field-bearing
+    /// `Query<'mcx>` parse-analysis path). Same NULL-by-default semantics.
+    static POST_PARSE_ANALYZE_CANONICAL_HOOK:
+        std::cell::Cell<Option<PostParseAnalyzeCanonicalHook>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// `post_parse_analyze_hook != NULL` for the canonical-path variant.
+pub fn post_parse_analyze_canonical_hook_present() -> bool {
+    POST_PARSE_ANALYZE_CANONICAL_HOOK.with(|c| c.get().is_some())
+}
+/// Register a module's canonical-path `post_parse_analyze_hook`.
+pub fn set_post_parse_analyze_canonical_hook(
+    hook: Option<PostParseAnalyzeCanonicalHook>,
+) -> Option<PostParseAnalyzeCanonicalHook> {
+    POST_PARSE_ANALYZE_CANONICAL_HOOK.with(|c| c.replace(hook))
+}
+/// Invoke the registered canonical-path `post_parse_analyze_hook`. Panics if
+/// none is registered (callers guard with
+/// [`post_parse_analyze_canonical_hook_present`]).
+pub fn call_post_parse_analyze_canonical_hook(
+    info: PostParseAnalyzeQueryInfo<'_>,
+    jstate: Option<&JumbleState>,
+) -> PgResult<()> {
+    match POST_PARSE_ANALYZE_CANONICAL_HOOK.with(std::cell::Cell::get) {
+        Some(hook) => hook(info, jstate),
+        None => panic!("call_post_parse_analyze_canonical_hook() called with no hook registered"),
+    }
 }
 
 /// `post_parse_analyze_hook != NULL` — whether a module registered a

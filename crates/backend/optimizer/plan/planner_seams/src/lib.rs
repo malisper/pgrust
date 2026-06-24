@@ -126,6 +126,20 @@ pub fn call_planner_hook<'mcx>(
 }
 
 seam_core::seam!(
+    /// `standard_planner(parse, query_string, cursorOptions, boundParams)`
+    /// (planner.c:302) — the core planner entry, exposed so a registered
+    /// `planner_hook` (e.g. pg_stat_statements) can chain to it without a
+    /// dependency on the full planner crate.
+    pub fn standard_planner<'mcx>(
+        mcx: Mcx<'mcx>,
+        parse: &Query<'mcx>,
+        query_string: &str,
+        cursor_options: i32,
+        bound_params: ::nodes::params::ParamListInfo,
+    ) -> PgResult<PlannedStmt<'mcx>>
+);
+
+seam_core::seam!(
     /// `plan_cluster_use_sort(tableOid, indexOid)` (planner.c): whether a
     /// seqscan+sort beats an indexscan for the cluster copy. C runs in
     /// `CurrentMemoryContext`; the value-model port threads the caller's `mcx`

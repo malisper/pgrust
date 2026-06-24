@@ -67,6 +67,23 @@ seam_core::seam!(
     ) -> PgResult<()>
 );
 
+seam_core::seam!(
+    /// `standard_ProcessUtility(...)` (utility.c:548) — the core utility-command
+    /// dispatch, exposed so a registered `ProcessUtility_hook` (e.g.
+    /// pg_stat_statements) can chain to it without a dependency on the full
+    /// utility crate.
+    pub fn standard_process_utility<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        pstmt: &::nodes::nodeindexscan::PlannedStmt<'mcx>,
+        query_string: &str,
+        read_only_tree: bool,
+        context: ::nodes::parsestmt::ProcessUtilityContext,
+        params: ::nodes::portalcmds::ParamListInfo,
+        dest: ::nodes::parsestmt::DestReceiverHandle,
+        qc: &mut portal::QueryCompletion,
+    ) -> PgResult<()>
+);
+
 // ===========================================================================
 // `ProcessUtility_hook` (utility.c): the loadable-module interposition point for
 // utility-command execution. In C `ProcessUtility()` calls `ProcessUtility_hook

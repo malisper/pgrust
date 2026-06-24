@@ -50,3 +50,7 @@ varlena_seams = { path = "../../backend/utils/adt/varlena_seams" }
 small1_seams = { path = "../../backend/parser/small1_seams" }
 funcapi_seams = { path = "../../backend/utils/fmgr/funcapi_seams" }
 execMain_seams = { path = "../../backend/executor/execMain_seams" }
+parser_analyze_seams = { path = "../../backend/parser/parser_analyze_seams" }
+planner_seams = { path = "../../backend/optimizer/plan/planner_seams" }
+utility_seams = { path = "../../backend/tcop/utility_seams" }
+portal = { path = "../../_support/types/portal" }

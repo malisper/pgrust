@@ -53,13 +53,47 @@ fn elog_error(msg: impl Into<alloc::string::String>) -> ::types_error::PgError {
 /// tail of `parse_analyze_*`. Under `compute_query_id`, jumble the analyzed
 /// query and store the resulting 64-bit id into `query.queryId` (which the
 /// planner copies into `PlannedStmt.queryId`, and `ExecutorStart` reports into
-/// `pg_stat_activity`). The `post_parse_analyze_hook` is NULL by default, so the
-/// `JumbleState` is not needed here (the hook would consume it).
-fn maybe_jumble_query(query: &mut Query<'_>) {
+/// `pg_stat_activity`). Returns the `JumbleState` (constant locations) when a
+/// jumble was computed, for the `post_parse_analyze_hook`.
+fn maybe_jumble_query(
+    query: &mut Query<'_>,
+) -> Option<::nodes::portalcmds::JumbleState> {
     use queryjumble_seams as queryjumble;
     if queryjumble::is_query_id_enabled::call() {
-        query.queryId = queryjumble::jumble_query_compute::call(query);
+        let (query_id, jstate) = queryjumble::jumble_query_canonical::call(query);
+        query.queryId = query_id;
+        Some(jstate)
+    } else {
+        None
     }
+}
+
+/// `if (post_parse_analyze_hook) (*post_parse_analyze_hook)(pstate, query,
+/// jstate);` (analyze.c) for the canonical field-bearing `Query<'mcx>` path.
+/// A no-op unless a module (e.g. pg_stat_statements) installed the canonical
+/// hook. `source_text` is `pstate->p_sourcetext`.
+fn run_post_parse_analyze_hook(
+    source_text: &str,
+    query: &Query<'_>,
+    jstate: Option<&::nodes::portalcmds::JumbleState>,
+) -> PgResult<()> {
+    use parser_analyze_seams as analyze_seams;
+    if !analyze_seams::post_parse_analyze_canonical_hook_present() {
+        return Ok(());
+    }
+    let utility_is_execute = match &query.utilityStmt {
+        Some(u) => u.tag() == ::nodes::nodes::T_ExecuteStmt,
+        None => false,
+    };
+    let info = analyze_seams::PostParseAnalyzeQueryInfo {
+        source_text,
+        query_id: query.queryId,
+        stmt_location: query.stmt_location,
+        stmt_len: query.stmt_len,
+        is_utility: query.utilityStmt.is_some(),
+        utility_is_execute,
+    };
+    analyze_seams::call_post_parse_analyze_canonical_hook(info, jstate)
 }
 
 /// `pstate->p_queryEnv = queryEnv` — set the parse state's query environment from
@@ -119,9 +153,10 @@ pub fn parse_analyze_fixedparams<'mcx>(
     // if (IsQueryIdEnabled()) jstate = JumbleQuery(query);  (analyze.c)
     // Under compute_query_id this sets query.queryId; the planner copies it into
     // PlannedStmt.queryId and ExecutorStart reports it into pg_stat_activity.
-    // The post_parse_analyze_hook is NULL by default, so the JumbleState is not
-    // consumed here.
-    maybe_jumble_query(&mut query);
+    let jstate = maybe_jumble_query(&mut query);
+
+    // if (post_parse_analyze_hook) (*post_parse_analyze_hook)(pstate, query, jstate);
+    run_post_parse_analyze_hook(source_text, &query, jstate.as_ref())?;
 
     small1::free_parsestate(pstate)?;
 
@@ -228,13 +263,11 @@ pub fn parse_analyze_varparams<'mcx>(
     small1::check_variable_parameters(&pstate, &query)?;
 
     // if (IsQueryIdEnabled()) jstate = JumbleQuery(query);  (analyze.c)
-    maybe_jumble_query(&mut query);
+    let jstate = maybe_jumble_query(&mut query);
 
     //   if (post_parse_analyze_hook)
     //       (*post_parse_analyze_hook) (pstate, query, jstate);
-    // The post_parse_analyze_hook is a per-backend `fn` pointer extensions install
-    // (NULL by default). With no extension loaded it is unset, so this is a no-op
-    // — exactly the C `if (hook)` guard falling through.
+    run_post_parse_analyze_hook(source_text, &query, jstate.as_ref())?;
 
     small1::free_parsestate(pstate)?;
 

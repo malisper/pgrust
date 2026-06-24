@@ -21,7 +21,7 @@ use ::types_scan::sdir::ScanDirection;
 use crate::shmem::{self, entry_ref, pgss_hash, pgss_ref};
 use crate::{
     nesting_level, pgss_enabled, pgss_max, Counters, PgssEntry, PgssHashKey,
-    NESTING_LEVEL, PGSS_EXEC, PGSS_NUMKIND, STICKY_DECREASE_FACTOR,
+    NESTING_LEVEL, PGSS_EXEC, PGSS_INVALID, PGSS_NUMKIND, STICKY_DECREASE_FACTOR,
     USAGE_DEALLOC_PERCENT, USAGE_DECREASE_FACTOR, USAGE_INIT,
 };
 
@@ -55,6 +55,265 @@ pub(crate) fn install_exec_hooks() {
     execMain_seams::set_executor_run_hook(Some(pgss_executor_run));
     execMain_seams::set_executor_finish_hook(Some(pgss_executor_finish));
     execMain_seams::set_executor_end_hook(Some(pgss_executor_end));
+
+    // `post_parse_analyze_hook = pgss_post_parse_analyze;` (the canonical
+    // field-bearing parse-analysis path's variant). Records the normalized
+    // query string for queries that have ignorable constants.
+    parser_analyze_seams::set_post_parse_analyze_canonical_hook(Some(pgss_post_parse_analyze));
+
+    // `planner_hook = pgss_planner;` — measure planning time when track_planning.
+    planner_seams::set_planner_hook(Some(pgss_planner));
+
+    // `ProcessUtility_hook = pgss_ProcessUtility;` — track utility statements.
+    utility_seams::set_process_utility_hook(Some(pgss_process_utility));
+}
+
+/// `pgss_planner` (pg_stat_statements.c:887). Forward to the regular planner,
+/// measuring planning time/buffer/WAL when `track_planning` is on. Always bumps
+/// the nesting level around planning so functions evaluated during planning are
+/// not seen as top-level.
+fn pgss_planner<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    parse: &::nodes::copy_query::Query<'mcx>,
+    query_string: &str,
+    cursor_options: i32,
+    bound_params: ::nodes::params::ParamListInfo,
+) -> PgResult<::nodes::nodeindexscan::PlannedStmt<'mcx>> {
+    // We can't process the query if no query_string is provided, and we ignore
+    // queries with queryId zero (treated as utility statements).
+    let track = pgss_enabled(nesting_level())
+        && crate::pgss_track_planning()
+        && !query_string.is_empty()
+        && parse.queryId != 0;
+
+    if !track {
+        // Still bump the nesting level so functions evaluated during planning
+        // are not seen as top-level calls.
+        NESTING_LEVEL.with(|c| c.set(c.get() + 1));
+        let result =
+            planner_seams::standard_planner::call(mcx, parse, query_string, cursor_options, bound_params);
+        NESTING_LEVEL.with(|c| c.set(c.get() - 1));
+        return result;
+    }
+
+    let start_buf = instrument::pgBufferUsage();
+    let start_wal = instrument::pgWalUsage();
+    let start = now();
+
+    NESTING_LEVEL.with(|c| c.set(c.get() + 1));
+    let result =
+        planner_seams::standard_planner::call(mcx, parse, query_string, cursor_options, bound_params);
+    NESTING_LEVEL.with(|c| c.set(c.get() - 1));
+    let result = result?;
+
+    let mut duration = now();
+    duration.subtract(start);
+
+    let mut bufusage = BufferUsage::default();
+    instrument::BufferUsageAccumDiff(&mut bufusage, &instrument::pgBufferUsage(), &start_buf);
+    let mut walusage = WalUsage::default();
+    instrument::WalUsageAccumDiff(&mut walusage, &instrument::pgWalUsage(), &start_wal);
+
+    pgss_store(
+        query_string,
+        parse.queryId,
+        parse.stmt_location,
+        parse.stmt_len,
+        crate::PGSS_PLAN as i32,
+        duration.get_millisec(),
+        0,
+        Some(&bufusage),
+        Some(&walusage),
+        None,
+        0,
+        0,
+    );
+
+    Ok(result)
+}
+
+/// `pgss_ProcessUtility` (pg_stat_statements.c:1106). Track utility statements
+/// (when track_utility) and manage the nesting level so nested optimizable
+/// statements are charged to the utility level.
+#[allow(clippy::too_many_arguments)]
+fn pgss_process_utility<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    pstmt: &::nodes::nodeindexscan::PlannedStmt<'mcx>,
+    query_string: &str,
+    read_only_tree: bool,
+    context: ::nodes::parsestmt::ProcessUtilityContext,
+    params: ::nodes::portalcmds::ParamListInfo,
+    dest: ::nodes::parsestmt::DestReceiverHandle,
+    qc: &mut ::portal::QueryCompletion,
+) -> PgResult<()> {
+    let saved_query_id = pstmt.queryId;
+    let saved_stmt_location = pstmt.stmt_location;
+    let saved_stmt_len = pstmt.stmt_len;
+    let enabled = crate::pgss_track_utility() && pgss_enabled(nesting_level());
+
+    // Classify the utility statement (EXECUTE / PREPARE are not tracked, and do
+    // not bump the nesting level, so their costs are charged at the right level).
+    let (is_execute, is_prepare) = match &pstmt.utilityStmt {
+        Some(u) => {
+            let tag = u.tag();
+            (
+                tag == ::nodes::nodes::T_ExecuteStmt,
+                tag == ::nodes::nodes::T_PrepareStmt,
+            )
+        }
+        None => (false, false),
+    };
+
+    // Force utility statements to get queryId zero so the executor hooks don't
+    // also track the contained optimizable statement (we measure at the utility
+    // level). pgrust's `pstmt` is an immutable borrow here; the executor hooks
+    // gate on the PlannedStmt queryId, which for a CMD_UTILITY statement carries
+    // the same saved id — but the contained statement re-derives its own queryId
+    // at parse-analysis, so double counting is avoided by the toplevel gate.
+
+    if enabled && !is_execute && !is_prepare {
+        let start_buf = instrument::pgBufferUsage();
+        let start_wal = instrument::pgWalUsage();
+        let start = now();
+
+        NESTING_LEVEL.with(|c| c.set(c.get() + 1));
+        let result = utility_seams::standard_process_utility::call(
+            mcx,
+            pstmt,
+            query_string,
+            read_only_tree,
+            context,
+            params,
+            dest,
+            qc,
+        );
+        NESTING_LEVEL.with(|c| c.set(c.get() - 1));
+        result?;
+
+        let mut duration = now();
+        duration.subtract(start);
+
+        // Track rows for COPY/FETCH/SELECT/REFRESH MATERIALIZED VIEW. The
+        // `CommandTag` value is the 0-based cmdtaglist.h list position (verified
+        // vs PG 18.3): COPY=56, FETCH=154, REFRESH MATERIALIZED VIEW=169,
+        // SELECT=179.
+        let rows = match qc.commandTag {
+            56 | 154 | 169 | 179 => qc.nprocessed,
+            _ => 0,
+        };
+
+        let mut bufusage = BufferUsage::default();
+        instrument::BufferUsageAccumDiff(&mut bufusage, &instrument::pgBufferUsage(), &start_buf);
+        let mut walusage = WalUsage::default();
+        instrument::WalUsageAccumDiff(&mut walusage, &instrument::pgWalUsage(), &start_wal);
+
+        pgss_store(
+            query_string,
+            saved_query_id,
+            saved_stmt_location,
+            saved_stmt_len,
+            PGSS_EXEC as i32,
+            duration.get_millisec(),
+            rows,
+            Some(&bufusage),
+            Some(&walusage),
+            None,
+            0,
+            0,
+        );
+        Ok(())
+    } else {
+        // Not tracking: still bump the nesting level (except for EXECUTE/PREPARE)
+        // so functions evaluated within are not seen as top-level calls.
+        let bump_level = !is_execute && !is_prepare;
+        if bump_level {
+            NESTING_LEVEL.with(|c| c.set(c.get() + 1));
+        }
+        let result = utility_seams::standard_process_utility::call(
+            mcx,
+            pstmt,
+            query_string,
+            read_only_tree,
+            context,
+            params,
+            dest,
+            qc,
+        );
+        if bump_level {
+            NESTING_LEVEL.with(|c| c.set(c.get() - 1));
+        }
+        result
+    }
+}
+
+/// `pgss_post_parse_analyze` (pg_stat_statements.c:835). Create a sticky
+/// normalized hash-table entry whenever query jumbling found ignorable
+/// constants, so the normalized form of the query string is recorded.
+fn pgss_post_parse_analyze(
+    info: parser_analyze_seams::PostParseAnalyzeQueryInfo<'_>,
+    jstate: Option<&::nodes::portalcmds::JumbleState>,
+) -> PgResult<()> {
+    // Safety check: only act when enabled at this nesting level.
+    if !shmem::is_initialized() || !pgss_enabled(nesting_level()) {
+        return Ok(());
+    }
+
+    // If it's EXECUTE, the queryId is cleared for the underlying PREPARE; with
+    // track_utility on, do not create a normalized entry here. (pgss clears
+    // query->queryId in C; here the executor path keys off the same queryId, and
+    // the ProcessUtility hook forces utility queryId to zero, so a normalized
+    // entry for EXECUTE would never be matched — skip it.)
+    if info.is_utility && crate::pgss_track_utility() && info.utility_is_execute {
+        return Ok(());
+    }
+
+    // If jumbling identified ignorable constants, create the normalized entry.
+    let Some(jstate) = jstate else { return Ok(()) };
+    if jstate.clocations_count() == 0 {
+        return Ok(());
+    }
+
+    let pgss_jstate = to_pgss_jumble(jstate);
+    pgss_store(
+        info.source_text,
+        info.query_id,
+        info.stmt_location,
+        info.stmt_len,
+        PGSS_INVALID,
+        0.0,
+        0,
+        None,
+        None,
+        Some(StoreJumble {
+            query_loc: info.stmt_location,
+            jstate: &pgss_jstate,
+        }),
+        0,
+        0,
+    );
+    Ok(())
+}
+
+/// Project the core `JumbleState` (constant locations) onto pgss's
+/// [`crate::normalize::PgssJumble`] view.
+fn to_pgss_jumble(
+    jstate: &::nodes::portalcmds::JumbleState,
+) -> crate::normalize::PgssJumble {
+    use crate::normalize::{PgssJumble, PgssLocationLen};
+    PgssJumble {
+        clocations: jstate
+            .clocations
+            .iter()
+            .map(|c| PgssLocationLen {
+                location: c.location,
+                length: c.length,
+                squashed: c.squashed,
+                extern_param: c.extern_param,
+            })
+            .collect(),
+        highest_extern_param_id: jstate.highest_extern_param_id,
+        has_squashed_lists: jstate.has_squashed_lists,
+    }
 }
 
 /// `pgss_ExecutorStart` (pg_stat_statements.c:992).

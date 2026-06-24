@@ -11789,6 +11789,7 @@ pub fn init_seams() {
 
     planner_seams::pg_plan_query::set(pg_plan_query_impl);
     planner_seams::pg_plan_query_params::set(pg_plan_query_params_impl);
+    planner_seams::standard_planner::set(standard_planner);
     planner_seams::plan_cluster_use_sort::set(plan_cluster_use_sort_impl);
     planner_seams::select_rowmark_type::set(|rte, strength| {
         select_rowmark_type(rte, strength)

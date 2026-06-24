@@ -30,3 +30,13 @@ seam_core::seam!(
     /// `query_id`; the caller has already checked `IsQueryIdEnabled()`.
     pub fn jumble_query_compute<'mcx>(query: &CanonicalQuery<'mcx>) -> i64
 );
+
+seam_core::seam!(
+    /// `JumbleQuery(query)` (queryjumble.c) over the canonical field-bearing
+    /// `Query` — compute the 64-bit jumble id (returned) AND the constant-location
+    /// array (carried in the returned [`JumbleState`]). This is the parse-analysis
+    /// entry that also feeds the `post_parse_analyze_hook` (e.g. pg_stat_statements'
+    /// query normalization). Unlike [`jumble_query_compute`], the caller keeps the
+    /// `JumbleState` to drive normalized-query-string generation.
+    pub fn jumble_query_canonical<'mcx>(query: &CanonicalQuery<'mcx>) -> (i64, JumbleState)
+);

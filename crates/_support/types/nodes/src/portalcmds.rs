@@ -5,6 +5,7 @@
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use crate::nodes::CmdType;
@@ -61,19 +62,50 @@ pub struct QueryPayload {
     _private: (),
 }
 
+/// One constant location recorded by `JumbleQuery` (`LocationLen` in
+/// `nodes/queryjumble.h`). The post-parse-analyze hook reads these to build a
+/// normalized query string (replacing constants with `$n`).
+#[derive(Clone, Copy, Debug)]
+pub struct JumbleLocationLen {
+    /// start offset in query text
+    pub location: i32,
+    /// length in bytes, or -1 to ignore
+    pub length: i32,
+    /// Does this location represent a squashed list?
+    pub squashed: bool,
+    /// Is this location a PARAM_EXTERN parameter?
+    pub extern_param: bool,
+}
+
 /// `JumbleState` (`nodes/queryjumble.h`) — produced by `JumbleQuery`, consumed
-/// only as the third argument of `post_parse_analyze_hook`. Opaque to
-/// portalcmds (`None` = the C `NULL`).
+/// as the third argument of `post_parse_analyze_hook`. Carries the
+/// constant-location array (the fields a hook such as pg_stat_statements reads
+/// to normalize a query); the internal `jumble`/`pending_nulls` working buffer
+/// is private to the jumble owner and not represented here.
 pub struct JumbleState {
-    _private: (),
+    /// `JumbleState.clocations` — locations of constants that may be replaced.
+    pub clocations: Vec<JumbleLocationLen>,
+    /// `JumbleState.highest_extern_param_id`.
+    pub highest_extern_param_id: i32,
+    /// `JumbleState.has_squashed_lists`.
+    pub has_squashed_lists: bool,
 }
 
 impl JumbleState {
-    /// Construct the opaque placeholder (the `JumbleQuery` seam's return value
-    /// for the DECLARE-CURSOR path, which threads it into the NULL-by-default
-    /// `post_parse_analyze_hook` and never inspects it).
+    /// Construct an empty placeholder (the `JumbleQuery` seam's return value
+    /// for paths that compute a query-id but record no constant locations, e.g.
+    /// the DECLARE-CURSOR pass-through).
     pub fn opaque() -> Self {
-        JumbleState { _private: () }
+        JumbleState {
+            clocations: Vec::new(),
+            highest_extern_param_id: 0,
+            has_squashed_lists: false,
+        }
+    }
+
+    /// `clocations_count` — number of recorded constant locations.
+    pub fn clocations_count(&self) -> usize {
+        self.clocations.len()
     }
 }
 
