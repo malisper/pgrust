@@ -24,6 +24,9 @@ utils_error = { path = "../../backend/utils/utils_error" }
 arrayfuncs = { path = "../../backend/utils/adt/arrayfuncs" }
 mcx = { path = "../../_support/mcx" }
 
+# pg_verifymbstr for pgp_sym_decrypt_text NUL/invalid-encoding rejection
+mbutils_seams = { path = "../../backend/utils/mb/mbutils_seams" }
+
 # custom GUC registration (pgcrypto.builtin_crypto_enabled)
 misc_guc = { path = "../../backend/utils/misc/misc_guc" }
 guc_tables = { path = "../../backend/utils/misc/guc_tables" }

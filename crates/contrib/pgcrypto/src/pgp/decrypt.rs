@@ -39,9 +39,25 @@ pub fn decrypt_symmetric(
                 let body = rdr.read_body(&hdr).map_err(|_| CORRUPT_DATA.to_string())?;
                 let sk = sess.as_ref().ok_or_else(|| WRONG_KEY.to_string())?;
                 let mdc = t == PGP_PKT_SYMENC_DATA_MDC;
-                let inner = decrypt_data_packet(sk, &body, mdc)?;
                 ctx.disable_mdc = if mdc { 0 } else { 1 };
-                return finish_inner(ctx, inner);
+                // CFB-decrypt and verify the prefix; on a wrong key C does NOT
+                // bail — it flags corrupt_prefix and keeps parsing the garbage
+                // (emitting debug NOTICEs), then reports "Wrong key" at the end.
+                let (inner, corrupt_prefix) = decrypt_data_packet(ctx, sk, &body, mdc)?;
+                let parsed = finish_inner(ctx, inner);
+                // Deferred MDC debug line comes after the literal-data parse.
+                if ctx.pending_bad_mdc {
+                    ctx.dbg("mdcbuf_finish: bad MDC pkt hdr");
+                    ctx.pending_bad_mdc = false;
+                }
+                if corrupt_prefix {
+                    return Err(WRONG_KEY.to_string());
+                }
+                let out = parsed?;
+                if ctx.unexpected_binary {
+                    return Err(NOT_TEXT.to_string());
+                }
+                return Ok(out);
             }
             t if t == PGP_PKT_PUBENC_SESSKEY => {
                 return Err(WRONG_KEY.to_string());
@@ -103,8 +119,15 @@ fn parse_symenc_sesskey(
 }
 
 /// CFB-decrypt the symmetrically-encrypted data packet, verify the prefix
-/// (and MDC if present), and return the inner packet stream.
-fn decrypt_data_packet(sk: &SessKey, body: &[u8], mdc: bool) -> Result<Vec<u8>, String> {
+/// (and MDC if present), and return `(inner_stream, corrupt_prefix)`. A
+/// corrupt prefix (wrong key) does NOT abort — C flags it and keeps parsing the
+/// garbage so debug NOTICEs match, then reports "Wrong key" at the end.
+fn decrypt_data_packet(
+    ctx: &mut PgpContext,
+    sk: &SessKey,
+    body: &[u8],
+    mdc: bool,
+) -> Result<(Vec<u8>, bool), String> {
     let bs = cipher_block_size(sk.cipher);
     let ct = if mdc {
         if body.is_empty() || body[0] != 0x01 {
@@ -122,8 +145,10 @@ fn decrypt_data_packet(sk: &SessKey, body: &[u8], mdc: bool) -> Result<Vec<u8>, 
     if plain.len() < bs + 2 {
         return Err(WRONG_KEY.to_string());
     }
+    let mut corrupt_prefix = false;
     if plain[bs - 2] != plain[bs] || plain[bs - 1] != plain[bs + 1] {
-        return Err(WRONG_KEY.to_string());
+        ctx.dbg("prefix_init: corrupt prefix");
+        corrupt_prefix = true;
     }
 
     let inner_start = bs + 2;
@@ -132,18 +157,26 @@ fn decrypt_data_packet(sk: &SessKey, body: &[u8], mdc: bool) -> Result<Vec<u8>, 
             return Err(CORRUPT_DATA.to_string());
         }
         let mdc_off = plain.len() - (2 + MDC_DIGEST_LEN);
+        let inner = plain[inner_start..mdc_off].to_vec();
         if plain[mdc_off] != 0xD3 || plain[mdc_off + 1] != 0x14 {
-            return Err("Not MDC packet".to_string());
+            // Wrong key → garbage MDC header. Defer the "bad MDC pkt hdr" debug
+            // line until AFTER the literal-data parse (C's filter order).
+            ctx.pending_bad_mdc = true;
+            return Ok((inner, true));
         }
         let mut md = Digest::new(PGP_DIGEST_SHA1).ok_or(UNSUPPORTED_HASH.to_string())?;
         md.update(&plain[..mdc_off + 2]);
         let want = md.finish();
         if want != plain[mdc_off + 2..mdc_off + 2 + MDC_DIGEST_LEN] {
-            return Err("MDC mismatch".to_string());
+            if !corrupt_prefix {
+                return Err("MDC mismatch".to_string());
+            }
+            ctx.pending_bad_mdc = true;
+            return Ok((inner, true));
         }
-        Ok(plain[inner_start..mdc_off].to_vec())
+        Ok((inner, corrupt_prefix))
     } else {
-        Ok(plain[inner_start..].to_vec())
+        Ok((plain[inner_start..].to_vec(), corrupt_prefix))
     }
 }
 
@@ -168,7 +201,14 @@ fn finish_inner(ctx: &mut PgpContext, inner: Vec<u8>) -> Result<Vec<u8>, String>
                 .map_err(|_| "decompression failed".to_string())?,
             PGP_COMPR_ZLIB => super::compress::inflate_zlib(&body[1..])
                 .map_err(|_| "decompression failed".to_string())?,
-            _ => return Err(UNSUPPORTED_COMPR.to_string()),
+            PGP_COMPR_BZIP2 => {
+                ctx.dbg("parse_compressed_data: bzip2 unsupported");
+                return Err(UNSUPPORTED_COMPR.to_string());
+            }
+            _ => {
+                ctx.dbg("parse_compressed_data: unknown compr type");
+                return Err(UNSUPPORTED_COMPR.to_string());
+            }
         };
         return read_literal(ctx, &decompressed);
     }
@@ -203,9 +243,12 @@ fn read_literal_from(
     if body.len() < off {
         return Err(CORRUPT_DATA.to_string());
     }
-    if ty == b'u' {
-        ctx.unicode_mode = 1;
+    // text-mode decrypt of a non-text ('b') literal → "Not text data" later.
+    if ctx.text_mode != 0 && ty != b't' && ty != b'u' {
+        ctx.dbg(&format!("parse_literal_data: data type={}", ty as char));
+        ctx.unexpected_binary = true;
     }
+    ctx.unicode_mode = if ty == b'u' { 1 } else { 0 };
     let payload = &body[off..];
     if (ty == b't' || ty == b'u') && ctx.convert_crlf != 0 {
         Ok(un_convert_crlf(payload))

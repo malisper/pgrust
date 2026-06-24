@@ -22,6 +22,13 @@ pub struct DecryptOutput {
     pub notices: Vec<String>,
 }
 
+/// A decrypt failure carrying the `dbg:` NOTICE trace to emit before the error.
+#[derive(Debug)]
+pub struct DecryptError {
+    pub message: String,
+    pub notices: Vec<String>,
+}
+
 /// `encrypt_internal` (symmetric path). `is_text` selects literal-data type
 /// 'b'/'t' and (with unicode_mode) 'u'. `args` is the option string (or None).
 pub fn sym_encrypt(
@@ -45,20 +52,34 @@ pub fn sym_decrypt(
     key: &[u8],
     args: Option<&[u8]>,
     need_text: bool,
-) -> Result<DecryptOutput, String> {
+) -> Result<DecryptOutput, DecryptError> {
     let mut ctx = PgpContext::default();
     if let Some(a) = args {
-        ctx.parse_args(a)?;
+        ctx.parse_args(a)
+            .map_err(|e| DecryptError { message: e, notices: Vec::new() })?;
     }
     ctx.text_mode = if need_text { 1 } else { 0 };
 
     let exp = ctx.clone();
-    let plaintext = decrypt::decrypt_symmetric(&mut ctx, data, key)?;
-    let notices = if exp.expect {
-        build_expect_notices(&exp, &ctx)
-    } else {
-        Vec::new()
+    let result = decrypt::decrypt_symmetric(&mut ctx, data, key);
+
+    // The `dbg:` NOTICE trace is emitted even when the decrypt then errors.
+    let debug_notices = ctx.debug_notices.clone();
+
+    let plaintext = match result {
+        Ok(p) => p,
+        Err(message) => {
+            return Err(DecryptError {
+                message,
+                notices: debug_notices,
+            })
+        }
     };
+
+    let mut notices = debug_notices;
+    if exp.expect {
+        notices.extend(build_expect_notices(&exp, &ctx));
+    }
     Ok(DecryptOutput { plaintext, notices })
 }
 

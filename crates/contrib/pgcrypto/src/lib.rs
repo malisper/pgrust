@@ -98,6 +98,16 @@ fn arg_bytes(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Vec<u8> {
     varlena_payload(image).to_vec()
 }
 
+/// The FULL varlena image (header included) of a by-ref arg — used for array
+/// args, which `deconstruct_text_array_nullable` parses with the header in place.
+fn arg_raw_image(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Vec<u8> {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .unwrap_or_else(|| px_error("pgcrypto: by-ref arg missing from by-ref lane"))
+        .to_vec()
+}
+
 /// A `text` arg decoded to a `String` (the C `text_to_cstring`).
 fn arg_text_string(fcinfo: &FunctionCallInfoBaseData, i: usize) -> String {
     String::from_utf8_lossy(&arg_bytes(fcinfo, i)).into_owned()
@@ -375,9 +385,20 @@ fn pgp_sym_decrypt(fcinfo: &mut FunctionCallInfoBaseData, need_text: bool) -> Da
             for n in &out.notices {
                 pgp_notice(n);
             }
+            // pgp_sym_decrypt_text runs pg_verifymbstr over the result.
+            if need_text {
+                if let Err(e) = ::mbutils_seams::pg_verifymbstr::call(&out.plaintext, false) {
+                    raise(e);
+                }
+            }
             ret_varlena(fcinfo, &out.plaintext)
         }
-        Err(e) => px_error(&e),
+        Err(e) => {
+            for n in &e.notices {
+                pgp_notice(n);
+            }
+            px_error(&e.message);
+        }
     }
 }
 
@@ -458,8 +479,8 @@ fn text_cell(bytes: &[u8]) -> MatCell {
 fn parse_key_value_arrays(
     fcinfo: &FunctionCallInfoBaseData,
 ) -> Result<(Vec<Vec<u8>>, Vec<Vec<u8>>), PgError> {
-    let key_img = arg_bytes(fcinfo, 1);
-    let val_img = arg_bytes(fcinfo, 2);
+    let key_img = arg_raw_image(fcinfo, 1);
+    let val_img = arg_raw_image(fcinfo, 2);
 
     let nkdims = array_ndim(&key_img);
     let nvdims = array_ndim(&val_img);
@@ -537,20 +558,21 @@ fn find_sub(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
 
-/// `ARR_NDIM` from the ArrayType payload (`arg_bytes` already stripped the
-/// varlena header, so the first 4 bytes are `ndim`).
-fn array_ndim(payload: &[u8]) -> i32 {
+/// `ARR_NDIM` from the full ArrayType varlena image: skip the varlena header,
+/// then the first 4 bytes of the ArrayType struct are `ndim`.
+fn array_ndim(image: &[u8]) -> i32 {
+    let payload = varlena_payload(image);
     if payload.len() < 4 {
         return 0;
     }
     i32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]])
 }
 
-/// Deconstruct a 1-D `text[]` payload into nullable byte vectors.
-fn deconstruct_text_array(payload: &[u8]) -> Result<Vec<Option<Vec<u8>>>, PgError> {
+/// Deconstruct a 1-D `text[]` image (full varlena) into nullable byte vectors.
+fn deconstruct_text_array(image: &[u8]) -> Result<Vec<Option<Vec<u8>>>, PgError> {
     let scratch = ::mcx::MemoryContext::new("pgcrypto text[] arg");
     let mcx = scratch.mcx();
-    let v = ::arrayfuncs::construct::deconstruct_text_array_nullable(mcx, payload)?;
+    let v = ::arrayfuncs::construct::deconstruct_text_array_nullable(mcx, image)?;
     Ok(v.iter()
         .map(|o| o.as_ref().map(|s| s.as_str().as_bytes().to_vec()))
         .collect())

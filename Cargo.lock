@@ -17794,6 +17794,7 @@ dependencies = [
  "ecb",
  "fmgr",
  "guc_tables",
+ "mbutils_seams",
  "mcx",
  "miniz_oxide",
  "misc_guc",
