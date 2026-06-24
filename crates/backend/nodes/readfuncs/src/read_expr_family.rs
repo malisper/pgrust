@@ -850,10 +850,10 @@ fn read_array_expr<'mcx>(mcx: Mcx<'mcx>) -> PgResult<ArrayExpr> {
     let element_typeid = read_oid_field()?;
     let elements = read_expr_list_field(mcx)?;
     let multidims = read_bool_field()?;
-    // list_start / list_end are written by OUT but trimmed from the repo struct
-    // (query-jumble-only). Consume them (read as locations → -1, discarded).
-    let _list_start = read_location_field()?;
-    let _list_end = read_location_field()?;
+    // list_start / list_end are written by OUT and read back here (query-jumble
+    // constant squashing reads them off the canonical ArrayExpr).
+    let list_start = read_location_field()?;
+    let list_end = read_location_field()?;
     let location = read_location_field()?;
     Ok(ArrayExpr {
         array_typeid,
@@ -861,6 +861,8 @@ fn read_array_expr<'mcx>(mcx: Mcx<'mcx>) -> PgResult<ArrayExpr> {
         element_typeid,
         elements,
         multidims,
+        list_start,
+        list_end,
         location,
     })
 }

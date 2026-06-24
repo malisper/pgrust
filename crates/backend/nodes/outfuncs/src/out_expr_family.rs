@@ -385,14 +385,11 @@ fn out_array_expr(buf: &mut String, n: &::nodes::primnodes::ArrayExpr, wl: bool)
     write_oid_field(buf, "element_typeid", n.element_typeid);
     write_expr_list_field(buf, "elements", &n.elements, wl);
     write_bool_field(buf, "multidims", n.multidims);
-    // NOTE: the repo's post-analysis `ArrayExpr` trims `list_start`/`list_end`
-    // (query-jumble-only ParseLoc fields C writes). C `_outArrayExpr` writes
-    // `:list_start :list_end :location`; we emit `list_start`/`list_end` as the
-    // location value (-1 unless write_loc) so the token stream stays
-    // field-for-field. They are not round-trippable into the trimmed struct, so
-    // READ drops them (faithful: location fields read as -1).
-    write_location_field(buf, "list_start", -1, wl);
-    write_location_field(buf, "list_end", -1, wl);
+    // C `_outArrayExpr` writes `:list_start :list_end :location`. The canonical
+    // ArrayExpr carries list_start/list_end (query-jumble constant squashing
+    // reads them); READ round-trips them back.
+    write_location_field(buf, "list_start", n.list_start, wl);
+    write_location_field(buf, "list_end", n.list_end, wl);
     write_location_field(buf, "location", n.location, wl);
 }
 

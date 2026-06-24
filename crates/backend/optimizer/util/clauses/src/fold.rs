@@ -1925,6 +1925,8 @@ pub fn make_SAOP_expr<'mcx>(
             element_typeid: coltype,
             elements: exprs,
             multidims: false,
+            list_start: -1,
+            list_end: -1,
             // arrayExpr->location = -1;
             location: -1,
         });

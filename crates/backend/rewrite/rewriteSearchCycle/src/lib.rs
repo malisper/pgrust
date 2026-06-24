@@ -162,6 +162,8 @@ fn make_path_initial_array<'mcx>(rowexpr: RowExpr<'mcx>) -> Expr<'mcx> {
         element_typeid: RECORDOID,
         elements: vec![Expr::RowExpr(rowexpr)],
         multidims: false,
+        list_start: -1,
+        list_end: -1,
         location: -1,
     })
 }
@@ -175,6 +177,8 @@ fn make_path_cat_expr<'mcx>(rowexpr: RowExpr<'mcx>, path_varattno: AttrNumber) -
         element_typeid: RECORDOID,
         elements: vec![Expr::RowExpr(rowexpr)],
         multidims: false,
+        list_start: -1,
+        list_end: -1,
         location: -1,
     });
 

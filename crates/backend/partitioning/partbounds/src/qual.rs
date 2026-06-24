@@ -180,6 +180,8 @@ fn make_partition_op_expr<'mcx>(
                     element_typeid: key.parttypid[keynum],
                     elements: elems.into_iter().collect(),
                     multidims: false,
+                    list_start: -1,
+                    list_end: -1,
                     location: -1,
                 };
                 let opfuncid = lsyscache::get_opcode::call(operoid)?;

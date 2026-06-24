@@ -870,15 +870,17 @@ fn transformAExprIn<'mcx>(
                 element_typeid: scalar_type,
                 elements: aexprs,
                 multidims: false,
-                // newa->location = -1. The C also records list_start/list_end
-                // (disabling query-jumbling squashing when has_rvars), but the
-                // trimmed ArrayExpr drops those fields.
+                // If the IN expression contains Vars, disable query jumbling
+                // squashing (Vars cannot be safely jumbled): list_start/end = -1.
+                // Otherwise propagate the parser-recorded list bounds, which the
+                // query-jumble walker uses to record the squashed-list location.
+                //   newa->list_start = has_rvars ? -1 : a->rexpr_list_start;
+                //   newa->list_end   = has_rvars ? -1 : a->rexpr_list_end;
+                list_start: if has_rvars { -1 } else { rexpr_list_start },
+                list_end: if has_rvars { -1 } else { rexpr_list_end },
+                // newa->location = -1.
                 location: -1,
             };
-            // has_rvars + rexpr_list_start/end feed ArrayExpr.list_start/end in
-            // C (query-jumbling squashing control); those fields are not on the
-            // trimmed ArrayExpr, so they have no effect here.
-            let _ = (has_rvars, rexpr_list_start, rexpr_list_end);
 
             let lexpr_for_saop = lexpr_t
                 .clone()
@@ -2269,7 +2271,7 @@ fn transformArrayExpr<'mcx>(
     // Transform the element expressions. One-dimensional unless we find an
     // array-type element.
     let mut multidims = false;
-    let A_ArrayExpr { elements, location, .. } = a;
+    let A_ArrayExpr { elements, location, list_start, list_end, .. } = a;
     let mut newelems: Vec<Expr> = Vec::with_capacity(elements.len());
     for e in elements.into_iter() {
         let e = ::mcx::PgBox::into_inner(e);
@@ -2389,6 +2391,9 @@ fn transformArrayExpr<'mcx>(
         element_typeid: element_type,
         elements: newcoercedelems,
         multidims,
+        // newa->list_start = a->list_start; newa->list_end = a->list_end;
+        list_start,
+        list_end,
         // newa->location = a->location;
         location,
     }))

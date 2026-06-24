@@ -675,6 +675,8 @@ pub fn ParseFuncOrColumn<'mcx>(
             element_typeid,
             elements: vargs,
             multidims: false,
+            list_start: -1,
+            list_end: -1,
             location: list_loc,
         };
 

@@ -1344,6 +1344,12 @@ pub struct ArrayExpr<'mcx> {
     pub elements: Vec<Expr<'mcx>>,
     /// `bool multidims` — true if elements are sub-arrays.
     pub multidims: bool,
+    /// `ParseLoc list_start` — start of the element list (for query-jumble
+    /// constant squashing), or -1 if unknown / squashing disabled.
+    pub list_start: ParseLoc,
+    /// `ParseLoc list_end` — end of the element list (for query-jumble constant
+    /// squashing), or -1 if unknown / squashing disabled.
+    pub list_end: ParseLoc,
     /// `ParseLoc location` — token location, or -1 if unknown.
     pub location: ParseLoc,
 }
@@ -2308,6 +2314,8 @@ impl<'mcx> Expr<'mcx> {
                 element_typeid: a.element_typeid,
                 elements: clone_vec_expr(&a.elements, mcx)?,
                 multidims: a.multidims,
+                list_start: a.list_start,
+                list_end: a.list_end,
                 location: a.location,
             }),
             Expr::RowExpr(r) => Expr::RowExpr(RowExpr {
