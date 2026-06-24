@@ -852,15 +852,24 @@ pub fn MarkProcInLogicalDecoding() {
 
 /// Clear `PROC_IN_LOGICAL_DECODING` on `MyProc` (and its dense mirror) under
 /// `ProcArrayLock` exclusive — slot.c `ReplicationSlotRelease`.
+///
+/// Faithful to C's `ReplicationSlotRelease` (slot.c:780-783), which acquires
+/// `ProcArrayLock` exclusively, clears the flag, then releases — the lock
+/// acquire/release is part of this operation (the caller does NOT already hold
+/// the lock, and the slot need not have been logical). This unconditional
+/// clear runs on the physical-slot release path too — e.g. the temporary
+/// physical slot `pg_basebackup` creates by default.
 pub fn ProcArrayClearLogicalDecodingFlag() {
-    debug_assert!(lwlock::lwlock_held_by_me_in_mode_main::call(
-        PROC_ARRAY_LOCK,
-        LWLockMode::LW_EXCLUSIVE
-    ));
+    lwlock::lwlock_acquire_proc_array::call(LWLockMode::LW_EXCLUSIVE)
+        .expect("ProcArrayClearLogicalDecodingFlag: ProcArrayLock acquire");
+
     let mypgprocno = proc::my_proc_number::call();
     let new_flags = proc::proc_status_flags::call(mypgprocno) & !PROC_IN_LOGICAL_DECODING;
     proc::set_my_proc_status_flags::call(new_flags);
     proc::set_proc_array_status_flags::call(proc::proc_pgxactoff::call(mypgprocno), new_flags);
+
+    lwlock::lwlock_release_proc_array::call()
+        .expect("ProcArrayClearLogicalDecodingFlag: ProcArrayLock release");
 }
 
 /// `GetConflictingVirtualXIDs(TransactionId limitXmin, Oid dbOid)`
