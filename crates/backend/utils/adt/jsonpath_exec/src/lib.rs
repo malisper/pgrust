@@ -176,13 +176,14 @@ struct JsonBaseObjectInfo {
 }
 
 /// A jsonpath variable resolver callback (C: `JsonPathGetVarCallback`).
-type JsonPathGetVarCallback = fn(
-    mcx: Mcx<'_>,
-    vars: &JsonPathVars,
-    var_name: &[u8],
-    base_object: &mut JsonbValue,
-    base_object_id: &mut i32,
-) -> PgResult<Option<JsonbValue>>;
+type JsonPathGetVarCallback =
+    for<'mcx> fn(
+        mcx: Mcx<'mcx>,
+        vars: &'mcx JsonPathVars,
+        var_name: &[u8],
+        base_object: &mut JsonbValue<'mcx>,
+        base_object_id: &mut i32,
+    ) -> PgResult<Option<JsonbValue<'mcx>>>;
 
 /// A jsonpath variable counter callback (C: `JsonPathCountVarsCallback`).
 type JsonPathCountVarsCallback = fn(vars: &JsonPathVars) -> PgResult<i32>;
@@ -228,7 +229,7 @@ pub struct JsonPathVariable {
 
 /// Context of jsonpath execution (C: `struct JsonPathExecContext`,
 /// jsonpath_exec.c:96-117).
-struct JsonPathExecContext<'mcx, 'p> {
+struct JsonPathExecContext<'mcx, 'p: 'mcx> {
     /// Memory context charged for numeric/jsonb allocations (the repo carries
     /// this explicitly; C uses the ambient `CurrentMemoryContext`).
     mcx: Mcx<'mcx>,
@@ -237,9 +238,9 @@ struct JsonPathExecContext<'mcx, 'p> {
     /// Callback to extract a given variable (C: `getVar`).
     getVar: JsonPathGetVarCallback,
     /// For `$` evaluation (C: `JsonbValue *root`).
-    root: JsonbValue,
+    root: JsonbValue<'mcx>,
     /// For `@` evaluation (C: `JsonbValue *current`).
-    current: JsonbValue,
+    current: JsonbValue<'mcx>,
     /// "base object" for `.keyvalue()` (C: `JsonBaseObjectInfo baseObject`).
     baseObject: JsonBaseObjectInfo,
     /// "id" counter for `.keyvalue()` (C: `int lastGeneratedObjectId`).
@@ -309,17 +310,17 @@ fn return_error(
 /// List of jsonb values with shortcut for single-value list (C:
 /// `struct JsonValueList`).
 #[derive(Clone, Debug, Default)]
-pub struct JsonValueList {
+pub struct JsonValueList<'mcx> {
     /// C: `JsonbValue *singleton`.
-    singleton: Option<JsonbValue>,
+    singleton: Option<JsonbValue<'mcx>>,
     /// C: `List *list`.
-    list: Vec<JsonbValue>,
+    list: Vec<JsonbValue<'mcx>>,
 }
 
 /// Iterator over a [`JsonValueList`] (C: `struct JsonValueListIterator`).
-struct JsonValueListIterator {
+struct JsonValueListIterator<'mcx> {
     /// All items, materialized in order (mirrors C's `singleton`-or-`list`).
-    items: Vec<JsonbValue>,
+    items: Vec<JsonbValue<'mcx>>,
     /// Next index to return.
     pos: usize,
 }
@@ -2318,7 +2319,7 @@ fn CountJsonPathVars(vars: &JsonPathVars) -> PgResult<i32> {
 /// text/varchar arm strips the varlena header (`VARDATA_ANY`/
 /// `VARSIZE_ANY_EXHDR`), and the jsonb/json arms reuse the in-crate
 /// `JsonbExtractScalar`/`JsonbInitBinary`/`jsonb_in`.
-fn JsonItemFromDatum(mcx: Mcx<'_>, var: &JsonPathVariable) -> PgResult<JsonbValue> {
+fn JsonItemFromDatum<'mcx>(mcx: Mcx<'mcx>, var: &JsonPathVariable) -> PgResult<JsonbValue<'mcx>> {
     use ::types_tuple::heaptuple::{
         BOOLOID, DATEOID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID, INT8OID, JSONBOID, JSONOID,
         NUMERICOID, TEXTOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID, VARCHAROID,
@@ -2484,13 +2485,13 @@ fn getJsonPathVariable(
 }
 
 /// C: `getJsonPathVariableFromJsonb` (jsonpath_exec.c:3171).
-fn getJsonPathVariableFromJsonb(
-    _mcx: Mcx<'_>,
-    vars: &JsonPathVars,
+fn getJsonPathVariableFromJsonb<'mcx>(
+    mcx: Mcx<'mcx>,
+    vars: &'mcx JsonPathVars,
     var_name: &[u8],
-    base_object: &mut JsonbValue,
+    base_object: &mut JsonbValue<'mcx>,
     base_object_id: &mut i32,
-) -> PgResult<Option<JsonbValue>> {
+) -> PgResult<Option<JsonbValue<'mcx>>> {
     let vars_bytes = match vars {
         JsonPathVars::Jsonb(b) => b,
         _ => {
@@ -2501,7 +2502,7 @@ fn getJsonPathVariableFromJsonb(
 
     let tmp = JsonbValue {
         typ: jbvType::jbvString,
-        val: JsonbValueData::String(var_name.to_vec()),
+        val: JsonbValueData::String(::mcx::slice_borrow_in(mcx, var_name)?),
     };
 
     let result = findJsonbValueFromContainer(jsonb_root(vars_bytes), JB_FOBJECT, &tmp)?;
@@ -2731,7 +2732,7 @@ fn compareNumeric(_mcx: Mcx<'_>, a: &[u8], b: &[u8]) -> i32 {
 }
 
 /// C: `copyJsonbValue` (jsonpath_exec.c:3443).
-fn copyJsonbValue(src: &JsonbValue) -> JsonbValue {
+fn copyJsonbValue<'mcx>(src: &JsonbValue<'mcx>) -> JsonbValue<'mcx> {
     src.clone()
 }
 
@@ -2819,7 +2820,7 @@ fn JsonValueListClear(jvl: &mut JsonValueList) {
 }
 
 /// C: `JsonValueListAppend` (jsonpath_exec.c:3511).
-fn JsonValueListAppend(jvl: &mut JsonValueList, jbv: JsonbValue) {
+fn JsonValueListAppend<'mcx>(jvl: &mut JsonValueList<'mcx>, jbv: JsonbValue<'mcx>) {
     if let Some(singleton) = jvl.singleton.take() {
         jvl.list = vec![singleton, jbv];
     } else if jvl.list.is_empty() {
@@ -2830,7 +2831,7 @@ fn JsonValueListAppend(jvl: &mut JsonValueList, jbv: JsonbValue) {
 }
 
 /// C: `JsonValueListLength` (jsonpath_exec.c:3525).
-fn JsonValueListLength(jvl: &JsonValueList) -> i32 {
+fn JsonValueListLength(jvl: &JsonValueList<'_>) -> i32 {
     if jvl.singleton.is_some() {
         1
     } else {
@@ -2839,12 +2840,12 @@ fn JsonValueListLength(jvl: &JsonValueList) -> i32 {
 }
 
 /// C: `JsonValueListIsEmpty` (jsonpath_exec.c:3531).
-fn JsonValueListIsEmpty(jvl: &JsonValueList) -> bool {
+fn JsonValueListIsEmpty(jvl: &JsonValueList<'_>) -> bool {
     jvl.singleton.is_none() && jvl.list.is_empty()
 }
 
 /// C: `JsonValueListHead` (jsonpath_exec.c:3537).
-fn JsonValueListHead(jvl: &JsonValueList) -> &JsonbValue {
+fn JsonValueListHead<'a, 'mcx>(jvl: &'a JsonValueList<'mcx>) -> &'a JsonbValue<'mcx> {
     if let Some(s) = &jvl.singleton {
         s
     } else {
@@ -2853,7 +2854,7 @@ fn JsonValueListHead(jvl: &JsonValueList) -> &JsonbValue {
 }
 
 /// C: `JsonValueListGetList` (jsonpath_exec.c:3543).
-fn JsonValueListGetList(jvl: &JsonValueList) -> Vec<JsonbValue> {
+fn JsonValueListGetList<'mcx>(jvl: &JsonValueList<'mcx>) -> Vec<JsonbValue<'mcx>> {
     if let Some(s) = &jvl.singleton {
         vec![s.clone()]
     } else {
@@ -2862,7 +2863,7 @@ fn JsonValueListGetList(jvl: &JsonValueList) -> Vec<JsonbValue> {
 }
 
 /// C: `JsonValueListInitIterator` (jsonpath_exec.c:3552).
-fn JsonValueListInitIterator(jvl: &JsonValueList) -> JsonValueListIterator {
+fn JsonValueListInitIterator<'mcx>(jvl: &JsonValueList<'mcx>) -> JsonValueListIterator<'mcx> {
     JsonValueListIterator {
         items: JsonValueListGetList(jvl),
         pos: 0,
@@ -2870,7 +2871,7 @@ fn JsonValueListInitIterator(jvl: &JsonValueList) -> JsonValueListIterator {
 }
 
 /// C: `JsonValueListNext` (jsonpath_exec.c:3578).
-fn JsonValueListNext(it: &mut JsonValueListIterator) -> Option<JsonbValue> {
+fn JsonValueListNext<'mcx>(it: &mut JsonValueListIterator<'mcx>) -> Option<JsonbValue<'mcx>> {
     if it.pos < it.items.len() {
         let v = it.items[it.pos].clone();
         it.pos += 1;
@@ -2882,7 +2883,7 @@ fn JsonValueListNext(it: &mut JsonValueListIterator) -> Option<JsonbValue> {
 
 /// C: `JsonbInitBinary` (jsonpath_exec.c:3599). `jb` is the full on-disk jsonb
 /// varlena bytes.
-fn JsonbInitBinary(jbv: &mut JsonbValue, jb: &[u8]) {
+fn JsonbInitBinary<'mcx>(jbv: &mut JsonbValue<'mcx>, jb: &'mcx [u8]) {
     // C never fails here (just stores binary.data/binary.len). The idiomatic
     // helper is fallible only on a structurally-impossible short slice; on the
     // execution path `jb` is always a valid serialized jsonb.
@@ -2890,7 +2891,7 @@ fn JsonbInitBinary(jbv: &mut JsonbValue, jb: &[u8]) {
 }
 
 /// C: `JsonbType` (jsonpath_exec.c:3612). Never returns `jbvBinary` as is.
-fn JsonbType(jb: &JsonbValue) -> PgResult<jbvType> {
+fn JsonbType(jb: &JsonbValue<'_>) -> PgResult<jbvType> {
     let mut typ = jb.typ;
 
     if jb.typ == jbvType::jbvBinary {
@@ -2914,7 +2915,7 @@ fn JsonbType(jb: &JsonbValue) -> PgResult<jbvType> {
 }
 
 /// C: `getScalar` (jsonpath_exec.c:3636).
-fn getScalar(scalar: &JsonbValue, typ: jbvType) -> Option<&JsonbValue> {
+fn getScalar<'a, 'mcx>(scalar: &'a JsonbValue<'mcx>, typ: jbvType) -> Option<&'a JsonbValue<'mcx>> {
     // Scalars should be always extracted during jsonpath execution.
     debug_assert!(
         scalar.typ != jbvType::jbvBinary
@@ -2930,16 +2931,16 @@ fn getScalar(scalar: &JsonbValue, typ: jbvType) -> Option<&JsonbValue> {
 }
 
 /// C: `wrapItemsInArray` (jsonpath_exec.c:3647).
-fn wrapItemsInArray(items: &JsonValueList) -> PgResult<JsonbValue> {
+fn wrapItemsInArray<'mcx>(mcx: Mcx<'mcx>, items: &JsonValueList<'mcx>) -> PgResult<JsonbValue<'mcx>> {
     let mut ps = None;
-    pushJsonbValue(&mut ps, JsonbIteratorToken::WJB_BEGIN_ARRAY, None)?;
+    pushJsonbValue(mcx, &mut ps, JsonbIteratorToken::WJB_BEGIN_ARRAY, None)?;
 
     let mut it = JsonValueListInitIterator(items);
     while let Some(jbv) = JsonValueListNext(&mut it) {
-        pushJsonbValue(&mut ps, JsonbIteratorToken::WJB_ELEM, Some(&jbv))?;
+        pushJsonbValue(mcx, &mut ps, JsonbIteratorToken::WJB_ELEM, Some(&jbv))?;
     }
 
-    Ok(pushJsonbValue(&mut ps, JsonbIteratorToken::WJB_END_ARRAY, None)?
+    Ok(pushJsonbValue(mcx, &mut ps, JsonbIteratorToken::WJB_END_ARRAY, None)?
         .expect("WJB_END_ARRAY yields a container value"))
 }
 
@@ -3846,7 +3847,7 @@ fn memcmp(a: &[u8], b: &[u8]) -> i32 {
 }
 
 /// The on-disk numeric bytes of a `jbvNumeric` value.
-fn numeric_bytes_of(v: &JsonbValue) -> &[u8] {
+fn numeric_bytes_of<'mcx>(v: &JsonbValue<'mcx>) -> &'mcx [u8] {
     match &v.val {
         JsonbValueData::Numeric(b) => b,
         _ => unreachable!("numeric_bytes_of on a non-numeric JsonbValue"),
@@ -3854,7 +3855,7 @@ fn numeric_bytes_of(v: &JsonbValue) -> &[u8] {
 }
 
 /// The string bytes of a `jbvString` value.
-fn string_bytes(v: &JsonbValue) -> &[u8] {
+fn string_bytes<'mcx>(v: &JsonbValue<'mcx>) -> &'mcx [u8] {
     match &v.val {
         JsonbValueData::String(b) => b,
         _ => unreachable!("string_bytes on a non-string JsonbValue"),
@@ -3862,7 +3863,7 @@ fn string_bytes(v: &JsonbValue) -> &[u8] {
 }
 
 /// The boolean payload of a `jbvBool` value.
-fn bool_of(v: &JsonbValue) -> bool {
+fn bool_of(v: &JsonbValue<'_>) -> bool {
     match &v.val {
         JsonbValueData::Bool(b) => *b,
         _ => unreachable!("bool_of on a non-bool JsonbValue"),

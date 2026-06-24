@@ -370,7 +370,7 @@ pub fn gin_extract_jsonb<'mcx>(mcx: Mcx<'mcx>, jb_root: &[u8]) -> PgResult<Vec<V
     // Otherwise, use 2 * root count as initial estimate of result size.
     let mut entries = gin_entries_init(2 * total as usize)?;
 
-    let mut it = JsonbIteratorInit(jb_root);
+    let mut it = JsonbIteratorInit(mcx, jb_root);
     let mut v = JsonbValue::null();
 
     loop {
@@ -460,9 +460,11 @@ fn jsonb_path_ops__add_path_item(
 
         JsonPathItemType::jpiKey => {
             // C: jbv.type = jbvString; jbv.val.string.val = jspGetString(...);
+            // Borrow the key bytes straight out of `jsp` (zero-copy): the
+            // transient `jbv` is consumed by JsonbHashScalarValue within this call.
             let jbv = JsonbValue {
                 typ: jbvType::jbvString,
-                val: JsonbValueData::String(jspGetString(jsp).to_vec()),
+                val: JsonbValueData::String(jspGetString(jsp)),
             };
             JsonbHashScalarValue(&jbv, hash)?;
             Ok(true)
@@ -775,7 +777,7 @@ fn extract_jsp_bool_expr<'mcx>(
 
 /// Build the [`JsonbValue`] scalar from a scalar jsonpath item (C: the
 /// `switch (scalar_item->type)` block inside the `jpiEqual` case).
-fn scalar_from_path_item(scalar_item: &JsonPathItem<'_>) -> PgResult<JsonbValue> {
+fn scalar_from_path_item<'a>(scalar_item: &JsonPathItem<'a>) -> PgResult<JsonbValue<'a>> {
     let v = match scalar_item.typ {
         JsonPathItemType::jpiNull => JsonbValue::null(),
         JsonPathItemType::jpiBool => JsonbValue {
@@ -786,12 +788,12 @@ fn scalar_from_path_item(scalar_item: &JsonPathItem<'_>) -> PgResult<JsonbValue>
         JsonPathItemType::jpiNumeric => JsonbValue {
             typ: jbvType::jbvNumeric,
             // scalar.val.numeric = (Numeric) scalar_item->content.value.data;
-            val: JsonbValueData::Numeric(jspGetNumeric(scalar_item).to_vec()),
+            val: JsonbValueData::Numeric(jspGetNumeric(scalar_item)),
         },
         JsonPathItemType::jpiString => JsonbValue {
             typ: jbvType::jbvString,
             // scalar.val.string.{val,len} = content.value.{data,datalen};
-            val: JsonbValueData::String(jspGetString(scalar_item).to_vec()),
+            val: JsonbValueData::String(jspGetString(scalar_item)),
         },
         _ => {
             return Err(PgError::error(format!(
@@ -1101,7 +1103,7 @@ struct PathHashStack {
 /// C: `gin_extract_jsonb_path(PG_FUNCTION_ARGS)`. Extract the GIN keys of a
 /// jsonb value (`jsonb_path_ops`) — `uint32` hashes, one per JSON value, with
 /// the leading key(s) folded into each value's hash.
-pub fn gin_extract_jsonb_path(jb_root: &[u8]) -> PgResult<Vec<Vec<u8>>> {
+pub fn gin_extract_jsonb_path<'mcx>(mcx: Mcx<'mcx>, jb_root: &[u8]) -> PgResult<Vec<Vec<u8>>> {
     let total = jb_root_count(jb_root) as i32;
 
     // If the root level is empty, we certainly have no keys.
@@ -1117,7 +1119,7 @@ pub fn gin_extract_jsonb_path(jb_root: &[u8]) -> PgResult<Vec<Vec<u8>>> {
     // models `tail`; a missing parent (index 0's "parent") is the C NULL parent.
     let mut stack: Vec<PathHashStack> = vec![PathHashStack { hash: 0 }];
 
-    let mut it = JsonbIteratorInit(jb_root);
+    let mut it = JsonbIteratorInit(mcx, jb_root);
     let mut v = JsonbValue::null();
 
     loop {
@@ -1205,7 +1207,7 @@ pub fn gin_extract_jsonb_query_path<'mcx>(
             return Err(query_strategy_mismatch());
         };
         // Query is a jsonb, so just apply gin_extract_jsonb_path ...
-        out.entries = gin_extract_jsonb_path(jb_root)?;
+        out.entries = gin_extract_jsonb_path(mcx, jb_root)?;
         // ... although "contains {}" requires a full index scan
         if out.entries.is_empty() {
             out.search_mode_all = true;

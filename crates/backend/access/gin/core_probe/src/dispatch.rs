@@ -339,6 +339,7 @@ fn dispatch_extract_value<'mcx>(
             // native-endian hash bytes (a by-value `uint32` GIN key).
             let jb = value.as_ref_bytes();
             let keys = jsonb_gin_seams::gin_extract_jsonb_path::call(
+                mcx,
                 vardata_any(jb),
             )?;
             let elems = hash_keys_to_datums(mcx, keys)?;

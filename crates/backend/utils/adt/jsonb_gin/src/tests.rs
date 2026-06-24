@@ -41,45 +41,48 @@ fn root_of(mcx: Mcx<'_>, v: &JsonbValue) -> Vec<u8> {
     bytes[VARHDRSZ..].to_vec()
 }
 
-fn jstr(s: &str) -> JsonbValue {
+fn jstr(s: &str) -> JsonbValue<'_> {
     JsonbValue {
         typ: jbvType::jbvString,
-        val: JsonbValueData::String(s.as_bytes().to_vec()),
+        val: JsonbValueData::String(s.as_bytes()),
     }
 }
 
-fn jbool(b: bool) -> JsonbValue {
+fn jbool<'a>(b: bool) -> JsonbValue<'a> {
     JsonbValue {
         typ: jbvType::jbvBool,
         val: JsonbValueData::Bool(b),
     }
 }
 
-fn jnull() -> JsonbValue {
+fn jnull<'a>() -> JsonbValue<'a> {
     JsonbValue::null()
 }
 
-fn jobject(pairs: Vec<(&str, JsonbValue)>) -> JsonbValue {
-    let pairs = pairs
-        .into_iter()
-        .enumerate()
-        .map(|(i, (k, val))| JsonbPair {
+fn jobject<'a>(mcx: ::mcx::Mcx<'a>, pairs: Vec<(&'a str, JsonbValue<'a>)>) -> JsonbValue<'a> {
+    let mut out = ::mcx::vec_with_capacity_in(mcx, pairs.len()).unwrap();
+    for (i, (k, val)) in pairs.into_iter().enumerate() {
+        out.push(JsonbPair {
             key: jstr(k),
             value: val,
             order: i as u32,
-        })
-        .collect();
+        });
+    }
     JsonbValue {
         typ: jbvType::jbvObject,
-        val: JsonbValueData::Object(pairs),
+        val: JsonbValueData::Object(out),
     }
 }
 
-fn jarray(elems: Vec<JsonbValue>) -> JsonbValue {
+fn jarray<'a>(mcx: ::mcx::Mcx<'a>, elems: Vec<JsonbValue<'a>>) -> JsonbValue<'a> {
+    let mut out = ::mcx::vec_with_capacity_in(mcx, elems.len()).unwrap();
+    for e in elems {
+        out.push(e);
+    }
     JsonbValue {
         typ: jbvType::jbvArray,
         val: JsonbValueData::Array {
-            elems,
+            elems: out,
             raw_scalar: false,
         },
     }
@@ -138,7 +141,7 @@ fn scalar_key_types() {
 fn extract_jsonb_empty_object_has_no_keys() {
     let ctx = MemoryContext::new("jsonb_gin.test.empty");
     let mcx = ctx.mcx();
-    let root = root_of(mcx, &jobject(vec![]));
+    let root = root_of(mcx, &jobject(mcx, vec![]));
     let entries = gin_extract_jsonb(mcx, &root).unwrap();
     assert!(entries.is_empty());
 }
@@ -147,7 +150,7 @@ fn extract_jsonb_empty_object_has_no_keys() {
 fn extract_jsonb_object_keys_and_values() {
     let ctx = MemoryContext::new("jsonb_gin.test.obj");
     let mcx = ctx.mcx();
-    let root = root_of(mcx, &jobject(vec![("a", jstr("x")), ("b", jbool(false))]));
+    let root = root_of(mcx, &jobject(mcx, vec![("a", jstr("x")), ("b", jbool(false))]));
     let entries = gin_extract_jsonb(mcx, &root).unwrap();
     // Two keys (KEY flag) + one string value (STR flag) + one bool value
     // (BOOL flag).
@@ -163,7 +166,7 @@ fn extract_jsonb_string_array_elements_are_keys() {
     let mcx = ctx.mcx();
     // String array elements are treated as keys (see jsonb.h); a bool element
     // is a value.
-    let root = root_of(mcx, &jarray(vec![jstr("s"), jbool(true)]));
+    let root = root_of(mcx, &jarray(mcx, vec![jstr("s"), jbool(true)]));
     let entries = gin_extract_jsonb(mcx, &root).unwrap();
     let flags: Vec<u8> = entries.iter().map(|e| e[VARHDRSZ]).collect();
     assert!(flags.contains(&JGINFLAG_KEY)); // the string element
@@ -178,16 +181,16 @@ fn extract_jsonb_string_array_elements_are_keys() {
 fn extract_jsonb_path_emits_uint32_hashes() {
     let ctx = MemoryContext::new("jsonb_gin.test.path");
     let mcx = ctx.mcx();
-    let root = root_of(mcx, &jobject(vec![("a", jstr("x")), ("b", jstr("y"))]));
-    let entries = gin_extract_jsonb_path(&root).unwrap();
+    let root = root_of(mcx, &jobject(mcx, vec![("a", jstr("x")), ("b", jstr("y"))]));
+    let entries = gin_extract_jsonb_path(mcx, &root).unwrap();
     // One hash entry per value; each is a 4-byte uint32 Datum.
     assert_eq!(entries.len(), 2);
     assert!(entries.iter().all(|e| e.len() == 4));
     // {"a":"x"} and {"b":"x"} must differ — the key folds into the hash.
-    let root2 = root_of(mcx, &jobject(vec![("a", jstr("x"))]));
-    let root3 = root_of(mcx, &jobject(vec![("b", jstr("x"))]));
-    let e2 = gin_extract_jsonb_path(&root2).unwrap();
-    let e3 = gin_extract_jsonb_path(&root3).unwrap();
+    let root2 = root_of(mcx, &jobject(mcx, vec![("a", jstr("x"))]));
+    let root3 = root_of(mcx, &jobject(mcx, vec![("b", jstr("x"))]));
+    let e2 = gin_extract_jsonb_path(mcx, &root2).unwrap();
+    let e3 = gin_extract_jsonb_path(mcx, &root3).unwrap();
     assert_ne!(e2[0], e3[0]);
 }
 
@@ -195,8 +198,8 @@ fn extract_jsonb_path_emits_uint32_hashes() {
 fn extract_jsonb_path_empty_is_empty() {
     let ctx = MemoryContext::new("jsonb_gin.test.path_empty");
     let mcx = ctx.mcx();
-    let root = root_of(mcx, &jobject(vec![]));
-    assert!(gin_extract_jsonb_path(&root).unwrap().is_empty());
+    let root = root_of(mcx, &jobject(mcx, vec![]));
+    assert!(gin_extract_jsonb_path(mcx, &root).unwrap().is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -231,7 +234,7 @@ fn extract_query_exists_is_single_key() {
 fn extract_query_contains_empty_forces_full_scan() {
     let ctx = MemoryContext::new("jsonb_gin.test.q_contains_empty");
     let mcx = ctx.mcx();
-    let root = root_of(mcx, &jobject(vec![]));
+    let root = root_of(mcx, &jobject(mcx, vec![]));
     let out = gin_extract_jsonb_query(
         mcx,
         GinJsonbQuery::Contains(&root),

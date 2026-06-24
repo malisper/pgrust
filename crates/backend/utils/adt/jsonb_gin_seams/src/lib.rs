@@ -97,7 +97,10 @@ seam_core::seam!(
     /// `gin_extract_jsonb_path` (jsonb_gin.c:1089, OID 3485) — the
     /// `jsonb_path_ops` `extractValue` proc. The GIN keys are `uint32` hashes
     /// (one per JSON value, with the leading key(s) folded into each hash).
-    pub fn gin_extract_jsonb_path(jb_root: &[u8]) -> PgResult<Vec<Vec<u8>>>
+    pub fn gin_extract_jsonb_path<'mcx>(
+        mcx: Mcx<'mcx>,
+        jb_root: &[u8],
+    ) -> PgResult<Vec<Vec<u8>>>
 );
 
 seam_core::seam!(
