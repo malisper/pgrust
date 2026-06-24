@@ -27,6 +27,10 @@ pub fn ExecDeletePrologue<'mcx>(
     oldtuple: Option<FormedTuple<'mcx>>,
     epqreturnslot: Option<&mut Option<SlotId>>,
     result: Option<&mut TM_Result>,
+    // Receives the BEFORE-trigger EPQ-advanced TID (C mutates *tupleid in place
+    // via GetTupleForTrigger's table_tuple_lock(FIND_LAST_VERSION)). The
+    // cross-partition caller needs it to retry against the current row version.
+    tupleid_out: Option<&mut ItemPointerData>,
 ) -> PgResult<bool> {
     let mut result = result;
     if let Some(r) = result.as_deref_mut() {
@@ -57,10 +61,10 @@ pub fn ExecDeletePrologue<'mcx>(
             result,
             &mut context.tmfd,
             mtstate.operation == CmdType::CMD_MERGE,
-            // ExecDelete advances its own tid in the ldelete EPQ loop; the
-            // BEFORE-trigger path passes the concurrent tuple back via
-            // epqreturnslot, so no tid-advance is threaded here.
-            None,
+            // GetTupleForTrigger's table_tuple_lock(FIND_LAST_VERSION) advances
+            // *tupleid to the latest row version on the concurrent-update path;
+            // thread it back so the cross-partition caller retries against it.
+            tupleid_out,
         );
     }
 

@@ -428,7 +428,7 @@ pub fn ExecMergeMatched<'mcx>(
                             mtstate,
                             estate,
                             result_rel_info,
-                            working_tid.as_ref(),
+                            working_tid.as_mut(),
                             None,
                             projected,
                             can_set_tag,
@@ -500,6 +500,7 @@ pub fn ExecMergeMatched<'mcx>(
                         None,
                         None,
                         Some(&mut prologue_result),
+                        None,
                     )? {
                         if prologue_result == TM_Result::TM_Ok {
                             // "do nothing"

@@ -243,6 +243,12 @@ pub fn ExecDelete<'mcx>(
     mut tmresult: Option<&mut TM_Result>,
     mut tuple_deleted: Option<&mut bool>,
     mut epqreturnslot: Option<&mut Option<SlotId>>,
+    // When the EPQ recheck traverses a concurrent-update chain and passes back
+    // the re-fetched row via `epqreturnslot`, report the latest (post-traverse)
+    // row TID here. This mirrors C's in-place `*tupleid` mutation inside
+    // table_tuple_lock(FIND_LAST_VERSION): the cross-partition UPDATE caller
+    // must retry against the latest version, not the stale original TID.
+    mut advanced_tid: Option<&mut Option<ItemPointerData>>,
 ) -> PgResult<Option<SlotId>> {
     // TupleTableSlot *slot = NULL;
     let mut slot: Option<SlotId> = None;
@@ -253,7 +259,10 @@ pub fn ExecDelete<'mcx>(
     }
 
     // Prepare for the delete.  This includes BEFORE ROW triggers, so we're done
-    // if it says we are.
+    // if it says we are. The BEFORE-trigger EPQ recheck (GetTupleForTrigger) may
+    // advance the TID to the latest row version; capture it so the cross-partition
+    // caller can retry against the current version.
+    let mut prologue_advanced_tid: Option<ItemPointerData> = tupleid.copied();
     if !ExecDeletePrologue(
         mcx,
         context,
@@ -264,7 +273,21 @@ pub fn ExecDelete<'mcx>(
         oldtuple.clone(),
         epqreturnslot.as_deref_mut().map(|r| &mut *r),
         tmresult.as_deref_mut().map(|r| &mut *r),
+        prologue_advanced_tid.as_mut(),
     )? {
+        // Prologue returned false (BEFORE trigger said skip, or its EPQ recheck
+        // passed the concurrent tuple back via epqreturnslot). If it ran an EPQ
+        // recheck and advanced the TID, report it so the cross-partition caller
+        // retries against the latest version (mirrors C's in-place *tupleid).
+        if let (Some(adv), Some(eret)) = (
+            advanced_tid.as_deref_mut().map(|r| &mut *r),
+            epqreturnslot.as_deref_mut().map(|r| &mut *r),
+        ) {
+            // Only meaningful when an EPQ tuple was actually passed back.
+            if eret.is_some() {
+                *adv = prologue_advanced_tid;
+            }
+        }
         return Ok(None);
     }
 
@@ -418,6 +441,14 @@ pub fn ExecDelete<'mcx>(
                                         epqreturnslot.as_deref_mut().map(|r| &mut *r)
                                     {
                                         *epqret = Some(epqslot);
+                                        // Report the latest (traversed) TID so the
+                                        // cross-partition caller retries against the
+                                        // current row version (C: in-place *tupleid).
+                                        if let Some(adv) =
+                                            advanced_tid.as_deref_mut().map(|r| &mut *r)
+                                        {
+                                            *adv = Some(cur_tid);
+                                        }
                                         return Ok(None);
                                     } else {
                                         // goto ldelete;

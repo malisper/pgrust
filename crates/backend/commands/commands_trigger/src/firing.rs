@@ -4414,6 +4414,15 @@ fn exec_br_delete_triggers_impl<'mcx>(
             if let Some(cand) = epqslot_candidate {
                 if let Some(out) = epqslot {
                     *out = Some(cand);
+                    // GetTupleForTrigger's table_tuple_lock(FIND_LAST_VERSION)
+                    // advanced to the latest row version (now in the OLD slot's
+                    // tts_tid). Report it so a cross-partition UPDATE caller can
+                    // retry the move against the current version (mirrors C's
+                    // in-place *tupleid mutation, which persists even when
+                    // GetTupleForTrigger returns the EPQ slot via newSlot).
+                    if let Some(tout) = tupleid_out {
+                        *tout = estate.slot(slot).tts_tid;
+                    }
                     return Ok(false);
                 }
             }

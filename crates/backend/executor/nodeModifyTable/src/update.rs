@@ -145,7 +145,7 @@ pub fn ExecUpdate<'mcx>(
                 mtstate,
                 estate,
                 result_rel_info,
-                Some(&cur_tid),
+                Some(&mut cur_tid),
                 oldtuple.clone(),
                 slot,
                 can_set_tag,
@@ -460,7 +460,7 @@ pub fn ExecUpdateAct<'mcx>(
     mtstate: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     result_rel_info: RriId,
-    tupleid: Option<&ItemPointerData>,
+    mut tupleid: Option<&mut ItemPointerData>,
     oldtuple: Option<FormedTuple<'mcx>>,
     mut slot: SlotId,
     can_set_tag: bool,
@@ -508,14 +508,16 @@ pub fn ExecUpdateAct<'mcx>(
             let mut retry_slot: Option<SlotId> = None;
             let mut insert_destrel: Option<RriId> = None;
             let mut result = TM_Result::TM_Ok;
+            let mut retry_tid: Option<ItemPointerData> = None;
 
+            let xpart_tid = tupleid.as_deref().copied();
             if ExecCrossPartitionUpdate(
                 mcx,
                 context,
                 mtstate,
                 estate,
                 result_rel_info,
-                tupleid,
+                xpart_tid.as_ref(),
                 oldtuple.clone(),
                 slot,
                 can_set_tag,
@@ -524,6 +526,7 @@ pub fn ExecUpdateAct<'mcx>(
                 &mut retry_slot,
                 &mut inserted_tuple,
                 &mut insert_destrel,
+                &mut retry_tid,
             )? {
                 // success!
                 update_cxt.crossPartUpdate = true;
@@ -534,7 +537,9 @@ pub fn ExecUpdateAct<'mcx>(
                 let trig_after = estate.result_rel(result_rel_info).ri_trig_update_after_row;
                 if let Some(dest) = insert_destrel {
                     if trig_after {
-                        if let (Some(tid), Some(ins)) = (tupleid, inserted_tuple) {
+                        if let (Some(tid), Some(ins)) =
+                            (tupleid.as_deref().copied(), inserted_tuple)
+                        {
                             ExecCrossPartitionUpdateForeignKey(
                                 mcx,
                                 context,
@@ -542,7 +547,7 @@ pub fn ExecUpdateAct<'mcx>(
                                 estate,
                                 result_rel_info,
                                 dest,
-                                tid,
+                                &tid,
                                 slot,
                                 ins,
                             )?;
@@ -560,7 +565,12 @@ pub fn ExecUpdateAct<'mcx>(
             }
 
             // ExecCrossPartitionUpdate installed an updated version of the new
-            // tuple in the retry slot; start over.
+            // tuple in the retry slot; start over. Thread the EPQ-advanced TID
+            // back so the retry (and the final table_tuple_update) targets the
+            // current row version (mirrors C's in-place `*tupleid` mutation).
+            if let (Some(adv), Some(tid_ref)) = (retry_tid, tupleid.as_deref_mut()) {
+                *tid_ref = adv;
+            }
             slot = retry_slot.expect("ExecUpdateAct: cross-partition retry without retry_slot");
             continue; // goto lreplace
         }
@@ -579,7 +589,9 @@ pub fn ExecUpdateAct<'mcx>(
         let cid = estate.es_output_cid;
         let snapshot = estate.es_snapshot.as_deref().cloned();
         let crosscheck = estate.es_crosscheck_snapshot.as_deref().cloned();
-        let otid = *tupleid.expect("ExecUpdateAct: plain table update needs tupleid");
+        let otid = *tupleid
+            .as_deref()
+            .expect("ExecUpdateAct: plain table update needs tupleid");
         let mcx = estate.es_query_cxt;
         let slot_ref = estate.slot_data_mut(slot);
         break table_tableam::table_tuple_update(
@@ -686,6 +698,10 @@ pub fn ExecCrossPartitionUpdate<'mcx>(
     retry_slot: &mut Option<SlotId>,
     inserted_tuple: &mut Option<SlotId>,
     insert_destrel: &mut Option<RriId>,
+    // On the concurrent-update retry path, report the latest (EPQ-traversed) TID
+    // so the ExecUpdateAct caller retries the move against the current row
+    // version (mirrors C's in-place `*tupleid` mutation).
+    retry_tid: &mut Option<ItemPointerData>,
 ) -> PgResult<bool> {
     context.cpDeletedSlot = None;
     context.cpUpdateReturningSlot = None;
@@ -738,6 +754,7 @@ pub fn ExecCrossPartitionUpdate<'mcx>(
     // Row movement, part 1.  Delete the tuple, but skip RETURNING processing.
     let mut tuple_deleted = false;
     let mut epqslot: Option<SlotId> = None;
+    let mut delete_advanced_tid: Option<ItemPointerData> = None;
     crate::delete_exec::ExecDelete(
         mcx,
         context,
@@ -752,6 +769,7 @@ pub fn ExecCrossPartitionUpdate<'mcx>(
         Some(tmresult),
         Some(&mut tuple_deleted),
         Some(&mut epqslot),
+        Some(&mut delete_advanced_tid),
     )?;
 
     // For some reason if DELETE didn't happen then we should skip the insert as
@@ -762,20 +780,52 @@ pub fn ExecCrossPartitionUpdate<'mcx>(
         } else if epqslot.is_none() || estate.slot(epqslot.unwrap()).is_empty() {
             return Ok(true);
         } else {
-            // The cross-partition DELETE leg traversed a concurrent update chain
-            // (EvalPlanQual produced a surviving tuple). Retrying the UPDATE on
-            // the new version requires re-fetching the OLD tuple by the *latest*
-            // row TID — but ExecDelete advanced that TID internally and the owned
-            // model does not yet thread it back here (C updates `*tupleid`), so a
-            // retry would re-fetch the stale original TID and loop. Until the
-            // cross-partition-key UPDATE EPQ tid-advance leg lands, raise a clean
-            // serialization error rather than spin. (Non-concurrent
-            // cross-partition UPDATE never reaches here — epqslot is None above.)
-            let _ = (epqslot, retry_slot);
-            return Err(::types_error::PgError::error(
-                "could not serialize access due to concurrent update",
-            )
-            .with_sqlstate(::types_error::ERRCODE_T_R_SERIALIZATION_FAILURE));
+            // epqslot is normally NULL.  But when ExecDelete() finds that another
+            // transaction has concurrently updated the same row, it re-fetches the
+            // row, skips the delete, and epqslot is set to the re-fetched tuple
+            // slot.  In that case, we need to do all the checks again.  (C:
+            // nodeModifyTable.c ExecCrossPartitionUpdate, lines 2034-2053.)
+            let epqslot = epqslot.expect("ExecCrossPartitionUpdate: epqslot checked non-None");
+
+            // ... but first, make sure ri_oldTupleSlot is initialized.
+            if !estate.result_rel(result_rel_info).ri_projectNewInfoValid {
+                ExecInitUpdateProjection(mcx, mtstate, estate, result_rel_info)?;
+            }
+            let old_slot = estate.result_rel(result_rel_info).ri_oldTupleSlot.expect(
+                "ExecCrossPartitionUpdate: ri_oldTupleSlot not initialized after ExecInitUpdateProjection",
+            );
+
+            // Fetch the most recent version of old tuple.  C fetches by the
+            // caller's tupleid under SnapshotAny, but C's tupleid was mutated in
+            // place to the latest (traversed) version inside ExecDelete's
+            // table_tuple_lock(FIND_LAST_VERSION); the owned ExecDelete reports
+            // that advanced TID via `delete_advanced_tid`. Fetch by it so the OLD
+            // slot holds the current row version, and thread it back so the
+            // caller's retry targets the same version.
+            let otid = delete_advanced_tid
+                .or_else(|| tupleid.copied())
+                .expect("ExecCrossPartitionUpdate: heap delete needs a TID");
+            *retry_tid = Some(otid);
+            let rel2 = relation_alias(estate, result_rel_info);
+            let any = snapshot_any();
+            let qcxt = estate.es_query_cxt;
+            let oldslot_ref = estate.slot_data_mut(old_slot);
+            if !table_tableam::table_tuple_fetch_row_version(
+                qcxt, &rel2, &otid, &any, oldslot_ref,
+            )? {
+                return Err(::types_error::PgError::error(
+                    "failed to fetch tuple being updated",
+                ));
+            }
+
+            // and project the new tuple to retry the UPDATE with
+            *retry_slot = Some(ExecGetUpdateNewTuple(
+                estate,
+                result_rel_info,
+                epqslot,
+                Some(old_slot),
+            )?);
+            return Ok(false);
         }
     }
 
