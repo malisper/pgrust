@@ -22,6 +22,65 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+// ===========================================================================
+// Fast OID hasher for the per-call built-in lookup maps.
+//
+// The hot `EEOP_FUNCEXPR` dispatch does TWO `HashMap<Oid, _>` lookups per call
+// (the `NATIVE` Result-native overlay and the `RESOLVED_BUILTIN` resolution
+// memo). The std default `SipHash` is a cryptographic hash that was a measured
+// per-tuple hotspot (`hash_one`/`SipHasher::write` ~2% of serial CPU for a
+// 10M-row `i % 2 = 0` filter). The keys are `Oid` (a `u32`); hash them with a
+// single Fibonacci multiply — the standard fast integer hash — instead. This is
+// a per-backend in-memory lookup table with no on-disk/cross-process exposure,
+// so the hash choice is a pure micro-optimization (no behavior change).
+// ===========================================================================
+
+/// A `Hasher` for a single `u32`/`u64` key: one Fibonacci multiply (no SipHash
+/// state machine). Only the integer `write_u32`/`write_u64` paths are used; the
+/// byte `write` path falls back to a simple FNV-style fold so it stays correct
+/// for any accidental non-integer key.
+#[derive(Default)]
+struct OidHasher(u64);
+
+impl std::hash::Hasher for OidHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write_u32(&mut self, n: u32) {
+        // 2^64 / golden ratio — spreads small sequential OIDs across buckets.
+        self.0 = (n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+    #[inline]
+    fn write_u64(&mut self, n: u64) {
+        self.0 = n.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        let mut h = self.0;
+        for &b in bytes {
+            h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
+        }
+        self.0 = h;
+    }
+}
+
+/// `BuildHasher` for [`OidHasher`] — zero-state, so a `HashMap` built with it has
+/// no per-map seed allocation.
+#[derive(Default, Clone)]
+struct BuildOidHasher;
+
+impl std::hash::BuildHasher for BuildOidHasher {
+    type Hasher = OidHasher;
+    #[inline]
+    fn build_hasher(&self) -> OidHasher {
+        OidHasher(0)
+    }
+}
+
+/// A `HashMap` keyed by `Oid` using the fast [`OidHasher`].
+type OidHashMap<V> = HashMap<Oid, V, BuildOidHasher>;
+
 use ::mcx::{Mcx, MemoryContext, PgString, PgVec};
 
 use ::types_acl::{AclMode, AclResult, ACL_EXECUTE, ACL_USAGE};
@@ -125,7 +184,7 @@ pub fn clear_builtins() {
 
 thread_local! {
     /// C: no analogue (the panic→Result migration overlay). Keyed by `foid`.
-    static NATIVE: RefCell<HashMap<Oid, PgFnNative>> = RefCell::new(HashMap::new());
+    static NATIVE: RefCell<OidHashMap<PgFnNative>> = RefCell::new(OidHashMap::default());
 }
 
 /// Register a single **Result-native** built-in (the migration target shape).
@@ -186,8 +245,8 @@ thread_local! {
     /// per-backend memo of a built-in OID's `ResolvedFmgrInfo` (behind an `Rc`
     /// so the hot path clones a refcount, not the `String`-bearing
     /// `BuiltinFunction`). Keyed by `fn_oid`.
-    static RESOLVED_BUILTIN: RefCell<HashMap<Oid, std::rc::Rc<ResolvedFmgrInfo>>> =
-        RefCell::new(HashMap::new());
+    static RESOLVED_BUILTIN: RefCell<OidHashMap<std::rc::Rc<ResolvedFmgrInfo>>> =
+        RefCell::new(OidHashMap::default());
 }
 
 /// Return the cached `ResolvedFmgrInfo` for built-in `fn_oid`, resolving and
