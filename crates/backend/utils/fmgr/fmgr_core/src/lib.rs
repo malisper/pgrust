@@ -4213,6 +4213,97 @@ fn function_call_invoke_datum_resolved_seam<'mcx>(
     }
 }
 
+/// `EEOP_FUNCEXPR` over the STEP'S OWN persistent ABI call frame — the faithful
+/// `fcinfo->isnull = false; d = op->d.func.fn_addr(fcinfo)` of execExprInterp.c.
+///
+/// The caller (the interpreter) owns `fcinfo`, allocated once at `ExecInitFunc`
+/// and reused in place across every tuple. Versus
+/// [`function_call_invoke_datum_resolved_seam`] this removes the per-call
+/// `fcinfo_pool_take`/`fcinfo_pool_return` (the profiled hotspot ~½ of the
+/// `EEOP_FUNCEXPR` subtree): the frame is never popped from a pool, never
+/// `reset_for_reuse`d, and never cleared/parked — its `flinfo` resolution is
+/// stamped ONCE (on the first call, when `flinfo` is `None`) and its
+/// `args`/`ref_args` are refilled in place each tuple (length set, capacity
+/// retained). A NON-built-in `fn_oid` (catalog / security-definer / SQL) falls
+/// through to the by-OID [`function_call_invoke_datum_seam`], so DDL
+/// invalidation, the secdef userid switch, and SQL-function dispatch are
+/// unchanged.
+fn function_call_invoke_step_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    fn_oid: Oid,
+    collation: Oid,
+    fcinfo: &mut FunctionCallInfoBaseData,
+    args: &[::types_tuple::heaptuple::Datum<'mcx>],
+    args_null: &[bool],
+    fn_expr: Option<::types_core::fmgr::FnExprErased>,
+) -> PgResult<(::types_tuple::heaptuple::Datum<'mcx>, bool)> {
+    // Recover the cached built-in resolution; on a miss (non-built-in or any
+    // resolution error) fall through to the ordinary by-OID seam, which keeps the
+    // catalog / secdef / SQL legs exactly as before.
+    let cached = resolved_builtin_cached(mcx, fn_oid)?;
+    let Some(resolved) = cached else {
+        return function_call_invoke_datum_seam(mcx, fn_oid, collation, args, args_null, fn_expr);
+    };
+
+    // The per-call-site `fn_expr` (C: `flinfo->fn_expr`). Built once and stamped
+    // onto the persistent frame's `flinfo` on the first call; the COMMON
+    // non-polymorphic hot path (`int4eq`/`int4mod`, `fn_expr == None`) builds
+    // none.
+    let fn_expr_box: Option<Box<FnExpr>> = fn_expr.map(|node| {
+        Box::new(FnExpr::External(::fmgr::ExternalFnExpr {
+            tag: 0,
+            node: Some(node),
+        }))
+    });
+
+    // C: the step's `fcinfo` is initialized ONCE at `ExecInitFunc`
+    // (`InitFunctionCallInfoData`): its `flinfo` (the resolved `FmgrInfo`),
+    // `fncollation`, and `nargs` are stamped there and reused every tuple. Mirror
+    // that: stamp `flinfo`/`fncollation` only when this is the first call on this
+    // persistent frame (i.e. `flinfo` not yet set), so the resolution is not
+    // rebuilt per tuple. (`resolved.finfo` is a cheap `FmgrInfo` clone — no
+    // `String` — done once.)
+    if fcinfo.flinfo.is_none() {
+        let mut flinfo = resolved.finfo.clone();
+        flinfo.fn_expr = fn_expr_box.clone();
+        fcinfo.flinfo = Some(Box::new(flinfo));
+        fcinfo.fncollation = collation;
+    }
+
+    // Refill `args`/`ref_args` IN PLACE (length set to nargs, capacity retained).
+    // The marshalling Datum -> (NullableDatum, RefPayload) still happens (the
+    // dual-fcinfo-home #327: the executor frame and the ABI carrier never meet),
+    // but it overwrites the existing Vec slots rather than allocating a fresh
+    // frame.
+    fcinfo.args.clear();
+    fcinfo.ref_args.clear();
+    fcinfo.args.reserve(args.len());
+    fcinfo.ref_args.reserve(args.len());
+    for (i, val) in args.iter().enumerate() {
+        let is_null = args_null.get(i).copied().unwrap_or(false);
+        let (mut nd, refp) = datum_to_ref_arg(val);
+        if is_null {
+            nd.isnull = true;
+        }
+        fcinfo.args.push(nd);
+        fcinfo.ref_args.push(if is_null { None } else { refp });
+    }
+    fcinfo.nargs = args.len() as i16;
+
+    let out = dispatch_frame_ref_args_in_place(mcx, &resolved, fcinfo, fn_expr_box, None);
+    // The persistent frame is NOT returned to a pool; the interpreter keeps it on
+    // the step. Drop any caller-owned by-reference RESULT carrier so it does not
+    // survive into the next call (the result has already been materialized into
+    // `mcx` by `dispatch_frame_ref_args_in_place`); `take_ref_result` inside the
+    // dispatch already consumed it.
+    match out? {
+        Some(pair) => Ok(pair),
+        None => unreachable!(
+            "function_call_invoke_step with NULL escontext never soft-fails"
+        ),
+    }
+}
+
 fn function_call_invoke_datum_seam<'mcx>(
     mcx: Mcx<'mcx>,
     fn_oid: Oid,
@@ -5241,6 +5332,7 @@ pub fn init_seams() {
     fmgr_seams::function_call_invoke_datum_resolved::set(
         function_call_invoke_datum_resolved_seam,
     );
+    fmgr_seams::function_call_invoke_step::set(function_call_invoke_step_seam);
     fmgr_seams::function_call_invoke_datum_soft::set(function_call_invoke_datum_soft_seam);
     fmgr_seams::function_call_invoke_datum_owned::set(
         function_call_invoke_datum_owned_seam,

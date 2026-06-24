@@ -1134,6 +1134,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `EEOP_FUNCEXPR` dispatch over the step's OWN persistent call frame — the
+    /// faithful `fcinfo->isnull = false; d = op->d.func.fn_addr(fcinfo)` of
+    /// execExprInterp.c. The caller (the interpreter) owns the ABI carrier `fcinfo`
+    /// allocated once at `ExecInitFunc` and reused in place every tuple; this seam
+    /// refills its `args`/`ref_args` from the canonical `args`/`args_null` IN
+    /// PLACE (no per-call frame allocation, no pool take/return), resolves the
+    /// built-in `fn_addr` from the cached resolution (an `Rc` bump for a
+    /// built-in), dispatches directly, and reads the result back. A NON-built-in
+    /// `fn_oid` (catalog / security-definer / SQL) falls through to the by-OID
+    /// [`function_call_invoke_datum`] path, so DDL invalidation, the secdef userid
+    /// switch, and SQL-function dispatch are unaffected. `fcinfo.flinfo` carries
+    /// the resolved `FmgrInfo` (with `fn_expr` stamped); the seam reuses it across
+    /// rows so the resolution is not rebuilt per tuple.
+    pub fn function_call_invoke_step<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        fn_oid: Oid,
+        collation: Oid,
+        fcinfo: &mut ::fmgr::FunctionCallInfoBaseData,
+        args: &[Datum<'mcx>],
+        args_null: &[bool],
+        fn_expr: Option<::types_core::fmgr::FnExprErased>,
+    ) -> PgResult<(Datum<'mcx>, bool)>
+);
+
+seam_core::seam!(
     /// `FunctionCallInvoke(fcinfo)` with a soft-error sink installed on the call
     /// frame (C: `InitFunctionCallInfoData(*fcinfo, ..., escontext, NULL)` in
     /// `make_range`, rangetypes.c:2034). Identical to [`function_call_invoke_datum`]

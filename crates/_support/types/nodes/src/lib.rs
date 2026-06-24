@@ -6,11 +6,16 @@
 //! irreducible, so its modules land here — but each is trimmed to only the
 //! items the ports so far consume. Module names follow src-idiomatic.
 
-#![no_std]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+// `nodes` is `std` (no longer `#![no_std]`): the executor `Func` step now owns
+// the real `fmgr::FunctionCallInfoBaseData` ABI call frame (C's
+// `op->d.func.fcinfo_data`, allocated once at `ExecInitFunc` and reused in place
+// every tuple), and that carrier needs `std` for its `Box<dyn Any>` internal-arg
+// lane / `Box<dyn ExpandedObject>`. `extern crate alloc` is kept so every
+// existing `alloc::…` path in this crate compiles unchanged.
 extern crate alloc;
 
 pub mod bitmapset;

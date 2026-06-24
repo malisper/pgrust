@@ -20,6 +20,13 @@ node_payload_codegen = []
 
 [dependencies]
 types_core = { path = "../types_core" }
+# The `std` fmgr ABI call-frame carrier (`FunctionCallInfoBaseData`): the
+# executor `Func` step owns one persistent carrier (C's `op->d.func.fcinfo_data`,
+# allocated once at `ExecInitFunc`), filled in place and dispatched directly each
+# tuple. `fmgr` deps only the leaf type crates (types_core/datum/types_error/
+# types_tuple/mcx) — none reach `nodes` — so the edge is acyclic. (This is why
+# `nodes` is now `std` rather than `#![no_std]`.)
+fmgr = { path = "../fmgr" }
 types_acl = { path = "../types_acl" }
 types_error = { path = "../types_error" }
 types_scan = { path = "../types_scan" }

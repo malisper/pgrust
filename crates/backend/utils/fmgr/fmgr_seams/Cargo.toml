@@ -21,3 +21,6 @@ types_bgworker = { path = "../../../../_support/types/types_bgworker" }
 types_ri_triggers = { path = "../../../../_support/types/types_ri_triggers" }
 array = { path = "../../../../_support/types/array" }
 nodes = { path = "../../../../_support/types/nodes" }
+# The std ABI call-frame carrier the step-owned `function_call_invoke_step` seam
+# takes by `&mut` (C's `op->d.func.fcinfo_data`, reused in place per tuple).
+fmgr = { path = "../../../../_support/types/fmgr" }

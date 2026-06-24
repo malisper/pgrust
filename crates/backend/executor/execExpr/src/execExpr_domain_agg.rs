@@ -1887,6 +1887,9 @@ fn emit_eq_column<'mcx>(
             fn_addr: None,
             nargs: 2,
             make_ro: false,
+            // NULLIF/DISTINCT keep the by-OID dispatch path (not the step-owned
+            // carrier hot path), so this stays empty.
+            step_fcinfo: ::core::cell::RefCell::new(None),
         },
     };
     core::expr_eval_push_step(mcx, state, ndstep)?;

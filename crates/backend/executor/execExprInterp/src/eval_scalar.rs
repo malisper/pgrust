@@ -32,7 +32,7 @@
 //! are written out faithfully.
 
 use ::fmgr_seams::{
-    function_call_invoke_datum, function_call_invoke_datum_resolved, function_call_invoke_datum_soft,
+    function_call_invoke_datum, function_call_invoke_datum_soft, function_call_invoke_step,
 };
 // The bare-word newtype: the scalar form the fmgr/arrayfuncs seams and the
 // step-payload eval helpers operate on.
@@ -212,6 +212,46 @@ fn func_step_fn_expr<'a, 'mcx>(
     }
 }
 
+/// Take the step's persistent ABI call frame (C's `op->d.func.fcinfo_data`,
+/// allocated once at `ExecInitFunc`) out of its `RefCell`, or a freshly-built
+/// empty carrier when the slot is empty (first execution) or already taken (a
+/// reentrant call into THIS same step). `put_step_fcinfo` returns it after the
+/// call so the same allocation is reused every tuple. The carrier travels by
+/// value across the seam (the `RefCell` is the interpreter-side home), exactly
+/// the C "fcinfo lives on the step" model — the only divergence is that the dual
+/// fcinfo home (#327) keeps the std ABI carrier and the `'mcx` executor frame
+/// distinct, so this one is the ABI carrier the dispatch needs.
+#[inline]
+fn take_step_fcinfo<'mcx>(
+    state: &ExprState<'mcx>,
+    op: usize,
+) -> ::fmgr::FunctionCallInfoBaseData {
+    match step_data(state, op) {
+        ExprEvalStepData::Func { step_fcinfo, .. } => step_fcinfo
+            .borrow_mut()
+            .take()
+            .unwrap_or_else(|| ::fmgr::FunctionCallInfoBaseData::new(None, 0, 0, None, None)),
+        other => unreachable!("EEOP_FUNCEXPR step carries the wrong payload: {other:?}"),
+    }
+}
+
+/// Return the step's persistent ABI call frame after a call (capacity retained
+/// for the next tuple). A reentrant call's throwaway carrier is simply dropped
+/// if the slot is already occupied.
+#[inline]
+fn put_step_fcinfo<'mcx>(
+    state: &ExprState<'mcx>,
+    op: usize,
+    carrier: ::fmgr::FunctionCallInfoBaseData,
+) {
+    if let ExprEvalStepData::Func { step_fcinfo, .. } = step_data(state, op) {
+        let mut slot = step_fcinfo.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(carrier);
+        }
+    }
+}
+
 /// `ExecInterpExecuteFuncStep` core — the shared body for the `EEOP_FUNCEXPR`
 /// (and strict / fusage) opcodes:
 ///
@@ -279,16 +319,21 @@ pub fn exec_func_step<'mcx>(
                 mcx, fn_oid, collation, &args, &nulls, fn_expr,
             )?
         } else {
-            // mcx-pooling Phase 1: route the hot `EEOP_FUNCEXPR[_STRICT]` call
-            // through the resolution `ExecInitFunc` cached once for this step,
-            // instead of re-resolving `fn_oid` (the `fmgr_isbuiltin`
-            // `BuiltinFunction` String clone + a fresh `FmgrInfo`) on every
-            // tuple. A non-built-in falls through to the by-OID path inside the
-            // seam, so the catalog/secdef/SQL legs are unchanged. C reuses
-            // `op->d.func.fcinfo_data`/`flinfo` here (execExprInterp.c:920).
-            function_call_invoke_datum_resolved::call(
-                mcx, fn_oid, collation, &args, &nulls, fn_expr,
-            )?
+            // C: `fcinfo->isnull = false; d = op->d.func.fn_addr(fcinfo)`
+            // (execExprInterp.c:920) — dispatch through the step's OWN persistent
+            // ABI call frame (`op->d.func.fcinfo_data`), allocated once at
+            // ExecInitFunc and reused in place every tuple. Take the carrier off
+            // the step, dispatch (refilling its `args` in place — no frame pool
+            // take/return), then return it so its capacity is retained. A
+            // reentrant call into THIS same step (the dispatched function
+            // recursing) finds the slot taken and builds a throwaway carrier, so
+            // correctness never depends on availability.
+            let mut carrier = take_step_fcinfo(state, op);
+            let r = function_call_invoke_step::call(
+                mcx, fn_oid, collation, &mut carrier, &args, &nulls, fn_expr,
+            );
+            put_step_fcinfo(state, op, carrier);
+            r?
         };
 
     // *op->resvalue = d;  *op->resnull = fcinfo->isnull;

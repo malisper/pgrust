@@ -913,6 +913,22 @@ pub enum ExprEvalStepData<'mcx> {
         nargs: i32,
         /// make arg0 R/O (used only for NULLIF)
         make_ro: bool,
+        /// The persistent ABI call frame this step dispatches through — C's
+        /// `op->d.func.fcinfo_data`, allocated ONCE at `ExecInitFunc` and reused
+        /// in place every tuple (no per-call frame allocation: `EEOP_FUNCEXPR`
+        /// in execExprInterp.c just refills `fcinfo->args[i]` and calls
+        /// `fn_addr(fcinfo)`). The real `std` fmgr ABI carrier
+        /// (`::fmgr::FunctionCallInfoBaseData`) — distinct from the trimmed
+        /// `'mcx` executor frame in [`fcinfo_data`](Self::Func::fcinfo_data),
+        /// which carries only the OID/collation resolution metadata. The hot
+        /// interpreter path `take()`s this carrier, fills its `args` in place,
+        /// dispatches `fn_addr` directly, reads the result back, and returns the
+        /// carrier (so its `args`/`ref_args` capacity is retained across rows).
+        /// A reentrant call (the dispatched function recursing into THIS same
+        /// step) finds the slot empty and builds a throwaway carrier, so
+        /// correctness never depends on availability. `None` until the first
+        /// execution (the carrier is lazily built sized for `nargs`).
+        step_fcinfo: ::core::cell::RefCell<Option<::fmgr::FunctionCallInfoBaseData>>,
     },
     /// `boolexpr` — for EEOP_BOOL_*_STEP.
     BoolExpr {

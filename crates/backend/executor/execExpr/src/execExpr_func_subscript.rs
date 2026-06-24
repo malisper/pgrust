@@ -657,6 +657,10 @@ pub(crate) fn exec_init_func<'mcx>(
         fn_addr: None,
         nargs,
         make_ro: false,
+        // C's `op->d.func.fcinfo_data` is allocated once HERE at ExecInitFunc;
+        // this owned model builds the real ABI carrier lazily on first execution
+        // (sized for nargs), so it starts empty.
+        step_fcinfo: ::core::cell::RefCell::new(None),
     };
 
     Ok(())

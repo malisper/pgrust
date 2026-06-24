@@ -67,6 +67,10 @@ nodes_core_seams = { path = "../../nodes/nodes_core_seams" }
 varlena_seams = { path = "../../utils/adt/varlena_seams" }
 stack_depth_seams = { path = "../../utils/misc/stack_depth_seams" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+# The std ABI call-frame carrier (`FunctionCallInfoBaseData`) the interpreter
+# takes off the `EEOP_FUNCEXPR` step and hands the dispatch seam by `&mut` (C's
+# `op->d.func.fcinfo_data`, reused in place per tuple).
+fmgr = { path = "../../../_support/types/fmgr" }
 pgstat_function_seams = { path = "../../utils/activity/pgstat_function_seams" }
 types_pgstat = { path = "../../../_support/types/types_pgstat" }
 tuplesort_seams = { path = "../../utils/sort/tuplesort_seams" }
