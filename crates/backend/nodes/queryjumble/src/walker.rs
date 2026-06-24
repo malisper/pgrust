@@ -966,6 +966,18 @@ fn jumble_node_body(jstate: &mut JumbleState, tag: NodeTag, node: &Node) {
             jn_opt(jstate, s.collClause.as_deref());
             jn_list(jstate, s.constraints.as_slice());
         }
+        ntag::T_AlterDomainStmt => {
+            // `_jumbleAlterDomainStmt`: subtype, typeName, name, def, behavior,
+            // missing_ok. Distinguishes `ALTER DOMAIN d SET DEFAULT` from
+            // `ALTER DOMAIN d ADD CONSTRAINT ...`.
+            let s = node.expect_alterdomainstmt();
+            jstate.append_jumble(&[s.subtype as u8]);
+            jn_list(jstate, s.typeName.as_slice());
+            jumble_opt_cstring(jstate, s.name.as_deref());
+            jn_opt(jstate, s.def.as_deref());
+            jf_u32(jstate, s.behavior as u32);
+            jf_bool(jstate, s.missing_ok);
+        }
         ntag::T_DefineStmt => {
             // `_jumbleDefineStmt` (CREATE TYPE / AGGREGATE / OPERATOR / etc.).
             let s = node.expect_definestmt();
@@ -1030,6 +1042,112 @@ fn jumble_node_body(jstate: &mut JumbleState, tag: NodeTag, node: &Node) {
             // `generate_series(1,10)` / `generate_series(2,20)` normalize.
             let s = node.expect_rangetblfunction();
             jn_opt(jstate, s.funcexpr.as_deref());
+        }
+
+        // ===================================================================
+        // Raw (un-analyzed) parse-tree query nodes. These appear as the inner
+        // query of utility statements that store the verbatim parse tree —
+        // CREATE VIEW's `query`, COPY's `query` (the COPY (SELECT/INSERT/...)
+        // form), CREATE RULE's actions. In a raw tree, constants are `A_Const`
+        // nodes whose VALUES are jumbled (not location-recorded), so two raw
+        // queries differing only in a literal get DISTINCT ids and keep their
+        // verbatim text — matching how C jumbles these (no normalization of a
+        // utility statement's verbatim raw sub-query).
+        // ===================================================================
+        ntag::T_SelectStmt => {
+            jumble_select_stmt_fields(jstate, node.expect_selectstmt());
+        }
+        ntag::T_InsertStmt => {
+            // `_jumbleInsertStmt`.
+            let s = node.expect_insertstmt();
+            jumble_opt_range_var(jstate, s.relation.as_deref());
+            jn_list(jstate, s.cols.as_slice());
+            jn_opt(jstate, s.selectStmt.as_deref());
+            jumble_opt_on_conflict_clause(jstate, s.onConflictClause.as_deref());
+            jumble_opt_returning_clause(jstate, s.returningClause.as_deref());
+            jumble_opt_with_clause(jstate, s.withClause.as_deref());
+            jf_u32(jstate, s.r#override as u32);
+        }
+        ntag::T_UpdateStmt => {
+            // `_jumbleUpdateStmt`.
+            let s = node.expect_updatestmt();
+            jumble_opt_range_var(jstate, s.relation.as_deref());
+            jn_list(jstate, s.targetList.as_slice());
+            jn_opt(jstate, s.whereClause.as_deref());
+            jn_list(jstate, s.fromClause.as_slice());
+            jumble_opt_returning_clause(jstate, s.returningClause.as_deref());
+            jumble_opt_with_clause(jstate, s.withClause.as_deref());
+        }
+        ntag::T_DeleteStmt => {
+            // `_jumbleDeleteStmt`.
+            let s = node.expect_deletestmt();
+            jumble_opt_range_var(jstate, s.relation.as_deref());
+            jn_list(jstate, s.usingClause.as_slice());
+            jn_opt(jstate, s.whereClause.as_deref());
+            jumble_opt_returning_clause(jstate, s.returningClause.as_deref());
+            jumble_opt_with_clause(jstate, s.withClause.as_deref());
+        }
+        ntag::T_ResTarget => {
+            // `_jumbleResTarget`: name, indirection, val.
+            let s = node.expect_restarget();
+            jumble_opt_cstring(jstate, s.name.as_deref());
+            jn_list(jstate, s.indirection.as_slice());
+            jn_opt(jstate, s.val.as_deref());
+        }
+        ntag::T_A_Expr => {
+            // `_jumbleA_Expr`: kind, name, lexpr, rexpr.
+            let s = node.expect_a_expr();
+            jf_u32(jstate, s.kind as u32);
+            jn_list(jstate, s.name.as_slice());
+            jn_opt(jstate, s.lexpr.as_deref());
+            jn_opt(jstate, s.rexpr.as_deref());
+        }
+        ntag::T_ColumnRef => {
+            // `_jumbleColumnRef`: fields.
+            let s = node.expect_columnref();
+            jn_list(jstate, s.fields.as_slice());
+        }
+        ntag::T_FuncCall => {
+            // `_jumbleFuncCall`.
+            let s = node.expect_funccall();
+            jn_list(jstate, s.funcname.as_slice());
+            jn_list(jstate, s.args.as_slice());
+            jn_list(jstate, s.agg_order.as_slice());
+            jn_opt(jstate, s.agg_filter.as_deref());
+            jumble_opt_window_def(jstate, s.over.as_deref());
+            jf_bool(jstate, s.agg_within_group);
+            jf_bool(jstate, s.agg_star);
+            jf_bool(jstate, s.agg_distinct);
+            jf_bool(jstate, s.func_variadic);
+            jf_u32(jstate, s.funcformat as u32);
+        }
+        ntag::T_TypeCast => {
+            // `_jumbleTypeCast`: arg, typeName.
+            let s = node.expect_typecast();
+            jn_opt(jstate, s.arg.as_deref());
+            jumble_opt_type_name(jstate, s.typeName.as_deref());
+        }
+        ntag::T_A_Indices => {
+            // `_jumbleA_Indices`: is_slice, lidx, uidx.
+            let s = node.expect_a_indices();
+            jf_bool(jstate, s.is_slice);
+            jn_opt(jstate, s.lidx.as_deref());
+            jn_opt(jstate, s.uidx.as_deref());
+        }
+        ntag::T_A_Indirection => {
+            // `_jumbleA_Indirection`: arg, indirection.
+            let s = node.expect_a_indirection();
+            jn_opt(jstate, s.arg.as_deref());
+            jn_list(jstate, s.indirection.as_slice());
+        }
+        ntag::T_A_Star => {
+            // `_jumbleA_Star`: no significant fields (the tag distinguishes it).
+        }
+        ntag::T_ReturningOption => {
+            // `_jumbleReturningOption`: option, value.
+            let s = node.expect_returningoption();
+            jf_u32(jstate, s.option as u32);
+            jumble_opt_cstring(jstate, s.value.as_deref());
         }
 
         ntag::T_Integer
@@ -1180,6 +1298,118 @@ fn jumble_opt_collate_clause(
             _jumble_tag(jstate, ntag::T_CollateClause);
             jn_opt(jstate, cc.arg.as_deref());
             jn_list(jstate, cc.collname.as_slice());
+        }
+        None => jstate.append_jumble_null(),
+    }
+}
+
+/// `_jumbleSelectStmt`'s body (the tag is emitted by the caller). Shared by the
+/// `T_SelectStmt` arm and the typed `larg`/`rarg` recursion below.
+fn jumble_select_stmt_fields(jstate: &mut JumbleState, s: &::nodes::rawnodes::SelectStmt) {
+    jn_list(jstate, s.distinctClause.as_slice());
+    jn_opt(jstate, s.intoClause.as_deref());
+    jn_list(jstate, s.targetList.as_slice());
+    jn_list(jstate, s.fromClause.as_slice());
+    jn_opt(jstate, s.whereClause.as_deref());
+    jn_list(jstate, s.groupClause.as_slice());
+    jf_bool(jstate, s.groupDistinct);
+    jn_opt(jstate, s.havingClause.as_deref());
+    jn_list(jstate, s.windowClause.as_slice());
+    jn_list(jstate, s.valuesLists.as_slice());
+    jn_list(jstate, s.sortClause.as_slice());
+    jn_opt(jstate, s.limitOffset.as_deref());
+    jn_opt(jstate, s.limitCount.as_deref());
+    jf_u32(jstate, s.limitOption as u32);
+    jn_list(jstate, s.lockingClause.as_slice());
+    jumble_opt_with_clause(jstate, s.withClause.as_deref());
+    jf_u32(jstate, s.op as u32);
+    jf_bool(jstate, s.all);
+    jumble_opt_select_stmt(jstate, s.larg.as_deref());
+    jumble_opt_select_stmt(jstate, s.rarg.as_deref());
+}
+
+/// `JUMBLE_NODE(larg/rarg)` for a typed `Option<PgBox<SelectStmt>>` (set-op
+/// arms): emit the `T_SelectStmt` tag + body or AppendJumbleNull.
+fn jumble_opt_select_stmt(jstate: &mut JumbleState, s: Option<&::nodes::rawnodes::SelectStmt>) {
+    match s {
+        Some(sel) => {
+            _jumble_tag(jstate, ntag::T_SelectStmt);
+            jumble_select_stmt_fields(jstate, sel);
+        }
+        None => jstate.append_jumble_null(),
+    }
+}
+
+/// `JUMBLE_NODE(withClause)` for a typed `Option<PgBox<WithClause>>`
+/// (`_jumbleWithClause`: ctes, recursive). Emits the `T_WithClause` tag + body
+/// or AppendJumbleNull.
+fn jumble_opt_with_clause(jstate: &mut JumbleState, w: Option<&::nodes::rawnodes::WithClause>) {
+    match w {
+        Some(wc) => {
+            _jumble_tag(jstate, ntag::T_WithClause);
+            jn_list(jstate, wc.ctes.as_slice());
+            jf_bool(jstate, wc.recursive);
+        }
+        None => jstate.append_jumble_null(),
+    }
+}
+
+/// `JUMBLE_NODE(returningClause)` for a typed `Option<PgBox<ReturningClause>>`
+/// (`_jumbleReturningClause`: options, exprs).
+fn jumble_opt_returning_clause(
+    jstate: &mut JumbleState,
+    r: Option<&::nodes::rawnodes::ReturningClause>,
+) {
+    match r {
+        Some(rc) => {
+            _jumble_tag(jstate, ntag::T_ReturningClause);
+            jn_list(jstate, rc.options.as_slice());
+            jn_list(jstate, rc.exprs.as_slice());
+        }
+        None => jstate.append_jumble_null(),
+    }
+}
+
+/// `JUMBLE_NODE(onConflictClause)` for a typed `Option<PgBox<OnConflictClause>>`
+/// (`_jumbleOnConflictClause`: action, infer, targetList, whereClause). The
+/// `infer` child (`InferClause`) is recursed inline.
+fn jumble_opt_on_conflict_clause(
+    jstate: &mut JumbleState,
+    o: Option<&::nodes::rawnodes::OnConflictClause>,
+) {
+    match o {
+        Some(oc) => {
+            _jumble_tag(jstate, ntag::T_OnConflictClause);
+            jf_u32(jstate, oc.action as u32);
+            match oc.infer.as_deref() {
+                Some(inf) => {
+                    _jumble_tag(jstate, ntag::T_InferClause);
+                    jn_list(jstate, inf.indexElems.as_slice());
+                    jn_opt(jstate, inf.whereClause.as_deref());
+                    jumble_opt_cstring(jstate, inf.conname.as_deref());
+                }
+                None => jstate.append_jumble_null(),
+            }
+            jn_list(jstate, oc.targetList.as_slice());
+            jn_opt(jstate, oc.whereClause.as_deref());
+        }
+        None => jstate.append_jumble_null(),
+    }
+}
+
+/// `JUMBLE_NODE(over)` for a typed `Option<PgBox<WindowDef>>`
+/// (`_jumbleWindowDef`). Emits the `T_WindowDef` tag + body or AppendJumbleNull.
+fn jumble_opt_window_def(jstate: &mut JumbleState, d: Option<&::nodes::rawnodes::WindowDef>) {
+    match d {
+        Some(wd) => {
+            _jumble_tag(jstate, ntag::T_WindowDef);
+            jumble_opt_cstring(jstate, wd.name.as_deref());
+            jumble_opt_cstring(jstate, wd.refname.as_deref());
+            jn_list(jstate, wd.partitionClause.as_slice());
+            jn_list(jstate, wd.orderClause.as_slice());
+            jf_i32(jstate, wd.frameOptions);
+            jn_opt(jstate, wd.startOffset.as_deref());
+            jn_opt(jstate, wd.endOffset.as_deref());
         }
         None => jstate.append_jumble_null(),
     }
