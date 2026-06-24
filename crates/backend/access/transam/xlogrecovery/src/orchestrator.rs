@@ -32,7 +32,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use ::mcx::Mcx;
+use ::mcx::{Mcx, PgString};
 use ::control::{CheckPoint as CtlCheckPoint, ControlFileData, DBState};
 use ::types_core::{InvalidXLogRecPtr, TimeLineID, XLogRecPtr};
 use ::types_error::{ErrorLocation, PgError, PgResult, DEBUG1, FATAL, LOG, PANIC, WARNING};
@@ -166,6 +166,18 @@ fn read_recovery_signal_file(st: &mut XLogRecoveryState) -> PgResult<()> {
 fn validate_recovery_parameters(st: &mut XLogRecoveryState, mcx: Mcx<'_>) -> PgResult<()> {
     if !st.archive_recovery_requested {
         return Ok(());
+    }
+
+    // In C, `recoveryRestoreCommand` / `PrimaryConnInfo` ARE the GUC globals.
+    // This port mirrors them as state fields, but the GUC engine writes the
+    // backing cells (when it parses `restore_command` / `primary_conninfo`), not
+    // these snapshot fields. Pull the live GUC values in before the compulsory-
+    // parameter checks so the standby/archive-recovery validation sees them.
+    if let Some(cmd) = crate::gucvars::recovery_restore_command() {
+        st.recovery_restore_command = cmd;
+    }
+    if let Some(conninfo) = crate::gucvars::primary_conn_info() {
+        st.primary_conn_info = conninfo;
     }
 
     // Check for compulsory parameters.
@@ -1013,6 +1025,25 @@ pub(crate) fn standby_mode() -> bool {
         return false;
     }
     recovery_state_mut().standby_mode
+}
+
+/// `recoveryRestoreCommand` (xlogrecovery.c global `char *recoveryRestoreCommand`)
+/// read for the `recovery_restore_command` seam install — the configured
+/// `restore_command`. `RestoreArchivedFile` (xlogarchive.c) reads it to build the
+/// restore command; in standby mode it may be unset (empty), which the caller
+/// treats as "archive not available". Returns `None` before the recovery-state
+/// holder exists; otherwise the command charged to `mcx` (the `pstrdup` analog).
+pub(crate) fn recovery_restore_command(mcx: Mcx<'_>) -> Option<PgString<'_>> {
+    // In C, `recoveryRestoreCommand` is the GUC global itself; read the live GUC
+    // backing (set by the GUC engine when it parses `restore_command = '...'`),
+    // not the recovery-state snapshot field (which is not synced from the GUC).
+    let cmd = crate::gucvars::recovery_restore_command()?;
+    let mut s = PgString::new_in(mcx);
+    // try_push_str only fails on allocation failure; the recovery command is a
+    // small GUC string, so unwrap is faithful to the C `pstrdup` (which longjmps
+    // on OOM — here the Err would propagate identically if it could occur).
+    s.try_push_str(&cmd).expect("recovery_restore_command");
+    Some(s)
 }
 
 // --- File-system helpers (the C stat/unlink/AllocateFile/pg_fsync/durable_rename

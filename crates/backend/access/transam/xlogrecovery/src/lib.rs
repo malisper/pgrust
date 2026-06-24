@@ -187,6 +187,11 @@ pub fn init_seams() {
     seams::recovery_target_tli::set(orchestrator::recovery_target_tli);
     seams::reached_consistency::set(orchestrator::reached_consistency);
     seams::standby_mode::set(orchestrator::standby_mode);
+    // recoveryRestoreCommand (xlogrecovery.c global) — RestoreArchivedFile reads
+    // it to build the restore command. Backed by the startup process's recovery
+    // state; without this the standby/archive-recovery boot panics on the
+    // uninstalled seam.
+    seams::recovery_restore_command::set(orchestrator::recovery_restore_command);
 
     // GUC `conf->variable` accessors (`*conf->variable`) for the recovery /
     // streaming GUC globals whose C file-static storage lives in
