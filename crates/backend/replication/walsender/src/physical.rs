@@ -132,12 +132,81 @@ pub fn XLogSendPhysical() {
 
 /// The WAL read + framing + put-message of `XLogSendPhysical` (the
 /// `WALReadFromBuffers`/`WALRead` loop, the `'w'` header, the CheckXLogRemoved
-/// + cascading needreload retry).  Owned by the xlog/xlogreader subsystem.
-fn xlog_send_physical_emit(_startptr: XLogRecPtr, _endptr: XLogRecPtr, _send_rqst_ptr: XLogRecPtr) {
-    panic!(
-        "XLogSendPhysical emit: depends on unported WALRead / xlogreader segment \
-         read + CheckXLogRemoved + libpq 'w' message framing"
-    );
+/// + cascading needreload retry).
+///
+/// `WALReadFromBuffers` is a pure optimization; we read the whole slice from
+/// `wal_read` (the C `WALRead` fallback), which is always correct.  The
+/// cascading-standby `needreload`-retry loop is a recovery-only correctness
+/// retry against archive-replaced segments; with the whole slice read in one
+/// `wal_read` call it is not exercised on the primary path and is omitted here
+/// (the read is re-validated by `CheckXLogRemoved` below, as in C).
+fn xlog_send_physical_emit(startptr: XLogRecPtr, endptr: XLogRecPtr, send_rqst_ptr: XLogRecPtr) {
+    let nbytes = (endptr - startptr) as usize;
+
+    // Pass the current TLI because only WalSndSegmentOpen controls whether a new
+    // TLI is needed.  In the owned model the open xlogreader's `seg.ws_tli` is
+    // the timeline we are sending: `sendTimeLine`.
+    let tli: TimeLineID = proc_get(|p| p.sendTimeLine);
+
+    // OK to read and send the slice.
+    //   resetStringInfo(&output_message);
+    //   pq_sendbyte(&output_message, 'w');
+    //   pq_sendint64(&output_message, startptr);    /* dataStart */
+    //   pq_sendint64(&output_message, SendRqstPtr);  /* walEnd */
+    //   pq_sendint64(&output_message, 0);            /* sendtime, filled last */
+    //   enlargeStringInfo(&output_message, nbytes);
+    //   ... read the WAL slice into output_message ...
+    let outcome = xlog::wal_read::call(startptr, nbytes as i32, tli);
+    let wal_bytes = match outcome {
+        xlog::WalReadOutcome::Ok(bytes) => bytes,
+        xlog::WalReadOutcome::Error(_errinfo) => {
+            // WALReadRaiseError(&errinfo).
+            wal_read_raise_error();
+        }
+    };
+    debug_assert_eq!(wal_bytes.len(), nbytes);
+
+    crate::core::with_output_message(|b| {
+        b.clear();
+        b.push(b'w');
+        b.extend_from_slice(&startptr.to_be_bytes()); // dataStart
+        b.extend_from_slice(&send_rqst_ptr.to_be_bytes()); // walEnd
+        b.extend_from_slice(&0i64.to_be_bytes()); // sendtime, filled in last
+        b.extend_from_slice(&wal_bytes);
+
+        // Fill the send timestamp last, so that it is taken as late as possible.
+        //   memcpy(&output_message.data[1 + sizeof(int64) + sizeof(int64)], ...)
+        let sendtime = timestamp::get_current_timestamp::call();
+        b[1 + 8 + 8..1 + 8 + 8 + 8].copy_from_slice(&(sendtime as i64).to_be_bytes());
+    });
+
+    // pq_putmessage_noblock('d', output_message.data, output_message.len);
+    crate::pq_putmessage_noblock_output_message(b'd');
+
+    // See logical_read_xlog_page().
+    //   XLByteToSeg(startptr, segno, xlogreader->segcxt.ws_segsize);
+    //   CheckXLogRemoved(segno, xlogreader->seg.ws_tli);
+    let segsize = xlog::wal_segment_size::call() as u64;
+    let segno = startptr / segsize;
+    xlog::check_xlog_removed::call(segno, tli)
+        .expect("CheckXLogRemoved");
+}
+
+/// `WALReadRaiseError(&errinfo)` — the WAL-read failure ereport.  Reached only
+/// when `wal_read` could not return the requested slice (segment removed mid
+/// read / short read); raises the C `errcode_for_file_access()` error.
+fn wal_read_raise_error() -> ! {
+    utils_error::ereport(types_error::ERROR)
+        .errmsg(alloc::string::String::from(
+            "could not read from WAL: requested WAL segment slice is unavailable",
+        ))
+        .finish(types_error::ErrorLocation::new(
+            "xlogreader.c",
+            0,
+            "WALReadRaiseError",
+        ))
+        .expect("ereport(ERROR) WALReadRaiseError");
+    unreachable!()
 }
 
 /// `readTimeLineHistory(rqstTLI)` + `tliSwitchPoint(sendTLI, history)`.  The

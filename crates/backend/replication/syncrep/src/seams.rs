@@ -114,6 +114,7 @@ pub fn init_seams() {
     own::sync_rep_update_sync_standbys_defined::set(sync_rep_update_sync_standbys_defined);
     own::sync_rep_init_config::set(sync_rep_init_config);
     own::sync_rep_get_candidate_standbys::set(sync_rep_get_candidate_standbys);
+    own::sync_rep_release_waiters::set(crate::SyncRepReleaseWaiters);
     own::sync_rep_config_is_priority::set(sync_rep_config_is_priority);
 
     // GUC var accessor for `synchronous_standby_names` (`char *SyncRepStandbyNames`,

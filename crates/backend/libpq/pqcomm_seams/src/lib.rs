@@ -85,6 +85,30 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pq_getbyte_if_available(&c)` (`libpq/pqcomm.c`) — get the next byte from
+    /// the connection if one is available without blocking. Returns `Ok(Some(c))`
+    /// if a byte was read, `Ok(None)` if none was available without blocking
+    /// (the C `r == 0`), and `Err`/`Ok(Some)`-with the C `r < 0` mapped to
+    /// returning the negative count is folded into the contract: a closed/EOF
+    /// connection is reported as `Ok(Some(0xFF))`? No — see below: the seam
+    /// returns `Ok(None)` for "no data", `Ok(Some(byte))` for a read byte, and
+    /// `Err` for the unexpected-EOF / error (`r < 0`).
+    pub fn pq_getbyte_if_available() -> types_error::PgResult<Option<u8>>
+);
+
+seam_core::seam!(
+    /// `pq_getmessage(&buf, maxlen)` (`libpq/pqcomm.c`) — read one complete
+    /// protocol message body (after the type byte has already been consumed by
+    /// `pq_getbyte_if_available`). Returns `Ok(Some(body))` with the message
+    /// payload bytes, or `Ok(None)` for the C `EOF` return (peer closed). `Err`
+    /// carries the over-length / interrupt `ereport(ERROR)`.
+    pub fn pq_getmessage<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        maxlen: i32,
+    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, u8>>>
+);
+
+seam_core::seam!(
     /// `pq_peekbyte()` (`libpq/pqcomm.c`) — peek at the next input byte without
     /// consuming it; returns the byte (0-255) or `EOF` (-1). `Err` carries the
     /// blocking-wait interrupt-processing `ereport(ERROR)` reachable through

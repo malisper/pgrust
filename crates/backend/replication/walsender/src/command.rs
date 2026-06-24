@@ -195,6 +195,12 @@ fn begin_replication_command(cmd_string: &str) {
     crate::core::with_output_message(|b| b.clear());
 }
 
+/// Crate-visible wrapper around `end_replication_command` for the
+/// START_REPLICATION result-set tail (start_replication.rs).
+pub(crate) fn end_replication_command_pub(cmdtag: &str) {
+    end_replication_command(cmdtag)
+}
+
 /// `EndReplicationCommand(cmdtag)` + `debug_query_string = NULL`.
 fn end_replication_command(cmdtag: &str) {
     dest::end_replication_command::call(cmdtag.to_string())
@@ -595,12 +601,214 @@ pub fn UploadManifest() {
     basebackup::upload_manifest::call().expect("UploadManifest");
 }
 
-/// `static void CreateReplicationSlot(CreateReplicationSlotCmd *cmd)`.
-pub fn CreateReplicationSlot(_cmd: crate::core::CreateReplicationSlotCmd) {
-    panic!(
-        "CreateReplicationSlot: depends on unported slot creation + logical \
-         decoding context setup + libpq result framing"
-    );
+/// `static void parseCreateReplSlotOptions(...)` (walsender.c:1114).
+///
+/// Faithful port of the option-parsing helper, restricted to the option set the
+/// physical-slot path needs (`reserve_wal`). The logical-only options
+/// (`snapshot`/`two_phase`/`failover`) are still recognized so that supplying
+/// them on a PHYSICAL slot raises the same "conflicting or redundant options"
+/// syntax error C raises, and an unknown option raises the same `elog(ERROR)`.
+/// `ereport(ERROR, errcode(ERRCODE_SYNTAX_ERROR), errmsg("conflicting or
+/// redundant options"))` — the shared error raised by parseCreateReplSlotOptions.
+fn conflicting_or_redundant() -> types_error::PgResult<()> {
+    utils_error::ereport(types_error::ERROR)
+        .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+        .errmsg(alloc::string::String::from("conflicting or redundant options"))
+        .finish(types_error::ErrorLocation::new(
+            "walsender.c",
+            0,
+            "parseCreateReplSlotOptions",
+        ))
+}
+
+fn parse_create_repl_slot_options(
+    cmd: &crate::core::CreateReplicationSlotCmd,
+) -> types_error::PgResult<bool> {
+    use crate::core::ReplicationKind;
+
+    let mut reserve_wal = false;
+    let mut reserve_wal_given = false;
+    let mut snapshot_action_given = false;
+    let mut two_phase_given = false;
+    let mut failover_given = false;
+
+    for defel in &cmd.options {
+        let defname = defel.defname.as_deref().unwrap_or("");
+        if defname == "snapshot" {
+            if snapshot_action_given || cmd.kind != ReplicationKind::REPLICATION_KIND_LOGICAL {
+                conflicting_or_redundant()?;
+            }
+            snapshot_action_given = true;
+        } else if defname == "reserve_wal" {
+            if reserve_wal_given || cmd.kind != ReplicationKind::REPLICATION_KIND_PHYSICAL {
+                conflicting_or_redundant()?;
+            }
+            reserve_wal_given = true;
+            // *reserve_wal = defGetBoolean(defel);
+            // The repl grammar only ever attaches a `Node::Boolean` arg here
+            // (RESERVE_WAL -> Boolean(true)); a missing arg means `true`, exactly
+            // as defGetBoolean treats a NULL arg.
+            reserve_wal = match defel.arg.as_deref() {
+                Some(parsenodes::Node::Boolean(b)) => b.boolval,
+                None => true,
+                _ => {
+                    utils_error::ereport(types_error::ERROR)
+                        .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+                        .errmsg(alloc::string::String::from("reserve_wal requires a Boolean value"))
+                        .finish(types_error::ErrorLocation::new(
+                            "walsender.c",
+                            0,
+                            "parseCreateReplSlotOptions",
+                        ))?;
+                    unreachable!()
+                }
+            };
+        } else if defname == "two_phase" {
+            if two_phase_given || cmd.kind != ReplicationKind::REPLICATION_KIND_LOGICAL {
+                conflicting_or_redundant()?;
+            }
+            two_phase_given = true;
+        } else if defname == "failover" {
+            if failover_given || cmd.kind != ReplicationKind::REPLICATION_KIND_LOGICAL {
+                conflicting_or_redundant()?;
+            }
+            failover_given = true;
+        } else {
+            utils_error::ereport(types_error::ERROR)
+                .errmsg(alloc::format!("unrecognized option: {defname}"))
+                .finish(types_error::ErrorLocation::new(
+                    "walsender.c",
+                    0,
+                    "parseCreateReplSlotOptions",
+                ))?;
+            unreachable!()
+        }
+    }
+
+    Ok(reserve_wal)
+}
+
+/// `static void CreateReplicationSlot(CreateReplicationSlotCmd *cmd)`
+/// (walsender.c:1191).
+///
+/// Physical-slot path is fully ported (this is what `pg_basebackup` exercises
+/// when it creates its default temporary physical slot). The LOGICAL path —
+/// which requires a logical-decoding context + snapshot builder — is not yet
+/// ported and raises a graceful ERROR.
+pub fn CreateReplicationSlot(cmd: crate::core::CreateReplicationSlotCmd) {
+    CreateReplicationSlotImpl(cmd).expect("CreateReplicationSlot")
+}
+
+fn CreateReplicationSlotImpl(
+    cmd: crate::core::CreateReplicationSlotCmd,
+) -> types_error::PgResult<()> {
+    use crate::core::{InvalidOid, ReplicationKind, TEXTOID};
+    use replication_slot_2::ReplicationSlotPersistency;
+
+    // Assert(!MyReplicationSlot);  (not modeled — slot ownership is implicit)
+
+    // parseCreateReplSlotOptions(cmd, &reserve_wal, ...);
+    let reserve_wal = parse_create_repl_slot_options(&cmd)?;
+
+    // The repo has no ambient memory context for the walsender command path, so
+    // own one for the duration of this command (as IdentifySystem does).
+    let ctx = mcx::MemoryContext::new("CREATE_REPLICATION_SLOT");
+    let mcx = ctx.mcx();
+
+    let slotname = cmd.slotname.as_deref().unwrap_or("");
+
+    if cmd.kind == ReplicationKind::REPLICATION_KIND_PHYSICAL {
+        // ReplicationSlotCreate(cmd->slotname, false,
+        //     cmd->temporary ? RS_TEMPORARY : RS_PERSISTENT, false, false, false);
+        let persistency = if cmd.temporary {
+            ReplicationSlotPersistency::RS_TEMPORARY
+        } else {
+            ReplicationSlotPersistency::RS_PERSISTENT
+        };
+        crate::slot::replication_slot_create::call(
+            slotname, false, persistency, false, false, false, InvalidOid,
+        )?;
+
+        if reserve_wal {
+            // ReplicationSlotReserveWal();
+            crate::slot::replication_slot_reserve_wal::call()?;
+            // ReplicationSlotMarkDirty();
+            crate::slot::replication_slot_mark_dirty::call();
+            // if (!cmd->temporary) ReplicationSlotSave();
+            if !cmd.temporary {
+                crate::slot::replication_slot_save::call()?;
+            }
+        }
+    } else {
+        // LOGICAL slot creation needs a logical-decoding context + snapshot
+        // builder, which are not yet ported.
+        crate::slot::replication_slot_release::call().ok();
+        return utils_error::ereport(types_error::ERROR)
+            .errmsg(alloc::string::String::from(
+                "CREATE_REPLICATION_SLOT ... LOGICAL: logical-decoding context \
+                 setup is not yet ported",
+            ))
+            .finish(types_error::ErrorLocation::new(
+                "walsender.c",
+                0,
+                "CreateReplicationSlot",
+            ));
+    }
+
+    // snprintf(xloc, sizeof(xloc), "%X/%X",
+    //          LSN_FORMAT_ARGS(MyReplicationSlot->data.confirmed_flush));
+    let confirmed = crate::slot::slot_confirmed_flush::call();
+    let xloc = alloc::format!("{:X}/{:X}", (confirmed >> 32) as u32, confirmed as u32);
+
+    // dest = CreateDestReceiver(DestRemoteSimple);
+    let dest = dest::create_dest_receiver::call(types_dest::CommandDest::RemoteSimple);
+
+    // tupdesc = CreateTemplateTupleDesc(4); four TEXT columns.
+    let mut tupdesc = tupdesc::CreateTemplateTupleDesc(mcx, 4)?;
+    tupdesc::TupleDescInitBuiltinEntry(
+        &mut tupdesc, 1, "slot_name", TEXTOID, -1, 0,
+    )?;
+    tupdesc::TupleDescInitBuiltinEntry(
+        &mut tupdesc, 2, "consistent_point", TEXTOID, -1, 0,
+    )?;
+    tupdesc::TupleDescInitBuiltinEntry(
+        &mut tupdesc, 3, "snapshot_name", TEXTOID, -1, 0,
+    )?;
+    tupdesc::TupleDescInitBuiltinEntry(
+        &mut tupdesc, 4, "output_plugin", TEXTOID, -1, 0,
+    )?;
+    let tupdesc = Some(mcx::alloc_in(mcx, tupdesc)?);
+
+    // tstate = begin_tup_output_tupdesc(dest, tupdesc, &TTSOpsVirtual);
+    let mut tstate = execTuples_seams::begin_tup_output_tupdesc::call(
+        mcx,
+        dest,
+        tupdesc,
+        nodes::TupleSlotKind::Virtual,
+    )?;
+
+    // slot_name = NameStr(MyReplicationSlot->data.name);
+    let slot_name = crate::slot::slot_name::call();
+    let v0 = varlena_seams::cstring_to_text_v::call(mcx, &slot_name)?;
+    // consistent wal location.
+    let v1 = varlena_seams::cstring_to_text_v::call(mcx, &xloc)?;
+    // snapshot name — always NULL on the physical path (no exported snapshot).
+    let v2 = types_tuple::Datum::null();
+    // plugin, or NULL if none — always NULL on the physical path.
+    let v3 = types_tuple::Datum::null();
+
+    let values = [v0, v1, v2, v3];
+    let nulls = [false, false, true, true];
+
+    // do_tup_output(tstate, values, nulls);
+    execTuples_seams::do_tup_output::call(mcx, &mut tstate, &values, &nulls)?;
+    // end_tup_output(tstate);
+    execTuples_seams::end_tup_output::call(mcx, tstate)?;
+
+    // ReplicationSlotRelease();
+    crate::slot::replication_slot_release::call()?;
+
+    Ok(())
 }
 
 /// `static void DropReplicationSlot(DropReplicationSlotCmd *cmd)`.

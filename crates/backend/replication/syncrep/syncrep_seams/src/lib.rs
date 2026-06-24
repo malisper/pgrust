@@ -35,6 +35,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SyncRepReleaseWaiters()` (syncrep.c) — update the synchronous-standby
+    /// LSNs from `MyWalSnd` and wake any backends whose commit can now be
+    /// released. Called by the walsender on each standby reply (non-cascading).
+    pub fn sync_rep_release_waiters() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `SyncRepGetCandidateStandbys(&standbys)` (syncrep.c) — the currently
     /// active synchronous standbys. Returned as `(walsnd_index, pid)` pairs (the
     /// only fields `pg_stat_get_wal_senders` matches on). Infallible (a shared

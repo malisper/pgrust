@@ -933,6 +933,7 @@ pub fn init_seams() {
     // segment read backing `read_local_xlog_page` (used by XlogReadTwoPhaseData
     // and other local-WAL readers).
     s::wal_read::set(write::wal_read);
+    s::check_xlog_removed::set(driver::CheckXLogRemoved);
 
     // xlog.c GUC-value reads consumed by the checkpointer aux-process main loop
     // (CheckArchiveTimeout / IsCheckpointOnSchedule). `XLogArchiveTimeout` is the

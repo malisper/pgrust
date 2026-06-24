@@ -2114,6 +2114,40 @@ fn pq_getbytes_seam(mcx: Mcx<'_>, len: usize) -> PgResult<Option<PgVec<'_, u8>>>
     Ok(Some(buf))
 }
 
+/// Adapter for the `pq_getbyte_if_available` seam: `Ok(Some(byte))` if a byte
+/// was read (C `r == 1`), `Ok(None)` if none was available without blocking
+/// (C `r == 0`), `Err` on the unexpected-EOF / error (C `r < 0`).
+fn pq_getbyte_if_available_seam() -> PgResult<Option<u8>> {
+    let mut c: u8 = 0;
+    let r = pq_getbyte_if_available(&mut c)?;
+    if r < 0 {
+        // The C caller (ProcessRepliesIfAny) treats r < 0 as unexpected EOF;
+        // mirror that as an error the owner already logged (COMMERROR) so the
+        // walsender can proc_exit(0).
+        return Err(types_error::PgError::error(std::string::String::from(
+            "unexpected EOF on standby connection",
+        )));
+    }
+    if r == 0 {
+        return Ok(None);
+    }
+    Ok(Some(c))
+}
+
+/// Adapter for the `pq_getmessage` seam: read one message body into a fresh
+/// `mcx` buffer. `Ok(None)` for the C `EOF` return; `Ok(Some(bytes))` otherwise.
+fn pq_getmessage_seam(mcx: Mcx<'_>, maxlen: i32) -> PgResult<Option<PgVec<'_, u8>>> {
+    let mut s = StringInfo::new_in(mcx);
+    if pq_getmessage(&mut s, maxlen)? == EOF {
+        return Ok(None);
+    }
+    let mut buf: PgVec<u8> = PgVec::new_in(mcx);
+    let bytes = s.as_bytes();
+    buf.try_reserve_exact(bytes.len()).map_err(|_| mcx.oom(bytes.len()))?;
+    buf.extend_from_slice(bytes);
+    Ok(Some(buf))
+}
+
 /// Adapter for the `pq_buffer_remaining_data` seam (`-> i64`). The owner's
 /// [`pq_buffer_remaining_data`] returns `isize`.
 fn pq_buffer_remaining_data_seam() -> i64 {
@@ -2136,6 +2170,8 @@ pub fn init_seams() {
     pqcomm_seams::pq_startmsgread::set(pq_startmsgread);
     pqcomm_seams::pq_endmsgread::set(pq_endmsgread);
     pqcomm_seams::pq_getbytes::set(pq_getbytes_seam);
+    pqcomm_seams::pq_getbyte_if_available::set(pq_getbyte_if_available_seam);
+    pqcomm_seams::pq_getmessage::set(pq_getmessage_seam);
     pqcomm_seams::pq_peekbyte::set(pq_peekbyte);
     pqcomm_seams::pq_buffer_remaining_data::set(pq_buffer_remaining_data_seam);
     pqcomm_seams::modify_fe_be_wait_set_latch::set(pq_modify_fe_be_wait_set_latch);

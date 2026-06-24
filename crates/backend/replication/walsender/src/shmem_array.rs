@@ -10,7 +10,7 @@
 
 use crate::core::{
     proc_get, slot_spin_acquire, slot_spin_release, walsnds_slot, walsnds_slot_mut, with_proc,
-    ReplicationKind, WalSnd, WalSndState, XLogRecPtr,
+    ReplicationKind, TimestampTz, WalSnd, WalSndState, XLogRecPtr,
 };
 
 /// `&WalSndCtl->walsnds[MyWalSnd]` — the current backend's reserved slot index.
@@ -158,6 +158,50 @@ pub fn my_set_sentptr(sentptr: XLogRecPtr) {
     let slot = walsnds_slot_mut(idx);
     slot_spin_acquire(slot);
     slot.sentPtr = sentptr;
+    slot_spin_release(slot);
+}
+
+/// `ProcessStandbyReplyMessage`'s shared-state update under `MyWalSnd->mutex`:
+/// write the standby's reported write/flush/apply positions, the per-position
+/// lags (only when the lag was newly measured or the lag times are being
+/// cleared), and the reply timestamp.
+#[allow(clippy::too_many_arguments)]
+pub fn my_set_reply(
+    write: XLogRecPtr,
+    flush: XLogRecPtr,
+    apply: XLogRecPtr,
+    write_lag: types_datetime::TimeOffset,
+    flush_lag: types_datetime::TimeOffset,
+    apply_lag: types_datetime::TimeOffset,
+    clear_lag_times: bool,
+    reply_time: TimestampTz,
+) {
+    let idx = my_slot_index();
+    let slot = walsnds_slot_mut(idx);
+    slot_spin_acquire(slot);
+    slot.write = write;
+    slot.flush = flush;
+    slot.apply = apply;
+    if write_lag != -1 || clear_lag_times {
+        slot.writeLag = write_lag;
+    }
+    if flush_lag != -1 || clear_lag_times {
+        slot.flushLag = flush_lag;
+    }
+    if apply_lag != -1 || clear_lag_times {
+        slot.applyLag = apply_lag;
+    }
+    slot.replyTime = reply_time;
+    slot_spin_release(slot);
+}
+
+/// `ProcessStandbyHSFeedbackMessage`'s shared-state update under
+/// `MyWalSnd->mutex`: write only the reply timestamp.
+pub fn my_set_reply_time(reply_time: TimestampTz) {
+    let idx = my_slot_index();
+    let slot = walsnds_slot_mut(idx);
+    slot_spin_acquire(slot);
+    slot.replyTime = reply_time;
     slot_spin_release(slot);
 }
 

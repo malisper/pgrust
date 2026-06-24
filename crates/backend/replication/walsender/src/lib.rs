@@ -55,6 +55,7 @@ use dsm_core_seams as ipc;
 use latch_seams as latch;
 use procarray_seams as procarray;
 use procsignal_seams as procsignal;
+use lmgr_proc_seams as proc_seams;
 use ipc_shmem_seams as shmem;
 use condition_variable_seams as condvar;
 use dest_seams as dest;
@@ -300,6 +301,14 @@ pub(crate) fn pq_putmessage_noblock_copydone() {
     pq::pq_putmessage_noblock::call(b'c', &[]);
 }
 
+/// `pq_beginmessage(&buf, PqMsg_CopyBothResponse); pq_sendbyte(&buf, 0);
+/// pq_sendint16(&buf, 0); pq_endmessage(&buf);` — the CopyBothResponse ('W')
+/// message with a 3-byte body: overall copy format byte (0 = textual) followed
+/// by a 0 column count (int16).
+pub(crate) fn pq_putmessage_copyboth_response() {
+    pq::pq_putmessage::call(b'W', &[0, 0, 0]).expect("pq_putmessage(CopyBothResponse)");
+}
+
 pub(crate) fn modify_fe_be_wait_set_socket(events: u32) {
     pq::modify_fe_be_wait_set_socket::call(events);
 }
@@ -320,6 +329,55 @@ pub(crate) fn standby_slots_have_caughtup(
 ) -> bool {
     slot::standby_slots_have_caughtup::call(flushed_lsn, types_error::ErrorLevel(elevel))
         .expect("StandbySlotsHaveCaughtup")
+}
+
+/// `ereport(COMMERROR, ERRCODE_PROTOCOL_VIOLATION, "unexpected EOF on standby
+/// connection")` — server-only log before the walsender `proc_exit(0)`.
+pub(crate) fn ereport_commerror_eof_on_standby() {
+    utils_error::ereport(types_error::COMMERROR)
+        .errcode(types_error::ERRCODE_PROTOCOL_VIOLATION)
+        .errmsg("unexpected EOF on standby connection")
+        .finish(types_error::ErrorLocation::new(
+            "walsender.c",
+            0,
+            "ProcessRepliesIfAny",
+        ))
+        .expect("ereport(COMMERROR) cannot fail below ERROR");
+}
+
+/// `ereport(FATAL, ERRCODE_PROTOCOL_VIOLATION, "invalid standby message type
+/// \"%c\"")`.  FATAL terminates the process.
+pub(crate) fn ereport_fatal_invalid_standby_message(firstchar: u8) -> ! {
+    utils_error::ereport(types_error::FATAL)
+        .errcode(types_error::ERRCODE_PROTOCOL_VIOLATION)
+        .errmsg(alloc::format!(
+            "invalid standby message type \"{}\"",
+            firstchar as char
+        ))
+        .finish(types_error::ErrorLocation::new(
+            "walsender.c",
+            0,
+            "ProcessRepliesIfAny",
+        ))
+        .expect("ereport(FATAL) invalid standby message type");
+    unreachable!()
+}
+
+/// `ereport(COMMERROR, ERRCODE_PROTOCOL_VIOLATION, "unexpected message type
+/// \"%c\"")` — server-only log before the walsender `proc_exit(0)`.
+pub(crate) fn ereport_commerror_unexpected_message_type(msgtype: u8) {
+    utils_error::ereport(types_error::COMMERROR)
+        .errcode(types_error::ERRCODE_PROTOCOL_VIOLATION)
+        .errmsg(alloc::format!(
+            "unexpected message type \"{}\"",
+            msgtype as char
+        ))
+        .finish(types_error::ErrorLocation::new(
+            "walsender.c",
+            0,
+            "ProcessStandbyMessage",
+        ))
+        .expect("ereport(COMMERROR) cannot fail below ERROR");
 }
 
 /// `ereport(COMMERROR, "terminating walsender process due to replication

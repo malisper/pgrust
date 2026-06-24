@@ -39,6 +39,7 @@ walreceiverfuncs_seams = { path = "../walreceiverfuncs_seams" }
 slotsync_seams = { path = "../logical/slotsync_seams" }
 logical_seams = { path = "../logical/logical_seams" }
 replication_basebackup_seams = { path = "../replication_basebackup_seams" }
+lmgr_proc_seams = { path = "../../storage/lmgr/lmgr_proc_seams" }
 procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
 latch_seams = { path = "../../storage/ipc/latch_seams" }
 procarray_seams = { path = "../../storage/ipc/procarray_seams" }
@@ -70,6 +71,8 @@ pgsleep = { path = "../../../port/pgsleep" }
 types_guc = { path = "../../../_support/types/types_guc" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 types_dest = { path = "../../../_support/types/types_dest" }
+parsenodes = { path = "../../../_support/types/parsenodes" }
+replication_slot_2 = { path = "../../../_support/types/replication_slot_2" }
 nodes = { path = "../../../_support/types/nodes" }
 signal = { path = "../../../_support/types/signal" }
 mcx = { path = "../../../_support/mcx" }

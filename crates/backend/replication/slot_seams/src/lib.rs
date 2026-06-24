@@ -283,6 +283,11 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `MyReplicationSlot->data.xmin`.
+    pub fn slot_xmin() -> TransactionId
+);
+
+seam_core::seam!(
     /// `MyReplicationSlot->data.catalog_xmin`.
     pub fn slot_catalog_xmin() -> TransactionId
 );
@@ -335,6 +340,11 @@ seam_core::seam!(
 seam_core::seam!(
     /// `MyReplicationSlot->data.catalog_xmin = xid` (caller holds mutex).
     pub fn slot_set_catalog_xmin(xid: TransactionId)
+);
+
+seam_core::seam!(
+    /// `MyReplicationSlot->data.xmin = xid` (caller holds mutex).
+    pub fn slot_set_xmin(xid: TransactionId)
 );
 
 seam_core::seam!(

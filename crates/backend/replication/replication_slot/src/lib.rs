@@ -3041,6 +3041,9 @@ fn seam_slot_failover() -> bool {
 fn seam_slot_two_phase_at() -> XLogRecPtr {
     my_slot_ref().data.two_phase_at
 }
+fn seam_slot_xmin() -> TransactionId {
+    my_slot_ref().data.xmin
+}
 fn seam_slot_catalog_xmin() -> TransactionId {
     my_slot_ref().data.catalog_xmin
 }
@@ -3073,6 +3076,9 @@ fn seam_slot_set_effective_catalog_xmin(xid: TransactionId) {
 }
 fn seam_slot_set_catalog_xmin(xid: TransactionId) {
     my_slot_mut().data.catalog_xmin = xid;
+}
+fn seam_slot_set_xmin(xid: TransactionId) {
+    my_slot_mut().data.xmin = xid;
 }
 fn seam_slot_set_effective_xmin(xid: TransactionId) {
     my_slot_mut().effective_xmin = xid;
@@ -3254,6 +3260,7 @@ pub fn init_seams() {
     s::slot_two_phase::set(seam_slot_two_phase);
     s::slot_failover::set(seam_slot_failover);
     s::slot_two_phase_at::set(seam_slot_two_phase_at);
+    s::slot_xmin::set(seam_slot_xmin);
     s::slot_catalog_xmin::set(seam_slot_catalog_xmin);
     s::slot_candidate_xmin_lsn::set(seam_slot_candidate_xmin_lsn);
     s::slot_candidate_catalog_xmin::set(seam_slot_candidate_catalog_xmin);
@@ -3265,6 +3272,7 @@ pub fn init_seams() {
     s::slot_set_restart_lsn::set(seam_slot_set_restart_lsn);
     s::slot_set_effective_catalog_xmin::set(seam_slot_set_effective_catalog_xmin);
     s::slot_set_catalog_xmin::set(seam_slot_set_catalog_xmin);
+    s::slot_set_xmin::set(seam_slot_set_xmin);
     s::slot_set_effective_xmin::set(seam_slot_set_effective_xmin);
     s::slot_set_confirmed_flush::set(seam_slot_set_confirmed_flush);
     s::slot_set_two_phase::set(seam_slot_set_two_phase);

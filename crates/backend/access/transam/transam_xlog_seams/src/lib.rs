@@ -418,6 +418,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CheckXLogRemoved(segno, tli)` (xlog.c:3747) — error if a WAL segment
+    /// that is still needed has already been removed. `Err` carries the C
+    /// "requested WAL segment ... has already been removed" `ereport(ERROR)`.
+    pub fn check_xlog_removed(segno: XLogSegNo, tli: TimeLineID) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `XLogGetReplicationSlotMinimumLSN()` (xlog.c): the oldest LSN required
     /// by any replication slot, or `InvalidXLogRecPtr` if none. Read under the
     /// `info_lck` spinlock by the owner.
