@@ -255,10 +255,35 @@ pub fn ExecHashTableCreate<'mcx>(
     debug_assert_eq!(nbuckets, 1 << log2_nbuckets);
 
     // Initialize the hash table control block. The control block is allocated
-    // from the per-query context (mcx); the working storage lives in the
-    // subsidiary hash/batch/spill contexts (here all modelled by mcx, since the
-    // owned arenas are dropped with the table).
+    // from the per-query context (mcx). The per-batch tuple storage (the three
+    // owned arenas + the inline MinimalTuple images) lives in a dedicated
+    // `batchCxt` — a bump-arena child of the per-query context, reset WHOLESALE
+    // at each batch boundary (`ExecHashTableReset`). A bump child makes each
+    // tuple's `PgBox`/`PgVec` deallocate a no-op (no per-chunk free, like
+    // `bump.c`), and the wholesale reset reclaims every batch tuple's bytes in
+    // O(1) — the C `MemoryContextReset(batchCxt)` model.
+    //
+    // The parallel-hash path keeps tuples in DSA / shared tuplestores
+    // (`nodeHash::parallel`) and never touches these serial arenas, so it gets
+    // no batchCxt (`None`).
     let spaceAllowedSkew = space_allowed * SKEW_HASH_MEM_PERCENT_USIZE / 100;
+    let batch_cxt: Option<Box<::mcx::MemoryContext>> = if parallel {
+        None
+    } else {
+        Some(Box::new(mcx.context().new_child_bump("HashBatchContext")))
+    };
+    // Allocator handle for the per-batch arenas, reborrowed at `mcx`'s lifetime
+    // from the boxed batchCxt (stable heap address). On the parallel path there
+    // is no batchCxt; the arenas stay empty there, so fall back to `mcx` (they
+    // are never allocated into).
+    let batch_mcx: Mcx<'mcx> = match batch_cxt.as_deref() {
+        // SAFETY: the box is moved into `hashtable.batch_cxt` below and lives as
+        // long as the table; the arenas built with this handle are dropped before
+        // it (it is the table's last field). Same self-owned-arena discipline as
+        // `HashJoinTableData::batch_mcx` / `erh_table`.
+        Some(ctx) => unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'mcx>>(ctx.mcx()) },
+        None => mcx,
+    };
     let mut hashtable = ::mcx::alloc_in(
         mcx,
         HashJoinTableData {
@@ -300,12 +325,16 @@ pub fn ExecHashTableCreate<'mcx>(
             parallel_state: state.parallel_state,
             batches: PgVec::new_in(mcx),
             current_chunk_shared: execparallel::DsaPointer::default(),
-            tuples: PgVec::new_in(mcx),
-            skew_tuples: PgVec::new_in(mcx),
-            chunk_arena: PgVec::new_in(mcx),
+            // The per-batch arenas live in batchCxt (batch_mcx), reset wholesale
+            // at each batch boundary; on the parallel path batch_mcx == mcx and
+            // they stay empty.
+            tuples: PgVec::new_in(batch_mcx),
+            skew_tuples: PgVec::new_in(batch_mcx),
+            chunk_arena: PgVec::new_in(batch_mcx),
             // spillCxt is a child of hashCxt in C; modelled by the per-query
             // context the batch spill files are charged to.
             spillCxt: mcx,
+            batch_cxt,
         },
     )?;
 
@@ -752,8 +781,16 @@ pub fn ExecHashIncreaseNumBatches<'mcx>(
     // the arena + chunk list, then re-stage the kept tuples via `dense_alloc`
     // (rebuilding both the dense chunks and the bucket chains), and dump the
     // moved-out tuples through the inner-batch-file save seam.
+    // The fresh dense arena is batchCxt-backed (the kept tuples re-staged below
+    // via dense_alloc copy their MinimalTuple images into batchCxt, mirroring C's
+    // dense_alloc into the same batchCxt). The old arena's tuples are either moved
+    // into the new arena (kept) or dropped (dumped to a batch file); their bytes
+    // remain in batchCxt until the next ExecHashTableReset reclaims them
+    // wholesale — C instead pfree's the old chunks here, a memory-footprint-only
+    // divergence under repeated mid-build rebatching (correctness is identical).
+    let batch_mcx = hashtable.batch_mcx();
     let old_tuples: PgVec<'mcx, HashJoinTupleData<'mcx>> =
-        core::mem::replace(&mut hashtable.tuples, PgVec::new_in(mcx));
+        core::mem::replace(&mut hashtable.tuples, PgVec::new_in(batch_mcx));
     hashtable.chunk_arena.clear();
     hashtable.chunks = None;
     hashtable.current_chunk = None;
@@ -916,6 +953,12 @@ pub fn dense_alloc<'mcx>(
     // just in case the size is not already aligned properly
     let size = MAXALIGN(size);
 
+    // The inline MinimalTuple image is allocated in batchCxt (C: it is part of
+    // the dense chunk byte buffer carved from batchCxt), reclaimed wholesale at
+    // ExecHashTableReset. (`hashtable.tuples` is itself a batchCxt-backed Vec, so
+    // its grow already bump-allocates there.)
+    let batch_mcx = hashtable.batch_mcx();
+
     // Reserve the arena slot the caller will fill. Allocating fails as OOM.
     if hashtable.tuples.try_reserve(1).is_err() {
         return Err(mcx.oom(size));
@@ -924,7 +967,7 @@ pub fn dense_alloc<'mcx>(
     hashtable.tuples.push(HashJoinTupleData {
         next: HashJoinTupleLink::Unshared(None),
         hashvalue: 0,
-        mintuple: empty_mintuple(mcx)?,
+        mintuple: empty_mintuple(batch_mcx)?,
     });
 
     // If tuple size is larger than threshold, allocate a separate chunk.
@@ -1033,10 +1076,15 @@ pub fn ExecHashTableInsert<'mcx>(
     // ... insert tuple ...
     // if (shouldFree) heap_free_minimal_tuple(tuple);
     //
-    // The execTuples seam copies the slot's tuple into mcx, so the owned model
-    // never frees explicitly (the copy is dropped with the context).
+    // Fetch the inner tuple's MinimalTuple image DIRECTLY into batchCxt (C:
+    // dense_alloc carves it from a batchCxt chunk). This is the dominant build
+    // path — every inner-relation tuple — so routing it into the bump batchCxt is
+    // where the per-tuple malloc/free churn is eliminated: the copy is reclaimed
+    // wholesale at ExecHashTableReset instead of an individual aset free per
+    // tuple. The execTuples seam copies the slot's tuple into the given context.
+    let batch_mcx = hashtable.batch_mcx();
     let (tuple, _should_free) =
-        execTuples_seams::exec_fetch_slot_minimal_tuple::call(mcx, estate, slot)?;
+        execTuples_seams::exec_fetch_slot_minimal_tuple::call(batch_mcx, estate, slot)?;
     exec_hash_table_insert_tuple(mcx, hashtable, tuple, hashvalue)
 }
 
@@ -1447,14 +1495,40 @@ pub fn ExecHashTableReset<'mcx>(
 ) -> PgResult<()> {
     let nbuckets = hashtable.nbuckets;
 
-    // Release all the hash buckets and tuples acquired in the prior pass (the
-    // batchCxt reset frees the dense chunks + tuples), and reinitialize for a
-    // new pass. The owned model clears the per-batch arenas. (Skew is a
-    // batch-0-only structure already torn down by ExecHashRemoveNextSkewBucket,
-    // but its backing arena is reclaimed by the batchCxt reset in C, so clear
-    // the separate skew arena here too.)
-    hashtable.tuples.clear();
-    hashtable.skew_tuples.clear();
+    // Release all the hash buckets and tuples acquired in the prior pass and
+    // reinitialize for a new pass. C does this with a SINGLE
+    // `MemoryContextReset(hashtable->batchCxt)` — every dense chunk + inline
+    // MinimalTuple + skew tuple is reclaimed wholesale, no per-tuple free.
+    //
+    // The owned model mirrors that: move the three batchCxt-backed arenas out
+    // into locals and DROP them first — each element's `PgBox`/`PgVec` Drop now
+    // runs a cheap bump *deallocate* (no per-chunk free, like `bump.c`), and
+    // dropping the Vec headers releases their (also batchCxt-backed) buffers — so
+    // the context's live-byte charge falls to zero. THEN reset the context
+    // wholesale (reclaiming every block in O(1)), and finally re-stage fresh
+    // empty arenas in the now-reset context. This replaces the previous
+    // per-element `Vec::clear` against per-query-context allocations (an
+    // individual malloc/free per tuple) with the C batchCxt wholesale reset.
+    {
+        // Move out + drop the old arenas (cheap bump-deallocates → uncharge to 0).
+        // Temporary placeholders are query-context Vecs (immediately overwritten
+        // below); they never receive a push.
+        let _old_tuples = core::mem::replace(&mut hashtable.tuples, PgVec::new_in(mcx));
+        let _old_skew = core::mem::replace(&mut hashtable.skew_tuples, PgVec::new_in(mcx));
+        let _old_chunks = core::mem::replace(&mut hashtable.chunk_arena, PgVec::new_in(mcx));
+        drop(_old_tuples);
+        drop(_old_skew);
+        drop(_old_chunks);
+    }
+    // MemoryContextReset(batchCxt): reclaim all batch tuple blocks wholesale.
+    hashtable.reset_batch_cxt();
+    // Re-stage fresh empty arenas in the reset batchCxt (the placeholders above
+    // were query-context Vecs; replace them so subsequent inserts bump-allocate
+    // back into batchCxt). On the parallel path batch_mcx == mcx (arenas unused).
+    let batch_mcx = hashtable.batch_mcx();
+    hashtable.tuples = PgVec::new_in(batch_mcx);
+    hashtable.skew_tuples = PgVec::new_in(batch_mcx);
+    hashtable.chunk_arena = PgVec::new_in(batch_mcx);
 
     // Reallocate and reinitialize the hash bucket headers.
     //   hashtable->buckets.unshared = palloc0_array(HashJoinTuple, nbuckets);
@@ -1464,7 +1538,6 @@ pub fn ExecHashTableReset<'mcx>(
     hashtable.spaceUsed = 0;
 
     // Forget the chunks (the memory was freed by the context reset above).
-    hashtable.chunk_arena.clear();
     hashtable.chunks = None;
     hashtable.current_chunk = None;
 

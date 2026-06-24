@@ -259,10 +259,13 @@ pub fn ExecHashSkewTableInsert<'mcx>(
     // bool shouldFree;
     // MinimalTuple tuple = ExecFetchSlotMinimalTuple(slot, &shouldFree);
     //
-    // The owned model always copies into mcx, so the C shouldFree /
+    // The owned model copies into batchCxt (C: hashTuple =
+    // MemoryContextAlloc(hashtable->batchCxt, ...)), so the skew tuple's bytes
+    // are reclaimed by the wholesale ExecHashTableReset. The C shouldFree /
     // heap_free_minimal_tuple bookkeeping is internal to the owner.
+    let batch_mcx = hashtable.batch_mcx();
     let (mut tuple, _should_free) =
-        execTuples_seams::exec_fetch_slot_minimal_tuple::call(mcx, estate, slot)?;
+        execTuples_seams::exec_fetch_slot_minimal_tuple::call(batch_mcx, estate, slot)?;
 
     // Create the HashJoinTuple.
     //   hashTupleSize = HJTUPLE_OVERHEAD + tuple->t_len;
@@ -375,7 +378,10 @@ pub fn ExecHashRemoveNextSkewBucket<'mcx>(
 
             // memcpy(copyTuple, hashTuple, tupleSize): copy the header + inline
             // MinimalTuple image from the skew tuple into the dense-storage slot.
-            let mintuple = hashtable.skew_tuples[cur.0].mintuple.clone_in(mcx)?;
+            // The copied tuple lands in the dense `tuples` arena (batchCxt), so
+            // clone its MinimalTuple image into batchCxt too (C: dense_alloc from
+            // batchCxt). Reclaimed wholesale at ExecHashTableReset.
+            let mintuple = hashtable.skew_tuples[cur.0].mintuple.clone_in(hashtable.batch_mcx())?;
             let src_hashvalue = hashtable.skew_tuples[cur.0].hashvalue;
             {
                 let dst = &mut hashtable.tuples[copyTuple.0];

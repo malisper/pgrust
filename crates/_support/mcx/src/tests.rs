@@ -691,6 +691,205 @@ mod bumpdrop {
         ctx.reset();
         assert_eq!(ctx.used(), 0);
     }
+
+    /// Models the hash-join `batchCxt` usage (nodeHash): a CHILD bump context
+    /// backs an OWNED `PgVec` of Drop-having values (the per-batch tuple arena).
+    /// Per-batch reset: drop the owned Vec (each element's Drop runs a cheap bump
+    /// *deallocate*, not a malloc/free), `reset()` the context wholesale, then
+    /// re-stage a fresh Vec and reuse. Asserts: no double-drop, charge returns to
+    /// zero each cycle, and the re-staged arena works across many batches. This is
+    /// the exact pattern `ExecHashTableReset` relies on (NOT arena_leak/BumpDrop —
+    /// the rebatch path `mem::replace`s the owned Vec, which arena_leak forbids).
+    #[test]
+    fn child_bump_owned_vec_wholesale_reset_and_reuse() {
+        let drops = Rc::new(Cell::new(0u32));
+        let root = MemoryContext::new("query");
+        let mut batch = root.new_child_bump("HashBatchContext");
+
+        let total_batches = 6usize;
+        let per_batch = 50usize;
+        for b in 0..total_batches {
+            // Build the per-batch arena in the child bump context.
+            let mut v: PgVec<DropCounter> = {
+                // Reborrow the child's Mcx (the nodeHash code transmutes this to
+                // the table's 'mcx; here a plain borrow suffices for the test).
+                let mcx = batch.mcx();
+                let mut v = PgVec::new_in(mcx);
+                for _ in 0..per_batch {
+                    v.push(DropCounter { drops: drops.clone() });
+                }
+                v
+            };
+            assert_eq!(drops.get() as usize, b * per_batch, "no drops mid-batch");
+            assert!(batch.used() > 0, "arena charged while the batch is live");
+
+            // Per-batch reset: drop the owned arena (cheap bump-deallocates that
+            // uncharge), then reset the context wholesale.
+            v.clear();
+            drop(v);
+            assert_eq!(
+                drops.get() as usize,
+                (b + 1) * per_batch,
+                "every element dropped exactly once at the batch boundary"
+            );
+            batch.reset();
+            assert_eq!(batch.used(), 0, "wholesale reset returns the charge to zero");
+        }
+        // No element dropped more than once across all batches.
+        assert_eq!(drops.get() as usize, total_batches * per_batch);
+
+        // Dropping the context after a clean reset is a no-op (no double-free).
+        drop(batch);
+        assert_eq!(drops.get() as usize, total_batches * per_batch);
+        assert_eq!(root.subtree_used(), 0, "child charge fully released to parent");
+    }
+
+    /// Models the rebatch `mem::replace` move: tuples move from an old owned arena
+    /// into a new one (both in the same child bump context) WITHOUT being dropped,
+    /// exactly as `ExecHashIncreaseNumBatches` re-stages kept tuples. Asserts the
+    /// moved elements are not double-dropped and survive to the final reset.
+    #[test]
+    fn child_bump_rebatch_move_preserves_elements() {
+        let drops = Rc::new(Cell::new(0u32));
+        let mut batch = MemoryContext::new_bump("HashBatchContext");
+        {
+            let mcx = batch.mcx();
+            let mut old: PgVec<DropCounter> = PgVec::new_in(mcx);
+            for _ in 0..8 {
+                old.push(DropCounter { drops: drops.clone() });
+            }
+            // Rebatch: replace the old arena with a fresh one, MOVE every element.
+            let mut newv: PgVec<DropCounter> = PgVec::new_in(mcx);
+            for e in old.into_iter() {
+                newv.push(e); // move, not clone — no Drop runs
+            }
+            assert_eq!(drops.get(), 0, "moved tuples are not dropped during rebatch");
+            newv.clear();
+            drop(newv);
+            assert_eq!(drops.get(), 8, "elements drop once when the new arena drops");
+        }
+        batch.reset();
+        assert_eq!(batch.used(), 0);
+    }
+
+    /// CHURN MEASUREMENT (the nodeHash batchCxt change). Models the per-batch
+    /// hash-join build/reset cycle two ways over identical work, counting the
+    /// REAL per-chunk free operations the backing allocator performs.
+    ///
+    ///   OLD model (per-query-context Aset arena + `Vec::clear`): each tuple's
+    ///   `MinimalTuple` (a `PgBox` header + a `PgVec` data buffer) is freed
+    ///   INDIVIDUALLY through the Aset allocator at every batch boundary — a real
+    ///   per-chunk free (freelist routing) per allocation, per batch.
+    ///
+    ///   NEW model (bump batchCxt + wholesale `reset`): the same tuples bump-
+    ///   allocate into the batch context; their per-object `deallocate` is a
+    ///   bump NO-OP, and the whole batch is reclaimed by ONE `reset()`.
+    ///
+    /// We classify each `deallocate` by backend: an Aset/Malloc free is "real
+    /// churn"; a Bump free is a no-op. The headline number is real-churn-frees:
+    /// thousands in the old model, ZERO in the new (every byte reclaimed by the
+    /// `nbatch` wholesale resets instead).
+    #[test]
+    fn churn_measurement_per_tuple_free_vs_wholesale_reset() {
+        use crate::{alloc_in, PgVec, PgBox};
+
+        // Count real (non-bump) per-chunk frees by snapshotting Aset bookkeeping
+        // is awkward; instead we observe the live charge. A simpler, robust proxy:
+        // the bump context performs NO per-object free work — assert it via the
+        // fact that after dropping the spine (before reset) its live charge is
+        // UNCHANGED-by-reclaim only at reset. We count "real frees" structurally:
+        // the old model must execute one deallocate per (box+vec) per batch to
+        // return memory; the new model returns it all in `nbatch` resets.
+        let tuples_per_batch = 500usize;
+        let nbatch = 16usize;
+
+        // Helper: build one batch of tuple-like (PgBox header + PgVec data) in
+        // `mcx`, returning the owned spine.
+        fn build_batch<'m>(
+            mcx: Mcx<'m>,
+            n: usize,
+        ) -> alloc::vec::Vec<(PgBox<'m, [u8; 24]>, PgVec<'m, u8>)> {
+            let mut v = alloc::vec::Vec::with_capacity(n);
+            for _ in 0..n {
+                let b = alloc_in(mcx, [0u8; 24]).unwrap();
+                let mut data = PgVec::new_in(mcx);
+                data.extend_from_slice(&[7u8; 40]);
+                v.push((b, data));
+            }
+            v
+        }
+
+        // ---- OLD model: Aset query context, per-tuple free at each batch reset.
+        // The deallocate probe counts every REAL per-chunk Aset free.
+        let _ = crate::churn_probe::take(); // reset the probe
+        {
+            let qcx = MemoryContext::new("query-old");
+            for _ in 0..nbatch {
+                let batch = build_batch(qcx.mcx(), tuples_per_batch);
+                // ExecHashTableReset (old): each tuple freed INDIVIDUALLY through
+                // the Aset (real per-chunk free) as the spine drops.
+                drop(batch);
+                // Aset returns every freed byte to its freelists; charge is 0.
+                assert_eq!(qcx.used(), 0);
+            }
+        }
+        let old_real_frees = crate::churn_probe::take();
+
+        // ---- NEW model: bump batchCxt; per-object frees are no-ops; ONE reset
+        // per batch reclaims everything. The probe should count ZERO real frees.
+        let mut wholesale_resets = 0u64;
+        {
+            let qcx = MemoryContext::new("query-new");
+            let mut batch_cxt = qcx.new_child_bump("HashBatchContext");
+            for _ in 0..nbatch {
+                {
+                    let batch = build_batch(batch_cxt.mcx(), tuples_per_batch);
+                    assert!(batch_cxt.used() > 0, "batch tuples charged while live");
+                    // Drop the spine: every PgBox/PgVec deallocate is a BUMP NO-OP
+                    // (bump.c never frees a chunk) — no real per-chunk free work.
+                    drop(batch);
+                }
+                // ExecHashTableReset (new): reclaim the whole batch in ONE reset.
+                batch_cxt.reset();
+                wholesale_resets += 1;
+                assert_eq!(batch_cxt.used(), 0, "wholesale reset returns charge to zero");
+            }
+        }
+        let new_real_frees = crate::churn_probe::take();
+
+        std::eprintln!(
+            "\n==== HASH-JOIN batchCxt CHURN ({} tuples/batch x {} batches) ====\n\
+             OLD (per-query Aset + Vec::clear): real per-chunk frees = {}\n\
+             NEW (bump batchCxt + wholesale reset): real per-chunk frees = {} \
+             (reclaimed by {} wholesale resets)\n\
+             ELIMINATED per-tuple free operations: {}\n\
+             ===============================================================",
+            tuples_per_batch, nbatch,
+            old_real_frees, new_real_frees, wholesale_resets,
+            old_real_frees - new_real_frees,
+        );
+
+        // The headline guarantee: the new model performs essentially ZERO real
+        // per-chunk frees on the hot build/reset path (all reclamation is
+        // wholesale), while the old model performs at LEAST one real free per
+        // (box+vec) per batch. The global atomic probe can be perturbed by other
+        // tests freeing on an Aset concurrently under `cargo test`'s default
+        // parallel harness, so the asserts are pollution-tolerant ranges; the
+        // exact counts (printed above, e.g. OLD=16000, NEW=0) come from an
+        // isolated `--test-threads=1` run.
+        let expected_old = (tuples_per_batch * 2 * nbatch) as u64;
+        assert!(
+            old_real_frees >= expected_old,
+            "old model frees every box+vec individually every batch (>= {}, got {})",
+            expected_old, old_real_frees,
+        );
+        assert!(
+            new_real_frees < expected_old / 4,
+            "new model eliminates the bulk of per-tuple frees (got {}, old {})",
+            new_real_frees, old_real_frees,
+        );
+        assert_eq!(wholesale_resets, nbatch as u64);
+    }
 }
 
 mod owned {

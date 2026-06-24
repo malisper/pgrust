@@ -481,6 +481,72 @@ pub struct HashJoinTableData<'mcx> {
     /// OWNED-MODEL arena: the dense-allocation chunk headers, linked by
     /// [`HashChunkIdx`].
     pub chunk_arena: PgVec<'mcx, HashMemoryChunkData>,
+    /// `MemoryContext batchCxt` (nodeHash.c) — the per-batch memory context,
+    /// reset WHOLESALE at each batch boundary (`ExecHashTableReset`). All
+    /// per-batch tuple storage (the dense-arena tuples + their inline
+    /// `MinimalTuple` images, the skew-arena tuples, and the chunk headers) is
+    /// bump-allocated in this context instead of the per-query context. Resetting
+    /// it reclaims every batch tuple's bytes in O(1) (a `bump.c`-style wholesale
+    /// reset) rather than freeing each tuple's `PgBox`/`PgVec` individually — the
+    /// C `ExecHashTableReset(MemoryContextReset(batchCxt))` model.
+    ///
+    /// SELF-OWNED ARENA (the `erh_table` precedent): the three arena fields above
+    /// carry the struct's `'mcx` parameter but are actually allocated in THIS
+    /// context. The context is heap-boxed so its address is stable across moves
+    /// of the table; [`batch_mcx`](Self::batch_mcx) reborrows it at `'mcx`. It is
+    /// the LAST declared field so Rust drops it AFTER the arenas (whose element
+    /// `Drop` deallocates into it) — drop-order is load-bearing exactly as in
+    /// `erh_table::ErhEntry` and `McxOwned`.
+    ///
+    /// `None` only for the parallel-hash path, which stores tuples in DSA /
+    /// shared tuplestores (`nodeHash::parallel`) and never touches these arenas.
+    pub batch_cxt: Option<Box<::mcx::MemoryContext>>,
+}
+
+impl<'mcx> HashJoinTableData<'mcx> {
+    /// The per-batch context's allocator handle, reborrowed at the table's
+    /// `'mcx` lifetime — every per-batch tuple allocation (`dense_alloc`'s inline
+    /// `MinimalTuple`, the skew-tuple copy, the three arena spines) goes through
+    /// this instead of the per-query context, so a wholesale
+    /// [`reset_batch_cxt`](Self::reset_batch_cxt) reclaims them all at once.
+    ///
+    /// # Panics
+    /// On the parallel-hash path (`batch_cxt == None`); that path never allocates
+    /// into these serial arenas.
+    ///
+    /// # Soundness
+    /// `batch_cxt` is a heap `Box`, so its address is stable while the table
+    /// lives, and it is the table's last-declared field — dropped only AFTER the
+    /// arena fields whose elements deallocate into it. The reborrow to `'mcx` is
+    /// the same `erh_table`/`McxOwned` self-owned-arena discipline: the bytes the
+    /// returned handle hands out stay valid until the context is reset/dropped,
+    /// and `reset_batch_cxt` only resets it once every arena allocation has been
+    /// reclaimed (the arenas are emptied first).
+    #[inline]
+    pub fn batch_mcx(&self) -> Mcx<'mcx> {
+        let ctx: &::mcx::MemoryContext = self
+            .batch_cxt
+            .as_deref()
+            .expect("batch_mcx: batch_cxt is None (parallel-hash path)");
+        // Reborrow the boxed context's `Mcx` and extend it to the table's `'mcx`.
+        // SAFETY: the box outlives every per-batch allocation (it is the table's
+        // last field, freed after the arenas), so a handle bounded by `'mcx` is
+        // never used past the context's life. Mirrors `erh_table::with_erh_mut`'s
+        // transmute of a context-bound handle to the caller's lifetime.
+        unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'mcx>>(ctx.mcx()) }
+    }
+
+    /// `MemoryContextReset(hashtable->batchCxt)` — reclaim every per-batch tuple
+    /// byte WHOLESALE. The three arenas must already be empty (their bump
+    /// deallocates ran via `clear()`/drop, so the context's live-byte charge is
+    /// zero); this then drops all the arena blocks in O(1). No-op on the
+    /// parallel-hash path.
+    #[inline]
+    pub fn reset_batch_cxt(&mut self) {
+        if let Some(ctx) = self.batch_cxt.as_deref_mut() {
+            ctx.reset();
+        }
+    }
 }
 
 impl<'mcx> core::fmt::Debug for HashJoinTableData<'mcx> {

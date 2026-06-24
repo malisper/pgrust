@@ -971,9 +971,18 @@ unsafe impl Allocator for Mcx<'_> {
         match &self.0.backend {
             // AllocSetFree: pooled chunk -> its size-class freelist; dedicated
             // chunk -> Global. The routing recomputes from `layout`, matching
-            // `alloc`.
-            Backend::Aset(set) => set.borrow_mut().dealloc(ptr, layout),
-            Backend::Malloc => Global.deallocate(ptr, layout),
+            // `alloc`. These are the REAL per-chunk frees the bump batchCxt
+            // eliminates; the churn measurement counts them (test only).
+            Backend::Aset(set) => {
+                #[cfg(test)]
+                crate::churn_probe::bump();
+                set.borrow_mut().dealloc(ptr, layout)
+            }
+            Backend::Malloc => {
+                #[cfg(test)]
+                crate::churn_probe::bump();
+                Global.deallocate(ptr, layout)
+            }
             // bump.c never frees individual chunks (reset reclaims wholesale), so
             // the block model is untouched on deallocate. (Reached only for
             // collections allocated into a BumpDrop context that are NOT routed
@@ -1348,3 +1357,19 @@ pub fn slice_in<'mcx, T: Clone>(mcx: Mcx<'mcx>, src: &[T]) -> PgResult<PgVec<'mc
 
 #[cfg(test)]
 mod tests;
+
+/// Test-only counter of REAL per-chunk frees (Aset/Malloc `deallocate`s) — bump
+/// deallocates are no-ops and are NOT counted. Used by the hash-join batchCxt
+/// churn measurement to count, not assume, the per-tuple free operations the
+/// wholesale-reset model eliminates.
+#[cfg(test)]
+pub(crate) mod churn_probe {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    pub(crate) static REAL_FREES: AtomicU64 = AtomicU64::new(0);
+    pub(crate) fn bump() {
+        REAL_FREES.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn take() -> u64 {
+        REAL_FREES.swap(0, Ordering::Relaxed)
+    }
+}
