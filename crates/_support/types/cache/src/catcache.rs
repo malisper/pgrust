@@ -378,6 +378,11 @@ pub struct CatCInProgress {
 pub struct CatCacheArena {
     /// All caches, in registration order (the C `slist ch_caches`).
     pub caches: Vec<ArenaCatCache>,
+    /// O(1) syscache-id → `caches` index, mirroring the C `SysCache[cacheId]`
+    /// direct array indexing. Entry `id` holds the `CacheIdx` of the cache
+    /// registered with that id, or `CacheIdx::NONE` if unregistered. Grown on
+    /// push in `InitCatCache`; caches are never removed, so entries are stable.
+    pub id_index: Vec<CacheIdx>,
     /// `CacheHdr->ch_ntup` — total tuples across all caches.
     pub ch_ntup: i32,
     /// `catcache_in_progress_stack` — the create-in-progress stack (top last).

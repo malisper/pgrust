@@ -63,12 +63,15 @@ pub(crate) fn with_arena<R>(f: impl FnOnce(&mut CatCacheArena) -> R) -> R {
 }
 
 /// Find a registered cache by its syscache id (`SysCache[id]`).
+///
+/// O(1) direct index into the per-id map, mirroring C's `SysCache[cacheId]`.
+/// (Previously this linearly scanned `arena.caches` — ~80 caches on every
+/// syscache lookup, measured at ~2.8% of backend CPU on the boolean profile.)
 pub(crate) fn find_cache_by_id(arena: &CatCacheArena, cache_id: i32) -> Option<CacheIdx> {
-    arena
-        .caches
-        .iter()
-        .position(|c| c.id == cache_id)
-        .map(CacheIdx)
+    match arena.id_index.get(cache_id as usize).copied() {
+        Some(idx) if idx != CacheIdx::NONE => Some(idx),
+        _ => None,
+    }
 }
 
 /// Install every outward catcache seam (called once from `seams-init`).

@@ -507,7 +507,19 @@ pub fn InitCatCache(
          * rely on id lookup, since head-vs-tail only affects the (debug) stats
          * walk and the reset iteration order (which is order-insensitive).
          */
+        let new_idx = CacheIdx(arena.caches.len());
+        let id = cache.id as usize;
         arena.caches.push(cache);
+        /*
+         * Maintain the O(1) syscache-id → index map (the C `SysCache[cacheId]`
+         * direct-array form). Grow the sparse vector to cover `id` and record
+         * the new cache's index, so `find_cache_by_id` is a direct lookup
+         * instead of a linear scan over ~80 caches on every syscache hit.
+         */
+        if id >= arena.id_index.len() {
+            arena.id_index.resize(id + 1, CacheIdx::NONE);
+        }
+        arena.id_index[id] = new_idx;
     });
 
     /* C returns the non-NULL CatCache pointer; the seam reports "created". */
