@@ -19,6 +19,16 @@ extern crate alloc;
 
 use alloc::string::String;
 
+// On wasm `libc` does not export `dev_t`/`ino_t` (no POSIX stat layer). The
+// dynamic loader is inert in single-user wasm (no `dlopen`), but the
+// `FileIdentity` carrier still references these widths; provide local aliases
+// matching the 64-bit Linux `struct stat` field widths.
+#[cfg(target_family = "wasm")]
+mod libc {
+    pub type dev_t = u64;
+    pub type ino_t = u64;
+}
+
 use ::types_core::fmgr::PgAbiValues;
 
 /// `Pg_magic_struct` (`fmgr.h`) — a module's magic block. `len` is

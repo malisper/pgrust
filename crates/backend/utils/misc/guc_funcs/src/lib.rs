@@ -59,6 +59,10 @@
 
 extern crate alloc;
 
+#[cfg(not(target_family = "wasm"))]
+use std::fs as osfs_free;
+#[cfg(target_family = "wasm")]
+use wasm_libc_shim::fscompat as osfs_free;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -556,10 +560,10 @@ pub fn AlterSystemSetConfigFile(stmt: &VariableSetStmt) -> PgResult<()> {
     // If we're resetting everything, no need to read/parse the old file.
     if !resetall {
         // if (stat(AutoConfFileName, &st) == 0) { open + ParseConfigFp }
-        match std::fs::metadata(&auto_conf_file_name) {
+        match osfs_free::metadata(&auto_conf_file_name) {
             Ok(_) => {
                 // infile = AllocateFile(AutoConfFileName, "r");
-                let contents = std::fs::read(&auto_conf_file_name).map_err(|e| {
+                let contents = osfs_free::read(&auto_conf_file_name).map_err(|e| {
                     let mut b = ereport(ERROR);
                     if let Some(errno) = e.raw_os_error() {
                         b = b.with_saved_errno(errno).errcode_for_file_access();

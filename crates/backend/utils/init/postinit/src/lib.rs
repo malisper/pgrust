@@ -12,6 +12,9 @@
 
 #![allow(non_snake_case)]
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use ::utils_error::ereport;
 use ::mcx::{Mcx, MemoryContext, PgString};
 use ::types_catalog::pg_database::{FormPgDatabase, COLLPROVIDER_LIBC};
@@ -1183,9 +1186,14 @@ fn shutdown_postgres_cb(code: i32, arg: types_tuple::Datum<'static>) -> PgResult
 
 /// `before_shmem_exit(ShutdownXLOG, 0)` — delegate to xlog.c's exit callback.
 ///
-/// Both the `before_shmem_exit` seam and the xlog `ShutdownXLOG` seam now carry
-/// the canonical unified `types_tuple::Datum<'static>`, so the arg forwards
-/// directly.
+/// Calls the real ported WAL-engine shutdown driver
+/// ([`transam_xlog::do_checkpoint::ShutdownXLOG`], which writes
+/// the shutdown checkpoint and flips the control file to `Shutdowned`). The
+/// top-level `transam_xlog::ShutdownXLOG(code, arg)` re-export is
+/// still the deferred xlog-driver *panic stub* (it has the C `(code, arg)`
+/// signature but no body — see the `xlog_driver_deferred!` block); calling it
+/// here aborted the clean-exit path. The C `ShutdownXLOG` body consults neither
+/// `code` nor `arg`, so dropping them is faithful.
 fn shutdown_xlog_cb(code: i32, arg: types_tuple::Datum<'static>) -> PgResult<()> {
     transam_xlog::ShutdownXLOG(code, arg);
     Ok(())

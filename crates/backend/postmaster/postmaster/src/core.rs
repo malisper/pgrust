@@ -14,6 +14,9 @@
 //! underlying slab; `PMChild` is `Copy`, so the postmaster's singleton globals
 //! hold the value just as the C globals hold a `PMChild *`).
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use ::pmchild::PMChild;
 use ::waiteventset_seams::WaitEventSet;
 pub use ::types_core::init::BackendType;

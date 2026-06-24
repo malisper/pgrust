@@ -15,6 +15,15 @@ use std::cell::Cell;
 
 use ::types_error::PgResult;
 
+// `SIGQUIT` signal number. Native takes it from libc; wasm has no `libc::SIG*`
+// (and never delivers a signal — the crash-exit handler install below is inert
+// single-user), so use the standard Linux number, matching the wasm SIG
+// constants `backend-libpq-pqsignal` already adopts.
+#[cfg(not(target_family = "wasm"))]
+use libc::SIGQUIT;
+#[cfg(target_family = "wasm")]
+const SIGQUIT: i32 = 3;
+
 thread_local! {
     /// `volatile sig_atomic_t ConfigReloadPending = false;`
     static CONFIG_RELOAD_PENDING: Cell<bool> = const { Cell::new(false) };
@@ -108,7 +117,15 @@ pub fn SignalHandlerForConfigReload() {
 /// ensure the postmaster sees this as a crash, too, but no harm in being
 /// doubly sure.)
 pub fn SignalHandlerForCrashExit() -> ! {
-    unsafe { libc::_exit(2) }
+    // `_exit(2)` skips atexit/proc_exit cleanup (shmem may be corrupt). On wasm
+    // there is no `libc::_exit` and no atexit machinery; `process::exit` is the
+    // equivalent immediate, no-cleanup process termination.
+    #[cfg(not(target_family = "wasm"))]
+    unsafe {
+        libc::_exit(2)
+    }
+    #[cfg(target_family = "wasm")]
+    std::process::exit(2)
 }
 
 /// `SignalHandlerForShutdownRequest(SIGNAL_ARGS)` — simple signal handler
@@ -147,10 +164,10 @@ pub fn init_seams() {
     // handler installer is src/port/pqsignal.c (reached through its seam).
     s::install_crash_exit_sigquit_handler::set(|| {
         port_pqsignal_seams::pqsignal::call(
-            libc::SIGQUIT,
+            SIGQUIT,
             signal::SigHandler::Handler(crash_exit_handler),
         );
-        libpq_pqsignal::block_sig_delete(libc::SIGQUIT);
+        libpq_pqsignal::block_sig_delete(SIGQUIT);
         libpq_pqsignal::set_block_sig_mask();
         Ok(())
     });

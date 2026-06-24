@@ -36,3 +36,6 @@ common_exec_seams = { path = "../../common/common_exec_seams" }
 common_path_seams = { path = "../../../common/common_path_seams" }
 username_seams = { path = "../../../common/username_seams" }
 pg_locale_seams = { path = "../../utils/adt/pg_locale_seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../wasm-libc-shim" }

@@ -50,6 +50,9 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use core::cell::Cell;
 
 use ::types_core::{ProcNumber, TimestampTz, XLogRecPtr, InvalidXLogRecPtr, INVALID_PROC_NUMBER};

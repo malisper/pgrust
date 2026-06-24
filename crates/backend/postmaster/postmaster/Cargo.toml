@@ -93,3 +93,6 @@ libc = "0.2"
 walsender_seams = { path = "../../replication/walsender_seams" }
 autovacuum_seams = { path = "../autovacuum_seams" }
 launch_backend_seams = { path = "../launch_backend_seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../wasm-libc-shim" }

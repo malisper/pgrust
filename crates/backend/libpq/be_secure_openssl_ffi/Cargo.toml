@@ -29,3 +29,5 @@ be_secure_openssl_ffi_seams = { path = "../be_secure_openssl_ffi_seams" }
 # the external-passphrase command) the provider's real OpenSSL C callbacks
 # delegate into, plus its inbound BIO bridge.
 be_secure_openssl = { path = "../be_secure_openssl" }
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../wasm-libc-shim" }

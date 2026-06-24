@@ -14,3 +14,6 @@ types_error = { path = "../../../../_support/types/types_error" }
 utils_error = { path = "../../utils_error" }
 error_small_seams = { path = "../error_small_seams" }
 syslogger_seams = { path = "../../../postmaster/syslogger_seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

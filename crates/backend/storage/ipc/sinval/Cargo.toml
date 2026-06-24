@@ -33,3 +33,6 @@ lwlock_seams = { path = "../../lmgr/lwlock_seams" }
 transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
 inval_seams = { path = "../../../utils/cache/inval_seams" }
 init_small_seams = { path = "../../../utils/init/init_small_seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

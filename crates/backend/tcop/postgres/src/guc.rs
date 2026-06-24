@@ -241,6 +241,19 @@ pub fn process_postgres_switches(argv: &[String], ctx: GucContext) -> PgResult<O
 
                 // ParseLongOption(optarg, &name, &value)
                 let (name, value) = parse_long_option(&opt.optarg_str())?;
+
+                // pgrust extension: `--regress-output` is a valueless flag that
+                // switches the single-user backend to psql `-a -q`-compatible
+                // output (for byte-diffing against the regress expected/*.out).
+                // Handle it before the value-required check below. ParseLongOption
+                // normalizes hyphens to underscores, so match the normalized name.
+                if name == "regress_output" || name == "regress-output" {
+                    if secure {
+                        globals::set_regress_output(true);
+                    }
+                    continue;
+                }
+
                 let value = match value {
                     Some(v) => v,
                     None => {

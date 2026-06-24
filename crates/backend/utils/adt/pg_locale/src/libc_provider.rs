@@ -14,6 +14,9 @@
 //! `querylocale(LC_VERSION_MASK)` branches are not part of the active (glibc)
 //! profile and are not compiled.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 extern crate alloc;
 
 use alloc::format;

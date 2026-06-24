@@ -10,6 +10,9 @@
 //! seam slots are process-global `OnceLock`s, installed once via `Once`; each
 //! test resets the backing state and chdir's into its own scratch dir.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use super::*;
 use std::cell::RefCell;
 use std::collections::BTreeMap;

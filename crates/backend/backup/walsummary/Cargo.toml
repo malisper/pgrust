@@ -22,3 +22,6 @@ utils_error = { path = "../../utils/utils_error" }
 walsummary_seams = { path = "../walsummary_seams" }
 fd_seams = { path = "../../storage/file/fd_seams" }
 common_blkreftable = { path = "../../../common/common_blkreftable" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../wasm-libc-shim" }

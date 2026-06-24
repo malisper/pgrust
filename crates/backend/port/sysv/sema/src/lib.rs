@@ -52,6 +52,65 @@ use ::types_core::{ProcNumber, Size};
 use ::types_error::{PgError, PgResult, FATAL, PANIC};
 use ::types_storage::storage::PGSemaphoreData;
 
+/// `PGSemaphoreShmemSize(int maxSemas)` — report amount of shared memory needed
+/// for semaphores. Pure arithmetic (no OS calls), shared across all targets.
+pub fn PGSemaphoreShmemSize(max_semas: i32) -> PgResult<Size> {
+    // mul_size(maxSemas, sizeof(PGSemaphoreData)); the C uses the overflow-
+    // checked helper, but PGSemaphoreData is 8 bytes and maxSemas is bounded,
+    // so a plain product matches (mul_size only ereports on size_t overflow).
+    Ok((max_semas as usize) * core::mem::size_of::<PGSemaphoreData>())
+}
+
+// ---------------------------------------------------------------------------
+// wasm (single-process) stub.
+//
+// wasip1 has no SysV semaphores (`semget`/`semctl`/`semop`/`sembuf`/`IPC_*`
+// absent from `libc`). A single-process build has no inter-process contention,
+// so semaphores are no-ops: reserve does nothing, and lock/unlock/reset/trylock
+// succeed immediately. (`PGSemaphoreLock` is only ever blocking when another
+// process holds the sema; with one process the count is always available.)
+// ---------------------------------------------------------------------------
+#[cfg(target_family = "wasm")]
+mod wasm_stub {
+    use super::*;
+
+    pub fn PGReserveSemaphores(_max_semas: i32) -> PgResult<()> {
+        Ok(())
+    }
+    pub fn PGSemaphoreReset(_procno: ProcNumber) {}
+    pub fn PGSemaphoreLock(_procno: ProcNumber) {}
+    pub fn PGSemaphoreUnlock(_procno: ProcNumber) {}
+    pub fn PGSemaphoreTryLock(_procno: ProcNumber) -> bool {
+        true
+    }
+
+    pub fn init_seams() {
+        pg_sema_seams::pg_semaphore_shmem_size::set(PGSemaphoreShmemSize);
+        pg_sema_seams::pg_reserve_semaphores::set(PGReserveSemaphores);
+        pg_sema_seams::pg_semaphore_reset::set(PGSemaphoreReset);
+        pg_sema_seams::pg_semaphore_lock::set(PGSemaphoreLock);
+        pg_sema_seams::pg_semaphore_unlock::set(PGSemaphoreUnlock);
+    }
+}
+
+#[cfg(target_family = "wasm")]
+pub use wasm_stub::{
+    init_seams, PGReserveSemaphores, PGSemaphoreLock, PGSemaphoreReset, PGSemaphoreTryLock,
+    PGSemaphoreUnlock,
+};
+
+#[cfg(not(target_family = "wasm"))]
+pub use native::{
+    init_seams, PGReserveSemaphores, PGSemaphoreLock, PGSemaphoreReset, PGSemaphoreTryLock,
+    PGSemaphoreUnlock,
+};
+
+#[cfg(not(target_family = "wasm"))]
+mod native {
+use super::*;
+use std::sync::Mutex;
+use types_error::{PgError, FATAL, PANIC};
+
 /// `SEMAS_PER_SET` — number of useful semaphores in each set we allocate. It
 /// must be *less than* the kernel's SEMMSL, because we allocate one extra sema
 /// in each set for identification purposes.
@@ -311,15 +370,6 @@ fn finalize_created_set(sem_id: IpcSemaphoreId, num_sems: i32) -> PgResult<IpcSe
     };
     semaphore_unlock(&mysema);
     Ok(sem_id)
-}
-
-/// `PGSemaphoreShmemSize(int maxSemas)` — report amount of shared memory
-/// needed for semaphores.
-pub fn PGSemaphoreShmemSize(max_semas: i32) -> PgResult<Size> {
-    // mul_size(maxSemas, sizeof(PGSemaphoreData)); the C uses the overflow-
-    // checked helper, but PGSemaphoreData is 8 bytes and maxSemas is bounded,
-    // so a plain product matches (mul_size only ereports on size_t overflow).
-    Ok((max_semas as usize) * core::mem::size_of::<PGSemaphoreData>())
 }
 
 /// `PGReserveSemaphores(int maxSemas)` — initialize semaphore support.
@@ -590,3 +640,5 @@ pub fn init_seams() {
     pg_sema_seams::pg_semaphore_lock::set(PGSemaphoreLock);
     pg_sema_seams::pg_semaphore_unlock::set(PGSemaphoreUnlock);
 }
+
+} // mod native

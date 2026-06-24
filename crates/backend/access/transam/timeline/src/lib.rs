@@ -36,6 +36,9 @@
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use ::utils_error::errno::current_errno;
 use ::utils_error::ereport;
 use ::types_error::{ErrorLocation, PgResult, ERROR, FATAL};

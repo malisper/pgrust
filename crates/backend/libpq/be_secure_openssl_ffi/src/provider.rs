@@ -1,6 +1,9 @@
 //! The OpenSSL binding + seam installs (only compiled with `ssl-openssl`).
 #![allow(non_upper_case_globals)] // mirror OpenSSL header symbol names (NID_commonName, …)
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use core::ffi::{c_char, c_int, c_long, c_uchar, c_uint, c_void};
 use std::ffi::{CStr, CString};
 

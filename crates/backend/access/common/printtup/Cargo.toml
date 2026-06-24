@@ -25,3 +25,6 @@ tcop_dest = { path = "../../../tcop/tcop_dest" }
 dest_seams = { path = "../../../tcop/dest_seams" }
 printtup_seams = { path = "../printtup_seams" }
 portal = { path = "../../../../_support/types/portal" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

@@ -55,6 +55,9 @@
 //! the caller to the matching `FileClose` ([`wal_summary_reader_file_close`]),
 //! so no side registry is needed.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use ::mcx::{Mcx, PgVec};
 
 use ::utils_error::ereport;

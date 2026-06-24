@@ -505,10 +505,19 @@ fn log_checkpoint_end(flags: i32) {
 
 /// `(pg_time_t) time(NULL)` — the wall-clock seconds the checkpoint records in
 /// `checkPoint.time`.
-fn wallclock_time() -> ::types_core::pg_time_t {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as ::types_core::pg_time_t)
-        .unwrap_or(0)
+fn wallclock_time() -> types_core::pg_time_t {
+    // std's SystemTime panics on wasm64-unknown-unknown (no clock syscall); use
+    // the host clock import there.
+    #[cfg(not(target_family = "wasm"))]
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as types_core::pg_time_t)
+            .unwrap_or(0)
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        (wasm_libc_shim::now_unix_nanos() / 1_000_000_000) as types_core::pg_time_t
+    }
 }

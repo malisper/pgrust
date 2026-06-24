@@ -13,7 +13,58 @@
 //! `interfaces-libpq-legacy-pqsignal` crate). Neither is part of this crate.
 
 use std::cell::Cell;
+#[cfg(not(target_family = "wasm"))]
 use std::mem::MaybeUninit;
+
+// ---------------------------------------------------------------------------
+// The `sigset_t` representation and the low-level set primitives.
+//
+// Native: real `libc::sigset_t` manipulated via `sig{empty,fill,add,del,ismember}set`.
+//
+// wasm (single-process, wasip1): `libc` exposes neither `sigset_t` nor any of
+// the `sig*set` helpers nor `sigprocmask`/`SIG*`. wasm never delivers a signal,
+// so the kernel-mask installs are no-ops, but the `SignalMasks` membership API
+// is still consumed by callers (via seams and directly), so we keep it fully
+// functional by representing the set as a `u64` bitmask (bit `n` = signal `n`)
+// and the SIG* numbers as their standard Linux values.
+// ---------------------------------------------------------------------------
+
+#[cfg(not(target_family = "wasm"))]
+pub use libc::sigset_t;
+
+#[cfg(target_family = "wasm")]
+/// wasm stand-in for `libc::sigset_t`: a `u64` bitmask, bit `n` ⇒ signal `n`.
+/// Signal numbers used by this crate are all < 64, so a single `u64` suffices.
+pub type sigset_t = u64;
+
+// SIG* constants. Native uses libc's; wasm uses the standard Linux numbers
+// (the only ones this crate references), so the masks behave identically.
+#[cfg(target_family = "wasm")]
+mod sig {
+    use core::ffi::c_int;
+    pub const SIGHUP: c_int = 1;
+    pub const SIGINT: c_int = 2;
+    pub const SIGQUIT: c_int = 3;
+    pub const SIGILL: c_int = 4;
+    pub const SIGTRAP: c_int = 5;
+    pub const SIGABRT: c_int = 6;
+    pub const SIGBUS: c_int = 7;
+    pub const SIGFPE: c_int = 8;
+    pub const SIGSEGV: c_int = 11;
+    pub const SIGALRM: c_int = 14;
+    pub const SIGTERM: c_int = 15;
+    pub const SIGCONT: c_int = 18;
+    pub const SIGSYS: c_int = 31;
+}
+
+#[cfg(not(target_family = "wasm"))]
+use libc::{
+    SIGABRT, SIGALRM, SIGBUS, SIGCONT, SIGFPE, SIGILL, SIGQUIT, SIGSEGV, SIGSYS, SIGTERM, SIGTRAP,
+};
+#[cfg(target_family = "wasm")]
+use sig::{
+    SIGABRT, SIGALRM, SIGBUS, SIGCONT, SIGFPE, SIGILL, SIGQUIT, SIGSEGV, SIGSYS, SIGTERM, SIGTRAP,
+};
 
 /// Install this crate's seams: the `sigprocmask` mask-install primitives that
 /// operate over the masks this crate owns.
@@ -24,6 +75,7 @@ pub fn init_seams() {
 }
 
 /// `sigprocmask(SIG_SETMASK, &BlockSig, NULL)` — block all signals.
+#[cfg(not(target_family = "wasm"))]
 fn block_signals() {
     let masks = signal_masks();
     // SAFETY: `block_sig()` points to a valid, initialized sigset_t.
@@ -33,6 +85,7 @@ fn block_signals() {
 }
 
 /// `sigprocmask(SIG_SETMASK, &UnBlockSig, NULL)` — restore the normal mask.
+#[cfg(not(target_family = "wasm"))]
 fn unblock_signals() {
     let masks = signal_masks();
     // SAFETY: `unblock_sig()` points to a valid, initialized sigset_t.
@@ -40,6 +93,14 @@ fn unblock_signals() {
         libc::sigprocmask(libc::SIG_SETMASK, masks.unblock_sig(), core::ptr::null_mut());
     }
 }
+
+/// wasm: no kernel signal mask to install — single-process never blocks signals.
+#[cfg(target_family = "wasm")]
+fn block_signals() {}
+
+/// wasm: no kernel signal mask to install.
+#[cfg(target_family = "wasm")]
+fn unblock_signals() {}
 
 /// The three backend signal masks initialized by [`pqinitmask`].
 ///
@@ -54,29 +115,21 @@ fn unblock_signals() {
 ///   `UnBlockSig` afterwards.)
 #[derive(Clone, Copy, Debug)]
 pub struct SignalMasks {
-    unblock_sig: libc::sigset_t,
-    block_sig: libc::sigset_t,
-    startup_block_sig: libc::sigset_t,
+    unblock_sig: sigset_t,
+    block_sig: sigset_t,
+    startup_block_sig: sigset_t,
 }
 
 /// Signals that should never be blocked (`BlockSig`/`StartupBlockSig` clear
 /// these). Mirrors the `#ifdef SIG*` deletions in `pqinitmask`; every one of
 /// these names exists on the platforms we build for.
-const NEVER_BLOCK_SIGNALS: &[libc::c_int] = &[
-    libc::SIGTRAP,
-    libc::SIGABRT,
-    libc::SIGILL,
-    libc::SIGFPE,
-    libc::SIGSEGV,
-    libc::SIGBUS,
-    libc::SIGSYS,
-    libc::SIGCONT,
+const NEVER_BLOCK_SIGNALS: &[core::ffi::c_int] = &[
+    SIGTRAP, SIGABRT, SIGILL, SIGFPE, SIGSEGV, SIGBUS, SIGSYS, SIGCONT,
 ];
 
 /// Signals unique to startup — additionally cleared only from
 /// `StartupBlockSig`.
-const STARTUP_UNBLOCKED_SIGNALS: &[libc::c_int] =
-    &[libc::SIGQUIT, libc::SIGTERM, libc::SIGALRM];
+const STARTUP_UNBLOCKED_SIGNALS: &[core::ffi::c_int] = &[SIGQUIT, SIGTERM, SIGALRM];
 
 impl SignalMasks {
     /// Builds the three masks: `UnBlockSig = sigemptyset`;
@@ -105,32 +158,32 @@ impl SignalMasks {
     }
 
     /// `UnBlockSig`.
-    pub fn unblock_sig(&self) -> &libc::sigset_t {
+    pub fn unblock_sig(&self) -> &sigset_t {
         &self.unblock_sig
     }
 
     /// `BlockSig`.
-    pub fn block_sig(&self) -> &libc::sigset_t {
+    pub fn block_sig(&self) -> &sigset_t {
         &self.block_sig
     }
 
     /// `StartupBlockSig`.
-    pub fn startup_block_sig(&self) -> &libc::sigset_t {
+    pub fn startup_block_sig(&self) -> &sigset_t {
         &self.startup_block_sig
     }
 
     /// True iff `signal` is a member of `BlockSig`.
-    pub fn block_sig_contains(&self, signal: libc::c_int) -> bool {
+    pub fn block_sig_contains(&self, signal: core::ffi::c_int) -> bool {
         signal_set_contains(&self.block_sig, signal)
     }
 
     /// True iff `signal` is a member of `StartupBlockSig`.
-    pub fn startup_block_sig_contains(&self, signal: libc::c_int) -> bool {
+    pub fn startup_block_sig_contains(&self, signal: core::ffi::c_int) -> bool {
         signal_set_contains(&self.startup_block_sig, signal)
     }
 
     /// True iff `signal` is a member of `UnBlockSig`.
-    pub fn unblock_sig_contains(&self, signal: libc::c_int) -> bool {
+    pub fn unblock_sig_contains(&self, signal: core::ffi::c_int) -> bool {
         signal_set_contains(&self.unblock_sig, signal)
     }
 }
@@ -175,7 +228,7 @@ pub fn set_block_sig_mask() {
 /// miscinit.c's `sigdelset(&BlockSig, SIGQUIT)`). The change sticks for every
 /// later `set_block_sig_mask()` / [`block_signals`] install, matching the C
 /// semantics where `sigdelset` edits the persistent global.
-pub fn block_sig_delete(signal: libc::c_int) {
+pub fn block_sig_delete(signal: core::ffi::c_int) {
     let mut masks = MASKS.get();
     delete_signal(&mut masks.block_sig, signal);
     MASKS.set(masks);
@@ -184,11 +237,9 @@ pub fn block_sig_delete(signal: libc::c_int) {
 /// `sigaddset(&UnBlockSig, signal)` — persistently add `signal` to the owned
 /// `UnBlockSig` snapshot (mutating the C global `UnBlockSig`, mirroring
 /// waiteventset.c's `sigaddset(&UnBlockSig, SIGURG)` on the signalfd build).
-pub fn unblock_sig_add(signal: libc::c_int) {
+pub fn unblock_sig_add(signal: core::ffi::c_int) {
     let mut masks = MASKS.get();
-    // SAFETY: `unblock_sig` is a valid, initialized sigset_t.
-    let rc = unsafe { libc::sigaddset(&mut masks.unblock_sig as *mut libc::sigset_t, signal) };
-    debug_assert_eq!(rc, 0);
+    add_signal(&mut masks.unblock_sig, signal);
     MASKS.set(masks);
 }
 
@@ -196,39 +247,84 @@ pub fn unblock_sig_add(signal: libc::c_int) {
 /// `BlockSig` snapshot (mutating the C global `BlockSig`, mirroring
 /// `quickdie`'s `sigaddset(&BlockSig, SIGQUIT)` which prevents nested SIGQUIT
 /// handler invocations).
-pub fn block_sig_add(signal: libc::c_int) {
+pub fn block_sig_add(signal: core::ffi::c_int) {
     let mut masks = MASKS.get();
-    // SAFETY: `block_sig` is a valid, initialized sigset_t.
-    let rc = unsafe { libc::sigaddset(&mut masks.block_sig as *mut libc::sigset_t, signal) };
-    debug_assert_eq!(rc, 0);
+    add_signal(&mut masks.block_sig, signal);
     MASKS.set(masks);
 }
 
-fn empty_signal_set() -> libc::sigset_t {
-    let mut set = MaybeUninit::<libc::sigset_t>::uninit();
+// ---- low-level set primitives (native: libc; wasm: u64 bitmask) ----
+
+#[cfg(not(target_family = "wasm"))]
+fn empty_signal_set() -> sigset_t {
+    let mut set = MaybeUninit::<sigset_t>::uninit();
     // SAFETY: `sigemptyset` initializes the whole set; we assume_init after.
     let rc = unsafe { libc::sigemptyset(set.as_mut_ptr()) };
     debug_assert_eq!(rc, 0);
     unsafe { set.assume_init() }
 }
 
-fn full_signal_set() -> libc::sigset_t {
-    let mut set = MaybeUninit::<libc::sigset_t>::uninit();
+#[cfg(not(target_family = "wasm"))]
+fn full_signal_set() -> sigset_t {
+    let mut set = MaybeUninit::<sigset_t>::uninit();
     // SAFETY: `sigfillset` initializes the whole set; we assume_init after.
     let rc = unsafe { libc::sigfillset(set.as_mut_ptr()) };
     debug_assert_eq!(rc, 0);
     unsafe { set.assume_init() }
 }
 
-fn delete_signal(set: &mut libc::sigset_t, signal: libc::c_int) {
+#[cfg(not(target_family = "wasm"))]
+fn delete_signal(set: &mut sigset_t, signal: core::ffi::c_int) {
     // SAFETY: `set` is a valid, initialized sigset_t.
     let rc = unsafe { libc::sigdelset(set, signal) };
     debug_assert_eq!(rc, 0);
 }
 
-fn signal_set_contains(set: &libc::sigset_t, signal: libc::c_int) -> bool {
+#[cfg(not(target_family = "wasm"))]
+fn add_signal(set: &mut sigset_t, signal: core::ffi::c_int) {
+    // SAFETY: `set` is a valid, initialized sigset_t.
+    let rc = unsafe { libc::sigaddset(set as *mut sigset_t, signal) };
+    debug_assert_eq!(rc, 0);
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn signal_set_contains(set: &sigset_t, signal: core::ffi::c_int) -> bool {
     // SAFETY: `set` is a valid, initialized sigset_t.
     unsafe { libc::sigismember(set, signal) == 1 }
+}
+
+// wasm: the set is a `u64` bitmask, bit `n` ⇒ signal `n`. All signal numbers
+// this crate uses are < 64, so a single `u64` is exact. `sigfillset` sets every
+// bit; the membership/add/delete ops mirror the libc semantics.
+#[cfg(target_family = "wasm")]
+fn empty_signal_set() -> sigset_t {
+    0
+}
+
+#[cfg(target_family = "wasm")]
+fn full_signal_set() -> sigset_t {
+    u64::MAX
+}
+
+#[cfg(target_family = "wasm")]
+fn signal_bit(signal: core::ffi::c_int) -> u64 {
+    debug_assert!(signal > 0 && (signal as u32) < 64);
+    1u64 << (signal as u32)
+}
+
+#[cfg(target_family = "wasm")]
+fn delete_signal(set: &mut sigset_t, signal: core::ffi::c_int) {
+    *set &= !signal_bit(signal);
+}
+
+#[cfg(target_family = "wasm")]
+fn add_signal(set: &mut sigset_t, signal: core::ffi::c_int) {
+    *set |= signal_bit(signal);
+}
+
+#[cfg(target_family = "wasm")]
+fn signal_set_contains(set: &sigset_t, signal: core::ffi::c_int) -> bool {
+    *set & signal_bit(signal) != 0
 }
 
 #[cfg(test)]

@@ -21,3 +21,6 @@ formatting_seams = { path = "../../utils/adt/formatting_seams" }
 mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 define_seams = { path = "../../commands/define_seams" }
 libc = "0.2"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../wasm-libc-shim" }

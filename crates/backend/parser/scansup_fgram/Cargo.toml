@@ -15,3 +15,6 @@ mmgr_fgram = { path = "../../utils/mmgr/mmgr_fgram" }
 mb_fgram = { path = "../../utils/mb/mb_fgram" }
 pg_ffi_fgram = { path = "../../../_support/pgrust/pg_ffi_fgram" }
 libc = { version = "0.2", default-features = false }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../wasm-libc-shim" }

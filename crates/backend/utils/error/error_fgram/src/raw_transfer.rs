@@ -1,6 +1,11 @@
 use std::ffi::CStr;
 use std::ptr;
 
+// wasm: shadow the extern `libc` with the crate-local shim providing
+// `malloc`/`free` (absent on wasm64).
+#[cfg(target_family = "wasm")]
+use crate::libc_wasm as libc;
+
 use ::pg_ffi_fgram::{ErrorLevel, PgrustErrorData, SqlState};
 
 use crate::{value::nonzero_position, ErrorLocation, PgError};

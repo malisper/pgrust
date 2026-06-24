@@ -18,3 +18,5 @@ randomize-allocated-memory = []
 error_fgram = { path = "../../error/error_fgram" }
 libc = { version = "0.2", default-features = false }
 pg_ffi_fgram = { path = "../../../../_support/pgrust/pg_ffi_fgram" }
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

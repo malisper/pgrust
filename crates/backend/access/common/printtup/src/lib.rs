@@ -51,6 +51,8 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::too_many_arguments)]
 
+pub mod psql_format;
+
 use ::mcx::Mcx;
 use ::types_core::{FmgrInfo, Oid};
 use ::types_dest::dest::CommandDest;
@@ -858,13 +860,72 @@ fn printtup_dest_shutdown<'mcx>(_mcx: Mcx<'mcx>, state: u64) -> PgResult<()> {
 /// Write `s` to stdout, mirroring C's `printf("...")` in `printatt`. The
 /// standalone backend's tuples land on the process stdout stream.
 fn print_to_stdout(s: &str) {
-    use std::io::Write;
-    let stdout = std::io::stdout();
-    let mut h = stdout.lock();
-    // Best-effort like C printf (which ignores the return); a closed stdout in
-    // the standalone backend is not an ereport condition.
-    let _ = h.write_all(s.as_bytes());
-    let _ = h.flush();
+    #[cfg(not(target_family = "wasm"))]
+    {
+        use std::io::Write;
+        let stdout = std::io::stdout();
+        let mut h = stdout.lock();
+        // Best-effort like C printf (which ignores the return); a closed stdout
+        // in the standalone backend is not an ereport condition.
+        let _ = h.write_all(s.as_bytes());
+        let _ = h.flush();
+    }
+    // std stdout is a no-op on wasm64-unknown-unknown; route to the host.
+    #[cfg(target_family = "wasm")]
+    {
+        wasm_libc_shim::stdout_write(s.as_bytes());
+    }
+}
+
+// ===========================================================================
+// Regress-output mode (psql -a -q emulation) for the DestDebug receiver.
+//
+// When `regress_output()` is set, the debug receiver does NOT stream the C debug
+// dump; instead it COLLECTS the column metadata (startup) and each row's
+// rendered cells (receive), then emits a psql `print_aligned` table at shutdown
+// (widths require all rows first). The flag is a thread-local set by the tcop
+// single-user driver via `set_regress_output` (avoids a dep cycle on the tcop
+// crate; the value mirrors `globals::regress_output()`).
+// ===========================================================================
+
+use crate::psql_format::PsqlColumn;
+
+thread_local! {
+    static REGRESS_OUTPUT: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    /// Collected column headers + per-column right-align for the in-flight result.
+    static REGRESS_COLS: RefCell<Vec<PsqlColumn>> = const { RefCell::new(Vec::new()) };
+    /// Collected rows (each a Vec of Option<rendered cell string>).
+    static REGRESS_ROWS: RefCell<Vec<Vec<Option<String>>>> = const { RefCell::new(Vec::new()) };
+    /// The string psql prints for a SQL NULL cell. Default is empty (psql's
+    /// default), changed by the `\pset null '...'` backslash command that some
+    /// regress files (e.g. boolean.sql) issue mid-file.
+    static REGRESS_NULL_DISPLAY: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// Set the NULL display string (psql `\pset null '...'`). The single-user
+/// regress reader calls this when it intercepts that backslash command.
+pub fn set_regress_null_display(s: &str) {
+    REGRESS_NULL_DISPLAY.with(|n| *n.borrow_mut() = s.to_string());
+}
+
+/// Enable/disable psql-aligned regress output for the DestDebug receiver. Set by
+/// the single-user driver to mirror `globals::regress_output()`.
+pub fn set_regress_output(on: bool) {
+    REGRESS_OUTPUT.with(|f| f.set(on));
+}
+
+fn regress_output() -> bool {
+    REGRESS_OUTPUT.with(|f| f.get())
+}
+
+/// psql right-aligns columns whose type category is Numeric (`'N'`). Resolve the
+/// per-column alignment from the attribute's type category.
+fn regress_right_align(atttypid: Oid) -> bool {
+    // TYPCATEGORY_NUMERIC = 'N' (pg_type.h). psql right-aligns numeric columns.
+    match lsyscache_seams::get_type_category_preferred::call(atttypid) {
+        Ok((category, _preferred)) => category == b'N',
+        Err(_) => false,
+    }
 }
 
 /// `&debugtupDR` (dest.c:75) routed into the tcop-dest router: register the
@@ -894,6 +955,23 @@ fn debugtup_dest_startup<'mcx>(
     _operation: CmdType,
     typeinfo: &TupleDescData<'mcx>,
 ) -> PgResult<()> {
+    if regress_output() {
+        // Collect column headers + per-column alignment; defer printing until the
+        // aligned table is emitted at shutdown (widths need every row first).
+        let natts = typeinfo.natts as usize;
+        let mut cols = Vec::with_capacity(natts);
+        for i in 0..natts {
+            let att: &FormData_pg_attribute = typeinfo.attr(i);
+            let name = format!("{}", Latin1Lossy(att.attname.name_str()));
+            cols.push(PsqlColumn {
+                name,
+                right_align: regress_right_align(att.atttypid),
+            });
+        }
+        REGRESS_COLS.with(|c| *c.borrow_mut() = cols);
+        REGRESS_ROWS.with(|r| r.borrow_mut().clear());
+        return Ok(());
+    }
     let out = debugStartup(typeinfo);
     print_to_stdout(&out);
     Ok(())
@@ -914,6 +992,27 @@ fn debugtup_dest_receive<'mcx>(
         .tts_tupleDescriptor
         .as_deref()
         .expect("debugtup: slot has no tuple descriptor");
+    if regress_output() {
+        // Render each column to its psql cell string (NULL -> None), collect the
+        // row; the aligned table is emitted at shutdown.
+        let natts = typeinfo.natts as usize;
+        let mut row: Vec<Option<String>> = Vec::with_capacity(natts);
+        for i in 0..natts {
+            let (attr, isnull) = &columns[i];
+            if *isnull {
+                row.push(None);
+                continue;
+            }
+            let att: &FormData_pg_attribute = typeinfo.attr(i);
+            let (typoutput, _typisvarlena) =
+                lsyscache_seams::get_type_output_info::call(att.atttypid)?;
+            let value =
+                fmgr_seams::oid_output_function_call::call(mcx, typoutput, attr)?;
+            row.push(Some(format!("{}", Latin1Lossy(&value))));
+        }
+        REGRESS_ROWS.with(|r| r.borrow_mut().push(row));
+        return Ok(true);
+    }
     let (out, ret) = debugtup_emit(mcx, typeinfo, &columns)?;
     print_to_stdout(&out);
     Ok(ret)
@@ -921,6 +1020,29 @@ fn debugtup_dest_receive<'mcx>(
 
 /// The dest-router `rShutdown` slot for `debugtupDR` — C's `donothingCleanup`.
 fn debugtup_dest_shutdown<'mcx>(_mcx: Mcx<'mcx>, _state: u64) -> PgResult<()> {
+    if regress_output() {
+        let cols = REGRESS_COLS.with(|c| c.borrow().clone());
+        let rows = REGRESS_ROWS.with(|r| r.borrow().clone());
+        // Only a real result set (a SELECT-like statement with a row
+        // description) emits a table. A utility/DML statement routed here with no
+        // columns produces nothing (psql prints no result + no trailing blank for
+        // those under -q). Guard on a non-empty column list.
+        if cols.is_empty() {
+            return Ok(());
+        }
+        // Emit the psql-aligned table for this result set, followed by ONE
+        // trailing blank line. psql prints a blank line after each query's
+        // result set (verified against the live server: every `(N rows)` footer
+        // is followed by an empty line); source blank lines are never echoed and
+        // errors get no trailing blank, so this is the sole producer of the
+        // inter-result blank lines in the regress output.
+        let null_display = REGRESS_NULL_DISPLAY.with(|n| n.borrow().clone());
+        let out = crate::psql_format::format_aligned(&cols, &rows, &null_display);
+        print_to_stdout(&out);
+        print_to_stdout("\n");
+        REGRESS_COLS.with(|c| c.borrow_mut().clear());
+        REGRESS_ROWS.with(|r| r.borrow_mut().clear());
+    }
     Ok(())
 }
 

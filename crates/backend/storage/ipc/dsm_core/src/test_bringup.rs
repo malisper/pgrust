@@ -44,6 +44,9 @@
 //! (slot search/refcount under the control lock) is identical either way and is
 //! what this bring-up exists to make runnable.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::cell::Cell;
 use std::sync::Once;
 

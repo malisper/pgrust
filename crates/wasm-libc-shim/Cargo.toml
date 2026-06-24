@@ -1,0 +1,12 @@
+[package]
+name = "wasm-libc-shim"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "wasm_libc_shim"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]

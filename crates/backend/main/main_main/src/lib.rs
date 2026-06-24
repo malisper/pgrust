@@ -22,6 +22,9 @@
 //! flag consulted only by the `ubsan_default_options` sanitizer hook; it is a
 //! thread-local here.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::cell::Cell;
 
 use ::common_exec_seams::set_pglocale_pgservice;

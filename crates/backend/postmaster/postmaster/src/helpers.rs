@@ -6,6 +6,9 @@
 
 #![allow(dead_code)]
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use ::utils_error::ereport;
 use ::types_error::{ErrorLevel, ErrorLocation, DEBUG1};
 

@@ -8,9 +8,21 @@
 //! reservation family, `count_usable_fds`/`set_max_safe_fds`, and
 //! `InitFileAccess`.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::cell::RefCell;
+/// The owned kernel-file carrier. Natively `std::fs::File`; on wasm64 (where
+/// `std::fs::File` is the uninhabited never type and `std::fs` performs no I/O)
+/// a real `WasmFile` carrier that routes I/O through the host VFS imports.
+#[cfg(not(target_family = "wasm"))]
 use std::fs::File as StdFile;
+#[cfg(target_family = "wasm")]
+use wasm_libc_shim::osfile::WasmFile as StdFile;
+#[cfg(not(target_family = "wasm"))]
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
+#[cfg(target_family = "wasm")]
+use wasm_libc_shim::osfd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::path::Path;
 
 use aio_seams_2 as aio_seams;
@@ -113,9 +125,16 @@ pub(crate) struct PipeHandle {
     pub stdin: Option<std::process::ChildStdin>,
 }
 
+/// The owned directory-iterator carrier: `std::fs::ReadDir` natively, a
+/// host-VFS-backed `WasmReadDir` on wasm64.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) type OsReadDir = std::fs::ReadDir;
+#[cfg(target_family = "wasm")]
+pub(crate) type OsReadDir = wasm_libc_shim::osfile::WasmReadDir;
+
 /// A live directory iterator opened with `AllocateDir`.
 pub(crate) struct DirHandle {
-    pub iter: Option<std::fs::ReadDir>,
+    pub iter: Option<OsReadDir>,
 }
 
 /// `AllocateDesc` (fd.c:258-268).
@@ -621,6 +640,9 @@ pub(crate) fn ResourceOwnerForgetFile(file: i32) {
 /// `count_usable_fds(int max_to_probe, int *usable_fds, int *already_open)`
 /// (fd.c) — probe how many fds we can actually open. Returns
 /// `(usable_fds, already_open)`.
+// Unused on wasm64-unknown-unknown: `set_max_safe_fds` takes a fixed path there
+// (no kernel fd table to probe via `dup`).
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 pub(crate) fn count_usable_fds(max_to_probe: i32) -> (i32, i32) {
     let mut fd: Vec<i32> = Vec::with_capacity(1024);
     let mut used: i32 = 0;
@@ -694,6 +716,16 @@ pub fn set_max_safe_fds() -> PgResult<()> {
     // We want to set max_safe_fds to MIN(usable_fds, max_files_per_process)
     // less the slop factor for files that are opened without consulting fd.c.
     let mfp = max_files_per_process();
+    // The `count_usable_fds` probe `dup(2)`s the stderr fd until failure to
+    // measure the real kernel fd limit. On wasm64-unknown-unknown there is no
+    // kernel fd table: `dup` is an ENOSYS shim that fails immediately, so the
+    // probe would report 0 usable fds and FATAL out. The host VFS instead hands
+    // out its own integer fds on demand (see the harness `Vfs`), so treat the
+    // configured `max_files_per_process` as fully usable, with nothing already
+    // open. (Mirrors the no-op stance the other wasm OS-coupling shims take.)
+    #[cfg(target_family = "wasm")]
+    let (usable_fds, already_open) = (mfp, 0);
+    #[cfg(not(target_family = "wasm"))]
     let (usable_fds, already_open) = count_usable_fds(mfp);
 
     let mut new_max = usable_fds.min(mfp);
@@ -926,8 +958,15 @@ pub fn seam_init_file_access() -> PgResult<()> {
 }
 
 /// Inward-seam adapter for `last_errno` — read the current OS `errno`.
+#[cfg(not(target_family = "wasm"))]
 pub fn seam_last_errno() -> i32 {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+/// wasm64: read the host-VFS shim errno (std's `last_os_error` is always 0).
+#[cfg(target_family = "wasm")]
+pub fn seam_last_errno() -> i32 {
+    wasm_libc_shim::errno()
 }
 
 /// Inward-seam adapter for `access_f_ok` — `access(path, F_OK)` (InitPostgres).
@@ -1079,8 +1118,16 @@ fn here(funcname: &'static str) -> ErrorLocation {
 }
 
 /// The calling thread's current `errno`.
+#[cfg(not(target_family = "wasm"))]
 fn errno() -> i32 {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+/// On wasm64 the host-VFS shims set their own thread-local errno (std's
+/// `last_os_error` is always 0 there), so read the shim's errno.
+#[cfg(target_family = "wasm")]
+fn errno() -> i32 {
+    wasm_libc_shim::errno()
 }
 
 /// `pub(crate)` wrapper over [`set_errno`] for other modules (e.g. the
@@ -1106,7 +1153,10 @@ fn set_errno(value: i32) {
 /// Render a filesystem path as a NUL-terminated C string for the libc calls
 /// that mirror fd.c's direct `open`/`mkdir`.
 fn path_to_cstring(path: &Path) -> std::ffi::CString {
+    #[cfg(not(target_family = "wasm"))]
     use std::os::unix::ffi::OsStrExt;
+    #[cfg(target_family = "wasm")]
+    use wasm_libc_shim::osfd::OsStrExt;
     std::ffi::CString::new(path.as_os_str().as_bytes())
         .unwrap_or_else(|_| std::ffi::CString::new("").unwrap())
 }

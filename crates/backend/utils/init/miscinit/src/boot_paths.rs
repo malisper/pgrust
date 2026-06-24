@@ -11,6 +11,9 @@
 //! `skip_drive` == identity, `make_native_path` == identity, no `.exe` suffix);
 //! the Windows-only arms reduce away exactly as documented in the C source.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::ffi::{CStr, CString};
 
 use ::types_error::{PgError, PgResult, ERROR, FATAL};
@@ -726,6 +729,19 @@ fn normalize_exec_path(path: &str) -> PgResult<String> {
 /// this program's executable. Returns the resolved path, or `Err` if it cannot
 /// be located (the C `return -1` legs, which the caller turns into `elog(FATAL)`).
 fn find_my_exec(argv0: &str) -> PgResult<String> {
+    // On wasm64-unknown-unknown there is no real executable file to stat: argv0
+    // is a bare "postgres" name, there is no PATH, and `validate_exec` would
+    // access(2) a nonexistent file. The resolved `my_exec_path` only seeds the
+    // pkglib/share-dir derivation, and on wasm those are supplied out-of-band
+    // (PGRUST_PGSHAREDIR is baked at build time; the datadir is the preopened
+    // root). So return a fixed sentinel absolute path instead of failing.
+    #[cfg(target_family = "wasm")]
+    {
+        let _ = argv0;
+        return Ok("/postgres".to_string());
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
     // strlcpy(retpath, argv0, MAXPGPATH)
     let retpath = if argv0.len() >= MAXPGPATH {
         &argv0[..MAXPGPATH - 1]
@@ -791,6 +807,7 @@ fn find_my_exec(argv0: &str) -> PgResult<String> {
         FATAL,
         format!("could not find a \"{argv0}\" to execute"),
     ))
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -39,3 +39,6 @@ latch_seams = { path = "../../storage/ipc/latch_seams" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 
 libc = "0.2"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../wasm-libc-shim" }

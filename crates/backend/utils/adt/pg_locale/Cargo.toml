@@ -44,3 +44,6 @@ mbutils_seams = { path = "../../mb/mbutils_seams" }
 # ICU provider: merged (returns FEATURE_NOT_SUPPORTED in the ICU-disabled
 # profile). Called directly — acyclic (icu depends only on types-*).
 pg_locale_icu = { path = "../pg_locale_icu" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

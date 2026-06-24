@@ -1,6 +1,9 @@
 //! `ident_inet` (`auth.c:1670`) + `interpret_ident_response` (`auth.c:1589`) —
 //! Ident (RFC 1413) authentication.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use ::utils_error::ereport;
 use ::types_error::{PgResult, LOG};
 use ::net::{AddrInfoHint, PgAddrInfo, Port, SockAddr};

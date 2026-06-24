@@ -18,6 +18,9 @@
 //! the function manager the same `(user_fn, api_version)` pair the OS loader's
 //! `fetch_finfo_record` would have produced.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use ::datum::Datum;
 use ::types_error::{PgError, PgResult};
 use ::fmgr::{FunctionCallInfoBaseData, LoadedExternalFunc, PGFunction};

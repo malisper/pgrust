@@ -115,6 +115,9 @@ prepare = { path = "../../commands/prepare" }
 plancache_seams = { path = "../../utils/cache/plancache_seams" }
 params_seams = { path = "../../nodes/params_seams" }
 printtup_seams = { path = "../../access/common/printtup_seams" }
+# Direct dep for the regress-output flag mirror (set_regress_output) + PsqlError
+# construction in emit_regress_error; aliased to the historical crate name the source uses.
+backend-access-common-printtup = { package = "printtup", path = "../../access/common/printtup" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
 mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
@@ -141,3 +144,6 @@ libpq_pqsignal_seams = { path = "../../libpq/libpq_pqsignal_seams" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../wasm-libc-shim" }

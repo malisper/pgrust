@@ -10,13 +10,39 @@
 //! their owners' seams; everything else is plain `std::fs` here.
 
 use std::cell::{Cell, RefCell};
+#[cfg(not(target_family = "wasm"))]
 use std::fs::OpenOptions;
+#[cfg(target_family = "wasm")]
+use wasm_libc_shim::osfile::WasmOpenOptions as OpenOptions;
 use std::io::{Read, Write};
+#[cfg(not(target_family = "wasm"))]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim::osfs::OpenOptionsExt;
+
+#[cfg(not(target_family = "wasm"))]
+use std::fs as osfs_free;
+#[cfg(target_family = "wasm")]
+use wasm_libc_shim::fscompat as osfs_free;
 
 use ::types_error::{PgError, PgResult, FATAL};
 
 use crate::MISCINIT_C;
+
+/// `getpid()`. `std::process::id()` panics on `wasm64-unknown-unknown` (std's
+/// process backend is unsupported), so read the shim's pid there.
+fn my_process_id() -> u32 {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        std::process::id()
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        // SAFETY: getpid is a const-returning shim (no preconditions).
+        unsafe { wasm_libc_shim::getpid() as u32 }
+    }
+}
 
 /// `DIRECTORY_LOCK_FILE` (`miscinit.c:60`).
 pub(crate) const DIRECTORY_LOCK_FILE: &str = "postmaster.pid";
@@ -90,7 +116,7 @@ pub fn unlink_lock_files() {
         let mut files = files.borrow_mut();
         for curfile in files.iter() {
             // unlink(curfile); /* Should we complain if the unlink fails? */
-            let _ = std::fs::remove_file(curfile);
+            let _ = osfs_free::remove_file(curfile);
         }
         // lock_files = NIL;
         files.clear();
@@ -139,7 +165,7 @@ pub fn create_lock_file(
     ref_name: &str,
 ) -> PgResult<()> {
     // my_pid = getpid(); my_p_pid = getppid(); my_gp_pid = atoi(getenv(...)).
-    let my_pid: i32 = std::process::id() as i32;
+    let my_pid: i32 = my_process_id() as i32;
     let my_p_pid: i32 = backend_port_path_seams::getppid::call();
     let my_gp_pid: i32 = match std::env::var("PG_GRANDPARENT_PID") {
         Ok(v) => parse_leading_i32(&v),
@@ -273,7 +299,7 @@ pub fn create_lock_file(
         }
 
         // Looks like nobody's home. Unlink the file and try again to create it.
-        if let Err(e) = std::fs::remove_file(filename) {
+        if let Err(e) = osfs_free::remove_file(filename) {
             return Err(file_err(
                 format!("could not remove old lock file \"{filename}\""),
                 &e,
@@ -305,7 +331,7 @@ pub fn create_lock_file(
     }
 
     if let Err(e) = file.write_all(contents.as_bytes()) {
-        let _ = std::fs::remove_file(filename);
+        let _ = osfs_free::remove_file(filename);
         return Err(file_err(
             format!("could not write lock file \"{filename}\""),
             &e,
@@ -314,7 +340,7 @@ pub fn create_lock_file(
 
     // pg_fsync(fd)
     if let Err(e) = file.sync_all() {
-        let _ = std::fs::remove_file(filename);
+        let _ = osfs_free::remove_file(filename);
         return Err(file_err(
             format!("could not write lock file \"{filename}\""),
             &e,
@@ -491,7 +517,10 @@ pub fn AddToDataDirLockFile(target_line: i32, line: &str) -> PgResult<()> {
     }
 
     // Rewrite the data in a single pwrite at offset 0 (atomic to onlookers).
+    #[cfg(not(target_family = "wasm"))]
     use std::os::unix::fs::FileExt;
+    #[cfg(target_family = "wasm")]
+    use wasm_libc_shim::osfs::FileExt;
     match file.write_all_at(dest.as_bytes(), 0) {
         Ok(()) => {}
         Err(e) => {
@@ -581,7 +610,7 @@ pub fn RecheckDataDirLockFile() -> PgResult<bool> {
     drop(file);
 
     let file_pid = parse_leading_i64(&buffer);
-    if file_pid == std::process::id() as i64 {
+    if file_pid == my_process_id() as i64 {
         return Ok(true); // all is well
     }
 
@@ -589,7 +618,7 @@ pub fn RecheckDataDirLockFile() -> PgResult<bool> {
     utils_error::ereport(::types_error::LOG)
         .errmsg(format!(
             "lock file \"{DIRECTORY_LOCK_FILE}\" contains wrong PID: {file_pid} instead of {}",
-            std::process::id()
+            my_process_id()
         ))
         .finish(::types_error::ErrorLocation::new(
             MISCINIT_C, 1751, "RecheckDataDirLockFile",

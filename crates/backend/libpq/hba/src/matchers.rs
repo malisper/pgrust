@@ -10,6 +10,9 @@
 //! `pg_sockaddr_cidr_mask` / `pg_foreach_ifaddr`) are reused from the ported
 //! `backend-libpq-ifaddr` crate.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::net::IpAddr;
 
 use ::ifaddr::{self as ifaddr, AddressFamily};

@@ -25,6 +25,9 @@
 //! slotsync, walsender, the CV protocol, GUC reload) are reached through their
 //! owners' seam crates and panic loudly until those owners land.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::cell::UnsafeCell;
 use std::sync::OnceLock;
 

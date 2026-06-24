@@ -48,3 +48,6 @@ acl_seams = { path = "../../../utils/adt/acl_seams" }
 miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
 init_small_seams = { path = "../../../utils/init/init_small_seams" }
 superuser_seams = { path = "../../../utils/misc/superuser_seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

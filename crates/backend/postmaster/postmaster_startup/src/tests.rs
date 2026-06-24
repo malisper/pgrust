@@ -7,6 +7,9 @@
 //! enforces by construction only if tests run on the locked path — so each
 //! test resets the flags it uses).
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use super::*;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Mutex, MutexGuard, Once};

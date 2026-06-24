@@ -83,3 +83,6 @@ dbcommands_seams = { path = "../../commands/dbcommands_seams" }
 execTuples_seams = { path = "../../executor/execTuples_seams" }
 
 libc = "0.2"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../wasm-libc-shim" }

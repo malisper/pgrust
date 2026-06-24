@@ -19,3 +19,6 @@ fd_seams = { path = "../../storage/file/fd_seams" }
 init_small = { path = "../../utils/init/init_small" }
 common_path_seams = { path = "../../../common/common_path_seams" }
 pgstrcasecmp = { path = "../../../port/pgstrcasecmp" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../wasm-libc-shim" }

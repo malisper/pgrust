@@ -4,6 +4,9 @@
 //!
 //! Ported from `src/backend/libpq/hba.c` (lines 2530-3126).
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use acl_seams as acl;
 use ::mcx::{Mcx, PgString};
 use ::types_error::{PgResult, DEBUG3, LOG};

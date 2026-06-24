@@ -23,3 +23,6 @@ dsm_core_seams = { path = "../../storage/ipc/dsm_core_seams" }
 pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
 stat_seams = { path = "../activity/stat_seams" }
 libc = "0.2"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../wasm-libc-shim" }

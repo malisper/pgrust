@@ -48,3 +48,6 @@ types_pgstat = { path = "../../../../_support/types/types_pgstat" }
 snapshot = { path = "../../../../_support/types/snapshot" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 types_vacuum = { path = "../../../../_support/types/types_vacuum" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

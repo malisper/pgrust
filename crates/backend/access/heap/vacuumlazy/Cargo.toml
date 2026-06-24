@@ -27,3 +27,6 @@ postgres_seams = { path = "../../../tcop/postgres_seams" }
 
 [dev-dependencies]
 types_tuple = { path = "../../../../_support/types/types_tuple" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

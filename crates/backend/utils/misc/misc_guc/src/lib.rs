@@ -61,6 +61,10 @@ pub mod units;
 #[cfg(test)]
 mod tests;
 
+#[cfg(not(target_family = "wasm"))]
+use std::fs as osfs_free;
+#[cfg(target_family = "wasm")]
+use wasm_libc_shim::fscompat as osfs_free;
 use ::utils_error::ereport;
 use ::types_error::{
     PgError, PgResult, SqlState, ERRCODE_INVALID_PARAMETER_VALUE, ERROR, WARNING,
@@ -407,7 +411,7 @@ pub fn SelectConfigFiles(user_doption: Option<&str>, progname: &str) -> PgResult
     };
 
     if let Some(dir) = &configdir {
-        if std::fs::metadata(dir).is_err() {
+        if osfs_free::metadata(dir).is_err() {
             eprintln!("{progname}: could not access directory \"{dir}\"");
             eprintln!(
                 "Run initdb or pg_basebackup to initialize a PostgreSQL data directory."
@@ -438,7 +442,7 @@ pub fn SelectConfigFiles(user_doption: Option<&str>, progname: &str) -> PgResult
     // Read the config file for the first time (only data_directory is picked up
     // this pass, to find the data directory so the autoconf file can be read).
     let config_file_name = live::get_string("config_file").flatten().unwrap_or_default();
-    if std::fs::metadata(&config_file_name).is_err() {
+    if osfs_free::metadata(&config_file_name).is_err() {
         eprintln!(
             "{progname}: could not access the server configuration file \"{config_file_name}\""
         );

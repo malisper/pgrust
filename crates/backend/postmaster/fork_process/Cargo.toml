@@ -15,3 +15,6 @@ fork_process_seams = { path = "../fork_process_seams" }
 libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
 init_small = { path = "../../utils/init/init_small" }
 pg_strong_random_seams = { path = "../../../port/pg_strong_random_seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../wasm-libc-shim" }

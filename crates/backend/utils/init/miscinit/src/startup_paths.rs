@@ -12,6 +12,9 @@
 //! [`crate::init_seams`]. Each mirrors its C source on the non-Windows path
 //! (the only platform this tree builds for).
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::ffi::CStr;
 
 use ::types_error::{PgError, PgResult, FATAL};

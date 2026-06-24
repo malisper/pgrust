@@ -53,7 +53,12 @@ pub fn read_tz_file(filename: &str) -> TzFileResult {
     }
 
     // tzFile = AllocateFile(file_path, "r");
-    let contents = match std::fs::read(&file_path) {
+    // std::fs is inert on wasm64-unknown-unknown; read via the host VFS there.
+    #[cfg(not(target_family = "wasm"))]
+    let read_result = std::fs::read(&file_path);
+    #[cfg(target_family = "wasm")]
+    let read_result = wasm_libc_shim::fscompat::read(&file_path);
+    let contents = match read_result {
         Ok(bytes) => bytes,
         Err(err) => {
             // The open failed. C now checks whether the *directory* itself is
@@ -68,7 +73,18 @@ pub fn read_tz_file(filename: &str) -> TzFileResult {
                 dir_path.truncate(MAXPGPATH - 1);
             }
             // AllocateDir == opendir; NULL == could not open the directory.
-            if std::fs::read_dir(&dir_path).is_err() {
+            #[cfg(not(target_family = "wasm"))]
+            let dir_err = std::fs::read_dir(&dir_path).is_err();
+            // wasm64: probe the directory via the host VFS (std::fs is inert).
+            #[cfg(target_family = "wasm")]
+            let dir_err = {
+                use wasm_libc_shim::osfd::OsStrExt as _;
+                wasm_libc_shim::osfile::WasmReadDir::open(
+                    std::path::Path::new(&dir_path).as_os_str().as_bytes(),
+                )
+                .is_err()
+            };
+            if dir_err {
                 return TzFileResult::Open(TzFileOpenError::DirectoryMissing {
                     // C: errmsg("could not open directory \"%s\": %m", file_path)
                     // — file_path here is the timezonesets directory path.

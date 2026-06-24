@@ -16,3 +16,6 @@ guc_file_seams = { path = "../guc_file_seams" }
 guc_seams = { path = "../guc_seams" }
 conffiles_seams = { path = "../conffiles_seams" }
 init_small_seams = { path = "../../init/init_small_seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

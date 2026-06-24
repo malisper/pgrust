@@ -569,6 +569,7 @@ fn wait_latch_or_socket_seam(
 /// `kill(pid, SIGUSR1)` (`ShutDownSlotSync`): signal the slot-sync worker so
 /// it notices the stop request. The seam surfaces a failed `kill(2)` as `Err`
 /// (the C ignores the return; the porter chose to make the failure visible).
+#[cfg(not(target_family = "wasm"))]
 fn kill_sigusr1(pid: i32) -> PgResult<()> {
     let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGUSR1) };
     if rc != 0 {
@@ -577,6 +578,14 @@ fn kill_sigusr1(pid: i32) -> PgResult<()> {
             "could not send signal to process {pid}: {e}"
         )));
     }
+    Ok(())
+}
+
+/// wasm (single-process) stub: there is no other process to signal, so
+/// `kill(pid, SIGUSR1)` is a no-op that succeeds. The slot-sync worker the
+/// caller would wake does not exist in single-user wasm.
+#[cfg(target_family = "wasm")]
+fn kill_sigusr1(_pid: i32) -> PgResult<()> {
     Ok(())
 }
 

@@ -1075,6 +1075,47 @@ mod tests {
         assert!(int2abs(i16::MIN).is_err());
     }
 
+    // Exact reproduction of the int4.sql gcd()/lcm() regression rows, including
+    // the `-b` operand (computed via int4um, as the SQL `lcm(a,-b)` does). This
+    // pins the helpers to PostgreSQL's expected output and guards the wasm64
+    // INT_MIN-negation correctness fix. Each tuple is (a, b, expected for the
+    // four column expressions: f(a,b), f(a,-b), f(b,a), f(-b,a)).
+    fn check_gcd_row(a: i32, b: i32, exp: [i32; 4]) {
+        let nb = int4um(b).unwrap();
+        assert_eq!(int4gcd(a, b).unwrap(), exp[0], "gcd({a},{b})");
+        assert_eq!(int4gcd(a, nb).unwrap(), exp[1], "gcd({a},-{b})");
+        assert_eq!(int4gcd(b, a).unwrap(), exp[2], "gcd({b},{a})");
+        assert_eq!(int4gcd(nb, a).unwrap(), exp[3], "gcd(-{b},{a})");
+    }
+
+    fn check_lcm_row(a: i32, b: i32, exp: [i32; 4]) {
+        let nb = int4um(b).unwrap();
+        assert_eq!(int4lcm(a, b).unwrap(), exp[0], "lcm({a},{b})");
+        assert_eq!(int4lcm(a, nb).unwrap(), exp[1], "lcm({a},-{b})");
+        assert_eq!(int4lcm(b, a).unwrap(), exp[2], "lcm({b},{a})");
+        assert_eq!(int4lcm(nb, a).unwrap(), exp[3], "lcm(-{b},{a})");
+    }
+
+    #[test]
+    fn gcd_lcm_int4sql_rows() {
+        // gcd() rows from int4.sql.
+        check_gcd_row(0, 0, [0, 0, 0, 0]);
+        check_gcd_row(0, 6410818, [6410818, 6410818, 6410818, 6410818]);
+        check_gcd_row(61866666, 6410818, [1466, 1466, 1466, 1466]);
+        check_gcd_row(-61866666, 6410818, [1466, 1466, 1466, 1466]);
+        check_gcd_row(i32::MIN, 1, [1, 1, 1, 1]);
+        check_gcd_row(i32::MIN, 2147483647, [1, 1, 1, 1]);
+        check_gcd_row(i32::MIN, 1073741824, [1073741824, 1073741824, 1073741824, 1073741824]);
+
+        // lcm() rows from int4.sql. The last row is the one that errors on wasm64.
+        check_lcm_row(0, 0, [0, 0, 0, 0]);
+        check_lcm_row(0, 42, [0, 0, 0, 0]);
+        check_lcm_row(42, 42, [42, 42, 42, 42]);
+        check_lcm_row(330, 462, [2310, 2310, 2310, 2310]);
+        check_lcm_row(-330, 462, [2310, 2310, 2310, 2310]);
+        check_lcm_row(i32::MIN, 0, [0, 0, 0, 0]);
+    }
+
     #[test]
     fn in_range_overflow_branches() {
         assert!(in_range_int4_int4(5, i32::MAX, 10, false, true).unwrap());

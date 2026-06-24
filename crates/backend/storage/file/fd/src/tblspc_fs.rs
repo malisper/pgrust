@@ -9,13 +9,19 @@
 //! reported as the C-style `errno` integer so the caller can reproduce
 //! tablespace.c's exact `errno == ENOENT`/`EEXIST` branching.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use ::tblspc_fs_seams::{StatKind, StatResult};
 use ::types_error::PgResult;
 
 use crate::vfd_core;
 
 fn errno_now() -> i32 {
-    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+    // `std::io::Error::last_os_error()` is inert on wasm64 (always 0); the file
+    // shims set their own thread-local errno. Use the shared accessor that reads
+    // the right source per target so `stat`==ENOENT branching works on wasm.
+    utils_error::errno::current_errno()
 }
 
 fn path_cstring(path: &str) -> std::ffi::CString {

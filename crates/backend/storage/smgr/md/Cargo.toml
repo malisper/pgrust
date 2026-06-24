@@ -29,3 +29,6 @@ sync_seams = { path = "../../sync/sync_seams" }
 xlogrecovery_seams = { path = "../../../access/transam/xlogrecovery_seams" }
 binary_upgrade_seams = { path = "../../../catalog/binary_upgrade_seams" }
 tablespace_seams = { path = "../../../commands/tablespace_seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

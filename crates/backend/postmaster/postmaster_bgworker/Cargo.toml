@@ -56,3 +56,6 @@ misc_timeout = { path = "../../utils/misc/misc_timeout" }
 # these subsystem crates depend only on bgworker's *-seams, not this crate).
 launcher = { path = "../../replication/logical/launcher" }
 applyparallelworker = { path = "../../replication/logical/applyparallelworker" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../wasm-libc-shim" }

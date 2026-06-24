@@ -22,7 +22,9 @@
 //! infallible like the C call sites expect (no palloc means OOM is not part
 //! of its failure surface, so no `PgResult`).
 
+#[cfg(not(target_family = "wasm"))]
 use std::mem::MaybeUninit;
+#[cfg(not(target_family = "wasm"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // `Timeval`/`PgRUsage` (`utils/pg_rusage.h`) are canonically defined in
@@ -40,6 +42,7 @@ pub fn pg_rusage_new() -> PgRUsage {
 }
 
 /// `gettimeofday(&tv, NULL)` -> `(tv_sec, tv_usec)`.
+#[cfg(not(target_family = "wasm"))]
 fn os_gettimeofday() -> (i64, i64) {
     let dur = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -47,10 +50,20 @@ fn os_gettimeofday() -> (i64, i64) {
     (dur.as_secs() as i64, dur.subsec_micros() as i64)
 }
 
+/// wasm (single-process) stub: `std::time::SystemTime::now()` panics on
+/// `wasm64-unknown-unknown` (no clock host import), so the wall-clock snapshot
+/// reports zero. Only affects the cosmetic "elapsed" progress strings in
+/// VACUUM/ANALYZE/CLUSTER and recovery logging.
+#[cfg(target_family = "wasm")]
+fn os_gettimeofday() -> (i64, i64) {
+    (0, 0)
+}
+
 /// `getrusage(RUSAGE_SELF, &ru)` -> `(ru_utime.tv_sec, ru_utime.tv_usec,
 /// ru_stime.tv_sec, ru_stime.tv_usec)`. On failure (which `getrusage`
 /// essentially never returns for RUSAGE_SELF) reports zeros — the benign
 /// degradation C would get from an all-zero `struct rusage`.
+#[cfg(not(target_family = "wasm"))]
 fn os_getrusage_self() -> (i64, i64, i64, i64) {
     let mut ru: MaybeUninit<libc::rusage> = MaybeUninit::uninit();
     // SAFETY: `getrusage` fills `ru` for RUSAGE_SELF; read only on success.
@@ -65,6 +78,15 @@ fn os_getrusage_self() -> (i64, i64, i64, i64) {
         ru.ru_stime.tv_sec as i64,
         ru.ru_stime.tv_usec as i64,
     )
+}
+
+/// wasm (single-process) stub: `getrusage` is unavailable under
+/// wasm32/wasm64-wasip1, so CPU-time accounting reports zero. Only affects the
+/// cosmetic "CPU: user/system" progress strings in VACUUM/ANALYZE/CLUSTER;
+/// wall-clock elapsed (via `gettimeofday`/`SystemTime`) is still accurate.
+#[cfg(target_family = "wasm")]
+fn os_getrusage_self() -> (i64, i64, i64, i64) {
+    (0, 0, 0, 0)
 }
 
 /// Initialize usage snapshot. As in C, OS-call failure status is ignored.

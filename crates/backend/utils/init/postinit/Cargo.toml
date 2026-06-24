@@ -87,3 +87,6 @@ timeout_seams = { path = "../../misc/timeout_seams" }
 portalmem_seams = { path = "../../mmgr/portalmem_seams" }
 resowner_seams = { path = "../../resowner/resowner_seams" }
 snapmgr_seams = { path = "../../time/snapmgr_seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

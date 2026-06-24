@@ -48,3 +48,6 @@ types_storage = { path = "../../../../_support/types/types_storage" }
 # in for downstream consumers.
 [dev-dependencies]
 mmgr_freepage = { path = "../../../utils/mmgr/mmgr_freepage" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

@@ -11,3 +11,5 @@ path = "src/lib.rs"
 [dependencies]
 libc = "0.2"
 types_core = { path = "../../types/types_core" }
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../wasm-libc-shim" }

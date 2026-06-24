@@ -15,6 +15,21 @@ use std::cell::Cell;
 
 use ::types_error::PgError;
 
+/// `getpid()` for the log line prefix. `std::process::id()` panics on
+/// `wasm64-unknown-unknown` (std's process backend is unsupported), so read the
+/// shim's pid there; natively use `std::process::id()`.
+pub(crate) fn current_pid() -> u32 {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        std::process::id()
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        // SAFETY: getpid is a const-returning shim (no preconditions).
+        unsafe { wasm_libc_shim::getpid() as u32 }
+    }
+}
+
 pub trait BackendLogContext: Sync {
     /// `MyProcPort != NULL`.
     fn has_client_port(&self) -> bool {
@@ -61,7 +76,7 @@ pub trait BackendLogContext: Sync {
 
     /// `MyProcPid`.
     fn process_id(&self) -> u32 {
-        std::process::id()
+        current_pid()
     }
 
     /// `MyProc->lockGroupLeader->pid` (`None` when `MyProc` is NULL or there

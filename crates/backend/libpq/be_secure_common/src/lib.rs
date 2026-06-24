@@ -12,6 +12,9 @@
 //! matching the sibling ports (xlogarchive.c, miscinit.c). `wait_result_to_str`
 //! is reached through its (unported) owner's seam.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use be_secure_common_seams as my_seams;
 use fd_seams as fd_seams;
 use ::fd_seams::PipeReadLine;

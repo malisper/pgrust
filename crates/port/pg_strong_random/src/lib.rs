@@ -24,6 +24,7 @@ pub fn pg_strong_random_init() {
 /// Faithful to the non-OpenSSL/non-Win32 branch: `open("/dev/urandom",
 /// O_RDONLY)`, then `read()` in a loop until `len` bytes are read, retrying on
 /// `EINTR`, and `close()` at the end.
+#[cfg(not(target_family = "wasm"))]
 pub fn pg_strong_random(buf: &mut [u8]) -> bool {
     // f = open("/dev/urandom", O_RDONLY, 0);
     let path = c"/dev/urandom";
@@ -62,6 +63,37 @@ pub fn pg_strong_random(buf: &mut [u8]) -> bool {
     ok
 }
 
+/// wasm: there is no `/dev/urandom` (no `open`/`read`/`close`, no `O_RDONLY`)
+/// on `wasm64-unknown-unknown`, and no wasi `random_get` import is linked in
+/// this no-OS target. Seed a SplitMix64 stream from the monotonic + realtime
+/// clocks and the buffer address so the bytes are non-constant per call. This
+/// is NOT cryptographically strong; it is a single-user bring-up stand-in
+/// (TODO: route to a host `random_get` import once a wasi/host ABI is wired).
+#[cfg(target_family = "wasm")]
+pub fn pg_strong_random(buf: &mut [u8]) -> bool {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let mut state = (clock_realtime_ns() as u64)
+        ^ (buf.as_ptr() as u64).rotate_left(17)
+        ^ COUNTER.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed);
+
+    // SplitMix64
+    let mut next = || -> u64 {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+
+    for chunk in buf.chunks_mut(8) {
+        let bytes = next().to_le_bytes();
+        chunk.copy_from_slice(&bytes[..chunk.len()]);
+    }
+    true
+}
+
 // ---------------------------------------------------------------------------
 // clock_realtime_ns — the real-time clock read uuid.c's UUID v7 path uses.
 //
@@ -71,6 +103,7 @@ pub fn pg_strong_random(buf: &mut [u8]) -> bool {
 // ---------------------------------------------------------------------------
 
 /// The current real timestamp in nanoseconds since the UNIX epoch.
+#[cfg(not(target_family = "wasm"))]
 pub fn clock_realtime_ns() -> i64 {
     let mut tp = libc::timespec {
         tv_sec: 0,
@@ -89,6 +122,13 @@ pub fn clock_realtime_ns() -> i64 {
         return (tv.tv_sec as i64) * 1_000_000_000 + (tv.tv_usec as i64) * 1_000;
     }
     (tp.tv_sec as i64) * 1_000_000_000 + (tp.tv_nsec as i64)
+}
+
+/// wasm: no `clock_gettime`/`gettimeofday`, and `std::time::SystemTime::now()`
+/// panics on `wasm64-unknown-unknown`. Read the host wall clock through the shim.
+#[cfg(target_family = "wasm")]
+pub fn clock_realtime_ns() -> i64 {
+    wasm_libc_shim::now_unix_nanos()
 }
 
 /// Install this crate's seam implementations.

@@ -25,6 +25,9 @@
 //! the scaffold stage panics through them so the control flow in
 //! `proc_lifecycle` is the real one, never a stub of proc.c's own logic.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use ::types_core::init::BackendType;
 use ::types_core::{LocalTransactionId, ProcNumber, TransactionId};
 use ::types_tuple::Datum;
@@ -280,9 +283,18 @@ pub(crate) fn autovacuum_launcher_pid() -> i32 {
 
 // ---- libc ----
 
-/// `getpid()`.
+/// `getpid()`. `std::process::id()` panics on `wasm64-unknown-unknown`; use the
+/// shim's `getpid` there.
 pub(crate) fn getpid() -> i32 {
-    std::process::id() as i32
+    #[cfg(not(target_family = "wasm"))]
+    {
+        std::process::id() as i32
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        // SAFETY: getpid is a const-returning shim (no preconditions).
+        unsafe { libc::getpid() as i32 }
+    }
 }
 
 /// `kill(pid, SIGUSR2)`.

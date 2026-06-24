@@ -27,3 +27,6 @@ libc = { version = "0.2" }
 
 [dev-dependencies]
 init = { path = "../../../_support/seam/init" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../wasm-libc-shim" }

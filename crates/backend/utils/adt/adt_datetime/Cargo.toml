@@ -49,3 +49,6 @@ common_path_seams = { path = "../../../../common/common_path_seams" }
 # `backend-storage-file-fd`; the test harness installs a `std::fs::read_dir`
 # body (the same OS call) so the tzdb scan resolves.
 fd_seams = { path = "../../../storage/file/fd_seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

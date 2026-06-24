@@ -14,7 +14,45 @@
     clippy::pedantic
 )]
 
+#[cfg(not(target_family = "wasm"))]
 use libc::{memchr, strnlen};
+
+// wasm-only stubs: `libc::memchr` and `libc::strnlen` are absent on the
+// wasm64-unknown-unknown target. These re-implement the C-ABI symbols with
+// identical signatures and semantics so the call sites compile and behave
+// identically.
+#[cfg(target_family = "wasm")]
+#[inline]
+unsafe extern "C" fn memchr(
+    s: *const ::core::ffi::c_void,
+    c: ::core::ffi::c_int,
+    n: size_t,
+) -> *mut ::core::ffi::c_void {
+    let needle = c as u8;
+    let bytes = s as *const u8;
+    let mut i: size_t = 0;
+    while i < n {
+        if *bytes.add(i) == needle {
+            return bytes.add(i) as *mut ::core::ffi::c_void;
+        }
+        i += 1;
+    }
+    ::core::ptr::null_mut()
+}
+
+#[cfg(target_family = "wasm")]
+#[inline]
+unsafe extern "C" fn strnlen(s: *const ::core::ffi::c_char, maxlen: size_t) -> size_t {
+    let bytes = s as *const u8;
+    let mut i: size_t = 0;
+    while i < maxlen {
+        if *bytes.add(i) == 0 {
+            return i;
+        }
+        i += 1;
+    }
+    maxlen
+}
 pub use ::pg_ffi_fgram::{
     mb2wchar_with_len_converter, mbchar_verifier, mbdisplaylen_converter, mbinterval,
     mblen_converter, mbstr_verifier, pg_enc, pg_wchar, pg_wchar_tbl, wchar2mb_with_len_converter,

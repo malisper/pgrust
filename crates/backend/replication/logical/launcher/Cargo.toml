@@ -51,3 +51,6 @@ walreceiver_seams = { path = "../../walreceiver_seams" }
 origin_seams = { path = "../origin_seams" }
 worker_seams = { path = "../worker_seams" }
 applyparallelworker_seams = { path = "../applyparallelworker_seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

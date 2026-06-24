@@ -896,7 +896,10 @@ fn invalid_descriptor(fd: i32) -> PgError {
 /// Convert the large-object filename `text` payload bytes into an OS path,
 /// mirroring `text_to_cstring_buffer(filename, fnamebuf, MAXPGPATH)`.
 fn fname_to_path(filename: &[u8]) -> std::path::PathBuf {
+    #[cfg(not(target_family = "wasm"))]
     use std::os::unix::ffi::OsStrExt;
+    #[cfg(target_family = "wasm")]
+    use wasm_libc_shim::osfs::OsStrBytesExt as OsStrExt;
     std::path::PathBuf::from(std::ffi::OsStr::from_bytes(filename))
 }
 
@@ -957,7 +960,10 @@ fn export_server_file(
     read_chunk: &mut dyn FnMut(&mut [u8]) -> PgResult<i32>,
 ) -> PgResult<()> {
     use std::io::Write;
+    #[cfg(not(target_family = "wasm"))]
     use std::os::unix::fs::OpenOptionsExt;
+    #[cfg(target_family = "wasm")]
+    use wasm_libc_shim::osfs::OpenOptionsExt;
 
     let path = fname_to_path(filename);
     let fname = path.display();

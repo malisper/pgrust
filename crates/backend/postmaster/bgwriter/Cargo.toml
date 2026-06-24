@@ -68,3 +68,6 @@ pgstat_wal_seams = { path = "../../utils/activity/pgstat_wal_seams" }
 timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
 transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
 pgsleep_seams = { path = "../../../port/pgsleep_seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../wasm-libc-shim" }

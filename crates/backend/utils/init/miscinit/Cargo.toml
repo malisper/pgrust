@@ -94,3 +94,6 @@ acl_seams = { path = "../../adt/acl_seams" }
 types_catalog = { path = "../../../../_support/types/types_catalog" }
 tablespace_globals_seams = { path = "../../../commands/tablespace_globals_seams" }
 username_seams = { path = "../../../../common/username_seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

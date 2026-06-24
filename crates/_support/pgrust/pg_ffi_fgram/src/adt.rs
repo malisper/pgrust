@@ -31,8 +31,20 @@ macro_rules! const_assert {
 
 /// Family field values for [`inet_struct`].  `PGSQL_AF_INET` is `AF_INET + 0`
 /// and `PGSQL_AF_INET6` is `AF_INET + 1` (utils/inet.h).
+///
+/// These are on-disk constants for the inet/cidr types: PostgreSQL stores
+/// `AF_INET`'s numeric value (2 on every platform it supports) in the inet
+/// binary representation, so the value must be stable regardless of build host.
+/// On wasm (`target_family = "wasm"`) `libc` does not export `AF_INET`, so we
+/// pin the literal `2` — identical to the value `libc::AF_INET` yields natively.
+#[cfg(not(target_family = "wasm"))]
 pub const PGSQL_AF_INET: u8 = libc::AF_INET as u8;
+#[cfg(not(target_family = "wasm"))]
 pub const PGSQL_AF_INET6: u8 = (libc::AF_INET + 1) as u8;
+#[cfg(target_family = "wasm")]
+pub const PGSQL_AF_INET: u8 = 2;
+#[cfg(target_family = "wasm")]
+pub const PGSQL_AF_INET6: u8 = 3;
 
 /// Internal storage format for IP addresses (both INET and CIDR). (utils/inet.h)
 #[repr(C)]

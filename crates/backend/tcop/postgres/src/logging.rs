@@ -23,6 +23,9 @@
 
 #![allow(non_snake_case)]
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use ::utils_error::{errdetail_internal, errfinish, errmsg_internal, errstart};
 use ::mcx::{Mcx, PgString};
 use ::types_error::{PgResult, LOG};
@@ -300,6 +303,16 @@ pub fn ShowUsage(title: &str) -> PgResult<()> {
         let (f, l, fc) = here!("ShowUsage");
         errfinish(f, l, fc)?;
     }
+    Ok(())
+}
+
+// wasm64 has no `getrusage`/`rusage`; the `log_statement_stats` resource-usage
+// report is a diagnostic only, so single-user wasm gets no-op stand-ins (the
+// `! system usage stats` lines are simply omitted).
+#[cfg(all(not(unix), target_family = "wasm"))]
+pub fn ResetUsage() {}
+#[cfg(all(not(unix), target_family = "wasm"))]
+pub fn ShowUsage(_title: &str) -> PgResult<()> {
     Ok(())
 }
 

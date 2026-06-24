@@ -85,3 +85,6 @@ libc = "0.2"
 [dev-dependencies]
 lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
 waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

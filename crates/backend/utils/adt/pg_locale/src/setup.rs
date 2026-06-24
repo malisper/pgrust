@@ -7,6 +7,9 @@
 //! hooks. The libc `setlocale`/`setenv` calls are OS FFI bound here; everything
 //! PostgreSQL decides is ported in-crate.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 extern crate alloc;
 
 use alloc::format;

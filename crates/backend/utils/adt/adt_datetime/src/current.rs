@@ -59,11 +59,22 @@ pub fn clock_timestamp() -> TimestampTz {
 /// the strftime seam.
 pub fn timeofday() -> String {
     // gettimeofday() equivalent: seconds + microseconds since the Unix epoch.
-    let dur = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let tt = dur.as_secs() as pg_time_t;
-    let tv_usec = dur.subsec_micros();
+    // std's SystemTime::now() panics on wasm64; read the host clock there.
+    #[cfg(not(target_family = "wasm"))]
+    let (tt, tv_usec) = {
+        let dur = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        (dur.as_secs() as pg_time_t, dur.subsec_micros())
+    };
+    #[cfg(target_family = "wasm")]
+    let (tt, tv_usec) = {
+        let ns = wasm_libc_shim::now_unix_nanos();
+        (
+            (ns / 1_000_000_000) as pg_time_t,
+            ((ns % 1_000_000_000) / 1_000) as u32,
+        )
+    };
 
     // pg_strftime(templ, sizeof(templ), "...%%06d...", pg_localtime(&tt, zone)).
     // The doubled "%%06d" survives strftime as a literal "%06d", which the

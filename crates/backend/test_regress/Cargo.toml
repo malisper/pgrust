@@ -44,3 +44,6 @@ typcache_seams = { path = "../utils/cache/typcache_seams" }
 clauses = { path = "../optimizer/util/clauses" }
 costsize_seams = { path = "../optimizer/path/costsize_seams" }
 nodes = { path = "../../_support/types/nodes" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../wasm-libc-shim" }

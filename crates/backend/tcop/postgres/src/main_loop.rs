@@ -37,6 +37,9 @@
 
 #![allow(non_snake_case)]
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 extern crate alloc;
 
 use alloc::string::String;
@@ -91,6 +94,16 @@ mod pqmsg {
 /// `EOF` sentinel returned by [`ReadCommand`]/[`SocketBackend`] on a lost
 /// connection (C's `EOF == -1`).
 const EOF: i32 = -1;
+
+std::thread_local! {
+    /// Regress-output mode: the text of the statement currently being read/run,
+    /// captured by `interactive_backend_regress`. `debug_query_string` is left
+    /// NULL in the single-user path (the `'mcx`->`'static` store is skipped, see
+    /// simple_query.rs), so `emit_regress_error` reads the offending statement
+    /// here for the psql `LINE n:`/caret echo.
+    static REGRESS_CUR_QUERY: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 /// `PQ_SMALL_MESSAGE_LIMIT` (libpq.h): cap for short fixed-shape messages.
 const PQ_SMALL_MESSAGE_LIMIT: i32 = 10000;
@@ -207,11 +220,22 @@ fn SocketBackend(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
 /// placed in `in_buf` and we act like a `'Q'` (simple query) message was
 /// received. Returns [`EOF`] if end-of-file input is seen (time to shut down).
 fn InteractiveBackend(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
+    #[cfg(not(target_family = "wasm"))]
     use std::io::Write;
 
+    // Regress-output mode (psql -a -q emulation): no "backend> " prompt; read a
+    // whole `;`-terminated statement while echoing each raw input line verbatim
+    // (psql `-a` echoes every line, including comments and blank lines), so the
+    // backend's stdout byte-matches expected/*.out. Comment/blank lines that
+    // precede a statement are echoed and accumulated into the buffer too — the
+    // parser ignores leading comments/whitespace, so a multi-statement read that
+    // begins with comments still parses to the intended statement.
+    if globals::regress_output() {
+        return interactive_backend_regress(in_buf);
+    }
+
     // Display a prompt and obtain input from the user.
-    print!("backend> ");
-    let _ = std::io::stdout().flush();
+    interactive_print("backend> ");
 
     in_buf.reset(); // resetStringInfo(inBuf)
 
@@ -267,11 +291,358 @@ fn InteractiveBackend(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
     if globals::echo_query() {
         // inBuf->data is NUL-terminated; print up to (but not including) it.
         let text = core::str::from_utf8(&in_buf.data[..in_buf.len() - 1]).unwrap_or("");
-        print!("statement: {text}\n");
+        interactive_print(&format!("statement: {text}\n"));
     }
-    let _ = std::io::stdout().flush();
 
     Ok(pqmsg::QUERY) // PqMsg_Query
+}
+
+/// Regress-output reader: read one `;`-terminated statement, echoing each raw
+/// input line verbatim (psql `-a`). Leading comment/blank lines are echoed and
+/// included in the buffer (the parser skips them). Returns [`EOF`] when input
+/// ends with nothing pending (after echoing any trailing comment lines).
+fn interactive_backend_regress(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
+    in_buf.reset();
+    let mut line: Vec<u8> = Vec::new();
+    let mut saw_any = false;
+    // psql echoes leading comment lines but does NOT include them in the query
+    // string it sends to the server, so the parser's error position (and thus the
+    // `LINE n:` echo) is relative to the statement alone. Mirror that: until the
+    // first line carrying actual statement text, echo comment-only lines but do
+    // NOT add them to `in_buf`.
+    let mut stmt_started = false;
+    loop {
+        let c = interactive_getc()?;
+        if c == EOF {
+            // Flush a final unterminated line (e.g. trailing comment with no
+            // newline): echo it and, if it held statement text, run it.
+            if !line.is_empty() {
+                echo_regress_line(&line);
+                if stmt_started || !is_comment_only(&line) {
+                    in_buf.data.extend_from_slice(&line);
+                }
+                saw_any = true;
+            }
+            if !saw_any || in_buf.len() == 0 {
+                return Ok(EOF);
+            }
+            break;
+        }
+        let ch = c as u8;
+        line.push(ch);
+        if ch == b'\n' {
+            let content_len = line.len() - 1; // bytes before the trailing '\n'
+            let is_blank = content_len == 0 && !in_statement_literal(&in_buf.data);
+            if is_blank {
+                // Empirical psql `-X -a -q` rule (verified against the live
+                // server): source blank lines are NEVER echoed (psql's MainLoop
+                // skips empty lines via `continue` before the `puts(line)` echo).
+                // The blank lines in expected/*.out come solely from psql printing
+                // ONE blank line after each query RESULT SET (emitted by the
+                // regress DestReceiver), not from echoing source blanks.
+                line.clear();
+                continue;
+            }
+            // Echo the completed line verbatim (psql -a).
+            echo_regress_line(&line);
+            // psql backslash meta-commands (`\getenv`, `\set`, `\pset`, …) are
+            // intercepted by the psql client at a statement boundary: echoed
+            // (under -a) but NEVER sent to the SQL parser. The single-user
+            // backend must do the same, or each `\`-line becomes a bogus
+            // `syntax error at or near "\"`. We only intercept when no statement
+            // is currently in progress (a `\` inside a multi-line statement is
+            // not a meta-command for the regress files). Handle the one command
+            // whose effect the diff observes — `\pset null '...'` — and treat
+            // every other backslash line as an echoed no-op.
+            if !stmt_started && line_is_backslash_command(&line) {
+                maybe_apply_pset_null(&line);
+                line.clear();
+                continue;
+            }
+            // Add to the query buffer only once real statement text has begun;
+            // leading comment-only lines are echoed but not sent to the parser
+            // (so `LINE n:` is relative to the statement, as psql does).
+            if !stmt_started && is_comment_only(&line) {
+                line.clear();
+                continue;
+            }
+            stmt_started = true;
+            in_buf.data.extend_from_slice(&line);
+            // A statement ends when this line carries a ';' that, ignoring any
+            // trailing `-- line comment` and trailing whitespace, is the last
+            // significant token. This matches psql/regress: one statement per
+            // ';'-terminated run, with any leading comment lines attached. The
+            // `;` may be followed on the same line by a trailing comment (e.g.
+            // `SELECT gcd(...); -- overflow`) — a bare "last non-whitespace byte
+            // is ';'" test misses that and wrongly fuses the statement with the
+            // following ones, so the parser runs them as one batch (an earlier
+            // statement's error then suppresses the rest). Scan the accumulated
+            // buffer so a ';' inside a string literal is correctly ignored.
+            let terminates = buffer_ends_statement(&in_buf.data);
+            line.clear();
+            if terminates {
+                saw_any = true;
+                break;
+            }
+            saw_any = true;
+        }
+    }
+
+    if in_buf.len() == 0 {
+        return Ok(EOF);
+    }
+    // Trim any trailing whitespace + trailing `-- line comment` that follows the
+    // terminating ';'. psql echoes that tail (already done above via
+    // echo_regress_line) but does NOT include it in the query string it sends to
+    // the server, so the server's `LINE n:`/caret echo must reflect only the
+    // statement text. Without this, an error on a statement with a trailing
+    // comment (e.g. `INSERT ...;  -- error, type mismatch`) echoes the comment
+    // in the LINE line and diffs against expected.
+    if let Some(end) = statement_query_end(&in_buf.data) {
+        in_buf.data.truncate(end);
+    }
+    // Capture the statement text (sans the soon-to-be-added NUL) for the psql
+    // LINE/caret echo in emit_regress_error. The error position the parser
+    // records is 1-based into THIS statement string, so it must match what the
+    // parser saw: the raw accumulated bytes (leading comments included, as the
+    // parser receives them).
+    let stmt = String::from_utf8_lossy(&in_buf.data).into_owned();
+    REGRESS_CUR_QUERY.with(|q| *q.borrow_mut() = Some(stmt));
+    // Add '\0' to make it look the same as the message case.
+    in_buf.data.push(b'\0');
+    Ok(pqmsg::QUERY)
+}
+
+/// Approximate psql's `psql_scan_in_quote`: are we currently inside an open
+/// single-quoted string literal in the accumulated buffer? Used so a blank line
+/// *inside* a multi-line literal is preserved (not skipped like an inter-
+/// statement blank). A simple unescaped single-quote parity over the buffer
+/// covers the regress simple-file set (no dollar-quoting there); refine if a
+/// file with multi-line dollar-quoted bodies needs it.
+fn in_statement_literal(buf: &[u8]) -> bool {
+    let mut in_quote = false;
+    let mut i = 0;
+    while i < buf.len() {
+        if buf[i] == b'\'' {
+            // A doubled '' inside a literal is an escaped quote, not a close.
+            if in_quote && i + 1 < buf.len() && buf[i + 1] == b'\'' {
+                i += 2;
+                continue;
+            }
+            in_quote = !in_quote;
+        }
+        i += 1;
+    }
+    in_quote
+}
+
+/// True if the accumulated query buffer holds a complete `;`-terminated
+/// statement, i.e. there is a `;` outside any string literal / line comment and
+/// everything after it is only whitespace or a trailing `-- line comment`.
+///
+/// psql's lexer ends a statement at the `;` even when a comment follows it on
+/// the same line (`SELECT 1; -- note`). A naive "last non-whitespace byte is
+/// ';'" test fails there and fuses the statement with the following ones. This
+/// walks the buffer tracking single-quoted literals and `--` line comments so
+/// only a real top-level `;` counts, then confirms the tail is insignificant.
+fn buffer_ends_statement(buf: &[u8]) -> bool {
+    let mut in_quote = false;
+    let mut last_semi: Option<usize> = None;
+    let mut i = 0;
+    while i < buf.len() {
+        let b = buf[i];
+        if in_quote {
+            if b == b'\'' {
+                // A doubled '' is an escaped quote, not a close.
+                if i + 1 < buf.len() && buf[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                in_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' => in_quote = true,
+            b'-' if i + 1 < buf.len() && buf[i + 1] == b'-' => {
+                // Line comment: skip to end of line.
+                while i < buf.len() && buf[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            b';' => last_semi = Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+
+    statement_terminator_pos(buf, last_semi).is_some()
+}
+
+/// If `buf` is a complete statement, return the byte index just past its
+/// terminating `;` (so `buf[..pos]` is exactly the query text psql sends to the
+/// server — trailing whitespace + trailing `-- line comment` excluded). Returns
+/// `None` if the buffer is not yet a complete statement. `last_semi` is the
+/// index of the final top-level `;` already located by the caller's scan.
+fn statement_terminator_pos(buf: &[u8], last_semi: Option<usize>) -> Option<usize> {
+    let pos = last_semi?;
+    // Everything after the terminating ';' must be whitespace or a trailing
+    // line comment (psql echoes it but it does not extend the statement, and —
+    // critically — does NOT include it in the query string sent to the server,
+    // so the server's `LINE n:`/caret echo must not show it either).
+    let mut j = pos + 1;
+    while j < buf.len() {
+        let b = buf[j];
+        if b.is_ascii_whitespace() {
+            j += 1;
+            continue;
+        }
+        if b == b'-' && j + 1 < buf.len() && buf[j + 1] == b'-' {
+            while j < buf.len() && buf[j] != b'\n' {
+                j += 1;
+            }
+            continue;
+        }
+        // Real statement text after the ';' — not yet terminated.
+        return None;
+    }
+    Some(pos + 1)
+}
+
+/// Scan `buf` for the terminating `;` (top level, ignoring quotes and comments)
+/// and return the byte index just past it when the buffer is a complete
+/// statement, else `None`. Wrapper used at statement finalization to trim the
+/// trailing comment/whitespace off the query string.
+fn statement_query_end(buf: &[u8]) -> Option<usize> {
+    let mut in_quote = false;
+    let mut last_semi: Option<usize> = None;
+    let mut i = 0;
+    while i < buf.len() {
+        let b = buf[i];
+        if in_quote {
+            if b == b'\'' {
+                if i + 1 < buf.len() && buf[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                in_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' => in_quote = true,
+            b'-' if i + 1 < buf.len() && buf[i + 1] == b'-' => {
+                while i < buf.len() && buf[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            b';' => last_semi = Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+    statement_terminator_pos(buf, last_semi)
+}
+
+/// True if `line` (with optional trailing newline) is a single-line SQL comment
+/// — optional leading whitespace then `--` running to end of line. Used to keep
+/// leading comment lines out of the statement buffer (they're echoed but not
+/// sent to the parser, so the error LINE/caret is relative to the statement).
+fn is_comment_only(line: &[u8]) -> bool {
+    let mut i = 0;
+    while i < line.len() && (line[i] == b' ' || line[i] == b'\t') {
+        i += 1;
+    }
+    i + 1 < line.len() && line[i] == b'-' && line[i + 1] == b'-'
+}
+
+/// Echo one raw input line (already including its trailing newline if present)
+/// to stdout, exactly as psql `-a` does.
+fn echo_regress_line(line: &[u8]) {
+    let s = String::from_utf8_lossy(line);
+    interactive_print(&s);
+}
+
+/// True if `line` (optional trailing newline) is a psql backslash meta-command:
+/// optional leading whitespace then a `\`. These are handled by the psql client,
+/// not the SQL parser.
+fn line_is_backslash_command(line: &[u8]) -> bool {
+    let mut i = 0;
+    while i < line.len() && (line[i] == b' ' || line[i] == b'\t') {
+        i += 1;
+    }
+    i < line.len() && line[i] == b'\\'
+}
+
+/// If `line` is `\pset null '...'` (the only backslash command whose effect the
+/// regress diff observes), apply the NULL display string to the printtup
+/// formatter. The value may be single-quoted (`'(null)'`) or a bare token.
+/// Other `\pset` subcommands and other backslash commands are ignored (echoed
+/// no-ops), matching what the regress files need.
+fn maybe_apply_pset_null(line: &[u8]) {
+    let s = String::from_utf8_lossy(line);
+    let s = s.trim();
+    // Split on whitespace: ["\pset", "null", "'(null)'"] (the value token may
+    // itself contain spaces inside quotes — handle that by taking everything
+    // after the `null` keyword and stripping one layer of single quotes).
+    let mut it = s.split_whitespace();
+    if it.next() != Some("\\pset") {
+        return;
+    }
+    if it.next() != Some("null") {
+        return;
+    }
+    // The remainder (rejoined) is the value argument.
+    let rest: String = it.collect::<Vec<_>>().join(" ");
+    let val = if rest.len() >= 2 && rest.starts_with('\'') && rest.ends_with('\'') {
+        rest[1..rest.len() - 1].to_string()
+    } else {
+        rest
+    };
+    backend_access_common_printtup::set_regress_null_display(&val);
+}
+
+/// Render a per-statement error to stdout in psql's client format (regress mode).
+/// Builds a [`psql_format::PsqlError`] from the structured [`PgError`] (message /
+/// detail / hint / cursor position) plus the current statement text (for the
+/// `LINE n:`/caret echo) and writes the formatted block to stdout.
+fn emit_regress_error(err: &types_error::PgError) {
+    use backend_access_common_printtup::psql_format::{format_error, PsqlError};
+    let severity = ::utils_error::error_severity(err.level()).to_string();
+    let pe = PsqlError {
+        severity,
+        message: err.message.clone(),
+        detail: err.detail.clone(),
+        hint: err.hint.clone(),
+        // cursor_position is 1-based; only emit the LINE/caret when > 0.
+        position: err.cursor_position.filter(|&p| p > 0).map(|p| p as usize),
+        // Prefer debug_query_string; in the single-user path it's NULL (store
+        // skipped), so fall back to the regress-captured statement text.
+        query: globals::debug_query_string()
+            .map(|s| s.to_string())
+            .or_else(|| REGRESS_CUR_QUERY.with(|q| q.borrow().clone())),
+    };
+    interactive_print(&format_error(&pe));
+}
+
+/// Write a prompt/echo string to the interactive output. Natively this is
+/// `print!` + flush over std stdout; on `wasm64-unknown-unknown` std stdout is a
+/// no-op, so route to the host stdout import.
+fn interactive_print(s: &str) {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        use std::io::Write;
+        print!("{s}");
+        let _ = std::io::stdout().flush();
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        wasm_libc_shim::stdout_write(s.as_bytes());
+    }
 }
 
 /// `interactive_getc()` (postgres.c:324) — collect one character from stdin.
@@ -279,6 +650,7 @@ fn InteractiveBackend(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
 /// respond to signals, particularly SIGTERM/SIGQUIT. Returns [`EOF`] (-1) at
 /// end of file.
 fn interactive_getc() -> PgResult<i32> {
+    #[cfg(not(target_family = "wasm"))]
     use std::io::Read;
 
     // This will not process catchup interrupts or notifications while reading.
@@ -287,10 +659,17 @@ fn interactive_getc() -> PgResult<i32> {
 
     // c = getc(stdin);
     let mut byte = [0u8; 1];
+    #[cfg(not(target_family = "wasm"))]
     let c = match std::io::stdin().read(&mut byte) {
         Ok(0) => EOF,
         Ok(_) => byte[0] as i32,
         Err(_) => EOF,
+    };
+    // std stdin is a no-op on wasm64-unknown-unknown; read SQL via the host.
+    #[cfg(target_family = "wasm")]
+    let c = match wasm_libc_shim::stdin_read(&mut byte) {
+        0 => EOF,
+        _ => byte[0] as i32,
     };
 
     crate::interrupt::ProcessClientReadInterrupt(false)?;
@@ -427,8 +806,14 @@ fn error_recovery(mcx: Mcx<'_>, err: ::types_error::PgError, state: &mut LoopSta
     // Make sure libpq is in a good state.
     pqcomm::pq_comm_reset();
 
-    // Report the error to the client and/or server log.
-    ::utils_error::emit_error_report_for(&err);
+    // Report the error to the client and/or server log. In regress-output mode
+    // the client format is psql's (ERROR:/DETAIL:/HINT:/LINE+caret) on stdout,
+    // so it byte-matches expected/*.out; otherwise the normal LOG-style report.
+    if globals::regress_output() {
+        emit_regress_error(&err);
+    } else {
+        ::utils_error::emit_error_report_for(&err);
+    }
 
     // valgrind_report_error_query(debug_query_string) — valgrind-only, skipped.
 
@@ -1184,8 +1569,15 @@ fn postgres_main_inner(dbname: Option<&str>, username: Option<&str>) -> PgResult
         types_core::init::ProcessingMode::NormalProcessing,
     );
 
+    // Mirror the regress-output flag into the printtup DestDebug receiver so it
+    // emits psql-aligned tables instead of the debug dump.
+    backend_access_common_printtup::set_regress_output(globals::regress_output());
+
     // BeginReportingGUCOptions(): report GUCs to the client if appropriate.
-    misc_guc::report::begin_reporting_guc_options();
+    // In regress-output mode (psql -a -q) GUC reports are suppressed (-q).
+    if !globals::regress_output() {
+        misc_guc::report::begin_reporting_guc_options();
+    }
 
     // if (IsUnderPostmaster && Log_disconnections) on_proc_exit(log_disconnections)
     // — the disconnect-log callback; registration is process-exit plumbing,
@@ -1418,4 +1810,41 @@ fn leak_str_in<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<&'mcx str> {
             .errmsg("invalid byte sequence in query string")
             .into_error()
     })
+}
+
+#[cfg(test)]
+mod regress_split_tests {
+    use super::buffer_ends_statement;
+
+    #[test]
+    fn semicolon_then_trailing_comment_terminates() {
+        // The int4.sql case that previously fused statements: a ';' followed by
+        // a trailing line comment must still end the statement.
+        assert!(buffer_ends_statement(b"SELECT gcd((-2147483648)::int4, 0::int4); -- overflow\n"));
+    }
+
+    #[test]
+    fn bare_semicolon_terminates() {
+        assert!(buffer_ends_statement(b"SELECT 1;\n"));
+        assert!(buffer_ends_statement(b"SELECT 1;   \n"));
+    }
+
+    #[test]
+    fn no_semicolon_does_not_terminate() {
+        assert!(!buffer_ends_statement(b"SELECT a, b, lcm(a, b)\n"));
+        assert!(!buffer_ends_statement(b"-- test lcm()\n"));
+    }
+
+    #[test]
+    fn semicolon_inside_literal_is_not_a_terminator() {
+        // The ';' is inside a string literal; the statement is not complete.
+        assert!(!buffer_ends_statement(b"SELECT ';\n"));
+        // Closed literal then a real terminator -> complete.
+        assert!(buffer_ends_statement(b"SELECT ';';\n"));
+    }
+
+    #[test]
+    fn semicolon_in_a_line_comment_is_not_a_terminator() {
+        assert!(!buffer_ends_statement(b"SELECT 1 -- a; b\n"));
+    }
 }

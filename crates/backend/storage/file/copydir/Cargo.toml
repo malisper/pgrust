@@ -20,3 +20,6 @@ fd_seams = { path = "../fd_seams" }
 transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 libc = "0.2"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

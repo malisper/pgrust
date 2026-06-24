@@ -8,6 +8,9 @@
 //! replication slots, locale validation, GUC settings, checkpoint / xlog,
 //! filesystem) go through their owners' real fns or seams.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;

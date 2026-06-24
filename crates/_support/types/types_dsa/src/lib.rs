@@ -36,7 +36,16 @@ pub const DSA_SEGMENT_INDEX_NONE: DsaSegmentIndex = Size::MAX;
 /// `DSA_OFFSET_WIDTH` — number of low bits of a `dsa_pointer` used for the
 /// in-segment offset (the high bits hold the segment number). 40 on the 64-bit
 /// build (`SIZEOF_DSA_POINTER == 8`).
+///
+/// On wasm32 (single-process build) `usize`/`Size` is 32-bit, so a 40-bit
+/// `DSA_MAX_SEGMENT_SIZE` cannot be represented in `Size`. DSA is unused in the
+/// single-process wasm build (shared memory is plain process memory), but the
+/// crate must still compile, so the geometry is narrowed to fit a 32-bit
+/// address space. Native (64-bit) builds are unchanged.
+#[cfg(not(target_arch = "wasm32"))]
 pub const DSA_OFFSET_WIDTH: u32 = 40;
+#[cfg(target_arch = "wasm32")]
+pub const DSA_OFFSET_WIDTH: u32 = 28;
 
 /// `DSA_OFFSET_BITMASK` — bitmask for the offset part of a `dsa_pointer`.
 pub const DSA_OFFSET_BITMASK: DsaPointer = (1u64 << DSA_OFFSET_WIDTH) - 1;

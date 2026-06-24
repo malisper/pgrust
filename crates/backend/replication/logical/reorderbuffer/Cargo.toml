@@ -64,3 +64,5 @@ logical_seams = { path = "../logical_seams" }
 relfilenumbermap = { path = "../../../utils/cache/relfilenumbermap" }
 relcache_seams = { path = "../../../utils/cache/relcache_seams" }
 init_small_seams = { path = "../../../utils/init/init_small_seams" }
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

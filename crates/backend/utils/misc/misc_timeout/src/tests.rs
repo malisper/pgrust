@@ -2,6 +2,9 @@
 //! pqsignal, interrupt holdoff) are installed once with deterministic stubs;
 //! a thread-local "now" lets a test advance the clock.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::cell::Cell;
 use std::sync::Once;
 

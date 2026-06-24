@@ -66,3 +66,6 @@ syncrep_seams = { path = "../../../replication/syncrep/syncrep_seams" }
 pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
 pg_sema_seams = { path = "../../../port/pg_sema_seams" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

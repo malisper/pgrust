@@ -45,3 +45,6 @@ miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 postinit_seams = { path = "../../utils/init/postinit_seams" }
 guc_seams = { path = "../../utils/misc/guc_seams" }
 port_pqsignal_seams = { path = "../../../port/port_pqsignal_seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../wasm-libc-shim" }

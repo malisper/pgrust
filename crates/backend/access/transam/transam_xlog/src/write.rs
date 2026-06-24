@@ -23,6 +23,9 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 extern crate std;
 
 use core::cell::Cell;
@@ -881,7 +884,13 @@ pub(crate) fn XLogFileInitInternal(
     }
 
     // Initialize an empty (all-zeroes) segment in a temp file.
-    let tmppath = std::format!("{XLOGDIR}/xlogtemp.{}", std::process::id());
+    // std::process::id() panics on wasm64-unknown-unknown; use the shim's pid.
+    #[cfg(not(target_family = "wasm"))]
+    let pid = std::process::id();
+    // SAFETY: getpid is a const-returning shim (no preconditions).
+    #[cfg(target_family = "wasm")]
+    let pid = unsafe { libc::getpid() as u32 };
+    let tmppath = std::format!("{XLOGDIR}/xlogtemp.{}", pid);
     fd::unlink_file::call(&tmppath);
 
     let open_flags = O_RDWR | O_CREAT | O_EXCL | PG_BINARY;

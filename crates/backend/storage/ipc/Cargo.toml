@@ -74,3 +74,6 @@ pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
 status_seams = { path = "../../utils/activity/status_seams" }
 waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
 injection_point_seams = { path = "injection_point_seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../wasm-libc-shim" }

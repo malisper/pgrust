@@ -30,6 +30,9 @@
 
 #![allow(non_snake_case)]
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::cell::RefCell;
 use std::sync::Mutex;
 

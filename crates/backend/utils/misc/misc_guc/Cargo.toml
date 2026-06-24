@@ -48,3 +48,6 @@ pqcomm_seams = { path = "../../../libpq/pqcomm_seams" }
 # Parallel-worker GUC-state transfer seams (declared by parallel.c's runtime
 # seam crate, consumed by parallel.c; guc.c owns + installs the bodies):
 parallel_rt_seams = { path = "../../../access/transam/parallel_rt_seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

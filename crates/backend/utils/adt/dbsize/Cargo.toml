@@ -82,3 +82,5 @@ aclchk_seams = { path = "../../../catalog/aclchk_seams" }
 # `ObjectType` (OBJECT_DATABASE / OBJECT_TABLESPACE) for the owner's signature.
 types_acl = { path = "../../../../_support/types/types_acl" }
 nodes = { path = "../../../../_support/types/nodes" }
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

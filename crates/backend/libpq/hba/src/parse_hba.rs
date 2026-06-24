@@ -3,6 +3,9 @@
 //!
 //! Ported from `src/backend/libpq/hba.c` (lines 1327-2524).
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use ::ifaddr::AddressFamily;
 use ::types_error::{ErrorLevel, PgResult};
 use ::net::{

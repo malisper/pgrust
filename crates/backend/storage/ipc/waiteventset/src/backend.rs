@@ -44,26 +44,30 @@ fn is_waiting() -> bool {
 /// rather than the self-pipe).
 pub fn wakeup_my_proc() {
     if is_waiting() {
-        let pid = init_small_seams::my_proc_pid::call();
+        let _pid = init_small_seams::my_proc_pid::call();
         // SAFETY: kill with SIGURG; async-signal-safe and infallible in C.
+        // wasm: no `kill`/`SIGURG`; single-user has no blocked wait to wake.
+        #[cfg(not(target_family = "wasm"))]
         unsafe {
-            libc::kill(pid, libc::SIGURG);
+            libc::kill(_pid, libc::SIGURG);
         }
     }
 }
 
-fn errno() -> libc::c_int {
+#[cfg(not(target_family = "wasm"))]
+fn errno() -> core::ffi::c_int {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
-fn os_error_string(e: libc::c_int) -> String {
+#[cfg(not(target_family = "wasm"))]
+fn os_error_string(e: core::ffi::c_int) -> String {
     std::io::Error::from_raw_os_error(e).to_string()
 }
 
 // ===========================================================================
 // WAIT_USE_KQUEUE (macOS / BSD)
 // ===========================================================================
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), not(target_family = "wasm")))]
 mod imp {
     use super::*;
 
@@ -681,6 +685,123 @@ mod imp {
         }
 
         Ok(returned_events)
+    }
+}
+
+// ===========================================================================
+// WASM (single-user, no kqueue/epoll/signalfd; no socket waits)
+// ===========================================================================
+//
+// `wasm64-unknown-unknown` has no kqueue/epoll/signalfd and no `kill`/`SIGURG`.
+// In single-user mode there is no postmaster, no listener socket, and no other
+// process to wake us: the latch is set synchronously on the one backend thread.
+// So this backend carries no kernel handle. The only wait that matters is
+// `WL_LATCH_SET`, which we resolve by polling the latch directly (no kernel
+// blocking primitive exists to register fds against). `WL_SOCKET_*` events are
+// never registered single-user; `WL_POSTMASTER_DEATH` can never fire (there is
+// no postmaster). A finite-timeout wait that finds nothing ready reports a
+// timeout; an infinite-timeout wait reports the latch as ready rather than
+// deadlocking (there is no external waker on this target).
+#[cfg(target_family = "wasm")]
+mod imp {
+    use super::*;
+
+    /// No kernel readiness handle on wasm.
+    pub struct Backend;
+
+    /// `InitializeWaitEventSupport()` — on wasm there is no kernel signal layer
+    /// to register against (no `SIGURG`), so this is a no-op.
+    pub fn initialize_wait_event_support() -> PgResult<()> {
+        Ok(())
+    }
+
+    pub fn create(_nevents: i32) -> PgResult<Backend> {
+        Ok(Backend)
+    }
+
+    pub fn free(_backend: &mut Backend) {}
+
+    /// No fd carries the latch event (no signalfd on wasm).
+    pub fn latch_set_fd() -> i32 {
+        PGINVALID_SOCKET
+    }
+
+    /// No postmaster, hence no death-watch fd.
+    pub fn postmaster_death_fd() -> i32 {
+        PGINVALID_SOCKET
+    }
+
+    /// Nothing to register against a kernel object.
+    pub fn adjust_add(_set: &mut WaitEventSetData, _pos: i32) -> PgResult<()> {
+        Ok(())
+    }
+
+    pub fn adjust_modify(
+        _set: &mut WaitEventSetData,
+        _pos: i32,
+        _old_events: u32,
+    ) -> PgResult<()> {
+        Ok(())
+    }
+
+    /// `WaitEventSetWaitBlock` (wasm single-user): scan the registered events
+    /// for a `WL_LATCH_SET` whose latch is set, and report it. If none is
+    /// ready, report a timeout for a finite wait; for an infinite wait, report
+    /// the first latch event ready-anyway (no external waker exists, so
+    /// blocking forever would deadlock the single thread).
+    pub fn wait_block(
+        handle: WaitEventSetHandle,
+        cur_timeout: i64,
+        occurred: &mut [WaitEvent],
+    ) -> PgResult<i32> {
+        let nevents = occurred.len() as i32;
+        if nevents <= 0 {
+            return Ok(-1);
+        }
+
+        let (events, latch) =
+            crate::run_with_set(handle, |set| (set.events.clone(), set.latch));
+
+        // First pass: a latch event whose latch is genuinely set.
+        for cur_event in events.iter() {
+            if cur_event.events == WL_LATCH_SET {
+                if let Some(l) = latch {
+                    if latch_seams::latch_maybe_sleeping::call(l)
+                        && latch_seams::latch_is_set::call(l)
+                    {
+                        occurred[0] = WaitEvent {
+                            fd: PGINVALID_SOCKET,
+                            pos: cur_event.pos,
+                            user_data: cur_event.user_data,
+                            events: WL_LATCH_SET,
+                        };
+                        return Ok(1);
+                    }
+                }
+            }
+        }
+
+        // Nothing ready. A finite wait times out.
+        if cur_timeout >= 0 {
+            return Ok(-1);
+        }
+
+        // Infinite wait with no external waker: report the first latch event so
+        // the caller re-checks its condition rather than deadlocking.
+        for cur_event in events.iter() {
+            if cur_event.events == WL_LATCH_SET {
+                occurred[0] = WaitEvent {
+                    fd: PGINVALID_SOCKET,
+                    pos: cur_event.pos,
+                    user_data: cur_event.user_data,
+                    events: WL_LATCH_SET,
+                };
+                return Ok(1);
+            }
+        }
+
+        // No latch registered at all on an infinite wait: treat as a timeout.
+        Ok(-1)
     }
 }
 

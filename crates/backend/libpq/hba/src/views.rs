@@ -6,6 +6,9 @@
 //! `values[]` / `nulls[]` arrays and inserted through
 //! `materialized_srf_putvalues` (the repo's `tuplestore_putvalues` analog).
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use ::arrayfuncs_seams::construct_text_array_bytes;
 use ::varlena_seams::cstring_to_text_v;
 use ::funcapi_seams::materialized_srf_putvalues;

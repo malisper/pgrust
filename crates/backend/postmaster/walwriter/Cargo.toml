@@ -57,3 +57,6 @@ dynahash_seams = { path = "../../utils/hash/dynahash_seams" }
 waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
 pgstat_wal_seams = { path = "../../utils/activity/pgstat_wal_seams" }
 pgsleep_seams = { path = "../../../port/pgsleep_seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../wasm-libc-shim" }

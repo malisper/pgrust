@@ -14,6 +14,9 @@
 //! to the C palloc-into-CurrentMemoryContext path (it relies on explicit
 //! `free`, not a context reset). We install it once at startup.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use core::ffi::c_void;
 
 use ::runtime::mem::{install, AllocHooks};

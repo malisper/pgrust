@@ -28,6 +28,9 @@
 //! `commit_transaction_command`, `has_privs_of_role`, `get_user_id`,
 //! `pg_check_dir`, `is_absolute_path`), panicking until those owners land.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use ::sink::{
     bbsink_forward_archive_contents, bbsink_forward_begin_archive,
     bbsink_forward_begin_backup, bbsink_forward_begin_manifest, bbsink_forward_cleanup,

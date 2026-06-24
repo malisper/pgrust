@@ -81,3 +81,6 @@ walsender_seams = { path = "../../../replication/walsender_seams" }
 variable_seams = { path = "../../../commands/variable_seams" }
 tablespace_globals_seams = { path = "../../../commands/tablespace_globals_seams" }
 pg_rusage = { path = "../../../utils/misc/pg_rusage" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

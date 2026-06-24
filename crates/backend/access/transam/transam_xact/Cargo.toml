@@ -86,3 +86,6 @@ portalmem_seams = { path = "../../../utils/mmgr/portalmem_seams" }
 combocid_seams = { path = "../../../utils/time/combocid_seams" }
 snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
 snapmgr_pc_seams = { path = "../../../utils/time/snapmgr_pc_seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

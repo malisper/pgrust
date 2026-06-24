@@ -16,6 +16,13 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-env-changed=LIBXML2_LIB_DIR");
 
+    // wasm: no system libxml2 to link (single-user XML paths are inert / the
+    // feature is off). Emit no link directive so the wasm linker doesn't seek
+    // `-lxml2`.
+    if std::env::var("CARGO_CFG_TARGET_FAMILY").as_deref() == Ok("wasm") {
+        return;
+    }
+
     if std::env::var_os("CARGO_FEATURE_WITH_LIBXML").is_none() {
         // Feature off => no binding, no link (faithful `#ifdef USE_LIBXML` off).
         return;

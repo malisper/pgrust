@@ -3,6 +3,7 @@
 //! `::types_core::instrument` (dependency-free); this crate holds only the
 //! pieces that need libc.
 
+#[allow(unused_imports)]
 use ::types_core::instrument::{instr_time, NS_PER_S};
 
 /// `pg_clock_gettime_ns()` — read `PG_INSTR_CLOCK` and convert to nanosecond
@@ -10,6 +11,7 @@ use ::types_core::instrument::{instr_time, NS_PER_S};
 /// darwin (faster and higher resolution there) and `CLOCK_MONOTONIC`
 /// elsewhere. Like the C inline, the (cannot-fail-for-these-args) return code
 /// is ignored.
+#[cfg(not(target_family = "wasm"))]
 pub fn pg_clock_gettime_ns() -> instr_time {
     #[cfg(target_os = "macos")]
     const PG_INSTR_CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC_RAW;
@@ -27,6 +29,25 @@ pub fn pg_clock_gettime_ns() -> instr_time {
     instr_time {
         ticks: (tmp.tv_sec as i64) * NS_PER_S + tmp.tv_nsec as i64,
     }
+}
+
+/// wasm: no `clock_gettime`/`clockid_t`, and `std::time::Instant::now()` panics
+/// on `wasm64-unknown-unknown` (the platform's time backend is unsupported), so
+/// read the host wall clock and anchor it to process start for a monotonic
+/// nanosecond tick. Faithful to the C contract: ticks are monotonic
+/// nanoseconds, nonzero after the first reading.
+#[cfg(target_family = "wasm")]
+pub fn pg_clock_gettime_ns() -> instr_time {
+    use std::sync::OnceLock;
+    static ANCHOR_NS: OnceLock<i64> = OnceLock::new();
+    let anchor = *ANCHOR_NS.get_or_init(wasm_libc_shim::now_unix_nanos);
+    // +1 keeps the very first reading strictly positive (C's CLOCK_MONOTONIC
+    // is never 0 in practice; callers/tests assert ticks > 0). The host clock
+    // is wall-time; for single-user instrumentation a near-monotonic delta off a
+    // fixed anchor is sufficient (clamped to be non-decreasing).
+    let now = wasm_libc_shim::now_unix_nanos();
+    let ns = (now - anchor).max(0) + 1;
+    instr_time { ticks: ns }
 }
 
 /// `INSTR_TIME_SET_CURRENT(t)`.

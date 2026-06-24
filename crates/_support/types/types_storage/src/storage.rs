@@ -15,6 +15,18 @@ use crate::ilist::{dlist_head, dlist_node};
 use crate::latch::Latch;
 use crate::lock::{LOCKMASK, LOCKMODE, LOCKTAG};
 
+// On wasm (`target_family = "wasm"`) `libc` does not export `pid_t`/`dev_t`/
+// `ino_t` (no POSIX process/stat layer on wasip1). `PGShmemHeader` is a
+// `repr(C)` shared-segment header whose `creatorPID`/`device`/`inode` are only
+// ever set (and never read meaningfully) in single-process mode; provide local
+// aliases matching the standard 64-bit Linux widths the struct layout assumes.
+#[cfg(target_family = "wasm")]
+mod libc {
+    pub type pid_t = i32;
+    pub type dev_t = u64;
+    pub type ino_t = u64;
+}
+
 /// `Buffer` (`storage/buf.h`) — a shared-buffer-pool index (or, when
 /// negative, a local-buffer index). Zero is `InvalidBuffer`.
 pub type Buffer = i32;

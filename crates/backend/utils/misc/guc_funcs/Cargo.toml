@@ -41,3 +41,6 @@ varlena_seams = { path = "../../adt/varlena_seams" }
 arrayfuncs_seams = { path = "../../adt/arrayfuncs_seams" }
 
 [dev-dependencies]
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

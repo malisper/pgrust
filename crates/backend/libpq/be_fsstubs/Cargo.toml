@@ -28,3 +28,6 @@ guc_tables = { path = "../../utils/misc/guc_tables" }
 transam_xact_seams = { path = "../../access/transam/transam_xact_seams" }
 be_fsstubs_seams = { path = "../be_fsstubs_seams" }
 snapmgr_seams = { path = "../../utils/time/snapmgr_seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../wasm-libc-shim" }

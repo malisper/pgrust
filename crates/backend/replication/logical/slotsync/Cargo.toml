@@ -61,3 +61,6 @@ procsignal_seams = { path = "../../../storage/ipc/procsignal_seams" }
 port_pqsignal_seams = { path = "../../../../port/port_pqsignal_seams" }
 signal = { path = "../../../../_support/types/signal" }
 libc = "0.2"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../../wasm-libc-shim" }

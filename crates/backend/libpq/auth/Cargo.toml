@@ -31,3 +31,6 @@ types_error = { path = "../../../_support/types/types_error" }
 net = { path = "../../../_support/types/net" }
 types_network = { path = "../../../_support/types/types_network" }
 stringinfo = { path = "../../../_support/types/stringinfo" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../../../wasm-libc-shim" }

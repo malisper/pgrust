@@ -7,7 +7,15 @@
 //! their owners' seams. `LocalLatchData` is `miscinit.c`'s own backend-private
 //! latch, owned here.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::cell::Cell;
+
+#[cfg(not(target_family = "wasm"))]
+use std::fs as osfs_free;
+#[cfg(target_family = "wasm")]
+use wasm_libc_shim::fscompat as osfs_free;
 
 use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, FATAL};
 use ::types_storage::latch::LatchHandle;
@@ -138,7 +146,7 @@ pub fn SwitchBackToLocalLatch() -> PgResult<()> {
 pub fn checkDataDir() -> PgResult<()> {
     let data_dir = init_small::globals::DataDir().expect("DataDir set");
 
-    let stat_buf = match std::fs::metadata(&data_dir) {
+    let stat_buf = match osfs_free::metadata(&data_dir) {
         Ok(m) => m,
         Err(e) => {
             // Both C exits carry errcode_for_file_access() (miscinit.c:357/362).
@@ -170,8 +178,12 @@ pub fn checkDataDir() -> PgResult<()> {
         .with_sqlstate(::types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE));
     }
 
+    #[cfg(not(target_family = "wasm"))]
     use std::os::unix::fs::MetadataExt;
+    #[cfg(not(target_family = "wasm"))]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(target_family = "wasm")]
+    use wasm_libc_shim::osfs::{MetadataExt, PermissionsExt};
 
     // Check that the directory belongs to my userid; if not, reject. This is an
     // essential part of the interlock that prevents two postmasters from
@@ -215,6 +227,18 @@ pub fn checkDataDir() -> PgResult<()> {
 /// `ChangeToDataDir()` (`miscinit.c:459`): chdir into `DataDir`.
 pub fn ChangeToDataDir() -> PgResult<()> {
     let data_dir = init_small::globals::DataDir().expect("DataDir set");
+    // On wasm64-unknown-unknown there is no process cwd and
+    // `std::env::set_current_dir` is unsupported (it errors). The host VFS
+    // harness maps the datadir as its preopened root and resolves every guest
+    // path (absolute or relative) under it, so the chdir is unnecessary — the
+    // data-dir-relative paths the backend forms after this point already
+    // resolve correctly. Treat the chdir as a successful no-op.
+    #[cfg(target_family = "wasm")]
+    {
+        let _ = &data_dir;
+        return Ok(());
+    }
+    #[cfg(not(target_family = "wasm"))]
     if std::env::set_current_dir(&data_dir).is_err() {
         let e = std::io::Error::last_os_error();
         // C carries errcode_for_file_access() (miscinit.c:465).
@@ -238,7 +262,7 @@ pub fn ValidatePgVersion(path: &str) -> PgResult<()> {
 
     let full_path = format!("{path}/PG_VERSION");
 
-    let contents = match std::fs::read_to_string(&full_path) {
+    let contents = match osfs_free::read_to_string(&full_path) {
         Ok(s) => s,
         Err(e) => {
             if e.raw_os_error() == Some(2) {

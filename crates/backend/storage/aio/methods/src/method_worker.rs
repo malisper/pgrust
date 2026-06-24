@@ -38,6 +38,9 @@
 //! latch the C dereferences, addressed by its owner's procno instead of a raw
 //! pointer.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 extern crate alloc;
 
 use alloc::vec::Vec;

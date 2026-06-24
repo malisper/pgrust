@@ -19,6 +19,9 @@
 //! which `database_ctype_is_c` selects the `pg_wchar` path and this `wstr`/`isw*`
 //! path is otherwise dormant). This is deterministic, not a fabricated stub.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use core::ffi::c_int;
 
 use ::tsearchcmds_seams::LexDescr;

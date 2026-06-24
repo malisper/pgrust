@@ -32,7 +32,10 @@
 // contract, so accept the lint crate-wide.
 #![allow(clippy::result_large_err)]
 
+#[cfg(not(target_family = "wasm"))]
 use std::fs::File as StdFile;
+#[cfg(target_family = "wasm")]
+use wasm_libc_shim::osfile::WasmFile as StdFile;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicI32, Ordering};
 
