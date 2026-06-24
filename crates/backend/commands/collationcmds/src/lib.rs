@@ -1165,9 +1165,20 @@ pub fn init_seams() {
         Ok(())
     });
     // `enumerate_icu_locales` / `get_icu_locale_comment` are entirely under
-    // `#ifdef USE_ICU`; in this ICU-disabled build they are empty / None.
-    seam::enumerate_icu_locales::set(|| Ok(Vec::new()));
-    seam::get_icu_locale_comment::set(|_localename| Ok(None));
+    // `#ifdef USE_ICU`. With the `icu` feature on they reach the system ICU; off,
+    // they are empty / None.
+    #[cfg(feature = "icu")]
+    {
+        seam::enumerate_icu_locales::set(|| pg_locale_icu::provider::enumerate_icu_locales());
+        seam::get_icu_locale_comment::set(|localename| {
+            pg_locale_icu::provider::get_icu_locale_comment(localename)
+        });
+    }
+    #[cfg(not(feature = "icu"))]
+    {
+        seam::enumerate_icu_locales::set(|| Ok(Vec::new()));
+        seam::get_icu_locale_comment::set(|_localename| Ok(None));
+    }
     // `enumerate_libc_locales` — the `OpenPipeStream("locale -a")` read loop
     // (`READ_LOCALE_A_OUTPUT`, non-WIN32), yielding newline-stripped names.
     seam::enumerate_libc_locales::set(enumerate_libc_locales);

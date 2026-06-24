@@ -66,15 +66,20 @@ pub enum LocaleInfo {
         /// `info.builtin.casemap_full` — full Unicode case mapping.
         casemap_full: bool,
     },
+    /// An ICU-provider locale (`pg_locale_icu.c`): the owned `UCollator` +
+    /// locale string (`info.icu`). ICU always carries a `collate` vtable
+    /// (`collate_is_c` is always false for ICU).
+    Icu(pg_locale_icu::IcuLocale),
 }
 
 impl LocaleInfo {
     /// Whether this provider has a `collate` method vtable (C: `result->collate
     /// != NULL`). libc sets it iff its collation is not C/POSIX; the bare
-    /// C-locale and builtin never do (they are `collate_is_c`).
+    /// C-locale and builtin never do (they are `collate_is_c`); ICU always does.
     fn has_collate_methods(&self) -> bool {
         match self {
             LocaleInfo::Libc(l) => l.has_collate_methods(),
+            LocaleInfo::Icu(_) => true,
             LocaleInfo::CLocale | LocaleInfo::Builtin { .. } => false,
         }
     }
@@ -144,9 +149,11 @@ fn create_pg_locale(collid: Oid) -> PgResult<LocaleEntry> {
     let mut entry = if row.provider == COLLPROVIDER_BUILTIN {
         create_pg_locale_builtin(collid)?
     } else if row.provider == COLLPROVIDER_ICU {
-        create_pg_locale_icu(collid)?;
-        // The ICU-disabled profile always returns Err above; this is unreachable.
-        unreachable!("create_pg_locale_icu must return Err in a non-ICU build");
+        // C: colllocale is NOT NULL for ICU collations (SysCacheGetAttrNotNull).
+        let iculocstr = row.locale.as_deref().ok_or_else(|| {
+            PgError::error(format!("null colllocale for ICU collation {collid}"))
+        })?;
+        create_pg_locale_icu(iculocstr, row.is_deterministic, row.icurules.as_deref())?
     } else if row.provider == COLLPROVIDER_LIBC {
         crate::libc_provider::create_pg_locale_libc(collid)?
     } else {
@@ -256,8 +263,14 @@ pub fn init_database_collation() -> PgResult<()> {
     let mut entry = if row.provider == COLLPROVIDER_BUILTIN {
         create_pg_locale_builtin(DEFAULT_COLLATION_OID)?
     } else if row.provider == COLLPROVIDER_ICU {
-        create_pg_locale_icu(DEFAULT_COLLATION_OID)?;
-        unreachable!("create_pg_locale_icu must return Err in a non-ICU build");
+        // C: the default database collation is always deterministic; datlocale
+        // is NOT NULL for an ICU-provider database. `daticurules` is not yet
+        // surfaced on DatabaseLocaleRow (no ICU-default cluster exercises it in
+        // this profile), so custom default rules are not applied here.
+        let iculocstr = row.locale.as_deref().ok_or_else(|| {
+            PgError::error("null datlocale for ICU database default collation")
+        })?;
+        create_pg_locale_icu(iculocstr, true, None)?
     } else if row.provider == COLLPROVIDER_LIBC {
         crate::libc_provider::create_pg_locale_libc(DEFAULT_COLLATION_OID)?
     } else {
@@ -303,11 +316,50 @@ fn create_pg_locale_builtin(collid: Oid) -> PgResult<LocaleEntry> {
     })
 }
 
-/// `create_pg_locale_icu(collid, context)` (`pg_locale_icu.c`) — merged; the
-/// ICU-disabled profile always returns `Err(FEATURE_NOT_SUPPORTED)`.
-fn create_pg_locale_icu(collid: Oid) -> PgResult<()> {
+/// `create_pg_locale_icu(collid, context)` (`pg_locale_icu.c:142`, `USE_ICU`):
+/// open the `UCollator` for `iculocstr` and assemble the locale entry. ICU is
+/// always non-C for collate/ctype and carries a collate vtable. With the
+/// `with-icu` feature off, the ICU provider crate has no live constructor and
+/// this path is unreachable (an ICU collation row could only exist if seeded by
+/// an ICU build; resolving it then errors through the seam).
+#[cfg(feature = "icu")]
+fn create_pg_locale_icu(
+    iculocstr: &str,
+    deterministic: bool,
+    icurules: Option<&str>,
+) -> PgResult<LocaleEntry> {
+    if icurules.is_some() {
+        // Custom ICU tailoring rules (`collicurules`) are out of the bounded
+        // scope; opening with rules needs ucol_openRules + the UConverter path.
+        return Err(PgError::error(
+            "ICU collations with custom rules are not supported in this build",
+        )
+        .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+    }
+    let result = pg_locale_icu::create_pg_locale_icu(iculocstr, deterministic)?;
+    let view = PgLocaleStruct {
+        provider: CollProvider::Icu,
+        deterministic: result.deterministic,
+        collate_is_c: false,
+        ctype_is_c: false,
+        is_default: false,
+    };
+    Ok(LocaleEntry {
+        view,
+        info: LocaleInfo::Icu(result.icu),
+    })
+}
+
+/// `create_pg_locale_icu` with the ICU provider compiled out: an ICU collation
+/// row resolved in a non-ICU build reports `FEATURE_NOT_SUPPORTED` (C's `#else`).
+#[cfg(not(feature = "icu"))]
+fn create_pg_locale_icu(
+    _iculocstr: &str,
+    _deterministic: bool,
+    _icurules: Option<&str>,
+) -> PgResult<LocaleEntry> {
     let ctx = ::mcx::MemoryContext::new("create_pg_locale_icu");
-    pg_locale_icu::create_pg_locale_icu(ctx.mcx(), collid).map(|_| ())
+    pg_locale_icu::create_pg_locale_icu_seam(ctx.mcx(), C_COLLATION_OID).map(|_| unreachable!())
 }
 
 /// C: `elog(ERROR, "cache lookup failed for collation %u", collid)`.

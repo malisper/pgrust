@@ -28,6 +28,9 @@ use alloc::string::String;
 pub struct CollationLocaleRow {
     /// `collprovider` (`COLLPROVIDER_*` as `char`).
     pub provider: i8,
+    /// `collisdeterministic` — only ICU honors a non-deterministic collation;
+    /// `create_pg_locale_icu` reads it onto `result->deterministic`.
+    pub is_deterministic: bool,
     /// `collname` — the collation name (for the version-mismatch message).
     pub name: String,
     /// `collnamespace` — the collation's schema OID (for qualification).
@@ -38,6 +41,8 @@ pub struct CollationLocaleRow {
     pub ctype: Option<String>,
     /// `colllocale` (builtin/ICU locale), text or NULL.
     pub locale: Option<String>,
+    /// `collicurules` (ICU custom tailoring rules), text or NULL.
+    pub icurules: Option<String>,
     /// `collversion`, text or NULL.
     pub version: Option<String>,
 }

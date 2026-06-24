@@ -3,10 +3,19 @@ name = "pg_locale_icu"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
+build = "build.rs"
 
 [lib]
 name = "pg_locale_icu"
 path = "src/lib.rs"
+
+[features]
+# Mirrors PostgreSQL's `--with-icu` configure option (`#ifdef USE_ICU`). When ON,
+# the crate binds the system ICU (`-licui18n -licuuc -licudata`) and implements
+# the live ICU collation path. When OFF, only the `#else` of
+# `create_pg_locale_icu` is compiled (`FEATURE_NOT_SUPPORTED`).
+default = ["with-icu"]
+with-icu = []
 
 [dependencies]
 mcx = { path = "../../../../_support/mcx" }

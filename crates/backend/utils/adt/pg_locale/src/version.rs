@@ -39,8 +39,18 @@ pub fn get_collation_actual_version(
     }
 
     if collprovider == COLLPROVIDER_ICU {
-        let _ = collcollate;
-        return Ok(None);
+        #[cfg(feature = "icu")]
+        {
+            let _ = mcx;
+            return Ok(Some(
+                pg_locale_icu::provider::get_collation_actual_version_icu(collcollate)?,
+            ));
+        }
+        #[cfg(not(feature = "icu"))]
+        {
+            let _ = collcollate;
+            return Ok(None);
+        }
     }
 
     if collprovider == COLLPROVIDER_LIBC {

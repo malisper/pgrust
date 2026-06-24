@@ -2147,6 +2147,8 @@ pub(crate) fn collation_locale_row(
         return Ok(None);
     };
     let provider = getattr_char(mcx, COLLOID, &tup, Anum_pg_collation_collprovider_loc)?;
+    let is_deterministic =
+        getattr_bool(mcx, COLLOID, &tup, Anum_pg_collation_collisdeterministic_loc)?;
     let name = getattr_name(mcx, COLLOID, &tup, Anum_pg_collation_collname_loc)?
         .as_str()
         .to_string();
@@ -2154,15 +2156,18 @@ pub(crate) fn collation_locale_row(
     let collate = getattr_option_text(mcx, COLLOID, &tup, Anum_pg_collation_collcollate_loc)?;
     let ctype = getattr_option_text(mcx, COLLOID, &tup, Anum_pg_collation_collctype_loc)?;
     let locale = getattr_option_text(mcx, COLLOID, &tup, Anum_pg_collation_colllocale_loc)?;
+    let icurules = getattr_option_text(mcx, COLLOID, &tup, Anum_pg_collation_collicurules_loc)?;
     let version = getattr_option_text(mcx, COLLOID, &tup, Anum_pg_collation_collversion_loc)?;
     ReleaseSysCache(tup);
     Ok(Some(pg_locale_catalog_seams::CollationLocaleRow {
         provider,
+        is_deterministic,
         name,
         namespace,
         collate,
         ctype,
         locale,
+        icurules,
         version,
     }))
 }

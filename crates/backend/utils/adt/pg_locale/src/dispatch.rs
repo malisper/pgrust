@@ -76,17 +76,39 @@ pub fn pg_strncoll(collid: Oid, arg1: &[u8], arg2: &[u8]) -> PgResult<i32> {
         LocaleInfo::Libc(l) if !entry.view.collate_is_c => {
             Ok(crate::libc_provider::strncoll_libc(arg1, arg2, l))
         }
+        #[cfg(feature = "icu")]
+        LocaleInfo::Icu(l) => icu_strncoll(l, arg1, arg2),
         _ => Err(support_error("pg_strncoll", entry.view.provider)),
     }
+}
+
+/// `strncoll_icu`/`strncoll_icu_utf8` dispatch: the ICU provider supports the
+/// UTF-8 server encoding (the bounded scope); a non-UTF-8 encoding reports
+/// `FEATURE_NOT_SUPPORTED`.
+#[cfg(feature = "icu")]
+fn icu_strncoll(l: &pg_locale_icu::IcuLocale, arg1: &[u8], arg2: &[u8]) -> PgResult<i32> {
+    const PG_UTF8: i32 = 6;
+    if mbutils_seams::get_database_encoding::call() != PG_UTF8 {
+        return Err(pg_locale_icu::provider::non_utf8_unsupported("comparison"));
+    }
+    pg_locale_icu::provider::strncoll_icu(l, arg1, arg2)
 }
 
 /// `pg_strxfrm_enabled(locale)` (`pg_locale.c:1387`) —
 /// `locale->collate->strxfrm_is_safe`. libc is conservatively `false` (the
 /// non-`TRUST_STRXFRM` default); builtin/C have no collate vtable.
 #[must_use]
-pub fn pg_strxfrm_enabled(_collid: Oid) -> bool {
+pub fn pg_strxfrm_enabled(collid: Oid) -> bool {
     // collate_methods_libc.strxfrm_is_safe is `false` unless TRUST_STRXFRM, and
-    // a collate_is_c / builtin locale has no collate vtable. Either way: false.
+    // a collate_is_c / builtin locale has no collate vtable. ICU sets
+    // `strxfrm_is_safe = true`.
+    #[cfg(feature = "icu")]
+    if let Ok(entry) = resolve(collid) {
+        if matches!(entry.info, LocaleInfo::Icu(_)) {
+            return true;
+        }
+    }
+    let _ = collid;
     false
 }
 
@@ -97,6 +119,17 @@ pub fn pg_strxfrm<'mcx>(mcx: Mcx<'mcx>, collid: Oid, src: &[u8]) -> PgResult<PgV
     match &entry.info {
         LocaleInfo::Libc(l) if !entry.view.collate_is_c => {
             crate::libc_provider::strnxfrm_libc(mcx, src, l)
+        }
+        #[cfg(feature = "icu")]
+        LocaleInfo::Icu(l) => {
+            const PG_UTF8: i32 = 6;
+            if mbutils_seams::get_database_encoding::call() != PG_UTF8 {
+                return Err(pg_locale_icu::provider::non_utf8_unsupported("sort key"));
+            }
+            let blob = pg_locale_icu::provider::strnxfrm_icu(l, src)?;
+            let mut out = ::mcx::vec_with_capacity_in::<u8>(mcx, blob.len())?;
+            out.extend_from_slice(&blob);
+            Ok(out)
         }
         _ => Err(support_error("pg_strnxfrm", entry.view.provider)),
     }
@@ -143,8 +176,34 @@ pub fn pg_strlower<'mcx>(mcx: Mcx<'mcx>, collid: Oid, src: &[u8]) -> PgResult<Pg
         CollProvider::Libc => {
             pg_locale_libc_seams::strlower_libc::call(mcx, src, collid)
         }
+        #[cfg(feature = "icu")]
+        CollProvider::Icu => icu_case(mcx, &entry.info, src, pg_locale_icu::provider::strlower_icu),
         p => Err(support_error("pg_strlower", p)),
     }
+}
+
+/// Shared ICU case-mapping dispatch: the bounded UTF-8 path. Resolves the
+/// `IcuLocale` from the entry, runs the given ICU case worker, and copies the
+/// result into `mcx`. A non-UTF-8 server encoding reports
+/// `FEATURE_NOT_SUPPORTED`.
+#[cfg(feature = "icu")]
+fn icu_case<'mcx>(
+    mcx: Mcx<'mcx>,
+    info: &LocaleInfo,
+    src: &[u8],
+    worker: fn(&pg_locale_icu::IcuLocale, &[u8]) -> PgResult<alloc::vec::Vec<u8>>,
+) -> PgResult<PgVec<'mcx, u8>> {
+    const PG_UTF8: i32 = 6;
+    let LocaleInfo::Icu(l) = info else {
+        return Err(support_error("pg_strlower", CollProvider::Icu));
+    };
+    if mbutils_seams::get_database_encoding::call() != PG_UTF8 {
+        return Err(pg_locale_icu::provider::non_utf8_unsupported("case mapping"));
+    }
+    let blob = worker(l, src)?;
+    let mut out = ::mcx::vec_with_capacity_in::<u8>(mcx, blob.len())?;
+    out.extend_from_slice(&blob);
+    Ok(out)
 }
 
 /// `pg_strtitle(...)` (`pg_locale.c:1290`).
@@ -157,6 +216,8 @@ pub fn pg_strtitle<'mcx>(mcx: Mcx<'mcx>, collid: Oid, src: &[u8]) -> PgResult<Pg
         CollProvider::Libc => {
             pg_locale_libc_seams::strtitle_libc::call(mcx, src, collid)
         }
+        #[cfg(feature = "icu")]
+        CollProvider::Icu => icu_case(mcx, &entry.info, src, pg_locale_icu::provider::strtitle_icu),
         p => Err(support_error("pg_strtitle", p)),
     }
 }
@@ -171,6 +232,8 @@ pub fn pg_strupper<'mcx>(mcx: Mcx<'mcx>, collid: Oid, src: &[u8]) -> PgResult<Pg
         CollProvider::Libc => {
             pg_locale_libc_seams::strupper_libc::call(mcx, src, collid)
         }
+        #[cfg(feature = "icu")]
+        CollProvider::Icu => icu_case(mcx, &entry.info, src, pg_locale_icu::provider::strupper_icu),
         p => Err(support_error("pg_strupper", p)),
     }
 }
@@ -186,6 +249,8 @@ pub fn pg_strfold<'mcx>(mcx: Mcx<'mcx>, collid: Oid, src: &[u8]) -> PgResult<PgV
         CollProvider::Libc => {
             pg_locale_libc_seams::strlower_libc::call(mcx, src, collid)
         }
+        #[cfg(feature = "icu")]
+        CollProvider::Icu => icu_case(mcx, &entry.info, src, pg_locale_icu::provider::strfold_icu),
         p => Err(support_error("pg_strfold", p)),
     }
 }

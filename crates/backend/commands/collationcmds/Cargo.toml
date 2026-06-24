@@ -8,6 +8,14 @@ publish.workspace = true
 name = "collationcmds"
 path = "src/lib.rs"
 
+[features]
+# `icu` mirrors PostgreSQL's `--with-icu` (`#ifdef USE_ICU`): the
+# `enumerate_icu_locales` / `get_icu_locale_comment` import helpers (whose bodies
+# live in collationcmds.c, both under `#ifdef USE_ICU`) reach the system ICU via
+# the ICU provider crate. On by default.
+default = ["icu"]
+icu = ["dep:pg_locale_icu"]
+
 [dependencies]
 mcx = { path = "../../../_support/mcx" }
 utility_out_seams = { path = "../../tcop/utility_out_seams" }
@@ -38,3 +46,7 @@ miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 pg_locale_seams = { path = "../../utils/adt/pg_locale_seams" }
 fd_seams = { path = "../../storage/file/fd_seams" }
+
+# ICU provider (the import-path locale enumeration + display-name helpers), behind
+# the `icu` feature. Acyclic — pg_locale_icu depends only on types-*.
+pg_locale_icu = { path = "../../utils/adt/pg_locale_icu", optional = true }

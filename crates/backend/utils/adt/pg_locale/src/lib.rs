@@ -36,9 +36,10 @@ extern crate alloc;
 use alloc::format;
 
 use ::mcx::{Mcx, PgString};
-use ::types_error::{
-    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_WRONG_OBJECT_TYPE,
-};
+use ::types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE};
+// Only the ICU-disabled arms (and the `with-icu`-off seam bodies) reference this.
+#[cfg_attr(feature = "icu", allow(unused_imports))]
+use ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED;
 
 pub mod cache;
 pub mod chklocale;
@@ -132,15 +133,10 @@ fn pg_encoding_to_char(encoding: i32) -> alloc::string::String {
     }
 }
 
-/// `icu_language_tag(loc_str, elevel)` (`pg_locale.c:1549`): in the ICU-disabled
-/// profile this is the `#else` arm — `ereport(ERROR, FEATURE_NOT_SUPPORTED)`.
-pub fn icu_language_tag<'mcx>(_mcx: Mcx<'mcx>, _loc_str: &str) -> PgResult<PgString<'mcx>> {
-    Err(PgError::error("ICU is not supported in this build")
-        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED))
-}
-
-/// `icu_validate_locale(loc_str)` (`pg_locale.c:1607`): in the ICU-disabled
-/// profile, `ereport(ERROR, FEATURE_NOT_SUPPORTED)`.
+/// `icu_validate_locale(loc_str)` (`pg_locale.c:1607`) in the ICU-disabled build:
+/// `ereport(ERROR, FEATURE_NOT_SUPPORTED)`. The ICU-enabled body lives in
+/// [`icu_validate_locale_seam`].
+#[cfg(not(feature = "icu"))]
 pub fn icu_validate_locale(_loc_str: &str) -> PgResult<()> {
     Err(PgError::error("ICU is not supported in this build")
         .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED))
@@ -204,20 +200,105 @@ fn install_collationcmds_locale_seams() {
 
     cc::builtin_locale_encoding::set(builtin_locale_encoding);
     cc::builtin_validate_locale::set(builtin_validate_locale);
-    cc::icu_validate_locale::set(icu_validate_locale);
+    cc::icu_validate_locale::set(icu_validate_locale_seam);
     cc::icu_validation_level::set(|| Ok(setup::icu_validation_level()));
 
     // `pg_get_encoding_from_locale(locale, false)` — chklocale.c (write_message
     // is always false at collationcmds' call sites).
     cc::pg_get_encoding_from_locale::set(|locale| chklocale::pg_get_encoding_from_locale(locale));
 
-    // `icu_language_tag(loc_str, elevel)` — in the ICU-disabled build this
-    // unconditionally `ereport(ERROR, FEATURE_NOT_SUPPORTED)`. The seam variant
-    // would return `Ok(None)` only where ICU is built; here it can only Err.
-    cc::icu_language_tag::set(|mcx, loc_str, _strength| {
-        icu_language_tag(mcx, loc_str).map(Some)
+    // `icu_language_tag(loc_str, elevel)` (pg_locale.c:1550): on failure
+    // `ereport(elevel)` and return NULL; with ICU off this `ereport(ERROR,
+    // FEATURE_NOT_SUPPORTED)`. `strength` is the elevel the caller passes.
+    cc::icu_language_tag::set(icu_language_tag_seam);
+    // The import path always uses ERROR strength and never tolerates NULL.
+    cc::icu_language_tag_error::set(|mcx, name| {
+        icu_language_tag_seam(mcx, name, ::types_error::ERROR.0)?
+            .ok_or_else(|| PgError::error("ICU is not supported in this build"))
     });
-    cc::icu_language_tag_error::set(|mcx, name| icu_language_tag(mcx, name));
+}
+
+/// `icu_language_tag(loc_str, elevel)` seam body. On a conversion failure,
+/// `ereport(elevel)` with the C message; at WARNING/below this returns `Ok(None)`
+/// (the caller treats it as a NULL tag), at ERROR it raises.
+#[allow(unused_variables)]
+fn icu_language_tag_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    loc_str: &str,
+    elevel: i32,
+) -> PgResult<Option<PgString<'mcx>>> {
+    #[cfg(feature = "icu")]
+    {
+        match pg_locale_icu::provider::icu_language_tag(loc_str) {
+            Ok(tag) => Ok(Some(PgString::from_str_in(&tag, mcx)?)),
+            Err(name) => {
+                // C: if (elevel > 0) ereport(elevel, ...); return NULL.
+                if elevel > 0 {
+                    ::utils_error::ereport(::types_error::ErrorLevel(elevel))
+                        .errcode(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+                        .errmsg(format!(
+                            "could not convert locale name \"{loc_str}\" to language tag: {name}"
+                        ))
+                        .finish(::types_error::ErrorLocation::new(
+                            "../src/backend/utils/adt/pg_locale.c",
+                            1588,
+                            "icu_language_tag",
+                        ))?;
+                }
+                Ok(None)
+            }
+        }
+    }
+    #[cfg(not(feature = "icu"))]
+    {
+        let _ = (mcx, loc_str, elevel);
+        Err(PgError::error("ICU is not supported in this build")
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED))
+    }
+}
+
+/// `icu_validate_locale(loc_str)` seam body (`pg_locale.c:1608`). Reads
+/// `icu_validation_level` directly: `< 0` skips validation; the
+/// language/unknown-language problems are emitted at that level (WARNING by
+/// default, so they do not raise); the collator-open failure is always ERROR.
+fn icu_validate_locale_seam(loc_str: &str) -> PgResult<()> {
+    #[cfg(feature = "icu")]
+    {
+        let elevel = setup::icu_validation_level();
+        // C: if (elevel < 0) return; (no validation).
+        if elevel < 0 {
+            return Ok(());
+        }
+        // C: pg_upgrade downgrade to WARNING is handled by the GUC; not modeled.
+        if let Some(problem) = pg_locale_icu::provider::icu_validate_locale(loc_str)? {
+            let (msg, _) = match &problem {
+                pg_locale_icu::provider::IcuValidateProblem::CannotGetLanguage { loc, name } => (
+                    format!("could not get language from ICU locale \"{loc}\": {name}"),
+                    (),
+                ),
+                pg_locale_icu::provider::IcuValidateProblem::UnknownLanguage { loc, lang } => {
+                    (format!("ICU locale \"{loc}\" has unknown language \"{lang}\""), ())
+                }
+            };
+            ::utils_error::ereport(::types_error::ErrorLevel(elevel))
+                .errcode(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg(msg)
+                .errhint(
+                    "To disable ICU locale validation, set the parameter \
+                     \"icu_validation_level\" to \"disabled\".",
+                )
+                .finish(::types_error::ErrorLocation::new(
+                    "../src/backend/utils/adt/pg_locale.c",
+                    1660,
+                    "icu_validate_locale",
+                ))?;
+        }
+        Ok(())
+    }
+    #[cfg(not(feature = "icu"))]
+    {
+        icu_validate_locale(loc_str)
+    }
 }
 
 /// Install the `lc_messages`/`lc_monetary`/`lc_numeric`/`lc_time` GUC
@@ -344,13 +425,9 @@ mod tests {
         assert_eq!(err.sqlstate(), ERRCODE_WRONG_OBJECT_TYPE);
     }
 
+    #[cfg(not(feature = "icu"))]
     #[test]
     fn icu_paths_report_feature_not_supported() {
-        let ctx = ::mcx::MemoryContext::new("t");
-        assert_eq!(
-            icu_language_tag(ctx.mcx(), "en-US").unwrap_err().sqlstate(),
-            ERRCODE_FEATURE_NOT_SUPPORTED
-        );
         assert_eq!(
             icu_validate_locale("en-US").unwrap_err().sqlstate(),
             ERRCODE_FEATURE_NOT_SUPPORTED

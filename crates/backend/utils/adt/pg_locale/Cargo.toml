@@ -8,6 +8,13 @@ publish.workspace = true
 name = "pg_locale"
 path = "src/lib.rs"
 
+[features]
+# `icu` mirrors PostgreSQL's `--with-icu` (`#ifdef USE_ICU`). It gates the live
+# ICU collator construction in the cache and forwards to the ICU provider crate's
+# `with-icu`. On by default; turn off to build without the system ICU.
+default = ["icu"]
+icu = ["pg_locale_icu/with-icu"]
+
 [dependencies]
 mcx = { path = "../../../../_support/mcx" }
 types_core = { path = "../../../../_support/types/types_core" }

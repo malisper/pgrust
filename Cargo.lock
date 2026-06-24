@@ -3210,6 +3210,7 @@ dependencies = [
  "nodes",
  "parse_type_seams",
  "parsenodes",
+ "pg_locale_icu",
  "pg_locale_seams",
  "string",
  "transam_xact_seams",
