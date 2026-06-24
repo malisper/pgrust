@@ -2477,7 +2477,7 @@ fn compare_scalars<'mcx>(
     let db = &values[b].value;
     let tb = values[b].tupno;
 
-    let compare = apply_sort_comparator::call(da.clone(), db.clone(), ssup)?;
+    let compare = apply_sort_comparator::call(da, db, ssup)?;
     if compare != 0 {
         return Ok(compare);
     }

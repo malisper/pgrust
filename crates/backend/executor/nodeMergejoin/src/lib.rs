@@ -377,8 +377,8 @@ fn ApplySortComparator<'mcx>(
         // `ldatum`/`rdatum` are already canonical (set from
         // `exec_eval_expr_switch_context`), so they flow straight through.
         let mut compare = sortsupport::apply_sort_comparator::call(
-            clause.ldatum.clone(),
-            clause.rdatum.clone(),
+            &clause.ldatum,
+            &clause.rdatum,
             &clause.ssup,
         )?;
         if reverse {

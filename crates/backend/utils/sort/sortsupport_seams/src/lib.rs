@@ -52,9 +52,15 @@ seam_core::seam!(
     /// scalar word or a `ByRef` detoasted image) — a by-reference sort key
     /// (e.g. text) crosses here as `ByRef`, so this is NOT a bare-word edge:
     /// the carrier is threaded through rather than collapsed to a machine word.
+    ///
+    /// The operands are passed BY REFERENCE: a sort comparison only READS the two
+    /// datums (C passes the raw `Datum` word), so the comparator does not need an
+    /// owned copy. Borrowing here removes the per-comparison `Datum::clone_in`
+    /// (and, for a by-ref key, the `mcx::slice_in`) the by-value form forced on
+    /// the O(n log n) `comparetup` hot path.
     pub fn apply_sort_comparator(
-        datum1: Datum<'_>,
-        datum2: Datum<'_>,
+        datum1: &Datum<'_>,
+        datum2: &Datum<'_>,
         ssup: &SortSupportData<'_>,
     ) -> PgResult<i32>
 );
@@ -132,9 +138,12 @@ seam_core::seam!(
     /// used when an abbreviated comparison was inconclusive. The caller has
     /// verified `ssup.abbrev_full_comparator.is_some()`. `Err` carries the
     /// comparator's `ereport(ERROR)`s.
+    ///
+    /// Operands are passed BY REFERENCE (read-only comparison; see
+    /// [`apply_sort_comparator`]).
     pub fn apply_sort_abbrev_full_comparator(
-        datum1: Datum<'_>,
-        datum2: Datum<'_>,
+        datum1: &Datum<'_>,
+        datum2: &Datum<'_>,
         ssup: &SortSupportData<'_>,
     ) -> PgResult<i32>
 );

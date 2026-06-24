@@ -465,7 +465,7 @@ fn cmp_orderbyvals(
             .get(i)
             .cloned()
             .ok_or_else(|| elog("orderby value index out of range"))?;
-        let result = sortsupport::apply_sort_comparator::call(a, b, ssup)?;
+        let result = sortsupport::apply_sort_comparator::call(&a, &b, ssup)?;
         if result != 0 {
             return Ok(result);
         }

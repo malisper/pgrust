@@ -34,7 +34,7 @@ use ::types_sortsupport::{
 };
 
 use ::fmgr_core::{
-    datum_to_ref_arg, fmgr_info_cxt, function_call_coll_ref_args,
+    datum_to_ref_arg, fmgr_info_cxt, function_call_coll_ref_args_pooled,
 };
 use ::fmgr::ResolvedFmgrInfo;
 
@@ -137,7 +137,7 @@ fn register_shim(state: Comparator) -> SortComparatorId {
 /// `FunctionCallInvoke`, and `elog(ERROR, "function %u returned NULL")` if the
 /// result came back null. [`function_call2_coll`] performs the invoke and that
 /// exact NULL check.
-fn comparison_shim(mcx: Mcx<'_>, id: SortComparatorId, x: Datum<'_>, y: Datum<'_>) -> PgResult<i32> {
+fn comparison_shim(mcx: Mcx<'_>, id: SortComparatorId, x: &Datum<'_>, y: &Datum<'_>) -> PgResult<i32> {
     // Snapshot the resolved lookup and release the registry borrow before the
     // fmgr call, so a (re-entrant) comparator that itself prepares a shim can
     // not trip a RefCell double-borrow.
@@ -176,15 +176,22 @@ fn comparison_shim(mcx: Mcx<'_>, id: SortComparatorId, x: Datum<'_>, y: Datum<'_
             // (the `struct varlena *` / `char *` C would pass). The old-style btree
             // comparator (e.g. `btnamecmp`) reads its operands from the ref-args
             // lane, so the name/text bytes reach it intact.
-            let (ax, rx) = datum_to_ref_arg(&x);
-            let (ay, ry) = datum_to_ref_arg(&y);
-            let result = function_call_coll_ref_args(
+            let (ax, rx) = datum_to_ref_arg(x);
+            let (ay, ry) = datum_to_ref_arg(y);
+            // mcx-pooling (sort-comparator lane): `comparison_shim` runs on EVERY
+            // O(n log n) comparison, and the by-OID `function_call_coll_ref_args`
+            // allocated/dropped a fresh `args`/`ref_args` Vec + boxed `FmgrInfo`
+            // per call (the profiled libc malloc/free churn). The pooled variant
+            // reuses a per-backend frame with the same collation / fn_expr / NULL
+            // self-check, mirroring the FunctionCall2Coll btree-comparator fix
+            // (f9d0e0a97).
+            let result = function_call_coll_ref_args_pooled(
                 mcx,
                 &resolution,
-                finfo,
+                &finfo,
                 collation,
-                vec![ax, ay],
-                vec![rx, ry],
+                [ax, ay],
+                [rx, ry],
             )?;
             // C: `comparison_shim` returns the `Datum` result as an `int`
             // (`DatumGetInt32`).
@@ -198,10 +205,11 @@ fn comparison_shim(mcx: Mcx<'_>, id: SortComparatorId, x: Datum<'_>, y: Datum<'_
             Ok(cmp(x, y))
         }
         // A GiST box comparator (`gist_bbox_zorder_cmp`): the operands are
-        // pass-by-reference `BOX` images, so the canonical `Datum<'_>` is
-        // threaded WHOLE (its `ByRef` payload, NOT a collapsed word) into the
-        // kernel, which decodes the `BOX` from the bytes. Pure, infallible.
-        Resolved::GistBox(cmp) => Ok(cmp(x, y)),
+        // pass-by-reference `BOX` images; the kernel takes an owned canonical
+        // `Datum`, so the borrowed operands are cloned into `mcx` here (the GiST
+        // path is not the int/text comparetup hot path that motivated the
+        // by-reference seam, so the clone is acceptable on this rare arm).
+        Resolved::GistBox(cmp) => Ok(cmp(x.clone_in(mcx)?, y.clone_in(mcx)?)),
         // `ssup_datum_unsigned_cmp` (sortsupport.c): the abbreviated-key
         // comparator, comparing the two pass-by-value Datum words as unsigned
         // integers. On a 64-bit (`SIZEOF_DATUM == 8`) build the abbreviated key
@@ -214,7 +222,7 @@ fn comparison_shim(mcx: Mcx<'_>, id: SortComparatorId, x: Datum<'_>, y: Datum<'_
 /// pass-by-value `Datum`s as unsigned integers. Used by types whose abbreviated
 /// keys (or unsigned native values) sort by raw word ordering. `ssup` is
 /// unused. The operands are `ByVal` words.
-fn ssup_datum_unsigned_cmp(x: Datum<'_>, y: Datum<'_>) -> i32 {
+fn ssup_datum_unsigned_cmp(x: &Datum<'_>, y: &Datum<'_>) -> i32 {
     let x = x.as_usize();
     let y = y.as_usize();
     // C: `(x < y) ? -1 : ((x > y) ? 1 : 0)`.
@@ -455,8 +463,8 @@ pub fn PrepareSortSupportFromGistIndexRel(
 /// The caller has already verified `ssup.comparator.is_some()` and handled the
 /// null / reverse arithmetic (`ApplySortComparator` in sortsupport.h).
 fn apply_sort_comparator(
-    datum1: Datum<'_>,
-    datum2: Datum<'_>,
+    datum1: &Datum<'_>,
+    datum2: &Datum<'_>,
     ssup: &SortSupportData<'_>,
 ) -> PgResult<i32> {
     let id = ssup
@@ -556,8 +564,8 @@ fn apply_sort_abbrev_abort(
 /// [`comparison_shim`]. The caller has verified
 /// `ssup.abbrev_full_comparator.is_some()`.
 fn apply_sort_abbrev_full_comparator(
-    datum1: Datum<'_>,
-    datum2: Datum<'_>,
+    datum1: &Datum<'_>,
+    datum2: &Datum<'_>,
     ssup: &SortSupportData<'_>,
 ) -> PgResult<i32> {
     let id = ssup

@@ -1494,7 +1494,7 @@ fn ApplySortComparator<'mcx>(
             -1
         }
     } else {
-        let mut compare = sortsupport::apply_sort_comparator::call(datum1, datum2, ssup)?;
+        let mut compare = sortsupport::apply_sort_comparator::call(&datum1, &datum2, ssup)?;
         if ssup.ssup_reverse {
             compare = INVERT_COMPARE_RESULT(compare);
         }

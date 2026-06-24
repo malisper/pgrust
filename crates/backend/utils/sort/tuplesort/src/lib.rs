@@ -892,8 +892,8 @@ fn comparetup_heap<'mcx>(
     let sort_key = &state.base.sortKeys[0];
 
     // Compare the leading sort key.
-    let compare = apply_sort_comparator(a.datum1.clone_in(state.mcx())?, a.isnull1,
-                                        b.datum1.clone_in(state.mcx())?, b.isnull1,
+    let compare = apply_sort_comparator(&a.datum1, a.isnull1,
+                                        &b.datum1, b.isnull1,
                                         sort_key)?;
     if compare != 0 {
         return Ok(compare);
@@ -945,9 +945,9 @@ fn comparetup_heap_tiebreak<'mcx>(
         let (datum1, isnull1) = &lcols[idx];
         let (datum2, isnull2) = &rcols[idx];
         let compare = apply_sort_abbrev_full_comparator(
-            datum1.clone_in(mcx)?,
+            datum1,
             *isnull1,
-            datum2.clone_in(mcx)?,
+            datum2,
             *isnull2,
             sort_key0,
         )?;
@@ -963,9 +963,9 @@ fn comparetup_heap_tiebreak<'mcx>(
         let (datum1, isnull1) = &lcols[idx];
         let (datum2, isnull2) = &rcols[idx];
         let compare = apply_sort_comparator(
-            datum1.clone_in(mcx)?,
+            datum1,
             *isnull1,
-            datum2.clone_in(mcx)?,
+            datum2,
             *isnull2,
             sort_key,
         )?;
@@ -1007,8 +1007,8 @@ fn comparetup_datum<'mcx>(
     b: &SortTuple<'mcx>,
 ) -> PgResult<i32> {
     let sort_key = &state.base.sortKeys[0];
-    let compare = apply_sort_comparator(a.datum1.clone_in(state.mcx())?, a.isnull1,
-                                        b.datum1.clone_in(state.mcx())?, b.isnull1,
+    let compare = apply_sort_comparator(&a.datum1, a.isnull1,
+                                        &b.datum1, b.isnull1,
                                         sort_key)?;
     if compare != 0 {
         return Ok(compare);
@@ -1037,7 +1037,7 @@ fn comparetup_datum_tiebreak<'mcx>(
     let datum1 = datum_body_value(mcx, a)?;
     let datum2 = datum_body_value(mcx, b)?;
     apply_sort_abbrev_full_comparator(
-        datum1, a.isnull1, datum2, b.isnull1, sort_key,
+        &datum1, a.isnull1, &datum2, b.isnull1, sort_key,
     )
 }
 
@@ -1057,9 +1057,9 @@ fn datum_body_value<'mcx>(mcx: Mcx<'mcx>, stup: &SortTuple<'mcx>) -> PgResult<Da
 /// the C inline exactly (NULLs collate per `ssup_nulls_first`, then the
 /// installed comparator, then `ssup_reverse` flips the sign).
 fn apply_sort_comparator<'mcx>(
-    datum1: Datum<'mcx>,
+    datum1: &Datum<'mcx>,
     isnull1: bool,
-    datum2: Datum<'mcx>,
+    datum2: &Datum<'mcx>,
     isnull2: bool,
     ssup: &SortSupportData<'mcx>,
 ) -> PgResult<i32> {
@@ -1097,9 +1097,9 @@ fn apply_sort_comparator<'mcx>(
 /// (the authoritative comparator used when an abbreviated comparison was
 /// inconclusive). Mirrors the C inline exactly.
 fn apply_sort_abbrev_full_comparator<'mcx>(
-    datum1: Datum<'mcx>,
+    datum1: &Datum<'mcx>,
     isnull1: bool,
-    datum2: Datum<'mcx>,
+    datum2: &Datum<'mcx>,
     isnull2: bool,
     ssup: &SortSupportData<'mcx>,
 ) -> PgResult<i32> {
@@ -1663,9 +1663,9 @@ fn comparetup_index_btree<'mcx>(
 
     // Compare the leading sort key.
     let compare = apply_sort_comparator(
-        a.datum1.clone_in(state.mcx())?,
+        &a.datum1,
         a.isnull1,
-        b.datum1.clone_in(state.mcx())?,
+        &b.datum1,
         b.isnull1,
         sort_key,
     )?;
@@ -1708,9 +1708,9 @@ fn comparetup_index_btree_tiebreak<'mcx>(
         let (datum1, isnull1) = index_getattr(mcx, tuple1, 1, tup_des)?;
         let (datum2, isnull2) = index_getattr(mcx, tuple2, 1, tup_des)?;
         let compare = apply_sort_abbrev_full_comparator(
-            datum1,
+            &datum1,
             isnull1,
-            datum2,
+            &datum2,
             isnull2,
             &state.base.sortKeys[0],
         )?;
@@ -1730,7 +1730,7 @@ fn comparetup_index_btree_tiebreak<'mcx>(
         let (datum1, isnull1) = index_getattr(mcx, tuple1, nkey, tup_des)?;
         let (datum2, isnull2) = index_getattr(mcx, tuple2, nkey, tup_des)?;
 
-        let compare = apply_sort_comparator(datum1, isnull1, datum2, isnull2, sort_key)?;
+        let compare = apply_sort_comparator(&datum1, isnull1, &datum2, isnull2, sort_key)?;
         if compare != 0 {
             return Ok(compare); // done when we find unequal attributes.
         }
@@ -1953,9 +1953,9 @@ fn comparetup_cluster<'mcx>(
     // Compare the leading sort key, if it's simple.
     if state.base.haveDatum1 {
         let compare = apply_sort_comparator(
-            a.datum1.clone_in(state.mcx())?,
+            &a.datum1,
             a.isnull1,
-            b.datum1.clone_in(state.mcx())?,
+            &b.datum1,
             b.isnull1,
             sort_key,
         )?;
@@ -1991,9 +1991,9 @@ fn comparetup_cluster_tiebreak<'mcx>(
             let (datum1, isnull1) = heaptuple::heap_getattr(mcx, ltup, leading as i32, tup_desc)?;
             let (datum2, isnull2) = heaptuple::heap_getattr(mcx, rtup, leading as i32, tup_desc)?;
             let compare = apply_sort_abbrev_full_comparator(
-                datum1,
+                &datum1,
                 isnull1,
-                datum2,
+                &datum2,
                 isnull2,
                 &state.base.sortKeys[0],
             )?;
@@ -2018,9 +2018,9 @@ fn comparetup_cluster_tiebreak<'mcx>(
             let (datum1, isnull1) = heaptuple::heap_getattr(mcx, ltup, attno as i32, tup_desc)?;
             let (datum2, isnull2) = heaptuple::heap_getattr(mcx, rtup, attno as i32, tup_desc)?;
             let compare = apply_sort_comparator(
-                datum1,
+                &datum1,
                 isnull1,
-                datum2,
+                &datum2,
                 isnull2,
                 &state.base.sortKeys[k],
             )?;
@@ -2046,9 +2046,9 @@ fn comparetup_cluster_tiebreak<'mcx>(
             let (datum1, isnull1) = &l_values[k];
             let (datum2, isnull2) = &r_values[k];
             let compare = apply_sort_comparator(
-                datum1.clone_in(mcx)?,
+                datum1,
                 *isnull1,
-                datum2.clone_in(mcx)?,
+                datum2,
                 *isnull2,
                 &state.base.sortKeys[k],
             )?;

@@ -107,7 +107,7 @@ fn cmp_with_nulls<'mcx>(
     } else if bnull {
         return Ok(-1);
     }
-    apply_sort_comparator::call(av.clone(), bv.clone(), ssup)
+    apply_sort_comparator::call(av, bv, ssup)
 }
 
 /// `build_attnums_array(attrs, nexprs, numattrs)` (extended_stats.c:938) —
@@ -764,7 +764,7 @@ fn mcv_compare_scalars_simple<'mcx>(
     ssup.ssup_collation = collation;
     ssup.ssup_nulls_first = false;
     prepare_sort_support_from_ordering_op::call(lt_opr, &mut ssup)?;
-    apply_sort_comparator::call(a.clone(), b.clone(), &ssup)
+    apply_sort_comparator::call(a, b, &ssup)
 }
 
 /// `statext_mcv_serialize` per-value codec (mcv.c:868-919): emit one MCV value's

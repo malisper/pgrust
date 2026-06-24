@@ -128,15 +128,15 @@ fn ordering_op_falls_back_to_shim_and_sets_reverse() {
 
     // Invoking it runs the builtin: cmp(7, 9) = -1, cmp(9, 7) = 1, cmp(5,5)=0.
     assert_eq!(
-        apply_sort_comparator(Datum::from_i32(7), Datum::from_i32(9), &ssup).unwrap(),
+        apply_sort_comparator(&Datum::from_i32(7), &Datum::from_i32(9), &ssup).unwrap(),
         -1
     );
     assert_eq!(
-        apply_sort_comparator(Datum::from_i32(9), Datum::from_i32(7), &ssup).unwrap(),
+        apply_sort_comparator(&Datum::from_i32(9), &Datum::from_i32(7), &ssup).unwrap(),
         1
     );
     assert_eq!(
-        apply_sort_comparator(Datum::from_i32(5), Datum::from_i32(5), &ssup).unwrap(),
+        apply_sort_comparator(&Datum::from_i32(5), &Datum::from_i32(5), &ssup).unwrap(),
         0
     );
 }
@@ -175,6 +175,6 @@ fn prepare_comparison_shim_installs_and_runs() {
     PrepareSortSupportComparisonShim(CMP_OID, &mut ssup).unwrap();
 
     assert!(ssup.comparator.is_some());
-    let r = apply_sort_comparator(Datum::from_i32(3), Datum::from_i32(10), &ssup).unwrap();
+    let r = apply_sort_comparator(&Datum::from_i32(3), &Datum::from_i32(10), &ssup).unwrap();
     assert_eq!(r, -1);
 }

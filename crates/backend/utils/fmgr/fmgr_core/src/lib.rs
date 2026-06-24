@@ -882,6 +882,47 @@ pub fn function_call_coll_ref_args_out(
     Ok((d, fcinfo.take_ref_result()))
 }
 
+/// Pooled-frame variant of [`function_call_coll_ref_args`] for a HOT, repeated
+/// caller that already holds a resolved `(FmgrResolution, FmgrInfo)` (the sort
+/// comparator path: `comparison_shim` invokes the same old-style btree comparator
+/// on EVERY O(n log n) comparison). Instead of `init_fcinfo` allocating a fresh
+/// `args`/`ref_args` Vec + a boxed `FmgrInfo` and dropping the whole
+/// `FunctionCallInfoBaseData` per call (the profiled libc malloc/free churn), it
+/// borrows a per-backend pooled frame ([`fcinfo_pool_take`]), refills the
+/// capacity-retained `args`/`ref_args` Vecs in place, dispatches, and returns the
+/// frame to the pool ([`fcinfo_pool_return`]). Semantics are identical to
+/// [`function_call_coll_ref_args`]: same collation, same `fn_expr` threading
+/// (fmgr.c:658), same `invoke_flinfo` NULL self-check.
+///
+/// Reentrancy is safe: a nested fmgr call pops a DIFFERENT pooled frame.
+pub fn function_call_coll_ref_args_pooled(
+    mcx: Mcx<'_>,
+    res: &FmgrResolution,
+    flinfo: &FmgrInfo,
+    collation: Oid,
+    args: [NullableDatum; 2],
+    ref_args: [Option<RefPayload>; 2],
+) -> PgResult<Datum> {
+    let oid = flinfo.fn_oid;
+    let fn_expr = flinfo.fn_expr.clone();
+    // C: the per-step reusable `fcinfo`/`flinfo` (execExprInterp.c:920) — here a
+    // pooled frame whose Vecs keep their capacity across calls. `flinfo.clone()`
+    // is a cheap field copy + an `Rc` bump for `fn_expr` (no `String`), reused
+    // into the existing `Box` slot by `reset_for_reuse`.
+    let mut fcinfo = fcinfo_pool_take(Some(flinfo.clone()), collation);
+    let [a1, a2] = args;
+    let [r1, r2] = ref_args;
+    fcinfo.args.push(a1);
+    fcinfo.args.push(a2);
+    fcinfo.ref_args.push(r1);
+    fcinfo.ref_args.push(r2);
+    fcinfo.nargs = 2;
+    fcinfo.debug_assert_ref_null_consistency();
+    let result = invoke_flinfo(mcx, res, &mut fcinfo, oid, fn_expr);
+    fcinfo_pool_return(fcinfo);
+    result
+}
+
 // ===========================================================================
 // OidFunctionCall{0..9}Coll family.
 // ===========================================================================

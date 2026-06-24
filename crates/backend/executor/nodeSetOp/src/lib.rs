@@ -1110,7 +1110,7 @@ fn apply_sort_comparator(
         // The comparator seam now takes the canonical `Datum<'_>`; pass the
         // clause values straight through.
         let mut compare =
-            sortsupport::apply_sort_comparator::call(datum1.clone(), datum2.clone(), ssup)?;
+            sortsupport::apply_sort_comparator::call(datum1, datum2, ssup)?;
         if reverse {
             // INVERT_COMPARE_RESULT(compare)
             compare = if compare < 0 { 1 } else { compare.wrapping_neg() };

@@ -905,7 +905,7 @@ fn ApplySortComparator<'mcx>(
         // already canonical values from `slot_getattr`, so they pass straight
         // through (a by-reference image is carried faithfully, no forge).
         let mut compare =
-            sortsupport::apply_sort_comparator::call(datum1, datum2, ssup)?;
+            sortsupport::apply_sort_comparator::call(&datum1, &datum2, ssup)?;
         if ssup.ssup_reverse {
             compare = INVERT_COMPARE_RESULT(compare);
         }
