@@ -131,6 +131,11 @@ commands_async = { path = "../../commands/commands_async" }
 # SRF body (locked slot-array snapshot walk + materialized_srf_putvalues).
 slotfuncs = { path = "../../replication/slotfuncs" }
 
+# pg_stat_get_wal_senders() (OID 3099): the pg_stat_replication view's per-row
+# decision logic (slot snapshot + privilege gate + sync classification); the
+# materialize-mode SRF plumbing is in pg_stat_get_wal_senders.rs.
+walsender = { path = "../../replication/walsender" }
+
 # pg_options_to_table(text[]) (OID 2289): the (option_name, option_value)
 # materialize-mode SRF body (untransformRelOptions + materialized_srf_putvalues).
 foreign = { path = "../../foreign/foreign" }

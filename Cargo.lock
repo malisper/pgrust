@@ -6894,6 +6894,7 @@ dependencies = [
  "varlena",
  "varlena_seams",
  "waitevent",
+ "walsender",
  "wasm-libc-shim",
  "xid8funcs",
  "xlogfuncs",

@@ -112,6 +112,7 @@ mod pg_get_aios;
 mod pg_get_backend_memory_contexts;
 mod pg_get_wait_events;
 mod pg_stat_get_wal_receiver;
+mod pg_stat_get_wal_senders;
 mod pg_timezone;
 mod show_all_file_settings;
 mod show_all_settings;
@@ -377,6 +378,11 @@ pub fn init_seams() {
     // pg_stat_get_wal_receiver() (OID 3317): the pg_stat_wal_receiver view's
     // 0-or-1-row table function (NULL when no receiver is running).
     pg_stat_get_wal_receiver::register_pg_stat_get_wal_receiver();
+    // pg_stat_get_wal_senders() (OID 3099): the pg_stat_replication view's
+    // materialize-mode SRF (one row per active walsender). The per-row decision
+    // logic lives in the walsender owner; this adapter does the InitMaterializedSRF
+    // + tuplestore_putvalues plumbing.
+    pg_stat_get_wal_senders::register_pg_stat_get_wal_senders();
 }
 
 // ===========================================================================
