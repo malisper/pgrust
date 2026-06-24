@@ -47,7 +47,7 @@ FROM rust:1-bookworm AS rustbuild
 ARG PG_SHAREDIR
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential pkg-config libicu-dev \
+        build-essential pkg-config libicu-dev libldap2-dev libpam0g-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Bake the runtime share dir (timezone/timezonesets) location into the binary so
@@ -130,6 +130,7 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         libicu72 tzdata locales libnss-wrapper xz-utils zstd gzip \
+        libldap-2.5-0 libpam0g \
         gosu \
     ; \
     rm -rf /var/lib/apt/lists/*; \
