@@ -72,6 +72,7 @@ allocator-api2 = { version = "0.2", default-features = false, features = ["alloc
 
 # Seam crates (leaf; never create cycles).
 postgres_seams = { path = "../postgres_seams" }
+backend_startup_seams = { path = "../backend_startup_seams" }
 execParallel_support_seams = { path = "../../executor/execParallel_support_seams" }
 init_small_seams = { path = "../../utils/init/init_small_seams" }
 guc_tables_seams = { path = "../../utils/misc/guc_tables_seams" }

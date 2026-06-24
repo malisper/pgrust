@@ -1033,9 +1033,12 @@ fn ready_state(mcx: Mcx<'_>, state: &mut LoopState) -> PgResult<()> {
     // Report any recently-changed GUC options.
     misc_guc::report::report_changed_guc_options();
 
-    // The first-ready connection-timing LOG line (conn_timing.ready_for_use) is
-    // a connection-setup-duration diagnostic; the conn_timing accounting owner
-    // is a separate unit. Not threaded here (logging-only).
+    // The first time this backend is ready for query, log the durations of the
+    // different components of connection establishment and setup (postgres.c
+    // 4655-4680). The `conn_timing` global + `log_connections` aspect mask are
+    // owned by backend_startup, which gates and emits the "connection ready"
+    // line through this seam.
+    backend_startup_seams::log_connection_ready::call();
 
     dest_seams::ready_for_query::call(mcx, dest)?;
     state.send_ready_for_query = false;

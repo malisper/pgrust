@@ -35,3 +35,14 @@ seam_core::seam!(
     /// `backend_startup.c`). Set by `postinit.c`'s `PerformAuthentication`.
     pub fn set_conn_timing_auth_end(tstamp: types_core::TimestampTz)
 );
+
+seam_core::seam!(
+    /// The first-ready connection-setup-durations LOG line (`postgres.c`
+    /// `PostgresMain`, the `conn_timing.ready_for_use == TIMESTAMP_MINUS_INFINITY
+    /// && (log_connections & LOG_CONNECTION_SETUP_DURATIONS) &&
+    /// IsExternalConnectionBackend(MyBackendType)` block). Owned by
+    /// `backend_startup.c` because it reads/writes the `conn_timing` global and
+    /// the `log_connections` aspect mask; called once from the main loop just
+    /// before `ReadyForQuery`.
+    pub fn log_connection_ready()
+);

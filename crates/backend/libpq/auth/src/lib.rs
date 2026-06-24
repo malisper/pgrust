@@ -828,7 +828,10 @@ pub mod gucvars {
 pub fn init_seams() {
     auth_seams::client_authentication::set(client_authentication_entry);
     auth_seams::authentication_timeout::set(authentication_timeout_entry);
-    auth_seams::log_connection_authorization::set(log_connection_authorization_entry);
+    // `log_connection_authorization` reads the AUTHORIZATION aspect bit of the
+    // `log_connections` mask, which is owned by backend_startup; that unit
+    // installs this seam (against LOG_CONNECTION_AUTHORIZATION). Installing it
+    // here would route to the wrong (authentication) bit.
     auth_seams::client_authn_id::set(client_authn_id_entry);
 
     // `ClientAuthentication_hook` (auth.c global function pointer) — the optional
@@ -875,13 +878,6 @@ fn client_authentication_entry() -> PgResult<()> {
 /// owner installs the real value — until then the compiled-in default applies.
 fn authentication_timeout_entry() -> i32 {
     60
-}
-
-/// `log_connections & LOG_CONNECTION_AUTHORIZATION`: read through the GUC seam.
-fn log_connection_authorization_entry() -> bool {
-    // The "authorization" aspect is logged by postinit; auth.c itself reads the
-    // "authentication" aspect. They share the GUC; route through the same seam.
-    auth_seams::log_connection_authentication::call()
 }
 
 /// `MyClientConnectionInfo.authn_id`.

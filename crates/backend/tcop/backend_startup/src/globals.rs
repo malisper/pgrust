@@ -73,7 +73,7 @@ pub mod conn_timing {
     use super::{Cell, TimestampTz};
 
     /// `TIMESTAMP_MINUS_INFINITY` (`datatype/timestamp.h`) == `INT64_MIN + 1`.
-    const TIMESTAMP_MINUS_INFINITY: TimestampTz = i64::MIN + 1;
+    pub const TIMESTAMP_MINUS_INFINITY: TimestampTz = i64::MIN + 1;
 
     thread_local! {
         static SOCKET_CREATE: Cell<TimestampTz> = const { Cell::new(0) };

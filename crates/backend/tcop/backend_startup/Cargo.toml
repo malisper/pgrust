@@ -57,6 +57,7 @@ varlena_seams = { path = "../../utils/adt/varlena_seams" }
 scalar_seams = { path = "../../utils/adt/scalar_seams" }
 init_small_seams = { path = "../../utils/init/init_small_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
 ip_seams = { path = "../../../common/ip_seams" }
 string_seams = { path = "../../../common/string_seams" }
 pgsleep_seams = { path = "../../../port/pgsleep_seams" }

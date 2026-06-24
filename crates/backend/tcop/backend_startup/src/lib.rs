@@ -1188,6 +1188,7 @@ pub fn init_seams() {
     backend_startup_seams::set_conn_timing_child::set(set_conn_timing_child);
     backend_startup_seams::set_conn_timing_auth_start::set(globals::conn_timing::set_auth_start);
     backend_startup_seams::set_conn_timing_auth_end::set(globals::conn_timing::set_auth_end);
+    backend_startup_seams::log_connection_ready::set(log_connection_ready);
 
     // GUC variable accessors (`conf->variable`) for the two GUC variables this
     // unit owns (backend_startup.c:46-47, guc_tables.c:1253/4991). The GUC
@@ -1226,6 +1227,15 @@ pub fn init_seams() {
     auth_seams::log_connection_authentication::set(|| {
         log_connections::get() & LOG_CONNECTION_AUTHENTICATION != 0
     });
+
+    // `log_connections & LOG_CONNECTION_AUTHORIZATION` — postinit reads this
+    // bitmask (via the auth seam) to decide whether to emit the "connection
+    // authorized" line. The aspect-flag mask is owned by this unit, so the read
+    // is installed here against the AUTHORIZATION bit (distinct from the
+    // AUTHENTICATION bit above).
+    auth_seams::log_connection_authorization::set(|| {
+        log_connections::get() & LOG_CONNECTION_AUTHORIZATION != 0
+    });
 }
 
 /// `set_conn_timing_child` (the inward seam): transfer launch timings into the
@@ -1238,6 +1248,56 @@ fn set_conn_timing_child(
     conn_timing::set_socket_create(socket_create);
     conn_timing::set_fork_start(fork_start);
     conn_timing::set_fork_end(fork_end);
+}
+
+/// The first-ready connection-setup-durations LOG line (`postgres.c`
+/// `PostgresMain`, the block at postgres.c:4655-4680). The first time this
+/// backend is ready for query, log the durations of the different components of
+/// connection establishment and setup.
+fn log_connection_ready() {
+    use globals::conn_timing::TIMESTAMP_MINUS_INFINITY;
+
+    // if (conn_timing.ready_for_use == TIMESTAMP_MINUS_INFINITY &&
+    //     (log_connections & LOG_CONNECTION_SETUP_DURATIONS) &&
+    //     IsExternalConnectionBackend(MyBackendType))
+    if conn_timing::ready_for_use() != TIMESTAMP_MINUS_INFINITY {
+        return;
+    }
+    if log_connections::get() & LOG_CONNECTION_SETUP_DURATIONS == 0 {
+        return;
+    }
+    // IsExternalConnectionBackend(MyBackendType): B_BACKEND || B_WAL_SENDER.
+    let bt = init_small_seams::my_backend_type::call();
+    if !matches!(bt, BackendType::Backend | BackendType::WalSender) {
+        return;
+    }
+
+    conn_timing::set_ready_for_use(timestamp_seams::get_current_timestamp::call());
+
+    // TimestampDifferenceMicroseconds(start, stop): 0 if start >= stop, else
+    // (uint64) stop - start (timestamp.h:90).
+    let diff_us = |start: TimestampTz, stop: TimestampTz| -> u64 {
+        if start >= stop {
+            0
+        } else {
+            (stop as i128 - start as i128) as u64
+        }
+    };
+
+    let total_duration = diff_us(conn_timing::socket_create(), conn_timing::ready_for_use());
+    let fork_duration = diff_us(conn_timing::fork_start(), conn_timing::fork_end());
+    let auth_duration = diff_us(conn_timing::auth_start(), conn_timing::auth_end());
+
+    // NS_PER_US == 1000: divide microsecond durations to render milliseconds.
+    const NS_PER_US: f64 = 1000.0;
+    let _ = ereport(LOG)
+        .errmsg(format!(
+            "connection ready: setup total={:.3} ms, fork={:.3} ms, authentication={:.3} ms",
+            total_duration as f64 / NS_PER_US,
+            fork_duration as f64 / NS_PER_US,
+            auth_duration as f64 / NS_PER_US,
+        ))
+        .finish(loc(4677, "PostgresMain"));
 }
 
 // ===========================================================================
