@@ -55,16 +55,16 @@ fn arg_cstring<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
 /// `StringInfo`.
 #[inline]
 fn arg_varlena<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    let image = fcinfo
+    // The sole caller is `boolrecv`, whose arg0 is the binary recv message
+    // (`PG_GETARG_POINTER` -> a `StringInfo` over the RAW wire bytes), NOT a
+    // header-ful varlena. Return the bytes verbatim — the earlier `&image[4..]`
+    // header-strip wrongly dropped the (only) payload byte of the 1-byte bool
+    // wire value, leaving an empty buffer so `pq_getmsgbyte` reported
+    // "no data left in message". (Mirrors char/int `arg_varlena`.)
+    fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("bool fn: by-ref arg missing from by-ref lane");
-    // `VARDATA_ANY`: skip the 4-byte header on the header-ful image.
-    if image.len() >= 4 {
-        &image[4..]
-    } else {
-        &[]
-    }
+        .expect("bool fn: by-ref arg missing from by-ref lane")
 }
 
 #[inline]
@@ -80,16 +80,18 @@ fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: alloc::string::String) 
     Datum::from_usize(0)
 }
 
-/// Set a varlena (`boolsend`/`text`) result on the by-ref lane. The bytes are
-/// the header-less payload (the boundary owns the `VARHDRSZ` framing).
+/// Set a varlena (`boolsend`/`text`) result on the by-ref lane. The boundary
+/// carries the `RefPayload::Varlena` content as the bytea PAYLOAD directly (no
+/// header interpretation) — `length(boolsend(true))` reads it as-is — so the
+/// payload must be stored VERBATIM, exactly as the `char`/`int` send wrappers
+/// do. (`boolsend`'s core already returns the bare payload via
+/// `pq_begintypsend`/`pq_endtypsend` + `Bytea::as_bytes()`.) The previous code
+/// prepended a second VARHDRSZ word, so `boolsend(true)` became the 5-byte
+/// `\x1400000001` instead of `\x01`, breaking every binary bool/composite-bool
+/// result.
 #[inline]
 fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: alloc::vec::Vec<u8>) -> Datum {
-    // `palloc(VARHDRSZ + len)` + `SET_VARSIZE`: build the header-ful image.
-    let total = bytes.len() + 4;
-    let mut img = alloc::vec::Vec::with_capacity(total);
-    img.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
-    img.extend_from_slice(&bytes);
-    fcinfo.set_ref_result(RefPayload::Varlena(img));
+    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
     Datum::from_usize(0)
 }
 

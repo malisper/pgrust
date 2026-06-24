@@ -11125,6 +11125,7 @@ dependencies = [
  "mcx",
  "numutils",
  "pqformat",
+ "stringinfo",
  "types_core",
  "types_error",
 ]

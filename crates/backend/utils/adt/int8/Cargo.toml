@@ -22,3 +22,5 @@ fmgr_core = { path = "../../fmgr/fmgr_core" }
 # bytea framing int8send produces, exactly as int4send uses it.
 pqformat = { path = "../../../libpq/pqformat" }
 mcx = { path = "../../../../_support/mcx" }
+# StringInfo wire reader for int8recv (pq_getmsgint64 over the recv buffer).
+stringinfo = { path = "../../../../_support/types/stringinfo" }

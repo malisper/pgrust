@@ -156,6 +156,12 @@ pub fn int8in(num: &str, escontext: Option<&mut SoftErrorContext>) -> PgResult<i
     pg_strtoint64_safe(num, escontext)
 }
 
+/// `int8recv()` (int8.c): `PG_RETURN_INT64(pq_getmsgint64(buf))` — read the
+/// 8 big-endian wire bytes as a signed 64-bit integer.
+pub fn int8recv(buf: &mut ::stringinfo::StringInfo<'_>) -> PgResult<i64> {
+    ::pqformat::pq_getmsgint64(buf)
+}
+
 /// `int8out()`: render an `int8` as decimal text.
 pub fn int8out(val: i64) -> String {
     let mut buf = [0u8; MAX_INT64_DIGITS];

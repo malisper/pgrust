@@ -145,6 +145,36 @@ fn fc_int8out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Da
 /// pq_sendint64(&buf, arg1); PG_RETURN_BYTEA_P(pq_endtypsend(&buf))` — the value's
 /// 8 big-endian bytes. The `Varlena` payload is just the wire bytes; the libpq /
 /// fmgr boundary wraps the varlena framing.
+/// `PG_GETARG_POINTER(i)` as the binary recv message bytes on the by-ref lane.
+#[inline]
+fn arg_varlena<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("int8 fn: by-ref recv arg missing from by-ref lane")
+}
+
+/// Decode a `recv` builtin: build a `StringInfo` over a copy of the wire bytes
+/// and run `decode` (mirrors the `int` crate's `with_recv_buf`).
+fn with_recv_buf<T>(
+    src: &[u8],
+    decode: impl FnOnce(&mut ::stringinfo::StringInfo<'_>) -> types_error::PgResult<T>,
+) -> types_error::PgResult<T> {
+    let m = mcx::MemoryContext::new("int8 recv scratch");
+    let mut data = mcx::PgVec::new_in(m.mcx());
+    if data.try_reserve(src.len()).is_err() {
+        return Err(types_error::PgError::error("out of memory"));
+    }
+    data.extend_from_slice(src);
+    let mut buf = ::stringinfo::StringInfo::from_vec(data);
+    decode(&mut buf)
+}
+
+/// `int8recv(internal) -> int8` (pg_proc.dat oid 2408).
+fn fc_int8recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i64(with_recv_buf(arg_varlena(fcinfo, 0), crate::int8recv)?))
+}
+
 fn fc_int8send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let v = arg_i64(fcinfo, 0);
     // C: pq_begintypsend(&buf); pq_sendint64(&buf, arg1); pq_endtypsend(&buf).
@@ -496,6 +526,7 @@ pub fn register_int8_builtins() {
         // ---- I/O ----
         builtin(460, "int8in", 1, true, false, fc_int8in),
         builtin(461, "int8out", 1, true, false, fc_int8out),
+        builtin(2408, "int8recv", 1, true, false, fc_int8recv),
         builtin(2409, "int8send", 1, true, false, fc_int8send),
         // ---- comparison operators ----
         builtin(467, "int8eq", 2, true, false, fc_int8eq),

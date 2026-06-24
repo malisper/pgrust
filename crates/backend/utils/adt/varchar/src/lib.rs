@@ -320,11 +320,11 @@ pub fn bpcharrecv<'mcx>(
     // str = pq_getmsgtext(buf, buf->len - buf->cursor, &nbytes);
     let rawbytes = buf.data.len().saturating_sub(buf.cursor);
     let str = pqformat::pq_getmsgtext(mcx, buf, rawbytes)?;
-    // pq_getmsgtext appends a trailing NUL (cstring contract); bpchar_input
-    // operates on the `nbytes` payload, not the NUL.
-    let payload = &str[..str.len().saturating_sub(1)];
+    // `pq_getmsgtext` returns the contents WITHOUT the NUL terminator that C's
+    // palloc(rawbytes+1) copy carries, so its length IS C's `nbytes` — the whole
+    // payload. (The previous `str.len()-1` dropped the final data byte.)
     // result = bpchar_input(str, nbytes, atttypmod, NULL); -- hard-error context
-    let result = bpchar_input(mcx, payload, atttypmod, None)?;
+    let result = bpchar_input(mcx, &str, atttypmod, None)?;
     result.ok_or_else(|| PgError::error("bpcharrecv: bpchar_input with no escontext returned None"))
 }
 
@@ -545,10 +545,15 @@ pub fn varcharrecv<'mcx>(
     _typelem: Oid,
     atttypmod: i32,
 ) -> PgResult<PgVec<'mcx, u8>> {
+    // C: str = pq_getmsgtext(buf, buf->len - buf->cursor, &nbytes);
+    //    result = varchar_input(str, nbytes, atttypmod);
+    // `pq_getmsgtext` returns the contents WITHOUT the NUL terminator that C's
+    // palloc(rawbytes+1) copy carries, so its length IS C's `nbytes` — the whole
+    // payload. (The previous `str.len()-1` dropped the final data byte, matching
+    // C only if a terminator were present, which it is not here.)
     let rawbytes = buf.data.len().saturating_sub(buf.cursor);
     let str = pqformat::pq_getmsgtext(mcx, buf, rawbytes)?;
-    let payload = &str[..str.len().saturating_sub(1)];
-    let result = varchar_input(mcx, payload, atttypmod, None)?;
+    let result = varchar_input(mcx, &str, atttypmod, None)?;
     result
         .ok_or_else(|| PgError::error("varcharrecv: varchar_input with no escontext returned None"))
 }
