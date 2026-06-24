@@ -103,6 +103,18 @@ std::thread_local! {
     /// here for the psql `LINE n:`/caret echo.
     static REGRESS_CUR_QUERY: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
+
+    /// Regress-output mode: set true once the first non-blank input line has been
+    /// seen (process-wide). Used to skip the leading blank lines before the first
+    /// statement (psql does) while still echoing blank lines between statements.
+    static REGRESS_STARTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn regress_started() -> bool {
+    REGRESS_STARTED.with(|f| f.get())
+}
+fn regress_set_started() {
+    REGRESS_STARTED.with(|f| f.set(true));
 }
 
 /// `PQ_SMALL_MESSAGE_LIMIT` (libpq.h): cap for short fixed-shape messages.
@@ -323,16 +335,22 @@ fn interactive_backend_regress(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
         let ch = c as u8;
         line.push(ch);
         if ch == b'\n' {
-            // psql MainLoop (`mainloop.c`): a line that is empty after stripping
-            // its newline (`line[0] == '\0'`) and not inside a quoted literal is
-            // skipped entirely — NOT echoed and NOT added to the query buffer
-            // (the `continue` before the `puts(line)` echo). Mirror that so blank
-            // source lines never appear in the regress output.
             let content_len = line.len() - 1; // bytes before the trailing '\n'
-            if content_len == 0 && !in_statement_literal(&in_buf.data) {
+            let is_blank = content_len == 0 && !in_statement_literal(&in_buf.data);
+            if is_blank {
+                // psql echoes blank source lines (`puts(line)`) once the script
+                // has started producing output, but skips the LEADING blank lines
+                // before the first non-blank line of the whole input. Track that
+                // with a process-wide flag. Blank lines are echoed but NOT added
+                // to the query buffer (they are not part of the statement text,
+                // so the parser's error position stays relative to the statement).
+                if regress_started() {
+                    echo_regress_line(&line);
+                }
                 line.clear();
                 continue;
             }
+            regress_set_started();
             // Echo the completed line verbatim (psql -a) and append to the buf.
             echo_regress_line(&line);
             in_buf.data.extend_from_slice(&line);
