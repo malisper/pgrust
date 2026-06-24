@@ -1423,6 +1423,7 @@ members = [
   "crates/contrib/pg_prewarm",
   "crates/contrib/pg_stat_statements",
   "crates/contrib/test_decoding",
+  "crates/contrib/uuid_ossp",
   "crates/interfaces/libpq/fe",
   "crates/interfaces/libpq/fe_seams",
   "crates/interfaces/libpq/legacy_pqsignal",

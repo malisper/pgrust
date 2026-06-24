@@ -10592,6 +10592,7 @@ dependencies = [
  "utf8_and_win",
  "utility",
  "utils_error",
+ "uuid_ossp",
  "vacuumlazy",
  "vacuumparallel",
  "varbit",
@@ -25666,6 +25667,20 @@ dependencies = [
  "types_dest",
  "types_error",
  "wasm-libc-shim",
+]
+
+[[package]]
+name = "uuid_ossp"
+version = "0.0.0"
+dependencies = [
+ "cryptohash",
+ "datum",
+ "dfmgr_seams",
+ "fmgr",
+ "md5",
+ "pg_strong_random",
+ "types_error",
+ "types_uuid",
 ]
 
 [[package]]

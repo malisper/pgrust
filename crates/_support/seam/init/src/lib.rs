@@ -16,6 +16,7 @@ pub fn init_all() {
     verify_common::init_seams();
     pg_prewarm::init_seams();
     pg_stat_statements::init_seams();
+    uuid_ossp::init_seams();
     shell_archive::init_seams();
     commands_async::init_seams();
     test_regress::init_seams();

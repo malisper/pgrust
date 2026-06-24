@@ -1,0 +1,22 @@
+[package]
+name = "uuid_ossp"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "uuid_ossp"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../_support/types/datum" }
+fmgr = { path = "../../_support/types/fmgr" }
+types_error = { path = "../../_support/types/types_error" }
+types_uuid = { path = "../../_support/types/types_uuid" }
+
+md5 = { path = "../../common/md5" }
+cryptohash = { path = "../../common/cryptohash" }
+pg_strong_random = { path = "../../port/pg_strong_random" }
+
+# Seams (consulted, not owned):
+dfmgr_seams = { path = "../../backend/utils/fmgr/dfmgr_seams" }
