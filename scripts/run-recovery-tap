@@ -36,6 +36,31 @@
 
 set -eu
 
+usage() {
+    cat <<'EOF'
+usage: scripts/run-recovery-tap [t/002_archiving.pl ...]
+
+Runs selected PostgreSQL recovery TAP tests against the pgrust server while
+borrowing PostgreSQL's C client tools.
+
+Environment overrides:
+  PG_SRC          C postgres-18.3 source tree
+                  (default: sibling ../pgrust/postgres-18.3 of the repo parent)
+  PG_INSTALL      full C install dir with bin/ lib/ share/
+                  (default: /tmp/pgrust_pginstall)
+  PGRUST_BIN      pgrust postgres binary (default: target/release/postgres)
+  PG_TEST_TIMEOUT_DEFAULT
+                  poll_query_until timeout seconds (default: 90)
+
+With no test files, runs the archive-recovery group.
+EOF
+    exit 0
+}
+
+case "${1:-}" in
+    --help|-h) usage ;;
+esac
+
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
 # --- locate the pgrust release binary -----------------------------------
