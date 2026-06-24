@@ -23126,6 +23126,7 @@ dependencies = [
  "backend-utils-error-small-seams",
  "seam-core",
  "types-error",
+ "wasm-libc-shim",
 ]
 
 [[package]]
