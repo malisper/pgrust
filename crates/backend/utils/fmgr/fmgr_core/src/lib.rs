@@ -3636,9 +3636,14 @@ fn input_function_call_seam<'mcx>(
 
 /// `ReceiveFunctionCall(flinfo, buf, typioparam, typmod)` seam (fmgr.c): one-shot
 /// lookup by `function_id` + call of the binary receive function on the
-/// `StringInfo` payload `buf`. Returns the bare scalar word.
-fn receive_function_call_seam(
-    mcx: Mcx<'_>,
+/// `StringInfo` payload `buf`. Returns the bare `Datum` C's `ReceiveFunctionCall`
+/// yields: a by-value scalar is its machine word; a by-reference result
+/// (text/numeric/… as a derived range's byref subtype goes through here) is a
+/// pointer into `mcx` to the receive function's flattened on-disk image — the
+/// uniform `Datum = uintptr_t` C returns, mirroring the input lane
+/// ([`fmgr_out_element_word`]). The caller owns `mcx`'s lifetime.
+fn receive_function_call_seam<'mcx>(
+    mcx: Mcx<'mcx>,
     function_id: Oid,
     buf: &[u8],
     typioparam: Oid,
@@ -3653,7 +3658,7 @@ fn receive_function_call_seam(
         typioparam,
         typmod,
     )?;
-    Ok(fmgr_out_word(out))
+    fmgr_out_element_word(mcx, out)
 }
 
 /// `InputFunctionCallSafe(&inputproc, str, typioparam, typmod, escontext,

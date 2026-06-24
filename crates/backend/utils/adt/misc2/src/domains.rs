@@ -116,18 +116,20 @@ pub fn domain_recv<'mcx>(
     // domain_state_setup(domainType, /*binary=*/true, ...).
     let io = typcache_seams::domain_get_base_input_info::call(domain_type, true)?;
 
-    // Invoke the base type's typreceive procedure to convert the data. The seam
-    // yields the bare scalar word; wrap it in the canonical by-value arm.
-    let value = Datum::ByVal(
-        fmgr_seams::receive_function_call::call(
-            mcx,
-            io.typiofunc,
-            buf,
-            io.typioparam,
-            io.typtypmod,
-        )?
-        .as_usize(),
-    );
+    // Invoke the base type's typreceive procedure to convert the data
+    // (C: `value = ReceiveFunctionCall(&my_extra->proc, buf, ...)`, a bare
+    // uniform `Datum`). The canonical seam classifies the result by the base
+    // type's return convention — a by-value scalar lands in `ByVal`, a
+    // by-reference base type (text/numeric/…) lands in `ByRef` over the
+    // receive function's flattened payload — so a domain over a varlena base
+    // type round-trips its referent instead of being mis-tagged by-value.
+    let value = fmgr_seams::oid_receive_function_call::call(
+        mcx,
+        io.typiofunc,
+        Some(buf),
+        io.typioparam,
+        io.typtypmod,
+    )?;
 
     // Do the necessary checks to ensure it's a valid domain value. (binary
     // input always supplies a non-null value, matching the C `buf == NULL`
