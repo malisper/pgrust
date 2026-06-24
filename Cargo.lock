@@ -20936,6 +20936,7 @@ dependencies = [
  "init_small_seams",
  "injection_point_seams",
  "interrupt",
+ "ipc_shmem_seams",
  "libc",
  "lwlock_seams",
  "mcx",

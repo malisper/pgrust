@@ -33,6 +33,7 @@ init_small_seams = { path = "../../utils/init/init_small_seams" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
 dsm_core_seams = { path = "../../storage/ipc/dsm_core_seams" }
+ipc_shmem_seams = { path = "../../storage/ipc/ipc_shmem_seams" }
 fd_seams = { path = "../../storage/file/fd_seams" }
 transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
 procarray_seams = { path = "../../storage/ipc/procarray_seams" }

@@ -28,8 +28,6 @@
 #[cfg(target_family = "wasm")]
 #[allow(unused_imports)]
 use wasm_libc_shim as libc;
-use std::cell::UnsafeCell;
-use std::sync::OnceLock;
 
 use ::utils_error::{ereport, elog};
 use ::types_core::init::BackendType;
@@ -135,6 +133,15 @@ const _SLOT_INVALIDATION_CAUSES_LEN_OK: () =
 /// `ReplicationSlot` (slot.h) — in-memory slot state. `mutex` guards the
 /// spinlock-protected fields; `in_use` is flipped under
 /// `ReplicationSlotControlLock`.
+///
+/// `#[repr(C)]`: this struct lives in the genuine cross-process shared-memory
+/// segment created by [`ReplicationSlotsShmemInit`] (the `ShmemInitStruct`
+/// "ReplicationSlot Ctl" block), exactly as C's `ReplicationSlot` does. A stable
+/// C-compatible layout lets every backend overlay the same bytes. Every field is
+/// shmem-safe: `mutex`/`io_in_progress_lock`/`active_cv` are the real atomic
+/// lock primitives, and `data` is `#[repr(C)]` `ReplicationSlotPersistentData`
+/// (fixed-size `NameData`, no heap pointers / `Vec` / `Mutex`).
+#[repr(C)]
 pub struct ReplicationSlot {
     /// `slock_t mutex` — per-slot spinlock.
     pub mutex: Spinlock,
@@ -167,49 +174,27 @@ pub struct ReplicationSlot {
     pub last_saved_restart_lsn: XLogRecPtr,
 }
 
-impl ReplicationSlot {
-    fn new_zeroed() -> Self {
-        ReplicationSlot {
-            mutex: Spinlock::new(),
-            in_use: false,
-            active_pid: 0,
-            just_dirtied: false,
-            dirty: false,
-            effective_xmin: 0,
-            effective_catalog_xmin: 0,
-            data: ReplicationSlotPersistentData::default(),
-            io_in_progress_lock: ::types_storage::LWLock::default(),
-            active_cv: ConditionVariable::new(),
-            candidate_catalog_xmin: 0,
-            candidate_xmin_lsn: 0,
-            candidate_restart_valid: 0,
-            candidate_restart_lsn: 0,
-            last_saved_confirmed_flush: 0,
-            inactive_since: 0,
-            last_saved_restart_lsn: 0,
-        }
-    }
+
+thread_local! {
+    /// `ReplicationSlotCtl` (slot.c) — the per-process attach address of the ONE
+    /// genuine cross-process shared-memory segment that holds the
+    /// `replication_slots[max_replication_slots]` array. C declares
+    /// `ReplicationSlotCtlData *ReplicationSlotCtl;` and allocates the block
+    /// (with `offsetof(.., replication_slots) == 0`, so the block IS the array)
+    /// via `ShmemInitStruct("ReplicationSlot Ctl", ...)` in
+    /// `ReplicationSlotsShmemInit`.
+    ///
+    /// A plain `OnceLock<Box<[..]>>` would be COW-private per forked backend — a
+    /// slot created in one backend would be invisible to another (the headline
+    /// bug: `READ_REPLICATION_SLOT` empty, `pg_logical_slot_get_changes` "does
+    /// not exist"). Storing the real `ShmemInitStruct` attach address fixes
+    /// that: every backend overlays the same `repr(C)` `[ReplicationSlot]`
+    /// bytes, with access disciplined by the named
+    /// `ReplicationSlot{Allocation,Control}Lock` LWLocks and the per-slot
+    /// `mutex` spinlock, exactly as in C.
+    static SLOT_CTL_ADDR: std::cell::Cell<*mut u8> =
+        const { std::cell::Cell::new(core::ptr::null_mut()) };
 }
-
-/// One shared slot cell: the slot lives behind interior mutability, exactly as
-/// C keeps it in shared memory. Access is disciplined by the named LWLocks and
-/// the slot's own `mutex` spinlock, never by Rust's borrow checker.
-struct SlotCell {
-    inner: UnsafeCell<ReplicationSlot>,
-}
-
-// SAFETY: the slot array is genuinely cross-backend shared memory; in this
-// thread-per-backend model concurrent access is disciplined by the named
-// LWLocks and the per-slot spinlock exactly as in C, not by Rust aliasing.
-unsafe impl Sync for SlotCell {}
-
-/// `ReplicationSlotCtlData` — the shared control area (just the slot array).
-struct ReplicationSlotCtlData {
-    replication_slots: Box<[SlotCell]>,
-}
-
-/// `ReplicationSlotCtl` (slot.c) — process-wide (shared-memory) control area.
-static SLOT_ARRAY: OnceLock<ReplicationSlotCtlData> = OnceLock::new();
 
 thread_local! {
     /// `ReplicationSlot *MyReplicationSlot` — this backend's acquired slot,
@@ -262,24 +247,38 @@ fn synchronized_standby_slots_set(v: Option<String>) {
     *SYNCHRONIZED_STANDBY_SLOTS_RAW.lock().unwrap() = v;
 }
 
-fn ctl() -> &'static ReplicationSlotCtlData {
-    SLOT_ARRAY
-        .get()
-        .expect("ReplicationSlotCtl accessed before ReplicationSlotsShmemInit")
+/// The base of the in-shmem `[ReplicationSlot; max_replication_slots]` array
+/// (the `ReplicationSlotCtl->replication_slots` pointer). Panics loudly if used
+/// before `ReplicationSlotsShmemInit` (C would crash dereferencing NULL).
+fn slot_array_base() -> *mut ReplicationSlot {
+    let p = SLOT_CTL_ADDR.with(std::cell::Cell::get);
+    assert!(
+        !p.is_null(),
+        "ReplicationSlotCtl accessed before ReplicationSlotsShmemInit"
+    );
+    p as *mut ReplicationSlot
 }
 
 /// Borrow slot `i` immutably. SAFETY: caller holds the appropriate
-/// lock/spinlock per slot.c's locking model.
+/// lock/spinlock per slot.c's locking model; `i < max_replication_slots`.
 #[allow(clippy::mut_from_ref)]
 unsafe fn slot_ref(i: usize) -> &'static ReplicationSlot {
-    &*ctl().replication_slots[i].inner.get()
+    debug_assert!(i < max_replication_slots() as usize);
+    // SAFETY: `slot_array_base()` is the attach address of the genuine shmem
+    // segment sized `max_replication_slots * sizeof(ReplicationSlot)`; `i` is in
+    // range; the segment outlives every process, so `'static` is sound. Aliasing
+    // is disciplined by the named LWLocks + per-slot spinlock, not the borrow
+    // checker.
+    &*slot_array_base().add(i)
 }
 
 /// Borrow slot `i` mutably. SAFETY: caller holds the appropriate
-/// lock/spinlock per slot.c's locking model.
+/// lock/spinlock per slot.c's locking model; `i < max_replication_slots`.
 #[allow(clippy::mut_from_ref)]
 unsafe fn slot_mut(i: usize) -> &'static mut ReplicationSlot {
-    &mut *ctl().replication_slots[i].inner.get()
+    debug_assert!(i < max_replication_slots() as usize);
+    // SAFETY: see `slot_ref`.
+    &mut *slot_array_base().add(i)
 }
 
 fn my_replication_slot() -> Option<usize> {
@@ -600,26 +599,39 @@ pub fn ReplicationSlotsShmemInit() {
     if max_replication_slots() == 0 {
         return;
     }
-    // ShmemInitStruct + first-time zero-init: build the slot array once. The
-    // per-slot SpinLockInit / LWLockInitialize / ConditionVariableInit happen
-    // in `new_zeroed` (the lock primitives start free).
-    let _ = SLOT_ARRAY.get_or_init(|| {
+
+    // ReplicationSlotCtl = (ReplicationSlotCtlData *)
+    //     ShmemInitStruct("ReplicationSlot Ctl", ReplicationSlotsShmemSize(),
+    //                     &found);
+    let size = ReplicationSlotsShmemSize();
+    let (addr, found) = ipc_shmem_seams::shmem_init_struct::call("ReplicationSlot Ctl", size)
+        .expect("ReplicationSlotsShmemInit: ShmemInitStruct(\"ReplicationSlot Ctl\") failed");
+    SLOT_CTL_ADDR.with(|c| c.set(addr));
+
+    if !found {
+        // First time through, so initialize. C does `MemSet(ctl, 0, size)` then
+        // SpinLockInit / LWLockInitialize / ConditionVariableInit each slot.
+        // SAFETY: `addr` is a freshly-reserved `size`-byte segment.
+        unsafe {
+            core::ptr::write_bytes(addr, 0, size);
+        }
         let n = max_replication_slots() as usize;
-        let mut v = Vec::with_capacity(n);
-        for _ in 0..n {
-            let mut slot = ReplicationSlot::new_zeroed();
+        for i in 0..n {
+            // SAFETY: zeroed bytes are a valid `ReplicationSlot` (the lock
+            // primitives' free/init state is all-zero: Spinlock word 0, LWLock
+            // state 0 / empty waiters, CV mutex 0 / empty wakeup), and the slot
+            // body's scalars are all zero-valued; writing the lock fields in
+            // place mirrors C's per-slot init loop. `i < n` and we are the only
+            // (first) caller, so no concurrent access.
+            let slot = unsafe { slot_mut(i) };
+            ::s_lock::s_init_lock(&slot.mutex);
             lwlock::lwlock_initialize::call(
                 &mut slot.io_in_progress_lock,
                 ::types_storage::LWTRANCHE_REPLICATION_SLOT_IO,
             );
-            v.push(SlotCell {
-                inner: UnsafeCell::new(slot),
-            });
+            cv::condition_variable_init::call(&mut slot.active_cv);
         }
-        ReplicationSlotCtlData {
-            replication_slots: v.into_boxed_slice(),
-        }
-    });
+    }
 }
 
 /// `void ReplicationSlotInitialize(void)` (slot.c:239).
@@ -1410,7 +1422,7 @@ pub fn ReplicationSlotsComputeRequiredXmin(already_locked: bool) -> PgResult<()>
     let mut agg_xmin: TransactionId = 0;
     let mut agg_catalog_xmin: TransactionId = 0;
 
-    debug_assert!(SLOT_ARRAY.get().is_some());
+    debug_assert!(!SLOT_CTL_ADDR.with(std::cell::Cell::get).is_null());
 
     if !already_locked {
         lock_control(LWLockMode::LW_SHARED)?;
@@ -1459,7 +1471,7 @@ pub fn ReplicationSlotsComputeRequiredXmin(already_locked: bool) -> PgResult<()>
 pub fn ReplicationSlotsComputeRequiredLSN() -> PgResult<()> {
     let mut min_required: XLogRecPtr = 0;
 
-    debug_assert!(SLOT_ARRAY.get().is_some());
+    debug_assert!(!SLOT_CTL_ADDR.with(std::cell::Cell::get).is_null());
 
     lock_control(LWLockMode::LW_SHARED)?;
     for i in 0..max_replication_slots() as usize {
