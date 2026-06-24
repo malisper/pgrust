@@ -390,6 +390,10 @@ pub fn ExecMergeMatched<'mcx>(
                         None,
                         projected,
                         Some(&mut prologue_result),
+                        // MERGE skips the BR-trigger EPQ recheck
+                        // (is_merge_update=true); tid advance is handled by the
+                        // ExecMergeMatched recheck loop, not threaded here.
+                        None,
                     )? {
                         if prologue_result == TM_Result::TM_Ok {
                             // "do nothing"

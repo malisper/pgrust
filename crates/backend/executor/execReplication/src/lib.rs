@@ -1018,6 +1018,7 @@ pub fn ExecSimpleRelationUpdate<'mcx>(
             None, // tmresult
             &mut tmfd,
             false, // is_merge_update
+            None,  // tupleid_out (apply path has no EPQ tid-advance)
         )? {
             skip_tuple = true;
         }
@@ -1155,6 +1156,7 @@ pub fn ExecSimpleRelationDelete<'mcx>(
             None, // tmresult
             &mut tmfd,
             false, // is_merge_delete
+            None,  // tupleid_out
         )?;
     }
 

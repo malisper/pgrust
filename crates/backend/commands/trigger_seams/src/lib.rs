@@ -503,6 +503,11 @@ seam_core::seam!(
         tmresult: Option<&mut types_tableam::tableam::TM_Result>,
         tmfd: &mut types_tableam::tableam::TM_FailureData,
         is_merge_delete: bool,
+        // C mutates the caller's `tupleid` in-place: GetTupleForTrigger's
+        // table_tuple_lock(FIND_LAST_VERSION) advances it to the latest row
+        // version. When present, receives that advanced tid so the caller's
+        // subsequent table_tuple_delete + AFTER trigger operate on it.
+        tupleid_out: Option<&mut ::types_tuple::heaptuple::ItemPointerData>,
     ) -> PgResult<bool>
 );
 
@@ -548,6 +553,11 @@ seam_core::seam!(
         tmresult: Option<&mut types_tableam::tableam::TM_Result>,
         tmfd: &mut types_tableam::tableam::TM_FailureData,
         is_merge_update: bool,
+        // C mutates the caller's `tupleid` in-place: GetTupleForTrigger's
+        // table_tuple_lock(FIND_LAST_VERSION) advances it to the latest row
+        // version. When present, receives that advanced tid so the caller's
+        // subsequent table_tuple_update + AFTER trigger operate on it.
+        tupleid_out: Option<&mut ::types_tuple::heaptuple::ItemPointerData>,
     ) -> ::types_error::PgResult<bool>
 );
 

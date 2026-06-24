@@ -62,6 +62,17 @@ pub fn ExecUpdate<'mcx>(
         ));
     }
 
+    // The tid the AFTER-ROW trigger / epilogue must fetch the OLD tuple by.
+    // C threads `tupleid` (an in-place-mutated pointer) through the BEFORE
+    // trigger (GetTupleForTrigger advances it via table_tuple_lock
+    // FIND_LAST_VERSION) and into ExecUpdateEpilogue. The owned model carries
+    // that advanced tid in `epilogue_tid`: the BEFORE-trigger prologue writes it
+    // (when it ran an EPQ recheck), and the plain-table redo loop below refreshes
+    // it from its own EPQ advance. So ExecARUpdateTriggers re-fetches the
+    // EPQ-updated OLD tuple (not the stale pre-recheck one), and the redo loop
+    // targets the already-locked latest version (no redundant second recheck).
+    let mut epilogue_tid: Option<ItemPointerData> = tupleid.copied();
+
     // Prepare for the update.  This includes BEFORE ROW triggers, so we're done
     // if it says we are.
     if !ExecUpdatePrologue(
@@ -74,6 +85,7 @@ pub fn ExecUpdate<'mcx>(
         oldtuple.clone(),
         slot,
         None,
+        epilogue_tid.as_mut(),
     )? {
         return Ok(None);
     }
@@ -118,8 +130,11 @@ pub fn ExecUpdate<'mcx>(
         // If we generate a new candidate tuple after EvalPlanQual testing, we
         // must loop back here to try again.
         let mut lockedtid: ItemPointerData;
-        // tupleid must be valid in this branch (plain table update).
-        let mut cur_tid = *tupleid.expect("ExecUpdate: plain table update needs tupleid");
+        // tupleid must be valid in this branch (plain table update). Start from
+        // the (possibly BR-trigger-advanced) tid so table_tuple_update targets
+        // the already-locked latest version on the concurrent-update path.
+        let mut cur_tid =
+            epilogue_tid.expect("ExecUpdate: plain table update needs tupleid");
 
         let result: TM_Result = loop {
             // redo_act:
@@ -305,7 +320,9 @@ pub fn ExecUpdate<'mcx>(
             }
         };
         let _ = result;
-        let _ = &mut cur_tid;
+        // Carry the (possibly EPQ-advanced) tid out for the AFTER trigger /
+        // epilogue so it re-fetches the current row version's OLD tuple.
+        epilogue_tid = Some(cur_tid);
     }
 
     if can_set_tag {
@@ -319,7 +336,7 @@ pub fn ExecUpdate<'mcx>(
         estate,
         &update_cxt,
         result_rel_info,
-        tupleid,
+        epilogue_tid.as_ref(),
         oldtuple,
         slot,
     )?;
@@ -352,6 +369,7 @@ pub fn ExecUpdatePrologue<'mcx>(
     oldtuple: Option<FormedTuple<'mcx>>,
     slot: SlotId,
     mut result: Option<&mut TM_Result>,
+    tupleid_out: Option<&mut ItemPointerData>,
 ) -> PgResult<bool> {
     if let Some(r) = result.as_deref_mut() {
         *r = TM_Result::TM_Ok;
@@ -398,6 +416,7 @@ pub fn ExecUpdatePrologue<'mcx>(
             result,
             &mut context.tmfd,
             is_merge,
+            tupleid_out,
         );
     }
 

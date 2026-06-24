@@ -4364,6 +4364,7 @@ fn exec_br_delete_triggers_impl<'mcx>(
     tmresult: Option<&mut ::types_tableam::tableam::TM_Result>,
     tmfd: &mut ::types_tableam::tableam::TM_FailureData,
     is_merge_delete: bool,
+    tupleid_out: Option<&mut ItemPointerData>,
 ) -> PgResult<bool> {
     use ::types_catalog::pg_trigger::{
         TRIGGER_TYPE_BEFORE, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_MATCHES, TRIGGER_TYPE_ROW,
@@ -4415,6 +4416,13 @@ fn exec_br_delete_triggers_impl<'mcx>(
                     *out = Some(cand);
                     return Ok(false);
                 }
+            }
+
+            // Report the (clean-lock) tid to the caller for the AFTER trigger /
+            // delete; matches C threading `tupleid` through the locked slot. On
+            // the no-traversal path this is the original tid, unchanged.
+            if let Some(out) = tupleid_out {
+                *out = estate.slot(slot).tts_tid;
             }
 
             // trigtuple = ExecFetchSlotHeapTuple(slot, true, &should_free);
@@ -4701,6 +4709,7 @@ fn exec_br_update_triggers_impl<'mcx>(
     tmresult: Option<&mut ::types_tableam::tableam::TM_Result>,
     tmfd: &mut ::types_tableam::tableam::TM_FailureData,
     is_merge_update: bool,
+    tupleid_out: Option<&mut ItemPointerData>,
 ) -> PgResult<bool> {
     use ::types_catalog::pg_trigger::{
         TRIGGER_TYPE_BEFORE, TRIGGER_TYPE_MATCHES, TRIGGER_TYPE_ROW, TRIGGER_TYPE_UPDATE,
@@ -4748,14 +4757,47 @@ fn exec_br_update_triggers_impl<'mcx>(
                 return Ok(false); // cancel the update action
             }
 
-            // A concurrent READ-COMMITTED update would hand back a raw subplan
-            // tuple in epqslot_candidate that must be re-formed via
-            // ExecGetUpdateNewTuple to replace `newslot`.  GetTupleForTrigger
-            // only sets epqslot_candidate on the `traversed` EPQ leg (a genuine
-            // concurrent update); the common clean-lock path leaves it None, so a
-            // present value is the deferred EPQ-recheck leg.
+            // C's GetTupleForTrigger mutates the caller's `tupleid` in place via
+            // table_tuple_lock(FIND_LAST_VERSION): on the `traversed` EPQ leg it
+            // advances *tupleid to the latest row version (heapam_handler.c:397).
+            // The owned lock leaves the latest version in oldslot.tts_tid; export
+            // it so ExecUpdate's redo loop targets the already-locked latest
+            // version (table_tuple_update returns TM_Ok, not TM_Updated, avoiding
+            // a redundant second EvalPlanQual recheck) and the AFTER trigger
+            // fetches the correct OLD tuple.
             if epqslot_candidate.is_some() {
-                return Err(epq_recheck_unported());
+                if let Some(out) = tupleid_out {
+                    *out = estate.slot(oldslot).tts_tid;
+                }
+            }
+
+            // In READ COMMITTED it's possible the target tuple was changed due to
+            // a concurrent update.  In that case we have a raw subplan output
+            // tuple in epqslot_candidate, and need to form a new insertable tuple
+            // using ExecGetUpdateNewTuple to replace the one we received in
+            // newslot.  (trigger.c:3013-3048)
+            if let Some(epqslot_candidate) = epqslot_candidate {
+                //   epqslot_clean = ExecGetUpdateNewTuple(relinfo,
+                //                       epqslot_candidate, oldslot);
+                // ExecGetUpdateNewTuple is `ExecProjectNewTuple` over the
+                // relation's update projection (ri_projectNew), which is already
+                // valid here: ExecModifyTable built the candidate `newslot` via
+                // ExecGetUpdateNewTuple before calling ExecUpdate.
+                let epqslot_clean = execExpr_seams::exec_project_new_tuple::call(
+                    estate,
+                    relinfo,
+                    epqslot_candidate,
+                    Some(oldslot),
+                )?;
+
+                //   if (unlikely(newslot != epqslot_clean))
+                //       ExecCopySlot(newslot, epqslot_clean);
+                if newslot != epqslot_clean {
+                    execTuples_seams::exec_copy_slot::call(estate, newslot, epqslot_clean)?;
+                }
+
+                //   ExecMaterializeSlot(newslot);
+                execTuples_seams::exec_materialize_slot::call(estate, newslot)?;
             }
 
             // trigtuple = ExecFetchSlotHeapTuple(oldslot, true, &should_free_trig);
@@ -4902,6 +4944,7 @@ fn get_tuple_for_trigger<'mcx>(
     mut tmresultp: Option<&mut ::types_tableam::tableam::TM_Result>,
     tmfdp: &mut ::types_tableam::tableam::TM_FailureData,
 ) -> PgResult<bool> {
+    let _ = &mut *_epqstate;
     use ::types_tableam::tableam::TM_Result;
 
     // The firing path always passes epqslot != NULL; the no-epqslot branch
@@ -4963,11 +5006,32 @@ fn get_tuple_for_trigger<'mcx>(
         }
         TM_Result::TM_Ok => {
             if tmfdp.traversed {
-                // Recheck the tuple using EPQ, if requested.  This is the
-                // concurrent-update re-execution sub-tree — deferred (the
-                // LockRows lane left epq_needed false on TM_Ok).
+                // Recheck the tuple using EPQ, if requested.  Otherwise just
+                // return that it was concurrently updated.
+                //   *epqslot = EvalPlanQual(epqstate, relation,
+                //                           relinfo->ri_RangeTableIndex, oldslot);
+                //   if (TupIsNull(*epqslot)) { *epqslot = NULL; return false; }
                 if do_epq_recheck {
-                    Err(epq_recheck_unported())
+                    let rti = estate.result_rel(relinfo).ri_RangeTableIndex;
+                    let recheck = execMain_seams::eval_plan_qual::call(
+                        estate,
+                        _epqstate,
+                        relinfo,
+                        rti,
+                        oldslot,
+                    )?;
+                    match recheck {
+                        Some(s) => {
+                            *epqslot = Some(s);
+                            Ok(true)
+                        }
+                        None => {
+                            // PlanQual failed for the updated tuple — must not
+                            // process this tuple.
+                            *epqslot = None;
+                            Ok(false)
+                        }
+                    }
                 } else {
                     // Just return that it was concurrently updated.
                     if let Some(r) = tmresultp.as_deref_mut() {
@@ -5009,17 +5073,6 @@ fn get_tuple_for_trigger<'mcx>(
             other
         ))),
     }
-}
-
-#[cold]
-#[inline(never)]
-fn epq_recheck_unported() -> PgError {
-    PgError::error(
-        "GetTupleForTrigger: the target tuple was concurrently updated \
-         (TM_Ok && traversed) — the EvalPlanQual re-execution sub-tree \
-         (EvalPlanQual / ExecGetUpdateNewTuple) is not yet ported; the common \
-         clean-lock (TM_Ok) BEFORE-ROW UPDATE/DELETE path runs end-to-end",
-    )
 }
 /// `ExecIRUpdateTriggers(estate, relinfo, trigtuple, newslot)` (trigger.c:3215) —
 /// fire the INSTEAD OF UPDATE row triggers on a view.  Like the IR-DELETE path

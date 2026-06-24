@@ -57,6 +57,10 @@ pub fn ExecDeletePrologue<'mcx>(
             result,
             &mut context.tmfd,
             mtstate.operation == CmdType::CMD_MERGE,
+            // ExecDelete advances its own tid in the ldelete EPQ loop; the
+            // BEFORE-trigger path passes the concurrent tuple back via
+            // epqreturnslot, so no tid-advance is threaded here.
+            None,
         );
     }
 
