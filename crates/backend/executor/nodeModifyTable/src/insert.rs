@@ -740,13 +740,17 @@ pub fn ExecOnConflictUpdate<'mcx>(
     // *returning = ExecUpdate(context, resultRelInfo, conflictTid, NULL,
     //              existing, resultRelInfo->ri_onConflict->oc_ProjSlot, canSetTag);
     let proj_slot = oc_proj_slot::call(estate, result_rel_info);
+    // ExecUpdate takes `tupleid` as an in/out pointer (C mutates `*tupleid`).
+    // ON CONFLICT targets never set ri_needLockTagTuple, so the caller does not
+    // depend on the post-call advance; thread a local copy.
+    let mut oc_tid = *conflict_tid;
     *returning = ExecUpdate(
         mcx,
         context,
         mtstate,
         estate,
         result_rel_info,
-        Some(conflict_tid),
+        Some(&mut oc_tid),
         None,
         Some(existing),
         proj_slot,

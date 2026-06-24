@@ -290,6 +290,7 @@ pub fn ExecLockRows<'mcx>(
 /// partitioning is performed in-crate.
 pub fn ExecInitLockRows<'mcx>(
     node: &'mcx LockRows<'mcx>,
+    plan_node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<PgBox<'mcx, LockRowsStateData<'mcx>>> {
@@ -303,8 +304,14 @@ pub fn ExecInitLockRows<'mcx>(
     // lrstate->ps.plan = (Plan *) node; lrstate->ps.state = estate;
     // lrstate->ps.ExecProcNode = ExecLockRows;
     //
-    // The plan-node link and the ExecProcNode install are wired by the executor
-    // node factory (it owns the plan-tree references and the dispatch slot).
+    // The ExecProcNode dispatch slot is wired by the executor node factory; the
+    // plan back-link must be set *here* (before ExecInitResultTypeTL below), as
+    // C does at the top of ExecInitLockRows, because ExecInitResultTypeTL reads
+    // `lrstate->ps.plan->targetlist` to build the result tuple type. (A CteScan
+    // parent later reads this via ExecGetResultType(cteplanstate); if the plan
+    // link were wired only after this returns, the result type would be empty —
+    // "attribute number 1 exceeds number of columns 0".)
+    lrstate.ps.plan = Some(plan_node);
     seam::init_plan_state_links::call(&mut lrstate, node)?;
 
     // Miscellaneous initialization. LockRows nodes never call ExecQual or
