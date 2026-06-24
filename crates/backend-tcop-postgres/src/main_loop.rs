@@ -95,6 +95,16 @@ mod pqmsg {
 /// connection (C's `EOF == -1`).
 const EOF: i32 = -1;
 
+std::thread_local! {
+    /// Regress-output mode: the text of the statement currently being read/run,
+    /// captured by `interactive_backend_regress`. `debug_query_string` is left
+    /// NULL in the single-user path (the `'mcx`->`'static` store is skipped, see
+    /// simple_query.rs), so `emit_regress_error` reads the offending statement
+    /// here for the psql `LINE n:`/caret echo.
+    static REGRESS_CUR_QUERY: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// `PQ_SMALL_MESSAGE_LIMIT` (libpq.h): cap for short fixed-shape messages.
 const PQ_SMALL_MESSAGE_LIMIT: i32 = 10000;
 /// `PQ_LARGE_MESSAGE_LIMIT` (libpq.h): `MaxAllocSize - 1`.
@@ -313,6 +323,16 @@ fn interactive_backend_regress(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
         let ch = c as u8;
         line.push(ch);
         if ch == b'\n' {
+            // psql MainLoop (`mainloop.c`): a line that is empty after stripping
+            // its newline (`line[0] == '\0'`) and not inside a quoted literal is
+            // skipped entirely — NOT echoed and NOT added to the query buffer
+            // (the `continue` before the `puts(line)` echo). Mirror that so blank
+            // source lines never appear in the regress output.
+            let content_len = line.len() - 1; // bytes before the trailing '\n'
+            if content_len == 0 && !in_statement_literal(&in_buf.data) {
+                line.clear();
+                continue;
+            }
             // Echo the completed line verbatim (psql -a) and append to the buf.
             echo_regress_line(&line);
             in_buf.data.extend_from_slice(&line);
@@ -336,9 +356,39 @@ fn interactive_backend_regress(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
     if in_buf.len() == 0 {
         return Ok(EOF);
     }
+    // Capture the statement text (sans the soon-to-be-added NUL) for the psql
+    // LINE/caret echo in emit_regress_error. The error position the parser
+    // records is 1-based into THIS statement string, so it must match what the
+    // parser saw: the raw accumulated bytes (leading comments included, as the
+    // parser receives them).
+    let stmt = String::from_utf8_lossy(&in_buf.data).into_owned();
+    REGRESS_CUR_QUERY.with(|q| *q.borrow_mut() = Some(stmt));
     // Add '\0' to make it look the same as the message case.
     in_buf.data.push(b'\0');
     Ok(pqmsg::QUERY)
+}
+
+/// Approximate psql's `psql_scan_in_quote`: are we currently inside an open
+/// single-quoted string literal in the accumulated buffer? Used so a blank line
+/// *inside* a multi-line literal is preserved (not skipped like an inter-
+/// statement blank). A simple unescaped single-quote parity over the buffer
+/// covers the regress simple-file set (no dollar-quoting there); refine if a
+/// file with multi-line dollar-quoted bodies needs it.
+fn in_statement_literal(buf: &[u8]) -> bool {
+    let mut in_quote = false;
+    let mut i = 0;
+    while i < buf.len() {
+        if buf[i] == b'\'' {
+            // A doubled '' inside a literal is an escaped quote, not a close.
+            if in_quote && i + 1 < buf.len() && buf[i + 1] == b'\'' {
+                i += 2;
+                continue;
+            }
+            in_quote = !in_quote;
+        }
+        i += 1;
+    }
+    in_quote
 }
 
 /// Echo one raw input line (already including its trailing newline if present)
@@ -362,7 +412,11 @@ fn emit_regress_error(err: &types_error::PgError) {
         hint: err.hint.clone(),
         // cursor_position is 1-based; only emit the LINE/caret when > 0.
         position: err.cursor_position.filter(|&p| p > 0).map(|p| p as usize),
-        query: globals::debug_query_string().map(|s| s.to_string()),
+        // Prefer debug_query_string; in the single-user path it's NULL (store
+        // skipped), so fall back to the regress-captured statement text.
+        query: globals::debug_query_string()
+            .map(|s| s.to_string())
+            .or_else(|| REGRESS_CUR_QUERY.with(|q| q.borrow().clone())),
     };
     interactive_print(&format_error(&pe));
 }
