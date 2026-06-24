@@ -245,8 +245,9 @@ pub fn process_postgres_switches(argv: &[String], ctx: GucContext) -> PgResult<O
                 // pgrust extension: `--regress-output` is a valueless flag that
                 // switches the single-user backend to psql `-a -q`-compatible
                 // output (for byte-diffing against the regress expected/*.out).
-                // Handle it before the value-required check below.
-                if name == "regress-output" {
+                // Handle it before the value-required check below. ParseLongOption
+                // normalizes hyphens to underscores, so match the normalized name.
+                if name == "regress_output" || name == "regress-output" {
                     if secure {
                         globals::set_regress_output(true);
                     }
