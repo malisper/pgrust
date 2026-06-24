@@ -71,6 +71,19 @@ fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
     Datum::from_usize(0)
 }
 
+/// Return a `bytea` for `array_send`: the `array_send` core produces only the
+/// wire payload, but C's `pq_endtypsend` returns a header-ful `bytea`, and the
+/// send seam strips exactly one `VARHDRSZ`. Prepend the 4-byte varlena length
+/// header so the strip recovers the full payload (mirrors `int4send`).
+fn ret_bytea_send(fcinfo: &mut FunctionCallInfoBaseData, payload: Vec<u8>) -> Datum {
+    let total = payload.len() + 4;
+    let mut img = Vec::with_capacity(total);
+    img.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+    img.extend_from_slice(&payload);
+    fcinfo.set_ref_result(RefPayload::Varlena(img));
+    Datum::from_usize(0)
+}
+
 fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
     fcinfo.set_ref_result(RefPayload::Cstring(s));
     Datum::from_usize(0)
@@ -135,7 +148,7 @@ fn fc_array_send(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let array = arg_array_detoast(fcinfo, 0)?;
     let m = scratch_mcx();
     let bytes = crate::io::array_send(m.mcx(), &array)?;
-    Ok(ret_varlena(fcinfo, bytes.as_slice().to_vec()))
+    Ok(ret_bytea_send(fcinfo, bytes.as_slice().to_vec()))
 }
 
 fn builtin(

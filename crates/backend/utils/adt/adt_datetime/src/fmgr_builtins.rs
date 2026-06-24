@@ -129,6 +129,20 @@ fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
     fcinfo.set_ref_result(::fmgr::boundary::RefPayload::Varlena(bytes));
     Datum::from_usize(0)
 }
+/// Return a `bytea` result for a `*_send` function: the `*_send` cores here
+/// produce only the wire payload, but C's `pq_endtypsend` returns a header-ful
+/// `bytea` (`SET_VARSIZE`), and the send seam strips exactly one `VARHDRSZ`
+/// (`SendFunctionCall` -> `VARDATA`/`VARSIZE - VARHDRSZ`). Prepend the 4-byte
+/// varlena length header so that strip recovers the full payload (mirrors
+/// `int4send`'s `pq_begintypsend`/`pq_endtypsend`).
+fn ret_bytea_send(fcinfo: &mut FunctionCallInfoBaseData, payload: Vec<u8>) -> Datum {
+    let total = payload.len() + 4;
+    let mut img = Vec::with_capacity(total);
+    img.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+    img.extend_from_slice(&payload);
+    fcinfo.set_ref_result(::fmgr::boundary::RefPayload::Varlena(img));
+    Datum::from_usize(0)
+}
 /// Set a `text` result: prepend the 4-byte varlena length header to the
 /// header-less payload (`cstring_to_text`'s `SET_VARSIZE` + `memcpy`).
 #[inline]
@@ -262,7 +276,7 @@ fn fc_date_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<
 }
 fn fc_date_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let d = arg_i32(fcinfo, 0);
-    Ok(ret_varlena(fcinfo, crate::binio::date_send(d)))
+    Ok(ret_bytea_send(fcinfo, crate::binio::date_send(d)))
 }
 fn fc_make_date(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::date::make_date(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1), arg_i32(fcinfo, 2)) {
@@ -495,7 +509,7 @@ fn fc_time_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<
     }
 }
 fn fc_time_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    Ok(ret_varlena(fcinfo, crate::binio::time_send(arg_i64(fcinfo, 0))))
+    Ok(ret_bytea_send(fcinfo, crate::binio::time_send(arg_i64(fcinfo, 0))))
 }
 fn fc_make_time(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::time::make_time(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1), arg_f64(fcinfo, 2)) {
@@ -780,7 +794,7 @@ fn fc_timetz_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResul
 }
 fn fc_timetz_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let t = arg_timetz(fcinfo, 0);
-    Ok(ret_varlena(fcinfo, crate::binio::timetz_send(&t)))
+    Ok(ret_bytea_send(fcinfo, crate::binio::timetz_send(&t)))
 }
 fn fc_timetz_scale(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let t = arg_timetz(fcinfo, 0);
@@ -981,7 +995,7 @@ fn fc_timestamp_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgRe
     }
 }
 fn fc_timestamp_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    Ok(ret_varlena(fcinfo, crate::binio::timestamp_send(arg_i64(fcinfo, 0))))
+    Ok(ret_bytea_send(fcinfo, crate::binio::timestamp_send(arg_i64(fcinfo, 0))))
 }
 fn fc_timestamp_scale(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let mut t = arg_i64(fcinfo, 0);
@@ -1062,7 +1076,7 @@ fn fc_timestamptz_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::Pg
     }
 }
 fn fc_timestamptz_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    Ok(ret_varlena(fcinfo, crate::binio::timestamptz_send(arg_i64(fcinfo, 0))))
+    Ok(ret_bytea_send(fcinfo, crate::binio::timestamptz_send(arg_i64(fcinfo, 0))))
 }
 fn fc_timestamptz_scale(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let mut t = arg_i64(fcinfo, 0);
@@ -1095,7 +1109,7 @@ fn fc_interval_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgRes
 }
 fn fc_interval_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let iv = arg_interval(fcinfo, 0);
-    Ok(ret_varlena(fcinfo, crate::binio::interval_send(&iv)))
+    Ok(ret_bytea_send(fcinfo, crate::binio::interval_send(&iv)))
 }
 
 // ---------------------------------------------------------------------------
