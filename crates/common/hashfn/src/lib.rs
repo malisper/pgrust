@@ -248,6 +248,115 @@ pub fn init_seams() {
     hashfn_seams::hash_bytes_extended::set(hash_bytes_extended);
 }
 
+/* ==========================================================================
+ * Fast non-cryptographic hasher for internal, process-local hash tables.
+ *
+ * Rust's `std::collections::HashMap` defaults to `RandomState`, i.e.
+ * SipHash-1-3 — a *cryptographic* hash std chose for HashDoS resistance on
+ * adversarial (e.g. network-supplied) keys. Many of pgrust's hottest hash
+ * tables are purely internal and process-local: the relcache `RelationIdCache`
+ * (Oid keys), the backend-private buffer pin-count map (buf_id keys), the
+ * lock-manager `LockMethodLocalHash` (LOCALLOCKTAG keys). Their keys are never
+ * attacker-controlled and never persisted, so SipHash's collision resistance
+ * buys nothing while costing real CPU on every catalog/buffer/lock access (the
+ * boolean.sql profile shows `DefaultHasher::write` reached through these paths,
+ * `docs/perf/boolean-profile-aset.md`). C PostgreSQL hashes the equivalent
+ * dynahash tables with fast non-crypto hashes (`oid_hash`/`uint32_hash`/
+ * `tag_hash` in `hashfn.c`/dynahash); for the array-backed pin map C does not
+ * hash at all.
+ *
+ * [`FxHasher`] is the FxHash construction rustc itself uses for its internal
+ * small-key maps: a rotate-xor-multiply step by an odd "golden ratio"
+ * constant. One `imul` per word; excellent avalanche for integer and small
+ * struct keys. The hash is internal-only, so any consistent good hash is
+ * correct — insert and lookup route through the same hasher.
+ * ======================================================================== */
+
+/// Odd multiplicative constant from rustc's `FxHasher` (64-bit golden ratio).
+const FX_SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+/// FxHash-style hasher for internal hash tables. Implements every integer
+/// `write_*` so derived `Hash` impls on small struct keys (e.g. `LOCKTAG`,
+/// which hashes field-by-field) take the fast word path, never the per-byte
+/// fallback.
+#[derive(Default, Clone)]
+pub struct FxHasher {
+    hash: u64,
+}
+
+impl FxHasher {
+    #[inline]
+    fn add(&mut self, i: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ i).wrapping_mul(FX_SEED);
+    }
+}
+
+impl core::hash::Hasher for FxHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.add(u64::from(i));
+    }
+    #[inline]
+    fn write_u16(&mut self, i: u16) {
+        self.add(u64::from(i));
+    }
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.add(u64::from(i));
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.add(i);
+    }
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn write_i8(&mut self, i: i8) {
+        self.add(i as u8 as u64);
+    }
+    #[inline]
+    fn write_i16(&mut self, i: i16) {
+        self.add(i as u16 as u64);
+    }
+    #[inline]
+    fn write_i32(&mut self, i: i32) {
+        self.add(i as u32 as u64);
+    }
+    #[inline]
+    fn write_i64(&mut self, i: i64) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        // Word-at-a-time for the tail/byte-slice path (still single-imul/word).
+        let mut chunks = bytes.chunks_exact(8);
+        for c in &mut chunks {
+            self.add(u64::from_le_bytes(c.try_into().unwrap()));
+        }
+        let mut tail = 0u64;
+        for (i, &b) in chunks.remainder().iter().enumerate() {
+            tail |= u64::from(b) << (i * 8);
+        }
+        if !bytes.is_empty() {
+            self.add(tail);
+        }
+    }
+}
+
+/// A `BuildHasher` producing [`FxHasher`]s (no random seed — deterministic).
+pub type FxBuildHasher = core::hash::BuildHasherDefault<FxHasher>;
+
+/// `std::collections::HashMap` flavour using the fast [`FxHasher`] instead of
+/// SipHash. Drop-in for internal, non-persisted tables keyed by integers or
+/// small `#[derive(Hash)]` structs.
+pub type FxHashMap<K, V> = std::collections::HashMap<K, V, FxBuildHasher>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,5 +449,73 @@ mod tests {
         );
         assert_eq!(murmurhash32(0x1234_5678), 0xe37c_d1bc);
         assert_eq!(murmurhash64(0x0123_4567_89ab_cdef), 0x87cb_fbfe_8902_2cea);
+    }
+
+    #[test]
+    fn fxhash_map_insert_lookup_roundtrip() {
+        // The only correctness invariant for an internal, non-persisted table:
+        // insert and lookup route through the same hasher, so every stored key
+        // is found and absent keys are not.
+        let mut m: FxHashMap<u32, u64> = FxHashMap::default();
+        let keys: [u32; 9] = [0, 1, 2, 16384, 16385, 2614, u32::MAX, 1259, 1247];
+        for (i, &k) in keys.iter().enumerate() {
+            m.insert(k, i as u64 * 7 + 1);
+        }
+        for (i, &k) in keys.iter().enumerate() {
+            assert_eq!(m.get(&k).copied(), Some(i as u64 * 7 + 1));
+        }
+        assert_eq!(m.get(&999_999), None);
+        m.insert(16384, 42);
+        assert_eq!(m.get(&16384).copied(), Some(42));
+        assert_eq!(m.len(), keys.len());
+    }
+
+    #[test]
+    fn fxhash_is_deterministic_and_spreads() {
+        use core::hash::BuildHasher;
+        let bh = FxBuildHasher::default();
+        // Deterministic: equal keys hash equal (no random seed) — required so a
+        // lookup lands in the bucket an insert chose.
+        assert_eq!(bh.hash_one(16384u32), bh.hash_one(16384u32));
+        // Distinct neighbours avalanche apart.
+        assert_ne!(bh.hash_one(16384u32), bh.hash_one(16385u32));
+    }
+
+    #[test]
+    fn fxhash_struct_key_uses_word_path() {
+        // A small `#[derive(Hash)]` struct hashes field-by-field via the integer
+        // `write_*` methods (e.g. LOCKTAG); confirm a struct key works as a map
+        // key and distinct structs separate.
+        #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+        struct Tag {
+            a: u32,
+            b: u32,
+            c: u16,
+            d: u8,
+        }
+        let mut m: FxHashMap<Tag, i32> = FxHashMap::default();
+        let t1 = Tag { a: 1, b: 2, c: 3, d: 4 };
+        let t2 = Tag { a: 1, b: 2, c: 3, d: 5 };
+        m.insert(t1, 100);
+        m.insert(t2, 200);
+        assert_eq!(m.get(&t1).copied(), Some(100));
+        assert_eq!(m.get(&t2).copied(), Some(200));
+        assert_eq!(m.len(), 2);
+    }
+
+    #[test]
+    fn fxhash_byte_slice_word_path_matches_byte_by_byte_intent() {
+        use core::hash::{Hash, Hasher};
+        // The `write(&[u8])` word path must be deterministic and length-/order-
+        // sensitive (a good internal hash); equal slices hash equal, different
+        // slices generally differ.
+        fn h(bytes: &[u8]) -> u64 {
+            let mut s = FxHasher::default();
+            bytes.hash(&mut s);
+            s.finish()
+        }
+        assert_eq!(h(b"PostgreSQL"), h(b"PostgreSQL"));
+        assert_ne!(h(b"PostgreSQL"), h(b"PostgreSQM"));
+        assert_ne!(h(b""), h(b"a"));
     }
 }

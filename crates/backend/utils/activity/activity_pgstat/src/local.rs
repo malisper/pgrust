@@ -11,7 +11,9 @@
 //! model (matching C's "only the owning backend touches its `pgStatLocal`").
 
 use core::cell::RefCell;
-use std::collections::HashMap;
+// Fast non-crypto FxHash (vs std's SipHash): this per-backend stats map is hit
+// on every pgstat count; `PgStat_HashKey` is process-local and never persisted.
+use ::hashfn::FxHashMap as HashMap;
 
 use ::types_pgstat::pgstat_internal::PgStat_HashKey;
 
@@ -47,7 +49,7 @@ impl PgStat_SnapshotStats {
     pub fn new() -> Self {
         PgStat_SnapshotStats {
             prepared: false,
-            stats: HashMap::new(),
+            stats: HashMap::default(),
         }
     }
 }

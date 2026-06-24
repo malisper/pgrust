@@ -9,6 +9,9 @@ name = "bufmgr"
 path = "src/lib.rs"
 
 [dependencies]
+# Fast non-crypto FxHash for the backend-private buffer pin-count map (replaces
+# std's SipHash on the hot PinBuffer/UnpinBuffer path).
+hashfn = { path = "../../../../common/hashfn" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_storage = { path = "../../../../_support/types/types_storage" }

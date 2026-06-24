@@ -32,8 +32,14 @@ pub mod entry {
 }
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
+
+/// `HashMap` flavour for the internal OID-keyed relcache stores: identical
+/// semantics to `std`'s `HashMap`, but with the fast non-crypto FxHash instead
+/// of SipHash (see [`hashfn::FxHashMap`] for the rationale — these stores are
+/// hit on every `RelationIdGetRelation` and the boolean.sql profile showed
+/// `DefaultHasher::write` ≈ 1.1% of backend CPU through SipHash).
+pub(crate) use ::hashfn::FxHashMap as OidHashMap;
 
 use ::utils_error::{ereport, emit_error_report_for, PgError, PgResult};
 use ::types_core::primitive::{Oid, ProcNumber};
@@ -99,7 +105,7 @@ pub(crate) struct RelcacheState {
     /// in an `Rc<RefCell<..>>` (the stable allocation the C `Relation` pointer
     /// protects; a clone given out to a holder is C's live shared pointer, and
     /// `Rc::strong_count > 1` means an external holder pins it).
-    pub(crate) id_cache: HashMap<Oid, Rc<RefCell<RelationData>>>,
+    pub(crate) id_cache: OidHashMap<Oid, Rc<RefCell<RelationData>>>,
     /// `in_progress_list` — stack of ongoing `RelationBuildDesc` calls.
     pub(crate) in_progress_list: Vec<InProgressEnt>,
     /// `eoxact_list[]` (fixed `MAX_EOXACT_LIST` bound, not a heap allocation).
@@ -115,25 +121,25 @@ pub(crate) struct RelcacheState {
 
     /// `relation->rd_partkey` cache slots (the relcache-owned partition keys,
     /// keyed by relation OID; C: `rd_partkey` in `rd_partkeycxt`).
-    pub(crate) partkey: HashMap<Oid, OwnedPartitionKey>,
+    pub(crate) partkey: OidHashMap<Oid, OwnedPartitionKey>,
     /// `relation->rd_partcheck` cache slots + the `rd_partcheckvalid` flag
     /// (keyed by relation OID; C: `rd_partcheck` in `rd_partcheckcxt`). An empty
     /// `Vec` with `valid = true` is the C NIL (no qual) case.
-    pub(crate) partcheck: HashMap<Oid, (bool, Vec<nodes::primnodes::Expr<'static>>)>,
+    pub(crate) partcheck: OidHashMap<Oid, (bool, Vec<nodes::primnodes::Expr<'static>>)>,
 }
 
 impl RelcacheState {
     fn new() -> Self {
         Self {
-            id_cache: HashMap::new(),
+            id_cache: OidHashMap::default(),
             in_progress_list: Vec::new(),
             eoxact_list: Vec::new(),
             eoxact_list_overflowed: false,
             relcache_invals_received: 0,
             critical_relcaches_built: false,
             critical_shared_relcaches_built: false,
-            partkey: HashMap::new(),
-            partcheck: HashMap::new(),
+            partkey: OidHashMap::default(),
+            partcheck: OidHashMap::default(),
         }
     }
 }
@@ -882,4 +888,46 @@ where
                 .into_error()),
         },
     })?
+}
+
+#[cfg(test)]
+mod fx_hash_tests {
+    use super::OidHashMap;
+    use ::hashfn::FxBuildHasher;
+    use std::hash::BuildHasher;
+    use ::types_core::primitive::Oid;
+
+    /// The fast non-crypto hasher routes inserts and lookups through the SAME
+    /// hash, so an `OidHashMap` finds every entry it stored (the only
+    /// correctness invariant for an internal, non-persisted table).
+    #[test]
+    fn oid_hashmap_insert_lookup_roundtrip() {
+        let mut m: OidHashMap<Oid, u64> = OidHashMap::default();
+        // Include adversarial-adjacent OID patterns: 0, small, dense, sparse.
+        let keys: [Oid; 9] = [0, 1, 2, 16384, 16385, 2614, 0xFFFF_FFFF, 1259, 1247];
+        for (i, &k) in keys.iter().enumerate() {
+            m.insert(k, i as u64 * 7 + 1);
+        }
+        assert_eq!(m.len(), keys.len());
+        for (i, &k) in keys.iter().enumerate() {
+            assert_eq!(m.get(&k).copied(), Some(i as u64 * 7 + 1), "lookup miss for oid {k}");
+        }
+        assert_eq!(m.get(&999_999), None);
+        // Overwrite keeps a single entry (same bucket mapping on re-hash of key).
+        m.insert(16384, 42);
+        assert_eq!(m.get(&16384).copied(), Some(42));
+        assert_eq!(m.len(), keys.len());
+    }
+
+    /// Two equal `Oid`s hash identically (determinism — no random seed), which
+    /// is what lets lookup land in the insert bucket.
+    #[test]
+    fn fx_hasher_is_deterministic_for_equal_keys() {
+        let bh = FxBuildHasher::default();
+        let oid: Oid = 16384;
+        assert_eq!(bh.hash_one(oid), bh.hash_one(oid));
+        // Distinct OIDs avalanche to distinct hashes (not a hard guarantee, but
+        // these specific neighbours must differ for the table to spread).
+        assert_ne!(bh.hash_one(16384u32), bh.hash_one(16385u32));
+    }
 }

@@ -11,7 +11,10 @@
 use core::any::Any;
 
 use alloc::boxed::Box;
-use std::collections::HashMap;
+// Fast non-crypto FxHash (vs std's SipHash): `entry_ref_hash` is consulted on
+// every `pgstat_get_entry_ref` (per buffer read/hit); `PgStat_HashKey` keys are
+// process-local and never persisted.
+use ::hashfn::{FxBuildHasher, FxHashMap as HashMap};
 
 use ::types_pgstat::pgstat_internal::{
     PgStat_HashKey, PgStat_ShmemControl, PgStat_Snapshot, PgStatShared_Common,
@@ -220,7 +223,10 @@ impl PgStat_PendingState {
     pub fn new() -> Self {
         PgStat_PendingState {
             pending: dlist_head::new(),
-            entry_ref_hash: HashMap::with_capacity(PGSTAT_ENTRY_REF_HASH_SIZE),
+            entry_ref_hash: HashMap::with_capacity_and_hasher(
+                PGSTAT_ENTRY_REF_HASH_SIZE,
+                FxBuildHasher::default(),
+            ),
         }
     }
 }

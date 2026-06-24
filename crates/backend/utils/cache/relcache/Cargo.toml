@@ -10,6 +10,9 @@ path = "src/lib.rs"
 
 [dependencies]
 trace = { path = "../../../../_support/pgrust/trace" }
+# Fast non-crypto FxHash for the internal OID-keyed relcache stores (replaces
+# std's SipHash on the hot RelationIdGetRelation path).
+hashfn = { path = "../../../../common/hashfn" }
 # Inward seam crate this unit owns + installs.
 relcache_seams = { path = "../relcache_seams" }
 # `top_memory_context()` — `CacheMemoryContext` is created as a child of

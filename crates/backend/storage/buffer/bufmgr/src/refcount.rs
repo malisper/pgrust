@@ -16,9 +16,18 @@
 //! value is the entry.
 
 use core::cell::RefCell;
-use std::collections::HashMap;
 
 use ::types_core::primitive::Buffer;
+
+/// `HashMap` keyed by `i32` buf_id using the fast non-crypto FxHash instead of
+/// std's SipHash. This map is hit on *every* buffer pin/unpin/lookup
+/// (`GetPrivateRefCount`/`PinBuffer`/`UnpinBuffer`); its `i32` buf_id keys are
+/// process-local and never persisted, so SipHash buys nothing (the boolean.sql
+/// profile showed `DefaultHasher::write` reached here through
+/// `PinBufferForBlock`). C tracks these pins in a plain array indexed by buf_id
+/// (no hashing); the fast integer FxHash is the faithful map-backed analog.
+/// See [`hashfn::FxHashMap`].
+type BufIdHashMap<K, V> = ::hashfn::FxHashMap<K, V>;
 
 /// `PrivateRefCountEntry` (bufmgr.c) — the per-backend pin record for one
 /// buffer. Crate-local: this repo has no shared `PrivateRefCountEntry` type, and
@@ -34,7 +43,7 @@ pub struct PrivateRefCountEntry {
 /// The backend-local private pin map (keyed by 0-based buf_id).
 #[derive(Default)]
 pub struct PrivateRefCount {
-    counts: RefCell<HashMap<i32, u32>>,
+    counts: RefCell<BufIdHashMap<i32, u32>>,
 }
 
 // The lifecycle methods are the F1b pin/unpin API; they compile now but are

@@ -32,6 +32,9 @@ ipc_shmem_seams = { path = "../../ipc/ipc_shmem_seams" }
 init_small_seams = { path = "../../../utils/init/init_small_seams" }
 dynahash_seams = { path = "../../../utils/hash/dynahash_seams" }
 hashfn_seams = { path = "../../../../common/hashfn_seams" }
+# Fast non-crypto FxHash for the backend-local LockMethodLocalHash (replaces
+# std's SipHash on the hot LockAcquire/LockRelease path).
+hashfn = { path = "../../../../common/hashfn" }
 
 # lock.c owns the max_locks_per_transaction / log_lock_failures GUC storage
 # cells (installs their accessors into the GUC table).

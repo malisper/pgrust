@@ -39,7 +39,6 @@
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicPtr, Ordering};
-use std::collections::HashMap;
 
 use ::types_core::primitive::INVALID_PROC_NUMBER;
 use ::types_core::ProcNumber;
@@ -1277,8 +1276,14 @@ unsafe impl Send for SharedLockTable {}
 thread_local! {
     /// `LockMethodLocalHash` (lock.c backend-private LOCALLOCK hash table),
     /// built by `InitLockManagerAccess`. Keyed by `LOCALLOCKTAG`.
-    pub(crate) static LOCAL: RefCell<HashMap<LOCALLOCKTAG, alloc::boxed::Box<LOCALLOCK>>> =
-        RefCell::new(HashMap::new());
+    // `LockMethodLocalHash` is hit on every LockAcquire/LockRelease; its
+    // `LOCALLOCKTAG` keys are process-local and never persisted, so it uses the
+    // fast non-crypto FxHash rather than std's SipHash (the boolean.sql profile
+    // showed `DefaultHasher::write` reached here via LockAcquireExtended).
+    // `LOCALLOCKTAG` derives `Hash` field-by-field, so FxHash takes the fast
+    // per-word path. See `hashfn::FxHashMap`.
+    pub(crate) static LOCAL: RefCell<::hashfn::FxHashMap<LOCALLOCKTAG, alloc::boxed::Box<LOCALLOCK>>> =
+        RefCell::new(::hashfn::FxHashMap::default());
 
     /// `FastPathStrongRelationLocks` (lock.c shmem struct), built by
     /// `LockManagerShmemInit`.
@@ -1324,7 +1329,7 @@ pub(crate) fn with_shared<R>(f: impl FnOnce(&mut SharedLockTable) -> R) -> R {
 
 /// Run `f` with mutable access to the backend-local LOCALLOCK table.
 pub(crate) fn with_local<R>(
-    f: impl FnOnce(&mut HashMap<LOCALLOCKTAG, alloc::boxed::Box<LOCALLOCK>>) -> R,
+    f: impl FnOnce(&mut ::hashfn::FxHashMap<LOCALLOCKTAG, alloc::boxed::Box<LOCALLOCK>>) -> R,
 ) -> R {
     LOCAL.with(|c| f(&mut c.borrow_mut()))
 }
