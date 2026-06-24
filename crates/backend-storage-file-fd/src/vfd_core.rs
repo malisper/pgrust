@@ -640,6 +640,9 @@ pub(crate) fn ResourceOwnerForgetFile(file: i32) {
 /// `count_usable_fds(int max_to_probe, int *usable_fds, int *already_open)`
 /// (fd.c) — probe how many fds we can actually open. Returns
 /// `(usable_fds, already_open)`.
+// Unused on wasm64-unknown-unknown: `set_max_safe_fds` takes a fixed path there
+// (no kernel fd table to probe via `dup`).
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 pub(crate) fn count_usable_fds(max_to_probe: i32) -> (i32, i32) {
     let mut fd: Vec<i32> = Vec::with_capacity(1024);
     let mut used: i32 = 0;
@@ -713,6 +716,16 @@ pub fn set_max_safe_fds() -> PgResult<()> {
     // We want to set max_safe_fds to MIN(usable_fds, max_files_per_process)
     // less the slop factor for files that are opened without consulting fd.c.
     let mfp = max_files_per_process();
+    // The `count_usable_fds` probe `dup(2)`s the stderr fd until failure to
+    // measure the real kernel fd limit. On wasm64-unknown-unknown there is no
+    // kernel fd table: `dup` is an ENOSYS shim that fails immediately, so the
+    // probe would report 0 usable fds and FATAL out. The host VFS instead hands
+    // out its own integer fds on demand (see the harness `Vfs`), so treat the
+    // configured `max_files_per_process` as fully usable, with nothing already
+    // open. (Mirrors the no-op stance the other wasm OS-coupling shims take.)
+    #[cfg(target_family = "wasm")]
+    let (usable_fds, already_open) = (mfp, 0);
+    #[cfg(not(target_family = "wasm"))]
     let (usable_fds, already_open) = count_usable_fds(mfp);
 
     let mut new_max = usable_fds.min(mfp);
