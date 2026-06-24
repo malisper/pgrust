@@ -25,6 +25,8 @@ extra_encnames_fgram = { path = "../../../common/extra_encnames_fgram" }
 verify_nbtree = { path = "../../../contrib/amcheck/verify_nbtree" }
 verify_common = { path = "../../../contrib/amcheck/verify_common" }
 pg_prewarm = { path = "../../../contrib/pg_prewarm" }
+injection_point = { path = "../../../backend/utils/misc/injection_point" }
+injection_points = { path = "../../../contrib/injection_points" }
 pgcrypto = { path = "../../../contrib/pgcrypto" }
 pg_stat_statements = { path = "../../../contrib/pg_stat_statements" }
 uuid_ossp = { path = "../../../contrib/uuid_ossp" }

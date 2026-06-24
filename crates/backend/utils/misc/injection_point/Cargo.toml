@@ -1,0 +1,37 @@
+[package]
+name = "injection_point"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "injection_point"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam/seam_core" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+condvar = { path = "../../../../_support/types/condvar" }
+
+# Condition-variable wait/wakeup + custom wait events for injection_wait.
+condition_variable = { path = "../../../storage/lmgr/condition_variable" }
+s_lock = { path = "../../../storage/lmgr/s_lock" }
+waitevent = { path = "../../../utils/activity/waitevent" }
+
+# The shmem size/init + INJECTION_POINT(...) entrypoint seams this crate owns.
+injection_point_seams = { path = "../../../storage/ipc/injection_point_seams" }
+
+# ShmemInitStruct / add_size for the shared registry.
+ipc_shmem_seams = { path = "../../../storage/ipc/ipc_shmem_seams" }
+
+# InjectionPointLock (MainLWLockArray offset 51).
+lwlock = { path = "../../../storage/lmgr/lwlock" }
+
+# MyProcNumber for the LWLock acquire.
+init_small_seams = { path = "../../init/init_small_seams" }
+
+# elog(ERROR) surface.
+utils_error = { path = "../../utils_error" }

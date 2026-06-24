@@ -1325,6 +1325,8 @@ members = [
   "crates/backend/utils/misc/clean_seams",
   "crates/backend/utils/misc/conffiles_seams",
   "crates/backend/utils/misc/guc_file",
+  "crates/backend/utils/misc/injection_point",
+  "crates/contrib/injection_points",
   "crates/backend/utils/misc/guc_file_seams",
   "crates/backend/utils/misc/guc_funcs",
   "crates/backend/utils/misc/guc_funcs_seams",
