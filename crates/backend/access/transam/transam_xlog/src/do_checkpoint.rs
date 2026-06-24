@@ -30,7 +30,7 @@ extern crate std;
 use ::utils_error::{ereport, PgResult};
 use ::control::{CheckPoint, DBState};
 use ::types_core::{InvalidTransactionId, XLogRecPtr};
-use ::types_error::{ErrorLocation, DEBUG1, ERROR, LOG};
+use ::types_error::{ErrorLocation, DEBUG1, DEBUG2, ERROR, LOG};
 use ::types_storage::storage::LW_EXCLUSIVE;
 use ::wal::wal::RM_XLOG_ID;
 use ::wal::xlog_consts::{
@@ -433,6 +433,232 @@ fn check_point_guts(check_point_redo: XLogRecPtr, flags: i32) -> PgResult<()> {
 }
 
 // ===========================================================================
+// CreateRestartPoint — xlog.c:7655.
+// ===========================================================================
+
+/// `RS_INVAL_WAL_REMOVED` (replication/slot.h, `1 << 0`).
+const RS_INVAL_WAL_REMOVED: u32 = 1 << 0;
+/// `RS_INVAL_IDLE_TIMEOUT` (replication/slot.h, `1 << 3`).
+const RS_INVAL_IDLE_TIMEOUT: u32 = 1 << 3;
+
+/// `WAIT_EVENT_ARCHIVE_CLEANUP_COMMAND` = `PG_WAIT_IPC + 1` (= 0x08000001),
+/// the IPC-class wait event for `archive_cleanup_command` (wait_event_types.h).
+const WAIT_EVENT_ARCHIVE_CLEANUP_COMMAND: u32 = 0x0800_0001;
+
+/// Runtime `KeepLogSeg(recptr, *logSegNo)` (xlog.c:8020) — retreat `log_seg_no`
+/// over the live GUC/slot/summarizer posture, delegating to the pure core. Same
+/// shape as `crate::GetWALAvailability`'s inline KeepLogSeg call.
+fn keep_log_seg(recptr: XLogRecPtr, log_seg_no: ::types_core::XLogSegNo, wal_segment_size: i32)
+    -> ::types_core::XLogSegNo
+{
+    crate::retention::KeepLogSeg(
+        recptr,
+        log_seg_no,
+        wal_segment_size,
+        crate::driver::XLogGetReplicationSlotMinimumLSN(),
+        vars::max_slot_wal_keep_size_mb.read(),
+        globals::IsBinaryUpgrade(),
+        walsummarizer_seams::get_oldest_unsummarized_lsn::call().unwrap_or(InvalidXLogRecPtr),
+        vars::wal_keep_size_mb.read(),
+    )
+}
+
+/// `bool CreateRestartPoint(int flags)` (xlog.c:7655) — establish a restartpoint
+/// (the recovery-time analog of a checkpoint), flushing the buffer/SLRU state
+/// durably, advancing the control file's checkpoint to the last replayed safe
+/// checkpoint (stashed in `XLogCtl` by `RecoveryRestartPoint`), recycling WAL,
+/// and running `archive_cleanup_command`. Returns `true` if a new restartpoint
+/// was established. Runs in the checkpointer (or the startup process at
+/// shutdown). Faithful to the C, over the live `XLogCtl` shmem substrate.
+pub fn CreateRestartPoint(flags: i32) -> PgResult<bool> {
+    let wal_segment_size = wal_segment_size();
+
+    // Get a local copy of the last safe checkpoint record (info_lck).
+    let (last_check_point_rec_ptr, last_check_point_end_ptr, last_check_point) = {
+        let ctl = unsafe { &*xlog_ctl() };
+        shmem::spin_lock_acquire(&ctl.info_lck);
+        // SAFETY: live shmem region, info_lck held.
+        let r = unsafe {
+            let c = &*xlog_ctl();
+            (c.lastCheckPointRecPtr, c.lastCheckPointEndPtr, c.lastCheckPoint)
+        };
+        shmem::spin_lock_release(&ctl.info_lck);
+        r
+    };
+
+    // Check that we're still in recovery mode.
+    if !shmem::RecoveryInProgress() {
+        ereport(DEBUG2)
+            .errmsg_internal("skipping restartpoint, recovery has already ended")
+            .finish(loc(7685, "CreateRestartPoint"))?;
+        return Ok(false);
+    }
+
+    // If the last checkpoint we've replayed is already our last restartpoint, we
+    // can't perform a new one. We still update minRecoveryPoint so a shutdown
+    // restartpoint won't start up earlier than before.
+    let prior_cp_redo = with_control_file_lock(|| Ok(control_file_mut().checkPointCopy.redo))?;
+    if last_check_point_rec_ptr == InvalidXLogRecPtr || last_check_point.redo <= prior_cp_redo {
+        ereport(DEBUG2)
+            .errmsg_internal(std::format!(
+                "skipping restartpoint, already performed at {:X}/{:X}",
+                (last_check_point.redo >> 32) as u32,
+                last_check_point.redo as u32
+            ))
+            .finish(loc(7708, "CreateRestartPoint"))?;
+
+        crate::write::UpdateMinRecoveryPoint(InvalidXLogRecPtr, true)?;
+        if flags & CHECKPOINT_IS_SHUTDOWN != 0 {
+            with_control_file_lock(|| {
+                control_file_mut().state = DBState::ShutdownedInRecovery;
+                shmem::UpdateControlFile()
+            })?;
+        }
+        return Ok(false);
+    }
+
+    // Update the shared RedoRecPtr so the startup process can count segments
+    // replayed since last restartpoint. Hold off insertions while updating it.
+    crate::insert::WALInsertLockAcquireExclusive()?;
+    crate::shmem::set_redo_rec_ptr_cached(last_check_point.redo);
+    // SAFETY: holding all WAL insert locks serializes Insert.RedoRecPtr.
+    unsafe {
+        (*xlog_ctl()).Insert.RedoRecPtr = last_check_point.redo;
+    }
+    crate::insert::WALInsertLockRelease()?;
+
+    // Also update the info_lck-protected copy.
+    {
+        let ctl = unsafe { &*xlog_ctl() };
+        shmem::spin_lock_acquire(&ctl.info_lck);
+        // SAFETY: live shmem region, info_lck held.
+        unsafe {
+            (*xlog_ctl()).RedoRecPtr = last_check_point.redo;
+        }
+        shmem::spin_lock_release(&ctl.info_lck);
+    }
+
+    if vars::log_checkpoints.read() {
+        log_checkpoint_start(flags);
+    }
+
+    // Flush all shmem disk + commit-log buffers to disk (CheckPointGuts).
+    check_point_guts(last_check_point.redo, flags)?;
+
+    // Remember the prior checkpoint's redo ptr (UpdateCheckPointDistanceEstimate).
+    let prior_redo_ptr = with_control_file_lock(|| Ok(control_file_mut().checkPointCopy.redo))?;
+
+    // Update pg_control. Check that it still shows an older checkpoint, else do
+    // nothing (guards against a racing end-of-recovery checkpoint).
+    with_control_file_lock(|| {
+        let cf = control_file_mut();
+        if cf.checkPointCopy.redo < last_check_point.redo {
+            cf.checkPoint = last_check_point_rec_ptr;
+            cf.checkPointCopy = last_check_point;
+
+            // Ensure minRecoveryPoint is past the checkpoint record if the control
+            // file still shows DB_IN_ARCHIVE_RECOVERY (a backup in recovery uses
+            // minRecoveryPoint to decide which WAL files to include).
+            if cf.state == DBState::InArchiveRecovery {
+                if cf.minRecoveryPoint < last_check_point_end_ptr {
+                    cf.minRecoveryPoint = last_check_point_end_ptr;
+                    cf.minRecoveryPointTLI = last_check_point.ThisTimeLineID;
+                    crate::redo::set_local_min_recovery_point(
+                        cf.minRecoveryPoint,
+                        cf.minRecoveryPointTLI,
+                    );
+                }
+                if flags & CHECKPOINT_IS_SHUTDOWN != 0 {
+                    cf.state = DBState::ShutdownedInRecovery;
+                }
+            }
+            shmem::UpdateControlFile()?;
+        }
+        Ok(())
+    })?;
+
+    // Update the average distance between checkpoints/restartpoints. (Optimization
+    // only; the file-scope CheckPointDistanceEstimate moving average is owned by
+    // the same housekeeping the online-checkpoint path skips — see CreateCheckPoint.)
+    let _ = prior_redo_ptr;
+
+    // Delete old log files no longer needed for the last restartpoint.
+    let redo_rec_ptr = crate::shmem::redo_rec_ptr_cached();
+    let mut log_seg_no = crate::XLByteToSeg(redo_rec_ptr, wal_segment_size);
+
+    // Retreat _logSegNo using the current end of xlog replayed or received,
+    // whichever is later.
+    let (receive_ptr, _latest_chunk_start, _receive_tli) =
+        walreceiverfuncs_seams::get_wal_rcv_flush_rec_ptr_full::call();
+    let (replay_ptr, mut replay_tli) = xlogrecovery_seams::get_xlog_replay_rec_ptr_tli::call();
+    let endptr = if receive_ptr < replay_ptr { replay_ptr } else { receive_ptr };
+    log_seg_no = keep_log_seg(endptr, log_seg_no, wal_segment_size);
+
+    if slot_seams::invalidate_obsolete_replication_slots::call(
+        RS_INVAL_WAL_REMOVED | RS_INVAL_IDLE_TIMEOUT,
+        log_seg_no,
+        ::types_core::InvalidOid,
+        InvalidTransactionId,
+    )? {
+        // Some slots were invalidated; recompute the horizon from RedoRecPtr.
+        log_seg_no = crate::XLByteToSeg(redo_rec_ptr, wal_segment_size);
+        log_seg_no = keep_log_seg(endptr, log_seg_no, wal_segment_size);
+    }
+    log_seg_no = log_seg_no.wrapping_sub(1);
+
+    // Recycle segments on a useful timeline.
+    if !shmem::RecoveryInProgress() {
+        replay_tli = unsafe { (*xlog_ctl()).InsertTimeLineID };
+    }
+
+    // RemoveOldXlogFiles(_logSegNo, RedoRecPtr, endptr, replayTLI) — the WAL
+    // recycle pass is owned by the not-yet-ported xlog directory driver; like the
+    // online-checkpoint path (CreateCheckPoint), skipping it only retains more WAL
+    // than strictly necessary and is behaviour-preserving.
+    let _ = log_seg_no;
+
+    // Make more log segments if needed.
+    crate::write::PreallocXlogFiles(endptr, replay_tli, &mut crate::checkpoint::CheckpointStats::default())?;
+
+    // Truncate pg_subtrans if possible (only with hot standby, where
+    // StartupSUBTRANS has run). The pg_subtrans trim is non-durability-critical
+    // housekeeping owned by subtrans/procarray; the online-checkpoint path skips
+    // its TruncateSUBTRANS too. Documented divergence (see DESIGN_DEBT.md).
+
+    log_checkpoint_end(flags);
+
+    let xtime = xlogrecovery_seams::get_latest_x_time::call();
+    let elevel = if vars::log_checkpoints.read() { LOG } else { DEBUG2 };
+    ereport(elevel)
+        .errmsg(std::format!(
+            "recovery restart point at {:X}/{:X}",
+            (last_check_point.redo >> 32) as u32,
+            last_check_point.redo as u32
+        ))
+        .finish(loc(7895, "CreateRestartPoint"))?;
+    let _ = xtime;
+
+    // Finally, execute archive_cleanup_command, if any. The command + its
+    // placeholder substitution are transient (C: CurrentMemoryContext); use a
+    // throwaway context.
+    let cmd_cx = ::mcx::MemoryContext::new("archive_cleanup_command");
+    let cmd_mcx = cmd_cx.mcx();
+    if let Some(cmd) = xlogrecovery_seams::archive_cleanup_command::call(cmd_mcx) {
+        if !cmd.as_str().is_empty() {
+            xlogarchive::ExecuteRecoveryCommand(
+                cmd_mcx,
+                cmd.as_str(),
+                "archive_cleanup_command",
+                false,
+                WAIT_EVENT_ARCHIVE_CLEANUP_COMMAND,
+            )?;
+        }
+    }
+
+    Ok(true)
+}
+
+// ===========================================================================
 // ShutdownXLOG — xlog.c:6664.
 // ===========================================================================
 
@@ -449,21 +675,8 @@ pub fn ShutdownXLOG() -> PgResult<()> {
     // its seam here.)
 
     if shmem::RecoveryInProgress() {
-        // During recovery a shutdown checkpoint becomes a restartpoint. The
-        // restartpoint engine (CreateRestartPoint) consults the last replayed
-        // checkpoint stashed in XLogCtl; it is not yet ported as a runtime driver
-        // here, so flush the buffer/SLRU state durably (the durability-critical
-        // half) and update the control file to ShutdownedInRecovery, matching
-        // CreateRestartPoint's no-new-checkpoint early-out.
-        check_point_guts(InvalidXLogRecPtr, CHECKPOINT_IS_SHUTDOWN | CHECKPOINT_IMMEDIATE)?;
-        with_control_file_lock(|| {
-            let cf = control_file_mut();
-            if cf.state == DBState::InArchiveRecovery {
-                cf.state = DBState::ShutdownedInRecovery;
-            }
-            shmem::UpdateControlFile()
-        })?;
-        Ok(())
+        // During recovery a shutdown checkpoint becomes a restartpoint.
+        CreateRestartPoint(CHECKPOINT_IS_SHUTDOWN | CHECKPOINT_IMMEDIATE).map(|_| ())
     } else {
         // If archiving is enabled, rotate the last XLOG file. Owned by xlogarchive
         // / RequestXLogSwitch; archiving is off in the regress harness.

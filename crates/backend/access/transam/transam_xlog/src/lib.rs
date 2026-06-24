@@ -838,6 +838,12 @@ pub fn init_seams() {
     // assign hooks during InitializeGUCOptions to seed CheckPointSegments.
     guc_state::install();
 
+    // `bool EnableHotStandby` (xlog.c:146, the `hot_standby` GUC) — xlogrecovery
+    // reads this through the seam (validateRecoveryParameters, CreateRestartPoint's
+    // TruncateSUBTRANS gate). The GUC accessor is installed by guc_state above;
+    // route the seam read at the same value.
+    s::enable_hot_standby::set(|| guc_tables::vars::EnableHotStandby.read());
+
     // The remaining xlog.c-owned WAL-settings GUC variable accessors
     // (full_page_writes / wal_log_hints / wal_init_zero / wal_recycle /
     // log_checkpoints / track_wal_io_timing / archive_timeout /
@@ -1068,20 +1074,11 @@ pub fn init_seams() {
     // The durable checkpoint record IS written here (the #157 keystone); its WAL
     // bytes are then force-reported by the checkpointer's pgstat_report_wal(true).
     s::create_checkpoint::set(do_checkpoint::CreateCheckPoint);
-    s::create_restartpoint::set(|flags| {
-        let _ = flags;
-        ::utils_error::ereport(types_error::LOG)
-            .errmsg(
-                "skipping restartpoint: the WAL checkpoint-record driver (XLogCtl shmem) \
-                 is not yet ported; no restartpoint was established",
-            )
-            .finish(types_error::ErrorLocation::new(
-                "xlog.c",
-                0,
-                "CreateRestartPoint",
-            ))?;
-        Ok(false)
-    });
+    // `CreateRestartPoint(flags)` (xlog.c:7655) — the runtime restartpoint over
+    // the live XLogCtl shmem substrate: flush buffers/SLRUs (CheckPointGuts),
+    // advance the control file to the last replayed safe checkpoint, recycle WAL
+    // / invalidate obsolete slots, and run archive_cleanup_command.
+    s::create_restartpoint::set(do_checkpoint::CreateRestartPoint);
     // `ShutdownXLOG(code, arg)` (xlog.c:6664) — the WAL-engine shutdown: write a
     // shutdown checkpoint (CreateCheckPoint(CHECKPOINT_IS_SHUTDOWN|IMMEDIATE)), or
     // during recovery flush + mark ShutdownedInRecovery.

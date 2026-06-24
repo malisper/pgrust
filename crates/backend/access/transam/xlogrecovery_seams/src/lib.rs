@@ -228,6 +228,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `archiveCleanupCommand` (xlogrecovery.c global) — the configured
+    /// `archive_cleanup_command`, or `None`/empty when unset. Returned charged
+    /// to `mcx` (the `pstrdup` analog). Consumed by `CreateRestartPoint`.
+    pub fn archive_cleanup_command<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+    ) -> Option<mcx::PgString<'mcx>>
+);
+
+seam_core::seam!(
     /// `GetOldestRestartPoint(*lastCheckPointRecPtr, *lastCheckPointTLI)`
     /// (xlogrecovery.c) — the redo pointer and timeline of the oldest restart
     /// point still needed. Reads `ControlFile` under a spinlock.

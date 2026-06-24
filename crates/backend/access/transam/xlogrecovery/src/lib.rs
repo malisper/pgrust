@@ -193,6 +193,9 @@ pub fn init_seams() {
     // state; without this the standby/archive-recovery boot panics on the
     // uninstalled seam.
     seams::recovery_restore_command::set(orchestrator::recovery_restore_command);
+    // archiveCleanupCommand (xlogrecovery.c global) — CreateRestartPoint runs it
+    // after a successful restartpoint to clean up no-longer-needed WAL.
+    seams::archive_cleanup_command::set(orchestrator::archive_cleanup_command);
 
     // GUC `conf->variable` accessors (`*conf->variable`) for the recovery /
     // streaming GUC globals whose C file-static storage lives in

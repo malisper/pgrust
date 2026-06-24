@@ -1077,6 +1077,9 @@ pub(crate) fn recovery_restore_command(mcx: Mcx<'_>) -> Option<PgString<'_>> {
     // backing (set by the GUC engine when it parses `restore_command = '...'`),
     // not the recovery-state snapshot field (which is not synced from the GUC).
     let cmd = crate::gucvars::recovery_restore_command()?;
+    if cmd.is_empty() {
+        return None;
+    }
     let mut s = PgString::new_in(mcx);
     // try_push_str only fails on allocation failure; the recovery command is a
     // small GUC string, so unwrap is faithful to the C `pstrdup` (which longjmps
@@ -1085,6 +1088,18 @@ pub(crate) fn recovery_restore_command(mcx: Mcx<'_>) -> Option<PgString<'_>> {
     Some(s)
 }
 
+/// Read for the `archive_cleanup_command` seam — the configured
+/// `archive_cleanup_command` GUC (`archiveCleanupCommand`; xlogrecovery.c:86),
+/// or `None` when unset/empty. Consumed by `CreateRestartPoint`.
+pub(crate) fn archive_cleanup_command(mcx: Mcx<'_>) -> Option<PgString<'_>> {
+    let cmd = crate::gucvars::archive_cleanup_command()?;
+    if cmd.is_empty() {
+        return None;
+    }
+    let mut s = PgString::new_in(mcx);
+    s.try_push_str(&cmd).expect("archive_cleanup_command");
+    Some(s)
+}
 // --- File-system helpers (the C stat/unlink/AllocateFile/pg_fsync/durable_rename
 //     calls), routed through the fd unit's seams. ---
 
