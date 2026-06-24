@@ -246,7 +246,52 @@ fn resolve_options_expanded(
         }
         apply_option(&mut o, k, val);
     }
+    apply_conninfo_defaults(&mut o);
     Ok(o)
+}
+
+/// `conninfo_add_defaults` (fe-connect.c), the subset that matters for an
+/// accepted startup packet: fill in option fallbacks not given explicitly nor
+/// by a service entry. The decisive one is `user`, which the server requires
+/// in the startup packet — C defaults it (in precedence order) to the `PGUSER`
+/// environment variable, then to `pg_fe_getauthname()` (the OS login name via
+/// `getpwuid(geteuid())`). Without this, an apply-worker/walreceiver conninfo
+/// that omits `user=` would send no user name and the server rejects it with
+/// `FATAL: no PostgreSQL user name specified in startup packet`.
+fn apply_conninfo_defaults(o: &mut ResolvedOptions) {
+    if o.user.as_deref().is_none_or(str::is_empty) {
+        // envvar leg: PGUSER (conninfo_add_defaults applies it before the
+        // compiled/special-case fallback).
+        if let Some(env_user) = std::env::var("PGUSER").ok().filter(|s| !s.is_empty()) {
+            o.user = Some(env_user);
+        } else if let Some(name) = fe_getauthname() {
+            // Special "user" handling: pg_fe_getauthname(). C leaves it NULL on
+            // failure (only a problem if the caller truly gave no user); we
+            // mirror that — a lookup failure leaves `user` unset.
+            o.user = Some(name);
+        }
+    }
+}
+
+/// `pg_fe_getauthname(NULL)` (fe-auth.c) → `pg_fe_getusername(geteuid())`:
+/// the effective OS user's login name via `getpwuid(geteuid())->pw_name`.
+/// Returns `None` on any lookup failure (C returns NULL and leaves `user`
+/// unset, which is not itself an error).
+fn fe_getauthname() -> Option<String> {
+    // SAFETY: geteuid never fails; getpwuid returns a pointer into a static
+    // libc buffer (we are single-threaded at connect setup), copied out at
+    // once below before any other libc call can clobber it.
+    let uid = unsafe { libc::geteuid() };
+    let pw = unsafe { libc::getpwuid(uid) };
+    if pw.is_null() {
+        return None;
+    }
+    let name_ptr = unsafe { (*pw).pw_name };
+    if name_ptr.is_null() {
+        return None;
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr(name_ptr) };
+    Some(name.to_string_lossy().into_owned())
 }
 
 fn apply_option(o: &mut ResolvedOptions, k: &str, val: String) {
@@ -393,6 +438,11 @@ fn libpqsrv_connect_params(
     match PgClientConn::connect(transport, &params, o.password.as_deref()) {
         Ok(conn) => {
             let id = store_conn(conn);
+            // Record the conninfo the connection was opened with. Mirror C's
+            // `PQconninfo`, which reports defaults filled in (notably `user`,
+            // resolved to the OS login name when omitted) — so the conninfo
+            // `libpqrcv_get_conninfo` rebuilds carries the resolved user.
+            let (keys, vals) = with_resolved_user(&keys, &vals, o.user.as_deref());
             store_conn_options(id, &keys, &vals);
             id
         }
@@ -401,6 +451,32 @@ fn libpqsrv_connect_params(
             0
         }
     }
+}
+
+/// Return `(keys, vals)` for `store_conn_options` with the resolved `user`
+/// folded in: if the caller supplied a non-empty `user` key its value is
+/// overwritten with the resolved one (identical when explicit); if no `user`
+/// key was present, one is appended. This makes the recorded conninfo match
+/// what `build_startup_packet` actually sent (C's `PQconninfo` defaults-filled
+/// table), so a downstream `libpqrcv_get_conninfo` rebuild keeps the user.
+fn with_resolved_user(
+    keys: &[String],
+    vals: &[Option<String>],
+    resolved_user: Option<&str>,
+) -> (Vec<String>, Vec<Option<String>>) {
+    let mut keys: Vec<String> = keys.to_vec();
+    let mut vals: Vec<Option<String>> = vals.to_vec();
+    let resolved_user = match resolved_user {
+        Some(u) if !u.is_empty() => u.to_string(),
+        _ => return (keys, vals),
+    };
+    if let Some(idx) = keys.iter().position(|k| k == "user") {
+        vals[idx] = Some(resolved_user);
+    } else {
+        keys.push("user".to_string());
+        vals.push(Some(resolved_user));
+    }
+    (keys, vals)
 }
 
 /// Stash a connect-attempt error so `PQerrorMessage(0)` can report it.
@@ -700,4 +776,94 @@ pub fn install() {
     s::pq_conninfo_parse::set(pq_conninfo_parse);
     s::pq_escape_literal::set(pq_escape_literal);
     s::pq_escape_identifier::set(pq_escape_identifier);
+}
+
+#[cfg(test)]
+mod default_user_tests {
+    use super::*;
+    use crate::protocol3::{build_startup_packet3, StartupParams, PG_PROTOCOL_3_0};
+
+    /// The OS login name the way C's `pg_fe_getauthname` would compute it.
+    fn os_login() -> String {
+        let uid = unsafe { libc::geteuid() };
+        let pw = unsafe { libc::getpwuid(uid) };
+        assert!(!pw.is_null(), "test host has no passwd entry for euid");
+        let name = unsafe { std::ffi::CStr::from_ptr((*pw).pw_name) };
+        name.to_string_lossy().into_owned()
+    }
+
+    fn parse(user: Option<&str>) -> ResolvedOptions {
+        let mut keys = vec!["dbname".to_string()];
+        let mut vals = vec![Some("postgres".to_string())];
+        if let Some(u) = user {
+            keys.push("user".to_string());
+            vals.push(Some(u.to_string()));
+        }
+        resolve_options_expanded(&keys, &vals, true).unwrap()
+    }
+
+    fn startup_user(o: &ResolvedOptions) -> Option<String> {
+        let params = StartupParams {
+            pversion: PG_PROTOCOL_3_0,
+            pguser: o.user.as_deref(),
+            db_name: o.dbname.as_deref(),
+            ..Default::default()
+        };
+        let pkt = build_startup_packet3(&params, &[]).unwrap();
+        // The packet is: 4-byte version, then NUL-terminated key/value pairs.
+        let body = &pkt[4..];
+        let mut it = body.split(|&b| b == 0).filter(|s| !s.is_empty());
+        while let (Some(k), Some(v)) = (it.next(), it.next()) {
+            if k == b"user" {
+                return Some(String::from_utf8_lossy(v).into_owned());
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn omitted_user_defaults_to_os_login_and_reaches_startup_packet() {
+        // No PGUSER in the env for this assertion.
+        let saved = std::env::var("PGUSER").ok();
+        unsafe { std::env::remove_var("PGUSER") };
+
+        let o = parse(None);
+        assert_eq!(o.user.as_deref(), Some(os_login().as_str()));
+        // The decisive bug: the startup packet now carries a user name.
+        assert_eq!(startup_user(&o).as_deref(), Some(os_login().as_str()));
+
+        if let Some(v) = saved {
+            unsafe { std::env::set_var("PGUSER", v) };
+        }
+    }
+
+    #[test]
+    fn explicit_user_wins() {
+        let o = parse(Some("alice"));
+        assert_eq!(o.user.as_deref(), Some("alice"));
+        assert_eq!(startup_user(&o).as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn pguser_env_used_when_user_omitted() {
+        let saved = std::env::var("PGUSER").ok();
+        unsafe { std::env::set_var("PGUSER", "bob_from_env") };
+
+        let o = parse(None);
+        assert_eq!(o.user.as_deref(), Some("bob_from_env"));
+        assert_eq!(startup_user(&o).as_deref(), Some("bob_from_env"));
+
+        match saved {
+            Some(v) => unsafe { std::env::set_var("PGUSER", v) },
+            None => unsafe { std::env::remove_var("PGUSER") },
+        }
+    }
+
+    #[test]
+    fn with_resolved_user_appends_when_absent() {
+        let (keys, vals) =
+            with_resolved_user(&["dbname".to_string()], &[Some("db".to_string())], Some("zoe"));
+        let idx = keys.iter().position(|k| k == "user").unwrap();
+        assert_eq!(vals[idx].as_deref(), Some("zoe"));
+    }
 }
