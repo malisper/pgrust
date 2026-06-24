@@ -66,4 +66,13 @@ pub fn init_seams() {
         }
     });
     ipci_seams::calculate_shmem_size::set(ipci_core::calculate_shmem_size);
+    // Re-register the ReleaseSemaphores on_shmem_exit callback after a crash
+    // reinit's shmem_exit(1) consumed it. This tree reuses the existing
+    // semaphore batch and skips the C CreateSharedMemoryAndSemaphores re-create
+    // that would otherwise re-register the callback, so the postmaster reinit
+    // path drives this seam instead to keep the persistent sets reclaimable at
+    // the genuine final exit. Routes to the pg_sema owner.
+    ipci_seams::reregister_release_semaphores::set(
+        pg_sema_seams::pg_reregister_release_semaphores::call,
+    );
 }

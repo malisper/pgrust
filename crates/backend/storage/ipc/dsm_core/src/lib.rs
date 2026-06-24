@@ -72,6 +72,11 @@ pub fn init_seams() {
     ipc_seams::proc_exit::set(|code| {
         ipc::proc_exit(code, init_small_seams::my_proc_pid::call())
     });
+    // `proc_exit_inprogress` reader — the authoritative flag lives in
+    // utils_error::config (set by proc_exit_prepare before shmem_exit). An
+    // on_shmem_exit callback (e.g. ReleaseSemaphores) uses it to tell the
+    // postmaster's genuine final exit from a crash-reinit shmem_exit(1) cycle.
+    dsm_core_seams::proc_exit_inprogress::set(::utils_error::config::proc_exit_inprogress);
     dsm_core_seams::on_proc_exit::set(ipc::on_proc_exit);
     dsm_core_seams::on_shmem_exit::set(ipc::on_shmem_exit);
     dsm_core_seams::before_shmem_exit::set(ipc::before_shmem_exit);

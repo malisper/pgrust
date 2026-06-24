@@ -84,9 +84,14 @@ mod wasm_stub {
         true
     }
 
+    pub fn pg_reregister_release_semaphores() -> PgResult<()> {
+        Ok(())
+    }
+
     pub fn init_seams() {
         pg_sema_seams::pg_semaphore_shmem_size::set(PGSemaphoreShmemSize);
         pg_sema_seams::pg_reserve_semaphores::set(PGReserveSemaphores);
+        pg_sema_seams::pg_reregister_release_semaphores::set(pg_reregister_release_semaphores);
         pg_sema_seams::pg_semaphore_reset::set(PGSemaphoreReset);
         pg_sema_seams::pg_semaphore_lock::set(PGSemaphoreLock);
         pg_sema_seams::pg_semaphore_unlock::set(PGSemaphoreUnlock);
@@ -417,60 +422,88 @@ pub fn PGReserveSemaphores(max_semas: i32) -> PgResult<()> {
     drop(state);
 
     // on_shmem_exit(ReleaseSemaphores, 0).
+    register_release_semaphores()?;
+
+    Ok(())
+}
+
+/// Register the `ReleaseSemaphores` `on_shmem_exit` callback (the tail of
+/// `PGReserveSemaphores`). Factored out so the postmaster's crash-reinit path
+/// can re-register it: a reinit runs `shmem_exit(1)`, which *consumes* the whole
+/// `on_shmem_exit` list (the callbacks are popped and the index reset). In C the
+/// reinit then re-runs `CreateSharedMemoryAndSemaphores` → `PGReserveSemaphores`,
+/// which re-registers this callback; this tree reuses the existing semaphore
+/// batch and deliberately skips that re-create, so without re-registering here
+/// the callback would be gone and the persistent sets would leak at the
+/// postmaster's eventual final `proc_exit` (the same SEMMNI-exhaustion leak this
+/// callback exists to prevent, just one crash-reinit later).
+pub fn register_release_semaphores() -> PgResult<()> {
     dsm_core_seams::on_shmem_exit::call(
         release_semaphores,
         types_tuple::Datum::from_i32(0),
-    )?;
-
-    Ok(())
+    )
 }
 
 /// `ReleaseSemaphores(status, arg)` — release semaphores at shutdown or shmem
 /// reinitialization (an `on_shmem_exit` callback).
 ///
-/// DIVERGENCE FROM C, tied to this tree's shared-memory model (mirrors the same
-/// reasoning as sysv_shmem.c's `anonymous_shmem_detach`): in C, crash reinit
-/// runs `shmem_exit(1)` — which fires this callback and `semctl(IPC_RMID)`s every
-/// SysV semaphore set — and then immediately re-runs
-/// `CreateSharedMemoryAndSemaphores()` → `PGReserveSemaphores()`, which creates a
-/// fresh batch of sets. This tree reuses a single segment / semaphore batch for
-/// the cluster's lifetime: `PGReserveSemaphores` eagerly stashes the
-/// `PGSemaphoreData` mirror in process-static state that the re-forked children
-/// inherit, and crash reinit deliberately skips the re-create. If we killed the
-/// sets here in the postmaster, the very next re-forked auxiliary process'
-/// `PGSemaphoreReset` (`semctl(..., SETVAL, 0)`) would hit a removed set and fail
-/// `EINVAL`, aborting startup. So in the postmaster process we keep the sets:
-/// they must outlive every reinit, and at genuine postmaster exit the kernel
-/// reclaims the SysV sets on the postmaster's death anyway. Forked children
-/// inherit a *populated* `my_sema_sets` via copy-on-write (`PGReserveSemaphores`
-/// runs once in the postmaster, before the first fork), so a child running this
-/// callback on its own exit would `IPC_RMID` the still-shared sets and break the
-/// surviving postmaster — therefore no process under the postmaster removes the
-/// sets either. Only a true standalone backend reclaims the sets it created.
+/// Faithful to C, the postmaster MUST `semctl(IPC_RMID)` every SysV semaphore
+/// set at its genuine final exit: unlike SysV shared-memory segments (where
+/// `IPC_RMID` while still attached only marks the segment for delayed delete),
+/// SysV semaphore sets are NOT auto-reclaimed by the kernel on process death —
+/// they persist until an explicit `IPC_RMID` or a reboot. Skipping the removal
+/// leaks ~`MaxBackends/SEMAS_PER_SET` sets on every clean shutdown/restart,
+/// eventually exhausting `SEMMNI` ("too many clients" / cannot start).
+///
+/// DIVERGENCE FROM C, tied to this tree's shared-memory model: in C, crash
+/// reinit runs `shmem_exit(1)` — firing this callback and removing every set —
+/// and then immediately re-runs `CreateSharedMemoryAndSemaphores()` →
+/// `PGReserveSemaphores()`, which creates a *fresh* batch of sets. This tree
+/// instead REUSES a single semaphore batch for the cluster's lifetime:
+/// `PGReserveSemaphores` runs exactly once (in the postmaster, before the first
+/// fork) and eagerly stashes the `PGSemaphoreData` mirror in process-static
+/// state that the re-forked children inherit, and `PostmasterStateMachine`'s
+/// crash-reinit path deliberately skips the re-create
+/// (`if !pm().shmem_created`). So this callback must remove the sets ONLY at the
+/// postmaster's genuine final exit, never across a crash reinit (which still
+/// runs `shmem_exit(1)` in the postmaster to drop callbacks/LWLocks) — otherwise
+/// the very next re-forked auxiliary process' `PGSemaphoreReset`
+/// (`semctl(.., SETVAL, 0)`) would hit a removed set and fault `EINVAL`,
+/// aborting crash recovery.
+///
+/// Three cases are distinguished:
+/// - **Standalone backend** (`--single`, `is_postmaster_environment() == false`):
+///   it created its own sets and removes them here on exit (unchanged from C).
+/// - **Forked child** (`is_under_postmaster()`): it inherited a *populated*
+///   `my_sema_sets` via fork's copy-on-write, but the sets are shared OS objects
+///   owned by the postmaster for the whole cluster. A child running this
+///   `IPC_RMID` loop on its own exit would destroy the still-shared sets out from
+///   under the surviving postmaster, so a child NEVER removes them.
+/// - **Postmaster process** (`is_postmaster_environment() && !is_under_postmaster()`):
+///   removes the sets only when `proc_exit_inprogress` — i.e. at the genuine
+///   `proc_exit` final-shutdown cleanup, not the crash-reinit `shmem_exit(1)`
+///   cycle (which does not set `proc_exit_inprogress`). This is exactly when C's
+///   postmaster lets the sets go (C re-creates after reinit; we keep-and-reuse,
+///   so we must withhold the removal until the very end).
+///
+/// A bare `SIGKILL`/`_exit()` of the whole postmaster still leaks the sets, as
+/// it does in C — the kernel cannot help with SysV semaphores. The fix targets
+/// the clean-exit path, which is where the leak was occurring.
 fn release_semaphores(_status: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
-    // The postmaster owns the persistent semaphore sets that every re-forked
-    // child inherits across crash reinit; they must never be removed while the
-    // postmaster lives (see the divergence note above).
-    //
-    // In this tree `PGReserveSemaphores` runs exactly once, in the postmaster,
-    // before the first fork — so every child inherits a *non-empty*
-    // `my_sema_sets` mirror via fork's copy-on-write (the old "children find
-    // num_sema_sets == 0, so the kill loop is a no-op" assumption is false).
-    // The sets are real, shared OS objects keyed for the whole cluster; if any
-    // child ran this `IPC_RMID` loop on its own `on_shmem_exit` — including the
-    // children the postmaster SIGQUITs during crash reinit — it would destroy
-    // the sets out from under the surviving postmaster, and the very next
-    // re-forked auxiliary process' `PGSemaphoreReset` (`semctl(.., SETVAL, 0)`)
-    // would fault `EINVAL` and abort crash recovery.
-    //
-    // So no process in a postmaster environment (the postmaster itself OR any
-    // of its forked children) may remove the sets: they must outlive every
-    // reinit, and the kernel reclaims the SysV sets when the postmaster finally
-    // dies. Only a genuine standalone backend (`--single`,
-    // `is_postmaster_environment() == false`) actually created its own sets and
-    // must reclaim them here on exit.
     if init_small_seams::is_postmaster_environment::call() {
-        return Ok(());
+        // A forked child must never touch the postmaster's shared sets (see the
+        // divergence note above): it inherited a populated `my_sema_sets` via
+        // copy-on-write, but the sets are cluster-lifetime OS objects.
+        if init_small_seams::is_under_postmaster::call() {
+            return Ok(());
+        }
+        // The postmaster itself: keep the sets across crash reinit
+        // (`shmem_exit(1)` with `proc_exit_inprogress == false`); remove them
+        // only at the genuine final `proc_exit` shutdown. Without this, the
+        // sets leaked on every clean shutdown/restart until SEMMNI exhaustion.
+        if !dsm_core_seams::proc_exit_inprogress::call() {
+            return Ok(());
+        }
     }
 
     let mut state = SEMA_STATE.lock().unwrap();
@@ -636,6 +669,7 @@ fn stat(path: &str) -> Result<libc::stat, libc::c_int> {
 pub fn init_seams() {
     pg_sema_seams::pg_semaphore_shmem_size::set(PGSemaphoreShmemSize);
     pg_sema_seams::pg_reserve_semaphores::set(PGReserveSemaphores);
+    pg_sema_seams::pg_reregister_release_semaphores::set(register_release_semaphores);
     pg_sema_seams::pg_semaphore_reset::set(PGSemaphoreReset);
     pg_sema_seams::pg_semaphore_lock::set(PGSemaphoreLock);
     pg_sema_seams::pg_semaphore_unlock::set(PGSemaphoreUnlock);

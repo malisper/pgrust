@@ -20,6 +20,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Re-register the `ReleaseSemaphores` `on_shmem_exit` callback (the tail of
+    /// `PGReserveSemaphores`) without re-creating any semaphores. The postmaster
+    /// crash-reinit path calls this after `shmem_exit(1)`, which consumes the
+    /// whole `on_shmem_exit` list: this tree reuses the existing semaphore batch
+    /// and skips the C `CreateSharedMemoryAndSemaphores` re-create that would
+    /// otherwise re-register the callback, so without re-registering here the
+    /// persistent sets would leak at the postmaster's eventual final exit (the
+    /// SEMMNI-exhaustion leak, one crash-reinit later). `Err` carries the
+    /// `ereport(FATAL)` if the on-exit list is full.
+    pub fn pg_reregister_release_semaphores() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `PGSemaphoreReset(GetPGProcByNumber(procno)->sem)` (pg_sema) — reset the
     /// named PGPROC's wait semaphore to zero. Called from `InitProcess` /
     /// `InitAuxiliaryProcess` to ensure the slot's semaphore starts at zero.

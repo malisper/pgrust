@@ -15,6 +15,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Re-register the `ReleaseSemaphores` `on_shmem_exit` callback after the
+    /// postmaster's crash-reinit `shmem_exit(1)` consumed the on-exit list.
+    ///
+    /// In C, crash reinit re-runs `CreateSharedMemoryAndSemaphores` →
+    /// `PGReserveSemaphores`, which re-registers the callback. This tree reuses
+    /// the existing semaphore batch (and main shmem segment) for the cluster's
+    /// lifetime and deliberately skips that re-create (see
+    /// `PostmasterStateMachine`'s `if !pm().shmem_created` guard), so the
+    /// `on_shmem_exit` registration that the reinit `shmem_exit(1)` just consumed
+    /// must be re-established here. Otherwise the persistent SysV semaphore sets
+    /// would leak at the postmaster's eventual genuine final exit (`SEMMNI`
+    /// exhaustion), one crash-reinit later. Delegates to the pg_sema seam.
+    /// `Err` carries the on-exit-list-full `ereport(FATAL)`.
+    pub fn reregister_release_semaphores() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `CalculateShmemSize(int *num_semaphores)` (ipci.c): estimate the total
     /// size of the main shared-memory segment by summing every subsystem's
     /// `*ShmemSize`, plus the add-in request. The C `num_semaphores`

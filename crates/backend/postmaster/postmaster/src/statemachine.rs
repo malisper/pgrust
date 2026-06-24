@@ -295,6 +295,19 @@ pub fn PostmasterStateMachine() {
 
         sp::shmem_exit::call(1);
 
+        /*
+         * shmem_exit(1) just consumed the entire on_shmem_exit callback list,
+         * including ReleaseSemaphores. In C the reinit re-runs
+         * CreateSharedMemoryAndSemaphores -> PGReserveSemaphores, which
+         * re-registers it; this tree reuses the existing semaphore batch and
+         * skips that re-create (the `if !pm().shmem_created` guard below), so we
+         * re-register ReleaseSemaphores here. Otherwise the persistent SysV
+         * semaphore sets would leak at the postmaster's genuine final exit (the
+         * SEMMNI-exhaustion leak), one crash-reinit later.
+         */
+        ipci_seams::reregister_release_semaphores::call()
+            .expect("reregister_release_semaphores");
+
         /* re-read control file into local memory */
         sp::local_process_control_file::call(true);
 

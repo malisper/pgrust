@@ -57,6 +57,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `proc_exit_inprogress` (`storage/ipc/ipc.c`) — true once `proc_exit`
+    /// has begun the genuine process-termination cleanup (it sets the flag
+    /// before calling `shmem_exit`). The standalone crash-reinit
+    /// `shmem_exit(1)` path in `PostmasterStateMachine` does NOT set it. An
+    /// `on_shmem_exit` callback that must distinguish the postmaster's true
+    /// final exit from a crash-reinit cycle (e.g. `ReleaseSemaphores`, which
+    /// must remove the persistent SysV semaphore sets only at final exit, not
+    /// across a reinit that reuses them) reads this flag.
+    pub fn proc_exit_inprogress() -> bool
+);
+
+seam_core::seam!(
     /// `on_proc_exit(function, arg)` (`storage/ipc/ipc.c`) — register a
     /// callback to run inside `proc_exit`. The `Err` is the C
     /// `ereport(FATAL)` past `MAX_ON_EXITS`. Callbacks carry the same
