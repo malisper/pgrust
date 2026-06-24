@@ -1038,6 +1038,9 @@ pub fn init_seams() {
     syscache_seams::lookup_authid_by_name::set(
         projections::lookup_authid_by_name,
     );
+    syscache_seams::fetch_role_password::set(
+        projections::fetch_role_password,
+    );
     syscache_seams::lookup_authmem_by_keys::set(
         projections::lookup_authmem_by_keys,
     );

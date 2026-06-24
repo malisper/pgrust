@@ -1,0 +1,111 @@
+#!/bin/sh
+# Run PostgreSQL's authentication TAP suite (src/test/authentication/t/*.pl)
+# against the pgrust `postgres` binary.
+#
+# This is a direct adaptation of scripts/run-recovery-tap (see that script for
+# the full rationale behind the "fake install" + realpath-escape subtleties).
+# The authentication tests (001_password.pl) create roles WITH PASSWORD and
+# flip pg_hba.conf between trust/password/md5/scram-sha-256, then connect with
+# the C libpq client (psql) over a Unix-domain socket and assert the server
+# accepts/rejects. The SERVER under test is pgrust; the client tools + cluster
+# bootstrap (initdb) run on the C install.
+#
+# Usage:
+#   scripts/run-auth-tap t/001_password.pl
+#   scripts/run-auth-tap                 # runs t/001_password.pl
+#
+# Environment overrides (same as run-recovery-tap):
+#   PG_SRC, PG_INSTALL, PG_TEST_TIMEOUT_DEFAULT, PGRUST_BIN
+
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+PGRUST_BIN="${PGRUST_BIN:-$repo_root/target/release/postgres}"
+if [ ! -x "$PGRUST_BIN" ]; then
+    echo "pgrust postgres not found at $PGRUST_BIN; run: cargo build --release --bin postgres" >&2
+    exit 1
+fi
+
+PG_SRC="${PG_SRC:-$repo_root/../../pgrust/postgres-18.3}"
+if [ ! -d "$PG_SRC/src/test/authentication" ]; then
+    if [ -d "$HOME/workspace/work/pgrust/postgres-18.3/src/test/authentication" ]; then
+        PG_SRC="$HOME/workspace/work/pgrust/postgres-18.3"
+    fi
+fi
+if [ ! -d "$PG_SRC/src/test/authentication" ]; then
+    echo "C postgres source tree not found (set PG_SRC=...); looked at $PG_SRC" >&2
+    exit 1
+fi
+PG_SRC=$(CDPATH= cd -- "$PG_SRC" && pwd)
+
+PG_INSTALL="${PG_INSTALL:-/tmp/pgrust_pginstall}"
+if [ ! -x "$PG_INSTALL/bin/initdb" ] || [ ! -d "$PG_INSTALL/share/postgresql" ]; then
+    echo "full C install not found at PG_INSTALL=$PG_INSTALL (need bin/ + share/)" >&2
+    exit 1
+fi
+
+ipc_run=$(find "$HOME/perl5/lib/perl5" -name Run.pm -path '*IPC*' 2>/dev/null | head -1 || true)
+if [ -n "$ipc_run" ]; then
+    ipc_dir=${ipc_run%/IPC/Run.pm}
+else
+    ipc_dir=""
+fi
+
+# --- assemble the fake install dir (see run-recovery-tap for full detail) ---
+INST=/tmp/pgrust_auth_tap_inst
+rm -rf "$INST"
+mkdir -p "$INST/bin"
+for f in "$PG_INSTALL"/bin/*; do
+    ln -sf "$f" "$INST/bin/$(basename "$f")"
+done
+rm -f "$INST/bin/pg_ctl"
+cp -p "$PG_INSTALL/bin/pg_ctl" "$INST/bin/pg_ctl"
+rm -f "$INST/bin/postgres"
+cp -p "$PGRUST_BIN" "$INST/bin/postgres"
+ln -sf "$PG_INSTALL/share" "$INST/share"
+ln -sf "$PG_INSTALL/lib" "$INST/lib"
+[ -d "$PG_INSTALL/include" ] && ln -sf "$PG_INSTALL/include" "$INST/include"
+
+_pgctl_dir=$(cd -- "$(dirname -- "$(/usr/bin/python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$INST/bin/pg_ctl" 2>/dev/null || echo "$INST/bin/pg_ctl")")" && pwd)
+_resolved_postgres="$_pgctl_dir/postgres"
+if ! strings "$_resolved_postgres" 2>/dev/null | grep -q PGRUST_TRACE; then
+    echo "FATAL: pg_ctl would launch a NON-pgrust postgres at $_resolved_postgres" >&2
+    exit 1
+fi
+echo "harness self-check OK: pg_ctl resolves pgrust server at $_resolved_postgres" >&2
+
+tmpconf=/tmp/pgrust_auth_tap_tempconfig.conf
+cat > "$tmpconf" <<'EOF'
+io_method = sync
+max_stack_depth = 7000kB
+EOF
+
+cd "$PG_SRC/src/test/authentication"
+PERL5LIB="$PG_SRC/src/test/perl"
+[ -n "$ipc_dir" ] && PERL5LIB="$PERL5LIB:$ipc_dir"
+export PERL5LIB
+export PATH="$INST/bin:$PATH"
+export DYLD_LIBRARY_PATH="$PG_INSTALL/lib:${DYLD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$PG_INSTALL/lib:${LD_LIBRARY_PATH:-}"
+export TEMP_CONFIG="$tmpconf"
+export PG_REGRESS="$PG_SRC/src/test/regress/pg_regress"
+export PG_TEST_TIMEOUT_DEFAULT="${PG_TEST_TIMEOUT_DEFAULT:-90}"
+
+export with_icu="${with_icu:-no}"
+export with_ssl="${with_ssl:-openssl_no}"
+export with_gssapi="${with_gssapi:-no}"
+export with_ldap="${with_ldap:-no}"
+export with_pam="${with_pam:-no}"
+export with_readline="${with_readline:-no}"
+
+rundir=/tmp/pgrust_auth_tap_data
+rm -rf "$rundir" tmp_check log
+mkdir -p "$rundir"
+export TESTDATADIR="$rundir"
+
+if [ "$#" -eq 0 ]; then
+    set -- t/001_password.pl
+fi
+
+exec prove -v "$@"

@@ -62,7 +62,7 @@ use ::cache::typcache::PgRangeRow;
 use ::cache::AuthIdRow;
 use types_tuple::tupdesc::PgTypeInfo;
 use ::syscache_seams::CastRow;
-use ::cache::syscache::{ForeignDataWrapperFormRow, ForeignServerFormRow};
+use ::cache::syscache::{ForeignDataWrapperFormRow, ForeignServerFormRow, RolePasswordLookup};
 use ::types_namespace::OperRow;
 use ::types_namespace::{
     CharArrayDatum, FuncProcAttrs, OidArrayDatum, ProcCompileRow, ProcRow, TextArrayDatum,
@@ -3612,6 +3612,56 @@ pub(crate) fn lookup_authid_by_name<'mcx>(
     let row = project_authid(mcx, &tup)?;
     ReleaseSysCache(tup);
     Ok(Some(row))
+}
+
+/// `SearchSysCache1(AUTHNAME, PointerGetDatum(role))` for `get_role_password`
+/// (`libpq/crypt.c`): projects `rolpassword` (`TextDatumGetCString`) and
+/// `rolvaliduntil` (`DatumGetTimestampTz`) into a [`RolePasswordLookup`],
+/// distinguishing no-such-role / no-password / found. The `ReleaseSysCache`
+/// is subsumed by returning the data by value.
+///
+/// This is `get_role_password`'s `SearchSysCache1` + the two
+/// `SysCacheGetAttr(roleTup, Anum_pg_authid_rolpassword/rolvaliduntil)`
+/// extractions (crypt.c:42-77); the `rolvaliduntil` expiry comparison and the
+/// `*logdetail` composition stay caller-side (in `backend-libpq-crypt`).
+pub(crate) fn fetch_role_password(role: &str) -> PgResult<RolePasswordLookup> {
+    let scratch = MemoryContext::new("syscache fetch_role_password projection");
+    let mcx = scratch.mcx();
+    // roleTup = SearchSysCache1(AUTHNAME, PointerGetDatum(role));
+    let tuple = SearchSysCache1(mcx, AUTHNAME, SysCacheKey::Str(role))?;
+    let Some(tup) = tuple else {
+        // if (!HeapTupleIsValid(roleTup)) — no such user.
+        return Ok(RolePasswordLookup::NoSuchRole);
+    };
+
+    // datum = SysCacheGetAttr(AUTHNAME, roleTup, Anum_pg_authid_rolpassword,
+    //                         &isnull);
+    let (pw_val, pw_null) = SysCacheGetAttr(mcx, AUTHNAME, &tup, Anum_pg_authid_rolpassword)?;
+    if pw_null {
+        // if (isnull) — user has no password.
+        ReleaseSysCache(tup);
+        return Ok(RolePasswordLookup::NoPassword);
+    }
+    // shadow_pass = TextDatumGetCString(datum);
+    let shadow_pass = varlena_seams::text_to_cstring_v::call(mcx, &pw_val)?
+        .as_str()
+        .to_string();
+
+    // datum = SysCacheGetAttr(AUTHNAME, roleTup, Anum_pg_authid_rolvaliduntil,
+    //                         &isnull);
+    let (vu_val, vu_null) = SysCacheGetAttr(mcx, AUTHNAME, &tup, Anum_pg_authid_rolvaliduntil)?;
+    let valid_until = if vu_null {
+        None
+    } else {
+        // vuntil = DatumGetTimestampTz(datum);
+        Some(byval(vu_val)?.as_i64())
+    };
+
+    ReleaseSysCache(tup);
+    Ok(RolePasswordLookup::Found {
+        shadow_pass,
+        valid_until,
+    })
 }
 
 fn project_authid<'mcx>(mcx: Mcx<'mcx>, tup: &FormedTuple<'_>) -> PgResult<AuthIdRow<'mcx>> {
