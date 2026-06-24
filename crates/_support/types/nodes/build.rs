@@ -1180,9 +1180,13 @@ fn find_nodetags_h(manifest_dir: &Path) -> PathBuf {
     }
 
     // Relative locations to try, walking up from the crate manifest dir. The
-    // first is the src-idiomatic `build-rust` symlink convention; the rest reach
-    // the sibling `pgrust` checkout (`.../work/pgrust/postgres-18.3/...`).
+    // FIRST is the VENDORED copy committed in this crate (`vendor/nodetags.h`),
+    // which makes the build self-contained — no sibling PostgreSQL source
+    // checkout is required. `PGRUST_NODETAGS_H` (checked above) still overrides
+    // it. The `build-rust` symlink + sibling `pgrust/postgres-18.3` checkout
+    // remain as fallbacks for the src-idiomatic layout.
     const RELS: &[&str] = &[
+        "vendor/nodetags.h",
         "build-rust/src/include/nodes/nodetags.h",
         "pgrust/postgres-18.3/src/backend/nodes/nodetags.h",
         "../pgrust/postgres-18.3/src/backend/nodes/nodetags.h",
