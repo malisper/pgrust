@@ -28,7 +28,7 @@
 // ---------------------------------------------------------------------------
 #[cfg(target_family = "wasm")]
 mod wasm_stub {
-    use types_net::{AddrInfoHint, PgAddrInfo, SockAddr};
+    use ::net::{AddrInfoHint, PgAddrInfo, SockAddr};
 
     /// glibc `EAI_FAIL` numeric value (resolver "non-recoverable failure").
     const EAI_FAIL: i32 = -2;
@@ -77,8 +77,8 @@ mod wasm_stub {
     }
 
     pub fn init_seams() {
-        common_ip_seams::pg_getaddrinfo_all::set(pg_getaddrinfo_all);
-        common_ip_seams::pg_getnameinfo_all::set(pg_getnameinfo_all);
+        ip_seams::pg_getaddrinfo_all::set(pg_getaddrinfo_all);
+        ip_seams::pg_getnameinfo_all::set(pg_getnameinfo_all);
     }
 }
 

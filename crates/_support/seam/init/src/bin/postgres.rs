@@ -22,6 +22,34 @@
 
 use ::main_main::{pg_main, MainOutcome};
 
+// On `wasm64-unknown-unknown` the `getrandom` crate (pulled in transitively via
+// pgcrypto -> pwhash -> rand) has no OS/JS entropy backend, so it requires a
+// caller-registered `custom` backend. `postgres --single` never exercises
+// pgcrypto's randomness on the boot path, so a small in-module xorshift PRNG
+// (seeded from a monotonically advancing counter) is sufficient to satisfy the
+// link without a host entropy import. This is wasm-only; native uses the OS RNG.
+#[cfg(target_family = "wasm")]
+fn wasm_getrandom(buf: &mut [u8]) -> Result<(), getrandom::Error> {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static STATE: AtomicU64 = AtomicU64::new(0x9E37_79B9_7F4A_7C15);
+    let mut x = STATE.fetch_add(0x2545_F491_4F6C_DD1D, Ordering::Relaxed) | 1;
+    for chunk in buf.chunks_mut(8) {
+        // xorshift64*
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        let v = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
+        let bytes = v.to_le_bytes();
+        for (d, s) in chunk.iter_mut().zip(bytes.iter()) {
+            *d = *s;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_family = "wasm")]
+getrandom::register_custom_getrandom!(wasm_getrandom);
+
 fn main() {
     // On wasm64-unknown-unknown std's panic message goes to std stderr, which is
     // a no-op — so a panic (e.g. an `.expect()` on a startup PgError) aborts

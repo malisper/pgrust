@@ -670,3 +670,8 @@ initdb = { path = "../../../backend/main/initdb" }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 wasm-libc-shim = { path = "../../../wasm-libc-shim" }
+# pgcrypto pulls in pwhash -> rand -> getrandom, which has no backend for
+# wasm64-unknown-unknown (no OS, no JS). Enable getrandom's `custom` feature and
+# register a backend (see the postgres bin) so the module links. pgcrypto's
+# randomness is never on the single-user boot path.
+getrandom = { version = "0.2", features = ["custom"] }
