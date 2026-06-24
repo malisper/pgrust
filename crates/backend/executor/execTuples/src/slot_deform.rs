@@ -18,11 +18,13 @@
 //! In this codebase a heap tuple's user-data area is a separate byte slice
 //! (`heaptuple::FormedTuple::data`), not bytes hanging
 //! off the `HeapTupleData` header. After the keystone the heap slot carries the
-//! body-bearing [`FormedTuple`], so the one place this engine needs
-//! `(char *) tup + t_hoff` — [`heap_slot_body`] — returns the slot's owned data
-//! body directly, and the by-reference [`fetchatt`] writes a
-//! `Datum::ByRef` over the verbatim on-disk field bytes into the
-//! by-reference `tts_values` lane. Everything here is complete.
+//! body-bearing [`FormedTuple`], so where this engine needs
+//! `(char *) tup + t_hoff` it borrows the slot's owned data body slice directly
+//! (`slot.tuple.data`), alongside disjoint borrows of the null bitmap
+//! (`tup->t_bits`) and the descriptor's compact attrs — no per-deform copies.
+//! The by-reference [`fetchatt`] writes a `Datum::ByRef` over the verbatim
+//! on-disk field bytes into the by-reference `tts_values` lane. Everything here
+//! is complete.
 
 extern crate alloc;
 use alloc::format;
@@ -311,23 +313,6 @@ pub fn slot_deform_heap_tuple<'mcx>(
         natts = tuple_natts;
     }
 
-    // The null bitmap (tup->t_bits) and the user-data area
-    // ((char *) tup + tup->t_hoff). The body byte carrier is owned by
-    // slot_payload_model and not yet landed (see module docs / heap_slot_body).
-    let bp_owned: alloc::vec::Vec<u8> = tup.t_bits.iter().copied().collect();
-    let data: alloc::vec::Vec<u8> = heap_slot_body(slot);
-
-    // Snapshot descriptor compact attrs (read-only) before borrowing tts arrays.
-    let compact_attrs: alloc::vec::Vec<CompactAttribute> = slot
-        .base
-        .tts_tupleDescriptor
-        .as_ref()
-        .expect("slot_deform_heap_tuple: slot has no tuple descriptor")
-        .compact_attrs
-        .iter()
-        .copied()
-        .collect();
-
     // Check whether the first call for this tuple, and initialize or restore
     // loop state.
     let mut attnum = slot.base.tts_nvalid as i32;
@@ -344,8 +329,30 @@ pub fn slot_deform_heap_tuple<'mcx>(
     }
 
     {
-        let values = slot.base.tts_values.as_mut_slice();
-        let isnull = slot.base.tts_isnull.as_mut_slice();
+        // Borrow the read-only source bytes (null bitmap `tup->t_bits`, user-data
+        // area `(char *) tup + tup->t_hoff`, and the descriptor's compact attrs)
+        // and the mutable tts arrays as DISJOINT fields of `slot` — no per-call
+        // Vec copies. C deforms straight out of the tuple/descriptor in place.
+        let HeapTupleTableSlot { base, tuple, .. } = &mut *slot;
+        let formed = tuple
+            .as_ref()
+            .expect("slot_deform_heap_tuple: slot lost its physical tuple");
+        let bp: &[u8] = formed
+            .tuple
+            .t_data
+            .as_ref()
+            .expect("slot_deform_heap_tuple: tuple has no t_data")
+            .t_bits
+            .as_slice();
+        let data: &[u8] = formed.data.as_slice();
+        let compact_attrs: &[CompactAttribute] = base
+            .tts_tupleDescriptor
+            .as_ref()
+            .expect("slot_deform_heap_tuple: slot has no tuple descriptor")
+            .compact_attrs
+            .as_slice();
+        let values = base.tts_values.as_mut_slice();
+        let isnull = base.tts_isnull.as_mut_slice();
         let mut slowp = false;
 
         // If 'slow' isn't set, try deforming using deforming code that does not
@@ -357,9 +364,9 @@ pub fn slot_deform_heap_tuple<'mcx>(
                     mcx,
                     values,
                     isnull,
-                    &compact_attrs,
-                    &bp_owned,
-                    &data,
+                    compact_attrs,
+                    bp,
+                    data,
                     attnum,
                     natts,
                     false, // slow
@@ -372,9 +379,9 @@ pub fn slot_deform_heap_tuple<'mcx>(
                     mcx,
                     values,
                     isnull,
-                    &compact_attrs,
-                    &bp_owned,
-                    &data,
+                    compact_attrs,
+                    bp,
+                    data,
                     attnum,
                     natts,
                     false, // slow
@@ -393,9 +400,9 @@ pub fn slot_deform_heap_tuple<'mcx>(
                 mcx,
                 values,
                 isnull,
-                &compact_attrs,
-                &bp_owned,
-                &data,
+                compact_attrs,
+                bp,
+                data,
                 attnum,
                 natts,
                 true, // slow
@@ -424,27 +431,6 @@ pub fn slot_deform_heap_tuple<'mcx>(
     }
 
     Ok(())
-}
-
-/// `(char *) tup + tup->t_hoff` — the heap slot's user-data byte area.
-///
-/// In C this is a pointer into the contiguous `HeapTupleHeaderData` chunk just
-/// past the (aligned, null-bitmap-bearing) header. In this codebase the body
-/// bytes travel separately from the `HeapTupleData` header as the heap slot's
-/// owned [`FormedTuple::data`] (`= (char *) tup + t_hoff`), set up when the
-/// tuple was stored. Hand the deform engine that owned body slice directly.
-///
-/// The caller has already established the slot has a physical tuple (it reads
-/// `slot.tuple` for the header/natts just above), so the body carrier is
-/// present too.
-fn heap_slot_body(slot: &HeapTupleTableSlot) -> alloc::vec::Vec<u8> {
-    slot.tuple
-        .as_ref()
-        .expect("heap_slot_body: heap slot has no physical tuple")
-        .data
-        .iter()
-        .copied()
-        .collect()
 }
 
 /// `slot_getmissingattrs(slot, startAttNum, lastAttNum)` (execTuples.c:2056):

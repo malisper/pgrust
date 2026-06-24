@@ -227,6 +227,47 @@ fn copyslot_virtual_to_heap_then_heap_to_minimal() {
 }
 
 #[test]
+fn deform_with_null_middle_column_slow_path() {
+    // A 3-column tuple (int4, text NULL, int4) forces the deform engine onto the
+    // `hasnulls`/`slow` branch: the middle null has no storage, so the trailing
+    // int4's offset can only be found by carefully walking past the null. This
+    // exercises the disjoint-borrow refactor's slow loop end to end.
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let td = tupdesc(mcx, &[byval(4, 4), varlena(), byval(4, 4)]);
+
+    let mut vslot = MakeTupleTableSlot(mcx, mk_desc(mcx, &td), TupleSlotKind::Virtual)
+        .unwrap();
+    {
+        let base = vslot.base_mut();
+        base.tts_values.clear();
+        base.tts_isnull.clear();
+        base.tts_values.push(Datum::from_i32(0x0A0B0C0D));
+        base.tts_values.push(Datum::null());
+        base.tts_values.push(Datum::from_i32(0x11223344));
+        base.tts_isnull.push(false);
+        base.tts_isnull.push(true); // middle column NULL
+        base.tts_isnull.push(false);
+    }
+    ExecStoreVirtualTuple(&mut vslot).unwrap();
+
+    // Form -> store into a heap slot -> deform.
+    let formed = ExecCopySlotHeapTuple(mcx, &mut vslot).unwrap();
+    let mut hslot =
+        MakeTupleTableSlot(mcx, mk_desc(mcx, &td), TupleSlotKind::HeapTuple).unwrap();
+    ExecStoreHeapTuple(formed, &mut hslot, true).unwrap();
+
+    let cols = deform_all(mcx, &mut hslot);
+    assert_eq!(cols.len(), 3);
+    assert_eq!(cols[0].0, Datum::from_i32(0x0A0B0C0D));
+    assert_eq!(cols[0].1, false);
+    assert_eq!(cols[1].1, true, "middle column must deform back as NULL");
+    // The trailing fixed-width column's offset must be found past the null.
+    assert_eq!(cols[2].0, Datum::from_i32(0x11223344));
+    assert_eq!(cols[2].1, false);
+}
+
+#[test]
 fn force_store_heap_tuple_into_virtual_deforms() {
     let ctx = MemoryContext::new("test");
     let mcx = ctx.mcx();
