@@ -215,6 +215,46 @@ pub fn consistent_bool(
     Ok((out.matched, out.recheck))
 }
 
+/// Generic `comparePartial` (`comparePartialFn`): nargs = 4 (`<partial_key>`,
+/// `<key>`, `int2 strategy`, `internal extra_data`) RETURNS `int4`. Unlike the
+/// extract/consistent procs this has a plain fmgr signature (two by-ref key args
+/// + a by-value `int4` return, no `internal` out-parameters), so it crosses the
+/// frame directly: both keys ride the by-ref lane (slots 0/1), the strategy is a
+/// by-value word (slot 2), and the result word is the return.
+pub fn compare_partial(
+    fn_oid: Oid,
+    collation: Oid,
+    query_key: &[u8],
+    idatum: &[u8],
+    strategy: u16,
+) -> PgResult<i32> {
+    let scratch = MemoryContext::new("gin_ext_compare_partial");
+    let mcx = scratch.mcx();
+    let resolved = ::fmgr_core::fmgr_info(mcx, fn_oid)?;
+
+    let mut finfo = CallFmgrInfo::empty();
+    finfo.fn_oid = fn_oid;
+    finfo.fn_nargs = 4;
+    finfo.fn_strict = resolved.finfo.fn_strict;
+
+    let mut fcinfo = FunctionCallInfoBaseData::new(Some(Box::new(finfo)), 4, collation, None, None);
+    fcinfo.args = vec![
+        NullableDatum::null(),
+        NullableDatum::null(),
+        // arg 2: StrategyNumber (uint16) as a by-value word.
+        NullableDatum::value(::datum::Datum::from_usize(strategy as usize)),
+        NullableDatum::null(),
+    ];
+    fcinfo.args[0].isnull = false;
+    fcinfo.args[1].isnull = false;
+    fcinfo.set_ref_arg(0, RefPayload::Varlena(query_key.to_vec()));
+    fcinfo.set_ref_arg(1, RefPayload::Varlena(idatum.to_vec()));
+
+    let result = ::fmgr_core::function_call_invoke(mcx, &resolved.resolution, &mut fcinfo)?;
+    // PG_RETURN_INT32 — the low word of the returned Datum.
+    Ok(result.as_i32())
+}
+
 /// Generic ternary `triConsistent` (`triConsistentFn`): nargs = 7 (`internal
 /// check`, `int2 strategy`, `<query>`, `int4 nkeys`, `internal extra_data`,
 /// `internal queryKeys`, `internal nullFlags`).

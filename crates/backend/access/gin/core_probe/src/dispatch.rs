@@ -889,24 +889,25 @@ fn dispatch_compare_partial<'mcx>(
             let b = vardata_any(idatum.as_ref_bytes());
             Ok(tsginidx::gin_cmp_prefix(a, b))
         }
-        other => Err(unported(other, "comparePartial")),
+        // Generic catalog-driven fallback (extension opclass comparePartial):
+        // pass the FULL by-ref varlena images so the extension body's
+        // `PG_GETARG_*` reads the header as C does.
+        other => crate::extdispatch::compare_partial(
+            other,
+            _collation,
+            query_key.as_ref_bytes(),
+            idatum.as_ref_bytes(),
+            _strategy,
+        ),
     }
 }
 
-/// The loud bottom-out for a GIN opclass support-proc OID this dispatch does not
-/// handle (a tsvector_ops / jsonb_ops support proc whose body is not yet ported,
-/// or a user-defined opclass that would need a `Datum::Internal` fmgr arm).
-fn unported(foid: u32, role: &str) -> PgError {
-    PgError::error(format!(
-        "GIN opclass {role} support function (OID {foid}) has no owned dispatch \
-         (anyarray_ops, tsvector_ops, and jsonb_ops / jsonb_path_ops procedures \
-         are wired through the typed by-OID GIN dispatch; this OID is not one of \
-         them — a user-defined opclass would need a Datum::Internal fmgr arm)"
-    ))
-}
-
-/// Install the four GIN opclass-dispatch seams over the `anyarray_ops`
-/// support-proc OIDs. Called from this crate's `init_seams()`.
+/// Install the GIN opclass-dispatch seams. The built-in opclasses
+/// (`anyarray_ops` / `tsvector_ops` / `jsonb_ops` / `jsonb_path_ops`) are
+/// served by the fast typed by-OID arms above; any other (extension) opclass
+/// support-proc OID falls through to [`crate::extdispatch`], the generic
+/// catalog-driven `index_getprocinfo → FunctionCallNColl` path. Called from
+/// this crate's `init_seams()`.
 pub fn install() {
     gin_extract_value::set(dispatch_extract_value);
     gin_extract_query::set(dispatch_extract_query);
