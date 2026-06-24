@@ -896,6 +896,16 @@ thread_local! {
     static REGRESS_COLS: RefCell<Vec<PsqlColumn>> = const { RefCell::new(Vec::new()) };
     /// Collected rows (each a Vec of Option<rendered cell string>).
     static REGRESS_ROWS: RefCell<Vec<Vec<Option<String>>>> = const { RefCell::new(Vec::new()) };
+    /// The string psql prints for a SQL NULL cell. Default is empty (psql's
+    /// default), changed by the `\pset null '...'` backslash command that some
+    /// regress files (e.g. boolean.sql) issue mid-file.
+    static REGRESS_NULL_DISPLAY: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// Set the NULL display string (psql `\pset null '...'`). The single-user
+/// regress reader calls this when it intercepts that backslash command.
+pub fn set_regress_null_display(s: &str) {
+    REGRESS_NULL_DISPLAY.with(|n| *n.borrow_mut() = s.to_string());
 }
 
 /// Enable/disable psql-aligned regress output for the DestDebug receiver. Set by
@@ -1026,7 +1036,8 @@ fn debugtup_dest_shutdown<'mcx>(_mcx: Mcx<'mcx>, _state: u64) -> PgResult<()> {
         // is followed by an empty line); source blank lines are never echoed and
         // errors get no trailing blank, so this is the sole producer of the
         // inter-result blank lines in the regress output.
-        let out = crate::psql_format::format_aligned(&cols, &rows);
+        let null_display = REGRESS_NULL_DISPLAY.with(|n| n.borrow().clone());
+        let out = crate::psql_format::format_aligned(&cols, &rows, &null_display);
         print_to_stdout(&out);
         print_to_stdout("\n");
         REGRESS_COLS.with(|c| c.borrow_mut().clear());

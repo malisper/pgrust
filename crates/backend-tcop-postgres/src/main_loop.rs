@@ -345,6 +345,20 @@ fn interactive_backend_regress(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
             }
             // Echo the completed line verbatim (psql -a).
             echo_regress_line(&line);
+            // psql backslash meta-commands (`\getenv`, `\set`, `\pset`, …) are
+            // intercepted by the psql client at a statement boundary: echoed
+            // (under -a) but NEVER sent to the SQL parser. The single-user
+            // backend must do the same, or each `\`-line becomes a bogus
+            // `syntax error at or near "\"`. We only intercept when no statement
+            // is currently in progress (a `\` inside a multi-line statement is
+            // not a meta-command for the regress files). Handle the one command
+            // whose effect the diff observes — `\pset null '...'` — and treat
+            // every other backslash line as an echoed no-op.
+            if !stmt_started && line_is_backslash_command(&line) {
+                maybe_apply_pset_null(&line);
+                line.clear();
+                continue;
+            }
             // Add to the query buffer only once real statement text has begun;
             // leading comment-only lines are echoed but not sent to the parser
             // (so `LINE n:` is relative to the statement, as psql does).
@@ -494,6 +508,45 @@ fn is_comment_only(line: &[u8]) -> bool {
 fn echo_regress_line(line: &[u8]) {
     let s = String::from_utf8_lossy(line);
     interactive_print(&s);
+}
+
+/// True if `line` (optional trailing newline) is a psql backslash meta-command:
+/// optional leading whitespace then a `\`. These are handled by the psql client,
+/// not the SQL parser.
+fn line_is_backslash_command(line: &[u8]) -> bool {
+    let mut i = 0;
+    while i < line.len() && (line[i] == b' ' || line[i] == b'\t') {
+        i += 1;
+    }
+    i < line.len() && line[i] == b'\\'
+}
+
+/// If `line` is `\pset null '...'` (the only backslash command whose effect the
+/// regress diff observes), apply the NULL display string to the printtup
+/// formatter. The value may be single-quoted (`'(null)'`) or a bare token.
+/// Other `\pset` subcommands and other backslash commands are ignored (echoed
+/// no-ops), matching what the regress files need.
+fn maybe_apply_pset_null(line: &[u8]) {
+    let s = String::from_utf8_lossy(line);
+    let s = s.trim();
+    // Split on whitespace: ["\pset", "null", "'(null)'"] (the value token may
+    // itself contain spaces inside quotes — handle that by taking everything
+    // after the `null` keyword and stripping one layer of single quotes).
+    let mut it = s.split_whitespace();
+    if it.next() != Some("\\pset") {
+        return;
+    }
+    if it.next() != Some("null") {
+        return;
+    }
+    // The remainder (rejoined) is the value argument.
+    let rest: String = it.collect::<Vec<_>>().join(" ");
+    let val = if rest.len() >= 2 && rest.starts_with('\'') && rest.ends_with('\'') {
+        rest[1..rest.len() - 1].to_string()
+    } else {
+        rest
+    };
+    backend_access_common_printtup::set_regress_null_display(&val);
 }
 
 /// Render a per-statement error to stdout in psql's client format (regress mode).

@@ -40,8 +40,13 @@ pub struct PsqlColumn {
 /// Render one result set in psql aligned mode: header, rule, data rows, footer.
 ///
 /// `rows[r][c]` is the already type-output-rendered string for column `c`, or
-/// `None` for SQL NULL (psql prints NULL as an empty cell by default).
-pub fn format_aligned(columns: &[PsqlColumn], rows: &[Vec<Option<String>>]) -> String {
+/// `None` for SQL NULL. `null_display` is the string psql prints for a NULL
+/// cell — the empty string by default, or whatever `\pset null '...'` set.
+pub fn format_aligned(
+    columns: &[PsqlColumn],
+    rows: &[Vec<Option<String>>],
+    null_display: &str,
+) -> String {
     let ncols = columns.len();
     if ncols == 0 {
         // No columns (e.g. a utility statement routed here by mistake): psql
@@ -50,14 +55,16 @@ pub fn format_aligned(columns: &[PsqlColumn], rows: &[Vec<Option<String>>]) -> S
     }
 
     // Column content widths = max(display-width of header, max data width).
+    // A NULL cell contributes the width of `null_display`.
     let mut widths: Vec<usize> = columns.iter().map(|c| display_width(&c.name)).collect();
     for row in rows {
         for (c, cell) in row.iter().enumerate() {
-            if let Some(s) = cell {
-                let w = display_width(s);
-                if w > widths[c] {
-                    widths[c] = w;
-                }
+            let w = match cell {
+                Some(s) => display_width(s),
+                None => display_width(null_display),
+            };
+            if w > widths[c] {
+                widths[c] = w;
             }
         }
     }
@@ -110,7 +117,11 @@ pub fn format_aligned(columns: &[PsqlColumn], rows: &[Vec<Option<String>>]) -> S
             // Leading margin space (psql prints this for every column with
             // border != 0).
             line.push(' ');
-            let cell = row.get(c).and_then(|v| v.as_deref()).unwrap_or("");
+            // A NULL cell renders as `null_display` (psql's `\pset null`).
+            let cell = match row.get(c) {
+                Some(Some(s)) => s.as_str(),
+                _ => null_display,
+            };
             let pad = widths[c].saturating_sub(display_width(cell));
             let is_last = c == ncols - 1;
             if columns[c].right_align {
@@ -312,7 +323,7 @@ mod tests {
     fn select_one() {
         let cols = vec![col("one", true)];
         let rows = vec![vec![Some("1".to_string())]];
-        let got = format_aligned(&cols, &rows);
+        let got = format_aligned(&cols, &rows, "");
         assert_eq!(got, " one \n-----\n   1\n(1 row)\n");
     }
 
@@ -322,7 +333,7 @@ mod tests {
     fn select_bool_true() {
         let cols = vec![col("true", false)];
         let rows = vec![vec![Some("t".to_string())]];
-        let got = format_aligned(&cols, &rows);
+        let got = format_aligned(&cols, &rows, "");
         assert_eq!(got, " true \n------\n t\n(1 row)\n");
     }
 
@@ -341,7 +352,7 @@ mod tests {
             vec![Some("4567890123456789".into()), Some("4567890123456789".into())],
             vec![Some("4567890123456789".into()), Some("-4567890123456789".into())],
         ];
-        let got = format_aligned(&cols, &rows);
+        let got = format_aligned(&cols, &rows, "");
         // Built from explicit space counts to avoid source-whitespace ambiguity.
         let expected = concat!(
             "        q1        |        q2         \n",
@@ -360,7 +371,7 @@ mod tests {
     fn zero_rows() {
         let cols = vec![col("one", true)];
         let rows: Vec<Vec<Option<String>>> = vec![];
-        let got = format_aligned(&cols, &rows);
+        let got = format_aligned(&cols, &rows, "");
         assert_eq!(got, " one \n-----\n(0 rows)\n");
     }
 
@@ -445,7 +456,7 @@ mod tests {
             vec![Some(" ".into())], // zero-length char -> blank-padded to " "
             vec![Some("c".into())],
         ];
-        let got = format_aligned(&cols, &rows);
+        let got = format_aligned(&cols, &rows, "");
         let expected = concat!(
             " f1 \n",
             "----\n",
@@ -473,7 +484,7 @@ mod tests {
             vec![Some("doh!".into())],
             vec![Some("hi de ho neighbor".into())],
         ];
-        let got = format_aligned(&cols, &rows);
+        let got = format_aligned(&cols, &rows, "");
         let expected = concat!(
             "        f1         \n", // header centered, trailing margin kept
             "-------------------\n",
@@ -552,7 +563,7 @@ mod tests {
         // arrays.out fixture exactly).
         let cols = vec![col("int4", true)];
         let rows = vec![vec![None]];
-        let got = format_aligned(&cols, &rows);
+        let got = format_aligned(&cols, &rows, "");
         assert_eq!(got, " int4 \n------\n     \n(1 row)\n");
     }
 
@@ -563,7 +574,28 @@ mod tests {
     fn null_left_aligned_margin_only() {
         let cols = vec![col("any_value", false)];
         let rows = vec![vec![None]];
-        let got = format_aligned(&cols, &rows);
+        let got = format_aligned(&cols, &rows, "");
         assert_eq!(got, " any_value \n-----------\n \n(1 row)\n");
+    }
+
+    // boolean.sql does `\pset null '(null)'`, then SELECT ... returning NULL.
+    // expected/boolean.out:
+    //   ?column?
+    //   ----------
+    //   (null)
+    //  (1 row)
+    // The NULL display string "(null)" (7 chars) also drives the column width.
+    #[test]
+    fn null_display_pset() {
+        let cols = vec![col("?column?", false)];
+        let rows = vec![vec![None]];
+        let got = format_aligned(&cols, &rows, "(null)");
+        let expected = concat!(
+            " ?column? \n",
+            "----------\n",
+            " (null)\n", // left-aligned last col: margin + value, no trailing pad
+            "(1 row)\n",
+        );
+        assert_eq!(got, expected);
     }
 }
