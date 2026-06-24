@@ -205,6 +205,14 @@ pub fn dsm_impl_op(
             || (mapped_address.is_null() && *mapped_size == 0)
     );
 
+    // wasm64 single-user is a single address space with no shm_open/mmap/shmget,
+    // so DSM "segments" are plain heap allocations tracked by handle. Route every
+    // op to the in-process backend regardless of the GUC's value.
+    #[cfg(target_family = "wasm")]
+    {
+        return dsm_impl_wasm(op, handle, request_size, mapped_address, mapped_size);
+    }
+    #[cfg(not(target_family = "wasm"))]
     match dynamic_shared_memory_type() {
         DSM_IMPL_POSIX => dsm_impl_posix(
             op,
@@ -246,6 +254,72 @@ fn cstring(s: &str) -> CString {
 
 /// `dsm_impl_posix` — POSIX shared memory (`shm_open`/`shm_unlink`; sizing
 /// and mapping as if the segments were files).
+/// wasm64 in-process DSM backend. Single-user wasm has one address space and no
+/// `shm_open`/`mmap`/`shmget`, so a DSM "segment" is just a leaked heap region
+/// tracked by its `dsm_handle`; "attach" returns the same pointer (the lone
+/// process created it), "detach" is a no-op (the region stays mapped for the
+/// process), and "destroy" frees it. Mirrors the SysV-shmem heap-arena stub.
+#[cfg(target_family = "wasm")]
+fn dsm_impl_wasm(
+    op: DsmOp,
+    handle: dsm_handle,
+    request_size: usize,
+    mapped_address: &mut *mut u8,
+    mapped_size: &mut usize,
+) -> PgResult<bool> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    thread_local! {
+        // handle -> (boxed region ptr, byte length).
+        static SEGMENTS: RefCell<HashMap<dsm_handle, (*mut u8, usize)>> =
+            RefCell::new(HashMap::new());
+    }
+
+    match op {
+        DsmOp::Create => {
+            // A 8-byte-aligned zeroed region; leak it (lives for the process).
+            let words = request_size.div_ceil(8).max(1);
+            let mut backing: Vec<u64> = std::vec![0u64; words];
+            let ptr = backing.as_mut_ptr() as *mut u8;
+            std::mem::forget(backing);
+            SEGMENTS.with(|s| s.borrow_mut().insert(handle, (ptr, request_size)));
+            *mapped_address = ptr;
+            *mapped_size = request_size;
+            Ok(true)
+        }
+        DsmOp::Attach => {
+            // The creating (lone) process already holds the region.
+            match SEGMENTS.with(|s| s.borrow().get(&handle).copied()) {
+                Some((ptr, size)) => {
+                    *mapped_address = ptr;
+                    *mapped_size = size;
+                    Ok(true)
+                }
+                None => Ok(false), // no such segment
+            }
+        }
+        DsmOp::Detach => {
+            // Single address space: keep the region mapped, just clear the view.
+            *mapped_address = std::ptr::null_mut();
+            *mapped_size = 0;
+            Ok(true)
+        }
+        DsmOp::Destroy => {
+            if let Some((ptr, size)) = SEGMENTS.with(|s| s.borrow_mut().remove(&handle)) {
+                let words = size.div_ceil(8).max(1);
+                // SAFETY: reconstruct the leaked Vec<u64> to free it.
+                unsafe {
+                    drop(std::vec::Vec::from_raw_parts(ptr as *mut u64, words, words));
+                }
+            }
+            *mapped_address = std::ptr::null_mut();
+            *mapped_size = 0;
+            Ok(true)
+        }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
 fn dsm_impl_posix(
     op: DsmOp,
     handle: dsm_handle,
