@@ -1011,6 +1011,27 @@ fn fc_record_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult
 }
 
 /// `record_send(record) -> bytea`.
+/// `record_recv(internal, oid, int4) -> record` (pg_proc.dat oid 2402). C:
+/// `record_recv(buf, tupType, atttypmod)` reads the binary composite image. arg0
+/// is the binary message `StringInfo` (`PG_GETARG_POINTER`), arriving on the
+/// by-ref lane as the RAW wire bytes; arg1 is the row type (`tupioparam`), arg2
+/// the typmod.
+fn fc_record_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let buf = fcinfo
+        .ref_arg(0)
+        .and_then(|p| p.as_varlena())
+        .expect("record_recv: by-ref recv buffer missing from by-ref lane")
+        .to_vec();
+    let tupioparam = arg_oid(fcinfo, 1);
+    let tup_typmod = arg_i32(fcinfo, 2);
+    let m = scratch_mcx();
+    let r = crate::rowtypes::record_recv(m.mcx(), &buf, tupioparam, tup_typmod);
+    match r {
+        Ok(t) => Ok(ret_record(fcinfo, &t)),
+        Err(e) => Err(e),
+    }
+}
+
 fn fc_record_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let rec = arg_record(m.mcx(), fcinfo, 0)?;
@@ -1555,6 +1576,7 @@ pub fn register_misc2_builtins() {
         //      StringInfo arg0 is not on the fmgr frame) ----
         builtin(2290, "record_in", 3, true, false, fc_record_in),
         builtin(2291, "record_out", 1, true, false, fc_record_out),
+        builtin(2402, "record_recv", 3, true, false, fc_record_recv),
         builtin(2403, "record_send", 1, true, false, fc_record_send),
         // ---- rowtypes.c: record comparison / btree support ----
         builtin(2981, "record_eq", 2, true, false, fc_record_eq),

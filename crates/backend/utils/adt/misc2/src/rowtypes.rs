@@ -569,11 +569,15 @@ pub fn record_send<'mcx>(
         pq_sendbytes(&mut buf, &outputbytes)?;
     }
 
+    // C: `PG_RETURN_BYTEA_P(pq_endtypsend(&buf))` returns the FULL header-ful
+    // bytea. The send seam (`oid_send_function_call_seam`) strips exactly one
+    // `VARHDRSZ` to recover the wire payload, so the image must keep its header —
+    // returning the header-LESS `.data()` here made the seam's strip eat the
+    // leading ncolumns word (composite binary output was 4 bytes short, so a
+    // client read past the end). Hand back the full image, like array_send /
+    // int4send.
     let bytea = pq_endtypsend(buf);
-    // Cross out the bytea's payload bytes (header stripped), matching the
-    // PG_RETURN_BYTEA_P contract callers see.
-    let payload = bytea.data();
-    ::mcx::slice_in(mcx, payload)
+    ::mcx::slice_in(mcx, bytea.as_bytes())
 }
 
 /// `record_cmp(record1, record2)` — internal three-way comparison engine shared
