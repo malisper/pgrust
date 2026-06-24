@@ -213,6 +213,17 @@ fn InteractiveBackend(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
     #[cfg(not(target_family = "wasm"))]
     use std::io::Write;
 
+    // Regress-output mode (psql -a -q emulation): no "backend> " prompt; read a
+    // whole `;`-terminated statement while echoing each raw input line verbatim
+    // (psql `-a` echoes every line, including comments and blank lines), so the
+    // backend's stdout byte-matches expected/*.out. Comment/blank lines that
+    // precede a statement are echoed and accumulated into the buffer too — the
+    // parser ignores leading comments/whitespace, so a multi-statement read that
+    // begins with comments still parses to the intended statement.
+    if globals::regress_output() {
+        return interactive_backend_regress(in_buf);
+    }
+
     // Display a prompt and obtain input from the user.
     interactive_print("backend> ");
 
@@ -274,6 +285,86 @@ fn InteractiveBackend(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
     }
 
     Ok(pqmsg::QUERY) // PqMsg_Query
+}
+
+/// Regress-output reader: read one `;`-terminated statement, echoing each raw
+/// input line verbatim (psql `-a`). Leading comment/blank lines are echoed and
+/// included in the buffer (the parser skips them). Returns [`EOF`] when input
+/// ends with nothing pending (after echoing any trailing comment lines).
+fn interactive_backend_regress(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
+    in_buf.reset();
+    let mut line: Vec<u8> = Vec::new();
+    let mut saw_any = false;
+    loop {
+        let c = interactive_getc()?;
+        if c == EOF {
+            // Flush a final unterminated line (e.g. trailing comment with no
+            // newline): echo it and, if it held statement text, run it.
+            if !line.is_empty() {
+                echo_regress_line(&line);
+                in_buf.data.extend_from_slice(&line);
+                saw_any = true;
+            }
+            if !saw_any || in_buf.len() == 0 {
+                return Ok(EOF);
+            }
+            break;
+        }
+        let ch = c as u8;
+        line.push(ch);
+        if ch == b'\n' {
+            // Echo the completed line verbatim (psql -a) and append to the buf.
+            echo_regress_line(&line);
+            in_buf.data.extend_from_slice(&line);
+            // A statement ends when this line, ignoring trailing whitespace,
+            // ends with ';' (and the accumulated buffer contains non-comment
+            // statement text). This matches psql/regress: one statement per
+            // ';'-terminated run, with any leading comment lines attached.
+            let trimmed = line
+                .iter()
+                .rposition(|&b| !b.is_ascii_whitespace())
+                .map(|p| line[p]);
+            line.clear();
+            if trimmed == Some(b';') {
+                saw_any = true;
+                break;
+            }
+            saw_any = true;
+        }
+    }
+
+    if in_buf.len() == 0 {
+        return Ok(EOF);
+    }
+    // Add '\0' to make it look the same as the message case.
+    in_buf.data.push(b'\0');
+    Ok(pqmsg::QUERY)
+}
+
+/// Echo one raw input line (already including its trailing newline if present)
+/// to stdout, exactly as psql `-a` does.
+fn echo_regress_line(line: &[u8]) {
+    let s = String::from_utf8_lossy(line);
+    interactive_print(&s);
+}
+
+/// Render a per-statement error to stdout in psql's client format (regress mode).
+/// Builds a [`psql_format::PsqlError`] from the structured [`PgError`] (message /
+/// detail / hint / cursor position) plus the current statement text (for the
+/// `LINE n:`/caret echo) and writes the formatted block to stdout.
+fn emit_regress_error(err: &types_error::PgError) {
+    use backend_access_common_printtup::psql_format::{format_error, PsqlError};
+    let severity = backend_utils_error::error_severity(err.level()).to_string();
+    let pe = PsqlError {
+        severity,
+        message: err.message.clone(),
+        detail: err.detail.clone(),
+        hint: err.hint.clone(),
+        // cursor_position is 1-based; only emit the LINE/caret when > 0.
+        position: err.cursor_position.filter(|&p| p > 0).map(|p| p as usize),
+        query: globals::debug_query_string().map(|s| s.to_string()),
+    };
+    interactive_print(&format_error(&pe));
 }
 
 /// Write a prompt/echo string to the interactive output. Natively this is
@@ -453,8 +544,14 @@ fn error_recovery(mcx: Mcx<'_>, err: types_error::PgError, state: &mut LoopState
     // Make sure libpq is in a good state.
     pqcomm::pq_comm_reset();
 
-    // Report the error to the client and/or server log.
-    backend_utils_error::emit_error_report_for(&err);
+    // Report the error to the client and/or server log. In regress-output mode
+    // the client format is psql's (ERROR:/DETAIL:/HINT:/LINE+caret) on stdout,
+    // so it byte-matches expected/*.out; otherwise the normal LOG-style report.
+    if globals::regress_output() {
+        emit_regress_error(&err);
+    } else {
+        backend_utils_error::emit_error_report_for(&err);
+    }
 
     // valgrind_report_error_query(debug_query_string) — valgrind-only, skipped.
 
@@ -1210,8 +1307,15 @@ fn postgres_main_inner(dbname: Option<&str>, username: Option<&str>) -> PgResult
         types_core::init::ProcessingMode::NormalProcessing,
     );
 
+    // Mirror the regress-output flag into the printtup DestDebug receiver so it
+    // emits psql-aligned tables instead of the debug dump.
+    backend_access_common_printtup::set_regress_output(globals::regress_output());
+
     // BeginReportingGUCOptions(): report GUCs to the client if appropriate.
-    backend_utils_misc_guc::report::begin_reporting_guc_options();
+    // In regress-output mode (psql -a -q) GUC reports are suppressed (-q).
+    if !globals::regress_output() {
+        backend_utils_misc_guc::report::begin_reporting_guc_options();
+    }
 
     // if (IsUnderPostmaster && Log_disconnections) on_proc_exit(log_disconnections)
     // — the disconnect-log callback; registration is process-exit plumbing,

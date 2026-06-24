@@ -40,6 +40,13 @@ thread_local! {
     /// (echo queries, single-user mode).
     static ECHO_QUERY: Cell<bool> = const { Cell::new(false) };
 
+    /// pgrust extension (not in C): the `--regress-output` switch. When set, the
+    /// single-user backend emits `psql -a -q`-compatible output (raw query echo,
+    /// `print_aligned` result tables, psql error blocks) instead of the
+    /// `backend>` prompt + `DestDebug` debug dump, so its stdout can be byte-diffed
+    /// against the regression suite's `expected/*.out`. Single-user only.
+    static REGRESS_OUTPUT: Cell<bool> = const { Cell::new(false) };
+
     /// `static bool UseSemiNewlineNewline = false;` (postgres.c:155) — the `-j`
     /// switch (use `;\n\n` as the interactive command delimiter).
     static USE_SEMI_NEWLINE_NEWLINE: Cell<bool> = const { Cell::new(false) };
@@ -147,6 +154,18 @@ pub fn echo_query() -> bool {
 #[inline]
 pub fn set_echo_query(value: bool) {
     ECHO_QUERY.set(value);
+}
+
+// `RegressOutput` (pgrust `--regress-output`).
+
+#[inline]
+pub fn regress_output() -> bool {
+    REGRESS_OUTPUT.get()
+}
+
+#[inline]
+pub fn set_regress_output(value: bool) {
+    REGRESS_OUTPUT.set(value);
 }
 
 // `UseSemiNewlineNewline`.

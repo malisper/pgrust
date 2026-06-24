@@ -18887,6 +18887,7 @@ name = "backend-tcop-postgres"
 version = "0.0.0"
 dependencies = [
  "allocator-api2",
+ "backend-access-common-printtup",
  "backend-access-common-printtup-seams",
  "backend-access-transam-parallel",
  "backend-access-transam-parallel-rt-seams",

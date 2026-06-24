@@ -877,6 +877,47 @@ fn print_to_stdout(s: &str) {
     }
 }
 
+// ===========================================================================
+// Regress-output mode (psql -a -q emulation) for the DestDebug receiver.
+//
+// When `regress_output()` is set, the debug receiver does NOT stream the C debug
+// dump; instead it COLLECTS the column metadata (startup) and each row's
+// rendered cells (receive), then emits a psql `print_aligned` table at shutdown
+// (widths require all rows first). The flag is a thread-local set by the tcop
+// single-user driver via `set_regress_output` (avoids a dep cycle on the tcop
+// crate; the value mirrors `globals::regress_output()`).
+// ===========================================================================
+
+use crate::psql_format::PsqlColumn;
+
+thread_local! {
+    static REGRESS_OUTPUT: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    /// Collected column headers + per-column right-align for the in-flight result.
+    static REGRESS_COLS: RefCell<Vec<PsqlColumn>> = const { RefCell::new(Vec::new()) };
+    /// Collected rows (each a Vec of Option<rendered cell string>).
+    static REGRESS_ROWS: RefCell<Vec<Vec<Option<String>>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Enable/disable psql-aligned regress output for the DestDebug receiver. Set by
+/// the single-user driver to mirror `globals::regress_output()`.
+pub fn set_regress_output(on: bool) {
+    REGRESS_OUTPUT.with(|f| f.set(on));
+}
+
+fn regress_output() -> bool {
+    REGRESS_OUTPUT.with(|f| f.get())
+}
+
+/// psql right-aligns columns whose type category is Numeric (`'N'`). Resolve the
+/// per-column alignment from the attribute's type category.
+fn regress_right_align(atttypid: Oid) -> bool {
+    // TYPCATEGORY_NUMERIC = 'N' (pg_type.h). psql right-aligns numeric columns.
+    match backend_utils_cache_lsyscache_seams::get_type_category_preferred::call(atttypid) {
+        Ok((category, _preferred)) => category == b'N',
+        Err(_) => false,
+    }
+}
+
 /// `&debugtupDR` (dest.c:75) routed into the tcop-dest router: register the
 /// static debugtup receiver (callbacks `debugStartup` / `debugtup` /
 /// `donothingCleanup`) and return the [`DestReceiverHandle`] that names it.
@@ -904,6 +945,23 @@ fn debugtup_dest_startup<'mcx>(
     _operation: CmdType,
     typeinfo: &TupleDescData<'mcx>,
 ) -> PgResult<()> {
+    if regress_output() {
+        // Collect column headers + per-column alignment; defer printing until the
+        // aligned table is emitted at shutdown (widths need every row first).
+        let natts = typeinfo.natts as usize;
+        let mut cols = Vec::with_capacity(natts);
+        for i in 0..natts {
+            let att: &FormData_pg_attribute = typeinfo.attr(i);
+            let name = format!("{}", Latin1Lossy(att.attname.name_str()));
+            cols.push(PsqlColumn {
+                name,
+                right_align: regress_right_align(att.atttypid),
+            });
+        }
+        REGRESS_COLS.with(|c| *c.borrow_mut() = cols);
+        REGRESS_ROWS.with(|r| r.borrow_mut().clear());
+        return Ok(());
+    }
     let out = debugStartup(typeinfo);
     print_to_stdout(&out);
     Ok(())
@@ -924,6 +982,27 @@ fn debugtup_dest_receive<'mcx>(
         .tts_tupleDescriptor
         .as_deref()
         .expect("debugtup: slot has no tuple descriptor");
+    if regress_output() {
+        // Render each column to its psql cell string (NULL -> None), collect the
+        // row; the aligned table is emitted at shutdown.
+        let natts = typeinfo.natts as usize;
+        let mut row: Vec<Option<String>> = Vec::with_capacity(natts);
+        for i in 0..natts {
+            let (attr, isnull) = &columns[i];
+            if *isnull {
+                row.push(None);
+                continue;
+            }
+            let att: &FormData_pg_attribute = typeinfo.attr(i);
+            let (typoutput, _typisvarlena) =
+                backend_utils_cache_lsyscache_seams::get_type_output_info::call(att.atttypid)?;
+            let value =
+                backend_utils_fmgr_fmgr_seams::oid_output_function_call::call(mcx, typoutput, attr)?;
+            row.push(Some(format!("{}", Latin1Lossy(&value))));
+        }
+        REGRESS_ROWS.with(|r| r.borrow_mut().push(row));
+        return Ok(true);
+    }
     let (out, ret) = debugtup_emit(mcx, typeinfo, &columns)?;
     print_to_stdout(&out);
     Ok(ret)
@@ -931,6 +1010,15 @@ fn debugtup_dest_receive<'mcx>(
 
 /// The dest-router `rShutdown` slot for `debugtupDR` — C's `donothingCleanup`.
 fn debugtup_dest_shutdown<'mcx>(_mcx: Mcx<'mcx>, _state: u64) -> PgResult<()> {
+    if regress_output() {
+        let cols = REGRESS_COLS.with(|c| c.borrow().clone());
+        let rows = REGRESS_ROWS.with(|r| r.borrow().clone());
+        // Emit the psql-aligned table for this result set.
+        let out = crate::psql_format::format_aligned(&cols, &rows);
+        print_to_stdout(&out);
+        REGRESS_COLS.with(|c| c.borrow_mut().clear());
+        REGRESS_ROWS.with(|r| r.borrow_mut().clear());
+    }
     Ok(())
 }
 

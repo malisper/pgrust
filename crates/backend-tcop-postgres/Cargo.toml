@@ -115,6 +115,10 @@ backend-commands-prepare = { path = "../backend-commands-prepare" }
 backend-utils-cache-plancache-seams = { path = "../backend-utils-cache-plancache-seams" }
 backend-nodes-params-seams = { path = "../backend-nodes-params-seams" }
 backend-access-common-printtup-seams = { path = "../backend-access-common-printtup-seams" }
+# Direct dep for the regress-output flag mirror (set_regress_output) + PsqlError
+# construction in emit_regress_error. No dependency cycle (printtup does not
+# depend on tcop-postgres).
+backend-access-common-printtup = { path = "../backend-access-common-printtup" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
