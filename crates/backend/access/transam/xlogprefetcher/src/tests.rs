@@ -27,6 +27,8 @@ fn prefetcher<'mcx, 'r, 'rdr>(
         recent_idx: 0,
         no_readahead_until: 0,
         streaming_read: None,
+        cached_inflight: Cell::new(0),
+        cached_completed: Cell::new(0),
         begin_ptr: 0,
         reconfigure_count: 0,
     }

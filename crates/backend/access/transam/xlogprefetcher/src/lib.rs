@@ -345,7 +345,23 @@ pub struct XLogPrefetcher<'mcx, 'r, 'rdr> {
     /* IO depth manager. */
     /// `LsnReadQueue *streaming_read` — allocated on first
     /// `XLogPrefetcherReadRecord` (the reconfigure path).
+    ///
+    /// In C this is a stable pointer the prefetcher always dereferences. Here
+    /// the queue is briefly moved out of `self` (via `.take()`) while
+    /// `lrq_prefetch`/`lrq_complete_lsn` run, so their `XLogPrefetcherNextBlock`
+    /// callback can borrow the rest of `self`. During that window the
+    /// callback's page read can re-enter `XLogPrefetcherComputeStats` (the
+    /// streaming-wait path calls it before sleeping), finding `streaming_read`
+    /// temporarily `None`. The cached `lrq_inflight`/`lrq_completed` snapshot
+    /// below lets `ComputeStats` publish gauges in that re-entrant window —
+    /// reading the same transient counters C would read off the live pointer.
     streaming_read: Option<LsnReadQueue<'mcx>>,
+
+    /// Last-seen `lrq_inflight`/`lrq_completed`, kept current whenever the
+    /// queue is in `self`, so `XLogPrefetcherComputeStats` can publish gauges
+    /// even when the queue is momentarily taken out for a prefetch callback.
+    cached_inflight: Cell<u32>,
+    cached_completed: Cell<u32>,
 
     begin_ptr: XLogRecPtr,
 
@@ -526,6 +542,8 @@ impl<'mcx, 'r, 'rdr> XLogPrefetcher<'mcx, 'r, 'rdr> {
             recent_idx: 0,
             no_readahead_until: 0,
             streaming_read: None,
+            cached_inflight: Cell::new(0),
+            cached_completed: Cell::new(0),
             begin_ptr: 0,
             // First usage will cause streaming_read to be allocated.
             reconfigure_count: XLOG_PREFETCH_RECONFIGURE_COUNT.with(Cell::get) - 1,
@@ -563,13 +581,22 @@ impl<'mcx, 'r, 'rdr> XLogPrefetcher<'mcx, 'r, 'rdr> {
             None => 0,
         };
 
-        // How many IOs are currently in flight and completed?
-        let lrq = self
-            .streaming_read
-            .as_ref()
-            .expect("streaming_read allocated (C dereferences it unconditionally)");
-        let io_depth = lrq_inflight(lrq);
-        let completed = lrq_completed(lrq);
+        // How many IOs are currently in flight and completed? C dereferences
+        // the stable `streaming_read` pointer here unconditionally. In this
+        // port the queue may be momentarily taken out of `self` for a prefetch
+        // callback that re-enters this function (the streaming-wait path); when
+        // that is the case, fall back to the cached snapshot kept up to date
+        // while the queue is in `self`.
+        let (io_depth, completed) = match self.streaming_read.as_ref() {
+            Some(lrq) => {
+                let d = lrq_inflight(lrq);
+                let c = lrq_completed(lrq);
+                self.cached_inflight.set(d);
+                self.cached_completed.set(c);
+                (d, c)
+            }
+            None => (self.cached_inflight.get(), self.cached_completed.get()),
+        };
 
         // Update the instantaneous stats visible in pg_stat_recovery_prefetch.
         let s = shared_stats();
@@ -1136,6 +1163,8 @@ impl XLogPrefetcher<'_, '_, '_> {
             }
 
             self.streaming_read = Some(lrq_alloc(self.mcx, max_distance, max_inflight)?);
+            self.cached_inflight.set(0);
+            self.cached_completed.set(0);
 
             self.reconfigure_count = reconfigure_count;
         }
@@ -1220,6 +1249,10 @@ impl XLogPrefetcher<'_, '_, '_> {
             .streaming_read
             .take()
             .expect("streaming_read allocated (C dereferences it unconditionally)");
+        // Refresh the snapshot a re-entrant ComputeStats will read while the
+        // queue is out of `self`.
+        self.cached_inflight.set(lrq_inflight(&lrq));
+        self.cached_completed.set(lrq_completed(&lrq));
         let result = lrq_prefetch(&mut lrq, |lsn| {
             let (status, out_lsn) =
                 self.XLogPrefetcherNextBlock(maintenance_io_concurrency, io_direct_flags)?;
@@ -1243,6 +1276,10 @@ impl XLogPrefetcher<'_, '_, '_> {
             .streaming_read
             .take()
             .expect("streaming_read allocated (C dereferences it unconditionally)");
+        // Refresh the snapshot a re-entrant ComputeStats will read while the
+        // queue is out of `self`.
+        self.cached_inflight.set(lrq_inflight(&lrq));
+        self.cached_completed.set(lrq_completed(&lrq));
         let result = lrq_complete_lsn(&mut lrq, lsn, enabled, |out| {
             let (status, out_lsn) =
                 self.XLogPrefetcherNextBlock(maintenance_io_concurrency, io_direct_flags)?;
