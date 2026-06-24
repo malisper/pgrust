@@ -1105,35 +1105,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `FunctionCallInvoke(fcinfo)` over the canonical [`Datum`] lane using the
-    /// function resolution `ExecInitFunc` cached **once** for the call site
-    /// (mcx-pooling Phase 1 — the per-fmgr-call frame-churn fix). Identical in
-    /// signature, arguments, and result to [`function_call_invoke_datum`], but
-    /// for a BUILT-IN `fn_oid` it skips the per-call `fmgr_info` OID
-    /// re-resolution — the `fmgr_isbuiltin` `BuiltinFunction` clone (a `String`
-    /// heap alloc) and the fresh `FmgrInfo`/`FmgrResolution` build — by
-    /// recovering the resolution memoized at first call (an `Rc` refcount bump).
-    /// C resolves `flinfo` once at `ExecInitFunc` (execExpr.c:2736) and reuses it
-    /// on every `EEOP_FUNCEXPR` call; this seam is the owned model's stand-in for
-    /// that (the std/lifetime-bound `FmgrResolution` cannot ride the no_std
-    /// `Func` step — the #327 dual-fcinfo-home split — so it is memoized
-    /// per-backend by OID instead). A NON-built-in OID (catalog /
-    /// security-definer / SQL) transparently falls through to the by-OID
-    /// [`function_call_invoke_datum`] path, so DDL invalidation, the secdef
-    /// userid switch, and SQL-function dispatch are unaffected. The
-    /// `EEOP_FUNCEXPR[_STRICT]` interpreter steps drive this; every other caller
-    /// (DISTINCT/NULLIF/ROWCOMPARE/HASHDATUM/IOCOERCE) keeps the by-OID seam.
-    pub fn function_call_invoke_datum_resolved<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        fn_oid: Oid,
-        collation: Oid,
-        args: &[Datum<'mcx>],
-        args_null: &[bool],
-        fn_expr: Option<::types_core::fmgr::FnExprErased>,
-    ) -> PgResult<(Datum<'mcx>, bool)>
-);
-
-seam_core::seam!(
     /// `EEOP_FUNCEXPR` dispatch over the step's OWN persistent call frame — the
     /// faithful `fcinfo->isnull = false; d = op->d.func.fn_addr(fcinfo)` of
     /// execExprInterp.c. The caller (the interpreter) owns the ABI carrier `fcinfo`

@@ -160,7 +160,7 @@ pub fn clear_builtins() {
     // The resolved-built-in memo references the registry's built-ins; drop it
     // too so a re-registration is observed (defined below).
     RESOLVED_BUILTIN.with(|c| c.borrow_mut().clear());
-    FCINFO_POOL.with(|p| p.borrow_mut().clear());
+    COMPARATOR_FCINFO.with(|p| *p.borrow_mut() = None);
 }
 
 // ===========================================================================
@@ -229,7 +229,7 @@ pub fn native_builtin(foid: Oid) -> Option<PgFnNative> {
 //
 // This per-backend cache stands in for the on-the-step resolution: it memoizes
 // the `ResolvedFmgrInfo` for a BUILT-IN OID behind an `Rc` so the hot
-// `function_call_invoke_datum_resolved` seam recovers it with a refcount bump
+// `function_call_invoke_step` seam recovers it with a refcount bump
 // (no `String` alloc, no registry clone). ONLY built-ins are cached — they are
 // compile-time-constant (C's `fmgr_builtins[]` never changes), so the entry is
 // permanently valid; catalog / security-definer / SQL functions are NOT cached
@@ -302,26 +302,35 @@ pub fn clear_resolved_builtin_cache() {
 // ===========================================================================
 
 thread_local! {
-    /// Per-backend free-list of reusable ABI-carrier call frames. Empty at
-    /// start; grows to the steady-state fmgr recursion depth then stops
-    /// allocating. No C analogue (C's frame is the per-step `fcinfo_data`).
-    static FCINFO_POOL: RefCell<Vec<FunctionCallInfoBaseData>> = const { RefCell::new(Vec::new()) };
+    /// The comparator path's single persistent ABI-carrier call frame, the
+    /// faithful analogue of C's `SortShimExtra.fcinfo` (a `SortSupport`'s
+    /// comparator-owned `FunctionCallInfoBaseData`, allocated once and reused on
+    /// EVERY `comparison_shim`/`FunctionCall2Coll` comparison). Built lazily on
+    /// the first comparison and refilled in place thereafter; a reentrant
+    /// comparator (one that itself calls `FunctionCall2Coll`) finds the slot
+    /// taken and runs on a throwaway carrier, so correctness never depends on
+    /// availability. This replaces the former per-call frame POOL (a free-list
+    /// of frames with a take/return per comparison) — the carrier now lives on
+    /// the (per-backend) comparator state, exactly as C's `ssup` holds it.
+    static COMPARATOR_FCINFO: RefCell<Option<FunctionCallInfoBaseData>> =
+        const { RefCell::new(None) };
 }
 
-/// Borrow a reusable frame from the pool (or build a fresh one on an empty
-/// pool) and `reset_for_reuse` it with the call's lookup info — its `args` /
-/// `ref_args` are cleared to length 0 but KEEP their capacity, so the caller
-/// refills `frame.args` in place. The caller MUST hand it back via
-/// [`fcinfo_pool_return`] (an RAII-style pair) so its capacity is recycled.
+/// Take the comparator path's persistent call frame out of its slot (or build a
+/// throwaway when the slot is empty on the first call, or already taken by a
+/// reentrant comparator) and `reset_for_reuse` it with the call's lookup info —
+/// its `args` / `ref_args` are cleared to length 0 but KEEP their capacity, so
+/// the caller refills `frame.args` in place. The caller MUST hand it back via
+/// [`comparator_fcinfo_return`] so the allocation is reused on the next call.
 /// `nargs` is set to 0 here; the caller sets it after refilling `args`.
-fn fcinfo_pool_take(flinfo: Option<FmgrInfo>, collation: Oid) -> FunctionCallInfoBaseData {
+fn comparator_fcinfo_take(flinfo: Option<FmgrInfo>, collation: Oid) -> FunctionCallInfoBaseData {
     // C: a trigger / CALL / aggregate dispatcher deposits the `fcinfo->context`
     // node-tag / agg back-pointer on a thread-local; consume it onto THIS frame
     // (per-frame discipline), exactly as `init_fcinfo` does.
     let context = ::fmgr::fmgr::take_call_context_tag()
         .map(|(tag, atomic)| ::fmgr::fmgr::ContextNode { tag, atomic });
-    let mut frame = FCINFO_POOL
-        .with(|p| p.borrow_mut().pop())
+    let mut frame = COMPARATOR_FCINFO
+        .with(|p| p.borrow_mut().take())
         .unwrap_or_else(|| FunctionCallInfoBaseData::new(None, 0, 0, None, None));
     frame.reset_for_reuse(flinfo, 0, collation, context, None);
     if let Some(link) = ::fmgr::fmgr::take_agg_context_link() {
@@ -330,22 +339,21 @@ fn fcinfo_pool_take(flinfo: Option<FmgrInfo>, collation: Oid) -> FunctionCallInf
     frame
 }
 
-/// Return a frame to the pool after a call. Its `flinfo`/`args`/`ref_args`
-/// capacity is retained for the next call; the live payload is cleared so no
-/// caller-owned data (a returned `internal` box, a captured error) leaks across
-/// reuse.
-fn fcinfo_pool_return(mut frame: FunctionCallInfoBaseData) {
+/// Return the comparator path's persistent call frame after a call. Its
+/// `flinfo`/`args`/`ref_args` capacity is retained for the next comparison; the
+/// live payload is cleared so no caller-owned data (a returned `internal` box, a
+/// captured error) leaks across reuse. A reentrant comparator's throwaway
+/// carrier finds the slot already occupied and is simply dropped.
+fn comparator_fcinfo_return(mut frame: FunctionCallInfoBaseData) {
     // Drop any live payload now (before the frame is parked) so an `internal`
     // state box / soft-error sink does not survive into the next call's reuse.
     //
     // The `flinfo` Box is KEPT allocated (its live payload is the only leak risk,
     // and `FmgrInfo::clone`/`reset_for_reuse` already overwrite the whole record
     // in place on the next take): nulling it here freed the `Box<FmgrInfo>` and
-    // `fcinfo_pool_take`→`reset_for_reuse` re-`Box::new`'d it on the very next
-    // call — a malloc+free PAIR on every single fmgr dispatch (the profiled
-    // `fcinfo_pool_return`/`drop_in_place<FunctionCallInfoBaseData>` /
-    // `fcinfo_pool_take` malloc hotspot, 10M× for a per-row WHERE filter). Clear
-    // only its owned-payload slots in place so no caller box survives reuse; the
+    // `comparator_fcinfo_take`→`reset_for_reuse` re-`Box::new`'d it on the very
+    // next call — a malloc+free PAIR on every single comparison. Clear only its
+    // owned-payload slots in place so no caller box survives reuse; the
     // resolution metadata is stale-but-harmless (overwritten next take).
     if let Some(flinfo) = frame.flinfo.as_mut() {
         flinfo.fn_extra = None;
@@ -360,19 +368,21 @@ fn fcinfo_pool_return(mut frame: FunctionCallInfoBaseData) {
     frame.args.clear();
     frame.ref_args.clear();
     frame.internal_args.clear();
-    // Cap the pool so a pathological deep-recursion burst does not retain an
-    // unbounded number of frames forever.
-    FCINFO_POOL.with(|p| {
-        let mut pool = p.borrow_mut();
-        if pool.len() < 64 {
-            pool.push(frame);
+    // Park the carrier back on the comparator state. A reentrant comparator's
+    // throwaway frame finds the slot occupied and is dropped (only the outermost
+    // carrier persists), so there is at most ONE frame retained per backend.
+    COMPARATOR_FCINFO.with(|p| {
+        let mut slot = p.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(frame);
         }
     });
 }
 
-/// Clear the fcinfo frame pool (test/re-init support; no C analogue).
+/// Clear the comparator persistent fcinfo carrier (test/re-init support; no C
+/// analogue).
 pub fn clear_fcinfo_pool() {
-    FCINFO_POOL.with(|p| p.borrow_mut().clear());
+    COMPARATOR_FCINFO.with(|p| *p.borrow_mut() = None);
 }
 
 /// C: `fmgr_last_builtin_oid`.
@@ -961,13 +971,15 @@ pub fn function_call_coll_ref_args_out(
 /// on EVERY O(n log n) comparison). Instead of `init_fcinfo` allocating a fresh
 /// `args`/`ref_args` Vec + a boxed `FmgrInfo` and dropping the whole
 /// `FunctionCallInfoBaseData` per call (the profiled libc malloc/free churn), it
-/// borrows a per-backend pooled frame ([`fcinfo_pool_take`]), refills the
+/// reuses the comparator's persistent ABI carrier
+/// ([`comparator_fcinfo_take`], C's `SortShimExtra.fcinfo`), refills the
 /// capacity-retained `args`/`ref_args` Vecs in place, dispatches, and returns the
-/// frame to the pool ([`fcinfo_pool_return`]). Semantics are identical to
+/// frame to its slot ([`comparator_fcinfo_return`]). Semantics are identical to
 /// [`function_call_coll_ref_args`]: same collation, same `fn_expr` threading
 /// (fmgr.c:658), same `invoke_flinfo` NULL self-check.
 ///
-/// Reentrancy is safe: a nested fmgr call pops a DIFFERENT pooled frame.
+/// Reentrancy is safe: a nested comparator (one that itself calls
+/// `FunctionCall2Coll`) finds the carrier taken and runs on a throwaway frame.
 pub fn function_call_coll_ref_args_pooled(
     mcx: Mcx<'_>,
     res: &FmgrResolution,
@@ -982,7 +994,7 @@ pub fn function_call_coll_ref_args_pooled(
     // pooled frame whose Vecs keep their capacity across calls. `flinfo.clone()`
     // is a cheap field copy + an `Rc` bump for `fn_expr` (no `String`), reused
     // into the existing `Box` slot by `reset_for_reuse`.
-    let mut fcinfo = fcinfo_pool_take(Some(flinfo.clone()), collation);
+    let mut fcinfo = comparator_fcinfo_take(Some(flinfo.clone()), collation);
     let [a1, a2] = args;
     let [r1, r2] = ref_args;
     fcinfo.args.push(a1);
@@ -992,7 +1004,7 @@ pub fn function_call_coll_ref_args_pooled(
     fcinfo.nargs = 2;
     fcinfo.debug_assert_ref_null_consistency();
     let result = invoke_flinfo(mcx, res, &mut fcinfo, oid, fn_expr);
-    fcinfo_pool_return(fcinfo);
+    comparator_fcinfo_return(fcinfo);
     result
 }
 
@@ -3122,8 +3134,8 @@ fn function_call2_coll_datum_seam<'mcx>(
     // it re-resolved `fmgr_info(function_id)` (a `BuiltinFunction` `String` clone
     // + fresh `FmgrInfo`) AND allocated/dropped a fresh `FunctionCallInfoBaseData`
     // (two `vec![]` + a boxed `flinfo`) on EVERY comparison. Reuse the cached
-    // built-in resolution (an `Rc` bump) and a pooled frame, exactly as
-    // `function_call_invoke_datum_resolved_seam` does. A NON-built-in `fn_oid`
+    // built-in resolution (an `Rc` bump) and the comparator's persistent ABI
+    // carrier (C's `SortShimExtra.fcinfo`, reused in place). A NON-built-in `fn_oid`
     // (catalog / security-definer / SQL function) returns `None` and falls
     // through to the verbatim by-OID path below, so DDL invalidation, the secdef
     // userid switch, and SQL dispatch are unaffected. There is no `fn_expr` and
@@ -3135,13 +3147,13 @@ fn function_call2_coll_datum_seam<'mcx>(
         // with the by-ref referent), so the `isnull=false` it sets is kept.
         let (a1, r1) = datum_to_ref_arg(&arg1);
         let (a2, r2) = datum_to_ref_arg(&arg2);
-        let mut frame = fcinfo_pool_take(Some(resolved.finfo.clone()), collation);
+        let mut frame = comparator_fcinfo_take(Some(resolved.finfo.clone()), collation);
         frame.args.push(a1);
         frame.args.push(a2);
         frame.nargs = 2;
         let ref_args = vec![r1, r2];
         let out = dispatch_resolved_into_frame(mcx, &resolved, &mut frame, ref_args, None, None);
-        fcinfo_pool_return(frame);
+        comparator_fcinfo_return(frame);
         return match out? {
             // C `FunctionCall2Coll`: `if (fcinfo->isnull) elog(ERROR, "function
             // %u returned NULL", flinfo->fn_oid)`. The shared
@@ -3938,7 +3950,7 @@ fn function_call_invoke_datum_core_soft<'mcx>(
     // For a BUILT-IN `fn_oid` recover the resolution memoized at first call (an
     // `Rc` refcount bump) instead of re-`fmgr_isbuiltin`'ing — which CLONES the
     // whole `BuiltinFunction` (a `String` heap alloc) — on every call. This is
-    // the same memo `function_call_invoke_datum_resolved_seam` uses, lifted to
+    // the same memo `function_call_invoke_step_seam` uses, lifted to
     // the shared by-OID core so EVERY by-OID caller benefits: the aggregate
     // transition/final functions (`function_call_invoke_datum_owned*`, the
     // profiled `count(*)` `int8inc` per-row String-clone hotspot), DISTINCT /
@@ -4002,8 +4014,8 @@ fn function_call_invoke_datum_core_soft<'mcx>(
 /// `fmgr_info` resolution and `fn_expr` stamping (C: everything in
 /// `EEOP_FUNCEXPR*` from `InitFunctionCallInfoData`/the arg gather to
 /// `fn_addr(fcinfo)` — the per-call work, no OID lookup). Taking the
-/// already-`ResolvedFmgrInfo` by reference lets the mcx-pooling Phase-1 fast path
-/// (`function_call_invoke_datum_resolved_seam`) reuse the resolution
+/// already-`ResolvedFmgrInfo` by reference lets the on-the-step fast path
+/// (`function_call_invoke_step_seam`) reuse the resolution
 /// `ExecInitFunc` cached once on the step instead of re-resolving the OID (which
 /// clones the whole `BuiltinFunction` — a `String` heap alloc — and boxes a fresh
 /// `FmgrInfo`) on every call, per tuple. The resolution is borrowed (never
@@ -4037,8 +4049,8 @@ fn function_call_invoke_resolved_core_soft<'mcx>(
 /// args, install the optional soft-error sink, `fcinfo->isnull = false; d =
 /// fn_addr(fcinfo)`, then read back the result). Operates on a `&mut` frame so
 /// the same body serves BOTH the freshly-allocated frame
-/// ([`function_call_invoke_resolved_core_soft`]) and the POOLED frame
-/// ([`function_call_invoke_datum_resolved_seam`]'s reuse path). No allocation of
+/// ([`function_call_invoke_resolved_core_soft`]) and a persistent reused frame
+/// (the step seam and the comparator carrier path's reuse). No allocation of
 /// its own beyond the unavoidable detoast / result materialization into `mcx`.
 fn dispatch_resolved_into_frame<'mcx>(
     mcx: Mcx<'mcx>,
@@ -4127,99 +4139,12 @@ fn dispatch_frame_ref_args_in_place<'mcx>(
     Ok(Some((result, false)))
 }
 
-/// `FunctionCallInvoke(fcinfo)` over the canonical [`Datum`] lane using the
-/// resolution `ExecInitFunc` cached once for the step (mcx-pooling Phase 1). For
-/// a BUILT-IN `fn_oid` this skips the per-call `fmgr_info` OID re-resolution —
-/// the `fmgr_isbuiltin` `BuiltinFunction` clone (a `String` heap alloc) and the
-/// fresh `FmgrInfo`/`FmgrResolution` build — by recovering the memoized
-/// `ResolvedFmgrInfo` (an `Rc` refcount bump). Argument marshalling and dispatch
-/// are otherwise byte-identical to [`function_call_invoke_datum_seam`]: the
-/// canonical `Datum` args are marshalled to the ABI `(word, ref)` lanes, the
-/// step's `fn_expr` is re-stamped onto the (cached) `FmgrInfo`, and the call runs
-/// under `collation` (`fcinfo->fncollation`). A NON-built-in OID (catalog /
-/// security-definer / SQL) falls through to the ordinary by-OID
-/// [`function_call_invoke_datum_seam`], so DDL invalidation, the secdef userid
-/// switch, and SQL-function dispatch are unaffected.
-fn function_call_invoke_datum_resolved_seam<'mcx>(
-    mcx: Mcx<'mcx>,
-    fn_oid: Oid,
-    collation: Oid,
-    args: &[::types_tuple::heaptuple::Datum<'mcx>],
-    args_null: &[bool],
-    fn_expr: Option<::types_core::fmgr::FnExprErased>,
-) -> PgResult<(::types_tuple::heaptuple::Datum<'mcx>, bool)> {
-    // Recover the cached built-in resolution; on a miss (non-built-in or any
-    // resolution error) fall through to the ordinary by-OID seam, which keeps
-    // the catalog / secdef / SQL legs exactly as before.
-    let cached = resolved_builtin_cached(mcx, fn_oid)?;
-    let Some(resolved) = cached else {
-        return function_call_invoke_datum_seam(mcx, fn_oid, collation, args, args_null, fn_expr);
-    };
-
-    // Build the per-call-site `fn_expr` Box (C: `flinfo->fn_expr`, stamped onto
-    // the frame's `FmgrInfo` below). The shared, cache-owned `resolved` carries
-    // no `fn_expr` (it is keyed by OID and shared across every call site), so we
-    // BORROW it directly — no `FmgrResolution`/`String` clone per tuple (the
-    // profiled WHERE-clause hotspot). The per-call node is a cheap `Rc`-backed
-    // `FnExprErased`; the COMMON non-polymorphic hot path (`int4pl`/`int4mod`,
-    // `fn_expr == None`) builds none. A polymorphic built-in (`array_eq`,
-    // `record_eq`) reads it back via `get_fn_expr_*` off the frame's flinfo.
-    let fn_expr_box: Option<Box<FnExpr>> = fn_expr.map(|node| {
-        Box::new(FnExpr::External(::fmgr::ExternalFnExpr {
-            tag: 0,
-            node: Some(node),
-        }))
-    });
-
-    // Take a reusable call frame from the per-backend pool (no per-call frame
-    // construction / drop — the profiled hotspot). Marshal the canonical `Datum`
-    // args DIRECTLY into the frame's capacity-retained `args` Vec (the
-    // load-bearing dual-fcinfo-home re-marshal — #327; the executor frame and
-    // the ABI carrier never meet, so the value conversion stays, but it no longer
-    // allocates a throwaway Vec). The by-reference side channel is gathered into
-    // a local `ref_args` Vec that `dispatch_resolved_into_frame` moves into the
-    // frame's (also capacity-retained) `ref_args` in place.
-    // The frame's `flinfo` is a cheap `FmgrInfo` clone (no `String`); stamp the
-    // per-call `fn_expr` onto it (C: `fcinfo->flinfo->fn_expr`) so a callee's
-    // `get_fn_expr_*` reads the call-site node.
-    let mut frame = fcinfo_pool_take(Some(resolved.finfo.clone()), collation);
-    if let Some(flinfo) = frame.flinfo.as_mut() {
-        flinfo.fn_expr = fn_expr_box.clone();
-    }
-    // Refill the frame's `args` AND `ref_args` (both cleared by `reset_for_reuse`
-    // / `fcinfo_pool_return`, capacity kept) DIRECTLY — no throwaway local
-    // `ref_args` Vec, so the pooled hot path allocates nothing per call.
-    frame.ref_args.clear();
-    frame.ref_args.reserve(args.len());
-    for (i, val) in args.iter().enumerate() {
-        let is_null = args_null.get(i).copied().unwrap_or(false);
-        let (mut nd, refp) = datum_to_ref_arg(val);
-        if is_null {
-            nd.isnull = true;
-        }
-        frame.args.push(nd);
-        frame.ref_args.push(if is_null { None } else { refp });
-    }
-    frame.nargs = args.len() as i16;
-
-    let out = dispatch_frame_ref_args_in_place(mcx, &resolved, &mut frame, fn_expr_box, None);
-    fcinfo_pool_return(frame);
-    match out? {
-        Some(pair) => Ok(pair),
-        // No escontext was installed, so a soft error never occurs.
-        None => unreachable!(
-            "function_call_invoke_datum_resolved with NULL escontext never soft-fails"
-        ),
-    }
-}
-
 /// `EEOP_FUNCEXPR` over the STEP'S OWN persistent ABI call frame — the faithful
 /// `fcinfo->isnull = false; d = op->d.func.fn_addr(fcinfo)` of execExprInterp.c.
 ///
 /// The caller (the interpreter) owns `fcinfo`, allocated once at `ExecInitFunc`
-/// and reused in place across every tuple. Versus
-/// [`function_call_invoke_datum_resolved_seam`] this removes the per-call
-/// `fcinfo_pool_take`/`fcinfo_pool_return` (the profiled hotspot ~½ of the
+/// and reused in place across every tuple. This carries no per-call
+/// frame take/return (the profiled hotspot ~½ of the
 /// `EEOP_FUNCEXPR` subtree): the frame is never popped from a pool, never
 /// `reset_for_reuse`d, and never cleared/parked — its `flinfo` resolution is
 /// stamped ONCE (on the first call, when `flinfo` is `None`) and its
@@ -5329,9 +5254,6 @@ pub fn init_seams() {
         fastpath_function_call_invoke_seam,
     );
     fmgr_seams::function_call_invoke_datum::set(function_call_invoke_datum_seam);
-    fmgr_seams::function_call_invoke_datum_resolved::set(
-        function_call_invoke_datum_resolved_seam,
-    );
     fmgr_seams::function_call_invoke_step::set(function_call_invoke_step_seam);
     fmgr_seams::function_call_invoke_datum_soft::set(function_call_invoke_datum_soft_seam);
     fmgr_seams::function_call_invoke_datum_owned::set(
