@@ -27,6 +27,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetSnapshotData(snapshot)` (procarray.c) — the in-place variant: fill the
+    /// caller-owned `snapshot` struct, reusing its already-allocated
+    /// `xip`/`subxip` arrays instead of allocating fresh ones per call (C's
+    /// actual `malloc`-once-per-snapshot-struct lifetime). Used by the hot
+    /// snapmgr acquisition path. Can `ereport(ERROR)`.
+    pub fn get_snapshot_data_into(snapshot: &mut SnapshotData) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `ProcArrayInstallImportedXmin(xmin, sourcevxid)` (procarray.c) — make
     /// our `MyProc->xmin` safe to set from an imported snapshot, verifying the
     /// source vxid is still running. Returns false when the source vanished.

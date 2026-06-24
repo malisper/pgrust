@@ -241,34 +241,27 @@ impl StaticWhich {
 /// `MyProc->xmin`/`TransactionXmin`/`RecentXmin` updates, and return that
 /// struct's handle.
 fn get_snapshot_data_into(which: StaticWhich) -> PgResult<SnapHandle> {
-    let fetched = procarray_seams::get_snapshot_data::call()?;
-    let xmin = fetched.xmin;
-
-    let handle = with_state(|s| {
-        let h = which.handle(s);
-        {
-            let mut d = h.borrow_mut();
-            d.xmin = fetched.xmin;
-            d.xmax = fetched.xmax;
-            d.xcnt = fetched.xip.len() as u32;
-            d.xip = fetched.xip;
-            d.subxcnt = fetched.subxip.len() as i32;
-            d.subxip = fetched.subxip;
-            d.suboverflowed = fetched.suboverflowed;
-            d.takenDuringRecovery = fetched.takenDuringRecovery;
-            d.copied = false;
-            // procarray.c GetSnapshotData ends with
-            //   snapshot->curcid = GetCurrentCommandId(false);
-            // so a freshly-fetched snapshot sees tuples written by earlier
-            // commands of the current transaction. The procarray seam already
-            // computes this into `fetched.curcid`; carry it through rather than
-            // zeroing it (zeroing diverged from C and could hide own-transaction
-            // rows on any path that does not subsequently bump the command id).
-            d.curcid = fetched.curcid;
-            d.snapXactCompletionCount = fetched.snapXactCompletionCount;
-        }
-        h
-    });
+    // Fill the reusable per-`which` static struct in place. The procarray seam
+    // reuses the struct's already-allocated `xip`/`subxip` arrays rather than
+    // allocating two fresh >8 KiB xid arrays per call — matching C's
+    // `GetSnapshotData(snapshot)`, which `malloc`s those arrays once per
+    // snapshot struct and reuses them on every acquisition. This is the
+    // dominant un-poolable malloc source identified in the post-aset profile.
+    let handle = with_state(|s| which.handle(s));
+    {
+        let mut d = handle.borrow_mut();
+        procarray_seams::get_snapshot_data_into::call(&mut d)?;
+        // procarray.c GetSnapshotData ends with
+        //   snapshot->curcid = GetCurrentCommandId(false);
+        // The seam already computes this into d.curcid via the proc fill, but
+        // d.xcnt/subxcnt must mirror the filled array lengths (the seam sets
+        // them, but snapmgr historically derived them from the Vec lengths;
+        // keep that invariant explicit and harmless).
+        debug_assert_eq!(d.xcnt as usize, d.xip.len());
+        debug_assert_eq!(d.subxcnt as usize, d.subxip.len());
+        d.copied = false;
+    }
+    let xmin = handle.borrow().xmin;
 
     // procarray.c: if (!TransactionIdIsValid(MyProc->xmin)) MyProc->xmin =
     // TransactionXmin = xmin;

@@ -59,6 +59,13 @@ fn transaction_id_advance(dest: TransactionId) -> TransactionId {
 /// The seam returns only the computed snapshot fields; snapmgr replays the
 /// `MyProc->xmin`/`TransactionXmin`/`RecentXmin` updates via the proc seam.
 ///
+/// This by-value entry mints a fresh `SnapshotData` per call (used by the cold
+/// SSI snapshot-acquisition path in predicate.c, which has no caller-owned
+/// destination struct to reuse). The hot snapmgr path uses
+/// [`GetSnapshotDataInto`], which fills a caller-owned struct and so reuses its
+/// already-allocated `xip`/`subxip` arrays — matching C's
+/// `malloc(GetMaxSnapshotXidCount()…)`-once-per-snapshot-struct lifetime.
+///
 /// NB: the `GetSnapshotDataReuse` fast path (which reuses the caller's previous
 /// snapshot arrays when `xactCompletionCount` is unchanged) cannot be expressed
 /// across this seam: the owner is not handed the caller's prior `SnapshotData`,
@@ -66,6 +73,19 @@ fn transaction_id_advance(dest: TransactionId) -> TransactionId {
 /// reuse only changes performance, never the resulting xmin/xmax/xip/subxip).
 pub fn GetSnapshotData() -> PgResult<SnapshotData> {
     let mut snapshot = SnapshotData::sentinel(::snapshot::snapshot::SnapshotType::SNAPSHOT_MVCC);
+    GetSnapshotDataInto(&mut snapshot)?;
+    Ok(snapshot)
+}
+
+/// `GetSnapshotData(Snapshot snapshot)` (procarray.c) — fill the caller-owned
+/// `snapshot` in place, reusing its already-allocated `xip`/`subxip` arrays
+/// rather than allocating fresh ones per call. This is C's actual contract: the
+/// `xip`/`subxip` arrays are `malloc`'d once (sized to
+/// `GetMaxSnapshotXidCount()`/`GetMaxSnapshotSubxidCount()`) when a snapshot
+/// struct is first used and reused across every `GetSnapshotData` on that
+/// struct. The caller's prior `xip`/`subxip` contents are overwritten.
+pub fn GetSnapshotDataInto(snapshot: &mut SnapshotData) -> PgResult<()> {
+    snapshot.snapshot_type = ::snapshot::snapshot::SnapshotType::SNAPSHOT_MVCC;
 
     let mut count: usize = 0;
     let mut subcount: i32 = 0;
@@ -83,12 +103,21 @@ pub fn GetSnapshotData() -> PgResult<SnapshotData> {
     let xmax;
     let mut xmin;
 
-    // We allocate maxProcs xids / TOTAL_MAX_CACHED_SUBXIDS subxids of space,
-    // matching the C `malloc(GetMaxSnapshotXidCount() ...)`.
+    // We need maxProcs xids / TOTAL_MAX_CACHED_SUBXIDS subxids of working space,
+    // matching the C `malloc(GetMaxSnapshotXidCount() ...)`. Reuse the caller's
+    // existing `xip`/`subxip` allocations: resize them to the max length in
+    // place (no reallocation once they've grown to capacity, which is C's
+    // once-per-snapshot-struct malloc that is then reused on every call). The
+    // arrays are repopulated below and truncated to the live count at the end,
+    // so stale contents from the prior call are never observed.
     let max_xip = crate::shmem_model::GetMaxSnapshotXidCount() as usize;
     let max_subxip = crate::shmem_model::GetMaxSnapshotSubxidCount() as usize;
-    let mut xip: Vec<TransactionId> = vec![0; max_xip];
-    let mut subxip: Vec<TransactionId> = vec![0; max_subxip];
+    let mut xip = std::mem::take(&mut snapshot.xip);
+    let mut subxip = std::mem::take(&mut snapshot.subxip);
+    xip.clear();
+    xip.resize(max_xip, 0);
+    subxip.clear();
+    subxip.resize(max_subxip, 0);
 
     // It is sufficient to get shared lock on ProcArrayLock, even if we are going
     // to set MyProc->xmin.
@@ -323,7 +352,7 @@ pub fn GetSnapshotData() -> PgResult<SnapshotData> {
     snapshot.regd_count = 0;
     snapshot.copied = false;
 
-    Ok(snapshot)
+    Ok(())
 }
 
 /// `GetSnapshotDataReuse(Snapshot snapshot)` (procarray.c, static) — the
@@ -899,6 +928,7 @@ pub fn init_seams() {
     use procarray_seams as seams;
 
     seams::get_snapshot_data::set(GetSnapshotData);
+    seams::get_snapshot_data_into::set(GetSnapshotDataInto);
     seams::proc_array_install_imported_xmin::set(ProcArrayInstallImportedXmin);
     seams::proc_array_install_restored_xmin::set(ProcArrayInstallRestoredXmin);
     seams::get_running_transaction_data::set(GetRunningTransactionData);
