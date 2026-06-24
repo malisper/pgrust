@@ -153,7 +153,7 @@ fn populate_recordset_record<'mcx>(
     mcx: Mcx<'mcx>,
     cache: &mut PopulateRecordCacheLocal<'mcx>,
     rec: Option<&FormedTuple<'mcx>>,
-    obj: &JsObjectW<'_>,
+    obj: &JsObjectW<'mcx>,
     result: &mut Vec<FormedTuple<'mcx>>,
 ) -> PgResult<()> {
     // acquire/update cached tuple descriptor
@@ -431,7 +431,8 @@ fn populate_recordset_worker<'mcx>(
     } else {
         // Jsonb *jb = PG_GETARG_JSONB_P(json_arg_num);
         let jb = funcapi::srf_arg_varlena_bytes::call(mcx, fcinfo_ref, json_arg_num)?;
-        let root = crate::common::vardata_any(&jb);
+        let jb: &'mcx [u8] = ::mcx::slice_borrow_in(mcx, &jb)?;
+        let root = crate::common::vardata_any(jb);
         let header = u32::from_ne_bytes([root[0], root[1], root[2], root[3]]);
 
         // if (JB_ROOT_IS_SCALAR(jb) || !JB_ROOT_IS_ARRAY(jb)) ereport("cannot call %s on a non-array")

@@ -639,9 +639,9 @@ fn jsonb_set_with_value<'mcx>(
 /// `null`); the `jsonb_in` parse is the fmgr boundary.
 pub fn jsonb_set_lax<'mcx>(
     mcx: Mcx<'mcx>,
-    arg0: Option<&[u8]>,
+    arg0: Option<&'mcx [u8]>,
     path: Option<(&[Option<Vec<u8>>], i32)>,
-    newjsonb: Option<&[u8]>,
+    newjsonb: Option<&'mcx [u8]>,
     create: Option<bool>,
     handle_null: Option<&[u8]>,
     json_null: &'mcx [u8],

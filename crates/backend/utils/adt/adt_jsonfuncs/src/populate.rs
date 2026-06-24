@@ -376,10 +376,10 @@ fn populate_array_check_dimension(
 }
 
 /// `populate_array_element` (jsonfuncs.c:2618). `Ok(false)` == soft error.
-fn populate_array_element(
-    ctx: &mut PopulateArrayContext<'_, '_, '_>,
+fn populate_array_element<'mcx>(
+    ctx: &mut PopulateArrayContext<'mcx, '_, '_>,
     ndim: i32,
-    jsv: &JsValue,
+    jsv: &JsValue<'mcx>,
 ) -> PgResult<bool> {
     let mut element_isnull = false;
     let element_type = ctx.aio.element_type;
@@ -747,7 +747,7 @@ fn populate_array<'mcx>(
     mcx: Mcx<'mcx>,
     aio: &mut ArrayIOData<'mcx>,
     colname: Option<&[u8]>,
-    jsv: &JsValue,
+    jsv: &JsValue<'mcx>,
     isnull: &mut bool,
     mut escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<Datum<'mcx>> {
@@ -808,10 +808,10 @@ fn populate_array<'mcx>(
 
 /// `JsValueToJsObject` (jsonfuncs.c:2982): convert a [`JsValue`] into a
 /// [`JsObjectW`]. Returns `Ok(false)` when a soft error was reported.
-fn js_value_to_js_object<'a>(
-    jsv: &'a JsValue,
+fn js_value_to_js_object<'mcx>(
+    jsv: &JsValue<'mcx>,
     escontext: &mut Option<&mut SoftErrorContext>,
-) -> PgResult<(JsObjectW<'a>, bool)> {
+) -> PgResult<(JsObjectW<'mcx>, bool)> {
     match jsv {
         JsValue::Json { str, .. } => {
             // jso->val.json_hash = get_json_object_as_hash(json, len, "populate_composite", escontext);
@@ -825,6 +825,7 @@ fn js_value_to_js_object<'a>(
             let jbv = jbv.as_deref().expect("jsonb value present");
             // if (jbv->type == jbvBinary && JsonContainerIsObject(jbv->val.binary.data))
             if let (jbvType::jbvBinary, JsonbValueData::Binary { data, .. }) = (jbv.typ, &jbv.val) {
+                let data: &'mcx [u8] = *data;
                 if json_container_is_object(container_header(data)) {
                     return Ok((JsObjectW::JsonbCont(Some(data)), !soft_error_occurred(escontext)));
                 }
@@ -881,7 +882,7 @@ fn populate_composite<'mcx>(
     typid: u32,
     _colname: Option<&[u8]>,
     defaultval: Option<&FormedTuple<'mcx>>,
-    jsv: &JsValue,
+    jsv: &JsValue<'mcx>,
     isnull: &mut bool,
     mut escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<Datum<'mcx>> {
@@ -940,7 +941,7 @@ fn populate_scalar<'mcx>(
     io: &ScalarIOData,
     typid: u32,
     typmod: i32,
-    jsv: &JsValue,
+    jsv: &JsValue<'mcx>,
     isnull: &mut bool,
     mut escontext: Option<&mut SoftErrorContext>,
     omit_quotes: bool,
@@ -994,14 +995,14 @@ fn populate_scalar<'mcx>(
                 str_opt = Some(if b { b"true".to_vec() } else { b"false".to_vec() });
             } else if jbv.typ == jbvType::jbvNumeric {
                 // str = DatumGetCString(DirectFunctionCall1(numeric_out, numeric));
-                let num = match &jbv.val {
+                let num: &[u8] = match &jbv.val {
                     JsonbValueData::Numeric(n) => n,
                     _ => &[],
                 };
                 str_opt = Some(numeric_out(mcx, num)?.into_bytes());
             } else if jbv.typ == jbvType::jbvBinary {
                 // str = JsonbToCString(NULL, binary.data, binary.len);
-                let (data, len) = match &jbv.val {
+                let (data, len): (&[u8], i32) = match &jbv.val {
                     JsonbValueData::Binary { data, len, .. } => (data, *len),
                     _ => (&[][..], 0),
                 };
@@ -1060,7 +1061,7 @@ fn populate_domain<'mcx>(
     io: &mut DomainIOData<'mcx>,
     typid: u32,
     colname: Option<&[u8]>,
-    jsv: &JsValue,
+    jsv: &JsValue<'mcx>,
     isnull: &mut bool,
     mut escontext: Option<&mut SoftErrorContext>,
     omit_quotes: bool,
@@ -1226,7 +1227,7 @@ fn populate_record_field<'mcx>(
     typmod: i32,
     colname: Option<&[u8]>,
     defaultval: &Datum<'mcx>,
-    jsv: &JsValue,
+    jsv: &JsValue<'mcx>,
     isnull: &mut bool,
     mut escontext: Option<&mut SoftErrorContext>,
     omit_scalar_quotes: bool,
@@ -1330,7 +1331,7 @@ fn datum_get_heap_tuple_header<'mcx>(
 
 /// `JsObjectGetField` (jsonfuncs.c:3491): look up `field` in the object,
 /// producing the per-field [`JsValue`]. Returns `(jsv, found)`.
-fn js_object_get_field(obj: &JsObjectW<'_>, field: &[u8]) -> PgResult<(JsValue, bool)> {
+fn js_object_get_field<'a>(obj: &JsObjectW<'a>, field: &[u8]) -> PgResult<(JsValue<'a>, bool)> {
     match obj {
         JsObjectW::JsonHash(hash) => {
             // hashentry = hash_search(json_hash, field, HASH_FIND, NULL);
@@ -1372,7 +1373,7 @@ pub(crate) fn populate_record<'mcx>(
     tupdesc: &TupleDescData<'mcx>,
     record_p: Option<Box<RecordIOData<'mcx>>>,
     defaultval: Option<&FormedTuple<'mcx>>,
-    obj: &JsObjectW<'_>,
+    obj: &JsObjectW<'mcx>,
     mut escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<(FormedTuple<'mcx>, Option<Box<RecordIOData<'mcx>>>)> {
     let ncolumns = tupdesc.natts;

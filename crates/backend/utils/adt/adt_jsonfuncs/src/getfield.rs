@@ -877,9 +877,9 @@ pub fn jsonb_get_element<'mcx>(
     as_text: bool,
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     let npath = path.len() as i32;
-    // JsonbContainer *container = &jb->root;
-    let mut container: Vec<u8> = vardata_any(jb).to_vec();
-    let mut jbvp: Option<JsonbValue> = None;
+    // JsonbContainer *container = &jb->root;  (a borrow into the 'mcx document)
+    let mut container: &'mcx [u8] = vardata_any(jb);
+    let mut jbvp: Option<JsonbValue<'mcx>> = None;
     let mut have_object = false;
     let mut have_array = false;
 
@@ -894,7 +894,7 @@ pub fn jsonb_get_element<'mcx>(
         // Assert(JB_ROOT_IS_ARRAY(jb) && JB_ROOT_IS_SCALAR(jb));
         // Extract the scalar value, if it is what we'll return.
         if npath <= 0 {
-            jbvp = getIthJsonbValueFromContainer(&container, 0)?;
+            jbvp = getIthJsonbValueFromContainer(container, 0)?;
         }
     }
 
@@ -908,7 +908,7 @@ pub fn jsonb_get_element<'mcx>(
         if as_text {
             // return PointerGetDatum(cstring_to_text(JsonbToCString(NULL,
             //                          container, VARSIZE(jb))));
-            return Ok(Some(JsonbToCString(mcx, &container, varsize_jsonb(jb))?));
+            return Ok(Some(JsonbToCString(mcx, container, varsize_jsonb(jb))?));
         } else {
             // not text mode - just hand back the jsonb
             return Ok(Some(slice_to_pgvec(mcx, jb)?));
@@ -921,7 +921,7 @@ pub fn jsonb_get_element<'mcx>(
             // jbvp = getKeyJsonValueFromContainer(container, VARDATA_ANY(subscr),
             //                                     VARSIZE_ANY_EXHDR(subscr), NULL);
             let subscr = path[i];
-            jbvp = getKeyJsonValueFromContainer(&container, subscr)?;
+            jbvp = getKeyJsonValueFromContainer(container, subscr)?;
         } else if have_array {
             // char *indextext = TextDatumGetCString(path[i]);
             let indextext = path[i];
@@ -940,11 +940,11 @@ pub fn jsonb_get_element<'mcx>(
                 // Handle negative subscript.
                 // Container must be array, but make sure.
                 // if (!JsonContainerIsArray(container)) elog(ERROR, "not a jsonb array");
-                if !json_container_is_array(container_header(&container)) {
+                if !json_container_is_array(container_header(container)) {
                     return Err(elog_error("not a jsonb array"));
                 }
                 // nelements = JsonContainerSize(container);
-                let nelements = json_container_size(container_header(&container));
+                let nelements = json_container_size(container_header(container));
                 // if (lindex == INT_MIN || -lindex > nelements)
                 //     { *isnull = true; return PointerGetDatum(NULL); }
                 // else index = nelements + lindex;
@@ -956,7 +956,7 @@ pub fn jsonb_get_element<'mcx>(
             };
 
             // jbvp = getIthJsonbValueFromContainer(container, index);
-            jbvp = getIthJsonbValueFromContainer(&container, index)?;
+            jbvp = getIthJsonbValueFromContainer(container, index)?;
         } else {
             // scalar, extraction yields a null
             // *isnull = true; return PointerGetDatum(NULL);
@@ -977,16 +977,16 @@ pub fn jsonb_get_element<'mcx>(
         // if (jbvp->type == jbvBinary) { container = jbvp->val.binary.data; ... }
         // else { Assert(IsAJsonbScalar(jbvp)); have_object = false; have_array = false; }
         if current_type == jbvType::jbvBinary {
-            // container = jbvp->val.binary.data;
-            let data = match &jbvp.as_ref().expect("jbvp must be set").val {
-                JsonbValueData::Binary { data, .. } => data.to_vec(),
+            // container = jbvp->val.binary.data;  (binary.data is &'mcx, Copy)
+            let data: &'mcx [u8] = match &jbvp.as_ref().expect("jbvp must be set").val {
+                JsonbValueData::Binary { data, .. } => data,
                 _ => unreachable!("jbvBinary payload"),
             };
             container = data;
-            have_object = json_container_is_object(container_header(&container));
-            have_array = json_container_is_array(container_header(&container));
+            have_object = json_container_is_object(container_header(container));
+            have_array = json_container_is_array(container_header(container));
             // Assert(!JsonContainerIsScalar(container));
-            debug_assert!(!json_container_is_scalar(container_header(&container)));
+            debug_assert!(!json_container_is_scalar(container_header(container)));
         } else {
             // Assert(IsAJsonbScalar(jbvp));
             debug_assert!(is_a_jsonb_scalar(current_type));

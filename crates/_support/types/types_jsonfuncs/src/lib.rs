@@ -22,12 +22,9 @@ use ::types_core::{InvalidOid, Oid};
 use ::fmgr::resolution::FmgrResolution;
 use ::fmgr::FmgrInfo;
 use ::types_json::{JsonTokenType, JsonTypeCategory};
-// `<'static>` bridge: this crate stores a `Box<JsonbValue>` in a struct field
-// (an owned working tree) and is not yet converted to thread `'mcx`.  Naming the
-// `JsonbValueStatic` alias keeps today's owned-tree behavior unchanged.  (Also
-// on the `datum-b` jsonb migration map -- the bridge keeps the two campaigns
-// independently stageable.)
-use types_jsonb::jsonb_util::JsonbValueStatic as JsonbValue;
+// `JsValue` now threads the arena lifetime: its jsonb arm holds an arena-borrowed
+// `JsonbValue<'mcx>` (zero-copy populate path), so the type itself is parametric.
+use types_jsonb::jsonb_util::JsonbValue;
 use ::types_jsonb::jsonb::JsonbContainer;
 use ::types_tuple::heaptuple::TupleDesc;
 
@@ -207,7 +204,7 @@ pub struct DomainCheckCache {
 /// populate recursion processes. The C tagged union over `is_json` becomes a
 /// Rust enum.
 #[derive(Clone, Debug)]
-pub enum JsValue {
+pub enum JsValue<'mcx> {
     /// The `is_json` arm: `struct { const char *str; int len; JsonTokenType
     /// type; }`. `str = None` is the C NULL pointer (a JSON null / absent
     /// field); `len` is the string length or `-1` if NUL-terminated.
@@ -216,7 +213,7 @@ pub enum JsValue {
         type_: JsonTokenType,
     },
     /// The jsonb arm: `JsonbValue *jsonb`. `None` is the C NULL pointer.
-    Jsonb(Option<Box<JsonbValue>>),
+    Jsonb(Option<Box<JsonbValue<'mcx>>>),
 }
 
 /// C: `struct JsObject` (jsonfuncs.c:309) — a json object as either a hash of

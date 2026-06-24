@@ -404,6 +404,16 @@ fn fc_jsonb_set_lax(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgRes
     };
 
     let m = scratch_mcx();
+    // Re-home the by-ref args (they borrow fcinfo) into the scratch arena so they
+    // satisfy the `'mcx`-lifetimed jsonb_set_lax signature (zero-copy read path).
+    let arg0: Option<&[u8]> = match arg0 {
+        Some(b) => Some(::mcx::slice_borrow_in(m.mcx(), b)?),
+        None => None,
+    };
+    let newjsonb: Option<&[u8]> = match newjsonb {
+        Some(b) => Some(::mcx::slice_borrow_in(m.mcx(), b)?),
+        None => None,
+    };
     // json_null = JsonbValueToJsonb(jbvNull) — the on-disk image for `null`.
     let json_null = jsonb_util::JsonbValueToJsonb(
         m.mcx(),
@@ -411,6 +421,7 @@ fn fc_jsonb_set_lax(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgRes
     )?
     .as_slice()
     .to_vec();
+    let json_null = ::mcx::slice_borrow_in(m.mcx(), &json_null)?;
 
     let r = crate::setops::jsonb_set_lax(
         m.mcx(),
@@ -419,7 +430,7 @@ fn fc_jsonb_set_lax(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgRes
         newjsonb,
         create,
         handle_null.as_deref(),
-        &json_null,
+        json_null,
     )?;
     Ok(ret_opt_varlena(fcinfo, r.map(|v| v.as_slice().to_vec())))
 }
@@ -452,7 +463,8 @@ fn fc_jsonb_strip_nulls(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::P
     let jb = arg_jsonb_image(fcinfo, 0).to_vec();
     let strip_in_arrays = arg_bool(fcinfo, 1);
     let m = scratch_mcx();
-    let r = crate::strip::jsonb_strip_nulls(m.mcx(), &jb, strip_in_arrays)?;
+    let jb = ::mcx::slice_borrow_in(m.mcx(), &jb)?;
+    let r = crate::strip::jsonb_strip_nulls(m.mcx(), jb, strip_in_arrays)?;
     Ok(ret_varlena(fcinfo, r.as_slice().to_vec()))
 }
 

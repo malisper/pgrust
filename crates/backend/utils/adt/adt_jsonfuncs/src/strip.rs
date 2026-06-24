@@ -254,7 +254,7 @@ impl<'mcx> StripnullState<'mcx> {
 /// varlena; the result is the full result varlena.
 pub fn jsonb_strip_nulls<'mcx>(
     mcx: Mcx<'mcx>,
-    jb: &[u8],
+    jb: &'mcx [u8],
     strip_in_arrays: bool,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let root = crate::common::vardata_any(jb);
