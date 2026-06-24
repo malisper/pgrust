@@ -337,7 +337,21 @@ fn fcinfo_pool_take(flinfo: Option<FmgrInfo>, collation: Oid) -> FunctionCallInf
 fn fcinfo_pool_return(mut frame: FunctionCallInfoBaseData) {
     // Drop any live payload now (before the frame is parked) so an `internal`
     // state box / soft-error sink does not survive into the next call's reuse.
-    frame.flinfo = None;
+    //
+    // The `flinfo` Box is KEPT allocated (its live payload is the only leak risk,
+    // and `FmgrInfo::clone`/`reset_for_reuse` already overwrite the whole record
+    // in place on the next take): nulling it here freed the `Box<FmgrInfo>` and
+    // `fcinfo_pool_take`→`reset_for_reuse` re-`Box::new`'d it on the very next
+    // call — a malloc+free PAIR on every single fmgr dispatch (the profiled
+    // `fcinfo_pool_return`/`drop_in_place<FunctionCallInfoBaseData>` /
+    // `fcinfo_pool_take` malloc hotspot, 10M× for a per-row WHERE filter). Clear
+    // only its owned-payload slots in place so no caller box survives reuse; the
+    // resolution metadata is stale-but-harmless (overwritten next take).
+    if let Some(flinfo) = frame.flinfo.as_mut() {
+        flinfo.fn_extra = None;
+        flinfo.fn_extra_user = None;
+        flinfo.fn_expr = None;
+    }
     frame.context = None;
     frame.agg_context = None;
     frame.escontext = None;
