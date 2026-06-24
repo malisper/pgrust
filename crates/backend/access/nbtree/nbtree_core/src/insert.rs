@@ -2784,19 +2784,25 @@ fn _bt_delete_or_dedup_one_page<'mcx>(
     index_unchanged: bool,
 ) -> PgResult<()> {
     let buffer = insertstate.buf;
-    let page = bufmgr::buffer_get_page::call(mcx, buffer)?;
-    let opaque = opaque_from_page(&page)?;
-
-    debug_assert!(P_ISLEAF(&opaque));
     debug_assert!(simpleonly || insertstate.itup_key.as_ref().unwrap().heapkeyspace);
     debug_assert!(!simpleonly || (!checkingunique && !uniquedup && !index_unchanged));
 
-    /* Scan over all items to see which need to be deleted (LP_DEAD). */
-    let minoff = P_FIRSTDATAKEY(&opaque);
-    let maxoff = PageGetMaxOffsetNumber(&PageRef::new(&page)?);
-    let mut deletable: StdVec<OffsetNumber> = StdVec::with_capacity(MaxIndexTuplesPerPage);
-    {
-        let pref = PageRef::new(&page)?;
+    /*
+     * Borrow the leaf page in place (mirroring C's `Page page =
+     * BufferGetPage(buffer)` pointer) for the read-only LP_DEAD scan: no owned
+     * 8 KiB snapshot. The borrow is fully consumed before the `_bt_simpledel_pass`
+     * buffer re-entry below; only the computed `(minoff, maxoff, deletable)`
+     * escape.
+     */
+    let (minoff, maxoff, deletable) = bufmgr::buffer_with_page(buffer, |page| {
+        let opaque = opaque_from_page(page)?;
+        debug_assert!(P_ISLEAF(&opaque));
+
+        /* Scan over all items to see which need to be deleted (LP_DEAD). */
+        let minoff = P_FIRSTDATAKEY(&opaque);
+        let pref = PageRef::new(page)?;
+        let maxoff = PageGetMaxOffsetNumber(&pref);
+        let mut deletable: StdVec<OffsetNumber> = StdVec::with_capacity(MaxIndexTuplesPerPage);
         let mut offnum = minoff;
         while offnum <= maxoff {
             let itemid = PageGetItemId(&pref, offnum)?;
@@ -2805,7 +2811,8 @@ fn _bt_delete_or_dedup_one_page<'mcx>(
             }
             offnum = OffsetNumberNext(offnum);
         }
-    }
+        Ok((minoff, maxoff, deletable))
+    })?;
 
     if !deletable.is_empty() {
         _bt_simpledel_pass(
@@ -2814,8 +2821,10 @@ fn _bt_delete_or_dedup_one_page<'mcx>(
         insertstate.bounds_valid = false;
 
         /* Return when a page split has already been avoided */
-        let freepage = bufmgr::buffer_get_page::call(mcx, buffer)?;
-        if (PageGetFreeSpace(&PageRef::new(&freepage)?) as usize) >= insertstate.itemsz {
+        let enough_free = bufmgr::buffer_with_page(buffer, |freepage| {
+            Ok((PageGetFreeSpace(&PageRef::new(freepage)?) as usize) >= insertstate.itemsz)
+        })?;
+        if enough_free {
             return Ok(());
         }
 
@@ -2874,56 +2883,46 @@ fn _bt_simpledel_pass<'mcx>(
     minoff: OffsetNumber,
     maxoff: OffsetNumber,
 ) -> PgResult<()> {
-    let page = bufmgr::buffer_get_page::call(mcx, buffer)?;
+    let iblknum = bufmgr::buffer_get_block_number::call(buffer);
 
-    /* Get array of table blocks pointed to by LP_DEAD-set tuples */
-    let deadblocks = _bt_deadblocks(&page, deletable, newitem)?;
+    /*
+     * Borrow the leaf page in place (C's `Page page = BufferGetPage(buffer)`):
+     * the `deadblocks` build and the `delstate` scan are read-only and fully
+     * consumed here; only the owned `delstate` (allocated in `mcx`) escapes,
+     * before the `bt_delitems_delete_check` buffer re-entry below. No 8 KiB copy.
+     */
+    let delstate = bufmgr::buffer_with_page(buffer, |page| {
+        /* Initialize tableam state that describes the index deletion operation. */
+        let cap = MaxTIDsPerBTreePage;
+        let deltids: PgVec<'mcx, TmIndexDelete> = vec_with_capacity_in(mcx, cap)?;
+        let status: PgVec<'mcx, TmIndexStatus> = vec_with_capacity_in(mcx, cap)?;
+        let mut delstate = TmIndexDeleteOp {
+            iblknum,
+            bottomup: false,
+            bottomupfreespace: 0,
+            deltids,
+            status,
+        };
 
-    /* Initialize tableam state that describes the index deletion operation. */
-    let cap = MaxTIDsPerBTreePage;
-    let deltids: PgVec<'mcx, TmIndexDelete> = vec_with_capacity_in(mcx, cap)?;
-    let status: PgVec<'mcx, TmIndexStatus> = vec_with_capacity_in(mcx, cap)?;
-    let mut delstate = TmIndexDeleteOp {
-        iblknum: bufmgr::buffer_get_block_number::call(buffer),
-        bottomup: false,
-        bottomupfreespace: 0,
-        deltids,
-        status,
-    };
+        /* Get array of table blocks pointed to by LP_DEAD-set tuples */
+        let deadblocks = _bt_deadblocks(page, deletable, newitem)?;
 
-    let pref = PageRef::new(&page)?;
-    let mut offnum = minoff;
-    while offnum <= maxoff {
-        let itemid = PageGetItemId(&pref, offnum)?;
-        let itup = PageGetItem(&pref, &itemid)?;
-        let ituphdr = index_tuple_header(itup);
-        let item_dead = ItemIdIsDead(&itemid);
+        let pref = PageRef::new(page)?;
+        let mut offnum = minoff;
+        while offnum <= maxoff {
+            let itemid = PageGetItemId(&pref, offnum)?;
+            let itup = PageGetItem(&pref, &itemid)?;
+            let ituphdr = index_tuple_header(itup);
+            let item_dead = ItemIdIsDead(&itemid);
 
-        if !BTreeTupleIsPosting(&ituphdr) {
-            let tidblock = ipd_block_number(&ituphdr.t_tid);
-            if deadblocks.binary_search(&tidblock).is_ok() {
-                let id = delstate.deltids.len() as i16;
-                delstate.deltids.push(TmIndexDelete {
-                    tid: ituphdr.t_tid,
-                    id,
-                });
-                delstate.status.push(TmIndexStatus {
-                    idxoffnum: offnum,
-                    knowndeletable: item_dead,
-                    promising: false,
-                    freespace: 0,
-                });
-            } else {
-                debug_assert!(!item_dead);
-            }
-        } else {
-            let nitem = BTreeTupleGetNPosting(&ituphdr) as usize;
-            for p in 0..nitem {
-                let tid = posting_list_n(itup, p);
-                let tidblock = ipd_block_number(&tid);
+            if !BTreeTupleIsPosting(&ituphdr) {
+                let tidblock = ipd_block_number(&ituphdr.t_tid);
                 if deadblocks.binary_search(&tidblock).is_ok() {
                     let id = delstate.deltids.len() as i16;
-                    delstate.deltids.push(TmIndexDelete { tid, id });
+                    delstate.deltids.push(TmIndexDelete {
+                        tid: ituphdr.t_tid,
+                        id,
+                    });
                     delstate.status.push(TmIndexStatus {
                         idxoffnum: offnum,
                         knowndeletable: item_dead,
@@ -2933,11 +2932,30 @@ fn _bt_simpledel_pass<'mcx>(
                 } else {
                     debug_assert!(!item_dead);
                 }
+            } else {
+                let nitem = BTreeTupleGetNPosting(&ituphdr) as usize;
+                for p in 0..nitem {
+                    let tid = posting_list_n(itup, p);
+                    let tidblock = ipd_block_number(&tid);
+                    if deadblocks.binary_search(&tidblock).is_ok() {
+                        let id = delstate.deltids.len() as i16;
+                        delstate.deltids.push(TmIndexDelete { tid, id });
+                        delstate.status.push(TmIndexStatus {
+                            idxoffnum: offnum,
+                            knowndeletable: item_dead,
+                            promising: false,
+                            freespace: 0,
+                        });
+                    } else {
+                        debug_assert!(!item_dead);
+                    }
+                }
             }
-        }
 
-        offnum = OffsetNumberNext(offnum);
-    }
+            offnum = OffsetNumberNext(offnum);
+        }
+        Ok(delstate)
+    })?;
 
     debug_assert!(delstate.deltids.len() >= deletable.len());
 

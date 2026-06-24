@@ -1617,10 +1617,10 @@ pub fn bt_start_prim_scan<'mcx>(
 /// `_bt_advance_array_keys()` — Advance array elements using a tuple. Works as
 /// a wrapper around `_bt_check_compare`; sets `pstate.continuescan` and
 /// `so->needPrimScan`, and returns whether caller's tuple satisfies the new qual.
-fn bt_advance_array_keys<'mcx>(
+fn bt_advance_array_keys<'mcx, 'p>(
     rel: &Relation<'mcx>,
     so: &mut BTScanOpaqueData<'mcx>,
-    pstate: Option<&mut BTReadPageState<'mcx>>,
+    pstate: Option<&mut BTReadPageState<'mcx, 'p>>,
     tuple: &[u8],
     tupnatts: i32,
     sktrig: i32,
@@ -1948,8 +1948,7 @@ fn bt_advance_array_keys<'mcx>(
         // finaltup == tuple && still unsatisfied -> new primitive scan.
         let finaltup_is_tuple = ps
             .finaltup
-            .as_ref()
-            .map(|f| f.as_slice() == tuple)
+            .map(|f| f == tuple)
             .unwrap_or(false);
 
         if !all_required_satisfied && finaltup_is_tuple {
@@ -1958,14 +1957,14 @@ fn bt_advance_array_keys<'mcx>(
     }
 
     if matches!(disp, Disp::ContinueScan) {
-        // Proactively check finaltup.
-        let finaltup_bytes = pstate
-            .as_deref()
-            .and_then(|ps| ps.finaltup.as_ref())
-            .map(|f| f.to_vec());
+        // Proactively check finaltup. `finaltup` borrows the live page (`'p`),
+        // which outlives `pstate`, so copy the slice reference out (no heap copy)
+        // to release the `pstate` borrow before the `&mut so` calls below.
+        let finaltup_bytes: Option<&[u8]> =
+            pstate.as_deref().and_then(|ps| ps.finaltup);
 
         if !all_required_satisfied {
-            if let Some(ft) = finaltup_bytes.as_ref() {
+            if let Some(ft) = finaltup_bytes {
                 let nfatts = bt_tuple_get_natts(&index_tuple_header(ft), rel_natts(rel) as u16)
                     as i32;
                 let mut sb = so.scanBehind;
@@ -1991,11 +1990,9 @@ fn bt_advance_array_keys<'mcx>(
         if so.scanBehind {
             // Truncated high key -- _bt_scanbehind_checkkeys recheck scheduled.
         } else if has_required_opposite_direction_only {
-            let finaltup_bytes = pstate
-                .as_deref()
-                .and_then(|ps| ps.finaltup.as_ref())
-                .map(|f| f.to_vec());
-            if let Some(ft) = finaltup_bytes.as_ref() {
+            let finaltup_bytes: Option<&[u8]> =
+                pstate.as_deref().and_then(|ps| ps.finaltup);
+            if let Some(ft) = finaltup_bytes {
                 if !bt_oppodir_checkkeys(rel, so, dir, ft)? {
                     disp = Disp::NewPrimScan;
                 }
@@ -2108,10 +2105,10 @@ fn bt_verify_keys_with_arraykeys(so: &BTScanOpaqueData) -> bool {
 /// conditions. Advances array keys and stops/starts primitive index scans for
 /// `array_keys=true` callers. (Public: the per-page scan engine in `search.rs`
 /// and amcheck call here.)
-pub fn bt_checkkeys<'mcx>(
+pub fn bt_checkkeys<'mcx, 'p>(
     rel: &Relation<'mcx>,
     so: &mut BTScanOpaqueData<'mcx>,
-    pstate: &mut BTReadPageState<'mcx>,
+    pstate: &mut BTReadPageState<'mcx, 'p>,
     array_keys: bool,
     tuple: &[u8],
     tupnatts: i32,
@@ -2258,10 +2255,10 @@ fn bt_oppodir_checkkeys<'mcx>(
 /// guaranteed to be satisfied by every tuple from `pstate.page`. Sets
 /// `pstate.startikey` and `pstate.forcenonrequired`. (Public; the scan engine
 /// calls here at the start of reading each non-first leaf page.)
-pub fn bt_set_startikey<'mcx>(
+pub fn bt_set_startikey<'mcx, 'p>(
     rel: &Relation<'mcx>,
     so: &mut BTScanOpaqueData<'mcx>,
-    pstate: &mut BTReadPageState<'mcx>,
+    pstate: &mut BTReadPageState<'mcx, 'p>,
 ) -> PgResult<()> {
     let mut startikey = 0i32;
     let mut arrayidx = 0i32;
@@ -2277,7 +2274,7 @@ pub fn bt_set_startikey<'mcx>(
     }
 
     // The page being read (owned bytes); decode line pointers from it.
-    let page = PageRef::new(pstate.page.as_slice())?;
+    let page = PageRef::new(pstate.page)?;
 
     // minoff is the lowest non-pivot tuple; maxoff the highest.
     let firstiid = PageGetItemId(&page, pstate.minoff)?;
@@ -2747,10 +2744,10 @@ fn bt_check_rowcompare<'mcx>(
 
 /// `_bt_checkkeys_look_ahead()` — Determine if a scan with array keys should
 /// skip over uninteresting tuples; sets `pstate.skip` on success.
-fn bt_checkkeys_look_ahead<'mcx>(
+fn bt_checkkeys_look_ahead<'mcx, 'p>(
     rel: &Relation<'mcx>,
     so: &mut BTScanOpaqueData<'mcx>,
-    pstate: &mut BTReadPageState<'mcx>,
+    pstate: &mut BTReadPageState<'mcx, 'p>,
     tupnatts: i32,
 ) -> PgResult<()> {
     let dir = so.currPos.dir;
@@ -2792,7 +2789,7 @@ fn bt_checkkeys_look_ahead<'mcx>(
             as OffsetNumber
     };
 
-    let page = PageRef::new(pstate.page.as_slice())?;
+    let page = PageRef::new(pstate.page)?;
     let iid = PageGetItemId(&page, aheadoffnum)?;
     let ahead = PageGetItem(&page, &iid)?.to_vec();
 

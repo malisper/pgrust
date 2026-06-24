@@ -1829,11 +1829,10 @@ fn _bt_readpage<'mcx>(
     let maxoff = PageGetMaxOffsetNumber(&page);
 
     /* initialize page-level state that we'll pass to _bt_checkkeys */
-    let mut pstate = ::types_nbtree::BTReadPageState::new(mcx);
+    let mut pstate = ::types_nbtree::BTReadPageState::new(mcx, page_bytes);
     pstate.minoff = minoff;
     pstate.maxoff = maxoff;
     pstate.finaltup = None;
-    pstate.page = to_pgvec(mcx, page_bytes);
     pstate.firstpage = firstpage;
     pstate.forcenonrequired = false;
     pstate.startikey = 0;
@@ -1850,7 +1849,7 @@ fn _bt_readpage<'mcx>(
             if !P_RIGHTMOST(&opaque) {
                 let iid = PageGetItemId(&page, P_HIKEY)?;
                 let hikey = PageGetItem(&page, &iid)?;
-                pstate.finaltup = Some(to_pgvec(mcx, hikey));
+                pstate.finaltup = Some(hikey);
 
                 if so.scanBehind
                     && !bt_scanbehind_checkkeys(rel, so, dir, hikey)?
@@ -1963,7 +1962,7 @@ fn _bt_readpage<'mcx>(
             if minoff <= maxoff && !P_LEFTMOST(&opaque) {
                 let iid = PageGetItemId(&page, minoff)?;
                 let ftup = PageGetItem(&page, &iid)?;
-                pstate.finaltup = Some(to_pgvec(mcx, ftup));
+                pstate.finaltup = Some(ftup);
 
                 if so.scanBehind && !bt_scanbehind_checkkeys(rel, so, dir, ftup)? {
                     so.currPos.moreLeft = false;
@@ -2070,13 +2069,6 @@ fn _bt_readpage<'mcx>(
 
     Ok(so.currPos.firstItem <= so.currPos.lastItem)
     })
-}
-
-/// Copy a byte slice into an owned `PgVec<u8>`.
-fn to_pgvec<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgVec<'mcx, u8> {
-    let mut v: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, bytes.len()).expect("pgvec alloc");
-    v.extend_from_slice(bytes);
-    v
 }
 
 // ===========================================================================

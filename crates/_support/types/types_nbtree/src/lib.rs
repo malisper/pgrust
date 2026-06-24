@@ -774,16 +774,24 @@ impl<'mcx> BTScanOpaqueData<'mcx> {
 /// plus the private look-ahead/primscan-scheduling counters all mirror the C
 /// struct field-for-field.
 #[derive(Clone, Debug)]
-pub struct BTReadPageState<'mcx> {
+pub struct BTReadPageState<'mcx, 'p> {
     /// Lowest non-pivot tuple's offset.
     pub minoff: OffsetNumber,
     /// Highest non-pivot tuple's offset.
     pub maxoff: OffsetNumber,
     /// Needed by scans with array keys (page high key / first non-pivot tuple),
-    /// or `None` on the rightmost/leftmost page. Owned page-item bytes.
-    pub finaltup: Option<PgVec<'mcx, u8>>,
-    /// Page being read (owned bytes over the scan context).
-    pub page: PgVec<'mcx, u8>,
+    /// or `None` on the rightmost/leftmost page. Borrowed page-item bytes that
+    /// point into the live pinned leaf page (`'p`), exactly like C's pointer
+    /// into `BufferGetPage` — no owned copy.
+    pub finaltup: Option<&'p [u8]>,
+    /// Page being read — a borrow into the live pinned leaf page (`'p`),
+    /// mirroring C's `Page page = BufferGetPage(...)` pointer. No owned 8 KiB
+    /// snapshot is allocated; the borrow is valid for the duration of
+    /// `_bt_readpage`, which holds the buffer pin/content lock.
+    pub page: &'p [u8],
+    /// Phantom binder so `'mcx` stays a parameter even though the page-borrowed
+    /// fields now use `'p`.
+    pub _mcx: ::core::marker::PhantomData<::mcx::Mcx<'mcx>>,
     /// page is first for primitive scan?
     pub firstpage: bool,
     /// treat all keys as nonrequired?
@@ -805,14 +813,17 @@ pub struct BTReadPageState<'mcx> {
     pub nskipadvances: i16,
 }
 
-impl<'mcx> BTReadPageState<'mcx> {
-    /// A fresh read-page state over `mcx` (with an empty owned page buffer).
-    pub fn new(mcx: ::mcx::Mcx<'mcx>) -> Self {
+impl<'mcx, 'p> BTReadPageState<'mcx, 'p> {
+    /// A fresh read-page state whose `page` borrows the live pinned leaf page
+    /// bytes (`'p`). `mcx` is retained only as a phantom binder (the per-tuple
+    /// comparison machinery still threads `'mcx`); no page copy is made.
+    pub fn new(_mcx: ::mcx::Mcx<'mcx>, page: &'p [u8]) -> Self {
         BTReadPageState {
             minoff: 0,
             maxoff: 0,
             finaltup: None,
-            page: PgVec::new_in(mcx),
+            page,
+            _mcx: ::core::marker::PhantomData,
             firstpage: false,
             forcenonrequired: false,
             startikey: 0,
