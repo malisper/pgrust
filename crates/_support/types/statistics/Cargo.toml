@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 types_core = { path = "../types_core" }
+types_error = { path = "../types_error" }
 datum = { path = "../datum" }
 types_tuple = { path = "../types_tuple" }
 mcx = { path = "../../mcx" }

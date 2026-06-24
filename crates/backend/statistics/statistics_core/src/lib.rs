@@ -146,8 +146,8 @@ pub fn build_sorted_items<'mcx>(
     let mut nrows = 0usize;
     for i in 0..data.numrows as usize {
         let mut toowide = false;
-        let mut values: Vec<Datum<'mcx>> = Vec::with_capacity(numattrs);
-        let mut isnull: Vec<bool> = Vec::with_capacity(numattrs);
+        // Per-row buffers from the ANALYZE arena (C: palloc in the build context).
+        let mut item = SortItem::with_capacity_in(mcx, numattrs)?;
 
         for j in 0..numattrs {
             let attnum = attnums[j];
@@ -161,35 +161,40 @@ pub fn build_sorted_items<'mcx>(
             }
             debug_assert!(idx < data.nattnums as usize);
 
-            let mut value = data.values[idx][i].clone();
+            // C copies the Datum *word* from data->values (a shallow pointer
+            // copy); the referenced bytes are never duplicated. The owned model
+            // has no borrowing Datum, so we read the source by reference and
+            // either re-home the value into the arena (clone_in) or, for a
+            // varlena, replace it outright with the detoasted arena image — so
+            // the bytes land in the bulk-freed build context, not the global
+            // heap, and the wide-value clone is skipped entirely.
+            let src = &data.values[idx][i];
             let isn = data.nulls[idx][i];
             let attlen = typlen[idx];
 
-            if !isn && attlen == -1 {
-                if toast_raw_datum_size::call(mcx, &value)? > WIDTH_THRESHOLD {
+            let value = if !isn && attlen == -1 {
+                if toast_raw_datum_size::call(mcx, src)? > WIDTH_THRESHOLD {
                     toowide = true;
                     break;
                 }
                 // value = PointerGetDatum(PG_DETOAST_DATUM(value)): detoast the
                 // varlena bytes and re-wrap as a by-reference Datum.
                 let detoasted =
-                    pg_detoast_datum_packed::call(mcx, value.as_varlena_bytes().as_ref())?;
-                value = Datum::from_byref_bytes_in(mcx, detoasted.as_slice())?;
-            }
+                    pg_detoast_datum_packed::call(mcx, src.as_varlena_bytes().as_ref())?;
+                Datum::from_byref_bytes_in(mcx, detoasted.as_slice())?
+            } else {
+                src.clone_in(mcx)?
+            };
 
-            values.push(value);
-            isnull.push(isn);
+            item.values.push(value);
+            item.isnull.push(isn);
         }
 
         if toowide {
             continue;
         }
 
-        items.push(SortItem {
-            values,
-            isnull,
-            count: 0,
-        });
+        items.push(item);
         nrows += 1;
     }
 
@@ -316,11 +321,7 @@ fn ndistinct_for_combination<'mcx>(
 
     let mut items: Vec<SortItem<'mcx>> = Vec::with_capacity(numrows as usize);
     for _ in 0..numrows {
-        items.push(SortItem {
-            values: Vec::with_capacity(k as usize),
-            isnull: Vec::with_capacity(k as usize),
-            count: 0,
-        });
+        items.push(SortItem::with_capacity_in(mcx, k as usize)?);
     }
 
     for i in 0..k as usize {
@@ -332,9 +333,10 @@ fn ndistinct_for_combination<'mcx>(
         mss.add_dimension(i as i32, lt_opr, collid)?;
 
         for j in 0..numrows as usize {
+            // C copies the Datum word; re-home the value into the arena.
             items[j]
                 .values
-                .push(data.values[combination[i] as usize][j].clone());
+                .push(data.values[combination[i] as usize][j].clone_in(mcx)?);
             items[j].isnull.push(data.nulls[combination[i] as usize][j]);
         }
     }
@@ -489,6 +491,7 @@ fn build_distinct_groups<'mcx>(
 /// returned dimension vectors are truncated to the deduplicated length, and
 /// `ncounts[dim]` records that length.
 fn build_column_frequencies<'mcx>(
+    mcx: Mcx<'mcx>,
     groups: &[SortItem<'mcx>],
     mss: &MultiSortSupport<'mcx>,
 ) -> PgResult<(Vec<Vec<SortItem<'mcx>>>, Vec<i32>)> {
@@ -504,11 +507,12 @@ fn build_column_frequencies<'mcx>(
         // values/isnull vector to match C's single-dimension search items).
         let mut col: Vec<SortItem<'mcx>> = Vec::with_capacity(ngroups);
         for i in 0..ngroups {
-            col.push(SortItem {
-                values: vec![groups[i].values[dim].clone()],
-                isnull: vec![groups[i].isnull[dim]],
-                count: groups[i].count,
-            });
+            col.push(single_dim_item_in(
+                mcx,
+                &groups[i].values[dim],
+                groups[i].isnull[dim],
+                groups[i].count,
+            )?);
         }
 
         // qsort_interruptible(result[dim], ..., sort_item_compare, ssup):
@@ -532,6 +536,23 @@ fn build_column_frequencies<'mcx>(
     }
 
     Ok((result, ncounts))
+}
+
+/// Build a single-dimension `SortItem` (1-element `values`/`isnull`) in the
+/// ANALYZE arena, re-homing the source value via `clone_in` (C: a `palloc`'d
+/// 1-element search/frequency item). Used for the per-column frequency tables
+/// and the MCV base-frequency lookup keys.
+fn single_dim_item_in<'mcx>(
+    mcx: Mcx<'mcx>,
+    value: &Datum<'mcx>,
+    isnull: bool,
+    count: i32,
+) -> PgResult<SortItem<'mcx>> {
+    let mut item = SortItem::with_capacity_in(mcx, 1)?;
+    item.values.push(value.clone_in(mcx)?);
+    item.isnull.push(isnull);
+    item.count = count;
+    Ok(item)
 }
 
 /// `sort_item_compare(a, b, ssup)` (mcv.c:464) — single-dimension
@@ -664,7 +685,7 @@ fn statext_mcv_build<'mcx>(
     }
 
     // compute frequencies for values in each column
-    let (freqs, nfreqs) = build_column_frequencies(&groups, &mss)?;
+    let (freqs, nfreqs) = build_column_frequencies(mcx, &groups, &mss)?;
 
     let mut mcvlist = MCVList {
         magic: STATS_MCV_MAGIC,
@@ -683,21 +704,21 @@ fn statext_mcv_build<'mcx>(
     for i in 0..nitems {
         debug_assert!(i == 0 || groups[i - 1].count >= groups[i].count);
 
+        // The MCVItem is the final serialized-output carrier (global-heap Vec,
+        // one per kept item, length nitems); copy the group's arena buffers into
+        // it. (C: statext_mcv_build copies the kept group's values/isnull into
+        // the MCVItem.)
         let mut item = MCVItem {
             frequency: (groups[i].count as f64) / (numrows as f64),
             base_frequency: 1.0,
-            isnull: groups[i].isnull.clone(),
-            values: groups[i].values.clone(),
+            isnull: groups[i].isnull.iter().copied().collect(),
+            values: groups[i].values.iter().cloned().collect(),
         };
 
         // base frequency, if the attributes were independent
         for j in 0..numattrs {
             // search this dimension's frequency table for the group's value
-            let key = SortItem {
-                values: vec![groups[i].values[j].clone()],
-                isnull: vec![groups[i].isnull[j]],
-                count: 0,
-            };
+            let key = single_dim_item_in(mcx, &groups[i].values[j], groups[i].isnull[j], 0)?;
             let pos = bsearch_single_dim(&key, &freqs[j], nfreqs[j] as usize, &mss.ssup[j])?
                 .expect("base-frequency value must be present in the column frequency table");
             item.base_frequency *= (freqs[j][pos].count as f64) / (numrows as f64);

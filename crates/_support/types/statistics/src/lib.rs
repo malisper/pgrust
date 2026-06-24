@@ -13,7 +13,8 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use ::mcx::Mcx;
+use ::mcx::{Mcx, PgVec};
+use ::types_error::PgResult;
 use ::types_core::{AttrNumber, Oid};
 use ::types_tuple::pg_type::FormData_pg_type;
 // The canonical `'mcx` byte-lane value type (`ByVal(usize)` / `ByRef(PgVec<u8>)`).
@@ -225,11 +226,33 @@ pub struct DimensionInfo {
 ///     int         count;
 /// } SortItem;
 /// ```
-#[derive(Clone, Debug, Default, PartialEq)]
+///
+/// The per-row `values`/`isnull` buffers are arena-backed [`PgVec`]s allocated
+/// from the ANALYZE memory context (C: `palloc` in the dedicated build context,
+/// bulk-freed by one `MemoryContextDelete`), not global-heap `Vec`s. This
+/// matches C's allocation model — the build allocates many of these per ANALYZE
+/// and never individually frees them — and keeps the malloc/free churn off the
+/// global allocator. `Clone` clones into the same arena (`PgVec` carries its
+/// allocator), so deriving it is sound. `Default` is intentionally *not* derived
+/// (a `PgVec` needs an `Mcx` to construct); use [`SortItem::with_capacity_in`].
+#[derive(Clone, Debug, PartialEq)]
 pub struct SortItem<'mcx> {
-    pub values: Vec<Datum<'mcx>>,
-    pub isnull: Vec<bool>,
+    pub values: PgVec<'mcx, Datum<'mcx>>,
+    pub isnull: PgVec<'mcx, bool>,
     pub count: i32,
+}
+
+impl<'mcx> SortItem<'mcx> {
+    /// Allocate an empty `SortItem` with `cap`-element `values`/`isnull` buffers
+    /// reserved in the ANALYZE arena `mcx` (C: `palloc(... * sizeof)` in the
+    /// build context). `count` starts at 0.
+    pub fn with_capacity_in(mcx: Mcx<'mcx>, cap: usize) -> PgResult<Self> {
+        Ok(SortItem {
+            values: ::mcx::vec_with_capacity_in(mcx, cap)?,
+            isnull: ::mcx::vec_with_capacity_in(mcx, cap)?,
+            count: 0,
+        })
+    }
 }
 
 /* ---------------------------------------------------------------------------
