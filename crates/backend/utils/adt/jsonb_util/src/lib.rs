@@ -134,6 +134,14 @@ fn slice_to_vec(src: &[u8]) -> PgResult<Vec<u8>> {
     Ok(v)
 }
 
+/// Copy a `&[u8]` into a shared, refcounted `Rc<[u8]>` document buffer (one copy
+/// at the iterator root; nested-container recursion then shares this buffer
+/// without re-copying).  Reserves fallibly via [`slice_to_vec`] so the OOM path
+/// is identical to the rest of the crate.
+fn rc_from_slice(src: &[u8]) -> PgResult<alloc::rc::Rc<[u8]>> {
+    Ok(alloc::rc::Rc::from(slice_to_vec(src)?.into_boxed_slice()))
+}
+
 // ---------------------------------------------------------------------------
 // On-disk byte helpers (replace the C pointer arithmetic over JsonbContainer).
 // ---------------------------------------------------------------------------
@@ -285,6 +293,33 @@ pub fn getJsonbLength(jc: &[u8], index: i32) -> u32 {
 /// or when the caller does not track document identity).  It is threaded into
 /// any `jbvBinary` child produced so the document-relative `offset` field is
 /// preserved for `.keyvalue()` ids; it has no effect on scalar children.
+/// Cheap container-recursion peek: if the `index`-th child is a nested container
+/// (object/array, i.e. `fillJsonbValue` would produce a `jbvBinary`), return the
+/// child container's window start `cstart` within `container` -- the same value
+/// `fillJsonbValue` computes -- without copying the child bytes.  Returns `None`
+/// for scalar children (the caller falls back to a full [`fillJsonbValue`]).
+///
+/// This is the bounded copy elimination for the iterator's hot recursion path:
+/// `JsonbIteratorNext` only needs the child window to build the child iterator
+/// (which shares the parent's `Rc` document buffer), so the per-step
+/// `slice_to_vec` of the whole nested container is avoided entirely.
+#[inline]
+fn child_container_start(
+    container: &[u8],
+    index: usize,
+    data_proper: usize,
+    offset: u32,
+) -> Option<usize> {
+    let entry = container_child(container, index);
+    if jbe_iscontainer(entry) {
+        // Mirrors fillJsonbValue's container arm: cstart = base_addr +
+        // INTALIGN(offset), with base_addr == data_proper.
+        Some(data_proper + intalign(offset as usize))
+    } else {
+        None
+    }
+}
+
 fn fillJsonbValue(
     container: &[u8],
     index: usize,
@@ -623,8 +658,8 @@ fn appendElement(pstate: &mut JsonbParseState, scalar_val: &JsonbValue) -> PgRes
 /// reported as `None` (the pre-existing `Option` contract), not silently
 /// mis-iterated.
 pub fn JsonbIteratorInit(container: &[u8]) -> Option<Box<JsonbIterator>> {
-    slice_to_vec(container)
-        .and_then(|c| iteratorFromContainer(c, 0, None))
+    rc_from_slice(container)
+        .and_then(|buf| iteratorFromContainer(buf, 0, 0, None))
         .ok()
 }
 
@@ -637,8 +672,8 @@ pub fn JsonbIteratorInit(container: &[u8]) -> Option<Box<JsonbIterator>> {
 /// This entry point exists only in the safe port: C derives the position from
 /// the raw `JsonbContainer *` pointer, which is unavailable here.
 pub fn JsonbIteratorInitAt(container: &[u8], doc_offset: i32) -> Option<Box<JsonbIterator>> {
-    slice_to_vec(container)
-        .and_then(|c| iteratorFromContainer(c, doc_offset, None))
+    rc_from_slice(container)
+        .and_then(|buf| iteratorFromContainer(buf, 0, doc_offset, None))
         .ok()
 }
 
@@ -692,39 +727,55 @@ pub fn JsonbIteratorNext(
                         return Ok(WJB_END_ARRAY);
                     }
                 }
-                let recurse_data;
+                let recurse_buf;
+                let recurse_cont_start;
                 let recurse_off;
                 {
                     let cur = it
                         .as_mut()
                         .ok_or_else(|| PgError::error("JsonbIteratorNext: iterator is NULL"))?;
                     let idx = cur.cur_index as usize;
-                    fillJsonbValue(
-                        &cur.container,
-                        idx,
-                        cur.data_proper,
-                        cur.cur_data_offset,
-                        cur.doc_offset,
-                        val,
-                    )?;
-                    let child = container_child(&cur.container, idx);
-                    jbe_advance_offset(&mut cur.cur_data_offset, child);
-                    cur.cur_index += 1;
 
-                    if !val.is_scalar() && !skip_nested {
-                        recurse_data = Some(binary_data(val)?);
-                        recurse_off = binary_offset(val);
+                    // Recursion fast path: if the child is a nested container and
+                    // we will recurse into it, compute its window directly and
+                    // share the document buffer -- skipping the full
+                    // `fillJsonbValue` (and its `slice_to_vec` of the whole child
+                    // container), since `val` is overwritten by the child's first
+                    // step anyway.
+                    let cstart = if skip_nested {
+                        None
                     } else {
+                        child_container_start(
+                            cur.container(),
+                            idx,
+                            cur.data_proper,
+                            cur.cur_data_offset,
+                        )
+                    };
+
+                    let child = container_child(cur.container(), idx);
+                    if let Some(cstart) = cstart {
+                        jbe_advance_offset(&mut cur.cur_data_offset, child);
+                        cur.cur_index += 1;
+                        recurse_off = cur.doc_offset + cstart as i32;
+                        recurse_cont_start = cur.cont_start + cstart;
+                        recurse_buf = alloc::rc::Rc::clone(&cur.buf);
+                    } else {
+                        fillJsonbValue(
+                            cur.container(),
+                            idx,
+                            cur.data_proper,
+                            cur.cur_data_offset,
+                            cur.doc_offset,
+                            val,
+                        )?;
+                        jbe_advance_offset(&mut cur.cur_data_offset, child);
+                        cur.cur_index += 1;
                         return Ok(WJB_ELEM);
                     }
                 }
-                let child_it = iteratorFromContainer(
-                    recurse_data.ok_or_else(|| {
-                        PgError::error("JsonbIteratorNext: recurse data is NULL")
-                    })?,
-                    recurse_off,
-                    it.take(),
-                )?;
+                let child_it =
+                    iteratorFromContainer(recurse_buf, recurse_cont_start, recurse_off, it.take())?;
                 *it = Some(child_it);
                 continue;
             }
@@ -739,7 +790,8 @@ pub fn JsonbIteratorNext(
                 val.val = JsonbValueData::Object(placeholder_pairs(cur.n_elems)?);
                 cur.cur_index = 0;
                 cur.cur_data_offset = 0;
-                cur.cur_value_offset = getJsonbOffset(&cur.container, cur.n_elems as i32);
+                let val_off = getJsonbOffset(cur.container(), cur.n_elems as i32);
+                cur.cur_value_offset = val_off;
                 cur.state = JBI_OBJECT_KEY;
                 return Ok(WJB_BEGIN_OBJECT);
             }
@@ -761,7 +813,7 @@ pub fn JsonbIteratorNext(
                     .ok_or_else(|| PgError::error("JsonbIteratorNext: iterator is NULL"))?;
                 let idx = cur.cur_index as usize;
                 fillJsonbValue(
-                    &cur.container,
+                    cur.container(),
                     idx,
                     cur.data_proper,
                     cur.cur_data_offset,
@@ -775,7 +827,8 @@ pub fn JsonbIteratorNext(
                 return Ok(WJB_KEY);
             }
             JBI_OBJECT_VALUE => {
-                let recurse_data;
+                let recurse_buf;
+                let recurse_cont_start;
                 let recurse_off;
                 {
                     let cur = it
@@ -784,34 +837,46 @@ pub fn JsonbIteratorNext(
                     cur.state = JBI_OBJECT_KEY;
                     let idx = cur.cur_index as usize;
                     let nelems = cur.n_elems as usize;
-                    fillJsonbValue(
-                        &cur.container,
-                        idx + nelems,
-                        cur.data_proper,
-                        cur.cur_value_offset,
-                        cur.doc_offset,
-                        val,
-                    )?;
-                    let child_k = container_child(&cur.container, idx);
-                    jbe_advance_offset(&mut cur.cur_data_offset, child_k);
-                    let child_v = container_child(&cur.container, idx + nelems);
-                    jbe_advance_offset(&mut cur.cur_value_offset, child_v);
-                    cur.cur_index += 1;
 
-                    if !val.is_scalar() && !skip_nested {
-                        recurse_data = Some(binary_data(val)?);
-                        recurse_off = binary_offset(val);
+                    // Recursion fast path (see JBI_ARRAY_ELEM): skip the
+                    // container-copying `fillJsonbValue` when we will recurse.
+                    let cstart = if skip_nested {
+                        None
                     } else {
+                        child_container_start(
+                            cur.container(),
+                            idx + nelems,
+                            cur.data_proper,
+                            cur.cur_value_offset,
+                        )
+                    };
+
+                    let child_k = container_child(cur.container(), idx);
+                    let child_v = container_child(cur.container(), idx + nelems);
+                    if let Some(cstart) = cstart {
+                        jbe_advance_offset(&mut cur.cur_data_offset, child_k);
+                        jbe_advance_offset(&mut cur.cur_value_offset, child_v);
+                        cur.cur_index += 1;
+                        recurse_off = cur.doc_offset + cstart as i32;
+                        recurse_cont_start = cur.cont_start + cstart;
+                        recurse_buf = alloc::rc::Rc::clone(&cur.buf);
+                    } else {
+                        fillJsonbValue(
+                            cur.container(),
+                            idx + nelems,
+                            cur.data_proper,
+                            cur.cur_value_offset,
+                            cur.doc_offset,
+                            val,
+                        )?;
+                        jbe_advance_offset(&mut cur.cur_data_offset, child_k);
+                        jbe_advance_offset(&mut cur.cur_value_offset, child_v);
+                        cur.cur_index += 1;
                         return Ok(WJB_VALUE);
                     }
                 }
-                let child_it = iteratorFromContainer(
-                    recurse_data.ok_or_else(|| {
-                        PgError::error("JsonbIteratorNext: recurse data is NULL")
-                    })?,
-                    recurse_off,
-                    it.take(),
-                )?;
+                let child_it =
+                    iteratorFromContainer(recurse_buf, recurse_cont_start, recurse_off, it.take())?;
                 *it = Some(child_it);
                 continue;
             }
@@ -846,24 +911,6 @@ fn placeholder_pairs(n: u32) -> PgResult<Vec<JsonbPair>> {
     Ok(v)
 }
 
-/// Extract the owned container bytes from a `jbvBinary` JsonbValue produced by
-/// `fillJsonbValue` (for recursing).
-fn binary_data(val: &JsonbValue) -> PgResult<Vec<u8>> {
-    match &val.val {
-        JsonbValueData::Binary { data, len, .. } => slice_to_vec(&data[..*len as usize]),
-        _ => unreachable!("recurse target must be jbvBinary"),
-    }
-}
-
-/// Extract the document-relative `offset` of a `jbvBinary` JsonbValue (for
-/// propagating into the child iterator).
-fn binary_offset(val: &JsonbValue) -> i32 {
-    match &val.val {
-        JsonbValueData::Binary { offset, .. } => *offset,
-        _ => unreachable!("recurse target must be jbvBinary"),
-    }
-}
-
 /// `JBE_ADVANCE_OFFSET(offset, je)` (jsonb.h:162).
 #[inline]
 fn jbe_advance_offset(offset: &mut u32, je: JEntry) {
@@ -885,11 +932,13 @@ fn jbe_advance_offset(offset: &mut u32, je: JEntry) {
 /// container")` (jsonb_util.c:1042-1043).  This is a can't-happen on validated
 /// on-disk data, but is raised rather than silently mis-iterated.
 fn iteratorFromContainer(
-    container: Vec<u8>,
+    buf: alloc::rc::Rc<[u8]>,
+    cont_start: usize,
     doc_offset: i32,
     parent: Option<Box<JsonbIterator>>,
 ) -> PgResult<Box<JsonbIterator>> {
-    let header = container_header(&container);
+    let container = &buf[cont_start..];
+    let header = container_header(container);
     let n_elems = json_container_size(header);
     // Array starts just after header (4 bytes); children = container->children.
     let children_off = 4;
@@ -912,7 +961,8 @@ fn iteratorFromContainer(
     };
 
     Ok(Box::new(JsonbIterator {
-        container,
+        buf,
+        cont_start,
         n_elems,
         is_scalar,
         children_off,
@@ -1524,9 +1574,8 @@ pub fn JsonbDeepContains(
             let val_container = val
                 .as_ref()
                 .ok_or_else(|| PgError::error("JsonbDeepContains: val iterator is NULL"))?
-                .container
-                .clone();
-            let lhs_val = match getKeyJsonValueFromContainer(&val_container, &key_bytes)? {
+                .container();
+            let lhs_val = match getKeyJsonValueFromContainer(val_container, &key_bytes)? {
                 Some(v) => v,
                 None => return Ok(false),
             };
@@ -1580,9 +1629,8 @@ pub fn JsonbDeepContains(
                 let val_container = val
                     .as_ref()
                     .ok_or_else(|| PgError::error("JsonbDeepContains: val iterator is NULL"))?
-                    .container
-                    .clone();
-                if findJsonbValueFromContainer(&val_container, JB_FARRAY, &vcontained)?.is_none() {
+                    .container();
+                if findJsonbValueFromContainer(val_container, JB_FARRAY, &vcontained)?.is_none() {
                     return Ok(false);
                 }
             } else {

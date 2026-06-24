@@ -1369,7 +1369,6 @@ members = [
   "crates/backend/utils/time/snapmgr_pc_seams",
   "crates/backend/utils/time/snapmgr_seams",
   "crates/backend/utils/utils_error",
-  "crates/common/archive",
   "crates/common/archive_seams",
   "crates/common/blkreftable_seams",
   "crates/common/checksum_helper",
@@ -1412,7 +1411,6 @@ members = [
   "crates/common/unicode_norm_bitfields",
   "crates/common/username_seams",
   "crates/common/variant_frontshlib_pgfnames_rmtree",
-  "crates/common/wait_error",
   "crates/common/wait_error_seams",
   "crates/common/wchar_fgram",
   "crates/contrib/amcheck/verify_common",
@@ -1481,12 +1479,6 @@ strip = "symbols"
 lto = false
 codegen-units = 1
 
-# Symbolized profiling build: identical codegen to `release` (so `sample`/perf
-# numbers match the production binary) but with DWARF debug info and symbols kept
-# so Rust frames resolve by name instead of `???`. Lives in its own
-# `target/profiling/` cache, so building it does NOT invalidate the `release`
-# cache and a shared/persistent CARGO_TARGET_DIR stays warm across reprofiles
-# (incremental, not a cold full-workspace rebuild). See docs/perf/profiling-builds.md.
 [profile.profiling]
 inherits = "release"
 debug = 1

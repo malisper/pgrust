@@ -137,13 +137,27 @@ pub struct JsonbParseState {
 
 /// Iterator over an on-disk `JsonbContainer` (C: `struct JsonbIterator`).
 ///
-/// The container bytes are owned so the iterator is self-contained; `dataProper`
-/// is replaced by `data_proper` (a byte offset within `container`).
+/// `dataProper` is replaced by `data_proper` (a byte offset within the
+/// container window).
+///
+/// The backing bytes live in a shared [`Rc<[u8]>`] document buffer (`buf`) plus
+/// a `cont_start` window offset.  When the iterator recurses into a nested
+/// container, the child iterator **shares the same `Rc`** and only records the
+/// nested container's start offset in `cont_start`, instead of copying the
+/// nested sub-slice into a fresh owned `Vec`.  This mirrors C, where every
+/// nesting level's `JsonbIterator` holds a raw `JsonbContainer *` into the same
+/// document buffer, and it removes the per-recursion `malloc`/`free` of each
+/// nested container.  Use [`JsonbIterator::container`] to get the windowed
+/// `&[u8]` the call sites operate on.
 #[derive(Clone, Debug)]
 pub struct JsonbIterator {
-    /// The container bytes, starting at the `JsonbContainer` header
-    /// (C: `JsonbContainer *container`).
-    pub container: Vec<u8>,
+    /// Shared document buffer the container bytes live in.  Shared across the
+    /// parent/child iterator chain via [`Rc`] so recursion never re-copies a
+    /// nested container (C: the document the `JsonbContainer *` points into).
+    pub buf: alloc::rc::Rc<[u8]>,
+    /// Byte offset of this iterator's `JsonbContainer` header within `buf`
+    /// (`0` for the document root).
+    pub cont_start: usize,
     /// Number of elements (`nPairs` for objects) (C: `nElems`).
     pub n_elems: u32,
     /// Pseudo-array scalar value? (C: `isScalar`).
@@ -170,4 +184,15 @@ pub struct JsonbIterator {
     /// This is bookkeeping unique to the safe port (C reconstructs it from raw
     /// container pointers).
     pub doc_offset: i32,
+}
+
+impl JsonbIterator {
+    /// The container bytes this iterator operates on, as a windowed view into
+    /// the shared document buffer (C: `JsonbContainer *container`).  All the
+    /// container-relative indexing (`data_proper`, `children_off`, `JEntry`
+    /// reads) is taken against this slice.
+    #[inline]
+    pub fn container(&self) -> &[u8] {
+        &self.buf[self.cont_start..]
+    }
 }
