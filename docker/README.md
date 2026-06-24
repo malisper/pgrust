@@ -58,6 +58,11 @@ psql postgresql://postgres:secret@localhost:5432/postgres -c 'select version()'
 #  -> pgrust 18.3 ...
 ```
 
+> Note: `POSTGRES_PASSWORD` is still **required** on first init (same as the
+> official image), but the pgrust server cannot yet *enforce* passwords on TCP
+> connections — host connections use `trust`, so the password in the URL above is
+> accepted-and-ignored by the server. See "How it differs" below.
+
 ### Environment variables (identical to the official image)
 
 | Var                         | Default            | Meaning                                                             |
@@ -122,10 +127,17 @@ Only three places diverge, all because the server is pgrust:
 1. **`docker_temp_server_start` / `docker_temp_server_stop`** launch the pgrust
    binary directly (upstream uses `pg_ctl`, which would launch C postgres),
    backgrounded + polled, and `SIGINT` to stop (fast shutdown).
-2. **`pg_setup_hba_conf`** reads `password_encryption` from the freshly-written
-   `postgresql.conf` (defaulting to `scram-sha-256`) instead of running
-   `postgres -C password_encryption`, so it never depends on pgrust supporting
-   `-C`.
+2. **`pg_setup_hba_conf`** writes a `trust` `host` line by default instead of a
+   password (`scram-sha-256`) line. The pgrust server cannot yet *perform*
+   password authentication (the `fetch_role_password` seam is unported), so a
+   password `host` line would make every TCP connection FATAL even with the
+   correct password; `trust` is the only host method that works today. The
+   superuser password is still set by `initdb` and stored in the catalog (so it
+   is enforced once auth lands), and `POSTGRES_PASSWORD` is still *required* on
+   first init exactly like upstream (only an explicit
+   `POSTGRES_HOST_AUTH_METHOD=trust` waives it). An explicit
+   `POSTGRES_HOST_AUTH_METHOD` is always honored, with a warning if it names a
+   password method the server will reject.
 3. The **final `exec`** rewrites `postgres ...` to the pgrust binary and appends
    pgrust GUCs (`io_method=sync`, `max_stack_depth=60000`,
    `unix_socket_directories=/var/run/postgresql`) and a larger stack ulimit /

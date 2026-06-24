@@ -312,21 +312,39 @@ docker_setup_env() {
 # all arguments will be passed along as arguments to `postgres` for getting the value of 'password_encryption'
 #
 # pgrust note: upstream discovers the auth method via `postgres -C
-# password_encryption`. We instead read password_encryption out of the
-# freshly-initdb'd postgresql.conf (initdb writes the default there), defaulting
-# to scram-sha-256 (the PG14+ default), so we never depend on the pgrust binary
-# supporting the `-C` flag.
+# password_encryption` and writes a password `host` line (scram-sha-256). The
+# pgrust SERVER, however, cannot yet PERFORM password authentication — the
+# `syscache_seams::fetch_role_password` seam is unported, so a `host all all all
+# scram-sha-256` (or md5) line makes every TCP connection FATAL ("seam not
+# installed: fetch_role_password"), even with the correct password. Only `trust`
+# host lines work today (local connections already use `trust`, which is why the
+# init-script client and unix-socket healthchecks succeed).
+#
+# So, to keep the image a working drop-in over TCP, the host auth method
+# DEFAULTS to `trust` here (the password is still set by initdb and stored in the
+# catalog — it is simply not enforced on `host` lines until pgrust gains password
+# auth). An explicit POSTGRES_HOST_AUTH_METHOD always wins; if a user forces a
+# password method we honor it (and warn that pgrust will reject those TCP logins).
 pg_setup_hba_conf() {
 	if [ "$1" = 'postgres' ]; then
 		shift
 	fi
-	local auth
-	auth="$(
-		sed -n "s/^[[:space:]]*password_encryption[[:space:]]*=[[:space:]]*'\{0,1\}\([a-zA-Z0-9_-]*\)'\{0,1\}.*/\1/p" \
-			"$PGDATA/postgresql.conf" 2>/dev/null | tail -n 1
-	)"
-	: "${auth:=scram-sha-256}"
-	: "${POSTGRES_HOST_AUTH_METHOD:=$auth}"
+	# pgrust can only authenticate `trust` host connections today.
+	: "${POSTGRES_HOST_AUTH_METHOD:=trust}"
+	case "$POSTGRES_HOST_AUTH_METHOD" in
+		trust|reject) ;;
+		*)
+			cat >&2 <<-EOWARN
+				********************************************************************************
+				WARNING: POSTGRES_HOST_AUTH_METHOD="$POSTGRES_HOST_AUTH_METHOD" requested, but the
+				         pgrust server cannot yet perform password authentication
+				         (fetch_role_password is unported). TCP connections using this method
+				         will be rejected by the server with a FATAL "seam not installed"
+				         error. Use POSTGRES_HOST_AUTH_METHOD=trust for working TCP access.
+				********************************************************************************
+			EOWARN
+			;;
+	esac
 	{
 		printf '\n'
 		if [ 'trust' = "$POSTGRES_HOST_AUTH_METHOD" ]; then
