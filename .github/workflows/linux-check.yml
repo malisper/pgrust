@@ -1,0 +1,79 @@
+name: Linux cargo check
+
+# Compile-only Linux gate. `cargo check` resolves and type-checks every crate
+# (including the Linux-only `cfg(target_os = "linux")` branches that the macOS
+# dev build never compiles), without the final link step. Its purpose is to
+# catch the seam-rename "bit-rot" class that previously stranded the
+# linux-support branch: a refactor that moves/renames a seam compiles on macOS
+# but breaks a Linux-gated call site, and only a Linux compile surfaces it.
+#
+# NOTE: this needs a Linux runner (ubuntu-latest below) OR, if run from a
+# non-Linux runner, the x86_64-unknown-linux-gnu target installed. A plain
+# `cargo check` (no link) does not require a cross C toolchain. A full
+# `cargo build`/link would additionally need the gnu sysroot + linker; that is
+# intentionally out of scope here (check-only keeps this fast and runner-light).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  linux-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The PostgreSQL 18.3 source tree supplies a few generated headers the
+      # build scripts read (notably nodes/nodetags.h). The repo's
+      # crates/_support/types/nodes/build.rs honors PGRUST_NODETAGS_H as an
+      # explicit override; point it at a checked-out postgres-18.3 tree.
+      #
+      # Adjust the ref/URL to wherever the project pins its upstream PG source.
+      - name: Fetch PostgreSQL 18.3 source (for generated headers)
+        run: |
+          set -euo pipefail
+          curl -fsSL https://ftp.postgresql.org/pub/source/v18.3/postgresql-18.3.tar.bz2 -o /tmp/pg.tar.bz2
+          mkdir -p /tmp/pgsrc
+          tar -xjf /tmp/pg.tar.bz2 -C /tmp/pgsrc --strip-components=1
+          test -f /tmp/pgsrc/src/backend/nodes/nodetags.h
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-linux-check-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-linux-check-
+
+      # Native x86_64-linux-gnu check. ubuntu-latest is already x86_64-linux, so
+      # this exercises the Linux cfg branches with the host toolchain (no cross).
+      - name: cargo check (x86_64-unknown-linux-gnu)
+        env:
+          PGRUST_NODETAGS_H: /tmp/pgsrc/src/backend/nodes/nodetags.h
+        run: cargo check --workspace --keep-going
+
+      # Optional aarch64-linux cross-check (compile-only; needs the target std
+      # but no linker for `cargo check`). Kept non-blocking via continue-on-error
+      # so a missing cross std never red-lights the gate; promote to required
+      # once a runner with the aarch64 std is guaranteed.
+      - name: Add aarch64-unknown-linux-gnu target
+        continue-on-error: true
+        run: rustup target add aarch64-unknown-linux-gnu
+
+      - name: cargo check (aarch64-unknown-linux-gnu, non-blocking)
+        continue-on-error: true
+        env:
+          PGRUST_NODETAGS_H: /tmp/pgsrc/src/backend/nodes/nodetags.h
+        run: cargo check --workspace --keep-going --target aarch64-unknown-linux-gnu
