@@ -19,3 +19,7 @@ backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }
 common-path-seams = { path = "../common-path-seams" }
 port-pgstrcasecmp = { path = "../port-pgstrcasecmp" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+# wasm64: tz files are read via the host VFS (std::fs is inert on wasm64).
+wasm-libc-shim = { path = "../wasm-libc-shim" }

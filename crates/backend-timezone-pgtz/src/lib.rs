@@ -72,7 +72,20 @@ fn my_exec_path_str() -> String {
 ///
 /// C `pg_open_tzfile(name, canonname)` (`want_canonical` mirrors a non-NULL
 /// `canonname` out-buffer). The name is searched for case-insensitively.
-pub fn pg_open_tzfile(name: &str, want_canonical: bool) -> Option<(std::fs::File, Option<String>)> {
+/// Read an entire tz file's bytes. Natively `std::fs::read`; on wasm64 (where
+/// `std::fs` is inert) the host VFS via the shim's `fscompat::read`.
+fn read_tzfile(path: &str) -> std::io::Result<Vec<u8>> {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        std::fs::read(path)
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        wasm_libc_shim::fscompat::read(path)
+    }
+}
+
+pub fn pg_open_tzfile(name: &str, want_canonical: bool) -> Option<(Vec<u8>, Option<String>)> {
     // strlcpy(fullname, pg_TZDIR(), sizeof(fullname));
     let tzdir = pg_tzdir();
     let orignamelen = tzdir.len();
@@ -86,8 +99,8 @@ pub fn pg_open_tzfile(name: &str, want_canonical: bool) -> Option<(std::fs::File
     // the name as-is.
     if !want_canonical {
         let asis = format!("{tzdir}/{name}");
-        if let Ok(file) = std::fs::File::open(&asis) {
-            return Some((file, None));
+        if let Ok(bytes) = read_tzfile(&asis) {
+            return Some((bytes, None));
         }
         // Fall through to do it the hard way.
     }
@@ -128,8 +141,8 @@ pub fn pg_open_tzfile(name: &str, want_canonical: bool) -> Option<(std::fs::File
         None
     };
 
-    let file = std::fs::File::open(&fullname).ok()?;
-    Some((file, canonname))
+    let bytes = read_tzfile(&fullname).ok()?;
+    Some((bytes, canonname))
 }
 
 /// Scan `dirname` for a case-insensitive match to `fname`. Returns the actual

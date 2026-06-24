@@ -19170,6 +19170,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-pgtime",
+ "wasm-libc-shim",
 ]
 
 [[package]]
