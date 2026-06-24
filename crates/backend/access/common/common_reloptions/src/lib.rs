@@ -183,8 +183,13 @@ pub type ValidateStringRelopt = fn(Option<&str>) -> PgResult<()>;
 /// only computes the size; otherwise it writes into the buffer and returns the
 /// number of bytes written.
 pub type FillStringRelopt = fn(value: Option<&str>, ptr: Option<&mut [u8]>) -> Size;
-/// Whole-option-set validator (`relopts_validator`).
-pub type ReloptsValidator = fn(parsed_options: &mut [u8], vals: &[RelOptValue]) -> PgResult<()>;
+/// Whole-option-set validator (`relopts_validator`). C's signature is
+/// `void (*)(void *parsed_options, relopt_value *vals, int nvals)`; the owned
+/// model threads only `parsed_options` (the parsed fixed-size options bytea),
+/// which is what crosses the `register_reloptions_validator` seam and all that
+/// any in-tree validator reads, and returns the `ereport(ERROR)` message on
+/// failure (matching `::types_reloptions::relopts_validator`).
+pub type ReloptsValidator = fn(parsed_options: &mut [u8]) -> Result<(), String>;
 
 /// One member of an enum reloption's accepted-value list
 /// (`relopt_enum_elt_def`).
@@ -1543,7 +1548,9 @@ pub fn build_local_reloptions(mcx: Mcx<'_>, relopts: &LocalRelOpts, options: Opt
 
     if validate {
         for validator in &relopts.validators {
-            validator(&mut opts, &vals)?;
+            validator(&mut opts).map_err(|msg| {
+                PgError::error(msg).with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
+            })?;
         }
     }
     Ok(opts)
@@ -1864,6 +1871,19 @@ fn init_local_reloptions_seam(
     relopts.relopt_struct_size = relopt_struct_size;
 }
 
+/// Seam target for `register_reloptions_validator(relopts, validator)`.
+///
+/// Pushes the opclass validator onto the shared `local_relopts`'s validator
+/// list, mirroring C's `register_reloptions_validator`. The validator is later
+/// carried into the crate-internal `LocalRelOpts` by `local_relopts_from_shared`
+/// and invoked at the end of `build_local_reloptions`.
+fn register_reloptions_validator_seam(
+    relopts: &mut ::types_reloptions::local_relopts,
+    validator: ::types_reloptions::relopts_validator,
+) {
+    relopts.validators.push(validator);
+}
+
 /// Seam target for `add_local_int_reloption(relopts, name, desc, default, min,
 /// max, offset)`.
 ///
@@ -1911,7 +1931,10 @@ fn local_relopts_from_shared(shared: &::types_reloptions::local_relopts) -> Loca
     use ::types_reloptions::{relopt_type as ST, relopt_typed};
     let mut out = LocalRelOpts {
         options: Vec::with_capacity(shared.options.len()),
-        validators: Vec::new(),
+        // The shared and internal validator types are the same shape
+        // (`fn(&mut [u8]) -> Result<(), String>`); carry the opclass-registered
+        // validators across the seam so `build_local_reloptions` runs them.
+        validators: shared.validators.clone(),
         relopt_struct_size: shared.relopt_struct_size,
     };
     for opt in &shared.options {
@@ -2043,6 +2066,9 @@ pub fn init_seams() {
     );
     reloptions_seams::add_local_real_reloption::set(
         add_local_real_reloption_seam,
+    );
+    reloptions_seams::register_reloptions_validator::set(
+        register_reloptions_validator_seam,
     );
     reloptions_seams::build_reloptions_btree::set(build_reloptions_btree_seam);
     reloptions_seams::build_reloptions_hash::set(build_reloptions_hash_seam);

@@ -76,7 +76,16 @@ pub struct relopt_value {
 
 /// `relopts_validator` (reloptions.h:137) —
 /// `void (*)(void *parsed_options, relopt_value *vals, int nvals)`.
-pub type relopts_validator = fn(parsed_options: &mut (), vals: &mut [relopt_value]);
+///
+/// In the owned model the validator crosses the `register_reloptions_validator`
+/// seam and runs at the end of `build_local_reloptions`; it receives the parsed
+/// fixed-size options bytea (`parsed_options`, what C's `void *parsed_options`
+/// points at). The `vals` array is not threaded — every in-tree validator
+/// (e.g. `ltree_gist_relopts_validator`) reads only `parsed_options`. An
+/// `Err(message)` carries the `ereport(ERROR)` message of a failed validation
+/// (mapped to a `PgError` at the seam boundary, which owns the `types_error`
+/// dependency this leaf `no_std` type crate must not pull in).
+pub type relopts_validator = fn(parsed_options: &mut [u8]) -> Result<(), String>;
 
 /// `local_relopt` (reloptions.h:171) — one local option definition plus the
 /// offset of its parsed value in the result bytea.

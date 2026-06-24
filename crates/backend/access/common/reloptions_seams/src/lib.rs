@@ -11,7 +11,7 @@
 
 use ::types_core::Oid;
 use ::types_error::PgResult;
-use ::types_reloptions::{local_relopts, AttributeOpts, RdOptions, TableSpaceOpts};
+use ::types_reloptions::{local_relopts, relopts_validator, AttributeOpts, RdOptions, TableSpaceOpts};
 
 seam_core::seam!(
     /// `extractRelOptions(tuple, GetPgClassDescriptor(), amoptsfn)` (reloptions.c),
@@ -60,6 +60,16 @@ seam_core::seam!(
         min_val: i32,
         max_val: i32,
         offset: i32,
+    )
+);
+
+seam_core::seam!(
+    /// `register_reloptions_validator(relopts, validator)` (reloptions.c) —
+    /// register a custom validation callback that runs at the end of
+    /// `build_local_reloptions` against the parsed options bytea.
+    pub fn register_reloptions_validator(
+        relopts: &mut local_relopts,
+        validator: relopts_validator,
     )
 );
 

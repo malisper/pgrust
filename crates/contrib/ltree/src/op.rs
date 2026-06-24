@@ -489,3 +489,60 @@ pub fn ltxtq_exec(tree: &[u8], query: &[u8]) -> bool {
     let operand = q.operand();
     ltree_execute(&items, 0, &t_names, operand, true, 0)
 }
+
+/// `ltree_execute(GETQUERY(query), &sig, false, checkcondition_bit)` — the GiST
+/// inner-node ltxtquery evaluator. Mirrors `gist_qtxt`'s use of `ltree_execute`
+/// with `calcnot = false` (NOT-nodes optimistically match an inner key) and a
+/// signature-bitmap leaf check: each VAL `ITEM` is "present" iff its CRC's bit
+/// is set in `sign` (when the operand can look at the sign — `FLG_CANLOOKSIGN`).
+///
+/// `getbit(i)` returns the i-th signature bit; `hashval(crc)` maps an ITEM's CRC
+/// to its bit index. This keeps the bit-math (HASHVAL with the opclass's
+/// `SIGLENBIT`) in the GiST module while reusing the polish-notation walk.
+pub fn ltxtq_exec_sign(
+    query: &[u8],
+    canlooksign: &dyn Fn(u8) -> bool,
+    bit_set: &dyn Fn(i32) -> bool,
+) -> bool {
+    let q = Ltxtquery::new(query);
+    let items: Vec<Item> = (0..q.size()).map(|i| q.item(i)).collect();
+    ltree_execute_sign(&items, 0, canlooksign, bit_set, 0)
+}
+
+/// `ltree_execute` with the `checkcondition_bit` callback and `calcnot = false`.
+fn ltree_execute_sign(
+    items: &[Item],
+    cur: usize,
+    canlooksign: &dyn Fn(u8) -> bool,
+    bit_set: &dyn Fn(i32) -> bool,
+    depth: u32,
+) -> bool {
+    if depth > 100_000 {
+        return false;
+    }
+    let it = &items[cur];
+    if it.typ as i32 == VAL {
+        // checkcondition_bit: FLG_CANLOOKSIGN(val->flag) ? GETBIT(sign, HASHVAL(val->val)) : true
+        if canlooksign(it.flag) {
+            bit_set(it.val)
+        } else {
+            true
+        }
+    } else if it.val == b'!' as i32 {
+        // calcnot == false → a NOT node optimistically matches.
+        true
+    } else if it.val == b'&' as i32 {
+        if ltree_execute_sign(items, cur + it.left as usize, canlooksign, bit_set, depth + 1) {
+            ltree_execute_sign(items, cur + 1, canlooksign, bit_set, depth + 1)
+        } else {
+            false
+        }
+    } else {
+        // |-operator
+        if ltree_execute_sign(items, cur + it.left as usize, canlooksign, bit_set, depth + 1) {
+            true
+        } else {
+            ltree_execute_sign(items, cur + 1, canlooksign, bit_set, depth + 1)
+        }
+    }
+}

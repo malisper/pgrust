@@ -302,6 +302,10 @@ impl<'a> Lquery<'a> {
     pub fn numlevel(&self) -> usize {
         read_u16(self.buf, 4) as usize
     }
+    /// `query->firstgood` — number of leading simple-match levels.
+    pub fn firstgood(&self) -> u16 {
+        read_u16(self.buf, 6)
+    }
     pub fn flag(&self) -> u16 {
         read_u16(self.buf, 8)
     }

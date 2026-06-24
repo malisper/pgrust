@@ -17,6 +17,13 @@ types_core = { path = "../../_support/types/types_core" }
 types_error = { path = "../../_support/types/types_error" }
 types_tuple = { path = "../../_support/types/types_tuple" }
 
+# GiST opclass-support call protocol (the generic catalog-driven dispatch):
+gist = { path = "../../_support/types/gist" }
+
+# Local-reloptions parse table for the *_gist_options opclass-options procs:
+types_reloptions = { path = "../../_support/types/types_reloptions" }
+reloptions_seams = { path = "../../backend/access/common/reloptions_seams" }
+
 # ltree core services:
 crc32c = { path = "../../port/crc32c" }
 mbutils = { path = "../../backend/utils/mb/mbutils" }

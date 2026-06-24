@@ -33,6 +33,7 @@
 
 mod array;
 mod crc;
+mod gist;
 mod io;
 mod op;
 mod repr;
@@ -40,7 +41,11 @@ mod repr;
 use ::datum::Datum;
 use ::fmgr::boundary::RefPayload;
 use ::fmgr::{FunctionCallInfoBaseData, LoadedExternalFunc, PGFunction};
-use ::types_error::PgError;
+use ::gist::extproc::{
+    GistConsistentInOut, GistEntryInOut, GistPenaltyInOut, GistPicksplitInOut, GistSameInOut,
+    GistUnionInOut, GIST_EXTPROC_INTERNAL_SLOT,
+};
+use ::types_error::{PgError, PgResult};
 
 const LIBRARY: &str = "ltree";
 
@@ -771,45 +776,274 @@ fn fc_ltreeparentsel(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // ===========================================================================
 // GiST opclass support functions (ltree_gist.c / _ltree_gist.c).
 //
-// Keystone-gated: pgrust's generic extension-opclass GiST dispatch is not yet
-// on main, so these are registered as loud-panic stubs. `CREATE EXTENSION`'s
-// C-symbol validator must find every symbol; building/using a gist_ltree_ops
-// index mirrors-C-and-panics until the keystone lands.
+// Reached through pgrust's GENERIC, catalog-driven GiST opclass dispatch: the
+// GiST core resolves each support proc into an `FmgrInfo` and `gist-proc`'s
+// `extdispatch` invokes the body here through a real fmgr frame, passing the
+// GISTENTRY/entryvec/splitvec + the *recheck/*penalty/*size out-parameters
+// through the `gist::extproc` internal protocol struct (slot 0), and the
+// consistent query (an ltree/lquery/ltxtquery/ltree[] varlena, per strategy) on
+// the by-ref lane (slot 1).
+//
+// `ltree_gist_in`/`ltree_gist_out` always ereport(ERROR) in C (the `ltree_gist`
+// pseudo-type has no text I/O) — kept as the loud-error stubs.
+//
+// The configured opclass `siglen` is not threaded to the support procs (the
+// documented tsvector_ops divergence), so the build/read paths use the default
+// signature length; see `gist.rs`. Results stay exact.
 // ===========================================================================
 
-fn unported_gist(name: &'static str) -> ! {
-    raise(PgError::error(format!(
-        "ltree: GiST opclass support function \"{name}\" (ltree_gist.c/_ltree_gist.c) \
-         is unported — pgrust's generic extension-opclass GiST dispatch keystone \
-         is not yet available; ltree seq-scan operators and btree/hash indexes work"
-    )));
+fn fc_ltree_gist_in(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    raise(PgError::error("cannot accept a value of type ltree_gist"));
+}
+fn fc_ltree_gist_out(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    raise(PgError::error("cannot display a value of type ltree_gist"));
 }
 
-macro_rules! gist_stub {
-    ($fn_name:ident, $sym:literal) => {
-        fn $fn_name(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-            unported_gist($sym);
-        }
+/// Pull the boxed GiST protocol struct of type `T` out of the internal lane,
+/// run `body` on it (mutating in place), and put it back so the dispatch reads
+/// the outputs.
+fn with_gist_proto<T: ::core::any::Any>(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    body: impl FnOnce(&mut T) -> PgResult<()>,
+) -> Datum {
+    let mut state = match fcinfo.take_internal_arg(GIST_EXTPROC_INTERNAL_SLOT) {
+        Some(boxed) => match boxed.downcast::<T>() {
+            Ok(s) => s,
+            Err(_) => raise(PgError::error(
+                "ltree GiST support: internal protocol state has the wrong type",
+            )),
+        },
+        None => raise(PgError::error(
+            "ltree GiST support function invoked without its internal protocol \
+             state — pgrust's generic GiST opclass dispatch was bypassed",
+        )),
     };
+    if let Err(e) = body(&mut state) {
+        fcinfo.set_internal_arg(GIST_EXTPROC_INTERNAL_SLOT, state);
+        raise(e);
+    }
+    fcinfo.set_internal_arg(GIST_EXTPROC_INTERNAL_SLOT, state);
+    fcinfo.isnull = false;
+    Datum::from_usize(0)
 }
 
-gist_stub!(fc_ltree_gist_in, "ltree_gist_in");
-gist_stub!(fc_ltree_gist_out, "ltree_gist_out");
-gist_stub!(fc_ltree_compress, "ltree_compress");
-gist_stub!(fc_ltree_decompress, "ltree_decompress");
-gist_stub!(fc_ltree_same, "ltree_same");
-gist_stub!(fc_ltree_union, "ltree_union");
-gist_stub!(fc_ltree_penalty, "ltree_penalty");
-gist_stub!(fc_ltree_picksplit, "ltree_picksplit");
-gist_stub!(fc_ltree_consistent, "ltree_consistent");
-gist_stub!(fc_ltree_gist_options, "ltree_gist_options");
-gist_stub!(fc__ltree_compress, "_ltree_compress");
-gist_stub!(fc__ltree_same, "_ltree_same");
-gist_stub!(fc__ltree_union, "_ltree_union");
-gist_stub!(fc__ltree_penalty, "_ltree_penalty");
-gist_stub!(fc__ltree_picksplit, "_ltree_picksplit");
-gist_stub!(fc__ltree_consistent, "_ltree_consistent");
-gist_stub!(fc__ltree_gist_options, "_ltree_gist_options");
+/// The consistent/array-consistent query rides the by-ref lane at slot 1 as its
+/// HEADER-FUL varlena image (the body re-reads its `VARSIZE`-bounded payload).
+fn gist_query_image(fcinfo: &FunctionCallInfoBaseData) -> Vec<u8> {
+    fcinfo
+        .ref_arg(1)
+        .and_then(|p| p.as_varlena())
+        .expect("ltree GiST consistent: query arg missing from by-ref lane")
+        .to_vec()
+}
+
+// --- gist_ltree_ops -------------------------------------------------------
+
+fn fc_ltree_compress(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gist_proto::<GistEntryInOut>(fcinfo, |io| {
+        match gist::ltree_compress(io.entry.leafkey, &io.entry.key, io.entry.key_is_null)? {
+            Some(new_key) => {
+                io.passthrough = false;
+                io.retval_key = new_key;
+                io.retval_leafkey = false;
+            }
+            None => io.passthrough = true,
+        }
+        Ok(())
+    })
+}
+
+fn fc_ltree_decompress(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gist_proto::<GistEntryInOut>(fcinfo, |io| {
+        match gist::ltree_decompress() {
+            Some(new_key) => {
+                io.passthrough = false;
+                io.retval_key = new_key;
+                io.retval_leafkey = io.entry.leafkey;
+            }
+            None => io.passthrough = true,
+        }
+        Ok(())
+    })
+}
+
+fn fc_ltree_same(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gist_proto::<GistSameInOut>(fcinfo, |io| {
+        io.equal = gist::ltree_same(&io.a, &io.b, gist::LTREE_SIGLEN_DEFAULT as usize)?;
+        Ok(())
+    })
+}
+
+fn fc_ltree_union(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gist_proto::<GistUnionInOut>(fcinfo, |io| {
+        let entries: Vec<(Vec<u8>, bool)> = io
+            .entries
+            .iter()
+            .map(|e| (e.key.clone(), e.key_is_null))
+            .collect();
+        io.result = gist::ltree_union(&entries, gist::LTREE_SIGLEN_DEFAULT as usize)?;
+        Ok(())
+    })
+}
+
+fn fc_ltree_penalty(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gist_proto::<GistPenaltyInOut>(fcinfo, |io| {
+        io.penalty = gist::ltree_penalty(&io.orig_key, &io.new_key, gist::LTREE_SIGLEN_DEFAULT as usize)?;
+        Ok(())
+    })
+}
+
+fn fc_ltree_picksplit(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gist_proto::<GistPicksplitInOut>(fcinfo, |io| {
+        let entries: Vec<(Vec<u8>, bool)> = io
+            .entries
+            .iter()
+            .map(|e| (e.key.clone(), e.key_is_null))
+            .collect();
+        let (left, right, ldatum, rdatum) =
+            gist::ltree_picksplit(&entries, gist::LTREE_SIGLEN_DEFAULT as usize)?;
+        io.spl_left = left;
+        io.spl_right = right;
+        io.spl_ldatum = ldatum;
+        io.spl_rdatum = rdatum;
+        Ok(())
+    })
+}
+
+fn fc_ltree_consistent(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let query = gist_query_image(fcinfo);
+    with_gist_proto::<GistConsistentInOut>(fcinfo, |io| {
+        let (matched, recheck) = gist::ltree_consistent(
+            io.entry.leafkey,
+            &io.entry.key,
+            io.entry.key_is_null,
+            &query,
+            io.strategy,
+            gist::LTREE_SIGLEN_DEFAULT as usize,
+        )?;
+        io.matched = matched;
+        io.recheck = recheck;
+        Ok(())
+    })
+}
+
+fn fc_ltree_gist_options(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let mut relopts = match fcinfo.take_ref_arg(0) {
+        Some(RefPayload::Internal(b)) => match b.downcast::<::types_reloptions::local_relopts>() {
+            Ok(r) => r,
+            Err(_) => raise(PgError::error(
+                "ltree_gist_options: arg 0 internal is not a local_relopts",
+            )),
+        },
+        _ => raise(PgError::error(
+            "ltree_gist_options invoked without its local_relopts internal arg — \
+             pgrust's index_options_function_call path was bypassed",
+        )),
+    };
+    gist::ltree_gist_options(&mut relopts);
+    fcinfo.set_ref_arg(0, RefPayload::Internal(relopts));
+    fcinfo.isnull = false;
+    Datum::from_usize(0)
+}
+
+// --- gist__ltree_ops (ltree[] array opclass) ------------------------------
+
+fn fc__ltree_compress(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gist_proto::<GistEntryInOut>(fcinfo, |io| {
+        match gist::array_compress(
+            io.entry.leafkey,
+            &io.entry.key,
+            io.entry.key_is_null,
+            gist::LTREE_ASIGLEN_DEFAULT as usize,
+        )? {
+            Some(new_key) => {
+                io.passthrough = false;
+                io.retval_key = new_key;
+                io.retval_leafkey = false;
+            }
+            None => io.passthrough = true,
+        }
+        Ok(())
+    })
+}
+
+fn fc__ltree_same(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gist_proto::<GistSameInOut>(fcinfo, |io| {
+        io.equal = gist::array_same(&io.a, &io.b, gist::LTREE_ASIGLEN_DEFAULT as usize)?;
+        Ok(())
+    })
+}
+
+fn fc__ltree_union(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gist_proto::<GistUnionInOut>(fcinfo, |io| {
+        let entries: Vec<(Vec<u8>, bool)> = io
+            .entries
+            .iter()
+            .map(|e| (e.key.clone(), e.key_is_null))
+            .collect();
+        io.result = gist::array_union(&entries, gist::LTREE_ASIGLEN_DEFAULT as usize)?;
+        Ok(())
+    })
+}
+
+fn fc__ltree_penalty(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gist_proto::<GistPenaltyInOut>(fcinfo, |io| {
+        io.penalty =
+            gist::array_penalty(&io.orig_key, &io.new_key, gist::LTREE_ASIGLEN_DEFAULT as usize)?;
+        Ok(())
+    })
+}
+
+fn fc__ltree_picksplit(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gist_proto::<GistPicksplitInOut>(fcinfo, |io| {
+        let entries: Vec<(Vec<u8>, bool)> = io
+            .entries
+            .iter()
+            .map(|e| (e.key.clone(), e.key_is_null))
+            .collect();
+        let (left, right, ldatum, rdatum) =
+            gist::array_picksplit(&entries, gist::LTREE_ASIGLEN_DEFAULT as usize)?;
+        io.spl_left = left;
+        io.spl_right = right;
+        io.spl_ldatum = ldatum;
+        io.spl_rdatum = rdatum;
+        Ok(())
+    })
+}
+
+fn fc__ltree_consistent(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let query = gist_query_image(fcinfo);
+    with_gist_proto::<GistConsistentInOut>(fcinfo, |io| {
+        let (matched, recheck) = gist::array_consistent(
+            &io.entry.key,
+            io.entry.key_is_null,
+            &query,
+            io.strategy,
+            gist::LTREE_ASIGLEN_DEFAULT as usize,
+        )?;
+        io.matched = matched;
+        io.recheck = recheck;
+        Ok(())
+    })
+}
+
+fn fc__ltree_gist_options(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let mut relopts = match fcinfo.take_ref_arg(0) {
+        Some(RefPayload::Internal(b)) => match b.downcast::<::types_reloptions::local_relopts>() {
+            Ok(r) => r,
+            Err(_) => raise(PgError::error(
+                "_ltree_gist_options: arg 0 internal is not a local_relopts",
+            )),
+        },
+        _ => raise(PgError::error(
+            "_ltree_gist_options invoked without its local_relopts internal arg",
+        )),
+    };
+    gist::array_gist_options(&mut relopts);
+    fcinfo.set_ref_arg(0, RefPayload::Internal(relopts));
+    fcinfo.isnull = false;
+    Datum::from_usize(0)
+}
 
 // ===========================================================================
 // Builtin-library registration.

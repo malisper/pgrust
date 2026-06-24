@@ -12552,12 +12552,15 @@ dependencies = [
  "dfmgr_seams",
  "fmgr",
  "formatting_seams",
+ "gist",
  "hashfn",
  "mbutils",
  "mcx",
+ "reloptions_seams",
  "ts_locale_seams",
  "types_core",
  "types_error",
+ "types_reloptions",
  "types_tuple",
 ]
 
