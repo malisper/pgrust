@@ -94,49 +94,51 @@ fn install_seams() {
 
 // --- jsonb document builders -----------------------------------------------
 
-fn num_bytes(mcx: Mcx<'_>, n: i64) -> Vec<u8> {
-    ::adt_numeric::convert::int64_to_numeric(mcx, n)
-        .unwrap()
-        .to_vec()
+fn num_bytes<'mcx>(mcx: Mcx<'mcx>, n: i64) -> &'mcx [u8] {
+    let v = ::adt_numeric::convert::int64_to_numeric(mcx, n).unwrap();
+    ::mcx::slice_borrow_in(mcx, v.as_slice()).unwrap()
 }
 
-fn jnum(mcx: Mcx<'_>, n: i64) -> JsonbValue {
+fn jnum<'mcx>(mcx: Mcx<'mcx>, n: i64) -> JsonbValue<'mcx> {
     JsonbValue {
         typ: jbvType::jbvNumeric,
         val: JsonbValueData::Numeric(num_bytes(mcx, n)),
     }
 }
 
-fn jstr(s: &str) -> JsonbValue {
+fn jstr(s: &str) -> JsonbValue<'_> {
     JsonbValue {
         typ: jbvType::jbvString,
-        val: JsonbValueData::String(s.as_bytes().to_vec()),
+        val: JsonbValueData::String(s.as_bytes()),
     }
 }
 
-fn jarr(elems: Vec<JsonbValue>) -> JsonbValue {
+fn jarr<'mcx>(mcx: Mcx<'mcx>, elems: Vec<JsonbValue<'mcx>>) -> JsonbValue<'mcx> {
+    let mut out = ::mcx::vec_with_capacity_in(mcx, elems.len()).unwrap();
+    for e in elems {
+        out.push(e);
+    }
     JsonbValue {
         typ: jbvType::jbvArray,
         val: JsonbValueData::Array {
-            elems,
+            elems: out,
             raw_scalar: false,
         },
     }
 }
 
-fn jobj(pairs: Vec<(&str, JsonbValue)>) -> JsonbValue {
-    let pairs = pairs
-        .into_iter()
-        .enumerate()
-        .map(|(i, (k, v))| JsonbPair {
+fn jobj<'mcx>(mcx: Mcx<'mcx>, pairs: Vec<(&'mcx str, JsonbValue<'mcx>)>) -> JsonbValue<'mcx> {
+    let mut out = ::mcx::vec_with_capacity_in(mcx, pairs.len()).unwrap();
+    for (i, (k, v)) in pairs.into_iter().enumerate() {
+        out.push(JsonbPair {
             key: jstr(k),
             value: v,
             order: i as u32,
-        })
-        .collect();
+        });
+    }
     JsonbValue {
         typ: jbvType::jbvObject,
-        val: JsonbValueData::Object(pairs),
+        val: JsonbValueData::Object(out),
     }
 }
 
@@ -168,7 +170,7 @@ fn current() -> Box<JsonPathParseItem> {
 }
 
 fn num_item(mcx: Mcx<'_>, n: i64) -> Box<JsonPathParseItem> {
-    leaf(jpiNumeric, JsonPathParseValue::Numeric(num_bytes(mcx, n)))
+    leaf(jpiNumeric, JsonPathParseValue::Numeric(num_bytes(mcx, n).to_vec()))
 }
 
 // The boxes are load-bearing: each item is linked via `next:
@@ -242,7 +244,7 @@ fn root_returns_document() {
     let ctx = MemoryContext::new("jsonpath-exec-test");
     let mcx = ctx.mcx();
     // doc: {"a": 1}
-    let doc = to_jsonb(mcx, &jobj(vec![("a", jnum(mcx, 1))]));
+    let doc = to_jsonb(mcx, &jobj(mcx, vec![("a", jnum(mcx, 1))]));
     let jp = flatten(mcx, true, root());
     let out = jsonb_path_query(mcx, &doc, &jp, None, false).unwrap();
     assert_eq!(out.len(), 1);
@@ -255,7 +257,7 @@ fn key_accessor() {
     let ctx = MemoryContext::new("jsonpath-exec-test");
     let mcx = ctx.mcx();
     // doc: {"a": 42, "b": "x"}; path: $.a
-    let doc = to_jsonb(mcx, &jobj(vec![("a", jnum(mcx, 42)), ("b", jstr("x"))]));
+    let doc = to_jsonb(mcx, &jobj(mcx, vec![("a", jnum(mcx, 42)), ("b", jstr("x"))]));
     let jp = flatten(mcx, true, chain(vec![root(), key("a")]));
     let out = jsonb_path_query(mcx, &doc, &jp, None, false).unwrap();
     assert_eq!(out.len(), 1);
@@ -267,7 +269,7 @@ fn key_missing_lax_returns_empty() {
     let ctx = MemoryContext::new("jsonpath-exec-test");
     let mcx = ctx.mcx();
     // doc: {"a": 1}; path: $.zzz  (lax: structural error ignored -> empty)
-    let doc = to_jsonb(mcx, &jobj(vec![("a", jnum(mcx, 1))]));
+    let doc = to_jsonb(mcx, &jobj(mcx, vec![("a", jnum(mcx, 1))]));
     let jp = flatten(mcx, true, chain(vec![root(), key("zzz")]));
     let out = jsonb_path_query(mcx, &doc, &jp, None, true).unwrap();
     assert!(out.is_empty());
@@ -278,7 +280,7 @@ fn array_subscript() {
     let ctx = MemoryContext::new("jsonpath-exec-test");
     let mcx = ctx.mcx();
     // doc: [10, 20, 30]; path: $[1]
-    let doc = to_jsonb(mcx, &jarr(vec![jnum(mcx, 10), jnum(mcx, 20), jnum(mcx, 30)]));
+    let doc = to_jsonb(mcx, &jarr(mcx, vec![jnum(mcx, 10), jnum(mcx, 20), jnum(mcx, 30)]));
     let jp = flatten(mcx, true, chain(vec![root(), index_array(num_item(mcx, 1))]));
     let out = jsonb_path_query(mcx, &doc, &jp, None, false).unwrap();
     assert_eq!(out.len(), 1);
@@ -302,7 +304,7 @@ fn match_comparison_true() {
     let ctx = MemoryContext::new("jsonpath-exec-test");
     let mcx = ctx.mcx();
     // doc: {"a": 7}; predicate: $.a == 7  (via @@ / jsonb_path_match)
-    let doc = to_jsonb(mcx, &jobj(vec![("a", jnum(mcx, 7))]));
+    let doc = to_jsonb(mcx, &jobj(mcx, vec![("a", jnum(mcx, 7))]));
     let pred = binary(jpiEqual, chain(vec![root(), key("a")]), num_item(mcx, 7));
     let jp = flatten(mcx, true, pred);
     assert_eq!(
@@ -315,7 +317,7 @@ fn match_comparison_true() {
 fn match_comparison_false() {
     let ctx = MemoryContext::new("jsonpath-exec-test");
     let mcx = ctx.mcx();
-    let doc = to_jsonb(mcx, &jobj(vec![("a", jnum(mcx, 7))]));
+    let doc = to_jsonb(mcx, &jobj(mcx, vec![("a", jnum(mcx, 7))]));
     let pred = binary(jpiEqual, chain(vec![root(), key("a")]), num_item(mcx, 8));
     let jp = flatten(mcx, true, pred);
     assert_eq!(
@@ -328,7 +330,7 @@ fn match_comparison_false() {
 fn exists_true_and_false() {
     let ctx = MemoryContext::new("jsonpath-exec-test");
     let mcx = ctx.mcx();
-    let doc = to_jsonb(mcx, &jobj(vec![("a", jnum(mcx, 1))]));
+    let doc = to_jsonb(mcx, &jobj(mcx, vec![("a", jnum(mcx, 1))]));
 
     // $.a exists
     let jp_a = flatten(mcx, true, chain(vec![root(), key("a")]));
@@ -350,7 +352,7 @@ fn size_method() {
     let ctx = MemoryContext::new("jsonpath-exec-test");
     let mcx = ctx.mcx();
     // doc: [1,2,3]; path: $.size()  -> 3
-    let doc = to_jsonb(mcx, &jarr(vec![jnum(mcx, 1), jnum(mcx, 2), jnum(mcx, 3)]));
+    let doc = to_jsonb(mcx, &jarr(mcx, vec![jnum(mcx, 1), jnum(mcx, 2), jnum(mcx, 3)]));
     let jp = flatten(
         mcx,
         true,
@@ -366,7 +368,7 @@ fn type_method() {
     let ctx = MemoryContext::new("jsonpath-exec-test");
     let mcx = ctx.mcx();
     // doc: {"a": 1}; path: $.type()  -> "object"
-    let doc = to_jsonb(mcx, &jobj(vec![("a", jnum(mcx, 1))]));
+    let doc = to_jsonb(mcx, &jobj(mcx, vec![("a", jnum(mcx, 1))]));
     let jp = flatten(
         mcx,
         true,
@@ -393,10 +395,10 @@ fn keyvalue_id_root_object_is_zero() {
     // doc: {"a": 1, "b": [1, 2], "c": {"a": "bbb"}}
     let doc = to_jsonb(
         mcx,
-        &jobj(vec![
+        &jobj(mcx, vec![
             ("a", jnum(mcx, 1)),
-            ("b", jarr(vec![jnum(mcx, 1), jnum(mcx, 2)])),
-            ("c", jobj(vec![("a", jstr("bbb"))])),
+            ("b", jarr(mcx, vec![jnum(mcx, 1), jnum(mcx, 2)])),
+            ("c", jobj(mcx, vec![("a", jstr("bbb"))])),
         ]),
     );
     // path: $.keyvalue()
@@ -429,12 +431,12 @@ fn keyvalue_id_array_elements_are_document_offsets() {
     // doc: [{"a": 1, "b": [1, 2]}, {"c": {"a": "bbb"}}]
     let doc = to_jsonb(
         mcx,
-        &jarr(vec![
-            jobj(vec![
+        &jarr(mcx, vec![
+            jobj(mcx, vec![
                 ("a", jnum(mcx, 1)),
-                ("b", jarr(vec![jnum(mcx, 1), jnum(mcx, 2)])),
+                ("b", jarr(mcx, vec![jnum(mcx, 1), jnum(mcx, 2)])),
             ]),
-            jobj(vec![("c", jobj(vec![("a", jstr("bbb"))]))]),
+            jobj(mcx, vec![("c", jobj(mcx, vec![("a", jstr("bbb"))]))]),
         ]),
     );
     // path: $[*].keyvalue()
@@ -461,7 +463,7 @@ fn vars_not_an_object_errors_22023() {
     // doc: 1 ; path: $ ; vars: [1, 2]  (an array, not an object)
     let doc = to_jsonb(mcx, &jnum(mcx, 1));
     let jp = flatten(mcx, true, root());
-    let vars = to_jsonb(mcx, &jarr(vec![jnum(mcx, 1), jnum(mcx, 2)]));
+    let vars = to_jsonb(mcx, &jarr(mcx, vec![jnum(mcx, 1), jnum(mcx, 2)]));
 
     let err = jsonb_path_query(mcx, &doc, &jp, Some(&vars), false).unwrap_err();
     assert_eq!(err.message(), "\"vars\" argument is not an object");
@@ -476,7 +478,7 @@ fn vars_object_is_accepted() {
     let mcx = ctx.mcx();
     let doc = to_jsonb(mcx, &jnum(mcx, 1));
     let jp = flatten(mcx, true, root());
-    let vars = to_jsonb(mcx, &jobj(vec![("x", jnum(mcx, 1))]));
+    let vars = to_jsonb(mcx, &jobj(mcx, vec![("x", jnum(mcx, 1))]));
     let out = jsonb_path_query(mcx, &doc, &jp, Some(&vars), false).unwrap();
     assert_eq!(out.len(), 1);
     assert_eq!(out[0], doc);
@@ -487,7 +489,7 @@ fn filter_with_current() {
     let ctx = MemoryContext::new("jsonpath-exec-test");
     let mcx = ctx.mcx();
     // doc: [1, 5, 9]; path: $[*] ? (@ > 4)  -> [5, 9]
-    let doc = to_jsonb(mcx, &jarr(vec![jnum(mcx, 1), jnum(mcx, 5), jnum(mcx, 9)]));
+    let doc = to_jsonb(mcx, &jarr(mcx, vec![jnum(mcx, 1), jnum(mcx, 5), jnum(mcx, 9)]));
     let any = leaf(jpiAnyArray, JsonPathParseValue::None);
     let filter = leaf(
         jpiFilter,
