@@ -580,6 +580,17 @@ fn jumble_utility_node(jstate: &mut JumbleState, node: &Node) {
             let s = node.expect_variableshowstmt();
             jumble_opt_cstring(jstate, s.name.as_deref());
         }
+        ntag::T_CreateRoleStmt => {
+            // `_jumbleCreateRoleStmt`: stmt_type, JUMBLE_STRING(role), options.
+            // The role name is jumbled, so `CREATE ROLE a` / `CREATE ROLE b`
+            // get distinct query ids.
+            let s = node.expect_createrolestmt();
+            jf_u32(jstate, s.stmt_type as u32);
+            jumble_opt_cstring(jstate, s.role.as_deref());
+            for o in s.options.iter() {
+                jumble_utility_node(jstate, o);
+            }
+        }
         ntag::T_DeallocateStmt => {
             // `_jumbleDeallocateStmt`: JUMBLE_FIELD(isall), JUMBLE_LOCATION.
             // The name is query_jumble_ignore; its location is recorded so
@@ -587,6 +598,49 @@ fn jumble_utility_node(jstate: &mut JumbleState, node: &Node) {
             let s = node.expect_deallocatestmt();
             jf_bool(jstate, s.isall);
             _record_const_location(jstate, s.location);
+        }
+        ntag::T_DoStmt => {
+            // `_jumbleDoStmt`: JUMBLE_NODE(args) — the DefElem options (the
+            // inline code + language), so distinct DO blocks differ.
+            let s = node.expect_dostmt();
+            for a in s.args.iter() {
+                jumble_utility_node(jstate, a);
+            }
+        }
+        ntag::T_DefElem => {
+            // `_jumbleDefElem`: defnamespace, defname, arg, defaction.
+            let s = node.expect_defelem();
+            jumble_opt_cstring(jstate, s.defnamespace.as_deref());
+            jumble_opt_cstring(jstate, s.defname.as_deref());
+            match s.arg.as_deref() {
+                Some(a) => jumble_utility_node(jstate, a),
+                None => jstate.append_jumble_null(),
+            }
+            jf_u32(jstate, s.defaction as u32);
+        }
+        ntag::T_Integer
+        | ntag::T_Float
+        | ntag::T_Boolean
+        | ntag::T_String
+        | ntag::T_BitString => {
+            // A bare value node (e.g. a DefElem.arg): jumble its payload so the
+            // option value distinguishes the statement. (Re-emit the tag the
+            // generic head already emitted? No — jumble_value_node emits the
+            // tag, so emit only the payload here to avoid a double tag.)
+            match tag {
+                ntag::T_Integer => jf_i32(jstate, node.expect_integer().ival),
+                ntag::T_Boolean => jf_bool(jstate, node.expect_boolean().boolval),
+                ntag::T_Float => {
+                    jumble_opt_cstring(jstate, Some(node.expect_float().fval.as_str()))
+                }
+                ntag::T_String => {
+                    jumble_opt_cstring(jstate, Some(node.expect_string().sval.as_str()))
+                }
+                ntag::T_BitString => {
+                    jumble_opt_cstring(jstate, Some(node.expect_bitstring().bsval.as_str()))
+                }
+                _ => {}
+            }
         }
         ntag::T_List => {
             if let Some(list) = node.as_list() {
