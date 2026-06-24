@@ -24,6 +24,9 @@ init_small = { path = "../../utils/init/init_small" }
 
 # Real ported subprograms reached by the dispatch switch.
 bootstrap = { path = "../../bootstrap/bootstrap" }
+
+# pgrust initdb driver (early-dispatched, not a real PG DispatchOption).
+initdb = { path = "../initdb" }
 help_config = { path = "../../utils/misc/help_config" }
 more = { path = "../../utils/misc/more" }
 

@@ -1,0 +1,16 @@
+[package]
+name = "initdb"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "initdb"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+types_error = { path = "../../../_support/types/types_error" }
+
+# Share-path derivation (get_share_path(my_exec_path)).
+common_path_seams = { path = "../../../common/common_path_seams" }

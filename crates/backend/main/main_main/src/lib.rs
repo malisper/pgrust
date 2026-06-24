@@ -100,6 +100,8 @@ pub enum MainOutcome {
     Dispatched,
     /// Print this text to stdout and `exit(0)`.
     PrintAndExit(String),
+    /// Run the `pgrust initdb` driver and exit with its status.
+    Initdb,
 }
 
 /// `main(argc, argv)` (main.c): the common server-process startup and the
@@ -195,6 +197,16 @@ pub fn pg_main(mcx: Mcx<'static>, argv: &[&str]) -> PgResult<MainOutcome> {
         }
         if arg1 == "--version" || arg1 == "-V" {
             return Ok(MainOutcome::PrintAndExit(PG_BACKEND_VERSIONSTR.to_string()));
+        }
+
+        // `pgrust initdb` / `postgres --initdb`: create a fresh data directory.
+        // This is NOT a real PostgreSQL must-be-first DispatchOption (in C,
+        // initdb is a separate binary); it is intercepted early here. The
+        // driver re-execs this same binary for the --boot and --single phases.
+        // initdb refuses to run as root, like every other path, so we keep the
+        // root check active and run it from the dispatch switch below.
+        if arg1 == "initdb" || arg1 == "--initdb" {
+            return Ok(MainOutcome::Initdb);
         }
 
         // We also allow "--describe-config" and "-C var" to be called by root,

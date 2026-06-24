@@ -698,6 +698,7 @@ members = [
   "crates/backend/libpq/pqmq",
   "crates/backend/libpq/pqmq_seams",
   "crates/backend/main/main_main",
+  "crates/backend/main/initdb",
   "crates/backend/main/main_seams",
   "crates/backend/nodes/copyfuncs",
   "crates/backend/nodes/copyfuncs_pc_seams",

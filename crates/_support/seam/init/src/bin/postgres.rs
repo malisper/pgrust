@@ -74,6 +74,20 @@ fn main() {
             // a logic error.
             exit_process(0);
         }
+        Ok(MainOutcome::Initdb) => {
+            // `pgrust initdb` driver — re-execs this binary for --boot/--single.
+            // Not built on wasm (no subprocesses there).
+            #[cfg(not(target_family = "wasm"))]
+            match initdb::initdb_main(&argv) {
+                Ok(()) => exit_process(0),
+                Err(msg) => {
+                    out_stderr(&format!("initdb: error: {msg}\n"));
+                    exit_process(1);
+                }
+            }
+            #[cfg(target_family = "wasm")]
+            exit_process(1);
+        }
         Err(err) => {
             // C's FATAL startup failures print to stderr and exit(1).
             out_stderr(&format!(

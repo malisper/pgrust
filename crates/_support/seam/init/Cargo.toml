@@ -660,5 +660,9 @@ comp = { path = "../../../pl/plpgsql/src/comp" }
 exec = { path = "../../../pl/plpgsql/src/exec" }
 handler = { path = "../../../pl/plpgsql/src/handler" }
 
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+# pgrust initdb driver (subprocess-based; not built for wasm).
+initdb = { path = "../../../backend/main/initdb" }
+
 [target.'cfg(target_family = "wasm")'.dependencies]
 wasm-libc-shim = { path = "../../../wasm-libc-shim" }
