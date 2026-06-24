@@ -277,9 +277,19 @@ pub fn range_send<'mcx>(
 ) -> PgResult<Datum> {
     let range = getarg_range_p(mcx, fcinfo, 0)?;
     let cache = get_range_io_data(range_type_get_oid(range), IOFuncSelector::Send)?;
-    let bytes = range_send_kernel(mcx, &cache, range)?;
+    // `range_send_kernel` returns the header-LESS wire body (the same payload the
+    // multirange send embeds via the rangetypes-seam). C's range_send returns the
+    // FULL `pq_endtypsend` bytea (`PG_RETURN_BYTEA_P`), and the send seam strips
+    // exactly one VARHDRSZ, so frame the body with the 4-byte varlena length word
+    // here — otherwise the seam's strip ate the leading flags+lower-length bytes
+    // and a client got "range too short".
+    let payload = range_send_kernel(mcx, &cache, range)?;
+    let total = payload.len() + 4;
+    let mut img = Vec::with_capacity(total);
+    img.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+    img.extend_from_slice(&payload);
     // PG_RETURN_BYTEA_P(...): by-ref bytea result.
-    fcinfo.set_ref_result(::fmgr::RefPayload::Varlena(bytes));
+    fcinfo.set_ref_result(::fmgr::RefPayload::Varlena(img));
     Ok(Datum::null())
 }
 

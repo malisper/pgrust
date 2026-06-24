@@ -270,8 +270,18 @@ fn fc_multirange_send(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> 
         .and_then(|p| p.as_varlena())
         .expect("multirange_send arg 0 is a multirange");
     let word = mr_bytes_to_arg_word(m.mcx(), image)?;
-    let bytes = crate::typcache_io::multirange_send(m.mcx(), word)?;
-    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+    let payload = crate::typcache_io::multirange_send(m.mcx(), word)?;
+    // C: `PG_RETURN_BYTEA_P(pq_endtypsend(&buf))` — a header-ful bytea. The send
+    // seam strips exactly one VARHDRSZ to recover the wire payload, so frame the
+    // header-less `multirange_send` body with the 4-byte varlena length word
+    // (matching int4send / array_send / record_send). Storing it header-less let
+    // the seam's strip eat the leading rangeCount word, so a client decoding the
+    // multirange read 0 ranges and panicked past the end.
+    let total = payload.len() + 4;
+    let mut img = Vec::with_capacity(total);
+    img.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+    img.extend_from_slice(&payload);
+    fcinfo.set_ref_result(RefPayload::Varlena(img));
     Ok(Datum::null())
 }
 
