@@ -862,3 +862,192 @@ pub fn install() {
     gin_consistent_call_tri::set(dispatch_consistent_tri);
     gin_compare_partial::set(dispatch_compare_partial);
 }
+
+// ---------------------------------------------------------------------------
+// Regression guard for the GIN + TOAST corruption bug (commit 9048b921d).
+//
+// Before that fix, `dispatch_extract_value` read the GIN index value's raw
+// heap-tuple attribute bytes directly. For a TOAST-eligible varlena column
+// (large tsvector / text[] / jsonb) the on-disk attribute can be an 18-byte
+// external TOAST pointer (`VARATT_IS_EXTERNAL`, low byte `0x01`) or an
+// inline-compressed varlena (`VARATT_IS_4B_C`, low two bits `0b10`), NOT the
+// flat value. The tsvector arm then read bytes[4..8] of that pointer as the
+// tsvector's `size` and walked a bogus `WordEntry` array, so a huge "size"
+// drove a multi-GB allocation that the `MaxAllocSize` gate rejected with
+// `invalid memory alloc request size <huge>`.
+//
+// C's per-opclass extractValue procs read their argument through
+// `PG_GETARG_<TYPE>(0)` == `PG_DETOAST_DATUM`, which fetches an external value
+// back and decompresses a compressed one, so they always see the flat value.
+// The fix detoasts (`detoast_value`) before any arm reads the bytes.
+//
+// These tests construct an external / compressed image whose mis-read `size`
+// word is huge, install a `detoast_attr` seam that returns a known flat
+// tsvector, and assert the dispatch DETOASTS (returns the correct lexeme keys)
+// rather than reading the raw pointer bytes. They FAIL on the pre-fix code
+// (the raw-pointer `size` blows up the allocation) and PASS on current main.
+#[cfg(test)]
+mod toast_regression_tests {
+    use super::*;
+    use ::mcx::MemoryContext;
+    use ::types_core::fmgr::FmgrInfo;
+    use std::sync::Once;
+
+    // A `text` varlena image (4-byte header, low 2 bits `00`) for a lexeme — the
+    // exact GIN key `gin_extract_tsvector`'s `cstring_to_text_with_len` produces.
+    fn text_image(s: &[u8]) -> Vec<u8> {
+        let total = 4 + s.len();
+        let mut out = ((total as u32) << 2).to_ne_bytes().to_vec();
+        out.extend_from_slice(s);
+        out
+    }
+
+    // A valid flat tsvector datum with a single lexeme, 4-byte (uncompressed,
+    // un-external) header. Layout: `int32 vl_len_; int32 size;` then one 4-byte
+    // `WordEntry` (`len:11` at bits 1..12, `pos:20` at bits 12..32) then the
+    // lexeme bytes. This is what detoasting the external/compressed image yields.
+    fn flat_tsvector_one_lexeme(lexeme: &[u8]) -> Vec<u8> {
+        let total = 8 + 4 + lexeme.len();
+        let mut out = Vec::with_capacity(total);
+        out.extend_from_slice(&((total as u32) << 2).to_ne_bytes()); // vl_len_ (4B header)
+        out.extend_from_slice(&1i32.to_ne_bytes()); // size = 1 entry
+        let word: u32 = (lexeme.len() as u32) << 1; // len in bits 1..12, pos = 0
+        out.extend_from_slice(&word.to_ne_bytes());
+        out.extend_from_slice(lexeme);
+        out
+    }
+
+    // An 18-byte external TOAST pointer image (`VARATT_IS_EXTERNAL`: low byte
+    // `0x01`). bytes[4..8] are deliberately a huge value: pre-fix, the tsvector
+    // arm reads them as the tsvector `size` and allocates `size * sizeof(entry)`
+    // bytes, blowing the `MaxAllocSize` gate. `0x4000_0000` (1 GiB worth of
+    // entries) is comfortably over the 1 GiB cap once multiplied by the entry
+    // size, so the pre-fix path errors deterministically.
+    fn external_toast_pointer() -> Vec<u8> {
+        let mut p = vec![0u8; 18];
+        p[0] = 0x01; // VARATT_IS_1B_E
+        p[4..8].copy_from_slice(&0x4000_0000u32.to_ne_bytes()); // bogus huge "size"
+        p
+    }
+
+    // An inline-compressed varlena image (`VARATT_IS_4B_C`: low two bits `0b10`).
+    // bytes[4..8] are again a huge bogus "size" for the pre-fix mis-read.
+    fn compressed_varlena() -> Vec<u8> {
+        let mut p = vec![0u8; 24];
+        p[0] = 0x02; // (h & 0x03) == 0x02  => VARATT_IS_4B_C
+        p[4..8].copy_from_slice(&0x4000_0000u32.to_ne_bytes()); // bogus huge "size"
+        p
+    }
+
+    // Install a `detoast_attr` seam (once per test binary) that returns a known
+    // flat tsvector for any external/compressed image. This stands in for the
+    // real TOAST fetch + decompression: the only contract `dispatch_extract_value`
+    // relies on is that an external/compressed image is replaced by the flat one
+    // BEFORE the opclass arm reads it. A test that bypassed detoast (the bug)
+    // would never reach this seam with the raw pointer's bytes intact.
+    static INSTALL_DETOAST: Once = Once::new();
+    fn install_detoast_seam() {
+        INSTALL_DETOAST.call_once(|| {
+            if !detoast_seams::detoast_attr::is_installed() {
+                detoast_seams::detoast_attr::set(|mcx, attr| {
+                    // The detoasted ("fetched back / decompressed") flat value:
+                    // a tsvector with one lexeme whose identity depends on the
+                    // toast kind so each case can assert the right key.
+                    let lexeme: &[u8] = match attr.first() {
+                        Some(&0x01) => b"catexternal",   // external pointer
+                        Some(&h) if (h & 0x03) == 0x02 => b"catcompressed", // compressed
+                        _ => b"catflat",
+                    };
+                    let flat = flat_tsvector_one_lexeme(lexeme);
+                    ::mcx::slice_in(mcx, &flat)
+                });
+            }
+        });
+    }
+
+    fn tsvector_fmgr() -> FmgrInfo {
+        let mut fi = FmgrInfo::empty();
+        fi.fn_oid = F_GIN_EXTRACT_TSVECTOR;
+        fi
+    }
+
+    // The core guard: an EXTERNAL TOAST-pointer GIN value must be detoasted
+    // before extractValue. Pre-fix, the raw pointer's bytes[4..8] are read as a
+    // huge tsvector `size` and the allocation blows the MaxAllocSize gate
+    // (`invalid memory alloc request size`) — so this returns `Err` (the test
+    // FAILS). Post-fix, it detoasts to the flat tsvector and returns the lexeme
+    // key (the test PASSES).
+    #[test]
+    fn extract_value_detoasts_external_tsvector() {
+        install_detoast_seam();
+        let cx = MemoryContext::new("gin-toast-test");
+        let mcx = cx.mcx();
+        let fi = tsvector_fmgr();
+        let raw = external_toast_pointer();
+        let value = Datum::from_byref_bytes_in(mcx, &raw).unwrap();
+
+        let out = dispatch_extract_value(mcx, &fi, 0, value)
+            .expect("external TOAST pointer must be detoasted before extractValue, not read raw");
+        let (keys, _nulls) = out.expect("tsvector extract yields keys");
+        assert_eq!(keys.len(), 1, "one lexeme -> one GIN key");
+        assert_eq!(
+            keys[0].as_ref_bytes(),
+            text_image(b"catexternal").as_slice(),
+            "the key must come from the DETOASTED tsvector, not the raw TOAST pointer bytes"
+        );
+    }
+
+    // Same guard for an inline-COMPRESSED GIN value (the other VARATT branch the
+    // fix covers).
+    #[test]
+    fn extract_value_detoasts_compressed_tsvector() {
+        install_detoast_seam();
+        let cx = MemoryContext::new("gin-toast-test");
+        let mcx = cx.mcx();
+        let fi = tsvector_fmgr();
+        let raw = compressed_varlena();
+        let value = Datum::from_byref_bytes_in(mcx, &raw).unwrap();
+
+        let out = dispatch_extract_value(mcx, &fi, 0, value)
+            .expect("compressed varlena must be detoasted before extractValue, not read raw");
+        let (keys, _nulls) = out.expect("tsvector extract yields keys");
+        assert_eq!(keys.len(), 1);
+        assert_eq!(
+            keys[0].as_ref_bytes(),
+            text_image(b"catcompressed").as_slice(),
+            "the key must come from the DECOMPRESSED tsvector, not the raw compressed bytes"
+        );
+    }
+
+    // Direct unit check of the `detoast_value` helper: external and compressed
+    // images are replaced; a plain (4-byte-header, uncompressed) value passes
+    // through unchanged.
+    #[test]
+    fn detoast_value_replaces_external_and_compressed_only() {
+        install_detoast_seam();
+        let cx = MemoryContext::new("gin-toast-test");
+        let mcx = cx.mcx();
+
+        // External -> replaced by the flat tsvector image.
+        let ext = Datum::from_byref_bytes_in(mcx, &external_toast_pointer()).unwrap();
+        let flat = detoast_value(mcx, ext).unwrap();
+        assert_eq!(
+            flat.as_ref_bytes(),
+            flat_tsvector_one_lexeme(b"catexternal").as_slice()
+        );
+
+        // Compressed -> replaced (decompressed).
+        let comp = Datum::from_byref_bytes_in(mcx, &compressed_varlena()).unwrap();
+        let flatc = detoast_value(mcx, comp).unwrap();
+        assert_eq!(
+            flatc.as_ref_bytes(),
+            flat_tsvector_one_lexeme(b"catcompressed").as_slice()
+        );
+
+        // Plain 4-byte-header value -> passed through verbatim (no detoast).
+        let plain = flat_tsvector_one_lexeme(b"plain");
+        let pv = Datum::from_byref_bytes_in(mcx, &plain).unwrap();
+        let out = detoast_value(mcx, pv).unwrap();
+        assert_eq!(out.as_ref_bytes(), plain.as_slice());
+    }
+}
