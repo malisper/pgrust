@@ -1049,7 +1049,7 @@ fn populate_scalar<'mcx>(
 /// payload bytes.
 fn jsonb_string_bytes(jbv: &JsonbValue) -> Vec<u8> {
     match &jbv.val {
-        JsonbValueData::String(s) => s.clone(),
+        JsonbValueData::String(s) => s.to_vec(),
         _ => Vec::new(),
     }
 }
@@ -1847,7 +1847,7 @@ fn populate_record_worker<'mcx>(
             typ: jbvType::jbvBinary,
             val: JsonbValueData::Binary {
                 len: root.len() as i32,
-                data: root.to_vec(),
+                data: ::mcx::slice_borrow_in(mcx, root)?,
                 offset: 0,
             },
         };
@@ -2000,7 +2000,7 @@ pub fn json_populate_type<'mcx>(
             let bytes = s.as_slice().to_vec();
             JsValue::Jsonb(Some(Box::new(JsonbValue {
                 typ: jbvType::jbvString,
-                val: JsonbValueData::String(bytes),
+                val: JsonbValueData::String(::mcx::slice_borrow_in(mcx, &bytes)?),
             })))
         } else {
             // jbv.type = jbvBinary; data = &jsonb->root; len = VARSIZE - VARHDRSZ;
@@ -2009,7 +2009,7 @@ pub fn json_populate_type<'mcx>(
                 typ: jbvType::jbvBinary,
                 val: JsonbValueData::Binary {
                     len: root.len() as i32,
-                    data: root.to_vec(),
+                    data: ::mcx::slice_borrow_in(mcx, root)?,
                     offset: 0,
                 },
             })))

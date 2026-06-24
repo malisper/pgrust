@@ -193,7 +193,7 @@ fn each_worker_jsonb<'mcx>(
         if r == JsonbIteratorToken::WJB_KEY {
             // key = cstring_to_text_with_len(v.val.string.val, v.val.string.len);
             let key = match v.val {
-                JsonbValueData::String(ref s) => s.clone(),
+                JsonbValueData::String(ref s) => s.to_vec(),
                 _ => Vec::new(),
             };
 

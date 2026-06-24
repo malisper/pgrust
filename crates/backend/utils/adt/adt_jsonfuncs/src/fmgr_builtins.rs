@@ -472,7 +472,8 @@ fn fc_json_strip_nulls(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::Pg
 /// `jsonb_typeof(jsonb) -> text` (oid 3210).
 fn fc_jsonb_typeof(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0).to_vec();
-    let typ = adt_jsonb::jsonb_typeof(&jb)?;
+    let m = scratch_mcx();
+    let typ = adt_jsonb::jsonb_typeof(m.mcx(), ::mcx::slice_borrow_in(m.mcx(), &jb)?)?;
     Ok(ret_text(fcinfo, typ.as_bytes().to_vec()))
 }
 

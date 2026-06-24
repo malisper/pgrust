@@ -799,7 +799,7 @@ fn push_null_elements<'mcx>(mcx: Mcx<'mcx>, ps: &mut Option<Box<JsonbParseState<
     let mut num = num;
     while num > 0 {
         num -= 1;
-        push(ps, JsonbIteratorToken::WJB_ELEM, Some(&null))?;
+        push(mcx, ps, JsonbIteratorToken::WJB_ELEM, Some(&null))?;
     }
     Ok(())
 }

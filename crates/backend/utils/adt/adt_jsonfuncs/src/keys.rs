@@ -105,7 +105,7 @@ fn jsonb_object_keys_worker<'mcx>(mcx: Mcx<'mcx>, jb: &'mcx [u8]) -> PgResult<Ve
         // NUL-terminated cstr that CStringGetTextDatum later consumes).
         if r == JsonbIteratorToken::WJB_KEY {
             if let JsonbValueData::String(ref s) = v.val {
-                result.push(s.clone());
+                result.push(s.to_vec());
             }
         }
     }

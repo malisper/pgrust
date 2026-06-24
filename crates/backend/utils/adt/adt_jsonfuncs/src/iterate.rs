@@ -283,12 +283,12 @@ fn token_lt_begin_array(typ: JsonbIteratorToken) -> bool {
 /// `jsonb` is the full jsonb varlena; the root container starts at `VARHDRSZ`.
 pub fn transform_jsonb_string_values<'mcx>(
     mcx: Mcx<'mcx>,
-    jsonb: &[u8],
+    jsonb: &'mcx [u8],
     transform_action: &mut dyn FnMut(Mcx<'mcx>, &[u8]) -> PgResult<PgVec<'mcx, u8>>,
 ) -> PgResult<PgVec<'mcx, u8>> {
     // JsonbValue v, *res = NULL; JsonbParseState *st = NULL; bool is_scalar;
-    let mut res: Option<JsonbValue> = None;
-    let mut st = None;
+    let mut res: Option<JsonbValue<'mcx>> = None;
+    let mut st: Option<alloc::boxed::Box<types_jsonb::jsonb_util::JsonbParseState<'mcx>>> = None;
 
     // it = JsonbIteratorInit(mcx, &jsonb->root);
     let mut it = JsonbIteratorInit(mcx, crate::common::vardata_any(jsonb));
@@ -317,10 +317,11 @@ pub fn transform_jsonb_string_values<'mcx>(
             //   v.val.string.len = VARSIZE_ANY_EXHDR(out);
             // Detoasting an owned byte buffer is a no-op; VARDATA_ANY /
             // VARSIZE_ANY_EXHDR are just the bytes and their length.
-            v.val = JsonbValueData::String(out.to_vec());
+            v.val = JsonbValueData::String(::mcx::slice_borrow_in(mcx, &out)?);
             // res = pushJsonbValue(&st, type, type < WJB_BEGIN_ARRAY ? &v : NULL);
             // (here type is WJB_VALUE or WJB_ELEM, both < WJB_BEGIN_ARRAY)
             res = pushJsonbValue(
+                mcx,
                 &mut st,
                 typ,
                 if token_lt_begin_array(typ) {

@@ -979,7 +979,7 @@ pub fn jsonb_get_element<'mcx>(
         if current_type == jbvType::jbvBinary {
             // container = jbvp->val.binary.data;
             let data = match &jbvp.as_ref().expect("jbvp must be set").val {
-                JsonbValueData::Binary { data, .. } => data.clone(),
+                JsonbValueData::Binary { data, .. } => data.to_vec(),
                 _ => unreachable!("jbvBinary payload"),
             };
             container = data;
