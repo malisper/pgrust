@@ -61,8 +61,9 @@ pub const PGP_MAX_BLOCK: usize = 16;
 
 pub const MDC_DIGEST_LEN: usize = 20;
 
-/// pgcrypto error strings (px_strerror).
-pub const CORRUPT_DATA: &str = "Corrupt data";
+/// pgcrypto error strings (px_strerror). Both `PXE_PGP_CORRUPT_DATA` and the
+/// generic wrong-key code map to "Wrong key or corrupt data" in px.c.
+pub const CORRUPT_DATA: &str = "Wrong key or corrupt data";
 pub const WRONG_KEY: &str = "Wrong key or corrupt data";
 pub const UNSUPPORTED_CIPHER: &str = "Unsupported cipher algorithm";
 pub const UNSUPPORTED_HASH: &str = "Unsupported digest algorithm";

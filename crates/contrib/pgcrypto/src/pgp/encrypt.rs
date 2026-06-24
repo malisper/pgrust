@@ -100,17 +100,33 @@ pub fn encrypt_symmetric(
     }
     write_packet(&mut out, PGP_PKT_SYMENC_SESSKEY, &esk);
 
-    // --- Build the inner plaintext stream (prefix + literal + MDC) ---
+    // --- Build the symmetrically-encrypted data packet with the session key ---
+    write_encdata_packet(&ctx, data, &sess_key, &mut out)?;
+
+    let _ = render_newlen; // retained for parity reference
+    let _ = sess_cipher;
+    Ok(out)
+}
+
+/// Build and append the symmetrically-encrypted data packet (prefix + literal
+/// [+ MDC], CFB-encrypted under `sess_key`) for the cipher named in `ctx`. This
+/// is shared by the symmetric and public-key encrypt entry points.
+pub fn write_encdata_packet(
+    ctx: &PgpContext,
+    data: &[u8],
+    sess_key: &[u8],
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
     let bs = cipher_block_size(ctx.cipher_algo);
 
     // literal (with optional compression wrapping)
     let mut literal = if ctx.text_mode != 0 && ctx.convert_crlf != 0 {
-        build_literal_packet(&ctx, &convert_crlf(data))
+        build_literal_packet(ctx, &convert_crlf(data))
     } else {
-        build_literal_packet(&ctx, data)
+        build_literal_packet(ctx, data)
     };
     if ctx.compress_algo > 0 && ctx.compress_level > 0 {
-        literal = build_compressed_packet(&ctx, &literal)?;
+        literal = build_compressed_packet(ctx, &literal)?;
     }
 
     // prefix: bs random bytes + 2 repeat
@@ -142,7 +158,7 @@ pub fn encrypt_symmetric(
 
     // CFB encrypt.
     let resync = !mdc;
-    let mut cfb = PgpCfb::create(ctx.cipher_algo, &sess_key, resync, None)
+    let mut cfb = PgpCfb::create(ctx.cipher_algo, sess_key, resync, None)
         .map_err(|e| e.to_string())?;
     let ciphertext = cfb.encrypt(&plaintext);
 
@@ -158,11 +174,8 @@ pub fn encrypt_symmetric(
         body.push(0x01);
     }
     body.extend_from_slice(&ciphertext);
-    write_packet(&mut out, tag, &body);
-
-    let _ = render_newlen; // retained for parity reference
-    let _ = sess_cipher;
-    Ok(out)
+    write_packet(out, tag, &body);
+    Ok(())
 }
 
 use super::consts::Digest;

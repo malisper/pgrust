@@ -7,9 +7,9 @@ use super::context::PgpContext;
 use super::packet::PktReader;
 use super::s2k::S2k;
 
-struct SessKey {
-    cipher: i32,
-    key: Vec<u8>,
+pub struct SessKey {
+    pub cipher: i32,
+    pub key: Vec<u8>,
 }
 
 /// `pgp_decrypt` for the symmetric path. `ctx` is updated in place with the
@@ -18,6 +18,34 @@ pub fn decrypt_symmetric(
     ctx: &mut PgpContext,
     data: &[u8],
     passphrase: &[u8],
+) -> Result<Vec<u8>, String> {
+    decrypt_message(ctx, data, &mut |ctx, body| {
+        parse_symenc_sesskey(ctx, body, passphrase)
+    })
+}
+
+/// `pgp_decrypt` for the public-key path: the caller-supplied `pubenc` closure
+/// recovers the session key from a tag-1 packet body (which it decrypts with the
+/// recipient secret key). The symmetric data-packet pipeline is shared.
+pub fn decrypt_pubkey(
+    ctx: &mut PgpContext,
+    data: &[u8],
+    pubenc: &mut dyn FnMut(&[u8]) -> Result<SessKey, String>,
+) -> Result<Vec<u8>, String> {
+    decrypt_message(ctx, data, &mut |ctx, body| {
+        let sk = pubenc(body)?;
+        ctx.cipher_algo = sk.cipher;
+        Ok(sk)
+    })
+}
+
+/// The shared decrypt driver: walk the packet stream, recover the session key
+/// from whichever ESK packet (`sesskey` callback dispatches symmetric vs
+/// public-key), then decrypt the symmetrically-encrypted data packet.
+fn decrypt_message(
+    ctx: &mut PgpContext,
+    data: &[u8],
+    sesskey: &mut dyn FnMut(&mut PgpContext, &[u8]) -> Result<SessKey, String>,
 ) -> Result<Vec<u8>, String> {
     let mut rdr = PktReader::new(data);
     let mut sess: Option<SessKey> = None;
@@ -31,9 +59,9 @@ pub fn decrypt_symmetric(
             t if t == PGP_PKT_MARKER => {
                 let _ = rdr.read_body(&hdr).map_err(|_| CORRUPT_DATA.to_string())?;
             }
-            t if t == PGP_PKT_SYMENC_SESSKEY => {
+            t if t == PGP_PKT_SYMENC_SESSKEY || t == PGP_PKT_PUBENC_SESSKEY => {
                 let body = rdr.read_body(&hdr).map_err(|_| CORRUPT_DATA.to_string())?;
-                sess = Some(parse_symenc_sesskey(ctx, &body, passphrase)?);
+                sess = Some(sesskey(ctx, &body)?);
             }
             t if t == PGP_PKT_SYMENC_DATA || t == PGP_PKT_SYMENC_DATA_MDC => {
                 let body = rdr.read_body(&hdr).map_err(|_| CORRUPT_DATA.to_string())?;
@@ -58,9 +86,6 @@ pub fn decrypt_symmetric(
                     return Err(NOT_TEXT.to_string());
                 }
                 return Ok(out);
-            }
-            t if t == PGP_PKT_PUBENC_SESSKEY => {
-                return Err(WRONG_KEY.to_string());
             }
             _ => {
                 let _ = rdr.read_body(&hdr).map_err(|_| CORRUPT_DATA.to_string())?;

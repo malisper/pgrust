@@ -52,3 +52,8 @@ pwhash = "1"
 
 # OpenPGP compression (ZIP = raw deflate, ZLIB = zlib-wrapped). Pure Rust.
 miniz_oxide = "0.8"
+
+# OpenPGP public-key (RSA/ElGamal) MPI math: modexp / modinverse over big
+# integers, mirroring pgcrypto's OpenSSL BIGNUM path (pgp-mpi-openssl.c).
+num-bigint = "0.4"
+num-traits = "0.2"

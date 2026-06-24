@@ -25,10 +25,9 @@
 //! * **gen_random_uuid** mirrors core's v4 UUID (random bytes + version/variant
 //!   bits), formatted as a 36-char text (the catalog declares a `uuid` return,
 //!   but the value crosses the by-ref boundary as the canonical text image).
-//! * The **PGP suite** (`pgp_*`, `armor`/`dearmor`) is registered as
-//!   graceful-`ERROR` stubs (large self-contained subsystem; see module docs and
-//!   the port report). `CREATE EXTENSION` still succeeds because the symbols
-//!   resolve.
+//! * The **PGP suite** (`pgp_*`, `armor`/`dearmor`) is fully ported: ASCII
+//!   armor, symmetric and public-key (RSA/ElGamal) encrypt/decrypt, compression,
+//!   S2K, CFB, MDC, and key-id extraction (see the `pgp` module).
 
 use ::datum::Datum;
 use ::fmgr::boundary::RefPayload;
@@ -327,23 +326,61 @@ fn pgp_notice(msg: &str) {
     let _ = ereport(NOTICE).errmsg(msg).finish(here("pgp_decrypt"));
 }
 
-macro_rules! pgp_stub {
-    ($name:ident, $sym:literal) => {
-        fn $name(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-            px_error(concat!(
-                "pgcrypto: ",
-                $sym,
-                " (PGP public-key subsystem) is not ported in this build"
-            ));
-        }
-    };
+/// `pgp_pub_encrypt_text` / `pgp_pub_encrypt_bytea`. arg0=data, arg1=pubkey
+/// (dearmored), optional arg2=args.
+fn pgp_pub_encrypt(fcinfo: &mut FunctionCallInfoBaseData, is_text: bool) -> Datum {
+    let data = arg_bytes(fcinfo, 0);
+    let key = arg_bytes(fcinfo, 1);
+    let args = opt_arg_bytes(fcinfo, 2);
+    match pgp::pub_encrypt(&data, &key, args.as_deref(), is_text) {
+        Ok(out) => ret_varlena(fcinfo, &out),
+        Err(e) => px_error(&e),
+    }
 }
 
-// Public-key path: not ported (RSA/ElGamal MPI math).
-pgp_stub!(fc_pgp_pub_encrypt_text, "pgp_pub_encrypt_text");
-pgp_stub!(fc_pgp_pub_encrypt_bytea, "pgp_pub_encrypt_bytea");
-pgp_stub!(fc_pgp_pub_decrypt_text, "pgp_pub_decrypt_text");
-pgp_stub!(fc_pgp_pub_decrypt_bytea, "pgp_pub_decrypt_bytea");
+fn fc_pgp_pub_encrypt_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    pgp_pub_encrypt(fcinfo, true)
+}
+
+fn fc_pgp_pub_encrypt_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    pgp_pub_encrypt(fcinfo, false)
+}
+
+/// `pgp_pub_decrypt_text` / `pgp_pub_decrypt_bytea`. arg0=msg(bytea),
+/// arg1=seckey (dearmored), optional arg2=password, optional arg3=args.
+fn pgp_pub_decrypt(fcinfo: &mut FunctionCallInfoBaseData, need_text: bool) -> Datum {
+    let data = arg_bytes(fcinfo, 0);
+    let key = arg_bytes(fcinfo, 1);
+    let psw = opt_arg_bytes(fcinfo, 2);
+    let args = opt_arg_bytes(fcinfo, 3);
+    match pgp::pub_decrypt(&data, &key, psw.as_deref(), args.as_deref(), need_text) {
+        Ok(out) => {
+            for n in &out.notices {
+                pgp_notice(n);
+            }
+            if need_text {
+                if let Err(e) = ::mbutils_seams::pg_verifymbstr::call(&out.plaintext, false) {
+                    raise(e);
+                }
+            }
+            ret_varlena(fcinfo, &out.plaintext)
+        }
+        Err(e) => {
+            for n in &e.notices {
+                pgp_notice(n);
+            }
+            px_error(&e.message);
+        }
+    }
+}
+
+fn fc_pgp_pub_decrypt_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    pgp_pub_decrypt(fcinfo, true)
+}
+
+fn fc_pgp_pub_decrypt_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    pgp_pub_decrypt(fcinfo, false)
+}
 
 /// Optional args arg (the 3rd arg of `pgp_sym_*`): `None` when absent.
 fn opt_arg_bytes(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Option<Vec<u8>> {
