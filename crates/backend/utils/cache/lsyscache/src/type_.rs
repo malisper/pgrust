@@ -827,14 +827,39 @@ pub fn get_subscripting_routines(
             fetch_leakproof: true,
             store_leakproof: false,
         },
-        // Any other subscripting handler is not modeled yet; OidFunctionCall0
-        // would dispatch to its body. Mirror PG and panic at the unported owner.
-        other => panic!(
-            "getSubscriptingRoutines: typsubscript handler OID {} is not a modeled \
-             subscript handler (only array_subscript_handler / \
-             raw_array_subscript_handler / jsonb_subscript_handler are ported)",
-            other
-        ),
+        // A contrib type's subscripting handler has a dynamically-assigned OID
+        // (not a fixed builtin OID), so it can not be matched as a constant. C's
+        // OidFunctionCall0(typsubscript) dispatches to the handler body by OID;
+        // the owned-model equivalent resolves the handler's proname and matches
+        // the ported contrib handlers. `hstore_subscript_handler`
+        // (contrib/hstore/hstore_subs.c) is ported.
+        other => {
+            let scratch = ::mcx::MemoryContext::new("getSubscriptingRoutines");
+            let proname = crate::function::get_func_name(scratch.mcx(), other)?;
+            let proname_str: Option<&str> = proname.as_deref();
+            match proname_str {
+                // hstore_subscript_handler (hstore_subs.c):
+                //   .transform = hstore_subscript_transform,
+                //   .exec_setup = hstore_exec_setup,
+                //   .fetch_strict = true (fetch returns NULL for NULL inputs),
+                //   .fetch_leakproof = true (fetch returns NULL for bad subscript),
+                //   .store_leakproof = false (assignment throws error)
+                Some("hstore_subscript_handler") => SubscriptRoutines {
+                    handler: SubscriptHandler::Hstore,
+                    fetch_strict: true,
+                    fetch_leakproof: true,
+                    store_leakproof: false,
+                },
+                _ => panic!(
+                    "getSubscriptingRoutines: typsubscript handler OID {} ({}) is not a \
+                     modeled subscript handler (only array_subscript_handler / \
+                     raw_array_subscript_handler / jsonb_subscript_handler / \
+                     hstore_subscript_handler are ported)",
+                    other,
+                    proname_str.unwrap_or("?"),
+                ),
+            }
+        }
     };
     Ok(Some((routines, typelem)))
 }

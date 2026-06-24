@@ -81,6 +81,8 @@ arrayfuncs_seams = { path = "../../utils/adt/arrayfuncs_seams" }
 lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }
 # jsonb subscripting execution bodies (jsonbsubs.c) reached per-callback.
 jsonbsubs_seams = { path = "../../utils/adt/jsonbsubs_seams" }
+# hstore subscripting execution bodies (hstore_subs.c) reached per-callback.
+hstoresubs_seams = { path = "../../../contrib/hstoresubs_seams" }
 # SQL/JSON path evaluation (jsonpath_exec.c) for EEOP_JSONEXPR_PATH:
 # JsonPathExists/Query/Value + JsonbValueToJsonb + json_populate_type coercion.
 # These are leaf adt units with no executor deps, so the edges are acyclic.

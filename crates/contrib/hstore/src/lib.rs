@@ -36,6 +36,8 @@ use repr::{
 
 mod records;
 
+mod subs;
+
 /// The simple (suffix-free) library name — `$libdir/hstore` reduces to this.
 const LIBRARY: &str = "hstore";
 
@@ -1188,4 +1190,6 @@ pub fn init_seams() {
         lookup,
         pg_init: None,
     });
+    // hstore subscripting execution bodies (hstore_subs.c).
+    subs::init_seams();
 }

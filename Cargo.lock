@@ -6262,6 +6262,7 @@ dependencies = [
  "format_type_seams",
  "heaptoast",
  "heaptuple",
+ "hstoresubs_seams",
  "jsonb_util",
  "jsonbsubs_seams",
  "jsonpath_exec",
@@ -9578,12 +9579,14 @@ version = "0.0.0"
 dependencies = [
  "arrayfuncs",
  "datum",
+ "detoast_seams",
  "dfmgr_seams",
  "fmgr",
  "fmgr_core",
  "fmgr_seams",
  "hashfn",
  "heaptuple",
+ "hstoresubs_seams",
  "json_seams",
  "jsonapi",
  "jsonb_util",
@@ -9598,6 +9601,17 @@ dependencies = [
  "utils_error",
  "varlena",
  "varlena_seams",
+]
+
+[[package]]
+name = "hstoresubs_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_tuple",
 ]
 
 [[package]]

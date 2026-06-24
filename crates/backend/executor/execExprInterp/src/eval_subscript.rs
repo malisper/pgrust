@@ -196,6 +196,10 @@ pub fn exec_sbsref<'mcx>(
         | SubscriptMethod::JsonbFetchOld => {
             return jsonb::exec(state, op, econtext, estate, method, op_res);
         }
+        // hstore FETCH / ASSIGN (contrib/hstore/hstore_subs.c) likewise.
+        SubscriptMethod::HstoreFetch | SubscriptMethod::HstoreAssign => {
+            return hstore::exec(state, op, econtext, estate, method, op_res);
+        }
         _ => {}
     }
     let mut inputs = extract(state, op);
@@ -337,6 +341,10 @@ pub fn exec_sbsref<'mcx>(
         | SubscriptMethod::JsonbFetchOld
         | SubscriptMethod::JsonbCheckSubscripts => {
             unreachable!("jsonb subscript method dispatched through the array exec_sbsref body")
+        }
+        // hstore methods are handled by hstore::exec via the early return above.
+        SubscriptMethod::HstoreFetch | SubscriptMethod::HstoreAssign => {
+            unreachable!("hstore subscript method dispatched through the array exec_sbsref body")
         }
     }
     Ok(())
@@ -616,5 +624,115 @@ mod jsonb {
         if let Some(c) = inputs.prev_cell {
             write_cell(state, c, val, isnull);
         }
+    }
+}
+
+/// hstore subscripting execution (contrib/hstore/hstore_subs.c). hstore has a
+/// single `text` subscript and no `sbs_check_subscripts` / `sbs_fetch_old`, so
+/// there is no preceding SUBSCRIPTS step: the FETCH/ASSIGN step reads the single
+/// subscript Datum directly from its arena cell (`upper_cells[0]`, the C
+/// `sbsrefstate->upperindex[0]`) and dispatches the primitive body — which lives
+/// in the `hstore` owner, reached through `hstoresubs_seams`.
+mod hstore {
+    use super::{read_cell, write_cell};
+    use ::types_error::{PgError, PgResult, ERRCODE_NULL_VALUE_NOT_ALLOWED};
+    use ::nodes::execexpr::{
+        ExprEvalStepData, ExprState, ResultCellId, SubscriptMethod,
+    };
+    use ::nodes::execnodes::EcxtId;
+    use ::nodes::EStateData;
+
+    /// Owned snapshot of an hstore SBSREF step's `SubscriptingRefState` (just the
+    /// single subscript cell plus the assignment-mode flag and replacement cell).
+    struct HstoreInputs {
+        isassignment: bool,
+        // arena cell the single text subscript was evaluated into.
+        subscript_cell: Option<ResultCellId>,
+        replace_cell: Option<ResultCellId>,
+    }
+
+    fn extract<'mcx>(state: &ExprState<'mcx>, op: usize) -> HstoreInputs {
+        let steps = state.steps.as_ref().expect("eval_subscript(hstore): steps not ready");
+        let st = match &steps[op].d {
+            ExprEvalStepData::SbsRef { state: Some(s), .. } => s,
+            other => unreachable!(
+                "eval_subscript(hstore): step.d carries no SubscriptingRefState: {other:?}"
+            ),
+        };
+        // hstore is single-subscript: upper_cells[0] holds the text subscript.
+        let subscript_cell = st
+            .upper_cells
+            .as_ref()
+            .and_then(|c| c.first().copied())
+            .flatten();
+        HstoreInputs {
+            isassignment: st.isassignment,
+            subscript_cell,
+            replace_cell: st.replace_cell,
+        }
+    }
+
+    /// `EEOP_SBSREF_FETCH` / `_ASSIGN` for hstore.
+    pub fn exec<'mcx>(
+        state: &mut ExprState<'mcx>,
+        op: usize,
+        econtext: EcxtId,
+        estate: &mut EStateData<'mcx>,
+        method: SubscriptMethod,
+        op_res: ResultCellId,
+    ) -> PgResult<()> {
+        let inputs = extract(state, op);
+
+        // The single text subscript Datum (sbsrefstate->upperindex[0]).
+        let sub_cell = inputs
+            .subscript_cell
+            .expect("eval_subscript(hstore): subscript has no arena cell");
+        let (key, key_null) = read_cell(state, sub_cell);
+
+        let mcx = estate.ecxt(econtext).ecxt_per_query_memory;
+        let (container, container_null) = read_cell(state, op_res);
+
+        use hstoresubs_seams as hstoresubs;
+        match method {
+            SubscriptMethod::HstoreFetch => {
+                // C: if (sbsrefstate->upperindexnull[0]) { *op->resnull = true; return; }
+                if key_null {
+                    let (cur, _) = read_cell(state, op_res);
+                    write_cell(state, op_res, cur, true);
+                    return Ok(());
+                }
+                let (val, isnull) =
+                    hstoresubs::hstore_subscript_fetch::call(mcx, container, key)?;
+                write_cell(state, op_res, val, isnull);
+            }
+            SubscriptMethod::HstoreAssign => {
+                // C: if (sbsrefstate->upperindexnull[0]) ereport(ERROR,
+                //        ERRCODE_NULL_VALUE_NOT_ALLOWED,
+                //        "hstore subscript in assignment must not be null");
+                if key_null {
+                    return Err(PgError::error(
+                        "hstore subscript in assignment must not be null",
+                    )
+                    .with_sqlstate(ERRCODE_NULL_VALUE_NOT_ALLOWED));
+                }
+                let (rep, repnull) = match inputs.replace_cell {
+                    Some(c) => read_cell(state, c),
+                    None => panic!(
+                        "eval_subscript(hstore): assignment step has no replacement-value cell"
+                    ),
+                };
+                let (val, isnull) = hstoresubs::hstore_subscript_assign::call(
+                    mcx,
+                    container,
+                    container_null,
+                    key,
+                    rep,
+                    repnull,
+                )?;
+                write_cell(state, op_res, val, isnull);
+            }
+            _ => unreachable!("hstore::exec dispatched a non-hstore method"),
+        }
+        Ok(())
     }
 }

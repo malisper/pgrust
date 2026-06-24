@@ -1519,7 +1519,34 @@ fn subscript_exec_setup<'mcx>(
             array_exec_setup(sbsref, sbsrefstate, methods)
         }
         SubscriptHandler::Jsonb => jsonb_exec_setup(sbsref, sbsrefstate, methods),
+        SubscriptHandler::Hstore => hstore_exec_setup(sbsref, sbsrefstate, methods),
     }
+}
+
+/// `hstore_exec_setup(sbsref, sbsrefstate, methods)`
+/// (contrib/hstore/hstore_subs.c) — set up the hstore subscript method
+/// discriminants. hstore has exactly one subscript and no slice / check /
+/// fetch-old; the fetch and assign bodies do everything (the C header comment).
+fn hstore_exec_setup<'mcx>(
+    _sbsref: &::nodes::primnodes::SubscriptingRef<'mcx>,
+    sbsrefstate: &mut ::nodes::execexpr::SubscriptingRefState<'mcx>,
+    methods: &mut ::nodes::execexpr::SubscriptExecSteps,
+) -> PgResult<()> {
+    use ::nodes::execexpr::SubscriptMethod;
+
+    // C: Assert(sbsrefstate->numlower == 0); Assert(sbsrefstate->numupper == 1);
+    debug_assert_eq!(sbsrefstate.numlower, 0);
+    debug_assert_eq!(sbsrefstate.numupper, 1);
+
+    // C: methods->sbs_check_subscripts = NULL;
+    //    methods->sbs_fetch     = hstore_subscript_fetch;
+    //    methods->sbs_assign    = hstore_subscript_assign;
+    //    methods->sbs_fetch_old = NULL;
+    methods.sbs_check_subscripts = None;
+    methods.sbs_fetch = Some(SubscriptMethod::HstoreFetch);
+    methods.sbs_assign = Some(SubscriptMethod::HstoreAssign);
+    methods.sbs_fetch_old = None;
+    Ok(())
 }
 
 /// `jsonb_exec_setup(sbsref, sbsrefstate, methods)` (jsonbsubs.c) — set up the

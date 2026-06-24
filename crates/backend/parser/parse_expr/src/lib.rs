@@ -7121,6 +7121,79 @@ fn jsonb_subscript_transform<'mcx>(
     Ok(sbsref)
 }
 
+/// `hstore_subscript_transform(sbsref, indirection, pstate, isSlice, isAssignment)`
+/// (contrib/hstore/hstore_subs.c): verify there's just one subscript, coerce it
+/// to text, and set the result type (always text).
+fn hstore_subscript_transform<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    mut sbsref: SubscriptingRef<'mcx>,
+    indirection: &[A_Indices<'mcx>],
+    pstate: &mut ParseState<'mcx>,
+    is_slice: bool,
+) -> PgResult<SubscriptingRef<'mcx>> {
+    // C: if (isSlice || list_length(indirection) != 1)
+    //        ereport(ERROR, ERRCODE_FEATURE_NOT_SUPPORTED,
+    //                "hstore allows only one subscript", ...);
+    if is_slice || indirection.len() != 1 {
+        // C: parser_errposition(pstate, exprLocation((Node *) indirection)).
+        // `indirection` is a `List *`; exprLocation of a bare List node is -1
+        // (no location), so psql emits no caret context — matching the expected
+        // output (cf. the two `-- error` subscript cases in hstore.sql).
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("hstore allows only one subscript")
+            .errposition(parser_errposition(pstate, -1))
+            .into_error());
+    }
+
+    // C: ai = linitial_node(A_Indices, indirection);
+    //    Assert(ai->uidx != NULL && ai->lidx == NULL && !ai->is_slice);
+    let ai = &indirection[0];
+    debug_assert!(ai.uidx.is_some() && ai.lidx.is_none() && !ai.is_slice);
+    let uidx = ai
+        .uidx
+        .as_deref()
+        .expect("hstore_subscript_transform: A_Indices.uidx is NULL");
+
+    // C: subexpr = transformExpr(pstate, ai->uidx, pstate->p_expr_kind);
+    let subexpr = transformExpr(pstate, Some(uidx.clone_in(mcx)?), pstate.p_expr_kind)?
+        .expect("hstore_subscript_transform: uidx transformed to NULL");
+    let subexpr_type = expr_type(Some(&subexpr))?;
+
+    // C: subexpr = coerce_to_target_type(pstate, subexpr, exprType(subexpr),
+    //                 TEXTOID, -1, COERCION_ASSIGNMENT, COERCE_IMPLICIT_CAST, -1);
+    //    if (subexpr == NULL) ereport(ERROR, ERRCODE_DATATYPE_MISMATCH,
+    //                 "hstore subscript must have type text", ...);
+    let coerced = match coerce::coerce_to_target_type::call(
+        pstate,
+        subexpr,
+        subexpr_type,
+        TEXTOID,
+        -1,
+        CoercionContext::COERCION_ASSIGNMENT,
+        CoercionForm::COERCE_IMPLICIT_CAST,
+        -1,
+    )? {
+        Some(c) => c,
+        None => {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_DATATYPE_MISMATCH)
+                .errmsg("hstore subscript must have type text")
+                .errposition(parser_errposition(pstate, node_location(uidx)))
+                .into_error());
+        }
+    };
+
+    // C: sbsref->refupperindexpr = list_make1(subexpr);
+    //    sbsref->reflowerindexpr = NIL;
+    //    sbsref->refrestype = TEXTOID; sbsref->reftypmod = -1;
+    sbsref.refupperindexpr = alloc::vec![Some(coerced.clone_in(mcx)?)];
+    sbsref.reflowerindexpr = Vec::new();
+    sbsref.refrestype = TEXTOID;
+    sbsref.reftypmod = -1;
+    Ok(sbsref)
+}
+
 /// Install of `subscripting_transform`: dispatch on the container type's
 /// `SubscriptHandler` (re-derived from `refcontainertype`) to the matching
 /// transform method body.
@@ -7141,6 +7214,9 @@ fn subscripting_transform_impl<'mcx>(
         }
         SubscriptHandler::Jsonb => {
             jsonb_subscript_transform(mcx, sbsref, indirection, pstate, is_slice)
+        }
+        SubscriptHandler::Hstore => {
+            hstore_subscript_transform(mcx, sbsref, indirection, pstate, is_slice)
         }
     }
 }

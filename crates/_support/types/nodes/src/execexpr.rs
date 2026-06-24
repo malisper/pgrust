@@ -377,6 +377,12 @@ pub enum SubscriptMethod {
     /// element and records the array-vs-object expectation, so it is reached
     /// through the jsonbsubs owner.
     JsonbCheckSubscripts,
+    /// `hstore_subscript_fetch` (contrib/hstore/hstore_subs.c) — fetch the
+    /// `text` value for one hstore key.
+    HstoreFetch,
+    /// `hstore_subscript_assign` (contrib/hstore/hstore_subs.c) — set/replace
+    /// one hstore key.
+    HstoreAssign,
 }
 
 /// `SubscriptingRefState` (execExpr.h) — non-inline data for container
@@ -627,6 +633,10 @@ pub enum SubscriptHandler {
     RawArray,
     /// `jsonb_subscript_handler` — jsonb (`jsonb_exec_setup`, jsonbsubs.c).
     Jsonb,
+    /// `hstore_subscript_handler` — the `hstore` contrib type
+    /// (`hstore_exec_setup`, contrib/hstore/hstore_subs.c). A single text
+    /// subscript, no slice / check / fetch-old.
+    Hstore,
 }
 
 /// `JsonConstructorExprState` (execExpr.h) — EEOP_JSON_CONSTRUCTOR state, too

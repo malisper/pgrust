@@ -20,6 +20,8 @@ utils_error = { path = "../../backend/utils/utils_error" }
 arrayfuncs = { path = "../../backend/utils/adt/arrayfuncs" }
 varlena = { path = "../../backend/utils/adt/varlena" }
 varlena_seams = { path = "../../backend/utils/adt/varlena_seams" }
+detoast_seams = { path = "../../backend/access/common/detoast_seams" }
+hstoresubs_seams = { path = "../hstoresubs_seams" }
 json_seams = { path = "../../backend/utils/adt/json_seams" }
 jsonapi = { path = "../../common/jsonapi" }
 hashfn = { path = "../../common/hashfn" }
