@@ -90,31 +90,53 @@ pub fn format_aligned(columns: &[PsqlColumn], rows: &[Vec<Option<String>>]) -> S
     out.push('\n');
 
     // Data rows.
+    //
+    // psql's `print_aligned_text` (print.c) does NOT blanket right-trim a data
+    // row. With the default border (1), the cell value itself is written
+    // verbatim — so a `char(n)`/`bpchar` cell whose value is literal trailing
+    // spaces keeps them. The only "trimming" is structural: for the LAST column
+    // psql emits `finalspaces = (j < col_count - 1)` = false, meaning a
+    // left-aligned last column gets NO trailing alignment padding, and NO
+    // trailing margin space is printed after the last column. Right-aligned
+    // cells never have trailing padding anyway. We mirror that exactly: pad
+    // every non-last column (and its trailing margin), but for the last column
+    // skip the alignment pad (when left-aligned) and the trailing margin space.
     for row in rows {
         let mut line = String::new();
         for c in 0..ncols {
             if c > 0 {
                 line.push('|');
             }
+            // Leading margin space (psql prints this for every column with
+            // border != 0).
             line.push(' ');
             let cell = row.get(c).and_then(|v| v.as_deref()).unwrap_or("");
             let pad = widths[c].saturating_sub(display_width(cell));
+            let is_last = c == ncols - 1;
             if columns[c].right_align {
+                // Right aligned: leading spaces, then the value verbatim. No
+                // trailing pad in any case.
                 for _ in 0..pad {
                     line.push(' ');
                 }
                 line.push_str(cell);
             } else {
+                // Left aligned: value verbatim, then trailing pad only if this
+                // is not the last column (psql's `finalspaces`).
                 line.push_str(cell);
-                for _ in 0..pad {
-                    line.push(' ');
+                if !is_last {
+                    for _ in 0..pad {
+                        line.push(' ');
+                    }
                 }
             }
-            line.push(' ');
+            // Trailing margin space: psql prints it only when not the last
+            // column.
+            if !is_last {
+                line.push(' ');
+            }
         }
-        // psql right-trims trailing whitespace on each data row.
-        let trimmed = line.trim_end_matches(' ');
-        out.push_str(trimmed);
+        out.push_str(&line);
         out.push('\n');
     }
 
@@ -159,12 +181,23 @@ pub struct PsqlError {
 /// psql shows the single source line that contains the position and points the
 /// caret at the offending character within it.
 pub fn format_error(err: &PsqlError) -> String {
+    // Mirrors libpq's `pqBuildErrorMessage3` field order (default verbosity):
+    //   SEVERITY:  message\n
+    //   LINE <n>: <src>\n  <caret>\n      (the statement-position cursor block)
+    //   DETAIL:  ...\n
+    //   HINT:  ...\n
+    // The position/caret block comes BEFORE DETAIL/HINT — not after.
     let mut out = String::new();
     let sev = if err.severity.is_empty() { "ERROR" } else { &err.severity };
     out.push_str(sev);
     out.push_str(":  ");
     out.push_str(&err.message);
     out.push('\n');
+    if let (Some(pos), Some(query)) = (err.position, &err.query) {
+        if pos >= 1 {
+            out.push_str(&format_line_and_caret(query, pos));
+        }
+    }
     if let Some(d) = &err.detail {
         out.push_str("DETAIL:  ");
         out.push_str(d);
@@ -174,11 +207,6 @@ pub fn format_error(err: &PsqlError) -> String {
         out.push_str("HINT:  ");
         out.push_str(h);
         out.push('\n');
-    }
-    if let (Some(pos), Some(query)) = (err.position, &err.query) {
-        if pos >= 1 {
-            out.push_str(&format_line_and_caret(query, pos));
-        }
     }
     out
 }
@@ -400,14 +428,142 @@ mod tests {
         assert_eq!(echo_query("SELECT 1;\n"), "SELECT 1;\n");
     }
 
+    // expected/char.out: SELECT * FROM CHAR_TBL; — char(1) column `f1`.
+    // The 6th row's value is a single literal space (zero-length char input is
+    // blank-padded to width 1). psql MUST preserve that trailing space: the row
+    // is "  " (leading margin + the space value), NOT "" (over-trimmed).
+    // Bytes copied verbatim from expected/char.out lines 29-38.
     #[test]
-    fn null_is_empty_cell() {
-        // SELECT NULL::int AS x;  -> right-aligned numeric, NULL = empty cell.
-        let cols = vec![col("x", true)];
+    fn char_tbl_preserves_trailing_space() {
+        let cols = vec![col("f1", false)];
+        let rows = vec![
+            vec![Some("a".into())],
+            vec![Some("A".into())],
+            vec![Some("1".into())],
+            vec![Some("2".into())],
+            vec![Some("3".into())],
+            vec![Some(" ".into())], // zero-length char -> blank-padded to " "
+            vec![Some("c".into())],
+        ];
+        let got = format_aligned(&cols, &rows);
+        let expected = concat!(
+            " f1 \n",
+            "----\n",
+            " a\n",
+            " A\n",
+            " 1\n",
+            " 2\n",
+            " 3\n",
+            "  \n", // <- leading margin + the literal blank-pad space, preserved
+            " c\n",
+            "(7 rows)\n",
+        );
+        assert_eq!(got, expected);
+    }
+
+    // expected/text.out: SELECT * FROM TEXT_TBL; — single text column, width 17.
+    // A left-aligned LAST column gets NO trailing alignment padding (psql's
+    // `finalspaces` is false for the last column). So " doh!" is exactly margin
+    // + value, with no run of pad spaces. Header DOES keep its trailing space.
+    // Bytes copied verbatim from expected/text.out lines 18-22.
+    #[test]
+    fn text_tbl_last_col_no_trailing_pad() {
+        let cols = vec![col("f1", false)];
+        let rows = vec![
+            vec![Some("doh!".into())],
+            vec![Some("hi de ho neighbor".into())],
+        ];
+        let got = format_aligned(&cols, &rows);
+        let expected = concat!(
+            "        f1         \n", // header centered, trailing margin kept
+            "-------------------\n",
+            " doh!\n",               // no trailing pad on last (left) column
+            " hi de ho neighbor\n",
+            "(2 rows)\n",
+        );
+        assert_eq!(got, expected);
+    }
+
+    // expected/text.out lines 26-30: an error with BOTH a position (LINE/caret)
+    // and a HINT. libpq emits the caret block BEFORE the HINT.
+    //   ERROR:  function length(integer) does not exist
+    //   LINE 1: select length(42);
+    //                  ^
+    //   HINT:  No function matches the given name and argument types. ...
+    #[test]
+    fn error_hint_comes_after_line_caret() {
+        let query = "select length(42);";
+        let pos = query.find("length").unwrap() + 1; // 1-based, caret under 'l'
+        let err = PsqlError {
+            severity: "ERROR".into(),
+            message: "function length(integer) does not exist".into(),
+            detail: None,
+            hint: Some(
+                "No function matches the given name and argument types. \
+                 You might need to add explicit type casts."
+                    .into(),
+            ),
+            position: Some(pos),
+            query: Some(query.to_string()),
+        };
+        let got = format_error(&err);
+        let expected = concat!(
+            "ERROR:  function length(integer) does not exist\n",
+            "LINE 1: select length(42);\n",
+            "               ^\n",
+            "HINT:  No function matches the given name and argument types. \
+             You might need to add explicit type casts.\n",
+        );
+        assert_eq!(got, expected);
+    }
+
+    // DETAIL + HINT + position together: order must be ERROR, LINE/caret,
+    // DETAIL, HINT.
+    #[test]
+    fn error_detail_hint_position_order() {
+        let query = "select foo;";
+        let err = PsqlError {
+            severity: "ERROR".into(),
+            message: "msg".into(),
+            detail: Some("det".into()),
+            hint: Some("hnt".into()),
+            position: Some(8),
+            query: Some(query.to_string()),
+        };
+        let got = format_error(&err);
+        let expected = concat!(
+            "ERROR:  msg\n",
+            "LINE 1: select foo;\n",
+            "               ^\n",
+            "DETAIL:  det\n",
+            "HINT:  hnt\n",
+        );
+        assert_eq!(got, expected);
+    }
+
+    // SELECT NULL::int AS x;  -> right-aligned numeric, NULL = empty value.
+    // psql does NOT trim the data row: a right-aligned last column still emits
+    // the leading margin + full alignment padding. Verified against real
+    // fixtures: arrays.out renders a single NULL int4 cell as "     " (margin +
+    // 4 pad spaces over the width-4 "int4" header), NOT "".
+    #[test]
+    fn null_right_aligned_keeps_padding() {
+        // Header "int4" forces width 4 so the padding is visible (matches the
+        // arrays.out fixture exactly).
+        let cols = vec![col("int4", true)];
         let rows = vec![vec![None]];
         let got = format_aligned(&cols, &rows);
-        // width = max("x"=1, "")=1; header " x ", rule "---", data row is a
-        // single empty (trimmed) cell -> "" then "\n".
-        assert_eq!(got, " x \n---\n\n(1 row)\n");
+        assert_eq!(got, " int4 \n------\n     \n(1 row)\n");
+    }
+
+    // SELECT NULL AS any_value;  -> left-aligned NULL last column = leading
+    // margin only, no trailing pad. Verified against aggregates.out: the data
+    // row is a single space.
+    #[test]
+    fn null_left_aligned_margin_only() {
+        let cols = vec![col("any_value", false)];
+        let rows = vec![vec![None]];
+        let got = format_aligned(&cols, &rows);
+        assert_eq!(got, " any_value \n-----------\n \n(1 row)\n");
     }
 }
