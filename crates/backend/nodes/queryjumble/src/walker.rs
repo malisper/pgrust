@@ -294,6 +294,13 @@ fn jumble_expr_fields(jstate: &mut JumbleState, expr: &Expr) {
             jf_u32(jstate, c.resulttype);
             jumble_opt_expr(jstate, c.arg.as_deref());
         }
+        Expr::ArrayCoerceExpr(a) => {
+            // `_jumbleArrayCoerceExpr`: recurse into arg (the inner ArrayExpr,
+            // where squashing happens) + elemexpr, then jumble resulttype.
+            jumble_opt_expr(jstate, a.arg.as_deref());
+            jumble_opt_expr(jstate, a.elemexpr.as_deref());
+            jf_u32(jstate, a.resulttype);
+        }
         Expr::CaseExpr(c) => {
             jumble_case_expr(jstate, c);
         }
