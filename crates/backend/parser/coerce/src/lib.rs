@@ -280,10 +280,29 @@ fn strip_top_collate(expr: Expr) -> (Expr, Option<CollateExpr>) {
 /// returns the *same* node pointer when it did nothing; with owned values we
 /// detect "unchanged" structurally.
 fn exprs_identical(a: &Expr, b: &Expr) -> bool {
-    // coerce_type returns the input unchanged only in the "no conversion" arms,
-    // where the value is byte-identical. A structural equality on the debug
-    // representation is the faithful owned-value stand-in for C pointer
-    // identity here (the only consumer is the implicit-display-form decision).
+    // C's `result != expr` test in coerce_to_target_type is a raw pointer
+    // identity check. coerce_type returns the input unchanged (same pointer)
+    // in two ways: the "no conversion" arms (where the value is byte-identical),
+    // and the `p_coerce_param_hook` arm, where the hook mutates the Param *in
+    // place* and returns "very possibly the same Param node" (parse_coerce.c).
+    //
+    // In the owned model the hook returns a fresh Param value whose fields
+    // (paramtype/paramtypmod/paramcollid/location) have been updated, so a
+    // structural compare against the pre-coercion Param would (wrongly) report
+    // a difference and force the implicit-display path — which then asks
+    // hide_coercion_node to strip a coercion node that was never generated,
+    // tripping the "unsupported node type" error. C never reaches that because
+    // the pointer is unchanged. Mirror C: two Params naming the same parameter
+    // slot (same paramkind + paramid) are the same node object.
+    if let (Some(pa), Some(pb)) = (a.as_param(), b.as_param()) {
+        if pa.paramkind == pb.paramkind && pa.paramid == pb.paramid {
+            return true;
+        }
+    }
+
+    // Otherwise a structural equality on the debug representation is the
+    // faithful owned-value stand-in for C pointer identity (the only consumer
+    // is the implicit-display-form decision).
     format!("{a:?}") == format!("{b:?}")
 }
 
