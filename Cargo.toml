@@ -1478,3 +1478,14 @@ debug = 0
 strip = "symbols"
 lto = false
 codegen-units = 1
+
+# Symbolized profiling build: identical codegen to `release` (so `sample`/perf
+# numbers match the production binary) but with DWARF debug info and symbols kept
+# so Rust frames resolve by name instead of `???`. Lives in its own
+# `target/profiling/` cache, so building it does NOT invalidate the `release`
+# cache and a shared/persistent CARGO_TARGET_DIR stays warm across reprofiles
+# (incremental, not a cold full-workspace rebuild). See docs/perf/profiling-builds.md.
+[profile.profiling]
+inherits = "release"
+debug = 1
+strip = false
