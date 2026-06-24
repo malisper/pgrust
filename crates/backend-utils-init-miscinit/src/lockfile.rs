@@ -30,6 +30,20 @@ use types_error::{PgError, PgResult, FATAL};
 
 use crate::MISCINIT_C;
 
+/// `getpid()`. `std::process::id()` panics on `wasm64-unknown-unknown` (std's
+/// process backend is unsupported), so read the shim's pid there.
+fn my_process_id() -> u32 {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        std::process::id()
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        // SAFETY: getpid is a const-returning shim (no preconditions).
+        unsafe { wasm_libc_shim::getpid() as u32 }
+    }
+}
+
 /// `DIRECTORY_LOCK_FILE` (`miscinit.c:60`).
 pub(crate) const DIRECTORY_LOCK_FILE: &str = "postmaster.pid";
 
@@ -151,7 +165,7 @@ pub fn create_lock_file(
     ref_name: &str,
 ) -> PgResult<()> {
     // my_pid = getpid(); my_p_pid = getppid(); my_gp_pid = atoi(getenv(...)).
-    let my_pid: i32 = std::process::id() as i32;
+    let my_pid: i32 = my_process_id() as i32;
     let my_p_pid: i32 = backend_port_path_seams::getppid::call();
     let my_gp_pid: i32 = match std::env::var("PG_GRANDPARENT_PID") {
         Ok(v) => parse_leading_i32(&v),
@@ -596,7 +610,7 @@ pub fn RecheckDataDirLockFile() -> PgResult<bool> {
     drop(file);
 
     let file_pid = parse_leading_i64(&buffer);
-    if file_pid == std::process::id() as i64 {
+    if file_pid == my_process_id() as i64 {
         return Ok(true); // all is well
     }
 
@@ -604,7 +618,7 @@ pub fn RecheckDataDirLockFile() -> PgResult<bool> {
     backend_utils_error::ereport(types_error::LOG)
         .errmsg(format!(
             "lock file \"{DIRECTORY_LOCK_FILE}\" contains wrong PID: {file_pid} instead of {}",
-            std::process::id()
+            my_process_id()
         ))
         .finish(types_error::ErrorLocation::new(
             MISCINIT_C, 1751, "RecheckDataDirLockFile",

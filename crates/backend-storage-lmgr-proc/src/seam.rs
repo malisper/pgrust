@@ -283,9 +283,18 @@ pub(crate) fn autovacuum_launcher_pid() -> i32 {
 
 // ---- libc ----
 
-/// `getpid()`.
+/// `getpid()`. `std::process::id()` panics on `wasm64-unknown-unknown`; use the
+/// shim's `getpid` there.
 pub(crate) fn getpid() -> i32 {
-    std::process::id() as i32
+    #[cfg(not(target_family = "wasm"))]
+    {
+        std::process::id() as i32
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        // SAFETY: getpid is a const-returning shim (no preconditions).
+        unsafe { libc::getpid() as i32 }
+    }
 }
 
 /// `kill(pid, SIGUSR2)`.

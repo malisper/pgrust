@@ -493,10 +493,19 @@ pub fn StartupXLOG() -> PgResult<()> {
     // start the archive_timeout timer and LSN running.
     unsafe {
         let ctl = &mut *xlog_ctl();
-        ctl.lastSegSwitchTime = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as types_core::pg_time_t)
-            .unwrap_or(0);
+        // std's SystemTime panics on wasm64-unknown-unknown; use the host clock.
+        #[cfg(not(target_family = "wasm"))]
+        {
+            ctl.lastSegSwitchTime = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as types_core::pg_time_t)
+                .unwrap_or(0);
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            ctl.lastSegSwitchTime =
+                (wasm_libc_shim::now_unix_nanos() / 1_000_000_000) as types_core::pg_time_t;
+        }
         ctl.lastSegSwitchLSN = end_of_log;
     }
 
