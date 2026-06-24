@@ -191,6 +191,31 @@ fn unpack_short_to_4b<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<::mcx::PgV
     }
 }
 
+/// `PG_DETOAST_DATUM(value)` for the GIN index value: fetch an out-of-line
+/// (external) TOAST value back from the TOAST table and decompress an inline-
+/// compressed one, returning the flat in-line varlena image. A plain (short- or
+/// 4-byte-header, uncompressed) value is returned unchanged.
+///
+/// C's per-opclass `extractValue` procs read their argument through
+/// `PG_GETARG_<TYPE>(0)`, which is `PG_DETOAST_DATUM` — so they always see the
+/// flat value. The value handed to this dispatch is the raw heap-tuple attribute,
+/// which for a TOAST-eligible GIN column may be an 18-byte external TOAST pointer
+/// (`VARATT_IS_EXTERNAL`, low byte `0x01`) or an inline-compressed varlena
+/// (`VARATT_IS_4B_C`, low two bits `0b10`). Either of those, walked as if it were
+/// the flat value, mis-reads the embedded `size`/length and triggers a wild
+/// allocation. Detoast here, before any arm reads the bytes, mirroring C.
+fn detoast_value<'mcx>(mcx: Mcx<'mcx>, value: Datum<'mcx>) -> PgResult<Datum<'mcx>> {
+    let image = value.as_ref_bytes();
+    let is_external = matches!(image.first(), Some(&0x01)); // VARATT_IS_1B_E
+    let is_compressed = matches!(image.first(), Some(&h) if (h & 0x03) == 0x02); // VARATT_IS_4B_C
+    if is_external || is_compressed {
+        let flat = detoast_seams::detoast_attr::call(mcx, image)?;
+        Datum::from_byref_bytes_in(mcx, &flat)
+    } else {
+        Ok(value)
+    }
+}
+
 /// Encode `gin_extract_tsquery`'s `map_item_operand` (the `int *` map the C code
 /// stores in every `extra_data[]` slot) as a native-endian `i32` byte blob, the
 /// per-key opclass-private `extra_data` the GIN scan carries from `extractQuery`
@@ -261,6 +286,18 @@ fn dispatch_extract_value<'mcx>(
     _collation: Oid,
     value: Datum<'mcx>,
 ) -> PgResult<Option<(PgVec<'mcx, Datum<'mcx>>, PgVec<'mcx, bool>)>> {
+    // C's per-opclass extractValue procs read their indexed value through
+    // `PG_GETARG_<TYPE>(0)` == `PG_DETOAST_DATUM`, which fetches an out-of-line
+    // (external) value back from the TOAST table and decompresses an inline-
+    // compressed one. The value handed to this dispatch is the raw heap-tuple
+    // attribute image, so for a TOAST-eligible GIN column (e.g. a large
+    // `tsvector` / `text[]` / `jsonb`) it can arrive as an 18-byte external
+    // TOAST pointer or an inline-compressed varlena. Walking that pointer/compressed
+    // image as if it were the flat value reads its bytes as a bogus `size`/length
+    // and blows up (`invalid memory alloc request size`). Detoast to the flat
+    // in-line form up front, exactly as the C extract procs do, before any arm
+    // reads the value bytes.
+    let value = detoast_value(mcx, value)?;
     match flinfo.fn_oid {
         F_GINARRAYEXTRACT | F_GINARRAYEXTRACT_2ARGS => {
             // ginarrayextract / ginarrayextract_2args: identical extraction (the

@@ -4526,6 +4526,7 @@ dependencies = [
  "arrayfuncs_seams",
  "core_probe_seams",
  "datum",
+ "detoast_seams",
  "error_seams",
  "fmgr",
  "fmgr_core",

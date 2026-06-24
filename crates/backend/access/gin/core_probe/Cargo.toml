@@ -30,6 +30,7 @@ lsyscache_seams = { path = "../../../utils/cache/lsyscache_seams" }
 arrayfuncs_seams = { path = "../../../utils/adt/arrayfuncs_seams" }
 tsginidx = { path = "../../../utils/adt/tsginidx" }
 jsonb_gin_seams = { path = "../../../utils/adt/jsonb_gin_seams" }
+detoast_seams = { path = "../../common/detoast_seams" }
 amvalidate_seams = { path = "../../index/amvalidate_seams" }
 regproc_seams = { path = "../../../utils/adt/regproc_seams" }
 syscache_seams = { path = "../../../utils/cache/syscache_seams" }
