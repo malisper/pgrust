@@ -43,6 +43,7 @@
 use wasm_libc_shim as libc;
 use std::cell::RefCell;
 use std::collections::HashMap;
+#[cfg(not(target_family = "wasm"))]
 use std::time::Instant;
 
 use backend_utils_error::ereport;
@@ -153,21 +154,46 @@ fn oom() -> PgError {
 // instr_time helpers (instr_time.h), used by ProcessSyncRequests timing.
 // ===========================================================================
 
+/// The reading carrier for the two-point elapsed-interval timing below. A
+/// `std::time::Instant` natively; on wasm64-unknown-unknown `Instant::now()`
+/// panics (the platform's time backend is unsupported), so a raw host-clock
+/// nanosecond count stands in.
+#[cfg(not(target_family = "wasm"))]
+type InstrInstant = Instant;
+#[cfg(target_family = "wasm")]
+type InstrInstant = u64;
+
 /// `INSTR_TIME_SET_CURRENT(t)` — we only ever subtract two readings, so an
-/// [`Instant`] reproduces the elapsed interval faithfully.
+/// [`Instant`] (or a host-clock nanosecond reading on wasm) reproduces the
+/// elapsed interval faithfully.
 #[inline]
-fn instr_time_set_current() -> Instant {
-    Instant::now()
+fn instr_time_set_current() -> InstrInstant {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        Instant::now()
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        wasm_libc_shim::now_unix_nanos() as u64
+    }
 }
 
 /// `INSTR_TIME_SUBTRACT` + `INSTR_TIME_GET_MICROSEC` — elapsed `start`..now in
 /// microseconds (saturating, like the C `uint64` cast).
 #[inline]
-fn elapsed_microsec(start: Instant) -> u64 {
-    Instant::now()
-        .duration_since(start)
-        .as_micros()
-        .min(u64::MAX as u128) as u64
+fn elapsed_microsec(start: InstrInstant) -> u64 {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        Instant::now()
+            .duration_since(start)
+            .as_micros()
+            .min(u64::MAX as u128) as u64
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        let now = wasm_libc_shim::now_unix_nanos() as u64;
+        now.saturating_sub(start) / 1_000
+    }
 }
 
 /// `FILE_POSSIBLY_DELETED(err)` (`fd.h`) — on non-Windows this is
