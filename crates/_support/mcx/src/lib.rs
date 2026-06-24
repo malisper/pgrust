@@ -199,6 +199,16 @@ struct Acct {
     /// (surfacing through `try_` collection APIs), mirroring
     /// `ereport(ERROR, ERRCODE_OUT_OF_MEMORY)`.
     limit: Cell<usize>,
+    /// Hot-path cache: `true` iff this context **or any ancestor** carries a
+    /// finite `limit`. When `false`, `charge`'s limit-validation ancestor walk
+    /// is provably a no-op (nothing on the path to the root can reject the
+    /// charge) and is skipped — the common case, since default contexts are
+    /// unlimited. Computed at creation from the parent's flag-or-limit; a
+    /// `with_limit` setting a finite limit sets it on the context (which, per
+    /// the `with_limit` contract, has no children yet, so no descendant flags
+    /// need updating). This caches the path predicate so the common allocate
+    /// path never re-walks ancestors just to discover nothing is limited.
+    limited_path: Cell<bool>,
     /// Backend arena footprint (`bump.c` block bytes), snapshotted on each bump
     /// allocate/grow. `0` for malloc-backed contexts (their footprint == the
     /// per-chunk `self_used`). This lives on `Acct` (not just on the backend in
@@ -291,6 +301,12 @@ impl MemoryContext {
                 (true, b.mem_allocated, b.nblocks)
             }
         };
+        // A fresh context is itself unlimited (`with_limit` may set a finite
+        // limit after); it is on a limited path iff its parent already is, or
+        // the parent carries a finite limit of its own.
+        let limited_path = parent.as_ref().is_some_and(|p| {
+            p.limited_path.get() || p.limit.get() != usize::MAX
+        });
         let acct = alloc::rc::Rc::new(Acct {
             name,
             ident: RefCell::new(None),
@@ -299,6 +315,7 @@ impl MemoryContext {
             self_peak: Cell::new(0),
             subtree_peak: Cell::new(0),
             limit: Cell::new(usize::MAX),
+            limited_path: Cell::new(limited_path),
             arena_footprint: Cell::new(init_footprint),
             arena_nblocks: Cell::new(init_nblocks),
             is_bump,
@@ -322,7 +339,24 @@ impl MemoryContext {
     /// always-full limit — pass `usize::MAX` for unlimited, or just don't
     /// call this). Subtree semantics match how PG uses recursive
     /// `MemoryContextMemAllocated` for work_mem-style decisions.
+    ///
+    /// Contract: call this at construction time, before creating any accounting
+    /// child of this context (the sole caller pattern). It updates the
+    /// `limited_path` cache for *this* node so the charge fast-path is correct;
+    /// children created afterward inherit a now-finite limit through
+    /// [`with_backend`]'s parent check. (Setting a finite limit on a context
+    /// that already has descendants would leave their cached `limited_path`
+    /// stale; that is not a supported usage and is `debug_assert`ed against.)
     pub fn with_limit(self, limit: usize) -> Self {
+        debug_assert!(
+            self.acct.children.borrow().iter().all(|w| w.strong_count() == 0),
+            "with_limit must be set before creating children (limited_path cache would go stale)",
+        );
+        // Setting a finite limit puts this node itself on a limited path, so the
+        // charge fast-path will perform the validation walk for it.
+        if limit != usize::MAX {
+            self.acct.limited_path.set(true);
+        }
         self.acct.limit.set(limit);
         self
     }
@@ -484,18 +518,40 @@ impl MemoryContext {
     }
 
     /// Validate against every ancestor's limit, then apply to every
-    /// ancestor's subtree counter — two passes so a failure applies nothing.
+    /// ancestor's subtree counter. The validation pass is elided when neither
+    /// this context nor any ancestor carries a finite limit (the cached
+    /// `limited_path` flag, the common case) — there is then nothing on the
+    /// path to the root that could reject the charge, and `subtree_used` cannot
+    /// overflow `usize::MAX` without a finite ceiling first being hit. When a
+    /// limit exists on the path, the two-pass form is kept (validate everything
+    /// first, so a failure applies nothing). The single-node (root, no parent)
+    /// case skips the ancestor iterator entirely.
     fn charge(&self, n: usize) -> Result<(), AllocError> {
-        for node in self.acct.ancestors() {
-            let new = node.subtree_used.get().checked_add(n).ok_or(AllocError)?;
-            if new > node.limit.get() {
-                return Err(AllocError);
+        if self.acct.limited_path.get() {
+            for node in self.acct.ancestors() {
+                let new = node.subtree_used.get().checked_add(n).ok_or(AllocError)?;
+                if new > node.limit.get() {
+                    return Err(AllocError);
+                }
             }
         }
-        let self_new = self.acct.self_used.get() + n;
-        self.acct.self_used.set(self_new);
-        if self_new > self.acct.self_peak.get() {
-            self.acct.self_peak.set(self_new);
+        let acct = &*self.acct;
+        let self_new = acct.self_used.get() + n;
+        acct.self_used.set(self_new);
+        if self_new > acct.self_peak.get() {
+            acct.self_peak.set(self_new);
+        }
+        if acct.parent.is_none() {
+            // Root context: no ancestors to propagate to, so update this one
+            // node's subtree counter directly (still incremental — a root may
+            // have accounting descendants whose bytes are already included)
+            // rather than spinning up the ancestor iterator.
+            let new = acct.subtree_used.get() + n;
+            acct.subtree_used.set(new);
+            if new > acct.subtree_peak.get() {
+                acct.subtree_peak.set(new);
+            }
+            return Ok(());
         }
         for node in self.acct.ancestors() {
             let new = node.subtree_used.get() + n;
@@ -508,14 +564,20 @@ impl MemoryContext {
     }
 
     fn uncharge(&self, n: usize) {
+        let acct = &*self.acct;
         debug_assert!(
-            self.acct.self_used.get() >= n,
+            acct.self_used.get() >= n,
             "context {:?} uncharging {} with only {} charged",
-            self.acct.name,
+            acct.name,
             n,
-            self.acct.self_used.get(),
+            acct.self_used.get(),
         );
-        self.acct.self_used.set(self.acct.self_used.get().saturating_sub(n));
+        acct.self_used.set(acct.self_used.get().saturating_sub(n));
+        if acct.parent.is_none() {
+            // Root: subtree counter mirrors self_used exactly.
+            acct.subtree_used.set(acct.subtree_used.get().saturating_sub(n));
+            return;
+        }
         for node in self.acct.ancestors() {
             node.subtree_used.set(node.subtree_used.get().saturating_sub(n));
         }

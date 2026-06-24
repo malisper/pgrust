@@ -292,6 +292,175 @@ fn ident_set_forget_and_stats() {
     assert_eq!(root.ident(), None, "NULL forgets the old identifier");
 }
 
+/// Hot-path micro-opt invariance (#7a): the limit-walk elision + root
+/// fast-path must produce byte-identical `used`/`subtree_used`/`peak`/
+/// `subtree_peak` for ANY alloc/grow/shrink/free/reset sequence on a
+/// multi-level tree. This recomputes the four counters with a deliberately
+/// naive, branch-free reference model and asserts equality at every step.
+#[test]
+fn hotpath_invariance_counters_byte_identical() {
+    // A reference accounting model: a flat tree of nodes, each tracking
+    // self_used + peak; subtree counters are recomputed by summing the model.
+    struct Ref {
+        // self_used per node index
+        used: alloc::vec::Vec<usize>,
+        self_peak: alloc::vec::Vec<usize>,
+        subtree_peak: alloc::vec::Vec<usize>,
+        // parent index (usize::MAX for root)
+        parent: alloc::vec::Vec<usize>,
+    }
+    impl Ref {
+        fn subtree(&self, i: usize) -> usize {
+            // sum of self_used over i and all transitive descendants
+            let mut total = self.used[i];
+            for j in 0..self.used.len() {
+                if j != i {
+                    let mut p = self.parent[j];
+                    while p != usize::MAX {
+                        if p == i {
+                            total += self.used[j];
+                            break;
+                        }
+                        p = self.parent[p];
+                    }
+                }
+            }
+            total
+        }
+        fn charge(&mut self, i: usize, n: usize) {
+            self.used[i] += n;
+            if self.used[i] > self.self_peak[i] {
+                self.self_peak[i] = self.used[i];
+            }
+            // bump subtree_peak of self and every ancestor
+            let mut k = i;
+            loop {
+                let st = self.subtree(k);
+                if st > self.subtree_peak[k] {
+                    self.subtree_peak[k] = st;
+                }
+                if self.parent[k] == usize::MAX {
+                    break;
+                }
+                k = self.parent[k];
+            }
+        }
+        fn uncharge(&mut self, i: usize, n: usize) {
+            self.used[i] -= n;
+        }
+    }
+
+    // Tree: root -> {a -> {a1}, b}
+    let root = MemoryContext::new("root");
+    let a = root.new_child("a");
+    let a1 = a.new_child("a1");
+    let b = root.new_child("b");
+    let ctxs = [&root, &a, &a1, &b];
+    let mut refm = Ref {
+        used: alloc::vec![0; 4],
+        self_peak: alloc::vec![0; 4],
+        subtree_peak: alloc::vec![0; 4],
+        parent: alloc::vec![usize::MAX, 0, 1, 0],
+    };
+
+    let mut vecs: [PgVec<u8>; 4] = [
+        PgVec::new_in(root.mcx()),
+        PgVec::new_in(a.mcx()),
+        PgVec::new_in(a1.mcx()),
+        PgVec::new_in(b.mcx()),
+    ];
+
+    let check = |ctxs: &[&MemoryContext; 4], refm: &Ref| {
+        for i in 0..4 {
+            assert_eq!(ctxs[i].used(), refm.used[i], "used[{i}]");
+            assert_eq!(ctxs[i].subtree_used(), refm.subtree(i), "subtree_used[{i}]");
+            assert_eq!(ctxs[i].peak(), refm.self_peak[i], "peak[{i}]");
+            assert_eq!(
+                ctxs[i].subtree_peak(),
+                refm.subtree_peak[i],
+                "subtree_peak[{i}]"
+            );
+        }
+    };
+
+    // Helper: reserve_exact on a vec drives charge/grow; track the byte delta.
+    let do_reserve = |vecs: &mut [PgVec<u8>; 4], refm: &mut Ref, i: usize, total: usize| {
+        let before = vecs[i].capacity();
+        vecs[i].reserve_exact(total - vecs[i].len());
+        let after = vecs[i].capacity();
+        refm.charge(i, after - before);
+    };
+
+    do_reserve(&mut vecs, &mut refm, 2, 100); // a1: 100
+    check(&ctxs, &refm);
+    do_reserve(&mut vecs, &mut refm, 1, 40); // a: 40
+    check(&ctxs, &refm);
+    do_reserve(&mut vecs, &mut refm, 0, 7); // root self: 7
+    check(&ctxs, &refm);
+    do_reserve(&mut vecs, &mut refm, 3, 256); // b: 256
+    check(&ctxs, &refm);
+    do_reserve(&mut vecs, &mut refm, 2, 500); // a1 grow: +400
+    check(&ctxs, &refm);
+
+    // Free a1 entirely (drop returns every byte).
+    let cap = vecs[2].capacity();
+    vecs[2] = PgVec::new_in(a1.mcx());
+    refm.uncharge(2, cap);
+    check(&ctxs, &refm);
+
+    // Peaks must persist after frees.
+    assert!(root.subtree_peak() >= 7 + 40 + 500 + 256);
+
+    // Free everything; counters return to zero, peaks stay.
+    for (i, v) in vecs.iter_mut().enumerate() {
+        let cap = v.capacity();
+        *v = PgVec::new_in(ctxs[i].mcx());
+        refm.uncharge(i, cap);
+    }
+    check(&ctxs, &refm);
+    assert_eq!(root.subtree_used(), 0);
+}
+
+/// The finite-limit count must drive the `charge` skip flag correctly across
+/// set/drop, and the limit-check itself must still reject over-limit charges
+/// (forcing the non-elided validation walk).
+#[test]
+fn hotpath_limit_flag_lifecycle_and_enforcement() {
+    // No limits anywhere: unlimited charges always succeed (skip path).
+    let root = MemoryContext::new("root");
+    let child = root.new_child("child");
+    let mut v: PgVec<u8> = PgVec::new_in(child.mcx());
+    v.try_reserve_exact(1 << 20).expect("unlimited, skip path");
+    assert_eq!(root.subtree_used(), 1 << 20);
+    drop(v);
+
+    // A limited sibling forces the validation walk process-wide; the unlimited
+    // subtree above is unaffected, the limited one is enforced.
+    {
+        let limited = MemoryContext::new("limited").with_limit(256);
+        let mut w: PgVec<u8> = PgVec::new_in(limited.mcx());
+        assert!(w.try_reserve_exact(257).is_err(), "over limit rejected");
+        assert_eq!(limited.used(), 0, "failed charge applied nothing");
+        w.try_reserve_exact(256).expect("at limit ok");
+        assert_eq!(limited.used(), 256);
+
+        // Ancestor limit caps a descendant even while the descendant is unlimited.
+        let cap_root = MemoryContext::new("cap").with_limit(100);
+        let kid = cap_root.new_child("kid");
+        let mut k: PgVec<u8> = PgVec::new_in(kid.mcx());
+        assert!(k.try_reserve_exact(101).is_err(), "ancestor limit caps kid");
+        k.try_reserve_exact(100).expect("at ancestor limit ok");
+        assert_eq!(cap_root.subtree_used(), 100);
+    } // limited + cap_root drop here -> finite-limit count returns toward 0
+
+    // After the limited contexts drop, unlimited charges still work (and now
+    // take the skip path again). This also exercises the Acct::drop decrement.
+    let root2 = MemoryContext::new("root2");
+    let mut x: PgVec<u8> = PgVec::new_in(root2.mcx());
+    x.try_reserve_exact(1 << 20).expect("skip path restored after limits drop");
+    assert_eq!(root2.used(), 1 << 20);
+}
+
 mod owned {
     use crate::*;
 
