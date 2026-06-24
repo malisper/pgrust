@@ -41,6 +41,29 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `bttextsortsupport` native SortSupport comparator (varlena.c
+    /// `varstrfastcmp_c` / `varlenafastcmp_locale`, the comparator
+    /// `varstr_sortsupport` installs into `ssup->comparator` for `text`).
+    ///
+    /// `image1`/`image2` are the FULL header-ful, possibly TOAST-external or
+    /// inline-compressed canonical `ByRef` varlena images (exactly the operands
+    /// C's comparator receives as `Datum x, Datum y` before `DatumGetVarStringPP`).
+    /// This seam mirrors C's per-operand `DatumGetVarStringPP` (detoast +
+    /// `VARDATA_ANY`) and then runs `varstr_cmp` on the payloads, so the sort
+    /// comparator hot path can call it with zero copy on the common inline case
+    /// (no `RefPayload`/`Vec<u8>` marshalling through the fmgr boundary).
+    ///
+    /// Used by the sort substrate (`utils/sort/sortsupport.c`) to install the
+    /// native `text` comparator instead of the old-style `bttextcmp` fmgr shim.
+    /// `Err` carries the locale-comparison / detoast `ereport(ERROR)`.
+    pub fn bttext_image_cmp(
+        image1: &[u8],
+        image2: &[u8],
+        collid: types_core::Oid,
+    ) -> PgResult<i32>
+);
+
+seam_core::seam!(
     /// `textToQualifiedNameList(textval)` (varlena.c): split a (possibly
     /// qualified) name `text` on `.` into its identifier parts, downcasing
     /// and dequoting per `SplitIdentifierString`. `textval` is the `text`

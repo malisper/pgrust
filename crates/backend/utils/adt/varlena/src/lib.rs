@@ -457,6 +457,82 @@ fn seam_varstr_cmp(arg1: &[u8], arg2: &[u8], collid: types_core::Oid) -> PgResul
     comparison::varstr_cmp(arg1, arg2, collid)
 }
 
+/// True iff a varlena `image` is TOAST-external (`VARATT_IS_1B_E`) or inline
+/// 4-byte-compressed (`VARATT_IS_COMPRESSED`) — i.e. needs a `detoast_attr` to
+/// read its payload. Mirrors the predicate in `detoast_varlena_args`. A short
+/// (1-byte-header) or 4-byte-uncompressed image needs no detoast and its payload
+/// can be borrowed in place via [`vardata_any_slice`].
+#[inline]
+fn varlena_image_needs_detoast(image: &[u8]) -> bool {
+    if image.is_empty() {
+        return false;
+    }
+    let b0 = image[0];
+    if b0 == 0x01 {
+        // VARATT_IS_EXTERNAL (1B-E): on-disk TOAST pointer.
+        true
+    } else if (b0 & 0x03) == 0x02 {
+        // VARATT_IS_COMPRESSED (4B-C): a real compressed varlena is exactly
+        // VARSIZE bytes (guards a fixed-width name/bpchar buffer whose first byte
+        // spuriously has low bits 0b10 — same guard as detoast_varlena_args).
+        image.len() >= 4
+            && (u32::from_ne_bytes([image[0], image[1], image[2], image[3]]) >> 2) as usize
+                == image.len()
+    } else {
+        false
+    }
+}
+
+/// C: `bttextsortsupport` native comparator — `varstrfastcmp_c` /
+/// `varlenafastcmp_locale` over two FULL header-ful (possibly external /
+/// compressed) varlena images. Each operand is detoasted + `VARDATA_ANY`-sliced
+/// exactly as C's `DatumGetVarStringPP`, then compared by [`comparison::varstr_cmp`]
+/// (the same authoritative ordering — the C comparator's buf1/buf2 strcoll cache
+/// is a perf optimization that does not change the result). Zero-copy on the
+/// common inline case: only an external/compressed image allocates (scratch mcx
+/// for the detoast).
+fn seam_bttext_image_cmp(
+    image1: &[u8],
+    image2: &[u8],
+    collid: types_core::Oid,
+) -> PgResult<i32> {
+    // Common case: both operands are inline (short or 4B-uncompressed) varlena
+    // images, as freshly-built / heap-deformed sort keys almost always are. Then
+    // both payloads are borrowed in place with ZERO allocation — the whole point
+    // of Option A. The scratch `MemoryContext` (a malloc) is created ONLY when an
+    // operand is genuinely TOAST-external / inline-compressed and must be
+    // detoasted; it lives for the rest of the call so the detoasted borrow stays
+    // valid across `varstr_cmp`.
+    let needs1 = varlena_image_needs_detoast(image1);
+    let needs2 = varlena_image_needs_detoast(image2);
+
+    if !needs1 && !needs2 {
+        return comparison::varstr_cmp(
+            vardata_any_slice(image1),
+            vardata_any_slice(image2),
+            collid,
+        );
+    }
+
+    let scratch = mcx::MemoryContext::new("bttext_image_cmp scratch");
+    let p1: PgVec<'_, u8>;
+    let payload1: &[u8] = if needs1 {
+        p1 = text_payload_from_bytes(scratch.mcx(), image1)?;
+        &p1
+    } else {
+        vardata_any_slice(image1)
+    };
+    let p2: PgVec<'_, u8>;
+    let payload2: &[u8] = if needs2 {
+        p2 = text_payload_from_bytes(scratch.mcx(), image2)?;
+        &p2
+    } else {
+        vardata_any_slice(image2)
+    };
+
+    comparison::varstr_cmp(payload1, payload2, collid)
+}
+
 fn seam_split_identifier_string<'mcx>(
     mcx: Mcx<'mcx>,
     raw: &str,
@@ -581,6 +657,7 @@ pub fn init_seams() {
     s::text_to_cstring::set(seam_text_to_cstring);
     s::text_to_cstring_v::set(seam_text_to_cstring_v);
     s::varstr_cmp::set(seam_varstr_cmp);
+    s::bttext_image_cmp::set(seam_bttext_image_cmp);
     s::split_identifier_string::set(seam_split_identifier_string);
     s::split_directories_string::set(seam_split_directories_string);
 

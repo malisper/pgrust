@@ -21943,6 +21943,7 @@ dependencies = [
  "types_error",
  "types_sortsupport",
  "types_tuple",
+ "varlena_seams",
 ]
 
 [[package]]

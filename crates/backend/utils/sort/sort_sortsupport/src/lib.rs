@@ -52,6 +52,16 @@ use nbtcompare_seams as nbtcompare; // `FastComparator` type alias lives here.
 // `GistComparator` / `GistAbbrevConverter` kernel type aliases live here.
 use gist_proc_seams as gist_proc;
 use dispatch_seams as gist_dispatch;
+// varlena's native `text` SortSupport comparator (`bttext_image_cmp`): the
+// substrate installs it as a [`Comparator::NativeRef`] so the `text` sort hot
+// path compares the operand bytes in place (no fmgr-shim copy).
+use varlena_seams as varlena;
+
+/// C: `bttextsortsupport` `pg_proc` OID (`pg_proc.dat` oid 3255). The
+/// `BTSORTSUPPORT_PROC` for the default `text_ops` opclass; this substrate
+/// recognizes it in `oid_function_call1_sortsupport` and installs varlena's
+/// native comparator.
+const F_BTTEXTSORTSUPPORT: Oid = 3255;
 
 /// `OidIsValid(oid)` — `InvalidOid` is 0.
 #[inline]
@@ -97,6 +107,19 @@ enum Comparator {
     },
     /// A type's fast comparator installed directly by its `*sortsupport`.
     Native(nbtcompare::FastComparator),
+    /// A by-REFERENCE native comparator (e.g. varlena's `bttext_image_cmp`): a
+    /// type whose `*sortsupport` installs a direct comparator that reads the two
+    /// operands' bytes rather than a packed `Datum` word. Unlike
+    /// [`Comparator::Shim`], the operand bytes are borrowed straight from the
+    /// canonical `&Datum` (`as_ref_bytes()`) and handed to `cmp` with NO
+    /// `RefPayload`/`Vec<u8>` copy — the whole point of the native fast path.
+    /// `cmp` is `(image1, image2, collation) -> i32` (fallible: the locale /
+    /// detoast `ereport(ERROR)` travels as `Err`), the C-ABI shape of
+    /// `ssup->comparator` for `text` (`varstrfastcmp_c`/`varlenafastcmp_locale`).
+    NativeRef {
+        cmp: fn(&[u8], &[u8], Oid) -> PgResult<i32>,
+        collation: Oid,
+    },
     /// A GiST box comparator (`gist_bbox_zorder_cmp`) installed by
     /// `gist_point_sortsupport`. Held as the kernel function pointer; unlike
     /// [`Comparator::Native`] its operands are pass-by-reference `BOX` images, so
@@ -144,6 +167,7 @@ fn comparison_shim(mcx: Mcx<'_>, id: SortComparatorId, x: &Datum<'_>, y: &Datum<
     enum Resolved {
         Shim(::fmgr::FmgrResolution, ::fmgr::FmgrInfo, Oid),
         Native(nbtcompare::FastComparator),
+        NativeRef(fn(&[u8], &[u8], Oid) -> PgResult<i32>, Oid),
         GistBox(gist_proc::GistComparator),
         UnsignedCmp,
     }
@@ -156,6 +180,7 @@ fn comparison_shim(mcx: Mcx<'_>, id: SortComparatorId, x: &Datum<'_>, y: &Datum<
                 *collation,
             ),
             Comparator::Native(cmp) => Resolved::Native(*cmp),
+            Comparator::NativeRef { cmp, collation } => Resolved::NativeRef(*cmp, *collation),
             Comparator::GistBox(cmp) => Resolved::GistBox(*cmp),
             Comparator::UnsignedCmp => Resolved::UnsignedCmp,
         }
@@ -203,6 +228,14 @@ fn comparison_shim(mcx: Mcx<'_>, id: SortComparatorId, x: &Datum<'_>, y: &Datum<
             let x = datum::Datum::from_usize(x.as_usize());
             let y = datum::Datum::from_usize(y.as_usize());
             Ok(cmp(x, y))
+        }
+        // A by-reference native comparator (varlena's `bttext_image_cmp`): borrow
+        // the two operands' canonical varlena bytes IN PLACE and hand them
+        // straight to the kernel. No `datum_to_ref_arg` / `RefPayload` / `to_vec`
+        // — this is the whole win of Option A over the `Shim` path, which
+        // heap-allocated + copied + freed a `Vec<u8>` per operand per comparison.
+        Resolved::NativeRef(cmp, collation) => {
+            cmp(x.as_ref_bytes(), y.as_ref_bytes(), collation)
         }
         // A GiST box comparator (`gist_bbox_zorder_cmp`): the operands are
         // pass-by-reference `BOX` images; the kernel takes an owned canonical
@@ -319,6 +352,23 @@ fn oid_function_call1_sortsupport(sortfunc: Oid, ssup: &mut SortSupportData<'_>)
     // sortsupport routine on the live SortSupport. Routed by OID to the typed
     // routine (the owned `Datum` cannot carry the SortSupport pointer).
     if nbtcompare_seams::run_sortsupport::call(sortfunc, ssup) {
+        return Ok(());
+    }
+
+    // `bttextsortsupport` (Option A): install varlena's native by-reference
+    // comparator instead of falling through to the `bttextcmp` fmgr shim. C's
+    // `varstr_sortsupport` picks `varstrfastcmp_c` (LC_COLLATE=C) or
+    // `varlenafastcmp_locale` based on the collation; `bttext_image_cmp` folds
+    // both into one entry point (`varstr_cmp` branches on `collation_is_c`
+    // internally), so the decision is the same authoritative ordering — only the
+    // abbreviated-key optimization is skipped (a perf path that does not change
+    // sort results; see the follow-up note in init_seams).
+    if sortfunc == F_BTTEXTSORTSUPPORT {
+        let id = register_shim(Comparator::NativeRef {
+            cmp: |a, b, c| varlena::bttext_image_cmp::call(a, b, c),
+            collation: ssup.ssup_collation,
+        });
+        ssup.comparator = Some(id);
         return Ok(());
     }
 
@@ -736,6 +786,15 @@ pub fn init_seams() {
     sx::apply_sort_abbrev_converter::set(apply_sort_abbrev_converter);
     sx::apply_sort_abbrev_abort::set(apply_sort_abbrev_abort);
     sx::apply_sort_abbrev_full_comparator::set(apply_sort_abbrev_full_comparator);
+
+    // FOLLOW-UP (abbreviated keys): `text` installs only the full
+    // `NativeRef`/`bttext_image_cmp` comparator (see
+    // `oid_function_call1_sortsupport`); C's `varstr_sortsupport` additionally
+    // arms abbreviated keys (`ssup_datum_unsigned_cmp` + `varstr_abbrev_convert`
+    // / `varstr_abbrev_abort`, all already ported in varlena's sortsupport.rs).
+    // Abbreviation is a perf optimization that does not change sort results, and
+    // wiring it requires carrying the `VarStringSortSupport` scratch (buf1/buf2 +
+    // HLL) across comparisons through the trimmed `SortSupportData`. Deferred.
 
     // The fast-comparator install seams (owned by this substrate).
     nbtcompare_seams::install_sortsupport_int2::set(install_native_comparator);

@@ -36,6 +36,11 @@ gist_proc_seams = { path = "../../../access/gist/gist_proc_seams" }
 # pointer through fmgr). Seam crate only — no cycle with the gist-proc impl.
 dispatch_seams = { path = "../../../access/gist/dispatch_seams" }
 
+# varlena's native `text` SortSupport comparator seam (`bttext_image_cmp`): the
+# substrate installs the native text comparator that calls this instead of the
+# old-style `bttextcmp` fmgr shim. Seam crate only — no cycle with varlena's impl.
+varlena_seams = { path = "../../adt/varlena_seams" }
+
 # outward seam crates (callees; panic until owners land)
 lsyscache_seams = { path = "../../cache/lsyscache_seams" }
 relcache_seams = { path = "../../cache/relcache_seams" }
