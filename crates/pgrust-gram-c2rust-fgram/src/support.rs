@@ -360,13 +360,54 @@ unsafe fn cstr_to_bytes<'a>(s: *const c_char) -> &'a [u8] {
 // setjmp/longjmp escape with the workspace's safe-Rust unwinding.
 
 /// Marker payload of the parser's controlled abort panic.
+#[cfg(not(target_family = "wasm"))]
 struct ParserAbortSentinel;
 
-/// Escape an in-flight parse the way C's `ereport(ERROR)`/`longjmp` does, via a
-/// Rust panic carrying [`ParserAbortSentinel`].  The message/SQLSTATE/cursor
-/// have already been recorded in the `CUR_*` thread-locals by the caller.
+#[cfg(target_family = "wasm")]
+thread_local! {
+    /// wasm-only: set by [`pgrust_gram_error_jump`] when an
+    /// `ereport(ERROR)`/syntax/lexer error fires during a parse. On
+    /// `wasm64-unknown-unknown` the target spec forces `panic-strategy=abort`
+    /// and rustc emits no wasm exception-handling, so the native
+    /// `panic_any(ParserAbortSentinel)` + `catch_unwind` escape would abort the
+    /// whole module instead of being recovered (see docs/wasm-feasibility-map.md
+    /// PASS 8). Instead, the error has already been recorded in the `CUR_*`
+    /// thread-locals; this flag tells `base_yylex` to return `YYEOF` (0) so
+    /// bison terminates the parse promptly, `base_yyparse` returns nonzero,
+    /// `run_inner`/`raw_parser_bytes` return NIL, and the caller surfaces the
+    /// recorded error as `Err` — the same end state as the native unwind path,
+    /// without unwinding.
+    static ABORT_PENDING: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// wasm-only: true iff a parser-error escape is pending (set since the last
+/// [`clear_abort_pending`]).
+#[cfg(target_family = "wasm")]
+fn abort_pending() -> bool {
+    ABORT_PENDING.with(|f| f.get())
+}
+
+/// wasm-only: reset the pending-abort flag (called by `raw_parser_bytes` before
+/// each parse, alongside `clear_last_error`).
+#[cfg(target_family = "wasm")]
+fn clear_abort_pending() {
+    ABORT_PENDING.with(|f| f.set(false));
+}
+
+/// Escape an in-flight parse the way C's `ereport(ERROR)`/`longjmp` does.
+///
+/// Native: a Rust panic carrying [`ParserAbortSentinel`] (caught by
+/// `raw_parser_bytes`'s `catch_unwind`). wasm: set the `ABORT_PENDING` flag and
+/// return — `base_yylex` will then feed bison `YYEOF` to terminate the parse
+/// (the error is already in the `CUR_*` thread-locals). The message/SQLSTATE/
+/// cursor have already been recorded by the caller.
+#[cfg(not(target_family = "wasm"))]
 fn pgrust_gram_error_jump() -> ! {
     std::panic::panic_any(ParserAbortSentinel)
+}
+#[cfg(target_family = "wasm")]
+fn pgrust_gram_error_jump() {
+    ABORT_PENDING.with(|f| f.set(true));
 }
 
 thread_local! {
@@ -586,6 +627,14 @@ pub unsafe fn base_yylex(
     llocp: *mut c_int,
     yyscanner: gram::core_yyscan_t,
 ) -> c_int {
+    // wasm: once a parser-error escape is pending (set by the non-unwinding
+    // `pgrust_gram_error_jump`), feed bison `YYEOF` (0) so it terminates the
+    // parse instead of recovering/continuing with the already-failed input.
+    #[cfg(target_family = "wasm")]
+    if abort_pending() {
+        return 0;
+    }
+
     let shim = yyscanner.cast::<ShimScanner>();
     let lexer = &mut *(*shim).lexer;
 
@@ -615,6 +664,10 @@ pub unsafe fn base_yylex(
                 CUR_ERRHINT.with(|h| *h.borrow_mut() = e.hint.unwrap_or_default());
             }
             pgrust_gram_error_jump();
+            // wasm: the jump set ABORT_PENDING and returned; hand bison YYEOF (0)
+            // so it stops. (Native: `pgrust_gram_error_jump` is `!`, unreachable.)
+            #[cfg(target_family = "wasm")]
+            return 0;
         }
     };
 
@@ -1365,12 +1418,15 @@ pub fn raw_parser_bytes(sql: &[u8], mode: RawParseMode) -> *mut List {
     // Reset the recorded-error state so a NIL result can be told apart:
     // last_error() == None then means genuinely empty input, not an error.
     clear_last_error();
+    #[cfg(target_family = "wasm")]
+    clear_abort_pending();
     install_arena();
 
-    // Drive the parse under a Rust unwind guard: an ereport(ERROR)/syntax error
-    // panics with `ParserAbortSentinel`, which we catch here and turn into NULL
-    // (NIL), the C `raw_parser` contract.  Any non-sentinel panic is a genuine
-    // bug and is re-raised.
+    // Native: drive the parse under a Rust unwind guard — an
+    // ereport(ERROR)/syntax error panics with `ParserAbortSentinel`, which we
+    // catch here and turn into NULL (NIL), the C `raw_parser` contract. Any
+    // non-sentinel panic is a genuine bug and is re-raised.
+    #[cfg(not(target_family = "wasm"))]
     let tree = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
         run_inner()
     })) {
@@ -1385,6 +1441,20 @@ pub fn raw_parser_bytes(sql: &[u8], mode: RawParseMode) -> *mut List {
                 CUR_SQL.with(|s| *s.borrow_mut() = None);
                 std::panic::resume_unwind(payload);
             }
+        }
+    };
+
+    // wasm: no unwinding — `pgrust_gram_error_jump` set `ABORT_PENDING` and the
+    // parse terminated via `base_yylex` returning YYEOF. Run `run_inner`
+    // directly; if an error was recorded, return NIL (the recorded error is
+    // surfaced by the caller via `last_error()`), exactly as the catch arm does.
+    #[cfg(target_family = "wasm")]
+    let tree = {
+        let p = unsafe { run_inner() };
+        if abort_pending() {
+            core::ptr::null_mut::<List>()
+        } else {
+            p.cast::<List>()
         }
     };
 
