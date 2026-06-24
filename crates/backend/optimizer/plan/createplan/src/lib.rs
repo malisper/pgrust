@@ -105,7 +105,7 @@ use ::mcx::PgString;
 use ::pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use ::pathnodes::{
     EcId, IndexOptInfo, MaterialPath, NodeId, Path, PathId, PathKey, PathNode, PathTarget,
-    PlannerInfo, RelId, Relids, RinfoId,
+    PlanRowMarkId, PlannerInfo, RelId, Relids, RinfoId,
     RELOPT_BASEREL, RELOPT_OTHER_MEMBER_REL, RTE_RELATION,
     UNIQUE_PATH_HASH, UNIQUE_PATH_NOOP, UNIQUE_PATH_SORT,
 };
@@ -4783,7 +4783,7 @@ fn create_modifytable_plan<'mcx>(
     let part_cols_updated = p.partColsUpdated;
     let result_relations: Vec<i32> = p.resultRelations.clone();
     let update_colnos_lists: Vec<Vec<AttrNumber>> = p.updateColnosLists.clone();
-    let row_marks: Vec<NodeId> = p.rowMarks.clone();
+    let row_marks: Vec<PlanRowMarkId> = p.rowMarks.clone();
     let onconflict = p.onconflict;
     let epq_param = p.epqParam;
     let returning_lists: Vec<Vec<NodeId>> = p.returningLists.clone();
@@ -4858,7 +4858,7 @@ fn make_modifytable<'mcx>(
     with_check_option_lists: Vec<Vec<NodeId>>,
     merge_action_lists: Vec<Vec<NodeId>>,
     merge_join_conditions: Vec<Vec<NodeId>>,
-    row_marks: Vec<NodeId>,
+    row_marks: Vec<PlanRowMarkId>,
     onconflict: Option<OnConflictPlanData<'mcx>>,
     epq_param: i32,
 ) -> PgResult<::nodes::modifytable::ModifyTable<'mcx>> {
@@ -4903,14 +4903,22 @@ fn make_modifytable<'mcx>(
             Some(outer)
         };
 
-    // rowMarks -> List of PlanRowMark nodes. Empty on the INSERT spine; a
-    // non-empty list is a locking/EvalPlanQual path deferred to that family.
-    if !row_marks.is_empty() {
-        panic!(
-            "make_modifytable: rowMarks (PlanRowMark list) resolution not yet ported \
-             (needs the PlanRowMark carrier)"
-        );
-    }
+    // rowMarks -> List of PlanRowMark. Empty on the INSERT spine; a non-empty
+    // list (e.g. a MERGE's source ROW_MARK_REFERENCE marks) is needed so the
+    // ModifyTable EvalPlanQual recheck can re-fetch the non-locked source rows.
+    // C aliases each `PlanRowMark *` into the node's list; here `PlanRowMark` is
+    // a scalar `Copy`, so we materialize each handle into a value.
+    //   node->rowMarks = rowMarks;   (createplan.c make_modifytable)
+    let row_marks_field: Option<PgVec<'mcx, ::nodes::nodelockrows::PlanRowMark>> =
+        if row_marks.is_empty() {
+            None
+        } else {
+            let mut out = vec_with_capacity_in(mcx, row_marks.len())?;
+            for id in &row_marks {
+                out.push(*run.resolve_rowmark(*id));
+            }
+            Some(out)
+        };
 
     // returningLists -> List of per-result-rel RETURNING tlists. Resolve each
     // arena handle list back to an owned TargetEntry list (setrefs.c later
@@ -5095,7 +5103,7 @@ fn make_modifytable<'mcx>(
         returningLists: returning_lists_field,
         fdwPrivLists: Some(fdw_priv_lists),
         fdwDirectModifyPlans: None,
-        rowMarks: None,
+        rowMarks: row_marks_field,
         epqParam: epq_param,
         // ON CONFLICT fields. !onconflict => all empty/none (createplan.c:7211).
         onConflictAction: oc_action,

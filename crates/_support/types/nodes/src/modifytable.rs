@@ -193,8 +193,10 @@ pub struct ModifyTable<'mcx> {
     pub fdwPrivLists: Option<PgVec<'mcx, Option<PgBox<'mcx, Node<'mcx>>>>>,
     /// `Bitmapset *fdwDirectModifyPlans` — indices of FDW DM plans.
     pub fdwDirectModifyPlans: Option<PgBox<'mcx, Bitmapset<'mcx>>>,
-    /// `List *rowMarks` — PlanRowMarks (non-locking only).
-    pub rowMarks: Option<PgVec<'mcx, PgBox<'mcx, Node<'mcx>>>>,
+    /// `List *rowMarks` — PlanRowMarks (non-locking only). Typed as the scalar
+    /// `Copy` `PlanRowMark` (mirroring `LockRows.rowMarks`), since `PlanRowMark`
+    /// is not a `Node` enum variant.
+    pub rowMarks: Option<PgVec<'mcx, crate::nodelockrows::PlanRowMark>>,
     /// `int epqParam` — ID of Param for EvalPlanQual re-eval.
     pub epqParam: i32,
     /// `OnConflictAction onConflictAction`.
@@ -301,12 +303,12 @@ impl ModifyTable<'_> {
             Some(b) => Some(alloc_in(mcx, b.clone_in(mcx)?)?),
             None => None,
         };
-        // `COPY_NODE_FIELD(rowMarks)` — a `List` of `PlanRowMark` nodes.
+        // `COPY_NODE_FIELD(rowMarks)` — a `List` of `PlanRowMark` (scalar Copy).
         let rowMarks = match &self.rowMarks {
             Some(marks) => {
                 let mut out = vec_with_capacity_in(mcx, marks.len())?;
                 for m in marks.iter() {
-                    out.push(alloc_in(mcx, m.clone_in(mcx)?)?);
+                    out.push(*m);
                 }
                 Some(out)
             }

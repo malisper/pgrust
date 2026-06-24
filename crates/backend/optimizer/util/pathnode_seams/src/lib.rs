@@ -662,7 +662,7 @@ mod modifytable {
             update_colnos_lists: Vec<Vec<AttrNumber>>,
             with_check_option_lists: Vec<Vec<NodeId>>,
             returning_lists: Vec<Vec<NodeId>>,
-            row_marks: Vec<NodeId>,
+            row_marks: Vec<PlanRowMarkId>,
             onconflict: Option<NodeId>,
             merge_action_lists: Vec<Vec<NodeId>>,
             merge_join_conditions: Vec<Vec<NodeId>>,

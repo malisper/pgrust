@@ -1590,9 +1590,11 @@ pub struct ModifyTablePath {
     /// `List *returningLists` — per-target-table RETURNING tlists (node handles).
     #[allow(non_snake_case)]
     pub returningLists: Vec<Vec<NodeId>>,
-    /// `List *rowMarks` — PlanRowMarks (non-locking only; opaque node handles).
+    /// `List *rowMarks` — PlanRowMarks (non-locking only; PlanRowMark store
+    /// handles, the same id-space as `LockRowsPath.rowMarks` and
+    /// `PlannerInfo.rowMarks`).
     #[allow(non_snake_case)]
-    pub rowMarks: Vec<NodeId>,
+    pub rowMarks: Vec<PlanRowMarkId>,
     /// `OnConflictExpr *onconflict` — ON CONFLICT clause, or `None` (opaque
     /// node handle; analysis is deferred to createplan.c).
     pub onconflict: Option<NodeId>,

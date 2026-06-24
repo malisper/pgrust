@@ -2484,27 +2484,161 @@ fn EvalPlanQualInit<'mcx>(
 /// pruned `rowMarks` list is the live INSERT/UPDATE/DELETE path (NIL arowmarks).
 #[allow(non_snake_case)]
 fn eval_plan_qual_set_plan_with_row_marks<'mcx>(
-    _mcx: ::mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
-    _estate: &mut ::nodes::EStateData<'mcx>,
-    row_marks: &[::mcx::PgBox<'mcx, ::nodes::nodes::Node<'mcx>>],
+    estate: &mut ::nodes::EStateData<'mcx>,
+    row_marks: &[::nodes::nodelockrows::PlanRowMark],
     subplan: Option<&'mcx ::nodes::nodes::Node<'mcx>>,
 ) -> PgResult<()> {
+    use ::nodes::nodelockrows::{ExecAuxRowMarkData, ExecRowMark, ROW_MARK_COPY};
+
     // foreach(l, node->rowMarks) { ...ExecFindRowMark / ExecBuildAuxRowMark... }
-    if !row_marks.is_empty() {
-        return Err(unported(
-            "ExecInitModifyTable arowmarks loop: PlanRowMark / ExecFindRowMark / \
-             ExecBuildAuxRowMark (EPQ aux-rowmark machinery)",
-        ));
+    //
+    // C (ExecInitModifyTable, execMain.c):
+    //   arowmarks = NIL;
+    //   foreach(l, node->rowMarks) {
+    //     PlanRowMark *rc = lfirst_node(PlanRowMark, l);
+    //     if (rc->isParent) continue;
+    //     RangeTblEntry *rte = exec_rt_fetch(rc->rti, estate);
+    //     if (rte->rtekind == RTE_RELATION &&
+    //         !bms_is_member(rc->rti, estate->es_unpruned_relids)) continue;
+    //     erm = ExecFindRowMark(estate, rc->rti, false);
+    //     aerm = ExecBuildAuxRowMark(erm, subplan->targetlist);
+    //     arowmarks = lappend(arowmarks, aerm);
+    //   }
+    //   EvalPlanQualSetPlan(&mtstate->mt_epqstate, subplan, arowmarks);
+    //
+    // These non-locking aux-rowmarks let the EvalPlanQual recheck re-fetch the
+    // non-result relations (e.g. a MERGE's source) so a concurrent-update recheck
+    // of the join re-evaluates against the right source rows.
+    let mut arowmarks: ::mcx::PgVec<'mcx, ExecAuxRowMarkData<'mcx>> =
+        ::mcx::PgVec::new_in(mcx);
+
+    // The recheck plan's targetlist is where the resjunk ctid/tableoid/wholerow
+    // columns live (C `subplan->targetlist`).
+    let subplan_tlist = subplan.and_then(|n| n.plan_head().targetlist.as_ref());
+
+    for rc in row_marks.iter() {
+        // ignore "parent" rowmarks; they are irrelevant at runtime
+        if rc.isParent {
+            continue;
+        }
+
+        // Also ignore rowmarks belonging to child tables pruned in
+        // ExecDoInitialPruning(). Only RTE_RELATION entries participate in
+        // pruning; a non-relation RTE (a ROW_MARK_COPY/REFERENCE source) is never
+        // a member of es_unpruned_relids, and must NOT be skipped.
+        if execUtils::exec_rt_fetch(rc.rti, estate).rtekind == ::nodes::parsenodes::RTE_RELATION
+            && !nodes_core_seams::bms_is_member::call(
+                rc.rti as i32,
+                estate.es_unpruned_relids.as_deref(),
+            )
+        {
+            continue;
+        }
+
+        // erm = ExecFindRowMark(estate, rc->rti, false): the per-query ExecRowMark
+        // built by init_plan_rowmarks, stored in es_rowmarks[rti-1]. Re-alias its
+        // relation handle (Rc-backed) into a fresh copy owned by the aux mark.
+        let idx = (rc.rti - 1) as usize;
+        let src = estate
+            .es_rowmarks
+            .get(idx)
+            .and_then(|o| o.as_ref())
+            .ok_or_else(|| {
+                ::types_error::PgError::error("failed to find ExecRowMark for rangetable index")
+            })?;
+        let erm: ::mcx::PgBox<'mcx, ExecRowMark<'mcx>> = ::mcx::alloc_in(
+            mcx,
+            ExecRowMark {
+                relation: src.relation.as_ref().map(|r| r.alias()),
+                relid: src.relid,
+                rti: src.rti,
+                prti: src.prti,
+                rowmarkId: src.rowmarkId,
+                markType: src.markType,
+                strength: src.strength,
+                waitPolicy: src.waitPolicy,
+                ermActive: src.ermActive,
+                curCtid: src.curCtid,
+                ermExtra: None,
+            },
+        )?;
+
+        // aerm = ExecBuildAuxRowMark(erm, subplan->targetlist): locate the resjunk
+        // ctid/tableoid/wholerow columns for this rowmark in the recheck plan's
+        // target list (ported 1:1 from execMain.c ExecBuildAuxRowMark).
+        let mut aerm = ExecAuxRowMarkData {
+            rowmark: None,
+            ctidAttNo: 0,
+            toidAttNo: 0,
+            wholeAttNo: 0,
+        };
+        if erm.markType != ROW_MARK_COPY {
+            // need ctid for all methods other than COPY
+            let resname = alloc::format!("ctid{}", erm.rowmarkId);
+            aerm.ctidAttNo = epq_find_junk_in_tlist(subplan_tlist, &resname);
+            if aerm.ctidAttNo == 0 {
+                return Err(::types_error::PgError::error(alloc::format!(
+                    "could not find junk {resname} column"
+                )));
+            }
+            // if child relation, need tableoid too
+            if erm.rti != erm.prti {
+                let resname = alloc::format!("tableoid{}", erm.rowmarkId);
+                aerm.toidAttNo = epq_find_junk_in_tlist(subplan_tlist, &resname);
+                if aerm.toidAttNo == 0 {
+                    return Err(::types_error::PgError::error(alloc::format!(
+                        "could not find junk {resname} column"
+                    )));
+                }
+            }
+        } else {
+            // need the whole row not a TID
+            let resname = alloc::format!("wholerow{}", erm.rowmarkId);
+            aerm.wholeAttNo = epq_find_junk_in_tlist(subplan_tlist, &resname);
+            if aerm.wholeAttNo == 0 {
+                return Err(::types_error::PgError::error(alloc::format!(
+                    "could not find junk {resname} column"
+                )));
+            }
+        }
+        aerm.rowmark = Some(erm);
+        arowmarks.push(aerm);
     }
 
-    // EvalPlanQualSetPlan(epqstate, subplan, NIL):
+    // EvalPlanQualSetPlan(epqstate, subplan, arowmarks):
     //   EvalPlanQualEnd(epqstate);   — no live EPQ query at ExecInitModifyTable
     //   epqstate->plan = subplan;    — record the recheck plan tree
-    //   epqstate->arowMarks = NIL;   — no non-locking aux rowmarks (empty list)
+    //   epqstate->arowMarks = arowmarks;
     epqstate.plan = subplan;
-    epqstate.arowMarks = None;
+    epqstate.arowMarks = if arowmarks.is_empty() {
+        None
+    } else {
+        Some(arowmarks)
+    };
     Ok(())
+}
+
+/// `ExecFindJunkAttributeInTlist(targetlist, attrName)` (execJunk.c): the resno
+/// of the resjunk `TargetEntry` whose `resname` matches, or 0 if none.
+fn epq_find_junk_in_tlist<'mcx>(
+    targetlist: Option<&::mcx::PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>>,
+    attr_name: &str,
+) -> ::types_core::primitive::AttrNumber {
+    let Some(tlist) = targetlist else {
+        return 0;
+    };
+    for tle in tlist.iter() {
+        if tle.resjunk {
+            if let Some(name) = tle.resname.as_deref() {
+                if name == attr_name {
+                    return tle.resno;
+                }
+            }
+        }
+    }
+    0
 }
 
 // ===========================================================================
@@ -2605,6 +2739,18 @@ fn EvalPlanQual<'mcx>(
     // Need to run a recheck subquery. Initialize or reinitialize EPQ state.
     //   EvalPlanQualBegin(epqstate);
     EvalPlanQualBegin(estate, epqstate)?;
+
+    // Bridge the top-level output (source) tuple recorded by EvalPlanQualSetSlot
+    // (`epqstate.origslot`, a parent-estate slot) into the recheck estate's
+    // marker so EvalPlanQualFetchRowMark can read its resjunk ctid/tableoid/
+    // wholerow columns when re-fetching a non-locked rowmarked relation (e.g. a
+    // MERGE's source). The recheck estate did not exist when EvalPlanQualSetSlot
+    // ran (ModifyTable sets origslot at the top of its per-tuple loop, before any
+    // recheck), so the bridge happens here, once the estate exists. The LockRows
+    // path bridges in eval_plan_qual_set_slot_lockrows (its recheckestate already
+    // exists at set-slot time), so this only fires for an as-yet-unbridged
+    // origslot (e.g. ModifyTable/MERGE).
+    epq_bridge_origslot(estate, epqstate)?;
 
     // Lend the parent's materialized CTE shared stores to the recheck estate for
     // the duration of this recheck so recheck CteScans read them as followers
@@ -3060,6 +3206,80 @@ fn eval_plan_qual_set_slot_lockrows<'mcx>(
         .expect("eval_plan_qual_set_slot_lockrows: recheckestate present");
     let rcx = rc.es_query_cxt;
     // Reuse the marker's existing origslot if present, else create one.
+    let existing = rc.es_epq_active.as_deref().and_then(|m| m.epq_marker_origslot);
+    let dst = match existing {
+        Some(s) => s,
+        None => {
+            let desc_owned = match desc.as_ref() {
+                Some(d) => Some(::mcx::alloc_in(rcx, d.clone_in(rcx)?)?),
+                None => None,
+            };
+            let s = execTuples_seams::exec_alloc_table_slot::call(
+                rc,
+                desc_owned,
+                ::nodes::TupleSlotKind::HeapTuple,
+            )?;
+            if let Some(m) = rc.es_epq_active.as_deref_mut() {
+                m.epq_marker_origslot = Some(s);
+            }
+            s
+        }
+    };
+    let tuple = tuple.clone_in(rcx)?;
+    let rcslot = rc.slot_data_mut(dst);
+    ::execTuples::slot_store_fetch::ExecForceStoreHeapTuple(rcx, tuple, rcslot, true)?;
+    Ok(())
+}
+
+/// Bridge `epqstate.origslot` (a PARENT-estate slot recorded by
+/// EvalPlanQualSetSlot) into the recheck estate's marker
+/// (`epq_marker_origslot`), so `EvalPlanQualFetchRowMark` — which runs threaded
+/// with the recheck estate — can read the source tuple's resjunk
+/// ctid/tableoid/wholerow columns. Used by the ModifyTable/MERGE path, whose
+/// recheck estate is only created (by EvalPlanQualBegin) after origslot was
+/// recorded. A no-op when there are no non-locking aux rowmarks to consume it,
+/// or when origslot is unset.
+fn epq_bridge_origslot<'mcx>(
+    parentestate: &mut ::nodes::EStateData<'mcx>,
+    epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
+) -> PgResult<()> {
+    let slot = match epqstate.origslot {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+    let needs_origslot = epqstate
+        .arowMarks
+        .as_ref()
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+    if !needs_origslot {
+        return Ok(());
+    }
+    if epqstate.recheckestate.is_none() {
+        return Ok(());
+    }
+
+    // Materialize the parent origin slot, fetch its heap tuple, clone into the
+    // recheck context, and force-store into a recheck-estate slot whose
+    // descriptor matches the origin tuple (mirror of the LockRows bridge).
+    let pcx = parentestate.es_query_cxt;
+    execTuples_seams::exec_materialize_slot::call(parentestate, slot)?;
+    let (tuple, _should_free) = {
+        let inslot = parentestate.slot_data_mut(slot);
+        ::execTuples::slot_store_fetch::ExecFetchSlotHeapTuple(pcx, inslot, true)?
+    };
+    let desc = parentestate
+        .slot(slot)
+        .tts_tupleDescriptor
+        .as_deref()
+        .map(|d| d.clone_in(pcx))
+        .transpose()?;
+
+    let rc = epqstate
+        .recheckestate
+        .as_deref_mut()
+        .expect("epq_bridge_origslot: recheckestate present");
+    let rcx = rc.es_query_cxt;
     let existing = rc.es_epq_active.as_deref().and_then(|m| m.epq_marker_origslot);
     let dst = match existing {
         Some(s) => s,

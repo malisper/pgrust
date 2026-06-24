@@ -4895,9 +4895,20 @@ fn add_modifytable_to_path<'mcx>(
     };
 
     // If there was a FOR [KEY] UPDATE/SHARE clause the LockRows node dealt with
-    // it; else ModifyTable handles it. parse->rowMarks is empty here (guarded
-    // out above), so rowMarks = root->rowMarks (also empty on this path).
-    let row_marks: Vec<::pathnodes::NodeId> = Vec::new();
+    // fetching non-locked marked rows; else ModifyTable does that.
+    //   if (parse->rowMarks) rowMarks = NIL; else rowMarks = root->rowMarks;
+    // For MERGE, parse->rowMarks is empty but root->rowMarks carries the source
+    // relations' ROW_MARK_REFERENCE marks (built by preprocess_rowmarks), which
+    // the ModifyTable node needs so its EvalPlanQual recheck can re-fetch the
+    // source rows — without them a concurrent-update recheck of the MERGE join
+    // re-scans the source unconstrained and mis-detects MATCHED rows as NOT
+    // MATCHED (bug #18103).
+    let parse_has_row_marks = !run.resolve(root.parse).rowMarks.is_empty();
+    let row_marks: Vec<::pathnodes::PlanRowMarkId> = if parse_has_row_marks {
+        Vec::new()
+    } else {
+        root.rowMarks.clone()
+    };
 
     let part_cols_updated = root.partColsUpdated;
     let epq_param = paramassign_seams::assign_special_exec_param::call(root)?;

@@ -3752,14 +3752,14 @@ fn set_modifytable_references<'mcx>(
                 *r = r.wrapping_add(rtoffset as u32);
             }
         }
-        // rowMarks: PlanRowMark nodes carried as Node handles here. A
-        // single-relation UPDATE/DELETE has none; a non-empty list needs the
-        // walkable PlanRowMark (owned by the rowmark cohort).
-        if m.rowMarks.as_ref().map(|l| !l.is_empty()).unwrap_or(false) {
-            return Err(PgError::error(
-                "set_plan_refs(T_ModifyTable): per-rowmark rti/prti bump over the \
-                 ModifyTable.rowMarks Node list is owned by the rowmark cohort and not ported",
-            ));
+        // rowMarks: the scalar PlanRowMarks (e.g. a MERGE source's non-locking
+        // marks). Bump each mark's rti/prti by rtoffset.
+        //   foreach(l, splan->rowMarks) { rc->rti += rtoffset; rc->prti += rtoffset; }
+        if let Some(marks) = m.rowMarks.as_mut() {
+            for rc in marks.iter_mut() {
+                rc.rti = rc.rti.wrapping_add(rtoffset as u32);
+                rc.prti = rc.prti.wrapping_add(rtoffset as u32);
+            }
         }
 
         // Append result relation RT index(es) to the global list.

@@ -691,7 +691,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
         estate: &mut ::nodes::EStateData<'mcx>,
-        row_marks: &[mcx::PgBox<'mcx, ::nodes::nodes::Node<'mcx>>],
+        row_marks: &[::nodes::nodelockrows::PlanRowMark],
         subplan: Option<&'mcx ::nodes::nodes::Node<'mcx>>,
     ) -> ::types_error::PgResult<()>
 );

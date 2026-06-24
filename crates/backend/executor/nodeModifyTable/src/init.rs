@@ -684,8 +684,8 @@ pub fn ExecInitModifyTable<'mcx>(
     // empty/parent-only/pruned rowMarks list) and records it together with the
     // recheck plan on the canonical EPQState, mirroring the C
     // `EvalPlanQualSetPlan(epqstate, subplan, arowmarks)`.
-    let empty_row_marks: &[PgBox<'mcx, ::nodes::nodes::Node<'mcx>>] = &[];
-    let row_marks: &[PgBox<'mcx, ::nodes::nodes::Node<'mcx>>] = node
+    let empty_row_marks: &[::nodes::nodelockrows::PlanRowMark] = &[];
+    let row_marks: &[::nodes::nodelockrows::PlanRowMark] = node
         .rowMarks
         .as_ref()
         .map(|v| v.as_slice())

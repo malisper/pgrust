@@ -615,17 +615,17 @@ fn reset_expr_context(estate: &mut EStateData<'_>, ecxt: ::nodes::EcxtId) {
 /// original output slot for a possible later EPQ recheck (`epqstate->origslot
 /// = slot;`).
 ///
-/// `origslot` is one of the EvalPlanQual-machinery fields trimmed from the
-/// canonical owned [`::nodes::EPQState`] (it lands with the execMain
-/// EvalPlanQual port, which both writes and consumes it via `es_epq_active`).
-/// In the owned model the modifytable port never reads `origslot` back — the
-/// EPQ recheck that consumes it is itself an execMain seam — so the faithful
-/// residue of this setter is a no-op until execMain owns the field.
+/// `origslot` carries the top-level output (source) tuple whose resjunk
+/// ctid/tableoid/wholerow columns `EvalPlanQualFetchRowMark` reads to re-fetch a
+/// non-locked rowmarked relation during the recheck (e.g. a MERGE's source). The
+/// recheck estate (where the fetch runs) does not exist yet at this point — it is
+/// built lazily by `EvalPlanQual`/`EvalPlanQualBegin` — so we only record the
+/// parent-estate slot id here; `EvalPlanQual` bridges the tuple into a
+/// recheck-addressable slot when the recheck runs.
 #[inline]
 fn eval_plan_qual_set_slot(epqstate: &mut ::nodes::EPQState<'_>, slot: SlotId) {
-    // C: epqstate->origslot = slot; — origslot is trimmed from the canonical
-    // EPQState (owned by execMain's EvalPlanQual machinery); no-op residue.
-    let _ = (epqstate, slot);
+    // C: epqstate->origslot = slot;
+    epqstate.origslot = Some(slot);
 }
 
 /// `resultRelInfo->ri_projectNewInfoValid` — whether the insert/update "new
