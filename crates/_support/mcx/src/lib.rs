@@ -66,6 +66,131 @@ enum Backend {
     /// (bumpalo's internal chunk geometry is unrelated to `bump.c`'s block
     /// algorithm and cannot be used directly).
     Bump(bumpalo::Bump, RefCell<BumpBlocks>),
+    /// `bump.c`-style arena **augmented with a per-context drop list** — C's
+    /// `AllocSetReset` model for *owned* Rust values. Bytes are bump-allocated
+    /// like [`Bump`](Backend::Bump), but a value with a destructor allocated
+    /// here registers `(ptr, drop_glue::<T>)` on [`DropList`] at construction and
+    /// has its own `Drop` suppressed (leaked); on `reset`/drop the context runs
+    /// the drop list LIFO, then `bump.reset()`, then zeroes the accounting
+    /// counters. Net: N allocations + 1 reset with **zero** per-object
+    /// `Drop`/`dealloc`/`uncharge`. The drop-glue registration is *collection-
+    /// side* ([`arena_box_in`]/[`arena_vec_in`]/…): the type-erased `Allocator`
+    /// trait can't capture `T`'s destructor, but the caller — who knows `T` —
+    /// can. Opt-in via [`MemoryContext::new_bumpdrop`] /
+    /// [`MemoryContext::new_child_bumpdrop`]; never a default.
+    BumpDrop(bumpalo::Bump, RefCell<BumpBlocks>, RefCell<DropList>),
+}
+
+/// One registered destructor: the data pointer of a leaked owned value living
+/// in the arena, and a monomorphized `fn` that runs that value's drop glue.
+///
+/// `glue` is `unsafe fn(NonNull<u8>)` — for a value of type `T` it is
+/// `drop_glue::<T>`, which `ptr::drop_in_place`s the `T` at `ptr`. The `fn`
+/// pointer is captured *by the caller* (which statically knows `T`); the
+/// allocator backend never sees `T`. This is the crux that makes a type-erased
+/// `Allocator` drop-aware.
+struct DropEntry {
+    /// The value's address as an **exposed-provenance** raw pointer
+    /// ([`core::ptr::with_exposed_provenance_mut`] reconstructs a usable pointer
+    /// in `glue`). Storing the value's pointer this way — rather than a tagged
+    /// `NonNull` derived from the returned `&mut T` — is what keeps the drop
+    /// list Miri/Stacked-Borrows clean: the returned reference can be used
+    /// arbitrarily by the caller without invalidating the drop list's copy,
+    /// because an exposed pointer is not a tracked sibling in the borrow stack.
+    /// (The provenance was exposed at registration in [`arena_leak`].)
+    addr: *mut u8,
+    glue: unsafe fn(*mut u8),
+}
+
+/// Per-`BumpDrop`-context list of registered destructors, run LIFO on
+/// reset/drop (mirroring `reset_cbs` and C's reset-callback order). Stored in a
+/// plain `alloc::vec::Vec` on the heap (NOT inside the bump arena): a separate
+/// allocation keeps the list's own growth from aliasing the arena bytes it
+/// points into, which is what keeps the raw drop-glue path Miri-clean. The
+/// per-entry cost is a pointer + an `fn` pointer — vastly cheaper than the
+/// `malloc`/`free` pair an `Aset`/`Malloc` context pays per object.
+struct DropList {
+    entries: alloc::vec::Vec<DropEntry>,
+}
+
+impl DropList {
+    fn new() -> Self {
+        DropList { entries: alloc::vec::Vec::new() }
+    }
+
+    /// Run every registered destructor **LIFO**, consuming the list. Panic-safe:
+    /// each entry is `pop`ped *before* its glue runs, so a panicking destructor
+    /// cannot leave a half-consumed entry that a later pass (the context's own
+    /// `Drop`) would run again — at most the still-unrun (earlier-registered)
+    /// entries leak, which is sound (leaking is always safe), never a double
+    /// free / double drop.
+    fn run(&mut self) {
+        while let Some(entry) = self.entries.pop() {
+            // SAFETY: `entry.ptr` is the live, aligned data pointer of a value of
+            // the exact type `glue` was monomorphized for (`drop_glue::<T>`),
+            // allocated into this context's arena and leaked (its own `Drop`
+            // suppressed) at registration. It has not been dropped before — this
+            // is the sole drop, run exactly once — and the arena bytes are still
+            // mapped (we run the list *before* `bump.reset()`). No live borrow of
+            // the value can exist: `reset`/drop take `&mut self`/own the context.
+            unsafe { (entry.glue)(entry.addr) };
+        }
+    }
+}
+
+/// Monomorphized drop glue for `T`: run `T`'s destructor in place at `p`. The
+/// caller (a `BumpDrop` registration site that knows `T`) hands the *pointer to
+/// this function* to the type-erased backend; this is the only place `T`'s
+/// `Drop` is invoked for an arena value.
+///
+/// # Safety
+/// `p` must point to a live, properly-aligned, initialized `T` that has not been
+/// (and will not otherwise be) dropped.
+unsafe fn drop_glue<T>(addr: *mut u8) {
+    // Reconstruct a usable pointer from the exposed-provenance address recorded
+    // at registration, then run `T`'s destructor in place.
+    let p = core::ptr::with_exposed_provenance_mut::<T>(addr as usize);
+    core::ptr::drop_in_place(p);
+}
+
+/// No-op drop glue: the leaked value has no destructor to run (POD); reclamation
+/// is purely the `bump.reset()` + wholesale counter-zero. Registering it still
+/// asserts the context is `BumpDrop`.
+unsafe fn drop_glue_noop(_addr: *mut u8) {}
+
+/// Drop glue for a [`PgVec`] leaked into the arena that runs **only the
+/// elements'** destructors, never the `Vec`'s own `deallocate`.
+///
+/// The arena owns the `Vec`'s buffer bytes (bump-allocated) and reclaims them
+/// wholesale at `bump.reset()`; the buffer must *not* be freed individually
+/// (bump has no per-chunk free, exactly as `bump.c`). Running the full
+/// `Vec::drop` would call `Mcx::deallocate` on the leaked allocator handle —
+/// the same `Mcx`-carried-in-a-leaked-value path that trips Stacked Borrows for
+/// any leaked collection. Dropping the elements in place via the *current* `len`
+/// (read from the still-live header in the arena) frees what needs freeing
+/// without touching the allocator handle, which is both C-faithful and
+/// Miri-clean.
+///
+/// # Safety
+/// `addr` is the exposed-provenance address of a live, initialized
+/// `PgVec<'mcx, T>` header in the arena (registered by [`arena_vec_in`]); its
+/// element drops have not run and will not run elsewhere.
+unsafe fn drop_glue_vec_elems<T>(addr: *mut u8) {
+    // The header's allocator field (`Mcx<'mcx>` == `&MemoryContext`) is never
+    // touched here — we only read `len`/`as_mut_ptr` and drop the `[T]`, none of
+    // which dereference the allocator — so the concrete lifetime is irrelevant
+    // and `'static` is a sound stand-in for the layout-identical header type.
+    let header = core::ptr::with_exposed_provenance_mut::<PgVec<'static, T>>(addr as usize);
+    // Read the data pointer and length off the live header, then drop the
+    // initialized `[T]` in place. We deliberately do NOT drop the `Vec` header
+    // itself (which would `deallocate` the buffer); the bump arena reclaims it.
+    let v: &mut PgVec<'static, T> = &mut *header;
+    let len = v.len();
+    let data: *mut T = v.as_mut_ptr();
+    // Setting len to 0 first guards against a re-entrant double-drop if an
+    // element's destructor somehow observes the header.
+    v.set_len(0);
+    core::ptr::drop_in_place(core::ptr::slice_from_raw_parts_mut(data, len));
 }
 
 /// `ALLOCSET_DEFAULT_INITSIZE` (memutils.h) — `bump.c` keeper/first block size.
@@ -282,6 +407,37 @@ impl MemoryContext {
         Self::with_backend(name, Backend::Bump(bumpalo::Bump::new(), RefCell::new(BumpBlocks::new())), Some(self.acct.clone()))
     }
 
+    /// Drop-aware bump-arena root context: bump-allocates like
+    /// [`new_bump`](Self::new_bump), but owned values registered via
+    /// [`arena_box_in`]/[`arena_vec_in`]/[`arena_string_in`] have their
+    /// destructor run **once at reset/drop** (LIFO) instead of per-object. C's
+    /// `AllocSetReset` model for owned Rust data. Opt-in; never a default.
+    pub fn new_bumpdrop(name: &'static str) -> Self {
+        Self::with_backend(
+            name,
+            Backend::BumpDrop(
+                bumpalo::Bump::new(),
+                RefCell::new(BumpBlocks::new()),
+                RefCell::new(DropList::new()),
+            ),
+            None,
+        )
+    }
+
+    /// [`new_child`](Self::new_child) with the drop-aware bump backend
+    /// ([`new_bumpdrop`](Self::new_bumpdrop)).
+    pub fn new_child_bumpdrop(&self, name: &'static str) -> MemoryContext {
+        Self::with_backend(
+            name,
+            Backend::BumpDrop(
+                bumpalo::Bump::new(),
+                RefCell::new(BumpBlocks::new()),
+                RefCell::new(DropList::new()),
+            ),
+            Some(self.acct.clone()),
+        )
+    }
+
     fn with_backend(
         name: &'static str,
         backend: Backend,
@@ -296,7 +452,7 @@ impl MemoryContext {
             // unchanged); the lazy keeper means an empty context holds 0 blocks.
             Backend::Aset(_) => (false, 0usize, 0usize),
             Backend::Malloc => (false, 0usize, 0usize),
-            Backend::Bump(_, blocks) => {
+            Backend::Bump(_, blocks) | Backend::BumpDrop(_, blocks, _) => {
                 let b = blocks.borrow();
                 (true, b.mem_allocated, b.nblocks)
             }
@@ -420,13 +576,21 @@ impl MemoryContext {
     /// high-water mark.
     pub fn reset(&mut self) {
         self.fire_reset_callbacks();
-        debug_assert_eq!(
-            self.acct.self_used.get(),
-            0,
-            "context {:?} reset with {} bytes still charged (leaked allocation?)",
-            self.acct.name,
-            self.acct.self_used.get(),
-        );
+        // `BumpDrop` is the C `AllocSetReset` model for *owned* values: live
+        // collections are still charged at reset (their `Drop` was suppressed —
+        // they are reclaimed wholesale here), so the "everything already dropped"
+        // assertion does NOT apply. For `Aset`/`Malloc`/`Bump` it still does:
+        // those require every collection to have dropped (returning its bytes)
+        // before reset, so a nonzero `self_used` signals a genuine leak.
+        if !matches!(self.backend, Backend::BumpDrop(..)) {
+            debug_assert_eq!(
+                self.acct.self_used.get(),
+                0,
+                "context {:?} reset with {} bytes still charged (leaked allocation?)",
+                self.acct.name,
+                self.acct.self_used.get(),
+            );
+        }
         if let Backend::Aset(set) = &mut self.backend {
             // AllocSetReset: free every block but the keeper, empty freelists.
             set.get_mut().reset();
@@ -435,10 +599,32 @@ impl MemoryContext {
             bump.reset();
             blocks.get_mut().reset();
         }
+        if let Backend::BumpDrop(bump, blocks, droplist) = &mut self.backend {
+            // §3.2/§3.3: run every registered destructor LIFO FIRST (while the
+            // arena bytes the entries point into are still mapped), THEN reclaim
+            // the bytes wholesale, THEN zero the counters below. Order is
+            // load-bearing — running glue after `bump.reset()` would touch freed
+            // memory.
+            droplist.get_mut().run();
+            bump.reset();
+            blocks.get_mut().reset();
+        }
+        // §3.3: under `BumpDrop`, per-object `uncharge` never ran (each value's
+        // `Drop` was suppressed), so the whole live charge is released here in a
+        // single counter-zero — propagated to ancestors so `subtree_used`
+        // (work_mem/spill input) stays exact.
+        let residual = self.acct.self_used.get();
+        if matches!(self.backend, Backend::BumpDrop(..)) && residual > 0 {
+            for node in self.acct.ancestors() {
+                node.subtree_used
+                    .set(node.subtree_used.get().saturating_sub(residual));
+            }
+            self.acct.self_used.set(0);
+        }
         // Reset the block-footprint snapshot the accounting tree reads.
         self.acct.arena_footprint.set(0);
         self.acct.arena_nblocks.set(0);
-        if let Backend::Bump(_, blocks) = &self.backend {
+        if let Backend::Bump(_, blocks) | Backend::BumpDrop(_, blocks, _) = &self.backend {
             let b = blocks.borrow();
             self.acct.arena_footprint.set(b.mem_allocated);
             self.acct.arena_nblocks.set(b.nblocks);
@@ -464,7 +650,9 @@ impl MemoryContext {
                 // Aset mirrors the old malloc backend's stats (requested bytes),
                 // keeping pg_backend_memory_contexts output unchanged.
                 Backend::Aset(_) | Backend::Malloc => self.acct.self_used.get(),
-                Backend::Bump(_, blocks) => blocks.borrow().mem_allocated,
+                Backend::Bump(_, blocks) | Backend::BumpDrop(_, blocks, _) => {
+                    blocks.borrow().mem_allocated
+                }
             },
         }
     }
@@ -503,6 +691,27 @@ impl MemoryContext {
     /// an allocation fails; message shape follows `mcxt.c`.
     pub fn oom(&self, request: usize) -> PgError {
         crate::oom_named(self.acct.name, request)
+    }
+
+    /// Register `(ptr, glue)` on this context's drop list, to run LIFO at
+    /// reset/drop. Only meaningful for a [`BumpDrop`](Backend::BumpDrop) context;
+    /// for any other backend this is a no-op (values there are dropped
+    /// individually through the `Allocator`, not via the drop list).
+    ///
+    /// # Safety
+    /// `ptr` must point to a live `T` (the type `glue == drop_glue::<T>` was
+    /// monomorphized for) allocated in *this* context's arena and whose own
+    /// `Drop` has been suppressed (leaked), so the registered glue is the unique
+    /// owner that runs `T::drop`. The value must remain valid until this context
+    /// is reset/dropped (guaranteed by the `'mcx` borrow on the returned
+    /// reference and `reset`'s `&mut self`).
+    unsafe fn register_drop(&self, addr: *mut u8, glue: unsafe fn(*mut u8)) -> bool {
+        if let Backend::BumpDrop(_, _, droplist) = &self.backend {
+            droplist.borrow_mut().entries.push(DropEntry { addr, glue });
+            true
+        } else {
+            false
+        }
     }
 
     fn fire_reset_callbacks(&self) {
@@ -604,6 +813,14 @@ impl Drop for MemoryContext {
     /// to ancestor counters so the accounting tree never holds phantom bytes.
     fn drop(&mut self) {
         self.fire_reset_callbacks();
+        // For a `BumpDrop` context, every owned value's `Drop` was suppressed at
+        // construction (leaked into the arena); their destructors run here, LIFO,
+        // before the bump bytes go away with `self`. Without this the arena
+        // values' destructors would never run (a leak of any owned resource they
+        // hold — `PgVec`/`PgString` element drops, `Box<dyn …>`, etc.).
+        if let Backend::BumpDrop(_, _, droplist) = &self.backend {
+            droplist.borrow_mut().run();
+        }
         // C MemoryContextDeleteOnly resets the ident; ours would otherwise
         // linger on the Acct node a surviving child keeps alive.
         self.acct.ident.borrow_mut().take();
@@ -730,7 +947,7 @@ unsafe impl Allocator for Mcx<'_> {
         let result = match &self.0.backend {
             Backend::Aset(set) => set.borrow_mut().alloc(layout),
             Backend::Malloc => Global.allocate(layout),
-            Backend::Bump(bump, blocks) => {
+            Backend::Bump(bump, blocks) | Backend::BumpDrop(bump, blocks, _) => {
                 let r = bump.allocate(layout);
                 if r.is_ok() {
                     // Model bump.c's block decision for this chunk and refresh
@@ -758,8 +975,14 @@ unsafe impl Allocator for Mcx<'_> {
             Backend::Aset(set) => set.borrow_mut().dealloc(ptr, layout),
             Backend::Malloc => Global.deallocate(ptr, layout),
             // bump.c never frees individual chunks (reset reclaims wholesale), so
-            // the block model is untouched on deallocate.
-            Backend::Bump(bump, _) => bump.deallocate(ptr, layout),
+            // the block model is untouched on deallocate. (Reached only for
+            // collections allocated into a BumpDrop context that are NOT routed
+            // through the leaking `arena_*_in` API — those drop normally and the
+            // matching uncharge above keeps `self_used` exact; the arena-leaked
+            // values never call deallocate.)
+            Backend::Bump(bump, _) | Backend::BumpDrop(bump, _, _) => {
+                bump.deallocate(ptr, layout)
+            }
         }
     }
 
@@ -774,7 +997,7 @@ unsafe impl Allocator for Mcx<'_> {
         let result = match &self.0.backend {
             Backend::Aset(set) => set.borrow_mut().realloc(ptr, old_layout, new_layout),
             Backend::Malloc => Global.grow(ptr, old_layout, new_layout),
-            Backend::Bump(bump, blocks) => {
+            Backend::Bump(bump, blocks) | Backend::BumpDrop(bump, blocks, _) => {
                 let r = bump.grow(ptr, old_layout, new_layout);
                 if r.is_ok() {
                     // bump.c can't grow in place; bumpalo bump-allocates the
@@ -805,7 +1028,9 @@ unsafe impl Allocator for Mcx<'_> {
         let result = match &self.0.backend {
             Backend::Aset(set) => set.borrow_mut().realloc(ptr, old_layout, new_layout),
             Backend::Malloc => Global.shrink(ptr, old_layout, new_layout),
-            Backend::Bump(bump, _) => bump.shrink(ptr, old_layout, new_layout),
+            Backend::Bump(bump, _) | Backend::BumpDrop(bump, _, _) => {
+                bump.shrink(ptr, old_layout, new_layout)
+            }
         };
         if result.is_ok() {
             self.0.uncharge(old_layout.size() - new_layout.size());
@@ -859,6 +1084,137 @@ pub fn alloc_in<'mcx, T>(mcx: Mcx<'mcx>, value: T) -> PgResult<PgBox<'mcx, T>> {
 /// escaping.
 pub fn leak_in<'mcx, T>(b: PgBox<'mcx, T>) -> &'mcx mut T {
     PgBox::leak(b)
+}
+
+/// Take a value already boxed in a [`BumpDrop`](Backend::BumpDrop) context,
+/// register its monomorphized destructor on the context's drop list, suppress
+/// the box's own `Drop` (leak it into the arena), and hand back an honest
+/// `&'mcx mut T`.
+///
+/// This is the collection-side half of the drop-aware arena: the type-erased
+/// `Allocator` can't capture `T`'s destructor (it only sees `Layout`), but this
+/// function — which statically knows `T` — registers `drop_glue::<T>`. The
+/// value is then *not* freed individually (`Box::leak` forgets its `Drop`); it
+/// lives in the arena until the context resets/drops, at which point the
+/// registered glue runs its destructor exactly once — C's "freed with its
+/// context" for owned Rust values.
+///
+/// The returned borrow is tied to `'mcx` (the context lifetime), so the borrow
+/// checker still forbids use-after-reset exactly as for [`leak_in`].
+///
+/// Requires `b`'s context to be `BumpDrop` (the only backend with a drop list).
+/// On any other backend the registration cannot happen; that is a programming
+/// error — `debug_assert`ed — and in release the value would leak without its
+/// destructor running (always memory-safe, never a double free). Use the
+/// `arena_*_in` constructors below rather than calling this directly.
+pub fn arena_leak<'mcx, T>(b: PgBox<'mcx, T>) -> &'mcx mut T {
+    // Decompose the box into a raw `*mut T` (full-allocation provenance) plus the
+    // context handle, suppressing the box's own `Drop`. We register the drop glue
+    // against THIS raw pointer and then return `&mut *raw` — a *child* retag of
+    // `raw`. Under Stacked Borrows a child Unique retag does not invalidate its
+    // parent, so the pointer the drop list holds stays valid when the glue later
+    // runs. (Deriving the stored pointer from the returned `&mut` instead — a
+    // sibling — would be invalidated the moment the reference is used; that is
+    // the Miri SB violation this ordering avoids.)
+    let (raw, alloc): (*mut T, Mcx<'mcx>) =
+        allocator_api2::boxed::Box::into_raw_with_allocator(b);
+    // Expose `raw`'s provenance and record its address. The drop glue rebuilds a
+    // usable pointer via `with_exposed_provenance_mut`. This severs the stored
+    // pointer from the borrow stack so the returned `&mut T` can be used freely
+    // without invalidating it.
+    let addr = core::ptr::with_exposed_provenance_mut::<u8>(
+        (raw as *mut u8).expose_provenance(),
+    );
+    // SAFETY: `raw` is the live, aligned `T` just yielded by `into_raw_with_
+    // allocator`, allocated in `alloc`'s arena; the box's `Drop` is suppressed,
+    // so the registered `drop_glue::<T>` is the unique destructor. The value
+    // stays valid until the context resets/drops (the `'mcx` borrow returned
+    // below enforces this statically).
+    let registered = unsafe { alloc.context().register_drop(addr, drop_glue::<T>) };
+    debug_assert!(
+        registered || !core::mem::needs_drop::<T>(),
+        "arena_leak: value of a Drop type leaked into a non-BumpDrop context \
+         (its destructor will never run); use a BumpDrop context",
+    );
+    // SAFETY: `raw` points to a live, aligned, initialized `T`; we hand out a
+    // single `&'mcx mut T` (no other reference to it exists — the box is
+    // consumed) tied to the context lifetime. This borrow is a child of `raw`,
+    // leaving the drop-list's copy of `raw` valid.
+    unsafe { &mut *raw }
+}
+
+/// Allocate `value` in a [`BumpDrop`](Backend::BumpDrop) context, registering
+/// its destructor to run at reset/drop, and return an honest `&'mcx mut T`.
+/// The arena analog of [`alloc_in`] — bump-allocates, never frees individually.
+pub fn arena_box_in<'mcx, T>(mcx: Mcx<'mcx>, value: T) -> PgResult<&'mcx mut T> {
+    let b = alloc_in(mcx, value)?;
+    Ok(arena_leak(b))
+}
+
+/// Build a [`PgVec`] in a [`BumpDrop`](Backend::BumpDrop) context, register the
+/// *vec's own* `drop_in_place` (which drops every element then the buffer), and
+/// leak it into an honest `&'mcx mut PgVec<'mcx, T>`. Pushing into the returned
+/// vec bump-grows in the arena; the whole thing — elements included — is
+/// reclaimed in one shot at reset/drop.
+pub fn arena_vec_in<'mcx, T>(
+    mcx: Mcx<'mcx>,
+    vec: PgVec<'mcx, T>,
+) -> PgResult<&'mcx mut PgVec<'mcx, T>> {
+    // Box the Vec header in the arena and register *element-only* drop glue
+    // (`drop_glue_vec_elems`): it drops the `[T]` in place via the header's
+    // live len, but NEVER calls the Vec's own `deallocate` (the bump arena owns
+    // the buffer bytes and reclaims them at reset — `bump.c` has no per-chunk
+    // free). This is both C-faithful and avoids the `Mcx`-carried-in-a-leaked-
+    // value deallocate path that trips Stacked Borrows.
+    let b = alloc_in(mcx, vec)?;
+    let (raw, alloc): (*mut PgVec<'mcx, T>, Mcx<'mcx>) =
+        allocator_api2::boxed::Box::into_raw_with_allocator(b);
+    let addr =
+        core::ptr::with_exposed_provenance_mut::<u8>((raw as *mut u8).expose_provenance());
+    // SAFETY: `raw` is the live, aligned `PgVec` header just leaked into `alloc`'s
+    // arena; its elements have not been dropped and the element-only glue is the
+    // unique destructor for them. Valid until reset/drop (the `'mcx` borrow
+    // returned enforces this statically).
+    let registered = unsafe { alloc.context().register_drop(addr, drop_glue_vec_elems::<T>) };
+    debug_assert!(
+        registered || !core::mem::needs_drop::<T>(),
+        "arena_vec_in: Vec of a Drop element type leaked into a non-BumpDrop \
+         context (element destructors will never run); use a BumpDrop context",
+    );
+    // SAFETY: single `&'mcx mut` to the live header; child retag of `raw`,
+    // leaving the drop list's exposed address valid.
+    Ok(unsafe { &mut *raw })
+}
+
+/// Build a [`PgString`] in a [`BumpDrop`](Backend::BumpDrop) context, register
+/// its destructor (element-only, like [`arena_vec_in`]), and leak it into an
+/// honest `&'mcx mut PgString<'mcx>`. A `PgString`'s elements are POD `u8`, so
+/// there is nothing to destruct — the registration is what reclaims accounting
+/// at reset; the byte buffer dies with the arena.
+pub fn arena_string_in<'mcx>(
+    mcx: Mcx<'mcx>,
+    s: PgString<'mcx>,
+) -> PgResult<&'mcx mut PgString<'mcx>> {
+    // PgString is a thin wrapper over PgVec<u8>; its only Drop is the inner
+    // Vec's, whose elements (u8) are Drop-trivial — so there is nothing to
+    // destruct, the byte buffer dies with the arena, and accounting is reclaimed
+    // by the wholesale counter-zero at reset. We register a no-op element-glue
+    // entry (`drop_glue_vec_elems::<u8>` over the inner buffer, which drops 0
+    // elements) purely so the BumpDrop-context guard fires on misuse and the
+    // path stays uniform with `arena_vec_in`.
+    let b = alloc_in(mcx, s)?;
+    let raw: *mut PgString<'mcx> =
+        allocator_api2::boxed::Box::into_raw_with_allocator(b).0;
+    let addr =
+        core::ptr::with_exposed_provenance_mut::<u8>((raw as *mut u8).expose_provenance());
+    // SAFETY: the only Drop a PgString carries is its inner Vec<u8>'s, whose u8
+    // elements are POD — there is genuinely nothing to destruct. Register a
+    // no-op glue (so the BumpDrop guard still fires); the byte buffer and the
+    // header are reclaimed wholesale at `bump.reset()`.
+    let registered = unsafe { mcx.context().register_drop(addr, drop_glue_noop) };
+    debug_assert!(registered, "arena_string_in: use a BumpDrop context");
+    // SAFETY: single `&'mcx mut` to the live header; child retag of `raw`.
+    Ok(unsafe { &mut *raw })
 }
 
 /// Move the value out of a [`PgBox`] **without** invoking the box allocator's

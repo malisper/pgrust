@@ -1,3 +1,5 @@
+extern crate std;
+
 use super::*;
 use core::fmt::Write as _;
 
@@ -459,6 +461,236 @@ fn hotpath_limit_flag_lifecycle_and_enforcement() {
     let mut x: PgVec<u8> = PgVec::new_in(root2.mcx());
     x.try_reserve_exact(1 << 20).expect("skip path restored after limits drop");
     assert_eq!(root2.used(), 1 << 20);
+}
+
+/// Drop-aware bump arena (`Backend::BumpDrop`): owned values registered via the
+/// `arena_*_in` API have their destructor run **exactly once at reset/drop**,
+/// not per-object, not twice.
+mod bumpdrop {
+    use super::*;
+    use alloc::rc::Rc;
+    use core::cell::Cell;
+
+    /// A type whose `Drop` bumps a shared counter, so we can assert the
+    /// destructor ran exactly once (and at the right time).
+    struct DropCounter {
+        drops: Rc<Cell<u32>>,
+    }
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.drops.set(self.drops.get() + 1);
+        }
+    }
+
+    #[test]
+    fn destructor_runs_exactly_once_at_reset_not_at_alloc() {
+        let drops = Rc::new(Cell::new(0u32));
+        let mut ctx = MemoryContext::new_bumpdrop("arena");
+        {
+            let mcx = ctx.mcx();
+            // Allocate several Drop-having values into the arena.
+            for _ in 0..5 {
+                let _r: &mut DropCounter =
+                    arena_box_in(mcx, DropCounter { drops: drops.clone() }).unwrap();
+            }
+            // Crucially: NONE have dropped yet — they were leaked into the arena.
+            assert_eq!(drops.get(), 0, "no per-object Drop ran at allocation");
+            assert!(ctx.used() > 0, "values are charged while live");
+        }
+        // Still zero after the borrow scope ends — leak suppressed individual Drop.
+        assert_eq!(drops.get(), 0, "leaked values do NOT drop when borrows end");
+
+        ctx.reset();
+        // Exactly five destructors ran, once each, at reset.
+        assert_eq!(drops.get(), 5, "all destructors run exactly once at reset");
+        // Accounting zeroed by the single counter-reset.
+        assert_eq!(ctx.used(), 0, "reset releases the whole live charge");
+
+        // Reset again: nothing to run, no double-drop.
+        ctx.reset();
+        assert_eq!(drops.get(), 5, "no destructor runs twice");
+    }
+
+    #[test]
+    fn destructor_runs_on_drop_when_context_dropped() {
+        let drops = Rc::new(Cell::new(0u32));
+        {
+            let ctx = MemoryContext::new_bumpdrop("arena");
+            let mcx = ctx.mcx();
+            for _ in 0..3 {
+                let _r = arena_box_in(mcx, DropCounter { drops: drops.clone() }).unwrap();
+            }
+            assert_eq!(drops.get(), 0);
+        } // ctx dropped here
+        assert_eq!(drops.get(), 3, "context drop runs the drop list");
+    }
+
+    #[test]
+    fn destructors_run_lifo() {
+        let order: Rc<RefCell<alloc::vec::Vec<u8>>> = Rc::default();
+        struct OrderRec {
+            id: u8,
+            order: Rc<RefCell<alloc::vec::Vec<u8>>>,
+        }
+        impl Drop for OrderRec {
+            fn drop(&mut self) {
+                self.order.borrow_mut().push(self.id);
+            }
+        }
+        let mut ctx = MemoryContext::new_bumpdrop("arena");
+        {
+            let mcx = ctx.mcx();
+            for id in 1..=4u8 {
+                let _r = arena_box_in(mcx, OrderRec { id, order: order.clone() }).unwrap();
+            }
+        }
+        ctx.reset();
+        assert_eq!(&*order.borrow(), &[4, 3, 2, 1], "drop list runs LIFO like C");
+    }
+
+    #[test]
+    fn arena_vec_of_non_pod_reclaimed_at_reset() {
+        // A PgVec<DropCounter> stored in the arena: its OWN drop_in_place must
+        // run, dropping every element exactly once at reset.
+        let drops = Rc::new(Cell::new(0u32));
+        let mut ctx = MemoryContext::new_bumpdrop("arena");
+        {
+            let mcx = ctx.mcx();
+            let mut v: PgVec<DropCounter> = PgVec::new_in(mcx);
+            for _ in 0..10 {
+                v.push(DropCounter { drops: drops.clone() });
+            }
+            let _leaked: &mut PgVec<DropCounter> = arena_vec_in(mcx, v).unwrap();
+            assert_eq!(drops.get(), 0, "elements not dropped while vec is live in arena");
+        }
+        assert_eq!(drops.get(), 0, "vec leaked, elements still live");
+        ctx.reset();
+        assert_eq!(drops.get(), 10, "all 10 elements dropped once at reset");
+        assert_eq!(ctx.used(), 0);
+    }
+
+    #[test]
+    fn arena_string_reclaimed_at_reset() {
+        let mut ctx = MemoryContext::new_bumpdrop("arena");
+        {
+            let mcx = ctx.mcx();
+            let s = PgString::from_str_in("hello arena", mcx).unwrap();
+            let leaked: &mut PgString = arena_string_in(mcx, s).unwrap();
+            assert_eq!(leaked.as_str(), "hello arena");
+            assert!(ctx.used() > 0);
+        }
+        ctx.reset();
+        assert_eq!(ctx.used(), 0, "string buffer reclaimed at reset");
+    }
+
+    #[test]
+    fn used_and_subtree_used_invariant_across_alloc_reset() {
+        let root = MemoryContext::new("root");
+        let mut arena = root.new_child_bumpdrop("arena");
+        let drops = Rc::new(Cell::new(0u32));
+        for round in 0..3 {
+            {
+                let mcx = arena.mcx();
+                for _ in 0..20 {
+                    let _r = arena_box_in(mcx, DropCounter { drops: drops.clone() }).unwrap();
+                }
+                assert!(arena.used() > 0, "round {round}: charged while live");
+                assert_eq!(
+                    root.subtree_used(),
+                    arena.used(),
+                    "round {round}: ancestor subtree mirrors child"
+                );
+            }
+            arena.reset();
+            assert_eq!(arena.used(), 0, "round {round}: reset zeroes self_used");
+            assert_eq!(
+                root.subtree_used(),
+                0,
+                "round {round}: reset propagates to ancestor subtree_used"
+            );
+            assert_eq!(drops.get(), 20 * (round + 1), "round {round}: 20 more drops");
+        }
+    }
+
+    #[test]
+    fn nested_arenas_reclaim_independently() {
+        let drops_outer = Rc::new(Cell::new(0u32));
+        let drops_inner = Rc::new(Cell::new(0u32));
+        {
+            let outer = MemoryContext::new_bumpdrop("outer");
+            let _o = arena_box_in(outer.mcx(), DropCounter { drops: drops_outer.clone() }).unwrap();
+            let mut inner = outer.new_child_bumpdrop("inner");
+            {
+                let _i =
+                    arena_box_in(inner.mcx(), DropCounter { drops: drops_inner.clone() }).unwrap();
+                assert_eq!(outer.subtree_used(), outer.used() + inner.used());
+            }
+            inner.reset();
+            assert_eq!(drops_inner.get(), 1, "inner reset drops inner only");
+            assert_eq!(drops_outer.get(), 0, "outer untouched by inner reset");
+            // inner drops here (already drained — no double drop), then outer.
+        }
+        assert_eq!(drops_outer.get(), 1, "outer drop runs outer's list once");
+        assert_eq!(drops_inner.get(), 1, "inner already drained; no double drop");
+    }
+
+    #[test]
+    fn panic_in_drop_glue_does_not_double_run_remaining() {
+        // A destructor that panics must not corrupt the drop list: entries are
+        // popped before running, so a panic leaks the still-unrun earlier
+        // entries (safe) but never double-runs the panicked or any other entry.
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let drops = Rc::new(Cell::new(0u32));
+        struct PanicOnDrop {
+            // Boom on the 3rd-registered (== first popped is last-registered).
+            boom: bool,
+            drops: Rc<Cell<u32>>,
+        }
+        impl Drop for PanicOnDrop {
+            fn drop(&mut self) {
+                self.drops.set(self.drops.get() + 1);
+                if self.boom {
+                    panic!("destructor panic");
+                }
+            }
+        }
+
+        let mut ctx = MemoryContext::new_bumpdrop("arena");
+        {
+            let mcx = ctx.mcx();
+            // Registered order: A(no), B(BOOM), C(no). LIFO drop order: C, B, A.
+            let _a = arena_box_in(mcx, PanicOnDrop { boom: false, drops: drops.clone() }).unwrap();
+            let _b = arena_box_in(mcx, PanicOnDrop { boom: true, drops: drops.clone() }).unwrap();
+            let _c = arena_box_in(mcx, PanicOnDrop { boom: false, drops: drops.clone() }).unwrap();
+        }
+        let n_before = drops.get();
+        assert_eq!(n_before, 0);
+        let res = catch_unwind(AssertUnwindSafe(|| ctx.reset()));
+        assert!(res.is_err(), "the panic propagates out of reset");
+        // C ran, then B panicked: 2 drops. A is leaked (never run), not double-run.
+        assert_eq!(drops.get(), 2, "popped-before-run: C+B ran, no double drop");
+
+        // A second reset must NOT re-run B or C (they were popped). It may run A
+        // (still queued). No entry runs twice.
+        let res2 = catch_unwind(AssertUnwindSafe(|| ctx.reset()));
+        assert!(res2.is_ok(), "second reset is clean");
+        assert_eq!(drops.get(), 3, "A drained on the 2nd reset; B/C never re-run");
+    }
+
+    #[test]
+    fn pod_value_in_arena_needs_no_drop_entry() {
+        // A Drop-trivial value (u64) bump-allocated and leaked is correct without
+        // any destructor (Strategy A): reset just reclaims the bytes.
+        let mut ctx = MemoryContext::new_bumpdrop("arena");
+        {
+            let mcx = ctx.mcx();
+            let r: &mut u64 = arena_box_in(mcx, 42u64).unwrap();
+            assert_eq!(*r, 42);
+        }
+        ctx.reset();
+        assert_eq!(ctx.used(), 0);
+    }
 }
 
 mod owned {
