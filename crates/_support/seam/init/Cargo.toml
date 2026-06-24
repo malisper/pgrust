@@ -103,6 +103,7 @@ xlogfuncs = { path = "../../../backend/access/transam/xlogfuncs" }
 xloginsert = { path = "../../../backend/access/transam/xloginsert" }
 xlogarchive = { path = "../../../backend/access/transam/xlogarchive" }
 common_archive = { path = "../../../common/archive" }
+common_wait_error = { path = "../../../common/wait_error" }
 xlogprefetcher = { path = "../../../backend/access/transam/xlogprefetcher" }
 xlogreader = { path = "../../../backend/access/transam/xlogreader" }
 xlogrecovery = { path = "../../../backend/access/transam/xlogrecovery" }

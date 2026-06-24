@@ -4016,6 +4016,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "common_wait_error"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "wait_error_seams",
+]
+
+[[package]]
 name = "common_wchar"
 version = "0.0.0"
 dependencies = [
@@ -10052,6 +10060,7 @@ dependencies = [
  "common_blkreftable",
  "common_relation",
  "common_reloptions",
+ "common_wait_error",
  "comp",
  "compare",
  "condition_variable",

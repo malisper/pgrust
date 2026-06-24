@@ -1412,6 +1412,7 @@ members = [
   "crates/common/unicode_norm_bitfields",
   "crates/common/username_seams",
   "crates/common/variant_frontshlib_pgfnames_rmtree",
+  "crates/common/wait_error",
   "crates/common/wait_error_seams",
   "crates/common/wchar_fgram",
   "crates/contrib/amcheck/verify_common",
