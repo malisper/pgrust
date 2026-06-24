@@ -174,3 +174,12 @@ seam_core::seam!(
         in_hot_standby: bool,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `CheckPointTwoPhase(redo_horizon)` (twophase.c) — fsync every valid /
+    /// in-redo prepared-xact whose PREPARE end-LSN ≤ `redo_horizon` to a
+    /// `pg_twophase/` state file, so it survives a crash that loses the WAL
+    /// before the new checkpoint redo point. Called from `CreateCheckPoint` via
+    /// `CheckPointGuts` (xlog.c:7600), deliberately last in the checkpoint.
+    pub fn check_point_two_phase(redo_horizon: XLogRecPtr) -> PgResult<()>
+);

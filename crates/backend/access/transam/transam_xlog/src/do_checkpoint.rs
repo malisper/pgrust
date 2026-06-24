@@ -393,7 +393,7 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
 /// (`CheckPointGutsCallbacks` in the owned-state port) are driven by the
 /// `check_point_buffers` seam's own checkpoint hooks where ported; here we run
 /// the buffer write pass + the fsync drain, matching the prior seam's flush half.
-fn check_point_guts(_check_point_redo: XLogRecPtr, flags: i32) -> PgResult<()> {
+fn check_point_guts(check_point_redo: XLogRecPtr, flags: i32) -> PgResult<()> {
     // Write out all dirty SLRU + main buffer-pool data (xlog.c:7585-7589).
     //   CheckPointCLOG  — the commit-status SLRU. Without this, a transaction
     //                     replayed/committed in the CLOG shared buffers shows
@@ -421,6 +421,14 @@ fn check_point_guts(_check_point_redo: XLogRecPtr, flags: i32) -> PgResult<()> {
         vars::enableFsync.read(),
         vars::log_checkpoints.read(),
     )?;
+
+    // CheckPointTwoPhase(checkPointRedo) (xlog.c:7600) — deliberately delayed as
+    // long as possible. Serialize to a pg_twophase/ state file every valid /
+    // in-redo prepared xact whose PREPARE end-LSN ≤ the redo horizon, so it
+    // survives a crash that truncates WAL before this checkpoint's redo point
+    // (otherwise the PREPARE record is gone and restoreTwoPhaseData has nothing
+    // to read → the prepared xact is silently lost across the restart).
+    twophase_seams::check_point_two_phase::call(check_point_redo)?;
     Ok(())
 }
 

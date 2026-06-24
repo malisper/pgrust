@@ -413,8 +413,16 @@ pub fn StartupXLOG() -> PgResult<()> {
 
     // Pre-scan prepared transactions to find out the XID range present.
     // (xlog.c:5988 passes NULL/NULL — the xids list is unused on this path.)
-    oldest_active_xid =
-        twophase_seam::prescan_prepared_transactions::call(orig_next_xid, transaction_xmin)?.0;
+    // ProcessTwoPhaseBuffer reads TransamVariables->nextXid FRESH (twophase.c:
+    // 2178); after redo it has advanced past the pre-redo checkpoint value, so
+    // re-read it here rather than reusing the value captured before REDO (a
+    // stale value rejects every recovered prepared xact as "future").
+    let post_redo_next_xid = varsup_seam::read_next_transaction_id::call();
+    oldest_active_xid = twophase_seam::prescan_prepared_transactions::call(
+        post_redo_next_xid,
+        post_redo_next_xid,
+    )?
+    .0;
 
     // Allow ordinary WAL segment creation before possibly switching timelines.
     crate::write::SetInstallXLogFileSegmentActive()?;
@@ -543,8 +551,16 @@ pub fn StartupXLOG() -> PgResult<()> {
     clog_seam::trim_clog::call()?;
     multixact_seam::trim_multixact::call()?;
 
-    // Reload shared-memory state for prepared transactions.
-    twophase_seam::recover_prepared_transactions::call(orig_next_xid, transaction_xmin, false)?;
+    // Reload shared-memory state for prepared transactions. ProcessTwoPhaseBuffer
+    // reads TransamVariables->nextXid FRESH (twophase.c:2178); re-read it here
+    // (it advanced during REDO) so recovered prepared xacts are not rejected as
+    // "future" against the stale pre-REDO checkpoint nextXid.
+    let recover_next_xid = varsup_seam::read_next_transaction_id::call();
+    twophase_seam::recover_prepared_transactions::call(
+        recover_next_xid,
+        recover_next_xid,
+        false,
+    )?;
 
     // Shut down xlogreader.
     recovery_seam::shutdown_wal_recovery::call()?;

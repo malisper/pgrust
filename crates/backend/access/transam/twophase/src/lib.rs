@@ -2947,6 +2947,9 @@ pub fn init_seams() {
             })
         })
     });
+    seams::check_point_two_phase::set(|redo_horizon| {
+        with_twophase_state(|state| check_point_two_phase(state, redo_horizon))
+    });
 
     // `FinishPreparedTransaction(gid, isCommit)` — the utility dispatch
     // (`standard_ProcessUtility`'s COMMIT/ROLLBACK PREPARED arms) reaches this
