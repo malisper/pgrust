@@ -447,8 +447,15 @@ fn pgstat_build_snapshot_fixed(kind: PgStat_Kind) -> PgResult<()> {
     }
     let idx = kind.0 as usize;
 
-    let already_valid = local::with_local(|l| l.snapshot.fixed_valid[idx]);
-    if already_valid {
+    // C `pgstat_build_snapshot_fixed` (pgstat.c:1233-1243): under
+    // PGSTAT_FETCH_CONSISTENCY_NONE the snapshot is rebuilt on every fetch
+    // (valid[idx] = false); only in cache/snapshot mode does an already-valid
+    // snapshot short-circuit. Without this, a `none`-consistency fetch returns
+    // the first (now stale) snapshot — e.g. pg_stat_slru.blks_zeroed never
+    // reflecting a zeroing that happened after the first read.
+    if fetch_consistency() == PgStat_FetchConsistency::PGSTAT_FETCH_CONSISTENCY_NONE {
+        local::with_local(|l| l.snapshot.fixed_valid[idx] = false);
+    } else if local::with_local(|l| l.snapshot.fixed_valid[idx]) {
         return Ok(());
     }
 
@@ -481,13 +488,29 @@ fn pgstat_build_snapshot_fixed(kind: PgStat_Kind) -> PgResult<()> {
 /// `pgstat_snapshot_fixed(kind)` (`pgstat.c`) — ensure a fixed-kind snapshot is
 /// materialized for reading (the inward seam consumed by the stats SQL views).
 pub fn pgstat_snapshot_fixed(kind: PgStat_Kind) -> PgResult<()> {
+    // C (pgstat.c:1067-1068): a pending forced clear (stats_fetch_consistency
+    // GUC just changed) discards the stale snapshot before reading.
+    if FORCE_STATS_SNAPSHOT_CLEAR.with(|c| c.get()) {
+        pgstat_clear_snapshot();
+    }
+
     let now = timestamp::get_current_timestamp::call();
     local::with_local(|l| {
         if l.snapshot.snapshot_timestamp == 0 {
             l.snapshot.snapshot_timestamp = now;
         }
     });
-    pgstat_build_snapshot_fixed(kind)
+
+    // C (pgstat.c:1070-1073): in SNAPSHOT consistency mode the *entire* stats
+    // set (including variable-numbered kinds like functions) is frozen at the
+    // first read, so a later fetch of a not-yet-existing entry returns NULL even
+    // if it materialized after this snapshot was taken. Otherwise build only the
+    // requested fixed kind.
+    if fetch_consistency() == PgStat_FetchConsistency::PGSTAT_FETCH_CONSISTENCY_SNAPSHOT {
+        pgstat_build_snapshot()
+    } else {
+        pgstat_build_snapshot_fixed(kind)
+    }
 }
 
 /// `pgstat_init_snapshot_fixed()` (`pgstat.c`) — build snapshots for *all*
