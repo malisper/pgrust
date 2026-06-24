@@ -703,6 +703,9 @@ pub fn init_seams() {
     heapam_seam::insert_one_tuple::set(|mcx, rel, attrtypes, values, nulls| {
         catalog_drivers::insert_one_tuple(mcx, rel, attrtypes, values, nulls)
     });
+    // bootstrap.c short-packs catalog varlenas like every C heap_form_tuple;
+    // the driver toggles this for the BKI run so --boot output matches C.
+    heapam_seam::set_bootstrap_short_packing::set(::heaptuple::set_bootstrap_short_packing);
     // bootstrap.c populate_typ_list — pg_type catalog-scan driver.
     heapam_seam::read_pg_type::set(|mcx| catalog_drivers::read_pg_type(mcx));
     // cluster.c get_tables_to_cluster — pg_index indisclustered systable scan.

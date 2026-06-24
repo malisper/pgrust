@@ -66,6 +66,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Enable/disable bootstrap-scoped short-varlena packing (heaptuple
+    /// `set_bootstrap_short_packing`). C always short-packs packable varlenas in
+    /// `heap_form_tuple`/`index_form_tuple`; pgrust keeps the global flag off (the
+    /// runtime fixed-`VARHDRSZ` reader blocker), so to make the `--boot` on-disk
+    /// catalog tuples byte-identical to C the bootstrap driver flips this on for
+    /// the BKI run. Returns the previous value so the driver can restore it.
+    /// **Installed by `backend-access-heap-heapam`.**
+    pub fn set_bootstrap_short_packing(on: bool) -> bool
+);
+
+seam_core::seam!(
     /// `populate_typ_list()`'s catalog read (bootstrap.c), batched at the heap
     /// owner: `table_open(TypeRelationId, NoLock)` +
     /// `table_beginscan_catalog` + `heap_getnext` loop + `table_endscan` +

@@ -278,6 +278,43 @@ const VARDATA_4B_OFF: usize = VARHDRSZ;
 /// so on-disk compatibility is one-directional and safe.
 const SHORT_VARLENA_PACKING: bool = false;
 
+std::thread_local! {
+    /// Bootstrap-scoped short-varlena packing override.
+    ///
+    /// The global `SHORT_VARLENA_PACKING` const is `false` because ~30 runtime
+    /// adt/index readers strip a FIXED 4-byte `VARHDRSZ` header from a stored
+    /// varlena (see the const's doc) and would mis-read a 1-byte short header.
+    /// That blocker is about values inserted AT RUNTIME (inet/jsonb/numeric index
+    /// keys, CHAR casts, catalog arrays populated by DDL).
+    ///
+    /// The `postgres --boot` (BKI bootstrap) path is different: it only forms
+    /// catalog rows whose packable varlenas are plain `text` columns
+    /// (`pg_proc.prosrc`/`probin`, `pg_description.description`, ...). Those are
+    /// read back exclusively through the size-aware `VARDATA_ANY`/`text_payload_
+    /// from_bytes` path (heap deform -> `text_to_cstring_v`), which already accepts
+    /// short headers. C ALWAYS short-packs (it is not bootstrap-specific), so to
+    /// produce a byte-identical `--boot` datadir pgrust must short-pack the
+    /// bootstrap rows too. We scope it to bootstrap (set by the bootstrap driver)
+    /// so the runtime-reader blocker stays untouched.
+    static BOOTSTRAP_SHORT_PACKING: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// Enable/disable bootstrap-scoped short-varlena packing for the current thread.
+/// Called by the bootstrap driver for the duration of the `--boot` BKI run.
+/// Returns the previous value so a caller can restore it.
+pub fn set_bootstrap_short_packing(on: bool) -> bool {
+    BOOTSTRAP_SHORT_PACKING.with(|c| c.replace(on))
+}
+
+/// `true` when `heap_form_tuple` should short-pack packable varlenas: either the
+/// (currently-off) global convention or the bootstrap-scoped override. Both the
+/// size-computation (`heap_compute_data_size`) and the fill (`fill_val`) gate on
+/// this so the computed `data_length` and the written bytes stay in lockstep.
+#[inline]
+fn short_varlena_packing() -> bool {
+    SHORT_VARLENA_PACKING || BOOTSTRAP_SHORT_PACKING.with(|c| c.get())
+}
+
 /// `SET_VARSIZE(PTR, len)` (varatt.h, little-endian): a 4-byte uncompressed
 /// header whose `VARSIZE_4B == len` (low two bits 00). Returns the header bytes.
 #[inline]
@@ -453,7 +490,7 @@ pub fn heap_compute_data_size(
         // `varsize_any`/`VARDATA_ANY` consumers (which still accept short) read
         // them. (`compact_attr_is_packable`/`varatt_converted_short_size` kept for
         // the symmetric `fill_val` guard / future re-enable.)
-        if SHORT_VARLENA_PACKING
+        if short_varlena_packing()
             && compact_attr_is_packable(atti)
             && varatt_can_make_short(varlena_image.as_deref().unwrap())
         {
@@ -646,10 +683,11 @@ fn fill_val(
             // no alignment for short varlenas
             data_length = varsize_short(val);
             data[off..off + data_length].copy_from_slice(&val[..data_length]);
-        } else if SHORT_VARLENA_PACKING && att.attispackable && varatt_can_make_short(val) {
+        } else if short_varlena_packing() && att.attispackable && varatt_can_make_short(val) {
             // convert to short varlena -- no alignment
-            // (disabled: see `SHORT_VARLENA_PACKING` — keep the full 4-byte header
-            // so fixed-`VARHDRSZ` consumers read the payload, not 3 bytes in)
+            // (off by default — see `SHORT_VARLENA_PACKING`/`short_varlena_packing`;
+            // enabled only during `--boot` so the on-disk bootstrap catalog tuples
+            // match C, which always short-packs packable varlenas)
             data_length = varatt_converted_short_size(val);
             set_varsize_short(&mut data[off..], data_length);
             // memcpy(data + 1, VARDATA(val), data_length - 1)

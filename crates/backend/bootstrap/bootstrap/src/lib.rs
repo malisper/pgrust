@@ -470,9 +470,16 @@ pub fn BootstrapModeMain(mcx: Mcx<'static>, argv: Vec<String>, check_only: bool)
     }
 
     /* Process bootstrap input. */
+    // C short-packs packable varlenas in every `heap_form_tuple`/
+    // `index_form_tuple` (it has no global "header-ful" convention); pgrust keeps
+    // that off at runtime (the fixed-`VARHDRSZ` reader blocker) but must match C
+    // on disk during bootstrap. Enable it for the BKI run (heap rows AND the
+    // `build indices` tuples) so the `--boot` catalog files are byte-identical.
+    let prev_short_packing = heapam_seams::set_bootstrap_short_packing::call(true);
     transam_xact_seams::start_transaction_command::call()?;
     bootparse_seams::boot_yyparse::call(mcx)?;
     transam_xact_seams::commit_transaction_command::call()?;
+    heapam_seams::set_bootstrap_short_packing::call(prev_short_packing);
 
     /*
      * We should now know about all mapped relations, so write out the initial
