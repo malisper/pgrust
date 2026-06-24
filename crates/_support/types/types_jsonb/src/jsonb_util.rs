@@ -23,14 +23,6 @@
 //! crate seams over -- notably the `jbvDatetime` rendering seam -- name
 //! [`JsonbDatetime`] in their signatures, and centralized seams may only
 //! reference vocabulary from the `types` crate.
-//!
-//! ## `<'static>` bridge aliases
-//!
-//! Consumer crates not yet converted to thread `'mcx` name the `…Static` aliases
-//! (`JsonbValueStatic`, `JsonbValueDataStatic`, `JsonbPairStatic`,
-//! `JsonbParseStateStatic`, `JsonbIteratorStatic`) and compile unchanged: a
-//! `'static` working tree is today's owned-tree behavior with no safety change.
-//! Converted consumers name `JsonbValue<'mcx>` and gain the borrow-check.
 
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
@@ -43,9 +35,6 @@ use ::mcx::PgVec;
 /// arena allocation; the `numeric` crate provides the operations.
 pub type JsonbNumeric<'mcx> = &'mcx [u8];
 
-/// `'static` bridge alias (see module docs).
-pub type JsonbNumericStatic = JsonbNumeric<'static>;
-
 /// In-memory representation of a jsonb scalar/container value
 /// (C: `struct JsonbValue`).  The `type`-tagged union is modeled as a Rust enum
 /// payload alongside the explicit `jbvType` tag the C code branches on.
@@ -56,9 +45,6 @@ pub struct JsonbValue<'mcx> {
     /// The tagged payload (C: the `val` union).
     pub val: JsonbValueData<'mcx>,
 }
-
-/// `'static` bridge alias for not-yet-converted consumers (see module docs).
-pub type JsonbValueStatic = JsonbValue<'static>;
 
 /// The payload union of [`JsonbValue`] (C: `JsonbValue.val`).
 #[derive(Clone, Debug)]
@@ -107,9 +93,6 @@ pub enum JsonbValueData<'mcx> {
     Datetime(JsonbDatetime),
 }
 
-/// `'static` bridge alias (see module docs).
-pub type JsonbValueDataStatic = JsonbValueData<'static>;
-
 impl JsonbValue<'_> {
     /// Construct a `jbvNull` value.
     pub fn null() -> Self {
@@ -150,9 +133,6 @@ pub struct JsonbPair<'mcx> {
     pub order: u32,
 }
 
-/// `'static` bridge alias (see module docs).
-pub type JsonbPairStatic = JsonbPair<'static>;
-
 /// Conversion state used when parsing Jsonb from text or coercing types
 /// (C: `struct JsonbParseState`).  Modeled as a stack of frames threaded by
 /// `next`, mirroring the C singly linked list.  The frame chain is heap-boxed on
@@ -169,9 +149,6 @@ pub struct JsonbParseState<'mcx> {
     /// Parent frame (C: `JsonbParseState *next`).
     pub next: Option<alloc::boxed::Box<JsonbParseState<'mcx>>>,
 }
-
-/// `'static` bridge alias (see module docs).
-pub type JsonbParseStateStatic = JsonbParseState<'static>;
 
 extern crate alloc;
 
@@ -230,9 +207,6 @@ pub struct JsonbIterator<'mcx> {
     /// container pointers).
     pub doc_offset: i32,
 }
-
-/// `'static` bridge alias (see module docs).
-pub type JsonbIteratorStatic = JsonbIterator<'static>;
 
 impl<'mcx> JsonbIterator<'mcx> {
     /// The container bytes this iterator operates on, as a windowed view into
