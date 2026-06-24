@@ -776,12 +776,6 @@ pub fn initialize_one_guc_option_hooks(var: &mut GucVariable) -> PgResult<Option
         GucVariable::Bool(conf) => {
             let mut newval = conf.boot_val;
             let extra = call_bool_check_hook(conf, &mut newval, PGC_S_DEFAULT)?;
-            // `*conf->variable = conf->reset_val = boot_val` (guc.c): seed the
-            // owner-installed storage with the boot value, so a variable that
-            // has no assign hook still has its bound global initialized.
-            if conf.variable.installed() {
-                conf.variable.write(newval);
-            }
             if let Some(slot) = conf.assign_hook {
                 if slot.installed() {
                     (slot.get())(newval, extra.as_deref());
@@ -794,9 +788,6 @@ pub fn initialize_one_guc_option_hooks(var: &mut GucVariable) -> PgResult<Option
         GucVariable::Int(conf) => {
             let mut newval = conf.boot_val;
             let extra = call_int_check_hook(conf, &mut newval, PGC_S_DEFAULT)?;
-            if conf.variable.installed() {
-                conf.variable.write(newval);
-            }
             if let Some(slot) = conf.assign_hook {
                 if slot.installed() {
                     (slot.get())(newval, extra.as_deref());
@@ -809,9 +800,6 @@ pub fn initialize_one_guc_option_hooks(var: &mut GucVariable) -> PgResult<Option
         GucVariable::Real(conf) => {
             let mut newval = conf.boot_val;
             let extra = call_real_check_hook(conf, &mut newval, PGC_S_DEFAULT)?;
-            if conf.variable.installed() {
-                conf.variable.write(newval);
-            }
             if let Some(slot) = conf.assign_hook {
                 if slot.installed() {
                     (slot.get())(newval, extra.as_deref());
@@ -825,6 +813,15 @@ pub fn initialize_one_guc_option_hooks(var: &mut GucVariable) -> PgResult<Option
             // `newval = guc_strdup(boot_val)` (NULL boot_val stays NULL).
             let mut newval = conf.boot_val.clone();
             let extra = call_string_check_hook(conf, &mut newval, PGC_S_DEFAULT)?;
+            // `*conf->variable = conf->reset_val = boot_val` (guc.c): seed the
+            // owner-installed *string* storage with the boot value, so a
+            // string GUC with an installed accessor and no assign hook (e.g.
+            // ssl_ciphers → SSLCipherList) still has its bound global
+            // initialized to the compiled-in default. (Restricted to strings:
+            // the int/real/enum runtime-computed GUCs — e.g. the shmem-sizing
+            // placeholders overwritten later by InitializeShmemGUCs — must keep
+            // reading their owner store, not be pinned to a placeholder boot
+            // value here.)
             if conf.variable.installed() {
                 conf.variable.write(newval.clone());
             }
@@ -840,9 +837,6 @@ pub fn initialize_one_guc_option_hooks(var: &mut GucVariable) -> PgResult<Option
         GucVariable::Enum(conf) => {
             let mut newval = conf.boot_val;
             let extra = call_enum_check_hook(conf, &mut newval, PGC_S_DEFAULT)?;
-            if conf.variable.installed() {
-                conf.variable.write(newval);
-            }
             if let Some(slot) = conf.assign_hook {
                 if slot.installed() {
                     (slot.get())(newval, extra.as_deref());
