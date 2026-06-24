@@ -26,5 +26,5 @@ seam_core::seam!(
     /// (case-corrected) spelling of `name` is returned alongside the open
     /// file. `None` mirrors C's `-1` return (file not found / not openable);
     /// the C function never `ereport`s.
-    pub fn pg_open_tzfile(name: &str, want_canonical: bool) -> Option<(std::fs::File, Option<String>)>
+    pub fn pg_open_tzfile(name: &str, want_canonical: bool) -> Option<(Vec<u8>, Option<String>)>
 );

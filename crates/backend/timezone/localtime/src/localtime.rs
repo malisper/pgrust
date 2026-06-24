@@ -77,28 +77,18 @@ pub fn tzload(
     doextend: bool,
 ) -> Result<Option<String>, TzLoadError> {
     let name = name.strip_prefix(':').unwrap_or(name);
-    let Some((file, canonical)) =
+    let Some((mut bytes, canonical)) =
         pgtz_seams::pg_open_tzfile::call(name, want_canonical)
     else {
         return Err(TzLoadError::NotFound);
     };
 
-    // C tzload mallocs its read buffer (`union local_storage`) and returns
-    // errno (ENOMEM) when that fails; reserve the full single-read cap up
-    // front so the read itself never allocates.
-    let mut bytes = Vec::new();
-    if bytes.try_reserve_exact(INPUT_BUF_SIZE).is_err() {
-        return Err(TzLoadError::OutOfMemory);
-    }
-    {
-        use std::io::Read;
-        if file
-            .take(INPUT_BUF_SIZE as u64)
-            .read_to_end(&mut bytes)
-            .is_err()
-        {
-            return Err(TzLoadError::Invalid);
-        }
+    // C tzload reads at most `sizeof(union local_storage)` bytes in a single
+    // read; a file larger than this is truncated and then fails the later
+    // length checks. The seam returns the whole file's bytes, so truncate to
+    // the single-read cap to preserve that accept/reject behavior.
+    if bytes.len() > INPUT_BUF_SIZE {
+        bytes.truncate(INPUT_BUF_SIZE);
     }
     parse_tzif(&bytes, sp, doextend)?;
     Ok(if want_canonical { canonical } else { None })
