@@ -51,6 +51,8 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::too_many_arguments)]
 
+pub mod psql_format;
+
 use mcx::Mcx;
 use types_core::{FmgrInfo, Oid};
 use types_dest::dest::CommandDest;
