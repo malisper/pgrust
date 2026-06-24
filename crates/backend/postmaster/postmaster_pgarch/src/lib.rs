@@ -36,7 +36,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::sync::atomic::Ordering;
-use std::sync::OnceLock;
 
 use ::utils_error::{ereport, PgResult};
 use ::types_error::{ErrorLocation, ERROR, LOG, WARNING};
@@ -84,16 +83,36 @@ const VALID_XFN_CHARS: &[u8] = b"0123456789ABCDEF.history.backup.partial";
 // ---------------------------------------------------------------------------
 
 /// `static PgArchData *PgArch = NULL;` — the archiver's shared-memory control
-/// block, created by `PgArchShmemInit`. Process-global (shared across every
-/// backend); the field atomics make a shared `&` sound.
-static PG_ARCH: OnceLock<PgArchData> = OnceLock::new();
+/// block, created by `PgArchShmemInit` via `ShmemInitStruct` and attached by
+/// every process. The pointer is the per-process attach address of the ONE
+/// cross-process segment (so the archiver's `pgprocno` advertisement at startup
+/// is visible to backends calling `PgArchWakeup`); the field atomics make a
+/// shared `&` sound.
+///
+/// A plain `OnceLock<PgArchData>` would be COW-private per forked process — the
+/// archiver's `pgprocno` write would never reach a backend, so `PgArchWakeup`
+/// would always read `INVALID_PROC_NUMBER` and the archiver would only ever run
+/// on its 60 s autowake timer (never promptly on a fresh `.ready`). Storing the
+/// real `ShmemInitStruct` address fixes that.
+thread_local! {
+    static PG_ARCH_ADDR: Cell<*mut u8> = const { Cell::new(core::ptr::null_mut()) };
+}
 
 /// The `PgArch->...` dereference; C would crash on use before
 /// `PgArchShmemInit`, here a loud panic.
 fn pg_arch() -> &'static PgArchData {
-    PG_ARCH
-        .get()
-        .expect("PgArch shared memory not initialized (PgArchShmemInit not called)")
+    let p = PG_ARCH_ADDR.with(Cell::get);
+    assert!(
+        !p.is_null(),
+        "PgArch shared memory not initialized (PgArchShmemInit not called)"
+    );
+    // SAFETY: `p` is the attach address of the `ShmemInitStruct("PgArch Data")`
+    // segment, sized `sizeof(PgArchData)` and zero/`PgArchData::new`-initialized
+    // by the first caller. The segment outlives every process (its lifetime is
+    // the cluster's shared memory), so a `'static` borrow is sound; `PgArchData`
+    // is `repr(C)` with only atomic fields, so concurrent cross-process access
+    // is well-defined.
+    unsafe { &*(p as *const PgArchData) }
 }
 
 // ---------------------------------------------------------------------------
@@ -418,13 +437,24 @@ pub fn PgArchShmemSize() -> usize {
 /// branch: `MemSet` to zero, `pgprocno = INVALID_PROC_NUMBER`,
 /// `force_dir_scan = 0`); later callers just attach.
 pub fn PgArchShmemInit() {
-    PG_ARCH.get_or_init(|| {
-        let data = PgArchData::new();
+    // PgArch = (PgArchData *) ShmemInitStruct("Archiver Data",
+    //                                         PgArchShmemSize(), &found);
+    let size = PgArchShmemSize();
+    let (addr, found) = ipc_shmem_seams::shmem_init_struct::call("Archiver Data", size)
+        .expect("PgArchShmemInit: ShmemInitStruct(\"Archiver Data\") failed");
+    PG_ARCH_ADDR.with(|c| c.set(addr));
+
+    if !found {
+        // First time through: zero the block, then set the non-zero defaults.
+        // SAFETY: `addr` points at a freshly-reserved, `size`-byte segment.
+        unsafe {
+            core::ptr::write_bytes(addr, 0, size);
+        }
+        let data = pg_arch();
         // !found branch: pgprocno = INVALID_PROC_NUMBER; force_dir_scan = 0.
         data.pgprocno.store(INVALID_PROC_NUMBER, Ordering::Relaxed);
         data.force_dir_scan.value.store(0, Ordering::Relaxed);
-        data
-    });
+    }
 }
 
 /// `PgArchCanRestart(void)`.

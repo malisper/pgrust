@@ -18,15 +18,28 @@
 //! `pg_current_wal_insert_lsn`, `pg_current_wal_flush_lsn`, `pg_switch_wal`,
 //! `pg_create_restore_point(text)`, `pg_last_wal_receive_lsn`,
 //! `pg_last_wal_replay_lsn`, `pg_last_xact_replay_timestamp`, and
-//! `pg_log_standby_snapshot`. The remaining `xlogfuncs.c` SQL functions are NOT
-//! registered: the file-name / backup / LSN-diff functions return `numeric` or
+//! `pg_log_standby_snapshot`. The online base-backup control functions
+//! `pg_backup_start(text, bool) -> pg_lsn` and `pg_backup_stop(bool) ->
+//! record(lsn, labelfile, spcmapfile)` are also registered: the long-lived
+//! `(BackupState, tablespace_map)` that C keeps in file-scope statics between the
+//! two SQL calls is mirrored in this module's session thread-locals, and the
+//! 3-column `pg_backup_stop` record crosses the by-reference `Composite` lane via
+//! `funcapi::record_from_values` (the same record carrier `pg_create_*_replication_slot`
+//! / `pg_get_object_address` use). The remaining `xlogfuncs.c` SQL functions are
+//! NOT registered: the file-name / LSN-diff functions return `numeric` or
 //! composite rows whose `Mcx`-built varlena/composite the fmgr boundary cannot
 //! yet carry for those shapes.
 
-use ::types_core::{TimestampTz, XLogRecPtr};
+use ::types_core::{Oid, TimestampTz, XLogRecPtr};
 use ::datum::Datum;
 use ::fmgr::boundary::RefPayload;
 use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::types_tuple::Datum as DatumV;
+
+/// C: `LSNOID` (`pg_type.h`) — the `pg_lsn` result-column type Oid.
+const LSNOID: Oid = 3220;
+/// C: `TEXTOID` (`pg_type.h`) — the `text` result-column type Oid.
+const TEXTOID: Oid = 25;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -278,6 +291,124 @@ fn fc_pg_walfile_name(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgR
 }
 
 // ---------------------------------------------------------------------------
+// pg_backup_start / pg_backup_stop — session-persistent backup statics.
+// ---------------------------------------------------------------------------
+
+// C `xlogfuncs.c` keeps the long-lived `backup_state` / `tablespace_map` in
+// file-scope statics (allocated in a dedicated TopMemoryContext child), so the
+// `BackupState` and tablespace-map bytes survive from the `pg_backup_start()`
+// SQL call to the matching `pg_backup_stop()` SQL call. The value-model cores
+// (`crate::pg_backup_start` / `crate::pg_backup_stop`) thread that state through
+// their return/argument, so the fmgr boundary owns the longevity here: this
+// thread-local pair mirrors the two C statics. (Backend-private state — a
+// backup is per-session, never crosses to a worker.)
+std::thread_local! {
+    /// C: `static BackupState *backup_state = NULL;`
+    static FMGR_BACKUP_STATE: core::cell::Cell<Option<::wal::BackupState>> =
+        const { core::cell::Cell::new(None) };
+    /// C: `static StringInfo tablespace_map = NULL;` — the cstring body bytes.
+    static FMGR_TABLESPACE_MAP: core::cell::RefCell<Option<Vec<u8>>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+/// `pg_backup_start(label text, fast bool)` (xlogfuncs.c:54) — `pg_lsn` result.
+///
+/// Mirrors the C wrapper: stash the long-lived `(backup_state, tablespace_map)`
+/// returned by the value core into the session statics, then return the start
+/// LSN. C resets the statics on a second start; `crate::pg_backup_start` itself
+/// rejects a double-start (`SESSION_BACKUP_RUNNING`), so on success the previous
+/// statics were already cleared by the matching stop / abort.
+fn fc_pg_backup_start(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let backupid = arg_text(fcinfo, 0).to_string();
+    let fast = arg_bool(fcinfo, 1);
+    let m = scratch_mcx();
+    let (startpoint, backup_state, tablespace_map) =
+        crate::pg_backup_start(m.mcx(), &backupid, fast)?;
+    // Copy the long-lived state out of the scratch arena into the session
+    // statics (C: the dedicated backupcontext child of TopMemoryContext).
+    FMGR_BACKUP_STATE.with(|c| c.set(Some(backup_state)));
+    FMGR_TABLESPACE_MAP.with(|c| *c.borrow_mut() = Some(tablespace_map.as_slice().to_vec()));
+    Ok(ret_lsn(startpoint))
+}
+
+/// `pg_backup_stop(wait_for_archive bool DEFAULT true)` (xlogfuncs.c:121) —
+/// `record(lsn pg_lsn, labelfile text, spcmapfile text)`.
+///
+/// Mirrors the C wrapper: read the session statics stashed by
+/// `pg_backup_start()`, finish the backup, build the 3-column record, then clear
+/// the statics (C: `MemoryContextDelete(backupcontext)`). If no backup is in
+/// progress the statics are absent; the value core's status check still raises
+/// "backup is not in progress" because `get_backup_status()` is the source of
+/// truth, so we synthesize empty state only to reach that error path.
+fn fc_pg_backup_stop(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let waitforarchive = arg_bool(fcinfo, 0);
+    let backup_state = FMGR_BACKUP_STATE.with(|c| c.get());
+    let tablespace_map = FMGR_TABLESPACE_MAP.with(|c| c.borrow().clone());
+
+    let m = scratch_mcx();
+
+    // C asserts the statics are non-NULL only after the SESSION_BACKUP_RUNNING
+    // check passes. If they are absent the core's own status check raises
+    // "backup is not in progress" (errhint "Did you call pg_backup_start()?");
+    // supply a default state purely so we can reach that error branch.
+    let state = backup_state.unwrap_or_else(::wal::BackupState::zeroed);
+    let map = tablespace_map.unwrap_or_default();
+
+    let res = crate::pg_backup_stop(m.mcx(), waitforarchive, state, &map)?;
+
+    // Clear the session statics (C: clears backup_state/tablespace_map and
+    // deletes backupcontext) now the backup has ended.
+    FMGR_BACKUP_STATE.with(|c| c.set(None));
+    FMGR_TABLESPACE_MAP.with(|c| *c.borrow_mut() = None);
+
+    // values[0] = LSNGetDatum(stoppoint);
+    // values[1] = CStringGetTextDatum(backup_label);
+    // values[2] = CStringGetTextDatum(tablespace_map->data);
+    let coltypes = [LSNOID, TEXTOID, TEXTOID];
+    let values = [
+        DatumV::from_u64(res.lsn),
+        text_datum(m.mcx(), res.labelfile.as_slice())?,
+        text_datum(m.mcx(), res.spcmapfile.as_slice())?,
+    ];
+    let nulls = [false, false, false];
+
+    let rec = funcapi_seams::record_from_values::call(m.mcx(), &coltypes, &values, &nulls)?;
+    Ok(ret_record(fcinfo, rec))
+}
+
+/// Build a `text` value `DatumV` (header-ful varlena image: 4-byte length word
+/// + payload bytes) from a header-LESS `text` payload, as the
+/// `CStringGetTextDatum` columns of the `pg_backup_stop` record require for
+/// `heap_form_tuple`.
+fn text_datum<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    payload: &[u8],
+) -> types_error::PgResult<DatumV<'mcx>> {
+    let total = payload.len() + 4;
+    let mut img = Vec::with_capacity(total);
+    img.extend_from_slice(&::datum::varlena::set_varsize_4b(total));
+    img.extend_from_slice(payload);
+    DatumV::from_byref_bytes_in(mcx, &img)
+}
+
+/// Carry a composite-record `Datum` (built by `record_from_values`) onto the
+/// fmgr frame's by-reference `Composite` lane (C:
+/// `PG_RETURN_DATUM(HeapTupleGetDatum(tuple))`).
+fn ret_record(fcinfo: &mut FunctionCallInfoBaseData, built: DatumV<'_>) -> Datum {
+    match built {
+        DatumV::ByRef(bytes) => {
+            fcinfo.set_ref_result(RefPayload::Composite(bytes.as_slice().to_vec()));
+            Datum::from_usize(0)
+        }
+        DatumV::Composite(t) => {
+            fcinfo.set_ref_result(RefPayload::Composite(t.to_datum_image()));
+            Datum::from_usize(0)
+        }
+        _ => panic!("xlogfuncs fmgr: record_from_values produced a non-composite Datum"),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
@@ -351,5 +482,10 @@ pub fn register_xlogfuncs_builtins() {
         builtin(6305, "pg_log_standby_snapshot", 0, true, false, fc_pg_log_standby_snapshot),
         // pg_walfile_name(pg_lsn) -> text
         builtin(2851, "pg_walfile_name", 1, true, false, fc_pg_walfile_name),
+        // ---- online base-backup control (composite / lsn results) ----
+        // pg_backup_start(text, bool) -> pg_lsn
+        builtin(2172, "pg_backup_start", 2, true, false, fc_pg_backup_start),
+        // pg_backup_stop(bool) -> record(lsn, labelfile, spcmapfile)
+        builtin(2739, "pg_backup_stop", 1, true, false, fc_pg_backup_stop),
     ]);
 }

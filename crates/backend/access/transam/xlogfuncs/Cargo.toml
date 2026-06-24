@@ -14,6 +14,7 @@ types_core = { path = "../../../../_support/types/types_core" }
 fmgr = { path = "../../../../_support/types/fmgr" }
 datum = { path = "../../../../_support/types/datum" }
 fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
+funcapi_seams = { path = "../../../utils/fmgr/funcapi_seams" }
 wal = { path = "../../../../_support/types/wal" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 types_storage = { path = "../../../../_support/types/types_storage" }

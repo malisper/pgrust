@@ -26,6 +26,7 @@ aio_core_seams = { path = "../../storage/aio/aio_core_seams" }
 fd_seams = { path = "../../storage/file/fd_seams" }
 file_seams = { path = "../../storage/file/file_seams" }
 pmsignal_seams = { path = "../../storage/ipc/pmsignal_seams" }
+ipc_shmem_seams = { path = "../../storage/ipc/ipc_shmem_seams" }
 procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
 dsm_core_seams = { path = "../../storage/ipc/dsm_core_seams" }
 latch_seams = { path = "../../storage/ipc/latch_seams" }
