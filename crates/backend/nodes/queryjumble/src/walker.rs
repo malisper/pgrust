@@ -204,9 +204,23 @@ fn jumble_opt_node(jstate: &mut JumbleState, node: Option<&Node>) {
 /// `_jumbleNode`'s "always emit type, then significant fields" shape — the
 /// canonical tree does not expose those structural bodies to this walker).
 fn jumble_node(jstate: &mut JumbleState, node: &Node) {
-    _jumble_tag(jstate, node.node_tag());
+    let tag = node.node_tag();
+    _jumble_tag(jstate, tag);
     if let Some(expr) = node.as_expr() {
         jumble_expr_fields(jstate, expr);
+        return;
+    }
+    if tag == ntag::T_MergeAction {
+        // `_jumbleMergeAction`: matchKind, commandType, qual, targetList. These
+        // distinguish the WHEN clauses of otherwise-identical MERGE statements.
+        if let Some(a) = node.as_mergeaction() {
+            jf_u32(jstate, a.matchKind as u32);
+            jf_u32(jstate, a.commandType as u32);
+            // JUMBLE_NODE(qual) — the transformed WHEN condition.
+            jumble_opt_node(jstate, a.qual.as_deref());
+            // JUMBLE_NODE(targetList) — the per-action target list.
+            jumble_node_list(jstate, a.targetList.as_slice());
+        }
     }
 }
 
