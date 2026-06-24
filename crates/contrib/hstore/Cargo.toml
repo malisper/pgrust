@@ -30,6 +30,17 @@ jsonb_util = { path = "../../backend/utils/adt/jsonb_util" }
 heaptuple = { path = "../../backend/access/common/heaptuple" }
 fmgr_core = { path = "../../backend/utils/fmgr/fmgr_core" }
 
+# GIN / GiST opclass-support call protocols (the generic catalog-driven dispatch):
+gin = { path = "../../_support/types/gin" }
+gist = { path = "../../_support/types/gist" }
+
+# Local-reloptions parse table for the ghstore_options opclass-options proc:
+types_reloptions = { path = "../../_support/types/types_reloptions" }
+reloptions_seams = { path = "../../backend/access/common/reloptions_seams" }
+
+# Traditional CRC-32 for the ghstore signature hashing:
+crc32c = { path = "../../port/crc32c" }
+
 # Seams (consulted, not owned):
 dfmgr_seams = { path = "../../backend/utils/fmgr/dfmgr_seams" }
 typcache_seams = { path = "../../backend/utils/cache/typcache_seams" }

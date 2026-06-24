@@ -353,8 +353,23 @@ fn to_jsonb_impl(fcinfo: &mut FunctionCallInfoBaseData, loose: bool) -> PgResult
 }
 
 // ===========================================================================
-// GiST / GIN opclass + subscript handler — loud-panic stubs (documented gap).
+// GiST / GIN opclass support functions + subscript handler.
+//
+// The GiST/GIN bodies live in `crate::hstore_gist` / `crate::hstore_gin`; these
+// `PGFunction` shims marshal the `gist::extproc` / `gin::extproc` internal
+// protocol structs (the generic catalog-driven dispatch) in/out and call the
+// bodies. (The subscript handler remains the documented gap.)
 // ===========================================================================
+
+use ::gin::extproc::{
+    GinConsistentInOut, GinExtractQueryOut, GinExtractValueOut, GIN_EXTPROC_INTERNAL_SLOT,
+};
+use ::gist::extproc::{
+    GistConsistentInOut, GistEntryInOut, GistPenaltyInOut, GistPicksplitInOut, GistSameInOut,
+    GistUnionInOut, GIST_EXTPROC_INTERNAL_SLOT,
+};
+
+use crate::{hstore_gin, hstore_gist};
 
 fn unported(sym: &str) -> ! {
     raise(PgError::error(alloc::format!(
@@ -362,25 +377,224 @@ fn unported(sym: &str) -> ! {
     )));
 }
 
-macro_rules! index_stub {
-    ($name:ident, $sym:literal) => {
-        pub fn $name(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-            unported($sym);
-        }
-    };
+// ghstore_in / ghstore_out always ereport(ERROR) in C (the ghstore pseudo-type
+// has no text I/O); keep them as the loud-error shims.
+pub fn fc_ghstore_in(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    raise(PgError::error("cannot accept a value of type ghstore"));
+}
+pub fn fc_ghstore_out(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    raise(PgError::error("cannot display a value of type ghstore"));
 }
 
-index_stub!(fc_ghstore_in, "ghstore_in");
-index_stub!(fc_ghstore_out, "ghstore_out");
-index_stub!(fc_ghstore_compress, "ghstore_compress");
-index_stub!(fc_ghstore_decompress, "ghstore_decompress");
-index_stub!(fc_ghstore_penalty, "ghstore_penalty");
-index_stub!(fc_ghstore_picksplit, "ghstore_picksplit");
-index_stub!(fc_ghstore_union, "ghstore_union");
-index_stub!(fc_ghstore_same, "ghstore_same");
-index_stub!(fc_ghstore_consistent, "ghstore_consistent");
-index_stub!(fc_ghstore_options, "ghstore_options");
-index_stub!(fc_gin_extract_hstore, "gin_extract_hstore");
-index_stub!(fc_gin_extract_hstore_query, "gin_extract_hstore_query");
-index_stub!(fc_gin_consistent_hstore, "gin_consistent_hstore");
-index_stub!(fc_hstore_subscript_handler, "hstore_subscript_handler");
+pub fn fc_hstore_subscript_handler(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    unported("hstore_subscript_handler");
+}
+
+// --- GiST ------------------------------------------------------------------
+
+/// Pull the boxed GiST protocol struct of type `T` out of the internal lane,
+/// run `body` on it (mutating in place), and put it back so the dispatch reads
+/// the outputs.
+fn with_gist_proto<T: ::core::any::Any>(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    body: impl FnOnce(&mut T) -> PgResult<()>,
+) -> Datum {
+    let mut state = match fcinfo.take_internal_arg(GIST_EXTPROC_INTERNAL_SLOT) {
+        Some(boxed) => match boxed.downcast::<T>() {
+            Ok(s) => s,
+            Err(_) => raise(PgError::error(
+                "hstore GiST support: internal protocol state has the wrong type",
+            )),
+        },
+        None => raise(PgError::error(
+            "hstore GiST support function invoked without its internal protocol \
+             state — pgrust's generic GiST opclass dispatch was bypassed",
+        )),
+    };
+    if let Err(e) = body(&mut state) {
+        fcinfo.set_internal_arg(GIST_EXTPROC_INTERNAL_SLOT, state);
+        raise(e);
+    }
+    fcinfo.set_internal_arg(GIST_EXTPROC_INTERNAL_SLOT, state);
+    fcinfo.isnull = false;
+    Datum::from_usize(0)
+}
+
+/// `ghstore_compress(entry)`.
+pub fn fc_ghstore_compress(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gist_proto::<GistEntryInOut>(fcinfo, |io| {
+        match hstore_gist::ghstore_compress(io.entry.leafkey, &io.entry.key, io.entry.key_is_null)? {
+            Some(new_key) => {
+                io.passthrough = false;
+                io.retval_key = new_key;
+                io.retval_leafkey = false;
+            }
+            None => io.passthrough = true,
+        }
+        Ok(())
+    })
+}
+
+/// `ghstore_decompress(entry)` — identity on the owned by-ref lane.
+pub fn fc_ghstore_decompress(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gist_proto::<GistEntryInOut>(fcinfo, |io| {
+        match hstore_gist::ghstore_decompress() {
+            Some(new_key) => {
+                io.passthrough = false;
+                io.retval_key = new_key;
+                io.retval_leafkey = io.entry.leafkey;
+            }
+            None => io.passthrough = true,
+        }
+        Ok(())
+    })
+}
+
+/// `ghstore_penalty(origentry, newentry, &penalty)`.
+pub fn fc_ghstore_penalty(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gist_proto::<GistPenaltyInOut>(fcinfo, |io| {
+        io.penalty = hstore_gist::ghstore_penalty(&io.orig_key, &io.new_key)?;
+        Ok(())
+    })
+}
+
+/// `ghstore_picksplit(entryvec, &v)`.
+pub fn fc_ghstore_picksplit(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gist_proto::<GistPicksplitInOut>(fcinfo, |io| {
+        let entries: Vec<(Vec<u8>, bool)> = io
+            .entries
+            .iter()
+            .map(|e| (e.key.clone(), e.key_is_null))
+            .collect();
+        let (left, right, ldatum, rdatum) = hstore_gist::ghstore_picksplit(&entries)?;
+        io.spl_left = left;
+        io.spl_right = right;
+        io.spl_ldatum = ldatum;
+        io.spl_rdatum = rdatum;
+        Ok(())
+    })
+}
+
+/// `ghstore_union(entryvec, &size)`.
+pub fn fc_ghstore_union(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gist_proto::<GistUnionInOut>(fcinfo, |io| {
+        let entries: Vec<(Vec<u8>, bool)> = io
+            .entries
+            .iter()
+            .map(|e| (e.key.clone(), e.key_is_null))
+            .collect();
+        io.result = hstore_gist::ghstore_union(&entries)?;
+        Ok(())
+    })
+}
+
+/// `ghstore_same(a, b, &result)`.
+pub fn fc_ghstore_same(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gist_proto::<GistSameInOut>(fcinfo, |io| {
+        io.equal = hstore_gist::ghstore_same(&io.a, &io.b)?;
+        Ok(())
+    })
+}
+
+/// `ghstore_consistent(entry, query, strategy, subtype, recheck)`. The query
+/// (an hstore / text / text[]) rides the by-ref lane at slot 1.
+pub fn fc_ghstore_consistent(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let query = arg_bytes(fcinfo, 1).to_vec();
+    with_gist_proto::<GistConsistentInOut>(fcinfo, |io| {
+        let (matched, recheck) = hstore_gist::ghstore_consistent(
+            &io.entry.key,
+            io.entry.key_is_null,
+            &query,
+            io.strategy,
+        )?;
+        io.matched = matched;
+        io.recheck = recheck;
+        Ok(())
+    })
+}
+
+/// `ghstore_options(relopts)` — register the `siglen` opclass option.
+pub fn fc_ghstore_options(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let mut relopts = match fcinfo.take_ref_arg(0) {
+        Some(RefPayload::Internal(b)) => {
+            match b.downcast::<::types_reloptions::local_relopts>() {
+                Ok(r) => r,
+                Err(_) => raise(PgError::error(
+                    "ghstore_options: arg 0 internal is not a local_relopts",
+                )),
+            }
+        }
+        _ => raise(PgError::error(
+            "ghstore_options invoked without its local_relopts internal arg — \
+             pgrust's index_options_function_call path was bypassed",
+        )),
+    };
+    hstore_gist::ghstore_options(&mut relopts);
+    fcinfo.set_ref_arg(0, RefPayload::Internal(relopts));
+    fcinfo.isnull = false;
+    Datum::from_usize(0)
+}
+
+// --- GIN -------------------------------------------------------------------
+
+/// Pull the boxed GIN protocol struct of type `T` out of the internal lane, run
+/// `body` on it (mutating in place), and put it back. `value`/`query` is the
+/// by-ref arg-0 payload (the full header-ful image; the bodies strip headers).
+fn with_gin_proto<T: ::core::any::Any>(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    body: impl FnOnce(&mut T, &[u8]) -> PgResult<()>,
+) -> Datum {
+    let value = arg_bytes(fcinfo, 0).to_vec();
+    let mut state = match fcinfo.take_internal_arg(GIN_EXTPROC_INTERNAL_SLOT) {
+        Some(boxed) => match boxed.downcast::<T>() {
+            Ok(s) => s,
+            Err(_) => raise(PgError::error(
+                "hstore GIN support: internal protocol state has the wrong type",
+            )),
+        },
+        None => raise(PgError::error(
+            "hstore GIN support function invoked without its internal protocol \
+             state — pgrust's generic GIN opclass dispatch was bypassed",
+        )),
+    };
+    if let Err(e) = body(&mut state, &value) {
+        fcinfo.set_internal_arg(GIN_EXTPROC_INTERNAL_SLOT, state);
+        raise(e);
+    }
+    fcinfo.set_internal_arg(GIN_EXTPROC_INTERNAL_SLOT, state);
+    fcinfo.isnull = false;
+    Datum::from_usize(0)
+}
+
+/// `gin_extract_hstore(hstore, internal) RETURNS internal`.
+pub fn fc_gin_extract_hstore(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gin_proto::<GinExtractValueOut>(fcinfo, |out, value| {
+        out.keys = hstore_gin::gin_extract_hstore(value);
+        Ok(())
+    })
+}
+
+/// `gin_extract_hstore_query(hstore, internal, int2, internal, internal)
+/// RETURNS internal`.
+pub fn fc_gin_extract_hstore_query(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gin_proto::<GinExtractQueryOut>(fcinfo, |out, query| {
+        let (keys, search_mode) = hstore_gin::gin_extract_hstore_query(query, out.strategy)?;
+        out.keys = keys;
+        if let Some(mode) = search_mode {
+            out.search_mode = mode;
+        }
+        Ok(())
+    })
+}
+
+/// `gin_consistent_hstore(internal, int2, hstore, int4, internal, internal)
+/// RETURNS bool`.
+pub fn fc_gin_consistent_hstore(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    with_gin_proto::<GinConsistentInOut>(fcinfo, |io, _query| {
+        let (matched, recheck) =
+            hstore_gin::gin_consistent_hstore(&io.check, io.strategy, io.nkeys)?;
+        io.matched = matched;
+        io.recheck = recheck;
+        Ok(())
+    })
+}

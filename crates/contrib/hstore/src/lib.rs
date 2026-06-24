@@ -13,9 +13,11 @@
 //! no C ABI). The control + install SQL live in `extension/` and are installed
 //! into the share directory's `extension/` subdir.
 //!
-//! The GiST/GIN opclass functions (`ghstore_*`, `gin_*_hstore`) and the hstore
-//! subscript handler are NOT registered here (see the crate README / report);
-//! index creation over hstore therefore falls back to the documented gap.
+//! The GiST/GIN opclass functions (`ghstore_*`, `gin_*_hstore`) are ported
+//! (`hstore_gist.rs` / `hstore_gin.rs`) over the generic catalog-driven GiST/GIN
+//! opclass dispatch (`gist::extproc` / `gin::extproc`), so `CREATE INDEX ...
+//! USING gist (h)` / `USING gin (h)` and the `@>`/`?`/`?&`/`?|` index strategies
+//! work. The hstore subscript handler remains the documented gap.
 
 extern crate alloc;
 
@@ -35,6 +37,9 @@ use repr::{
 };
 
 mod records;
+
+mod hstore_gist;
+mod hstore_gin;
 
 mod subs;
 
@@ -1149,9 +1154,9 @@ fn lookup(function: &str) -> Option<LoadedExternalFunc> {
         "hstore_hash_extended" => Some(fc_hstore_hash_extended),
         // version diag.
         "hstore_version_diag" => Some(fc_hstore_version_diag),
-        // GiST / GIN opclass + subscript handler (loud-panic stubs; the
-        // catalog objects exist so CREATE EXTENSION succeeds, but index
-        // build / subscripting is the documented gap).
+        // GiST / GIN opclass support functions (ported in hstore_gist.rs /
+        // hstore_gin.rs over the generic catalog-driven dispatch) + the
+        // subscript handler (still the documented gap).
         "ghstore_in" => Some(records::fc_ghstore_in),
         "ghstore_out" => Some(records::fc_ghstore_out),
         "ghstore_compress" => Some(records::fc_ghstore_compress),
