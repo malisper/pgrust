@@ -161,6 +161,39 @@ fn read_recovery_signal_file(st: &mut XLogRecoveryState) -> PgResult<()> {
 // validateRecoveryParameters (xlogrecovery.c:1127).
 // ===========================================================================
 
+/// Snapshot the recovery-target / streaming GUC globals (the check/assign hooks'
+/// `gucvars` home, plus the plain `conf->variable` cells) into the startup
+/// process's [`XLogRecoveryState`]. C reads these as file-static externs
+/// throughout recovery (xlogrecovery.c:84-123); this is the single point where
+/// the port copies the GUC-assigned values into the working state.
+fn snapshot_recovery_target_gucs(st: &mut XLogRecoveryState) {
+    // The recovery-target globals written by the check/assign hooks.
+    st.recovery_target = crate::gucvars::recovery_target();
+    st.recovery_target_xid = crate::gucvars::recovery_target_xid();
+    st.recovery_target_lsn = crate::gucvars::recovery_target_lsn();
+    st.recovery_target_name = crate::gucvars::recovery_target_name();
+    st.recovery_target_timeline_goal = crate::gucvars::recovery_target_timeline_goal();
+    st.recovery_target_tli_requested = crate::gucvars::recovery_target_tli_requested();
+
+    // The plain `conf->variable` GUC cells the recovery code reads as globals.
+    st.recovery_target_inclusive = crate::gucvars::recovery_target_inclusive();
+    st.recovery_target_action =
+        RecoveryTargetAction::from_i32(crate::gucvars::recovery_target_action());
+    st.recovery_min_apply_delay = crate::gucvars::recovery_min_apply_delay();
+    st.recovery_target_time_string = crate::gucvars::recovery_target_time_string()
+        .unwrap_or_default();
+    st.wal_receiver_create_temp_slot = crate::gucvars::wal_receiver_create_temp_slot();
+    if let Some(end_cmd) = crate::gucvars::recovery_end_command() {
+        st.recovery_end_command = end_cmd;
+    }
+    if let Some(cleanup_cmd) = crate::gucvars::archive_cleanup_command() {
+        st.archive_cleanup_command = cleanup_cmd;
+    }
+    if let Some(slot) = crate::gucvars::primary_slot_name() {
+        st.primary_slot_name = slot;
+    }
+}
+
 /// `static void validateRecoveryParameters(void)` (xlogrecovery.c:1127) — check
 /// the compulsory recovery parameters and finalize the recovery target.
 fn validate_recovery_parameters(st: &mut XLogRecoveryState, mcx: Mcx<'_>) -> PgResult<()> {
@@ -372,14 +405,20 @@ pub fn init_wal_recovery(
 ) -> PgResult<InitWalRecoveryResult> {
     // Create the backend-local recovery state holder once and install it into
     // the page-read driver (the startup process owns it for the whole of
-    // recovery). The recovery-target GUC assign hooks may have already populated
-    // a state via recovery_state_mut(); honour an existing one if present.
+    // recovery).
     if !recovery_state_is_set() {
         let st_ptr: *mut XLogRecoveryState = Box::into_raw(Box::new(XLogRecoveryState::new()));
         RECOVERY_STATE.with(|c| c.set(st_ptr));
         crate::pageread::set_recovery_state_ptr(st_ptr);
     }
     let st = recovery_state_mut();
+
+    // Snapshot the recovery-target GUC globals into the startup process's state.
+    // In C these are file-static externs the check/assign hooks wrote during GUC
+    // processing (xlogrecovery.c:87-123); this port mirrors them in `gucvars`,
+    // the assign hook's home, and reads them here at recovery start — exactly
+    // where C's `StartupXLOG`/`InitWalRecovery` first consult the globals.
+    snapshot_recovery_target_gucs(st);
 
     let dbstate_at_startup = control_file.state;
 

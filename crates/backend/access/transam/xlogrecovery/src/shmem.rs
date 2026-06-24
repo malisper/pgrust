@@ -561,6 +561,14 @@ pub fn with_recovery_wakeup_latch(
     f(&ctl().recoveryWakeupLatch);
 }
 
+/// Run `f` over `&XLogRecoveryCtl->recoveryNotPausedCV` — the shared condition
+/// variable the recovery-pause loop waits on (`ConditionVariableTimedSleep`).
+/// The CV is embedded in the shmem ctl struct, so the paused startup process
+/// reaches it through this accessor.
+pub fn with_recovery_not_paused_cv(f: &mut dyn FnMut(&ConditionVariable)) {
+    f(&ctl().recoveryNotPausedCV);
+}
+
 /// `void XLogRequestWalReceiverReply(void)` (xlogrecovery.c:4528) — schedule a
 /// walreceiver wakeup in the main recovery loop (the redo loop consumes the
 /// flag on its next iteration).

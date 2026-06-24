@@ -201,7 +201,7 @@ pub fn perform_wal_recovery<'mcx>(
             // Pause WAL replay, if requested by a hot-standby session via
             // SetRecoveryPause(). The unlocked read mirrors the C volatile peek.
             if crate::shmem::recovery_pause_state_unlocked() != RecoveryPauseState::NotPaused {
-                crate::stop::recovery_pauses_here(st, false);
+                crate::stop::recovery_pauses_here(st, mcx, false)?;
             }
 
             // Have we reached our recovery target?
@@ -218,7 +218,7 @@ pub fn perform_wal_recovery<'mcx>(
                 // of problems, so we must test again here otherwise pausing
                 // during the delay-wait wouldn't work.
                 if crate::shmem::recovery_pause_state_unlocked() != RecoveryPauseState::NotPaused {
-                    crate::stop::recovery_pauses_here(st, false);
+                    crate::stop::recovery_pauses_here(st, mcx, false)?;
                 }
             }
 
@@ -258,7 +258,7 @@ pub fn perform_wal_recovery<'mcx>(
                 }
                 RecoveryTargetAction::Pause => {
                     crate::stop::set_recovery_pause(st, true);
-                    crate::stop::recovery_pauses_here(st, true);
+                    crate::stop::recovery_pauses_here(st, mcx, true)?;
                     // drop into promote
                 }
                 RecoveryTargetAction::Promote => {}

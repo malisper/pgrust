@@ -12,6 +12,7 @@ crate-type = ["rlib"]
 [dependencies]
 seam_core = { path = "../../../../_support/seam/seam_core" }
 types_core = { path = "../../../../_support/types/types_core" }
+types_guc = { path = "../../../../_support/types/types_guc" }
 wal = { path = "../../../../_support/types/wal" }
 control = { path = "../../../../_support/types/control" }
 types_storage = { path = "../../../../_support/types/types_storage" }

@@ -777,7 +777,8 @@ fn wait_for_wal_to_become_available(
         if crate::shmem::get_recovery_pause_state()
             != ::wal::wal::RecoveryPauseState::NotPaused
         {
-            crate::stop::recovery_pauses_here(recovery_state(), false);
+            let ctx = mcx::MemoryContext::new("recovery pause");
+            crate::stop::recovery_pauses_here(recovery_state(), ctx.mcx(), false)?;
         }
 
         // Handle interrupts of the startup process.

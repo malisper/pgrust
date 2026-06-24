@@ -25,7 +25,8 @@ use core::cell::{Cell, RefCell};
 
 // `RECOVERY_TARGET_ACTION_PAUSE` — the boot value of `recoveryTargetAction`
 // (an int GUC over the `recovery_target_action` enum; guc_tables.c).
-use crate::core::RecoveryTargetAction;
+use crate::core::{RecoveryTargetAction, RecoveryTargetTimeLineGoal, RecoveryTargetType};
+use ::types_core::{InvalidXLogRecPtr, TimeLineID, TransactionId, XLogRecPtr};
 
 // ---------------------------------------------------------------------------
 // `char *` string GUC globals. The C `conf->variable` is a `char **`; the GUC
@@ -146,4 +147,93 @@ pub fn wal_receiver_create_temp_slot() -> bool {
 /// `*conf->variable` write for `wal_receiver_create_temp_slot`.
 pub fn set_wal_receiver_create_temp_slot(value: bool) {
     WAL_RECEIVER_CREATE_TEMP_SLOT.with(|c: &Cell<_>| c.set(value));
+}
+
+// ---------------------------------------------------------------------------
+// Recovery-target globals (xlogrecovery.c:87-123). These are NOT `conf->variable`
+// of any GUC: the GUC strings (`recovery_target`, `recovery_target_xid`,
+// `recovery_target_lsn`, `recovery_target_name`, `recovery_target_time`,
+// `recovery_target_timeline`) are parsed by the check/assign hooks, which write
+// these decoded extern globals. The startup process snapshots them into its
+// `XLogRecoveryState` at `InitWalRecovery`. The hooks fire in any backend
+// (PGC_POSTMASTER), so these mirror the C file-statics 1:1 as the assign-hook's
+// home; the boot values match the C initializers.
+// ---------------------------------------------------------------------------
+
+std::thread_local! {
+    /// `RecoveryTargetType recoveryTarget = RECOVERY_TARGET_UNSET;`
+    /// (xlogrecovery.c:87).
+    static RECOVERY_TARGET: Cell<RecoveryTargetType> =
+        const { Cell::new(RecoveryTargetType::Unset) };
+
+    /// `TransactionId recoveryTargetXid;` (xlogrecovery.c:90).
+    static RECOVERY_TARGET_XID: Cell<TransactionId> = const { Cell::new(0) };
+
+    /// `XLogRecPtr recoveryTargetLSN;` (xlogrecovery.c:94).
+    static RECOVERY_TARGET_LSN: Cell<XLogRecPtr> = const { Cell::new(InvalidXLogRecPtr) };
+
+    /// `const char *recoveryTargetName;` (xlogrecovery.c:93).
+    static RECOVERY_TARGET_NAME: RefCell<String> = const { RefCell::new(String::new()) };
+
+    /// `RecoveryTargetTimeLineGoal recoveryTargetTimeLineGoal =
+    /// RECOVERY_TARGET_TIMELINE_LATEST;` (xlogrecovery.c:122).
+    static RECOVERY_TARGET_TIMELINE_GOAL: Cell<RecoveryTargetTimeLineGoal> =
+        const { Cell::new(RecoveryTargetTimeLineGoal::Latest) };
+
+    /// `TimeLineID recoveryTargetTLIRequested = 0;` (xlogrecovery.c:123).
+    static RECOVERY_TARGET_TLI_REQUESTED: Cell<TimeLineID> = const { Cell::new(0) };
+}
+
+/// `recoveryTarget` read.
+pub fn recovery_target() -> RecoveryTargetType {
+    RECOVERY_TARGET.with(Cell::get)
+}
+/// `recoveryTarget` write.
+pub fn set_recovery_target(value: RecoveryTargetType) {
+    RECOVERY_TARGET.with(|c: &Cell<_>| c.set(value));
+}
+
+/// `recoveryTargetXid` read.
+pub fn recovery_target_xid() -> TransactionId {
+    RECOVERY_TARGET_XID.with(Cell::get)
+}
+/// `recoveryTargetXid` write.
+pub fn set_recovery_target_xid(value: TransactionId) {
+    RECOVERY_TARGET_XID.with(|c: &Cell<_>| c.set(value));
+}
+
+/// `recoveryTargetLSN` read.
+pub fn recovery_target_lsn() -> XLogRecPtr {
+    RECOVERY_TARGET_LSN.with(Cell::get)
+}
+/// `recoveryTargetLSN` write.
+pub fn set_recovery_target_lsn(value: XLogRecPtr) {
+    RECOVERY_TARGET_LSN.with(|c: &Cell<_>| c.set(value));
+}
+
+/// `recoveryTargetName` read.
+pub fn recovery_target_name() -> String {
+    RECOVERY_TARGET_NAME.with(|c| c.borrow().clone())
+}
+/// `recoveryTargetName` write.
+pub fn set_recovery_target_name(value: String) {
+    RECOVERY_TARGET_NAME.with(|c| *c.borrow_mut() = value);
+}
+
+/// `recoveryTargetTimeLineGoal` read.
+pub fn recovery_target_timeline_goal() -> RecoveryTargetTimeLineGoal {
+    RECOVERY_TARGET_TIMELINE_GOAL.with(Cell::get)
+}
+/// `recoveryTargetTimeLineGoal` write.
+pub fn set_recovery_target_timeline_goal(value: RecoveryTargetTimeLineGoal) {
+    RECOVERY_TARGET_TIMELINE_GOAL.with(|c: &Cell<_>| c.set(value));
+}
+
+/// `recoveryTargetTLIRequested` read.
+pub fn recovery_target_tli_requested() -> TimeLineID {
+    RECOVERY_TARGET_TLI_REQUESTED.with(Cell::get)
+}
+/// `recoveryTargetTLIRequested` write.
+pub fn set_recovery_target_tli_requested(value: TimeLineID) {
+    RECOVERY_TARGET_TLI_REQUESTED.with(|c: &Cell<_>| c.set(value));
 }

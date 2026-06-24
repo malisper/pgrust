@@ -33,7 +33,15 @@ use crate::core::{lsn_fmt, RecordRef, RecoveryPauseState, RecoveryTargetType, XL
 use crate::replay::get_record_timestamp;
 use crate::walrecovery::reader_state;
 
+use condition_variable_seams as condvar;
+use startup_seams as startup_seam;
 use timestamp_seams as timestamp_seam;
+
+/// `WAIT_EVENT_RECOVERY_PAUSE` (wait_event_types.h) — the wait-event id reported
+/// while the redo loop sleeps on `recoveryNotPausedCV`. The wait-event reporting
+/// is cosmetic (pg_stat_activity), so this mirrors the other recovery wait-event
+/// placeholders in this unit (`pageread.rs`) until the wait-event id table lands.
+const WAIT_EVENT_RECOVERY_PAUSE: u32 = 0;
 
 #[inline]
 fn loc(lineno: i32, func: &str) -> ::types_error::ErrorLocation {
@@ -353,14 +361,64 @@ pub(crate) fn get_recovery_stop_reason(st: &XLogRecoveryState, mcx: Mcx<'_>) -> 
     }
 }
 
-/// `static void recoveryPausesHere(bool endOfRecovery)` (xlogrecovery.c) — block
-/// here while the recovery pause state is set.
-pub(crate) fn recovery_pauses_here(_st: &mut XLogRecoveryState, _end_of_recovery: bool) {
-    panic!(
-        "blocked: xlogrecovery::stop::recovery_pauses_here — pause loop needs \
-         ProcessStartupProcInterrupts + recovery-pause CV timed sleep + CheckForStandbyTrigger \
-         (unported startup-proc/promote owners); pending stop-family fill"
-    )
+/// `static void recoveryPausesHere(bool endOfRecovery)` (xlogrecovery.c:2933) —
+/// block here while the recovery pause state is set, until resumed via
+/// `pg_wal_replay_resume()` (broadcasts `recoveryNotPausedCV`) or a standby
+/// promotion is triggered.
+pub(crate) fn recovery_pauses_here(
+    st: &mut XLogRecoveryState,
+    mcx: Mcx<'_>,
+    end_of_recovery: bool,
+) -> Result<(), PgError> {
+    // Don't pause unless users can connect!
+    if !st.local_hot_standby_active {
+        return Ok(());
+    }
+
+    // Don't pause after standby promotion has been triggered.
+    if st.local_promote_is_triggered {
+        return Ok(());
+    }
+
+    if end_of_recovery {
+        ereport(LOG)
+            .errmsg("pausing at the end of recovery")
+            .errhint("Execute pg_wal_replay_resume() to promote.")
+            .finish(loc(2945, "recoveryPausesHere"))?;
+    } else {
+        ereport(LOG)
+            .errmsg("recovery has paused")
+            .errhint("Execute pg_wal_replay_resume() to continue.")
+            .finish(loc(2950, "recoveryPausesHere"))?;
+    }
+
+    // loop until recoveryPauseState is set to RECOVERY_NOT_PAUSED
+    while crate::shmem::get_recovery_pause_state() != RecoveryPauseState::NotPaused {
+        startup_seam::process_startup_proc_interrupts::call(mcx)?;
+        if crate::promote::check_for_standby_trigger(st) {
+            return Ok(());
+        }
+
+        // If recovery pause is requested then set it paused. While we are in the
+        // loop, user might resume and pause again so set this every time.
+        crate::shmem::confirm_recovery_paused();
+
+        // We wait on a condition variable that will wake us as soon as the pause
+        // ends, but we use a timeout so we can check the above exit condition
+        // periodically too. A cancel/terminate inside the sleep's
+        // CHECK_FOR_INTERRUPTS surfaces as Err, which must propagate.
+        let mut sleep_result: Result<bool, PgError> = Ok(false);
+        crate::shmem::with_recovery_not_paused_cv(&mut |cv| {
+            sleep_result = condvar::condition_variable_timed_sleep::call(
+                cv,
+                1000,
+                WAIT_EVENT_RECOVERY_PAUSE,
+            );
+        });
+        sleep_result?;
+    }
+    condvar::condition_variable_cancel_sleep::call();
+    Ok(())
 }
 
 /// `static bool recoveryApplyDelay(XLogReaderState *record)`

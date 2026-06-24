@@ -26888,6 +26888,7 @@ dependencies = [
  "transam_xlog_seams",
  "types_core",
  "types_error",
+ "types_guc",
  "types_storage",
  "utils_error",
  "variable_seams",

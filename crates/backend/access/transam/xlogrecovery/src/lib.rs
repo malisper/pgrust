@@ -244,4 +244,25 @@ pub fn init_seams() {
         get: gucvars::recovery_target_time_string,
         set: gucvars::set_recovery_target_time_string,
     });
+
+    // GUC check/assign hooks for the recovery-target / streaming-replication
+    // parameters (xlogrecovery.c:4782-5105). The `guc_tables` config entries
+    // reference these by slot; the GUC engine fires them when parsing the
+    // matching GUC. The check hooks parse/validate and produce the `extra`
+    // payload; the assign hooks write the recovery-target globals (the
+    // `gucvars` cells) that `InitWalRecovery` snapshots into the recovery state.
+    use ::guc_tables::hooks;
+    hooks::check_primary_slot_name.install(guc::check_primary_slot_name);
+    hooks::check_recovery_target.install(guc::check_recovery_target);
+    hooks::assign_recovery_target.install(guc::assign_recovery_target);
+    hooks::check_recovery_target_lsn.install(guc::check_recovery_target_lsn);
+    hooks::assign_recovery_target_lsn.install(guc::assign_recovery_target_lsn);
+    hooks::check_recovery_target_name.install(guc::check_recovery_target_name);
+    hooks::assign_recovery_target_name.install(guc::assign_recovery_target_name);
+    hooks::check_recovery_target_time.install(guc::check_recovery_target_time);
+    hooks::assign_recovery_target_time.install(guc::assign_recovery_target_time);
+    hooks::check_recovery_target_timeline.install(guc::check_recovery_target_timeline);
+    hooks::assign_recovery_target_timeline.install(guc::assign_recovery_target_timeline);
+    hooks::check_recovery_target_xid.install(guc::check_recovery_target_xid);
+    hooks::assign_recovery_target_xid.install(guc::assign_recovery_target_xid);
 }

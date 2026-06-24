@@ -92,6 +92,18 @@ pub enum RecoveryTargetAction {
     Shutdown = 2,
 }
 
+impl RecoveryTargetAction {
+    /// Decode the `recovery_target_action` enum GUC's stored int (the
+    /// `recovery_target_action_options` ids) into the typed action.
+    pub fn from_i32(value: i32) -> Self {
+        match value {
+            1 => RecoveryTargetAction::Promote,
+            2 => RecoveryTargetAction::Shutdown,
+            _ => RecoveryTargetAction::Pause,
+        }
+    }
+}
+
 // ===========================================================================
 // pg_control info opcodes + signal constants used by the recovery families.
 // ===========================================================================

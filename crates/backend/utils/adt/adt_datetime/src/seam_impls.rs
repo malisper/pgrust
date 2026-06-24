@@ -168,6 +168,16 @@ pub fn parse_recovery_target_time(newval: String) -> bool {
     tm2timestamp(&tm, fsec, Some(tz), &mut timestamp).is_ok()
 }
 
+/// `recovery_target_timestamptz_in` — the full `timestamptz_in` conversion of
+/// `recovery_target_time_string` run by `validateRecoveryParameters`
+/// (xlogrecovery.c:1168 `DatumGetTimestampTz(DirectFunctionCall3(timestamptz_in,
+/// CStringGetDatum(recovery_target_time_string), ObjectIdGetDatum(InvalidOid),
+/// Int32GetDatum(-1)))`). Time-zone-dependent; `Err` carries the
+/// `ereport(ERROR)` for an unparsable/out-of-range value.
+pub fn recovery_target_timestamptz_in(newval: String) -> types_error::PgResult<TimestampTz> {
+    crate::timestamp::timestamptz_in(&newval, -1)
+}
+
 // ---------------------------------------------------------------------------
 // json.c: JsonEncodeDateTime (json.c:309). Pure date/time field-conversion +
 // Encode* (XSD date style). Owned by the datetime subsystem.
@@ -535,6 +545,7 @@ pub fn init_seams() {
     ts::timestamptz_pl_interval::set(seam_timestamptz_pl_interval);
     ts::interval_lerp::set(seam_interval_lerp);
     ts::parse_recovery_target_time::set(parse_recovery_target_time);
+    ts::recovery_target_timestamptz_in::set(recovery_target_timestamptz_in);
     ts::timestamp_difference::set(timestamp_difference);
     ts::timestamp_difference_exceeds::set(timestamp_difference_exceeds);
     ts::timestamptz_to_str::set(timestamptz_to_str);
