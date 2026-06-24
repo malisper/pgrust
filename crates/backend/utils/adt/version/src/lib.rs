@@ -31,15 +31,36 @@ pub mod fmgr_builtins;
 /// `PG_VERSION_STR` (`pg_config.h`) — the full version banner emitted by
 /// `version()`. `configure` defines it as
 /// `"PostgreSQL " PG_VERSION " on " host ", compiled by " cc ", " bits "-bit"`.
-/// This is the value `configure` produced for the porting target (matching the
-/// c2rust rendering of this unit).
+/// The `host` substring is selected by build target via `cfg` so a Linux binary
+/// reports a `*-linux-gnu` host and a macOS binary reports `*-apple-darwin`,
+/// instead of a baked-in constant. The 3 `version()` callers only regex-match
+/// platform substrings (e.g. `linux-gnu`), so the right OS token must appear.
 // DELIBERATE DIVERGENCE (user-approved): the version() banner is branded
 // "pgrust" instead of the faithful "PostgreSQL". This is an intentional cosmetic
 // divergence from upstream — no regress test diffs the version() banner (the 3
 // callers only regex-match platform substrings like 'linux-gnu'), and
 // server_version / server_version_num are unchanged.
+//
+// macOS (unchanged from the original baked constant):
+#[cfg(target_os = "macos")]
 pub const PG_VERSION_STR: &str =
     "pgrust 18.3 on aarch64-darwin, compiled by clang-21.0.0, 64-bit";
+// Linux aarch64:
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+pub const PG_VERSION_STR: &str =
+    "pgrust 18.3 on aarch64-linux-gnu, compiled by clang-21.0.0, 64-bit";
+// Linux x86_64:
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const PG_VERSION_STR: &str =
+    "pgrust 18.3 on x86_64-linux-gnu, compiled by clang-21.0.0, 64-bit";
+// Any other Linux arch:
+#[cfg(all(target_os = "linux", not(any(target_arch = "aarch64", target_arch = "x86_64"))))]
+pub const PG_VERSION_STR: &str =
+    "pgrust 18.3 on unknown-linux-gnu, compiled by clang-21.0.0, 64-bit";
+// Any other (non-macOS, non-Linux) target — keep the banner well-formed:
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub const PG_VERSION_STR: &str =
+    "pgrust 18.3 on unknown, compiled by clang-21.0.0, 64-bit";
 
 /// `pgsql_version(PG_FUNCTION_ARGS)` (version.c) —
 /// `PG_RETURN_TEXT_P(cstring_to_text(PG_VERSION_STR))`.
