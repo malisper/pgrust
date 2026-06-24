@@ -1,0 +1,36 @@
+[package]
+name = "hstore"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "hstore"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../_support/mcx" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+datum = { path = "../../_support/types/datum" }
+fmgr = { path = "../../_support/types/fmgr" }
+types_tuple = { path = "../../_support/types/types_tuple" }
+
+utils_error = { path = "../../backend/utils/utils_error" }
+arrayfuncs = { path = "../../backend/utils/adt/arrayfuncs" }
+varlena = { path = "../../backend/utils/adt/varlena" }
+varlena_seams = { path = "../../backend/utils/adt/varlena_seams" }
+json_seams = { path = "../../backend/utils/adt/json_seams" }
+jsonapi = { path = "../../common/jsonapi" }
+hashfn = { path = "../../common/hashfn" }
+types_jsonb = { path = "../../_support/types/types_jsonb" }
+jsonb_util = { path = "../../backend/utils/adt/jsonb_util" }
+heaptuple = { path = "../../backend/access/common/heaptuple" }
+fmgr_core = { path = "../../backend/utils/fmgr/fmgr_core" }
+
+# Seams (consulted, not owned):
+dfmgr_seams = { path = "../../backend/utils/fmgr/dfmgr_seams" }
+typcache_seams = { path = "../../backend/utils/cache/typcache_seams" }
+lsyscache_seams = { path = "../../backend/utils/cache/lsyscache_seams" }
+fmgr_seams = { path = "../../backend/utils/fmgr/fmgr_seams" }
+small1_seams = { path = "../../backend/parser/small1_seams" }

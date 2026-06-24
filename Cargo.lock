@@ -9383,6 +9383,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "hstore"
+version = "0.0.0"
+dependencies = [
+ "arrayfuncs",
+ "datum",
+ "dfmgr_seams",
+ "fmgr",
+ "fmgr_core",
+ "fmgr_seams",
+ "hashfn",
+ "heaptuple",
+ "json_seams",
+ "jsonapi",
+ "jsonb_util",
+ "lsyscache_seams",
+ "mcx",
+ "small1_seams",
+ "typcache_seams",
+ "types_core",
+ "types_error",
+ "types_jsonb",
+ "types_tuple",
+ "utils_error",
+ "varlena",
+ "varlena_seams",
+]
+
+[[package]]
 name = "hyperloglog"
 version = "0.0.0"
 dependencies = [
@@ -10227,6 +10255,7 @@ dependencies = [
  "heaptoast",
  "heaptuple",
  "hio",
+ "hstore",
  "import",
  "incremental",
  "index",

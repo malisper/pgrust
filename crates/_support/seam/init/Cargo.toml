@@ -28,6 +28,7 @@ pg_prewarm = { path = "../../../contrib/pg_prewarm" }
 pg_stat_statements = { path = "../../../contrib/pg_stat_statements" }
 uuid_ossp = { path = "../../../contrib/uuid_ossp" }
 citext = { path = "../../../contrib/citext" }
+hstore = { path = "../../../contrib/hstore" }
 detoast = { path = "../../../backend/access/common/detoast" }
 toast_compression = { path = "../../../backend/access/common/toast_compression" }
 heaptuple = { path = "../../../backend/access/common/heaptuple" }

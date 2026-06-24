@@ -18,6 +18,7 @@ pub fn init_all() {
     pg_stat_statements::init_seams();
     uuid_ossp::init_seams();
     citext::init_seams();
+    hstore::init_seams();
     shell_archive::init_seams();
     commands_async::init_seams();
     test_regress::init_seams();
