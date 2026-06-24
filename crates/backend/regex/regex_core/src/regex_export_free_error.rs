@@ -65,6 +65,14 @@ pub fn seam_pg_regcomp(
     // `RegexT` does not borrow from this context, so a transient context that
     // is dropped here is sufficient to charge the compile-time allocations.
     let cx = MemoryContext::new("RegexpCompileContext");
+    // C: pg_regcomp opens with `pg_set_regex_collation(collation)`, which
+    // ereport(ERROR)s (longjmp) for an unresolved / nondeterministic collation —
+    // a real PgError, not a regex compile (`REG_*`) code. Run it here so that
+    // error propagates verbatim as the seam's `Err` (the in-crate `pg_regcomp`
+    // returns only `RegResult`, which would otherwise flatten it to REG_INVARG ->
+    // "invalid argument to regex function"). It also primes the per-backend
+    // `REGEX_LOCALE_STATE` that the compile reads.
+    crate::regex_locale::pg_set_regex_collation(cx.mcx(), collation)?;
     match crate::regex_compile::pg_regcomp(cx.mcx(), pattern, cflags, collation) {
         Ok(re) => {
             let re_nsub = re.re_nsub;

@@ -42,7 +42,7 @@ use pg_locale_seams as locale_seam;
 use mbutils_seams as mb_seam;
 use ::mcx::{Mcx, PgVec};
 use ::pgstrcasecmp::{pg_ascii_tolower, pg_tolower};
-use ::types_core::{Oid, C_COLLATION_OID};
+use ::types_core::{InvalidOid, Oid};
 use ::types_error::{make_sqlstate, PgError, PgResult, SqlState};
 use ::locale::{CollProvider, PgLocaleStruct};
 use ::types_wchar::encoding::PG_UTF8;
@@ -420,14 +420,35 @@ fn match_text(
 
 /// C: `MB_MatchText` -- `like_match.c` compiled for multibyte characters
 /// (`NextChar` via `pg_mblen_with_len`, no case folding).
-pub fn MB_MatchText(t: &[u8], p: &[u8], locale: Locale<'_>, mcx: Mcx<'_>) -> PgResult<i32> {
-    match_text(t, p, locale, C_COLLATION_OID, NextCharMode::MultiByte, CaseFold::None, mcx)
+///
+/// `collation` is the OID that produced `locale` (or `InvalidOid` for the
+/// locale-NULL paths). It is threaded to `pg_strncoll` for the nondeterministic
+/// branch, matching C's `MatchText(..., locale)` (the seam re-keys the locale by
+/// OID). Hardcoding it to `C_COLLATION_OID` would mis-route the nondeterministic
+/// comparison to the 'c' provider.
+pub fn MB_MatchText(
+    t: &[u8],
+    p: &[u8],
+    locale: Locale<'_>,
+    collation: Oid,
+    mcx: Mcx<'_>,
+) -> PgResult<i32> {
+    match_text(t, p, locale, collation, NextCharMode::MultiByte, CaseFold::None, mcx)
 }
 
 /// C: `SB_MatchText` -- `like_match.c` compiled for single-byte characters
 /// (`NextChar == NextByte`, no case folding).
-pub fn SB_MatchText(t: &[u8], p: &[u8], locale: Locale<'_>, mcx: Mcx<'_>) -> PgResult<i32> {
-    match_text(t, p, locale, C_COLLATION_OID, NextCharMode::SingleByte, CaseFold::None, mcx)
+///
+/// `collation` is threaded for the nondeterministic `pg_strncoll` branch, as for
+/// [`MB_MatchText`].
+pub fn SB_MatchText(
+    t: &[u8],
+    p: &[u8],
+    locale: Locale<'_>,
+    collation: Oid,
+    mcx: Mcx<'_>,
+) -> PgResult<i32> {
+    match_text(t, p, locale, collation, NextCharMode::SingleByte, CaseFold::None, mcx)
 }
 
 /// C: `SB_IMatchText` -- `like_match.c` compiled for single-byte case-insensitive
@@ -454,8 +475,17 @@ pub fn SB_IMatchText(
 
 /// C: `UTF8_MatchText` -- `like_match.c` compiled for UTF-8 with the fast
 /// `NextChar` (no case folding).
-pub fn UTF8_MatchText(t: &[u8], p: &[u8], locale: Locale<'_>, mcx: Mcx<'_>) -> PgResult<i32> {
-    match_text(t, p, locale, C_COLLATION_OID, NextCharMode::Utf8, CaseFold::None, mcx)
+///
+/// `collation` is threaded for the nondeterministic `pg_strncoll` branch, as for
+/// [`MB_MatchText`].
+pub fn UTF8_MatchText(
+    t: &[u8],
+    p: &[u8],
+    locale: Locale<'_>,
+    collation: Oid,
+    mcx: Mcx<'_>,
+) -> PgResult<i32> {
+    match_text(t, p, locale, collation, NextCharMode::Utf8, CaseFold::None, mcx)
 }
 
 // ===========================================================================
@@ -587,11 +617,11 @@ pub fn GenericMatchText(s: &[u8], p: &[u8], collation: Oid, mcx: Mcx<'_>) -> PgR
     let locale = locale_seam::pg_newlocale_from_collation::call(mcx, collation)?;
 
     if mb_seam::pg_database_encoding_max_length::call() == 1 {
-        SB_MatchText(s, p, Some(&locale), mcx)
+        SB_MatchText(s, p, Some(&locale), collation, mcx)
     } else if mb_seam::get_database_encoding::call() == PG_UTF8 {
-        UTF8_MatchText(s, p, Some(&locale), mcx)
+        UTF8_MatchText(s, p, Some(&locale), collation, mcx)
     } else {
-        MB_MatchText(s, p, Some(&locale), mcx)
+        MB_MatchText(s, p, Some(&locale), collation, mcx)
     }
 }
 
@@ -622,11 +652,13 @@ pub fn Generic_Text_IC_like(str: &[u8], pat: &[u8], collation: Oid, mcx: Mcx<'_>
         // C: pat = lower(collation, pat); str = lower(collation, str).
         let lpat = formatting::case::str_tolower(mcx, pat, collation)?;
         let lstr = formatting::case::str_tolower(mcx, str, collation)?;
-        // C passes locale NULL to the lowered-text match.
+        // C passes locale NULL to the lowered-text match (and collation 0 in
+        // this repo's seam: the lowered, deterministic comparison never reaches
+        // the nondeterministic `pg_strncoll` branch).
         if mb_seam::get_database_encoding::call() == PG_UTF8 {
-            UTF8_MatchText(&lstr, &lpat, None, mcx)
+            UTF8_MatchText(&lstr, &lpat, None, InvalidOid, mcx)
         } else {
-            MB_MatchText(&lstr, &lpat, None, mcx)
+            MB_MatchText(&lstr, &lpat, None, InvalidOid, mcx)
         }
     } else {
         SB_IMatchText(str, pat, &locale, collation, mcx)
@@ -674,12 +706,12 @@ pub fn textnlike(str: &[u8], pat: &[u8], collation: Oid, mcx: Mcx<'_>) -> PgResu
 /// C: `bytealike` (like.c:325) -- `bytea LIKE bytea`.  No collation: matches with
 /// a NULL locale.
 pub fn bytealike(str: &[u8], pat: &[u8], mcx: Mcx<'_>) -> PgResult<bool> {
-    Ok(SB_MatchText(str, pat, None, mcx)? == LIKE_TRUE)
+    Ok(SB_MatchText(str, pat, None, InvalidOid, mcx)? == LIKE_TRUE)
 }
 
 /// C: `byteanlike` (like.c:346) -- `bytea NOT LIKE bytea`.
 pub fn byteanlike(str: &[u8], pat: &[u8], mcx: Mcx<'_>) -> PgResult<bool> {
-    Ok(SB_MatchText(str, pat, None, mcx)? != LIKE_TRUE)
+    Ok(SB_MatchText(str, pat, None, InvalidOid, mcx)? != LIKE_TRUE)
 }
 
 /// C: `nameiclike` (like.c:371) -- `name ILIKE text`.

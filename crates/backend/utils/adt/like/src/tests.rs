@@ -16,7 +16,7 @@ use super::*;
 use pg_locale_seams as locale_seam;
 use mbutils_seams as mb_seam;
 use ::mcx::Mcx;
-use ::types_core::Oid;
+use ::types_core::{C_COLLATION_OID, InvalidOid, Oid};
 use ::locale::{CollProvider, PgLocale, PgLocaleStruct};
 
 static INIT: Once = Once::new();
@@ -43,7 +43,7 @@ fn install_seams() {
         mb_seam::pg_database_encoding_max_length::set(|| 1);
         mb_seam::get_database_encoding::set(|| 0);
         // Single-byte: each byte is its own character.
-        mb_seam::pg_mblen_range::set(|_s| 1);
+        mb_seam::pg_mblen_range::set(|_s| Ok(1));
         // C collation resolves without catalog access.
         locale_seam::pg_newlocale_from_collation::set(new_c_locale);
         // Deterministic C locale never reaches pg_strncoll; loud-panic if it does.
@@ -74,8 +74,8 @@ fn sb_literal_match() {
     install_seams();
     let c = ctx();
     let m = c.mcx();
-    assert_eq!(SB_MatchText(b"abc", b"abc", NULL, m).unwrap(), LIKE_TRUE);
-    assert_eq!(SB_MatchText(b"abc", b"abd", NULL, m).unwrap(), LIKE_FALSE);
+    assert_eq!(SB_MatchText(b"abc", b"abc", NULL, InvalidOid, m).unwrap(), LIKE_TRUE);
+    assert_eq!(SB_MatchText(b"abc", b"abd", NULL, InvalidOid, m).unwrap(), LIKE_FALSE);
 }
 
 #[test]
@@ -83,8 +83,8 @@ fn sb_percent_fast_path_matches_everything() {
     install_seams();
     let c = ctx();
     let m = c.mcx();
-    assert_eq!(SB_MatchText(b"", b"%", NULL, m).unwrap(), LIKE_TRUE);
-    assert_eq!(SB_MatchText(b"anything", b"%", NULL, m).unwrap(), LIKE_TRUE);
+    assert_eq!(SB_MatchText(b"", b"%", NULL, InvalidOid, m).unwrap(), LIKE_TRUE);
+    assert_eq!(SB_MatchText(b"anything", b"%", NULL, InvalidOid, m).unwrap(), LIKE_TRUE);
 }
 
 #[test]
@@ -92,10 +92,10 @@ fn sb_underscore_matches_single_char() {
     install_seams();
     let c = ctx();
     let m = c.mcx();
-    assert_eq!(SB_MatchText(b"a", b"_", NULL, m).unwrap(), LIKE_TRUE);
-    assert_eq!(SB_MatchText(b"", b"_", NULL, m).unwrap(), LIKE_ABORT);
-    assert_eq!(SB_MatchText(b"ab", b"a_", NULL, m).unwrap(), LIKE_TRUE);
-    assert_eq!(SB_MatchText(b"a", b"a_", NULL, m).unwrap(), LIKE_ABORT);
+    assert_eq!(SB_MatchText(b"a", b"_", NULL, InvalidOid, m).unwrap(), LIKE_TRUE);
+    assert_eq!(SB_MatchText(b"", b"_", NULL, InvalidOid, m).unwrap(), LIKE_ABORT);
+    assert_eq!(SB_MatchText(b"ab", b"a_", NULL, InvalidOid, m).unwrap(), LIKE_TRUE);
+    assert_eq!(SB_MatchText(b"a", b"a_", NULL, InvalidOid, m).unwrap(), LIKE_ABORT);
 }
 
 #[test]
@@ -103,12 +103,12 @@ fn sb_percent_wildcards() {
     install_seams();
     let c = ctx();
     let m = c.mcx();
-    assert_eq!(SB_MatchText(b"abc", b"a%c", NULL, m).unwrap(), LIKE_TRUE);
-    assert_eq!(SB_MatchText(b"abc", b"a%d", NULL, m).unwrap(), LIKE_ABORT);
-    assert_eq!(SB_MatchText(b"abcde", b"%cd%", NULL, m).unwrap(), LIKE_TRUE);
-    assert_eq!(SB_MatchText(b"abc", b"abc%", NULL, m).unwrap(), LIKE_TRUE);
-    assert_eq!(SB_MatchText(b"abc", b"%_", NULL, m).unwrap(), LIKE_TRUE);
-    assert_eq!(SB_MatchText(b"", b"%_", NULL, m).unwrap(), LIKE_ABORT);
+    assert_eq!(SB_MatchText(b"abc", b"a%c", NULL, InvalidOid, m).unwrap(), LIKE_TRUE);
+    assert_eq!(SB_MatchText(b"abc", b"a%d", NULL, InvalidOid, m).unwrap(), LIKE_ABORT);
+    assert_eq!(SB_MatchText(b"abcde", b"%cd%", NULL, InvalidOid, m).unwrap(), LIKE_TRUE);
+    assert_eq!(SB_MatchText(b"abc", b"abc%", NULL, InvalidOid, m).unwrap(), LIKE_TRUE);
+    assert_eq!(SB_MatchText(b"abc", b"%_", NULL, InvalidOid, m).unwrap(), LIKE_TRUE);
+    assert_eq!(SB_MatchText(b"", b"%_", NULL, InvalidOid, m).unwrap(), LIKE_ABORT);
 }
 
 #[test]
@@ -116,9 +116,9 @@ fn sb_end_of_text_trailing_percent() {
     install_seams();
     let c = ctx();
     let m = c.mcx();
-    assert_eq!(SB_MatchText(b"abc", b"abc%%%", NULL, m).unwrap(), LIKE_TRUE);
-    assert_eq!(SB_MatchText(b"abc", b"abcd", NULL, m).unwrap(), LIKE_ABORT);
-    assert_eq!(SB_MatchText(b"abcd", b"abc", NULL, m).unwrap(), LIKE_FALSE);
+    assert_eq!(SB_MatchText(b"abc", b"abc%%%", NULL, InvalidOid, m).unwrap(), LIKE_TRUE);
+    assert_eq!(SB_MatchText(b"abc", b"abcd", NULL, InvalidOid, m).unwrap(), LIKE_ABORT);
+    assert_eq!(SB_MatchText(b"abcd", b"abc", NULL, InvalidOid, m).unwrap(), LIKE_FALSE);
 }
 
 #[test]
@@ -126,9 +126,9 @@ fn sb_escape_literal() {
     install_seams();
     let c = ctx();
     let m = c.mcx();
-    assert_eq!(SB_MatchText(b"50%", b"50\\%", NULL, m).unwrap(), LIKE_TRUE);
-    assert_eq!(SB_MatchText(b"50x", b"50\\%", NULL, m).unwrap(), LIKE_FALSE);
-    assert_eq!(SB_MatchText(b"a\\b", b"a\\\\b", NULL, m).unwrap(), LIKE_TRUE);
+    assert_eq!(SB_MatchText(b"50%", b"50\\%", NULL, InvalidOid, m).unwrap(), LIKE_TRUE);
+    assert_eq!(SB_MatchText(b"50x", b"50\\%", NULL, InvalidOid, m).unwrap(), LIKE_FALSE);
+    assert_eq!(SB_MatchText(b"a\\b", b"a\\\\b", NULL, InvalidOid, m).unwrap(), LIKE_TRUE);
 }
 
 #[test]
@@ -136,7 +136,7 @@ fn sb_escape_at_end_errors() {
     install_seams();
     let c = ctx();
     let m = c.mcx();
-    let err = SB_MatchText(b"abc", b"ab\\", NULL, m).unwrap_err();
+    let err = SB_MatchText(b"abc", b"ab\\", NULL, InvalidOid, m).unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_INVALID_ESCAPE_SEQUENCE);
     assert_eq!(err.message(), "LIKE pattern must not end with escape character");
 }
@@ -146,7 +146,7 @@ fn sb_escape_at_end_after_percent_errors() {
     install_seams();
     let c = ctx();
     let m = c.mcx();
-    let err = SB_MatchText(b"abc", b"%\\", NULL, m).unwrap_err();
+    let err = SB_MatchText(b"abc", b"%\\", NULL, InvalidOid, m).unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_INVALID_ESCAPE_SEQUENCE);
 }
 

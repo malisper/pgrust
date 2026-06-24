@@ -29,8 +29,8 @@ use crate::regex_consts::*;
 use crate::regex_error::{RegError, RegResult};
 use crate::regex_foundation::{newcvec, subcolor, subcolorcvec, subcoloronechr};
 use crate::regex_locale::{
-    allcases, casecmp, cclasscvec, cmp, eclass, element, lookupcclass, pg_set_regex_collation,
-    pg_wc_isalnum, pg_wc_isalpha, pg_wc_isdigit, pg_wc_isspace, range,
+    allcases, casecmp, cclasscvec, cmp, eclass, element, lookupcclass, pg_wc_isalnum,
+    pg_wc_isalpha, pg_wc_isdigit, pg_wc_isspace, range,
 };
 use crate::regex_nfa::{
     cloneouts, colorcomplement, compact, copyouts, cparc, delsub, dropstate, dupnfa, dupnfa_cross,
@@ -3218,6 +3218,15 @@ fn empty_colormap() -> ColorMap {
 /// [`regex::RegexCompiled`] carrier); the non-`REG_OKAY` arm is the
 /// `RegResult` error.
 ///
+/// NOTE on collation: in C, pg_regcomp opens with `pg_set_regex_collation`,
+/// which `ereport(ERROR)`s for an unresolved / nondeterministic collation and
+/// longjmps out — that error is NOT a regex compile (`REG_*`) code. The seam
+/// adapter [`crate::regex_export_free_error::seam_pg_regcomp`] performs that step
+/// just before this call so its `PgResult` Err escapes verbatim (rather than
+/// being flattened to `REG_INVARG`, which would mis-report "invalid argument to
+/// regex function"). By the time control reaches here the per-backend
+/// `REGEX_LOCALE_STATE` is already selected and read below during the NFA build.
+///
 /// `mcx` is the allocation context charged for all compile-time allocations.
 pub fn pg_regcomp<'mcx>(
     mcx: Mcx<'mcx>,
@@ -3233,11 +3242,8 @@ pub fn pg_regcomp<'mcx>(
         return Err(RegError(REG_INVARG));
     }
 
-    // Initialize locale-dependent support (C: pg_set_regex_collation(mcx, collation)).
-    // A collation-setup failure is mapped to REG_INVARG at this boundary.
-    if pg_set_regex_collation(mcx, collation).is_err() {
-        return Err(RegError(REG_INVARG));
-    }
+    // Locale-dependent support (C: pg_set_regex_collation(collation)) was set up
+    // by the seam adapter ahead of this call; see the NOTE above.
 
     // Build the colormap + NFA (C: initcm(v, &cm); v->nfa = newnfa(v, &cm, NULL)).
     let mut cm = empty_colormap();
