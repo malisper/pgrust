@@ -2078,6 +2078,19 @@ fn xl_routine_default() -> XLogReaderRoutineHandle {
     XLogReaderRoutineHandle::default()
 }
 
+/// `XL_ROUTINE(.page_read = logical_read_xlog_page, .segment_open =
+/// WalSndSegmentOpen, .segment_close = wal_segment_close)` — the walsender's
+/// streaming XLogReaderRoutine (the page-read waits for new WAL through
+/// `WalSndWaitForWal`, processing replies/keepalives, vs the default local-xlog
+/// routine's bare busy-wait). The concrete routine lives in xlogutils, keyed off
+/// this non-default handle (the C `XLogReaderRoutine *` the walsender passes);
+/// `xlog_reader_routine_for_handle` maps a non-zero handle to the walsnd
+/// routine.
+#[inline]
+fn xl_routine_walsnd() -> XLogReaderRoutineHandle {
+    XLogReaderRoutineHandle(1)
+}
+
 /* =========================================================================
  * Small owned helpers (not C functions)
  * ========================================================================= */
@@ -2330,6 +2343,46 @@ pub fn init_seams() {
     ::logical_seams::UpdateDecodingStats::set(|ctx| {
         UpdateDecodingStats(ctx)
     });
+
+    // The walsender-facing decoding-context lifecycle seams (the walsender owns
+    // the returned ctx for its streaming loop, mirroring C's file-static
+    // `logical_decoding_ctx`). These avoid a walsender -> logical.c dependency
+    // cycle (logical.c depends on walsender_seams for the write callbacks).
+    ::logical_seams::check_logical_decoding_requirements::set(|wal_level, db| {
+        CheckLogicalDecodingRequirements(wal_level, db)
+    });
+    ::logical_seams::create_decoding_context_walsnd::set(
+        create_decoding_context_walsnd_seam,
+    );
+    ::logical_seams::free_decoding_context::set(|ctx| FreeDecodingContext(ctx));
+}
+
+/// Seam body for [`logical_seams::create_decoding_context_walsnd`]. Registers the
+/// walsender's plugin options, then `CreateDecodingContext(cmd->startpoint,
+/// cmd->options, false, XL_ROUTINE(.page_read = logical_read_xlog_page, ...),
+/// WalSndPrepareWrite, WalSndWriteData, WalSndUpdateProgress)` (walsender.c's
+/// `StartLogicalReplication`). The three writer function pointers collapse to the
+/// `OutputWriter::WalSnd` enum (#351); `prepare_write`/`do_write`/
+/// `update_progress` are all present on the walsender path.
+fn create_decoding_context_walsnd_seam(
+    start_lsn: XLogRecPtr,
+    options: Vec<(String, Option<String>)>,
+    wal_segment_size: i32,
+    my_database_id: Oid,
+) -> PgResult<Box<LogicalDecodingContext>> {
+    let opts_handle = ::logical_seams::register_output_plugin_options(options);
+    CreateDecodingContext(
+        start_lsn,
+        opts_handle,
+        false, /* fast_forward */
+        xl_routine_walsnd(),
+        true,  /* prepare_write present (WalSndPrepareWrite) */
+        true,  /* do_write present (WalSndWriteData) */
+        true,  /* update_progress present (WalSndUpdateProgress) */
+        ::types_logical::OutputWriter::WalSnd,
+        wal_segment_size,
+        my_database_id,
+    )
 }
 
 /// Seam thunk: the inward seam carries only the callback; we resolve

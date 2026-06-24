@@ -100,6 +100,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `WalSndWaitForWal(loc)` (walsender.c) — the wait the walsender's
+    /// `logical_read_xlog_page` page-read callback performs to ensure enough WAL
+    /// is available, processing standby replies / keepalives / config reloads
+    /// while it sleeps. Returns the current flush position (`>= loc` once WAL is
+    /// there, or `< loc` when shutting down). Reached from the walsnd
+    /// XLogReaderRoutine in xlogutils; owned by walsender.
+    pub fn wal_snd_wait_for_wal(loc: XLogRecPtr) -> XLogRecPtr
+);
+
+seam_core::seam!(
     /// `bool am_walsender` (walsender.c) — true if this process is a WAL
     /// sender. A backend-local global read.
     pub fn am_walsender() -> bool

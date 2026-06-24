@@ -99,6 +99,46 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CheckLogicalDecodingRequirements()` (logical.c:111) — verify `wal_level
+    /// >= logical`, a non-template/valid database, and `max_replication_slots >
+    /// 0`. Reached from the walsender's `StartLogicalReplication`. `wal_level`
+    /// and `my_database_id` are the caller's `wal_level` GUC and `MyDatabaseId`
+    /// (no ambient globals at the seam).
+    pub fn check_logical_decoding_requirements(
+        wal_level: ::types_logical::WalLevel,
+        my_database_id: Oid,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `CreateDecodingContext(start_lsn, options, false, XL_ROUTINE(...),
+    /// WalSndPrepareWrite, WalSndWriteData, WalSndUpdateProgress)` (logical.c:499)
+    /// for the walsender (`OutputWriter::WalSnd`) path. The walsender owns the
+    /// returned `Box<LogicalDecodingContext>` for the streaming loop (C's
+    /// file-static `logical_decoding_ctx`). `options` are the plugin
+    /// `(key, value)` DefElem pairs the walsender deconstructed from
+    /// `cmd->options`; `wal_segment_size`/`my_database_id` are the caller's
+    /// `wal_segment_size` GUC and `MyDatabaseId`. `walsnd_routine` selects the
+    /// walsender page-read routine (`logical_read_xlog_page` →
+    /// `WalSndWaitForWal`) vs the default local-xlog routine. Can `ereport`.
+    pub fn create_decoding_context_walsnd(
+        start_lsn: XLogRecPtr,
+        options: Vec<(alloc::string::String, Option<alloc::string::String>)>,
+        wal_segment_size: i32,
+        my_database_id: Oid,
+    ) -> PgResult<alloc::boxed::Box<LogicalDecodingContext>>
+);
+
+seam_core::seam!(
+    /// `FreeDecodingContext(ctx)` (logical.c:679) — call the output plugin's
+    /// shutdown callback and free the reorder buffer / snapshot builder /
+    /// xlogreader / context. The walsender calls this after its streaming loop.
+    pub fn free_decoding_context(
+        ctx: &mut LogicalDecodingContext,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// Re-enter the crate's ReorderBuffer-driven `*_cb_wrapper` selected by
     /// `cb`, with `ctx == cache->private_data` (the runtime resolves the live
     /// decoding context). The reorderbuffer owner's trampolines call this.

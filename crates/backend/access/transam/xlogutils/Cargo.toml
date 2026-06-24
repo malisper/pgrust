@@ -32,3 +32,4 @@ relcache_seams = { path = "../../../utils/cache/relcache_seams" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 pgsleep_seams = { path = "../../../../port/pgsleep_seams" }
 common_relpath_seams = { path = "../../../../common/common_relpath_seams" }
+walsender_seams = { path = "../../../replication/walsender_seams" }

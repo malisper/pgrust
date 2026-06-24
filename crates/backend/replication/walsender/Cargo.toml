@@ -38,6 +38,10 @@ repl_scanner_seams = { path = "../repl_scanner_seams" }
 walreceiverfuncs_seams = { path = "../walreceiverfuncs_seams" }
 slotsync_seams = { path = "../logical/slotsync_seams" }
 logical_seams = { path = "../logical/logical_seams" }
+decode_seams = { path = "../logical/decode_seams" }
+xlogreader_seams = { path = "../../access/transam/xlogreader_seams" }
+types_logical = { path = "../../../_support/types/types_logical" }
+mcxt_seams = { path = "../../utils/mmgr/mcxt_seams" }
 replication_basebackup_seams = { path = "../replication_basebackup_seams" }
 lmgr_proc_seams = { path = "../../storage/lmgr/lmgr_proc_seams" }
 procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }

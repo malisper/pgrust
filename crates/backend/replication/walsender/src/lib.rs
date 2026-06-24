@@ -194,6 +194,10 @@ pub fn init_seams() {
         crate::logical::WalSndUpdateProgress(loc, xid, skipped);
         Ok(())
     });
+
+    // The walsnd XLogReaderRoutine's `logical_read_xlog_page` page-read (in
+    // xlogutils) waits for future WAL through this seam.
+    ws::wal_snd_wait_for_wal::set(crate::mainloop::WalSndWaitForWal);
 }
 
 // ---------------------------------------------------------------------------
@@ -302,6 +306,12 @@ pub(crate) fn pq_putmessage_noblock_output_message(msgtype: u8) {
 /// `pq_putmessage_noblock('c', NULL, 0)` — send CopyDone.
 pub(crate) fn pq_putmessage_noblock_copydone() {
     pq::pq_putmessage_noblock::call(b'c', &[]);
+}
+
+/// `pq_putmessage_noblock(msgtype, data, len)` — send an arbitrary message body
+/// (the logical send path frames its CopyData `'d'` packet out of `ctx->out`).
+pub(crate) fn pq_putmessage_noblock_bytes(msgtype: u8, data: &[u8]) {
+    pq::pq_putmessage_noblock::call(msgtype, data);
 }
 
 /// `pq_beginmessage(&buf, PqMsg_CopyBothResponse); pq_sendbyte(&buf, 0);

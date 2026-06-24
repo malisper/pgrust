@@ -3,11 +3,13 @@
 //!
 //! 1:1 port of `XLogSendLogical`, `WalSndPrepareWrite`, `WalSndWriteData`,
 //! `ProcessPendingWrites`, `WalSndUpdateProgress`.  The caught-up /
-//! pending-write / progress control flow is ported here; the decoding context,
-//! the output-plugin StringInfo, the `XLogReadRecord` step, and the message
-//! framing are owned by the unported logical-decoding / xlogreader / libpq
-//! subsystems and reached through their seams (or a precise panic where the
-//! whole step is that subsystem's logic).
+//! pending-write / progress control flow is ported here, and the
+//! decoding-context-touching steps are wired: `XLogSendLogical` reads + drives
+//! `LogicalDecodingProcessRecord` over the live `logical_decoding_ctx` (owned by
+//! `core::with_logical_decoding_ctx`), and the write/progress callbacks frame the
+//! `'w'` CopyData header into the output plugin's `ctx->out` StringInfo (reached
+//! through the parked decoding ctx, the C `rb->private_data`) and put it out with
+//! `pq_putmessage_noblock('d', ...)`.
 
 #![allow(non_snake_case)]
 
@@ -18,6 +20,9 @@ use crate::core::{
     SYNC_STANDBY_DEFINED, WALSND_LOGICAL_LAG_TRACK_INTERVAL_MS,
 };
 use crate::{timestamp, xlog, xlogrecovery};
+use ::mcxt_seams as mcxt;
+
+extern crate alloc;
 
 // Socket wakeup bits + wait event.
 const WL_SOCKET_READABLE: u32 = 1 << 1;
@@ -194,34 +199,90 @@ pub fn WalSndUpdateProgress(lsn: XLogRecPtr, _xid: TransactionId, skipped_xact: 
 }
 
 // ---------------------------------------------------------------------------
-// The logical-decoding-context-touching steps (owned by the logical decoding /
-// xlogreader vertical).
+// The logical-decoding-context-touching steps.
+//
+// `XLogSendLogical` runs as the WalSndLoop send-data callback: the ctx cell is
+// *not* mutably borrowed at that point (no decode is in flight), so the read +
+// process + EndRecPtr steps borrow it through `with_logical_decoding_ctx`.
+//
+// The write / progress callbacks (`WalSndPrepareWrite` / `WalSndWriteData` /
+// `WalSndUpdateProgress`) instead fire *inside* `LogicalDecodingProcessRecord`,
+// while the ctx cell is already borrowed — so they reach the *same* ctx through
+// the parked pointer (`logical_seams::with_current_decoding_ctx`, the C
+// `rb->private_data`), never re-borrowing the cell.
 // ---------------------------------------------------------------------------
 
-/// `record = XLogReadRecord(ctx->reader, &errm); if (record) LogicalDecodingProcessRecord(...)`.
+/// `record = XLogReadRecord(ctx->reader, &errm); if (record)
+/// LogicalDecodingProcessRecord(logical_decoding_ctx, logical_decoding_ctx->reader)`.
+/// Returns whether a record was read (so the caller advances `sentPtr`).
 fn xlog_read_record_logical_and_process() -> bool {
-    panic!(
-        "XLogSendLogical record read: depends on unported XLogReadRecord + \
-         LogicalDecodingProcessRecord"
-    );
+    use ::xlogreader_seams as xlogreader;
+    use ::decode_seams as decode;
+
+    let reader = crate::core::with_logical_decoding_ctx(|ctx| ctx.reader);
+    let read = xlogreader::XLogReadRecord::call(reader);
+
+    // xlog record was invalid.
+    if let Some(errm) = read.err {
+        utils_error::ereport(types_error::ERROR)
+            .errmsg(alloc::format!(
+                "could not find record while sending logically-decoded data: {errm}"
+            ))
+            .finish(types_error::ErrorLocation::new(
+                "walsender.c",
+                0,
+                "XLogSendLogical",
+            ))
+            .expect("ereport(ERROR) logical record read");
+    }
+
+    if read.record {
+        crate::core::with_logical_decoding_ctx(|ctx| {
+            let reader = ctx.reader;
+            decode::LogicalDecodingProcessRecord::call(ctx, reader)
+        })
+        .expect("LogicalDecodingProcessRecord");
+        return true;
+    }
+    false
 }
 
 /// `ctx->reader->EndRecPtr`.
 fn logical_decoding_ctx_end_rec_ptr() -> XLogRecPtr {
-    panic!("XLogSendLogical: depends on unported LogicalDecodingContext->reader->EndRecPtr");
+    use ::xlogreader_seams as xlogreader;
+    let reader = crate::core::with_logical_decoding_ctx(|ctx| ctx.reader);
+    xlogreader::reader_EndRecPtr::call(reader)
 }
 
-/// `ctx->end_xact` flag set during the output-plugin callback.
+/// `ctx->end_xact` flag set during the output-plugin callback.  Read from the
+/// parked decoding ctx (the write/progress callbacks fire inside the decode
+/// scope).
 fn decoding_ctx_end_xact() -> bool {
-    panic!("WalSndUpdateProgress: depends on unported LogicalDecodingContext->end_xact");
+    ::logical_seams::with_current_decoding_ctx(|ctx| ctx.end_xact)
 }
 
-/// Build the `'w'` header into `ctx->out` (the output-plugin StringInfo).
-fn walsnd_prepare_write_emit(_lsn: XLogRecPtr) {
-    panic!("WalSndPrepareWrite: depends on unported LogicalDecodingContext->out framing");
+/// Build the `'w'` header into `ctx->out` (the output-plugin StringInfo):
+/// `resetStringInfo(ctx->out); pq_sendbyte('w'); pq_sendint64(lsn);
+/// pq_sendint64(lsn); pq_sendint64(0 /* sendtime, filled later */)`.
+fn walsnd_prepare_write_emit(lsn: XLogRecPtr) {
+    let out = ::logical_seams::with_current_decoding_ctx(|ctx| ctx.out);
+    mcxt::store_reset_string_info(out);
+    mcxt::store_append_string_info(out, &[b'w']);
+    mcxt::store_append_string_info(out, &(lsn as i64).to_be_bytes()); // dataStart
+    mcxt::store_append_string_info(out, &(lsn as i64).to_be_bytes()); // walEnd
+    mcxt::store_append_string_info(out, &0i64.to_be_bytes()); // sendtime, filled later
 }
 
-/// Fill the send timestamp into `ctx->out` and `pq_putmessage_noblock('d', ...)`.
-fn walsnd_write_data_emit(_now: TimestampTz) {
-    panic!("WalSndWriteData: depends on unported LogicalDecodingContext->out CopyData send");
+/// Fill the send timestamp into `ctx->out` at offset `1 + 8 + 8` and
+/// `pq_putmessage_noblock('d', ctx->out->data, ctx->out->len)`.
+fn walsnd_write_data_emit(now: TimestampTz) {
+    let out = ::logical_seams::with_current_decoding_ctx(|ctx| ctx.out);
+    // memcpy(&ctx->out->data[1 + sizeof(int64) + sizeof(int64)], &now, 8).
+    let mut data = mcxt::store_read_string_info(out);
+    let off = 1 + 8 + 8;
+    if data.len() >= off + 8 {
+        data[off..off + 8].copy_from_slice(&(now as i64).to_be_bytes());
+    }
+    // pq_putmessage_noblock('d', ctx->out->data, ctx->out->len).
+    crate::pq_putmessage_noblock_bytes(b'd', &data);
 }

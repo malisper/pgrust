@@ -60,6 +60,7 @@ use bufmgr_seams as buf_seam;
 use fd_seams as fd_seam;
 use smgr_seams as smgr_seam;
 use common_relpath_seams as relpath_seam;
+use walsender_seams;
 
 /// `InvalidBuffer` (`storage/buf.h`) — zero.
 const InvalidBuffer: Buffer = 0;
@@ -762,6 +763,84 @@ fn wal_segment_open_cb(
     wal_segment_open(state, next_seg_no, *tli_p)
 }
 
+/// `XLogReaderRoutine->page_read` callback for the walsender's logical-decoding
+/// reader (`logical_read_xlog_page`, walsender.c). Identical to
+/// [`read_local_xlog_page`] except the wait for future WAL goes through
+/// `WalSndWaitForWal` (the seam), which processes standby replies / keepalives /
+/// config reloads while it sleeps and returns `< target+reqLen` when the
+/// walsender is shutting down (the C `return -1`). The timeline is the current
+/// flush/replay timeline; the historic-timeline (cascading-standby promotion)
+/// branch is not modeled here (matching the primary-decoding path the walsender
+/// streaming tests exercise — the same gap noted on the physical send path).
+pub fn logical_read_xlog_page(
+    state: &mut XLogReaderState<'_>,
+    targetPagePtr: XLogRecPtr,
+    reqLen: i32,
+    _targetRecPtr: XLogRecPtr,
+    cur_page: &mut [u8],
+) -> PgResult<i32> {
+    // flushptr = WalSndWaitForWal(targetPagePtr + reqLen);
+    let flushptr = walsender_seams::wal_snd_wait_for_wal::call(targetPagePtr + reqLen as u64);
+
+    // Fail if not enough (implies we are going to shut down).
+    if flushptr < targetPagePtr + reqLen as u64 {
+        return Ok(-1);
+    }
+
+    // Determine the current timeline (am_cascading_walsender on a standby; the
+    // insertion timeline on a primary). `XLogReadDetermineTimeline` wires the
+    // reader's currTLI/currTLIValidUntil/nextTLI from it.
+    let curr_tli: TimeLineID = if !xlog_seam::recovery_in_progress::call() {
+        // C uses GetWALInsertionTimeLine(); the flush TLI matches it on a
+        // primary that has finished recovery (the walsender only streams flushed
+        // WAL, so the insert and flush timelines are equal here).
+        xlog_seam::get_flush_rec_ptr::call().1
+    } else {
+        recovery_seam::get_xlog_replay_rec_ptr_tli::call().1
+    };
+
+    XLogReadDetermineTimeline(state, targetPagePtr, reqLen as u32, curr_tli)?;
+
+    let count: i32 = if targetPagePtr + XLOG_BLCKSZ as u64 <= flushptr {
+        // more than one block available
+        XLOG_BLCKSZ as i32
+    } else {
+        // part of the page available
+        (flushptr - targetPagePtr) as i32
+    };
+
+    // now actually read the data, we know it's there.
+    match xlog_seam::wal_read::call(targetPagePtr, count, curr_tli) {
+        WalReadOutcome::Ok(bytes) => {
+            let n = (count as usize).min(bytes.len()).min(cur_page.len());
+            cur_page[..n].copy_from_slice(&bytes[..n]);
+        }
+        WalReadOutcome::Error(errinfo) => {
+            WALReadRaiseError(&errinfo)?;
+        }
+    }
+
+    Ok(count)
+}
+
+/// The [`XLogPageReadCB`](::wal::rmgr::XLogPageReadCB) adapter for
+/// [`logical_read_xlog_page`] (the walsnd routine). Mirrors
+/// [`read_local_xlog_page_cb`]'s `readBuf` move-out/move-back dance.
+fn logical_read_xlog_page_cb(
+    state: &mut XLogReaderState<'_>,
+    target_page_ptr: XLogRecPtr,
+    req_len: i32,
+    target_rec_ptr: XLogRecPtr,
+) -> PgResult<i32> {
+    let mut buf = state
+        .readBuf
+        .take()
+        .expect("XLogReaderState.readBuf must be allocated before a page read");
+    let res = logical_read_xlog_page(state, target_page_ptr, req_len, target_rec_ptr, &mut buf[..]);
+    state.readBuf = Some(buf);
+    res
+}
+
 /// The [`XLogPageReadCB`](::wal::rmgr::XLogPageReadCB) adapter for
 /// [`read_local_xlog_page`]. The C callback takes `char *readBuf` as its last
 /// argument, which is the reader's own `state->readBuf`; in C the reader passes
@@ -976,9 +1055,21 @@ pub fn init_seams() {
     // bootstrap/2PC/SQL WAL readers forward). The handle is the C
     // `XLogReaderRoutine *`; the only routine the in-tree callers ever pass is
     // this stock one, so resolution is constant.
-    ::xlogreader_seams::xlog_reader_routine_for_handle::set(|_handle| {
+    ::xlogreader_seams::xlog_reader_routine_for_handle::set(|handle| {
+        // Handle 0 (the C `XLogReaderRoutine *` the bootstrap/2PC/SQL readers
+        // pass) -> the stock local-xlog routine. A non-zero handle is the
+        // walsender's `XL_ROUTINE(.page_read = logical_read_xlog_page, ...)`:
+        // its page-read waits for future WAL through `WalSndWaitForWal` so the
+        // streaming send loop keeps processing replies/keepalives. Segment
+        // open/close reuse the stock local-pg_wal handlers (correct for the
+        // non-historic primary timeline the streaming path uses).
+        let page_read = if handle.0 == 0 {
+            read_local_xlog_page_cb
+        } else {
+            logical_read_xlog_page_cb
+        };
         ::wal::rmgr::XLogReaderRoutine {
-            page_read: Some(read_local_xlog_page_cb),
+            page_read: Some(page_read),
             segment_open: Some(wal_segment_open_cb),
             segment_close: Some(wal_segment_close),
         }

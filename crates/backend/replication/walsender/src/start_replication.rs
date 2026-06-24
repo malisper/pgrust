@@ -1,11 +1,21 @@
 //! START_REPLICATION (physical + logical) and the standby flush-position helper.
 //!
 //! `GetStandbyFlushRecPtr` is genuine in-crate LSN arithmetic and is ported
-//! here.  `StartReplication` / `StartLogicalReplication` set up the xlogreader,
-//! acquire/validate the replication slot, install the decoding context, and
-//! drive `WalSndLoop`; their bodies are dominated by unported subsystems
-//! (xlogreader, slots, logical decoding, timeline history, libpq) and panic
-//! precisely until those land.
+//! here.  `StartReplication` (physical) and `StartLogicalReplication` (logical)
+//! set up the reader, acquire/validate the replication slot, install the
+//! decoding context, and drive `WalSndLoop`.  `StartLogicalReplication` is a
+//! faithful port of walsender.c: it `CheckLogicalDecodingRequirements`,
+//! `ReplicationSlotAcquire`s the slot, `CreateDecodingContext`s at the start LSN
+//! (over the walsnd `XL_ROUTINE` whose page-read waits through
+//! `WalSndWaitForWal`), sends the `CopyBothResponse`, then drives
+//! `WalSndLoop(XLogSendLogical)` — `XLogReadRecord` +
+//! `LogicalDecodingProcessRecord`, the output plugin writing the `'w'` CopyData
+//! stream through the `WalSndPrepareWrite`/`WalSndWriteData` callbacks.  The
+//! historic-timeline (cascading-standby) switchpoint read is still gated (the
+//! same `readTimeLineHistory`/`tliSwitchPoint` gap the physical path notes); the
+//! end-to-end streaming transport additionally needs the replication slots in
+//! shared memory (a separate keystone) so a forked walsender can `Acquire` a
+//! slot another backend created.
 
 #![allow(non_snake_case)]
 
@@ -312,21 +322,142 @@ fn timeline_switch_point_history(
 }
 
 /// `static void StartLogicalReplication(StartReplicationCmd *cmd)`.
-pub fn StartLogicalReplication(_cmd: &StartReplicationCmd) {
-    panic!(
-        "StartLogicalReplication: depends on unported logical decoding context \
-         creation (CreateDecodingContext) + output plugin + WalSndLoop(XLogSendLogical)"
-    );
+pub fn StartLogicalReplication(cmd: &StartReplicationCmd) {
+    use crate::core::{with_proc, WalSndState};
+
+    // make sure that our requirements are still fulfilled.
+    //   CheckLogicalDecodingRequirements();
+    let wal_level = types_logical::WalLevel(xlog::wal_level::call() as i32);
+    let my_database_id = crate::miscinit::my_database_id::call();
+    logical_seams::check_logical_decoding_requirements::call(wal_level, my_database_id)
+        .expect("CheckLogicalDecodingRequirements");
+
+    debug_assert!(!crate::slot::my_replication_slot_is_set::call());
+
+    // ReplicationSlotAcquire(cmd->slotname, true, true);
+    let slotname = cmd
+        .slotname
+        .as_deref()
+        .expect("START_REPLICATION ... LOGICAL requires a slot name");
+    crate::slot::replication_slot_acquire::call(slotname, true, true)
+        .expect("ReplicationSlotAcquire");
+
+    // Force a disconnect after a promotion, so the decoding code doesn't need to
+    // care about an eventual switch from recovery to a normal environment.
+    let am_cascading = xlog::recovery_in_progress::call();
+    with_proc(|p| p.am_cascading_walsender = am_cascading);
+    if am_cascading && !xlog::recovery_in_progress::call() {
+        // (RecoveryInProgress() was just re-read above; the promotion-window race
+        // the C guards is benign here — set got_STOPPING if it ever holds.)
+        with_proc(|p| p.got_STOPPING = 1);
+    }
+
+    // Create our decoding context, making it start at the previously ack'ed
+    // position.  Do this before sending a CopyBothResponse so any errors are
+    // reported early.
+    //   logical_decoding_ctx = CreateDecodingContext(cmd->startpoint, cmd->options,
+    //       false, XL_ROUTINE(.page_read=logical_read_xlog_page, ...),
+    //       WalSndPrepareWrite, WalSndWriteData, WalSndUpdateProgress);
+    let options = deflist_to_string_pairs(&cmd.options);
+    let wal_segment_size = xlog::wal_segment_size::call();
+    let ctx = logical_seams::create_decoding_context_walsnd::call(
+        cmd.startpoint,
+        options,
+        wal_segment_size,
+        my_database_id,
+    )
+    .expect("CreateDecodingContext");
+    crate::core::set_logical_decoding_ctx(ctx);
+
+    crate::init::WalSndSetState(WalSndState::WALSNDSTATE_CATCHUP);
+
+    // Send a CopyBothResponse message, and start streaming.
+    send_copy_both_response();
+    crate::pq_flush();
+
+    // Start reading WAL from the oldest required WAL.
+    //   XLogBeginRead(logical_decoding_ctx->reader,
+    //                 MyReplicationSlot->data.restart_lsn);
+    let restart_lsn = crate::slot::slot_restart_lsn::call();
+    let reader = crate::core::with_logical_decoding_ctx(|c| c.reader);
+    ::xlogreader_seams::XLogBeginRead::call(reader, restart_lsn);
+
+    // Report the location after which we'll send out further commits as the
+    // current sentPtr.
+    //   sentPtr = MyReplicationSlot->data.confirmed_flush;
+    let confirmed_flush = crate::slot::slot_confirmed_flush::call();
+    with_proc(|p| p.sentPtr = confirmed_flush);
+
+    // Also update the sent position status in shared memory.
+    //   MyWalSnd->sentPtr = MyReplicationSlot->data.restart_lsn;
+    crate::shmem_array::my_set_sentptr(restart_lsn);
+
+    with_proc(|p| p.replication_active = 1);
+
+    crate::sync_rep_init_config();
+
+    // Main loop of walsender.
+    crate::mainloop::WalSndLoop(crate::logical::XLogSendLogical as WalSndSendDataCallback);
+
+    // FreeDecodingContext(logical_decoding_ctx); ReplicationSlotRelease();
+    if let Some(mut ctx) = crate::core::take_logical_decoding_ctx() {
+        logical_seams::free_decoding_context::call(&mut ctx)
+            .expect("FreeDecodingContext");
+    }
+    crate::slot::replication_slot_release::call()
+        .expect("ReplicationSlotRelease");
+
+    with_proc(|p| p.replication_active = 0);
+    if proc_get(|p| p.got_STOPPING) != 0 {
+        crate::proc_exit(0);
+    }
+    crate::init::WalSndSetState(WalSndState::WALSNDSTATE_STARTUP);
+
+    // Get out of COPY mode (CommandComplete) — the dispatcher's
+    // EndReplicationCommand("START_REPLICATION") sends the CommandComplete
+    // (`SetQueryCompletion(&qc, CMDTAG_COPY, 0); EndCommand(...)`).
 }
 
-/// `static void WalSndSegmentOpen(...)` — xlogreader segment-open callback.
+/// Convert `cmd->options` (a `List *DefElem` of plugin options) into the
+/// `(key, defGetString(arg))` pairs the decoding context forwards to the output
+/// plugin's startup callback. The repl grammar attaches a `Node::String` arg
+/// (`include-xids '1'`) or no arg (a bare flag), mirroring `defGetString`.
+fn deflist_to_string_pairs(
+    options: &[parsenodes::DefElem],
+) -> alloc::vec::Vec<(alloc::string::String, Option<alloc::string::String>)> {
+    options
+        .iter()
+        .map(|d| {
+            let key = d.defname.clone().unwrap_or_default();
+            let val = match d.arg.as_deref() {
+                Some(parsenodes::Node::String(s)) => s.sval.clone(),
+                Some(parsenodes::Node::Integer(i)) => Some(alloc::format!("{}", i.ival)),
+                _ => None,
+            };
+            (key, val)
+        })
+        .collect()
+}
+
+/// `static void WalSndSegmentOpen(...)` — the walsnd XLogReaderRoutine's
+/// segment-open callback.  In the owned model the walsnd routine
+/// (`xlog_reader_routine_for_handle` for the non-zero handle, in xlogutils)
+/// reuses the stock local-pg_wal `wal_segment_open` (correct for the non-historic
+/// primary timeline the streaming path uses); the historic-timeline branch of
+/// the C `WalSndSegmentOpen` is the same gap the physical send path notes.  This
+/// symbol is retained only as a marker — the routine resolution lives in
+/// xlogutils, so it is never reached.
 pub fn WalSndSegmentOpen() {
-    panic!("WalSndSegmentOpen: depends on unported xlogreader segment open");
+    panic!("WalSndSegmentOpen: the walsnd XLogReaderRoutine lives in xlogutils");
 }
 
-/// `static int logical_read_xlog_page(...)` — xlogreader page-read callback.
+/// `static int logical_read_xlog_page(...)` — the walsnd XLogReaderRoutine's
+/// page-read callback.  The real body lives in xlogutils (`logical_read_xlog_page`,
+/// resolved for the non-zero `XLogReaderRoutineHandle`): it waits for future WAL
+/// through `WalSndWaitForWal` (installed as the `wal_snd_wait_for_wal` seam) then
+/// `WALRead`s the page.  This symbol is retained only as a marker.
 pub fn logical_read_xlog_page() -> i32 {
-    panic!("logical_read_xlog_page: depends on unported xlogreader page read");
+    panic!("logical_read_xlog_page: the walsnd page-read callback lives in xlogutils");
 }
 
 /// `if (xlogreader) XLogReaderFree(xlogreader)` in WalSndErrorCleanup — close the

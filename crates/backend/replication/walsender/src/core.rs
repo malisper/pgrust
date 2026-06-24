@@ -270,6 +270,47 @@ pub fn with_output_message<R>(f: impl FnOnce(&mut alloc::vec::Vec<u8>) -> R) -> 
     f(&mut OUTPUT_MESSAGE.0.borrow_mut())
 }
 
+// The file-static `LogicalDecodingContext *logical_decoding_ctx` (walsender.c):
+// the live decoding context the logical send path (`XLogSendLogical`) drives.
+// The walsender owns the `Box` for the streaming loop (C's file-static); the
+// write/progress callbacks reach the *same* ctx through the parked-pointer
+// (`logical_seams::with_current_decoding_ctx`) while it is mutably borrowed here,
+// so they must never re-borrow this cell.
+struct DecodingCtxCell(RefCell<Option<alloc::boxed::Box<::types_logical::LogicalDecodingContext>>>);
+// SAFETY: walsenders are single-threaded per process (see ProcCell).
+unsafe impl Sync for DecodingCtxCell {}
+
+static LOGICAL_DECODING_CTX: DecodingCtxCell = DecodingCtxCell(RefCell::new(None));
+
+/// Install the live `logical_decoding_ctx` for the logical streaming loop
+/// (`logical_decoding_ctx = CreateDecodingContext(...)`).
+pub fn set_logical_decoding_ctx(
+    ctx: alloc::boxed::Box<::types_logical::LogicalDecodingContext>,
+) {
+    *LOGICAL_DECODING_CTX.0.borrow_mut() = Some(ctx);
+}
+
+/// Run `f` with mutable access to the live `logical_decoding_ctx`
+/// (`XLogSendLogical`'s `logical_decoding_ctx->reader` reads + the
+/// `LogicalDecodingProcessRecord(logical_decoding_ctx, ...)` drive). Panics if no
+/// context is installed (the C would dereference a NULL `logical_decoding_ctx`).
+pub fn with_logical_decoding_ctx<R>(
+    f: impl FnOnce(&mut ::types_logical::LogicalDecodingContext) -> R,
+) -> R {
+    let mut guard = LOGICAL_DECODING_CTX.0.borrow_mut();
+    let ctx = guard
+        .as_mut()
+        .expect("logical_decoding_ctx accessed outside a logical streaming session");
+    f(ctx)
+}
+
+/// `FreeDecodingContext(logical_decoding_ctx)` has run; drop the owned box and
+/// hand it back so the caller can free it through the seam first.
+pub fn take_logical_decoding_ctx(
+) -> Option<alloc::boxed::Box<::types_logical::LogicalDecodingContext>> {
+    LOGICAL_DECODING_CTX.0.borrow_mut().take()
+}
+
 // ---------------------------------------------------------------------------
 // The shared-memory WalSndCtlData array (`WalSndCtl`).
 //
