@@ -10645,6 +10645,7 @@ dependencies = [
  "pg_stat_statements",
  "pg_strong_random",
  "pg_subscription",
+ "pg_trgm",
  "pg_ts",
  "pg_type",
  "pgcrypto",
@@ -17644,6 +17645,26 @@ dependencies = [
  "types_core",
  "types_error",
  "types_storage",
+ "types_tuple",
+]
+
+[[package]]
+name = "pg_trgm"
+version = "0.0.0"
+dependencies = [
+ "arrayfuncs_seams",
+ "crc32c",
+ "datum",
+ "dfmgr_seams",
+ "fmgr",
+ "formatting_seams",
+ "guc_tables",
+ "mbutils",
+ "mcx",
+ "misc_guc",
+ "ts_locale_seams",
+ "types_error",
+ "types_guc",
  "types_tuple",
 ]
 

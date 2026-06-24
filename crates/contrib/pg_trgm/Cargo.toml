@@ -1,0 +1,32 @@
+[package]
+name = "pg_trgm"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_trgm"
+path = "src/lib.rs"
+
+[dependencies]
+# Boundary / support types:
+mcx = { path = "../../_support/mcx" }
+datum = { path = "../../_support/types/datum" }
+fmgr = { path = "../../_support/types/fmgr" }
+types_error = { path = "../../_support/types/types_error" }
+types_tuple = { path = "../../_support/types/types_tuple" }
+types_guc = { path = "../../_support/types/types_guc" }
+
+# Trigram core services:
+crc32c = { path = "../../port/crc32c" }
+mbutils = { path = "../../backend/utils/mb/mbutils" }
+
+# Seams (consulted, not owned):
+dfmgr_seams = { path = "../../backend/utils/fmgr/dfmgr_seams" }
+ts_locale_seams = { path = "../../backend/tsearch/ts_locale_seams" }
+formatting_seams = { path = "../../backend/utils/adt/formatting_seams" }
+arrayfuncs_seams = { path = "../../backend/utils/adt/arrayfuncs_seams" }
+
+# GUC registration:
+misc_guc = { path = "../../backend/utils/misc/misc_guc" }
+guc_tables = { path = "../../backend/utils/misc/guc_tables" }
