@@ -1454,11 +1454,16 @@ pub fn heap_getnextslot<'mcx>(
         sscan.rs_rd.pgstat_enabled,
     );
     let cbuf = heap_scan(sscan).rs_cbuf;
+    // Move the already-owned `rs_ctup` directly into the slot instead of taking
+    // a second deep copy via `clone_in`. `read_on_page_full` already materialized
+    // this tuple off the page into `es_query_cxt`-owned storage, and `rs_ctup` is
+    // overwritten by the next `heapgettup*` call, so the prior `clone_in` was a
+    // redundant per-row materialization (C stores a page pointer here, zero
+    // copies). `.take()` leaves `None`, which the next call repopulates.
     let tuple = heap_scan(sscan)
         .rs_ctup
-        .as_ref()
-        .expect("heap_getnextslot: rs_ctup just checked non-None")
-        .clone_in(mcx)?;
+        .take()
+        .expect("heap_getnextslot: rs_ctup just checked non-None");
     exec_store_buffer_heap_tuple(tuple, slot, cbuf)?;
     Ok(true)
 }
@@ -2109,11 +2114,12 @@ pub fn heap_getnextslot_tidrange<'mcx>(
         sscan.rs_rd.pgstat_enabled,
     );
     let cbuf = heap_scan(sscan).rs_cbuf;
+    // Move the already-owned `rs_ctup` into the slot rather than re-cloning it;
+    // see `heap_getnextslot` for why the prior `clone_in` was redundant.
     let tuple = heap_scan(sscan)
         .rs_ctup
-        .as_ref()
-        .expect("heap_getnextslot_tidrange: rs_ctup non-None")
-        .clone_in(mcx)?;
+        .take()
+        .expect("heap_getnextslot_tidrange: rs_ctup non-None");
     exec_store_buffer_heap_tuple(tuple, slot, cbuf)?;
     Ok(true)
 }
