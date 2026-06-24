@@ -60,6 +60,7 @@ twophase_seams = { path = "../twophase_seams" }
 varsup_seams = { path = "../varsup_seams" }
 xlogutils = { path = "../xlogutils" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+resowner_seams = { path = "../../../utils/resowner/resowner_seams" }
 timeline_seams = { path = "../timeline_seams" }
 vacuum_seams = { path = "../../../commands/vacuum_seams" }
 origin_seams = { path = "../../../replication/logical/origin_seams" }

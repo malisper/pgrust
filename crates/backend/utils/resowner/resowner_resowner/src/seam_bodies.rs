@@ -221,6 +221,21 @@ pub fn install() {
 
     rr::reset_current_resource_owner::set(|| SetCurrentResourceOwner(None));
 
+    // `CurrentResourceOwner = AuxProcessResourceOwner` (xlog.c:6671-6673,
+    // ShutdownXLOG). Two C Asserts: the aux owner must exist, and no other
+    // transaction resowner may be installed.
+    rr::set_current_to_aux_process_resource_owner::set(|| {
+        let aux = AuxProcessResourceOwner()
+            .ok_or_else(|| ::types_error::PgError::error("AuxProcessResourceOwner is not set"))?;
+        debug_assert!(
+            CurrentResourceOwner().is_none()
+                || CurrentResourceOwner() == Some(aux),
+            "CurrentResourceOwner must be NULL or AuxProcessResourceOwner"
+        );
+        SetCurrentResourceOwner(Some(aux));
+        Ok(())
+    });
+
     rr::set_current_resource_owner::set(|owner| SetCurrentResourceOwner(opt(owner)));
 
     // `AtStart_ResourceOwner()` (xact.c:1330): create the toplevel transaction

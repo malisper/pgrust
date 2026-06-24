@@ -80,6 +80,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CurrentResourceOwner = AuxProcessResourceOwner` (xlog.c:6671-6673,
+    /// `ShutdownXLOG`): install the aux-process resource owner as the current
+    /// one so the shutdown checkpoint's buffer flush (`SyncOneBuffer` →
+    /// `ResourceOwnerEnlarge(CurrentResourceOwner)` + the with-owner UnpinBuffer)
+    /// has a live owner to pin against. Asserts the aux owner exists and that no
+    /// other transaction resowner is installed, matching C's two `Assert`s.
+    pub fn set_current_to_aux_process_resource_owner() -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `CurrentResourceOwner = owner` (resowner.c global): restore the current
     /// resource owner. snapbuild.c's SnapBuildClearExportedSnapshot restores
     /// the owner saved before StartTransactionCommand (NULL handle == C NULL).

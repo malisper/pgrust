@@ -1186,17 +1186,23 @@ fn shutdown_postgres_cb(code: i32, arg: types_tuple::Datum<'static>) -> PgResult
 
 /// `before_shmem_exit(ShutdownXLOG, 0)` — delegate to xlog.c's exit callback.
 ///
-/// Calls the real ported WAL-engine shutdown driver
-/// ([`transam_xlog::do_checkpoint::ShutdownXLOG`], which writes
-/// the shutdown checkpoint and flips the control file to `Shutdowned`). The
-/// top-level `transam_xlog::ShutdownXLOG(code, arg)` re-export is
-/// still the deferred xlog-driver *panic stub* (it has the C `(code, arg)`
-/// signature but no body — see the `xlog_driver_deferred!` block); calling it
-/// here aborted the clean-exit path. The C `ShutdownXLOG` body consults neither
-/// `code` nor `arg`, so dropping them is faithful.
+/// Calls the real ported WAL-engine shutdown driver via the installed
+/// `shutdown_xlog` seam ([`transam_xlog::do_checkpoint::ShutdownXLOG`], wired in
+/// `transam_xlog::init_seams`), which runs the shutdown checkpoint
+/// (`CreateCheckPoint(CHECKPOINT_IS_SHUTDOWN | CHECKPOINT_IMMEDIATE)` —
+/// `CheckPointGuts` flushes all dirty buffers + SLRUs, writes the
+/// `XLOG_CHECKPOINT_SHUTDOWN` record, and flips the control file to
+/// `DB_SHUTDOWNED`), or a restartpoint during recovery.
+///
+/// We deliberately do NOT call the top-level `transam_xlog::ShutdownXLOG(code,
+/// arg)` re-export: that one is still the deferred xlog-driver *panic stub* (it
+/// carries the C `(code, arg)` signature but has no body — see the
+/// `xlog_driver_deferred!` block), and calling it here aborted the clean-exit
+/// path. The C `ShutdownXLOG` body consults neither `code` nor `arg`, so
+/// dropping them is faithful.
 fn shutdown_xlog_cb(code: i32, arg: types_tuple::Datum<'static>) -> PgResult<()> {
-    transam_xlog::ShutdownXLOG(code, arg);
-    Ok(())
+    let _ = (code, arg);
+    transam_xlog_seams::shutdown_xlog::call()
 }
 
 /// `before_shmem_exit(pgstat_before_server_shutdown, 0)` — delegate to pgstat.

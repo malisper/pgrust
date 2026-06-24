@@ -665,6 +665,18 @@ pub fn CreateRestartPoint(flags: i32) -> PgResult<bool> {
 /// `void ShutdownXLOG(int code, Datum arg)` (xlog.c:6664) — shut down the WAL
 /// engine, writing a shutdown checkpoint (or, during recovery, a restartpoint).
 pub fn ShutdownXLOG() -> PgResult<()> {
+    // We should have an aux process resource owner to use, and we should not be
+    // in a transaction that's installed some other resowner (xlog.c:6669-6673):
+    //   Assert(AuxProcessResourceOwner != NULL);
+    //   Assert(CurrentResourceOwner == NULL ||
+    //          CurrentResourceOwner == AuxProcessResourceOwner);
+    //   CurrentResourceOwner = AuxProcessResourceOwner;
+    // The shutdown checkpoint's buffer flush (SyncOneBuffer →
+    // ResourceOwnerEnlarge(CurrentResourceOwner) + the with-owner UnpinBuffer)
+    // pins against this owner; without it the flush errors with
+    // "CurrentResourceOwner is NULL" and silently leaves dirty buffers unwritten.
+    resowner_seams::set_current_to_aux_process_resource_owner::call()?;
+
     ereport(LOG)
         .errmsg("shutting down")
         .finish(loc(6677, "ShutdownXLOG"))?;

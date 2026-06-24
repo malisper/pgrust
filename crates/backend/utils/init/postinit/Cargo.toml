@@ -28,6 +28,7 @@ libc = "0.2"
 # namespace search-path, procsignal init.
 utils_error = { path = "../../utils_error" }
 transam_xlog = { path = "../../../access/transam/transam_xlog" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
 cache_syscache = { path = "../../cache/cache_syscache" }
 catalog_namespace = { path = "../../../catalog/catalog_namespace" }
 procsignal = { path = "../../../storage/ipc/procsignal" }
