@@ -78,6 +78,29 @@ fn func_step_inputs<'mcx>(
     Vec<bool>,
     usize,
 ) {
+    let mut args = Vec::new();
+    let mut nulls = Vec::new();
+    let (fn_oid, collation, nargs) = func_step_inputs_into(state, op, &mut args, &mut nulls);
+    (fn_oid, collation, args, nulls, nargs)
+}
+
+/// Gather an `EEOP_FUNCEXPR*` step's `(fn_oid, fncollation, nargs)` and fill the
+/// caller-provided `args`/`nulls` buffers with the per-argument result cells (C:
+/// `fcinfo->args[i]`). The buffers are cleared first; the caller may reuse a
+/// thread-local scratch buffer across calls so the hot per-tuple path does not
+/// allocate two fresh `Vec`s every call (the profiled malloc-churn hotspot).
+fn func_step_inputs_into<'mcx>(
+    state: &ExprState<'mcx>,
+    op: usize,
+    args: &mut Vec<DatumV<'mcx>>,
+    nulls: &mut Vec<bool>,
+) -> (
+    ::types_core::primitive::Oid,
+    ::types_core::primitive::Oid,
+    usize,
+) {
+    args.clear();
+    nulls.clear();
     match step_data(state, op) {
         ExprEvalStepData::Func {
             finfo,
@@ -98,17 +121,75 @@ fn func_step_inputs<'mcx>(
             // fcinfo->args[i].value  = *cell.value (the canonical Datum — the cell
             //                          already carries the by-ref/by-value image);
             // fcinfo->args[i].isnull =  cell.isnull.
-            let mut args: Vec<DatumV<'mcx>> = Vec::with_capacity(cells.len());
-            let mut nulls: Vec<bool> = Vec::with_capacity(cells.len());
+            args.reserve(cells.len());
+            nulls.reserve(cells.len());
             for &cell in cells.iter() {
                 let c = state.result_cells.get(cell);
                 args.push(c.value.clone());
                 nulls.push(c.isnull);
             }
-            (finfo.fn_oid, fcinfo.fncollation, args, nulls, *nargs as usize)
+            (finfo.fn_oid, fcinfo.fncollation, *nargs as usize)
         }
         other => unreachable!("EEOP_FUNCEXPR step carries the wrong payload: {other:?}"),
     }
+}
+
+thread_local! {
+    /// Per-backend reusable scratch buffers for the hot `EEOP_FUNCEXPR[_STRICT]`
+    /// argument gather. C writes `fcinfo->args[i]` into the per-step frame
+    /// allocated once at `ExecInitFunc`; the owned model gathers the cells into a
+    /// pair of `Vec`s just before dispatch. Allocating those `Vec`s fresh on every
+    /// tuple was ~half the serial CPU of a filter like `i % 2 = 0` (10M calls).
+    /// This holds ONE reusable `(args, nulls)` pair: a non-reentrant FUNCEXPR call
+    /// borrows it (cleared, capacity kept) and hands it back. A reentrant inner
+    /// FUNCEXPR (an argument that is itself a function whose own argument steps run
+    /// between the gather and the dispatch — they don't here, the gather is
+    /// complete before dispatch) would find the cell taken and falls back to a
+    /// fresh allocation, so correctness never depends on availability.
+    static FUNC_ARG_SCRATCH: std::cell::RefCell<Option<(Vec<DatumV<'static>>, Vec<bool>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Borrow the reusable `(args, nulls)` scratch (cleared, capacity retained), or a
+/// fresh empty pair if it is already in use (reentrancy) or not yet created.
+#[inline]
+fn take_func_arg_scratch<'mcx>() -> (Vec<DatumV<'mcx>>, Vec<bool>) {
+    FUNC_ARG_SCRATCH.with(|s| {
+        match s.borrow_mut().take() {
+            // SAFETY: the buffers are returned EMPTY (no live `Datum<'mcx>`
+            // borrows survive across calls — `put_func_arg_scratch` clears them),
+            // so the `'static` storage lifetime is only re-cast to the caller's
+            // `'mcx` while the buffers are non-empty during this single call and
+            // cleared again before being parked. This is the standard
+            // capacity-reuse pattern (mirrors the fmgr fcinfo frame pool).
+            Some((args, nulls)) => unsafe {
+                (
+                    std::mem::transmute::<Vec<DatumV<'static>>, Vec<DatumV<'mcx>>>(args),
+                    nulls,
+                )
+            },
+            None => (Vec::new(), Vec::new()),
+        }
+    })
+}
+
+/// Return the scratch buffers after a call (cleared so no `Datum<'mcx>` survives),
+/// retaining capacity for the next call. A nested call's fresh buffers are simply
+/// dropped if the slot is already occupied.
+#[inline]
+fn put_func_arg_scratch<'mcx>(mut args: Vec<DatumV<'mcx>>, mut nulls: Vec<bool>) {
+    args.clear();
+    nulls.clear();
+    // SAFETY: `args` is now empty, so re-casting its element lifetime to 'static
+    // carries no live borrowed data; only the heap capacity is parked.
+    let args: Vec<DatumV<'static>> =
+        unsafe { std::mem::transmute::<Vec<DatumV<'mcx>>, Vec<DatumV<'static>>>(args) };
+    FUNC_ARG_SCRATCH.with(|s| {
+        let mut slot = s.borrow_mut();
+        if slot.is_none() {
+            *slot = Some((args, nulls));
+        }
+    });
 }
 
 /// Recover the call-expression node `ExecInitFunc` stamped onto the step's
@@ -154,7 +235,11 @@ pub fn exec_func_step<'mcx>(
     strict: bool,
     estate: &EStateData<'mcx>,
 ) -> PgResult<()> {
-    let (fn_oid, collation, args, nulls, _nargs) = func_step_inputs(state, op);
+    // Reuse the per-backend scratch buffers (capacity retained across tuples)
+    // instead of allocating two fresh `Vec`s per call — the profiled malloc
+    // hotspot for a per-row filter like `i % 2 = 0` (10M FUNCEXPR calls).
+    let (mut args, mut nulls) = take_func_arg_scratch();
+    let (fn_oid, collation, _nargs) = func_step_inputs_into(state, op, &mut args, &mut nulls);
     let (resvalue_id, resnull_id) = res_cells(state, op);
     let _ = resnull_id; // value/is-null share one cell
 
@@ -168,6 +253,7 @@ pub fn exec_func_step<'mcx>(
     // FUNCEXPR) wrote into the wrong location and the EEOP_QUAL reader saw zero.
     if strict && nulls.iter().any(|&n| n) {
         crate::interp_loop::write_cell(state, resvalue_id, DatumV::null(), true);
+        put_func_arg_scratch(args, nulls);
         return Ok(());
     }
 
@@ -207,6 +293,7 @@ pub fn exec_func_step<'mcx>(
 
     // *op->resvalue = d;  *op->resnull = fcinfo->isnull;
     crate::interp_loop::write_cell(state, resvalue_id, value, isnull);
+    put_func_arg_scratch(args, nulls);
     Ok(())
 }
 
