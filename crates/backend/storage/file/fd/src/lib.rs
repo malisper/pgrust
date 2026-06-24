@@ -104,6 +104,9 @@ pub fn init_seams() {
     fd_seams::access_f_ok::set(vfd_core::seam_access_f_ok);
     fd_seams::unlink_file::set(vfd_core::seam_unlink_file);
     fd_seams::rename_file::set(vfd_core::seam_rename_file);
+    fd_seams::durable_unlink::set(|fname| {
+        sync_cleanup::durable_unlink(fname, ::types_error::FATAL)
+    });
 
     // Transaction-end cleanup.
     fd_seams::at_eoxact_files::set(sync_cleanup::AtEOXact_Files);

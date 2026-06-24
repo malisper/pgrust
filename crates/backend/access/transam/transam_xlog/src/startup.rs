@@ -35,7 +35,7 @@ use alloc::string::{String, ToString};
 use ::utils_error::{ereport, PgError, PgResult};
 use ::control::{DBState, FirstNormalUnloggedLSN};
 use ::types_core::{TimeLineID, TransactionId, XLogRecPtr};
-use ::types_error::{ErrorLocation, DEBUG1, FATAL, LOG, NOTICE, PANIC};
+use ::types_error::{ErrorLocation, DEBUG1, FATAL, LOG, NOTICE};
 use ::types_core::xact::{InvalidTransactionId, TransactionIdIsValid};
 use ::wal::wal::RM_XLOG_ID;
 use ::wal::xlog_consts::{
@@ -76,6 +76,14 @@ use standby_seams as standby_seam;
 
 const CONTROL_FILE_LOCK: usize = 9;
 const PROC_ARRAY_LOCK: usize = 4;
+
+/// Recovery signal-file names (`xlogrecovery.c:58-59`).
+const STANDBY_SIGNAL_FILE: &str = "standby.signal";
+const RECOVERY_SIGNAL_FILE: &str = "recovery.signal";
+
+/// `ARCHIVE_MODE_OFF` (`access/xlog.h`) — `XLogArchivingActive()` is
+/// `XLogArchiveMode > ARCHIVE_MODE_OFF`.
+const ARCHIVE_MODE_OFF: i32 = 0;
 
 /// Backup/tablespace label-file names (`access/xlog.h:307-311`).
 const BACKUP_LABEL_FILE: &str = "backup_label";
@@ -429,14 +437,57 @@ pub fn StartupXLOG() -> PgResult<()> {
 
     // Consider whether we need to assign a new timeline ID. On the clean
     // (non-archive) path we just extend the timeline we were in.
-    let new_tli = end_of_recovery_info.last_rec_tli;
+    let mut new_tli = end_of_recovery_info.last_rec_tli;
     if recovery_seam::archive_recovery_requested::call() {
-        return Err(PgError::new(
-            PANIC,
-            "blocked: StartupXLOG archive-recovery timeline switch (xlog.c:6019-6060) — \
-             findNewestTimeLine + XLogInitNewTimeline + writeTimeLineHistory + signal-file \
-             cleanup require the unported archive-recovery legs; pending recovery family fill",
-        ));
+        let archive_recovery_requested = true;
+        let recovery_target_tli = recovery_seam::recovery_target_tli::call();
+
+        // findNewestTimeLine(recoveryTargetTLI) + 1. (xlog.c:6013)
+        new_tli = {
+            let cx = mcx::MemoryContext::new("StartupXLOG/findNewestTimeLine");
+            timeline_seam::find_newest_timeline::call(
+                cx.mcx(),
+                recovery_target_tli,
+                archive_recovery_requested,
+            )?
+        } + 1;
+        ereport(LOG)
+            .errmsg(format!("selected new timeline ID: {new_tli}"))
+            .finish(loc(6015, "StartupXLOG"))?;
+
+        // Make a writable copy of the last WAL segment. (xlog.c:6022)
+        XLogInitNewTimeline(end_of_recovery_info.end_of_log_tli, end_of_log, new_tli)?;
+
+        // Remove the signal files out of the way, so that we don't accidentally
+        // re-enter archive recovery mode in a subsequent crash. (xlog.c:6028)
+        if end_of_recovery_info.standby_signal_file_found {
+            fd_seams::durable_unlink::call(STANDBY_SIGNAL_FILE)?;
+        }
+        if end_of_recovery_info.recovery_signal_file_found {
+            fd_seams::durable_unlink::call(RECOVERY_SIGNAL_FILE)?;
+        }
+
+        // Write the timeline history file, and have it archived. After this
+        // point the timeline appears as "taken" in the WAL archive and to any
+        // standby servers. (xlog.c:6042)
+        let xlog_archiving_active =
+            guc_tables::vars::XLogArchiveMode.read() > ARCHIVE_MODE_OFF;
+        {
+            let cx = mcx::MemoryContext::new("StartupXLOG/writeTimeLineHistory");
+            timeline_seam::write_timeline_history::call(
+                cx.mcx(),
+                new_tli,
+                recovery_target_tli,
+                end_of_log,
+                &end_of_recovery_info.recovery_stop_reason,
+                archive_recovery_requested,
+                xlog_archiving_active,
+            )?;
+        }
+
+        ereport(LOG)
+            .errmsg("archive recovery complete")
+            .finish(loc(6048, "StartupXLOG"))?;
     }
 
     // Save the selected TimeLineID in shared memory.
@@ -1076,20 +1127,62 @@ pub fn CreateOverwriteContrecordRecord(
 
 /// `static void XLogInitNewTimeline(endTLI, endOfLog, newTLI)` (xlog.c:5276) —
 /// initialize the starting WAL segment for a new timeline at the end of archive
-/// recovery. The `XLogFileCopy` + `UpdateMinRecoveryPoint` + `XLogArchiveCleanup`
-/// legs are unported; this is reached only on the archive-recovery path.
+/// recovery. If the switch happens mid-segment, copy the last old-timeline
+/// segment up to the switch point onto the new timeline; otherwise (switch on a
+/// segment boundary) create the next fresh segment on the new timeline. Then
+/// clear any stale `.ready`/`.done` archive flags for the new segment.
 pub fn XLogInitNewTimeline(
     end_tli: TimeLineID,
     end_of_log: XLogRecPtr,
     new_tli: TimeLineID,
 ) -> PgResult<()> {
-    let _ = (end_tli, end_of_log, new_tli);
-    Err(PgError::new(
-        PANIC,
-        "blocked: XLogInitNewTimeline (xlog.c:5276) — XLogFileCopy + \
-         UpdateMinRecoveryPoint + XLogArchiveCleanup are owned by unported \
-         archive-recovery legs; pending recovery family fill",
-    ))
+    use crate::{XLByteToPrevSeg, XLByteToSeg, XLogFileName};
+
+    // we always switch to a new timeline after archive recovery.
+    debug_assert!(end_tli != new_tli);
+
+    let wal_segsz = shmem::wal_segment_size();
+
+    // Update min recovery point one last time. (xlog.c:5288)
+    crate::write::UpdateMinRecoveryPoint(InvalidXLogRecPtr, true)?;
+
+    // Calculate the last segment on the old timeline, and the first segment on
+    // the new timeline. If the switch happens in the middle of a segment, they
+    // are the same; if exactly at a segment boundary, startLogSegNo will be
+    // endLogSegNo + 1. (xlog.c:5295-5296)
+    let end_log_seg_no = XLByteToPrevSeg(end_of_log, wal_segsz);
+    let start_log_seg_no = XLByteToSeg(end_of_log, wal_segsz);
+
+    if end_log_seg_no == start_log_seg_no {
+        // Make a copy of the file on the new timeline. (xlog.c:5313-5314)
+        crate::write::XLogFileCopy(
+            new_tli,
+            end_log_seg_no,
+            end_tli,
+            end_log_seg_no,
+            XLogSegmentOffset(end_of_log, wal_segsz) as i32,
+        )?;
+    } else {
+        // The switch happened at a segment boundary, so just create the next
+        // segment on the new timeline. (xlog.c:5323-5337)
+        let fd = crate::write::XLogFileInit(start_log_seg_no, new_tli)?;
+        // SAFETY: closing the bare kernel fd returned by XLogFileInit.
+        let rc = unsafe { libc::close(fd) };
+        if rc != 0 {
+            let xlogfname = XLogFileName(new_tli, start_log_seg_no, wal_segsz);
+            let e = std::io::Error::last_os_error();
+            return Err(PgError::error(format!(
+                "could not close file \"{xlogfname}\": {e}"
+            )));
+        }
+    }
+
+    // Let's just make real sure there are not .ready or .done flags posted for
+    // the new segment. (xlog.c:5342-5343)
+    let xlogfname = XLogFileName(new_tli, start_log_seg_no, wal_segsz);
+    xlogarchive::XLogArchiveCleanup(&xlogfname);
+
+    Ok(())
 }
 
 // ===========================================================================

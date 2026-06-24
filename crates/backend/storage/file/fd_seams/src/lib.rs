@@ -527,6 +527,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `void durable_unlink(const char *fname, int elevel)` (`fd.c:872`) —
+    /// remove a file and fsync the parent directory for durability. On I/O
+    /// failure the owner `ereport`s at `elevel`, carried on `Err`. Used by the
+    /// end-of-recovery timeline switch to durably remove the signal files.
+    pub fn durable_unlink(fname: &str) -> ::types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `bool rmtree(const char *path, bool rmtopdir)` (`common/rmtree.c`) —
     /// remove a directory tree. Returns true on full success (false logs a
     /// warning internally, like C).

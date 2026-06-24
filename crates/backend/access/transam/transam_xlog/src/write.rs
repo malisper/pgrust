@@ -1061,6 +1061,145 @@ fn InstallXLogFileSegment(
     Ok(true)
 }
 
+/// `XLogFileCopy(destTLI, destsegno, srcTLI, srcsegno, upto)` (xlog.c:3437) —
+/// copy a WAL segment file from the source timeline to the destination
+/// timeline. The first `upto` bytes are copied from the source file; the rest
+/// of the segment is zero-filled. The completed temp file is durably renamed
+/// into the destination segment's final name via
+/// `InstallXLogFileSegment(find_free = false)`.
+///
+/// Used by `XLogInitNewTimeline` at the end of archive recovery to make a
+/// writable copy of the last old-timeline segment on the new timeline.
+pub(crate) fn XLogFileCopy(
+    dest_tli: TimeLineID,
+    dest_segno: XLogSegNo,
+    src_tli: TimeLineID,
+    src_segno: XLogSegNo,
+    upto: i32,
+) -> PgResult<()> {
+    let seg = wal_segment_size();
+
+    // Open the source file. (xlog.c:3452-3457)
+    let path = XLogFilePath(src_tli, src_segno, seg);
+    let srcfd = match fd::basic_open_file_flags::call(&path, O_RDONLY | PG_BINARY) {
+        Ok(fd) if fd >= 0 => fd,
+        _ => {
+            let e = fd::last_errno::call();
+            return Err(PgError::error(std::format!(
+                "could not open file \"{}\": {}",
+                path,
+                std::io::Error::from_raw_os_error(e)
+            )));
+        }
+    };
+
+    // Copy into a temp file name. (xlog.c:3461-3471)
+    #[cfg(not(target_family = "wasm"))]
+    let pid = std::process::id();
+    // SAFETY: getpid is a const-returning shim (no preconditions).
+    #[cfg(target_family = "wasm")]
+    let pid = unsafe { libc::getpid() as u32 };
+    let tmppath = std::format!("{XLOGDIR}/xlogtemp.{}", pid);
+    fd::unlink_file::call(&tmppath);
+
+    // do not use get_sync_bit() here --- want to fsync only at end of fill.
+    let fd = match fd::basic_open_file_flags::call(
+        &tmppath,
+        O_RDWR | O_CREAT | O_EXCL | PG_BINARY,
+    ) {
+        Ok(fd) if fd >= 0 => fd,
+        _ => {
+            let e = fd::last_errno::call();
+            close_bare_fd(srcfd);
+            return Err(PgError::error(std::format!(
+                "could not create file \"{}\": {}",
+                tmppath,
+                std::io::Error::from_raw_os_error(e)
+            )));
+        }
+    };
+
+    // The xlog.c loop advances in BLCKSZ-sized chunks; XLOG_BLCKSZ here.
+    let bufsz = XLOG_BLCKSZ as usize;
+    let mut buffer = std::vec![0u8; bufsz];
+    let mut nbytes: i32 = 0;
+    while (nbytes as i64) < seg as i64 {
+        let mut nread = upto - nbytes;
+
+        // The part not read from the source is filled with zeros.
+        if (nread as i64) < bufsz as i64 {
+            buffer.iter_mut().for_each(|b| *b = 0);
+        }
+
+        if nread > 0 {
+            if nread as usize > bufsz {
+                nread = bufsz as i32;
+            }
+            let r = fd::pg_pread::call(srcfd, &mut buffer[..nread as usize], nbytes as i64);
+            if r != nread as isize {
+                fd::unlink_file::call(&tmppath);
+                close_bare_fd(fd);
+                close_bare_fd(srcfd);
+                if r < 0 {
+                    let e = fd::last_errno::call();
+                    return Err(PgError::error(std::format!(
+                        "could not read file \"{}\": {}",
+                        path,
+                        std::io::Error::from_raw_os_error(e)
+                    )));
+                } else {
+                    return Err(PgError::error(std::format!(
+                        "could not read file \"{}\": read {} of {}",
+                        path, r, nread
+                    )));
+                }
+            }
+        }
+
+        let w = fd::pg_pwrite::call(fd, &buffer[..bufsz], nbytes as i64);
+        if w != bufsz as isize {
+            let e = fd::last_errno::call();
+            // If we fail to make the file, delete it to release disk space.
+            fd::unlink_file::call(&tmppath);
+            close_bare_fd(fd);
+            close_bare_fd(srcfd);
+            // if write didn't set errno, assume problem is no disk space.
+            let e = if e != 0 { e } else { libc::ENOSPC };
+            return Err(PgError::error(std::format!(
+                "could not write to file \"{}\": {}",
+                tmppath,
+                std::io::Error::from_raw_os_error(e)
+            )));
+        }
+
+        nbytes += bufsz as i32;
+    }
+
+    // fsync the temp file. (xlog.c:3532-3537)
+    if fd::pg_fsync::call(fd) != 0 {
+        let e = fd::last_errno::call();
+        close_bare_fd(fd);
+        close_bare_fd(srcfd);
+        return Err(PgError::error(std::format!(
+            "could not fsync file \"{}\": {}",
+            tmppath,
+            std::io::Error::from_raw_os_error(e)
+        )));
+    }
+
+    close_bare_fd(fd);
+    close_bare_fd(srcfd);
+
+    // Now move the segment into place with its final name. (xlog.c:3552)
+    let mut installed_segno = dest_segno;
+    if !InstallXLogFileSegment(&mut installed_segno, &tmppath, false, 0, dest_tli)? {
+        return Err(PgError::error(
+            "InstallXLogFileSegment should not have failed",
+        ));
+    }
+    Ok(())
+}
+
 /// `SetInstallXLogFileSegmentActive(void)` (xlog.c:9554) — enable WAL file
 /// recycling and preallocation by setting the `XLogCtl->InstallXLogFileSegmentActive`
 /// flag under `ControlFileLock` in exclusive mode.

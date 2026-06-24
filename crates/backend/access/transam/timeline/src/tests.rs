@@ -57,6 +57,19 @@ fn setup() {
             let c = CString::new(path).unwrap();
             Ok(unsafe { libc::open(c.as_ptr(), flags, 0o600) })
         });
+        // fd_seams i32-contract open used by writeTimeLineHistory's parent-copy
+        // open: returns `-errno` on failure (mirroring C's OpenTransientFile
+        // returning -1 + errno) so the ENOENT "parent has no parents" branch is
+        // exercised.
+        fd::open_transient_file::set(|path, flags| {
+            let c = CString::new(path).unwrap();
+            let rc = unsafe { libc::open(c.as_ptr(), flags, 0o600) };
+            if rc < 0 {
+                -current_errno()
+            } else {
+                rc
+            }
+        });
         file::close_transient_file::set(|fd| unsafe { libc::close(fd) });
         file::pg_fsync::set(|fd| unsafe { libc::fsync(fd) });
         file::data_sync_elevel::set(|elevel| elevel);

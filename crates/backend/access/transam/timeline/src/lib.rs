@@ -390,8 +390,14 @@ pub fn writeTimeLineHistory(
         path = TLHistoryFilePath(parentTLI);
     }
 
-    let srcfd = file::open_transient_file::call(&path, libc::O_RDONLY)?;
+    // C's `OpenTransientFile` returns -1 with errno set on failure; this
+    // caller deliberately tolerates ENOENT ("parent has no parents"). The
+    // `fd_seams` i32-contract seam mirrors that exactly (negative `-errno` on
+    // failure), so use it here rather than the `file_seams` PgResult seam,
+    // which would ereport on ENOENT before this branch can inspect errno.
+    let srcfd = fd::open_transient_file::call(&path, libc::O_RDONLY);
     if srcfd < 0 {
+        set_errno(-srcfd);
         if current_errno() != libc::ENOENT {
             return Err(ereport(ERROR)
                 .with_saved_errno(current_errno())
