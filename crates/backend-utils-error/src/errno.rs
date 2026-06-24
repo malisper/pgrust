@@ -117,8 +117,19 @@ pub fn sqlstate_for_socket_access(errno: i32) -> SqlState {
 
 /// `errno` as seen by the calling thread right now (the value elog.c saves
 /// into `edata->saved_errno` at `get_error_stack_entry`).
+///
+/// On wasm64-unknown-unknown `std::io::Error::last_os_error()` is INERT (std's
+/// errno is not wired to anything — it stays 0), but the file/stat/open shims in
+/// `wasm-libc-shim` DO set their own thread-local errno (ENOENT/EEXIST/EMFILE/…).
+/// Ported code that branches on errno (e.g. tablespace `stat`==ENOENT -> create
+/// the dir, EMFILE retry loops) must read THAT errno, so on wasm read the shim's.
+#[cfg(not(target_family = "wasm"))]
 pub fn current_errno() -> i32 {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+#[cfg(target_family = "wasm")]
+pub fn current_errno() -> i32 {
+    wasm_libc_shim::errno()
 }
 
 /// `strerror(errnum)` — the text `%m` expands to.
