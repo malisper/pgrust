@@ -580,6 +580,10 @@ pub fn init_seams() {
     use ::guc_tables::{hooks, vars, GucHookExtra, GucVarAccessors};
     use ::types_guc::guc::GucSource;
 
+    // `BootStrapSUBTRANS()` (subtrans.c) — called once by `BootStrapXLOG`
+    // (xlog.c) at initdb to create + zero the first subtrans page.
+    transam_xlog_seams::boot_strap_sub_trans::set(|| with_ctl(BootStrapSUBTRANS));
+
     seams::sub_trans_get_parent::set(|xid| with_ctl(|st| SubTransGetParent(st, xid)));
     seams::sub_trans_set_parent::set(|xid, parent| with_ctl(|st| SubTransSetParent(st, xid, parent)));
     seams::sub_trans_get_topmost_transaction::set(|xid| {

@@ -206,6 +206,32 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `BootStrapCLOG()` (clog.c): create + zero the first commit-log page at
+    /// bootstrap. Installed by the clog owner; called from `BootStrapXLOG`.
+    pub fn boot_strap_clog() -> ::types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `BootStrapCommitTs()` (commit_ts.c): commit-timestamp bootstrap (a no-op
+    /// in current PG; segments are created lazily). Installed by the commit_ts
+    /// owner; called from `BootStrapXLOG`.
+    pub fn boot_strap_commit_ts() -> ::types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `BootStrapSUBTRANS()` (subtrans.c): create + zero the first subtrans page
+    /// at bootstrap. Installed by the subtrans owner; called from `BootStrapXLOG`.
+    pub fn boot_strap_sub_trans() -> ::types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `BootStrapMultiXact()` (multixact.c): create + zero the first multixact
+    /// offset + member pages at bootstrap. Installed by the multixact owner;
+    /// called from `BootStrapXLOG`.
+    pub fn boot_strap_multi_xact() -> ::types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `CheckpointStats.ckpt_slru_written++` (xlog.c's `CheckpointStats`
     /// global, bumped directly by slru.c during checkpoint write-all).
     /// Narrow write-side capability on the owner's global, same shape as

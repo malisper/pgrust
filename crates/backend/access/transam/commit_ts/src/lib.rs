@@ -948,6 +948,14 @@ fn commit_ts_shmem_init_seam() -> PgResult<()> {
 pub fn init_seams() {
     use commit_ts_seams as seams;
 
+    // `BootStrapCommitTs()` (commit_ts.c) — called once by `BootStrapXLOG`
+    // (xlog.c) at initdb. A no-op in current PG (segments created lazily on
+    // ActivateCommitTs), but it must not panic on the bootstrap path.
+    transam_xlog_seams::boot_strap_commit_ts::set(|| {
+        with_commit_ts_state(BootStrapCommitTs);
+        Ok(())
+    });
+
     // Install the GUC check_hook for commit_timestamp_buffers (the table in
     // guc-tables references this slot by C symbol). The C
     // `check_commit_ts_buffers` records its detail via `GUC_check_errdetail`

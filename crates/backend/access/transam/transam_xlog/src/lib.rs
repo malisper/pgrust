@@ -117,6 +117,8 @@ pub mod guc_vars;
 
 pub mod backup;
 
+pub mod bootstrap_xlog;
+
 pub mod driver;
 pub use driver::{
     CheckXLogRemoved, GetFakeLSNForUnloggedRel, GetFullPageWriteInfo, GetLastImportantRecPtr,
@@ -1002,6 +1004,9 @@ pub fn init_seams() {
     // `StartupXLOG()` — the WAL-engine startup driver (xlog.c). The startup
     // process reaches it through the xlog-seams `startup_xlog` slot.
     s::startup_xlog::set(startup::StartupXLOG);
+    // `BootStrapXLOG(data_checksum_version)` (xlog.c) — the one-time WAL +
+    // control-file install run by `postgres --boot` / `initdb`.
+    s::boot_strap_xlog::set(bootstrap_xlog::BootStrapXLOG);
     // COW-model re-seed of the cluster XID/multixact bounds from the control
     // file, called by the postmaster after the startup process succeeds so the
     // postmaster's fork-inherited copy of `TransamVariables`/`MultiXactState` is

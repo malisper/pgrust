@@ -20,6 +20,7 @@ transam_xlog_seams = { path = "../transam_xlog_seams" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 crc32c = { path = "../../../../port/crc32c" }
+pg_strong_random = { path = "../../../../port/pg_strong_random" }
 s_lock = { path = "../../../storage/lmgr/s_lock" }
 ipc_shmem_seams = { path = "../../../storage/ipc/ipc_shmem_seams" }
 fd_seams = { path = "../../../storage/file/fd_seams" }

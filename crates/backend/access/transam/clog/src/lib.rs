@@ -1070,6 +1070,10 @@ pub fn init_seams() {
     clog_seams::clog_shmem_init::set(clog_shmem_init_seam);
     clog_seams::extend_clog::set(ExtendCLOG);
 
+    // `BootStrapCLOG()` (clog.c) — called once by `BootStrapXLOG` (xlog.c) at
+    // initdb to create + zero the first commit-log page.
+    transam_xlog_seams::boot_strap_clog::set(BootStrapCLOG);
+
     // WAL-startup entry points called once by `StartupXLOG` (xlog.c) on the
     // clean DB_SHUTDOWNED / end-of-recovery path.
     clog_seams::startup_clog::set(StartupCLOG);

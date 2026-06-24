@@ -23,3 +23,4 @@ guc_seams = { path = "../../../utils/misc/guc_seams" }
 varsup_seams = { path = "../varsup_seams" }
 snapmgr_pc_seams = { path = "../../../utils/time/snapmgr_pc_seams" }
 subtrans_seams = { path = "../subtrans_seams" }
+transam_xlog_seams = { path = "../transam_xlog_seams" }

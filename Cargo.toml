@@ -533,6 +533,7 @@ members = [
   "crates/backend/common/backend_common_path_seams",
   "crates/backend/common/backend_common_relpath_seams",
   "crates/backend/common/common_exec_seams",
+  "crates/backend/common/link_canary",
   "crates/backend/common/link_canary_seams",
   "crates/backend/common/relpath",
   "crates/backend/executor/execAmi",

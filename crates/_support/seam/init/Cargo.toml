@@ -34,6 +34,7 @@ next = { path = "../../../backend/access/common/next" }
 bufmask = { path = "../../../backend/access/common/bufmask" }
 toast_internals = { path = "../../../backend/access/common/toast_internals" }
 printtup = { path = "../../../backend/access/common/printtup" }
+link_canary = { path = "../../../backend/common/link_canary" }
 common_relation = { path = "../../../backend/access/common/common_relation" }
 common_reloptions = { path = "../../../backend/access/common/common_reloptions" }
 session = { path = "../../../backend/access/common/session" }

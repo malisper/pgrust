@@ -2745,6 +2745,10 @@ pub fn init_seams() {
     mx_seams::multixact_twophase_postabort::set(multixact_twophase_postabort);
     mx_seams::multixact_redo::set(multixact_redo);
     mx_seams::at_eoxact_multixact::set(AtEOXact_MultiXact);
+
+    // `BootStrapMultiXact()` (multixact.c) — called once by `BootStrapXLOG`
+    // (xlog.c) at initdb to create + zero the first offset/member pages.
+    transam_xlog_seams::boot_strap_multi_xact::set(BootStrapMultiXact);
     mx_seams::at_prepare_multixact::set(AtPrepare_MultiXact);
     mx_seams::post_prepare_multixact::set(post_prepare_multixact_seam);
     mx_seams::multixactoffsetssyncfiletag::set(multixactoffsetssyncfiletag);

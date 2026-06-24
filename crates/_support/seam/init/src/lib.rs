@@ -28,6 +28,7 @@ pub fn init_all() {
     bufmask::init_seams();
     toast_internals::init_seams();
     printtup::init_seams();
+    link_canary::init_seams();
     common_relation::init_seams();
     common_reloptions::init_seams();
     session::init_seams();

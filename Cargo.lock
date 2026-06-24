@@ -10252,6 +10252,7 @@ dependencies = [
  "legacy_pqsignal",
  "libpq_pqsignal",
  "like",
+ "link_canary",
  "lmgr",
  "lmgr_deadlock",
  "lmgr_proc",
@@ -11746,6 +11747,13 @@ dependencies = [
  "types_error",
  "types_wchar",
  "varlena",
+]
+
+[[package]]
+name = "link_canary"
+version = "0.0.0"
+dependencies = [
+ "link_canary_seams",
 ]
 
 [[package]]
@@ -22749,6 +22757,7 @@ dependencies = [
  "snapmgr_pc_seams",
  "subtrans_seams",
  "transam",
+ "transam_xlog_seams",
  "types_core",
  "types_error",
  "types_guc",
@@ -24068,6 +24077,7 @@ dependencies = [
  "miscinit_seams",
  "multixact_seams",
  "origin_seams",
+ "pg_strong_random",
  "pgstat_io_seams",
  "pgstat_seams",
  "pgstrcasecmp",
