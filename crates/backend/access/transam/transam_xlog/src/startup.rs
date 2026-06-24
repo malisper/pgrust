@@ -412,8 +412,9 @@ pub fn StartupXLOG() -> PgResult<()> {
     }
 
     // Pre-scan prepared transactions to find out the XID range present.
+    // (xlog.c:5988 passes NULL/NULL — the xids list is unused on this path.)
     oldest_active_xid =
-        twophase_seam::prescan_prepared_transactions::call(orig_next_xid, transaction_xmin)?;
+        twophase_seam::prescan_prepared_transactions::call(orig_next_xid, transaction_xmin)?.0;
 
     // Allow ordinary WAL segment creation before possibly switching timelines.
     crate::write::SetInstallXLogFileSegmentActive()?;
@@ -773,9 +774,16 @@ fn startup_xlog_redo_phase(
         // The oldest active XID at the start of recovery: from prepared-xact
         // prescan if we started at a shutdown checkpoint, else recorded in the
         // checkpoint record. (xlog.c:5851-5856)
+        // The shutdown-checkpoint branch keeps the prepared-xact xids list to
+        // build the running-xacts snapshot below; the online-checkpoint branch
+        // takes oldestActiveXid from the checkpoint record and needs no list.
+        let mut prepared_xids: ::std::vec::Vec<TransactionId> = ::std::vec::Vec::new();
         let oldest_active_xid = if was_shutdown {
             let next_xid = check_point.nextXid.xid();
-            twophase_seam::prescan_prepared_transactions::call(next_xid, InvalidTransactionId)?
+            let (oldest, xids) =
+                twophase_seam::prescan_prepared_transactions::call(next_xid, InvalidTransactionId)?;
+            prepared_xids = xids;
+            oldest
         } else {
             check_point.oldestActiveXid
         };
@@ -809,21 +817,30 @@ fn startup_xlog_redo_phase(
             // server, with only prepared transactions still alive. We're never
             // overflowed at this point because all subxids are listed with
             // their parent prepared transactions. (xlog.c:5887-5908)
-            //
-            // The prescan above did not surface the prepared-xact xids list
-            // (the prescan_prepared_transactions seam returns only the oldest
-            // active xid). Reconstructing the running-xacts xids array for the
-            // shutdown-checkpoint standby start requires that list; surface the
-            // boundary precisely rather than applying an incomplete snapshot.
-            let _ = oldest_active_xid;
-            return Err(PgError::new(
-                PANIC,
-                "blocked: StartupXLOG hot-standby shutdown-checkpoint running-xacts \
-                 (xlog.c:5887) — ProcArrayApplyRecoveryInfo needs the prepared-xact \
-                 xids list from PrescanPreparedTransactions; the prescan seam returns \
-                 only oldestActiveXID. Standby started from a running (online) \
-                 checkpoint takes the wasShutdown==false path and is unaffected.",
-            ));
+            let cx = mcx::MemoryContext::new("StartupXLOG/running-xacts");
+            // latestCompletedXid = checkPoint.nextXid; TransactionIdRetreat(it)
+            // — decrement, skipping the special XIDs below FirstNormalTransactionId.
+            let mut latest_completed_xid = check_point.nextXid.xid();
+            loop {
+                latest_completed_xid = latest_completed_xid.wrapping_sub(1);
+                if latest_completed_xid >= ::types_core::xact::FirstNormalTransactionId {
+                    break;
+                }
+            }
+            debug_assert!(::types_core::xact::TransactionIdIsNormal(latest_completed_xid));
+            let running = types_storage::storage::RunningTransactionsData {
+                xcnt: prepared_xids.len() as i32,
+                subxcnt: 0,
+                subxid_status: types_storage::storage::SUBXIDS_IN_SUBTRANS,
+                nextXid: check_point.nextXid.xid(),
+                oldestRunningXid: oldest_active_xid,
+                // C leaves oldestDatabaseRunningXid uninitialized here;
+                // ProcArrayApplyRecoveryInfo never reads it on this path.
+                oldestDatabaseRunningXid: InvalidTransactionId,
+                latestCompletedXid: latest_completed_xid,
+                xids: mcx::slice_in(cx.mcx(), &prepared_xids)?,
+            };
+            procarray_seam::proc_array_apply_recovery_info::call(&running)?;
         }
     }
 

@@ -2927,7 +2927,6 @@ pub fn init_seams() {
     seams::prescan_prepared_transactions::set(|orig_next_xid, transaction_xmin| {
         with_twophase_state(|state| {
             prescan_prepared_transactions(state, orig_next_xid, transaction_xmin)
-                .map(|(oldest_active_xid, _xids)| oldest_active_xid)
         })
     });
     seams::standby_recover_prepared_transactions::set(|orig_next_xid, transaction_xmin| {

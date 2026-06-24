@@ -137,15 +137,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `PrescanPreparedTransactions(NULL, NULL)` (twophase.c) — return the oldest
-    /// XID having an unfinished prepared transaction (or `nextXid` if none) so
-    /// `StartupSUBTRANS` knows how far back to zero. Called from `StartupXLOG`
-    /// (xlog.c:5988). The clean path discards the xids list (only used for hot
-    /// standby), so the seam returns just the `oldestActiveXID`.
+    /// `PrescanPreparedTransactions(xids_p, nxids_p)` (twophase.c) — return the
+    /// oldest XID having an unfinished prepared transaction (or `nextXid` if none)
+    /// so `StartupSUBTRANS` knows how far back to zero, plus the list of prepared
+    /// XIDs. Called from `StartupXLOG` (xlog.c:5857, 5988). The clean path
+    /// (xlog.c:5988, C `xids_p == NULL`) drops the list; the hot-standby
+    /// shutdown-checkpoint path (xlog.c:5857) consumes it to build the
+    /// running-xacts snapshot. The seam always collects the list (the C
+    /// `xids_p == NULL` case is just `running.xids` going unused) — the caller
+    /// keeps or drops it.
     pub fn prescan_prepared_transactions(
         orig_next_xid: TransactionId,
         transaction_xmin: TransactionId,
-    ) -> PgResult<TransactionId>
+    ) -> PgResult<(TransactionId, ::std::vec::Vec<TransactionId>)>
 );
 
 seam_core::seam!(
