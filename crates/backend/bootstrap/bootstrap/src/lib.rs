@@ -821,13 +821,23 @@ pub fn InsertOneValue(mcx: Mcx<'static>, value: &str, i: i32) -> PgResult<()> {
     set_values(i as usize, datum.clone());
 
     /*
-     * We use ereport not elog here so parameters aren't evaluated unless the
-     * message is going to be printed, which generally it isn't.
+     * We use ereport not elog here so that parameters aren't evaluated unless
+     * the message is going to be printed, which generally it isn't.
+     *
+     * This guard is load-bearing during bootstrap: the output function for an
+     * already-inserted value (e.g. `regprocout` / `regtypeout`) resolves the
+     * value's namespace via `get_namespace_name`, which opens pg_namespace —
+     * a relation that does not yet exist this early in the BKI run. C's
+     * `ereport(DEBUG4, errmsg(... OidOutputFunctionCall ...))` only calls the
+     * output function when DEBUG4 is actually being emitted; mirror that by
+     * gating the call on `message_level_is_interesting(DEBUG4)`.
      */
-    let out = fmgr_seams::oid_output_function_call_datum::call(mcx, io.typoutput, datum)?;
-    ereport(DEBUG4)
-        .errmsg_internal(format!("inserted -> {}", out.as_str()))
-        .finish(loc(685, "InsertOneValue"))?;
+    if ::utils_error::message_level_is_interesting(DEBUG4) {
+        let out = fmgr_seams::oid_output_function_call_datum::call(mcx, io.typoutput, datum)?;
+        ereport(DEBUG4)
+            .errmsg_internal(format!("inserted -> {}", out.as_str()))
+            .finish(loc(685, "InsertOneValue"))?;
+    }
 
     Ok(())
 }
@@ -1399,6 +1409,55 @@ impl Getopt {
 
 pub fn init_seams() {
     ::bootstrap_seams::boot_get_type_io_data::set(boot_get_type_io_data);
+
+    // `index_register(heap, ind, indexInfo)` (bootstrap.c) — reached from
+    // `index_create` in bootstrap mode to defer the index build. The seam hands
+    // the live `&IndexInfo<'mcx>` and the owner deep-copies it into its
+    // process-lifetime list (C copies into the no-gc bootstrap context). Every
+    // index declared in postgres.bki is a plain key-column index with no
+    // expressions / predicate / exclusion / unique-op lists, so the copy is a
+    // scalar/array field copy with the borrowed `Option<PgVec>` list fields
+    // staying `None`; assert that invariant rather than silently dropping a
+    // borrowed list.
+    ::bootstrap_seams::index_register::set(|_mcx, heap, ind, index_info| {
+        debug_assert!(
+            index_info.ii_Expressions.is_none()
+                && index_info.ii_Predicate.is_none()
+                && index_info.ii_ExclusionOps.is_none()
+                && index_info.ii_UniqueOps.is_none(),
+            "bootstrap index_register: BKI index unexpectedly carries \
+             expression/predicate/exclusion/unique lists"
+        );
+        let static_info = nodes::execnodes::IndexInfo::<'static> {
+            ii_NumIndexAttrs: index_info.ii_NumIndexAttrs,
+            ii_NumIndexKeyAttrs: index_info.ii_NumIndexKeyAttrs,
+            ii_IndexAttrNumbers: index_info.ii_IndexAttrNumbers,
+            ii_Expressions: None,
+            ii_ExpressionsState: None,
+            ii_Predicate: None,
+            ii_PredicateState: None,
+            ii_ExclusionOps: None,
+            ii_ExclusionProcs: None,
+            ii_ExclusionStrats: None,
+            ii_UniqueOps: None,
+            ii_UniqueProcs: None,
+            ii_UniqueStrats: None,
+            ii_Unique: index_info.ii_Unique,
+            ii_NullsNotDistinct: index_info.ii_NullsNotDistinct,
+            ii_ReadyForInserts: index_info.ii_ReadyForInserts,
+            ii_CheckedUnchanged: index_info.ii_CheckedUnchanged,
+            ii_IndexUnchanged: index_info.ii_IndexUnchanged,
+            ii_Concurrent: index_info.ii_Concurrent,
+            ii_BrokenHotChain: index_info.ii_BrokenHotChain,
+            ii_Summarizing: index_info.ii_Summarizing,
+            ii_WithoutOverlaps: index_info.ii_WithoutOverlaps,
+            ii_ParallelWorkers: index_info.ii_ParallelWorkers,
+            ii_Am: index_info.ii_Am,
+            ..Default::default()
+        };
+        index_register(heap, ind, static_info);
+        Ok(())
+    });
 }
 
 #[cfg(test)]
