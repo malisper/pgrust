@@ -43,17 +43,21 @@ use ::mcx::{Mcx, MemoryContext};
 use ::types_catalog::catalog::NAMESPACE_RELATION_ID;
 use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
 use ::types_catalog::pg_collation as cat;
+use ::types_core::fmgr::F_OIDEQ;
 use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
-use ::types_storage::lock::{NoLock, ShareRowExclusiveLock};
-use types_tuple::heaptuple::Datum;
+use ::types_storage::lock::{NoLock, RowExclusiveLock, ShareRowExclusiveLock};
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use types_tuple::heaptuple::{Datum, FormedTuple};
 
 use ::utils_error::ereport;
 use ::types_error::pg_error::ErrorLocation;
 use ::types_error::{PgResult, ERRCODE_DUPLICATE_OBJECT, ERROR, NOTICE};
 
-use ::heaptuple::heap_form_tuple;
+use ::heaptuple::{heap_form_tuple, heap_modify_tuple};
 use ::catalog_catalog::GetNewOidWithIndex;
-use ::indexing::keystone::CatalogTupleInsert;
+use ::indexing::keystone::{CatalogTupleInsert, CatalogTupleUpdate};
+use ::scankey::ScanKeyInit;
+use genam_seams as genam_seams;
 use ::pg_depend::{
     checkMembershipInCurrentExtension, recordDependencyOn, recordDependencyOnCurrentExtension,
 };
@@ -64,7 +68,7 @@ use ::datum::Datum as ScalarWord;
 
 use table_seams as table_seams;
 use objectaccess_seams as objectaccess_seams;
-use ::collationcmds_seams::{collation_create, CollationCreateArgs};
+use ::collationcmds_seams::{collation_create, update_collation_version, CollationCreateArgs};
 use varlena_seams as varlena_seams;
 use mbutils_seams as mbutils_seams;
 use encnames_seams as encnames_seams;
@@ -377,7 +381,109 @@ fn collation_create_handler(args: CollationCreateArgs) -> PgResult<Oid> {
     )
 }
 
+/* ===========================================================================
+ * update_collation_version (collationcmds.c: AlterCollation tail)
+ * ========================================================================= */
+
+/// `ScanKeyInit(&key, attno, BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(value))`.
+fn oid_key<'mcx>(attno: i16, value: Oid) -> PgResult<ScanKeyData<'mcx>> {
+    let mut key = ScanKeyData::empty();
+    ScanKeyInit(
+        &mut key,
+        attno,
+        BTEqualStrategyNumber,
+        F_OIDEQ,
+        Datum::from_oid(value),
+    )?;
+    Ok(key)
+}
+
+/// `SearchSysCacheCopy1(COLLOID, coll_oid)` — a writable copy of the collation's
+/// heap tuple, fetched via an index scan on `CollationOidIndexId` (mirrors
+/// pg_operator's `search_operator_by_oid`). Returns the raw `FormedTuple` (the
+/// caller reads its `t_self` and feeds it to `heap_modify_tuple`).
+fn search_collation_by_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &rel::Relation<'mcx>,
+    oid: Oid,
+) -> PgResult<Option<FormedTuple<'mcx>>> {
+    let skey = [oid_key(cat::Anum_pg_collation_oid as i16, oid)?];
+    let found;
+    {
+        let mut scan = genam_seams::systable_beginscan::call(
+            rel,
+            cat::CollationOidIndexId,
+            true,
+            None,
+            &skey,
+        )?;
+        found = genam_seams::systable_getnext::call(mcx, scan.desc_mut())?;
+        scan.end()?;
+    }
+    Ok(found)
+}
+
+/// `update_collation_version` (the `CatalogTupleUpdate` tail of
+/// `AlterCollation`, collationcmds.c): open `pg_collation` `RowExclusiveLock`,
+/// re-form the row with `collversion = newversion` (NULL ⇒ `None`) for
+/// `coll_oid`, `CatalogTupleUpdate` it, fire `InvokeObjectPostAlterHook`, close
+/// `NoLock`.
+///
+/// C builds the updated tuple with `heap_modify_tuple` only in the
+/// version-changed branch and re-uses the unmodified `SearchSysCacheCopy1` copy
+/// in the unchanged branch; either way it always `CatalogTupleUpdate`s. The
+/// caller (`AlterCollation`) already decided which `newversion` to write (the
+/// new value on a change, the old value on no change), so this seam just writes
+/// the single `collversion` column.
+pub fn UpdateCollationVersion(mcx: Mcx<'_>, coll_oid: Oid, newversion: Option<&str>) -> PgResult<()> {
+    let rel = table_seams::table_open::call(mcx, cat::CollationRelationId, RowExclusiveLock)?;
+
+    let existing = match search_collation_by_oid(mcx, &rel, coll_oid)? {
+        Some(t) => t,
+        None => {
+            rel.close(NoLock)?;
+            return Err(ereport(ERROR)
+                .errmsg_internal(format!("cache lookup failed for collation {coll_oid}"))
+                .into_error());
+        }
+    };
+
+    let tupdesc = rel.rd_att_clone_in(mcx)?;
+    let idx = (cat::Anum_pg_collation_collversion - 1) as usize;
+
+    let mut replaces = [false; cat::Natts_pg_collation];
+    replaces[idx] = true;
+    let mut nulls = [false; cat::Natts_pg_collation];
+    let mut values: [Datum<'_>; cat::Natts_pg_collation] = core::array::from_fn(|_| Datum::null());
+    match newversion {
+        Some(s) => values[idx] = text_datum(mcx, s)?,
+        None => nulls[idx] = true,
+    }
+
+    let otid = existing.tuple.t_self;
+    let mut tup = heap_modify_tuple(mcx, &existing, &tupdesc, &values, &nulls, &replaces)?;
+    CatalogTupleUpdate(mcx, &rel, otid, &mut tup)?;
+
+    /* InvokeObjectPostAlterHook(CollationRelationId, collOid, 0); */
+    objectaccess_seams::invoke_object_post_alter_hook::call(cat::CollationRelationId, coll_oid, 0)?;
+
+    /* heap_freetuple(tup): the formed tuple is dropped at end of scope. */
+    drop(tup);
+    rel.close(NoLock)?;
+    Ok(())
+}
+
+/// The inward `update_collation_version` seam handler. Like `collation_create`
+/// the seam threads no `Mcx`, so the handler owns a scratch `MemoryContext` for
+/// the catalog mutation, dropped on return.
+fn update_collation_version_handler(coll_oid: Oid, newversion: Option<String>) -> PgResult<()> {
+    let scratch = MemoryContext::new("UpdateCollationVersion");
+    let mcx = scratch.mcx();
+    UpdateCollationVersion(mcx, coll_oid, newversion.as_deref())
+}
+
 /// Install every inward seam this unit owns. Wired into `seams-init::init_all`.
 pub fn init_seams() {
     collation_create::set(collation_create_handler);
+    update_collation_version::set(update_collation_version_handler);
 }

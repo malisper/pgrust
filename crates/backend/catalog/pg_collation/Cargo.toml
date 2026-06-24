@@ -47,6 +47,13 @@ cache_syscache = { path = "../../utils/cache/cache_syscache" }
 pg_depend = { path = "../pg_depend" }
 pg_shdepend = { path = "../pg_shdepend" }
 
+# SearchSysCacheCopy1(COLLOID) via an index scan on CollationOidIndexId — the
+# ALTER COLLATION REFRESH VERSION read-modify-write (mirrors pg_operator's
+# SearchSysCacheCopy1(OPEROID) helper).
+scankey = { path = "../../access/common/scankey" }
+genam_seams = { path = "../../access/index/genam_seams" }
+types_scan = { path = "../../../_support/types/types_scan" }
+
 # Outward callees crossed as seams.
 table_seams = { path = "../../access/table/table_seams" }
 objectaccess_seams = { path = "../objectaccess_seams" }
