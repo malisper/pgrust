@@ -494,6 +494,34 @@ fn jumble_utility_node(jstate: &mut JumbleState, node: &Node) {
                 }
             }
         }
+        ntag::T_ClosePortalStmt => {
+            // `_jumbleClosePortalStmt`: JUMBLE_STRING(portalname).
+            let s = node.expect_closeportalstmt();
+            jumble_opt_cstring(jstate, s.portalname.as_deref());
+        }
+        ntag::T_FetchStmt => {
+            // `_jumbleFetchStmt`: direction, howMany, portalname, ismove.
+            let s = node.expect_fetchstmt();
+            jf_u32(jstate, s.direction as u32);
+            jstate.append_jumble(&s.how_many.to_ne_bytes());
+            jumble_opt_cstring(jstate, s.portalname.as_deref());
+            jf_bool(jstate, s.ismove);
+        }
+        ntag::T_TransactionStmt => {
+            // `_jumbleTransactionStmt`: kind, options, chain, JUMBLE_LOCATION.
+            let s = node.expect_transactionstmt();
+            jf_u32(jstate, s.kind as u32);
+            for o in s.options.iter() {
+                jumble_utility_node(jstate, o);
+            }
+            jf_bool(jstate, s.chain);
+            _record_const_location(jstate, s.location);
+        }
+        ntag::T_VariableShowStmt => {
+            // `_jumbleVariableShowStmt`: JUMBLE_STRING(name).
+            let s = node.expect_variableshowstmt();
+            jumble_opt_cstring(jstate, s.name.as_deref());
+        }
         ntag::T_List => {
             if let Some(list) = node.as_list() {
                 for n in list.iter() {
