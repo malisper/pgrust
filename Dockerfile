@@ -1,37 +1,41 @@
 # syntax=docker/dockerfile:1
 #
-# Reproducible build + run image for pgrust (a Rust port of PostgreSQL 18.3).
+# Drop-in replacement for the official `postgres` Docker image
+# (docker-library/postgres), backed by the pgrust `postgres` binary (a Rust port
+# of PostgreSQL 18.3) instead of C postgres.
+#
+# Anyone can swap `postgres` -> `pgrust` in their `docker run` / compose and get
+# the same contract: POSTGRES_PASSWORD / POSTGRES_USER / POSTGRES_DB /
+# POSTGRES_INITDB_ARGS / POSTGRES_HOST_AUTH_METHOD / PGDATA env vars,
+# /docker-entrypoint-initdb.d first-init scripts, PGDATA at
+# /var/lib/postgresql/data (declared a VOLUME), the `postgres` unix user (uid
+# 999), the /var/run/postgresql socket dir, EXPOSE 5432, STOPSIGNAL SIGINT,
+# ENTRYPOINT ["docker-entrypoint.sh"], CMD ["postgres"], and gosu step-down.
+#
+# The ONE substitution: the user-facing SERVER is the pgrust binary. But pgrust's
+# own initdb is unported, so the catalog bootstrap (`initdb`) and the init-script
+# client (`psql`) come from the bundled PostgreSQL 18 PGDG packages, exactly as
+# the official image's tooling. The C `postgres` backend is present too, but it
+# is invoked ONLY by initdb's bootstrap — never as the user-facing server.
 #
 # Three stages:
 #   1. rustbuild — builds the pgrust `postgres` binary. `nodetags.h` is vendored
-#                  in the repo (crates/_support/types/nodes/vendor/nodetags.h),
-#                  so this stage needs no PostgreSQL source at all — just Rust +
-#                  libicu-dev (the ICU collation provider links system ICU via
-#                  pkg-config).
-#   2. pgtools  — pulls the C `initdb` / `psql` / `postgres` + loadable modules
-#                 + libpq + the PostgreSQL share tree from the PGDG apt repo.
-#                 pgrust's own initdb is unported, so a datadir must be created
-#                 by the C `initdb` (which runs the C `postgres` backend to
-#                 bootstrap the catalog); psql is the client. The C `postgres`
-#                 is used ONLY by initdb — it is NOT the user-facing server.
-#   3. final    — slim runtime: the pgrust binary (the server) + those minimal C
-#                 tools + libicu, with an entrypoint that initdb's a datadir,
-#                 boots pgrust by absolute path, and (default CMD) runs a query.
+#                  (crates/_support/types/nodes/vendor/nodetags.h), so this stage
+#                  needs no PostgreSQL source — just Rust + libicu-dev.
+#   2. pgtools  — harvests C initdb / psql / postgres + loadable modules + libpq
+#                 + the PostgreSQL share tree from the PGDG apt repo.
+#   3. final    — official-postgres-compatible runtime.
 #
 # Build:  docker build -t pgrust .
-# Run:    docker run --rm pgrust            # boots + prints version + a query
-#         docker run --rm -it pgrust psql   # interactive psql against pgrust
-#
-# No host mounts are required for the build.
+# Run:    docker run --rm -e POSTGRES_PASSWORD=secret -p 5432:5432 pgrust
 
 # The C tools (initdb / psql / the bootstrap-only postgres backend), their
-# loadable modules, and the share tree are all kept at their PGDG-native paths
-# in the final image. This matters because the C `postgres` backend computes
-# $libdir and the bki/template share dir RELATIVE to its own executable
-# location (configure-time PGBINDIR/PKGLIBDIR/PGSHAREDIR); relocating the binary
+# loadable modules, and the share tree are kept at their PGDG-native paths in the
+# final image, because the C `postgres` backend computes $libdir and the
+# bki/template share dir RELATIVE to its own executable location; relocating it
 # would make initdb's bootstrap backend look for dict_snowball.so etc. in the
-# wrong place. So we leave the whole /usr/lib/postgresql/18 + /usr/share/...
-# layout untouched.
+# wrong place.
+ARG PG_MAJOR=18
 ARG PG_LIBROOT=/usr/lib/postgresql/18
 ARG PG_SHAREDIR=/usr/share/postgresql/18
 
@@ -56,7 +60,7 @@ WORKDIR /src
 COPY . /src
 
 RUN cargo build --release --locked --bin postgres \
-    && cp /build/target/release/postgres /opt/postgres
+    && cp /build/target/release/postgres /opt/pgrust-postgres
 
 # ---------------------------------------------------------------------------
 # Stage 2: obtain the minimal C tools (initdb, psql, libpq, share) from PGDG
@@ -67,10 +71,9 @@ ARG PG_LIBROOT
 ARG PG_SHAREDIR
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Add the PostgreSQL Global Development Group (PGDG) apt repo and install the
-# PostgreSQL 18 server + client packages (server package carries initdb +
-# postgres + the loadable modules + the share/ tree; client package carries
-# psql + libpq).
+# Add the PGDG apt repo and install the PostgreSQL 18 server + client packages
+# (server package carries initdb + postgres + the loadable modules + the share/
+# tree; client package carries psql + libpq).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates gnupg wget \
     && install -d /usr/share/postgresql-common/pgdg \
@@ -84,8 +87,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Sanity-check the layout the final stage relies on, and gather the non-glibc
-# shared libs the three binaries pull in (libpq, libicu, libldap, ...) into a
-# single dir we can copy wholesale. Everything else stays at its native path.
+# shared libs the binaries pull in (libpq, libicu, libldap, ...) into a single
+# dir we can copy wholesale. Everything else stays at its native path.
 RUN set -eux; \
     test -x "${PG_LIBROOT}/bin/initdb"; \
     test -x "${PG_LIBROOT}/bin/psql"; \
@@ -100,22 +103,47 @@ RUN set -eux; \
     done
 
 # ---------------------------------------------------------------------------
-# Stage 3: runtime image
+# Stage 3: runtime image — drop-in compatible with the official postgres image
 # ---------------------------------------------------------------------------
 FROM debian:bookworm-slim AS final
 
+ARG PG_MAJOR
 ARG PG_LIBROOT
 ARG PG_SHAREDIR
 ENV DEBIAN_FRONTEND=noninteractive
-# libicu72 is the only runtime package we install (the pgrust binary links it
-# directly for the ICU collation provider). initdb/psql/postgres's other libs
-# are copied from the pgtools stage into /opt/runlibs.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        libicu72 tzdata \
-    && rm -rf /var/lib/apt/lists/*
 
-# The pgrust binary (this IS the user-facing server).
-COPY --from=rustbuild /opt/postgres /usr/local/bin/postgres
+# The "postgres" user/group with uid/gid 999, exactly like the official image —
+# so a host mounting the data volume sees identical ownership.
+RUN set -eux; \
+    groupadd -r postgres --gid=999; \
+    useradd -r -g postgres --uid=999 --home-dir=/var/lib/postgresql --shell=/bin/bash postgres; \
+    install --verbose --directory --owner postgres --group postgres --mode 1777 /var/lib/postgresql
+
+# Runtime packages:
+#   libicu72        — linked directly by the pgrust binary (ICU collation provider)
+#   tzdata          — system zoneinfo (Debian PG is --with-system-tzdata)
+#   locales         — en_US.utf8 (matches the official image's LANG)
+#   gosu            — root -> postgres step-down (Debian package, like upstream)
+#   libnss-wrapper  — fakes the current uid in /etc/passwd for initdb under --user
+#   xz-utils/zstd/gzip — decompress *.sql.{xz,zst,gz} init scripts
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        libicu72 tzdata locales libnss-wrapper xz-utils zstd gzip \
+        gosu \
+    ; \
+    rm -rf /var/lib/apt/lists/*; \
+    # verify gosu works (and that the "nobody" user resolves) like the official image \
+    gosu nobody true; \
+    localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8 || true
+ENV LANG=en_US.utf8
+
+ENV PG_MAJOR=${PG_MAJOR}
+
+# The pgrust binary (this IS the user-facing server). It is named
+# `pgrust-postgres` so the C `postgres` (needed by initdb) keeps the bare
+# `postgres` name on PATH; the entrypoint launches the server by this path.
+COPY --from=rustbuild /opt/pgrust-postgres /usr/local/bin/pgrust-postgres
 
 # The C tools at their PGDG-native paths (so the bootstrap backend's relative
 # $libdir / share-dir computation resolves correctly):
@@ -130,26 +158,28 @@ ENV PATH=${PG_LIBROOT}/bin:$PATH
 ENV LD_LIBRARY_PATH=/opt/runlibs
 
 # Debian's PostgreSQL is built --with-system-tzdata, so the package share dir
-# ships NO `timezone/` subtree — PG reads the system zoneinfo. The pgrust binary
-# still looks for ${PGRUST_PGSHAREDIR}/timezone, so point it at the system
-# tzdata (identical TZif/zic format). `tzdata` (/usr/share/zoneinfo) is already
-# present via the base image's dependencies.
+# ships NO `timezone/` subtree. The pgrust binary looks for
+# ${PGRUST_PGSHAREDIR}/timezone, so point it at the system tzdata.
 RUN test -d /usr/share/zoneinfo \
-    && ln -s /usr/share/zoneinfo "${PG_SHAREDIR}/timezone"
+    && ln -snf /usr/share/zoneinfo "${PG_SHAREDIR}/timezone"
 
-# Non-root runtime user (PostgreSQL refuses to run as root).
-RUN useradd -m -u 1000 pgrust \
-    && mkdir -p /var/lib/pgrust \
-    && chown -R pgrust:pgrust /var/lib/pgrust
-USER pgrust
+# Official-image data dir + socket dir conventions.
+ENV PGDATA=/var/lib/postgresql/data
+RUN install --verbose --directory --owner postgres --group postgres --mode 1777 /var/lib/postgresql/data
+RUN mkdir -p /var/run/postgresql && chown -R postgres:postgres /var/run/postgresql && chmod 3777 /var/run/postgresql
 
-ENV PGDATA=/var/lib/pgrust/data \
-    PGSOCKDIR=/tmp \
-    PGPORT=5432
+# The entrypoint, installed under the official name so `docker-entrypoint.sh` on
+# PATH works for users who reference it explicitly.
+COPY docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN ln -snf /usr/local/bin/docker-entrypoint.sh /docker-entrypoint.sh # backwards compat
 
-COPY --chown=pgrust:pgrust docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+# First-init scripts dir (official image convention).
+RUN mkdir -p /docker-entrypoint-initdb.d
+
+VOLUME /var/lib/postgresql/data
 
 EXPOSE 5432
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-# Default: boot pgrust and run a sanity query, then exit.
-CMD ["query"]
+STOPSIGNAL SIGINT
+ENTRYPOINT ["docker-entrypoint.sh"]
+# Default: run the server (the entrypoint rewrites this to the pgrust binary).
+CMD ["postgres"]
