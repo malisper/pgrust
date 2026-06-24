@@ -3003,6 +3003,51 @@ fn function_call2_coll_datum_seam<'mcx>(
     arg1: ::types_tuple::heaptuple::Datum<'mcx>,
     arg2: ::types_tuple::heaptuple::Datum<'mcx>,
 ) -> PgResult<::types_tuple::heaptuple::Datum<'mcx>> {
+    // mcx-pooling Phase 1 (FunctionCall2Coll lane): the dominant boolean.sql /
+    // btree-comparator (`bt_compare` → `btint4cmp`/etc.) hot path lands here, and
+    // it re-resolved `fmgr_info(function_id)` (a `BuiltinFunction` `String` clone
+    // + fresh `FmgrInfo`) AND allocated/dropped a fresh `FunctionCallInfoBaseData`
+    // (two `vec![]` + a boxed `flinfo`) on EVERY comparison. Reuse the cached
+    // built-in resolution (an `Rc` bump) and a pooled frame, exactly as
+    // `function_call_invoke_datum_resolved_seam` does. A NON-built-in `fn_oid`
+    // (catalog / security-definer / SQL function) returns `None` and falls
+    // through to the verbatim by-OID path below, so DDL invalidation, the secdef
+    // userid switch, and SQL dispatch are unaffected. There is no `fn_expr` and
+    // no `escontext` on the FunctionCall2Coll C API, so the cached resolution is
+    // borrowed directly (no per-call `fn_expr` re-stamp / clone).
+    if let Some(resolved) = resolved_builtin_cached(mcx, function_id)? {
+        // datum_to_ref_arg never marks a NULL: FunctionCall2Coll's caller passes
+        // its args by the C contract (the carrier always pairs a non-NULL word
+        // with the by-ref referent), so the `isnull=false` it sets is kept.
+        let (a1, r1) = datum_to_ref_arg(&arg1);
+        let (a2, r2) = datum_to_ref_arg(&arg2);
+        let mut frame = fcinfo_pool_take(Some(resolved.finfo.clone()), collation);
+        frame.args.push(a1);
+        frame.args.push(a2);
+        frame.nargs = 2;
+        let ref_args = vec![r1, r2];
+        let out = dispatch_resolved_into_frame(mcx, &resolved, &mut frame, ref_args, None);
+        fcinfo_pool_return(frame);
+        return match out? {
+            // C `FunctionCall2Coll`: `if (fcinfo->isnull) elog(ERROR, "function
+            // %u returned NULL", flinfo->fn_oid)`. The shared
+            // `dispatch_resolved_into_frame` allows NULL (it is shared with the
+            // executor `EEOP_FUNCEXPR` lane, where a NULL return is legal), so the
+            // C-API NULL self-check is re-applied here — the by-OID path below
+            // does it via `invoke_flinfo`/`null_check`, and this fast path must
+            // not drop that leg.
+            Some((_value, true)) => Err(PgError::error(format!(
+                "function {function_id} returned NULL"
+            ))),
+            Some((value, false)) => Ok(value),
+            // No escontext was installed, so a soft error never occurs.
+            None => unreachable!(
+                "function_call2_coll_datum (resolved) with NULL escontext never soft-fails"
+            ),
+        };
+    }
+
+    // Non-built-in: verbatim by-OID path (unchanged semantics).
     let resolved = fmgr_info(mcx, function_id)?;
     let (a1, r1) = datum_to_ref_arg(&arg1);
     let (a2, r2) = datum_to_ref_arg(&arg2);
