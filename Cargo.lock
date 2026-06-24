@@ -10534,6 +10534,7 @@ dependencies = [
  "logicalfuncs",
  "lsn_trigfuncs",
  "lsyscache",
+ "ltree",
  "lwlock",
  "lz4",
  "mac",
@@ -12533,6 +12534,24 @@ dependencies = [
  "types_core",
  "types_error",
  "types_selfuncs",
+ "types_tuple",
+]
+
+[[package]]
+name = "ltree"
+version = "0.0.0"
+dependencies = [
+ "crc32c",
+ "datum",
+ "dfmgr_seams",
+ "fmgr",
+ "formatting_seams",
+ "hashfn",
+ "mbutils",
+ "mcx",
+ "ts_locale_seams",
+ "types_core",
+ "types_error",
  "types_tuple",
 ]
 

@@ -22,6 +22,7 @@ pub fn init_all() {
     uuid_ossp::init_seams();
     citext::init_seams();
     hstore::init_seams();
+    ltree::init_seams();
     pg_trgm::init_seams();
     shell_archive::init_seams();
     commands_async::init_seams();

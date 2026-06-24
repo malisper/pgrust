@@ -1428,6 +1428,7 @@ members = [
   "crates/contrib/earthdistance",
   "crates/contrib/hstore",
   "crates/contrib/hstoresubs_seams",
+  "crates/contrib/ltree",
   "crates/contrib/pgcrypto",
   "crates/contrib/pg_prewarm",
   "crates/contrib/pg_stat_statements",
