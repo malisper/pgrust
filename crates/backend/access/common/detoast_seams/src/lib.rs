@@ -82,11 +82,14 @@ seam_core::seam!(
     /// including the varlena header. Unlike [`toast_datum_size`] (the physical
     /// on-disk size), this reports what the value occupies once expanded, which
     /// is what `compute_array_stats` compares against `ARRAY_WIDTH_THRESHOLD`.
-    /// `value` is the canonical `'mcx` value (a varlena array). `Err` carries
-    /// the toast-fetch `ereport(ERROR)` surface.
+    /// `value` is the canonical `'mcx` value (a varlena array), borrowed: this
+    /// measures the value's logical width by reading VARSIZE through the
+    /// pointer, exactly as C's `toast_raw_datum_size(value)` does — no copy of
+    /// the value is needed. `Err` carries the toast-fetch `ereport(ERROR)`
+    /// surface.
     pub fn toast_raw_datum_size<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        value: types_tuple::Datum<'mcx>,
+        value: &types_tuple::Datum<'mcx>,
     ) -> types_error::PgResult<i64>
 );
 

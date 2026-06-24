@@ -166,7 +166,7 @@ pub fn build_sorted_items<'mcx>(
             let attlen = typlen[idx];
 
             if !isn && attlen == -1 {
-                if toast_raw_datum_size::call(mcx, value.clone())? > WIDTH_THRESHOLD {
+                if toast_raw_datum_size::call(mcx, &value)? > WIDTH_THRESHOLD {
                     toowide = true;
                     break;
                 }

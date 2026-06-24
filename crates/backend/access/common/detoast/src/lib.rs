@@ -752,7 +752,7 @@ fn toast_datum_size_seam(mcx: Mcx<'_>, attr: &[u8]) -> PgResult<usize> {
 /// we forward the stored image to [`toast_raw_datum_size`].
 fn toast_raw_datum_size_seam<'mcx>(
     mcx: Mcx<'mcx>,
-    value: types_tuple::Datum<'mcx>,
+    value: &types_tuple::Datum<'mcx>,
 ) -> PgResult<i64> {
     Ok(toast_raw_datum_size(mcx, value.as_ref_bytes())? as i64)
 }

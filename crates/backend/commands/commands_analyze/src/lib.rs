@@ -1902,7 +1902,7 @@ fn compute_distinct_stats_inner<'mcx>(
 
         if is_varlena {
             total_width += varsize_any_datum(&value) as f64;
-            if detoast::toast_raw_datum_size::call(mcx, value.clone())? as u32 > WIDTH_THRESHOLD {
+            if detoast::toast_raw_datum_size::call(mcx, &value)? as u32 > WIDTH_THRESHOLD {
                 toowide_cnt += 1;
                 continue;
             }
@@ -2139,7 +2139,7 @@ fn compute_scalar_stats_inner<'mcx>(
 
         if is_varlena {
             total_width += varsize_any_datum(&value) as f64;
-            if detoast::toast_raw_datum_size::call(mcx, value.clone())? as u32 > WIDTH_THRESHOLD {
+            if detoast::toast_raw_datum_size::call(mcx, &value)? as u32 > WIDTH_THRESHOLD {
                 toowide_cnt += 1;
                 continue;
             }

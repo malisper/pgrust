@@ -448,7 +448,7 @@ pub fn compute_array_stats(
         }
 
         /* Skip too-large values. */
-        if toast_raw_datum_size::call(mcx, value.clone())? > ARRAY_WIDTH_THRESHOLD {
+        if toast_raw_datum_size::call(mcx, &value)? > ARRAY_WIDTH_THRESHOLD {
             array_no += 1;
             continue;
         } else {
