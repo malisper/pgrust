@@ -275,6 +275,7 @@ pub fn ts_headline_jsonb_byid_opt<'mcx>(
     opt: Option<&[u8]>,
 ) -> PgResult<Vec<u8>> {
     let state = headline_json_state(mcx, tsconfig, query_image, opt)?;
+    let jb: &'mcx [u8] = ::mcx::slice_borrow_in(mcx, jb)?;
     let out = transform_jsonb_string_values(mcx, jb, &mut |m: Mcx<'mcx>, elem: &[u8]| {
         state.headline_json_value(m, elem)
     })?;

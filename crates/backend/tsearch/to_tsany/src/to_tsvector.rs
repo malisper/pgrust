@@ -154,13 +154,13 @@ pub fn jsonb_to_tsvector_byid<'mcx>(
     jb: &[u8],
     jb_flags: &[u8],
 ) -> PgResult<Vec<u8>> {
-    let flags = parse_jsonb_index_flags(jb_flags)?;
+    let flags = parse_jsonb_index_flags(mcx, ::mcx::slice_borrow_in(mcx, jb_flags)?)?;
     jsonb_to_tsvector_worker(mcx, cfg_id, jb, flags)
 }
 
 /// `jsonb_to_tsvector` (to_tsany.c:343): current config + parsed flags.
 pub fn jsonb_to_tsvector<'mcx>(mcx: Mcx<'mcx>, jb: &[u8], jb_flags: &[u8]) -> PgResult<Vec<u8>> {
-    let flags = parse_jsonb_index_flags(jb_flags)?;
+    let flags = parse_jsonb_index_flags(mcx, ::mcx::slice_borrow_in(mcx, jb_flags)?)?;
     let cfg_id = getTSCurrentConfig(true)?;
     jsonb_to_tsvector_worker(mcx, cfg_id, jb, flags)
 }
@@ -181,14 +181,19 @@ pub fn json_string_to_tsvector(json: &[u8]) -> PgResult<Vec<u8>> {
 }
 
 /// `json_to_tsvector_byid` (to_tsany.c:406): flags from the jsonb flag array.
-pub fn json_to_tsvector_byid(cfg_id: Oid, json: &[u8], jb_flags: &[u8]) -> PgResult<Vec<u8>> {
-    let flags = parse_jsonb_index_flags(jb_flags)?;
+pub fn json_to_tsvector_byid<'mcx>(
+    mcx: Mcx<'mcx>,
+    cfg_id: Oid,
+    json: &[u8],
+    jb_flags: &[u8],
+) -> PgResult<Vec<u8>> {
+    let flags = parse_jsonb_index_flags(mcx, ::mcx::slice_borrow_in(mcx, jb_flags)?)?;
     json_to_tsvector_worker(cfg_id, json, flags)
 }
 
 /// `json_to_tsvector` (to_tsany.c:422): current config + parsed flags.
-pub fn json_to_tsvector(json: &[u8], jb_flags: &[u8]) -> PgResult<Vec<u8>> {
-    let flags = parse_jsonb_index_flags(jb_flags)?;
+pub fn json_to_tsvector<'mcx>(mcx: Mcx<'mcx>, json: &[u8], jb_flags: &[u8]) -> PgResult<Vec<u8>> {
+    let flags = parse_jsonb_index_flags(mcx, ::mcx::slice_borrow_in(mcx, jb_flags)?)?;
     let cfg_id = getTSCurrentConfig(true)?;
     json_to_tsvector_worker(cfg_id, json, flags)
 }

@@ -217,14 +217,16 @@ fn fc_json_to_tsvector_byid(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<D
     let cfg = arg_oid(fcinfo, 0);
     let json = arg_text(fcinfo, 1).to_vec();
     let jb_flags = arg_jsonb_image(fcinfo, 2).to_vec();
-    let img = crate::to_tsvector::json_to_tsvector_byid(cfg, &json, &jb_flags)?;
+    let m = scratch_mcx();
+    let img = crate::to_tsvector::json_to_tsvector_byid(m.mcx(), cfg, &json, &jb_flags)?;
     Ok(ret_varlena_image(fcinfo, img))
 }
 
 fn fc_json_to_tsvector(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let json = arg_text(fcinfo, 0).to_vec();
     let jb_flags = arg_jsonb_image(fcinfo, 1).to_vec();
-    let img = crate::to_tsvector::json_to_tsvector(&json, &jb_flags)?;
+    let m = scratch_mcx();
+    let img = crate::to_tsvector::json_to_tsvector(m.mcx(), &json, &jb_flags)?;
     Ok(ret_varlena_image(fcinfo, img))
 }
 
