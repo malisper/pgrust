@@ -106,6 +106,9 @@ pub fn lookup_latch(latch: LatchHandle) -> Arc<Latch> {
         LatchKind::Proc(_) => {
             panic!("lookup_latch: per-PGPROC procLatch is not an owned Arc; use with_latch")
         }
+        LatchKind::RecoveryWakeup => {
+            panic!("lookup_latch: recovery wakeup latch is not an owned Arc; use with_latch")
+        }
     }
 }
 
@@ -128,6 +131,7 @@ fn with_latch<R>(latch: LatchHandle, mut f: impl FnMut(&Latch) -> R) -> R {
             f(&arc)
         }
         LatchKind::Proc(procno) => with_proc_latch(procno, f),
+        LatchKind::RecoveryWakeup => with_recovery_wakeup_latch(f),
     }
 }
 
@@ -140,6 +144,20 @@ fn with_proc_latch<R>(procno: ProcNumber, mut f: impl FnMut(&Latch) -> R) -> R {
         result = Some(f(latch));
     });
     result.expect("with_proc_latch: proc seam did not invoke the callback")
+}
+
+/// Run `f` over `&XLogRecoveryCtl->recoveryWakeupLatch` via the xlogrecovery
+/// unit's `with_recovery_wakeup_latch` seam, capturing `f`'s result out of the
+/// void-returning callback shape. This is the embedded-in-shmem recovery
+/// wakeup latch the startup process owns/waits on — reached exactly like a
+/// per-PGPROC `procLatch`, through the owning unit's seam rather than this
+/// unit's registry.
+fn with_recovery_wakeup_latch<R>(mut f: impl FnMut(&Latch) -> R) -> R {
+    let mut result: Option<R> = None;
+    xlogrecovery_seams::with_recovery_wakeup_latch::call(&mut |latch: &Latch| {
+        result = Some(f(latch));
+    });
+    result.expect("with_recovery_wakeup_latch: recovery seam did not invoke the callback")
 }
 
 thread_local! {

@@ -11522,6 +11522,7 @@ dependencies = [
  "types_storage",
  "vacuumlazy_seams",
  "waiteventset_seams",
+ "xlogrecovery_seams",
 ]
 
 [[package]]
@@ -26827,6 +26828,7 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+ "types_storage",
  "wal",
 ]
 

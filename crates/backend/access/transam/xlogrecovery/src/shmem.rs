@@ -243,24 +243,17 @@ pub fn XLogRecoveryShmemInit() -> PgResult<()> {
 /// `&XLogRecoveryCtl->recoveryWakeupLatch` as a [`LatchHandle`] — the recovery
 /// wakeup latch identified for `OwnLatch`/`SetLatch`/`WaitLatch` by the latch
 /// unit's handle convention (the single recovery-shmem latch). Returned for
-/// later families (`OwnLatch` in `InitWalRecovery`, `WakeupRecovery`'s
-/// `SetLatch`) that thread it through the latch seams.
+/// the families that thread it through the latch seams: `OwnLatch` /
+/// `DisownLatch` in `InitWalRecovery` / `ShutdownWalRecovery`, and the
+/// `WaitLatch`/`ResetLatch` of the recovery wait loop. The [`with_latch`]
+/// dispatch in the latch unit decodes this reserved id to
+/// [`LatchKind::RecoveryWakeup`] and resolves it to the real embedded shmem
+/// latch through the `with_recovery_wakeup_latch` seam this unit installs in
+/// [`init_seams`](crate::init_seams).
 #[inline]
 pub fn recovery_wakeup_latch_handle() -> LatchHandle {
-    // The recovery-shmem latch is a single, distinct shared latch; the latch
-    // unit reserves handle slot 0 for "no latch", so this subsystem's latch is
-    // a dedicated reserved id agreed with the latch unit.
-    LatchHandle::new(RECOVERY_WAKEUP_LATCH_ID)
+    LatchHandle::recovery_wakeup()
 }
-
-/// Reserved `LatchHandle` id for the recovery wakeup latch (a single,
-/// process-global shared latch). It lives in this subsystem's own shmem
-/// (`XLogRecoveryCtl->recoveryWakeupLatch`), not the latch unit's registry, so
-/// this is still an unregistered local id — a latent handle for the not-yet-
-/// wired recovery `OwnLatch`/`SetLatch` families. It stays in the *local*
-/// handle space (the `PROC_TAG` bit clear), distinct from the per-PGPROC
-/// `procLatch` space (`LatchHandle::proc`).
-const RECOVERY_WAKEUP_LATCH_ID: usize = ::types_storage::latch::PROC_TAG - 1;
 
 // ===========================================================================
 // Shmem state accessors (the genuine shmem reads/writes, under info_lck where
@@ -553,6 +546,19 @@ pub(crate) fn set_promote_is_triggered() {
 /// requested. Sets the shared recovery-wakeup latch.
 pub fn wakeup_recovery() {
     latch::SetLatchPtr(&ctl().recoveryWakeupLatch);
+}
+
+/// Run `f` over `&XLogRecoveryCtl->recoveryWakeupLatch` — the body of the
+/// `with_recovery_wakeup_latch` seam the latch unit calls to reach this
+/// embedded-in-shmem shared latch (the faithful `&XLogRecoveryCtl->
+/// recoveryWakeupLatch` C pointer). The startup process drives
+/// `OwnLatch`/`WaitLatch`/`ResetLatch`/`DisownLatch` against it through the
+/// recovery-wakeup handle, which [`latch::with_latch`] decodes to this latch.
+/// Mirrors the proc unit's `with_proc_latch` for `&proc->procLatch`.
+pub fn with_recovery_wakeup_latch(
+    f: &mut dyn FnMut(&::types_storage::latch::Latch),
+) {
+    f(&ctl().recoveryWakeupLatch);
 }
 
 /// `void XLogRequestWalReceiverReply(void)` (xlogrecovery.c:4528) — schedule a

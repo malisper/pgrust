@@ -68,6 +68,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Run `f` over `&XLogRecoveryCtl->recoveryWakeupLatch` — the single
+    /// recovery-wakeup shared `Latch`, which lives embedded in the
+    /// xlogrecovery unit's own shared memory. The latch unit reaches it
+    /// through this callback (mirroring the proc unit's `with_proc_latch` for
+    /// `&proc->procLatch`) so it can apply its
+    /// `OwnLatch`/`DisownLatch`/`WaitLatch`/`ResetLatch` algorithm to the
+    /// *real* shmem latch (faithful to the C `Latch *`) instead of the latch
+    /// unit's own registry. A callback shape (not a returned reference) keeps
+    /// the shmem borrow contained (AGENTS.md: seams never return `&'static
+    /// mut`). The startup process is the sole owner/waiter, so there is no
+    /// procno parameter — there is exactly one such latch.
+    pub fn with_recovery_wakeup_latch(f: &mut dyn FnMut(&::types_storage::latch::Latch))
+);
+
+seam_core::seam!(
     /// `TimestampTz GetCurrentChunkReplayStartTime(void)` (xlogrecovery.c) —
     /// the timestamp of the WAL chunk currently being replayed, or 0 when
     /// unavailable. Consumed by `GetReplicationApplyDelay`.

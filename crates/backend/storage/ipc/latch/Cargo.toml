@@ -18,6 +18,7 @@ vacuumlazy_seams = { path = "../../../access/heap/vacuumlazy_seams" }
 procarray_seams = { path = "../procarray_seams" }
 waiteventset_seams = { path = "../waiteventset_seams" }
 lmgr_proc_seams = { path = "../../lmgr/lmgr_proc_seams" }
+xlogrecovery_seams = { path = "../../../access/transam/xlogrecovery_seams" }
 init_small_seams = { path = "../../../utils/init/init_small_seams" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }

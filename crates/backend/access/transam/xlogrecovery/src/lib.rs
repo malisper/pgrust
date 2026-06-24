@@ -143,6 +143,7 @@ pub fn init_seams() {
     // `Local*` caches), so they take no `XLogRecoveryState`.
     seams::get_xlog_receipt_time::set(shmem::get_xlog_receipt_time);
     seams::wakeup_recovery::set(shmem::wakeup_recovery);
+    seams::with_recovery_wakeup_latch::set(shmem::with_recovery_wakeup_latch);
     seams::promote_is_triggered::set(shmem::promote_is_triggered);
     seams::hot_standby_active::set(shmem::hot_standby_active);
     seams::startup_request_wal_receiver_restart::set(shmem::startup_request_wal_receiver_restart);

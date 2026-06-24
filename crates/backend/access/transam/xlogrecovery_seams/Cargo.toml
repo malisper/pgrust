@@ -15,3 +15,4 @@ wal = { path = "../../../../_support/types/wal" }
 control = { path = "../../../../_support/types/control" }
 mcx = { path = "../../../../_support/mcx" }
 types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }

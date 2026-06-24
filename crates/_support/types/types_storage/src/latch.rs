@@ -27,6 +27,15 @@ use ::types_core::ProcNumber;
 ///   `ProcGlobal->allProcs[procno].procLatch` by its `ProcNumber`; the proc
 ///   unit owns that array, the latch unit reaches the embedded `Latch`
 ///   through the proc unit's seam.
+/// * **RecoveryWakeup** — the single shared latch
+///   `XLogRecoveryCtl->recoveryWakeupLatch`. It lives embedded in the
+///   xlogrecovery unit's own shared memory (neither the latch unit's registry
+///   nor a `PGPROC`), so — exactly like **Proc** — the latch unit reaches the
+///   embedded `Latch` through that unit's seam. C names it by the plain
+///   pointer `&XLogRecoveryCtl->recoveryWakeupLatch`; the startup process
+///   `OwnLatch`/`WaitLatch`/`ResetLatch`/`DisownLatch`es it and the WAL
+///   receiver / checkpointer `SetLatch` it. There is only ever one, so a
+///   single reserved id ([`RECOVERY_WAKEUP_ID`]) names it.
 ///
 /// `lookup`/`SetLatch` dispatch on [`kind`](LatchHandle::kind), so a
 /// procno-derived handle resolves to the right PGPROC's latch instead of
@@ -39,6 +48,13 @@ pub struct LatchHandle(usize);
 /// local registry.
 pub const PROC_TAG: usize = 1usize << (usize::BITS - 1);
 
+/// Reserved [`LatchHandle`] id naming the single recovery-wakeup latch
+/// (`XLogRecoveryCtl->recoveryWakeupLatch`). It is `usize::MAX` — an id no
+/// `Local` registry slot (`index + 1`, bounded by allocation) and no `Proc`
+/// handle (`PROC_TAG | procno`, with `procno` a small array index) can ever
+/// collide with, so it is unambiguous against both spaces.
+pub const RECOVERY_WAKEUP_ID: usize = usize::MAX;
+
 /// Which `Latch` allocation a [`LatchHandle`] names (see [`LatchHandle`]).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum LatchKind {
@@ -47,6 +63,9 @@ pub enum LatchKind {
     Local(usize),
     /// `ProcGlobal->allProcs[procno].procLatch`, named by its `ProcNumber`.
     Proc(ProcNumber),
+    /// `XLogRecoveryCtl->recoveryWakeupLatch` — the single recovery-wakeup
+    /// shared latch embedded in the xlogrecovery unit's shared memory.
+    RecoveryWakeup,
 }
 
 impl LatchHandle {
@@ -66,6 +85,14 @@ impl LatchHandle {
         LatchHandle(PROC_TAG | (procno as usize))
     }
 
+    /// Mint the handle naming `XLogRecoveryCtl->recoveryWakeupLatch` (the
+    /// single recovery-wakeup shared latch). The xlogrecovery unit owns that
+    /// shmem-embedded `Latch`; the latch unit resolves it through that unit's
+    /// seam.
+    pub fn recovery_wakeup() -> Self {
+        LatchHandle(RECOVERY_WAKEUP_ID)
+    }
+
     /// The raw owner-side id this handle names (tag bit included).
     pub fn as_usize(self) -> usize {
         self.0
@@ -73,7 +100,9 @@ impl LatchHandle {
 
     /// Decode which `Latch` allocation this handle names.
     pub fn kind(self) -> LatchKind {
-        if self.0 & PROC_TAG != 0 {
+        if self.0 == RECOVERY_WAKEUP_ID {
+            LatchKind::RecoveryWakeup
+        } else if self.0 & PROC_TAG != 0 {
             LatchKind::Proc((self.0 & !PROC_TAG) as ProcNumber)
         } else {
             LatchKind::Local(self.0)
