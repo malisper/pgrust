@@ -410,6 +410,9 @@ pub fn PostmasterMain(argv: &[&str]) -> ! {
     /* Initialize SSL library, if specified. */
     if sp::enable_ssl::call() {
         // secure_initialize(true); LoadedSSL = true — owned by the SSL provider.
+        // On server start any error is reported FATAL (does not return).
+        be_secure_seams::secure_initialize::call(true)
+            .unwrap_or_else(|e| panic!("secure_initialize: {e:?}"));
     }
 
     /* Calculate MaxBackends + the child-slot table + fast-path locks. */

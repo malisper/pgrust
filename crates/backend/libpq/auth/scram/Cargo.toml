@@ -32,3 +32,6 @@ crypto = { path = "../../../../_support/types/crypto" }
 types_error = { path = "../../../../_support/types/types_error" }
 net = { path = "../../../../_support/types/net" }
 stringinfo = { path = "../../../../_support/types/stringinfo" }
+# be_tls_get_certificate_hash — server-cert hash for tls-server-end-point
+# channel binding (SCRAM-SHA-256-PLUS).
+be_secure_seams = { path = "../../be_secure_seams" }

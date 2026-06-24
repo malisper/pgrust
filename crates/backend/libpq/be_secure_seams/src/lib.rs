@@ -160,3 +160,24 @@ seam_core::seam!(
     /// `-1` on failure. Infallible at the ereport level.
     pub fn secure_open_gssapi(port: &mut net::Port) -> i32
 );
+
+seam_core::seam!(
+    /// `int secure_initialize(bool isServerStart)` (`libpq/be-secure.c`) —
+    /// initialize the global TLS context from the SSL GUCs. Called once by the
+    /// postmaster (`isServerStart == true`) when `ssl` is on, and again on
+    /// SIGHUP reloads. Returns `0` on success, `-1` on failure (errors logged
+    /// at LOG when not server start). `Err` carries a FATAL report (server
+    /// start does not return on error).
+    pub fn secure_initialize(is_server_start: bool) -> types_error::PgResult<i32>
+);
+
+seam_core::seam!(
+    /// `char *be_tls_get_certificate_hash(Port *port, size_t *len)`
+    /// (`libpq/be-secure-openssl.c`) — the hash of the server's TLS certificate,
+    /// for SCRAM `tls-server-end-point` channel binding (RFC 5929). `None` when
+    /// no server certificate is in use; otherwise the raw hash bytes (the hash
+    /// algorithm follows the cert's signature algorithm per RFC 5929 §4.1).
+    pub fn be_tls_get_certificate_hash(
+        port: &mut net::Port,
+    ) -> types_error::PgResult<Option<Vec<u8>>>
+);

@@ -201,7 +201,40 @@ extern "C" {
     fn ERR_get_error() -> c_ulong_t;
     fn ERR_clear_error();
     fn ERR_reason_error_string(e: c_ulong_t) -> *const c_char;
+
+    // Server-certificate hashing for SCRAM tls-server-end-point channel binding.
+    fn SSL_get_certificate(ssl: *const SSL) -> *mut X509;
+    fn X509_get_signature_info(
+        x: *mut X509,
+        mdnid: *mut c_int,
+        pknid: *mut c_int,
+        secbits: *mut c_int,
+        flags: *mut u32,
+    ) -> c_int;
+    fn X509_digest(
+        data: *const X509,
+        type_0: *const EVP_MD,
+        md: *mut c_uchar,
+        len: *mut c_uint,
+    ) -> c_int;
+    fn EVP_sha256() -> *const EVP_MD;
+    // `EVP_get_digestbynid(nid)` is a header macro for
+    // `EVP_get_digestbyobj(OBJ_nid2obj(nid))`; neither is an exported symbol on
+    // OpenSSL 3. Resolve the digest by its short name instead (the path the
+    // macro ultimately reaches via the OBJ tables).
+    fn EVP_get_digestbyname(name: *const c_char) -> *const EVP_MD;
 }
+
+#[repr(C)]
+struct EVP_MD {
+    _p: [u8; 0],
+}
+
+// EVP_MAX_MD_SIZE (openssl/evp.h) — large enough for SHA-512.
+const EVP_MAX_MD_SIZE: usize = 64;
+// Signature-algorithm NIDs (openssl/obj_mac.h) needing SHA-256 substitution.
+const NID_md5: c_int = 4;
+const NID_sha1: c_int = 64;
 
 #[allow(non_camel_case_types)]
 type c_ulong_t = core::ffi::c_ulong;
@@ -889,6 +922,46 @@ pub fn install() {
     });
     seams::ssl_get_peer_certificate::set(|ssl| unsafe {
         tok(SSL_get1_peer_certificate(ptr_ssl(ssl)))
+    });
+    seams::ssl_get_certificate_hash::set(|ssl| unsafe {
+        // server_cert = SSL_get_certificate(port->ssl);
+        let server_cert = SSL_get_certificate(ptr_ssl(ssl));
+        if server_cert.is_null() {
+            return None; // *len = 0; return NULL;
+        }
+        // Pick the digest from the cert's signature algorithm (RFC 5929 §4.1).
+        let mut algo_nid: c_int = 0;
+        if X509_get_signature_info(
+            server_cert,
+            &mut algo_nid,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        ) == 0
+        {
+            // elog(ERROR) in C; the SCRAM caller surfaces "could not get server
+            // certificate hash" when this returns None.
+            return None;
+        }
+        let algo_type = if algo_nid == NID_md5 || algo_nid == NID_sha1 {
+            EVP_sha256()
+        } else {
+            // EVP_get_digestbynid(algo_nid) -> EVP_get_digestbyname(OBJ_nid2sn).
+            let sn = OBJ_nid2sn(algo_nid);
+            if sn.is_null() {
+                return None;
+            }
+            EVP_get_digestbyname(sn)
+        };
+        if algo_type.is_null() {
+            return None;
+        }
+        let mut hash = [0u8; EVP_MAX_MD_SIZE];
+        let mut hash_size: c_uint = 0;
+        if X509_digest(server_cert, algo_type, hash.as_mut_ptr(), &mut hash_size) == 0 {
+            return None;
+        }
+        Some(hash[..hash_size as usize].to_vec())
     });
     seams::x509_get_subject_name::set(|cert| unsafe {
         tok(X509_get_subject_name(ptr_x509(cert)))

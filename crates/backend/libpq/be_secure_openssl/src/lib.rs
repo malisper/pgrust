@@ -1223,6 +1223,21 @@ pub fn be_tls_get_peer_serial<'mcx>(
     PgString::from_str_in(&s, mcx)
 }
 
+/// `char *be_tls_get_certificate_hash(Port *port, size_t *len)`.
+///
+/// The hash of the *server*'s certificate, for SCRAM `tls-server-end-point`
+/// channel binding (RFC 5929). Returns the raw hash bytes, or `None` when the
+/// server has no certificate (the C `return NULL` with `*len = 0`). The digest
+/// selection (`X509_get_signature_info`, the MD5/SHA-1→SHA-256 substitution)
+/// and `X509_digest` are performed inside the provider.
+pub fn be_tls_get_certificate_hash(port: &mut Port) -> Option<Vec<u8>> {
+    let ssl = port_ssl(port.sock);
+    if ssl == 0 {
+        return None;
+    }
+    ffi::ssl_get_certificate_hash::call(ssl)
+}
+
 /* ========================================================================= *
  *  File-scope GUC reads used by the open-server protocol-hint path.
  * ========================================================================= */
@@ -1260,5 +1275,6 @@ pub fn init_seams() {
     be_secure_seams::be_tls_get_peer_subject_name::set(be_tls_get_peer_subject_name);
     be_secure_seams::be_tls_get_peer_issuer_name::set(be_tls_get_peer_issuer_name);
     be_secure_seams::be_tls_get_peer_serial::set(be_tls_get_peer_serial);
+    be_secure_seams::be_tls_get_certificate_hash::set(|port| Ok(be_tls_get_certificate_hash(port)));
     init_bio_bridge_seams();
 }

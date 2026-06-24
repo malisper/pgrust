@@ -58,3 +58,5 @@ init_small_seams = { path = "../../utils/init/init_small_seams" }
 xlogprefetcher = { path = "../../access/transam/xlogprefetcher" }
 syslogger = { path = "../../postmaster/syslogger" }
 pqcomm = { path = "../../libpq/pqcomm" }
+# ssl_supported() — the build's `#ifdef USE_SSL` guard for check_ssl.
+be_secure_seams = { path = "../../libpq/be_secure_seams" }

@@ -271,13 +271,14 @@ pub fn pg_strcasecmp(s1: &[u8], s2: &[u8]) -> i32 {
 // build, faithful to the compiled configuration.
 // ===========================================================================
 
-/// `USE_SSL` (build flag).
-pub(crate) const fn use_ssl() -> bool {
-    false
+/// `USE_SSL` (build flag) — mirrored by the be-secure `ssl_supported` seam
+/// (`true` with `--with-ssl=openssl`).
+pub(crate) fn use_ssl() -> bool {
+    be_secure_seams::ssl_supported::call()
 }
 /// `EnableSSL` (GUC; only consulted under USE_SSL).
-pub(crate) const fn enable_ssl() -> bool {
-    false
+pub(crate) fn enable_ssl() -> bool {
+    guc_tables::vars::EnableSSL.read()
 }
 /// `ENABLE_GSS` (build flag).
 pub(crate) const fn enable_gss() -> bool {

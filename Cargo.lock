@@ -9098,9 +9098,11 @@ dependencies = [
  "allocator-api2",
  "arrayfuncs_seams",
  "auth_seams",
+ "be_secure_seams",
  "conffiles_seams",
  "fd_seams",
  "funcapi_seams",
+ "guc_tables",
  "hba_seams",
  "ifaddr",
  "init_small_seams",
@@ -18952,6 +18954,7 @@ name = "postmaster"
 version = "0.0.0"
 dependencies = [
  "autovacuum_seams",
+ "be_secure_seams",
  "bgworker_seams",
  "common_exec_seams",
  "fd_seams",
@@ -21753,6 +21756,7 @@ dependencies = [
  "auth",
  "auth_seams",
  "authid",
+ "be_secure_seams",
  "control",
  "crypt_seams",
  "crypto",
@@ -26355,6 +26359,7 @@ version = "0.0.0"
 dependencies = [
  "acl_seams",
  "adt_datetime",
+ "be_secure_seams",
  "bufmgr_seams",
  "common_path_seams",
  "encnames_seams",

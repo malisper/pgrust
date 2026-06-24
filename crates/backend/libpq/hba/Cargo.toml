@@ -42,6 +42,10 @@ ifaddr = { path = "../ifaddr" }
 fd_seams = { path = "../../storage/file/fd_seams" }
 conffiles_seams = { path = "../../utils/misc/conffiles_seams" }
 ip = { path = "../../../common/ip" }
+# SSL build guard (`#ifdef USE_SSL`) + the `ssl` (EnableSSL) GUC for the
+# hostssl/hostgssenc record validation.
+be_secure_seams = { path = "../be_secure_seams" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
 
 # Type vocabulary.
 types_core = { path = "../../../_support/types/types_core" }

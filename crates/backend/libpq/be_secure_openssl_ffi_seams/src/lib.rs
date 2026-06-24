@@ -350,6 +350,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `be_tls_get_certificate_hash(port, len)` core: hash the *server*'s
+    /// certificate (`SSL_get_certificate(ssl)`) for SCRAM `tls-server-end-point`
+    /// channel binding. The provider runs `X509_get_signature_info` to pick the
+    /// digest (SHA-256 substituted for MD5/SHA-1 per RFC 5929 §4.1), then
+    /// `X509_digest`. Returns the raw hash bytes, or `None` when `ssl` is `0` or
+    /// the server has no certificate. (libcrypto's EVP digest tables must be
+    /// resolved here, so the whole computation lives in the provider.)
+    pub fn ssl_get_certificate_hash(ssl: Ssl) -> Option<Vec<u8>>
+);
+
+seam_core::seam!(
     /// `X509_get_subject_name(cert)` — the subject name handle.
     pub fn x509_get_subject_name(cert: X509) -> X509Name
 );

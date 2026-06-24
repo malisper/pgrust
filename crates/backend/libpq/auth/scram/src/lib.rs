@@ -50,7 +50,8 @@ use ::control::MOCK_AUTH_NONCE_LEN;
 use ::crypto::pg_cryptohash_type;
 use ::types_error::{
     ErrorLocation, PgError, PgResult, ERROR, LOG, ERRCODE_FEATURE_NOT_SUPPORTED,
-    ERRCODE_INTERNAL_ERROR, ERRCODE_PROTOCOL_VIOLATION,
+    ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION,
+    ERRCODE_PROTOCOL_VIOLATION,
 };
 use ::net::Port;
 
@@ -221,9 +222,13 @@ impl scram_state {
 ///
 /// (`auth-scram.c:scram_get_mechanisms`.) Channel binding is only advertised
 /// with SSL; this build is `!USE_SSL`, so only the non-PLUS variant is listed.
-fn scram_get_mechanisms(_port: &Port, buf: &mut Vec<u8>) {
-    // #ifdef USE_SSL: the PLUS variant goes first when port->ssl_in_use. Not
-    // compiled in here.
+fn scram_get_mechanisms(port: &Port, buf: &mut Vec<u8>) {
+    // Advertise in decreasing order of importance: the channel-binding (PLUS)
+    // variant goes first, when SSL is in use. (`#ifdef USE_SSL`.)
+    if port.ssl_in_use {
+        buf.extend_from_slice(SCRAM_SHA_256_PLUS_NAME);
+        buf.push(b'\0');
+    }
     buf.extend_from_slice(SCRAM_SHA_256_NAME);
     buf.push(b'\0');
 }
@@ -245,11 +250,12 @@ fn scram_init(
     state.username = port.user_name.clone().unwrap_or_default();
     state.state = scram_state_enum::SCRAM_AUTH_INIT;
 
-    // Parse the selected mechanism. Without SSL we never advertised the PLUS
-    // variant, so selecting it is a protocol violation like any unsupported
-    // mechanism.
-    // #ifdef USE_SSL: SCRAM_SHA_256_PLUS_NAME && port->ssl_in_use arm omitted.
-    if selected_mech == SCRAM_SHA_256_NAME {
+    // Parse the selected mechanism. The PLUS variant is only valid when SSL is
+    // in use (it is advertised only then); anything else is a protocol
+    // violation like any unsupported mechanism.
+    if selected_mech == SCRAM_SHA_256_PLUS_NAME && port.ssl_in_use {
+        state.channel_binding_in_use = true;
+    } else if selected_mech == SCRAM_SHA_256_NAME {
         state.channel_binding_in_use = false;
     } else {
         return Err(ereport(ERROR)
@@ -344,7 +350,7 @@ struct ExchangeOutput {
 /// callee; the caller (driver loop) surfaces it.
 fn scram_exchange(
     state: &mut scram_state,
-    port: &Port,
+    port: &mut Port,
     input: Option<&[u8]>,
 ) -> PgResult<ExchangeOutput> {
     let mut output: Option<Vec<u8>> = None;
@@ -387,7 +393,7 @@ fn scram_exchange(
         scram_state_enum::SCRAM_AUTH_INIT => {
             // Initialization phase. Receive the first message from client and
             // be sure it parsed correctly. Then send the challenge.
-            read_client_first_message(state, input)?;
+            read_client_first_message(state, port, input)?;
 
             output = Some(build_server_first_message(state)?);
 
@@ -398,7 +404,7 @@ fn scram_exchange(
         scram_state_enum::SCRAM_AUTH_SALT_SENT => {
             // Final phase. Receive the response, verify, and let the client
             // know whether everything went well.
-            read_client_final_message(state, input)?;
+            read_client_final_message(state, port, input)?;
 
             if !verify_final_nonce(state) {
                 return Err(ereport(ERROR)
@@ -882,7 +888,11 @@ fn read_any_attr(
 ///
 /// (`auth-scram.c:read_client_first_message`.) Operates on a mutable copy of
 /// `input` (NUL-terminated, as C's `pstrdup`).
-fn read_client_first_message(state: &mut scram_state, input: &[u8]) -> PgResult<()> {
+fn read_client_first_message(
+    state: &mut scram_state,
+    port: &mut Port,
+    input: &[u8],
+) -> PgResult<()> {
     // p = pstrdup(input): own a NUL-terminated mutable buffer.
     let mut p: Vec<u8> = input.to_vec();
     p.push(b'\0');
@@ -907,7 +917,20 @@ fn read_client_first_message(state: &mut scram_state, input: &[u8]) -> PgResult<
             if state.channel_binding_in_use {
                 return Err(cbind_mismatch_err("read_client_first_message"));
             }
-            // #ifdef USE_SSL: if port->ssl_in_use, error — not compiled in.
+            // The client supports channel binding but thinks the server does
+            // not. If this server *does* support it (SSL in use), fail. (#ifdef
+            // USE_SSL.)
+            if port.ssl_in_use {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION)
+                    .errmsg("SCRAM channel binding negotiation error")
+                    .errdetail(
+                        "The client supports SCRAM channel binding but thinks the server does not.  \
+                         However, this server does support channel binding.",
+                    )
+                    .into_error()
+                    .with_error_location(here("read_client_first_message")));
+            }
             cur += 1;
             if p[cur] != b',' {
                 return Err(comma_expected_err(p[cur], "read_client_first_message"));
@@ -1174,7 +1197,11 @@ fn build_server_first_message(state: &mut scram_state) -> PgResult<Vec<u8>> {
 /// Read and parse the final message from the client.
 ///
 /// (`auth-scram.c:read_client_final_message`.)
-fn read_client_final_message(state: &mut scram_state, input: &[u8]) -> PgResult<()> {
+fn read_client_final_message(
+    state: &mut scram_state,
+    port: &mut Port,
+    input: &[u8],
+) -> PgResult<()> {
     // begin = p = pstrdup(input)
     let mut p: Vec<u8> = input.to_vec();
     p.push(b'\0');
@@ -1184,13 +1211,50 @@ fn read_client_final_message(state: &mut scram_state, input: &[u8]) -> PgResult<
     let (b, e) = read_attr_value(&mut p, &mut cur, b'c')?;
     let channel_binding = p[b..e].to_vec();
     if state.channel_binding_in_use {
-        // #ifdef USE_SSL: compare client value against the expected
-        //   base64("p=tls-server-end-point,," || cert-hash). Not compiled in;
-        //   the C #else path elogs. We never set channel_binding_in_use without
-        //   SSL, so this is unreachable, but mirror the #else guard.
-        elog(ERROR, "channel binding not supported by this build")
-            .map_err(|er| er.with_error_location(here("read_client_final_message")))?;
-        unreachable!("elog(ERROR) does not return");
+        // #ifdef USE_SSL: compare the client's value against the expected
+        //   base64("p=tls-server-end-point,," || cert-hash).
+        debug_assert_eq!(state.cbind_flag, b'p');
+
+        // Fetch hash data of the server's SSL certificate.
+        let cbind_data = be_secure_seams::be_tls_get_certificate_hash::call(port)?;
+        let cbind_data = match cbind_data {
+            Some(d) if !d.is_empty() => d,
+            _ => {
+                // should not happen
+                elog(ERROR, "could not get server certificate hash")
+                    .map_err(|er| er.with_error_location(here("read_client_final_message")))?;
+                unreachable!("elog(ERROR) does not return");
+            }
+        };
+
+        const CBIND_HEADER: &[u8] = b"p=tls-server-end-point,,";
+        let mut cbind_input = CBIND_HEADER.to_vec();
+        cbind_input.extend_from_slice(&cbind_data);
+
+        // base64-encode the cbind-input.
+        let b64_len = pg_b64_enc_len(cbind_input.len() as i32);
+        let mut b64_message = vec![0u8; b64_len as usize + 1];
+        let written = pg_b64_encode(
+            &cbind_input,
+            cbind_input.len() as i32,
+            &mut b64_message,
+            b64_len,
+        );
+        if written < 0 {
+            elog(ERROR, "could not encode channel binding data")
+                .map_err(|er| er.with_error_location(here("read_client_final_message")))?;
+            unreachable!("elog(ERROR) does not return");
+        }
+        b64_message.truncate(written as usize);
+
+        // Compare the client's value with the value expected by the server.
+        if channel_binding != b64_message {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION)
+                .errmsg("SCRAM channel binding check failed")
+                .into_error()
+                .with_error_location(here("read_client_final_message")));
+        }
     } else {
         // Without channel binding, the binding data must be "biws" ("n,,") or
         // "eSws" ("y,,"), matching the flag the client originally sent.

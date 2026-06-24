@@ -46,8 +46,8 @@ fn loc(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new(SRCFILE, 0, funcname)
 }
 
-/// `#ifdef USE_SSL` — this build does not link OpenSSL.
-pub const USE_SSL: bool = false;
+/// `#ifdef USE_SSL` — this build links OpenSSL (`--with-ssl=openssl`).
+pub const USE_SSL: bool = true;
 /// `#ifdef ENABLE_GSS` — this build does not link GSSAPI.
 pub const ENABLE_GSS: bool = false;
 
@@ -112,7 +112,11 @@ pub fn secure_initialize(is_server_start: bool) -> PgResult<i32> {
         // `return be_tls_init(isServerStart);`
         let (min_v, max_v) = ssl_protocol_versions();
         let rc = match tls::be_tls_init(min_v, max_v, is_server_start)? {
-            Ok(_loaded_ca) => 0,
+            Ok(loaded_ca) => {
+                // ssl_loaded_verify_locations is updated by be_tls_init's success.
+                SSL_LOADED_VERIFY.store(loaded_ca, Ordering::Relaxed);
+                0
+            }
             Err(()) => STATUS_ERROR,
         };
         // The postmaster sets `LoadedSSL = (secure_initialize(true) == 0)`.
@@ -131,7 +135,9 @@ pub fn secure_initialize(is_server_start: bool) -> PgResult<i32> {
 /// with `LoadedSSL = false`; the flag lives here, so the pairing is folded in.
 pub fn secure_destroy() {
     if USE_SSL {
-        tls::be_tls_destroy();
+        if tls::be_tls_destroy() {
+            SSL_LOADED_VERIFY.store(false, Ordering::Relaxed);
+        }
         LOADED_SSL.store(false, Ordering::Relaxed);
     }
 }
@@ -577,6 +583,7 @@ pub fn init_seams() {
     s::ssl_negotiation_disabled::set(ssl_negotiation_disabled);
     s::gss_negotiation_disabled::set(gss_negotiation_disabled);
     s::secure_open_server::set(|port| secure_open_server(port).expect("secure_open_server"));
+    s::secure_initialize::set(secure_initialize);
 
     // auth.c (`CheckPWChallengeAuth`) reads `secure_loaded_verify_locations()`
     // across `backend-libpq-auth-seams`; be-secure.c owns the function.

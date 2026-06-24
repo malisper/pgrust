@@ -88,6 +88,8 @@ launcher = { path = "../../replication/logical/launcher" }
 # Direct syscall chokepoint (waitpid/kill/time/close/pipe), mirroring how
 # fork-process calls libc::fork directly.
 libc = "0.2"
+# secure_initialize (be-secure.c) for TLS context bring-up when `ssl` is on.
+be_secure_seams = { path = "../../libpq/be_secure_seams" }
 
 [dev-dependencies]
 walsender_seams = { path = "../../replication/walsender_seams" }

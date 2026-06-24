@@ -1102,14 +1102,15 @@ pub fn check_default_with_oids(
     Ok(true)
 }
 
-/// `check_ssl` (variable.c L1248-1259). This build does not define `USE_SSL`,
-/// so any `true` setting is rejected.
+/// `check_ssl` (variable.c L1248-1259). The `#ifndef USE_SSL` rejection of a
+/// `true` setting is gated on the build's SSL support (the `ssl_supported`
+/// seam mirrors `#ifdef USE_SSL`); with `--with-ssl=openssl` it is compiled out.
 pub fn check_ssl(
     newval: &mut bool,
     _extra: &mut Option<GucHookExtra>,
     _source: GucSource,
 ) -> PgResult<bool> {
-    if *newval {
+    if !be_secure_seams::ssl_supported::call() && *newval {
         GUC_check_errmsg("SSL is not supported by this build");
         return Ok(false);
     }
