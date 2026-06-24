@@ -1868,8 +1868,16 @@ fn DetermineSlotInvalidationCause(
     if possible_causes & ReplicationSlotInvalidationCause::RS_INVAL_IDLE_TIMEOUT as u32 != 0 {
         debug_assert!(now > 0);
         if CanInvalidateIdleSlot(s) {
-            // (USE_INJECTION_POINTS "slot-timeout-inval" path is compile-time
-            // gated off in the default build, matching the C default.)
+            // IS_INJECTION_POINT_ATTACHED("slot-timeout-inval") — simulate the
+            // idle_timeout invalidation promptly to test the timeout behavior
+            // (044_invalidate_inactive_slots). Injection points are compiled in;
+            // this is a cheap shmem check when nothing is attached.
+            if injection_point_seams::is_injection_point_attached::call("slot-timeout-inval")
+                .unwrap_or(false)
+            {
+                *inactive_since = 0; // since the beginning of time
+                return ReplicationSlotInvalidationCause::RS_INVAL_IDLE_TIMEOUT;
+            }
             if timestamp_difference_exceeds_seconds(
                 s.inactive_since,
                 now,
@@ -3288,8 +3296,20 @@ pub fn init_seams() {
         seam_replication_slot_control_lock_acquire_exclusive,
     );
     s::replication_slot_control_lock_release::set(seam_replication_slot_control_lock_release);
-    // USE_INJECTION_POINTS is not compiled in: no-op.
-    s::maybe_injection_point_slot_advance_segment::set(|_old, _new| {});
+    // INJECTION_POINT("logical-replication-slot-advance-segment", NULL), fired
+    // only when the slot's restart_lsn crosses a WAL segment boundary
+    // (046_checkpoint_logical_slot attaches a 'wait' here).
+    s::maybe_injection_point_slot_advance_segment::set(|old_restart_lsn, new_restart_lsn| {
+        let wal_segsz = xlog::wal_segment_size::call();
+        let seg1 = xl_byte_to_seg(old_restart_lsn, wal_segsz);
+        let seg2 = xl_byte_to_seg(new_restart_lsn, wal_segsz);
+        if seg1 != seg2 {
+            let _ = injection_point_seams::injection_point_run::call(
+                "logical-replication-slot-advance-segment",
+                None,
+            );
+        }
+    });
     s::pgstat_report_replslot::set(seam_pgstat_report_replslot);
 
     // MyReplicationSlot field accessors/mutators for the slotsync consumer.

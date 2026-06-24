@@ -373,6 +373,12 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
     // Let smgr do post-checkpoint cleanup (deleting old files).
     sync_seams::sync_post_checkpoint::call()?;
 
+    // INJECTION_POINT("checkpoint-before-old-wal-removal", NULL) — tests
+    // (046_checkpoint_logical_slot, 047_checkpoint_physical_slot,
+    // 041_checkpoint_at_promote) attach a 'wait' here to pause the checkpoint
+    // just before old-WAL removal.
+    injection_point_seams::injection_point_run::call("checkpoint-before-old-wal-removal", None)?;
+
     // The old-WAL-segment recycle tail (KeepLogSeg + InvalidateObsoleteReplication
     // Slots + RemoveOldXlogFiles) and WAL-summarizer wakeup / pg_subtrans trim are
     // housekeeping owned by xlogrecovery / slot.c / subtrans.c, not yet ported.
@@ -545,6 +551,11 @@ pub fn CreateRestartPoint(flags: i32) -> PgResult<bool> {
     // Flush all shmem disk + commit-log buffers to disk (CheckPointGuts).
     check_point_guts(last_check_point.redo, flags)?;
 
+    // INJECTION_POINT("create-restart-point", NULL) — placed after CheckPointGuts
+    // so some work has already happened (041_checkpoint_at_promote attaches a
+    // 'wait' here).
+    injection_point_seams::injection_point_run::call("create-restart-point", None)?;
+
     // Remember the prior checkpoint's redo ptr (UpdateCheckPointDistanceEstimate).
     let prior_redo_ptr = with_control_file_lock(|| Ok(control_file_mut().checkPointCopy.redo))?;
 
@@ -593,6 +604,11 @@ pub fn CreateRestartPoint(flags: i32) -> PgResult<bool> {
     let (replay_ptr, mut replay_tli) = xlogrecovery_seams::get_xlog_replay_rec_ptr_tli::call();
     let endptr = if receive_ptr < replay_ptr { replay_ptr } else { receive_ptr };
     log_seg_no = keep_log_seg(endptr, log_seg_no, wal_segment_size);
+
+    // INJECTION_POINT("restartpoint-before-slot-invalidation", NULL) —
+    // 047_checkpoint_physical_slot attaches a 'wait' here to pause the
+    // restartpoint just before InvalidateObsoleteReplicationSlots.
+    injection_point_seams::injection_point_run::call("restartpoint-before-slot-invalidation", None)?;
 
     if slot_seams::invalidate_obsolete_replication_slots::call(
         RS_INVAL_WAL_REMOVED | RS_INVAL_IDLE_TIMEOUT,

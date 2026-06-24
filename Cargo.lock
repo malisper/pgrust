@@ -10494,6 +10494,8 @@ dependencies = [
  "init_small",
  "init_subselect",
  "initdb",
+ "injection_point",
+ "injection_points",
  "insert_vacuum",
  "instrument",
  "int",
@@ -11008,12 +11010,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "injection_point"
+version = "0.0.0"
+dependencies = [
+ "condition_variable",
+ "condvar",
+ "init_small_seams",
+ "injection_point_seams",
+ "ipc_shmem_seams",
+ "lwlock",
+ "s_lock",
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "utils_error",
+ "waitevent",
+]
+
+[[package]]
 name = "injection_point_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "injection_points"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "dfmgr_seams",
+ "dsm_core",
+ "fmgr",
+ "init_small_seams",
+ "injection_point",
+ "types_core",
+ "types_error",
+ "types_tuple",
+ "utils_error",
 ]
 
 [[package]]
@@ -18885,6 +18922,7 @@ dependencies = [
  "guc_seams",
  "hba_seams",
  "init_small_seams",
+ "injection_point_seams",
  "latch_seams",
  "libc",
  "lmgr_proc_seams",
@@ -20877,6 +20915,7 @@ dependencies = [
  "guc_file_seams",
  "guc_tables",
  "init_small_seams",
+ "injection_point_seams",
  "interrupt",
  "libc",
  "lwlock_seams",
@@ -22875,6 +22914,7 @@ dependencies = [
  "bufmgr_seams",
  "guc_tables",
  "init_small_seams",
+ "injection_point_seams",
  "inval_seams",
  "lmgr_proc_seams",
  "lock_seams",
@@ -24583,6 +24623,7 @@ dependencies = [
  "guc_tables",
  "init_small",
  "init_small_seams",
+ "injection_point_seams",
  "instrument_seams",
  "ipc_shmem_seams",
  "latch_seams",

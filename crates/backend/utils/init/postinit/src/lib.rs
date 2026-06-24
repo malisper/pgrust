@@ -652,7 +652,9 @@ pub fn InitPostgres(
     // And initialize an entry in the PgBackendStatus array.
     if !bootstrap {
         status_seams::pgstat_bestart_initial::call()?;
-        // INJECTION_POINT("init-pre-auth") — injection points are not compiled.
+        // INJECTION_POINT("init-pre-auth", NULL) — 007_pre_auth attaches a
+        // 'wait' here to pause a backend between startup and authentication.
+        injection_point_seams::injection_point_run::call("init-pre-auth", None)?;
     }
 
     // Initialize my entry in the shared-invalidation manager's array.

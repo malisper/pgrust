@@ -70,6 +70,7 @@ xloginsert_seams = { path = "../../../access/transam/xloginsert_seams" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 pgstat_seams = { path = "../../activity/pgstat_seams" }
 status_seams = { path = "../../activity/status_seams" }
+injection_point_seams = { path = "../../../storage/ipc/injection_point_seams" }
 acl_seams = { path = "../../adt/acl_seams" }
 pg_locale_seams = { path = "../../adt/pg_locale_seams" }
 ruleutils_seams = { path = "../../adt/ruleutils_seams" }

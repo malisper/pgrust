@@ -133,8 +133,9 @@ thread_local! {
 }
 
 /// `injection_points_cleanup` — before_shmem_exit callback detaching every
-/// locally-attached point. Signature matches `dsm_core::PgOnExitCallback`.
-fn injection_points_cleanup(_code: i32, _arg: Datum<'static>) -> PgResult<()> {
+/// locally-attached point. Signature matches `dsm_core::PgOnExitCallback`
+/// (`types_tuple::Datum<'static>`, the unified Datum word).
+fn injection_points_cleanup(_code: i32, _arg: ::types_tuple::Datum<'static>) -> PgResult<()> {
     if !INJECTION_POINT_LOCAL.with(|f| *f.borrow()) {
         return Ok(());
     }
@@ -227,7 +228,7 @@ fn fc_wakeup(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// the before_shmem_exit cleanup.
 fn fc_set_local(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     INJECTION_POINT_LOCAL.with(|f| *f.borrow_mut() = true);
-    ok(dsm_core::ipc::before_shmem_exit(injection_points_cleanup, Datum::null()));
+    ok(dsm_core::ipc::before_shmem_exit(injection_points_cleanup, ::types_tuple::Datum::null()));
     ret_void(fcinfo)
 }
 

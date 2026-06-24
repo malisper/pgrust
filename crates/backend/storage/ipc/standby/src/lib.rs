@@ -1312,6 +1312,16 @@ fn log_standby_snapshot_seam() -> PgResult<XLogRecPtr> {
 pub fn LogStandbySnapshot(mcx: Mcx<'_>) -> PgResult<XLogRecPtr> {
     assert!(xlog_standby_info_active());
 
+    // IS_INJECTION_POINT_ATTACHED("skip-log-running-xacts") — this record could
+    // move a slot's xmin forward during decoding, leading to unpredictable
+    // results, so 035_standby_logical_decoding asks to skip it. Cheap shmem
+    // check when nothing is attached.
+    if injection_point_seams::is_injection_point_attached::call("skip-log-running-xacts")
+        .unwrap_or(false)
+    {
+        return Ok(xlog::get_insert_rec_ptr::call());
+    }
+
     // Get details of any AccessExclusiveLocks being held at the moment.
     let locks = lock::get_running_transaction_locks::call(mcx)?;
     if !locks.is_empty() {

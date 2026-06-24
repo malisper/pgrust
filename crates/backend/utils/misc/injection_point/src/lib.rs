@@ -34,9 +34,9 @@ use std::sync::RwLock;
 
 use ::condvar::ConditionVariable;
 use ::types_core::Size;
-use ::types_error::PgResult;
+use ::types_error::{PgResult, ERROR};
 use ::types_storage::storage::{Spinlock, LW_EXCLUSIVE};
-use ::utils_error::{elog, ERROR};
+use ::utils_error::elog;
 
 use ::lwlock::LWLockAcquireMain;
 
@@ -151,12 +151,21 @@ unsafe impl Sync for InjectionPointsCtl {}
 static ACTIVE_INJECTION_POINTS: AtomicPtr<InjectionPointsCtl> =
     AtomicPtr::new(core::ptr::null_mut());
 
-/// `&*ActiveInjectionPoints` — panics if shmem init has not run.
-fn ctl() -> &'static InjectionPointsCtl {
+/// `ActiveInjectionPoints` as a raw `*mut` — panics if shmem init has not run.
+/// All mutation of the (non-atomic) byte arrays derives its `*mut` provenance
+/// from this pointer (never from `&T as *mut T`, which is UB), serialized by
+/// the relevant lock.
+fn ctl_ptr() -> *mut InjectionPointsCtl {
     let p = ACTIVE_INJECTION_POINTS.load(Ordering::Relaxed);
-    // SAFETY: once published by InjectionPointShmemInit, `p` addresses a live
-    // `InjectionPointsCtl` in the shared segment for the process lifetime.
-    unsafe { p.as_ref() }.expect("ActiveInjectionPoints not initialized (InjectionPointShmemInit has not run)")
+    assert!(!p.is_null(), "ActiveInjectionPoints not initialized (InjectionPointShmemInit has not run)");
+    p
+}
+
+/// `&*ActiveInjectionPoints` — shared view for atomic reads/writes.
+fn ctl() -> &'static InjectionPointsCtl {
+    // SAFETY: once published by InjectionPointShmemInit, the pointer addresses a
+    // live `InjectionPointsCtl` in the shared segment for the process lifetime.
+    unsafe { &*ctl_ptr() }
 }
 
 /// `strlcpy(dst, src, sizeof(dst))` into a fixed byte array, NUL-terminated.
@@ -277,14 +286,15 @@ pub fn InjectionPointAttach(
     // Save the entry. SAFETY: we hold InjectionPointLock; the entry's
     // generation is even (slot free), so no reader trusts these fields until we
     // bump the generation below. The byte arrays are written through a raw
-    // *mut obtained from the shared cell.
+    // *mut whose provenance is the original shmem `*mut` (ctl_ptr), not a `&T`.
     unsafe {
-        let entry_mut = entry as *const InjectionPointEntry as *mut InjectionPointEntry;
+        let entry_mut = &raw mut (*ctl_ptr()).entries[idx];
         store_cstr(&mut (*entry_mut).name, name);
         store_cstr(&mut (*entry_mut).library, library);
         store_cstr(&mut (*entry_mut).function, function);
-        let pd = &mut (*entry_mut).private_data;
-        pd[..private_data.len()].copy_from_slice(private_data);
+        let pd = &mut *(&raw mut (*entry_mut).private_data);
+        let n = private_data.len();
+        pd[..n].copy_from_slice(private_data);
     }
 
     // pg_write_barrier(); pg_atomic_write_u64(&entry->generation, generation+1)
@@ -499,9 +509,11 @@ pub fn injection_wait(name: &str) -> PgResult<()> {
             if ctl.wait_names[i][0] == 0 {
                 index = i as i32;
                 // SAFETY: under wait_lock; exclusive access to wait_names[i].
-                let names = &ctl.wait_names[i] as *const [u8; INJ_NAME_MAXLEN]
-                    as *mut [u8; INJ_NAME_MAXLEN];
-                unsafe { store_cstr(&mut *names, name) };
+                // `*mut` provenance derives from the shmem `ctl_ptr`.
+                unsafe {
+                    let names = &raw mut (*ctl_ptr()).wait_names[i];
+                    store_cstr(&mut *names, name);
+                }
                 old_wait_counts = ctl.wait_counts[i].load(Ordering::Relaxed);
                 break;
             }
@@ -526,10 +538,8 @@ pub fn injection_wait(name: &str) -> PgResult<()> {
 
     // Remove from the waiters.
     with_wait_lock(ctl, || {
-        let names = &ctl.wait_names[index] as *const [u8; INJ_NAME_MAXLEN]
-            as *mut [u8; INJ_NAME_MAXLEN];
-        // SAFETY: under wait_lock.
-        unsafe { (*names)[0] = 0 };
+        // SAFETY: under wait_lock; `*mut` provenance is the shmem ctl_ptr.
+        unsafe { (*ctl_ptr()).wait_names[index][0] = 0 };
     });
 
     Ok(())

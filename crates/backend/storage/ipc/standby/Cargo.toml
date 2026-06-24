@@ -14,6 +14,7 @@ twophase_seams = { path = "../../../access/transam/twophase_seams" }
 varsup_seams = { path = "../../../access/transam/varsup_seams" }
 transam_xact_seams = { path = "../../../access/transam/transam_xact_seams" }
 transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+injection_point_seams = { path = "../injection_point_seams" }
 xloginsert_seams = { path = "../../../access/transam/xloginsert_seams" }
 xlogrecovery_seams = { path = "../../../access/transam/xlogrecovery_seams" }
 xlogutils_seams = { path = "../../../access/transam/xlogutils_seams" }

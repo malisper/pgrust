@@ -25,6 +25,7 @@ s_lock = { path = "../../storage/lmgr/s_lock" }
 transam = { path = "../../access/transam/transam" }
 interrupt = { path = "../../postmaster/interrupt" }
 slot_seams = { path = "../slot_seams" }
+injection_point_seams = { path = "../../storage/ipc/injection_point_seams" }
 lwlock_seams = { path = "../../storage/lmgr/lwlock_seams" }
 condition_variable_seams = { path = "../../storage/lmgr/condition_variable_seams" }
 timestamp_seams = { path = "../../utils/adt/timestamp_seams" }

@@ -850,15 +850,12 @@ pub fn init_seams() {
         },
     );
 
-    // injection_point.c: this unit owns the injection-point-seams declarations
-    // ipci.c sizes/initializes (the `#else`/disabled-build arms here).
-    injection_point_seams::injection_point_shmem_size::set(
-        injection_point::injection_point_shmem_size,
-    );
-    injection_point_seams::injection_point_shmem_init::set(
-        injection_point::injection_point_shmem_init,
-    );
-    // The INJECTION_POINT(name) macro itself — a pure no-op in this
+    // injection_point.c: the shmem size/init pair AND the INJECTION_POINT(...)
+    // entrypoints are now owned by the real `injection_point` crate
+    // (utils/misc/injection_point), which installs them from its own
+    // init_seams(). The former disabled-build no-op stubs here are removed.
+    //
+    // The INJECTION_POINT(name) macro for the typcache call site — a pure no-op in this
     // non-injection build (`#define INJECTION_POINT(name, arg) ((void) name)`).
     // Call sites (e.g. typcache.c) reach it via the domains-seams declaration.
     domains_seams::injection_point::set(

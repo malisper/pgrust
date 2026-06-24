@@ -46,6 +46,7 @@ sink = { path = "../../../backup/sink" }
 instrument_seams = { path = "../../../executor/instrument_seams" }
 checkpointer_seams = { path = "../../../postmaster/checkpointer_seams" }
 sync_seams = { path = "../../../storage/sync/sync_seams" }
+injection_point_seams = { path = "../../../storage/ipc/injection_point_seams" }
 walsender_seams = { path = "../../../replication/walsender_seams" }
 walreceiverfuncs_seams = { path = "../../../replication/walreceiverfuncs_seams" }
 # StartupXLOG driver cross-subsystem seams (all -seams crates, leaf deps).
