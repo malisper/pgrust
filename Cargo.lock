@@ -17744,6 +17744,7 @@ dependencies = [
  "types-error",
  "types-guc",
  "types-storage",
+ "wasm-libc-shim",
 ]
 
 [[package]]

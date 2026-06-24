@@ -1112,11 +1112,24 @@ pub fn ValidateXLOGDirectoryStructure() -> PgResult<()> {
 }
 
 fn path_exists(path: &str) -> bool {
-    std::path::Path::new(path).exists()
+    // Route through the fd VFS seam rather than `std::path::Path::exists`: on
+    // wasm64-unknown-unknown `std::fs` is inert (it does not reach the host VFS),
+    // so a bare `Path::exists` always reports false there. The seam's
+    // `path_is_dir`/`file_exists` both stat through the host VFS (and through the
+    // real FS natively), so this is correct on both targets. The two callers
+    // (`archive_status`, `summaries`) are directories, but accept a plain file
+    // too to keep "exists" faithful.
+    if dir_exists(path) {
+        return true;
+    }
+    backend_storage_file_fd_seams::file_exists::call(path).unwrap_or(false)
 }
 
 fn dir_exists(path: &str) -> bool {
-    std::path::Path::new(path).is_dir()
+    // `std::path::Path::is_dir` does not reach the host VFS on wasm64; use the
+    // fd seam's VFS-routed stat (`stat(path) == 0 && S_ISDIR`). Identical to the
+    // C `stat` test on native.
+    backend_storage_file_fd_seams::path_is_dir::call(path)
 }
 
 /// `XLogSegmentOffset(xlogptr, wal_segsz_bytes)` (xlog_internal.h).
