@@ -391,6 +391,16 @@ fn interactive_backend_regress(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
     if in_buf.len() == 0 {
         return Ok(EOF);
     }
+    // Trim any trailing whitespace + trailing `-- line comment` that follows the
+    // terminating ';'. psql echoes that tail (already done above via
+    // echo_regress_line) but does NOT include it in the query string it sends to
+    // the server, so the server's `LINE n:`/caret echo must reflect only the
+    // statement text. Without this, an error on a statement with a trailing
+    // comment (e.g. `INSERT ...;  -- error, type mismatch`) echoes the comment
+    // in the LINE line and diffs against expected.
+    if let Some(end) = statement_query_end(&in_buf.data) {
+        in_buf.data.truncate(end);
+    }
     // Capture the statement text (sans the soon-to-be-added NUL) for the psql
     // LINE/caret echo in emit_regress_error. The error position the parser
     // records is 1-based into THIS statement string, so it must match what the
@@ -468,9 +478,20 @@ fn buffer_ends_statement(buf: &[u8]) -> bool {
         i += 1;
     }
 
-    let Some(pos) = last_semi else { return false };
+    statement_terminator_pos(buf, last_semi).is_some()
+}
+
+/// If `buf` is a complete statement, return the byte index just past its
+/// terminating `;` (so `buf[..pos]` is exactly the query text psql sends to the
+/// server — trailing whitespace + trailing `-- line comment` excluded). Returns
+/// `None` if the buffer is not yet a complete statement. `last_semi` is the
+/// index of the final top-level `;` already located by the caller's scan.
+fn statement_terminator_pos(buf: &[u8], last_semi: Option<usize>) -> Option<usize> {
+    let pos = last_semi?;
     // Everything after the terminating ';' must be whitespace or a trailing
-    // line comment (psql echoes it but it does not extend the statement).
+    // line comment (psql echoes it but it does not extend the statement, and —
+    // critically — does NOT include it in the query string sent to the server,
+    // so the server's `LINE n:`/caret echo must not show it either).
     let mut j = pos + 1;
     while j < buf.len() {
         let b = buf[j];
@@ -484,11 +505,47 @@ fn buffer_ends_statement(buf: &[u8]) -> bool {
             }
             continue;
         }
-        // Real statement text after the ';' — not yet terminated (the ';' was
-        // followed by more SQL on later lines).
-        return false;
+        // Real statement text after the ';' — not yet terminated.
+        return None;
     }
-    true
+    Some(pos + 1)
+}
+
+/// Scan `buf` for the terminating `;` (top level, ignoring quotes and comments)
+/// and return the byte index just past it when the buffer is a complete
+/// statement, else `None`. Wrapper used at statement finalization to trim the
+/// trailing comment/whitespace off the query string.
+fn statement_query_end(buf: &[u8]) -> Option<usize> {
+    let mut in_quote = false;
+    let mut last_semi: Option<usize> = None;
+    let mut i = 0;
+    while i < buf.len() {
+        let b = buf[i];
+        if in_quote {
+            if b == b'\'' {
+                if i + 1 < buf.len() && buf[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                in_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' => in_quote = true,
+            b'-' if i + 1 < buf.len() && buf[i + 1] == b'-' => {
+                while i < buf.len() && buf[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            b';' => last_semi = Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+    statement_terminator_pos(buf, last_semi)
 }
 
 /// True if `line` (with optional trailing newline) is a single-line SQL comment
