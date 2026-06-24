@@ -1,5 +1,10 @@
 //! crypt() / gen_salt() — password hashing.
 //!
+//! The `pwhash` traditional/extended-DES and sha-crypt entry points are marked
+//! `deprecated` (they are legacy algorithms), but pgcrypto must support them for
+//! `crypt(3)` compatibility, so `#![allow(deprecated)]` is intentional.
+#![allow(deprecated)]
+//!
 //! Implements the md5-crypt (`$1$`) algorithm fully (byte-for-byte with C's
 //! `crypt-md5.c`) and traditional des-crypt (`crypt-des.c`). bcrypt (`$2a$`) and
 //! xdes (`_`) are routed but rely on [`bcrypt`]/[`xdes`] helpers; gen_salt
@@ -70,6 +75,20 @@ pub fn gen_salt(salt_type: &str, rounds: i32) -> Result<String, String> {
             let enc = bcrypt::encode_salt64(&raw);
             Ok(format!("$2a${r:02}${enc}"))
         }
+        "sha256crypt" | "sha512crypt" => {
+            // PX_SHACRYPT_ROUNDS_{DEFAULT,MIN,MAX} = 5000 / 1000 / 999999999.
+            let r = if rounds == 0 { 5000 } else { rounds };
+            if !(1000..=999_999_999).contains(&r) {
+                return Err("gen_salt: Incorrect number of rounds".to_string());
+            }
+            // 16 random base-64 salt chars (the crypt itoa64 alphabet).
+            let salt = random_salt_chars(16)?;
+            let magic = if lower == "sha256crypt" { '5' } else { '6' };
+            Ok(format!(
+                "${magic}$rounds={r}${}",
+                String::from_utf8_lossy(&salt)
+            ))
+        }
         _ => Err("gen_salt: Unknown salt algorithm".to_string()),
     }
 }
@@ -80,6 +99,8 @@ pub fn crypt(password: &str, salt: &str) -> Result<String, String> {
     let s = salt.as_bytes();
     if s.starts_with(b"$1$") {
         md5c::crypt_md5(password.as_bytes(), s)
+    } else if s.starts_with(b"$5$") || s.starts_with(b"$6$") {
+        shacrypt::crypt_sha(password, salt)
     } else if s.starts_with(b"$2a$") || s.starts_with(b"$2x$") || s.starts_with(b"$2b$") {
         bcrypt::crypt_bf(password.as_bytes(), s)
     } else if s.first() == Some(&b'_') {
@@ -94,3 +115,4 @@ pub fn crypt(password: &str, salt: &str) -> Result<String, String> {
 }
 
 mod bcrypt;
+mod shacrypt;
