@@ -25,5 +25,9 @@ backend-access-common-tidstore-seams = { path = "../backend-access-common-tidsto
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 
+[target.'cfg(target_family = "wasm")'.dependencies]
+# Host monotonic clock — std::time::Instant::now() panics on wasm64.
+wasm-libc-shim = { path = "../wasm-libc-shim" }
+
 [dev-dependencies]
 types-tuple = { path = "../types-tuple" }

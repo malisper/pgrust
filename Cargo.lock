@@ -1938,6 +1938,7 @@ dependencies = [
  "types-storage",
  "types-tuple",
  "types-vacuum",
+ "wasm-libc-shim",
 ]
 
 [[package]]

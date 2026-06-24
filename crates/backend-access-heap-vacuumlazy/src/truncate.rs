@@ -4,7 +4,42 @@
 //!   * [`lazy_truncate_heap`] (vacuumlazy.c:3200).
 //!   * [`count_nondeletable_pages`] (vacuumlazy.c:3331).
 
+#[cfg(not(target_family = "wasm"))]
 use std::time::Instant;
+
+/// Monotonic reading carrier for the truncate lock-check timing. A
+/// `std::time::Instant` natively; on wasm64-unknown-unknown `Instant::now()`
+/// panics (unsupported time backend), so a host-clock nanosecond count stands in.
+#[cfg(not(target_family = "wasm"))]
+type TimeInstant = Instant;
+#[cfg(target_family = "wasm")]
+type TimeInstant = u64;
+
+#[inline]
+fn time_now() -> TimeInstant {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        Instant::now()
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        wasm_libc_shim::now_unix_nanos() as u64
+    }
+}
+
+/// Elapsed milliseconds from `start` to now (saturating).
+#[inline]
+fn elapsed_millis(start: TimeInstant) -> u128 {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        Instant::now().duration_since(start).as_micros() / 1000
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        let now = wasm_libc_shim::now_unix_nanos() as u64;
+        (now.saturating_sub(start) as u128) / 1_000_000
+    }
+}
 
 use backend_utils_error::{ereport};
 use types_error::{ErrorLocation, DEBUG2, INFO};
@@ -169,7 +204,7 @@ pub fn count_nondeletable_pages<'mcx>(
 ) -> PgResult<BlockNumber> {
     let mut blkno: BlockNumber;
     let mut prefetched_until: BlockNumber;
-    let mut starttime: Instant = Instant::now();
+    let mut starttime: TimeInstant = time_now();
 
     blkno = vacrel.rel_pages;
     const _: () = assert!(
@@ -185,9 +220,8 @@ pub fn count_nondeletable_pages<'mcx>(
          * blocks), if another process wants a lock on our relation.
          */
         if (blkno % 32) == 0 {
-            let currenttime = Instant::now();
-            let elapsed = currenttime.duration_since(starttime);
-            if (elapsed.as_micros() / 1000) >= VACUUM_TRUNCATE_LOCK_CHECK_INTERVAL as u128 {
+            let currenttime = time_now();
+            if elapsed_millis(starttime) >= VACUUM_TRUNCATE_LOCK_CHECK_INTERVAL as u128 {
                 if vl::lock_has_waiters_relation::call(&vacrel.rel, AccessExclusiveLock)? {
                     ereport(if vacrel.verbose { INFO } else { DEBUG2 })
                         .errmsg(format!(
