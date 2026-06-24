@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# Run PostgreSQL's src/test/isolation suite against one pgrust instance.
+
+set -euo pipefail
+
+usage() {
+    code="${1:-2}"
+    cat <<'EOF'
+usage: scripts/run-pg-isolation [test names...]
+
+Required environment:
+  PG_SRC       PostgreSQL 18.3 source tree
+  PG_INSTALL   PostgreSQL 18.3 C install prefix
+
+Optional environment:
+  PG_BUILD     PostgreSQL build tree containing src/test/isolation/pg_isolation_regress
+               (default: PG_SRC)
+  PG_ISOLATION_REGRESS
+               explicit path to pg_isolation_regress
+  PGRUST_BIN   pgrust postgres binary (default: target/release/postgres)
+  PGPORT       port for the temp postmaster (default: 55434)
+  OUTDIR       output directory (default: temp dir)
+EOF
+    exit "$code"
+}
+
+case "${1:-}" in
+    --help|-h) usage 0 ;;
+esac
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+if [ -z "${PG_SRC:-}" ]; then
+    echo "set PG_SRC to a PostgreSQL 18.3 source tree" >&2
+    exit 1
+fi
+if [ -z "${PG_INSTALL:-}" ]; then
+    echo "set PG_INSTALL to a PostgreSQL 18.3 C install prefix" >&2
+    exit 1
+fi
+
+PG_SRC=$(CDPATH= cd -- "$PG_SRC" && pwd)
+PG_BUILD="${PG_BUILD:-$PG_SRC}"
+PG_BUILD=$(CDPATH= cd -- "$PG_BUILD" && pwd)
+PG_INSTALL=$(CDPATH= cd -- "$PG_INSTALL" && pwd)
+ISO_SRC="$PG_SRC/src/test/isolation"
+PGRUST_BIN="${PGRUST_BIN:-$repo_root/target/release/postgres}"
+
+if [ ! -d "$ISO_SRC/specs" ] || [ ! -f "$ISO_SRC/isolation_schedule" ]; then
+    echo "PostgreSQL isolation files not found under $ISO_SRC" >&2
+    exit 1
+fi
+for tool in initdb psql; do
+    if [ ! -x "$PG_INSTALL/bin/$tool" ]; then
+        echo "PG_INSTALL must contain bin/$tool" >&2
+        exit 1
+    fi
+done
+if [ ! -x "$PGRUST_BIN" ]; then
+    echo "pgrust postgres not found at $PGRUST_BIN; run: cargo build --release --bin postgres" >&2
+    exit 1
+fi
+
+if [ -n "${PG_ISOLATION_REGRESS:-}" ]; then
+    ISO_REGRESS="$PG_ISOLATION_REGRESS"
+else
+    ISO_REGRESS=""
+    for candidate in \
+        "$PG_BUILD/src/test/isolation/pg_isolation_regress" \
+        "$PG_SRC/src/test/isolation/pg_isolation_regress"
+    do
+        if [ -x "$candidate" ]; then
+            ISO_REGRESS="$candidate"
+            break
+        fi
+    done
+fi
+if [ -z "$ISO_REGRESS" ] || [ ! -x "$ISO_REGRESS" ]; then
+    echo "pg_isolation_regress not found; build PostgreSQL's isolation tests or set PG_ISOLATION_REGRESS" >&2
+    echo "example: make -C /path/to/postgres-18.3/build-clean/src/test/isolation" >&2
+    exit 1
+fi
+
+tmpbase=${TMPDIR:-/tmp}
+tmpbase=${tmpbase%/}
+OUTDIR="${OUTDIR:-$(mktemp -d "$tmpbase/pgrust_pg_isolation.XXXXXX")}"
+DATADIR="$OUTDIR/data"
+SOCK="$OUTDIR/sock"
+PM_LOG="$OUTDIR/postmaster.log"
+PORT="${PGPORT:-55434}"
+
+mkdir -p "$OUTDIR" "$SOCK" "$OUTDIR/output_iso"
+
+export PGTZ="${PGTZ:-America/Los_Angeles}"
+export PGDATESTYLE="${PGDATESTYLE:-Postgres, MDY}"
+export LANG="${LANG:-C}"
+export LC_MESSAGES="${LC_MESSAGES:-C}"
+export PGOPTIONS="${PGOPTIONS:--c intervalstyle=postgres_verbose}"
+export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
+unset LC_ALL LC_COLLATE LC_CTYPE LC_MONETARY LC_NUMERIC LC_TIME LANGUAGE
+
+echo "isolation output: $OUTDIR" >&2
+
+"$PG_INSTALL/bin/initdb" -D "$DATADIR" --no-locale --encoding=UTF8 -U postgres >"$OUTDIR/initdb.log" 2>&1
+
+ulimit -s 65520 2>/dev/null || true
+"$PGRUST_BIN" -D "$DATADIR" -F -c listen_addresses= -k "$SOCK" -p "$PORT" \
+    -c io_method=sync -c max_stack_depth=60000 \
+    -c checkpoint_timeout=3600 -c autovacuum=on \
+    -c max_logical_replication_workers=0 >"$PM_LOG" 2>&1 &
+pm=$!
+
+cleanup() {
+    if kill -0 "$pm" 2>/dev/null; then
+        kill "$pm" 2>/dev/null || true
+        for _ in $(seq 1 50); do
+            kill -0 "$pm" 2>/dev/null || return 0
+            sleep 0.1
+        done
+        kill -9 "$pm" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+booted=no
+for _ in $(seq 1 160); do
+    if "$PG_INSTALL/bin/psql" -h "$SOCK" -p "$PORT" -U postgres -d postgres -c 'SELECT 1' >/dev/null 2>&1; then
+        booted=yes
+        break
+    fi
+    sleep 0.5
+done
+[ "$booted" = yes ] || {
+    echo "postmaster did not start; see $PM_LOG" >&2
+    exit 1
+}
+
+cmd=(
+    "$ISO_REGRESS"
+    --use-existing
+    "--host=$SOCK"
+    "--port=$PORT"
+    --user=postgres
+    "--inputdir=$ISO_SRC"
+    "--outputdir=$OUTDIR/output_iso"
+    "--bindir=$PG_INSTALL/bin"
+    "--schedule=$ISO_SRC/isolation_schedule"
+)
+if [ "$#" -gt 0 ]; then
+    cmd+=("$@")
+fi
+
+exec "${cmd[@]}"

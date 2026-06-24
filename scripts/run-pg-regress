@@ -1,0 +1,7 @@
+#!/bin/sh
+# Public regression entrypoint. Uses the serial PostgreSQL schedule harness.
+
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec "$script_dir/run-pg-regress-serial" "$@"
