@@ -1406,7 +1406,22 @@ pub fn wal_read(
             nbytes
         };
 
+        // Measure I/O timing to read WAL data, for pg_stat_io
+        // (xlogreader.c:1570; gated on track_wal_io_timing inside the seam).
+        let io_start = pgstat_io::pgstat_prepare_io_time::call();
+
         let readbytes = fd::pg_pread::call(fd, &mut out[p..p + segbytes as usize], startoff as i64);
+
+        // pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL, IOOP_READ,
+        // io_start, 1, readbytes) (xlogreader.c:1582). The seam shape is
+        // pre-bound to WAL/NORMAL/READ; this fires for every read, including the
+        // error path below, exactly as C counts before its `readbytes <= 0`
+        // check. Clamp a negative short-read/error result to 0 bytes.
+        pgstat_io::pgstat_count_io_op_time_wal_read::call(
+            io_start,
+            if readbytes > 0 { readbytes as u32 } else { 0 },
+        );
+
         if readbytes <= 0 {
             let e = if readbytes < 0 { fd::last_errno::call() } else { 0 };
             close_bare_fd(fd);
