@@ -1338,6 +1338,24 @@ mod imp {
     pub unsafe fn ftruncate(fd: c_int, len: off_t) -> c_int {
         host_ret(unsafe { host_ftruncate(fd, len) }) as c_int
     }
+    /// `truncate(path, len)` — the path-based POSIX form. The host VFS exposes
+    /// only fd-based `host_ftruncate`, so implement the path form as
+    /// `open(O_WRONLY) + ftruncate + close`. `mdunlink`/`mdtruncate` call the
+    /// raw `truncate(2)` on a relation's path to release space before unlink;
+    /// without this it returned ENOSYS, so DROP/TRUNCATE logged a spurious
+    /// `could not truncate file "..." (os error 38)` WARNING (the operation
+    /// still succeeded because the file is unlinked anyway, but the noise is
+    /// alarming). Mirrors `open()`/`ftruncate()`/`close()` above.
+    pub unsafe fn truncate(path: *const c_char, len: off_t) -> c_int {
+        let plen = unsafe { cstr_len(path) };
+        let fd = host_ret(unsafe { host_open(path as *const u8, plen, O_WRONLY, 0) }) as c_int;
+        if fd < 0 {
+            return -1;
+        }
+        let r = host_ret(unsafe { host_ftruncate(fd, len) }) as c_int;
+        let _ = unsafe { host_close(fd) };
+        r
+    }
     pub unsafe fn fsync(fd: c_int) -> c_int {
         host_ret(unsafe { host_fsync(fd) }) as c_int
     }
@@ -1366,7 +1384,6 @@ mod imp {
     }
 
     enosys_i32! {
-        truncate(path: *const c_char, len: off_t);
         chmod(path: *const c_char, mode: mode_t);
         chown(path: *const c_char, owner: uid_t, group: gid_t);
         symlink(target: *const c_char, link: *const c_char);
