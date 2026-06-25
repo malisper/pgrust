@@ -201,8 +201,14 @@ export with_pam="${with_pam:-no}"
 export with_readline="${with_readline:-no}"
 
 rundir="${RTAP_BASE}_data"
-rm -rf "$rundir" tmp_check log
-mkdir -p "$rundir"
+# Isolate PostgreSQL::Test's tmp_check/log dir too: without TESTDIR it writes
+# ./tmp_check + ./log relative to the (shared) recovery-test cwd, so CONCURRENT
+# run-recovery-tap invocations clobber each other's logs and produce spurious
+# bails even when RECOVERY_TAP_DIR/$rundir differ. TESTDIR redirects tmp_check
+# (and the node logs under it) under our per-run base.
+export TESTDIR="${RTAP_BASE}_testdir"
+rm -rf "$rundir" "$TESTDIR" tmp_check log
+mkdir -p "$rundir" "$TESTDIR"
 export TESTDATADIR="$rundir"
 
 if [ "$#" -eq 0 ]; then
