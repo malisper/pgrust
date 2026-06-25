@@ -693,7 +693,7 @@ fn pq_socket(conn: PgConnId) -> Pgsocket {
 /// 2.0-protocol API. Returns 0 (success) for a connection that is not mid-copy.
 fn pq_endcopy(conn: PgConnId) -> i32 {
     // Drain to ReadyForQuery (PQendcopy's v3 behaviour: it loops PQgetResult).
-    match with_conn(conn, |c| c.collect_result()) {
+    match with_conn(conn, |c| c.end_copy()) {
         Ok(_) => 0,
         Err(_) => 1,
     }

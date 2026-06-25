@@ -51,6 +51,44 @@ pub enum CopyRecv {
 use crate::result::{ExecStatusType, PGresult, PgResAttDesc, PgResAttValue, PgTransactionStatusType};
 use crate::transport::{Transport, TransportError};
 
+/// The async COPY sub-state of a connection, mirroring the COPY-related values
+/// of libpq's `conn->asyncStatus` (`PGASYNC_COPY_OUT` / `PGASYNC_COPY_IN` /
+/// `PGASYNC_COPY_BOTH`). This drives the same control flow `getCopyDataMessage`
+/// + `PQgetResult` use to end a COPY without blocking on the wire: in
+/// particular, when a CopyBoth stream sees the server's `CopyDone` it transitions
+/// to `In` (C's `asyncStatus = PGASYNC_COPY_IN`) and a subsequent `PQgetResult`
+/// must synthesize a `PGRES_COPY_IN` result *without reading the socket* — the
+/// trailing `CommandComplete`/`ReadyForQuery` are not sent by the peer until we
+/// reply with our own `CopyDone` (`PQputCopyEnd`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CopyState {
+    /// Not in a COPY (`asyncStatus` is none of the COPY values).
+    None,
+    /// `PGASYNC_COPY_OUT`: a COPY-out stream is in progress.
+    Out,
+    /// `PGASYNC_COPY_BOTH`: a CopyBoth (replication) stream is in progress.
+    Both,
+    /// `PGASYNC_COPY_IN`: reached either as a genuine COPY-in, or — the case
+    /// that matters here — after the server ended a CopyBoth stream with
+    /// `CopyDone` (we owe it our own `CopyDone` before the trailing result is
+    /// sent). `PQgetResult` here yields a `PGRES_COPY_IN` result with no wire I/O.
+    In,
+    /// A COPY-out stream's `CopyDone` was seen; the trailing
+    /// `CommandComplete`/`ReadyForQuery` ARE already on the wire, so the next
+    /// `PQgetResult` collects the queued trailing result (the C `PGASYNC_BUSY`
+    /// transition that `getCopyDataMessage` performs for a plain COPY-out).
+    OutEnded,
+    /// We have sent our own `CopyDone` ([`Self::copy_done`] / `PQputCopyEnd`),
+    /// so the stream is now `PGASYNC_BUSY` and the server will send the trailing
+    /// result(s): for a historic-timeline switch a single-row `PGRES_TUPLES_OK`
+    /// (the next timeline) followed by `CommandComplete`, otherwise just
+    /// `CommandComplete`, then `ReadyForQuery`. `PQgetResult` here reads ONE
+    /// result per call off the wire (delivering `TUPLES_OK`, then `COMMAND_OK`,
+    /// then `NULL`), matching libpq's `PQgetResult` exactly — `libpqrcv_endstreaming`
+    /// depends on that one-at-a-time delivery.
+    Draining,
+}
+
 /// A live frontend connection. Owns the byte-stream transport plus the
 /// observable connection state libpq exposes (`PQstatus` / `PQerrorMessage` /
 /// `PQtransactionStatus` / `PQparameterStatus` / `PQbackendPID`). The C
@@ -74,19 +112,27 @@ pub struct PgClientConn<T: Transport> {
     /// Whether a password was actually sent during connect
     /// (`PQconnectionUsedPassword`).
     used_password: bool,
-    /// Whether the server has ended the current COPY-out/CopyBoth stream
-    /// (`CopyDone` seen by [`Self::copy_receive`]) and the trailing
-    /// `CommandComplete`/`ReadyForQuery` result has not yet been collected.
-    /// Mirrors libpq's `asyncStatus` leaving the COPY states with a result
-    /// queued: the first `PQgetResult` after `PQgetCopyData` returns -1 yields
-    /// that trailing `PGRES_COMMAND_OK`, and the next returns NULL.
-    copy_ended: bool,
+    /// The async COPY sub-state (`conn->asyncStatus`'s COPY values). Set to
+    /// [`CopyState::Both`]/[`CopyState::Out`] when a Copy{Both,Out}Response
+    /// starts the stream, advanced by [`Self::copy_receive`] when the server's
+    /// `CopyDone` ends it, and cleared once the trailing result is drained.
+    /// Distinguishing CopyBoth from CopyOut at end-of-stream is what lets us
+    /// mirror C's non-blocking `PGRES_COPY_IN` result (see [`CopyState`]).
+    copy_state: CopyState,
 }
 
 impl<T: Transport> PgClientConn<T> {
     /// `PQstatus(conn) == CONNECTION_OK`.
     pub fn is_ok(&self) -> bool {
         self.ok
+    }
+
+    /// Test-only access to the underlying transport, used by the loopback tests
+    /// to push additional inbound bytes mid-exchange (modelling a backend that
+    /// sends its trailing result only after receiving the client's CopyDone).
+    #[cfg(test)]
+    pub(crate) fn transport_mut(&mut self) -> &mut T {
+        &mut self.transport
     }
 
     /// `PQerrorMessage(conn)`.
@@ -205,7 +251,7 @@ impl<T: Transport> PgClientConn<T> {
             be_pid: 0,
             be_key: 0,
             used_password: false,
-            copy_ended: false,
+            copy_state: CopyState::None,
         };
 
         // The auth / parameter / ready loop: pump messages until ReadyForQuery
@@ -327,7 +373,7 @@ impl<T: Transport> PgClientConn<T> {
     /// Send a `Query` ('Q') message (`PQsendQuery` core).
     pub fn send_query(&mut self, query: &str) -> Result<(), TransportError> {
         // A new command starts: any prior COPY's trailing result is moot.
-        self.copy_ended = false;
+        self.copy_state = CopyState::None;
         let mut body = Vec::new();
         body.try_reserve(query.len() + 1)
             .map_err(|_| TransportError::OutOfMemory)?;
@@ -461,11 +507,23 @@ impl<T: Transport> PgClientConn<T> {
                     return Ok(CopyRecv::Data(msg.body));
                 }
                 codec::B_COPY_DONE => {
-                    // The server ended the COPY. The trailing CommandComplete +
-                    // ReadyForQuery are still on the wire; the next
-                    // `get_result_after_copy` collects them (libpqrcv_receive's
-                    // `PQgetResult` after `PQgetCopyData` returns -1).
-                    self.copy_ended = true;
+                    // The server ended the COPY. Mirror `getCopyDataMessage`'s
+                    // CopyDone transition (fe-protocol3.c):
+                    //
+                    //   * in COPY_BOTH (replication) we move to COPY_IN — we now
+                    //     owe the peer our own CopyDone before it sends the
+                    //     trailing CommandComplete/ReadyForQuery, so the next
+                    //     `PQgetResult` must yield a `PGRES_COPY_IN` result with
+                    //     NO wire read (otherwise we deadlock: the server is
+                    //     waiting on our CopyDone while we wait on its result —
+                    //     e.g. an end-of-timeline switch);
+                    //   * in plain COPY_OUT we move to "busy" with the trailing
+                    //     result already on the wire, so the next `PQgetResult`
+                    //     collects it.
+                    self.copy_state = match self.copy_state {
+                        CopyState::Both => CopyState::In,
+                        _ => CopyState::OutEnded,
+                    };
                     return Ok(CopyRecv::Done);
                 }
                 codec::B_NOTICE_RESPONSE => {
@@ -502,11 +560,22 @@ impl<T: Transport> PgClientConn<T> {
     }
 
     /// `PQputCopyEnd(conn, NULL)` — send a `CopyDone` ('c') frame ending our
-    /// side of the COPY stream.
+    /// side of the COPY stream. As in libpq's `PQputCopyEnd`, sending our
+    /// CopyDone moves the async status out of the COPY states to "busy": the
+    /// server will now send the trailing result(s), which the next
+    /// `PQgetResult` reads off the wire (see [`CopyState::Draining`]).
     pub fn copy_done(&mut self) -> Result<(), TransportError> {
         let framed = codec::build_message(codec::F_COPY_DONE, &[])?;
         self.transport.write_all(&framed)?;
         self.transport.flush()?;
+        // Only a stream we were actively in transitions to draining; a stray
+        // copy_done outside a COPY leaves the state untouched.
+        if matches!(
+            self.copy_state,
+            CopyState::In | CopyState::Both | CopyState::Out | CopyState::OutEnded
+        ) {
+            self.copy_state = CopyState::Draining;
+        }
         Ok(())
     }
 
@@ -516,26 +585,138 @@ impl<T: Transport> PgClientConn<T> {
     }
 
     /// After receiving `CopyDone` from the server (`copy_receive` returned
-    /// `None`), collect the trailing result up to `ReadyForQuery`
-    /// (`libpqrcv_endstreaming` reads CommandComplete then ReadyForQuery).
+    /// `Done`), collect the trailing result up to `ReadyForQuery` (the trailing
+    /// `CommandComplete` then `ReadyForQuery`). This is the convenience form used
+    /// where the trailing result is already on the wire; the replication path
+    /// instead sends its own `CopyDone` ([`Self::copy_done`]) and then reads the
+    /// results one at a time via [`Self::get_result_after_copy`].
     pub fn end_copy(&mut self) -> Result<PGresult, TransportError> {
-        self.copy_ended = false;
+        self.copy_state = CopyState::None;
         self.collect_result()
     }
 
     /// `PQgetResult(conn)` as the WAL receiver's end-of-COPY path uses it
-    /// (`libpqrcv_receive` after `PQgetCopyData` returns -1). When the server has
-    /// just ended the COPY (CopyDone seen), collect and return the trailing
-    /// result (`CommandComplete` -> `PGRES_COMMAND_OK`, draining through
-    /// `ReadyForQuery`); the next call returns `None` (the C `PQgetResult`
-    /// returning NULL once the result queue is drained). When no COPY is
-    /// outstanding there is nothing queued, so return `None`.
+    /// (`libpqrcv_receive` after `PQgetCopyData` returns -1, and
+    /// `libpqrcv_endstreaming`). Mirrors `PQgetResult`'s dispatch over the COPY
+    /// `asyncStatus` values:
+    ///
+    ///   * [`CopyState::In`] (reached after the server's CopyDone ended a
+    ///     CopyBoth stream): return a `PGRES_COPY_IN` result **without any wire
+    ///     I/O**, exactly as C's `getCopyResult(conn, PGRES_COPY_IN)`. The
+    ///     trailing `CommandComplete`/`ReadyForQuery` are NOT sent until we reply
+    ///     with our own `CopyDone` ([`Self::copy_done`]), so reading here would
+    ///     deadlock. We stay in `In` until `copy_done` is sent (after which
+    ///     `collect_result`/`end_copy` drains the real trailing results).
+    ///   * [`CopyState::OutEnded`] (a plain COPY-out ended): the trailing result
+    ///     is already on the wire — collect and return it, then drop to
+    ///     [`CopyState::None`].
+    ///   * otherwise: nothing is queued, return `None` (C's `PQgetResult`
+    ///     returning NULL once the result queue is drained).
     pub fn get_result_after_copy(&mut self) -> Result<Option<PGresult>, TransportError> {
-        if !self.copy_ended {
-            return Ok(None);
+        match self.copy_state {
+            CopyState::In => {
+                // getCopyResult(conn, PGRES_COPY_IN): a synthesized result, no
+                // socket read. asyncStatus stays COPY_IN.
+                Ok(Some(PGresult::make_empty(ExecStatusType::PGRES_COPY_IN)))
+            }
+            CopyState::OutEnded => {
+                self.copy_state = CopyState::None;
+                Ok(Some(self.collect_result()?))
+            }
+            CopyState::Draining => {
+                // Post-PQputCopyEnd: deliver the trailing results one at a time,
+                // exactly as C's PQgetResult does. `None` (the terminating NULL,
+                // at ReadyForQuery) drops us back to the no-COPY state.
+                let r = self.get_one_result()?;
+                if r.is_none() {
+                    self.copy_state = CopyState::None;
+                }
+                Ok(r)
+            }
+            CopyState::None | CopyState::Out | CopyState::Both => Ok(None),
         }
-        self.copy_ended = false;
-        Ok(Some(self.collect_result()?))
+    }
+
+    /// `PQgetResult(conn)` for a single result: pump messages, building exactly
+    /// ONE result, and return it; return `None` once `ReadyForQuery` is reached
+    /// with no further result (the C `PQgetResult` returning NULL). This is the
+    /// one-result-at-a-time form `libpqrcv_endstreaming` relies on (it reads the
+    /// next-timeline `PGRES_TUPLES_OK`, then the `CommandComplete`, then the
+    /// terminating NULL as separate calls), as opposed to [`Self::collect_result`]
+    /// which drains the whole command sequence and returns only the last result.
+    fn get_one_result(&mut self) -> Result<Option<PGresult>, TransportError> {
+        let mut current: Option<PGresult> = None;
+        loop {
+            let msg = self.read_message()?;
+            match msg.kind {
+                codec::B_ROW_DESCRIPTION => {
+                    current = Some(self.parse_row_description(&msg.body)?);
+                }
+                codec::B_DATA_ROW => {
+                    let res = current.as_mut().ok_or(TransportError::ProtocolViolation)?;
+                    Self::parse_data_row(&msg.body, res)?;
+                }
+                codec::B_COMMAND_COMPLETE => {
+                    // CommandComplete completes the in-progress result (tagging a
+                    // TUPLES_OK), or, with none pending, is itself a COMMAND_OK
+                    // result. Either way it ends ONE result — return it.
+                    let mut res = current
+                        .take()
+                        .unwrap_or_else(|| PGresult::make_empty(ExecStatusType::PGRES_COMMAND_OK));
+                    let tag = MsgReader::new(&msg.body).get_cstr()?;
+                    res.cmd_status = String::from_utf8_lossy(&tag).into_owned();
+                    return Ok(Some(res));
+                }
+                codec::B_EMPTY_QUERY => {
+                    return Ok(Some(PGresult::make_empty(ExecStatusType::PGRES_EMPTY_QUERY)));
+                }
+                codec::B_ERROR_RESPONSE => {
+                    let (sqlstate, message) = self.parse_error_notice(&msg.body, true)?;
+                    let mut res = PGresult::make_empty(ExecStatusType::PGRES_FATAL_ERROR);
+                    res.err_msg = Some(message.clone());
+                    res.sqlstate = sqlstate;
+                    self.error_message = message;
+                    return Ok(Some(res));
+                }
+                codec::B_READY_FOR_QUERY => {
+                    // End of the command sequence. If a result was somehow still
+                    // in progress (a RowDescription with no terminating
+                    // CommandComplete — the backend does not actually do this)
+                    // deliver it; otherwise this is the terminating NULL.
+                    self.handle_ready_for_query(&msg.body)?;
+                    return Ok(current.take());
+                }
+                codec::B_NOTICE_RESPONSE => {
+                    let _ = self.parse_error_notice(&msg.body, false)?;
+                }
+                codec::B_NOTIFICATION_RESPONSE => {
+                    let _ = self.parse_notification(&msg.body)?;
+                }
+                codec::B_PARAMETER_STATUS => {
+                    self.handle_parameter_status(&msg.body)?;
+                }
+                codec::B_COPY_OUT_RESPONSE => {
+                    return Ok(Some(
+                        self.parse_copy_start(&msg.body, ExecStatusType::PGRES_COPY_OUT)?,
+                    ));
+                }
+                codec::B_COPY_IN_RESPONSE => {
+                    return Ok(Some(
+                        self.parse_copy_start(&msg.body, ExecStatusType::PGRES_COPY_IN)?,
+                    ));
+                }
+                codec::B_COPY_BOTH_RESPONSE => {
+                    return Ok(Some(
+                        self.parse_copy_start(&msg.body, ExecStatusType::PGRES_COPY_BOTH)?,
+                    ));
+                }
+                other => {
+                    return Err(TransportError::Io(format!(
+                        "unexpected message type '{}' during result", other as char
+                    )));
+                }
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -673,6 +854,17 @@ impl<T: Transport> PgClientConn<T> {
                 ..Default::default()
             });
         }
+        // Enter the matching async COPY sub-state, the way libpq sets
+        // `conn->asyncStatus` from a Copy{Out,In,Both}Response. This is what lets
+        // `copy_receive`'s end-of-stream handling know whether a `CopyDone`
+        // leaves us owing the peer a `CopyDone` (CopyBoth -> COPY_IN) or whether
+        // the trailing result is already queued (plain CopyOut).
+        self.copy_state = match copytype {
+            ExecStatusType::PGRES_COPY_OUT => CopyState::Out,
+            ExecStatusType::PGRES_COPY_BOTH => CopyState::Both,
+            ExecStatusType::PGRES_COPY_IN => CopyState::In,
+            _ => CopyState::None,
+        };
         let mut res = PGresult::make_empty(copytype);
         res.att_descs = att_descs;
         res.binary = copy_is_binary as i32;

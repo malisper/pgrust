@@ -27,6 +27,12 @@ impl MockBackend {
             outbound: Vec::new(),
         }
     }
+
+    /// Append more bytes the client can subsequently read (models a backend that
+    /// only sends its trailing result after it has received the client's reply).
+    fn push_inbound(&mut self, more: &[u8]) {
+        self.inbound.extend_from_slice(more);
+    }
 }
 
 impl Transport for MockBackend {
@@ -329,6 +335,91 @@ fn copy_both_stream() {
     assert!(matches!(conn.copy_receive().unwrap(), crate::client::CopyRecv::Done)); // CopyDone
     let trailing = conn.end_copy().unwrap();
     assert_eq!(trailing.result_status(), ExecStatusType::PGRES_COMMAND_OK);
+}
+
+/// The end-of-timeline switch protocol, exactly as `libpqrcv_receive` (-1 path)
+/// + `libpqrcv_endstreaming` drive it. This is the regression guard for the
+/// async-receive deadlock: in CopyBoth mode the server's `CopyDone` must yield a
+/// non-blocking `PGRES_COPY_IN` result (the trailing CommandComplete/Ready are
+/// NOT on the wire yet — the server is waiting for OUR CopyDone), and only AFTER
+/// we send `copy_done` are the trailing results delivered one at a time
+/// (TUPLES_OK with the next timeline, then CommandComplete, then NULL).
+#[test]
+fn copy_both_end_of_timeline_does_not_block() {
+    // A 2-field text row_desc / data_row helper inline (next_tli, startpos).
+    fn row_desc_two(n1: &str, n2: &str) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&2u16.to_be_bytes());
+        for name in [n1, n2] {
+            body.extend_from_slice(name.as_bytes());
+            body.push(0);
+            body.extend_from_slice(&0u32.to_be_bytes()); // tableid
+            body.extend_from_slice(&0u16.to_be_bytes()); // columnid
+            body.extend_from_slice(&0u32.to_be_bytes()); // typid
+            body.extend_from_slice(&(-1i16).to_be_bytes()); // typlen
+            body.extend_from_slice(&(-1i32).to_be_bytes()); // atttypmod
+            body.extend_from_slice(&0u16.to_be_bytes()); // format text
+        }
+        msg(codec::B_ROW_DESCRIPTION, &body)
+    }
+    fn data_row_two(v1: &[u8], v2: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&2u16.to_be_bytes());
+        for v in [v1, v2] {
+            body.extend_from_slice(&(v.len() as i32).to_be_bytes());
+            body.extend_from_slice(v);
+        }
+        msg(codec::B_DATA_ROW, &body)
+    }
+
+    // Stream up to (and including) the server's CopyDone. CRUCIALLY, the trailing
+    // result is NOT appended here — a real walsender does not send it until it
+    // receives our CopyDone, so if `get_result_after_copy` tried to read it now
+    // the mock would EOF (the deadlock the fix removes).
+    let mut stream = Vec::new();
+    stream.extend(copy_both(0));
+    stream.extend(copy_data(b"WAL"));
+    stream.extend(copy_done()); // server's CopyDone (end of historic timeline)
+
+    let mut conn = connected_backend(stream);
+    let start = conn.start_replication("START_REPLICATION 0/0 TIMELINE 1").unwrap();
+    assert_eq!(start.result_status(), ExecStatusType::PGRES_COPY_BOTH);
+
+    match conn.copy_receive().unwrap() {
+        crate::client::CopyRecv::Data(d) => assert_eq!(&d[..], b"WAL"),
+        _ => panic!("expected CopyData WAL"),
+    }
+    // The server's CopyDone in CopyBoth mode.
+    assert!(matches!(conn.copy_receive().unwrap(), crate::client::CopyRecv::Done));
+
+    // libpqrcv_receive's -1 path: PQgetResult must yield PGRES_COPY_IN WITHOUT
+    // reading the socket (no trailing result is on the wire yet — reading would
+    // EOF the mock / deadlock a real backend).
+    let copy_in = conn.get_result_after_copy().unwrap().expect("a COPY_IN result");
+    assert_eq!(copy_in.result_status(), ExecStatusType::PGRES_COPY_IN);
+
+    // libpqrcv_endstreaming: send our CopyDone, THEN read the trailing results.
+    conn.copy_done().unwrap();
+
+    // Only now is the trailing result on the wire. Push it into the mock by
+    // appending to its inbound queue via a fresh connection mirroring the post-
+    // CopyDone exchange: rowdesc(next_tli, startpos), datarow(2, 0/3028...),
+    // CommandComplete (result-set), CommandComplete (START_STREAMING), Ready.
+    let mut trailing = Vec::new();
+    trailing.extend(row_desc_two("next_tli", "next_tli_startpos"));
+    trailing.extend(data_row_two(b"2", b"0/3028510"));
+    trailing.extend(command_complete("SELECT 1"));
+    trailing.extend(command_complete("START_STREAMING"));
+    trailing.extend(ready(b'I'));
+    conn.transport_mut().push_inbound(&trailing);
+
+    // get_result_after_copy delivers one result per call, exactly like PQgetResult.
+    let r1 = conn.get_result_after_copy().unwrap().expect("TUPLES_OK next_tli");
+    assert_eq!(r1.result_status(), ExecStatusType::PGRES_TUPLES_OK);
+    assert_eq!(r1.get_value(0, 0), b"2"); // next timeline id
+    let r2 = conn.get_result_after_copy().unwrap().expect("COMMAND_OK");
+    assert_eq!(r2.result_status(), ExecStatusType::PGRES_COMMAND_OK);
+    assert!(conn.get_result_after_copy().unwrap().is_none()); // terminating NULL
 }
 
 // ---------------------------------------------------------------------------
