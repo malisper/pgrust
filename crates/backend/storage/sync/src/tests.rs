@@ -2,10 +2,14 @@
 //!
 //! The cross-subsystem dependencies are function-pointer seams (`OnceLock`
 //! slots installed once). The test "runtime" lives in a thread-local [`TestRt`]
-//! that the installed seam functions read/mutate; each test resets the runtime
-//! and threads a fresh [`SyncState`] explicitly into the internal entry points
-//! (the public seams read the crate's `thread_local!` state, which the tests
-//! bypass to keep each test's state isolated).
+//! that the installed seam functions read/mutate. The checkpoint entry points
+//! (`process_sync_requests` / `sync_pre_checkpoint` / `sync_post_checkpoint`)
+//! deliberately do NOT hold the [`SYNC_STATE`] borrow across their re-entrant
+//! seam callbacks (`absorb_sync_requests` re-enters `remember_sync_request`),
+//! so they read the crate's `thread_local!` state in narrow `with_state`
+//! scopes. The tests therefore seed that same `thread_local!` (via [`reset_state`]
+//! / [`set_state`]) rather than threading a private `&mut SyncState`; each test
+//! resets both the runtime and the shared state first to stay isolated.
 
 use std::cell::RefCell;
 use std::sync::Once;
@@ -42,9 +46,9 @@ fn with_rt<R>(f: impl FnOnce(&mut TestRt) -> R) -> R {
 static INSTALL: Once = Once::new();
 
 /// Install every owner seam once (idempotent across tests) with a function that
-/// reads the per-thread [`TestRt`], then reset the runtime and return a fresh
-/// [`SyncState`].
-fn setup(configure: impl FnOnce(&mut TestRt)) -> SyncState {
+/// reads the per-thread [`TestRt`], then reset the runtime and the shared
+/// [`SYNC_STATE`] to a fresh, empty state.
+fn setup(configure: impl FnOnce(&mut TestRt)) {
     INSTALL.call_once(|| {
         checkpointer_seams::absorb_sync_requests::set(|| {
             with_rt(|rt| rt.absorbs += 1);
@@ -116,7 +120,20 @@ fn setup(configure: impl FnOnce(&mut TestRt)) -> SyncState {
         configure(rt);
     });
 
-    SyncState::new()
+    reset_state();
+}
+
+/// Replace the crate `thread_local!` [`SYNC_STATE`] with a fresh empty state so
+/// each test starts clean (the checkpoint entry points operate on this shared
+/// state).
+fn reset_state() {
+    SYNC_STATE.with(|cell| *cell.borrow_mut() = SyncState::new());
+}
+
+/// Run `f` against a momentary borrow of the shared [`SYNC_STATE`] (test-side
+/// inspection / direct setup that mirrors what the production seams do).
+fn with_shared<R>(f: impl FnOnce(&mut SyncState) -> R) -> R {
+    SYNC_STATE.with(|cell| f(&mut cell.borrow_mut()))
 }
 
 fn rt_enable_fsync() -> bool {
@@ -135,129 +152,139 @@ fn tag(seg: u64) -> FileTag {
     FileTag::new(SyncRequestHandler::SYNC_HANDLER_MD, MAIN_FORKNUM, locator(1, 2, 3), seg)
 }
 
-fn pending_entry(s: &SyncState, t: FileTag) -> PendingFsyncEntry {
-    *s.pending_ops.as_ref().unwrap().get(&t).expect("entry present")
+fn pending_entry(t: FileTag) -> PendingFsyncEntry {
+    with_shared(|s| *s.pending_ops.as_ref().unwrap().get(&t).expect("entry present"))
 }
 
 #[test]
 fn init_creates_pending_ops_when_requested() {
-    let mut s = setup(|_| {});
-    init_sync(&mut s, true);
-    assert!(s.pending_ops.is_some());
+    setup(|_| {});
+    with_shared(|s| init_sync(s, true));
+    assert!(with_shared(|s| s.pending_ops.is_some()));
 }
 
 #[test]
 fn init_skips_pending_ops_when_not_requested() {
-    let mut s = setup(|_| {});
-    init_sync(&mut s, false);
-    assert!(s.pending_ops.is_none());
+    setup(|_| {});
+    with_shared(|s| init_sync(s, false));
+    assert!(with_shared(|s| s.pending_ops.is_none()));
 }
 
 #[test]
 fn remember_and_process_sync_request() {
-    let mut s = setup(|_| {});
-    init_sync(&mut s, true);
-    remember_sync_request(&mut s, &tag(7), SyncRequestType::SYNC_REQUEST).unwrap();
-    process_sync_requests(&mut s, rt_enable_fsync(), false).unwrap();
+    setup(|_| {});
+    with_shared(|s| init_sync(s, true));
+    with_shared(|s| remember_sync_request(s, &tag(7), SyncRequestType::SYNC_REQUEST)).unwrap();
+    process_sync_requests(rt_enable_fsync(), false).unwrap();
     assert_eq!(with_rt(|rt| rt.synced.clone()), vec![tag(7)]);
     assert_eq!(with_rt(|rt| rt.ckpt_rels), 1);
-    assert_eq!(s.pending_ops.as_ref().unwrap().len(), 0);
+    assert_eq!(with_shared(|s| s.pending_ops.as_ref().unwrap().len()), 0);
 }
 
 #[test]
 fn forget_request_cancels_entry() {
-    let mut s = setup(|_| {});
-    init_sync(&mut s, true);
-    remember_sync_request(&mut s, &tag(7), SyncRequestType::SYNC_REQUEST).unwrap();
-    remember_sync_request(&mut s, &tag(7), SyncRequestType::SYNC_FORGET_REQUEST).unwrap();
-    process_sync_requests(&mut s, rt_enable_fsync(), false).unwrap();
+    setup(|_| {});
+    with_shared(|s| init_sync(s, true));
+    with_shared(|s| remember_sync_request(s, &tag(7), SyncRequestType::SYNC_REQUEST)).unwrap();
+    with_shared(|s| remember_sync_request(s, &tag(7), SyncRequestType::SYNC_FORGET_REQUEST))
+        .unwrap();
+    process_sync_requests(rt_enable_fsync(), false).unwrap();
     assert!(with_rt(|rt| rt.synced.is_empty()));
-    assert_eq!(s.pending_ops.as_ref().unwrap().len(), 0);
+    assert_eq!(with_shared(|s| s.pending_ops.as_ref().unwrap().len()), 0);
 }
 
 #[test]
 fn filter_request_cancels_matching_db() {
-    let mut s = setup(|_| {});
-    init_sync(&mut s, true);
-    remember_sync_request(&mut s, &tag(7), SyncRequestType::SYNC_REQUEST).unwrap();
+    setup(|_| {});
+    with_shared(|s| init_sync(s, true));
+    with_shared(|s| remember_sync_request(s, &tag(7), SyncRequestType::SYNC_REQUEST)).unwrap();
     let filter = FileTag::new(SyncRequestHandler::SYNC_HANDLER_MD, MAIN_FORKNUM, locator(0, 2, 0), 0);
-    remember_sync_request(&mut s, &filter, SyncRequestType::SYNC_FILTER_REQUEST).unwrap();
-    process_sync_requests(&mut s, rt_enable_fsync(), false).unwrap();
+    with_shared(|s| remember_sync_request(s, &filter, SyncRequestType::SYNC_FILTER_REQUEST))
+        .unwrap();
+    process_sync_requests(rt_enable_fsync(), false).unwrap();
     assert!(with_rt(|rt| rt.synced.is_empty()));
 }
 
 #[test]
 fn filter_request_keeps_other_db() {
-    let mut s = setup(|_| {});
-    init_sync(&mut s, true);
-    remember_sync_request(&mut s, &tag(7), SyncRequestType::SYNC_REQUEST).unwrap();
-    let filter = FileTag::new(SyncRequestHandler::SYNC_HANDLER_MD, MAIN_FORKNUM, locator(0, 999, 0), 0);
-    remember_sync_request(&mut s, &filter, SyncRequestType::SYNC_FILTER_REQUEST).unwrap();
-    process_sync_requests(&mut s, rt_enable_fsync(), false).unwrap();
+    setup(|_| {});
+    with_shared(|s| init_sync(s, true));
+    with_shared(|s| remember_sync_request(s, &tag(7), SyncRequestType::SYNC_REQUEST)).unwrap();
+    let filter =
+        FileTag::new(SyncRequestHandler::SYNC_HANDLER_MD, MAIN_FORKNUM, locator(0, 999, 0), 0);
+    with_shared(|s| remember_sync_request(s, &filter, SyncRequestType::SYNC_FILTER_REQUEST))
+        .unwrap();
+    process_sync_requests(rt_enable_fsync(), false).unwrap();
     assert_eq!(with_rt(|rt| rt.synced.clone()), vec![tag(7)]);
 }
 
 #[test]
 fn filter_request_cancels_matching_unlink() {
-    let mut s = setup(|_| {});
-    init_sync(&mut s, true);
-    remember_sync_request(&mut s, &tag(7), SyncRequestType::SYNC_UNLINK_REQUEST).unwrap();
+    setup(|_| {});
+    with_shared(|s| init_sync(s, true));
+    with_shared(|s| remember_sync_request(s, &tag(7), SyncRequestType::SYNC_UNLINK_REQUEST))
+        .unwrap();
     let filter = FileTag::new(SyncRequestHandler::SYNC_HANDLER_MD, MAIN_FORKNUM, locator(0, 2, 0), 0);
-    remember_sync_request(&mut s, &filter, SyncRequestType::SYNC_FILTER_REQUEST).unwrap();
-    sync_pre_checkpoint(&mut s).unwrap();
-    sync_post_checkpoint(&mut s).unwrap();
+    with_shared(|s| remember_sync_request(s, &filter, SyncRequestType::SYNC_FILTER_REQUEST))
+        .unwrap();
+    sync_pre_checkpoint().unwrap();
+    sync_post_checkpoint().unwrap();
     assert!(with_rt(|rt| rt.unlinks.is_empty()));
 }
 
 #[test]
 fn fsync_enoent_retry_then_success() {
-    let mut s = setup(|rt| rt.sync_fail_then_ok = true);
-    init_sync(&mut s, true);
-    remember_sync_request(&mut s, &tag(7), SyncRequestType::SYNC_REQUEST).unwrap();
-    process_sync_requests(&mut s, rt_enable_fsync(), false).unwrap();
+    setup(|rt| rt.sync_fail_then_ok = true);
+    with_shared(|s| init_sync(s, true));
+    with_shared(|s| remember_sync_request(s, &tag(7), SyncRequestType::SYNC_REQUEST)).unwrap();
+    process_sync_requests(rt_enable_fsync(), false).unwrap();
     assert_eq!(with_rt(|rt| rt.synced.clone()), vec![tag(7)]);
     assert!(with_rt(|rt| rt.sync_failed_once));
 }
 
 #[test]
 fn fsync_disabled_skips_handler() {
-    let mut s = setup(|rt| rt.enable_fsync = false);
-    init_sync(&mut s, true);
-    remember_sync_request(&mut s, &tag(7), SyncRequestType::SYNC_REQUEST).unwrap();
-    process_sync_requests(&mut s, rt_enable_fsync(), false).unwrap();
+    setup(|rt| rt.enable_fsync = false);
+    with_shared(|s| init_sync(s, true));
+    with_shared(|s| remember_sync_request(s, &tag(7), SyncRequestType::SYNC_REQUEST)).unwrap();
+    process_sync_requests(rt_enable_fsync(), false).unwrap();
     assert!(with_rt(|rt| rt.synced.is_empty()));
     assert_eq!(with_rt(|rt| rt.ckpt_rels), 0);
-    assert_eq!(s.pending_ops.as_ref().unwrap().len(), 0);
+    assert_eq!(with_shared(|s| s.pending_ops.as_ref().unwrap().len()), 0);
 }
 
 #[test]
 fn unlink_request_processed_after_cycle_advance() {
-    let mut s = setup(|_| {});
-    init_sync(&mut s, true);
-    remember_sync_request(&mut s, &tag(7), SyncRequestType::SYNC_UNLINK_REQUEST).unwrap();
-    sync_pre_checkpoint(&mut s).unwrap();
-    sync_post_checkpoint(&mut s).unwrap();
+    setup(|_| {});
+    with_shared(|s| init_sync(s, true));
+    with_shared(|s| remember_sync_request(s, &tag(7), SyncRequestType::SYNC_UNLINK_REQUEST))
+        .unwrap();
+    sync_pre_checkpoint().unwrap();
+    sync_post_checkpoint().unwrap();
     assert_eq!(with_rt(|rt| rt.unlinks.clone()), vec![tag(7)]);
-    assert!(s.pending_unlinks.is_empty());
+    assert!(with_shared(|s| s.pending_unlinks.is_empty()));
 }
 
 #[test]
 fn unlink_request_deferred_when_same_cycle() {
-    let mut s = setup(|_| {});
-    init_sync(&mut s, true);
-    sync_pre_checkpoint(&mut s).unwrap();
-    remember_sync_request(&mut s, &tag(7), SyncRequestType::SYNC_UNLINK_REQUEST).unwrap();
-    sync_post_checkpoint(&mut s).unwrap();
+    setup(|_| {});
+    with_shared(|s| init_sync(s, true));
+    sync_pre_checkpoint().unwrap();
+    with_shared(|s| remember_sync_request(s, &tag(7), SyncRequestType::SYNC_UNLINK_REQUEST))
+        .unwrap();
+    sync_post_checkpoint().unwrap();
     assert!(with_rt(|rt| rt.unlinks.is_empty()));
-    assert_eq!(s.pending_unlinks.len(), 1);
+    assert_eq!(with_shared(|s| s.pending_unlinks.len()), 1);
 }
 
 #[test]
 fn register_forwards_when_no_local_ops() {
-    let mut s = setup(|rt| rt.forward_full_n = 2);
+    setup(|rt| rt.forward_full_n = 2);
     // No init_sync => pending_ops is None => forward path.
-    let ok =
-        register_sync_request(&mut s, &tag(1), SyncRequestType::SYNC_REQUEST, true).unwrap();
+    let ok = with_shared(|s| {
+        register_sync_request(s, &tag(1), SyncRequestType::SYNC_REQUEST, true)
+    })
+    .unwrap();
     assert!(ok);
     assert_eq!(with_rt(|rt| rt.waits), 2);
     assert_eq!(
@@ -268,52 +295,57 @@ fn register_forwards_when_no_local_ops() {
 
 #[test]
 fn register_no_retry_returns_false_when_full() {
-    let mut s = setup(|rt| rt.forward_full_n = 1);
-    let ok =
-        register_sync_request(&mut s, &tag(1), SyncRequestType::SYNC_REQUEST, false).unwrap();
+    setup(|rt| rt.forward_full_n = 1);
+    let ok = with_shared(|s| {
+        register_sync_request(s, &tag(1), SyncRequestType::SYNC_REQUEST, false)
+    })
+    .unwrap();
     assert!(!ok);
     assert_eq!(with_rt(|rt| rt.waits), 0);
 }
 
 #[test]
 fn register_local_remembers_when_pending_ops_present() {
-    let mut s = setup(|_| {});
-    init_sync(&mut s, true);
-    let ok =
-        register_sync_request(&mut s, &tag(5), SyncRequestType::SYNC_REQUEST, false).unwrap();
+    setup(|_| {});
+    with_shared(|s| init_sync(s, true));
+    let ok = with_shared(|s| {
+        register_sync_request(s, &tag(5), SyncRequestType::SYNC_REQUEST, false)
+    })
+    .unwrap();
     assert!(ok);
     assert!(with_rt(|rt| rt.forwarded.is_empty()));
-    assert_eq!(s.pending_ops.as_ref().unwrap().len(), 1);
+    assert_eq!(with_shared(|s| s.pending_ops.as_ref().unwrap().len()), 1);
 }
 
 #[test]
 fn process_without_pending_ops_errors() {
-    let mut s = setup(|_| {});
-    assert!(process_sync_requests(&mut s, rt_enable_fsync(), false).is_err());
+    setup(|_| {});
+    assert!(process_sync_requests(rt_enable_fsync(), false).is_err());
 }
 
 #[test]
 fn duplicate_sync_request_keeps_oldest_cycle_ctr() {
-    let mut s = setup(|_| {});
-    init_sync(&mut s, true);
-    remember_sync_request(&mut s, &tag(7), SyncRequestType::SYNC_REQUEST).unwrap();
-    let first = pending_entry(&s, tag(7)).cycle_ctr;
-    s.sync_cycle_ctr = s.sync_cycle_ctr.wrapping_add(5);
-    remember_sync_request(&mut s, &tag(7), SyncRequestType::SYNC_REQUEST).unwrap();
-    let again = pending_entry(&s, tag(7)).cycle_ctr;
+    setup(|_| {});
+    with_shared(|s| init_sync(s, true));
+    with_shared(|s| remember_sync_request(s, &tag(7), SyncRequestType::SYNC_REQUEST)).unwrap();
+    let first = pending_entry(tag(7)).cycle_ctr;
+    with_shared(|s| s.sync_cycle_ctr = s.sync_cycle_ctr.wrapping_add(5));
+    with_shared(|s| remember_sync_request(s, &tag(7), SyncRequestType::SYNC_REQUEST)).unwrap();
+    let again = pending_entry(tag(7)).cycle_ctr;
     assert_eq!(first, again);
 }
 
 #[test]
 fn canceled_then_rerequested_reinitializes() {
-    let mut s = setup(|_| {});
-    init_sync(&mut s, true);
-    remember_sync_request(&mut s, &tag(7), SyncRequestType::SYNC_REQUEST).unwrap();
-    remember_sync_request(&mut s, &tag(7), SyncRequestType::SYNC_FORGET_REQUEST).unwrap();
-    assert!(pending_entry(&s, tag(7)).canceled);
-    remember_sync_request(&mut s, &tag(7), SyncRequestType::SYNC_REQUEST).unwrap();
-    assert!(!pending_entry(&s, tag(7)).canceled);
-    process_sync_requests(&mut s, rt_enable_fsync(), false).unwrap();
+    setup(|_| {});
+    with_shared(|s| init_sync(s, true));
+    with_shared(|s| remember_sync_request(s, &tag(7), SyncRequestType::SYNC_REQUEST)).unwrap();
+    with_shared(|s| remember_sync_request(s, &tag(7), SyncRequestType::SYNC_FORGET_REQUEST))
+        .unwrap();
+    assert!(pending_entry(tag(7)).canceled);
+    with_shared(|s| remember_sync_request(s, &tag(7), SyncRequestType::SYNC_REQUEST)).unwrap();
+    assert!(!pending_entry(tag(7)).canceled);
+    process_sync_requests(rt_enable_fsync(), false).unwrap();
     assert_eq!(with_rt(|rt| rt.synced.clone()), vec![tag(7)]);
 }
 

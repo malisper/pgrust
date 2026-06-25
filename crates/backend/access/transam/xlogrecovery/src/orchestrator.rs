@@ -1101,6 +1101,20 @@ pub(crate) fn archive_cleanup_command(mcx: Mcx<'_>) -> Option<PgString<'_>> {
     Some(s)
 }
 
+/// Read for the `recovery_end_command` seam — the configured
+/// `recovery_end_command` GUC (`recoveryEndCommand`; xlogrecovery.c:85), or
+/// `None` when unset/empty. Consumed by `CleanupAfterArchiveRecovery` (xlog.c)
+/// at the conclusion of archive recovery.
+pub(crate) fn recovery_end_command(mcx: Mcx<'_>) -> Option<PgString<'_>> {
+    let cmd = crate::gucvars::recovery_end_command()?;
+    if cmd.is_empty() {
+        return None;
+    }
+    let mut s = PgString::new_in(mcx);
+    s.try_push_str(&cmd).expect("recovery_end_command");
+    Some(s)
+}
+
 /// Read for the `primary_conninfo` seam — the configured `primary_conninfo`
 /// GUC (`PrimaryConnInfo`; xlogrecovery.c:98), copied into `mcx` (the C call
 /// sites `pstrdup` it). C never returns NULL here — the boot value is `""` —

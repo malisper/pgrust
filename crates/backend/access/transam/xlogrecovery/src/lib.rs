@@ -212,6 +212,9 @@ pub fn init_seams() {
     // archiveCleanupCommand (xlogrecovery.c global) — CreateRestartPoint runs it
     // after a successful restartpoint to clean up no-longer-needed WAL.
     seams::archive_cleanup_command::set(orchestrator::archive_cleanup_command);
+    // recoveryEndCommand (xlogrecovery.c global) — CleanupAfterArchiveRecovery
+    // (xlog.c) runs it once at the conclusion of archive recovery.
+    seams::recovery_end_command::set(orchestrator::recovery_end_command);
 
     // GUC `conf->variable` accessors (`*conf->variable`) for the recovery /
     // streaming GUC globals whose C file-static storage lives in

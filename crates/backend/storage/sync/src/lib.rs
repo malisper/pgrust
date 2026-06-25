@@ -292,20 +292,39 @@ fn init_sync(state: &mut SyncState, create_pending_ops: bool) {
 }
 
 /// `SyncPreCheckpoint(void)` (`sync.c:176-194`) — pre-checkpoint work.
-fn sync_pre_checkpoint(state: &mut SyncState) -> PgResult<()> {
+///
+/// NB: no `with_state` borrow may be held across `absorb_sync_requests` — it
+/// re-enters `remember_sync_request` -> `with_state`, double-borrowing the
+/// `RefCell` (a FATAL panic). C has no such hazard (a bare global hashtable, no
+/// borrow check). So this is a free function holding the borrow only in narrow
+/// scopes, releasing it before the re-entrant absorb, exactly as
+/// `process_sync_requests` does.
+fn sync_pre_checkpoint() -> PgResult<()> {
     // Ensure unlink requests forwarded before the checkpoint began are
-    // processed in the current checkpoint.
+    // processed in the current checkpoint. (Borrow MUST be released here.)
     checkpointer_seams::absorb_sync_requests::call()?;
 
     // Any unlink requests arriving after this point get the next cycle counter
     // and won't be unlinked until the next checkpoint.
-    state.checkpoint_cycle_ctr = state.checkpoint_cycle_ctr.wrapping_add(1);
+    with_state(|state| {
+        state.checkpoint_cycle_ctr = state.checkpoint_cycle_ctr.wrapping_add(1);
+    });
     Ok(())
 }
 
 /// `SyncPostCheckpoint(void)` (`sync.c:201-280`) — remove lingering files that
 /// can now be safely removed.
-fn sync_post_checkpoint(state: &mut SyncState) -> PgResult<()> {
+///
+/// NB: no `with_state` borrow may be held across `unlink_filetag` (an md/SLRU
+/// callback) or `absorb_sync_requests` — the latter re-enters
+/// `remember_sync_request` -> `with_state`, double-borrowing the `RefCell` (a
+/// FATAL panic; C has a bare global list, no borrow check). So the borrow is
+/// taken only in narrow `with_state` scopes and released before every such
+/// re-entrant call, exactly as `process_sync_requests` does. Each list entry is
+/// re-fetched live per iteration (an interleaved absorb's SYNC_FILTER_REQUEST
+/// may have set `canceled`); the index is stable because nothing removes from
+/// the list mid-loop (absorb only appends at the end / marks `canceled`).
+fn sync_post_checkpoint() -> PgResult<()> {
     let mut absorb_counter = UNLINKS_PER_ABSORB;
 
     // foreach(lc, pendingUnlinks). We iterate by index so we can compute the
@@ -313,8 +332,8 @@ fn sync_post_checkpoint(state: &mut SyncState) -> PgResult<()> {
     // logic does. New entries appended by an interleaved AbsorbSyncRequests are
     // added at the end and are NOT visited beyond the original length (matching
     // C: new entries carry the new cycle_ctr that the break below stops on).
-    let checkpoint_cycle_ctr = state.checkpoint_cycle_ctr;
-    let len = state.pending_unlinks.len();
+    let (checkpoint_cycle_ctr, len) =
+        with_state(|state| (state.checkpoint_cycle_ctr, state.pending_unlinks.len()));
 
     // `reached_end` mirrors C's `lc == NULL` after the loop; `stop_index` is the
     // index of the first not-yet-processed old entry (the C `lc`).
@@ -323,7 +342,8 @@ fn sync_post_checkpoint(state: &mut SyncState) -> PgResult<()> {
 
     let mut i = 0;
     while i < len {
-        let entry = state.pending_unlinks[i];
+        // Re-fetch the live entry (an interleaved absorb may have canceled it).
+        let entry = with_state(|state| state.pending_unlinks[i]);
 
         // Skip over any canceled entries.
         if entry.canceled {
@@ -340,7 +360,7 @@ fn sync_post_checkpoint(state: &mut SyncState) -> PgResult<()> {
 
         // Unlink the file. `FileTag.handler` is a typed `SyncRequestHandler`
         // (the C `int16` index into `syncsw[]`, now a checked enum), so no
-        // range check is needed.
+        // range check is needed. (Borrow released across the callback.)
         let handler = entry.tag.handler;
         let op = unlink_filetag(handler, entry.tag)?;
         if op.result < 0 {
@@ -356,10 +376,11 @@ fn sync_post_checkpoint(state: &mut SyncState) -> PgResult<()> {
         }
 
         // Mark the list entry as canceled, just in case.
-        state.pending_unlinks[i].canceled = true;
+        with_state(|state| state.pending_unlinks[i].canceled = true);
 
         // As in ProcessSyncRequests, don't stop absorbing fsync requests for a
-        // long time when there are many deletions to do.
+        // long time when there are many deletions to do. (Borrow MUST be
+        // released across this re-entrant absorb.)
         absorb_counter -= 1;
         if absorb_counter <= 0 {
             checkpointer_seams::absorb_sync_requests::call()?;
@@ -372,13 +393,15 @@ fn sync_post_checkpoint(state: &mut SyncState) -> PgResult<()> {
     // If we reached the end of the list, drop the whole list; otherwise keep the
     // entries at or after the stop cell (C frees the first `ntodelete` and does
     // list_delete_first_n).
-    if reached_end {
-        // list_free_deep(pendingUnlinks); pendingUnlinks = NIL;
-        state.pending_unlinks.clear();
-    } else {
-        // ntodelete == stop_index: drain the leading processed entries.
-        state.pending_unlinks.drain(0..stop_index);
-    }
+    with_state(|state| {
+        if reached_end {
+            // list_free_deep(pendingUnlinks); pendingUnlinks = NIL;
+            state.pending_unlinks.clear();
+        } else {
+            // ntodelete == stop_index: drain the leading processed entries.
+            state.pending_unlinks.drain(0..stop_index);
+        }
+    });
     Ok(())
 }
 
@@ -780,11 +803,18 @@ fn init_sync_seam(create_pending_ops: bool) {
 }
 
 fn sync_pre_checkpoint_seam() -> PgResult<()> {
-    with_state(sync_pre_checkpoint)
+    // NB: NOT inside `with_state` — `sync_pre_checkpoint` calls back into
+    // `absorb_sync_requests` (which re-enters `remember_sync_request` ->
+    // `with_state`); holding the borrow across that double-borrows the cell.
+    // It takes the state in narrow `with_state` scopes internally instead.
+    sync_pre_checkpoint()
 }
 
 fn sync_post_checkpoint_seam() -> PgResult<()> {
-    with_state(sync_post_checkpoint)
+    // NB: NOT inside `with_state` — `sync_post_checkpoint` calls back into
+    // `absorb_sync_requests` / `unlink_filetag`; it grabs the state in narrow
+    // `with_state` scopes internally, releasing the borrow before each.
+    sync_post_checkpoint()
 }
 
 fn process_sync_requests_seam(enable_fsync: bool, log_checkpoints: bool) -> PgResult<()> {

@@ -375,8 +375,8 @@ pub fn StartupXLOG() -> PgResult<()> {
     };
     let mut end_of_log = end_of_recovery_info.end_of_log;
     // EndOfLogTLI is consumed by CleanupAfterArchiveRecovery on the archive
-    // path (which returns a precise panic earlier on this clean-path port).
-    let _end_of_log_tli = end_of_recovery_info.end_of_log_tli;
+    // path (executed below once recovery is finished).
+    let end_of_log_tli = end_of_recovery_info.end_of_log_tli;
     let aborted_rec_ptr = end_of_recovery_info.aborted_rec_ptr;
     let missing_contrec_ptr = end_of_recovery_info.missing_contrec_ptr;
 
@@ -663,8 +663,11 @@ pub fn StartupXLOG() -> PgResult<()> {
     // WAL.
     crate::control_funcs::XLogReportParameters()?;
 
-    // If this is archive recovery, perform post-recovery cleanup. (Not reached
-    // on the clean path; archive_recovery_requested would have returned earlier.)
+    // If this is archive recovery, perform post-recovery cleanup actions
+    // (recovery_end_command + old-timeline segment cleanup). (xlog.c:6203-6205)
+    if recovery_seam::archive_recovery_requested::call() {
+        CleanupAfterArchiveRecovery(end_of_log_tli, end_of_log, new_tli)?;
+    }
 
     // Local WAL inserts enabled; finish commit-timestamp initialization.
     commit_ts_seam::complete_commit_ts_initialization::call()?;
@@ -985,6 +988,87 @@ fn startup_xlog_redo_phase(
     }
 
     Ok(true)
+}
+
+// ===========================================================================
+// CleanupAfterArchiveRecovery (xlog.c:5350).
+// ===========================================================================
+
+/// `WAIT_EVENT_RECOVERY_END_COMMAND` (`utils/wait_event_types.h`) — the
+/// `PG_WAIT_IPC` class (`0x08000000`) entry for `recovery_end_command`. It is
+/// at 0-based index 46 in the alphabetically-ordered `WaitEventIPC` enum
+/// (`WAIT_EVENT_APPEND_READY = PG_WAIT_IPC` is index 0), so the value is
+/// `PG_WAIT_IPC + 46 = 0x0800002E`.
+const WAIT_EVENT_RECOVERY_END_COMMAND: u32 = 0x0800_002E;
+
+/// `static void CleanupAfterArchiveRecovery(TimeLineID EndOfLogTLI, XLogRecPtr
+/// EndOfLog, TimeLineID newTLI)` (xlog.c:5350) — perform cleanup actions at the
+/// conclusion of archive recovery: run `recovery_end_command`, remove
+/// non-parent (old-timeline) WAL segments, and archive the last partial segment
+/// on the old timeline (as `*.partial`) if we switched mid-segment.
+fn CleanupAfterArchiveRecovery(
+    end_of_log_tli: TimeLineID,
+    end_of_log: XLogRecPtr,
+    new_tli: TimeLineID,
+) -> PgResult<()> {
+    use crate::{XLByteToPrevSeg, XLogFileName, XLogFilePath, XLogSegmentOffset};
+
+    // Execute the recovery_end_command, if any. (xlog.c:5357) The command + its
+    // placeholder substitution are transient (C: CurrentMemoryContext); use a
+    // throwaway context.
+    let cmd_cx = ::mcx::MemoryContext::new("recovery_end_command");
+    let cmd_mcx = cmd_cx.mcx();
+    if let Some(cmd) = recovery_seam::recovery_end_command::call(cmd_mcx) {
+        if !cmd.as_str().is_empty() {
+            xlogarchive::ExecuteRecoveryCommand(
+                cmd_mcx,
+                cmd.as_str(),
+                "recovery_end_command",
+                true,
+                WAIT_EVENT_RECOVERY_END_COMMAND,
+            )?;
+        }
+    }
+    drop(cmd_cx);
+
+    // We switched to a new timeline. Clean up segments on the old timeline:
+    // remove any higher-numbered segments on the old timeline that are not part
+    // of the new timeline's history (they might be pre-allocated garbage).
+    // (xlog.c:5371)
+    crate::control_funcs::RemoveNonParentXlogFiles(end_of_log, new_tli)?;
+
+    // If the switch happened in the middle of a segment, rename the last,
+    // partial segment on the old timeline with a `.partial` suffix and archive
+    // it, unless it is already known complete (.ready/.done present). Archive
+    // recovery never reads `.partial` segments, so they normally go unused, but
+    // they can be useful for a manual PITR / debugging. (xlog.c:5400-5435)
+    let wal_segment_size = shmem::wal_segment_size();
+    let xlog_archiving_active =
+        guc_tables::vars::XLogArchiveMode.read() > ARCHIVE_MODE_OFF;
+    if XLogSegmentOffset(end_of_log, wal_segment_size) != 0 && xlog_archiving_active {
+        let end_log_seg_no = XLByteToPrevSeg(end_of_log, wal_segment_size);
+        let origfname = XLogFileName(end_of_log_tli, end_log_seg_no, wal_segment_size);
+
+        if !xlogarchive::XLogArchiveIsReadyOrDone(&origfname) {
+            // If we're summarizing WAL, we can't rename the partial file until
+            // the summarizer finishes with it, else it would fail.
+            if guc_tables::vars::summarize_wal.read() {
+                walsummarizer_seams::wait_for_wal_summarization::call(end_of_log)?;
+            }
+
+            let origpath = XLogFilePath(end_of_log_tli, end_log_seg_no, wal_segment_size);
+            let partialfname = format!("{origfname}.partial");
+            let partialpath = format!("{origpath}.partial");
+
+            // Make sure there's no .done or .ready file for the .partial file.
+            xlogarchive::XLogArchiveCleanup(&partialfname);
+
+            file_seams::durable_rename::call(&origpath, &partialpath, ::types_error::ERROR)?;
+            xlogarchive::XLogArchiveNotify(&partialfname)?;
+        }
+    }
+
+    Ok(())
 }
 
 // ===========================================================================

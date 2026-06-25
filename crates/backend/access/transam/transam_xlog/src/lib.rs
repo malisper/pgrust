@@ -919,6 +919,15 @@ pub fn init_seams() {
     // do_pg_backup_stop / xlogarchive's RestoreArchivedFile.
     xlogrecovery_seams::get_recovery_state::set(|| Ok(driver::GetRecoveryState()));
 
+    // GetOldestRestartPoint() (xlog.c:9533) — same ownership split: the impl
+    // lives here (ControlFile owns checkPointCopy.redo / ThisTimeLineID), but
+    // the seam is declared on the xlogrecovery side (its callers in
+    // xlogarchive.c: RestoreArchivedFile / KeepFileRestoredFromArchive, reached
+    // from the recovery restartpoint path). Wire the xlog-owned impl into it so
+    // the standby checkpointer's CreateRestartPoint -> archive cleanup doesn't
+    // hit an uninstalled seam.
+    xlogrecovery_seams::get_oldest_restart_point::set(|| Ok(driver::GetOldestRestartPoint()));
+
     // The decision inputs xloginsert.c's XLogInsert / XLogBeginInsert read
     // before they hold an insertion lock (XLogInsertAllowed / full-page-write
     // info), plus the WAL-compression / consistency-checking GUC reads its
