@@ -183,6 +183,10 @@ export LD_LIBRARY_PATH="$PG_INSTALL/lib:${LD_LIBRARY_PATH:-}"
 export TEMP_CONFIG="$tmpconf"
 export PG_REGRESS="$PG_SRC/src/test/regress/pg_regress"
 export PG_TEST_TIMEOUT_DEFAULT="${PG_TEST_TIMEOUT_DEFAULT:-90}"
+# Tests gated on injection points (044/046/047/...) read $enable_injection_points;
+# under `use warnings FATAL=>'all'` an unset value fatals into an instant
+# "No plan found" bail. pgrust builds the injection_points support in, so enable it.
+export enable_injection_points="${enable_injection_points:-yes}"
 
 # Build-capability flags the TAP tests read to decide skips. PostgreSQL's build
 # Makefile normally exports these from the ./configure result; pgrust's build
