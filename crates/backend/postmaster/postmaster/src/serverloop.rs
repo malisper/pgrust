@@ -13,7 +13,7 @@ use ::pqcomm::{AcceptConnection, TouchSocketFiles};
 use ::launch_backend::postmaster_child_launch;
 use ::pmchild::{
     AllocDeadEndChild, AssignPostmasterChildSlot, ReleasePostmasterChildSlot,
-    SetActiveChildBgworkerInfo, SetActiveChildPid,
+    SetActiveChildBgworkerInfo, SetActiveChildPidByEntry,
 };
 use ::waiteventset_seams::WaitEventSet;
 use ::utils_error::{ereport};
@@ -348,8 +348,13 @@ pub fn BackendStartup(client_sock: &ClientSocket) -> i32 {
         ))
         .finish(here("BackendStartup"));
 
-    /* Safe to add this backend to our list of backends now. */
-    SetActiveChildPid(bn.child_slot, pid);
+    /* Safe to add this backend to our list of backends now. (C: `bn->pid =
+     * pid`.) Set the pid on the slab entry by identity, not by child_slot:
+     * dead-end children all carry child_slot == 0, so a slot-number lookup
+     * would never find them, leaving them in ActiveChildList with pid == 0 —
+     * which makes a later crash's TerminateChildren run `kill(-0, ...)` and
+     * signal the postmaster's own process group. */
+    SetActiveChildPidByEntry(&bn, pid);
     STATUS_OK
 }
 

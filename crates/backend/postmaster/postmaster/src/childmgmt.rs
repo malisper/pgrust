@@ -31,6 +31,15 @@ use crate::helpers::{here, kill, pm_signame};
 /// (a recently-forked child might not have run `setsid()` yet).
 pub fn signal_child(pmchild: PMChild, signal: i32) {
     let pid = pmchild.pid;
+    // Defensive: never signal a non-positive pid. C's PMChildren always carry a
+    // valid (post-fork) pid; a `pid <= 0` here would make `kill(-pid, signal)`
+    // below signal the postmaster's OWN process group (pid 0 == "my group"),
+    // taking the whole cluster down. The root cause (a dead-end child whose pid
+    // was never set) is fixed in BackendStartup, but guard here too so no future
+    // pid==0 window can ever escalate a child signal into cluster suicide.
+    if pid <= 0 {
+        return;
+    }
     let desc = miscinit_seams::get_backend_type_desc::call(pmchild.bkend_type);
     let _ = ereport(DEBUG3)
         .errmsg_internal(format!(

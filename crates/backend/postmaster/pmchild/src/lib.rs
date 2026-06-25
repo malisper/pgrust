@@ -744,6 +744,34 @@ pub fn SetActiveChildPid(child_slot: i32, pid: i32) -> bool {
     }
 }
 
+/// Set the `pid` of a live active child identified by the `PMChild` entry
+/// itself (the slab cell still matching `pmchild`), mirroring C's direct
+/// `bn->pid = pid` assignment in `BackendStartup`. Unlike [`SetActiveChildPid`],
+/// this works for dead-end children, which all carry `child_slot == 0` and so
+/// cannot be matched by slot number — the just-forked one is located by
+/// [`find_active_index`]'s full-entry equality (it still has `pid == 0` at the
+/// call site, exactly matching its slab cell). Returns whether the entry was
+/// found.
+///
+/// This is the load-bearing fix for the crash-restart abnormal-exit bug: if a
+/// dead-end child never gets its pid set, it lingers in `ActiveChildList` with
+/// `pid == 0`, and the next crash's `TerminateChildren` calls `kill(-0, SIGABRT)`
+/// — which signals the postmaster's OWN process group, killing the cluster
+/// instead of crash-restarting it.
+pub fn SetActiveChildPidByEntry(pmchild: &PMChild, pid: i32) -> bool {
+    let mut state = PMCHILD.lock().unwrap();
+    match find_active_index(&state, pmchild) {
+        Some(idx) => {
+            state.slab[idx]
+                .as_mut()
+                .expect("active child slab slot is live")
+                .pid = pid;
+            true
+        }
+        None => false,
+    }
+}
+
 /// Set the `bkend_type` of a live active child identified by `child_slot`
 /// (postmaster.c rewrites `bp->bkend_type = B_WAL_SENDER` in place when it
 /// notices a backend has become a walsender, in `SignalChildren`/
