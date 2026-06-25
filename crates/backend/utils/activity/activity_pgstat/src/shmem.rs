@@ -21,7 +21,7 @@ use core::sync::atomic::Ordering;
 
 use ::types_core::{Oid, Size};
 use ::types_error::PgResult;
-use ::types_pgstat::activity_pgstat::PgStat_Kind;
+use ::types_pgstat::activity_pgstat::{PgStat_Kind, PGSTAT_KIND_DATABASE};
 use ::types_pgstat::pgstat_internal::{
     PgStat_HashKey, PgStat_ShmemControl, PgStatShared_Common, PgStatShared_HashEntry,
 };
@@ -704,10 +704,6 @@ fn pgstat_release_entry_ref_for_key(key: &PgStat_HashKey) -> PgResult<()> {
 /// once the last reference is gone. Returns `true` if the entry was freed
 /// immediately (no other live references), `false` if a GC is needed.
 pub fn pgstat_drop_entry(kind: PgStat_Kind, dboid: Oid, objid: u64) -> PgResult<bool> {
-    // For database drops, C also drops the per-database contents; that broader
-    // sweep (pgstat_drop_database_and_contents) lands with the database-kind
-    // crate. The single-entry drop is the faithful core here.
-    let _ = kind;
     let key = PgStat_HashKey { kind, dboid, objid };
 
     let (area, dsh) = local::with_local(|l| (l.dsa, l.shared_hash));
@@ -748,6 +744,16 @@ pub fn pgstat_drop_entry(kind: PgStat_Kind, dboid: Oid, objid: u64) -> PgResult<
                     false
                 }
             };
+
+            // Database stats contain other stats. Drop those as well when
+            // dropping the database (pgstat_shmem.c). DROP DATABASE schedules a
+            // single PGSTAT_KIND_DATABASE transactional drop; this cascade is
+            // what clears the database's relation/function entries — on the
+            // primary at commit and on a standby during xact_redo_commit.
+            if kind == PGSTAT_KIND_DATABASE {
+                pgstat_drop_database_and_contents(dboid)?;
+            }
+
             Ok(freed)
         }
     }
@@ -824,6 +830,83 @@ pub fn pgstat_drop_all_entries() -> PgResult<()> {
         pgstat_release_entry_ref_for_key(&key)?;
 
         if !unsafe { pgstat_drop_entry_internal(area, &mut hstat, shent)? } {
+            not_freed_count += 1;
+        }
+    }
+    dshash::dshash_seq_term(&mut hstat)?;
+
+    if not_freed_count > 0 {
+        pgstat_request_entry_refs_gc()?;
+    }
+    Ok(())
+}
+
+/// `pgstat_release_db_entry_refs(dboid)` (`pgstat_shmem.c`) — release this
+/// backend's local references to every stats entry belonging to `dboid`
+/// (`pgstat_release_matching_entry_refs(true, match_db, dboid)`). Called by
+/// [`pgstat_drop_database_and_contents`] so this backend is not the lone holder
+/// of an about-to-be-dropped entry's reference, which would prevent it from
+/// being freed until later.
+fn pgstat_release_db_entry_refs(dboid: Oid) -> PgResult<()> {
+    // pgStatEntryRefHash == NULL -> nothing to do.
+    let keys: std::vec::Vec<PgStat_HashKey> = local::with_pending(|p| {
+        p.entry_ref_hash
+            .keys()
+            .filter(|k| k.dboid == dboid)
+            .copied()
+            .collect()
+    });
+    for key in keys {
+        // discard_pending = true (C passes true here); the for-key release
+        // removes the local ref-hash slot and, if this was the last reference
+        // to a dropped entry, frees the body. (The pending stats discard is
+        // subsumed by removing the slot in this model.)
+        pgstat_release_entry_ref_for_key(&key)?;
+    }
+    Ok(())
+}
+
+/// `pgstat_drop_database_and_contents(dboid)` (`pgstat_shmem.c`) — drop the
+/// stats for a dropped database *and* every per-object stats entry inside it
+/// (relations, functions, ...). The DROP DATABASE transaction only schedules a
+/// single `PGSTAT_KIND_DATABASE` transactional drop; this cascade is what clears
+/// the contained relation/function entries, on the primary at commit and on a
+/// standby at `xact_redo_commit`. Called from [`pgstat_drop_entry`] when the
+/// dropped entry is a database entry.
+fn pgstat_drop_database_and_contents(dboid: Oid) -> PgResult<()> {
+    debug_assert!(dboid != ::types_core::InvalidOid);
+
+    let (area, dsh) = local::with_local(|l| (l.dsa, l.shared_hash));
+    debug_assert!(!dsh.is_null());
+
+    // This backend might be the only one holding a reference to an
+    // about-to-be-dropped entry; release those first (separately from the
+    // dshash iteration below, to avoid doing so while holding a partition lock
+    // on the shared hashtable).
+    pgstat_release_db_entry_refs(dboid)?;
+
+    let mut not_freed_count: u64 = 0;
+
+    // Some of the dshash entries are to be removed, so take an exclusive lock.
+    let mut hstat = dshash::dshash_seq_init(dsh, true);
+    loop {
+        let entry = match dshash::dshash_seq_next(&mut hstat)? {
+            Some(e) => e,
+            None => break,
+        };
+        // SAFETY: dshash_seq_next returns a live, locked entry address.
+        let shent = unsafe { shared_entry(entry) };
+
+        if unsafe { (*shent).dropped } {
+            continue;
+        }
+        if unsafe { (*shent).key.dboid } != dboid {
+            continue;
+        }
+
+        if !unsafe { pgstat_drop_entry_internal(area, &mut hstat, shent)? } {
+            // Even statistics for a dropped database might currently be
+            // accessed (e.g. database stats for pg_stat_database).
             not_freed_count += 1;
         }
     }
