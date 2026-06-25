@@ -706,6 +706,125 @@ pub(crate) fn lw_wait_mode_write(procno: ProcNumber, v: u8) {
     unsafe { core::ptr::write(base.add(idx), v) };
 }
 
+// ---- genuinely-shared per-PGPROC sync-rep fields (`syncRepLinks` /
+//      `syncRepState` / `waitLSN`) ----
+//
+// syncrep.c's wait queue (`WalSndCtl->SyncRepQueue[mode]`, head/tail in
+// walsender shmem) is a `proclist` threaded through each waiter's
+// `PGPROC.syncRepLinks`, with the per-waiter `syncRepState`/`waitLSN`. This is a
+// cross-process structure exactly like `cvWaitLink` / `lwWaitLink` above: a
+// *backend* commit (`SyncRepWaitForLSN`) pushes its own procno onto the shared
+// queue head and sets its `syncRepState`/`waitLSN`; a *walsender*
+// (`SyncRepReleaseWaiters` -> `SyncRepWakeQueue`) walks that queue, reads each
+// waiter's `waitLSN`, unlinks it (writing the waiter's `syncRepLinks`), and sets
+// its `syncRepState = SYNC_REP_WAIT_COMPLETE`. If these per-PGPROC fields stayed
+// in the COW-inherited, process-local `PROC_GLOBAL`, the walsender would resolve
+// the waiter's `syncRepLinks` in its OWN private copy — where the waiter never
+// linked itself, so it still reads the fork-inherited detached `{0,0}` while the
+// genuinely-shared queue head/tail say the waiter is enqueued. The walk then
+// sees a head/tail that references a "detached" node and loops forever
+// (`2 -> 0 -> 0 -> ...`), so the walsender never releases the waiter and the
+// primary's commit/PREPARE waits in `SyncRepWaitForLSN` forever. So these three
+// fields live in genuine shmem, mirroring `cvWaitLink`/`lwWaitLink`.
+static SHARED_SYNC_REP_LINKS: AtomicPtr<::types_storage::proclist_node> =
+    AtomicPtr::new(core::ptr::null_mut());
+/// Length of [`SHARED_SYNC_REP_LINKS`] (== total_procs), for bounds checks.
+static SHARED_SYNC_REP_LINK_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// Base of the genuinely-shared `[i32; total_procs]` `syncRepState` words.
+static SHARED_SYNC_REP_STATE: AtomicPtr<i32> = AtomicPtr::new(core::ptr::null_mut());
+/// Base of the genuinely-shared `[u64; total_procs]` `waitLSN` words.
+static SHARED_SYNC_REP_WAIT_LSN: AtomicPtr<u64> = AtomicPtr::new(core::ptr::null_mut());
+
+/// `&proc->syncRepLinks` over the genuinely-shared array (read).
+pub(crate) fn sync_rep_links_read(procno: ProcNumber) -> ::types_storage::proclist_node {
+    let base = SHARED_SYNC_REP_LINKS.load(AtomicOrdering::Relaxed);
+    let count = SHARED_SYNC_REP_LINK_COUNT.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "sync_rep_links_read: syncRepLinks base uninitialized (InitProcGlobal not run)"
+    );
+    let idx = procno as usize;
+    assert!(idx < count, "syncRepLinks index {idx} out of range (count {count})");
+    // SAFETY: in-range slot of the shared array; read under SyncRepLock (held by
+    // every queue caller) or the lock-free `dlist_node_is_detached` read,
+    // mirroring C's plain read of `proc->syncRepLinks`.
+    unsafe { core::ptr::read(base.add(idx)) }
+}
+
+/// `proc->syncRepLinks = node` over the genuinely-shared array (write).
+pub(crate) fn sync_rep_links_write(procno: ProcNumber, node: ::types_storage::proclist_node) {
+    let base = SHARED_SYNC_REP_LINKS.load(AtomicOrdering::Relaxed);
+    let count = SHARED_SYNC_REP_LINK_COUNT.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "sync_rep_links_write: syncRepLinks base uninitialized (InitProcGlobal not run)"
+    );
+    let idx = procno as usize;
+    assert!(idx < count, "syncRepLinks index {idx} out of range (count {count})");
+    // SAFETY: see `sync_rep_links_read`; written under SyncRepLock.
+    unsafe { core::ptr::write(base.add(idx), node) };
+}
+
+/// `&proc->syncRepState` over the genuinely-shared array (read).
+pub(crate) fn sync_rep_state_read(procno: ProcNumber) -> i32 {
+    let base = SHARED_SYNC_REP_STATE.load(AtomicOrdering::Relaxed);
+    let count = SHARED_SYNC_REP_LINK_COUNT.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "sync_rep_state_read: syncRepState base uninitialized (InitProcGlobal not run)"
+    );
+    let idx = procno as usize;
+    assert!(idx < count, "syncRepState index {idx} out of range (count {count})");
+    // SAFETY: in-range slot of the shared array. The waiter reads its own
+    // `syncRepState` lock-free in the wait loop (the C `pg_read_barrier` after
+    // the walsender's queue-removal + state write provides the ordering).
+    unsafe { core::ptr::read(base.add(idx)) }
+}
+
+/// `proc->syncRepState = state` over the genuinely-shared array (write).
+pub(crate) fn sync_rep_state_write(procno: ProcNumber, state: i32) {
+    let base = SHARED_SYNC_REP_STATE.load(AtomicOrdering::Relaxed);
+    let count = SHARED_SYNC_REP_LINK_COUNT.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "sync_rep_state_write: syncRepState base uninitialized (InitProcGlobal not run)"
+    );
+    let idx = procno as usize;
+    assert!(idx < count, "syncRepState index {idx} out of range (count {count})");
+    // SAFETY: see `sync_rep_state_read`.
+    unsafe { core::ptr::write(base.add(idx), state) };
+}
+
+/// `&proc->waitLSN` over the genuinely-shared array (read).
+pub(crate) fn sync_rep_wait_lsn_read(procno: ProcNumber) -> u64 {
+    let base = SHARED_SYNC_REP_WAIT_LSN.load(AtomicOrdering::Relaxed);
+    let count = SHARED_SYNC_REP_LINK_COUNT.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "sync_rep_wait_lsn_read: waitLSN base uninitialized (InitProcGlobal not run)"
+    );
+    let idx = procno as usize;
+    assert!(idx < count, "waitLSN index {idx} out of range (count {count})");
+    // SAFETY: in-range slot of the shared array; the walsender reads each
+    // waiter's `waitLSN` under SyncRepLock, mirroring C's plain read.
+    unsafe { core::ptr::read(base.add(idx)) }
+}
+
+/// `proc->waitLSN = lsn` over the genuinely-shared array (write).
+pub(crate) fn sync_rep_wait_lsn_write(procno: ProcNumber, lsn: u64) {
+    let base = SHARED_SYNC_REP_WAIT_LSN.load(AtomicOrdering::Relaxed);
+    let count = SHARED_SYNC_REP_LINK_COUNT.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "sync_rep_wait_lsn_write: waitLSN base uninitialized (InitProcGlobal not run)"
+    );
+    let idx = procno as usize;
+    assert!(idx < count, "waitLSN index {idx} out of range (count {count})");
+    // SAFETY: see `sync_rep_wait_lsn_read`; the waiter writes its own `waitLSN`
+    // under SyncRepLock before enqueueing.
+    unsafe { core::ptr::write(base.add(idx), lsn) };
+}
+
 /// Pointer to the genuinely-shared `ProcStructLock` spinlock word. Set by
 /// [`InitProcGlobal`], NULL until then. C: `slock_t *ProcStructLock` placed by
 /// `ShmemInitStruct`.
@@ -2248,6 +2367,44 @@ fn init_shared_pid_block(total_procs: usize) -> PgResult<()> {
         unsafe { core::ptr::write_bytes(lwm_ptr, 0, lwm_size) };
     }
     SHARED_LW_WAIT_MODE.store(lwm_ptr, AtomicOrdering::Relaxed);
+
+    // Per-PGPROC sync-rep fields (`syncRepLinks` nodes + `syncRepState`/`waitLSN`
+    // words) — genuinely shared so a walsender's `SyncRepWakeQueue` walks the
+    // same queue the backend linked itself onto and sets the waiter's true state.
+    let sr_size = mul_size(total_procs, size_of::<::types_storage::proclist_node>());
+    let (sr_ptr, sr_found) =
+        shmem::shmem_init_struct::call("PGPROC syncRepLinks nodes", sr_size)?;
+    let sr_ptr = sr_ptr as *mut ::types_storage::proclist_node;
+    if !sr_found {
+        // Zero (`proclist_node { next: 0, prev: 0 }`) — detached, matching C's
+        // `dlist_node_init(&MyProc->syncRepLinks)` / MemSet of the PGPROC block.
+        // SAFETY: `sr_ptr` addresses `sr_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(sr_ptr as *mut u8, 0, sr_size) };
+    }
+    SHARED_SYNC_REP_LINKS.store(sr_ptr, AtomicOrdering::Relaxed);
+    SHARED_SYNC_REP_LINK_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    let srs_size = mul_size(total_procs, size_of::<i32>());
+    let (srs_ptr, srs_found) =
+        shmem::shmem_init_struct::call("PGPROC syncRepState words", srs_size)?;
+    let srs_ptr = srs_ptr as *mut i32;
+    if !srs_found {
+        // Zero == `SYNC_REP_NOT_WAITING` (syncrep.h), matching C's MemSet.
+        // SAFETY: `srs_ptr` addresses `srs_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(srs_ptr as *mut u8, 0, srs_size) };
+    }
+    SHARED_SYNC_REP_STATE.store(srs_ptr, AtomicOrdering::Relaxed);
+
+    let srl_size = mul_size(total_procs, size_of::<u64>());
+    let (srl_ptr, srl_found) =
+        shmem::shmem_init_struct::call("PGPROC waitLSN words", srl_size)?;
+    let srl_ptr = srl_ptr as *mut u64;
+    if !srl_found {
+        // Zero == `InvalidXLogRecPtr`, matching C's MemSet of the PGPROC block.
+        // SAFETY: `srl_ptr` addresses `srl_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(srl_ptr as *mut u8, 0, srl_size) };
+    }
+    SHARED_SYNC_REP_WAIT_LSN.store(srl_ptr, AtomicOrdering::Relaxed);
 
     Ok(())
 }

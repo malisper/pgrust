@@ -97,10 +97,19 @@ fn init_my_proc_common(proc: &mut PGPROC, procno: ProcNumber, regular: bool) {
 
     proc.recoveryConflictPending = false;
 
-    // Initialize fields for sync rep
+    // Initialize fields for sync rep. The live sync-rep state is the
+    // genuinely-shared cells (so a walsender in another process sees this
+    // backend's queue links / wait state); reset them too. `syncRepLinks`'s
+    // `{0,0}` is C's `dlist_node_init(&MyProc->syncRepLinks)` detached marker.
     proc.waitLSN = INVALID_XLOG_REC_PTR;
     proc.syncRepState = SYNC_REP_NOT_WAITING;
     proc.syncRepLinks = Default::default();
+    crate::proc_shmem::sync_rep_wait_lsn_write(procno, INVALID_XLOG_REC_PTR);
+    crate::proc_shmem::sync_rep_state_write(procno, SYNC_REP_NOT_WAITING);
+    crate::proc_shmem::sync_rep_links_write(
+        procno,
+        ::types_storage::proclist_node { next: 0, prev: 0 },
+    );
 
     // Initialize fields for group XID clearing.
     proc.procArrayGroupMember = false;

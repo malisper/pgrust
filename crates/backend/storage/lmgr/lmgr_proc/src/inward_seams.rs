@@ -763,36 +763,42 @@ fn proc_is_regular_backend(procno: ProcNumber) -> bool {
 // per-proc fields C touches: `syncRepState`, `waitLSN`, and the intrusive
 // `syncRepLinks` (pgprocno-indexed `proclist_node`, exactly like `lwWaitLink`).
 
+// These per-PGPROC fields are touched cross-process by the syncrep wait queue
+// (a backend enqueues itself; a walsender in another process walks the queue,
+// unlinks the waiter, and sets its state), so they live in a genuine shmem
+// segment rather than the COW-private `allProcs` array — see
+// `proc_shmem::sync_rep_links_read` for the hang this prevents.
+
 fn my_proc_sync_rep_state() -> i32 {
-    with_my_proc_ref(|p| p.syncRepState)
+    crate::proc_shmem::sync_rep_state_read(crate::proc_shmem::my_proc_number())
 }
 
 fn set_my_proc_sync_rep_state(state: i32) {
-    with_my_proc(|p| p.syncRepState = state);
+    crate::proc_shmem::sync_rep_state_write(crate::proc_shmem::my_proc_number(), state);
 }
 
 fn set_proc_sync_rep_state(procno: ProcNumber, state: i32) {
-    with_proc_by_number(procno, |p| p.syncRepState = state);
+    crate::proc_shmem::sync_rep_state_write(procno, state);
 }
 
 fn my_proc_wait_lsn() -> XLogRecPtr {
-    with_my_proc_ref(|p| p.waitLSN)
+    crate::proc_shmem::sync_rep_wait_lsn_read(crate::proc_shmem::my_proc_number())
 }
 
 fn set_my_proc_wait_lsn(lsn: XLogRecPtr) {
-    with_my_proc(|p| p.waitLSN = lsn);
+    crate::proc_shmem::sync_rep_wait_lsn_write(crate::proc_shmem::my_proc_number(), lsn);
 }
 
 fn proc_wait_lsn(procno: ProcNumber) -> XLogRecPtr {
-    with_proc_by_number(procno, |p| p.waitLSN)
+    crate::proc_shmem::sync_rep_wait_lsn_read(procno)
 }
 
 fn proc_sync_rep_links(procno: ProcNumber) -> proclist_node {
-    with_proc_by_number(procno, |p| p.syncRepLinks)
+    crate::proc_shmem::sync_rep_links_read(procno)
 }
 
 fn set_proc_sync_rep_links(procno: ProcNumber, node: proclist_node) {
-    with_proc_by_number(procno, |p| p.syncRepLinks = node);
+    crate::proc_shmem::sync_rep_links_write(procno, node);
 }
 
 /// `XidCacheRemoveRunningXids`'s MyProc subxid-cache mutation (procarray.c).
