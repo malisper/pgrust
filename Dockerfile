@@ -12,29 +12,32 @@
 # 999), the /var/run/postgresql socket dir, EXPOSE 5432, STOPSIGNAL SIGINT,
 # ENTRYPOINT ["docker-entrypoint.sh"], CMD ["postgres"], and gosu step-down.
 #
-# The ONE substitution: the user-facing SERVER is the pgrust binary. But pgrust's
-# own initdb is unported, so the catalog bootstrap (`initdb`) and the init-script
-# client (`psql`) come from the bundled PostgreSQL 18 PGDG packages, exactly as
-# the official image's tooling. The C `postgres` backend is present too, but it
-# is invoked ONLY by initdb's bootstrap — never as the user-facing server.
+# The substitution: BOTH the user-facing SERVER and the catalog bootstrap
+# (`initdb`) are the pgrust binary — pgrust's own `--initdb` driver (a faithful
+# port of initdb.c) now does the bootstrap. The only C tool left is `psql`, the
+# init-script / healthcheck client (pgrust has no psql replacement); it comes
+# from the bundled PostgreSQL 18 PGDG client package. No C `postgres` backend and
+# no C `initdb` are present in the final image.
 #
 # Three stages:
 #   1. rustbuild — builds the pgrust `postgres` binary. `nodetags.h` is vendored
 #                  (crates/_support/types/nodes/vendor/nodetags.h), so this stage
 #                  needs no PostgreSQL source — just Rust + libicu-dev.
-#   2. pgtools  — harvests C initdb / psql / postgres + loadable modules + libpq
-#                 + the PostgreSQL share tree from the PGDG apt repo.
+#   2. pgtools  — harvests C psql + libpq from the PGDG client package, plus the
+#                 PostgreSQL share tree (postgres.bki, system_*.sql,
+#                 system_views.sql, information_schema.sql, sql_features.txt,
+#                 snowball_create.sql, config samples, tz data) that pgrust's
+#                 --initdb / --boot read. NO C postgres backend, NO C initdb, NO
+#                 bootstrap loadable modules.
 #   3. final    — official-postgres-compatible runtime.
 #
 # Build:  docker build -t pgrust .
 # Run:    docker run --rm -e POSTGRES_PASSWORD=secret -p 5432:5432 pgrust
 
-# The C tools (initdb / psql / the bootstrap-only postgres backend), their
-# loadable modules, and the share tree are kept at their PGDG-native paths in the
-# final image, because the C `postgres` backend computes $libdir and the
-# bki/template share dir RELATIVE to its own executable location; relocating it
-# would make initdb's bootstrap backend look for dict_snowball.so etc. in the
-# wrong place.
+# psql + libpq are kept at their PGDG-native paths in the final image; the share
+# tree is kept at its PGDG-native path too (PG_SHAREDIR) because the pgrust
+# binary's baked-in PGRUST_PGSHAREDIR points there for the tz tree, and the
+# entrypoint passes it to `--initdb` via `-L`.
 ARG PG_MAJOR=18
 ARG PG_LIBROOT=/usr/lib/postgresql/18
 ARG PG_SHAREDIR=/usr/share/postgresql/18
@@ -63,7 +66,7 @@ RUN cargo build --release --locked --bin postgres \
     && cp /build/target/release/postgres /opt/pgrust-postgres
 
 # ---------------------------------------------------------------------------
-# Stage 2: obtain the minimal C tools (initdb, psql, libpq, share) from PGDG
+# Stage 2: obtain psql + libpq + the share tree from PGDG
 # ---------------------------------------------------------------------------
 FROM debian:bookworm-slim AS pgtools
 
@@ -71,9 +74,12 @@ ARG PG_LIBROOT
 ARG PG_SHAREDIR
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Add the PGDG apt repo and install the PostgreSQL 18 server + client packages
-# (server package carries initdb + postgres + the loadable modules + the share/
-# tree; client package carries psql + libpq).
+# Add the PGDG apt repo and install the PostgreSQL 18 server + client packages.
+# We need the CLIENT package for psql + libpq, and the SERVER package only for
+# its share/ tree (postgres.bki, system_*.sql, system_views.sql,
+# information_schema.sql, sql_features.txt, snowball_create.sql, config samples)
+# — pgrust's --initdb / --boot read those. The server package's binaries and
+# loadable modules are NOT copied into the final image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates gnupg wget \
     && install -d /usr/share/postgresql-common/pgdg \
@@ -86,19 +92,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         postgresql-18 postgresql-client-18 \
     && rm -rf /var/lib/apt/lists/*
 
-# Sanity-check the layout the final stage relies on, and gather the non-glibc
-# shared libs the binaries pull in (libpq, libicu, libldap, ...) into a single
-# dir we can copy wholesale. Everything else stays at its native path.
+# Stage the C tools the final image keeps (psql only) into a clean bin dir,
+# verify the share files pgrust's --initdb needs are present, and gather the
+# non-glibc shared libs psql pulls in (libpq, libldap, ...) into a single dir we
+# can copy wholesale. The C `postgres` backend, C `initdb`, and the bootstrap
+# loadable modules are deliberately left behind.
 RUN set -eux; \
-    test -x "${PG_LIBROOT}/bin/initdb"; \
     test -x "${PG_LIBROOT}/bin/psql"; \
-    test -x "${PG_LIBROOT}/bin/postgres"; \
-    test -f "${PG_LIBROOT}/lib/dict_snowball.so"; \
     test -f "${PG_SHAREDIR}/postgres.bki"; \
-    mkdir -p /opt/runlibs; \
-    for b in "${PG_LIBROOT}"/bin/initdb "${PG_LIBROOT}"/bin/psql "${PG_LIBROOT}"/bin/postgres; do \
-        ldd "$b" | awk '/=> \//{print $3}'; \
-    done | sort -u | while read -r so; do \
+    test -f "${PG_SHAREDIR}/system_constraints.sql"; \
+    test -f "${PG_SHAREDIR}/system_functions.sql"; \
+    test -f "${PG_SHAREDIR}/system_views.sql"; \
+    test -f "${PG_SHAREDIR}/information_schema.sql"; \
+    test -f "${PG_SHAREDIR}/sql_features.txt"; \
+    test -f "${PG_SHAREDIR}/snowball_create.sql"; \
+    test -f "${PG_SHAREDIR}/pg_hba.conf.sample"; \
+    test -f "${PG_SHAREDIR}/postgresql.conf.sample"; \
+    test -f "${PG_SHAREDIR}/pg_ident.conf.sample"; \
+    mkdir -p /opt/pgbin /opt/runlibs; \
+    cp -L "${PG_LIBROOT}/bin/psql" /opt/pgbin/psql; \
+    ldd "${PG_LIBROOT}/bin/psql" | awk '/=> \//{print $3}' \
+    | sort -u | while read -r so; do \
         case "$so" in /lib/*|/usr/lib/*) cp -L "$so" /opt/runlibs/ || true;; esac; \
     done
 
@@ -121,15 +135,17 @@ RUN set -eux; \
 
 # Runtime packages:
 #   libicu72        — linked directly by the pgrust binary (ICU collation provider)
+#   libxml2         — linked directly by the pgrust binary (xml type support)
 #   tzdata          — system zoneinfo (Debian PG is --with-system-tzdata)
 #   locales         — en_US.utf8 (matches the official image's LANG)
 #   gosu            — root -> postgres step-down (Debian package, like upstream)
-#   libnss-wrapper  — fakes the current uid in /etc/passwd for initdb under --user
 #   xz-utils/zstd/gzip — decompress *.sql.{xz,zst,gz} init scripts
+# (the official image's libnss-wrapper is NOT needed here: only C initdb
+#  consulted /etc/passwd; pgrust initdb takes the superuser name from --username.)
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        libicu72 tzdata locales libnss-wrapper xz-utils zstd gzip \
+        libicu72 libxml2 tzdata locales xz-utils zstd gzip \
         libldap-2.5-0 libpam0g libssl3 \
         gosu \
     ; \
@@ -141,22 +157,26 @@ ENV LANG=en_US.utf8
 
 ENV PG_MAJOR=${PG_MAJOR}
 
-# The pgrust binary (this IS the user-facing server). It is named
-# `pgrust-postgres` so the C `postgres` (needed by initdb) keeps the bare
-# `postgres` name on PATH; the entrypoint launches the server by this path.
+# The pgrust binary. This IS both the user-facing server and the catalog
+# bootstrap driver (`pgrust-postgres --initdb`). It is named `pgrust-postgres`;
+# the entrypoint always launches it by this absolute path.
 COPY --from=rustbuild /opt/pgrust-postgres /usr/local/bin/pgrust-postgres
 
-# The C tools at their PGDG-native paths (so the bootstrap backend's relative
-# $libdir / share-dir computation resolves correctly):
-#   ${PG_LIBROOT}/bin   — initdb, psql, the bootstrap-only postgres backend
-#   ${PG_LIBROOT}/lib   — loadable modules dlopen'd during initdb (dict_snowball)
-#   ${PG_SHAREDIR}      — tz data + initdb bootstrap templates (postgres.bki, ...)
-COPY --from=pgtools ${PG_LIBROOT} ${PG_LIBROOT}
+# psql — the only C tool retained (init-script / healthcheck client; pgrust has
+# no psql replacement). Placed on PATH at the PGDG-native bin location.
+COPY --from=pgtools /opt/pgbin/psql ${PG_LIBROOT}/bin/psql
+# The PostgreSQL share tree: tz data + the initdb bootstrap templates
+# (postgres.bki, system_*.sql, system_views.sql, information_schema.sql,
+# sql_features.txt, snowball_create.sql, config samples) that pgrust --initdb /
+# --boot read.
 COPY --from=pgtools ${PG_SHAREDIR} ${PG_SHAREDIR}
-# The non-glibc shared libs those binaries link (libpq, libicu, libldap, ...).
+# The non-glibc shared libs psql links (libpq, libldap, ...).
 COPY --from=pgtools /opt/runlibs /opt/runlibs
 ENV PATH=${PG_LIBROOT}/bin:$PATH
 ENV LD_LIBRARY_PATH=/opt/runlibs
+# pgrust's --initdb passes this to its --boot/--single phases via `-L`, and the
+# binary's baked-in PGRUST_PGSHAREDIR points here too.
+ENV PG_SHAREDIR=${PG_SHAREDIR}
 
 # Debian's PostgreSQL is built --with-system-tzdata, so the package share dir
 # ships NO `timezone/` subtree. The pgrust binary looks for

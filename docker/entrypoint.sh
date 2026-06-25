@@ -5,12 +5,13 @@
 # same gosu step-down, same first-boot-on-localhost-then-restart pattern, same
 # pg_hba setup.
 #
-# The ONE substitution for pgrust: the user-facing SERVER is the pgrust
-# `postgres` binary (a Rust port of PostgreSQL 18.3), not C postgres. But:
-#   * the catalog bootstrap (`initdb`) is still done by the bundled C initdb,
-#     because pgrust's own initdb is unported; and
-#   * `psql` (the client used for init scripts / db setup) is the bundled C psql.
-# So the only places that diverge from upstream are:
+# The substitution for pgrust: BOTH the user-facing SERVER and the catalog
+# bootstrap (`initdb`) are the pgrust `postgres` binary (a Rust port of
+# PostgreSQL 18.3), not C postgres / C initdb. The only C tool left in the image
+# is `psql` (the client used for init scripts / db setup); pgrust has no psql
+# replacement. So the places that diverge from upstream are:
+#   * docker_init_database_dir — bootstraps via `pgrust-postgres --initdb`
+#     (pgrust's own ported initdb driver), not C `initdb`.
 #   * docker_temp_server_start / docker_temp_server_stop — these launch the
 #     pgrust binary directly (upstream uses `pg_ctl`, which would launch C
 #     postgres). pgrust is started backgrounded and we poll for readiness, then
@@ -25,10 +26,20 @@
 set -Eeo pipefail
 # TODO swap to -Eeuo pipefail above (after handling all potentially-unset variables)
 
-# The pgrust server binary (the user-facing server). The C `postgres` backend
-# that ships alongside initdb (used ONLY by initdb's bootstrap) is also on PATH,
-# so we always resolve the real server by this absolute path, never by name.
+# The pgrust server binary. This same binary also performs the catalog
+# bootstrap via its built-in `--initdb` driver, and re-execs itself for the
+# internal --boot / --single bootstrap phases. We always resolve it by this
+# absolute path, never by name.
 PGRUST_BIN="${PGRUST_BIN:-/usr/local/bin/pgrust-postgres}"
+
+# The share dir that ships the initdb bootstrap templates (postgres.bki,
+# system_*.sql, system_views.sql, information_schema.sql, sql_features.txt,
+# snowball_create.sql) and the config samples (postgresql.conf.sample,
+# pg_hba.conf.sample, pg_ident.conf.sample). pgrust's --initdb / --boot read
+# these. The pgrust binary lives in /usr/local/bin (not under the PGDG bindir),
+# so the relative share-dir derivation can't find it — we pass it explicitly
+# with `-L`. PGRUST_PGSHAREDIR is also baked into the binary for the tz tree.
+PG_SHAREDIR="${PG_SHAREDIR:-${PGRUST_PGSHAREDIR:-/usr/share/postgresql/18}}"
 
 # pgrust's per-statement frames are large; the C stack default refuses to boot.
 ulimit -s 65520 2>/dev/null || true
@@ -104,41 +115,45 @@ docker_create_db_directories() {
 	fi
 }
 
-# initialize empty PGDATA directory with new database via 'initdb'
+# initialize empty PGDATA directory with new database via pgrust's `--initdb`
 # arguments to `initdb` can be passed via POSTGRES_INITDB_ARGS or as arguments to this function
-# `initdb` automatically creates the "postgres", "template0", and "template1" dbnames
+# initdb automatically creates the "postgres", "template0", and "template1" dbnames
 # this is also where the database user is created, specified by `POSTGRES_USER` env
+#
+# pgrust note: upstream calls the C `initdb` binary. We instead invoke pgrust's
+# OWN ported initdb driver (`pgrust-postgres --initdb`), which scaffolds the data
+# dir, writes the config files, runs the catalog bootstrap (`--boot`) and the
+# post-bootstrap SQL (`--single`), and creates template0/postgres — all in pure
+# pgrust, no C postgres/initdb involved. Two divergences from C initdb:
+#   * pgrust initdb has no `--pwfile`; the superuser password is instead applied
+#     later (via ALTER ROLE) by docker_setup_password() once the temp server is
+#     up. The password is still set in the catalog, exactly as C initdb would.
+#   * the share dir is passed explicitly with `-L` (pgrust-postgres is in
+#     /usr/local/bin, outside the PGDG bindir, so relative derivation can't
+#     locate the share tree).
+# No nss_wrapper is needed: pgrust initdb takes the superuser name from
+# --username and does not consult /etc/passwd.
 docker_init_database_dir() {
-	# "initdb" is particular about the current user existing in "/etc/passwd", so we use "nss_wrapper" to fake that if necessary
-	# see https://github.com/docker-library/postgres/pull/253, https://github.com/docker-library/postgres/issues/359, https://cwrap.org/nss_wrapper.html
-	local uid; uid="$(id -u)"
-	if ! getent passwd "$uid" &> /dev/null; then
-		# see if we can find a suitable "libnss_wrapper.so" (https://salsa.debian.org/sssd-team/nss-wrapper/-/commit/b9925a653a54e24d09d9b498a2d913729f7abb15)
-		local wrapper
-		for wrapper in {/usr,}/lib{/*,}/libnss_wrapper.so; do
-			if [ -s "$wrapper" ]; then
-				NSS_WRAPPER_PASSWD="$(mktemp)"
-				NSS_WRAPPER_GROUP="$(mktemp)"
-				export LD_PRELOAD="$wrapper" NSS_WRAPPER_PASSWD NSS_WRAPPER_GROUP
-				local gid; gid="$(id -g)"
-				printf 'postgres:x:%s:%s:PostgreSQL:%s:/bin/false\n' "$uid" "$gid" "$PGDATA" > "$NSS_WRAPPER_PASSWD"
-				printf 'postgres:x:%s:\n' "$gid" > "$NSS_WRAPPER_GROUP"
-				break
-			fi
-		done
-	fi
-
 	if [ -n "${POSTGRES_INITDB_WALDIR:-}" ]; then
 		set -- --waldir "$POSTGRES_INITDB_WALDIR" "$@"
 	fi
 
-	# --pwfile refuses to handle a properly-empty file (hence the "\n"): https://github.com/docker-library/postgres/issues/1025
-	eval 'initdb --username="$POSTGRES_USER" --pwfile=<(printf "%s\n" "$POSTGRES_PASSWORD") '"$POSTGRES_INITDB_ARGS"' "$@"'
+	# pgrust initdb parses `--opt value` (space-separated), not `--opt=value`.
+	# Note: pgrust's initdb supports a subset of C initdb's options (-D/-U/-L/
+	# -E/--encoding/--lc-collate/--lc-ctype/--locale/--no-locale/--wal-segsize);
+	# unsupported POSTGRES_INITDB_ARGS (e.g. -A/--auth, --data-checksums) error.
+	eval '"$PGRUST_BIN" --initdb -D "$PGDATA" -L "$PG_SHAREDIR" --username "$POSTGRES_USER" '"$POSTGRES_INITDB_ARGS"' "$@"'
+}
 
-	# unset/cleanup "nss_wrapper" bits
-	if [[ "${LD_PRELOAD:-}" == */libnss_wrapper.so ]]; then
-		rm -f "$NSS_WRAPPER_PASSWD" "$NSS_WRAPPER_GROUP"
-		unset LD_PRELOAD NSS_WRAPPER_PASSWD NSS_WRAPPER_GROUP
+# Set the bootstrap superuser's password in the catalog. pgrust's --initdb has
+# no --pwfile, so we do what C initdb's --pwfile would have done — via ALTER
+# ROLE against the temporary server. Called after docker_temp_server_start.
+# A no-op when POSTGRES_PASSWORD is empty (POSTGRES_HOST_AUTH_METHOD=trust path).
+docker_setup_password() {
+	if [ -n "$POSTGRES_PASSWORD" ]; then
+		PGPASSWORD= docker_process_sql --dbname postgres --set pw="$POSTGRES_PASSWORD" <<-'EOSQL'
+			ALTER ROLE CURRENT_USER WITH PASSWORD :'pw' ;
+		EOSQL
 	fi
 }
 
@@ -451,6 +466,8 @@ _main() {
 			export PGPASSWORD="${PGPASSWORD:-$POSTGRES_PASSWORD}"
 			docker_temp_server_start "$@"
 
+			# pgrust initdb has no --pwfile, so set the superuser password now.
+			docker_setup_password
 			docker_setup_db
 			docker_process_init_files /docker-entrypoint-initdb.d/*
 
