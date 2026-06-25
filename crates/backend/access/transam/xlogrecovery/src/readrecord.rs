@@ -149,7 +149,16 @@ pub(crate) fn read_record(
     crate::walrecovery::set_page_read_private(emode, fetching_ckpt, replay_tli);
 
     // This is the first attempt to read this page.
+    //
+    // `lastSourceFailed` is a single file-static in C (xlogrecovery.c:249),
+    // shared between ReadRecord and WaitForWALToBecomeAvailable. The page-read
+    // driver reads it through the `pageread` accessor, so route ReadRecord's
+    // writes there too — keeping the struct field write-only here would leave
+    // WaitForWALToBecomeAvailable's copy stale, so it would never advance its
+    // source state machine / wait on the latch after an incomplete record,
+    // busy-looping (and never honoring a shutdown request).
     st.last_source_failed = false;
+    crate::pageread::set_last_source_failed(false);
 
     loop {
         // record = XLogPrefetcherReadRecord(xlogprefetcher, &errormsg);
@@ -176,8 +185,19 @@ pub(crate) fn read_record(
             }
 
             // if (readFile >= 0) { close(readFile); readFile = -1; }
-            // The segment fd is owned by the page-read driver (the prefetcher's
-            // reader), closed there.
+            // (xlogrecovery.c:3195-3199). This MUST run on every null record,
+            // not just on a page-read driver failure: when the reader hits an
+            // incomplete record at the end of valid WAL (e.g. a partial record
+            // left after the upstream walreceiver disconnects), the page itself
+            // is still present in the open segment, so XLogPageRead would keep
+            // returning it (readFile >= 0, source not Stream) and ReadRecord
+            // would re-report "invalid record length" forever without ever
+            // re-entering WaitForWALToBecomeAvailable — a tight busy loop that
+            // also never honors a shutdown request. Closing the fd here forces
+            // the next XLogPageRead to call WaitForWALToBecomeAvailable, which
+            // consults lastSourceFailed, advances the source state machine,
+            // waits on the latch, and processes startup-proc interrupts.
+            crate::pageread::close_read_file_pub();
 
             // We only end up here without a message when XLogPageRead() failed -
             // in that case we already logged something. In StandbyMode that only
@@ -215,8 +235,11 @@ pub(crate) fn read_record(
             return Ok(record);
         }
 
-        // No valid record available from this source.
+        // No valid record available from this source.  Mirror the single C
+        // file-static so WaitForWALToBecomeAvailable advances its state machine
+        // (and blocks/waits, checking interrupts) on the next page-read call.
         st.last_source_failed = true;
+        crate::pageread::set_last_source_failed(true);
 
         // If archive recovery was requested, but we were still doing crash
         // recovery, switch to archive recovery and retry using the offline
@@ -245,9 +268,14 @@ pub(crate) fn read_record(
             crate::replay::check_recovery_consistency(st)?;
 
             // Before we retry, reset lastSourceFailed and currentSource so that
-            // we will check the archive next.
+            // we will check the archive next.  Both are single C file-statics
+            // consulted by WaitForWALToBecomeAvailable; route through the
+            // canonical accessors (the struct fields alone are not what the
+            // page-read driver reads).
             st.last_source_failed = false;
+            crate::pageread::set_last_source_failed(false);
             st.current_source = XLogSource::Any;
+            crate::shmem::set_current_source(XLogSource::Any);
 
             continue;
         }

@@ -334,16 +334,25 @@ fn EpochFromFullTransactionId(fxid: u64) -> u32 {
 ///
 /// Never returns: it loops forever (the `for(;;)` at the top level), and the
 /// only exits are through `proc_exit`/`exit` (which never return) or the
-/// `ereport(ERROR|FATAL|PANIC)` paths which `longjmp` out of the daemon. We
-/// surface those as a hard panic at the entry boundary (no caller to unwind
-/// to), matching the `-> !` child-launch contract.
+/// `ereport(ERROR|FATAL|PANIC)` paths which `longjmp` out of the daemon.
+///
+/// The C walreceiver has no `sigsetjmp(PG_exception_stack)` of its own, so any
+/// `ereport(ERROR)` raised from the main loop (e.g. "could not receive data
+/// from WAL stream" when the primary drops the connection) is promoted to
+/// FATAL by `errstart` (no active handler) and exits via `proc_exit(1)`. The
+/// postmaster treats a wal-receiver exit status of 0 or 1 as *normal* — not a
+/// crash (`postmaster.c` reaper, B_WAL_RECEIVER arm) — so it does NOT bring
+/// down the rest of the cluster. We therefore emit the error report and
+/// `proc_exit(1)` here, matching that ERROR→FATAL→proc_exit(1) path, rather
+/// than panicking (a Rust panic exits 101, which the postmaster classifies as
+/// a crash and shuts the whole standby down — breaking 016_min_consistency).
 pub fn wal_receiver_main(_startup_data: &StartupData) -> ! {
     match wal_receiver_main_inner() {
         Ok(()) => unreachable!("WalReceiverMain loops forever or proc_exits"),
         Err(e) => {
-            // The C daemon's top-level error handling longjmps to the process
-            // top level and exits; there is no Rust caller to propagate to.
-            panic!("walreceiver exiting on error: {e:?}");
+            // ERROR with no exception handler ⇒ FATAL ⇒ proc_exit(1).
+            ::utils_error::emit_error_report_for(&e);
+            ipc::proc_exit::call(1, my_proc_pid());
         }
     }
 }
