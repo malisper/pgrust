@@ -58,6 +58,6 @@ pub fn check_pam_auth(
     _rhost: Option<&str>,
     _initial_password: &str,
     _request_password: &mut dyn FnMut() -> Option<String>,
-) -> Result<PamOutcome, String> {
+) -> Result<(PamOutcome, Vec<String>), String> {
     unreachable!("CheckPAMAuth reached without USE_PAM (hba should have rejected `pam`)")
 }

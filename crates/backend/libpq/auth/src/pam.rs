@@ -5,6 +5,10 @@
 //! lines to `ereport(LOG)`, then records `set_authn_id` on success — exactly the
 //! auth.c structure.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
+
 use ::net::Port;
 use ::types_error::{PgResult, LOG};
 use ::utils_error::ereport;

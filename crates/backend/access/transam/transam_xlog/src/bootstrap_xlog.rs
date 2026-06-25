@@ -21,6 +21,10 @@
 
 extern crate alloc;
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
+
 use alloc::vec;
 
 use ::control::{FirstNormalUnloggedLSN, MOCK_AUTH_NONCE_LEN};

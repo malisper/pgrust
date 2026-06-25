@@ -29,6 +29,10 @@
 
 extern crate std;
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
+
 use alloc::format;
 use alloc::string::{String, ToString};
 
