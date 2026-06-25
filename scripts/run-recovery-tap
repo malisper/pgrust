@@ -201,14 +201,14 @@ export with_pam="${with_pam:-no}"
 export with_readline="${with_readline:-no}"
 
 rundir="${RTAP_BASE}_data"
-# Isolate PostgreSQL::Test's tmp_check/log dir too: without TESTDIR it writes
-# ./tmp_check + ./log relative to the (shared) recovery-test cwd, so CONCURRENT
-# run-recovery-tap invocations clobber each other's logs and produce spurious
-# bails even when RECOVERY_TAP_DIR/$rundir differ. TESTDIR redirects tmp_check
-# (and the node logs under it) under our per-run base.
-export TESTDIR="${RTAP_BASE}_testdir"
-rm -rf "$rundir" "$TESTDIR" tmp_check log
-mkdir -p "$rundir" "$TESTDIR"
+# Isolate PostgreSQL::Test's log dir too. Utils.pm: tmp_check = $TESTDATADIR
+# (already per-run, set below), but log_path = $ENV{TESTLOGDIR} ? ... : "log" —
+# so without TESTLOGDIR the node logs go to ./log relative to the SHARED recovery
+# cwd, and a concurrent run's `rm -rf log` wipes another run's logs mid-test ->
+# spurious "start failed" bails. Point TESTLOGDIR at our per-run base.
+export TESTLOGDIR="${RTAP_BASE}_log"
+rm -rf "$rundir" "$TESTLOGDIR" tmp_check log
+mkdir -p "$rundir" "$TESTLOGDIR"
 export TESTDATADIR="$rundir"
 
 if [ "$#" -eq 0 ]; then
