@@ -95,6 +95,23 @@ fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: alloc::vec::Vec<u8>
     Datum::from_usize(0)
 }
 
+/// Set a `text` (`booltext`) result: prepend the 4-byte varlena length header to
+/// the header-less payload (`cstring_to_text`'s `SET_VARSIZE` + `memcpy`). The
+/// `RefPayload::Varlena` lane is HEADER-FUL (a `struct varlena *` image the adt
+/// readers run `VARDATA_ANY`/`VARSIZE_ANY_EXHDR` over), so a `text`-returning
+/// cast must frame its payload here — exactly as `char_text`'s `ret_text` does.
+/// (Distinct from `ret_varlena`/`boolsend`, whose core already returns the
+/// header-ful `pq_endtypsend` wire image and stores it verbatim.)
+#[inline]
+fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, payload: &[u8]) -> Datum {
+    let total = payload.len() + ::datum::VARHDRSZ;
+    let mut img = alloc::vec::Vec::with_capacity(total);
+    img.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+    img.extend_from_slice(payload);
+    fcinfo.set_ref_result(RefPayload::Varlena(img));
+    Datum::from_usize(0)
+}
+
 /// A scratch context for cores that allocate their result through `Mcx`.
 fn scratch_mcx() -> MemoryContext {
     MemoryContext::new("bool fmgr scratch")
@@ -147,12 +164,14 @@ fn fc_boolsend(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<D
 
 fn fc_booltext(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: booltext returns the SQL-spec spelling "true"/"false" wrapped in a
-    // `text` varlena (`cstring_to_text`). The boundary owns the VARHDRSZ framing,
-    // so the result payload is exactly those bytes (byte-identical to
-    // cstring_to_text's payload, minus the header) — same pattern as char_text.
+    // `text` varlena (`cstring_to_text`). The by-ref lane is HEADER-FUL, so frame
+    // the payload through `ret_text` (prepend VARHDRSZ) — same pattern as
+    // char_text. (The bare-payload `ret_varlena` is for boolsend's already-
+    // header-ful wire image; using it here left the text 4 bytes short — VARSIZE
+    // read off "true"/"false" itself — so `true::text` came back empty.)
     let arg1 = arg_bool(fcinfo, 0);
     let s = if arg1 { "true" } else { "false" };
-    Ok(ret_varlena(fcinfo, s.as_bytes().to_vec()))
+    Ok(ret_text(fcinfo, s.as_bytes()))
 }
 
 fn fc_booleq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
