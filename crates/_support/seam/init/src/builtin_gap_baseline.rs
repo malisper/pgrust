@@ -228,7 +228,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (3160, "pg_stat_get_checkpointer_write_time", BuiltinGapKind::NotRegistered),
     (3161, "pg_stat_get_checkpointer_sync_time", BuiltinGapKind::NotRegistered),
     (3162, "pg_collation_for", BuiltinGapKind::NotRegistered),
-    (3165, "pg_wal_lsn_diff", BuiltinGapKind::NotRegistered),
     (3169, "rangesel", BuiltinGapKind::NotRegistered),
     (3187, "btrecordimagecmp", BuiltinGapKind::NotRegistered),
     (3195, "pg_stat_get_archiver", BuiltinGapKind::NotRegistered),

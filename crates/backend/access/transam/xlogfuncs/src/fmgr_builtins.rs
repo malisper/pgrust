@@ -25,10 +25,12 @@
 //! two SQL calls is mirrored in this module's session thread-locals, and the
 //! 3-column `pg_backup_stop` record crosses the by-reference `Composite` lane via
 //! `funcapi::record_from_values` (the same record carrier `pg_create_*_replication_slot`
-//! / `pg_get_object_address` use). The remaining `xlogfuncs.c` SQL functions are
-//! NOT registered: the file-name / LSN-diff functions return `numeric` or
-//! composite rows whose `Mcx`-built varlena/composite the fmgr boundary cannot
-//! yet carry for those shapes.
+//! / `pg_get_object_address` use). `pg_walfile_name` (a `text` result) and
+//! `pg_wal_lsn_diff` (a `numeric` result) are registered too: their `Mcx`-built
+//! varlena image is copied out onto the by-ref `RefPayload::Varlena` lane before
+//! the scratch arena drops. The remaining `xlogfuncs.c` SQL functions that build
+//! composite rows or `numeric` offsets through shapes the fmgr boundary cannot
+//! yet carry stay unregistered.
 
 use ::types_core::{Oid, TimestampTz, XLogRecPtr};
 use ::datum::Datum;
@@ -153,6 +155,16 @@ fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
     image.extend_from_slice(&::datum::varlena::set_varsize_4b(bytes.len() + VARHDRSZ));
     image.extend_from_slice(&bytes);
     fcinfo.set_ref_result(RefPayload::Varlena(image));
+    Datum::from_usize(0)
+}
+
+/// Set a `numeric` (`PG_RETURN_NUMERIC`) result on the by-ref lane. Unlike
+/// `ret_text`, the `numeric_in` core already produces a self-describing varlena
+/// image (header included), so it is carried verbatim. Symmetric with
+/// `lsn_trigfuncs::fmgr_builtins::ret_numeric` (the `pg_lsn - pg_lsn` operator).
+#[inline]
+fn ret_numeric(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
+    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
     Datum::from_usize(0)
 }
 
@@ -288,6 +300,20 @@ fn fc_pg_walfile_name(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgR
         .as_slice()
         .to_vec();
     Ok(ret_text(fcinfo, bytes))
+}
+
+/// `pg_wal_lsn_diff(lsn1 pg_lsn, lsn2 pg_lsn)` (xlogfuncs.c:652) — a `numeric`
+/// result (the byte difference). The core (`pg_lsn_mi`) builds the numeric
+/// varlena image in the scratch arena; copy it out onto the by-ref lane before
+/// the arena drops.
+fn fc_pg_wal_lsn_diff(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let lsn1 = arg_lsn(fcinfo, 0);
+    let lsn2 = arg_lsn(fcinfo, 1);
+    let m = scratch_mcx();
+    let bytes: Vec<u8> = crate::pg_wal_lsn_diff(m.mcx(), lsn1, lsn2)?
+        .as_slice()
+        .to_vec();
+    Ok(ret_numeric(fcinfo, bytes))
 }
 
 // ---------------------------------------------------------------------------
@@ -482,6 +508,8 @@ pub fn register_xlogfuncs_builtins() {
         builtin(6305, "pg_log_standby_snapshot", 0, true, false, fc_pg_log_standby_snapshot),
         // pg_walfile_name(pg_lsn) -> text
         builtin(2851, "pg_walfile_name", 1, true, false, fc_pg_walfile_name),
+        // pg_wal_lsn_diff(pg_lsn, pg_lsn) -> numeric
+        builtin(3165, "pg_wal_lsn_diff", 2, true, false, fc_pg_wal_lsn_diff),
         // ---- online base-backup control (composite / lsn results) ----
         // pg_backup_start(text, bool) -> pg_lsn
         builtin(2172, "pg_backup_start", 2, true, false, fc_pg_backup_start),
