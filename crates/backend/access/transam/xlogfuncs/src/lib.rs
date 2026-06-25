@@ -500,7 +500,7 @@ pub fn pg_split_walfile_name<'mcx>(
 
 /// `pg_wal_replay_pause()` (xlogfuncs.c:518) — request to pause recovery.
 pub fn pg_wal_replay_pause() -> PgResult<()> {
-    if !xlogrecovery_seams::in_recovery::call() {
+    if !xlog::RecoveryInProgress() {
         return Err(recovery_not_in_progress_error());
     }
 
@@ -518,7 +518,7 @@ pub fn pg_wal_replay_pause() -> PgResult<()> {
 
 /// `pg_wal_replay_resume()` (xlogfuncs.c:548) — resume recovery now.
 pub fn pg_wal_replay_resume() -> PgResult<()> {
-    if !xlogrecovery_seams::in_recovery::call() {
+    if !xlog::RecoveryInProgress() {
         return Err(recovery_not_in_progress_error());
     }
 
@@ -543,7 +543,7 @@ fn promotion_ongoing_error(funcname: &str) -> PgError {
 /// `pg_is_wal_replay_paused()` (xlogfuncs.c:572) — whether recovery is paused
 /// (`GetRecoveryPauseState() != RECOVERY_NOT_PAUSED`).
 pub fn pg_is_wal_replay_paused() -> PgResult<bool> {
-    if !xlogrecovery_seams::in_recovery::call() {
+    if !xlog::RecoveryInProgress() {
         return Err(recovery_not_in_progress_error());
     }
 
@@ -553,7 +553,7 @@ pub fn pg_is_wal_replay_paused() -> PgResult<bool> {
 /// `pg_get_wal_replay_pause_state()` (xlogfuncs.c:593) — the recovery pause
 /// state as a `text` label ("not paused" / "pause requested" / "paused").
 pub fn pg_get_wal_replay_pause_state<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, u8>> {
-    if !xlogrecovery_seams::in_recovery::call() {
+    if !xlog::RecoveryInProgress() {
         return Err(recovery_not_in_progress_error());
     }
 
@@ -616,7 +616,7 @@ const WAITS_PER_SECOND: i32 = 10;
 /// Returns `true` when promotion has completed (if `wait`) or been initiated
 /// (if `!wait`); `false` when the wait timed out.
 pub fn pg_promote(wait: bool, wait_seconds: i32) -> PgResult<bool> {
-    if !xlogrecovery_seams::in_recovery::call() {
+    if !xlog::RecoveryInProgress() {
         return Err(recovery_not_in_progress_error());
     }
 
@@ -668,7 +668,7 @@ pub fn pg_promote(wait: bool, wait_seconds: i32) -> PgResult<bool> {
     for _i in 0..(WAITS_PER_SECOND * wait_seconds) {
         latch::ResetLatch(my_latch());
 
-        if !xlogrecovery_seams::in_recovery::call() {
+        if !xlog::RecoveryInProgress() {
             return Ok(true);
         }
 
