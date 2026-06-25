@@ -15,6 +15,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Reset the transient cross-process shared state a SIGQUIT/SIGKILL-killed
+    /// backend left behind, on the postmaster's crash-restart reinitialization.
+    /// Stands in for C's fresh, zeroed shared segment (which this tree reuses
+    /// across the restart): re-zeroes the lock manager's LOCK/PROCLOCK arena so a
+    /// lock held by a crash-killed in-progress transaction does not survive into,
+    /// and deadlock, the new generation. `Err` carries any subsystem
+    /// `ereport(ERROR)`.
+    pub fn reset_shared_state_after_crash() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// Re-register the `ReleaseSemaphores` `on_shmem_exit` callback after the
     /// postmaster's crash-reinit `shmem_exit(1)` consumed the on-exit list.
     ///

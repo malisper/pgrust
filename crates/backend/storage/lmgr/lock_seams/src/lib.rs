@@ -610,6 +610,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Re-zero the cross-process LOCK/PROCLOCK arena on the postmaster's
+    /// crash-restart, standing in for C's fresh `CreateSharedMemoryAndSemaphores`
+    /// segment (which clears the locks of SIGQUIT/SIGKILL-killed backends that
+    /// never ran `ProcKill`/`LockReleaseAll`).
+    pub fn lock_manager_reset_after_crash() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// The `holdMask` of every `PROCLOCK` on
     /// `GetPGProcByNumber(holder)->myProcLocks[partition]` (lock.c). proc.c's
     /// lock-group held-mask walk (`lock_group_held_locks`) reaches each member's

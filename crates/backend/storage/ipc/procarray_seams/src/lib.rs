@@ -422,6 +422,15 @@ seam_core::seam!(
     pub fn proc_array_shmem_init() -> ::types_error::PgResult<()>
 );
 
+seam_core::seam!(
+    /// Re-zero the shared ProcArray on the postmaster's crash-restart, clearing
+    /// the `pgprocnos[]` entries of SIGQUIT/SIGKILL-killed backends that never
+    /// ran `ProcArrayRemove` (so a committed transaction is not reported as still
+    /// "in progress" against a stale advertised XID). Stands in for C's fresh
+    /// zeroed shared segment.
+    pub fn proc_array_reset_after_crash() -> ::types_error::PgResult<()>
+);
+
 // --- backend-storage-ipc-signalfuncs consumer (signalfuncs.c) ---
 
 seam_core::seam!(

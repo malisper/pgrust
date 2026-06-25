@@ -326,6 +326,46 @@ const PROC_ARRAY_HEADER_SIZE: Size = core::mem::offset_of!(ProcArrayStruct, pgpr
 /// `ProcArrayShmemInit(void)` (procarray.c) — allocate-or-attach the ProcArray
 /// header (`ShmemInitStruct`) and the KnownAssignedXids ring; wire the
 /// `procArray` process-local.
+/// Re-zero the shared `ProcArrayStruct` after a backend crash, the way C gets a
+/// fresh, zeroed shared segment from the postmaster's crash-restart
+/// `CreateSharedMemoryAndSemaphores`. A backend killed by SIGQUIT/SIGKILL never
+/// runs `ProcArrayRemove`, so its `pgprocnos[]` entry (and the running XID it
+/// advertised) stays in the array; the post-restart cluster then sees that dead
+/// XID as still-running — e.g. an end-of-recovery `RUNNING_XACTS` record lists
+/// it, and `TransactionIdIsInProgress` reports a transaction that actually
+/// committed as "in progress", hiding its committed rows. Reset the active set
+/// to empty here (the KnownAssignedXids machinery is hot-standby-only and stays
+/// zeroed on the crash path). Mirrors the `!found` init `ProcArrayShmemInit`
+/// runs for a fresh segment.
+pub fn ProcArrayResetAfterCrash() -> PgResult<()> {
+    use ipc_shmem_seams as shmem;
+
+    let maxprocs = PROCARRAY_MAXPROCS();
+    let total_max_cached_subxids = TOTAL_MAX_CACHED_SUBXIDS();
+
+    let header_size = shmem::add_size::call(
+        PROC_ARRAY_HEADER_SIZE,
+        shmem::mul_size::call(core::mem::size_of::<i32>() as Size, maxprocs as Size)?,
+    )?;
+    let (addr, _found) = shmem::shmem_init_struct::call("Proc Array", header_size)?;
+    let proc_array = addr as *mut ProcArrayStruct;
+
+    // SAFETY: `proc_array` addresses the live shared block carved at init.
+    unsafe {
+        (*proc_array).numProcs = 0;
+        (*proc_array).maxProcs = maxprocs;
+        (*proc_array).maxKnownAssignedXids = total_max_cached_subxids;
+        (*proc_array).numKnownAssignedXids = 0;
+        (*proc_array).tailKnownAssignedXids = 0;
+        (*proc_array).headKnownAssignedXids = 0;
+        (*proc_array).lastOverflowedXid = ::types_core::InvalidTransactionId;
+        (*proc_array).replication_slot_xmin = ::types_core::InvalidTransactionId;
+        (*proc_array).replication_slot_catalog_xmin = ::types_core::InvalidTransactionId;
+        core::ptr::write_bytes((*proc_array).pgprocnos.as_mut_ptr(), 0, maxprocs as usize);
+    }
+    Ok(())
+}
+
 pub fn ProcArrayShmemInit() -> PgResult<()> {
     use ipc_shmem_seams as shmem;
 
@@ -531,6 +571,7 @@ pub fn init_seams() {
 
     seams::proc_array_shmem_size::set(ProcArrayShmemSize);
     seams::proc_array_shmem_init::set(ProcArrayShmemInit);
+    seams::proc_array_reset_after_crash::set(ProcArrayResetAfterCrash);
     seams::get_max_snapshot_xid_count::set(GetMaxSnapshotXidCount);
     seams::get_max_snapshot_subxid_count::set(GetMaxSnapshotSubxidCount);
 }

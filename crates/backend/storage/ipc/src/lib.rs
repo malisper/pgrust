@@ -66,6 +66,12 @@ pub fn init_seams() {
         }
     });
     ipci_seams::calculate_shmem_size::set(ipci_core::calculate_shmem_size);
+    // Reset the transient cross-process shared state (the lock manager arena) a
+    // crash-killed backend left behind, on the postmaster's crash-restart. This
+    // tree reuses the shared segment across the restart instead of re-creating a
+    // fresh zeroed one, so a lock held by a SIGQUIT/SIGKILL-killed in-progress
+    // transaction would otherwise survive and deadlock the new generation.
+    ipci_seams::reset_shared_state_after_crash::set(ipci_core::reset_shared_state_after_crash);
     // Re-register the ReleaseSemaphores on_shmem_exit callback after a crash
     // reinit's shmem_exit(1) consumed it. This tree reuses the existing
     // semaphore batch and skips the C CreateSharedMemoryAndSemaphores re-create

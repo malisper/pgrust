@@ -38,6 +38,9 @@ pub fn lock_manager_shmem_size() -> PgResult<Size> {
 pub fn lock_manager_shmem_init() -> PgResult<()> {
     lock_seams::lock_manager_shmem_init::call()
 }
+pub fn lock_manager_reset_after_crash() -> PgResult<()> {
+    lock_seams::lock_manager_reset_after_crash::call()
+}
 
 pub fn predicate_lock_shmem_size() -> PgResult<Size> {
     predicate_seams::predicate_lock_shmem_size::call()
@@ -51,6 +54,9 @@ pub fn proc_array_shmem_size() -> PgResult<Size> {
 }
 pub fn proc_array_shmem_init() -> PgResult<()> {
     procarray_seams::proc_array_shmem_init::call()
+}
+pub fn proc_array_reset_after_crash() -> PgResult<()> {
+    procarray_seams::proc_array_reset_after_crash::call()
 }
 
 /// `BackendStatusShmemSize`/`Init` — owner `backend-utils-activity-status`

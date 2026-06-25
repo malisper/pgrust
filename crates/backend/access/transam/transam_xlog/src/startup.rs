@@ -661,6 +661,24 @@ pub fn StartupXLOG() -> PgResult<()> {
             types_storage::storage::LW_EXCLUSIVE,
             globals::MyProcNumber(),
         )?;
+
+        // In C, ControlFile is genuine shared memory, so the end-of-recovery
+        // checkpoint just performed by the checkpointer (CHECKPOINT_WAIT, above
+        // in PerformRecoveryXLogAction) already updated the single shared
+        // ControlFile image this process is about to flip to InProduction — its
+        // recovered checkPoint location / checkPointCopy (advanced nextXid &c.)
+        // are preserved. In this tree ControlFile is a backend-local cell, so
+        // the checkpointer's update landed in the checkpointer's copy + on disk,
+        // while THIS (startup) process still holds the stale pre-recovery image
+        // it loaded before redo. Writing it back below (UpdateControlFile) would
+        // clobber the recovered checkpoint on disk with the pre-recovery one,
+        // resetting nextXid below the XIDs already committed during replay (every
+        // recovered committed row then reads as "in the future"). Re-read the
+        // checkpointer's durable image first so we only flip the state byte.
+        if performed_wal_recovery {
+            shmem::ReadControlFile()?;
+        }
+
         control_file_mut().state = DBState::InProduction;
 
         unsafe {
@@ -716,6 +734,21 @@ pub fn StartupXLOG() -> PgResult<()> {
 /// child computed. It is idempotent and reads only the control file the caller
 /// already holds.
 pub fn SeedTransamVariablesFromCheckpoint() -> PgResult<()> {
+    // Refresh the postmaster's backend-local ControlFile image from disk before
+    // seeding. The startup child just ran crash recovery: WAL replay advanced
+    // the (genuine shmem) TransamVariables->nextXid past every replayed commit,
+    // and the end-of-recovery checkpoint durably wrote that advanced value into
+    // global/pg_control (checkPointCopy.nextXid). The postmaster's own in-memory
+    // ControlFile copy, however, was loaded before the startup child ran and
+    // still holds the PRE-recovery checkpoint (e.g. on a crash restart the
+    // pre-crash nextXid). Seeding from that stale copy would CLOBBER the shmem
+    // nextXid the startup child correctly advanced — reverting it below the XIDs
+    // already committed on disk — so freshly-forked backends would reuse those
+    // XIDs and see every recovered committed row as "in the future" (relation /
+    // row "does not exist"). Re-reading the control file makes this reseed read
+    // the recovered checkpoint, so it is idempotent rather than destructive.
+    shmem::ReadControlFile()?;
+
     // checkPoint = ControlFile->checkPointCopy;
     let check_point = control_file_mut().checkPointCopy;
 

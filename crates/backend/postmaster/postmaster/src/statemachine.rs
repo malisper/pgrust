@@ -308,6 +308,22 @@ pub fn PostmasterStateMachine() {
         ipci_seams::reregister_release_semaphores::call()
             .expect("reregister_release_semaphores");
 
+        /*
+         * Reset the transient cross-process shared state that a crash-killed
+         * backend may have left behind. In C the reinit below re-creates a
+         * fresh, zeroed shared segment, so every subsystem starts empty; this
+         * tree reuses the segment (the *ShmemInit OnceLock metadata can't be
+         * re-published, see the divergence note further down), so we must
+         * explicitly re-zero the structures whose stale contents would corrupt
+         * the new generation. The lock manager is the load-bearing one: a
+         * backend killed by SIGQUIT/SIGKILL never ran ProcKill/LockReleaseAll,
+         * so a lock it held (e.g. RowExclusiveLock on a table from an
+         * in-progress xact) would survive in the shared LOCK/PROCLOCK arena and
+         * block every post-restart backend that touches the same object.
+         */
+        ipci_seams::reset_shared_state_after_crash::call()
+            .expect("reset_shared_state_after_crash");
+
         /* re-read control file into local memory */
         sp::local_process_control_file::call(true);
 

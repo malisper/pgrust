@@ -353,6 +353,28 @@ pub fn create_or_attach_shmem_structs() -> PgResult<()> {
     Ok(())
 }
 
+/// Reset the transient cross-process shared state a crashed backend may have
+/// left behind, on the postmaster's crash-restart reinitialization.
+///
+/// DIVERGENCE FROM C: C reinitializes by discarding the entire shared-memory
+/// segment and allocating a fresh, zeroed one via `CreateSharedMemoryAndSemaphores`,
+/// so every subsystem's structures start empty for the new generation. In this
+/// tree the segment is reused across the restart (the per-subsystem `*ShmemInit`
+/// functions publish `&'static` metadata into write-once cells — e.g.
+/// `MainLWLockArray` — that cannot be re-published without panicking), so the
+/// genuine MAP_SHARED structures survive the restart with whatever a
+/// SIGQUIT/SIGKILL-killed backend left in them. The lock manager is the one that
+/// breaks crash recovery in practice: a backend killed mid-transaction never ran
+/// `ProcKill`/`LockReleaseAll`, so its LOCK/PROCLOCK entries (e.g. a held
+/// `RowExclusiveLock`) stay live in the shared arena and block every backend in
+/// the post-restart generation that touches the same object. Re-zero that arena
+/// in place here, matching the empty state a fresh C segment would have.
+pub fn reset_shared_state_after_crash() -> PgResult<()> {
+    sa::lock_manager_reset_after_crash()?;
+    sa::proc_array_reset_after_crash()?;
+    Ok(())
+}
+
 /// `InitializeShmemGUCs(void)` (ipci.c) — set the runtime-computed
 /// shared-memory GUCs.
 ///

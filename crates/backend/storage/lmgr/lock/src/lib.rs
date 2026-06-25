@@ -124,6 +124,34 @@ pub fn LockManagerShmemInit() -> PgResult<()> {
     Ok(())
 }
 
+/// Re-zero the genuine-shmem LOCK / PROCLOCK arena after a backend crash, the
+/// way C gets a fresh, zeroed shared segment from the postmaster's crash-restart
+/// `CreateSharedMemoryAndSemaphores`. A backend killed by SIGQUIT (`quickdie`)
+/// or SIGKILL never runs `ProcKill` / `LockReleaseAll`, so its LOCK/PROCLOCK
+/// entries (e.g. a `RowExclusiveLock` held by an in-progress xact) stay live in
+/// the cross-process arena. In C the postmaster discards and re-creates the
+/// whole shared segment before relaunching, clearing them; in this tree the
+/// segment is reused across the crash restart (the OnceLock-published metadata
+/// can't be re-published), so the stale entries would otherwise survive into the
+/// new generation and block every backend that touches the same object. Re-run
+/// the same in-place zeroing `LockManagerShmemInit` does for a fresh segment.
+pub fn LockManagerResetAfterCrash() -> PgResult<()> {
+    use ::ipc_shmem_seams::shmem_init_struct;
+
+    let n_locks = nlockents()? as usize;
+    let n_proclocks = n_locks.saturating_mul(2);
+    let n_procs = total_procs();
+    let bytes = state::arena_bytes(n_locks, n_proclocks, n_procs);
+    // The arena already exists (found == true); ignore that and force the
+    // not-found re-zero path so the LOCK/PROCLOCK pools + bucket heads + free
+    // lists are reset to empty, exactly as for a freshly carved segment.
+    let (base, _found) = shmem_init_struct::call("Lock Table Arena", bytes)?;
+    state::shmem_init(base, /* found = */ false, n_locks, n_proclocks, n_procs);
+
+    state::FP_STRONG.with(|c| *c.borrow_mut() = state::FastPathStrongRelationLockData::default());
+    Ok(())
+}
+
 /// `InitLockManagerAccess()` (lock.c) — initialize the backend-private
 /// LOCALLOCK hash table.
 pub fn InitLockManagerAccess() -> PgResult<()> {
@@ -390,6 +418,7 @@ pub fn init_seams() {
     // F0 seams.
     seams::max_locks_per_xact::set(max_locks_per_xact);
     seams::lock_manager_shmem_init::set(LockManagerShmemInit);
+    seams::lock_manager_reset_after_crash::set(LockManagerResetAfterCrash);
     seams::lock_manager_shmem_size::set(LockManagerShmemSize);
     seams::init_lock_manager_access::set(InitLockManagerAccess);
     seams::lock_tag_hash_code::set(|tag| LockTagHashCode(&tag));
