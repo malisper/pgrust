@@ -1227,15 +1227,29 @@ fn load_typcache_tupdesc(type_id: Oid) -> PgResult<()> {
     if !oid_is_valid(typrelid) {
         return elog_error(format!("invalid typrelid for composite type {type_id}"));
     }
+    // relation_open(AccessShareLock) + assert reltype + RelationGetDescr +
+    // relation_close. The C bumps tdrefcount; the safe port owns the copy.
+    //
+    // CRITICAL: this seam must run OUTSIDE the `with_state` borrow. C's
+    // relation_open(AccessShareLock) takes the lock via LockRelationOid →
+    // AcceptInvalidationMessages, which can fire the typcache invalidation
+    // callbacks (type_cache_rel_callback &c.); those re-enter `with_state`.
+    // C never holds an entry reference across relation_open (it assigns
+    // typentry->tupDesc only AFTER the open returns), so we must not hold the
+    // borrow across the seam either — otherwise the re-entrant borrow_mut
+    // panics with `already borrowed`, FATAL-ing the backend. So we build the
+    // owned descriptor in a scratch context with NO borrow held, then install
+    // it (copied into the cache context) under a fresh momentary borrow,
+    // mirroring the open-then-assign ordering of C.
+    let scratch = MemoryContext::new("typcache load_typcache_tupdesc");
+    let tupdesc =
+        relcache_seams::relation_get_composite_tupdesc::call(scratch.mcx(), typrelid, type_id)?;
     with_state(|st| -> PgResult<()> {
-        // relation_open(AccessShareLock) + assert reltype + RelationGetDescr +
-        // relation_close, copied into the cache context. The C bumps
-        // tdrefcount; the safe port owns the copy.
-        let tupdesc = relcache_seams::relation_get_composite_tupdesc::call(st.mcx, typrelid, type_id)?;
+        let owned = copy_tupdesc_into_cache(st, &tupdesc)?;
         st.tupledesc_id_counter += 1;
         let next_id = st.tupledesc_id_counter;
         let e = st.entry_mut(type_id);
-        e.tup_desc = Some(tupdesc);
+        e.tup_desc = Some(owned);
         e.tup_desc_identifier = next_id;
         Ok(())
     })
