@@ -24719,6 +24719,7 @@ dependencies = [
  "walsummarizer_seams",
  "wasm-libc-shim",
  "xlogarchive",
+ "xlogarchive_seams",
  "xlogbackup",
  "xloginsert_seams",
  "xlogrecovery_seams",

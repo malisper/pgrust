@@ -11,12 +11,16 @@
 //! seams). It is the body the `create_checkpoint` / `shutdown_xlog` seams
 //! install — the #157 WAL-checkpoint-record keystone.
 //!
-//! Control flow is 1:1 with C `CreateCheckPoint`. The two genuine omissions are
-//! both housekeeping-only and behaviour-preserving (they were never performed by
-//! the prior graceful-degradation seam either), each marked inline:
-//!   * the old-WAL-segment recycle tail (`RemoveOldXlogFiles` +
-//!     `InvalidateObsoleteReplicationSlots`) — owned by xlogrecovery/slot.c, not
-//!     yet ported; skipping it only retains more WAL than strictly necessary.
+//! Control flow is 1:1 with C `CreateCheckPoint`. The old-WAL-recycle tail now
+//! computes `KeepLogSeg` and calls `InvalidateObsoleteReplicationSlots` over the
+//! live `XLogCtl`/slot substrate, so a primary CHECKPOINT enforces
+//! `max_slot_wal_keep_size` and the slot idle-timeout. The genuine omissions are
+//! all housekeeping-only and behaviour-preserving (none were performed by the
+//! prior graceful-degradation seam either), each marked inline:
+//!   * the `RemoveOldXlogFiles` unlink/recycle pass — owned by the not-yet-ported
+//!     xlog directory driver; skipping the unlink only retains more WAL than
+//!     strictly necessary (the durability-relevant slot-invalidation half of the
+//!     recycle tail IS performed).
 //!   * `UpdateCheckPointDistanceEstimate` / `WakeupWalSummarizer` /
 //!     `TruncateSUBTRANS` — optimization / summarizer / pg_subtrans-trim, not
 //!     durability-critical.
@@ -379,11 +383,56 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
     // just before old-WAL removal.
     injection_point_seams::injection_point_run::call("checkpoint-before-old-wal-removal", None)?;
 
-    // The old-WAL-segment recycle tail (KeepLogSeg + InvalidateObsoleteReplication
-    // Slots + RemoveOldXlogFiles) and WAL-summarizer wakeup / pg_subtrans trim are
-    // housekeeping owned by xlogrecovery / slot.c / subtrans.c, not yet ported.
-    // Skipping them only retains more WAL than strictly necessary and is
-    // behaviour-preserving relative to the prior graceful-degradation seam.
+    // Delete old log files, those no longer needed for the last checkpoint to
+    // prevent the disk holding the xlog from growing full. (xlog.c:7378-7396)
+    //
+    // C uses the global `RedoRecPtr` (== `checkPoint.redo` here, just published to
+    // the backend-local cache) as the recycle floor for `XLByteToSeg`, and the
+    // checkpoint-record end LSN `recptr` for `KeepLogSeg`. The recycle horizon is
+    // retreated over the live GUC/slot/summarizer posture by `keep_log_seg`, then
+    // obsolete replication slots are invalidated at that boundary — this is the
+    // leg that makes a CHECKPOINT enforce max_slot_wal_keep_size (RS_INVAL_WAL_
+    // REMOVED) and the idle-timeout (RS_INVAL_IDLE_TIMEOUT) on the primary. If any
+    // slot is invalidated its WAL hold is released, so the horizon is recomputed
+    // from RedoRecPtr exactly as in C.
+    let redo_rec_ptr = crate::shmem::redo_rec_ptr_cached();
+    let mut log_seg_no = crate::XLByteToSeg(redo_rec_ptr, wal_segment_size);
+    log_seg_no = keep_log_seg(recptr, log_seg_no, wal_segment_size);
+    if slot_seams::invalidate_obsolete_replication_slots::call(
+        RS_INVAL_WAL_REMOVED | RS_INVAL_IDLE_TIMEOUT,
+        log_seg_no,
+        ::types_core::InvalidOid,
+        InvalidTransactionId,
+    )? {
+        // Some slots have been invalidated; recalculate the old-segment horizon,
+        // starting again from RedoRecPtr.
+        log_seg_no = crate::XLByteToSeg(redo_rec_ptr, wal_segment_size);
+        log_seg_no = keep_log_seg(recptr, log_seg_no, wal_segment_size);
+    }
+    log_seg_no = log_seg_no.wrapping_sub(1);
+
+    // RemoveOldXlogFiles(_logSegNo, RedoRecPtr, recptr, checkPoint.ThisTimeLineID)
+    // (xlog.c:7397) — the WAL recycle/unlink pass is owned by the not-yet-ported
+    // xlog directory driver; like the live restartpoint path (CreateRestartPoint),
+    // skipping the unlink only retains more WAL than strictly necessary and is
+    // behaviour-preserving. The slot-invalidation above (the durability-relevant
+    // half) is performed faithfully.
+    let _ = log_seg_no;
+
+    // Make more log segments if needed. (xlog.c:7400-7402 — done after recycling
+    // old segments, since that may supply some of the needed files.)
+    if !shutdown {
+        crate::write::PreallocXlogFiles(
+            recptr,
+            check_point.ThisTimeLineID,
+            &mut crate::checkpoint::CheckpointStats::default(),
+        )?;
+    }
+
+    // TruncateSUBTRANS(GetOldestTransactionIdConsideredRunning()) (xlog.c:7411) —
+    // pg_subtrans trim is non-durability-critical housekeeping owned by
+    // subtrans/procarray; the live restartpoint path skips it too (documented
+    // divergence, see DESIGN_DEBT.md).
 
     log_checkpoint_end(flags);
 
