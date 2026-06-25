@@ -113,3 +113,12 @@ seam_core::seam!(
     /// `ereport(ERROR)`, carried on `Err`.
     pub fn startup_replication_origin() -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `CheckPointReplicationOrigin()` (origin.c:595) — write the
+    /// `pg_logical/replorigin_checkpoint` file from the shared-memory
+    /// replication-origin slots. Called from `CheckPointGuts` (xlog.c:7579) on
+    /// every checkpoint/restartpoint so logical-decoding origins survive a
+    /// clean restart. File write / fsync can `ereport(ERROR)`, carried on `Err`.
+    pub fn check_point_replication_origin() -> PgResult<()>
+);

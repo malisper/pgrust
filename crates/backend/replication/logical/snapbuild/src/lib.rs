@@ -1523,11 +1523,17 @@ fn procarray_get_oldest_safe_decoding_xid_locked() -> TransactionId {
     procarray_seams::GetOldestSafeDecodingTransactionId::call(false)
 }
 
+/// `open(2)` flags. These must come from `libc` — the numeric values of
+/// `O_CREAT`/`O_EXCL`/… differ per platform (e.g. `O_CREAT` is `0o100` on Linux
+/// but `0x200` on macOS/BSD), and the seam ultimately passes them straight to
+/// `libc::open`. Hardcoding the Linux octals silently dropped `O_CREAT` on
+/// macOS, so `OpenTransientFile(tmppath, O_CREAT|O_EXCL|O_WRONLY)` failed with
+/// `ENOENT` on a non-existent temp file (snapshot serialize on clean restart).
 mod libc_flags {
-    pub const O_RDONLY: i32 = 0;
-    pub const O_WRONLY: i32 = 1;
-    pub const O_CREAT: i32 = 0o100;
-    pub const O_EXCL: i32 = 0o200;
+    pub const O_RDONLY: i32 = libc::O_RDONLY;
+    pub const O_WRONLY: i32 = libc::O_WRONLY;
+    pub const O_CREAT: i32 = libc::O_CREAT;
+    pub const O_EXCL: i32 = libc::O_EXCL;
     /// `PG_BINARY` is 0 on POSIX.
     pub const PG_BINARY: i32 = 0;
 }
@@ -1548,6 +1554,9 @@ pub fn init_seams() {
     replication_snapbuild_seams::snap_build_clear_exported_snapshot::set(
         snap_build_clear_exported_snapshot,
     );
+
+    // Checkpoint entry point called from `CheckPointGuts` (xlog.c:7578).
+    replication_snapbuild_seams::check_point_snap_build::set(check_point_snap_build);
 }
 
 #[cfg(test)]

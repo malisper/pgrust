@@ -43,11 +43,14 @@ const DISK_STATE_SIZE: usize = 16;
 /// `sizeof(uint32 magic)` / `sizeof(pg_crc32c)`.
 const U32_SIZE: usize = 4;
 
+/// `open(2)` flags sourced from `libc` so the numeric values are
+/// platform-correct (`O_CREAT`/`O_EXCL` differ between Linux and macOS/BSD);
+/// the seam passes them straight to `libc::open`.
 mod libc_flags {
-    pub const O_WRONLY: i32 = 1;
-    pub const O_CREAT: i32 = 0o100;
-    pub const O_EXCL: i32 = 0o200;
-    pub const O_RDONLY: i32 = 0;
+    pub const O_WRONLY: i32 = libc::O_WRONLY;
+    pub const O_CREAT: i32 = libc::O_CREAT;
+    pub const O_EXCL: i32 = libc::O_EXCL;
+    pub const O_RDONLY: i32 = libc::O_RDONLY;
     /// `PG_BINARY` is 0 on POSIX.
     pub const PG_BINARY: i32 = 0;
 }

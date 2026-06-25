@@ -1125,6 +1125,7 @@ pub fn init_seams() {
     seams::relation_map_filenumber_to_oid::set(RelationMapFilenumberToOid);
     seams::relmap_redo::set(relmap_redo);
     seams::at_cci_relation_map::set(AtCCI_RelationMap);
+    seams::check_point_relation_map::set(CheckPointRelationMap);
     seams::at_eoxact_relation_map::set(AtEOXact_RelationMap);
     seams::at_prepare_relation_map::set(AtPrepare_RelationMap);
     // Pure-wiring install (assemble/seam-wiring-guard): owner body matches.

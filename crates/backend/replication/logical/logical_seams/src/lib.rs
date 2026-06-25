@@ -147,6 +147,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `LogicalConfirmReceivedLocation(lsn)` (logical.c:1822) — record that the
+    /// logical-decoding client has flushed up to `lsn`, advancing
+    /// `MyReplicationSlot`'s `confirmed_flush` (and, when a candidate xmin /
+    /// restart_lsn is reached, persisting them). Called from the logical
+    /// walsender's standby-reply handler (walsender.c) and from
+    /// `pg_logical_slot_get_changes`.
+    pub fn logical_confirm_received_location(lsn: XLogRecPtr) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `LogicalSlotAdvanceAndCheckSnapState(moveto, found_consistent_snapshot)`
     /// (logical.c:2083) — advance `MyReplicationSlot` by decoding up to
     /// `moveto`, returning the resulting `confirmed_flush`.

@@ -33,6 +33,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CheckPointRelationMap()` (relmapper.c) — fence checkpoints against an
+    /// in-progress relation-map write so a checkpoint never captures a
+    /// torn/partial map. Called from `CheckPointGuts` (xlog.c:7577). The merge
+    /// takes `RelationMappingLock`; surfaced as `PgResult<()>`.
+    pub fn check_point_relation_map() -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `AtEOXact_RelationMap(isCommit, isParallelWorker)` — commit/discard
     /// relation-map updates; the commit path writes WAL and can
     /// `ereport(ERROR)`.

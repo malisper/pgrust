@@ -51,6 +51,7 @@ use pqcomm_seams as pq;
 use replication_basebackup_seams as basebackup;
 use slotsync_seams as slotsync;
 use slot_seams as slot;
+use logical_seams as logical_seam;
 use replication_snapbuild_seams as snapbuild;
 use syncrep_seams as syncrep;
 use walreceiverfuncs_seams as walrcvfuncs;

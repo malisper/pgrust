@@ -2317,6 +2317,7 @@ pub fn init_seams() {
     ::logical_seams::dispatch_reorderbuffer_callback::set(
         dispatch_reorderbuffer_callback_seam,
     );
+    ::logical_seams::logical_confirm_received_location::set(LogicalConfirmReceivedLocation);
     ::logical_seams::logical_slot_advance_and_check_snap_state::set(
         |moveto, found_consistent_snapshot, wal_segment_size, my_database_id| {
             LogicalSlotAdvanceAndCheckSnapState(

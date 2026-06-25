@@ -9,6 +9,7 @@ name = "snapbuild"
 path = "src/lib.rs"
 
 [dependencies]
+libc = "0.2"
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 snapshot = { path = "../../../../_support/types/snapshot" }

@@ -13,7 +13,7 @@ use crate::core::{
     proc_get, uint32, with_proc, InvalidTransactionId, InvalidXLogRecPtr, TimestampTz,
     TransactionId, XLogRecPtr, SYNC_REP_WAIT_APPLY, SYNC_REP_WAIT_FLUSH, SYNC_REP_WAIT_WRITE,
 };
-use crate::{slot, syncrep, timestamp, varsup};
+use crate::{logical_seam, slot, syncrep, timestamp, varsup};
 
 /// `FirstNormalTransactionId` (`access/transam.h`): `((TransactionId) 3)`.
 const FirstNormalTransactionId: TransactionId = 3;
@@ -272,23 +272,19 @@ fn ProcessStandbyReplyMessage(r: &mut MsgReader<'_>) {
         syncrep::sync_rep_release_waiters::call().expect("SyncRepReleaseWaiters");
     }
 
-    // Advance our local xmin horizon when the client confirmed a flush.
+    // Advance our local xmin horizon when the client confirmed a flush
+    // (walsender.c ProcessStandbyReplyMessage):
+    //   if (SlotIsLogical(MyReplicationSlot))
+    //       LogicalConfirmReceivedLocation(flushPtr);
+    //   else
+    //       PhysicalConfirmReceivedLocation(flushPtr);
     if slot::my_replication_slot_is_set::call() && flushPtr != InvalidXLogRecPtr {
         if !slot::slot_is_physical::call() {
-            // LogicalConfirmReceivedLocation(flushPtr) — the logical walsender
-            // path is out of scope; this branch is unreachable during physical
-            // streaming (a physical START_REPLICATION rejects a logical slot).
-            utils_error::ereport(types_error::ERROR)
-                .errmsg(alloc::string::String::from(
-                    "LogicalConfirmReceivedLocation: logical replication reply \
-                     path is not yet ported",
-                ))
-                .finish(types_error::ErrorLocation::new(
-                    "walsender.c",
-                    0,
-                    "ProcessStandbyReplyMessage",
-                ))
-                .expect("ereport(ERROR) logical-confirm-unported");
+            // Logical slot: persist the client's confirmed flush so a later
+            // START_REPLICATION (or restart) resumes after the acknowledged
+            // changes instead of re-decoding them (recovery TAP 006 subtest 8).
+            logical_seam::logical_confirm_received_location::call(flushPtr)
+                .expect("LogicalConfirmReceivedLocation");
         } else {
             PhysicalConfirmReceivedLocation(flushPtr);
         }

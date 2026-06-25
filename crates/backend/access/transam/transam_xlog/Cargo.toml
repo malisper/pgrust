@@ -67,8 +67,11 @@ timeline_seams = { path = "../timeline_seams" }
 vacuum_seams = { path = "../../../commands/vacuum_seams" }
 origin_seams = { path = "../../../replication/logical/origin_seams" }
 slot_seams = { path = "../../../replication/slot_seams" }
+replication_snapbuild_seams = { path = "../../../replication/replication_snapbuild_seams" }
+rewriteheap_seams = { path = "../../heap/rewriteheap_seams" }
 reorderbuffer_seams = { path = "../../../replication/logical/reorderbuffer_seams" }
 relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+relmapper_seams = { path = "../../../utils/cache/relmapper_seams" }
 pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
 ps_status_seams = { path = "../../../utils/misc/ps_status_seams" }
 miscinit_seams = { path = "../../../utils/init/miscinit_seams" }

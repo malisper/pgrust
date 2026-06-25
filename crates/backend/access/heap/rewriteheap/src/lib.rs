@@ -115,12 +115,14 @@ const XLOG_HEAP2_REWRITE: u8 = 0x00;
 /// `"pg_logical/mappings"`.
 const PG_LOGICAL_MAPPINGS_DIR: &str = "pg_logical/mappings";
 
-/// POSIX `open(2)` flags. `PG_BINARY` is 0 on POSIX.
+/// `open(2)` flags sourced from `libc` so the numeric values are
+/// platform-correct (`O_CREAT`/`O_EXCL` differ between Linux and macOS/BSD);
+/// the seam passes them straight to `libc::open`. `PG_BINARY` is 0 on POSIX.
 mod libc_flags {
-    pub const O_WRONLY: i32 = 1;
-    pub const O_RDWR: i32 = 2;
-    pub const O_CREAT: i32 = 0o100;
-    pub const O_EXCL: i32 = 0o200;
+    pub const O_WRONLY: i32 = libc::O_WRONLY;
+    pub const O_RDWR: i32 = libc::O_RDWR;
+    pub const O_CREAT: i32 = libc::O_CREAT;
+    pub const O_EXCL: i32 = libc::O_EXCL;
     pub const PG_BINARY: i32 = 0;
 }
 

@@ -449,6 +449,21 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
 /// `check_point_buffers` seam's own checkpoint hooks where ported; here we run
 /// the buffer write pass + the fsync drain, matching the prior seam's flush half.
 fn check_point_guts(check_point_redo: XLogRecPtr, flags: i32) -> PgResult<()> {
+    // The pre-buffer callbacks (xlog.c:7577-7581), in C's exact order. These
+    // are durability-critical for logical decoding: without
+    // CheckPointReplicationSlots(is_shutdown), a logical slot's advanced
+    // confirmed_flush_lsn is never persisted, so after a clean restart the slot
+    // re-decodes already-consumed changes (recovery TAP 006 subtests 5/8, 038).
+    // CheckPointSnapBuild / CheckPointLogicalRewriteHeap reclaim stale
+    // pg_logical/{snapshots,mappings} files; CheckPointReplicationOrigin
+    // persists pg_logical/replorigin_checkpoint; CheckPointRelationMap fences a
+    // torn relation-map write.
+    relmapper_seams::check_point_relation_map::call()?;
+    slot_seams::checkpoint_replication_slots::call((flags & CHECKPOINT_IS_SHUTDOWN) != 0)?;
+    replication_snapbuild_seams::check_point_snap_build::call()?;
+    rewriteheap_seams::check_point_logical_rewrite_heap::call()?;
+    origin_seams::check_point_replication_origin::call()?;
+
     // Write out all dirty SLRU + main buffer-pool data (xlog.c:7585-7589).
     //   CheckPointCLOG  — the commit-status SLRU. Without this, a transaction
     //                     replayed/committed in the CLOG shared buffers shows
@@ -459,12 +474,11 @@ fn check_point_guts(check_point_redo: XLogRecPtr, flags: i32) -> PgResult<()> {
     //   CheckPointCommitTs / CheckPointMultiXact — the commit-timestamp and
     //                     multixact SLRUs (paired with the snapshots the record
     //                     carries).
-    // The remaining CheckPointGuts SLRU arms (SUBTRANS / Predicate) and the
-    // pre-buffer callbacks (RelationMap / ReplicationSlots / SnapBuild /
-    // LogicalRewriteHeap / ReplicationOrigin / TwoPhase) are owned by units that
-    // do not yet expose a CheckPoint seam; SUBTRANS is rebuilt from clog on
-    // recovery and Predicate/2PC are not durability-critical for the single-node
-    // crash-recovery contract, so omitting them is behaviour-preserving.
+    // The remaining CheckPointGuts SLRU arms (SUBTRANS / Predicate) are owned by
+    // units that do not yet expose a CheckPoint seam; SUBTRANS is rebuilt from
+    // clog on recovery and Predicate is not durability-critical for the
+    // single-node crash-recovery contract, so omitting them is
+    // behaviour-preserving.
     clog_seams::check_point_clog::call()?;
     commit_ts_seams::check_point_commit_ts::call()?;
     mx_seams::check_point_multi_xact::call()?;
