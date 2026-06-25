@@ -359,6 +359,13 @@ pub fn wal_receiver_main(_startup_data: &StartupData) -> ! {
 
 fn wal_receiver_main_inner() -> PgResult<()> {
     // MyBackendType = B_WAL_RECEIVER; AuxiliaryProcessMainCommon();
+    // (walreceiver.c:171) — the postmaster child-launch path does not set
+    // MyBackendType (each aux main does, cf. checkpointer/bgwriter), and
+    // AuxiliaryProcessMainCommon expects it pre-set (init_ps_display reads it).
+    // Without this the walreceiver's pg_stat_io WAL-write counts flush under the
+    // wrong BackendType, so `pg_stat_io WHERE backend_type='walreceiver'` stays
+    // at zero.
+    init_small_seams::set_my_backend_type::call(::types_core::init::BackendType::WalReceiver);
     auxprocess_seams::auxiliary_process_main_common::call()?;
 
     /*
