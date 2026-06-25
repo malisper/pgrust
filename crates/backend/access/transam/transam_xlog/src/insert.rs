@@ -769,7 +769,7 @@ pub fn XLogInsertRecord(
     let mut hdr: std::vec::Vec<u8> = header.to_vec();
 
     let start_pos;
-    let end_pos;
+    let mut end_pos;
     let inserted;
 
     // START_CRIT_SECTION() — interrupts already held off by the caller's crit
@@ -899,12 +899,28 @@ pub fn XLogInsertRecord(
         }
     }
 
-    // XLOG_SWITCH: flush the record + the padding, then return the end of just
-    // the xlog-switch record. (C: `XLogFlush(EndPos)`; the C also rewinds the
-    // return value to the actual record end via `RegisterSegmentBoundary`/the
-    // page-skip arithmetic — here `end_pos` already names the record end.)
+    // XLOG_SWITCH: flush the record + the empty padding that fills the rest of
+    // the segment, then return a pointer to just the end of the xlog-switch
+    // record. (xlog.c:1005-1028) Even though `ReserveXLogSwitch` reserved the
+    // rest of the segment (reflected in `end_pos`), the value handed back to the
+    // caller must name the record end, not the segment boundary — otherwise
+    // `pg_walfile_name(pg_switch_wal())` reports the NEXT segment instead of the
+    // segment that was just switched out (recovery TAP 042_low_level_backup).
     if class == WalInsertClass::SpecialSwitch {
         crate::write::XLogFlush(end_pos)?;
+
+        if inserted {
+            let seg = wal_segment_size();
+            end_pos = start_pos + SizeOfXLogRecord as u64;
+            if start_pos / XLOG_BLCKSZ as u64 != end_pos / XLOG_BLCKSZ as u64 {
+                let offset = XLogSegmentOffset(end_pos, seg) as u64;
+                if offset == end_pos % XLOG_BLCKSZ as u64 {
+                    end_pos += SizeOfXLogLongPHD as u64;
+                } else {
+                    end_pos += SizeOfXLogShortPHD as u64;
+                }
+            }
+        }
     }
 
     // Update our global variables.
