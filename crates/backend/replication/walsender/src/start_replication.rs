@@ -52,7 +52,12 @@ pub fn WaitForStandbyConfirmation(moveto: XLogRecPtr) -> types_error::PgResult<(
 }
 
 /// `static void StartReplication(StartReplicationCmd *cmd)`.
-pub fn StartReplication(cmd: &StartReplicationCmd) {
+///
+/// Returns `PgResult<()>` so the genuinely-fallible C calls that
+/// `ereport(ERROR)` (and longjmp to the command loop) propagate their `PgError`
+/// up through `exec_replication_command`'s per-command catch as a clean
+/// `ereport`, rather than panicking with a Debug-of-`PgError` string payload.
+pub fn StartReplication(cmd: &StartReplicationCmd) -> types_error::PgResult<()> {
     use crate::core::{
         with_proc, InvalidXLogRecPtr, WalSndState, INT8OID, TEXTOID,
     };
@@ -68,8 +73,7 @@ pub fn StartReplication(cmd: &StartReplicationCmd) {
 
     if let Some(slotname) = cmd.slotname.as_deref() {
         // ReplicationSlotAcquire(cmd->slotname, true, true);
-        crate::slot::replication_slot_acquire::call(slotname, true, true)
-            .expect("ReplicationSlotAcquire");
+        crate::slot::replication_slot_acquire::call(slotname, true, true)?;
         // if (SlotIsLogical(MyReplicationSlot)) ereport(ERROR, ...);
         if !crate::slot::slot_is_physical::call() {
             utils_error::ereport(types_error::ERROR)
@@ -81,8 +85,7 @@ pub fn StartReplication(cmd: &StartReplicationCmd) {
                     "walsender.c",
                     0,
                     "StartReplication",
-                ))
-                .expect("ereport(ERROR) logical-slot-for-physical");
+                ))?;
         }
 
         // We don't need to verify the slot's restart_lsn here; instead we rely
@@ -122,7 +125,7 @@ pub fn StartReplication(cmd: &StartReplicationCmd) {
             //                                &sendTimeLineNextTLI);
             //   list_free_deep(timeLineHistory);
             let (switchpoint, next_tli) =
-                timeline_switch_point_history(flush_tli, cmd.timeline);
+                timeline_switch_point_history(flush_tli, cmd.timeline)?;
             with_proc(|p| p.sendTimeLineNextTLI = next_tli);
 
             // This is quite loose on purpose: only check we didn't fork off the
@@ -139,8 +142,7 @@ pub fn StartReplication(cmd: &StartReplicationCmd) {
                         "walsender.c",
                         0,
                         "StartReplication",
-                    ))
-                    .expect("ereport(ERROR) startpoint-not-in-history");
+                    ))?;
             }
             with_proc(|p| p.sendTimeLineValidUpto = switchpoint);
         }
@@ -191,8 +193,7 @@ pub fn StartReplication(cmd: &StartReplicationCmd) {
                     "walsender.c",
                     0,
                     "StartReplication",
-                ))
-                .expect("ereport(ERROR) startpoint-ahead-of-flush");
+                ))?;
         }
 
         // Start streaming from the requested point.
@@ -223,8 +224,7 @@ pub fn StartReplication(cmd: &StartReplicationCmd) {
 
     // if (cmd->slotname) ReplicationSlotRelease();
     if cmd.slotname.is_some() {
-        crate::slot::replication_slot_release::call()
-            .expect("ReplicationSlotRelease");
+        crate::slot::replication_slot_release::call()?;
     }
 
     // Copy is finished now. Send a single-row result set indicating the next
@@ -248,17 +248,14 @@ pub fn StartReplication(cmd: &StartReplicationCmd) {
             dest::create_dest_receiver::call(types_dest::CommandDest::RemoteSimple);
 
         // tupdesc = CreateTemplateTupleDesc(2);  int8 next_tli + text next_tli_startpos
-        let mut tupdesc = tupdesc::CreateTemplateTupleDesc(mcx, 2)
-            .expect("CreateTemplateTupleDesc(2)");
+        let mut tupdesc = tupdesc::CreateTemplateTupleDesc(mcx, 2)?;
         tupdesc::TupleDescInitBuiltinEntry(
             &mut tupdesc, 1, "next_tli", INT8OID, -1, 0,
-        )
-        .expect("TupleDescInitBuiltinEntry(next_tli)");
+        )?;
         tupdesc::TupleDescInitBuiltinEntry(
             &mut tupdesc, 2, "next_tli_startpos", TEXTOID, -1, 0,
-        )
-        .expect("TupleDescInitBuiltinEntry(next_tli_startpos)");
-        let tupdesc = Some(mcx::alloc_in(mcx, tupdesc).expect("alloc tupdesc"));
+        )?;
+        let tupdesc = Some(mcx::alloc_in(mcx, tupdesc)?);
 
         // tstate = begin_tup_output_tupdesc(dest, tupdesc, &TTSOpsVirtual);
         let mut tstate = execTuples_seams::begin_tup_output_tupdesc::call(
@@ -266,28 +263,25 @@ pub fn StartReplication(cmd: &StartReplicationCmd) {
             dest,
             tupdesc,
             nodes::TupleSlotKind::Virtual,
-        )
-        .expect("begin_tup_output_tupdesc");
+        )?;
 
         // values[0] = Int64GetDatum((int64) sendTimeLineNextTLI);
         // values[1] = CStringGetTextDatum(startpos_str);
         let v0 = types_tuple::Datum::from_i64(next_tli as i64);
-        let v1 = varlena_seams::cstring_to_text_v::call(mcx, &startpos_str)
-            .expect("cstring_to_text(next_tli_startpos)");
+        let v1 = varlena_seams::cstring_to_text_v::call(mcx, &startpos_str)?;
         let values = [v0, v1];
         let nulls = [false, false];
 
         // do_tup_output(tstate, values, nulls);
-        execTuples_seams::do_tup_output::call(mcx, &mut tstate, &values, &nulls)
-            .expect("do_tup_output");
+        execTuples_seams::do_tup_output::call(mcx, &mut tstate, &values, &nulls)?;
         // end_tup_output(tstate);
-        execTuples_seams::end_tup_output::call(mcx, tstate)
-            .expect("end_tup_output");
+        execTuples_seams::end_tup_output::call(mcx, tstate)?;
     }
 
     // Send CommandComplete message.
     //   EndReplicationCommand("START_STREAMING");
     crate::command::end_replication_command_pub("START_STREAMING");
+    Ok(())
 }
 
 /// `pq_beginmessage(&buf, PqMsg_CopyBothResponse); pq_sendbyte(&buf, 0);
@@ -308,24 +302,26 @@ fn send_copy_both_response() {
 fn timeline_switch_point_history(
     flush_tli: TimeLineID,
     rqst_tli: TimeLineID,
-) -> (XLogRecPtr, TimeLineID) {
+) -> types_error::PgResult<(XLogRecPtr, TimeLineID)> {
     let ctx = mcx::MemoryContext::new("START_REPLICATION timeline history");
-    let history = timeline_seams::read_timeline_history::call(ctx.mcx(), flush_tli)
-        .expect("readTimeLineHistory");
+    let history = timeline_seams::read_timeline_history::call(ctx.mcx(), flush_tli)?;
     timeline_seams::tli_switch_point::call(rqst_tli, &history)
-        .expect("tliSwitchPoint")
 }
 
 /// `static void StartLogicalReplication(StartReplicationCmd *cmd)`.
-pub fn StartLogicalReplication(cmd: &StartReplicationCmd) {
+///
+/// Returns `PgResult<()>` so the genuinely-fallible C calls that
+/// `ereport(ERROR)` (and longjmp to the command loop) propagate their `PgError`
+/// up through `exec_replication_command`'s per-command catch as a clean
+/// `ereport`, rather than panicking with a Debug-of-`PgError` string payload.
+pub fn StartLogicalReplication(cmd: &StartReplicationCmd) -> types_error::PgResult<()> {
     use crate::core::{with_proc, WalSndState};
 
     // make sure that our requirements are still fulfilled.
     //   CheckLogicalDecodingRequirements();
     let wal_level = types_logical::WalLevel(xlog::wal_level::call() as i32);
     let my_database_id = crate::miscinit::my_database_id::call();
-    logical_seams::check_logical_decoding_requirements::call(wal_level, my_database_id)
-        .expect("CheckLogicalDecodingRequirements");
+    logical_seams::check_logical_decoding_requirements::call(wal_level, my_database_id)?;
 
     debug_assert!(!crate::slot::my_replication_slot_is_set::call());
 
@@ -334,8 +330,7 @@ pub fn StartLogicalReplication(cmd: &StartReplicationCmd) {
         .slotname
         .as_deref()
         .expect("START_REPLICATION ... LOGICAL requires a slot name");
-    crate::slot::replication_slot_acquire::call(slotname, true, true)
-        .expect("ReplicationSlotAcquire");
+    crate::slot::replication_slot_acquire::call(slotname, true, true)?;
 
     // Force a disconnect after a promotion, so the decoding code doesn't need to
     // care about an eventual switch from recovery to a normal environment.
@@ -360,8 +355,7 @@ pub fn StartLogicalReplication(cmd: &StartReplicationCmd) {
         options,
         wal_segment_size,
         my_database_id,
-    )
-    .expect("CreateDecodingContext");
+    )?;
     crate::core::set_logical_decoding_ctx(ctx);
 
     crate::init::WalSndSetState(WalSndState::WALSNDSTATE_CATCHUP);
@@ -396,11 +390,9 @@ pub fn StartLogicalReplication(cmd: &StartReplicationCmd) {
 
     // FreeDecodingContext(logical_decoding_ctx); ReplicationSlotRelease();
     if let Some(mut ctx) = crate::core::take_logical_decoding_ctx() {
-        logical_seams::free_decoding_context::call(&mut ctx)
-            .expect("FreeDecodingContext");
+        logical_seams::free_decoding_context::call(&mut ctx)?;
     }
-    crate::slot::replication_slot_release::call()
-        .expect("ReplicationSlotRelease");
+    crate::slot::replication_slot_release::call()?;
 
     with_proc(|p| p.replication_active = 0);
     if proc_get(|p| p.got_STOPPING) != 0 {
@@ -411,6 +403,7 @@ pub fn StartLogicalReplication(cmd: &StartReplicationCmd) {
     // Get out of COPY mode (CommandComplete) — the dispatcher's
     // EndReplicationCommand("START_REPLICATION") sends the CommandComplete
     // (`SetQueryCompletion(&qc, CMDTAG_COPY, 0); EndCommand(...)`).
+    Ok(())
 }
 
 /// Convert `cmd->options` (a `List *DefElem` of plugin options) into the

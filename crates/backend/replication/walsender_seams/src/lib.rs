@@ -19,10 +19,11 @@ seam_core::seam!(
 seam_core::seam!(
     /// `bool exec_replication_command(const char *cmd_string)` (walsender.c) —
     /// the WAL-sender replication-command entry reached from `PostgresMain`'s
-    /// simple-Query (`'Q'`) arm when `am_walsender`. Returns `false` if the
+    /// simple-Query (`'Q'`) arm when `am_walsender`. Returns `Ok(false)` if the
     /// string was not a replication command (the SQL path then takes over).
-    /// Can `ereport(ERROR)`.
-    pub fn exec_replication_command(cmd_string: &str) -> bool
+    /// Can `ereport(ERROR)`, carried on `Err` so the caller's per-command catch
+    /// delivers a clean `ereport` (vs a panic-string Debug dump).
+    pub fn exec_replication_command(cmd_string: &str) -> types_error::PgResult<bool>
 );
 
 seam_core::seam!(

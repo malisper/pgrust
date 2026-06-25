@@ -16,8 +16,13 @@ use crate::core::{proc_get, ReplCommand, ReplicationKind, WalSndState};
 use crate::{basebackup, dest, snapbuild, tcop};
 
 /// `bool exec_replication_command(const char *cmd_string)` — parse and execute a
-/// replication command; returns false if it was not a WalSender command.
-pub fn exec_replication_command(cmd_string: &str) -> bool {
+/// replication command; returns `Ok(false)` if it was not a WalSender command.
+///
+/// Returns `PgResult<bool>` so the per-command bodies that genuinely
+/// `ereport(ERROR)` (e.g. `StartReplication` / `StartLogicalReplication`)
+/// propagate their `PgError` to the caller's per-command catch as a clean
+/// `ereport`, rather than panicking with a Debug-of-`PgError` string payload.
+pub fn exec_replication_command(cmd_string: &str) -> types_error::PgResult<bool> {
     // If WAL sender was told that shutdown is getting close, switch its status so
     // the next replication commands are handled correctly.
     if proc_get(|p| p.got_STOPPING) != 0 {
@@ -41,7 +46,7 @@ pub fn exec_replication_command(cmd_string: &str) -> bool {
     // C "not a WalSender command" path (the SQL path takes over): return false.
     let cmd = match parse_replication_command(cmd_string) {
         Some(cmd) => cmd,
-        None => return false,
+        None => return Ok(false),
     };
 
     // Report query to monitoring, log it per log_replication_commands (DEBUG1
@@ -102,9 +107,9 @@ pub fn exec_replication_command(cmd_string: &str) -> bool {
                 .expect("PreventInTransactionBlock(START_REPLICATION)");
 
             if c.kind == ReplicationKind::REPLICATION_KIND_PHYSICAL {
-                crate::start_replication::StartReplication(&c);
+                crate::start_replication::StartReplication(&c)?;
             } else {
-                crate::start_replication::StartLogicalReplication(&c);
+                crate::start_replication::StartLogicalReplication(&c)?;
             }
 
             // Dupe, but necessary per libpqrcv_endstreaming.
@@ -134,7 +139,7 @@ pub fn exec_replication_command(cmd_string: &str) -> bool {
         }
     }
 
-    true
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------

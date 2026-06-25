@@ -1093,7 +1093,7 @@ fn dispatch_message<'mcx>(
                 // A WAL sender first tries the replication-command grammar; if
                 // the string is not a replication command, fall back to a plain
                 // SQL query (allowed on a database-connected/logical walsender).
-                if !walsender_seams::exec_replication_command::call(qstr) {
+                if !walsender_seams::exec_replication_command::call(qstr)? {
                     crate::simple_query::exec_simple_query(mcx, qstr)?;
                 }
             } else {
