@@ -327,6 +327,19 @@ seam_core::seam!(
     pub fn buffer_manager_shmem_init() -> types_error::PgResult<()>
 );
 
+seam_core::seam!(
+    /// Discard every resident shared buffer whose page LSN is past `flushed_lsn`,
+    /// dropping each WITHOUT writing it back. Driven by the startup process at
+    /// the end of crash REDO (before the end-of-recovery checkpoint): the buffer
+    /// pool persists across a crash in this tree's `MAP_SHARED` model, so pages a
+    /// SIGKILLed backend dirtied for an uncommitted change whose WAL was never
+    /// durably flushed survive with a page LSN past the durable WAL end. Left in
+    /// the pool, the end-of-recovery `CheckPointBuffers` `XLogFlush`es to that
+    /// LSN and aborts recovery; dropping them makes the pool consistent with the
+    /// durable WAL while preserving every committed page.
+    pub fn drop_buffers_past_lsn(flushed_lsn: types_core::primitive::XLogRecPtr) -> types_error::PgResult<()>
+);
+
 // ---------------------------------------------------------------------------
 // Free Space Map page round-trip + buffer primitives (freespace.c/fsmpage.c
 // consumer). The FSM page is `(FSMPage) PageGetContents(page)` of a buffer in

@@ -26,7 +26,7 @@ use ::support::{BufTable, BufferStrategyControl, StrategyShmemSize};
 use ::condvar::ConditionVariable;
 use ::types_core::Size;
 use ::types_core::primitive::{Buffer, BLCKSZ, INVALID_PROC_NUMBER};
-use ::types_storage::buf::{buftag, PgAioWaitRef, BM_LOCKED, FREENEXT_END_OF_LIST, FREENEXT_NOT_IN_LIST};
+use ::types_storage::buf::{buftag, PgAioWaitRef, BM_LOCKED, BM_VALID, FREENEXT_END_OF_LIST, FREENEXT_NOT_IN_LIST};
 use ::types_storage::storage::{
     pg_atomic_uint32, LWLock, LWLockMode, LWTRANCHE_BUFFER_CONTENT, BUFFER_MAPPING_LWLOCK_OFFSET,
     NUM_BUFFER_PARTITIONS,
@@ -358,6 +358,68 @@ impl BufferManager {
     /// `InitBufferPool` — back-compat constructor name.
     pub fn new(nbuffers: u32) -> Self {
         Self::BufferManagerShmemInit(nbuffers)
+    }
+
+    /// Discard every resident shared buffer whose page LSN is **strictly past**
+    /// `flushed_lsn`, dropping it WITHOUT writing it back.
+    ///
+    /// DIVERGENCE FROM C: on a crash restart C re-creates a fresh, zeroed shared
+    /// segment in `CreateSharedMemoryAndSemaphores`, so the startup process
+    /// always replays WAL into an empty buffer pool. In this tree the buffer
+    /// pool lives in a persistent `MAP_SHARED` segment that survives the crash
+    /// (the postmaster reuses it — see the `if !pm().shmem_created` guard), and
+    /// the resident pages are the genuinely-correct committed state. The only
+    /// inconsistent pages are those a crashed (SIGKILLed) backend dirtied for an
+    /// in-flight, uncommitted change whose WAL was generated but never durably
+    /// flushed: their page LSN is past the durable WAL flush point. Left in the
+    /// pool, the end-of-recovery `CheckPointBuffers` would `XLogFlush` to that
+    /// LSN and fail with "xlog flush request ... is not satisfied", aborting the
+    /// crash restart; and even if it didn't, the page would carry an aborted
+    /// change. Dropping exactly these buffers makes the pool consistent with the
+    /// durable WAL — the aborted change is discarded (the on-disk page, if any,
+    /// is the pre-change image, just as redo would leave it), and every
+    /// committed page is preserved.
+    ///
+    /// Called from the startup process at the end of REDO, before the
+    /// end-of-recovery checkpoint, after the WAL flush point has been set to the
+    /// end of valid WAL. Runs while no other backend can touch the pool (the
+    /// system is still in recovery, not accepting connections), so the per-buffer
+    /// header spinlock alone is the needed serialiser, exactly as `DropRelation*`
+    /// buffers does.
+    pub fn drop_buffers_past_lsn(&self, flushed_lsn: u64) -> types_error::PgResult<()> {
+        for buf_id in 0..self.nbuffers as usize {
+            // Unlocked pre-check (matches the DropRelation* fast skip): only
+            // VALID buffers can carry a stale LSN.
+            let pre = self.states.get(buf_id).value.load(Ordering::Relaxed);
+            if pre & BM_VALID == 0 {
+                continue;
+            }
+
+            let buf_state = self.lock_buf_hdr(buf_id);
+            if buf_state & BM_VALID == 0 {
+                self.unlock_buf_hdr(buf_id, buf_state);
+                continue;
+            }
+
+            // Read the page LSN while holding the header spinlock (no content
+            // lock needed: the system is in recovery and single-threaded over
+            // the pool here).
+            let page_lsn = self.with_block(buf_id, |block| {
+                page::PageGetLSN(
+                    &page::PageRef::new(block).expect("buffer block is BLCKSZ"),
+                )
+            });
+
+            if page_lsn > flushed_lsn {
+                // Drop the buffer without writing it back (its change is past the
+                // durable WAL and belongs to an aborted, never-committed xact).
+                // invalidate_buffer consumes the held spinlock.
+                self.invalidate_buffer(buf_id, buf_state)?;
+            } else {
+                self.unlock_buf_hdr(buf_id, buf_state);
+            }
+        }
+        Ok(())
     }
 
     // -- ambient (per-backend) manager handle ------------------------------
@@ -771,6 +833,17 @@ pub fn BufferManagerShmemInit() -> types_error::PgResult<()> {
     )?;
 
     Ok(())
+}
+
+/// Discard every resident shared buffer whose page LSN is past `flushed_lsn`,
+/// dropping each without writing it back. Called by the startup process at the
+/// end of crash REDO (before the end-of-recovery checkpoint) to evict pages a
+/// SIGKILLed backend dirtied for an uncommitted change whose WAL was never
+/// durably flushed — the only pool pages that survive the crash inconsistent
+/// with the durable WAL. See `BufferManager::drop_buffers_past_lsn` for the full
+/// rationale (and why every committed page is preserved).
+pub fn DropBuffersPastLSN(flushed_lsn: u64) -> types_error::PgResult<()> {
+    BufferManager::global_expect().drop_buffers_past_lsn(flushed_lsn)
 }
 
 #[cfg(test)]

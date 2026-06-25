@@ -639,6 +639,21 @@ pub fn StartupXLOG() -> PgResult<()> {
     // Emit checkpoint or end-of-recovery record, if required.
     let mut promoted = false;
     if performed_wal_recovery {
+        // DIVERGENCE FROM C: in C a crash discards all shared memory and the
+        // buffer pool is re-created empty, so REDO replays into a clean pool. In
+        // this tree the buffer pool is a persistent `MAP_SHARED` segment that
+        // survives the crash (the postmaster reuses it), so pages a SIGKILLed
+        // backend dirtied for an uncommitted change — whose WAL was generated but
+        // never durably flushed — remain resident with a page LSN past the
+        // durable WAL end (`end_of_log`). Drop exactly those buffers (without
+        // writing them back) before the end-of-recovery checkpoint: otherwise
+        // `CheckPointBuffers` would `XLogFlush` to that un-flushed LSN and abort
+        // recovery with "xlog flush request ... is not satisfied". Every
+        // committed page (LSN <= end_of_log) is preserved, so the surviving pool
+        // matches the durable WAL exactly. (Runs single-threaded: the system is
+        // still in recovery and not accepting connections.)
+        ::bufmgr_seams::drop_buffers_past_lsn::call(end_of_log)?;
+
         promoted = PerformRecoveryXLogAction()?;
     }
 

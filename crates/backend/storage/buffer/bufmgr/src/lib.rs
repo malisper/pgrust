@@ -872,6 +872,9 @@ pub fn init_seams() {
     bufmgr_seams::buffer_manager_shmem_init::set(
         mgr::BufferManagerShmemInit,
     );
+    bufmgr_seams::drop_buffers_past_lsn::set(
+        mgr::DropBuffersPastLSN,
+    );
 
     // GUC var accessors. Each of these globals is a plain process-global GUC
     // variable defined in bufmgr.c (none is read from the ControlFile), so the
