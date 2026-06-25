@@ -16,6 +16,10 @@
 //! reproduced — a synchronous driver is the faithful behaviour for the blocking
 //! entry points, and is all walreceiver + ecpg require.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
+
 use std::io::{Read, Write};
 
 /// Errors the client transport / driver can raise. These mirror the libpq

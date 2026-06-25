@@ -1637,6 +1637,38 @@ mod imp {
         0
     }
 
+    // poll(2) — the single-user wasm engine has no real pollable descriptors,
+    // so `poll` always reports the timeout (0 ready). The constants and the
+    // `pollfd` struct match the POSIX layout the frontend (libpq `fe`) uses.
+    pub type nfds_t = u64;
+    pub const POLLIN: c_short = 0x001;
+    pub const POLLPRI: c_short = 0x002;
+    pub const POLLOUT: c_short = 0x004;
+    pub const POLLERR: c_short = 0x008;
+    pub const POLLHUP: c_short = 0x010;
+    pub const POLLNVAL: c_short = 0x020;
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct pollfd {
+        pub fd: c_int,
+        pub events: c_short,
+        pub revents: c_short,
+    }
+    /// `int poll(struct pollfd *fds, nfds_t nfds, int timeout)`.
+    /// # Safety
+    /// `fds` points to `nfds` writable `pollfd` entries (or is null when
+    /// `nfds == 0`).
+    pub unsafe fn poll(fds: *mut pollfd, nfds: nfds_t, _timeout: c_int) -> c_int {
+        // Clear revents and report timeout (nothing ready) — single-user wasm
+        // has no real descriptors to wait on.
+        if !fds.is_null() {
+            for i in 0..nfds as usize {
+                unsafe { (*fds.add(i)).revents = 0 };
+            }
+        }
+        0
+    }
+
     pub unsafe fn getpeername(_s: c_int, _a: *mut sockaddr, _l: *mut socklen_t) -> c_int {
         set_errno(ENOSYS);
         -1

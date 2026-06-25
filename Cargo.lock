@@ -7374,6 +7374,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_libpqwalreceiver",
+ "wasm-libc-shim",
 ]
 
 [[package]]

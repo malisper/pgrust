@@ -23,6 +23,10 @@
 //! escapers (`PQescapeLiteral` / `PQescapeIdentifier`). Those bottom out in
 //! their declared loud seams below.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
+
 use std::cell::RefCell;
 #[cfg(not(target_family = "wasm"))]
 use std::net::TcpStream;
