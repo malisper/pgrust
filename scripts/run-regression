@@ -39,6 +39,17 @@ REGRESS="$VENDOR/regress"
 SQL="$REGRESS/sql"
 EXP="$REGRESS/expected"
 SCHEDULE="$REGRESS/parallel_schedule"
+
+# test_setup.sql does `\set regresslib :libdir '/regress' :dlsuffix` to build the
+# path for `CREATE FUNCTION ... AS '<libdir>/regress<dlsuffix>'` (the regress.c
+# test helpers). pgrust reimplements those ~60 helpers as the in-process `regress`
+# builtin library (crates/backend/test_regress), so the path need not exist — the
+# dfmgr strips the dir + suffix to the basename `regress` and resolves the builtin.
+# We just need the `:libdir`/`:dlsuffix` psql vars defined so the path is
+# well-formed (an undefined `:libdir` leaves the literal ':libdir/regress:dlsuffix'
+# → "could not access file"). `$libdir` is pgrust's own pkglibdir token.
+LIBDIR='$libdir'
+DLSUFFIX='.so'
 PGRUST_BIN="${PGRUST_BIN:-$repo_root/target/release/postgres}"
 
 # --- locate the vendored files -------------------------------------------------
@@ -171,6 +182,8 @@ while IFS= read -r f; do
         -v HIDE_TOAST_COMPRESSION=on \
         -v "abs_srcdir=$REGRESS" \
         -v "abs_builddir=$OUTDIR" \
+        -v "libdir=$LIBDIR" \
+        -v "dlsuffix=$DLSUFFIX" \
         < "$SQL/$f.sql" > "$out" 2>&1
     rc=$?
     "$PSQL" -h "$SOCK" -p "$PORT" -U postgres -d postgres -c 'SELECT 1' >/dev/null 2>&1
