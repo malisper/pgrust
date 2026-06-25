@@ -252,7 +252,17 @@ fn lwlock_offset(lock: usize) -> usize {
 }
 #[inline]
 fn lwlock_acquire(lock: usize, mode: LWLockMode) -> PgResult<()> {
-    lwlock::lwlock_acquire_main::call(lwlock_offset(lock), mode)?;
+    // `lwlock_acquire_main` returns an RAII `MainLWLockGuard` whose `Drop`
+    // releases the lock. The slotsync code models C's explicit
+    // `LWLockAcquire`/`LWLockRelease` pairing, so we must NOT let the guard
+    // drop here (that would release the lock immediately and pop it off the
+    // process held-locks list); the matching `lwlock_release` below does the
+    // release. Forgetting the guard keeps the lock held — exactly as
+    // `replication_slot`'s own `lock_control` does. Without this, every
+    // acquire/release pair double-released, surfacing the C
+    // `elog(ERROR, "lock %s is not held")`.
+    let guard = lwlock::lwlock_acquire_main::call(lwlock_offset(lock), mode)?;
+    std::mem::forget(guard);
     Ok(())
 }
 #[inline]

@@ -19,7 +19,7 @@ use alloc::string::String;
 use ::mcx::Mcx;
 use ::types_core::primitive::{TimestampTz, TransactionId};
 use ::types_core::{InvalidTransactionId, InvalidXLogRecPtr};
-use ::types_error::{PgError, LOG};
+use ::types_error::{PgError, PgResult, DEBUG2, LOG};
 use ::wal::wal::{RM_XACT_ID, RM_XLOG_ID, XLR_INFO_MASK};
 use ::wal::xact::{
     XLOG_XACT_ABORT, XLOG_XACT_ABORT_PREPARED, XLOG_XACT_COMMIT, XLOG_XACT_COMMIT_PREPARED,
@@ -36,6 +36,18 @@ use crate::walrecovery::reader_state;
 use condition_variable_seams as condvar;
 use startup_seams as startup_seam;
 use timestamp_seams as timestamp_seam;
+
+/// `WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH` (latch.h) — the wake-event
+/// mask the `recovery_min_apply_delay` wait arms on the recovery wakeup latch.
+const WL_LATCH_SET: u32 = 1 << 0;
+const WL_TIMEOUT: u32 = 1 << 3;
+const WL_EXIT_ON_PM_DEATH: u32 = 1 << 5;
+
+/// `WAIT_EVENT_RECOVERY_APPLY_DELAY` — the wait-event id reported while the
+/// startup process sleeps out a `recovery_min_apply_delay`. Matches the
+/// placeholder convention used by the sibling recovery wait loops in
+/// `pageread.rs` (the wait-event id table wiring is a separate keystone).
+const WAIT_EVENT_RECOVERY_APPLY_DELAY: u32 = 0;
 
 /// `WAIT_EVENT_RECOVERY_PAUSE` (wait_event_types.h) — the wait-event id reported
 /// while the redo loop sleeps on `recoveryNotPausedCV`. The wait-event reporting
@@ -423,21 +435,21 @@ pub(crate) fn recovery_pauses_here(
 
 /// `static bool recoveryApplyDelay(XLogReaderState *record)`
 /// (xlogrecovery.c:3004) — honor `recovery_min_apply_delay` for a commit record.
-pub(crate) fn recovery_apply_delay(st: &mut XLogRecoveryState, record: RecordRef) -> bool {
+pub(crate) fn recovery_apply_delay(st: &mut XLogRecoveryState, record: RecordRef) -> PgResult<bool> {
     // Nothing to do if no delay configured. (The GUC's boot value is 0, so this
     // is the universal crash-recovery / non-standby case.)
     if crate::gucvars::recovery_min_apply_delay() <= 0 {
-        return false;
+        return Ok(false);
     }
 
     // No delay is applied on a database not yet consistent.
     if !st.reached_consistency {
-        return false;
+        return Ok(false);
     }
 
     // Nothing to do if crash recovery is requested.
     if !st.archive_recovery_requested {
-        return false;
+        return Ok(false);
     }
 
     // Is it a COMMIT record? We deliberately do not delay aborts (no MVCC
@@ -445,42 +457,73 @@ pub(crate) fn recovery_apply_delay(st: &mut XLogRecoveryState, record: RecordRef
     // `XLogRecGetRmid(record)` / `XLogRecGetInfo(record)` over `xlogreader`.
     let r = reader_state();
     if xlogreader::XLogRecGetRmid(r) != RM_XACT_ID {
-        return false;
+        return Ok(false);
     }
     let xact_info = xlogreader::XLogRecGetInfo(r) & XLOG_XACT_OPMASK;
     if xact_info != XLOG_XACT_COMMIT && xact_info != XLOG_XACT_COMMIT_PREPARED {
-        return false;
+        return Ok(false);
     }
 
     let mut xtime: TimestampTz = 0;
     if !get_record_timestamp(record, &mut xtime) {
-        return false;
+        return Ok(false);
     }
 
     // delayUntil = TimestampTzPlusMilliseconds(xtime, recovery_min_apply_delay).
-    let delay_until =
+    let mut delay_until =
         xtime + (crate::gucvars::recovery_min_apply_delay() as TimestampTz) * 1000;
 
     // Exit without arming the latch if it's already past time to apply this
     // record.
     let now = timestamp_seam::get_current_timestamp::call();
-    let msecs = timestamp_seam::timestamp_difference_milliseconds::call(now, delay_until);
+    let mut msecs = timestamp_seam::timestamp_difference_milliseconds::call(now, delay_until);
     if msecs <= 0 {
-        return false;
+        return Ok(false);
     }
 
-    // The remaining timed wait loop (ResetLatch / ProcessStartupProcInterrupts /
-    // CheckForStandbyTrigger / WaitLatch on XLogRecoveryCtl->recoveryWakeupLatch)
-    // is reached only when a positive `recovery_min_apply_delay` is configured on
-    // a consistent archive-recovery standby — never on the crash-recovery path.
-    // Surface that (unported startup-proc latch-wait) boundary precisely.
-    panic!(
-        "blocked: xlogrecovery::stop::recovery_apply_delay wait loop (xlogrecovery.c:3049) — \
-         the recovery_min_apply_delay timed WaitLatch on recoveryWakeupLatch + \
-         ProcessStartupProcInterrupts + CheckForStandbyTrigger require the unported \
-         startup-proc latch-wait machinery; reached only with a positive \
-         recovery_min_apply_delay on a consistent standby; pending stop-family fill"
-    )
+    // The C `while (true)` wait loop (xlogrecovery.c:3049): ResetLatch on the
+    // recovery wakeup latch, process startup-proc interrupts (which may change
+    // `recovery_min_apply_delay`), check for a standby promotion trigger, then
+    // sleep out the remaining delay on the latch with a timeout. A
+    // cancel/terminate inside ProcessStartupProcInterrupts surfaces as `Err`
+    // here (the C `ereport(FATAL)` longjmp) and must propagate.
+    let handle = crate::shmem::recovery_wakeup_latch_handle();
+    loop {
+        latch::ResetLatch(handle);
+
+        // This might change recovery_min_apply_delay.
+        let mcx = ::mcx::MemoryContext::new("recovery apply delay interrupts");
+        startup_seam::process_startup_proc_interrupts::call(mcx.mcx())?;
+
+        if crate::promote::check_for_standby_trigger(st) {
+            break;
+        }
+
+        // Recalculate delayUntil as recovery_min_apply_delay could have changed
+        // while waiting in this loop.
+        delay_until =
+            xtime + (crate::gucvars::recovery_min_apply_delay() as TimestampTz) * 1000;
+
+        // Wait for difference between GetCurrentTimestamp() and delayUntil.
+        let now = timestamp_seam::get_current_timestamp::call();
+        msecs = timestamp_seam::timestamp_difference_milliseconds::call(now, delay_until);
+        if msecs <= 0 {
+            break;
+        }
+
+        let _ = ::utils_error::elog(
+            DEBUG2,
+            format!("recovery apply delay {msecs} milliseconds"),
+        );
+
+        let _ = latch::WaitLatch(
+            Some(handle),
+            WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+            msecs,
+            WAIT_EVENT_RECOVERY_APPLY_DELAY,
+        )?;
+    }
+    Ok(true)
 }
 
 /// `RecoveryPauseState GetRecoveryPauseState(void)` (xlogrecovery.c:3091) — the

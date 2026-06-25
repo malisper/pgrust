@@ -212,7 +212,7 @@ pub fn perform_wal_recovery<'mcx>(
 
             // If we've been asked to lag the primary, wait on latch until enough
             // time has passed.
-            if crate::stop::recovery_apply_delay(st, record) {
+            if crate::stop::recovery_apply_delay(st, record)? {
                 // We test for paused recovery again here. If user sets delayed
                 // apply, it may be because they expect to pause recovery in case
                 // of problems, so we must test again here otherwise pausing
