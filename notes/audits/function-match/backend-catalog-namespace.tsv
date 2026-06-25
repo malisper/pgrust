@@ -1,0 +1,151 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+MemoryContextSwitchTo	backend-catalog-namespace/src/namespace.rs:1892	-	MISSING	no	c2rust-inlined mcx macro; subsumed by Mcx model
+BoolGetDatum	backend-catalog-namespace/src/namespace.rs:1898	-	MISSING	no	c2rust-inlined Datum macro; Datum-layer deferral
+Int32GetDatum	backend-catalog-namespace/src/namespace.rs:1906	-	MISSING	no	c2rust-inlined Datum macro; Datum-layer deferral
+DatumGetObjectId	backend-catalog-namespace/src/namespace.rs:1910	-	MISSING	no	c2rust-inlined Datum macro; Datum-layer deferral
+ObjectIdGetDatum	backend-catalog-namespace/src/namespace.rs:1914	-	MISSING	no	c2rust-inlined Datum macro; Datum-layer deferral
+DatumGetPointer	backend-catalog-namespace/src/namespace.rs:1918	-	MISSING	no	c2rust-inlined Datum macro; Datum-layer deferral
+PointerGetDatum	backend-catalog-namespace/src/namespace.rs:1922	-	MISSING	no	c2rust-inlined Datum macro; Datum-layer deferral
+CStringGetDatum	backend-catalog-namespace/src/namespace.rs:1926	-	MISSING	no	c2rust-inlined Datum macro; Datum-layer deferral
+list_head	backend-catalog-namespace/src/namespace.rs:1931	-	MISSING	no	c2rust-inlined List accessor macro; subsumed by Vec/slice model
+list_length	backend-catalog-namespace/src/namespace.rs:1939	-	MISSING	no	c2rust-inlined List accessor macro; subsumed by Vec/slice model
+list_nth_cell	backend-catalog-namespace/src/namespace.rs:1943	-	MISSING	no	c2rust-inlined List accessor macro; subsumed by Vec/slice model
+lnext	backend-catalog-namespace/src/namespace.rs:1950	-	MISSING	no	c2rust-inlined List accessor macro; subsumed by Vec/slice model
+GETSTRUCT	backend-catalog-namespace/src/namespace.rs:1961	-	MISSING	no	c2rust-inlined macro; subsumed by typed catalog rows
+fasthash_init	backend-catalog-namespace/src/namespace.rs:1996	-	MISSING	no	simplehash/fasthash internal; search-path cache modeled by std HashMap, hashing internal
+fasthash_mix	backend-catalog-namespace/src/namespace.rs:2005	-	MISSING	no	fasthash internal; HashMap hashing folds this away
+fasthash_combine	backend-catalog-namespace/src/namespace.rs:2012	-	MISSING	no	fasthash internal; HashMap hashing folds this away
+fasthash_accum	backend-catalog-namespace/src/namespace.rs:2017	-	MISSING	no	fasthash internal; HashMap hashing folds this away
+fasthash_accum_cstring_unaligned	backend-catalog-namespace/src/namespace.rs:2108	-	MISSING	no	fasthash internal; HashMap hashing folds this away
+fasthash_accum_cstring_aligned	backend-catalog-namespace/src/namespace.rs:2126	-	MISSING	no	fasthash internal; HashMap hashing folds this away
+fasthash_accum_cstring	backend-catalog-namespace/src/namespace.rs:2149	-	MISSING	no	fasthash internal; HashMap hashing folds this away
+fasthash_final64	backend-catalog-namespace/src/namespace.rs:2163	-	MISSING	no	fasthash internal; HashMap hashing folds this away
+fasthash_reduce32	backend-catalog-namespace/src/namespace.rs:2170	-	MISSING	no	fasthash internal; HashMap hashing folds this away
+fasthash_final32	backend-catalog-namespace/src/namespace.rs:2174	-	MISSING	no	fasthash internal; HashMap hashing folds this away
+pg_leftmost_one_pos64	backend-catalog-namespace/src/namespace.rs:2181	-	MISSING	no	bit util used by simplehash sizing; HashMap manages its own capacity
+pg_nextpower2_64	backend-catalog-namespace/src/namespace.rs:2186	-	MISSING	no	simplehash sizing util; HashMap manages its own capacity
+nsphash_compute_size	backend-catalog-namespace/src/namespace.rs:2198	-	MISSING	no	simplehash internal; search-path cache modeled by std HashMap
+nsphash_update_parameters	backend-catalog-namespace/src/namespace.rs:2237	-	MISSING	no	simplehash internal; HashMap manages its own params
+nsphash_initial_bucket	backend-catalog-namespace/src/namespace.rs:2253	-	MISSING	no	simplehash internal; HashMap bucketing internal
+nsphash_next	backend-catalog-namespace/src/namespace.rs:2260	-	MISSING	no	simplehash internal; HashMap probing internal
+nsphash_prev	backend-catalog-namespace/src/namespace.rs:2269	-	MISSING	no	simplehash internal; HashMap probing internal
+nsphash_distance	backend-catalog-namespace/src/namespace.rs:2278	-	MISSING	no	simplehash internal; HashMap probing internal
+nsphash_entry_hash	backend-catalog-namespace/src/namespace.rs:2291	-	MISSING	no	simplehash internal; HashMap hashing internal
+nsphash_allocate	backend-catalog-namespace/src/namespace.rs:2298	-	MISSING	no	simplehash internal; HashMap allocation internal
+nsphash_free	backend-catalog-namespace/src/namespace.rs:2309	-	MISSING	no	simplehash internal; HashMap drop internal
+nsphash_create	backend-catalog-namespace/src/namespace.rs:2316	-	MISSING	no	simplehash internal; HashMap::new in spcache_init
+nsphash_grow	backend-catalog-namespace/src/namespace.rs:2345	-	MISSING	no	simplehash internal; HashMap auto-grows
+nsphash_insert_hash_internal	backend-catalog-namespace/src/namespace.rs:2425	-	MISSING	no	simplehash internal; HashMap insert internal
+nsphash_insert	backend-catalog-namespace/src/namespace.rs:2583	-	MISSING	no	simplehash internal; reached via spcache_insert -> HashMap insert
+nsphash_lookup_hash_internal	backend-catalog-namespace/src/namespace.rs:2592	-	MISSING	no	simplehash internal; HashMap lookup internal
+nsphash_lookup	backend-catalog-namespace/src/namespace.rs:2614	-	MISSING	no	simplehash internal; reached via spcache_lookup -> HashMap get
+spcachekey_hash	backend-catalog-namespace/src/namespace.rs:2642	backend-catalog-namespace/src/lib.rs:derived-Hash	MATCH	yes	fasthash replaced by std HashMap hashing of (String,Oid); hash value is map-internal, equality semantics are what matter
+spcachekey_equal	backend-catalog-namespace/src/namespace.rs:2655	backend-catalog-namespace/src/lib.rs:derived-Eq	MATCH	yes	roleid== && string== identical predicate (derived Eq on (String,Oid))
+spcache_init	backend-catalog-namespace/src/namespace.rs:2668	backend-catalog-namespace/src/lib.rs:spcache_init	MATCH	yes	reset condition cache&&valid&&len<256 identical; context create/reset modeled by drop/recreate map
+spcache_lookup	backend-catalog-namespace/src/namespace.rs:2694	backend-catalog-namespace/src/lib.rs:spcache_lookup	MATCH	yes	LastSearchPathCacheEntry memo as last_cache_key; returns presence
+spcache_insert	backend-catalog-namespace/src/namespace.rs:2719	backend-catalog-namespace/src/lib.rs:spcache_insert	MATCH	yes	entry().or_default() == C zero-init of non-key fields; memo updated
+RangeVarGetRelidExtended	backend-catalog-namespace/src/namespace.rs:2756	backend-catalog-namespace/src/lib.rs:RangeVarGetRelidExtended	MATCH	yes	retry loop, inval-counter checks, temp-persistence branch (42P16), NoLock break, retry unlock, NOWAIT/SKIP_LOCKED path (DEBUG1 vs ERROR), final 42P01 errors
+RangeVarGetCreationNamespace	backend-catalog-namespace/src/namespace.rs:3084	backend-catalog-namespace/src/lib.rs:RangeVarGetCreationNamespace	MATCH	yes	pg_temp alias, RELPERSISTENCE_TEMP, activeTempCreationPending, no-schema-selected 3F000
+RangeVarGetAndCheckCreationNamespace	backend-catalog-namespace/src/namespace.rs:3202	backend-catalog-namespace/src/lib.rs:RangeVarGetAndCheckCreationNamespace	MATCH	yes	bootstrap break, ACL_CREATE check, retry lock/unlock choreography, persistence adjust + existing_relation_id out-param
+RangeVarAdjustRelationPersistence	backend-catalog-namespace/src/namespace.rs:3336	backend-catalog-namespace/src/lib.rs:RangeVarAdjustRelationPersistence	MATCH	yes	three-way switch identical 42P16 messages; PERMANENT->TEMP rewrite in temp namespace
+RelnameGetRelid	backend-catalog-namespace/src/namespace.rs:3518	backend-catalog-namespace/src/lib.rs:RelnameGetRelid	MATCH	yes	matches C
+RelationIsVisible	backend-catalog-namespace/src/namespace.rs:3546	backend-catalog-namespace/src/lib.rs:RelationIsVisible	MATCH	yes	matches C
+RelationIsVisibleExt	backend-catalog-namespace/src/namespace.rs:3549	backend-catalog-namespace/src/lib.rs:RelationIsVisibleExt	MATCH	yes	is_missing out-param as Option<&mut bool>; quick PG_CATALOG check; slow conflict scan (no temp skip, matches C)
+TypenameGetTypid	backend-catalog-namespace/src/namespace.rs:3632	backend-catalog-namespace/src/lib.rs:TypenameGetTypid	MATCH	yes	matches C
+TypenameGetTypidExtended	backend-catalog-namespace/src/namespace.rs:3638	backend-catalog-namespace/src/lib.rs:TypenameGetTypidExtended	MATCH	yes	temp_ok skip
+TypeIsVisible	backend-catalog-namespace/src/namespace.rs:3676	backend-catalog-namespace/src/lib.rs:TypeIsVisible	MATCH	yes	matches C
+TypeIsVisibleExt	backend-catalog-namespace/src/namespace.rs:3679	backend-catalog-namespace/src/lib.rs:TypeIsVisibleExt	MATCH	yes	matches C
+FuncnameGetCandidates	backend-catalog-namespace/src/namespace.rs:3768	backend-catalog-namespace/src/lib.rs:FuncnameGetCandidates	MATCH	yes	pathpos loop, proallargtypes substitution under include_out_arguments, named/positional branches, variadic expansion, defaults, duplicate resolution, prepend-newest order via insert(0,..)
+MatchNamedCall	backend-catalog-namespace/src/namespace.rs:4190	backend-catalog-namespace/src/lib.rs:MatchNamedCall	MATCH	yes	proargnames-null->None->false; positional prefix; named scan with argmode filter i/b/v; pp counting; arggiven collision; defaults fill with first_arg_with_default cutoff
+FunctionIsVisible	backend-catalog-namespace/src/namespace.rs:4314	backend-catalog-namespace/src/lib.rs:FunctionIsVisible	MATCH	yes	matches C
+FunctionIsVisibleExt	backend-catalog-namespace/src/namespace.rs:4317	backend-catalog-namespace/src/lib.rs:FunctionIsVisibleExt	MATCH	yes	recursive FuncnameGetCandidates check with memcmp over pronargs
+OpernameGetOprid	backend-catalog-namespace/src/namespace.rs:4406	backend-catalog-namespace/src/lib.rs:OpernameGetOprid	MATCH	yes	exact-schema syscache probe; catlist3 walk per search-path entry skipping temp
+OpernameGetCandidates	backend-catalog-namespace/src/namespace.rs:4493	backend-catalog-namespace/src/lib.rs:OpernameGetCandidates	MATCH	yes	oprkind filter, pathpos, duplicate replace-in-place (pathpos/oid rewrite); resultSpace bulk-alloc dropped (allocation strategy only)
+OperatorIsVisible	backend-catalog-namespace/src/namespace.rs:4667	backend-catalog-namespace/src/lib.rs:OperatorIsVisible	MATCH	yes	matches C
+OperatorIsVisibleExt	backend-catalog-namespace/src/namespace.rs:4670	backend-catalog-namespace/src/lib.rs:OperatorIsVisibleExt	MATCH	yes	matches C
+OpclassnameGetOpcid	backend-catalog-namespace/src/namespace.rs:4738	backend-catalog-namespace/src/lib.rs:OpclassnameGetOpcid	MATCH	yes	temp skip
+OpclassIsVisible	backend-catalog-namespace/src/namespace.rs:4776	backend-catalog-namespace/src/lib.rs:OpclassIsVisible	MATCH	yes	matches C
+OpclassIsVisibleExt	backend-catalog-namespace/src/namespace.rs:4779	backend-catalog-namespace/src/lib.rs:OpclassIsVisibleExt	MATCH	yes	matches C
+OpfamilynameGetOpfid	backend-catalog-namespace/src/namespace.rs:4838	backend-catalog-namespace/src/lib.rs:OpfamilynameGetOpfid	MATCH	yes	matches C
+OpfamilyIsVisible	backend-catalog-namespace/src/namespace.rs:4876	backend-catalog-namespace/src/lib.rs:OpfamilyIsVisible	MATCH	yes	matches C
+OpfamilyIsVisibleExt	backend-catalog-namespace/src/namespace.rs:4879	backend-catalog-namespace/src/lib.rs:OpfamilyIsVisibleExt	MATCH	yes	matches C
+lookup_collation	backend-catalog-namespace/src/namespace.rs:4937	backend-catalog-namespace/src/lib.rs:lookup_collation	MATCH	yes	exact-encoding probe then any-encoding(-1) row; COLLPROVIDER_ICU gate via is_encoding_supported_by_icu
+CollationGetCollid	backend-catalog-namespace/src/namespace.rs:4981	backend-catalog-namespace/src/lib.rs:CollationGetCollid	MATCH	yes	matches C
+CollationIsVisible	backend-catalog-namespace/src/namespace.rs:5012	backend-catalog-namespace/src/lib.rs:CollationIsVisible	MATCH	yes	matches C
+CollationIsVisibleExt	backend-catalog-namespace/src/namespace.rs:5015	backend-catalog-namespace/src/lib.rs:CollationIsVisibleExt	MATCH	yes	matches C
+ConversionGetConid	backend-catalog-namespace/src/namespace.rs:5076	backend-catalog-namespace/src/lib.rs:ConversionGetConid	MATCH	yes	matches C
+ConversionIsVisible	backend-catalog-namespace/src/namespace.rs:5113	backend-catalog-namespace/src/lib.rs:ConversionIsVisible	MATCH	yes	matches C
+ConversionIsVisibleExt	backend-catalog-namespace/src/namespace.rs:5116	backend-catalog-namespace/src/lib.rs:ConversionIsVisibleExt	MATCH	yes	matches C
+get_statistics_object_oid	backend-catalog-namespace/src/namespace.rs:5177	backend-catalog-namespace/src/lib.rs:get_statistics_object_oid	MATCH	yes	42704 statistics object does not exist
+StatisticsObjIsVisible	backend-catalog-namespace/src/namespace.rs:5280	backend-catalog-namespace/src/lib.rs:StatisticsObjIsVisible	MATCH	yes	matches C
+StatisticsObjIsVisibleExt	backend-catalog-namespace/src/namespace.rs:5283	backend-catalog-namespace/src/lib.rs:StatisticsObjIsVisibleExt	MATCH	yes	slow scan skips temp namespace (matches C)
+get_ts_parser_oid	backend-catalog-namespace/src/namespace.rs:5374	backend-catalog-namespace/src/lib.rs:get_ts_parser_oid	MATCH	yes	matches C
+TSParserIsVisible	backend-catalog-namespace/src/namespace.rs:5477	backend-catalog-namespace/src/lib.rs:TSParserIsVisible	MATCH	yes	matches C
+TSParserIsVisibleExt	backend-catalog-namespace/src/namespace.rs:5480	backend-catalog-namespace/src/lib.rs:TSParserIsVisibleExt	MATCH	yes	matches C
+get_ts_dict_oid	backend-catalog-namespace/src/namespace.rs:5569	backend-catalog-namespace/src/lib.rs:get_ts_dict_oid	MATCH	yes	matches C
+TSDictionaryIsVisible	backend-catalog-namespace/src/namespace.rs:5672	backend-catalog-namespace/src/lib.rs:TSDictionaryIsVisible	MATCH	yes	matches C
+TSDictionaryIsVisibleExt	backend-catalog-namespace/src/namespace.rs:5675	backend-catalog-namespace/src/lib.rs:TSDictionaryIsVisibleExt	MATCH	yes	matches C
+get_ts_template_oid	backend-catalog-namespace/src/namespace.rs:5764	backend-catalog-namespace/src/lib.rs:get_ts_template_oid	MATCH	yes	matches C
+TSTemplateIsVisible	backend-catalog-namespace/src/namespace.rs:5867	backend-catalog-namespace/src/lib.rs:TSTemplateIsVisible	MATCH	yes	matches C
+TSTemplateIsVisibleExt	backend-catalog-namespace/src/namespace.rs:5870	backend-catalog-namespace/src/lib.rs:TSTemplateIsVisibleExt	MATCH	yes	matches C
+get_ts_config_oid	backend-catalog-namespace/src/namespace.rs:5961	backend-catalog-namespace/src/lib.rs:get_ts_config_oid	MATCH	yes	matches C
+TSConfigIsVisible	backend-catalog-namespace/src/namespace.rs:6064	backend-catalog-namespace/src/lib.rs:TSConfigIsVisible	MATCH	yes	matches C
+TSConfigIsVisibleExt	backend-catalog-namespace/src/namespace.rs:6067	backend-catalog-namespace/src/lib.rs:TSConfigIsVisibleExt	MATCH	yes	matches C
+DeconstructQualifiedName	backend-catalog-namespace/src/namespace.rs:6156	backend-catalog-namespace/src/lib.rs:DeconstructQualifiedName	MATCH	yes	1/2/3-part switch; cross-database 0A000; too-many-dotted 42601; out-params -> tuple return
+LookupNamespaceNoError	backend-catalog-namespace/src/namespace.rs:6286	backend-catalog-namespace/src/lib.rs:LookupNamespaceNoError	MATCH	yes	pg_temp alias invokes namespace search hook
+LookupExplicitNamespace	backend-catalog-namespace/src/namespace.rs:6303	backend-catalog-namespace/src/lib.rs:LookupExplicitNamespace	MATCH	yes	pg_temp fallthrough when no temp ns; ACL_USAGE + aclcheck_error + search hook
+LookupCreationNamespace	backend-catalog-namespace/src/namespace.rs:6337	backend-catalog-namespace/src/lib.rs:LookupCreationNamespace	MATCH	yes	pg_temp -> AccessTempTableNamespace(false); ACL_CREATE
+CheckSetNamespace	backend-catalog-namespace/src/namespace.rs:6363	backend-catalog-namespace/src/lib.rs:CheckSetNamespace	MATCH	yes	both 0A000 messages
+QualifiedNameGetCreationNamespace	backend-catalog-namespace/src/namespace.rs:6448	backend-catalog-namespace/src/lib.rs:QualifiedNameGetCreationNamespace	MATCH	yes	objname out-param -> tuple
+get_namespace_oid	backend-catalog-namespace/src/namespace.rs:6517	backend-catalog-namespace/src/lib.rs:get_namespace_oid	MATCH	yes	3F000 schema does not exist
+makeRangeVarFromNameList	backend-catalog-namespace/src/namespace.rs:6574	backend-catalog-namespace/src/lib.rs:makeRangeVarFromNameList	MATCH	yes	42601 improper relation name
+NameListToString	backend-catalog-namespace/src/namespace.rs:6653	backend-catalog-namespace/src/lib.rs:NameListToString	MATCH	yes	A_Star -> '*' (None in owned NameList); unexpected-node elog unrepresentable by type
+NameListToQuotedString	backend-catalog-namespace/src/namespace.rs:6723	backend-catalog-namespace/src/lib.rs:NameListToQuotedString	MATCH	yes	quote_identifier via ruleutils seam
+isTempNamespace	backend-catalog-namespace/src/namespace.rs:6758	backend-catalog-namespace/src/lib.rs:isTempNamespace	MATCH	yes	matches C
+isTempToastNamespace	backend-catalog-namespace/src/namespace.rs:6765	backend-catalog-namespace/src/lib.rs:isTempToastNamespace	MATCH	yes	matches C
+isTempOrTempToastNamespace	backend-catalog-namespace/src/namespace.rs:6772	backend-catalog-namespace/src/lib.rs:isTempOrTempToastNamespace	MATCH	yes	matches C
+isAnyTempNamespace	backend-catalog-namespace/src/namespace.rs:6781	backend-catalog-namespace/src/lib.rs:isAnyTempNamespace	MATCH	yes	prefix tests pg_temp_/pg_toast_temp_
+isOtherTempNamespace	backend-catalog-namespace/src/namespace.rs:6804	backend-catalog-namespace/src/lib.rs:isOtherTempNamespace	MATCH	yes	matches C
+checkTempNamespaceStatus	backend-catalog-namespace/src/namespace.rs:6811	backend-catalog-namespace/src/lib.rs:checkTempNamespaceStatus	MATCH	yes	INVALID_PROC_NUMBER(-1)/proc dead/other-db/not-owner -> IDLE; else IN_USE
+GetTempNamespaceProcNumber	backend-catalog-namespace/src/namespace.rs:6833	backend-catalog-namespace/src/lib.rs:GetTempNamespaceProcNumber	MATCH	yes	atoi helper reproduces C atoi (whitespace/sign/digit prefix)
+GetTempToastNamespace	backend-catalog-namespace/src/namespace.rs:6863	backend-catalog-namespace/src/lib.rs:GetTempToastNamespace	MATCH	yes	Assert -> debug_assert
+GetTempNamespaceState	backend-catalog-namespace/src/namespace.rs:6867	backend-catalog-namespace/src/lib.rs:GetTempNamespaceState	MATCH	yes	out-params -> tuple
+SetTempNamespaceState	backend-catalog-namespace/src/namespace.rs:6875	backend-catalog-namespace/src/lib.rs:SetTempNamespaceState	MATCH	yes	asserts + invalidation flags
+GetSearchPathMatcher	backend-catalog-namespace/src/namespace.rs:6885	backend-catalog-namespace/src/lib.rs:GetSearchPathMatcher	MATCH	yes	leading implicit-entry consumption with temp/catalog classification + assert; memory-context arg dropped (owned return)
+CopySearchPathMatcher	backend-catalog-namespace/src/namespace.rs:6917	backend-catalog-namespace/src/lib.rs:CopySearchPathMatcher	MATCH	yes	Clone
+SearchPathMatchesCurrentEnvironment	backend-catalog-namespace/src/namespace.rs:6932	backend-catalog-namespace/src/lib.rs:SearchPathMatchesCurrentEnvironment	MATCH	yes	generation fast path; addTemp/addCatalog/creation/schemas/extra-tail checks; generation update on success
+get_collation_oid	backend-catalog-namespace/src/namespace.rs:6987	backend-catalog-namespace/src/lib.rs:get_collation_oid	MATCH	yes	42704 with GetDatabaseEncodingName
+get_conversion_oid	backend-catalog-namespace/src/namespace.rs:7080	backend-catalog-namespace/src/lib.rs:get_conversion_oid	MATCH	yes	matches C
+FindDefaultConversionProc	backend-catalog-namespace/src/namespace.rs:7183	backend-catalog-namespace/src/lib.rs:FindDefaultConversionProc	MATCH	yes	FindDefaultConversion via pg_conversion seam
+preprocessNamespacePath	backend-catalog-namespace/src/namespace.rs:7213	backend-catalog-namespace/src/lib.rs:preprocessNamespacePath	MATCH	yes	SplitIdentifierString failure elog; $user (AUTHOID rolname + ACL_USAGE), pg_temp (temp_missing only if oidlist empty), normal refs; temp_missing out-param -> tuple
+finalNamespacePath	backend-catalog-namespace/src/namespace.rs:7337	backend-catalog-namespace/src/lib.rs:finalNamespacePath	MATCH	yes	dedupe + InvokeNamespaceSearchHook(false); firstNS; implicit pg_catalog then temp prepended
+cachedNamespacePath	backend-catalog-namespace/src/namespace.rs:7382	backend-catalog-namespace/src/lib.rs:cachedNamespacePath	MATCH	yes	NIL-oidlist recompute, finalPath recompute when empty/hook-present/forceRecompute, forceRecompute latched to hook presence; returns snapshot copy
+recomputeNamespacePath	backend-catalog-namespace/src/namespace.rs:7421	backend-catalog-namespace/src/lib.rs:recomputeNamespacePath	MATCH	yes	validity fast path; pathChanged comparison incl equal(finalPath,baseSearchPath); active=base snapshot; generation bump only on change
+AccessTempTableNamespace	backend-catalog-namespace/src/namespace.rs:7461	backend-catalog-namespace/src/lib.rs:AccessTempTableNamespace	MATCH	yes	MyXactFlags |= ACCESSEDTEMPNAMESPACE via xact seam; force semantics
+InitTempTableNamespace	backend-catalog-namespace/src/namespace.rs:7469	backend-catalog-namespace/src/lib.rs:InitTempTableNamespace	MATCH	yes	ACL_CREATE_TEMP (42501), RecoveryInProgress (25006), IsParallelWorker (25006), pg_temp_N/pg_toast_temp_N create-or-clean, CCI after creates, state + MyProc->tempNamespaceId publication
+AtEOXact_Namespace	backend-catalog-namespace/src/namespace.rs:7646	backend-catalog-namespace/src/lib.rs:AtEOXact_Namespace	MATCH	yes	subID-set && !parallel gate; commit -> before_shmem_exit callback; abort -> forget ns + invalidate + MyProc reset; subID cleared either way
+AtEOSubXact_Namespace	backend-catalog-namespace/src/namespace.rs:7667	backend-catalog-namespace/src/lib.rs:AtEOSubXact_Namespace	MATCH	yes	commit -> parent subid; abort -> full reset
+RemoveTempRelations	backend-catalog-namespace/src/namespace.rs:7685	backend-catalog-namespace/src/lib.rs:RemoveTempRelations	MATCH	yes	performDeletion flags INTERNAL|QUIETLY|SKIP_ORIGINAL|SKIP_EXTENSIONS=0x1D (audit fixed missing SKIP_EXTENSIONS), verified vs dependency.h
+RemoveTempRelationsCallback	backend-catalog-namespace/src/namespace.rs:7701	backend-catalog-namespace/src/lib.rs:RemoveTempRelationsCallback	MATCH	yes	AbortOutOfAnyTransaction/StartTransactionCommand/PushActiveSnapshot/remove/Pop/Commit via xact+snapmgr seams
+ResetTempTableNamespace	backend-catalog-namespace/src/namespace.rs:7715	backend-catalog-namespace/src/lib.rs:ResetTempTableNamespace	MATCH	yes	matches C
+check_search_path	backend-catalog-namespace/src/namespace.rs:7721	backend-catalog-namespace/src/lib.rs:check_search_path	MATCH	yes	use_cache=context-created; spcache fast path; SplitIdentifierString failure -> GUC_check_errdetail + false; insert on success; GUC extra/source params dropped (unused)
+assign_search_path	backend-catalog-namespace/src/namespace.rs:7762	backend-catalog-namespace/src/lib.rs:assign_search_path	MATCH	yes	baseSearchPathValid=false only; bootstrap assert
+InitializeSearchPath	backend-catalog-namespace/src/namespace.rs:7769	backend-catalog-namespace/src/lib.rs:InitializeSearchPath	MATCH	yes	bootstrap branch (pg_catalog-only base, generation bump); normal branch registers 4 syscache callbacks (38/11/9/21) + invalidation flags
+InvalidationCallback	backend-catalog-namespace/src/namespace.rs:7827	backend-catalog-namespace/src/lib.rs:InvalidationCallback	MATCH	yes	matches C
+fetch_search_path	backend-catalog-namespace/src/namespace.rs:7836	backend-catalog-namespace/src/lib.rs:fetch_search_path	MATCH	yes	activeTempCreationPending -> AccessTempTableNamespace(true)+recompute; implicit-prefix strip
+fetch_search_path_array	backend-catalog-namespace/src/namespace.rs:7855	backend-catalog-namespace/src/lib.rs:fetch_search_path_array	MATCH	yes	temp skip; count beyond array length
+pg_table_is_visible	backend-catalog-namespace/src/namespace.rs:7886	backend-catalog-namespace/src/lib.rs:pg_table_is_visible	MATCH	yes	shared pg_is_visible_body: missing -> None (SQL NULL)
+pg_type_is_visible	backend-catalog-namespace/src/namespace.rs:7902	backend-catalog-namespace/src/lib.rs:pg_type_is_visible	MATCH	yes	matches C
+pg_function_is_visible	backend-catalog-namespace/src/namespace.rs:7918	backend-catalog-namespace/src/lib.rs:pg_function_is_visible	MATCH	yes	matches C
+pg_operator_is_visible	backend-catalog-namespace/src/namespace.rs:7934	backend-catalog-namespace/src/lib.rs:pg_operator_is_visible	MATCH	yes	matches C
+pg_opclass_is_visible	backend-catalog-namespace/src/namespace.rs:7950	backend-catalog-namespace/src/lib.rs:pg_opclass_is_visible	MATCH	yes	matches C
+pg_opfamily_is_visible	backend-catalog-namespace/src/namespace.rs:7966	backend-catalog-namespace/src/lib.rs:pg_opfamily_is_visible	MATCH	yes	matches C
+pg_collation_is_visible	backend-catalog-namespace/src/namespace.rs:7982	backend-catalog-namespace/src/lib.rs:pg_collation_is_visible	MATCH	yes	matches C
+pg_conversion_is_visible	backend-catalog-namespace/src/namespace.rs:7998	backend-catalog-namespace/src/lib.rs:pg_conversion_is_visible	MATCH	yes	matches C
+pg_statistics_obj_is_visible	backend-catalog-namespace/src/namespace.rs:8016	backend-catalog-namespace/src/lib.rs:pg_statistics_obj_is_visible	MATCH	yes	matches C
+pg_ts_parser_is_visible	backend-catalog-namespace/src/namespace.rs:8034	backend-catalog-namespace/src/lib.rs:pg_ts_parser_is_visible	MATCH	yes	matches C
+pg_ts_dict_is_visible	backend-catalog-namespace/src/namespace.rs:8050	backend-catalog-namespace/src/lib.rs:pg_ts_dict_is_visible	MATCH	yes	matches C
+pg_ts_template_is_visible	backend-catalog-namespace/src/namespace.rs:8066	backend-catalog-namespace/src/lib.rs:pg_ts_template_is_visible	MATCH	yes	matches C
+pg_ts_config_is_visible	backend-catalog-namespace/src/namespace.rs:8084	backend-catalog-namespace/src/lib.rs:pg_ts_config_is_visible	MATCH	yes	matches C
+pg_my_temp_schema	backend-catalog-namespace/src/namespace.rs:8100	backend-catalog-namespace/src/lib.rs:pg_my_temp_schema	MATCH	yes	matches C
+pg_is_other_temp_schema	backend-catalog-namespace/src/namespace.rs:8104	backend-catalog-namespace/src/lib.rs:pg_is_other_temp_schema	MATCH	yes	matches C

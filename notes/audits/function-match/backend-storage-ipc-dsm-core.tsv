@@ -1,0 +1,67 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+DatumGetPointer	dsm.rs:908	types/postgres layer	SEAMED	no	c2rust-injected postgres.h inline; Datum conversion in shared types layer, not duplicated
+PointerGetDatum	dsm.rs:912	types/postgres layer	SEAMED	no	c2rust-injected postgres.h inline; shared types layer
+dlist_init	dsm.rs:916	std Vec/list substrate	MISSING	no	c2rust-injected ilist.h inline; intrusive list modeled as Vec, no standalone fn
+dlist_is_empty	dsm.rs:921	std Vec substrate	MISSING	no	c2rust-injected ilist.h inline
+dlist_push_head	dsm.rs:926	std Vec substrate	MISSING	no	c2rust-injected ilist.h inline (Vec push)
+dlist_delete	dsm.rs:939	std Vec substrate	MISSING	no	c2rust-injected ilist.h inline
+dlist_head_element_off	dsm.rs:944	std Vec substrate	MISSING	no	c2rust-injected ilist.h inline
+slist_init	dsm.rs:952	std Vec substrate	MISSING	no	c2rust-injected ilist.h inline
+slist_is_empty	dsm.rs:956	std Vec substrate	MISSING	no	c2rust-injected ilist.h inline
+slist_push_head	dsm.rs:960	std Vec substrate	MISSING	no	c2rust-injected ilist.h inline
+slist_pop_head_node	dsm.rs:968	std Vec substrate	MISSING	no	c2rust-injected ilist.h inline
+slist_delete_current	dsm.rs:975	std Vec substrate	MISSING	no	c2rust-injected ilist.h inline
+pg_leftmost_one_pos32	dsm.rs:980	dsm.rs (inlined in make_main_region_dsm_handle)	MATCH	yes	31-clz, undefined at 0 as in C; re-derived inline at the single call site
+ResourceOwnerRememberDSM	dsm.rs:1026	DsmSegment guard construction	PARTIAL	no	resowner.c unported; folded into DsmSegment RAII guard per query-lifecycle-raii.md
+ResourceOwnerForgetDSM	dsm.rs:1037	DsmSegment::into_id	PARTIAL	no	RAII guard consume-without-detach
+dsm_postmaster_startup	dsm.rs:1048	dsm.rs::dsm_postmaster_startup	MATCH	yes	maxitems=64+5*MaxBackends, even-handle prng loop, control magic 0x9a503d32 init, on_shmem_exit reg
+dsm_cleanup_using_control_segment	dsm.rs:1143	dsm.rs::dsm_cleanup_using_control_segment	MATCH	yes	ATTACH/sanity/per-item refcnt skips/DESTROY at LOG sequence
+dsm_cleanup_for_mmap	dsm.rs:1274	dsm.rs::dsm_cleanup_for_mmap	MATCH	yes	AllocateDir/ReadDir prefix-match unlink with errcode_for_file_access ERROR
+dsm_postmaster_shutdown	dsm.rs:1361	dsm.rs::dsm_postmaster_shutdown	MATCH	yes	nitems-before-sanity order, per-item destroy at LOG, write-back of all three globals
+dsm_backend_startup	dsm.rs:1497	dsm.rs::dsm_backend_startup	MATCH	yes	EXEC_BACKEND branch config-excluded; dsm_init_done=true
+dsm_estimate_size	dsm.rs:1501	dsm.rs::dsm_estimate_size	MATCH	yes	1MB * min_dynamic_shared_memory
+dsm_shmem_init	dsm.rs:1506	dsm.rs::dsm_shmem_init	MATCH	yes	size==0 early return; FreePageManagerInitialize + Put over first_page
+dsm_create	dsm.rs:1532	dsm.rs::dsm_create	MATCH	yes	lock choreography across 3 exits, main-region carve-out, prng handle loop, item[nitems] write, NULL_IF_MAXSEGMENTS vs ERROR
+dsm_attach	dsm.rs:1720	dsm.rs::dsm_attach	MATCH	yes	dup-handle ERROR, refcnt++ under lock, INVALID_CONTROL_SLOT -> detach+None, non-main ATTACH
+dsm_backend_shutdown	dsm.rs:1831	dsm.rs::dsm_backend_shutdown	MATCH	yes	detach list head (newest) until empty
+dsm_detach_all	dsm.rs:1840	dsm.rs::dsm_detach_all	MATCH	yes	fixed this branch: capture-before-loop local copy, dsm_control global untouched (was DIVERGES, now matches C)
+dsm_detach	dsm.rs:1862	dsm.rs::dsm_detach	MATCH	yes	HOLD_INTERRUPTS, pop-before-invoke callbacks, unmap+field reset, refcnt work, FreePageManagerPut on last
+dsm_pin_mapping	dsm.rs:1966	dsm.rs::dsm_pin_mapping	MATCH	yes	guard consumed = resowner forgotten
+dsm_unpin_mapping	dsm.rs:1973	dsm.rs::dsm_unpin_mapping	MATCH	yes	guard recreated; stale id traps vs C UB
+dsm_pin_segment	dsm.rs:1979	dsm.rs::dsm_pin_segment	MATCH	yes	already-pinned ERROR lock-held, non-main dsm_impl_pin_segment, refcnt++
+dsm_unpin_segment	dsm.rs:2036	dsm.rs::dsm_unpin_segment	MATCH	yes	scan skip refcnt<=1, not-found/not-pinned ERRORs, destroy on refcnt-- ==1
+dsm_find_mapping	dsm.rs:2184	dsm.rs::dsm_find_mapping	MATCH	yes	linear scan by handle
+dsm_segment_address	dsm.rs:2203	dsm.rs::dsm_segment_address	MATCH	yes	assert -> debug_assert, return mapped_address
+dsm_segment_map_length	dsm.rs:2209	dsm.rs::dsm_segment_map_length	MATCH	yes	return mapped_size
+dsm_segment_handle	dsm.rs:2213	dsm.rs::dsm_segment_handle	MATCH	yes	return handle
+on_dsm_detach	dsm.rs:2217	dsm.rs::on_dsm_detach	MATCH	yes	LIFO push, try_reserve = TopMemoryContext OOM surface
+cancel_on_dsm_detach	dsm.rs:2234	dsm.rs::cancel_on_dsm_detach	MATCH	yes	first match newest-first single removal
+reset_on_dsm_detach	dsm.rs:2274	dsm.rs::reset_on_dsm_detach	MATCH	yes	clear callbacks + invalidate control slots
+dsm_create_descriptor	dsm.rs:2299	dsm.rs::dsm_create_descriptor	MATCH	yes	enlarge+alloc OOM first, push-head, slot/address/size init, guard returned
+dsm_control_segment_sane	dsm.rs:2320	dsm.rs::dsm_control_segment_sane	MATCH	yes	offsetof bound, magic, bytes_needed>mapped, nitems>maxitems in C order
+dsm_control_bytes_needed	dsm.rs:2338	dsm.rs::dsm_control_bytes_needed	MATCH	yes	offsetof + sizeof(item)*nitems; repr(C) field-for-field layout
+make_main_region_dsm_handle	dsm.rs:2346	dsm.rs::make_main_region_dsm_handle	MATCH	yes	1|(slot<<1)|prng<<(leftmost_one_pos32(maxitems)+1); xoroshiro128ss high 32 bits
+is_main_region_dsm_handle	dsm.rs:2358	dsm.rs::is_main_region_dsm_handle	MATCH	yes	handle & 1
+ResOwnerReleaseDSM	dsm.rs:2361	DsmSegment::drop	MATCH	yes	Drop detaches if live; callback errors discarded (RAII doc, matches C abort machinery)
+ResOwnerPrintDSM	dsm.rs:2366	DsmSegment Debug impl	MATCH	yes	"dynamic shared memory segment %u"
+run_static_initializers	dsm.rs:2373	-	MISSING	no	c2rust transpile artifact for const-init of static data; const/thread_local init in Rust, no runtime fn
+pgstat_report_wait_start	dsm_impl.rs:867	backend-utils-activity-waitevent-seams	SEAMED	no	c2rust-injected wait_event.h inline; routed to waitevent owner seam
+pgstat_report_wait_end	dsm_impl.rs:871	backend-utils-activity-waitevent-seams	SEAMED	no	c2rust-injected wait_event.h inline; routed to waitevent owner seam
+dsm_impl_op	dsm_impl.rs:907	dsm_impl.rs::dsm_impl_op	MATCH	yes	dispatch posix/sysv/mmap on dynamic_shared_memory_type; default ERROR; windows arm config-excluded
+dsm_impl_posix	dsm_impl.rs:983	dsm_impl.rs::dsm_impl_posix	MATCH	yes	/PostgreSQL.%u name, teardown, Reserve/ReleaseExternalFD, O_CREAT|O_EXCL, EEXIST-silent, resize+backout, mmap flags
+dsm_impl_posix_resize	dsm_impl.rs:1264	dsm_impl.rs::dsm_impl_posix_resize	MATCH	yes	IsUnderPostmaster sigprocmask BlockSig, WAIT_EVENT_DSM_ALLOCATE, posix_fallocate/ftruncate EINTR loop, sigmask restore
+dsm_impl_sysv	dsm_impl.rs:1293	dsm_impl.rs::dsm_impl_sysv	MATCH	yes	%u name, IPC_PRIVATE check, ident cache as enum variant, shmget 0600, EEXIST-silent, shmdt+RMID teardown, shmat
+dsm_impl_mmap	dsm_impl.rs:1582	dsm_impl.rs::dsm_impl_mmap	MATCH	yes	pg_dynshmem/mmap.%u, OpenTransientFile, ZBUFFER 8192 zero-fill loop, mmap+unlink backout, CloseTransientFile errcode
+dsm_impl_pin_segment	dsm_impl.rs:1907	dsm_impl.rs::dsm_impl_pin_segment	MATCH	yes	non-Windows no-op leaving pm handle NULL; Windows config-excluded
+dsm_impl_unpin_segment	dsm_impl.rs:1917	dsm_impl.rs::dsm_impl_unpin_segment	MATCH	yes	non-Windows no-op
+errcode_for_dynamic_shared_memory	dsm_impl.rs:1925	dsm_impl.rs::sqlstate_for_dynamic_shared_memory + report_errno	MATCH	yes	EFBIG/ENOMEM->OUT_OF_MEMORY else errcode_for_file_access; saved errno passed explicitly
+proc_exit	ipc.rs:76	ipc.rs::proc_exit	MATCH	yes	getpid guard PANIC (abort, control cannot continue), DEBUG3 exit(%d), installed as backend-storage-ipc-seams::proc_exit fn(i32)->!
+proc_exit_prepare	ipc.rs:131	ipc.rs::proc_exit_prepare	MATCH	yes	sets proc_exit_inprogress, clears pending/holdoff/crit/error-context/debug_query, shmem_exit, on_proc_exit pop newest-first
+shmem_exit	ipc.rs:189	ipc.rs::shmem_exit	MATCH	yes	inprogress flag, before_shmem pop-then-call, dsm_backend_shutdown, on_shmem list, flag cleared; ? = C longjmp
+atexit_callback	ipc.rs:269	ipc.rs::atexit_callback	MATCH	yes	extern C, libc::atexit registered, calls proc_exit_prepare(-1)
+on_proc_exit	ipc.rs:273	ipc.rs::on_proc_exit	MATCH	yes	MAX_ON_EXITS=20, FATAL 54000 "out of on_proc_exit slots", one-time atexit setup
+before_shmem_exit	ipc.rs:325	ipc.rs::before_shmem_exit	MATCH	yes	same shape, "out of before_shmem_exit slots"
+on_shmem_exit	ipc.rs:378	ipc.rs::on_shmem_exit	MATCH	yes	same shape, "out of on_shmem_exit slots"
+cancel_before_shmem_exit	ipc.rs:431	ipc.rs::cancel_before_shmem_exit	MATCH	yes	latest-entry-only removal by fn ptr + Datum, else elog(ERROR) "not the latest entry"
+on_exit_reset	ipc.rs:477	ipc.rs::on_exit_reset	MATCH	yes	zero three indexes + reset_on_dsm_detach
+check_on_shmem_exit_lists_are_empty	ipc.rs:484	ipc.rs::check_on_shmem_exit_lists_are_empty	MATCH	yes	two elog(FATAL) checks in C order

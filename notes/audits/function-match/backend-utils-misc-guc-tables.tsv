@@ -1,0 +1,2 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+run_static_initializers	guc_tables.rs:13558	tables.rs/vars.rs/option_sets.rs/consts.rs (static data)	MATCH	yes	compiler-generated static-data init, not a source function; guc_tables.c defines ZERO functions. Audit verified 578 GUC/option-array entries identical per-entry (incl. f64 bit-exactness)

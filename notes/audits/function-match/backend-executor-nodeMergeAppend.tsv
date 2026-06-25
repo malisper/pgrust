@@ -1,0 +1,15 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+ExecInitMergeAppend	nodeMergeAppend.rs (C:64)	crates/backend-executor-nodeMergeAppend/src/lib.rs:95	MATCH	yes	Both pruning/non-pruning branches; bms_add_range(0,nplans-1); palloc0 ms_slots; per-key sortkey loop abbreviate=false; ms_initialized=false; ExecProcNode cb installed.
+ExecMergeAppend	nodeMergeAppend.rs (C:214 static)	crates/backend-executor-nodeMergeAppend/src/lib.rs:314	MATCH	yes	CHECK_FOR_INTERRUPTS; ms_nplans==0 early clear; lazy ExecFindMatchingSubPlans; first-pass build; steady-state binaryheap first/replace/remove; exhaustion returns cleared result slot.
+heap_compare_slots	nodeMergeAppend.rs (C:287 static)	crates/backend-executor-nodeMergeAppend/src/lib.rs:437	MATCH	yes	nkey loop, slot_getattr per key, ApplySortComparator, INVERT_COMPARE_RESULT on nonzero then return; else 0.
+ExecEndMergeAppend	nodeMergeAppend.rs (C:334)	crates/backend-executor-nodeMergeAppend/src/lib.rs:484	MATCH	yes	ExecEndNode over all ms_nplans children.
+ExecReScanMergeAppend	nodeMergeAppend.rs (C:354)	crates/backend-executor-nodeMergeAppend/src/lib.rs:507	MATCH	yes	prune-state+bms_overlap unset valid subplans; per-child UpdateChangedParamSet + ExecReScan; binaryheap_reset; ms_initialized=false.
+binaryheap_allocate	binaryheap.c:38 (in-crate)	crates/types-nodes/src/nodemergeappend.rs:167	MATCH	yes	capacity->bh_space, size 0, has_heap_property true, reserved backing store. In-crate specialized leaf, not seamed.
+binaryheap_reset	binaryheap.c:62 (in-crate)	crates/backend-executor-nodeMergeAppend/src/lib.rs:581	MATCH	yes	size 0, property true.
+binaryheap_add_unordered	binaryheap.c:115 (in-crate)	crates/backend-executor-nodeMergeAppend/src/lib.rs:596	MATCH	yes	capacity guard -> elog(ERROR,"out of binary heap slots"); property false; append; size++.
+binaryheap_build	binaryheap.c:137 (in-crate)	crates/backend-executor-nodeMergeAppend/src/lib.rs:659	MATCH	yes	for i=parent_offset(size-1)..0 sift_down; property true; guarded size>=1.
+binaryheap_first	binaryheap.c:176 (in-crate)	crates/backend-executor-nodeMergeAppend/src/lib.rs:608	MATCH	yes	returns bh_nodes[0]; empty->error vs C Assert (debug-only).
+binaryheap_remove_first	binaryheap.c:191 (in-crate)	crates/backend-executor-nodeMergeAppend/src/lib.rs:618	MATCH	yes	one-element fast path; else last->root, sift_down(0).
+binaryheap_replace_first	binaryheap.c:254 (in-crate)	crates/backend-executor-nodeMergeAppend/src/lib.rs:687	MATCH	yes	bh_nodes[0]=d; sift_down(0) when size>1.
+ApplySortComparator	sortsupport.h (inline)	crates/backend-executor-nodeMergeAppend/src/lib.rs:863	MATCH	yes	NULL ordering branches + reverse inversion; unsigned comparator via sortsupport seam.
+list_length	pg_list.h (inline)	crates/backend-executor-nodeMergeAppend/src/lib.rs:835	MATCH	yes	slice length.

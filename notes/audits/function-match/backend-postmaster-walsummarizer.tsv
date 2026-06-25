@@ -1,0 +1,24 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+WalSummarizerShmemSize	walsummarizer.rs:173	lib.rs:270	MATCH	yes	size_of::<WalSummarizerData>()
+WalSummarizerShmemInit	walsummarizer.rs:182	lib.rs:279	MATCH	yes	ShmemInitStruct via seam; on !found fills dummy + ConditionVariableInit; field-by-field identical
+WalSummarizerMain	walsummarizer.rs:213	lib.rs:307	MATCH	yes	MyBackendType=B_WAL_SUMMARIZER + aux bootstrap; on_shmem_exit; GetOldestUnsummarizedLSN; sigsetjmp -> per-iteration Err catch + WaitLatch(10000)
+GetWalSummarizerState	walsummarizer.rs:450	lib.rs:506	MATCH	yes	LW_SHARED; !initialized -> all-zero/-1; else 3-way pgprocno/pid normalize
+GetOldestUnsummarizedLSN	walsummarizer.rs:508	lib.rs:559	MATCH	yes	not-summarizing early return; non-summarizer fast-path; history walk; tli==0 -> ereport INTERNAL_ERROR; store + out-params
+WakeupWalSummarizer	walsummarizer.rs:640	lib.rs:681	MATCH	yes	NULL-ctl guard; LW_SHARED read pgprocno; SetLatch by procno if != INVALID
+WaitForWalSummarization	walsummarizer.rs:663	lib.rs:702	MATCH	yes	CHECK_FOR_INTERRUPTS; disabled -> return; deadcycles >=6 -> ereport ERROR; else WARNING; ConditionVariableTimedSleep
+WalSummarizerShutdown	walsummarizer.rs:791	lib.rs:821	MATCH	yes	LW_EXCLUSIVE; pgprocno=INVALID; on_shmem_exit adapter marshals (code,Datum)
+GetLatestLSN	walsummarizer.rs:803	lib.rs:834	MATCH	yes	!RecoveryInProgress -> GetFlushRecPtr; insert_tli!=0 path; else max(WalRcvFlush,XLogReplay)
+ProcessWalSummarizerInterrupts	walsummarizer.rs:861	lib.rs:865	MATCH	yes	barrier-pending; ConfigReloadPending -> ProcessConfigFile(PGC_SIGHUP); Shutdown||!enabled -> DEBUG1+proc_exit(0); LogMemoryContextPending
+SummarizeWAL	walsummarizer.rs:909	lib.rs:893	MATCH	yes	private_data init; XLogReaderAllocate via seam; exact vs FindNextRecord; loop; unconditional reader free (RAII); file-write block
+SummarizeDbaseRecord	walsummarizer.rs:1249	lib.rs:1195	MATCH	yes	CREATE_FILE_COPY/CREATE_WAL_LOG -> SetLimitBlock(MAIN,0); DROP -> per-tablespace loop offset 8; offsets verified
+SummarizeSmgrRecord	walsummarizer.rs:1318	lib.rs:1232	MATCH	yes	CREATE -> rlocator@0 forkNum@12; TRUNCATE -> blkno@0 rlocator@4 flags@16; offsets verified vs storage_xlog.h
+SummarizeXactRecord	walsummarizer.rs:1367	lib.rs:1270	MATCH	yes	info masking; COMMIT/COMMIT_PREPARED -> ParseCommitRecord per-xloc forknum loop; ABORT path; FSM skip + SetLimitBlock 0
+SummarizeXlogRecord	walsummarizer.rs:1427	lib.rs:1331	MATCH	yes	CHECKPOINT_REDO@0/SHUTDOWN@20/PARAMETER_CHANGE@20/END_OF_RECOVERY@16; returns wal_level==WAL_LEVEL_MINIMAL; offsets verified
+summarizer_read_local_xlog_page	walsummarizer.rs:1500	lib.rs:1368	MATCH	yes	ProcessInterrupts; read_upto logic; historic end_of_wal vs wait_for_wal + tliSwitchPoint; WALRead seam; pages_read++
+summarizer_wait_for_wal	walsummarizer.rs:1614	lib.rs:1446	MATCH	yes	sleep_quanta backoff; pgstat_report_wal; WaitLatch(MyLatch, sleep*MS_PER_QUANTUM, WAL_SUMMARIZER_WAL); ResetLatch; pages=0
+MaybeRemoveOldWalSummaries	walsummarizer.rs:1660	lib.rs:1483	MATCH	yes	GetRedoRecPtr; keep_time==0 / redo unchanged -> return; cutoff; GetWalSummaries; residual-rebuild loop with RemoveWalSummaryIfOlderThan
+list_length	walsummarizer.rs	-	MATCH	yes	c2rust-emitted inline of the pg_list List macro; idiomatically subsumed by Vec/slice len in the port
+list_nth	walsummarizer.rs	-	MATCH	yes	c2rust-emitted inline pg_list accessor; subsumed by Vec indexing in the port
+list_nth_cell	walsummarizer.rs	-	MATCH	yes	c2rust-emitted inline pg_list accessor; subsumed by Vec indexing in the port
+MemoryContextSwitchTo	walsummarizer.rs	-	MATCH	yes	c2rust-emitted inline; no ambient CurrentMemoryContext in the port (owned-root mctx model), so no-op equivalent
+pgstat_report_wait_end	walsummarizer.rs	-	SEAMED	no	c2rust-emitted inline wait-event helper; routed through the activity/wait-event owner seam

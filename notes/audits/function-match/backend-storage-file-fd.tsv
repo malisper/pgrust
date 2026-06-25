@@ -1,0 +1,107 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+__isctype	fd.rs:1085	-	MISSING	no	c2rust-injected libc ctype inline (ctype.h), not an fd.c function; subsumed by Rust char classification, no standalone counterpart
+isdigit	fd.rs:1097	sync_cleanup (looks_like_temp_rel_name uses is_ascii_digit)	MISSING	no	c2rust-injected libc inline; idiomatic char checks used inline, no standalone fn
+DatumGetInt32	fd.rs:1107	types/fmgr crate	SEAMED	no	c2rust-injected postgres.h inline; Datum conversion lives in the shared types/fmgr layer, not duplicated in fd
+Int32GetDatum	fd.rs:1111	types/fmgr crate	SEAMED	no	c2rust-injected postgres.h inline; same as DatumGetInt32
+pgstat_report_wait_start	fd.rs:1144	backend-utils-activity-waitevent-seams	SEAMED	no	wait_event.h inline; routed to waitevent owner seam
+pgstat_report_wait_end	fd.rs:1148	backend-utils-activity-waitevent-seams	SEAMED	no	wait_event.h inline; routed to waitevent owner seam
+pg_preadv	fd.rs:1152	vfd_io::pg_preadv	MATCH	yes	preadv EINTR-retry wrapper; matches port.h/pg_iovec.h logic
+pg_pwritev	fd.rs:1170	vfd_io::pg_pwritev	MATCH	yes	pwritev EINTR-retry wrapper
+ResourceOwnerRememberFile	fd.rs:1241	vfd_core/temp_files (has_resowner RAII)	PARTIAL	no	resowner callback machinery folded into RAII has_resowner model (resowner.c unported); documented PARTIAL-by-design
+ResourceOwnerForgetFile	fd.rs:1252	vfd_core/temp_files (has_resowner RAII)	PARTIAL	no	RAII has_resowner model; documented PARTIAL-by-design
+pg_fsync	fd.rs:1260	sync_cleanup::pg_fsync	MATCH	yes	enableFsync gate + writethrough/datasync dispatch
+pg_fsync_no_writethrough	fd.rs:1268	sync_cleanup::pg_fsync_no_writethrough	MATCH	yes	fsync/fdatasync branch on sync_method
+pg_fsync_writethrough	fd.rs:1284	sync_cleanup::pg_fsync_writethrough	MATCH	yes	F_FULLFSYNC (darwin) / ENOSYS path
+pg_fdatasync	fd.rs:1300	sync_cleanup::pg_fdatasync	MATCH	yes	fdatasync wrapper
+pg_file_exists	fd.rs:1314	sync_cleanup::pg_file_exists	MATCH	yes	stat-based existence + S_ISDIR/errno handling
+pg_flush_data	fd.rs:1371	sync_cleanup::pg_flush_data	MATCH	yes	sync_file_range/posix_fadvise/msync platform dispatch
+pg_ftruncate	fd.rs:1496	vfd_io (pg_ftruncate)	MATCH	yes	ftruncate EINTR-retry
+pg_truncate	fd.rs:1510	sync_cleanup::pg_truncate	MATCH	yes	open+ftruncate+close path
+fsync_fname	fd.rs:1524	sync_cleanup::fsync_fname	MATCH	yes	fsync_fname_ext(false) wrapper
+durable_rename	fd.rs:1531	sync_cleanup::durable_rename	MATCH	yes	fsync old/new + rename + dir fsync sequence
+durable_unlink	fd.rs:1674	sync_cleanup::durable_unlink	MATCH	yes	unlink + parent fsync
+InitFileAccess	fd.rs:1712	vfd_core::InitFileAccess	MATCH	yes	VfdCache alloc + before_shmem_exit registration
+InitTemporaryFileAccess	fd.rs:1776	vfd_core::InitTemporaryFileAccess	MATCH	yes	asserts + RegisterResourceReleaseCallback analogue
+count_usable_fds	fd.rs:1785	vfd_core::count_usable_fds	MATCH	yes	probe-open loop counting usable fds
+set_max_safe_fds	fd.rs:1900	vfd_core::set_max_safe_fds	MATCH	yes	count_usable_fds + reserve arithmetic
+BasicOpenFile	fd.rs:1987	vfd_core::BasicOpenFile	MATCH	yes	BasicOpenFilePerm(0600) wrapper
+BasicOpenFilePerm	fd.rs:1994	vfd_core::BasicOpenFilePerm	MATCH	yes	open EINTR loop + EMFILE/ENFILE LRU release retry
+AcquireExternalFD	fd.rs:2071	vfd_core::acquire (AcquireExternalFD)	MATCH	yes	ReserveExternalFD or ereport too-many
+ReserveExternalFD	fd.rs:2080	vfd_core::reserve (ReserveExternalFD)	MATCH	yes	numExternalFDs/maxAllocatedDescs accounting
+ReleaseExternalFD	fd.rs:2085	vfd_core (ReleaseExternalFD)	MATCH	yes	decrement numExternalFDs with assert
+Delete	fd.rs:2088	vfd_core::Delete	MATCH	yes	unlink VFD from LRU ring
+LruDelete	fd.rs:2096	vfd_core::LruDelete	MATCH	yes	close fd, Delete, mark closed
+Insert	fd.rs:2162	vfd_core::Insert	MATCH	yes	splice VFD into LRU ring head
+LruInsert	fd.rs:2171	vfd_core::LruInsert	MATCH	yes	reopen if closed + Insert
+ReleaseLruFile	fd.rs:2190	vfd_core::ReleaseLruFile	MATCH	yes	LruDelete oldest, assert nfile>0
+ReleaseLruFiles	fd.rs:2197	vfd_core::ReleaseLruFiles	MATCH	yes	loop ReleaseLruFile until fd available
+AllocateVfd	fd.rs:2204	vfd_core::AllocateVfd	MATCH	yes	free-list pop / cache enlarge
+FreeVfd	fd.rs:2298	vfd_core::FreeVfd	MATCH	yes	clear VFD, push to free list
+FileAccess	fd.rs:2308	vfd_core::FileAccess	MATCH	yes	LruInsert if not open / move to ring front
+ReportTemporaryFileUsage	fd.rs:2323	temp_files::ReportTemporaryFileUsage	MATCH	yes	log_temp_files threshold + pgstat report
+RegisterTemporaryFile	fd.rs:2363	temp_files::RegisterTemporaryFile	MATCH	yes	mark VFD temporary, resowner remember
+PathNameOpenFile	fd.rs:2373	vfd_io::PathNameOpenFile	MATCH	yes	PathNameOpenFilePerm(0600) wrapper
+PathNameOpenFilePerm	fd.rs:2380	vfd_io::PathNameOpenFilePerm	MATCH	yes	AllocateVfd + BasicOpenFilePerm + Insert
+PathNameCreateTemporaryDir	fd.rs:2451	temp_files::PathNameCreateTemporaryDir	MATCH	yes	mkdir parent+leaf with EEXIST tolerance
+PathNameDeleteTemporaryDir	fd.rs:2526	temp_files::PathNameDeleteTemporaryDir	MATCH	yes	walkdir-style rmdir of temp dir
+OpenTemporaryFile	fd.rs:2568	temp_files::OpenTemporaryFile	MATCH	yes	tablespace selection + InTablespace dispatch
+TempTablespacePath	fd.rs:2598	temp_files::TempTablespacePath	MATCH	yes	build pg_tblspc/<oid>/PG_TEMP path
+OpenTemporaryFileInTablespace	fd.rs:2623	temp_files::OpenTemporaryFileInTablespace	MATCH	yes	create temp dir + PathNameCreateTemporaryFile
+PathNameCreateTemporaryFile	fd.rs:2687	temp_files::PathNameCreateTemporaryFile	MATCH	yes	open O_CREAT|O_TRUNC temp + register
+PathNameOpenTemporaryFile	fd.rs:2737	temp_files::PathNameOpenTemporaryFile	MATCH	yes	open existing temp read-write
+PathNameDeleteTemporaryFile	fd.rs:2781	temp_files::PathNameDeleteTemporaryFile	MATCH	yes	stat for size + unlink temp file
+FileClose	fd.rs:2907	vfd_io::FileClose	MATCH	yes	close fd, Delete, temp-file size accounting + unlink
+FilePrefetch	fd.rs:3080	vfd_io::FilePrefetch	MATCH	yes	posix_fadvise WILLNEED (AIO path via aio seam)
+FileWriteback	fd.rs:3107	vfd_io::FileWriteback	MATCH	yes	FileAccess + pg_flush_data
+FileReadV	fd.rs:3131	vfd_io::FileReadV	MATCH	yes	FileAccess + pg_preadv + temp offset advance
+FileStartReadV	fd.rs:3159	vfd_io::FileStartReadV	MATCH	yes	AIO start read via aio seam
+FileWriteV	fd.rs:3177	vfd_io::FileWriteV	MATCH	yes	FileAccess + pg_pwritev + temp size limit enforcement
+FileSync	fd.rs:3274	vfd_io::FileSync	MATCH	yes	FileAccess + pg_fsync
+FileZero	fd.rs:3289	vfd_io::FileZero	MATCH	yes	pg_pwrite_zeros via fallocate/zero-write
+FileFallocate	fd.rs:3319	vfd_io::FileFallocate	MATCH	yes	posix_fallocate / ENOSYS fallback
+FileSize	fd.rs:3328	vfd_io::FileSize (file_size)	MATCH	yes	FileAccess + lseek SEEK_END
+FileTruncate	fd.rs:3337	vfd_io::FileTruncate	MATCH	yes	ftruncate + temp size adjust
+FilePathName	fd.rs:3362	vfd_io::FilePathName	MATCH	yes	return VFD fileName
+FileGetRawDesc	fd.rs:3366	vfd_io::FileGetRawDesc (vfd_raw_fd)	MATCH	yes	return raw fd
+FileGetRawFlags	fd.rs:3375	vfd_io::FileGetRawFlags	MATCH	yes	return fileFlags
+FileGetRawMode	fd.rs:3379	vfd_io::FileGetRawMode	MATCH	yes	return fileMode
+reserveAllocatedDesc	fd.rs:3382	allocated_desc::reserveAllocatedDesc	MATCH	yes	grow allocatedDescs array
+AllocateFile	fd.rs:3452	allocated_desc::AllocateFile	MATCH	yes	reserve + fopen + register AllocatedDescFile
+OpenTransientFile	fd.rs:3563	allocated_desc::OpenTransientFile	MATCH	yes	OpenTransientFilePerm(0600) wrapper
+OpenTransientFilePerm	fd.rs:3570	allocated_desc::OpenTransientFilePerm	MATCH	yes	reserve + BasicOpenFilePerm + register
+OpenPipeStream	fd.rs:3632	allocated_desc::OpenPipeStream	MATCH	yes	reserve + popen + register AllocatedDescPipe
+FreeDesc	fd.rs:3753	allocated_desc::FreeDesc	MATCH	yes	close/fclose/pclose/closedir per kind + remove slot
+FreeFile	fd.rs:3805	allocated_desc::FreeFile	MATCH	yes	find file desc + FreeDesc, fall back to fclose
+CloseTransientFile	fd.rs:3850	allocated_desc::CloseTransientFile	MATCH	yes	find raw desc + FreeDesc, fall back to close
+AllocateDir	fd.rs:3898	allocated_desc::AllocateDir	MATCH	yes	reserve + opendir + register AllocatedDescDir
+ReadDir	fd.rs:4008	allocated_desc::ReadDir	MATCH	yes	ReadDirExtended(ERROR) wrapper
+ReadDirExtended	fd.rs:4015	allocated_desc::ReadDirExtended	MATCH	yes	readdir with errno-reset + elevel error report
+FreeDir	fd.rs:4084	allocated_desc::FreeDir	MATCH	yes	find dir desc + FreeDesc, fall back to closedir
+ClosePipeStream	fd.rs:4132	allocated_desc::ClosePipeStream	MATCH	yes	find pipe desc + FreeDesc, fall back to pclose
+closeAllVfds	fd.rs:4177	allocated_desc::closeAllVfds	MATCH	yes	LruDelete all open VFDs
+SetTempTablespaces	fd.rs:4190	temp_files::SetTempTablespaces	MATCH	yes	store tablespace oid array + reset next index
+TempTablespacesAreSet	fd.rs:4207	temp_files::TempTablespacesAreSet	MATCH	yes	numTempTableSpaces >= 0
+GetTempTablespaces	fd.rs:4211	temp_files::GetTempTablespaces	MATCH	yes	copy out tablespace array
+GetNextTempTableSpace	fd.rs:4224	temp_files::GetNextTempTableSpace	MATCH	yes	round-robin next tablespace oid
+AtEOSubXact_Files	fd.rs:4235	sync_cleanup::AtEOSubXact_Files	MATCH	yes	subxact resowner-driven temp cleanup (RAII model)
+AtEOXact_Files	fd.rs:4256	sync_cleanup::AtEOXact_Files	MATCH	yes	CleanupTempFiles(false) + reset SpaceUsed
+BeforeShmemExit_Files	fd.rs:4261	sync_cleanup (before_shmem_exit_files_cb)	MATCH	yes	CleanupTempFiles(true) + closeAllVfds
+CleanupTempFiles	fd.rs:4267	sync_cleanup::CleanupTempFiles	MATCH	yes	scan VFDs closing temp/non-temp per isProcExit flag
+RemovePgTempFiles	fd.rs:4357	sync_cleanup::RemovePgTempFiles	MATCH	yes	per-tablespace pgsql_tmp cleanup + missing-ok
+RemovePgTempFilesInDir	fd.rs:4417	sync_cleanup::RemovePgTempFilesInDir	MATCH	yes	recursive temp dir cleanup w/ rmtopdir
+RemovePgTempRelationFiles	fd.rs:4582	sync_cleanup::RemovePgTempRelationFiles	MATCH	yes	scan dbspaces for temp rel files
+RemovePgTempRelationFilesInDbspace	fd.rs:4614	sync_cleanup::RemovePgTempRelationFilesInDbspace	MATCH	yes	unlink looks_like_temp_rel_name matches
+looks_like_temp_rel_name	fd.rs:4673	sync_cleanup::looks_like_temp_rel_name	MATCH	yes	tNNN_NNN[.seg][_fork] pattern parse
+SyncDataDirectory	fd.rs:4737	sync_cleanup::SyncDataDirectory	MATCH	yes	syncfs/walkdir pre-sync + fsync pass dispatch
+walkdir	fd.rs:4883	sync_cleanup::walkdir	MATCH	yes	recursive dir walk applying action + self
+pre_sync_fname	fd.rs:4955	sync_cleanup::pre_sync_fname	MATCH	yes	open + pg_flush_data + close
+datadir_fsync_fname	fd.rs:5059	sync_cleanup::datadir_fsync_fname	MATCH	yes	fsync_fname_ext(true) ignore-errors wrapper
+unlink_if_exists_fname	fd.rs:5100	sync_cleanup::unlink_if_exists_fname	MATCH	yes	conditional unlink/rmdir with ENOENT tolerance
+fsync_fname_ext	fd.rs:5139	sync_cleanup::fsync_fname_ext	MATCH	yes	open + fsync + dir-flag handling + elevel report
+fsync_parent_path	fd.rs:5257	sync_cleanup::fsync_parent_path	MATCH	yes	get_parent_directory + fsync_fname_ext
+MakePGDirectory	fd.rs:5283	vfd_core::seam_make_pg_directory (MakePGDirectory)	MATCH	yes	mkdir with pg_dir_create_mode
+data_sync_elevel	fd.rs:5289	sync_cleanup::data_sync_elevel	MATCH	yes	data_sync_retry ? elevel : PANIC
+check_debug_io_direct	fd.rs:5295	vfd_core::check_debug_io_direct	MATCH	yes	parse debug_io_direct GUC list + platform validation
+assign_debug_io_direct	fd.rs:5377	vfd_core::assign_debug_io_direct	MATCH	yes	store parsed io_direct_flags
+ResOwnerReleaseFile	fd.rs:5384	vfd_core/temp_files (RAII has_resowner)	PARTIAL	no	resowner release callback folded into RAII model; documented PARTIAL-by-design
+ResOwnerPrintFile	fd.rs:5391	-	PARTIAL	no	resowner debug-print callback; subsumed by RAII model, no standalone counterpart

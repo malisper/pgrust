@@ -1,0 +1,13 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+BoolGetDatum	rmgr.rs:3411	(inline helper)	MATCH	yes	Trivial Datum constructor; types-core/types-datum BoolGetDatum, used by pg_get_wal_resource_managers.
+Int32GetDatum	rmgr.rs:3419	(inline helper)	MATCH	yes	Trivial Datum constructor (sign-extend i32); types-datum Int32GetDatum.
+PointerGetDatum	rmgr.rs:3423	(inline helper)	MATCH	yes	Trivial Datum-from-pointer constructor; types-datum.
+RmgrIdIsBuiltin	rmgr.rs:3430	types-wal/src/rmgr.rs	MATCH	yes	rmid <= RM_MAX_BUILTIN_ID (21); lives in types-wal.
+RmgrIdIsCustom	rmgr.rs:3434	types-wal/src/rmgr.rs	MATCH	yes	rmid in [128,255]; lives in types-wal.
+RmgrIdExists	rmgr.rs:3438	lib.rs:378	MATCH	yes	rm_name != NULL -> rm_name.is_some(); xlog_internal.h inline.
+GetRmgr	rmgr.rs:3444	lib.rs:384	MATCH	yes	Returns row by value; missing -> RmgrNotFound Err; xlog_internal.h inline.
+RmgrStartup	rmgr.rs:6224	lib.rs:396	MATCH	yes	Loop 0..RM_N_IDS, skip !exists, call rm_startup via seam; returns PgResult.
+RmgrCleanup	rmgr.rs:6238	lib.rs:410	MATCH	yes	Identical loop; cleanup callbacks infallible fn().
+RmgrNotFound	rmgr.rs:6252	lib.rs:424	MATCH	yes	ereport(ERROR) with identical message+hint; XX000 default.
+RegisterCustomRmgr	rmgr.rs:6285	lib.rs:442	MATCH	yes	All five ERROR checks in C order with identical predicates/messages/hints; copy into thread-local slot; LOG ereport via seam.
+pg_get_wal_resource_managers	rmgr.rs:6504	lib.rs:528	MATCH	yes	InitMaterializedSRF then loop building 3 cols (rmid/name/builtin) via funcapi seam; returns Datum::null.

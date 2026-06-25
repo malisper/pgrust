@@ -1,0 +1,9 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+ObjectIdGetDatum	execCurrent.rs:2588	(types-tuple inline)	SEAMED	no	postgres.h inline owned by another unit; folded into seam projections
+DatumGetPointer	execCurrent.rs:2592	(types-tuple inline)	SEAMED	no	postgres.h inline owned elsewhere
+PointerGetDatum	execCurrent.rs:2596	(types-tuple inline)	SEAMED	no	postgres.h inline owned elsewhere
+ItemPointerIsValid	execCurrent.rs:2600	types-tuple::item_pointer_is_valid	MATCH	yes	itemptr.h inline; ip_posid != InvalidOffsetNumber(0); owned & removes NULL check
+slot_getsysattr	execCurrent.rs:2610	(execMain scan_node_extract_tid seam)	SEAMED	no	tuptable.h inline; live-slot sys-attr reads live inside scan_node_extract_tid seam (execMain owns live slot)
+execCurrentOf	execCurrent.rs:2627	lib.rs:83 exec_current_of (+resolve_rowmark/scan helpers)	MATCH	yes	full control flow re-derived; rowmark+scan branches; live-state reads SEAMED but all branch/error decisions in-crate
+fetch_cursor_param_value	execCurrent.rs:3119	exec_current_of fetch_cursor_param_value	MATCH	yes	static; gate, REFCURSOROID type check, error texts/codes preserved; hook+text decode SEAMED to execMain
+search_plan_tree	execCurrent.rs:3230	exec_current_of search_plan_tree	MATCH	yes	static; scan/append/result/limit/subqueryscan dispatch + pending_rescan post-check; scan-node arms pending PlanStateNode variants (C default-equivalent)

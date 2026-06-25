@@ -1,0 +1,17 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+isascii	timeline.rs:821	(inline libc shim)	MATCH	yes	c2rust-emitted libc inline; not a translation-unit fn; behavior identical via Rust ctype semantics
+__istype	timeline.rs:826	(inline libc shim)	MATCH	yes	c2rust-emitted ctype helper; behavior identical
+isspace	timeline.rs:840	(inline libc shim)	MATCH	yes	C-locale isspace set; reproduced by is_c_space in lib.rs
+TLHistoryFileName	timeline.rs:852	lib.rs:82	MATCH	yes	xlog_internal.h macro; format "%08X.history"
+TLHistoryFilePath	timeline.rs:864	lib.rs:88	MATCH	yes	xlog_internal.h macro; XLOGDIR "/%08X.history"
+pgstat_report_wait_start	timeline.rs:876	(inline shim)	MATCH	yes	wait-event probe inline; no-op-equivalent shim
+pgstat_report_wait_end	timeline.rs:880	(inline shim)	MATCH	yes	wait-event probe inline; no-op-equivalent shim
+restoreTimeLineHistoryFiles	timeline.rs:884	lib.rs:101	MATCH	yes	while tli<end, tli==1 skip, RestoreArchivedFile unconditional, KeepFileRestoredFromArchive on Some
+readTimeLineHistory	timeline.rs:912	lib.rs:133	MATCH	yes	tli==1 tip entry; archive/pg_wal branch; fgets+isspace+#+sscanf parse loop faithful; FATAL paths; lcons via insert(0,.)
+existsTimeLineHistory	timeline.rs:1239	lib.rs:285	MATCH	yes	probeTLI==1 false; archive vs pg_wal; file_exists seam (open ok/ENOENT/FATAL)
+findNewestTimeLine	timeline.rs:1301	lib.rs:311	MATCH	yes	newestTLI=startTLI; probe +1.. until !exists; wrapping_add mirrors unsigned increment
+writeTimeLineHistory	timeline.rs:1313	lib.rs:343	MATCH	yes	full temp-file emplacement orchestration in-crate over granular fd primitive seams; BLCKSZ copy loop, ENOSPC handling, fsync, durable_rename, archive notify
+writeTimeLineHistoryFile	timeline.rs:1677	lib.rs:539	MATCH	yes	temp-name, O_EXCL, single write, ENOSPC handling, fsync, durable_rename; granular fd seams only
+tliInHistory	timeline.rs:1842	lib.rs:612	MATCH	yes	linear scan for tle.tli==tli
+tliOfPointInHistory	timeline.rs:1867	lib.rs:624	MATCH	yes	(Invalid(begin)||begin<=ptr)&&(Invalid(end)||ptr<end); fallthrough errmsg_internal ERROR
+tliSwitchPoint	timeline.rs:1921	lib.rs:650	MATCH	yes	nextTLI out-param as tuple .1; returns (tle.end,nextTLI) before nextTLI update; not-found ERROR

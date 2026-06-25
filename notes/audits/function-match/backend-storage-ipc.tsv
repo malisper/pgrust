@@ -1,0 +1,6 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+RequestAddinShmemSpace	ipci.rs:198	ipci_core::request_addin_shmem_space:86	MATCH	yes	process_shmem_requests guard FATAL + add_size accumulate; in-progress flag threaded as explicit bool param (no-ambient-global)
+CalculateShmemSize	ipci.rs:231	ipci_core::calculate_shmem_size:110	MATCH	yes	base 100000 + 41 subsystem *ShmemSize add_size calls in exact order + total_addin_request + 8192 page round; out-param folded into (Size,i32)
+CreateSharedMemoryAndSemaphores	ipci.rs:293	ipci_core::create_shared_memory_and_semaphores:188	MATCH	yes	!IsUnderPostmaster assert, DEBUG3, PGSharedMemoryCreate (seghdr,shim), InitShmemAccess/PGReserveSemaphores/InitShmemAllocation, CreateOrAttachShmemStructs, dsm_postmaster_startup, shmem_startup_hook
+CreateOrAttachShmemStructs	ipci.rs:336	ipci_core::create_or_attach_shmem_structs:277	MATCH	yes	full *ShmemInit init order line-by-line, !IsUnderPostmaster InitProcGlobal guard preserved
+InitializeShmemGUCs	ipci.rs:381	ipci_core::initialize_shmem_gucs:352	MATCH	yes	shared_memory_size / _in_huge_pages / num_os_semaphores SetConfigOption with PGC_INTERNAL/PGC_S_DYNAMIC_DEFAULT, hp_size!=0 guard, add_size overflow paths

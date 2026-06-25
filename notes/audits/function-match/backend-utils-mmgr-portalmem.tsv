@@ -1,0 +1,33 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+MemoryContextSwitchTo	portalmem.rs:2437	(inlined / mcxt)	MATCH	yes	c2rust inline accessor; modeled by explicit Mcx threading per repo convention, behavior-identical.
+BoolGetDatum	portalmem.rs:2443	(types-fmgr Datum conv)	MATCH	yes	c2rust inline Datum conversion macro; identical bit-cast.
+PointerGetDatum	portalmem.rs:2451	(types-fmgr Datum conv)	MATCH	yes	c2rust inline Datum conversion macro; identical.
+Int64GetDatum	portalmem.rs:2455	(types-fmgr Datum conv)	MATCH	yes	c2rust inline Datum conversion macro; identical.
+TimestampTzGetDatum	portalmem.rs:2466	(types-fmgr Datum conv)	MATCH	yes	c2rust inline Datum conversion macro; identical.
+EnablePortalManager	portalmem.rs:2475	lib.rs:247	MATCH	yes	TopPortalContext + table created; Assert -> ok_or guard.
+GetPortalByName	portalmem.rs:2509	lib.rs:262	MATCH	yes	NULL/empty-name -> None; else hash lookup.
+PortalGetPrimaryStmt	portalmem.rs:2532	lib.rs:278	MATCH	yes	In-crate foreach(stmts)/canSetTag walk over real owned Vec<PlannedStmt>; prior MISSING resolved, seam removed.
+CreatePortal	portalmem.rs:2555	lib.rs:293	MATCH	yes	dup -> ERROR/WARNING(DUPLICATE_CURSOR)+PortalDrop(false); all fields init; HashTableInsert; SetIdentifier.
+CreateNewPortal	portalmem.rs:2726	lib.rs:384	MATCH	yes	thread_local unnamed_portal_count; "<unnamed portal %u>"; loop-until-nonconflict; CreatePortal(false,false).
+PortalDefineQuery	portalmem.rs:2747	lib.rs:400	MATCH	yes	Asserts->debug_assert; stores all 7 fields; status->PORTAL_DEFINED. Cursor-case copy lives in ledgered seam.
+PortalReleaseCachedPlan	portalmem.rs:2764	lib.rs (release_cached_plan)	MATCH	yes	cplan guard; ReleaseCachedPlan via plancache seam; clears cplan+stmts. Static fn; SEAMED callee but logic in-crate.
+PortalCreateHoldStore	portalmem.rs:2772	lib.rs:444	MATCH	yes	holdContext child of TopPortalContext; tuplestore_begin_heap(scroll) via seam; Asserts->debug_assert.
+PinPortal	portalmem.rs:2792	lib.rs:565	MATCH	yes	elog ERROR "portal already pinned".
+UnpinPortal	portalmem.rs:2824	lib.rs:576	MATCH	yes	elog ERROR "portal not pinned".
+MarkPortalActive	portalmem.rs:2856	lib.rs:587	MATCH	yes	runtime test -> ERROR OBJECT_NOT_IN_PREREQUISITE_STATE; sets ACTIVE + activeSubid.
+MarkPortalDone	portalmem.rs:2904	lib.rs:604	MATCH	yes	->DONE; run+clear cleanup hook.
+MarkPortalFailed	portalmem.rs:2917	lib.rs:617	MATCH	yes	assert status!=DONE; ->FAILED; run+clear cleanup.
+PortalDrop	portalmem.rs:2930	lib.rs:629	MATCH	yes	pinned/ACTIVE->ERROR INVALID_CURSOR_STATE; cleanup; HashTableDelete; ReleaseCachedPlan; holdSnapshot unregister; 3-phase resowner release; order+predicates match.
+PortalHashTableDeleteAll	portalmem.rs:3109	lib.rs:734	MATCH	yes	NULL-table early return; skip ACTIVE; PortalDrop(false); restart-on-drop.
+HoldPortal	portalmem.rs:3138	lib.rs (HoldPortal)	MATCH	yes	Static fn; PortalCreateHoldStore; PersistHoldablePortal seam; ReleaseCachedPlan; resowner=NULL; subids/level reset.
+PreCommit_Portals	portalmem.rs:3148	lib.rs:783	MATCH	yes	pinned&&!autoHeld->ERROR; ACTIVE path; HOLD&&subid&&READY->isPrepare ERROR else HoldPortal; else PortalDrop(true); restart; returns result.
+AtAbort_Portals	portalmem.rs:3271	lib.rs:859	MATCH	yes	ACTIVE&&shmem_exit_inprogress->MarkPortalFailed; subid/autoHeld continue; READY->MarkPortalFailed; cleanup; ReleaseCachedPlan; resowner=NULL; DeleteChildren.
+AtCleanup_Portals	portalmem.rs:3323	lib.rs:915	MATCH	yes	skip ACTIVE; subid/autoHeld continue; force-unpin; cleanup-still-set WARNING+clear; PortalDrop(false).
+PortalErrorCleanup	portalmem.rs:3392	lib.rs:960	MATCH	yes	autoHeld -> unpin + PortalDrop(false).
+AtSubCommit_Portals	portalmem.rs:3415	lib.rs:972	MATCH	yes	createSubid==mySubid->reparent+level; activeSubid==mySubid->parent; resowner NewParent dissolved to no-op (ledgered), control flow present.
+AtSubAbort_Portals	portalmem.rs:3449	lib.rs:1004	MATCH	yes	not-mine + mine paths reproduced; resowner owner args dissolved (ledgered).
+AtSubCleanup_Portals	portalmem.rs:3510	lib.rs:1073	MATCH	yes	createSubid!=mySubid continue; force-unpin; cleanup-still-set WARNING+clear; PortalDrop(false).
+pg_cursor	portalmem.rs:3572	lib.rs:1108	MATCH	yes	In-crate visible&&sourceText scan + 6 columns; SRF/Datum body crosses portalcmds seam (fmgr value-layer split).
+ThereAreNoReadyPortals	portalmem.rs:3633	lib.rs:1147	MATCH	yes	any READY -> false.
+HoldPinnedPortals	portalmem.rs:3658	lib.rs:1158	MATCH	yes	pinned&&!autoHeld: strategy!=ONE_SELECT->ERROR; status!=READY->elog ERROR; HoldPortal; autoHeld=true.
+ForgetPortalSnapshots	portalmem.rs:3754	lib.rs:1193	MATCH	yes	clear portalSnapshot; pop all ActiveSnapshot; mismatch->ERROR with both counts. Seams active_snapshot_set/pop.

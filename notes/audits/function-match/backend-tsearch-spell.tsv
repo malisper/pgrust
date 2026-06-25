@@ -1,0 +1,47 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+NIStartBuild	spell.rs:1162	lib.rs:363 ni_start_build	MATCH	yes	owned-context model flips building flag; temp-context auto-free subsumed by McxOwned drop
+NIFinishBuild	spell.rs:1174	lib.rs:371 ni_finish_build	MATCH	yes	clears Spell+CompoundAffixFlags scratch, flips building; == MemoryContextDelete(buildCxt)+nulling
+compact_palloc0	spell.rs:1183	(eliminated)	MATCH	yes	pure palloc-overhead bump-arena optimization; no observable behaviour; replaced by per-item PgVec
+cpstrdup	spell.rs:1206	lib.rs:569 new_bytes	MATCH	yes	strlen+1 copy -> NUL-free PgVec<u8>
+lowerstr_ctx	spell.rs:1217	lib.rs:433 str_tolower	MATCH	yes	str_tolower(src,strlen,DEFAULT_COLLATION_OID=100) via formatting seam wrapper
+cmpspell	spell.rs:1234	build.rs:1008 ni_sort_dictionary (bcmp word)	MATCH	yes	strcmp(word)
+cmpspellaffix	spell.rs:1243	build.rs:1008 ni_sort_dictionary (bcmp flag)	MATCH	yes	strcmp(p.flag)
+cmpcmdflag	spell.rs:1252	build.rs:606 cmpcmdflag	MATCH	yes	FM_NUM int compare else strcmp; debug_assert mirrors Assert
+findchar	spell.rs:1272	lib.rs:511 findchar	MATCH	yes	walk by pg_mblen, t_iseq compare
+findchar2	spell.rs:1286	lib.rs:523 findchar2	MATCH	yes	two-char variant
+strbcmp	spell.rs:1303	lib.rs:473 strbcmp	MATCH	yes	backward compare; shorter sorts first
+strbncmp	spell.rs:1333	lib.rs:490 strbncmp	MATCH	yes	backward bounded by count; l==0->0 first
+cmpaffix	spell.rs:1371	build.rs:1527 sort_affix	MATCH	yes	type first; prefix->strcmp(repl), suffix->strbcmp(repl)
+getNextFlagFromString	spell.rs:1392	build.rs:49 get_next_flag_from_string	MATCH	yes	Char/Long/Num state machine; strtol range checks; CONFIG_FILE_ERROR sqlstates
+IsAffixFlagInUse	spell.rs:1751	build.rs:135 is_affix_flag_in_use	MATCH	yes	empty flag->true; scan AffixData strcmp; debug_assert mirrors Assert
+NIAddSpell	spell.rs:1778	build.rs:157 ni_add_spell	MATCH	yes	grow-by-double subsumed by PgVec; flag==""->empty VoidString
+NIImportDictionary	spell.rs:1819	build.rs:304 ni_import_dictionary	MATCH	yes	flag extraction at /; trailing-space truncation; lowercase; add
+FindWord	spell.rs:1935	build.rs:178 find_word	MATCH	yes	trie binary search; flag&=FF_COMPOUNDFLAGMASK; isword/compoundflag predicates + IsAffixFlagInUse
+NIAddAffix	spell.rs:1997	build.rs:230 ni_add_affix	MATCH	yes	simple/regis/regex matcher selection; flagflags promotion; regex error->INVALID_REGULAR_EXPRESSION
+get_nextfield	spell.rs:2154	build.rs:353 get_nextfield	MATCH	yes	PAE_WAIT_MASK/INMASK; #->false; BUFSIZ truncation no-op under owned Vec
+parse_ooaffentry	spell.rs:2196	build.rs:385 parse_ooaffentry	MATCH	yes	5-field state walk; state codes preserved; early-EOL break; state<0 exit
+parse_affentry	spell.rs:2275	build.rs:458 parse_affentry	MATCH	yes	ispell mask>find,repl state machine; ' allowed in WAIT_FIND; syntax-error ereports
+setCompoundAffixFlagValue	spell.rs:2572	build.rs:541 set_compound_affix_flag_value	MATCH	yes	FM_NUM strtol+range->Num; else Str
+addCompoundAffixFlagValue	spell.rs:2678	build.rs:573 add_compound_affix_flag_value	MATCH	yes	leading-space skip; empty->syntax error; flag run stops at space/\n; sets usecompound
+getCompoundAffixFlagValue	spell.rs:2772	build.rs:619 get_compound_affix_flag_value	MATCH	yes	empty table->0; per-flag bsearch OR-ing values
+getAffixFlagSet	spell.rs:2824	build.rs:648 get_affix_flag_set	MATCH	yes	alias index resolution; >0 && <nAffixData / >nAffixData-error / VoidString branches
+NIImportOOAffixes	spell.rs:2927	build.rs:675 ni_import_oo_affixes	MATCH	yes	two-pass decls then qsort; AF alias compression; PFX/SFX header vs field; flag-width gating; /-flag extraction
+NIImportAffixes	spell.rs:3550	build.rs:843 ni_import_affixes	MATCH	yes	ispell path; old/new-format detection + conflict error; hands off to OOAffixes; s=recoded+4
+MergeAffix	spell.rs:3852	build.rs:974 merge_affix	MATCH	yes	empty-side short-circuit; FM_NUM comma join vs concat; appends and returns index
+makeCompoundFlags	spell.rs:3913	build.rs:999 make_compound_flags	MATCH	yes	getCompoundAffixFlagValue & FF_COMPOUNDFLAGMASK
+mkSPNode	spell.rs:3920	build.rs:1093 mk_sp_node	MATCH	yes	two-pass nchar count then fill; first-slot no-advance; MergeAffix+clearCompoundOnly; final-slot recurse; arena index
+NISortDictionary	spell.rs:4053	build.rs:1008 ni_sort_dictionary	MATCH	yes	alias branch (strtol validation) vs non-alias qsort+distinct count+AffixData fill; qsort by word + mkSPNode
+mkANode	spell.rs:4289	build.rs:1206 mk_a_node	MATCH	yes	affix-trie via GETCHAR front/back per type; per-slot aff list; first-slot no-advance; final-slot recurse
+mkVoidAffix	spell.rs:4442	build.rs:1315 mk_void_affix	MATCH	yes	synthetic isvoid node prepended; counts empty-repl affixes in [start,end); chains prior child
+isAffixInUse	spell.rs:4507	build.rs:1366 is_affix_in_use	MATCH	yes	scan AffixData via IsAffixFlagInUse
+NISortAffixes	spell.rs:4522	build.rs:1379 ni_sort_affixes	MATCH	yes	empty short-circuit; qsort; firstsuffix discovery; compound uniqueness via strbncmp; mkANode + two mkVoidAffix
+FindAffixes	spell.rs:4609	normalize.rs:64 find_affixes	MATCH	yes	single void-node handling; trie binary search GETWCHAR; returns matching slot with naff>0
+CheckAffix	spell.rs:4666	normalize.rs:122 check_affix	MATCH	yes	compound-flag gating (4 branches); suffix/prefix find; simple/regis/regex check (regex widen+pg_regexec==Matched)
+addToResult	spell.rs:4764	normalize.rs:214 add_to_result	MATCH	yes	forms.len()>=MAX_NORM-1 cap; dedup vs last entry
+NormalizeSubWord	spell.rs:4785	normalize.rs:230 normalize_sub_word	MATCH	yes	MAXNORMLEN guard; self-as-normal-form; prefix-only loop; suffix-then-prefix loop with CROSSPRODUCT; empty=NULL
+CheckCompoundAffixes	spell.rs:4976	normalize.rs:362 check_compound_affixes	MATCH	yes	null-table->-1; in-place strncmp vs strstr; len/issuffix update; *ptr advance every iter
+CopyVar	spell.rs:5030	normalize.rs SplitVar	MATCH	yes	linked list->Vec; CopyVar makedup 0/1 both clone (owned model never aliases)
+AddStem	spell.rs:5065	normalize.rs:50 add_stem	MATCH	yes	append stem to SplitVar
+SplitToVariants	spell.rs:5078	normalize.rs:404 split_to_variants	MATCH	yes	check_stack_depth; notprobed bitmap; compound-affix epenthesis loop; trie bsearch; head/tail ordering reproduces var->next chain
+addNorm	spell.rs:5274	normalize.rs:625 add_norm	MATCH	yes	< MAX_NORM-1 cap; lexeme into caller context
+NINormalizeWord	spell.rs:5298	normalize.rs:578 ni_normalize_word	MATCH	yes	base forms then compound variants; nvariant counter; < MAX_NORM cap; empty Vec->seam None (NULL)

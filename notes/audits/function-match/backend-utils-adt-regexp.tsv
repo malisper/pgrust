@@ -1,0 +1,52 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+RE_compile_and_cache	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:141	lib.rs:98	MATCH	yes	Self-organizing MRU cache; scan-from-front match on (len,cflags,collation,bytes), move-to-front, compile-on-miss, evict-at-32, insert-at-0. thread_local cache (per-backend global per AGENTS.md). Engine state owned behind RegexHandle; eviction frees via pg_regfree seam (C's MemoryContextDelete). Insert-failure path frees the just-compiled handle (C gets this from child-of-current context unwind).
+RE_wchar_execute	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:282	lib.rs:199	MATCH	yes	pg_regexec seam; Matched/NoMatch/Failed arms; Failed → ERRCODE_INVALID_REGULAR_EXPRESSION "regular expression failed".
+RE_execute	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:324	lib.rs:220	MATCH	yes	mb2wchar then RE_wchar_execute at start_search 0.
+RE_compile_and_execute	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:358	lib.rs:230	MATCH	yes	nmatch<2 (pmatch.len()<2) ⇒ REG_NOSUB; compile+execute.
+parse_re_flags	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:385	lib.rs:254	MATCH	yes	All 14 option chars + default error; bit set/clear identical; 'm'
+nameregexeq	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:459	lib.rs:339	MATCH	yes	REG_ADVANCED, nmatch 0.
+nameregexne	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:473	lib.rs:344	MATCH	yes	negation.
+textregexeq	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:487	lib.rs:349	MATCH	yes	
+textregexne	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:501	lib.rs:354	MATCH	yes	
+nameicregexeq	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:522	lib.rs:359	MATCH	yes	REG_ADVANCED|REG_ICASE.
+nameicregexne	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:536	lib.rs:364	MATCH	yes	
+texticregexeq	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:550	lib.rs:369	MATCH	yes	
+texticregexne	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:564	lib.rs:374	MATCH	yes	
+textregexsubstr	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:583	lib.rs:380	MATCH	yes	2 pmatch slots; re_nsub>0 ⇒ subexpr[1] else whole[0]; so<0||eo<0 ⇒ NULL; text_substr(so+1, eo-so) via seam.
+textregexreplace_noopt	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:642	lib.rs:423	MATCH	yes	REG_ADVANCED, search 0, n 1, via replace_text_regexp seam.
+textregexreplace	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:658	lib.rs:434	MATCH	yes	leading-digit ⇒ invalid-option error + HINT; parse flags; n = glob?0:1.
+textregexreplace_extended	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:700	lib.rs:472	MATCH	yes	start>0/n>=0 validation; n deduced from glob when absent; start-1. Optional args modeled as Option (C PG_NARGS).
+textregexreplace_extended_no_n	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:745	lib.rs:526	MATCH	yes	delegates with n=None.
+textregexreplace_extended_no_flags	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:752	lib.rs:540	MATCH	yes	delegates with flags=None.
+similar_escape_internal	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:768	lib.rs:561	MATCH	yes	Full SIMILAR-TO→ARE transform: prefix `^(?:`, suffix `)$`, escape-double-quote part separators (`){1,1}?(` / `){1,1}(?:`, >2 ⇒ error), multibyte slow path, bracket-class parsing with charclass_pos states 1/2/3, %→.* _→. (→(?: and \.^$ escaping. Default escape `\`, empty escape ⇒ none, >1-char escape validated via pg_mbstrlen_with_len.
+similar_to_escape_2	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1078	lib.rs:742	MATCH	yes	Some(esc).
+similar_to_escape_1	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1094	lib.rs:752	MATCH	yes	None ⇒ default escape.
+similar_escape	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1112	lib.rs:761	MATCH	yes	Non-strict: NULL pat ⇒ NULL; NULL esc ⇒ default.
+regexp_count	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1138	lib.rs:777	MATCH	yes	start>0; reject user 'g' then force glob; nmatches.
+regexp_count_no_start	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1181	lib.rs:806	MATCH	yes	
+regexp_count_no_flags	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1188	lib.rs:817	MATCH	yes	
+regexp_instr	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1198	lib.rs:828	MATCH	yes	start/n/endoption(0|1)/subexpr validation; pos = (n-1)*npatterns (+subexpr-1) *2 (+endoption); match_locs[pos]>=0 ? +1 : 0; n>nmatches or subexpr>npatterns ⇒ 0.
+regexp_instr_no_start	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1291	lib.rs:919	MATCH	yes	
+regexp_instr_no_n	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1298	lib.rs:929	MATCH	yes	
+regexp_instr_no_endoption	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1305	lib.rs:940	MATCH	yes	
+regexp_instr_no_flags	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1312	lib.rs:952	MATCH	yes	
+regexp_instr_no_subexpr	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1319	lib.rs:975	MATCH	yes	
+regexp_like	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1329	lib.rs:999	MATCH	yes	reject 'g'; RE_compile_and_execute nmatch 0.
+regexp_like_no_flags	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1357	lib.rs:1018	MATCH	yes	
+regexp_match	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1367	lib.rs:1034	MATCH	yes	reject 'g' (+HINT); setup w/ subpatterns; nmatches==0 ⇒ NULL; one build_regexp_match_result. elems/nulls workspace allocated in build fn (behavior-identical restructuring).
+regexp_match_no_flags	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1403	lib.rs:1062	MATCH	yes	
+regexp_matches	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1413	lib.rs:1079	MATCH	yes	Does NOT reject 'g'. Materializes one row per match; per-call setup+build retained and public for a value-per-call driver. Equivalent to SRF_RETURN_NEXT loop.
+regexp_matches_no_flags	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1462	lib.rs:1101	MATCH	yes	
+setup_regexp_matches	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1488	lib.rs:1153	MATCH	yes	wchar conv; REG_NOSUB unless subpatterns; npatterns/pmatch_len from re_nsub; array_len 255/31 grow 2^n-1 with MaxAllocSize(0x3fffffff)/4 limit ⇒ ERRCODE_PROGRAM_LIMIT_EXCEEDED; degenerate filter `so<wide_len && eo>prev_match_end`; subpattern vs whole-match location capture; maxlen tracking (incl. fetching_unmatched); zero-length advance +1; trailing match_locs[array_idx]=wide_len; wide_str kept only when eml>1. i64 offsets truncated to i32 on store (matches C int match_locs). conv_buf subsumed by conversion seam (maxlen has no further consumer).
+build_regexp_match_result	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1692	lib.rs:1315	MATCH	yes	loc = next_match*npatterns*2; per subpattern so/eo; <0 ⇒ NULL element; multibyte ⇒ wchar2mb(wide+so, eo-so); single-byte ⇒ text_substr(so+1, eo-so). Array construction (construct_md_array, TEXTOID) deferred to fmgr; returns element list.
+regexp_split_to_table	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1748	lib.rs:1357	MATCH	yes	reject 'g' then force glob; setup(false,true,true); loop next_match<=nmatches (nmatches+1 rows).
+regexp_split_to_table_no_flags	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1801	lib.rs:1385	MATCH	yes	
+regexp_split_to_array	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1812	lib.rs:1398	MATCH	yes	same matching; accumArrayResult/makeArrayResult deferred to fmgr; returns element list.
+regexp_split_to_array_no_flags	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1851	lib.rs:1426	MATCH	yes	
+build_regexp_split_result	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1863	lib.rs:1438	MATCH	yes	startpos = next_match>0 ? match_locs[next_match*2-1] : 0 (<0 ⇒ "invalid match ending position"); endpos = match_locs[next_match*2] (<startpos ⇒ "invalid match starting position"); multibyte wchar2mb vs single-byte text_substr.
+regexp_substr	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1904	lib.rs:1476	MATCH	yes	start/n>0/subexpr>=0; n>nmatches or subexpr>npatterns ⇒ NULL; pos math identical; so/eo<0 ⇒ NULL; text_substr(so+1, eo-so).
+regexp_substr_no_start	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1992	lib.rs:1556	MATCH	yes	
+regexp_substr_no_n	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:1999	lib.rs:1566	MATCH	yes	
+regexp_substr_no_flags	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:2006	lib.rs:1577	MATCH	yes	
+regexp_substr_no_subexpr	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:2013	lib.rs:1589	MATCH	yes	
+regexp_fixed_prefix	../pgrust/c2rust-runs/backend-utils-adt-regexp/src/regexp.rs:2025	lib.rs:1609	MATCH	yes	REG_ADVANCED(+ICASE)|REG_NOSUB; pg_regprefix seam: NoMatch⇒None, Prefix⇒(str,false), Exact⇒(str,true), Failed⇒ERRCODE_INVALID_REGULAR_EXPRESSION; wchar2mb back to db encoding. maxlen/Assert sizing subsumed by seam allocation.

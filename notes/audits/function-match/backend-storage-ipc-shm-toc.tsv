@@ -1,0 +1,14 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+tas	shm_toc.rs:64	(inlined)	MATCH	yes	c2rust SpinLock test-and-set shim; real Spinlock used.
+c2rust_pg_read_barrier	shm_toc.rs:68	(inlined)	MATCH	yes	c2rust barrier shim; fence(Acquire) at use sites.
+c2rust_pg_write_barrier	shm_toc.rs:72	(inlined)	MATCH	yes	c2rust barrier shim; fence(Release) at use sites.
+shm_toc_create	shm_toc.rs:76	lib.rs:190	MATCH	yes	magic, SpinLockInit, toc_total_bytes=BUFFERALIGN_DOWN, allocated/nentry=0, same order (audit).
+shm_toc_attach	shm_toc.rs:91	lib.rs:219	MATCH	yes	magic mismatch->None; both Asserts->debug_assert.
+shm_toc_allocate	shm_toc.rs:102	lib.rs:242	MATCH	yes	BUFFERALIGN; lock; toc_bytes math; wrapping_add overflow guard; release before ERROR OOM; pre-increment offset (audit spot-rederived).
+shm_toc_freespace	shm_toc.rs:182	lib.rs:284	MATCH	yes	read 3 fields under spinlock, release, total-(allocated+BUFFERALIGN(...)).
+shm_toc_insert	shm_toc.rs:218	lib.rs:315	MATCH	yes	Assert(address>toc) strict; offset relativized; nentry>=u32::MAX guard; release before ERROR; write then fence(Release) then ++nentry then unlock (audit spot-rederived).
+shm_toc_lookup	shm_toc.rs:311	lib.rs:368	MATCH	yes	lock-free read nentry, fence(Acquire), linear scan, found->base+offset; miss !noError->elog ERROR; noError->Ok(None) (audit).
+shm_toc_estimate	shm_toc.rs:368	lib.rs:438	MATCH	yes	offsetof+mul_size(keys,16)+add_size(chunks), BUFFERALIGN; add/mul via shmem seam (overflow->PgResult).
+shm_toc_initialize_estimator	shm_toc.h macro	lib.rs:419	MATCH	yes	zeroes both estimator fields.
+shm_toc_estimate_chunk	shm_toc.h macro	lib.rs:425	MATCH	yes	space_for_chunks=add_size(space_for_chunks,BUFFERALIGN(sz)).
+shm_toc_estimate_keys	shm_toc.h macro	lib.rs:431	MATCH	yes	number_of_keys=add_size(number_of_keys,cnt).

@@ -1,0 +1,31 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+pq_writeint32	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:149	crates/backend-libpq-pqformat/src/lib.rs:232	MATCH	yes	pqformat.h inline; pg_hton32=to_be_bytes (cross-checked vs c2rust swap_bytes on LE)
+pq_writeint64	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:161	crates/backend-libpq-pqformat/src/lib.rs:237	MATCH	yes	pqformat.h inline; pg_hton64=to_be_bytes
+pq_sendint32	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:173	crates/backend-libpq-pqformat/src/lib.rs:259	MATCH	yes	pqformat.h inline; enlarge+write = fallible append
+pq_sendint64	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:178	crates/backend-libpq-pqformat/src/lib.rs:264	MATCH	yes	pqformat.h inline; enlarge+write = fallible append
+pq_beginmessage	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:183	crates/backend-libpq-pqformat/src/lib.rs:99	MATCH	yes	initStringInfo (1024 prealloc, len 0) then cursor=msgtype
+pq_beginmessage_reuse	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:191	crates/backend-libpq-pqformat/src/lib.rs:107	MATCH	yes	resetStringInfo then stash msgtype in cursor
+pq_sendbytes	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:199	crates/backend-libpq-pqformat/src/lib.rs:113	MATCH	yes	appendBinaryStringInfo -> append_binary
+pq_sendcountedtext	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:207	crates/backend-libpq-pqformat/src/lib.rs:120	MATCH	yes	int32 count (excludes itself) then body; both conv/unconv branches verified
+pq_sendtext	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:225	crates/backend-libpq-pqformat/src/lib.rs:140	MATCH	yes	same two branches, no count, no NUL
+pq_sendstring	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:241	crates/backend-libpq-pqformat/src/lib.rs:153	MATCH	yes	appends string + NUL; cap-fire equivalence proven exact in audit
+pq_send_ascii_string	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:265	crates/backend-libpq-pqformat/src/lib.rs:171	MATCH	yes	IS_HIGHBIT_SET -> '?'; per-char append; trailing NUL
+pq_sendfloat4	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:288	crates/backend-libpq-pqformat/src/lib.rs:183	MATCH	yes	union pun = f32::to_bits then pq_sendint32
+pq_sendfloat8	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:294	crates/backend-libpq-pqformat/src/lib.rs:189	MATCH	yes	union pun = f64::to_bits then pq_sendint64
+pq_endmessage	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:300	crates/backend-libpq-pqformat/src/lib.rs:200	MATCH	yes	(void)pq_putmessage via seam; buffer consumed=pfree
+pq_endmessage_reuse	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:308	crates/backend-libpq-pqformat/src/lib.rs:210	MATCH	yes	same send, buffer not freed
+pq_begintypsend	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:314	crates/backend-libpq-pqformat/src/lib.rs:296	MATCH	yes	initStringInfo + four '\0' reserved for varlena length word
+pq_endtypsend	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:346	crates/backend-libpq-pqformat/src/lib.rs:309	MATCH	yes	SET_VARSIZE = LE store of len<<2; returns bytea
+pq_puttextmessage	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:353	crates/backend-libpq-pqformat/src/lib.rs:321	MATCH	yes	send strlen+1/slen+1 bytes; result discarded both branches
+pq_putemptymessage	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:372	crates/backend-libpq-pqformat/src/lib.rs:346	MATCH	yes	pq_putmessage(msgtype,NULL,0) -> &[]
+pq_getmsgbyte	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:378	crates/backend-libpq-pqformat/src/lib.rs:365	MATCH	yes	cursor>=len -> 08P01; returns byte as int 0..=255
+pq_getmsgint	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:424	crates/backend-libpq-pqformat/src/lib.rs:377	MATCH	yes	b 1/2/4 via from_be_bytes; default elog XX000 exact message
+pq_getmsgint64	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:492	crates/backend-libpq-pqformat/src/lib.rs:400	MATCH	yes	8 bytes via copymsgbytes, pg_ntoh64=i64::from_be_bytes
+pq_getmsgfloat4	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:502	crates/backend-libpq-pqformat/src/lib.rs:408	MATCH	yes	swap.i=pq_getmsgint(msg,4) -> f32::from_bits
+pq_getmsgfloat8	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:508	crates/backend-libpq-pqformat/src/lib.rs:413	MATCH	yes	swap.i=pq_getmsgint64 -> f64::from_bits
+pq_getmsgbytes	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:514	crates/backend-libpq-pqformat/src/lib.rs:422	MATCH	yes	bounds via saturating_sub reproduces signed len-cursor; 08P01; cursor+=datalen
+pq_copymsgbytes	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:566	crates/backend-libpq-pqformat/src/lib.rs:434	MATCH	yes	same check; memcpy into caller buf of len datalen; cursor+=datalen
+pq_getmsgtext	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:620	crates/backend-libpq-pqformat/src/lib.rs:452	MATCH	yes	cursor advances before conversion; conv/unconv paths match; *nbytes set
+pq_getmsgstring	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:688	crates/backend-libpq-pqformat/src/lib.rs:523	MATCH	yes	scan_cstring_len mirrors strlen-to-sentinel; no-NUL -> 08P01; then client_to_server
+pq_getmsgrawstring	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:740	crates/backend-libpq-pqformat/src/lib.rs:540	MATCH	yes	same scan/check/advance, no conversion, borrow into buffer
+pq_getmsgend	c2rust-runs/backend-libpq-pqformat/src/pqformat.rs:792	crates/backend-libpq-pqformat/src/lib.rs:549	MATCH	yes	cursor!=len -> 08P01 invalid message format

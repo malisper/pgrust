@@ -1,0 +1,37 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+DatumGetPointer	shm_mq.rs:937	(inlined)	MATCH	yes	c2rust Datum-cast shim (postgres.h macro); inlined.
+PointerGetDatum	shm_mq.rs:941	(inlined)	MATCH	yes	c2rust Datum-cast shim; inlined.
+pg_leftmost_one_pos64	shm_mq.rs:945	(inlined)	MATCH	yes	c2rust pg_bitutils inline; folded into pg_nextpower2_size_t helper.
+pg_nextpower2_64	shm_mq.rs:950	(inlined)	MATCH	yes	pg_bitutils inline; our pg_nextpower2_size_t (unit-tested) matches semantics.
+pg_atomic_write_u64_impl	shm_mq.rs:962	(inlined)	MATCH	yes	c2rust atomics shim; relaxed store + explicit fence.
+pg_atomic_read_u64_impl	shm_mq.rs:969	(inlined)	MATCH	yes	c2rust atomics shim; relaxed load + explicit fence.
+pg_atomic_init_u64_impl	shm_mq.rs:973	(inlined)	MATCH	yes	c2rust atomics shim.
+pg_atomic_init_u64	shm_mq.rs:980	(inlined)	MATCH	yes	c2rust atomics wrapper.
+pg_atomic_read_u64	shm_mq.rs:987	(inlined)	MATCH	yes	c2rust atomics wrapper.
+pg_atomic_write_u64	shm_mq.rs:991	(inlined)	MATCH	yes	c2rust atomics wrapper.
+tas	shm_mq.rs:998	(inlined)	MATCH	yes	c2rust SpinLock test-and-set shim; real Spinlock used.
+c2rust_pg_memory_barrier	shm_mq.rs:1003	(inlined)	MATCH	yes	c2rust barrier shim; fence(SeqCst) at use sites.
+c2rust_pg_read_barrier	shm_mq.rs:1007	(inlined)	MATCH	yes	c2rust barrier shim; fence(Acquire) at use sites.
+c2rust_pg_write_barrier	shm_mq.rs:1011	(inlined)	MATCH	yes	c2rust barrier shim; fence(Release) at use sites.
+shm_mq_create	shm_mq.rs:1018	lib.rs:392	MATCH	yes	MAXALIGN_DOWN size; header field-for-field init; NULL PGPROC->INVALID_PROC_NUMBER (audit).
+shm_mq_set_receiver	shm_mq.rs:1045	lib.rs:422	MATCH	yes	store under spinlock, read sender, SetLatch after release iff non-NULL.
+shm_mq_set_sender	shm_mq.rs:1067	lib.rs:436	MATCH	yes	symmetric to receiver.
+shm_mq_get_receiver	shm_mq.rs:1089	lib.rs:450	MATCH	yes	read under spinlock; NULL->None.
+shm_mq_get_sender	shm_mq.rs:1105	lib.rs:458	MATCH	yes	symmetric.
+shm_mq_attach	shm_mq.rs:1121	lib.rs:477	MATCH	yes	assert receiver/sender==MyProc; 12 handle fields; on_dsm_detach via dsm-core dep (audit).
+shm_mq_set_handle	shm_mq.rs:1154	lib.rs:518	MATCH	yes	Assert(handle==NULL)->debug_assert is_none.
+shm_mq_send	shm_mq.rs:1161	lib.rs:533	MATCH	yes	one-element iovec wrapper over sendv.
+shm_mq_sendv	shm_mq.rs:1177	lib.rs:556	MATCH	yes	nbytes>MaxAllocSize->ERROR 54000; length-word + data do/while loops, bottom-check ordering fixed in 74ebd82 (audit finding #1 resolved).
+shm_mq_receive	shm_mq.rs:1393	lib.rs:758	MATCH	yes	counterparty gate, consume-pending flush, split-word reassembly, single-chunk fast path, wrap-copy loop, ERROR 54000 (audit spot-rederived).
+shm_mq_wait_for_attach	shm_mq.rs:1678	lib.rs:984	MATCH	yes	victim selection by role, wait_internal->SUCCESS/DETACHED.
+shm_mq_detach	shm_mq.rs:1695	lib.rs:1008	MATCH	yes	flush send_pending, detach_internal, cancel_on_dsm_detach iff segment; C pfrees are drop of handle.
+shm_mq_detach_internal	shm_mq.rs:1716	lib.rs:1040	MATCH	yes	victim under spinlock, mq_detached=true under lock, SetLatch after release iff non-NULL.
+shm_mq_get_queue	shm_mq.rs:1739	lib.rs:524	MATCH	yes	accessor.
+shm_mq_send_bytes	shm_mq.rs:1742	lib.rs:1064	MATCH	yes	used/available math, compiler_fence, full/copy branches, WaitLatch send, ring memcpy w/ fence (audit spot-rederived).
+shm_mq_receive_bytes	shm_mq.rs:1847	lib.rs:1187	MATCH	yes	done test, fence(Acquire) before data ptr, detached re-read loop, WaitLatch receive (audit spot-rederived).
+shm_mq_counterparty_gone	shm_mq.rs:1915	lib.rs:1264	MATCH	yes	detached->true; bgworker status not in {STARTED,NOT_YET_STARTED}->set detached+true; else false.
+shm_mq_wait_internal	shm_mq.rs:1937	lib.rs:1299	MATCH	yes	per-iter pointer under spinlock (WaitTarget enum), detached-before-success ordering, WaitLatch internal (audit spot-rederived).
+shm_mq_inc_bytes_read	shm_mq.rs:1992	lib.rs:1354	MATCH	yes	fence(Acquire) before read-then-store (not fetch_add); SetLatch(sender).
+shm_mq_inc_bytes_written	shm_mq.rs:2003	lib.rs:1381	MATCH	yes	fence(Release) before read-then-store.
+shm_mq_detach_callback	shm_mq.rs:2011	lib.rs:1400	MATCH	yes	DatumGetPointer->queue base; detach_internal only.
+run_static_initializers	shm_mq.rs:2016	(n/a)	MATCH	yes	c2rust static-init shim (initializes shm_mq_minimum_size const); our const fn computes from repr(C) layout. No C function.

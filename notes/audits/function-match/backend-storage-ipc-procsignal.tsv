@@ -1,0 +1,37 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+pg_atomic_exchange_u32_impl	procsignal.rs:249	(inlined)	MATCH	yes	c2rust atomics transpile shim; our code uses real AtomicU32 ops.
+pg_atomic_fetch_or_u32_impl	procsignal.rs:256	(inlined)	MATCH	yes	c2rust atomics shim; real fetch_or.
+pg_atomic_fetch_add_u64_impl	procsignal.rs:263	(inlined)	MATCH	yes	c2rust atomics shim; real fetch_add.
+pg_atomic_read_u32_impl	procsignal.rs:270	(inlined)	MATCH	yes	c2rust atomics shim.
+pg_atomic_write_u32_impl	procsignal.rs:274	(inlined)	MATCH	yes	c2rust atomics shim.
+pg_atomic_init_u32_impl	procsignal.rs:281	(inlined)	MATCH	yes	c2rust atomics shim.
+pg_atomic_write_u64_impl	procsignal.rs:288	(inlined)	MATCH	yes	c2rust atomics shim.
+pg_atomic_read_u64_impl	procsignal.rs:295	(inlined)	MATCH	yes	c2rust atomics shim.
+pg_atomic_init_u64_impl	procsignal.rs:299	(inlined)	MATCH	yes	c2rust atomics shim.
+pg_atomic_add_fetch_u64_impl	procsignal.rs:306	(inlined)	MATCH	yes	c2rust atomics shim.
+pg_atomic_init_u32	procsignal.rs:313	(inlined)	MATCH	yes	c2rust atomics wrapper; inlined.
+pg_atomic_read_u32	procsignal.rs:320	(inlined)	MATCH	yes	c2rust atomics wrapper; inlined.
+pg_atomic_write_u32	procsignal.rs:324	(inlined)	MATCH	yes	c2rust atomics wrapper; inlined.
+pg_atomic_exchange_u32	procsignal.rs:331	(inlined)	MATCH	yes	c2rust atomics wrapper; real swap (ProcessProcSignalBarrier).
+pg_atomic_fetch_or_u32	procsignal.rs:338	(inlined)	MATCH	yes	c2rust atomics wrapper; real fetch_or (EmitProcSignalBarrier).
+pg_atomic_init_u64	procsignal.rs:345	(inlined)	MATCH	yes	c2rust atomics wrapper; inlined.
+pg_atomic_read_u64	procsignal.rs:352	(inlined)	MATCH	yes	c2rust atomics wrapper; inlined.
+pg_atomic_write_u64	procsignal.rs:356	(inlined)	MATCH	yes	c2rust atomics wrapper; inlined.
+pg_atomic_add_fetch_u64	procsignal.rs:363	(inlined)	MATCH	yes	c2rust atomics wrapper; fetch_add(1)+1 (EmitProcSignalBarrier).
+tas	procsignal.rs:370	(inlined)	MATCH	yes	c2rust SpinLock test-and-set shim; real Spinlock used.
+pg_rightmost_one_pos32	procsignal.rs:377	lib.rs:840	MATCH	yes	__builtin_ctz->trailing_zeros(); Assert->debug_assert (pg_bitutils.h inline).
+c2rust_pg_memory_barrier	procsignal.rs:381	(inlined)	MATCH	yes	c2rust barrier shim; our code uses fence(SeqCst).
+ProcSignalShmemSize	procsignal.rs:389	lib.rs:154	MATCH	yes	mul_size(slots, sizeof slot)+add_size(offsetof) via shmem seams; overflow->Err (audit).
+ProcSignalShmemInit	procsignal.rs:399	lib.rs:173	MATCH	yes	ShmemInitStruct found/!found->OnceLock::get_or_init; per-slot init incl. pss_barrierGeneration=u64::MAX (audit).
+ProcSignalInit	procsignal.rs:460	lib.rs:203	MATCH	yes	key-len asserts, both elog(ERROR) exact, under-mutex field order, post-release LOG, on_shmem_exit register (audit).
+CleanupProcSignalState	procsignal.rs:624	lib.rs:290	MATCH	yes	clears MyProcSignalSlot first, mutex re-check pid, mismatch LOG-and-return path, match path zeroes + CV broadcast (audit).
+SendProcSignal	procsignal.rs:687	lib.rs:344	MATCH	yes	procNumber arm + INVALID_PROC_NUMBER back-to-front scan; ESRCH/-1 fallthrough (audit).
+EmitProcSignalBarrier	procsignal.rs:749	lib.rs:390	MATCH	yes	flagbit=1<<type; fetch_or loop; add_fetch; reverse kill loop; returns generation (audit).
+WaitForProcSignalBarrier	procsignal.rs:804	lib.rs:442	MATCH	yes	DEBUG1 msgs; reverse loop; ConditionVariableTimedSleep(5000) w/ LOG on timeout; final fence(SeqCst) (audit).
+HandleProcSignalBarrierInterrupt	procsignal.rs:914	lib.rs:505	MATCH	yes	InterruptPending=true then ProcSignalBarrierPending=true, same order.
+ProcessProcSignalBarrier	procsignal.rs:925	lib.rs:518	MATCH	yes	PG_TRY/CATCH as closure; per-bit loop, SMGRRELEASE arm, BARRIER_CLEAR_BIT, ResetProcSignalBarrierBits on error+re-throw (audit, vs sigsetjmp rendering).
+ResetProcSignalBarrierBits	procsignal.rs:1008	lib.rs:645	MATCH	yes	fetch_or(flags); ProcSignalBarrierPending=true; InterruptPending=true, same order.
+CheckProcSignal	procsignal.rs:1022	lib.rs:659	MATCH	yes	reads MyProcSignalSlot once, clears flag only if set; no spinlock.
+procsignal_sigusr1_handler	procsignal.rs:1037	lib.rs:680	MATCH	yes	all 14 CheckProcSignal arms in C order, each delegating to owner seam; BARRIER in-crate; trailing SetLatch(MyLatch) (audit).
+SendCancelRequest	procsignal.rs:1085	lib.rs:763	MATCH	yes	PID==0 LOG; forward scan; timingsafe_bcmp on equal len; kill(-pid,SIGINT) HAVE_SETSID; all messages verbatim (audit).
+timingsafe_bcmp	(extern decl line 12)	lib.rs:848	MATCH	yes	libpgport non-OpenSSL arm: OR of byte XORs; equal-len precondition by caller (audit).

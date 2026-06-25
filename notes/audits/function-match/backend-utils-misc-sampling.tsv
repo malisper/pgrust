@@ -1,0 +1,11 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+BlockSampler_Init	sampling.rs:41	crates/backend-utils-misc-sampling/src/lib.rs:56	MATCH	yes	Field assigns in C order then sampler_random_init_state; Min(n,N) in unsigned space (n as BlockNumber).min(N) incl negative-samplesize wraparound.
+BlockSampler_HasMore	sampling.rs:59	crates/backend-utils-misc-sampling/src/lib.rs:77	MATCH	yes	(t<N)&&(m<n) with matching operand types.
+BlockSampler_Next	sampling.rs:63	crates/backend-utils-misc-sampling/src/lib.rs:81	MATCH	yes	K=N-t wrapping u32, k=n-m i32, take-all branch with post-inc t++, skip loop V<p, all float casts and wrapping arithmetic match.
+reservoir_init_selection_state	sampling.rs:87	crates/backend-utils-misc-sampling/src/lib.rs:145	MATCH	yes	Seed from pg_prng_uint32(global) -> global_prng next_u32; W=exp(-log(fract)/n).
+reservoir_get_next_S	sampling.rs:100	crates/backend-utils-misc-sampling/src/lib.rs:155	MATCH	yes	t<=22*n predicate; Algorithm X and Z arms re-derived term-by-term; descending product loop and W writeback match c2rust.
+sampler_random_init_state	sampling.rs:174	crates/backend-utils-misc-sampling/src/lib.rs:223	MATCH	yes	pg_prng_seed((uint64)seed) -> randstate.seed(seed as u64); double splitmix64 + zero-state check.
+sampler_random_fract	sampling.rs:181	crates/backend-utils-misc-sampling/src/lib.rs:228	MATCH	yes	do/while rejecting 0.0 -> loop with !=0.0; pg_prng_double -> next_f64 ((v>>12)*2^-52).
+anl_random_fract	sampling.rs:201	crates/backend-utils-misc-sampling/src/lib.rs:263	MATCH	yes	First-use init guard (seed oldrs from global, set flag) then fract; C static pair modeled as one Mutex<(state,bool)>.
+anl_init_selection_state	sampling.rs:214	crates/backend-utils-misc-sampling/src/lib.rs:268	MATCH	yes	Same init guard then exp(-log(fract)/n); same formula as reservoir_init.
+anl_get_next_S	sampling.rs:231	crates/backend-utils-misc-sampling/src/lib.rs:273	MATCH	yes	No init guard (matches C): locks state directly, writes oldrs.W=*stateptr, reservoir_get_next_S, writes back; fixed in audit round 1.

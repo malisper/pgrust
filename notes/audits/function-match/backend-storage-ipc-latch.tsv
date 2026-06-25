@@ -1,0 +1,11 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+c2rust_pg_memory_barrier	latch.rs:100	fence(SeqCst) inline	MATCH	yes	c2rust transpile shim for pg_memory_barrier(); mapped to fence(SeqCst) at each use site, not a source function
+InitializeLatchWaitSet	latch.rs:108	lib.rs::InitializeLatchWaitSet	MATCH	yes	assert null, CreateWaitEventSet(2), add WL_LATCH_SET at pos 0, IsUnderPostmaster WL_EXIT_ON_PM_DEATH at pos 1
+InitLatch	latch.rs:132	lib.rs::InitLatch	MATCH	yes	is_set/maybe_sleeping=false, owner_pid=MyProcPid, is_shared=false; WIN32 arm config-excluded
+InitSharedLatch	latch.rs:139	lib.rs::InitSharedLatch	MATCH	yes	is_set/maybe_sleeping=false, owner_pid=0, is_shared=true; WIN32 arm config-excluded
+OwnLatch	latch.rs:146	lib.rs::OwnLatch	MATCH	yes	assert is_shared, single owner_pid read, nonzero -> elog(PANIC) "latch already owned by PID %d", else store MyProcPid
+DisownLatch	latch.rs:182	lib.rs::DisownLatch	MATCH	yes	asserts is_shared + owner_pid==MyProcPid, owner_pid=0
+WaitLatch	latch.rs:186	lib.rs::WaitLatch	MATCH	yes	pm-death assert, ModifyWaitEvent pos 0/1, timeout gating, rc==0->WL_TIMEOUT else event.events
+WaitLatchOrSocket	latch.rs:233	lib.rs::WaitLatchOrSocket	MATCH	yes	CreateWaitEventSet(3), conditional adds in C order, result masking, free-on-error via guard Drop
+SetLatch	latch.rs:316	lib.rs::SetLatch / set_latch	MATCH	yes	memory barrier, quick exit if is_set, single owner_pid fetch, WakeupMyProc/WakeupOtherProc dispatch; infallible
+ResetLatch	latch.rs:337	lib.rs::ResetLatch	MATCH	yes	asserts owner_pid==MyProcPid + maybe_sleeping==false, is_set=false, trailing barrier

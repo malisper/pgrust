@@ -1,0 +1,11 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+ArrayGetOffset	probe-adt-arrayutils/src/arrayutils.rs:567	crates/backend-utils-adt-arrayutils/src/lib.rs	MATCH	yes	pure offset math; loop i=n-1..0
+ArrayGetNItems	probe-adt-arrayutils/src/arrayutils.rs:585	crates/backend-utils-adt-arrayutils/src/lib.rs	MATCH	yes	wraps *_safe(None); overflow hard error
+ArrayGetNItemsSafe	probe-adt-arrayutils/src/arrayutils.rs:592	crates/backend-utils-adt-arrayutils/src/lib.rs	MATCH	yes	per-dim product overflow + MaxArraySize check; errcode 54000
+ArrayCheckBounds	probe-adt-arrayutils/src/arrayutils.rs:709	crates/backend-utils-adt-arrayutils/src/lib.rs	MATCH	yes	wraps *_safe(None) discarding bool
+ArrayCheckBoundsSafe	probe-adt-arrayutils/src/arrayutils.rs:717	crates/backend-utils-adt-arrayutils/src/lib.rs	MATCH	yes	checked_add per dim; ereturn(false) errcode 54000
+mda_get_range	probe-adt-arrayutils/src/arrayutils.rs:766	crates/backend-utils-adt-arrayutils/src/lib.rs	MATCH	yes	span[i]=endp[i]-st[i]+1
+mda_get_prod	probe-adt-arrayutils/src/arrayutils.rs:781	crates/backend-utils-adt-arrayutils/src/lib.rs	MATCH	yes	prod[n-1]=1; reverse fill
+mda_get_offset_values	probe-adt-arrayutils/src/arrayutils.rs:796	crates/backend-utils-adt-arrayutils/src/lib.rs	MATCH	yes	dist accumulate nested loop
+mda_next_tuple	probe-adt-arrayutils/src/arrayutils.rs:819	crates/backend-utils-adt-arrayutils/src/lib.rs	MATCH	yes	carry loop; return i/0/-1
+ArrayGetIntegerTypmods	probe-adt-arrayutils/src/arrayutils.rs:847	crates/backend-utils-adt-arrayutils/src/lib.rs	SEAMED	no	3 guards + deconstruct_array_builtin + pg_strtoint32; cstring payload via detoast seam (unported owner)

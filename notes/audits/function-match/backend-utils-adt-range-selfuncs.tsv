@@ -1,0 +1,18 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+default_range_selectivity	rangetypes_selfuncs.rs:1584	range.rs:41	MATCH	yes	switch arms identical; 0.01/0.005/DEFAULT_RANGE_INEQ_SEL/DEFAULT_INEQ_SEL/default 0.01
+rangesel	rangetypes_selfuncs.rs:1596	range.rs:78	MATCH	yes	restriction-var punt, Const punt, constisnull->0, commute, @>elem single-point range, same-type DatumGetRangeTypeP, CLAMP_PROBABILITY
+calc_rangesel	rangetypes_selfuncs.rs:1719	range.rs:194	MATCH	yes	const deserialize for empty flag; shared calc_sel; CONTAINED merge; strict null multiplier + clamp
+calc_hist_selectivity	rangetypes_selfuncs.rs:1874	range.rs:250	MATCH	yes	needs_length_hist=CONTAINS|CONTAINED; full operator switch; -1.0 on no stats; const deserialize relocated to caller (equivalent)
+calc_hist_selectivity_scalar	rangetypes_selfuncs.rs:2197	lib.rs:400	MATCH	yes	shared kernel (identical in both C files); rbound_bsearch + Max(idx,0)/(n-1) + linear interpolation
+rbound_bsearch	rangetypes_selfuncs.rs:2226	lib.rs:432	MATCH	yes	shared kernel; lower=-1, upper=n-1, middle=(lower+upper+1)/2
+length_hist_bsearch	rangetypes_selfuncs.rs:2254	lib.rs:456	MATCH	yes	shared kernel; same bsearch on f64 length values
+get_position	rangetypes_selfuncs.rs:2276	lib.rs:475	MATCH	yes	shared kernel; finite/finite subdiff w/ NaN & zero-width->0.5 clamp; three infinite-bound branches
+get_len_position	rangetypes_selfuncs.rs:2367	lib.rs:548	MATCH	yes	shared kernel; 1.0-(hist2-value)/(hist2-hist1); infinite branches 1.0/0.0/0.5
+get_distance	rangetypes_selfuncs.rs:2386	lib.rs:581	MATCH	yes	shared kernel; finite/finite subdiff; infinite-bound get_float8_infinity branches
+calc_length_hist_frac	rangetypes_selfuncs.rs:2437	lib.rs:620	MATCH	yes	shared kernel; length-histogram area-fraction integral over [length1,length2]
+calc_hist_selectivity_contained	rangetypes_selfuncs.rs:2538	lib.rs:748	MATCH	yes	shared kernel; per-bin contained-area accumulation with length-hist fraction
+calc_hist_selectivity_contains	rangetypes_selfuncs.rs:2630	lib.rs:864	MATCH	yes	shared kernel; per-bin contains-area accumulation
+default_multirange_selectivity	multirangetypes_selfuncs.rs:1634	multirange.rs:57	MATCH	yes	all 27 operator arms identical
+multirangesel	multirangetypes_selfuncs.rs:1647	multirange.rs:107	MATCH	yes	same prologue; @>elem->make_multirange singleton; range-promotion arm (7 ops); var-is-elem/range punt (8 ops); same-type DatumGetMultirangeTypeP
+calc_multirangesel	multirangetypes_selfuncs.rs:1809	multirange.rs:258	MATCH	yes	empty iff rangeCount==0; overall bounds from range 0 / rangeCount-1; CONTAINED merge; shared calc_sel
+calc_hist_selectivity	multirangetypes_selfuncs.rs:1966	multirange.rs:353	MATCH	yes	rng_typcache=typcache->rngtype; needs_length_hist=4 contains/contained ops; full operator switch; filtered-out ops->elog; -1.0 on no stats

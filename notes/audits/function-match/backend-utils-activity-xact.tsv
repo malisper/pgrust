@@ -1,0 +1,13 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+AtEOXact_PgStat	pgstat_xact.rs:879	lib.rs:118	MATCH	yes	DB hook seam, then relations+dropped-stats when stack non-empty, then clear stack, then pgstat_clear_snapshot; Err skips clear+reset like C longjmp
+AtEOXact_PgStat_DroppedStats	pgstat_xact.rs:892	lib.rs:150	MATCH	yes	front-to-back drain; commit drops non-create, abort drops create; not_freed->gc; item removed after drop call (Err leaves item queued like C)
+AtEOSubXact_PgStat	pgstat_xact.rs:938	lib.rs:196	MATCH	yes	pop iff top.nest_level>=nestDepth; delinked before relation/dropped calls; node freed at scope end
+AtEOSubXact_PgStat_DroppedStats	pgstat_xact.rs:953	lib.rs:216	MATCH	yes	empty early-return before parent ensure; ensure(nestDepth-1)=parent top; item removed before branch; abort+create->drop, commit->push parent tail, else free; gc on not_freed
+AtPrepare_PgStat	pgstat_xact.rs:1007	lib.rs:269	MATCH	yes	relations hook only when stack non-empty; asserts as debug_assert
+PostPrepare_PgStat	pgstat_xact.rs:1017	lib.rs:286	MATCH	yes	relations hook when non-empty, then stack clear, then pgstat_clear_snapshot; infallible
+pgstat_get_xact_stack_level	pgstat_xact.rs:1029	lib.rs:310 (+ensure_xact_stack_level:321)	MATCH	yes	push new node iff top absent or top.nest_level!=nest_level; MemoryContextAlloc OOM->ERRCODE_OUT_OF_MEMORY; returns via closure (stack top = C node ptr)
+pgstat_get_transactional_drops	pgstat_xact.rs:1050	lib.rs:358	MATCH	yes	NULL stack->0 items; commit skips create, abort skips non-create; capacity=full pending count; iterates only top node
+pgstat_execute_transactional_drops	pgstat_xact.rs:1088	lib.rs:396	MATCH	yes	(ndrops,items) slice; empty early-return; per-item drop_entry; gc on not_freed; is_redo unused (matches C)
+create_drop_transactional_internal	pgstat_xact.rs:1112	lib.rs:418	MATCH	yes	GetCurrentTransactionNestLevel via seam; ensure level; item kind/dboid/objid_lo|hi as single u64; tail push; OOM-ordering differs but same ERROR
+pgstat_create_transactional	pgstat_xact.rs:1135	lib.rs:453	MATCH	yes	existence probe via seam; on hit ereport(WARNING,01000) identical text; pgstat_reset via seam; then internal create item
+pgstat_drop_transactional	pgstat_xact.rs:1185	lib.rs:477	MATCH	yes	one-line delegate with is_create=false

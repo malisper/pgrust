@@ -1,0 +1,27 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+InitMaterializedSRF	funcapi.rs:2601	crates/backend-utils-fmgr-funcapi/src/srf_support.rs:26	SEAMED	no	blocked on trimmed shapes (SRF note)
+init_MultiFuncCall	funcapi.rs:2748	crates/backend-utils-fmgr-funcapi/src/srf_support.rs:131	SEAMED	no	blocked on flinfo/econtext
+per_MultiFuncCall	funcapi.rs:2857	crates/backend-utils-fmgr-funcapi/src/srf_support.rs:182	SEAMED	no	blocked on flinfo->fn_extra
+end_MultiFuncCall	funcapi.rs:2865	crates/backend-utils-fmgr-funcapi/src/srf_support.rs:202	SEAMED	no	blocked on flinfo+econtext
+shutdown_MultiFuncCall	funcapi.rs:2879	crates/backend-utils-fmgr-funcapi/src/srf_support.rs:230	SEAMED	no	blocked on fn_extra+multi_call_memory_ctx
+get_call_result_type	funcapi.rs:2886	crates/backend-utils-fmgr-funcapi/src/result_type.rs:80	MATCH	yes	fn_oid/fn_expr via fmgr seam
+get_expr_result_type	funcapi.rs:2900	crates/backend-utils-fmgr-funcapi/src/result_type.rs:102	SEAMED	no	expr-node IsA dispatch owned by nodeFuncs
+get_func_result_type	funcapi.rs:3033	crates/backend-utils-fmgr-funcapi/src/result_type.rs:127	MATCH	yes	
+internal_get_result_type	funcapi.rs:3046	crates/backend-utils-fmgr-funcapi/src/result_type.rs:140	MATCH	yes	
+get_expr_result_tupdesc	funcapi.rs:3208	crates/backend-utils-fmgr-funcapi/src/result_type.rs:272	MATCH	yes	
+resolve_anyelement_from_others	funcapi.rs:3313	crates/backend-utils-fmgr-funcapi/src/polymorphic.rs:65	MATCH	yes	
+resolve_anyarray_from_others	funcapi.rs:3537	crates/backend-utils-fmgr-funcapi/src/polymorphic.rs:135	MATCH	yes	
+resolve_anyrange_from_others	funcapi.rs:3619	crates/backend-utils-fmgr-funcapi/src/polymorphic.rs:166	MATCH	yes	
+resolve_anymultirange_from_others	funcapi.rs:3700	crates/backend-utils-fmgr-funcapi/src/polymorphic.rs:194	MATCH	yes	
+resolve_polymorphic_tupdesc	funcapi.rs:3780	crates/backend-utils-fmgr-funcapi/src/polymorphic.rs:219	MATCH	yes	
+resolve_polymorphic_argtypes	funcapi.rs:4133	crates/backend-utils-fmgr-funcapi/src/polymorphic.rs:555	MATCH	yes	
+get_type_func_class	funcapi.rs:4418	crates/backend-utils-fmgr-funcapi/src/polymorphic.rs:762	MATCH	yes	
+get_func_arg_info	funcapi.rs:4451	crates/backend-utils-fmgr-funcapi/src/proc_info.rs:72	MATCH	yes	
+get_func_trftypes	funcapi.rs:4692	crates/backend-utils-fmgr-funcapi/src/proc_info.rs:179	MATCH	yes	
+get_func_input_arg_names	funcapi.rs:4778	crates/backend-utils-fmgr-funcapi/src/proc_info.rs:212	MATCH	yes	
+get_func_result_name	funcapi.rs:4938	crates/backend-utils-fmgr-funcapi/src/proc_info.rs:291	MATCH	yes	
+build_function_result_tupdesc_t	funcapi.rs:5148	crates/backend-utils-fmgr-funcapi/src/proc_info.rs:366	MATCH	yes	
+build_function_result_tupdesc_d	funcapi.rs:5200	crates/backend-utils-fmgr-funcapi/src/proc_info.rs:409	MATCH	yes	
+RelationNameGetTupleDesc	funcapi.rs:5452	crates/backend-utils-fmgr-funcapi/src/tupledesc.rs:37	MATCH	yes	
+TypeGetTupleDesc	funcapi.rs:5467	crates/backend-utils-fmgr-funcapi/src/tupledesc.rs:78	MATCH	yes	
+extract_variadic_args	funcapi.rs:5712	crates/backend-utils-fmgr-funcapi/src/tupledesc.rs:195	MATCH	yes	

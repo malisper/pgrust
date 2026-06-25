@@ -1,0 +1,19 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+MemoryContextSwitchTo	nodeTableFuncscan.rs:1790	(inline)	MATCH	yes	context swap realized idiomatically inline at ecxt switch sites
+Int32GetDatum	nodeTableFuncscan.rs:1796	(inline)	MATCH	yes	trivial cast macro; idiomatic inline
+DatumGetPointer	nodeTableFuncscan.rs:1800	(inline)	MATCH	yes	trivial cast macro; idiomatic inline
+newNode	nodeTableFuncscan.rs:1804	lib.rs:147	MATCH	yes	makeNode realized via alloc_in in ExecInitTableFuncScan
+list_head	nodeTableFuncscan.rs:1812	(inline)	MATCH	yes	List head read idiomatically as slice/iterator over list
+lnext	nodeTableFuncscan.rs:1820	(inline)	MATCH	yes	List cursor advance realized idiomatically via iterator
+TupleDescAttr	nodeTableFuncscan.rs:1830	lib.rs:531	MATCH	yes	attribute accessor reproduced idiomatically (scan_slot reads)
+ExecClearTuple	nodeTableFuncscan.rs:1847	lib.rs (execTuples seam)	SEAMED	no	delegated to execTuples seam
+ExecEvalExpr	nodeTableFuncscan.rs:1854	lib.rs:439 (execExpr seam)	SEAMED	no	expr eval delegated via execExpr exec_eval_expr_switch_context seam
+TableFuncNext	nodeTableFuncscan.rs:1863	lib.rs:79	MATCH	yes	first-call tupstore==NULL guard -> tfuncFetchRows; tuplestore_gettupleslot fwd/no-copy (audit verified)
+TableFuncRecheck	nodeTableFuncscan.rs:1874	lib.rs:104	MATCH	yes	unconditional true (audit verified)
+ExecTableFuncScan	nodeTableFuncscan.rs:1880	lib.rs:117	MATCH	yes	castNode + ExecScan(TableFuncNext,TableFuncRecheck) via execScan seam (audit verified)
+ExecInitTableFuncScan	nodeTableFuncscan.rs:1917	lib.rs:147	MATCH	yes	full init spine; BuildDescFromLists, slot/result-type, qual, routine selector, perTableCxt, expr lists, type-IO lookup (audit verified)
+ExecEndTableFuncScan	nodeTableFuncscan.rs:2024	lib.rs:305	MATCH	yes	if tupstore tuplestore_end then NULL (audit verified)
+ExecReScanTableFuncScan	nodeTableFuncscan.rs:2031	lib.rs:316	MATCH	yes	rescan teardown + ExecScanReScan (audit verified)
+tfuncFetchRows	nodeTableFuncscan.rs:2047	lib.rs:363	MATCH	yes	perTableCxt switch+reset; routine InitOpaque; tfuncInitialize; SetTable*; tfuncLoadRows; tuplestore (audit verified)
+tfuncInitialize	nodeTableFuncscan.rs:2105	lib.rs:457	MATCH	yes	docexpr eval/SetDocument; ns name/uri loop; rowexpr SetRowFilter; per-col SetColumnFilter + default eval (audit verified)
+tfuncLoadRows	nodeTableFuncscan.rs:2335	lib.rs:571	MATCH	yes	FetchRow loop; per-col GetValue with notnulls error; ordinality; tuplestore_puttuple; routine vtable via seam (audit verified)

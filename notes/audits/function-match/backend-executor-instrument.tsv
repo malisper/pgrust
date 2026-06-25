@@ -1,0 +1,16 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+pg_clock_gettime_ns	instrument.rs:112	lib.rs:381	MATCH	yes	instr_time.h inline; PG_INSTR_CLOCK CLOCK_MONOTONIC[_RAW]; ticks=tv_sec*NS_PER_S+tv_nsec
+InstrAlloc	instrument.rs:171	lib.rs:74	MATCH	yes	palloc0 n*sizeof -> zeroed PgVec; option-bit gate + per-element flag fill incl async_mode; MaxAllocSize gate
+InstrInit	instrument.rs:204	lib.rs:109	MATCH	yes	memset0 -> default; sets only three need_* flags
+InstrStartNode	instrument.rs:221	lib.rs:117	MATCH	yes	need_timer && !SET_CURRENT_LAZY -> elog ERROR "called twice"; buf/wal snapshots gated
+InstrStopNode	instrument.rs:266	lib.rs:135	MATCH	yes	save_tuplecount before +=; zero-starttime elog ERROR; ACCUM_DIFF+SET_ZERO; first-tuple async branch
+InstrUpdateTupleCount	instrument.rs:332	lib.rs:178	MATCH	yes	tuplecount += nTuples
+InstrEndLoop	instrument.rs:339	lib.rs:184	MATCH	yes	!running early return; nonzero-starttime elog ERROR; totals accum + reset block
+InstrAggNode	instrument.rs:386	lib.rs:214	MATCH	yes	first-tuple merge both branches; counter ADD; 8 double sums; need_buf/wal-gated Adds
+InstrStartParallelQuery	instrument.rs:416	lib.rs:256	MATCH	yes	snapshots pgBufferUsage/pgWalUsage into save thread-locals
+InstrEndParallelQuery	instrument.rs:421	lib.rs:265	MATCH	yes	zero out-params then AccumDiff(current,save) each
+InstrAccumParallelQuery	instrument.rs:439	lib.rs:281	MATCH	yes	adds worker usage into backend globals via BufferUsageAdd/WalUsageAdd
+BufferUsageAdd	instrument.rs:446	lib.rs:287	MATCH	yes	static; 10 int64 counters + 6 instr_time ADDs field-by-field
+BufferUsageAccumDiff	instrument.rs:468	lib.rs:307	MATCH	yes	10 += add-sub counters + 6 ACCUM_DIFFs
+WalUsageAdd	instrument.rs:498	lib.rs:333	MATCH	yes	static; 4 fields; wal_bytes u64 wrapping_add modular
+WalUsageAccumDiff	instrument.rs:505	lib.rs:342	MATCH	yes	wal_bytes wrapping_add(wrapping_sub); signed fields plain

@@ -1,0 +1,48 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+pq_init	pqcomm.rs:1161	lib.rs:215	MATCH	yes	Port fill, getsockname FATAL, NODELAY/KEEPALIVE FATALs (skip AF_UNIX), buffer init, on_proc_exit, set_noblock FATAL, FD_CLOEXEC FATAL, FeBeWaitSet creation, position asserts. Per audit.
+socket_comm_reset	pqcomm.rs:1391	lib.rs:382	MATCH	yes	Resets only PqCommBusy. Per audit.
+socket_close	pqcomm.rs:1394	lib.rs:389	MATCH	yes	NULL-MyProcPort no-op; secure_close; sock=PGINVALID_SOCKET. Per audit.
+ListenServerPort	pqcomm.rs:1401	lib.rs:421	MATCH	yes	AF_UNIX path-len check; Lock_AF_UNIX; getaddrinfo failures; per-addr loop socket/CLOEXEC/REUSEADDR/V6ONLY/bind/Setup_AF_UNIX/listen/log; STATUS_ERROR iff none added. Per audit.
+Lock_AF_UNIX	pqcomm.rs:2024	lib.rs:678	MATCH	yes	@-abstract shortcut; CreateSocketLockFile seam; unlink; path remembered. Per audit.
+Setup_AF_UNIX	pqcomm.rs:2041	lib.rs:744	MATCH	yes	@-abstract; numeric-gid vs getgrnam per strtoul; LOG+STATUS_ERROR paths; (uid_t)-1 owner. strtoul overflow clamp + \v whitespace (fix round 1). Per audit.
+AcceptConnection	pqcomm.rs:2167	lib.rs:812	MATCH	yes	accept; on failure LOG + pg_usleep(100000) + STATUS_ERROR. Per audit.
+TouchSocketFiles	pqcomm.rs:2212	lib.rs:851	MATCH	yes	utime(path,NULL), errors ignored. Per audit.
+RemoveSocketFiles	pqcomm.rs:2233	lib.rs:863	MATCH	yes	unlink each, errors ignored, list cleared. Per audit.
+socket_set_nonblocking	pqcomm.rs:2254	lib.rs:882	MATCH	yes	ERROR 08003 when MyProcPort NULL; else sets noblock. Per audit.
+pq_recvbuf	pqcomm.rs:2297	lib.rs:901	MATCH	yes	Left-justify/reset; blocking; errno=0; EINTR-continue; COMMERROR only when errno!=0; EOF on r<=0; length bump. Per audit.
+pq_getbyte	pqcomm.rs:2369	lib.rs:965	MATCH	yes	Assert reading; refill loop; unsigned byte, advances. Per audit.
+pq_peekbyte	pqcomm.rs:2383	lib.rs:985	MATCH	yes	Same without advance. Per audit.
+pq_getbyte_if_available	pqcomm.rs:2395	lib.rs:1005	MATCH	yes	Buffered fast path; nonblocking; errno=0; EAGAIN/EWOULDBLOCK/EINTR->0; other errno->COMMERROR; r==0 EOF; byte stored only on success. Per audit.
+pq_getbytes	pqcomm.rs:2454	lib.rs:1060	MATCH	yes	refill + bounded copy loop. Per audit.
+pq_discardbytes	pqcomm.rs:2483	lib.rs:1092	MATCH	yes	Same loop without copy. Per audit.
+pq_buffer_remaining_data	pqcomm.rs:2502	lib.rs:1119	MATCH	yes	Assert + difference. Per audit.
+pq_startmsgread	pqcomm.rs:2506	lib.rs:1130	MATCH	yes	FATAL 08P01 if already reading; then sets flag. Per audit.
+pq_endmsgread	pqcomm.rs:2550	lib.rs:1143	MATCH	yes	Assert + clear. Per audit.
+pq_is_reading_msg	pqcomm.rs:2554	lib.rs:1149	MATCH	yes	Returns flag. Per audit.
+pq_getmessage	pqcomm.rs:2558	lib.rs:1183	MATCH	yes	reset; 4-byte length read (COMMERROR EOF); ntoh32; len bounds COMMERROR; enlarge MaxAllocSize check; PG_CATCH discard+COMMERROR+rethrow (discard Err propagates, fix round 1); body EOF COMMERROR; flag cleared. Per audit.
+internal_putbytes	pqcomm.rs:2758	lib.rs:1254	MATCH	yes	flush-when-full; large-message direct internal_flush_buffer path; bounded buffer copy otherwise. Per audit.
+socket_flush	pqcomm.rs:2794	lib.rs:1310	MATCH	yes	Busy no-op; busy set before nonblocking(false)+flush; cleared on 0/EOF; stays set on Err. Per audit.
+internal_flush	pqcomm.rs:2806	lib.rs:1329	MATCH	yes	Delegates over send buffer/cursors; cursors written back on Err too; buffer moved (callers hold PqCommBusy). Per audit.
+internal_flush_buffer	pqcomm.rs:2814	lib.rs:1353	MATCH	yes	EINTR-continue; EAGAIN/EWOULDBLOCK->0; duplicate-suppressed COMMERROR; ClientConnectionLost/InterruptPending; EOF; errno latch reset; cursors zeroed. Per audit.
+socket_flush_if_writable	pqcomm.rs:2889	lib.rs:1403	MATCH	yes	Quick-exit when empty; busy no-op; nonblocking(true) before busy set. Per audit.
+socket_is_send_pending	pqcomm.rs:2903	lib.rs:1430	MATCH	yes	Returns send-pending. Per audit.
+socket_putmessage	pqcomm.rs:2906	lib.rs:1444	MATCH	yes	Assert msgtype; busy suppress; type byte + hton32(len+4) + body; goto fail clears busy on Ok, Err leaves set. Per audit.
+socket_putmessage_noblock	pqcomm.rs:2932	lib.rs:1477	MATCH	yes	required=ptr+1+4+len; grow-only repalloc; re-dispatch via pq_putmessage; Assert res==0. Per audit.
+pq_putmessage_v2	pqcomm.rs:2955	lib.rs:1502	MATCH	yes	Type byte + raw body, no length word; same busy handling. Per audit.
+pq_getkeepalivesidle	pqcomm.rs:2976	lib.rs:1656	MATCH	yes	NULL/AF_UNIX->0; cached; probe default via getsockopt(PG_TCP_KEEPALIVE_IDLE); LOG+-1 on failure. Per audit.
+pq_setkeepalivesidle	pqcomm.rs:3031	lib.rs:1680	MATCH	yes	NULL/AF_UNIX->OK; equal-value shortcut; probe default; 0->default; setsockopt LOG+ERROR; store. Per audit.
+pq_getkeepalivesinterval	pqcomm.rs:3095	lib.rs:1714	MATCH	yes	Same shape with TCP_KEEPINTVL. Per audit.
+pq_setkeepalivesinterval	pqcomm.rs:3151	lib.rs:1738	MATCH	yes	Same as setkeepalivesidle with interval. Per audit.
+pq_getkeepalivescount	pqcomm.rs:3215	lib.rs:1772	MATCH	yes	Same shape with TCP_KEEPCNT. Per audit.
+pq_setkeepalivescount	pqcomm.rs:3270	lib.rs:1796	MATCH	yes	Same as set family with count. Per audit.
+pq_gettcpusertimeout	pqcomm.rs:3334	lib.rs:1831/1856	MATCH	yes	Linux cfg = TCP_USER_TIMEOUT arm; other targets return 0 (#else, c2rust build). Per audit.
+pq_settcpusertimeout	pqcomm.rs:3340	lib.rs:1862/1897	MATCH	yes	Linux arm full; non-linux NULL/AF_UNIX precheck + LOG "not supported" + STATUS_ERROR for nonzero. Per audit.
+assign_tcp_keepalives_idle	pqcomm.rs:3381	lib.rs:1919	MATCH	yes	pq_setkeepalivesidle(newval, MyProcPort), result ignored. Per audit.
+show_tcp_keepalives_idle	pqcomm.rs:3388	lib.rs:1926	MATCH	yes	%d of pq_getkeepalivesidle(MyProcPort). Per audit.
+assign_tcp_keepalives_interval	pqcomm.rs:3399	lib.rs:1935	MATCH	yes	Per audit.
+show_tcp_keepalives_interval	pqcomm.rs:3406	lib.rs:1942	MATCH	yes	Per audit.
+assign_tcp_keepalives_count	pqcomm.rs:3417	lib.rs:1951	MATCH	yes	Per audit.
+show_tcp_keepalives_count	pqcomm.rs:3424	lib.rs:1958	MATCH	yes	Per audit.
+assign_tcp_user_timeout	pqcomm.rs:3435	lib.rs:1967	MATCH	yes	Per audit.
+show_tcp_user_timeout	pqcomm.rs:3442	lib.rs:1974	MATCH	yes	Per audit.
+pq_check_connection	pqcomm.rs:3453	lib.rs:1988	MATCH	yes	ModifyWaitEvent->WL_SOCKET_CLOSED; zero-timeout WaitEventSetWait; CLOSED->false; LATCH_SET->ResetLatch+retry; else true. Per audit.

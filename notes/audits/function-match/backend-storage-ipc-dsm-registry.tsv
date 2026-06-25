@@ -1,0 +1,6 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+MemoryContextSwitchTo	dsm_registry.rs:789	Mcx threading (top_mcx param)	SEAMED	no	c2rust-injected memutils.h inline; context switch modeled by threading Mcx<'static> top_mcx into dsm_create/dsm_attach
+DSMRegistryShmemSize	dsm_registry.rs:844	lib.rs:148	MATCH	yes	MAXALIGN(sizeof(DSMRegistryCtxStruct))=16
+DSMRegistryShmemInit	dsm_registry.rs:850	lib.rs:155	MATCH	yes	ShmemInitStruct("DSM Registry Data"); !found resets dsah=DSA_HANDLE_INVALID, dshh=DSHASH_HANDLE_INVALID
+init_dsm_registry	dsm_registry.rs:862	lib.rs:181	MATCH	yes	quick-exit on table!=NULL, DSMRegistryLock(offset 50) EXCLUSIVE, create vs attach branch, lock RAII release on both paths
+GetNamedDSMSegment	dsm_registry.rs:900	lib.rs:249	MATCH	yes	empty/too-long(>=64)/zero-size ERRORs, dshash_find_or_insert guard, invalid-handle create+pin path, find/attach path, dshash_release_lock

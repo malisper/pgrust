@@ -1,0 +1,38 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+pg_atomic_write_u64_impl	standby.rs:881	-	SEAMED	no	Inlined atomic header helper; MyProc->waitStart atomic write delegated via standby atomic seam (set_my_proc_wait_start).
+pg_atomic_read_u64_impl	standby.rs:888	-	SEAMED	no	Inlined atomic header helper; read delegated via my_proc_wait_start seam.
+pg_atomic_read_u64	standby.rs:892	-	SEAMED	no	Inlined wrapper over read_u64_impl; delegated via seam.
+pg_atomic_write_u64	standby.rs:896	-	SEAMED	no	Inlined wrapper over write_u64_impl; delegated via seam.
+pgstat_report_wait_start	standby.rs:908	-	SEAMED	no	Inlined header helper; delegated via activity-waitevent seam.
+pgstat_report_wait_end	standby.rs:912	-	SEAMED	no	Inlined header helper; delegated via activity-waitevent seam.
+InitRecoveryTransactionEnvironment	standby.rs:935	lib.rs:221	MATCH	yes	Tables->thread-local HashMaps; same init order; SharedInvalBackendInit/vxid stamp/GetNextLocalTransactionId/VirtualXactLockTableInsert/standbyState all present.
+ShutdownRecoveryTransactionEnvironment	standby.rs:978	lib.rs:255	MATCH	yes	NULL-guard; Expire->ReleaseAll->destroy->VirtualXactLockTableCleanup same order.
+GetStandbyLimitTime	standby.rs:990	lib.rs:285	MATCH	yes	GetXLogReceiptTime seam; -1=>0; TimestampTzPlusMilliseconds = tz+ms*1000.
+WaitExceedsMaxStandbyDelay	standby.rs:1012	lib.rs:313	MATCH	yes	CHECK_FOR_INTERRUPTS seam; ltime!=0 && now>=ltime; standbyWait_us doubling capped at 1e6.
+LogRecoveryConflict	standby.rs:1033	lib.rs:344	MATCH	yes	msecs/usecs split; pid-list via proc_number_get_proc_pid; plural/singular messages verbatim.
+ResolveRecoveryConflictWithVirtualXIDs	standby.rs:1162	lib.rs:415	MATCH	yes	Branch-for-branch identical: waitStart gating, per-vxid reset, cancel-on-delay 5ms grace, ps title, DeadlockTimeout LogRecoveryConflict with advanced waitlist.
+ResolveRecoveryConflictWithSnapshot	standby.rs:1244	lib.rs:526	MATCH	yes	InvalidXid no-op; GetConflictingVirtualXIDs; PROCSIG=10/wait event 0x0800002C; logical+catalog->InvalidateObsoleteReplicationSlots.
+ResolveRecoveryConflictWithSnapshotFullXid	standby.rs:1274	lib.rs:563	MATCH	yes	diff wrapping_sub < MaxTransactionId/2; low-32-bit truncation.
+ResolveRecoveryConflictWithTablespace	standby.rs:1289	lib.rs:580	MATCH	yes	GetConflictingVirtualXIDs(Invalid,Invalid); TABLESPACE=8/0x0800002D.
+ResolveRecoveryConflictWithDatabase	standby.rs:1302	lib.rs:594	MATCH	yes	while CountDBBackends>0 { CancelDBBackends(DATABASE=7); usleep(10000) }.
+ResolveRecoveryConflictWithLock	standby.rs:1309	lib.rs:619	MATCH	yes	Re-derived line-by-line: immediate path, STANDBY_LOCK/DEADLOCK timeouts, ProcWaitForSignal, two goto-cleanup paths, timeout disable + flag clear.
+ResolveRecoveryConflictWithBufferPin	standby.rs:1415	lib.rs:737	MATCH	yes	Immediate BUFFERPIN(12); STANDBY_TIMEOUT/DEADLOCK arm; ProcWaitForSignal(0x04000000); delay vs deadlock paths; disable_all_timeouts + flag clear.
+SendRecoveryConflictWithBufferPin	standby.rs:1460	lib.rs:804	MATCH	yes	Assert reason in {BUFFERPIN,STARTUP_DEADLOCK}; CancelDBBackends(Invalid,reason,false).
+CheckRecoveryConflictDeadlock	standby.rs:1464	lib.rs:819	MATCH	yes	HoldingBufferPinThatDelaysRecovery guard; ERROR 40P01 verbatim returned as Err.
+StandbyDeadLockHandler	standby.rs:1510	lib.rs:840	MATCH	yes	Sets deadlock flag.
+StandbyTimeoutHandler	standby.rs:1517	lib.rs:845	MATCH	yes	Sets delay flag.
+StandbyLockTimeoutHandler	standby.rs:1524	lib.rs:850	MATCH	yes	Sets lock flag.
+StandbyAcquireAccessExclusiveLock	standby.rs:1531	lib.rs:879	MATCH	yes	Skip valid/DidCommit/DidAbort order; xid entry create; lock de-dup; head-prepend LIFO; LockAcquire(AccessExclusiveLock=8,session) only when new; SET_LOCKTAG_RELATION field-for-field.
+StandbyReleaseXidEntryLocks	standby.rs:1620	lib.rs:912	MATCH	yes	Per-entry DEBUG4, LockRelease(true), failure LOG+debug_assert, hash removal; chain order preserved.
+StandbyReleaseLocks	standby.rs:1716	lib.rs:940	MATCH	yes	Valid xid->find+release+remove; invalid->StandbyReleaseAllLocks.
+StandbyReleaseLockTree	standby.rs:1741	lib.rs:958	MATCH	yes	xid then each subxid folded into slice.
+StandbyReleaseAllLocks	standby.rs:1755	lib.rs:967	MATCH	yes	DEBUG2; full-scan drain release+remove every xid entry.
+StandbyReleaseOldLocks	standby.rs:1806	lib.rs:985	MATCH	yes	skip prepared, skip !TransactionIdPrecedes(xid,oldxid); else release+remove; key-snapshot equivalent to hash_seq delete-current.
+standby_redo	standby.rs:1839	lib.rs:1150	MATCH	yes	info&~XLR_INFO_MASK; STANDBY_LOCK/RUNNING_XACTS/INVALIDATIONS dispatch; record-byte parsing verified vs standbydefs.h layouts; unknown->PANIC.
+LogStandbySnapshot	standby.rs:1932	lib.rs:1213	MATCH	yes	XLogStandbyInfoActive assert; locks log iff nlocks>0; running-data; ProcArrayLock release ordering by wal_level; XidGenLock release; returns recptr.
+LogCurrentRunningXacts	standby.rs:1961	lib.rs:1222	MATCH	yes	xl_running_xacts 24-byte layout; subxid_overflow flag; BeginInsert/SetRecordFlags/RegisterData order; xids iff xcnt>0; RM_STANDBY_ID=8; XLogSetAsyncXactLSN.
+LogAccessExclusiveLocks	standby.rs:2071	lib.rs:1293	MATCH	yes	header=nlocks(offset 4); 12-byte entries; register order; XLOG_STANDBY_LOCK insert.
+LogAccessExclusiveLock	standby.rs:2097	lib.rs:1315	MATCH	yes	GetCurrentTransactionId (fallible seam); LogAccessExclusiveLocks(1); MyXactFlags|=ACQUIREDACCESSEXCLUSIVELOCK.
+LogAccessExclusiveLockPrepare	standby.rs:2111	lib.rs:1333	MATCH	yes	(void) GetCurrentTransactionId().
+LogStandbyInvalidations	standby.rs:2115	lib.rs:1341	MATCH	yes	header dbId/tsId/inval/pad/nmsgs (16 bytes); raw 16-byte SharedInvalidationMessage payloads; XLOG_INVALIDATIONS insert.
+get_recovery_conflict_desc	standby.rs:2152	lib.rs:1403	MATCH	yes	All seven strings verbatim; default "unknown reason".

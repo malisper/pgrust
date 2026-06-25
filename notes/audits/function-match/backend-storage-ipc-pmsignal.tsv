@@ -1,0 +1,50 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+tas	barrier.rs:44	(inlined)	MATCH	yes	c2rust transpile shim for SpinLockAcquire test-and-set; our code uses real Spinlock (s-lock); no separate C function.
+BarrierInit	barrier.rs:48	barrier.rs:51	MATCH	yes	SpinLockInit + field init + ConditionVariableInit inlined; exact (audit).
+BarrierArriveAndWait	barrier.rs:61	barrier.rs:77	MATCH	yes	spinlock region, election logic, prepare/sleep/cancel CV loop, re-election; 1:1 (audit).
+BarrierArriveAndDetach	barrier.rs:119	barrier.rs:142	MATCH	yes	delegates BarrierDetachImpl(_, true).
+BarrierArriveAndDetachExceptLast	barrier.rs:123	barrier.rs:152	MATCH	yes	participants>1 early-return false; else assert==1, ++phase, true.
+BarrierAttach	barrier.rs:146	barrier.rs:173	MATCH	yes	assert !static_party, ++participants, return phase.
+BarrierDetach	barrier.rs:163	barrier.rs:191	MATCH	yes	delegates BarrierDetachImpl(_, false).
+BarrierPhase	barrier.rs:167	barrier.rs:204	MATCH	yes	lock-free phase read.
+BarrierParticipants	barrier.rs:171	barrier.rs:214	MATCH	yes	spinlocked participants read.
+BarrierDetachImpl	barrier.rs:189	barrier.rs:232	MATCH	yes	release predicate, ++phase, last=participants==0, broadcast outside lock; exact (audit spot-rederived).
+PMSignalShmemSize	pmsignal.rs:98	pmsignal.rs:181	MATCH	yes	offsetof header + mul_size/add_size over MaxLivePostmasterChildren(); checked-arith ereports preserved (audit).
+PMSignalShmemInit	pmsignal.rs:111	pmsignal.rs:211	MATCH	yes	!found zero-init, publish num_child_flags; OnceLock get_or_init models shmem find-or-create (audit).
+SendPostmasterSignal	pmsignal.rs:149	pmsignal.rs:239	MATCH	yes	!IsUnderPostmaster early return; set flag; kill(PostmasterPid,SIGUSR1).
+CheckPostmasterSignal	pmsignal.rs:160	pmsignal.rs:269	MATCH	yes	test-then-clear, no clear if unset.
+SetQuitSignalReason	pmsignal.rs:171	pmsignal.rs:289	MATCH	yes	store reason.
+GetQuitSignalReason	pmsignal.rs:178	pmsignal.rs:305	MATCH	yes	signal-handler-paranoid decode to NOT_SENT.
+MarkPostmasterChildSlotAssigned	pmsignal.rs:185	pmsignal.rs:329	MATCH	yes	bounds assert, slot--, !=UNUSED->FATAL(Err), set ASSIGNED.
+MarkPostmasterChildSlotUnassigned	pmsignal.rs:226	pmsignal.rs:355	MATCH	yes	result=(==ASSIGNED), set UNUSED, no state assert.
+IsPostmasterChildWalSender	pmsignal.rs:241	pmsignal.rs:372	MATCH	yes	== WALSENDER.
+RegisterPostmasterChildActive	pmsignal.rs:254	pmsignal.rs:391	MATCH	yes	asserts ASSIGNED, set ACTIVE, on_shmem_exit(MarkPostmasterChildInactive,0) via seam.
+MarkPostmasterChildWalSender	pmsignal.rs:271	pmsignal.rs:419	MATCH	yes	asserts ACTIVE, set WALSENDER.
+MarkPostmasterChildInactive	pmsignal.rs:280	pmsignal.rs:446	MATCH	yes	asserts ACTIVE||WALSENDER, set ASSIGNED.
+PostmasterIsAliveInternal	pmsignal.rs:293	pmsignal.rs:512	MATCH	yes	reset flag, death-watch read via seam; EAGAIN/EWOULDBLOCK->true; else re-arm+FATAL, false. WIN32 arm out of build config (audit).
+PostmasterDeathSignalInit	pmsignal.rs:367	pmsignal.rs:561	MATCH	yes	pqsignal(handler), request_parent_death_signal seam, seed possibly_dead=true.
+postmaster_death_handler	(in PostmasterDeathSignalInit path)	pmsignal.rs:471	MATCH	yes	static handler sets postmaster_possibly_dead=true; c2rust folds it into the installer; ported in-crate.
+BoolGetDatum	signalfuncs.rs:886	(inlined)	MATCH	yes	c2rust Datum-cast shim (postgres.h macro); inlined at call sites.
+DatumGetInt32	signalfuncs.rs:894	(inlined)	MATCH	yes	c2rust Datum-cast shim; inlined at call sites.
+DatumGetInt64	signalfuncs.rs:898	(inlined)	MATCH	yes	c2rust Datum-cast shim; inlined at call sites.
+pg_signal_backend	signalfuncs.rs:912	signalfuncs.rs:72	MATCH	yes	NULL-proc codes, privilege ladder, HAVE_SETSID kill(-pid,sig); SIGNAL_BACKEND_* 0-4 (audit spot-rederived).
+pg_cancel_backend	signalfuncs.rs:1007	signalfuncs.rs:156	MATCH	yes	SIGINT; NOSUPERUSER/NOAUTOVAC/NOPERMISSION errdetail exact; bool==SUCCESS.
+pg_wait_until_termination	signalfuncs.rs:1155	signalfuncs.rs:193	MATCH	yes	waittime=100 do/while as loop; kill(pid,0)/ESRCH->true; WaitLatch/ResetLatch; timeout WARNING plural.
+pg_terminate_backend	signalfuncs.rs:1261	signalfuncs.rs:273	MATCH	yes	timeout<0->NUMERIC_VALUE_OUT_OF_RANGE; SIGTERM; priv ladder; wait only SUCCESS&&timeout>0.
+pg_reload_conf	signalfuncs.rs:1460	signalfuncs.rs:320	MATCH	yes	kill(PostmasterPid,SIGHUP); fail->WARNING+false.
+pg_rotate_logfile	signalfuncs.rs:1494	signalfuncs.rs:343	MATCH	yes	!Logging_collector->WARNING+false; else SendPostmasterSignal(PMSIGNAL_ROTATE_LOGFILE)+true.
+proc_exit	ipc.rs:76	(none)	MISSING	no	ipc.c owned by backend-storage-ipc-dsm-core, not this unit (audit scope note).
+proc_exit_prepare	ipc.rs:131	(none)	MISSING	no	ipc.c owned by dsm-core.
+shmem_exit	ipc.rs:189	(none)	MISSING	no	ipc.c owned by dsm-core.
+atexit_callback	ipc.rs:269	(none)	MISSING	no	ipc.c owned by dsm-core.
+on_proc_exit	ipc.rs:273	(none)	MISSING	no	ipc.c owned by dsm-core.
+before_shmem_exit	ipc.rs:325	(none)	MISSING	no	ipc.c owned by dsm-core.
+on_shmem_exit	ipc.rs:378	(none)	MISSING	no	ipc.c owned by dsm-core; consumed here via backend_storage_ipc_seams::on_shmem_exit.
+cancel_before_shmem_exit	ipc.rs:431	(none)	MISSING	no	ipc.c owned by dsm-core.
+on_exit_reset	ipc.rs:477	(none)	MISSING	no	ipc.c owned by dsm-core.
+check_on_shmem_exit_lists_are_empty	ipc.rs:484	(none)	MISSING	no	ipc.c owned by dsm-core.
+RequestAddinShmemSpace	ipci.rs:198	(none)	MISSING	no	ipci.c owned by separate backend-storage-ipc-ipci unit (audit scope note).
+CalculateShmemSize	ipci.rs:231	(none)	MISSING	no	ipci.c owned by ipci unit.
+CreateSharedMemoryAndSemaphores	ipci.rs:293	(none)	MISSING	no	ipci.c owned by ipci unit.
+CreateOrAttachShmemStructs	ipci.rs:336	(none)	MISSING	no	ipci.c owned by ipci unit.
+InitializeShmemGUCs	ipci.rs:381	(none)	MISSING	no	ipci.c owned by ipci unit.

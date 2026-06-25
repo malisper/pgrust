@@ -1,0 +1,12 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+tas	s_lock.rs:53	crates/backend-storage-lmgr-s-lock/src/lib.rs:119	MATCH	yes	aarch64 __sync_lock_test_and_set(lock,1) -> AtomicI32::swap(1,Acquire); header-macro inline rendering
+spin_delay	s_lock.rs:57	crates/backend-storage-lmgr-s-lock/src/lib.rs:149	MATCH	yes	aarch64 isb / portable spin_loop hint; matches c2rust
+init_spin_delay	s_lock.rs:62	crates/backend-storage-lmgr-s-lock/src/lib.rs:162	MATCH	yes	zeros spins/delays/cur_delay, records file/line/func, returns struct by value
+pgstat_report_wait_start	s_lock.rs:76	(seam) backend-utils-activity-waitevent-seams	SEAMED	no	pgstat owner unported; thin ::call(event) marshal, no logic in seam
+pgstat_report_wait_end	s_lock.rs:80	(seam) backend-utils-activity-waitevent-seams	SEAMED	no	pgstat owner unported; bare ::call() marshal
+s_lock_stuck	s_lock.rs:89	crates/backend-storage-lmgr-s-lock/src/lib.rs:182	MATCH	yes	NULL func -> "(unknown)"; elog(PANIC) same arg order; PANIC never returns so -> ! faithful
+s_lock	s_lock.rs:127	crates/backend-storage-lmgr-s-lock/src/lib.rs:195	MATCH	yes	init_spin_delay; while TAS_SPIN loop -> perform_spin_delay; finish_spin_delay; returns delays
+perform_spin_delay	s_lock.rs:149	crates/backend-storage-lmgr-s-lock/src/lib.rs:213	MATCH	yes	pre-increment ordering, truncating float cast, MIN/MAX wrap; pg_usleep seamed; identical
+finish_spin_delay	s_lock.rs:174	crates/backend-storage-lmgr-s-lock/src/lib.rs:267	MATCH	yes	cur_delay==0 -> Min(+100,MAX); else >MIN -> Max(-1,MIN); same guards/clamps
+set_spins_per_delay	s_lock.rs:196	crates/backend-storage-lmgr-s-lock/src/lib.rs:282	MATCH	yes	plain assignment to backend-local estimate
+update_spins_per_delay	s_lock.rs:202	crates/backend-storage-lmgr-s-lock/src/lib.rs:298	MATCH	yes	(shared*15+local)/16 truncating integer division

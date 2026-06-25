@@ -1,0 +1,73 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+MemoryContextSwitchTo	execUtils.rs:3127	owned-mcx model	MATCH	yes	header inline; owned allocation/explicit-parent model
+CharGetDatum	execUtils.rs:3133	types-core	MATCH	yes	header inline; postgres.h
+Int16GetDatum	execUtils.rs:3137	types-core	MATCH	yes	header inline; postgres.h
+Int32GetDatum	execUtils.rs:3141	types-core	MATCH	yes	header inline; postgres.h
+PointerGetDatum	execUtils.rs:3145	types-core	MATCH	yes	header inline; postgres.h
+BlockIdSet	execUtils.rs:3151	types-tuple	MATCH	yes	header inline; block.h
+newNode	execUtils.rs:3161	owned makeNode model	MATCH	yes	header inline; makeNode realized as typed construction
+list_head	execUtils.rs:3169	types-nodes/pg_list	MATCH	yes	header inline; pg_list.h
+list_length	execUtils.rs:3177	types-nodes/pg_list	MATCH	yes	header inline; pg_list.h
+list_nth_cell	execUtils.rs:3181	types-nodes/pg_list	MATCH	yes	header inline; pg_list.h
+list_nth	execUtils.rs:3188	types-nodes/pg_list	MATCH	yes	header inline; pg_list.h
+lnext	execUtils.rs:3195	types-nodes/pg_list	MATCH	yes	header inline; pg_list.h
+TupleDescAttr	execUtils.rs:3205	types-tuple	MATCH	yes	header inline; tupdesc.h
+TupleDescCompactAttr	execUtils.rs:3222	types-tuple	MATCH	yes	header inline; tupdesc.h
+ItemPointerSetInvalid	execUtils.rs:3233	lib.rs (tmptup_from_composite)	MATCH	yes	header inline; itemptr.h, used in tmptup construction (audit row 49)
+att_isnull	execUtils.rs:3238	types-tuple	MATCH	yes	header inline; tupmacs.h
+fetch_att	execUtils.rs:3246	types-tuple	MATCH	yes	header inline; tupmacs.h
+HeapTupleHeaderGetDatumLength	execUtils.rs:3296	types-tuple	MATCH	yes	header inline; htup_details.h (used row 49)
+HeapTupleHeaderGetTypeId	execUtils.rs:3303	types-tuple	MATCH	yes	header inline; htup_details.h (used rows 30/31)
+HeapTupleHeaderGetTypMod	execUtils.rs:3309	types-tuple	MATCH	yes	header inline; htup_details.h
+HeapTupleHasNulls	execUtils.rs:3315	types-tuple	MATCH	yes	header inline; htup_details.h
+HeapTupleNoNulls	execUtils.rs:3320	lib.rs (heap_getattr fold)	MATCH	yes	header inline folded into heap_getattr (audit row 46)
+fastgetattr	execUtils.rs:3324	lib.rs (heap_getattr fold)	MATCH	yes	header inline folded into heap_getattr (audit row 46)
+heap_getattr	execUtils.rs:3356	lib.rs:heap_getattr	MATCH	yes	audit row 46; attnum>0 natts/missing/fastgetattr fold; null-bit; attnum<=0 -> heap_getsysattr
+pg_leftmost_one_pos64	execUtils.rs:3377	lib.rs (pg_prevpower2_size_t)	MATCH	yes	header inline; pg_bitutils.h; BITS-1-leading_zeros
+pg_prevpower2_64	execUtils.rs:3382	lib.rs:pg_prevpower2_size_t	MATCH	yes	audit row 48; 1<<leftmost_one_pos; UB-for-zero debug assert; unit-tested
+exec_rt_fetch	execUtils.rs:3393	lib.rs:exec_rt_fetch	MATCH	yes	audit row 47; list_nth(es_range_table, rti-1)
+CreateExecutorState	execUtils.rs:3403	lib.rs:CreateExecutorState	MATCH	yes	audit row 1; AllocSetContextCreate->new_child; EStateData::new_in field-by-field
+FreeExecutorState	execUtils.rs:3461	lib.rs:FreeExecutorState	MATCH	yes	audit row 2; reverse-creation FreeExprContext drain; JIT release; partdir; MemoryContextDelete->drop
+CreateExprContextInternal	execUtils.rs:3481	lib.rs:CreateExprContextInternal	MATCH	yes	audit row 3; static; all ExprContext fields to C values; pool append; size params ignored (mcx divergence)
+CreateExprContext	execUtils.rs:3522	lib.rs:CreateExprContext	MATCH	yes	audit row 4; ALLOCSET_DEFAULT_SIZES verified
+CreateWorkExprContext	execUtils.rs:3531	lib.rs:CreateWorkExprContext	MATCH	yes	audit row 5; pg_prevpower2(work_mem*1024/16); Min then Max order
+CreateStandaloneExprContext	execUtils.rs:3564	lib.rs:CreateStandaloneExprContext	MATCH	yes	audit row 6; node in caller ctx; ecxt_estate=NULL standalone
+FreeExprContext	execUtils.rs:3594	lib.rs:FreeExprContext + FreeStandaloneExprContext	MATCH	yes	audit row 7; both C ownership branches covered by two typed fns
+ReScanExprContext	execUtils.rs:3611	lib.rs:ReScanExprContext	MATCH	yes	audit row 8; ShutdownExprContext(true) + reset
+MakePerTupleExprContext	execUtils.rs:3616	lib.rs:MakePerTupleExprContext	MATCH	yes	audit row 9; lazy create-once cached id
+ExecAssignExprContext	execUtils.rs:3625	lib.rs:ExecAssignExprContext	MATCH	yes	audit row 10; ps_ExprContext=CreateExprContext
+ExecGetResultType	execUtils.rs:3632	lib.rs:ExecGetResultType	MATCH	yes	audit row 11; field read
+ExecGetResultSlotOps	execUtils.rs:3636	lib.rs:ExecGetResultSlotOps	MATCH	yes	audit row 12; all four branches incl TTS_FIXED cascade
+ExecGetCommonSlotOps	execUtils.rs:3664	lib.rs:ExecGetCommonSlotOps	MATCH	yes	audit row 13; nplans<=0 empty; probe first + loop; token equality
+ExecGetCommonChildSlotOps	execUtils.rs:3697	lib.rs:ExecGetCommonChildSlotOps	MATCH	yes	audit row 14; {outer,inner} order; .expect = C NULL-deref crash
+ExecAssignProjectionInfo	execUtils.rs:3709	lib.rs:ExecAssignProjectionInfo	SEAMED	no	audit row 15; ps_ProjInfo=ExecBuildProjectionInfo via execExpr owner seam (thin marshal)
+ExecConditionalAssignProjectionInfo	execUtils.rs:3722	lib.rs:ExecConditionalAssignProjectionInfo	MATCH	yes	audit row 16; match/else branches; resultops writes; lazy ExecInitResultSlot
+tlist_matches_tupdesc	execUtils.rs:3747	lib.rs:tlist_matches_tupdesc	MATCH	yes	audit row 17; static; six bail-outs in C order; trailing too-long check
+ExecAssignScanType	execUtils.rs:3797	lib.rs:ExecAssignScanType	SEAMED	no	audit row 18; ExecSetSlotDescriptor via execTuples seam
+ExecCreateScanSlotFromOuterPlan	execUtils.rs:3805	lib.rs:ExecCreateScanSlotFromOuterPlan	MATCH	yes	audit row 19; outerPlanState->ExecGetResultType->ExecInitScanTupleSlot; unit's own pending seam installed
+ExecRelationIsTargetRelation	execUtils.rs:3817	lib.rs:ExecRelationIsTargetRelation	MATCH	yes	audit row 20; list_member_int(resultRelations, scanrelid)
+ExecOpenScanRelation	execUtils.rs:3827	lib.rs:ExecOpenScanRelation	MATCH	yes	audit row 21; ExecGetRangeTableRelation; matview unscannable check; ereport 55000 msg+hint
+ExecInitRangeTable	execUtils.rs:3884	lib.rs:ExecInitRangeTable	MATCH	yes	audit row 22; six assignments in order incl palloc0 es_relations
+ExecGetRangeTableRelation	execUtils.rs:3902	lib.rs:ExecGetRangeTableRelation	MATCH	yes	audit row 23; pruned-rel check; first-open IsParallelWorker split; lock asserts; caches es_relations[rti-1]
+ExecInitResultRelation	execUtils.rs:3955	lib.rs:ExecInitResultRelation	MATCH	yes	audit row 24; open isResultRel; InitResultRelInfo via execMain seam; lazy palloc0; lappend
+UpdateChangedParamSet	execUtils.rs:3985	lib.rs:UpdateChangedParamSet	SEAMED	no	audit row 25; bms_intersect+bms_join via nodes-core seams; take()+move recycling
+executor_errposition	execUtils.rs:3994	lib.rs:executor_errposition	MATCH	yes	audit row 26; location<0/NULL guards; pg_mbstrlen_with_len+1; errposition
+RegisterExprContextCallback	execUtils.rs:4010	lib.rs:RegisterExprContextCallback	MATCH	yes	audit row 27; node in per_query_memory; push front of ecxt_callbacks
+UnregisterExprContextCallback	execUtils.rs:4028	lib.rs:UnregisterExprContextCallback	MATCH	yes	audit row 28; splices every fn&&arg match preserving survivor order; unit-tested
+ShutdownExprContext	execUtils.rs:4053	lib.rs:ShutdownExprContext	MATCH	yes	audit row 29; static; empty fast-path; pop-head loop runs cb only if isCommit
+GetAttributeByName	execUtils.rs:4081	lib.rs:GetAttributeByName	MATCH	yes	audit row 30; NULL tuple (0,true); lookup_rowtype_tupdesc; name scan namestrcmp; InvalidAttrNumber elog
+GetAttributeByNum	execUtils.rs:4222	lib.rs:GetAttributeByNum	MATCH	yes	audit row 31; invalid attrno elog before NULL-tuple check; else as row 30 minus name scan
+ExecTargetListLength	execUtils.rs:4322	lib.rs:ExecTargetListLength	MATCH	yes	audit row 32; list_length
+ExecCleanTargetListLength	execUtils.rs:4328	lib.rs:ExecCleanTargetListLength	MATCH	yes	audit row 33; count of !resjunk
+ExecGetTriggerOldSlot	execUtils.rs:4354	lib.rs:ExecGetTriggerOldSlot	MATCH	yes	audit row 34; lazy ExecInitExtraTupleSlot in es_query_cxt; cached ri_TrigOldSlot
+ExecGetTriggerNewSlot	execUtils.rs:4373	lib.rs:ExecGetTriggerNewSlot	MATCH	yes	audit row 35; as row 34 for ri_TrigNewSlot
+ExecGetReturningSlot	execUtils.rs:4392	lib.rs:ExecGetReturningSlot	MATCH	yes	audit row 36; as row 34 for ri_ReturningSlot
+ExecGetAllNullSlot	execUtils.rs:4411	lib.rs:ExecGetAllNullSlot	MATCH	yes	audit row 37; row 34 + ExecStoreAllNullTuple before caching ri_AllNullSlot
+ExecGetChildToRootMap	execUtils.rs:4429	lib.rs:ExecGetChildToRootMap	MATCH	yes	audit row 38; valid-flag gate; convert_tuples_by_name; flag set both arms
+ExecGetRootToChildMap	execUtils.rs:4450	lib.rs:ExecGetRootToChildMap	MATCH	yes	audit row 39; Assert ri_RootResultRelInfo; build_attrmap_by_name_if_req; flag set regardless
+ExecGetInsertedCols	execUtils.rs:4481	lib.rs:ExecGetInsertedCols	MATCH	yes	audit row 40; GetResultRTEPermissionInfo NULL->NULL; child rel map; copy-out semantics
+ExecGetUpdatedCols	execUtils.rs:4501	lib.rs:ExecGetUpdatedCols	MATCH	yes	audit row 41; as row 40 over updatedCols
+ExecGetExtraUpdatedCols	execUtils.rs:4521	lib.rs:ExecGetExtraUpdatedCols	MATCH	yes	audit row 42; !valid -> ExecInitGenerated CMD_UPDATE; returns ri_extraUpdatedCols
+ExecGetAllUpdatedCols	execUtils.rs:4531	lib.rs:ExecGetAllUpdatedCols	MATCH	yes	audit row 43; bms_union(Updated, ExtraUpdated); explicit mcx
+GetResultRTEPermissionInfo	execUtils.rs:4552	lib.rs:GetResultRTEPermissionInfo	MATCH	yes	audit row 44; static; three-way rti choice; rti>0 gate; getRTEPermissionInfo seam
+ExecGetResultRelCheckAsUser	execUtils.rs:4575	lib.rs:ExecGetResultRelCheckAsUser	MATCH	yes	audit row 45; NULL perminfo elog; checkAsUser?:GetUserId

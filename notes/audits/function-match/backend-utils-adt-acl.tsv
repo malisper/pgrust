@@ -1,0 +1,172 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+is_safe_acl_char	acl.rs:2943	aclitem_io.rs:56	MATCH	yes	name/logic cross-checked; MATCH per audit
+getid	acl.rs:2953	aclitem_io.rs:72	MATCH	yes	quote/escape handling; NAMEDATALEN-1 bound; ERRCODE_NAME_TOO_LONG; whitespace skip both ends
+putid	acl.rs:3039	aclitem_io.rs:133	MATCH	yes	quote-if-unsafe; "" escaping
+aclparse	acl.rs:3078	aclitem_io.rs:181	MATCH	yes	group/user keyword; = handling; full priv-char switch; * grant-option; /grantor; defaulted-grantor WARNING; ACL_ID_PUBLIC
+allocacl	acl.rs:3445	acl_ops.rs:136	MATCH	yes	name/logic cross-checked; MATCH per audit
+make_empty_acl	acl.rs:3508	acl_ops.rs:150	MATCH	yes	name/logic cross-checked; MATCH per audit
+aclcopy	acl.rs:3512	acl_ops.rs:155	MATCH	yes	name/logic cross-checked; MATCH per audit
+aclconcat	acl.rs:3572	acl_ops.rs:164	MATCH	yes	name/logic cross-checked; MATCH per audit
+aclmerge	acl.rs:3694	acl_ops.rs:179	MATCH	yes	name/logic cross-checked; MATCH per audit
+aclitemsort	acl.rs:3763	acl_ops.rs:207	MATCH	yes	name/logic cross-checked; MATCH per audit
+aclequal	acl.rs:3808	acl_ops.rs:217	MATCH	yes	name/logic cross-checked; MATCH per audit
+check_acl	acl.rs:3901	acl_ops.rs:238	MATCH	yes	name/logic cross-checked; MATCH per audit
+aclitemin	acl.rs:4024	aclitem_io.rs:342	MATCH	yes	trailing-garbage check; soft-error Ok(None) mirrors ereturn
+aclitemout	acl.rs:4073	aclitem_io.rs:381	MATCH	yes	grantee/grantor name via AUTHOID syscache (SEAMED); numeric OID fallback; N_ACL_RIGHTS loop; * for goptions
+aclitem_match	acl.rs:4173	aclitem_io.rs:449	MATCH	yes	name/logic cross-checked; MATCH per audit
+aclitemComparator	acl.rs:4179	aclitem_io.rs:455	MATCH	yes	name/logic cross-checked; MATCH per audit
+aclitem_eq	acl.rs:4206	aclitem_io.rs:479	MATCH	yes	name/logic cross-checked; MATCH per audit
+hash_aclitem	acl.rs:4223	aclitem_io.rs:484	MATCH	yes	sum of privs
+hash_aclitem_extended	acl.rs:4237	aclitem_io.rs:494	MATCH	yes	seeded hash_bytes_uint32_extended (init 0x9e3779b9+4+3923095, mix/final)
+acldefault	acl.rs:4259	acldefault.rs:48	MATCH	yes	all 13 ObjectType cases + default elog; world/owner defaults; ACL_ALL_RIGHTS_* verified field-by-field vs acl.h
+acldefault_sql	acl.rs:4399	acldefault.rs:166	MATCH	yes	char->ObjectType map verified vs C case list exactly
+aclupdate	acl.rs:4485	acl_ops.rs:244	MATCH	yes	DROP_RESTRICT->ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST; restart-on-modify loop
+aclnewowner	acl.rs:4661	acl_ops.rs:341	MATCH	yes	name/logic cross-checked; MATCH per audit
+check_circularity	acl.rs:4789	acl_ops.rs:410	MATCH	yes	name/logic cross-checked; MATCH per audit
+recursive_revoke	acl.rs:4919	acl_ops.rs:468	MATCH	yes	name/logic cross-checked; MATCH per audit
+aclmask	acl.rs:5055	acl_ops.rs:531	MATCH	yes	owner-goption fast path via has_privs_of_role (SEAMED); direct + indirect-membership pass; remaining recompute; ACLMASK_ALL/ANY done predicate
+aclmask_direct	acl.rs:5184	acl_ops.rs:591	MATCH	yes	infallible (no membership lookup); owner==roleid goption path
+aclmembers	acl.rs:5283	acl_ops.rs:633	MATCH	yes	worst-case 2N alloc; sort + qunique-equivalent dedup
+aclinsert	acl.rs:5375	acl_ops.rs:671	MATCH	yes	ERRCODE_FEATURE_NOT_SUPPORTED stub
+aclremove	acl.rs:5416	acl_ops.rs:677	MATCH	yes	ERRCODE_FEATURE_NOT_SUPPORTED stub
+aclcontains	acl.rs:5457	acl_ops.rs:688	MATCH	yes	logic in _impl/SRF body; argless entry panics at unported fmgr/SRF PG_GETARG/SRF marshaling boundary (own logic present, behavior-identical)
+makeaclitem	acl.rs:5510	acl_ops.rs:718	MATCH	yes	logic in _impl/SRF body; argless entry panics at unported fmgr/SRF PG_GETARG/SRF marshaling boundary (own logic present, behavior-identical)
+convert_any_priv_string	acl.rs:5617	acl_ops.rs:808	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_aclright_to_string	acl.rs:5710	acl_ops.rs:780	MATCH	yes	name/logic cross-checked; MATCH per audit
+aclexplode	acl.rs:5770	acl_ops.rs:772	MATCH	yes	logic in _impl/SRF body; argless entry panics at unported fmgr/SRF PG_GETARG/SRF marshaling boundary (own logic present, behavior-identical)
+has_table_privilege_name_name	acl.rs:5922	has_privilege.rs:55	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_table_privilege_name	acl.rs:5960	has_privilege.rs:70	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_table_privilege_name_id	acl.rs:5991	has_privilege.rs:84	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_table_privilege_id	acl.rs:6030	has_privilege.rs:100	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_table_privilege_id_name	acl.rs:6060	has_privilege.rs:115	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_table_privilege_id_id	acl.rs:6094	has_privilege.rs:129	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_table_name	acl.rs:6128	has_privilege.rs:1354	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_table_priv_string	acl.rs:6143	has_privilege.rs:1175	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_sequence_privilege_name_name	acl.rs:6238	has_privilege.rs:169	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_sequence_privilege_name	acl.rs:6317	has_privilege.rs:187	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_sequence_privilege_name_id	acl.rs:6389	has_privilege.rs:204	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_sequence_privilege_id	acl.rs:6474	has_privilege.rs:228	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_sequence_privilege_id_name	acl.rs:6551	has_privilege.rs:251	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_sequence_privilege_id_id	acl.rs:6626	has_privilege.rs:268	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_sequence_priv_string	acl.rs:6706	has_privilege.rs:1198	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_any_column_privilege_name_name	acl.rs:6751	has_privilege.rs:295	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_any_column_privilege_name	acl.rs:6794	has_privilege.rs:313	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_any_column_privilege_name_id	acl.rs:6830	has_privilege.rs:330	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_any_column_privilege_id	acl.rs:6884	has_privilege.rs:354	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_any_column_privilege_id_name	acl.rs:6931	has_privilege.rs:377	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_any_column_privilege_id_id	acl.rs:6970	has_privilege.rs:394	MATCH	yes	name/logic cross-checked; MATCH per audit
+column_privilege_check	acl.rs:7019	has_privilege.rs:1476	MATCH	yes	InvalidAttrNumber->-1; attribute-then-class aclcheck; is_missing->-1
+has_column_privilege_name_name_name	acl.rs:7056	has_privilege.rs:430	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_column_privilege_name_name_attnum	acl.rs:7104	has_privilege.rs:447	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_column_privilege_name_id_name	acl.rs:7148	has_privilege.rs:463	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_column_privilege_name_id_attnum	acl.rs:7192	has_privilege.rs:479	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_column_privilege_id_name_name	acl.rs:7232	has_privilege.rs:493	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_column_privilege_id_name_attnum	acl.rs:7276	has_privilege.rs:509	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_column_privilege_id_id_name	acl.rs:7316	has_privilege.rs:524	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_column_privilege_id_id_attnum	acl.rs:7356	has_privilege.rs:539	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_column_privilege_name_name	acl.rs:7392	has_privilege.rs:552	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_column_privilege_name_attnum	acl.rs:7433	has_privilege.rs:568	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_column_privilege_id_name	acl.rs:7470	has_privilege.rs:583	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_column_privilege_id_attnum	acl.rs:7507	has_privilege.rs:598	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_column_name	acl.rs:7539	has_privilege.rs:1438	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_column_priv_string	acl.rs:7614	has_privilege.rs:1211	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_database_privilege_name_name	acl.rs:7669	has_privilege.rs:728	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_database_privilege_name	acl.rs:7707	has_privilege.rs:732	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_database_privilege_name_id	acl.rs:7738	has_privilege.rs:736	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_database_privilege_id	acl.rs:7783	has_privilege.rs:740	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_database_privilege_id_name	acl.rs:7821	has_privilege.rs:744	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_database_privilege_id_id	acl.rs:7855	has_privilege.rs:748	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_database_name	acl.rs:7895	has_privilege.rs:1364	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_database_priv_string	acl.rs:7899	has_privilege.rs:1226	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_foreign_data_wrapper_privilege_name_name	acl.rs:7953	has_privilege.rs:755	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_foreign_data_wrapper_privilege_name	acl.rs:7996	has_privilege.rs:759	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_foreign_data_wrapper_privilege_name_id	acl.rs:8032	has_privilege.rs:763	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_foreign_data_wrapper_privilege_id	acl.rs:8077	has_privilege.rs:767	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_foreign_data_wrapper_privilege_id_name	acl.rs:8115	has_privilege.rs:771	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_foreign_data_wrapper_privilege_id_id	acl.rs:8154	has_privilege.rs:775	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_foreign_data_wrapper_name	acl.rs:8194	has_privilege.rs:1371	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_foreign_data_wrapper_priv_string	acl.rs:8198	has_privilege.rs:1241	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_function_privilege_name_name	acl.rs:8223	has_privilege.rs:782	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_function_privilege_name	acl.rs:8261	has_privilege.rs:786	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_function_privilege_name_id	acl.rs:8292	has_privilege.rs:790	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_function_privilege_id	acl.rs:8337	has_privilege.rs:794	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_function_privilege_id_name	acl.rs:8375	has_privilege.rs:798	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_function_privilege_id_id	acl.rs:8409	has_privilege.rs:802	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_function_name	acl.rs:8449	has_privilege.rs:1381	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_function_priv_string	acl.rs:8502	has_privilege.rs:1250	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_language_privilege_name_name	acl.rs:8527	has_privilege.rs:809	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_language_privilege_name	acl.rs:8565	has_privilege.rs:813	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_language_privilege_name_id	acl.rs:8596	has_privilege.rs:817	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_language_privilege_id	acl.rs:8641	has_privilege.rs:821	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_language_privilege_id_name	acl.rs:8679	has_privilege.rs:825	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_language_privilege_id_id	acl.rs:8713	has_privilege.rs:829	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_language_name	acl.rs:8753	has_privilege.rs:1393	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_language_priv_string	acl.rs:8757	has_privilege.rs:1259	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_schema_privilege_name_name	acl.rs:8782	has_privilege.rs:836	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_schema_privilege_name	acl.rs:8820	has_privilege.rs:840	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_schema_privilege_name_id	acl.rs:8851	has_privilege.rs:844	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_schema_privilege_id	acl.rs:8896	has_privilege.rs:848	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_schema_privilege_id_name	acl.rs:8932	has_privilege.rs:852	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_schema_privilege_id_id	acl.rs:8966	has_privilege.rs:856	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_schema_name	acl.rs:9006	has_privilege.rs:1400	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_schema_priv_string	acl.rs:9010	has_privilege.rs:1268	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_server_privilege_name_name	acl.rs:9045	has_privilege.rs:863	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_server_privilege_name	acl.rs:9083	has_privilege.rs:867	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_server_privilege_name_id	acl.rs:9114	has_privilege.rs:871	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_server_privilege_id	acl.rs:9159	has_privilege.rs:875	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_server_privilege_id_name	acl.rs:9195	has_privilege.rs:879	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_server_privilege_id_id	acl.rs:9229	has_privilege.rs:883	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_server_name	acl.rs:9269	has_privilege.rs:1407	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_server_priv_string	acl.rs:9273	has_privilege.rs:1279	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_tablespace_privilege_name_name	acl.rs:9298	has_privilege.rs:890	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_tablespace_privilege_name	acl.rs:9341	has_privilege.rs:894	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_tablespace_privilege_name_id	acl.rs:9377	has_privilege.rs:898	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_tablespace_privilege_id	acl.rs:9422	has_privilege.rs:902	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_tablespace_privilege_id_name	acl.rs:9460	has_privilege.rs:906	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_tablespace_privilege_id_id	acl.rs:9499	has_privilege.rs:910	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_tablespace_name	acl.rs:9539	has_privilege.rs:1414	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_tablespace_priv_string	acl.rs:9543	has_privilege.rs:1288	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_type_privilege_name_name	acl.rs:9568	has_privilege.rs:917	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_type_privilege_name	acl.rs:9606	has_privilege.rs:921	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_type_privilege_name_id	acl.rs:9635	has_privilege.rs:925	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_type_privilege_id	acl.rs:9680	has_privilege.rs:929	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_type_privilege_id_name	acl.rs:9716	has_privilege.rs:933	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_type_privilege_id_id	acl.rs:9750	has_privilege.rs:937	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_type_name	acl.rs:9790	has_privilege.rs:1424	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_type_priv_string	acl.rs:9843	has_privilege.rs:1297	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_param_priv_byname	acl.rs:9865	has_privilege.rs:1510	MATCH	yes	is_missing semantics; routed through aclchk
+has_parameter_privilege_name_name	acl.rs:9875	has_privilege.rs:946	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_parameter_privilege_name	acl.rs:9905	has_privilege.rs:957	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_parameter_privilege_id_name	acl.rs:9927	has_privilege.rs:966	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_parameter_priv_string	acl.rs:9953	has_privilege.rs:1306	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_lo_priv_byid	acl.rs:9984	has_privilege.rs:1517	MATCH	yes	LO snapshot=NULL iff ACL_UPDATE else GetActiveSnapshot; is_missing semantics
+has_largeobject_privilege_name_id	acl.rs:10009	has_privilege.rs:980	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_largeobject_privilege_id	acl.rs:10044	has_privilege.rs:997	MATCH	yes	name/logic cross-checked; MATCH per audit
+has_largeobject_privilege_id_id	acl.rs:10072	has_privilege.rs:1013	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_largeobject_priv_string	acl.rs:10103	has_privilege.rs:1317	MATCH	yes	name/logic cross-checked; MATCH per audit
+pg_has_role_name_name	acl.rs:10138	has_privilege.rs:1033	MATCH	yes	name/logic cross-checked; MATCH per audit
+pg_has_role_name	acl.rs:10176	has_privilege.rs:1047	MATCH	yes	name/logic cross-checked; MATCH per audit
+pg_has_role_name_id	acl.rs:10206	has_privilege.rs:1060	MATCH	yes	name/logic cross-checked; MATCH per audit
+pg_has_role_id	acl.rs:10239	has_privilege.rs:1073	MATCH	yes	name/logic cross-checked; MATCH per audit
+pg_has_role_id_name	acl.rs:10264	has_privilege.rs:1085	MATCH	yes	name/logic cross-checked; MATCH per audit
+pg_has_role_id_id	acl.rs:10297	has_privilege.rs:1098	MATCH	yes	name/logic cross-checked; MATCH per audit
+convert_role_priv_string	acl.rs:10324	has_privilege.rs:1331	MATCH	yes	name/logic cross-checked; MATCH per audit
+pg_role_aclcheck	acl.rs:10382	has_privilege.rs:1548	MATCH	yes	name/logic cross-checked; MATCH per audit
+initialize_acl	acl.rs:10413	role_membership.rs:84	MATCH	yes	bootstrap guard; cached_db_hash; 3 syscache inval callbacks (AUTHMEMROLEMEM/AUTHOID/DATABASEOID)
+RoleMembershipCacheCallback	acl.rs:10450	role_membership.rs:117	MATCH	yes	DATABASEOID hash filter; invalidate all 3 RoleRecurseType slots
+roles_list_append	acl.rs:10465	role_membership.rs:134	MATCH	yes	Bloom-filter fast path; ROLES_LIST_BLOOM_THRESHOLD=1024 build at *10
+roles_is_member_of	acl.rs:10516	role_membership.rs:187	MATCH	yes	cache short-circuit; pg_database datdba; iterate-while-appending agenda; admin_role out-param; PRIVS/SETROLE filters; pg_database_owner implicit membership; persistent cache via leaked slice (TopMemoryContext)
+has_privs_of_role	acl.rs:10651	role_membership.rs:335	MATCH	yes	name/logic cross-checked; MATCH per audit
+member_can_set_role	acl.rs:10669	role_membership.rs:355	MATCH	yes	name/logic cross-checked; MATCH per audit
+check_can_set_role	acl.rs:10687	role_membership.rs:376	MATCH	yes	ERRCODE_INSUFFICIENT_PRIVILEGE; GetUserNameFromId
+is_member_of_role	acl.rs:10731	role_membership.rs:393	MATCH	yes	name/logic cross-checked; MATCH per audit
+is_member_of_role_nosuper	acl.rs:10749	role_membership.rs:413	MATCH	yes	name/logic cross-checked; MATCH per audit
+is_admin_of_role	acl.rs:10767	role_membership.rs:428	MATCH	yes	name/logic cross-checked; MATCH per audit
+select_best_admin	acl.rs:10779	role_membership.rs:445	MATCH	yes	name/logic cross-checked; MATCH per audit
+select_best_grantor	acl.rs:10788	role_membership.rs:462	MATCH	yes	owner/superuser short path; popcount64->count_ones tie-break
+get_role_oid	acl.rs:10853	role_membership.rs:520	MATCH	yes	name/logic cross-checked; MATCH per audit
+get_role_oid_or_public	acl.rs:10910	role_membership.rs:538	MATCH	yes	name/logic cross-checked; MATCH per audit
+get_rolespec_oid	acl.rs:10921	role_membership.rs:550	MATCH	yes	ERRCODE_UNDEFINED_OBJECT/RESERVED_NAME; ROLESPEC_* variants
+get_rolespec_tuple	acl.rs:11012	role_membership.rs:580	MATCH	yes	name/logic cross-checked; MATCH per audit
+get_rolespec_name	acl.rs:11213	role_membership.rs:640	MATCH	yes	name/logic cross-checked; MATCH per audit
+check_rolespec_name	acl.rs:11228	role_membership.rs:650	MATCH	yes	name/logic cross-checked; MATCH per audit

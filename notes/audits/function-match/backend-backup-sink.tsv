@@ -1,0 +1,19 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+bbsink_begin_backup	basebackup_sink.rs:548	lib.rs:400	MATCH	yes	Header inline dispatch helper; sets state+buffer_length, calls begin_backup, asserts buffer!=NULL and buffer_length%BLCKSZ==0.
+bbsink_begin_archive	basebackup_sink.rs:558	lib.rs:419	MATCH	yes	Dispatches begin_archive with archive_name.
+bbsink_archive_contents	basebackup_sink.rs:567	lib.rs:430	MATCH	yes	Asserts len>0 && len<=buffer_length then dispatches archive_contents.
+bbsink_end_archive	basebackup_sink.rs:571	lib.rs:448	MATCH	yes	Dispatches end_archive.
+bbsink_begin_manifest	basebackup_sink.rs:575	lib.rs:456	MATCH	yes	Dispatches begin_manifest.
+bbsink_manifest_contents	basebackup_sink.rs:579	lib.rs:466	MATCH	yes	Asserts len>0 && len<=buffer_length then dispatches manifest_contents.
+bbsink_end_manifest	basebackup_sink.rs:583	lib.rs:482	MATCH	yes	Dispatches end_manifest.
+bbsink_end_backup	basebackup_sink.rs:587	lib.rs:495	MATCH	yes	Asserts tablespace_num==tablespaces.len() then dispatches end_backup with endptr,endtli.
+bbsink_cleanup	basebackup_sink.rs:597	lib.rs:511	MATCH	yes	Dispatches cleanup.
+bbsink_forward_begin_backup	basebackup_sink.rs:601	lib.rs:525	MATCH	yes	Forwards begin_backup with this sink's buffer_length, shares next's buffer (shares_next_buffer=true).
+bbsink_forward_begin_archive	basebackup_sink.rs:610	lib.rs:541	MATCH	yes	Forwards begin_archive with archive_name to next.
+bbsink_forward_archive_contents	basebackup_sink.rs:617	lib.rs:559	MATCH	yes	Shared-buffer assert (next present, shares_next_buffer, equal lengths) then forwards len.
+bbsink_forward_end_archive	basebackup_sink.rs:624	lib.rs:573	MATCH	yes	Forwards end_archive to next.
+bbsink_forward_begin_manifest	basebackup_sink.rs:628	lib.rs:585	MATCH	yes	Forwards begin_manifest to next.
+bbsink_forward_manifest_contents	basebackup_sink.rs:632	lib.rs:599	MATCH	yes	Shared-buffer assert then forwards len to next.
+bbsink_forward_end_manifest	basebackup_sink.rs:639	lib.rs:613	MATCH	yes	Forwards end_manifest to next.
+bbsink_forward_end_backup	basebackup_sink.rs:643	lib.rs:625	MATCH	yes	Forwards endptr,endtli to next.
+bbsink_forward_cleanup	basebackup_sink.rs:651	lib.rs:639	MATCH	yes	Forwards cleanup to next.

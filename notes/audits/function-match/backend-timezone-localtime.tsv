@@ -1,0 +1,34 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+init_ttinfo	localtime.rs:220	localtime.rs (ttinfo struct literals in tzparse/build_posix_transitions)	MATCH	yes	inlined; every call site mirrored by a full literal with tt_ttisstd:false, tt_ttisut:false
+detzcode	localtime.rs:232	localtime.rs:1599 (read_be_i32)	MATCH	yes	byte ladder + sign branch == big-endian two's-complement i32 read
+detzcode64	localtime.rs:258	localtime.rs:1603 (read_be_i64)	MATCH	yes	same for 64-bit
+differ_by_repeat	localtime.rs:288	localtime.rs:715 (differ_by_repeat)	MATCH	yes	early return never fires (63>=34), transcribed; checked_sub conservative-identical (t1>=t0 from sorted ats)
+tzloadbody	localtime.rs:300	localtime.rs:73/627 (tzload + parse_tzif + parse_tzif_block + parse_footer_posix + extend_with_posix + set_default_type)	MATCH	yes	decomposed; every C step re-derived (header validation, 32/64-bit block, footer graft, defaulttype). Findings F1/F3 fixed and re-audited
+tzload	localtime.rs:784	localtime.rs:73 (tzload)	MATCH	yes	errno collapsed to TzLoadError{NotFound,Invalid}; pg_open_tzfile SEAMED inside (thin marshal); close-error unobservable
+typesequiv	localtime.rs:801	localtime.rs:698 (typesequiv)	MATCH	yes	bounds + utoff/isdst/ttisstd/ttisut equality + abbrev strcmp via read_cstr (NUL-bounded)
+getzname	localtime.rs:863	localtime.rs:1093 (parse_zone_name, unquoted arm)	MATCH	yes	stops at NUL/digit/,/-/+ ; &str end == C NUL; ASCII delimiters
+getqzname	localtime.rs:882	localtime.rs:1093 (parse_zone_name, < arm)	MATCH	yes	scan to >; missing > -> None
+getnum	localtime.rs:896	localtime.rs:1109 (getnum)	MATCH	yes	first byte digit; reject on >max; reject <min; checked_mul/add cannot fire for reachable values
+getsecs	localtime.rs:933	localtime.rs:1133 (getsecs)	MATCH	yes	hh[0,167]/mm[0,59]/ss[0,60], optional : levels nested as C
+getoffset	localtime.rs:971	localtime.rs:1152 (parse_offset)	MATCH	yes	leading -/+ ; negation after parse
+getrule	localtime.rs:991	localtime.rs:1180 (parse_rule)	MATCH	yes	J/M m.n.d/bare-digit forms; /time via getoffset else default 2*SECSPERHOUR
+transtime	localtime.rs:1065	localtime.rs:1312 (transtime)	MATCH	yes	all three rule arms incl Zeller's congruence, week-advance loop, month-prefix; i64 value-identical to bounded i32
+tzparse	localtime.rs:1142	localtime.rs:109/1216 (tzparse + build_posix_transitions)	MATCH	yes	lastditch + quoted/unquoted std/dst, TZDEFRULESTRING unconditional (load_ok const false), rules loop with exact break/no-increment; dead TZDEFRULES else-branch elided (observable behavior preserved)
+gmtload	localtime.rs:1481	localtime.rs:211 (gmtload)	MATCH	yes	tzload("GMT") failure -> tzparse("GMT")
+localsub	localtime.rs:1492	localtime.rs:280 (localsub)	MATCH	yes	goback/goahead extrapolation (repeat_mapping, recursion, tm_year shift, range check) mirrors C; finding F2 fixed
+pg_localtime	localtime.rs:1574	localtime.rs:271 (pg_localtime)	MATCH	yes	thin wrapper; owned pg_tm instead of C static tm (representational)
+gmtsub	localtime.rs:1580	localtime.rs:252 (gmtsub)	MATCH	yes	lazily-init GMT state (thread_local OnceCell for static gmtptr); timesub; tm_zone WILDABBR when offset!=0
+pg_gmtime	localtime.rs:1603	localtime.rs:310 (pg_gmtime)	MATCH	yes	gmtsub(timep, 0)
+leaps_thru_end_of_nonneg	localtime.rs:1606	localtime.rs:1409 (leaps_thru_end_of_nonneg)	MATCH	yes	y/4 - y/100 + y/400
+leaps_thru_end_of	localtime.rs:1612	localtime.rs:1413 (leaps_thru_end_of)	MATCH	yes	-1 - f(-1 - y) for negative y (no overflow)
+timesub	localtime.rs:1620	localtime.rs:1421 (timesub + leap_correction)	MATCH	yes	leap scan, year loop with truncating div/mod, increment_overflow, wday formula; finding F4 (-fwrapv) fixed via wrapping_sub
+increment_overflow	localtime.rs:1811	localtime.rs:1381 (increment_overflow)	MATCH	yes	checked_add == C pre-checked add
+increment_overflow_time	localtime.rs:1827	localtime.rs:1394 (increment_overflow_time)	MATCH	yes	full-range checked add for i64 pg_time_t
+leapcorr	localtime.rs:1867	localtime.rs:1026 (leapcorr)	MATCH	yes	reverse scan, first t>=ls_trans wins, else 0
+pg_next_dst_boundary	localtime.rs:1885	localtime.rs:385/461 (next_dst_boundary_impl + pg_next_dst_boundary + tristate)	MATCH	yes	-1/0/1 distinction as NextDstBoundary enum; extrapolation via repeat_mapping; binary search lo=1..hi=timecnt-1 transcribed
+pg_interpret_timezone_abbrev	localtime.rs:2005	localtime.rs:486/1545 (pg_interpret_timezone_abbrev + find_abbrev)	MATCH	yes	NUL-delimited slot walk, cutoff via partition_point, backward/defaulttype/forward scan; miss -> None
+pg_timezone_abbrev_is_known	localtime.rs:2085	localtime.rs:551 (pg_timezone_abbrev_is_known)	MATCH	yes	find_abbrev; isfixed flip on conflict, leaves first-use gmtoff/isdst
+pg_get_next_timezone_abbrev	localtime.rs:2134	localtime.rs:586 (pg_get_next_timezone_abbrev)	MATCH	yes	indx<0||>=charcnt -> None; advance past trailing NUL; owned &str (representational)
+pg_get_timezone_offset	localtime.rs:2160	localtime.rs:601 (pg_get_timezone_offset)	MATCH	yes	all ttis must equal ttis[0].tt_utoff; iterates from 0 (index 0 trivially equal)
+pg_get_timezone_name	localtime.rs:2181	localtime.rs:611 (pg_get_timezone_name)	MATCH	yes	returns TZname
+pg_tz_acceptable	localtime.rs:2190	localtime.rs:619 (pg_tz_acceptable)	MATCH	yes	time2000 const verified; NULL or tm_sec!=0 -> false

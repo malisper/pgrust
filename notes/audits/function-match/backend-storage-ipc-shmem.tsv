@@ -1,0 +1,22 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+BoolGetDatum	shmem.rs:1750	(inlined)	MATCH	yes	c2rust Datum-cast shim (postgres.h macro); inlined.
+PointerGetDatum	shmem.rs:1758	(inlined)	MATCH	yes	c2rust Datum-cast shim; inlined.
+Int64GetDatum	shmem.rs:1762	(inlined)	MATCH	yes	c2rust Datum-cast shim; inlined.
+tas	shmem.rs:1766	(inlined)	MATCH	yes	c2rust SpinLock test-and-set shim; real Spinlock used.
+InitShmemAccess	shmem.rs:1791	lib.rs:121	MATCH	yes	seghdr/base/end set; end=base+totalsize.
+InitShmemAllocation	shmem.rs:1798	lib.rs:132	MATCH	yes	ShmemLock via ShmemAllocUnlocked(sizeof slock_t), SpinLockInit, aligned=CACHELINEALIGN, freeoffset, index=NULL (audit).
+ShmemAlloc	shmem.rs:1818	lib.rs:165	MATCH	yes	ShmemAllocRaw; NULL->ERROR OUT_OF_MEMORY "out of shared memory (%zu bytes requested)".
+ShmemAllocNoError	shmem.rs:1868	lib.rs:183	MATCH	yes	ShmemAllocRaw, returns NULL; installed as HASHCTL.alloc.
+ShmemAllocRaw	shmem.rs:1872	lib.rs:207	MATCH	yes	size=CACHELINEALIGN; *allocated_size=size; SpinLock guard; newFree<=totalsize->bump else NULL (audit).
+ShmemAllocUnlocked	shmem.rs:1908	lib.rs:246	MATCH	yes	size=MAXALIGN; no lock; newFree>totalsize->ERROR OOM; else bump.
+ShmemAddrIsValid	shmem.rs:1966	lib.rs:279	MATCH	yes	base<=addr<end.
+InitShmemIndex	shmem.rs:1971	lib.rs:285	MATCH	yes	keysize=SHMEM_INDEX_KEYSIZE(48), entrysize, ShmemInitHash("ShmemIndex",64,64,info,ELEM|STRINGS).
+ShmemInitHash	shmem.rs:1997	lib.rs:310	MATCH	yes	dsize/max_dsize=hash_select_dirsize; flags|=SHARED_MEM|ALLOC|DIRSIZE; ShmemInitStruct; found->ATTACH; hash_create (dynahash via seam cycle).
+ShmemInitStruct	shmem.rs:2026	lib.rs:357	MATCH	yes	LWLockAcquire RAII; null-index bootstrap; hash_search ENTER_NULL; size-mismatch/OOM ereports; foundPtr folded into return (audit).
+add_size	shmem.rs:2205	lib.rs:477	MATCH	yes	checked_add; overflow->ERROR PROGRAM_LIMIT_EXCEEDED.
+mul_size	shmem.rs:2251	lib.rs:492	MATCH	yes	zero-shortcut; checked_mul; overflow->same ereport.
+pg_get_shmem_allocations	shmem.rs:2300	lib.rs:519	MATCH	yes	InitMaterializedSRF; LW_SHARED; hash_seq; per-ent row; anonymous+unused rows; reads freeoffset/totalsize after loop (audit).
+pg_get_shmem_allocations_numa	shmem.rs:2388	lib.rs:605	MATCH	yes	pg_numa_init==-1->elog; max_node; pagesize; per-ent page-range align, memset 0xff, touch+CHECK_FOR_INTERRUPTS, query_pages, node tally, per-node + no-node rows (audit).
+pg_get_shmem_pagesize	shmem.rs:2673	lib.rs:781	MATCH	yes	sysconf(_SC_PAGESIZE); HUGE_PAGES_ON->GetHugePageSize seam; huge_pages_status explicit param. WIN32 n/a.
+pg_numa_available	shmem.rs:2685	lib.rs:801	MATCH	yes	pg_numa_init != -1.
+pg_numa_touch_mem_if_required	pg_numa.h inline	lib.rs:593	MATCH	yes	volatile uint64 read; ported in-crate (inline helper, not seamed).

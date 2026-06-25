@@ -1,0 +1,13 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+TransactionLogFetch	transam.rs:48	lib.rs:47	MATCH	yes	cache-hit first (incl xid 0 quirk); special-xid Bootstrap/Frozen->COMMITTED else ABORTED; clog fetch seam; cache update skipped for IN_PROGRESS/SUB_COMMITTED
+TransactionIdDidCommit	transam.rs:74	lib.rs:88	MATCH	yes	COMMITTED->true; SUB_COMMITTED precedes-TransactionXmin->false else SubTransGetParent; invalid parent WARNING(19) then false; recurse
+TransactionIdDidAbort	transam.rs:125	lib.rs:144	MATCH	yes	mirror of DidCommit with ABORTED->true and inverted SUB_COMMITTED defaults; recurse on parent
+TransactionIdCommitTree	transam.rs:175	lib.rs:187	MATCH	yes	delegate TransactionIdSetTreeStatus(xid,xids,COMMITTED,Invalid)
+TransactionIdAsyncCommitTree	transam.rs:189	lib.rs:198	MATCH	yes	same with caller lsn
+TransactionIdAbortTree	transam.rs:198	lib.rs:214	MATCH	yes	same with ABORTED+InvalidXLogRecPtr
+TransactionIdPrecedes	transam.rs:212	lib.rs:242	MATCH	yes	non-normal->unsigned <; else (int32)(id1-id2)<0 via wrapping_sub as i32
+TransactionIdPrecedesOrEquals	transam.rs:224	lib.rs:254	MATCH	yes	same shape <= / diff<=0
+TransactionIdFollows	transam.rs:236	lib.rs:264	MATCH	yes	same shape > / diff>0
+TransactionIdFollowsOrEquals	transam.rs:248	lib.rs:274	MATCH	yes	same shape >= / diff>=0
+TransactionIdLatest	transam.rs:260	lib.rs:285	MATCH	yes	back-to-front scan == iter().rev(); identical for empty array
+TransactionIdGetCommitLSN	transam.rs:279	lib.rs:311	MATCH	yes	cache-hit on xid equality only; non-normal->Invalid; else clog fetch, status discarded

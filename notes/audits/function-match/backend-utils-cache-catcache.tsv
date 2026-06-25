@@ -1,0 +1,96 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+MemoryContextSwitchTo	catcache.rs:1671	(inline)	MATCH	yes	mcxt.h inline; Mcx model handles contexts
+DatumGetBool	catcache.rs:1677	(inline)	MATCH	yes	postgres.h macro inline
+DatumGetChar	catcache.rs:1681	(inline)	MATCH	yes	postgres.h macro inline
+CharGetDatum	catcache.rs:1685	(inline)	MATCH	yes	postgres.h macro inline
+DatumGetInt16	catcache.rs:1689	(inline)	MATCH	yes	postgres.h macro inline
+Int16GetDatum	catcache.rs:1693	(inline)	MATCH	yes	postgres.h macro inline
+DatumGetInt32	catcache.rs:1697	(inline)	MATCH	yes	postgres.h macro inline
+Int32GetDatum	catcache.rs:1701	(inline)	MATCH	yes	postgres.h macro inline
+UInt32GetDatum	catcache.rs:1705	(inline)	MATCH	yes	postgres.h macro inline
+DatumGetPointer	catcache.rs:1709	(inline)	MATCH	yes	postgres.h macro inline
+PointerGetDatum	catcache.rs:1713	(inline)	MATCH	yes	postgres.h macro inline
+DatumGetCString	catcache.rs:1717	(inline)	MATCH	yes	postgres.h macro inline
+CStringGetDatum	catcache.rs:1721	(inline)	MATCH	yes	postgres.h macro inline
+DatumGetName	catcache.rs:1725	(inline)	MATCH	yes	postgres.h macro inline
+NameGetDatum	catcache.rs:1729	(inline)	MATCH	yes	postgres.h macro inline
+BlockIdGetBlockNumber	catcache.rs:1733	(inline)	MATCH	yes	itemptr.h inline; not catcache.c logic
+ItemPointerGetBlockNumberNoCheck	catcache.rs:1740	(inline)	MATCH	yes	itemptr.h inline
+ItemPointerGetBlockNumber	catcache.rs:1746	(inline)	MATCH	yes	itemptr.h inline
+ItemPointerGetOffsetNumberNoCheck	catcache.rs:1752	(inline)	MATCH	yes	itemptr.h inline
+ItemPointerGetOffsetNumber	catcache.rs:1758	(inline)	MATCH	yes	itemptr.h inline
+list_length	catcache.rs:1766	(inline)	MATCH	yes	pg_list.h inline; Vec::len in model
+TupleDescAttr	catcache.rs:1770	(inline)	MATCH	yes	tupdesc.h accessor inline (tupdesc seam)
+TupleDescCompactAttr	catcache.rs:1787	(inline)	MATCH	yes	tupdesc.h accessor inline (tupdesc seam)
+att_isnull	catcache.rs:1797	(inline)	MATCH	yes	htup_details.h inline
+fetch_att	catcache.rs:1805	(inline)	MATCH	yes	tupmacs.h inline
+HeapTupleHasNulls	catcache.rs:1856	(inline)	MATCH	yes	htup_details.h inline
+HeapTupleNoNulls	catcache.rs:1861	(inline)	MATCH	yes	htup_details.h inline
+HeapTupleHasExternal	catcache.rs:1865	(inline)	MATCH	yes	htup_details.h inline
+fastgetattr	catcache.rs:1870	(seam)	SEAMED	no	heaptuple attribute fetch; tuple-access substrate
+heap_getattr	catcache.rs:1902	(seam)	SEAMED	no	htup_details.h; tuple-access substrate
+hash_any	catcache.rs:1923	(seam)	SEAMED	no	hashfn.c owner; seamed
+murmurhash32	catcache.rs:1930	core_compute.rs	MATCH	yes	hashfn.h inline reused in int hashfast paths
+pg_rotate_left32	catcache.rs:1942	(inline)	MATCH	yes	pg_bitutils.h inline; used in hash combine
+dlist_init	catcache.rs:1949	(inline)	MATCH	yes	ilist.h inline; bucket lists modeled by arena graph
+dlist_push_head	catcache.rs:1954	(inline)	MATCH	yes	ilist.h inline; graph_machinery list ops
+dlist_delete	catcache.rs:1967	(inline)	MATCH	yes	ilist.h inline
+dlist_move_head	catcache.rs:1972	(inline)	MATCH	yes	ilist.h inline (move-to-front in search path)
+slist_init	catcache.rs:1983	(inline)	MATCH	yes	ilist.h inline
+slist_push_head	catcache.rs:1987	(inline)	MATCH	yes	ilist.h inline (cc_lists)
+ResourceOwnerRememberCatCacheRef	catcache.rs:2041	(resowner seam)	SEAMED	no	resowner ref identity tracked via resowner crate
+ResourceOwnerForgetCatCacheRef	catcache.rs:2052	(resowner seam)	SEAMED	no	resowner crate
+ResourceOwnerRememberCatCacheListRef	catcache.rs:2063	(resowner seam)	SEAMED	no	resowner crate
+ResourceOwnerForgetCatCacheListRef	catcache.rs:2074	(resowner seam)	SEAMED	no	resowner crate
+chareqfast	catcache.rs:2084	core_compute.rs:101	MATCH	yes	char equality
+charhashfast	catcache.rs:2088	core_compute.rs:107	MATCH	yes	char hash
+nameeqfast	catcache.rs:2091	core_compute.rs:121	MATCH	yes	by-ref key compared on resolved payload
+namehashfast	catcache.rs:2100	core_compute.rs:140	MATCH	yes	significant-len truncation preserved
+int2eqfast	catcache.rs:2107	core_compute.rs:150	MATCH	yes	int2 equality
+int2hashfast	catcache.rs:2111	core_compute.rs:156	MATCH	yes	int2 hash
+int4eqfast	catcache.rs:2114	core_compute.rs:162	MATCH	yes	int4 equality
+int4hashfast	catcache.rs:2117	core_compute.rs:168	MATCH	yes	int4 hash
+texteqfast	catcache.rs:2120	core_compute.rs:181	MATCH	yes	byte-slice text equality
+texthashfast	catcache.rs:2130	core_compute.rs:188	MATCH	yes	byte-slice text hash
+oidvectoreqfast	catcache.rs:2139	core_compute.rs:201	MATCH	yes	oidvector equality
+oidvectorhashfast	catcache.rs:2149	core_compute.rs:207	MATCH	yes	hash returns PgResult (fmgr path)
+GetCCHashEqFuncs	catcache.rs:2158	core_compute.rs:267	MATCH	yes	full key-type table; default FATAL panic; CCFastKind+eqfunc returned
+CatalogCacheComputeHashValue	catcache.rs:2257	core_compute.rs:300	MATCH	yes	switch fall-through + position rotate (24/16/8/0); FATAL bad nkeys
+CatalogCacheComputeTupleHashValue	catcache.rs:2346	inval_support.rs/list_path.rs	MATCH	yes	fastgetattr per cc_keyno then combine
+CatalogCacheCompareTuple	catcache.rs:2450	core_compute.rs:349	MATCH	yes	per-key eqfast compare
+CatCacheRemoveCTup	catcache.rs:2470	graph_machinery.rs	MATCH	yes	unlink, list-member fixup, free, counters
+CatCacheRemoveCList	catcache.rs:2489	graph_machinery.rs	MATCH	yes	member c_list clear + conditional ct removal
+CatCacheInvalidate	catcache.rs:2520	graph_machinery.rs:295	MATCH	yes	zap all lists, bucket tuple scan, in-progress stack
+CreateCacheMemoryContext	catcache.rs:2586	(mmgr seam)	SEAMED	no	CacheMemoryContext owned by mmgr substrate
+ResetCatalogCache	catcache.rs:2599	graph_machinery.rs	MATCH	yes	list+tuple mark-dead/remove, in-progress (skipped on debug_discard)
+ResetCatalogCaches	catcache.rs:2671	graph_machinery.rs:392	MATCH	yes	reset all caches
+ResetCatalogCachesExt	catcache.rs:2675	graph_machinery.rs:397	MATCH	yes	debug_discard variant
+CatalogCacheFlushCatalog	catcache.rs:2688	graph_machinery.rs:409	MATCH	yes	per-cache reset filtered by catId
+InitCatCache	catcache.rs:2704	graph_machinery.rs:441	MATCH	yes	register cache, alloc buckets, key/fastkind setup
+RehashCatCache	catcache.rs:2755	graph_machinery.rs	MATCH	yes	double buckets, rechain by HASH_INDEX
+RehashCatCacheLists	catcache.rs:2827	graph_machinery.rs	MATCH	yes	double list buckets, rechain
+ConditionalCatalogCacheInitializeCache	catcache.rs:2900	init_meta.rs	MATCH	yes	conditional initialize
+CatalogCacheInitializeCache	catcache.rs:2909	init_meta.rs	MATCH	yes	relcache/tupdesc seam, per-key GetCCHashEqFuncs, skey build
+InitCatCachePhase2	catcache.rs:2996	init_meta.rs:240	MATCH	yes	phase-2 index open
+IndexScanOK	catcache.rs:3012	init_meta.rs:287	MATCH	yes	bootstrapping-index allowlist preserved
+SearchCatCache	catcache.rs:3030	search_path.rs	MATCH	yes	entry dispatch
+SearchCatCache1	catcache.rs:3040	search_path.rs	MATCH	yes	1-key search
+SearchCatCache2	catcache.rs:3054	search_path.rs	MATCH	yes	2-key search
+SearchCatCache3	catcache.rs:3069	search_path.rs	MATCH	yes	3-key search
+SearchCatCache4	catcache.rs:3085	search_path.rs	MATCH	yes	4-key search
+SearchCatCacheInternal	catcache.rs:3095	search_path.rs	MATCH	yes	bucket probe, dead skip, move-to-front, refcount+
+SearchCatCacheMiss	catcache.rs:3154	search_path.rs	SEAMED	no	scan+toast-flatten+stale-retry owned by genam/heaptoast/relcache behind catcache_scan_single; negative-entry+bootstrap branch in-crate MATCH
+ReleaseCatCache	catcache.rs:3258	search_path.rs	MATCH	yes	delegates to ReleaseCatCacheWithOwner
+ReleaseCatCacheWithOwner	catcache.rs:3261	search_path.rs	MATCH	yes	refcount--, remove if dead&unref
+GetCatCacheHashValue	catcache.rs:3279	search_path.rs	MATCH	yes	initialize cache + compute hash
+SearchCatCacheList	catcache.rs:3290	list_path.rs	MATCH	yes	build_list_body + scan_members; c_list skip + dead-list propagation fixed
+ReleaseCatCacheList	catcache.rs:3630	list_path.rs	MATCH	yes	delegates to ReleaseCatCacheListWithOwner
+ReleaseCatCacheListWithOwner	catcache.rs:3633	list_path.rs	MATCH	yes	refcount--, remove if dead&unref
+CatalogCacheCreateEntry	catcache.rs:3647	graph_machinery.rs	MATCH	yes	create_entry_positive/negative; toast-flatten+in-progress behind seam; negative via CatCacheCopyKeys
+CatCacheFreeKeys	catcache.rs:3773	(owned arena drop)	MATCH	yes	by-ref key copies are owned Datums freed on slot reuse
+CatCacheCopyKeys	catcache.rs:3794	create_entry_negative/list keys	MATCH	yes	per-key datum copy
+PrepareToInvalidateCacheTuple	catcache.rs:3824	inval_support.rs:157	MATCH	yes	callback->request vec; ConditionalInit mid-iter; old+conditional-new hash; relisshared?0:MyDatabaseId
+ResOwnerReleaseCatCache	catcache.rs:3875	(resowner seam)	SEAMED	no	resowner integration
+ResOwnerPrintCatCache	catcache.rs:3881	(resowner seam)	SEAMED	no	resowner integration
+ResOwnerReleaseCatCacheList	catcache.rs:3895	(resowner seam)	SEAMED	no	resowner integration
+ResOwnerPrintCatCacheList	catcache.rs:3901	(resowner seam)	SEAMED	no	resowner integration

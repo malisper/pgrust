@@ -1,0 +1,7 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+RegisterExtensibleNodeEntry	c2rust-runs/backend-nodes-core/src/extensible.rs:692	crates/backend-nodes-extensible/src/lib.rs:86	MATCH	yes	static; lazy hash_create, strlen>=64 -> elog(ERROR), HASH_ENTER, found -> ERRCODE_DUPLICATE_OBJECT, else store extnodemethods
+RegisterExtensibleNodeMethods	c2rust-runs/backend-nodes-core/src/extensible.rs:807	crates/backend-nodes-extensible/src/lib.rs:140	MATCH	yes	delegates with label "Extensible Node Methods", registry extensible_node_methods
+RegisterCustomScanMethods	c2rust-runs/backend-nodes-core/src/extensible.rs:818	crates/backend-nodes-extensible/src/lib.rs:157	MATCH	yes	delegates with label "Custom Scan Methods", registry custom_scan_methods
+GetExtensibleNodeEntry	c2rust-runs/backend-nodes-core/src/extensible.rs:828	crates/backend-nodes-extensible/src/lib.rs:174	MATCH	yes	static; HASH_FIND gated on found flag; miss -> missing_ok NULL else ERRCODE_UNDEFINED_OBJECT
+GetExtensibleNodeMethods	c2rust-runs/backend-nodes-core/src/extensible.rs:891	crates/backend-nodes-extensible/src/lib.rs:214	MATCH	yes	delegates on extensible_node_methods, cast to *const ExtensibleNodeMethods
+GetCustomScanMethods	c2rust-runs/backend-nodes-core/src/extensible.rs:899	crates/backend-nodes-extensible/src/lib.rs:229	MATCH	yes	delegates on custom_scan_methods, cast to *const CustomScanMethods

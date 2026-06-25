@@ -1,0 +1,18 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+decimalLength32	numutils.rs:697	lib.rs:47	MATCH	yes	t=(msb_index+1)*1233/4096; t+(v>=PowersOfTen[t]); all 10 powers verified
+decimalLength64	numutils.rs:716	lib.rs:60	MATCH	yes	same formula, 20-entry u64 table verified
+pg_strtoint16	numutils.rs:875	lib.rs:94	MATCH	yes	delegates to _safe with None escontext
+pg_strtoint16_safe	numutils.rs:879	lib.rs:101	MATCH	yes	parse_signed::<i16>; smallint; fuzzed 2M, 0 mismatches
+pg_strtoint32	numutils.rs:1243	lib.rs:106	MATCH	yes	thin delegate
+pg_strtoint32_safe	numutils.rs:1247	lib.rs:111	MATCH	yes	parse_signed::<i32>; integer; boundary corpus all 4 bases
+pg_strtoint64	numutils.rs:1622	lib.rs:116	MATCH	yes	thin delegate
+pg_strtoint64_safe	numutils.rs:1626	lib.rs:121	MATCH	yes	parse_signed::<i64>; bigint; boundary corpus
+uint32in_subr	numutils.rs:2005	lib.rs:299	MATCH	yes	models strtoul(s,&endptr,0)+checks; fuzzed 1M; #if PG_UINT32_MAX!=ULONG_MAX narrowing ported
+uint64in_subr	numutils.rs:2158	lib.rs:313	MATCH	yes	strtou64=strtoull; same fuzz, no narrowing branch; overflow predicate equivalent
+pg_itoa	numutils.rs:2276	lib.rs:462	MATCH	yes	widen to i32, delegate to pg_ltoa
+pg_ultoa_n	numutils.rs:2283	lib.rs:577	MATCH	yes	zero->0/len1; decimalLength32 sizing; 4/2/1-digit DIGIT_TABLE blits; fuzzed 2M
+pg_ltoa	numutils.rs:2352	lib.rs:584	MATCH	yes	0u32.wrapping_sub for i32::MIN; - prefix; fuzzed
+pg_ulltoa_n	numutils.rs:2369	lib.rs:600	MATCH	yes	8-digit chunk loop then u32 tail; fuzzed vs u64::to_string
+pg_lltoa	numutils.rs:2482	lib.rs:607	MATCH	yes	u64 two's-complement negation + delegate; fuzzed incl i64::MIN
+pg_ultostr_zeropad	numutils.rs:2499	lib.rs:625	MATCH	yes	value<100&&minwidth==2 shortcut; left-pad; fuzzed; Assert->always-on assert (noted strengthening)
+pg_ultostr	numutils.rs:2533	lib.rs:654	MATCH	yes	pg_ultoa_n + end pointer -> returned String

@@ -1,0 +1,32 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+XLogFileName	xlogutils.rs:1425	xlog-seams/lib.rs:361	MISSING	no	Foreign xlog_internal.h inline; the codec is owned by the xlog crate (XLogFileName), reused here, not re-ported in xlogutils.
+XLogFilePath	xlogutils.rs:1447	xlog crate	MISSING	no	Foreign xlog_internal.h inline; owned by xlog crate, not re-ported here.
+PageXLogRecPtrGet	xlogutils.rs:1469	bufmgr-seams	MISSING	no	Foreign bufpage.h inline; page LSN access goes through bufmgr-seams, not a standalone ported fn.
+PageIsNew	xlogutils.rs:1474	bufmgr-seams::page_is_new	SEAMED	no	Foreign bufpage.h inline; reached via bufmgr-seams::page_is_new (Page lives behind Buffer id).
+PageGetLSN	xlogutils.rs:1479	bufmgr-seams::page_get_lsn	SEAMED	no	Foreign bufpage.h inline; reached via bufmgr-seams::page_get_lsn.
+PageSetLSN	xlogutils.rs:1483	bufmgr-seams::page_set_lsn	SEAMED	no	Foreign bufpage.h inline; reached via bufmgr-seams::page_set_lsn.
+BufferIsValid	xlogutils.rs:1489	-	MISSING	no	Foreign bufmgr.h inline; absorbed at call sites, not separately ported.
+BufferGetBlock	xlogutils.rs:1493	-	MISSING	no	Foreign bufmgr.h inline; buffer/page access via bufmgr-seams, not a standalone fn.
+BufferGetPage	xlogutils.rs:1506	-	MISSING	no	Foreign bufmgr.h inline; Page reached by Buffer id through bufmgr-seams, not re-ported.
+report_invalid_page	xlogutils.rs:1518	lib.rs:182	MATCH	yes	elog elevel, uninitialized/does-not-exist branch on present, relpathbackend path. Audit-confirmed.
+log_invalid_page	xlogutils.rs:1586	lib.rs:205	MATCH	yes	reachedConsistency PANIC arm, DEBUG1 report, HASH_ENTER keep-existing (or_insert). Audit-confirmed.
+forget_invalid_pages	xlogutils.rs:1693	lib.rs:248	MATCH	yes	filter locator/forkno/blkno>=minblkno, DEBUG2, corruption elog(ERROR); two-phase collect-then-remove. Audit-confirmed.
+forget_invalid_pages_db	xlogutils.rs:1804	lib.rs:289	MATCH	yes	filter dbOid==dbid, same structure. Audit-confirmed.
+XLogHaveInvalidPages	xlogutils.rs:1908	lib.rs:325	MATCH	yes	table!=NULL && num_entries>0 -> is_some_and(!is_empty).
+XLogCheckInvalidPages	xlogutils.rs:1917	lib.rs:330	MATCH	yes	NULL return; WARNING-report all; ignore?WARNING:PANIC; destroy+null table. Audit-confirmed.
+XLogReadBufferForRedo	xlogutils.rs:1998	lib.rs:365	MATCH	yes	Delegates to Extended RBM_NORMAL get_cleanup_lock=false; out-param as tuple.
+XLogInitBufferForRedo	xlogutils.rs:2012	lib.rs:374	MATCH	yes	Extended RBM_ZERO_AND_LOCK, returns buf.
+XLogReadBufferForRedoExtended	xlogutils.rs:2027	lib.rs:382	MATCH	yes	lsn=EndRecPtr; bogus block PANIC; WILL_INIT vs zeromode; FPI-apply branch (RestoreBlockImage/PageSetLSN/MarkBufferDirty/FlushOneBuffer); else branch BLK_DONE/NEEDS_REDO/NOTFOUND. Audit-confirmed.
+XLogReadBufferExtended	xlogutils.rs:2242	lib.rs:501	MATCH	yes	Assert blkno!=P_NEW; smgr/bufmgr substrate condensed into xlog_read_buffer_extended seam; xlogutils-owned log_invalid_page+PageIsNew decisions in-crate. Audit MATCH (SEAMED substrate).
+CreateFakeRelcacheEntry	xlogutils.rs:2312	lib.rs:551	SEAMED	no	C palloc0s RelationData+pg_class substrate; routed to relcache-seams::create_fake_relcache_entry (owner's type+smgropen).
+FreeFakeRelcacheEntry	xlogutils.rs:2337	lib.rs:559	SEAMED	no	C pfree(fakerel); routed to relcache-seams::free_fake_relcache_entry (takes ownership).
+XLogDropRelation	xlogutils.rs:2341	lib.rs:568	MATCH	yes	forget_invalid_pages(rlocator,forknum,0).
+XLogDropDatabase	xlogutils.rs:2348	lib.rs:574	MATCH	yes	smgrdestroyall() then forget_invalid_pages_db(dbid).
+XLogTruncateRelation	xlogutils.rs:2353	lib.rs:585	MATCH	yes	forget_invalid_pages(rlocator,forkNum,nblocks).
+XLogReadDetermineTimeline	xlogutils.rs:2361	lib.rs:599	MATCH	yes	lastReadPage arith, three guards incl Min(wantLength,XLOG_BLCKSZ-1), endOfSegment division check, tliOfPointInHistory/tliSwitchPoint, DEBUG3. Audit-confirmed.
+wal_segment_open	xlogutils.rs:2444	lib.rs:699	MATCH	yes	XLogFilePath, BasicOpenFile O_RDONLY|PG_BINARY, ENOENT vs open-error ereport with saved errno. Audit-confirmed.
+wal_segment_close	xlogutils.rs:2527	lib.rs:735	MATCH	yes	close + ws_file=-1 via reader_close_ws_file.
+read_local_xlog_page	xlogutils.rs:2532	lib.rs:742	MATCH	yes	guts(...,wait_for_wal=true).
+read_local_xlog_page_no_wait	xlogutils.rs:2549	lib.rs:754	MATCH	yes	guts(...,wait_for_wal=false).
+read_local_xlog_page_guts	xlogutils.rs:2565	lib.rs:766	MATCH	yes	loc=targetPagePtr+reqLen loop, GetFlush/GetReplay split, DetermineTimeline, count branches, WALRead->WALReadRaiseError. Audit-confirmed.
+WALReadRaiseError	xlogutils.rs:2637	lib.rs:861	MATCH	yes	XLogFileName; wre_read<0 file-access ERROR; ==0 DATA_CORRUPTED; partial no-op Ok. Audit-confirmed.

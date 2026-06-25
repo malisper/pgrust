@@ -1,0 +1,39 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+pg_atomic_write_u64_impl	slru.rs:421	(AtomicU64 substrate)	MATCH	yes	C atomic intrinsic -> AtomicU64::store.
+pg_atomic_read_u64_impl	slru.rs:428	(AtomicU64 substrate)	MATCH	yes	C atomic intrinsic -> AtomicU64::load.
+pg_atomic_init_u64_impl	slru.rs:432	(AtomicU64 substrate)	MATCH	yes	C atomic intrinsic -> AtomicU64::new.
+pg_atomic_init_u64	slru.rs:439	(AtomicU64 substrate)	MATCH	yes	atomics.h wrapper.
+pg_atomic_read_u64	slru.rs:446	(AtomicU64 substrate)	MATCH	yes	atomics.h wrapper.
+pg_atomic_write_u64	slru.rs:450	(AtomicU64 substrate)	MATCH	yes	atomics.h wrapper.
+SimpleLruGetBankLock	slru.rs:458	lib.rs:419	MATCH	yes	bank_locks[pageno % nbanks]; slru.h inline.
+pgstat_report_wait_start	slru.rs:468	(via waitevent seam)	SEAMED	no	pgstat wait_event start; pgstat owner via waitevent_seams.
+pgstat_report_wait_end	slru.rs:472	(via waitevent seam)	SEAMED	no	pgstat wait_event end; via waitevent_seams.
+SlruFileName	slru.rs:476	lib.rs:404	MATCH	yes	long %015X over [0,2^60-1]; short %04X over [0,2^24-1]; asserts->debug_assert.
+SimpleLruShmemSize	slru.rs:506	lib.rs:263	MATCH	yes	Per-array MAXALIGN accumulation; sizeof(SlruSharedData)=104 tabulated; LWLockPadded; BUFFERALIGN+BLCKSZ*nslots.
+SimpleLruAutotuneBuffers	slru.rs:612	lib.rs:289	MATCH	yes	Min(max-max%BANK, Max(BANK, NBuffers/divisor - rem)); NBuffers via globals seam; integer truncation.
+SimpleLruInit	slru.rs:641	lib.rs:310	MATCH	yes	Owned-Vec shmem model (CreateLWLocks precedent); try_reserve_exact same element counts; per-buffer+per-bank LWLockInitialize; attach branch behaviorally inert.
+check_slru_buffers	slru.rs:838	lib.rs:386	MATCH	yes	newval%BANK==0; GUC_check_errdetail text on failure as second tuple element.
+SimpleLruZeroPage	slru.rs:854	lib.rs:431	MATCH	yes	SlruSelectLRUPage->VALID+dirty, SlruRecentlyUsed, MemSet0, ZeroLSNs, atomic write latest_page_number, zeroed stat; entry assert.
+SimpleLruZeroLSNs	slru.rs:894	lib.rs:472	MATCH	yes	Zero lsn_groups_per_page entries at slotno*groups when groups>0; InvalidXLogRecPtr.
+SimpleLruWaitIO	slru.rs:927	lib.rs:487	MATCH	yes	Release bank->acquire+release buffer SHARED->re-acquire bank EXCLUSIVE; recovery branch via LWLockConditionalAcquire.
+SimpleLruReadPage	slru.rs:965	lib.rs:531	MATCH	yes	Infinite restart loop; in-memory hit w/ wait+continue; else read-busy, buffer lock, release bank, PhysicalReadPage, ZeroLSNs, re-acquire, set VALID/EMPTY, RecentlyUsed, read stat.
+SimpleLruReadPage_ReadOnly	slru.rs:1026	lib.rs:627	MATCH	yes	bankno=pageno%nbanks; shared-lock scan returns w/ SHARED held on hit; else exclusive + delegate ReadPage(write_ok=true).
+SlruInternalWritePage	slru.rs:1057	lib.rs:691	MATCH	yes	wait-WRITE_IN_PROGRESS-same-page; do-nothing predicate; write-busy/clear dirty; buffer lock, release bank, PhysicalWritePage; fdata close-on-fail; re-dirty on fail; VALID; report; checkpoint counters via seam.
+SimpleLruWritePage	slru.rs:1112	lib.rs:776	MATCH	yes	Entry assert + SlruInternalWritePage(..,None).
+SimpleLruDoesPhysicalPageExist	slru.rs:1119	lib.rs:785	MATCH	yes	exists stat; open O_RDONLY; ENOENT->false else OPEN_FAILED report; lseek SEEK_END; result=endpos>=offset+BLCKSZ; close!=0 records CLOSE_FAILED no report.
+SlruPhysicalReadPage	slru.rs:1159	lib.rs:847	MATCH	yes	open O_RDONLY; fd<0: errno!=ENOENT||!InRecovery->OPEN_FAILED else LOG read-as-zeroes; errno=0 then pg_pread; !=BLCKSZ->wait_end/errno/close/READ_FAILED; close!=0->CLOSE_FAILED. InRecovery via seam.
+SlruPhysicalWritePage	slru.rs:1258	lib.rs:918	MATCH	yes	written stat; WAL-before-data max group_lsn scan + crit-section XLogFlush; reuse/create fd; register or fallback; errno=0+pg_pwrite, ENOSPC default; sync-request via seam, full-queue pg_fsync; conditional close.
+SlruReportIOError	slru.rs:1399	lib.rs:1064	MATCH	yes	SlruIoError value channel; six causes -> ereport(ERROR) errcode_for_file_access exact errdetail; READ/WRITE %m vs too-few-bytes; FSYNC data_sync_elevel; unreachable.
+SlruRecentlyUsed	slru.rs:1738	lib.rs:1157	MATCH	yes	if(new != page_lru_count[slot]) {bank_cur=++new; page=new;}; pre-inc via wrapping_add.
+SlruSelectLRUPage	slru.rs:1752	lib.rs:1174	MATCH	yes	restart loop; first-scan pageno return; cur_count=bank_cur++ post-inc; per-slot delta wrapping_sub <0 reset; VALID/invalid best tracking + PagePrecedes tiebreak; all-busy WaitIO; clean victim/WritePage.
+SimpleLruWriteAll	slru.rs:1847	lib.rs:1278	MATCH	yes	flush stat; bank-walk lock churn; skip EMPTY; InternalWritePage(Some fdata); redirtied assert; close all tracking last failing (errno,pageno) CLOSE_FAILED report; fsync_fname when handler set.
+SimpleLruTruncate	slru.rs:1905	lib.rs:1353	MATCH	yes	truncate stat; restart loop; wraparound backstop PagePrecedes(latest,cutoff)->LOG+return; bank-walk; clean->EMPTY else WritePage/WaitIO goto restart; final SlruScanDirectory(DeleteCutoff).
+SlruInternalDeleteSegment	slru.rs:2023	lib.rs:1430	MATCH	yes	forget sync request SYNC_FORGET_REQUEST retryOnError=true; DEBUG2 removing-file; unlink ignored as in C.
+SlruDeleteSegment	slru.rs:2076	lib.rs:1451	MATCH	yes	acquire bank 0; restart(did_write) loop; bank-walk; pagesegno!=segno skip; clean->EMPTY else WritePage/WaitIO; re-loop; InternalDeleteSegment; release.
+SlruMayDeleteSegment	slru.rs:2139	lib.rs:1515	MATCH	yes	seg_last_page=segpage+PAGES_PER_SEGMENT-1; aligned assert; PagePrecedes(segpage,cutoff)&&PagePrecedes(seg_last_page,cutoff).
+SlruScanDirCbReportPresence	slru.rs:2154	lib.rs:1620	MATCH	yes	SlruMayDeleteSegment->true(stop) else false; void* -> typed cutoff_page.
+SlruScanDirCbDeleteCutoff	slru.rs:2166	lib.rs:1635	MATCH	yes	MayDeleteSegment->InternalDeleteSegment(segpage/PAGES_PER_SEGMENT); returns false.
+SlruScanDirCbDeleteAll	slru.rs:2179	lib.rs:1650	MATCH	yes	unconditional InternalDeleteSegment; returns false.
+SlruCorrectSegmentFilenameLength	slru.rs:2189	lib.rs:1662	MATCH	yes	long->len==15; short->len in {4,5,6}; unit-tested 0..20.
+SlruScanDirectory	slru.rs:2200	lib.rs:1677	MATCH	yes	AllocateDir/ReadDir/FreeDir via with_allocated_dir seam closure; length+strspn hex charset filter; strtoi64 base16; segpage; DEBUG2; callback; stop on true.
+SlruSyncFileTag	slru.rs:2271	lib.rs:1712	MATCH	yes	build path from ftag->segno; open O_RDWR, fd<0->-1; pg_fsync between wait start/end; save/restore errno; close; return (result,path).

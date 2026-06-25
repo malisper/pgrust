@@ -1,0 +1,17 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+StartupProcTriggerHandler	startup.rs	lib.rs:91	MATCH	yes	sets promote flag, WakeupRecovery via xlogrecovery seam
+StartupProcSigHupHandler	startup.rs	lib.rs:98	MATCH	yes	sets got_SIGHUP, wakes recovery
+StartupProcShutdownHandler	startup.rs	lib.rs:104	MATCH	yes	in_restore_command -> proc_exit(1) (seam returns !); else WakeupRecovery
+StartupRereadConfig	startup.rs	lib.rs:117	MATCH	yes	conninfo/slotname/tempSlot snapshotted before ProcessConfigFile(PGC_SIGHUP); restart iff any changed; pstrdup/pfree -> owned String
+ProcessStartupProcInterrupts	startup.rs	lib.rs:169	MATCH	yes	order preserved: SIGHUP reload -> shutdown proc_exit(1) -> postmaster-death probe (wrapping_add %1024) -> barrier -> mcxt log; dead path libc::exit(1)
+StartupProcExit	startup.rs	lib.rs:209	MATCH	yes	standbyState != STANDBY_DISABLED -> ShutdownRecoveryTransactionEnvironment
+StartupProcessMain	startup.rs	lib.rs:227	MATCH	yes	exact 15-step sequence: AuxiliaryProcessMainCommon, on_shmem_exit, pqsignal table, InitializeTimeouts, RegisterTimeout x3, sigprocmask, StartupXLOG, proc_exit(0)
+PreRestoreCommand	startup.rs	lib.rs:299	MATCH	yes	flag set before shutdown_requested re-check, same order as C
+PostRestoreCommand	startup.rs	lib.rs:311	MATCH	yes	clears in_restore_command
+IsPromoteSignaled	startup.rs	lib.rs:316	MATCH	yes	returns promote_signaled flag
+ResetPromoteSignaled	startup.rs	lib.rs:321	MATCH	yes	clears promote_signaled
+startup_progress_timeout_handler	startup.rs	lib.rs:328	MATCH	yes	sets startup_progress_timer_expired
+disable_startup_progress_timeout	startup.rs	lib.rs:333	MATCH	yes	interval==0 early return; disable_timeout(STARTUP_PROGRESS_TIMEOUT,false); flag cleared
+enable_startup_progress_timeout	startup.rs	lib.rs:345	MATCH	yes	interval==0 early return; fin_time = start + ms*1000; enable_timeout_every(12,fin_time,interval)
+begin_startup_progress_phase	startup.rs	lib.rs:364	MATCH	yes	interval==0 early return then disable + enable
+has_startup_progress_timeout_expired	startup.rs	lib.rs:378	MATCH	yes	None when not expired else TimestampDifference via seam, flag reset, Some((secs,usecs))

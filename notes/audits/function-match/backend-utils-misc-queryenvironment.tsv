@@ -1,0 +1,7 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+create_queryEnv	queryenvironment.rs:996	crates/backend-utils-misc-queryenvironment/src/lib.rs:41	MATCH	yes	palloc0 zero-init (namedRelList=NIL) -> QueryEnvironment::default() (empty Vec); owned-value convention.
+get_visible_ENR_metadata	queryenvironment.rs:1001	crates/backend-utils-misc-queryenvironment/src/lib.rs:50	MATCH	yes	NULL env->None, get_ENR hit->owned clone of md, miss->None; same control flow.
+register_ENR	queryenvironment.rs:1018	crates/backend-utils-misc-queryenvironment/src/lib.rs:66	MATCH	yes	lappend tail -> Vec::push (order preserved); duplicate-name Assert as debug_assert with same predicate.
+unregister_ENR	queryenvironment.rs:1028	crates/backend-utils-misc-queryenvironment/src/lib.rs:93	MATCH	yes	first name match via enr_index + Vec::remove; no-op on miss (list_delete equivalent).
+get_ENR	queryenvironment.rs:1044	crates/backend-utils-misc-queryenvironment/src/lib.rs:104	MATCH	yes	first strcmp==0 match in list order via iter().position; None on miss; strcmp==0 == &str eq.
+ENRMetadataGetTupDesc	queryenvironment.rs:1073	crates/backend-utils-misc-queryenvironment/src/lib.rs:148	SEAMED	no	Assert predicate exact; branch order identical; catalog leg (table_open/rd_att/table_close) legitimately delegated via backend-access-table-table-seams + backend-utils-cache-relcache-seams (unported owners).

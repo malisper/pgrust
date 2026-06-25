@@ -1,0 +1,4 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+pg_wchar_strncmp	wstrncmp.rs:5	lib.rs::pg_wchar_strncmp	MATCH	yes	n==0 guard; unsigned-sub narrowed to int; NUL/n-bound exits identical (audit table)
+pg_char_and_wchar_strncmp	wstrncmp.rs:33	lib.rs::pg_char_and_wchar_strncmp	MATCH	yes	zero-extends both compare and returned diff via PgWChar::from(byte); NUL/n bounds match
+pg_wchar_strlen	wstrncmp.rs:62	lib.rs::pg_wchar_strlen	MATCH	yes	PgWCharStr::len() = position of first zero wchar = C pointer diff

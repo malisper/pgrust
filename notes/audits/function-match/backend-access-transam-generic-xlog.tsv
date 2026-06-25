@@ -1,0 +1,15 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+PageSetLSN	generic_xlog.rs:1236	lib.rs:92 (page_set_lsn)	MATCH	yes	Writes pd_lsn at PD_LSN_OFFSET=0; bufpage.h inline.
+BufferIsValid	generic_xlog.rs:1241	(inline helper)	MATCH	yes	buffer != InvalidBuffer; buf.h inline, used inline in finish/redo.
+BufferGetBlock	generic_xlog.rs:1245	(inline helper)	MATCH	yes	bufmgr buffer->block index helper; subsumed by with_buffer_page seam path.
+BufferGetPage	generic_xlog.rs:1258	(via with_buffer_page seam)	SEAMED	no	Page bytes read through bufmgr with_buffer_page seam (owner holds pin/lock).
+writeFragment	generic_xlog.rs:1269	lib.rs:176 (write_fragment)	MATCH	yes	u16-ne offset+length headers then data bytes; deltaLen advanced; Assert->debug_assert.
+computeRegionDelta	generic_xlog.rs:1300	lib.rs:214 (compute_region_delta)	MATCH	yes	Branch-by-branch: invalid-start prefix, loopEnd=min, unmatched/matched runs, MATCH_THRESHOLD flush, trailing region, final write.
+computeDelta	generic_xlog.rs:1377	lib.rs:309 (compute_delta)	MATCH	yes	pd_lower/pd_upper reads; two computeRegionDelta calls; WAL_DEBUG verify block compiled out.
+GenericXLogStart	generic_xlog.rs:1411	lib.rs:343	MATCH	yes	Fallible mcx allocs returning PgResult; isLogged=RelationNeedsWAL via relcache seam; buffers InvalidBuffer.
+GenericXLogRegisterBuffer	generic_xlog.rs:1438	lib.rs:368	MATCH	yes	Linear scan of MAX_GENERIC_XLOG_PAGES slots; copy page via seam; overflow elog(ERROR) -> Err same message.
+GenericXLogFinish	generic_xlog.rs:1492	lib.rs:404	MATCH	yes	Logged/unlogged branches: crit section RAII, per-page delta/full-image memcpy, MarkBufferDirty, register, XLogInsert, PageSetLSN; via xloginsert seams.
+GenericXLogAbort	generic_xlog.rs:1609	lib.rs:522	MATCH	yes	pfree(state) = consume-by-value drop; no buffer changes.
+applyPageRedo	generic_xlog.rs:1612	lib.rs:532 (apply_page_redo)	MATCH	yes	Walk delta: read u16-ne offset/length, memcpy, advance.
+generic_redo	generic_xlog.rs:1644	lib.rs:556	MATCH	yes	lsn=EndRecPtr; loop blocks; XLogReadBufferForRedo seam; on BLK_NEEDS_REDO apply delta, zero hole, PageSetLSN, MarkBufferDirty; final unlock/release.
+generic_mask	generic_xlog.rs:1705	lib.rs:636	MATCH	yes	mask_page_lsn_and_checksum then mask_unused_space via bufmask seams; blkno unused.

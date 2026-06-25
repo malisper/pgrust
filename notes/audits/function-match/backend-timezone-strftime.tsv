@@ -1,0 +1,7 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+pg_strftime	strftime.rs:116	lib.rs:126 (pg_strftime)	MATCH	yes	_fmt into OutBuf; out.full() == p==s+maxsize -> None (truncated, no NUL); else push NUL + return Some(len). errno protocol -> Option (crate-owned entry). Dead EOVERFLOW branch omitted
+_fmt	strftime.rs:138	lib.rs:142 (fmt)	MATCH	yes	every specifier arm compared individually; trailing-% / %E%O modifier dispatch, %V/%G/%g ISO-week loop, recursive %c/%x/%D... all line-for-line
+_conv	strftime.rs:730	lib.rs:370 (conv)	MATCH	yes	five printf formats -> IntFmt enum; Rust {n:02}/{n:03}/{n:04}/{n:2}/{n} identical to C printf incl negatives
+_add	strftime.rs:740	lib.rs:347 (add) + OutBuf::push lib.rs:106	MATCH	yes	copies until NUL or ptlim, silent truncation; OutBuf push drops writes at limit
+_yconv	strftime.rs:757	lib.rs:393 (yconv)	MATCH	yes	DIVISOR=100, both borrow-correction branches, lead==0&&trail<0 -> "-0", abs(trail) via %02d; %C%y==%Y verified
+isleap_sum	private.h:147 (macro, c2rust-inlined)	lib.rs:446 (isleap_sum)	MATCH	yes	isleap(a%400 + b%400); C and Rust % both truncating for negatives

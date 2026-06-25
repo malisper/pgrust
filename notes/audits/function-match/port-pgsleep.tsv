@@ -1,0 +1,2 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+pg_usleep	probe-port-srv-pgsleep/src/pgsleep.rs:16	crates/port-pgsleep/src/lib.rs:31	MATCH	yes	guard microsec>0; tv_sec=microsec/1e6, tv_nsec=(microsec%1e6)*1000; nanosleep(&delay,NULL) ret discarded. width-faithful i64/c_long. WIN32 arm n/a (non-WIN32 build). Audit port-pgsleep.md confirms; spot-verified.

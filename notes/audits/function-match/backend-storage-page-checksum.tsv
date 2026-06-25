@@ -1,0 +1,4 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+checksum_comp	checksum.rs:47	crates/backend-storage-page-checksum/src/lib.rs:114	MATCH	yes	CHECKSUM_COMP macro: (tmp^value) then tmp*FNV_PRIME ^ (tmp>>17); wrapping_mul; FNV_PRIME=16777619
+checksum_block	checksum.rs (PageRef::checksum_block)	crates/backend-storage-page-checksum/src/lib.rs:87	MATCH	yes	pg_checksum_block: 32 base offsets, row-major 64x32 loop via chunks_exact(4)+from_ne_bytes, 2 zero rounds, xor-fold; differential-tested 50/50
+pg_checksum_page	checksum.rs:96	crates/backend-storage-page-checksum/src/lib.rs:56	MATCH	yes	save/zero/restore pd_checksum at offset 8, checksum^=blkno, (checksum%65535+1) as u16; identical

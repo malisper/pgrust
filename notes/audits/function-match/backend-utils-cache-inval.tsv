@@ -1,0 +1,53 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+ObjectIdGetDatum	inval.rs:1478	(intrinsic)	MATCH	yes	c2rust-emitted Datum cast intrinsic; idiomatic in-language op
+GETSTRUCT	inval.rs:1483	(intrinsic)	MATCH	yes	c2rust-emitted tuple-struct accessor intrinsic
+AssertCouldGetRelation	inval.rs:1499	(debug assert)	MATCH	yes	assertion-only helper
+AddInvalidationMessage	inval.rs:1539	msgs.rs	MATCH	yes	PgVec push; C maxmsgs/repalloc growth = Vec capacity
+AppendInvalidationMessageSubGroup	inval.rs:1575	msgs.rs	MATCH	yes	adjacency assert + SetSubGroupToFollow
+AddCatcacheInvalidationMessage	inval.rs:1584	msgs.rs	MATCH	yes	id<CHAR_MAX debug_assert; no union padding
+AddCatalogInvalidationMessage	inval.rs:1596	msgs.rs	MATCH	yes
+AddRelcacheInvalidationMessage	inval.rs:1607	msgs.rs	MATCH	yes	dedup scan (relId match or InvalidOid)
+AddRelsyncInvalidationMessage	inval.rs:1636	msgs.rs	MATCH	yes
+AddSnapshotInvalidationMessage	inval.rs:1665	msgs.rs	MATCH	yes	dedup on relId only
+AppendInvalidationMessages	inval.rs:1693	msgs.rs	MATCH	yes
+ProcessInvalidationMessages	inval.rs:1700	local_list.rs:236	MATCH	yes	catcache first
+ProcessInvalidationMessagesMulti	inval.rs:1731	msgs.rs	MATCH	yes	Multi only fires func when n>0
+RegisterCatcacheInvalidation	inval.rs:1764	registration.rs	MATCH	yes
+RegisterCatalogInvalidation	inval.rs:1778	registration.rs	MATCH	yes
+RegisterRelcacheInvalidation	inval.rs:1785	registration.rs	MATCH	yes	GetCurrentCommandId(true) + init-file flag via seams
+RegisterRelsyncInvalidation	inval.rs:1796	registration.rs	MATCH	yes
+RegisterSnapshotInvalidation	inval.rs:1803	registration.rs	MATCH	yes
+PrepareInvalidationState	inval.rs:1810	registration.rs	MATCH	yes	parent chain as stack; subxact-unprocessed ERROR
+PrepareInplaceInvalidationState	inval.rs:1915	registration.rs	MATCH	yes
+InvalidateSystemCachesExtended	inval.rs:1949	local_list.rs:136	MATCH	yes	snapshot/reset/relcache then 3 callback loops
+LocalExecuteInvalidationMessage	inval.rs:1986	local_list.rs:51	MATCH	yes	full id dispatch; exhaustive enum makes FATAL arm unreachable
+InvalidateSystemCaches	inval.rs:2085	local_list.rs:172	MATCH	yes
+AcceptInvalidationMessages	inval.rs:2089	local_list.rs:178	MATCH	yes	DISCARD_CACHES recursion guard via thread_local
+PostPrepare_Inval	inval.rs:2099	at_eoxact.rs:346	MATCH	yes
+xactGetCommittedInvalidationMessages	inval.rs:2103	at_eoxact.rs:353	MATCH	yes	order Prior:Cat,Cur:Cat,Prior:Rel,Cur:Rel
+inplaceGetInvalidationMessages	inval.rs:2264	at_eoxact.rs:399	MATCH	yes
+ProcessCommittedInvalidationMessages	inval.rs:2352	at_eoxact.rs:432	MATCH	yes	nmsgs<=0 early return; DatabasePath dance via seams
+AtEOXact_Inval	inval.rs:2440	at_eoxact.rs	MATCH	yes	commit pre/Append/MultiSend/post; abort local Prior; reset
+PreInplace_Inval	inval.rs:2478	at_eoxact.rs	MATCH	yes
+AtInplace_Inval	inval.rs:2486	at_eoxact.rs	MATCH	yes	MultiSend then post; clear inplace
+ForgetInplace_Inval	inval.rs:2506	at_eoxact.rs	MATCH	yes	clears inplace; rolls dense-array tail back
+AtEOSubXact_Inval	inval.rs:2510	at_eoxact.rs	MATCH	yes	commit lazy-parent vs append-up-and-pop; abort local+pop
+CommandEndInvalidationMessages	inval.rs:2582	at_eoxact.rs:57	MATCH	yes	local Current; XLogLogicalInfoActive->LogLogical; Append Current into Prior
+CacheInvalidateHeapTupleCommon	inval.rs:2601	cache_invalidate.rs:39	MATCH	yes	bootstrap/IsCatalog/IsToast short-circuits; relcache-definer dispatch
+CacheInvalidateHeapTuple	inval.rs:2685	cache_invalidate.rs:165	MATCH	yes
+CacheInvalidateHeapTupleInplace	inval.rs:2698	cache_invalidate.rs:174	MATCH	yes
+CacheInvalidateCatalog	inval.rs:2713	cache_invalidate.rs:182	MATCH	yes
+CacheInvalidateRelcache	inval.rs:2723	cache_invalidate.rs:197	MATCH	yes	relisshared via IsSharedRelation(relid)
+CacheInvalidateRelcacheAll	inval.rs:2735	cache_invalidate.rs:218	MATCH	yes
+CacheInvalidateRelcacheByTuple	inval.rs:2739	cache_invalidate.rs:227	MATCH	yes
+CacheInvalidateRelcacheByRelid	inval.rs:2753	cache_invalidate.rs:244	MATCH	yes	RELOID lookup via seam; not-found ERROR
+CacheInvalidateRelSync	inval.rs:2791	cache_invalidate.rs:279	MATCH	yes
+CacheInvalidateRelSyncAll	inval.rs:2795	cache_invalidate.rs:294	MATCH	yes
+CacheInvalidateSmgr	inval.rs:2799	cache_invalidate.rs:304	MATCH	yes	MAX_BACKENDS_BITS<=23 static assert; hi/lo split; sent immediately
+CacheInvalidateRelmap	inval.rs:2809	cache_invalidate.rs:320	MATCH	yes
+CacheRegisterSyscacheCallback	inval.rs:2816	cache_invalidate.rs:331	MATCH	yes	link-chain head/append; FATAL on bad id/out-of-slots
+CacheRegisterRelcacheCallback	inval.rs:2918	cache_invalidate.rs:377	MATCH	yes	FATAL on out-of-slots
+CacheRegisterRelSyncCallback	inval.rs:2960	cache_invalidate.rs:396	MATCH	yes	FATAL on out-of-slots
+CallSyscacheCallbacks	inval.rs:3002	cache_invalidate.rs:418	MATCH	yes	ERROR on bad id; link walk; callbacks snapshotted
+CallRelSyncCallbacks	inval.rs:3053	cache_invalidate.rs:448	MATCH	yes
+LogLogicalInvalidations	inval.rs:3064	at_eoxact.rs:479	MATCH	yes	xl_xact_invals header; per-subgroup XLogRegisterData; XLogInsert(RM_XACT_ID)

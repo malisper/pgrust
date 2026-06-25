@@ -1,0 +1,20 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+MemoryContextSwitchTo	nodeForeignscan.rs:3189	lib.rs (folded)	MATCH	yes	Inline context switch; folded into seam marshalling, behavior-identical.
+DatumGetBool	nodeForeignscan.rs:3195	lib.rs	MATCH	yes	Inline datum cast; idiomatic equivalent.
+newNode	nodeForeignscan.rs:3199	lib.rs (makeNode)	MATCH	yes	Inline node alloc+tag.
+ExecEvalExprSwitchContext	nodeForeignscan.rs:3210	lib.rs (execExpr seam)	MATCH	yes	Inline expr-eval wrapper via execExpr seam.
+ExecQual	nodeForeignscan.rs:3225	lib.rs:ForeignRecheck/ExecScanExtended	MATCH	yes	Inline qual eval; NULL-state->true mirrored.
+ForeignNext	nodeForeignscan.rs:3237	lib.rs:108	MATCH	yes	Audit fn1: direct-modify vs scan branch, tableoid stamp, TupIsNull return.
+ForeignRecheck	nodeForeignscan.rs:3266	lib.rs:161	MATCH	yes	Audit fn2: scantuple set, ResetExprContext, RecheckForeignScan gate, ExecQual.
+ExecForeignScan	nodeForeignscan.rs:3284	lib.rs:222	MATCH	yes	Audit fn3: EPQ-active non-SELECT->NULL else ExecScan(ForeignNext,ForeignRecheck).
+ExecInitForeignScan	nodeForeignscan.rs:3322	lib.rs:249	MATCH	yes	Audit fn4: full init; async_capable computed-not-stored deferral ledgered (D1).
+ExecEndForeignScan	nodeForeignscan.rs:3451	lib.rs:433	MATCH	yes	Audit fn5: EndDirectModify/EndForeignScan + outerPlan ExecEndNode.
+ExecReScanForeignScan	nodeForeignscan.rs:3470	lib.rs:471	MATCH	yes	Audit fn6: EPQ guard, ReScanForeignScan, outerPlan rescan, ExecScanReScan seam.
+ExecForeignScanEstimate	nodeForeignscan.rs:3488	lib.rs:522	MATCH	yes	Audit fn7: EstimateDSMForeignScan->pscan_len, estimate_chunk/keys(1).
+ExecForeignScanInitializeDSM	nodeForeignscan.rs:3512	lib.rs:542	MATCH	yes	Audit fn8: InitializeDSMForeignScan alloc/init/insert folded into FDW seam.
+ExecForeignScanReInitializeDSM	nodeForeignscan.rs:3530	lib.rs:565	MATCH	yes	Audit fn9: ReInitializeDSMForeignScan toc lookup folded into seam.
+ExecForeignScanInitializeWorker	nodeForeignscan.rs:3547	lib.rs:584	MATCH	yes	Audit fn10: InitializeWorkerForeignScan toc lookup folded into seam.
+ExecShutdownForeignScan	nodeForeignscan.rs:3564	lib.rs:600	MATCH	yes	Audit fn11: ShutdownForeignScan presence gate + call.
+ExecAsyncForeignScanRequest	nodeForeignscan.rs:3571	lib.rs:619	MATCH	yes	Audit fn12: requestee+fdwroutine resolved in seam, ForeignAsyncRequest call.
+ExecAsyncForeignScanConfigureWait	nodeForeignscan.rs:3577	lib.rs:633	MATCH	yes	Audit fn13: FDW ForeignAsyncConfigureWait via seam.
+ExecAsyncForeignScanNotify	nodeForeignscan.rs:3583	lib.rs:641	MATCH	yes	Audit fn14: FDW ForeignAsyncNotify via seam.

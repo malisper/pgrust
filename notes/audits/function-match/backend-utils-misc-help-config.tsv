@@ -1,0 +1,4 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+GucInfoMain	help_config.rs:298	lib.rs:61 GucInfoMain	MATCH	yes	build GUC table then render all visible options; build_guc_variables side handled, rendering identical
+displayStruct	help_config.rs:316	lib.rs:100 displayStruct	MATCH	yes	true unless GUC_NO_SHOW_ALL/GUC_NOT_IN_SAMPLE/GUC_DISALLOW_IN_FILE hidden flags set
+printMixedStruct	help_config.rs:320	lib.rs:107 printMixedStruct	MATCH	yes	nine tab-separated columns per vartype (bool/int/real/string/enum); min/max population matches C switch

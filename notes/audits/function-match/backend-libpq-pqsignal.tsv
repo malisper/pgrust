@@ -1,0 +1,3 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+__sigbits	c2rust-runs/backend-libpq-pqsignal/src/pqsignal.rs:6	crates/backend-libpq-pqsignal/src/lib.rs:179	MATCH	yes	Darwin header inline (not unit logic); covered by libc::sigdelset in delete_signal
+pqinitmask	c2rust-runs/backend-libpq-pqsignal/src/pqsignal.rs:19	crates/backend-libpq-pqsignal/src/lib.rs:153	MATCH	yes	pqinitmask builds SignalMasks::new; identical sigemptyset/sigfillset + sigdelset sets; signal constants verified vs headers

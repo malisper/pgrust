@@ -1,0 +1,33 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+BoolGetDatum	opclasscmds.rs:3354	-	MISSING	no	header inline (postgres.h Datum macro); dissolved, not a unit fn
+CharGetDatum	opclasscmds.rs:3362	-	MISSING	no	header inline (postgres.h Datum macro); dissolved
+Int16GetDatum	opclasscmds.rs:3366	-	MISSING	no	header inline (postgres.h Datum macro); dissolved
+ObjectIdGetDatum	opclasscmds.rs:3370	-	MISSING	no	header inline (postgres.h Datum macro); dissolved
+PointerGetDatum	opclasscmds.rs:3374	-	MISSING	no	header inline (postgres.h Datum macro); dissolved
+CStringGetDatum	opclasscmds.rs:3378	-	MISSING	no	header inline (postgres.h Datum macro); dissolved
+NameGetDatum	opclasscmds.rs:3382	-	MISSING	no	header inline (postgres.h Datum macro); dissolved
+newNode	opclasscmds.rs:3393	-	MISSING	no	header inline (nodes.h); node alloc owned by nodes, dissolved into typed ctor
+list_length	opclasscmds.rs:3401	-	MISSING	no	header inline (pg_list.h); owned by pg_list, dissolved
+list_nth_cell	opclasscmds.rs:3405	-	MISSING	no	header inline (pg_list.h); owned by pg_list
+GETSTRUCT	opclasscmds.rs:3414	-	MISSING	no	header inline (htup_details.h); dissolved into typed row reads
+OpFamilyCacheLookup	opclasscmds.rs:3482	lib.rs:127	MATCH	yes	qualified->syscache_opfamily_oid, unqualified->OpfamilynameGetOpfid; not-found+!missing_ok ERRCODE_UNDEFINED_OBJECT w/ am-name; am cache miss internal error; returns Option<Oid>
+get_opfamily_oid	opclasscmds.rs:3602	lib.rs:184	MATCH	yes	None->InvalidOid else oid
+OpClassCacheLookup	opclasscmds.rs:3621	lib.rs:201	MATCH	yes	structurally identical to OpFamilyCacheLookup for opclass (get_opclass_oid syscache / OpclassnameGetOpcid)
+get_opclass_oid	opclasscmds.rs:3741	lib.rs:260	MATCH	yes	mirror of get_opfamily_oid
+CreateOpFamily	opclasscmds.rs:3758	lib.rs:279	MATCH	yes	dup-name ERRCODE_DUPLICATE_OBJECT; pg_opfamily insert; deps AM=AUTO/namespace=NORMAL/owner/current-ext(false); EventTriggerCollectSimpleCommand + post-create hook; insert+OID alloc via indexing seam
+DefineOpClass	opclasscmds.rs:3893	lib.rs:376	MATCH	yes	full branch order: namespace ACL_CREATE; get_index_am_oid+info; maxOpNumber<=0->SHRT_MAX; superuser; datatype lookup; opfamily lookup-or-create; item loop op/func/storage dispatch w/ range errors; storage legality; opclass dup-name; isDefault scan->DUPLICATE_OBJECT; pg_opclass insert; ref defaulting; amadjustmembers; storeOperators/Procedures(false); collect; deps; post-create hook
+DefineOpFamily	opclasscmds.rs:4630	lib.rs:739	MATCH	yes	namespace ACL; get_index_am_oid; superuser; delegates to CreateOpFamily
+AlterOpFamily	opclasscmds.rs:4698	lib.rs:783	MATCH	yes	am lookup (name->oid w/ UNDEFINED_OBJECT); maxOpNumber clamp; opfamily lookup; superuser; isDrop->Drop else Add; returns opfamilyoid
+AlterOpFamilyAdd	opclasscmds.rs:4822	lib.rs:830	MATCH	yes	re-fetch amroutine; item loop operator (objargs-required else SYNTAX_ERROR), soft-dep fields, function, STORAGE->SYNTAX_ERROR, default->internal; amadjustmembers(InvalidOid); storeOperators/Procedures(true); collect alter
+AlterOpFamilyDrop	opclasscmds.rs:5120	lib.rs:959	MATCH	yes	item loop op/func via processTypesSpec (range errors), STORAGE->default->internal (grammar-prevented); dropOperators/dropProcedures; collect alter
+processTypesSpec	opclasscmds.rs:5305	lib.rs:1036	MATCH	yes	Assert(args!=NIL)->debug_assert; lefttype [0]; righttype [1] or =lefttype; len>2->SYNTAX_ERROR
+assignOperTypes	opclasscmds.rs:5362	lib.rs:1063	MATCH	yes	OPEROID lookup->internal on miss; oprkind!='b'->INVALID_OBJECT_DEFINITION; sortfamily branch !amcanorderbyop error; else oprresult!=BOOLOID error; lefttype/righttype defaulting
+assignProcTypes	opclasscmds.rs:5538	lib.rs:1128	MATCH	yes	opclassOptsProcNum branch priority via if/else-if; amcanorder chain (BTORDER1/SORTSUPPORT2/INRANGE3/EQUALIMAGE4/SKIPSUPPORT6); amcanhash (HASHSTANDARD1/HASHEXTENDED2); final typeoid defaulting+error; each else-if re-fetches amroutine
+addFamilyMember	opclasscmds.rs:6449	lib.rs:1354	MATCH	yes	duplicate (number,lefttype,righttype)->func/op-specific "appears more than once" w/ format_type_be; append
+storeOperators	opclasscmds.rs:6560	lib.rs:1399	MATCH	yes	isAdd dup check via amop_oid->DUPLICATE_OBJECT; oppurpose ORDER('o')/SEARCH('s'); pg_amop insert (9 Anums); deps by ref_is_hard/ref_is_family/typeDepNeeded/sortfamily; post-create hook
+storeProcedures	opclasscmds.rs:6791	lib.rs:1544	MATCH	yes	mirror of storeOperators for pg_amproc via amproc_oid (6 Anums); same dep structure
+typeDepNeeded	opclasscmds.rs:6993	lib.rs:1671	MATCH	yes	pinned->false; func->get_func_signature arg scan; else op_input_types left/right compare
+dropOperators	opclasscmds.rs:7025	lib.rs:1704	MATCH	yes	amop_oid lookup, !valid->UNDEFINED_OBJECT, else performDeletion(amop,DROP_RESTRICT,0)
+dropProcedures	opclasscmds.rs:7110	lib.rs:1740	MATCH	yes	mirror of dropOperators on pg_amproc
+IsThereOpClassInNamespace	opclasscmds.rs:7196	lib.rs:1780	MATCH	yes	opclass_exists->DUPLICATE_OBJECT w/ am-name + schema-name
+IsThereOpFamilyInNamespace	opclasscmds.rs:7252	lib.rs:1802	MATCH	yes	mirror of IsThereOpClassInNamespace on opfamily

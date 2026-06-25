@@ -1,0 +1,12 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+MemoryContextSwitchTo	sync.rs:883	crates/backend-storage-sync/src/lib.rs (mctx model)	MATCH	yes	header inline; owned-collection mctx design absorbs the C context switch; no observable divergence
+list_nth_cell	sync.rs:890	crates/backend-storage-sync/src/lib.rs (sync_post_checkpoint)	MATCH	yes	pg_list.h inline; realized via Vec indexing in SyncPostCheckpoint drain arithmetic
+list_nth	sync.rs:897	crates/backend-storage-sync/src/lib.rs	MATCH	yes	pg_list.h inline; Vec index access, behavior-identical
+list_cell_number	sync.rs:904	crates/backend-storage-sync/src/lib.rs (sync_post_checkpoint)	MATCH	yes	pg_list.h inline; stop_index = list_cell_number(list,lc) realized as usize index; verified against list_delete_first_n semantics
+pg_clock_gettime_ns	sync.rs:913	crates/portability-instr-time/src/lib.rs	MATCH	yes	instr_time inline rendered in portability-instr-time crate (direct dep); used inline for timing
+InitSync	sync.rs:1005	crates/backend-storage-sync/src/lib.rs:250	MATCH	yes	create_pending_ops gate passed in; HashMap+Vec fresh; pendingOpsCxt/critical-section absorbed by owned collections
+SyncPreCheckpoint	sync.rs:1048	crates/backend-storage-sync/src/lib.rs:262	MATCH	yes	absorb (seam) then checkpoint_cycle_ctr++ wrapping u16
+SyncPostCheckpoint	sync.rs:1053	crates/backend-storage-sync/src/lib.rs:275	MATCH	yes	foreach idx, skip-canceled continue, break on cycle_ctr match, unlink seam, ENOENT-swallow else WARNING, drain(0..stop_index)
+ProcessSyncRequests	sync.rs:1139	crates/backend-storage-sync/src/lib.rs:356	MATCH	yes	!pendingOps ERROR; absorb; stale-cycle refresh; key-snapshot scan; retry loop; data_sync_elevel seam; failure path leaves sync_in_progress=true; CheckpointStats seam
+RememberSyncRequest	sync.rs:1386	crates/backend-storage-sync/src/lib.rs:570	MATCH	yes	FORGET/FILTER/UNLINK/SYNC arms; HASH_ENTER oldest-cycle_ctr invariant; fallible reserve
+RegisterSyncRequest	sync.rs:1495	crates/backend-storage-sync/src/lib.rs:709	MATCH	yes	pendingOps!=NULL -> local Remember; else ForwardSyncRequest seam loop + WaitLatch retry seam

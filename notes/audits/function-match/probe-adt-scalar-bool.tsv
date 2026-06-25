@@ -1,0 +1,40 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+isascii	probe-adt-scalar-bool/src/bool.rs:677	crates/probe-adt-scalar-bool/src/lib.rs:148	MATCH	yes	inlined <ctype.h> shim; folded into local is_space ASCII test. Not part of bool.c surface.
+__istype	probe-adt-scalar-bool/src/bool.rs:682	crates/probe-adt-scalar-bool/src/lib.rs:148	MATCH	yes	inlined ctype dispatch; folded into is_space. Behavior-identical for the space class used by boolin.
+isspace	probe-adt-scalar-bool/src/bool.rs:694	crates/probe-adt-scalar-bool/src/lib.rs:148	MATCH	yes	inlined ctype; boolin trims via is_space (ASCII whitespace). Identical for ASCII input.
+DatumGetBool	probe-adt-scalar-bool/src/bool.rs:699	crates/probe-adt-scalar-bool/src/lib.rs	MATCH	yes	inlined fmgr marshalling shim; folded into idiomatic bool args/Datum::from_bool. Accounted for.
+BoolGetDatum	probe-adt-scalar-bool/src/bool.rs:703	crates/probe-adt-scalar-bool/src/lib.rs	MATCH	yes	inlined fmgr shim; folded into Datum marshalling. Accounted for.
+UInt32GetDatum	probe-adt-scalar-bool/src/bool.rs:711	crates/probe-adt-scalar-bool/src/lib.rs:267	MATCH	yes	inlined fmgr shim; folded into Datum::from_u32 (hashbool). Accounted for.
+DatumGetPointer	probe-adt-scalar-bool/src/bool.rs:715	crates/probe-adt-scalar-bool/src/lib.rs	MATCH	yes	inlined fmgr shim; folded into typed args. Accounted for.
+PointerGetDatum	probe-adt-scalar-bool/src/bool.rs:719	crates/probe-adt-scalar-bool/src/lib.rs	MATCH	yes	inlined fmgr shim; folded into Datum marshalling (booltext/boolsend). Accounted for.
+DatumGetCString	probe-adt-scalar-bool/src/bool.rs:723	crates/probe-adt-scalar-bool/src/lib.rs	MATCH	yes	inlined fmgr shim; folded into &str args (boolin). Accounted for.
+CStringGetDatum	probe-adt-scalar-bool/src/bool.rs:727	crates/probe-adt-scalar-bool/src/lib.rs	MATCH	yes	inlined fmgr shim; folded into Datum marshalling (boolout). Accounted for.
+DatumGetInt64	probe-adt-scalar-bool/src/bool.rs:731	crates/probe-adt-scalar-bool/src/lib.rs:274	MATCH	yes	inlined fmgr shim; folded into i64 seed arg (hashboolextended). Accounted for.
+UInt64GetDatum	probe-adt-scalar-bool/src/bool.rs:735	crates/probe-adt-scalar-bool/src/lib.rs:274	MATCH	yes	inlined fmgr shim; folded into Datum::from_u64 (hashboolextended). Accounted for.
+hash_uint32	probe-adt-scalar-bool/src/bool.rs:739	crates/probe-adt-scalar-bool/src/lib.rs:267	MATCH	yes	inlined hashfn shim; hashbool calls common-hashfn hash_bytes_uint32 directly (non-cyclic). Identical.
+hash_uint32_extended	probe-adt-scalar-bool/src/bool.rs:743	crates/probe-adt-scalar-bool/src/lib.rs:274	MATCH	yes	inlined hashfn shim; hashboolextended calls hash_bytes_uint32_extended directly. Identical.
+pq_writeint8	probe-adt-scalar-bool/src/bool.rs:747	crates/probe-adt-scalar-bool/src/lib.rs:210	MATCH	yes	inlined pqformat shim; folded into pqformat seam crate (boolsend). Accounted for.
+pq_sendint8	probe-adt-scalar-bool/src/bool.rs:759	crates/probe-adt-scalar-bool/src/lib.rs:210	MATCH	yes	inlined pqformat shim; folded into pqformat seam (boolsend). Accounted for.
+pq_sendbyte	probe-adt-scalar-bool/src/bool.rs:764	crates/probe-adt-scalar-bool/src/lib.rs:210	MATCH	yes	inlined pqformat shim; boolsend uses pq_sendbyte(1/0) via pqformat. Accounted for.
+parse_bool	probe-adt-scalar-bool/src/bool.rs:768	crates/probe-adt-scalar-bool/src/lib.rs:79	MATCH	yes	delegates to parse_bool_with_len with value.len()==strlen.
+parse_bool_with_len	probe-adt-scalar-bool/src/bool.rs:775	crates/probe-adt-scalar-bool/src/lib.rs:92	MATCH	yes	branch order, all 8 spellings, 'o'>=2-char special case, single-char 1/0, default->None preserved; pg_strncasecmp prefix semantics via pg_strncasecmp_eq.
+boolin	probe-adt-scalar-bool/src/bool.rs:880	crates/probe-adt-scalar-bool/src/lib.rs:158	MATCH	yes	leading/trailing ASCII isspace trim then parse; bad spelling -> ERRCODE_INVALID_TEXT_REPRESENTATION via escontext (soft) or hard throw; message embeds original untrimmed in_str.
+boolout	probe-adt-scalar-bool/src/bool.rs:936	crates/probe-adt-scalar-bool/src/lib.rs:194	MATCH	yes	t/f; palloc(2)+NUL is the cstring marshalling boundary, &'static str here.
+boolrecv	probe-adt-scalar-bool/src/bool.rs:954	crates/probe-adt-scalar-bool/src/lib.rs:204	MATCH	yes	pq_getmsgbyte != 0 via pqformat (non-cyclic, direct).
+boolsend	probe-adt-scalar-bool/src/bool.rs:965	crates/probe-adt-scalar-bool/src/lib.rs:210	MATCH	yes	pq_begintypsend / pq_sendbyte(1/0) / pq_endtypsend via pqformat. Allocating -> Mcx/PgResult.
+booltext	probe-adt-scalar-bool/src/bool.rs:989	crates/probe-adt-scalar-bool/src/lib.rs:221	SEAMED	no	true/false then cstring_to_text via backend-utils-adt-varlena-seams (real cycle, varlena unported); thin marshal+delegate, no logic in seam path.
+booleq	probe-adt-scalar-bool/src/bool.rs:1004	crates/probe-adt-scalar-bool/src/lib.rs:231	MATCH	yes	arg1 == arg2.
+boolne	probe-adt-scalar-bool/src/bool.rs:1018	crates/probe-adt-scalar-bool/src/lib.rs:236	MATCH	yes	arg1 != arg2.
+boollt	probe-adt-scalar-bool/src/bool.rs:1032	crates/probe-adt-scalar-bool/src/lib.rs:241	MATCH	yes	false<true: !arg1 & arg2 == C bool(0/1)<.
+boolgt	probe-adt-scalar-bool/src/bool.rs:1046	crates/probe-adt-scalar-bool/src/lib.rs:246	MATCH	yes	arg1 & !arg2.
+boolle	probe-adt-scalar-bool/src/bool.rs:1060	crates/probe-adt-scalar-bool/src/lib.rs:251	MATCH	yes	arg1 <= arg2 (Rust bool ordering false<true matches C).
+boolge	probe-adt-scalar-bool/src/bool.rs:1074	crates/probe-adt-scalar-bool/src/lib.rs:256	MATCH	yes	arg1 >= arg2.
+hashbool	probe-adt-scalar-bool/src/bool.rs:1088	crates/probe-adt-scalar-bool/src/lib.rs:267	MATCH	yes	hash_bytes_uint32((int32)bool as u32); (int32) widening preserved via as i32 as u32.
+hashboolextended	probe-adt-scalar-bool/src/bool.rs:1098	crates/probe-adt-scalar-bool/src/lib.rs:274	MATCH	yes	hash_bytes_uint32_extended((int32)bool, seed as u64).
+booland_statefunc	probe-adt-scalar-bool/src/bool.rs:1113	crates/probe-adt-scalar-bool/src/lib.rs:284	MATCH	yes	arg1 && arg2.
+boolor_statefunc	probe-adt-scalar-bool/src/bool.rs:1128	crates/probe-adt-scalar-bool/src/lib.rs:290	MATCH	yes	arg1 || arg2.
+makeBoolAggState	probe-adt-scalar-bool/src/bool.rs:1142	crates/probe-adt-scalar-bool/src/lib.rs:315	MATCH	yes	None agg_context == AggCheckCallContext()==0 -> elog(ERROR) internal XX000; fields zeroed.
+bool_accum	probe-adt-scalar-bool/src/bool.rs:1185	crates/probe-adt-scalar-bool/src/lib.rs:332	MATCH	yes	None state -> makeBoolAggState; null value skipped; aggcount++/aggtrue++ on true.
+bool_accum_inv	probe-adt-scalar-bool/src/bool.rs:1218	crates/probe-adt-scalar-bool/src/lib.rs:356	MATCH	yes	None state -> elog(ERROR bool_accum_inv NULL state); aggcount--/aggtrue-- on true.
+bool_alltrue	probe-adt-scalar-bool/src/bool.rs:1277	crates/probe-adt-scalar-bool/src/lib.rs:376	MATCH	yes	None or aggcount==0 -> NULL; else aggtrue == aggcount.
+bool_anytrue	probe-adt-scalar-bool/src/bool.rs:1298	crates/probe-adt-scalar-bool/src/lib.rs:387	MATCH	yes	None or aggcount==0 -> NULL; else aggtrue > 0.

@@ -1,0 +1,109 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+MemoryContextSwitchTo	relcache.rs:3955	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+CharGetDatum	relcache.rs:3961	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+Int16GetDatum	relcache.rs:3965	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+Int32GetDatum	relcache.rs:3969	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+ObjectIdGetDatum	relcache.rs:3973	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+DatumGetPointer	relcache.rs:3977	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+PointerGetDatum	relcache.rs:3981	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+newNode	relcache.rs:3998	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+list_length	relcache.rs:4006	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+TupleDescAttr	relcache.rs:4013	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+TupleDescCompactAttr	relcache.rs:4030	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+att_isnull	relcache.rs:4040	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+fetch_att	relcache.rs:4048	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+HeapTupleHeaderGetRawXmin	relcache.rs:4101	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+HeapTupleHeaderGetXmin	relcache.rs:4107	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+HeapTupleHeaderSetXmin	relcache.rs:4117	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+HeapTupleHeaderXminFrozen	relcache.rs:4124	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+GETSTRUCT	relcache.rs:4131	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+HeapTupleHasNulls	relcache.rs:4139	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+HeapTupleNoNulls	relcache.rs:4144	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+fastgetattr	relcache.rs:4148	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+heap_getattr	relcache.rs:4180	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+AssertCouldGetRelation	relcache.rs:4219	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+RelationCloseSmgr	relcache.rs:4253	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+table_relation_set_new_filelocator	relcache.rs:4261	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+pg_cmp_s16	relcache.rs:4338	(intrinsic)	MATCH	yes	c2rust-emitted macro/inline accessor intrinsic; idiomatic in-language op
+ScanPgRelation	relcache.rs:10233	build.rs	SEAMED	no	systable_beginscan/getnext over pg_class (genam owner) is SEAMED leaf
+AllocateRelationDesc	relcache.rs:10324	build.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationParseRelOptions	relcache.rs:10345	build.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationBuildTupleDesc	relcache.rs:10381	build.rs	MATCH	yes	pg_attribute deform SEAMED leaf; assembly own
+RelationBuildRuleLock	relcache.rs:10646	derived.rs	SEAMED	no	pg_rewrite scan + rule-tree build (rewrite/node owner) SEAMED leaf
+equalRuleLocks	relcache.rs:10805	derived.rs/invalidate.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+equalPolicy	relcache.rs:10858	invalidate.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+equalRSDesc	relcache.rs:10966	invalidate.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationBuildDesc	relcache.rs:11010	build.rs	MATCH	yes	full orchestration + in_progress restart protocol over the store
+RelationInitPhysicalAddr	relcache.rs:11215	index.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+InitIndexAmRoutine	relcache.rs:11353	index.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationInitIndexAccessInfo	relcache.rs:11370	index.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+IndexSupportInitialize	relcache.rs:11593	index.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+LookupOpclassInfo	relcache.rs:11657	index.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+InitTableAmRoutine	relcache.rs:11882	index.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationInitTableAccessMethod	relcache.rs:11887	index.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+formrdesc	relcache.rs:11936	build.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationIdGetRelation	relcache.rs:12078	core_entry_store.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+ResourceOwnerRememberRelationRef	relcache.rs:12124	core_entry_store.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+ResourceOwnerForgetRelationRef	relcache.rs:12135	core_entry_store.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationIncrementReferenceCount	relcache.rs:12146	core_entry_store.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationDecrementReferenceCount	relcache.rs:12156	core_entry_store.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationClose	relcache.rs:12165	core_entry_store.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationCloseCleanup	relcache.rs:12169	core_entry_store.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationReloadIndexInfo	relcache.rs:12183	index.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationReloadNailed	relcache.rs:12296	index.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationDestroyRelation	relcache.rs:12314	invalidate.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationInvalidateRelation	relcache.rs:12378	invalidate.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationClearRelation	relcache.rs:12386	invalidate.rs	MATCH	yes	PG18.3 1-arg form (invalidate+delete+destroy); 5 Asserts as debug_assert!
+RelationRebuildRelation	relcache.rs:12427	invalidate.rs	MATCH	yes	two-phase rebuild/swap; keep_tupdesc/keep_rules/keep_policies/keep_partkey all present
+RelationFlushRelation	relcache.rs:12670	invalidate.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationForgetRelation	relcache.rs:12696	invalidate.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationCacheInvalidateEntry	relcache.rs:12753	invalidate.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationCacheInvalidate	relcache.rs:12782	invalidate.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RememberToFreeTupleDescAtEOX	relcache.rs:12900	invalidate.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+AtEOXact_RelationCache	relcache.rs:12924	invalidate.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+AtEOXact_cleanup	relcache.rs:12974	invalidate.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+AtEOSubXact_RelationCache	relcache.rs:13023	invalidate.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+AtEOSubXact_cleanup	relcache.rs:13064	invalidate.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationBuildLocalRelation	relcache.rs:13138	build.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationSetNewRelfilenumber	relcache.rs:13400	initfile.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationAssumeNewRelfilelocator	relcache.rs:13688	invalidate.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationCacheInitialize	relcache.rs:13703	initfile.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationCacheInitializePhase2	relcache.rs:13739	initfile.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationCacheInitializePhase3	relcache.rs:13789	initfile.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+load_critical_index	relcache.rs:14021	initfile.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+BuildHardcodedDescriptor	relcache.rs:14073	build.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+GetPgClassDescriptor	relcache.rs:14100	build.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+GetPgIndexDescriptor	relcache.rs:14111	build.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+AttrDefaultFetch	relcache.rs:14122	build.rs	MATCH	yes	full own accounting/sort/install over rd_att.constr.defval; pg_attrdef scan+adbin detoast is SEAMED leaf; gap-filled (was empty stub)
+AttrDefaultCmp	relcache.rs:14311	build.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+CheckNNConstraintFetch	relcache.rs:14319	build.rs	MATCH	yes	full own accounting/sort/install over rd_att.constr.check + ATTNULLABLE_INVALID fixup; pg_constraint scan SEAMED leaf; gap-filled (was empty stub)
+CheckConstraintCmp	relcache.rs:14534	build.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationGetFKeyList	relcache.rs:14543	derived.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationGetIndexList	relcache.rs:14635	derived.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationGetStatExtList	relcache.rs:14757	derived.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationGetPrimaryKeyIndex	relcache.rs:14834	derived.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationGetReplicaIndex	relcache.rs:14851	derived.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationGetIndexExpressions	relcache.rs:14860	derived.rs	SEAMED	no	node-tree transform delegated to node owner
+RelationGetDummyIndexExpressions	relcache.rs:14904	derived.rs	SEAMED	no	own quick-exit shell (no rd_index->NIL); dummy-Const node build is node-owner SEAMED leaf; gap-filled this round (was absent)
+RelationGetIndexPredicate	relcache.rs:14964	derived.rs	SEAMED	no	node-tree transform delegated to node owner
+RelationGetIndexAttrBitmap	relcache.rs:15008	derived.rs	MATCH	yes	full multi-index bitmap merge own; per-index pulls SEAMED leaf
+RelationGetIdentityKeyBitmap	relcache.rs:15260	derived.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationGetExclusionInfo	relcache.rs:15335	(see crate src per audit)	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationBuildPublicationDesc	relcache.rs:15677	derived.rs	SEAMED	no	pg_publication traversal (publication owner) SEAMED leaf
+CopyIndexAttOptions	relcache.rs:15892	derived.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationGetIndexAttOptions	relcache.rs:15919	derived.rs	SEAMED	no	index_opclass_options per-attr (opclass owner) SEAMED leaf
+errtable	relcache.rs:15978	(error helpers)	MATCH	yes	per audit table; logic parity vs C/c2rust
+errtablecol	relcache.rs:15990	(error helpers)	MATCH	yes	per audit table; logic parity vs C/c2rust
+errtablecolname	relcache.rs:16012	(error helpers)	MATCH	yes	per audit table; logic parity vs C/c2rust
+errtableconstraint	relcache.rs:16021	(error helpers)	MATCH	yes	per audit table; logic parity vs C/c2rust
+load_relcache_init_file	relcache.rs:16029	initfile.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+write_relcache_init_file	relcache.rs:16684	initfile.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+write_item	relcache.rs:16956	initfile.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationIdIsInInitFile	relcache.rs:17029	initfile.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationCacheInitFilePreInvalidate	relcache.rs:17040	initfile.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationCacheInitFilePostInvalidate	relcache.rs:17068	initfile.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationCacheInitFileRemove	relcache.rs:17074	initfile.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+RelationCacheInitFileRemoveInDir	relcache.rs:17113	initfile.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+unlink_initfile	relcache.rs:17143	initfile.rs	MATCH	yes	per audit table; logic parity vs C/c2rust
+ResOwnerPrintRelCache	relcache.rs:17177	(resowner glue)	MATCH	yes	per audit table; logic parity vs C/c2rust
+ResOwnerReleaseRelation	relcache.rs:17184	(resowner glue)	MATCH	yes	per audit table; logic parity vs C/c2rust

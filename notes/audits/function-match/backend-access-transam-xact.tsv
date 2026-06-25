@@ -1,0 +1,114 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+MemoryContextSwitchTo	xact.rs:1700	(inline shim)	MATCH	yes	c2rust-emitted mcx inline; ambient-context choreography dissolves per repo convention
+FullTransactionIdFromEpochAndXid	xact.rs:1710	(inline shim)	MATCH	yes	transam.h inline; (epoch<<32)|xid packing identical
+ReadNextTransactionId	xact.rs:1719	(varsup seam)	MATCH	yes	transam.h inline reading ShmemVariableCache->nextXid; reached via varsup seam
+pgstat_report_wait_end	xact.rs:1776	(inline shim)	MATCH	yes	wait-event probe inline
+IsTransactionState	xact.rs:1863	lib.rs:382	MATCH	yes	state==TRANS_INPROGRESS only
+IsAbortedTransactionBlockState	xact.rs:1869	lib.rs:387	MATCH	yes	ABORT/SUBABORT
+GetTopTransactionId	xact.rs:1881	lib.rs:396	MATCH	yes	assigns at stack[0]
+GetTopTransactionIdIfAny	xact.rs:1888	lib.rs:404	MATCH	yes	faithful re-derivation, audited MATCH
+GetCurrentTransactionId	xact.rs:1892	lib.rs:409	MATCH	yes	faithful re-derivation, audited MATCH
+GetCurrentTransactionIdIfAny	xact.rs:1900	lib.rs:417	MATCH	yes	faithful re-derivation, audited MATCH
+GetTopFullTransactionId	xact.rs:1904	lib.rs:422	MATCH	yes	faithful re-derivation, audited MATCH
+GetTopFullTransactionIdIfAny	xact.rs:1911	lib.rs:430	MATCH	yes	faithful re-derivation, audited MATCH
+GetCurrentFullTransactionId	xact.rs:1915	lib.rs:435	MATCH	yes	faithful re-derivation, audited MATCH
+GetCurrentFullTransactionIdIfAny	xact.rs:1923	lib.rs:443	MATCH	yes	faithful re-derivation, audited MATCH
+MarkCurrentTransactionIdLoggedIfAny	xact.rs:1927	lib.rs:448	MATCH	yes	faithful re-derivation, audited MATCH
+IsSubxactTopXidLogPending	xact.rs:1935	lib.rs:457	MATCH	yes	same 5 predicates, same order; is_subxact == nestingLevel>=2
+MarkSubxactTopXidLogged	xact.rs:1954	lib.rs:481	MATCH	yes	Assert -> debug_assert
+GetStableLatestTransactionId	xact.rs:1958	lib.rs:491	MATCH	yes	static latch -> stable_latest keyed on lxid; same compute path
+AssignTransactionId	xact.rs:1971	lib.rs:514 (+ assign_transaction_id_at lib.rs:520)	MATCH	yes	parallel-mode ERROR(25000); iterative parent assign; log_unknown_top before GetNewTransactionId; subtrans/predicate/lock in C order; xl_xact_assignment bytes match
+GetCurrentSubTransactionId	xact.rs:2105	lib.rs:644	MATCH	yes	faithful re-derivation, audited MATCH
+SubTransactionIsActive	xact.rs:2110	lib.rs:649	MATCH	yes	skips TRANS_ABORT nodes
+GetCurrentCommandId	xact.rs:2126	lib.rs:664	MATCH	yes	parallel-worker ERROR same code/message
+SetParallelStartTimestamps	xact.rs:2173	lib.rs:682	MATCH	yes	faithful re-derivation, audited MATCH
+GetCurrentTransactionStartTimestamp	xact.rs:2181	lib.rs:691	MATCH	yes	faithful re-derivation, audited MATCH
+GetCurrentStatementStartTimestamp	xact.rs:2185	lib.rs:696	MATCH	yes	faithful re-derivation, audited MATCH
+GetCurrentTransactionStopTimestamp	xact.rs:2189	lib.rs:701	MATCH	yes	lazily sets via timestamp seam; debug-only Assert dropped
+SetCurrentStatementStartTimestamp	xact.rs:2197	lib.rs:710	MATCH	yes	faithful re-derivation, audited MATCH
+GetCurrentTransactionNestLevel	xact.rs:2203	lib.rs:720	MATCH	yes	faithful re-derivation, audited MATCH
+TransactionIdIsCurrentTransactionId	xact.rs:2208	lib.rs:725	MATCH	yes	non-normal early false; top-xid fast path; ParallelCurrentXids numeric binary search; per-node precedes-ordered search; skips abort/unassigned
+TransactionStartedDuringRecovery	xact.rs:2271	lib.rs:795	MATCH	yes	faithful re-derivation, audited MATCH
+EnterParallelMode	xact.rs:2275	lib.rs:804	MATCH	yes	faithful re-derivation, audited MATCH
+ExitParallelMode	xact.rs:2280	lib.rs:813	MATCH	yes	debug-only ParallelContextActive assert dropped
+IsInParallelMode	xact.rs:2285	lib.rs:821	MATCH	yes	faithful re-derivation, audited MATCH
+CommandCounterIncrement	xact.rs:2291	lib.rs:830	MATCH	yes	overflow ERROR(54000) with counter restored first; SnapshotSetCommandId+AtCCI_LocalCache order
+ForceSyncCommit	xact.rs:2385	lib.rs:872	MATCH	yes	faithful re-derivation, audited MATCH
+AtStart_Cache	xact.rs:2388	lib.rs:881	MATCH	yes	AcceptInvalidationMessages seam
+AtStart_Memory	xact.rs:2391	lib.rs:889	MATCH	yes	sanctioned: create-once contexts; switch-to dissolves
+AtStart_ResourceOwner	xact.rs:2419	lib.rs:903	MATCH	yes	sanctioned: flag only
+AtSubStart_Memory	xact.rs:2429	lib.rs:912	MATCH	yes	sanctioned: child of parent CurTransactionContext
+AtSubStart_ResourceOwner	xact.rs:2444	lib.rs:929	MATCH	yes	sanctioned
+RecordTransactionCommit	xact.rs:2453	engine.rs:53	MATCH	yes	LogLogicalInvalidations gate; no-xid + commit paths; replorigin predicate; crit+delayChkpt; XactLogCommitRecord; sync/async flush predicate; clog both arms; SyncRepWaitForLSN gate
+AtCCI_LocalCache	xact.rs:2618	lib.rs:937	MATCH	yes	relmap before inval
+AtCommit_Memory	xact.rs:2622	lib.rs:947	MATCH	yes	sanctioned: reset TopTransactionContext
+AtSubCommit_Memory	xact.rs:2629	lib.rs:959	MATCH	yes	sanctioned: empty->delete else retained on parent
+AtSubCommit_childXids	xact.rs:2638	lib.rs:990	MATCH	yes	limit check == C n>MaxAllocSize/4; my-xid-then-children order; child array reset
+RecordTransactionAbort	xact.rs:2740	engine.rs:211	MATCH	yes	no-xid early return; PANIC on already-committed; crit section abort record->clog abort tree; async nudge top only; XidCacheRemoveRunningXids
+AtAbort_Memory	xact.rs:2843	lib.rs:1022	MATCH	yes	sanctioned: ensure abort context exists
+AtSubAbort_Memory	xact.rs:2850	lib.rs:1031	MATCH	yes	sanctioned
+AtAbort_ResourceOwner	xact.rs:2853	lib.rs:1037	MATCH	yes	sanctioned: dissolves
+AtSubAbort_ResourceOwner	xact.rs:2856	lib.rs:1040	MATCH	yes	sanctioned: dissolves
+AtSubAbort_childXids	xact.rs:2860	lib.rs:1043	MATCH	yes	clears; unreportedXids not pruned (as C)
+AtCleanup_Memory	xact.rs:2869	lib.rs:1053	MATCH	yes	sanctioned: abort-ctx reset; top-ctx reset if exists
+AtSubCleanup_Memory	xact.rs:2881	lib.rs:1068	MATCH	yes	sanctioned: drops subxact contexts incl retained children
+StartTransaction	xact.rs:2893	engine.rs:311	MATCH	yes	state asserts; xact_is_sampled prng short-circuit; recovery/read-only branch; vxid create->lock->advertise order; pgstat report; AtStart_GUC/Cache/Trigger order
+CommitTransaction	xact.rs:2959	engine.rs:434	MATCH	yes	parallel-worker EnterParallelMode; trigger/portal pre-commit; PRE_COMMIT callbacks; full shutdown sequence in C order; ProcArrayEndTransaction
+PrepareTransaction	xact.rs:3180	engine.rs:623	MATCH	yes	xid first; temp-ns/exported-snapshot ERRORs(0A000); MarkAsPreparing; StartPrepare->AtPrepare_*->EndPrepare; PostPrepare order
+AbortTransaction	xact.rs:3405	engine.rs:839	MATCH	yes	hold interrupts; LWLockReleaseAll->cleanup chain; SetUserIdAndSecContext; AtEOXact_Parallel(false); abort list in C order; RecordTransactionAbort
+CleanupTransaction	xact.rs:3538	engine.rs:987	MATCH	yes	FATAL on bad state; portals->snapshots->owner flag->memory->state reset
+StartTransactionCommand	xact.rs:3602	engine.rs:1030	MATCH	yes	3 live arms + invalid-state ERROR; context switch dissolves
+SaveTransactionCharacteristics	xact.rs:3645	engine.rs:1064	MATCH	yes	faithful re-derivation, audited MATCH
+RestoreTransactionCharacteristics	xact.rs:3653	engine.rs:1073	MATCH	yes	faithful re-derivation, audited MATCH
+CommitTransactionCommand	xact.rs:3661	engine.rs:1086	MATCH	yes	while !internal loop
+CommitTransactionCommandInternal	xact.rs:3664	engine.rs:1093	MATCH	yes	every arm compared incl chain-restart blocks; SUBRELEASE/SUBCOMMIT loops; SUBRESTART/SUBABORT_RESTART name preservation
+AbortCurrentTransaction	xact.rs:3869	engine.rs:1298	MATCH	yes	faithful re-derivation, audited MATCH
+AbortCurrentTransactionInternal	xact.rs:3872	engine.rs:1304	MATCH	yes	all arms incl TRANS_START suppression in DEFAULT
+PreventInTransactionBlock	xact.rs:3939	lib.rs:1364	MATCH	yes	3 ERRORs(25001) + FATAL chain check + NEEDIMMEDIATECOMMIT flag
+WarnNoTransactionBlock	xact.rs:4103	lib.rs:1398	MATCH	yes	faithful re-derivation, audited MATCH
+RequireTransactionBlock	xact.rs:4110	lib.rs:1403	MATCH	yes	faithful re-derivation, audited MATCH
+CheckTransactionBlock	xact.rs:4116	lib.rs:1408	MATCH	yes	WARNING/ERROR 25P01
+IsInTransactionBlock	xact.rs:4191	lib.rs:1426	MATCH	yes	faithful re-derivation, audited MATCH
+RegisterXactCallback	xact.rs:4211	lib.rs:1090	MATCH	yes	audit fixed: prepends (C head-insert); returns typed token
+UnregisterXactCallback	xact.rs:4226	lib.rs:1108	MATCH	yes	audit fixed: removes first match only
+CallXactCallbacks	xact.rs:4253	lib.rs:1156	MATCH	yes	audit fixed: serial-snapshot walk == C saved-next walk; newest-first; self-unregistration safe
+RegisterSubXactCallback	xact.rs:4264	lib.rs:1121	MATCH	yes	audit fixed
+UnregisterSubXactCallback	xact.rs:4281	lib.rs:1139	MATCH	yes	audit fixed
+CallSubXactCallbacks	xact.rs:4312	lib.rs:1191	MATCH	yes	audit fixed
+BeginTransactionBlock	xact.rs:4333	engine.rs:1404	MATCH	yes	STARTED/IMPLICIT->BEGIN; 5-state WARNING; rest FATAL
+PrepareTransactionBlock	xact.rs:4416	engine.rs:1426	MATCH	yes	walks to top (stack[0]); gid stored; degraded-commit false path
+EndTransactionBlock	xact.rs:4439	engine.rs:1457	MATCH	yes	all arms incl SUBINPROGRESS/SUBABORT stack walks; chain errors before state change
+UserAbortTransactionBlock	xact.rs:4856	engine.rs:1581	MATCH	yes	STARTED/IMPLICIT warn-then-ABORT_PENDING
+BeginImplicitTransactionBlock	xact.rs:5111	engine.rs:1659	MATCH	yes	faithful re-derivation, audited MATCH
+EndImplicitTransactionBlock	xact.rs:5120	engine.rs:1670	MATCH	yes	faithful re-derivation, audited MATCH
+DefineSavepoint	xact.rs:5129	engine.rs:1680	MATCH	yes	parallel ERROR; IMPLICIT ERROR(25P01); push + name
+ReleaseSavepoint	xact.rs:5256	engine.rs:1716	MATCH	yes	innermost-first name search (rposition); not-found/wrong-level ERRORs(3B001); SUBRELEASE marking
+RollbackToSavepoint	xact.rs:5518	engine.rs:1793	MATCH	yes	SUBABORT_PENDING/SUBABORT_END marking; SUBRESTART/SUBABORT_RESTART target
+BeginInternalSubTransaction	xact.rs:5852	engine.rs:1891	MATCH	yes	ExitOnAnyError save/set/restore via seam; CommitTransactionCommand+StartTransactionCommand inside
+ReleaseCurrentSubTransaction	xact.rs:5904	engine.rs:1937	MATCH	yes	ERROR (not FATAL) on bad state, as C
+RollbackAndReleaseCurrentSubTransaction	xact.rs:5944	engine.rs:1954	MATCH	yes	faithful re-derivation, audited MATCH
+AbortOutOfAnyTransaction	xact.rs:5990	engine.rs:1990	MATCH	yes	loop over block states; ABORT*/SUBABORT* portal zap; TopMemoryContext revert dissolves
+IsTransactionBlock	xact.rs:6046	lib.rs:1442	MATCH	yes	faithful re-derivation, audited MATCH
+IsTransactionOrTransactionBlock	xact.rs:6058	lib.rs:1448	MATCH	yes	faithful re-derivation, audited MATCH
+TransactionBlockStatusCode	xact.rs:6068	lib.rs:1453	MATCH	yes	I/T/E mapping; out-of-enum arm statically unreachable (C elog FATAL)
+IsSubTransaction	xact.rs:6107	lib.rs:1481	MATCH	yes	faithful re-derivation, audited MATCH
+StartSubTransaction	xact.rs:6114	engine.rs:2084	MATCH	yes	faithful re-derivation, audited MATCH
+CommitSubTransaction	xact.rs:6162	engine.rs:2110	MATCH	yes	full sequence in C order; parent nesting to portals; XID-lock delete gated on assigned xid
+AbortSubTransaction	xact.rs:6318	engine.rs:2197	MATCH	yes	same preamble as AbortTransaction; owner-gated block in C order; no snapbuild reset (as C)
+CleanupSubTransaction	xact.rs:6456	engine.rs:2310	MATCH	yes	faithful re-derivation, audited MATCH
+PushTransaction	xact.rs:6504	engine.rs:2335	MATCH	yes	subxid wraparound ERROR(54000); parallelChildXact propagation; savepoint inherit; GetUserIdAndSecContext
+PopTransaction	xact.rs:6576	engine.rs:2400	MATCH	yes	WARNING + FATAL-no-parent; relinking dissolves
+EstimateTransactionStateSpace	xact.rs:6650	engine.rs:2427	MATCH	yes	header 32 + 4/xid
+SerializeTransactionState	xact.rs:6668	engine.rs:2443	MATCH	yes	byte-exact layout; parallel re-pass; numeric xidComparator sort
+StartParallelWorkerTransaction	xact.rs:6750	engine.rs:2505	MATCH	yes	StartTransaction first; field restore; PARALLEL_INPROGRESS; adds safe-Rust bounds checks (superset)
+EndParallelWorkerTransaction	xact.rs:6769	engine.rs:2548	MATCH	yes	faithful re-derivation, audited MATCH
+ShowTransactionState	xact.rs:6773	lib.rs:1276	MATCH	yes	DEBUG5 gate via message_level_is_interesting
+ShowTransactionStateRec	xact.rs:6778	lib.rs:1286	MATCH	yes	parent-first via stack iteration; same format; stack-depth guard unneeded
+BlockStateAsString	xact.rs:6887	lib.rs:1322	MATCH	yes	all 20 strings
+TransStateAsString	xact.rs:6915	lib.rs:1348	MATCH	yes	faithful re-derivation, audited MATCH
+xactGetCommittedChildren	xact.rs:6930	lib.rs:1233	MATCH	yes	clone instead of in-place pointer
+XactLogCommitRecord	xact.rs:6942	wal.rs:79	MATCH	yes	opcode/xinfo derivation verbatim (APPLY_FEEDBACK/DBINFO/GID/SPECIAL_REL_UPDATE); register order + byte layouts identical
+XactLogAbortRecord	xact.rs:7139	wal.rs:234	MATCH	yes	abort-specific xinfo (DBINFO only 2PC+logical); same order
+xact_redo_commit	xact.rs:7298	redo.rs:284	MATCH	yes	TransactionIdLatest->AdvanceNextFullTransactionIdPastXid->commit-ts->standbyState branch->replorigin_advance->rels/stats flush+drops->force-sync->apply-feedback; exact order
+xact_redo_abort	xact.rs:7373	redo.rs:394	MATCH	yes	abort-tree both arms; no invals; same tail
+xact_redo	xact.rs:7422	redo.rs:460	MATCH	yes	OPMASK dispatch; COMMIT/ABORT record xid, *_PREPARED parsed.twophase_xid; PREPARE->PrepareRedoAdd; ASSIGNMENT gated standbyState>=INITIALIZED; PANIC unknown; TwoPhaseStateLock behind twophase seam

@@ -1,0 +1,50 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+MemoryContextSwitchTo	plancache.rs:3015	(intrinsic)	MATCH	yes	c2rust-emitted context-switch intrinsic
+DatumGetPointer	plancache.rs:3021	(intrinsic)	MATCH	yes	c2rust-emitted Datum->Pointer intrinsic
+PointerGetDatum	plancache.rs:3025	(intrinsic)	MATCH	yes	c2rust-emitted Pointer->Datum intrinsic
+list_length	plancache.rs:3031	(intrinsic)	MATCH	yes	c2rust List inline accessor
+list_nth_cell	plancache.rs:3035	(intrinsic)	MATCH	yes	c2rust List inline accessor
+dlist_init	plancache.rs:3042	(intrinsic)	MATCH	yes	c2rust dlist inline; modeled by thread_local list ops
+dlist_push_tail	plancache.rs:3047	(intrinsic)	MATCH	yes	c2rust dlist inline; modeled by saved_plan_list push
+dlist_delete	plancache.rs:3060	(intrinsic)	MATCH	yes	c2rust dlist inline; modeled by list unlink
+ResourceOwnerRememberPlanCacheRef	plancache.rs:3094	via resowner_seams::resource_owner_remember_plan	MATCH	yes	inline wrapper; Enlarge+refcount+++Remember sequence at each call site
+ResourceOwnerForgetPlanCacheRef	plancache.rs:3105	via resource_owner_forget_plan	MATCH	yes	inline wrapper
+InitPlanCache	plancache.rs:3119	lib.rs:259	MATCH	yes	1 relcache + 7 syscache callbacks; ids/order match
+CreateCachedPlan	plancache.rs:3182	lib.rs:324	MATCH	yes	source_context child of CurrentMemoryContext; copyObject(raw); is_oneshot=false
+CreateCachedPlanForQuery	plancache.rs:3244	lib.rs:353	MATCH	yes	delegates to CreateCachedPlan(NULL) then copies analyzed tree
+CreateOneShotCachedPlan	plancache.rs:3266	lib.rs:369	MATCH	yes	palloc0 in CurrentMemoryContext; raw NOT copied; is_oneshot=true
+CompleteCachedPlan	plancache.rs:3312	lib.rs:393	MATCH	yes	oneshot/given/copy branches; dep extraction gated; RLS/search_path save; resultDesc
+SetPostRewriteHook	plancache.rs:3384	lib.rs:476	MATCH	yes	sets postRewrite + arg
+SaveCachedPlan	plancache.rs:3393	lib.rs:492	MATCH	yes	one-shot->elog ERROR; reparent under CacheMemoryContext; is_saved=true
+DropCachedPlan	plancache.rs:3429	lib.rs:520	MATCH	yes	unlink-if-saved; ReleaseGenericPlan; magic=0; MemoryContextDelete
+ReleaseGenericPlan	plancache.rs:3440	lib.rs:552	MATCH	yes	gplan!=NULL->magic assert; clear; ReleaseCachedPlan(plan,NULL)
+StmtPlanRequiresRevalidation	plancache.rs:3447	lib.rs:568	MATCH	yes	raw->stmt_requires_parse_analysis; analyzed->query_requires_rewrite_plan
+BuildingPlanRequiresSnapshot	plancache.rs:3459	lib.rs:581	MATCH	yes	raw->analyze_requires_snapshot; analyzed->query_requires_rewrite_plan
+RevalidateCachedQuery	plancache.rs:3471	lib.rs:597	MATCH	yes	full flow re-derived line-by-line; search_path/RLS/locked-recheck; reparse; resultDesc compare
+CheckCachedPlan	plancache.rs:3655	lib.rs:774	MATCH	yes	no-gplan->false; role recheck; saved_xmin/TransactionXmin transient check
+BuildCachedPlan	plancache.rs:3682	lib.rs:826	MATCH	yes	reval-if-invalid; qlist copy; snapshot gating; pg_plan_queries; saved_xmin; generation++
+choose_custom_plan	plancache.rs:3789	lib.rs:939	MATCH	yes	oneshot/no-params/no-reval; FORCE flags; CURSOR_OPT; <5 custom->true; avg-cost compare
+cached_plan_cost	plancache.rs:3825	lib.rs:991	MATCH	yes	sum planTree total_cost; +1000.0*cpu_operator_cost*(nrel+1) when include_planner
+GetCachedPlan	plancache.rs:3864	lib.rs:1017	MATCH	yes	re-derived; generic-reuse-vs-build; custom build+cost; counters; refcount+resowner
+ReleaseCachedPlan	plancache.rs:3954	lib.rs:1113	MATCH	yes	owner->is_saved assert+Forget; refcount--; on 0 magic=0+delete
+CachedPlanAllowsSimpleValidityCheck	plancache.rs:3970	lib.rs:1144	MATCH	yes	asserts; oneshot/RLS/role/saved_xmin rejects; query/stmt loop rejects
+CachedPlanIsSimplyValid	plancache.rs:4063	lib.rs:1216	MATCH	yes	dangling-safe checks; search_path match; registry contains_key guard = safe analogue
+CachedPlanSetParentContext	plancache.rs:4086	lib.rs:1256	MATCH	yes	saved/oneshot->elog; reparent context; gplan reparent if present
+CopyCachedPlan	plancache.rs:4156	lib.rs:1296	MATCH	yes	oneshot->elog; new contexts; deep copies; flags reset; gplan=NULL
+CachedPlanIsValid	plancache.rs:4287	lib.rs:1441	MATCH	yes	returns is_valid
+CachedPlanGetTargetList	plancache.rs:4293	lib.rs:1453	MATCH	yes	resultDesc==NULL->NIL; Revalidate; primary stmt; FetchStatementTargetList
+GetCachedExpression	plancache.rs:4306	lib.rs:1479	MATCH	yes	expression_planner_with_deps; copyObject; reparent under CacheMemoryContext
+FreeCachedExpression	plancache.rs:4345	lib.rs:1517	MATCH	yes	unlink; MemoryContextDelete; registry removal models free
+QueryListGetPrimaryStmt	plancache.rs:4349	lib.rs:1534	MATCH	yes	first canSetTag Query else NULL
+AcquireExecutorLocks	plancache.rs:4371	lib.rs:1548	MATCH	yes	utility->UtilityContainsQuery+ScanQueryForLocks; rtable RTE_RELATION/SUBQUERY lock
+AcquirePlannerLocks	plancache.rs:4427	lib.rs:1581	MATCH	yes	utility->UtilityContainsQuery+ScanQueryForLocks; else ScanQueryForLocks
+ScanQueryForLocks	plancache.rs:4455	lib.rs:1602	MATCH	yes	rtable switch; cteList recurse; hasSubLinks->walker recursion
+ScanQueryWalker	plancache.rs:4524	lib.rs:1647	SEAMED	no	opaque-tree walk delegated to walk_query_sublinks_for_locks; recursion+locking stay in-crate
+PlanCacheComputeResultDesc	plancache.rs:4546	lib.rs:1656	MATCH	yes	ChoosePortalStrategy switch over targetList/returningList/UtilityTupleDescriptor/NULL
+PlanCacheRelCallback	plancache.rs:4567	lib.rs:1689	MATCH	yes	saved iter; dep check; invalidate src+gplan; gplan stmt scan; expressions
+PlanCacheObjectCallback	plancache.rs:4652	lib.rs:1776	MATCH	yes	invalItems scan; nested two-level break via labeled loop; expressions invalItems
+PlanCacheSysCallback	plancache.rs:4793	lib.rs:1867	MATCH	yes	ResetPlanCache()
+ResetPlanCache	plancache.rs:4801	lib.rs:1876	MATCH	yes	saved iter; skip invalid/no-reval; invalidate src+gplan; invalidate all expressions
+ReleaseAllPlanCacheRefsInOwner	plancache.rs:4832	lib.rs:1918	MATCH	yes	ResourceOwnerReleaseAllOfKind modeled by release_all_plan_refs->ReleaseCachedPlan
+ResOwnerReleaseCachedPlan	plancache.rs:4835	lib.rs:1933	MATCH	yes	ReleaseCachedPlan(plan,NULL)
+run_static_initializers	plancache.rs:4841	(planref_resowner_desc in resowner owner)	MATCH	yes	c2rust static-init for planref_resowner_desc; descriptor registration is resowner's job

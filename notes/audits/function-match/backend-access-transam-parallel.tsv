@@ -1,0 +1,32 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+MemoryContextSwitchTo	parallel.rs:1373	(mcx substrate)	MATCH	yes	mcx.h inline; context switch folded onto Mcx model.
+DatumGetUInt32	parallel.rs:1379	types-datum	MATCH	yes	Trivial Datum accessor.
+UInt32GetDatum	parallel.rs:1383	types-datum	MATCH	yes	Trivial Datum constructor.
+DatumGetPointer	parallel.rs:1387	types-datum	MATCH	yes	Trivial Datum accessor.
+PointerGetDatum	parallel.rs:1391	types-datum	MATCH	yes	Trivial Datum constructor.
+dlist_init	parallel.rs:1395	(ilist substrate)	MATCH	yes	ilist.h inline; pcxt_list intrusive-list folded onto owned model.
+dlist_is_empty	parallel.rs:1400	(in parallel_context_active, lib.rs:1526)	MATCH	yes	ilist.h inline; used by ParallelContextActive.
+dlist_push_head	parallel.rs:1405	(fallible push_head, lib.rs)	MATCH	yes	ilist.h inline; now fallible w/ mcx.oom on slab grow.
+dlist_delete	parallel.rs:1418	(ilist substrate)	MATCH	yes	ilist.h inline; used by DestroyParallelContext.
+dlist_head_element_off	parallel.rs:1423	(ilist substrate)	MATCH	yes	ilist.h inline; head element accessor.
+tas	parallel.rs:1433	(Mutex substrate)	MATCH	yes	s_lock.h spinlock test-and-set folded onto Rust Mutex/atomics.
+CreateParallelContext	parallel.rs:1546	lib.rs:740	MATCH	yes	palloc0 ctx via mcx, subid/nworkers/names/error_context_stack, shm_toc default estimator, dlist_push_head; takes Mcx, fallible.
+InitializeParallelDSM	parallel.rs:1569	lib.rs:872	MATCH	yes	estimate->create->fps init->serialize; all 14 chunk keys; zero-worker fallbacks; xact-snapshot tsnap gate; real dsm/shm_toc substrate; fallible alloc via mcx.oom.
+ReinitializeParallelDSM	parallel.rs:1986	lib.rs:1097	MATCH	yes	finish+exit old workers, reset known_attached, fps->last_xlog_end=0, recreate error queues.
+ReinitializeParallelWorkers	parallel.rs:2037	lib.rs:1148	MATCH	yes	nworkers_to_launch=Min(nworkers, requested).
+LaunchParallelWorkers	parallel.rs:2048	lib.rs:1161	MATCH	yes	0-worker early return; BecomeLockGroupLeader; register loop w/ any_registrations_failed short-circuit + error-queue detach; known_attached alloc; BackgroundWorker assembly via thin seam.
+WaitForParallelWorkersToAttach	parallel.rs:2140	lib.rs:1238	MATCH	yes	CHECK_FOR_INTERRUPTS loop; per-worker STARTED/STOPPED/else; failed-to-init ereport; WaitLatch/ResetLatch; nknown>=launched exit+assert.
+WaitForParallelWorkersToFinish	parallel.rs:2251	lib.rs:1320	MATCH	yes	anyone_alive/nfinished loop; investigate-stopped branch w/ failed-to-init ereport; final WaitLatch; last_xlog_end>XactLastRecEnd update.
+WaitForParallelWorkersToExit	parallel.rs:2358	lib.rs:1410	MATCH	yes	per-worker WaitForBackgroundWorkerShutdown; POSTMASTER_DIED->FATAL ERRCODE_ADMIN_SHUTDOWN; pfree handle.
+DestroyParallelContext	parallel.rs:2423	lib.rs:1446	MATCH	yes	dlist_delete first; terminate+detach worker queues; dsm_detach (drop guard); private_memory free; HOLD/exit/RESUME interrupts; free worker array+ctx.
+ParallelContextActive	parallel.rs:2468	lib.rs:1526	MATCH	yes	!dlist_is_empty(pcxt_list).
+HandleParallelMessageInterrupt	parallel.rs:2472	lib.rs:726	MATCH	yes	InterruptPending=true; ParallelMessagePending=true; SetLatch(MyLatch); signal-handler-safe flag flips.
+ProcessParallelMessages	parallel.rs:2484	lib.rs:1535	MATCH	yes	HOLD_INTERRUPTS; hpm private context; clear pending; dlist_foreach; per-worker drain loop w/ WOULD_BLOCK/SUCCESS/lost-connection arms; reset+RESUME.
+ProcessParallelMessage	parallel.rs:2615	lib.rs:1594	MATCH	yes	known_attached set; pq_getmsgbyte; Error/Notice (Min(elevel,ERROR)=21, context line gated on !=DEBUG_PARALLEL_REGRESS, stack swap thin), Notification, Progress incr_param, Terminate detach, default elog(ERROR).
+AtEOSubXact_Parallel	parallel.rs:2750	lib.rs:1668	MATCH	yes	head-while loop, subid break, WARNING leaked-context on commit, destroy.
+AtEOXact_Parallel	parallel.rs:2794	lib.rs:1687	MATCH	yes	nuke-all loop, WARNING on commit, destroy.
+ParallelWorkerMain	parallel.rs:2832	lib.rs:1704	MATCH	yes	Full restore sequence in C order: init flag, signal handlers, dsm_attach+magic check, fps lookup, leader signal, error-queue attach+pq redirect, lock-group join, timestamps, entrypoint, auth/role/db/encoding, library/GUC/txn/pending-syncs/relmapper/reindex/combocid/session/snapshots/enums/clientconninfo restore in order, invalidate caches, sys-user init, serializable attach, EnterParallelMode, entrypt, teardown, Terminate.
+ParallelWorkerReportLastRecEnd	parallel.rs:3171	lib.rs:1908	MATCH	yes	assert fps; spinlock CAS delegated to fps_report_last_rec_end seam (cross-process spinlock).
+ParallelWorkerShutdown	parallel.rs:3188	lib.rs:1924	MATCH	yes	SendProcSignal(leaderpid, PROCSIG_PARALLEL_MESSAGE, procno); dsm_detach from Datum.
+LookupParallelWorkerFunction	parallel.rs:3199	lib.rs:1938	MATCH	yes	"postgres"->InternalParallelWorkers scan (5 names exact order)->resolve; not-found elog(ERROR); else load_external_function.
+run_static_initializers	parallel.rs:3261	(static-init substrate)	MATCH	yes	c2rust artifact for C static initializers; subsumed by Rust const/static initialization.

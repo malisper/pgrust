@@ -1,0 +1,19 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+pg_leftmost_one_pos64	pg_prng.rs:29	lib.rs:leftmost_one_pos64	MATCH	yes	63 - leading_zeros == 63 - __builtin_clzll; word!=0 precondition holds
+rotl	pg_prng.rs:36	lib.rs:rotate_left(used L134-137)	MATCH	yes	(x<<b)|(x>>(64-b)) == rotate_left for b in {7,24,37}; never b=0/64
+xoroshiro128ss	pg_prng.rs:39	lib.rs:131	MATCH	yes	rotl(s0*5,7)*9 etc; wrapping mul; seed-42 3-value vector verified
+splitmix64	pg_prng.rs:49	lib.rs:154	MATCH	yes	constants 0x9E37.../0xBF58.../0x94D0... shifts 30/27/31 verified; increment-then-extract order
+pg_prng_seed	pg_prng.rs:61	lib.rs:47	MATCH	yes	two splitmix64 draws + seed-check
+pg_prng_fseed	pg_prng.rs:67	lib.rs:53	MATCH	yes	((2^52-1) as f64 * fseed) as i64 as u64; agrees on documented [-1,1] domain
+pg_prng_seed_check	pg_prng.rs:77	lib.rs:58	MATCH	yes	all-zero -> Knuth LCG constants; always true
+pg_prng_uint64	pg_prng.rs:87	lib.rs:67	MATCH	yes	direct delegate
+pg_prng_uint64_range	pg_prng.rs:91	lib.rs:71	MATCH	yes	bitmask-rejection do-while; empty range -> rmin
+pg_prng_int64	pg_prng.rs:115	lib.rs:89	MATCH	yes	as i64 two's-complement cast
+pg_prng_int64p	pg_prng.rs:119	lib.rs:93	MATCH	yes	mask 0x7FFFFFFFFFFFFFFF
+pg_prng_int64_range	pg_prng.rs:123	lib.rs:97	MATCH	yes	wrapping_add equivalence vs C two-branch conversion; 100k spot-checks
+pg_prng_uint32	pg_prng.rs:153	lib.rs:105	MATCH	yes	v>>32
+pg_prng_int32	pg_prng.rs:158	lib.rs:109	MATCH	yes	(v>>32) as i32
+pg_prng_int32p	pg_prng.rs:163	lib.rs:113	MATCH	yes	v>>33
+pg_prng_double	pg_prng.rs:168	lib.rs:117	MATCH	yes	(v>>12) as f64 * 2^-52 == ldexp((v>>12),-52), exact
+pg_prng_double_normal	pg_prng.rs:179	lib.rs:121	MATCH	yes	Box-Muller sqrt(-2 ln u1)*sin(2 PI u2); draw order preserved
+pg_prng_bool	pg_prng.rs:191	lib.rs:127	MATCH	yes	v>>63 != 0

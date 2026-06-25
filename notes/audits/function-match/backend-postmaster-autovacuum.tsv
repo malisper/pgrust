@@ -1,0 +1,71 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+MemoryContextSwitchTo	autovacuum.rs:3982	mcxt-seams (native)	MATCH	yes	c2rust inline of header macro; native equivalent at call sites
+CharGetDatum	autovacuum.rs:3988	native	MATCH	yes	c2rust inline Datum cast; native equivalent
+ObjectIdGetDatum	autovacuum.rs:3992	native	MATCH	yes	c2rust inline Datum cast; native equivalent
+Int64GetDatum	autovacuum.rs:3996	native	MATCH	yes	c2rust inline Datum cast; native equivalent
+BlockNumberIsValid	autovacuum.rs:4002	native	MATCH	yes	c2rust inline macro; native equivalent
+ReadNextTransactionId	autovacuum.rs:4008	xact-seam	MATCH	yes	c2rust inline accessor; delegated to xact owner
+GETSTRUCT	autovacuum.rs:4015	native	MATCH	yes	c2rust inline heaptuple macro; native equivalent
+pg_atomic_test_set_flag_impl	autovacuum.rs:4023	port-atomics (native)	MATCH	yes	c2rust inline atomic; native std atomic
+pg_atomic_unlocked_test_flag_impl	autovacuum.rs:4029	port-atomics (native)	MATCH	yes	c2rust inline atomic; native std atomic
+pg_atomic_clear_flag_impl	autovacuum.rs:4035	port-atomics (native)	MATCH	yes	c2rust inline atomic; native std atomic
+pg_atomic_init_flag_impl	autovacuum.rs:4040	port-atomics (native)	MATCH	yes	c2rust inline atomic; native std atomic
+pg_atomic_read_u32_impl	autovacuum.rs:4044	port-atomics (native)	MATCH	yes	c2rust inline atomic; native std atomic
+pg_atomic_write_u32_impl	autovacuum.rs:4048	port-atomics (native)	MATCH	yes	c2rust inline atomic; native std atomic
+pg_atomic_init_u32_impl	autovacuum.rs:4055	port-atomics (native)	MATCH	yes	c2rust inline atomic; native std atomic
+pg_atomic_init_flag	autovacuum.rs:4062	port-atomics (native)	MATCH	yes	c2rust inline atomic wrapper; native std atomic
+pg_atomic_test_set_flag	autovacuum.rs:4066	port-atomics (native)	MATCH	yes	c2rust inline atomic wrapper; native std atomic
+pg_atomic_unlocked_test_flag	autovacuum.rs:4070	port-atomics (native)	MATCH	yes	c2rust inline atomic wrapper; native std atomic
+pg_atomic_clear_flag	autovacuum.rs:4074	port-atomics (native)	MATCH	yes	c2rust inline atomic wrapper; native std atomic
+pg_atomic_init_u32	autovacuum.rs:4078	port-atomics (native)	MATCH	yes	c2rust inline atomic wrapper; native std atomic
+pg_atomic_read_u32	autovacuum.rs:4085	port-atomics (native)	MATCH	yes	c2rust inline atomic wrapper; native std atomic
+pg_atomic_write_u32	autovacuum.rs:4089	port-atomics (native)	MATCH	yes	c2rust inline atomic wrapper; native std atomic
+dlist_init	autovacuum.rs:4103	native	MATCH	yes	c2rust inline ilist; native Vec/list semantics
+dlist_is_empty	autovacuum.rs:4108	native	MATCH	yes	c2rust inline ilist; native equivalent
+dlist_push_head	autovacuum.rs:4113	native	MATCH	yes	c2rust inline ilist; native insert(0,..)
+dlist_delete	autovacuum.rs:4126	native	MATCH	yes	c2rust inline ilist; native remove
+dlist_pop_head_node	autovacuum.rs:4131	native	MATCH	yes	c2rust inline ilist; native equivalent
+dlist_move_head	autovacuum.rs:4138	native	MATCH	yes	c2rust inline ilist; remove+insert(0,..)
+dlist_tail_element_off	autovacuum.rs:4149	native	MATCH	yes	c2rust inline ilist; native tail access
+dclist_init	autovacuum.rs:4157	native	MATCH	yes	c2rust inline ilist; native equivalent
+dclist_push_head	autovacuum.rs:4162	native	MATCH	yes	c2rust inline ilist; native equivalent
+dclist_pop_head_node	autovacuum.rs:4173	native	MATCH	yes	c2rust inline ilist; native equivalent
+dclist_count	autovacuum.rs:4182	native	MATCH	yes	c2rust inline ilist; native len
+table_endscan	autovacuum.rs:4186	tableam-seam	MATCH	yes	c2rust inline tableam wrapper; delegated to tableam owner
+pg_cmp_s32	autovacuum.rs:4213	native	MATCH	yes	c2rust inline cmp; native i32::cmp
+pgstat_report_wait_end	autovacuum.rs:4219	waitevent-seam	MATCH	yes	c2rust inline; delegated
+set_ps_display	autovacuum.rs:4223	ps-status-seam	MATCH	yes	c2rust inline wrapper over set_ps_display_with_len
+AutoVacLauncherMain	autovacuum.rs:4292	launcher.rs (AutoVacLauncherMain)	MATCH	yes	audit row 1: scheduling-loop body 1:1; pre-loop lifecycle out-of-crate
+ProcessAutoVacLauncherInterrupts	autovacuum.rs:4640	launcher.rs	MATCH	yes	audit row 2: barrier/log-memctx/catchup interrupts
+AutoVacLauncherShutdown	autovacuum.rs:4667	launcher.rs	MATCH	yes	audit row 3: launcherpid=0, proc_exit(0)
+launcher_determine_sleep	autovacuum.rs:4696	launcher.rs	MATCH	yes	audit row 4: recursion-once, MIN/MAX clamps faithful
+rebuild_database_list	autovacuum.rs:4741	launcher.rs	MATCH	yes	audit row 5: scoring/dedup/ordering; D4 millis i32 truncation fixed
+db_comparator	autovacuum.rs:4947	launcher.rs	MATCH	yes	audit row 6: pg_cmp_s32(adl_score)
+do_start_worker	autovacuum.rs:4956	launcher.rs	MATCH	yes	audit row 7: wrap-priority loop, force limits, freelist pop
+launch_worker	autovacuum.rs:5116	launcher.rs	MATCH	yes	audit row 8: update-or-rebuild; dlist_move_head
+AutoVacWorkerFailed	autovacuum.rs:5151	launcher.rs	MATCH	yes	audit row 9: sets av_signal[AutoVacForkFailed]
+avl_sigusr2_handler	autovacuum.rs:5155	launcher.rs	MATCH	yes	audit row 10: got_SIGUSR2; SetLatch
+AutoVacWorkerMain	autovacuum.rs:5163	worker.rs	MATCH	yes	audit row 11: slot-claim/running-list/do_autovacuum body faithful
+FreeWorkerInfo	autovacuum.rs:5398	worker.rs	MATCH	yes	audit row 12: on_shmem_exit cb; freelist push, AutoVacRebalance
+VacuumUpdateCosts	autovacuum.rs:5427	cost_balance.rs	MATCH	yes	audit row 13: branch order, failsafe assert, DEBUG2 log
+AutoVacuumUpdateCostLimit	autovacuum.rs:5520	cost_balance.rs	MATCH	yes	audit row 14: storage-param vs GUC, Max(limit/n,1)
+autovac_recalculate_workers_for_balance	autovacuum.rs:5580	cost_balance.rs	MATCH	yes	audit row 15: running-worker walk, conditional write
+get_database_list	autovacuum.rs:5611	autovacuum-ext-seams	SEAMED	no	audit row 16: pg_database seqscan body entirely foreign; thin delegate
+do_autovacuum	autovacuum.rs:5683	worker.rs	MATCH	yes	audit row 17: two-pass collection; D1/D2/M1 fixes confirmed
+perform_work_item	autovacuum.rs:6386	schedule.rs	MATCH	yes	audit row 18: name-lookup-skip, report, BRIN-summarize dispatch
+extract_autovac_opts	autovacuum.rs:6509	core.rs	MATCH	yes	audit row 19: M1 fixed; relkind assert + .autovacuum projection
+table_recheck_autovac	autovacuum.rs:6529	schedule.rs	MATCH	yes	audit row 20: reloptions fallback, VACOPT bitset, freeze-age
+recheck_relation_needs_vacanalyze	autovacuum.rs:6674	schedule.rs	MATCH	yes	audit row 21: pgstat fetch, delegate, toast doanalyze=false
+relation_needs_vacanalyze	autovacuum.rs:6704	schedule.rs	MATCH	yes	audit row 22: all threshold/scale/wraparound math 1:1
+autovacuum_do_vac_analyze	autovacuum.rs:6944	autovacuum-ext-seams	SEAMED	no	audit row 23: RangeVar/VacuumRelation build + vacuum() executor foreign
+autovac_report_activity	autovacuum.rs:6980	schedule.rs	MATCH	yes	audit row 24: command/options string, snprintf_append bound
+autovac_report_workitem	autovacuum.rs:7019	schedule.rs	MATCH	yes	audit row 25: D3 fixed; suffix bounded by snprintf_append
+AutoVacuumingActive	autovacuum.rs:7061	shmem.rs	MATCH	yes	audit row 26: start_daemon && track_counts
+AutoVacuumRequestWork	autovacuum.rs:7068	shmem.rs	MATCH	yes	audit row 27: lock, first-unused slot fill
+autovac_init	autovacuum.rs:7103	shmem.rs	MATCH	yes	audit row 28: start_daemon guard, track_counts WARNING+hint
+AutoVacuumShmemSize	autovacuum.rs:7143	shmem.rs	SEAMED	no	audit row 29: byte layout owned by substrate; returns slot count
+AutoVacuumShmemInit	autovacuum.rs:7159	shmem.rs/autovacuum-ext-seams	SEAMED	no	audit row 30: ShmemInitStruct + free-list seeding in substrate
+check_autovacuum_work_mem	autovacuum.rs:7207	shmem.rs	MATCH	yes	audit row 31: -1 passthrough, clamp <64 -> 64
+av_worker_available	autovacuum.rs:7220	shmem.rs	MATCH	yes	audit row 32: free_slots > Max(0, worker_slots - max_workers)
+check_av_worker_gucs	autovacuum.rs:7233	shmem.rs	MATCH	yes	audit row 33: worker_slots < max_workers -> WARNING+errdetail
+run_static_initializers	autovacuum.rs:7282	native	MATCH	yes	c2rust static-init artifact; no logic, native const init

@@ -1,0 +1,21 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+recordDependencyOn	pg_depend.rs:2667	lib.rs:203	MATCH	yes	delegates to recordMultipleDependencies with 1-elem slice (C nreferenced=1)
+recordMultipleDependencies	pg_depend.rs:2675	lib.rs:214	MATCH	yes	empty-slice early return; bootstrap early return; max_slots batch flush; pinned-skip continue; slot-reuse folded into row accumulator (alloc opt, identical rows)
+recordDependencyOnCurrentExtension	pg_depend.rs:2806	lib.rs:317	MATCH	yes	subId==0 debug_assert; creating_extension gate; isReplace branch w/ two ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE ereports
+checkMembershipInCurrentExtension	pg_depend.rs:2918	lib.rs:392	MATCH	yes	same gate; getExtensionOfObject; equal-to-current OK else CREATE IF NOT EXISTS ereport
+deleteDependencyRecordsFor	pg_depend.rs:2975	lib.rs:440	MATCH	yes	RowExclusiveLock; DependDependerIndexId scan; skipExtensionDeps continue; returns i64
+deleteDependencyRecordsForClass	pg_depend.rs:3047	lib.rs:478	MATCH	yes	delete when refclassid+deptype match
+deleteDependencyRecordsForSpecific	pg_depend.rs:3120	lib.rs:513	MATCH	yes	delete when refclassid+refobjid+deptype match
+changeDependencyFor	pg_depend.rs:3194	lib.rs:564	MATCH	yes	pin checks; both-pinned ret 1; old-pinned insert NORMAL; else scan+delete-or-update refobjid; orig TID preserved
+changeDependenciesOf	pg_depend.rs:3302	lib.rs:657	MATCH	yes	scan; every row set objid=newObjectId, update, count
+changeDependenciesOn	pg_depend.rs:3373	lib.rs:694	MATCH	yes	old-pinned ERRCODE_FEATURE_NOT_SUPPORTED; ref index scan; delete-or-update refobjid
+isObjectPinned	pg_depend.rs:3501	lib.rs:759	SEAMED	no	one-line delegate to IsPinnedObject via catalog seam (infallible bool); subId ignored as C
+getExtensionOfObject	pg_depend.rs:3505	lib.rs:785	MATCH	yes	AccessShareLock; first DependDependerIndexId row refclassid==ExtensionRelationId && deptype==EXTENSION
+getAutoExtensionsOfObject	pg_depend.rs:3578	lib.rs:816	MATCH	yes	AccessShareLock; collect refobjid where deptype==AUTO_EXTENSION into PgVec
+getExtensionType	pg_depend.rs:3649	lib.rs:863	MATCH	yes	DependReferenceIndexId 3-key; TYPEOID typname lookup folded into search_type_name seam; strcmp/break in-crate
+sequenceIsOwned	pg_depend.rs:3754	lib.rs:907	MATCH	yes	out-params -> Option<(Oid,i32)>; first DependDependerIndexId row matching
+getOwnedSequences_internal	pg_depend.rs:3829	lib.rs:937	MATCH	yes	3rd key present only when attnum!=0; full predicate incl get_rel_relkind==RELKIND_SEQUENCE
+getOwnedSequences	pg_depend.rs:3924	lib.rs:989	MATCH	yes	getOwnedSequences_internal(relid,0,0)
+getIdentitySequence	pg_depend.rs:3928	lib.rs:997	MATCH	yes	partition branch reads rd_rel.relispartition; ancestors; attname before relid reassign; len>1/empty elogs
+get_index_constraint	pg_depend.rs:4046	lib.rs:1054	MATCH	yes	DependDependerIndexId 3-key; first row refclassid==ConstraintRelationId && deptype==INTERNAL
+get_index_ref_constraints	pg_depend.rs:4125	lib.rs:1093	MATCH	yes	DependReferenceIndexId 3-key; collect objid where classid==ConstraintRelationId && deptype==NORMAL

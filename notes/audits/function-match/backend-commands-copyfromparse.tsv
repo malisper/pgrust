@@ -1,0 +1,28 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+ReceiveCopyBegin	copyfromparse.rs:3525	lib.rs:117	SEAMED	no	body is entirely libpq frontend (pq_beginmessage/sendbyte/sendint16xnatts/endmessage/flush); whole message build delegated to receive_copy_begin seam; per-column loop intrinsic to wire format
+ReceiveCopyBinaryHeader	copyfromparse.rs:3553	lib.rs:127	MATCH	yes	11-byte signature; (1<<16) WITH-OIDS check; tmp&=~(1<<16); (tmp>>16) critical-flags; len<0; extension skip loop; all BAD_COPY_FILE_FORMAT
+CopyGetData	copyfromparse.rs:3823	lib.rs:188	SEAMED	no	three source legs (FILE/FRONTEND/CALLBACK) are libpq/file I/O seams; raw_reached_eof bookkeeping reported back and folded in-crate
+CopyGetInt32	copyfromparse.rs:4105	lib.rs:214	MATCH	yes	pg_ntoh32 -> i32::from_be_bytes; EOF (read!=4) -> *val=0,false
+CopyGetInt16	copyfromparse.rs:4123	lib.rs:227	MATCH	yes	pg_ntoh16 -> i16::from_be_bytes; EOF -> *val=0,false
+CopyConvertBuf	copyfromparse.rs:4140	lib.rs:244	MATCH	yes	both branches; verifymbstr/nverified EOF predicate; transcoding memmove->copy_within, do_encoding_conversion_buf, MAX_CONVERSION_INPUT_LENGTH=4 predicate, dstlen preserved
+CopyConversionError	copyfromparse.rs:4228	lib.rs:320	MATCH	yes	asserts; non-transcoding report_invalid_encoding; transcoding re-run noError=false; final elog always raises
+CopyLoadRawBuf	copyfromparse.rs:4289	lib.rs:349	MATCH	yes	alias asserts; copy-down copy_within; raw_buf_len/index reset; CopyGetData(1, RAW_BUF_SIZE-len); NUL pad; bytes_processed; progress; inbytes==0->raw_reached_eof
+CopyLoadInputBuf	copyfromparse.rs:4331	lib.rs:393	MATCH	yes	nbytes=INPUT_BUF_BYTES; alias sync; for(;;): CopyConvertBuf, return->nbytes, input_reached_error->CopyConversionError, input_reached_eof->break, else CopyLoadRawBuf
+CopyReadBinaryData	copyfromparse.rs:4351	lib.rs:430	MATCH	yes	fast path RAW_BUF_BYTES>=nbytes memcpy; else do/while Min(nbytes-copied,RAW_BUF_BYTES), EOF break
+NextCopyFromRawFields	copyfromparse.rs:4400	lib.rs:476	MATCH	yes	delegates to internal with opts.csv_mode
+NextCopyFromRawFieldsInternal	copyfromparse.rs:4413	lib.rs:483	MATCH	yes	header-line handling; COPY_HEADER_MATCH per-column namestrcmp; null-field-name error; cur_lineno++; CopyReadLine; EOF->None; attribute parse
+NextCopyFrom	copyfromparse.rs:4620	lib.rs:575	MATCH	yes	MemSet values/nulls/defaults -> init; CopyFromOneRow dispatch; defaults loop values[defmap[i]]=ExecEvalExpr(defexprs[defmap[i]])
+CopyFromTextOneRow	copyfromparse.rs:4717	lib.rs:626	MATCH	yes	delegates is_csv=false
+CopyFromCSVOneRow	copyfromparse.rs:4726	lib.rs:635	MATCH	yes	delegates is_csv=true
+CopyFromTextLikeOneRow	copyfromparse.rs:4735	lib.rs:645	MATCH	yes	overflow check; per-attr loop; convert_select skip; CSV FORCE_NOT_NULL/FORCE_NULL; defaults vs InputFunctionCallSafe; ON_ERROR soft-error path
+CopyFromBinaryOneRow	copyfromparse.rs:4993	lib.rs:767	MATCH	yes	cur_lineno++; CopyGetInt16 EOF; fld_count==-1 EOF-marker+trailing check; fld_count!=attr_count error; per-attr CopyReadBinaryAttribute
+CopyReadLine	copyfromparse.rs:5127	lib.rs:825	MATCH	yes	resetStringInfo->clear; line_buf_valid=false; CopyReadLineText; FRONTEND drain loop on EOF; EOL trim per eol_type with asserts; line_buf_valid=true
+CopyReadLineText	copyfromparse.rs:5176	lib.rs:887	MATCH	yes	full state machine: CSV quote/escape toggle; \r lookahead refill; embedded-EOL cur_lineno++; CRNL/CR/NL detect+errors; \\ end-of-copy marker; REFILL_LINEBUF; input_is_raw aliasing
+GetDecimalFromHex	copyfromparse.rs:5752	lib.rs:1191	MATCH	yes	digit->hex-'0'; else tolower(hex)-'a'+10
+CopyReadAttributesText	copyfromparse.rs:5762	lib.rs:1204	MATCH	yes	zero-column case; field scan with \\ de-escape (octal/hex/named/literal); saw_non_ascii->pg_verifymbstr; NULL/DEFAULT markers; trailing \0 after markers (C order)
+CopyReadAttributesCSV	copyfromparse.rs:6056	lib.rs:1374	MATCH	yes	zero-column case; not-quote/in-quote loops with goto endfield->labeled break; escape-peek; unterminated-quote error; trailing \0 before marker (C endfield order); !saw_quote NULL gate; DEFAULT marker
+CopyReadBinaryAttribute	copyfromparse.rs:6327	lib.rs:1563	MATCH	yes	CopyGetInt32 EOF error; fld_size==-1 NULL via ReceiveFunctionCall(NULL); fld_size<0 invalid-field error; load bytes; ReceiveFunctionCall(buf); cursor!=len INVALID_BINARY_REPRESENTATION
+IF_NEED_REFILL_AND_NOT_EOF_CONTINUE	copyfromparse.rs:97	lib.rs:1122	MATCH	yes	macro: test arm ptr+extralen>=len && !hit_eof; continue at call sites
+IF_NEED_REFILL_AND_EOF_BREAK	copyfromparse.rs:109	lib.rs:1137	MATCH	yes	macro: test arm ptr+extralen>=len && hit_eof; extralen always 0
+REFILL_LINEBUF	copyfromparse.rs:126	lib.rs:1106	MATCH	yes	macro: append input_buf[index..ptr] to line_buf; advance input_buf_index; aliasing-aware
+BinarySignature	copyfromparse.rs:139	types_copy BINARY_SIGNATURE	MATCH	yes	"PGCOPY\n\377\r\n\0" verified byte-for-byte

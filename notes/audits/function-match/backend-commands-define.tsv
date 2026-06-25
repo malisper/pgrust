@@ -1,0 +1,16 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+DatumGetObjectId	define.rs:1097	(inlined)	MATCH	yes	c2rust header-macro shim; trivial Datum->Oid cast inlined at use sites
+PointerGetDatum	define.rs:1101	(inlined)	MATCH	yes	c2rust header-macro shim; trivial cast inlined
+CStringGetDatum	define.rs:1105	(inlined)	MATCH	yes	c2rust header-macro shim; trivial cast inlined
+DatumGetInt64	define.rs:1109	(inlined)	MATCH	yes	c2rust header-macro shim; trivial cast inlined
+defGetString	define.rs:1114	lib.rs:42	MATCH	yes	nodeTag switch over owned Node; Integer/Float/Boolean/String/TypeName/List/A_Star arms exact
+defGetNumeric	define.rs:1211	lib.rs:69	MATCH	yes	NULL->error; Integer as f64; Float floatVal; default syntax error
+defGetBoolean	define.rs:1301	lib.rs:82	MATCH	yes	Integer 0/1; case-insensitive true/false/on/off; else Boolean-value error
+defGetInt32	define.rs:1376	lib.rs:118	MATCH	yes	NULL/default integer-value error; Integer->ival
+defGetInt64	define.rs:1465	lib.rs:129	MATCH	yes	Integer as i64; Float int8in hard-error; default numeric-value error
+defGetObjectId	define.rs:1563	lib.rs:144	MATCH	yes	Integer as Oid; Float oidin; default numeric-value error
+defGetQualifiedName	define.rs:1661	lib.rs:160	MATCH	yes	TypeName names / List cells / String list_make1 / default name error
+defGetTypeName	define.rs:1758	lib.rs:178	MATCH	yes	TypeName clone / String makeTypeNameFromNameList seam / default type-name error
+defGetTypeLength	define.rs:1856	lib.rs:196	MATCH	yes	Integer ival; Float error; "variable"->-1; fallthrough/error ordering preserved
+defGetStringList	define.rs:2031	lib.rs:239	MATCH	yes	IsA(String) loop, unexpected/unrecognized node-type elogs
+errorConflictingDefElem	define.rs:2155	lib.rs:259	MATCH	yes	parser_errposition seam -> ERRCODE_SYNTAX_ERROR conflicting/redundant options

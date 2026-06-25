@@ -1,0 +1,45 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+BlockIdSet	itemptr.rs:35	crates/backend-storage-page/src/lib.rs:66	MATCH	yes	block.h inline; hi/lo16 split, identical
+BlockIdGetBlockNumber	itemptr.rs:43	crates/backend-storage-page/src/lib.rs:71	MATCH	yes	block.h inline; (hi<<16)|lo, identical
+ItemPointerGetBlockNumberNoCheck	itemptr.rs:50	crates/backend-storage-page/src/lib.rs:85	MATCH	yes	itemptr.h inline; BlockIdGetBlockNumber(&ip_blkid)
+ItemPointerGetBlockNumber	itemptr.rs:56	crates/backend-storage-page/src/lib.rs:90	MATCH	yes	itemptr.h inline; valid-assert + NoCheck getter
+ItemPointerGetOffsetNumberNoCheck	itemptr.rs:62	crates/backend-storage-page/src/lib.rs:95	MATCH	yes	itemptr.h inline; ip_posid read
+ItemPointerGetOffsetNumber	itemptr.rs:68	crates/backend-storage-page/src/lib.rs:100	MATCH	yes	itemptr.h inline; valid-assert + NoCheck getter
+ItemPointerSet	itemptr.rs:74	crates/backend-storage-page/src/lib.rs:105	MATCH	yes	itemptr.h inline; BlockIdSet + posid write
+ItemPointerEquals	itemptr.rs:83	crates/backend-storage-page/src/lib.rs:141	MATCH	yes	block && offset equality, identical
+ItemPointerCompare	itemptr.rs:100	crates/backend-storage-page/src/lib.rs:147	MATCH	yes	NoCheck getters (no posid!=0 assert); -1/0/1 ladder identical
+ItemPointerInc	itemptr.rs:131	crates/backend-storage-page/src/lib.rs:168	MATCH	yes	off==0xffff -> if blk!=InvalidBlockNumber wrap else off++; identical
+ItemPointerDec	itemptr.rs:149	crates/backend-storage-page/src/lib.rs:183	MATCH	yes	off==0 -> if blk!=0 borrow to 0xffff/blk-- else off--; identical
+PageIsEmpty	bufpage.rs:691	crates/backend-storage-page/src/lib.rs:514	MATCH	yes	bufpage.h inline; pd_lower<=SizeOfPageHeaderData
+PageIsNew	bufpage.rs:696	crates/backend-storage-page/src/lib.rs:519	MATCH	yes	bufpage.h inline; pd_upper==0
+PageGetItemId	bufpage.rs:701	crates/backend-storage-page/src/lib.rs:559	MATCH	yes	bufpage.h inline; line-pointer fetch (copy + writeback model); range-checked
+PageGetPageSize	bufpage.rs:710	crates/backend-storage-page/src/lib.rs:524	MATCH	yes	bufpage.h inline; pd_pagesize_version & 0xFF00
+PageSetPageSizeAndVersion	bufpage.rs:715	crates/backend-storage-page/src/lib.rs:534	MATCH	yes	bufpage.h inline; (size&0xFF00)|(version&0x00FF)
+PageGetSpecialSize	bufpage.rs:723	crates/backend-storage-page/src/lib.rs:540	MATCH	yes	bufpage.h inline; pageSize - pd_special
+PageValidateSpecialPointer	bufpage.rs:728	crates/backend-storage-page/src/lib.rs:584	MATCH	yes	c2rust body empty (no-op assert); realized as range check inside PageGetSpecialPointer
+PageGetItem	bufpage.rs:730	crates/backend-storage-page/src/lib.rs:592	MATCH	yes	bufpage.h inline; rejects no-storage lp; returns data slice at lp_off/lp_len
+PageGetMaxOffsetNumber	bufpage.rs:738	crates/backend-storage-page/src/lib.rs:545	MATCH	yes	bufpage.h inline; pd_lower<=hdr -> 0 else (lower-hdr)/4
+PageHasFreeLinePointers	bufpage.rs:749	crates/backend-storage-page/src/lib.rs:614	MATCH	yes	bufpage.h inline; pd_flags & PD_HAS_FREE_LINES
+PageSetHasFreeLinePointers	bufpage.rs:754	crates/backend-storage-page/src/lib.rs:619	MATCH	yes	bufpage.h inline; pd_flags |= PD_HAS_FREE_LINES
+PageClearHasFreeLinePointers	bufpage.rs:759	crates/backend-storage-page/src/lib.rs:625	MATCH	yes	bufpage.h inline; pd_flags &= ~PD_HAS_FREE_LINES
+pg_memory_is_all_zeros	bufpage.rs:783	crates/backend-storage-page/src/lib.rs:735	MATCH	yes	memutils inline; realized as all-zeroes early-out inside PageIsVerified; byte-wise zero scan
+PageInit	bufpage.rs:896	crates/backend-storage-page/src/lib.rs:706	MATCH	yes	MAXALIGN(specialSize); pageSize==BLCKSZ + bound asserts -> PgResult errs; MemSet 0; set flags/lower/upper/special/pagesize-version
+PageIsVerified	bufpage.rs:931	crates/backend-storage-page/src/lib.rs:735	MATCH	yes	checksum out-param -> tuple return; header-sane predicate bit-identical; all-zeroes early-out; PIV_LOG/IGNORE flags; ERRCODE_DATA_CORRUPTED
+PageAddItemExtended	bufpage.rs:1057	crates/backend-storage-page/src/lib.rs:804	MATCH	yes	corrupted-pointer no-MAXALIGN/PANIC variant; OVERWRITE/shuffle/free-slot/no-hint branches; signed fit test; memmove; ItemIdSetNormal; memcpy
+PageGetTempPage	bufpage.rs:1286	crates/backend-storage-page/src/lib.rs:912	MATCH	yes	palloc(pageSize) -> owned PageTemp, uninitialized
+PageGetTempPageCopy	bufpage.rs:1294	crates/backend-storage-page/src/lib.rs:918	MATCH	yes	palloc + memcpy whole page -> PageTemp copy
+PageGetTempPageCopySpecial	bufpage.rs:1307	crates/backend-storage-page/src/lib.rs:927	MATCH	yes	PageInit w/ same special size + copy special area
+PageRestoreTempPage	bufpage.rs:1325	crates/backend-storage-page/src/lib.rs:938	MATCH	yes	memcpy temp->old pageSize; pfree(temp) modeled by consuming PageTemp
+compactify_tuples	bufpage.rs:1335	crates/backend-storage-page/src/lib.rs:957	MATCH	yes	presorted/non-presorted C paths unified to slow-but-faithful; identical output every input
+PageRepairFragmentation	bufpage.rs:1497	crates/backend-storage-page/src/lib.rs:980	MATCH	yes	full-MAXALIGN/ERROR; collect used+storage lps; corrupted-lp ERROR; totallen-overflow ERROR; compactify; trailing-unused truncation; hint set/clear; presorted dropped (identical output)
+PageTruncateLinePointerArray	bufpage.rs:1720	crates/backend-storage-page/src/lib.rs:1074	MATCH	yes	back-to-front scan; countdone/sethint; never truncates last item; pd_lower-=4*nunusedend; CLOBBER behind feature; hint
+PageGetFreeSpace	bufpage.rs:1755	crates/backend-storage-page/src/lib.rs:1120	MATCH	yes	signed upper-lower; <sizeof(ItemIdData) -> 0 else minus one lp
+PageGetFreeSpaceForMultipleTuples	bufpage.rs:1770	crates/backend-storage-page/src/lib.rs:1130	MATCH	yes	signed; < ntups*4 -> 0 else minus ntups lps
+PageGetExactFreeSpace	bufpage.rs:1792	crates/backend-storage-page/src/lib.rs:1141	MATCH	yes	signed upper-lower; <0 -> 0
+PageGetHeapFreeSpace	bufpage.rs:1803	crates/backend-storage-page/src/lib.rs:1152	MATCH	yes	PageGetFreeSpace>0 -> nline>=MaxHeapTuplesPerPage: confirm-free-lp scan (0 if none) else space=0
+PageIndexTupleDelete	bufpage.rs:1832	crates/backend-storage-page/src/lib.rs:1183	MATCH	yes	full check; offnum bounds ERROR; corrupted-lp; MAXALIGN size; linp shift; tuple memmove forward; pd_upper+=size pd_lower-=4; remaining-lp adjust
+PageIndexMultiDelete	bufpage.rs:2030	crates/backend-storage-page/src/lib.rs:1253	MATCH	yes	nitems<=2 reverse retail delete; else full check; keep-list w/ corrupted-lp ERROR; out-of-order ERROR; totallen-overflow ERROR; compactify; presorted dropped (identical output)
+PageIndexTupleDeleteNoCompact	bufpage.rs:2292	crates/backend-storage-page/src/lib.rs:1361	MATCH	yes	full check; bounds; corrupted-lp; MAXALIGN; offnum<nline -> ItemIdSetUnused else pd_lower-=4 nline--; tuple memmove; remaining-lp adjust gated has_storage
+PageIndexTupleOverwrite	bufpage.rs:2485	crates/backend-storage-page/src/lib.rs:1423	MATCH	yes	full check; bounds; corrupted-lp; oversize -> false; size_diff; relocate-before memmove + pd_upper+=diff + lp adjust; set lp_off/lp_len; copy newtup
+PageSetChecksumCopy	bufpage.rs:2688	crates/backend-storage-page/src/lib.rs:1502	MATCH	yes	PageIsNew or !DataChecksumsEnabled -> unchanged copy; else copy + pd_checksum=pg_checksum_page; static scratch -> owned PageTemp
+PageSetChecksumInplace	bufpage.rs:2717	crates/backend-storage-page/src/lib.rs:1514	MATCH	yes	PageIsNew or !DataChecksumsEnabled -> return; else pd_checksum=pg_checksum_page in place

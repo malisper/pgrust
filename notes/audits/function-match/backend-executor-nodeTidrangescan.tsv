@@ -1,0 +1,26 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+MemoryContextSwitchTo	nodeTidrangescan.rs:2636	(idiomatic)	MATCH	yes	mcontext.h inline; realized idiomatically via Mcx switching, no behavioral diff.
+DatumGetPointer	nodeTidrangescan.rs:2642	(idiomatic)	MATCH	yes	postgres.h inline; folded into typed Datum->pointer access.
+BlockIdSet	nodeTidrangescan.rs:2648	lib.rs (ItemPointerSet:83)	MATCH	yes	block.h inline; subsumed by ItemPointerSet's block-id write.
+ItemPointerSet	nodeTidrangescan.rs:2656	lib.rs:83	MATCH	yes	itemptr.h inline reproduced in-crate.
+ItemPointerCopy	nodeTidrangescan.rs:2665	lib.rs:88	MATCH	yes	itemptr.h inline reproduced in-crate.
+newNode	nodeTidrangescan.rs:2672	(makeNode-shaped)	MATCH	yes	nodes.h inline; realized as TidRangeScanState::new_in per makeNode.
+list_length	nodeTidrangescan.rs:2680	(idiomatic)	MATCH	yes	pg_list.h inline; PgVec/list len.
+list_nth_cell	nodeTidrangescan.rs:2684	(idiomatic)	MATCH	yes	pg_list.h inline; indexed access into tidrangequals.
+ExecClearTuple	nodeTidrangescan.rs:2695	(seam)	SEAMED	no	tuptable.h; delegated to execTuples clear-slot seam (unported owner).
+table_endscan	nodeTidrangescan.rs:2702	(seam)	SEAMED	no	tableam.h; delegated to tableam table_endscan.
+table_beginscan_tidrange	nodeTidrangescan.rs:2706	(seam)	SEAMED	no	tableam.h; delegated to tableam wrapper.
+table_rescan_tidrange	nodeTidrangescan.rs:2731	(seam)	SEAMED	no	tableam.h; delegated to tableam wrapper.
+table_scan_getnextslot_tidrange	nodeTidrangescan.rs:2751	(seam)	SEAMED	no	tableam.h; delegated to tableam wrapper.
+ExecEvalExprSwitchContext	nodeTidrangescan.rs:2761	(seam)	SEAMED	no	executor.h inline; delegated to execExpr eval seam.
+get_leftop	nodeTidrangescan.rs:2776	lib.rs (is_ctid_var:159 / MakeTidOpExpr:185)	MATCH	yes	nodeFuncs.h inline; left-operand access over real Expr enum.
+get_rightop	nodeTidrangescan.rs:2786	lib.rs (MakeTidOpExpr:185)	MATCH	yes	nodeFuncs.h inline; right-operand access over real Expr enum.
+MakeTidOpExpr	nodeTidrangescan.rs:2795	lib.rs:185	MATCH	yes	CTID classification/invert/opno switch 2801/2799/2802/2800; both elog(ERROR) -> Err(ERRCODE_INTERNAL_ERROR). Per audit.
+TidExprListCreate	nodeTidrangescan.rs:2921	lib.rs:264	MATCH	yes	foreach over tidrangequals; IsA(OpExpr) guard; per-query-context PgVec append. Per audit.
+TidRangeEval	nodeTidrangescan.rs:2976	lib.rs:303	MATCH	yes	bounds init/narrowing with ItemPointerInc/Dec/Compare; NULL->Ok(false). Per audit.
+TidRangeNext	nodeTidrangescan.rs:3049	lib.rs:391	MATCH	yes	inScan eval/begin/rescan/getnextslot/clear-on-end. Per audit.
+TidRangeRecheck	nodeTidrangescan.rs:3087	lib.rs:430	MATCH	yes	re-eval; ItemPointerIsValid assert; range check. Per audit.
+ExecTidRangeScan	nodeTidrangescan.rs:3103	lib.rs:650	MATCH	yes	ExecScan(&ss, TidRangeNext, TidRangeRecheck). Per audit.
+ExecReScanTidRangeScan	nodeTidrangescan.rs:3137	lib.rs:658	MATCH	yes	trss_inScan=false; ExecScanReScan. Per audit.
+ExecEndTidRangeScan	nodeTidrangescan.rs:3142	lib.rs:670	MATCH	yes	scan!=NULL table_endscan. Per audit.
+ExecInitTidRangeScan	nodeTidrangescan.rs:3149	lib.rs:688	MATCH	yes	makeNode-shaped state; ExprContext; open rel; slot; proj; init qual; TidExprListCreate. Per audit.

@@ -1,0 +1,113 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+MemoryContextSwitchTo	execTuples.rs:1876	owned-mcx model	MATCH	yes	header inline
+CharGetDatum	execTuples.rs:1882	types-core	MATCH	yes	header inline; postgres.h
+Int16GetDatum	execTuples.rs:1886	types-core	MATCH	yes	header inline; postgres.h
+Int32GetDatum	execTuples.rs:1890	types-core	MATCH	yes	header inline; postgres.h
+DatumGetPointer	execTuples.rs:1894	types-core	MATCH	yes	header inline; postgres.h
+PointerGetDatum	execTuples.rs:1898	types-core	MATCH	yes	header inline; postgres.h
+BlockIdSet	execTuples.rs:1904	types-tuple	MATCH	yes	header inline; block.h
+ItemPointerSetInvalid	execTuples.rs:1913	types-tuple	MATCH	yes	header inline; itemptr.h
+list_length	execTuples.rs:1919	types-nodes/pg_list	MATCH	yes	header inline; pg_list.h
+TupleDescAttr	execTuples.rs:1923	types-tuple	MATCH	yes	header inline; tupdesc.h
+TupleDescCompactAttr	execTuples.rs:1940	types-tuple	MATCH	yes	header inline; tupdesc.h
+att_isnull	execTuples.rs:1950	types-tuple	MATCH	yes	header inline; tupmacs.h
+fetch_att	execTuples.rs:1958	types-tuple	MATCH	yes	header inline; tupmacs.h
+HeapTupleHeaderGetRawXmin	execTuples.rs:2009	types-tuple	MATCH	yes	header inline; htup_details.h
+HeapTupleHeaderGetDatumLength	execTuples.rs:2015	types-tuple	MATCH	yes	header inline; htup_details.h
+HeapTupleHeaderGetTypeId	execTuples.rs:2022	types-tuple	MATCH	yes	header inline; htup_details.h
+HeapTupleHeaderGetTypMod	execTuples.rs:2028	types-tuple	MATCH	yes	header inline; htup_details.h
+HeapTupleHasNulls	execTuples.rs:2038	types-tuple	MATCH	yes	header inline; htup_details.h
+slot_getsomeattrs	execTuples.rs:2052	slot_deform.rs	MATCH	yes	header inline; tuptable.h dispatch
+slot_getallattrs	execTuples.rs:2061	slot_deform.rs	MATCH	yes	header inline; tuptable.h dispatch
+ExecClearTuple	execTuples.rs:2065	slot_store_fetch.rs	MATCH	yes	tuptable.h inline; ops->clear dispatch
+ExecMaterializeSlot	execTuples.rs:2072	slot_store_fetch.rs	MATCH	yes	tuptable.h inline; ops->materialize dispatch
+ExecCopySlotHeapTuple	execTuples.rs:2076	slot_store_fetch.rs	MATCH	yes	tuptable.h inline; ops dispatch
+ExecCopySlotMinimalTuple	execTuples.rs:2080	slot_store_fetch.rs	MATCH	yes	tuptable.h inline; ops dispatch
+BufferIsValid	execTuples.rs:2088	types-storage	MATCH	yes	header inline; bufmgr.h
+tts_virtual_init	execTuples.rs:2285	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_virtual_release	execTuples.rs:2286	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_virtual_clear	execTuples.rs:2287	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_virtual_getsomeattrs	execTuples.rs:2304	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_virtual_getsysattr	execTuples.rs:2334	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_virtual_is_current_xact_tuple	execTuples.rs:2377	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_virtual_materialize	execTuples.rs:2419	slot_ops_vtables.rs	SEAMED	no	DEFERRED; carrier bridge (FormedTuple) modeling gap, panics
+tts_virtual_copyslot	execTuples.rs:2641	slot_ops_vtables.rs	MATCH	yes	non-virtual src deform DEFERRED otherwise MATCH
+tts_virtual_copy_heap_tuple	execTuples.rs:2663	slot_ops_vtables.rs	SEAMED	no	DEFERRED; FormedTuple carrier
+tts_virtual_copy_minimal_tuple	execTuples.rs:2672	slot_ops_vtables.rs	SEAMED	no	DEFERRED; FormedTuple carrier
+tts_heap_init	execTuples.rs:2683	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_heap_release	execTuples.rs:2684	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_heap_clear	execTuples.rs:2685	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_heap_getsomeattrs	execTuples.rs:2701	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_heap_getsysattr	execTuples.rs:2708	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_heap_is_current_xact_tuple	execTuples.rs:2756	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_heap_materialize	execTuples.rs:2807	slot_ops_vtables.rs	SEAMED	no	DEFERRED; carrier
+tts_heap_copyslot	execTuples.rs:2831	slot_ops_vtables.rs	SEAMED	no	fixed (was MISSING) -> DEFERRED; carrier
+tts_heap_get_heap_tuple	execTuples.rs:2842	slot_ops_vtables.rs	SEAMED	no	DEFERRED; carrier
+tts_heap_copy_heap_tuple	execTuples.rs:2851	slot_ops_vtables.rs	SEAMED	no	DEFERRED; carrier
+tts_heap_copy_minimal_tuple	execTuples.rs:2860	slot_ops_vtables.rs	SEAMED	no	DEFERRED; carrier
+tts_heap_store_tuple	execTuples.rs:2870	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_minimal_init	execTuples.rs:2888	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_minimal_release	execTuples.rs:2892	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_minimal_clear	execTuples.rs:2893	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_minimal_getsomeattrs	execTuples.rs:2909	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_minimal_getsysattr	execTuples.rs:2916	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_minimal_is_current_xact_tuple	execTuples.rs:2959	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_minimal_materialize	execTuples.rs:3001	slot_ops_vtables.rs	SEAMED	no	DEFERRED; carrier
+tts_minimal_copyslot	execTuples.rs:3030	slot_ops_vtables.rs	SEAMED	no	fixed (was MISSING) -> DEFERRED; carrier
+tts_minimal_get_minimal_tuple	execTuples.rs:3041	slot_ops_vtables.rs	SEAMED	no	DEFERRED; carrier
+tts_minimal_copy_heap_tuple	execTuples.rs:3050	slot_ops_vtables.rs	SEAMED	no	fixed (was MISSING) -> DEFERRED; carrier
+tts_minimal_copy_minimal_tuple	execTuples.rs:3059	slot_ops_vtables.rs	SEAMED	no	DEFERRED; carrier
+tts_minimal_store_tuple	execTuples.rs:3069	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_buffer_heap_init	execTuples.rs:3090	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_buffer_heap_release	execTuples.rs:3091	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_buffer_heap_clear	execTuples.rs:3092	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_buffer_heap_getsomeattrs	execTuples.rs:3112	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_buffer_heap_getsysattr	execTuples.rs:3119	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_buffer_is_current_xact_tuple	execTuples.rs:3173	slot_ops_vtables.rs	MATCH	yes	vtable cb
+tts_buffer_heap_materialize	execTuples.rs:3224	slot_ops_vtables.rs	SEAMED	no	DEFERRED; carrier
+tts_buffer_heap_copyslot	execTuples.rs:3254	slot_ops_vtables.rs	SEAMED	no	DEFERRED; carrier
+tts_buffer_heap_get_heap_tuple	execTuples.rs:3290	slot_ops_vtables.rs	SEAMED	no	DEFERRED; carrier
+tts_buffer_heap_copy_heap_tuple	execTuples.rs:3299	slot_ops_vtables.rs	SEAMED	no	DEFERRED; carrier
+tts_buffer_heap_copy_minimal_tuple	execTuples.rs:3308	slot_ops_vtables.rs	SEAMED	no	DEFERRED; carrier
+tts_buffer_heap_store_tuple	execTuples.rs:3319	slot_store_fetch.rs	MATCH	yes	vtable cb
+slot_deform_heap_tuple_internal	execTuples.rs:3354	slot_deform.rs	MATCH	yes	byte-area access DEFERRED otherwise MATCH
+slot_deform_heap_tuple	execTuples.rs:3512	slot_deform.rs	MATCH	yes	deform driver
+MakeTupleTableSlot	execTuples.rs:3587	slot_payload_model.rs	MATCH	yes	builds owned SlotData + value arrays
+ExecAllocTableSlot	execTuples.rs:3668	exec_init_slots.rs (exec_alloc_table_slot)	MATCH	yes	audit
+ExecResetTupleTable	execTuples.rs:3678	exec_init_slots.rs	MATCH	yes	audit
+MakeSingleTupleTableSlot	execTuples.rs:3724	exec_init_slots.rs	MATCH	yes	audit
+ExecDropSingleTupleTableSlot	execTuples.rs:3732	exec_init_slots.rs	MATCH	yes	audit
+ExecSetSlotDescriptor	execTuples.rs:3753	exec_init_slots.rs	MATCH	yes	array realloc DEFERRED otherwise MATCH
+ExecStoreHeapTuple	execTuples.rs:3783	slot_store_fetch.rs	MATCH	yes	audit
+ExecStoreBufferHeapTuple	execTuples.rs:3824	slot_store_fetch.rs	MATCH	yes	audit
+ExecStorePinnedBufferHeapTuple	execTuples.rs:3865	slot_store_fetch.rs	MATCH	yes	audit
+ExecStoreMinimalTuple	execTuples.rs:3907	slot_store_fetch.rs	MATCH	yes	audit
+ExecForceStoreHeapTuple	execTuples.rs:3947	slot_store_fetch.rs	MATCH	yes	audit
+ExecForceStoreMinimalTuple	execTuples.rs:3985	slot_store_fetch.rs	MATCH	yes	audit
+ExecStoreVirtualTuple	execTuples.rs:4021	slot_store_fetch.rs	SEAMED	no	DEFERRED; SlotId-pool payload model
+ExecStoreAllNullTuple	execTuples.rs:4030	slot_store_fetch.rs	MATCH	yes	audit
+ExecStoreHeapTupleDatum	execTuples.rs:4064	slot_store_fetch.rs	MATCH	yes	audit (DEFERRED per payload need where carrier required)
+ExecFetchSlotHeapTuple	execTuples.rs:4092	slot_store_fetch.rs	MATCH	yes	audit
+ExecFetchSlotMinimalTuple	execTuples.rs:4117	slot_store_fetch.rs	SEAMED	no	DEFERRED; carrier
+ExecFetchSlotHeapTupleDatum	execTuples.rs:4138	slot_store_fetch.rs	MATCH	yes	audit
+ExecInitResultTypeTL	execTuples.rs:4154	seamed self (exec_init_result_type_tl)	SEAMED	no	DEFERRED; Plan->targetlist not in trimmed PlanStateData
+ExecInitResultSlot	execTuples.rs:4159	exec_init_slots.rs	MATCH	yes	audit
+ExecInitResultTupleSlotTL	execTuples.rs:4175	exec_init_slots.rs	MATCH	yes	audit
+ExecInitScanTupleSlot	execTuples.rs:4183	exec_init_slots.rs	MATCH	yes	audit
+ExecInitExtraTupleSlot	execTuples.rs:4200	exec_init_slots.rs	MATCH	yes	audit
+ExecInitNullTupleSlot	execTuples.rs:4208	exec_init_slots.rs	MATCH	yes	audit
+slot_getmissingattrs	execTuples.rs:4217	slot_deform.rs	MATCH	yes	by-ref missing value DEFERRED otherwise MATCH
+slot_getsomeattrs_int	execTuples.rs:4254	slot_deform.rs	MATCH	yes	audit
+ExecTypeFromTL	execTuples.rs:4299	exectype_tupoutput.rs	MATCH	yes	exprType/Typmod/Collation SEAMED nodeFuncs
+ExecCleanTypeFromTL	execTuples.rs:4303	exectype_tupoutput.rs	MATCH	yes	audit
+ExecTypeFromTLInternal	execTuples.rs:4306	exectype_tupoutput.rs	MATCH	yes	audit
+ExecTypeFromExprList	execTuples.rs:4356	exectype_tupoutput.rs	MATCH	yes	audit
+ExecTypeSetColNames	execTuples.rs:4389	exectype_tupoutput.rs	MATCH	yes	audit
+BlessTupleDesc	execTuples.rs:4426	exectype_tupoutput.rs	MATCH	yes	typcache/fmgr calls SEAMED otherwise MATCH
+TupleDescGetAttInMetadata	execTuples.rs:4433	exectype_tupoutput.rs	MATCH	yes	audit
+BuildTupleFromCStrings	execTuples.rs:4477	exectype_tupoutput.rs	MATCH	yes	fmgr calls SEAMED otherwise MATCH
+HeapTupleHeaderGetDatum	execTuples.rs:4518	exectype_tupoutput.rs	MATCH	yes	audit
+begin_tup_output_tupdesc	execTuples.rs:4541	exectype_tupoutput.rs	MATCH	yes	audit
+do_tup_output	execTuples.rs:4557	exectype_tupoutput.rs	MATCH	yes	audit
+do_text_output_multiline	execTuples.rs:4582	exectype_tupoutput.rs	MATCH	yes	audit
+end_tup_output	execTuples.rs:4617	exectype_tupoutput.rs	MATCH	yes	audit

@@ -1,0 +1,10 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+ExecInitNode	execProcnode.rs:3620	execProcnode_init.rs:35	MATCH	yes	NULL guard; check_stack_depth seam; 35-arm nodeTag switch -> match, unported owners loud-panic (mirror-PG); ExecSetExecProcNode; initPlan walk (NIL no-op); instrument tail
+ExecSetExecProcNode	execProcnode.rs:3867	execProcnode_init.rs (ExecSetExecProcNode)	MATCH	yes	fixed this round; ExecProcNodeReal=function, ExecProcNode=ExecProcNodeFirst
+ExecProcNodeFirst	execProcnode.rs:3876	execProcnode_run_end.rs:57	MATCH	yes	check_stack_depth; instrument branch -> ExecProcNodeInstr/Real; re-read+dispatch
+ExecProcNodeInstr	execProcnode.rs:3890	execProcnode_run_end.rs:90	MATCH	yes	InstrStartNode; dispatch ExecProcNodeReal; TupIsNull?0:1 -> InstrStopNode
+MultiExecProcNode	execProcnode.rs:3910	execProcnode_run_end.rs:139	MATCH	yes	check_stack_depth+CHECK_FOR_INTERRUPTS; chgParam->ExecReScan; 4-arm switch (T_HashState panics unported); TIDBitmap return narrowing inert
+ExecEndNode	execProcnode.rs:3969	execProcnode_run_end.rs:200	MATCH	yes	NULL guard via typed ref; check_stack_depth; chgParam take+bms_free; ~40-arm teardown switch, landed variants loud-panic
+ExecShutdownNode	execProcnode.rs:4130	execProcnode_run_end.rs:398	MATCH	yes	thin driver -> ExecShutdownNode_walker(node,NULL)
+ExecShutdownNode_walker	execProcnode.rs:4133	execProcnode_run_end.rs:417	SEAMED	no	check_stack_depth present; recursion via planstate_tree_walker (unported nodeFuncs) + per-node ExecShutdown* seams + Instrumentation.running not modeled -> single loud panic; structure present
+ExecSetTupleBound	execProcnode.rs:4196	execProcnode_run_end.rs:327	MATCH	yes	ported this round; SortState set/clear bounded+bound; Append/MergeAppend recurse over plans; other arms not in non-exhaustive enum; fall-through no-op

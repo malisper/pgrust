@@ -1,0 +1,31 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+heap_vacuum_eager_scan_setup	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:2631	crates/backend-access-heap-vacuumlazy/src/vacuum_rel.rs:42	MATCH	yes	Eager-scan region/threshold setup; per-audit re-derivation matches.
+heap_vacuum_rel	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:2695	crates/backend-access-heap-vacuumlazy/src/vacuum_rel.rs:133	MATCH	yes	Driver entry; also the one INWARD seam installed by init_seams() (called by unported vacuum.c).
+lazy_scan_heap	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:3367	crates/backend-access-heap-vacuumlazy/src/scan.rs:42	MATCH	yes	Phase-I scan loop matches.
+heap_vac_scan_next_block	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:3631	crates/backend-access-heap-vacuumlazy/src/scan_block.rs:45	MATCH	yes	Three-state skip machine; wrapping_add reproduces InvalidBlockNumber+1==0 idiom.
+find_next_unskippable_block	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:3681	crates/backend-access-heap-vacuumlazy/src/scan_block.rs:125	MATCH	yes	SKIP_PAGES_THRESHOLD jump, eager-region reset, VAC_BLK_* flag writes match.
+lazy_scan_new_or_empty	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:3737	crates/backend-access-heap-vacuumlazy/src/scan_page.rs:59	MATCH	yes	New/empty page handling matches.
+cmpOffsetNumbers	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:3809	crates/backend-access-heap-vacuumlazy/src/scan_page.rs (inlined sort_by w/ pg_cmp_u16)	MATCH	yes	OffsetNumber comparator inlined as the sort_by closure; identical ordering.
+lazy_scan_prune	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:3815	crates/backend-access-heap-vacuumlazy/src/scan_page.rs:138	MATCH	yes	Prune/freeze accounting matches.
+lazy_scan_noprune	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:4048	crates/backend-access-heap-vacuumlazy/src/scan_page.rs:330	MATCH	yes	No-prune path matches.
+lazy_vacuum	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:4201	crates/backend-access-heap-vacuumlazy/src/vacuum_phase.rs:33	MATCH	yes	Index/heap vacuum phase orchestration matches.
+lazy_vacuum_all_indexes	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:4226	crates/backend-access-heap-vacuumlazy/src/vacuum_phase.rs:77	MATCH	yes	Parallel/serial index vacuum dispatch matches.
+vacuum_reap_lp_read_stream_next	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:4294	crates/backend-access-heap-vacuumlazy/src/scan_block.rs:235	MATCH	yes	Reap callback now in-crate (prior FAIL resolved); None=>Exhausted, Some=>carry ReapBlockInfo.
+lazy_vacuum_heap_rel	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:4314	crates/backend-access-heap-vacuumlazy/src/heap_vacuum.rs:44	MATCH	yes	Reap loop, read-stream begin/end, accounting asserts, DEBUG2 log match 1:1.
+lazy_vacuum_heap_page	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:4431	crates/backend-access-heap-vacuumlazy/src/heap_vacuum.rs:155	MATCH	yes	LP_DEAD->LP_UNUSED loop, WAL gate, four-way VM-set, vm_new_visible counters match.
+lazy_check_wraparound_failsafe	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:4534	crates/backend-access-heap-vacuumlazy/src/vacuum_phase.rs:148	MATCH	yes	Failsafe early-return, disable index/cleanup/truncate, WARNING text and cost resets match.
+lazy_cleanup_all_indexes	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:4607	crates/backend-access-heap-vacuumlazy/src/index.rs:24	MATCH	yes	Index cleanup dispatch matches.
+lazy_vacuum_one_index	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:4666	crates/backend-access-heap-vacuumlazy/src/index.rs:70	MATCH	yes	Single index bulkdelete matches.
+lazy_cleanup_one_index	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:4716	crates/backend-access-heap-vacuumlazy/src/index.rs:120	MATCH	yes	Single index cleanup matches.
+should_attempt_truncation	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:4762	crates/backend-access-heap-vacuumlazy/src/truncate.rs:35	MATCH	yes	Truncation decision matches.
+lazy_truncate_heap	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:4779	crates/backend-access-heap-vacuumlazy/src/truncate.rs:54	MATCH	yes	Truncate loop with lock retries matches.
+count_nondeletable_pages	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:4942	crates/backend-access-heap-vacuumlazy/src/truncate.rs:166	MATCH	yes	Backward scan for nondeletable pages matches.
+dead_items_alloc	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:5081	crates/backend-access-heap-vacuumlazy/src/dead_items.rs:26	MATCH	yes	TID store / parallel-vacuum alloc matches.
+dead_items_add	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:5163	crates/backend-access-heap-vacuumlazy/src/dead_items.rs:85	MATCH	yes	TID store add matches.
+dead_items_reset	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:5186	crates/backend-access-heap-vacuumlazy/src/dead_items.rs:107	MATCH	yes	TID store reset matches.
+dead_items_cleanup	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:5202	crates/backend-access-heap-vacuumlazy/src/dead_items.rs:128	MATCH	yes	TID store cleanup matches.
+heap_page_is_all_visible	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:5209	crates/backend-access-heap-vacuumlazy/src/heap_vacuum.rs:251	MATCH	yes	Per-tuple visibility classification + internal elog(ERROR) preserved.
+update_relstats_all_indexes	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:5337	crates/backend-access-heap-vacuumlazy/src/index.rs:163	MATCH	yes	Index relstats update matches.
+vacuum_error_callback	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:5363	crates/backend-access-heap-vacuumlazy/src/errcb.rs:36	MATCH	yes	errcontext message construction matches (returns Option<String>).
+update_vacuum_error_info	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:5473	crates/backend-access-heap-vacuumlazy/src/errcb.rs:104	MATCH	yes	Phase/block/offset save matches.
+restore_vacuum_error_info	backend-access-heap-vacuumlazy/src/vacuumlazy.rs:5489	crates/backend-access-heap-vacuumlazy/src/errcb.rs:124	MATCH	yes	Restore of saved error info matches.

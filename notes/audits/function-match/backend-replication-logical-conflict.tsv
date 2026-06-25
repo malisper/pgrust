@@ -1,0 +1,13 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+ObjectIdGetDatum	conflict.rs:2706	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers in idiomatic port, behavior-identical
+DatumGetTransactionId	conflict.rs:2710	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers
+PointerGetDatum	conflict.rs:2714	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers
+slot_getsysattr	conflict.rs:2720	(seam call)	MATCH	yes	c2rust inlined header inline; reached via execTuples seam in GetTupleTransactionInfo
+ExecCopySlot	conflict.rs:2737	(seam call)	MATCH	yes	c2rust inlined header inline; reached via execTuples seam in build_index_value_desc
+GetTupleTransactionInfo	conflict.rs:2755	lib.rs:97	MATCH	yes	xmin assigned before track check; commit-ts via seam; debug_assert for Assert
+ReportApplyConflict	conflict.rs:2777	lib.rs:141	MATCH	yes	pgstat report before ereport; errmsg byte-equal; errdetail_internal; errcode_apply_conflict
+InitConflictIndexes	conflict.rs:2866	lib.rs:197	MATCH	yes	loop over ri_NumIndices; Unique/indimmediate filters; try_reserve+push rd_id
+errcode_apply_conflict	conflict.rs:2884	lib.rs:255	MATCH	yes	23505 vs 40001 per type; total match over enum; unit-tested
+errdetail_apply_conflict	conflict.rs:2894	lib.rs:275	MATCH	yes	all 5 switch arms + 12 format strings byte-equal; localts/origin decision tree
+build_tuple_value_details	conflict.rs:3059	lib.rs:440	MATCH	yes	key/localslot/remoteslot/searchslot blocks; 8 joined variants byte-equal; trailing '.'
+build_index_value_desc	conflict.rs:3211	lib.rs:581	MATCH	yes	NULL->None; index_open seam; virtual-slot check on original slot; scantuple ordering

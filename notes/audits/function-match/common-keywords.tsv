@@ -1,0 +1,4 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+ScanKeywordLookup	common-batch1/src/kwlookup.rs:32	common-keywords/src/lib.rs:120	MATCH	yes	Idiomatic, behavior-identical case-insensitive lookup; returns keyword index or -1.
+GetScanKeyword	common-batch1/src/kwlookup.rs:21	common-keywords/src/lib.rs:111	MATCH	yes	Returns n-th keyword text; bounds-checked (also via ScanKeywordList::keyword).
+ScanKeywords_hash_func	common-batch1/src/keywords.rs:528	common-keywords/src/lib.rs:120 (subsumed into ScanKeywordLookup)	MATCH	yes	Perfect-hash index-selection optimization; only observable effect is which candidate is char-compared. Replaced by direct case-insensitive scan yielding identical accept/reject on every input.

@@ -1,0 +1,42 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+initReadOnlyStringInfo	walreceiver.rs:1631	(inline)	MATCH	yes	c2rust-inlined stringinfo.h inline; realized via in-crate StringInfo handling
+Int32GetDatum	walreceiver.rs:1644	(inline)	MATCH	yes	c2rust-inlined postgres.h macro; realized via existing Datum infra
+DatumGetPointer	walreceiver.rs:1648	(inline)	MATCH	yes	c2rust-inlined header macro; realized via existing Datum infra
+PointerGetDatum	walreceiver.rs:1652	(inline)	MATCH	yes	c2rust-inlined header macro; realized via existing Datum infra
+Int64GetDatum	walreceiver.rs:1656	(inline)	MATCH	yes	c2rust-inlined header macro; realized via existing Datum infra
+XLogFileName	walreceiver.rs:1666	lib.rs (in-crate)	MATCH	yes	inlined xlog_internal.h helper; format %08X%08X%08X verified in audit
+TLHistoryFileName	walreceiver.rs:1688	lib.rs (in-crate)	MATCH	yes	inlined helper; format %08X.history verified in audit
+TimestampTzGetDatum	walreceiver.rs:1700	(inline)	MATCH	yes	c2rust-inlined timestamp.h macro; realized via existing Datum infra
+pg_atomic_write_u64_impl	walreceiver.rs:1704	(inline)	MATCH	yes	c2rust-inlined atomics inline; realized via written_upto thread_local accessor
+pg_atomic_read_u64_impl	walreceiver.rs:1711	(inline)	MATCH	yes	c2rust-inlined atomics inline; realized via written_upto accessor
+c2rust_pg_atomic_memory_barrier	walreceiver.rs:1715	(inline)	MATCH	yes	c2rust-inlined barrier; no-op for thread_local model
+pg_atomic_read_u64	walreceiver.rs:1719	(inline)	MATCH	yes	c2rust-inlined atomics inline; realized via accessor
+pg_atomic_write_u64	walreceiver.rs:1723	(inline)	MATCH	yes	c2rust-inlined atomics inline; realized via accessor
+tas	walreceiver.rs:1730	(inline)	MATCH	yes	c2rust-inlined s_lock.h test-and-set; realized via Spinlock infra
+HeapTupleGetDatum	walreceiver.rs:1734	(inline)	MATCH	yes	c2rust-inlined funcapi.h macro; tuple/Datum layer is systemic deferral
+pq_writeint8	walreceiver.rs:1738	lib.rs (in-crate)	MATCH	yes	inlined pqformat.h encoder (big-endian); verified in audit
+pq_writeint32	walreceiver.rs:1750	lib.rs (in-crate)	MATCH	yes	inlined pqformat.h encoder (big-endian); verified in audit
+pq_writeint64	walreceiver.rs:1762	lib.rs (in-crate)	MATCH	yes	inlined pqformat.h encoder (big-endian); verified in audit
+pq_sendint8	walreceiver.rs:1774	lib.rs (in-crate)	MATCH	yes	inlined pqformat.h encoder; verified in audit
+pq_sendint32	walreceiver.rs:1779	lib.rs (in-crate)	MATCH	yes	inlined pqformat.h encoder; verified in audit
+pq_sendint64	walreceiver.rs:1784	lib.rs (in-crate)	MATCH	yes	inlined pqformat.h encoder; verified in audit
+pq_sendbyte	walreceiver.rs:1789	lib.rs (in-crate)	MATCH	yes	inlined pqformat.h encoder; verified in audit
+pgstat_report_wait_start	walreceiver.rs:1794	(inline)	MATCH	yes	c2rust-inlined wait_event.h inline; realized via waitevent owner
+pgstat_report_wait_end	walreceiver.rs:1798	(inline)	MATCH	yes	c2rust-inlined wait_event.h inline; realized via waitevent owner
+LSNGetDatum	walreceiver.rs:1811	(inline)	MATCH	yes	c2rust-inlined pg_lsn.h macro; realized via existing Datum infra
+set_ps_display	walreceiver.rs:1815	(seam)	MATCH	yes	c2rust-inlined ps_status.h inline; delegated to ps_status owner
+WalReceiverMain	walreceiver.rs:1845	lib.rs:292/303	MATCH	yes	full state machine + streaming loop; STOPPING->STOPPED CV broadcast + proc_exit(1); WAITING/STREAMING/RESTARTING->PANIC; independent WL_LATCH_SET/WL_TIMEOUT checks
+WalRcvWaitForStartPosition	walreceiver.rs:2745	lib.rs:754	MATCH	yes	STREAMING->WAITING under lock; non-STREAMING proc_exit(0)/FATAL; inner loop RESTARTING adopt->STREAMING; STOPPING proc_exit(1); WaitLatch
+WalRcvFetchTimeLineHistoryFiles	walreceiver.rs:2855	lib.rs:846	MATCH	yes	for tli first..=last; skip tli==1; existsTimeLineHistory; filename sanity PROTOCOL_VIOLATION; write; archive-mode branch
+WalRcvDie	walreceiver.rs:2960	lib.rs:897/903	MATCH	yes	assert TLI!=0; flush(dying=true); state asserts; STOPPED/pid=0/procno=INVALID/ready=false under lock; CV broadcast; disconnect; WakeupRecovery
+XLogWalRcvProcessMsg	walreceiver.rs:2986	lib.rs:938	MATCH	yes	'w' hdrlen=24 / 'k' hdrlen=17; len checks PROTOCOL_VIOLATION; parse + ProcessWalSndrMessage/optional reply; default ERROR
+XLogWalRcvWrite	walreceiver.rs:3165	lib.rs:991	MATCH	yes	assert tli!=0; segment close/create; startoff/segbytes clamp; pgstat io timing; pwrite; <=0 PANIC; advance; set_written_upto; trailing close
+XLogWalRcvFlush	walreceiver.rs:3272	lib.rs:1089	MATCH	yes	assert tli!=0; Flush<Write guard; issue_xlog_fsync; shmem update under lock; WakeupRecovery + cascade wakeup; PS; !dying reply+HSFeedback
+XLogWalRcvClose	walreceiver.rs:3315	lib.rs:1129	MATCH	yes	asserts; flush(false); filename; close PANIC on error; archive-mode branch; recvFile=-1
+XLogWalRcvSendReply	walreceiver.rs:3362	lib.rs:1172	MATCH	yes	force/interval guards; ComputeNextWakeup(REPLY); build 'r' message big-endian; DEBUG2; walrcv_send; function-local statics -> FileState
+XLogWalRcvSendHSFeedback	walreceiver.rs:3434	lib.rs:1245	MATCH	yes	interval/hsfb guards; ComputeNextWakeup(HSFEEDBACK); !HotStandbyActive return; xmin/catalog_xmin epoch adjust; 'h' message; walrcv_send
+ProcessWalSndrMessage	walreceiver.rs:3517	lib.rs:1331	MATCH	yes	shmem latestWalEnd/times under lock; DEBUG2-gated trace with apply-delay==-1 branch
+WalRcvComputeNextWakeup	walreceiver.rs:3618	lib.rs:1372	MATCH	yes	TERMINATE/PING use wal_receiver_timeout (PING /2); HSFEEDBACK/REPLY use status_interval; <=0 -> TIMESTAMP_INFINITY
+WalRcvForceReply	walreceiver.rs:3665	lib.rs:1413	MATCH	yes	set_force_reply (barrier in seam); read procno under lock; SetLatch if valid
+WalRcvGetStateString	walreceiver.rs:3683	lib.rs:1426	MATCH	yes	exhaustive 6-variant match -> identical strings; C trailing UNKNOWN is dead
+pg_stat_get_wal_receiver	walreceiver.rs:3698	lib.rs:1443	MATCH	yes	snapshot under lock; pid==0||!ready -> NULL; privilege gate ROLE_PG_READ_ALL_STATS=3375; field NULL/value selection 1:1; fmgr/Datum tuple layer is systemic deferral

@@ -1,0 +1,38 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+JsonbToJsonbValue	backend-utils-adt-jsonb-core/src/jsonb_util.rs:72	crates/backend-utils-adt-jsonb-util/src/lib.rs:161	MATCH	yes
+JsonbValueToJsonb	backend-utils-adt-jsonb-core/src/jsonb_util.rs:92	crates/backend-utils-adt-jsonb-util/src/lib.rs:177	MATCH	yes
+getJsonbOffset	backend-utils-adt-jsonb-core/src/jsonb_util.rs:134	crates/backend-utils-adt-jsonb-util/src/lib.rs:225	MATCH	yes
+getJsonbLength	backend-utils-adt-jsonb-core/src/jsonb_util.rs:159	crates/backend-utils-adt-jsonb-util/src/lib.rs:240	MATCH	yes
+compareJsonbContainers	backend-utils-adt-jsonb-core/src/jsonb_util.rs:191	crates/backend-utils-adt-jsonb-util/src/lib.rs:1241	MATCH	yes	bool/array/object/raw-scalar ordering; empty-array quirk; do/while -> loop
+findJsonbValueFromContainer	backend-utils-adt-jsonb-core/src/jsonb_util.rs:348	crates/backend-utils-adt-jsonb-util/src/lib.rs:1319	MATCH	yes
+getKeyJsonValueFromContainer	backend-utils-adt-jsonb-core/src/jsonb_util.rs:402	crates/backend-utils-adt-jsonb-util/src/lib.rs:1368	MATCH	yes
+getIthJsonbValueFromContainer	backend-utils-adt-jsonb-core/src/jsonb_util.rs:472	crates/backend-utils-adt-jsonb-util/src/lib.rs:1423	MATCH	yes
+fillJsonbValue	backend-utils-adt-jsonb-core/src/jsonb_util.rs:509	crates/backend-utils-adt-jsonb-util/src/lib.rs:266	MATCH	yes	numeric reconstruction length bit-identical (verified by roundtrip test)
+pushJsonbValue	backend-utils-adt-jsonb-core/src/jsonb_util.rs:570	crates/backend-utils-adt-jsonb-util/src/lib.rs:329	MATCH	yes
+pushJsonbValueScalar	backend-utils-adt-jsonb-core/src/jsonb_util.rs:644	crates/backend-utils-adt-jsonb-util/src/lib.rs:414	MATCH	yes
+pushState	backend-utils-adt-jsonb-core/src/jsonb_util.rs:735	crates/backend-utils-adt-jsonb-util/src/lib.rs:526	MATCH	yes
+appendKey	backend-utils-adt-jsonb-core/src/jsonb_util.rs:750	crates/backend-utils-adt-jsonb-util/src/lib.rs:538	MATCH	yes
+appendValue	backend-utils-adt-jsonb-core/src/jsonb_util.rs:779	crates/backend-utils-adt-jsonb-util/src/lib.rs:562	MATCH	yes
+appendElement	backend-utils-adt-jsonb-core/src/jsonb_util.rs:792	crates/backend-utils-adt-jsonb-util/src/lib.rs:572	MATCH	yes
+JsonbIteratorInit	backend-utils-adt-jsonb-core/src/jsonb_util.rs:821	crates/backend-utils-adt-jsonb-util/src/lib.rs:603	MATCH	yes
+JsonbIteratorNext	backend-utils-adt-jsonb-core/src/jsonb_util.rs:859	crates/backend-utils-adt-jsonb-util/src/lib.rs:624	MATCH	yes	full state machine; JBE_ADVANCE_OFFSET placement; recurse-unless-skipNested
+iteratorFromContainer	backend-utils-adt-jsonb-core/src/jsonb_util.rs:1012	crates/backend-utils-adt-jsonb-util/src/lib.rs:865	MATCH	yes
+freeAndGetParent	backend-utils-adt-jsonb-core/src/jsonb_util.rs:1054	crates/backend-utils-adt-jsonb-util/src/lib.rs:912	MATCH	yes
+JsonbDeepContains	backend-utils-adt-jsonb-core/src/jsonb_util.rs:1075	crates/backend-utils-adt-jsonb-util/src/lib.rs:1454	MATCH	yes	object-pair/array-element containment; O(N^2) nested-array temp build
+JsonbHashScalarValue	backend-utils-adt-jsonb-core/src/jsonb_util.rs:1329	crates/backend-utils-adt-jsonb-util/src/lib.rs:1819	MATCH	yes
+JsonbHashScalarValueExtended	backend-utils-adt-jsonb-core/src/jsonb_util.rs:1372	crates/backend-utils-adt-jsonb-util/src/lib.rs:1842	MATCH	yes
+equalsJsonbScalarValue	backend-utils-adt-jsonb-core/src/jsonb_util.rs:1414	crates/backend-utils-adt-jsonb-util/src/lib.rs:1641	SEAMED	no	numeric_eq delegated to numeric.c owner; varstr compare structural in-crate
+compareJsonbScalarValue	backend-utils-adt-jsonb-core/src/jsonb_util.rs:1446	crates/backend-utils-adt-jsonb-util/src/lib.rs:1671	SEAMED	no	varstr_cmp (varlena.c) + numeric_cmp (numeric.c) delegated; bool branch ba & !bb faithful
+reserveFromBuffer	backend-utils-adt-jsonb-core/src/jsonb_util.rs:1491	crates/backend-utils-adt-jsonb-util/src/lib.rs:947	MATCH	yes	ConvertBuffer::reserve
+copyToBuffer	backend-utils-adt-jsonb-core/src/jsonb_util.rs:1517	crates/backend-utils-adt-jsonb-util/src/lib.rs:966	MATCH	yes	ConvertBuffer::copy_to
+appendToBuffer	backend-utils-adt-jsonb-core/src/jsonb_util.rs:1526	crates/backend-utils-adt-jsonb-util/src/lib.rs:971	MATCH	yes	ConvertBuffer::append
+padBufferToInt	backend-utils-adt-jsonb-core/src/jsonb_util.rs:1540	crates/backend-utils-adt-jsonb-util/src/lib.rs:978	MATCH	yes	ConvertBuffer::pad_to_int
+convertToJsonb	backend-utils-adt-jsonb-core/src/jsonb_util.rs:1561	crates/backend-utils-adt-jsonb-util/src/lib.rs:990	MATCH	yes
+convertJsonbValue	backend-utils-adt-jsonb-core/src/jsonb_util.rs:1603	crates/backend-utils-adt-jsonb-util/src/lib.rs:1010	SEAMED	no	check_stack_depth delegated to stack-depth-seams; convert dispatch in-crate
+convertJsonbArray	backend-utils-adt-jsonb-core/src/jsonb_util.rs:1628	crates/backend-utils-adt-jsonb-util/src/lib.rs:1036	MATCH	yes
+convertJsonbObject	backend-utils-adt-jsonb-core/src/jsonb_util.rs:1712	crates/backend-utils-adt-jsonb-util/src/lib.rs:1090	MATCH	yes	stride keys i%32, values (i+nPairs)%32
+convertJsonbScalar	backend-utils-adt-jsonb-core/src/jsonb_util.rs:1828	crates/backend-utils-adt-jsonb-util/src/lib.rs:1155	SEAMED	no	json_encode_datetime (json.c) delegated for jbvDatetime arm; other arms in-crate
+lengthCompareJsonbStringValue	backend-utils-adt-jsonb-core/src/jsonb_util.rs:1893	crates/backend-utils-adt-jsonb-util/src/lib.rs:1892	MATCH	yes
+lengthCompareJsonbString	backend-utils-adt-jsonb-core/src/jsonb_util.rs:1912	crates/backend-utils-adt-jsonb-util/src/lib.rs:1877	MATCH	yes
+lengthCompareJsonbPair	backend-utils-adt-jsonb-core/src/jsonb_util.rs:1932	crates/backend-utils-adt-jsonb-util/src/lib.rs:1906	MATCH	yes
+uniqueifyJsonbObject	backend-utils-adt-jsonb-core/src/jsonb_util.rs:1956	crates/backend-utils-adt-jsonb-util/src/lib.rs:1926	MATCH	yes	dedup index math; sort_by behaviorally identical to qsort_arg (strict total order)

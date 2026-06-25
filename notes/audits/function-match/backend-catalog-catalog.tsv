@@ -1,0 +1,24 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+DatumGetObjectId	backend-catalog-small/src/catalog.rs:1197	-	MISSING	no	c2rust-inlined Datum macro; project-wide Datum-layer deferral (typed Oid args)
+ObjectIdGetDatum	backend-catalog-small/src/catalog.rs:1201	-	MISSING	no	c2rust-inlined Datum macro; Datum-layer deferral
+DatumGetPointer	backend-catalog-small/src/catalog.rs:1205	-	MISSING	no	c2rust-inlined Datum macro; Datum-layer deferral
+DatumGetName	backend-catalog-small/src/catalog.rs:1209	-	MISSING	no	c2rust-inlined Datum macro; Datum-layer deferral
+GETSTRUCT	backend-catalog-small/src/catalog.rs:1222	-	MISSING	no	c2rust-inlined macro; subsumed by typed catalog rows
+IsSystemRelation	backend-catalog-small/src/catalog.rs:1291	backend-catalog-catalog/src/lib.rs:110	MATCH	yes	IsSystemClassForm(rd_id,&rd_rel); reads owned RelationData, no catalog access
+IsSystemClass	backend-catalog-small/src/catalog.rs:1295	backend-catalog-catalog/src/lib.rs:125	MATCH	yes	IsCatalogRelationOid||IsToastClass/IsToastNamespace; PgClassForm + FormData_pg_class faces, identical predicate; short-circuit order preserved
+IsCatalogRelation	backend-catalog-small/src/catalog.rs:1303	backend-catalog-catalog/src/lib.rs:145	MATCH	yes	IsCatalogRelationOid(rd_id)
+IsCatalogRelationOid	backend-catalog-small/src/catalog.rs:1307	backend-catalog-catalog/src/lib.rs:160	MATCH	yes	relid < FIRST_UNPINNED_OBJECT_ID(12000)
+IsCatalogTextUniqueIndexOid	backend-catalog-small/src/catalog.rs:1311	backend-catalog-catalog/src/lib.rs:173	MATCH	yes	4-OID set 6246/6002/3597/3593 verified vs c2rust
+IsInplaceUpdateRelation	backend-catalog-small/src/catalog.rs:1319	backend-catalog-catalog/src/lib.rs:187	MATCH	yes	IsInplaceUpdateOid(rd_id)
+IsInplaceUpdateOid	backend-catalog-small/src/catalog.rs:1323	backend-catalog-catalog/src/lib.rs:195	MATCH	yes	relid==1259||relid==1262
+IsToastRelation	backend-catalog-small/src/catalog.rs:1327	backend-catalog-catalog/src/lib.rs:205	MATCH	yes	IsToastNamespace(rd_rel.relnamespace)
+IsToastClass	backend-catalog-small/src/catalog.rs:1331	backend-catalog-catalog/src/lib.rs:219	MATCH	yes	IsToastNamespace(reltuple.relnamespace)
+IsCatalogNamespace	backend-catalog-small/src/catalog.rs:1336	backend-catalog-catalog/src/lib.rs:229	MATCH	yes	==PG_CATALOG_NAMESPACE(11)
+IsToastNamespace	backend-catalog-small/src/catalog.rs:1340	backend-catalog-catalog/src/lib.rs:242	MATCH	yes	==PG_TOAST_NAMESPACE(99)||isTempToastNamespace; temp-toast crosses to ported namespace.c direct call (not a seam)
+IsReservedName	backend-catalog-small/src/catalog.rs:1345	backend-catalog-catalog/src/lib.rs:250	MATCH	yes	pg_ prefix; len>=3 guard identical on every input
+IsSharedRelation	backend-catalog-small/src/catalog.rs:1354	backend-catalog-catalog/src/lib.rs:264	MATCH	yes	three OID groups (11 catalogs/21 indexes/14 toast) compared one-for-one; group ordering + early return preserved
+IsPinnedObject	backend-catalog-small/src/catalog.rs:1411	backend-catalog-catalog/src/lib.rs:333	MATCH	yes	4 early-false guards (FirstUnpinned;2613;2615+2200;1262) then true; order+predicates exact
+GetNewOidWithIndex	backend-catalog-small/src/catalog.rs:1427	backend-catalog-catalog/src/lib.rs:380	MATCH	yes	bootstrap early return; do-while OID-probe via genam systable scan SnapshotAny; exponential log-throttle (1M/128M); retries++ then break; completion log; strings+plural arg match; Assert->debug_assert; CFI seamed
+GetNewRelFileNumber	backend-catalog-small/src/catalog.rs:1574	backend-catalog-catalog/src/lib.rs:516	MATCH	yes	persistence switch (TEMP/UNLOGGED/PERMANENT/default elog), spcOid/dbOid derivation, do-while GetNewOidWithIndex-or-GetNewObjectId, relpath_backend+access(F_OK); takes Mcx
+pg_nextoid	backend-catalog-small/src/catalog.rs:1680	backend-catalog-catalog/src/lib.rs:630	MATCH	yes	superuser check, table_open/index_open RowExclusiveLock RAII, IsSystemRelation, indrelid mismatch, SearchSysCacheAttName, atttypid!=OIDOID(26), indnkeyatts/indkey check, GetNewOidWithIndex; fmgr/Datum layer deferral
+pg_stop_making_pinned_objects	backend-catalog-small/src/catalog.rs:1971	backend-catalog-catalog/src/lib.rs:744	MATCH	yes	superuser check; StopGeneratingPinnedObjectIds via varsup seam; returns ()

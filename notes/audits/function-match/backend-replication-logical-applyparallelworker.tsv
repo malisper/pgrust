@@ -1,0 +1,53 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+pa_can_start	applyparallelworker.rs:264	lib.rs:321	MATCH	yes	four early-return predicates in order; maybe_reread_subscription; skiplsn; AllTablesyncsReady via tablesync seam (PgResult after reconcile)
+pa_setup_dsm	applyparallelworker.rs:326	lib.rs:376	MATCH	yes	header built in-crate; DSM/shm_toc/shm_mq delegated to worker setup_dsm seam; None on dsm_create failure
+pa_launch_parallel_worker	applyparallelworker.rs:403	lib.rs:415	MATCH	yes	pool scan !in_use; setup_dsm failure frees slot; launcher logicalrep_worker_launch(WORKERTYPE_PARALLEL_APPLY,...) post-reconcile; lappend/free on result
+pa_allocate_worker	applyparallelworker.rs:469	lib.rs:497	MATCH	yes	can_start+launch gates; lazy hash init; HASH_ENTER+found -> hash corrupted; spinlock write xact_state=UNKNOWN+xid
+pa_find_worker	applyparallelworker.rs:517	lib.rs:546	MATCH	yes	TransactionIdIsValid+NULL-hash guards; stream_apply_worker cache short-circuit; HASH_FIND; Assert(in_use) -> debug_assert
+pa_free_worker	applyparallelworker.rs:555	lib.rs:578	MATCH	yes	asserts; HASH_REMOVE+corrupted; threshold > max/2; stop+free via launcher logicalrep_pa_worker_stop post-reconcile
+pa_free_worker_info	applyparallelworker.rs:594	lib.rs:655	MATCH	yes	mq/error_mq detach guarded; serialize_changes -> stream_cleanup_files; dsm_detach; list_delete_ptr -> slot=None
+pa_detach_all_error_mq	applyparallelworker.rs:621	lib.rs:689	MATCH	yes	iterates pool, detaches+NULLs nonzero error_mq_handle (snapshot-then-call); also installed as owned seam
+pa_has_spooled_message_pending	applyparallelworker.rs:641	lib.rs:721	MATCH	yes	fileset_state != FS_EMPTY
+pa_process_spooled_messages_if_required	applyparallelworker.rs:657	lib.rs:731	MATCH	yes	FS_EMPTY->false; FS_SERIALIZE_IN_PROGRESS lock/unlock+re-read; DONE->READY; READY->apply_spooled_messages+EMPTY
+ProcessParallelApplyInterrupts	applyparallelworker.rs:711	lib.rs:770	MATCH	yes	CHECK_FOR_INTERRUPTS; ShutdownRequestPending->LOG+proc_exit(0); ConfigReloadPending->ProcessConfigFile(PGC_SIGHUP)
+LogicalParallelApplyLoop	applyparallelworker.rs:733	lib.rs:801	MATCH	yes	SUCCESS len==0 elog/first byte 'w'/apply_dispatch; WOULD_BLOCK spooled-or-wait(1000ms); DETACHED ereport; error-context push/pop
+pa_shutdown	applyparallelworker.rs:843	lib.rs:877	MATCH	yes	SendProcSignal(leader_pid, PROCSIG_PARALLEL_APPLY_MESSAGE, INVALID); dsm_detach(seg)
+ParallelApplyWorkerMain	applyparallelworker.rs:856	lib.rs:903	MATCH	yes	attach phases delegated to worker_attach_dsm; MyParallelShared bound; spinlock write; loop; Assert(false) trailer
+HandleParallelApplyMessageInterrupt	applyparallelworker.rs:995	lib.rs:936	MATCH	yes	InterruptPending=true; pending=true; SetLatch; installed by init_seams (owned seam)
+ProcessParallelApplyMessage	applyparallelworker.rs:1007	lib.rs:949	MATCH	yes	'E' pq_parse_errornotice + context restore + ereport ERROR ONIPS + errcontext; 'N'/'A' no-op; default elog
+ProcessParallelApplyMessages	applyparallelworker.rs:1069	lib.rs:1002	MATCH	yes	HOLD_INTERRUPTS; private hpam_context; pending=false; per-worker WOULD_BLOCK/SUCCESS/DETACHED; RESUME_INTERRUPTS
+pa_send_data	applyparallelworker.rs:1152	lib.rs:1066	MATCH	yes	asserts; immediate-mode->false; loop SUCCESS/DETACHED/WOULD_BLOCK wait(1000ms)+reset+CFI; 9000ms timeout->false
+pa_switch_to_partial_serialize	applyparallelworker.rs:1217	lib.rs:1124	MATCH	yes	LOG with xid; serialize_changes=true; stream_start_internal(xid,true); conditional pa_lock_stream(AccessExcl); FS_SERIALIZE_IN_PROGRESS
+pa_wait_for_xact_state	applyparallelworker.rs:1250	lib.rs:1163	MATCH	yes	break on >= xact_state (Ord); WaitLatch(10ms, PgResult post-reconcile); ResetLatch; CHECK_FOR_INTERRUPTS
+pa_wait_for_xact_finish	applyparallelworker.rs:1280	lib.rs:1194	MATCH	yes	wait_for_xact_state(STARTED); lock/unlock transaction AccessShare; state!=FINISHED -> ereport
+pa_set_xact_state	applyparallelworker.rs:1313	lib.rs:1228	MATCH	yes	mutex write (slock_t)
+pa_get_xact_state	applyparallelworker.rs:1325	lib.rs:1243	MATCH	yes	mutex read
+pa_set_stream_apply_worker	applyparallelworker.rs:1340	lib.rs:1252	MATCH	yes	stream_apply_worker = winfo (Option<handle>)
+pa_savepoint_name	applyparallelworker.rs:1354	lib.rs:1264	MATCH	yes	snprintf "pg_sp_%u_%u" with szsp-1+NUL truncation; NAMEDATALEN=64
+pa_start_subtrans	applyparallelworker.rs:1368	lib.rs:1289	MATCH	yes	current_xid!=top_xid && !subxactlist.contains; DefineSavepoint+CommitTransactionCommand; subxactlist.push (in-crate Vec, no seam)
+pa_reset_subtrans	applyparallelworker.rs:1408	lib.rs:1328	MATCH	yes	subxactlist.clear() (in-crate, no seam)
+pa_stream_abort	applyparallelworker.rs:1422	lib.rs:1351	MATCH	yes	origin LSN/ts; toplevel-abort path; subxact reverse scan over in-crate subxactlist + truncate(i); all list ops in-crate
+pa_set_fileset_state	applyparallelworker.rs:1504	lib.rs:1425	MATCH	yes	mutex write fileset_state; FS_SERIALIZE_DONE asserts leader+nonnull stream_fileset, copies fileset
+pa_get_fileset_state	applyparallelworker.rs:1524	lib.rs:1486	MATCH	yes	Assert(am_parallel_apply_worker); mutex read fileset_state
+pa_lock_stream	applyparallelworker.rs:1546	lib.rs:1497	MATCH	yes	LockApplyTransactionForSession(subid,xid,STREAM=0,lockmode)
+pa_unlock_stream	applyparallelworker.rs:1553	lib.rs:1507	MATCH	yes	UnlockApplyTransactionForSession(...,STREAM=0,...)
+pa_lock_transaction	applyparallelworker.rs:1579	lib.rs:1517	MATCH	yes	LockApplyTransactionForSession(...,XACT=1,...)
+pa_unlock_transaction	applyparallelworker.rs:1586	lib.rs:1527	MATCH	yes	UnlockApplyTransactionForSession(...,XACT=1,...)
+pa_decr_and_wait_stream_block	applyparallelworker.rs:1597	lib.rs:1541	MATCH	yes	Assert; pending==0 -> spooled? return : elog; fetch_sub-1==0 -> lock/unlock stream AccessShare
+pa_xact_finish	applyparallelworker.rs:1624	lib.rs:1573	MATCH	yes	Assert(am_leader_apply_worker); pa_unlock_stream(AccessExcl); pa_wait_for_xact_finish; store_flush_position; pa_free_worker
+am_leader_apply_worker	applyparallelworker.rs	-	MATCH	yes	c2rust-emitted inline of worker.c predicate; routed through worker/launcher owner seam (PgResult<bool> post-reconcile)
+DatumGetInt32	applyparallelworker.rs	-	MATCH	yes	c2rust-emitted inline Datum macro; subsumed by typed conversion in the port
+DatumGetPointer	applyparallelworker.rs	-	MATCH	yes	c2rust-emitted inline Datum macro; subsumed by typed conversion in the port
+PointerGetDatum	applyparallelworker.rs	-	MATCH	yes	c2rust-emitted inline Datum macro; subsumed by typed conversion in the port
+initReadOnlyStringInfo	applyparallelworker.rs	-	MATCH	yes	c2rust-emitted inline StringInfo helper; subsumed by the StringInfo model in the port
+list_length	applyparallelworker.rs	-	MATCH	yes	c2rust-emitted inline pg_list macro; subsumed by Vec/slice len
+list_nth_cell	applyparallelworker.rs	-	MATCH	yes	c2rust-emitted inline pg_list accessor; subsumed by Vec indexing
+MemoryContextSwitchTo	applyparallelworker.rs	-	MATCH	yes	c2rust-emitted inline; owned-root mctx model, no-op equivalent
+pg_atomic_init_u32	applyparallelworker.rs	-	MATCH	yes	c2rust-emitted inline atomics wrapper; subsumed by Rust atomic types
+pg_atomic_init_u32_impl	applyparallelworker.rs	-	MATCH	yes	c2rust-emitted inline atomics impl; subsumed by Rust atomic types
+pg_atomic_read_u32	applyparallelworker.rs	-	MATCH	yes	c2rust-emitted inline atomics wrapper; subsumed by Rust atomic types
+pg_atomic_read_u32_impl	applyparallelworker.rs	-	MATCH	yes	c2rust-emitted inline atomics impl; subsumed by Rust atomic types
+pg_atomic_fetch_sub_u32_impl	applyparallelworker.rs	-	MATCH	yes	c2rust-emitted inline atomics impl; subsumed by Rust atomic fetch_sub
+pg_atomic_sub_fetch_u32	applyparallelworker.rs	-	MATCH	yes	c2rust-emitted inline atomics wrapper; subsumed by Rust atomic types
+pg_atomic_sub_fetch_u32_impl	applyparallelworker.rs	-	MATCH	yes	c2rust-emitted inline atomics impl; subsumed by Rust atomic types
+tas	applyparallelworker.rs	-	MATCH	yes	c2rust-emitted inline test-and-set spinlock primitive; subsumed by Rust Mutex/atomics in the port

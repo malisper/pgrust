@@ -1,0 +1,32 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+BoolGetDatum	tsgistidx.rs:937	(inline)	MATCH	yes	c2rust macro inline; idiomatic Datum cast inlined at call sites
+DatumGetPointer	tsgistidx.rs:945	(inline)	MATCH	yes	c2rust macro inline; idiomatic cast at call sites
+PointerGetDatum	tsgistidx.rs:949	(inline)	MATCH	yes	c2rust macro inline; idiomatic cast at call sites
+pg_cmp_s32	tsgistidx.rs:977	lib.rs:185	MATCH	yes	signed 3-way compare; (a>b) as i32 - (a<b) as i32
+qunique	tsgistidx.rs:981	lib.rs:891	MATCH	yes	qunique_i32 over sorted int32 slice (lib/qunique.h)
+pg_popcount	tsgistidx.rs:1023	lib.rs:504	MATCH	yes	folded into sizebitvec popcount over siglen bytes
+DatumGetTSVector	tsgistidx.rs:1048	(inline)	MATCH	yes	c2rust detoast inline; modeled by detoast seam at call sites
+DatumGetTSQuery	tsgistidx.rs:1052	(inline)	MATCH	yes	c2rust detoast inline; modeled by detoast seam at call sites
+gtsvectorin	tsgistidx.rs:1064	lib.rs:213	MATCH	yes	always errors ERRCODE_FEATURE_NOT_SUPPORTED
+gtsvectorout	tsgistidx.rs:1105	lib.rs:220	MATCH	yes	"N unique words"/"all true bits"/"N true, M false"
+compareint	tsgistidx.rs:1153	lib.rs:191	MATCH	yes	delegates to pg_cmp_s32
+makesign	tsgistidx.rs:1161	lib.rs:196	MATCH	yes	MemSet 0 then HASH each arr element
+gtsvector_alloc	tsgistidx.rs:1214	lib.rs:144	MATCH	yes	ARRKEY/SIGNKEY/ALLISTRUE; sign copy only for plain SIGNKEY
+gtsvector_compress	tsgistidx.rs:1243	lib.rs:244	MATCH	yes	leaf (compress_leaf) + inner all-0xff->ALLISTRUE (compress_inner_alltrue)
+gtsvector_decompress	tsgistidx.rs:1401	(n/a)	MATCH	yes	pure detoast+GISTENTRY repack; no computational body
+checkcondition_arr	tsgistidx.rs:1423	lib.rs:319	MATCH	yes	prefix->MAYBE; binary search on int32 hashes
+checkcondition_bit	tsgistidx.rs:1450	lib.rs:346	MATCH	yes	prefix->MAYBE; GETBIT(HASHVAL)
+gtsvector_consistent	tsgistidx.rs:1496	lib.rs:369	MATCH	yes	recheck always true; signkey/alltrue/leaf branches; TS_execute seam
+unionkey	tsgistidx.rs:1578	lib.rs:410	MATCH	yes	OR sign / HASH arr; returns 1 on ALLISTRUE add
+gtsvector_union	tsgistidx.rs:1630	lib.rs:432	MATCH	yes	OR all entries; ALLISTRUE shortcut + break
+gtsvector_same	tsgistidx.rs:1694	lib.rs:457	MATCH	yes	signkey alltrue/byte-eq; arrkey len+elem-eq
+sizebitvec	tsgistidx.rs:1774	lib.rs:504	MATCH	yes	popcount over siglen bytes
+hemdistsign	tsgistidx.rs:1780	lib.rs:513	MATCH	yes	XOR popcount
+hemdist	tsgistidx.rs:1798	lib.rs:525	MATCH	yes	ALLISTRUE shortcuts then hemdistsign
+gtsvector_penalty	tsgistidx.rs:1834	lib.rs:551	MATCH	yes	arrkey: makesign + alltrue/hemdistsign; else hemdist
+fillcache	tsgistidx.rs:1881	lib.rs:597	MATCH	yes	arrkey makesign / alltrue flag / memcpy sign
+comparecost	tsgistidx.rs:1900	lib.rs:623	MATCH	yes	pg_cmp_s32 on cost
+hemdistcache	tsgistidx.rs:1908	lib.rs:628	MATCH	yes	alltrue shortcuts then hemdistsign
+gtsvector_picksplit	tsgistidx.rs:1927	lib.rs:660	MATCH	yes	seed search, costvector sort, left/right assignment, WISH_F balancing
+gtsvector_consistent_oldsig	tsgistidx.rs:2248	lib.rs:848	MATCH	yes	forwards to consistent
+gtsvector_options	tsgistidx.rs:2254	lib.rs:871	MATCH	yes	init_local_reloptions + add_local_int_reloption (siglen,1,SIGLEN_MAX)

@@ -1,0 +1,48 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+MemoryContextSwitchTo	copyto.rs:3522	(inlined)	MATCH	yes	c2rust header shim; context switch modeled by owned Mcx scoping
+list_length	copyto.rs:3529	(inlined)	MATCH	yes	c2rust list-macro shim; PgVec/list len inlined
+list_nth_cell	copyto.rs:3533	(inlined)	MATCH	yes	c2rust list-macro shim; nth-cell inlined
+TupleDescAttr	copyto.rs:3540	lib.rs:1308 td	MATCH	yes	c2rust header shim; attr accessor via td()/tup_desc_natts helpers
+slot_getsomeattrs	copyto.rs:3563	(seam)	MATCH	yes	c2rust header shim; subsumed by slot_getallattrs seam path
+slot_getallattrs	copyto.rs:3572	(seam)	SEAMED	no	c2rust header shim; delegated to execTuples slot_getallattrs seam
+table_beginscan	copyto.rs:3587	(seam)	SEAMED	no	c2rust header shim; tableam table_beginscan seam (snapshot-explicit)
+table_endscan	copyto.rs:3608	(seam)	SEAMED	no	c2rust header shim; tableam table_endscan seam
+table_scan_getnextslot	copyto.rs:3612	(seam)	SEAMED	no	c2rust header shim; tableam table_scan_getnextslot seam
+pq_writeint8	copyto.rs:3657	(inlined)	MATCH	yes	c2rust pqformat shim; direct pqformat dep / to_be_bytes inlined
+pq_writeint16	copyto.rs:3669	(inlined)	MATCH	yes	c2rust pqformat shim; inlined
+pq_sendint8	copyto.rs:3681	(inlined)	MATCH	yes	c2rust pqformat shim; inlined
+pq_sendint16	copyto.rs:3686	(inlined)	MATCH	yes	c2rust pqformat shim; inlined
+pq_sendbyte	copyto.rs:3691	(inlined)	MATCH	yes	c2rust pqformat shim; inlined
+CopyToGetRoutine	copyto.rs:3745	lib.rs:218 copy_to_get_routine	MATCH	yes	csv->binary->text precedence exact
+CopyToTextLikeStart	copyto.rs:3755	lib.rs:234 copy_to_text_like_start	MATCH	yes	need_transcoding null_print; header loop; CSV vs text colname escape
+CopyToTextLikeOutFunc	copyto.rs:3813	lib.rs:280 copy_to_text_like_out_func	SEAMED	no	getTypeOutputInfo + fmgr_info lookup-check seams; thin
+CopyToTextOneRow	copyto.rs:3823	lib.rs:406 routine_one_row Text	MATCH	yes	forwarding wrapper to copy_to_text_like_one_row(false)
+CopyToCSVOneRow	copyto.rs:3829	lib.rs:407 routine_one_row Csv	MATCH	yes	forwarding wrapper to copy_to_text_like_one_row(true)
+CopyToTextLikeOneRow	copyto.rs:3836	lib.rs:299 copy_to_text_like_one_row	MATCH	yes	need_delim, null_print_client, OutputFunctionCall seam, force_quote vs text
+CopyToTextLikeEnd	copyto.rs:3900	lib.rs:416 routine_end Text/Csv	MATCH	yes	C no-op
+CopyToBinaryStart	copyto.rs:3901	lib.rs:337 copy_to_binary_start	MATCH	yes	11-byte signature + two int32 zeros
+CopyToBinaryOutFunc	copyto.rs:3914	lib.rs:289 copy_to_binary_out_func	SEAMED	no	getTypeBinaryOutputInfo + fmgr lookup-check; thin
+CopyToBinaryOneRow	copyto.rs:3924	lib.rs:349 copy_to_binary_one_row	MATCH	yes	int16 natts, -1 isnull, SendFunctionCall seam, int32 len+data
+CopyToBinaryEnd	copyto.rs:3980	lib.rs:377 copy_to_binary_end	MATCH	yes	int16 -1 trailer + flush
+SendCopyBegin	copyto.rs:3984	lib.rs:426 send_copy_begin	MATCH	yes	pqformat assembly; COPY_FRONTEND; CopyOutResponse 'H'
+SendCopyEnd	copyto.rs:4009	lib.rs:442 send_copy_end	MATCH	yes	Assert len==0 debug_assert; CopyDone 'c'
+CopySendData	copyto.rs:4012	lib.rs:451 copy_send_data	MATCH	yes	appendBinaryStringInfo via try_reserve+extend
+CopySendString	copyto.rs:4019	lib.rs:456 copy_send_string	MATCH	yes	strlen modeled by slice length
+CopySendChar	copyto.rs:4029	lib.rs:461 copy_send_char	MATCH	yes	single-byte append
+CopySendEndOfRow	copyto.rs:4041	lib.rs:482 copy_send_end_of_row	MATCH	yes	EPIPE/is_program decision + program/file message selection in-crate
+CopySendTextLikeEndOfRow	copyto.rs:4145	lib.rs:553 copy_send_text_like_end_of_row	MATCH	yes	non-WIN32 '\n' for FILE/FRONTEND; WIN32 branch excluded by build config
+CopySendInt32	copyto.rs:4158	lib.rs:568 copy_send_int32	MATCH	yes	pg_hton32 = to_be_bytes
+CopySendInt16	copyto.rs:4168	lib.rs:574 copy_send_int16	MATCH	yes	pg_hton16 = to_be_bytes
+ClosePipeToProgram	copyto.rs:4177	lib.rs:580 close_pipe_to_program	SEAMED	no	pclose_rc handling in fd seam; debug_assert is_program preserved; thin
+EndCopy	copyto.rs:4254	lib.rs:594 end_copy	MATCH	yes	is_program close / FreeFile seam / progress_end / context delete = owned drop
+BeginCopyTo	copyto.rs:4293	lib.rs:622 BeginCopyTo	MATCH	yes	relkind gate, ProcessCopyOptions seam, rel vs query branch, attnums, encoding, dest selection
+EndCopyTo	copyto.rs:5379	lib.rs:938 EndCopyTo	MATCH	yes	end_copy_query seam + PopActiveSnapshot then EndCopy
+DoCopyTo	copyto.rs:5389	lib.rs:952 DoCopyTo	MATCH	yes	query branch returns receiver_processed; scan branch snapshot-explicit table_beginscan
+CopyOneRowTo	copyto.rs:5491	lib.rs:1055 copy_one_row_to	MATCH	yes	rowcontext reset = per-row owned drop; slot_getallattrs seam -> routine dispatch
+CopyAttributeOutText	copyto.rs:5502	lib.rs:1110 copy_attribute_out_text	MATCH	yes	embeds_ascii/safe loops, DUMPSOFAR, control-char escape table, mblen advance; byte-exact
+CopyAttributeOutCSV	copyto.rs:5672	lib.rs:1217 copy_attribute_out_csv	MATCH	yes	null_print pre-conv, single_attr quote, needs-quoting scan, escape inner loop; byte-exact
+copy_dest_startup	copyto.rs:5785	(none)	MATCH	yes	C body is no-op; zero logic
+copy_dest_receive	copyto.rs:5790	lib.rs:1069 copy_dest_receive	MATCH	yes	inward seam impl; CopyOneRowTo + receiver_processed++ + progress
+copy_dest_shutdown	copyto.rs:5804	(none)	MATCH	yes	C body is no-op; zero logic
+copy_dest_destroy	copyto.rs:5805	(none)	MATCH	yes	C body pfree(self); registry slot reclaimed by backend lifetime; behaviorally inert
+CreateCopyDestReceiver	copyto.rs:5809	lib.rs:1101 CreateCopyDestReceiver	MATCH	yes	builds receiver handle; no-op vtable callbacks; cstate bound later

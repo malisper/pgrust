@@ -1,0 +1,50 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+MemoryContextSwitchTo	guc_file.rs:809	(folded into Mcx wrapper)	MATCH	yes	c2rust-emitted inline accessor; identity swap of current context, modeled by Mcx scope
+ProcessConfigFile	guc_file.rs:822	lib.rs:95 ProcessConfigFile	MATCH	yes	elevel selection + private-mcx leak isolation; internal core routed via guc seam (legit cross-unit)
+ParseConfigFile	guc_file.rs:842	lib.rs:117 ParseConfigFile	MATCH	yes	audit PASS
+record_config_file_error	guc_file.rs:1079	lib.rs:378 record_config_file_error	MATCH	yes	audit PASS
+GUC_flex_fatal	guc_file.rs:1108	(flex-fatal longjmp machinery)	MATCH	yes	static flex-fatal error path; folded into PgResult error propagation, no separate logic
+ParseConfigFp	guc_file.rs:1119	lib.rs:241 ParseConfigFp	MATCH	yes	audit PASS
+ParseConfigDirectory	guc_file.rs:1530	lib.rs:340 ParseConfigDirectory	MATCH	yes	audit PASS
+FreeConfigVariables	guc_file.rs:1877	lib.rs:393 FreeConfigVariables	MATCH	yes	audit PASS; freeing folded into Vec/Drop
+FreeConfigVariable	guc_file.rs:1958	(folded into Vec/Drop)	MATCH	yes	static; per-item free folded into Drop of owned ConfigVariable Vec
+DeescapeQuotedString	guc_file.rs:2194	lib.rs:399 DeescapeQuotedString	MATCH	yes	audit PASS
+GUC_yylex	guc_file.rs:2437	lib.rs Lexer::next_token/parse_line	MATCH	yes	flex-generated scanner re-derived to hand-written maximal-munch Lexer (audit §2b)
+yy_get_next_buffer	guc_file.rs:2660	lib.rs Lexer	MATCH	yes	flex runtime buffer refill, subsumed by Rust string-slice Lexer
+yy_get_previous_state	guc_file.rs:2881	lib.rs Lexer	MATCH	yes	flex DFA state machinery, subsumed by Lexer
+yy_try_NUL_trans	guc_file.rs:2916	lib.rs Lexer	MATCH	yes	flex DFA NUL transition, subsumed by Lexer
+GUC_yyrestart	guc_file.rs:2943	lib.rs Lexer	MATCH	yes	flex buffer reset, subsumed by Lexer construction
+GUC_yy_switch_to_buffer	guc_file.rs:2973	lib.rs Lexer	MATCH	yes	flex buffer mgmt, subsumed by Lexer
+GUC_yy_load_buffer_state	guc_file.rs:3010	lib.rs Lexer	MATCH	yes	flex buffer mgmt, subsumed by Lexer
+GUC_yy_create_buffer	guc_file.rs:3028	lib.rs Lexer	MATCH	yes	flex buffer mgmt, subsumed by Lexer
+GUC_yy_delete_buffer	guc_file.rs:3060	lib.rs Lexer	MATCH	yes	flex buffer mgmt, subsumed by Lexer
+GUC_yy_init_buffer	guc_file.rs:3085	lib.rs Lexer	MATCH	yes	flex buffer mgmt, subsumed by Lexer
+GUC_yy_flush_buffer	guc_file.rs:3109	lib.rs Lexer	MATCH	yes	flex buffer mgmt, subsumed by Lexer
+GUC_yypush_buffer_state	guc_file.rs:3137	lib.rs Lexer	MATCH	yes	flex buffer stack, subsumed by Lexer
+GUC_yypop_buffer_state	guc_file.rs:3179	lib.rs Lexer	MATCH	yes	flex buffer stack, subsumed by Lexer
+GUC_yyensure_buffer_stack	guc_file.rs:3216	lib.rs Lexer	MATCH	yes	flex buffer stack, subsumed by Lexer
+GUC_yy_scan_buffer	guc_file.rs:3276	lib.rs Lexer	MATCH	yes	flex scan-from-buffer, subsumed by Lexer over input slice
+GUC_yy_scan_string	guc_file.rs:3313	lib.rs Lexer	MATCH	yes	flex scan-from-string, subsumed by Lexer over input slice
+GUC_yy_scan_bytes	guc_file.rs:3324	lib.rs Lexer	MATCH	yes	flex scan-from-bytes, subsumed by Lexer over input slice
+yy_fatal_error	guc_file.rs:3365	(flex-fatal machinery)	MATCH	yes	flex fatal path, folded into error propagation
+GUC_yyget_extra	guc_file.rs:3374	lib.rs Lexer	MATCH	yes	flex scanner-extra accessor, subsumed by Lexer state
+GUC_yyget_lineno	guc_file.rs:3381	lib.rs Lexer	MATCH	yes	flex lineno accessor, subsumed by Lexer line tracking
+GUC_yyget_column	guc_file.rs:3398	lib.rs Lexer	MATCH	yes	flex column accessor, subsumed by Lexer
+GUC_yyget_in	guc_file.rs:3415	lib.rs Lexer	MATCH	yes	flex input-FILE accessor, N/A under Rust Lexer
+GUC_yyget_out	guc_file.rs:3420	lib.rs Lexer	MATCH	yes	flex output-FILE accessor, N/A under Rust Lexer
+GUC_yyget_leng	guc_file.rs:3425	lib.rs Lexer	MATCH	yes	flex token-length accessor, subsumed by Lexer
+GUC_yyget_text	guc_file.rs:3430	lib.rs Lexer	MATCH	yes	flex token-text accessor, subsumed by Lexer
+GUC_yyset_extra	guc_file.rs:3437	lib.rs Lexer	MATCH	yes	flex scanner-extra setter, subsumed by Lexer state
+GUC_yyset_lineno	guc_file.rs:3445	lib.rs Lexer	MATCH	yes	flex lineno setter, subsumed by Lexer
+GUC_yyset_column	guc_file.rs:3467	lib.rs Lexer	MATCH	yes	flex column setter, subsumed by Lexer
+GUC_yyset_in	guc_file.rs:3489	lib.rs Lexer	MATCH	yes	flex input-FILE setter, N/A under Rust Lexer
+GUC_yyset_out	guc_file.rs:3494	lib.rs Lexer	MATCH	yes	flex output-FILE setter, N/A under Rust Lexer
+GUC_yyget_debug	guc_file.rs:3502	lib.rs Lexer	MATCH	yes	flex debug-flag accessor, N/A under Rust Lexer
+GUC_yyset_debug	guc_file.rs:3507	lib.rs Lexer	MATCH	yes	flex debug-flag setter, N/A under Rust Lexer
+GUC_yylex_init	guc_file.rs:3515	lib.rs Lexer	MATCH	yes	flex scanner init, subsumed by Lexer construction
+GUC_yylex_init_extra	guc_file.rs:3535	lib.rs Lexer	MATCH	yes	flex scanner init w/ extra, subsumed by Lexer construction
+yy_init_globals	guc_file.rs:3585	lib.rs Lexer	MATCH	yes	flex globals init, subsumed by Lexer construction
+GUC_yylex_destroy	guc_file.rs:3601	lib.rs Lexer	MATCH	yes	flex scanner teardown, subsumed by Lexer Drop
+GUC_yyalloc	guc_file.rs:3636	(Rust allocator)	MATCH	yes	flex malloc wrapper, N/A under Rust ownership
+GUC_yyrealloc	guc_file.rs:3644	(Rust allocator)	MATCH	yes	flex realloc wrapper, N/A under Rust ownership
+GUC_yyfree	guc_file.rs:3653	(Rust allocator)	MATCH	yes	flex free wrapper, N/A under Rust ownership

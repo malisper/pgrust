@@ -1,0 +1,52 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+json_in	backend-utils-adt-json/src/json.rs:107	crates/backend-utils-adt-json/src/lib.rs:120	MATCH	yes	parse_validate seam; soft error -> Ok(None)
+json_out	backend-utils-adt-json/src/json.rs:126	crates/backend-utils-adt-json/src/lib.rs:131	MATCH	yes	content bytes verbatim
+json_send	backend-utils-adt-json/src/json.rs:138	crates/backend-utils-adt-json/src/lib.rs:138	MATCH	yes	body = content bytes
+json_recv	backend-utils-adt-json/src/json.rs:152	crates/backend-utils-adt-json/src/lib.rs:144	MATCH	yes	validate then return text
+datum_to_json_internal	backend-utils-adt-json/src/json.rs:179	crates/backend-utils-adt-json/src/lib.rs:163	MATCH	yes	all switch arms; check_stack_depth seam added
+JsonEncodeDateTime	backend-utils-adt-json/src/json.rs:310	crates/backend-utils-adt-json/src/lib.rs:286	SEAMED	no	datetime subsystem delegated to timestamp-seams::json_encode_datetime
+array_dim_to_json	backend-utils-adt-json/src/json.rs:431	crates/backend-utils-adt-json/src/lib.rs:296	MATCH	yes	sep selection; recursive dim render
+array_to_json_internal	backend-utils-adt-json/src/json.rs:474	crates/backend-utils-adt-json/src/lib.rs:356	MATCH	yes	deconstruct_array seamed; structural assembly in-crate
+composite_to_json	backend-utils-adt-json/src/json.rs:521	crates/backend-utils-adt-json/src/lib.rs:399	MATCH	yes	dropped-attr skip; per-field render; catalog half seamed
+add_json	backend-utils-adt-json/src/json.rs:602	crates/backend-utils-adt-json/src/lib.rs:439	MATCH	yes	InvalidOid error; categorize_type seam
+array_to_json	backend-utils-adt-json/src/json.rs:630	crates/backend-utils-adt-json/src/lib.rs:503	MATCH	yes
+array_to_json_pretty	backend-utils-adt-json/src/json.rs:646	crates/backend-utils-adt-json/src/lib.rs:508	MATCH	yes
+row_to_json	backend-utils-adt-json/src/json.rs:663	crates/backend-utils-adt-json/src/lib.rs:517	MATCH	yes
+row_to_json_pretty	backend-utils-adt-json/src/json.rs:679	crates/backend-utils-adt-json/src/lib.rs:522	MATCH	yes
+to_json_is_immutable	backend-utils-adt-json/src/json.rs:700	crates/backend-utils-adt-json/src/lib.rs:461	MATCH	yes	category switch incl. TODO-recurse arrays/composites -> false (faithful)
+to_json	backend-utils-adt-json/src/json.rs:739	crates/backend-utils-adt-json/src/lib.rs:533	MATCH	yes	InvalidOid error; categorize_type; datum_to_json
+datum_to_json	backend-utils-adt-json/src/json.rs:763	crates/backend-utils-adt-json/src/lib.rs:483	MATCH	yes
+json_agg_transfn_worker	backend-utils-adt-json/src/json.rs:779	crates/backend-utils-adt-json/src/lib.rs:796	MATCH	yes	first-call init; absent_on_null skip; structured-type whitespace
+json_agg_transfn	backend-utils-adt-json/src/json.rs:861	crates/backend-utils-adt-json/src/lib.rs:862	MATCH	yes
+json_agg_strict_transfn	backend-utils-adt-json/src/json.rs:870	crates/backend-utils-adt-json/src/lib.rs:873	MATCH	yes
+json_agg_finalfn	backend-utils-adt-json/src/json.rs:879	crates/backend-utils-adt-json/src/lib.rs:885	MATCH	yes	NULL state -> None; else catenate ]
+json_unique_hash	backend-utils-adt-json/src/json.rs:900	crates/backend-utils-adt-json/src/lib.rs:579	MATCH	yes	hash_bytes_uint32(object_id) ^ hash_bytes(key); tag_hash seam
+json_unique_hash_match	backend-utils-adt-json/src/json.rs:911	crates/backend-utils-adt-json/src/lib.rs:587	MATCH	yes	object_id, key_len, then strncmp ordering
+json_unique_check_init	backend-utils-adt-json/src/json.rs:932	crates/backend-utils-adt-json/src/lib.rs:608	MATCH	yes	reset table
+json_unique_builder_init	backend-utils-adt-json/src/json.rs:950	crates/backend-utils-adt-json/src/lib.rs:613	MATCH	yes	check init + skipped_keys=None
+json_unique_check_key	backend-utils-adt-json/src/json.rs:958	crates/backend-utils-adt-json/src/lib.rs:621	MATCH	yes	HASH_ENTER + found semantics; returns !found
+json_unique_builder_get_throwawaybuf	backend-utils-adt-json/src/json.rs:978	crates/backend-utils-adt-json/src/lib.rs:645	MATCH	yes	lazy init / reset
+json_object_agg_transfn_worker	backend-utils-adt-json/src/json.rs:1002	crates/backend-utils-adt-json/src/lib.rs:898	MATCH	yes	first-call key/val categorize; null-key error; key_offset copy-before-hash
+json_object_agg_transfn	backend-utils-adt-json/src/json.rs:1150	crates/backend-utils-adt-json/src/lib.rs:998	MATCH	yes
+json_object_agg_strict_transfn	backend-utils-adt-json/src/json.rs:1159	crates/backend-utils-adt-json/src/lib.rs:1014	MATCH	yes
+json_object_agg_unique_transfn	backend-utils-adt-json/src/json.rs:1168	crates/backend-utils-adt-json/src/lib.rs:1030	MATCH	yes
+json_object_agg_unique_strict_transfn	backend-utils-adt-json/src/json.rs:1177	crates/backend-utils-adt-json/src/lib.rs:1046	MATCH	yes
+json_object_agg_finalfn	backend-utils-adt-json/src/json.rs:1186	crates/backend-utils-adt-json/src/lib.rs:1063	MATCH	yes	NULL -> None; else catenate space-brace
+catenate_stringinfo_string	backend-utils-adt-json/src/json.rs:1209	crates/backend-utils-adt-json/src/lib.rs:1076	MATCH	yes	buffer + addon
+json_build_object_worker	backend-utils-adt-json/src/json.rs:1224	crates/backend-utils-adt-json/src/lib.rs:1094	MATCH	yes	even-args errhint; per-pair skip/throwaway; key uniqueness copy
+json_build_object	backend-utils-adt-json/src/json.rs:1318	crates/backend-utils-adt-json/src/lib.rs:1187	MATCH	yes	nargs<0 -> None
+json_build_object_noargs	backend-utils-adt-json/src/json.rs:1338	crates/backend-utils-adt-json/src/lib.rs:1200	MATCH	yes	{}
+json_build_array_worker	backend-utils-adt-json/src/json.rs:1344	crates/backend-utils-adt-json/src/lib.rs:1206	MATCH	yes	absent_on_null skip; sep; add_json; ]
+json_build_array	backend-utils-adt-json/src/json.rs:1374	crates/backend-utils-adt-json/src/lib.rs:1234	MATCH	yes
+json_build_array_noargs	backend-utils-adt-json/src/json.rs:1394	crates/backend-utils-adt-json/src/lib.rs:1247	MATCH	yes	[]
+json_object	backend-utils-adt-json/src/json.rs:1406	crates/backend-utils-adt-json/src/lib.rs:1260	MATCH	yes	ndims 0/1/2/default; errors; escape_json_text; null -> null
+json_object_two_arg	backend-utils-adt-json/src/json.rs:1490	crates/backend-utils-adt-json/src/lib.rs:1319	MATCH	yes	nkdims/mismatch errors; per-pair render
+escape_json_char	backend-utils-adt-json/src/json.rs:1562	crates/backend-utils-adt-json/src/lib.rs:1377	MATCH	yes	control-char escapes; lowercase hex; else passthrough
+escape_json	backend-utils-adt-json/src/json.rs:1602	crates/backend-utils-adt-json/src/lib.rs:1403	MATCH	yes	quotes; loop stops at first NUL
+escape_json_with_len	backend-utils-adt-json/src/json.rs:1631	crates/backend-utils-adt-json/src/lib.rs:1426	MATCH	yes	SIMD fast path reduced to scalar run-flush; identical output
+escape_json_text	backend-utils-adt-json/src/json.rs:1736	crates/backend-utils-adt-json/src/lib.rs:1467	MATCH	yes	detoast is caller's; escapes via escape_json_with_len
+json_unique_object_start	backend-utils-adt-json/src/json.rs:1754	crates/backend-utils-adt-json/src/lib.rs:700	MATCH	yes	unique guard; push id; increment counter
+json_unique_object_end	backend-utils-adt-json/src/json.rs:1772	crates/backend-utils-adt-json/src/lib.rs:714	MATCH	yes	unique guard; pop
+json_unique_object_field_start	backend-utils-adt-json/src/json.rs:1787	crates/backend-utils-adt-json/src/lib.rs:725	MATCH	yes	unique guard; on collision set unique=false + clear stack
+json_validate	backend-utils-adt-json/src/json.rs:1812	crates/backend-utils-adt-json/src/lib.rs:1477	MATCH	yes	check_unique vs plain validate; throw_error errsave
+json_typeof	backend-utils-adt-json/src/json.rs:1874	crates/backend-utils-adt-json/src/lib.rs:1504	MATCH	yes	lex first token; token->type; default unexpected-token elog (XX000)

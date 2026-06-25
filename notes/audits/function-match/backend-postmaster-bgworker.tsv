@@ -1,0 +1,33 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+dlist_init	bgworker.rs:961	native	MATCH	yes	c2rust inline ilist substrate; native equivalent
+dlist_push_head	bgworker.rs:966	native	MATCH	yes	c2rust inline ilist substrate; native insert(0,..)
+dlist_delete	bgworker.rs:979	native	MATCH	yes	c2rust inline ilist substrate; native Vec::remove
+c2rust_pg_memory_barrier	bgworker.rs:1002	native	MATCH	yes	c2rust transpile substrate; native atomic fence/Mutex
+c2rust_pg_read_barrier	bgworker.rs:1006	native	MATCH	yes	c2rust transpile substrate; native atomic fence
+c2rust_pg_write_barrier	bgworker.rs:1010	native	MATCH	yes	c2rust transpile substrate; native atomic fence
+BackgroundWorkerShmemSize	bgworker.rs:1049	lib.rs:169	MATCH	yes	audit row 1: header(16)+max_worker_processes*slot
+BackgroundWorkerShmemInit	bgworker.rs:1062	lib.rs:180	MATCH	yes	audit row 2: shmem_init_struct; !IsUnderPostmaster list->slots
+FindRegisteredWorkerBySlotNumber	bgworker.rs:1117	lib.rs:237	MATCH	yes	audit row 3: linear scan by rw_shmem_slot -> Option<usize>
+BackgroundWorkerStateChange	bgworker.rs:1140	lib.rs:248	MATCH	yes	audit row 4: terminate/notify, NO_OOM, ascii_safe_strlcpy fixes
+ForgetBackgroundWorker	bgworker.rs:1378	lib.rs:445	MATCH	yes	audit row 5: parallel_terminate_count++, in_use=false, Vec::remove
+ReportBackgroundWorkerPID	bgworker.rs:1421	lib.rs:487	MATCH	yes	audit row 6: pid=rw_pid; notify_pid!=0 -> SIGUSR1
+ReportBackgroundWorkerExit	bgworker.rs:1433	lib.rs:510	MATCH	yes	audit row 7: Forget before notify; ordering preserved
+BackgroundWorkerStopNotifications	bgworker.rs:1452	lib.rs:548	MATCH	yes	audit row 8: zero bgw_notify_pid on notify_pid==pid
+ForgetUnstartedBackgroundWorkers	bgworker.rs:1472	lib.rs:564	MATCH	yes	audit row 9: index walk; re-examine after Forget; zap+notify
+ResetBackgroundWorkerCrashTimes	bgworker.rs:1507	lib.rs:608	MATCH	yes	audit row 10: NEVER_RESTART->Forget; else clear crashed_at/pid/notify
+SanityCheckBackgroundWorker	bgworker.rs:1533	lib.rs:652	MATCH	yes	audit row 11: four ereport predicates; USECS_PER_DAY bound
+bgworker_die	bgworker.rs:1715	lib.rs:743	MATCH	yes	audit row 12: block_signals then FATAL ADMIN_SHUTDOWN
+BackgroundWorkerMain	bgworker.rs:1756	lib.rs:768	MATCH	yes	audit row 13: NULL startup FATAL; sigsetjmp->?; body+proc_exit
+BackgroundWorkerInitializeConnection	bgworker.rs:1905	lib.rs:864	MATCH	yes	audit row 14: init_flags; FATAL no DB-conn flag; init_postgres_by_name
+BackgroundWorkerInitializeConnectionByOid	bgworker.rs:2002	lib.rs:900	MATCH	yes	audit row 15: same as 14 by OID/role
+BackgroundWorkerBlockSignals	bgworker.rs:2099	lib.rs:939	MATCH	yes	audit row 16: block_signals seam
+BackgroundWorkerUnblockSignals	bgworker.rs:2103	lib.rs:944	MATCH	yes	audit row 17: unblock_signals seam
+RegisterBackgroundWorker	bgworker.rs:2107	lib.rs:955	MATCH	yes	audit row 18: preload-tolerate, Sanity, numworkers limit, NO_OOM
+RegisterDynamicBackgroundWorker	bgworker.rs:2361	lib.rs:1086	MATCH	yes	audit row 19: parallel limit, unused-slot scan, guard held; F1 fix
+GetBackgroundWorkerPid	bgworker.rs:2434	lib.rs:1184	MATCH	yes	audit row 20: LW_SHARED guard; gen/in_use -> status mapping
+WaitForBackgroundWorkerStartup	bgworker.rs:2465	lib.rs:1228	MATCH	yes	audit row 21: CHECK_FOR_INTERRUPTS; WaitLatch BGWORKER_STARTUP
+WaitForBackgroundWorkerShutdown	bgworker.rs:2505	lib.rs:1269	MATCH	yes	audit row 22: same loop, break on Stopped, BGWORKER_SHUTDOWN
+TerminateBackgroundWorker	bgworker.rs:2539	lib.rs:1306	MATCH	yes	audit row 23: LW_EXCLUSIVE guard; terminate on gen match
+LookupBackgroundWorkerFunction	bgworker.rs:2563	lib.rs:1345	MATCH	yes	audit row 24: InternalBGWorkers 5-name table; address via loader seam
+GetBackgroundWorkerTypeByPid	bgworker.rs:2626	lib.rs:1375	MATCH	yes	audit row 25: LW_SHARED scan; pid match -> bgw_type
+run_static_initializers	bgworker.rs:2660	native	MATCH	yes	c2rust static-init artifact; no logic, native const init

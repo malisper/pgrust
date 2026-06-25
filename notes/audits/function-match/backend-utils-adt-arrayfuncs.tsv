@@ -1,0 +1,91 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+array_in	backend-utils-adt-array-more/src/arrayfuncs.rs:179	crates/backend-utils-adt-arrayfuncs/src/io.rs	MATCH	yes	full parse via ReadArray* helpers
+ReadArrayDimensions	backend-utils-adt-array-more/src/arrayfuncs.rs:402	crates/backend-utils-adt-arrayfuncs/src/io.rs	MATCH	yes
+ReadDimensionInt	backend-utils-adt-array-more/src/arrayfuncs.rs:519	crates/backend-utils-adt-arrayfuncs/src/io.rs	MATCH	yes
+ReadArrayStr	backend-utils-adt-array-more/src/arrayfuncs.rs:579	crates/backend-utils-adt-arrayfuncs/src/io.rs	MATCH	yes
+ReadArrayToken	backend-utils-adt-array-more/src/arrayfuncs.rs:796	crates/backend-utils-adt-arrayfuncs/src/io.rs	MATCH	yes
+CopyArrayEls	backend-utils-adt-array-more/src/arrayfuncs.rs:961	crates/backend-utils-adt-arrayfuncs/src/construct.rs	MATCH	yes	shared engine; byte-buffer faithful
+array_out	backend-utils-adt-array-more/src/arrayfuncs.rs:1016	crates/backend-utils-adt-arrayfuncs/src/io.rs	MATCH	yes
+array_recv	backend-utils-adt-array-more/src/arrayfuncs.rs:1271	crates/backend-utils-adt-arrayfuncs/src/io.rs	MATCH	yes
+ReadArrayBinary	backend-utils-adt-array-more/src/arrayfuncs.rs:1454	crates/backend-utils-adt-arrayfuncs/src/io.rs	MATCH	yes
+array_send	backend-utils-adt-array-more/src/arrayfuncs.rs:1548	crates/backend-utils-adt-arrayfuncs/src/io.rs	MATCH	yes
+array_ndims	backend-utils-adt-array-more/src/arrayfuncs.rs:1652	crates/backend-utils-adt-arrayfuncs/src/element_slice.rs	MATCH	yes
+array_dims	backend-utils-adt-array-more/src/arrayfuncs.rs:1668	crates/backend-utils-adt-arrayfuncs/src/element_slice.rs	MATCH	yes
+array_lower	backend-utils-adt-array-more/src/arrayfuncs.rs:1706	crates/backend-utils-adt-arrayfuncs/src/element_slice.rs	MATCH	yes
+array_upper	backend-utils-adt-array-more/src/arrayfuncs.rs:1733	crates/backend-utils-adt-arrayfuncs/src/element_slice.rs	MATCH	yes
+array_length	backend-utils-adt-array-more/src/arrayfuncs.rs:1763	crates/backend-utils-adt-arrayfuncs/src/element_slice.rs	MATCH	yes
+array_cardinality	backend-utils-adt-array-more/src/arrayfuncs.rs:1790	crates/backend-utils-adt-arrayfuncs/src/element_slice.rs	MATCH	yes
+array_get_element	backend-utils-adt-array-more/src/arrayfuncs.rs:1820	crates/backend-utils-adt-arrayfuncs/src/element_slice.rs	MATCH	yes
+array_get_element_expanded	backend-utils-adt-array-more/src/arrayfuncs.rs:1921	crates/backend-utils-adt-arrayfuncs/src/element_slice.rs:569	SEAMED	no	expanded-array subsystem (array_expanded.c) not ported; loud panic
+array_get_slice	backend-utils-adt-array-more/src/arrayfuncs.rs:2030	crates/backend-utils-adt-arrayfuncs/src/element_slice.rs	MATCH	yes
+array_set_element	backend-utils-adt-array-more/src/arrayfuncs.rs:2201	crates/backend-utils-adt-arrayfuncs/src/element_slice.rs	MATCH	yes
+array_set_element_expanded	backend-utils-adt-array-more/src/arrayfuncs.rs:2501	crates/backend-utils-adt-arrayfuncs/src/element_slice.rs:589	SEAMED	no	expanded-array subsystem not ported; loud panic
+array_set_slice	backend-utils-adt-array-more/src/arrayfuncs.rs:2806	crates/backend-utils-adt-arrayfuncs/src/element_slice.rs	MATCH	yes
+array_ref	backend-utils-adt-array-more/src/arrayfuncs.rs:3146	crates/backend-utils-adt-arrayfuncs/src/element_slice.rs	MATCH	yes
+array_set	backend-utils-adt-array-more/src/arrayfuncs.rs:3163	crates/backend-utils-adt-arrayfuncs/src/element_slice.rs	MATCH	yes
+array_map	backend-utils-adt-array-more/src/arrayfuncs.rs:3201	crates/backend-utils-adt-arrayfuncs/src/sql.rs:1224	SEAMED	no	needs executor ExecEvalExpr seam + exprstate/econtext args; mirror-and-panic
+construct_array	backend-utils-adt-array-more/src/arrayfuncs.rs:3361	crates/backend-utils-adt-arrayfuncs/src/construct.rs	MATCH	yes
+construct_array_builtin	backend-utils-adt-array-more/src/arrayfuncs.rs:3381	crates/backend-utils-adt-arrayfuncs/src/construct.rs	MATCH	yes	builtin type-meta switch transcribed
+construct_md_array	backend-utils-adt-array-more/src/arrayfuncs.rs:3494	crates/backend-utils-adt-arrayfuncs/src/construct.rs	MATCH	yes
+construct_empty_array	backend-utils-adt-array-more/src/arrayfuncs.rs:3580	crates/backend-utils-adt-arrayfuncs/src/construct.rs	MATCH	yes
+construct_empty_expanded_array	backend-utils-adt-array-more/src/arrayfuncs.rs:3597	crates/backend-utils-adt-arrayfuncs/src/construct.rs:182	SEAMED	no	expand_array/ExpandedArrayHeader (array_expanded.c) not ported; mirror-and-panic
+deconstruct_array	backend-utils-adt-array-more/src/arrayfuncs.rs:3631	crates/backend-utils-adt-arrayfuncs/src/construct.rs	MATCH	yes
+deconstruct_array_builtin	backend-utils-adt-array-more/src/arrayfuncs.rs:3697	crates/backend-utils-adt-arrayfuncs/src/construct.rs:233	MATCH	yes	builtin (typlen,byval,align) switch -> deconstruct_array
+array_contains_nulls	backend-utils-adt-array-more/src/arrayfuncs.rs:3773	crates/backend-utils-adt-arrayfuncs/src/construct.rs	MATCH	yes
+array_eq	backend-utils-adt-array-more/src/arrayfuncs.rs:3820	crates/backend-utils-adt-arrayfuncs/src/ops.rs	MATCH	yes	element_eq seam
+array_ne	backend-utils-adt-array-more/src/arrayfuncs.rs:3949	crates/backend-utils-adt-arrayfuncs/src/ops.rs	MATCH	yes
+array_lt	backend-utils-adt-array-more/src/arrayfuncs.rs:3955	crates/backend-utils-adt-arrayfuncs/src/ops.rs	MATCH	yes
+array_gt	backend-utils-adt-array-more/src/arrayfuncs.rs:3961	crates/backend-utils-adt-arrayfuncs/src/ops.rs	MATCH	yes
+array_le	backend-utils-adt-array-more/src/arrayfuncs.rs:3967	crates/backend-utils-adt-arrayfuncs/src/ops.rs	MATCH	yes
+array_ge	backend-utils-adt-array-more/src/arrayfuncs.rs:3973	crates/backend-utils-adt-arrayfuncs/src/ops.rs	MATCH	yes
+btarraycmp	backend-utils-adt-array-more/src/arrayfuncs.rs:3979	crates/backend-utils-adt-arrayfuncs/src/ops.rs	MATCH	yes
+array_cmp	backend-utils-adt-array-more/src/arrayfuncs.rs:3991	crates/backend-utils-adt-arrayfuncs/src/ops.rs	MATCH	yes	element_cmp seam; dimensionality tie-break faithful
+hash_array	backend-utils-adt-array-more/src/arrayfuncs.rs:4164	crates/backend-utils-adt-arrayfuncs/src/ops.rs	MATCH	yes	result*31+elthash; RECORDOID->F_HASH_RECORD
+hash_array_extended	backend-utils-adt-array-more/src/arrayfuncs.rs:4297	crates/backend-utils-adt-arrayfuncs/src/ops.rs	MATCH	yes
+array_contain_compare	backend-utils-adt-array-more/src/arrayfuncs.rs:4387	crates/backend-utils-adt-arrayfuncs/src/ops.rs	MATCH	yes	matchall semantics; strict-NULL skip
+arrayoverlap	backend-utils-adt-array-more/src/arrayfuncs.rs:4530	crates/backend-utils-adt-arrayfuncs/src/ops.rs	MATCH	yes
+arraycontains	backend-utils-adt-array-more/src/arrayfuncs.rs:4548	crates/backend-utils-adt-arrayfuncs/src/ops.rs	MATCH	yes
+arraycontained	backend-utils-adt-array-more/src/arrayfuncs.rs:4566	crates/backend-utils-adt-arrayfuncs/src/ops.rs	MATCH	yes
+array_create_iterator	backend-utils-adt-array-more/src/arrayfuncs.rs:4603	crates/backend-utils-adt-arrayfuncs/src/sql.rs	MATCH	yes	ArrayIteratorData struct in-crate (private to arrayfuncs.c); slice/element setup, cursor init reproduced
+array_iterate	backend-utils-adt-array-more/src/arrayfuncs.rs:4682	crates/backend-utils-adt-arrayfuncs/src/sql.rs	MATCH	yes	scalar + slice arms reproduced; returns ArrayIterateItem by value
+array_free_iterator	backend-utils-adt-array-more/src/arrayfuncs.rs:4765	crates/backend-utils-adt-arrayfuncs/src/sql.rs	MATCH	yes	consumes iterator by value; drop releases workspace
+array_get_isnull	backend-utils-adt-array-more/src/arrayfuncs.rs:4787	crates/backend-utils-adt-arrayfuncs/src/foundation.rs	MATCH	yes
+array_set_isnull	backend-utils-adt-array-more/src/arrayfuncs.rs:4804	crates/backend-utils-adt-arrayfuncs/src/foundation.rs	MATCH	yes
+ArrayCast	backend-utils-adt-array-more/src/arrayfuncs.rs:4822	crates/backend-utils-adt-arrayfuncs/src/construct.rs	MATCH	yes	byval/varlena/cstring/fixed cases (in array_cast_and_set)
+ArrayCastAndSet	backend-utils-adt-array-more/src/arrayfuncs.rs:4833	crates/backend-utils-adt-arrayfuncs/src/construct.rs	MATCH	yes
+array_seek	backend-utils-adt-array-more/src/arrayfuncs.rs:4872	crates/backend-utils-adt-arrayfuncs/src/foundation.rs	MATCH	yes
+array_nelems_size	backend-utils-adt-array-more/src/arrayfuncs.rs:4920	crates/backend-utils-adt-arrayfuncs/src/foundation.rs	MATCH	yes
+array_copy	backend-utils-adt-array-more/src/arrayfuncs.rs:4942	crates/backend-utils-adt-arrayfuncs/src/foundation.rs	MATCH	yes
+array_bitmap_copy	backend-utils-adt-array-more/src/arrayfuncs.rs:4972	crates/backend-utils-adt-arrayfuncs/src/foundation.rs	MATCH	yes
+array_slice_size	backend-utils-adt-array-more/src/arrayfuncs.rs:5043	crates/backend-utils-adt-arrayfuncs/src/element_slice.rs	MATCH	yes
+array_extract_slice	backend-utils-adt-array-more/src/arrayfuncs.rs:5103	crates/backend-utils-adt-arrayfuncs/src/element_slice.rs	MATCH	yes
+array_insert_slice	backend-utils-adt-array-more/src/arrayfuncs.rs:5176	crates/backend-utils-adt-arrayfuncs/src/element_slice.rs	MATCH	yes
+initArrayResult	backend-utils-adt-array-more/src/arrayfuncs.rs:5299	crates/backend-utils-adt-arrayfuncs/src/construct.rs	MATCH	yes
+initArrayResultWithSize	backend-utils-adt-array-more/src/arrayfuncs.rs:5316	crates/backend-utils-adt-arrayfuncs/src/construct.rs	MATCH	yes
+accumArrayResult	backend-utils-adt-array-more/src/arrayfuncs.rs:5356	crates/backend-utils-adt-arrayfuncs/src/construct.rs	MATCH	yes
+makeArrayResult	backend-utils-adt-array-more/src/arrayfuncs.rs:5426	crates/backend-utils-adt-arrayfuncs/src/construct.rs	MATCH	yes
+makeMdArrayResult	backend-utils-adt-array-more/src/arrayfuncs.rs:5458	crates/backend-utils-adt-arrayfuncs/src/construct.rs	MATCH	yes
+initArrayResultArr	backend-utils-adt-array-more/src/arrayfuncs.rs:5510	crates/backend-utils-adt-arrayfuncs/src/construct.rs	MATCH	yes
+accumArrayResultArr	backend-utils-adt-array-more/src/arrayfuncs.rs:5556	crates/backend-utils-adt-arrayfuncs/src/construct.rs	MATCH	yes
+makeArrayResultArr	backend-utils-adt-array-more/src/arrayfuncs.rs:5709	crates/backend-utils-adt-arrayfuncs/src/construct.rs	MATCH	yes
+initArrayResultAny	backend-utils-adt-array-more/src/arrayfuncs.rs:5788	crates/backend-utils-adt-arrayfuncs/src/construct.rs	MATCH	yes	owned seam installer
+accumArrayResultAny	backend-utils-adt-array-more/src/arrayfuncs.rs:5835	crates/backend-utils-adt-arrayfuncs/src/construct.rs	MATCH	yes	owned seam installer
+makeArrayResultAny	backend-utils-adt-array-more/src/arrayfuncs.rs:5863	crates/backend-utils-adt-arrayfuncs/src/construct.rs	MATCH	yes	owned seam installer
+array_larger	backend-utils-adt-array-more/src/arrayfuncs.rs:5893	crates/backend-utils-adt-arrayfuncs/src/sql.rs	MATCH	yes
+array_smaller	backend-utils-adt-array-more/src/arrayfuncs.rs:5902	crates/backend-utils-adt-arrayfuncs/src/sql.rs	MATCH	yes
+generate_subscripts	backend-utils-adt-array-more/src/arrayfuncs.rs:5923	crates/backend-utils-adt-arrayfuncs/src/sql.rs:94	MATCH	yes	SRF per-call materialization
+generate_subscripts_nodir	backend-utils-adt-array-more/src/arrayfuncs.rs:5987	crates/backend-utils-adt-arrayfuncs/src/sql.rs:140	MATCH	yes	wrapper -> generate_subscripts(reverse=false)
+array_fill_with_lower_bounds	backend-utils-adt-array-more/src/arrayfuncs.rs:5998	crates/backend-utils-adt-arrayfuncs/src/sql.rs:244	MATCH	yes	folded into array_fill; varlena bytes via detoast seam
+array_fill	backend-utils-adt-array-more/src/arrayfuncs.rs:6039	crates/backend-utils-adt-arrayfuncs/src/sql.rs:244	MATCH	yes	assembly via construct_md_array
+create_array_envelope	backend-utils-adt-array-more/src/arrayfuncs.rs:6074	crates/backend-utils-adt-arrayfuncs/src/sql.rs	MATCH	yes	dimension/overflow checks present (in array_fill)
+array_fill_internal	backend-utils-adt-array-more/src/arrayfuncs.rs:6091	crates/backend-utils-adt-arrayfuncs/src/sql.rs	MATCH	yes	varlena element bytes via detoast seam callee
+array_unnest	backend-utils-adt-array-more/src/arrayfuncs.rs:6260	crates/backend-utils-adt-arrayfuncs/src/sql.rs:830	MATCH	yes	flat-array arm; SRF materialized in order; expanded-header fast path is unported callee
+array_unnest_support	backend-utils-adt-array-more/src/arrayfuncs.rs:6351	crates/backend-utils-adt-arrayfuncs/src/sql.rs:895	SEAMED	no	planner support-request vocabulary (SupportRequestRows/estimate_*) not ported; mirror-and-panic
+array_replace_internal	backend-utils-adt-array-more/src/arrayfuncs.rs:6387	crates/backend-utils-adt-arrayfuncs/src/sql.rs:443	MATCH	yes	full scan/match/rebuild; lookup_element_eq_opr + element_eq seams; construct_md_array rebuild
+array_remove	backend-utils-adt-array-more/src/arrayfuncs.rs:6645	crates/backend-utils-adt-arrayfuncs/src/sql.rs:280	MATCH	yes	wrapper -> array_replace_internal(remove=true)
+array_replace	backend-utils-adt-array-more/src/arrayfuncs.rs:6667	crates/backend-utils-adt-arrayfuncs/src/sql.rs:299	MATCH	yes	wrapper -> array_replace_internal(remove=false)
+width_bucket_array	backend-utils-adt-array-more/src/arrayfuncs.rs:6696	crates/backend-utils-adt-arrayfuncs/src/sql.rs:614	MATCH	yes	float8 + generic fixed + variable paths all present
+width_bucket_array_float8	backend-utils-adt-array-more/src/arrayfuncs.rs:6759	crates/backend-utils-adt-arrayfuncs/src/sql.rs	MATCH	yes
+width_bucket_array_fixed	backend-utils-adt-array-more/src/arrayfuncs.rs:6803	crates/backend-utils-adt-arrayfuncs/src/sql.rs	MATCH	yes	cmp_proc + element_cmp seams; operand as ArrayElementDatum
+width_bucket_array_variable	backend-utils-adt-array-more/src/arrayfuncs.rs:6858	crates/backend-utils-adt-arrayfuncs/src/sql.rs:739	MATCH	yes	walk-from-left + O(N) base advance, faithful to C
+trim_array	backend-utils-adt-array-more/src/arrayfuncs.rs:6928	crates/backend-utils-adt-arrayfuncs/src/sql.rs	MATCH	yes	builds slice, calls array_get_slice

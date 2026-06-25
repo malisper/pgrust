@@ -1,0 +1,19 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+MemoryContextSwitchTo	deadlock.rs:880	-	SEAMED	no	Inlined mmgr header helper; report builder owns a per-call MemoryContext (Mcx) instead of CurrentMemoryContext switch.
+dlist_init	deadlock.rs:886	-	MATCH	yes	Inlined ilist header helper; list init reproduced inline at use sites.
+dlist_push_tail	deadlock.rs:891	-	MATCH	yes	Inlined ilist header helper; reproduced inline.
+dclist_init	deadlock.rs:904	-	MATCH	yes	Inlined ilist header helper; reproduced inline.
+dclist_push_tail	deadlock.rs:909	-	MATCH	yes	Inlined ilist header helper; wait_procs push reproduced inline.
+dclist_count	deadlock.rs:920	-	MATCH	yes	Inlined ilist header helper; count reproduced inline (nProcs=dclist_count).
+InitDeadLockChecking	deadlock.rs:952	detector.rs:150	MATCH	yes	All 8 arrays sized exactly (waitOrders=MaxBackends/2, possibleConstraints=4*MaxBackends); StaticAssert->const assert; fallible try_reserve_exact->PgResult; dedicated topoProcs buffer (observably identical).
+DeadLockCheck	deadlock.rs:990	detector.rs:230	MATCH	yes	Reset counters; recurse; hard-path re-run FindLockCycle + elog(FATAL)->Err; rearrange loop dclist reset+ProcLockWakeup seam; return SOFT/BLOCKED_BY_AV/NO.
+GetBlockingAutoVacuumPgproc	deadlock.rs:1053	detector.rs:312	MATCH	yes	take() = C read-then-NULL.
+DeadLockCheckRecurse	deadlock.rs:1059	detector.rs:326	MATCH	yes	nEdges<0->true,==0->false,nCur>=maxCur->true; savedList room test; per-edge re-run TestConfiguration; recurse without restoring nPossible on early return; end restores.
+TestConfiguration	deadlock.rs:1127	detector.rs:397	MATCH	yes	Room check->-1; ExpandConstraints fail->-1; waiter then blocker FindLockCycle; nSoftEdges==0->-1 hard else softFound; startProc last.
+FindLockCycle	deadlock.rs:1173	detector.rs:461	MATCH	yes	Reset nVisited/nDeadlockDetails/nSoftEdges; recurse depth 0; soft_edges_base index into possibleConstraints.
+FindLockCycleRecurse	deadlock.rs:1188	detector.rs:477	MATCH	yes	Group-leader redirect; visited scan i==0->deadlock; mark seen; wait-queue RecurseMember; lock-group fan-out with memberProc!=checkProc guard.
+FindLockCycleRecurseMember	deadlock.rs:1245	detector.rs:573	MATCH	yes	RELATION_EXTEND early-out; conflictMask; hard scan with holdMask&conflictMask bits; autovacuum PROC_IS_AUTOVACUUM->blocking_av; soft scan waitOrders lookup + hypothetical/true branches; soft edge appended at base+nSoftEdges.
+ExpandConstraints	deadlock.rs:1448	detector.rs:787	MATCH	yes	Backward scan; dedup against waitOrders; allocate WAIT_ORDER; TopoSort(i+1) fail->false; nWaitOrders++.
+TopoSort	deadlock.rs:1498	detector.rs:850	MATCH	yes	Fill topoProcs; MemSet before/after; representative selection; pred/link/afterConstraints; backward emit whole lock group, decrement predecessors; cons[] scratch mirrors C in-place.
+DeadLockReport	deadlock.rs:1680	detector.rs:1053	MATCH	yes	client/log lines with nextpid wrap; DescribeLockTag/GetLockmodeName seams; per-proc activity via pgstat seam; report_deadlock seam; ereport ERROR 40P01 verbatim; OOM degrades to bare deadlock error.
+RememberSimpleDeadLock	deadlock.rs:1795	detector.rs:1181	MATCH	yes	details[0]={lock.tag,lockmode,proc1.pid}; details[1]={proc2.waitLock.tag,proc2.waitLockMode,proc2.pid}; nDeadlockDetails=2.

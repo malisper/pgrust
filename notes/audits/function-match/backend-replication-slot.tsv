@@ -1,0 +1,52 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+list_length	slot.rs:1478	(inline)	MATCH	yes	c2rust-inlined pg_list.h helper; realized via existing List infra
+pgstat_report_wait_start	slot.rs:1482	(inline)	MATCH	yes	c2rust-inlined wait_event.h inline; realized via waitevent owner
+pgstat_report_wait_end	slot.rs:1486	(inline)	MATCH	yes	c2rust-inlined wait_event.h inline; realized via waitevent owner
+tas	slot.rs:1490	(inline)	MATCH	yes	c2rust-inlined s_lock.h test-and-set; realized via Spinlock infra
+ReplicationSlotSetInactiveSince	slot.rs:1498	lib.rs:306	MATCH	yes	slot.h inline realized as real fn; acquire_lock ? control-lock-guarded write : direct write of inactive_since
+ReplicationSlotsShmemSize	slot.rs:1574	lib.rs:363	MATCH	yes	max_replication_slots guard; offsetof+mul_size+add_size; matches add/mul Size discipline
+ReplicationSlotsShmemInit	slot.rs:1590	lib.rs:377	MATCH	yes	ShmemInitStruct; !found zero + per-slot ConditionVariableInit + LWLockInitialize(io_in_progress) + active_pid=0
+ReplicationSlotInitialize	slot.rs:1640	lib.rs:404	MATCH	yes	before_shmem_exit(ReplicationSlotShmemExit) registration
+ReplicationSlotShmemExit	slot.rs:1649	lib.rs:412	MATCH	yes	if MyReplicationSlot set, cleanup; release path mirrors C exit callback
+ReplicationSlotValidateName	slot.rs:1659	lib.rs:424	MATCH	yes	wraps ValidateNameInternal; ereport(elevel) on err_code; returns bool
+ReplicationSlotValidateNameInternal	slot.rs:1713	lib.rs:442	MATCH	yes	empty-name check; per-char [a-z0-9_] validation; length<NAMEDATALEN; err_code/err_detail out-params
+ReplicationSlotCreate	slot.rs:1765	lib.rs:497	MATCH	yes	CheckSlotRequirements; AllocationLock EXCLUSIVE; name dup scan; free-slot find; field init; in_use under control lock; create-on-disk; release alloc lock
+SearchNamedReplicationSlot	slot.rs:2029	lib.rs:646	MATCH	yes	need_lock control-lock SHARED bracket; scan in_use && name match; returns index
+ReplicationSlotIndex	slot.rs:2064	lib.rs:666	MATCH	yes	pointer arithmetic -> index; Assert range
+ReplicationSlotName	slot.rs:2073	lib.rs:672	MATCH	yes	control-lock SHARED; in_use copy name under spinlock; returns (found,NameData)
+ReplicationSlotAcquire	slot.rs:2095	lib.rs:696	MATCH	yes	retry loop; SearchNamed; active_pid CAS under mutex; nowait vs ConditionVariableSleep; error_if_invalid check; MyReplicationSlot set; SetInactiveSince
+ReplicationSlotRelease	slot.rs:2354	lib.rs:817	MATCH	yes	assert MyReplicationSlot; RS_EPHEMERAL drop path; active_pid=0 under mutex; SetInactiveSince; ConditionVariableBroadcast; MyReplicationSlot=NULL; pgstat
+ReplicationSlotCleanup	slot.rs:2479	lib.rs:896	MATCH	yes	control-lock SHARED scan; active_pid==MyProcPid (synced_only gate); DropPtr
+ReplicationSlotDrop	slot.rs:2529	lib.rs:930	MATCH	yes	Acquire(nowait); DropAcquired
+ReplicationSlotAlter	slot.rs:2584	lib.rs:951	MATCH	yes	Acquire; failover/two_phase change validation; persist branches; mark dirty + save; release
+ReplicationSlotDropAcquired	slot.rs:2804	lib.rs:1031	MATCH	yes	wraps DropPtr(MyReplicationSlot) + MyReplicationSlot=NULL
+ReplicationSlotDropPtr	slot.rs:2809	lib.rs:1068	MATCH	yes	path build; rename to tmp; AllocationLock EXCLUSIVE; in_use=false under control lock; rmtree; name/active reset; pgstat drop
+ReplicationSlotSave	slot.rs:2961	lib.rs:1143	MATCH	yes	assert path; SaveSlotToPath(MyReplicationSlot, path, ERROR)
+ReplicationSlotMarkDirty	slot.rs:2972	lib.rs:1152	MATCH	yes	dirty=true + just_dirtied=true under mutex
+ReplicationSlotPersist	slot.rs:2988	lib.rs:1163	MATCH	yes	assert not RS_PERSISTENT; persistency=RS_PERSISTENT under mutex; mark dirty; save
+ReplicationSlotsComputeRequiredXmin	slot.rs:3005	lib.rs:1181	MATCH	yes	control-lock SHARED (unless already_locked); scan effective_xmin/effective_catalog_xmin min; ProcArraySetReplicationSlotXmin
+ReplicationSlotsComputeRequiredLSN	slot.rs:3068	lib.rs:1231	MATCH	yes	control-lock SHARED; scan restart_lsn min; XLogSetReplicationSlotMinimumLSN
+ReplicationSlotsComputeLogicalRestartLSN	slot.rs:3127	lib.rs:1274	MATCH	yes	control-lock SHARED; logical slots restart_lsn min; returns result_lsn
+ReplicationSlotsCountDBSlots	slot.rs:3192	lib.rs:1322	MATCH	yes	control-lock SHARED; per-db in_use logical slot count; nslots/nactive out; returns bool
+ReplicationSlotsDropDBSlots	slot.rs:3244	lib.rs:1360	MATCH	yes	control-lock SHARED scan; per-matching-db acquire/active-pid kill+wait; DropPtr; my_proc_pid passed explicitly
+CheckSlotRequirements	slot.rs:3349	lib.rs:1418	MATCH	yes	max_replication_slots==0 ERROR; wal_level<replica ERROR (FEATURE_NOT_SUPPORTED)
+CheckSlotPermissions	slot.rs:3432	lib.rs:1435	MATCH	yes	has_rolreplication / REPLICATION privilege check; ERROR INSUFFICIENT_PRIVILEGE; mcx for allocating reads
+ReplicationSlotReserveWal	slot.rs:3480	lib.rs:1452	MATCH	yes	assert restart_lsn invalid; loop: GetXLogInsertRecPtr/redo; set restart_lsn under mutex; ComputeRequiredLSN; XLByteToSeg removed-segment recheck
+ReportSlotInvalidation	slot.rs:3548	lib.rs:1530	MATCH	yes	cause-specific errdetail/errhint message build; conflict vs idle-timeout branch; ereport with computed level
+CanInvalidateIdleSlot	slot.rs:3680	lib.rs:1589	MATCH	yes	idle_replication_slot_timeout_secs>0 && inactive_since>0 && not in-use predicate
+DetermineSlotInvalidationCause	slot.rs:3687	lib.rs:1599	MATCH	yes	per possible_causes bit (WAL_REMOVED/HORIZON/LOGICAL_SLOT_REQ/IDLE_TIMEOUT) ordered checks; returns first matching cause
+InvalidatePossiblyObsoleteSlot	slot.rs:3742	lib.rs:1662	MATCH	yes	retry loop; mutex snapshot; DetermineCause; active_pid kill+CV wait; mark invalidated under mutex; save; ReportSlotInvalidation; ComputeRequired*
+InvalidateObsoleteReplicationSlots	slot.rs:3908	lib.rs:1814	MATCH	yes	control-lock SHARED restart loop; per in_use slot InvalidatePossiblyObsoleteSlot; invalidated -> recompute + log
+CheckPointReplicationSlots	slot.rs:3964	lib.rs:1880	MATCH	yes	control-lock SHARED scan; dirty && persistent -> SaveSlotToPath; is_shutdown last-iteration fsync handling
+StartupReplicationSlots	slot.rs:4045	lib.rs:1929	MATCH	yes	scan pg_replslot dir; skip non-dir/tmp; RestoreSlotFromDisk each; rmtree leftovers
+CreateSlotOnDisk	slot.rs:4161	lib.rs:2011	MATCH	yes	mkdir slot dir; fsync; SaveSlotToPath(ERROR); dirty=true so subsequent checkpoint persists
+SaveSlotToPath	slot.rs:4287	lib.rs:2058	MATCH	yes	io-lock; tmp path open/write(magic/version/length/cp+checksum)/fsync; rename; fsync dir; clear dirty/just_dirtied; elevel error paths
+RestoreSlotFromDisk	slot.rs:4593	lib.rs:2198	MATCH	yes	open/read state file; magic/version/checksum validate; wal_level check (typed WalLevel as i32); name dup scan; slot reconstruct; in_use set; pgstat acquire
+GetSlotInvalidationCause	slot.rs:5390	lib.rs:2445	MATCH	yes	name->cause table lookup; default RS_INVAL_NONE
+GetSlotInvalidationCauseName	slot.rs:5405	lib.rs:2457	MATCH	yes	cause->name exhaustive match
+validate_sync_standby_slots	slot.rs:5419	lib.rs:2498	MATCH	yes	SplitIdentifierString via allocating varlena seam (short-lived MemoryContext); per-name validation copied to owned String
+check_synchronized_standby_slots	slot.rs:5488	lib.rs:2536	MATCH	yes	GUC check hook: parse names, validate each slot exists+physical+not-invalidated, build extra config
+assign_synchronized_standby_slots	slot.rs:5583	lib.rs:2559	MATCH	yes	GUC assign hook: store extra config into thread_local SYNCHRONIZED_STANDBY_SLOTS_CONFIG
+SlotExistsInSyncStandbySlots	slot.rs:5591	lib.rs:2566	MATCH	yes	scan configured names for slot_name match
+StandbySlotsHaveCaughtup	slot.rs:5614	lib.rs:2578	MATCH	yes	no-config/recovery/cached-oldest early returns; control-lock SHARED per-name SearchNamed; logical/invalidated/inactive ERROR paths; restart_lsn>=wait_for_lsn; min cache update
+WaitForStandbyConfirmation	slot.rs:5897	lib.rs:2713	MATCH	yes	loop StandbySlotsHaveCaughtup(WARNING); CHECK_FOR_INTERRUPTS; ConfigReloadPending reread; WaitLatch with timeout; reset latch

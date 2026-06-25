@@ -1,0 +1,21 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+clog_desc	backend-rmgrdesc-small/src/clogdesc.rs:188	crates/backend-access-rmgrdesc-small/src/clogdesc.rs:18	MATCH	yes	Masked info; ZEROPAGE i64@0, TRUNCATE pageno@0+oldestXact@8. Reads only printed bytes; only differs on 12-15 byte payloads where C reads garbage (UB).
+clog_identify	backend-rmgrdesc-small/src/clogdesc.rs:227	crates/backend-access-rmgrdesc-small/src/clogdesc.rs:35	MATCH	yes	Masked switch ZEROPAGE/TRUNCATE/None.
+commit_ts_desc	backend-rmgrdesc-small/src/committsdesc.rs:187	crates/backend-access-rmgrdesc-small/src/committsdesc.rs:18	MATCH	yes	ZEROPAGE bare "%PRId64" (no prefix); TRUNCATE "pageno %ld, oldestXid %u".
+commit_ts_identify	backend-rmgrdesc-small/src/committsdesc.rs:217	crates/backend-access-rmgrdesc-small/src/committsdesc.rs:36	MATCH	yes	C switches on RAW (unmasked) info; port deliberately mirrors raw match.
+dbase_desc	backend-rmgrdesc-small/src/dbasedesc.rs:197	crates/backend-access-rmgrdesc-small/src/dbasedesc.rs:22	MATCH	yes	FILE_COPY arg order (src_ts,src_db,ts,db) re-derived correct; WAL_LOG/DROP per-tablespace loop over i32 ntablespaces.
+dbase_identify	backend-rmgrdesc-small/src/dbasedesc.rs:241	crates/backend-access-rmgrdesc-small/src/dbasedesc.rs:54	MATCH	yes	Masked; three subtype names + None.
+generic_desc	backend-rmgrdesc-small/src/genericdesc.rs:174	crates/backend-access-rmgrdesc-small/src/genericdesc.rs:14	MATCH	yes	No info mask (no subtypes); cursor walk u16 off/len + skip; trailing-vs-separator by ptr<end identical.
+generic_identify	backend-rmgrdesc-small/src/genericdesc.rs:214	crates/backend-access-rmgrdesc-small/src/genericdesc.rs:37	MATCH	yes	Unconditionally "Generic".
+logicalmsg_desc	backend-rmgrdesc-small/src/logicalmsgdesc.rs:184	crates/backend-access-rmgrdesc-small/src/logicalmsgdesc.rs:17	MATCH	yes	Masked; transactional bool@4, prefix/message Size; %s prefix stops at NUL; hex-dump %02X with separator state identical.
+logicalmsg_identify	backend-rmgrdesc-small/src/logicalmsgdesc.rs:228	crates/backend-access-rmgrdesc-small/src/logicalmsgdesc.rs:51	MATCH	yes	Masked compare to "MESSAGE"/None.
+relmap_desc	backend-rmgrdesc-small/src/relmapdesc.rs:183	crates/backend-access-rmgrdesc-small/src/relmapdesc.rs:15	MATCH	yes	"database %u tablespace %u size %d"; nbytes signed i32.
+relmap_identify	backend-rmgrdesc-small/src/relmapdesc.rs:203	crates/backend-access-rmgrdesc-small/src/relmapdesc.rs:35	MATCH	yes	Masked; "UPDATE"/None.
+array_desc	backend-rmgrdesc-small/src/rmgrdesc_utils.rs:22	crates/backend-access-rmgrdesc-small/src/rmgrdesc_utils.rs:17	MATCH	yes	Type-erased void* form becomes &[T]+FnMut closure; empty=>" []", else " ["..", ".."]" exact. Provably identical for all representable inputs.
+offset_elem_desc	backend-rmgrdesc-small/src/rmgrdesc_utils.rs:62	crates/backend-access-rmgrdesc-small/src/rmgrdesc_utils.rs:36	MATCH	yes	%u of one OffsetNumber (u16); unused data param subsumed by closure.
+redirect_elem_desc	backend-rmgrdesc-small/src/rmgrdesc_utils.rs:74	crates/backend-access-rmgrdesc-small/src/rmgrdesc_utils.rs:41	MATCH	yes	&[OffsetNumber;2], "%u->%u".
+oid_elem_desc	backend-rmgrdesc-small/src/rmgrdesc_utils.rs:88	crates/backend-access-rmgrdesc-small/src/rmgrdesc_utils.rs:46	MATCH	yes	%u of one Oid (u32).
+seq_desc	backend-rmgrdesc-small/src/seqdesc.rs:178	crates/backend-access-rmgrdesc-small/src/seqdesc.rs:15	MATCH	yes	"rel %u/%u/%u" of spcOid/dbOid/relNumber; deref inside branch == C.
+seq_identify	backend-rmgrdesc-small/src/seqdesc.rs:197	crates/backend-access-rmgrdesc-small/src/seqdesc.rs:35	MATCH	yes	Masked; "LOG"/None.
+tblspc_desc	backend-rmgrdesc-small/src/tblspcdesc.rs:185	crates/backend-access-rmgrdesc-small/src/tblspcdesc.rs:17	MATCH	yes	CREATE "%u \"%s\"" (ts_path NUL-terminated); DROP "%u".
+tblspc_identify	backend-rmgrdesc-small/src/tblspcdesc.rs:210	crates/backend-access-rmgrdesc-small/src/tblspcdesc.rs:37	MATCH	yes	Masked; CREATE/DROP/None.

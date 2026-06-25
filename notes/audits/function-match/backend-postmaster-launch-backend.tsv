@@ -1,0 +1,4 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+MemoryContextSwitchTo	launch_backend.rs:717	mcxt-seam (native)	MATCH	yes	c2rust inline of header macro; switch_to_top_memory_context seam at call site
+PostmasterChildName	launch_backend.rs:862	lib.rs:164	MATCH	yes	audit: direct CHILD_PROCESS_KINDS table index
+postmaster_child_launch	launch_backend.rs:868	lib.rs:183	MATCH	yes	audit: full fork/child path 1:1; pre-fork timing, ClosePostmasterPorts, shmem_attach lookup, main_fn dispatch

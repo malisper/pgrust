@@ -1,0 +1,12 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+PointerGetDatum	sortsupport.rs:1882	(types-fmgr Datum conv)	MATCH	yes	c2rust inline Datum conversion macro; identical bit-cast.
+comparison_shim	sortsupport.rs:1889	lib.rs:95	MATCH	yes	function_call2_coll with isnull=false + shared null_check raising "function {oid} returned NULL"; same SQLSTATE; .as_i32(). Behaviorally identical to inlined fcinfo reuse.
+PrepareSortSupportComparisonShim	sortsupport.rs:1938	lib.rs:127	MATCH	yes	fmgr_info_cxt(ssup_cxt,cmpFunc); registers ShimState->token; sets comparator=Some(id). Token+per-backend registry is owned-model analog of ssup_extra-stored SortShimExtra.
+FinishSortSupportFunction	sortsupport.rs:1973	lib.rs:147	MATCH	yes	get_opfamily_proc(BTSORTSUPPORT_PROC) call; if comparator None get BTORDER_PROC, error "missing support function %d(%u,%u) in opfamily %u" else PrepareSortSupportComparisonShim. Branch-for-branch.
+PrepareSortSupportFromOrderingOp	sortsupport.rs:2038	lib.rs:206	MATCH	yes	debug_assert comparator None; get_ordering_op_properties bool+3-out -> Option; None->error; ssup_reverse=(cmptype==COMPARE_GT); tail FinishSortSupportFunction.
+PrepareSortSupportFromIndexRel	sortsupport.rs:2086	lib.rs:238	MATCH	yes	rd_opfamily/rd_opcintype[attno-1] via relcache seams; !amcanorder->error "unexpected non-amcanorder AM: %u"; ssup_reverse=reverse; FinishSortSupportFunction.
+PrepareSortSupportFromGistIndexRel	sortsupport.rs:2136	lib.rs:269	MATCH	yes	relam!=GIST_AM_OID(783)->error "unexpected non-gist AM: %u"; ssup_reverse=false; get_opfamily_proc(GIST_SORTSUPPORT_PROC=11); invalid->"missing support function..."; else OidFunctionCall1.
+qsort_interruptible_med3	qsort_interruptible.rs:18	—	MISSING	no	Belongs to split catalog unit backend-utils-sort-small/qsort_interruptible (row 574), not this sortsupport port unit; unported.
+qsort_interruptible_swap	qsort_interruptible.rs:52	—	MISSING	no	Same: separate qsort_interruptible unit, out of scope for sortsupport, unported.
+qsort_interruptible_swapn	qsort_interruptible.rs:58	—	MISSING	no	Same: separate qsort_interruptible unit, out of scope, unported.
+qsort_interruptible	qsort_interruptible.rs:73	—	MISSING	no	Same: separate qsort_interruptible unit, out of scope, unported.

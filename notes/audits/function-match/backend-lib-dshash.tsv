@@ -1,0 +1,33 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+dshash_create	dshash.rs:241	lib.rs:317	MATCH	yes	Local state + DSA control, 128 partitions, initial bucket array (NO_OOM|ZERO); invalid-ptr OOM ereport with same SQLSTATE+detail. Per audit.
+dshash_attach	dshash.rs:331	lib.rs:377	MATCH	yes	Resolves control addr; buckets=NULL/size_log2=0 for later ensure_valid; magic debug_assert. Per audit.
+dshash_detach	dshash.rs:351	lib.rs:408	MATCH	yes	Frees backend-local object only (Box::from_raw drop = pfree). Per audit.
+dshash_destroy	dshash.rs:355	lib.rs:417	MATCH	yes	ensure_valid; free every item/bucket; zero magic; free array+control; drop local. Per audit.
+dshash_get_hash_table_handle	dshash.rs:382	lib.rs:453	MATCH	yes	Returns control->handle. Per audit.
+dshash_find	dshash.rs:388	lib.rs:466	MATCH	yes	Hash->partition, lock per flag, ensure-valid, find_in_bucket; miss releases+None, hit returns with lock held. Per audit.
+dshash_find_or_insert	dshash.rs:446	lib.rs:502	MATCH	yes	restart loop; load-factor release+resize+restart; insert sets item->hash and bumps count. Index/threshold math verified. Per audit.
+dshash_delete_key	dshash.rs:540	lib.rs:552	MATCH	yes	Lock exclusive, delete_key_from_bucket, decrement on success, release. Per audit.
+dshash_delete_entry	dshash.rs:590	lib.rs:579	MATCH	yes	ITEM_FROM_ENTRY, partition from item->hash, delete_item, release. Per audit.
+dshash_release_lock	dshash.rs:615	lib.rs:595	MATCH	yes	ITEM_FROM_ENTRY, release partition lock for item->hash. Per audit.
+dshash_memcmp	dshash.rs:639	lib.rs:614	MATCH	yes	memcmp over size bytes, C-sign result. Per audit.
+dshash_memhash	dshash.rs:648	lib.rs:619	SEAMED	no	Forwards to tag_hash via common-hashfn-seams. Per audit.
+dshash_memcpy	dshash.rs:656	lib.rs:624	MATCH	yes	copy_from_slice of size bytes. Per audit.
+dshash_strcmp	dshash.rs:665	lib.rs:629	MATCH	yes	strlen<size assert; NUL-terminated compare. Per audit.
+dshash_strhash	dshash.rs:674	lib.rs:636	SEAMED	no	Forwards to string_hash via common-hashfn-seams; strlen<size assert kept. Per audit.
+dshash_strcpy	dshash.rs:685	lib.rs:642	MATCH	yes	Copies strlen(src)+1 bytes incl. NUL; strlen<size assert kept. Per audit.
+dshash_seq_init	dshash.rs:694	lib.rs:704	MATCH	yes	Field-for-field init (curpartition=-1, pnextitem=InvalidDsaPointer). Per audit.
+dshash_seq_next	dshash.rs:708	lib.rs:718	MATCH	yes	First-call lock partition 0 + nbuckets; bucket walk lock-next-then-release-current; pnextitem saved before return. Per audit.
+dshash_seq_term	dshash.rs:781	lib.rs:768	MATCH	yes	Releases held partition if curpartition>=0. Per audit.
+dshash_delete_current	dshash.rs:792	lib.rs:778	MATCH	yes	delete_item on curitem (lock retained as in C). Per audit.
+dshash_dump	dshash.rs:803	lib.rs:797	MATCH	yes	Acquire all 128 shared, print counts, release all; fprintf->returned String (non-behavioral I/O sub for debug dump). Per audit.
+delete_item	dshash.rs:882	lib.rs:846	MATCH	yes	delete_item_from_bucket, decrement, debug_assert!(false) on impossible miss. Per audit.
+resize	dshash.rs:910	lib.rs:863	MATCH	yes	Acquire-all with i==0 early return; HUGE|ZERO new array; reinsert via BUCKET_INDEX_FOR_HASH_AND_SIZE; swap, free old, release all (note A: extra local size_log2 write provably idempotent). Per audit.
+ensure_valid_bucket_pointers	dshash.rs:992	lib.rs:920	MATCH	yes	Refresh local buckets/size_log2 only when size_log2 != control->size_log2. Per audit.
+find_in_bucket	dshash.rs:1002	lib.rs:932	MATCH	yes	Walk bucket; equal_keys against ENTRY_FROM_ITEM; return item or None. Per audit.
+insert_item_into_bucket	dshash.rs:1033	lib.rs:951	MATCH	yes	Prepend item->next=*bucket; *bucket=item (debug-only addr Assert dropped). Per audit.
+insert_into_bucket	dshash.rs:1042	lib.rs:965	MATCH	yes	dsa_allocate(entry_size+MAXALIGN(sizeof item)), copy_key, prepend. Per audit.
+delete_key_from_bucket	dshash.rs:1079	lib.rs:1014	MATCH	yes	Walk *bucket_head, on key match splice + dsa_free; advance via BucketSlot::ItemNext. Per audit.
+delete_item_from_bucket	dshash.rs:1114	lib.rs:1038	MATCH	yes	Same walk matched by item pointer identity. Per audit.
+hash_key	dshash.rs:1137	lib.rs:1062	MATCH	yes	Dispatch on DshashKeyKind to strhash/memhash over key_size (note B). Per audit.
+equal_keys	dshash.rs:1147	lib.rs:1072	MATCH	yes	Read key_size bytes, dispatch to strcmp/memcmp==0 (note B). Per audit.
+copy_key	dshash.rs:1159	lib.rs:1084	MATCH	yes	Dispatch to strcpy/memcpy over key_size (note B). Per audit.

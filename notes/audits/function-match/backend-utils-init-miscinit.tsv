@@ -1,0 +1,58 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+ObjectIdGetDatum	miscinit.rs:1488	folded inline	MATCH	yes	postgres.h inline cast (Oid->Datum); idiomatic at call sites
+PointerGetDatum	miscinit.rs:1492	folded inline	MATCH	yes	postgres.h inline cast; idiomatic at call sites
+__sigbits	miscinit.rs:1500	folded inline	MATCH	yes	signal.h inline (1<<(signo-1)); folded into sigmask handling
+GETSTRUCT	miscinit.rs:1514	folded inline	MATCH	yes	htup_details.h inline (tuple data ptr); idiomatic tuple access
+pgstat_report_wait_start	miscinit.rs:1530	via pgstat seam	MATCH	yes	wait_event.h inline; reached via pgstat/waitevent seam
+pgstat_report_wait_end	miscinit.rs:1534	via pgstat seam	MATCH	yes	wait_event.h inline; reached via pgstat/waitevent seam
+InitPostmasterChild	miscinit.rs:1556	lib.rs InitPostmasterChild	MATCH	yes	full child-init sequence; per audit MATCH
+InitStandaloneProcess	miscinit.rs:1633	process.rs InitStandaloneProcess	MATCH	yes	seam now ->PgResult; sequence + path resolution + sigmask; find_my_exec failure FATAL
+SwitchToSharedLatch	miscinit.rs:1687	lib.rs SwitchToSharedLatch	MATCH	yes	MyLatch=&shared; SetLatch if owned
+InitProcessLocalLatch	miscinit.rs:1700	lib.rs InitProcessLocalLatch	MATCH	yes	InitLatch(&LocalLatchData); MyLatch=&LocalLatchData
+SwitchBackToLocalLatch	miscinit.rs:1705	lib.rs SwitchBackToLocalLatch	MATCH	yes	MyLatch=&LocalLatchData; ModifyWaitEvent
+GetBackendTypeDesc	miscinit.rs:1718	lib.rs GetBackendTypeDesc	MATCH	yes	all 18 strings; B_INVALID->"not initialized"; exhaustive enum match
+SetDatabasePath	miscinit.rs:1791	lib.rs SetDatabasePath	MATCH	yes	one-shot Assert(!DatabasePath); MemoryContextStrdup into TopMemoryContext
+checkDataDir	miscinit.rs:1795	lib.rs checkDataDir	MATCH	yes	stat ENOENT/other file-access SQLSTATE; S_ISDIR; euid; PG_MODE_MASK_GROUP=0o027; SetDataDirectoryCreatePerm+umask
+SetDataDir	miscinit.rs:2016	lib.rs SetDataDir	MATCH	yes	make_absolute_path; free old; set DataDir
+ChangeToDataDir	miscinit.rs:2025	lib.rs ChangeToDataDir	MATCH	yes	chdir(DataDir); FATAL on failure with file-access SQLSTATE
+GetUserId	miscinit.rs:2069	lib.rs GetUserId	MATCH	yes	Assert OidIsValid(CurrentUserId); return CurrentUserId
+GetOuterUserId	miscinit.rs:2073	lib.rs GetOuterUserId	MATCH	yes	Assert valid; return OuterUserId
+SetOuterUserId	miscinit.rs:2076	lib.rs SetOuterUserId	MATCH	yes	Assert valid; set OuterUserId + CurrentUserId; superuser flag
+GetSessionUserId	miscinit.rs:2091	lib.rs GetSessionUserId	MATCH	yes	Assert valid; return SessionUserId
+GetSessionUserIsSuperuser	miscinit.rs:2095	lib.rs GetSessionUserIsSuperuser	MATCH	yes	Assert valid; return SessionUserIsSuperuser
+SetSessionUserId	miscinit.rs:2098	lib.rs SetSessionUserId	MATCH	yes	Assert valid; set SessionUserId/IsSuperuser/Outer/Current
+GetSystemUser	miscinit.rs:2103	lib.rs GetSystemUser	MATCH	yes	return SystemUser
+GetAuthenticatedUserId	miscinit.rs:2107	lib.rs GetAuthenticatedUserId	MATCH	yes	Assert valid; return AuthenticatedUserId
+SetAuthenticatedUserId	miscinit.rs:2111	lib.rs SetAuthenticatedUserId	MATCH	yes	Assert valid; set AuthenticatedUserId
+GetUserIdAndSecContext	miscinit.rs:2116	lib.rs GetUserIdAndSecContext	MATCH	yes	out CurrentUserId + SecurityRestrictionContext
+SetUserIdAndSecContext	miscinit.rs:2124	lib.rs SetUserIdAndSecContext	MATCH	yes	set CurrentUserId + SecurityRestrictionContext
+InLocalUserIdChange	miscinit.rs:2132	lib.rs InLocalUserIdChange	MATCH	yes	(SecurityRestrictionContext & SECURITY_LOCAL_USERID_CHANGE)!=0
+InSecurityRestrictedOperation	miscinit.rs:2137	lib.rs InSecurityRestrictedOperation	MATCH	yes	& SECURITY_RESTRICTED_OPERATION
+InNoForceRLSOperation	miscinit.rs:2142	lib.rs InNoForceRLSOperation	MATCH	yes	& SECURITY_NOFORCE_RLS
+GetUserIdAndContext	miscinit.rs:2146	lib.rs GetUserIdAndContext	MATCH	yes	out CurrentUserId + (sec_context & SECURITY_LOCAL_USERID_CHANGE)
+SetUserIdAndContext	miscinit.rs:2154	lib.rs SetUserIdAndContext	MATCH	yes	in-place-change guard; sets bit + CurrentUserId
+has_rolreplication	miscinit.rs:2207	lib.rs has_rolreplication	MATCH	yes	superuser_arg early-return; AUTHOID lookup; seam (Mcx,Oid)->PgResult<bool>
+InitializeSessionUserId	miscinit.rs:2222	lib.rs InitializeSessionUserId	MATCH	yes	full role validation/login-check sequence; per audit MATCH
+InitializeSessionUserIdStandalone	miscinit.rs:2437	lib.rs InitializeSessionUserIdStandalone	MATCH	yes	AmInitProcess/single-user assert; bootstrap superuser session
+InitializeSystemUser	miscinit.rs:2443	lib.rs InitializeSystemUser	MATCH	yes	psprintf "auth_method:authn_id"; MemoryContextStrdup
+system_user	miscinit.rs:2459	lib.rs system_user	MATCH	yes	SQL fn: NULL if no SystemUser else cstring_to_text
+SetSessionAuthorization	miscinit.rs:2469	lib.rs SetSessionAuthorization	MATCH	yes	SecurityRestriction guard; SetSessionUserId; SetUserIdAndSecContext
+GetCurrentRoleId	miscinit.rs:2479	lib.rs GetCurrentRoleId	MATCH	yes	InvalidOid if SetRoleIsActive false else OuterUserId
+SetCurrentRoleId	miscinit.rs:2483	lib.rs SetCurrentRoleId	MATCH	yes	SetRoleIsActive flag; SetOuterUserId(roleid or SessionUserId)
+GetUserNameFromId	miscinit.rs:2497	lib.rs GetUserNameFromId	MATCH	yes	AUTHOID lookup; noerr->NULL else ERROR "invalid role OID"; pstrdup name
+EstimateClientConnectionInfoSpace	miscinit.rs:2568	lib.rs EstimateClientConnectionInfoSpace	MATCH	yes	add_size over SerializedClientConnectionInfo + authn_id strlen+1
+SerializeClientConnectionInfo	miscinit.rs:2583	lib.rs SerializeClientConnectionInfo	MATCH	yes	memcpy struct; strcpy authn_id when present
+RestoreClientConnectionInfo	miscinit.rs:2619	lib.rs RestoreClientConnectionInfo	MATCH	yes	memcpy struct; MemoryContextStrdup authn_id in TopMemoryContext
+UnlinkLockFiles	miscinit.rs:2648	lib.rs unlink_lock_files	MATCH	yes	foreach lock_files unlink; list_free_deep; lock_files=NIL
+CreateLockFile	miscinit.rs:2715	lockfile.rs create_lock_file	MATCH	yes	retry loop cap 100; FATAL exits; file-access SQLSTATE; LOCK_FILE_EXISTS hint; shmem scan key 7; reverse proc_exit
+CreateDataDirLockFile	miscinit.rs:3297	lib.rs create_data_dir_lock_file	MATCH	yes	CreateLockFile(DIRECTORY_LOCK_FILE, amPostmaster, true, DataDir)
+CreateSocketLockFile	miscinit.rs:3307	lib.rs create_socket_lock_file	MATCH	yes	snprintf .s.PGSQL.port.lock; CreateLockFile; record socket lock path
+TouchSocketLockFiles	miscinit.rs:3328	lib.rs touch_socket_lock_files	MATCH	yes	foreach socket_lock_files utime/skip DIRECTORY_LOCK_FILE
+AddToDataDirLockFile	miscinit.rs:3353	lib.rs AddToDataDirLockFile	MATCH	yes	read/replace line at target_line; pwrite; pg_fsync; file-access SQLSTATE
+RecheckDataDirLockFile	miscinit.rs:3623	lib.rs RecheckDataDirLockFile	MATCH	yes	open/read; ENOENT/EACCES LOG-and-true; parse pid; kill(0) ESRCH; content checks
+ValidatePgVersion	miscinit.rs:3779	lib.rs ValidatePgVersion	MATCH	yes	ENOENT->INVALID_PARAMETER_VALUE; non-ENOENT file-access; major-mismatch FATAL
+load_libraries	miscinit.rs:4010	lib.rs load_libraries	MATCH	yes	SplitDirectoriesString; foreach load_file with restricted flag; LOG
+process_shared_preload_libraries	miscinit.rs:4138	lib.rs process_shared_preload_libraries	MATCH	yes	in_progress flag; load_libraries(shared_preload_libraries, false); done flag
+process_session_preload_libraries	miscinit.rs:4149	lib.rs process_session_preload_libraries	MATCH	yes	load_libraries session_preload_libraries + local_preload_libraries
+process_shmem_requests	miscinit.rs:4162	lib.rs process_shmem_requests	MATCH	yes	in_progress flag; call shmem_request_hook
+pg_bindtextdomain	miscinit.rs:4171	lib.rs pg_bindtextdomain	MATCH	yes	ENABLE_NLS-only; empty in non-NLS build (matches C)

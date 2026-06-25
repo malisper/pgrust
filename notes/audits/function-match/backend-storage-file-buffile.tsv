@@ -1,0 +1,29 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+pg_clock_gettime_ns	buffile.rs:271	(inline)	MATCH	yes	c2rust-inlined instr_time.h helper; realized via portability_instr_time infra
+FileRead	buffile.rs:280	(seam)	MATCH	yes	c2rust-inlined fd.h wrapper; delegated to fd-seams file_read (negative-on-error contract preserved)
+FileWrite	buffile.rs:300	(seam)	MATCH	yes	c2rust-inlined fd.h wrapper; delegated to fd-seams file_write (negative-on-error contract preserved)
+makeBufFileCommon	buffile.rs:321	lib.rs:105	MATCH	yes	all field inits match; numFiles kept synced with files.len()
+makeBufFile	buffile.rs:334	lib.rs:125	MATCH	yes	resowner recorded None (fd/resowner edge unported); other inits match
+extendBufFile	buffile.rs:343	lib.rs:139	MATCH	yes	fileset==NULL branch temp vs new segment; push + bump count; CurrentResourceOwner save/restore owned by fd.c at open time
+BufFileCreateTemp	buffile.rs:363	lib.rs:190	MATCH	yes	PrepareTempTablespaces seam; OpenTemporaryFile seam; makeBufFile + isInterXact; allocates in mcx
+FileSetSegmentName	buffile.rs:372	lib.rs:162	MATCH	yes	segment name formatting matches
+MakeNewFileSetSegment	buffile.rs:385	lib.rs:171	MATCH	yes	unlink segment+1 then create segment (crash-leftover guard); Assert(file>0)->debug_assert
+BufFileCreateFileSet	buffile.rs:410	lib.rs:208	MATCH	yes	fileset segment create path; allocates in mcx
+BufFileOpenFileSet	buffile.rs:427	lib.rs:231	MATCH	yes	capacity-doubling probe -> growing Vec; break on f<=0; CHECK_FOR_INTERRUPTS; nfiles==0 missing_ok/error; readOnly=(mode==O_RDONLY)
+BufFileDeleteFileSet	buffile.rs:512	lib.rs:283	MATCH	yes	delete loop; found/missing_ok elog
+BufFileExportFileSet	buffile.rs:573	lib.rs:314	MATCH	yes	readOnly=true; dirty assert; flush
+BufFileClose	buffile.rs:578	lib.rs:331	MATCH	yes	flush + FileClose each segment; pfree -> drop the box
+BufFileLoadBuffer	buffile.rs:589	lib.rs:347	MATCH	yes	component-advance predicate; FileRead BLCKSZ at curOffset; nbytes<0 reset+file-access error; temp_blks_read on nbytes>0; io-timing gated
+BufFileDumpBuffer	buffile.rs:653	lib.rs:391	MATCH	yes	while-loop dump across segments; extend-until-room; bytestowrite=min(nbytes-wpos,MAX-curOffset); FileWrite <=0 error; post-loop reconcile
+BufFileReadCommon	buffile.rs:735	lib.rs:462	MATCH	yes	flush then fill loop; reload when pos>=nbytes; nthistime=min; memcpy; short-read predicate w/ fileset-vs-temp message split
+BufFileRead	buffile.rs:821	lib.rs:513	MATCH	yes	delegates (exact=false,eofOK=false)
+BufFileReadExact	buffile.rs:829	lib.rs:519	MATCH	yes	delegates (exact=true,eofOK=false)
+BufFileReadMaybeEOF	buffile.rs:837	lib.rs:526	MATCH	yes	delegates (exact=true,eofOK arg)
+BufFileWrite	buffile.rs:846	lib.rs:536	MATCH	yes	Assert(!readOnly)->debug_assert; flush-or-reset on pos>=BLCKSZ; nthistime=min; memcpy; dirty=true; grow nbytes
+BufFileFlush	buffile.rs:883	lib.rs:578	MATCH	yes	dump if dirty
+BufFileSeek	buffile.rs:889	lib.rs:594	MATCH	yes	three whence arms + default elog; newOffset<0 walk-back w/ EOF; in-buffer fast path; flush; seg fixup; forward walk; final EOF guard
+BufFileTell	buffile.rs:1021	lib.rs:679	MATCH	yes	returns curFile/curOffset+pos
+BufFileSeekBlock	buffile.rs:1030	lib.rs:689	MATCH	yes	fileno=blknum/SEG_SIZE; offset=(blknum%SEG_SIZE)*BLCKSZ; SEEK_SET
+BufFileSize	buffile.rs:1042	lib.rs:705	MATCH	yes	(numFiles-1)*MAX + FileSize(last); error on negative
+BufFileAppend	buffile.rs:1087	lib.rs:724	MATCH	yes	startBlock=numFiles*SEG_SIZE; asserts readOnly/!dirty; resowner-mismatch elog (None==None supported case); splice segments
+BufFileTruncateFileSet	buffile.rs:1138	lib.rs:753	MATCH	yes	descending loop; delete-vs-truncate predicate; delete path pop-tail+FileSetDelete; truncate path FileTruncate<0 error; post-loop reconcile

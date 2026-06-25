@@ -1,0 +1,39 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+BoolGetDatum	user.rs:3062	-	MISSING	no	header inline (postgres.h Datum macro); dissolved
+CharGetDatum	user.rs:3070	-	MISSING	no	header inline (postgres.h Datum macro); dissolved
+Int16GetDatum	user.rs:3074	-	MISSING	no	header inline (postgres.h Datum macro); dissolved
+Int32GetDatum	user.rs:3078	-	MISSING	no	header inline (postgres.h Datum macro); dissolved
+ObjectIdGetDatum	user.rs:3082	-	MISSING	no	header inline (postgres.h Datum macro); dissolved
+DatumGetPointer	user.rs:3086	-	MISSING	no	header inline (postgres.h Datum macro); dissolved
+PointerGetDatum	user.rs:3090	-	MISSING	no	header inline (postgres.h Datum macro); dissolved
+CStringGetDatum	user.rs:3094	-	MISSING	no	header inline (postgres.h Datum macro); dissolved
+newNode	user.rs:3099	-	MISSING	no	header inline (nodes.h); node alloc owned by nodes, dissolved into typed ctor
+TupleDescCompactAttr	user.rs:3107	-	MISSING	no	header inline (tupdesc.h); owned by tupdesc, dissolved into attr access
+att_isnull	user.rs:3117	-	MISSING	no	header inline (htup_details.h); owned by access/common heaptuple, dissolved into null-bitmap read
+fetch_att	user.rs:3125	-	MISSING	no	header inline (htup_details.h); owned by access/common heaptuple, dissolved into typed projection
+GETSTRUCT	user.rs:3175	-	MISSING	no	header inline (htup_details.h); dissolved into typed row reads
+HeapTupleHasNulls	user.rs:3183	-	MISSING	no	header inline (htup_details.h); owned by access/common heaptuple
+HeapTupleNoNulls	user.rs:3188	-	MISSING	no	header inline (htup_details.h); owned by access/common heaptuple
+fastgetattr	user.rs:3192	-	MISSING	no	header inline (htup_details.h); owned by access/common heaptuple, dissolved into typed projection
+heap_getattr	user.rs:3224	-	MISSING	no	header inline (htup_details.h); owned by access/common heaptuple, dissolved into typed projection
+have_createrole_privilege	user.rs:3298	lib.rs:202	MATCH	yes	has_createrole_privilege(GetUserId()) via seams
+CreateRole	user.rs:3302	lib.rs:211	MATCH	yes	option loop, conflict detection, all permission checks, empty-password clear, binary-upgrade OID override, implicit self-grant + createrole_self_grant, member adds, hooks - faithful in C order; regression-test name restriction #ifdef'd off, correctly omitted
+AlterRole	user.rs:4299	lib.rs:715	MATCH	yes	option loop incl rolemembers&&action!=0 guard, 3-tier permission logic, empty-password clear, validUntil default=existing-tuple value, action==+1/-1 add/drop
+AlterRoleSet	user.rs:5211	lib.rs:1121	MATCH	yes	role/db lock+check, superuser/createrole+admin/self tiers, global-setting superuser gate
+DropRole	user.rs:5383	lib.rs:1216	MATCH	yes	two-pass loop, self/outer/session-user guards, superuser+admin checks, silent authmem removal pass, shdepend check, comments/seclabel/setting cleanup
+RenameRole	user.rs:6020	lib.rs:1415	MATCH	yes	session/outer-user guards, reserved-name checks (old+new), dup check, superuser/createrole+admin tiers, MD5-clear-on-rename
+GrantRole	user.rs:6474	lib.rs:1543	MATCH	yes	opt parse (admin/inherit/set, parse_bool), grantor lookup, per-priv column rejection, grant/revoke dispatch
+DropOwnedObjects	user.rs:6719	lib.rs:1663	MATCH	yes	has_privs_of_role check per role, shdepDropOwned
+ReassignOwnedObjects	user.rs:6785	lib.rs:1692	MATCH	yes	source + receiving-side privilege checks, shdepReassignOwned
+roleSpecsToIds	user.rs:6898	lib.rs:1741	MATCH	yes	ordered OID resolution via get_rolespec_oid(..,false)
+AddRoleMems	user.rs:6921	lib.rs:1755	MATCH	yes	grantor resolve, lock, pg_database_owner + loop-membership sanity, ADMIN-circularity planner (member==BOOTSTRAP_SUPERUSERID early error), update-vs-insert WARNING-on-no-change, inherit default from rolinherit
+DelRoleMems	user.rs:7445	lib.rs:1982	MATCH	yes	grantor resolve, lock, plan_single_revoke per member w/ WARNING on not-found, apply NOOP/DELETE/option-clear
+check_role_membership_authorization	user.rs:7668	lib.rs:2081	MATCH	yes	pg_database_owner reject, superuser-vs-admin tiers, grant/revoke message split
+check_role_grantor	user.rs:7911	lib.rs:2173	MATCH	yes	implicit grantor (superuser->bootstrap else select_best_admin), explicit-grantor priv + admin-option validation
+initialize_revoke_actions	user.rs:8096	lib.rs:2268	MATCH	yes	C NULL-for-empty == empty Vec; all RRG_NOOP
+plan_single_revoke	user.rs:8117	lib.rs:2280	MATCH	yes	popcount assert, INHERIT/SET/ADMIN/full-grant branches, returns found-flag
+plan_member_revoke	user.rs:8165	lib.rs:2324	MATCH	yes	always DROP_CASCADE -> recursive planner never raises (let _ justified)
+plan_recursive_revoke	user.rs:8188	lib.rs:2343	MATCH	yes	idempotence guards, admin-option-only vs delete, would-still-have-admin scan, cascade recursion w/ DROP_RESTRICT error
+InitGrantRoleOptions	user.rs:8321	lib.rs:2422	MATCH	yes	defaults specified=0, admin=false, inherit=false, set=true
+check_createrole_self_grant	user.rs:8328	lib.rs:2438	MATCH	yes	SET/INHERIT keyword bits, list-syntax/keyword errors->Ok(None); GUC_check_errdetail detail channel wired via guc_check_errdetail seam (fixed)
+assign_createrole_self_grant	user.rs:8408	lib.rs:2470	MATCH	yes	enabled=options!=0; specified=ADMIN|INHERIT|SET; admin=false; inherit/set from bits

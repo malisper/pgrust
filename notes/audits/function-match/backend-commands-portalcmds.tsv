@@ -1,0 +1,11 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+MemoryContextSwitchTo	portalcmds.rs:2367	-	MISSING	no	header inline (memutils.h); ambient-context dissolution, owned by mmgr
+list_length	portalcmds.rs:2374	-	MISSING	no	header inline (pg_list.h); owned by pg_list, dissolved
+list_nth_cell	portalcmds.rs:2378	-	MISSING	no	header inline (pg_list.h); owned by pg_list
+SetQueryCompletion	portalcmds.rs:2388	lib.rs:268	MATCH	yes	cmdtag.h inline; trivial 2-field set, verified against c2rust 2388-2395
+IsQueryIdEnabled	portalcmds.rs:2397	-	SEAMED	no	queryjumble.h inline; reached via queryjumble::is_query_id_enabled seam, owned by queryjumble
+PerformCursorOpen	portalcmds.rs:2407	lib.rs:87	MATCH	yes	empty-name 34000; HOLD/RequireTransactionBlock vs SRO 42501; jumble-then-hook order; QueryRewrite + list_length!=1/CMD_SELECT elog; pg_plan_query; SCROLL decision off plan; copy into portal context via portalmem owner; PortalStart w/ GetActiveSnapshot
+PerformPortalFetch	portalcmds.rs:2614	lib.rs:228	MATCH	yes	empty-name 34000; GetPortalByName/!Valid 34000; ismove->DestNone; PortalRunFetch w/ 1:1 direction map; SetQueryCompletion MOVE(164)/FETCH(154) verified
+PerformPortalClose	portalcmds.rs:2724	lib.rs:290	MATCH	yes	NULL->PortalHashTableDeleteAll; ''->34000; !Valid 34000; PortalDrop(portal,false)
+PortalCleanup	portalcmds.rs:2818	lib.rs:325	MATCH	yes	asserts->debug_assert; queryDesc take-before-use; status!=PORTAL_FAILED guard; resowner save/set/restore around Finish/End/FreeQueryDesc via scoped callback
+PersistHoldablePortal	portalcmds.rs:2841	lib.rs:362	MATCH	yes	entry asserts; CreateTupleDescCopy into holdContext; MarkPortalActive; nested ActivePortal/PortalContext/CurrentResourceOwner RAII; TRY body Forward/Rewind/atEnd, DestTuplestore detoast=true, ExecutorRun, rDestroy, double-shutdown guard, position fixup skip 1_000_000; CATCH MarkPortalFailed (restore-order swap proven behaviorally identical); success tail PORTAL_READY/PopActiveSnapshot/DeleteChildren

@@ -1,0 +1,93 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+multirange_in	multirangetypes.rs:2289	typcache_io.rs:248	MATCH	yes	full parse state machine; malformed-literal errors carry ERRCODE_INVALID_TEXT_REPRESENTATION
+multirange_out	multirangetypes.rs:2658	typcache_io.rs:411	MATCH	yes	empty -> {}; delegates member range out via range seams
+multirange_recv	multirangetypes.rs:2705	typcache_io.rs:447	MATCH	yes	pq_getmsgint32/bytes/end mirrored; insufficient-data errors
+multirange_send	multirangetypes.rs:2773	typcache_io.rs:486	MATCH	yes	length-prefixed member encoding
+get_multirange_io_data	multirangetypes.rs:2819	typcache_io.rs:109	MATCH	yes	fn_extra cache -> per-call typcache lookup (optimization, not semantics); missing recv/send fn error restored ERRCODE_UNDEFINED_FUNCTION + format_type_be
+multirange_canonicalize	multirangetypes.rs:2974	serialize_core.rs:754	MATCH	yes	stable merge_sort_by + skip-empty + adjacent/before/overlap merge; identical output to qsort_arg path
+multirange_get_typcache	multirangetypes.rs:3043	typcache_io.rs:89	SEAMED	no	inward seam; calls lookup_type_cache_entry(TYPECACHE_MULTIRANGE_INFO)
+multirange_size_estimate	multirangetypes.rs:3086	serialize_core.rs:272	MATCH	yes	header + items + flags + boundaries offsets
+write_multirange_data	multirangetypes.rs:3224	serialize_core.rs:331	MATCH	yes	per-range bound serialize, align, item/flag arrays
+make_multirange	multirangetypes.rs:3381	serialize_core.rs:383	MATCH	yes	inward seam install but own logic: canonicalize + size + write
+multirange_get_bounds_offset	multirangetypes.rs:3399	serialize_core.rs:559	MATCH	yes	item-array off/len decode
+multirange_get_range	multirangetypes.rs:3422	serialize_core.rs:594	MATCH	yes	deserialize i-th member range
+multirange_get_bounds	multirangetypes.rs:3647	serialize_core.rs:645	MATCH	yes	inward seam install but own logic: flags + lower/upper bound decode
+multirange_get_union_range	multirangetypes.rs:3838	serialize_core.rs:708	MATCH	yes	empty->empty range; else first-lower..last-upper
+multirange_deserialize	multirangetypes.rs:3880	serialize_core.rs:727	MATCH	yes	materialize all member ranges
+make_empty_multirange	multirangetypes.rs:3904	serialize_core.rs:416	MATCH	yes	make_multirange with 0 ranges
+range_bounds_overlaps	multirangetypes.rs:3915	operators.rs:57	MATCH	yes
+range_bounds_contains	multirangetypes.rs:3934	operators.rs:81	MATCH	yes
+multirange_bsearch_match	multirangetypes.rs:3948	operators.rs:102	MATCH	yes	generic over comparator key; lo/hi bisection identical
+multirange_constructor2	multirangetypes.rs:3989	serialize_core.rs:438	MATCH	yes	nargs/null/type-mismatch (XX000)/per-elem null (NULL_VALUE_NOT_ALLOWED) faithful
+multirange_constructor1	multirangetypes.rs:4195	serialize_core.rs:511	MATCH	yes	dims>1 CARDINALITY_VIOLATION faithful
+multirange_constructor0	multirangetypes.rs:4276	serialize_core.rs:541	MATCH	yes	zero-arg empty multirange
+multirange_union	multirangetypes.rs:4322	setops_ordering_agg.rs:66	MATCH	yes
+multirange_minus	multirangetypes.rs:4386	setops_ordering_agg.rs:92	MATCH	yes
+multirange_minus_internal	multirangetypes.rs:4433	setops_ordering_agg.rs:112	MATCH	yes
+multirange_intersect	multirangetypes.rs:4510	setops_ordering_agg.rs:197	MATCH	yes
+multirange_intersect_internal	multirangetypes.rs:4547	setops_ordering_agg.rs:217	MATCH	yes
+range_agg_transfn	multirangetypes.rs:4615	setops_ordering_agg.rs:572	MATCH	yes	ArrayBuildState of range datums
+range_agg_finalfn	multirangetypes.rs:4707	setops_ordering_agg.rs:587	MATCH	yes	canonicalized multirange
+multirange_agg_transfn	multirangetypes.rs:4787	setops_ordering_agg.rs:608	MATCH	yes	unnest input multirange members into state
+multirange_intersect_agg_transfn	multirangetypes.rs:4909	setops_ordering_agg.rs:631	MATCH	yes	running intersection
+multirange_lower	multirangetypes.rs:5016	operators.rs:590	MATCH	yes	empty->error path preserved
+multirange_upper	multirangetypes.rs:5055	operators.rs:608	MATCH	yes	empty->error path preserved
+multirange_empty	multirangetypes.rs:5094	operators.rs:584	MATCH	yes
+multirange_lower_inc	multirangetypes.rs:5103	operators.rs:627	MATCH	yes
+multirange_upper_inc	multirangetypes.rs:5136	operators.rs:638	MATCH	yes
+multirange_lower_inf	multirangetypes.rs:5169	operators.rs:649	MATCH	yes
+multirange_upper_inf	multirangetypes.rs:5202	operators.rs:660	MATCH	yes
+multirange_contains_elem	multirangetypes.rs:5235	operators.rs:177	MATCH	yes
+elem_contained_by_multirange	multirangetypes.rs:5257	operators.rs:177	MATCH	yes	dispatch arg-swap of contains_elem
+multirange_elem_bsearch_comparison	multirangetypes.rs:5278	operators.rs:136	MATCH	yes
+multirange_contains_elem_internal	multirangetypes.rs:5321	operators.rs:177	MATCH	yes
+multirange_contains_range	multirangetypes.rs:5346	operators.rs:216	MATCH	yes
+range_contains_multirange	multirangetypes.rs:5370	operators.rs:241	MATCH	yes
+range_contained_by_multirange	multirangetypes.rs:5394	operators.rs:241	MATCH	yes	dispatch
+multirange_contained_by_range	multirangetypes.rs:5418	operators.rs:216	MATCH	yes	dispatch
+multirange_range_contains_bsearch_comparison	multirangetypes.rs:5441	operators.rs:191	MATCH	yes
+multirange_contains_range_internal	multirangetypes.rs:5461	operators.rs:216	MATCH	yes
+range_contains_multirange_internal	multirangetypes.rs:5506	operators.rs:241	MATCH	yes
+multirange_eq_internal	multirangetypes.rs:5567	operators.rs:538	MATCH	yes
+multirange_eq	multirangetypes.rs:5661	operators.rs:538	MATCH	yes
+multirange_ne_internal	multirangetypes.rs:5679	operators.rs:570	MATCH	yes
+multirange_ne	multirangetypes.rs:5687	operators.rs:570	MATCH	yes
+range_overlaps_multirange	multirangetypes.rs:5705	operators.rs:319	MATCH	yes
+multirange_overlaps_range	multirangetypes.rs:5729	operators.rs:319	MATCH	yes
+multirange_overlaps_multirange	multirangetypes.rs:5753	operators.rs:341	MATCH	yes
+multirange_range_overlaps_bsearch_comparison	multirangetypes.rs:5776	operators.rs:361	MATCH	yes
+range_overlaps_multirange_internal	multirangetypes.rs:5796	operators.rs:341	MATCH	yes
+multirange_overlaps_multirange_internal	multirangetypes.rs:5839	operators.rs:341	MATCH	yes
+range_overleft_multirange_internal	multirangetypes.rs:5918	operators.rs:409	MATCH	yes
+range_overleft_multirange	multirangetypes.rs:5967	operators.rs:409	MATCH	yes
+multirange_overleft_range	multirangetypes.rs:5991	operators.rs:409	MATCH	yes	dispatch; empty handling matches
+multirange_overleft_multirange	multirangetypes.rs:6060	operators.rs:409	MATCH	yes	dispatch
+range_overright_multirange_internal	multirangetypes.rs:6125	operators.rs:427	MATCH	yes
+range_overright_multirange	multirangetypes.rs:6166	operators.rs:427	MATCH	yes
+multirange_overright_range	multirangetypes.rs:6190	operators.rs:427	MATCH	yes	dispatch
+multirange_overright_multirange	multirangetypes.rs:6259	operators.rs:427	MATCH	yes	dispatch
+multirange_contains_multirange	multirangetypes.rs:6324	operators.rs:267	MATCH	yes
+multirange_contained_by_multirange	multirangetypes.rs:6348	operators.rs:267	MATCH	yes	dispatch
+multirange_contains_multirange_internal	multirangetypes.rs:6372	operators.rs:267	MATCH	yes	tandem walk; pre-increment semantics preserved
+range_before_multirange	multirangetypes.rs:6451	operators.rs:445	MATCH	yes
+multirange_before_range	multirangetypes.rs:6473	operators.rs:445	MATCH	yes
+multirange_before_multirange	multirangetypes.rs:6495	operators.rs:464	MATCH	yes
+range_after_multirange	multirangetypes.rs:6519	operators.rs:445	MATCH	yes
+multirange_after_range	multirangetypes.rs:6541	operators.rs:445	MATCH	yes
+multirange_after_multirange	multirangetypes.rs:6563	operators.rs:464	MATCH	yes
+range_before_multirange_internal	multirangetypes.rs:6587	operators.rs:445	MATCH	yes
+multirange_before_multirange_internal	multirangetypes.rs:6628	operators.rs:464	MATCH	yes
+range_after_multirange_internal	multirangetypes.rs:6672	operators.rs:445	MATCH	yes
+range_adjacent_multirange_internal	multirangetypes.rs:6721	operators.rs:501	MATCH	yes
+range_adjacent_multirange	multirangetypes.rs:6778	operators.rs:501	MATCH	yes
+multirange_adjacent_range	multirangetypes.rs:6802	operators.rs:501	MATCH	yes
+multirange_adjacent_multirange	multirangetypes.rs:6831	operators.rs:501	MATCH	yes
+multirange_cmp	multirangetypes.rs:6918	setops_ordering_agg.rs:315	MATCH	yes	type-match elog, tandem bound compare, shorter-comes-first
+multirange_lt	multirangetypes.rs:7058	setops_ordering_agg.rs:361	MATCH	yes	sign of cmp
+multirange_le	multirangetypes.rs:7063	setops_ordering_agg.rs:370	MATCH	yes
+multirange_ge	multirangetypes.rs:7068	setops_ordering_agg.rs:379	MATCH	yes
+multirange_gt	multirangetypes.rs:7073	setops_ordering_agg.rs:388	MATCH	yes
+range_merge_from_multirange	multirangetypes.rs:7078	setops_ordering_agg.rs:289	MATCH	yes	empty->empty; single->get_range; else first-lower..last-upper via make_range
+multirange_unnest	multirangetypes.rs:7148	operators.rs:682	MATCH	yes	SRF materialized as in-order Vec of member ranges
+hash_multirange	multirangetypes.rs:7199	setops_ordering_agg.rs:414	MATCH	yes	hash_uint32==hash_bytes_uint32; flags^lower, rotl(1), ^upper; (r<<5)-r+rh wrapping
+hash_multirange_extended	multirangetypes.rs:7335	setops_ordering_agg.rs:479	MATCH	yes	seeded variant; rotate_high_and_low_32bits mixer

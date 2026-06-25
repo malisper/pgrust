@@ -1,0 +1,31 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+MemoryContextSwitchTo	nodeSeqscan.rs:2658	(inline)	MATCH	yes	trivial CurrentMemoryContext swap; realized idiomatically inline at ecxt switch sites
+DatumGetBool	nodeSeqscan.rs:2664	(inline)	MATCH	yes	X&1!=0 cast macro; idiomatic inline
+newNode	nodeSeqscan.rs:2668	lib.rs:664	MATCH	yes	makeNode realized via alloc_in es_query_cxt in ExecInitSeqScan
+ExecClearTuple	nodeSeqscan.rs:2677	lib.rs (exec_tuples seam)	SEAMED	no	delegated to execTuples::exec_clear_tuple seam
+table_beginscan	nodeSeqscan.rs:2684	lib.rs:141 (tableam seam)	SEAMED	no	delegated to tableam seam in SeqNext lazy-begin path
+table_endscan	nodeSeqscan.rs:2705	lib.rs:732 (tableam seam)	SEAMED	no	delegated to tableam seam in ExecEndSeqScan
+table_rescan	nodeSeqscan.rs:2709	lib.rs:744 (tableam seam)	SEAMED	no	delegated to tableam seam in ExecReScanSeqScan
+table_scan_getnextslot	nodeSeqscan.rs:2715	lib.rs:141 (tableam seam)	SEAMED	no	delegated to tableam seam in SeqNext
+table_parallelscan_reinitialize	nodeSeqscan.rs:2758	lib.rs:856 (tableam seam)	SEAMED	no	delegated to tableam seam in ExecSeqScanReInitializeDSM
+ExecEvalExprNoReturn	nodeSeqscan.rs:2767	lib.rs (execExpr seam)	SEAMED	no	expr eval delegated via execExpr seam in scan driver
+ExecEvalExprSwitchContext	nodeSeqscan.rs:2781	lib.rs (execExpr seam)	SEAMED	no	expr eval delegated via execExpr seam
+ExecEvalExprNoReturnSwitchContext	nodeSeqscan.rs:2796	lib.rs (execExpr seam)	SEAMED	no	expr eval delegated via execExpr seam
+ExecProject	nodeSeqscan.rs:2806	lib.rs:347 (execExpr seam)	SEAMED	no	projection delegated via execExpr seam inside ExecScanExtended
+ExecQual	nodeSeqscan.rs:2820	lib.rs:347 (execExpr seam)	SEAMED	no	qual eval delegated via execExpr seam inside ExecScanExtended
+ExecScanFetch	nodeSeqscan.rs:2833	lib.rs:241	MATCH	yes	CHECK_FOR_INTERRUPTS; EPQ branch reproduced exactly per execScan.h (audit verified)
+ExecScanExtended	nodeSeqscan.rs:2915	lib.rs:347	MATCH	yes	no-qual/no-proj fast path else reset-loop fetch->qual->project; InstrCountFiltered1 on fail (audit verified)
+SeqNext	nodeSeqscan.rs:2952	lib.rs:141	MATCH	yes	es_direction/ss_ScanTupleSlot; lazy table_beginscan; getnextslot->Some/None (audit verified)
+SeqRecheck	nodeSeqscan.rs:2975	lib.rs:192	MATCH	yes	unconditional true (audit verified)
+ExecSeqScan	nodeSeqscan.rs:2981	lib.rs:576	MATCH	yes	three debug_asserts; ExecScanExtended(..,false,false) (audit verified)
+ExecSeqScanWithQual	nodeSeqscan.rs:3010	lib.rs:589	MATCH	yes	asserts qual no proj; ExecScanExtended(..,true,false) (audit verified)
+ExecSeqScanWithProject	nodeSeqscan.rs:3041	lib.rs:600	MATCH	yes	asserts proj no qual; ExecScanExtended(..,false,true) (audit verified)
+ExecSeqScanWithQualProject	nodeSeqscan.rs:3072	lib.rs:611	MATCH	yes	asserts qual+proj; ExecScanExtended(..,true,true) (audit verified)
+ExecSeqScanEPQ	nodeSeqscan.rs:3103	lib.rs:622	MATCH	yes	ExecScan(SeqNext,SeqRecheck) no asserts (audit verified)
+ExecInitSeqScan	nodeSeqscan.rs:3130	lib.rs:664	MATCH	yes	full init spine; ExecProcNode dispatch by qual/proj presence (audit verified)
+ExecEndSeqScan	nodeSeqscan.rs:3188	lib.rs:732	MATCH	yes	if scanDesc!=NULL table_endscan (audit verified)
+ExecReScanSeqScan	nodeSeqscan.rs:3196	lib.rs:744	MATCH	yes	if scan!=NULL table_rescan(scan,NULL); ExecScanReScan (audit verified)
+ExecSeqScanEstimate	nodeSeqscan.rs:3205	lib.rs:775	MATCH	yes	table_parallelscan_estimate; shm_toc_estimate_chunk/keys(1) (audit verified)
+ExecSeqScanInitializeDSM	nodeSeqscan.rs:3227	lib.rs:799	MATCH	yes	shm_toc_allocate; parallelscan_initialize; insert; beginscan_parallel; only DSM byte->typed primitive panics (audit verified)
+ExecSeqScanReInitializeDSM	nodeSeqscan.rs:3252	lib.rs:856	MATCH	yes	rs_parallel; table_parallelscan_reinitialize (audit verified)
+ExecSeqScanInitializeWorker	nodeSeqscan.rs:3263	lib.rs:884	MATCH	yes	shm_toc_lookup(false); table_beginscan_parallel (audit verified)

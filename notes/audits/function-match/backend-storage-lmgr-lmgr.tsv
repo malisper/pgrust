@@ -1,0 +1,55 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+BlockIdGetBlockNumber	lmgr.rs:1357	-	MATCH	yes	Inlined block.h header helper; block-number extraction reproduced inline at LockPage/LockTuple call sites.
+ItemPointerIsValid	lmgr.rs:1365	-	MATCH	yes	Inlined itemptr.h header helper; reproduced inline.
+ItemPointerGetBlockNumberNoCheck	lmgr.rs:1370	-	MATCH	yes	Inlined itemptr.h header helper; reproduced inline.
+ItemPointerGetBlockNumber	lmgr.rs:1376	-	MATCH	yes	Inlined itemptr.h header helper; reproduced inline.
+ItemPointerGetOffsetNumberNoCheck	lmgr.rs:1382	-	MATCH	yes	Inlined itemptr.h header helper; reproduced inline.
+ItemPointerGetOffsetNumber	lmgr.rs:1388	-	MATCH	yes	Inlined itemptr.h header helper; reproduced inline.
+RelationInitLockInfo	lmgr.rs:1399	lib.rs:230	MATCH	yes	Returns LockRelId value (relisshared/MyDatabaseId threaded in); dbId=0 when shared else MyDatabaseId.
+SetLocktagRelationOid	lmgr.rs:1408	lib.rs:211	MATCH	yes	shared->InvalidOid else MyDatabaseId via catalog::is_shared_relation + my_database_id seams.
+LockRelationOid	lmgr.rs:1423	lib.rs:255	MATCH	yes	acquire(false,false); !=ALREADY_CLEAR -> AcceptInvalidationMessages + MarkLockClear.
+ConditionalLockRelationOid	lmgr.rs:1452	lib.rs:266	MATCH	yes	acquire(false,true); NOT_AVAIL->false else inval+mark; true.
+LockRelationId	lmgr.rs:1490	lib.rs:281	MATCH	yes	LockRelId in, SET_LOCKTAG_RELATION.
+UnlockRelationId	lmgr.rs:1527	lib.rs:292	MATCH	yes	LockRelease(false).
+UnlockRelationOid	lmgr.rs:1548	lib.rs:299	MATCH	yes	LockRelease by relid.
+LockRelation	lmgr.rs:1561	lib.rs:307	MATCH	yes	Takes LockRelId.
+ConditionalLockRelation	lmgr.rs:1595	lib.rs:318	MATCH	yes	Conditional acquire.
+UnlockRelation	lmgr.rs:1638	lib.rs:332	MATCH	yes	Release.
+CheckRelationLockedByMe	lmgr.rs:1656	lib.rs:339	MATCH	yes	LockHeldByMe via lock::lock_held_by_me.
+CheckRelationOidLockedByMe	lmgr.rs:1678	lib.rs:349	MATCH	yes	Oid variant.
+LockHasWaitersRelation	lmgr.rs:1695	lib.rs:355	MATCH	yes	LockHasWaiters(...,false).
+LockRelationIdForSession	lmgr.rs:1716	lib.rs:362	MATCH	yes	session=true.
+UnlockRelationIdForSession	lmgr.rs:1737	lib.rs:369	MATCH	yes	release session=true.
+LockRelationForExtension	lmgr.rs:1758	lib.rs:376	MATCH	yes	RELATION_EXTEND tag; no inval per C comment.
+ConditionalLockRelationForExtension	lmgr.rs:1779	lib.rs:383	MATCH	yes	res!=NOT_AVAIL.
+RelationExtensionLockWaiterCount	lmgr.rs:1802	lib.rs:393	MATCH	yes	LockWaiterCount.
+UnlockRelationForExtension	lmgr.rs:1822	lib.rs:399	MATCH	yes	Release.
+LockDatabaseFrozenIds	lmgr.rs:1843	lib.rs:407	MATCH	yes	DATABASE_FROZEN_IDS tag, dbid=MyDatabaseId.
+LockPage	lmgr.rs:1861	lib.rs:418	MATCH	yes	PAGE tag.
+ConditionalLockPage	lmgr.rs:1883	lib.rs:429	MATCH	yes	Conditional.
+UnlockPage	lmgr.rs:1907	lib.rs:440	MATCH	yes	Release.
+LockTuple	lmgr.rs:1929	lib.rs:451	MATCH	yes	block/offset from ItemPointer threaded in.
+ConditionalLockTuple	lmgr.rs:1953	lib.rs:464	MATCH	yes	LockAcquireExtended with logLockFailure; !=NOT_AVAIL.
+UnlockTuple	lmgr.rs:1987	lib.rs:477	MATCH	yes	Release.
+XactLockTableInsert	lmgr.rs:2011	lib.rs:493	MATCH	yes	ExclusiveLock acquire.
+XactLockTableDelete	lmgr.rs:2029	lib.rs:500	MATCH	yes	ExclusiveLock release.
+XactLockTableWait	lmgr.rs:2047	lib.rs:514	MATCH	yes	ShareLock acquire+release loop; TransactionIdIsInProgress break; sleep-unless-first; SubTransGetTopmostTransaction; error-context via map_err+add_context; debug-only Assert dropped (ledgered).
+ConditionalXactLockTableWait	lmgr.rs:2116	lib.rs:552	MATCH	yes	LockAcquireExtended(...,true); NOT_AVAIL->false; same loop; same Assert dropped.
+SpeculativeInsertionLockAcquire	lmgr.rs:2167	lib.rs:585	MATCH	yes	thread_local speculativeInsertionToken; ++ with wrap (0->1); ExclusiveLock.
+SpeculativeInsertionLockRelease	lmgr.rs:2192	lib.rs:603	MATCH	yes	current token; ExclusiveLock release.
+SpeculativeInsertionWait	lmgr.rs:2210	lib.rs:612	MATCH	yes	ShareLock acquire+release; debug_assert_ne!(token,0).
+XactLockTableWaitErrorCb	lmgr.rs:2231	lib.rs:650	MATCH	yes	All 8 XLTW_Oper strings verbatim; None/invalid ctid/invalid rel->None.
+WaitForLockersMultiple	lmgr.rs:2288	lib.rs:697	MATCH	yes	empty->return; GetLockConflicts per tag; progress params; per-holder VirtualXactLock(...,true); reset {0,0,0}; holders over PgVec in mcx; proc_number_get_proc_pid NULL-check collapse.
+WaitForLockers	lmgr.rs:2391	lib.rs:779	MATCH	yes	single-tag delegation.
+LockDatabaseObject	lmgr.rs:2407	lib.rs:796	MATCH	yes	OBJECT tag dbid=MyDatabaseId; unconditional AcceptInvalidationMessages.
+ConditionalLockDatabaseObject	lmgr.rs:2431	lib.rs:809	MATCH	yes	Conditional.
+UnlockDatabaseObject	lmgr.rs:2476	lib.rs:828	MATCH	yes	Release.
+LockSharedObject	lmgr.rs:2499	lib.rs:841	MATCH	yes	dbid=InvalidOid; unconditional inval.
+ConditionalLockSharedObject	lmgr.rs:2523	lib.rs:854	MATCH	yes	Conditional.
+UnlockSharedObject	lmgr.rs:2568	lib.rs:873	MATCH	yes	Release.
+LockSharedObjectForSession	lmgr.rs:2591	lib.rs:885	MATCH	yes	session=true.
+UnlockSharedObjectForSession	lmgr.rs:2614	lib.rs:897	MATCH	yes	release session=true.
+LockApplyTransactionForSession	lmgr.rs:2637	lib.rs:910	MATCH	yes	APPLY_TRANSACTION tag dbid=MyDatabaseId, session=true.
+UnlockApplyTransactionForSession	lmgr.rs:2660	lib.rs:922	MATCH	yes	Release.
+DescribeLockTag	lmgr.rs:2683	lib.rs:969	MATCH	yes	All 13 branches + default; strings verbatim; VIRTUALTRANSACTION field1 signed; append_fmt OOM surfaced.
+GetLockNameFromTagType	lmgr.rs:2808	lib.rs:88	MATCH	yes	>LOCKTAG_LAST_TYPE->"???"; LockTagTypeNames[12] verbatim.

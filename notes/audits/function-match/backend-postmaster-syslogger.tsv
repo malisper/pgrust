@@ -1,0 +1,15 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+SysLoggerMain	syslogger.rs	lib.rs:248	MATCH	yes	full main loop verified branch-by-branch; signal table, WES latch+pipe, ResetLatch-first, SIGHUP rotation block, age/size rotation, INT_MAX clamp, read EINTR/EOF; pg_noreturn -> PgResult
+SysLogger_Start	syslogger.rs	lib.rs:563	MATCH	yes	pipe created once; FATAL on pipe failure; postmaster_child_launch(B_LOGGER); first-time redirection dup2/close; Assert -> debug_assert
+process_pipe_input	syslogger.rs	lib.rs:712	MATCH	yes	loop bound >=10; native-endian header parse at 2/4/8; validity predicate; dest ordering; per-pid list pid%256; slot-reuse semantics; left-justify copy_within
+flush_pipe_input	syslogger.rs	lib.rs:840	MATCH	yes	all 256 lists scanned; active buffers written to STDERR + marked free; bytes_in_logbuffer=0
+write_syslogger_file	syslogger.rs	lib.rs:880	MATCH	yes	dest fallback csv->json->syslogFile; fwrite mismatch -> write_stderr (never ereport); installed into owned seam
+logfile_open	syslogger.rs	lib.rs:924	MATCH	yes	umask around fopen restored after; setvbuf(_IOLBF); ereport LOG/FATAL; errno restored to fopen errno for caller ENFILE/EMFILE test
+logfile_rotate_dest	syslogger.rs	lib.rs:962	MATCH	yes	turned-off non-stderr -> close+clear; truncate-vs-append predicate; ENFILE/EMFILE handling; rotation_disabled on other errors
+logfile_rotate	syslogger.rs	lib.rs:1056	MATCH	yes	clears rotation_requested; fntime planned vs time(NULL); stderr->csv->json early return; update_metainfo + set_next_rotation
+logfile_getname	syslogger.rs	lib.rs:1114	MATCH	yes	%s/ prefix MAXPGPATH snprintf; pg_strftime via seams; .log suffix byte-compare (fixed from String-slice panic); strlcpy cap
+set_next_rotation_time	syslogger.rs	lib.rs:1149	MATCH	yes	Log_RotationAge<=0 early return; rotinterval = age*60; pg_time_t (i64) modulo arithmetic with tm_gmtoff
+update_metainfo_datafile	syslogger.rs	lib.rs:1175	MATCH	yes	no dest -> unlink current_logfiles; else umask around fopen tmp; three label lines gated; rename tmp->final; short write -> LOG
+CheckLogrotateSignal	syslogger.rs	lib.rs:1292	MATCH	yes	stat("logrotate")==0
+RemoveLogrotateSignalFiles	syslogger.rs	lib.rs:1300	MATCH	yes	unlink("logrotate"), result ignored
+sigUsr1Handler	syslogger.rs	lib.rs:1309	MATCH	yes	sets rotation_requested, SetLatch(MyLatch) via latch seam

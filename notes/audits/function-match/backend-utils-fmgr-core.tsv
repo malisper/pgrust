@@ -1,0 +1,70 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+fmgr_isbuiltin	fmgr.rs:2738	crates/backend-utils-fmgr-core/src/lib.rs:118	MATCH	yes	
+fmgr_lookupByName	fmgr.rs:2750	crates/backend-utils-fmgr-core/src/lib.rs:129	MATCH	yes	
+fmgr_info	fmgr.rs:2769	crates/backend-utils-fmgr-core/src/lib.rs:551	MATCH	yes	
+fmgr_info_cxt	fmgr.rs:2773	crates/backend-utils-fmgr-core/src/lib.rs:556	MATCH	yes	
+fmgr_info_cxt_security	fmgr.rs:2780	crates/backend-utils-fmgr-core/src/lib.rs:565	MATCH	yes	builtin fast path + prolang switch; SQL leg unported callee
+fmgr_symbol	fmgr.rs:2946	crates/backend-utils-fmgr-core/src/lib.rs:814	MATCH	yes	
+fmgr_info_C_lang	fmgr.rs:3045	crates/backend-utils-fmgr-core/src/lib.rs:724	MATCH	yes	api_version switch kept in-crate
+fmgr_info_other_lang	fmgr.rs:3135	crates/backend-utils-fmgr-core/src/lib.rs:786	MATCH	yes	
+fetch_finfo_record	fmgr.rs:3205	backend-utils-fmgr-dfmgr-seams	SEAMED	no	dfmgr internals via load_external_function seam
+lookup_C_func	fmgr.rs:3348	crates/backend-utils-fmgr-core/src/lib.rs:685	MATCH	yes	
+record_C_func	fmgr.rs:3378	crates/backend-utils-fmgr-core/src/lib.rs:702	MATCH	yes	
+fmgr_info_copy	fmgr.rs:3427	crates/backend-utils-fmgr-core/src/lib.rs:862	MATCH	yes	
+fmgr_internal_function	fmgr.rs:3441	crates/backend-utils-fmgr-core/src/lib.rs:141	MATCH	yes	
+fmgr_security_definer	fmgr.rs:3451	crates/backend-utils-fmgr-core/src/lib.rs:1011	MATCH	yes	+1032 body; pgstat usage faithful no-op
+DirectFunctionCall1Coll	fmgr.rs:3702	crates/backend-utils-fmgr-core/src/lib.rs:359	MATCH	yes	macro lib.rs:359-369
+DirectFunctionCall2Coll	fmgr.rs:3767	crates/backend-utils-fmgr-core/src/lib.rs:359	MATCH	yes	macro
+DirectFunctionCall3Coll	fmgr.rs:3839	crates/backend-utils-fmgr-core/src/lib.rs:359	MATCH	yes	macro
+DirectFunctionCall4Coll	fmgr.rs:3918	crates/backend-utils-fmgr-core/src/lib.rs:359	MATCH	yes	macro
+DirectFunctionCall5Coll	fmgr.rs:4004	crates/backend-utils-fmgr-core/src/lib.rs:359	MATCH	yes	macro
+DirectFunctionCall6Coll	fmgr.rs:4097	crates/backend-utils-fmgr-core/src/lib.rs:359	MATCH	yes	macro
+DirectFunctionCall7Coll	fmgr.rs:4197	crates/backend-utils-fmgr-core/src/lib.rs:359	MATCH	yes	macro
+DirectFunctionCall8Coll	fmgr.rs:4304	crates/backend-utils-fmgr-core/src/lib.rs:359	MATCH	yes	macro
+DirectFunctionCall9Coll	fmgr.rs:4418	crates/backend-utils-fmgr-core/src/lib.rs:359	MATCH	yes	macro
+CallerFInfoFunctionCall1	fmgr.rs:4539	crates/backend-utils-fmgr-core/src/lib.rs:374	MATCH	yes	
+CallerFInfoFunctionCall2	fmgr.rs:4605	crates/backend-utils-fmgr-core/src/lib.rs:385	MATCH	yes	
+FunctionCall0Coll	fmgr.rs:4678	crates/backend-utils-fmgr-core/src/lib.rs:405	MATCH	yes	
+FunctionCall1Coll	fmgr.rs:4736	crates/backend-utils-fmgr-core/src/lib.rs:438	MATCH	yes	macro lib.rs:438-446
+FunctionCall2Coll	fmgr.rs:4801	crates/backend-utils-fmgr-core/src/lib.rs:438	MATCH	yes	macro
+FunctionCall3Coll	fmgr.rs:4873	crates/backend-utils-fmgr-core/src/lib.rs:438	MATCH	yes	macro
+FunctionCall4Coll	fmgr.rs:4952	crates/backend-utils-fmgr-core/src/lib.rs:438	MATCH	yes	macro
+FunctionCall5Coll	fmgr.rs:5038	crates/backend-utils-fmgr-core/src/lib.rs:438	MATCH	yes	macro
+FunctionCall6Coll	fmgr.rs:5131	crates/backend-utils-fmgr-core/src/lib.rs:438	MATCH	yes	macro
+FunctionCall7Coll	fmgr.rs:5231	crates/backend-utils-fmgr-core/src/lib.rs:438	MATCH	yes	macro
+FunctionCall8Coll	fmgr.rs:5338	crates/backend-utils-fmgr-core/src/lib.rs:438	MATCH	yes	macro
+FunctionCall9Coll	fmgr.rs:5452	crates/backend-utils-fmgr-core/src/lib.rs:438	MATCH	yes	macro
+OidFunctionCall0Coll	fmgr.rs:5573	crates/backend-utils-fmgr-core/src/lib.rs:490	MATCH	yes	
+OidFunctionCall1Coll	fmgr.rs:5592	crates/backend-utils-fmgr-core/src/lib.rs:490	MATCH	yes	lib.rs:490-531
+OidFunctionCall2Coll	fmgr.rs:5612	crates/backend-utils-fmgr-core/src/lib.rs:490	MATCH	yes	
+OidFunctionCall3Coll	fmgr.rs:5633	crates/backend-utils-fmgr-core/src/lib.rs:490	MATCH	yes	
+OidFunctionCall4Coll	fmgr.rs:5655	crates/backend-utils-fmgr-core/src/lib.rs:490	MATCH	yes	
+OidFunctionCall5Coll	fmgr.rs:5678	crates/backend-utils-fmgr-core/src/lib.rs:490	MATCH	yes	
+OidFunctionCall6Coll	fmgr.rs:5702	crates/backend-utils-fmgr-core/src/lib.rs:490	MATCH	yes	
+OidFunctionCall7Coll	fmgr.rs:5736	crates/backend-utils-fmgr-core/src/lib.rs:490	MATCH	yes	
+OidFunctionCall8Coll	fmgr.rs:5772	crates/backend-utils-fmgr-core/src/lib.rs:490	MATCH	yes	
+OidFunctionCall9Coll	fmgr.rs:5810	crates/backend-utils-fmgr-core/src/lib.rs:490	MATCH	yes	
+InputFunctionCall	fmgr.rs:5850	crates/backend-utils-fmgr-core/src/lib.rs:1211	MATCH	yes	
+InputFunctionCallSafe	fmgr.rs:5962	crates/backend-utils-fmgr-core/src/lib.rs:1249	MATCH	yes	
+DirectInputFunctionCallSafe	fmgr.rs:6084	crates/backend-utils-fmgr-core/src/lib.rs:1294	MATCH	yes	
+OutputFunctionCall	fmgr.rs:6176	crates/backend-utils-fmgr-core/src/lib.rs:1340	MATCH	yes	
+ReceiveFunctionCall	fmgr.rs:6183	crates/backend-utils-fmgr-core/src/lib.rs:1352	MATCH	yes	
+SendFunctionCall	fmgr.rs:6295	crates/backend-utils-fmgr-core/src/lib.rs:1391	MATCH	yes	detoast deferred to varlena-aware caller
+OidInputFunctionCall	fmgr.rs:6305	crates/backend-utils-fmgr-core/src/lib.rs:1401	MATCH	yes	
+OidOutputFunctionCall	fmgr.rs:6326	crates/backend-utils-fmgr-core/src/lib.rs:1413	MATCH	yes	
+OidReceiveFunctionCall	fmgr.rs:6345	crates/backend-utils-fmgr-core/src/lib.rs:1419	MATCH	yes	
+OidSendFunctionCall	fmgr.rs:6366	crates/backend-utils-fmgr-core/src/lib.rs:1431	MATCH	yes	
+pg_detoast_datum	fmgr.rs:6385	-	MISSING	no	TOAST one-liner; varlena/detoast subsystem; ledgered out-of-unit
+pg_detoast_datum_copy	fmgr.rs:6395	-	MISSING	no	varlena/detoast subsystem; ledgered
+pg_detoast_datum_slice	fmgr.rs:6413	-	MISSING	no	varlena/detoast subsystem; ledgered
+pg_detoast_datum_packed	fmgr.rs:6421	-	MISSING	no	varlena/detoast subsystem; ledgered
+get_fn_expr_rettype	fmgr.rs:6435	crates/backend-utils-fmgr-core/src/lib.rs:1772	MATCH	yes	
+get_fn_expr_argtype	fmgr.rs:6444	crates/backend-utils-fmgr-core/src/lib.rs:1789	MATCH	yes	
+get_call_expr_argtype	fmgr.rs:6454	crates/backend-utils-fmgr-core/src/lib.rs:1802	MATCH	yes	SAOP element-type hack owned by nodeFuncs seam
+get_fn_expr_arg_stable	fmgr.rs:6503	crates/backend-utils-fmgr-core/src/lib.rs:1814	MATCH	yes	
+get_call_expr_arg_stable	fmgr.rs:6513	crates/backend-utils-fmgr-core/src/lib.rs:1823	MATCH	yes	Const/PARAM_EXTERN logic via seam
+get_fn_expr_variadic	fmgr.rs:6568	crates/backend-utils-fmgr-core/src/lib.rs:1835	MATCH	yes	
+set_fn_opclass_options	fmgr.rs:6583	crates/backend-utils-fmgr-core/src/lib.rs:1859	MATCH	yes	
+has_fn_opclass_options	fmgr.rs:6598	crates/backend-utils-fmgr-core/src/lib.rs:1865	MATCH	yes	
+get_fn_opclass_options	fmgr.rs:6611	crates/backend-utils-fmgr-core/src/lib.rs:1881	MATCH	yes	
+CheckFunctionValidatorAccess	fmgr.rs:6667	crates/backend-utils-fmgr-core/src/lib.rs:1905	MATCH	yes	

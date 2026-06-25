@@ -1,0 +1,61 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+MemoryContextSwitchTo	twophase.rs:2616	(inline shim)	MATCH	yes	c2rust-emitted mcx inline; ambient-context choreography dissolves per repo convention
+ObjectIdGetDatum	twophase.rs:2622	(inline shim)	MATCH	yes	postgres.h datum-conversion macro inline; behavior identical
+TransactionIdGetDatum	twophase.rs:2626	(inline shim)	MATCH	yes	datum-conversion macro inline
+PointerGetDatum	twophase.rs:2630	(inline shim)	MATCH	yes	datum-conversion macro inline
+Int64GetDatum	twophase.rs:2634	(inline shim)	MATCH	yes	datum-conversion macro inline
+FullTransactionIdFromEpochAndXid	twophase.rs:2648	lib.rs:2155	MATCH	yes	reproduced in adjust_to_full_transaction_id (epoch<<32|xid)
+FullTransactionIdFromU64	twophase.rs:2657	(inline shim)	MATCH	yes	transam.h inline; (epoch,xid) packing identical
+FullTransactionIdFromAllowableAt	twophase.rs:2663	lib.rs:2155	MATCH	yes	reproduced in-crate (special-xid epoch 0; epoch-- when xid>next.xid)
+dlist_init	twophase.rs:2688	(inline shim)	MATCH	yes	ilist.h inline; intrusive list dissolves to owned structures
+dlist_node_init	twophase.rs:2693	(inline shim)	MATCH	yes	ilist.h inline
+pg_atomic_init_u64_impl	twophase.rs:2698	(inline shim)	MATCH	yes	atomics.h inline; plain store
+pg_atomic_init_u64	twophase.rs:2705	(inline shim)	MATCH	yes	atomics.h inline
+TimestampTzGetDatum	twophase.rs:2715	(inline shim)	MATCH	yes	datum-conversion macro inline
+HeapTupleGetDatum	twophase.rs:2722	(inline shim)	MATCH	yes	datum-conversion macro inline
+pgstat_report_wait_start	twophase.rs:2726	(inline shim)	MATCH	yes	wait-event probe inline
+pgstat_report_wait_end	twophase.rs:2730	(inline shim)	MATCH	yes	wait-event probe inline
+TwoPhaseShmemSize	twophase.rs:2749	lib.rs:652	MATCH	yes	offsetof+ptr-array maxalign+gtd array sizing
+TwoPhaseShmemInit	twophase.rs:2772	lib.rs:582 (TwoPhaseStateData::new)	MATCH	yes	freelist LIFO order reproduced; procno via seam; wired in two_phase_shmem_init lib.rs:2448
+AtProcExit_Twophase	twophase.rs:2815	lib.rs:2398 + register_twophase_exit lib.rs:2392	SEAMED	no	exit-hook safety-net via ipc::before_shmem_exit; defers to backend-installed cleanup slot
+AtAbort_Twophase	twophase.rs:2819	lib.rs:939	MATCH	yes	valid->clear locking_backend else RemoveGXact under lock
+PostPrepare_Twophase	twophase.rs:2838	lib.rs:959	MATCH	yes	clear locking_backend under lock
+MarkAsPreparing	twophase.rs:2850	lib.rs:668	MATCH	yes	len/disabled/dup checks, freelist pop, guts, ondisk=false; all error SQLSTATEs match
+MarkAsPreparingGuts	twophase.rs:3066	lib.rs:746	MATCH	yes	dummy-PGPROC init seamed (proc_init_prepared); gxact fields + MyLockedGxact set
+GXactLoadSubxactData	twophase.rs:3140	proc::gxact_load_subxact_data::call (lib.rs:423)	SEAMED	no	PGPROC subxid cache is proc.c-owned
+MarkAsPrepared	twophase.rs:3163	lib.rs:776	MATCH	yes	lock_held branch, valid=true, ProcArrayAdd seamed
+LockGXact	twophase.rs:3180	lib.rs:796	MATCH	yes	valid/gid/busy/perm/db checks; 4 error SQLSTATEs + hints match
+RemoveGXact	twophase.rs:3393	lib.rs:876	MATCH	yes	swap-remove + freelist push; bounds->internal-error elog
+GetPreparedTransactionList	twophase.rs:3440	lib.rs:889	MATCH	yes	LW_SHARED snapshot copy
+pg_prepared_xact	twophase.rs:3479	lib.rs:919 (pg_prepared_xact_rows)	SEAMED	no	owned row projection (filter !valid, proc->xid/databaseId); funcapi/tupdesc glue at boundary
+TwoPhaseGetGXact	twophase.rs:3590	lib.rs:973	MATCH	yes	static cache omitted (pure optimization, identical output)
+TwoPhaseGetXidByVirtualXID	twophase.rs:3661	lib.rs:1014	MATCH	yes	vxid match, have_more on 2nd match
+TwoPhaseGetDummyProcNumber	twophase.rs:3705	lib.rs:1003	MATCH	yes	procno lookup
+TwoPhaseGetDummyProc	twophase.rs:3713	(via TwoPhaseGetDummyProcNumber + seam)	SEAMED	no	PGPROC* deref is proc.c-owned
+AdjustToFullTransactionId	twophase.rs:3721	lib.rs:2155	MATCH	yes	FullTransactionIdFromAllowableAt(ReadNextFullTransactionId(),xid) reproduced in-crate; next-full-xid via varsup seam
+TwoPhaseFilePath	twophase.rs:3727	lib.rs:2142 (+ two_phase_file_basename lib.rs:2132)	MATCH	yes	pg_twophase/%08X%08X epoch,xid computed in-crate
+save_state_data	twophase.rs:3748	lib.rs:290 (SaveState::save_state_data)	MATCH	yes	MAXALIGN pad, try_reserve OOM
+StartPrepare	twophase.rs:3777	lib.rs:380	MATCH	yes	header+gid+segments in C order; GXactLoadSubxactData seamed
+EndPrepare	twophase.rs:3913	lib.rs:467	MATCH	yes	END sentinel, total_len, origin fields, MaxAllocSize, crit/delayChkpt, insert/flush, MarkAsPrepared, SyncRep
+RegisterTwoPhaseRecord	twophase.rs:4015	lib.rs:332	MATCH	yes	record header + optional payload
+ReadTwoPhaseFile	twophase.rs:4037	lib.rs:1048 (+ seam_read_twophase_file lib.rs:2201)	MATCH	yes	size/align/magic/total_len/CRC validation in-crate; raw OpenTransientFile+fstat+read+close delegated to fd.c; missing_ok via access_f_ok probe
+XlogReadTwoPhaseData	twophase.rs:4488	wal::xlog_read_twophase_data::call (lib.rs:1329)	SEAMED	no	xlogreader is xlog.c-owned
+StandbyTransactionIdIsPrepared	twophase.rs:4690	lib.rs:1114	MATCH	yes	max==0->false, read missing_ok, hdr.xid==xid
+FinishPreparedTransaction	twophase.rs:4709	lib.rs:1300	MATCH	yes	ordering critical-path preserved (audit Findings #2/#3 fixed: real droppedstats/invalmsgs/dbinfo/MyXactFlags threaded)
+ProcessRecords	twophase.rs:4938	lib.rs:1153	MATCH	yes	END break, callbacks[rmid], MAXALIGN advance; dispatches ported rmgr tables directly
+RemoveTwoPhaseFile	twophase.rs:4977	lib.rs:2327 (seam_remove_twophase_file)	MATCH	yes	path-format in-crate; unlink delegated to fd_seams::unlink_file; missing WARNING only when give_warning
+RecreateTwoPhaseFile	twophase.rs:5014	lib.rs:1106 (+ seam_recreate_twophase_file lib.rs:2278)	MATCH	yes	CRC computed in-crate; raw open(O_CREAT|O_TRUNC|O_WRONLY)+write+write(crc)+pg_fsync+close delegated to fd.c
+CheckPointTwoPhase	twophase.rs:5208	lib.rs:1974	MATCH	yes	(valid|inredo)&&!ondisk&&end_lsn<=horizon, recreate, ondisk=true; dir fsync via seam_fsync_twophase_dir->fd::fsync_fname
+restoreTwoPhaseData	twophase.rs:5282	lib.rs:1785 (+ seam_scan_twophase_dir lib.rs:2346)	MATCH	yes	dir scan via fd with_allocated_dir; 16-hex filter + from_str_radix(.,16) in-crate; ProcessTwoPhaseBuffer + PrepareRedoAdd
+PrescanPreparedTransactions	twophase.rs:5339	lib.rs:1817	MATCH	yes	audit Finding #1 fixed: faithful unconditional i+=1 per entry (no reprocess of swap-removed slot)
+StandbyRecoverPreparedTransactions	twophase.rs:5414	lib.rs:1859	MATCH	yes	audit Finding #1 fixed
+RecoverPreparedTransactions	twophase.rs:5447	lib.rs:1887	MATCH	yes	audit Finding #1 fixed; recover-in-place, lock drop around ProcessRecords/StandbyReleaseLockTree
+ProcessTwoPhaseBuffer	twophase.rs:5651	lib.rs:1704	MATCH	yes	DidCommit/DidAbort or too-new->remove/redo+None; hdr.xid check; subxid loop set_parent/set_next_xid
+RecordTransactionCommitPrepared	twophase.rs:5918	lib.rs:1472	MATCH	yes	audit Finding #2 fixed (real droppedstats/invalmsgs/dbinfo)
+RecordTransactionAbortPrepared	twophase.rs:5981	lib.rs:1541	MATCH	yes	audit Finding #2/#3 fixed
+PrepareRedoAdd	twophase.rs:6057	lib.rs:1607 (+ seam_twophase_file_exists lib.rs:2370)	MATCH	yes	file-exists probe via fd_seams::access_f_ok; ERROR/WARNING by reachedConsistency; freelist; replorigin_advance
+PrepareRedoRemove	twophase.rs:6271	lib.rs:1676	MATCH	yes	find by xid, ondisk->remove file, RemoveGXact
+LookupGXact	twophase.rs:6324	lib.rs:2024	MATCH	yes	valid&&gid match, read disk/WAL, origin_lsn+timestamp compare
+TwoPhaseTransactionGid	twophase.rs:6378	lib.rs:2072	MATCH	yes	pg_gid_%u_%u; invalid-xid->PROTOCOL_VIOLATION
+IsTwoPhaseTransactionGidForSubid	twophase.rs:6432	lib.rs:2083	MATCH	yes	parse subid/xid + reconstruct-and-compare; identical outcome to C sscanf+strcmp on edge cases
+LookupGXactBySubid	twophase.rs:6459	lib.rs:2115	MATCH	yes	valid && IsTwoPhaseTransactionGidForSubid

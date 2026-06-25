@@ -1,0 +1,31 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+relptr_store_eval	freepage.rs:128	lib.rs (relptr_store, inlined RelPtr struct assign)	MATCH	yes	relptr.h inline macro; RelPtr one-field Copy struct, off=val-base+1, 0=NULL; identical encoding.
+FreePageManagerInitialize	freepage.rs:153	lib.rs:186	MATCH	yes	All fields zeroed/nulled; 129 freelists nulled. FPM_EXTRA_ASSERTS block absent from build.
+FreePageManagerGet	freepage.rs:186	lib.rs:211	MATCH	yes	bool+out-param -> Option<Size>; GetInternal->Cleanup->max->UpdateLargest order preserved; returns pre-cleanup result.
+FreePageManagerLargestContiguous	freepage.rs:201	lib.rs:344	MATCH	yes	Oversized-list scan else descending do/while (127..0) reproduced exactly.
+FreePageManagerUpdateLargest	freepage.rs:260	lib.rs:378	MATCH	yes	Identical.
+FreePageManagerPut	freepage.rs:268	lib.rs:235	MATCH	yes	contiguous>npages cleanup; max; UpdateLargest. PutInternal FATAL surfaces as Err (Put seam returns PgResult).
+FreePageManagerDump	freepage.rs:288	lib.rs:271	MATCH	yes	Byte-identical format strings; StringInfo -> Mcx + PgResult<PgString>; push_size reproduces %zu.
+FreePageBtreeAdjustAncestorKeys	freepage.rs:383	lib.rs:388	MATCH	yes	s/s-1 disambiguation, USE_ASSERT_CHECKING double-check as debug_assert, ascend loop identical.
+FreePageBtreeCleanup	freepage.rs:435	lib.rs:448	MATCH	yes	Depth-shrink + recycle-drain loops; soft-put Err provably unreachable -> unreachable! with citation.
+FreePageBtreeConsolidate	freepage.rs:574	lib.rs:547	MATCH	yes	nused>=max/3 early-out; right then left merge; memcpy->copy_nonoverlapping; parent-pointer update; RemovePage.
+FreePageBtreeFindLeftSibling	freepage.rs:653	lib.rs:613	MATCH	yes	Ascend while index==0, step index-1, descend via nused-1 children.
+FreePageBtreeFindRightSibling	freepage.rs:718	lib.rs:652	MATCH	yes	Mirror image, descend via child 0.
+FreePageBtreeFirstKey	freepage.rs:780	lib.rs:690	MATCH	yes	Identical.
+FreePageBtreeGetRecycled	freepage.rs:787	lib.rs:703	MATCH	yes	relptr_copy=struct assign; count decrement.
+FreePageBtreeInsertInternal	freepage.rs:819	lib.rs:720	MATCH	yes	memmove -> ptr::copy (overlap-safe), nused-index elements.
+FreePageBtreeInsertLeaf	freepage.rs:843	lib.rs:739	MATCH	yes	Same.
+FreePageBtreeRecycle	freepage.rs:862	lib.rs:756	MATCH	yes	magic/npages=1/list push/count increment.
+FreePageBtreeRemove	freepage.rs:901	lib.rs:778	MATCH	yes	nused==1->RemovePage; shift; index==0->AdjustAncestorKeys; Consolidate.
+FreePageBtreeRemovePage	freepage.rs:928	lib.rs:810	MATCH	yes	Root early return; ascend recycling levels; downlink removal; recycle; index==0 adjust; consolidate parent.
+FreePageBtreeSearch	freepage.rs:1014	lib.rs:883	MATCH	yes	split_pages bookkeeping, empty-root early return, internal descent left-bias, leaf-phase assert reproduced (constants equal).
+FreePageBtreeSearchInternal	freepage.rs:1067	lib.rs:952	MATCH	yes	Binary search incl. equal-return-mid.
+FreePageBtreeSearchLeaf	freepage.rs:1086	lib.rs:977	MATCH	yes	Same.
+FreePageBtreeSplitPage	freepage.rs:1105	lib.rs:1003	MATCH	yes	nused/2 to new sibling; parent relptr copied; internal parent-pointer fixup.
+FreePageBtreeUpdateParentPointers	freepage.rs:1141	lib.rs:1035	MATCH	yes	Identical.
+FreePageManagerDumpBtree	freepage.rs:1162	lib.rs:1044	MATCH	yes	check_stack_depth via seam (PgResult propagated, matches ereport unwind); format byte-identical; NULL-parent page arithmetic wraps as C ptr subtraction.
+FreePageManagerDumpSpans	freepage.rs:1259	lib.rs:1103	MATCH	yes	Branch restructured to common prefix + conditional suffix; identical bytes.
+FreePageManagerGetInternal	freepage.rs:1295	lib.rs:1128	MATCH	yes	npages=0 wrapping_sub -> None; best-fit scan; freelist unlink (chosen_f); singleton vs btree path; returns victim page.
+FreePageManagerPutInternal	freepage.rs:1437	lib.rs:1251	MATCH	yes	All four singleton cases incl. btree bootstrap; consolidate prev/next; split path incl. root split depth++; FATAL sites -> Err; union read layout note.
+FreePagePopSpanLeader	freepage.rs:1820	lib.rs:1556	MATCH	yes	prev==NULL -> unlink from freelist Min(npages,129)-1; Assert as debug_assert.
+FreePagePushSpanLeader	freepage.rs:1864	lib.rs:1577	MATCH	yes	Identical.

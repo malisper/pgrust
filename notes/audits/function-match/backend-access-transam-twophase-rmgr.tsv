@@ -1,0 +1,5 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+twophase_recover_callbacks	twophase_rmgr.rs:76	lib.rs:55	SEAMED	no	tables-only unit (no fns); dispatch table: NULL slots->None (MATCH), named callbacks (lock/multixact/predicate) delegated via owner ::call seams (unported)
+twophase_postcommit_callbacks	twophase_rmgr.rs:110	lib.rs:66	SEAMED	no	NULL slots->None; lock/pgstat/multixact callbacks via owner ::call seams
+twophase_postabort_callbacks	twophase_rmgr.rs:144	lib.rs:77	SEAMED	no	NULL slots->None; lock/pgstat/multixact callbacks via owner ::call seams; slot 3 (multixact_twophase_postabort) re-verified char-by-char
+twophase_standby_recover_callbacks	twophase_rmgr.rs:178	lib.rs:87	SEAMED	no	NULL slots->None; only slot 1 lock_twophase_standby_recover via owner ::call seam

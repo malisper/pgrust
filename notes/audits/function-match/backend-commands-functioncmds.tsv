@@ -1,0 +1,40 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+MemoryContextSwitchTo	functioncmds.rs:3656	(inlined)	MATCH	yes	c2rust header shim; context switch modeled by owned Mcx scoping
+CharGetDatum	functioncmds.rs:3662	(inlined)	MATCH	yes	c2rust header-macro shim; trivial cast inlined
+ObjectIdGetDatum	functioncmds.rs:3666	(inlined)	MATCH	yes	c2rust header-macro shim; trivial cast inlined
+DatumGetPointer	functioncmds.rs:3670	(inlined)	MATCH	yes	c2rust header-macro shim; trivial cast inlined
+PointerGetDatum	functioncmds.rs:3674	(inlined)	MATCH	yes	c2rust header-macro shim; trivial cast inlined
+CStringGetDatum	functioncmds.rs:3678	(inlined)	MATCH	yes	c2rust header-macro shim; trivial cast inlined
+BlockIdSet	functioncmds.rs:3684	(inlined)	MATCH	yes	c2rust itemptr shim; inlined
+ItemPointerSetInvalid	functioncmds.rs:3693	(inlined)	MATCH	yes	c2rust itemptr shim; inlined
+newNode	functioncmds.rs:3698	(inlined)	MATCH	yes	c2rust makeNode shim; node construction via real owned structs
+list_length	functioncmds.rs:3706	(inlined)	MATCH	yes	c2rust list-macro shim; PgVec len inlined
+list_nth_cell	functioncmds.rs:3710	(inlined)	MATCH	yes	c2rust list-macro shim; nth-cell inlined
+list_nth	functioncmds.rs:3717	(inlined)	MATCH	yes	c2rust list-macro shim; index inlined
+list_nth_oid	functioncmds.rs:3724	(inlined)	MATCH	yes	c2rust list-macro shim; index inlined
+TupleDescAttr	functioncmds.rs:3731	(inlined)	MATCH	yes	c2rust tupdesc shim; attr accessor inlined
+HeapTupleHeaderGetDatumLength	functioncmds.rs:3748	(inlined)	MATCH	yes	c2rust heaptuple shim; inlined
+HeapTupleHeaderGetTypeId	functioncmds.rs:3755	(inlined)	MATCH	yes	c2rust heaptuple shim; inlined
+HeapTupleHeaderGetTypMod	functioncmds.rs:3761	(inlined)	MATCH	yes	c2rust heaptuple shim; inlined
+GETSTRUCT	functioncmds.rs:3767	(inlined)	MATCH	yes	c2rust heaptuple shim; struct projection via seamed row carriers
+ExecEvalExprSwitchContext	functioncmds.rs:3808	(inlined/seam)	MATCH	yes	c2rust executor shim; subsumed by seamed default-expr eval path
+compute_return_type	functioncmds.rs:3822	lib.rs:127 compute_return_type	MATCH	yes	LookupTypeName seam; shell-type/namespace ACL/TypeShellMake; ACL_USAGE; SQLSTATEs verified
+interpret_function_parameter_list	functioncmds.rs:4095	lib.rs:241	MATCH	yes	full param mode/type/setof/variadic/output/duplicate/default rules; output vector construction exact
+compute_common_attribute	functioncmds.rs:5019	lib.rs:565	MATCH	yes	nine options in C order with is_procedure gate + dup -> errorConflictingDefElem
+interpret_func_volatility	functioncmds.rs:5199	lib.rs:667	MATCH	yes	immutable/stable/volatile -> PROVOLATILE chars; else internal-error
+interpret_func_parallel	functioncmds.rs:5247	lib.rs:683	MATCH	yes	safe/unsafe/restricted -> PROPARALLEL; else 42601
+update_proconfig_value	functioncmds.rs:5305	lib.rs:update_proconfig_value -> seam	SEAMED	no	GUCArrayAdd/Delete over text[] entirely external; thin delegate
+interpret_func_support	functioncmds.rs:5339	seam interpret_func_support	SEAMED	no	defGetQualifiedName + LookupFuncName + rettype + superuser; whole body external; thin
+compute_function_attributes	functioncmds.rs:5480	lib.rs:752	MATCH	yes	option loop + post-loop application order exact; only-overwrite-if-seen via Option
+interpret_AS_clause	functioncmds.rs:5771	lib.rs:872	MATCH	yes	no-body/dup-body/inline guards; C probin+prosrc; SQL inline body seam; INTERNAL empty->funcname
+CreateFunction	functioncmds.rs:6208	lib.rs:CreateFunction	MATCH	yes	namespace+ACL, default attrs, attrs compute, language lookup+perms, transforms, params, rettype, ProcedureCreate seam
+RemoveFunctionById	functioncmds.rs:6750	lib.rs:RemoveFunctionById -> seam	SEAMED	no	pg_proc/pg_aggregate tuple deletes; thin delegate to remove_function_tuple
+AlterFunction	functioncmds.rs:6830	lib.rs:AlterFunction	MATCH	yes	lookup preamble seamed; action loop + change collection in-crate; apply via seam
+CreateCast	functioncmds.rs:7298	lib.rs:CreateCast	MATCH	yes	type lookups, pseudo rejects, ACL, castmethod func/inout/binary branches, CastCreate seam; SQLSTATEs verified
+check_transform_function	functioncmds.rs:8312	lib.rs:1657 check_transform_function	MATCH	yes	volatile/normal-function/not-set/one-arg/arg0=INTERNALOID; all 42P17
+CreateTransform	functioncmds.rs:8518	lib.rs:CreateTransform	MATCH	yes	type/lang lookups+ACL, fromsql/tosql via check_transform_func helper, create_transform_tuple seam
+get_transform_oid	functioncmds.rs:9019	lib.rs:1840	MATCH	yes	GetSysCacheOid2(TRFTYPELANG) live syscache; missing_ok 42704; Mcx threaded
+IsThereFunctionInNamespace	functioncmds.rs:9078	lib.rs:IsThereFunctionInNamespace	MATCH	yes	SearchSysCacheExists3 via seam -> 42723 duplicate-function
+ExecuteDoStmt	functioncmds.rs:9140	lib.rs:ExecuteDoStmt	MATCH	yes	InlineCodeBlock build, option loop, language lookup+perms, laninline feature gate, execute_inline_handler seam
+ExecuteCallStmt	functioncmds.rs:9398	lib.rs:ExecuteCallStmt -> seam	SEAMED	no	whole executor/fmgr CALL invocation over runtime params/dest; thin delegate
+CallStmtResultDesc	functioncmds.rs:9703	lib.rs:CallStmtResultDesc -> seam	SEAMED	no	build_function_result_tupdesc_t + outargs fixup; allocating seam Mcx+PgResult; thin

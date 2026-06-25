@@ -1,0 +1,10 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+degtorad	earthdistance.rs:137	lib.rs:degtorad	MATCH	yes	(degrees/360.0)*TWO_PI; identical
+geo_distance_internal	earthdistance.rs:142	lib.rs:geo_distance_internal	MATCH	yes	haversine: longdiff wrap at M_PI, sino clamp at 1.0, 2*EARTH_RADIUS*asin(sino); operand order/associativity preserved
+geo_distance	earthdistance.rs:177	lib.rs:geo_distance/geo_distance_datum	MATCH	yes	fmgr arg extraction is boundary glue; port takes &Point; Datum::from_f64 == Float8GetDatum bit-for-bit
+DatumGetPointer	earthdistance.rs:101	(none)	MISSING	no	fmgr/Datum boundary helper (c2rust-inlined macro); not domain logic, subsumed by port's typed &Point boundary
+Int64GetDatum	earthdistance.rs:105	lib.rs:Datum::from (boundary)	MATCH	yes	Datum bit-reinterpret boundary glue; behavior preserved via Datum::from_f64 path
+Float8GetDatum	earthdistance.rs:109	lib.rs:Datum::from_f64	MATCH	yes	*(int64*)&X reinterpret == to_bits(); bit-for-bit
+DatumGetPointP	earthdistance.rs:115	(none)	MISSING	no	PG_GETARG_POINT_P boundary glue (c2rust-inlined); port takes &Point directly, no counterpart needed
+Pg_magic_func	earthdistance.rs:119	(none)	MISSING	no	PG_MODULE_MAGIC_EXT ABI boilerplate; not logic, intentionally not reproduced
+pg_finfo_geo_distance	earthdistance.rs:170	(none)	MISSING	no	PG_FUNCTION_INFO_V1 finfo boilerplate; not logic

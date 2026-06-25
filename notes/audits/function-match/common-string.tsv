@@ -1,0 +1,6 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+pg_str_endswith	string.rs:36	lib.rs:20	MATCH	yes	ends_with byte-equivalent for NUL-terminated inputs; empty end -> true both sides
+strtoint	string.rs:49	lib.rs:75	MATCH	yes	was DIVERGES (Result error variants); re-derived to total strtol semantics; 35-case differential vs libc strtol, 0 mismatches
+pg_clean_ascii	string.rs:62	lib.rs:35	MATCH	yes	predicate c<32||c>126, lowercase %02x escapes; allocating seam pg_clean_ascii(mcx,..)->PgResult mirrors palloc_extended failure surface; SEAMED-inward (owner installs)
+pg_is_ascii	string.rs:99	lib.rs:62	MATCH	yes	per-byte c&0x80 scan, default true
+pg_strip_crlf	string.rs:109	lib.rs:71	MATCH	yes	trim_end_matches(['\n','\r']).len()

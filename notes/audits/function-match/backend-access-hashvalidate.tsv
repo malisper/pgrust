@@ -1,0 +1,6 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+ObjectIdGetDatum	hashvalidate.rs:990	-	MATCH	yes	postgres.h Datum-boxing inline; absorbed (seam crates pass Oid directly).
+list_length	hashvalidate.rs:997	-	MATCH	yes	pg_list.h inline; absorbed (Vec::len).
+GETSTRUCT	hashvalidate.rs:1002	-	MATCH	yes	htup_details.h projection macro; absorbed into projected row structs.
+hashvalidate	hashvalidate.rs:1014	lib.rs::hashvalidate	MATCH	yes	Re-derived branch-by-branch (audit). CLAOID lookup via search_opclass seam; cache-miss -> elog ERROR. Proc loop amprocnum switch (1/2/3/default) with check_amproc/amoptsproc signature seams; opr loop strategy/purpose/signature/list_member checks; identify_opfamily_groups seam; 7 INFO reports (level 17, SQLSTATE 42P17) byte-compared. Outward calls SEAMED on unported owners (amvalidate/syscache/lsyscache/regproc/format_type/error/xact) but the function's own logic is fully present -> MATCH.
+hashadjustmembers	hashvalidate.rs:1638	lib.rs::hashadjustmembers	MATCH	yes	Re-derived (audit). OidIsValid(opclassoid) -> CCI + get_opclass_input_type seams; foreach over operators+functions; three-way classification (func/non-HASHSTANDARD, lefttype!=righttype, else opcintype refresh + opclass_for_family_datatype HASH_AM_OID=405, memoized-on-failure); 5 write outcomes (ref_is_hard/ref_is_family/refobjid) identical.

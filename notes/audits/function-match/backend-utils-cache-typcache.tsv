@@ -1,0 +1,63 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+shared_record_table_compare	typcache.rs:3997	backend-access-common-session-seams	SEAMED	no	DSA shared record table compare; session-seams
+shared_record_table_hash	typcache.rs:4024	backend-access-common-session-seams	SEAMED	no	DSA; session-seams
+type_cache_syshash	typcache.rs:4112	crates/backend-utils-cache-typcache/src/lib.rs:528	MATCH	yes	folded into HashMap keying in lookup_type_cache
+lookup_type_cache	typcache.rs:4125	crates/backend-utils-cache-typcache/src/lib.rs:528	MATCH	yes	lookup_type_cache + build_type_cache_entry
+load_typcache_tupdesc	typcache.rs:4778	crates/backend-utils-cache-typcache/src/lib.rs:1129	MATCH	yes	
+load_rangetype_info	typcache.rs:4817	crates/backend-utils-cache-typcache/src/lib.rs:1151	MATCH	yes	
+load_multirangetype_info	typcache.rs:4928	crates/backend-utils-cache-typcache/src/lib.rs:1194	MATCH	yes	
+load_domaintype_info	typcache.rs:4964	crates/backend-utils-cache-typcache/src/lib.rs:1215	MATCH	yes	post-fix; crawl/sort/lcons/NOT-NULL in-crate
+dcs_cmp	typcache.rs:5253	crates/backend-utils-cache-typcache/src/lib.rs:1215	MATCH	yes	sort_by(name) inside load_domaintype_info
+decr_dcc_refcount	typcache.rs:5263	crates/backend-utils-cache-typcache/src/lib.rs:1337	MATCH	yes	
+dccref_deletion_callback	typcache.rs:5269	crates/backend-utils-cache-typcache/src/lib.rs:1358	MATCH	yes	release_domain_constraint_ref
+prep_domain_constraints	typcache.rs:5278	crates/backend-utils-cache-typcache/src/lib.rs:2425	MATCH	yes	post-fix; reinstated in-crate
+InitDomainConstraintRef	typcache.rs:5321	crates/backend-utils-cache-typcache/src/lib.rs:2443	MATCH	yes	init_domain_constraint_ref
+UpdateDomainConstraintRef	typcache.rs:5352	crates/backend-utils-cache-typcache/src/lib.rs:2490	MATCH	yes	update_domain_constraint_ref
+DomainHasConstraints	typcache.rs:5382	crates/backend-utils-cache-typcache/src/lib.rs:2534	MATCH	yes	domain_has_constraints
+array_element_has_equality	typcache.rs:5387	crates/backend-utils-cache-typcache/src/lib.rs:1383	MATCH	yes	
+array_element_has_compare	typcache.rs:5395	crates/backend-utils-cache-typcache/src/lib.rs:1386	MATCH	yes	
+array_element_has_hashing	typcache.rs:5403	crates/backend-utils-cache-typcache/src/lib.rs:1389	MATCH	yes	
+array_element_has_extended_hashing	typcache.rs:5411	crates/backend-utils-cache-typcache/src/lib.rs:1392	MATCH	yes	
+cache_array_element_properties	typcache.rs:5420	crates/backend-utils-cache-typcache/src/lib.rs:1396	MATCH	yes	
+record_fields_have_equality	typcache.rs:5446	crates/backend-utils-cache-typcache/src/lib.rs:1434	MATCH	yes	
+record_fields_have_compare	typcache.rs:5454	crates/backend-utils-cache-typcache/src/lib.rs:1437	MATCH	yes	
+record_fields_have_hashing	typcache.rs:5462	crates/backend-utils-cache-typcache/src/lib.rs:1440	MATCH	yes	
+record_fields_have_extended_hashing	typcache.rs:5470	crates/backend-utils-cache-typcache/src/lib.rs:1443	MATCH	yes	
+cache_record_field_properties	typcache.rs:5479	crates/backend-utils-cache-typcache/src/lib.rs:1447	MATCH	yes	
+range_element_has_hashing	typcache.rs:5553	crates/backend-utils-cache-typcache/src/lib.rs:1549	MATCH	yes	
+range_element_has_extended_hashing	typcache.rs:5561	crates/backend-utils-cache-typcache/src/lib.rs:1552	MATCH	yes	
+cache_range_element_properties	typcache.rs:5570	crates/backend-utils-cache-typcache/src/lib.rs:1556	MATCH	yes	
+multirange_element_has_hashing	typcache.rs:5593	crates/backend-utils-cache-typcache/src/lib.rs:1583	MATCH	yes	
+multirange_element_has_extended_hashing	typcache.rs:5601	crates/backend-utils-cache-typcache/src/lib.rs:1586	MATCH	yes	
+cache_multirange_element_properties	typcache.rs:5610	crates/backend-utils-cache-typcache/src/lib.rs:1590	MATCH	yes	
+ensure_record_cache_typmod_slot_exists	typcache.rs:5635	crates/backend-utils-cache-typcache/src/lib.rs:1626	MATCH	yes	+grow_record_cache_array
+lookup_rowtype_tupdesc_internal	typcache.rs:5657	crates/backend-utils-cache-typcache/src/lib.rs:1669	MATCH	yes	owned-copy model; refcount->drop
+lookup_rowtype_tupdesc	typcache.rs:5793	crates/backend-utils-cache-typcache/src/lib.rs:1752	MATCH	yes	
+lookup_rowtype_tupdesc_noerror	typcache.rs:5805	crates/backend-utils-cache-typcache/src/lib.rs:1763	MATCH	yes	
+lookup_rowtype_tupdesc_copy	typcache.rs:5820	crates/backend-utils-cache-typcache/src/lib.rs:1774	MATCH	yes	tdrefcount=-1
+lookup_rowtype_tupdesc_domain	typcache.rs:5829	crates/backend-utils-cache-typcache/src/lib.rs:1789	MATCH	yes	
+record_type_typmod_hash	typcache.rs:5903	crates/backend-utils-cache-typcache/src/lib.rs:1885	MATCH	yes	record_cache_find (hash_row_type seam)
+record_type_typmod_compare	typcache.rs:5910	crates/backend-utils-cache-typcache/src/lib.rs:1885	MATCH	yes	equal_row_types seam in find/insert
+assign_record_type_typmod	typcache.rs:5925	crates/backend-utils-cache-typcache/src/lib.rs:1826	MATCH	yes	
+assign_record_type_identifier	typcache.rs:6009	crates/backend-utils-cache-typcache/src/lib.rs:1947	MATCH	yes	
+SharedRecordTypmodRegistryEstimate	typcache.rs:6072	crates/backend-utils-cache-typcache/src/lib.rs:1987	SEAMED	no	passthrough seam (DSA)
+SharedRecordTypmodRegistryInit	typcache.rs:6076	crates/backend-utils-cache-typcache/src/lib.rs:1992	SEAMED	no	passthrough seam (borrows descs)
+SharedRecordTypmodRegistryAttach	typcache.rs:6192	crates/backend-utils-cache-typcache/src/lib.rs:2008	SEAMED	no	passthrough seam
+InvalidateCompositeTypeCacheEntry	typcache.rs:6225	crates/backend-utils-cache-typcache/src/lib.rs:2018	MATCH	yes	invalidate_composite_type_cache_entry
+TypeCacheRelCallback	typcache.rs:6244	crates/backend-utils-cache-typcache/src/lib.rs:2050	MATCH	yes	type_cache_rel_callback
+TypeCacheTypCallback	typcache.rs:6298	crates/backend-utils-cache-typcache/src/lib.rs:2097	MATCH	yes	type_cache_typ_callback
+TypeCacheOpcCallback	typcache.rs:6329	crates/backend-utils-cache-typcache/src/lib.rs:2120	MATCH	yes	type_cache_opc_callback
+TypeCacheConstrCallback	typcache.rs:6355	crates/backend-utils-cache-typcache/src/lib.rs:2136	MATCH	yes	type_cache_constr_callback
+enum_known_sorted	typcache.rs:6368	crates/backend-utils-cache-typcache/src/lib.rs:2149	MATCH	yes	
+compare_values_of_enum	typcache.rs:6383	crates/backend-utils-cache-typcache/src/lib.rs:2161	MATCH	yes	
+load_enum_cache_data	typcache.rs:6489	crates/backend-utils-cache-typcache/src/lib.rs:2226	MATCH	yes	bitmap/sort/copy in-crate; scan seamed
+find_enumitem	typcache.rs:6680	crates/backend-utils-cache-typcache/src/lib.rs:2320	MATCH	yes	
+enum_oid_cmp	typcache.rs:6706	crates/backend-utils-cache-typcache/src/lib.rs:2320	MATCH	yes	sort_by/binary_search_by
+share_tupledesc	typcache.rs:6714	backend-access-common-session-seams	SEAMED	no	DSA; session-seams
+find_or_make_matching_shared_tupledesc	typcache.rs:6741	backend-access-common-session-seams	SEAMED	no	DSA; session-seams
+shared_record_typmod_registry_detach	typcache.rs:6879	backend-access-common-session-seams	SEAMED	no	DSA; session-seams
+insert_rel_type_cache_if_needed	typcache.rs:6895	crates/backend-utils-cache-typcache/src/lib.rs:2336	MATCH	yes	
+delete_rel_type_cache_if_needed	typcache.rs:6917	crates/backend-utils-cache-typcache/src/lib.rs:2355	MATCH	yes	
+finalize_in_progress_typentries	typcache.rs:6934	crates/backend-utils-cache-typcache/src/lib.rs:2382	MATCH	yes	
+AtEOXact_TypeCache	typcache.rs:6956	crates/backend-utils-cache-typcache/src/lib.rs:2396	MATCH	yes	at_eoxact_type_cache
+AtEOSubXact_TypeCache	typcache.rs:6960	crates/backend-utils-cache-typcache/src/lib.rs:2401	MATCH	yes	at_eosubxact_type_cache

@@ -1,0 +1,84 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+MemoryContextSwitchTo	nodeHash.rs:2201	nodeHash/src (folded)	MATCH	yes	Inline context switch; idiomatic equivalent.
+DatumGetBool	nodeHash.rs:2207	nodeHash/src	MATCH	yes	Inline datum cast.
+BoolGetDatum	nodeHash.rs:2211	nodeHash/src	MATCH	yes	Inline datum cast.
+Int16GetDatum	nodeHash.rs:2219	nodeHash/src	MATCH	yes	Inline datum cast.
+DatumGetUInt32	nodeHash.rs:2223	nodeHash/src	MATCH	yes	Inline datum cast.
+ObjectIdGetDatum	nodeHash.rs:2227	nodeHash/src	MATCH	yes	Inline datum cast.
+newNode	nodeHash.rs:2231	nodeHash/src (makeNode)	MATCH	yes	Inline node alloc+tag.
+HeapTupleHeaderHasMatch	nodeHash.rs:2240	nodeHash/src	MATCH	yes	Inline header match-flag test.
+HeapTupleHeaderClearMatch	nodeHash.rs:2245	nodeHash/src	MATCH	yes	Inline header match-flag clear.
+pg_atomic_compare_exchange_u64_impl	nodeHash.rs:2250	nodeHash/src	MATCH	yes	Inline atomic CAS impl; idiomatic equivalent.
+pg_atomic_write_u64_impl	nodeHash.rs:2270	nodeHash/src	MATCH	yes	Inline atomic write impl.
+pg_atomic_read_u64_impl	nodeHash.rs:2277	nodeHash/src	MATCH	yes	Inline atomic read impl.
+pg_atomic_init_u64_impl	nodeHash.rs:2281	nodeHash/src	MATCH	yes	Inline atomic init impl.
+pg_atomic_init_u64	nodeHash.rs:2288	nodeHash/src	MATCH	yes	Inline atomic init wrapper.
+pg_atomic_read_u64	nodeHash.rs:2295	nodeHash/src	MATCH	yes	Inline atomic read wrapper.
+pg_atomic_write_u64	nodeHash.rs:2299	nodeHash/src	MATCH	yes	Inline atomic write wrapper.
+pg_atomic_compare_exchange_u64	nodeHash.rs:2306	nodeHash/src	MATCH	yes	Inline atomic CAS wrapper.
+pg_leftmost_one_pos32	nodeHash.rs:2320	nodeHash/src	MATCH	yes	Audit: inline static helper re-derived correct.
+pg_leftmost_one_pos64	nodeHash.rs:2324	nodeHash/src	MATCH	yes	Audit: inline static helper re-derived correct.
+pg_nextpower2_32	nodeHash.rs:2329	nodeHash/src	MATCH	yes	Audit: inline static helper re-derived correct.
+pg_nextpower2_64	nodeHash.rs:2337	nodeHash/src	MATCH	yes	Audit: inline static helper re-derived correct.
+pg_prevpower2_32	nodeHash.rs:2345	nodeHash/src	MATCH	yes	Audit: inline static helper re-derived correct.
+pg_prevpower2_64	nodeHash.rs:2349	nodeHash/src	MATCH	yes	Audit: inline static helper re-derived correct.
+pg_rotate_right32	nodeHash.rs:2353	nodeHash/src	MATCH	yes	Audit: inline static helper re-derived correct.
+ExecProcNode	nodeHash.rs:2361	nodeHash/src (execProcnode seam)	MATCH	yes	Inline dispatch via execProcnode seam.
+ExecEvalExprSwitchContext	nodeHash.rs:2370	nodeHash/src (execExpr seam)	MATCH	yes	Inline expr-eval wrapper via execExpr seam.
+ExecQual	nodeHash.rs:2385	nodeHash/src	MATCH	yes	Inline qual eval; NULL-state->true mirrored.
+ExecQualAndReset	nodeHash.rs:2398	nodeHash/src	MATCH	yes	Inline qual+reset.
+ExecHash	nodeHash.rs:2441	exec_hash.rs:81	MATCH	yes	Audit fn1: elog(ERROR)->Err(PgError::error).
+MultiExecHash	nodeHash.rs:2470	exec_hash.rs:92	MATCH	yes	Audit fn2: instrument paths panic on unported InstrStart/Stop; dispatch exact.
+MultiExecPrivateHash	nodeHash.rs:2484	exec_hash.rs:134	MATCH	yes	Audit fn3: loop, skew/normal insert, IncreaseNumBuckets, space accounting faithful.
+MultiExecParallelHash	nodeHash.rs:2537	exec_hash.rs:253	MATCH	yes	Audit fn4: barrier phase switch+fallthrough, sts_end_write per batch, counters exact.
+ExecInitHash	nodeHash.rs:2632	exec_hash.rs:457	MATCH	yes	Audit fn5: makeNode, ExecAssignExprContext, child init, qual==NIL assert.
+ExecEndHash	nodeHash.rs:2656	exec_hash.rs:527	MATCH	yes	Audit fn6: recurse ExecEndNode(outerPlan).
+ExecHashTableCreate	nodeHash.rs:2662	hash_table.rs:156	MATCH	yes	Audit fn7: sizes from real Hash plan; serial panics on unported PrepareTempTablespaces.
+ExecChooseHashTableSize	nodeHash.rs:2808	hash_table.rs:316	MATCH	yes	Audit fn8: tupsize/skew/max_pointers/U-curve walk-back, overflow guards exact.
+ExecHashTableDestroy	nodeHash.rs:2998	hash_table.rs:503	MATCH	yes	Audit fn9: close batch files via buffile seam, drop arenas.
+ExecHashIncreaseBatchSize	nodeHash.rs:3015	hash_table.rs:541	MATCH	yes	Audit fn10: batchSpace compare, double spaceAllowed.
+ExecHashIncreaseNumBatches	nodeHash.rs:3025	hash_table.rs:563	MATCH	yes	Audit fn11: growEnabled/overflow guards, file-array grow, chunk rescan, dump, disable.
+ExecParallelHashIncreaseNumBatches	nodeHash.rs:3180	parallel.rs:292	MATCH	yes	Audit fn12: grow_batches phase machine with fallthrough; elect/decide faithful.
+ExecParallelHashRepartitionFirst	nodeHash.rs:3425	parallel.rs:651	MATCH	yes	Audit fn13: pop chunk queue, per-tuple bucket/batch, copy/sts_puttuple, counters.
+ExecParallelHashRepartitionRest	nodeHash.rs:3540	parallel.rs:713	MATCH	yes	Audit fn14: attach old inner stores, parallel scan, re-store, counters.
+ExecParallelHashMergeCounters	nodeHash.rs:3651	parallel.rs:772	MATCH	yes	Audit fn15: LWLock-guarded fold into shared totals, reset locals.
+ExecHashIncreaseNumBuckets	nodeHash.rs:3682	hash_table.rs:762	MATCH	yes	Audit fn16: nbuckets/log2 set, re-zero, rebuild chains from arena.
+ExecParallelHashIncreaseNumBuckets	nodeHash.rs:3762	parallel.rs:542	MATCH	yes	Audit fn17: grow_buckets ELECT/REALLOCATE/REINSERT, double nbuckets, reinsert.
+ExecHashTableInsert	nodeHash.rs:3923	hash_table.rs:941	MATCH	yes	Audit fn18: fetch via execTuples seam then full insert; else ExecHashJoinSaveTuple.
+ExecParallelHashTableInsert	nodeHash.rs:4000	parallel.rs:810	MATCH	yes	Audit fn19: real fetch + DSA memcpy of t_len bytes; Finding A resolved.
+ExecParallelHashTableInsertCurrentBatch	nodeHash.rs:4091	parallel.rs:873	MATCH	yes	Audit fn20: real fetch + DSA copy, non-retryable alloc; Finding A resolved.
+ExecHashGetBucketAndBatch	nodeHash.rs:4129	hash_table.rs:1055	MATCH	yes	Audit fn21: nbatch>1 ROR&(nbatch-1) else batchno=0. Exact.
+ExecScanHashBucket	nodeHash.rs:4149	hash_table.rs:1083	MATCH	yes	Audit fn22: head selection, hashvalue compare, store minimal, ExecQualAndReset.
+ExecParallelScanHashBucket	nodeHash.rs:4192	parallel.rs:910	MATCH	yes	Audit fn23: chain walk + reconstruct DSA mintuple, real exec_qual_and_reset; A+B resolved.
+ExecPrepHashTableForUnmatched	nodeHash.rs:4227	hash_table.rs:1194	MATCH	yes	Audit fn24: zero the three cursor fields.
+ExecParallelPrepHashTableForUnmatched	nodeHash.rs:4233	parallel.rs:945	MATCH	yes	Audit fn25: wait-free election, done/skip_unmatched, delegate to serial Prep.
+ExecScanHashTableForUnmatched	nodeHash.rs:4280	hash_table.rs:1209	MATCH	yes	Audit fn26: bucket/skew walk, HasMatch test, store+ResetExprContext, cursor advance.
+ExecParallelScanHashTableForUnmatched	nodeHash.rs:4335	parallel.rs:1067	MATCH	yes	Audit fn27: chain walk + !HasMatch, reconstruct DSA mintuple, ResetExprContext; A resolved.
+ExecHashTableReset	nodeHash.rs:4382	hash_table.rs:1316	MATCH	yes	Audit fn28: clear arena, re-alloc empty buckets, spaceUsed=0, forget chunks.
+ExecHashTableResetMatchFlags	nodeHash.rs:4395	hash_table.rs:1349	MATCH	yes	Audit fn29: clear match flag over main + skew chains.
+ExecReScanHash	nodeHash.rs:4428	exec_hash.rs:542	MATCH	yes	Audit fn30: chgParam==NULL ExecReScan(outerPlan) via execAmi seam.
+ExecHashBuildSkewHash	nodeHash.rs:4435	skew.rs:32	MATCH	yes	Audit fn31: skew guards, mcv seam, frac gate, open-addressing insert, space accounting.
+ExecHashGetSkewBucket	nodeHash.rs:4584	skew.rs:201	MATCH	yes	Audit fn32: skewEnabled gate, AND-mask probe loop, found/INVALID.
+ExecHashSkewTableInsert	nodeHash.rs:4606	skew.rs:234	MATCH	yes	Audit fn33: fetch, ClearMatch, push to skew chain, space, RemoveNext loop, IncreaseNumBatches.
+ExecHashRemoveNextSkewBucket	nodeHash.rs:4655	skew.rs:304	MATCH	yes	Audit fn34: last bucket, per-tuple move to dense/temp, space adjust, free, give-up-on-empty.
+ExecHashEstimate	nodeHash.rs:4742	instrument.rs:35	SEAMED	no	Audit fn35: thin marshal to execParallel-support seam; gate+size formula correct.
+ExecHashInitializeDSM	nodeHash.rs:4766	instrument.rs:59	SEAMED	no	Audit fn36: gate+size+shared-info init delegated to support seam.
+ExecHashInitializeWorker	nodeHash.rs:4794	instrument.rs:89	SEAMED	no	Audit fn37: gate+plan_node_id lookup delegated to support seam.
+ExecShutdownHash	nodeHash.rs:4812	exec_hash.rs:558	MATCH	yes	Audit fn38: alloc hinstrument if EXPLAIN&none, accumulate over final table.
+ExecHashRetrieveInstrumentation	nodeHash.rs:4823	instrument.rs:109	SEAMED	no	Audit fn39: present gate+size+copy delegated to support seam.
+ExecHashAccumInstrumentation	nodeHash.rs:4842	instrument.rs:130	MATCH	yes	Audit fn40: five Max() folds, exact.
+dense_alloc	nodeHash.rs:4876	hash_table.rs:834	MATCH	yes	Audit fn41: MAXALIGN, oversized/current/fresh chunk, used/ntuples accounting.
+ExecParallelHashTupleAlloc	nodeHash.rs:4929	parallel.rs:1076	MATCH	yes	Audit fn42: fast/LWLock slow path, growth-help retry, oversized, space/load checks.
+ExecParallelHashJoinSetUpBatches	nodeHash.rs:5052	parallel.rs:1215	MATCH	yes	Audit fn43: dsa_allocate0, accessor array, per-batch BarrierInit/attach, sts_initialize.
+ExecParallelHashCloseBatchAccessors	nodeHash.rs:5186	parallel.rs:1296	MATCH	yes	Audit fn44: sts_end_write + sts_end_parallel_scan per batch, clear accessors.
+ExecParallelHashEnsureBatchAccessors	nodeHash.rs:5199	parallel.rs:1327	MATCH	yes	Audit fn45: early-return-if-current, close-if-stale, DsaPointerIsValid assert, re-attach.
+ExecParallelHashTableAlloc	nodeHash.rs:5293	parallel.rs:1380	MATCH	yes	Audit fn46: dsa_allocate bucket array, init each atomic to InvalidDsaPointer.
+ExecHashTableDetachBatch	nodeHash.rs:5325	parallel.rs:1404	MATCH	yes	Audit fn47: parallel_state&&curbatch>=0, close files, asserts, ArriveAndDetach, free, curbatch=-1.
+ExecHashTableDetach	nodeHash.rs:5387	parallel.rs:1484	MATCH	yes	Audit fn48: build_barrier>=RUN assert, close files, last-out free batches, parallel_state=NULL.
+ExecParallelHashFirstTuple	nodeHash.rs:5417	parallel.rs:1542	MATCH	yes	Audit fn49: atomic read head, resolve, None on invalid.
+ExecParallelHashNextTuple	nodeHash.rs:5431	parallel.rs:1558	MATCH	yes	Audit fn50: resolve tuple->next.shared.
+ExecParallelHashPushTuple	nodeHash.rs:5440	parallel.rs:1575	MATCH	yes	Audit fn51: CAS loop on bucket head atomic.
+ExecParallelHashTableSetCurrentBatch	nodeHash.rs:5458	parallel.rs:1604	MATCH	yes	Audit fn52: curbatch, nbuckets/log2, reset current_chunk, at_least_one_chunk=false.
+ExecParallelHashPopChunkQueue	nodeHash.rs:5473	parallel.rs:1630	MATCH	yes	Audit fn53: LWLock, DsaPointerIsValid queue head, advance, return chunk+dp.
+ExecParallelHashTuplePrealloc	nodeHash.rs:5490	parallel.rs:1660	MATCH	yes	Audit fn54: want, asserts, LWLock, growth-help, space check, set preallocated/estimated.
+get_hash_memory_limit	nodeHash.rs:5561	hash_table.rs:1387	MATCH	yes	Audit fn55: work_mem*hash_mem_multiplier*1024 clamped to SIZE_MAX; GUCs via thread_local.

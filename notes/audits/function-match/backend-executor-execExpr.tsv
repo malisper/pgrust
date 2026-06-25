@@ -1,0 +1,46 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+MemoryContextSwitchTo	execExpr.rs:4989	(mmgr inline)	SEAMED	no	memutils.h inline owned by mmgr; folded into context handling
+DatumGetBool	execExpr.rs:4995	(types-tuple inline)	SEAMED	no	postgres.h inline owned elsewhere
+Int32GetDatum	execExpr.rs:4999	(types-tuple inline)	SEAMED	no	postgres.h inline owned elsewhere
+UInt32GetDatum	execExpr.rs:5003	(types-tuple inline)	SEAMED	no	postgres.h inline owned elsewhere
+ObjectIdGetDatum	execExpr.rs:5007	(types-tuple inline)	SEAMED	no	postgres.h inline owned elsewhere
+PointerGetDatum	execExpr.rs:5011	(types-tuple inline)	SEAMED	no	postgres.h inline owned elsewhere
+newNode	execExpr.rs:5016	(types-nodes inline)	SEAMED	no	nodes.h inline owned by nodes; node allocation handled by owned model
+list_length	execExpr.rs:5025	(types-nodes inline)	SEAMED	no	pg_list.h inline; idiomatic .len()/None in port
+list_nth_cell	execExpr.rs:5029	(types-nodes inline)	SEAMED	no	pg_list.h inline; idiomatic indexing in port
+TupleDescAttr	execExpr.rs:5036	(tupdesc inline)	SEAMED	no	tupdesc.h inline owned by access-common-tupdesc
+TupleDescCompactAttr	execExpr.rs:5053	(tupdesc inline)	SEAMED	no	tupdesc.h inline owned by access-common-tupdesc
+ExecEvalExprSwitchContext	execExpr.rs:5080	(execExprInterp inline)	SEAMED	no	executor.h inline; eval entry owned by execExprInterp
+ExecInitExpr	execExpr.rs:5095	execExpr_core.rs:1288 exec_init_expr	MATCH	yes	re-derived line-by-line against C + owned model
+ExecInitExprWithParams	execExpr.rs:5129	execExpr_core.rs:1309 exec_init_expr_with_params	MATCH	yes	re-derived line-by-line against C + owned model
+ExecInitQual	execExpr.rs:5163	execExpr_core.rs:1331 exec_init_qual	MATCH	yes	re-derived line-by-line against C + owned model
+ExecInitCheck	execExpr.rs:5252	execExpr_core.rs:1331 exec_init_qual (check wrapper)	MATCH	yes	re-derived line-by-line against C + owned model
+ExecInitExprList	execExpr.rs:5262	execExpr_core.rs:1382 exec_init_expr_list	MATCH	yes	re-derived line-by-line against C + owned model
+ExecBuildProjectionInfo	execExpr.rs:5287	execExpr_core.rs:1620/1496 exec_build_projection_info[_impl]	MATCH	yes	re-derived line-by-line against C + owned model
+ExecBuildUpdateProjection	execExpr.rs:5421	execExpr_core.rs:1856/1643 exec_build_update_projection[_impl]	MATCH	yes	re-derived line-by-line against C + owned model
+ExecPrepareExpr	execExpr.rs:5812	execExpr_core.rs:1422 exec_prepare_expr	MATCH	yes	re-derived line-by-line against C + owned model
+ExecPrepareQual	execExpr.rs:5825	execExpr_core.rs:1422 exec_prepare_expr (qual wrapper)	MATCH	yes	re-derived line-by-line against C + owned model
+ExecPrepareCheck	execExpr.rs:5838	execExpr_core.rs:1422 exec_prepare_expr (check wrapper)	MATCH	yes	re-derived line-by-line against C + owned model
+ExecPrepareExprList	execExpr.rs:5851	execExpr_core.rs:1467 exec_prepare_expr_list	MATCH	yes	re-derived line-by-line against C + owned model
+ExecCheck	execExpr.rs:5879	execExpr_core (exec_qual/check path)	MATCH	yes	re-derived line-by-line against C + owned model
+ExecReadyExpr	execExpr.rs:5894	execExpr_core.rs:148 exec_ready_expr	MATCH	yes	re-derived line-by-line against C + owned model
+ExecInitExprRec	execExpr.rs:5900	execExpr_core.rs:375 exec_init_expr_rec	MATCH	yes	45-arm switch; ScalarArrayOp/MinMax/ArrayExpr arms panic on keystone-trimmed shared model fields (genuine model-layer gap, mirror-and-panic)
+ExprEvalPushStep	execExpr.rs:8041	execExpr_core.rs:114 expr_eval_push_step	MATCH	yes	re-derived line-by-line against C + owned model
+ExecInitFunc	execExpr.rs:8068	execExpr_func_subscript.rs:374 exec_init_func	MATCH	yes	re-derived line-by-line against C + owned model
+ExecInitSubPlanExpr	execExpr.rs:8272	execExpr_func_subscript exec_init_subplan*	SEAMED	no	nodeSubplan owner unported
+ExecCreateExprSetupSteps	execExpr.rs:8364	execExpr_core.rs:318/332/352 exec_create_expr_setup_steps[_list/_tlist]	MATCH	yes	re-derived line-by-line against C + owned model
+ExecPushExprSetupSteps	execExpr.rs:8379	execExpr_core.rs:279 exec_push_expr_setup_steps	MATCH	yes	re-derived line-by-line against C + owned model
+expr_setup_walker	execExpr.rs:8471	execExpr_core.rs:164 expr_setup_walker	MATCH	yes	re-derived line-by-line against C + owned model
+ExecComputeSlotInfo	execExpr.rs:8579	execExpr_core.rs:246 exec_compute_slot_info	MATCH	yes	re-derived line-by-line against C + owned model
+ExecInitWholeRowVar	execExpr.rs:8657	execExpr_func_subscript.rs:652 exec_init_whole_row_var	MATCH	yes	SubqueryScan/CteScan parent path delegates to execJunk/execTuples seam
+ExecInitSubscriptingRef	execExpr.rs:8730	execExpr_func_subscript.rs:765 exec_init_subscripting_ref	SEAMED	no	getSubscriptingRoutines owner unported
+isAssignmentIndirectionExpr	execExpr.rs:9090	execExpr_func_subscript.rs:334 is_assignment_indirection_expr	MATCH	yes	re-derived line-by-line against C + owned model
+ExecInitCoerceToDomain	execExpr.rs:9127	execExpr_domain_agg.rs:182 exec_init_coerce_to_domain	SEAMED	no	typcache InitDomainConstraintRef (#58) unported; per-constraint steps blocked
+ExecBuildAggTrans	execExpr.rs:9269	execExpr_domain_agg.rs:325 exec_build_agg_trans	PARTIAL	no	common/presorted/single-col paths fully emitted; deserialize + multi-col non-presorted ORDER BY paths panic on nodeAgg ds_fcinfo / execTuples slot-cell model (#113)
+ExecBuildAggTransCall	execExpr.rs:9656	execExpr_domain_agg.rs:724 exec_build_agg_trans_call	MATCH	yes	re-derived line-by-line against C + owned model
+ExecBuildHash32FromAttrs	execExpr.rs:9729	execExpr_domain_agg.rs:854 exec_build_hash32_from_attrs	MATCH	yes	re-derived line-by-line against C + owned model
+ExecBuildHash32Expr	execExpr.rs:9863	execExpr_domain_agg.rs:1007 exec_build_hash32_expr	MATCH	yes	re-derived line-by-line against C + owned model
+ExecBuildGroupingEqual	execExpr.rs:10032	execExpr_domain_agg.rs:1157 exec_build_grouping_equal	MATCH	yes	re-derived line-by-line against C + owned model
+ExecBuildParamSetEqual	execExpr.rs:10214	execExpr_domain_agg.rs:1259 exec_build_param_set_equal	MATCH	yes	re-derived line-by-line against C + owned model
+ExecInitJsonExpr	execExpr.rs:10369	execExpr_json.rs:51 exec_init_json_expr	SEAMED	no	JsonExprState/JsonPathVariable/ErrorSaveContext runtime-state types not modeled; lsyscache seams
+ExecInitJsonCoercion	execExpr.rs:10676	execExpr_json.rs:203 exec_init_json_coercion	SEAMED	no	JsonExprState escontext + lsyscache seams unported

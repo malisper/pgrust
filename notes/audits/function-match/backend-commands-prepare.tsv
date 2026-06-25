@@ -1,0 +1,28 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+MemoryContextSwitchTo	prepare.rs:2775	-	MISSING	no	header inline (memutils.h); ambient-context dissolution, owned by mmgr
+BoolGetDatum	prepare.rs:2781	-	MISSING	no	header inline (postgres.h Datum macro); dissolved
+ObjectIdGetDatum	prepare.rs:2789	-	MISSING	no	header inline (postgres.h Datum macro); dissolved
+PointerGetDatum	prepare.rs:2793	-	MISSING	no	header inline (postgres.h Datum macro); dissolved
+Int64GetDatum	prepare.rs:2797	-	MISSING	no	header inline (postgres.h Datum macro); dissolved
+newNode	prepare.rs:2802	-	MISSING	no	header inline (nodes.h); node alloc owned by nodes, dissolved into typed ctor
+list_length	prepare.rs:2810	-	MISSING	no	header inline (pg_list.h); owned by pg_list, dissolved
+list_nth_cell	prepare.rs:2814	-	MISSING	no	header inline (pg_list.h); owned by pg_list
+lnext	prepare.rs:2821	-	MISSING	no	header inline (pg_list.h); owned by pg_list, dissolved into iteration
+TupleDescAttr	prepare.rs:2833	-	MISSING	no	header inline (tupdesc.h); owned by tupdesc, dissolved into attr access
+pg_clock_gettime_ns	prepare.rs:2852	-	MISSING	no	header inline (instr_time.h); clock op owned elsewhere, reached via explain bookkeeping seam
+ExecEvalExprSwitchContext	prepare.rs:2863	-	SEAMED	no	executor.h inline; reached via execExpr seam in EvaluateParams eval loop, owned by executor
+TimestampTzGetDatum	prepare.rs:2878	-	MISSING	no	header inline (timestamp.h Datum macro); dissolved
+PrepareQuery	prepare.rs:2883	lib.rs:127	MATCH	yes	empty-name INVALID_PSTATEMENT_DEFINITION; make_raw_stmt carries stmt/stmt_location/stmt_len (F1 resolved); argtypes TypeName->OID loop gated on nargs; CreateCachedPlan/analyze+rewrite/Complete/Store threaded through RawStmt
+ExecuteQuery	prepare.rs:2998	lib.rs:223	MATCH	yes	fixed_result elog; EvaluateParams gated num_params>0; portal create+visible=false+strdup; GetCachedPlan->PortalDefineQuery no fallible step between; intoClause !=1/!=CMD_SELECT WRONG_OBJECT_TYPE; eflags/count; Start/Run/Drop; conditional FreeExecutorState
+EvaluateParams	prepare.rs:3176	lib.rs:352	MATCH	yes	nparams!=num_params SYNTAX_ERROR+errdetail before num_params==0->NULL; copyObject->clone-into working vec; per-param transform/exprType/coerce/assign_collations bundled in parser seam; coercion-failed DATATYPE_MISMATCH+hint+errposition in-crate; makeParamList + canonical exec_prepare_expr_list seam + lock-step eval loop
+InitQueryHashTable	prepare.rs:3357	lib.rs:462	MATCH	yes	lazy None->Some(HashMap::with_capacity(32)); idempotent guard preserves !prepared_queries precondition
+StorePreparedStatement	prepare.rs:3382	lib.rs:476	MATCH	yes	GetCurrentStatementStartTimestamp first; lazy init; dup-key DUPLICATE_PSTATEMENT before insert; fields filled; SaveCachedPlan; NAMEDATALEN-1 truncation via hash_key
+FetchPreparedStatement	prepare.rs:3446	lib.rs:528	MATCH	yes	prepared_queries==NULL->NULL; !entry&&throwError->UNDEFINED_PSTATEMENT; else Ok(None)
+FetchPreparedStatementResultDesc	prepare.rs:3505	lib.rs:555	MATCH	yes	Assert(fixed_result)->debug_assert; resultDesc?CreateTupleDescCopy:NULL
+FetchPreparedStatementTargetList	prepare.rs:3515	lib.rs:579	MATCH	yes	CachedPlanGetTargetList + copyObject delegated; empty Vec == NIL
+DeallocateQuery	prepare.rs:3526	lib.rs:593	MATCH	yes	name?DropPreparedStatement(name,true):DropAllPreparedStatements()
+DropPreparedStatement	prepare.rs:3534	lib.rs:608	MATCH	yes	Fetch w/ showError, then (if found) DropCachedPlan + remove by stmt_name
+DropAllPreparedStatements	prepare.rs:3552	lib.rs:631	MATCH	yes	!prepared_queries->empty snapshot no-op; else drop+remove each; snapshot-then-drain behaviorally equiv to hash_seq scan
+ExplainExecuteQuery	prepare.rs:3581	lib.rs:661	MATCH	yes	begin bookkeeping; fetch; fixed_result elog; optional EvaluateParams (pstate straight through); GetCachedPlan; planduration; memory/buffer accounting guarded in-crate; per-plan CMD_UTILITY vs ExplainOnePlan; ExplainSeparatePlans; FreeExecutorState; ReleaseCachedPlan
+pg_prepared_statement	prepare.rs:3779	lib.rs:802	MATCH	yes	InitMaterializedSRF; null guard; single-scan snapshot; 8 values/nulls; name/query text; prepare_time int64; build_regtype_array(param_types); resultDesc?result_types:nulls[4]=true; from_sql bool; num_generic/custom int64; putvalues; returns (Datum)0
+build_regtype_array	prepare.rs:3866	lib.rs:889	MATCH	yes	ObjectIdGetDatum per element; construct_array_builtin(...,REGTYPEOID=2206); empty input->zero-element array (not NULL)

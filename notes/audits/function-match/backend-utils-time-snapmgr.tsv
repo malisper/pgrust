@@ -1,0 +1,56 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+MemoryContextSwitchTo	snapmgr.rs:1248	(inlined / mcxt)	MATCH	yes	c2rust inline accessor; modeled by explicit Mcx threading per repo convention, behavior-identical.
+DatumGetPointer	snapmgr.rs:1254	(types-fmgr Datum conv)	MATCH	yes	c2rust inline Datum conversion macro; identical bit-cast.
+PointerGetDatum	snapmgr.rs:1258	(types-fmgr Datum conv)	MATCH	yes	c2rust inline Datum conversion macro; identical.
+list_length	snapmgr.rs:1266	(types-nodes List accessor)	MATCH	yes	c2rust inline list.h accessor; length read, identical.
+pg_lfind32_one_by_one_helper	snapmgr.rs:1273	lib.rs:115 (pg_lfind32, fused)	MATCH	yes	c2rust SIMD-fallback helper; the scalar element-equality scan is fused into pg_lfind32; same result.
+pg_lfind32	snapmgr.rs:1288	lib.rs:115	MATCH	yes	Linear search of u32 array for value; SIMD path collapses to scalar iterator scan, behavior-identical.
+ResourceOwnerRememberSnapshot	snapmgr.rs:1487	— (RAII guard)	SEAMED	no	resowner registry dissolved into RAII guards per docs/query-lifecycle-raii.md; remember is caller's guard, not snapmgr logic.
+ResourceOwnerForgetSnapshot	snapmgr.rs:1498	— (RAII guard)	SEAMED	no	Same: resowner forget is caller's guard, dissolved.
+GetTransactionSnapshot	snapmgr.rs:1509	lib.rs:255	MATCH	yes	Historic short-circuit, FirstSnapshotSet first-call path, serializable/xact-snapshot copy + regd_count++ + registered_add, else paths all mirrored.
+GetLatestSnapshot	snapmgr.rs:1576	lib.rs:327	MATCH	yes	parallel-mode elog, historic assert, first-call delegate, SecondarySnapshot fetch.
+GetCatalogSnapshot	snapmgr.rs:1613	lib.rs:348	MATCH	yes	historic short-circuit then NonHistoric.
+GetNonHistoricCatalogSnapshot	snapmgr.rs:1620	lib.rs:358	MATCH	yes	refresh predicate CatalogSnapshot && !RelationInvalidatesSnapshotsOnly && !RelationHasSysCache; manual registered_add.
+InvalidateCatalogSnapshot	snapmgr.rs:1636	lib.rs:384	MATCH	yes	remove from registered + NULL + SnapshotResetXmin.
+InvalidateCatalogSnapshotConditionally	snapmgr.rs:1647	lib.rs:397	MATCH	yes	catalog && active==NULL && singular.
+SnapshotSetCommandId	snapmgr.rs:1656	lib.rs:407	MATCH	yes	first_snapshot_set guard; sets curcid on Current/Secondary; CatalogSnapshot left open.
+SetTransactionSnapshot	snapmgr.rs:1667	lib.rs:429	MATCH	yes	field copy w/ xcnt/subxcnt asserts; restored vs imported xmin install w/ same SQLSTATE/detail; serializable copy; curcid not copied; snapXactCompletionCount=0.
+CopySnapshot	snapmgr.rs:1805	lib.rs:533	MATCH	yes	xip copy; subxip copy gated on subxcnt>0 && (!suboverflowed || takenDuringRecovery); refcounts/copied/snapXactCompletionCount reset.
+FreeSnapshot	snapmgr.rs:1862	(Rc drop)	MATCH	yes	C pfree when both counts 0 modeled by last Rc drop; asserts mirrored at Pop/AtSubAbort/UnregisterNoOwner.
+PushActiveSnapshot	snapmgr.rs:1866	lib.rs:569	MATCH	yes	delegates with GetCurrentTransactionNestLevel().
+PushActiveSnapshotWithLevel	snapmgr.rs:1870	lib.rs:574	MATCH	yes	copy-if ==Current||==Secondary||!copied via ptr_eq; active_count++; push; level assert.
+PushCopiedSnapshot	snapmgr.rs:1896	lib.rs:607	MATCH	yes	force-copy then push.
+UpdateActiveSnapshotCommandId	snapmgr.rs:1900	lib.rs:612	MATCH	yes	asserts active_count==1/regd_count==0; parallel-mode guard on curcid change.
+PopActiveSnapshot	snapmgr.rs:1938	lib.rs:637	MATCH	yes	pop, active_count--, free-when-zero (Rc drop), SnapshotResetXmin.
+GetActiveSnapshot	snapmgr.rs:1956	lib.rs:665	MATCH	yes	top of stack.
+ActiveSnapshotSet	snapmgr.rs:1960	lib.rs:676	MATCH	yes	!active.is_empty().
+RegisterSnapshot	snapmgr.rs:1964	lib.rs:688	MATCH	yes	InvalidSnapshot->None; delegates to OnOwner.
+RegisterSnapshotOnOwner	snapmgr.rs:1971	lib.rs:694	MATCH	yes	copy-if-not-copied, regd_count++, registered_add when ==1; ResourceOwnerEnlarge/Remember elided (RAII guard, query-lifecycle-raii).
+UnregisterSnapshot	snapmgr.rs:1993	lib.rs:712	MATCH	yes	NULL->noop; delegates.
+UnregisterSnapshotFromOwner	snapmgr.rs:2000	lib.rs:721	MATCH	yes	resowner Forget is caller's guard; NoOwner core preserved.
+UnregisterSnapshotNoOwner	snapmgr.rs:2010	lib.rs:727	MATCH	yes	regd_count--, remove-when-zero, free + SnapshotResetXmin when both zero.
+xmin_cmp	snapmgr.rs:2020	lib.rs:151 (registered_min_xmin)	MATCH	yes	pairing-heap min-by-xmin reproduced by Vec scan w/ wraparound-aware TransactionIdPrecedes; only min consumed, observationally equal.
+SnapshotResetXmin	snapmgr.rs:2037	lib.rs:754	MATCH	yes	active-nonempty early return; empty->Invalid; else advance to min xmin if MyProc->xmin precedes; MyProc->xmin via proc seam.
+AtSubCommit_Snapshot	snapmgr.rs:2056	lib.rs:779	MATCH	yes	walk top-down (rev iter), stop at as_level<level, relabel to level-1.
+AtSubAbort_Snapshot	snapmgr.rs:2070	lib.rs:793	MATCH	yes	pop while as_level>=level, active_count--, free-when-zero, SnapshotResetXmin.
+AtEOXact_Snapshot	snapmgr.rs:2090	lib.rs:819	MATCH	yes	FirstXactSnapshot removal, exported-file unlink (WARNING) + registered removal, InvalidateCatalogSnapshot, commit-time leak WARNINGs, state reset, conditional SnapshotResetXmin, final assert.
+ExportSnapshot	snapmgr.rs:2229	lib.rs:899	MATCH	yes	subxact guard (25001), committed-children, path %08X-%08X-%d, copy+pseudo-register, full text serialization incl. addTopXid + sof overflow branch, tmp-write+rename, basename return.
+pg_export_snapshot	snapmgr.rs:2560	lib.rs:1003	MATCH	yes	wraps ExportSnapshot(GetActiveSnapshot); fmgr text-Datum wrapping is systemic fmgr deferral.
+parseIntFromText	snapmgr.rs:2567	lib.rs:1061	MATCH	yes	prefix check, %d scan, newline advance; errors SQLSTATE 22P02.
+parseXidFromText	snapmgr.rs:2705	lib.rs:1070	MATCH	yes	%u scan variant.
+parseVxidFromText	snapmgr.rs:2843	lib.rs:1079	MATCH	yes	%d/%u into vxid.
+ImportSnapshot	snapmgr.rs:2985	lib.rs:1131	MATCH	yes	fresh-xact guard, isolation guard, idstr charset check (incl. empty non-special), file read/ENOENT, full field parse w/ xcnt/subxcnt bounds, validity, serializable-source restrictions, cross-db check, SetTransactionSnapshot.
+XactHasExportedSnapshots	snapmgr.rs:3672	lib.rs:1290	MATCH	yes	!exported.is_empty().
+DeleteAllExportedSnapshotFiles	snapmgr.rs:3676	lib.rs:1009	MATCH	yes	dir read (fd seam, LOG-on-error/skip ./..), unlink each w/ LOG-on-failure.
+ThereAreNoPriorRegisteredSnapshots	snapmgr.rs:3739	lib.rs:1295	MATCH	yes	empty or singular.
+HaveRegisteredOrActiveSnapshot	snapmgr.rs:3749	lib.rs:1300	MATCH	yes	active->true; catalog-only singular->false; else non-empty.
+SetupHistoricSnapshot	snapmgr.rs:3762	lib.rs:1317	MATCH	yes	sets historic + tuplecid_data (*mut HTAB, real type); signature matches C (Snapshot, HTAB *).
+TeardownHistoricSnapshot	snapmgr.rs:3770	lib.rs:1324	MATCH	yes	clears both.
+HistoricSnapshotActive	snapmgr.rs:3775	lib.rs:1332	MATCH	yes	historic.is_some().
+HistoricSnapshotGetTupleCids	snapmgr.rs:3779	lib.rs:1338	MATCH	yes	returns *mut HTAB tuplecid_data; Assert(HistoricSnapshotActive()) mirrored.
+EstimateSnapshotSpace	snapmgr.rs:3783	lib.rs:1356	MATCH	yes	24-byte header + xcnt + (subxcnt when not overflow-or-recovery); add_size/mul_size overflow-ereport -> plain usize (differs only on impossible inputs).
+SerializeSnapshot	snapmgr.rs:3807	lib.rs:1369	MATCH	yes	byte-exact LE SerializedSnapshotData (24B); subxcnt zeroed on overflow-and-not-recovery; xip/subxip appended.
+RestoreSnapshot	snapmgr.rs:3865	lib.rs:1408	MATCH	yes	inverse of Serialize; copied=true, counts 0, snapXactCompletionCount=0.
+RestoreTransactionSnapshot	snapmgr.rs:3939	lib.rs:1280	MATCH	yes	SetTransactionSnapshot(snapshot,NULL,InvalidPid,source_pgproc); INVALID_PID=-1 matches miscadmin.h:32.
+XidInMVCCSnapshot	snapmgr.rs:3951	lib.rs:1458	MATCH	yes	range check (wraparound-aware), non-recovery full/overflow branches w/ SubTransGetTopmostTransaction seam + xmin recheck, recovery branch searching subxip.
+ResOwnerReleaseSnapshot	snapmgr.rs:3992	lib.rs:727 (target)	MATCH	yes	resowner release callback -> UnregisterSnapshotNoOwner; callback wiring is the dissolved resowner registry.

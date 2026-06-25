@@ -1,0 +1,63 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+initStringInfoFromString	proto.rs:1599	(inlined)	MATCH	yes	c2rust inlined header inline; folded into read entry points
+ObjectIdGetDatum	proto.rs:1611	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers
+TupleDescAttr	proto.rs:1618	(inlined)	MATCH	yes	c2rust inlined header inline; folded into callers
+pq_writeint8	proto.rs:1636	(inlined)	MATCH	yes	c2rust inlined pqformat inline; folded into StringInfo writers
+pq_writeint16	proto.rs:1648	(inlined)	MATCH	yes	c2rust inlined pqformat inline; folded into StringInfo writers
+pq_writeint32	proto.rs:1660	(inlined)	MATCH	yes	c2rust inlined pqformat inline; folded into StringInfo writers
+pq_writeint64	proto.rs:1672	(inlined)	MATCH	yes	c2rust inlined pqformat inline; folded into StringInfo writers
+pq_sendint8	proto.rs:1684	(inlined)	MATCH	yes	c2rust inlined pqformat inline; folded into callers
+pq_sendint16	proto.rs:1689	(inlined)	MATCH	yes	c2rust inlined pqformat inline; folded into callers
+pq_sendint32	proto.rs:1694	(inlined)	MATCH	yes	c2rust inlined pqformat inline; folded into callers
+pq_sendint64	proto.rs:1699	(inlined)	MATCH	yes	c2rust inlined pqformat inline; folded into callers
+pq_sendbyte	proto.rs:1704	(inlined)	MATCH	yes	c2rust inlined pqformat inline; folded into callers
+pq_sendint	proto.rs:1708	(inlined)	MATCH	yes	c2rust inlined pqformat inline; folded into callers
+GETSTRUCT	proto.rs:1758	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers
+slot_getsomeattrs	proto.rs:1766	(seam call)	MATCH	yes	c2rust inlined header inline; reached via execTuples seam (slot_getallattrs)
+slot_getallattrs	proto.rs:1775	(seam call)	MATCH	yes	c2rust inlined header inline; reached via execTuples slot_getallattrs seam
+logicalrep_write_begin	proto.rs:1790	lib.rs:381	MATCH	yes	byte+2xint64+int32; xact_time union->single field
+logicalrep_read_begin	proto.rs:1800	lib.rs:395	MATCH	yes	final_lsn==Invalid elog preserved
+logicalrep_write_commit	proto.rs:1838	lib.rs:410	MATCH	yes	flags=0; byte+byte+3xint64
+logicalrep_read_commit	proto.rs:1851	lib.rs:430	MATCH	yes	flags!=0 elog
+logicalrep_write_begin_prepare	proto.rs:1891	lib.rs:452	MATCH	yes	gid sent unconditionally via txn_gid
+logicalrep_read_begin_prepare	proto.rs:1903	lib.rs:471	MATCH	yes	two Invalid-LSN elogs; strlcpy_gid
+logicalrep_write_prepare_common	proto.rs:1977	lib.rs:498	MATCH	yes	3 Asserts->debug_assert (gid/is_prepared/xid valid)
+logicalrep_write_prepare	proto.rs:1993	lib.rs:531	MATCH	yes	delegates to common w/ PREPARE
+logicalrep_read_prepare_common	proto.rs:2000	lib.rs:541	MATCH	yes	flags; 2 Invalid-LSN; Invalid-xid elogs; msgtype interpolated
+logicalrep_read_prepare	proto.rs:2142	lib.rs:582	MATCH	yes	"prepare"
+logicalrep_write_commit_prepared	proto.rs:2154	lib.rs:592	MATCH	yes	Assert gid; 3xint64+int32+gid
+logicalrep_read_commit_prepared	proto.rs:2169	lib.rs:623	MATCH	yes	flags + 2 Invalid-LSN elogs
+logicalrep_write_rollback_prepared	proto.rs:2276	lib.rs:661	MATCH	yes	4xint64+int32+gid
+logicalrep_read_rollback_prepared	proto.rs:2293	lib.rs:694	MATCH	yes	flags + 2 Invalid-LSN elogs; 2 timestamps
+logicalrep_write_stream_prepare	proto.rs:2401	lib.rs:733	MATCH	yes	common w/ STREAM_PREPARE
+logicalrep_read_stream_prepare	proto.rs:2414	lib.rs:742	MATCH	yes	"stream prepare"
+logicalrep_write_origin	proto.rs:2426	lib.rs:751	MATCH	yes	byte+int64+string
+logicalrep_read_origin	proto.rs:2436	lib.rs:768	MATCH	yes	pstrdup(getmsgstring)->pstrdup_msgstring
+logicalrep_write_insert	proto.rs:2444	lib.rs:781	MATCH	yes	xid if valid; relid; 'N'; write_tuple
+logicalrep_read_insert	proto.rs:2462	lib.rs:805	MATCH	yes	action!='N' elog (numeric); matches
+logicalrep_write_update	proto.rs:2504	lib.rs:824	MATCH	yes	relreplident assert; 'O'/'K' on FULL; oldslot optional
+logicalrep_read_update	proto.rs:2531	lib.rs:864	MATCH	yes	action validation + has_oldtuple; %c formatting
+logicalrep_write_delete	proto.rs:2617	lib.rs:907	MATCH	yes	assert; 'O'/'K' on FULL
+logicalrep_read_delete	proto.rs:2639	lib.rs:942	MATCH	yes	action must be 'O'/'K'
+logicalrep_write_truncate	proto.rs:2683	lib.rs:965	MATCH	yes	flags from cascade/restart; loop over relids
+logicalrep_read_truncate	proto.rs:2712	lib.rs:1001	MATCH	yes	negative nrelids->empty loop; capacity clamped; List->PgVec
+logicalrep_write_message	proto.rs:2734	lib.rs:1023	MATCH	yes	flags+lsn+prefix+sz+bytes[..sz]
+logicalrep_write_rel	proto.rs:2758	lib.rs:1055	MATCH	yes	namespace+relname+replident+attrs
+logicalrep_read_rel	proto.rs:2780	lib.rs:1086	MATCH	yes	palloc struct->owned LogicalRepRelation in mcx
+logicalrep_write_typ	proto.rs:2794	lib.rs:1119	MATCH	yes	getBaseType seam; cache-fail elog; GETSTRUCT via SysCacheGetAttrNotNull
+logicalrep_read_typ	proto.rs:2844	lib.rs:1155	MATCH	yes	remoteid+nspname+typname
+logicalrep_write_tuple	proto.rs:2852	lib.rs:1170	MATCH	yes	nliveatts; slot_getallattrs seam; NULL/UNCHANGED/binary/text; send len=VARSIZE-VARHDRSZ; cache-fail elog
+logicalrep_read_tuple	proto.rs:2972	lib.rs:1257	MATCH	yes	natts u16; per-col kind switch; len read; unknown-kind elog; NUL sentinel omitted (invisible past len)
+logicalrep_write_attrs	proto.rs:3042	lib.rs:1314	MATCH	yes	nliveatts; idattrs via relcache seam unless FULL; replica-id flag; attnum-FirstLowInvalid offset
+logicalrep_read_attrs	proto.rs:3095	lib.rs:1381	MATCH	yes	per-att flags/replica-id bms_add_member; name/typ; mode read+ignored
+logicalrep_write_namespace	proto.rs:3131	lib.rs:1418	MATCH	yes	pg_catalog->'\0'; else get_namespace_name seam; NULL->elog
+logicalrep_read_namespace	proto.rs:3170	lib.rs:1438	MATCH	yes	empty->"pg_catalog"
+logicalrep_write_stream_start	proto.rs:3182	lib.rs:1453	MATCH	yes	Assert xid valid; int32+first_segment byte
+logicalrep_read_stream_start	proto.rs:3199	lib.rs:1471	MATCH	yes	first_segment = byte==1
+logicalrep_write_stream_stop	proto.rs:3209	lib.rs:1484	MATCH	yes	single byte
+logicalrep_write_stream_commit	proto.rs:3213	lib.rs:1490	MATCH	yes	xid+flags+3xint64
+logicalrep_read_stream_commit	proto.rs:3227	lib.rs:1516	MATCH	yes	xid; flags!=0 elog; fields
+logicalrep_write_stream_abort	proto.rs:3272	lib.rs:1543	MATCH	yes	xid+subxid; optional abort_lsn/time
+logicalrep_read_stream_abort	proto.rs:3289	lib.rs:1569	MATCH	yes	else-branch zeroes abort_lsn=Invalid, abort_time=0
+logicalrep_message_type	proto.rs:3305	lib.rs:1595	MATCH	yes	19 cases->strings; unknown->"??? (%d)" (no throw)
+logicalrep_should_publish_column	proto.rs:3340	lib.rs:1637	MATCH	yes	dropped->false; column list->bms_is_member; non-gen->true; STORED gen->include==Stored; else false

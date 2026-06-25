@@ -1,0 +1,7 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+ExecResult	nodeResult.rs (static, C:64)	crates/backend-executor-nodeResult/src/lib.rs:64	MATCH	yes	CHECK_FOR_INTERRUPTS; rs_checkqual one-time resconstantqual gate; ResetExprContext; outer ExecProcNode passthrough/exhaustion; ExecProject tail.
+ExecResultMarkPos	nodeResult.rs (C:142)	crates/backend-executor-nodeResult/src/lib.rs:152	MATCH	yes	outerPlan present -> ExecMarkPos; else elog(DEBUG2) identical text.
+ExecResultRestrPos	nodeResult.rs (C:158)	crates/backend-executor-nodeResult/src/lib.rs:166	MATCH	yes	outerPlan present -> ExecRestrPos; else elog(ERROR) identical text.
+ExecInitResult	nodeResult.rs (C:180)	crates/backend-executor-nodeResult/src/lib.rs:190	MATCH	yes	castNode; MARK/BACKWARD assert; makeNode(ResultState); rs_done/rs_checkqual; ExecAssignExprContext; child init; result slot/proj; qual+resconstantqual ExecInitQual.
+ExecEndResult	nodeResult.rs (C:233)	crates/backend-executor-nodeResult/src/lib.rs:262	MATCH	yes	ExecEndNode(outerPlanState); Some-guard behavior-identical to C unconditional (ExecEndNode(NULL) is a no-op).
+ExecReScanResult	nodeResult.rs (C:243)	crates/backend-executor-nodeResult/src/lib.rs:277	MATCH	yes	rs_done=false; rs_checkqual recompute; outerPlan && chgParam==NULL -> ExecReScan.

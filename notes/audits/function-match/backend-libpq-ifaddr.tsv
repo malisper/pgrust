@@ -1,0 +1,7 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+pg_range_sockaddr	ifaddr.rs:104	lib.rs:59	MATCH	yes	Family dispatch via IpAddr variants; identical on contract-respecting inputs, mixed/unsupported -> false. Per audit.
+range_sockaddr_AF_INET	ifaddr.rs:125	lib.rs:71	MATCH	yes	((addr^netaddr)&netmask)==0; byte-order invariant. Per audit.
+range_sockaddr_AF_INET6	ifaddr.rs:138	lib.rs:75	MATCH	yes	Per-octet (a^n)&m short-circuit over 16 octets. Per audit.
+pg_sockaddr_cidr_mask	ifaddr.rs:159	lib.rs:94 (+ipv4_cidr_mask:113,ipv6_cidr_mask:128,parse_strtol_base10)	MATCH	yes	NULL numbits default 32/128; strtol semantics incl. \v whitespace + sign + overflow clamp; IPv4/IPv6 mask loops transcribed exactly (fix round 1). Per audit.
+run_ifaddr_callback	ifaddr.rs:263	lib.rs:211 (+mask_is_valid_for_addr,address_family)	MATCH	yes	null-addr early return at caller; family-mismatch/INADDR_ANY/IPv6-unspecified mask invalidation; full-mask substitution. Per audit.
+pg_foreach_ifaddr	ifaddr.rs:331	lib.rs:287 (#[cfg(unix)]) + sockaddr_to_ipaddr:261	MATCH	yes	getifaddrs variant (built config); list walk + run_ifaddr_callback + freeifaddrs; AF_INET/AF_INET6 decode; non-IP filtered at decode (behaviorally identical). Per audit.

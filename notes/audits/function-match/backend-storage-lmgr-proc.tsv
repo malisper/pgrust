@@ -1,0 +1,54 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+DatumGetInt32	proc.rs:608	(types/postgres.h inline)	MATCH	yes	postgres.h inline; Datum->i32 cast, realized inline at the InitAuxiliaryProcess callback-arg sites
+Int32GetDatum	proc.rs:612	(types/postgres.h inline)	MATCH	yes	postgres.h inline; i32->Datum cast, realized inline at on_shmem_exit arg construction
+dlist_init	proc.rs:619	(ProcFreeList model, proc_shmem.rs)	MATCH	yes	ilist.h inline; freelist heads modeled as ordered ProcNumber lists; init = empty list
+dlist_node_init	proc.rs:624	(PGPROC links model)	MATCH	yes	ilist.h inline; detached-node marker via FreeList membership model; no separate node struct
+dlist_is_empty	proc.rs:629	crates/backend-storage-lmgr-proc/src/proc_shmem.rs (ProcFreeList::is_empty)	MATCH	yes	ilist.h inline; list emptiness over ProcNumber list
+dlist_push_head	proc.rs:634	crates/backend-storage-lmgr-proc/src/proc_shmem.rs:263	MATCH	yes	ilist.h inline; freelist_push_head -> ProcFreeList push_head
+dlist_push_tail	proc.rs:647	crates/backend-storage-lmgr-proc/src/proc_shmem.rs:267	MATCH	yes	ilist.h inline; freelist_push_tail -> ProcFreeList push_tail
+dlist_insert_before	proc.rs:660	crates/backend-storage-lmgr-proc/src/proc_waitqueue.rs	MATCH	yes	ilist.h inline; wait-queue priority insert realized as positional insert in JoinWaitQueue
+dlist_delete	proc.rs:670	crates/backend-storage-lmgr-proc/src/proc_waitqueue.rs	MATCH	yes	ilist.h inline; wait-queue dequeue realized in ProcWakeup/dequeue
+dlist_delete_thoroughly	proc.rs:675	crates/backend-storage-lmgr-proc/src/proc_waitqueue.rs	MATCH	yes	ilist.h inline; delete + node re-init, realized in dequeue with detach
+dlist_delete_from_thoroughly	proc.rs:682	crates/backend-storage-lmgr-proc/src/proc_waitqueue.rs	MATCH	yes	ilist.h inline; same as above with explicit head; realized in queue removal
+dlist_pop_head_node	proc.rs:689	crates/backend-storage-lmgr-proc/src/proc_shmem.rs:257	MATCH	yes	ilist.h inline; freelist pop -> ProcFreeList pop_head returning ProcNumber
+dlist_node_is_detached	proc.rs:696	crates/backend-storage-lmgr-proc/src/proc_waitqueue.rs	MATCH	yes	ilist.h inline; detached check realized via wait-queue membership model (ProcWakeup guard)
+dclist_init	proc.rs:700	(ProcGlobal freelist model)	MATCH	yes	ilist.h inline; counted-list init = empty list + count 0
+dclist_is_empty	proc.rs:705	crates/backend-storage-lmgr-proc/src/proc_shmem.rs	MATCH	yes	ilist.h inline; count==0 emptiness
+dclist_push_tail	proc.rs:709	crates/backend-storage-lmgr-proc/src/proc_waitqueue.rs	MATCH	yes	ilist.h inline; lock-group member push realized in BecomeLockGroupMember
+dclist_insert_before	proc.rs:720	crates/backend-storage-lmgr-proc/src/proc_waitqueue.rs	MATCH	yes	ilist.h inline; positional insert realized in queue insert
+dclist_delete_from_thoroughly	proc.rs:730	crates/backend-storage-lmgr-proc/src/proc_lifecycle.rs:324	MATCH	yes	ilist.h inline; counted-delete realized in ProcKill lock-group detach
+pg_atomic_init_u32_impl	proc.rs:739	(types-storage atomics)	MATCH	yes	atomics.h inline; AtomicU32 store rendering, realized inline at PGPROC field init
+pg_atomic_write_u64_impl	proc.rs:746	(types-storage atomics)	MATCH	yes	atomics.h inline; AtomicU64 store rendering
+pg_atomic_init_u64_impl	proc.rs:753	(types-storage atomics)	MATCH	yes	atomics.h inline; AtomicU64 init rendering
+pg_atomic_init_u32	proc.rs:760	(types-storage atomics)	MATCH	yes	atomics.h inline wrapper; realized inline at InitProcGlobal/InitProcess field init
+pg_atomic_init_u64	proc.rs:767	(types-storage atomics)	MATCH	yes	atomics.h inline wrapper
+pg_atomic_write_u64	proc.rs:774	(types-storage atomics)	MATCH	yes	atomics.h inline wrapper; realized inline at clogGroup/etc init
+tas	proc.rs:788	(seam) s_lock ProcStructLock	SEAMED	no	s_lock.h inline; spinlock TAS reached only via ProcStructLock; s_lock.c is the owner (Class-B panic-through)
+PGProcShmemSize	proc.rs:835	crates/backend-storage-lmgr-proc/src/proc_shmem.rs:86	MATCH	yes	add_size/mul_size over TotalProcs + mirror arrays
+FastPathLockShmemSize	proc.rs:856	crates/backend-storage-lmgr-proc/src/proc_shmem.rs:100	MATCH	yes	MAXALIGN(groups*u64)+MAXALIGN(slots*Oid)
+ProcGlobalShmemSize	proc.rs:879	crates/backend-storage-lmgr-proc/src/proc_shmem.rs:117	MATCH	yes	PROC_HDR + slock_t + above
+ProcGlobalSemas	proc.rs:888	crates/backend-storage-lmgr-proc/src/proc_shmem.rs:132	MATCH	yes	max_backends + NUM_AUXILIARY_PROCS
+InitProcGlobal	proc.rs:892	crates/backend-storage-lmgr-proc/src/proc_shmem.rs:361	MATCH	yes	freelists threaded by real C class partition (proc.c:328-351); records procgloballist
+InitProcess	proc.rs:1094	crates/backend-storage-lmgr-proc/src/proc_lifecycle.rs:116	MATCH	yes	freelist pop, class match, full field init, latch/sema/exit-cb ordering
+InitProcessPhase2	proc.rs:1331	crates/backend-storage-lmgr-proc/src/proc_lifecycle.rs:207	MATCH	yes	proc_array_add + on_shmem_exit
+InitAuxiliaryProcess	proc.rs:1341	crates/backend-storage-lmgr-proc/src/proc_lifecycle.rs:221	MATCH	yes	aux linear search via auxiliary_proc_find_free; cut-down init
+SetStartupBufferPinWaitBufId	proc.rs:1495	crates/backend-storage-lmgr-proc/src/proc_lifecycle.rs:480	MATCH	yes	ProcGlobal field write
+GetStartupBufferPinWaitBufId	proc.rs:1503	crates/backend-storage-lmgr-proc/src/proc_lifecycle.rs:486	MATCH	yes	ProcGlobal field read
+HaveNFreeProcs	proc.rs:1508	crates/backend-storage-lmgr-proc/src/proc_lifecycle.rs:492	MATCH	yes	freelist iter, n>0 assert, count==n
+LockErrorCleanup	proc.rs:1539	crates/backend-storage-lmgr-proc/src/proc_waitqueue.rs:658	MATCH	yes	hold-interrupts, abort-strong, timer disable, dequeue/grant
+ProcReleaseLocks	proc.rs:1594	crates/backend-storage-lmgr-proc/src/proc_waitqueue.rs:712	MATCH	yes	default + USER_LOCKMETHOD release
+RemoveProcFromArray	proc.rs:1602	crates/backend-storage-lmgr-proc/src/proc_lifecycle.rs:316	MATCH	yes	static callback; proc_array_remove
+ProcKill	proc.rs:1605	crates/backend-storage-lmgr-proc/src/proc_lifecycle.rs:324	MATCH	yes	static callback; lock-group detach, leader-return push_head, self push_tail, spins update
+AuxiliaryProcKill	proc.rs:1707	crates/backend-storage-lmgr-proc/src/proc_lifecycle.rs:415	MATCH	yes	static callback; aux slot release, pid==getpid panic, spins update
+AuxiliaryPidGetProc	proc.rs:1767	crates/backend-storage-lmgr-proc/src/proc_lifecycle.rs:461	MATCH	yes	pid==0 guard + linear scan
+JoinWaitQueue	proc.rs:1789	crates/backend-storage-lmgr-proc/src/proc_waitqueue.rs:110	MATCH	yes	priority-insert scan, early-deadlock, immediate-grant, heldLocks set
+ProcSleep	proc.rs:1909	crates/backend-storage-lmgr-proc/src/proc_waitqueue.rs:225	MATCH	yes	full wait loop: deadlock/lock timeout, HS, autovac-cancel, log_lock_waits
+ProcWakeup	proc.rs:2456	crates/backend-storage-lmgr-proc/src/proc_waitqueue.rs:523	MATCH	yes	detached guard, dequeue, clear-wait, SetLatch
+ProcLockWakeup	proc.rs:2477	crates/backend-storage-lmgr-proc/src/proc_waitqueue.rs:552	MATCH	yes	empty guard, ahead_requests conflict walk, grant+wakeup
+CheckDeadLock	proc.rs:2520	crates/backend-storage-lmgr-proc/src/proc_waitqueue.rs:602	MATCH	yes	all-partition acquire order, unlinked guard, DeadLockCheck (seam), hard-deadlock remove
+CheckDeadLockAlert	proc.rs:2555	crates/backend-storage-lmgr-proc/src/proc_waitqueue.rs:644	MATCH	yes	sets got_deadlock_timeout + latch; errno note correct
+GetLockHoldersAndWaiters	proc.rs:2565	crates/backend-storage-lmgr-proc/src/proc_waitqueue.rs:731	MATCH	yes	holder/waiter strings via lock seam; StringInfo OOM Err
+ProcWaitForSignal	proc.rs:2625	crates/backend-storage-lmgr-proc/src/proc_misc.rs:46	MATCH	yes	WaitLatch loop + ResetLatch
+ProcSendSignal	proc.rs:2640	crates/backend-storage-lmgr-proc/src/proc_misc.rs:63	MATCH	yes	range check via all_proc_count (real) + SetLatch
+BecomeLockGroupLeader	proc.rs:2674	crates/backend-storage-lmgr-proc/src/proc_misc.rs:78	MATCH	yes	idempotent self-leader under partition LWLock
+BecomeLockGroupMember	proc.rs:2699	crates/backend-storage-lmgr-proc/src/proc_misc.rs:112	MATCH	yes	leader pid/leader-of-self validation + dlist push_tail

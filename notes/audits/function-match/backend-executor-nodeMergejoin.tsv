@@ -1,0 +1,14 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+MJExamineQuals	nodeMergejoin.rs (C:175)	crates/backend-executor-nodeMergejoin/src/lib.rs:133	MATCH	yes	OpExpr check, ExecInitExpr x2, ssup setup, get_op_opfamily_properties, COMPARE_EQ check, BTSORTSUPPORT_PROC then BTORDER_PROC fallback + shim; elog messages preserved.
+MJEvalOuterValues	nodeMergejoin.rs (C:288)	crates/backend-executor-nodeMergejoin/src/lib.rs:239	MATCH	yes	end-of-input, reset OuterEContext, per-clause eval, i==0 nulls-first FillOuter early-end logic identical.
+MJEvalInnerValues	nodeMergejoin.rs (C:335)	crates/backend-executor-nodeMergejoin/src/lib.rs:291	MATCH	yes	Live/Marked slot selection via InnerSlot; rest identical to outer variant.
+MJCompare	nodeMergejoin.rs (C:386)	crates/backend-executor-nodeMergejoin/src/lib.rs:389	MATCH	yes	NULL-vs-NULL skip, ApplySortComparator, nulleqnull/ConstFalseJoin -> result=1.
+ApplySortComparator	sortsupport.h:200 (inline)	crates/backend-executor-nodeMergejoin/src/lib.rs:348	MATCH	yes	null/reverse arithmetic inlined; comparator via seam; INVERT on reverse.
+MJFillOuter	nodeMergejoin.rs (C:447)	crates/backend-executor-nodeMergejoin/src/lib.rs:451	MATCH	yes	reset ps_ExprContext, set outer=live/inner=null, ExecQual(otherqual), ExecProject, InstrCountFiltered2.
+MJFillInner	nodeMergejoin.rs (C:478)	crates/backend-executor-nodeMergejoin/src/lib.rs:485	MATCH	yes	mirror of MJFillOuter.
+check_constant_qual	nodeMergejoin.rs (C:514)	crates/backend-executor-nodeMergejoin/src/lib.rs:561	MATCH	yes	NIL->true, non-Const->false, null/false const sets is_const_false.
+ExecMergeJoin	nodeMergejoin.rs (C:594)	crates/backend-executor-nodeMergejoin/src/lib.rs:588	MATCH	yes	full EXEC_MJ_* state machine; JOINTUPLES econtext links set unconditionally (round-1 fix).
+ExecInitMergeJoin	nodeMergejoin.rs (C:1439)	crates/backend-executor-nodeMergejoin/src/lib.rs:1163	MATCH	yes	econtexts, child init, EXEC_FLAG_MARK gating, Material ExtraMarks, result slot/proj, marked slot, qual/joinqual, single_match, per-jointype null slots + check_constant_qual, MJExamineQuals, state reset.
+ExecEndMergeJoin	nodeMergejoin.rs (C:1636)	crates/backend-executor-nodeMergejoin/src/lib.rs:1389	MATCH	yes	ExecEndNode inner then outer.
+ExecReScanMergeJoin	nodeMergejoin.rs (C:1652)	crates/backend-executor-nodeMergejoin/src/lib.rs:1407	MATCH	yes	clear marked slot, state reset, chgParam==NULL -> ExecReScan each child.
+MarkInnerTuple	nodeMergejoin.rs (C:151 macro)	crates/backend-executor-nodeMergejoin/src/lib.rs:431	MATCH	yes	thin copy of inner->marked slot via execTuples seam (ExecCopySlot).

@@ -1,0 +1,45 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+brin_desc	brindesc.rs:217	brindesc.rs:22	MATCH	yes	all six opcodes; xl_brin_* offsets verified; OPMASK 0x70 applied
+brin_identify	brindesc.rs:282	brindesc.rs:69	MATCH	yes	all 8 cases incl |INIT_PAGE combos; constants 0x00-0x50/0x80 verified
+BlockIdGetBlockNumber	gindesc.rs:285	(inline)	MATCH	yes	c2rust-inlined itemptr.h helper; realized as block_id_at; Assert-only check inert
+ItemPointerGetBlockNumberNoCheck	gindesc.rs:292	(inline)	MATCH	yes	c2rust-inlined itemptr.h helper; realized as direct offset read
+ItemPointerGetBlockNumber	gindesc.rs:298	(inline)	MATCH	yes	c2rust-inlined itemptr.h helper; realized as direct offset read; Assert inert
+ItemPointerGetOffsetNumberNoCheck	gindesc.rs:304	(inline)	MATCH	yes	c2rust-inlined itemptr.h helper; realized as u16_at read
+ItemPointerGetOffsetNumber	gindesc.rs:310	(inline)	MATCH	yes	c2rust-inlined itemptr.h helper; realized as u16_at read; Assert inert
+desc_recompress_leaf	gindesc.rs:332	gindesc.rs:36	MATCH	yes	walbuf cursor walk; SizeOfGinPostingList SHORTALIGN; ADDITEMS 2+6*nitems; unknown action early return
+gin_desc	gindesc.rs:437	gindesc.rs:75	MATCH	yes	ginxlogInsert flags@0; children BlockIdData[2]; FPI/apply branches; split/deletelist offsets verified
+gin_identify	gindesc.rs:615	gindesc.rs:169	MATCH	yes	9 opcodes 0x10-0x90 verified
+out_gistxlogPageUpdate	gistdesc.rs:221	gistdesc.rs:19	MATCH	yes	intentionally empty in C; empty in port
+out_gistxlogPageReuse	gistdesc.rs:225	gistdesc.rs:24	MATCH	yes	locator 0/4/8, block@12, FullTransactionId@16, isCatalogRel@24; epoch/xid hi/lo split
+out_gistxlogDelete	gistdesc.rs:246	gistdesc.rs:41	MATCH	yes	snapshotConflictHorizon@0, ntodelete@4, isCatalogRel@6
+out_gistxlogPageSplit	gistdesc.rs:263	gistdesc.rs:54	MATCH	yes	npage@18 (origrlink@0, orignsn u64@8, origleaf@16)
+out_gistxlogPageDelete	gistdesc.rs:273	gistdesc.rs:61	MATCH	yes	deleteXid u64@0, downlinkOffset@8
+gist_desc	gistdesc.rs:286	gistdesc.rs:74	MATCH	yes	6 opcodes dispatched identically; ASSIGN_LSN no-op
+gist_identify	gistdesc.rs:313	gistdesc.rs:91	MATCH	yes	0x00-0x70 (0x40/0x50 retired) verified
+hash_desc	hashdesc.rs:263	hashdesc.rs:33	MATCH	yes	11 formatted opcodes; xl_hash_* offsets verified; %g rendered by GFmt matching printf
+hash_identify	hashdesc.rs:427	hashdesc.rs:132	MATCH	yes	13 opcodes 0x00-0xC0 verified
+BlockIdGetBlockNumber	heapdesc.rs:418	(inline)	MATCH	yes	c2rust-inlined itemptr.h helper (duplicated per file); realized as block_id_at
+ItemPointerGetBlockNumberNoCheck	heapdesc.rs:425	(inline)	MATCH	yes	c2rust-inlined itemptr.h helper; realized as direct offset read
+ItemPointerGetBlockNumber	heapdesc.rs:431	(inline)	MATCH	yes	c2rust-inlined itemptr.h helper; Assert inert
+ItemPointerGetOffsetNumberNoCheck	heapdesc.rs:437	(inline)	MATCH	yes	c2rust-inlined itemptr.h helper; realized as u16_at read
+ItemPointerGetOffsetNumber	heapdesc.rs:443	(inline)	MATCH	yes	c2rust-inlined itemptr.h helper; Assert inert
+infobits_desc	heapdesc.rs:491	heapdesc.rs:65	MATCH	yes	5 XLHL_* bits 0x01-0x10; ", " truncation; Assert->debug_assert
+truncate_flags_desc	heapdesc.rs:539	heapdesc.rs:95	MATCH	yes	CASCADE/RESTART_SEQS bits 1<<0/1<<1; same truncation
+plan_elem_desc	heapdesc.rs:564	heapdesc.rs (inlined closure in heap2_desc)	MATCH	yes	prints xmax@0/t_infomask@6/t_infomask2@4/ntuples@10 in C order; consumes frz_offsets cursor as C *offsets+=ntuples
+heap_xlog_deserialize_prune_and_freeze	heapdesc.rs:603	heapdesc.rs:139	MATCH	yes	four flag-gated sub-records same order; offsetof verified; redirections advance 2*2*n; out-params as PruneFreezeSubRecords
+heap_desc	heapdesc.rs:676	heapdesc.rs:207	MATCH	yes	OPMASK applied; INSERT/DELETE/UPDATE/HOT_UPDATE/TRUNCATE/CONFIRM/LOCK/INPLACE; xl_heap_* offsets verified; TRUNCATE via array_desc seams; INPLACE standby_desc_invalidations
+heap2_desc	heapdesc.rs:822	heapdesc.rs:267	MATCH	yes	PRUNE_* trio conflict_xid@SizeOfHeapPrune=2; VISIBLE/MULTI_INSERT/LOCK_UPDATED/NEW_CID offsets verified
+heap_identify	heapdesc.rs:1078	heapdesc.rs:437	MATCH	yes	11 cases incl three |INIT_PAGE combos
+heap2_identify	heapdesc.rs:1119	heapdesc.rs:455	MATCH	yes	9 cases incl MULTI_INSERT+INIT and REWRITE
+out_member	mxactdesc.rs:217	mxactdesc.rs:17	MATCH	yes	6 MultiXactStatus 0x00-0x05; default "(unk) "
+multixact_desc	mxactdesc.rs:269	mxactdesc.rs:32	MATCH	yes	ZERO_* int64 pageno unaligned; CREATE_ID mid@0/moff@4/nmembers@8/members@12 stride 8; TRUNCATE_ID skips oldestMultiDB@0
+multixact_identify	mxactdesc.rs:323	mxactdesc.rs:67	MATCH	yes	4 opcodes verified
+btree_desc	nbtdesc.rs:305	nbtdesc.rs:88	MATCH	yes	all 15 opcodes; xl_btree_* offsets verified (split/delete/halfdead/unlink/newroot/reuse/metadata)
+btree_identify	nbtdesc.rs:482	nbtdesc.rs:207	MATCH	yes	15 opcodes 0x00-0xE0 verified
+delvacuum_desc	nbtdesc.rs:534	nbtdesc.rs:34	MATCH	yes	deleted offsets via array_desc+offset_elem_desc seams; updated-objects loop SizeOfBtreeUpdate=2 stride; separators reproduced
+spg_desc	spgdesc.rs:274	spgdesc.rs:22	MATCH	yes	8 opcodes; spgxlog* offsets re-derived; AddNode parentBlk int8@5 signed
+spg_identify	spgdesc.rs:448	spgdesc.rs:146	MATCH	yes	8 opcodes 0x10-0x80 verified (0x00 retired)
+standby_desc_running_xacts	standbydesc.rs:277	standbydesc.rs:19	MATCH	yes	xl_running_xacts xcnt@0/subxcnt@4/overflow@8/nextXid@12/oldest@16/latest@20/xids@24; prints latest before oldest as C
+standby_desc	standbydesc.rs:331	standbydesc.rs:50	MATCH	yes	LOCK xl_standby_lock stride 12 from @4; RUNNING_XACTS delegate; INVALIDATIONS dbId@0/tsId@4/inval@8/nmsgs@12/msgs@16
+standby_identify	standbydesc.rs:371	standbydesc.rs:78	MATCH	yes	3 opcodes 0x00/0x10/0x20 verified
+standby_desc_invalidations	standbydesc.rs:390	standbydesc.rs:91	MATCH	yes	nmsgs<=0 early return; relcache-init-file line; per-message int8 id dispatch -1..-6; payload offsets verified; SizeOf=16

@@ -1,0 +1,28 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+MemoryContextSwitchTo	nodeBitmapHeapscan.rs:2825	lib.rs (folded)	MATCH	yes	Inline context switch; idiomatic equivalent.
+DatumGetBool	nodeBitmapHeapscan.rs:2831	lib.rs	MATCH	yes	Inline datum cast.
+newNode	nodeBitmapHeapscan.rs:2835	lib.rs (makeNode)	MATCH	yes	Inline node alloc+tag.
+tbm_exhausted	nodeBitmapHeapscan.rs:2843	lib.rs (tidbitmap seam)	MATCH	yes	Inline iterator-exhausted check; delegated to tidbitmap seam.
+tas	nodeBitmapHeapscan.rs:2847	lib.rs (SpinLockGuard)	MATCH	yes	Inline test-and-set; folded into spinlock guard, behavior-identical.
+ExecClearTuple	nodeBitmapHeapscan.rs:2852	lib.rs (execTuples seam)	MATCH	yes	Inline slot clear via execTuples seam.
+table_beginscan_bm	nodeBitmapHeapscan.rs:2859	lib.rs (tableam-bm seam)	MATCH	yes	Inline tableam wrapper via tableam-bm seam.
+table_endscan	nodeBitmapHeapscan.rs:2879	lib.rs (tableam-bm seam)	MATCH	yes	Inline tableam wrapper via seam.
+table_rescan	nodeBitmapHeapscan.rs:2883	lib.rs (tableam-bm seam)	MATCH	yes	Inline tableam wrapper via seam.
+table_scan_bitmap_next_tuple	nodeBitmapHeapscan.rs:2889	lib.rs (tableam-bm seam)	MATCH	yes	Inline tableam wrapper; lossy/exact counter deltas returned by seam, equivalent.
+ExecEvalExprSwitchContext	nodeBitmapHeapscan.rs:2934	lib.rs (execExpr seam)	MATCH	yes	Inline expr-eval wrapper via execExpr seam.
+ExecQual	nodeBitmapHeapscan.rs:2949	lib.rs	MATCH	yes	Inline qual eval; NULL-state->true mirrored.
+ExecQualAndReset	nodeBitmapHeapscan.rs:2962	lib.rs:242	MATCH	yes	Audit L5: NULL qual->true else ExecQual; always ResetExprContext after.
+BitmapTableScanSetup	nodeBitmapHeapscan.rs:2970	lib.rs:78	MATCH	yes	Audit fn1: leader/follower branches, tbm iterate, first-scan table_beginscan_bm.
+BitmapHeapNext	nodeBitmapHeapscan.rs:3070	lib.rs:159	MATCH	yes	Audit fn2: next-tuple loop, recheck->ExecQualAndReset, CFI, end-of-scan clear.
+BitmapDoneInitializingSharedState	nodeBitmapHeapscan.rs:3106	lib.rs:618	MATCH	yes	Audit fn3: spinlock-guarded state=BM_FINISHED, ConditionVariableBroadcast.
+BitmapHeapRecheck	nodeBitmapHeapscan.rs:3124	lib.rs:226	MATCH	yes	Audit fn4: sets ecxt_scantuple, returns ExecQualAndReset(bitmapqualorig).
+ExecBitmapHeapScan	nodeBitmapHeapscan.rs:3133	lib.rs:385	MATCH	yes	Audit fn5: delegates to ExecScan driver.
+ExecReScanBitmapHeapScan	nodeBitmapHeapscan.rs:3172	lib.rs:395	MATCH	yes	Audit fn6: tbm_exhausted/tbm_end_iterate, table_rescan, tbm_free, reset flags.
+ExecEndBitmapHeapScan	nodeBitmapHeapscan.rs:3197	lib.rs:468	MATCH	yes	Audit fn7: parallel-worker stats accumulate, ExecEndNode, scanDesc guard, tbm_free.
+ExecInitBitmapHeapScan	nodeBitmapHeapscan.rs:3223	lib.rs:522	MATCH	yes	Audit fn8: flag/MVCC asserts, makeNode, scan-rel open, slot/proj/qual init.
+BitmapShouldInitializeSharedState	nodeBitmapHeapscan.rs:3274	lib.rs:637	MATCH	yes	Audit fn9: state-machine loop/spinlock; wait-event const fixed to PG_WAIT_IPC|38.
+ExecBitmapHeapEstimate	nodeBitmapHeapscan.rs:3312	lib.rs:689	MATCH	yes	Audit fn10: MAXALIGN sizing + instrument/nworkers offsetof, estimate_chunk/keys.
+ExecBitmapHeapInitializeDSM	nodeBitmapHeapscan.rs:3342	lib.rs:716	PARTIAL	no	Audit fn11: sizing+allocate reproduced; in-place init gated behind unported DSM placement owner panic.
+ExecBitmapHeapReInitializeDSM	nodeBitmapHeapscan.rs:3414	lib.rs:764	MATCH	yes	Audit fn12: dsa-NULL early return, state=BM_INITIAL, tbm_free_shared_area, reset iterator.
+ExecBitmapHeapInitializeWorker	nodeBitmapHeapscan.rs:3430	lib.rs:792	PARTIAL	no	Audit fn13: es_query_dsa assert; chunk-attach is unported parallel-worker DSM owner, panics.
+ExecBitmapHeapRetrieveInstrumentation	nodeBitmapHeapscan.rs:3456	lib.rs:823	MATCH	yes	Audit fn14: NULL early return, deep-copy shared struct into private memory.

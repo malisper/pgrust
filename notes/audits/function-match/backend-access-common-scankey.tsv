@@ -1,0 +1,4 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+ScanKeyEntryInitialize	scankey.rs:86	-	MISSING	no	No counterpart in crate. C stamps flags/attno/strategy/subtype/collation/argument, then if procedure!=InvalidOid does fmgr_info(procedure,&sk_func) else memsets sk_func to zero. Crate only ports the ScanKeyInit shorthand.
+ScanKeyInit	scankey.rs:130	ScanKeyInit (lib.rs:30)	MATCH	yes	flags=0, attno, strategy, subtype=InvalidOid, collation=C_COLLATION_OID (950), argument; fmgr resolution via backend-utils-fmgr-fmgr-seams::fmgr_info_check (eager lookup-failure surface preserved); sk_func records resolved fn_oid (FmgrInfo embeds a C fn ptr that cannot cross the seam).
+ScanKeyEntryInitializeWithInfo	scankey.rs:146	-	MISSING	no	No counterpart in crate. C stamps the same fields with caller-supplied flags/subtype/collation, then fmgr_info_copy(&sk_func, finfo, CurrentMemoryContext) instead of a fresh lookup.

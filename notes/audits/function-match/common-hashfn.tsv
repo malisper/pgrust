@@ -1,0 +1,9 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+pg_rotate_left32	common-batch1/src/hashfn.rs:14	common-hashfn/src/lib.rs (u32::rotate_left)	MATCH	yes	rot(x,k) macro; native rotate_left identical to C (word<<n)|(word>>(32-n)) for all n in 1..31 used.
+hash_bytes	common-batch1/src/hashfn.rs:23	common-hashfn/src/lib.rs:88	MATCH	yes	init a=b=c=0x9e3779b9+len+3923095; 12-byte loop; LE tail per len 0..11; final; returns c. assert len<=i32::MAX mirrors int keylen.
+hash_bytes_extended	common-batch1/src/hashfn.rs:411	common-hashfn/src/lib.rs:93	MATCH	yes	Seed mix-before-loop when seed!=0 (a+=seed>>32; b+=seed; mix); same loop+tail; returns (b<<32)|c.
+hash_bytes_uint32	common-batch1/src/hashfn.rs:822	common-hashfn/src/lib.rs:100	MATCH	yes	a=b=c=0x9e3779b9+4+3923095; a+=k; final; return c.
+hash_bytes_uint32_extended	common-batch1/src/hashfn.rs:849	common-hashfn/src/lib.rs:107	MATCH	yes	Same init; seed mix when seed!=0; a+=k; final; (b<<32)|c.
+string_hash	common-batch1/src/hashfn.rs:901	common-hashfn/src/lib.rs:119	MATCH	yes	strlen via NUL scan; Min(s_len, keysize-1) with wrapping_sub(1) reproducing C unsigned wrap at keysize==0; then hash_bytes.
+tag_hash	common-batch1/src/hashfn.rs:914	common-hashfn/src/lib.rs:127	MATCH	yes	hash_bytes(key[..keysize]); assert slice covers keysize.
+uint32_hash	common-batch1/src/hashfn.rs:921	common-hashfn/src/lib.rs:133	MATCH	yes	hash_bytes_uint32(k); C Assert(keysize==sizeof(uint32)) enforced structurally by u32 signature.

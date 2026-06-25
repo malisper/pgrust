@@ -1,0 +1,88 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+utf8_to_unicode	wchar.rs(hdr inline)	lib.rs:133	MATCH	yes	bogus lead -> 0xffffffff
+unicode_to_utf8	wchar.rs(hdr inline)	lib.rs:157	MATCH	yes	1-4 byte encode, identical masks
+pg_ascii2wchar_with_len	wchar.rs:73	lib.rs:195	MATCH	yes
+pg_ascii_mblen	wchar.rs:88	lib.rs:210	MATCH	yes
+pg_ascii_dsplen	wchar.rs:94	lib.rs:214	MATCH	yes	NUL->0, <0x20/0x7f->-1, else 1
+pg_euc2wchar_with_len	wchar.rs:108	lib.rs:229	MATCH	yes	SS2/SS3/highbit/ascii
+pg_euc_mblen	wchar.rs:149	lib.rs:275	MATCH	yes
+pg_euc_dsplen	wchar.rs:165	lib.rs:289	MATCH	yes
+pg_eucjp2wchar_with_len	wchar.rs:184	lib.rs:304	MATCH	yes	delegates to euc
+pg_eucjp_mblen	wchar.rs:190	lib.rs:308	MATCH	yes
+pg_eucjp_dsplen	wchar.rs:196	lib.rs:312	MATCH	yes	SS2->1, SS3->2
+pg_euckr2wchar_with_len	wchar.rs:215	lib.rs:327	MATCH	yes
+pg_euckr_mblen	wchar.rs:221	lib.rs:331	MATCH	yes
+pg_euckr_dsplen	wchar.rs:227	lib.rs:335	MATCH	yes
+pg_euccn2wchar_with_len	wchar.rs:237	lib.rs:341	MATCH	yes	SS2/SS3 both 3-byte
+pg_euccn_mblen	wchar.rs:285	lib.rs:388	MATCH	yes	SS2/SS3->3 (differs from verifychar by design, preserved)
+pg_euccn_dsplen	wchar.rs:301	lib.rs:401	MATCH	yes
+pg_euctw2wchar_with_len	wchar.rs:317	lib.rs:411	MATCH	yes	SS2 4-byte (uint32)SS2<<24 cast preserved
+pg_euctw_mblen	wchar.rs:360	lib.rs:460	MATCH	yes
+pg_euctw_dsplen	wchar.rs:376	lib.rs:473	MATCH	yes
+pg_wchar2euc_with_len	wchar.rs:398	lib.rs:487	MATCH	yes	4/3/2/1-byte cascade
+pg_johab_mblen	wchar.rs:444	lib.rs:538	MATCH	yes
+pg_johab_dsplen	wchar.rs:450	lib.rs:542	MATCH	yes
+pg_utf2wchar_with_len	wchar.rs:462	lib.rs:550	MATCH	yes	1-4 byte decode, bogus->len1
+pg_wchar2utf_with_len	wchar.rs:525	lib.rs:608	MATCH	yes	uses pg_utf_mblen on written byte
+pg_utf_mblen_private	wchar.rs:556	lib.rs:176/1555	MATCH	yes	leading-byte length; NOT_USED 5/6-byte branches correctly absent
+mbbisearch	wchar.rs:599	lib.rs:628	MATCH	yes	max=len-1; empty-guard added (tables never empty)
+ucs_wcwidth	wchar.rs:646	lib.rs:648	MATCH	yes	nonspacing-first order, 0x10ffff bound
+pg_utf_dsplen	wchar.rs:680	lib.rs:664	MATCH	yes
+pg_mule2wchar_with_len	wchar.rs:692	lib.rs:672	MATCH	yes	LC1/LCPRV1/LC2/LCPRV2 ranges verified
+pg_wchar2mule_with_len	wchar.rs:749	lib.rs:732	MATCH	yes	all 6 range branches + ASCII verified
+pg_mule_mblen	wchar.rs:815	lib.rs:802/1561	MATCH	yes
+pg_mule_dsplen	wchar.rs:833	lib.rs:817	MATCH	yes
+pg_latin12wchar_with_len	wchar.rs:861	lib.rs:836	MATCH	yes
+pg_wchar2single_with_len	wchar.rs:883	lib.rs:851	MATCH	yes
+pg_latin1_mblen	wchar.rs:898	lib.rs:866	MATCH	yes
+pg_latin1_dsplen	wchar.rs:904	lib.rs:870	MATCH	yes
+pg_sjis_mblen	wchar.rs:913	lib.rs:878	MATCH	yes	0xa1..0xdf->1 kana
+pg_sjis_dsplen	wchar.rs:927	lib.rs:889	MATCH	yes
+pg_big5_mblen	wchar.rs:944	lib.rs:900	MATCH	yes
+pg_big5_dsplen	wchar.rs:956	lib.rs:908	MATCH	yes
+pg_gbk_mblen	wchar.rs:971	lib.rs:916	MATCH	yes
+pg_gbk_dsplen	wchar.rs:983	lib.rs:924	MATCH	yes
+pg_uhc_mblen	wchar.rs:998	lib.rs:932	MATCH	yes
+pg_uhc_dsplen	wchar.rs:1010	lib.rs:940	MATCH	yes
+pg_gb18030_mblen	wchar.rs:1037	lib.rs:948	MATCH	yes	.get(1).unwrap_or(0) defensive read, same result for valid callers
+pg_gb18030_dsplen	wchar.rs:1051	lib.rs:964	MATCH	yes
+pg_ascii_verifychar	wchar.rs:1085	lib.rs:986	MATCH	yes	return 1
+pg_ascii_verifystr	wchar.rs:1091	lib.rs:990	MATCH	yes	memchr -> nul_pos
+pg_eucjp_verifychar	wchar.rs:1104	lib.rs:994	MATCH	yes	SS2/SS3/highbit ranges + len checks
+pg_eucjp_verifystr	wchar.rs:1159	lib.rs:1046	MATCH	yes	shared verify_str helper (factored loop, verified identical)
+pg_euckr_verifychar	wchar.rs:1188	lib.rs:1050	MATCH	yes
+pg_euckr_verifystr	wchar.rs:1217	lib.rs:1073	MATCH	yes
+pg_euctw_verifychar	wchar.rs:1250	lib.rs:1077	MATCH	yes	SS2 0xa1..0xa7 first cont, SS3->-1
+pg_euctw_verifystr	wchar.rs:1300	lib.rs:1122	MATCH	yes
+pg_johab_verifychar	wchar.rs:1329	lib.rs:1126	MATCH	yes	--l>0 trailing EUC-range loop
+pg_johab_verifystr	wchar.rs:1353	lib.rs:1150	MATCH	yes
+pg_mule_verifychar	wchar.rs:1382	lib.rs:1154	MATCH	yes	trailing-byte highbit loop
+pg_mule_verifystr	wchar.rs:1403	lib.rs:1175	MATCH	yes
+pg_latin1_verifychar	wchar.rs:1432	lib.rs:1179	MATCH	yes
+pg_latin1_verifystr	wchar.rs:1438	lib.rs:1183	MATCH	yes
+pg_sjis_verifychar	wchar.rs:1449	lib.rs:1187	MATCH	yes	ISSJISHEAD/ISSJISTAIL inlined exactly
+pg_sjis_verifystr	wchar.rs:1472	lib.rs:1206	MATCH	yes
+pg_big5_verifychar	wchar.rs:1501	lib.rs:1210	MATCH	yes	NONUTF8_INVALID pair reject + NUL-in-trailer
+pg_big5_verifystr	wchar.rs:1526	lib.rs:1233	MATCH	yes
+pg_gbk_verifychar	wchar.rs:1555	lib.rs:1237	MATCH	yes
+pg_gbk_verifystr	wchar.rs:1580	lib.rs:1260	MATCH	yes
+pg_uhc_verifychar	wchar.rs:1609	lib.rs:1264	MATCH	yes
+pg_uhc_verifystr	wchar.rs:1634	lib.rs:1287	MATCH	yes
+pg_gb18030_verifychar	wchar.rs:1663	lib.rs:1291	MATCH	yes	4/2-byte range validation, len guards
+pg_gb18030_verifystr	wchar.rs:1694	lib.rs:1314	MATCH	yes
+pg_utf8_verifychar	wchar.rs:1723	lib.rs:1318	MATCH	yes	NUL->-1, l>len->-1, islegal check
+utf8_advance	wchar.rs:1894	lib.rs:1376	MATCH	yes	shift-DFA, mask 31
+pg_utf8_verifystr	wchar.rs:1912	lib.rs:1387	MATCH	yes	STRIDE fast path, ERR restart, backtrack-to-lead loop
+pg_utf8_islegal	wchar.rs:2010	lib.rs:1437/1568	MATCH	yes	RFC3629 second-byte tables; lengths 5/6->false
+pg_encoding_set_invalid	wchar.rs:2072	lib.rs:1539	MATCH	yes	UTF8->0xc0 else 0x8d; Option<()> replaces Assert(max_length>1)
+pg_encoding_mblen	wchar.rs:2156	lib.rs:1585	MATCH	yes	PG_VALID_ENCODING fallback to PG_SQL_ASCII via table_index
+pg_encoding_mblen_or_incomplete	wchar.rs:2168	lib.rs:1593	MATCH	yes	remaining<1 or GB18030+highbit+<2 -> INT_MAX
+pg_encoding_mblen_bounded	wchar.rs:2188	lib.rs:1602	MATCH	yes	strnlen over mblen
+pg_encoding_dsplen	wchar.rs:2198	lib.rs:1614	MATCH	yes
+pg_encoding_verifymbchar	wchar.rs:2210	lib.rs:1621	MATCH	yes	explicit C len -> slice len (idiomatic slice port)
+pg_encoding_verifymbstr	wchar.rs:2224	lib.rs:1627	MATCH	yes	likewise
+pg_encoding_max_length	wchar.rs:2235	lib.rs:1633	MATCH	yes	Assert(PG_VALID)+valid-check honored by table_index clamp
+vector8_broadcast	wchar.rs(simd.h inline)	lib.rs:115(folded)	MATCH	yes	SIMD-free header inline; port folds the four vector8_* primitives into scalar is_valid_ascii used by the UTF-8 verifystr fast path; detects NUL/high-bit per block, behavior identical
+vector8_eq	wchar.rs(simd.h inline)	lib.rs:115(folded)	MATCH	yes	folded into is_valid_ascii (see vector8_broadcast row)
+vector8_is_highbit_set	wchar.rs(simd.h inline)	lib.rs:115(folded)	MATCH	yes	folded into is_valid_ascii (high-bit detect)
+vector8_or	wchar.rs(simd.h inline)	lib.rs:115(folded)	MATCH	yes	folded into is_valid_ascii (block accumulate)

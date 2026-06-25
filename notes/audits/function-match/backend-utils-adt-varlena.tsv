@@ -1,0 +1,227 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+__isctype	varlena.rs:2381	(n/a)	MATCH	yes	c2rust libc ctype inline; not a varlena.c fn
+isxdigit	varlena.rs:2393	misc_encoding.rs:653	MATCH	yes	ctype inline; isxdigits_n reimplements the predicate over n bytes
+initReadOnlyStringInfo	varlena.rs:2398	(inline)	MATCH	yes	stringinfo.h inline; modeled inline at recv sites
+MemoryContextSwitchTo	varlena.rs:2410	(inline)	MATCH	yes	mcxt inline; Mcx model handles context
+DatumGetBool	varlena.rs:2416	(inline)	MATCH	yes	postgres.h macro inline
+BoolGetDatum	varlena.rs:2420	(inline)	MATCH	yes	postgres.h macro inline
+CharGetDatum	varlena.rs:2428	(inline)	MATCH	yes	postgres.h macro inline
+DatumGetInt16	varlena.rs:2432	(inline)	MATCH	yes	postgres.h macro inline
+Int16GetDatum	varlena.rs:2436	(inline)	MATCH	yes	postgres.h macro inline
+DatumGetInt32	varlena.rs:2440	split_format.rs:2017	MATCH	yes	macro inline; datum_get_int32 helper where needed
+Int32GetDatum	varlena.rs:2444	(inline)	MATCH	yes	postgres.h macro inline
+DatumGetUInt32	varlena.rs:2448	(inline)	MATCH	yes	postgres.h macro inline
+UInt32GetDatum	varlena.rs:2452	(inline)	MATCH	yes	postgres.h macro inline
+ObjectIdGetDatum	varlena.rs:2456	(inline)	MATCH	yes	postgres.h macro inline
+DatumGetPointer	varlena.rs:2460	(inline)	MATCH	yes	postgres.h macro inline
+PointerGetDatum	varlena.rs:2464	(inline)	MATCH	yes	postgres.h macro inline
+DatumGetCString	varlena.rs:2468	(inline)	MATCH	yes	postgres.h macro inline
+CStringGetDatum	varlena.rs:2472	(inline)	MATCH	yes	postgres.h macro inline
+DatumGetName	varlena.rs:2476	(inline)	MATCH	yes	postgres.h macro inline
+NameGetDatum	varlena.rs:2480	(inline)	MATCH	yes	postgres.h macro inline
+DatumGetInt64	varlena.rs:2484	(inline)	MATCH	yes	postgres.h macro inline
+Int64GetDatum	varlena.rs:2488	(inline)	MATCH	yes	postgres.h macro inline
+hash_any	varlena.rs:2494	(seam)	SEAMED	no	hashfn.c owner; seamed (used by abbrev convert)
+hash_uint32	varlena.rs:2501	(seam)	SEAMED	no	hashfn.c owner; seamed
+pg_add_s32_overflow	varlena.rs:2505	(inline)	MATCH	yes	port/int.h inline; checked_add used where needed
+pg_mul_s32_overflow	varlena.rs:2515	(inline)	MATCH	yes	port/int.h inline; checked_mul used where needed
+is_valid_unicode_codepoint	varlena.rs:2525	misc_encoding.rs:911	MATCH	yes	mb inline reimplemented
+is_utf16_surrogate_first	varlena.rs:2529	misc_encoding.rs:916	MATCH	yes	mb inline reimplemented
+is_utf16_surrogate_second	varlena.rs:2533	misc_encoding.rs:921	MATCH	yes	mb inline reimplemented
+surrogate_pair_to_codepoint	varlena.rs:2537	misc_encoding.rs:927	MATCH	yes	mb inline reimplemented
+utf8_to_unicode	varlena.rs:2546	misc_encoding.rs:853	MATCH	yes	mb inline reimplemented
+unicode_to_utf8	varlena.rs:2581	misc_encoding.rs:876	MATCH	yes	mb inline reimplemented
+fetch_att	varlena.rs:2612	(inline)	MATCH	yes	tupmacs.h inline; not varlena.c logic
+pg_popcount	varlena.rs:2662	bytea.rs:351	MATCH	yes	pg_bitutils inline; folded into bytea_bit_count
+pq_writeint8	varlena.rs:2689	(inline)	MATCH	yes	pqformat.h inline at send sites
+pq_writeint16	varlena.rs:2701	(inline)	MATCH	yes	pqformat.h inline at send sites
+pq_writeint32	varlena.rs:2713	(inline)	MATCH	yes	pqformat.h inline at send sites
+pq_sendint8	varlena.rs:2725	(inline)	MATCH	yes	pqformat.h inline at send sites
+pq_sendint16	varlena.rs:2730	(inline)	MATCH	yes	pqformat.h inline at send sites
+pq_sendint32	varlena.rs:2735	(inline)	MATCH	yes	pqformat.h inline at send sites
+pq_sendint	varlena.rs:2740	(inline)	MATCH	yes	pqformat.h inline at send sites
+cstring_to_text	varlena.rs:2794	keystone.rs:174	MATCH	yes	delegates to cstring_to_text_with_len(strlen)
+cstring_to_text_with_len	varlena.rs:2800	keystone.rs:181	MATCH	yes	palloc VARHDRSZ+len, set varsize, memcpy
+text_to_cstring	varlena.rs:2817	keystone.rs:196	MATCH	yes	detoast + palloc len+1 + memcpy + NUL
+text_to_cstring_buffer	varlena.rs:2884	keystone.rs:210	MATCH	yes	detoast, src_len clamp, memcpy, NUL terminate
+byteain	varlena.rs:2968	bytea.rs:54	MATCH	yes	backslash/octal escape parse; ERRCODE_INVALID_TEXT_REPRESENTATION
+byteaout	varlena.rs:3154	bytea.rs:126	MATCH	yes	escape vs hex output per bytea_output (escape path here)
+bytearecv	varlena.rs:3504	bytea.rs:191	MATCH	yes	copy remaining buffer bytes into bytea
+byteasend	varlena.rs:3526	bytea.rs:197	MATCH	yes	pq_sendbytes of payload
+bytea_string_agg_transfn	varlena.rs:3537	split_format.rs:1416	MATCH	yes	makeStringAggState + appendBinary delimiter/value
+bytea_string_agg_finalfn	varlena.rs:3734	split_format.rs:1562	MATCH	yes	build bytea from accumulated StringInfo
+textin	varlena.rs:3771	wire_io.rs:28	MATCH	yes	cstring_to_text of input
+textout	varlena.rs:3780	wire_io.rs:38	MATCH	yes	text_to_cstring
+textrecv	varlena.rs:3787	wire_io.rs:48	MATCH	yes	pq_getmsgtext + verify encoding
+textsend	varlena.rs:3804	wire_io.rs:64	MATCH	yes	pq_sendtext of payload
+unknownin	varlena.rs:3871	wire_io.rs:75	MATCH	yes	cstring_to_unknown
+unknownout	varlena.rs:3880	wire_io.rs:83	MATCH	yes	unknown_to_cstring (pstrdup)
+unknownrecv	varlena.rs:3889	wire_io.rs:93	MATCH	yes	read remaining as unknown
+unknownsend	varlena.rs:3903	wire_io.rs:103	MATCH	yes	pq_sendtext of payload
+textlen	varlena.rs:3920	wire_io.rs:128	MATCH	yes	wraps text_length
+text_length	varlena.rs:3926	keystone.rs:240	MATCH	yes	single-byte: VARSIZE_ANY_EXHDR; else mbstrlen seam
+textoctetlen	varlena.rs:3993	wire_io.rs:137	MATCH	yes	toast_raw_datum_size - VARHDRSZ
+textcat	varlena.rs:4003	wire_io.rs:145	MATCH	yes	wraps text_catenate
+text_catenate	varlena.rs:4020	keystone.rs:251	MATCH	yes	palloc len1+len2-VARHDRSZ, two memcpy
+charlen_to_bytelen	varlena.rs:4146	keystone.rs:266	MATCH	yes	single-byte fast path; else per-char mblen walk
+text_substr	varlena.rs:4165	position_ops.rs:52	MATCH	yes	wraps text_substring(..,true)
+text_substr_no_len	varlena.rs:4186	position_ops.rs:52	MATCH	yes	wraps text_substring(..,false) (same fn, len flag)
+text_substring	varlena.rs:4202	position_ops.rs:52	MATCH	yes	single-byte slice math + multibyte charlen path; bounds clamps
+pg_mbcharcliplen_chars	varlena.rs:4512	position_ops.rs:231	MATCH	yes	per-char mblen accumulation up to limit
+textoverlay	varlena.rs:4531	position_ops.rs:304	MATCH	yes	wraps text_overlay with sl
+textoverlay_no_len	varlena.rs:4559	position_ops.rs:304	MATCH	yes	wraps text_overlay computing sl from substr length
+text_overlay	varlena.rs:4584	position_ops.rs:304	MATCH	yes	sp/sl bounds, three text_substring + two catenate
+textpos	varlena.rs:4688	position_ops.rs:339	MATCH	yes	wraps text_position+1 (1-based)
+text_position	varlena.rs:4705	position_ops.rs:351	MATCH	yes	setup/next/get_match_pos/cleanup orchestration
+text_position_setup	varlena.rs:4866	position_ops.rs:382	MATCH	yes	BMH skiptable build, mask brackets, one-char/nondeterministic skips
+text_position_next	varlena.rs:5018	position_ops.rs:475	MATCH	yes	empty-pattern early return, retry loop, mb boundary walk
+text_position_next_internal	varlena.rs:5066	position_ops.rs:532	MATCH	yes	greedy/non-greedy loop, one-char fast path, BMH backward scan
+text_position_get_match_ptr	varlena.rs:5174	position_ops.rs:657	MATCH	yes	returns last_match pointer
+text_position_get_match_pos	varlena.rs:5179	position_ops.rs:641	MATCH	yes	char count from start to match
+text_position_reset	varlena.rs:5191	position_ops.rs:664	MATCH	yes	clears last_match/refpoint
+text_position_cleanup	varlena.rs:5196	position_ops.rs:671	MATCH	yes	frees skiptable (no-op in model)
+check_collation_set	varlena.rs:5197	keystone.rs:283	MATCH	yes	InvalidOid -> ERRCODE_INDETERMINATE_COLLATION
+varstr_cmp	varlena.rs:5244	comparison.rs:54	MATCH	yes	collate_is_c memcmp+len tiebreak; len-eq shortcut; pg_strncoll; deterministic tiebreak
+text_cmp	varlena.rs:5298	comparison.rs:89	MATCH	yes	detoast + varstr_cmp
+texteq	varlena.rs:5406	comparison.rs:97	MATCH	yes	deterministic length-shortcut then memcmp
+textne	varlena.rs:5510	comparison.rs:115	MATCH	yes	deterministic length-shortcut then memcmp negated
+text_lt	varlena.rs:5614	comparison.rs:130	MATCH	yes	text_cmp < 0
+text_le	varlena.rs:5652	comparison.rs:135	MATCH	yes	text_cmp <= 0
+text_gt	varlena.rs:5690	comparison.rs:140	MATCH	yes	text_cmp > 0
+text_ge	varlena.rs:5728	comparison.rs:145	MATCH	yes	text_cmp >= 0
+text_starts_with	varlena.rs:5766	comparison.rs:150	MATCH	yes	deterministic prefix memcmp; else nondeterministic locale path
+bttextcmp	varlena.rs:5918	comparison.rs:176	MATCH	yes	text_cmp returning int32 datum
+bttextsortsupport	varlena.rs:5956	sortsupport.rs:122	MATCH	yes	delegates to varstr_sortsupport(collid)
+varstr_sortsupport	varlena.rs:5970	sortsupport.rs:161	MATCH	yes	collate_c/abbrev setup, comparator selection, locale reservation
+varstrfastcmp_c	varlena.rs:6100	sortsupport.rs:277	MATCH	yes	memcmp min-len then length tiebreak; free if not cached
+bpcharfastcmp_c	varlena.rs:6232	sortsupport.rs:294	MATCH	yes	bpchartruelen trim then memcmp+len tiebreak
+namefastcmp_c	varlena.rs:6370	sortsupport.rs:327	MATCH	yes	strncmp over NAMEDATALEN
+varlenafastcmp_locale	varlena.rs:6383	sortsupport.rs:340	MATCH	yes	detoast then varstrfastcmp_locale
+namefastcmp_locale	varlena.rs:6504	sortsupport.rs:353	MATCH	yes	NameData then varstrfastcmp_locale
+varstrfastcmp_locale	varlena.rs:6519	sortsupport.rs:369	MATCH	yes	cache check, pg_strncoll, length/byte tiebreak
+varstr_abbrev_convert	varlena.rs:6633	sortsupport.rs:444	MATCH	yes	strxfrm or memcpy into abbrev key; cache + stats
+varstr_abbrev_abort	varlena.rs:6871	sortsupport.rs:564	MATCH	yes	abort heuristic on key cardinality
+btvarstrequalimage	varlena.rs:6968	comparison.rs:182	MATCH	yes	collation_is_deterministic check
+text_larger	varlena.rs:6976	comparison.rs:194	MATCH	yes	text_cmp>0 ? a : b
+text_smaller	varlena.rs:7000	comparison.rs:207	MATCH	yes	text_cmp<0 ? a : b
+nameeqtext	varlena.rs:7024	name_pattern.rs:32	MATCH	yes	name vs text byte compare, deterministic length shortcut
+texteqname	varlena.rs:7124	name_pattern.rs:49	MATCH	yes	mirror of nameeqtext
+namenetext	varlena.rs:7224	name_pattern.rs:66	MATCH	yes	negation of nameeqtext
+textnename	varlena.rs:7324	name_pattern.rs:83	MATCH	yes	mirror of namenetext
+btnametextcmp	varlena.rs:7424	name_pattern.rs:101	MATCH	yes	varstr_cmp(name,text)
+bttextnamecmp	varlena.rs:7501	name_pattern.rs:107	MATCH	yes	varstr_cmp(text,name)
+namelttext	varlena.rs:7578	name_pattern.rs:118	MATCH	yes	cmp<0
+nameletext	varlena.rs:7595	name_pattern.rs:123	MATCH	yes	cmp<=0
+namegttext	varlena.rs:7612	name_pattern.rs:128	MATCH	yes	cmp>0
+namegetext	varlena.rs:7629	name_pattern.rs:133	MATCH	yes	cmp>=0
+textltname	varlena.rs:7646	name_pattern.rs:138	MATCH	yes	cmp<0
+textlename	varlena.rs:7663	name_pattern.rs:143	MATCH	yes	cmp<=0
+textgtname	varlena.rs:7680	name_pattern.rs:148	MATCH	yes	cmp>0
+textgename	varlena.rs:7697	name_pattern.rs:153	MATCH	yes	cmp>=0
+internal_text_pattern_compare	varlena.rs:7713	name_pattern.rs:164	MATCH	yes	memcmp min-len then length tiebreak (C locale semantics)
+text_pattern_lt	varlena.rs:7826	name_pattern.rs:188	MATCH	yes	internal cmp<0
+text_pattern_le	varlena.rs:7864	name_pattern.rs:193	MATCH	yes	internal cmp<=0
+text_pattern_ge	varlena.rs:7902	name_pattern.rs:198	MATCH	yes	internal cmp>=0
+text_pattern_gt	varlena.rs:7940	name_pattern.rs:203	MATCH	yes	internal cmp>0
+bttext_pattern_cmp	varlena.rs:7978	name_pattern.rs:208	MATCH	yes	internal_text_pattern_compare returning datum
+bttext_pattern_sortsupport	varlena.rs:8016	sortsupport.rs:132	MATCH	yes	varstr_sortsupport with C collation
+byteaoctetlen	varlena.rs:8031	bytea.rs:204	MATCH	yes	toast_raw_datum_size - VARHDRSZ
+byteacat	varlena.rs:8041	bytea.rs:209	MATCH	yes	wraps bytea_catenate
+bytea_catenate	varlena.rs:8058	bytea.rs:214	MATCH	yes	palloc len1+len2-VARHDRSZ, two memcpy
+bytea_substr	varlena.rs:8188	bytea.rs:283	MATCH	yes	wraps bytea_substring(..,true)
+bytea_substr_no_len	varlena.rs:8209	bytea.rs:293	MATCH	yes	wraps bytea_substring(..,false)
+bytea_substring	varlena.rs:8225	bytea.rs:235	MATCH	yes	S/L bounds clamp, slice copy
+byteaoverlay	varlena.rs:8301	bytea.rs:299	MATCH	yes	wraps bytea_overlay with sl
+byteaoverlay_no_len	varlena.rs:8329	bytea.rs:310	MATCH	yes	wraps bytea_overlay computing sl
+bytea_overlay	varlena.rs:8390	bytea.rs:323	MATCH	yes	sp/sl bounds, three substrings + two catenate
+bytea_bit_count	varlena.rs:8494	bytea.rs:351	MATCH	yes	pg_popcount over payload
+byteapos	varlena.rs:8555	bytea.rs:357	MATCH	yes	naive substring search, 1-based result
+byteaGetByte	varlena.rs:8697	bytea.rs:379	MATCH	yes	bounds check then byte value
+byteaGetBit	varlena.rs:8803	bytea.rs:389	MATCH	yes	byteNo/bitNo extract bit
+byteaSetByte	varlena.rs:8917	bytea.rs:407	MATCH	yes	bounds check then set byte
+byteaSetBit	varlena.rs:8987	bytea.rs:425	MATCH	yes	0/1 validation, set/clear bit, ARRAY_SUBSCRIPT_ERROR
+bytea_reverse	varlena.rs:9110	bytea.rs:455	MATCH	yes	reverse payload bytes
+text_name	varlena.rs:9181	wire_io.rs:151	MATCH	yes	copy up to NAMEDATALEN-1 into NameData
+name_text	varlena.rs:9259	wire_io.rs:172	MATCH	yes	NameData strlen then cstring_to_text_with_len
+textToQualifiedNameList	varlena.rs:9271	split_format.rs:479	MATCH	yes	text_to_cstring + SplitIdentifierString + makeString list
+SplitIdentifierString	varlena.rs:9382	split_format.rs:508	MATCH	yes	quote/downcase/truncate identifier parsing
+SplitDirectoriesString	varlena.rs:9475	split_format.rs:643	MATCH	yes	directory list parse, canonicalize_path
+SplitGUCList	varlena.rs:9563	split_format.rs:754	MATCH	yes	GUC list parse (quotes, commas)
+byteaeq	varlena.rs:9643	bytea.rs:471	MATCH	yes	length shortcut then memcmp
+byteane	varlena.rs:9707	bytea.rs:477	MATCH	yes	negation of byteaeq
+bytealt	varlena.rs:9771	bytea.rs:482	MATCH	yes	memcmp_min then length tiebreak <0
+byteale	varlena.rs:9907	bytea.rs:488	MATCH	yes	<=0
+byteagt	varlena.rs:10043	bytea.rs:494	MATCH	yes	>0
+byteage	varlena.rs:10179	bytea.rs:500	MATCH	yes	>=0
+byteacmp	varlena.rs:10315	bytea.rs:506	MATCH	yes	memcmp_min then length tiebreak
+bytea_larger	varlena.rs:10456	bytea.rs:517	MATCH	yes	cmp>0 ? a : b
+bytea_smaller	varlena.rs:10580	bytea.rs:529	MATCH	yes	cmp<0 ? a : b
+bytea_sortsupport	varlena.rs:10704	sortsupport.rs:141	MATCH	yes	varstr_sortsupport with bytea (C) collation
+bytea_int2	varlena.rs:10717	bytea.rs:548	MATCH	yes	big-endian bytes -> int2, overflow check
+bytea_int4	varlena.rs:10822	bytea.rs:563	MATCH	yes	big-endian bytes -> int4
+bytea_int8	varlena.rs:10925	bytea.rs:576	MATCH	yes	big-endian bytes -> int8
+int2_bytea	varlena.rs:11028	bytea.rs:589	MATCH	yes	int2 -> big-endian bytea
+int4_bytea	varlena.rs:11032	bytea.rs:594	MATCH	yes	int4 -> big-endian bytea
+int8_bytea	varlena.rs:11036	bytea.rs:599	MATCH	yes	int8 -> big-endian bytea
+appendStringInfoText	varlena.rs:11039	split_format.rs:398	MATCH	yes	appendBinaryStringInfo of text payload
+replace_text	varlena.rs:11091	position_ops.rs:751	MATCH	yes	text_position search loop, build result with replacement
+check_replace_text_has_escape	varlena.rs:11319	replace_regexp.rs:175	MATCH	yes	scan for backslash escapes, return 0/1/2
+appendStringInfoRegexpSubstr	varlena.rs:11401	replace_regexp.rs:206	MATCH	yes	expand \N / \& backreferences into buffer
+replace_text_regexp	varlena.rs:11531	replace_regexp.rs:29	MATCH	yes	regexp match loop, escape expansion, start_search advance
+split_part	varlena.rs:11821	split_format.rs:860	MATCH	yes	text_position-driven field extraction, negative index from end
+text_isequal	varlena.rs:12106	split_format.rs:993	MATCH	yes	texteq via DirectFunctionCall
+text_to_array	varlena.rs:12121	split_format.rs:1133	MATCH	yes	split_text into array (no nulls)
+text_to_array_null	varlena.rs:12144	split_format.rs:1153	MATCH	yes	split_text into array with null string
+text_to_table	varlena.rs:12148	split_format.rs:1166	MATCH	yes	split_text into SRF tuplestore
+text_to_table_null	varlena.rs:12163	split_format.rs:1185	MATCH	yes	split_text into SRF with null string
+split_text	varlena.rs:12166	split_format.rs:1030	MATCH	yes	fldsep empty/non-empty cases, accum results
+split_text_accum_result	varlena.rs:12477	split_format.rs:1001	MATCH	yes	null vs accumArrayResult vs tuplestore per output mode
+array_to_text	varlena.rs:12513	split_format.rs:1201	MATCH	yes	wraps array_to_text_internal (no null)
+array_to_text_null	varlena.rs:12540	split_format.rs:1213	MATCH	yes	wraps array_to_text_internal with null string
+array_to_text_internal	varlena.rs:12595	split_format.rs:1227	MATCH	yes	deconstruct + OutputFunctionCall join with sep
+convert_to_base	varlena.rs:12816	misc_encoding.rs:65	MATCH	yes	repeated mod/div into digit buffer, reverse
+to_bin32	varlena.rs:12840	misc_encoding.rs:96	MATCH	yes	convert_to_base 2
+to_bin64	varlena.rs:12851	misc_encoding.rs:102	MATCH	yes	convert_to_base 2 (64-bit)
+to_oct32	varlena.rs:12862	misc_encoding.rs:108	MATCH	yes	convert_to_base 8
+to_oct64	varlena.rs:12873	misc_encoding.rs:113	MATCH	yes	convert_to_base 8 (64-bit)
+to_hex32	varlena.rs:12884	misc_encoding.rs:119	MATCH	yes	convert_to_base 16
+to_hex64	varlena.rs:12895	misc_encoding.rs:124	MATCH	yes	convert_to_base 16 (64-bit)
+pg_column_size	varlena.rs:12906	split_format.rs:1291	MATCH	yes	toast_datum_size of detoasted/compressed datum
+pg_column_compression	varlena.rs:12966	split_format.rs:1311	MATCH	yes	toast compression id -> method name or NULL
+pg_column_toast_chunk_id	varlena.rs:13076	split_format.rs:1348	MATCH	yes	external toast pointer chunk id or NULL
+makeStringAggState	varlena.rs:13158	split_format.rs:1366	MATCH	yes	aggregate context check, initStringInfo
+string_agg_transfn	varlena.rs:13197	split_format.rs:1373	MATCH	yes	delimiter then value append
+string_agg_combine	varlena.rs:13291	split_format.rs:1459	MATCH	yes	merge two partial states
+string_agg_serialize	varlena.rs:13378	split_format.rs:1495	MATCH	yes	serialize StringInfo into bytea
+string_agg_deserialize	varlena.rs:13403	split_format.rs:1513	MATCH	yes	rebuild StringInfo from bytea
+string_agg_finalfn	varlena.rs:13522	split_format.rs:1541	MATCH	yes	build text from accumulated buffer
+bytea_string_agg_finalfn	varlena.rs:3734	split_format.rs:1562	MATCH	yes	(also listed in bytea group) build bytea result
+build_concat_foutcache	varlena.rs:13549	split_format.rs:1591	MATCH	yes	lookup output funcs for concat args
+concat_internal	varlena.rs:13607	split_format.rs:1604	MATCH	yes	per-arg output, sep handling, variadic flatten
+text_concat	varlena.rs:13672	split_format.rs:1648	MATCH	yes	concat_internal with empty sep, start 0
+text_concat_ws	varlena.rs:13686	split_format.rs:1659	MATCH	yes	concat_internal with sep arg, start 1
+text_left	varlena.rs:13715	position_ops.rs:681	MATCH	yes	negative n offset from end; charlen substring
+text_right	varlena.rs:13796	position_ops.rs:696	MATCH	yes	negative n offset; tail substring
+text_reverse	varlena.rs:13868	position_ops.rs:711	MATCH	yes	single-byte vs multibyte char reversal
+text_format	varlena.rs:13958	split_format.rs:1878	MATCH	yes	format string parser, %s/%I/%L, width, argument positions
+text_format_parse_digits	varlena.rs:14531	split_format.rs:1691	MATCH	yes	parse decimal digit run with overflow check
+text_format_parse_format	varlena.rs:14642	split_format.rs:1717	MATCH	yes	parse argpos/width/conversion specifier
+text_format_string_conversion	varlena.rs:14984	split_format.rs:1832	MATCH	yes	NULL handling, %s/%I/%L dispatch
+text_format_append_string	varlena.rs:15066	split_format.rs:1782	MATCH	yes	left/right pad to width, append
+text_format_nv	varlena.rs:15139	split_format.rs:2003	MATCH	yes	text_format non-variadic wrapper
+rest_of_char_same	varlena.rs:15143	misc_encoding.rs:136	MATCH	yes	multibyte trailing-byte equality helper for levenshtein
+varstr_levenshtein	varlena.rs:15160	misc_encoding.rs:158	MATCH	yes	unified into less_equal with max_d=-1 (bound compiles out); computes identical value
+varstr_levenshtein_less_equal	varlena.rs:15340	misc_encoding.rs:158	MATCH	yes	banded DP with max_d cutoff, multibyte rest_of_char_same
+initClosestMatch	varlena.rs:15612	misc_encoding.rs:396	MATCH	yes	closest-match state init (levenshtein_closest_match family)
+updateClosestMatch	varlena.rs:15623	misc_encoding.rs:396	MATCH	yes	update min distance candidate
+getClosestMatch	varlena.rs:15661	misc_encoding.rs:396	MATCH	yes	return best match
+unicode_norm_form_from_string	varlena.rs:15666	misc_encoding.rs:459	MATCH	yes	NFC/NFD/NFKC/NFKD parse; else error
+unicode_version	varlena.rs:15776	misc_encoding.rs:492	MATCH	yes	PG_UNICODE_VERSION text
+icu_unicode_version	varlena.rs:15783	misc_encoding.rs:500	MATCH	yes	ICU version or NULL when no ICU
+unicode_assigned	varlena.rs:15788	misc_encoding.rs:511	MATCH	yes	per-codepoint assigned check via seam
+unicode_normalize_func	varlena.rs:15899	misc_encoding.rs:569	MATCH	yes	form parse, to wchar, unicode_normalize seam, back to utf8
+unicode_is_normalized	varlena.rs:16023	misc_encoding.rs:612	MATCH	yes	quickcheck + normalize compare
+isxdigits_n	varlena.rs:16142	misc_encoding.rs:653	MATCH	yes	all-n hex-digit predicate
+hexval	varlena.rs:16158	misc_encoding.rs:660	MATCH	yes	hex char -> value
+hexval_n	varlena.rs:16196	misc_encoding.rs:679	MATCH	yes	n hex chars -> value via wrapping shift/add
+unistr	varlena.rs:16214	misc_encoding.rs:695	MATCH	yes	backslash unicode escape decode, surrogate pairing

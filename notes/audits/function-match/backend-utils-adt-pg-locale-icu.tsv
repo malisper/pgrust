@@ -1,0 +1,2 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+create_pg_locale_icu	pg_locale_icu.rs:644	lib.rs:33	MATCH	yes	c2rust kept only the #else arm (ICU disabled in build profile): ereport(ERROR, ERRCODE_FEATURE_NOT_SUPPORTED) + unreachable return NULL. Port reproduces the error exactly; body is in-crate (installed as inward seam, not delegated out). All #ifdef USE_ICU functions are uncompiled in this profile and absent from the c2rust oracle.

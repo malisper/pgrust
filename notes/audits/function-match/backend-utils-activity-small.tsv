@@ -1,0 +1,32 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+pgstat_progress_parallel_incr_param	backend_progress.rs:186	backend_progress.rs:110	MATCH	yes	IsParallelWorker (ParallelWorkerNumber>=0) selects worker branch: PqMsg_Progress msg + sendint32(index)/sendint64(incr); leader calls incr_param; pqformat SEAMED to owner
+pgstat_progress_begin_write	backend_progress.rs:213	backend_progress.rs:33 pgstat_begin_write_activity	SEAMED	no	PGSTAT_BEGIN_WRITE_ACTIVITY macro; protocol + MyBEEntry owned by backend_status.c (seamed field op)
+pgstat_progress_end_write	backend_progress.rs:224	backend_progress.rs:42 pgstat_end_write_activity	SEAMED	no	PGSTAT_END_WRITE_ACTIVITY macro; owned by backend_status.c
+pgstat_progress_start_command	backend_progress.rs:235	backend_progress.rs:52	MATCH	yes	!beentry||!track early return; begin-write/set command/set target/zero st_progress_param/end-write in C order
+pgstat_progress_update_param	backend_progress.rs:255	backend_progress.rs:71	MATCH	yes	debug_assert index bound before beentry/track check; write bracket + single st_progress_param[index]=val
+pgstat_progress_incr_param	backend_progress.rs:272	backend_progress.rs:88	MATCH	yes	same shape with += incr
+pgstat_progress_update_multi_param	backend_progress.rs:290	backend_progress.rs:132	MATCH	yes	two slices; !beentry||!track||nparam==0 early return; one write bracket around loop; per-iter debug_assert
+pgstat_progress_end_command	backend_progress.rs:312	backend_progress.rs:157	MATCH	yes	beentry/track check; unbracketed INVALID early return; bracketed reset to INVALID/InvalidOid
+pgstat_copy_changecounted_stats	pgstat_archiver.rs:278	changecount.rs:85	MATCH	yes	pgstat_internal.h inline; do/while copy-retry loop; memcpy == typed *dst=*src
+pgstat_report_archiver	pgstat_archiver.rs:294	pgstat_archiver.rs:32	MATCH	yes	GetCurrentTimestamp (SEAMED) before write window; changecount bracket; failed/success branch ++count + memcpy 41-byte WAL name + timestamp
+pgstat_fetch_stat_archiver	pgstat_archiver.rs:322	pgstat_archiver.rs:61	MATCH	yes	snapshot_fixed(PGSTAT_KIND_ARCHIVER=7) then &snapshot.archiver via seam
+pgstat_archiver_init_shmem_cb	pgstat_archiver.rs:327	pgstat_archiver.rs:71	MATCH	yes	void*->typed PgStatShared_Archiver; LWLockInitialize(LWTRANCHE_PGSTATS_DATA=81) SEAMED
+pgstat_archiver_reset_all_cb	pgstat_archiver.rs:338	pgstat_archiver.rs:76	MATCH	yes	LWLockAcquire EXCLUSIVE -> copy_changecounted(reset_offset<-stats) -> stat_reset_timestamp -> release
+pgstat_archiver_snapshot_cb	pgstat_archiver.rs:352	pgstat_archiver.rs:102	MATCH	yes	changecounted copy of live stats; LW_SHARED copy of reset_offset; compensation: ==reset->wal[0]=0 ts0 else subtract; staged in local
+pgstat_begin_changecount_write	pgstat_archiver.rs:399	changecount.rs:24	MATCH	yes	pgstat_internal.h inline; parity Assert->debug_assert + ++; crit-section/write-barrier elided (process-global)
+pgstat_end_changecount_write	pgstat_archiver.rs:410	changecount.rs:35	MATCH	yes	pgstat_internal.h inline; ++ then parity assert
+pgstat_begin_changecount_read	pgstat_archiver.rs:421	changecount.rs:45	MATCH	yes	pgstat_internal.h inline; before_cc capture; odd->retry
+pgstat_end_changecount_read	pgstat_archiver.rs:431	changecount.rs:60	MATCH	yes	pgstat_internal.h inline; before_cc==after_cc success predicate
+pg_memory_is_all_zeros	pgstat_bgwriter.rs:842	pgstat_bgwriter.rs is_all_zeros (per-type)	MATCH	yes	memutils.h inline; byte-zero test == all-fields-zero for padding-free all-int64 structs
+pgstat_report_bgwriter	pgstat_bgwriter.rs:977	pgstat_bgwriter.rs:56	MATCH	yes	debug_assert !shmem.is_shutdown; pgstat_assert_is_up SEAMED; is_all_zeros early return before shmem; changecount bracket; 3 BGWRITER_ACC fields; reset pending=default; pgstat_flush_io(false) SEAMED last
+PendingBgWriterStats (global)	pgstat_bgwriter.rs (static)	pgstat_bgwriter.rs:49 with_pending_bgwriter_stats	MATCH	yes	file-owned zero-init process global; accessor is PGDLLIMPORT access path for bufmgr.c field bumps
+pgstat_fetch_stat_bgwriter	pgstat_bgwriter.rs:1014	pgstat_bgwriter.rs:99	MATCH	yes	snapshot_fixed(PGSTAT_KIND_BGWRITER=8) + snapshot pointer
+pgstat_bgwriter_init_shmem_cb	pgstat_bgwriter.rs:1019	pgstat_bgwriter.rs:109	MATCH	yes	LWLockInitialize LWTRANCHE_PGSTATS_DATA
+pgstat_bgwriter_reset_all_cb	pgstat_bgwriter.rs:1030	pgstat_bgwriter.rs:114	MATCH	yes	EXCLUSIVE lock -> copy_changecounted reset_offset -> timestamp -> release
+pgstat_bgwriter_snapshot_cb	pgstat_bgwriter.rs:1044	pgstat_bgwriter.rs:140	MATCH	yes	changecounted copy; locked reset read; BGWRITER_COMP subtraction of 3 counters (no stat_reset_timestamp compensation)
+pgstat_report_checkpointer	pgstat_checkpointer.rs:984	pgstat_checkpointer.rs:69	MATCH	yes	same shape as report_bgwriter with 10 CHECKPOINTER_ACC fields; is_all_zeros == pg_memory_is_all_zeros (11 padding-free int64s)
+PendingCheckpointerStats (global)	pgstat_checkpointer.rs (static)	pgstat_checkpointer.rs:60 with_pending_checkpointer_stats	MATCH	yes	file-owned zero-init process global; PGDLLIMPORT access path
+pgstat_fetch_stat_checkpointer	pgstat_checkpointer.rs:1031	pgstat_checkpointer.rs:119	MATCH	yes	snapshot_fixed(PGSTAT_KIND_CHECKPOINTER=9) + snapshot pointer
+pgstat_checkpointer_init_shmem_cb	pgstat_checkpointer.rs:1036	pgstat_checkpointer.rs:129	MATCH	yes	LWLockInitialize LWTRANCHE_PGSTATS_DATA
+pgstat_checkpointer_reset_all_cb	pgstat_checkpointer.rs:1047	pgstat_checkpointer.rs:134	MATCH	yes	EXCLUSIVE lock -> copy_changecounted reset_offset -> timestamp -> release
+pgstat_checkpointer_snapshot_cb	pgstat_checkpointer.rs:1061	pgstat_checkpointer.rs:160	MATCH	yes	changecounted copy; locked reset read; ten-field CHECKPOINTER_COMP subtraction

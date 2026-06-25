@@ -1,0 +1,35 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+isascii	postinit.rs:3802	folded inline	MATCH	yes	ctype.h inline (_c & ~0x7F)==0; folded into char classification
+__istype	postinit.rs:3807	folded inline	MATCH	yes	darwin ctype inline; folded into isspace
+isspace	postinit.rs:3821	c_isspace lib.rs	MATCH	yes	__istype(_c,_CTYPE_S); C-locale isspace; tested by isspace_matches_c_locale
+ObjectIdGetDatum	postinit.rs:3826	folded inline	MATCH	yes	postgres.h inline Oid->Datum; idiomatic at call sites
+DatumGetPointer	postinit.rs:3830	folded inline	MATCH	yes	postgres.h inline Datum->Pointer; idiomatic
+PointerGetDatum	postinit.rs:3834	folded inline	MATCH	yes	postgres.h inline Pointer->Datum; idiomatic
+CStringGetDatum	postinit.rs:3838	folded inline	MATCH	yes	postgres.h inline cstring->Datum; idiomatic
+list_head	postinit.rs:3844	folded inline	MATCH	yes	pg_list.h inline (l?&l.elements[0]:NULL); idiomatic list iteration
+lnext	postinit.rs:3852	folded inline	MATCH	yes	pg_list.h inline next-cell; idiomatic list iteration
+GETSTRUCT	postinit.rs:3862	folded inline	MATCH	yes	htup_details.h inline tuple data ptr; idiomatic tuple access
+table_endscan	postinit.rs:3879	via tableam seam	MATCH	yes	tableam.h inline -> scan_end AM callback; reached via tableam seam
+pg_leftmost_one_pos32	postinit.rs:3906	folded into pg_nextpower2_32	MATCH	yes	pg_bitutils.h inline; folded into pg_nextpower2_32
+pg_nextpower2_32	postinit.rs:3910	lib.rs pg_nextpower2_32	MATCH	yes	pg_bitutils.h inline; num<=1->1 else 1<<(leftmost_one_pos32(num-1)+1); tested
+set_ps_display	postinit.rs:3918	via ps-status seam	MATCH	yes	ps_status.h inline -> set_ps_display_with_len(strlen); reached via ps-status seam
+GetDatabaseTuple	postinit.rs:3921	lib.rs GetDatabaseTuple	MATCH	yes	table_open(DatabaseRelationId); ScanKeyInit Anum_pg_database_datname; systable scan by index; heap_copytuple
+GetDatabaseTupleByOid	postinit.rs:3971	lib.rs GetDatabaseTupleByOid	MATCH	yes	scan by Anum_oid via DatabaseOidIndexId; heap_copytuple
+PerformAuthentication	postinit.rs:4019	lib.rs PerformAuthentication	MATCH	yes	enable auth timeout; ClientAuthentication; LOG connection authorized with TLS/auth details
+CheckMyDatabase	postinit.rs:4111	lib.rs CheckMyDatabase	MATCH	yes	datform checks (connectable/invalid-form); CONNLIMIT; ctype/collate; encoding setup; full sequence per audit
+pg_split_opts	postinit.rs:4566	lib.rs pg_split_opts	MATCH	yes	tokenize optstr on whitespace with backslash escaping; lappend each as -c arg
+InitializeMaxBackends	postinit.rs:4609	lib.rs InitializeMaxBackends	MATCH	yes	Assert MaxBackends==0; MaxConnections+autovacuum+bgworkers+aux; cap check MAX_BACKENDS
+InitializeFastPathLocks	postinit.rs:4668	lib.rs InitializeFastPathLocks	MATCH	yes	FastPathLockGroupsPerBackend power-of-2 from MaxBackends; Assert<=FP_LOCK_GROUPS_PER_BACKEND_MAX
+BaseInit	postinit.rs:4689	lib.rs BaseInit	MATCH	yes	InitCommunication; DebugFileOpen; InitFileAccess; InitTemporaryFileAccess; InitBufferManagerAccess; InitSync; smgrinit; pgaio_init_backend
+InitPostgres	postinit.rs:4703	lib.rs InitPostgres	MATCH	yes	keystone init sequence; full body present per audit MATCH
+process_startup_options	postinit.rs:5438	lib.rs process_startup_options	MATCH	yes	gucsource for postmaster vs client; SetConfigOption datestyle; pg_split_opts; process_postgres_switches
+process_settings	postinit.rs:5496	lib.rs process_settings	MATCH	yes	relation open; ApplySetting database-then-role then role-only; close
+ShutdownPostgres	postinit.rs:5511	lib.rs ShutdownPostgres / shutdown_postgres_cb	MATCH	yes	AbortOutOfAnyTransaction; LockReleaseAll(DEFAULT_LOCKMETHOD,true)
+StatementTimeoutHandler	postinit.rs:5515	lib.rs StatementTimeoutHandler	MATCH	yes	set MyLatch; kill(MyProcPid, SIGINT)
+LockTimeoutHandler	postinit.rs:5523	lib.rs LockTimeoutHandler	MATCH	yes	kill(MyProcPid, SIGINT)
+TransactionTimeoutHandler	postinit.rs:5527	lib.rs TransactionTimeoutHandler	MATCH	yes	TransactionTimeoutPending=true; set MyLatch; kill SIGINT
+IdleInTransactionSessionTimeoutHandler	postinit.rs:5538	lib.rs IdleInTransactionSessionTimeoutHandler	MATCH	yes	IdleInTransactionSessionTimeoutPending=true; InterruptPending; set latch
+IdleSessionTimeoutHandler	postinit.rs:5549	lib.rs IdleSessionTimeoutHandler	MATCH	yes	IdleSessionTimeoutPending=true; InterruptPending; set latch
+IdleStatsUpdateTimeoutHandler	postinit.rs:5560	lib.rs IdleStatsUpdateTimeoutHandler	MATCH	yes	IdleStatsUpdateTimeoutPending=true; InterruptPending; set latch
+ClientCheckTimeoutHandler	postinit.rs:5571	lib.rs ClientCheckTimeoutHandler	MATCH	yes	CheckClientConnectionPending=true; InterruptPending; set latch
+ThereIsAtLeastOneRole	postinit.rs:5582	lib.rs ThereIsAtLeastOneRole	MATCH	yes	table_open pg_authid; heap_getnext result!=NULL; close

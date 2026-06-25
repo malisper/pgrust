@@ -1,0 +1,41 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+pg_leftmost_one_pos64	dynahash.rs:762	folded into pg_ceil_log2_64 lib.rs:1339	MATCH	yes	pg_bitutils.h inline; 64-(num-1).leading_zeros() == leftmost_one_pos64(num-1)+1, folded into pg_ceil_log2_64
+pg_ceil_log2_64	dynahash.rs:767	lib.rs:1339	MATCH	yes	num<=1->0 else leftmost-one-pos based; helper for my_log2
+tas	dynahash.rs:776	via backend_storage_lmgr_s_lock seam	MATCH	yes	s_lock.h TAS inline; real spinlock primitives reached through s_lock seam
+DynaHashAlloc	dynahash.rs:798	dyna_hash_alloc/hash_alloc lib.rs:177,201	MATCH	yes	NULL-on-OOM via try_reserve_exact; zeroed slab; per-table arena == C private MemoryContext
+string_compare	dynahash.rs:801	lib.rs:229	MATCH	yes	strncmp(k1,k2,keysize-1) byte loop, unsigned-char diff, NUL short-circuit
+hash_create	dynahash.rs:809	lib.rs:286	MATCH	yes	all flag branches; is_string_hash flag models hashp->hash==string_hash compare (identical for all in-tree callers)
+hdefault	dynahash.rs:1160	lib.rs:520	MATCH	yes	MemSet 0 + dsize/nsegs/num_partitions/max_dsize/ssize/sshift defaults
+choose_nelem_alloc	dynahash.rs:1188	lib.rs:533	MATCH	yes	elementSize MAXALIGN; allocSize=128 do/while <<1 until nelem>=32
+init_htab	dynahash.rs:1211	lib.rs:549	MATCH	yes	mutex init; next_pow2_int; mask/nsegs; dir-too-small->false; dir+segment alloc; nelem_alloc
+hash_estimate_size	dynahash.rs:1272	lib.rs:613	MATCH	yes	nBuckets/nSegments/nDirEntries doubling; HASHHDR+dir+segments+element groups
+hash_select_dirsize	dynahash.rs:1332	lib.rs:639	MATCH	yes	identical nDirEntries doubling
+hash_get_shared_size	dynahash.rs:1350	lib.rs:651	MATCH	yes	sizeof(HASHHDR)+dsize*sizeof(HASHSEGMENT), no MAXALIGN (matches C)
+hash_destroy	dynahash.rs:1361	lib.rs:665	MATCH	yes	NULL-guard; drops per-table arena == MemoryContextDelete(hcxt)
+hash_stats	dynahash.rs:1368	(omitted)	MATCH	yes	entirely under #ifdef HASH_STATISTICS (not in build); no-op, correctly omitted
+get_hash_value	dynahash.rs:1373	get_hash_value/do_hash lib.rs:682	MATCH	yes	hashp->hash(key,keysize)
+calc_bucket	dynahash.rs:1380	lib.rs:712	MATCH	yes	hash & high_mask then & low_mask if > max_bucket
+hash_search	dynahash.rs:1392	lib.rs:723	MATCH	yes	computes hash then delegates to _with_hash_value
+hash_search_with_hash_value	dynahash.rs:1407	lib.rs:733	MATCH	yes	split predicate; lookup; chain; FIND/REMOVE/ENTER/ENTER_NULL; OOM ERROR shared/local
+hash_update_hash_key	dynahash.rs:1723	lib.rs:840	MATCH	yes	frozen ERROR; locate old/new; collision->Ok(false); same-bucket relink skip; hashvalue+keycopy
+get_hash_entry	dynahash.rs:1876	lib.rs:915	MATCH	yes	freelist pop loop; element_alloc-or-borrow; partitioned borrow walk; non-partitioned OOM->null
+hash_get_num_entries	dynahash.rs:1987	lib.rs:983	MATCH	yes	freeList[0].nentries + partitioned sum 1..NUM_FREELISTS; no locking (matches C)
+hash_seq_init	dynahash.rs:2004	lib.rs:1001	MATCH	yes	zero state; register unless frozen
+hash_seq_init_with_hash_value	dynahash.rs:2017	lib.rs:1014	MATCH	yes	hasHashvalue/hashvalue; curBucket+curEntry from initial lookup
+hash_seq_search	dynahash.rs:2030	lib.rs:1031	MATCH	yes	hasHashvalue single-bucket scan; continue-curBucket; segment/bucket advance; term on exhaustion
+hash_seq_term	dynahash.rs:2127	lib.rs:1111	MATCH	yes	deregister unless frozen
+hash_freeze	dynahash.rs:2133	lib.rs:1123	MATCH	yes	shared ERROR; active-scan ERROR; set frozen
+expand_table	dynahash.rs:2196	lib.rs:1150	MATCH	yes	new_bucket/segnum/segndx; dir_realloc+seg_alloc; max_bucket++; mask readjust; split chains
+dir_realloc	dynahash.rs:2256	lib.rs:1215	MATCH	yes	NO_MAX_DSIZE guard; double dsize; alloc; memcpy+zero tail; old slab retained in bounded arena (never reused)
+seg_alloc	dynahash.rs:2311	lib.rs:1241	MATCH	yes	alloc sizeof(HASHBUCKET)*ssize, NULL passthrough, MemSet 0
+element_alloc	dynahash.rs:2345	lib.rs:1253	MATCH	yes	isfixed->false; elementSize; nelem*size alloc; reverse-link; lock; splice freelist head; unlock
+hash_initial_lookup	dynahash.rs:2415	lib.rs:1296	MATCH	yes	calc_bucket; segment_num/ndx; dir[seg]; NULL->hash_corrupted; returns (&segp[ndx],bucket)
+hash_corrupted	dynahash.rs:2436	lib.rs:1311	MATCH	yes	shared->PANIC else FATAL; noreturn via trailing panic
+my_log2	dynahash.rs:2498	lib.rs:1330	MATCH	yes	clamp >LONG_MAX/2; pg_ceil_log2_64 path
+next_pow2_long	dynahash.rs:2504	lib.rs:1349	MATCH	yes	1<<my_log2(num)
+next_pow2_int	dynahash.rs:2509	lib.rs:1354	MATCH	yes	clamp >INT_MAX/2; 1<<my_log2
+register_seq_scan	dynahash.rs:2520	lib.rs:1372	MATCH	yes	MAX_SEQ_SCANS=100 ERROR; push (hashp, nest level via xact seam)
+deregister_seq_scan	dynahash.rs:2555	lib.rs:1391	MATCH	yes	backward search; swap-remove; not-found ERROR
+has_seq_scans	dynahash.rs:2596	lib.rs:1411	MATCH	yes	linear membership
+AtEOXact_HashTables	dynahash.rs:2608	lib.rs:1417	MATCH	yes	commit->WARNING per leaked scan; clear all
+AtEOSubXact_HashTables	dynahash.rs:2647	lib.rs:1433	MATCH	yes	backward walk; level>=nestDepth->(commit WARNING) swap-remove

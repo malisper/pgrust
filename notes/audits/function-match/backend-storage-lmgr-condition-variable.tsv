@@ -1,0 +1,17 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+pg_clock_gettime_ns	condition_variable.rs:271	-	SEAMED	no	Inlined instr_time header helper; clock read via portability-instr-time (INSTR_TIME_SET_CURRENT).
+tas	condition_variable.rs:281	-	MATCH	yes	Inlined s-lock test-and-set; reproduced inside Spinlock acquire (s_lock_macro) via the s-lock dep.
+proclist_init	condition_variable.rs:291	lib.rs (proclist_init)	MATCH	yes	head=tail=INVALID_PROC_NUMBER.
+proclist_is_empty	condition_variable.rs:296	lib.rs (proclist_is_empty)	MATCH	yes	head==INVALID_PROC_NUMBER.
+proclist_node_get	condition_variable.rs:300	-	SEAMED	no	PGPROC.cvWaitLink node read/write delegated via lmgr-proc seams (proc_cv_wait_link).
+proclist_push_tail_offset	condition_variable.rs:310	lib.rs:99	MATCH	yes	Empty: prev=next=INVALID,head=tail; else prev=old tail, old tail.next=procno, next=INVALID, tail=procno; node written back through seam.
+proclist_delete_offset	condition_variable.rs:330	lib.rs (proclist_delete)	MATCH	yes	prev/next relinking with head/tail fixups; node zeroed {0,0}.
+proclist_contains_offset	condition_variable.rs:352	lib.rs (proclist_contains)	MATCH	yes	prev==0 && next==0 -> false else true.
+proclist_pop_head_node_offset	condition_variable.rs:365	lib.rs:161	MATCH	yes	Returns list->head procno (procno-equivalent to C PGPROC* for SetLatch/proc!=MyProc).
+ConditionVariableInit	condition_variable.rs:378	lib.rs:172	MATCH	yes	SpinLockInit (store 0) + proclist_init.
+ConditionVariablePrepareToSleep	condition_variable.rs:383	lib.rs	MATCH	yes	pgprocno=MyProcNumber first; cancel prior; record cv_sleep_target; push tail under spinlock; order identical.
+ConditionVariableSleep	condition_variable.rs:405	lib.rs	MATCH	yes	Delegates to ConditionVariableTimedSleep(cv,-1,wei); discards bool; PgResult propagates ereport-shaped errors.
+ConditionVariableTimedSleep	condition_variable.rs:416	lib.rs:230	MATCH	yes	Re-derived line-by-line: target!=cv->prepare+false; timeout wait_events; WaitLatch/ResetLatch loop; contains re-push; CHECK_FOR_INTERRUPTS; timeout truncation cast; cur_timeout<=0->true.
+ConditionVariableCancelSleep	condition_variable.rs:488	lib.rs	MATCH	yes	NULL target->false; contained->delete else signaled=true; clear target after unlock; return signaled.
+ConditionVariableSignal	condition_variable.rs:521	lib.rs	MATCH	yes	Pop head under spinlock if non-empty; SetLatch outside lock via set_proc_latch seam.
+ConditionVariableBroadcast	condition_variable.rs:541	lib.rs	MATCH	yes	pgprocno first; cancel own; sentinel push; sentinel loop pop+contains+wake-unless-self; debug_assert under lock.

@@ -1,0 +1,19 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+WaitEventCustomShmemSize	wait_event.rs:405	lib.rs:774	MATCH	yes	MAXALIGN(counter) + 2x hash_estimate_size; add_size -> PgResult per ereport surface
+WaitEventCustomShmemInit	wait_event.rs:427	lib.rs:794	MATCH	yes	ShmemInitStruct + !found init (nextId=1, SpinLockInit) + two ShmemInitHash (BLOBS uint32; STRINGS NAMEDATALEN)
+WaitEventExtensionNew	wait_event.rs:475	lib.rs:841	MATCH	yes	delegates to CustomNew(PG_WAIT_EXTENSION,..)
+WaitEventInjectionPointNew	wait_event.rs:481	lib.rs:847	MATCH	yes	delegates to CustomNew(PG_WAIT_INJECTIONPOINT,..)
+WaitEventCustomNew	wait_event.rs:486	lib.rs:853	MATCH	yes	name-length elog; SHARED find+release; EXCLUSIVE re-find; spinlock id alloc with >=MAX_SIZE(128) ereport; HASH_ENTER both tables + strlcpy; class-conflict DUPLICATE_OBJECT; all release paths preserved
+GetWaitEventCustomIdentifier	wait_event.rs:728	lib.rs:946	MATCH	yes	==PG_WAIT_EXTENSION->"Extension"; SHARED lookup; null->elog INTERNAL
+GetWaitEventCustomNames	wait_event.rs:785	lib.rs:973	MATCH	yes	palloc(char**)+count -> Vec<String>; class-mask filter; lock released incl hash_seq error path
+pgstat_set_wait_event_storage	wait_event.rs:836	lib.rs:661	MATCH	yes	redirect to installable shared slot, guarded by restore-on-drop
+pgstat_reset_wait_event_storage	wait_event.rs:842	lib.rs:671	MATCH	yes	back to thread-local default slot
+pgstat_get_wait_event_type	wait_event.rs:846	lib.rs:152	MATCH	yes	==0->None; 10-arm class switch + default "???" verified vs wait_classes.h
+pgstat_get_wait_event	wait_event.rs:895	lib.rs:582	MATCH	yes	==0->None; LWLock/Lock via outward seams; Ext/InjPoint via CustomIdentifier; 6 generated classes via build-once lookup; default "unknown wait event"
+pgstat_get_wait_activity	wait_event.rs:949	lib.rs:412 wait_event_data	MATCH	yes	generated per-class switch reproduced as build-once (info)->name lookup; ids in case-insensitive sorted order; unknown->"unknown wait event"
+pgstat_get_wait_bufferpin	wait_event.rs:1023	lib.rs:412 wait_event_data	MATCH	yes	generated per-class switch -> build-once name lookup
+pgstat_get_wait_client	wait_event.rs:1036	lib.rs:412 wait_event_data	MATCH	yes	generated per-class switch -> build-once name lookup
+pgstat_get_wait_io	wait_event.rs:1078	lib.rs:412 wait_event_data	MATCH	yes	generated per-class switch -> build-once name lookup
+pgstat_get_wait_ipc	wait_event.rs:1375	lib.rs:412 wait_event_data	MATCH	yes	generated per-class switch -> build-once name lookup
+pgstat_get_wait_timeout	wait_event.rs:1592	lib.rs:412 wait_event_data	MATCH	yes	generated per-class switch -> build-once name lookup
+pg_get_wait_events	wait_event_funcs.rs:3240	lib.rs:1051	MATCH	yes	waitEventData[] (generated) reproduced as build-once wait_event_funcs_data(); + Extension + InjectionPoint custom rows with exact format strings; SRF/tuplestore plumbing is fmgr boundary

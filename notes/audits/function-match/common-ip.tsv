@@ -1,0 +1,6 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+pg_getaddrinfo_all	probe-srv-ip/src/ip.rs:94	common-ip/src/lib.rs:28	MATCH	yes	Unix-socket path routes to getaddrinfo_unix; else getaddrinfo; result list ownership preserved.
+pg_freeaddrinfo_all	probe-srv-ip/src/ip.rs:121	common-ip/src/lib.rs:88	MATCH	yes	Owned-Vec model: drop frees the list (replaces C freeaddrinfo / per-node free).
+pg_getnameinfo_all	probe-srv-ip/src/ip.rs:137	common-ip/src/lib.rs:95	MATCH	yes	AF_UNIX routes to getnameinfo_unix; else getnameinfo with NI_NUMERICHOST|NI_NUMERICSERV.
+getaddrinfo_unix	probe-srv-ip/src/ip.rs:186	common-ip/src/lib.rs:130	MATCH	yes	Static helper; builds sockaddr_un, path length check, calloc-equivalent allocation of addrinfo.
+getnameinfo_unix	probe-srv-ip/src/ip.rs:252	common-ip/src/lib.rs:212	MATCH	yes	Static helper; strlcpy node/service per flags (after fix noted in audit).

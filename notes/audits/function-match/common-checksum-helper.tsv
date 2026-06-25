@@ -1,0 +1,6 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+pg_checksum_parse_type	common-batch3/src/checksum_helper.rs:75	common-checksum-helper/src/lib.rs:146	MATCH	yes	Six pg_strcasecmp arms in identical order (none/crc32c/sha224/256/384/512) else None; out-param NONE write folded into None return.
+pg_checksum_type_name	common-batch3/src/checksum_helper.rs:112	common-checksum-helper/src/lib.rs:178	MATCH	yes	All six arms return exact strings; C Assert(false)/"???" fall-through unreachable (closed enum).
+pg_checksum_init	common-batch3/src/checksum_helper.rs:146	common-checksum-helper/src/lib.rs:198	MATCH	yes	NONE no-op; CRC32C INIT 0xFFFFFFFF; SHA-2 via create_sha2 (in-crate NULL/init/free flow), only pg_cryptohash_* primitives cross seam; 0/-1 -> Result.
+pg_checksum_update	common-batch3/src/checksum_helper.rs:209	common-checksum-helper/src/lib.rs:242	MATCH	yes	NONE Ok; CRC32C COMP_CRC32C via port_crc32c::pg_comp_crc32c_sb8; SHA-2 pg_cryptohash_update, <0 err. Switch on raw_context equivalent to C type switch.
+pg_checksum_final	common-batch3/src/checksum_helper.rs:234	common-checksum-helper/src/lib.rs:283	MATCH	yes	NONE 0; CRC32C FIN XOR 0xFFFFFFFF + 4-byte to_ne_bytes; SHA-2 retval = digest length (28/32/48/64), final <0 err (no free on fail), then free. StaticAsserts compile-time invariants.

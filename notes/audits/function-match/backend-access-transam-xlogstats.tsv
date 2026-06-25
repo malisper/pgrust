@@ -1,0 +1,3 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+XLogRecGetLen	xlogstats.rs:196	lib.rs:126	MATCH	yes	Per-block fpi_len fold over blocks()[0..=max_block_id]; predicate in_use&&has_image; wrapping arithmetic; out-param pair as tuple. Audit-confirmed.
+XLogRecStoreStats	xlogstats.rs:227	lib.rs:137	MATCH	yes	count++/rec_len/fpi_len folds, recid=info>>4 with RM_XACT_ID&0x07 mask; table indexing in-bounds. Audit-confirmed.

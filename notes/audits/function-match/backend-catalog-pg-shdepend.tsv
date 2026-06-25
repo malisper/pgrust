@@ -1,0 +1,26 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+recordSharedDependencyOn	pg_shdepend.rs:2825	lib.rs:202	MATCH	yes	subId==0 debug_assert; bootstrap early-return seam; pinned check; delegates insert; table_open/close as Relation guard
+recordDependencyOnOwner	pg_shdepend.rs:2851	lib.rs:245	MATCH	yes	builds two ObjectAddress, calls recordSharedDependencyOn with OWNER
+shdepChangeDep	pg_shdepend.rs:2878	lib.rs:267	MATCH	yes	LockAndCheck; 4-key Depender scan; deptype filter; multiple-match elog ERROR; pinned->delete else update in place else insert
+changeDependencyOnOwner	pg_shdepend.rs:3048	lib.rs:354	MATCH	yes	ChangeDep(OWNER) then DropDependency(ACL, drop_subobjects=true)
+recordDependencyOnTablespace	pg_shdepend.rs:3077	lib.rs:401	MATCH	yes	ObjectAddressSet then recordSharedDependencyOn TABLESPACE
+changeDependencyOnTablespace	pg_shdepend.rs:3105	lib.rs:424	MATCH	yes	newTablespace!=DEFAULTTABLESPACE_OID && !=InvalidOid -> ChangeDep else DropDependency
+getOidListDiff	pg_shdepend.rs:3136	lib.rs:467	MATCH	yes	sorted-merge diff; in-place compaction; identical index arithmetic; unit-tested
+updateAclDependencies	pg_shdepend.rs:3186	lib.rs:517	MATCH	yes	delegates to Worker with SHARED_DEPENDENCY_ACL + ownerId
+updateInitAclDependencies	pg_shdepend.rs:3209	lib.rs:544	MATCH	yes	Worker with SHARED_DEPENDENCY_INITACL, ownerId=InvalidOid
+updateAclDependenciesWorker	pg_shdepend.rs:3230	lib.rs:569	MATCH	yes	getOidListDiff; add new / drop old with owner+pinned+objsubId skips; pfree -> Rust drop
+shared_dependency_comparator	pg_shdepend.rs:3298	lib.rs:664	MATCH	yes	OID, classId, objsubid(u32), deptype ordering; stable sort unobservable; unit-tested
+checkSharedDependencies	pg_shdepend.rs:3335	lib.rs:715	MATCH	yes	pinned->ERROR DEPENDENT_OBJECTS_STILL_EXIST; objects/remoteDep arrays; MAX_REPORTED_DEPS=100 split; ngettext tails
+copyTemplateDependencies	pg_shdepend.rs:3651	lib.rs:909	MATCH	yes	batch multi-insert; dbid rewritten to newDbId; batch divisor non-FAIL (identical catalog contents)
+dropDatabaseDependencies	pg_shdepend.rs:3786	lib.rs:967	MATCH	yes	delete dbid=databaseId rows; then DropDependency(DatabaseRelationId, drop_subobjects=true)
+deleteSharedDependencyRecordsFor	pg_shdepend.rs:3847	lib.rs:1010	MATCH	yes	DropDependency with drop_subobjects=(objsubId==0)
+shdepAddDependency	pg_shdepend.rs:3866	lib.rs:1038	MATCH	yes	LockAndCheck ref; form tuple (dbid via classIdGetDbId); insert
+shdepDropDependency	pg_shdepend.rs:3913	lib.rs:1074	MATCH	yes	3 or 4 keys (drop_subobjects->nkeys=3); filter refclassId/refobjId/deptype; delete matches
+classIdGetDbId	pg_shdepend.rs:4014	lib.rs:1131	MATCH	yes	IsSharedRelation->InvalidOid else MyDatabaseId
+shdepLockAndCheckObject	pg_shdepend.rs:4024	lib.rs:1147	MATCH	yes	LockSharedObject(AccessShareLock).keep(); AUTHOID exists; tablespace/database name; default ERROR; SQLSTATEs match
+storeObjectDescription	pg_shdepend.rs:4202	lib.rs:1196	MATCH	yes	getObjectDescription None->return; newline sep; per-deptype msgs; REMOTE ngettext; unrecognized ERROR
+shdepDropOwned	pg_shdepend.rs:4342	lib.rs:1266	MATCH	yes	pinned role ERROR; recheckable ref scan; POLICY/ACL/OWNER/INITACL branches; sort + performMultipleDeletions
+shdepDropOwned_owner_branch	pg_shdepend.rs:4342	lib.rs:1423	MATCH	yes	extracted helper for OWNER-case body (c2rust inline at 1463); dbid==MyDatabaseId||classid==AuthMem -> lock+recheck+add
+shdepReassignOwned	pg_shdepend.rs:4584	lib.rs:1460	MATCH	yes	pinned role ERROR; ref scan; OWNER->_Owner; INITACL->_InitAcl; ACL/POLICY/TABLESPACE no-op; default ERROR; CCI per row
+shdepReassignOwned_Owner	pg_shdepend.rs:4766	lib.rs:1549	MATCH	yes	classid switch over 23 catalog OIDs; generic group->AlterObjectOwner_internal; default ERROR
+shdepReassignOwned_InitAcl	pg_shdepend.rs:4838	lib.rs:1611	MATCH	yes	ReplaceRoleInInitPriv delegate

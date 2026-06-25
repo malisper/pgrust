@@ -1,0 +1,15 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+MemoryContextSwitchTo	partcache.rs:3179	(intrinsic)	MATCH	yes	c2rust-emitted context-switch intrinsic
+ObjectIdGetDatum	partcache.rs:3185	(intrinsic)	MATCH	yes	c2rust-emitted Datum cast intrinsic
+DatumGetPointer	partcache.rs:3189	(intrinsic)	MATCH	yes	c2rust-emitted Datum->Pointer intrinsic
+list_head	partcache.rs:3194	(intrinsic)	MATCH	yes	c2rust List inline accessor; idiomatic iteration in port
+list_length	partcache.rs:3202	(intrinsic)	MATCH	yes	c2rust List inline accessor
+list_nth_cell	partcache.rs:3206	(intrinsic)	MATCH	yes	c2rust List inline accessor
+lnext	partcache.rs:3213	(intrinsic)	MATCH	yes	c2rust List inline accessor
+TupleDescAttr	partcache.rs:3223	(intrinsic)	MATCH	yes	c2rust tupdesc inline accessor
+GETSTRUCT	partcache.rs:3240	(intrinsic)	MATCH	yes	c2rust-emitted tuple-struct accessor intrinsic
+RelationGetPartitionKey	partcache.rs:3260	lib.rs:70	MATCH	yes	relkind!=PARTITIONED->None; lazy build; cache delegated to relcache owner
+RelationBuildPartitionKey	partcache.rs:3273	lib.rs:99	MATCH	yes	PARTRELID lookup; strategy validation; per-column opclass/support-func/type loop; 1 ledgered seam-boundary (open_partrel_tuple absorbs partexprs block) - behavior-identical
+RelationGetPartitionQual	partcache.rs:3646	lib.rs:307	MATCH	yes	!relispartition->NIL else generate_partition_qual
+get_partition_qual_relid	partcache.rs:3653	lib.rs:326	MATCH	yes	relispartition guard; relation_open(AccessShareLock); implicit-AND->bool; close(NoLock)
+generate_partition_qual	partcache.rs:3671	lib.rs:378	MATCH	yes	check_stack_depth; rd_partcheckvalid fast path; parent recursion list_concat; map_partition_varattnos; 1 ledgered seam-boundary (qual_from_partbound) - behavior-identical

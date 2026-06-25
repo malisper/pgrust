@@ -1,0 +1,14 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+ts_copychar_with_len	regis.rs:69	regis.rs:277 (copy_char_into)	MATCH	yes	ts_locale.h inline; memcpy of len bytes -> extend_from_slice
+ts_copychar_cstr	regis.rs:78	regis.rs:277 (copy_char_into)	MATCH	yes	ts_locale.h inline; folded into copy_char_into (already-sliced whole char)
+RS_isRegis	regis.rs:93	regis.rs:131 (rs_is_regis)	MATCH	yes	same 4-state machine, same predicates/literals, default-state elog(ERROR) -> Err(XX000), final state==RS_IN_WAIT. t_isalpha/pg_mblen SEAMED callees
+newRegisNode	regis.rs:161	regis.rs:256 (push_node)	MATCH	yes	palloc0 + linked-list append -> owned PgVec push with try_reserve/oom; len capacity detail no-op
+RS_compile	regis.rs:174	regis.rs:177 (rs_compile)	MATCH	yes	memset+issuffix init, per-state node creation, three shouldn't-get-here elog(ERROR) -> XX000, post-loop state check, nchar walk; ptr-chase -> index
+RS_free	regis.rs:416	regis.rs:95 (Regis::free)	MATCH	yes	pfree-chain + node=NULL -> nodes.clear() + nchar reset
+mb_strchr	regis.rs:426	regis.rs:287 (mb_strchr)	MATCH	yes	while(*ptr && !res) walk, same-byte-length classes only, byte-equality, advance by plen
+RS_execute	regis.rs:461	regis.rs:308 (rs_execute)	MATCH	yes	char-count, len<nchar early-out, issuffix skip, per-node ONEOF/NONEOF via mb_strchr; unreachable default elog elided (2-variant enum)
+DatumGetInt32	dict_ispell.rs:902	dict_ispell.rs (inlined at call site)	MATCH	yes	c2rust-lowered postgres.h Datum accessor inline; not a dict_ispell.c function
+DatumGetPointer	dict_ispell.rs:906	dict_ispell.rs (inlined at call site)	MATCH	yes	c2rust-lowered postgres.h Datum accessor inline
+PointerGetDatum	dict_ispell.rs:910	dict_ispell.rs (inlined at call site)	MATCH	yes	c2rust-lowered postgres.h Datum accessor inline
+dispell_init	dict_ispell.rs:916	dict_ispell.rs:38 (dispell_init)	MATCH	yes	body fully ported in-crate (dictfile/afffile/stopwords dispatch, dup-flag guards, same errmsgs/SQLSTATE, sort ordering); NI* / get_tsearch_config_filename / readstoplist / defGetString / str_tolower are SEAMED callees only
+dispell_lexize	dict_ispell.rs:1234	dict_ispell.rs:106 (dispell_lexize)	MATCH	yes	body fully ported (len<=0 -> None, res==NULL -> None, stop-word compaction as in-place retain); str_tolower/NINormalizeWord SEAMED callees; DEFAULT_COLLATION_OID=100 verified

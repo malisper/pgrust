@@ -1,0 +1,17 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+load_external_function	dfmgr.rs:298	crates/backend-utils-fmgr-dfmgr/src/lib.rs:96	MATCH	yes	
+load_file	dfmgr.rs:377	crates/backend-utils-fmgr-dfmgr/src/lib.rs:131	MATCH	yes	
+lookup_external_function	dfmgr.rs:392	crates/backend-utils-fmgr-dfmgr/src/lib.rs:148	SEAMED	no	bare dlsym!=NULL via loader::function_exists; thin
+internal_load_library	dfmgr.rs:398	crates/backend-utils-fmgr-dfmgr/src/lib.rs:157	MATCH	yes	
+incompatible_module_error	dfmgr.rs:666	crates/backend-utils-fmgr-dfmgr/src/lib.rs:262	MATCH	yes	D1 fixed: ABI-extra C-string compare
+get_first_loaded_module	dfmgr.rs:869	crates/backend-utils-fmgr-dfmgr/src/lib.rs:418	MATCH	yes	
+get_next_loaded_module	dfmgr.rs:873	crates/backend-utils-fmgr-dfmgr/src/lib.rs:430	MATCH	yes	
+get_loaded_module_details	dfmgr.rs:879	crates/backend-utils-fmgr-dfmgr/src/lib.rs:443	MATCH	yes	
+expand_dynamic_library_name	dfmgr.rs:889	crates/backend-utils-fmgr-dfmgr/src/lib.rs:541	MATCH	yes	
+check_restricted_library_name	dfmgr.rs:953	crates/backend-utils-fmgr-dfmgr/src/lib.rs:584	MATCH	yes	
+substitute_path_macro	dfmgr.rs:1006	crates/backend-utils-fmgr-dfmgr/src/lib.rs:602	MATCH	yes	
+find_in_path	dfmgr.rs:1072	crates/backend-utils-fmgr-dfmgr/src/lib.rs:633	MATCH	yes	
+find_rendezvous_variable	dfmgr.rs:1246	crates/backend-utils-fmgr-dfmgr/src/lib.rs:460	MATCH	yes	get + set_rendezvous_variable
+EstimateLibraryStateSpace	dfmgr.rs:1290	crates/backend-utils-fmgr-dfmgr/src/lib.rs:479	MATCH	yes	estimate_library_state_space
+SerializeLibraryState	dfmgr.rs:1308	crates/backend-utils-fmgr-dfmgr/src/lib.rs:492	MATCH	yes	serialize_library_state
+RestoreLibraryState	dfmgr.rs:1332	crates/backend-utils-fmgr-dfmgr/src/lib.rs:513	MATCH	yes	restore_library_state

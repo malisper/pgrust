@@ -1,0 +1,87 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+range_in	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:90	FB/IO range_in	MATCH	yes	fmgr boundary + parse via get_range_io_data
+range_out	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:139	FB/IO range_out	MATCH	yes	
+range_recv	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:179	FB/IO range_recv	MATCH	yes	
+range_send	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:263	FB/IO range_send	MATCH	yes	
+get_range_io_data	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:319	IO get_range_io_data	SEAMED	no	body resolves lookup_type_cache / get_type_io_data / fmgr_info — all unported neighbors; mirror-PG-and-panic naming the owners (no own logic lost)
+range_constructor2	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:379	FB range_constructor2	MATCH	yes	
+range_constructor3	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:408	FB range_constructor3	MATCH	yes	
+range_lower	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:448	FB range_lower	MATCH	yes	
+range_upper	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:469	FB range_upper	MATCH	yes	
+range_empty	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:493	FB range_empty	MATCH	yes	
+range_lower_inc	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:503	FB range_lower_inc	MATCH	yes	
+range_upper_inc	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:513	FB range_upper_inc	MATCH	yes	
+range_lower_inf	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:523	FB range_lower_inf	MATCH	yes	
+range_upper_inf	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:533	FB range_upper_inf	MATCH	yes	
+range_contains_elem	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:546	FB range_contains_elem	MATCH	yes	
+elem_contained_by_range	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:559	FB elem_contained_by_range	MATCH	yes	
+range_eq_internal	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:575	BC range_eq_internal	MATCH	yes	type-match guard, empty handling, both-bounds cmp
+range_eq	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:607	FB range_eq	MATCH	yes	
+range_ne_internal	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:620	BC range_ne_internal	MATCH	yes	!eq
+range_ne	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:627	FB range_ne	MATCH	yes	
+range_contains	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:640	FB range_contains	MATCH	yes	
+range_contained_by	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:653	FB range_contained_by	MATCH	yes	
+range_before_internal	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:666	BC range_before_internal	MATCH	yes	upper1 < lower2
+range_before	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:691	FB range_before	MATCH	yes	
+range_after_internal	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:704	BC range_after_internal	MATCH	yes	lower1 > upper2
+range_after	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:729	FB range_after	MATCH	yes	
+bounds_adjacent	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:759	BC bounds_adjacent	MATCH	yes	make_range probe in mcx; canonical-finfo continuity test
+range_adjacent_internal	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:800	BC range_adjacent_internal	MATCH	yes	mcx threaded (fix #2); B~C or D~A
+range_adjacent	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:830	FB range_adjacent	MATCH	yes	
+range_overlaps_internal	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:843	BC range_overlaps_internal	MATCH	yes	
+range_overlaps	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:876	FB range_overlaps	MATCH	yes	
+range_overleft_internal	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:889	BC range_overleft_internal	MATCH	yes	
+range_overleft	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:917	FB range_overleft	MATCH	yes	
+range_overright_internal	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:930	BC range_overright_internal	MATCH	yes	
+range_overright	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:958	FB range_overright	MATCH	yes	
+range_minus	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:974	FB range_minus	MATCH	yes	
+range_minus_internal	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:995	SO range_minus_internal	MATCH	yes	all 5 ordering cases; "result of range_minus would not be contiguous" error
+range_union_internal	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1054	SO range_union_internal	MATCH	yes	strict adjacency check (fix #2 call site); contiguity error
+range_union	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1100	FB range_union	MATCH	yes	
+range_merge	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1116	FB/SO range_merge	MATCH	yes	
+range_intersect	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1129	FB range_intersect	MATCH	yes	
+range_intersect_internal	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1145	SO range_intersect_internal	MATCH	yes	empty short-circuits; max(lower)/min(upper)
+range_split_internal	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1184	SO range_split_internal	MATCH	yes	(None,None) == C return false; inclusive/lower inversions
+range_intersect_agg_transfn	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1221	FB/SO range_intersect_agg_transfn	MATCH	yes	strict-aggregate state handling
+range_cmp	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1251	FB/CSH range_cmp	MATCH	yes	type-match guard at fmgr boundary; total order kernel
+range_sortsupport	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1297	FB range_sortsupport	MATCH	yes	installs range_fast_cmp
+range_fast_cmp	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1309	CSH range_fast_cmp	MATCH	yes	
+range_lt	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1359	FB range_lt	MATCH	yes	
+range_le	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1367	FB range_le	MATCH	yes	
+range_ge	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1375	FB range_ge	MATCH	yes	
+range_gt	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1383	FB range_gt	MATCH	yes	
+hash_range	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1394	CSH hash_range	MATCH	yes	flags sign-extend (i8 as u32); rotate-left-1; element hash re-lookup via lookup_range_elem_hash_proc seam
+hash_range_extended	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1460	CSH hash_range_extended	MATCH	yes	ROTATE_HIGH_AND_LOW_32BITS mask verified vs hashfn.h
+int4range_canonical	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1528	CSH int4range_canonical	MATCH	yes	INT32_MAX overflow guard, +1, inclusive flip, empty short-circuit
+int8range_canonical	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1575	CSH int8range_canonical	MATCH	yes	INT64_MAX guard
+daterange_canonical	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1622	CSH daterange_canonical	MATCH	yes	DATE_NOT_FINITE + IS_VALID_DATE bounds verified vs date.h/timestamp.h
+int4range_subdiff	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1685	CSH int4range_subdiff	MATCH	yes	(double)v1-(double)v2
+int8range_subdiff	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1694	CSH int8range_subdiff	MATCH	yes	
+numrange_subdiff	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1703	CSH numrange_subdiff	MATCH	yes	float8 via numeric_sub/numeric_float8; delegates to numeric seam
+daterange_subdiff	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1719	CSH daterange_subdiff	MATCH	yes	
+tsrange_subdiff	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1728	CSH tsrange_subdiff	MATCH	yes	USECS_PER_SEC scaling
+tstzrange_subdiff	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1739	CSH tstzrange_subdiff	MATCH	yes	
+range_get_typcache	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1767	BC range_get_typcache	SEAMED	no	body is lookup_type_cache(TYPECACHE_RANGE_INFO)+guard; the only owned-inward seam consumers can reach; mirror-PG-and-panic until typcache lands a range-bearing seam (fix #1: todo!()->panic!)
+range_serialize	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1791	RS range_serialize	MATCH	yes	size compute + write; flags assembly; canonical call
+range_deserialize	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1920	RS range_deserialize	MATCH	yes	header walk, alignment, fetch_att
+range_get_flags	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:1987	RS range_get_flags	MATCH	yes	
+range_set_contain_empty	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:2001	RS range_set_contain_empty	MATCH	yes	
+make_range	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:2016	RS make_range	MATCH	yes	serialize then optional canonical
+range_cmp_bounds	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:2080	BC range_cmp_bounds	MATCH	yes	infinity cases, cmp proc, inclusivity tie-break
+range_cmp_bound_values	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:2154	BC range_cmp_bound_values	MATCH	yes	value-only compare
+range_compare	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:2193	BC range_compare	MATCH	yes	empty<non-empty, lower then upper
+make_empty_range	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:2229	RS make_empty_range	MATCH	yes	
+elem_contained_by_range_support	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:2251	PS/FB	MATCH	yes	dispatch to find_simplified_clause(root, rightop, leftop)
+range_contains_elem_support	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:2277	PS/FB	MATCH	yes	find_simplified_clause(root, leftop, rightop)
+range_parse_flags	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:2311	IO range_parse_flags	MATCH	yes	"[]" "[)" "(]" "()" + malformed errors
+range_parse	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:2386	IO range_parse	MATCH	yes	quote/escape state machine, "malformed range literal" errors
+range_parse_bound	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:2502	IO range_parse_bound	MATCH	yes	
+range_deparse	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:2571	IO range_deparse	MATCH	yes	
+range_bound_escape	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:2601	IO range_bound_escape	MATCH	yes	quoting rules
+range_contains_internal	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:2650	BC range_contains_internal	MATCH	yes	lower1<=lower2 && upper1>=upper2
+range_contained_by_internal	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:2682	BC range_contained_by_internal	MATCH	yes	swap args
+range_contains_elem_internal	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:2691	BC range_contains_elem_internal	MATCH	yes	both-bound cmp with inclusivity
+datum_compute_size	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:2747	RS datum_compute_size	MATCH	yes	att_align_datum / att_addlength_datum
+datum_write	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:2773	RS datum_write	MATCH	yes	store_att_byval / packed-varlena path
+find_simplified_clause	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:2850	PS find_simplified_clause	MATCH	yes	const/null guard, empty->FALSE, both-inf->TRUE, volatile/subplan/cost gating, both-bound AND-clause
+build_bound_expr	../pgrust/c2rust-runs/backend-utils-adt-range-core/src/rangetypes.rs:2972	PS build_bound_expr	MATCH	yes	strategy selection + OidIsValid guard restored in-crate; makeConst/make_opclause/get_opfamily_member seamed

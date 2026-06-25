@@ -1,0 +1,31 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+pgstat_report_wait_start	relmapper.rs:414	(fd seam)	MATCH	yes	c2rust-inlined header inline (wait_event.h); the wait-event accounting is internal to the fd read/write seam owner; no separate counterpart needed.
+pgstat_report_wait_end	relmapper.rs:418	(fd seam)	MATCH	yes	header inline; same as above.
+relmap_mapping	relmapper.rs:433	lib.rs:241,250	MATCH	yes	c2rust codegen artifact (raw-pointer accessor to avoid panic_bounds_check, not a C function); our RelMapFile.mappings slice indexing in lookup_oid/lookup_filenumber.
+relmap_mapping_mut	relmapper.rs:437	lib.rs (mappings[])	MATCH	yes	c2rust codegen artifact; mutable mappings[] indexing in apply_map_update/RelationMapRemoveMapping.
+RelationMapOidToFilenumber	relmapper.rs:497	lib.rs:261	MATCH	yes	active-then-pending(shared/local) lookup_oid; returns InvalidRelFileNumber. (audit basis, spot-verified.)
+RelationMapFilenumberToOid	relmapper.rs:541	lib.rs:285	MATCH	yes	reverse lookups in same order; InvalidOid default.
+RelationMapOidToFilenumberForDatabase	relmapper.rs:585	lib.rs:308	MATCH	yes	read_relmap_file(...,false,ERROR) then linear scan; InvalidRelFileNumber default.
+RelationMapCopy	relmapper.rs:610	lib.rs:326	MATCH	yes	read src, LWLock EXCLUSIVE, write_relmap_file(true,false,false), unlock; send_sinval=false preserve_files=false as in C.
+RelationMapUpdateMap	relmapper.rs:644	lib.rs:366	MATCH	yes	bootstrap->permanent; else nestlevel>1/parallel errors (same messages); immediate->active else pending; apply_map_update(...,true).
+apply_map_update	relmapper.rs:732	lib.rs:412	MATCH	yes	replace-in-place; !add_okay->error; >=MAX_MAPPINGS "ran out of space"; append+bump count.
+merge_map_updates	relmapper.rs:810	lib.rs:441	MATCH	yes	bulk apply loop.
+RelationMapRemoveMapping	relmapper.rs:828	lib.rs:455	MATCH	yes	collapse mappings[last] into the hole, decrement; not-found->error with oid.
+RelationMapInvalidate	relmapper.rs:871	lib.rs:479	MATCH	yes	reload only if magic==FILEMAGIC, per shared/local.
+RelationMapInvalidateAll	relmapper.rs:881	lib.rs:495	MATCH	yes	reload both if valid.
+AtCCI_RelationMap	relmapper.rs:890	lib.rs:516	MATCH	yes	merge pending->active shared then local, zero pending counts. C void but merge can elog ERROR -> seam reconciled to PgResult.
+AtEOXact_RelationMap	relmapper.rs:909	lib.rs:534	MATCH	yes	commit&!parallel: assert no pending, perform_relmap_update shared/local then zero; else drop all four. Asserts->debug_assert.
+AtPrepare_RelationMap	relmapper.rs:930	lib.rs:574	MATCH	yes	any of four nonzero->ereport(ERROR,FEATURE_NOT_SUPPORTED) same message/SQLSTATE.
+CheckPointRelationMap	relmapper.rs:977	lib.rs:594	MATCH	yes	lock SHARED then unlock.
+RelationMapFinishBootstrap	relmapper.rs:987	lib.rs:604	MATCH	yes	assert bootstrap+no pending; lock EXCLUSIVE; write shared (global/Invalid/GLOBALTABLESPACE) and local (DatabasePath/MyDatabaseId/MyDatabaseTableSpace), all flags false; unlock on every path.
+RelationMapInitialize	relmapper.rs:1015	lib.rs:662	MATCH	yes	zero magic + all counts.
+RelationMapInitializePhase2	relmapper.rs:1026	lib.rs:676	MATCH	yes	bootstrap->noop; else load shared.
+RelationMapInitializePhase3	relmapper.rs:1035	lib.rs:685	MATCH	yes	bootstrap->noop; else load local.
+EstimateRelationMapSpace	relmapper.rs:1044	lib.rs:697	MATCH	yes	2 * sizeof(RelMapFile).
+SerializeRelationMap	relmapper.rs:1048	lib.rs:704	MATCH	yes	copies active shared+local into owned SerializedActiveRelMaps (DSM-marshal layer places it).
+RestoreRelationMap	relmapper.rs:1060	lib.rs:713	MATCH	yes	any of four nonzero->"parallel worker has existing mappings"; else copy active shared+local in.
+load_relmap_file	relmapper.rs:1101	lib.rs:737	MATCH	yes	shared->"global"; local->DatabasePath; FATAL elevel.
+read_relmap_file	relmapper.rs:1114	lib.rs:753	MATCH	yes	lock unless held; open/read/close via fd seam; open/read/close-failure, short-read (DATA_CORRUPTED), magic/num_mappings, CRC-mismatch reports reproduced with C text/SQLSTATE; lock released before validation as in C.
+write_relmap_file	relmapper.rs:1334	lib.rs:853	MATCH	yes	assert lock-held-exclusive; magic+bogus-count check; CRC fill; temp write (fd seam) with errno->ereport incl ENOSPC fallback; WAL leg in crit section (encode_xl_relmap_update header + image, XLogInsert(RM_RELMAP_ID,XLOG_RELMAP_UPDATE), XLogFlush); durable_rename; conditional sinval; preserve_files loop. Ordering preserved.
+perform_relmap_update	relmapper.rs:1576	lib.rs:971	MATCH	yes	lock EXCLUSIVE; reload target (lock_held=true); copy to newmap; merge with allowSystemTableMods; write_relmap_file(true,true,true); copy back; unlock on every path.
+relmap_redo	relmapper.rs:1643	lib.rs:1022	MATCH	yes	info = XLogRecGetInfo & ~XLR_INFO_MASK; assert no block refs; XLOG_RELMAP_UPDATE->decode header, nbytes!=sizeof->PANIC, decode image, GetDatabasePath, lock EXCLUSIVE, write_relmap_file(false,true,false), unlock, dbpath dropped; else->PANIC unknown op code.

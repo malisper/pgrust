@@ -1,0 +1,25 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+newNode	nodeAppend.rs:1936	lib.rs (makeNode helper)	MATCH	yes	Trivial node alloc+tag; idiomatic makeNode equivalent in-crate.
+list_length	nodeAppend.rs:1943	lib.rs	MATCH	yes	Inline list helper; idiomatic Vec/List length, behavior-identical.
+list_nth_cell	nodeAppend.rs:1947	lib.rs	MATCH	yes	Inline list helper subsumed into list_nth indexing.
+list_nth	nodeAppend.rs:1954	lib.rs	MATCH	yes	Inline list helper; idiomatic indexed access.
+ExecClearTuple	nodeAppend.rs:1963	lib.rs:clear_result_tuple_slot/execTuples seam	MATCH	yes	Inline slot clear delegated to execTuples; behavior-identical.
+ExecProcNode	nodeAppend.rs:1970	lib.rs (execProcnode seam)	MATCH	yes	Inline dispatch via execProcnode seam.
+ExecInitAppend	nodeAppend.rs:1987	lib.rs:122	MATCH	yes	Audit fn1: pruning/async-alloc/common-slot-ops/field inits all mirrored.
+ExecAppend	nodeAppend.rs:2134	lib.rs:337	MATCH	yes	Audit fn2: first-call init, async/sync interleave, CFI, dispatch, TupIsNull.
+ExecEndAppend	nodeAppend.rs:2184	lib.rs:423	MATCH	yes	Audit fn3: 0..nplans ExecEndNode loop.
+ExecReScanAppend	nodeAppend.rs:2197	lib.rs:441	MATCH	yes	Audit fn4: prune-param reset, per-child rescan gating, async reset.
+ExecAppendEstimate	nodeAppend.rs:2245	lib.rs:537	MATCH	yes	Audit fn5: pstate_len add_size + estimate_chunk/keys(1).
+ExecAppendInitializeDSM	nodeAppend.rs:2266	lib.rs:556	MATCH	yes	Audit fn6: toc alloc/insert, LWLockInitialize, zeroed pa_finished, Leader.
+ExecAppendReInitializeDSM	nodeAppend.rs:2295	lib.rs:591	MATCH	yes	Audit fn7: pa_next_plan=0, pa_finished zeroed.
+ExecAppendInitializeWorker	nodeAppend.rs:2309	lib.rs:615	MATCH	yes	Audit fn8: shm_toc_lookup(false), Worker strategy.
+choose_next_subplan_locally	nodeAppend.rs:2322	lib.rs:660	MATCH	yes	Audit fn9: syncdone short-circuit, fwd/back bms walk.
+choose_next_subplan_for_leader	nodeAppend.rs:2357	lib.rs:716	MATCH	yes	Audit fn10: LWLock guard, mark-finished, find+mark-invalid, release paths.
+choose_next_subplan_for_worker	nodeAppend.rs:2393	lib.rs:779	MATCH	yes	Audit fn11: full pa_next_plan state machine, verified branch-for-branch.
+mark_invalid_subplans_as_finished	nodeAppend.rs:2462	lib.rs:883	MATCH	yes	Audit fn12: all-valid short-circuit, mark non-members finished.
+ExecAppendAsyncBegin	nodeAppend.rs:2476	lib.rs:909	MATCH	yes	Audit fn13: valid-subplan ident+classify, syncdone/nasyncremain init.
+ExecAppendAsyncGetNext	nodeAppend.rs:2502	lib.rs:960	MATCH	yes	Audit fn14: request, wait-loop with CFI, syncdone break, done clear.
+ExecAppendAsyncRequest	nodeAppend.rs:2530	lib.rs:1003	MATCH	yes	Audit fn15: needrequest-empty, pending return, re-request, bms_free.
+ExecAppendAsyncEventWait	nodeAppend.rs:2563	lib.rs:1057	MATCH	yes	Audit fn16: resolved; delivery loop notifies single matched req via user_data.
+ExecAsyncAppendResponse	nodeAppend.rs:2653	lib.rs:1176	MATCH	yes	Audit fn17: request_complete gate, nasyncremain decrement, needrequest add.
+classify_matching_subplans	nodeAppend.rs:2675	lib.rs:1222	MATCH	yes	Audit fn18: empty->syncdone, no-overlap->0, intersect->valid_asyncplans.

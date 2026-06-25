@@ -1,0 +1,24 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+list_nth_cell	explain_format.rs:678	(inlined)	MATCH	yes	c2rust list-macro shim; nth-cell access inlined via PgVec index
+ExplainPropertyList	explain_format.rs:689	lib.rs:ExplainPropertyList	MATCH	yes	four-arm format switch (TEXT/XML/JSON/YAML); first-flag comma semantics exact
+ExplainPropertyListNested	explain_format.rs:842	lib.rs:ExplainPropertyListNested	MATCH	yes	TEXT/XML delegate; JSON/YAML unlabeled bracketed list
+ExplainProperty	explain_format.rs:918	lib.rs:ExplainProperty	MATCH	yes	static; unit Option<&str>; numeric vs escaped value per format
+ExplainPropertyText	explain_format.rs:988	lib.rs:ExplainPropertyText	MATCH	yes	ExplainProperty(qlabel,NULL,value,false)
+ExplainPropertyInteger	explain_format.rs:1002	lib.rs:ExplainPropertyInteger	MATCH	yes	INT64_FORMAT into [u8;32] scratch, numeric=true
+ExplainPropertyUInteger	explain_format.rs:1024	lib.rs:ExplainPropertyUInteger	MATCH	yes	UINT64_FORMAT decimal, numeric=true
+ExplainPropertyFloat	explain_format.rs:1046	lib.rs:ExplainPropertyFloat	MATCH	yes	%.*f -> {:.*} prec=max(ndigits,0), numeric=true
+ExplainPropertyBool	explain_format.rs:1061	lib.rs:ExplainPropertyBool	MATCH	yes	true/false, numeric=true
+ExplainOpenGroup	explain_format.rs:1079	lib.rs:ExplainOpenGroup	MATCH	yes	XML/JSON/YAML group open + lcons_int + indent++
+ExplainCloseGroup	explain_format.rs:1142	lib.rs:ExplainCloseGroup	MATCH	yes	indent-- + close brace/bracket + list_delete_first
+ExplainOpenSetAsideGroup	explain_format.rs:1175	lib.rs:ExplainOpenSetAsideGroup	MATCH	yes	emits nothing; lcons_int + indent+=depth per format
+ExplainSaveGroup	explain_format.rs:1211	lib.rs:ExplainSaveGroup	MATCH	yes	returns state_save (idiomatic out-param); TEXT/XML return 0 observably identical
+ExplainRestoreGroup	explain_format.rs:1236	lib.rs:ExplainRestoreGroup	MATCH	yes	lcons_int(state_save) + indent+=depth
+ExplainDummyGroup	explain_format.rs:1257	lib.rs:ExplainDummyGroup	MATCH	yes	XML close-immediate; JSON/YAML escaped objtype line
+ExplainBeginOutput	explain_format.rs:1298	lib.rs:ExplainBeginOutput	MATCH	yes	XML explain namespace header byte-verified; JSON '['; YAML lcons_int
+ExplainEndOutput	explain_format.rs:1326	lib.rs:ExplainEndOutput	MATCH	yes	XML </explain>; JSON "\n]"; list_delete_first
+ExplainSeparatePlans	explain_format.rs:1350	lib.rs:ExplainSeparatePlans	MATCH	yes	TEXT '\n'; others no-op
+ExplainXMLTag	explain_format.rs:1358	lib.rs:ExplainXMLTag	MATCH	yes	static; valid charset byte-verified; NOWHITESPACE/CLOSING/CLOSE_IMMEDIATE handling
+ExplainIndentText	explain_format.rs:1429	lib.rs:ExplainIndentText	MATCH	yes	Assert TEXT; indent*2 spaces when at line start
+ExplainJSONLineEnding	explain_format.rs:1439	lib.rs:ExplainJSONLineEnding	MATCH	yes	static; linitial_int!=0 -> ',' else set head=1; '\n'
+ExplainYAMLLineStarting	explain_format.rs:1450	lib.rs:ExplainYAMLLineStarting	MATCH	yes	static; head==0 set 1 else '\n'+indent*2 spaces
+escape_yaml	explain_format.rs:1461	lib.rs:escape_yaml	MATCH	yes	static; delegates to escape_json seam (C body is literally escape_json)

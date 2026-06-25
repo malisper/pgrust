@@ -1,0 +1,34 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+MemoryContextSwitchTo	execPartition.rs:4223	owned-mcx model	MATCH	yes	header inline; owned allocation model
+DatumGetInt32	execPartition.rs:4229	types-core	MATCH	yes	header inline; postgres.h
+newNode	execPartition.rs:4234	owned makeNode model	MATCH	yes	header inline; makeNode typed construction
+list_head	execPartition.rs:4242	types-nodes/pg_list	MATCH	yes	header inline; pg_list.h
+list_length	execPartition.rs:4250	types-nodes/pg_list	MATCH	yes	header inline; pg_list.h
+list_nth_cell	execPartition.rs:4254	types-nodes/pg_list	MATCH	yes	header inline; pg_list.h
+list_nth	execPartition.rs:4261	types-nodes/pg_list	MATCH	yes	header inline; pg_list.h
+lnext	execPartition.rs:4268	types-nodes/pg_list	MATCH	yes	header inline; pg_list.h
+slot_getsomeattrs	execPartition.rs:4282	execTuples seam	MATCH	yes	header inline; tuptable.h, reached via execTuples
+slot_getattr	execPartition.rs:4291	execTuples seam	MATCH	yes	header inline; tuptable.h
+ExecClearTuple	execPartition.rs:4303	execTuples seam	MATCH	yes	header inline; tuptable.h
+ExecEvalExprSwitchContext	execPartition.rs:4313	execExpr seam	MATCH	yes	header inline; executor.h
+get_partition_natts	execPartition.rs:4328	partcache accessor	MATCH	yes	header inline; partcache.h
+get_partition_col_attnum	execPartition.rs:4332	partcache accessor	MATCH	yes	header inline; partcache.h
+get_partition_col_typid	execPartition.rs:4339	partcache accessor	MATCH	yes	header inline; partcache.h
+ExecSetupPartitionTupleRouting	execPartition.rs:4346	routing_setup.rs:24	MATCH	yes	audit row 1; proute/dispatch[0] build+grow; root set; ExecInitPartitionDispatchInfo(NULL,0)
+ExecFindPartition	execPartition.rs:4368	routing_find.rs:23	MATCH	yes	audit row 2; full while-loop; root-constraint; FormPartitionKeyDatum; no-part error; leaf/sub branches; scantuple save/restore
+ExecInitPartitionInfo	execPartition.rs:4617	routing_init_info.rs:20	MATCH	yes	audit row 3; prologue in-crate; five plan-node legs delegated to nodeModifyTable seams (adjudicated neighbor-split, not absent OWN logic)
+ExecInitRoutingInfo	execPartition.rs:5087	routing_setup.rs:63	MATCH	yes	audit row 4; RootToChildMap->ri_PartitionTupleSlot; array grow 8,*2; FDW block faithful no-op
+ExecInitPartitionDispatchInfo	execPartition.rs:5163	routing_setup.rs:165	MATCH	yes	audit row 5; lazy es_partition_directory; partdesc lookup; indexes memset -1; grow 4,*2; nonleaf RRI; parent downlink
+ExecCleanupTupleRouting	execPartition.rs:5278	routing_setup.rs:379	MATCH	yes	audit row 6; dispatch close loop i=1..; leaf close panics on unported ExecCloseIndices; FDW EndForeignInsert faithful no-op
+FormPartitionKeyDatum	execPartition.rs:5313	routing_find.rs:347	MATCH	yes	audit row 7; partexprs/keystate compile; plain col vs expr; both "wrong number" elog paths
+get_partition_for_tuple	execPartition.rs:5410	routing_find.rs:448	MATCH	yes	audit row 8; HASH/LIST/RANGE bsearch incl null/default/cache; last_found update
+ExecBuildSlotPartitionKeyDescription	execPartition.rs:5605	routing_find.rs:683	MATCH	yes	audit row 9; RLS->None; table/per-col acl; getTypeOutputInfo+OidOutputFunctionCall; mbcliplen truncation
+adjust_partition_colnos	execPartition.rs:5703	colnos.rs:15	MATCH	yes	audit row 10; ChildToRootMap+delegate; dead (ON CONFLICT caller delegated out)
+adjust_partition_colnos_using_map	execPartition.rs:5710	colnos.rs:35	MATCH	yes	audit row 11; attno bounds/zero->unexpected attno elog; lappend_int; dead (MERGE caller delegated)
+ExecDoInitialPruning	execPartition.rs:5782	pruning.rs:161	MATCH	yes	audit row 12; foreach pruneinfo CreatePartitionPruneState+do_initial_prune; bms_add_members es_unpruned_relids; C timing preserved
+ExecInitPartitionExecPruning	execPartition.rs:5834	pruning.rs:230	MATCH	yes	audit row 13; relids bms_equal elog; moves owned PgBox out (None tombstone); do_initial/exec_prune; returns owned box
+CreatePartitionPruneState	execPartition.rs:5907	pruning.rs:292	MATCH	yes	audit row 14; econtext; per-hierarchy build; quick-compare memcmp + full pd/pp_idx remap; present_parts; execparamids; EXPLAIN skip
+InitPartitionPruneContext	execPartition.rs:6162	pruning.rs:651	MATCH	yes	audit row 15; strategy/partnatts/nparts; boundinfo real PartitionBoundInfo moved out; stepcmpfuncs palloc0; per-step gates; ExecInitExpr split
+InitExecPartitionPruneContexts	execPartition.rs:6247	pruning.rs:780	MATCH	yes	audit row 16; bms_num_members<n -> fix_subplan_map; rev per-rel loop; present_parts rebuild; other_subplans remap; &mut state
+ExecFindMatchingSubPlans	execPartition.rs:6377	pruning.rs:1002	MATCH	yes	audit row 17; asserts; per-hierarchy recurse; other_subplans add; bms_copy out; reset; trimmed public seam rtis=NULL
+find_matching_subplans_recurse	execPartition.rs:6420	pruning.rs:1090	MATCH	yes	audit row 18; check_stack_depth; partset via get_matching_partitions; subplan_map>=0 add else subpart recurse

@@ -1,0 +1,19 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+ParseCommitRecord	backend-rmgrdesc-extra/src/xactdesc.rs:459	crates/backend-access-rmgrdesc-xactdesc/src/lib.rs:223	MATCH	yes	Byte-view parser; xact_time@0, xinfo gated by XLOG_XACT_HAS_INFO, sub-record walk in parse_commit_abort_body. Offsets verified vs access/xact.h.
+ParseAbortRecord	backend-rmgrdesc-extra/src/xactdesc.rs:564	crates/backend-access-rmgrdesc-xactdesc/src/lib.rs:240	MATCH	yes	Identical walk; MinSizeOfXactAbort=8.
+ParsePrepareRecord	backend-rmgrdesc-extra/src/xactdesc.rs:655	crates/backend-access-rmgrdesc-xactdesc/src/lib.rs:398	MATCH	yes	Header field offsets + MAXALIGN(8) bufptr advance over GID and sub-arrays match C exactly; GID trimmed at first NUL.
+xact_desc_relations	backend-rmgrdesc-extra/src/xactdesc.rs:768	crates/backend-access-rmgrdesc-xactdesc/src/lib.rs:550	MATCH	yes	if(nrels>0) guard; "; %s:" then " %s" per relpathperm(loc,MAIN). relpathperm via owner seam (unported leaf).
+xact_desc_subxacts	backend-rmgrdesc-extra/src/xactdesc.rs:806	crates/backend-access-rmgrdesc-xactdesc/src/lib.rs:569	MATCH	yes	"; subxacts:" + " %u" per xid.
+xact_desc_stats	backend-rmgrdesc-extra/src/xactdesc.rs:828	crates/backend-access-rmgrdesc-xactdesc/src/lib.rs:587	MATCH	yes	"; %sdropped stats:" + " %d/%u/%llu"; objid reassembled (hi<<32)|lo; widths/signedness match.
+xact_desc_commit	backend-rmgrdesc-extra/src/xactdesc.rs:857	crates/backend-access-rmgrdesc-xactdesc/src/lib.rs:630	MATCH	yes	twophase prefix, timestamptz_to_str, rels/subxacts/stats, standby_desc_invalidations(RelcacheInitFileInval), apply_feedback/sync, origin block; %X/%X uppercase preserved.
+xact_desc_abort	backend-rmgrdesc-extra/src/xactdesc.rs:939	crates/backend-access-rmgrdesc-xactdesc/src/lib.rs:675	MATCH	yes	Same ordering: rels/subxacts then origin then stats last; no inval messages.
+xact_desc_prepare	backend-rmgrdesc-extra/src/xactdesc.rs:995	crates/backend-access-rmgrdesc-xactdesc/src/lib.rs:704	MATCH	yes	"gid %s: ", rels(commit/abort)/stats/subxacts, standby_desc_invalidations(initfileinval) tsId=InvalidOid, origin gated by origin_id!=InvalidRepOriginId.
+xact_desc_assignment	backend-rmgrdesc-extra/src/xactdesc.rs:1077	crates/backend-access-rmgrdesc-xactdesc/src/lib.rs:740	MATCH	yes	"subxacts:" + " %u" over xsub[0..nsubxacts] (nsubxacts@4, xsub@8).
+xact_desc	backend-rmgrdesc-extra/src/xactdesc.rs:1097	crates/backend-access-rmgrdesc-xactdesc/src/lib.rs:759	MATCH	yes	info & XLOG_XACT_OPMASK dispatch over COMMIT/ABORT(+PREPARED)/PREPARE/ASSIGNMENT("xtop %u: ")/INVALIDATIONS.
+xact_identify	backend-rmgrdesc-extra/src/xactdesc.rs:1153	crates/backend-access-rmgrdesc-xactdesc/src/lib.rs:790	MATCH	yes	7-arm switch to symbolic names, None default; opcodes verified vs access/xact.h.
+xlog_desc	backend-rmgrdesc-extra/src/xlogdesc.rs:333	(none)	MISSING	no	xlogdesc.c not owned by this crate (lives in backend-rmgrdesc-next unit, only -xlogdesc-seams crate exists; impl not present).
+xlog_identify	backend-rmgrdesc-extra/src/xlogdesc.rs:520	(none)	MISSING	no	xlogdesc.c not in this crate; no counterpart here.
+get_wal_level_string	backend-rmgrdesc-extra/src/xlogdesc.rs:315	(none)	MISSING	no	xlogdesc.c static helper; not in this crate.
+XLogRecGetBlockRefInfo	backend-rmgrdesc-extra/src/xlogdesc.rs:570	(none)	MISSING	no	xlogdesc.c block-ref describer; not in this crate.
+replorigin_desc	backend-rmgrdesc-extra/src/replorigindesc.rs:186	(none)	MISSING	no	replorigindesc.c not owned by this crate (only -replorigindesc-seams exists).
+replorigin_identify	backend-rmgrdesc-extra/src/replorigindesc.rs:224	(none)	MISSING	no	replorigindesc.c not in this crate; no counterpart here.

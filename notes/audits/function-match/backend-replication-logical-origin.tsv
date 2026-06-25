@@ -1,0 +1,43 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+DatumGetBool	origin.rs:2678	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers
+BoolGetDatum	origin.rs:2682	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers
+ObjectIdGetDatum	origin.rs:2690	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers
+DatumGetPointer	origin.rs:2694	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers
+PointerGetDatum	origin.rs:2698	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers
+DatumGetInt64	origin.rs:2702	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers
+Int64GetDatum	origin.rs:2706	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers
+GETSTRUCT	origin.rs:2716	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers
+DatumGetTimestampTz	origin.rs:2735	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers
+DatumGetLSN	origin.rs:2751	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers
+LSNGetDatum	origin.rs:2755	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers
+replorigin_check_prerequisites	origin.rs:2779	lib.rs:194	MATCH	yes	both ereports; max==0 + !recoveryOK&&RecoveryInProgress; RecoveryInProgress seamed
+IsReservedOriginName	origin.rs:2868	lib.rs:170	MATCH	yes	pg_strcasecmp vs two literals; ASCII case-insensitive
+replorigin_by_name	origin.rs:2875	lib.rs:217	SEAMED	no	syscache_roident_by_name seam; missing+!ok->ERRCODE_UNDEFINED_OBJECT; InvalidOid when missing_ok
+replorigin_create	origin.rs:2935	lib.rs:238	SEAMED	no	>512->ERRCODE_PROGRAM_LIMIT_EXCEEDED; dirty-snapshot free-id scan+insert+CCI via create_catalog_insert seam
+replorigin_state_clear	origin.rs:3126	lib.rs:270	MATCH	yes	goto restart->loop; busy+nowait->ERRCODE_OBJECT_IN_USE; busy+wait->CV sleep; WAL-drop seam
+replorigin_drop_by_name	origin.rs:3230	lib.rs:337	SEAMED	no	open RowExclusive->by_name->LockSharedObject; state_clear->delete+CCI; catalog/lmgr legs seamed
+replorigin_by_oid	origin.rs:3298	lib.rs:380	SEAMED	no	debug asserts; found->name; missing+!ok->ERRCODE_UNDEFINED_OBJECT; syscache_roname_by_oid seam
+ReplicationOriginShmemSize	origin.rs:3363	lib.rs:400	MATCH	yes	max==0->0 else proportional; drops C offsetof byte (no consumer uses byte count); zero+proportionality preserved
+ReplicationOriginShmemInit	origin.rs:3379	lib.rs:416	MATCH	yes	max==0 early return; n zeroed entries try_reserve; LWLockInitialize+CV each; OnceLock publish
+CheckPointReplicationOrigin	origin.rs:3431	lib.rs:455	SEAMED	no	max==0; SHARED lock; per-slot snapshot+XLogFlush; checkpoint_write seam (transient I/O)
+StartupReplicationOrigin	origin.rs:3709	lib.rs:514	SEAMED	no	already_started one-shot; checkpoint_read seam; last_state==max PANIC; dropped elog informational
+replorigin_redo	origin.rs:4141	lib.rs:556	MATCH	yes	info mask; SET->advance; DROP->linear clear; default PANIC; decoders reproduce byte layout
+replorigin_advance	origin.rs:4211	lib.rs:641	SEAMED	no	DoNotReplicateId early return; EXCLUSIVE lock; slot search; ERRCODE_OBJECT_IN_USE; wal_insert_replorigin_set seam; LSN predicates
+replorigin_get_progress	origin.rs:4378	lib.rs:758	SEAMED	no	SHARED lock; linear search; per-slot snapshot; flush&&local!=Invalid->XLogFlush
+ReplicationOriginExitCleanup	origin.rs:4413	lib.rs:796	MATCH	yes	NULL session return; EXCLUSIVE lock; acquired_by==MyProcPid clear+null cache; broadcast
+replorigin_session_setup	origin.rs:4438	lib.rs:828	SEAMED	no	registered_cleanup one-shot->on_shmem_exit seam; busy->ERRCODE_OBJECT_IN_USE; new-slot init; broadcast
+replorigin_session_reset	origin.rs:4648	lib.rs:934	MATCH	yes	NULL->ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE; EXCLUSIVE lock; clear+null cache; broadcast
+replorigin_session_advance	origin.rs:4703	lib.rs:965	MATCH	yes	asserts non-NULL; per-slot EXCLUSIVE lock; advance local then remote with < guards
+replorigin_session_get_progress	origin.rs:4717	lib.rs:990	SEAMED	no	per-slot SHARED snapshot; flush&&local!=Invalid->XLogFlush
+pg_replication_origin_create	origin.rs:4730	lib.rs:1041	MATCH	yes	prereq(false,false); IsReservedName/IsReservedOriginName->ERRCODE_RESERVED_NAME; replorigin_create
+pg_replication_origin_drop	origin.rs:4800	lib.rs:1062	MATCH	yes	prereq(false,false); replorigin_drop_by_name(name,false,true)
+pg_replication_origin_oid	origin.rs:4819	lib.rs:1070	MATCH	yes	prereq(false,false); by_name(true); OidIsValid->Some else None
+pg_replication_origin_session_setup	origin.rs:4843	lib.rs:1084	MATCH	yes	prereq(true,false); by_name(false)->session_setup(origin,0); set session_origin
+pg_replication_origin_session_reset	origin.rs:4865	lib.rs:1097	MATCH	yes	prereq(true,false); session_reset; clear three session globals
+pg_replication_origin_session_is_setup	origin.rs:4876	lib.rs:1111	MATCH	yes	prereq(false,false); session_origin != Invalid
+pg_replication_origin_session_progress	origin.rs:4885	lib.rs:1119	MATCH	yes	prereq(true,false); NULL->prereq error; session_get_progress; Invalid->None
+pg_replication_origin_xact_setup	origin.rs:4944	lib.rs:1139	MATCH	yes	prereq(true,false); NULL->prereq error; set session lsn+timestamp
+pg_replication_origin_xact_reset	origin.rs:5003	lib.rs:1159	MATCH	yes	prereq(true,false); clear session lsn+timestamp
+pg_replication_origin_advance	origin.rs:5012	lib.rs:1170	SEAMED	no	prereq(true,false); LockRelationOid seam; by_name(false); replorigin_advance(go_backward,wal_log); UnlockRelationOid seam
+pg_replication_origin_progress	origin.rs:5042	lib.rs:1194	MATCH	yes	prereq(true,true); by_name(false); replorigin_get_progress; Invalid->None
+pg_show_replication_origin_status	origin.rs:5073	lib.rs:1213	SEAMED	no	prereq(false,true); InitMaterializedSRF seam; SHARED lock; per-row via put_replication_origin_status_row seam

@@ -1,0 +1,9 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+format_type	backend-utils-adt-sqlhelpers/src/format_type.rs:862	crates/backend-utils-adt-format-type/src/lib.rs:92	MATCH	yes	SQL entry; ALLOW_INVALID flag + typemod null handling
+format_type_extended	backend-utils-adt-sqlhelpers/src/format_type.rs:898	crates/backend-utils-adt-format-type/src/lib.rs:120	MATCH	yes	full decision tree; 17-arm special-case switch; catalog fields via seams
+format_type_be	backend-utils-adt-sqlhelpers/src/format_type.rs:1207	crates/backend-utils-adt-format-type/src/lib.rs:362	MATCH	yes	wrapper (-1,0)
+format_type_be_qualified	backend-utils-adt-sqlhelpers/src/format_type.rs:1211	crates/backend-utils-adt-format-type/src/lib.rs:370	MATCH	yes	wrapper (-1,FORCE_QUALIFY)
+format_type_with_typemod	backend-utils-adt-sqlhelpers/src/format_type.rs:1221	crates/backend-utils-adt-format-type/src/lib.rs:376	MATCH	yes	wrapper (typemod,TYPEMOD_GIVEN)
+printTypmod	backend-utils-adt-sqlhelpers/src/format_type.rs:1227	crates/backend-utils-adt-format-type/src/lib.rs:386	MATCH	yes	InvalidOid typmodout path open-coded; else typmod_out seam
+type_maximum_size	backend-utils-adt-sqlhelpers/src/format_type.rs:1257	crates/backend-utils-adt-format-type/src/lib.rs:444	MATCH	yes	BPCHAR/VARCHAR/NUMERIC/VARBIT/BIT size arithmetic
+oidvectortypes	backend-utils-adt-sqlhelpers/src/format_type.rs:1282	crates/backend-utils-adt-format-type/src/lib.rs:485	MATCH	yes	per-element format_type_extended join; growable PgString replaces manual repalloc (no observable diff)

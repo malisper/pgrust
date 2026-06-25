@@ -1,0 +1,41 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+Int32GetDatum	xlogprefetcher.rs:1992	-	MISSING	no	Foreign postgres.h inline (Datum cast); absorbed at call sites / types crate, not separately ported in this unit.
+Int64GetDatum	xlogprefetcher.rs:1996	-	MISSING	no	Foreign postgres.h inline; absorbed at call sites, not separately ported here.
+XLogReaderHasQueuedRecordOrError	xlogprefetcher.rs:2006	xlogreader-seams	SEAMED	no	xlogreader.h inline reaching XLogReaderState; delegated via xlogreader-seams::has_queued_record_or_error (unported owner).
+dlist_init	xlogprefetcher.rs:2018	-	MISSING	no	Foreign ilist.h inline; modeled by the PgVec/dlist bridge in-crate, not a standalone ported fn.
+dlist_is_empty	xlogprefetcher.rs:2023	-	MISSING	no	Foreign ilist.h inline; absorbed into filter_queue ops.
+dlist_push_head	xlogprefetcher.rs:2028	-	MISSING	no	Foreign ilist.h inline; modeled by AddFilter rotate logic.
+dlist_delete	xlogprefetcher.rs:2041	-	MISSING	no	Foreign ilist.h inline; absorbed into filter dequeue.
+dlist_tail_element_off	xlogprefetcher.rs:2046	-	MISSING	no	Foreign ilist.h inline; absorbed into CompleteFilters tail drain.
+pg_atomic_write_u64_impl	xlogprefetcher.rs:2054	-	MISSING	no	Foreign atomics inline; AtomicU64 used directly in-crate.
+pg_atomic_read_u64_impl	xlogprefetcher.rs:2061	-	MISSING	no	Foreign atomics inline; AtomicU64 used directly.
+pg_atomic_init_u64_impl	xlogprefetcher.rs:2065	-	MISSING	no	Foreign atomics inline; AtomicU64 used directly.
+pg_atomic_init_u64	xlogprefetcher.rs:2072	-	MISSING	no	Foreign atomics inline; AtomicU64 used directly.
+pg_atomic_read_u64	xlogprefetcher.rs:2079	-	MISSING	no	Foreign atomics inline; AtomicU64 used directly.
+pg_atomic_write_u64	xlogprefetcher.rs:2083	-	MISSING	no	Foreign atomics inline; AtomicU64 used directly.
+BufferIsValid	xlogprefetcher.rs:2093	-	MISSING	no	Foreign bufmgr.h inline; absorbed at NextBlock prefetch hit handling.
+TimestampTzGetDatum	xlogprefetcher.rs:2097	-	MISSING	no	Foreign timestamp.h inline; absorbed in pg_stat_get_recovery_prefetch.
+lrq_alloc	xlogprefetcher.rs:2111	lib.rs:198	MATCH	yes	size=max_distance+1, ring resized, palloc OOM->?; min size 2. Audit-confirmed.
+lrq_free	xlogprefetcher.rs:2138	lib.rs(Drop)	MATCH	yes	pfree -> Drop of owned LsnReadQueue. Audit-confirmed.
+lrq_inflight	xlogprefetcher.rs:2142	lib.rs:224	MATCH	yes	Field read.
+lrq_completed	xlogprefetcher.rs:2146	lib.rs:229	MATCH	yes	Field read.
+lrq_prefetch	xlogprefetcher.rs:2150	lib.rs:237	MATCH	yes	Admission test, switch on Again/Io/NoIo, head wrap, next callback. Audit-confirmed.
+lrq_complete_lsn	xlogprefetcher.rs:2186	lib.rs:267	MATCH	yes	Tail-drain, dec inflight/completed, tail wrap, prefetch iff enabled. Audit-confirmed.
+XLogPrefetchShmemSize	xlogprefetcher.rs:2212	lib.rs:402	MATCH	yes	sizeof(XLogPrefetchStats).
+XLogPrefetchResetStats	xlogprefetcher.rs:2216	lib.rs:408	MATCH	yes	reset_time=GetCurrentTimestamp, others 0.
+XLogPrefetchShmemInit	xlogprefetcher.rs:2247	lib.rs:425	MATCH	yes	!found init arm via OnceLock; SharedStats genuine shared memory. Audit-confirmed.
+XLogPrefetchReconfigure	xlogprefetcher.rs:2286	lib.rs:444	MATCH	yes	count++ thread-local.
+XLogPrefetchIncrement	xlogprefetcher.rs:2290	lib.rs:452	MATCH	yes	*c=read+1 Relaxed; Assert->debug_assert.
+XLogPrefetcherAllocate	xlogprefetcher.rs:2297	lib.rs:466	MATCH	yes	palloc0, filter_table reserve(1024), reconfigure_count=count-1, gauges zeroed. Audit-confirmed.
+XLogPrefetcherFree	xlogprefetcher.rs:2335	lib.rs:509	MATCH	yes	consumes self -> Drop frees ring+table.
+XLogPrefetcherGetReader	xlogprefetcher.rs:2341	lib.rs:513	MATCH	yes	Returns reader.
+XLogPrefetcherComputeStats	xlogprefetcher.rs:2347	lib.rs:519	MATCH	yes	wal_distance/io_depth/block_distance stored, next_stats_shm_lsn=ReadRecPtr+STATS_DISTANCE. Audit-confirmed.
+XLogPrefetcherNextBlock	xlogprefetcher.rs:2370	lib.rs:567	MATCH	yes	Full for(;;) read-ahead, filter ops (XLOG/DBASE/SMGR), block scan with skip_fpw/init/new/rep, prefetch hit/io/elog. Audit-confirmed.
+pg_stat_get_recovery_prefetch	xlogprefetcher.rs:2596	lib.rs:896	MATCH	yes	10 cols, InitMaterializedSRF, putvalues, return (Datum)0. Audit-confirmed.
+XLogPrefetcherAddFilter	xlogprefetcher.rs:2655	lib.rs:936	MATCH	yes	HASH_ENTER insert+push_head / found extend+Min+rotate. Audit-confirmed.
+XLogPrefetcherCompleteFilters	xlogprefetcher.rs:2687	lib.rs:994	MATCH	yes	Drain from tail while until_replayed<replaying_lsn; >= break; remove. Audit-confirmed.
+XLogPrefetcherIsFiltered	xlogprefetcher.rs:2711	lib.rs:1017	MATCH	yes	Empty fast path; block-range and whole-db filters. Audit-confirmed.
+XLogPrefetcherBeginRead	xlogprefetcher.rs:2746	lib.rs:1050	MATCH	yes	reconfigure_count--, begin_ptr, no_readahead_until=0, XLogBeginRead.
+XLogPrefetcherReadRecord	xlogprefetcher.rs:2756	lib.rs:1073	MATCH	yes	reconfigure ring realloc, CompleteFilters, complete_lsn, prefetch-if-empty, NextRecord, ComputeStats. Audit-confirmed.
+check_recovery_prefetch	xlogprefetcher.rs:2818	lib.rs:1223	MATCH	yes	USE_PREFETCH cfg by target_os; ON rejected with GUC_check_errdetail.
+assign_recovery_prefetch	xlogprefetcher.rs:2826	lib.rs:1236	MATCH	yes	recovery_prefetch=new_value; AmStartupProcess->Reconfigure.

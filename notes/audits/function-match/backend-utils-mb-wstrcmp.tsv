@@ -1,0 +1,2 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+pg_char_and_wchar_strcmp	wstrcmp.rs:3	lib.rs:12	MATCH	yes	sign-extended char->pg_wchar loop compare; matching-NUL->0; mismatch returns unsigned-byte minus wchar truncated to i32

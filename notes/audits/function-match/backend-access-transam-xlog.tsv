@@ -1,0 +1,161 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+DatumGetBool	xlog.rs:2437	-	MISSING	no	Foreign postgres.h inline; absorbed at call sites, not separately ported.
+FullTransactionIdFromEpochAndXid	xlog.rs:2455	-	MISSING	no	Foreign transam.h inline; absorbed elsewhere.
+FullTransactionIdRetreat	xlog.rs:2464	-	MISSING	no	Foreign transam.h inline; absorbed elsewhere.
+pg_atomic_compare_exchange_u64_impl	xlog.rs:2545	-	MISSING	no	Foreign atomics inline; Atomic types used directly.
+pg_atomic_exchange_u64_impl	xlog.rs:2555	-	MISSING	no	Foreign atomics inline.
+pg_atomic_fetch_add_u64_impl	xlog.rs:2562	-	MISSING	no	Foreign atomics inline.
+pg_atomic_write_u64_impl	xlog.rs:2569	-	MISSING	no	Foreign atomics inline.
+pg_atomic_read_u64_impl	xlog.rs:2576	-	MISSING	no	Foreign atomics inline.
+pg_atomic_init_u64_impl	xlog.rs:2580	-	MISSING	no	Foreign atomics inline.
+pg_atomic_read_membarrier_u64_impl	xlog.rs:2587	-	MISSING	no	Foreign atomics inline.
+pg_atomic_write_membarrier_u64_impl	xlog.rs:2593	-	MISSING	no	Foreign atomics inline.
+c2rust_pg_atomic_memory_barrier	xlog.rs:2600	-	MISSING	no	atomics.h barrier shim, not xlog.c logic.
+pg_atomic_init_u64	xlog.rs:2604	-	MISSING	no	Foreign atomics inline.
+pg_atomic_read_u64	xlog.rs:2611	-	MISSING	no	Foreign atomics inline.
+pg_atomic_read_membarrier_u64	xlog.rs:2615	-	MISSING	no	Foreign atomics inline.
+pg_atomic_write_u64	xlog.rs:2621	-	MISSING	no	Foreign atomics inline.
+pg_atomic_write_membarrier_u64	xlog.rs:2628	-	MISSING	no	Foreign atomics inline.
+pg_atomic_compare_exchange_u64	xlog.rs:2635	-	MISSING	no	Foreign atomics inline.
+pg_atomic_fetch_add_u64	xlog.rs:2643	-	MISSING	no	Foreign atomics inline.
+pg_atomic_monotonic_advance_u64	xlog.rs:2650	-	MISSING	no	Foreign atomics inline.
+tas	xlog.rs:2668	-	MISSING	no	Foreign s_lock.h inline (spinlock test-and-set); owned by storage spinlock substrate.
+XLogFileName	xlog.rs:2703	lib.rs:361	MATCH	yes	xlog_internal.h codec macro; tli/segno/segsz hex format. Audit-confirmed.
+IsXLogFileName	xlog.rs:2725	lib.rs:376	MATCH	yes	xlog_internal.h predicate; 24 hex chars. Audit-confirmed.
+IsPartialXLogFileName	xlog.rs:2733	lib.rs:381	MATCH	yes	xlog_internal.h predicate; .partial suffix. Audit-confirmed.
+XLogFromFileName	xlog.rs:2751	lib.rs:388	MATCH	yes	xlog_internal.h codec; hex parse to (tli,segno). Audit-confirmed.
+XLogFilePath	xlog.rs:2771	lib.rs:402	MATCH	yes	xlog_internal.h codec; pg_wal/<name> path. Audit-confirmed.
+BackupHistoryFileName	xlog.rs:2793	lib.rs:429	MATCH	yes	xlog_internal.h codec; name.offset.backup. Audit-confirmed.
+IsBackupHistoryFileName	xlog.rs:2818	lib.rs:445	MATCH	yes	xlog_internal.h predicate. Audit-confirmed.
+BackupHistoryFilePath	xlog.rs:2837	lib.rs:452	MATCH	yes	xlog_internal.h codec. Audit-confirmed.
+RmgrIdExists	xlog.rs:2862	-	MISSING	no	Foreign rmgr.h inline; owned by rmgr unit, not re-ported here.
+GetRmgr	xlog.rs:2868	-	MISSING	no	Foreign rmgr.h inline; owned by rmgr unit.
+pgstat_report_wait_start	xlog.rs:2895	-	MISSING	no	Foreign wait_event.h inline; pgstat owner.
+pgstat_report_wait_end	xlog.rs:2899	-	MISSING	no	Foreign wait_event.h inline; pgstat owner.
+WalSndWakeupProcessRequests	xlog.rs:2903	-	MISSING	no	Foreign walsender.h inline; walsender owner.
+set_ps_display	xlog.rs:2928	-	MISSING	no	Foreign ps_status.h inline; ps_status owner.
+c2rust_pg_memory_barrier	xlog.rs:2932	-	MISSING	no	atomics.h barrier shim, not xlog.c logic.
+c2rust_pg_read_barrier	xlog.rs:2936	-	MISSING	no	atomics.h barrier shim, not xlog.c logic.
+c2rust_pg_write_barrier	xlog.rs:2940	-	MISSING	no	atomics.h barrier shim, not xlog.c logic.
+XLogInsertRecord	xlog.rs:3150	lib.rs:512-649	SEAMED	no	WAL-insert engine; deferred behind xlog-driver debt (shmem/spinlock/reader substrate). Panics loudly. Audit DEFERRED.
+ReserveXLogInsertLocation	xlog.rs:3361	lib.rs:512-649	SEAMED	no	WAL-insert engine; deferred (shmem/spinlock). Audit DEFERRED.
+ReserveXLogSwitch	xlog.rs:3394	lib.rs:512-649	SEAMED	no	WAL-insert engine; deferred. Audit DEFERRED.
+CopyXLogRecordToWAL	xlog.rs:3446	lib.rs:512-649	SEAMED	no	WAL-insert engine; deferred (GetXLogBuffer substrate). Audit DEFERRED.
+WALInsertLockAcquire	xlog.rs:3599	lib.rs:512-649	SEAMED	no	WAL-insert lock; deferred (LWLock/shmem). Audit DEFERRED.
+WALInsertLockAcquireExclusive	xlog.rs:3614	lib.rs:512-649	SEAMED	no	WAL-insert lock; deferred. Audit DEFERRED.
+WALInsertLockRelease	xlog.rs:3632	lib.rs:512-649	SEAMED	no	WAL-insert lock; deferred. Audit DEFERRED.
+WALInsertLockUpdateInsertingAt	xlog.rs:3653	lib.rs:512-649	SEAMED	no	WAL-insert lock; deferred. Audit DEFERRED.
+WaitXLogInsertionsToFinish	xlog.rs:3674	lib.rs:512-649	SEAMED	no	WAL-insert engine; deferred (shmem/locks). Audit DEFERRED.
+GetXLogBuffer	xlog.rs:3792	lib.rs:512-649	SEAMED	no	WAL-insert engine; deferred (shmem buffers). Audit DEFERRED.
+WALReadFromBuffers	xlog.rs:3884	lib.rs:512-649	SEAMED	no	WAL-insert engine; deferred (shmem buffers). Audit DEFERRED.
+XLogBytePosToRecPtr	xlog.rs:3991	lib.rs:263	MATCH	yes	byte-pos arithmetic re-derived line-for-line. Audit-confirmed.
+XLogBytePosToEndRecPtr	xlog.rs:4022	lib.rs:288	MATCH	yes	page-boundary zero-offset arm. Audit-confirmed.
+XLogRecPtrToBytePos	xlog.rs:4064	lib.rs:321	MATCH	yes	inverse arithmetic; Assert debug-only. Audit-confirmed.
+AdvanceXLInsertBuffer	xlog.rs:4100	lib.rs:512-649	SEAMED	no	WAL-insert engine; deferred (shmem buffers). Audit DEFERRED.
+CalculateCheckpointSegments	xlog.rs:4261	lib.rs:469	MATCH	yes	round-down, floor at 1. Audit-confirmed.
+assign_max_wal_size	xlog.rs:4272	lib.rs:488	MATCH	yes	recompute wrapper over CalculateCheckpointSegments. Audit-confirmed (fix round).
+assign_checkpoint_completion_target	xlog.rs:4280	lib.rs:494	MATCH	yes	recompute wrapper. Audit-confirmed (fix round).
+check_wal_segment_size	xlog.rs:4288	lib.rs:184	MATCH	yes	GUC check hook (IsValidWalSegSize). Audit-confirmed.
+XLOGfileslop	xlog.rs:4306	retention.rs:43	MATCH	yes	min/max clamp, +10%, ceil. Audit-confirmed.
+XLogCheckpointNeeded	xlog.rs:4344	lib.rs(added)	MATCH	yes	RedoRecPtr/CheckPointSegments arith. Audit-confirmed (fix round).
+XLogWrite	xlog.rs:4355	lib.rs:512-649	SEAMED	no	WAL write driver; deferred (fd/shmem). Audit DEFERRED.
+XLogSetAsyncXactLSN	xlog.rs:4645	lib.rs:512-649	SEAMED	no	shmem setter; deferred. Audit DEFERRED.
+XLogSetReplicationSlotMinimumLSN	xlog.rs:4701	lib.rs:512-649	SEAMED	no	shmem setter; deferred. Audit DEFERRED.
+XLogGetReplicationSlotMinimumLSN	xlog.rs:4716	lib.rs:512-649	SEAMED	no	shmem getter; deferred. Audit DEFERRED.
+UpdateMinRecoveryPoint	xlog.rs:4732	lib.rs:512-649	SEAMED	no	control-file/shmem driver; deferred. Audit DEFERRED.
+XLogFlush	xlog.rs:4832	lib.rs:512-649	SEAMED	no	WAL flush driver; deferred (shmem/locks). Audit DEFERRED.
+XLogBackgroundFlush	xlog.rs:4952	lib.rs:512-649	SEAMED	no	WAL flush driver; deferred. Audit DEFERRED.
+XLogNeedsFlush	xlog.rs:5061	lib.rs:512-649	SEAMED	no	shmem read driver; deferred. Audit DEFERRED.
+XLogFileInitInternal	xlog.rs:5106	lib.rs:512-649	SEAMED	no	file I/O driver; deferred (fd.c). Audit DEFERRED.
+XLogFileInit	xlog.rs:5442	lib.rs:512-649	SEAMED	no	file I/O driver; deferred. Audit DEFERRED.
+XLogFileCopy	xlog.rs:5495	lib.rs:512-649	SEAMED	no	file I/O driver; deferred. Audit DEFERRED.
+InstallXLogFileSegment	xlog.rs:5880	lib.rs:512-649	SEAMED	no	file I/O driver; deferred. Audit DEFERRED.
+XLogFileOpen	xlog.rs:5960	lib.rs:512-649	SEAMED	no	file I/O driver; deferred. Audit DEFERRED.
+XLogFileClose	xlog.rs:6009	lib.rs:512-649	SEAMED	no	file I/O driver; deferred. Audit DEFERRED.
+PreallocXlogFiles	xlog.rs:6053	lib.rs:512-649	SEAMED	no	file I/O driver; deferred. Audit DEFERRED.
+CheckXLogRemoved	xlog.rs:6086	lib.rs:512-649	SEAMED	no	shmem read driver; deferred. Audit DEFERRED.
+XLogGetLastRemovedSegno	xlog.rs:6142	lib.rs:512-649	SEAMED	no	shmem getter; deferred. Audit DEFERRED.
+XLogGetOldestSegno	xlog.rs:6158	retention.rs:173	MATCH	yes	dir-scan filter as iterator (XLogGetOldestSegnoFromNames). Audit-confirmed.
+UpdateLastRemovedPtr	xlog.rs:6189	retention.rs:214	SEAMED	no	full fn reads/sets shmem global; deferred. The portable parse helper (strips .partial then XLogFromFileName) is grounded in retention.rs:214 but the driver fn is DEFERRED. Audit DEFERRED.
+RemoveTempXlogFiles	xlog.rs:6207	lib.rs:512-649	SEAMED	no	file I/O driver; deferred (dir scan/unlink). Audit DEFERRED.
+RemoveOldXlogFiles	xlog.rs:6288	retention.rs:204	SEAMED	no	full fn does dir-scan/fd work; deferred. The name-filter helper (strcmp d+8 vs lastoff+8) is grounded in retention.rs:204 (IsOldXlogFileCandidate) but the driver fn is DEFERRED. Audit DEFERRED.
+RemoveNonParentXlogFiles	xlog.rs:6366	lib.rs:512-649	SEAMED	no	file I/O driver; deferred. Audit DEFERRED.
+RemoveXlogFile	xlog.rs:6441	lib.rs:512-649	SEAMED	no	file I/O driver; deferred. Audit DEFERRED.
+ValidateXLOGDirectoryStructure	xlog.rs:6541	lib.rs:512-649	SEAMED	no	file I/O driver; deferred. Audit DEFERRED.
+CleanupBackupHistory	xlog.rs:6806	lib.rs:512-649	SEAMED	no	file I/O driver; deferred. Audit DEFERRED.
+InitControlFile	xlog.rs:6862	lib.rs:512-649	SEAMED	no	control-file driver; deferred. Audit DEFERRED.
+WriteControlFile	xlog.rs:6935	lib.rs:512-649	SEAMED	no	control-file I/O driver; deferred (fd.c). Audit DEFERRED.
+ReadControlFile	xlog.rs:7116	lib.rs:512-649	SEAMED	no	control-file I/O driver; deferred. Audit DEFERRED.
+UpdateControlFile	xlog.rs:8154	lib.rs:512-649	SEAMED	no	control-file I/O driver; deferred. Audit DEFERRED.
+GetSystemIdentifier	xlog.rs:8158	lib.rs:512-649	SEAMED	no	control-file/shmem getter; deferred. Audit DEFERRED.
+GetMockAuthenticationNonce	xlog.rs:8162	lib.rs:512-649	SEAMED	no	control-file getter; deferred. Audit DEFERRED.
+DataChecksumsEnabled	xlog.rs:8166	lib.rs:512-649	SEAMED	no	control-file getter; deferred. Audit DEFERRED.
+GetDefaultCharSignedness	xlog.rs:8170	lib.rs:512-649	SEAMED	no	control-file getter; deferred. Audit DEFERRED.
+GetFakeLSNForUnloggedRel	xlog.rs:8174	lib.rs:512-649	SEAMED	no	shmem getter; deferred. Audit DEFERRED.
+XLOGChooseNumBuffers	xlog.rs:8180	lib.rs(added)	MATCH	yes	NBuffers/32 clamp [8, segsz/BLCKSZ]. Audit-confirmed (fix round).
+check_wal_buffers	xlog.rs:8192	lib.rs:534	MATCH	yes	-1 autotune + floor-4. Audit-confirmed (fix round).
+check_wal_consistency_checking	xlog.rs:8209	lib.rs:512-649	SEAMED	no	GUC check; deferred (RmgrTable/MemoryContext). Audit DEFERRED.
+assign_wal_consistency_checking	xlog.rs:8338	lib.rs:512-649	SEAMED	no	GUC assign; deferred. Audit DEFERRED.
+InitializeWalConsistencyChecking	xlog.rs:8345	lib.rs:512-649	SEAMED	no	GUC init; deferred. Audit DEFERRED.
+show_archive_command	xlog.rs:8369	lib.rs:512-649	SEAMED	no	GUC show hook; deferred. Audit DEFERRED.
+show_in_hot_standby	xlog.rs:8377	lib.rs:512-649	SEAMED	no	GUC show hook; deferred. Audit DEFERRED.
+LocalProcessControlFile	xlog.rs:8385	lib.rs:512-649	SEAMED	no	control-file driver; deferred. Audit DEFERRED.
+GetActiveWalLevelOnStandby	xlog.rs:8391	lib.rs:512-649	SEAMED	no	shmem getter; deferred. Audit DEFERRED.
+XLOGShmemSize	xlog.rs:8395	lib.rs:512-649	SEAMED	no	shmem sizing driver; deferred (ShmemInitStruct). Audit DEFERRED.
+XLOGShmemInit	xlog.rs:8444	lib.rs:512-649	SEAMED	no	shmem init driver; deferred. Audit DEFERRED.
+BootStrapXLOG	xlog.rs:8569	lib.rs:512-649	SEAMED	no	bootstrap driver; deferred (fd/shmem/control file). Audit DEFERRED.
+str_time	xlog.rs:8818	lib.rs:512-649	SEAMED	no	timezone-formatting helper; deferred (pg_strftime). Audit DEFERRED.
+XLogInitNewTimeline	xlog.rs:8829	lib.rs:512-649	SEAMED	no	startup/recovery leg; deferred. Audit DEFERRED.
+CleanupAfterArchiveRecovery	xlog.rs:8902	lib.rs:512-649	SEAMED	no	startup/recovery leg; deferred. Audit DEFERRED.
+CheckRequiredParameterValues	xlog.rs:8968	lib.rs:512-649	SEAMED	no	startup/recovery leg; deferred. Audit DEFERRED.
+StartupXLOG	xlog.rs:9051	lib.rs:512-649	SEAMED	no	startup driver; deferred (xlogrecovery/shmem/fd). Audit DEFERRED.
+SwitchIntoArchiveRecovery	xlog.rs:9880	lib.rs:512-649	SEAMED	no	startup/recovery leg; deferred. Audit DEFERRED.
+ReachedEndOfBackup	xlog.rs:9913	lib.rs:512-649	SEAMED	no	startup/recovery leg; deferred. Audit DEFERRED.
+PerformRecoveryXLogAction	xlog.rs:9933	lib.rs:512-649	SEAMED	no	startup/recovery leg; deferred. Audit DEFERRED.
+RecoveryInProgress	xlog.rs:9949	lib.rs:512-649	SEAMED	no	shmem getter; deferred. Audit DEFERRED.
+GetRecoveryState	xlog.rs:9960	lib.rs:512-649	SEAMED	no	shmem getter; deferred. Audit DEFERRED.
+XLogInsertAllowed	xlog.rs:9976	lib.rs:512-649	SEAMED	no	shmem getter; deferred. Audit DEFERRED.
+LocalSetXLogInsertAllowed	xlog.rs:9986	checkpoint.rs:455	MATCH	yes	CheckpointState-scoped local flag set. Audit-confirmed.
+GetRedoRecPtr	xlog.rs:9992	lib.rs:512-649	SEAMED	no	shmem getter; deferred. Audit DEFERRED.
+GetFullPageWriteInfo	xlog.rs:10011	lib.rs:512-649	SEAMED	no	shmem getter; deferred. Audit DEFERRED.
+GetInsertRecPtr	xlog.rs:10019	lib.rs:512-649	SEAMED	no	shmem getter; deferred. Audit DEFERRED.
+GetFlushRecPtr	xlog.rs:10035	lib.rs:512-649	SEAMED	no	shmem getter; deferred. Audit DEFERRED.
+GetWALInsertionTimeLine	xlog.rs:10049	lib.rs:512-649	SEAMED	no	shmem getter; deferred. Audit DEFERRED.
+GetWALInsertionTimeLineIfSet	xlog.rs:10053	lib.rs:512-649	SEAMED	no	shmem getter; deferred. Audit DEFERRED.
+GetLastImportantRecPtr	xlog.rs:10069	lib.rs:512-649	SEAMED	no	shmem getter; deferred. Audit DEFERRED.
+GetLastSegSwitchData	xlog.rs:10089	lib.rs:512-649	SEAMED	no	shmem getter; deferred. Audit DEFERRED.
+ShutdownXLOG	xlog.rs:10105	lib.rs:512-649	SEAMED	no	shutdown driver; deferred. Audit DEFERRED.
+LogCheckpointStart	xlog.rs:10162	checkpoint.rs ext	SEAMED	no	checkpoint logging; deferred (xlog-checkpoint-deps ext seam). Audit DEFERRED.
+LogCheckpointEnd	xlog.rs:10304	checkpoint.rs ext	SEAMED	no	checkpoint logging; deferred. Audit DEFERRED.
+UpdateCheckPointDistanceEstimate	xlog.rs:10452	retention.rs:224	MATCH	yes	bump-fast/decay-slow moving average (UpdateCheckPointDistanceEstimateCore). Audit-confirmed.
+update_checkpoint_display	xlog.rs:10461	checkpoint.rs ext	SEAMED	no	ps_status display; deferred. Audit DEFERRED.
+CreateCheckPoint	xlog.rs:10499	checkpoint.rs:149	MATCH	yes	full control flow; shmem/subsystem reads deferred ext::*. Audit-confirmed.
+CreateEndOfRecoveryRecord	xlog.rs:10935	lib.rs:512-649	SEAMED	no	record writer; deferred (XLogInsert). Audit DEFERRED.
+CreateOverwriteContrecordRecord	xlog.rs:11009	lib.rs:512-649	SEAMED	no	record writer; deferred. Audit DEFERRED.
+CheckPointGuts	xlog.rs:11185	checkpoint.rs:335	MATCH	yes	callback fan-out + sync timing. Audit-confirmed.
+RecoveryRestartPoint	xlog.rs:11206	lib.rs:512-649	SEAMED	no	recovery leg; deferred. Audit DEFERRED.
+CreateRestartPoint	xlog.rs:11257	checkpoint.rs:353	MATCH	yes	full control flow vs C. Audit-confirmed.
+GetWALAvailability	xlog.rs:11550	retention.rs:132	MATCH	yes	classification; externals lifted to params. Audit-confirmed.
+KeepLogSeg	xlog.rs:11588	retention.rs:77	MATCH	yes	slot/summarizer/wal_keep floors, underflow guard. Audit-confirmed.
+XLogPutNextOid	xlog.rs:11638	lib.rs:512-649	SEAMED	no	record writer; deferred (XLogInsert). Audit DEFERRED.
+RequestXLogSwitch	xlog.rs:11647	lib.rs:512-649	SEAMED	no	record writer; deferred. Audit DEFERRED.
+XLogRestorePoint	xlog.rs:11660	lib.rs:512-649	SEAMED	no	record writer; deferred. Audit DEFERRED.
+XLogReportParameters	xlog.rs:11713	lib.rs:512-649	SEAMED	no	record writer; deferred. Audit DEFERRED.
+UpdateFullPageWrites	xlog.rs:11777	lib.rs:512-649	SEAMED	no	record writer/shmem; deferred. Audit DEFERRED.
+xlog_redo	xlog.rs:11816	redo.rs:51	MATCH	yes	opcode dispatch; unknown-opcode no-op. Audit-confirmed (fix round on else arm).
+get_sync_bit	xlog.rs:12330	lib.rs:559	MATCH	yes	sync-flag mapping switch; platform values lifted to params. Audit-confirmed (fix round).
+assign_wal_sync_method	xlog.rs:12379	lib.rs:512-649	SEAMED	no	GUC assign/fd driver; deferred. Audit DEFERRED.
+issue_xlog_fsync	xlog.rs:12438	lib.rs:512-649	SEAMED	no	fsync driver; deferred (fd.c). Audit DEFERRED.
+do_pg_backup_start	xlog.rs:12563	lib.rs:512-649	SEAMED	no	backup driver; deferred. Audit DEFERRED.
+get_backup_status	xlog.rs:13013	lib.rs:512-649	SEAMED	no	backup state getter; deferred. Audit DEFERRED.
+do_pg_backup_stop	xlog.rs:13017	lib.rs:512-649	SEAMED	no	backup driver; deferred. Audit DEFERRED.
+do_pg_abort_backup	xlog.rs:13458	lib.rs:512-649	SEAMED	no	backup driver; deferred. Audit DEFERRED.
+register_persistent_abort_backup_handler	xlog.rs:13503	lib.rs:512-649	SEAMED	no	backup driver; deferred. Audit DEFERRED.
+GetXLogInsertRecPtr	xlog.rs:13517	lib.rs:512-649	SEAMED	no	shmem getter; deferred. Audit DEFERRED.
+GetXLogWriteRecPtr	xlog.rs:13534	lib.rs:512-649	SEAMED	no	shmem getter; deferred. Audit DEFERRED.
+GetOldestRestartPoint	xlog.rs:13545	lib.rs:512-649	SEAMED	no	control-file getter; deferred. Audit DEFERRED.
+XLogShutdownWalRcv	xlog.rs:13560	lib.rs:512-649	SEAMED	no	walreceiver driver; deferred. Audit DEFERRED.
+SetInstallXLogFileSegmentActive	xlog.rs:13565	lib.rs:512-649	SEAMED	no	shmem setter; deferred. Audit DEFERRED.
+ResetInstallXLogFileSegmentActive	xlog.rs:13576	lib.rs:512-649	SEAMED	no	shmem setter; deferred. Audit DEFERRED.
+IsInstallXLogFileSegmentActive	xlog.rs:13587	lib.rs:512-649	SEAMED	no	shmem getter; deferred. Audit DEFERRED.
+SetWalWriterSleeping	xlog.rs:13600	lib.rs:512-649	SEAMED	no	shmem setter; deferred. Audit DEFERRED.

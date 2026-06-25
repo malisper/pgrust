@@ -1,0 +1,88 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+MemoryContextSwitchTo	nodeAgg.rs:3854	nodeAgg/src (folded)	MATCH	yes	Inline context switch; idiomatic equivalent.
+DatumGetBool	nodeAgg.rs:3860	nodeAgg/src	MATCH	yes	Inline datum cast.
+ObjectIdGetDatum	nodeAgg.rs:3864	nodeAgg/src	MATCH	yes	Inline datum cast.
+DatumGetPointer	nodeAgg.rs:3868	nodeAgg/src	MATCH	yes	Inline datum cast.
+newNode	nodeAgg.rs:3872	nodeAgg/src (makeNode)	MATCH	yes	Inline node alloc+tag.
+list_length	nodeAgg.rs:3884	nodeAgg/src	MATCH	yes	Inline list helper; idiomatic length.
+list_nth_cell	nodeAgg.rs:3888	nodeAgg/src	MATCH	yes	Inline list helper subsumed into indexing.
+list_last_cell	nodeAgg.rs:3895	nodeAgg/src	MATCH	yes	Inline list helper; last-element access.
+list_nth	nodeAgg.rs:3900	nodeAgg/src	MATCH	yes	Inline list helper; idiomatic indexed access.
+TupleDescAttr	nodeAgg.rs:3907	nodeAgg/src	MATCH	yes	Inline tupdesc attr access.
+GETSTRUCT	nodeAgg.rs:3924	nodeAgg/src	MATCH	yes	Inline heap-tuple struct access.
+slot_getsomeattrs	nodeAgg.rs:3941	nodeAgg/src (execTuples seam)	MATCH	yes	Inline slot deform via execTuples seam.
+slot_getallattrs	nodeAgg.rs:3950	nodeAgg/src (execTuples seam)	MATCH	yes	Inline slot deform via execTuples seam.
+ExecClearTuple	nodeAgg.rs:3954	nodeAgg/src (execTuples seam)	MATCH	yes	Inline slot clear via execTuples seam.
+ExecCopySlotHeapTuple	nodeAgg.rs:3961	nodeAgg/src (execTuples seam)	MATCH	yes	Inline slot copy via execTuples seam.
+pg_leftmost_one_pos64	nodeAgg.rs:3966	nodeAgg/src	MATCH	yes	Inline bit-scan; idiomatic equivalent.
+pg_nextpower2_64	nodeAgg.rs:3971	nodeAgg/src	MATCH	yes	Inline next-power-of-2.
+pg_prevpower2_64	nodeAgg.rs:3979	nodeAgg/src	MATCH	yes	Inline prev-power-of-2.
+TupleHashEntrySize	nodeAgg.rs:3990	nodeAgg/src (execGrouping seam)	MATCH	yes	Inline entry-size accessor via execGrouping.
+TupleHashEntryGetTuple	nodeAgg.rs:3994	nodeAgg/src (execGrouping seam)	MATCH	yes	Inline entry-tuple accessor via execGrouping.
+TupleHashEntryGetAdditional	nodeAgg.rs:3998	nodeAgg/src	SEAMED	no	Entry "additional" layout is the unported execGrouping entry-layout boundary; panics.
+ExecProcNode	nodeAgg.rs:4010	nodeAgg/src (execProcnode seam)	MATCH	yes	Inline dispatch via execProcnode seam.
+ExecEvalExpr	nodeAgg.rs:4019	nodeAgg/src (execExpr seam)	MATCH	yes	Inline expr-eval wrapper via execExpr seam.
+ExecEvalExprNoReturn	nodeAgg.rs:4029	nodeAgg/src (execExpr seam)	MATCH	yes	Inline expr-eval wrapper via execExpr seam.
+ExecEvalExprSwitchContext	nodeAgg.rs:4043	nodeAgg/src (execExpr seam)	MATCH	yes	Inline expr-eval wrapper via execExpr seam.
+ExecEvalExprNoReturnSwitchContext	nodeAgg.rs:4058	nodeAgg/src (execExpr seam)	MATCH	yes	Inline expr-eval wrapper via execExpr seam.
+ExecProject	nodeAgg.rs:4068	nodeAgg/src (execExpr seam)	MATCH	yes	Inline projection via execExpr seam.
+ExecQual	nodeAgg.rs:4082	nodeAgg/src	MATCH	yes	Inline qual eval; NULL-state->true mirrored.
+ExecQualAndReset	nodeAgg.rs:4095	nodeAgg/src	MATCH	yes	Inline qual+reset.
+select_current_set	nodeAgg.rs:4110	node_lifecycle.rs	MATCH	yes	Audit full-MATCH list.
+initialize_phase	nodeAgg.rs:4122	node_lifecycle.rs	MATCH	yes	Audit full-MATCH list.
+fetch_input_tuple	nodeAgg.rs:4166	node_lifecycle.rs	MATCH	yes	Audit full-MATCH list.
+initialize_aggregate	nodeAgg.rs:4197	transition.rs:23	MATCH	yes	Audit full-MATCH list (initialize_aggregate(s)).
+initialize_aggregates	nodeAgg.rs:4260	transition.rs	MATCH	yes	Audit full-MATCH list.
+advance_transition_function	nodeAgg.rs:4295	transition.rs:219	SEAMED	no	Audit spot-check 1: own loop/branches present; panic at fmgr FunctionCallInvoke.
+advance_aggregates	nodeAgg.rs:4363	transition.rs	SEAMED	no	Audit: own logic to execExpr ExecBuildAggTrans/ExecEvalExpr boundary; panics.
+process_ordered_aggregate_single	nodeAgg.rs:4369	transition.rs	SEAMED	no	Audit: own logic to fmgr FunctionCallInvoke boundary; panics.
+process_ordered_aggregate_multi	nodeAgg.rs:4449	transition.rs	SEAMED	no	Audit: own logic to fmgr FunctionCallInvoke boundary; panics.
+finalize_aggregate	nodeAgg.rs:4523	finalize.rs:68	SEAMED	no	Audit spot-check 2: own args/strict logic present; panic at fmgr.
+finalize_partialaggregate	nodeAgg.rs:4646	finalize.rs	SEAMED	no	Audit: own logic to fmgr ExecAggCopyTransValue boundary; panics.
+prepare_hash_slot	nodeAgg.rs:4711	hash_grouping.rs	SEAMED	no	Audit: own logic to execTuples slot machinery boundary; panics.
+prepare_projection_slot	nodeAgg.rs:4734	finalize.rs	SEAMED	no	Audit: all_grouped_cols branch hits unported execTuples slot boundary; panics.
+finalize_aggregates	nodeAgg.rs:4780	finalize.rs	MATCH	yes	Audit full-MATCH list.
+project_aggregates	nodeAgg.rs:4856	finalize.rs	SEAMED	no	Audit: own logic to execExpr boundary; panics.
+find_cols	nodeAgg.rs:4868	exec_init_agg.rs	SEAMED	no	Audit: blocked on Node-vocabulary (Var/Aggref/tree_walker) absent from shared enum; panics.
+find_cols_walker	nodeAgg.rs:4895	exec_init_agg.rs	SEAMED	no	Audit: blocked on Node-vocabulary boundary; panics.
+build_hash_tables	nodeAgg.rs:4953	hash_grouping.rs	MATCH	yes	Audit full-MATCH list.
+build_hash_table	nodeAgg.rs:4978	hash_grouping.rs	SEAMED	no	Audit: own logic to execGrouping entry-additional layout boundary; panics.
+find_hash_columns	nodeAgg.rs:5009	exec_init_agg.rs	SEAMED	no	Audit: blocked on Node-vocabulary boundary; panics.
+hash_agg_entry_size	nodeAgg.rs:5146	spill.rs	MATCH	yes	CHUNKHDRSZ fixed to 8; sizing arithmetic re-derived correct.
+hashagg_recompile_expressions	nodeAgg.rs:5175	hash_grouping.rs	SEAMED	no	Audit: own logic to execExpr boundary; panics.
+hash_agg_set_limits	nodeAgg.rs:5231	spill.rs:48	MATCH	yes	Audit full-MATCH list; C-1 BLCKSZ fix consumer re-derived correct.
+hash_agg_check_limits	nodeAgg.rs:5273	spill.rs	MATCH	yes	Audit full-MATCH list.
+hash_agg_enter_spill_mode	nodeAgg.rs:5299	spill.rs	MATCH	yes	Audit full-MATCH list.
+hash_agg_update_metrics	nodeAgg.rs:5331	spill.rs:193	MATCH	yes	Audit full-MATCH list; C-1 BLCKSZ fix consumer re-derived correct.
+hash_create_memory	nodeAgg.rs:5379	hash_grouping.rs:206	SEAMED	no	Own logic to execUtils CreateWorkExprContext / work_mem boundary; panics.
+hash_choose_num_buckets	nodeAgg.rs:5420	hash_grouping.rs	MATCH	yes	Audit full-MATCH list.
+hash_choose_num_partitions	nodeAgg.rs:5439	spill.rs	MATCH	yes	Audit full-MATCH list.
+initialize_hash_entry	nodeAgg.rs:5477	hash_grouping.rs	SEAMED	no	Audit: own logic to execGrouping entry-additional layout boundary; panics.
+lookup_hash_entries	nodeAgg.rs:5501	hash_grouping.rs	SEAMED	no	Audit spot-check 3: own logic to TupleHashEntryGetAdditional layout boundary; panics.
+ExecAgg	nodeAgg.rs:5551	node_lifecycle.rs	MATCH	yes	Audit full-MATCH list; strategy/phase dispatch.
+agg_retrieve_direct	nodeAgg.rs:5594	sorted_grouping.rs	MATCH	yes	Audit full-MATCH list.
+agg_fill_hash_table	nodeAgg.rs:5811	hash_grouping.rs	MATCH	yes	Audit full-MATCH list.
+agg_refill_hash_table	nodeAgg.rs:5836	hash_grouping.rs	SEAMED	no	Audit: own logic to execGrouping/execTuples boundary; panics.
+agg_retrieve_hash_table	nodeAgg.rs:5978	hash_grouping.rs	MATCH	yes	Audit full-MATCH list.
+agg_retrieve_hash_table_in_memory	nodeAgg.rs:5995	hash_grouping.rs	SEAMED	no	Audit: own logic to execGrouping/execTuples boundary; panics.
+hashagg_spill_init	nodeAgg.rs:6075	spill.rs:382	MATCH	yes	Audit spot-check 4: full MATCH; shift/mask arithmetic + HLL init.
+hashagg_spill_tuple	nodeAgg.rs:6124	spill.rs	SEAMED	no	Audit: own logic to execTuples slot boundary; panics.
+hashagg_batch_new	nodeAgg.rs:6191	spill.rs	MATCH	yes	Audit full-MATCH list.
+hashagg_batch_read	nodeAgg.rs:6208	spill.rs	MATCH	yes	Audit full-MATCH list.
+hashagg_finish_initial_spills	nodeAgg.rs:6344	spill.rs	MATCH	yes	Audit full-MATCH list.
+hashagg_spill_finish	nodeAgg.rs:6363	spill.rs	MATCH	yes	Audit full-MATCH list.
+hashagg_reset_spill_state	nodeAgg.rs:6405	spill.rs	MATCH	yes	Audit full-MATCH list.
+ExecInitAgg	nodeAgg.rs:6428	exec_init_agg.rs	SEAMED	no	Audit: own grouping-set/numPhases/field init present to execUtils EcxtId-pooled ExprContext boundary; panics.
+build_pertrans_for_aggref	nodeAgg.rs:7528	exec_init_agg.rs	MATCH	yes	Audit full-MATCH list.
+GetAggInitVal	nodeAgg.rs:7777	node_lifecycle.rs:725	SEAMED	no	Own logic to lsyscache getTypeInputInfo / fmgr OidInputFunctionCall boundary; panics.
+ExecEndAgg	nodeAgg.rs:7791	node_lifecycle.rs	MATCH	yes	Audit full-MATCH list.
+ExecReScanAgg	nodeAgg.rs:7854	node_lifecycle.rs	MATCH	yes	Audit full-MATCH list.
+AggCheckCallContext	nodeAgg.rs:8015	aggapi.rs	SEAMED	no	Audit: blocked on fmgr FunctionCallInfoBaseData.context field (trimmed); panics.
+AggGetAggref	nodeAgg.rs:8045	aggapi.rs	SEAMED	no	Audit: blocked on fmgr call-frame back-reference; panics.
+AggGetTempMemoryContext	nodeAgg.rs:8069	aggapi.rs	SEAMED	no	Audit: blocked on fmgr call-frame back-reference; panics.
+AggStateIsShared	nodeAgg.rs:8082	aggapi.rs	SEAMED	no	Audit: blocked on fmgr call-frame back-reference; panics.
+AggRegisterCallback	nodeAgg.rs:8107	aggapi.rs	SEAMED	no	Audit: blocked on fmgr call-frame back-reference; panics.
+ExecAggEstimate	nodeAgg.rs:8148	aggapi.rs	MATCH	yes	Audit full-MATCH list; offset/nworkers arithmetic present.
+ExecAggInitializeDSM	nodeAgg.rs:8173	aggapi.rs	SEAMED	no	Audit: own offset/nworkers arithmetic present to transam-parallel shm_toc boundary; panics.
+ExecAggInitializeWorker	nodeAgg.rs:8203	aggapi.rs	SEAMED	no	Audit: own arithmetic present to transam-parallel shm_toc boundary; panics.
+ExecAggRetrieveInstrumentation	nodeAgg.rs:8214	aggapi.rs	SEAMED	no	Audit: own arithmetic present to transam-parallel shm_toc boundary; panics.

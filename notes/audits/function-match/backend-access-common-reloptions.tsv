@@ -1,0 +1,57 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+MemoryContextSwitchTo	reloptions.rs:1181	-	MATCH	yes	Header/macro inline (mcx.h); absorbed into owned Mcx model, no separate logic.
+CharGetDatum	reloptions.rs:1187	-	MATCH	yes	postgres.h Datum-boxing inline; absorbed into types-datum.
+Int16GetDatum	reloptions.rs:1191	-	MATCH	yes	postgres.h Datum-boxing inline; absorbed.
+Int32GetDatum	reloptions.rs:1195	-	MATCH	yes	postgres.h Datum-boxing inline; absorbed.
+DatumGetPointer	reloptions.rs:1199	-	MATCH	yes	postgres.h inline; absorbed into types-datum.
+PointerGetDatum	reloptions.rs:1203	-	MATCH	yes	postgres.h inline; absorbed.
+list_length	reloptions.rs:1209	-	MATCH	yes	pg_list.h inline; absorbed (Vec::len).
+TupleDescCompactAttr	reloptions.rs:1213	-	MATCH	yes	tupdesc.h inline accessor; absorbed (struct field access).
+att_isnull	reloptions.rs:1224	-	MATCH	yes	tupmacs.h null-bit inline; absorbed.
+fetch_att	reloptions.rs:1232	-	MATCH	yes	tupmacs.h by-val fetch inline; absorbed into typed value model.
+GETSTRUCT	reloptions.rs:1281	-	MATCH	yes	htup_details.h projection macro; absorbed.
+HeapTupleHasNulls	reloptions.rs:1289	-	MATCH	yes	htup_details.h inline; absorbed.
+HeapTupleNoNulls	reloptions.rs:1294	-	MATCH	yes	htup_details.h inline; absorbed.
+fastgetattr	reloptions.rs:1298	-	MATCH	yes	htup_details.h inline; absorbed into typed tuple model.
+initialize_reloptions	reloptions.rs:1832	initialize_reloptions (lib.rs:551)	MATCH	yes	Builds the static relOpts table (bool/int/real/enum/string) and counts; mirrors C.
+add_reloption_kind	reloptions.rs:1947	add_reloption_kind (lib.rs:577)	MATCH	yes	Allocates next custom relopt_kind bit; bound check identical.
+add_reloption	reloptions.rs:1991	add_reloption (lib.rs:591)	MATCH	yes	Grows/appends the global relOpts array; mirrors C realloc+assign.
+init_local_reloptions	reloptions.rs:2019	init_local_reloptions (lib.rs:600)	MATCH	yes	Clears option/validator lists, records struct size.
+register_reloptions_validator	reloptions.rs:2028	register_reloptions_validator (lib.rs:608)	MATCH	yes	Stores validator on the LocalRelOpts.
+add_local_reloption	reloptions.rs:2037	add_local_reloption (lib.rs:614)	MATCH	yes	Appends option at offset to LocalRelOpts.
+allocate_reloption	reloptions.rs:2049	allocate_reloption (lib.rs:621)	MATCH	yes	Builds a relopt_gen with name/desc/kinds/lockmode/type/data.
+init_bool_reloption	reloptions.rs:2128	init_bool_reloption (lib.rs:637)	MATCH	yes	allocate_reloption + default_val.
+add_bool_reloption	reloptions.rs:2147	add_bool_reloption (lib.rs:642)	MATCH	yes	init + add_reloption.
+add_local_bool_reloption	reloptions.rs:2164	add_local_bool_reloption (lib.rs:648)	MATCH	yes	init + add_local_reloption.
+init_int_reloption	reloptions.rs:2180	init_int_reloption (lib.rs:653)	MATCH	yes	allocate + default/min/max.
+add_int_reloption	reloptions.rs:2203	add_int_reloption (lib.rs:658)	MATCH	yes	init + add_reloption.
+add_local_int_reloption	reloptions.rs:2224	add_local_int_reloption (lib.rs:664)	MATCH	yes	init + add_local_reloption.
+init_real_reloption	reloptions.rs:2244	init_real_reloption (lib.rs:669)	MATCH	yes	allocate + default/min/max.
+add_real_reloption	reloptions.rs:2267	add_real_reloption (lib.rs:674)	MATCH	yes	init + add_reloption.
+add_local_real_reloption	reloptions.rs:2288	add_local_real_reloption (lib.rs:680)	MATCH	yes	init + add_local_reloption.
+init_enum_reloption	reloptions.rs:2308	init_enum_reloption (lib.rs:685)	MATCH	yes	allocate + members/default/detailmsg.
+add_enum_reloption	reloptions.rs:2331	add_enum_reloption (lib.rs:690)	MATCH	yes	init + add_reloption.
+add_local_enum_reloption	reloptions.rs:2352	add_local_enum_reloption (lib.rs:696)	MATCH	yes	init + add_local_reloption.
+init_string_reloption	reloptions.rs:2372	init_string_reloption (lib.rs:701)	MATCH	yes	allocate + default/validator/filler; runs validator on default as in C.
+add_string_reloption	reloptions.rs:2414	add_string_reloption (lib.rs:727)	MATCH	yes	init + add_reloption.
+add_local_string_reloption	reloptions.rs:2434	add_local_string_reloption (lib.rs:734)	MATCH	yes	init + add_local_reloption.
+transformRelOptions	reloptions.rs:2455	transformRelOptions (lib.rs:781)	MATCH	yes	Old-option keep/replace, namespace validity, RESET check, oids filter, name-contains-= guard; array build via arrayfuncs construct/deconstruct seam (different owner unit).
+untransformRelOptions	reloptions.rs:2829	untransformRelOptions (lib.rs:936)	MATCH	yes	Splits each text elem on first '='; builds (name,arg) pairs; deconstruct via arrayfuncs seam.
+extractRelOptions	reloptions.rs:2874	extractRelOptions (lib.rs:974)	MATCH	yes	relkind dispatch to heap/view/partitioned/index reloptions; mirrors C.
+parseRelOptionsInternal	reloptions.rs:2910	parseRelOptionsInternal (lib.rs:1008)	MATCH	yes	Per-element name match against relopts, parse_one_reloption, unrecognized-option error when validate.
+parseRelOptions	reloptions.rs:3028	parseRelOptions (lib.rs:1041)	MATCH	yes	Collects matching relopts for the kind then parses; deconstruct via arrayfuncs seam.
+parseLocalRelOptions	reloptions.rs:3071	parseLocalRelOptions (lib.rs:1070)	MATCH	yes	Builds value array from LocalRelOpts options then parses.
+parse_one_reloption	reloptions.rs:3106	parse_one_reloption (lib.rs:1089)	MATCH	yes	Per-type (bool/int/real/enum/string) parse with range/enum validation and error messages.
+allocateReloptStruct	reloptions.rs:3544	allocateReloptStruct (lib.rs:1264)	MATCH	yes	Computes total size incl. string offsets, allocs the rdopts buffer.
+fillRelOptions	reloptions.rs:3590	fillRelOptions (lib.rs:1296)	MATCH	yes	Writes parsed values into the struct buffer per relopt_parse_elt table; string offset packing.
+default_reloptions	reloptions.rs:3789	default_reloptions (lib.rs:1378)	MATCH	yes	build_reloptions over the StdRdOptions parse-elt table; typed RelOptStruct::Std.
+build_reloptions	reloptions.rs:3806	build_reloptions (lib.rs:1437)	MATCH	yes	parseRelOptions -> allocateReloptStruct -> fillRelOptions; null-on-empty.
+build_local_reloptions	reloptions.rs:3837	build_local_reloptions (lib.rs:1452)	MATCH	yes	parseLocalRelOptions -> allocate -> fill over LocalRelOpts.
+partitioned_table_reloptions	reloptions.rs:3913	partitioned_table_reloptions (lib.rs:1478)	MATCH	yes	No options accepted; validate -> error on any option, else None.
+view_reloptions	reloptions.rs:3965	view_reloptions (lib.rs:1488)	MATCH	yes	build_reloptions over the ViewOptions (check_option/security_barrier/...) table.
+heap_reloptions	reloptions.rs:4001	heap_reloptions (lib.rs:1511)	MATCH	yes	TOASTVALUE default-tweak (fillfactor=100, analyze_threshold=-1, scale=-1), RELATION/MATVIEW heap, else None.
+index_reloptions	reloptions.rs:4026	index_reloptions (lib.rs:1531)	SEAMED	no	Delegates to the AM amoptions callback via backend-access-index-amapi-seams::am_reloptions (C calls the amoptions function pointer); strict-null short-circuit preserved.
+attribute_reloptions	reloptions.rs:4037	attribute_reloptions (lib.rs:1545)	MATCH	yes	parseRelOptions(ATTRIBUTE) into typed AttributeOpts {n_distinct,n_distinct_inherited}.
+tablespace_reloptions	reloptions.rs:4068	tablespace_reloptions (lib.rs:1569)	MATCH	yes	parseRelOptions(TABLESPACE) into typed TableSpaceOpts {random_page_cost,seq_page_cost,effective/maintenance_io_concurrency}.
+AlterTableGetRelOptionsLockLevel	reloptions.rs:4112	AlterTableGetRelOptionsLockLevel (lib.rs:1593)	MATCH	yes	Empty list -> AccessExclusiveLock; else max lockmode over matching relopts; namelen+1 exact-match compare preserved.
+run_static_initializers	reloptions.rs:4157	-	MATCH	yes	c2rust artifact installing static-array initializers; subsumed by Rust const/initialize_reloptions.

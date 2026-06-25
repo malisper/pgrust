@@ -1,0 +1,14 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+HeapTupleHeaderGetRawXmin	combocid.rs:739	types-tuple (htup_details.h accessor)	MATCH	yes	c2rust inline tuple accessor; same field/mask, verified in types-tuple against htup_details.h.
+HeapTupleHeaderXminCommitted	combocid.rs:745	types-tuple (htup_details.h accessor)	MATCH	yes	c2rust inline accessor; HEAP_XMIN_COMMITTED(0x0100) mask test, verified in types-tuple.
+HeapTupleHeaderGetRawCommandId	combocid.rs:752	types-tuple (htup_details.h accessor)	MATCH	yes	c2rust inline accessor; t_cid read, verified in types-tuple.
+HeapTupleHeaderGetCmin	combocid.rs:768	lib.rs:88	MATCH	yes	Raw-cid fetch, HEAP_COMBOCID test, GetRealCmin dispatch; Assert(!HEAP_MOVED) as debug_assert; cross-subsystem assert compiled out (as in build).
+HeapTupleHeaderGetCmax	combocid.rs:779	lib.rs:106	MATCH	yes	Same structure; debug-only cross-subsystem Assert omitted; release behavior identical.
+HeapTupleHeaderAdjustCmax	combocid.rs:790	lib.rs:129	MATCH	yes	!XminCommitted && TransactionIdIsCurrentTransactionId(RawXmin) predicate (short-circuit order preserved); combo branch via GetCmin+GetComboCommandId; out-params -> PgResult<(CommandId,bool)>; xact seam call.
+AtEOXact_ComboCid	combocid.rs:807	lib.rs:154	MATCH	yes	combo_hash=None + replace vec with empty (drop frees); same observable post-state as C nulling under TopTransactionContext reset.
+GetComboCommandId	combocid.rs:813	lib.rs:163	MATCH	yes	Static; lazy first-use init (array+hash, size 100 each); grow-before-enter doubling via try_reserve_exact; found-reuse else new=len; HASH_BLOBS keying = derived Hash/Eq on 2 u32 fields; OOM -> Err(mcx.oom).
+GetRealCmin	combocid.rs:884	lib.rs:229	MATCH	yes	Static; Assert(combocid<used)+array read; vec index panics in release where C reads garbage (tighter on UB path, identical on valid inputs).
+GetRealCmax	combocid.rs:887	lib.rs:235	MATCH	yes	Static; same as GetRealCmin for .cmax.
+EstimateComboCIDStateSpace	combocid.rs:891	lib.rs:250	MATCH	yes	sizeof(int)=4 + mul_size(8,used) via add_size; local checked_add/checked_mul raise "requested shared memory size overflows size_t" SQLSTATE 54000; checked_mul returns 0 for zero operand.
+SerializeComboCIDState	combocid.rs:904	lib.rs:270	MATCH	yes	native-endian 4-byte count then packed (cmin,cmax) u32 pairs (no padding); size check; elog ERROR "not enough space to serialize ComboCID state" (XX000); check-first vs write-first unobservable (error longjmps).
+RestoreComboCIDState	combocid.rs:959	lib.rs:305	MATCH	yes	Assert(!comboCids&&!comboHash)->debug_assert; native-endian i32 count; negative->empty loop; per-element GetComboCommandId + cid!=i -> "unexpected command ID while restoring combo CIDs" (XX000); short-buffer bounds-checked (tighter than C UB).

@@ -1,0 +1,9 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+conv_compare	unicode_norm.rs:48933	(none)	MISSING	no	FRONTEND-only bsearch comparator; backend unit uses perfect-hash/binary-search lookup so no comparator exists or is needed; not part of backend build
+get_code_entry	unicode_norm.rs:48949	lib.rs:169	MATCH	yes	c2rust(frontend) bsearch; port binary_search_by_key over codepoint-sorted UnicodeDecompMain (verified sorted, all 6843 rows exact); NULL->None
+get_canonical_class	unicode_norm.rs:48968	lib.rs:177	MATCH	yes	entry.map_or(0, comb_class)
+get_code_decomposition	unicode_norm.rs:48972	lib.rs:184	MATCH	yes	DECOMPOSITION_IS_INLINE single codepoint vs slice of len DECOMPOSITION_SIZE; Inline/Slice iterator variants
+get_decomposed_size	unicode_norm.rs:48990	lib.rs:226	MATCH	yes	Hangul fast path + NULL/SIZE==0/compat predicate; recursive sum
+recompose_code	unicode_norm.rs:49031	lib.rs:286	MATCH	yes	Hangul L+V and LV+T paths; else inverse lookup (port frontend linear scan == backend hash candidate+verify)
+decompose_code	unicode_norm.rs:49093	lib.rs:248	MATCH	yes	Hangul l/v/t expansion; else NULL/zero/compat -> push code else recurse
+unicode_normalize	unicode_norm.rs:49155	lib.rs:378/415/425	MATCH	yes	decomp-size alloc, decompose, canonical_order, optional recompose; Mcx+PgResult mirrors palloc OOM; _z variant handles 0-terminated contract

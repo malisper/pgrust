@@ -1,0 +1,42 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+DatumGetPointer	dsa.rs:281	crates/types-core (Datum<->Pointer)	MATCH	yes	c2rust-inlined Datum->Pointer cast helper; reproduced via the project Datum/Pointer conversions (no logic).
+PointerGetDatum	dsa.rs:285	crates/types-core (Pointer<->Datum)	MATCH	yes	c2rust-inlined Pointer->Datum cast helper; reproduced via the project conversions (no logic).
+pg_leftmost_one_pos64	dsa.rs:289	crates/backend-utils-mmgr-dsa/src/lib.rs:123 (inlined in contiguous_pages_to_segment_bin)	MATCH	yes	leftmost-one-pos used only by contiguous_pages_to_segment_bin; reproduced as Size::BITS - leading_zeros there.
+c2rust_pg_read_barrier	dsa.rs:307	n/a	MATCH	yes	C2RUST_TRANSPILE-only no-op shim, not a real function; excluded; the load-ordering it guards is implied on the single-process target.
+contiguous_pages_to_segment_bin	dsa.rs:320	crates/backend-utils-mmgr-dsa/src/lib.rs:123	MATCH	yes	n==0->0 else leftmost_one_pos(n)+1 capped at DSA_NUM_SEGMENT_BINS-1.
+dsa_create_ext	dsa.rs:513	crates/backend-utils-mmgr-dsa/src/runtime.rs:382	MATCH	yes	dsm_create->pin->create_internal->on_dsm_detach; dsm_create NULL->Err; takes Mcx.
+dsa_create_in_place_ext	dsa.rs:542	crates/backend-utils-mmgr-dsa/src/runtime.rs:415	MATCH	yes	create_internal(DSM_HANDLE_INVALID,None); on_dsm_detach only if segment provided.
+dsa_get_handle	dsa.rs:573	crates/backend-utils-mmgr-dsa/src/runtime.rs:442	MATCH	yes	returns control->handle; Assert->debug_assert_ne.
+dsa_attach	dsa.rs:577	crates/backend-utils-mmgr-dsa/src/runtime.rs:451	MATCH	yes	dsm_attach NULL->ERROR ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE->Err; attach_internal; on_dsm_detach.
+dsa_attach_in_place	dsa.rs:633	crates/backend-utils-mmgr-dsa/src/runtime.rs:466	MATCH	yes	attach_internal(NULL,DSA_HANDLE_INVALID); on_dsm_detach iff segment.
+dsa_on_dsm_detach_release_in_place	dsa.rs:656	crates/backend-utils-mmgr-dsa/src/runtime.rs:481	MATCH	yes	(DsmSegmentId,Datum) signature; delegates to dsa_release_in_place.
+dsa_on_shmem_exit_release_in_place	dsa.rs:663	crates/backend-utils-mmgr-dsa/src/runtime.rs:487	MATCH	yes	(code,place); code ignored; delegates.
+dsa_release_in_place	dsa.rs:670	crates/backend-utils-mmgr-dsa/src/runtime.rs:493	MATCH	yes	area lock; magic+refcnt asserts; --refcnt==0 -> unpin every live segment_handle.
+dsa_pin_mapping	dsa.rs:689	crates/backend-utils-mmgr-dsa/src/runtime.rs:525	MATCH	yes	registry holds session-lifetime segment ids; clearing resowner_set is whole effect; per-segment pin is a no-op here (infallible C void).
+dsa_allocate_extended	dsa.rs:703	crates/backend-utils-mmgr-dsa/src/runtime.rs:763	MATCH	yes	size>0 debug_assert; validate_alloc_request; large path (alloc_object span/get_best/make_new/FreePageManagerGet FATAL/init_span/pagemap_set/ZERO); small path; OOM via oom().
+dsa_free	dsa.rs:1012	crates/backend-utils-mmgr-dsa/src/runtime.rs:855	MATCH	yes	check_for_freed_segments; locate span/superblock/object; SPAN_LARGE special case (fpm_put+rebin+unlink_span+recursive free); normal: freelist push, nallocatable++, two fullness transitions. CLOBBER_FREED_MEMORY ifdef excluded.
+dsa_get_address	dsa.rs:1100	crates/backend-utils-mmgr-dsa/src/runtime.rs:357	MATCH	yes	InvalidDsaPointer->0; check_for_freed_segments; split; map-in via get_segment_by_index; return base+offset.
+dsa_pin	dsa.rs:1123	crates/backend-utils-mmgr-dsa/src/runtime.rs:534	MATCH	yes	area lock; already-pinned->ERROR "dsa_area already pinned"->Err; set pinned, ++refcnt.
+dsa_unpin	dsa.rs:1159	crates/backend-utils-mmgr-dsa/src/runtime.rs:548	MATCH	yes	area lock; refcnt>1 assert; not-pinned->Err "dsa_area not pinned"; clear pinned, --refcnt.
+dsa_set_size_limit	dsa.rs:1195	crates/backend-utils-mmgr-dsa/src/runtime.rs:563	MATCH	yes	area lock; set max_total_segment_size.
+dsa_get_total_size	dsa.rs:1201	crates/backend-utils-mmgr-dsa/src/runtime.rs:571	MATCH	yes	area lock; read total_segment_size.
+dsa_trim	dsa.rs:1209	crates/backend-utils-mmgr-dsa/src/runtime.rs:917	MATCH	yes	reverse pool order; skip SPAN_LARGE; per-class fullness-1 scan; destroy_superblock when nallocatable==nmax.
+dsa_dump	dsa.rs:1246	crates/backend-utils-mmgr-dsa/src/runtime.rs:957	MATCH	yes	stderr->eprintln!; area-lock segment-bins + per-pool fullness walk, same fields/format intent.
+dsa_minimum_size	dsa.rs:1417	crates/backend-utils-mmgr-dsa/src/runtime.rs:600	MATCH	yes	MAXALIGN(sizeof control)+MAXALIGN(sizeof FPM) then grow by sizeof(dsa_pointer)/page until pages cover.
+create_internal	dsa.rs:1442	crates/backend-utils-mmgr-dsa/src/runtime.rs:624	MATCH	yes	size<minimum->ERROR; metadata_bytes+page-pad; memset; all control fields incl magic=MAGIC^handle^0, max_total=Size::MAX, bins=NONE, refcnt=1; lock + every pool lock; segment_maps[0]; fpm init+put; bin.
+attach_internal	dsa.rs:1619	crates/backend-utils-mmgr-dsa/src/runtime.rs:716	MATCH	yes	magic/handle asserts; segment_maps[0]; area lock; refcnt==0->Err; ++refcnt; copy freed_segment_counter.
+init_span	dsa.rs:1730	crates/backend-utils-mmgr-dsa/src/runtime.rs:1039	MATCH	yes	head->prevspan link; push to fullness-1; BLOCK_OF_SPANS vs non-SPAN_LARGE fields; firstfree=NOTHING_FREE; fclass=1. Debug-only LWLockHeldByMe assert dropped (no seam).
+transfer_first_span	dsa.rs:1772	crates/backend-utils-mmgr-dsa/src/runtime.rs:1081	MATCH	yes	empty source->false; unlink head, relink target head, fix prevspans, set fclass.
+alloc_object	dsa.rs:1801	crates/backend-utils-mmgr-dsa/src/runtime.rs:1114	MATCH	yes	sclass lock; no active span & !ensure_active_superblock->Invalid; else pop firstfree or init new; --nallocatable; full->transfer to class N-1.
+ensure_active_superblock	dsa.rs:1863	crates/backend-utils-mmgr-dsa/src/runtime.rs:1158	MATCH	yes	nmax calc; fclass 2..N-1 rebalance; transfer fallbacks; alloc span for non-BLOCK_OF_SPANS; area lock get_best/make_new; FreePageManagerGet FATAL; BLOCK_OF_SPANS carve inline; init_span + pagemap fill.
+get_segment_by_index	dsa.rs:2020	crates/backend-utils-mmgr-dsa/src/runtime.rs:1281	MATCH	yes	unmapped->attach; DSM_HANDLE_INVALID->ERROR "freed"->Err; NULL->Err; set map; high_segment_index; magic assert.
+destroy_superblock	dsa.rs:2139	crates/backend-utils-mmgr-dsa/src/runtime.rs:1327	MATCH	yes	unlink_span; area lock+check_for_freed_segments_locked; fpm_put; fully-free & index!=0 -> unlink_segment+freed+total-=size+unpin/detach+INVALID+counter++; else rebin; recursive free for non-BLOCK_OF_SPANS.
+unlink_span	dsa.rs:2195	crates/backend-utils-mmgr-dsa/src/runtime.rs:1387	MATCH	yes	next/prev relink; no-prev->pool->spans[fclass]=next.
+add_span_to_fullness_class	dsa.rs:2211	crates/backend-utils-mmgr-dsa/src/runtime.rs:1409	MATCH	yes	head->prevspan; push front; set fclass.
+dsa_detach	dsa.rs:2232	crates/backend-utils-mmgr-dsa/src/runtime.rs:581	MATCH	yes	detach each mapped segment; free backend-local area (registry slot->None).
+unlink_segment	dsa.rs:2243	crates/backend-utils-mmgr-dsa/src/runtime.rs:1432	MATCH	yes	prev relink or segment_bins[bin]=next (with assert); next relink.
+get_best_segment	dsa.rs:2262	crates/backend-utils-mmgr-dsa/src/runtime.rs:1456	MATCH	yes	check_for_freed_segments_locked; bin scan from contiguous_pages_to_segment_bin(npages); threshold 1<<(bin-1); skip/rebin/done logic.
+make_new_segment	dsa.rs:2299	crates/backend-utils-mmgr-dsa/src/runtime.rs:1487	MATCH	yes	free-slot scan; total>=max->None; geometric total_size; metadata+pad; too-small->None; odd-sized retry->None; dsm_create NULL->None; pin; record handle/high/total; map; fpm init+put; magic=MAGIC^handle^index; bin link.
+check_for_freed_segments	dsa.rs:2514	crates/backend-utils-mmgr-dsa/src/runtime.rs:1613	MATCH	yes	pg_read_barrier (no-op shim) then counter compare; lock + locked variant.
+check_for_freed_segments_locked	dsa.rs:2526	crates/backend-utils-mmgr-dsa/src/runtime.rs:1625	MATCH	yes	counter compare; detach every mapped+freed segment, zero map; store counter.
+rebin_segment	dsa.rs:2555	crates/backend-utils-mmgr-dsa/src/runtime.rs:1649	MATCH	yes	new_bin from fpm_largest; same-bin->return; unlink; push front of new bin; next->prev fix.

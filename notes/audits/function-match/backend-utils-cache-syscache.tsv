@@ -1,0 +1,53 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+CharGetDatum	syscache.rs:1021	(typed Datum)	MATCH	yes	c2rust-inlined header macro (postgres.h); subsumed by typed Datum constructors (Datum::from_*); used where C builds keys.
+Int16GetDatum	syscache.rs:1025	lib.rs:546	MATCH	yes	header macro; Datum::from_i16 (SearchSysCacheAttNum key).
+Int32GetDatum	syscache.rs:1029	(typed Datum)	MATCH	yes	header macro; Datum::from_i32 equivalent.
+ObjectIdGetDatum	syscache.rs:1033	lib.rs:494,545	MATCH	yes	header macro; Datum::from_oid.
+PointerGetDatum	syscache.rs:1037	(typed Datum)	MATCH	yes	header macro; subsumed by typed Datum.
+CStringGetDatum	syscache.rs:1041	(SysCacheKey::Str)	MATCH	yes	header macro; cstring keys carried by SysCacheKey::Str.
+BlockIdSet	syscache.rs:1047	(ItemPointerData::new)	MATCH	yes	header macro (block.h); subsumed by ItemPointerData::new / BlockIdData.
+BlockIdGetBlockNumber	syscache.rs:1055	lib.rs:855,360	MATCH	yes	header macro; ip_blkid.block_number().
+ItemPointerIsValid	syscache.rs:1063	lib.rs:849	MATCH	yes	header macro (itemptr.h); posid!=0. (C also checks pointer!=NULL; the value here is always present.)
+ItemPointerGetBlockNumberNoCheck	syscache.rs:1068	lib.rs:855	MATCH	yes	header macro; block_number().
+ItemPointerGetBlockNumber	syscache.rs:1074	lib.rs:360,855	MATCH	yes	header macro; block_number() (the Assert(IsValid) is debug-only in C).
+ItemPointerGetOffsetNumberNoCheck	syscache.rs:1080	lib.rs:361	MATCH	yes	header macro; ip_posid.
+ItemPointerGetOffsetNumber	syscache.rs:1086	lib.rs:361	MATCH	yes	header macro; ip_posid.
+ItemPointerSetInvalid	syscache.rs:1092	lib.rs:844	MATCH	yes	header macro; item_pointer_invalid() = InvalidBlockNumber(0xffffffff)+posid 0.
+TupleDescAttr	syscache.rs:1100	(tupdesc.attrs[])	MATCH	yes	header macro (tupdesc.h); tupdesc.attrs indexing in SysCacheGetAttrNotNull / heap_getattr.
+TupleDescCompactAttr	syscache.rs:1117	(heaptuple unit)	MATCH	yes	header macro; compact-attr access lives in heaptuple unit used by nocachegetattr.
+att_isnull	syscache.rs:1128	(heaptuple unit)	MATCH	yes	header macro; null-bitmap test inside heap_attisnull (heaptuple unit).
+fetch_att	syscache.rs:1136	(heaptuple unit)	MATCH	yes	header macro; byval fetch lives in heaptuple nocachegetattr.
+GETSTRUCT	syscache.rs:1186	(deformed access)	MATCH	yes	header macro; Form_* field reads via DeformedColumn / nocachegetattr.
+HeapTupleHasNulls	syscache.rs:1194	(heaptuple unit)	MATCH	yes	header macro; subsumed by heap_attisnull path.
+HeapTupleNoNulls	syscache.rs:1199	(heaptuple unit)	MATCH	yes	header macro; subsumed.
+fastgetattr	syscache.rs:1203	lib.rs:581	MATCH	yes	header macro; the fast byval/non-null path folded into heap_getattr -> nocachegetattr (heaptuple unit).
+heap_getattr	syscache.rs:1235	lib.rs:581	MATCH	yes	header macro (htup_details.h); attnum<=0->heap_getsysattr; >natts->getmissingattr; null->(null,true); else nocachegetattr. Same branch order.
+pg_cmp_u32	syscache.rs:1259	(Ord on Oid)	MATCH	yes	header inline; Oid is u32 so the OID-list sort uses unsigned Ord == pg_cmp_u32.
+qunique	syscache.rs:1263	lib.rs:175,177	MATCH	yes	header inline; sort_unstable()+dedup() over the OID lists matches qsort(oid_compare)+qunique.
+InitCatalogCache	syscache.rs:2120	lib.rs:126	MATCH	yes	per-cacheinfo InitCatCache (via catcache seam) setting sys_cache_exists; accumulate reloid into SysCacheRelationOid and reloid+indoid into SysCacheSupportingRelOid; sort+dedup both; CacheInitialized=true; asserts (OidIsValid, !RelationInvalidatesSnapshotsOnly) mirrored as debug_assert.
+InitCatalogCachePhase2	syscache.rs:2230	lib.rs:193	MATCH	yes	assert CacheInitialized; InitCatCachePhase2(id,true) for every id via catcache seam.
+SearchSysCache	syscache.rs:2240	lib.rs:211	MATCH	yes	assert_cache_exists; delegates to SearchCatCache via catcache seam. Returns owned copy (ownership model documented).
+SearchSysCache1	syscache.rs:2250	lib.rs:225	MATCH	yes	assert + nkeys==1 debug check; SearchCatCache1 seam.
+SearchSysCache2	syscache.rs:2257	lib.rs:237	MATCH	yes	assert + nkeys==2; SearchCatCache2 seam.
+SearchSysCache3	syscache.rs:2265	lib.rs:250	MATCH	yes	assert + nkeys==3; SearchCatCache3 seam.
+SearchSysCache4	syscache.rs:2274	lib.rs:264	MATCH	yes	assert + nkeys==4; SearchCatCache4 seam.
+ReleaseSysCache	syscache.rs:2284	lib.rs:281	MATCH	yes	owned model: drop(tuple) (cache-side refcount already dropped in the search).
+SearchSysCacheLocked1	syscache.rs:2288	lib.rs:307	MATCH	yes	two-fetch loop: ItemPointerSetInvalid; search; on held lock null->release+None, equal-tid->return, else release+retry; LOCKTAG_TUPLE built with dboid=Invalid if cc_relisshared else MyDatabaseId, reloid, blk, off; LockAcquire(InplaceUpdateTupleLock); AcceptInvalidationMessages. Lock as RAII guard; MyDatabaseId passed explicitly. lock/inval/catcache via seams.
+SearchSysCacheCopy	syscache.rs:2339	lib.rs:381	MATCH	yes	SearchSysCache then heap_copytuple, release original.
+SearchSysCacheLockedCopy1	syscache.rs:2357	lib.rs:401	MATCH	yes	SearchSysCacheLocked1 + heap_copytuple, release; guard carried with the copy.
+SearchSysCacheExists	syscache.rs:2372	lib.rs:418	MATCH	yes	search, release if found, return bool.
+GetSysCacheOid	syscache.rs:2388	lib.rs:439	MATCH	yes	search; null->InvalidOid; else heap_getattr(oidcol) vs cache tupdesc, DatumGetObjectId; release.
+SearchSysCacheAttName	syscache.rs:2413	lib.rs:486	MATCH	yes	SearchSysCache2(ATTNAME,relid,name); None if attisdropped; else the tuple.
+SearchSysCacheCopyAttName	syscache.rs:2433	lib.rs:508	MATCH	yes	attisdropped-aware copy.
+SearchSysCacheExistsAttName	syscache.rs:2448	lib.rs:524	MATCH	yes	attisdropped-aware exists.
+SearchSysCacheAttNum	syscache.rs:2461	lib.rs:537	MATCH	yes	SearchSysCache2(ATTNUM,relid,attnum); None if attisdropped.
+SearchSysCacheCopyAttNum	syscache.rs:2481	lib.rs:559	MATCH	yes	attisdropped-aware copy.
+SysCacheGetAttr	syscache.rs:2496	lib.rs:625	MATCH	yes	id-range check; if cc_tupdesc not valid -> InitCatCachePhase2(id,false); heap_getattr against cache tupdesc.
+SysCacheGetAttrNotNull	syscache.rs:2547	lib.rs:651	MATCH	yes	SysCacheGetAttr then if null elog ERROR with relname (get_rel_name seam) + column name from cache tupdesc; same message.
+GetSysCacheHashValue	syscache.rs:2600	lib.rs:687	MATCH	yes	id-range/exists check then GetCatCacheHashValue via catcache seam.
+SearchSysCacheList	syscache.rs:2643	lib.rs:721	MATCH	yes	id-range/exists check then SearchCatCacheList; returns owned Vec (release==drop).
+SysCacheInvalidate	syscache.rs:2687	lib.rs:750	MATCH	yes	id-range check; no-op if cache not initialized; else CatCacheInvalidate(id,hashvalue) via seam.
+RelationInvalidatesSnapshotsOnly	syscache.rs:2729	lib.rs:778	MATCH	yes	exact 7-OID switch (DbRoleSetting/Depend/SharedDepend/Description/SharedDescription/SecLabel/SharedSecLabel) -> true, else false.
+RelationHasSysCache	syscache.rs:2737	lib.rs:807	MATCH	yes	binary search of sorted SysCacheRelationOid (low/high widened to i64 to avoid empty-array underflow).
+RelationSupportsSysCache	syscache.rs:2755	lib.rs:813	MATCH	yes	binary search of sorted SysCacheSupportingRelOid.
+oid_compare	syscache.rs:2773	lib.rs:174,176	MATCH	yes	qsort comparator -> Oid unsigned Ord used by sort_unstable; identical ordering.

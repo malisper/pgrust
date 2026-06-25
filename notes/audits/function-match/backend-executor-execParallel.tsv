@@ -1,0 +1,25 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+MemoryContextSwitchTo	execParallel.rs:3020	(mmgr inline)	SEAMED	no	memutils.h inline owned by mmgr
+newNode	execParallel.rs:3026	(types-nodes inline)	SEAMED	no	nodes.h inline owned by nodes
+list_nth_cell	execParallel.rs:3034	(types-nodes inline)	SEAMED	no	pg_list.h inline owned by nodes
+list_nth_oid	execParallel.rs:3041	(types-nodes inline)	SEAMED	no	pg_list.h inline owned by nodes
+ExecSerializePlan	execParallel.rs:3076	lib.rs:152 exec_serialize_plan	MATCH	yes	copyObject+resjunk-clear+dummy PlannedStmt+parallel-safe subplan NULL-hole filter+nodeToString; PlannedStmt field-fill delegated to sup::build_serializable_plannedstmt
+ExecParallelEstimate	execParallel.rs:3150	lib.rs:174 exec_parallel_estimate	MATCH	yes	14-tag NodeTag dispatch, parallel_aware gate on 6 tags, recurse via planstate_children
+EstimateParamExecSpace	execParallel.rs:3243	lib.rs:240 estimate_param_exec_space	MATCH	yes	sizeof(int) init, bms_next_member loop, datumEstimateSpace; typByVal/typLen via param_exec_value
+SerializeParamExecParams	execParallel.rs:3281	lib.rs:266 serialize_param_exec_params	MATCH	yes	dsa_allocate, write nparams, per-param paramid+datumSerialize, returns handle
+RestoreParamExecParams	execParallel.rs:3340	lib.rs:303 restore_param_exec_params	MATCH	yes	read nparams, loop paramid+datumRestore, write back, execPlan=NULL
+ExecParallelInitializeDSM	execParallel.rs:3371	lib.rs:323 exec_parallel_initialize_dsm	MATCH	yes	instrumentation slot fill, nnodes++, same 14-tag dispatch/gates as Estimate, recurse
+ExecParallelSetupTupleQueues	execParallel.rs:3480	lib.rs:395 exec_parallel_setup_tuple_queues	MATCH	yes	nworkers==0 empty, alloc/lookup tqueuespace, per-worker shm_mq_create, attach, insert key when !reinitialize
+ExecInitParallelPlan	execParallel.rs:3539	lib.rs:447 exec_init_parallel_plan	MATCH	yes	full DSM sizing/population verified field-by-field; MAXALIGN math matches C; constant fix applied per audit Finding 1
+ExecParallelCreateReaders	execParallel.rs:3930	lib.rs:693 exec_parallel_create_readers	MATCH	yes	nworkers_launched, alloc reader array, set_handle, CreateTupleQueueReader
+ExecParallelReinitialize	execParallel.rs:3952	lib.rs:722 exec_parallel_reinitialize	MATCH	yes	ExecSetParamPlanMulti, ReinitializeParallelDSM, SetupTupleQueues(true), free old param_exec, re-serialize, ReInitializeDSM walk
+ExecParallelReInitializeDSM	execParallel.rs:3990	lib.rs:780 exec_parallel_re_initialize_dsm	MATCH	yes	NodeTag dispatch, reinit on 8 parallel_aware nodes, BitmapIndex/Hash/Sort/IncrSort/Memoize no-op, recurse
+ExecParallelRetrieveInstrumentation	execParallel.rs:4060	lib.rs:840 exec_parallel_retrieve_instrumentation	MATCH	yes	linear search elog ERROR plan-node-not-found, InstrAggNode per worker, store worker_instrument, recurse
+ExecParallelRetrieveJitInstrumentation	execParallel.rs:4195	lib.rs:908 exec_parallel_retrieve_jit_instrumentation	MATCH	yes	alloc-if-needed + InstrJitAgg accumulate, per-worker detail, set_worker_jit_instrument
+ExecParallelFinish	execParallel.rs:4238	lib.rs:936 exec_parallel_finish	MATCH	yes	finished no-op guard, detach+free tqueues, destroy readers, WaitForParallelWorkersToFinish, InstrAccumParallelQuery, finished=true
+ExecParallelCleanup	execParallel.rs:4276	lib.rs:983 exec_parallel_cleanup	MATCH	yes	retrieve instr+jit, dsa_free param_exec, dsa_detach, DestroyParallelContext, pei dropped
+ExecParallelGetReceiver	execParallel.rs:4300	lib.rs:1021 exec_parallel_get_receiver	MATCH	yes	lookup TUPLE_QUEUE, offset by ParallelWorkerNumber*SIZE, set sender, CreateTupleQueueDestReceiver
+ExecParallelGetQueryDesc	execParallel.rs:4318	lib.rs:1043 exec_parallel_get_query_desc	MATCH	yes	lookup QUERY_TEXT/PLANNEDSTMT/PARAMLISTINFO, stringToNode, RestoreParamList, CreateQueryDesc
+ExecParallelReportInstrumentation	execParallel.rs:4353	lib.rs:1081 exec_parallel_report_instrumentation	MATCH	yes	InstrEndLoop, linear search elog ERROR, asserts, InstrAggNode slot RMW, recurse
+ExecParallelInitializeWorker	execParallel.rs:4431	lib.rs:1131 exec_parallel_initialize_worker	MATCH	yes	14-tag NodeTag dispatch + gates as InitializeDSM, recurse
+ParallelQueryMain	execParallel.rs:4530	lib.rs:1193 parallel_query_main	MATCH	yes	full worker driver verified end-to-end (fixed state, receiver, instr/jit, QueryDesc, dsa_attach, ExecutorStart/Run/Finish/End, RestoreParamExecParams, SetTupleBound, usage accounting, ReportInstrumentation, FreeQueryDesc)

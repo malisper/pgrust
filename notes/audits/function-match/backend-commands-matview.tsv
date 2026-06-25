@@ -1,0 +1,26 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+ObjectIdGetDatum	matview.rs:3573	-	MISSING	no	header inline (postgres.h Datum macro); dissolved into idiomatic Datum conversion, not a unit fn
+DatumGetPointer	matview.rs:3577	-	MISSING	no	header inline (postgres.h Datum macro); dissolved, not a unit fn
+list_length	matview.rs:3582	-	MISSING	no	header inline (pg_list.h); owned by pg_list, dissolved into idiomatic len()
+list_nth_cell	matview.rs:3586	-	MISSING	no	header inline (pg_list.h); owned by pg_list
+TupleDescAttr	matview.rs:3593	-	MISSING	no	header inline (tupdesc.h); owned by tupdesc, dissolved into attr access
+GETSTRUCT	matview.rs:3610	-	MISSING	no	header inline (htup_details.h); dissolved into typed row reads via seams
+table_tuple_insert	matview.rs:3631	-	MISSING	no	header inline (tableam.h); table-AM op, reached via seam in transientrel_receive
+table_finish_bulk_insert	matview.rs:3643	-	MISSING	no	header inline (tableam.h); table-AM op, reached via seam in transientrel_shutdown
+SetQueryCompletion	matview.rs:3655	lib.rs (inline)	MATCH	yes	cmdtag.h inline; trivial 2-field set, modeled inline on FINISH path
+SetMatViewPopulatedState	matview.rs:3672	lib.rs:84	MATCH	yes	relkind assert, syscache-copy update of relispopulated, CCI; pg_class read/update via frontier read-seams; cache-lookup-failed elog on false
+ExecRefreshMatView	matview.rs:3723	lib.rs:113	MATCH	yes	lockmode concurrent?ExclusiveLock:AccessExclusiveLock; RangeVarGetRelidExtended; tail-calls RefreshMatViewByOid is_create=false
+RefreshMatViewByOid	matview.rs:3760	lib.rs:155	MATCH	yes	all guard branches identical predicates/SQLSTATEs (0A000/0A000/42601/internal/55000); SRO/GUC-nest/RestrictSearchPath order; PG_TRY depth restore; CommandTag set on FINISH (CMDTAG value bug fixed in audit)
+refresh_matview_datafill	matview.rs:4204	lib.rs:410	MATCH	yes	copy/AcquireRewriteLocks/QueryRewrite bundled; list_length!=1 internal elog; CHECK_FOR_INTERRUPTS; plan/snapshot/executor lifecycle; es_processed; PopActiveSnapshot
+CreateTransientRelDestReceiver	matview.rs:4289	lib.rs:482	SEAMED	no	palloc0 + DR_transientrel vtable wiring owned by runtime; thin delegate (DestReceiver unported)
+transientrel_startup	matview.rs:4320	lib.rs:492	SEAMED	no	table_open + private-field fill + bulk-insert state touch unported table-AM/DR internals; thin delegate
+transientrel_receive	matview.rs:4333	lib.rs:506	SEAMED	no	table_tuple_insert on private fields; returns C true; thin delegate
+transientrel_shutdown	matview.rs:4347	lib.rs:517	SEAMED	no	FreeBulkInsertState/table_finish_bulk_insert/table_close; thin delegate
+transientrel_destroy	matview.rs:4354	lib.rs:527	SEAMED	no	pfree(self); thin delegate
+make_temptable_name_n	matview.rs:4357	lib.rs:538	MATCH	yes	initStringInfo+append+appendStringInfo("_%d",n); format _{n} identical
+refresh_by_match_merge	matview.rs:4376	lib.rs:557	MATCH	yes	all 9 SPI calls w/ correct result-code checks; SQL byte-identical to C format strings; SRO toggle; per-unique-index equality-qual loop in-crate; foundUniqueIndex 0A000; SPI_finish (SPI_OK_FINISH=2 bug fixed); relnatts bound-checked
+refresh_by_heap_swap	matview.rs:5057	lib.rs:874	SEAMED	no	finish_heap_swap fixed flags (false,false,true,true)+RecentXmin/ReadNextMultiXactId read by runtime; cluster.c unported; thin delegate
+is_usable_unique_index	matview.rs:5074	lib.rs:890	MATCH	yes	indisunique&&indimmediate&&indisvalid&&predicate==NIL&&indnatts>0; per-key attnum<=0 -> false; pg_index reads bundled, predicate logic in-crate
+MatViewIncrementalMaintenanceIsEnabled	matview.rs:5100	lib.rs:931	MATCH	yes	depth>0
+OpenMatViewIncrementalMaintenance	matview.rs:5103	lib.rs:941	MATCH	yes	depth++
+CloseMatViewIncrementalMaintenance	matview.rs:5106	lib.rs:951	MATCH	yes	depth--; debug_assert >= 0

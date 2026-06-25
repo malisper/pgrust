@@ -1,0 +1,68 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+pgstat_report_wait_start	lwlock.rs:949	lib.rs:730	SEAMED	no	Inlined header helper; LWLockReportWaitStart delegates pgstat_report_wait_start(PG_WAIT_LWLOCK|tranche) via waitevent seam.
+pgstat_report_wait_end	lwlock.rs:953	lib.rs:735	SEAMED	no	Inlined header helper; LWLockReportWaitEnd delegates via waitevent seam.
+pg_leftmost_one_pos32	lwlock.rs:957	-	MATCH	yes	Inlined pg_bitutils helper; used by pg_nextpower2_32, reproduced inline (next_power_of_two).
+pg_nextpower2_32	lwlock.rs:961	-	MATCH	yes	Inlined pg_bitutils helper; (n).max(8).next_power_of_two() at LWLockRegisterTranche use site.
+pg_atomic_compare_exchange_u32_impl	lwlock.rs:969	-	MATCH	yes	Inlined atomic header helper; reproduced inline via AtomicU32 compare_exchange in attempt/wakeup CAS loops.
+pg_atomic_fetch_sub_u32_impl	lwlock.rs:979	-	MATCH	yes	Inlined atomic header helper; reproduced inline (fetch_sub) in LWLockReleaseInternal.
+pg_atomic_fetch_and_u32_impl	lwlock.rs:986	-	MATCH	yes	Inlined atomic header helper; reproduced inline (fetch_and) in WaitListUnlock.
+pg_atomic_fetch_or_u32_impl	lwlock.rs:993	-	MATCH	yes	Inlined atomic header helper; reproduced inline (fetch_or) in WaitListLock/QueueSelf.
+pg_atomic_exchange_u64_impl	lwlock.rs:1000	-	MATCH	yes	Inlined atomic header helper; reproduced inline (swap SeqCst) in UpdateVar/ReleaseClearVar.
+pg_atomic_read_u32_impl	lwlock.rs:1007	-	MATCH	yes	Inlined atomic header helper; reproduced inline (load) at read sites.
+pg_atomic_init_u32_impl	lwlock.rs:1011	-	MATCH	yes	Inlined atomic header helper; reproduced inline (init store) in LWLockInitialize.
+pg_atomic_sub_fetch_u32_impl	lwlock.rs:1018	-	MATCH	yes	Inlined atomic header helper; fetch_sub + wrapping_sub reproduces the new value in ReleaseInternal.
+pg_atomic_read_u64_impl	lwlock.rs:1025	-	MATCH	yes	Inlined atomic header helper; reproduced inline (relaxed load) in ConflictsWithVar.
+pg_atomic_init_u32	lwlock.rs:1029	-	MATCH	yes	Inlined wrapper over init_u32_impl; reproduced inline.
+pg_atomic_read_u32	lwlock.rs:1036	-	MATCH	yes	Inlined wrapper over read_u32_impl; reproduced inline.
+pg_atomic_compare_exchange_u32	lwlock.rs:1040	-	MATCH	yes	Inlined wrapper over cmpxchg_impl; reproduced inline.
+pg_atomic_fetch_and_u32	lwlock.rs:1048	-	MATCH	yes	Inlined wrapper; reproduced inline.
+pg_atomic_fetch_or_u32	lwlock.rs:1055	-	MATCH	yes	Inlined wrapper; reproduced inline.
+pg_atomic_sub_fetch_u32	lwlock.rs:1062	-	MATCH	yes	Inlined wrapper; reproduced inline.
+pg_atomic_read_u64	lwlock.rs:1069	-	MATCH	yes	Inlined wrapper; reproduced inline.
+pg_atomic_exchange_u64	lwlock.rs:1073	-	MATCH	yes	Inlined wrapper; reproduced inline.
+tas	lwlock.rs:1096	-	MATCH	yes	Inlined s-lock test-and-set; subsumed by atomic CAS in WaitListLock (no separate spinlock object).
+init_spin_delay	lwlock.rs:1100	-	PARTIAL	no	Inlined s_lock header helper; SpinDelayStatus init has no counterpart - perform_spin_delay is unported s_lock.c, replaced by core::hint::spin_loop() (timing/backoff only, no lwlock-observable state). Ledgered in audit row 22.
+proclist_init	lwlock.rs:1114	lib.rs:268	MATCH	yes	head=tail=INVALID_PROC_NUMBER.
+proclist_is_empty	lwlock.rs:1119	lib.rs:273	MATCH	yes	head==INVALID_PROC_NUMBER.
+proclist_node_get	lwlock.rs:1123	-	SEAMED	no	PGPROC.lwWaitLink node read/write delegated via lmgr-proc seams (proc_lw_wait_link / set_proc_lw_wait_link).
+proclist_push_head_offset	lwlock.rs:1133	lib.rs:277	MATCH	yes	Empty: next=prev=INVALID,head=tail; else next=old head, old head.prev=procno, prev=INVALID, head=procno.
+proclist_push_tail_offset	lwlock.rs:1153	lib.rs:298	MATCH	yes	Mirror image of push_head.
+proclist_delete_offset	lwlock.rs:1173	lib.rs:319	MATCH	yes	prev/next relinking with head/tail fixups; node reset {0,0}.
+c2rust_pg_write_barrier	lwlock.rs:1195	-	MATCH	yes	Transpile shim for pg_write_barrier; port emits fence(Release) at both use sites (Wakeup, UpdateVar) - >= the C barrier.
+NumLWLocksForNamedTranches	lwlock.rs:1329	lib.rs:365	MATCH	yes	Sum of num_lwlocks over request array.
+LWLockShmemSize	lwlock.rs:1340	lib.rs:376	MATCH	yes	Same formula via mul_size/add_size seams (overflow ereport->Err); Rust layout sizes (owned-model).
+CreateLWLocks	lwlock.rs:1373	lib.rs:493	MATCH	yes	Documented owned-model adaptation: !IsUnderPostmaster sequence identical; under-postmaster rebuilds array re-deriving same placement ranges; both register every named tranche.
+InitializeLWLocks	lwlock.rs:1407	lib.rs:544	MATCH	yes	Four init loops with verified offsets/tranche ids; named-tranche loop assigns LWLockNewTrancheId per request from NUM_FIXED_LWLOCKS; placement metadata = owned stand-in for shmem NamedLWLockTrancheArray.
+InitLWLockAccess	lwlock.rs:1499	lib.rs:605	MATCH	yes	Empty without LWLOCK_STATS (c2rust: {}).
+GetNamedLWLockTranche	lwlock.rs:1501	lib.rs:610	MATCH	yes	First-name match; base = NUM_FIXED_LWLOCKS + cumulative preceding num_lwlocks; miss->elog(ERROR).
+LWLockNewTrancheId	lwlock.rs:1548	lib.rs:632	MATCH	yes	Post-increment under ShmemLock spinlock seam; process-wide atomic stand-in.
+LWLockRegisterTranche	lwlock.rs:1572	lib.rs:647	MATCH	yes	<FIRST_USER_DEFINED->no-op; growth pg_nextpower2_32(Max(8,id+1)); zero-fill; stores owned copy (strictly safer than C pointer).
+RequestNamedLWLockTranche	lwlock.rs:1612	lib.rs:678	MATCH	yes	!process_shmem_requests_in_progress->elog(FATAL)->Err; byte-wise strlcpy truncation (fixed round 1); debug_assert kept; Vec growth.
+LWLockInitialize	lwlock.rs:1682	lib.rs:722	MATCH	yes	state:=LW_FLAG_RELEASE_OK init store; tranche uint16; waiters proclist_init.
+LWLockReportWaitStart	lwlock.rs:1694	lib.rs:730	SEAMED	no	Thin delegate to pgstat_report_wait_start via waitevent seam.
+LWLockReportWaitEnd	lwlock.rs:1698	lib.rs:735	SEAMED	no	Thin delegate to pgstat_report_wait_end via waitevent seam.
+GetLWTrancheName	lwlock.rs:1701	lib.rs:743	MATCH	yes	Builtin range->table; user range->registered name or "extension"; NULL gap slots->"unknown" (unreachable input).
+GetLWLockIdentifier	lwlock.rs:1719	lib.rs:764	MATCH	yes	Assert(classId==PG_WAIT_LWLOCK) debug_assert; event id = tranche.
+LWLockAttemptLock	lwlock.rs:1725	lib.rs:780	MATCH	yes	Read-once-then-CAS loop; exclusive/shared free tests and increments; always swaps (barrier); compare_exchange_weak in retry loop behaviorally identical.
+LWLockWaitListLock	lwlock.rs:1758	lib.rs:824	MATCH	yes	fetch_or(LOCKED) try, spin while locked, retry - exact flow; perform_spin_delay replaced by spin_loop (timing only, ledgered).
+LWLockWaitListUnlock	lwlock.rs:1792	lib.rs:851	MATCH	yes	fetch_and(!LOCKED) Release; Assert(old&LOCKED) debug_assert.
+LWLockWakeup	lwlock.rs:1799	lib.rs:861	MATCH	yes	Collect-under-waitlist-lock walk; skip-exclusive-after-woken; release_ok/wokeup_somebody; PENDING_WAKEUP; CAS RELEASE_OK/HAS_WAITERS; wake loop delete+fence+NOT_WAITING+sem unlock.
+LWLockQueueSelf	lwlock.rs:1904	lib.rs:961	MATCH	yes	No-PGPROC/already-waiting elog(PANIC); waitlist lock; fetch_or(HAS_WAITERS); set lwWaiting/lwWaitMode; UNTIL_FREE->push_head else push_tail; unlock.
+LWLockDequeueSelf	lwlock.rs:1989	lib.rs:997	MATCH	yes	on_waitlist test; conditional delete; clear HAS_WAITERS iff empty; clear lwWaiting or fetch_or(RELEASE_OK)+absorb scheduled wakeup+repay.
+LWLockAcquire	lwlock.rs:2039	lib.rs:1075	MATCH	yes	Room check elog(ERROR); HOLD_INTERRUPTS; attempt/queue/re-attempt/dequeue/sleep loop result=false; fetch_or(RELEASE_OK) before ReportWaitEnd; record; repay extraWaits.
+LWLockConditionalAcquire	lwlock.rs:2124	lib.rs:1151	MATCH	yes	Room check, HOLD, one attempt; mustwait->RESUME+false else record+true.
+LWLockAcquireOrWait	lwlock.rs:2178	lib.rs:1182	MATCH	yes	Twice-in-a-row LW_WAIT_UNTIL_FREE queuing; NO RELEASE_OK re-set on sleep (deliberate C difference preserved); repay; mustwait->RESUME+false else record+true.
+LWLockConflictsWithVar	lwlock.rs:2260	lib.rs:1249	MATCH	yes	mustwait=state&LW_VAL_EXCLUSIVE; free->(false,true); else relaxed read u64, mismatch->store newval (false,false), match->(true,false).
+LWLockWaitForVar	lwlock.rs:2286	lib.rs:1281	MATCH	yes	HOLD; loop conflict-check/queue UNTIL_FREE/fetch_or(RELEASE_OK)/re-check/dequeue/sleep with report start+end; repay; RESUME.
+LWLockUpdateVar	lwlock.rs:2345	lib.rs:1350	MATCH	yes	swap(SeqCst); under waitlist lock pop front-of-queue UNTIL_FREE waiters (break on first non-UNTIL_FREE), PENDING_WAKEUP; wake loop identical to Wakeup; Assert(EXCLUSIVE) debug_assert.
+LWLockDisownInternal	lwlock.rs:2421	lib.rs:1401	MATCH	yes	Backwards search (rposition); shift-down removal; elog(ERROR "lock %s is not held") with tranche name; no RESUME.
+LWLockReleaseInternal	lwlock.rs:2471	lib.rs:1415	MATCH	yes	sub_fetch EXCLUSIVE/SHARED; Assert(!(new&EXCLUSIVE)) debug_assert; check_waiters iff HAS_WAITERS|RELEASE_OK set and LOCK_MASK clear; then Wakeup.
+LWLockDisown	lwlock.rs:2500	lib.rs:1449	MATCH	yes	DisownInternal + RESUME_INTERRUPTS.
+LWLockRelease	lwlock.rs:2509	lib.rs:1456	MATCH	yes	DisownInternal->ReleaseInternal->RESUME.
+LWLockReleaseDisowned	lwlock.rs:2520	lib.rs:1466	MATCH	yes	ReleaseInternal only.
+LWLockReleaseClearVar	lwlock.rs:2527	lib.rs:1472	MATCH	yes	Full-barrier swap then LWLockRelease.
+LWLockReleaseAll	lwlock.rs:2536	lib.rs:1488	MATCH	yes	While held: HOLD (balance Release RESUME) + release last-held; safe with zero held.
+ForEachLWLockHeldByMe	lwlock.rs:2549	lib.rs:1505	MATCH	yes	Iterate held entries in order, callback (lock,mode); void *context subsumed by closure; fixed-size stack snapshot.
+LWLockHeldByMe	lwlock.rs:2564	lib.rs:1520	MATCH	yes	Any-entry address equality.
+LWLockAnyHeldByMe	lwlock.rs:2576	lib.rs:1531	MATCH	yes	Stride-window predicate over &[LWLockPadded]; equivalent to C begin<=p<end && (p-begin)%stride==0.
+LWLockHeldByMeInMode	lwlock.rs:2607	lib.rs:1540	MATCH	yes	Address + mode equality.

@@ -1,0 +1,10 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+AlterTableCreateToastTable	toasting.rs:3177	lib.rs:68	MATCH	yes	forwarder to CheckAndCreateToastTable(check=true, OIDOldToast=InvalidOid)
+NewHeapCreateToastTable	toasting.rs:3185	lib.rs:78	MATCH	yes	forwarder to CheckAndCreateToastTable(check=false, OIDOldToast)
+NewRelationCreateToastTable	toasting.rs:3194	lib.rs:89	MATCH	yes	forwarder (AccessExclusiveLock, check=false, InvalidOid)
+CheckAndCreateToastTable	toasting.rs:3206	lib.rs:94	MATCH	yes	table_open; create_toast_table (ret discarded); table_close(NoLock)
+BootstrapToastTable	toasting.rs:3227	lib.rs:123	MATCH	yes	table_openrv+makeRangeVar; relkind guard elog; create_toast_table false->elog; both ERRORs default XX000
+create_toast_table	toasting.rs:3313	lib.rs:166	MATCH	yes	workhorse: reltoastrelid guard; binary-upgrade gates; AccessExclusiveLock check; 3-attr tupledesc; namespace; heap_create_with_catalog 21-arg; IndexInfo 2-key primary; index_create; normal/bootstrap pg_class update w/ in-crate cache-lookup elog; recordDependencyOn INTERNAL; CCI
+needs_toast_table	toasting.rs:3673	lib.rs:424	MATCH	yes	3 early-false guards (PARTITIONED_TABLE; relisshared&&!bootstrap; IsCatalogRelation&&!bootstrap) then table_relation_needs_toast_table
+table_relation_needs_toast_table	toasting.rs:3157	lib.rs (tableam seam)	SEAMED	no	access/tableam.h inline rd_tableam dispatcher; delegated to backend-access-table-tableam-seams (plain value, no ereport)
+table_relation_toast_am	toasting.rs:3163	lib.rs (tableam seam)	SEAMED	no	access/tableam.h inline rd_tableam dispatcher; delegated to backend-access-table-tableam-seams (plain value)

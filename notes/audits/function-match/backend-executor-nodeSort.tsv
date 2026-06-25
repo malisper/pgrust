@@ -1,0 +1,16 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+newNode	nodeSort.rs:1784	lib.rs:307	MATCH	yes	makeNode realized via alloc_in in ExecInitSort
+TupleDescAttr	nodeSort.rs:1791	(inline)	MATCH	yes	attribute accessor; idiomatic inline at desc-read sites
+slot_getsomeattrs	nodeSort.rs:1810	lib.rs (execTuples seam)	SEAMED	no	deform delegated; datum-sort path reads via execTuples seam
+ExecClearTuple	nodeSort.rs:1819	lib.rs (execTuples seam)	SEAMED	no	delegated to execTuples seam
+ExecProcNode	nodeSort.rs:1834	lib.rs:649 (execProcnode seam)	SEAMED	no	next_outer_slot dispatches child via execProcnode seam
+ExecSort	nodeSort.rs:1842	lib.rs:87	MATCH	yes	first-call tuplesort init/feed loop then per-call fetch; tuplesort ops seamed (audit verified)
+ExecInitSort	nodeSort.rs:1968	lib.rs:307	MATCH	yes	makeNode/castNode; flag+datumSort logic identical (audit verified)
+ExecEndSort	nodeSort.rs:2013	lib.rs:395	MATCH	yes	tuplesort_end iff present; ExecEndNode(outer) (audit verified)
+ExecSortMarkPos	nodeSort.rs:2021	lib.rs:423	MATCH	yes	!sort_Done early return; tuplesort_markpos (audit verified)
+ExecSortRestrPos	nodeSort.rs:2028	lib.rs:438	MATCH	yes	!sort_Done early return; tuplesort_restorepos (audit verified)
+ExecReScanSort	nodeSort.rs:2035	lib.rs:459	MATCH	yes	re-sort condition matches C 384-387 exactly (audit verified)
+ExecSortEstimate	nodeSort.rs:2058	lib.rs:544	MATCH	yes	guards+sizing in-crate; opaque shm reads/writes seamed (audit verified)
+ExecSortInitializeDSM	nodeSort.rs:2083	lib.rs:569	MATCH	yes	guards+sizing in-crate; shm ops on opaque shm_toc via seam (audit verified)
+ExecSortInitializeWorker	nodeSort.rs:2113	lib.rs:595	MATCH	yes	shm_toc_lookup + am_worker=true via seam (audit verified)
+ExecSortRetrieveInstrumentation	nodeSort.rs:2125	lib.rs:610	MATCH	yes	NULL-guard+sizing in-crate; palloc/memcpy on opaque shm via seam (audit verified)

@@ -1,0 +1,36 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+UInt32GetDatum	tupdesc.rs:914	-	MATCH	yes	postgres.h Datum-boxing inline; absorbed into types-datum.
+ObjectIdGetDatum	tupdesc.rs:918	-	MATCH	yes	postgres.h inline; absorbed.
+DatumGetPointer	tupdesc.rs:922	-	MATCH	yes	postgres.h inline; absorbed.
+PointerGetDatum	tupdesc.rs:926	-	MATCH	yes	postgres.h inline; absorbed.
+list_length	tupdesc.rs:933	-	MATCH	yes	pg_list.h inline; absorbed (Vec::len).
+TupleDescAttr	tupdesc.rs:940	-	MATCH	yes	tupdesc.h accessor inline; absorbed (slice index).
+TupleDescCompactAttr	tupdesc.rs:957	-	MATCH	yes	tupdesc.h accessor inline; absorbed.
+GETSTRUCT	tupdesc.rs:967	-	MATCH	yes	htup_details.h projection macro; absorbed.
+hash_uint32	tupdesc.rs:977	-	SEAMED	no	hashfn.h inline == hash_bytes_uint32; outward common-hashfn-seams call (hashfn.c owner).
+hash_combine	tupdesc.rs:981	hashRowType body (lib.rs:605)	MATCH	yes	hashfn.h inline (a^=b+0x9e3779b9+(a<<6)+(a>>2)) inlined into hashRowType via wrapping_add chain; byte-identical.
+ResourceOwnerRememberTupleDesc	tupdesc.rs:1006	-	MATCH	yes	resowner registry dissolved per documented RAII architecture (audit 3b); load-bearing tdrefcount preserved, only ambient cleanup hook removed.
+ResourceOwnerForgetTupleDesc	tupdesc.rs:1017	-	MATCH	yes	resowner registry dissolved (audit 3b).
+populate_compact_attribute_internal	tupdesc.rs:1028	populate_compact_attribute_internal (lib.rs:134)	MATCH	yes	attcacheoff=-1, attispackable/attgenerated, attnullability ternary, attalign switch; IsCatalogRelationOid outward seam; elog ERROR mapped to PgError.
+populate_compact_attribute	tupdesc.rs:1099	populate_compact_attribute (lib.rs:122)	MATCH	yes	Delegates to the internal builder with TupleDescAttr fields.
+verify_compact_attribute	tupdesc.rs:1110	-	MATCH	yes	USE_ASSERT_CHECKING-only debug verifier; no-op in release build (N/A, absent).
+CreateTemplateTupleDesc	tupdesc.rs:1115	CreateTemplateTupleDesc (lib.rs:75)	MATCH	yes	Allocates natts attrs + compact attrs, tdrefcount=-1, tdtypeid=RECORDOID.
+CreateTupleDesc	tupdesc.rs:1140	CreateTupleDesc (lib.rs:104)	MATCH	yes	Template + copies the supplied attrs and populates compact attrs.
+CreateTupleDescCopy	tupdesc.rs:1160	CreateTupleDescCopy (lib.rs:179)	MATCH	yes	Copies attrs, clears constr/missing/defval/attnotnull as C does, repopulates compact.
+CreateTupleDescTruncatedCopy	tupdesc.rs:1186	CreateTupleDescTruncatedCopy (lib.rs:208)	MATCH	yes	Same as Copy but truncates to natts.
+CreateTupleDescCopyConstr	tupdesc.rs:1215	CreateTupleDescCopyConstr (lib.rs:240)	MATCH	yes	Full copy incl. constraints (defval/check/missing) and attnotnull.
+TupleDescCopy	tupdesc.rs:1329	TupleDescCopy (lib.rs:305)	MATCH	yes	Into existing dst: copy header+attrs, clear constr, repopulate compact.
+TupleDescCopyEntry	tupdesc.rs:1361	TupleDescCopyEntry (lib.rs:333)	MATCH	yes	Copies one attr, clears constraint flags, repopulates compact attr.
+FreeTupleDesc	tupdesc.rs:1392	FreeTupleDesc (lib.rs:362)	MATCH	yes	Frees constr (defval bins, check exprs/names, missing) then the desc; Rust drop.
+IncrTupleDescRefCount	tupdesc.rs:1441	IncrTupleDescRefCount (lib.rs:378)	MATCH	yes	tdrefcount++ preserved; resowner Enlarge/Remember dissolved (audit 3b).
+DecrTupleDescRefCount	tupdesc.rs:1447	DecrTupleDescRefCount (lib.rs:393)	MATCH	yes	--tdrefcount, free-at-zero preserved; resowner Forget dissolved (audit 3b).
+equalTupleDescs	tupdesc.rs:1455	equalTupleDescs (lib.rs:412)	MATCH	yes	All 18 per-attr field compares + constraint block (not_null/generated/defval/missing/check) in C order; atthasmissing ignored as in C.
+equalRowTypes	tupdesc.rs:1666	equalRowTypes (lib.rs:567)	MATCH	yes	natts/tdtypeid + per-attr atttypid/atttypmod/attlen/attndims/attcollation compare.
+hashRowType	tupdesc.rs:1708	hashRowType (lib.rs:605)	MATCH	yes	hash_combine(hash_uint32(natts/tdtypeid/atttypid...)); hash_uint32 seamed to common-hashfn.
+TupleDescInitEntry	tupdesc.rs:1724	TupleDescInitEntry (lib.rs:627)	MATCH	yes	Type-dependent + fixed field writes; syscache TYPEOID lookup via search_type_attr_info seam (reordered before writes, observationally equivalent); cache-miss raises cache-lookup-failed.
+TupleDescInitBuiltinEntry	tupdesc.rs:1826	TupleDescInitBuiltinEntry (lib.rs:647)	MATCH	yes	Hard-coded builtin table TEXT/TEXT[]/BOOL/INT4/INT8/OID verified value-by-value; default -> elog ERROR.
+TupleDescInitEntryCollation	tupdesc.rs:1931	TupleDescInitEntryCollation (lib.rs:671)	MATCH	yes	Writes attcollation for the attr.
+BuildDescFromLists	tupdesc.rs:1943	BuildDescFromLists (lib.rs:687)	MATCH	yes	CreateTemplateTupleDesc + per-(name,type,typmod,collation) TupleDescInitEntry/Collation.
+TupleDescGetDefault	tupdesc.rs:2010	TupleDescGetDefault (lib.rs:714)	MATCH	yes	Finds adnum in constr->defval, stringToNode via backend-nodes-read-seams::string_to_node.
+ResOwnerReleaseTupleDesc	tupdesc.rs:2031	-	MATCH	yes	resowner registry dissolved (audit 3b).
+ResOwnerPrintTupleDesc	tupdesc.rs:2038	-	MATCH	yes	resowner DebugPrint dissolved (audit 3b).

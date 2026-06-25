@@ -1,0 +1,7 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+Int16GetDatum	attoptcache.rs:367	(inline)	MATCH	yes	postgres.h macro inline; Datum::from_i16 at call sites
+ObjectIdGetDatum	attoptcache.rs:371	(inline)	MATCH	yes	postgres.h macro inline; Datum::from_oid at call sites
+InvalidateAttoptCacheCallback	attoptcache.rs:377	lib.rs:70	MATCH	yes	hashvalue==0 clears whole cache; else removes entries with matching hash_value
+relatt_cache_syshash	attoptcache.rs:441	lib.rs:95	MATCH	yes	GetSysCacheHashValue2(ATTNUM, attrelid, attnum)
+InitializeAttoptCache	attoptcache.rs:454	lib.rs:108	MATCH	yes	create cache hash + register ATTNUM syscache callback
+get_attribute_options	attoptcache.rs:494	lib.rs:130	MATCH	yes	lazy init, cache lookup, SearchSysCache2 ATTNUM, attribute_reloptions, insert entry

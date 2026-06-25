@@ -1,0 +1,5 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+ExecNestLoop	nodeNestloop.rs:1762 (C:59 static)	crates/backend-executor-nodeNestloop/src/lib.rs:95	MATCH	yes	NeedNewOuter/MatchedOuter driver; nestParams PARAM_EXEC plumbing; single_match/antijoin/left-join null extension; instrumentation; per-tuple econtext reset. All predicates/ordering match c2rust.
+ExecInitNestLoop	nodeNestloop.rs:1884 (C:261)	crates/backend-executor-nodeNestloop/src/lib.rs:389	MATCH	yes	BACKWARD/MARK assert; makeNode(NestLoopState); ExecAssignExprContext; REWIND toggle between child inits; result slot/proj; qual/joinqual; single_match; jointype switch null slot + elog(ERROR) default.
+ExecEndNestLoop	nodeNestloop.rs:1973 (C:360)	crates/backend-executor-nodeNestloop/src/lib.rs:520	MATCH	yes	ExecEndNode(outer) then ExecEndNode(inner); Some-guards behavior-identical (both children always exist post-init).
+ExecReScanNestLoop	nodeNestloop.rs:1978 (C:380)	crates/backend-executor-nodeNestloop/src/lib.rs:541	MATCH	yes	outerPlan chgParam==NULL -> ExecReScan; inner deliberately not rescanned; nl_NeedNewOuter=true, nl_MatchedOuter=false.

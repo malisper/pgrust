@@ -1,0 +1,40 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+ExecCheckPlanOutput	nodeModifyTable.rs (C:195)	crates/backend-executor-nodeModifyTable/src/lifecycle.rs:55	MATCH	yes	tlist walk, both column-count errors; also called from ExecInitMerge CMD_INSERT arm.
+ExecProcessReturning	nodeModifyTable.rs (C:288)	crates/backend-executor-nodeModifyTable/src/lifecycle.rs:160	MATCH	yes	unchanged.
+ExecCheckTupleVisible	nodeModifyTable.rs (C:363)	crates/backend-executor-nodeModifyTable/src/insert.rs:827	MATCH	yes	unchanged.
+ExecCheckTIDVisible	nodeModifyTable.rs (C:397)	crates/backend-executor-nodeModifyTable/src/insert.rs:787	MATCH	yes	unchanged.
+ExecInitGenerated	nodeModifyTable.rs (C:430)	crates/backend-executor-nodeModifyTable/src/lifecycle.rs:281	MATCH	yes	owned-seam-installed.
+ExecComputeStoredGenerated	nodeModifyTable.rs (C:544)	crates/backend-executor-nodeModifyTable/src/lifecycle.rs:430	MATCH	yes	dispatch+early-exit in-crate; slot loop seamed to execTuples.
+ExecInitInsertProjection	nodeModifyTable.rs (C:640)	crates/backend-executor-nodeModifyTable/src/insert.rs:476	MATCH	yes	unchanged.
+ExecInitUpdateProjection	nodeModifyTable.rs (C:710)	crates/backend-executor-nodeModifyTable/src/update.rs:888	MATCH	yes	unchanged.
+ExecGetInsertNewTuple	nodeModifyTable.rs (C:768)	crates/backend-executor-nodeModifyTable/src/insert.rs:439	MATCH	yes	unchanged.
+ExecGetUpdateNewTuple	nodeModifyTable.rs (C:812)	crates/backend-executor-nodeModifyTable/src/update.rs:875	MATCH	yes	unchanged.
+ExecInsert	nodeModifyTable.rs (C:850)	crates/backend-executor-nodeModifyTable/src/insert_exec.rs:168	MATCH	yes	reads mt_merge_action->mas_action->commandType for RLS WCO kind under MERGE; fed by restored mt_merge_action assignment.
+ExecBatchInsert	nodeModifyTable.rs (C:1367)	crates/backend-executor-nodeModifyTable/src/insert.rs:341	MATCH	yes	unchanged.
+ExecPendingInserts	nodeModifyTable.rs (C:1427)	crates/backend-executor-nodeModifyTable/src/insert.rs:402	MATCH	yes	unchanged.
+ExecDeletePrologue	nodeModifyTable.rs (C:1460)	crates/backend-executor-nodeModifyTable/src/delete.rs:19	MATCH	yes	unchanged.
+ExecDeleteAct	nodeModifyTable.rs (C:1492)	crates/backend-executor-nodeModifyTable/src/delete.rs:67	MATCH	yes	unchanged.
+ExecDeleteEpilogue	nodeModifyTable.rs (C:1514)	crates/backend-executor-nodeModifyTable/src/delete.rs:98	MATCH	yes	unchanged.
+ExecDelete	nodeModifyTable.rs (C:1572)	crates/backend-executor-nodeModifyTable/src/delete_exec.rs:274	MATCH	yes	EPQ path threads canonical mt_epqstate.
+ExecCrossPartitionUpdate	nodeModifyTable.rs (C:1930)	crates/backend-executor-nodeModifyTable/src/update.rs:637	MATCH	yes	unchanged.
+ExecUpdatePrologue	nodeModifyTable.rs (C:2092)	crates/backend-executor-nodeModifyTable/src/update.rs:332	MATCH	yes	unchanged.
+ExecUpdatePrepareSlot	nodeModifyTable.rs (C:2135)	crates/backend-executor-nodeModifyTable/src/update.rs:393	MATCH	yes	unchanged.
+ExecUpdateAct	nodeModifyTable.rs (C:2170)	crates/backend-executor-nodeModifyTable/src/update.rs:422	MATCH	yes	unchanged.
+ExecUpdateEpilogue	nodeModifyTable.rs (C:2321)	crates/backend-executor-nodeModifyTable/src/update.rs:569	MATCH	yes	unchanged.
+ExecCrossPartitionUpdateForeignKey	nodeModifyTable.rs (C:2368)	crates/backend-executor-nodeModifyTable/src/update.rs:800	MATCH	yes	unchanged.
+ExecUpdate	nodeModifyTable.rs (C:2461)	crates/backend-executor-nodeModifyTable/src/update.rs:36	MATCH	yes	EPQ path threads canonical mt_epqstate.
+ExecOnConflictUpdate	nodeModifyTable.rs (C:2713)	crates/backend-executor-nodeModifyTable/src/insert.rs:578	MATCH	yes	all 6 TM_Result arms / SQLSTATEs.
+ExecMerge	nodeModifyTable.rs (C:2931)	crates/backend-executor-nodeModifyTable/src/merge.rs:17	MATCH	yes	matched->ExecMergeMatched, !matched dispatch.
+ExecMergeMatched	nodeModifyTable.rs (C:3057)	crates/backend-executor-nodeModifyTable/src/merge_matched.rs:111	MATCH	yes	matched-action core reads owned ri_MergeActions/ri_MergeJoinCondition/ri_RowIdAttNo/ri_WithCheckOptions/ri_projectReturning in-crate; all TM_Result arms + RETURNING; foreign primitives via real owner seams; mt_merge_action restored. SQLSTATEs 21000/27000/40001.
+ExecMergeNotMatched	nodeModifyTable.rs (C:3597)	crates/backend-executor-nodeModifyTable/src/merge.rs:76	MATCH	yes	in-crate action loop over owned ri_MergeActions[NOT_MATCHED_BY_TARGET]; CMD_INSERT arm restores mt_merge_action before ExecInsert.
+ExecInitMerge	nodeModifyTable.rs (C:3680)	crates/backend-executor-nodeModifyTable/src/merge.rs:245	MATCH	yes	per-action commandType switch, mt_merge_subcommands accumulation, partitioned-vs-inherited CMD_INSERT init, ExecCheckPlanOutput, makeNode(MergeActionState), ri_MergeActions append in-crate; only leaf primitives seamed.
+ExecInitMergeTupleSlots	nodeModifyTable.rs (C:3960)	crates/backend-executor-nodeModifyTable/src/merge.rs:339	MATCH	yes	two table_slot_create, ri_projectNewInfoValid=true.
+fireBSTriggers	nodeModifyTable.rs (C:3980)	crates/backend-executor-nodeModifyTable/src/lifecycle.rs:772	SEAMED	no	trigger.c callees; legit delegation to unported trigger owner.
+fireASTriggers	nodeModifyTable.rs (C:4017)	crates/backend-executor-nodeModifyTable/src/lifecycle.rs:818	SEAMED	no	trigger.c callees; legit delegation to unported trigger owner.
+ExecSetupTransitionCaptureState	nodeModifyTable.rs (C:4062)	crates/backend-executor-nodeModifyTable/src/lifecycle.rs:502	SEAMED	no	MakeTransitionCaptureState (trigger.c, unported) -> Err; legit.
+ExecPrepareTupleRouting	nodeModifyTable.rs (C:4091)	crates/backend-executor-nodeModifyTable/src/lifecycle.rs:528	MATCH	yes	*partRelInfo written, map==NULL fast path.
+ExecModifyTable	nodeModifyTable.rs (C:4151)	crates/backend-executor-nodeModifyTable/src/exec.rs:98	MATCH	yes	es_epq_active guard fires as Err.
+ExecLookupResultRelByOid	nodeModifyTable.rs (C:4583)	crates/backend-executor-nodeModifyTable/src/lifecycle.rs:620	MATCH	yes	unchanged.
+ExecInitModifyTable	nodeModifyTable.rs (C:4632)	crates/backend-executor-nodeModifyTable/src/init.rs:31	MATCH	yes	ON CONFLICT DO UPDATE block ported in-crate (OnConflictSetState build); remaining Err deferrals owner-blocked on unported FDW/aux neighbors.
+ExecEndModifyTable	nodeModifyTable.rs (C:5221)	crates/backend-executor-nodeModifyTable/src/lifecycle.rs:687	MATCH	yes	unchanged.
+ExecReScanModifyTable	nodeModifyTable.rs (C:5275)	crates/backend-executor-nodeModifyTable/src/lifecycle.rs	MATCH	yes	elog(ERROR,"...not implemented") mirrored.

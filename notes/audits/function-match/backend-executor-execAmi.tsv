@@ -1,0 +1,12 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+ObjectIdGetDatum	execAmi.rs:4317	(types-tuple inline)	SEAMED	no	post-preprocessor header inline (postgres.h), owned by another unit; uses folded into seam projections
+list_length	execAmi.rs:4322	(types-nodes inline)	SEAMED	no	pg_list.h inline owned by nodes; usage idiomatic .len()/None in port
+list_nth_cell	execAmi.rs:4326	(types-nodes inline)	SEAMED	no	pg_list.h inline owned by nodes; usage idiomatic indexing in port
+GETSTRUCT	execAmi.rs:4333	(htup inline)	SEAMED	no	htup_details.h macro owned elsewhere; folded into search_relation_relam projection
+ExecReScan	execAmi.rs:4345	lib.rs:66 exec_re_scan	MATCH	yes	re-derived line-by-line; param-propagation walk, Material direct-dep arm, default unrecognized_node_type error all preserved
+ExecMarkPos	execAmi.rs:4566	lib.rs:211 exec_mark_pos	MATCH	yes	Material->ExecMaterialMarkPos direct dep; default soft DEBUG2 path returns Ok
+ExecRestrPos	execAmi.rs:4619	lib.rs:234 exec_restr_pos	MATCH	yes	Material->ExecMaterialRestrPos; default hard ERROR unrecognized_node_type
+ExecSupportsMarkRestore	execAmi.rs:4672	lib.rs:250 exec_supports_mark_restore	MATCH	yes	switches on pathtype data field; full truth table verified against headers
+ExecSupportsBackwardScan	execAmi.rs:4728	lib.rs:331 exec_supports_backward_scan	MATCH	yes	NULL->false, parallel_aware->false, Material->true; default false reproduced; unrepresentable arms pending node variants
+IndexSupportsBackwardScan	execAmi.rs:4786	lib.rs:366 index_supports_backward_scan	MATCH	yes	static; RELOID lookup via search_relation_relam projection, cache-miss error raised in-crate, amcanbackward via index_am_canbackward seam
+ExecMaterializesOutput	execAmi.rs:4830	lib.rs:397 exec_materializes_output	MATCH	yes	pure 7-tag set membership; tag constants verified against nodetags.h

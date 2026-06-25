@@ -1,0 +1,40 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+DatumGetBool	slotsync.rs:1325	(inline)	MATCH	yes	c2rust-inlined postgres.h macro; realized via existing Datum infra
+DatumGetTransactionId	slotsync.rs:1329	(inline)	MATCH	yes	c2rust-inlined header macro; realized via existing Datum infra
+DatumGetPointer	slotsync.rs:1333	(inline)	MATCH	yes	c2rust-inlined header macro; realized via existing Datum infra
+PointerGetDatum	slotsync.rs:1337	(inline)	MATCH	yes	c2rust-inlined header macro; realized via existing Datum infra
+DatumGetInt64	slotsync.rs:1341	(inline)	MATCH	yes	c2rust-inlined header macro; realized via existing Datum infra
+tas	slotsync.rs:1355	(inline)	MATCH	yes	c2rust-inlined s_lock.h spinlock test-and-set; realized via Spinlock infra
+slot_getsomeattrs	slotsync.rs:1359	(seam)	MATCH	yes	c2rust-inlined tuptable.h inline; reached via libpqwalreceiver result tupslot decode
+slot_getattr	slotsync.rs:1368	(seam)	MATCH	yes	c2rust-inlined tuptable.h inline; per-column decode in synchronize_slots via result_gettupleslot getattr seams
+ExecClearTuple	slotsync.rs:1380	(seam)	MATCH	yes	c2rust-inlined executor inline; reached via exec_clear_tuple seam
+walrcv_clear_result	slotsync.rs:1387	(seam)	MATCH	yes	c2rust-inlined walreceiver.h inline; delegated to libpqwalreceiver-seams owner
+ReplicationSlotSetInactiveSince	slotsync.rs:1403	(seam)	MATCH	yes	c2rust-inlined slot.h inline; delegated to backend-replication-slot owner (set_inactive_since)
+DatumGetLSN	slotsync.rs:1436	(inline)	MATCH	yes	c2rust-inlined pg_lsn.h macro; realized via existing Datum infra
+update_local_synced_slot	slotsync.rs:1448	lib.rs:317	MATCH	yes	persistency LOG/DEBUG1 ternary; SnapBuild/LogicalSlotAdvance branch; confirmed_flush sanity ERROR; mark-dirty/save; effective_catalog_xmin compute
+get_local_synced_slots	slotsync.rs:1664	lib.rs:455	MATCH	yes	ControlLock SHARED array scan; in_use&&synced; SlotIsLogical assert; by-handle; try_reserve OOM
+local_sync_slot_required	slotsync.rs:1687	lib.rs:481	MATCH	yes	name compare; spin-guarded locally_invalidated predicate; break; by-handle
+drop_local_obsolete_slots	slotsync.rs:1741	lib.rs:510	MATCH	yes	LockSharedObject guard; spin synced-recheck; conditional Acquire+DropAcquired; UnlockSharedObject; LOG
+reserve_wal_for_local_slot	slotsync.rs:1836	lib.rs:554	MATCH	yes	AllocationLock EXCLUSIVE; min_safe_lsn=min(redo,slotmin); Max(restart,min_safe); compute_required_lsn; removed-segno ERROR
+update_and_persist_local_synced_slot	slotsync.rs:1903	lib.rs:591	MATCH	yes	precedes early-false; !found_consistent LOG+false; persist; sync-ready LOG
+synchronize_one_slot	slotsync.rs:1987	lib.rs:646	MATCH	yes	latestFlushPtr ahead check; SearchNamedReplicationSlot acquire path vs create branch; persist; final Release
+synchronize_slots	slotsync.rs:2272	lib.rs:774	MATCH	yes	slotRow OID array; started_tx; walrcv_exec; WALRCV_OK_TUPLES; tupslot gettuple loop; per-column decode; RS_EPHEMERAL skip; drop_local_obsolete; per-slot lock/sync/unlock; commit
+validate_remote_info	slotsync.rs:2464	lib.rs:902	MATCH	yes	quote_literal_cstr cmd; exec; status check; single-tuple fetch; remote_in_recovery FEATURE_NOT_SUPPORTED; primary_slot_valid INVALID_PARAMETER_VALUE; clear; commit
+CheckAndGetDbnameFromConninfo	slotsync.rs:2655	lib.rs:974	MATCH	yes	walrcv_get_dbname_from_conninfo; None -> INVALID_PARAMETER_VALUE
+ValidateSlotSyncParams	slotsync.rs:2708	lib.rs:991	MATCH	yes	wal_level<logical / primary_slot_name empty / hsf off / primary_conninfo empty -> report_at(elevel,INVALID_PARAMETER_VALUE)+false
+slotsync_reread_config	slotsync.rs:2864	lib.rs:1046	MATCH	yes	old/new conninfo/slotname/sync_slots/hsf reads; ProcessConfigFile; disabled LOG+proc_exit; param-change LOG+last_start_time=0+proc_exit
+ProcessSlotSyncInterrupts	slotsync.rs:2951	lib.rs:1104	MATCH	yes	CHECK_FOR_INTERRUPTS; spin stop_signaled read; promotion LOG+proc_exit; ConfigReloadPending->reread
+slotsync_worker_disconnect	slotsync.rs:2991	lib.rs:1133	MATCH	yes	DatumGetPointer(arg)->WalReceiverConn; walrcv_disconnect
+slotsync_worker_onexit	slotsync.rs:3000	lib.rs:1140	MATCH	yes	release if MyReplicationSlot set; cleanup(false); spin pid=InvalidPid; syncing_slots cleanup
+wait_for_slot_activity	slotsync.rs:3024	lib.rs:1165	MATCH	yes	sleep_ms doubling (cap MAX)/reset MIN; WaitLatch; WL_LATCH_SET reset
+check_and_set_sync_info	slotsync.rs:3047	lib.rs:1189	MATCH	yes	spin; asserts; stopSignaled ERROR; syncing ERROR (OBJECT_NOT_IN_PREREQUISITE_STATE); set syncing+pid; syncing_slots=true
+reset_syncing_flag	slotsync.rs:3144	lib.rs:1224	MATCH	yes	spin syncing=false; syncing_slots=false
+ReplSlotSyncWorkerMain	slotsync.rs:3159	lib.rs:1242	MATCH	yes	-> ! wrapper over PgResult inner; full bootstrap order faithful; daemon-boundary panic mirrors sigsetjmp ERROR->proc_exit
+update_synced_slots_inactive_since	slotsync.rs:3367	lib.rs:1322	MATCH	yes	!StandbyMode return; pid/syncing assert; ControlLock SHARED scan; in_use&&synced; asserts; now-once; set_inactive_since(true)
+ShutDownSlotSync	slotsync.rs:3396	lib.rs:1357	MATCH	yes	stopSignaled=true; !syncing early update+return; kill SIGUSR1; wait loop (WaitLatch 10ms, spin recheck/break); update
+SlotSyncWorkerCanRestart	slotsync.rs:3452	lib.rs:1408	MATCH	yes	time(NULL) seconds; (unsigned)(cur-last)<INTERVAL throttle; last_start_time update
+IsSyncingReplicationSlots	slotsync.rs:3463	lib.rs:1440	MATCH	yes	returns syncing_slots
+SlotSyncShmemSize	slotsync.rs:3467	lib.rs:1448	MATCH	yes	size_of SlotSyncCtxStruct
+SlotSyncShmemInit	slotsync.rs:3471	lib.rs:1452	MATCH	yes	ShmemInitStruct; !found -> zero + pid=InvalidPid + SpinLockInit
+slotsync_failure_callback	slotsync.rs:3489	lib.rs:1486	MATCH	yes	release if set; cleanup(true); reset_syncing_flag if syncing; walrcv_disconnect
+SyncReplicationSlots	slotsync.rs:3506	lib.rs:1506	MATCH	yes	PG_ENSURE_ERROR_CLEANUP: body then on Err run failure_callback + re-raise

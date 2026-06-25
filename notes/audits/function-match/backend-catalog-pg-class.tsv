@@ -1,0 +1,2 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+errdetail_relkind_not_supported	backend-catalog-probe-pg_class/src/pg_class.rs:27	backend-catalog-pg-class/src/lib.rs:34	MATCH	yes	switch(relkind) 10 arms + default; all 10 errdetail strings byte-for-byte; RELKIND_* constants verified; default elog(ERROR) unrecognized relkind; errdetail returns String by value (repo convention)

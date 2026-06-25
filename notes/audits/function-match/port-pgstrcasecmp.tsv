@@ -1,0 +1,13 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+isascii	probe-port-srv-pgstrcasecmp/src/pgstrcasecmp.rs:69	crates/port-pgstrcasecmp/src/lib.rs	MATCH	yes	inlined <ctype.h> shim; high-bit branch defers to libc directly so 7-bit/highbit split folded into ch.is_ascii_* + libc::isupper/islower. Not part of pgstrcasecmp.c surface; behavior preserved.
+__istype	probe-port-srv-pgstrcasecmp/src/pgstrcasecmp.rs:74	crates/port-pgstrcasecmp/src/lib.rs	MATCH	yes	inlined ctype dispatch shim; folded into direct libc::isupper/islower calls in fold_to_lower/pg_toupper. Behavior-identical.
+islower	probe-port-srv-pgstrcasecmp/src/pgstrcasecmp.rs:86	crates/port-pgstrcasecmp/src/lib.rs:80	MATCH	yes	inlined ctype; pg_toupper calls libc::islower directly (acyclic, no seam). Identical.
+isupper	probe-port-srv-pgstrcasecmp/src/pgstrcasecmp.rs:90	crates/port-pgstrcasecmp/src/lib.rs:134	MATCH	yes	inlined ctype; fold_to_lower/pg_tolower call libc::isupper directly. Identical.
+tolower	probe-port-srv-pgstrcasecmp/src/pgstrcasecmp.rs:94	crates/port-pgstrcasecmp/src/lib.rs:135	MATCH	yes	inlined ctype; fold_to_lower calls libc::tolower directly. Identical.
+toupper	probe-port-srv-pgstrcasecmp/src/pgstrcasecmp.rs:98	crates/port-pgstrcasecmp/src/lib.rs:81	MATCH	yes	inlined ctype; pg_toupper calls libc::toupper directly. Identical.
+pg_strcasecmp	probe-port-srv-pgstrcasecmp/src/pgstrcasecmp.rs:102	crates/port-pgstrcasecmp/src/lib.rs:27	MATCH	yes	per-index walk, byte_at yields 0 past slice end (=C NUL), fold_to_lower on mismatch (ASCII A-Z down + highbit locale tolower), return i32 diff; stop at NUL. Idiomatic but identical.
+pg_strncasecmp	probe-port-srv-pgstrcasecmp/src/pgstrcasecmp.rs:145	crates/port-pgstrcasecmp/src/lib.rs:51	MATCH	yes	same as strcasecmp bounded by n (while i<n); c2rust n-- predecrement loop equals while i<n then i+=1. Stop at NUL inside. Identical.
+pg_toupper	probe-port-srv-pgstrcasecmp/src/pgstrcasecmp.rs:194	crates/port-pgstrcasecmp/src/lib.rs:77	MATCH	yes	ASCII a-z -> -('a'-'A'); else highbit && libc::islower -> libc::toupper; else unchanged. Identical.
+pg_tolower	probe-port-srv-pgstrcasecmp/src/pgstrcasecmp.rs:208	crates/port-pgstrcasecmp/src/lib.rs:92	MATCH	yes	delegates to fold_to_lower = exact pg_tolower rule (ASCII A-Z up-by-32; highbit && isupper -> libc::tolower; else unchanged). Identical.
+pg_ascii_toupper	probe-port-srv-pgstrcasecmp/src/pgstrcasecmp.rs:222	crates/port-pgstrcasecmp/src/lib.rs:98	MATCH	yes	ASCII a-z -> upper only; no locale. Identical.
+pg_ascii_tolower	probe-port-srv-pgstrcasecmp/src/pgstrcasecmp.rs:232	crates/port-pgstrcasecmp/src/lib.rs:108	MATCH	yes	ASCII A-Z -> lower only; no locale. Identical.

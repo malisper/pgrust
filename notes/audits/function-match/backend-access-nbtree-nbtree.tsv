@@ -1,0 +1,29 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+bthandler	backend-access-nbtree-nbtree/src/nbtree.rs:3790	crates/backend-access-nbtree-nbtree/src/lib.rs:148	MATCH	yes	IndexAmRoutine vtable fill; all am* fields + flags match.
+btbuildempty	backend-access-nbtree-nbtree/src/nbtree.rs:3956	crates/backend-access-nbtree-nbtree/src/lib.rs:189	MATCH	yes	Body in-crate; smgr bulk write delegated to nbtree-core seam (genuinely-foreign owner).
+btinsert	backend-access-nbtree-nbtree/src/nbtree.rs:3967	crates/backend-access-nbtree-nbtree/src/lib.rs:201	MATCH	yes	Body in-crate; index_form_tuple / _bt_doinsert SEAMED to owners.
+btgettuple	backend-access-nbtree-nbtree/src/nbtree.rs:3986	crates/backend-access-nbtree-nbtree/src/lib.rs:223	MATCH	yes	SAOP/array loop + _bt_first/_bt_next/_bt_killitems via seams; kill-bit logic in-crate.
+btgetbitmap	backend-access-nbtree-nbtree/src/nbtree.rs:4026	crates/backend-access-nbtree-nbtree/src/lib.rs:279	MATCH	yes	tbm add loop + prim-scan handling in-crate.
+btbeginscan	backend-access-nbtree-nbtree/src/nbtree.rs:4062	crates/backend-access-nbtree-nbtree/src/lib.rs:336	MATCH	yes	BTScanOpaque alloc/init matches.
+btrescan	backend-access-nbtree-nbtree/src/nbtree.rs:4099	crates/backend-access-nbtree-nbtree/src/lib.rs:388	MATCH	yes	markItemIndex reset, array keys reset, scankey copy match.
+btendscan	backend-access-nbtree-nbtree/src/nbtree.rs:4156	crates/backend-access-nbtree-nbtree/src/lib.rs:451	MATCH	yes	killitems flush + _bt_parallel_done tail + free match.
+btmarkpos	backend-access-nbtree-nbtree/src/nbtree.rs:4187	crates/backend-access-nbtree-nbtree/src/lib.rs:476	MATCH	yes	mark/restore pos save matches.
+btrestrpos	backend-access-nbtree-nbtree/src/nbtree.rs:4202	crates/backend-access-nbtree-nbtree/src/lib.rs:495	MATCH	yes	markItemIndex restore + array restore match.
+btestimateparallelscan	backend-access-nbtree-nbtree/src/nbtree.rs:4249	crates/backend-access-nbtree-nbtree/src/lib.rs:595	MATCH	yes	In-crate sizing loop (was relocated/MISSING in round 1, now fixed); add_size overflow in-crate.
+_bt_parallel_serialize_arrays	backend-access-nbtree-nbtree/src/nbtree.rs:4297	crates/backend-access-nbtree-nbtree/src/lib.rs:657	MATCH	yes	In-crate SAOP/skip-array serialize (fixed); datum_serialize via datum seam.
+_bt_parallel_restore_arrays	backend-access-nbtree-nbtree/src/nbtree.rs:4338	crates/backend-access-nbtree-nbtree/src/lib.rs:701	MATCH	yes	In-crate restore cursor arithmetic (fixed); datum_restore via datum seam.
+btinitparallelscan	backend-access-nbtree-nbtree/src/nbtree.rs:4387	crates/backend-access-nbtree-nbtree/src/lib.rs:764	MATCH	yes	LWLock/CV init + field writes in-crate (fixed).
+btparallelrescan	backend-access-nbtree-nbtree/src/nbtree.rs:4399	crates/backend-access-nbtree-nbtree/src/lib.rs:778	MATCH	yes	Lock-protected status reset in-crate (fixed).
+_bt_parallel_seize	backend-access-nbtree-nbtree/src/nbtree.rs:4415	crates/backend-access-nbtree-nbtree/src/lib.rs:831	MATCH	yes	LWLock-protected BTPS_State machine + CV sleep in-crate as bt_parallel_seize_core (fixed); inward seam wrapper installed.
+_bt_parallel_release	backend-access-nbtree-nbtree/src/nbtree.rs:4496	crates/backend-access-nbtree-nbtree/src/lib.rs:930	MATCH	yes	Status advance + CV signal in-crate as bt_parallel_release_core (fixed).
+_bt_parallel_done	backend-access-nbtree-nbtree/src/nbtree.rs:4517	crates/backend-access-nbtree-nbtree/src/lib.rs:957	MATCH	yes	Done-state transition + CV broadcast in-crate as bt_parallel_done_core (fixed).
+_bt_parallel_primscan_schedule	backend-access-nbtree-nbtree/src/nbtree.rs:4547	crates/backend-access-nbtree-nbtree/src/lib.rs:1004	MATCH	yes	Prim-scan reschedule in-crate as bt_parallel_primscan_schedule_core (fixed).
+btbulkdelete	backend-access-nbtree-nbtree/src/nbtree.rs:4574	crates/backend-access-nbtree-nbtree/src/lib.rs:1036	MATCH	yes	stats alloc + btvacuumscan drive match.
+btvacuumcleanup	backend-access-nbtree-nbtree/src/nbtree.rs:4637	crates/backend-access-nbtree-nbtree/src/lib.rs:1076	MATCH	yes	needs-cleanup gate + final scan match.
+btvacuumscan	backend-access-nbtree-nbtree/src/nbtree.rs:4663	crates/backend-access-nbtree-nbtree/src/lib.rs:1125	MATCH	yes	full-index scan loop, pendingfsm, progress reporting match.
+btvacuumpage	backend-access-nbtree-nbtree/src/nbtree.rs:4776	crates/backend-access-nbtree-nbtree/src/lib.rs:1252	MATCH	yes	page recursion + btvacuumpage_leaf split; delete/halfdead handling match.
+btreevacuumposting	backend-access-nbtree-nbtree/src/nbtree.rs:5024	crates/backend-access-nbtree-nbtree/src/lib.rs:1512	MATCH	yes	posting-list dead-TID remap matches.
+btcanreturn	backend-access-nbtree-nbtree/src/nbtree.rs:5069	crates/backend-access-nbtree-nbtree/src/lib.rs:1561	MATCH	yes	unconditional true matches.
+btgettreeheight	backend-access-nbtree-nbtree/src/nbtree.rs:5076	crates/backend-access-nbtree-nbtree/src/lib.rs:1566	MATCH	yes	_bt_getrootheight via seam; passthrough matches.
+bttranslatestrategy	backend-access-nbtree-nbtree/src/nbtree.rs:5080	crates/backend-access-nbtree-nbtree/src/lib.rs:1575	MATCH	yes	strategy 1..5 -> CompareType mapping matches.
+bttranslatecmptype	backend-access-nbtree-nbtree/src/nbtree.rs:5094	crates/backend-access-nbtree-nbtree/src/lib.rs:1587	MATCH	yes	COMPARE_LT..GT -> strategy mapping matches.

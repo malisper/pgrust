@@ -1,0 +1,18 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+MemoryContextSwitchTo	backend_startup.rs:1054	(dep types-mcx)	MATCH	yes	c2rust-lowered header inline (utils/mmgr); provided by the context type in our crate, not a backend_startup.c function
+list_length	backend_startup.rs:1062	(dep backend-nodes/pg_list)	MATCH	yes	c2rust-lowered pg_list.h inline; List ops live in the nodes crate
+list_nth_cell	backend_startup.rs:1066	(dep backend-nodes/pg_list)	MATCH	yes	c2rust-lowered pg_list.h inline; provided by the List type
+pq_writeint32	backend_startup.rs:1084	(dep backend-libpq-pqformat)	MATCH	yes	c2rust-lowered pqformat.h inline; pqformat sendint32 used directly in send_negotiate_protocol_version
+pq_sendint32	backend_startup.rs:1096	(dep backend-libpq-pqformat)	MATCH	yes	c2rust-lowered pqformat.h inline; called directly via backend-libpq-pqformat
+set_ps_display	backend_startup.rs:1101	(seam ps-status)	MATCH	yes	c2rust-lowered ps_status.h inline (calls set_ps_display_with_len); reached via ps-status path
+BackendMain	backend_startup.rs:1122	lib.rs:134 (backend_main)	MATCH	yes	audit row 1: reads BackendStartupData, TopMemoryContext, BackendInitialize, InitProcess seam, PostgresMain hand-off; EXEC_BACKEND reinit not this model
+BackendInitialize	backend_startup.rs:1136	lib.rs:192 (backend_initialize)	MATCH	yes	audit row 2: full body line-for-line; FATAL path returned as Err and driven through report/proc_exit by wrapper
+ProcessSSLStartup	backend_startup.rs:1667	lib.rs:456 (process_ssl_startup)	MATCH	yes	audit row 3: peekbyte/EOF, USE_SSL arms gated on ssl_supported(), reject label
+ProcessStartupPacket	backend_startup.rs:1785	lib.rs:527 (process_startup_packet)	MATCH	yes	audit row 4: 1-then-3 length read, CANCEL/SSL/GSS dispatch with recursion, v3 name/value scan, NAMEDATALEN truncation
+ProcessCancelRequestPacket	backend_startup.rs:2568	lib.rs:908 (process_cancel_request_packet)	MATCH	yes	audit row 5: pktlen<8 COMMERROR, len=pktlen-8, 0<len<=256, be32 backendPID, SendCancelRequest
+SendNegotiateProtocolVersion	backend_startup.rs:2670	lib.rs:944 (send_negotiate_protocol_version)	MATCH	yes	audit row 6: beginmessage 'v', sendint32 proto/count, per-option sendstring, endmessage via pqformat
+process_startup_packet_die	backend_startup.rs:2700	lib.rs:974 (process_startup_packet_die)	MATCH	yes	audit row 7: _exit(1)
+StartupPacketTimeoutHandler	backend_startup.rs:2705	lib.rs:980 (startup_packet_timeout_handler)	MATCH	yes	audit row 8: _exit(1)
+validate_log_connections_options	backend_startup.rs:2708	lib.rs:999 (validate_log_connections_options)	MATCH	yes	audit row 9: compat_options[8]+options[5] tables transcribed value-for-value; goto next as labeled continue
+check_log_connections	backend_startup.rs:2868	lib.rs:1074 (check_log_connections)	MATCH	yes	audit row 10: SplitIdentifierString via varlena seam, validation in helper, returns flags for GUC machinery
+assign_log_connections	backend_startup.rs:2909	lib.rs:1096 (assign_log_connections)	MATCH	yes	audit row 11: log_connections = *(int*)extra

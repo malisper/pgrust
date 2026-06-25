@@ -1,0 +1,31 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+MemoryContextSwitchTo	nodeTidscan.rs:2711	(idiomatic)	MATCH	yes	mcontext.h inline; realized via Mcx switching, no behavioral diff.
+DatumGetPointer	nodeTidscan.rs:2717	(idiomatic)	MATCH	yes	postgres.h inline; folded into typed Datum->pointer access.
+BlockIdGetBlockNumber	nodeTidscan.rs:2722	(idiomatic)	MATCH	yes	block.h inline; subsumed by ItemPointer block accessors.
+ItemPointerGetBlockNumberNoCheck	nodeTidscan.rs:2729	(in-crate/itemptr)	MATCH	yes	itemptr.h inline; used by itemptr_comparator/tid handling.
+ItemPointerGetBlockNumber	nodeTidscan.rs:2735	(in-crate/itemptr)	MATCH	yes	itemptr.h inline.
+ItemPointerGetOffsetNumberNoCheck	nodeTidscan.rs:2741	(in-crate/itemptr)	MATCH	yes	itemptr.h inline; used by comparator.
+ItemPointerGetOffsetNumber	nodeTidscan.rs:2747	(in-crate/itemptr)	MATCH	yes	itemptr.h inline.
+newNode	nodeTidscan.rs:2753	(makeNode-shaped)	MATCH	yes	nodes.h inline; realized as TidScanState::new_in.
+list_length	nodeTidscan.rs:2761	(idiomatic)	MATCH	yes	pg_list.h inline.
+list_nth_cell	nodeTidscan.rs:2765	(idiomatic)	MATCH	yes	pg_list.h inline.
+ExecClearTuple	nodeTidscan.rs:2772	(seam)	SEAMED	no	tuptable.h; delegated to execTuples clear-slot seam.
+table_beginscan_tid	nodeTidscan.rs:2779	lib.rs:311 (tableam call)	SEAMED	no	tableam.h; delegated to tableam::table_beginscan_tid.
+table_endscan	nodeTidscan.rs:2796	(tableam call)	SEAMED	no	tableam.h; delegated to tableam::table_endscan.
+table_rescan	nodeTidscan.rs:2800	(tableam call)	SEAMED	no	tableam.h; delegated to tableam::table_rescan.
+table_tuple_fetch_row_version	nodeTidscan.rs:2806	(tableam call)	SEAMED	no	tableam.h; delegated to tableam wrapper.
+table_tuple_tid_valid	nodeTidscan.rs:2850	(tableam call)	SEAMED	no	tableam.h; delegated to tableam wrapper.
+ExecEvalExprSwitchContext	nodeTidscan.rs:2859	(seam)	SEAMED	no	executor.h inline; delegated to execExpr eval seam.
+qunique	nodeTidscan.rs:2874	lib.rs:194	MATCH	yes	adjacent-dup removal on sorted slice; same j/i compaction. Per audit.
+is_opclause	nodeTidscan.rs:2916	lib.rs (TidExprListCreate:243)	MATCH	yes	nodeFuncs.h inline; Expr::OpExpr match.
+get_leftop	nodeTidscan.rs:2922	lib.rs:155	MATCH	yes	nodeFuncs.h inline; linitial over real Expr args.
+get_rightop	nodeTidscan.rs:2932	lib.rs:160	MATCH	yes	nodeFuncs.h inline; lsecond-or-None over real Expr args.
+TidExprListCreate	nodeTidscan.rs:2941	lib.rs:222	MATCH	yes	opclause/SAOP/CurrentOf branches + both elogs. Per audit.
+TidListEval	nodeTidscan.rs:3071	lib.rs:295	MATCH	yes	scalar/array/currentof; sort+qunique; deconstruct_tid_array (TIDOID=27). Per audit.
+itemptr_comparator	nodeTidscan.rs:3239	lib.rs:173	MATCH	yes	block-then-offset total order. Per audit.
+TidNext	nodeTidscan.rs:3263	lib.rs:438	MATCH	yes	direction init/advance, fetch, CFI, clear-on-end. Per audit.
+TidRecheck	nodeTidscan.rs:3318	lib.rs:512	MATCH	yes	currentOf short-circuit, lazy eval, bsearch (tid_list_contains). Per audit.
+ExecTidScan	nodeTidscan.rs:3344	lib.rs:681	MATCH	yes	ExecScan(&ss, TidNext, TidRecheck). Per audit.
+ExecReScanTidScan	nodeTidscan.rs:3371	lib.rs:686	MATCH	yes	reset tss_TidList + table_rescan + ExecScanReScan seam. Per audit.
+ExecEndTidScan	nodeTidscan.rs:3387	lib.rs:704	MATCH	yes	table_endscan seam. Per audit.
+ExecInitTidScan	nodeTidscan.rs:3393	lib.rs:714	MATCH	yes	makeNode + open + slot + qual + TidExprListCreate; scanrelid captured (prior FAIL fixed). Per audit.

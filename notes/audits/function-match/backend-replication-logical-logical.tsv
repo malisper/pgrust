@@ -1,0 +1,44 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+MemoryContextSwitchTo	logical.rs:2311	(inlined)	MATCH	yes	c2rust inlined header inline; folded into callers
+tas	logical.rs:2320	(inlined)	MATCH	yes	c2rust inlined spinlock inline; subsumed by lock primitives
+CheckLogicalDecodingRequirements	logical.rs:2325	lib.rs:266	MATCH	yes	wal_level/MyDatabaseId params; both ERRCODE errmsgs verbatim; standby branch; CheckSlotRequirements seamed
+StartupDecodingContext	logical.rs:2455	lib.rs:306	MATCH	yes	palloc0 field init; LoadOutputPlugin; XLogReaderAllocate OOM; streaming/twophase OR-chains; rb callback wiring seamed
+CreateInitDecodingContext	logical.rs:2738	lib.rs:447	MATCH	yes	5 sanity ereports+SQLSTATEs; namestrcpy; restart_lsn branch; lock order; xmin horizon; twophase &= two_phase
+CreateDecodingContext	logical.rs:3021	lib.rs:596	MATCH	yes	physical/db-mismatch/synced ereports; asserts; start_lsn forward+LOG; twophase &= ...; final LOG
+DecodingContextReady	logical.rs:3309	lib.rs:742	MATCH	yes	== SNAPBUILD_CONSISTENT (2)
+DecodingContextFindStartpoint	logical.rs:3316	lib.rs:747	MATCH	yes	XLogBeginRead; read loop err/!record elog(ERROR); ready-break; CFI; confirmed_flush under mutex
+FreeDecodingContext	logical.rs:3441	lib.rs:797	MATCH	yes	shutdown_cb guard; free reorder/snapbuild/reader; MemoryContextDelete
+OutputPluginPrepareWrite	logical.rs:3451	lib.rs:811	MATCH	yes	!accept_writes elog(ERROR); prepared_write=true
+OutputPluginWrite	logical.rs:3490	lib.rs:824	MATCH	yes	!prepared_write elog(ERROR); prepared_write=false
+OutputPluginUpdateProgress	logical.rs:3529	lib.rs:837	MATCH	yes	!update_progress early return
+LoadOutputPlugin	logical.rs:3540	lib.rs:853	MATCH	yes	_PG_output_plugin_init via dfmgr seam; required-callback elog messages verbatim
+output_plugin_error_callback	logical.rs:3675	lib.rs:877	MATCH	yes	both errcontext branches verbatim
+startup_cb_wrapper	logical.rs:3702	lib.rs:917	MATCH	yes	accept_writes=false,end_xact=false; assert !fast_forward
+shutdown_cb_wrapper	logical.rs:3735	lib.rs:937	MATCH	yes	same output-state setup
+begin_cb_wrapper	logical.rs:3764	lib.rs:956	MATCH	yes	accept_writes=true; write_xid=xid; write_location=first_lsn; end_xact=false
+commit_cb_wrapper	logical.rs:3800	lib.rs:982	MATCH	yes	report_location=final_lsn; write_location=end_lsn; end_xact=true
+begin_prepare_cb_wrapper	logical.rs:3837	lib.rs:1010	MATCH	yes	twophase assert; mandatory begin_prepare_cb guard
+prepare_cb_wrapper	logical.rs:3914	lib.rs:1041	MATCH	yes	mandatory prepare_cb guard
+commit_prepared_cb_wrapper	logical.rs:3992	lib.rs:1074	MATCH	yes	mandatory commit_prepared_cb guard
+rollback_prepared_cb_wrapper	logical.rs:4072	lib.rs:1107	MATCH	yes	prepare_end_lsn+prepare_time args; mandatory rollback_prepared_cb guard
+change_cb_wrapper	logical.rs:4153	lib.rs:1145	MATCH	yes	write_location=change_lsn; end_xact=false
+truncate_cb_wrapper	logical.rs:4191	lib.rs:1177	MATCH	yes	optional truncate_cb early return; nrelations/relations args
+filter_prepare_cb_wrapper	logical.rs:4234	lib.rs:1215	MATCH	yes	accept_writes=false; returns bool
+filter_by_origin_cb_wrapper	logical.rs:4270	lib.rs:1239	MATCH	yes	accept_writes=false; returns bool
+message_cb_wrapper	logical.rs:4305	lib.rs:1262	MATCH	yes	optional message_cb early return; write_xid = txn?xid:Invalid
+stream_start_cb_wrapper	logical.rs:4357	lib.rs:1305	MATCH	yes	streaming assert; mandatory stream_start_cb guard
+stream_stop_cb_wrapper	logical.rs:4435	lib.rs:1336	MATCH	yes	mandatory stream_stop_cb guard
+stream_abort_cb_wrapper	logical.rs:4513	lib.rs:1367	MATCH	yes	end_xact=true; mandatory stream_abort_cb guard
+stream_prepare_cb_wrapper	logical.rs:4591	lib.rs:1398	MATCH	yes	streaming+twophase asserts; distinct prepare-time guard message
+stream_commit_cb_wrapper	logical.rs:4669	lib.rs:1438	MATCH	yes	mandatory stream_commit_cb guard
+stream_change_cb_wrapper	logical.rs:4747	lib.rs:1471	MATCH	yes	mandatory stream_change_cb guard
+stream_message_cb_wrapper	logical.rs:4826	lib.rs:1508	MATCH	yes	optional stream_message_cb early return
+stream_truncate_cb_wrapper	logical.rs:4878	lib.rs:1553	MATCH	yes	optional stream_truncate_cb early return
+update_progress_txn_cb_wrapper	logical.rs:4921	lib.rs:1595	MATCH	yes	accept_writes=false; delegates to OutputPluginUpdateProgress(ctx,false)
+LogicalIncreaseXminForSlot	logical.rs:4957	lib.rs:1612	MATCH	yes	empty first if preserved; 3-way candidate; got_new_xmin DEBUG1; updated_xmin->LogicalConfirmReceivedLocation
+LogicalIncreaseRestartDecodingForSlot	logical.rs:5024	lib.rs:1664	MATCH	yes	asserts; 4-way branch incl failure-DEBUG1 with 5 LSN args; per-branch mutex release
+LogicalConfirmReceivedLocation	logical.rs:5136	lib.rs:1735	MATCH	yes	unlocked pre-check; no-backwards; xmin/restart apply; injection-point seam; effective_catalog_xmin
+ResetLogicalStreamingState	logical.rs:5257	lib.rs:1837	MATCH	yes	CheckXidAlive=Invalid; bsysscan=false (xact seam)
+UpdateDecodingStats	logical.rs:5262	lib.rs:1843	MATCH	yes	<=0 early return; DEBUG2 line; pgstat_report_replslot; reset 8 counters
+LogicalReplicationSlotHasPendingWal	logical.rs:5333	lib.rs:1876	MATCH	yes	PG_TRY/CATCH InvalidateSystemCaches; CreateDecodingContext fast_forward; loop bound; processing_required via seam
+LogicalSlotAdvanceAndCheckSnapState	logical.rs:5447	lib.rs:1951	MATCH	yes	found_consistent_snapshot=false preset; WaitForStandbyConfirmation; loop EndRecPtr<moveto; resowner restore; Confirm+MarkDirty

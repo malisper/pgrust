@@ -1,0 +1,27 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+CharGetDatum	heaptoast.rs:1827	-	MATCH	yes	postgres.h Datum-boxing inline; absorbed.
+Int16GetDatum	heaptoast.rs:1831	-	MATCH	yes	postgres.h inline; absorbed.
+DatumGetInt32	heaptoast.rs:1835	-	MATCH	yes	postgres.h inline; absorbed.
+Int32GetDatum	heaptoast.rs:1839	-	MATCH	yes	postgres.h inline; absorbed.
+ObjectIdGetDatum	heaptoast.rs:1843	-	MATCH	yes	postgres.h inline; absorbed.
+DatumGetPointer	heaptoast.rs:1847	-	MATCH	yes	postgres.h inline; absorbed.
+PointerGetDatum	heaptoast.rs:1851	-	MATCH	yes	postgres.h inline; absorbed.
+BlockIdSet	heaptoast.rs:1857	-	MATCH	yes	itemptr.h inline; absorbed into ItemPointer model (used by scankey init path).
+ItemPointerSetInvalid	heaptoast.rs:1866	-	MATCH	yes	itemptr.h inline; absorbed.
+TupleDescAttr	heaptoast.rs:1878	-	MATCH	yes	tupdesc.h accessor inline; absorbed.
+TupleDescCompactAttr	heaptoast.rs:1895	-	MATCH	yes	tupdesc.h accessor inline; absorbed.
+att_isnull	heaptoast.rs:1905	att_isnull (lib.rs)	MATCH	yes	tupmacs.h null-bit inline (bits[att>>3]>>(att&7))&1==0; ported for fastgetattr.
+fetch_att	heaptoast.rs:1913	-	MATCH	yes	tupmacs.h by-val fetch inline; absorbed into typed value model.
+HeapTupleHeaderSetDatumLength	heaptoast.rs:1967	-	MATCH	yes	htup_details.h setter inline; absorbed (heap_form_tuple sets the datum fields).
+HeapTupleHeaderSetTypeId	heaptoast.rs:1974	-	MATCH	yes	htup_details.h setter inline; absorbed.
+HeapTupleHeaderSetTypMod	heaptoast.rs:1981	-	MATCH	yes	htup_details.h setter inline; absorbed.
+BITMAPLEN	heaptoast.rs:1988	-	MATCH	yes	htup_details.h null-bitmap length inline; absorbed into hoff arithmetic.
+HeapTupleHasNulls	heaptoast.rs:1992	-	MATCH	yes	htup_details.h inline; absorbed.
+HeapTupleNoNulls	heaptoast.rs:1997	-	MATCH	yes	htup_details.h inline; absorbed.
+fastgetattr	heaptoast.rs:2001	fastgetattr (lib.rs)	MATCH	yes	htup_details.h inline: HEAP_HASNULL+att_isnull null check then nocachegetattr; attcacheoff fast path computes identical value.
+heap_toast_delete	heaptoast.rs:2076	heap_toast_delete (lib.rs)	MATCH	yes	heap_deform_tuple (direct dep) then toast_delete_external across toast-internals seam; relkind Assert is a NDEBUG no-op.
+heap_toast_insert_or_update	heaptoast.rs:2099	heap_toast_insert_or_update (lib.rs)	MATCH	yes	options&=~SPECULATIVE; hoff/maxDataLen; all four pass loops byte-for-byte; rebuild via heap_form_tuple + header field/infomask splice; toast_helper seams. Returns None for unchanged.
+toast_flatten_tuple	heaptoast.rs:2333	toast_flatten_tuple (lib.rs)	MATCH	yes	Per-attr external detoast via detoast_external_attr seam; heap_form_tuple + t_self/tableOid/choice/ctid copy + XACT-mask splice (0xFFF0/0xE000).
+toast_flatten_tuple_to_datum	heaptoast.rs:2404	toast_flatten_tuple_to_datum (lib.rs)	MATCH	yes	Per-attr external|compressed detoast via detoast_attr seam; heap_form_tuple sets composite-Datum fields; ctid/infomask/natts copied; returns formed tuple stand-in. Owned seam target.
+toast_build_flattened_tuple	heaptoast.rs:2524	toast_build_flattened_tuple (lib.rs)	MATCH	yes	values clone; per-attr external expansion via detoast_external_attr; heap_form_tuple with caller isnull.
+heap_fetch_toast_slice	heaptoast.rs:2574	heap_fetch_toast_slice (lib.rs)	MATCH	yes	totalchunks/startchunk/endchunk wrapping unsigned arithmetic; scan keys (F_OIDEQ 184, F_INT4EQ 65, F_INT4GE 150, F_INT4LE 149; strategies 3/4/2); genam ordered-scan seams; chunk classify + ERRCODE_DATA_CORRUPTED checks; copy window reproduced.

@@ -1,0 +1,3 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+SwitchToUntrustedUser	usercontext.rs:33	usercontext.rs:25	MATCH	yes	GetUserIdAndSecContext store; !member_can_set_role->ERROR 42501 with both role names; reciprocal->save_nestlevel=-1; else SECURITY_RESTRICTED_OPERATION|=0x2 + NewGUCNestLevel
+RestoreUserContext	usercontext.rs:94	usercontext.rs:91	MATCH	yes	save_nestlevel!=-1->AtEOXact_GUC(false,nestlevel); then SetUserIdAndSecContext(save_userid,save_sec_context)

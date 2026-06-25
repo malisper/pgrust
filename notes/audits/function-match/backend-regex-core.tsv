@@ -1,0 +1,229 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+isascii	regcomp.rs:590	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+__istype_l	regcomp.rs:595	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+__toupper_l	regcomp.rs:607	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+__tolower_l	regcomp.rs:618	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+isalnum_l	regcomp.rs:629	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+isalpha_l	regcomp.rs:640	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+isdigit_l	regcomp.rs:647	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+isgraph_l	regcomp.rs:654	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+islower_l	regcomp.rs:661	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+isprint_l	regcomp.rs:668	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+ispunct_l	regcomp.rs:675	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+isspace_l	regcomp.rs:682	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+isupper_l	regcomp.rs:689	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+tolower_l	regcomp.rs:696	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+toupper_l	regcomp.rs:703	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+iswalnum_l	regcomp.rs:715	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+iswalpha_l	regcomp.rs:726	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+iswdigit_l	regcomp.rs:733	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+iswgraph_l	regcomp.rs:740	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+iswlower_l	regcomp.rs:747	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+iswprint_l	regcomp.rs:754	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+iswpunct_l	regcomp.rs:761	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+iswspace_l	regcomp.rs:768	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+iswupper_l	regcomp.rs:775	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+towlower_l	regcomp.rs:782	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+towupper_l	regcomp.rs:786	-	SEAMED	no	libc ctype inline shim emitted by c2rust; real ctype/locale logic routed through pg-locale seam (regex_locale)
+pg_regcomp	regcomp.rs:882	regex_compile.rs:3222	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+moresubs	regcomp.rs:1080	regex_compile.rs:1495	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+freev	regcomp.rs:1119	-	MATCH	yes	pg_regcomp error/cleanup path subsumed by RegResult propagation + Drop (idiomatic Drop)
+makesearch	regcomp.rs:1151	regex_compile.rs:3024	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+parse	regcomp.rs:1218	regex_compile.rs:2103	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+parsebranch	regcomp.rs:1282	regex_compile.rs:2188	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+parseqatom	regcomp.rs:1323	regex_compile.rs:2259	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+nonword	regcomp.rs:2011	regex_compile.rs:1577	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+word	regcomp.rs:2026	regex_compile.rs:1595	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+charclass	regcomp.rs:2034	regex_compile.rs:1533	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+charclasscomplement	regcomp.rs:2048	regex_compile.rs:1544	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+scannum	regcomp.rs:2079	regex_compile.rs:1272	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+repeat	regcomp.rs:2093	regex_compile.rs:2027	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+bracket	regcomp.rs:2202	regex_compile.rs:1821	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+cbracket	regcomp.rs:2235	regex_compile.rs:1853	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+brackpart	regcomp.rs:2255	regex_compile.rs:1679	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+scanplain	regcomp.rs:2416	regex_compile.rs:1634	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+onechr	regcomp.rs:2427	regex_compile.rs:1511	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+optimizebracket	regcomp.rs:2440	regex_compile.rs:1883	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+wordchrs	regcomp.rs:2479	regex_compile.rs:1604	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+processlacon	regcomp.rs:2504	regex_compile.rs:1927	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+subre	regcomp.rs:2549	regex_compile.rs:1414	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+freesubre	regcomp.rs:2596	regex_compile.rs:1470	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+freesubreandsiblings	regcomp.rs:2605	regex_compile.rs:1485	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+freesrnode	regcomp.rs:2612	regex_compile.rs:1451	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+removecaptures	regcomp.rs:2631	regex_compile.rs:2955	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+numst	regcomp.rs:2654	regex_compile.rs:2987	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+markst	regcomp.rs:2671	regex_compile.rs:3001	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+cleanst	regcomp.rs:2680	regex_compile.rs:3014	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+nfatree	regcomp.rs:2694	regex_compile.rs:3158	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+nfanode	regcomp.rs:2707	regex_compile.rs:3120	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+newlacon	regcomp.rs:2736	regex_compile.rs:1978	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+freelacons	regcomp.rs:2774	-	MATCH	yes	lacons vector drops with Vars/Guts (idiomatic Drop)
+rfree	regcomp.rs:2788	-	MATCH	yes	regex_t freer; owned structs drop on scope (pg_regfree) (idiomatic Drop)
+rstacktoodeep	regcomp.rs:2812	regex_compile.rs:3185	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+lexstart	regcomp.rs:2824	regex_compile.rs:344	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+prefixes	regcomp.rs:2839	regex_compile.rs:367	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+next	regcomp.rs:2962	regex_compile.rs:467	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+lexescape	regcomp.rs:3503	regex_compile.rs:861	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+lexdigits	regcomp.rs:3798	regex_compile.rs:1037	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+brenext	regcomp.rs:3858	regex_compile.rs:1083	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+skip	regcomp.rs:4012	regex_compile.rs:1198	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+newline	regcomp.rs:4033	regex_compile.rs:1267	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+chrnamed	regcomp.rs:4036	regex_compile.rs:1230	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+initcm	regcomp.rs:4060	regex_foundation.rs:155	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+freecm	regcomp.rs:4124	regex_foundation.rs:199	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_reg_getcolor	regcomp.rs:4140	regex_foundation.rs:214	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+maxcolor	regcomp.rs:4169	regex_foundation.rs:249	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+newcolor	regcomp.rs:4175	regex_foundation.rs:261	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+freecolor	regcomp.rs:4245	regex_foundation.rs:312	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pseudocolor	regcomp.rs:4280	regex_foundation.rs:362	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+subcolor	regcomp.rs:4296	regex_foundation.rs:378	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+subcolorhi	regcomp.rs:4317	regex_foundation.rs:406	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+newsub	regcomp.rs:4335	regex_foundation.rs:427	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+newhicolorrow	regcomp.rs:4353	regex_foundation.rs:453	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+newhicolorcols	regcomp.rs:4409	regex_foundation.rs:483	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+subcolorcvec	regcomp.rs:4460	regex_foundation.rs:519	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+subcoloronechr	regcomp.rs:4560	regex_foundation.rs:598	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+subcoloronerange	regcomp.rs:4664	regex_foundation.rs:714	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+subcoloronerow	regcomp.rs:4780	regex_foundation.rs:840	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+okcolors	regcomp.rs:4808	regex_nfa/nfacolor.rs:108	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+colorchain	regcomp.rs:4855	regex_nfa/nfacolor.rs:51	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+uncolorchain	regcomp.rs:4864	regex_nfa/nfacolor.rs:69	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+rainbow	regcomp.rs:4878	regex_nfa/nfacolor.rs:172	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+colorcomplement	regcomp.rs:4909	regex_nfa/nfacolor.rs:205	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+newnfa	regcomp.rs:4948	regex_nfa.rs:144	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+freenfa	regcomp.rs:5002	regex_nfa.rs:192	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+newstate	regcomp.rs:5038	regex_nfa.rs:213	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+newfstate	regcomp.rs:5121	regex_nfa.rs:274	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+dropstate	regcomp.rs:5132	regex_nfa.rs:282	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+freestate	regcomp.rs:5150	regex_nfa.rs:301	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+newarc	regcomp.rs:5167	regex_nfa.rs:446	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+createarc	regcomp.rs:5204	regex_nfa.rs:373	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+allocarc	regcomp.rs:5241	regex_nfa.rs:338	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+freearc	regcomp.rs:5301	regex_nfa.rs:488	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+changearcsource	regcomp.rs:5341	regex_nfa.rs:555	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+changearctarget	regcomp.rs:5363	regex_nfa.rs:596	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+hasnonemptyout	regcomp.rs:5385	regex_nfa.rs:636	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+findarc	regcomp.rs:5396	regex_nfa.rs:649	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+cparc	regcomp.rs:5413	regex_nfa.rs:663	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+sortins	regcomp.rs:5421	regex_nfa.rs:750	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+sortins_cmp	regcomp.rs:5479	regex_nfa.rs:690	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+sortouts	regcomp.rs:5505	regex_nfa.rs:783	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+sortouts_cmp	regcomp.rs:5563	regex_nfa.rs:704	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+moveins	regcomp.rs:5589	regex_nfa.rs:829	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+copyins	regcomp.rs:5663	regex_nfa.rs:899	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+mergeins	regcomp.rs:5677	regex_nfa.rs:1009	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+moveouts	regcomp.rs:5755	regex_nfa.rs:921	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+copyouts	regcomp.rs:5829	regex_nfa.rs:985	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+cloneouts	regcomp.rs:5843	regex_nfa.rs:1088	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+delsub	regcomp.rs:5857	regex_nfa.rs:1119	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+deltraverse	regcomp.rs:5866	regex_nfa.rs:1141	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+dupnfa	regcomp.rs:5912	regex_nfa.rs:1183	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+duptraverse	regcomp.rs:5928	regex_nfa.rs:1216	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+removeconstraints	regcomp.rs:5966	regex_nfa.rs:1253	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+removetraverse	regcomp.rs:5979	regex_nfa.rs:1278	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+cleartraverse	regcomp.rs:6026	regex_nfa.rs:1317	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+single_color_transition	regcomp.rs:6053	regex_nfa.rs:1527	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+specialcolors	regcomp.rs:6079	regex_nfa.rs:1566	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+optimize	regcomp.rs:6096	regex_nfa.rs:3079	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pullback	regcomp.rs:6112	regex_nfa.rs:1717	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pull	regcomp.rs:6167	regex_nfa.rs:1783	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pushfwd	regcomp.rs:6237	regex_nfa.rs:1883	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+push	regcomp.rs:6292	regex_nfa.rs:1946	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+combine	regcomp.rs:6362	regex_nfa.rs:1617	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+fixempties	regcomp.rs:6414	regex_nfa.rs:2053	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+emptyreachable	regcomp.rs:6566	regex_nfa.rs:2210	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+isconstraintarc	regcomp.rs:6600	regex_nfa.rs:2591	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+hasconstraintout	regcomp.rs:6607	regex_nfa.rs:2597	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+fixconstraintloops	regcomp.rs:6618	regex_nfa.rs:2617	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+findconstraintloop	regcomp.rs:6678	regex_nfa.rs:2686	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+breakconstraintloop	regcomp.rs:6719	regex_nfa.rs:2730	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+clonesuccessorstates	regcomp.rs:6799	regex_nfa.rs:2842	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+removecantmatch	regcomp.rs:6962	regex_nfa.rs:1597	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+cleanup	regcomp.rs:6982	regex_nfa.rs:1487	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+markreachable	regcomp.rs:7010	regex_nfa.rs:1431	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+markcanreach	regcomp.rs:7042	regex_nfa.rs:1459	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+analyze	regcomp.rs:7074	regex_nfa.rs:3101	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+checkmatchall	regcomp.rs:7097	regex_nfa.rs:2246	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+checkmatchall_recurse	regcomp.rs:7221	regex_nfa.rs:2357	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+check_out_colors_match	regcomp.rs:7329	regex_nfa.rs:2483	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+check_in_colors_match	regcomp.rs:7366	regex_nfa.rs:2535	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+compact	regcomp.rs:7403	regex_nfa.rs:3148	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+carcsort	regcomp.rs:7514	regex_nfa.rs:3258	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+carc_cmp	regcomp.rs:7530	regex_nfa.rs:3266	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+freecnfa	regcomp.rs:7550	regex_nfa.rs:3287	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+dumpnfa	regcomp.rs:7556	-	MISSING	no	REG_DEBUG-only dump stub; excluded from build config (absent in real port logic)
+newcvec	regcomp.rs:7557	regex_foundation.rs:52	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+clearcvec	regcomp.rs:7576	regex_foundation.rs:72	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+addchr	regcomp.rs:7582	regex_foundation.rs:83	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+addrange	regcomp.rs:7587	regex_foundation.rs:93	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+getcvec	regcomp.rs:7596	regex_foundation.rs:109	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+freecvec	regcomp.rs:7616	regex_foundation.rs:133	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_set_regex_collation	regcomp.rs:7764	regex_locale.rs:220	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_wc_isdigit	regcomp.rs:7871	regex_locale.rs:307	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_wc_isalpha	regcomp.rs:7903	regex_locale.rs:312	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_wc_isalnum	regcomp.rs:7932	regex_locale.rs:317	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_wc_isword	regcomp.rs:7964	regex_locale.rs:322	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_wc_isupper	regcomp.rs:7970	regex_locale.rs:331	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_wc_islower	regcomp.rs:7999	regex_locale.rs:336	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_wc_isgraph	regcomp.rs:8028	regex_locale.rs:341	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_wc_isprint	regcomp.rs:8057	regex_locale.rs:346	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_wc_ispunct	regcomp.rs:8086	regex_locale.rs:351	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_wc_isspace	regcomp.rs:8118	regex_locale.rs:356	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_wc_toupper	regcomp.rs:8147	regex_locale.rs:361	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_wc_tolower	regcomp.rs:8190	regex_locale.rs:386	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+store_match	regcomp.rs:8236	regex_locale.rs:486	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_ctype_get_cache	regcomp.rs:8288	regex_locale.rs:425	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+element	regcomp.rs:8861	regex_locale.rs:652	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+range	regcomp.rs:8890	regex_locale.rs:690	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+before	regcomp.rs:8959	regex_locale.rs:641	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+eclass	regcomp.rs:8965	regex_locale.rs:755	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+lookupcclass	regcomp.rs:8988	regex_locale.rs:780	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+cclasscvec	regcomp.rs:9015	regex_locale.rs:797	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+cclass_column_index	regcomp.rs:9142	regex_locale.rs:886	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+allcases	regcomp.rs:9199	regex_locale.rs:937	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+cmp	regcomp.rs:9212	regex_locale.rs:952	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+casecmp	regcomp.rs:9223	regex_locale.rs:965	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_regerror	regerror.rs:192	regex_export_free_error.rs:266	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_regexec	regexec.rs:296	regex_exec.rs:1667	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+getsubdfa	regexec.rs:616	regex_exec.rs:615	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+getladfa	regexec.rs:633	regex_exec.rs:638	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+find	regexec.rs:641	regex_exec.rs:1414	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+cfind	regexec.rs:750	regex_exec.rs:1504	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+cfindloop	regexec.rs:787	regex_exec.rs:1533	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+zapallsubs	regexec.rs:895	regex_exec.rs:1899	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+zaptreesubs	regexec.rs:904	regex_exec.rs:1914	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+subset	regexec.rs:921	regex_exec.rs:1935	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+cdissect	regexec.rs:936	regex_exec.rs:1958	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+ccondissect	regexec.rs:993	regex_exec.rs:2056	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+crevcondissect	regexec.rs:1055	regex_exec.rs:2126	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+cbrdissect	regexec.rs:1127	regex_exec.rs:2194	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+caltdissect	regexec.rs:1186	regex_exec.rs:2269	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+citerdissect	regexec.rs:1213	regex_exec.rs:2318	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+creviterdissect	regexec.rs:1342	regex_exec.rs:2479	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+longest	regexec.rs:1471	regex_exec.rs:887	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+shortest	regexec.rs:1613	regex_exec.rs:1025	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+matchuntil	regexec.rs:1750	regex_exec.rs:1180	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+dfa_backref	regexec.rs:1853	regex_exec.rs:1292	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+lastcold	regexec.rs:1926	regex_exec.rs:1379	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+newdfa	regexec.rs:1945	regex_exec.rs:306	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+freedfa	regexec.rs:2040	-	MATCH	yes	explicit drop() at C freedfa sites + scope-drop (idiomatic Drop)
+hash	regexec.rs:2059	regex_exec.rs:375	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+initialize	regexec.rs:2073	regex_exec.rs:389	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+miss	regexec.rs:2115	regex_exec.rs:666	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+lacon	regexec.rs:2283	regex_exec.rs:805	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+getvacant	regexec.rs:2341	regex_exec.rs:430	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pickss	regexec.rs:2414	regex_exec.rs:527	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_reg_getnumstates	regexport.rs:160	regex_export_free_error.rs:318	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_reg_getinitialstate	regexport.rs:168	regex_export_free_error.rs:324	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_reg_getfinalstate	regexport.rs:176	regex_export_free_error.rs:330	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+traverse_lacons	regexport.rs:183	regex_export_free_error.rs:340	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_reg_getnumoutarcs	regexport.rs:209	regex_export_free_error.rs:379	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_reg_getoutarcs	regexport.rs:230	regex_export_free_error.rs:392	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_reg_getnumcolors	regexport.rs:248	regex_export_free_error.rs:403	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_reg_colorisbegin	regexport.rs:256	regex_export_free_error.rs:410	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_reg_colorisend	regexport.rs:271	regex_export_free_error.rs:416	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_reg_getnumcharacters	regexport.rs:286	regex_export_free_error.rs:422	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_reg_getcharacters	regexport.rs:304	regex_export_free_error.rs:445	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_regfree	regfree.rs:27	regex_export_free_error.rs:204	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+pg_regprefix	regprefix.rs:170	regex_exec.rs:2648	MATCH	yes	audit PASS: all-MATCH; same-named port fn
+findprefix	regprefix.rs:213	regex_exec.rs:2708	MATCH	yes	audit PASS: all-MATCH; same-named port fn

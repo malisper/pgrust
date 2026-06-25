@@ -1,0 +1,5 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+ProcessMainLoopInterrupts	interrupt.rs:36	lib.rs (ProcessMainLoopInterrupts)	MATCH	yes	audit row 1: four arms in C order; clear-before-reload; ?->skip-later
+SignalHandlerForConfigReload	interrupt.rs:55	lib.rs (SignalHandlerForConfigReload)	MATCH	yes	audit row 2: ConfigReloadPending=true; SetLatch(MyLatch)
+SignalHandlerForCrashExit	interrupt.rs:65	lib.rs (SignalHandlerForCrashExit)	MATCH	yes	audit row 3: _exit(2); no atexit callbacks
+SignalHandlerForShutdownRequest	interrupt.rs:71	lib.rs (SignalHandlerForShutdownRequest)	MATCH	yes	audit row 4: ShutdownRequestPending=true; SetLatch(MyLatch)

@@ -1,0 +1,33 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+MemoryContextSwitchTo	pgarch.rs:1153	mcxt-seam (native)	MATCH	yes	c2rust inline header macro; native equivalent
+DatumGetPointer	pgarch.rs:1159	native	MATCH	yes	c2rust inline Datum cast; native equivalent
+PointerGetDatum	pgarch.rs:1163	native	MATCH	yes	c2rust inline Datum cast; native equivalent
+DatumGetCString	pgarch.rs:1167	native	MATCH	yes	c2rust inline Datum cast; native equivalent
+CStringGetDatum	pgarch.rs:1171	native	MATCH	yes	c2rust inline Datum cast; native equivalent
+IsTLHistoryFileName	pgarch.rs:1176	lib.rs (in-crate helper)	MATCH	yes	audit: reproduced in-crate (8 upper-hex + .history); checks out
+StatusFilePath	pgarch.rs:1192	lib.rs (in-crate helper)	MATCH	yes	audit: reproduced in-crate (.ready/.done snprintf); checks out
+pgstat_report_wait_end	pgarch.rs:1214	waitevent-seam	MATCH	yes	c2rust inline; delegated to waitevent owner
+pg_atomic_exchange_u32_impl	pgarch.rs:1224	port-atomics (native)	MATCH	yes	c2rust inline atomic; native std atomic
+pg_atomic_init_u32_impl	pgarch.rs:1232	port-atomics (native)	MATCH	yes	c2rust inline atomic; native std atomic
+pg_atomic_write_membarrier_u32_impl	pgarch.rs:1239	port-atomics (native)	MATCH	yes	c2rust inline atomic; native std atomic (store SeqCst)
+pg_atomic_init_u32	pgarch.rs:1246	port-atomics (native)	MATCH	yes	c2rust inline atomic wrapper; native std atomic
+pg_atomic_write_membarrier_u32	pgarch.rs:1253	port-atomics (native)	MATCH	yes	c2rust inline atomic wrapper; native std atomic
+pg_atomic_exchange_u32	pgarch.rs:1260	port-atomics (native)	MATCH	yes	c2rust inline atomic wrapper; native std atomic
+set_ps_display	pgarch.rs:1267	ps-status-seam	MATCH	yes	c2rust inline wrapper over set_ps_display_with_len
+PgArchShmemSize	pgarch.rs:1297	lib.rs:358	MATCH	yes	audit row 1: size_of::<PgArchData>(); add_size from 0
+PgArchShmemInit	pgarch.rs:1303	lib.rs:366	MATCH	yes	audit row 2: OnceLock get_or_init; !found zeroes, pgprocno=INVALID
+PgArchCanRestart	pgarch.rs:1340	lib.rs:383	MATCH	yes	audit row 3: static last_pgarch_start_time; (unsigned)(cur-last)<10
+PgArchiverMain	pgarch.rs:1352	lib.rs:404	MATCH	yes	audit row 4: signal installs, AuxiliaryProcessMainCommon, MainLoop; F2 archive_context create restored
+PgArchWakeup	pgarch.rs:1439	lib.rs:493	MATCH	yes	audit row 5: SetLatch on allProcs[pgprocno].procLatch; INVALID guard
+pgarch_waken_stop	pgarch.rs:1447	lib.rs:505	MATCH	yes	audit row 6: ready_to_stop, SetLatch(MyLatch)
+pgarch_MainLoop	pgarch.rs:1454	lib.rs:522	MATCH	yes	audit row 7: do/while->loop; ResetLatch, interrupts, 60s grace, WaitLatch
+pgarch_ArchiverCopyLoop	pgarch.rs:1489	lib.rs:578	MATCH	yes	audit row 8: F1 fixed; check_configured_cb not-configured WARNING/return restored
+pgarch_archiveXlog	pgarch.rs:1699	lib.rs:685	MATCH	yes	audit row 9: F2 fixed; archive_context switch+success-path reset restored
+pgarch_readyXlog	pgarch.rs:1776	lib.rs:768	MATCH	yes	audit row 10: force_dir_scan, stat revisit, XFN bounds, max-heap
+ready_file_comparator	pgarch.rs:1948	lib.rs:905	MATCH	yes	audit row 11: IsTLHistoryFileName, history wins, else byte strcmp
+PgArchForceDirScan	pgarch.rs:1967	lib.rs:923	MATCH	yes	audit row 12: store(1, SeqCst) ~ pg_atomic_write_membarrier_u32
+pgarch_archiveDone	pgarch.rs:1973	lib.rs:932	MATCH	yes	audit row 13: StatusFilePath .ready/.done; rename; WARNING on fail
+pgarch_die	pgarch.rs:2023	lib.rs:951	MATCH	yes	audit row 14: pgprocno = INVALID_PROC_NUMBER
+ProcessPgArchInterrupts	pgarch.rs:2026	lib.rs:960	MATCH	yes	audit row 15: barrier/logmemctx/configreload; both-set ERROR; libChanged exit
+LoadArchiveLibrary	pgarch.rs:2126	lib.rs:1013	MATCH	yes	audit row 16: both-set ERROR; shell vs load_external_function; cb checks
+pgarch_call_module_shutdown_cb	pgarch.rs:2271	lib.rs:1072	MATCH	yes	audit row 17: calls shutdown_cb if defined

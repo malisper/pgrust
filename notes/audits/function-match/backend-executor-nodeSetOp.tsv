@@ -1,0 +1,21 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+newNode	nodeSetOp.rs:1733	lib.rs:728	MATCH	yes	makeNode realized via alloc_in in ExecInitSetOp
+slot_getsomeattrs	nodeSetOp.rs:1742	lib.rs:495 (execTuples seam)	SEAMED	no	deform delegated; setop_compare_slots uses slot_getallattrs seam
+slot_getallattrs	nodeSetOp.rs:1751	lib.rs:495 (execTuples seam)	SEAMED	no	full deform delegated via execTuples seam in setop_compare_slots
+ExecClearTuple	nodeSetOp.rs:1755	lib.rs:1013 (execTuples seam)	SEAMED	no	delegated to execTuples seam (clear_result_tuple)
+ExecCopySlotMinimalTuple	nodeSetOp.rs:1762	lib.rs:1152 (execTuples seam)	SEAMED	no	copy_minimal_tuple delegates to execTuples seam
+ApplySortComparator	nodeSetOp.rs:1770	lib.rs:1094	MATCH	yes	apply_sort_comparator: null-first/datum1 fast path + comparator call, reproduced inline
+TupleHashEntryGetTuple	nodeSetOp.rs:1808	lib.rs (execGrouping seam)	SEAMED	no	accessor delegated via execGrouping/nodeagg seam
+TupleHashEntryGetAdditional	nodeSetOp.rs:1812	lib.rs:1133 (read/write_pergroup)	SEAMED	no	additional-bytes accessor; pergroup read/write over seam-provided slice
+ExecProcNode	nodeSetOp.rs:1824	lib.rs:999 (execProcnode seam)	SEAMED	no	child dispatch delegated via execProcnode seam (exec_proc_child)
+build_hash_table	nodeSetOp.rs:1832	lib.rs:108	MATCH	yes	asserts; ExecGetResultType/CommonChildSlotOps; BuildTupleHashTable seamed to execGrouping (audit verified)
+set_output_count	nodeSetOp.rs:1855	lib.rs:179	MATCH	yes	all four SETOPCMD arms + default elog(ERROR) preserved (audit verified)
+ExecSetOp	nodeSetOp.rs:1921	lib.rs:236	MATCH	yes	CHECK_FOR_INTERRUPTS; numOutput dec/return; setop_done; HASHED fill+retrieve else sorted (audit verified)
+setop_retrieve_sorted	nodeSetOp.rs:1948	lib.rs:289	MATCH	yes	need_init/merge-loop/cmpresult branches/set_output_count/emit exact (audit verified)
+setop_load_group	nodeSetOp.rs:2025	lib.rs:410	MATCH	yes	needGroup=false; null->clear+0; else store+loop compare+assert<=0 (audit verified)
+setop_compare_slots	nodeSetOp.rs:2065	lib.rs:495	MATCH	yes	getallattrs both; per-key ApplySortComparator; return on !=0 (audit verified)
+setop_fill_hash_table	nodeSetOp.rs:2097	lib.rs:527	MATCH	yes	outer/inner lookup loops; numLeft/numRight; isnew-zero in callback; ResetTupleHashIterator (audit verified)
+setop_retrieve_hash_table	nodeSetOp.rs:2177	lib.rs:645	MATCH	yes	loop CHECK_FOR_INTERRUPTS; ScanTupleHashTable; set_output_count; emit (audit verified)
+ExecInitSetOp	nodeSetOp.rs:2216	lib.rs:728	MATCH	yes	full init spine incl HASHED tableContext, sortKeys, build_hash_table (audit verified)
+ExecEndSetOp	nodeSetOp.rs:2309	lib.rs:879	MATCH	yes	tableContext delete via drop; ExecEndNode outer+inner (audit verified)
+ExecReScanSetOp	nodeSetOp.rs:2317	lib.rs:907	MATCH	yes	clear result; reset counts; HASHED reset-table path; sorted need_init; chgParam-guarded ExecReScan (audit verified)

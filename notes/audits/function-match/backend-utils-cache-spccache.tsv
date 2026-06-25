@@ -1,0 +1,8 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+ObjectIdGetDatum	spccache.rs:346	lib.rs:119	MATCH	yes	c2rust-inlined header macro (postgres.h); reproduced idiomatically via Datum::from_oid for the SearchSysCache1 key.
+InvalidateTableSpaceCacheCallback	spccache.rs:353	lib.rs:55	MATCH	yes	C hash_seq + pfree(opts) + HASH_REMOVE for every entry == flush-all; payload is by-value here so hash.clear() is the whole job. No-op when uninitialized (C guards on TableSpaceCacheHash!=NULL).
+InitializeTableSpaceCache	spccache.rs:415	lib.rs:69	MATCH	yes	hash created in its own cache context; CacheRegisterSyscacheCallback(TABLESPACEOID) via inval seam.
+get_tablespace	spccache.rs:450	lib.rs:91	MATCH	yes	spcid==Invalid->MyDatabaseTableSpace; lazy-init; cache probe; miss->SearchSysCache1(TABLESPACEOID), null tuple treated as no-opts, else tablespace_reloptions(spcoptions,false) via reloptions seam; entry inserted only after the catalog read. MyDatabaseTableSpace passed explicitly. Returns opts by-value (C returns the cache pointer; only opts is read).
+get_tablespace_page_costs	spccache.rs:511	lib.rs:185	MATCH	yes	nullable out-pointers -> Option<&mut f64>; C predicate "!opts || cost<0" reproduced as its exact NaN-safe complement !(cost<0.0); GUC fallbacks random/seq_page_cost passed via PageCostDefaults.
+get_tablespace_io_concurrency	spccache.rs:538	lib.rs:221	MATCH	yes	"!opts || eic<0 -> effective_io_concurrency GUC, else opts.eic"; GUC passed explicitly.
+get_tablespace_maintenance_io_concurrency	spccache.rs:551	lib.rs:236	MATCH	yes	same shape against maintenance_io_concurrency GUC, passed explicitly.

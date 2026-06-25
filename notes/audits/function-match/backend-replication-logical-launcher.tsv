@@ -1,0 +1,44 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+MemoryContextSwitchTo	launcher.rs:3472	(inlined)	MATCH	yes	c2rust inlined header inline; folded into callers
+Int32GetDatum	launcher.rs:3478	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers
+DatumGetObjectId	launcher.rs:3482	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers
+ObjectIdGetDatum	launcher.rs:3486	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers
+PointerGetDatum	launcher.rs:3490	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers
+Int64GetDatum	launcher.rs:3494	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers
+GETSTRUCT	launcher.rs:3501	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers
+tas	launcher.rs:3517	(inlined)	MATCH	yes	c2rust inlined spinlock inline; subsumed by lock primitives
+table_endscan	launcher.rs:3524	(inlined)	MATCH	yes	c2rust inlined header inline; folded into get_subscription_list scan
+TimestampTzGetDatum	launcher.rs:3531	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers
+am_leader_apply_worker	launcher.rs:3547	(inlined)	MATCH	yes	c2rust inlined header inline; folded into callers
+LSNGetDatum	launcher.rs:3552	(inlined)	MATCH	yes	c2rust inlined header macro; folded into callers
+get_subscription_list	launcher.rs:3610	lib.rs:269	SEAMED	no	catalog scan via subscription::* seam; assembles Subscription rows, same fields
+WaitForReplicationWorkerAttach	launcher.rs:3651	lib.rs (WaitForReplicationWorkerAttach)	MATCH	yes	wait loop; get_background_worker_pid; wait_latch_my_latch; generation recheck
+logicalrep_worker_find	launcher.rs:3727	lib.rs (logicalrep_worker_find)	MATCH	yes	slot scan under LogicalRepWorkerLock; returns slot index
+logicalrep_workers_find	launcher.rs:3756	lib.rs (logicalrep_workers_find)	MATCH	yes	collects matching slot indices
+logicalrep_worker_launch	launcher.rs:3789	lib.rs (logicalrep_worker_launch)	MATCH	yes	bgworker register via register_dynamic_background_worker; bgw fields per C
+logicalrep_worker_stop_internal	launcher.rs:4228	lib.rs (logicalrep_worker_stop_internal)	MATCH	yes	SIGTERM + wait loop
+logicalrep_worker_stop	launcher.rs:4300	lib.rs (logicalrep_worker_stop)	MATCH	yes	matches C
+logicalrep_pa_worker_stop	launcher.rs:4315	lib.rs:761	SEAMED	no	parallel-apply via pa::* seam
+logicalrep_worker_wakeup	launcher.rs:4353	lib.rs (logicalrep_worker_wakeup)	MATCH	yes	matches C
+logicalrep_worker_wakeup_ptr	launcher.rs:4368	lib.rs (logicalrep_worker_wakeup_ptr)	MATCH	yes	set_latch_for_proc_pid
+logicalrep_worker_attach	launcher.rs:4374	lib.rs (logicalrep_worker_attach)	MATCH	yes	sets MyLogicalRepWorker slot (thread_local)
+logicalrep_worker_detach	launcher.rs:4481	lib.rs (logicalrep_worker_detach)	MATCH	yes	walrcv/fileset/pa error-mq seams; lock_release_all gated by initializing_apply_worker
+logicalrep_worker_cleanup	launcher.rs:4530	lib.rs (logicalrep_worker_cleanup)	MATCH	yes	zeroes slot
+logicalrep_launcher_onexit	launcher.rs:4541	lib.rs (logicalrep_launcher_onexit)	MATCH	yes	matches C
+logicalrep_worker_onexit	launcher.rs:4547	lib.rs (logicalrep_worker_onexit)	MATCH	yes	matches C
+logicalrep_sync_worker_count	launcher.rs:4566	lib.rs (logicalrep_sync_worker_count)	MATCH	yes	matches C
+logicalrep_pa_worker_count	launcher.rs:4587	lib.rs (logicalrep_pa_worker_count)	MATCH	yes	matches C
+ApplyLauncherShmemSize	launcher.rs:4607	lib.rs (ApplyLauncherShmemSize)	MATCH	yes	16 + n*128 MAXALIGN
+ApplyLauncherRegister	launcher.rs:4623	lib.rs (ApplyLauncherRegister)	MATCH	yes	guarded by max_logical_replication_workers==0 || is_binary_upgrade
+ApplyLauncherShmemInit	launcher.rs:4674	lib.rs (ApplyLauncherShmemInit)	MATCH	yes	inits slot array; last_start_dsa/dsh INVALID
+logicalrep_launcher_attach_dshmem	launcher.rs:4706	lib.rs (logicalrep_launcher_attach_dshmem)	MATCH	yes	reconciled to real DsaArea/DshashTable; dsa_create/pin; dshash_create; publishes handles
+ApplyLauncherSetWorkerStartTime	launcher.rs:4748	lib.rs (ApplyLauncherSetWorkerStartTime)	MATCH	yes	dshash_find_or_insert -> guard; write last_start_time; guard.release()
+ApplyLauncherGetWorkerStartTime	launcher.rs:4765	lib.rs (ApplyLauncherGetWorkerStartTime)	MATCH	yes	dshash_find; None->0; else read+release
+ApplyLauncherForgetWorkerStartTime	launcher.rs:4784	lib.rs (ApplyLauncherForgetWorkerStartTime)	MATCH	yes	dshash_delete_key; result discarded
+AtEOXact_ApplyLauncher	launcher.rs:4789	lib.rs (AtEOXact_ApplyLauncher)	MATCH	yes	installed into inward seam at_eoxact_apply_launcher (void)
+ApplyLauncherWakeupAtCommit	launcher.rs:4798	lib.rs (ApplyLauncherWakeupAtCommit)	MATCH	yes	matches C
+ApplyLauncherWakeup	launcher.rs:4803	lib.rs (ApplyLauncherWakeup)	MATCH	yes	pg_kill(launcher_pid, SIGUSR1)
+ApplyLauncherMain	launcher.rs:4809	lib.rs (ApplyLauncherMain)	MATCH	yes	supervisor loop; signal handlers; bgworker connection; naptime
+IsLogicalLauncher	launcher.rs:4978	lib.rs (IsLogicalLauncher)	MATCH	yes	matches C
+GetLeaderApplyWorkerPid	launcher.rs:4982	lib.rs (GetLeaderApplyWorkerPid)	MATCH	yes	matches C
+pg_stat_get_subscription	launcher.rs:5011	lib.rs:1359	SEAMED	no	SRF; funcapi srf_arg0_oid/cstring_get_text_datum trimmed fmgr plumbing

@@ -1,0 +1,21 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+find_active_timeout	timeout.rs:146	crates/backend-utils-misc-timeout/src/lib.rs:128	MATCH	yes	Linear scan over active_timeouts[0..num], .index==id, returns position or None (C -1); stores slot indices vs pointers (equivalent for fixed array).
+insert_timeout	timeout.rs:159	crates/backend-utils-misc-timeout/src/lib.rs:138	MATCH	yes	Range check index>num -> FATAL; set active, shift [index..num] up, write slot, num++.
+remove_timeout_index	timeout.rs:217	crates/backend-utils-misc-timeout/src/lib.rs:161	MATCH	yes	Range check index>=num -> FATAL (msg 0..num-1); clear active, shift [index+1..num] down, num--.
+enable_timeout	timeout.rs:270	crates/backend-utils-misc-timeout/src/lib.rs:181	MATCH	yes	Asserts; if active remove; insertion sort by fin_time then id tie; reset indicator, set start/fin/interval, insert_timeout.
+schedule_alarm	timeout.rs:302	crates/backend-utils-misc-timeout/src/lib.rs:223	MATCH	yes	num>0 guard; lost-signal recovery; nearest=active[0].fin_time; TimestampDifference seam; enable_alarm before early-return; setitimer(ITIMER_REAL); FATAL on failure with %m. All > vs >= boundaries preserved.
+handle_sig_alarm	timeout.rs:412	crates/backend-utils-misc-timeout/src/lib.rs:303	MATCH	yes	HOLD_INTERRUPTS/SetLatch seams; signal_pending=false; fire-loop with indicator+handler+interval recompute+enable_timeout; schedule_alarm; RESUME_INTERRUPTS; borrow dropped before each handler call (re-entrant).
+InitializeTimeouts	timeout.rs:470	crates/backend-utils-misc-timeout/src/lib.rs:397	MATCH	yes	disable_alarm, num=0, init all MAX_TIMEOUTS slots, flag=true, pqsignal(SIGALRM,handle_sig_alarm) seam.
+RegisterTimeout	timeout.rs:504	crates/backend-utils-misc-timeout/src/lib.rs:425	MATCH	yes	id>=USER_TIMEOUT scan for free slot; none -> FATAL ERRCODE_CONFIGURATION_LIMIT_EXCEEDED (panic carrying PgError); store handler, return id.
+reschedule_timeouts	timeout.rs:567	crates/backend-utils-misc-timeout/src/lib.rs:468	MATCH	yes	Early return if uninit; disable_alarm; if num>0 schedule_alarm(GetCurrentTimestamp()).
+enable_timeout_after	timeout.rs:580	crates/backend-utils-misc-timeout/src/lib.rs:488	MATCH	yes	disable_alarm, now, fin=now+delay, enable_timeout(..,0), schedule_alarm(now).
+enable_timeout_every	timeout.rs:596	crates/backend-utils-misc-timeout/src/lib.rs:503	MATCH	yes	disable_alarm, now, enable_timeout(id,now,fin,delay), schedule_alarm.
+enable_timeout_at	timeout.rs:611	crates/backend-utils-misc-timeout/src/lib.rs:520	MATCH	yes	disable_alarm, now, enable_timeout(..,0), schedule_alarm.
+enable_timeouts	timeout.rs:625	crates/backend-utils-misc-timeout/src/lib.rs:532	MATCH	yes	disable_alarm, single now; per entry AFTER/EVERY fin=now+delay, AT uses fin_time; default elog arm unreachable (closed enum, behavior-equivalent); schedule_alarm.
+disable_timeout	timeout.rs:702	crates/backend-utils-misc-timeout/src/lib.rs:567	MATCH	yes	Asserts; disable_alarm; if active remove; clear indicator unless keep_indicator; if num>0 schedule_alarm(GetCurrentTimestamp()).
+disable_timeouts	timeout.rs:721	crates/backend-utils-misc-timeout/src/lib.rs:610	MATCH	yes	Asserts; disable_alarm; per entry remove+clear-indicator-unless-keep; then if num>0 one schedule_alarm.
+disable_all_timeouts	timeout.rs:749	crates/backend-utils-misc-timeout/src/lib.rs:644	MATCH	yes	disable_alarm; num=0; clear every slot active and (unless keep_indicators) indicator; kernel timer untouched.
+get_timeout_active	timeout.rs:775	crates/backend-utils-misc-timeout/src/lib.rs:665	MATCH	yes	Returns all_timeouts[id].active.
+get_timeout_indicator	timeout.rs:779	crates/backend-utils-misc-timeout/src/lib.rs:672	MATCH	yes	If set: reset when reset_indicator, return true; else false (never resets on false).
+get_timeout_start_time	timeout.rs:795	crates/backend-utils-misc-timeout/src/lib.rs:688	MATCH	yes	Returns start_time.
+get_timeout_finish_time	timeout.rs:799	crates/backend-utils-misc-timeout/src/lib.rs:694	MATCH	yes	Returns fin_time.

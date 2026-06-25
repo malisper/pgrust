@@ -1,0 +1,39 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+CharGetDatum	foreigncmds.rs:4159	(inlined)	MATCH	yes	c2rust header-macro shim; trivial cast inlined
+Int16GetDatum	foreigncmds.rs:4163	(inlined)	MATCH	yes	c2rust header-macro shim; trivial cast inlined
+Int32GetDatum	foreigncmds.rs:4167	(inlined)	MATCH	yes	c2rust header-macro shim; trivial cast inlined
+ObjectIdGetDatum	foreigncmds.rs:4171	(inlined)	MATCH	yes	c2rust header-macro shim; trivial cast inlined
+DatumGetPointer	foreigncmds.rs:4175	(inlined)	MATCH	yes	c2rust header-macro shim; trivial cast inlined
+PointerGetDatum	foreigncmds.rs:4179	(inlined)	MATCH	yes	c2rust header-macro shim; trivial cast inlined
+CStringGetDatum	foreigncmds.rs:4183	(inlined)	MATCH	yes	c2rust header-macro shim; trivial cast inlined
+newNode	foreigncmds.rs:4187	(inlined)	MATCH	yes	c2rust makeNode shim; node construction inlined via real owned structs
+TupleDescCompactAttr	foreigncmds.rs:4195	(inlined)	MATCH	yes	c2rust tupdesc shim; attr accessor inlined
+att_isnull	foreigncmds.rs:4205	(inlined)	MATCH	yes	c2rust heaptuple shim; null-bitmap test inlined
+fetch_att	foreigncmds.rs:4213	(inlined)	MATCH	yes	c2rust heaptuple shim; subsumed by seamed syscache projections
+GETSTRUCT	foreigncmds.rs:4263	(inlined)	MATCH	yes	c2rust heaptuple shim; struct projection via seamed row carriers
+HeapTupleHasNulls	foreigncmds.rs:4271	(inlined)	MATCH	yes	c2rust heaptuple shim; inlined
+HeapTupleNoNulls	foreigncmds.rs:4276	(inlined)	MATCH	yes	c2rust heaptuple shim; inlined
+fastgetattr	foreigncmds.rs:4280	(inlined)	MATCH	yes	c2rust heaptuple shim; subsumed by seamed row projections
+heap_getattr	foreigncmds.rs:4312	(inlined)	MATCH	yes	c2rust heaptuple shim; subsumed by seamed row projections
+optionListToArray	foreigncmds.rs:4372	lib.rs:156 (folded into transformGenericOptions)	MATCH	yes	"="-in-name rejection kept; text[] encode is genuine catalog encoding via store seam (acceptable fold)
+transformGenericOptions	foreigncmds.rs:4468	lib.rs:92	MATCH	yes	SET/ADD/DROP/UNSPEC merge; not-found/dup errors; validator via seam
+AlterForeignDataWrapperOwner_internal	foreigncmds.rs:4700	lib.rs:201	SEAMED	no	superuser guards + owner-change ported; tuple update via fdw_set_owner seam; thin
+AlterForeignDataWrapperOwner	foreigncmds.rs:4864	lib.rs:255	SEAMED	no	name lookup seam; not-found error + ObjectAddressSet ported
+AlterForeignDataWrapperOwner_oid	foreigncmds.rs:4940	lib.rs:276	SEAMED	no	oid lookup seam; not-found ported; inward REASSIGN-OWNED entry
+AlterForeignServerOwner_internal	foreigncmds.rs:5000	lib.rs:299	SEAMED	no	full permission ladder ported; tuple/ACL update via server_set_owner; thin
+AlterForeignServerOwner	foreigncmds.rs:5096	lib.rs:366	SEAMED	no	name lookup seam; not-found ported
+AlterForeignServerOwner_oid	foreigncmds.rs:5171	lib.rs:387	SEAMED	no	oid lookup seam; not-found ported; inward REASSIGN-OWNED entry
+lookup_fdw_handler_func	foreigncmds.rs:5231	lib.rs:426	MATCH	yes	arg NULL->InvalidOid; LookupFuncName seam; rettype!=FDW_HANDLEROID error
+lookup_fdw_validator_func	foreigncmds.rs:5286	lib.rs:452	MATCH	yes	(text[],oid) arity 2, return ignored
+parse_func_options	foreigncmds.rs:5300	lib.rs:466	MATCH	yes	handler/validator dup -> errorConflictingDefElem; unknown internal elog
+CreateForeignDataWrapper	foreigncmds.rs:5380	lib.rs:508	SEAMED	no	superuser/dup/parse/transform/deps/hook ported; insert_fdw catalog DML seam
+AlterForeignDataWrapper	foreigncmds.rs:5582	lib.rs:597	SEAMED	no	repl bookkeeping, WARNINGs, dep flush+rebuild, hook ported; update_fdw seams
+CreateForeignServer	foreigncmds.rs:5874	lib.rs:731	SEAMED	no	IF NOT EXISTS, aclcheck, transform, deps+ext+hook ported; insert_server seam DML
+AlterForeignServer	foreigncmds.rs:6087	lib.rs:843	SEAMED	no	ownercheck-or-superuser, version/options branches, hook ported; update_server seams
+user_mapping_ddl_aclcheck	foreigncmds.rs:6239	lib.rs:919	MATCH	yes	ownercheck -> self USAGE / other NOT_OWNER ladder
+CreateUserMapping	foreigncmds.rs:6265	lib.rs:954	SEAMED	no	rolespec/PUBLIC split, aclcheck, uniqueness, IF NOT EXISTS, deps+hook ported; insert_usermapping DML
+AlterUserMapping	foreigncmds.rs:6469	lib.rs:1055	SEAMED	no	rolespec split, server lookup, aclcheck, options branch, hook ported; update_usermapping DML
+RemoveUserMapping	foreigncmds.rs:6660	lib.rs:1126	MATCH	yes	PUBLIC/role split, IF EXISTS NOTICE, missing branches, aclcheck, performDeletion seam
+CreateForeignTable	foreigncmds.rs:6881	lib.rs:1214	SEAMED	no	CCI, USAGE aclcheck, transform ported; insert_foreign_table seam (insert + dep edge)
+ImportForeignSchema	foreigncmds.rs:6965	lib.rs:1294 (+import_one_command)	MATCH	yes	perm checks + loop body in-crate; GetFdwRoutine/parse/ProcessUtility via thin seams
+import_error_callback	foreigncmds.rs:7188	lib.rs:import_error_callback	MATCH	yes	static; attach-on-propagation map_err; errposition/internal/context line

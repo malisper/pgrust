@@ -1,0 +1,13 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+RunObjectPostCreateHook	backend-catalog-probe-objectaccess/src/objectaccess.rs:71	backend-catalog-objectaccess/src/lib.rs:124	MATCH	yes	OAT_POST_CREATE, classId/objectId/subId, &pc_arg{is_internal}; memset(0)+set == struct literal
+RunObjectDropHook	backend-catalog-probe-objectaccess/src/objectaccess.rs:96	backend-catalog-objectaccess/src/lib.rs:141	MATCH	yes	OAT_DROP, &drop_arg{dropflags}
+RunObjectTruncateHook	backend-catalog-probe-objectaccess/src/objectaccess.rs:119	backend-catalog-objectaccess/src/lib.rs:158	MATCH	yes	OAT_TRUNCATE, RelationRelationId(1259), subId 0, arg NULL->None
+RunObjectPostAlterHook	backend-catalog-probe-objectaccess/src/objectaccess.rs:130	backend-catalog-objectaccess/src/lib.rs:169	MATCH	yes	OAT_POST_ALTER, &pa_arg{auxiliary_id,is_internal}
+RunNamespaceSearchHook	backend-catalog-probe-objectaccess/src/objectaccess.rs:158	backend-catalog-objectaccess/src/lib.rs:191	MATCH	yes	OAT_NAMESPACE_SEARCH, NamespaceRelationId(2615), ns_arg{ereport_on_violation,result=true}; returns ns_arg.result via &mut out-param
+RunFunctionExecuteHook	backend-catalog-probe-objectaccess/src/objectaccess.rs:184	backend-catalog-objectaccess/src/lib.rs:207	MATCH	yes	OAT_FUNCTION_EXECUTE, ProcedureRelationId(1255), arg NULL->None
+RunObjectPostCreateHookStr	backend-catalog-probe-objectaccess/src/objectaccess.rs:195	backend-catalog-objectaccess/src/lib.rs:223	MATCH	yes	str variant, uses object_access_hook_str
+RunObjectDropHookStr	backend-catalog-probe-objectaccess/src/objectaccess.rs:220	backend-catalog-objectaccess/src/lib.rs:240	MATCH	yes	str variant
+RunObjectTruncateHookStr	backend-catalog-probe-objectaccess/src/objectaccess.rs:243	backend-catalog-objectaccess/src/lib.rs:257	MATCH	yes	RelationRelationId, None arg
+RunObjectPostAlterHookStr	backend-catalog-probe-objectaccess/src/objectaccess.rs:256	backend-catalog-objectaccess/src/lib.rs:268	MATCH	yes	str variant
+RunNamespaceSearchHookStr	backend-catalog-probe-objectaccess/src/objectaccess.rs:284	backend-catalog-objectaccess/src/lib.rs:289	MATCH	yes	NamespaceRelationId, returns ns_arg.result
+RunFunctionExecuteHookStr	backend-catalog-probe-objectaccess/src/objectaccess.rs:310	backend-catalog-objectaccess/src/lib.rs:308	MATCH	yes	ProcedureRelationId, None arg

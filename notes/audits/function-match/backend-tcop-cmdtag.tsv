@@ -1,0 +1,22 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+InitializeQueryCompletion	cmdtag.rs:242	lib.rs:279 (initialize_query_completion)	MATCH	yes	sets commandTag=CMDTAG_UNKNOWN(0), nprocessed=0; &mut out param
+GetCommandTagName	cmdtag.rs:247	lib.rs:285 (get_command_tag_name)	MATCH	yes	tag_behavior[tag].name
+GetCommandTagNameAndLen	cmdtag.rs:253	lib.rs:292 (get_command_tag_name_and_len)	MATCH	yes	returns (name, name.len()); name.len()==C namelen (ASCII)
+command_tag_display_rowcount	cmdtag.rs:261	lib.rs:298 (command_tag_display_rowcount)	MATCH	yes	table lookup
+command_tag_event_trigger_ok	cmdtag.rs:267	lib.rs:303 (command_tag_event_trigger_ok)	MATCH	yes	table lookup
+command_tag_table_rewrite_ok	cmdtag.rs:273	lib.rs:308 (command_tag_table_rewrite_ok)	MATCH	yes	table lookup
+GetCommandTagEnum	cmdtag.rs:279	lib.rs:320 (get_command_tag_enum)	MATCH	yes	bsearch transcribed (base/last as isize indices); NUL/empty guard; pg_strcasecmp byte-identical
+BuildQueryCompletionString	cmdtag.rs:319	lib.rs:360 (build_query_completion_string)	MATCH	yes	memcpy tagname, INSERT special-case " 0", pg_ulltoa_n decimal; idiomatic Mcx+PgResult<PgString> (strlen recoverable as .len())
+run_static_initializers	cmdtag.rs:358	lib.rs:66 (TAG_BEHAVIOR const)	MATCH	yes	c2rust lowering of the static const TAG_BEHAVIOR table initializer (data, not a C function); 193 rows diffed byte-for-byte vs cmdtaglist.h
+pq_writeint8	dest.rs:1155	(none)	MISSING	no	dest.c unported in this crate; c2rust-lowered pqformat.h inline. dest.c's only repo presence is backend-tcop-dest-seams (DestReceiver method seams), no implementation crate
+pq_sendint8	dest.rs:1167	(none)	MISSING	no	dest.c unported in this crate (see pq_writeint8); c2rust-lowered pqformat.h inline
+pq_sendbyte	dest.rs:1172	(none)	MISSING	no	dest.c unported in this crate; c2rust-lowered pqformat.h inline
+donothingReceive	dest.rs:1175	(none)	MISSING	no	dest.c unported in this crate
+donothingStartup	dest.rs:1181	(none)	MISSING	no	dest.c unported in this crate
+donothingCleanup	dest.rs:1186	(none)	MISSING	no	dest.c unported in this crate
+BeginCommand	dest.rs:1284	(none)	MISSING	no	dest.c unported in this crate
+CreateDestReceiver	dest.rs:1289	(none)	MISSING	no	dest.c unported in this crate
+EndCommand	dest.rs:1314	(none)	MISSING	no	dest.c unported in this crate
+EndReplicationCommand	dest.rs:1340	(none)	MISSING	no	dest.c unported in this crate
+NullCommand	dest.rs:1352	(none)	MISSING	no	dest.c unported in this crate
+ReadyForQuery	dest.rs:1361	(none)	MISSING	no	dest.c unported in this crate

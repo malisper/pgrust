@@ -1,0 +1,44 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+MemoryContextSwitchTo	nodeSubplan.rs:1886	(inline)	MATCH	yes	context swap realized idiomatically inline at ecxt switch sites
+DatumGetBool	nodeSubplan.rs:1892	lib.rs:76	MATCH	yes	X&1!=0 cast macro reproduced inline
+BoolGetDatum	nodeSubplan.rs:1896	lib.rs:70	MATCH	yes	bool->Datum cast macro reproduced inline
+CharGetDatum	nodeSubplan.rs:1904	(inline)	MATCH	yes	trivial cast macro; folded into deform/seam path
+Int16GetDatum	nodeSubplan.rs:1908	(inline)	MATCH	yes	trivial cast macro; folded into deform/seam path
+Int32GetDatum	nodeSubplan.rs:1912	(inline)	MATCH	yes	trivial cast macro; idiomatic inline
+DatumGetPointer	nodeSubplan.rs:1916	(inline)	MATCH	yes	trivial cast macro; idiomatic inline
+PointerGetDatum	nodeSubplan.rs:1920	(inline)	MATCH	yes	trivial cast macro; idiomatic inline
+newNode	nodeSubplan.rs:1924	lib.rs:789	MATCH	yes	makeNode realized via alloc_in in ExecInitSubPlan
+list_length	nodeSubplan.rs:1932	(inline)	MATCH	yes	List length read idiomatically as slice/Vec len
+list_nth_cell	nodeSubplan.rs:1936	(inline)	MATCH	yes	List indexing realized idiomatically
+list_nth	nodeSubplan.rs:1943	(inline)	MATCH	yes	List indexing realized idiomatically
+TupleDescCompactAttr	nodeSubplan.rs:1950	(inline)	MATCH	yes	compact-attr accessor; folded into getattr seam path
+att_isnull	nodeSubplan.rs:1960	(inline)	MATCH	yes	null-bitmap test; folded into getattr seam path
+fetch_att	nodeSubplan.rs:1968	(inline)	MATCH	yes	byval/byref datum fetch; folded into getattr seam path
+HeapTupleHasNulls	nodeSubplan.rs:2018	(inline)	MATCH	yes	infomask HEAP_HASNULL test; folded into getattr seam path
+HeapTupleNoNulls	nodeSubplan.rs:2023	(inline)	MATCH	yes	negation of HasNulls; folded into getattr seam path
+fastgetattr	nodeSubplan.rs:2027	lib.rs (execTuples seam)	SEAMED	no	heap attr fetch delegated via execTuples cur_tuple_getattr seam
+heap_getattr	nodeSubplan.rs:2059	lib.rs:284 (execTuples seam)	SEAMED	no	curTuple attr read delegated via execTuples cur_tuple_getattr seam
+slot_getsomeattrs	nodeSubplan.rs:2079	lib.rs (execTuples seam)	SEAMED	no	deform delegated via execTuples seam
+slot_attisnull	nodeSubplan.rs:2088	lib.rs (execTuples seam)	SEAMED	no	null test via execTuples seam
+slot_getattr	nodeSubplan.rs:2098	lib.rs:314 (execTuples seam)	SEAMED	no	slot attr read delegated via execTuples slot_getattr_by_id seam
+ExecClearTuple	nodeSubplan.rs:2110	lib.rs (execTuples seam)	SEAMED	no	delegated to execTuples seam
+ExecCopySlotHeapTuple	nodeSubplan.rs:2117	lib.rs (execTuples seam)	SEAMED	no	copy delegated via execTuples seam (curTuple copy)
+TupleHashEntryGetTuple	nodeSubplan.rs:2121	lib.rs (execGrouping seam)	SEAMED	no	accessor delegated via execGrouping seam
+ExecProcNode	nodeSubplan.rs:2125	lib.rs:1261 (execProcnode seam)	SEAMED	no	child dispatch delegated via execProcnode seam
+ExecEvalExprNoReturn	nodeSubplan.rs:2134	lib.rs (execExpr seam)	SEAMED	no	expr eval delegated via execExpr seam
+ExecEvalExprSwitchContext	nodeSubplan.rs:2148	lib.rs (execExpr seam)	SEAMED	no	expr eval delegated via execExpr seam
+ExecEvalExprNoReturnSwitchContext	nodeSubplan.rs:2163	lib.rs (execExpr seam)	SEAMED	no	expr eval delegated via execExpr seam
+ExecProject	nodeSubplan.rs:2173	lib.rs (execExpr seam)	SEAMED	no	projection delegated via execExpr seam (projRight)
+is_andclause	nodeSubplan.rs:2187	(inline)	MATCH	yes	NodeTag==T_BoolExpr && AND_EXPR test reproduced inline
+ExecSubPlan	nodeSubplan.rs:2195	lib.rs:87	MATCH	yes	CHECK_FOR_INTERRUPTS; CTE/setParam guards; force forward dir; Hash/Scan dispatch (audit verified)
+ExecHashSubPlan	nodeSubplan.rs:2282	lib.rs:132	MATCH	yes	parParam guard; rebuild predicate; empty-FALSE; LHS-probe; NULL cascade ordered (audit verified)
+ExecScanSubPlan	nodeSubplan.rs:2365	lib.rs:207	MATCH	yes	was DIVERGES (ARRAY ctx) fixed; per-type arms, ANY/ALL combine+breaks, cardinality (audit verified)
+buildSubPlanHash	nodeSubplan.rs:2732	lib.rs:404	MATCH	yes	assert ANY; nbuckets clamp; main+nulls build; scan loop slotNoNulls routing (audit verified)
+execTuplesUnequal	nodeSubplan.rs:2860	lib.rs:594	MATCH	yes	reset ctx; for(i=numCols;--i>=0); null continue; FunctionCall2Coll; first-unequal break (audit verified)
+findPartialMatch	nodeSubplan.rs:2910	lib.rs:663	MATCH	yes	whole-table scan; CHECK_FOR_INTERRUPTS; !execTuplesUnequal->Term+true (audit verified)
+slotAllNulls	nodeSubplan.rs:2954	lib.rs:746	MATCH	yes	1..=ncols false on first non-null else true (audit verified)
+slotNoNulls	nodeSubplan.rs:2966	lib.rs:763	MATCH	yes	1..=ncols false on first null else true (audit verified)
+ExecInitSubPlan	nodeSubplan.rs:2979	lib.rs:789	MATCH	yes	was PARTIAL fixed; useHashTable arrays in-crate; catalog/projection seamed (audit verified)
+ExecSetParamPlan	nodeSubplan.rs:3344	lib.rs:948	MATCH	yes	ANY/ALL/CTE guards; force forward; ARRAY init; scan loop EXISTS/ARRAY/multi-row; restore dir (audit verified)
+ExecSetParamPlanMulti	nodeSubplan.rs:3657	lib.rs:1099	MATCH	yes	paramid loop; re-enter ExecSetParamPlan via seam; assert cleared (audit verified)
+ExecReScanSetParamPlan	nodeSubplan.rs:3677	lib.rs:1127	MATCH	yes	parParam/setParam/extParam guards; per-setParam mark-dirty + chgParam add (audit verified)

@@ -1,0 +1,211 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+numeric_in	numeric.rs:2576	io.rs:371	MATCH	yes	
+numeric_out	numeric.rs:2827	io.rs:690	MATCH	yes	
+numeric_is_nan	numeric.rs:2866	types-numeric/lib.rs:221	MATCH	yes	
+numeric_is_inf	numeric.rs:2870	types-numeric/lib.rs:239	MATCH	yes	
+numeric_is_integral	numeric.rs:2874	ops_sql.rs:160	MATCH	yes	
+make_numeric_typmod	numeric.rs:2896	types-numeric/lib.rs:331	MATCH	yes	
+is_valid_numeric_typmod	numeric.rs:2904	types-numeric/lib.rs:337	MATCH	yes	
+numeric_typmod_precision	numeric.rs:2908	types-numeric/lib.rs:343	MATCH	yes	
+numeric_typmod_scale	numeric.rs:2913	types-numeric/lib.rs:350	MATCH	yes	
+numeric_maximum_size	numeric.rs:2919	ops_sql.rs:1388	MATCH	yes	
+numeric_out_sci	numeric.rs:2935	io.rs:711	MATCH	yes	
+numeric_normalize	numeric.rs:2966	ops_sql.rs:1173	MATCH	yes	
+numeric_recv	numeric.rs:3008	io.rs:776	MATCH	yes	
+numeric_send	numeric.rs:3196	io.rs:831	MATCH	yes	
+numeric_support	numeric.rs:3231	series_srf.rs:343	SEAMED	no	own decision logic in-crate; cross-unit callee (tuplesort abbrev / funcapi SRF / planner Node) reached via outbound seam per rangetypes planner-support precedent
+numeric	numeric.rs:3274	io.rs:371	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_in
+numerictypmodin	numeric.rs:3418	ops_sql.rs:1325	MATCH	yes	
+numerictypmodout	numeric.rs:3619	ops_sql.rs:1366	MATCH	yes	
+numeric_abs	numeric.rs:3641	ops_sql.rs:468	MATCH	yes	
+numeric_uminus	numeric.rs:3673	ops_sql.rs:486	MATCH	yes	
+numeric_uplus	numeric.rs:3756	ops_sql.rs:512	MATCH	yes	
+numeric_sign_internal	numeric.rs:3764	ops_sql.rs:140	MATCH	yes	
+numeric_sign	numeric.rs:3817	ops_sql.rs:528	MATCH	yes	
+numeric_round	numeric.rs:3835	ops_sql.rs:581	MATCH	yes	
+numeric_trunc	numeric.rs:3881	ops_sql.rs:602	MATCH	yes	
+numeric_ceil	numeric.rs:3927	ops_sql.rs:620	MATCH	yes	
+numeric_floor	numeric.rs:3954	ops_sql.rs:630	MATCH	yes	
+generate_series_numeric	numeric.rs:3981	series_srf.rs:122	SEAMED	no	own decision logic in-crate; cross-unit callee (tuplesort abbrev / funcapi SRF / planner Node) reached via outbound seam per rangetypes planner-support precedent
+generate_series_step_numeric	numeric.rs:3985	series_srf.rs:137	SEAMED	no	own decision logic in-crate; cross-unit callee (tuplesort abbrev / funcapi SRF / planner Node) reached via outbound seam per rangetypes planner-support precedent
+generate_series_numeric_support	numeric.rs:4368	series_srf.rs:387	SEAMED	no	own decision logic in-crate; cross-unit callee (tuplesort abbrev / funcapi SRF / planner Node) reached via outbound seam per rangetypes planner-support precedent
+width_bucket_numeric	numeric.rs:4511	ops_sql.rs:998	MATCH	yes	
+compute_bucket	numeric.rs:4809	ops_sql.rs:1082	MATCH	yes	
+numeric_sortsupport	numeric.rs:4865	aggregate.rs:1014	SEAMED	no	own decision logic in-crate; cross-unit callee (tuplesort abbrev / funcapi SRF / planner Node) reached via outbound seam per rangetypes planner-support precedent
+numeric_abbrev_convert	numeric.rs:4906	aggregate.rs:828	MATCH	yes	
+numeric_abbrev_abort	numeric.rs:4967	aggregate.rs:946	MATCH	yes	
+numeric_fast_cmp	numeric.rs:5085	aggregate.rs:916	MATCH	yes	
+numeric_cmp_abbrev	numeric.rs:5102	aggregate.rs:928	MATCH	yes	
+numeric_abbrev_convert_var	numeric.rs:5115	aggregate.rs:855	MATCH	yes	
+numeric_cmp	numeric.rs:5178	ops_sql.rs:544	MATCH	yes	
+numeric_eq	numeric.rs:5212	ops_sql.rs:553	MATCH	yes	
+numeric_ne	numeric.rs:5246	ops_sql.rs:557	MATCH	yes	
+numeric_gt	numeric.rs:5280	ops_sql.rs:569	MATCH	yes	
+numeric_ge	numeric.rs:5314	ops_sql.rs:573	MATCH	yes	
+numeric_lt	numeric.rs:5348	ops_sql.rs:561	MATCH	yes	
+numeric_le	numeric.rs:5382	ops_sql.rs:565	MATCH	yes	
+cmp_numerics	numeric.rs:5415	io.rs:912	MATCH	yes	
+in_range_numeric_numeric	numeric.rs:5569	ops_sql.rs:1217	MATCH	yes	
+hash_numeric	numeric.rs:5795	aggregate.rs:1045	MATCH	yes	
+hash_numeric_extended	numeric.rs:5946	aggregate.rs:1100	MATCH	yes	
+numeric_add	numeric.rs:6103	ops_sql.rs:247	MATCH	yes	
+numeric_add_opt_error	numeric.rs:6119	ops_sql.rs:247	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_add
+numeric_sub	numeric.rs:6191	ops_sql.rs:278	MATCH	yes	
+numeric_sub_opt_error	numeric.rs:6207	ops_sql.rs:278	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_sub
+numeric_mul	numeric.rs:6279	ops_sql.rs:309	MATCH	yes	
+numeric_mul_opt_error	numeric.rs:6295	ops_sql.rs:309	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_mul
+numeric_div	numeric.rs:6382	ops_sql.rs:354	MATCH	yes	
+numeric_div_opt_error	numeric.rs:6398	ops_sql.rs:354	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_div
+numeric_div_trunc	numeric.rs:6587	ops_sql.rs:392	MATCH	yes	
+numeric_mod	numeric.rs:6761	ops_sql.rs:427	MATCH	yes	
+numeric_mod_opt_error	numeric.rs:6777	kernel_var.rs:1760	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core mod_var
+numeric_inc	numeric.rs:6892	ops_sql.rs:517	MATCH	yes	
+numeric_smaller	numeric.rs:6919	ops_sql.rs:980	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_min
+numeric_larger	numeric.rs:6937	ops_sql.rs:989	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_max
+numeric_gcd	numeric.rs:6955	ops_sql.rs:921	MATCH	yes	
+numeric_lcm	numeric.rs:7011	ops_sql.rs:932	MATCH	yes	
+numeric_fac	numeric.rs:7083	ops_sql.rs:954	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_factorial
+numeric_sqrt	numeric.rs:7223	ops_sql.rs:640	MATCH	yes	
+numeric_exp	numeric.rs:7319	ops_sql.rs:666	MATCH	yes	
+numeric_ln	numeric.rs:7393	ops_sql.rs:696	MATCH	yes	
+numeric_log	numeric.rs:7488	ops_sql.rs:719	MATCH	yes	
+numeric_power	numeric.rs:7639	ops_sql.rs:755	MATCH	yes	
+numeric_scale	numeric.rs:7907	ops_sql.rs:1316	MATCH	yes	
+get_min_scale	numeric.rs:7930	ops_sql.rs:1117	MATCH	yes	
+numeric_min_scale	numeric.rs:7962	ops_sql.rs:1117	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core get_min_scale
+numeric_trim_scale	numeric.rs:7989	ops_sql.rs:1159	MATCH	yes	
+random_numeric	numeric.rs:8016	random.rs:31	MATCH	yes	
+int64_to_numeric	numeric.rs:8225	convert.rs:565	MATCH	yes	
+int64_div_fast_to_numeric	numeric.rs:8246	convert.rs:573	MATCH	yes	
+int4_numeric	numeric.rs:8307	convert.rs:565	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core int64_to_numeric
+numeric_int4_opt_error	numeric.rs:8316	convert.rs:456	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numericvar_to_int32
+numeric_int4	numeric.rs:8471	convert.rs:456	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numericvar_to_int32
+numericvar_to_int32	numeric.rs:8479	convert.rs:456	MATCH	yes	
+int8_numeric	numeric.rs:8499	convert.rs:565	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core int64_to_numeric
+numeric_int8_opt_error	numeric.rs:8508	kernel_transcendental.rs:147	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numericvar_to_int64
+numeric_int8	numeric.rs:8663	kernel_transcendental.rs:147	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numericvar_to_int64
+int2_numeric	numeric.rs:8672	convert.rs:565	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core int64_to_numeric
+numeric_int2	numeric.rs:8681	convert.rs:456	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numericvar_to_int32
+float8_numeric	numeric.rs:8869	convert.rs:784	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core float8_to_numeric
+numeric_float8	numeric.rs:8923	convert.rs:809	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_to_float8
+numeric_float8_no_overflow	numeric.rs:8960	convert.rs:809	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_to_float8
+float4_numeric	numeric.rs:8994	convert.rs:784	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core float8_to_numeric
+numeric_float4	numeric.rs:9048	convert.rs:853	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_to_float4
+numeric_pg_lsn	numeric.rs:9085	convert.rs:471	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numericvar_to_uint64
+makeNumericAggState	numeric.rs:9225	aggregate.rs:292	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core do_numeric_accum
+makeNumericAggStateCurrentContext	numeric.rs:9269	aggregate.rs:292	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core do_numeric_accum
+do_numeric_accum	numeric.rs:9279	aggregate.rs:292	MATCH	yes	
+do_numeric_discard	numeric.rs:9335	aggregate.rs:343	MATCH	yes	
+numeric_accum	numeric.rs:9409	aggregate.rs:292	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core do_numeric_accum
+numeric_combine	numeric.rs:9442	aggregate.rs:560	MATCH	yes	
+numeric_avg_accum	numeric.rs:9536	aggregate.rs:292	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core do_numeric_accum
+numeric_avg_combine	numeric.rs:9569	aggregate.rs:560	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_combine
+numeric_avg_serialize	numeric.rs:9661	aggregate.rs:614	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_serialize
+numeric_avg_deserialize	numeric.rs:9731	aggregate.rs:653	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_deserialize
+numeric_serialize	numeric.rs:9853	aggregate.rs:614	MATCH	yes	
+numeric_deserialize	numeric.rs:9925	aggregate.rs:653	MATCH	yes	
+numeric_accum_inv	numeric.rs:10049	aggregate.rs:343	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core do_numeric_discard
+makeInt128AggState	numeric.rs:10110	aggregate.rs:694	MATCH	yes	
+makeInt128AggStateCurrentContext	numeric.rs:10153	aggregate.rs:694	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core make_int128_agg_state
+do_int128_accum	numeric.rs:10162	aggregate.rs:704	MATCH	yes	
+do_int128_discard	numeric.rs:10172	aggregate.rs:714	MATCH	yes	
+int2_accum	numeric.rs:10183	aggregate.rs:725	MATCH	yes	
+int4_accum	numeric.rs:10216	aggregate.rs:733	MATCH	yes	
+int8_accum	numeric.rs:10249	aggregate.rs:741	MATCH	yes	
+numeric_poly_combine	numeric.rs:10284	aggregate.rs:560	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_combine
+numeric_poly_serialize	numeric.rs:10362	aggregate.rs:614	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_serialize
+numeric_poly_deserialize	numeric.rs:10429	aggregate.rs:653	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_deserialize
+int8_avg_accum	numeric.rs:10549	aggregate.rs:704	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core do_int128_accum
+int8_avg_combine	numeric.rs:10582	aggregate.rs:560	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_combine
+int8_avg_serialize	numeric.rs:10658	aggregate.rs:614	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_serialize
+int8_avg_deserialize	numeric.rs:10723	aggregate.rs:653	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_deserialize
+int2_accum_inv	numeric.rs:10839	aggregate.rs:714	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core do_int128_discard
+int4_accum_inv	numeric.rs:10898	aggregate.rs:714	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core do_int128_discard
+int8_accum_inv	numeric.rs:10957	aggregate.rs:714	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core do_int128_discard
+int8_avg_accum_inv	numeric.rs:11046	aggregate.rs:714	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core do_int128_discard
+numeric_poly_sum	numeric.rs:11105	aggregate.rs:757	MATCH	yes	
+numeric_poly_avg	numeric.rs:11143	aggregate.rs:420	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_avg
+numeric_avg	numeric.rs:11188	aggregate.rs:420	MATCH	yes	
+numeric_sum	numeric.rs:11248	aggregate.rs:454	MATCH	yes	
+numeric_stddev_internal	numeric.rs:11300	aggregate.rs:488	MATCH	yes	
+numeric_var_samp	numeric.rs:11427	aggregate.rs:488	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_stddev_internal
+numeric_stddev_samp	numeric.rs:11452	aggregate.rs:488	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_stddev_internal
+numeric_var_pop	numeric.rs:11477	aggregate.rs:488	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_stddev_internal
+numeric_stddev_pop	numeric.rs:11502	aggregate.rs:488	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_stddev_internal
+numeric_poly_stddev_internal	numeric.rs:11526	aggregate.rs:488	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_stddev_internal
+numeric_poly_var_samp	numeric.rs:11599	aggregate.rs:488	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_stddev_internal
+numeric_poly_stddev_samp	numeric.rs:11629	aggregate.rs:488	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_stddev_internal
+numeric_poly_var_pop	numeric.rs:11661	aggregate.rs:488	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_stddev_internal
+numeric_poly_stddev_pop	numeric.rs:11691	aggregate.rs:488	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_stddev_internal
+int2_sum	numeric.rs:11721	(core int8_sum)	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core int8_sum
+int4_sum	numeric.rs:11761	(core int8_sum)	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core int8_sum
+int8_sum	numeric.rs:11801	(core int8_sum)	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core int8_sum
+int2_avg_accum	numeric.rs:11851	(core int8_avg_accum)	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core int8_avg_accum
+int4_avg_accum	numeric.rs:11946	(core int8_avg_accum)	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core int8_avg_accum
+int4_avg_combine	numeric.rs:12041	aggregate.rs:560	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_combine
+int2_avg_accum_inv	numeric.rs:12224	aggregate.rs:714	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core do_int128_discard
+int4_avg_accum_inv	numeric.rs:12319	aggregate.rs:714	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core do_int128_discard
+int8_avg	numeric.rs:12414	aggregate.rs:420	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core numeric_avg
+int2int4_sum	numeric.rs:12504	(core int8_sum)	MATCH	yes	fmgr-boundary wrapper / no own logic beyond Datum marshalling; represented by core int8_sum
+alloc_var	numeric.rs:12584	kernel_var.rs:134	MATCH	yes	
+free_var	numeric.rs:12599	(idiom-folded)	MATCH	yes	C kernel helper folded into Rust owned-value idiom (no standalone fn)
+zero_var	numeric.rs:12607	kernel_var.rs:68	MATCH	yes	
+set_var_from_str	numeric.rs:12617	io.rs:79	MATCH	yes	
+xdigit_value	numeric.rs:12895	(idiom-folded)	MATCH	yes	C kernel helper folded into Rust owned-value idiom (no standalone fn)
+set_var_from_non_decimal_integer_str	numeric.rs:12912	io.rs:258	MATCH	yes	
+set_var_from_num	numeric.rs:13147	convert.rs:106	MATCH	yes	
+init_var_from_num	numeric.rs:13220	(idiom-folded)	MATCH	yes	C kernel helper folded into Rust owned-value idiom (no standalone fn)
+set_var_from_var	numeric.rs:13287	kernel_var.rs:141	MATCH	yes	
+get_str_from_var	numeric.rs:13316	io.rs:512	MATCH	yes	
+get_str_from_var_sci	numeric.rs:13445	io.rs:648	MATCH	yes	
+numericvar_serialize	numeric.rs:13500	io.rs:856	MATCH	yes	
+numericvar_deserialize	numeric.rs:13515	io.rs:873	MATCH	yes	
+duplicate_numeric	numeric.rs:13545	ops_sql.rs:127	MATCH	yes	
+make_result_opt_error	numeric.rs:13559	convert.rs:147	MATCH	yes	
+make_result	numeric.rs:13748	convert.rs:135	MATCH	yes	
+apply_typmod	numeric.rs:13751	convert.rs:237	MATCH	yes	
+apply_typmod_special	numeric.rs:13841	convert.rs:289	MATCH	yes	
+numericvar_to_int64	numeric.rs:13887	kernel_transcendental.rs:147	MATCH	yes	
+int64_to_numericvar	numeric.rs:13958	kernel_transcendental.rs:65	MATCH	yes	
+numericvar_to_uint64	numeric.rs:13993	convert.rs:471	MATCH	yes	
+numericvar_to_int128	numeric.rs:14057	convert.rs:522	MATCH	yes	
+int128_to_numericvar	numeric.rs:14113	convert.rs:623	MATCH	yes	
+numericvar_to_double_no_overflow	numeric.rs:14148	ops_sql.rs:1429	MATCH	yes	
+cmp_var	numeric.rs:14206	kernel_var.rs:160	MATCH	yes	
+cmp_var_common	numeric.rs:14221	kernel_var.rs:174	MATCH	yes	
+add_var	numeric.rs:14271	kernel_var.rs:299	MATCH	yes	
+sub_var	numeric.rs:14326	kernel_var.rs:360	MATCH	yes	
+mul_var	numeric.rs:14381	kernel_var.rs:710	MATCH	yes	
+mul_var_short	numeric.rs:14614	kernel_var.rs:920	MATCH	yes	
+div_var	numeric.rs:15256	kernel_var.rs:1145	MATCH	yes	
+div_var_int	numeric.rs:15696	kernel_var.rs:1522	MATCH	yes	
+div_var_int64	numeric.rs:15837	kernel_var.rs:1622	MATCH	yes	
+select_div_scale	numeric.rs:15970	kernel_var.rs:1714	MATCH	yes	
+mod_var	numeric.rs:16024	kernel_var.rs:1760	MATCH	yes	
+div_mod_var	numeric.rs:16054	kernel_var.rs:1775	MATCH	yes	
+ceil_var	numeric.rs:16112	kernel_var.rs:1824	MATCH	yes	
+floor_var	numeric.rs:16136	kernel_var.rs:1838	MATCH	yes	
+gcd_var	numeric.rs:16160	ops_sql.rs:880	MATCH	yes	
+sqrt_var	numeric.rs:16230	kernel_transcendental.rs:259	MATCH	yes	
+exp_var	numeric.rs:16621	kernel_transcendental.rs:544	MATCH	yes	
+estimate_ln_dweight	numeric.rs:16778	kernel_transcendental.rs:209	MATCH	yes	
+ln_var	numeric.rs:16833	kernel_transcendental.rs:639	MATCH	yes	
+log_var	numeric.rs:17040	kernel_transcendental.rs:710	MATCH	yes	
+power_var	numeric.rs:17118	kernel_transcendental.rs:745	MATCH	yes	
+power_var_int	numeric.rs:17338	kernel_transcendental.rs:886	MATCH	yes	
+power_ten_int	numeric.rs:17620	io.rs:616	MATCH	yes	
+random_var	numeric.rs:17648	random.rs:69	MATCH	yes	
+cmp_abs	numeric.rs:17833	kernel_var.rs:219	MATCH	yes	
+cmp_abs_common	numeric.rs:17846	kernel_var.rs:229	MATCH	yes	
+add_abs	numeric.rs:17913	kernel_var.rs:420	MATCH	yes	
+sub_abs	numeric.rs:17988	kernel_var.rs:480	MATCH	yes	
+round_var	numeric.rs:18059	kernel_var.rs:544	MATCH	yes	
+trunc_var	numeric.rs:18125	kernel_var.rs:651	MATCH	yes	
+strip_var	numeric.rs:18155	kernel_var.rs:685	MATCH	yes	
+accum_sum_reset	numeric.rs:18178	aggregate.rs:191	MATCH	yes	
+accum_sum_add	numeric.rs:18188	aggregate.rs:32	MATCH	yes	
+accum_sum_carry	numeric.rs:18217	aggregate.rs:131	MATCH	yes	
+accum_sum_rescale	numeric.rs:18265	aggregate.rs:64	MATCH	yes	
+accum_sum_final	numeric.rs:18328	aggregate.rs:202	MATCH	yes	
+accum_sum_copy	numeric.rs:18393	aggregate.rs:255	MATCH	yes	
+accum_sum_combine	numeric.rs:18420	aggregate.rs:276	MATCH	yes	

@@ -1,0 +1,37 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+BoolGetDatum	pg_controldata.rs:913	(typed conversion)	MATCH	yes	c2rust-emitted inline Datum macro; folded into typed bool projection
+Int32GetDatum	pg_controldata.rs:921	(typed conversion)	MATCH	yes	inline Datum macro; folded into typed i32 projection
+ObjectIdGetDatum	pg_controldata.rs:925	(typed conversion)	MATCH	yes	inline Datum macro; folded into typed Oid projection
+TransactionIdGetDatum	pg_controldata.rs:929	(typed conversion)	MATCH	yes	inline Datum macro; folded into typed xid projection
+PointerGetDatum	pg_controldata.rs:933	(typed conversion)	MATCH	yes	inline Datum macro; folded into typed pointer projection
+Int64GetDatum	pg_controldata.rs:937	(typed conversion)	MATCH	yes	inline Datum macro; folded into typed i64 projection
+XLogFileName	pg_controldata.rs:942	pg_controldata.rs:197 XLogFileName	MATCH	yes	xlog_internal.h macro; segno/TLI -> filename, verified vs C
+HeapTupleGetDatum	pg_controldata.rs:964	(typed conversion)	MATCH	yes	inline Datum macro; tuple-forming is fmgr glue, projection structs returned instead
+LSNGetDatum	pg_controldata.rs:968	(typed conversion)	MATCH	yes	inline Datum macro; folded into typed XLogRecPtr projection
+TimestampTzGetDatum	pg_controldata.rs:972	(typed conversion)	MATCH	yes	inline Datum macro; folded into typed TimestampTz projection
+pg_control_system	pg_controldata.rs:976	pg_controldata.rs:95 pg_control_system	MATCH	yes	read controlfile + CRC; projects version/catalog/sysid/time->timestamptz
+pg_control_checkpoint	pg_controldata.rs:1078	pg_controldata.rs:106 pg_control_checkpoint	MATCH	yes	XLByteToSeg+XLogFileName over redo/TLI; "%u:%u" epoch:xid; 18 fields in order
+pg_control_recovery	pg_controldata.rs:1254	pg_controldata.rs:141 pg_control_recovery	MATCH	yes	minRecoveryPoint/TLI, backupStart/End, backupEndRequired
+pg_control_init	pg_controldata.rs:1360	pg_controldata.rs:153 pg_control_init	MATCH	yes	all 12 init fields incl data_checksum_version, default_char_signedness
+set_ps_display	ps_status.rs:64	ps_status.rs:236 set_ps_display	MATCH	yes	set_ps_display_with_len(activity, strlen)
+save_ps_display_args	ps_status.rs:82	ps_status.rs:85 save_ps_display_args	MATCH	yes	records title-buffer bound; CLOBBER_ARGV argv/environ relocation documented (no raw argv handed); buffer-size preserved
+init_ps_display	ps_status.rs:181	ps_status.rs:116 init_ps_display	MATCH	yes	BackendType fallback; IsUnderPostmaster/saved_args early returns; "postgres: " prefix; force-update path
+update_ps_display_precheck	ps_status.rs:224	ps_status.rs:96 update_ps_display_precheck	MATCH	yes	update_process_title/IsUnderPostmaster/buffer-present gates
+set_ps_display_suffix	ps_status.rs:237	ps_status.rs:175 set_ps_display_suffix	MATCH	yes	overwrite via nosuffix_len; not-enough-space branch w/ cur_len<size-1 guard; flush
+set_ps_display_remove_suffix	ps_status.rs:276	ps_status.rs:214 set_ps_display_remove_suffix	MATCH	yes	restores nosuffix_len, clears it, flush
+set_ps_display_with_len	ps_status.rs:290	ps_status.rs:242 set_ps_display_with_len	MATCH	yes	wipe suffix; rebuild fixed-prefix+activity bounded truncation; flush
+flush_ps_display	ps_status.rs:317	ps_status.rs:278 flush_ps_display/os_set_proc_title	MATCH	yes	BSD setproctitle; CLOBBER_ARGV transmission documented no-op, tracked buffer authoritative
+get_ps_display	ps_status.rs:346	ps_status.rs:267 get_ps_display	MATCH	yes	returns (activity, displen) = buffer minus fixed prefix and its length
+BoolGetDatum	rls.rs:830	(typed conversion)	MATCH	yes	inline Datum macro; folded into typed bool result
+DatumGetObjectId	rls.rs:838	(typed conversion)	MATCH	yes	inline Datum macro; folded into typed Oid arg extraction
+ObjectIdGetDatum	rls.rs:842	(typed conversion)	MATCH	yes	inline Datum macro; folded into typed Oid
+DatumGetPointer	rls.rs:846	(typed conversion)	MATCH	yes	inline Datum macro; folded into typed pointer
+GETSTRUCT	rls.rs:851	(typed accessor)	MATCH	yes	inline tuple-struct accessor macro; folded into typed catalog row access via seam
+check_enable_rls	rls.rs:860	rls.rs:46 check_enable_rls	MATCH	yes	FirstNormalObjectId guard; RELOID miss->RLS_NONE; relrowsecurity/bypassrls/owner branches; ereport on !row_security&&!noError; verified line-by-line
+row_security_active	rls.rs:948	rls.rs:117 row_security_active	MATCH	yes	check_enable_rls(oid, InvalidOid, true)==RLS_ENABLED
+row_security_active_name	rls.rs:959	rls.rs:124 row_security_active_name	MATCH	yes	name->oid via namespace seam mirroring RangeVarGetRelid; UNDEFINED_TABLE on miss
+ObjectIdGetDatum	superuser.rs:210	(typed conversion)	MATCH	yes	inline Datum macro; folded into typed Oid
+GETSTRUCT	superuser.rs:214	(typed accessor)	MATCH	yes	inline tuple-struct accessor; folded into typed authid row access via seam
+superuser	superuser.rs:225	superuser.rs:30 superuser	MATCH	yes	superuser_arg(GetUserId()); per-backend cache via thread_local
+superuser_arg	superuser.rs:229	superuser.rs:35 superuser_arg	MATCH	yes	BOOTSTRAP_SUPERUSERID fast path; cache hit; AUTHOID rolsuper lookup; callback registration
+RoleidCallback	superuser.rs:260	superuser.rs:66 RoleidCallback	MATCH	yes	syscache-inval callback resetting last_roleid cache

@@ -1,0 +1,13 @@
+function	c2rust_loc	our_loc	verdict	perfect_match	note
+gin_cmp_tslexeme	../pgrust/c2rust-runs/backend-utils-adt-ts-index-rank/src/tsginidx.rs:24	lib.rs:193	MATCH	yes	delegates to `ts_compare_string` seam (false)
+gin_cmp_prefix	../pgrust/c2rust-runs/backend-utils-adt-ts-index-rank/src/tsginidx.rs:40	lib.rs:200	MATCH	yes	prefix compare; `cmp<0 -> 1` "prevent continue scan"
+gin_extract_tsvector	../pgrust/c2rust-runs/backend-utils-adt-ts-index-rank/src/tsginidx.rs:64	lib.rs:211	MATCH	yes	one text key per lexeme; `*nentries==size`
+gin_extract_tsquery	../pgrust/c2rust-runs/backend-utils-adt-ts-index-rank/src/tsginidx.rs:94	lib.rs:246	MATCH	yes	VAL count, partialmatch, item->operand map, searchMode
+checkcondition_gin	../pgrust/c2rust-runs/backend-utils-adt-ts-index-rank/src/tsginidx.rs:183	lib.rs:324	MATCH	yes	TRUE->MAYBE when weight!=0 or data present
+gin_tsquery_consistent	../pgrust/c2rust-runs/backend-utils-adt-ts-index-rank/src/tsginidx.rs:214	lib.rs:357	MATCH	yes	bool[]->GinTernaryValue reinterpret; TS_execute_ternary seam
+gin_tsquery_triconsistent	../pgrust/c2rust-runs/backend-utils-adt-ts-index-rank/src/tsginidx.rs:263	lib.rs:405	MATCH	yes	ternary check; GIN/TS value equivalence
+gin_extract_tsvector_2args	../pgrust/c2rust-runs/backend-utils-adt-ts-index-rank/src/tsginidx.rs:304	lib.rs:449	MATCH	yes	post-dispatch tail-call to primary
+gin_extract_tsquery_5args	../pgrust/c2rust-runs/backend-utils-adt-ts-index-rank/src/tsginidx.rs:316	lib.rs:457	MATCH	yes	"
+gin_tsquery_consistent_6args	../pgrust/c2rust-runs/backend-utils-adt-ts-index-rank/src/tsginidx.rs:328	lib.rs:465	MATCH	yes	"
+gin_extract_tsquery_oldsig	../pgrust/c2rust-runs/backend-utils-adt-ts-index-rank/src/tsginidx.rs:340	lib.rs:475	MATCH	yes	"
+gin_tsquery_consistent_oldsig	../pgrust/c2rust-runs/backend-utils-adt-ts-index-rank/src/tsginidx.rs:350	lib.rs:483	MATCH	yes	"

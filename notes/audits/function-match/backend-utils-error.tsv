@@ -1,0 +1,81 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+is_log_level_output	elog.rs:1994	crates/backend-utils-error/src/policy.rs:13	MATCH	yes	
+should_output_to_server	elog.rs:2014	crates/backend-utils-error/src/policy.rs:36	MATCH	yes	
+should_output_to_client	elog.rs:2018	crates/backend-utils-error/src/policy.rs:44	MATCH	yes	
+message_level_is_interesting	elog.rs:2032	crates/backend-utils-error/src/policy.rs:58	MATCH	yes	
+in_error_recursion_trouble	elog.rs:2043	crates/backend-utils-error/src/stack.rs:70	MATCH	yes	
+err_gettext	elog.rs:2047	identity (non-NLS)	MATCH	yes	identity; not reproduced (sanctioned)
+errstart_cold	elog.rs:2054	crates/backend-utils-error/src/stack.rs:174	MATCH	yes	
+errstart	elog.rs:2061	crates/backend-utils-error/src/stack.rs:78	MATCH	yes	sanctioned PG_exception_stack==NULL divergence note
+errfinish	elog.rs:2128	crates/backend-utils-error/src/stack.rs:194	MATCH	yes	sanctioned divergence at ERROR (PgResult)
+errsave_start	elog.rs:2228	crates/backend-utils-error/src/stack.rs:694	MATCH	yes	fixed: overflow PANICs
+errsave_finish	elog.rs:2257	crates/backend-utils-error/src/stack.rs:739	MATCH	yes	
+get_error_stack_entry	elog.rs:2312	crates/backend-utils-error/src/stack.rs:78	MATCH	yes	inlined into push sites
+set_stack_entry_domain	elog.rs:2357	crates/backend-utils-error/src/stack.rs:78	MATCH	yes	inlined
+set_stack_entry_location	elog.rs:2368	crates/backend-utils-error/src/stack.rs:180	MATCH	yes	normalize_filename + assignment
+matches_backtrace_functions	elog.rs:2391	crates/backend-utils-error/src/config.rs:293	MATCH	yes	
+errcode	elog.rs:2411	crates/backend-utils-error/src/stack.rs:392	MATCH	yes	
+errcode_for_file_access	elog.rs:2449	crates/backend-utils-error/src/stack.rs:398	MATCH	yes	+errno.rs:44 sqlstate table
+errcode_for_socket_access	elog.rs:2516	crates/backend-utils-error/src/stack.rs:406	MATCH	yes	+errno.rs:68
+errmsg	elog.rs:2567	crates/backend-utils-error/src/stack.rs:415	MATCH	yes	
+errbacktrace	elog.rs:2641	crates/backend-utils-error/src/stack.rs:517	MATCH	yes	
+set_backtrace	elog.rs:2682	crates/backend-utils-error/src/report.rs:229	MATCH	yes	platform backtrace adaptation
+errmsg_internal	elog.rs:2723	crates/backend-utils-error/src/stack.rs:423	MATCH	yes	
+errmsg_plural	elog.rs:2797	crates/backend-utils-error/src/stack.rs:433	MATCH	yes	fixed: message_id=fmt_singular
+errdetail	elog.rs:2876	crates/backend-utils-error/src/stack.rs:442	MATCH	yes	
+errdetail_internal	elog.rs:2949	crates/backend-utils-error/src/stack.rs:449	MATCH	yes	
+errdetail_log	elog.rs:3022	crates/backend-utils-error/src/stack.rs:454	MATCH	yes	
+errdetail_log_plural	elog.rs:3095	crates/backend-utils-error/src/stack.rs:464	MATCH	yes	
+errdetail_plural	elog.rs:3173	crates/backend-utils-error/src/stack.rs:469	MATCH	yes	
+errhint	elog.rs:3251	crates/backend-utils-error/src/stack.rs:474	MATCH	yes	
+errhint_internal	elog.rs:3324	crates/backend-utils-error/src/stack.rs:481	MATCH	yes	
+errhint_plural	elog.rs:3397	crates/backend-utils-error/src/stack.rs:486	MATCH	yes	
+errcontext_msg	elog.rs:3475	crates/backend-utils-error/src/stack.rs:492	MATCH	yes	+context_chain append
+set_errcontext_domain	elog.rs:3548	crates/backend-utils-error/src/stack.rs:500	MATCH	yes	
+errhidestmt	elog.rs:3590	crates/backend-utils-error/src/stack.rs:507	MATCH	yes	
+errhidecontext	elog.rs:3626	crates/backend-utils-error/src/stack.rs:512	MATCH	yes	
+errposition	elog.rs:3662	crates/backend-utils-error/src/stack.rs:522	MATCH	yes	
+internalerrposition	elog.rs:3700	crates/backend-utils-error/src/stack.rs:527	MATCH	yes	
+internalerrquery	elog.rs:3738	crates/backend-utils-error/src/stack.rs:532	MATCH	yes	
+err_generic_string	elog.rs:3785	crates/backend-utils-error/src/stack.rs:538	MATCH	yes	
+set_errdata_field	elog.rs:3889	crates/backend-utils-error/src/stack.rs:538	MATCH	yes	subsumed (field assignment)
+geterrcode	elog.rs:3897	crates/backend-utils-error/src/stack.rs:545	MATCH	yes	
+geterrposition	elog.rs:3932	crates/backend-utils-error/src/stack.rs:550	MATCH	yes	
+getinternalerrposition	elog.rs:3967	crates/backend-utils-error/src/stack.rs:555	MATCH	yes	
+pre_format_elog_string	elog.rs:4006	crates/backend-utils-error/src/report.rs:244	MATCH	yes	
+format_elog_string	elog.rs:4014	crates/backend-utils-error/src/report.rs:253	MATCH	yes	
+EmitErrorReport	elog.rs:4120	crates/backend-utils-error/src/stack.rs:324	MATCH	yes	
+CopyErrorData	elog.rs:4172	crates/backend-utils-error/src/stack.rs:569	MATCH	yes	
+FreeErrorData	elog.rs:4266	crates/backend-utils-error/src/stack.rs:575	MATCH	yes	
+FreeErrorDataContents	elog.rs:4270	crates/backend-utils-error/src/stack.rs:575	MATCH	yes	subsumed by Drop
+FlushErrorState	elog.rs:4309	crates/backend-utils-error/src/stack.rs:579	MATCH	yes	
+ThrowErrorData	elog.rs:4928	crates/backend-utils-error/src/stack.rs:593	MATCH	yes	documented ereport-channel adaptation
+ReThrowError	elog.rs:4984	crates/backend-utils-error/src/stack.rs:650	MATCH	yes	under PgResult divergence
+pg_re_throw	elog.rs:5035	crates/backend-utils-error/src/stack.rs:665	MATCH	yes	under PgResult divergence
+GetErrorContextStack	elog.rs:5058	crates/backend-utils-error/src/stack.rs:681	DIVERGES	no	no counterpart: attach-on-propagation model has no ambient error_context_stack to walk; context lives on the propagating PgError (documented PgResult design divergence)
+DebugFileOpen	elog.rs:5076	crates/backend-utils-error/src/report.rs:940	MATCH	yes	
+check_backtrace_functions	elog.rs:5199	crates/backend-utils-error/src/config.rs:256	MATCH	yes	
+assign_backtrace_functions	elog.rs:5260	crates/backend-utils-error/src/config.rs:287	MATCH	yes	
+check_log_destination	elog.rs:5267	crates/backend-utils-error/src/config.rs:303	MATCH	yes	
+assign_log_destination	elog.rs:5359	crates/backend-utils-error/src/config.rs:330	MATCH	yes	
+assign_syslog_ident	elog.rs:5366	crates/backend-utils-error/src/syslog.rs:40	MATCH	yes	
+assign_syslog_facility	elog.rs:5381	crates/backend-utils-error/src/syslog.rs:56	MATCH	yes	
+write_syslog	elog.rs:5393	crates/backend-utils-error/src/syslog.rs:80	MATCH	yes	fixed: c_isspace incl \v
+write_console	elog.rs:5509	crates/backend-utils-error/src/report.rs:701	MATCH	yes	
+get_formatted_log_time	elog.rs:5518	crates/backend-utils-error/src/report.rs:123	MATCH	yes	GMT boot zone (sanctioned)
+reset_formatted_start_time	elog.rs:5551	crates/backend-utils-error/src/report.rs:143	MATCH	yes	
+get_formatted_start_time	elog.rs:5556	crates/backend-utils-error/src/report.rs:148	MATCH	yes	
+check_log_of_query	elog.rs:5572	crates/backend-utils-error/src/report.rs:165	MATCH	yes	
+get_backend_type_for_log	elog.rs:5585	crates/backend-utils-error/src/report.rs:189	MATCH	yes	
+process_log_prefix_padding	elog.rs:5601	crates/backend-utils-error/src/report.rs:265	MATCH	yes	
+log_line_prefix	elog.rs:5629	crates/backend-utils-error/src/report.rs:323	MATCH	yes	
+log_status_format	elog.rs:5633	crates/backend-utils-error/src/report.rs:329	MATCH	yes	
+unpack_sql_state	elog.rs:6215	crates/backend-utils-error/src/report.rs:197	MATCH	yes	
+send_message_to_server_log	elog.rs:6230	crates/backend-utils-error/src/report.rs:550	MATCH	yes	csvlog/jsonlog/syslogger seamed
+write_pipe_chunks	elog.rs:6436	crates/backend-utils-error/src/report.rs:748	MATCH	yes	fixed: was MISSING; now in-crate
+err_sendstring	elog.rs:6497	crates/backend-utils-error/src/report.rs:793	MATCH	yes	
+send_message_to_frontend	elog.rs:6507	crates/backend-utils-error/src/report.rs:805	MATCH	yes	pq_putmessage/flush SEAMED
+error_severity	elog.rs:6658	crates/backend-utils-error/src/report.rs:202	MATCH	yes	
+append_with_tabs	elog.rs:6695	crates/backend-utils-error/src/report.rs:217	MATCH	yes	
+write_stderr	elog.rs:6729	crates/backend-utils-error/src/report.rs:926	MATCH	yes	
+vwrite_stderr	elog.rs:6738	crates/backend-utils-error/src/report.rs:931	MATCH	yes	

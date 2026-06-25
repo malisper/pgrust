@@ -1,0 +1,38 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+BlockIdGetBlockNumber	tableam.rs:1627	types-tuple BlockIdData::block_number	MATCH	yes	Trivial block.h inline; raw field read.
+ItemPointerGetBlockNumberNoCheck	tableam.rs:1634	types-tuple (raw field read)	MATCH	yes	itemptr.h NoCheck inline; no validity assert.
+ItemPointerGetOffsetNumberNoCheck	tableam.rs:1640	types-tuple (raw field read)	MATCH	yes	itemptr.h NoCheck inline; ip_posid read.
+pg_atomic_fetch_add_u64_impl	tableam.rs:1646	(AtomicU64 substrate)	MATCH	yes	C atomic intrinsic -> Rust AtomicU64::fetch_add.
+pg_atomic_write_u64_impl	tableam.rs:1653	(AtomicU64 substrate)	MATCH	yes	C atomic intrinsic -> AtomicU64::store.
+pg_atomic_init_u64_impl	tableam.rs:1660	(AtomicU64 substrate)	MATCH	yes	C atomic intrinsic -> AtomicU64::new.
+pg_atomic_init_u64	tableam.rs:1667	(AtomicU64 substrate)	MATCH	yes	atomics.h wrapper over _impl.
+pg_atomic_write_u64	tableam.rs:1674	(AtomicU64 substrate)	MATCH	yes	atomics.h wrapper over _impl.
+pg_atomic_fetch_add_u64	tableam.rs:1681	(AtomicU64 substrate)	MATCH	yes	atomics.h wrapper over _impl.
+tas	tableam.rs:1688	(Mutex substrate)	MATCH	yes	s_lock.h spinlock test-and-set folded onto Rust Mutex.
+RelationGetSmgr	tableam.rs:1695	(rd_locator,rd_backend) via smgr seam	SEAMED	no	smgr pin/cache is smgr owner's concern; pair keyed by smgropen, no logic lost.
+table_index_fetch_begin	tableam.rs:1710	lib.rs:301	MATCH	yes	rd_tableam->index_fetch_begin(rel) dispatch.
+table_index_fetch_end	tableam.rs:1718	lib.rs:315	MATCH	yes	scan->rel->rd_tableam->index_fetch_end(scan); descriptor consumed by value.
+table_index_fetch_tuple	tableam.rs:1724	lib.rs:322	MATCH	yes	CheckXidAlive/!bsysscan guard exact elog text, then vtable dispatch all 6 args.
+table_tuple_insert	tableam.rs:1769	lib.rs:476	MATCH	yes	Pure dispatch, no guard.
+table_tuple_delete	tableam.rs:1781	lib.rs:488	MATCH	yes	Pure dispatch, 8 args in order, no guard.
+table_tuple_update	tableam.rs:1796	lib.rs:504	MATCH	yes	Pure dispatch, 10 args in order, no guard.
+pg_leftmost_one_pos32	tableam.rs:1824	(in pg_nextpower2_32, lib.rs:138)	MATCH	yes	pg_bitutils.h clz-based; re-derived, used by pg_nextpower2_32.
+pg_nextpower2_32	tableam.rs:1828	lib.rs:138	MATCH	yes	Power-of-2 identity else 1<<(31-clz+1); unit-tested.
+table_slot_callbacks	tableam.rs:1843	lib.rs:153	MATCH	yes	Three arms C order: rd_tableam slot_callbacks; FOREIGN_TABLE -> heap; else assert VIEW/PARTITIONED -> virtual.
+table_slot_create	tableam.rs:1861	lib.rs:182	MATCH	yes	table_slot_callbacks + MakeSingleTupleTableSlot via execTuples seam; *reglist becomes caller ownership.
+table_beginscan_catalog	tableam.rs:1875	lib.rs:196	MATCH	yes	flags SO_TYPE_SEQSCAN|ALLOW_STRAT|SYNC|PAGEMODE|TEMP_SNAPSHOT; RegisterSnapshot(GetCatalogSnapshot) via seams; scan_begin.
+table_parallelscan_estimate	tableam.rs:1898	lib.rs:216	MATCH	yes	IsMVCCSnapshot -> add_size(EstimateSnapshotSpace) else assert SnapshotAny; add parallelscan_estimate; add_size overflow check.
+table_parallelscan_initialize	tableam.rs:1919	lib.rs:238	MATCH	yes	phs_snapshot_off from AM; MVCC SerializeSnapshot + phs_snapshot_any=false else assert + true.
+table_beginscan_parallel	tableam.rs:1944	lib.rs:265	MATCH	yes	flags w/o TEMP_SNAPSHOT; assert RelFileLocatorEquals; !any -> Restore+Register+TEMP_SNAPSHOT else SnapshotAny; scan_begin.
+table_index_fetch_tuple_check	tableam.rs:1974	lib.rs:354	MATCH	yes	slot create -> fetch begin -> table_index_fetch_tuple -> fetch end -> drop slot -> return found.
+table_tuple_get_latest_tid	tableam.rs:2001	lib.rs:384	MATCH	yes	CheckXidAlive&&!bsysscan guard elog; !tuple_tid_valid ereport ERRCODE_INVALID_PARAMETER_VALUE exact msg; then tuple_get_latest_tid.
+simple_table_tuple_insert	tableam.rs:2088	lib.rs:556	MATCH	yes	table_tuple_insert(rel,slot,GetCurrentCommandId(true),0,NULL).
+simple_table_tuple_delete	tableam.rs:2101	lib.rs:567	MATCH	yes	table_tuple_delete with GetCurrentCommandId/snapshot/wait; switch arms with exact elog texts.
+simple_table_tuple_update	tableam.rs:2252	lib.rs:607	MATCH	yes	As delete with lockmode/update_indexes; lockmode pre-seed unobservable (AM writes it).
+table_block_parallelscan_estimate	tableam.rs:2408	lib.rs:651	MATCH	yes	Returns own descriptor size = DSM space estimate; semantically identical role.
+table_block_parallelscan_initialize	tableam.rs:2412	lib.rs:656	MATCH	yes	phs_locator/nblocks/syncscan predicate; SpinLockInit + startblock=Invalid + atomic 0; returns size.
+table_block_parallelscan_reinitialize	tableam.rs:2432	lib.rs:680	MATCH	yes	pg_atomic_write_u64(phs_nallocated,0) -> store(0).
+table_block_parallelscan_startblock_init	tableam.rs:2443	lib.rs:695	MATCH	yes	memset->Default; MaxBlockNumber assert; chunk_size pg_nextpower2_32 Max/Min; retry-loop goto shape via loop/continue; ss_get_location seam.
+table_block_parallelscan_nextpage	tableam.rs:2494	lib.rs:773	MATCH	yes	chunk_remaining arm vs ramp-down predicate in wrapping u32; fetch_add; page modulo u64; syncscan report.
+table_block_relation_size	tableam.rs:2547	lib.rs:883	MATCH	yes	InvalidForkNumber -> sum 0..MAX_FORKNUM (PG quirk preserved) else single fork; nblocks*BLCKSZ u64; RelationGetSmgr pair.
+table_block_relation_estimate_size	tableam.rs:2567	lib.rs:926	MATCH	yes	curpages/relpages coercions; 10-page HACK; density branch / fillfactor+get_rel_data_width seams; rint->round_ties_even; allvisfrac three-way.

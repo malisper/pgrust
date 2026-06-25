@@ -1,0 +1,31 @@
+function	c2rust_loc	our_loc	verdict	perfect_match(yes|no)	note
+DatumGetInt32	tsrank.rs:858	(inline)	MATCH	yes	c2rust macro inline; idiomatic cast at call sites
+Int32GetDatum	tsrank.rs:862	(inline)	MATCH	yes	c2rust macro inline; idiomatic cast at call sites
+DatumGetPointer	tsrank.rs:866	(inline)	MATCH	yes	c2rust macro inline; idiomatic cast at call sites
+Float4GetDatum	tsrank.rs:870	(inline)	MATCH	yes	c2rust macro inline; idiomatic cast at call sites
+DatumGetTSVector	tsrank.rs:878	(inline)	MATCH	yes	c2rust detoast inline; modeled by detoast seam at call sites
+DatumGetTSQuery	tsrank.rs:888	(inline)	MATCH	yes	c2rust detoast inline; modeled by detoast seam at call sites
+word_distance	tsrank.rs:902	lib.rs:222	MATCH	yes	w>100 -> 1e-30; double-promoted exp body, float4 cast of w
+cnt_length	tsrank.rs:914	lib.rs:230	MATCH	yes	per-entry POSDATALEN (0 counts as 1)
+find_wordentry	tsrank.rs:948	lib.rs:247	MATCH	yes	binary search + prefix scan; nitem out-param
+compareQueryOperand	tsrank.rs:1035	lib.rs:296	MATCH	yes	tsCompareString on operand strings
+SortAndUniqItems	tsrank.rs:1051	lib.rs:311	MATCH	yes	collect VAL, sort, dedup; carries (item idx, operand)
+calc_rank_and	tsrank.rs:1120	lib.rs:380	MATCH	yes	POSNULL weight=MAXENTRYPOS-1; pairwise dist/word_distance; res combine
+calc_rank_or	tsrank.rs:1262	lib.rs:467	MATCH	yes	POSNULL pos=0; per-entry resj/wjm; /1.64493406685; /size
+calc_rank	tsrank.rs:1378	lib.rs:524	MATCH	yes	AND/PHRASE->and else or; res<0->1e-20; all RANK_NORM_* branches
+getWeights	tsrank.rs:1426	lib.rs:579	MATCH	yes	too-short ARRAY_SUBSCRIPT_ERROR; default for neg; >1 out-of-range; ndim/nulls in seam
+ts_rank_wttf	tsrank.rs:1629	lib.rs:604	MATCH	yes	getWeights + calc_rank(method)
+ts_rank_wtt	tsrank.rs:1691	lib.rs:611	MATCH	yes	getWeights + calc_rank(DEF_NORM_METHOD)
+ts_rank_ttf	tsrank.rs:1748	lib.rs:618	MATCH	yes	default_weights + calc_rank(method)
+ts_rank_tt	tsrank.rs:1792	lib.rs:623	MATCH	yes	default_weights + calc_rank(DEF_NORM_METHOD)
+compareDocR	tsrank.rs:1830	lib.rs:705	MATCH	yes	(pos, weight, entry) ordering
+checkcondition_QueryOperand	tsrank.rs:1868	lib.rs:731	MATCH	yes	operandexists; npos/pos with reverseinsert offset
+resetQueryRepresentation	tsrank.rs:1897	lib.rs:758	MATCH	yes	clears exists/npos, sets reverseinsert
+fillQueryRepresentationData	tsrank.rs:1910	lib.rs:767	MATCH	yes	per-item insert with reverse/forward lastPos logic
+Cover	tsrank.rs:1966	lib.rs:814	MATCH	yes	check_stack_depth seam; up/down bound scan; recursion
+get_docrep	tsrank.rs:2051	lib.rs:895	MATCH	yes	build pos stream, sort, join per (pos,entry); NULL when empty
+calc_rank_cd	tsrank.rs:2235	lib.rs:1000	MATCH	yes	invws, Cover loop, Cpos/nNoise/SumDist, all RANK_NORM_* branches
+ts_rankcd_wttf	tsrank.rs:2399	lib.rs:1099	MATCH	yes	getWeights + calc_rank_cd(method)
+ts_rankcd_wtt	tsrank.rs:2457	lib.rs:1106	MATCH	yes	getWeights + calc_rank_cd(DEF_NORM_METHOD)
+ts_rankcd_ttf	tsrank.rs:2514	lib.rs:1113	MATCH	yes	default_weights + calc_rank_cd(method)
+ts_rankcd_tt	tsrank.rs:2554	lib.rs:1118	MATCH	yes	default_weights + calc_rank_cd(DEF_NORM_METHOD)
