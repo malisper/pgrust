@@ -440,22 +440,48 @@ pub fn pgstat_report_analyze(
 ///
 /// Returns the relation's pending-entry key when stats should be counted
 /// (lazily prepping the entry the way C's `pgstat_assoc_relation` does), else
-/// `None`. `pgstat_info != NULL` is modeled as "a pending entry exists for the
-/// key".
+/// `None`.
+///
+/// IMPORTANT: the C `rel->pgstat_info != NULL` "likely" fast path is *not* the
+/// same as "a pending entry exists in the OID-keyed hash". `rel->pgstat_info`
+/// is the relcache entry's per-open back-pointer to its pending block, set only
+/// by `pgstat_assoc_relation` (which requires `rel->pgstat_enabled`) and cleared
+/// by `pgstat_unlink_relation` — and `pgstat_init_relation` unlinks it at *every*
+/// relation open when `!pgstat_track_counts`. So whenever this relation is opened
+/// while `track_counts = off`, C has `pgstat_info == NULL` *and* `pgstat_enabled
+/// == false`, hence `pgstat_should_count_relation` returns false even though the
+/// backend's pending hash still holds an (unflushed) entry for the relation from
+/// an earlier counted statement.
+///
+/// pgrust has no per-relcache `pgstat_info` back-pointer; it reaches the pending
+/// block by OID key. Gating the count on hash presence alone (the old
+/// `pgstat_have_pending` shortcut taken *before* the `pgstat_enabled` check)
+/// therefore *over-counts*: an operation performed under `track_counts = off`
+/// would still be counted as long as a prior counted statement left an unflushed
+/// pending entry. Whether that pending entry survived to the off-period
+/// statement is rate-limit/timing dependent (`pgstat_report_stat` only flushes
+/// once per `PGSTAT_MIN_INTERVAL`), which is exactly the intermittent
+/// over-count seen in the `stats` isolation spec.
+///
+/// Faithful translation: `pgstat_enabled` — recomputed from `pgstat_track_counts`
+/// at each relation open by `pgstat_init_relation`, and stored on the relcache
+/// entry — is the gate. When it is true we count, re-using the existing pending
+/// entry if present (the `pgstat_info != NULL` fast path) else prepping one
+/// (`pgstat_assoc_relation`). When it is false we must not count, regardless of a
+/// stale pending entry, mirroring C's open-time unlink.
 fn should_count_relation(
     relid: Oid,
     relisshared: bool,
     pgstat_enabled: bool,
 ) -> PgResult<Option<PgStat_HashKey>> {
+    if !pgstat_enabled {
+        return Ok(None);
+    }
     let key = relation_key(relid, relisshared);
-    if pgstat_core::pgstat_have_pending(key) {
-        return Ok(Some(key));
-    }
-    if pgstat_enabled {
+    if !pgstat_core::pgstat_have_pending(key) {
         pgstat_assoc_relation(relid, relisshared)?;
-        return Ok(Some(key));
     }
-    Ok(None)
+    Ok(Some(key))
 }
 
 /// Port of `void pgstat_count_heap_insert(Relation rel, PgStat_Counter n)`.
