@@ -171,6 +171,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetCurrentReplayRecPtr(&replayEndTLI)` (xlogrecovery.c:4604) — position
+    /// of the last applied record, OR the record currently being applied. Unlike
+    /// `GetXLogReplayRecPtr`, this reads `XLogRecoveryCtl->replayEndRecPtr` /
+    /// `replayEndTLI` (set BEFORE a record is replayed), so during `xlog_redo`
+    /// of a timeline-switching record it already reflects the NEW timeline.
+    /// Returns `(replayEndRecPtr, replayEndTLI)`.
+    pub fn get_current_replay_rec_ptr_tli() -> (XLogRecPtr, ::types_core::TimeLineID)
+);
+
+seam_core::seam!(
     /// `StandbyMode` (xlogrecovery.c global bool): true while the server is in
     /// standby mode (continuous recovery awaiting more WAL). Pure read.
     pub fn standby_mode() -> bool

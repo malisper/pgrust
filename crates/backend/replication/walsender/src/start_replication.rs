@@ -298,27 +298,22 @@ fn send_copy_both_response() {
     crate::pq_putmessage_copyboth_response();
 }
 
-/// `readTimeLineHistory(FlushTLI)` + `tliSwitchPoint(cmd->timeline, history,
-/// &sendTimeLineNextTLI)` for the explicit-client-timeline path of
-/// `StartReplication`.  The timeline-history read + switchpoint lookup are owned
-/// by the unported mcx-threaded `readTimeLineHistory`/`tliSwitchPoint`; reached
-/// only when a cascading client explicitly requests a historic timeline.
+/// `timeLineHistory = readTimeLineHistory(FlushTLI);
+///  switchpoint = tliSwitchPoint(cmd->timeline, timeLineHistory,
+///                               &sendTimeLineNextTLI);`
+/// for the explicit-client-timeline path of `StartReplication` — a cascading
+/// client requested a historic timeline, so we read FlushTLI's timeline history
+/// and look up where `rqst_tli` switched to its child. Returns
+/// `(switchpoint, sendTimeLineNextTLI)`.
 fn timeline_switch_point_history(
-    _flush_tli: TimeLineID,
-    _rqst_tli: TimeLineID,
+    flush_tli: TimeLineID,
+    rqst_tli: TimeLineID,
 ) -> (XLogRecPtr, TimeLineID) {
-    utils_error::ereport(types_error::ERROR)
-        .errmsg(alloc::string::String::from(
-            "START_REPLICATION ... TIMELINE <historic>: timeline-history \
-             readTimeLineHistory/tliSwitchPoint is not yet ported",
-        ))
-        .finish(types_error::ErrorLocation::new(
-            "walsender.c",
-            0,
-            "StartReplication",
-        ))
-        .expect("ereport(ERROR) historic-timeline-unported");
-    unreachable!()
+    let ctx = mcx::MemoryContext::new("START_REPLICATION timeline history");
+    let history = timeline_seams::read_timeline_history::call(ctx.mcx(), flush_tli)
+        .expect("readTimeLineHistory");
+    timeline_seams::tli_switch_point::call(rqst_tli, &history)
+        .expect("tliSwitchPoint")
 }
 
 /// `static void StartLogicalReplication(StartReplicationCmd *cmd)`.

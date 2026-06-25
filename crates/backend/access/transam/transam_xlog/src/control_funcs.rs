@@ -33,6 +33,8 @@ use ::wal::wal::{RM_XLOG_ID, XLOG_MARK_UNIMPORTANT};
 use ::wal::xlog_consts::WalLevel;
 
 use xloginsert_seams as xloginsert;
+use fd_seams;
+use xlogarchive_seams;
 use lwlock as lwlock;
 use timestamp_seams as timestamp;
 use ::init_small::globals;
@@ -273,6 +275,117 @@ pub fn ReachedEndOfBackup(end_rec_ptr: XLogRecPtr, tli: TimeLineID) -> PgResult<
 
     // LWLockRelease(ControlFileLock);
     lwlock::LWLockRelease(control_file_lock)?;
+    Ok(())
+}
+
+/// `SwitchIntoArchiveRecovery(XLogRecPtr EndRecPtr, TimeLineID replayTLI)`
+/// (xlog.c:6271) — callback from `PerformWalRecovery()` when we switch from
+/// crash recovery to archive recovery mode. Initialize `minRecoveryPoint` to
+/// this record, update the control file's `state` to `DB_IN_ARCHIVE_RECOVERY`,
+/// re-enable local `minRecoveryPoint` tracking, and publish the
+/// `RECOVERY_STATE_ARCHIVE` shared state under `ControlFileLock`.
+pub fn SwitchIntoArchiveRecovery(end_rec_ptr: XLogRecPtr, replay_tli: TimeLineID) -> PgResult<()> {
+    use ::wal::xlog_consts::RecoveryState;
+
+    // LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
+    let control_file_lock = lwlock::main_lock_ref(CONTROL_FILE_LOCK);
+    lwlock::LWLockAcquire(control_file_lock, LW_EXCLUSIVE, globals::MyProcNumber())?;
+
+    // initialize minRecoveryPoint to this record
+    let cf = shmem::control_file_mut();
+    cf.state = ::control::DBState::InArchiveRecovery;
+    if cf.minRecoveryPoint < end_rec_ptr {
+        cf.minRecoveryPoint = end_rec_ptr;
+        cf.minRecoveryPointTLI = replay_tli;
+    }
+    // update local copy
+    crate::redo::set_local_min_recovery_point(cf.minRecoveryPoint, cf.minRecoveryPointTLI);
+
+    // The startup process can update its local copy of minRecoveryPoint from
+    // this point.
+    crate::redo::set_update_min_recovery_point(true);
+
+    UpdateControlFile()?;
+
+    // We update SharedRecoveryState while holding the lock on ControlFileLock
+    // so both states are consistent in shared memory.
+    let ctl = shmem::xlog_ctl();
+    assert!(!ctl.is_null(), "XLogCtl shmem not initialized");
+    // SAFETY: live shmem region, set by XLOGShmemInit.
+    let ctl = unsafe { &*ctl };
+    shmem::spin_lock_acquire(&ctl.info_lck);
+    let ctl_mut = ctl as *const shmem::XLogCtlData as *mut shmem::XLogCtlData;
+    // SAFETY: live shmem region, info_lck held.
+    unsafe { (*ctl_mut).SharedRecoveryState = RecoveryState::Archive };
+    shmem::spin_lock_release(&ctl.info_lck);
+
+    // LWLockRelease(ControlFileLock);
+    lwlock::LWLockRelease(control_file_lock)?;
+    Ok(())
+}
+
+/// `RemoveNonParentXlogFiles(XLogRecPtr switchpoint, TimeLineID newTLI)`
+/// (xlog.c:3960) — after a timeline switch during recovery, remove any WAL
+/// segments in `pg_wal` that are on a timeline OLDER than `newTLI` but whose
+/// segment number is `>=` the first segment on the new timeline (i.e. they are
+/// not part of `newTLI`'s history and are no longer needed for recovery).
+///
+/// Faithful to C except for the recycle optimization: C's `RemoveXlogFile`
+/// first tries to recycle a removable segment as a future log segment
+/// (`InstallXLogFileSegment`) and only `durable_unlink`s it otherwise. That
+/// recycle tail is the same one the sibling `RemoveOldXlogFiles` leaves
+/// unported (see `do_checkpoint.rs` `CreateRestartPoint`), so here we go
+/// straight to `durable_unlink` + `XLogArchiveCleanup`. The observable effect
+/// — stale cross-timeline segments removed — matches C; only the recycle/rename
+/// micro-optimization differs (documented DESIGN_DEBT, same as RemoveOldXlogFiles).
+pub fn RemoveNonParentXlogFiles(switchpoint: XLogRecPtr, new_tli: TimeLineID) -> PgResult<()> {
+    let wal_segment_size = shmem::wal_segment_size();
+
+    // Initialize info about where to begin the work. (C also computes a
+    // recycleSegNo for the recycle path we skip.)
+    let switch_log_seg_no = crate::XLByteToPrevSeg(switchpoint, wal_segment_size);
+
+    // Construct the filename of the last segment to be kept.
+    let switchseg = crate::XLogFileName(new_tli, switch_log_seg_no, wal_segment_size);
+
+    let _ = ::utils_error::elog(
+        ::types_error::DEBUG2,
+        alloc::format!("attempting to remove WAL segments newer than log file {switchseg}"),
+    );
+
+    // AllocateDir(XLOGDIR) + ReadDir loop.
+    let names = fd_seams::read_dir_names::call("pg_wal")?;
+    let switch_bytes = switchseg.as_bytes();
+    for name in &names {
+        // Ignore files that are not XLOG segments.
+        if !crate::IsXLogFileName(name) {
+            continue;
+        }
+
+        let name_bytes = name.as_bytes();
+        // Remove files on an older timeline than the new one (first 8 chars,
+        // the TLI, compare less) but with a segment number >= the new
+        // timeline's first segment (chars 8.., the segment, compare greater).
+        // Mirrors C's `strncmp(d_name, switchseg, 8) < 0 &&
+        //               strcmp(d_name + 8, switchseg + 8) > 0`.
+        if name_bytes[..8] < switch_bytes[..8] && name_bytes[8..] > switch_bytes[8..] {
+            // If the file has already been marked .ready, don't remove it yet:
+            // it isn't required for recovery, but it's safer to let it be
+            // archived and removed later.
+            if !xlogarchive_seams::xlog_archive_is_ready::call(name) {
+                let _ = ::utils_error::elog(
+                    ::types_error::DEBUG2,
+                    alloc::format!("removing write-ahead log file \"{name}\""),
+                );
+                let path = alloc::format!("pg_wal/{name}");
+                // durable_unlink logs its own message on failure; ignore the
+                // result and continue, as C's RemoveXlogFile does.
+                let _ = fd_seams::durable_unlink::call(&path);
+                xlogarchive_seams::xlog_archive_cleanup::call(name);
+            }
+        }
+    }
+
     Ok(())
 }
 

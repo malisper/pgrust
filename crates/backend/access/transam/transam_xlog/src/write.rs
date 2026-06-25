@@ -581,7 +581,8 @@ pub fn UpdateMinRecoveryPoint(lsn: XLogRecPtr, force: bool) -> PgResult<()> {
     } else if force || local_min < lsn {
         // To avoid updating the control file too often, advance it all the way
         // to the last record being replayed. (xlog.c:2766)
-        let (new_min, new_min_tli) = xlogrecovery_seams::get_xlog_replay_rec_ptr_tli::call();
+        let (new_min, new_min_tli) =
+            xlogrecovery_seams::get_current_replay_rec_ptr_tli::call();
         if !force && new_min < lsn {
             ::utils_error::ereport(::types_error::WARNING)
                 .errmsg_internal(std::format!(

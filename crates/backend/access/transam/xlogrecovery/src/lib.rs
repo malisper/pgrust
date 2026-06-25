@@ -131,6 +131,7 @@ pub fn init_seams() {
     // writes of the `XLogRecoveryCtl` shared struct).
     seams::get_xlog_replay_rec_ptr::set(shmem::get_xlog_replay_rec_ptr);
     seams::get_xlog_replay_rec_ptr_tli::set(shmem::get_xlog_replay_rec_ptr);
+    seams::get_current_replay_rec_ptr_tli::set(shmem::get_current_replay_rec_ptr);
     seams::get_xlog_replay_recptr::set(shmem::get_xlog_replay_recptr_only);
     seams::get_current_chunk_replay_start_time::set(shmem::get_current_chunk_replay_start_time);
     seams::get_latest_x_time::set(shmem::get_latest_xtime);
@@ -188,6 +189,12 @@ pub fn init_seams() {
     seams::recovery_target_tli::set(orchestrator::recovery_target_tli);
     seams::reached_consistency::set(orchestrator::reached_consistency);
     seams::standby_mode::set(orchestrator::standby_mode);
+    // `StandbyMode` is also re-declared as a seam in `transam_xlog_seams` (the
+    // alias xlogarchive / replication_slot read through). It is backed by the
+    // same xlogrecovery file-static, so install it here from the same getter —
+    // otherwise xlogarchive's RestoreArchivedFile / slot WAL-keep checks panic
+    // on the uninstalled seam during standby/archive-recovery boot.
+    transam_xlog_seams::standby_mode::set(orchestrator::standby_mode);
     // recoveryRestoreCommand (xlogrecovery.c global) — RestoreArchivedFile reads
     // it to build the restore command. Backed by the startup process's recovery
     // state; without this the standby/archive-recovery boot panics on the

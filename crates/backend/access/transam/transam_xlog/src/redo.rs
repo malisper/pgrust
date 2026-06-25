@@ -259,7 +259,7 @@ fn redo_end_of_recovery(record: &mut XLogReaderState<'_>) -> PgResult<()> {
 /// ereport(PANIC, ...)` — the per-arm timeline cross-check (xlog.c:8423/8489/8527).
 fn check_replay_tli(tli: TimeLineID, kind: &str) -> PgResult<()> {
     let (_replay_ptr, replay_tli) =
-        xlogrecovery_seams::get_xlog_replay_rec_ptr_tli::call();
+        xlogrecovery_seams::get_current_replay_rec_ptr_tli::call();
     if tli != replay_tli {
         return ereport(PANIC)
             .errmsg(alloc::format!(
@@ -419,7 +419,7 @@ fn redo_parameter_change(record: &mut XLogReaderState<'_>) -> PgResult<()> {
     let local_min = LOCAL_MIN_RECOVERY_POINT.with(|c| c.get());
     if local_min != crate::InvalidXLogRecPtr && local_min < lsn {
         let (_replay_ptr, replay_tli) =
-            xlogrecovery_seams::get_xlog_replay_rec_ptr_tli::call();
+            xlogrecovery_seams::get_current_replay_rec_ptr_tli::call();
         let cf = crate::shmem::control_file_mut();
         cf.minRecoveryPoint = lsn;
         cf.minRecoveryPointTLI = replay_tli;

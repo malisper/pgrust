@@ -24,6 +24,7 @@ pg_strong_random = { path = "../../../../port/pg_strong_random" }
 s_lock = { path = "../../../storage/lmgr/s_lock" }
 ipc_shmem_seams = { path = "../../../storage/ipc/ipc_shmem_seams" }
 fd_seams = { path = "../../../storage/file/fd_seams" }
+xlogarchive_seams = { path = "../xlogarchive_seams" }
 pgstat_io_seams = { path = "../../../utils/activity/pgstat_io_seams" }
 lwlock_seams = { path = "../../../storage/lmgr/lwlock_seams" }
 lwlock = { path = "../../../storage/lmgr/lwlock" }

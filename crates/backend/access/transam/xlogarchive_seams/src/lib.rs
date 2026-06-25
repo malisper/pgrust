@@ -48,3 +48,15 @@ seam_core::seam!(
     /// written file. Can `ereport` on file-create failure.
     pub fn xlog_archive_notify(fname: String) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `XLogArchiveIsReady(xlog)` (xlogarchive.c) — true if the segment has a
+    /// pending `archive_status/<xlog>.ready` notification. Pure `stat`.
+    pub fn xlog_archive_is_ready(xlog: &str) -> bool
+);
+
+seam_core::seam!(
+    /// `XLogArchiveCleanup(xlog)` (xlogarchive.c) — remove the segment's
+    /// `archive_status/<xlog>.{done,ready}` markers (failures ignored, as in C).
+    pub fn xlog_archive_cleanup(xlog: &str)
+);

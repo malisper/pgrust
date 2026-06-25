@@ -794,4 +794,6 @@ pub fn init_seams() {
     inward::keep_file_restored_from_archive::set(keep_file_restored_from_archive);
     inward::xlog_archive_force_done::set(xlog_archive_force_done);
     inward::xlog_archive_notify::set(xlog_archive_notify);
+    inward::xlog_archive_is_ready::set(XLogArchiveIsReady);
+    inward::xlog_archive_cleanup::set(XLogArchiveCleanup);
 }

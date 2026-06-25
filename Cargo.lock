@@ -24219,6 +24219,7 @@ dependencies = [
  "wal",
  "wasm-libc-shim",
  "xlogarchive_seams",
+ "xlogrecovery_seams",
 ]
 
 [[package]]

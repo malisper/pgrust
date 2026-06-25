@@ -681,13 +681,21 @@ pub fn tliSwitchPoint(
 pub fn init_seams() {
     use timeline_seams as seams;
     // `read_timeline_history(mcx, target_tli)` is the live cyclic-consumer
-    // surface (xlogutils `XLogReadDetermineTimeline`, walsummarizer): these
-    // run during normal operation / streaming, where `ArchiveRecoveryRequested`
-    // is its default `false` (it is only set true during archive-recovery
-    // startup in xlogrecovery.c). So the 2-arg seam is the pg_wal-path reader;
-    // it threads `archive_recovery_requested = false` into the full impl.
+    // surface (xlogutils `XLogReadDetermineTimeline`, walsummarizer, and the
+    // recovery page-read driver's `XLogFileReadAnyTLI`). C's
+    // `readTimeLineHistory` reads the `ArchiveRecoveryRequested` global
+    // unconditionally, so thread the live value here: during normal operation /
+    // streaming it is `false` (pg_wal-path reader), but during archive-recovery
+    // startup it is `true`, which is what lets `XLogFileReadAnyTLI` restore the
+    // target timeline's history file from the archive and discover the parent
+    // timelines (without it, a PITR/archive node only ever sees the target TLI
+    // and cannot locate a checkpoint that lives on a parent timeline).
     seams::read_timeline_history::set(|mcx, target_tli| {
-        readTimeLineHistory(mcx, target_tli, false)
+        readTimeLineHistory(
+            mcx,
+            target_tli,
+            xlogrecovery_seams::archive_recovery_requested::call(),
+        )
     });
     seams::exists_timeline_history::set(|mcx, probe_tli, arr| {
         existsTimeLineHistory(probe_tli, arr, mcx)

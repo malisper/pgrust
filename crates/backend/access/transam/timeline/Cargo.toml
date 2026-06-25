@@ -16,6 +16,7 @@ types_error = { path = "../../../../_support/types/types_error" }
 wal = { path = "../../../../_support/types/wal" }
 
 timeline_seams = { path = "../timeline_seams" }
+xlogrecovery_seams = { path = "../xlogrecovery_seams" }
 xlogarchive_seams = { path = "../xlogarchive_seams" }
 fd_seams = { path = "../../../storage/file/fd_seams" }
 file_seams = { path = "../../../storage/file/file_seams" }

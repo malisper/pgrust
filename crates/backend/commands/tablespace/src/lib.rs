@@ -1857,6 +1857,56 @@ pub fn init_seams() {
         let ctx = ::mcx::MemoryContext::new("GetDefaultTablespace");
         GetDefaultTablespace(ctx.mcx(), relpersistence, false)
     });
+
+    // --- GUC check/assign hooks (guc_tables hook slots) ----------------------
+    // `default_tablespace` / `temp_tablespaces` carry check_hook + assign_hook
+    // pointers in guc_tables.c. Their bodies live in this unit, so install them
+    // into the engine's hook slots — otherwise setting either GUC (e.g. a
+    // `temp_tablespaces = ...` line in postgresql.conf) panics on the
+    // uninstalled slot before the postmaster reaches "ready to accept
+    // connections".
+    ::guc_tables::hooks::check_default_tablespace
+        .install(check_default_tablespace_hook);
+    ::guc_tables::hooks::check_temp_tablespaces.install(check_temp_tablespaces_hook);
+    ::guc_tables::hooks::assign_temp_tablespaces.install(assign_temp_tablespaces_hook);
+}
+
+/// Slot-conformant wrapper for [`check_default_tablespace`]. The engine's hook
+/// slot passes the new value as `&mut Option<String>`; the body wants a `&str`
+/// in a fresh memory context (catalog lookups).
+fn check_default_tablespace_hook(
+    newval: &mut Option<String>,
+    _extra: &mut Option<::guc_tables::GucHookExtra>,
+    source: GucSource,
+) -> PgResult<bool> {
+    let ctx = ::mcx::MemoryContext::new("check_default_tablespace");
+    let val = newval.as_deref().unwrap_or("");
+    check_default_tablespace(ctx.mcx(), val, source)
+}
+
+/// Slot-conformant wrapper for [`check_temp_tablespaces`]. Translates the typed
+/// `TempTablespacesExtra` into the engine's type-erased `GucHookExtra` box.
+fn check_temp_tablespaces_hook(
+    newval: &mut Option<String>,
+    extra: &mut Option<::guc_tables::GucHookExtra>,
+    source: GucSource,
+) -> PgResult<bool> {
+    let ctx = ::mcx::MemoryContext::new("check_temp_tablespaces");
+    let val = newval.as_deref().unwrap_or("");
+    let mut typed: Option<TempTablespacesExtra> = None;
+    let ok = check_temp_tablespaces(ctx.mcx(), val, &mut typed, source)?;
+    *extra = typed.map(|e| -> ::guc_tables::GucHookExtra { alloc::boxed::Box::new(e) });
+    Ok(ok)
+}
+
+/// Slot-conformant wrapper for [`assign_temp_tablespaces`]. Downcasts the
+/// engine's type-erased `GucHookExtra` back to `TempTablespacesExtra`.
+fn assign_temp_tablespaces_hook(
+    newval: Option<&str>,
+    extra: Option<&::guc_tables::GucHookExtra>,
+) {
+    let typed = extra.and_then(|e| e.downcast_ref::<TempTablespacesExtra>());
+    assign_temp_tablespaces(newval.unwrap_or(""), typed);
 }
 
 /// `case T_CreateTableSpaceStmt: CreateTableSpace(stmt)` (utility.c). Extract the

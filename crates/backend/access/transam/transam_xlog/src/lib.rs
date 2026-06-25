@@ -1016,6 +1016,8 @@ pub fn init_seams() {
     s::request_xlog_switch::set(control_funcs::RequestXLogSwitch);
     s::update_full_page_writes::set(control_funcs::UpdateFullPageWrites);
     s::reached_end_of_backup::set(control_funcs::ReachedEndOfBackup);
+    s::switch_into_archive_recovery::set(control_funcs::SwitchIntoArchiveRecovery);
+    s::remove_non_parent_xlog_files::set(control_funcs::RemoveNonParentXlogFiles);
     s::allow_cascade_replication::set(control_funcs::AllowCascadeReplication);
     {
         use walreceiverfuncs_seams as wf;
