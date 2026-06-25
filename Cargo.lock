@@ -1705,6 +1705,7 @@ dependencies = [
  "wal",
  "walsender_seams",
  "walsummarizer_seams",
+ "wasm-libc-shim",
  "xlogbackup",
  "zstd",
 ]

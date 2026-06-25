@@ -713,6 +713,15 @@ mod imp {
     pub unsafe fn getuid() -> uid_t {
         WASM_UID
     }
+    /// Fixed effective group id for the single-user wasm engine (mirrors
+    /// `WASM_UID`).
+    pub const WASM_GID: gid_t = 1000;
+    pub unsafe fn getegid() -> gid_t {
+        WASM_GID
+    }
+    pub unsafe fn getgid() -> gid_t {
+        WASM_GID
+    }
     pub unsafe fn setenv(_n: *const c_char, _v: *const c_char, _o: c_int) -> c_int {
         0
     }

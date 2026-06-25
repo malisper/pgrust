@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 libc = "0.2"
+wasm-libc-shim = { path = "../../../wasm-libc-shim" }
 mcx = { path = "../../../_support/mcx" }
 seam_core = { path = "../../../_support/seam/seam_core" }
 types_core = { path = "../../../_support/types/types_core" }
