@@ -156,6 +156,15 @@ pub fn push(allowed_modes: i32) -> MatSrfGuard {
 /// reading/writing `fcinfo->resultinfo`). `None` when no SRF dispatch is on this
 /// thread's stack (the callee was reached as an ordinary scalar call -- C's
 /// `rsinfo == NULL`).
+///
+/// RE-ENTRANCY INVARIANT (TD-REFCELL-REENTRANCY): this holds `MAT_SRF_STACK`'s
+/// `borrow_mut()` across `f`, so `f` MUST NOT re-enter this cell — it must not
+/// call `push`/`with_top`/`take`/`is_active`, nor dispatch a nested SRF whose
+/// callee would. Every in-tree caller's `f` is emit-only (it writes rows/desc
+/// into the sink and returns), so the cell is provably non-re-entered today and
+/// the panicking `borrow_mut()` is sound. A future value-per-call SRF that
+/// recurses into another SRF from inside the sink closure would need this
+/// converted to a `try_borrow_mut() -> Err(PgError)` seatbelt.
 pub fn with_top<R>(f: impl FnOnce(Option<&mut MatSrfSink>) -> R) -> R {
     MAT_SRF_STACK.with(|s| {
         let mut stack = s.borrow_mut();

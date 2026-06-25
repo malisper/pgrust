@@ -30,7 +30,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::result_large_err)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
@@ -224,8 +224,6 @@ struct Globals {
     /// out is `next_shared_token`.
     shared_registry: BTreeMap<SharedToken, Arc<ParallelApplyWorkerShared>>,
     next_shared_token: SharedToken,
-    /// `volatile sig_atomic_t ParallelApplyMessagePending` (C line 245).
-    parallel_apply_message_pending: bool,
     /// `static List *subxactlist = NIL;` (C line 255) — a list of subtransaction
     /// xids maintained by this file. In C it is allocated in
     /// `TopTransactionContext` and freed at transaction end; here it is a plain
@@ -242,7 +240,6 @@ impl Globals {
             my_parallel_shared: None,
             shared_registry: BTreeMap::new(),
             next_shared_token: 1,
-            parallel_apply_message_pending: false,
             subxactlist: Vec::new(),
         }
     }
@@ -250,6 +247,22 @@ impl Globals {
 
 thread_local! {
     static GLOBALS: RefCell<Globals> = RefCell::new(Globals::seed());
+
+    /// `volatile sig_atomic_t ParallelApplyMessagePending = false;`
+    /// (applyparallelworker.c:245).
+    ///
+    /// In C this is a standalone process-global atomic flag, NOT part of any
+    /// struct guarded by a lock — `HandleParallelApplyMessageInterrupt()` runs
+    /// in a signal handler and sets it directly. It is deliberately kept OUT of
+    /// the `RefCell`-guarded [`Globals`]: the signal handler can fire while
+    /// mainline code (any `with_globals` block, or one that crosses a
+    /// `CHECK_FOR_INTERRUPTS`) already holds a `GLOBALS.borrow_mut()`.
+    /// Re-entering that borrow from the handler would panic
+    /// `already borrowed: BorrowMutError` — the same bug class already fixed for
+    /// `ParallelMessagePending` in `transam_parallel`. A plain [`Cell`] is
+    /// reentrancy-safe (no borrow tracking), matching C's `volatile
+    /// sig_atomic_t` semantics.
+    static PARALLEL_APPLY_MESSAGE_PENDING: Cell<bool> = const { Cell::new(false) };
 }
 
 #[inline]
@@ -271,11 +284,15 @@ pub fn pa_winfo_serialize_changes(winfo: WorkerHandle) -> bool {
 
 /// Read `ParallelApplyMessagePending`.
 pub fn parallel_apply_message_pending() -> bool {
-    with_globals(|g| g.parallel_apply_message_pending)
+    PARALLEL_APPLY_MESSAGE_PENDING.with(|c| c.get())
 }
 
 fn set_parallel_apply_message_pending(v: bool) {
-    with_globals(|g| g.parallel_apply_message_pending = v);
+    // Signal-handler-safe: a plain `Cell` store mirrors C's `volatile
+    // sig_atomic_t` write and never takes a `borrow_mut()`, so the
+    // `HandleParallelApplyMessageInterrupt` signal handler can set this even
+    // while mainline code holds the `GLOBALS` borrow.
+    PARALLEL_APPLY_MESSAGE_PENDING.with(|c| c.set(v));
 }
 
 /// Whether `MyParallelShared` has been set (worker side).
