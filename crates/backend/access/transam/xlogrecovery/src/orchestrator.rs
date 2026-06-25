@@ -1100,6 +1100,28 @@ pub(crate) fn archive_cleanup_command(mcx: Mcx<'_>) -> Option<PgString<'_>> {
     s.try_push_str(&cmd).expect("archive_cleanup_command");
     Some(s)
 }
+
+/// Read for the `primary_conninfo` seam — the configured `primary_conninfo`
+/// GUC (`PrimaryConnInfo`; xlogrecovery.c:98), copied into `mcx` (the C call
+/// sites `pstrdup` it). C never returns NULL here — the boot value is `""` —
+/// so an unset/empty GUC yields an empty string, matching `StartupRereadConfig`
+/// (postmaster_startup.c) which compares the conninfo before/after a SIGHUP.
+pub(crate) fn primary_conninfo(mcx: Mcx<'_>) -> PgResult<PgString<'_>> {
+    let cmd = crate::gucvars::primary_conn_info().unwrap_or_default();
+    let mut s = PgString::new_in(mcx);
+    s.try_push_str(&cmd)?;
+    Ok(s)
+}
+
+/// Read for the `primary_slot_name` seam — the configured `primary_slot_name`
+/// GUC (`PrimarySlotName`; xlogrecovery.c:99), copied into `mcx`. Like
+/// `primary_conninfo`, C never returns NULL (boot `""`).
+pub(crate) fn primary_slot_name(mcx: Mcx<'_>) -> PgResult<PgString<'_>> {
+    let name = crate::gucvars::primary_slot_name().unwrap_or_default();
+    let mut s = PgString::new_in(mcx);
+    s.try_push_str(&name)?;
+    Ok(s)
+}
 // --- File-system helpers (the C stat/unlink/AllocateFile/pg_fsync/durable_rename
 //     calls), routed through the fd unit's seams. ---
 

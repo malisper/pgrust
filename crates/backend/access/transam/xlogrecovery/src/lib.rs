@@ -149,6 +149,15 @@ pub fn init_seams() {
     seams::hot_standby_active::set(shmem::hot_standby_active);
     seams::startup_request_wal_receiver_restart::set(shmem::startup_request_wal_receiver_restart);
 
+    // The streaming-replication GUC readers the startup process consults in
+    // `StartupRereadConfig` (postmaster_startup.c) on every SIGHUP to decide
+    // whether a critical walreceiver option changed.  Without these the standby
+    // startup process panics ("seam not installed") on the first config reload
+    // and the node dies — which leaves a synchronous primary waiting forever.
+    seams::primary_conninfo::set(orchestrator::primary_conninfo);
+    seams::primary_slot_name::set(orchestrator::primary_slot_name);
+    seams::wal_receiver_create_temp_slot::set(gucvars::wal_receiver_create_temp_slot);
+
     // `XLogRequestWalReceiverReply()` is owned by xlogrecovery.c; its seam now
     // lives in this unit's own -seams crate (moved off walreceiverfuncs-seams,
     // where it had been parked as a layering convenience + allowlist debt).
