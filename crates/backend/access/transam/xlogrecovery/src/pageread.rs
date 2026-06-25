@@ -654,6 +654,22 @@ fn wait_for_wal_to_become_available(
             XLogSource::Stream => {
                 debug_assert!(st.standby_mode);
 
+                // C reads the live `PrimaryConnInfo` / `PrimarySlotName` GUC
+                // globals when (re)requesting streaming (see the
+                // `RequestXLogStreaming(tli, ptr, PrimaryConnInfo,
+                // PrimarySlotName, ...)` call in xlogrecovery.c). `StartupRereadConfig`
+                // updates those GUCs on SIGHUP and flags a walreceiver restart, so
+                // the restarted receiver must pick up the new values. These `st`
+                // fields are only a per-recovery snapshot taken at init; refresh
+                // them from the live GUCs here so a `primary_slot_name` /
+                // `primary_conninfo` change applied via reload (no restart) takes
+                // effect — otherwise a cascaded standby reconnects without its
+                // configured slot and hot_standby_feedback never reaches the slot.
+                st.primary_conn_info = crate::gucvars::primary_conn_info().unwrap_or_default();
+                st.primary_slot_name = crate::gucvars::primary_slot_name().unwrap_or_default();
+                st.wal_receiver_create_temp_slot =
+                    crate::gucvars::wal_receiver_create_temp_slot();
+
                 // Shutdown walreceiver if a restart was requested.
                 if crate::shmem::pending_wal_rcv_restart() && !start_wal_receiver {
                     walrcv_seam::xlog_shutdown_wal_rcv::call();

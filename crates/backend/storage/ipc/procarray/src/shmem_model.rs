@@ -218,6 +218,61 @@ pub struct ComputeXidHorizonsResult {
     pub temp_oldest_nonremovable: TransactionId,
 }
 
+/// A per-process pointer + length view over a genuinely-shared (`ShmemAlloc`)
+/// flat array, used for the hot-standby `KnownAssignedXids` ring and its
+/// validity bitmap. Mirrors C's `static TransactionId *KnownAssignedXids;` /
+/// `static bool *KnownAssignedXidsValid;`: the pointer is per-process (set by
+/// `ProcArrayShmemInit` and inherited across `fork`), the target memory is
+/// shared, so writes by the startup process are visible to every backend. The
+/// cursor bounds (`head`/`tail`/`num`/`max`) live in the shared `ProcArrayStruct`.
+///
+/// `Deref`/`DerefMut` expose a `[T]` of length `len`, so existing call sites
+/// (`kax.borrow()[i]`, `kax.borrow_mut()[i] = v`, `&kax.borrow()[..]`) work
+/// unchanged. All accesses run under `ProcArrayLock`, exactly as in C.
+#[derive(Clone, Copy, Debug)]
+pub struct KaxArray<T> {
+    ptr: *mut T,
+    len: usize,
+}
+
+// SAFETY: the pointer addresses a cluster-wide shmem block valid for the process
+// lifetime; all element access is serialized by `ProcArrayLock` as in C. The
+// thread_local holding it is per-backend.
+unsafe impl<T> Send for KaxArray<T> {}
+
+impl<T> KaxArray<T> {
+    /// The unattached sentinel (before `ProcArrayShmemInit` wires the pointer).
+    pub const EMPTY: Self = KaxArray {
+        ptr: core::ptr::null_mut(),
+        len: 0,
+    };
+}
+
+impl<T> core::ops::Deref for KaxArray<T> {
+    type Target = [T];
+    #[inline]
+    fn deref(&self) -> &[T] {
+        if self.ptr.is_null() {
+            return &[];
+        }
+        // SAFETY: `ptr`/`len` describe the shared block carved by
+        // `ProcArrayShmemInit`; reads stay in bounds and are serialized by
+        // `ProcArrayLock`.
+        unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl<T> core::ops::DerefMut for KaxArray<T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [T] {
+        if self.ptr.is_null() {
+            return &mut [];
+        }
+        // SAFETY: see `deref`; callers hold `ProcArrayLock` for the mutation.
+        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // File-static process-locals (procarray.c top-of-file `static` declarations).
 // Inherited at fork as per-process views; modelled as backend thread-locals.
@@ -231,12 +286,21 @@ thread_local! {
     /// backend.
     pub static PROC_ARRAY: RefCell<Option<ProcArrayPtr>> = const { RefCell::new(None) };
 
-    /// `static TransactionId *KnownAssignedXids;` — the hot-standby ring buffer
-    /// (lives in the shmem region; the cursor bounds are in `ProcArrayStruct`).
-    pub static KNOWN_ASSIGNED_XIDS: RefCell<Vec<TransactionId>> = const { RefCell::new(Vec::new()) };
+    /// `static TransactionId *KnownAssignedXids;` — the hot-standby ring buffer.
+    /// This is a per-process POINTER into a genuinely-shared `ShmemAlloc` block
+    /// (set by `ProcArrayShmemInit`): the startup process appends/removes xids
+    /// and every backend's `GetSnapshotData` must observe those writes, so the
+    /// payload itself must live in the `MAP_SHARED` segment, not a per-process
+    /// `Vec`. (A `Vec`'s backing buffer would be process-private heap — the
+    /// startup process's adds would be invisible to backends, so a standby
+    /// snapshot would miss in-progress recovery xids; cf. the `pgprocnos`
+    /// flexible-array comment above.)
+    pub static KNOWN_ASSIGNED_XIDS: RefCell<KaxArray<TransactionId>> =
+        const { RefCell::new(KaxArray::EMPTY) };
     /// `static bool *KnownAssignedXidsValid;` — the validity bitmap parallel to
-    /// `KnownAssignedXids`.
-    pub static KNOWN_ASSIGNED_XIDS_VALID: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
+    /// `KnownAssignedXids`; likewise a per-process pointer into shared memory.
+    pub static KNOWN_ASSIGNED_XIDS_VALID: RefCell<KaxArray<bool>> =
+        const { RefCell::new(KaxArray::EMPTY) };
 
     /// `static GlobalVisState GlobalVisSharedRels;`
     pub static GLOBAL_VIS_SHARED_RELS: RefCell<GlobalVisState> =
@@ -425,29 +489,60 @@ pub fn ProcArrayShmemInit() -> PgResult<()> {
     // the `backend-storage-lmgr-proc-seams` accessors keyed by `ProcNumber`,
     // so there is no per-process base pointer to cache (no-op).
 
-    // Create or attach to the KnownAssignedXids arrays too, if needed.
+    // Create or attach to the KnownAssignedXids arrays too, if needed. These are
+    // genuinely-shared `ShmemAlloc` blocks (C: `ShmemInitStruct`): the startup
+    // process appends/removes ring entries and every backend's snapshot must
+    // observe those writes, so the payload lives in the `MAP_SHARED` segment and
+    // the process-locals hold per-process POINTERS at it (not owned `Vec`s).
     if guc_tables::vars::EnableHotStandby.read() {
-        let (_kax, _) = shmem::shmem_init_struct::call(
+        let (kax_addr, kax_found) = shmem::shmem_init_struct::call(
             "KnownAssignedXids",
             shmem::mul_size::call(
                 core::mem::size_of::<TransactionId>() as Size,
                 total_max_cached_subxids as Size,
             )?,
         )?;
-        let (_kaxv, _) = shmem::shmem_init_struct::call(
+        let (kaxv_addr, kaxv_found) = shmem::shmem_init_struct::call(
             "KnownAssignedXidsValid",
             shmem::mul_size::call(
                 core::mem::size_of::<bool>() as Size,
                 total_max_cached_subxids as Size,
             )?,
         )?;
-        // The ring + validity bitmap themselves are the genuinely-shared
-        // payload modelled as the process-local `KNOWN_ASSIGNED_XIDS` /
-        // `KNOWN_ASSIGNED_XIDS_VALID` views sized to the same cap.
-        KNOWN_ASSIGNED_XIDS
-            .with(|k| *k.borrow_mut() = vec![0; total_max_cached_subxids as usize]);
-        KNOWN_ASSIGNED_XIDS_VALID
-            .with(|k| *k.borrow_mut() = vec![false; total_max_cached_subxids as usize]);
+        let kax_ptr = kax_addr as *mut TransactionId;
+        let kaxv_ptr = kaxv_addr as *mut bool;
+
+        // Zero the freshly-carved blocks (C relies on shmem being zeroed; on the
+        // allocator path that is `ShmemInitStruct`'s `memset`). Only the first
+        // process to create the block initializes it; attachers reuse it.
+        if !kax_found {
+            // SAFETY: the block is `total_max_cached_subxids` `TransactionId`s.
+            unsafe {
+                core::ptr::write_bytes(kax_ptr, 0, total_max_cached_subxids as usize);
+            }
+        }
+        if !kaxv_found {
+            // SAFETY: the block is `total_max_cached_subxids` `bool`s.
+            unsafe {
+                core::ptr::write_bytes(kaxv_ptr, 0, total_max_cached_subxids as usize);
+            }
+        }
+
+        // Record per-process pointers at the shared blocks (C's
+        // `KnownAssignedXids = ...; KnownAssignedXidsValid = ...;` run in every
+        // process, allocator or attacher).
+        KNOWN_ASSIGNED_XIDS.with(|k| {
+            *k.borrow_mut() = KaxArray {
+                ptr: kax_ptr,
+                len: total_max_cached_subxids as usize,
+            }
+        });
+        KNOWN_ASSIGNED_XIDS_VALID.with(|k| {
+            *k.borrow_mut() = KaxArray {
+                ptr: kaxv_ptr,
+                len: total_max_cached_subxids as usize,
+            }
+        });
     }
 
     Ok(())
