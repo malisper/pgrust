@@ -11,19 +11,17 @@
 //! seams). It is the body the `create_checkpoint` / `shutdown_xlog` seams
 //! install — the #157 WAL-checkpoint-record keystone.
 //!
-//! Control flow is 1:1 with C `CreateCheckPoint`. The old-WAL-recycle tail now
-//! computes `KeepLogSeg` and calls `InvalidateObsoleteReplicationSlots` over the
-//! live `XLogCtl`/slot substrate, so a primary CHECKPOINT enforces
-//! `max_slot_wal_keep_size` and the slot idle-timeout. The genuine omissions are
-//! all housekeeping-only and behaviour-preserving (none were performed by the
-//! prior graceful-degradation seam either), each marked inline:
-//!   * the `RemoveOldXlogFiles` unlink/recycle pass — owned by the not-yet-ported
-//!     xlog directory driver; skipping the unlink only retains more WAL than
-//!     strictly necessary (the durability-relevant slot-invalidation half of the
-//!     recycle tail IS performed).
-//!   * `UpdateCheckPointDistanceEstimate` / `WakeupWalSummarizer` /
-//!     `TruncateSUBTRANS` — optimization / summarizer / pg_subtrans-trim, not
-//!     durability-critical.
+//! Control flow is 1:1 with C `CreateCheckPoint`. The old-WAL-recycle tail
+//! computes `KeepLogSeg`, calls `InvalidateObsoleteReplicationSlots`, and runs
+//! the `RemoveOldXlogFiles` recycle/unlink pass over the live `XLogCtl`/slot/fd
+//! substrate, so a primary CHECKPOINT enforces `max_slot_wal_keep_size` + the
+//! slot idle-timeout AND physically frees the now-obsolete WAL segments
+//! (recycling them into future segments when `wal_recycle` is on, else
+//! `durable_unlink`). The remaining omissions are housekeeping-only and
+//! behaviour-preserving (none were performed by the prior graceful-degradation
+//! seam either), each marked inline:
+//!   * `WakeupWalSummarizer` / `TruncateSUBTRANS` — summarizer / pg_subtrans-trim,
+//!     not durability-critical.
 //! Everything that governs durability (the record write, the redo point, the
 //! control-file update, the ckptFullXid publish) is performed faithfully.
 
@@ -377,6 +375,13 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
     // Let smgr do post-checkpoint cleanup (deleting old files).
     sync_seams::sync_post_checkpoint::call()?;
 
+    // Update the average distance between checkpoints if the prior checkpoint
+    // exists. This feeds XLOGfileslop's recycle horizon below (xlog.c:7370-7372).
+    if _prior_redo_ptr != InvalidXLogRecPtr {
+        let redo_rec_ptr = crate::shmem::redo_rec_ptr_cached();
+        update_check_point_distance_estimate(redo_rec_ptr.wrapping_sub(_prior_redo_ptr));
+    }
+
     // INJECTION_POINT("checkpoint-before-old-wal-removal", NULL) — tests
     // (046_checkpoint_logical_slot, 047_checkpoint_physical_slot,
     // 041_checkpoint_at_promote) attach a 'wait' here to pause the checkpoint
@@ -412,21 +417,24 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
     log_seg_no = log_seg_no.wrapping_sub(1);
 
     // RemoveOldXlogFiles(_logSegNo, RedoRecPtr, recptr, checkPoint.ThisTimeLineID)
-    // (xlog.c:7397) — the WAL recycle/unlink pass is owned by the not-yet-ported
-    // xlog directory driver; like the live restartpoint path (CreateRestartPoint),
-    // skipping the unlink only retains more WAL than strictly necessary and is
-    // behaviour-preserving. The slot-invalidation above (the durability-relevant
-    // half) is performed faithfully.
-    let _ = log_seg_no;
+    // (xlog.c:7397) — recycle or physically remove all WAL segments older than the
+    // computed floor. The recycle floor is RedoRecPtr (== checkPoint.redo) and the
+    // recycle horizon comes from `recptr` (the checkpoint-record end LSN); this is
+    // what makes a CHECKPOINT actually free disk after a slot has been invalidated
+    // past max_slot_wal_keep_size, instead of merely flagging the slot.
+    let mut stats = crate::checkpoint::CheckpointStats::default();
+    remove_old_xlog_files(
+        log_seg_no,
+        redo_rec_ptr,
+        recptr,
+        check_point.ThisTimeLineID,
+        &mut stats,
+    )?;
 
     // Make more log segments if needed. (xlog.c:7400-7402 — done after recycling
     // old segments, since that may supply some of the needed files.)
     if !shutdown {
-        crate::write::PreallocXlogFiles(
-            recptr,
-            check_point.ThisTimeLineID,
-            &mut crate::checkpoint::CheckpointStats::default(),
-        )?;
+        crate::write::PreallocXlogFiles(recptr, check_point.ThisTimeLineID, &mut stats)?;
     }
 
     // TruncateSUBTRANS(GetOldestTransactionIdConsideredRunning()) (xlog.c:7411) —
@@ -538,6 +546,182 @@ fn keep_log_seg(recptr: XLogRecPtr, log_seg_no: ::types_core::XLogSegNo, wal_seg
         walsummarizer_seams::get_oldest_unsummarized_lsn::call().unwrap_or(InvalidXLogRecPtr),
         vars::wal_keep_size_mb.read(),
     )
+}
+
+// ===========================================================================
+// Old-WAL recycle/unlink: RemoveOldXlogFiles / RemoveXlogFile /
+// UpdateLastRemovedPtr / XLOGfileslop (xlog.c:3884 / 4028 / 3831 / 2254 / 6848).
+// ===========================================================================
+
+/// `static double CheckPointDistanceEstimate` (xlog.c:227) — the bump-fast /
+/// decay-slow moving average of the inter-checkpoint WAL distance, used by
+/// `XLOGfileslop` to size the recycle horizon. C keeps it in a file-scope
+/// `static double`; this backend-local atomic (an `f64` bit pattern) is the same
+/// per-process state — the checkpointer (or startup process for restartpoints)
+/// is the only writer, and reads are its own.
+static CHECK_POINT_DISTANCE_ESTIMATE: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// `UpdateCheckPointDistanceEstimate(uint64 nbytes)` (xlog.c:6848) — update the
+/// moving average of WAL written between checkpoints. Now that we actually
+/// recycle old segments (`XLOGfileslop` consumes this estimate) this is wired at
+/// both checkpoint sites, instead of being skipped as a pure optimization.
+fn update_check_point_distance_estimate(nbytes: u64) {
+    use core::sync::atomic::Ordering;
+    let prev = f64::from_bits(CHECK_POINT_DISTANCE_ESTIMATE.load(Ordering::Relaxed));
+    let next = crate::retention::UpdateCheckPointDistanceEstimateCore(prev, nbytes);
+    CHECK_POINT_DISTANCE_ESTIMATE.store(next.to_bits(), Ordering::Relaxed);
+}
+
+/// `XLOGfileslop(lastredoptr)` (xlog.c:2254) — the highest segment number that
+/// should be kept around as a recycled future log segment, over the live
+/// min/max_wal_size, completion-target, and distance-estimate posture.
+fn xlogfileslop(lastredoptr: XLogRecPtr, wal_segment_size: i32) -> ::types_core::XLogSegNo {
+    use core::sync::atomic::Ordering;
+    let distance_estimate =
+        f64::from_bits(CHECK_POINT_DISTANCE_ESTIMATE.load(Ordering::Relaxed));
+    crate::retention::XLOGfileslop(
+        lastredoptr,
+        wal_segment_size,
+        vars::min_wal_size_mb.read(),
+        vars::max_wal_size_mb.read(),
+        vars::CheckPointCompletionTarget.read(),
+        distance_estimate,
+    )
+}
+
+/// `UpdateLastRemovedPtr(char *filename)` (xlog.c:3831) — advance
+/// `XLogCtl->lastRemovedSegNo` to reflect that `filename` has been removed
+/// (under `info_lck`, monotonically). The C `XLogFromFileName` reads only the
+/// first 24 hex chars, so it also accepts `.partial` names; strip the suffix.
+fn update_last_removed_ptr(filename: &str) {
+    let base = filename
+        .strip_suffix(crate::XLOG_FILE_SUFFIX_PARTIAL)
+        .unwrap_or(filename);
+    let Ok((_tli, segno)) = crate::XLogFromFileName(base, wal_segment_size()) else {
+        return;
+    };
+
+    let ctl = unsafe { &*xlog_ctl() };
+    shmem::spin_lock_acquire(&ctl.info_lck);
+    // SAFETY: live shmem region, info_lck held.
+    unsafe {
+        if segno > (*xlog_ctl()).lastRemovedSegNo {
+            (*xlog_ctl()).lastRemovedSegNo = segno;
+        }
+    }
+    shmem::spin_lock_release(&ctl.info_lck);
+}
+
+/// `RemoveXlogFile(segname, recycleSegNo, *endlogSegNo, insertTLI)`
+/// (xlog.c:4028) — recycle or remove a single no-longer-needed log segment.
+///
+/// Before deleting, see if the file can be recycled as a future log segment
+/// (only normal files, never symlinks pointing into a separate archive dir):
+/// when `wal_recycle` is on, `*endlogSegNo <= recycleSegNo`, segment installation
+/// is active, the entry is a regular file, and `InstallXLogFileSegment(find_free)`
+/// succeeds in renaming it to a free future slot, bump `*endlogSegNo` and count a
+/// recycle. Otherwise `durable_unlink` it and count a removal. Either way, clean
+/// up the archive `.ready`/`.done` markers. (The Windows rename-before-delete arm
+/// is irrelevant on the supported platforms.)
+fn remove_xlog_file(
+    segname: &str,
+    recycle_seg_no: ::types_core::XLogSegNo,
+    endlog_seg_no: &mut ::types_core::XLogSegNo,
+    insert_tli: ::types_core::TimeLineID,
+    stats: &mut crate::checkpoint::CheckpointStats,
+) -> PgResult<()> {
+    // PGFILETYPE_REG (common/file_utils.h) — a plain regular file.
+    const PGFILETYPE_REG: i32 = 2;
+
+    let path = std::format!("pg_wal/{segname}");
+
+    // Try to recycle the segment as a future log segment first.
+    let recycled = vars::wal_recycle.read()
+        && *endlog_seg_no <= recycle_seg_no
+        && crate::write::IsInstallXLogFileSegmentActive()
+        && fd_seams::get_dirent_type::call(&path) == PGFILETYPE_REG
+        && crate::write::InstallXLogFileSegment(
+            endlog_seg_no,
+            &path,
+            true,
+            recycle_seg_no,
+            insert_tli,
+        )?;
+
+    if recycled {
+        ereport(DEBUG2)
+            .errmsg_internal(std::format!("recycled write-ahead log file \"{segname}\""))
+            .finish(loc(4053, "RemoveXlogFile"))?;
+        stats.ckpt_segs_recycled += 1;
+        // Needn't recheck that slot on future iterations.
+        *endlog_seg_no += 1;
+    } else {
+        // No need for any more future segments, or recycling failed: remove it.
+        ereport(DEBUG2)
+            .errmsg_internal(std::format!("removing write-ahead log file \"{segname}\""))
+            .finish(loc(4066, "RemoveXlogFile"))?;
+        // durable_unlink logs its own message on failure; on error C returns
+        // without counting/cleaning up, so we do the same.
+        if fd_seams::durable_unlink::call(&path).is_err() {
+            return Ok(());
+        }
+        stats.ckpt_segs_removed += 1;
+    }
+
+    xlogarchive::XLogArchiveCleanup(segname);
+    Ok(())
+}
+
+/// `RemoveOldXlogFiles(segno, lastredoptr, endptr, insertTLI)` (xlog.c:3884) —
+/// recycle or remove all log files older than or equal to `segno`.
+///
+/// `endptr` is the current (or recent) end of xlog and `lastredoptr` is the last
+/// checkpoint's redo pointer; together they fix where we try to recycle to.
+/// `insertTLI` is the timeline recycled segments should be reused for. The
+/// timeline part of the filename is ignored in the keep/remove comparison so a
+/// segment from a parent timeline is never prematurely removed.
+fn remove_old_xlog_files(
+    segno: ::types_core::XLogSegNo,
+    lastredoptr: XLogRecPtr,
+    endptr: XLogRecPtr,
+    insert_tli: ::types_core::TimeLineID,
+    stats: &mut crate::checkpoint::CheckpointStats,
+) -> PgResult<()> {
+    let seg = wal_segment_size();
+
+    // Where to try to recycle to.
+    let mut endlog_seg_no = crate::XLByteToSeg(endptr, seg);
+    let recycle_seg_no = xlogfileslop(lastredoptr, seg);
+
+    // Filename of the last segment to be kept. The timeline ID doesn't matter —
+    // it is ignored in the comparison (during recovery InsertTimeLineID isn't set).
+    let lastoff = crate::XLogFileName(0, segno, seg);
+
+    ereport(DEBUG2)
+        .errmsg_internal(std::format!(
+            "attempting to remove WAL segments older than log file {lastoff}"
+        ))
+        .finish(loc(3905, "RemoveOldXlogFiles"))?;
+
+    let names = fd_seams::read_dir_names::call("pg_wal")?;
+    for name in &names {
+        // The per-entry filter (xlog.c:3913-3928): the entry must be an XLOG
+        // segment (or partial segment), and — ignoring the timeline part (chars
+        // 0..8) so a parent-timeline segment is never prematurely removed — its
+        // segment number (chars 8..) must be <= lastoff's. This is the unit-tested
+        // `IsOldXlogFileCandidate`, identical to C's `strcmp(d_name+8, lastoff+8)
+        // <= 0` with the `IsXLogFileName || IsPartialXLogFileName` guard.
+        if crate::retention::IsOldXlogFileCandidate(name, &lastoff) {
+            if xlogarchive::XLogArchiveCheckDone(name)? {
+                // Update the last-removed location in shared memory first.
+                update_last_removed_ptr(name);
+                remove_xlog_file(name, recycle_seg_no, &mut endlog_seg_no, insert_tli, stats)?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// `bool CreateRestartPoint(int flags)` (xlog.c:7655) — establish a restartpoint
@@ -659,13 +843,15 @@ pub fn CreateRestartPoint(flags: i32) -> PgResult<bool> {
         Ok(())
     })?;
 
-    // Update the average distance between checkpoints/restartpoints. (Optimization
-    // only; the file-scope CheckPointDistanceEstimate moving average is owned by
-    // the same housekeeping the online-checkpoint path skips — see CreateCheckPoint.)
-    let _ = prior_redo_ptr;
+    // Update the average distance between checkpoints/restartpoints if the prior
+    // checkpoint exists. This feeds XLOGfileslop's recycle horizon below
+    // (xlog.c:7817-7821).
+    let redo_rec_ptr = crate::shmem::redo_rec_ptr_cached();
+    if prior_redo_ptr != InvalidXLogRecPtr {
+        update_check_point_distance_estimate(redo_rec_ptr.wrapping_sub(prior_redo_ptr));
+    }
 
     // Delete old log files no longer needed for the last restartpoint.
-    let redo_rec_ptr = crate::shmem::redo_rec_ptr_cached();
     let mut log_seg_no = crate::XLByteToSeg(redo_rec_ptr, wal_segment_size);
 
     // Retreat _logSegNo using the current end of xlog replayed or received,
@@ -698,14 +884,16 @@ pub fn CreateRestartPoint(flags: i32) -> PgResult<bool> {
         replay_tli = unsafe { (*xlog_ctl()).InsertTimeLineID };
     }
 
-    // RemoveOldXlogFiles(_logSegNo, RedoRecPtr, endptr, replayTLI) — the WAL
-    // recycle pass is owned by the not-yet-ported xlog directory driver; like the
-    // online-checkpoint path (CreateCheckPoint), skipping it only retains more WAL
-    // than strictly necessary and is behaviour-preserving.
-    let _ = log_seg_no;
+    // RemoveOldXlogFiles(_logSegNo, RedoRecPtr, endptr, replayTLI) (xlog.c:7870) —
+    // recycle or physically remove the WAL segments no longer needed for the last
+    // restartpoint, recycling onto `replay_tli`. This is what frees WAL on a
+    // standby after a slot is invalidated, and the recovery-time analog of the
+    // online-checkpoint recycle pass above.
+    let mut stats = crate::checkpoint::CheckpointStats::default();
+    remove_old_xlog_files(log_seg_no, redo_rec_ptr, endptr, replay_tli, &mut stats)?;
 
     // Make more log segments if needed.
-    crate::write::PreallocXlogFiles(endptr, replay_tli, &mut crate::checkpoint::CheckpointStats::default())?;
+    crate::write::PreallocXlogFiles(endptr, replay_tli, &mut stats)?;
 
     // Truncate pg_subtrans if possible (only with hot standby, where
     // StartupSUBTRANS has run). The pg_subtrans trim is non-durability-critical

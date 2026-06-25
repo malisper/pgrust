@@ -1009,7 +1009,7 @@ fn close_bare_fd(fd: i32) {
 /// (xlog.c:3582) — rename the temp file into its final segment name, finding a
 /// free slot if `find_free`. Returns true if it raised the extant-segment
 /// count.
-fn InstallXLogFileSegment(
+pub(crate) fn InstallXLogFileSegment(
     segno: &mut XLogSegNo,
     tmppath: &str,
     find_free: bool,

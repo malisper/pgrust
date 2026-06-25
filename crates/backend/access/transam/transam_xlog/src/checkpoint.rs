@@ -50,9 +50,16 @@ pub struct CheckpointStats {
     pub ckpt_sync_end_t: TimestampTz,
     pub ckpt_end_t: TimestampTz,
     /// `ckpt_segs_added` — # of new xlog segments created (incremented by
-    /// `PreallocXlogFiles`). The other C `CheckpointStatsData` counters
-    /// (`ckpt_bufs_written`, `ckpt_segs_removed`, …) are not yet modeled.
+    /// `PreallocXlogFiles`).
     pub ckpt_segs_added: i32,
+    /// `ckpt_segs_removed` — # of old xlog segments deleted (incremented by
+    /// `RemoveXlogFile`).
+    pub ckpt_segs_removed: i32,
+    /// `ckpt_segs_recycled` — # of old xlog segments recycled into future
+    /// segments (incremented by `RemoveXlogFile`). The remaining C
+    /// `CheckpointStatsData` counters (`ckpt_bufs_written`, …) are not yet
+    /// modeled.
+    pub ckpt_segs_recycled: i32,
 }
 
 /// The checkpoint process's owned file-scope state (xlog.c file-scope globals
