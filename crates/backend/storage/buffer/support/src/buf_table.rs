@@ -203,6 +203,29 @@ impl BufTable {
         Ok(table)
     }
 
+    /// Re-empty the shared lookup table in place after a crash restart, exactly
+    /// as the `!found` branch of [`InitBufTable`] does for a freshly-carved
+    /// segment. The crash-restart driver ([`reset_shared_state_after_crash`]
+    /// (ipci.c)) reuses the existing `MAP_SHARED` region (the same base this
+    /// handle already wraps — the bump allocator is deterministic, so a re-run
+    /// re-derives the identical offset), so the buffer-mapping entries a
+    /// SIGKILLed backend left pointing at now-dropped buffers must be cleared
+    /// here to match the empty state a fresh C segment would have. Mirrors the
+    /// fresh-segment init: every slot empty, zero live entries per partition.
+    pub fn reset_after_crash(&self) {
+        let total_slots = self.cap_per_part * NUM_BUFFER_PARTITIONS as usize;
+        for i in 0..total_slots {
+            // SAFETY: i < total_slots; the region holds `total_slots` Slots, and
+            // the crash-restart driver runs single-threaded in the postmaster
+            // with every child dead (no concurrent partition-lock holders).
+            unsafe { *self.slots.add(i) = Slot::empty() };
+        }
+        // SAFETY: header points at the live region (single-threaded, as above).
+        unsafe {
+            (*self.header).nentries = [0; NUM_BUFFER_PARTITIONS as usize];
+        }
+    }
+
     /// Absolute slot index of `local` within partition `p`'s region.
     #[inline]
     fn abs_idx(&self, partition: usize, local: usize) -> usize {

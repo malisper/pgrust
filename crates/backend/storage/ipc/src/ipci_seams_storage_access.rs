@@ -31,6 +31,9 @@ pub fn buffer_manager_shmem_size() -> PgResult<Size> {
 pub fn buffer_manager_shmem_init() -> PgResult<()> {
     bufmgr_seams::buffer_manager_shmem_init::call()
 }
+pub fn buffer_manager_reset_after_crash() -> PgResult<()> {
+    bufmgr_seams::buffer_manager_reset_after_crash::call()
+}
 
 pub fn lock_manager_shmem_size() -> PgResult<Size> {
     lock_seams::lock_manager_shmem_size::call()

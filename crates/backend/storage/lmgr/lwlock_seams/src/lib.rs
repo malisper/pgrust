@@ -306,3 +306,16 @@ seam_core::seam!(
     /// unless `LWLOCK_STATS` is compiled in.
     pub fn init_lwlock_access()
 );
+
+seam_core::seam!(
+    /// Re-initialize every word of the already-published `MainLWLockArray` to its
+    /// fresh, unheld state on the postmaster's crash-restart reinitialization (the
+    /// `CreateLWLocks` leg of `reset_shared_state_after_crash`, ipci.c). C gets a
+    /// fresh, zeroed segment so every LWLock starts unheld; this tree reuses the
+    /// segment and can't re-publish the `MAIN_LWLOCKS` base pointer, so it
+    /// re-zeroes the lock WORDS in place — a backend killed mid-hold (SIGQUIT/
+    /// SIGKILL) never ran `LWLockReleaseAll`, so its held bit + waiter queue would
+    /// otherwise survive and deadlock the new generation. `Err` is reserved (the
+    /// reset is infallible today).
+    pub fn lwlock_reset_after_crash() -> ::types_error::PgResult<()>
+);

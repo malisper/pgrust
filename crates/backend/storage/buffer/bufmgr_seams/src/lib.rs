@@ -328,16 +328,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// Discard every resident shared buffer whose page LSN is past `flushed_lsn`,
-    /// dropping each WITHOUT writing it back. Driven by the startup process at
-    /// the end of crash REDO (before the end-of-recovery checkpoint): the buffer
-    /// pool persists across a crash in this tree's `MAP_SHARED` model, so pages a
-    /// SIGKILLed backend dirtied for an uncommitted change whose WAL was never
-    /// durably flushed survive with a page LSN past the durable WAL end. Left in
-    /// the pool, the end-of-recovery `CheckPointBuffers` `XLogFlush`es to that
-    /// LSN and aborts recovery; dropping them makes the pool consistent with the
-    /// durable WAL while preserving every committed page.
-    pub fn drop_buffers_past_lsn(flushed_lsn: types_core::primitive::XLogRecPtr) -> types_error::PgResult<()>
+    /// Reset the entire shared buffer pool to the empty, fresh-segment state on a
+    /// postmaster crash restart — the `BufferManagerShmemInit` leg of
+    /// `reset_shared_state_after_crash` (ipci.c). C re-creates a zeroed
+    /// `MAP_SHARED` segment on crash, so the startup process replays WAL into an
+    /// empty pool; this tree reuses the segment, so the postmaster re-runs the
+    /// in-place descriptor / page / lookup-table / strategy init loops here,
+    /// BEFORE the startup process forks, giving redo a genuinely clean pool (the
+    /// principled replacement for the old end-of-redo `drop_buffers_past_lsn`).
+    pub fn buffer_manager_reset_after_crash() -> types_error::PgResult<()>
 );
 
 // ---------------------------------------------------------------------------

@@ -26,7 +26,7 @@ use ::support::{BufTable, BufferStrategyControl, StrategyShmemSize};
 use ::condvar::ConditionVariable;
 use ::types_core::Size;
 use ::types_core::primitive::{Buffer, BLCKSZ, INVALID_PROC_NUMBER};
-use ::types_storage::buf::{buftag, PgAioWaitRef, BM_LOCKED, BM_VALID, FREENEXT_END_OF_LIST, FREENEXT_NOT_IN_LIST};
+use ::types_storage::buf::{buftag, PgAioWaitRef, BM_LOCKED, FREENEXT_END_OF_LIST, FREENEXT_NOT_IN_LIST};
 use ::types_storage::storage::{
     pg_atomic_uint32, LWLock, LWLockMode, LWTRANCHE_BUFFER_CONTENT, BUFFER_MAPPING_LWLOCK_OFFSET,
     NUM_BUFFER_PARTITIONS,
@@ -360,66 +360,69 @@ impl BufferManager {
         Self::BufferManagerShmemInit(nbuffers)
     }
 
-    /// Discard every resident shared buffer whose page LSN is **strictly past**
-    /// `flushed_lsn`, dropping it WITHOUT writing it back.
+    /// Reset the entire shared buffer pool to the EMPTY, fresh-segment state on a
+    /// postmaster crash restart — the principled equivalent of C re-creating a
+    /// zeroed `MAP_SHARED` segment in `CreateSharedMemoryAndSemaphores`.
     ///
-    /// DIVERGENCE FROM C: on a crash restart C re-creates a fresh, zeroed shared
-    /// segment in `CreateSharedMemoryAndSemaphores`, so the startup process
-    /// always replays WAL into an empty buffer pool. In this tree the buffer
-    /// pool lives in a persistent `MAP_SHARED` segment that survives the crash
-    /// (the postmaster reuses it — see the `if !pm().shmem_created` guard), and
-    /// the resident pages are the genuinely-correct committed state. The only
-    /// inconsistent pages are those a crashed (SIGKILLed) backend dirtied for an
-    /// in-flight, uncommitted change whose WAL was generated but never durably
-    /// flushed: their page LSN is past the durable WAL flush point. Left in the
-    /// pool, the end-of-recovery `CheckPointBuffers` would `XLogFlush` to that
-    /// LSN and fail with "xlog flush request ... is not satisfied", aborting the
-    /// crash restart; and even if it didn't, the page would carry an aborted
-    /// change. Dropping exactly these buffers makes the pool consistent with the
-    /// durable WAL — the aborted change is discarded (the on-disk page, if any,
-    /// is the pre-change image, just as redo would leave it), and every
-    /// committed page is preserved.
+    /// DIVERGENCE FROM C, and why this is the right model: on a crash C discards
+    /// the whole shared segment and allocates a fresh, zeroed one, so the startup
+    /// process always replays WAL into an EMPTY pool — there are simply no
+    /// crash-surviving resident pages. In this tree the pool lives in a persistent
+    /// `MAP_SHARED` segment the postmaster reuses across the restart, so pages a
+    /// SIGKILLed backend left resident (committed or not) survive. Rather than
+    /// surgically dropping the subset whose LSN is past the durable WAL end (the
+    /// old `drop_buffers_past_lsn`, a blunt approximation that ran late, at
+    /// end-of-redo), we make the pool genuinely fresh here, in the postmaster,
+    /// BEFORE the startup process forks: re-run the same in-place descriptor /
+    /// page / lookup-table / strategy init loops `BufferManagerShmemInit` runs for
+    /// a freshly-carved segment. The startup process then replays WAL into a clean
+    /// pool exactly as in C — every page is re-read from disk and re-derived by
+    /// redo, so the end-of-recovery `CheckPointBuffers` has nothing past the WAL
+    /// flush point and no "xlog flush request is not satisfied" can arise.
     ///
-    /// Called from the startup process at the end of REDO, before the
-    /// end-of-recovery checkpoint, after the WAL flush point has been set to the
-    /// end of valid WAL. Runs while no other backend can touch the pool (the
-    /// system is still in recovery, not accepting connections), so the per-buffer
-    /// header spinlock alone is the needed serialiser, exactly as `DropRelation*`
-    /// buffers does.
-    pub fn drop_buffers_past_lsn(&self, flushed_lsn: u64) -> types_error::PgResult<()> {
-        for buf_id in 0..self.nbuffers as usize {
-            // Unlocked pre-check (matches the DropRelation* fast skip): only
-            // VALID buffers can carry a stale LSN.
-            let pre = self.states.get(buf_id).value.load(Ordering::Relaxed);
-            if pre & BM_VALID == 0 {
-                continue;
-            }
+    /// Runs single-threaded in the postmaster with every child already dead (the
+    /// crash-restart `PM_NO_CHILDREN` state, after `shmem_exit(1)`), so the
+    /// per-buffer header spinlocks / strategy spinlock are uncontended; the
+    /// re-init is the only writer.
+    ///
+    /// The leaked process-global `BufferManager` handle ([`global`]) is NOT
+    /// re-published — its array base pointers still address the same `MAP_SHARED`
+    /// regions (the bump allocator is deterministic across the restart), so this
+    /// re-zeroes through the already-correct pointers in place.
+    pub fn reset_after_crash(&self) {
+        let n = self.nbuffers as usize;
 
-            let buf_state = self.lock_buf_hdr(buf_id);
-            if buf_state & BM_VALID == 0 {
-                self.unlock_buf_hdr(buf_id, buf_state);
-                continue;
-            }
-
-            // Read the page LSN while holding the header spinlock (no content
-            // lock needed: the system is in recovery and single-threaded over
-            // the pool here).
-            let page_lsn = self.with_block(buf_id, |block| {
-                page::PageGetLSN(
-                    &page::PageRef::new(block).expect("buffer block is BLCKSZ"),
-                )
-            });
-
-            if page_lsn > flushed_lsn {
-                // Drop the buffer without writing it back (its change is past the
-                // durable WAL and belongs to an aborted, never-committed xact).
-                // invalidate_buffer consumes the held spinlock.
-                self.invalidate_buffer(buf_id, buf_state)?;
-            } else {
-                self.unlock_buf_hdr(buf_id, buf_state);
-            }
+        // Re-run the per-descriptor init loop (mirrors `BufferManagerShmemInit`'s
+        // `if !found { for i in 0..n { ... } }`): state=0, tag cleared, freelist
+        // re-threaded 0 -> 1 -> ... -> END, wait_backend cleared,
+        // content lock re-initialized, I/O condvar re-initialized.
+        for i in 0..n {
+            // pg_atomic_init_u32(&state, 0).
+            self.states.get_mut(i).value.store(0, Ordering::Relaxed);
+            *self.fields.get_mut(i) = DescFields {
+                tag: buftag::default(),
+                free_next: if i + 1 < n {
+                    (i + 1) as i32
+                } else {
+                    FREENEXT_END_OF_LIST
+                },
+                wait_backend_pgprocno: INVALID_PROC_NUMBER,
+                io_wref: PgAioWaitRef::default(),
+            };
+            // LWLockInitialize(content_lock, LWTRANCHE_BUFFER_CONTENT).
+            lwlock::LWLockInitialize(self.content_locks.get_mut(i), LWTRANCHE_BUFFER_CONTENT);
+            // ConditionVariableInit(BufferDescriptorGetIOCV(buf)).
+            *self.io_cvs.get_mut(i) = ConditionVariable::new();
+            condition_variable::ConditionVariableInit(self.io_cvs.get(i));
         }
-        Ok(())
+        // MemSet(BufferBlocks, 0, NBuffers * BLCKSZ).
+        let blen = self.blocks.len();
+        self.blocks.slice_mut(0, blen).fill(0);
+
+        // Re-empty the buffer-mapping lookup table and re-initialize the freelist
+        // head/tail + clock-sweep hand to the fresh-pool state.
+        self.buf_table.reset_after_crash();
+        self.strategy_control.reset_after_crash();
     }
 
     // -- ambient (per-backend) manager handle ------------------------------
@@ -835,15 +838,16 @@ pub fn BufferManagerShmemInit() -> types_error::PgResult<()> {
     Ok(())
 }
 
-/// Discard every resident shared buffer whose page LSN is past `flushed_lsn`,
-/// dropping each without writing it back. Called by the startup process at the
-/// end of crash REDO (before the end-of-recovery checkpoint) to evict pages a
-/// SIGKILLed backend dirtied for an uncommitted change whose WAL was never
-/// durably flushed — the only pool pages that survive the crash inconsistent
-/// with the durable WAL. See `BufferManager::drop_buffers_past_lsn` for the full
-/// rationale (and why every committed page is preserved).
-pub fn DropBuffersPastLSN(flushed_lsn: u64) -> types_error::PgResult<()> {
-    BufferManager::global_expect().drop_buffers_past_lsn(flushed_lsn)
+/// Reset the shared buffer pool to the empty, fresh-segment state on a postmaster
+/// crash restart (the `BufferManagerShmemInit` leg of
+/// `reset_shared_state_after_crash`). See
+/// [`BufferManager::reset_after_crash`] for the full rationale: this is the
+/// principled "fresh, zeroed pool" that replaces the old end-of-redo
+/// `drop_buffers_past_lsn` approximation. Runs in the postmaster, single-threaded,
+/// before the startup process forks.
+pub fn BufferManagerResetAfterCrash() -> types_error::PgResult<()> {
+    BufferManager::global_expect().reset_after_crash();
+    Ok(())
 }
 
 #[cfg(test)]

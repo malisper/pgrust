@@ -639,20 +639,22 @@ pub fn StartupXLOG() -> PgResult<()> {
     // Emit checkpoint or end-of-recovery record, if required.
     let mut promoted = false;
     if performed_wal_recovery {
-        // DIVERGENCE FROM C: in C a crash discards all shared memory and the
-        // buffer pool is re-created empty, so REDO replays into a clean pool. In
-        // this tree the buffer pool is a persistent `MAP_SHARED` segment that
-        // survives the crash (the postmaster reuses it), so pages a SIGKILLed
-        // backend dirtied for an uncommitted change — whose WAL was generated but
-        // never durably flushed — remain resident with a page LSN past the
-        // durable WAL end (`end_of_log`). Drop exactly those buffers (without
-        // writing them back) before the end-of-recovery checkpoint: otherwise
-        // `CheckPointBuffers` would `XLogFlush` to that un-flushed LSN and abort
-        // recovery with "xlog flush request ... is not satisfied". Every
-        // committed page (LSN <= end_of_log) is preserved, so the surviving pool
-        // matches the durable WAL exactly. (Runs single-threaded: the system is
-        // still in recovery and not accepting connections.)
-        ::bufmgr_seams::drop_buffers_past_lsn::call(end_of_log)?;
+        // No resident buffer has an LSN past the durable WAL end when redo
+        // reaches here, so the end-of-recovery `CheckPointBuffers` has nothing to
+        // `XLogFlush` past the flush point and the old per-page
+        // `drop_buffers_past_lsn` evict (a blunt approximation of a fresh pool) is
+        // no longer needed:
+        //   * crash recovery — the pool is genuinely EMPTY. At first boot the
+        //     postmaster just created a fresh (empty) segment; on a crash-restart
+        //     it emptied the reused segment in `reset_shared_state_after_crash`
+        //     (ipci.c) BEFORE forking this startup process (the MAP_SHARED bytes
+        //     it cleared are visible here through the inherited mapping). Either
+        //     way redo replays into a clean pool exactly as in C.
+        //   * standby promotion / end-of-recovery on a running standby — the pool
+        //     is NOT empty (hot-standby reads loaded pages during continuous
+        //     recovery), but every resident page was replayed at an LSN <=
+        //     `end_of_log`, and the flush pointer was just set to `end_of_log`
+        //     (above), so still nothing is dirty past the flush point.
 
         promoted = PerformRecoveryXLogAction()?;
     }

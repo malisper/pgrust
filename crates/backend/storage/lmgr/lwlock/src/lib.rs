@@ -618,6 +618,82 @@ pub fn CreateLWLocks(mcx: Mcx<'_>, is_under_postmaster: bool) -> PgResult<&'stat
     Ok(table)
 }
 
+/// Re-initialize every word of the already-published `MainLWLockArray` to its
+/// fresh, unheld state on a postmaster crash restart — the `CreateLWLocks` leg of
+/// `reset_shared_state_after_crash` (ipci.c).
+///
+/// DIVERGENCE FROM C: C re-creates a fresh, zeroed `MAP_SHARED` segment on crash,
+/// so every LWLock word starts unheld. This tree reuses the segment, and the
+/// `MAIN_LWLOCKS` `OnceLock` (the published `&'static` base pointer + count +
+/// read-only tranche metadata) can NOT be re-published — so we must re-zero the
+/// lock WORDS in place instead. This is load-bearing: a backend killed by
+/// SIGQUIT/SIGKILL while holding an LWLock (e.g. a buffer content lock, a lock /
+/// buffer-mapping partition lock, or `ProcArrayLock`) never ran the
+/// error-recovery `LWLockReleaseAll`, so the held bit + the waiter queue stay set
+/// in the shared array and every backend in the post-restart generation that
+/// acquires that lock would block forever. `LWLockInitialize` resets each word to
+/// `LW_FLAG_RELEASE_OK` with an empty waiter list (exactly the fresh-segment
+/// state), re-using the SAME tranche IDs the published metadata already carries
+/// (no `LWLockNewTrancheId` — the counter and named-tranche placement are
+/// unchanged across the restart). The published base pointer stays valid because
+/// the bump allocator is deterministic, so the array is at the same offset.
+///
+/// Runs single-threaded in the postmaster with every child dead (after
+/// `shmem_exit(1)`, in `PM_NO_CHILDREN`), so re-zeroing the words is unraced.
+pub fn LWLockResetAfterCrash() -> PgResult<()> {
+    let table = match MAIN_LWLOCKS.get() {
+        Some(t) => t,
+        // No main array published yet means CreateLWLocks never ran — there is
+        // nothing to reset (a crash before first boot completed is impossible on
+        // the postmaster crash-restart path, but stay defensive).
+        None => return Ok(()),
+    };
+
+    // SAFETY: `locks_ptr`/`locks_len` describe the live `[LWLockPadded]` in the
+    // shared segment; the crash-restart driver runs single-threaded in the
+    // postmaster (every child dead), so taking a transient `&mut` over the shared
+    // words to re-initialize them is unraced — no other process can observe a
+    // torn write, exactly as the postmaster's first-boot `CreateLWLocks` init is
+    // unraced.
+    let locks: &mut [LWLockPadded] =
+        unsafe { core::slice::from_raw_parts_mut(table.locks_ptr as *mut LWLockPadded, table.locks_len) };
+
+    // Re-initialize the fixed locks with their fixed tranche IDs (the same loop
+    // `InitializeLWLocks` runs for a fresh segment, minus the tranche-ID
+    // allocation).
+    for id in 0..NUM_INDIVIDUAL_LWLOCKS {
+        LWLockInitialize(&mut locks[id as usize].lock, id);
+    }
+    for id in 0..NUM_BUFFER_PARTITIONS {
+        LWLockInitialize(
+            &mut locks[(BUFFER_MAPPING_LWLOCK_OFFSET + id) as usize].lock,
+            LWTRANCHE_BUFFER_MAPPING,
+        );
+    }
+    for id in 0..NUM_LOCK_PARTITIONS {
+        LWLockInitialize(
+            &mut locks[(LOCK_MANAGER_LWLOCK_OFFSET + id) as usize].lock,
+            LWTRANCHE_LOCK_MANAGER,
+        );
+    }
+    for id in 0..NUM_PREDICATELOCK_PARTITIONS {
+        LWLockInitialize(
+            &mut locks[(PREDICATELOCK_MANAGER_LWLOCK_OFFSET + id) as usize].lock,
+            LWTRANCHE_PREDICATE_LOCK_MANAGER,
+        );
+    }
+
+    // Re-initialize the named-tranche locks using the tranche IDs ALREADY in the
+    // published placement metadata (do NOT allocate fresh IDs).
+    for range in table.named_tranches() {
+        for offset in 0..range.len {
+            LWLockInitialize(&mut locks[range.start + offset].lock, range.tranche_id);
+        }
+    }
+
+    Ok(())
+}
+
 /// `InitializeLWLocks` (lwlock.c:512) — initialize LWLocks that are fixed and
 /// those belonging to named tranches; returns the named-tranche placement
 /// metadata (the owned stand-in for filling `NamedLWLockTrancheArray`).
@@ -2000,6 +2076,7 @@ pub fn init_seams() {
     );
     lwlock_seams::lwlock_shmem_size::set(LWLockShmemSize);
     lwlock_seams::create_lwlocks::set(create_lwlocks_seam);
+    lwlock_seams::lwlock_reset_after_crash::set(LWLockResetAfterCrash);
     lwlock_seams::init_lwlock_access::set(InitLWLockAccess);
 }
 

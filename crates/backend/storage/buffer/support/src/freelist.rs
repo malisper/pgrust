@@ -26,7 +26,7 @@
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use ::s_lock::{s_lock_macro, s_unlock, Spinlock};
+use ::s_lock::{s_init_lock, s_lock_macro, s_unlock, Spinlock};
 use ::types_core::Size;
 use ::types_error::{PgError, PgResult};
 use ::types_storage::buf::{
@@ -143,6 +143,31 @@ impl BufferStrategyControl {
             }
         }
         Ok(Self { body, nbuffers })
+    }
+
+    /// Re-initialize the shared strategy control block in place after a crash
+    /// restart, exactly as the `!found` branch of [`StrategyInitialize`] does for
+    /// a freshly-carved segment. The crash-restart driver re-empties the buffer
+    /// pool (every buffer dropped, the freelist re-threaded by the descriptor
+    /// reset), so the clock-sweep hand, the freelist head/tail and the
+    /// allocation counters must be reset to the fresh-pool state — head=0,
+    /// tail=NBuffers-1 (the whole pool free), sweep hand at 0 — matching what a
+    /// fresh C segment's `StrategyInitialize` would leave. Runs single-threaded
+    /// in the postmaster with every child dead, so the spinlock is not contended.
+    pub fn reset_after_crash(&self) {
+        let n = self.nbuffers as i32;
+        // SAFETY: `body` points at the live shared region for the server's life;
+        // the crash-restart driver runs single-threaded (no concurrent strategy
+        // spinlock holders).
+        let body = self.body();
+        // SpinLockInit(&buffer_strategy_lock) — drop any stale held state.
+        s_init_lock(&body.buffer_strategy_lock);
+        body.next_victim_buffer.store(0, Ordering::Relaxed);
+        body.first_free_buffer.set(0);
+        body.last_free_buffer.set(n - 1);
+        body.complete_passes.set(0);
+        body.num_buffer_allocs.store(0, Ordering::Relaxed);
+        body.bgwprocno.set(-1);
     }
 
     /// The shmem-resident control block.

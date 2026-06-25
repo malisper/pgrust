@@ -354,22 +354,105 @@ pub fn create_or_attach_shmem_structs() -> PgResult<()> {
 }
 
 /// Reset the transient cross-process shared state a crashed backend may have
-/// left behind, on the postmaster's crash-restart reinitialization.
+/// left behind, on the postmaster's crash-restart reinitialization — the
+/// principled, single-point stand-in for C's fresh, zeroed shared segment.
 ///
-/// DIVERGENCE FROM C: C reinitializes by discarding the entire shared-memory
-/// segment and allocating a fresh, zeroed one via `CreateSharedMemoryAndSemaphores`,
-/// so every subsystem's structures start empty for the new generation. In this
-/// tree the segment is reused across the restart (the per-subsystem `*ShmemInit`
-/// functions publish `&'static` metadata into write-once cells — e.g.
-/// `MainLWLockArray` — that cannot be re-published without panicking), so the
-/// genuine MAP_SHARED structures survive the restart with whatever a
-/// SIGQUIT/SIGKILL-killed backend left in them. The lock manager is the one that
-/// breaks crash recovery in practice: a backend killed mid-transaction never ran
-/// `ProcKill`/`LockReleaseAll`, so its LOCK/PROCLOCK entries (e.g. a held
-/// `RowExclusiveLock`) stay live in the shared arena and block every backend in
-/// the post-restart generation that touches the same object. Re-zero that arena
-/// in place here, matching the empty state a fresh C segment would have.
+/// # Why this exists (the architectural divergence)
+///
+/// On an abnormal-backend crash C's postmaster runs `shmem_exit(1)` and then
+/// `CreateSharedMemoryAndSemaphores()` (postmaster.c), which DESTROYS the
+/// shared-memory segment and allocates a FRESH, ZEROED one, re-running every
+/// subsystem `*ShmemInit`. So in C the new generation starts with every shared
+/// structure empty.
+///
+/// This tree CANNOT re-create the segment: it reuses one persistent
+/// `MAP_SHARED|MAP_ANONYMOUS` mmap for the cluster's lifetime (the postmaster
+/// keeps it mapped — see `PostmasterStateMachine`'s `if !pm().shmem_created`
+/// guard and `anonymous_shmem_detach`), because the per-subsystem `*ShmemInit`
+/// functions publish the segment's base pointers into process-local cells (a mix
+/// of write-once `OnceLock`s like `MainLWLockArray`, a `Box::leak`'d
+/// `BufferManager`, `AtomicPtr`s and `thread_local` `Cell`s) that mostly cannot
+/// be re-published. So the genuine MAP_SHARED structures SURVIVE the restart with
+/// whatever a SIGQUIT/SIGKILL-killed backend left in them.
+///
+/// # The principled fix (re-zero in place, mirroring the C init list)
+///
+/// We therefore re-zero / re-initialize, IN PLACE, exactly the shared structures
+/// a fresh C segment would have empty — driven from this ONE function whose body
+/// mirrors `create_or_attach_shmem_structs`'s init list, so it can never drift
+/// back into per-test whack-a-mole. Each leg re-runs the owner's existing
+/// fresh-segment (`!found`) init loop against the base pointer it already cached;
+/// because the bump allocator is DETERMINISTIC (identical config re-read from the
+/// control file ⇒ identical sizes/order ⇒ every structure re-lands at the SAME
+/// offset), those cached pointers stay valid and nothing is re-published. This
+/// runs in the postmaster, single-threaded, in `PM_NO_CHILDREN` after
+/// `shmem_exit(1)` and BEFORE the startup process forks, so every re-zero is
+/// unraced.
+///
+/// # What we reset, and what we deliberately do NOT
+///
+/// Reset (genuine cross-generation-transient MAP_SHARED state that a crashed
+/// backend leaves dirty and that recovery does NOT rebuild):
+///   * **Buffer pool** — emptied to the fresh-segment state, so redo replays into
+///     a clean pool exactly as in C (the principled replacement for the old
+///     end-of-redo `drop_buffers_past_lsn` approximation: a truly-fresh pool has
+///     no crash-surviving pages past the WAL flush point).
+///   * **LWLock words** (`MainLWLockArray` incl. buffer-content / partition
+///     locks) — a backend killed mid-hold never ran `LWLockReleaseAll`; the held
+///     bit + waiter queue would otherwise deadlock the new generation.
+///   * **Heavyweight lock table** (LOCK / PROCLOCK arena) — a held
+///     `RowExclusiveLock` &c. from an in-progress xact would otherwise block
+///     every post-restart backend touching the same object.
+///   * **ProcArray** — a dead backend's `pgprocnos[]` entry / advertised running
+///     XID would otherwise make the new cluster treat a committed xact as still
+///     in progress.
+///
+/// Deliberately NOT reset — the forked **startup process** rebuilds these during
+/// WAL replay, so touching them here would be wasted work or would fight redo:
+/// `XLogCtl`, `ShmemVariableCache` (varsup / `nextXid`), the CLOG / MultiXact /
+/// SubTrans SLRU caches, and the `ControlFile` cache (re-read by
+/// `local_process_control_file(true)` then advanced by redo). The 2PC GXACT slots
+/// are likewise re-populated from `pg_twophase` by `RecoverPreparedTransactions`.
+///
+/// # Honest scope: structures a fresh C segment would also zero but we don't (yet)
+///
+/// To be precise about what is genuinely fresh vs. still approximated, a fresh C
+/// segment ALSO zeroes several structures this reset does not, each safe to skip
+/// only for a specific reason (re-zero them here if that reason ever stops
+/// holding):
+///   * **AIO handle pool** (`PgAioCtl` per-backend handles) — would hold a
+///     SIGKILLed backend's in-flight handle. Safe to skip only because the sole
+///     supported `io_method` is `sync` (the `worker` method is unported and reads
+///     sync-fallback), so AIO completes synchronously and no handle ever survives
+///     in-flight across a crash. MUST be reset here if async AIO is ever enabled.
+///   * **Predicate-lock manager** (`PredXactList` / SERIALIZABLEXACTs) — a
+///     SIGKILLed SERIALIZABLE xact's `SERIALIZABLEXACT` leaks. Low-impact (only
+///     affects SERIALIZABLE-isolation correctness, and a fresh generation's
+///     conflict checks largely ignore stale entries), but a faithful fresh
+///     segment would clear it; an in-place `!found` reset belongs here.
+///   * **procsignal / sinval queue / replication-slot ctl / PGPROC freelist** —
+///     transient per-generation state a crashed backend can dirty; not reset
+///     today because the existing test surface does not exercise a stale-state
+///     failure through them (the heavyweight-lock / LWLock / procarray / buffer
+///     leaks were the ones that broke crash recovery in practice). Each has the
+///     same `!found`-in-place reset shape as the four legs below and should be
+///     added when a test surfaces a concrete leak.
+///
+/// This list is the honest boundary between "genuinely fresh-zeroed" (the four
+/// legs below) and "still approximated"; keeping it here, next to the dispatch,
+/// is what prevents the reset from silently drifting back into per-test
+/// whack-a-mole.
 pub fn reset_shared_state_after_crash() -> PgResult<()> {
+    // LWLock words first (matching `create_or_attach_shmem_structs`, where
+    // `CreateLWLocks` runs first): the lock manager / buffer resets below take
+    // LWLocks, so the words must be unheld before they run.
+    lwlock::lwlock_reset_after_crash::call()?;
+
+    // Buffer pool → empty, fresh-segment state (the `BufferManagerShmemInit` leg).
+    sa::buffer_manager_reset_after_crash()?;
+
+    // Heavyweight lock table + ProcArray (the `LockManagerShmemInit` /
+    // `ProcArrayShmemInit` legs).
     sa::lock_manager_reset_after_crash()?;
     sa::proc_array_reset_after_crash()?;
     Ok(())
