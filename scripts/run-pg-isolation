@@ -134,12 +134,24 @@ done
     exit 1
 }
 
+# pg_isolation_regress --use-existing does NOT create the test database (only the
+# non-existing-cluster path does). Create it ourselves — drop first so reruns are
+# clean. Without this, every spec fails to connect/set up and the run reports 0
+# passed (the classic "all 120 failed" symptom).
+"$PG_INSTALL/bin/psql" -h "$SOCK" -p "$PORT" -U postgres -d postgres -q \
+    -c "DROP DATABASE IF EXISTS isolation_regression" \
+    -c "CREATE DATABASE isolation_regression TEMPLATE template0" || {
+    echo "could not create the isolation_regression database" >&2
+    exit 1
+}
+
 cmd=(
     "$ISO_REGRESS"
     --use-existing
     "--host=$SOCK"
     "--port=$PORT"
     --user=postgres
+    --dbname=isolation_regression
     "--inputdir=$ISO_SRC"
     "--outputdir=$OUTDIR/output_iso"
     "--bindir=$PG_INSTALL/bin"
