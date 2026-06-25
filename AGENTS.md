@@ -253,6 +253,26 @@ crates/<unit>-seams    seam declarations for <unit>, created on first cyclic cal
 .claude/skills/        next-crates / port-crate / audit-crate
 ```
 
+## Knowledge-artifact conventions (where docs live)
+
+We are migrating to the cleaned-up repo **`malisper/pgrust`**, which is the
+repo going forward. **Keep its git history clean** — small, well-described,
+logically-scoped commits (NOT the per-port merge spew of the fabled tree). When
+porting work onto it, apply changes as a tidy patch set with clear messages;
+never replay the 7600-commit port history.
+
+Reference/knowledge artifacts follow a fixed directory convention so they stay
+findable and survive the migration:
+
+- `AGENTS.md` — repo root (this file).
+- `.claude/skills/` — the porting skills (next-crates / port-crate / audit-crate).
+- `notes/` — **everything else**: design docs, per-crate audits, and any document
+  about **bugs, deferred work, tech debt, unported features, or divergences**.
+  In `malisper/pgrust` these live under `notes/` (`notes/audits/`, `notes/docs/`,
+  `notes/DESIGN_DEBT.md`, `notes/UNPORTED-FEATURES.md`, …). When you write a new
+  knowledge/status/design/bug doc, put it under `notes/` — do not scatter it at
+  the repo root or invent new top-level dirs.
+
 ## Workflow per crate
 
 1. `/next-crates` — pick what to port next (bottom-up by dependencies).
