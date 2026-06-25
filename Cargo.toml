@@ -1532,3 +1532,32 @@ strip = false
 lto = false
 codegen-units = 16
 panic = "abort"
+
+# wasm64 PRODUCTION profile for pgrust.com. Unlike wasm-boot (opt-level="z" +
+# debug info, tuned for boot bring-up iteration, slow at runtime), this targets
+# the deployed browser experience: fast queries AND a small module that the
+# browser can cold-compile quickly.
+#   opt-level = "s"  -> good size/speed balance. The whole-postgres module is
+#                       fundamentally large, and module size dominates first-load
+#                       (download + browser cold-compile ∝ instruction count), so
+#                       "s" keeps the module small while running far faster than
+#                       "z". (Measured best browser experience vs 2/3 — see
+#                       tools/wasm-web build notes.)
+#   lto = true       -> cross-crate inlining + dead-code elimination; both faster
+#                       and smaller.
+#   codegen-units=1  -> maximal optimization (no per-CGU boundaries).
+#   strip = true     -> drop debug + name sections (pure size win, no runtime
+#                       cost). A wasm-opt -O2 post-pass shrinks further.
+#   panic = "abort"  -> the wasm64 target spec hard-codes panic=abort anyway.
+# Build with:
+#   cargo +nightly build -Zbuild-std=std,panic_abort --bin postgres \
+#     --target wasm64-unknown-unknown --profile wasm-prod
+# then run `wasm-opt -O2` on the output (see tools/wasm-web/build.sh).
+[profile.wasm-prod]
+inherits = "release"
+opt-level = "s"
+debug = false
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
