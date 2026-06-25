@@ -2462,10 +2462,19 @@ pub fn ParseExprKindName(expr_kind: ParseExprKind) -> &'static str {
 /// set-returning function/operator). Public so `analyze.c`'s `transformCallStmt`
 /// can pass it to `ParseFuncOrColumn` (C reads `pstate->p_last_srf` directly).
 pub fn last_srf_expr<'mcx>(pstate: &ParseState<'mcx>) -> Option<Expr<'mcx>> {
+    // C reads `pstate->p_last_srf` (a `Node *`) by pointer; here we hand back an
+    // owned `Expr`. Deep-copy through the sanctioned `clone_in` path (copyObject
+    // shape) rather than the derived `.clone()` — the SRF's argument list may
+    // embed a `SubLink` (e.g. a scalar subselect argument like
+    // `ts_parse((SELECT cfgparser ...), $2)` in ts_debug's body), whose owned
+    // `Query` subselect panics under a plain `.clone()`.
     pstate
         .p_last_srf
         .as_ref()
-        .and_then(|b| b.as_expr().map(|e| e.clone()))
+        .and_then(|b| b.as_expr())
+        .map(|e| e.clone_in(aexpr_clone_ctx(pstate)))
+        .transpose()
+        .expect("last_srf_expr: SRF node clone_in failed")
 }
 
 // NB: the `pstate->p_last_srf` *write* for a set-returning operator is performed
