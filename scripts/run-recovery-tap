@@ -128,7 +128,11 @@ fi
 #                  finds the *C* postgres (pgrust's bootstrap path differs and
 #                  exits 101), so cluster init stays on C. Only the running
 #                  SERVER is pgrust -- exactly what we want.
-INST=/tmp/pgrust_recovery_tap_inst
+# All run dirs derive from one base so PARALLEL runs can be isolated (the recovery
+# tests spin up their own postmasters; concurrent runs on the same dirs collide):
+#   RECOVERY_TAP_DIR=/tmp/rtap-<unique> scripts/run-recovery-tap t/NNN_*.pl
+RTAP_BASE="${RECOVERY_TAP_DIR:-/tmp/pgrust_recovery_tap}"
+INST="${RTAP_BASE}_inst"
 rm -rf "$INST"
 mkdir -p "$INST/bin"
 for f in "$PG_INSTALL"/bin/*; do
@@ -159,7 +163,7 @@ fi
 echo "harness self-check OK: pg_ctl resolves pgrust server at $_resolved_postgres" >&2
 
 # --- TEMP_CONFIG: force io_method=sync (worker unported) ----------------
-tmpconf=/tmp/pgrust_recovery_tap_tempconfig.conf
+tmpconf="${RTAP_BASE}_tempconfig.conf"
 cat > "$tmpconf" <<'EOF'
 # pgrust requires io_method=sync (worker io method unported); larger stack
 # depth matches the main regress harness (scripts equivalent of measure.sh's
@@ -196,7 +200,7 @@ export with_ldap="${with_ldap:-no}"
 export with_pam="${with_pam:-no}"
 export with_readline="${with_readline:-no}"
 
-rundir=/tmp/pgrust_recovery_tap_data
+rundir="${RTAP_BASE}_data"
 rm -rf "$rundir" tmp_check log
 mkdir -p "$rundir"
 export TESTDATADIR="$rundir"
