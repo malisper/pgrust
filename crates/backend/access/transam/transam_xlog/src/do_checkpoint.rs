@@ -965,8 +965,17 @@ pub fn ShutdownXLOG() -> PgResult<()> {
         // During recovery a shutdown checkpoint becomes a restartpoint.
         CreateRestartPoint(CHECKPOINT_IS_SHUTDOWN | CHECKPOINT_IMMEDIATE).map(|_| ())
     } else {
-        // If archiving is enabled, rotate the last XLOG file. Owned by xlogarchive
-        // / RequestXLogSwitch; archiving is off in the regress harness.
+        // If archiving is enabled, rotate the last XLOG file so that all the
+        // remaining records are archived (postmaster wakes up the archiver
+        // process one more time at the end of shutdown). The checkpoint record
+        // will go to the next XLOG file and won't be archived (yet). (xlog.c:
+        // 6700-6701) Without this, a clean shutdown of an archiving node leaves
+        // its final partial WAL segment with no .ready marker, so it is never
+        // copied to the archive — breaking PITR consumers that depend on it
+        // (recovery TAP 028_pitr_timelines test 3).
+        if vars::XLogArchiveMode.read() > 0 {
+            crate::control_funcs::RequestXLogSwitch(false)?;
+        }
         CreateCheckPoint(CHECKPOINT_IS_SHUTDOWN | CHECKPOINT_IMMEDIATE).map(|_| ())
     }
 }
