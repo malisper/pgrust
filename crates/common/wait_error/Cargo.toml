@@ -12,3 +12,4 @@ crate-type = ["rlib"]
 [dependencies]
 wait_error_seams = { path = "../wait_error_seams" }
 libc = "0.2"
+wasm-libc-shim = { path = "../../wasm-libc-shim" }

@@ -7,6 +7,10 @@
 //! the `WIFEXITED`/`WEXITSTATUS`/`WIFSIGNALED`/`WTERMSIG` POSIX macros apply
 //! directly via the `libc` crate.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
+
 /// `wait_result_is_signal(exit_status, signum)` (wait_error.c) — true if the
 /// child terminated due to the given signal (or exited 128+signum, the shell's
 /// signal-exit convention).

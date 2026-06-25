@@ -4165,6 +4165,7 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "wait_error_seams",
+ "wasm-libc-shim",
 ]
 
 [[package]]
