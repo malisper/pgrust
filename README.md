@@ -1,11 +1,11 @@
 <h1 align="center">pgrust</h1>
 
 <p align="center">
-  <strong>A PostgreSQL rewrite in Rust.</strong>
+  <strong>A Postgres rewrite in Rust.</strong>
 </p>
 
 <p align="center">
-  <img alt="PostgreSQL 18.3" src="https://img.shields.io/badge/PostgreSQL-18.3-336791">
+  <img alt="Postgres 18.3" src="https://img.shields.io/badge/Postgres-18.3-336791">
   <img alt="Regression queries: 46k+" src="https://img.shields.io/badge/regression_queries-46k%2B-brightgreen">
   <a href="https://github.com/malisper/pgrust/blob/main/LICENSE">
     <img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue">
@@ -24,21 +24,21 @@
 
 <br />
 
-pgrust targets compatibility with PostgreSQL 18.3 and matches PostgreSQL's
+pgrust targets compatibility with Postgres 18.3 and matches Postgres's
 expected output across more than 46,000 regression queries.
 
-pgrust is disk compatible with PostgreSQL and can boot from an existing
-PostgreSQL 18.3 data directory.
+pgrust is disk compatible with Postgres and can boot from an existing Postgres
+18.3 data directory.
 
 The goal is to make Postgres easier to change from the inside: keep the behavior
-Postgres-shaped, keep the real PostgreSQL tests as the oracle, and use Rust plus
+Postgres-shaped, keep the real Postgres tests as the oracle, and use Rust plus
 AI-assisted programming to explore deeper server changes.
 
 ## Status
 
 pgrust is not production-ready yet. It is not performance optimized yet.
 
-Existing PostgreSQL extensions and procedural language extensions such as
+Existing Postgres extensions and procedural language extensions such as
 PL/Python, PL/Perl, and PL/Tcl are not generally compatible yet. Some bundled
 contrib modules are already ported, and more compatibility may be possible over
 time.
@@ -129,18 +129,18 @@ psql -h /tmp -p 5432 -U postgres -d postgres \
 
 ## Regression Tests
 
-Run the PostgreSQL regression tests against pgrust:
+Run the Postgres regression tests against pgrust:
 
 ```bash
 PGRUST_BIN="$PWD/target/release/postgres" \
 scripts/run-regression
 ```
 
-The runner uses pgrust's own `--initdb` plus the vendored PostgreSQL 18.3 test
-files in this repository. It needs a PostgreSQL 18 `psql` client on `PATH`; if
+The runner uses pgrust's own `--initdb` plus the vendored Postgres 18.3 test
+files in this repository. It needs a Postgres 18 `psql` client on `PATH`; if
 `psql` is somewhere else, set `PGRUST_PSQL=/path/to/psql`.
 
-Verified launch result: pgrust matched PostgreSQL's expected output across more
+Verified launch result: pgrust matched Postgres's expected output across more
 than 46,000 regression queries.
 
 ## History
