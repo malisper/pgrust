@@ -39,8 +39,16 @@ use ::types_error::{
     PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
 use ::tsearch::{DictSnowball, SnowballEnvHandle, StopList, TSLexeme};
+use ::datum::Datum;
+use ::fmgr::{FunctionCallInfoBaseData, LoadedExternalFunc, PGFunction};
 
 pub mod mem_provider;
+
+/// The simple library name the `snowball` template's SQL functions reference
+/// (`AS '$libdir/dict_snowball', 'dsnowball_init'`). Registered with the dfmgr
+/// builtin-library registry so `CREATE FUNCTION ... LANGUAGE C` resolves it
+/// without touching the OS loader (there is no `dict_snowball.so`).
+const LIBRARY: &str = "dict_snowball";
 
 /// `DEFAULT_COLLATION_OID` (`pg_collation_d.h`).
 const DEFAULT_COLLATION_OID: types_core::Oid = 100;
@@ -305,12 +313,91 @@ fn one_lexeme<'mcx>(
     Ok(out)
 }
 
+// ===========================================================================
+// Builtin-library registration.
+//
+// `snowball_create.sql` (run during initdb) creates the `snowball` template's
+// underlying C functions:
+//   CREATE FUNCTION dsnowball_init(INTERNAL)
+//       RETURNS INTERNAL AS '$libdir/dict_snowball', 'dsnowball_init' …
+//   CREATE FUNCTION dsnowball_lexize(INTERNAL, …)
+//       RETURNS INTERNAL AS '$libdir/dict_snowball', 'dsnowball_lexize' …
+// The Rust backend exposes no C ABI, so there is no `dict_snowball.so` to
+// `dlopen`; this unit's bodies are ported in-process. Registering them with the
+// dfmgr builtin-library registry lets `CREATE FUNCTION … LANGUAGE C` resolve the
+// `(library, symbol)` pair (validating the pg_proc rows) instead of erroring
+// with "could not access file dict_snowball".
+//
+// These `PGFunction` entry points are not actually invoked through fmgr at run
+// time: the text-search dictionary machinery (`to_tsany`'s lexize dispatch)
+// recognizes the `snowball` template by its `INIT`/`LEXIZE` method names and
+// calls [`dsnowball_init`] / [`dsnowball_lexize`] directly with the typed
+// (`Mcx`-bound) arguments. The wrappers below therefore only ever run if some
+// path were to dispatch these INTERNAL-typed functions through the generic fmgr
+// machinery (which C never does either — they are dictionary template methods),
+// in which case they raise the same error the C bodies would on a bare call.
+// ===========================================================================
+
+/// Raise a structured `ereport(ERROR)` through the `PGFunction` dispatch point
+/// (`invoke_pgfunction`'s `catch_unwind`), mirroring the contrib libraries.
+fn raise(err: PgError) -> ! {
+    std::panic::panic_any(err);
+}
+
+/// `dsnowball_init` fmgr entry — see the module note above; the dictionary
+/// machinery calls [`dsnowball_init`] directly, so reaching here means the
+/// INTERNAL template method was invoked through generic fmgr, which is not a
+/// supported call path (the C function would likewise fault on its INTERNAL
+/// argument). Present so `CREATE FUNCTION` can resolve the symbol.
+fn fc_dsnowball_init(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    raise(
+        ereport(ERROR)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg("dsnowball_init may only be called as a text search dictionary template method")
+            .into_error(),
+    )
+}
+
+/// `dsnowball_lexize` fmgr entry — see [`fc_dsnowball_init`].
+fn fc_dsnowball_lexize(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    raise(
+        ereport(ERROR)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg(
+                "dsnowball_lexize may only be called as a text search dictionary template method",
+            )
+            .into_error(),
+    )
+}
+
+/// Resolve a `dict_snowball` symbol to its ported `PGFunction`. `None` for an
+/// unknown symbol (the C "could not find function in file" error).
+fn lookup(function: &str) -> Option<LoadedExternalFunc> {
+    let user_fn: PGFunction = match function {
+        "dsnowball_init" => Some(fc_dsnowball_init),
+        "dsnowball_lexize" => Some(fc_dsnowball_lexize),
+        _ => return None,
+    };
+    Some(LoadedExternalFunc {
+        user_fn,
+        api_version: 1,
+    })
+}
+
 /// Install the seams this unit owns (`backend-snowball-dict-snowball-seams`):
 /// the `snowball` dictionary template's `dsnowball_init` / `dsnowball_lexize`
 /// fmgr methods.
 pub fn init_seams() {
     dict_snowball_seams::dsnowball_init::set(dsnowball_init);
     dict_snowball_seams::dsnowball_lexize::set(dsnowball_lexize);
+    // Register the `dict_snowball` module with the dynamic-loader's ported-
+    // library registry so `CREATE FUNCTION … AS '$libdir/dict_snowball'`
+    // resolves in-process (there is no `dict_snowball.so` to dlopen).
+    dfmgr_seams::register_builtin_library(dfmgr_seams::BuiltinLibraryEntry {
+        name: LIBRARY,
+        lookup,
+        pg_init: None,
+    });
     // Install the raw-address allocator the libstemmer runtime needs (the
     // backend `palloc` redefinition in `snowball/header.h`).
     mem_provider::install_snowball_alloc();

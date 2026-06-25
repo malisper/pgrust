@@ -111,8 +111,13 @@ fn lexize_by_oid(
     let options = deflist_pairs(&info.options);
     let len = input.len() as i32;
 
-    // Key on the template's lexize method name (stable for builtin + snowball).
-    let name = lsyscache::get_func_name::call(mcx, info.lexize_oid)?
+    // Key on the template lexize method's `prosrc` (the C symbol name): C
+    // dispatches the lexize method through fmgr by OID → `(probin, prosrc)`, so
+    // the C symbol is the stable discriminator regardless of the SQL function's
+    // name. For the builtin templates prosrc == the SQL name; for a `snowball`
+    // template whose `dsnowball_lexize` function was created under a different
+    // SQL name, the prosrc is still `dsnowball_lexize`.
+    let name = lsyscache::get_func_prosrc::call(mcx, info.lexize_oid)?
         .map(|s| s.as_str().to_string())
         .ok_or_else(|| {
             PgError::error(alloc::format!(

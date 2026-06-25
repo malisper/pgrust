@@ -5403,7 +5403,9 @@ dependencies = [
  "cache",
  "define_seams",
  "dict",
+ "dict_snowball",
  "ispell_regis",
+ "lsyscache_seams",
  "mcx",
  "tsearchcmds_seams",
  "types_core",
@@ -5427,8 +5429,11 @@ dependencies = [
 name = "dict_snowball"
 version = "0.0.0"
 dependencies = [
+ "datum",
  "define_seams",
+ "dfmgr_seams",
  "dict_snowball_seams",
+ "fmgr",
  "formatting_seams",
  "libc",
  "mbutils_seams",

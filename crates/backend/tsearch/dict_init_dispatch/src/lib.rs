@@ -18,7 +18,7 @@
 
 extern crate alloc;
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 
 use ::define_seams::DefElemArg;
 use tsearchcmds_seams as ts_seams;
@@ -61,11 +61,26 @@ fn call_dict_init(
             dict::dict_thesaurus::thesaurus_init(mcx, pairs)?;
         }
         other => {
-            // Mirrors the C fmgr "function N not found" failure for an
-            // init method whose OID this dispatcher does not know.
-            return Err(PgError::error(alloc::format!(
-                "text search dictionary init function {other} not found"
-            )));
+            // The `snowball` template's `dsnowball_init` is created by
+            // `snowball_create.sql` at initdb time with a dynamically-assigned
+            // OID, so it has no fixed builtin OID to match above. C resolves the
+            // init method through fmgr by OID → the `(probin, prosrc)` C symbol;
+            // here we key on the function's `prosrc` (the C symbol name, stable
+            // regardless of the SQL function's name), dispatching the
+            // `$libdir/dict_snowball` `dsnowball_init` symbol to the ported body.
+            // Any other unknown OID mirrors the C fmgr "function N not found".
+            let prosrc = lsyscache_seams::get_func_prosrc::call(mcx, other)?
+                .map(|s| s.as_str().to_string());
+            match prosrc.as_deref() {
+                Some("dsnowball_init") => {
+                    dict_snowball::dsnowball_init(mcx, pairs)?;
+                }
+                _ => {
+                    return Err(PgError::error(alloc::format!(
+                        "text search dictionary init function {other} not found"
+                    )));
+                }
+            }
         }
     }
 

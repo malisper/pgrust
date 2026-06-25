@@ -17,3 +17,5 @@ define_seams = { path = "../../commands/define_seams" }
 tsearchcmds_seams = { path = "../../commands/tsearchcmds_seams" }
 dict = { path = "../dict" }
 ispell_regis = { path = "../ispell_regis" }
+dict_snowball = { path = "../../snowball/dict_snowball" }
+lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }

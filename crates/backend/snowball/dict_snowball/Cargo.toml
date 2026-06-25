@@ -13,6 +13,9 @@ mcx = { path = "../../../_support/mcx" }
 types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
 tsearch = { path = "../../../_support/types/tsearch" }
+fmgr = { path = "../../../_support/types/fmgr" }
+datum = { path = "../../../_support/types/datum" }
+dfmgr_seams = { path = "../../utils/fmgr/dfmgr_seams" }
 utils_error = { path = "../../utils/utils_error" }
 runtime = { path = "../runtime" }
 dict_snowball_seams = { path = "../dict_snowball_seams" }
