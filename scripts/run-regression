@@ -100,6 +100,11 @@ PORT="${PGPORT:-55434}"
 # Put the unix socket under a SHORT path (NOT the long $OUTDIR) so sun_path fits.
 SOCK=$(mktemp -d /tmp/pgr.XXXXXX)
 mkdir -p "$OUTDIR"
+# Tests that write server-side output (COPY TO / lo_export into
+# :abs_builddir/results/...) — copy, copyencoding, misc, largeobject — need this
+# dir to exist, exactly as real pg_regress creates it. Without it they fail with
+# "No such file or directory".
+mkdir -p "$OUTDIR/results"
 : > "$STATUS"
 
 # --- env (match run-pg-regress-serial expectations) ----------------------------
