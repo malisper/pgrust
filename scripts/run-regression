@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+# Clone-only PostgreSQL regression runner for pgrust.
+#
+# Runs the main regression suite against one pgrust instance using ONLY:
+#   * pgrust's own release binary  (target/release/postgres, incl. --initdb)
+#   * the vendored PG 18.3 data files in  vendor/postgres-18.3/
+#   * a PostgreSQL 18 `psql` CLIENT  (the one remaining external dependency)
+#
+# There is NO dependency on a PostgreSQL source tree ($PG_SRC) or a C install /
+# C initdb. A fresh clone + Rust toolchain + a psql client is enough.
+#
+# Finding psql (in priority order):
+#   1. $PGRUST_PSQL                       (explicit override)
+#   2. `command -v psql`                  (a psql on PATH)
+#   3. /tmp/pgrust_pginstall/bin/psql     (a local C install, if present)
+# If none is found, the script prints how to install one and exits.
+#
+# Usage:
+#   scripts/run-regression [test names...]
+#     no args  -> run the whole parallel_schedule order
+#     args     -> run just those tests (test_setup is auto-prepended if absent)
+#
+# Optional environment:
+#   PGRUST_BIN   pgrust postgres binary (default: target/release/postgres)
+#   PGRUST_PSQL  psql client to use     (default: auto-detect, see above)
+#   PGPORT       postmaster port        (default: 55434)
+#   OUTDIR       output directory        (default: a temp dir)
+#   STOP_AFTER   stop after this test name (debugging)
+
+set -euo pipefail
+
+usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-2}"; }
+case "${1:-}" in --help|-h) usage 0 ;; esac
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+VENDOR="$repo_root/vendor/postgres-18.3"
+SHARE="$VENDOR/share"
+REGRESS="$VENDOR/regress"
+SQL="$REGRESS/sql"
+EXP="$REGRESS/expected"
+SCHEDULE="$REGRESS/parallel_schedule"
+PGRUST_BIN="${PGRUST_BIN:-$repo_root/target/release/postgres}"
+
+# --- locate the vendored files -------------------------------------------------
+for need in "$SHARE/postgres.bki" "$SQL" "$EXP" "$SCHEDULE"; do
+    if [ ! -e "$need" ]; then
+        echo "missing vendored file/dir: $need" >&2
+        echo "is vendor/postgres-18.3/ present? (this script is clone-only)" >&2
+        exit 1
+    fi
+done
+
+# --- locate pgrust postgres ----------------------------------------------------
+if [ ! -x "$PGRUST_BIN" ]; then
+    echo "pgrust postgres not found at $PGRUST_BIN" >&2
+    echo "build it: cargo build --release --bin postgres" >&2
+    exit 1
+fi
+
+# --- locate a psql client (the only external dependency) -----------------------
+PSQL=""
+if [ -n "${PGRUST_PSQL:-}" ]; then
+    PSQL="$PGRUST_PSQL"
+elif command -v psql >/dev/null 2>&1; then
+    PSQL=$(command -v psql)
+elif [ -x /tmp/pgrust_pginstall/bin/psql ]; then
+    PSQL=/tmp/pgrust_pginstall/bin/psql
+fi
+if [ -z "$PSQL" ] || [ ! -x "$PSQL" ]; then
+    cat >&2 <<'EOF'
+error: no psql client found.
+
+This is the one remaining external dependency of the clone-only runner.
+Install a PostgreSQL 18 client and either add it to PATH or set PGRUST_PSQL:
+
+  macOS:  brew install libpq && export PATH="$(brew --prefix libpq)/bin:$PATH"
+  or:     export PGRUST_PSQL=/path/to/psql
+EOF
+    exit 1
+fi
+
+# --- output dir + SHORT socket dir (macOS 103-byte sun_path limit) -------------
+tmpbase=${TMPDIR:-/tmp}; tmpbase=${tmpbase%/}
+OUTDIR="${OUTDIR:-$(mktemp -d "$tmpbase/pgrust_regress.XXXXXX")}"
+DATADIR="$OUTDIR/data"
+STATUS="$OUTDIR/_status.tsv"
+PM_LOG="$OUTDIR/postmaster.log"
+PORT="${PGPORT:-55434}"
+# Put the unix socket under a SHORT path (NOT the long $OUTDIR) so sun_path fits.
+SOCK=$(mktemp -d /tmp/pgr.XXXXXX)
+mkdir -p "$OUTDIR"
+: > "$STATUS"
+
+# --- env (match run-pg-regress-serial expectations) ----------------------------
+export PG_ABS_SRCDIR="$REGRESS"
+export PGTZ="${PGTZ:-America/Los_Angeles}"
+export PGDATESTYLE="${PGDATESTYLE:-Postgres, MDY}"
+export LANG="${LANG:-C}"
+export LC_MESSAGES="${LC_MESSAGES:-C}"
+export PGOPTIONS="${PGOPTIONS:--c intervalstyle=postgres_verbose}"
+export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
+unset LC_ALL LC_COLLATE LC_CTYPE LC_MONETARY LC_NUMERIC LC_TIME LANGUAGE
+
+echo "regression output: $OUTDIR" >&2
+echo "psql client:       $PSQL" >&2
+echo "socket dir:        $SOCK" >&2
+
+# --- pgrust's OWN initdb over the VENDORED share -------------------------------
+echo "running pgrust --initdb ..." >&2
+"$PGRUST_BIN" --initdb -D "$DATADIR" -L "$SHARE" \
+    --no-locale --encoding UTF8 -U postgres >"$OUTDIR/initdb.log" 2>&1 || {
+    echo "pgrust --initdb failed; see $OUTDIR/initdb.log" >&2
+    tail -20 "$OUTDIR/initdb.log" >&2
+    exit 1
+}
+
+# --- boot the pgrust server ----------------------------------------------------
+ulimit -s 65520 2>/dev/null || true
+"$PGRUST_BIN" -D "$DATADIR" -F -c listen_addresses= -k "$SOCK" -p "$PORT" \
+    -c io_method=sync -c max_stack_depth=60000 \
+    -c checkpoint_timeout=3600 -c autovacuum=on \
+    -c max_logical_replication_workers=0 >"$PM_LOG" 2>&1 &
+pm=$!
+
+cleanup() {
+    if kill -0 "$pm" 2>/dev/null; then
+        kill "$pm" 2>/dev/null || true
+        for _ in $(seq 1 50); do
+            kill -0 "$pm" 2>/dev/null || break
+            sleep 0.1
+        done
+        kill -9 "$pm" 2>/dev/null || true
+    fi
+    rm -rf "$SOCK" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+booted=no
+for _ in $(seq 1 160); do
+    if "$PSQL" -h "$SOCK" -p "$PORT" -U postgres -d postgres -c 'SELECT 1' >/dev/null 2>&1; then
+        booted=yes; break
+    fi
+    kill -0 "$pm" 2>/dev/null || { echo "postmaster died during boot" >&2; tail -20 "$PM_LOG" >&2; exit 1; }
+    sleep 0.5
+done
+[ "$booted" = yes ] || { echo "postmaster did not start; see $PM_LOG" >&2; exit 1; }
+
+"$PSQL" -h "$SOCK" -p "$PORT" -U postgres -d postgres -c 'CREATE DATABASE regression' >/dev/null
+
+# --- build the run order -------------------------------------------------------
+if [ "$#" -gt 0 ]; then
+    : > "$OUTDIR/_order.txt"
+    # test_setup must run first (creates onek/tenk/... fixtures)
+    case " $* " in *" test_setup "*) ;; *) echo test_setup >> "$OUTDIR/_order.txt" ;; esac
+    printf '%s\n' "$@" >> "$OUTDIR/_order.txt"
+else
+    grep '^test:' "$SCHEDULE" |
+        sed 's/^test:[[:space:]]*//' |
+        tr ' ' '\n' |
+        grep -v '^$' > "$OUTDIR/_order.txt"
+fi
+
+# --- run each file -------------------------------------------------------------
+while IFS= read -r f; do
+    [ -f "$SQL/$f.sql" ] || { echo "missing SQL file for test: $f" >&2; exit 1; }
+    out="$OUTDIR/$f.out"
+    set +e
+    "$PSQL" -h "$SOCK" -p "$PORT" -U postgres -d regression \
+        -X -a -q \
+        -v HIDE_TABLEAM=on \
+        -v HIDE_TOAST_COMPRESSION=on \
+        -v "abs_srcdir=$REGRESS" \
+        -v "abs_builddir=$OUTDIR" \
+        < "$SQL/$f.sql" > "$out" 2>&1
+    rc=$?
+    "$PSQL" -h "$SOCK" -p "$PORT" -U postgres -d postgres -c 'SELECT 1' >/dev/null 2>&1
+    alive=$?
+    set -e
+
+    best="$EXP/$f.out"; bl=999999
+    for ef in "$EXP/$f.out" "$EXP/${f}_1.out" "$EXP/${f}_2.out"; do
+        [ -f "$ef" ] || continue
+        dl=$(set +o pipefail; diff "$out" "$ef" 2>/dev/null | wc -l | tr -d ' ')
+        if [ "$dl" -lt "$bl" ]; then bl=$dl; best="$ef"; fi
+    done
+
+    if   [ "$alive" -ne 0 ]; then status=CRASHED
+    elif [ "$rc" -ne 0 ];    then status=PSQL_FAIL
+    elif [ "$bl" -eq 0 ];    then status=PASS
+    else                          status=FAIL
+    fi
+
+    printf '%s\t%s\t%d\t%s\n' "$f" "$status" "$bl" "$best" | tee -a "$STATUS"
+    if [ "$status" = FAIL ]; then
+        echo "--- diff $f (first 40 lines) ---" >&2
+        diff "$out" "$best" 2>/dev/null | head -40 >&2 || true
+    fi
+    [ "${STOP_AFTER:-}" = "$f" ] && break
+done < "$OUTDIR/_order.txt"
+
+total=$(wc -l < "$STATUS" | tr -d ' ')
+awk -F'\t' -v tot="$total" '{c[$2]++} END{
+    printf "\nPASS=%d/%d  FAIL=%d  PSQL_FAIL=%d  CRASHED=%d\n",
+        c["PASS"], tot, c["FAIL"], c["PSQL_FAIL"], c["CRASHED"]
+}' "$STATUS"
+
+if awk -F'\t' '$2!="PASS"{bad=1} END{exit bad?0:1}' "$STATUS"; then
+    exit 1
+fi
