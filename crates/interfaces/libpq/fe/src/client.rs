@@ -74,6 +74,13 @@ pub struct PgClientConn<T: Transport> {
     /// Whether a password was actually sent during connect
     /// (`PQconnectionUsedPassword`).
     used_password: bool,
+    /// Whether the server has ended the current COPY-out/CopyBoth stream
+    /// (`CopyDone` seen by [`Self::copy_receive`]) and the trailing
+    /// `CommandComplete`/`ReadyForQuery` result has not yet been collected.
+    /// Mirrors libpq's `asyncStatus` leaving the COPY states with a result
+    /// queued: the first `PQgetResult` after `PQgetCopyData` returns -1 yields
+    /// that trailing `PGRES_COMMAND_OK`, and the next returns NULL.
+    copy_ended: bool,
 }
 
 impl<T: Transport> PgClientConn<T> {
@@ -198,6 +205,7 @@ impl<T: Transport> PgClientConn<T> {
             be_pid: 0,
             be_key: 0,
             used_password: false,
+            copy_ended: false,
         };
 
         // The auth / parameter / ready loop: pump messages until ReadyForQuery
@@ -318,6 +326,8 @@ impl<T: Transport> PgClientConn<T> {
 
     /// Send a `Query` ('Q') message (`PQsendQuery` core).
     pub fn send_query(&mut self, query: &str) -> Result<(), TransportError> {
+        // A new command starts: any prior COPY's trailing result is moot.
+        self.copy_ended = false;
         let mut body = Vec::new();
         body.try_reserve(query.len() + 1)
             .map_err(|_| TransportError::OutOfMemory)?;
@@ -451,6 +461,11 @@ impl<T: Transport> PgClientConn<T> {
                     return Ok(CopyRecv::Data(msg.body));
                 }
                 codec::B_COPY_DONE => {
+                    // The server ended the COPY. The trailing CommandComplete +
+                    // ReadyForQuery are still on the wire; the next
+                    // `get_result_after_copy` collects them (libpqrcv_receive's
+                    // `PQgetResult` after `PQgetCopyData` returns -1).
+                    self.copy_ended = true;
                     return Ok(CopyRecv::Done);
                 }
                 codec::B_NOTICE_RESPONSE => {
@@ -504,7 +519,23 @@ impl<T: Transport> PgClientConn<T> {
     /// `None`), collect the trailing result up to `ReadyForQuery`
     /// (`libpqrcv_endstreaming` reads CommandComplete then ReadyForQuery).
     pub fn end_copy(&mut self) -> Result<PGresult, TransportError> {
+        self.copy_ended = false;
         self.collect_result()
+    }
+
+    /// `PQgetResult(conn)` as the WAL receiver's end-of-COPY path uses it
+    /// (`libpqrcv_receive` after `PQgetCopyData` returns -1). When the server has
+    /// just ended the COPY (CopyDone seen), collect and return the trailing
+    /// result (`CommandComplete` -> `PGRES_COMMAND_OK`, draining through
+    /// `ReadyForQuery`); the next call returns `None` (the C `PQgetResult`
+    /// returning NULL once the result queue is drained). When no COPY is
+    /// outstanding there is nothing queued, so return `None`.
+    pub fn get_result_after_copy(&mut self) -> Result<Option<PGresult>, TransportError> {
+        if !self.copy_ended {
+            return Ok(None);
+        }
+        self.copy_ended = false;
+        Ok(Some(self.collect_result()?))
     }
 
     // -----------------------------------------------------------------------

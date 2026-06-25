@@ -506,11 +506,27 @@ fn libpqsrv_exec(conn: PgConnId, query: String, _wait_event_info: u32) -> PgResu
 }
 
 /// `libpqsrv_get_result(conn)` — fetch the next result (`0` == NULL == done).
-/// `PQexec`/`libpqsrv_exec` already drains to ReadyForQuery and returns the one
-/// result, so a follow-up `get_result` has nothing left: return NULL (the C
-/// `PQgetResult` returning NULL after the final result), the loop terminator.
-fn libpqsrv_get_result(_conn: PgConnId, _wait_event_info: u32) -> PgResultId {
-    0
+///
+/// `libpqrcv_receive` calls this after `PQgetCopyData` returns -1 (the server
+/// ended the CopyBoth stream, e.g. at a timeline switch): C's `PQgetResult`
+/// then yields the trailing `PGRES_COMMAND_OK` (drained through
+/// `ReadyForQuery`), and a second `PQgetResult` returns NULL. We mirror that via
+/// the connection's just-ended-COPY state: the first call collects and returns
+/// the trailing result; subsequent calls (and calls outside an end-of-COPY,
+/// where `PQexec` already drained to ReadyForQuery) return NULL.
+fn libpqsrv_get_result(conn: PgConnId, _wait_event_info: u32) -> PgResultId {
+    match with_conn(conn, |c| c.get_result_after_copy()) {
+        Ok(Some(r)) => store_result(r),
+        Ok(None) => 0,
+        Err(e) => {
+            // A wire error while collecting the trailing result: surface it as a
+            // PGRES_FATAL_ERROR result (libpq builds a fatal result, not NULL),
+            // so the caller reports it rather than treating it as a clean end.
+            let mut r = PGresult::make_empty(ExecStatusType::PGRES_FATAL_ERROR);
+            r.err_msg = Some(e.message());
+            store_result(r)
+        }
+    }
 }
 
 /// `libpqsrv_disconnect(conn)` — PQfinish: send Terminate and free the conn.
@@ -565,6 +581,14 @@ fn pq_error_message(conn: PgConnId) -> String {
 }
 
 fn pq_result_status(res: PgResultId) -> SeamExecStatus {
+    // `PQresultStatus(NULL)` returns `PGRES_FATAL_ERROR` (fe-exec.c) — the C
+    // callers (e.g. `libpqrcv_receive`'s end-of-stream `PQgetResult` ->
+    // `PQresultStatus` after a peer disconnect, where `PQgetResult` yields NULL)
+    // rely on this NULL-tolerance rather than dereferencing. Index 0 is our NULL
+    // sentinel, so mirror C here instead of treating it as an invalid handle.
+    if res == 0 {
+        return ExecStatusType::PGRES_FATAL_ERROR;
+    }
     with_result(res, |r| seam_exec_status(r.result_status()))
 }
 
