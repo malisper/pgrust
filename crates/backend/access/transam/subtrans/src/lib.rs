@@ -599,6 +599,10 @@ pub fn init_seams() {
         with_ctl(|st| StartupSUBTRANS(st, oldest_active_xid))
     });
 
+    // `CheckPointSUBTRANS()` — driven from `CheckPointGuts` (xlog.c:7587) at
+    // every checkpoint/restartpoint to flush dirty pg_subtrans SLRU pages.
+    seams::check_point_subtrans::set(|| with_ctl(CheckPointSUBTRANS));
+
     // The C GUC `int subtransaction_buffers` lives in the thread_local here;
     // the GUC machinery reaches it through these accessors, and the check
     // hook validates new values via check_slru_buffers (subtrans.c

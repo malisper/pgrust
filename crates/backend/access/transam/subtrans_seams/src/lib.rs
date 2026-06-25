@@ -59,3 +59,13 @@ seam_core::seam!(
     /// SLRU page zeroing can `ereport(ERROR)`, carried on `Err`.
     pub fn startup_subtrans(oldest_active_xid: TransactionId) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `CheckPointSUBTRANS()` (subtrans.c:354) — write dirty pg_subtrans SLRU
+    /// pages to disk at a checkpoint (`CheckPointGuts`, xlog.c:7587). Not
+    /// required for correctness (pg_subtrans is rebuilt during recovery), but
+    /// it lets the checkpointer (rather than backends) flush dirty pages, and a
+    /// node that has never evicted a page otherwise never materializes its
+    /// pg_subtrans segment on disk. The SLRU writes can `ereport(ERROR)`.
+    pub fn check_point_subtrans() -> PgResult<()>
+);

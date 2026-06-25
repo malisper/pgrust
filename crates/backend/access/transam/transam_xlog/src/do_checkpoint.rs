@@ -474,14 +474,22 @@ fn check_point_guts(check_point_redo: XLogRecPtr, flags: i32) -> PgResult<()> {
     //   CheckPointCommitTs / CheckPointMultiXact — the commit-timestamp and
     //                     multixact SLRUs (paired with the snapshots the record
     //                     carries).
-    // The remaining CheckPointGuts SLRU arms (SUBTRANS / Predicate) are owned by
-    // units that do not yet expose a CheckPoint seam; SUBTRANS is rebuilt from
-    // clog on recovery and Predicate is not durability-critical for the
-    // single-node crash-recovery contract, so omitting them is
+    //   CheckPointSUBTRANS — the subtransaction-parent SLRU (xlog.c:7587). Not
+    //                     required for cross-crash correctness (pg_subtrans is
+    //                     rebuilt during recovery), but C flushes it here so the
+    //                     checkpointer — not backends — writes the dirty pages,
+    //                     and so a node that never evicted a page still
+    //                     materializes its pg_subtrans segment on disk (recovery
+    //                     TAP 009 subtest "contents of pg_subtrans/ have changed"
+    //                     inspects the on-disk directory directly).
+    // The remaining CheckPointGuts SLRU arm (Predicate) is owned by a unit that
+    // does not yet expose a CheckPoint seam; it is not durability-critical for
+    // the single-node crash-recovery contract, so omitting it is
     // behaviour-preserving.
     clog_seams::check_point_clog::call()?;
     commit_ts_seams::check_point_commit_ts::call()?;
     mx_seams::check_point_multi_xact::call()?;
+    subtrans_seams::check_point_subtrans::call()?;
 
     // CheckPointBuffers: BufferSync write pass over the shared buffer pool.
     bufmgr_seams::check_point_buffers::call(flags)?;
