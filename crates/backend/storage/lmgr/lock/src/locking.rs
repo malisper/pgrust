@@ -866,6 +866,25 @@ pub fn LockAcquireExtended(
     )?;
 
     let myproc = proc::my_proc_number::call();
+
+    // Heal a broken LOCALLOCK/PROCLOCK invariant before re-requesting. We reach
+    // here only when the LOCALLOCK shows nLocks==0 (the n>0 fast path above
+    // returned already). If the shared table nonetheless records this backend as
+    // already holding `lockmode` on this tag, that grant is an orphan: an earlier
+    // acquire granted the shared PROCLOCK but was interrupted before
+    // GrantLockLocal restored the local count (C has no such interruptible gap,
+    // so it `elog(ERROR)`s here instead). Un-grant the orphan now — reversing the
+    // shared counts the original acquire incremented — so the normal request
+    // below re-grants it with correct accounting, rather than tripping the
+    // "is already held" check in SetupLockInTable.
+    let orphan_held = state::with_shared(|s| {
+        (s.proclock_hold_mask(locktag, myproc) & LOCKBIT_ON(lockmode)) != 0
+    });
+    if orphan_held {
+        let wakeup_needed = un_grant_lock(locktag, lockmode, myproc, lockmethodid);
+        clean_up_lock(locktag, myproc, lockmethodid, wakeup_needed);
+    }
+
     let proclock = setup_lock_in_table(myproc, locktag, lockmode)?;
     let proc_no = match proclock {
         Some(p) => p,
@@ -1129,6 +1148,28 @@ pub fn LockReleaseAll(lockmethodid: u8, all_locks: bool) -> PgResult<()> {
 
         // Unused entry: forget it.
         if n_locks == 0 {
+            // Heal a broken LOCALLOCK/PROCLOCK invariant: if this backend has an
+            // orphaned grant in the shared table for this tag (a PROCLOCK bit set
+            // while the LOCALLOCK shows nLocks==0 — e.g. an acquire that granted
+            // the shared PROCLOCK but was interrupted before GrantLockLocal ran),
+            // mark it for release so Pass 2 ungrants it. Otherwise the orphan
+            // persists and a later acquire of the same tag fails "is already
+            // held". C never reaches this state (its grant/grant-local pair has
+            // no interruptible gap), so the C code simply drops the unused entry;
+            // we additionally reconcile the shared side. Only do this for the
+            // method being released; leave other methods' grants alone.
+            if localtag.lock.locktag_lockmethodid == lockmethodid {
+                let myproc = proc::my_proc_number::call();
+                state::with_shared(|s| {
+                    let hold = s.proclock_hold_mask(&localtag.lock, myproc);
+                    let orphan = hold & LOCKBIT_ON(localtag.mode);
+                    if orphan != 0 {
+                        s.proclock_update(&localtag.lock, myproc, |pl| {
+                            pl.release_mask |= orphan;
+                        });
+                    }
+                });
+            }
             remove_local_lock(&localtag);
             continue;
         }
