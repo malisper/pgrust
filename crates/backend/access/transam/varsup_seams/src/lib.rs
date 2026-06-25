@@ -146,6 +146,26 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Forward-only (no-regress) variant of [`set_transam_variables_at_startup`]
+    /// used by the COW-model `SeedTransamVariablesFromCheckpoint` re-seed that the
+    /// postmaster / bgwriter run after the startup process finishes recovery.
+    ///
+    /// `TransamVariables` is genuine cluster-wide shared memory, so the startup
+    /// process' redo already advanced `nextXid`/`nextOid` past every replayed
+    /// record (e.g. to the value after the last replayed COMMIT). The re-seed only
+    /// exists to lift an as-yet-unseeded COW child up to the checkpoint values; it
+    /// must therefore never move the cluster-wide counters *backwards* below what
+    /// redo already advanced them to. On the promotion path the durable
+    /// `pg_control` checkpoint copy still holds the pre-recovery (backup)
+    /// checkpoint — promotion writes an `XLOG_END_OF_RECOVERY` record, not a
+    /// checkpoint — so an unconditional store would regress `nextXid`, making
+    /// every transaction committed during recovery read as "in the future"
+    /// (its catalog rows vanish: "relation ... does not exist"). Forward-max keeps
+    /// the re-seed idempotent on every path.
+    pub fn reseed_transam_variables_no_regress(next_xid: FullTransactionId, next_oid: Oid)
+);
+
+seam_core::seam!(
     /// `XLOG_NEXTOID` redo (xlog.c:8316-8331 in `xlog_redo`):
     /// `TransamVariables->nextOid = nextOid; TransamVariables->oidCount = 0;`
     /// under `OidGenLock`. The record carries the recorded `nextOid` exactly;

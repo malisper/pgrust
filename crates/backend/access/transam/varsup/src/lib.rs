@@ -912,6 +912,29 @@ pub fn init_seams() {
         tv.oidCount = 0;
     });
 
+    // Forward-only re-seed (COW-model `SeedTransamVariablesFromCheckpoint`): never
+    // regress the cluster-wide counters below what redo already advanced them to.
+    // `TransamVariables` is genuine shared memory, so the startup process' redo
+    // advance is already visible here; this re-seed only lifts an unseeded child
+    // up to the checkpoint. On the promotion path the durable checkpoint copy is
+    // the pre-recovery one (promotion writes XLOG_END_OF_RECOVERY, not a
+    // checkpoint), so an unconditional store would regress nextXid and make every
+    // transaction committed during recovery invisible.
+    seams::reseed_transam_variables_no_regress::set(|next_xid, next_oid| {
+        let mut tv = transam();
+        if FullTransactionIdPrecedes(tv.nextXid, next_xid) {
+            tv.nextXid = next_xid;
+        }
+        // OIDs wrap, so "forward" is not a total order; only adopt the checkpoint
+        // nextOid when the live value is still the unseeded zero (the COW child
+        // case this re-seed exists for). A redo-advanced live value is left
+        // untouched, exactly as for nextXid.
+        if tv.nextOid == 0 {
+            tv.nextOid = next_oid;
+            tv.oidCount = 0;
+        }
+    });
+
     // `XLOG_NEXTOID` redo (xlog.c:8316-8331): believe the recorded nextOid
     // exactly and zero the prefetch count, under `OidGenLock`. varsup owns the
     // `TransamVariables` singleton + lock; the XLOG redo dispatcher reaches them

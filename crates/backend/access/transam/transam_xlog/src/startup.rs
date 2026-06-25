@@ -771,7 +771,20 @@ pub fn SeedTransamVariablesFromCheckpoint() -> PgResult<()> {
 
     // initialize shared memory variables from the checkpoint record.
     // (xlog.c:5634-5642)
-    varsup_seam::set_transam_variables_at_startup::call(check_point.nextXid, check_point.nextOid);
+    //
+    // Forward-only: this re-seed runs AFTER the startup process' redo advanced the
+    // (genuine shmem) cluster-wide nextXid/nextOid past every replayed record. On
+    // the promotion path the durable checkpoint copy read above is the
+    // pre-recovery (backup) checkpoint — promotion ends recovery with an
+    // XLOG_END_OF_RECOVERY record, not a checkpoint — so an unconditional store
+    // here would regress nextXid below the XIDs already committed during replay,
+    // making every recovered transaction read as "in the future" (its catalog rows
+    // disappear). Re-seeding no-regress lifts an unseeded COW child up to the
+    // checkpoint while preserving a redo-advanced live value.
+    varsup_seam::reseed_transam_variables_no_regress::call(
+        check_point.nextXid,
+        check_point.nextOid,
+    );
     multixact_seam::multi_xact_set_next_m_xact::call(
         check_point.nextMulti,
         check_point.nextMultiOffset,

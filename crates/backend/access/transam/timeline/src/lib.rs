@@ -164,11 +164,16 @@ pub fn readTimeLineHistory<'mcx>(
             None => {
                 from_archive = false;
                 /*
-                 * RestoreArchivedFile() leaves `path` untouched on failure; the
-                 * subsequent open then fails with ENOENT, taking the "not there,
-                 * so assume no parents" branch below.
+                 * RestoreArchivedFile()'s `not_available` tail (xlogarchive.c:
+                 * 271-281) leaves `path` set to the pg_wal path when the file is
+                 * not in the archive (or there is no restore_command). The
+                 * subsequent open then reads the pg_wal copy if one exists — e.g.
+                 * a history file a streaming standby fetched into pg_wal — or
+                 * fails with ENOENT, taking the "not there, so assume no parents"
+                 * branch below. (`from_archive` stays false so we don't re-keep a
+                 * file already in pg_wal.)
                  */
-                path = String::new();
+                path = TLHistoryFilePath(targetTLI);
             }
         }
     } else {
@@ -300,7 +305,16 @@ pub fn existsTimeLineHistory(
         let histfname = TLHistoryFileName(probeTLI);
         match xlogarchive::restore_archived_history_file::call(mcx, &histfname)? {
             Some(restored) => path = restored.as_str().to_string(),
-            None => path = String::new(),
+            // RestoreArchivedFile's `not_available` tail (xlogarchive.c:271-281):
+            // when the file is not in the archive (or there is no restore_command,
+            // e.g. a streaming-only standby), it leaves `path` set to the pg_wal
+            // path so the caller still finds a copy streamed/copied there. The
+            // `restore_archived_history_file` seam collapses that to `None`, so we
+            // reconstruct the fallback here. Without it a standby that streamed a
+            // new timeline's history file into pg_wal would never see it, and
+            // `findNewestTimeLine` could not follow onto the new timeline after a
+            // promotion.
+            None => path = TLHistoryFilePath(probeTLI),
         }
     } else {
         path = TLHistoryFilePath(probeTLI);
