@@ -1,0 +1,16 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "PostgreSQL regression expected output uses planner labels like Sort Key and Group Key."
+paths = [
+  '''vendor/postgres-18\.3/regress/expected/(aggregates|limit|union)\.out''',
+]
+rules = ["generic-api-key"]
+
+[[allowlists]]
+description = "PostgreSQL pgcrypto test fixture contains a public test PGP private key."
+paths = [
+  '''crates/contrib/pgcrypto/src/pgp/mod\.rs''',
+]
+rules = ["private-key"]
