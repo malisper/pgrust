@@ -35,6 +35,9 @@ pub const INT4OID: Oid = 23;
 pub const INT2OID: Oid = 21;
 pub const VOIDOID: Oid = 2278;
 pub const INTERNALOID: Oid = 2281;
+pub const TEXTOID: Oid = 25;
+pub const TEXTARRAYOID: Oid = 1009;
+pub const RECORDOID: Oid = 2249;
 
 pub const BTREE_AM_OID: Oid = 403;
 
@@ -44,6 +47,7 @@ pub const TABLE_AM_HANDLEROID: Oid = 269;
 
 // `ScanKeyInit` always stamps this into `sk_collation`.
 pub const C_COLLATION_OID: Oid = 950;
+pub const DEFAULT_COLLATION_OID: Oid = 100;
 
 pub const RELPERSISTENCE_PERMANENT: u8 = b'p';
 pub const RELPERSISTENCE_UNLOGGED: u8 = b'u';

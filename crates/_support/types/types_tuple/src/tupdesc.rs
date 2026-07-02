@@ -13,6 +13,8 @@ pub const TYPSTORAGE_EXTERNAL: i8 = b'e' as i8;
 pub const TYPSTORAGE_MAIN: i8 = b'm' as i8;
 pub const TYPSTORAGE_EXTENDED: i8 = b'x' as i8;
 
+pub const InvalidCompressionMethod: i8 = 0;
+
 pub const ATTNULLABLE_UNRESTRICTED: i8 = b'f' as i8;
 pub const ATTNULLABLE_UNKNOWN: i8 = b'u' as i8;
 pub const ATTNULLABLE_VALID: i8 = b'v' as i8;
@@ -175,6 +177,16 @@ pub struct TupleDescData<'mcx> {
 }
 
 pub type TupleDesc<'a, 'mcx> = &'a TupleDescData<'mcx>;
+
+// SearchSysCache1(TYPEOID) projected to the fields TupleDescInitEntry reads.
+#[derive(Clone, Copy, Debug)]
+pub struct PgTypeShape {
+    pub typlen: i16,
+    pub typbyval: bool,
+    pub typalign: i8,
+    pub typstorage: i8,
+    pub typcollation: Oid,
+}
 
 impl<'mcx> TupleDescData<'mcx> {
     #[inline]

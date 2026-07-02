@@ -1,7 +1,7 @@
 use types_core::Oid;
 use types_error::PgResult;
 use types_storage::PgClassShape;
-use types_tuple::HeapTupleData;
+use types_tuple::{HeapTupleData, PgTypeShape};
 
 seam_core::seam!(
     pub fn search_syscache_exists_reloid(reloid: Oid) -> PgResult<bool>
@@ -38,4 +38,10 @@ seam_core::seam!(
 seam_core::seam!(
     // Some(conrelid) iff contype == CONSTRAINT_FOREIGN && OidIsValid(conrelid).
     pub fn pg_constraint_fk_target(tuple: &HeapTupleData<'_>) -> Option<Oid>
+);
+
+seam_core::seam!(
+    // SearchSysCache1(TYPEOID, typid) projected to TupleDescInitEntry's reads;
+    // None mirrors !HeapTupleIsValid(tup).
+    pub fn lookup_pg_type_shape(typid: Oid) -> PgResult<Option<PgTypeShape>>
 );
