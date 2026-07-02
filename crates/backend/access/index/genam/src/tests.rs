@@ -7,12 +7,12 @@ use types_core::{Oid, BTREE_AM_OID, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANEN
 use types_error::{PgResult, ERRCODE_TRANSACTION_ROLLBACK};
 use types_nbtree::BTScanOpaqueData;
 use types_rel::{
-    FormData_pg_class, FormData_pg_index, LockInfoData, LockRelId, NameData, Relation,
-    RelationData, LOCKMODE, RELKIND_INDEX, RELKIND_RELATION, REPLICA_IDENTITY_DEFAULT,
+    FormData_pg_class, FormData_pg_index, LockInfoData, LockRelId, Relation, RelationData,
+    LOCKMODE, RELKIND_INDEX, RELKIND_RELATION, REPLICA_IDENTITY_DEFAULT,
 };
 use types_scan::scankey::ScanKeyData;
 use types_snapshot::{SnapshotData, SNAPSHOT_MVCC};
-use types_tuple::TupleDescData;
+use types_tuple::{NameData, TupleDescData};
 
 use crate::*;
 
@@ -199,7 +199,9 @@ fn convert_scan_keys_rejects_non_index_column() {
     let mcx = cx.mcx();
     let idx = make(mcx, IDX, "idx", RELKIND_INDEX, BTREE_AM_OID);
 
-    let err = convert_scan_keys(mcx, &idx, &[key_on(7)]).unwrap_err();
+    let Err(err) = convert_scan_keys(mcx, &idx, &[key_on(7)]) else {
+        panic!("expected error");
+    };
     assert!(err.message().contains("column is not in index"));
 }
 

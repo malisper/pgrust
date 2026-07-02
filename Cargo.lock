@@ -124,6 +124,7 @@ dependencies = [
  "pgstat_seams",
  "postgres_seams",
  "pqcomm",
+ "pqcomm_seams",
  "pqformat",
  "procsignal",
  "ps_status_seams",
@@ -543,6 +544,25 @@ dependencies = [
 [[package]]
 name = "guc"
 version = "0.0.0"
+dependencies = [
+ "aclchk_seams",
+ "elog",
+ "guc_seams",
+ "guc_tables",
+ "init_small",
+ "mbutils_seams",
+ "mcx",
+ "miscinit",
+ "parser_small1",
+ "pqcomm_seams",
+ "scalar_seams",
+ "transam_xlog_seams",
+ "types_core",
+ "types_dest",
+ "types_error",
+ "types_guc",
+ "xact_seams",
+]
 
 [[package]]
 name = "guc_file_seams"
@@ -785,7 +805,17 @@ dependencies = [
 
 [[package]]
 name = "launch_backend"
-version = "0.1.0"
+version = "0.0.0"
+dependencies = [
+ "backend_startup",
+ "init_small",
+ "ip",
+ "libpq_pqsignal",
+ "miscinit",
+ "timestamp_seams",
+ "types_core",
+ "types_startup",
+]
 
 [[package]]
 name = "launcher_seams"
@@ -1174,6 +1204,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "pgstat"
+version = "0.0.0"
+dependencies = [
+ "guc_tables",
+ "hashbrown",
+ "init_small",
+ "mcx",
+ "pgstat_seams",
+ "pgstat_xact_seams",
+ "timestamp_seams",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "xact_seams",
+]
+
+[[package]]
 name = "pgstat_seams"
 version = "0.0.0"
 dependencies = [
@@ -1511,6 +1558,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "relcache"
+version = "0.1.0"
+dependencies = [
+ "elog",
+ "init_small",
+ "lmgr",
+ "lwlock",
+ "mcx",
+ "miscinit_seams",
+ "namespace_seams",
+ "relcache_build_seams",
+ "relcache_seams",
+ "relmapper_seams",
+ "smgr",
+ "snapmgr",
+ "syscache_seams",
+ "tupdesc",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_tuple",
+ "xact_seams",
+]
+
+[[package]]
+name = "relcache_build_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_tuple",
+]
+
+[[package]]
 name = "relcache_seams"
 version = "0.0.0"
 dependencies = [
@@ -1775,7 +1859,6 @@ dependencies = [
 name = "snapmgr_seams"
 version = "0.0.0"
 dependencies = [
- "mcx",
  "seam_core",
  "types_core",
  "types_error",

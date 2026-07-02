@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use exectuples::FetchedHeapTuple;
 use indexam::{IndexScanDescData, IndexScanOpaque};
-use mcx::{slice_in, vec_with_capacity_in, Mcx, MemoryContext, PgVec};
+use mcx::{Mcx, MemoryContext, PgVec};
 use tableam::TableScanDescData;
 use types_core::primitive::AttrNumber;
 use types_core::xact::TransactionIdIsValid;
@@ -84,8 +84,8 @@ pub fn RelationGetIndexScan<'mcx>(
         numberOfKeys: nkeys,
         numberOfOrderBys: norderbys,
         // Key workspace; filled by amrescan.
-        keyData: vec_with_capacity_in(mcx, nkeys.max(0) as usize)?,
-        orderByData: vec_with_capacity_in(mcx, norderbys.max(0) as usize)?,
+        keyData: skey_vec(mcx, nkeys.max(0) as usize)?,
+        orderByData: skey_vec(mcx, norderbys.max(0) as usize)?,
         xs_want_itup: false,
         xs_temp_snap: false,
         kill_prior_tuple: false,
@@ -165,7 +165,7 @@ pub fn systable_beginscan<'mcx>(
                 heapRelation,
                 Some(snap),
                 nkeys,
-                slice_in(mcx, key)?,
+                skey_slice_in(mcx, key)?,
                 true,
                 false,
             )?;
@@ -443,7 +443,7 @@ fn convert_scan_keys<'mcx>(
         .expect("systable scan index has no rd_index (C would deref NULL)")
         .indkey;
 
-    let mut idxkey = vec_with_capacity_in(mcx, key.len())?;
+    let mut idxkey = skey_vec(mcx, key.len())?;
     for k in key {
         let Some(j) = indkey.iter().position(|&col| col == k.sk_attno) else {
             return Err(column_not_in_index());
@@ -453,6 +453,26 @@ fn convert_scan_keys<'mcx>(
         idxkey.push(ik);
     }
     Ok(idxkey)
+}
+
+// ScanKeyData is droppy (sk_func.fn_extra), so the !needs_drop arena helpers
+// refuse it; scan descriptors are rule-3 by-value owners, Drop is correct.
+fn skey_vec<'mcx>(mcx: Mcx<'mcx>, cap: usize) -> PgResult<PgVec<'mcx, ScanKeyData>> {
+    let mut v = PgVec::new_in(mcx);
+    v.try_reserve_exact(cap)
+        .map_err(|_| Box::new(mcx.oom(cap * core::mem::size_of::<ScanKeyData>())))?;
+    Ok(v)
+}
+
+fn skey_slice_in<'mcx>(
+    mcx: Mcx<'mcx>,
+    key: &[ScanKeyData],
+) -> PgResult<PgVec<'mcx, ScanKeyData>> {
+    let mut v = skey_vec(mcx, key.len())?;
+    for k in key {
+        v.push(k.clone());
+    }
+    Ok(v)
 }
 
 // Caller-provided snapshot: caller owns it (nothing to unregister). None:

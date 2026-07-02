@@ -18,3 +18,4 @@ types_snapshot = { path = "../../../../_support/types/snapshot" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 xact_seams = { path = "../../transam/xact_seams" }
 s_lock_seams = { path = "../../../storage/lmgr/s_lock_seams" }
+exectuples = { path = "../../../executor/exectuples" }
