@@ -47,6 +47,7 @@ pub const TABLE_AM_HANDLEROID: Oid = 269;
 
 // `ScanKeyInit` always stamps this into `sk_collation`.
 pub const C_COLLATION_OID: Oid = 950;
+pub const POSIX_COLLATION_OID: Oid = 951;
 pub const DEFAULT_COLLATION_OID: Oid = 100;
 
 pub const RELPERSISTENCE_PERMANENT: u8 = b'p';
