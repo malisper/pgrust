@@ -1,4 +1,4 @@
-use core::cell::{Cell, RefCell, UnsafeCell};
+use core::cell::{Cell, UnsafeCell};
 use core::mem::ManuallyDrop;
 
 use elog::ereport;
@@ -48,10 +48,19 @@ thread_local! {
             recv_buffer: UnsafeCell::new([0; PQ_RECV_BUFFER_SIZE]),
         }
     };
-    // C's TopMemoryContext PqSendBuffer; lazily created until pq_init lands.
-    // ManuallyDrop: a droppy TLS payload costs a per-access state machine.
-    static SEND: RefCell<Option<ManuallyDrop<McxOwned<SendBufTy>>>> =
-        const { RefCell::new(None) };
+    // C's TopMemoryContext PqSendBuffer, created by pq_init_buffers (C's
+    // pq_init). ManuallyDrop: a droppy TLS payload costs a per-access state
+    // machine. UnsafeCell, not RefCell: the borrow flag re-paid per call what
+    // comm_busy guards (+3 insns/call, docs/benchmarks/pqcomm.md).
+    static SEND: UnsafeCell<Option<ManuallyDrop<McxOwned<SendBufTy>>>> = const {
+        assert!(!core::mem::needs_drop::<Option<ManuallyDrop<McxOwned<SendBufTy>>>>());
+        UnsafeCell::new(None)
+    };
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static SEND_ACTIVE: Cell<bool> = const { Cell::new(false) };
 }
 
 fn loc(funcname: &'static str) -> ErrorLocation {
@@ -79,29 +88,65 @@ fn new_send_buf() -> PgResult<McxOwned<SendBufTy>> {
     })
 }
 
+#[cfg(debug_assertions)]
+struct SendActiveGuard;
+
+#[cfg(debug_assertions)]
+impl Drop for SendActiveGuard {
+    fn drop(&mut self) {
+        SEND_ACTIVE.with(|b| b.set(false));
+    }
+}
+
+#[cfg(debug_assertions)]
+fn send_active_guard() -> SendActiveGuard {
+    SEND_ACTIVE.with(|b| assert!(!b.replace(true), "reentrant SEND access"));
+    SendActiveGuard
+}
+
+#[cold]
+#[inline(never)]
+fn send_init_cold(
+    slot: &mut Option<ManuallyDrop<McxOwned<SendBufTy>>>,
+) -> PgResult<&mut ManuallyDrop<McxOwned<SendBufTy>>> {
+    Ok(slot.insert(ManuallyDrop::new(new_send_buf()?)))
+}
+
 fn with_send<R>(
     f: impl for<'mcx> FnOnce(&mut SendBuf<'mcx>) -> PgResult<R>,
 ) -> PgResult<R> {
+    #[cfg(debug_assertions)]
+    let _active = send_active_guard();
     SEND.with(|cell| -> PgResult<R> {
-        let mut slot = cell.borrow_mut();
-        if slot.is_none() {
-            *slot = Some(ManuallyDrop::new(new_send_buf()?));
+        // SAFETY: one backend = one thread and each thread owns its own SEND
+        // TLS slot, so the only aliasing hazard is same-thread reentry — and
+        // no path reachable from `f` re-enters SEND: the secure_* seams do
+        // not call back into pqcomm, and errors below them are COMMERROR
+        // (never client-directed) precisely so they cannot recurse into the
+        // send side; comm_busy suppresses reentrant putmessage/flush at the
+        // API boundary; SEND_ACTIVE re-checks the claim in debug builds.
+        let slot = unsafe { &mut *cell.get() };
+        match slot {
+            Some(sb) => sb.with_mut(f),
+            None => send_init_cold(slot)?.with_mut(f),
         }
-        slot.as_mut().unwrap().with_mut(f)
     })
 }
 
 /// The "initialize state variables" block of C `pq_init`; the socket half
 /// (Port setup, FeBeWaitSet, keepalives) lands with the socket/port unit.
 pub fn pq_init_buffers() -> PgResult<()> {
-    SEND.with(|cell| -> PgResult<()> {
-        let mut slot = cell.borrow_mut();
-        let fresh = ManuallyDrop::new(new_send_buf()?);
+    #[cfg(debug_assertions)]
+    let _active = send_active_guard();
+    let fresh = ManuallyDrop::new(new_send_buf()?);
+    SEND.with(|cell| {
+        // SAFETY: same single-thread slot ownership as with_send; no send
+        // routine is live here (checked in debug by the guard above).
+        let slot = unsafe { &mut *cell.get() };
         if let Some(old) = slot.replace(fresh) {
             drop(ManuallyDrop::into_inner(old));
         }
-        Ok(())
-    })?;
+    });
     PQ.with(|st| {
         st.send_pointer.set(0);
         st.send_start.set(0);
