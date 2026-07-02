@@ -1,0 +1,33 @@
+[package]
+name = "procsignal"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "procsignal"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+elog = { path = "../../../utils/error/elog" }
+init_small = { path = "../../../utils/init/init_small" }
+latch = { path = "../latch" }
+lmgr_proc = { path = "../../lmgr/lmgr_proc" }
+procsignal_seams = { path = "../procsignal_seams" }
+ipc_seams = { path = "../ipc_seams" }
+shmem_seams = { path = "../shmem_seams" }
+sinval_seams = { path = "../sinval_seams" }
+s_lock_seams = { path = "../../lmgr/s_lock_seams" }
+condition_variable_seams = { path = "../../lmgr/condition_variable_seams" }
+smgr_seams = { path = "../../smgr/smgr_seams" }
+mcxt_seams = { path = "../../../utils/mmgr/mcxt_seams" }
+libc = "0.2"
+
+[dev-dependencies]
+pg_sema_seams = { path = "../../../port/pg_sema_seams" }
+latch_seams = { path = "../latch_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+waiteventset_seams = { path = "../waiteventset_seams" }

@@ -31,6 +31,7 @@ pub const ShareLock: LOCKMODE = 5;
 pub const ShareRowExclusiveLock: LOCKMODE = 6;
 pub const ExclusiveLock: LOCKMODE = 7;
 pub const AccessExclusiveLock: LOCKMODE = 8;
+pub const MaxLockMode: LOCKMODE = AccessExclusiveLock;
 
 pub const InplaceUpdateTupleLock: LOCKMODE = ExclusiveLock;
 
@@ -50,13 +51,6 @@ pub const LOCKTAG_USERLOCK: uint8 = 9;
 pub const LOCKTAG_ADVISORY: uint8 = 10;
 pub const LOCKTAG_APPLY_TRANSACTION: uint8 = 11;
 pub const LOCKTAG_LAST_TYPE: uint8 = LOCKTAG_APPLY_TRANSACTION;
-
-// dbId is InvalidOid for a shared/global relation (utils/rel.h).
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub struct LockRelId {
-    pub relId: Oid,
-    pub dbId: Oid,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(i32)]
@@ -85,7 +79,101 @@ pub struct LOCKTAG {
 
 const _: () = assert!(core::mem::size_of::<LOCKTAG>() == 16);
 
+// Constructors mirror lock.h's SET_LOCKTAG_* field-for-field; these tags key
+// the shared lock hash, so the encodings must match C exactly.
 impl LOCKTAG {
+    #[inline]
+    pub fn relation(dbid: Oid, relid: Oid) -> Self {
+        LOCKTAG {
+            locktag_field1: dbid,
+            locktag_field2: relid,
+            locktag_field3: 0,
+            locktag_field4: 0,
+            locktag_type: LOCKTAG_RELATION,
+            locktag_lockmethodid: DEFAULT_LOCKMETHOD,
+        }
+    }
+
+    #[inline]
+    pub fn relation_extend(dbid: Oid, relid: Oid) -> Self {
+        LOCKTAG {
+            locktag_type: LOCKTAG_RELATION_EXTEND,
+            ..Self::relation(dbid, relid)
+        }
+    }
+
+    #[inline]
+    pub fn database_frozen_ids(dbid: Oid) -> Self {
+        LOCKTAG {
+            locktag_field1: dbid,
+            locktag_field2: 0,
+            locktag_field3: 0,
+            locktag_field4: 0,
+            locktag_type: LOCKTAG_DATABASE_FROZEN_IDS,
+            locktag_lockmethodid: DEFAULT_LOCKMETHOD,
+        }
+    }
+
+    #[inline]
+    pub fn page(dbid: Oid, relid: Oid, blocknum: uint32) -> Self {
+        LOCKTAG {
+            locktag_field1: dbid,
+            locktag_field2: relid,
+            locktag_field3: blocknum,
+            locktag_field4: 0,
+            locktag_type: LOCKTAG_PAGE,
+            locktag_lockmethodid: DEFAULT_LOCKMETHOD,
+        }
+    }
+
+    #[inline]
+    pub fn tuple(dbid: Oid, relid: Oid, blocknum: uint32, offnum: uint16) -> Self {
+        LOCKTAG {
+            locktag_field1: dbid,
+            locktag_field2: relid,
+            locktag_field3: blocknum,
+            locktag_field4: offnum,
+            locktag_type: LOCKTAG_TUPLE,
+            locktag_lockmethodid: DEFAULT_LOCKMETHOD,
+        }
+    }
+
+    #[inline]
+    pub fn speculative_insertion(xid: TransactionId, token: uint32) -> Self {
+        LOCKTAG {
+            locktag_field1: xid,
+            locktag_field2: token,
+            locktag_field3: 0,
+            locktag_field4: 0,
+            locktag_type: LOCKTAG_SPECULATIVE_TOKEN,
+            locktag_lockmethodid: DEFAULT_LOCKMETHOD,
+        }
+    }
+
+    #[inline]
+    pub fn object(dbid: Oid, classid: Oid, objid: Oid, objsubid: uint16) -> Self {
+        LOCKTAG {
+            locktag_field1: dbid,
+            locktag_field2: classid,
+            locktag_field3: objid,
+            locktag_field4: objsubid,
+            locktag_type: LOCKTAG_OBJECT,
+            locktag_lockmethodid: DEFAULT_LOCKMETHOD,
+        }
+    }
+
+    #[inline]
+    pub fn apply_transaction(dbid: Oid, suboid: Oid, xid: TransactionId, objid: uint16) -> Self {
+        LOCKTAG {
+            locktag_field1: dbid,
+            locktag_field2: suboid,
+            locktag_field3: xid,
+            locktag_field4: objid,
+            locktag_type: LOCKTAG_APPLY_TRANSACTION,
+            locktag_lockmethodid: DEFAULT_LOCKMETHOD,
+        }
+    }
+
     pub fn advisory(id1: uint32, id2: uint32, id3: uint32, id4: uint16) -> Self {
         LOCKTAG {
             locktag_field1: id1,

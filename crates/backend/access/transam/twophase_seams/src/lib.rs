@@ -1,0 +1,64 @@
+use types_core::{Oid, RepOriginId, TimestampTz, TransactionId, XLogRecPtr};
+use types_error::PgResult;
+
+// StartPrepare's inputs, pre-serialized to the 2PC state-file segment images
+// (cold path; std collections are the marshal buffers, not engine state).
+#[derive(Clone, Debug, Default)]
+pub struct StartPrepareArgs {
+    pub xid: TransactionId,
+    pub gid: String,
+    pub prepared_at: TimestampTz,
+    pub owner: Oid,
+    pub databaseid: Oid,
+    pub children: Vec<TransactionId>,
+    pub ncommitrels: i32,
+    pub commitrels: Vec<u8>,
+    pub nabortrels: i32,
+    pub abortrels: Vec<u8>,
+    pub ncommitstats: i32,
+    pub commitstats: Vec<u8>,
+    pub nabortstats: i32,
+    pub abortstats: Vec<u8>,
+    pub ninvalmsgs: i32,
+    pub invalmsgs: Vec<u8>,
+    pub initfileinval: bool,
+}
+
+seam_core::seam!(
+    pub fn mark_as_preparing(
+        xid: TransactionId,
+        gid: &str,
+        prepared_at: TimestampTz,
+        owner: Oid,
+        databaseid: Oid,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn start_prepare<'a>(args: &'a StartPrepareArgs) -> PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn end_prepare() -> PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn post_prepare_twophase()
+);
+
+seam_core::seam!(
+    pub fn at_abort_twophase()
+);
+
+seam_core::seam!(
+    pub fn prepare_redo_add<'a>(
+        data: &'a [u8],
+        start_lsn: XLogRecPtr,
+        end_lsn: XLogRecPtr,
+        origin_id: RepOriginId,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn prepare_redo_remove(xid: TransactionId, give_warning: bool) -> PgResult<()>
+);

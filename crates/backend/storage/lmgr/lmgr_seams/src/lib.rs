@@ -13,3 +13,11 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn check_relation_locked_by_me(relid: Oid, lockmode: LOCKMODE, orstronger: bool) -> bool
 );
+
+seam_core::seam!(
+    pub fn xact_lock_table_insert(xid: types_core::TransactionId) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn xact_lock_table_delete(xid: types_core::TransactionId) -> types_error::PgResult<()>
+);

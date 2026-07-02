@@ -1,0 +1,9 @@
+[package]
+name = "lock"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "lock"
+path = "src/lib.rs"

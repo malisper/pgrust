@@ -1,22 +1,14 @@
 use ::types_core::Oid;
 
-// storage/lockdefs.h lock modes; hosted here until the lmgr unit lands, as
-// rel.h itself hosts LockRelId/LockInfoData for the same convenience.
-pub type LOCKMODE = i32;
+// LOCKMODE's home is types_storage::lock (C: storage/lockdefs.h); re-exported
+// here because rel.h-shaped code names the modes through utils/rel.h.
+pub use ::types_storage::lock::{
+    AccessExclusiveLock, AccessShareLock, ExclusiveLock, InplaceUpdateTupleLock, MaxLockMode,
+    NoLock, RowExclusiveLock, RowShareLock, ShareLock, ShareRowExclusiveLock,
+    ShareUpdateExclusiveLock, LOCKMODE,
+};
 
-pub const NoLock: LOCKMODE = 0;
-pub const AccessShareLock: LOCKMODE = 1;
-pub const RowShareLock: LOCKMODE = 2;
-pub const RowExclusiveLock: LOCKMODE = 3;
-pub const ShareUpdateExclusiveLock: LOCKMODE = 4;
-pub const ShareLock: LOCKMODE = 5;
-pub const ShareRowExclusiveLock: LOCKMODE = 6;
-pub const ExclusiveLock: LOCKMODE = 7;
-pub const AccessExclusiveLock: LOCKMODE = 8;
-pub const MaxLockMode: LOCKMODE = 8;
-
-pub const InplaceUpdateTupleLock: LOCKMODE = ExclusiveLock;
-
+// dbId is InvalidOid for a shared/global relation (utils/rel.h).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub struct LockRelId {
     pub relId: Oid,
