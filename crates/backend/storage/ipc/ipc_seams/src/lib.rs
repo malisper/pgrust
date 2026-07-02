@@ -13,3 +13,8 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn on_shmem_exit(callback: fn(code: i32, arg: usize), arg: usize)
 );
+
+seam_core::seam!(
+    // `on_proc_exit(function, arg)` (storage/ipc/ipc.c).
+    pub fn on_proc_exit(callback: fn(code: i32, arg: usize), arg: usize)
+);

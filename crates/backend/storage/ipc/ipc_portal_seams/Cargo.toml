@@ -1,0 +1,8 @@
+[package]
+name = "ipc_portal_seams"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+seam_core = { path = "../../../../_support/seam_core" }

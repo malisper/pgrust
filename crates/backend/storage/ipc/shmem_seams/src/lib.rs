@@ -23,3 +23,9 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn shmem_lock_release()
 );
+
+seam_core::seam!(
+    // PGSharedMemoryIsInUse(id1, id2) (storage/pg_shmem.h; port/sysv_shmem.c);
+    // CreateLockFile's orphaned-segment interlock.
+    pub fn pg_shared_memory_is_in_use(id1: u64, id2: u64) -> PgResult<bool>
+);

@@ -1,0 +1,26 @@
+[package]
+name = "lmgr"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "lmgr"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+init_small = { path = "../../../utils/init/init_small" }
+catalog_seams = { path = "../../../catalog/catalog_seams" }
+inval_seams = { path = "../../../utils/cache/inval_seams" }
+lmgr_seams = { path = "../lmgr_seams" }
+lock_seams = { path = "../lock_seams" }
+procarray_seams = { path = "../../ipc/procarray_seams" }
+subtrans_seams = { path = "../../../access/transam/subtrans_seams" }
+
+[dev-dependencies]
+mcx = { path = "../../../../_support/mcx" }

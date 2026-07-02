@@ -28,3 +28,26 @@ seam_core::seam!(
     // wal_segment_size (xlog.c global).
     pub fn wal_segment_size() -> i32
 );
+
+seam_core::seam!(
+    // XLogStandbyInfoActive() (xlog.h): wal_level >= replica.
+    pub fn xlog_standby_info_active() -> bool
+);
+
+seam_core::seam!(
+    // XactLastRecEnd (xlog.c global).
+    pub fn xact_last_rec_end() -> XLogRecPtr
+);
+
+seam_core::seam!(
+    pub fn set_xact_last_rec_end(lsn: XLogRecPtr)
+);
+
+seam_core::seam!(
+    // XactLastCommitEnd = lsn (xlog.c global).
+    pub fn set_xact_last_commit_end(lsn: XLogRecPtr)
+);
+
+seam_core::seam!(
+    pub fn xlog_set_async_xact_lsn(lsn: XLogRecPtr)
+);

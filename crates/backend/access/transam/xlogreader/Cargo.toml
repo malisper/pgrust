@@ -1,0 +1,9 @@
+[package]
+name = "xlogreader"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "xlogreader"
+path = "src/lib.rs"

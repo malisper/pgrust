@@ -471,16 +471,16 @@ backend-statistics-mvdistinct	*/mvdistinct.c	todo			fabled:backend-statistics-mv
 backend-storage-aio-core	src/backend/storage/aio/aio.c,src/backend/storage/aio/aio_callback.c,src/backend/storage/aio/aio_funcs.c,src/backend/storage/aio/aio_io.c,src/backend/storage/aio/method_io_uring.c	todo			
 backend-storage-aio-methods	*/aio_init.c,*/aio_target.c,*/method_sync.c,*/method_worker.c	todo			fabled:backend-storage-aio-methods; m1-spine
 backend-storage-aio-read-stream	src/backend/storage/aio/read_stream.c	todo			fabled:backend-storage-aio-read-stream; m1-dep(stub-ok)
-backend-storage-buffer-bufmgr	src/backend/storage/buffer/bufmgr.c	todo			fabled:backend-storage-buffer-bufmgr; m1-spine
+backend-storage-buffer-bufmgr	src/backend/storage/buffer/bufmgr.c	in-progress	bufmgr		fabled:backend-storage-buffer-bufmgr; m1-spine
 backend-storage-buffer-small	*/buf_init.c,*/buf_table.c,*/freelist.c,*/localbuf.c	combined-into:backend-storage-buffer-support			
-backend-storage-buffer-support	src/backend/storage/buffer/buf_init.c,src/backend/storage/buffer/buf_table.c,src/backend/storage/buffer/freelist.c,src/backend/storage/buffer/localbuf.c	todo			fabled:backend-storage-buffer-support; m1-spine
+backend-storage-buffer-support	src/backend/storage/buffer/buf_init.c,src/backend/storage/buffer/buf_table.c,src/backend/storage/buffer/freelist.c,src/backend/storage/buffer/localbuf.c	in-progress	bufmgr		fabled:backend-storage-buffer-support; m1-spine; buf_init+buf_table+freelist in bufmgr crate; localbuf phase 2
 backend-storage-file	*/buffile.c,*/copydir.c,*/fd.c,*/fileset.c,*/reinit.c,*/sharedfileset.c	ported	fd	cold	m1-spine; VFD cache + descriptor table, OwnedFd concentrated in FdState (no-drop split), single-borrow ops (fixes fabled EMFILE double-borrow); real pg_flush_data (fabled stubbed no-op), PG_IOV_MAX 128 (fabled stale 32); installs all 6 file_seams; IO wrappers syscall-dominated, no bench; 21 tests, density 4.7%
 backend-storage-freespace	*/freespace.c,*/fsmpage.c,*/indexfsm.c	todo			fabled:backend-storage-freespace; m1-dep(stub-ok)
-backend-storage-ipc-dsm-core	*/dsm.c,*/dsm_impl.c	in-progress	dsm_core		fabled:backend-storage-ipc-dsm-core; m1-spine
+backend-storage-ipc-dsm-core	*/dsm.c,*/dsm_impl.c	ported	dsm_core	cold	fabled:backend-storage-ipc-dsm-core; m1-spine; model mapping: single process/thread-per-backend collapses dsm_impl.c's posix/sysv/mmap/windows OS arms to one in-process backing (heap regions keyed by handle, zeroed like fresh shm pages; every dynamic_shared_memory_type routes there, GUC storage kept); dsm.c handle/refcnt(0=free,1=moribund,2+=active)/pin lifecycle exact incl. create-collision retry, refcnt<=1 attach skip, pin/unpin error surface, LIFO on-detach callbacks, reset_on_dsm_detach slot-forget; resowner bookkeeping = DsmSegment RAII guard (no-drop.md), DynamicSharedMemoryControlLock = lwlock main_lock(34) via scoped guard; control globals are process statics (C fork-inherits per-process copies); deferred loud-panic: main-region carve-out (min_dynamic_shared_memory>0 needs freepage.c); n/a: EXEC_BACKEND dsm_set_control_handle, dsm_cleanup_for_mmap (backing writes no files), impl_private/pm_handle (SysV/Windows-only); handle randomness via new pg_prng_seams::global_prng_uint32 (loud-panic until common pg_prng lands); boot/cold, no bench; 15 tests, density 4.5%
 backend-storage-ipc-dsm-registry	*/dsm_registry.c	todo			fabled:backend-storage-ipc-dsm-registry; m1-spine
 backend-storage-ipc-latch	src/backend/storage/ipc/latch.c	ported	latch	cold	fabled:backend-storage-ipc-latch; m1-spine; PG18 split confirmed: self-pipe/signalfd + epoll/kqueue live in waiteventset.c (unit 494) reached via new waiteventset_seams; SetLatch signal-safe (const-init latch slab, lock/alloc-free resolve, Relaxed+fence(SeqCst) exactly at C pg_memory_barrier sites - notes/latch-atomics.md); MyLatch TLS slot landed in init_small::globals (C globals.c); proc_latch decl added to lmgr_proc_seams; installs latch_seams::set_latch_my_latch; 16 tests, density 3.4%; wait paths cold, SetLatch contention = future bench target
 backend-storage-ipc-pmsignal	*/barrier.c,*/ipc.c,*/pmsignal.c,*/signalfuncs.c	todo			fabled:backend-storage-ipc-pmsignal; m1-spine
-backend-storage-ipc-procarray	src/backend/storage/ipc/procarray.c	todo			fabled:backend-storage-ipc-procarray; m1-spine
+backend-storage-ipc-procarray	src/backend/storage/ipc/procarray.c	in-progress	procarray		fabled:backend-storage-ipc-procarray; m1-spine
 backend-storage-ipc-procsignal	src/backend/storage/ipc/procsignal.c	todo			fabled:backend-storage-ipc-procsignal; m1-spine
 backend-storage-ipc-shm-toc	src/backend/storage/ipc/shm_toc.c	todo			fabled:backend-storage-ipc-shm-toc; m1-spine
 backend-storage-ipc-shm-mq	src/backend/storage/ipc/shm_mq.c	todo			fabled:backend-storage-ipc-shm-mq; m1-spine
@@ -496,7 +496,7 @@ backend-storage-large-object	*/inv_api.c	todo			fabled:backend-storage-large-obj
 backend-storage-lmgr-condition-variable	src/backend/storage/lmgr/condition_variable.c	todo			fabled:backend-storage-lmgr-condition-variable; m1-dep(stub-ok)
 backend-storage-lmgr-deadlock	src/backend/storage/lmgr/deadlock.c	todo			fabled:backend-storage-lmgr-deadlock; m1-dep(stub-ok)
 backend-storage-lmgr-lock	src/backend/storage/lmgr/lock.c	todo			fabled:backend-storage-lmgr-lock; m1-spine
-backend-storage-lmgr-lmgr	src/backend/storage/lmgr/lmgr.c	todo			fabled:backend-storage-lmgr-lmgr; m1-spine
+backend-storage-lmgr-lmgr	src/backend/storage/lmgr/lmgr.c	ported	lmgr	cold	m1-spine; relation/tuple/xact/object lock wrappers C-faithful, tag encodings test-pinned vs lock.h; installs lmgr_seams (relation.c signatures verified, no fixes); LOCKMODE consolidated to types_storage (deferred item DONE); session/extension/speculative locks deferred w/ named missing surfaces; fastpath is lock.c unit requirement; 20 tests, density 1.4%
 backend-storage-lmgr-lock	src/backend/storage/lmgr/lock.c	todo			m1-spine
 backend-storage-lmgr-lwlock	src/backend/storage/lmgr/lwlock.c	benched	lwlock	0.89-1.00x-instr/0.86-0.99x-ns	fabled:lwlock; m1-spine; C single-u32 word exact; D1 xadd shared acquire (Freund residual, beat-postgres §9) with backout-wakeup handoff; Acquire/Release throughout, zero SeqCst; exchange-excl REFUTED (clobbers co-encoded fields); contended paths seamed+deferred, loom check required before multi-backend milestone; DUAL PASS uncontended Graviton clang-16; 15 tests, Miri SB+TB, density 4.6%; docs/benchmarks/lwlock.md
 backend-storage-lmgr-predicate	src/backend/storage/lmgr/predicate.c	todo			fabled:backend-storage-lmgr-predicate; m1-spine
@@ -612,7 +612,7 @@ backend-utils-adt-typanalyze-small	*/array_typanalyze.c,*/rangetypes_typanalyze.
 backend-utils-adt-varlena	*/varlena.c	todo			fabled:assemble/backend-utils-adt-varlena; m1-spine(boot)
 backend-utils-adt-version	*/version.c	todo			fabled:backend-utils-adt-version
 backend-utils-adt-xml	*/xml.c	todo			fabled:backend-utils-adt-xml; m1-dep(stub-ok)
-backend-utils-cache-catcache	src/backend/utils/cache/catcache.c,src/include/utils/catcache.h	todo			m1-spine
+backend-utils-cache-catcache	src/backend/utils/cache/catcache.c,src/include/utils/catcache.h	in-progress	catcache		m1-spine
 backend-utils-cache-evtcache	src/backend/utils/cache/evtcache.c,src/include/utils/evtcache.h	todo			fabled:backend-utils-cache-evtcache
 backend-utils-cache-funccache	src/backend/utils/cache/funccache.c,src/include/utils/funccache.h	todo			fabled:backend-utils-cache-funccache; m1-dep(stub-ok)
 backend-utils-cache-inval	src/backend/utils/cache/inval.c,src/include/storage/sinval.h,src/include/utils/inval.h	ported	inval		m1-spine; full inval.c: CacheInvalidate*/Register*/Accept/AtEO(Sub)Xact/inplace/2PC/recovery/LogLogicalInvalidations; fabled late endpoint shape (alloc-free group send under single borrow, per-step Copy copy-out around re-entrant callbacks, reused scratch, retained-capacity dense arrays => 0 mallocs/commit steady state); C fn-pointer callback tables fixed-capacity (registrant units unported, enum dispatch impossible yet); consts vs headers: SysCacheSize 85, MAX_BACKENDS_BITS 18, XLOG_XACT_INVALIDATIONS 0x60, RM_XACT_ID 1; new owner seams: sinval/catcache/relmapper/smgr/snapmgr/xloginsert/catalog/relpath + adds to syscache/relcache/xact/miscinit/transam_xlog seams (loud-panic until owners land); installs inval_seams::accept_invalidation_messages + debug_discard_caches GUC; 14 tests, density 3.7%; bench: AtEOXact/CommandEnd per-commit hot -> bench with xact unit (needs sinval+catcache installed); audit pending
@@ -622,7 +622,8 @@ backend-utils-cache-plancache	src/backend/utils/cache/plancache.c,src/include/ut
 backend-utils-cache-relcache	src/backend/utils/cache/relcache.c,src/include/utils/relcache.h,src/include/utils/rel.h,src/include/catalog/pg_publication.h	todo			m1-spine
 backend-utils-cache-relcache-nodexform	src/backend/utils/cache/relcache.c	todo			fabled:backend-utils-cache-relcache-nodexform; m1-spine
 backend-utils-cache-relmapper	src/backend/utils/cache/relmapper.c,src/include/utils/relmapper.h	todo			fabled:backend-utils-cache-relmapper; m1-spine(boot)
-backend-utils-cache-small	*/attoptcache.c,*/relfilenumbermap.c,*/spccache.c,*/syscache.c,*/ts_cache.c	todo			fabled:backend-utils-cache-syscache (+attoptcache,spccache,relfilenumbermap,ts-cache); m1-spine
+backend-utils-cache-syscache	src/backend/utils/cache/syscache.c,src/include/utils/syscache.h	in-progress	cache_syscache		m1-spine; split from backend-utils-cache-small
+backend-utils-cache-small	*/attoptcache.c,*/relfilenumbermap.c,*/spccache.c,*/ts_cache.c	todo			fabled:backend-utils-cache-syscache (+attoptcache,spccache,relfilenumbermap,ts-cache); m1-spine; syscache.c split out to backend-utils-cache-syscache
 backend-utils-cache-typcache	src/backend/utils/cache/typcache.c,src/include/utils/typcache.h	todo			fabled:backend-utils-cache-typcache; m1-spine
 backend-utils-error-elog	src/backend/utils/error/elog.c	todo			fabled:backend-utils-error; m1-spine
 backend-utils-error-small	*/assert.c,*/csvlog.c,*/jsonlog.c	todo			fabled:backend-utils-error-small; m1-spine
@@ -671,7 +672,7 @@ backend-utils-sort-sortsupport	src/backend/utils/sort/sortsupport.c	todo			fable
 backend-utils-sort-storage	*/logtape.c,*/sharedtuplestore.c,*/tuplestore.c	todo			fabled:backend-utils-sort-storage; m1-dep(stub-ok)
 backend-utils-sort-tuplesort	*/tuplesort.c,*/tuplesortvariants.c	todo			fabled:backend-utils-sort-tuplesort; m1-dep(stub-ok)
 backend-utils-time-small	*/combocid.c	todo			fabled:backend-utils-time-combocid; m1-spine
-backend-utils-time-snapmgr	src/backend/utils/time/snapmgr.c	todo			fabled:backend-utils-time-snapmgr; m1-spine
+backend-utils-time-snapmgr	src/backend/utils/time/snapmgr.c	in-progress	snapmgr		fabled:backend-utils-time-snapmgr; m1-spine
 bin-clusterdb-batch1	*/clusterdb.c	todo			
 bin-createdb-batch1	*/createdb.c	todo			
 bin-createuser-batch1	*/createuser.c	todo			
