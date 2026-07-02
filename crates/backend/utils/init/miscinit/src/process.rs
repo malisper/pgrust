@@ -1,0 +1,140 @@
+use std::cell::Cell;
+
+use elog::ereport;
+use init_small::globals as g;
+use types_core::INVALID_PROC_NUMBER;
+use types_error::{ErrorLocation, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, FATAL};
+use types_storage::latch::LatchHandle;
+
+use crate::{MISCINIT_C, PG_VERSION};
+
+thread_local! {
+    // LocalLatchData: one slab slot per backend thread, allocated once, reused.
+    static LOCAL_LATCH: Cell<Option<LatchHandle>> = const { Cell::new(None) };
+}
+
+fn local_latch() -> LatchHandle {
+    if let Some(h) = LOCAL_LATCH.get() {
+        return h;
+    }
+    let h = latch::allocate_local_latch();
+    LOCAL_LATCH.set(Some(h));
+    h
+}
+
+pub fn InitProcessLocalLatch() {
+    let l = local_latch();
+    g::SetMyLatch(Some(l));
+    latch::InitLatch(l);
+}
+
+pub fn SwitchToSharedLatch() {
+    debug_assert_eq!(g::MyLatch(), Some(local_latch()));
+    debug_assert_ne!(g::MyProcNumber(), INVALID_PROC_NUMBER);
+
+    let proc_latch = LatchHandle::proc(g::MyProcNumber());
+    g::SetMyLatch(Some(proc_latch));
+
+    // C: if (FeBeWaitSet) ModifyWaitEvent(..., FeBeWaitSetLatchPos, ...); pqcomm
+    // defers FeBeWaitSet to the socket/port unit — the repoint lands with it.
+    // Set the shared latch as the local one might have been set.
+    latch::SetLatch(proc_latch);
+}
+
+pub fn SwitchBackToLocalLatch() {
+    let l = local_latch();
+    debug_assert_ne!(g::MyLatch(), Some(l));
+    debug_assert_eq!(g::MyLatch(), Some(LatchHandle::proc(g::MyProcNumber())));
+
+    g::SetMyLatch(Some(l));
+
+    latch::SetLatch(l); // FeBeWaitSet repoint deferred as above
+}
+
+pub fn ChangeToDataDir() -> PgResult<()> {
+    let data_dir = g::DataDir().expect("ChangeToDataDir: DataDir is set");
+    if let Err(e) = std::env::set_current_dir(data_dir) {
+        ereport(FATAL)
+            .with_saved_errno(e.raw_os_error().unwrap_or(0))
+            .errcode_for_file_access()
+            .errmsg(format!("could not change directory to \"{data_dir}\": %m"))
+            .finish(loc(465, "ChangeToDataDir"))?;
+    }
+    Ok(())
+}
+
+pub fn ValidatePgVersion(path: &str) -> PgResult<()> {
+    let my_major = leading_i64(PG_VERSION);
+    let full_path = format!("{path}/PG_VERSION");
+
+    let contents = match std::fs::read_to_string(&full_path) {
+        Ok(s) => s,
+        Err(e) => {
+            let errno = e.raw_os_error().unwrap_or(0);
+            if errno == libc::ENOENT {
+                ereport(FATAL)
+                    .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                    .errmsg(format!("\"{path}\" is not a valid data directory"))
+                    .errdetail(format!("File \"{full_path}\" is missing."))
+                    .finish(loc(1789, "ValidatePgVersion"))?;
+            }
+            ereport(FATAL)
+                .with_saved_errno(errno)
+                .errcode_for_file_access()
+                .errmsg(format!("could not open file \"{full_path}\": %m"))
+                .finish(loc(1795, "ValidatePgVersion"))?;
+            return Ok(());
+        }
+    };
+
+    // fscanf "%63s": first whitespace-delimited token, max 63 bytes.
+    let token = contents.split_whitespace().next().unwrap_or("");
+    let file_version_string = token.get(..63).unwrap_or(token);
+    let starts_numeric = file_version_string
+        .bytes()
+        .next()
+        .is_some_and(|b| b.is_ascii_digit() || b == b'+' || b == b'-');
+    if file_version_string.is_empty() || !starts_numeric {
+        ereport(FATAL)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg(format!("\"{path}\" is not a valid data directory"))
+            .errdetail(format!("File \"{full_path}\" does not contain valid data."))
+            .errhint("You might need to initdb.")
+            .finish(loc(1805, "ValidatePgVersion"))?;
+    }
+
+    if leading_i64(file_version_string) != my_major {
+        ereport(FATAL)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg("database files are incompatible with server")
+            .errdetail(format!(
+                "The data directory was initialized by PostgreSQL version {file_version_string}, \
+                 which is not compatible with this version {PG_VERSION}."
+            ))
+            .finish(loc(1816, "ValidatePgVersion"))?;
+    }
+    Ok(())
+}
+
+// strtol(s, NULL, 10).
+pub(crate) fn leading_i64(s: &str) -> i64 {
+    let bytes = s.trim_start().as_bytes();
+    let mut i = 0;
+    let mut sign = 1i64;
+    if bytes.first().is_some_and(|&b| b == b'+' || b == b'-') {
+        if bytes[0] == b'-' {
+            sign = -1;
+        }
+        i = 1;
+    }
+    let mut val = 0i64;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        val = val.saturating_mul(10).saturating_add((bytes[i] - b'0') as i64);
+        i += 1;
+    }
+    sign.saturating_mul(val)
+}
+
+pub(crate) fn loc(lineno: i32, funcname: &'static str) -> ErrorLocation {
+    ErrorLocation::new(MISCINIT_C, lineno, funcname)
+}

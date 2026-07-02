@@ -153,6 +153,11 @@ pub fn SetDatabasePath(value: &str) {
     DATABASE_PATH.set(Some(String::from(value).leak()));
 }
 
+// `DatabasePath = NULL` (inval.c's recovery-only poke via miscinit).
+pub fn ClearDatabasePath() {
+    DATABASE_PATH.set(None);
+}
+
 // miscadmin.h / c.h interrupt macros over the counters above. Per-query hot
 // family (frontend reads, WAL critical sections): keep as inline Cell ops.
 

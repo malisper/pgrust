@@ -428,6 +428,47 @@ name = "hashfn"
 version = "0.1.0"
 
 [[package]]
+name = "heapam"
+version = "0.1.0"
+dependencies = [
+ "bufmgr_seams",
+ "datum",
+ "exectuples",
+ "heapam_visibility_seams",
+ "init_small",
+ "mcx",
+ "multixact_seams",
+ "predicate_seams",
+ "procarray_seams",
+ "pruneheap_seams",
+ "snapmgr_seams",
+ "subtrans_seams",
+ "syncscan_seams",
+ "tableam",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_rel",
+ "types_scan",
+ "types_slot",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+ "xact_seams",
+]
+
+[[package]]
+name = "heapam_visibility_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_snapshot",
+ "types_tuple",
+]
+
+[[package]]
 name = "heaptuple"
 version = "0.1.0"
 dependencies = [
@@ -1204,6 +1245,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pruneheap_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_rel",
+]
+
+[[package]]
 name = "ps_status_seams"
 version = "0.0.0"
 dependencies = [
@@ -1439,7 +1490,40 @@ dependencies = [
 
 [[package]]
 name = "snapmgr"
-version = "0.1.0"
+version = "0.0.0"
+dependencies = [
+ "autovacuum_seams",
+ "condition_variable_seams",
+ "deadlock_seams",
+ "elog",
+ "init_small",
+ "ipc_seams",
+ "latch_seams",
+ "lmgr_proc",
+ "lock_seams",
+ "lwlock",
+ "mcx",
+ "miscinit_seams",
+ "pg_sema_seams",
+ "pmsignal_seams",
+ "procarray",
+ "resowner_seams",
+ "s_lock_seams",
+ "shmem_seams",
+ "snapmgr_portal_seams",
+ "snapmgr_seams",
+ "subtrans_seams",
+ "syncrep_seams",
+ "syscache_seams",
+ "timeout_seams",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_resowner",
+ "types_snapshot",
+ "waitevent_seams",
+ "xact_seams",
+]
 
 [[package]]
 name = "snapmgr_portal_seams"
@@ -1530,6 +1614,16 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "syncscan_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_rel",
 ]
 
 [[package]]

@@ -1,0 +1,30 @@
+[package]
+name = "miscinit"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "miscinit"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+mcx = { path = "../../../../_support/mcx" }
+init_small = { path = "../init_small" }
+latch = { path = "../../../storage/ipc/latch" }
+lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
+elog = { path = "../../error/elog" }
+guc_tables = { path = "../../misc/guc_tables" }
+guc_seams = { path = "../../misc/guc_seams" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
+shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
+miscinit_seams = { path = "../miscinit_seams" }
+libc = "0.2"
+
+[dev-dependencies]
+pgstat_seams = { path = "../../activity/pgstat_seams" }
+init_small_seams = { path = "../init_small_seams" }
