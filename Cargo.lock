@@ -677,6 +677,37 @@ dependencies = [
 [[package]]
 name = "lock"
 version = "0.0.0"
+dependencies = [
+ "deadlock_seams",
+ "dynahash",
+ "elog_seams",
+ "guc_tables",
+ "init_small",
+ "ipc_seams",
+ "latch_seams",
+ "lmgr_proc",
+ "lmgr_seams",
+ "lock_seams",
+ "lwlock",
+ "mcx",
+ "miscinit_seams",
+ "pg_sema_seams",
+ "pmsignal_seams",
+ "ps_status_seams",
+ "resowner_seams",
+ "s_lock_seams",
+ "shmem_seams",
+ "standby_seams",
+ "timeout_seams",
+ "timestamp_seams",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_hash",
+ "types_resowner",
+ "types_storage",
+ "waitevent_seams",
+]
 
 [[package]]
 name = "lock_seams"
