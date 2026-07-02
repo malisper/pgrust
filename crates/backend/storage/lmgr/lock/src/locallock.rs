@@ -1,0 +1,232 @@
+use std::cell::{Cell, RefCell};
+use std::mem::ManuallyDrop;
+
+use mcx::{Mcx, MemoryContext, PgHashMap, PgVec};
+use types_error::PgResult;
+use types_resowner::ResourceOwner;
+use types_storage::lock::{
+    LOCALLOCKTAG, LOCK, LOCKMODE, LOCKTAG, LOCKTAG_RELATION_EXTEND, MaxLockMode, PROCLOCK,
+};
+
+use crate::fastpath::{decrement_strong_lock_count, FastPathStrongLockHashPartition};
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LOCALLOCKOWNER {
+    pub owner: ResourceOwner,
+    pub nLocks: i64,
+}
+
+pub(crate) struct LOCALLOCK {
+    pub hashcode: u32,
+    pub lock: *mut LOCK,
+    pub proclock: *mut PROCLOCK,
+    pub nLocks: i64,
+    pub lockOwners: PgVec<'static, LOCALLOCKOWNER>,
+    pub holdsStrongLockCount: bool,
+    pub lockCleared: bool,
+}
+
+pub(crate) struct LocalState {
+    pub mcx: Mcx<'static>,
+    pub table: PgHashMap<'static, LOCALLOCKTAG, LOCALLOCK>,
+    pub scratch: PgVec<'static, LOCALLOCKTAG>,
+}
+
+thread_local! {
+    static LOCAL: RefCell<Option<ManuallyDrop<LocalState>>> = const { RefCell::new(None) };
+    static STRONG_LOCK_IN_PROGRESS: Cell<Option<LOCALLOCKTAG>> = const { Cell::new(None) };
+    static AWAITED_LOCK: Cell<Option<(LOCALLOCKTAG, u32)>> = const { Cell::new(None) };
+    static AWAITED_OWNER: Cell<ResourceOwner> = const { Cell::new(ResourceOwner::NULL) };
+    // IsRelationExtensionLockHeld, assert-only as in C.
+    static RELATION_EXTENSION_LOCK_HELD: Cell<bool> = const { Cell::new(false) };
+}
+
+pub fn InitLockManagerAccess() {
+    let cx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("LOCALLOCK hash")));
+    let mcx = cx.mcx();
+    LOCAL.with_borrow_mut(|slot| {
+        assert!(slot.is_none(), "InitLockManagerAccess called twice");
+        *slot = Some(ManuallyDrop::new(LocalState {
+            mcx,
+            table: PgHashMap::with_hasher_in(Default::default(), mcx),
+            scratch: PgVec::new_in(mcx),
+        }));
+    });
+}
+
+pub(crate) fn with_local<R>(f: impl FnOnce(&mut LocalState) -> R) -> R {
+    LOCAL.with_borrow_mut(|slot| {
+        let state = slot
+            .as_mut()
+            .unwrap_or_else(|| panic!("lock manager backend state not initialized"));
+        f(state)
+    })
+}
+
+pub(crate) fn awaited_lock() -> Option<(LOCALLOCKTAG, u32)> {
+    AWAITED_LOCK.get()
+}
+
+pub(crate) fn set_awaited_lock(tag: LOCALLOCKTAG, hashcode: u32, owner: ResourceOwner) {
+    AWAITED_LOCK.set(Some((tag, hashcode)));
+    AWAITED_OWNER.set(owner);
+}
+
+pub fn GetAwaitedLockHashcode() -> Option<u32> {
+    AWAITED_LOCK.get().map(|(_, hashcode)| hashcode)
+}
+
+pub fn ResetAwaitedLock() {
+    AWAITED_LOCK.set(None);
+}
+
+pub fn GrantAwaitedLock() {
+    let (tag, _) = AWAITED_LOCK.get().expect("no awaited lock");
+    GrantLockLocal(&tag, AWAITED_OWNER.get());
+}
+
+pub(crate) fn CheckAndSetLockHeld(tag: &LOCALLOCKTAG, acquired: bool) {
+    if cfg!(debug_assertions) && tag.lock.locktag_type == LOCKTAG_RELATION_EXTEND {
+        RELATION_EXTENSION_LOCK_HELD.set(acquired);
+    }
+}
+
+pub(crate) fn assert_no_relation_extension_lock_held() {
+    debug_assert!(!RELATION_EXTENSION_LOCK_HELD.get());
+}
+
+/// Find-or-create the LOCALLOCK; guarantees owner-array room like C's
+/// pre-grow. Returns (hashcode, held_locally, lock_cleared).
+pub(crate) fn prepare_locallock(tag: &LOCALLOCKTAG) -> (u32, bool, bool) {
+    with_local(|state| {
+        let mcx = state.mcx;
+        let entry = state.table.entry(*tag).or_insert_with(|| {
+            let mut owners = PgVec::new_in(mcx);
+            owners.reserve(8);
+            LOCALLOCK {
+                hashcode: crate::shared::LockTagHashCode(&tag.lock),
+                lock: std::ptr::null_mut(),
+                proclock: std::ptr::null_mut(),
+                nLocks: 0,
+                lockOwners: owners,
+                holdsStrongLockCount: false,
+                lockCleared: false,
+            }
+        });
+        entry.lockOwners.reserve(1);
+        (entry.hashcode, entry.nLocks > 0, entry.lockCleared)
+    })
+}
+
+pub(crate) fn GrantLockLocal(tag: &LOCALLOCKTAG, owner: ResourceOwner) {
+    with_local(|state| {
+        let ll = state.table.get_mut(tag).expect("missing LOCALLOCK");
+        ll.nLocks += 1;
+        for slot in ll.lockOwners.iter_mut() {
+            if slot.owner == owner {
+                slot.nLocks += 1;
+                return;
+            }
+        }
+        ll.lockOwners.push(LOCALLOCKOWNER { owner, nLocks: 1 });
+    });
+    if !owner.is_null() {
+        resowner_seams::resource_owner_remember_lock::call(owner, *tag);
+    }
+    CheckAndSetLockHeld(tag, true);
+}
+
+pub(crate) fn RemoveLocalLock(tag: &LOCALLOCKTAG) {
+    let (owners, holds_strong, hashcode) = with_local(|state| {
+        let ll = state.table.get_mut(tag).expect("missing LOCALLOCK");
+        let owners: Vec<ResourceOwner> = ll
+            .lockOwners
+            .iter()
+            .rev()
+            .filter(|o| !o.owner.is_null())
+            .map(|o| o.owner)
+            .collect();
+        ll.lockOwners.clear();
+        (owners, ll.holdsStrongLockCount, ll.hashcode)
+    });
+    for owner in owners {
+        resowner_seams::resource_owner_forget_lock::call(owner, *tag);
+    }
+    if holds_strong {
+        decrement_strong_lock_count(hashcode);
+    }
+    let removed = with_local(|state| state.table.remove(tag).is_some());
+    debug_assert!(removed, "locallock table corrupted");
+    CheckAndSetLockHeld(tag, false);
+}
+
+pub(crate) fn BeginStrongLockAcquire(tag: &LOCALLOCKTAG, fasthashcode: u32) {
+    debug_assert!(STRONG_LOCK_IN_PROGRESS.get().is_none());
+    with_local(|state| {
+        let ll = state.table.get_mut(tag).expect("missing LOCALLOCK");
+        debug_assert!(!ll.holdsStrongLockCount);
+        crate::fastpath::increment_strong_lock_count_partition(fasthashcode);
+        ll.holdsStrongLockCount = true;
+    });
+    STRONG_LOCK_IN_PROGRESS.set(Some(*tag));
+}
+
+pub(crate) fn FinishStrongLockAcquire() {
+    STRONG_LOCK_IN_PROGRESS.set(None);
+}
+
+pub fn AbortStrongLockAcquire() {
+    let Some(tag) = STRONG_LOCK_IN_PROGRESS.get() else {
+        return;
+    };
+    with_local(|state| {
+        let ll = state.table.get_mut(&tag).expect("missing LOCALLOCK");
+        debug_assert!(ll.holdsStrongLockCount);
+        let fasthashcode = FastPathStrongLockHashPartition(ll.hashcode);
+        crate::fastpath::decrement_strong_lock_count_partition(fasthashcode);
+        ll.holdsStrongLockCount = false;
+    });
+    STRONG_LOCK_IN_PROGRESS.set(None);
+}
+
+pub fn MarkLockClear(locktag: &LOCKTAG, lockmode: LOCKMODE) {
+    let tag = LOCALLOCKTAG {
+        lock: *locktag,
+        mode: lockmode,
+    };
+    with_local(|state| {
+        let ll = state.table.get_mut(&tag).expect("missing LOCALLOCK");
+        debug_assert!(ll.nLocks > 0);
+        ll.lockCleared = true;
+    });
+}
+
+pub fn LockHeldByMe(locktag: &LOCKTAG, lockmode: LOCKMODE, orstronger: bool) -> bool {
+    let held = with_local(|state| {
+        let tag = LOCALLOCKTAG {
+            lock: *locktag,
+            mode: lockmode,
+        };
+        state.table.get(&tag).is_some_and(|ll| ll.nLocks > 0)
+    });
+    if held {
+        return true;
+    }
+    if orstronger {
+        for slockmode in lockmode + 1..=MaxLockMode {
+            if LockHeldByMe(locktag, slockmode, false) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Warning-path helper: LockRelease/LockHasWaiters "you don't own a lock".
+pub(crate) fn warn_not_owned(mode_name: &str) -> PgResult<()> {
+    elog_seams::ereport_msg::call(
+        types_error::WARNING,
+        format!("you don't own a lock of type {mode_name}"),
+        None,
+    )
+}

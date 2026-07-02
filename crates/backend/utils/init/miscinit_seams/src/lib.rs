@@ -38,3 +38,7 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn switch_back_to_local_latch()
 );
+
+seam_core::seam!(
+    pub fn get_user_id() -> Oid
+);

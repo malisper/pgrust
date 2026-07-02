@@ -1,7 +1,7 @@
 use datum::Datum;
 use mcx::PgVec;
 use types_core::Oid;
-use types_error::{PgError, PgResult};
+use types_error::PgResult;
 use types_tuple::varatt;
 use types_tuple::{HeapTupleData, TupleDescData};
 
@@ -417,7 +417,7 @@ pub fn CatalogCacheFlushCatalog(cat_id: Oid) -> PgResult<()> {
     for &id in &targets[..n] {
         with_state(|st| reset_catalog_cache(st, id, false));
         // Callbacks re-enter arbitrarily; no state borrow held.
-        inval::CallSyscacheCallbacks(id, 0)?;
+        inval::invalidate::CallSyscacheCallbacks(id, 0)?;
     }
     Ok(())
 }

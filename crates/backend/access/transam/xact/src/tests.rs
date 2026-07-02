@@ -83,7 +83,6 @@ fn self_unregistration_is_safe() {
     RegisterXactCallback(cb_self_unregister, Datum::from_usize(2));
     CallXactCallbacks(XACT_EVENT_COMMIT).unwrap();
     CallXactCallbacks(XACT_EVENT_COMMIT).unwrap();
-    // round 1: 2 (self-unregisters) then 1; round 2: just 1.
     assert_eq!(log_take(), vec![2, 1, 1]);
     reset_xact_state_for_tests();
 }
@@ -111,7 +110,6 @@ fn block_status_code_idle_by_default() {
 #[test]
 fn command_counter_increment_noop_when_unused() {
     reset_xact_state_for_tests();
-    // currentCommandIdUsed is false: no seams are reached, no error.
     CommandCounterIncrement().unwrap();
     reset_xact_state_for_tests();
 }
@@ -171,7 +169,6 @@ fn commit_record_round_trips_through_parser() {
     install_test_seams();
     reset_xact_state_for_tests();
 
-    // Plain commit: single fragment, no xinfo.
     XactLogCommitRecord(777, &[], &[], &[], &[], false, 0, InvalidTransactionId, None).unwrap();
     let (info, body) = CAPTURED.with(|c| c.borrow_mut().take()).unwrap();
     assert_eq!(info, XLOG_XACT_COMMIT);
@@ -181,7 +178,6 @@ fn commit_record_round_trips_through_parser() {
     assert_eq!(parsed.xinfo, 0);
     assert!(parsed.subxacts.is_empty());
 
-    // Commit with subxacts + AE locks.
     let subs = [10u32, 11, 12];
     XactLogCommitRecord(
         888,
@@ -232,7 +228,6 @@ fn parser_rejects_truncated_records() {
 fn savepoint_ops_rejected_outside_blocks() {
     install_test_seams();
     reset_xact_state_for_tests();
-    // TBLOCK_DEFAULT is an invalid state for all of these.
     assert!(DefineSavepoint(Some("sp")).is_err());
     assert!(ReleaseSavepoint("sp").is_err());
     assert!(RollbackToSavepoint("sp").is_err());

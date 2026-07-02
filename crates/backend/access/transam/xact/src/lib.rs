@@ -124,7 +124,6 @@ impl std::fmt::Debug for SubXactCallbackItem {
     }
 }
 
-/// One-load read of `CurrentTransactionState->blockState` (mirror Cell).
 pub(crate) fn cur_block_state() -> TBlockState {
     let v = state::mirror_block_state();
     debug_assert_eq!(v, xs(|s| s.current().block_state));
@@ -184,7 +183,6 @@ pub fn IsAbortedTransactionBlockState() -> bool {
     matches!(cur_block_state(), TBLOCK_ABORT | TBLOCK_SUBABORT)
 }
 
-/// `GetTopTransactionId` — assigns one if not yet set.
 pub fn GetTopTransactionId() -> PgResult<TransactionId> {
     if !GetTopFullTransactionIdIfAny().is_valid() {
         assign_transaction_id_at(0)?;
@@ -264,8 +262,6 @@ pub fn MarkSubxactTopXidLogged() {
     xs(|s| s.current_mut().top_xid_logged = true);
 }
 
-/// Latches the value for the rest of the transaction, keyed on
-/// `MyProc->vxid.lxid` changing; reference point for `age(xid)`.
 pub fn GetStableLatestTransactionId() -> PgResult<TransactionId> {
     let procno = lmgr_proc::MyProc().expect("MyProc is not set");
     let my_lxid = lmgr_proc::GetPGProcByNumber(procno)
@@ -305,8 +301,6 @@ fn assign_transaction_id_at(idx: usize) -> PgResult<()> {
             .finish(xact_location("AssignTransactionId"));
     }
 
-    // Ensure parent(s) have XIDs, so a child's XID is always later than its
-    // parent's; iterate up then assign down (C avoids deep recursion too).
     if is_subxact && !xs(|s| s.node(idx - 1).full_transaction_id.is_valid()) {
         let mut parents = Vec::new();
         let mut p = idx;
@@ -322,8 +316,6 @@ fn assign_transaction_id_at(idx: usize) -> PgResult<()> {
         }
     }
 
-    // wal_level=logical: a subxact's xid may appear in WAL only after its
-    // toplevel xid has been logged.
     let log_unknown_top = is_subxact
         && xlog_seams::xlog_logical_info_active::call()
         && !xs(|s| s.node(0).did_log_xid);
@@ -357,8 +349,6 @@ fn assign_transaction_id_at(idx: usize) -> PgResult<()> {
     resowner_seams::restore_current_resource_owner::call(saved);
     insert_result?;
 
-    // Every PGPROC_MAX_CACHED_SUBXIDS assigned xids per top-level xact, WAL
-    // the assignment (hot-standby KnownAssignedXids bookkeeping).
     if is_subxact && xlog_seams::xlog_standby_info_active::call() {
         xs(|s| {
             s.unreported_xids
@@ -370,22 +360,23 @@ fn assign_transaction_id_at(idx: usize) -> PgResult<()> {
             Ok::<(), PgError>(())
         })?;
 
-        // must match the test in RecoverPreparedTransactions()
         if xs(|s| s.unreported_xids.len()) >= PGPROC_MAX_CACHED_SUBXIDS || log_unknown_top {
             let xtop = GetTopTransactionId()?;
             debug_assert!(xtop != InvalidTransactionId);
-            let subxids = xs(|s| s.unreported_xids.clone());
-
-            // xl_xact_assignment { TransactionId xtop; int nsubxacts; xsub[] }
-            let mut hdr = [0u8; 8];
-            hdr[0..4].copy_from_slice(&xtop.to_ne_bytes());
-            hdr[4..8].copy_from_slice(&(subxids.len() as i32).to_ne_bytes());
-            let mut body: Vec<u8> = Vec::new();
-            body.try_reserve(subxids.len() * 4)
-                .map_err(|_| PgError::error("out of memory building xid-assignment record"))?;
-            for x in &subxids {
-                body.extend_from_slice(&x.to_ne_bytes());
-            }
+            let (hdr, body) = xs(|s| {
+                let mut hdr = [0u8; 8];
+                hdr[0..4].copy_from_slice(&xtop.to_ne_bytes());
+                hdr[4..8].copy_from_slice(&(s.unreported_xids.len() as i32).to_ne_bytes());
+                let mut body: Vec<u8> = Vec::new();
+                body.try_reserve(s.unreported_xids.len() * 4)
+                    .map_err(|_| {
+                        PgError::error("out of memory building xid-assignment record")
+                    })?;
+                for x in &s.unreported_xids {
+                    body.extend_from_slice(&x.to_ne_bytes());
+                }
+                Ok::<_, PgError>((hdr, body))
+            })?;
             xloginsert_seams::xlog_insert::call(RM_XACT_ID, XLOG_XACT_ASSIGNMENT, &[&hdr, &body])?;
 
             xs(|s| {
@@ -416,10 +407,8 @@ pub fn SubTransactionIsActive(subxid: SubTransactionId) -> bool {
     })
 }
 
-/// `GetCurrentCommandId` — global to a transaction, not subxact-local.
 pub fn GetCurrentCommandId(used: bool) -> PgResult<CommandId> {
     if used {
-        // No provision for reporting currentCommandIdUsed back to a leader.
         if parallel_seams::is_parallel_worker::call() {
             return ereport(ERROR)
                 .errcode(ERRCODE_INVALID_TRANSACTION_STATE)
@@ -450,7 +439,6 @@ pub fn GetCurrentStatementStartTimestamp() -> TimestampTz {
     xs(|s| s.stmt_start_timestamp)
 }
 
-/// Sets the stop timestamp if unset (C's lazy latch).
 pub fn GetCurrentTransactionStopTimestamp() -> TimestampTz {
     if xs(|s| s.xact_stop_timestamp) == 0 {
         let ts = timestamp_seams::get_current_timestamp::call();
@@ -484,7 +472,6 @@ pub fn TransactionIdIsCurrentTransactionId(xid: TransactionId) -> bool {
     }
 
     xs(|s| {
-        // Parallel worker: sorted ParallelCurrentXids is the whole answer.
         if !s.parallel_current_xids.is_empty() {
             return s.parallel_current_xids.binary_search(&xid).is_ok();
         }
@@ -536,7 +523,6 @@ pub fn EnterParallelMode() {
     });
 }
 
-/// (C also asserts `!ParallelContextActive()` when leaving the last level.)
 pub fn ExitParallelMode() {
     xs(|s| {
         debug_assert!(s.current().parallel_mode_level > 0);
@@ -549,7 +535,6 @@ pub fn IsInParallelMode() -> bool {
 }
 
 pub fn CommandCounterIncrement() -> PgResult<()> {
-    // No-op unless the counter was "used" to mark tuples (hot short-circuit).
     let used = state::mirror_command_id_used();
     debug_assert_eq!(used, xs(|s| s.command_id_used()));
     if !used {
@@ -563,8 +548,6 @@ pub fn CommandCounterIncrement() -> PgResult<()> {
             .finish(xact_location("CommandCounterIncrement"));
     }
 
-    // C increments then backs off on wraparound; checking before the write
-    // leaves currentCommandId identically unchanged on failure.
     let next = xs(|s| {
         let next = s.command_id() + 1;
         if next == InvalidCommandId {
@@ -592,12 +575,9 @@ pub fn ForceSyncCommit() {
 }
 
 pub(crate) fn AtStart_Cache() -> PgResult<()> {
-    inval::AcceptInvalidationMessages()
+    inval::local::AcceptInvalidationMessages()
 }
 
-/// First time through, create TransactionAbortContext and
-/// TopTransactionContext; at top level CurTransactionContext IS
-/// TopTransactionContext.
 pub(crate) fn AtStart_Memory() {
     xs(|s| {
         if s.transaction_abort_context.is_none() {
@@ -643,12 +623,10 @@ pub(crate) fn AtSubStart_ResourceOwner() -> PgResult<()> {
 }
 
 fn AtCCI_LocalCache() -> PgResult<()> {
-    // Relation map changes must reach the relcache before local sinval runs.
     relmapper_seams::at_cci_relation_map::call()?;
-    inval::CommandEndInvalidationMessages()
+    inval::eoxact::CommandEndInvalidationMessages()
 }
 
-/// TopTransactionContext survives but becomes empty.
 pub(crate) fn AtCommit_Memory() {
     xs(|s| {
         s.node_mut(0).retained_child_contexts.clear();
@@ -658,8 +636,6 @@ pub(crate) fn AtCommit_Memory() {
     });
 }
 
-/// Delete the subxact's CurTransactionContext if empty, else keep it alive
-/// (in C it survives as a child of the parent until top-level end).
 pub(crate) fn AtSubCommit_Memory() -> PgResult<()> {
     xs(|s| {
         let idx = s.stack_len() - 1;
@@ -688,8 +664,6 @@ pub(crate) fn AtSubCommit_Memory() -> PgResult<()> {
     })
 }
 
-/// Pass my XID + child XIDs up to the parent as committed children, in XID
-/// order (my XID precedes my children's; existing entries precede mine).
 pub(crate) fn AtSubCommit_childXids() -> PgResult<()> {
     xs(|s| {
         let idx = s.stack_len() - 1;
@@ -742,7 +716,6 @@ pub(crate) fn AtSubAbort_ResourceOwner() {
 
 pub(crate) fn AtSubAbort_childXids() {
     xs(|s| {
-        // (C doesn't bother pruning unreportedXids here either.)
         s.current_mut().child_xids = Vec::new();
     });
 }
@@ -773,8 +746,6 @@ pub(crate) fn AtSubCleanup_Memory() {
     });
 }
 
-/// Prepended as in C, so callbacks run most-recently-registered first and a
-/// registration made during `CallXactCallbacks` is not invoked this round.
 pub fn RegisterXactCallback(callback: XactCallback, arg: Datum) {
     xs(|s| {
         s.xact_callbacks
@@ -789,7 +760,7 @@ pub fn UnregisterXactCallback(callback: XactCallback, arg: Datum) {
         if let Some(pos) = s
             .xact_callbacks
             .iter()
-            .position(|item| item.callback == callback && item.arg == arg)
+            .position(|item| std::ptr::fn_addr_eq(item.callback, callback) && item.arg == arg)
         {
             s.xact_callbacks.remove(pos);
         }
@@ -810,17 +781,13 @@ pub fn UnregisterSubXactCallback(callback: SubXactCallback, arg: Datum) {
         if let Some(pos) = s
             .subxact_callbacks
             .iter()
-            .position(|item| item.callback == callback && item.arg == arg)
+            .position(|item| std::ptr::fn_addr_eq(item.callback, callback) && item.arg == arg)
         {
             s.subxact_callbacks.remove(pos);
         }
     });
 }
 
-/// Snapshot the registrations and call each one still registered when its
-/// turn comes (the C `next = item->next` walk: self-unregistration is safe,
-/// mid-iteration registrations don't run this round). Invocations hold no
-/// state borrow, so callbacks may re-enter this crate.
 pub(crate) fn CallXactCallbacks(event: XactEvent) -> PgResult<()> {
     let items: Vec<XactCallbackItem> = xs(|s| {
         let mut v = Vec::new();
@@ -833,7 +800,7 @@ pub(crate) fn CallXactCallbacks(event: XactEvent) -> PgResult<()> {
         let live = xs(|s| {
             s.xact_callbacks
                 .iter()
-                .any(|it| it.callback == item.callback && it.arg == item.arg)
+                .any(|it| std::ptr::fn_addr_eq(it.callback, item.callback) && it.arg == item.arg)
         });
         if live {
             (item.callback)(event, item.arg)?;
@@ -858,7 +825,7 @@ pub(crate) fn CallSubXactCallbacks(
         let live = xs(|s| {
             s.subxact_callbacks
                 .iter()
-                .any(|it| it.callback == item.callback && it.arg == item.arg)
+                .any(|it| std::ptr::fn_addr_eq(it.callback, item.callback) && it.arg == item.arg)
         });
         if live {
             (item.callback)(event, my_subid, parent_subid, item.arg)?;
@@ -867,8 +834,6 @@ pub(crate) fn CallSubXactCallbacks(
     Ok(())
 }
 
-/// Committed children of the current transaction (C hands out the in-place
-/// array; the callers here consume a fallible copy).
 pub fn xactGetCommittedChildren() -> PgResult<Vec<TransactionId>> {
     xs(|s| {
         let src = &s.current().child_xids;
@@ -884,8 +849,6 @@ pub(crate) fn xact_location(function: &'static str) -> ErrorLocation {
     ErrorLocation::new("xact.c", 0, function)
 }
 
-/// `MemoryContextStrdup(TopTransactionContext, ...)` stand-in; palloc can
-/// ereport OOM.
 pub(crate) fn try_strdup(s: &str, what: &'static str) -> PgResult<String> {
     let mut out = String::new();
     out.try_reserve_exact(s.len())
@@ -906,13 +869,11 @@ pub(crate) fn warn_internal(msg: &str) {
 }
 
 pub(crate) fn ShowTransactionState(str: &str) {
-    // skip work if message will definitely not be printed
     if message_level_is_interesting(DEBUG5) {
         ShowTransactionStateRec(str);
     }
 }
 
-/// C recurses parent-first; the stack's front-to-back order is the same.
 fn ShowTransactionStateRec(str: &str) {
     let lines = xs(|s| {
         s.nodes()
@@ -1056,7 +1017,6 @@ fn CheckTransactionBlock(isTopLevel: bool, throwError: bool, stmtType: &str) -> 
         .finish(xact_location("CheckTransactionBlock"))
 }
 
-/// True on the same conditions PreventInTransactionBlock errors on.
 pub fn IsInTransactionBlock(isTopLevel: bool) -> bool {
     if IsTransactionBlock() {
         return true;
@@ -1132,4 +1092,15 @@ pub fn init_seams() {
     xact_seams::set_xact_accessed_temp_namespace::set(seam_set_xact_accessed_temp_namespace);
     xact_seams::get_current_command_id::set(GetCurrentCommandId);
     xact_seams::get_current_transaction_nest_level::set(GetCurrentTransactionNestLevel);
+    xact_seams::get_top_transaction_id_if_any::set(GetTopTransactionIdIfAny);
+    xact_seams::is_transaction_or_transaction_block::set(IsTransactionOrTransactionBlock);
+    xact_seams::start_transaction_command::set(StartTransactionCommand);
+    xact_seams::commit_transaction_command::set(CommitTransactionCommand);
+    xact_seams::is_in_parallel_mode::set(IsInParallelMode);
+    xact_seams::isolation_uses_xact_snapshot::set(IsolationUsesXactSnapshot);
+    xact_seams::isolation_is_serializable::set(IsolationIsSerializable);
+    xact_seams::transaction_id_is_current_transaction_id::set(TransactionIdIsCurrentTransactionId);
+    xact_portal_seams::get_current_statement_start_timestamp::set(
+        GetCurrentStatementStartTimestamp,
+    );
 }

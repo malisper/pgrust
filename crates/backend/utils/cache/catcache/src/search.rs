@@ -210,7 +210,7 @@ fn search_miss(cache_id: i32, hash_value: u32, keys: &[CatCKey<'_>; 4]) -> PgRes
 /// `memcpy(cur_skey, cache->cc_skey, ...)` + `sk_argument = v1..vN`. By-ref
 /// arguments are framed into the on-disk image the index comparator reads
 /// (NameData buffer / 4-byte-header varlena / oidvector), in `scan_mcx`.
-fn build_scan_keys<'mcx>(
+pub(crate) fn build_scan_keys<'mcx>(
     scan_mcx: mcx::Mcx<'mcx>,
     cache_id: i32,
     nkeys: i32,

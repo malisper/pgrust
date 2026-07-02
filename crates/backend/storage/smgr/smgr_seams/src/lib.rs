@@ -24,6 +24,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // smgrreadv(smgropen(rlocator), forknum, blocknum, 1 iov) (smgr.c);
+    // buffer is exactly BLCKSZ.
+    pub fn smgr_read(
+        rlocator: RelFileLocatorBackend,
+        forknum: ForkNumber,
+        blocknum: BlockNumber,
+        buffer: &mut [u8],
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     pub fn at_eoxact_smgr()
 );
 

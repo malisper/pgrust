@@ -223,7 +223,6 @@ impl XactState {
         }
     }
 
-    /// `CurrentTransactionState`
     pub(crate) fn current(&self) -> &TransactionNode {
         self.stack.subs.last().unwrap_or(&self.stack.top)
     }

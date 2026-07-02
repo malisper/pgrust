@@ -58,7 +58,7 @@ impl BufferPin {
     /// Explicit `ReleaseBuffer` (the ordered-teardown path).
     #[inline]
     pub fn release(self) {
-        release_buffer::call(self.buffer);
+        let _ = release_buffer::call(self.buffer);
         core::mem::forget(self);
     }
 
@@ -79,7 +79,7 @@ impl BufferPin {
 
 impl Drop for BufferPin {
     fn drop(&mut self) {
-        release_buffer::call(self.buffer);
+        let _ = release_buffer::call(self.buffer);
     }
 }
 
