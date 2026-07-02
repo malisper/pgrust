@@ -18,6 +18,13 @@ thread_local! {
     static ICU_VALIDATION_LEVEL: Cell<i32> = const { Cell::new(WARNING.0) };
 }
 
+pub(crate) fn monetary_and_numeric_are_c() -> bool {
+    fn is_c(s: &str) -> bool {
+        s == "C" || s == "POSIX"
+    }
+    LOCALE_MONETARY.with(|s| is_c(&s.borrow())) && LOCALE_NUMERIC.with(|s| is_c(&s.borrow()))
+}
+
 #[must_use]
 pub fn database_ctype_is_c() -> bool {
     DATABASE_CTYPE_IS_C.with(Cell::get)
