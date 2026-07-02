@@ -28,8 +28,7 @@ fn bringup() -> MutexGuard<'static, ()> {
         init_small::globals::set_max_worker_processes(8);
         pmchild_seams::init_postmaster_child_slots::call();
     });
-    // Re-run per test thread: idempotent, refreshes pmsignal's thread-local
-    // num_child_flags copy (in production only the postmaster calls Mark*).
+    // Idempotent; refreshes pmsignal's thread-local num_child_flags copy.
     pmsignal::PMSignalShmemInit(pmchild_seams::max_live_postmaster_children::call());
     TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -37,7 +36,6 @@ fn bringup() -> MutexGuard<'static, ()> {
 #[test]
 fn slot_count_matches_c_formula() {
     let _g = bringup();
-    // 2*(100+10) + 16 + 8 + MAX_IO_WORKERS + 10 singletons.
     assert_eq!(MaxLivePostmasterChildren(), 220 + 16 + 8 + 32 + 10);
 }
 
@@ -58,7 +56,6 @@ fn assign_release_roundtrip_and_masks() {
     assert_eq!(pmchild_seams::count_children::call(btmask(BackendType::Backend)), 0);
     assert!(FindPostmasterChildByPid(4242).is_none());
 
-    // Freshly released slot is granted next (C push_head/pop_head LIFO).
     let again = pmchild_seams::assign_postmaster_child_slot::call(BackendType::Backend).unwrap();
     assert_eq!(again, slot);
     assert!(pmchild_seams::release_postmaster_child_slot::call(again));

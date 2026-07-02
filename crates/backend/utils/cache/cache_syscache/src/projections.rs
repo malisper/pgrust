@@ -9,8 +9,14 @@ use types_storage::PgClassShape;
 use syscache_seams::PgTypeTypcacheShape;
 use types_tuple::{HeapTupleData, NameData, PgTypeShape, TupleDescData};
 
-use crate::{GetSysCacheOid, ReleaseSysCache, SearchSysCache1, SearchSysCacheExists, SysCacheKey};
-use crate::cacheinfo::{ATTNUM, AUTHOID, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, RELNAMENSP, RELOID, TYPEOID};
+use mcx::PgVec;
+use syscache_seams::PgCastShape;
+
+use crate::{
+    GetSysCacheOid, ReleaseSysCache, ReleaseSysCacheList, SearchSysCache1, SearchSysCache2,
+    SearchSysCache4, SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1, SysCacheKey,
+};
+use crate::cacheinfo::{ATTNUM, AUTHNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, OPEROID, RELNAMENSP, RELOID, TYPEOID};
 
 const ANUM_PG_CLASS_OID: i32 = 1;
 const ANUM_PG_CLASS_RELISSHARED: i32 = 16;
@@ -30,10 +36,29 @@ const ANUM_PG_ATTRIBUTE_ATTRELID: i32 = 1;
 const ANUM_PG_INDEX_INDEXRELID: i32 = 1;
 const ANUM_PG_CONSTRAINT_CONTYPE: i32 = 4;
 const ANUM_PG_CONSTRAINT_CONRELID: i32 = 9;
+const ANUM_PG_AUTHID_OID: i32 = 1;
 const ANUM_PG_AUTHID_ROLNAME: i32 = 2;
+const ANUM_PG_AUTHID_ROLSUPER: i32 = 3;
 const ANUM_PG_NAMESPACE_OID: i32 = 1;
 const ANUM_PG_NAMESPACE_NSPNAME: i32 = 2;
 const CONSTRAINT_FOREIGN: i8 = b'f' as i8;
+const ANUM_PG_OPERATOR_OID: i32 = 1;
+const ANUM_PG_OPERATOR_OPRNAMESPACE: i32 = 3;
+const ANUM_PG_OPERATOR_OPRKIND: i32 = 5;
+const ANUM_PG_OPERATOR_OPRCANMERGE: i32 = 6;
+const ANUM_PG_OPERATOR_OPRCANHASH: i32 = 7;
+const ANUM_PG_OPERATOR_OPRLEFT: i32 = 8;
+const ANUM_PG_OPERATOR_OPRRIGHT: i32 = 9;
+const ANUM_PG_OPERATOR_OPRRESULT: i32 = 10;
+const ANUM_PG_OPERATOR_OPRCOM: i32 = 11;
+const ANUM_PG_OPERATOR_OPRNEGATE: i32 = 12;
+const ANUM_PG_OPERATOR_OPRCODE: i32 = 13;
+const ANUM_PG_OPERATOR_OPRREST: i32 = 14;
+const ANUM_PG_OPERATOR_OPRJOIN: i32 = 15;
+const ANUM_PG_CAST_OID: i32 = 1;
+const ANUM_PG_CAST_CASTFUNC: i32 = 4;
+const ANUM_PG_CAST_CASTCONTEXT: i32 = 5;
+const ANUM_PG_CAST_CASTMETHOD: i32 = 6;
 
 fn tupdesc_for(cache_id: i32) -> &'static TupleDescData<'static> {
     match catcache::cache_tupdesc(cache_id) {
@@ -108,6 +133,18 @@ fn lookup_pg_type_shape(typid: Oid) -> PgResult<Option<PgTypeShape>> {
     drop(t);
     ReleaseSysCache(tuple);
     Ok(Some(shape))
+}
+
+fn lookup_authid_by_rolname(rolname: &str) -> PgResult<Option<(Oid, bool)>> {
+    let Some(tuple) = SearchSysCache1(AUTHNAME, SysCacheKey::Str(rolname))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let oid = getattr(&t, AUTHNAME, ANUM_PG_AUTHID_OID).as_oid();
+    let rolsuper = getattr(&t, AUTHNAME, ANUM_PG_AUTHID_ROLSUPER).as_bool();
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some((oid, rolsuper)))
 }
 
 fn lookup_authid_rolname<'mcx>(mcx: Mcx<'mcx>, roleid: Oid) -> PgResult<Option<PgString<'mcx>>> {
@@ -225,6 +262,112 @@ fn syscache_hash_value_typeoid(typid: Oid) -> PgResult<u32> {
     )
 }
 
+fn lookup_pg_operator_shape(opno: Oid) -> PgResult<Option<syscache_seams::PgOperatorShape>> {
+    let Some(tuple) = SearchSysCache1(OPEROID, SysCacheKey::Value(Datum::from_oid(opno)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let shape = syscache_seams::PgOperatorShape {
+        oprleft: getattr(&t, OPEROID, ANUM_PG_OPERATOR_OPRLEFT).as_oid(),
+        oprright: getattr(&t, OPEROID, ANUM_PG_OPERATOR_OPRRIGHT).as_oid(),
+        oprresult: getattr(&t, OPEROID, ANUM_PG_OPERATOR_OPRRESULT).as_oid(),
+        oprcom: getattr(&t, OPEROID, ANUM_PG_OPERATOR_OPRCOM).as_oid(),
+        oprnegate: getattr(&t, OPEROID, ANUM_PG_OPERATOR_OPRNEGATE).as_oid(),
+        oprcode: getattr(&t, OPEROID, ANUM_PG_OPERATOR_OPRCODE).as_oid(),
+        oprrest: getattr(&t, OPEROID, ANUM_PG_OPERATOR_OPRREST).as_oid(),
+        oprjoin: getattr(&t, OPEROID, ANUM_PG_OPERATOR_OPRJOIN).as_oid(),
+        oprcanmerge: getattr(&t, OPEROID, ANUM_PG_OPERATOR_OPRCANMERGE).as_bool(),
+        oprcanhash: getattr(&t, OPEROID, ANUM_PG_OPERATOR_OPRCANHASH).as_bool(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
+fn lookup_pg_operator_oid_exact(
+    opername: &str,
+    oprleft: Oid,
+    oprright: Oid,
+    oprnamespace: Oid,
+) -> PgResult<Oid> {
+    let Some(tuple) = SearchSysCache4(
+        OPERNAMENSP,
+        SysCacheKey::Str(opername),
+        SysCacheKey::Value(Datum::from_oid(oprleft)),
+        SysCacheKey::Value(Datum::from_oid(oprright)),
+        SysCacheKey::Value(Datum::from_oid(oprnamespace)),
+    )?
+    else {
+        return Ok(0);
+    };
+    let oid = getattr(&tuple.tuple(), OPERNAMENSP, ANUM_PG_OPERATOR_OID).as_oid();
+    ReleaseSysCache(tuple);
+    Ok(oid)
+}
+
+fn lookup_pg_operator_candidates<'mcx>(
+    mcx: Mcx<'mcx>,
+    opername: &str,
+    oprleft: Oid,
+    oprright: Oid,
+) -> PgResult<PgVec<'mcx, (Oid, Oid)>> {
+    let list = SearchSysCacheList(
+        OPERNAMENSP,
+        3,
+        SysCacheKey::Str(opername),
+        SysCacheKey::Value(Datum::from_oid(oprleft)),
+        SysCacheKey::Value(Datum::from_oid(oprright)),
+    )?;
+    let n = list.n_members() as usize;
+    let mut out = mcx::vec_with_capacity_in(mcx, n)?;
+    for i in 0..n {
+        let m = list.member(i);
+        let t = m.tuple();
+        out.push((
+            getattr(&t, OPERNAMENSP, ANUM_PG_OPERATOR_OID).as_oid(),
+            getattr(&t, OPERNAMENSP, ANUM_PG_OPERATOR_OPRNAMESPACE).as_oid(),
+        ));
+    }
+    ReleaseSysCacheList(list);
+    Ok(out)
+}
+
+fn pg_operator_name_candidates_exist(opername: &str, oprkind: i8) -> PgResult<bool> {
+    let list = SearchSysCacheList1(OPERNAMENSP, SysCacheKey::Str(opername))?;
+    let n = list.n_members() as usize;
+    let mut found = false;
+    for i in 0..n {
+        let m = list.member(i);
+        if getattr(&m.tuple(), OPERNAMENSP, ANUM_PG_OPERATOR_OPRKIND).as_i8() == oprkind {
+            found = true;
+            break;
+        }
+    }
+    ReleaseSysCacheList(list);
+    Ok(found)
+}
+
+fn lookup_pg_cast_shape(sourcetypeid: Oid, targettypeid: Oid) -> PgResult<Option<PgCastShape>> {
+    let Some(tuple) = SearchSysCache2(
+        CASTSOURCETARGET,
+        SysCacheKey::Value(Datum::from_oid(sourcetypeid)),
+        SysCacheKey::Value(Datum::from_oid(targettypeid)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let shape = PgCastShape {
+        oid: getattr(&t, CASTSOURCETARGET, ANUM_PG_CAST_OID).as_oid(),
+        castfunc: getattr(&t, CASTSOURCETARGET, ANUM_PG_CAST_CASTFUNC).as_oid(),
+        castcontext: getattr(&t, CASTSOURCETARGET, ANUM_PG_CAST_CASTCONTEXT).as_i8(),
+        castmethod: getattr(&t, CASTSOURCETARGET, ANUM_PG_CAST_CASTMETHOD).as_i8(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
 pub(crate) fn install() {
     syscache_seams::search_syscache_exists_reloid::set(search_syscache_exists_reloid);
     syscache_seams::sys_cache_invalidate::set(sys_cache_invalidate);
@@ -236,9 +379,15 @@ pub(crate) fn install() {
     syscache_seams::pg_constraint_fk_target::set(pg_constraint_fk_target);
     syscache_seams::lookup_pg_type_shape::set(lookup_pg_type_shape);
     syscache_seams::lookup_authid_rolname::set(lookup_authid_rolname);
+    syscache_seams::lookup_authid_by_rolname::set(lookup_authid_by_rolname);
     syscache_seams::lookup_pg_type_typcache_shape::set(lookup_pg_type_typcache_shape);
     syscache_seams::syscache_hash_value_typeoid::set(syscache_hash_value_typeoid);
     syscache_seams::lookup_pg_class_relid_by_name::set(lookup_pg_class_relid_by_name);
     syscache_seams::pg_namespace_nspname::set(pg_namespace_nspname);
     syscache_seams::lookup_pg_namespace_oid_by_name::set(lookup_pg_namespace_oid_by_name);
+    syscache_seams::lookup_pg_operator_shape::set(lookup_pg_operator_shape);
+    syscache_seams::lookup_pg_operator_oid_exact::set(lookup_pg_operator_oid_exact);
+    syscache_seams::lookup_pg_operator_candidates::set(lookup_pg_operator_candidates);
+    syscache_seams::pg_operator_name_candidates_exist::set(pg_operator_name_candidates_exist);
+    syscache_seams::lookup_pg_cast_shape::set(lookup_pg_cast_shape);
 }

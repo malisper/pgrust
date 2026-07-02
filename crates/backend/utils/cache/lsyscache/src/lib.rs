@@ -27,16 +27,10 @@ pub use statistics::*;
 pub use typ::*;
 
 use types_core::Oid;
-pub use types_pathnodes::CompareType;
-
-// access/cmptype.h (home unported; values are wire-visible in pg_amop logic).
-pub const COMPARE_INVALID: CompareType = 0;
-pub const COMPARE_LT: CompareType = 1;
-pub const COMPARE_LE: CompareType = 2;
-pub const COMPARE_EQ: CompareType = 3;
-pub const COMPARE_GE: CompareType = 4;
-pub const COMPARE_GT: CompareType = 5;
-pub const COMPARE_NE: CompareType = 6;
+pub use types_pathnodes::{
+    CompareType, COMPARE_EQ, COMPARE_GE, COMPARE_GT, COMPARE_INVALID, COMPARE_LE, COMPARE_LT,
+    COMPARE_NE,
+};
 
 pub type StrategyNumber = u16;
 pub const InvalidStrategy: StrategyNumber = 0;

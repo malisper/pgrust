@@ -12,26 +12,17 @@ use types_storage::{PGShmemHeader, PGShmemMagic};
 #[cfg(test)]
 mod tests;
 
-// C legs whose owner units are unported are absent from both drivers below;
-// each owner allocates its shared structures when it lands, and until then its
-// first entry point panics with its own name (no silent stub): dsm_registry,
-// xlogprefetcher, xlogrecovery, commit_ts, multixact, twophase, bgworker,
-// predicate, checkpointer, autovacuum, slots/origin/walsnd/walrcv/
-// walsummarizer/pgarch/launcher/slotsync, nbtree vacuum-cycle, syncscan,
-// async, pgstat shmem, custom wait events, injection points, aio. Segment
-// mechanics (PGSharedMemoryCreate / InitShmemAccess / InitShmemAllocation /
-// InitShmemIndex / PGReserveSemaphores / the shmem-index hash estimate /
-// huge pages) have no thread-model counterpart: allocation is per-request
-// (see the shmem crate doc) and semaphores are per-PGPROC in InitProcGlobal.
-// AttachSharedMemoryStructs (EXEC_BACKEND) is likewise n/a: child threads
-// share the address space, the fork()-inheritance arm of the C.
+// Unported owners are absent from both drivers (each allocates its shmem when
+// it lands; until then its first entry point panics with its own name); the
+// full omission list is in CATALOG.tsv. Segment mechanics (PGSharedMemoryCreate
+// / InitShmemAccess/Allocation/Index / PGReserveSemaphores / huge pages) and
+// AttachSharedMemoryStructs (EXEC_BACKEND) have no thread-model counterpart:
+// allocation is per-request (shmem crate doc), semaphores are per-PGPROC.
 
 thread_local! {
     static TOTAL_ADDIN_REQUEST: Cell<usize> = const { Cell::new(0) };
 }
 
-// process_shmem_requests_in_progress (miscinit.c) arrives as a parameter, as
-// fabled's port did: no ambient-global getter seams.
 pub fn RequestAddinShmemSpace(
     size: usize,
     process_shmem_requests_in_progress: bool,
@@ -56,11 +47,7 @@ fn proc_global_config(fastpath_lock_groups_per_backend: i32) -> ProcGlobalConfig
     }
 }
 
-/// CalculateShmemSize: `(size, num_semaphores)`; the C out-parameter is always
-/// returned. The sum covers the landed subsystems only (header comment), so it
-/// undercounts C until the missing owners land — the consumers (the
-/// shared_memory_size / num_os_semaphores GUCs) are informational here, with
-/// no segment to size.
+/// Returns `(size, num_semaphores)`; sums landed subsystems only.
 pub fn CalculateShmemSize(cfg: &ProcGlobalConfig) -> PgResult<(usize, i32)> {
     let num_semas = lmgr_proc::ProcGlobalSemas();
 
@@ -97,9 +84,7 @@ pub fn CreateSharedMemoryAndSemaphores(fastpath_lock_groups_per_backend: i32) ->
 
     CreateOrAttachShmemStructs(&cfg)?;
 
-    // The C shim is the segment header PGSharedMemoryCreate returned;
-    // dsm_postmaster_startup stores the control-segment handle in it. With no
-    // segment, ipci owns the header for the cluster lifetime.
+    // The C shim is PGSharedMemoryCreate's segment header; ipci owns it here.
     let shim = Box::leak(Box::new(PGShmemHeader {
         magic: PGShmemMagic,
         creatorPID: std::process::id() as _,
@@ -112,9 +97,7 @@ pub fn CreateSharedMemoryAndSemaphores(fastpath_lock_groups_per_backend: i32) ->
     }));
     dsm_core::dsm::dsm_postmaster_startup(shim)?;
 
-    // shmem_startup_hook: preload libraries are unported; the miscinit
-    // process_shared_preload_libraries seam panics before any hook could
-    // have been installed.
+    // shmem_startup_hook: none can exist, preload libraries are unported.
     Ok(())
 }
 
@@ -156,8 +139,7 @@ pub fn InitializeShmemGUCs(fastpath_lock_groups_per_backend: i32) -> PgResult<()
         PGC_S_DYNAMIC_DEFAULT,
     )?;
 
-    // GetHugePageSize: no segment, no huge pages; the GUC keeps its -1
-    // "not supported" boot value.
+    // No segment, no huge pages: that GUC keeps its -1 boot value.
 
     guc::SetConfigOption(
         "num_os_semaphores",
