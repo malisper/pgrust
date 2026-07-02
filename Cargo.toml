@@ -49,6 +49,12 @@ members = [
     "crates/backend/catalog/pg_class_seams",
     "crates/backend/access/table/table_seams",
     "crates/backend/access/table/table",
+    "crates/_support/types/snapshot",
+    "crates/_support/types/portal",
+    "crates/_support/types/array",
+    "crates/_support/types/types_nbtree",
+    "crates/common/wchar",
+    "crates/_support/types/nodes",
 ]
 
 [workspace.package]

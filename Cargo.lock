@@ -316,9 +316,6 @@ dependencies = [
 [[package]]
 name = "rel_vocab"
 version = "0.1.0"
-dependencies = [
- "types_core",
-]
 
 [[package]]
 name = "relation_seams"
@@ -329,6 +326,7 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+ "types_rel",
 ]
 
 [[package]]
@@ -372,6 +370,8 @@ dependencies = [
  "table_seams",
  "types_core",
  "types_error",
+ "types_rel",
+ "types_tuple",
 ]
 
 [[package]]
@@ -379,15 +379,19 @@ name = "table_seams"
 version = "0.0.0"
 dependencies = [
  "mcx",
- "rel_vocab",
  "seam_core",
  "types_core",
  "types_error",
+ "types_rel",
 ]
 
 [[package]]
 name = "trace"
 version = "0.0.0"
+
+[[package]]
+name = "types_array"
+version = "0.1.0"
 
 [[package]]
 name = "types_core"
@@ -424,6 +428,18 @@ dependencies = [
  "types_core",
  "types_tuple",
 ]
+
+[[package]]
+name = "types_nbtree"
+version = "0.1.0"
+
+[[package]]
+name = "types_nodes"
+version = "0.1.0"
+
+[[package]]
+name = "types_portal"
+version = "0.1.0"
 
 [[package]]
 name = "types_rel"
@@ -464,6 +480,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "types_snapshot"
+version = "0.1.0"
+
+[[package]]
 name = "types_storage"
 version = "0.1.0"
 dependencies = [
@@ -494,6 +514,10 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "wchar"
+version = "0.1.0"
 
 [[package]]
 name = "zerocopy"
