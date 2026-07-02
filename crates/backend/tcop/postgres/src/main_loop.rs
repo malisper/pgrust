@@ -1,0 +1,564 @@
+// PostgresMain + ReadCommand/SocketBackend (postgres.c). The C sigsetjmp
+// recovery block is the Err/panic arm of each loop iteration.
+use ::elog::ereport;
+use ::mcx::{Mcx, MemoryContext, PgVec};
+use ::stringinfo::StringInfo;
+use ::types_dest::CommandDest;
+use ::types_error::{
+    PgError, PgResult, ERRCODE_CONNECTION_FAILURE, ERRCODE_PROTOCOL_VIOLATION, ERROR, FATAL,
+};
+
+use crate::{
+    check_for_interrupts, loc, set_doing_command_read, set_doing_extended_query_message,
+    set_ignore_till_sync, set_xact_started, simple_query, ignore_till_sync,
+};
+
+mod pqmsg {
+    pub const QUERY: i32 = b'Q' as i32;
+    pub const PARSE: i32 = b'P' as i32;
+    pub const BIND: i32 = b'B' as i32;
+    pub const EXECUTE: i32 = b'E' as i32;
+    pub const FUNCTION_CALL: i32 = b'F' as i32;
+    pub const CLOSE: i32 = b'C' as i32;
+    pub const DESCRIBE: i32 = b'D' as i32;
+    pub const FLUSH: i32 = b'H' as i32;
+    pub const SYNC: i32 = b'S' as i32;
+    pub const TERMINATE: i32 = b'X' as i32;
+    pub const COPY_DATA: i32 = b'd' as i32;
+    pub const COPY_DONE: i32 = b'c' as i32;
+    pub const COPY_FAIL: i32 = b'f' as i32;
+    pub const CLOSE_COMPLETE: u8 = b'3';
+    pub const BACKEND_KEY_DATA: u8 = b'K';
+}
+
+const EOF: i32 = pqcomm::EOF;
+
+const PQ_SMALL_MESSAGE_LIMIT: i32 = 10000;
+const PQ_LARGE_MESSAGE_LIMIT: i32 = 0x3fffffff - 1; /* MaxAllocSize - 1 */
+
+fn SocketBackend(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
+    // HOLD_CANCEL_INTERRUPTS() ... RESUME_CANCEL_INTERRUPTS(): a query cancel
+    // must not fire mid-read and lose FE/BE sync; the guard resumes on every
+    // exit path.
+    struct CancelHoldoff;
+    impl Drop for CancelHoldoff {
+        fn drop(&mut self) {
+            init_small::globals::ResumeCancelInterrupts();
+        }
+    }
+    init_small::globals::HoldCancelInterrupts();
+    let _holdoff = CancelHoldoff;
+
+    pqcomm::pq_startmsgread()?;
+    let qtype = pqcomm::pq_getbyte()?;
+
+    if qtype == EOF {
+        if xact::IsTransactionState() {
+            ereport(types_error::COMMERROR)
+                .errcode(ERRCODE_CONNECTION_FAILURE)
+                .errmsg("unexpected EOF on client connection with an open transaction")
+                .finish(loc(369, "SocketBackend"))?;
+        } else {
+            elog::config::set_where_to_send_output(CommandDest::None);
+        }
+        return Ok(qtype);
+    }
+
+    let maxmsglen = match qtype {
+        x if x == pqmsg::QUERY || x == pqmsg::FUNCTION_CALL => {
+            set_doing_extended_query_message(false);
+            PQ_LARGE_MESSAGE_LIMIT
+        }
+        x if x == pqmsg::TERMINATE => {
+            set_doing_extended_query_message(false);
+            set_ignore_till_sync(false);
+            PQ_SMALL_MESSAGE_LIMIT
+        }
+        x if x == pqmsg::BIND || x == pqmsg::PARSE => {
+            set_doing_extended_query_message(true);
+            PQ_LARGE_MESSAGE_LIMIT
+        }
+        x if x == pqmsg::CLOSE
+            || x == pqmsg::DESCRIBE
+            || x == pqmsg::EXECUTE
+            || x == pqmsg::FLUSH =>
+        {
+            set_doing_extended_query_message(true);
+            PQ_SMALL_MESSAGE_LIMIT
+        }
+        x if x == pqmsg::SYNC => {
+            set_ignore_till_sync(false);
+            set_doing_extended_query_message(false);
+            PQ_SMALL_MESSAGE_LIMIT
+        }
+        x if x == pqmsg::COPY_DATA => {
+            set_doing_extended_query_message(false);
+            PQ_LARGE_MESSAGE_LIMIT
+        }
+        x if x == pqmsg::COPY_DONE || x == pqmsg::COPY_FAIL => {
+            set_doing_extended_query_message(false);
+            PQ_SMALL_MESSAGE_LIMIT
+        }
+        other => {
+            return Err(ereport(FATAL)
+                .errcode(ERRCODE_PROTOCOL_VIOLATION)
+                .errmsg(format!("invalid frontend message type {other}"))
+                .into_error()
+                .into());
+        }
+    };
+
+    if pqcomm::pq_getmessage(in_buf, maxmsglen)? != 0 {
+        return Ok(EOF); /* suitable message already logged */
+    }
+
+    Ok(qtype)
+}
+
+fn ReadCommand(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
+    if elog::config::where_to_send_output() == CommandDest::Remote {
+        SocketBackend(in_buf)
+    } else {
+        panic!("ReadCommand (postgres.c:487): InteractiveBackend (single-user mode) not ported");
+    }
+}
+
+struct LoopState {
+    send_ready_for_query: bool,
+    idle_in_transaction_timeout_enabled: bool,
+    idle_session_timeout_enabled: bool,
+}
+
+fn error_recovery(err: &PgError, state: &mut LoopState) -> PgResult<()> {
+    use init_small::globals as g;
+
+    /* error_context_stack = NULL: the ambient callback chain is Err-carried. */
+
+    // C's elog.c ERROR path resets the holdoff counters before longjmp; here
+    // the catching frame does it (an unbalanced HOLD_INTERRUPTS on the unwind
+    // path would otherwise leak forever).
+    g::SetInterruptHoldoffCount(0);
+    g::SetQueryCancelHoldoffCount(0);
+    g::SetCritSectionCount(0);
+
+    timeout_seams::disable_all_timeouts::call(false)?; /* do first to avoid race */
+    g::SetQueryCancelPending(false);
+    state.idle_in_transaction_timeout_enabled = false;
+    state.idle_session_timeout_enabled = false;
+
+    set_doing_command_read(false);
+
+    pqcomm::pq_comm_reset();
+
+    elog::emit_error_report_for(err);
+
+
+    xact::AbortCurrentTransaction()?;
+
+
+    portalmem::PortalErrorCleanup()?;
+
+
+    elog::FlushErrorState();
+
+    if crate::doing_extended_query_message() {
+        set_ignore_till_sync(true);
+    }
+
+    set_xact_started(false);
+
+    if pqcomm::pq_is_reading_msg() {
+        return Err(ereport(FATAL)
+            .errcode(ERRCODE_PROTOCOL_VIOLATION)
+            .errmsg("terminating connection because protocol synchronization was lost")
+            .into_error()
+            .into());
+    }
+
+    Ok(())
+}
+
+fn ready_state(mcx: Mcx<'_>, state: &mut LoopState) -> PgResult<()> {
+    use backend_status_seams::BackendState;
+
+    if xact::IsAbortedTransactionBlockState() {
+        ps_status_seams::set_ps_display::call("idle in transaction (aborted)");
+        backend_status_seams::pgstat_report_activity::call(
+            BackendState::STATE_IDLEINTRANSACTION_ABORTED,
+            None,
+        );
+        // Idle-in-transaction timer: IdleInTransactionSessionTimeout GUC
+        // backing var lands with the guc lane (boot default 0: disabled).
+    } else if xact::IsTransactionOrTransactionBlock() {
+        ps_status_seams::set_ps_display::call("idle in transaction");
+        backend_status_seams::pgstat_report_activity::call(
+            BackendState::STATE_IDLEINTRANSACTION,
+            None,
+        );
+    } else {
+        /* notify processing (ProcessNotifyInterrupt): async.c lane; its
+         * pending flag cannot be raised yet. */
+
+        let stats_timeout = pgstat::pending::pgstat_report_stat(false);
+        if stats_timeout > 0 {
+            if !timeout_seams::get_timeout_active::call(timeout_seams::IDLE_STATS_UPDATE_TIMEOUT) {
+                timeout_seams::enable_timeout_after::call(
+                    timeout_seams::IDLE_STATS_UPDATE_TIMEOUT,
+                    stats_timeout as i32,
+                )?;
+            }
+        } else if timeout_seams::get_timeout_active::call(timeout_seams::IDLE_STATS_UPDATE_TIMEOUT)
+        {
+            timeout_seams::disable_timeout::call(timeout_seams::IDLE_STATS_UPDATE_TIMEOUT, false)?;
+        }
+
+        ps_status_seams::set_ps_display::call("idle");
+        backend_status_seams::pgstat_report_activity::call(BackendState::STATE_IDLE, None);
+
+        // Idle-session timer: IdleSessionTimeout GUC backing var lands with
+        // the guc lane (boot default 0: disabled).
+    }
+
+    guc::report::report_changed_guc_options();
+
+
+    tcop_dest::ReadyForQuery(mcx, elog::config::where_to_send_output())?;
+    state.send_ready_for_query = false;
+
+    Ok(())
+}
+
+fn dispatch_message<'mcx>(
+    mcx: Mcx<'mcx>,
+    firstchar: i32,
+    input_message: &mut StringInfo<'mcx>,
+    state: &mut LoopState,
+) -> PgResult<()> {
+    match firstchar {
+        x if x == pqmsg::QUERY => {
+            xact::SetCurrentStatementStartTimestamp();
+
+            let query_string: &'mcx str = {
+                let s = pqformat::pq_getmsgstring(mcx, input_message)?;
+                leak_str_in(mcx, s.as_bytes())?
+            };
+            pqformat::pq_getmsgend(input_message)?;
+
+            simple_query::exec_simple_query(mcx, query_string)?;
+
+            state.send_ready_for_query = true;
+        }
+
+        x if x == pqmsg::PARSE || x == pqmsg::BIND || x == pqmsg::EXECUTE
+            || x == pqmsg::DESCRIBE =>
+        {
+            panic!(
+                "PostgresMain: extended-query protocol message {:?} not ported \
+                 (exec_parse/bind/execute/describe_message, postgres.c:1389-2780)",
+                firstchar as u8 as char
+            );
+        }
+
+        x if x == pqmsg::FUNCTION_CALL => {
+            panic!(
+                "PostgresMain: fastpath function call ('F') not ported \
+                 (HandleFunctionRequest, tcop/fastpath.c)"
+            );
+        }
+
+        x if x == pqmsg::CLOSE => {
+            let close_type = pqformat::pq_getmsgbyte(input_message)?;
+            let close_target = {
+                let s = pqformat::pq_getmsgrawstring(input_message)?;
+                core::str::from_utf8(s)
+                    .map_err(|_| {
+                        Box::new(PgError::new(ERROR, "invalid string in message".to_string()))
+                    })?
+                    .to_string()
+            };
+            pqformat::pq_getmsgend(input_message)?;
+
+            match close_type as u8 {
+                b'S' => {
+                    if !close_target.is_empty() {
+                        panic!(
+                            "PostgresMain: Close(statement) needs DropPreparedStatement \
+                             (commands/prepare.c lane)"
+                        );
+                    }
+                    simple_query::drop_unnamed_stmt();
+                }
+                b'P' => {
+                    if let Some(portal) = portalmem::GetPortalByName(Some(&close_target)) {
+                        portalmem::PortalDrop(&portal, false)?;
+                    }
+                }
+                other => {
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_PROTOCOL_VIOLATION)
+                        .errmsg(format!("invalid CLOSE message subtype {other}"))
+                        .into_error()
+                        .into());
+                }
+            }
+
+            if elog::config::where_to_send_output() == CommandDest::Remote {
+                pqformat::pq_putemptymessage(pqmsg::CLOSE_COMPLETE)?;
+            }
+        }
+
+        x if x == pqmsg::FLUSH => {
+            pqformat::pq_getmsgend(input_message)?;
+            if elog::config::where_to_send_output() == CommandDest::Remote {
+                pqcomm::pq_flush()?;
+            }
+        }
+
+        x if x == pqmsg::SYNC => {
+            pqformat::pq_getmsgend(input_message)?;
+            xact::EndImplicitTransactionBlock();
+            simple_query::finish_xact_command()?;
+            state.send_ready_for_query = true;
+        }
+
+        x if x == EOF || x == pqmsg::TERMINATE => {
+            if elog::config::where_to_send_output() == CommandDest::Remote {
+                elog::config::set_where_to_send_output(CommandDest::None);
+            }
+            ipc_seams::proc_exit::call(0, init_small::globals::MyProcPid());
+        }
+
+        x if x == pqmsg::COPY_DATA || x == pqmsg::COPY_DONE || x == pqmsg::COPY_FAIL => {
+        }
+
+        other => {
+            return Err(ereport(FATAL)
+                .errcode(ERRCODE_PROTOCOL_VIOLATION)
+                .errmsg(format!("invalid frontend message type {other}"))
+                .into_error()
+                .into());
+        }
+    }
+
+    Ok(())
+}
+
+fn leak_str_in<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<&'mcx str> {
+    let mut v: PgVec<'mcx, u8> = PgVec::new_in(mcx);
+    mcx::vec_append_bytes(&mut v, bytes)?;
+    let slice: &'mcx mut [u8] = v.leak();
+    core::str::from_utf8(slice)
+        .map_err(|_| Box::new(PgError::new(ERROR, "invalid byte sequence in query string".to_string())))
+}
+
+pub fn PostgresMain(dbname: &str, username: &str) -> ! {
+    let outcome = postgres_main_inner(dbname, username);
+    if let Err(err) = outcome {
+        elog::emit_error_report_for(&err);
+    }
+    ipc_seams::proc_exit::call(1, init_small::globals::MyProcPid())
+}
+
+fn postgres_main_inner(dbname: &str, username: &str) -> PgResult<()> {
+    assert!(!dbname.is_empty() || !username.is_empty());
+
+    timeout_seams::initialize_timeouts::call(); /* establishes SIGALRM handler */
+
+    if elog::config::where_to_send_output() == CommandDest::Remote {
+        let len = init_small::globals::WithMyProcPort(|port| {
+            const PG_PROTOCOL_3_2: u32 = (3 << 16) | 2;
+            if port.proto >= PG_PROTOCOL_3_2 {
+                types_core::primitive::MAX_CANCEL_KEY_LENGTH
+            } else {
+                4
+            }
+        });
+        let mut key = [0u8; types_core::primitive::MAX_CANCEL_KEY_LENGTH];
+        pg_strong_random(&mut key[..len])?;
+        init_small::globals::SetMyCancelKey(key);
+        init_small::globals::SetMyCancelKeyLength(len as i32);
+    }
+
+    postinit::BaseInit()?;
+
+    let top = MemoryContext::new("PostgresMainInit");
+    postinit::InitPostgres(
+        top.mcx(),
+        Some(dbname),
+        types_core::primitive::InvalidOid,
+        Some(username),
+        types_core::primitive::InvalidOid,
+        postinit::INIT_PG_LOAD_SESSION_LIBS,
+        None,
+    )?;
+    drop(top);
+
+
+    miscinit::SetProcessingMode(types_core::ProcessingMode::NormalProcessing);
+
+    guc::report::begin_reporting_guc_options();
+
+
+    // pgstat_report_connect(MyDatabaseId): session-connect stat, lands with
+    // pgstat's connect tracking.
+
+    if elog::config::where_to_send_output() == CommandDest::Remote {
+        let key = init_small::globals::MyCancelKey();
+        let len = init_small::globals::MyCancelKeyLength() as usize;
+        debug_assert!(len > 0);
+        let scratch = MemoryContext::new("CancelKeyMsg");
+        let mut buf = pqformat::pq_beginmessage(scratch.mcx(), pqmsg::BACKEND_KEY_DATA)?;
+        pqformat::pq_sendint32(&mut buf, init_small::globals::MyProcPid() as u32)?;
+        pqformat::pq_sendbytes(&mut buf, &key[..len])?;
+        pqformat::pq_endmessage(buf)?;
+    }
+
+    let mut message_context = MemoryContext::new_bump("MessageContext");
+
+
+    let mut state = LoopState {
+        send_ready_for_query: true,
+        idle_in_transaction_timeout_enabled: false,
+        idle_session_timeout_enabled: false,
+    };
+
+    loop {
+        /*
+         * Release storage left over from prior query cycle. C resets the
+         * long-lived MessageContext; this is that reset (stale stmt-list
+         * handles die with it).
+         */
+        pquery::stmt_list::reset_all();
+        message_context.reset();
+        let mcx = message_context.mcx();
+
+        let iteration = run_one_iteration(mcx, &mut state);
+
+        match iteration {
+            Ok(()) => {}
+            Err(err) => {
+                if err.level() >= FATAL {
+                    return Err(err);
+                }
+                let mut pending = err;
+                const MAX_RECOVERY_ATTEMPTS: u32 = 16;
+                let mut settled = false;
+                for _ in 0..MAX_RECOVERY_ATTEMPTS {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        error_recovery(&pending, &mut state)
+                    })) {
+                        Ok(Ok(())) => {
+                            settled = true;
+                            break;
+                        }
+                        Ok(Err(next)) => {
+                            if next.level() >= FATAL {
+                                return Err(next);
+                            }
+                            pending = next;
+                        }
+                        Err(payload) => {
+                            pending = Box::new(pg_error_from_panic(payload));
+                        }
+                    }
+                }
+                if !settled {
+                    return Err(ereport(FATAL)
+                        .errmsg_internal(
+                            "error recovery failed to settle the transaction; terminating backend",
+                        )
+                        .into_error()
+                        .into());
+                }
+                if !ignore_till_sync() {
+                    state.send_ready_for_query = true; /* initially, or after error */
+                }
+            }
+        }
+    }
+}
+
+// One iteration of the C for(;;) body (postgres.c:4516-5021), Err = the
+// sigsetjmp path. Panics from unported seams are mapped to ERROR-level errors
+// so the backend recovers as C does from ereport(ERROR).
+fn run_one_iteration(mcx: Mcx<'_>, state: &mut LoopState) -> PgResult<()> {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_one_iteration_inner(mcx, state)
+    }));
+    match outcome {
+        Ok(r) => r,
+        Err(payload) => Err(Box::new(pg_error_from_panic(payload))),
+    }
+}
+
+fn pg_error_from_panic(payload: Box<dyn std::any::Any + Send>) -> PgError {
+    match payload.downcast::<PgError>() {
+        Ok(e) => *e,
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "backend panicked".to_string());
+            PgError::new(ERROR, msg)
+        }
+    }
+}
+
+fn run_one_iteration_inner<'mcx>(mcx: Mcx<'mcx>, state: &mut LoopState) -> PgResult<()> {
+    set_doing_extended_query_message(false);
+
+    let mut input_message = StringInfo::new_in(mcx)?;
+
+    snapmgr::InvalidateCatalogSnapshotConditionally();
+
+    if state.send_ready_for_query {
+        ready_state(mcx, state)?;
+    }
+
+    set_doing_command_read(true);
+
+    let firstchar = ReadCommand(&mut input_message)?;
+
+    if state.idle_in_transaction_timeout_enabled {
+        timeout_seams::disable_timeout::call(
+            timeout_seams::IDLE_IN_TRANSACTION_SESSION_TIMEOUT,
+            false,
+        )?;
+        state.idle_in_transaction_timeout_enabled = false;
+    }
+    if state.idle_session_timeout_enabled {
+        timeout_seams::disable_timeout::call(timeout_seams::IDLE_SESSION_TIMEOUT, false)?;
+        state.idle_session_timeout_enabled = false;
+    }
+
+    check_for_interrupts()?;
+    set_doing_command_read(false);
+
+    if interrupt::ConfigReloadPending() {
+        interrupt::SetConfigReloadPending(false);
+        guc_file::ProcessConfigFile(types_guc_context_sighup())?;
+    }
+
+    if ignore_till_sync() && firstchar != EOF {
+        return Ok(());
+    }
+
+    dispatch_message(mcx, firstchar, &mut input_message, state)
+}
+
+fn types_guc_context_sighup() -> types_guc::GucContext {
+    types_guc::GucContext::PGC_SIGHUP
+}
+
+fn pg_strong_random(buf: &mut [u8]) -> PgResult<()> {
+    // SAFETY: getentropy fills exactly buf.len() (<= 256) bytes or fails.
+    let rc = unsafe { libc::getentropy(buf.as_mut_ptr().cast(), buf.len()) };
+    if rc != 0 {
+        return Err(ereport(ERROR)
+            .errmsg("could not generate random cancel key")
+            .into_error()
+            .into());
+    }
+    Ok(())
+}

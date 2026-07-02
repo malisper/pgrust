@@ -47,3 +47,23 @@ seam_core::seam!(
     // `pgstat_report_tempfile(filesize)` (utils/activity/pgstat_database.c).
     pub fn pgstat_report_tempfile(file_size: u64)
 );
+
+seam_core::seam!(
+    // pgstat_initialize (pgstat.c).
+    pub fn pgstat_initialize() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    // pgstat_before_server_shutdown(code, arg) (pgstat.c), before_shmem_exit shape.
+    pub fn pgstat_before_server_shutdown(code: i32) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    // pgstat_restore_stats() (pgstat.c).
+    pub fn pgstat_restore_stats() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    // pgstat_discard_stats() (pgstat.c).
+    pub fn pgstat_discard_stats() -> types_error::PgResult<()>
+);

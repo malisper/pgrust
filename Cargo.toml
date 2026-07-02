@@ -116,6 +116,7 @@ members = [
     "crates/backend/executor/exectuples",
     "crates/backend/executor/execexpr",
     "crates/backend/executor/executils",
+    "crates/backend/storage/freespace/freespace_seams",
     "crates/backend/tcop/cmdtag",
     "crates/backend/access/transam/xact_seams",
     "crates/backend/tcop/dest",
@@ -269,6 +270,7 @@ members = [
     "crates/backend/utils/adt/float",
     "crates/backend/utils/fmgr/funcapi",
     "crates/backend/utils/misc/ps_status",
+    "crates/backend/parser/gram_core",
 ]
 
 [workspace.package]
