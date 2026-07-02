@@ -11,8 +11,7 @@ use types_storage::storage::MAX_IO_WORKERS;
 #[cfg(test)]
 mod tests;
 
-// PMChild (postmaster.h). `rw` is C's RegisteredBgWorker*; the bgworker
-// registry is unported, so the field is the registration handle placeholder.
+// PMChild (postmaster.h); `rw` stands in for C's RegisteredBgWorker*.
 #[derive(Clone, Copy, Debug)]
 pub struct PMChild {
     pub pid: pid_t,
@@ -28,14 +27,10 @@ struct PMChildPool {
     freelist: Vec<i32>, // LIFO of slot numbers (C dlist push/pop head)
 }
 
-// C's slot slab + freelists + ActiveChildList are postmaster-private statics;
-// the Mutex is belt-and-suspenders for that single-thread invariant (cold,
-// supervisor-only paths). Dead-end children have no pool slot: they get unique
-// NEGATIVE synthetic ids so the slot-keyed seam surface can address them
-// (C addresses them by struct pointer).
-// `active` is the authoritative PMChild store (C's ActiveChildList); pools
-// track free slot NUMBERS only — the C slot slab is reconstructible from the
-// number, so it is not duplicated here.
+// Postmaster-private in C; the Mutex guards that single-writer invariant
+// (cold supervisor paths). `active` is C's ActiveChildList; pools hold free
+// slot numbers. Dead-end children have no pool slot: they get unique NEGATIVE
+// ids so the slot-keyed seam surface can address them (C uses the pointer).
 struct Registry {
     pools: Vec<PMChildPool>,
     active: Vec<PMChild>,
@@ -63,8 +58,7 @@ pub fn MaxLivePostmasterChildren() -> i32 {
 
 pub fn InitPostmasterChildSlots() {
     let mut pool_sizes = [0i32; BACKEND_NUM_TYPES];
-    // More connections than backends: some may still be authenticating; WAL
-    // senders start as regular backends and share that pool.
+    // Extra headroom for authenticating connections; WAL senders share the pool.
     pool_sizes[BackendType::Backend as usize] = 2
         * (init_small::globals::MaxConnections() + guc_tables::vars::max_wal_senders.read());
     pool_sizes[BackendType::AutovacWorker as usize] =
@@ -98,7 +92,7 @@ pub fn InitPostmasterChildSlots() {
             freelist.push(slotno + 1);
             slotno += 1;
         }
-        // C dlist_push_tail + dlist_pop_head = FIFO; keep that grant order.
+        // C grants FIFO (push_tail/pop_head).
         freelist.reverse();
         pools.push(PMChildPool { size, first_slotno, freelist });
     }
@@ -230,9 +224,8 @@ fn btmask_contains(mask: u32, t: BackendType) -> bool {
     mask & (1 << (t as u32)) != 0
 }
 
-// The shared walk of CountChildren/SignalChildren (postmaster.c): resolve
-// B_BACKENDs that announced themselves WAL senders when the mask
-// distinguishes the two.
+// CountChildren/SignalChildren walk: resolve B_BACKENDs that became WAL
+// senders when the mask distinguishes the two.
 fn for_each_match(mask: u32, mut f: impl FnMut(&PMChild)) -> i32 {
     with_registry(|reg| {
         let mut matched = 0;
@@ -270,9 +263,8 @@ pub fn CountChildren(target_mask: u32) -> i32 {
 
 pub fn SignalChildren(signal: i32, target_mask: u32) -> bool {
     let matched = for_each_match(target_mask, |bp| {
-        // C signal_child = kill(pid, signal). One address space: per-thread
-        // delivery needs a drain the tcop/interrupt lane does not have yet;
-        // a silent drop would hang shutdown, so fail with the owner's name.
+        // C kill(pid, signal); a silent drop would hang shutdown, so the
+        // undesigned per-thread delivery fails with its owner's name.
         panic!(
             "SignalChildren: delivering signal {} to {} thread pid {} — per-thread \
              signal delivery is undesigned (pmchild redesign, tcop/interrupt drain)",

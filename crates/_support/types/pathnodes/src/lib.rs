@@ -77,7 +77,15 @@ pub const RELOPT_OTHER_JOINREL: RelOptKind = 3;
 pub const RELOPT_UPPER_REL: RelOptKind = 4;
 pub const RELOPT_OTHER_UPPER_REL: RelOptKind = 5;
 
+// access/cmptype.h (values are wire-visible in pg_amop logic).
 pub type CompareType = i32;
+pub const COMPARE_INVALID: CompareType = 0;
+pub const COMPARE_LT: CompareType = 1;
+pub const COMPARE_LE: CompareType = 2;
+pub const COMPARE_EQ: CompareType = 3;
+pub const COMPARE_GE: CompareType = 4;
+pub const COMPARE_GT: CompareType = 5;
+pub const COMPARE_NE: CompareType = 6;
 
 pub type VolatileFunctionStatus = u32;
 pub const VOLATILITY_UNKNOWN: VolatileFunctionStatus = 0;

@@ -5,10 +5,8 @@ use super::*;
 
 static BE_STATUS_INITS: AtomicUsize = AtomicUsize::new(0);
 
-// C boot values: 2*(100+10) + 16 + 8 + 32 io-workers + 10 singletons.
 const MAX_LIVE_CHILDREN: i32 = 286;
 
-// Test accessors for GUC slots whose owner units are unported; C boot_vals.
 fn install_test_gucs() {
     use std::sync::atomic::{AtomicI32, Ordering::Relaxed};
     static AV_SLOTS: AtomicI32 = AtomicI32::new(16);
@@ -63,6 +61,9 @@ fn bringup() {
         init_seams();
     });
     guc::store::initialize_guc_options().unwrap();
+    // Unseeded global prng is the xoroshiro zero fixed point; postmaster's
+    // InitProcessGlobals seeds it before ipci runs.
+    pg_prng::global_prng(|prng| prng.seed(42));
     g::SetNBuffers(16);
     g::SetMaxConnections(100);
     g::set_max_worker_processes(8);
@@ -80,7 +81,6 @@ fn create_shared_memory_and_semaphores_end_to_end() {
     pmsignal::MarkPostmasterChildSlotAssigned(1).unwrap();
     assert!(pmsignal::MarkPostmasterChildSlotUnassigned(1));
 
-    // Idempotent re-entry is not C behavior; second run must not be needed.
     ipci_seams::initialize_shmem_gucs::call(4).unwrap();
     let mb = guc::GetConfigOption("shared_memory_size", false, false)
         .unwrap()
@@ -114,7 +114,6 @@ fn calculate_shmem_size_rounds_and_counts_addin() {
 #[test]
 fn request_addin_outside_hook_is_fatal() {
     bringup();
-    // C elog(FATAL) does not return: it reaches proc_exit (stubbed to panic).
     let err = std::panic::catch_unwind(|| RequestAddinShmemSpace(1, false))
         .expect_err("FATAL must not return");
     let msg = err.downcast_ref::<String>().cloned().unwrap_or_default();

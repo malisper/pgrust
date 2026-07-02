@@ -346,6 +346,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "auxprocess"
+version = "0.0.0"
+
+[[package]]
 name = "backend_progress_seams"
 version = "0.0.0"
 dependencies = [
@@ -467,6 +471,10 @@ dependencies = [
  "seam_core",
  "types_error",
 ]
+
+[[package]]
+name = "bgwriter"
+version = "0.0.0"
 
 [[package]]
 name = "bufmgr"
@@ -647,6 +655,10 @@ name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+
+[[package]]
+name = "checkpointer"
+version = "0.0.0"
 
 [[package]]
 name = "checkpointer_seams"
@@ -2837,6 +2849,10 @@ name = "postmaster_seams"
 version = "0.0.0"
 
 [[package]]
+name = "postmaster_startup"
+version = "0.0.0"
+
+[[package]]
 name = "pqcomm"
 version = "0.0.0"
 dependencies = [
@@ -4554,6 +4570,10 @@ dependencies = [
  "types_error",
  "types_storage",
 ]
+
+[[package]]
+name = "walwriter"
+version = "0.0.0"
 
 [[package]]
 name = "wchar"
