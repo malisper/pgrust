@@ -1,0 +1,9 @@
+[package]
+name = "postinit"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "postinit"
+path = "src/lib.rs"

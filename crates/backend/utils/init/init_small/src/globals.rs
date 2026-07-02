@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::mem::ManuallyDrop;
 
 use types_core::{
     pg_time_t, pid_t, uint32, uint8, InvalidOid, Oid, ProcNumber, ProtocolVersion, TimestampTz,
@@ -128,6 +129,41 @@ scalar_global! {
     SERIALIZABLE_BUFFERS, serializable_buffers, set_serializable_buffers, i32, 32;
     SUBTRANSACTION_BUFFERS, subtransaction_buffers, set_subtransaction_buffers, i32, 0;
     TRANSACTION_BUFFERS, transaction_buffers, set_transaction_buffers, i32, 0;
+}
+
+// `ClientSocket *MyClientSocket` / `struct Port *MyProcPort` (globals.c).
+// Port is droppy: ManuallyDrop keeps the TLS const-init with no dtor state
+// machine; the Port leaks at thread exit as C's TopMemoryContext copy does at
+// process exit (per-connection reclaim is thread-model debt, see M5 note in
+// docs/strategy.md — session state must not assume thread identity).
+thread_local! {
+    static MY_CLIENT_SOCKET: Cell<Option<types_startup::ClientSocket>> = const { Cell::new(None) };
+    static MY_PROC_PORT: RefCell<Option<ManuallyDrop<Box<types_startup::Port>>>> =
+        const { RefCell::new(None) };
+}
+
+pub fn MyClientSocket() -> Option<types_startup::ClientSocket> {
+    MY_CLIENT_SOCKET.get()
+}
+
+pub fn SetMyClientSocket(sock: types_startup::ClientSocket) {
+    MY_CLIENT_SOCKET.set(Some(sock));
+}
+
+pub fn HaveMyProcPort() -> bool {
+    MY_PROC_PORT.with(|p| p.borrow().is_some())
+}
+
+pub fn SetMyProcPort(port: types_startup::Port) {
+    MY_PROC_PORT.with(|p| *p.borrow_mut() = Some(ManuallyDrop::new(Box::new(port))));
+}
+
+pub fn WithMyProcPort<R>(f: impl FnOnce(&mut types_startup::Port) -> R) -> R {
+    MY_PROC_PORT.with(|p| {
+        let mut slot = p.borrow_mut();
+        let port = slot.as_mut().expect("MyProcPort is not set");
+        f(port)
+    })
 }
 
 // `char *DataDir` / `char *DatabasePath`: set once per backend, never freed in
