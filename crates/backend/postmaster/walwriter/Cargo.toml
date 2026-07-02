@@ -1,0 +1,9 @@
+[package]
+name = "walwriter"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "walwriter"
+path = "src/lib.rs"

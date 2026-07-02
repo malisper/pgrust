@@ -15,8 +15,9 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // SyncPreCheckpoint() (sync.c).
-    pub fn sync_pre_checkpoint()
+    // SyncPreCheckpoint() (sync.c); absorbs (which allocates) before the
+    // cycle bump, so it carries C's ereport surface.
+    pub fn sync_pre_checkpoint() -> PgResult<()>
 );
 
 seam_core::seam!(

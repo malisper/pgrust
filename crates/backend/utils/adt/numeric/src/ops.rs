@@ -1,0 +1,804 @@
+use types_error::{ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_FEATURE_NOT_SUPPORTED};
+
+use crate::arith::{add_var, cmp_var_common, div_var, mul_var, select_div_scale, sub_var};
+use crate::io::get_str_from_var;
+use crate::var::{
+    int64_to_var, make_result, make_result_into, make_result_opt_error, set_var_from_int64,
+    var_to_int32, var_to_int64, NumericImage, NumericVar, CONST_ZERO,
+};
+use crate::{
+    division_by_zero_error, numeric_can_be_short, Num, DEC_DIGITS, NUMERIC_DSCALE_MASK,
+    NUMERIC_DSCALE_MAX, NUMERIC_INF_SIGN_MASK, NUMERIC_NEG, NUMERIC_POS,
+    NUMERIC_SHORT_DSCALE_MASK, NUMERIC_SHORT_DSCALE_SHIFT, NUMERIC_SHORT_SIGN_MASK,
+    NUMERIC_WEIGHT_MAX, VARHDRSZ,
+};
+
+#[inline]
+pub fn make_numeric_typmod(precision: i32, scale: i32) -> i32 {
+    ((precision << 16) | (scale & 0x7ff)) + VARHDRSZ as i32
+}
+
+#[inline]
+pub fn is_valid_numeric_typmod(typmod: i32) -> bool {
+    typmod >= VARHDRSZ as i32
+}
+
+#[inline]
+pub fn numeric_typmod_precision(typmod: i32) -> i32 {
+    ((typmod - VARHDRSZ as i32) >> 16) & 0xffff
+}
+
+#[inline]
+pub fn numeric_typmod_scale(typmod: i32) -> i32 {
+    (((typmod - VARHDRSZ as i32) & 0x7ff) ^ 1024) - 1024
+}
+
+#[cold]
+#[inline(never)]
+fn numeric_field_overflow(precision: i32, scale: i32, maxdigits: i32) -> PgError {
+    PgError::error("numeric field overflow")
+        .with_sqlstate(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
+        .with_detail(format!(
+            "A field with precision {precision}, scale {scale} must round to an absolute value less than {}{}.",
+            if maxdigits != 0 { "10^" } else { "" },
+            if maxdigits != 0 { maxdigits } else { 1 }
+        ))
+}
+
+#[cold]
+#[inline(never)]
+fn numeric_field_overflow_inf(precision: i32, scale: i32) -> PgError {
+    PgError::error("numeric field overflow")
+        .with_sqlstate(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
+        .with_detail(format!(
+            "A field with precision {precision}, scale {scale} cannot hold an infinite value."
+        ))
+}
+
+pub fn apply_typmod(
+    var: &mut NumericVar,
+    typmod: i32,
+    escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<bool> {
+    if !is_valid_numeric_typmod(typmod) {
+        return Ok(true);
+    }
+
+    let precision = numeric_typmod_precision(typmod);
+    let scale = numeric_typmod_scale(typmod);
+    let maxdigits = precision - scale;
+
+    var.round(scale);
+
+    if var.dscale < 0 {
+        var.dscale = 0;
+    }
+
+    let mut ddigits = (var.weight + 1) * DEC_DIGITS;
+    if ddigits > maxdigits {
+        for i in 0..var.ndigits {
+            let dig = var.digits()[i as usize];
+            if dig != 0 {
+                if dig < 10 {
+                    ddigits -= 3;
+                } else if dig < 100 {
+                    ddigits -= 2;
+                } else if dig < 1000 {
+                    ddigits -= 1;
+                }
+                if ddigits > maxdigits {
+                    return ereturn(
+                        escontext,
+                        false,
+                        numeric_field_overflow(precision, scale, maxdigits),
+                    );
+                }
+                break;
+            }
+            ddigits -= DEC_DIGITS;
+        }
+    }
+
+    Ok(true)
+}
+
+pub fn apply_typmod_special(
+    num: Num<'_>,
+    typmod: i32,
+    escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<bool> {
+    debug_assert!(num.is_special());
+
+    // NaN passes any typmod (longstanding behavior); Inf never fits one.
+    if num.is_nan() {
+        return Ok(true);
+    }
+    if !is_valid_numeric_typmod(typmod) {
+        return Ok(true);
+    }
+
+    let precision = numeric_typmod_precision(typmod);
+    let scale = numeric_typmod_scale(typmod);
+    ereturn(
+        escontext,
+        false,
+        numeric_field_overflow_inf(precision, scale),
+    )
+}
+
+fn numeric_sign_internal(num: Num<'_>) -> i32 {
+    if num.is_special() {
+        debug_assert!(!num.is_nan());
+        if num.is_pinf() {
+            1
+        } else {
+            -1
+        }
+    } else if num.ndigits() == 0 {
+        0
+    } else if num.sign() == NUMERIC_NEG {
+        -1
+    } else {
+        1
+    }
+}
+
+pub fn numeric_add_into(num1: Num<'_>, num2: Num<'_>, out: &mut NumericImage) -> PgResult<()> {
+    if num1.is_special() || num2.is_special() {
+        let h = if num1.is_nan() || num2.is_nan() {
+            crate::NUMERIC_NAN
+        } else if num1.is_pinf() {
+            if num2.is_ninf() {
+                crate::NUMERIC_NAN
+            } else {
+                crate::NUMERIC_PINF
+            }
+        } else if num1.is_ninf() {
+            if num2.is_pinf() {
+                crate::NUMERIC_NAN
+            } else {
+                crate::NUMERIC_NINF
+            }
+        } else if num2.is_pinf() {
+            crate::NUMERIC_PINF
+        } else {
+            crate::NUMERIC_NINF
+        };
+        out.set_special(h);
+        return Ok(());
+    }
+
+    let result = add_var(num1.view(), num2.view());
+    if !make_result_into(result.view(), out) {
+        return Err(crate::numeric_overflow_error().into());
+    }
+    Ok(())
+}
+
+pub fn numeric_add_common(num1: Num<'_>, num2: Num<'_>) -> PgResult<NumericImage> {
+    let mut out = NumericImage::empty();
+    numeric_add_into(num1, num2, &mut out)?;
+    Ok(out)
+}
+
+pub fn numeric_sub_into(num1: Num<'_>, num2: Num<'_>, out: &mut NumericImage) -> PgResult<()> {
+    if num1.is_special() || num2.is_special() {
+        let h = if num1.is_nan() || num2.is_nan() {
+            crate::NUMERIC_NAN
+        } else if num1.is_pinf() {
+            if num2.is_pinf() {
+                crate::NUMERIC_NAN
+            } else {
+                crate::NUMERIC_PINF
+            }
+        } else if num1.is_ninf() {
+            if num2.is_ninf() {
+                crate::NUMERIC_NAN
+            } else {
+                crate::NUMERIC_NINF
+            }
+        } else if num2.is_pinf() {
+            crate::NUMERIC_NINF
+        } else {
+            crate::NUMERIC_PINF
+        };
+        out.set_special(h);
+        return Ok(());
+    }
+
+    let result = sub_var(num1.view(), num2.view());
+    if !make_result_into(result.view(), out) {
+        return Err(crate::numeric_overflow_error().into());
+    }
+    Ok(())
+}
+
+pub fn numeric_sub_common(num1: Num<'_>, num2: Num<'_>) -> PgResult<NumericImage> {
+    let mut out = NumericImage::empty();
+    numeric_sub_into(num1, num2, &mut out)?;
+    Ok(out)
+}
+
+fn inf_times_sign(pos: bool, sign: i32) -> PgResult<NumericImage> {
+    Ok(match sign {
+        0 => NumericImage::nan(),
+        1 => {
+            if pos {
+                NumericImage::pinf()
+            } else {
+                NumericImage::ninf()
+            }
+        }
+        _ => {
+            if pos {
+                NumericImage::ninf()
+            } else {
+                NumericImage::pinf()
+            }
+        }
+    })
+}
+
+pub fn numeric_mul_into(num1: Num<'_>, num2: Num<'_>, out: &mut NumericImage) -> PgResult<()> {
+    if num1.is_special() || num2.is_special() {
+        let img = if num1.is_nan() || num2.is_nan() {
+            NumericImage::nan()
+        } else if num1.is_pinf() {
+            inf_times_sign(true, numeric_sign_internal(num2))?
+        } else if num1.is_ninf() {
+            inf_times_sign(false, numeric_sign_internal(num2))?
+        } else if num2.is_pinf() {
+            inf_times_sign(true, numeric_sign_internal(num1))?
+        } else {
+            inf_times_sign(false, numeric_sign_internal(num1))?
+        };
+        out.set_from_num(img.num());
+        return Ok(());
+    }
+
+    let arg1 = num1.view();
+    let arg2 = num2.view();
+    let mut result = mul_var(arg1, arg2, arg1.dscale + arg2.dscale);
+    if result.dscale > NUMERIC_DSCALE_MAX {
+        result.round(NUMERIC_DSCALE_MAX);
+    }
+    if !make_result_into(result.view(), out) {
+        return Err(crate::numeric_overflow_error().into());
+    }
+    Ok(())
+}
+
+pub fn numeric_mul_common(num1: Num<'_>, num2: Num<'_>) -> PgResult<NumericImage> {
+    let mut out = NumericImage::empty();
+    numeric_mul_into(num1, num2, &mut out)?;
+    Ok(out)
+}
+
+pub fn numeric_div_into(num1: Num<'_>, num2: Num<'_>, out: &mut NumericImage) -> PgResult<()> {
+    if num1.is_special() || num2.is_special() {
+        if num1.is_nan() || num2.is_nan() {
+            out.set_special(crate::NUMERIC_NAN);
+            return Ok(());
+        }
+        if num1.is_pinf() || num1.is_ninf() {
+            if num2.is_special() {
+                out.set_special(crate::NUMERIC_NAN);
+                return Ok(());
+            }
+            let pos = num1.is_pinf();
+            let h = match numeric_sign_internal(num2) {
+                0 => return Err(division_by_zero_error().into()),
+                1 => {
+                    if pos {
+                        crate::NUMERIC_PINF
+                    } else {
+                        crate::NUMERIC_NINF
+                    }
+                }
+                _ => {
+                    if pos {
+                        crate::NUMERIC_NINF
+                    } else {
+                        crate::NUMERIC_PINF
+                    }
+                }
+            };
+            out.set_special(h);
+            return Ok(());
+        }
+        // num1 finite / [-]Inf: no underflow in numeric, return zero.
+        make_result_into(CONST_ZERO, out);
+        return Ok(());
+    }
+
+    let arg1 = num1.view();
+    let arg2 = num2.view();
+    let rscale = select_div_scale(arg1, arg2);
+    let result = div_var(arg1, arg2, rscale, true, true)?;
+    if !make_result_into(result.view(), out) {
+        return Err(crate::numeric_overflow_error().into());
+    }
+    Ok(())
+}
+
+pub fn numeric_div_common(num1: Num<'_>, num2: Num<'_>) -> PgResult<NumericImage> {
+    let mut out = NumericImage::empty();
+    numeric_div_into(num1, num2, &mut out)?;
+    Ok(out)
+}
+
+pub fn numeric_div_trunc_common(num1: Num<'_>, num2: Num<'_>) -> PgResult<NumericImage> {
+    if num1.is_special() || num2.is_special() {
+        if num1.is_nan() || num2.is_nan() {
+            return Ok(NumericImage::nan());
+        }
+        if num1.is_pinf() {
+            if num2.is_special() {
+                return Ok(NumericImage::nan());
+            }
+            return match numeric_sign_internal(num2) {
+                0 => Err(division_by_zero_error().into()),
+                1 => Ok(NumericImage::pinf()),
+                _ => Ok(NumericImage::ninf()),
+            };
+        }
+        if num1.is_ninf() {
+            if num2.is_special() {
+                return Ok(NumericImage::nan());
+            }
+            return match numeric_sign_internal(num2) {
+                0 => Err(division_by_zero_error().into()),
+                1 => Ok(NumericImage::ninf()),
+                _ => Ok(NumericImage::pinf()),
+            };
+        }
+        return make_result(CONST_ZERO);
+    }
+
+    let result = div_var(num1.view(), num2.view(), 0, false, true)?;
+    make_result(result.view())
+}
+
+pub fn cmp_numerics(num1: Num<'_>, num2: Num<'_>) -> i32 {
+    if num1.is_special() {
+        if num1.is_nan() {
+            if num2.is_nan() {
+                0
+            } else {
+                1
+            }
+        } else if num1.is_pinf() {
+            if num2.is_nan() {
+                -1
+            } else if num2.is_pinf() {
+                0
+            } else {
+                1
+            }
+        } else if num2.is_ninf() {
+            0
+        } else {
+            -1
+        }
+    } else if num2.is_special() {
+        if num2.is_ninf() {
+            1
+        } else {
+            -1
+        }
+    } else {
+        cmp_var_common(
+            num1.digits(),
+            num1.ndigits(),
+            num1.weight(),
+            num1.sign(),
+            num2.digits(),
+            num2.ndigits(),
+            num2.weight(),
+            num2.sign(),
+        )
+    }
+}
+
+#[inline]
+pub fn numeric_eq(num1: Num<'_>, num2: Num<'_>) -> bool {
+    cmp_numerics(num1, num2) == 0
+}
+
+#[inline]
+pub fn numeric_ne(num1: Num<'_>, num2: Num<'_>) -> bool {
+    cmp_numerics(num1, num2) != 0
+}
+
+#[inline]
+pub fn numeric_gt(num1: Num<'_>, num2: Num<'_>) -> bool {
+    cmp_numerics(num1, num2) > 0
+}
+
+#[inline]
+pub fn numeric_ge(num1: Num<'_>, num2: Num<'_>) -> bool {
+    cmp_numerics(num1, num2) >= 0
+}
+
+#[inline]
+pub fn numeric_lt(num1: Num<'_>, num2: Num<'_>) -> bool {
+    cmp_numerics(num1, num2) < 0
+}
+
+#[inline]
+pub fn numeric_le(num1: Num<'_>, num2: Num<'_>) -> bool {
+    cmp_numerics(num1, num2) <= 0
+}
+
+/// The `numeric(num, typmod)` length coercion.
+pub fn numeric_apply_typmod(num: Num<'_>, typmod: i32) -> PgResult<NumericImage> {
+    if num.is_special() {
+        apply_typmod_special(num, typmod, None)?;
+        return Ok(NumericImage::from_num(num));
+    }
+
+    if !is_valid_numeric_typmod(typmod) {
+        return Ok(NumericImage::from_num(num));
+    }
+
+    let precision = numeric_typmod_precision(typmod);
+    let scale = numeric_typmod_scale(typmod);
+    let maxdigits = precision - scale;
+    let dscale = scale.max(0);
+
+    // In-bounds and no rounding needed: copy and patch the dscale field,
+    // unless a larger dscale forces abandoning the short header.
+    let ddigits = (num.weight() + 1) * DEC_DIGITS;
+    if ddigits <= maxdigits
+        && scale >= num.dscale()
+        && (numeric_can_be_short(dscale, num.weight()) || !num.is_short())
+    {
+        let mut img = NumericImage::from_num(num);
+        let hdr_word = num.header();
+        let new_hdr = if num.is_short() {
+            (hdr_word & !NUMERIC_SHORT_DSCALE_MASK) | ((dscale as u16) << NUMERIC_SHORT_DSCALE_SHIFT)
+        } else {
+            num.sign() | (dscale as u16 & NUMERIC_DSCALE_MASK)
+        };
+        img.set_header_word(new_hdr);
+        return Ok(img);
+    }
+
+    let mut var = NumericVar::from_view(num.view());
+    apply_typmod(&mut var, typmod, None)?;
+    make_result(var.view())
+}
+
+pub fn numeric_round_common(num: Num<'_>, scale: i32) -> PgResult<NumericImage> {
+    if num.is_special() {
+        return Ok(NumericImage::from_num(num));
+    }
+
+    let scale = scale
+        .max(-(NUMERIC_WEIGHT_MAX + 1) * DEC_DIGITS - 1)
+        .min(NUMERIC_DSCALE_MAX);
+
+    let mut arg = NumericVar::from_view(num.view());
+    arg.round(scale);
+    if scale < 0 {
+        arg.dscale = 0;
+    }
+    make_result(arg.view())
+}
+
+pub fn numeric_trunc_common(num: Num<'_>, scale: i32) -> PgResult<NumericImage> {
+    if num.is_special() {
+        return Ok(NumericImage::from_num(num));
+    }
+
+    let scale = scale
+        .max(-(NUMERIC_WEIGHT_MAX + 1) * DEC_DIGITS)
+        .min(NUMERIC_DSCALE_MAX);
+
+    let mut arg = NumericVar::from_view(num.view());
+    arg.trunc(scale);
+    if scale < 0 {
+        arg.dscale = 0;
+    }
+    make_result(arg.view())
+}
+
+pub fn numeric_abs(num: Num<'_>) -> NumericImage {
+    let mut res = NumericImage::from_num(num);
+    let h = num.header();
+    if num.is_short() {
+        res.set_header_word(h & !NUMERIC_SHORT_SIGN_MASK);
+    } else if num.is_special() {
+        // -Inf becomes Inf; NaN unaffected.
+        res.set_header_word(h & !NUMERIC_INF_SIGN_MASK);
+    } else {
+        res.set_header_word(NUMERIC_POS | num.dscale() as u16);
+    }
+    res
+}
+
+pub fn numeric_uminus(num: Num<'_>) -> NumericImage {
+    let mut res = NumericImage::from_num(num);
+    let h = num.header();
+    if num.is_special() {
+        if !num.is_nan() {
+            res.set_header_word(h ^ NUMERIC_INF_SIGN_MASK);
+        }
+    } else if num.ndigits() != 0 {
+        if num.is_short() {
+            res.set_header_word(h ^ NUMERIC_SHORT_SIGN_MASK);
+        } else if num.sign() == NUMERIC_POS {
+            res.set_header_word(NUMERIC_NEG | num.dscale() as u16);
+        } else {
+            res.set_header_word(NUMERIC_POS | num.dscale() as u16);
+        }
+    }
+    res
+}
+
+pub fn numeric_uplus(num: Num<'_>) -> NumericImage {
+    NumericImage::from_num(num)
+}
+
+#[cold]
+#[inline(never)]
+fn cannot_convert_special(is_nan: bool, target: &str) -> PgError {
+    PgError::error(format!(
+        "cannot convert {} to {target}",
+        if is_nan { "NaN" } else { "infinity" }
+    ))
+    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+}
+
+#[cold]
+#[inline(never)]
+fn out_of_range(target: &str) -> PgError {
+    PgError::error(format!("{target} out of range"))
+        .with_sqlstate(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
+}
+
+pub fn int64_to_numeric(val: i64) -> NumericImage {
+    let mut var = NumericVar::new();
+    set_var_from_int64(val, &mut var);
+    make_result_opt_error(var.view()).expect("int64 always fits numeric")
+}
+
+pub fn int4_numeric(val: i32) -> NumericImage {
+    int64_to_numeric(val as i64)
+}
+
+pub fn int8_numeric(val: i64) -> NumericImage {
+    int64_to_numeric(val)
+}
+
+pub fn int2_numeric(val: i16) -> NumericImage {
+    int64_to_numeric(val as i64)
+}
+
+pub fn numeric_int4(num: Num<'_>) -> PgResult<i32> {
+    if num.is_special() {
+        return Err(cannot_convert_special(num.is_nan(), "integer").into());
+    }
+    var_to_int32(num.view()).ok_or_else(|| out_of_range("integer").into())
+}
+
+pub fn numeric_int8(num: Num<'_>) -> PgResult<i64> {
+    if num.is_special() {
+        return Err(cannot_convert_special(num.is_nan(), "bigint").into());
+    }
+    var_to_int64(num.view()).ok_or_else(|| out_of_range("bigint").into())
+}
+
+pub fn numeric_int2(num: Num<'_>) -> PgResult<i16> {
+    if num.is_special() {
+        return Err(cannot_convert_special(num.is_nan(), "smallint").into());
+    }
+    let val = var_to_int64(num.view()).ok_or_else(|| out_of_range("smallint"))?;
+    if val < i16::MIN as i64 || val > i16::MAX as i64 {
+        return Err(out_of_range("smallint").into());
+    }
+    Ok(val as i16)
+}
+
+// %.*g significant-digit formatting (C's snprintf("%.*g", prec, val) for
+// finite nonzero values): Rust's {:.*e} rounds correctly to prec digits.
+fn format_g(val: f64, prec: usize, out: &mut Vec<u8>) {
+    debug_assert!(val.is_finite());
+    if val == 0.0 {
+        out.push(b'0');
+        return;
+    }
+    let sci = format!("{:.*e}", prec - 1, val);
+    let (mant, exp) = sci.split_once('e').expect("{:e} always emits an exponent");
+    let exp: i32 = exp.parse().expect("{:e} exponent is an integer");
+    let mut digits: Vec<u8> = mant.bytes().filter(|b| b.is_ascii_digit()).collect();
+    let neg = mant.starts_with('-');
+    while digits.len() > 1 && digits[digits.len() - 1] == b'0' {
+        digits.pop();
+    }
+
+    if neg {
+        out.push(b'-');
+    }
+    if exp < -4 || exp >= prec as i32 {
+        out.push(digits[0]);
+        if digits.len() > 1 {
+            out.push(b'.');
+            out.extend_from_slice(&digits[1..]);
+        }
+        out.push(b'e');
+        out.push(if exp < 0 { b'-' } else { b'+' });
+        let e = exp.unsigned_abs();
+        if e < 10 {
+            out.push(b'0');
+        }
+        out.extend_from_slice(e.to_string().as_bytes());
+    } else if exp < 0 {
+        out.extend_from_slice(b"0.");
+        for _ in 0..(-exp - 1) {
+            out.push(b'0');
+        }
+        out.extend_from_slice(&digits);
+    } else {
+        let ip = (exp as usize) + 1;
+        if digits.len() <= ip {
+            out.extend_from_slice(&digits);
+            for _ in 0..ip - digits.len() {
+                out.push(b'0');
+            }
+        } else {
+            out.extend_from_slice(&digits[..ip]);
+            out.push(b'.');
+            out.extend_from_slice(&digits[ip..]);
+        }
+    }
+}
+
+fn float_to_numeric(val: f64, prec: usize) -> PgResult<NumericImage> {
+    if val.is_nan() {
+        return Ok(NumericImage::nan());
+    }
+    if val.is_infinite() {
+        return Ok(if val < 0.0 {
+            NumericImage::ninf()
+        } else {
+            NumericImage::pinf()
+        });
+    }
+
+    let mut buf = Vec::with_capacity(32);
+    format_g(val, prec, &mut buf);
+    let s = core::str::from_utf8(&buf).expect("format_g emits ASCII");
+    match crate::io::numeric_in(s, -1, None)? {
+        Some(img) => Ok(img),
+        None => unreachable!("numeric_in on %g output cannot soft-fail"),
+    }
+}
+
+pub fn float8_numeric(val: f64) -> PgResult<NumericImage> {
+    float_to_numeric(val, 15)
+}
+
+pub fn float4_numeric(val: f32) -> PgResult<NumericImage> {
+    float_to_numeric(val as f64, 6)
+}
+
+pub fn numeric_float8(num: Num<'_>) -> PgResult<f64> {
+    if num.is_special() {
+        return Ok(if num.is_pinf() {
+            f64::INFINITY
+        } else if num.is_ninf() {
+            f64::NEG_INFINITY
+        } else {
+            f64::NAN
+        });
+    }
+    let mut buf = Vec::with_capacity(32);
+    get_str_from_var(num.view(), &mut buf);
+    let s = core::str::from_utf8(&buf).expect("numeric text is ASCII");
+    adt_float::float8in(s, None)
+}
+
+pub fn numeric_float4(num: Num<'_>) -> PgResult<f32> {
+    if num.is_special() {
+        return Ok(if num.is_pinf() {
+            f32::INFINITY
+        } else if num.is_ninf() {
+            f32::NEG_INFINITY
+        } else {
+            f32::NAN
+        });
+    }
+    let mut buf = Vec::with_capacity(32);
+    get_str_from_var(num.view(), &mut buf);
+    let s = core::str::from_utf8(&buf).expect("numeric text is ASCII");
+    adt_float::float4in(s, None)
+}
+
+pub fn numeric_avg_div(sum: Num<'_>, count: i64) -> PgResult<NumericImage> {
+    let count_img = int64_to_numeric(count);
+    numeric_div_common(sum, count_img.num())
+}
+
+macro_rules! unported {
+    ($($name:ident),* $(,)?) => {$(
+        pub fn $name() -> ! {
+            panic!(concat!("adt_numeric: ", stringify!($name), " not ported (deferred)"))
+        }
+    )*};
+}
+
+// Deferred loud (M3+ / other lanes): transcendentals, mod/gcd family, wire
+// format, sortsupport/hash, to_char support, selectivity.
+unported! {
+    numeric_sqrt_unported,
+    numeric_exp_unported,
+    numeric_ln_unported,
+    numeric_log_unported,
+    numeric_power_unported,
+    numeric_mod_unported,
+    numeric_gcd_unported,
+    numeric_lcm_unported,
+    numeric_fac_unported,
+    numeric_recv_unported,
+    numeric_send_unported,
+    numeric_sortsupport_unported,
+    hash_numeric_unported,
+    numeric_out_sci_unported,
+    width_bucket_numeric_unported,
+    in_range_numeric_unported,
+    generate_series_numeric_unported,
+    numeric_stddev_unported,
+}
+
+pub fn numeric_is_nan(num: Num<'_>) -> bool {
+    num.is_nan()
+}
+
+pub fn numeric_is_inf(num: Num<'_>) -> bool {
+    num.is_inf()
+}
+
+pub fn numeric_maximum_size(typmod: i32) -> i32 {
+    if !is_valid_numeric_typmod(typmod) {
+        return -1;
+    }
+    let precision = numeric_typmod_precision(typmod);
+    let numeric_digits = (precision + 2 * (DEC_DIGITS - 1)) / DEC_DIGITS;
+    crate::NUMERIC_HDRSZ as i32 + numeric_digits * 2
+}
+
+pub fn int64_div_fast_to_numeric(val1: i64, log10val2: i32) -> PgResult<NumericImage> {
+    let rscale = if log10val2 < 0 { 0 } else { log10val2 };
+
+    let mut w = log10val2 / DEC_DIGITS;
+    let mut m = log10val2 % DEC_DIGITS;
+    if m < 0 {
+        m += DEC_DIGITS;
+        w -= 1;
+    }
+
+    let mut result;
+    if m > 0 {
+        const POW10: [i64; 4] = [1, 10, 100, 1000];
+        let factor = POW10[(DEC_DIGITS - m) as usize];
+        match val1.checked_mul(factor) {
+            Some(new_val1) => {
+                result = int64_to_var(new_val1);
+            }
+            None => {
+                let tmp = val1 as i128 * factor as i128;
+                result = NumericVar::new();
+                crate::var::int128_to_var(tmp, &mut result);
+            }
+        }
+        w += 1;
+    } else {
+        result = int64_to_var(val1);
+    }
+
+    result.weight -= w;
+    result.dscale = rscale;
+
+    make_result(result.view())
+}

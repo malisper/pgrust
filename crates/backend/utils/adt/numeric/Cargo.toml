@@ -1,0 +1,13 @@
+[package]
+name = "adt_numeric"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "adt_numeric"
+path = "src/lib.rs"
+
+[dependencies]
+adt_float = { path = "../float" }
+types_error = { path = "../../../../_support/types/types_error" }
