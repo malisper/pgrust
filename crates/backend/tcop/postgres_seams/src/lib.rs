@@ -35,3 +35,19 @@ seam_core::seam!(
     // ShowUsage(title) (postgres.c).
     pub fn show_usage(title: &str) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    // set_debug_options(debug_flag, ctx, source-fixed-ARGV) (postgres.c);
+    // ctx u8 = GucContext discriminant.
+    pub fn set_debug_options(debug_flag: i32, gucctx: u8) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    // set_plan_disabling_options(arg, ctx, ARGV) (postgres.c).
+    pub fn set_plan_disabling_options(arg: &str, gucctx: u8) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    // get_stats_option_name(optarg) (postgres.c); None = invalid.
+    pub fn get_stats_option_name(arg: &str) -> Option<&'static str>
+);

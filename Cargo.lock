@@ -745,6 +745,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "freespace_seams"
+version = "0.1.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_rel",
+]
+
+[[package]]
 name = "funcapi"
 version = "0.1.0"
 dependencies = [
@@ -805,6 +815,10 @@ dependencies = [
  "types_scan",
  "types_tuple",
 ]
+
+[[package]]
+name = "gram_core"
+version = "0.1.0"
 
 [[package]]
 name = "guc"
@@ -1979,6 +1993,7 @@ dependencies = [
  "pg_prng",
  "pmchild_seams",
  "pmsignal",
+ "postgres_seams",
  "postinit",
  "pqcomm_seams",
  "syslogger_seams",
@@ -1986,6 +2001,7 @@ dependencies = [
  "transam_xlog",
  "transam_xlog_seams",
  "types_core",
+ "types_dest",
  "types_error",
  "types_guc",
  "types_startup",
