@@ -320,10 +320,15 @@ unsafe fn page_collect_tuples<const ALL_VISIBLE: bool, const CHECK_SERIALIZABLE:
 ) -> PgResult<u32> {
     let mut ntup: u32 = 0;
 
-    for lineoff in FirstOffsetNumber..=lines {
+    // C's `for (lineoff = FirstOffsetNumber; lineoff <= lines; lineoff++)`:
+    // a manual while — RangeInclusive drags an exhausted-flag (cset/cinc)
+    // through the per-tuple loop control.
+    let mut lineoff = FirstOffsetNumber;
+    while lineoff <= lines {
         // SAFETY: lineoff <= lines <= MaxHeapTuplesPerPage (fn contract).
         let lpp = unsafe { page.item_id_unchecked(lineoff) };
         if !lpp.is_normal() {
+            lineoff += 1;
             continue;
         }
 
@@ -362,6 +367,7 @@ unsafe fn page_collect_tuples<const ALL_VISIBLE: bool, const CHECK_SERIALIZABLE:
             unsafe { *vistuples.get_unchecked_mut(ntup as usize) = lineoff };
             ntup += 1;
         }
+        lineoff += 1;
     }
 
     debug_assert!(ntup as usize <= MaxHeapTuplesPerPage);
@@ -750,6 +756,20 @@ fn heapgettup<'mcx>(scan: &mut HeapScanDescData<'mcx>, dir: ScanDirection) -> Pg
     Ok(())
 }
 
+// Advance the pagemode scan to its next page (read + collect); false = scan
+// exhausted. Out of line: keeps the page-advance arm's register pressure off
+// the per-tuple walk's frame.
+#[inline(never)]
+fn pagemode_next_page(scan: &mut HeapScanDescData<'_>, dir: ScanDirection) -> PgResult<bool> {
+    heap_fetch_next_buffer(scan, dir)?;
+    if scan.rs_cbuf.is_none() {
+        return Ok(false);
+    }
+    debug_assert!(scan.rs_cbuf.as_ref().unwrap().block_number() == scan.rs_cblock);
+    heap_prepare_pagescan(scan)?;
+    Ok(true)
+}
+
 // Also #[inline(never)]: the call boundary between the rs_ctup narrow stores
 // here and heap_getnextslot's wide reload for the slot store lets the stores
 // retire — fusing them puts a failed store-to-load forward (strh trio → ldr d)
@@ -775,15 +795,9 @@ fn heapgettup_pagemode<'mcx>(scan: &mut HeapScanDescData<'mcx>, dir: ScanDirecti
 
     loop {
         if !continue_page {
-            heap_fetch_next_buffer(scan, dir)?;
-            if scan.rs_cbuf.is_none() {
+            if !pagemode_next_page(scan, dir)? {
                 break;
             }
-            debug_assert!(
-                scan.rs_cbuf.as_ref().unwrap().block_number() == scan.rs_cblock
-            );
-
-            heap_prepare_pagescan(scan)?;
             linesleft = scan.rs_ntuples as i32;
             lineindex = if ScanDirectionIsForward(dir) { 0 } else { linesleft - 1 };
         }
@@ -1026,11 +1040,16 @@ fn store_ctup_into_slot<'mcx>(
     scan: &mut HeapScanDescData<'mcx>,
     slot: &mut SlotData<'mcx>,
 ) {
-    let t = scan.rs_ctup.as_ref().expect("no current tuple");
-    let pin = scan
-        .rs_cbuf
-        .as_ref()
-        .expect("returned tuple without a pinned buffer");
+    debug_assert!(scan.rs_ctup.is_some() && scan.rs_cbuf.is_some());
+    // SAFETY: caller checked rs_ctup is Some; the struct invariant ties a
+    // Some rs_ctup to a pinned rs_cbuf (C: rs_ctup.t_data != NULL implies
+    // rs_cbuf is valid).
+    let (t, pin) = unsafe {
+        (
+            scan.rs_ctup.as_ref().unwrap_unchecked(),
+            scan.rs_cbuf.as_ref().unwrap_unchecked(),
+        )
+    };
     // SAFETY: same pinned image as rs_ctup; ExecStoreBufferHeapTuple takes its own pin (C contract).
     let tuple = unsafe {
         HeapTupleData::from_raw_parts(t.header_ptr(), t.t_len, t.t_self, t.t_tableOid)

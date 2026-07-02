@@ -182,24 +182,18 @@ seam_core::seam!(
 pub mod pin;
 pub use pin::{BufferPin, ContentLockGuard};
 
-// C's `extern char *BufferBlocks` header global: published once by
-// BufferManagerShmemInit so BufferGetPage stays a header inline (base +
-// (buf-1)*BLCKSZ) instead of a per-call seam hop on every per-tuple path.
-// Test fakes that serve pages through the buffer_get_page seam simply never
-// publish, and BufferPin::page() falls back to the seam.
+// C's `extern char *BufferBlocks` header global: keeps BufferGetPage a header
+// inline instead of a per-tuple seam hop.
 static BUFFER_BLOCKS: core::sync::atomic::AtomicPtr<u8> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
-/// Publish the shared buffer pool base (bufmgr init; C: BufferBlocks).
-/// The pool must span `NBuffers * BLCKSZ` bytes for the process lifetime.
+/// Publish the pool base (spans `NBuffers * BLCKSZ` for the process lifetime).
 pub fn publish_buffer_blocks(base: *mut u8) {
     BUFFER_BLOCKS.store(base, core::sync::atomic::Ordering::Release);
 }
 
 #[inline]
 pub(crate) fn buffer_blocks() -> *mut u8 {
-    // Relaxed per bufmgr's pool globals: published before any backend
-    // touches buffers (thread spawn synchronizes).
     BUFFER_BLOCKS.load(core::sync::atomic::Ordering::Relaxed)
 }
 

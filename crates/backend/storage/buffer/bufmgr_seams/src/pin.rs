@@ -36,19 +36,16 @@ impl BufferPin {
     #[inline]
     pub fn page(&self) -> PageRef<'_> {
         let base = crate::buffer_blocks();
+        // SAFETY: the pin held for the borrow keeps the page live and the id
+        // in 1..=NBuffers; published pool = C's inline BufferGetPage,
+        // unpublished (test fakes) = the seam. Locking is the caller's part.
         if !base.is_null() {
-            // C's header-inline BufferGetPage: BufferBlocks + (buf-1)*BLCKSZ.
-            // SAFETY: the pin held for the borrow keeps the page live and the
-            // buffer id valid (1..=NBuffers); the published pool spans
-            // NBuffers*BLCKSZ. Locking is the caller's C contract.
             unsafe {
                 PageRef::from_raw(core::ptr::NonNull::new_unchecked(
                     base.add((self.buffer as usize - 1) * types_core::BLCKSZ),
                 ))
             }
         } else {
-            // SAFETY: as above; unpublished pool (test fakes) serves pages
-            // through the seam.
             unsafe { PageRef::from_raw(buffer_get_page::call(self.buffer)) }
         }
     }

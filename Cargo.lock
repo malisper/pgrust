@@ -2154,6 +2154,7 @@ dependencies = [
 name = "parse_collate"
 version = "0.0.0"
 dependencies = [
+ "datum",
  "elog",
  "lsyscache",
  "mbutils",
@@ -2473,6 +2474,7 @@ version = "0.1.0"
 dependencies = [
  "backend_status_seams",
  "clauses",
+ "clauses_seams",
  "datum",
  "guc_tables",
  "init_small",
@@ -4294,6 +4296,27 @@ dependencies = [
 [[package]]
 name = "variable"
 version = "0.0.0"
+dependencies = [
+ "adt_acl",
+ "adt_datetime",
+ "backend_status",
+ "elog",
+ "guc",
+ "guc_tables",
+ "init_small",
+ "mbutils",
+ "mcx",
+ "miscinit",
+ "snapmgr",
+ "superuser",
+ "syscache_seams",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "varlena",
+ "xact",
+]
 
 [[package]]
 name = "varlena"

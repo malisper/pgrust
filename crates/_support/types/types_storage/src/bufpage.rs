@@ -247,15 +247,10 @@ impl<'a> PageRef<'a> {
         unsafe { self.item_id_unchecked(offnum) }
     }
 
-    /// C's 2-insn `PageGetItemId` (per-tuple scan kernel).
-    ///
+    /// C's 2-insn `PageGetItemId`.
     /// # Safety
-    /// `offnum >= 1` and `SizeOfPageHeaderData + offnum * 4 <= BLCKSZ`.
-    /// The intended proof is ONE check per page, not per tuple: any
-    /// `offnum <= max_offset_number()` qualifies once the caller has verified
-    /// `pd_lower <= BLCKSZ` (equivalently `max_offset_number() <=
-    /// MaxOffsetNumber`) for the pinned page — heapam hoists that check to
-    /// page arrival (its `MaxHeapTuplesPerPage` assert implies it).
+    /// `offnum >= 1` and `SizeOfPageHeaderData + offnum * 4 <= BLCKSZ`: any
+    /// `offnum <= max_offset_number()` after ONE per-page `pd_lower` check.
     #[inline]
     pub unsafe fn item_id_unchecked(&self, offnum: OffsetNumber) -> ItemIdData {
         let offnum = offnum as usize;
@@ -278,15 +273,10 @@ impl<'a> PageRef<'a> {
         unsafe { self.item_raw_unchecked(id) }
     }
 
-    /// C's `PageGetItem` shape: no per-tuple bounds re-check.
-    ///
+    /// C's `PageGetItem`: no per-tuple bounds re-check.
     /// # Safety
-    /// `id` is a line pointer read from THIS page whose item lies within the
-    /// image (`lp_off >= SizeOfPageHeaderData`, `lp_off + lp_len <= BLCKSZ`).
-    /// That is the heap page invariant every writer (`PageAddItemExtended`)
-    /// maintains and C reads without checking; scan paths may rely on it for
-    /// LP_NORMAL entries exactly as heapam.c does (offsets from rs_vistuples
-    /// were collected under the content lock with `is_normal` checked).
+    /// `id` came from THIS page with its item within the image — the page
+    /// invariant every writer keeps and C reads unchecked (LP_NORMAL).
     #[inline]
     pub unsafe fn item_raw_unchecked(&self, id: ItemIdData) -> (*const u8, u32) {
         let off = id.lp_off() as usize;
