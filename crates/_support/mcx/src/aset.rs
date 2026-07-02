@@ -1,5 +1,4 @@
-// aset.c block-pooling backend, minus the per-chunk header (the Allocator gets
-// context + Layout). Pooled chunks are 8-aligned; is_dedicated is layout-pure.
+// aset.c block-pooling backend, minus the per-chunk header (the Allocator gets context + Layout); is_dedicated is layout-pure.
 
 use core::alloc::Layout;
 use core::ptr::NonNull;
@@ -80,13 +79,11 @@ mod guard {
     }
 }
 
-// ALLOC_MINBITS / ALLOCSET_NUM_FREELISTS / ALLOC_CHUNK_LIMIT (aset.c).
 const ALLOC_MINBITS: u32 = 3;
 const NUM_FREELISTS: usize = 11;
 const ALLOC_CHUNK_LIMIT: usize = 1 << (NUM_FREELISTS - 1 + ALLOC_MINBITS as usize);
-const POOL_MAX_ALIGN: usize = 8;
+pub(crate) const POOL_MAX_ALIGN: usize = 8;
 
-// ALLOCSET_DEFAULT_INITSIZE / ALLOCSET_DEFAULT_MAXSIZE (memutils.h).
 pub(crate) const INIT_BLOCK_SIZE: usize = 8 * 1024;
 pub(crate) const MAX_BLOCK_SIZE: usize = 8 * 1024 * 1024;
 
@@ -114,10 +111,10 @@ pub fn alloc_stats() -> (u64, u64) {
 
 const MAX_FREE_CONTEXTS: usize = 100;
 
-struct Block {
-    ptr: NonNull<u8>,
-    size: usize,
-    used: usize,
+pub(crate) struct Block {
+    pub(crate) ptr: NonNull<u8>,
+    pub(crate) size: usize,
+    pub(crate) used: usize,
 }
 
 impl Block {
@@ -125,16 +122,15 @@ impl Block {
         Layout::from_size_align(size, POOL_MAX_ALIGN).unwrap()
     }
 
-    fn alloc(size: usize) -> Result<Block, AllocError> {
+    pub(crate) fn alloc(size: usize) -> Result<Block, AllocError> {
         #[cfg(feature = "aset-stats")]
         stats::BLOCK_MALLOCS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let ptr = Global.allocate(Block::layout(size))?;
         Ok(Block { ptr: ptr.cast(), size, used: 0 })
     }
 
-    /// # Safety
-    /// At most once per block, with no chunk in it still in use.
-    unsafe fn free(self) {
+    /// # Safety: at most once per block, with no chunk in it still in use.
+    pub(crate) unsafe fn free(self) {
         Global.deallocate(self.ptr, Block::layout(self.size));
     }
 }
@@ -190,7 +186,7 @@ impl KeeperPool {
 }
 
 #[inline]
-fn take_recycled_blocks() -> alloc::vec::Vec<Block> {
+pub(crate) fn take_recycled_blocks() -> alloc::vec::Vec<Block> {
     #[cfg(test)]
     {
         alloc::vec::Vec::new()
@@ -202,7 +198,7 @@ fn take_recycled_blocks() -> alloc::vec::Vec<Block> {
 }
 
 #[inline]
-fn recycle_blocks(blocks: alloc::vec::Vec<Block>) {
+pub(crate) fn recycle_blocks(blocks: alloc::vec::Vec<Block>) {
     #[cfg(test)]
     {
         for b in blocks {
@@ -249,8 +245,7 @@ pub(crate) struct AllocSet {
     freelist: [Option<NonNull<u8>>; NUM_FREELISTS],
     next_block_size: usize,
     mem_allocated: usize,
-    // Cached bump window over the active block (C's freeptr/endptr); null until a
-    // block exists. Invariant: cur_ptr <= cur_end, in the active block.
+    // Cached bump window over the active block (C's freeptr/endptr); null until a block exists.
     cur_ptr: *mut u8,
     cur_end: *mut u8,
 }
@@ -319,10 +314,11 @@ impl AllocSet {
         let avail = self.cur_end as usize - self.cur_ptr as usize;
         if csize <= avail {
             let p = self.cur_ptr;
-            // SAFETY: csize <= avail keeps the bump within the active block.
-            self.cur_ptr = unsafe { p.add(csize) };
-            // SAFETY: p is inside a live block, hence non-null.
-            return Ok(NonNull::slice_from_raw_parts(unsafe { NonNull::new_unchecked(p) }, csize));
+            // SAFETY: csize <= avail keeps the bump within the active block; p non-null there.
+            unsafe {
+                self.cur_ptr = p.add(csize);
+                return Ok(NonNull::slice_from_raw_parts(NonNull::new_unchecked(p), csize));
+            }
         }
 
         self.alloc_new_block(csize)

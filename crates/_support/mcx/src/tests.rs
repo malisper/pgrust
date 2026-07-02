@@ -761,8 +761,7 @@ mod bumpdrop {
             old_real_frees - new_real_frees,
         );
 
-        // Pollution-tolerant: parallel tests also free on Asets; exact counts
-        // need --test-threads=1.
+        // Pollution-tolerant: parallel tests also free on Asets.
         let expected_old = (tuples_per_batch * 2 * nbatch) as u64;
         assert!(
             old_real_frees >= expected_old,
@@ -924,39 +923,27 @@ mod owned {
 
 mod bump_pool {
     use super::*;
-    use core::cell::UnsafeCell;
 
+    // Keeper retention across reset (the pool itself is covered by keeper_pool_caps_and_recycles).
     #[test]
-    fn bump_pool_recycles_reset_arena() {
-        let pool = BumpPool { stack: UnsafeCell::new(alloc::vec::Vec::new()) };
-
-        let b = bump_take_from(&pool);
-        b.alloc_slice_fill_copy(1000, 7u8);
-        let cap_before = {
-            let mut b = b;
-            b.reset();
-            let c = b.chunk_capacity();
-            b.alloc_slice_fill_copy(1000, 9u8);
-            bump_give_to(&pool, b);
-            c
+    fn bump_reset_retains_and_reuses_keeper_block() {
+        let mut ctx = MemoryContext::new_bump("per-tuple");
+        let first = {
+            let mcx = ctx.mcx();
+            let v = vec_with_capacity_in::<u8>(mcx, 64).unwrap();
+            v.as_ptr() as usize
         };
-        assert_eq!(pool.with(|s| s.len()), 1, "arena parked");
-
-        let b2 = bump_take_from(&pool);
-        assert_eq!(pool.with(|s| s.len()), 0);
-        assert_eq!(b2.chunk_capacity(), cap_before, "same retained chunk, reset");
-
-        bump_give_to(&pool, b2);
-        for _ in 0..(BUMP_POOL_MAX + 3) {
-            bump_give_to(&pool, bumpalo::Bump::new());
-        }
-        assert!(pool.with(|s| s.len()) <= BUMP_POOL_MAX);
-
-        let big = bumpalo::Bump::new();
-        big.alloc_slice_fill_copy(BUMP_POOL_MAX_RETAINED + 4096, 1u8);
-        pool.with(|s| s.clear());
-        bump_give_to(&pool, big);
-        assert_eq!(pool.with(|s| s.len()), 0, "oversized arena not parked");
+        let footprint = ctx.stats().arena_footprint;
+        assert!(footprint > 0);
+        ctx.reset();
+        assert_eq!(ctx.stats().arena_footprint, footprint, "keeper retained over reset");
+        let again = {
+            let mcx = ctx.mcx();
+            let v = vec_with_capacity_in::<u8>(mcx, 64).unwrap();
+            v.as_ptr() as usize
+        };
+        assert_eq!(first, again, "first post-reset chunk starts the retained keeper");
+        assert_eq!(ctx.stats().arena_footprint, footprint, "no new block malloc'd");
     }
 }
 
@@ -976,7 +963,6 @@ mod acct_pool {
             arena_footprint: Cell::new(0),
             arena_nblocks: Cell::new(0),
             is_bump: false,
-            uncharge_on_free: Cell::new(true),
             parent: None,
             children: RefCell::new(alloc::vec::Vec::new()),
         }
