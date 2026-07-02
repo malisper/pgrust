@@ -16,15 +16,14 @@ use ::mcx::PgVec;
 
 use crate::unported_phase2;
 
-/// _bt_preprocess_keys. `input_keys` is scan->keyData (mutated in place by
-/// strategy fixup, as in C); outputs land in so->keyData.
+/// _bt_preprocess_keys; `input_keys` (scan->keyData) is mutated in place by
+/// strategy fixup, as in C.
 pub(crate) fn bt_preprocess_keys(
     rel: &Relation<'_>,
     so: &mut BTScanOpaqueData<'_>,
     input_keys: &mut [ScanKeyData],
 ) -> PgResult<()> {
     if so.numberOfKeys > 0 {
-        // Only once per btrescan; later calls are no-ops.
         return Ok(());
     }
 
@@ -48,7 +47,6 @@ pub(crate) fn bt_preprocess_keys(
     so.keyData.clear();
     so.keyData.reserve(number_of_keys);
 
-    // Single-key fast path.
     if number_of_keys == 1 {
         if !bt_fix_scankey_strategy(&mut inkeys[0], indoption) {
             so.qual_ok = false;
@@ -64,17 +62,14 @@ pub(crate) fn bt_preprocess_keys(
     let mut new_number_of_keys: usize = 0;
     let mut number_of_equal_cols: usize = 0;
 
-    // xform[i]: index (into inkeys) of the current best key of strategy i+1.
     let mut attno = 1;
     let mut xform: [Option<usize>; BTMaxStrategyNumber as usize] =
         [None; BTMaxStrategyNumber as usize];
     let mut redundant_key_kept = false;
 
-    // Iterates 0..=numberOfKeys; the last pass emits the final attribute.
     let mut i = 0usize;
     loop {
         if i < number_of_keys && !bt_fix_scankey_strategy(&mut inkeys[i], indoption) {
-            // NULL comparison constant can't be matched: give up.
             so.qual_ok = false;
             return Ok(());
         }
@@ -86,7 +81,6 @@ pub(crate) fn bt_preprocess_keys(
                 return Err(keys_out_of_order());
             }
 
-            // "=" makes every other key on the attribute redundant (or the
             // whole qual contradictory).
             if let Some(eq_i) = xform[BTEqualStrategyNumber as usize - 1] {
                 for j in (0..BTMaxStrategyNumber as usize).rev() {
@@ -101,8 +95,7 @@ pub(crate) fn bt_preprocess_keys(
                         return Ok(());
                     }
 
-                    // "eq-arg chk-op chk-arg", e.g. x = 3 vs x < 5 tests 3 < 5.
-                    match compare_scankey_args(rel, inkeys, chk_i, eq_i, chk_i)? {
+                            match compare_scankey_args(rel, inkeys, chk_i, eq_i, chk_i)? {
                         Some(test_result) => {
                             if !test_result {
                                 so.qual_ok = false;
@@ -116,7 +109,6 @@ pub(crate) fn bt_preprocess_keys(
                 number_of_equal_cols += 1;
             }
 
-            // Keep only one of <, <= and one of >, >= when comparable.
             for (strict, loose) in [
                 (BTLessStrategyNumber, BTLessEqualStrategyNumber),
                 (BTGreaterStrategyNumber, BTGreaterEqualStrategyNumber),
@@ -136,7 +128,6 @@ pub(crate) fn bt_preprocess_keys(
                 }
             }
 
-            // Emit the cleaned-up keys; mark them required when all prior
             // attributes had "=".
             for j in (0..BTMaxStrategyNumber as usize).rev() {
                 if let Some(k) = xform[j] {
@@ -161,20 +152,16 @@ pub(crate) fn bt_preprocess_keys(
         match xform[j] {
             None => xform[j] = Some(i),
             Some(prev) => {
-                // Keep only the more restrictive of the two, when comparable.
                 match compare_scankey_args(rel, inkeys, i, i, prev)? {
                     Some(test_result) => {
                         if test_result {
                             xform[j] = Some(i);
                         } else if j == BTEqualStrategyNumber as usize - 1 {
-                            // key == a && key == b, but a != b
                             so.qual_ok = false;
                             return Ok(());
                         }
-                        // else the old key is more restrictive: keep it
                     }
                     None => {
-                        // Not comparable: push the old key out, keep the new.
                         so.keyData.push(inkeys[prev].clone());
                         new_number_of_keys += 1;
                         if number_of_equal_cols == (attno - 1) as usize {
@@ -193,7 +180,6 @@ pub(crate) fn bt_preprocess_keys(
 
     so.numberOfKeys = new_number_of_keys as i32;
 
-    // Leftover redundant inequalities: keep at most one required key per
     // attribute and direction.
     if redundant_key_kept && so.qual_ok {
         bt_unmark_keys(so)?;
@@ -201,9 +187,8 @@ pub(crate) fn bt_preprocess_keys(
     Ok(())
 }
 
-// The phase-2 gate: SAOP arrays, and PG 18's skip-array backfill for omitted
-// prefix attributes (_bt_num_array_keys), both change scan semantics — panic
-// rather than run the scan without them.
+// Phase-2 gate: SAOP arrays and PG 18's skip-array backfill for omitted
+// prefix attributes change scan semantics — panic, never silently degrade.
 fn reject_array_lanes(rel: &Relation<'_>, input_keys: &[ScanKeyData]) {
     let mut max_attno = 0;
     for key in input_keys {
@@ -234,12 +219,10 @@ fn keys_out_of_order() -> Box<PgError> {
     ))
 }
 
-/// _bt_fix_scankey_strategy: fold indoption into sk_flags (commuting DESC
-/// strategies), classify IS [NOT] NULL keys; false = unsatisfiable NULL qual.
+/// _bt_fix_scankey_strategy; false = unsatisfiable NULL qual.
 fn bt_fix_scankey_strategy(skey: &mut ScanKeyData, indoption: &PgVec<'_, i16>) -> bool {
     let addflags = (indoption[skey.sk_attno as usize - 1] as i32) << SK_BT_INDOPTION_SHIFT;
 
-    // All btree operators are treated as strict: a NULL constant can never
     // match. IS NULL / IS NOT NULL keys keep going as =-like keys.
     if skey.sk_flags & SK_ISNULL != 0 {
         debug_assert!(skey.sk_flags & SK_ROW_HEADER == 0);
@@ -288,8 +271,7 @@ fn bt_mark_scankey_required(skey: &mut ScanKeyData) {
 }
 
 /// _bt_compare_scankey_args, scalar arm: is "left op right" true? `None` when
-/// the opfamily can't supply the cross-type comparison.
-/// All three arguments index `keys`; op aliases left or right, as in C.
+/// the opfamily can't supply the cross-type comparison; op aliases an arg.
 fn compare_scankey_args(
     rel: &Relation<'_>,
     keys: &[ScanKeyData],
@@ -301,14 +283,12 @@ fn compare_scankey_args(
     debug_assert!((leftarg.sk_flags | rightarg.sk_flags) & SK_ROW_HEADER == 0);
     debug_assert!((leftarg.sk_flags | rightarg.sk_flags) & SK_SEARCHARRAY == 0);
 
-    // NULL args only arise from IS [NOT] NULL keys; NULL sorts per indoption.
     if (leftarg.sk_flags | rightarg.sk_flags) & SK_ISNULL != 0 {
         let leftnull = leftarg.sk_flags & SK_ISNULL != 0;
         let rightnull = rightarg.sk_flags & SK_ISNULL != 0;
         debug_assert!(!leftnull || leftarg.sk_flags & (SK_SEARCHNULL | SK_SEARCHNOTNULL) != 0);
         debug_assert!(!rightnull || rightarg.sk_flags & (SK_SEARCHNULL | SK_SEARCHNOTNULL) != 0);
 
-        // true > false makes these work for NULLS LAST; flip for NULLS FIRST.
         let mut strat = op.sk_strategy;
         if op.sk_flags & SK_BT_NULLS_FIRST != 0 {
             strat = BTCommuteStrategyNumber(strat);
@@ -328,13 +308,11 @@ fn compare_scankey_args(
 
     let opcintype = rel.rd_opcintype[leftarg.sk_attno as usize - 1];
 
-    // sk_subtype == InvalidOid means the opclass input type (ScanKeyInit hack).
     let lefttype = if leftarg.sk_subtype != 0 { leftarg.sk_subtype } else { opcintype };
     let righttype = if rightarg.sk_subtype != 0 { rightarg.sk_subtype } else { opcintype };
     let optype = if op.sk_subtype != 0 { op.sk_subtype } else { opcintype };
 
     if lefttype == opcintype && righttype == optype {
-        // op's own comparison proc applies directly. Per-scan cold path: the
         // fmgr_info_copy clone stands in for C's persistent &op->sk_func.
         let mut func = op.sk_func.clone();
         let r = function_call2_coll(
@@ -346,7 +324,6 @@ fn compare_scankey_args(
         return Ok(Some(r.as_bool()));
     }
 
-    // Cross-type: find the opfamily operator (un-commute DESC first).
     let mut strat = op.sk_strategy;
     if op.sk_flags & SK_BT_DESC != 0 {
         strat = BTCommuteStrategyNumber(strat);
@@ -374,9 +351,7 @@ fn compare_scankey_args(
     Ok(None) // can't make the comparison
 }
 
-/// _bt_unmark_keys, scalar arm: with redundant inequalities kept, retain at
-/// most one required key per attribute/direction (the first "=" wins), clear
-/// requiredness on the rest and move them after the kept keys.
+/// _bt_unmark_keys, scalar arm: one required key per attribute/direction.
 fn bt_unmark_keys(so: &mut BTScanOpaqueData<'_>) -> PgResult<()> {
     let n = so.numberOfKeys as usize;
     let mcx = *so.keyData.allocator();
@@ -401,7 +376,6 @@ fn bt_unmark_keys(so: &mut BTScanOpaqueData<'_>) -> PgResult<()> {
             have_req_backward = false;
         }
 
-        // Equalities get priority over inequalities.
         if have_req_equals {
             debug_assert!(origkey.sk_flags & SK_SEARCHNULL == 0);
             unmarkikey[i] = true;
@@ -411,7 +385,6 @@ fn bt_unmark_keys(so: &mut BTScanOpaqueData<'_>) -> PgResult<()> {
         if origkey.sk_flags & SK_BT_REQFWD != 0 && origkey.sk_flags & SK_BT_REQBKWD != 0 {
             debug_assert!(origkey.sk_strategy == BTEqualStrategyNumber);
             have_req_equals = true;
-            // Unmark any prior inequality keys on attno after all.
             for item in unmarkikey[firsti..i].iter_mut() {
                 if !*item {
                     *item = true;
@@ -436,9 +409,12 @@ fn bt_unmark_keys(so: &mut BTScanOpaqueData<'_>) -> PgResult<()> {
 
     debug_assert!(nunmark > 0, "only called when a redundant key was kept");
 
-    // Stable partition: kept keys first, unmarked (requiredness cleared) last.
-    let mut kept: PgVec<'_, ScanKeyData> = ::mcx::vec_with_capacity_in(mcx, n - nunmark)?;
-    let mut unmarked: PgVec<'_, ScanKeyData> = ::mcx::vec_with_capacity_in(mcx, nunmark)?;
+    // ScanKeyData is droppy (sk_func.fn_extra): plain reserve, not the
+    // !needs_drop arena helper.
+    let mut kept: PgVec<'_, ScanKeyData> = PgVec::new_in(mcx);
+    kept.reserve(n - nunmark);
+    let mut unmarked: PgVec<'_, ScanKeyData> = PgVec::new_in(mcx);
+    unmarked.reserve(nunmark);
     for (i, key) in so.keyData.iter().enumerate() {
         if !unmarkikey[i] {
             kept.push(key.clone());

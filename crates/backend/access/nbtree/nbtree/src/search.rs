@@ -44,8 +44,6 @@ use crate::{check_for_interrupts, unported_phase2};
 const INVERT_COMPARE_RESULT: fn(i32) -> i32 = |r| if r < 0 { 1 } else { -r };
 const MAXALIGN: fn(usize) -> usize = |l| (l + 7) & !7;
 
-/// BufferGetPage over a raw scan-position buffer.
-///
 /// # Safety
 /// `buf` must be pinned for as long as the returned view is used (BTScanPos
 /// ownership contract), locked per C's access rules.
@@ -63,8 +61,7 @@ pub(crate) fn pos_unpin_if_pinned(pos: &mut BTScanPosData) -> PgResult<()> {
     Ok(())
 }
 
-// The scan-facing slice of IndexScanDescData, split-borrowed once per AM entry
-// point so the whole runtime can hold &mut so alongside the scan fields.
+// IndexScanDescData split-borrowed once per AM entry point.
 pub(crate) struct ScanCtx<'a, 'mcx> {
     pub rel: &'a Relation<'mcx>,
     pub so: &'a mut BTScanOpaqueData<'mcx>,
@@ -76,8 +73,8 @@ pub(crate) struct ScanCtx<'a, 'mcx> {
     pub frame: OrderProcFrame,
 }
 
-// C BTScanInsertData, stack layout: only the live key prefix is initialized
-// (palloc parity — C never zeroes the trailing scankeys).
+// C BTScanInsertData, stack layout; only the live key prefix is initialized
+// (palloc parity).
 pub(crate) struct BtScanInsert {
     pub heapkeyspace: bool,
     pub allequalimage: bool,
@@ -118,14 +115,11 @@ impl BtScanInsert {
     }
 }
 
-/// _bt_search, BT_READ arm: descend to the first leaf the key could be on,
-/// returned pinned + read-locked; `None` for an empty index. The C parent-page
-/// BTStack is built for insertions only — read callers free it unread, so this
-/// arm never builds it (the insert lane adds the stacked variant).
-///
-/// Batched descent (docs/graviton.md §1.5): each level is a serial
-/// lock-couple + binary search; the known lever is overlapping the child page
-/// fetch with the tail of the parent's search. Design note only — needs
+/// _bt_search, BT_READ arm; `None` for an empty index. C divergence: the
+/// parent-page BTStack is insert-only (read callers free it unread) — the
+/// insert lane adds the stacked variant.
+/// Batched-descent lever (docs/graviton.md §1.5), noted not forced: overlap
+/// the child-page fetch with the tail of the parent's binary search; needs
 /// bufmgr prefetch support and a measured win.
 pub(crate) fn bt_search(
     rel: &Relation<'_>,
@@ -136,7 +130,6 @@ pub(crate) fn bt_search(
         return Ok(None);
     };
 
-    // One iteration per level; move right first to shake off concurrent splits.
     loop {
         pin = bt_moveright(rel, key, pin, frame)?;
 
@@ -168,11 +161,10 @@ fn bt_moveright(
     mut pin: BufferPin,
     frame: &mut OrderProcFrame,
 ) -> PgResult<BufferPin> {
-    // false = move right iff scan key > high key; true = iff >= high key.
     let cmpval: i32 = if key.nextkey { 0 } else { 1 };
 
     loop {
-        let (ignore, next) = {
+        let next = {
             let page = pin.page();
             let opaque = page_opaque(&page);
             if P_RIGHTMOST(&opaque) {
@@ -192,9 +184,8 @@ fn bt_moveright(
                 }
                 return Ok(pin);
             }
-            (P_IGNORE(&opaque), opaque.btpo_next)
+            opaque.btpo_next
         };
-        let _ = ignore;
         pin = bt_relandgetbuf(rel, Some(pin), next, BT_READ)?;
     }
 }
@@ -223,7 +214,6 @@ pub(crate) fn bt_binsrch(
     let mut low = P_FIRSTDATAKEY(&opaque);
     let mut high = page.max_offset_number();
 
-    // Empty page (or high key only, post-VACUUM): first available slot.
     if high < low {
         return Ok(low);
     }
@@ -243,7 +233,6 @@ pub(crate) fn bt_binsrch(
     }
 
     if P_ISLEAF(&opaque) {
-        // Backward scans want the last tuple < (<=) the key: step back one.
         if key.backward {
             return Ok(low - 1);
         }
@@ -268,7 +257,6 @@ pub(crate) fn bt_compare(
     debug_assert!(key.keysz as i32 <= rel.indnkeyatts());
     debug_assert!(key.heapkeyspace || key.scantid.is_none());
 
-    // Force ">" for the (-inf) first data item on an internal page.
     if !P_ISLEAF(&opaque) && offnum == P_FIRSTDATAKEY(&opaque) {
         return Ok(1);
     }
@@ -301,7 +289,6 @@ pub(crate) fn bt_compare(
                     -1 // NOT_NULL "<" NULL
                 }
             } else {
-                // sk_func(index value, sk_argument); flip unless DESC.
                 let arg = scankey.sk_argument;
                 let mut r = frame.cmp(scankey, datum, arg)?;
                 if scankey.sk_flags & SK_BT_DESC == 0 {
@@ -315,12 +302,10 @@ pub(crate) fn bt_compare(
             }
         }
 
-        // Truncated attributes sort as minus infinity.
         if key.keysz as i32 > ntupatts {
             return Ok(1);
         }
 
-        // Tie-break on heap TID (heapkeyspace indexes).
         let heap_tid = bt_tuple_get_heap_tid(itup);
         let Some(scantid) = key.scantid.as_ref() else {
             if !key.backward
@@ -355,15 +340,13 @@ fn drop_lock_and_maybe_pin(rel: &Relation<'_>, so: &mut BTScanOpaqueData<'_>) ->
     if !so.dropPin {
         return bufmgr::lock_buffer::call(so.currPos.buf, bufmgr::BUFFER_LOCK_UNLOCK);
     }
-    // Record the LSN so _bt_killitems can detect concurrent TID recycling.
     so.currPos.lsn = bufmgr::buffer_get_lsn_atomic::call(so.currPos.buf);
     let pin = BufferPin::adopt(so.currPos.buf).expect("pinned currPos");
     so.currPos.buf = InvalidBuffer;
     bt_relbuf(rel, pin)
 }
 
-/// index_getprocinfo(rel, attno, BTORDER_PROC) + fmgr_info_copy, backed by the
-/// rd_supportinfo rule-5 cache (resolved once per column per relcache entry).
+/// index_getprocinfo + fmgr_info_copy over the rd_supportinfo rule-5 cache.
 fn order_procinfo(rel: &Relation<'_>, attno: usize) -> PgResult<FmgrInfo> {
     let mut cache = rel.rd_supportinfo.borrow_mut();
     if cache.is_empty() {
@@ -422,9 +405,7 @@ pub(crate) fn bt_first(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResul
     if rel.pgstat_enabled.get() {
         *ctx.xs_pgstat_index_scans += 1;
     }
-    // C: scan->instrument->nsearches++ — instrumentation lands with execnodes.
 
-    // Choose the boundary keys that position the scan (at most one per column).
     let mut start_keys: [Option<StartKey>; INDEX_MAX_KEYS as usize] =
         [const { None }; INDEX_MAX_KEYS as usize];
     let mut keysz: usize = 0;
@@ -436,7 +417,6 @@ pub(crate) fn bt_first(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResul
         let mut bkey: Option<usize> = None;
         let mut implies_nn: Option<usize> = None;
 
-        // Iterates 0..=numberOfKeys; the last pass finalizes the last attr.
         let mut i = 0usize;
         loop {
             if i >= keys.len() || keys[i].sk_attno != curattr {
@@ -446,7 +426,6 @@ pub(crate) fn bt_first(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResul
                     }
                 }
 
-                // No usable boundary key: maybe deduce a NOT NULL key.
                 if bkey.is_none() {
                     if let Some(inn) = implies_nn {
                         let inn_flags = keys[inn].sk_flags;
@@ -495,7 +474,6 @@ pub(crate) fn bt_first(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResul
                     unported_phase2("skip-array NEXT/PRIOR sentinel keys");
                 }
 
-                // Done at the last preprocessed key or the first nonrequired one.
                 if i >= keys.len()
                     || keys[i].sk_flags & (SK_BT_REQFWD | SK_BT_REQBKWD) == 0
                 {
@@ -533,12 +511,10 @@ pub(crate) fn bt_first(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResul
         }
     }
 
-    // No usable boundary keys: scan from one end of the tree.
     if keysz == 0 {
         return bt_endpoint(ctx, dir);
     }
 
-    // Build the insertion scankey for the boundary point.
     debug_assert!(keysz <= INDEX_MAX_KEYS as usize);
     let mut inskey = BtScanInsert::new();
 
@@ -553,7 +529,6 @@ pub(crate) fn bt_first(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResul
             unported_phase2("row-comparison boundary keys (_bt_first)");
         }
 
-        // Swap in the BTORDER_PROC 3-way comparison function.
         let sk_func = if bkey.sk_subtype == rel.rd_opcintype[i] || bkey.sk_subtype == 0 {
             order_procinfo(rel, i + 1)?
         } else {
@@ -623,8 +598,6 @@ pub(crate) fn bt_first(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResul
 
     if leaf.is_none() {
         debug_assert!(!ctx.so.needPrimScan);
-        // Completely empty index: relation-level predicate lock, then retry
-        // to close the SSI window.
         if xact::IsolationIsSerializable() {
             let snap = ctx.snapshot.expect("serializable scan has a snapshot");
             predicate_seams::predicate_lock_relation::call(rel, snap)?;
@@ -682,8 +655,7 @@ pub(crate) struct BtReadPageState<'p> {
     pub forcenonrequired: bool,
     pub startikey: i32,
     pub continuescan: bool,
-    // C's finaltup/offnum/skip/rechecks/targetdistance/nskipadvances drive the
-    // array lane only (phase 2).
+    // C's finaltup/offnum/skip/rechecks fields drive the array lane (phase 2).
 }
 
 /// _bt_readpage: load all matching items from the currPos page.
@@ -702,7 +674,6 @@ fn bt_readpage(
     so.currPos.currPage = bufmgr::buffer_get_block_number::call(so.currPos.buf);
     so.currPos.prevPage = opaque.btpo_prev;
     so.currPos.nextPage = opaque.btpo_next;
-    // currPos.lsn is set at _bt_drop_lock_and_maybe_pin time.
     so.currPos.dir = dir;
     so.currPos.nextTupleOffset = 0;
 
@@ -737,13 +708,11 @@ fn bt_readpage(
     let mut item_index: i32;
 
     if ScanDirectionIsForward(dir) {
-        // startikey precheck once the primscan has read at least one page.
         if !pstate.firstpage && minoff < maxoff {
             // SAFETY: page pinned+locked for this call.
             unsafe { bt_set_startikey(rel, so, &mut pstate, &mut ctx.frame)? };
         }
 
-        // load items[] in ascending order
         item_index = 0;
         offnum = offnum.max(minoff);
 
@@ -790,8 +759,6 @@ fn bt_readpage(
             offnum += 1;
         }
 
-        // High-key check: no need to visit the right sibling when it shows
-        // no more matches are possible (split points make this common).
         if pstate.continuescan && !so.scanBehind && !P_RIGHTMOST(&opaque) {
             let itup = page_item(&page, page.item_id(P_HIKEY));
             pstate.startikey = 0; // _bt_set_startikey ignores P_HIKEY
@@ -816,7 +783,6 @@ fn bt_readpage(
             unsafe { bt_set_startikey(rel, so, &mut pstate, &mut ctx.frame)? };
         }
 
-        // load items[] in descending order
         item_index = MaxTIDsPerBTreePage as i32;
         offnum = offnum.min(maxoff);
 
@@ -824,9 +790,6 @@ fn bt_readpage(
             let iid = page.item_id(offnum);
             let mut tuple_alive = true;
 
-            // Killed tuples are skipped, except that the first tuple on the
-            // page still gets its keys checked (the backward-scan analog of
-            // the forward scan's high-key stop check).
             if ctx.ignore_killed_tuples && iid.is_dead() {
                 if offnum > minoff {
                     offnum -= 1;
@@ -848,8 +811,6 @@ fn bt_readpage(
                         item_index -= 1;
                         bt_saveitem(so, item_index, offnum, itup);
                     } else {
-                        // Posting-list TIDs stay in ascending order even on
-                        // backward scans (_bt_killitems relies on it).
                         item_index -= 1;
                         let tuple_offset =
                             bt_setuppostingitems(so, item_index, offnum, itup);
@@ -920,8 +881,7 @@ unsafe fn bt_saveitem(
     so.currPos.set_item(item_index as usize, item);
 }
 
-/// _bt_setuppostingitems: save the first TID of a posting-list tuple; the
-/// (truncated) base tuple is stored once for all of its TIDs.
+/// _bt_setuppostingitems.
 ///
 /// # Safety
 /// `itup` is a live posting tuple on the locked currPos page.
@@ -946,7 +906,6 @@ unsafe fn bt_setuppostingitems(
         let base = curr_tuples.as_mut_ptr().add(so.currPos.nextTupleOffset as usize);
         // SAFETY: nextTupleOffset stays <= BLCKSZ.
         core::ptr::copy_nonoverlapping(itup, base, itupsz);
-        // Defensively shrink the work-area tuple header to the base size.
         let info_p = base.add(6).cast::<u16>();
         info_p.write((info_p.read() & !INDEX_SIZE_MASK) | itupsz as u16);
         so.currPos.nextTupleOffset += itupsz as i32;
@@ -983,7 +942,6 @@ fn bt_returnitem(ctx: &mut ScanCtx<'_, '_>) {
     // SAFETY: itemIndex within [firstItem, lastItem] (asserted): written slot.
     let item = unsafe { so.currPos.item(so.currPos.itemIndex as usize) };
     *ctx.xs_heaptid = item.heapTid;
-    // C also sets scan->xs_itup for index-only scans; that lands with xs_itup.
 }
 
 /// _bt_steppage.
@@ -995,7 +953,6 @@ fn bt_steppage(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResult<bool> 
         bt_killitems(ctx.rel, so)?;
     }
 
-    // Preserve the mark position before currPos changes.
     if so.markItemIndex >= 0 {
         if BTScanPosIsPinned(&so.currPos) {
             bufmgr::incr_buffer_ref_count::call(so.currPos.buf);
@@ -1025,8 +982,7 @@ fn bt_steppage(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResult<bool> 
     bt_readnextpage(ctx, blkno, lastcurrblkno, dir)
 }
 
-// C's memcpy(&so->markPos, &so->currPos, offsetof(items[1]) + lastItem*sizeof)
-// as field copies + the live items prefix; markTuples mirrors currTuples.
+// C's offsetof-bounded markPos memcpy: header fields + live items prefix.
 fn copy_scanpos(so: &mut BTScanOpaqueData<'_>) {
     let n = (so.currPos.lastItem + 1).max(0) as usize;
     so.markPos.buf = so.currPos.buf;
@@ -1105,7 +1061,6 @@ fn bt_readfirstpage(
         return Ok(true);
     }
 
-    // No matches here: release the lock and step to the next page.
     bufmgr::lock_buffer::call(ctx.so.currPos.buf, bufmgr::BUFFER_LOCK_UNLOCK)?;
 
     bt_steppage(ctx, dir)
@@ -1123,8 +1078,6 @@ fn bt_readnextpage(
     debug_assert!(ctx.so.currPos.currPage == lastcurrblkno);
     debug_assert!(!BTScanPosIsPinned(&ctx.so.currPos));
 
-    // The scan already read lastcurrblkno, the page to our left (right, for
-    // backwards scans).
     if ScanDirectionIsForward(dir) {
         ctx.so.currPos.moreLeft = true;
     } else {
@@ -1153,7 +1106,6 @@ fn bt_readnextpage(
             match bt_lock_and_validate_left(rel, &mut blkno, lastcurrblkno)? {
                 Some(pin) => ctx.so.currPos.buf = pin.into_buffer(),
                 None => {
-                    // Concurrent deletion of the leftmost page.
                     BTScanPosInvalidate(&mut ctx.so.currPos);
                     return Ok(false);
                 }
@@ -1196,7 +1148,6 @@ fn bt_readnextpage(
             };
         }
 
-        // No matching tuples on this page.
         let pin = BufferPin::adopt(ctx.so.currPos.buf).expect("pinned above");
         ctx.so.currPos.buf = InvalidBuffer;
         bt_relbuf(rel, pin)?;
@@ -1221,8 +1172,6 @@ fn bt_lock_and_validate_left(
         check_for_interrupts();
         let mut pin = bt_getbuf(rel, *blkno, BT_READ)?;
 
-        // Walk right at most four hops looking for the page whose right link
-        // still points at lastcurrblkno (deleted pages stay in the chain).
         let mut tries = 0;
         loop {
             let (deleted, next, rightmost) = {
@@ -1245,12 +1194,9 @@ fn bt_lock_and_validate_left(
             pin = bt_relandgetbuf(rel, Some(pin), *blkno, BT_READ)?;
         }
 
-        // Return to the original page to see what happened to its prev link.
         pin = bt_relandgetbuf(rel, Some(pin), lastcurrblkno, BT_READ)?;
         let deleted = P_ISDELETED(&page_opaque(&pin.page()));
         if deleted {
-            // Move right to the first nondeleted page: it owns the deleted
-            // page's keyspace, so stepping left from it lands correctly.
             loop {
                 let (rightmost, next) = {
                     let page = pin.page();
@@ -1267,8 +1213,6 @@ fn bt_lock_and_validate_left(
                 }
             }
         } else {
-            // lastcurrblkno intact: its left sibling must have split/deleted;
-            // an unchanged prev link would mean an infinite loop.
             if page_opaque(&pin.page()).btpo_prev == origblkno {
                 return Err(Box::new(PgError::error(format!(
                     "could not find left sibling of block {lastcurrblkno} in index \"{}\"",
@@ -1307,7 +1251,6 @@ fn bt_get_endpoint(rel: &Relation<'_>, level: u32, rightmost: bool) -> PgResult<
             let page = pin.page();
             let opaque = page_opaque(&page);
             if P_IGNORE(&opaque) || (rightmost && !P_RIGHTMOST(&opaque)) {
-                // Dead page (or need the true rightmost): step right.
                 if opaque.btpo_next == P_NONE {
                     return Err(fell_off_the_end(rel));
                 }
@@ -1323,7 +1266,6 @@ fn bt_get_endpoint(rel: &Relation<'_>, level: u32, rightmost: bool) -> PgResult<
                     .with_sqlstate(::types_error::ERRCODE_INDEX_CORRUPTED),
                 ));
             } else {
-                // Descend to the leftmost/rightmost child.
                 let offnum = if rightmost {
                     page.max_offset_number()
                 } else {
@@ -1348,7 +1290,6 @@ fn bt_endpoint(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResult<bool> 
     debug_assert!(!ctx.so.needPrimScan);
 
     let Some(pin) = bt_get_endpoint(rel, 0, ScanDirectionIsBackward(dir))? else {
-        // Empty index: relation-level predicate lock, nothing finer exists.
         if let Some(snap) = ctx.snapshot {
             predicate_seams::predicate_lock_relation::call(rel, snap)?;
         }
@@ -1360,7 +1301,6 @@ fn bt_endpoint(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResult<bool> 
         let opaque = page_opaque(&page);
         debug_assert!(P_ISLEAF(&opaque));
         if ScanDirectionIsForward(dir) {
-            // Dead pages may remain to the left; leftmostness isn't asserted.
             P_FIRSTDATAKEY(&opaque)
         } else {
             debug_assert!(P_RIGHTMOST(&opaque));
@@ -1377,8 +1317,7 @@ fn bt_endpoint(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResult<bool> 
     Ok(true)
 }
 
-/// btgettuple's killed-item bookkeeping + _bt_next dispatch (nbtree.c body;
-/// lives here to keep the split-borrowed ScanCtx pattern in one module).
+/// btgettuple's killed-item bookkeeping + _bt_next dispatch (nbtree.c body).
 pub(crate) fn bt_gettuple_continue(
     ctx: &mut ScanCtx<'_, '_>,
     dir: ScanDirection,

@@ -51,6 +51,9 @@ fn install() {
             Ok(XID_IN_PROGRESS.with(Cell::get))
         });
         transam_seams::transaction_id_did_commit::set(|_| Ok(XID_COMMITTED.with(Cell::get)));
+        transam_xlog_seams::xlog_standby_info_active::set(|| false);
+        // BTORDER_PROC lookup for the live btree read path: btint4cmp.
+        syscache_seams::lookup_pg_amproc::set(|_, _, _, _| Ok(351));
         crate::init_seams();
     });
 }
@@ -125,16 +128,25 @@ fn make<'mcx>(mcx: Mcx<'mcx>, oid: Oid, name: &str, relkind: u8, relam: Oid) -> 
             attrs: PgVec::new_in(mcx),
         }),
         rd_index,
-        rd_opcintype: PgVec::new_in(mcx),
-        rd_opfamily: PgVec::new_in(mcx),
-        rd_indoption: PgVec::new_in(mcx),
-        rd_indcollation: PgVec::new_in(mcx),
+        rd_opcintype: two_col_vec(mcx, relkind, 23),
+        rd_opfamily: two_col_vec(mcx, relkind, 1976),
+        rd_indoption: two_col_vec(mcx, relkind, 0i16),
+        rd_indcollation: two_col_vec(mcx, relkind, 0),
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
         rd_supportinfo: Default::default(),
     };
     Relation::open(data, Some(record_close))
+}
+
+fn two_col_vec<T: Copy>(mcx: Mcx<'_>, relkind: u8, v: T) -> PgVec<'_, T> {
+    let mut vec = PgVec::new_in(mcx);
+    if relkind == RELKIND_INDEX {
+        vec.push(v);
+        vec.push(v);
+    }
+    vec
 }
 
 fn record_close(_oid: Oid, _lockmode: LOCKMODE) -> PgResult<()> {
@@ -152,6 +164,7 @@ fn fake_relation_open(mcx: Mcx<'_>, oid: Oid, _lockmode: LOCKMODE) -> PgResult<R
 fn key_on(attno: i16) -> ScanKeyData {
     let mut k = ScanKeyData::empty();
     k.sk_attno = attno;
+    k.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
     k
 }
 
@@ -264,8 +277,7 @@ fn beginscan_heap_arm_runs_real_read_lane() {
 }
 
 #[test]
-#[should_panic(expected = "nbtree")]
-fn beginscan_index_arm_stops_at_nbtree() {
+fn beginscan_index_arm_reaches_btree() {
     install();
     let cx = MemoryContext::new("test");
     let mcx = cx.mcx();
@@ -273,15 +285,18 @@ fn beginscan_index_arm_stops_at_nbtree() {
     let _ = systable_beginscan(mcx, &tbl, IDX, true, Some(static_snapshot()), &[key_on(1)]);
 }
 
+// The btree read path is live: a leading-column scan now stops at the
+// uninstalled bufmgr seam instead of an nbtree dispatch panic. (Heap attr 3
+// remaps to index column 1; heap attr 1 alone would be a skip scan, phase 2.)
 #[test]
-#[should_panic(expected = "nbtree")]
-fn seam_scan_reaches_the_index_arm() {
+#[should_panic(expected = "read_buffer")]
+fn seam_scan_reaches_the_buffer_layer() {
     install();
     let cx = MemoryContext::new("test");
     let mcx = cx.mcx();
     let tbl = make(mcx, TBL, "pg_class", RELKIND_RELATION, HEAP_AM);
     let mut consume = |_: &HeapTupleData<'_>| Ok(true);
-    let _ = genam_seams::systable_scan_catalog::call(&tbl, IDX, true, &[key_on(1)], &mut consume);
+    let _ = genam_seams::systable_scan_catalog::call(&tbl, IDX, true, &[key_on(3)], &mut consume);
 }
 
 #[test]

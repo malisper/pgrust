@@ -119,6 +119,12 @@ fn missing_procedure(pname: &str, r: &RelationData<'_>) -> Box<PgError> {
 
 #[cold]
 #[inline(never)]
+fn mock_outside_tests() -> ! {
+    unreachable!("mock index AM outside indexam's own tests")
+}
+
+#[cold]
+#[inline(never)]
 fn unported(what: &str) -> ! {
     panic!("unported: {what}")
 }
@@ -392,6 +398,8 @@ fn am_beginscan<'mcx>(
         IndexAmKind::Btree => nbtree::btbeginscan(mcx, indexRelation, nkeys, norderbys),
         #[cfg(test)]
         IndexAmKind::Mock => Ok(mock::beginscan(mcx, indexRelation, nkeys, norderbys)),
+        #[allow(unreachable_patterns)]
+        _ => mock_outside_tests(),
     }
 }
 
@@ -405,6 +413,8 @@ fn am_rescan(
         IndexScanOpaque::Btree(_) => nbtree::btrescan(scan, keys),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(mock::rescan(scan)),
+        #[allow(unreachable_patterns)]
+        _ => mock_outside_tests(),
     }
 }
 
@@ -413,6 +423,8 @@ fn am_endscan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Btree(_) => nbtree::btendscan(scan),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(()),
+        #[allow(unreachable_patterns)]
+        _ => mock_outside_tests(),
     }
 }
 
@@ -421,6 +433,8 @@ fn am_markpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Btree(_) => nbtree::btmarkpos(scan),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(mock::markpos(scan)),
+        #[allow(unreachable_patterns)]
+        _ => mock_outside_tests(),
     }
 }
 
@@ -429,6 +443,8 @@ fn am_restrpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Btree(_) => nbtree::btrestrpos(scan),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => unreachable!("Mock lacks amrestrpos"),
+        #[allow(unreachable_patterns)]
+        _ => mock_outside_tests(),
     }
 }
 
@@ -439,6 +455,8 @@ fn am_gettuple(scan: &mut IndexScanDescData<'_>, direction: ScanDirection) -> Pg
         IndexScanOpaque::Btree(_) => nbtree::btgettuple(scan, direction),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(mock::gettuple(scan)),
+        #[allow(unreachable_patterns)]
+        _ => mock_outside_tests(),
     }
 }
 
@@ -458,6 +476,8 @@ fn am_insert<'mcx>(
         IndexAmKind::Btree => unported("nbtree btinsert (insert lane is phase 2)"),
         #[cfg(test)]
         IndexAmKind::Mock => Ok(true),
+        #[allow(unreachable_patterns)]
+        _ => mock_outside_tests(),
     }
 }
 
@@ -467,25 +487,44 @@ fn am_insert_cleanup(kind: IndexAmKind, indexRelation: &Relation<'_>) -> PgResul
         IndexAmKind::Btree => unported("nbtree aminsertcleanup (insert lane is phase 2)"),
         #[cfg(test)]
         IndexAmKind::Mock => Ok(()),
+        #[allow(unreachable_patterns)]
+        _ => mock_outside_tests(),
     }
 }
 
 // The table-AM fetch boundary: direct tableam calls (heapam_handler landed);
-// tests substitute a scripted mock.
-#[cfg(not(test))]
+// unit tests substitute a scripted mock via the relscan wrapper's Mock arm.
 mod fetch {
     use super::*;
 
+    #[cfg(not(test))]
     pub fn begin<'mcx>(heapRelation: &Relation<'mcx>) -> IndexFetchTableData<'mcx> {
-        tableam::table_index_fetch_begin(heapRelation)
+        IndexFetchTableData::Table(tableam::table_index_fetch_begin(heapRelation))
+    }
+
+    #[cfg(test)]
+    pub fn begin<'mcx>(heapRelation: &Relation<'mcx>) -> IndexFetchTableData<'mcx> {
+        IndexFetchTableData::Mock(types_relscan::MockFetch {
+            rel: heapRelation.alias(),
+            mock_fetch: Vec::new(),
+            resets: 0,
+        })
     }
 
     pub fn reset(heapfetch: &mut IndexFetchTableData<'_>) {
-        tableam::table_index_fetch_reset(heapfetch);
+        match heapfetch {
+            IndexFetchTableData::Table(t) => tableam::table_index_fetch_reset(t),
+            #[allow(unreachable_patterns)]
+            other => mock::reset(other),
+        }
     }
 
     pub fn end(heapfetch: IndexFetchTableData<'_>) {
-        tableam::table_index_fetch_end(heapfetch);
+        match heapfetch {
+            IndexFetchTableData::Table(t) => tableam::table_index_fetch_end(t),
+            #[allow(unreachable_patterns)]
+            _ => {}
+        }
     }
 
     pub fn tuple<'mcx>(
@@ -497,52 +536,65 @@ mod fetch {
         call_again: &mut bool,
         all_dead: &mut bool,
     ) -> PgResult<bool> {
-        tableam::table_index_fetch_tuple(
-            mcx,
-            heapfetch,
-            tid,
-            snapshot,
-            slot,
-            call_again,
-            Some(all_dead),
-        )
-    }
-}
-
-#[cfg(test)]
-mod fetch {
-    use super::*;
-
-    pub fn begin<'mcx>(heapRelation: &Relation<'mcx>) -> IndexFetchTableData<'mcx> {
-        IndexFetchTableData {
-            rel: heapRelation.alias(),
-            mock_fetch: Vec::new(),
-            resets: 0,
+        match heapfetch {
+            IndexFetchTableData::Table(t) => tableam::table_index_fetch_tuple(
+                mcx,
+                t,
+                tid,
+                snapshot,
+                slot,
+                call_again,
+                Some(all_dead),
+            ),
+            #[allow(unreachable_patterns)]
+            other => mock::tuple(other, tid, slot, call_again, all_dead),
         }
     }
 
-    pub fn reset(heapfetch: &mut IndexFetchTableData<'_>) {
-        heapfetch.resets += 1;
+    // The Mock arm exists only under the relscan "mock" feature (test builds);
+    // a non-test build reaching here would be a wiring bug.
+    #[cfg(test)]
+    mod mock {
+        use super::*;
+
+        pub fn reset(heapfetch: &mut IndexFetchTableData<'_>) {
+            heapfetch.mock_mut().resets += 1;
+        }
+
+        pub fn tuple<'mcx>(
+            heapfetch: &mut IndexFetchTableData<'mcx>,
+            tid: &mut ItemPointerData,
+            slot: &mut SlotData<'mcx>,
+            call_again: &mut bool,
+            all_dead: &mut bool,
+        ) -> PgResult<bool> {
+            let (found, cont, dead) = heapfetch.mock_mut().mock_fetch.remove(0);
+            *call_again = cont;
+            *all_dead = dead;
+            if found {
+                slot.base_mut().tts_tid = *tid;
+            }
+            Ok(found)
+        }
     }
 
-    pub fn end(_heapfetch: IndexFetchTableData<'_>) {}
+    #[cfg(not(test))]
+    mod mock {
+        use super::*;
 
-    pub fn tuple<'mcx>(
-        _mcx: Mcx<'mcx>,
-        heapfetch: &mut IndexFetchTableData<'mcx>,
-        tid: &mut ItemPointerData,
-        _snapshot: &mut Option<Rc<SnapshotData<'mcx>>>,
-        slot: &mut SlotData<'mcx>,
-        call_again: &mut bool,
-        all_dead: &mut bool,
-    ) -> PgResult<bool> {
-        let (found, cont, dead) = heapfetch.mock_fetch.remove(0);
-        *call_again = cont;
-        *all_dead = dead;
-        if found {
-            slot.base_mut().tts_tid = *tid;
+        pub fn reset(_heapfetch: &mut IndexFetchTableData<'_>) {
+            unreachable!("mock table fetch outside tests")
         }
-        Ok(found)
+
+        pub fn tuple<'mcx>(
+            _heapfetch: &mut IndexFetchTableData<'mcx>,
+            _tid: &mut ItemPointerData,
+            _slot: &mut SlotData<'mcx>,
+            _call_again: &mut bool,
+            _all_dead: &mut bool,
+        ) -> PgResult<bool> {
+            unreachable!("mock table fetch outside tests")
+        }
     }
 }
 
@@ -577,6 +629,7 @@ mod mock {
             xs_recheck: false,
             xs_pgstat_index_tuples: 0,
             xs_pgstat_heap_fetches: 0,
+            xs_pgstat_index_scans: 0,
         }
     }
 
