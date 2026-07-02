@@ -1,0 +1,16 @@
+[package]
+name = "toastdesc"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "toastdesc"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+snapshot = { package = "types_snapshot", path = "../../../../_support/types/snapshot" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }

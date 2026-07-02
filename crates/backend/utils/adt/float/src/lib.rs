@@ -1,5 +1,7 @@
 //! float.c — float4/float8 I/O, arithmetic, comparisons, math, aggregates.
 
+extern crate alloc;
+
 pub mod aggregates;
 pub mod builtins;
 pub mod funcs;
@@ -125,11 +127,111 @@ pub fn float8_fits_in_int64(num: f64) -> bool {
     num >= (i64::MIN as f64) && num < -(i64::MIN as f64)
 }
 
+// Cold tails take `result` and return Result<bits, Box<PgError>> (ScalarPair
+// -> two registers, no sret, nothing live across the call), so the happy
+// paths compile to C's unlikely() shape: one isinf test, leaf, shrink-wrapped.
+type ColdBits32 = Result<u32, alloc::boxed::Box<PgError>>;
+type ColdBits64 = Result<u64, alloc::boxed::Box<PgError>>;
+
+#[cold]
+#[inline(never)]
+fn f4_inf_cold(val1: f32, val2: f32, result: f32) -> ColdBits32 {
+    if !val1.is_infinite() && !val2.is_infinite() {
+        return Err(float_overflow_error().into());
+    }
+    Ok(result.to_bits())
+}
+
+#[cold]
+#[inline(never)]
+fn f8_inf_cold(val1: f64, val2: f64, result: f64) -> ColdBits64 {
+    if !val1.is_infinite() && !val2.is_infinite() {
+        return Err(float_overflow_error().into());
+    }
+    Ok(result.to_bits())
+}
+
+#[cold]
+#[inline(never)]
+fn f4_mul_zero_cold(val1: f32, val2: f32, result: f32) -> ColdBits32 {
+    if val1 != 0.0 && val2 != 0.0 {
+        return Err(float_underflow_error().into());
+    }
+    Ok(result.to_bits())
+}
+
+#[cold]
+#[inline(never)]
+fn f8_mul_zero_cold(val1: f64, val2: f64, result: f64) -> ColdBits64 {
+    if val1 != 0.0 && val2 != 0.0 {
+        return Err(float_underflow_error().into());
+    }
+    Ok(result.to_bits())
+}
+
+#[cold]
+#[inline(never)]
+fn f4_div_inf_cold(val1: f32, result: f32) -> ColdBits32 {
+    if !val1.is_infinite() {
+        return Err(float_overflow_error().into());
+    }
+    Ok(result.to_bits())
+}
+
+#[cold]
+#[inline(never)]
+fn f8_div_inf_cold(val1: f64, result: f64) -> ColdBits64 {
+    if !val1.is_infinite() {
+        return Err(float_overflow_error().into());
+    }
+    Ok(result.to_bits())
+}
+
+#[cold]
+#[inline(never)]
+fn f4_div_zero_cold(val1: f32, val2: f32, result: f32) -> ColdBits32 {
+    if val1 != 0.0 && !val2.is_infinite() {
+        return Err(float_underflow_error().into());
+    }
+    Ok(result.to_bits())
+}
+
+#[cold]
+#[inline(never)]
+fn f8_div_zero_cold(val1: f64, val2: f64, result: f64) -> ColdBits64 {
+    if val1 != 0.0 && !val2.is_infinite() {
+        return Err(float_underflow_error().into());
+    }
+    Ok(result.to_bits())
+}
+
+#[cold]
+#[inline(never)]
+fn zero_divide_boxed() -> alloc::boxed::Box<PgError> {
+    alloc::boxed::Box::new(float_zero_divide_error())
+}
+
+#[inline(always)]
+fn bits4(r: ColdBits32) -> PgResult<f32> {
+    match r {
+        Ok(b) => Ok(f32::from_bits(b)),
+        Err(e) => Err(e),
+    }
+}
+
+#[inline(always)]
+fn bits8(r: ColdBits64) -> PgResult<f64> {
+    match r {
+        Ok(b) => Ok(f64::from_bits(b)),
+        Err(e) => Err(e),
+    }
+}
+
 #[inline]
 pub fn float4_pl(val1: f32, val2: f32) -> PgResult<f32> {
     let result = val1 + val2;
-    if result.is_infinite() && !val1.is_infinite() && !val2.is_infinite() {
-        return Err(float_overflow_error().into());
+    if result.is_infinite() {
+        return bits4(f4_inf_cold(val1, val2, result));
     }
     Ok(result)
 }
@@ -137,8 +239,8 @@ pub fn float4_pl(val1: f32, val2: f32) -> PgResult<f32> {
 #[inline]
 pub fn float8_pl(val1: f64, val2: f64) -> PgResult<f64> {
     let result = val1 + val2;
-    if result.is_infinite() && !val1.is_infinite() && !val2.is_infinite() {
-        return Err(float_overflow_error().into());
+    if result.is_infinite() {
+        return bits8(f8_inf_cold(val1, val2, result));
     }
     Ok(result)
 }
@@ -146,8 +248,8 @@ pub fn float8_pl(val1: f64, val2: f64) -> PgResult<f64> {
 #[inline]
 pub fn float4_mi(val1: f32, val2: f32) -> PgResult<f32> {
     let result = val1 - val2;
-    if result.is_infinite() && !val1.is_infinite() && !val2.is_infinite() {
-        return Err(float_overflow_error().into());
+    if result.is_infinite() {
+        return bits4(f4_inf_cold(val1, val2, result));
     }
     Ok(result)
 }
@@ -155,8 +257,8 @@ pub fn float4_mi(val1: f32, val2: f32) -> PgResult<f32> {
 #[inline]
 pub fn float8_mi(val1: f64, val2: f64) -> PgResult<f64> {
     let result = val1 - val2;
-    if result.is_infinite() && !val1.is_infinite() && !val2.is_infinite() {
-        return Err(float_overflow_error().into());
+    if result.is_infinite() {
+        return bits8(f8_inf_cold(val1, val2, result));
     }
     Ok(result)
 }
@@ -164,11 +266,11 @@ pub fn float8_mi(val1: f64, val2: f64) -> PgResult<f64> {
 #[inline]
 pub fn float4_mul(val1: f32, val2: f32) -> PgResult<f32> {
     let result = val1 * val2;
-    if result.is_infinite() && !val1.is_infinite() && !val2.is_infinite() {
-        return Err(float_overflow_error().into());
+    if result.is_infinite() {
+        return bits4(f4_inf_cold(val1, val2, result));
     }
-    if result == 0.0 && val1 != 0.0 && val2 != 0.0 {
-        return Err(float_underflow_error().into());
+    if result == 0.0 {
+        return bits4(f4_mul_zero_cold(val1, val2, result));
     }
     Ok(result)
 }
@@ -176,11 +278,11 @@ pub fn float4_mul(val1: f32, val2: f32) -> PgResult<f32> {
 #[inline]
 pub fn float8_mul(val1: f64, val2: f64) -> PgResult<f64> {
     let result = val1 * val2;
-    if result.is_infinite() && !val1.is_infinite() && !val2.is_infinite() {
-        return Err(float_overflow_error().into());
+    if result.is_infinite() {
+        return bits8(f8_inf_cold(val1, val2, result));
     }
-    if result == 0.0 && val1 != 0.0 && val2 != 0.0 {
-        return Err(float_underflow_error().into());
+    if result == 0.0 {
+        return bits8(f8_mul_zero_cold(val1, val2, result));
     }
     Ok(result)
 }
@@ -188,14 +290,14 @@ pub fn float8_mul(val1: f64, val2: f64) -> PgResult<f64> {
 #[inline]
 pub fn float4_div(val1: f32, val2: f32) -> PgResult<f32> {
     if val2 == 0.0 && !val1.is_nan() {
-        return Err(float_zero_divide_error().into());
+        return Err(zero_divide_boxed());
     }
     let result = val1 / val2;
-    if result.is_infinite() && !val1.is_infinite() {
-        return Err(float_overflow_error().into());
+    if result.is_infinite() {
+        return bits4(f4_div_inf_cold(val1, result));
     }
-    if result == 0.0 && val1 != 0.0 && !val2.is_infinite() {
-        return Err(float_underflow_error().into());
+    if result == 0.0 {
+        return bits4(f4_div_zero_cold(val1, val2, result));
     }
     Ok(result)
 }
@@ -203,14 +305,14 @@ pub fn float4_div(val1: f32, val2: f32) -> PgResult<f32> {
 #[inline]
 pub fn float8_div(val1: f64, val2: f64) -> PgResult<f64> {
     if val2 == 0.0 && !val1.is_nan() {
-        return Err(float_zero_divide_error().into());
+        return Err(zero_divide_boxed());
     }
     let result = val1 / val2;
-    if result.is_infinite() && !val1.is_infinite() {
-        return Err(float_overflow_error().into());
+    if result.is_infinite() {
+        return bits8(f8_div_inf_cold(val1, result));
     }
-    if result == 0.0 && val1 != 0.0 && !val2.is_infinite() {
-        return Err(float_underflow_error().into());
+    if result == 0.0 {
+        return bits8(f8_div_zero_cold(val1, val2, result));
     }
     Ok(result)
 }
@@ -218,20 +320,14 @@ pub fn float8_div(val1: f64, val2: f64) -> PgResult<f64> {
 // NaN-aware comparisons (float.h): all NaNs equal, NaN > every non-NaN.
 #[inline]
 pub fn float4_eq(val1: f32, val2: f32) -> bool {
-    if val1.is_nan() {
-        val2.is_nan()
-    } else {
-        !val2.is_nan() && val1 == val2
-    }
+    // == is already NaN-false; the disjunct form drops a select vs C.
+    val1 == val2 || (val1.is_nan() && val2.is_nan())
 }
 
 #[inline]
 pub fn float8_eq(val1: f64, val2: f64) -> bool {
-    if val1.is_nan() {
-        val2.is_nan()
-    } else {
-        !val2.is_nan() && val1 == val2
-    }
+    // == is already NaN-false; the disjunct form drops a select vs C.
+    val1 == val2 || (val1.is_nan() && val2.is_nan())
 }
 
 #[inline]
