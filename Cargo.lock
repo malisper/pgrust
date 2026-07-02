@@ -24,6 +24,7 @@ dependencies = [
  "superuser",
  "types_core",
  "types_error",
+ "types_rel",
 ]
 
 [[package]]
@@ -1182,12 +1183,15 @@ version = "0.1.0"
 dependencies = [
  "datum",
  "exectuples",
+ "lmgr_seams",
  "mbutils_seams",
  "mcx",
  "queryenvironment",
  "snapmgr",
+ "table",
  "types_core",
  "types_error",
+ "types_nodes",
  "types_rel",
  "types_scan",
  "types_slot",
@@ -1863,12 +1867,17 @@ name = "launch_backend"
 version = "0.0.0"
 dependencies = [
  "backend_startup",
+ "bgwriter",
+ "checkpointer",
  "guc_tables",
  "init_small",
  "ip",
+ "ipc",
  "libc",
  "libpq_pqsignal",
  "miscinit",
+ "postmaster_seams",
+ "postmaster_startup",
  "pqcomm_seams",
  "stack_depth",
  "timestamp_seams",
@@ -1876,6 +1885,7 @@ dependencies = [
  "types_startup",
  "types_storage",
  "waiteventset_seams",
+ "walwriter",
 ]
 
 [[package]]
@@ -2303,6 +2313,34 @@ dependencies = [
 [[package]]
 name = "nodeindexonlyscan"
 version = "0.1.0"
+dependencies = [
+ "bufmgr_seams",
+ "datum",
+ "execexpr",
+ "execscan",
+ "exectuples",
+ "executils",
+ "indexam",
+ "init_small",
+ "mcx",
+ "nbtree",
+ "nodeindexscan",
+ "predicate_seams",
+ "syscache_seams",
+ "tableam",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nbtree",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_slot",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+]
 
 [[package]]
 name = "nodeindexscan"
@@ -3064,10 +3102,36 @@ dependencies = [
 [[package]]
 name = "postmaster_seams"
 version = "0.0.0"
+dependencies = [
+ "seam_core",
+]
 
 [[package]]
 name = "postmaster_startup"
 version = "0.0.0"
+dependencies = [
+ "auxprocess",
+ "elog",
+ "guc_file",
+ "guc_tables",
+ "init_small",
+ "ipc",
+ "libpq_pqsignal",
+ "mcxt_seams",
+ "miscinit",
+ "procsignal_seams",
+ "standby_seams",
+ "startup_seams",
+ "timeout",
+ "timeout_seams",
+ "timestamp_seams",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "types_startup",
+ "xlogutils",
+]
 
 [[package]]
 name = "pqcomm"
@@ -4335,6 +4399,7 @@ dependencies = [
  "relmapper",
  "shmem",
  "snapbuild_seams",
+ "startup_seams",
  "subtrans_seams",
  "sync_seams",
  "timeline_seams",
