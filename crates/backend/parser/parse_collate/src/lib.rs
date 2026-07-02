@@ -4,7 +4,7 @@
 mod tests;
 
 use mcx::Mcx;
-use parse_expr::{expr_collation, expr_location};
+use parse_expr::{expr_collation, expr_location, expr_type};
 use parser_small1::{parser_errposition, ParseState};
 use types_core::catalog::DEFAULT_COLLATION_OID;
 use types_core::{InvalidOid, Oid, OidIsValid, ParseLoc};
@@ -228,6 +228,63 @@ fn assign_collations_walker<'mcx>(
                 CollateStrength::None
             };
             location = expr_location(node);
+        }
+        // C's default arm over the closed set this lane can produce.
+        tag @ (NodeTag::T_OpExpr | NodeTag::T_RelabelType) => {
+            match tag {
+                NodeTag::T_OpExpr => {
+                    for arg in &node.as_op_expr().unwrap().args {
+                        assign_collations_walker(arg, &mut loccontext)?;
+                    }
+                }
+                NodeTag::T_RelabelType => {
+                    assign_collations_walker(
+                        node.as_relabel_type().unwrap().arg,
+                        &mut loccontext,
+                    )?;
+                }
+                _ => unreachable!(),
+            }
+
+            let typcollation = lsyscache::get_typcollation(expr_type(node))?;
+            if OidIsValid(typcollation) {
+                if loccontext.strength > CollateStrength::None {
+                    collation = loccontext.collation;
+                    strength = loccontext.strength;
+                    location = loccontext.location;
+                } else {
+                    collation = typcollation;
+                    strength = CollateStrength::Implicit;
+                    location = expr_location(node);
+                }
+            } else {
+                collation = InvalidOid;
+                strength = CollateStrength::None;
+                location = -1;
+            }
+
+            let set_coll = if strength == CollateStrength::Conflict { InvalidOid } else { collation };
+            let input_coll = if loccontext.strength == CollateStrength::Conflict {
+                InvalidOid
+            } else {
+                loccontext.collation
+            };
+            // SAFETY: parse analysis exclusively owns the just-built tree; the
+            // child borrows above have ended.
+            unsafe {
+                match tag {
+                    NodeTag::T_OpExpr => node
+                        .with_mut::<types_nodes::OpExpr, _>(|o| {
+                            o.opcollid = set_coll;
+                            o.inputcollid = input_coll;
+                        })
+                        .unwrap(),
+                    NodeTag::T_RelabelType => node
+                        .with_mut::<types_nodes::RelabelType, _>(|r| r.resultcollid = set_coll)
+                        .unwrap(),
+                    _ => unreachable!(),
+                }
+            }
         }
         other => panic!(
             "assign_collations_walker (parse_collate.c): general-case arm for {other:?} \

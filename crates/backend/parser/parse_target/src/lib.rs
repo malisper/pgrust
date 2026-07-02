@@ -6,11 +6,11 @@ mod tests;
 use mcx::Mcx;
 use parse_expr::{expr_type, transformExpr};
 use parser_small1::{ParseExprKind, ParseState};
-use types_core::catalog::UNKNOWNOID;
+use types_core::catalog::{TEXTOID, UNKNOWNOID};
 use types_core::AttrNumber;
 use types_error::PgResult;
 use types_nodes::rawnodes::A_Expr_Kind;
-use types_nodes::{Node, NodeList, NodeTag};
+use types_nodes::{CoercionForm, Node, NodeList, NodeTag, TargetEntry};
 
 pub fn transformTargetList<'mcx>(
     mcx: Mcx<'mcx>,
@@ -107,16 +107,30 @@ pub fn markTargetListOrigins<'mcx>(
 }
 
 pub fn resolveTargetListUnknowns<'mcx>(
-    _pstate: &ParseState<'_, 'mcx>,
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
     targetlist: &NodeList<'mcx>,
 ) -> PgResult<()> {
     for tle_node in targetlist {
         let tle = tle_node.as_target_entry().unwrap();
-        if expr_type(tle.expr) == UNKNOWNOID {
-            panic!(
-                "resolveTargetListUnknowns (parse_target.c): coerce_type \
-                 UNKNOWN→TEXT literal path unported — unit backend-parser-coerce"
-            );
+        let restype = expr_type(tle.expr);
+        if restype == UNKNOWNOID {
+            let coerced = coerce::coerce_type(
+                mcx,
+                pstate,
+                tle.expr,
+                restype,
+                TEXTOID,
+                -1,
+                coerce::COERCION_IMPLICIT,
+                CoercionForm::COERCE_IMPLICIT_CAST,
+                -1,
+            )?;
+            // SAFETY: parse analysis holds exclusive access to the targetlist
+            // it just built; the `tle` borrow is not used past this point.
+            unsafe {
+                tle_node.with_mut::<TargetEntry, _>(|t| t.expr = coerced).unwrap();
+            }
         }
     }
     Ok(())

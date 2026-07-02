@@ -1,6 +1,6 @@
 use datum::Datum;
 use mcx::{Mcx, MemoryContext};
-use types_core::catalog::INT4OID;
+use types_core::catalog::{INT4OID, TEXTOID, UNKNOWNOID};
 use types_core::InvalidOid;
 use types_nodes::nodes_enums::CmdType;
 use types_nodes::parsenodes::{QuerySource, TransactionStmt};
@@ -94,8 +94,8 @@ fn select_with_alias_and_multiple_columns() {
 }
 
 #[test]
-#[should_panic(expected = "make_op")]
-fn select_1_plus_1_arms_transform_then_panics_at_oper_lookup() {
+fn select_1_plus_1_end_to_end() {
+    install_type_fixture();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let name = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "+" }).unwrap()).unwrap();
@@ -111,19 +111,42 @@ fn select_1_plus_1_arms_transform_then_panics_at_oper_lookup() {
     let target = Node::mk_res_target(mcx, None, NodeList::nil(), Some(aexpr), 7).unwrap();
     let raw_stmt = raw(select_stmt(mcx, &[target]), 12);
 
-    let _ = analyze(mcx, "SELECT 1 + 1", &raw_stmt);
+    let q = analyze(mcx, "SELECT 1 + 1", &raw_stmt);
+
+    assert_eq!(q.commandType, CmdType::CMD_SELECT);
+    let te = q.targetList.nth(0).as_target_entry().unwrap();
+    assert_eq!(te.resname, Some("?column?"));
+    let op = te.expr.as_op_expr().unwrap();
+    assert_eq!((op.opno, op.opfuncid, op.opresulttype), (551, 177, INT4OID));
+    assert!(!op.opretset);
+    assert_eq!((op.opcollid, op.inputcollid), (InvalidOid, InvalidOid));
+    assert_eq!(op.args.len(), 2);
+    let lhs = op.args.nth(0).as_const().unwrap();
+    assert_eq!((lhs.consttype, lhs.constvalue), (INT4OID, Datum::from_i32(1)));
+    assert_eq!(op.location, 9);
 }
 
 #[test]
-#[should_panic(expected = "coerce_type")]
-fn select_string_panics_at_unknown_resolution() {
+fn select_string_resolves_unknown_to_text() {
+    install_type_fixture();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let sconst =
         Node::mk_a_const(mcx, Some(ValUnion::String(PgStr { sval: "x" })), 7).unwrap();
     let target = Node::mk_res_target(mcx, None, NodeList::nil(), Some(sconst), 7).unwrap();
     let raw_stmt = raw(select_stmt(mcx, &[target]), 10);
-    let _ = analyze(mcx, "SELECT 'x'", &raw_stmt);
+
+    let q = analyze(mcx, "SELECT 'x'", &raw_stmt);
+
+    let te = q.targetList.nth(0).as_target_entry().unwrap();
+    let c = te.expr.as_const().unwrap();
+    assert_eq!(c.consttype, TEXTOID);
+    assert_eq!((c.constlen, c.constbyval, c.constisnull), (-1, false, false));
+    assert_eq!(c.constcollid, 100);
+    assert_eq!(c.location, 7);
+    // SAFETY: the datum points at a flat 4B-header text varlena owned by mcx.
+    let v = unsafe { datum::varlena::VarlenaRef::from_ptr(c.constvalue.as_usize() as *const u8) };
+    assert_eq!(v.data(), b"x");
 }
 
 #[test]
@@ -182,13 +205,77 @@ fn install_type_fixture() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        syscache_seams::lookup_pg_type_shape::set(|_| {
+        syscache_seams::lookup_pg_type_shape::set(|typid| {
             Ok(Some(types_tuple::PgTypeShape {
-                typlen: 4,
-                typbyval: true,
+                typlen: if typid == TEXTOID { -1 } else { 4 },
+                typbyval: typid != TEXTOID,
                 typalign: b'i' as i8,
                 typstorage: b'p' as i8,
-                typcollation: InvalidOid,
+                typcollation: if typid == TEXTOID { 100 } else { InvalidOid },
+            }))
+        });
+        syscache_seams::pg_type_base_shape::set(|typid| {
+            Ok(Some(syscache_seams::PgTypeBaseShape {
+                typtype: if typid == UNKNOWNOID { b'p' as i8 } else { b'b' as i8 },
+                typbasetype: InvalidOid,
+                typtypmod: -1,
+                typelem: InvalidOid,
+                typsubscript: InvalidOid,
+            }))
+        });
+        syscache_seams::pg_type_io_shape::set(|typid| {
+            Ok((typid == TEXTOID).then_some(syscache_seams::PgTypeIoShape {
+                oid: TEXTOID,
+                typinput: 46,
+                typoutput: 47,
+                typreceive: 2414,
+                typsend: 2415,
+                typmodin: InvalidOid,
+                typmodout: InvalidOid,
+                typelem: InvalidOid,
+                typlen: -1,
+                typbyval: false,
+                typalign: b'i' as i8,
+                typdelim: b',' as i8,
+                typisdefined: true,
+            }))
+        });
+        miscinit_seams::get_user_id::set(|| 10);
+        syscache_seams::lookup_pg_operator_candidates::set(|mcx, name, l, r| {
+            let mut v = mcx::vec_with_capacity_in(mcx, 1)?;
+            if name == "+" && l == INT4OID && r == INT4OID {
+                v.push((551, 11));
+            }
+            Ok(v)
+        });
+        syscache_seams::lookup_pg_operator_shape::set(|opno| {
+            Ok((opno == 551).then_some(syscache_seams::PgOperatorShape {
+                oprleft: INT4OID,
+                oprright: INT4OID,
+                oprresult: INT4OID,
+                oprcom: 551,
+                oprnegate: InvalidOid,
+                oprcode: 177,
+                oprrest: InvalidOid,
+                oprjoin: InvalidOid,
+                oprcanmerge: false,
+                oprcanhash: false,
+            }))
+        });
+        syscache_seams::pg_operator_name_candidates_exist::set(|name, _| Ok(name == "+"));
+        syscache_seams::lookup_pg_proc_shape::set(|funcid| {
+            Ok((funcid == 177).then_some(syscache_seams::PgProcShape {
+                pronamespace: 11,
+                prorettype: INT4OID,
+                provariadic: InvalidOid,
+                prosupport: InvalidOid,
+                pronargs: 2,
+                prokind: b'f' as i8,
+                provolatile: b'i' as i8,
+                proparallel: b's' as i8,
+                proretset: false,
+                proisstrict: true,
+                proleakproof: false,
             }))
         });
     });

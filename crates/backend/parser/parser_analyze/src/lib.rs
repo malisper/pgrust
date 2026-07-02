@@ -304,7 +304,7 @@ fn transformSelectStmt<'mcx>(
     qry.windowClause = transformWindowDefinitions(pstate, &windowdefs, &mut qry.targetList)?;
 
     if pstate.p_resolve_unknowns {
-        resolveTargetListUnknowns(pstate, &qry.targetList)?;
+        resolveTargetListUnknowns(mcx, pstate, &qry.targetList)?;
     }
 
     qry.rtable = mem::take(&mut pstate.p_rtable);

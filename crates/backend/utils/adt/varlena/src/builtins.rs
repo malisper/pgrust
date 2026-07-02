@@ -1,6 +1,6 @@
 //! fmgr wrappers (`fc_*`) + the `VARLENA_BUILTINS` table for fmgr-core.
 //! Not registrable yet (no frame allocation/wire convention — the int.c
-//! recv/send precedent): textin/textcat/*recv/*send, byteain/byteacat,
+//! recv/send precedent): textcat/*recv/*send, byteain/byteacat,
 //! unknownin, bttextsortsupport; value cores live in the crate root.
 
 use datum::Datum;
@@ -116,6 +116,19 @@ pub fn fc_bytea_smaller(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
     })
 }
 
+// Result varlena lives in the resolved FmgrInfo's scratch (see OutBuf);
+// callers that outlive the FmgrInfo copy it out (C pallocs per call).
+pub fn fc_textin(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 of textin is a non-null cstring (strict fn).
+    let s = unsafe { fcinfo.arg_cstring(0) }.to_bytes();
+    let buf = out_scratch(flinfo, "textin");
+    buf.clear();
+    buf.reserve(datum::varlena::VARHDRSZ + s.len());
+    buf.extend_from_slice(&datum::varlena::set_varsize_4b(datum::varlena::VARHDRSZ + s.len()));
+    buf.extend_from_slice(s);
+    Ok(Datum::from_usize(buf.as_ptr() as usize))
+}
+
 pub fn fc_textout(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
     let payload = unsafe { fcinfo.arg_varlena_packed(0) }.data();
@@ -185,6 +198,7 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
 // pg_proc.dat rows (all proisstrict, none retset); 1317/1369/1381 = textlen aliases.
 pub const VARLENA_BUILTINS: &[FmgrBuiltin] = &[
     b(31, "byteaout", 1, fc_byteaout),
+    b(46, "textin", 1, fc_textin),
     b(47, "textout", 1, fc_textout),
     b(67, "texteq", 2, fc_texteq),
     b(110, "unknownout", 1, fc_unknownout),

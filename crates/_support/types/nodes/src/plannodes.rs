@@ -143,6 +143,20 @@ pub struct SeqScan<'mcx> {
     pub scan: Scan<'mcx>,
 }
 
+/// `indexorderdir` carries the C ScanDirection value (-1/0/1).
+#[derive(Default)]
+#[repr(C)]
+pub struct IndexScan<'mcx> {
+    pub scan: Scan<'mcx>,
+    pub indexid: u32,
+    pub indexqual: NodeList<'mcx>,
+    pub indexqualorig: NodeList<'mcx>,
+    pub indexorderby: NodeList<'mcx>,
+    pub indexorderbyorig: NodeList<'mcx>,
+    pub indexorderbyops: OidList<'mcx>,
+    pub indexorderdir: i32,
+}
+
 /// # Safety: implementors must be `repr(C)` with a [`Plan`] first field, so a
 /// `NodeRep<Self>` reads as a `NodeRep<Plan>` prefix, and their tag must be
 /// listed in [`is_plan_tag`].
@@ -158,10 +172,15 @@ unsafe impl<'mcx> NodeVariant<'mcx> for Result<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for SeqScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_SeqScan;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for IndexScan<'mcx> {
+    const TAG: NodeTag = NodeTag::T_IndexScan;
+}
 // SAFETY: repr(C), Plan first (offset asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for Result<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
 unsafe impl<'mcx> PlanVariant<'mcx> for SeqScan<'mcx> {}
+// SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
+unsafe impl<'mcx> PlanVariant<'mcx> for IndexScan<'mcx> {}
 
 const _: () = {
     assert!(offset_of!(Result, plan) == 0);
@@ -173,10 +192,14 @@ const _: () = {
     assert!(
         offset_of!(NodeRep<SeqScan>, payload) == offset_of!(NodeRep<Plan>, payload)
     );
+    assert!(offset_of!(IndexScan, scan) == 0);
+    assert!(
+        offset_of!(NodeRep<IndexScan>, payload) == offset_of!(NodeRep<Plan>, payload)
+    );
 };
 
 fn is_plan_tag(tag: NodeTag) -> bool {
-    matches!(tag, NodeTag::T_Result | NodeTag::T_SeqScan)
+    matches!(tag, NodeTag::T_Result | NodeTag::T_SeqScan | NodeTag::T_IndexScan)
 }
 
 impl<'mcx> Node<'mcx> {
@@ -192,6 +215,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_seq_scan(self) -> Option<&'mcx SeqScan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_index_scan(self) -> Option<&'mcx IndexScan<'mcx>> {
         self.as_variant()
     }
 

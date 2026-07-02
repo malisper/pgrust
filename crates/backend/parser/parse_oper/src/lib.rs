@@ -1,0 +1,361 @@
+#![allow(non_snake_case)]
+
+#[cfg(test)]
+mod tests;
+
+use std::cell::RefCell;
+use std::mem::ManuallyDrop;
+
+use cache_syscache::cacheinfo::{CASTSOURCETARGET, OPERNAMENSP};
+use coerce::COERCION_IMPLICIT;
+use datum::Datum;
+use mcx::{Mcx, MemoryContext, PgHashMap};
+use parser_small1::{parser_errposition, ParseState};
+use syscache_seams::PgOperatorShape;
+use types_core::catalog::UNKNOWNOID;
+use types_core::{InvalidOid, Oid, OidIsValid, ParseLoc};
+use types_error::{
+    ErrorLocation, PgError, PgResult, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_FUNCTION, ERROR,
+};
+use types_nodes::{CoercionForm, Node, NodeList, OpExpr};
+
+pub struct Operator {
+    pub oid: Oid,
+    pub shape: PgOperatorShape,
+}
+
+const NAMEDATALEN: usize = 64;
+const MAX_CACHED_PATH_LEN: usize = 16;
+
+// Zero-filled unused bytes keep hashing stable (C's MemSet'd OprCacheKey).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct OprCacheKey {
+    oprname: [u8; NAMEDATALEN],
+    left_arg: Oid,
+    right_arg: Oid,
+    search_path: [Oid; MAX_CACHED_PATH_LEN],
+}
+
+struct OprCache {
+    map: PgHashMap<'static, OprCacheKey, Oid>,
+}
+
+thread_local! {
+    static OPR_CACHE: RefCell<Option<ManuallyDrop<OprCache>>> = const { RefCell::new(None) };
+}
+
+fn with_opr_cache<R>(f: impl FnOnce(&mut PgHashMap<'static, OprCacheKey, Oid>) -> R) -> PgResult<R> {
+    OPR_CACHE.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            // The context is leaked (backend-lifetime table, C: hash_create in
+            // TopMemoryContext); flush on pg_operator and pg_cast changes.
+            let mcx = Box::leak(Box::new(MemoryContext::new("Operator lookup cache"))).mcx();
+            inval::invalidate::CacheRegisterSyscacheCallback(
+                OPERNAMENSP,
+                InvalidateOprCacheCallBack,
+                Datum::null(),
+            )?;
+            inval::invalidate::CacheRegisterSyscacheCallback(
+                CASTSOURCETARGET,
+                InvalidateOprCacheCallBack,
+                Datum::null(),
+            )?;
+            *slot = Some(ManuallyDrop::new(OprCache {
+                map: PgHashMap::with_capacity_in(256, mcx),
+            }));
+        }
+        Ok(f(&mut slot.as_mut().unwrap().map))
+    })
+}
+
+fn InvalidateOprCacheCallBack(_arg: Datum, _cacheid: i32, _hashvalue: u32) {
+    OPR_CACHE.with(|cell| {
+        if let Some(cache) = cell.borrow_mut().as_mut() {
+            cache.map.clear();
+        }
+    });
+}
+
+fn name_parts<'a, 'mcx>(opname: &NodeList<'mcx>, buf: &'a mut [&'mcx str; 4]) -> &'a [&'mcx str] {
+    let n = opname.len().min(buf.len());
+    for (i, slot) in buf.iter_mut().enumerate().take(n) {
+        *slot = opname.nth(i).as_string().expect("operator name list holds String nodes").sval;
+    }
+    &buf[..n]
+}
+
+fn make_oper_cache_key(
+    key: &mut OprCacheKey,
+    parts: &[&str],
+    ltypeId: Oid,
+    rtypeId: Oid,
+) -> PgResult<bool> {
+    let (schemaname, opername) = catalog_namespace::DeconstructQualifiedName(parts)?;
+
+    let n = opername.len().min(NAMEDATALEN - 1);
+    key.oprname[..n].copy_from_slice(&opername.as_bytes()[..n]);
+    key.left_arg = ltypeId;
+    key.right_arg = rtypeId;
+
+    if let Some(schemaname) = schemaname {
+        key.search_path[0] = catalog_namespace::LookupExplicitNamespace(schemaname, false)?;
+    } else if catalog_namespace::fetch_search_path_array(&mut key.search_path)?
+        > MAX_CACHED_PATH_LEN
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn binary_oper_exact(parts: &[&str], arg1: Oid, arg2: Oid) -> PgResult<Oid> {
+    let mut was_unknown = false;
+    let (mut arg1, mut arg2) = (arg1, arg2);
+    if arg1 == UNKNOWNOID && arg2 != InvalidOid {
+        arg1 = arg2;
+        was_unknown = true;
+    } else if arg2 == UNKNOWNOID && arg1 != InvalidOid {
+        arg2 = arg1;
+        was_unknown = true;
+    }
+
+    let result = catalog_namespace::OpernameGetOprid(parts, arg1, arg2)?;
+    if OidIsValid(result) {
+        return Ok(result);
+    }
+
+    if was_unknown {
+        let basetype = lsyscache::getBaseType(arg1)?;
+        if basetype != arg1 {
+            let result = catalog_namespace::OpernameGetOprid(parts, basetype, basetype)?;
+            if OidIsValid(result) {
+                return Ok(result);
+            }
+        }
+    }
+    Ok(InvalidOid)
+}
+
+pub fn oper(
+    pstate: &ParseState<'_, '_>,
+    opname: &NodeList<'_>,
+    ltypeId: Oid,
+    rtypeId: Oid,
+    noError: bool,
+    location: ParseLoc,
+) -> PgResult<Option<Operator>> {
+    let mut buf = [""; 4];
+    let parts = name_parts(opname, &mut buf);
+
+    let mut key = OprCacheKey {
+        oprname: [0; NAMEDATALEN],
+        left_arg: InvalidOid,
+        right_arg: InvalidOid,
+        search_path: [InvalidOid; MAX_CACHED_PATH_LEN],
+    };
+    let key_ok = make_oper_cache_key(&mut key, parts, ltypeId, rtypeId)?;
+
+    if key_ok {
+        let cached = with_opr_cache(|map| map.get(&key).copied().unwrap_or(InvalidOid))?;
+        if OidIsValid(cached) {
+            if let Some(shape) = syscache_seams::lookup_pg_operator_shape::call(cached)? {
+                return Ok(Some(Operator { oid: cached, shape }));
+            }
+        }
+    }
+
+    let operOid = binary_oper_exact(parts, ltypeId, rtypeId)?;
+    if !OidIsValid(operOid) {
+        let (_, opername) = catalog_namespace::DeconstructQualifiedName(parts)?;
+        if syscache_seams::pg_operator_name_candidates_exist::call(opername, b'b' as i8)? {
+            panic!(
+                "oper (parse_oper.c): inexact operator resolution (OpernameGetCandidates/\
+                 oper_select_candidate/func_match_argtypes) unported — unit \
+                 backend-parser-parse-oper; operator \"{opername}\" ({ltypeId}, {rtypeId})"
+            );
+        }
+    }
+
+    let shape =
+        if OidIsValid(operOid) { syscache_seams::lookup_pg_operator_shape::call(operOid)? } else { None };
+    match shape {
+        Some(shape) => {
+            if key_ok {
+                with_opr_cache(|map| map.insert(key, operOid))?;
+            }
+            Ok(Some(Operator { oid: operOid, shape }))
+        }
+        None if noError => Ok(None),
+        None => Err(op_error(pstate, parts, ltypeId, rtypeId, location)),
+    }
+}
+
+/// C `make_op`, with the operand types precomputed by the caller (exprType's
+/// closed-set slice lives in parse_expr pending backend-nodes-core).
+#[allow(clippy::too_many_arguments)]
+pub fn make_op<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    opname: &NodeList<'mcx>,
+    ltree: Option<Node<'mcx>>,
+    rtree: Option<Node<'mcx>>,
+    ltypeId: Oid,
+    rtypeId: Oid,
+    last_srf: Option<Node<'mcx>>,
+    location: ParseLoc,
+) -> PgResult<Node<'mcx>> {
+    let Some(rtree) = rtree else {
+        return Err(postfix_error());
+    };
+    let Some(ltree) = ltree else {
+        panic!(
+            "make_op (parse_oper.c): prefix operator arm (left_oper) unported — unit \
+             backend-parser-parse-oper"
+        );
+    };
+
+    let op = oper(pstate, opname, ltypeId, rtypeId, false, location)?
+        .expect("oper(noError=false) always returns an operator");
+
+    if !OidIsValid(op.shape.oprcode) {
+        let mut buf = [""; 4];
+        let parts = name_parts(opname, &mut buf);
+        return Err(shell_error(pstate, parts, &op, location));
+    }
+
+    let actual_arg_types = [ltypeId, rtypeId];
+    let mut declared_arg_types = [op.shape.oprleft, op.shape.oprright];
+
+    let rettype = coerce::enforce_generic_type_consistency(
+        &actual_arg_types,
+        &mut declared_arg_types,
+        op.shape.oprresult,
+        false,
+    );
+
+    // make_fn_arguments (parse_func.c) hosted here until backend-parser-func.
+    let ltree = coerce_arg(mcx, pstate, ltree, actual_arg_types[0], declared_arg_types[0])?;
+    let rtree = coerce_arg(mcx, pstate, rtree, actual_arg_types[1], declared_arg_types[1])?;
+
+    let opretset = lsyscache::get_func_retset(op.shape.oprcode)?;
+    if opretset {
+        let _ = last_srf;
+        panic!(
+            "make_op (parse_oper.c): set-returning operator needs check_srf_call_placement \
+             (parse_func.c) — unit backend-parser-func"
+        );
+    }
+
+    let args = NodeList::make2(mcx, ltree, rtree)?;
+    Node::mk(
+        mcx,
+        OpExpr {
+            opno: op.oid,
+            opfuncid: op.shape.oprcode,
+            opresulttype: rettype,
+            opretset,
+            opcollid: InvalidOid,
+            inputcollid: InvalidOid,
+            args,
+            location,
+        },
+    )
+}
+
+fn coerce_arg<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+    node: Node<'mcx>,
+    actual: Oid,
+    declared: Oid,
+) -> PgResult<Node<'mcx>> {
+    if actual == declared {
+        return Ok(node);
+    }
+    coerce::coerce_type(
+        mcx,
+        pstate,
+        node,
+        actual,
+        declared,
+        -1,
+        COERCION_IMPLICIT,
+        CoercionForm::COERCE_IMPLICIT_CAST,
+        -1,
+    )
+}
+
+// C renders type names via format_type_be (format_type.c, unported).
+fn op_signature_string(parts: &[&str], arg1: Oid, arg2: Oid) -> String {
+    let opname = parts.join(".");
+    if OidIsValid(arg1) {
+        format!("{arg1} {opname} {arg2}")
+    } else {
+        format!("{opname} {arg2}")
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn op_error(
+    pstate: &ParseState<'_, '_>,
+    parts: &[&str],
+    arg1: Oid,
+    arg2: Oid,
+    location: ParseLoc,
+) -> Box<PgError> {
+    let encoding = mbutils::GetDatabaseEncoding();
+    let hint = if !OidIsValid(arg1) || !OidIsValid(arg2) {
+        "No operator matches the given name and argument type. \
+         You might need to add an explicit type cast."
+    } else {
+        "No operator matches the given name and argument types. \
+         You might need to add explicit type casts."
+    };
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_FUNCTION)
+            .errmsg(format!(
+                "operator does not exist: {}",
+                op_signature_string(parts, arg1, arg2)
+            ))
+            .errhint(hint.to_string())
+            .errposition(parser_errposition(pstate, location, encoding))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_oper.c", 0, "op_error")),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn shell_error(
+    pstate: &ParseState<'_, '_>,
+    parts: &[&str],
+    op: &Operator,
+    location: ParseLoc,
+) -> Box<PgError> {
+    let encoding = mbutils::GetDatabaseEncoding();
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_FUNCTION)
+            .errmsg(format!(
+                "operator is only a shell: {}",
+                op_signature_string(parts, op.shape.oprleft, op.shape.oprright)
+            ))
+            .errposition(parser_errposition(pstate, location, encoding))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_oper.c", 0, "make_op")),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn postfix_error() -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg("postfix operators are not supported".to_string())
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_oper.c", 0, "make_op")),
+    )
+}

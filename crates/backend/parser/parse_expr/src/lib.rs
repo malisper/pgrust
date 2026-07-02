@@ -114,6 +114,7 @@ fn transformAExprOp<'mcx>(
         );
     }
 
+    let last_srf = pstate.p_last_srf;
     let lexpr = match lexpr {
         Some(l) => Some(transformExprRecurse(mcx, pstate, l)?),
         None => None,
@@ -122,13 +123,10 @@ fn transformAExprOp<'mcx>(
         Some(r) => Some(transformExprRecurse(mcx, pstate, r)?),
         None => None,
     };
-    let _ = (lexpr, rexpr, pstate.p_last_srf);
 
-    panic!(
-        "transformAExprOp (parse_expr.c): make_op (parse_oper.c) operator lookup \
-         (oper()/OprCacheHash/OpernameGetOprid via OPERNAMENSP) unported — \
-         unit backend-parser-parse-oper"
-    );
+    let ltypeId = lexpr.map_or(types_core::InvalidOid, expr_type);
+    let rtypeId = rexpr.map_or(types_core::InvalidOid, expr_type);
+    parse_oper::make_op(mcx, pstate, &a.name, lexpr, rexpr, ltypeId, rtypeId, last_srf, a.location)
 }
 
 fn transformParamRef<'mcx>(

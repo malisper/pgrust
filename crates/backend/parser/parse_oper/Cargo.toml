@@ -7,3 +7,22 @@ publish.workspace = true
 [lib]
 name = "parse_oper"
 path = "src/lib.rs"
+
+[dependencies]
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+coerce = { path = "../coerce" }
+datum = { path = "../../../_support/types/datum" }
+elog = { path = "../../utils/error/elog" }
+inval = { path = "../../utils/cache/inval" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+mbutils = { path = "../../utils/mb/mbutils" }
+mcx = { path = "../../../_support/mcx" }
+parser_small1 = { path = "../parser_small1" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+
+[dev-dependencies]
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
