@@ -38,8 +38,7 @@ seam_core::seam!(
     pub fn pgstat_count_checkpointer_slru_written()
 );
 
-// pgstat_init_relation (pgstat_relation.c): returns C's rel->pgstat_enabled
-// (RELKIND_HAS_STORAGE && pgstat_track_counts); pgstat keys pgstat_info by relid.
+// Returns C's rel->pgstat_enabled; pgstat keys pgstat_info by relid.
 seam_core::seam!(
     pub fn pgstat_init_relation(relid: types_core::Oid, relkind: u8) -> bool
 );
