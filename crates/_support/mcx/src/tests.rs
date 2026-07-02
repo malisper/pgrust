@@ -990,7 +990,7 @@ mod acct_pool {
     // A recycled allocation has no live handle, so reuse cannot alias.
     #[test]
     fn recycle_is_use_after_reset_free() {
-        let pool = AcctPool { stack: core::cell::UnsafeCell::new(alloc::vec::Vec::new()) };
+        let pool = AcctPool::new(alloc::vec::Vec::new());
 
         let p1: NonNull<AcctInner> = acct_take_from(&pool);
         unsafe {
@@ -1105,4 +1105,79 @@ mod acct_pool {
         let ctx = MemoryContext::new_bump("not-forget");
         let _ = arena_box_in_forget(ctx.mcx(), Node { oid: 0, cost: 0.0 }).unwrap();
     }
+}
+
+#[test]
+fn generation_context_fifo_and_reset_roundtrip() {
+    let mut ctx = MemoryContext::new_generation("gen");
+    {
+        let mcx = ctx.mcx();
+        let mut ring: std::collections::VecDeque<PgBox<'_, [u64; 8]>> =
+            std::collections::VecDeque::new();
+        for i in 0..32u64 {
+            ring.push_back(box_new_in(mcx, [i; 8]));
+        }
+        let peak0 = ctx.stats().arena_footprint;
+        for i in 0..10_000u64 {
+            ring.push_back(box_new_in(mcx, [i; 8]));
+            let old = ring.pop_front().unwrap();
+            assert_eq!(old[0], if i < 32 { i } else { i - 32 });
+            drop(old);
+        }
+        assert!(ctx.stats().arena_footprint <= peak0.max(4 * 8192));
+        assert!(ctx.used() > 0);
+    }
+    ctx.reset();
+    assert_eq!(ctx.used(), 0);
+    let p = box_new_in(ctx.mcx(), 7u64);
+    assert_eq!(*p, 7);
+    assert!(ctx.used() > 0, "keeper re-charged on first post-reset alloc");
+}
+
+#[test]
+fn generation_vec_grows_and_frees_through_context() {
+    let ctx = MemoryContext::new_generation("gen");
+    let mcx = ctx.mcx();
+    let mut v: PgVec<u64> = PgVec::new_in(mcx);
+    for i in 0..10_000u64 {
+        v.push(i);
+    }
+    assert_eq!(v.iter().sum::<u64>(), 10_000 * 9_999 / 2);
+    drop(v);
+    let s = ctx.stats();
+    assert!(s.arena_footprint > 0);
+}
+
+#[test]
+fn slab_context_boxes_roundtrip_and_uncharge() {
+    let mut ctx = MemoryContext::new_slab("slab", 8 * 1024, core::mem::size_of::<[u64; 9]>());
+    {
+        let mcx = ctx.mcx();
+        let mut held: std::vec::Vec<PgBox<'_, [u64; 9]>> = std::vec::Vec::new();
+        for i in 0..5_000u64 {
+            held.push(box_new_in(mcx, [i; 9]));
+        }
+        let peak = ctx.used();
+        assert!(peak >= 5_000 * 72);
+        for (i, b) in held.drain(..).enumerate() {
+            assert_eq!(b[0], i as u64);
+            drop(b);
+        }
+        // Up to 10 empty blocks stay parked; the rest uncharge.
+        assert!(ctx.used() <= 10 * 8 * 1024, "used {} after drain", ctx.used());
+        assert!(ctx.used() < peak);
+    }
+    ctx.reset();
+    assert_eq!(ctx.used(), 0);
+    assert_eq!(ctx.stats().arena_footprint, 0);
+}
+
+#[test]
+fn slab_child_context_reports_in_parent_subtree() {
+    let parent = MemoryContext::new("parent");
+    let child = parent.new_child_slab("slab-child", 8 * 1024, 64);
+    let b = box_new_in(child.mcx(), [0u8; 64]);
+    assert!(parent.subtree_used() >= 8 * 1024);
+    drop(b);
+    drop(child);
 }

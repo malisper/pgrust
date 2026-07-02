@@ -136,22 +136,20 @@ impl Block {
 }
 
 // Recycled-keeper pool — aset.c's context_freelists[]; all keepers are INIT_BLOCK_SIZE.
+// PoolMutex, not bare UnsafeCell: dependent crates' libtest threads share the
+// pool (notes/mcx-acct-pool-test-race.md); create/drop only, so the lock is cold.
 struct KeeperPool {
-    stack: core::cell::UnsafeCell<alloc::vec::Vec<alloc::vec::Vec<Block>>>,
+    stack: crate::PoolMutex<alloc::vec::Vec<alloc::vec::Vec<Block>>>,
 }
 
-// SAFETY: the single-threaded backend never accesses `stack` concurrently.
-unsafe impl Sync for KeeperPool {}
-
 static KEEPER_POOL: KeeperPool = KeeperPool {
-    stack: core::cell::UnsafeCell::new(alloc::vec::Vec::new()),
+    stack: crate::PoolMutex::new(alloc::vec::Vec::new()),
 };
 
 impl KeeperPool {
     #[inline]
     fn with<R>(&self, f: impl FnOnce(&mut alloc::vec::Vec<alloc::vec::Vec<Block>>) -> R) -> R {
-        // SAFETY: single-threaded backend — no other live access to `stack`.
-        f(unsafe { &mut *self.stack.get() })
+        self.stack.with(f)
     }
 
     fn take(&self) -> alloc::vec::Vec<Block> {
@@ -286,6 +284,9 @@ impl AllocSet {
         self.mem_allocated
     }
 
+    // always-inline: with 7 Backend variants LLVM's budget outlines this behind a
+    // call in hot lanes (+17 instr/op on aset_alloc_8, Graviton job -1783030007).
+    #[inline(always)]
     pub(crate) fn alloc(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         // ZST: dangling aligned pointer, no pool state touched (as allocator_api2 expects).
         if layout.size() == 0 {
@@ -595,9 +596,7 @@ mod tests {
 
     #[test]
     fn keeper_pool_caps_and_recycles() {
-        let pool = KeeperPool {
-            stack: core::cell::UnsafeCell::new(alloc::vec::Vec::new()),
-        };
+        let pool = KeeperPool { stack: crate::PoolMutex::new(alloc::vec::Vec::new()) };
         pool.recycle(alloc::vec::Vec::new());
         assert_eq!(pool.with(|s| s.len()), 1);
         let _ = pool.take();
