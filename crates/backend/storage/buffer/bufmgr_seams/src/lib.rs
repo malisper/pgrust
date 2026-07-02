@@ -154,5 +154,35 @@ seam_core::seam!(
     pub fn flush_relations_all_buffers(rlocators: &[RelFileLocatorBackend]) -> PgResult<()>
 );
 
+seam_core::seam!(
+    // MarkBufferDirtyHint(buffer, buffer_std) (bufmgr.c); can ereport via
+    // XLogSaveBufferForHint.
+    pub fn mark_buffer_dirty_hint(buffer: Buffer, buffer_std: bool) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // BufferIsPermanent(buffer) (bufmgr.c): Assert-only in C.
+    pub fn buffer_is_permanent(buffer: Buffer) -> bool
+);
+
+seam_core::seam!(
+    pub fn buffer_get_lsn_atomic(buffer: Buffer) -> XLogRecPtr
+);
+
+seam_core::seam!(
+    // ReleaseAndReadBuffer(buffer, relation, blockNum): keeps the pin when the
+    // held buffer already holds blockNum (C's same-block fastpath lives inside).
+    pub fn release_and_read_buffer<'a, 'mcx>(
+        buffer: Buffer,
+        rel: &'a types_rel::RelationData<'mcx>,
+        block_num: BlockNumber,
+    ) -> PgResult<Buffer>
+);
+
 pub mod pin;
 pub use pin::{BufferPin, ContentLockGuard};
+
+seam_core::seam!(
+    // CheckPointBuffers(flags) (bufmgr.c).
+    pub fn check_point_buffers(flags: i32) -> PgResult<()>
+);

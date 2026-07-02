@@ -12,7 +12,7 @@ use crate::buf_hdr::{
     BufferDesc, BufferDescriptorGetBuffer, GetBufferDescriptor, LockBufHdr, UnlockBufHdr,
     WaitBufHdrUnlocked,
 };
-use crate::privref::{self, GetPrivateRefCount, ReservePrivateRefCountEntry};
+use crate::privref::{self, GetPrivateRefCount};
 
 #[inline]
 pub(crate) fn buffer_usagecount(state: u32) -> u32 {
@@ -31,6 +31,7 @@ pub(crate) fn buffer_refcount(state: u32) -> u32 {
 // M2 swizzling decision site: under swizzling + optimistic latching a warm-hit
 // pin becomes a version-validated read with zero atomics; this CAS (and the
 // UnpinBuffer decrement) is what that replaces (docs/beat-postgres.md §7).
+#[inline]
 pub(crate) fn PinBuffer(desc: &BufferDesc, strategy: &BufferAccessStrategy) -> bool {
     let b = BufferDescriptorGetBuffer(desc);
     let already = privref::track_pin(b);
@@ -74,6 +75,7 @@ pub(crate) fn PinBuffer(desc: &BufferDesc, strategy: &BufferAccessStrategy) -> b
 /// PinBuffer_Locked (bufmgr.c): pin while holding the header lock; the
 /// refcount bump and the unlock are one release store. Caller guarantees no
 /// preexisting local pin and has reserved a private refcount entry.
+#[inline]
 pub(crate) fn PinBuffer_Locked(desc: &BufferDesc) {
     let b = BufferDescriptorGetBuffer(desc);
     debug_assert!(GetPrivateRefCount(b) == 0);
@@ -84,7 +86,7 @@ pub(crate) fn PinBuffer_Locked(desc: &BufferDesc) {
     debug_assert!(prev == 0);
 }
 
-/// UnpinBuffer / UnpinBufferNoOwner (bufmgr.c).
+#[inline]
 pub(crate) fn UnpinBuffer(desc: &BufferDesc) {
     let b = BufferDescriptorGetBuffer(desc);
     if !privref::track_unpin(b) {
@@ -116,7 +118,6 @@ pub(crate) fn UnpinBuffer(desc: &BufferDesc) {
     }
 }
 
-/// WakePinCountWaiter (bufmgr.c).
 fn WakePinCountWaiter(desc: &BufferDesc) {
     let mut buf_state = LockBufHdr(desc);
     if buf_state & BM_PIN_COUNT_WAITER != 0 && buffer_refcount(buf_state) == 1 {
@@ -130,7 +131,6 @@ fn WakePinCountWaiter(desc: &BufferDesc) {
     UnlockBufHdr(desc, buf_state);
 }
 
-/// ReleaseBuffer (bufmgr.c).
 pub fn ReleaseBuffer(buffer: Buffer) -> PgResult<()> {
     if !BufferIsValid(buffer) {
         return Err(bad_buffer_id(buffer, "ReleaseBuffer"));
@@ -142,7 +142,6 @@ pub fn ReleaseBuffer(buffer: Buffer) -> PgResult<()> {
     Ok(())
 }
 
-/// IncrBufferRefCount (bufmgr.c).
 pub fn IncrBufferRefCount(buffer: Buffer) {
     assert!(BufferIsPinned(buffer), "buffer {buffer} is not pinned");
     if buffer < 0 {
@@ -151,7 +150,6 @@ pub fn IncrBufferRefCount(buffer: Buffer) {
     privref::track_incr(buffer);
 }
 
-/// BufferIsPinned (bufmgr.c macro; shared-buffer arm).
 pub fn BufferIsPinned(buffer: Buffer) -> bool {
     if !BufferIsValid(buffer) {
         return false;
@@ -162,7 +160,6 @@ pub fn BufferIsPinned(buffer: Buffer) -> bool {
     GetPrivateRefCount(buffer) > 0
 }
 
-/// CheckBufferIsPinnedOnce (bufmgr.c).
 pub fn CheckBufferIsPinnedOnce(buffer: Buffer) -> PgResult<()> {
     if buffer < 0 {
         panic!(
@@ -235,5 +232,3 @@ pub(crate) fn bad_buffer_id(buffer: Buffer, funcname: &'static str) -> Box<types
             .with_error_location(ErrorLocation::new("bufmgr.c", 0, funcname)),
     )
 }
-
-pub(crate) use ReservePrivateRefCountEntry as reserve_entry;

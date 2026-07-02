@@ -16,6 +16,7 @@ guc_tables = { path = "../../../utils/misc/guc_tables" }
 init_small = { path = "../../../utils/init/init_small" }
 lwlock = { path = "../../lmgr/lwlock" }
 mcx = { path = "../../../../_support/mcx" }
+relmapper_seams = { path = "../../../utils/cache/relmapper_seams" }
 seam_core = { path = "../../../../_support/seam_core" }
 smgr_seams = { path = "../../smgr/smgr_seams" }
 types_core = { path = "../../../../_support/types/types_core" }
@@ -23,3 +24,6 @@ types_error = { path = "../../../../_support/types/types_error" }
 types_hash = { path = "../../../../_support/types/hash" }
 types_rel = { path = "../../../../_support/types/rel" }
 types_storage = { path = "../../../../_support/types/types_storage" }
+
+[dev-dependencies]
+shmem_seams = { path = "../../ipc/shmem_seams" }

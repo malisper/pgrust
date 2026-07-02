@@ -8,7 +8,7 @@ use lwlock::{
 use types_core::{BlockNumber, Buffer, BufferIsValid, XLogRecPtr, BLCKSZ};
 use types_error::{ErrorLocation, PgResult, ERROR};
 use types_storage::buf::{
-    buftag, BM_DIRTY, BM_JUST_DIRTIED, BM_LOCKED, BM_PIN_COUNT_WAITER, BM_VALID,
+    buftag, BM_DIRTY, BM_JUST_DIRTIED, BM_LOCKED, BM_PIN_COUNT_WAITER,
 };
 use types_storage::bufpage::PageRef;
 
@@ -32,7 +32,6 @@ fn shared_desc(buffer: Buffer) -> &'static BufferDesc {
     GetBufferDescriptor(buffer - 1)
 }
 
-/// LockBuffer (bufmgr.c).
 pub fn LockBuffer(buffer: Buffer, mode: i32) -> PgResult<()> {
     debug_assert!(BufferIsPinned(buffer));
     if buffer < 0 {
@@ -54,7 +53,6 @@ pub fn LockBuffer(buffer: Buffer, mode: i32) -> PgResult<()> {
     }
 }
 
-/// ConditionalLockBuffer (bufmgr.c).
 pub fn ConditionalLockBuffer(buffer: Buffer) -> PgResult<bool> {
     debug_assert!(BufferIsPinned(buffer));
     if buffer < 0 {
@@ -87,7 +85,7 @@ pub fn LockBufferForCleanup(buffer: Buffer) -> PgResult<()> {
             return Err(Box::new(
                 types_error::PgError::new(
                     ERROR,
-                    "multiple backends attempting to wait for pincount 1".into(),
+                    "multiple backends attempting to wait for pincount 1",
                 )
                 .with_error_location(ErrorLocation::new("bufmgr.c", 0, "LockBufferForCleanup")),
             ));
@@ -102,13 +100,11 @@ pub fn LockBufferForCleanup(buffer: Buffer) -> PgResult<()> {
     }
 }
 
-/// UnlockReleaseBuffer (bufmgr.c).
 pub fn UnlockReleaseBuffer(buffer: Buffer) -> PgResult<()> {
     LockBuffer(buffer, BUFFER_LOCK_UNLOCK)?;
     ReleaseBuffer(buffer)
 }
 
-/// MarkBufferDirty (bufmgr.c).
 pub fn MarkBufferDirty(buffer: Buffer) -> PgResult<()> {
     if !BufferIsValid(buffer) {
         return Err(bad_buffer_id(buffer, "MarkBufferDirty"));
@@ -150,13 +146,11 @@ pub fn MarkBufferDirty(buffer: Buffer) -> PgResult<()> {
     Ok(())
 }
 
-/// BufferGetBlockNumber (bufmgr.c).
 pub fn BufferGetBlockNumber(buffer: Buffer) -> BlockNumber {
     debug_assert!(BufferIsPinned(buffer));
     shared_desc(buffer).tag().blockNum
 }
 
-/// BufferGetTag (bufmgr.c).
 pub fn BufferGetTag(buffer: Buffer) -> buftag {
     debug_assert!(BufferIsPinned(buffer));
     shared_desc(buffer).tag()

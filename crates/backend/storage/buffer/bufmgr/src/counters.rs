@@ -2,9 +2,8 @@ use core::cell::Cell;
 
 use init_small::globals;
 
-// pgBufferUsage's shared_blks_* stores (instrument.h) — C pays these on every
-// hit/read/dirty; the executor's instrumentation unit will consume them.
-// pgstat_count_io_op / per-relation pgstat counts pend the pgstat unit.
+// pgBufferUsage's shared_blks_* stores (instrument.h); pgstat_count_io_op /
+// per-relation counts pend the pgstat unit.
 thread_local! {
     static SHARED_BLKS_HIT: Cell<u64> = const { Cell::new(0) };
     static SHARED_BLKS_READ: Cell<u64> = const { Cell::new(0) };
