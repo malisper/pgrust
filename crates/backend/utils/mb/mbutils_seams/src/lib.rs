@@ -40,3 +40,8 @@ seam_core::seam!(
     // C: GetDatabaseEncoding() (mbutils.c); the i32 is a pg_enc.
     pub fn get_database_encoding() -> i32
 );
+
+seam_core::seam!(
+    // C: GetDatabaseEncodingName() (mbutils.c).
+    pub fn get_database_encoding_name() -> &'static str
+);

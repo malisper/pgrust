@@ -20,8 +20,7 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // GUC_check_errdetail(...) (utils/misc/guc.c): record the errdetail a
-    // check hook reports before returning false.
+    // GUC_check_errdetail (guc.c).
     pub fn guc_check_errdetail(detail: String)
 );
 

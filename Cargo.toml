@@ -63,8 +63,14 @@ members = [
     "crates/backend/storage/file/file_seams",
     "crates/backend/storage/sync/sync_seams",
     "crates/backend/access/transam/transam_xlog_seams",
+    "crates/backend/access/transam/transam_xlog",
     "crates/backend/access/transam/xlogutils_seams",
     "crates/backend/access/transam/slru",
+    "crates/backend/access/transam/clog",
+    "crates/backend/access/transam/subtrans",
+    "crates/backend/access/transam/transam",
+    "crates/backend/access/transam/varsup",
+    "crates/backend/commands/dbcommands_seams",
     "crates/backend/utils/cache/relcache_seams",
     "crates/backend/utils/cache/syscache_seams",
     "crates/backend/utils/cache/inval_seams",
@@ -219,6 +225,10 @@ members = [
     "crates/common/pglz",
     "crates/backend/access/common/detoast",
     "crates/backend/access/common/toast_internals_seams",
+    "crates/backend/utils/init/postinit",
+    "crates/backend/utils/init/postinit_seams",
+    "crates/backend/postmaster/postmaster",
+    "crates/backend/postmaster/postmaster_seams",
 ]
 
 [workspace.package]
