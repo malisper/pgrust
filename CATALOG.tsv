@@ -32,7 +32,7 @@ backend-access-brin-scan	*/brin.c	todo			fabled:backend-access-brin-scan
 backend-access-brin-tuple	*/brin_tuple.c	todo			fabled:backend-access-brin-tuple
 backend-access-brin-validate	*/brin_validate.c	todo			fabled:backend-access-brin-validate
 backend-access-brin-xlog	*/brin_xlog.c	todo			fabled:backend-access-brin-xlog; m1-dep(stub-ok)
-backend-access-common-heaptuple	*/heaptuple.c	todo			fabled:backend-access-common-heaptuple; m1-spine; codec lane partial in substrate crate datum
+backend-access-common-heaptuple	src/backend/access/common/heaptuple.c(form lane)	benched	heaptuple	0.90x-slope-instr/0.98-1.07x-ns	m1-spine; single-pass contiguous image build (rule 8), whole-word header stores (V2 forwarding); per-attr slope 0.90x beats C, form4/modify/datasize at-or-below parity; form1 +23-instr fixed tax documented (mcx charge + PgResult plumbing); 15 tests, Miri SB+TB; docs/benchmarks/heaptuple.md
 backend-access-common-indextuple	*/indextuple.c	todo			fabled:backend-access-common-indextuple; m1-dep(stub-ok)
 backend-access-common-more	*/printtup.c,*/reloptions.c	todo			fabled:backend-access-common-reloptions + backend-access-common-printtup; m1-spine
 backend-access-common-next	*/attmap.c,*/syncscan.c,*/tupconvert.c	todo			fabled:backend-access-common-next; m1-spine
