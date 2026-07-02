@@ -140,6 +140,8 @@ fn RelationReloadIndexInfo(
         rd_indcollation: ii.indcollation,
         rd_options: scanned.options,
         pgstat_enabled: Cell::new(false),
+        rd_amcache: Default::default(),
+        rd_supportinfo: Default::default(),
     });
     copy_preserved(held, &newrel);
     with_state(|st| {
@@ -188,6 +190,8 @@ fn RelationReloadNailed(
         rd_indcollation: mcx::PgVec::new_in(cache_mcx()),
         rd_options: scanned.options,
         pgstat_enabled: Cell::new(false),
+        rd_amcache: Default::default(),
+        rd_supportinfo: Default::default(),
     });
     copy_preserved(held, &newrel);
     with_state(|st| {
@@ -275,7 +279,7 @@ pub fn RelationCacheInvalidateEntry(relationId: Oid) -> PgResult<()> {
 // pg_class, pg_class_oid_index, other nailed, rest — catalogs must be current
 // before they reload the rest. Phase lists are transient per call, as in C.
 pub fn RelationCacheInvalidate(debug_discard: bool) -> PgResult<()> {
-    relmapper_seams::relation_map_invalidate_all::call();
+    relmapper_seams::relation_map_invalidate_all::call()?;
 
     let snapshot: Vec<(Oid, Rc<RelationData<'static>>, bool)> = with_state(|st| {
         st.id_cache.iter().map(|(k, e)| (*k, Rc::clone(&e.rel), e.nailed)).collect()

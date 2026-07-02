@@ -153,7 +153,7 @@ fn install() {
         miscinit_seams::is_bootstrap_processing_mode::set(|| false);
         xact_seams::is_transaction_state::set(|| IN_XACT.with(|c| c.get()));
         xact_seams::get_current_sub_transaction_id::set(|| CUR_SUBID.with(|c| c.get()));
-        relmapper_seams::relation_map_invalidate_all::set(|| ());
+        relmapper_seams::relation_map_invalidate_all::set(|| Ok(()));
         relmapper_seams::relation_map_initialize::set(|| ());
         relmapper_seams::relation_map_initialize_phase2::set(|| Ok(()));
         relmapper_seams::relation_map_initialize_phase3::set(|| Ok(()));

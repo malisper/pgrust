@@ -140,6 +140,8 @@ fn finish_relcache_entries() -> PgResult<()> {
             rd_indcollation: mcx::PgVec::new_in(crate::cache_mcx()),
             rd_options: scanned.options,
             pgstat_enabled: core::cell::Cell::new(rel.pgstat_enabled.get()),
+            rd_amcache: Default::default(),
+            rd_supportinfo: Default::default(),
         });
         with_state(|st| {
             if let Some(ent) = st.id_cache.get_mut(&relid) {

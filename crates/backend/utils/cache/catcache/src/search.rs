@@ -6,14 +6,12 @@ use types_error::PgResult;
 use types_scan::scankey::ScanKeyData;
 use types_tuple::{HeapTupleData, ItemPointerData};
 
-use crate::compute::{compute_hash_value, hash_index, int4_hash, CatCKey, CCFastKind};
+use crate::compute::{fast_hash_probe, hash_index, int4_hash, CatCKey, CCFastKind};
 use crate::graph::{create_entry_negative, create_entry_positive, remove_ct};
-use crate::{compare_tuple, init, with_state, NONE};
+use crate::{eq_stored, init, with_state, NONE};
 
-/// A pinned positive cache entry — C's returned `HeapTuple` (`&ct->tuple`)
-/// plus the `ct->refcount++` it carries. Release with [`ReleaseCatCache`];
-/// the entry's image cannot be freed while pinned (invalidation only marks
-/// it dead), so [`tuple`](CatCTuple::tuple) borrows are stable.
+/// A pinned positive entry (C's `&ct->tuple` + `ct->refcount++`); release
+/// with [`ReleaseCatCache`]. The image cannot be freed while pinned.
 #[must_use]
 pub struct CatCTuple {
     pub(crate) cache_id: i32,
@@ -60,96 +58,227 @@ fn pin_entry(cache_id: i32, slot: u32, ct: &crate::CatCTup) -> CatCTuple {
     }
 }
 
-/// The bucket probe (`SearchCatCacheInternal` up to the miss tail): ONE
-/// non-reentrant state borrow does hash → bucket walk → compare →
-/// move-to-front → refcount bump. No seam, no allocation.
-#[inline]
-fn probe(cache_id: i32, mut nkeys: i32, keys: &[CatCKey<'_>; 4]) -> Probe {
+/// Search-key carrier, monomorphized per arity: constant `nkeys`, no
+/// key-array materialization. `NKEYS == -1` reads the cache's `cc_nkeys`.
+pub(crate) trait ProbeKeys {
+    const NKEYS: i32;
+    fn slot(&self, i: usize) -> CatCKey<'_>;
+    fn to_array(&self) -> [CatCKey<'_>; 4];
+}
+
+pub(crate) struct K1<'a>(pub CatCKey<'a>);
+pub(crate) struct K2<'a>(pub CatCKey<'a>, pub CatCKey<'a>);
+pub(crate) struct K3<'a>(pub CatCKey<'a>, pub CatCKey<'a>, pub CatCKey<'a>);
+pub(crate) struct K4<'a>(pub [CatCKey<'a>; 4]);
+pub(crate) struct KDyn<'a>(pub [CatCKey<'a>; 4]);
+
+impl ProbeKeys for K1<'_> {
+    const NKEYS: i32 = 1;
+    #[inline(always)]
+    fn slot(&self, i: usize) -> CatCKey<'_> {
+        debug_assert_eq!(i, 0);
+        self.0
+    }
+    fn to_array(&self) -> [CatCKey<'_>; 4] {
+        [self.0, CatCKey::UNUSED, CatCKey::UNUSED, CatCKey::UNUSED]
+    }
+}
+
+impl ProbeKeys for K2<'_> {
+    const NKEYS: i32 = 2;
+    #[inline(always)]
+    fn slot(&self, i: usize) -> CatCKey<'_> {
+        if i == 0 {
+            self.0
+        } else {
+            self.1
+        }
+    }
+    fn to_array(&self) -> [CatCKey<'_>; 4] {
+        [self.0, self.1, CatCKey::UNUSED, CatCKey::UNUSED]
+    }
+}
+
+impl ProbeKeys for K3<'_> {
+    const NKEYS: i32 = 3;
+    #[inline(always)]
+    fn slot(&self, i: usize) -> CatCKey<'_> {
+        match i {
+            0 => self.0,
+            1 => self.1,
+            _ => self.2,
+        }
+    }
+    fn to_array(&self) -> [CatCKey<'_>; 4] {
+        [self.0, self.1, self.2, CatCKey::UNUSED]
+    }
+}
+
+impl ProbeKeys for K4<'_> {
+    const NKEYS: i32 = 4;
+    #[inline(always)]
+    fn slot(&self, i: usize) -> CatCKey<'_> {
+        self.0[i]
+    }
+    fn to_array(&self) -> [CatCKey<'_>; 4] {
+        self.0
+    }
+}
+
+impl ProbeKeys for KDyn<'_> {
+    const NKEYS: i32 = -1;
+    #[inline(always)]
+    fn slot(&self, i: usize) -> CatCKey<'_> {
+        self.0[i]
+    }
+    fn to_array(&self) -> [CatCKey<'_>; 4] {
+        self.0
+    }
+}
+
+/// `CatalogCacheComputeHashValue`.
+#[inline(always)]
+fn hash_keys<K: ProbeKeys>(kinds: &[CCFastKind; 4], nkeys: i32, keys: &K) -> u32 {
+    let mut hash: u32 = 0;
+    if nkeys == 4 {
+        hash ^= fast_hash_probe(kinds[3], &keys.slot(3)).rotate_left(24);
+    }
+    if nkeys >= 3 {
+        hash ^= fast_hash_probe(kinds[2], &keys.slot(2)).rotate_left(16);
+    }
+    if nkeys >= 2 {
+        hash ^= fast_hash_probe(kinds[1], &keys.slot(1)).rotate_left(8);
+    }
+    hash ^ fast_hash_probe(kinds[0], &keys.slot(0))
+}
+
+/// `CatalogCacheCompareTuple`.
+#[inline(always)]
+fn keys_match<K: ProbeKeys>(
+    kinds: &[CCFastKind; 4],
+    nkeys: i32,
+    ct: &crate::CatCTup,
+    keys: &K,
+) -> bool {
+    for i in 0..nkeys as usize {
+        if !eq_stored(kinds[i], ct.keys[i], ct.payload, &keys.slot(i)) {
+            return false;
+        }
+    }
+    true
+}
+
+/// `SearchCatCacheInternal` up to the miss tail: ONE non-reentrant borrow,
+/// one cache resolve, then hash → bucket walk → compare → move-to-front →
+/// refcount bump; the walk indexes uncheckedly (arena kernel invariants).
+#[inline(always)]
+fn probe<K: ProbeKeys>(cache_id: i32, keys: &K) -> Probe {
     with_state(|st| {
-        let cache = st.cache(cache_id);
+        let cache = st.cache_mut(cache_id);
         if !cache.initialized {
             return Probe::NeedsInit;
         }
-        if nkeys == 0 {
-            nkeys = cache.cc_nkeys;
-        }
-        debug_assert_eq!(cache.cc_nkeys, nkeys);
+        let nkeys = if K::NKEYS > 0 { K::NKEYS } else { cache.cc_nkeys };
+        debug_assert!(K::NKEYS < 0 || cache.cc_nkeys == nkeys);
         let kinds = cache.cc_kind;
 
-        // Monomorphized single-Oid-key lane (RELOID/TYPEOID/PROCOID/... —
-        // the dominant catalog probe): no per-key dispatch at all.
-        if nkeys == 1 {
-            if let (CCFastKind::Int4, CatCKey::Value(w)) = (kinds[0], &keys[0]) {
-                return probe_1_int4(st, cache_id, *w);
+        // Monomorphized single-Oid-key lane; rare non-Oid 1-key kinds go
+        // through the outlined walk so this closure stays inlinable.
+        if K::NKEYS == 1 {
+            if let (CCFastKind::Int4, CatCKey::Value(w)) = (kinds[0], keys.slot(0)) {
+                return probe_1_int4(cache_id, cache, w);
             }
+            return probe_walk_outlined(cache_id, cache, nkeys, &kinds, keys);
         }
 
-        let hash_value = compute_hash_value(&kinds, nkeys, keys);
-        let bi = hash_index(hash_value, cache.cc_nbuckets);
-        let mut cur = cache.cc_bucket[bi];
-        while cur != NONE {
-            let ct = &cache.tuples[cur as usize];
-            if !ct.dead
-                && ct.hash_value == hash_value
-                && compare_tuple(&kinds, nkeys, ct, keys)
-            {
-                return found(st, cache_id, bi, cur);
-            }
-            cur = ct.next;
-        }
-        Probe::Miss { hash_value }
+        probe_walk(cache_id, cache, nkeys, &kinds, keys)
     })
 }
 
-#[inline]
-fn probe_1_int4(st: &mut crate::CatCacheState<'_>, cache_id: i32, w: Datum) -> Probe {
-    let cache = st.cache(cache_id);
-    let hash_value = int4_hash(w);
+#[inline(always)]
+fn probe_walk<K: ProbeKeys>(
+    cache_id: i32,
+    cache: &mut crate::CatCache<'_>,
+    nkeys: i32,
+    kinds: &[CCFastKind; 4],
+    keys: &K,
+) -> Probe {
+    let hash_value = hash_keys(kinds, nkeys, keys);
     let bi = hash_index(hash_value, cache.cc_nbuckets);
-    let key = w.as_i32();
-    let mut cur = cache.cc_bucket[bi];
+    // SAFETY: bi is masked below cc_bucket.len() (power-of-two invariant).
+    let mut cur = unsafe { *cache.cc_bucket.get_unchecked(bi) };
     while cur != NONE {
-        let ct = &cache.tuples[cur as usize];
-        if !ct.dead && ct.hash_value == hash_value && ct.keys[0].as_i32() == key {
-            return found(st, cache_id, bi, cur);
+        // SAFETY: bucket links reference live slots (arena invariant).
+        let ct = unsafe { cache.tuples.get_unchecked(cur as usize) };
+        if !ct.dead && ct.hash_value == hash_value && keys_match(kinds, nkeys, ct, keys) {
+            return found(cache_id, cache, bi, cur);
         }
         cur = ct.next;
     }
     Probe::Miss { hash_value }
 }
 
-#[inline]
-fn found(st: &mut crate::CatCacheState<'_>, cache_id: i32, bucket: usize, slot: u32) -> Probe {
-    let cache = st.cache_mut(cache_id);
+#[inline(never)]
+fn probe_walk_outlined<K: ProbeKeys>(
+    cache_id: i32,
+    cache: &mut crate::CatCache<'_>,
+    nkeys: i32,
+    kinds: &[CCFastKind; 4],
+    keys: &K,
+) -> Probe {
+    probe_walk(cache_id, cache, nkeys, kinds, keys)
+}
+
+#[inline(always)]
+fn probe_1_int4(cache_id: i32, cache: &mut crate::CatCache<'_>, w: Datum) -> Probe {
+    let hash_value = int4_hash(w);
+    let bi = hash_index(hash_value, cache.cc_nbuckets);
+    let key = w.as_i32();
+    // SAFETY: bi is masked below cc_bucket.len() (power-of-two invariant).
+    let mut cur = unsafe { *cache.cc_bucket.get_unchecked(bi) };
+    while cur != NONE {
+        // SAFETY: bucket links reference live slots (arena invariant).
+        let ct = unsafe { cache.tuples.get_unchecked(cur as usize) };
+        if !ct.dead && ct.hash_value == hash_value && ct.keys[0].as_i32() == key {
+            return found(cache_id, cache, bi, cur);
+        }
+        cur = ct.next;
+    }
+    Probe::Miss { hash_value }
+}
+
+#[inline(always)]
+fn found(cache_id: i32, cache: &mut crate::CatCache<'_>, bucket: usize, slot: u32) -> Probe {
     cache.ct_move_head(bucket, slot);
-    let ct = &mut cache.tuples[slot as usize];
+    // SAFETY: `slot` came off the bucket walk (live slot).
+    let ct = unsafe { cache.tuples.get_unchecked_mut(slot as usize) };
     if ct.negative {
         Probe::NegativeHit
     } else {
-        // C: ResourceOwnerEnlarge + ct->refcount++ + RememberCatCacheRef.
-        // The pin is the guard; resowner integration follows the xact unit.
+        // C also RememberCatCacheRef's; resowner integration follows xact.
         ct.refcount += 1;
         Probe::Hit(pin_entry(cache_id, slot, ct))
     }
 }
 
-fn search_internal(cache_id: i32, nkeys: i32, keys: &[CatCKey<'_>; 4]) -> PgResult<Option<CatCTuple>> {
+#[inline(always)]
+fn search_internal<K: ProbeKeys>(cache_id: i32, keys: &K) -> PgResult<Option<CatCTuple>> {
     loop {
-        match probe(cache_id, nkeys, keys) {
+        match probe(cache_id, keys) {
             Probe::Hit(t) => return Ok(Some(t)),
             Probe::NegativeHit => return Ok(None),
-            Probe::Miss { hash_value } => return search_miss(cache_id, hash_value, keys),
+            Probe::Miss { hash_value } => {
+                return search_miss(cache_id, hash_value, &keys.to_array());
+            }
             Probe::NeedsInit => {
-                // Init opens the catalog relation (re-enters the catcache via
-                // the relcache path); runs with no state borrow, then retry.
+                /* init re-enters the catcache; no borrow held, then retry */
                 init::catalog_cache_initialize_cache(cache_id)?;
             }
         }
     }
 }
 
-/// `SearchCatCacheMiss` — scan the catalog through the genam seam, insert a
-/// positive entry (or a negative one), return the pinned copy.
+/// `SearchCatCacheMiss`.
 #[cold]
 fn search_miss(cache_id: i32, hash_value: u32, keys: &[CatCKey<'_>; 4]) -> PgResult<Option<CatCTuple>> {
     let (reloid, indexoid, nkeys) = with_state(|st| {
@@ -166,7 +295,7 @@ fn search_miss(cache_id: i32, hash_value: u32, keys: &[CatCKey<'_>; 4]) -> PgRes
 
     let mut slot: Option<u32> = None;
     let mut create_err: Option<Box<types_error::PgError>> = None;
-    genam_seams::systable_scan_catalog::call(
+    crate::scan_seam::systable_scan_catalog::call(
         &relation,
         indexoid,
         index_ok,
@@ -207,9 +336,7 @@ fn search_miss(cache_id: i32, hash_value: u32, keys: &[CatCKey<'_>; 4]) -> PgRes
     Ok(None)
 }
 
-/// `memcpy(cur_skey, cache->cc_skey, ...)` + `sk_argument = v1..vN`. By-ref
-/// arguments are framed into the on-disk image the index comparator reads
-/// (NameData buffer / 4-byte-header varlena / oidvector), in `scan_mcx`.
+/// `memcpy(cur_skey, cc_skey, ...)` + `sk_argument = v1..vN`.
 pub(crate) fn build_scan_keys<'mcx>(
     scan_mcx: mcx::Mcx<'mcx>,
     cache_id: i32,
@@ -265,9 +392,7 @@ fn frame_scan_arg(mcx: mcx::Mcx<'_>, kind: CCFastKind, key: &CatCKey<'_>) -> PgR
             Datum::from_usize(buf.as_ptr() as usize)
         }
         CCFastKind::OidVector => {
-            // Rebuild the oidvector image (buildoidvector): 24-byte ArrayType
-            // header {vl_len, ndim=1, dataoffset=0, elemtype=OIDOID, dim1,
-            // lbound1=0} + element words.
+            // buildoidvector: 24-byte ArrayType header + element words.
             let b = key.bytes();
             let dim1 = (b.len() / 4) as i32;
             let total = 24 + b.len();
@@ -296,15 +421,17 @@ pub fn SearchCatCache(
     v3: CatCKey<'_>,
     v4: CatCKey<'_>,
 ) -> PgResult<Option<CatCTuple>> {
-    search_internal(cache_id, 0, &[v1, v2, v3, v4])
+    search_internal(cache_id, &KDyn([v1, v2, v3, v4]))
 }
 
+#[inline]
 pub fn SearchCatCache1(cache_id: i32, v1: CatCKey<'_>) -> PgResult<Option<CatCTuple>> {
-    search_internal(cache_id, 1, &[v1, CatCKey::UNUSED, CatCKey::UNUSED, CatCKey::UNUSED])
+    search_internal(cache_id, &K1(v1))
 }
 
+#[inline]
 pub fn SearchCatCache2(cache_id: i32, v1: CatCKey<'_>, v2: CatCKey<'_>) -> PgResult<Option<CatCTuple>> {
-    search_internal(cache_id, 2, &[v1, v2, CatCKey::UNUSED, CatCKey::UNUSED])
+    search_internal(cache_id, &K2(v1, v2))
 }
 
 pub fn SearchCatCache3(
@@ -313,7 +440,7 @@ pub fn SearchCatCache3(
     v2: CatCKey<'_>,
     v3: CatCKey<'_>,
 ) -> PgResult<Option<CatCTuple>> {
-    search_internal(cache_id, 3, &[v1, v2, v3, CatCKey::UNUSED])
+    search_internal(cache_id, &K3(v1, v2, v3))
 }
 
 pub fn SearchCatCache4(
@@ -323,14 +450,17 @@ pub fn SearchCatCache4(
     v3: CatCKey<'_>,
     v4: CatCKey<'_>,
 ) -> PgResult<Option<CatCTuple>> {
-    search_internal(cache_id, 4, &[v1, v2, v3, v4])
+    search_internal(cache_id, &K4([v1, v2, v3, v4]))
 }
 
 /// `ReleaseCatCache(tuple)`.
+#[inline]
 pub fn ReleaseCatCache(tuple: CatCTuple) {
     with_state(|st| {
         let cache = st.cache_mut(tuple.cache_id);
-        let ct = &mut cache.tuples[tuple.slot as usize];
+        // SAFETY: a pin is only minted by `pin_entry` over a live slot, and a
+        // pinned slot (refcount > 0) is never freed until this release.
+        let ct = unsafe { cache.tuples.get_unchecked_mut(tuple.slot as usize) };
         debug_assert!(ct.refcount > 0);
         ct.refcount -= 1;
         if ct.dead && ct.refcount == 0 && ct.c_list == NONE {
@@ -352,6 +482,6 @@ pub fn GetCatCacheHashValue(
     }
     Ok(with_state(|st| {
         let c = st.cache(cache_id);
-        compute_hash_value(&c.cc_kind, c.cc_nkeys, &[v1, v2, v3, v4])
+        hash_keys(&c.cc_kind, c.cc_nkeys, &KDyn([v1, v2, v3, v4]))
     }))
 }

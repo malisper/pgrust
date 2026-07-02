@@ -7,3 +7,4 @@ publish.workspace = true
 [dependencies]
 seam_core = { path = "../../../../_support/seam_core" }
 types_portal = { path = "../../../../_support/types/portal" }
+types_error = { path = "../../../../_support/types/types_error" }

@@ -1,6 +1,7 @@
 seam_core::seam!(
-    // RelationMapInvalidate(shared) (relmapper.c): flag-setting only, no ereport.
-    pub fn relation_map_invalidate(shared: bool)
+    // RelationMapInvalidate(shared) (relmapper.c): reloads the map file when
+    // loaded; the read can FATAL, carried as Err.
+    pub fn relation_map_invalidate(shared: bool) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -16,7 +17,8 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    pub fn relation_map_invalidate_all()
+    // Same FATAL-able reload as relation_map_invalidate.
+    pub fn relation_map_invalidate_all() -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -38,4 +40,12 @@ seam_core::seam!(
         shared: bool,
         immediate: bool,
     ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    // RelationMapOidToFilenumber (relmapper.c): pure in-memory lookup, no ereport.
+    pub fn relation_map_oid_to_filenumber(
+        relation_id: types_core::Oid,
+        shared: bool,
+    ) -> types_core::RelFileNumber
 );

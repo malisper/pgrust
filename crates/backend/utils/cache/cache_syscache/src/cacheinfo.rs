@@ -102,174 +102,89 @@ pub const USERMAPPINGOID: i32 = 83;
 pub const USERMAPPINGUSERSERVER: i32 = 84;
 
 pub const CACHEINFO: [CacheDesc; SYS_CACHE_SIZE] = [
-    // AGGFNOID
     CacheDesc { reloid: 2600, indoid: 2650, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 16 },
-    // AMNAME
     CacheDesc { reloid: 2601, indoid: 2651, nkeys: 1, key: [2, 0, 0, 0], nbuckets: 4 },
-    // AMOID
     CacheDesc { reloid: 2601, indoid: 2652, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 4 },
-    // AMOPOPID
     CacheDesc { reloid: 2602, indoid: 2654, nkeys: 3, key: [7, 6, 2, 0], nbuckets: 64 },
-    // AMOPSTRATEGY
     CacheDesc { reloid: 2602, indoid: 2653, nkeys: 4, key: [2, 3, 4, 5], nbuckets: 64 },
-    // AMPROCNUM
     CacheDesc { reloid: 2603, indoid: 2655, nkeys: 4, key: [2, 3, 4, 5], nbuckets: 16 },
-    // ATTNAME
     CacheDesc { reloid: 1249, indoid: 2658, nkeys: 2, key: [1, 2, 0, 0], nbuckets: 32 },
-    // ATTNUM
     CacheDesc { reloid: 1249, indoid: 2659, nkeys: 2, key: [1, 5, 0, 0], nbuckets: 128 },
-    // AUTHMEMMEMROLE
     CacheDesc { reloid: 1261, indoid: 2695, nkeys: 3, key: [3, 2, 4, 0], nbuckets: 8 },
-    // AUTHMEMROLEMEM
     CacheDesc { reloid: 1261, indoid: 2694, nkeys: 3, key: [2, 3, 4, 0], nbuckets: 8 },
-    // AUTHNAME
     CacheDesc { reloid: 1260, indoid: 2676, nkeys: 1, key: [2, 0, 0, 0], nbuckets: 8 },
-    // AUTHOID
     CacheDesc { reloid: 1260, indoid: 2677, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 8 },
-    // CASTSOURCETARGET
     CacheDesc { reloid: 2605, indoid: 2661, nkeys: 2, key: [2, 3, 0, 0], nbuckets: 256 },
-    // CLAAMNAMENSP
     CacheDesc { reloid: 2616, indoid: 2686, nkeys: 3, key: [2, 3, 4, 0], nbuckets: 8 },
-    // CLAOID
     CacheDesc { reloid: 2616, indoid: 2687, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 8 },
-    // COLLNAMEENCNSP
     CacheDesc { reloid: 3456, indoid: 3164, nkeys: 3, key: [2, 7, 3, 0], nbuckets: 8 },
-    // COLLOID
     CacheDesc { reloid: 3456, indoid: 3085, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 8 },
-    // CONDEFAULT
     CacheDesc { reloid: 2607, indoid: 2668, nkeys: 4, key: [3, 5, 6, 1], nbuckets: 8 },
-    // CONNAMENSP
     CacheDesc { reloid: 2607, indoid: 2669, nkeys: 2, key: [2, 3, 0, 0], nbuckets: 8 },
-    // CONSTROID
     CacheDesc { reloid: 2606, indoid: 2667, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 16 },
-    // CONVOID
     CacheDesc { reloid: 2607, indoid: 2670, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 8 },
-    // DATABASEOID
     CacheDesc { reloid: 1262, indoid: 2672, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 4 },
-    // DEFACLROLENSPOBJ
     CacheDesc { reloid: 826, indoid: 827, nkeys: 3, key: [2, 3, 4, 0], nbuckets: 8 },
-    // ENUMOID
     CacheDesc { reloid: 3501, indoid: 3502, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 8 },
-    // ENUMTYPOIDNAME
     CacheDesc { reloid: 3501, indoid: 3503, nkeys: 2, key: [2, 4, 0, 0], nbuckets: 8 },
-    // EVENTTRIGGERNAME
     CacheDesc { reloid: 3466, indoid: 3467, nkeys: 1, key: [2, 0, 0, 0], nbuckets: 8 },
-    // EVENTTRIGGEROID
     CacheDesc { reloid: 3466, indoid: 3468, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 8 },
-    // EXTENSIONNAME
     CacheDesc { reloid: 3079, indoid: 3081, nkeys: 1, key: [2, 0, 0, 0], nbuckets: 2 },
-    // EXTENSIONOID
     CacheDesc { reloid: 3079, indoid: 3080, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 2 },
-    // FOREIGNDATAWRAPPERNAME
     CacheDesc { reloid: 2328, indoid: 548, nkeys: 1, key: [2, 0, 0, 0], nbuckets: 2 },
-    // FOREIGNDATAWRAPPEROID
     CacheDesc { reloid: 2328, indoid: 112, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 2 },
-    // FOREIGNSERVERNAME
     CacheDesc { reloid: 1417, indoid: 549, nkeys: 1, key: [2, 0, 0, 0], nbuckets: 2 },
-    // FOREIGNSERVEROID
     CacheDesc { reloid: 1417, indoid: 113, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 2 },
-    // FOREIGNTABLEREL
     CacheDesc { reloid: 3118, indoid: 3119, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 4 },
-    // INDEXRELID
     CacheDesc { reloid: 2610, indoid: 2679, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 64 },
-    // LANGNAME
     CacheDesc { reloid: 2612, indoid: 2681, nkeys: 1, key: [2, 0, 0, 0], nbuckets: 4 },
-    // LANGOID
     CacheDesc { reloid: 2612, indoid: 2682, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 4 },
-    // NAMESPACENAME
     CacheDesc { reloid: 2615, indoid: 2684, nkeys: 1, key: [2, 0, 0, 0], nbuckets: 4 },
-    // NAMESPACEOID
     CacheDesc { reloid: 2615, indoid: 2685, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 16 },
-    // OPERNAMENSP
     CacheDesc { reloid: 2617, indoid: 2689, nkeys: 4, key: [2, 8, 9, 3], nbuckets: 256 },
-    // OPEROID
     CacheDesc { reloid: 2617, indoid: 2688, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 32 },
-    // OPFAMILYAMNAMENSP
     CacheDesc { reloid: 2753, indoid: 2754, nkeys: 3, key: [2, 3, 4, 0], nbuckets: 8 },
-    // OPFAMILYOID
     CacheDesc { reloid: 2753, indoid: 2755, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 8 },
-    // PARAMETERACLNAME
     CacheDesc { reloid: 6243, indoid: 6246, nkeys: 1, key: [2, 0, 0, 0], nbuckets: 4 },
-    // PARAMETERACLOID
     CacheDesc { reloid: 6243, indoid: 6247, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 4 },
-    // PARTRELID
     CacheDesc { reloid: 3350, indoid: 3351, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 32 },
-    // PROCNAMEARGSNSP
     CacheDesc { reloid: 1255, indoid: 2691, nkeys: 3, key: [2, 20, 3, 0], nbuckets: 128 },
-    // PROCOID
     CacheDesc { reloid: 1255, indoid: 2690, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 128 },
-    // PUBLICATIONNAME
     CacheDesc { reloid: 6104, indoid: 6111, nkeys: 1, key: [2, 0, 0, 0], nbuckets: 8 },
-    // PUBLICATIONNAMESPACE
     CacheDesc { reloid: 6237, indoid: 6238, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 64 },
-    // PUBLICATIONNAMESPACEMAP
     CacheDesc { reloid: 6237, indoid: 6239, nkeys: 2, key: [3, 2, 0, 0], nbuckets: 64 },
-    // PUBLICATIONOID
     CacheDesc { reloid: 6104, indoid: 6110, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 8 },
-    // PUBLICATIONREL
     CacheDesc { reloid: 6106, indoid: 6112, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 64 },
-    // PUBLICATIONRELMAP
     CacheDesc { reloid: 6106, indoid: 6113, nkeys: 2, key: [3, 2, 0, 0], nbuckets: 64 },
-    // RANGEMULTIRANGE
     CacheDesc { reloid: 3541, indoid: 2228, nkeys: 1, key: [3, 0, 0, 0], nbuckets: 4 },
-    // RANGETYPE
     CacheDesc { reloid: 3541, indoid: 3542, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 4 },
-    // RELNAMENSP
     CacheDesc { reloid: 1259, indoid: 2663, nkeys: 2, key: [2, 3, 0, 0], nbuckets: 128 },
-    // RELOID
     CacheDesc { reloid: 1259, indoid: 2662, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 128 },
-    // REPLORIGIDENT
     CacheDesc { reloid: 6000, indoid: 6001, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 16 },
-    // REPLORIGNAME
     CacheDesc { reloid: 6000, indoid: 6002, nkeys: 1, key: [2, 0, 0, 0], nbuckets: 16 },
-    // RULERELNAME
     CacheDesc { reloid: 2618, indoid: 2693, nkeys: 2, key: [3, 2, 0, 0], nbuckets: 8 },
-    // SEQRELID
     CacheDesc { reloid: 2224, indoid: 5002, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 32 },
-    // STATEXTDATASTXOID
     CacheDesc { reloid: 3429, indoid: 3433, nkeys: 2, key: [1, 2, 0, 0], nbuckets: 4 },
-    // STATEXTNAMENSP
     CacheDesc { reloid: 3381, indoid: 3997, nkeys: 2, key: [3, 4, 0, 0], nbuckets: 4 },
-    // STATEXTOID
     CacheDesc { reloid: 3381, indoid: 3380, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 4 },
-    // STATRELATTINH
     CacheDesc { reloid: 2619, indoid: 2696, nkeys: 3, key: [1, 2, 3, 0], nbuckets: 128 },
-    // SUBSCRIPTIONNAME
     CacheDesc { reloid: 6100, indoid: 6115, nkeys: 2, key: [2, 4, 0, 0], nbuckets: 4 },
-    // SUBSCRIPTIONOID
     CacheDesc { reloid: 6100, indoid: 6114, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 4 },
-    // SUBSCRIPTIONRELMAP
     CacheDesc { reloid: 6102, indoid: 6117, nkeys: 2, key: [2, 1, 0, 0], nbuckets: 64 },
-    // TABLESPACEOID
     CacheDesc { reloid: 1213, indoid: 2697, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 4 },
-    // TRFOID
     CacheDesc { reloid: 3576, indoid: 3574, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 16 },
-    // TRFTYPELANG
     CacheDesc { reloid: 3576, indoid: 3575, nkeys: 2, key: [2, 3, 0, 0], nbuckets: 16 },
-    // TSCONFIGMAP
     CacheDesc { reloid: 3603, indoid: 3609, nkeys: 3, key: [1, 2, 3, 0], nbuckets: 2 },
-    // TSCONFIGNAMENSP
     CacheDesc { reloid: 3602, indoid: 3608, nkeys: 2, key: [2, 3, 0, 0], nbuckets: 2 },
-    // TSCONFIGOID
     CacheDesc { reloid: 3602, indoid: 3712, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 2 },
-    // TSDICTNAMENSP
     CacheDesc { reloid: 3600, indoid: 3604, nkeys: 2, key: [2, 3, 0, 0], nbuckets: 2 },
-    // TSDICTOID
     CacheDesc { reloid: 3600, indoid: 3605, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 2 },
-    // TSPARSERNAMENSP
     CacheDesc { reloid: 3601, indoid: 3606, nkeys: 2, key: [2, 3, 0, 0], nbuckets: 2 },
-    // TSPARSEROID
     CacheDesc { reloid: 3601, indoid: 3607, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 2 },
-    // TSTEMPLATENAMENSP
     CacheDesc { reloid: 3764, indoid: 3766, nkeys: 2, key: [2, 3, 0, 0], nbuckets: 2 },
-    // TSTEMPLATEOID
     CacheDesc { reloid: 3764, indoid: 3767, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 2 },
-    // TYPENAMENSP
     CacheDesc { reloid: 1247, indoid: 2704, nkeys: 2, key: [2, 3, 0, 0], nbuckets: 64 },
-    // TYPEOID
     CacheDesc { reloid: 1247, indoid: 2703, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 64 },
-    // USERMAPPINGOID
     CacheDesc { reloid: 1418, indoid: 174, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 2 },
-    // USERMAPPINGUSERSERVER
     CacheDesc { reloid: 1418, indoid: 175, nkeys: 2, key: [2, 3, 0, 0], nbuckets: 2 },
 ];
