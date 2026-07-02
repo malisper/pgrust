@@ -500,7 +500,7 @@ backend-storage-lmgr-lmgr	src/backend/storage/lmgr/lmgr.c	todo			fabled:backend-
 backend-storage-lmgr-lock	src/backend/storage/lmgr/lock.c	todo			m1-spine
 backend-storage-lmgr-lwlock	src/backend/storage/lmgr/lwlock.c	benched	lwlock	0.89-1.00x-instr/0.86-0.99x-ns	fabled:lwlock; m1-spine; C single-u32 word exact; D1 xadd shared acquire (Freund residual, beat-postgres §9) with backout-wakeup handoff; Acquire/Release throughout, zero SeqCst; exchange-excl REFUTED (clobbers co-encoded fields); contended paths seamed+deferred, loom check required before multi-backend milestone; DUAL PASS uncontended Graviton clang-16; 15 tests, Miri SB+TB, density 4.6%; docs/benchmarks/lwlock.md
 backend-storage-lmgr-predicate	src/backend/storage/lmgr/predicate.c	todo			fabled:backend-storage-lmgr-predicate; m1-spine
-backend-storage-lmgr-proc	src/backend/storage/lmgr/proc.c	todo			fabled:backend-storage-lmgr-proc; m1-spine
+backend-storage-lmgr-proc	src/backend/storage/lmgr/proc.c	ported	lmgr_proc	cold	m1-spine; PGPROC/PROC_HDR reshaped shmem-correct (needs_drop-asserted, SyncCell per C lock domain, intrusive proclists) - discharges deferred.md types_storage item; ProcSleep family deferred to lock.c owner (right shapes not yet portable); installs all 8 lmgr_proc_seams lwlock consumes; 7 tests, density 2.8%; notes/lmgr-proc-port.md
 backend-storage-lmgr-s-lock	src/backend/storage/lmgr/s_lock.c	todo			fabled:backend-storage-lmgr-s-lock; m1-dep(stub-ok)
 backend-storage-page-checksum	src/backend/storage/page/checksum.c	todo			fabled:backend-storage-page-checksum; m1-dep(stub-ok)
 common-checksum-helper	src/common/checksum_helper.c	todo			fabled:common-checksum-helper

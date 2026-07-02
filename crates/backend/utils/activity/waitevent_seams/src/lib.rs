@@ -7,3 +7,11 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn pgstat_report_wait_end()
 );
+
+seam_core::seam!(
+    pub fn pgstat_set_wait_event_storage(slot: &'static core::sync::atomic::AtomicU32)
+);
+
+seam_core::seam!(
+    pub fn pgstat_reset_wait_event_storage()
+);
