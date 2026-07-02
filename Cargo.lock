@@ -128,6 +128,25 @@ dependencies = [
 [[package]]
 name = "auth"
 version = "0.0.0"
+dependencies = [
+ "auth_seams",
+ "backend_startup",
+ "elog",
+ "hba",
+ "init_small",
+ "ip",
+ "ipc_seams",
+ "libc",
+ "mcx",
+ "miscinit",
+ "postgres_seams",
+ "pqcomm",
+ "pqformat",
+ "stringinfo",
+ "types_core",
+ "types_error",
+ "types_startup",
+]
 
 [[package]]
 name = "auth_seams"
@@ -3282,6 +3301,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_tuple",
 ]
 
 [[package]]

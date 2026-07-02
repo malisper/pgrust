@@ -49,16 +49,13 @@ pub(crate) struct CatCTup {
     pub t_len: u32,
     pub t_self: ItemPointerData,
     pub t_tableoid: Oid,
-    /// Stable allocation; entries move on slot-vec growth, this never does.
-    /// Positive entries: `[t_self; pad; t_tableoid; t_len]` 16-byte prefix,
-    /// then the tuple image (see `IMG_PREFIX`) — C keeps HeapTupleData inside
-    /// the CatCTup the same way, and it lets a pin be pointer-sized.
+    /// Stable allocation (entries move on slot-vec growth, this never
+    /// does); positive entries: `IMG_PREFIX` header, then the image.
     pub payload: *mut u8,
     pub payload_len: u32,
 }
 
-/// Positive-entry payload prefix: `t_self` at +0 (6 bytes), `t_tableoid` at
-/// +8, `t_len` at +12; image at +16 (keeps the image 8-aligned).
+/// C's in-entry HeapTupleData: t_self +0, t_tableoid +8, t_len +12, image +16.
 pub(crate) const IMG_PREFIX: usize = 16;
 
 impl CatCTup {
@@ -179,9 +176,7 @@ fn state_init(slot: &mut Option<ManuallyDrop<McxOwned<CatCacheStateTy>>>) {
 /// any violation into a panic.
 #[inline(always)]
 pub(crate) fn with_state<R>(f: impl for<'mcx> FnOnce(&mut CatCacheState<'mcx>) -> R) -> R {
-    // Tiny closure so LocalKey::with inlines to the TLS address; the probe
-    // body stays inlinable into callers (LocalKey::with outlines big
-    // closures, which cost the hit path an extra call frame).
+    // Tiny closure: LocalKey::with outlines big ones (an extra call frame).
     let cell = STATE.with(|cell| cell as *const UnsafeCell<Option<ManuallyDrop<McxOwned<CatCacheStateTy>>>>);
     #[cfg(debug_assertions)]
     let _guard = {
@@ -234,13 +229,8 @@ pub(crate) unsafe fn stored_bytes<'a>(payload: *const u8, key: Datum) -> &'a [u8
     unsafe { core::slice::from_raw_parts(payload.add(off as usize), len as usize) }
 }
 
-/// `cc_fastequal[i](cachekeys[i], searchkeys[i])`, de-fmgr'd.
-///
-/// Split like `fast_hash_probe`: the word arms collapse to one low-32-bit
-/// compare (both sides are canonical datums — tupmacs fetch on the insert
-/// side, `Datum::from_char/from_i16/from_i32/from_oid` on the probe side —
-/// so the per-kind extension is already identical) and inline; the by-ref
-/// arms carry slice-compare loops and go through one outlined call.
+/// `cc_fastequal[i]`, de-fmgr'd; split like `fast_hash_probe` — canonical
+/// word datums are one inline low-32 compare, slice compares one call.
 #[inline(always)]
 pub(crate) fn eq_stored(kind: CCFastKind, stored: Datum, payload: *const u8, probe: &CatCKey<'_>) -> bool {
     match kind {
