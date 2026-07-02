@@ -5,7 +5,7 @@ use core::sync::atomic::{
 
 use ::types_core::{
     uint16, uint32, uint64, uint8, LocalTransactionId, Oid, ProcNumber, RelFileNumber, Size,
-    TransactionId, XLogRecPtr, XidStatus, INVALID_PROC_NUMBER,
+    TransactionId, INVALID_PROC_NUMBER,
 };
 
 use crate::ilist::dlist_head;
@@ -142,10 +142,61 @@ pub enum LWLockWaitState {
 
 pub use LWLockWaitState::*;
 
+// C's NULL-links "detached" state; distinct from the INVALID list terminator.
+pub const PROC_LINK_DETACHED: ProcNumber = -2;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct proclist_node {
     pub next: ProcNumber,
     pub prev: ProcNumber,
+}
+
+impl proclist_node {
+    pub const fn detached() -> Self {
+        Self {
+            next: PROC_LINK_DETACHED,
+            prev: PROC_LINK_DETACHED,
+        }
+    }
+
+    pub const fn is_detached(&self) -> bool {
+        self.next == PROC_LINK_DETACHED
+    }
+}
+
+// C's non-atomic under-lock field: serialized by the lock named at the field.
+#[repr(transparent)]
+pub struct SyncCell<T>(UnsafeCell<T>);
+
+// SAFETY: cross-thread access serialized by the field's documented lock.
+unsafe impl<T: Send> Sync for SyncCell<T> {}
+
+impl<T: Copy> SyncCell<T> {
+    pub const fn new(value: T) -> Self {
+        Self(UnsafeCell::new(value))
+    }
+
+    pub fn get(&self) -> T {
+        // SAFETY: serialized by the field's documented lock.
+        unsafe { *self.0.get() }
+    }
+
+    pub fn set(&self, value: T) {
+        // SAFETY: as `get`.
+        unsafe { *self.0.get() = value }
+    }
+}
+
+impl<T> SyncCell<T> {
+    pub const fn ptr(&self) -> *mut T {
+        self.0.get()
+    }
+}
+
+impl<T: Copy + core::fmt::Debug> core::fmt::Debug for SyncCell<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.get().fmt(f)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -539,86 +590,87 @@ pub const NUM_SPECIAL_WORKER_PROCS: i32 = 2;
 pub const FP_LOCK_GROUPS_PER_BACKEND_MAX: i32 = 1024;
 pub const FP_LOCK_SLOTS_PER_GROUP: i32 = 16;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PGSemaphoreData {
-    pub semId: i32,
-    pub semNum: i32,
-}
-
-// C keeps the pair separately assignable (not a VirtualTransactionId) because
-// it is not atomically assignable as a whole.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct PGProcVxid {
-    pub procNumber: ProcNumber,
-    pub lxid: LocalTransactionId,
+    pub procNumber: AtomicI32,
+    pub lxid: AtomicU32,
 }
 
-impl Default for PGProcVxid {
-    fn default() -> Self {
+impl PGProcVxid {
+    pub const fn new(procNumber: ProcNumber, lxid: LocalTransactionId) -> Self {
         Self {
-            procNumber: INVALID_PROC_NUMBER,
-            lxid: 0,
+            procNumber: AtomicI32::new(procNumber),
+            lxid: AtomicU32::new(lxid),
         }
     }
 }
 
-// Shmem-resident, always reached by pointer in C — never Copy/Clone.
-// C-pointer fields carry identities, not invented boxes: `procgloballist` is
-// the FreeListId naming one of PROC_HDR's four heads, `waitLock`/`waitProcLock`
-// carry the awaited lock's LOCKTAG / holder ProcNumber, `lockGroupLeader` the
-// leader's ProcNumber.
-#[derive(Debug)]
+// Shmem-resident fixed slot of allProcs; C-pointer fields carry identities.
+// Domains: [PSL] ProcStructLock, [PART] lock partition, [LEAD] leader's
+// partition, [PAL] ProcArrayLock, [FPL] fpInfoLock, [SRL] SyncRepLock,
+// [WLL] LWLock wait-list bit, [CV] condvar spinlock; atomics cover C's
+// pg_atomic_* and every field C reads unlocked/volatile.
 pub struct PGPROC {
-    pub links: dlist_node,
-    pub procgloballist: Option<FreeListId>,
-    pub sem: Option<Box<PGSemaphoreData>>,
-    pub waitStatus: ProcWaitStatus,
+    pub links: SyncCell<proclist_node>,               // [PSL] freelist / [PART] wait queue
+    pub procgloballist: SyncCell<Option<FreeListId>>, // fixed at InitProcGlobal
+    pub waitStatus: AtomicU32,                        // ProcWaitStatus
     pub procLatch: Latch,
-    pub xid: TransactionId,
-    pub xmin: TransactionId,
-    pub pid: i32,
-    pub pgxactoff: i32,
+    pub xid: pg_atomic_uint32,
+    pub xmin: pg_atomic_uint32,
+    pub pid: AtomicI32,
+    pub pgxactoff: AtomicI32, // [PAL]
     pub vxid: PGProcVxid,
-    pub databaseId: Oid,
-    pub roleId: Oid,
-    pub tempNamespaceId: Oid,
-    pub isRegularBackend: bool,
-    pub recoveryConflictPending: bool,
-    pub lwWaiting: uint8,
-    pub lwWaitMode: uint8,
-    pub lwWaitLink: proclist_node,
-    pub cvWaitLink: proclist_node,
-    pub waitLock: Option<LOCKTAG>,
-    pub waitProcLock: Option<ProcNumber>,
-    pub waitLockMode: LOCKMODE,
-    pub heldLocks: LOCKMASK,
+    pub databaseId: AtomicU32,
+    pub roleId: AtomicU32,
+    pub tempNamespaceId: AtomicU32,
+    pub isRegularBackend: AtomicBool,
+    pub recoveryConflictPending: AtomicBool,
+    pub lwWaiting: AtomicU8,
+    pub lwWaitMode: AtomicU8,
+    pub lwWaitLink: SyncCell<proclist_node>, // [WLL]
+    pub cvWaitLink: SyncCell<proclist_node>, // [CV]
+    pub waitLock: SyncCell<Option<LOCKTAG>>, // [PART]
+    pub waitProcLock: SyncCell<Option<ProcNumber>>, // [PART]
+    pub waitLockMode: SyncCell<LOCKMODE>,    // [PART]
+    pub heldLocks: SyncCell<LOCKMASK>,       // [PART]
     pub waitStart: pg_atomic_uint64,
-    pub delayChkptFlags: i32,
-    pub statusFlags: uint8,
-    pub waitLSN: XLogRecPtr,
-    pub syncRepState: i32,
-    pub syncRepLinks: proclist_node,
-    pub myProcLocks: [dlist_head; NUM_LOCK_PARTITIONS as usize],
-    pub subxidStatus: XidCacheStatus,
-    pub subxids: XidCache,
-    pub procArrayGroupMember: bool,
+    pub delayChkptFlags: AtomicI32,
+    pub statusFlags: AtomicU8, // [PAL]; PROC_HDR.statusFlags mirror is authoritative
+    pub waitLSN: AtomicU64,
+    pub syncRepState: SyncCell<i32>,          // [SRL]
+    pub syncRepLinks: SyncCell<proclist_node>, // [SRL]
+    pub myProcLocks: [SyncCell<dlist_head>; NUM_LOCK_PARTITIONS as usize], // [PART i]
+    pub subxidStatus: SyncCell<XidCacheStatus>, // [PAL]
+    pub subxids: SyncCell<XidCache>,          // [PAL]
+    pub procArrayGroupMember: AtomicBool,
     pub procArrayGroupNext: pg_atomic_uint32,
-    pub procArrayGroupMemberXid: TransactionId,
-    pub wait_event_info: uint32,
-    pub clogGroupMember: bool,
+    pub procArrayGroupMemberXid: AtomicU32,
+    pub wait_event_info: AtomicU32,
+    pub clogGroupMember: AtomicBool,
     pub clogGroupNext: pg_atomic_uint32,
-    pub clogGroupMemberXid: TransactionId,
-    pub clogGroupMemberXidStatus: XidStatus,
-    pub clogGroupMemberPage: i64,
-    pub clogGroupMemberLsn: XLogRecPtr,
+    pub clogGroupMemberXid: AtomicU32,
+    pub clogGroupMemberXidStatus: AtomicI32, // XidStatus
+    pub clogGroupMemberPage: AtomicI64,
+    pub clogGroupMemberLsn: AtomicU64,
     pub fpInfoLock: LWLock,
-    pub fpLockBits: Vec<uint64>,
-    pub fpRelId: Vec<Oid>,
-    pub fpVXIDLock: bool,
-    pub fpLocalTransactionId: LocalTransactionId,
-    pub lockGroupLeader: Option<ProcNumber>,
-    pub lockGroupMembers: ProcFreeList,
-    pub lockGroupLink: dlist_node,
+    // [FPL] views into the leaked fast-path arena set by InitProcGlobal.
+    pub fpLockBits: SyncCell<*const SyncCell<uint64>>,
+    pub fpRelId: SyncCell<*const SyncCell<Oid>>,
+    pub fpVXIDLock: AtomicBool,        // [FPL]
+    pub fpLocalTransactionId: AtomicU32, // [FPL]
+    pub lockGroupLeader: AtomicI32,    // ProcNumber [LEAD]
+    pub lockGroupMembers: SyncCell<proclist_head>, // [LEAD], linked via lockGroupLink
+    pub lockGroupLink: SyncCell<proclist_node>,    // [LEAD]
+}
+
+// SAFETY: atomics, all-atomic Latch/LWLock, tagged SyncCells, leaked arrays.
+unsafe impl Sync for PGPROC {}
+unsafe impl Send for PGPROC {}
+
+impl core::fmt::Debug for PGPROC {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("PGPROC")
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -629,127 +681,109 @@ pub enum FreeListId {
     Walsender,
 }
 
-// The intrusive shmem dlist of PGPROCs realized over the index-addressed
-// allProcs arena as an ordered ProcNumber list.
-#[derive(Clone, Debug, Default)]
-pub struct ProcFreeList {
-    pub members: VecDeque<ProcNumber>,
-}
-
-impl ProcFreeList {
-    pub const fn new() -> Self {
-        Self {
-            members: VecDeque::new(),
-        }
-    }
-
-    pub fn push_tail(&mut self, procno: ProcNumber) {
-        self.members.push_back(procno);
-    }
-
-    pub fn push_head(&mut self, procno: ProcNumber) {
-        self.members.push_front(procno);
-    }
-
-    pub fn pop_head(&mut self) -> Option<ProcNumber> {
-        self.members.pop_front()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.members.is_empty()
-    }
-
-    pub fn remove(&mut self, procno: ProcNumber) {
-        if let Some(pos) = self.members.iter().position(|&p| p == procno) {
-            self.members.remove(pos);
-        }
-    }
-}
-
-#[derive(Debug)]
+// Slices are fixed-capacity leaked allocations sized once by InitProcGlobal.
 pub struct PROC_HDR {
-    pub allProcs: Vec<PGPROC>,
-    pub xids: Vec<TransactionId>,
-    pub subxidStates: Vec<XidCacheStatus>,
-    pub statusFlags: Vec<uint8>,
+    pub allProcs: &'static [PGPROC],
+    // Dense pgxactoff-indexed mirrors of PGPROC fields (procarray.c).
+    pub xids: &'static [pg_atomic_uint32],
+    pub subxidStates: &'static [SyncCell<XidCacheStatus>], // [PAL]
+    pub statusFlags: &'static [AtomicU8],                  // [PAL]
     pub allProcCount: uint32,
-    pub freeProcs: ProcFreeList,
-    pub autovacFreeProcs: ProcFreeList,
-    pub bgworkerFreeProcs: ProcFreeList,
-    pub walsenderFreeProcs: ProcFreeList,
+    // C: lock.c's FastPathLockGroupsPerBackend global; fixed at sizing time.
+    pub fpLockGroupsPerBackend: uint32,
+    pub freeProcs: SyncCell<proclist_head>,          // [PSL]
+    pub autovacFreeProcs: SyncCell<proclist_head>,   // [PSL]
+    pub bgworkerFreeProcs: SyncCell<proclist_head>,  // [PSL]
+    pub walsenderFreeProcs: SyncCell<proclist_head>, // [PSL]
     pub procArrayGroupFirst: pg_atomic_uint32,
     pub clogGroupFirst: pg_atomic_uint32,
-    pub walwriterProc: ProcNumber,
-    pub checkpointerProc: ProcNumber,
-    pub spins_per_delay: i32,
-    pub startupBufferPinWaitBufId: i32,
+    pub walwriterProc: AtomicI32,    // ProcNumber
+    pub checkpointerProc: AtomicI32, // ProcNumber
+    pub spins_per_delay: SyncCell<i32>, // [PSL]
+    pub startupBufferPinWaitBufId: AtomicI32,
+}
+
+impl core::fmt::Debug for PROC_HDR {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("PROC_HDR")
+    }
 }
 
 impl PGPROC {
-    // Mirrors InitProcGlobal's MemSet(0) over the fresh PGPROC array.
     pub fn new_zeroed() -> Self {
         Self {
-            links: dlist_node::new(),
-            procgloballist: None,
-            sem: None,
-            waitStatus: PROC_WAIT_STATUS_OK,
+            links: SyncCell::new(proclist_node::detached()),
+            procgloballist: SyncCell::new(None),
+            waitStatus: AtomicU32::new(PROC_WAIT_STATUS_OK),
             procLatch: Latch {
                 is_set: AtomicI32::new(0),
                 maybe_sleeping: AtomicI32::new(0),
                 is_shared: AtomicBool::new(false),
                 owner_pid: AtomicI32::new(0),
             },
-            xid: 0,
-            xmin: 0,
-            pid: 0,
-            pgxactoff: 0,
-            vxid: PGProcVxid {
-                procNumber: 0,
-                lxid: 0,
-            },
-            databaseId: 0,
-            roleId: 0,
-            tempNamespaceId: 0,
-            isRegularBackend: false,
-            recoveryConflictPending: false,
-            lwWaiting: 0,
-            lwWaitMode: 0,
-            lwWaitLink: proclist_node::default(),
-            cvWaitLink: proclist_node::default(),
-            waitLock: None,
-            waitProcLock: None,
-            waitLockMode: 0,
-            heldLocks: 0,
+            xid: pg_atomic_uint32::new(0),
+            xmin: pg_atomic_uint32::new(0),
+            pid: AtomicI32::new(0),
+            pgxactoff: AtomicI32::new(0),
+            vxid: PGProcVxid::new(0, 0),
+            databaseId: AtomicU32::new(0),
+            roleId: AtomicU32::new(0),
+            tempNamespaceId: AtomicU32::new(0),
+            isRegularBackend: AtomicBool::new(false),
+            recoveryConflictPending: AtomicBool::new(false),
+            lwWaiting: AtomicU8::new(0),
+            lwWaitMode: AtomicU8::new(0),
+            lwWaitLink: SyncCell::new(proclist_node::default()),
+            cvWaitLink: SyncCell::new(proclist_node::default()),
+            waitLock: SyncCell::new(None),
+            waitProcLock: SyncCell::new(None),
+            waitLockMode: SyncCell::new(0),
+            heldLocks: SyncCell::new(0),
             waitStart: pg_atomic_uint64::new(0),
-            delayChkptFlags: 0,
-            statusFlags: 0,
-            waitLSN: 0,
-            syncRepState: 0,
-            syncRepLinks: proclist_node { next: 0, prev: 0 },
-            myProcLocks: core::array::from_fn(|_| dlist_head::new()),
-            subxidStatus: XidCacheStatus {
+            delayChkptFlags: AtomicI32::new(0),
+            statusFlags: AtomicU8::new(0),
+            waitLSN: AtomicU64::new(0),
+            syncRepState: SyncCell::new(0),
+            syncRepLinks: SyncCell::new(proclist_node::detached()),
+            myProcLocks: core::array::from_fn(|_| SyncCell::new(dlist_head::new())),
+            subxidStatus: SyncCell::new(XidCacheStatus {
                 count: 0,
                 overflowed: false,
-            },
-            subxids: XidCache::default(),
-            procArrayGroupMember: false,
+            }),
+            subxids: SyncCell::new(XidCache::default()),
+            procArrayGroupMember: AtomicBool::new(false),
             procArrayGroupNext: pg_atomic_uint32::new(0),
-            procArrayGroupMemberXid: 0,
-            wait_event_info: 0,
-            clogGroupMember: false,
+            procArrayGroupMemberXid: AtomicU32::new(0),
+            wait_event_info: AtomicU32::new(0),
+            clogGroupMember: AtomicBool::new(false),
             clogGroupNext: pg_atomic_uint32::new(0),
-            clogGroupMemberXid: 0,
-            clogGroupMemberXidStatus: 0,
-            clogGroupMemberPage: 0,
-            clogGroupMemberLsn: 0,
+            clogGroupMemberXid: AtomicU32::new(0),
+            clogGroupMemberXidStatus: AtomicI32::new(0),
+            clogGroupMemberPage: AtomicI64::new(0),
+            clogGroupMemberLsn: AtomicU64::new(0),
             fpInfoLock: LWLock::default(),
-            fpLockBits: Vec::new(),
-            fpRelId: Vec::new(),
-            fpVXIDLock: false,
-            fpLocalTransactionId: 0,
-            lockGroupLeader: None,
-            lockGroupMembers: ProcFreeList::new(),
-            lockGroupLink: dlist_node::new(),
+            fpLockBits: SyncCell::new(core::ptr::null()),
+            fpRelId: SyncCell::new(core::ptr::null()),
+            fpVXIDLock: AtomicBool::new(false),
+            fpLocalTransactionId: AtomicU32::new(0),
+            lockGroupLeader: AtomicI32::new(INVALID_PROC_NUMBER),
+            lockGroupMembers: SyncCell::new(proclist_head::default()),
+            lockGroupLink: SyncCell::new(proclist_node::detached()),
+        }
+    }
+
+    /// SAFETY contract: fpInfoLock held; groups == fpLockGroupsPerBackend.
+    pub unsafe fn fp_lock_bits(&self, groups: usize) -> &[SyncCell<uint64>] {
+        unsafe { core::slice::from_raw_parts(self.fpLockBits.get(), groups) }
+    }
+
+    /// SAFETY contract: see [`PGPROC::fp_lock_bits`].
+    pub unsafe fn fp_rel_id(&self, groups: usize) -> &[SyncCell<Oid>] {
+        unsafe {
+            core::slice::from_raw_parts(
+                self.fpRelId.get(),
+                groups * FP_LOCK_SLOTS_PER_GROUP as usize,
+            )
         }
     }
 }
@@ -757,21 +791,22 @@ impl PGPROC {
 impl PROC_HDR {
     pub fn new_zeroed() -> Self {
         Self {
-            allProcs: Vec::new(),
-            xids: Vec::new(),
-            subxidStates: Vec::new(),
-            statusFlags: Vec::new(),
+            allProcs: &[],
+            xids: &[],
+            subxidStates: &[],
+            statusFlags: &[],
             allProcCount: 0,
-            freeProcs: ProcFreeList::new(),
-            autovacFreeProcs: ProcFreeList::new(),
-            bgworkerFreeProcs: ProcFreeList::new(),
-            walsenderFreeProcs: ProcFreeList::new(),
+            fpLockGroupsPerBackend: 0,
+            freeProcs: SyncCell::new(proclist_head::default()),
+            autovacFreeProcs: SyncCell::new(proclist_head::default()),
+            bgworkerFreeProcs: SyncCell::new(proclist_head::default()),
+            walsenderFreeProcs: SyncCell::new(proclist_head::default()),
             procArrayGroupFirst: pg_atomic_uint32::new(INVALID_PROC_NUMBER as u32),
             clogGroupFirst: pg_atomic_uint32::new(INVALID_PROC_NUMBER as u32),
-            walwriterProc: INVALID_PROC_NUMBER,
-            checkpointerProc: INVALID_PROC_NUMBER,
-            spins_per_delay: 0,
-            startupBufferPinWaitBufId: -1,
+            walwriterProc: AtomicI32::new(INVALID_PROC_NUMBER),
+            checkpointerProc: AtomicI32::new(INVALID_PROC_NUMBER),
+            spins_per_delay: SyncCell::new(0),
+            startupBufferPinWaitBufId: AtomicI32::new(-1),
         }
     }
 }
@@ -806,6 +841,14 @@ mod tests {
         assert_eq!(v.monotonic_advance(3), 5);
         assert_eq!(v.monotonic_advance(9), 9);
         assert_eq!(v.read(), 9);
+    }
+
+    #[test]
+    fn proc_shapes_are_shmem_resident() {
+        assert!(!core::mem::needs_drop::<PGPROC>());
+        assert!(!core::mem::needs_drop::<PROC_HDR>());
+        assert!(proclist_node::detached().is_detached());
+        assert!(!proclist_node::default().is_detached());
     }
 
     #[test]

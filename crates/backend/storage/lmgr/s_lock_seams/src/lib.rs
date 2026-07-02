@@ -29,3 +29,11 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn finish_spin_delay<'a>(status: &'a SpinDelayStatus)
 );
+
+seam_core::seam!(
+    pub fn set_spins_per_delay(shared_spins_per_delay: i32)
+);
+
+seam_core::seam!(
+    pub fn update_spins_per_delay(shared_spins_per_delay: i32) -> i32
+);

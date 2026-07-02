@@ -1,0 +1,27 @@
+// utils/timeout.h TimeoutId order (service priority order).
+pub type TimeoutId = i32;
+pub const STARTUP_PACKET_TIMEOUT: TimeoutId = 0;
+pub const DEADLOCK_TIMEOUT: TimeoutId = 1;
+pub const LOCK_TIMEOUT: TimeoutId = 2;
+pub const STATEMENT_TIMEOUT: TimeoutId = 3;
+pub const STANDBY_DEADLOCK_TIMEOUT: TimeoutId = 4;
+pub const STANDBY_TIMEOUT: TimeoutId = 5;
+pub const STANDBY_LOCK_TIMEOUT: TimeoutId = 6;
+pub const IDLE_IN_TRANSACTION_SESSION_TIMEOUT: TimeoutId = 7;
+pub const TRANSACTION_TIMEOUT: TimeoutId = 8;
+pub const IDLE_SESSION_TIMEOUT: TimeoutId = 9;
+pub const IDLE_STATS_UPDATE_TIMEOUT: TimeoutId = 10;
+pub const CLIENT_CONNECTION_CHECK_TIMEOUT: TimeoutId = 11;
+pub const STARTUP_PROGRESS_TIMEOUT: TimeoutId = 12;
+pub const USER_TIMEOUT: TimeoutId = 13;
+pub const MAX_TIMEOUTS: TimeoutId = USER_TIMEOUT + 10;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DisableTimeoutParams {
+    pub id: TimeoutId,
+    pub keep_indicator: bool,
+}
+
+seam_core::seam!(
+    pub fn disable_timeouts<'a>(timeouts: &'a [DisableTimeoutParams])
+);
