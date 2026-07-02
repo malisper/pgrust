@@ -1085,6 +1085,7 @@ name = "hba"
 version = "0.0.0"
 dependencies = [
  "acl_seams",
+ "auth_seams",
  "conffiles_seams",
  "elog",
  "guc_tables",

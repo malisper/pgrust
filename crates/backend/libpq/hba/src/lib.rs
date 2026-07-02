@@ -329,5 +329,7 @@ pub(crate) fn ident_file_name() -> String {
 pub fn init_seams() {
     hba_seams::load_hba::set(|| load_hba().unwrap_or(false));
     hba_seams::load_ident::set(|| load_ident().unwrap_or(false));
+    auth_seams::load_hba::set(|| load_hba().unwrap_or(false));
+    auth_seams::load_ident::set(|| load_ident().unwrap_or(false));
     hba_seams::hba_authname::set(hba_authname);
 }

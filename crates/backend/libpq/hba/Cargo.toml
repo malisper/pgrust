@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 acl_seams = { path = "../../utils/adt/acl_seams" }
+auth_seams = { path = "../auth_seams" }
 conffiles_seams = { path = "../../utils/misc/conffiles_seams" }
 elog = { path = "../../utils/error/elog" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
