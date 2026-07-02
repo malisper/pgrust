@@ -19,8 +19,7 @@ use types_snapshot::{SnapshotData, SnapshotType};
 #[cfg(test)]
 mod tests;
 
-// C `Snapshot` = SnapshotData*; Rc because snapmgr itself refcounts
-// (regd_count/active_count + FreeSnapshot), per sharing rule 2.3.
+// Rc because snapmgr itself refcounts (regd/active counts), rule 2.3.
 pub type Snapshot = Rc<SnapshotData<'static>>;
 
 pub use procarray::{RecentXmin, TransactionXmin};
@@ -53,8 +52,7 @@ enum Which {
     Catalog,
 }
 
-// C's CurrentSnapshot/SecondarySnapshot pointers either alias the reusable
-// static structs or (transaction-snapshot mode) a registered copy.
+// Current/SecondarySnapshot alias a static or a registered copy.
 #[derive(Clone)]
 enum SnapRef {
     Static(Which),
@@ -100,8 +98,7 @@ impl SnapMgrState {
 }
 
 thread_local! {
-    // ManuallyDrop keeps the TLS payload !needs_drop (fabled-lessons §8); the
-    // C statics live for the backend's whole life anyway.
+    // ManuallyDrop keeps the TLS payload !needs_drop (fabled-lessons §8).
     static STATE: RefCell<Option<ManuallyDrop<SnapMgrState>>> = const { RefCell::new(None) };
 }
 
@@ -110,8 +107,7 @@ thread_local! {
     static STATIC_REPLACED: Cell<u64> = const { Cell::new(0) };
 }
 
-// Nonzero means a caller held a static snapshot handle across acquisitions,
-// silently defeating C's array reuse + the xactCompletionCount fastpath.
+// Nonzero: a held static handle defeated array reuse + the reuse fastpath.
 #[cfg(debug_assertions)]
 pub fn static_snapshot_replacements() -> u64 {
     STATIC_REPLACED.get()
@@ -163,10 +159,9 @@ pub fn FirstSnapshotSet() -> bool {
     with_state(|s| s.first_snapshot_set)
 }
 
-// Refills the reusable struct for `which` via procarray::GetSnapshotData —
-// always the SAME Rc, so snapXactCompletionCount and the once-sized xip
-// arrays persist and the C 18.3 reuse fastpath can fire. The seams reached
-// under the borrow (xact command id, recovery check) never re-enter snapmgr.
+// Always refills the SAME persistent struct so snapXactCompletionCount and
+// the once-sized xip arrays survive — the reuse fastpath depends on it.
+// Seams reached under the borrow never re-enter snapmgr.
 fn get_snapshot_data_static(which: Which) -> PgResult<Snapshot> {
     let snap = with_state(|s| -> PgResult<Snapshot> {
         let mcx = s.mcx;
@@ -176,9 +171,8 @@ fn get_snapshot_data_static(which: Which) -> PgResult<Snapshot> {
             Which::Catalog => &mut s.catalog_data,
         };
         if Rc::get_mut(slot).is_none() {
-            // An outstanding handle still aliases the static (C would clobber
-            // it in place); give the old holder its stale copy and refill a
-            // fresh struct. Loses the array reuse for this call only.
+            // An outstanding handle aliases the static (C clobbers it);
+            // leave the holder a stale copy, refill a fresh struct.
             #[cfg(debug_assertions)]
             STATIC_REPLACED.set(STATIC_REPLACED.get() + 1);
             *slot = new_static_snapshot(mcx);
@@ -199,14 +193,12 @@ pub fn GetTransactionSnapshot() -> PgResult<Snapshot> {
     let (historic, first_snapshot_set) =
         with_state(|s| (s.historic.clone(), s.first_snapshot_set));
 
-    // Return historic snapshot if doing logical decoding.
     if let Some(historic) = historic {
         debug_assert!(!first_snapshot_set);
         return Ok(historic);
     }
 
     if !first_snapshot_set {
-        // Don't allow catalog snapshot to be older than xact snapshot.
         InvalidateCatalogSnapshot();
 
         with_state(|s| {
@@ -222,8 +214,7 @@ pub fn GetTransactionSnapshot() -> PgResult<Snapshot> {
             .expect_err("elog(ERROR)"));
         }
 
-        // In transaction-snapshot mode the first snapshot must live to end of
-        // xact, so return a registered copy rather than the static.
+        // Xact-snapshot mode: the first snapshot must live to end of xact.
         if xact_seams::isolation_uses_xact_snapshot::call() {
             if xact_seams::isolation_is_serializable::call() {
                 unported("GetSerializableTransactionSnapshot (predicate.c)");
@@ -283,8 +274,6 @@ pub fn GetCatalogSnapshot(relid: Oid) -> PgResult<Snapshot> {
 }
 
 pub fn GetNonHistoricCatalogSnapshot(relid: Oid) -> PgResult<Snapshot> {
-    // A relation with neither catcache nor snapshot invalidations needs a
-    // fresh snapshot every time.
     if with_state(|s| s.catalog_valid)
         && !syscache_seams::relation_invalidates_snapshots_only::call(relid)
         && !syscache_seams::relation_has_sys_cache::call(relid)
@@ -294,8 +283,7 @@ pub fn GetNonHistoricCatalogSnapshot(relid: Oid) -> PgResult<Snapshot> {
 
     if !with_state(|s| s.catalog_valid) {
         let catalog = get_snapshot_data_static(Which::Catalog)?;
-        // Shove the catalog snapshot into the registered set manually so it
-        // counts for PGPROC->xmin decisions (no RegisterSnapshot copy).
+        // Registered directly (no copy) so it counts for PGPROC->xmin.
         with_state(|s| s.registered.push(catalog));
     }
 
@@ -350,8 +338,7 @@ pub fn CopySnapshot(snapshot: &Snapshot) -> Snapshot {
     let mcx = with_state(|s| s.mcx);
 
     let xip = copy_xids(mcx, &snapshot.xip[..snapshot.xcnt as usize]);
-    // Skip the subxid array if it overflowed — except during recovery, when
-    // top-level XIDs live in subxip too.
+    // Overflowed subxip is skipped — except in recovery (top xids live there).
     let subxip = if snapshot.subxcnt > 0 && (!snapshot.suboverflowed || snapshot.takenDuringRecovery)
     {
         copy_xids(mcx, &snapshot.subxip[..snapshot.subxcnt as usize])
@@ -449,7 +436,6 @@ pub fn PopActiveSnapshot() -> PgResult<()> {
         let snap = popped.as_snap;
         debug_assert!(snap.active_count.get() > 0);
         snap.active_count.set(snap.active_count.get() - 1);
-        // FreeSnapshot: both counts zero => dropping the last Rc reclaims it.
         if snap.active_count.get() == 0 && snap.regd_count.get() == 0 {
             debug_assert!(snap.copied);
         }
@@ -484,7 +470,6 @@ pub fn RegisterSnapshot(snapshot: Option<&Snapshot>) -> PgResult<Option<Snapshot
 }
 
 pub fn RegisterSnapshotOnOwner(snapshot: &Snapshot, owner: ResourceOwner) -> PgResult<Snapshot> {
-    // Static snapshot? Create a persistent copy.
     let snap = if snapshot.copied {
         snapshot.clone()
     } else {
@@ -523,7 +508,6 @@ pub fn UnregisterSnapshotNoOwner(snapshot: &Snapshot) {
         with_state(|s| registered_remove(s, snapshot));
     }
     if snapshot.regd_count.get() == 0 && snapshot.active_count.get() == 0 {
-        // FreeSnapshot happens when the caller's Rc drops.
         with_state(snapshot_reset_xmin_locked);
     }
 }
@@ -538,8 +522,7 @@ pub fn SnapshotResetXmin() {
     with_state(snapshot_reset_xmin_locked);
 }
 
-// Runs under an already-taken state borrow; MyProc->xmin is a plain shared
-// field write (no snapmgr re-entry).
+// Runs under the state borrow; the proc-xmin write can't re-enter snapmgr.
 fn snapshot_reset_xmin_locked(s: &mut SnapMgrState) {
     if !s.active.is_empty() {
         return;
@@ -551,7 +534,6 @@ fn snapshot_reset_xmin_locked(s: &mut SnapMgrState) {
         return;
     }
 
-    // pairingheap_first: the registered snapshot with the smallest xmin.
     let mut min_xmin = s.registered[0].xmin;
     for h in &s.registered[1..] {
         if TransactionIdPrecedes(h.xmin, min_xmin) {
@@ -567,7 +549,6 @@ fn snapshot_reset_xmin_locked(s: &mut SnapMgrState) {
 
 pub fn AtSubCommit_Snapshot(level: i32) {
     with_state(|s| {
-        // Relabel this subtransaction's active snapshots as the parent's.
         for elt in s.active.iter_mut().rev() {
             if elt.as_level < level {
                 break;
@@ -583,7 +564,6 @@ pub fn AtSubAbort_Snapshot(level: i32) -> PgResult<()> {
             let snap = s.active.pop().expect("checked non-empty").as_snap;
             debug_assert!(snap.active_count.get() >= 1);
             snap.active_count.set(snap.active_count.get() - 1);
-            // FreeSnapshot when both counts are zero: last Rc drops here.
         }
         snapshot_reset_xmin_locked(s);
     });
@@ -592,7 +572,6 @@ pub fn AtSubAbort_Snapshot(level: i32) -> PgResult<()> {
 
 pub fn AtEOXact_Snapshot(is_commit: bool, reset_xmin: bool) -> PgResult<()> {
     let (leftover_registered, leftover_active) = with_state(|s| {
-        // Release the privately-managed transaction-snapshot registration.
         if let Some(first_xact) = s.first_xact_snapshot.take() {
             debug_assert!(first_xact.regd_count.get() > 0);
             debug_assert!(!s.registered.is_empty());
@@ -600,12 +579,10 @@ pub fn AtEOXact_Snapshot(is_commit: bool, reset_xmin: bool) -> PgResult<()> {
         }
         // exportedSnapshots cleanup lives with ExportSnapshot (phase 2).
 
-        // Drop catalog snapshot if any.
         if s.catalog_valid {
             s.catalog_valid = false;
             let catalog = s.catalog_data.clone();
             registered_remove(s, &catalog);
-            // The full reset below supersedes SnapshotResetXmin here.
         }
 
         let leftover_registered = is_commit && !s.registered.is_empty();
@@ -678,12 +655,10 @@ pub fn HistoricSnapshotGetTupleCids() -> ! {
     unported("HistoricSnapshotGetTupleCids (logical decoding tuplecid hash)")
 }
 
-// XidInMVCCSnapshot (snapmgr.c): is xid still running per this snapshot?
 // Callers check TransactionIdIsCurrentTransactionId first, as in C.
 pub fn XidInMVCCSnapshot(xid: TransactionId, snapshot: &SnapshotData<'_>) -> PgResult<bool> {
     let mut xid = xid;
 
-    // Range checks eliminate most XIDs without touching the arrays.
     if TransactionIdPrecedes(xid, snapshot.xmin) {
         return Ok(false);
     }
@@ -693,12 +668,10 @@ pub fn XidInMVCCSnapshot(xid: TransactionId, snapshot: &SnapshotData<'_>) -> PgR
 
     if !snapshot.takenDuringRecovery {
         if !snapshot.suboverflowed {
-            // Full subxact data: search subxip, then fall through to xip.
             if snapshot.subxip[..snapshot.subxcnt.max(0) as usize].contains(&xid) {
                 return Ok(true);
             }
         } else {
-            // Overflowed: map to top-level via pg_subtrans, then search xip.
             xid = subtrans_seams::sub_trans_get_topmost_transaction::call(xid)?;
             if TransactionIdPrecedes(xid, snapshot.xmin) {
                 return Ok(false);
@@ -708,7 +681,6 @@ pub fn XidInMVCCSnapshot(xid: TransactionId, snapshot: &SnapshotData<'_>) -> PgR
             return Ok(true);
         }
     } else {
-        // In recovery all xids live in subxip; xip is empty.
         if snapshot.suboverflowed {
             xid = subtrans_seams::sub_trans_get_topmost_transaction::call(xid)?;
             if TransactionIdPrecedes(xid, snapshot.xmin) {
@@ -730,6 +702,12 @@ pub fn init_seams() {
     snapmgr_seams::at_subcommit_snapshot::set(AtSubCommit_Snapshot);
     snapmgr_seams::at_subabort_snapshot::set(AtSubAbort_Snapshot);
     snapmgr_seams::xact_has_exported_snapshots::set(XactHasExportedSnapshots);
+    snapmgr_seams::transaction_xmin::set(TransactionXmin);
+    snapmgr_seams::get_catalog_snapshot::set(GetCatalogSnapshot);
+    snapmgr_seams::register_snapshot::set(|snapshot| {
+        RegisterSnapshotOnOwner(&snapshot, resowner_seams::current_resource_owner::call())
+    });
+    snapmgr_seams::unregister_snapshot::set(|snapshot| UnregisterSnapshot(Some(&snapshot)));
     snapmgr_portal_seams::unregister_snapshot_from_owner::set(|snapshot, owner| {
         UnregisterSnapshotFromOwner(&snapshot, owner)
     });

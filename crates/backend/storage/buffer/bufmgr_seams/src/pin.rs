@@ -1,5 +1,4 @@
-//! Buffer pin + content lock guards (docs/no-drop.md: Drop is the abort
-//! path); page bytes are reachable only through pin-scoped borrows.
+//! Pin/content-lock guards (docs/no-drop.md); page access is pin-scoped.
 
 use types_core::{BlockNumber, Buffer, InvalidBuffer};
 use types_error::PgResult;
@@ -15,7 +14,6 @@ pub struct BufferPin {
 }
 
 impl BufferPin {
-    /// Adopt one already-taken pin reference; `InvalidBuffer` maps to `None`.
     #[inline]
     pub fn adopt(buffer: Buffer) -> Option<BufferPin> {
         if buffer == InvalidBuffer {
@@ -78,7 +76,6 @@ impl core::fmt::Debug for BufferPin {
     }
 }
 
-// Borrowing the pin makes release-while-locked a compile error.
 pub struct ContentLockGuard<'p> {
     pin: &'p BufferPin,
 }

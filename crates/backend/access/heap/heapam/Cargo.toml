@@ -1,0 +1,31 @@
+[package]
+name = "heapam"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+datum = { path = "../../../../_support/types/datum" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_snapshot = { path = "../../../../_support/types/snapshot" }
+types_slot = { path = "../../../../_support/types/types_slot" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+tableam = { path = "../../table/tableam" }
+exectuples = { path = "../../../executor/exectuples" }
+init_small = { path = "../../../utils/init/init_small" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
+pruneheap_seams = { path = "../pruneheap_seams" }
+syncscan_seams = { path = "../../common/syncscan_seams" }
+heapam_visibility_seams = { path = "../heapam_visibility_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
+subtrans_seams = { path = "../../transam/subtrans_seams" }
+multixact_seams = { path = "../../transam/multixact_seams" }
+xact_seams = { path = "../../transam/xact_seams" }

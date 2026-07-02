@@ -10,7 +10,7 @@ use ::types_core::{
 
 use crate::ilist::dlist_head;
 use crate::latch::Latch;
-use crate::lock::{LOCKMASK, LOCKMODE, LOCKTAG};
+use crate::lock::{LOCK, LOCKMASK, LOCKMODE, PROCLOCK};
 
 pub use ::types_core::{Buffer, BufferIsValid, InvalidBuffer};
 
@@ -629,8 +629,8 @@ pub struct PGPROC {
     pub lwWaitMode: AtomicU8,
     pub lwWaitLink: SyncCell<proclist_node>, // [WLL]
     pub cvWaitLink: SyncCell<proclist_node>, // [CV]
-    pub waitLock: SyncCell<Option<LOCKTAG>>, // [PART]
-    pub waitProcLock: SyncCell<Option<ProcNumber>>, // [PART]
+    pub waitLock: SyncCell<*mut LOCK>,       // [PART]; null = not waiting
+    pub waitProcLock: SyncCell<*mut PROCLOCK>, // [PART]
     pub waitLockMode: SyncCell<LOCKMODE>,    // [PART]
     pub heldLocks: SyncCell<LOCKMASK>,       // [PART]
     pub waitStart: pg_atomic_uint64,
@@ -735,8 +735,8 @@ impl PGPROC {
             lwWaitMode: AtomicU8::new(0),
             lwWaitLink: SyncCell::new(proclist_node::default()),
             cvWaitLink: SyncCell::new(proclist_node::default()),
-            waitLock: SyncCell::new(None),
-            waitProcLock: SyncCell::new(None),
+            waitLock: SyncCell::new(core::ptr::null_mut()),
+            waitProcLock: SyncCell::new(core::ptr::null_mut()),
             waitLockMode: SyncCell::new(0),
             heldLocks: SyncCell::new(0),
             waitStart: pg_atomic_uint64::new(0),

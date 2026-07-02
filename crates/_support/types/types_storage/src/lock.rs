@@ -1,10 +1,7 @@
-use alloc::boxed::Box;
-use alloc::string::String;
-use alloc::vec::Vec;
+use ::types_core::{uint16, uint32, uint8, Oid, ProcNumber, TimestampTz, TransactionId};
 
-use ::types_core::{int64, uint16, uint32, uint8, Oid, TimestampTz, TransactionId};
-
-use crate::ilist::{dclist_head, dlist_head, dlist_node};
+use crate::ilist::{dlist_head, dlist_node};
+use crate::storage::proclist_head;
 
 pub type LOCKMODE = i32;
 
@@ -224,7 +221,7 @@ pub struct LockInstanceData {
 // seam for pg_lock_status (lockfuncs.c).
 #[derive(Clone, Debug)]
 pub struct PredLockStatusRow {
-    pub locktypename: String,
+    pub locktypename: alloc::string::String,
     pub database: u32,
     pub relation: u32,
     pub has_page: bool,
@@ -261,90 +258,101 @@ pub enum DeadLockState {
     BlockedByAutoVacuum = 4,
 }
 
-// C's const pointers into lock.c's static tables, carried as owned vectors
-// built once by lock.c at init.
-#[derive(Clone, Debug)]
+// C's pointers into lock.c's static const tables, carried as 'static borrows.
+#[derive(Clone, Copy, Debug)]
 pub struct LockMethodData {
     pub numLockModes: i32,
-    pub conflictTab: Vec<LOCKMASK>,
-    pub lockModeNames: Vec<String>,
+    pub conflictTab: &'static [LOCKMASK],
+    pub lockModeNames: &'static [&'static str],
     pub trace_flag: bool,
 }
 
-pub type LockMethod = Box<LockMethodData>;
+pub type LockMethod = &'static LockMethodData;
 
+// Shmem-resident dynahash entry; every field is protected by the lock
+// partition assigned by LockTagHashCode(tag) ([PART]). waitProcs threads
+// ProcNumbers through PGPROC.links; procLocks threads PROCLOCK.lockLink.
+#[repr(C)]
 #[derive(Debug)]
 pub struct LOCK {
     pub tag: LOCKTAG,
     pub grantMask: LOCKMASK,
     pub waitMask: LOCKMASK,
     pub procLocks: dlist_head,
-    pub waitProcs: dclist_head,
+    pub waitProcs: ProcWaitQueue,
     pub requested: [i32; MAX_LOCKMODES],
     pub nRequested: i32,
     pub granted: [i32; MAX_LOCKMODES],
     pub nGranted: i32,
 }
 
-impl Default for LOCK {
-    fn default() -> Self {
-        LOCK {
-            tag: LOCKTAG::default(),
-            grantMask: 0,
-            waitMask: 0,
-            procLocks: dlist_head::default(),
-            waitProcs: dclist_head::default(),
-            requested: [0; MAX_LOCKMODES],
-            nRequested: 0,
-            granted: [0; MAX_LOCKMODES],
-            nGranted: 0,
+impl LOCK {
+    pub fn lock_method(&self) -> LOCKMETHODID {
+        self.tag.locktag_lockmethodid as LOCKMETHODID
+    }
+}
+
+// C's dclist_head over PGPROC.links, realized over ProcNumbers.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ProcWaitQueue {
+    pub list: proclist_head,
+    pub count: u32,
+}
+
+impl ProcWaitQueue {
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+}
+
+// The PROCLOCK hash key. C keys on {LOCK*, PGPROC*}; the PGPROC identity here
+// is its ProcNumber. `pad` participates in the 16-byte blob key and MUST be
+// zero. myLock stays a raw pointer: dynahash LOCK entries are address-stable
+// for the life of the PROCLOCK (guaranteed by nRequested accounting).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PROCLOCKTAG {
+    pub myLock: *mut LOCK,
+    pub myProc: ProcNumber,
+    pub pad: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<PROCLOCKTAG>() == 16);
+
+impl PROCLOCKTAG {
+    pub fn new(my_lock: *mut LOCK, my_proc: ProcNumber) -> Self {
+        Self {
+            myLock: my_lock,
+            myProc: my_proc,
+            pad: 0,
         }
     }
 }
 
-#[derive(Debug)]
-pub struct PROCLOCKTAG {
-    pub myLock: Option<Box<LOCK>>,
-    pub myProc: Option<Box<crate::storage::PGPROC>>,
-}
-
+// Shmem-resident dynahash entry, [PART] like LOCK. groupLeader is a PGPROC
+// identity (C stores the pointer). releaseMask is per-backend scratch used
+// only by the owning backend within LockReleaseAll/PostPrepare_Locks.
+#[repr(C)]
 #[derive(Debug)]
 pub struct PROCLOCK {
     pub tag: PROCLOCKTAG,
-    pub groupLeader: Option<Box<crate::storage::PGPROC>>,
+    pub groupLeader: ProcNumber,
     pub holdMask: LOCKMASK,
     pub releaseMask: LOCKMASK,
     pub lockLink: dlist_node,
     pub procLink: dlist_node,
 }
 
+const _: () = {
+    assert!(!core::mem::needs_drop::<LOCK>());
+    assert!(!core::mem::needs_drop::<PROCLOCK>());
+};
+
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct LOCALLOCKTAG {
     pub lock: LOCKTAG,
     pub mode: LOCKMODE,
-}
-
-// C divergence from fabled: `Owner` is generic — the resowner unit is not
-// ported yet; lock.c instantiates it with the canonical ResourceOwner handle,
-// which it only stores and compares. `owner == None` = session-level hold.
-#[derive(Clone, Debug)]
-pub struct LOCALLOCKOWNER<Owner> {
-    pub owner: Option<Owner>,
-    pub nLocks: int64,
-}
-
-#[derive(Debug)]
-pub struct LOCALLOCK<Owner> {
-    pub tag: LOCALLOCKTAG,
-    pub hashcode: uint32,
-    pub lock: Option<Box<LOCK>>,
-    pub proclock: Option<Box<PROCLOCK>>,
-    pub nLocks: int64,
-    pub numLockOwners: i32,
-    pub maxLockOwners: i32,
-    pub lockOwners: Vec<LOCALLOCKOWNER<Owner>>,
-    pub holdsStrongLockCount: bool,
-    pub lockCleared: bool,
 }
 
 #[cfg(test)]
@@ -356,5 +364,12 @@ mod tests {
         assert_eq!(LOCKBIT_ON(AccessExclusiveLock), 1 << 8);
         assert_eq!(LOCKBIT_OFF(AccessShareLock), !(1 << 1));
         assert_eq!(LOCKTAG_LAST_TYPE, 11);
+    }
+
+    #[test]
+    fn shared_lock_shapes_are_shmem_resident() {
+        assert!(!core::mem::needs_drop::<LOCK>());
+        assert!(!core::mem::needs_drop::<PROCLOCK>());
+        assert_eq!(core::mem::size_of::<PROCLOCKTAG>(), 16);
     }
 }

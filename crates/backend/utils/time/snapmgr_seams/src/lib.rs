@@ -25,7 +25,25 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // The snapmgr.c TransactionXmin global; a getter seam sanctioned as the
-    // global's accessor until snapmgr ports (serializable-only cold path).
+    // The snapmgr.c TransactionXmin global (cold: serializable-only callers).
     pub fn transaction_xmin() -> types_core::TransactionId
+);
+
+// Snapshots are snapmgr-owned, backend-lifetime storage (C: statics +
+// TopTransactionContext copies); C's signatures carry no allocator.
+seam_core::seam!(
+    pub fn get_catalog_snapshot(
+        relid: types_core::Oid,
+    ) -> types_error::PgResult<std::rc::Rc<types_snapshot::SnapshotData<'static>>>
+);
+
+seam_core::seam!(
+    // RegisterSnapshot: returns the registered (possibly copied) snapshot.
+    pub fn register_snapshot(
+        snapshot: std::rc::Rc<types_snapshot::SnapshotData<'static>>,
+    ) -> types_error::PgResult<std::rc::Rc<types_snapshot::SnapshotData<'static>>>
+);
+
+seam_core::seam!(
+    pub fn unregister_snapshot(snapshot: std::rc::Rc<types_snapshot::SnapshotData<'static>>)
 );

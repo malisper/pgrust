@@ -21,6 +21,10 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn get_current_transaction_stop_timestamp() -> types_core::TimestampTz
+);
+
+seam_core::seam!(
     pub fn get_top_transaction_id_if_any() -> types_core::TransactionId
 );
 
@@ -52,4 +56,8 @@ seam_core::seam!(
 
 seam_core::seam!(
     pub fn transaction_id_is_current_transaction_id(xid: types_core::TransactionId) -> bool
+);
+
+seam_core::seam!(
+    pub fn is_transaction_state() -> bool
 );

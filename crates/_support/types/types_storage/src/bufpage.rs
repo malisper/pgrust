@@ -163,6 +163,101 @@ pub const MaxHeapTupleSize: Size = BLCKSZ - {
 
 pub const PG_IO_ALIGN_SIZE: usize = 4096;
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct PageHeaderData {
+    pub pd_lsn: PageXLogRecPtr,
+    pub pd_checksum: uint16,
+    pub pd_flags: uint16,
+    pub pd_lower: uint16,
+    pub pd_upper: uint16,
+    pub pd_special: uint16,
+    pub pd_pagesize_version: uint16,
+    pub pd_prune_xid: uint32,
+    pub pd_linp: [ItemIdData; 0],
+}
+
+const _: () = assert!(core::mem::offset_of!(PageHeaderData, pd_lower) == 12);
+const _: () = assert!(core::mem::offset_of!(PageHeaderData, pd_prune_xid) == 20);
+const _: () = assert!(core::mem::offset_of!(PageHeaderData, pd_linp) == SizeOfPageHeaderData);
+
+// C's `Page`, read view. All access chains from the raw pointer (no whole-page
+// `&[u8]`), so C's tolerated hint-bit stores don't invalidate the view.
+#[derive(Clone, Copy)]
+pub struct PageRef<'a> {
+    ptr: core::ptr::NonNull<u8>,
+    _page: core::marker::PhantomData<&'a [u8]>,
+}
+
+impl<'a> PageRef<'a> {
+    /// # Safety
+    /// `ptr` is a live, MAXALIGN-aligned, `BLCKSZ`-readable page image for all
+    /// of `'a` (buffer pages: pinned for `'a`); concurrent writes follow C's locking contract.
+    #[inline]
+    pub unsafe fn from_raw(ptr: core::ptr::NonNull<u8>) -> PageRef<'a> {
+        PageRef {
+            ptr,
+            _page: core::marker::PhantomData,
+        }
+    }
+
+    #[inline]
+    pub fn as_ptr(&self) -> *const u8 {
+        self.ptr.as_ptr()
+    }
+
+    #[inline]
+    fn read_u16(&self, off: usize) -> uint16 {
+        debug_assert!(off + 2 <= BLCKSZ && off % 2 == 0);
+        // SAFETY: in-bounds, 2-aligned (from_raw contract).
+        unsafe { self.ptr.as_ptr().add(off).cast::<uint16>().read() }
+    }
+
+    #[inline]
+    pub fn max_offset_number(&self) -> OffsetNumber {
+        let pd_lower = self.read_u16(core::mem::offset_of!(PageHeaderData, pd_lower)) as usize;
+        if pd_lower <= SizeOfPageHeaderData {
+            0
+        } else {
+            ((pd_lower - SizeOfPageHeaderData) / core::mem::size_of::<ItemIdData>())
+                as OffsetNumber
+        }
+    }
+
+    #[inline]
+    pub fn is_all_visible(&self) -> bool {
+        (self.read_u16(core::mem::offset_of!(PageHeaderData, pd_flags)) & PD_ALL_VISIBLE) != 0
+    }
+
+    #[inline]
+    pub fn is_new(&self) -> bool {
+        self.read_u16(core::mem::offset_of!(PageHeaderData, pd_upper)) == 0
+    }
+
+    /// `*PageGetItemId(page, offnum)` by value; hard-bounded to the page image.
+    #[inline]
+    pub fn item_id(&self, offnum: OffsetNumber) -> ItemIdData {
+        let offnum = offnum as usize;
+        assert!(
+            offnum >= 1
+                && SizeOfPageHeaderData + offnum * core::mem::size_of::<ItemIdData>() <= BLCKSZ
+        );
+        let off = SizeOfPageHeaderData + (offnum - 1) * core::mem::size_of::<ItemIdData>();
+        // SAFETY: in-bounds (checked above), 4-aligned (header is MAXALIGNed).
+        unsafe { self.ptr.as_ptr().add(off).cast::<ItemIdData>().read() }
+    }
+
+    /// `PageGetItem` + `ItemIdGetLength` as raw parts (raw: hint-bit writes stay legal).
+    #[inline]
+    pub fn item_raw(&self, id: ItemIdData) -> (*const u8, u32) {
+        let off = id.lp_off() as usize;
+        let len = id.lp_len() as usize;
+        assert!(off >= SizeOfPageHeaderData && off + len <= BLCKSZ, "corrupt line pointer");
+        // SAFETY: in-bounds (checked above).
+        (unsafe { self.ptr.as_ptr().add(off) }, len as u32)
+    }
+}
+
 // Owned local scratch page: PageGetTempPage*'s palloc(pageSize), always a full
 // BLCKSZ buffer even when pd_pagesize is smaller.
 #[derive(Clone, Debug, Eq, PartialEq)]
