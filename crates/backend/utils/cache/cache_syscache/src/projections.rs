@@ -6,15 +6,23 @@ use mcx::{Mcx, PgString};
 use types_core::Oid;
 use types_error::PgResult;
 use types_storage::PgClassShape;
-use types_tuple::{HeapTupleData, PgTypeShape, TupleDescData};
+use syscache_seams::PgTypeTypcacheShape;
+use types_tuple::{HeapTupleData, NameData, PgTypeShape, TupleDescData};
 
-use crate::{ReleaseSysCache, SearchSysCache1, SearchSysCacheExists, SysCacheKey};
-use crate::cacheinfo::{ATTNUM, AUTHOID, CONSTROID, INDEXRELID, RELOID, TYPEOID};
+use crate::{GetSysCacheOid, ReleaseSysCache, SearchSysCache1, SearchSysCacheExists, SysCacheKey};
+use crate::cacheinfo::{ATTNUM, AUTHOID, CONSTROID, INDEXRELID, NAMESPACEOID, RELNAMENSP, RELOID, TYPEOID};
 
 const ANUM_PG_CLASS_OID: i32 = 1;
 const ANUM_PG_CLASS_RELISSHARED: i32 = 16;
+const ANUM_PG_TYPE_TYPNAME: i32 = 2;
 const ANUM_PG_TYPE_TYPLEN: i32 = 5;
 const ANUM_PG_TYPE_TYPBYVAL: i32 = 6;
+const ANUM_PG_TYPE_TYPTYPE: i32 = 7;
+const ANUM_PG_TYPE_TYPISDEFINED: i32 = 10;
+const ANUM_PG_TYPE_TYPRELID: i32 = 12;
+const ANUM_PG_TYPE_TYPSUBSCRIPT: i32 = 13;
+const ANUM_PG_TYPE_TYPELEM: i32 = 14;
+const ANUM_PG_TYPE_TYPARRAY: i32 = 15;
 const ANUM_PG_TYPE_TYPALIGN: i32 = 23;
 const ANUM_PG_TYPE_TYPSTORAGE: i32 = 24;
 const ANUM_PG_TYPE_TYPCOLLATION: i32 = 29;
@@ -23,6 +31,7 @@ const ANUM_PG_INDEX_INDEXRELID: i32 = 1;
 const ANUM_PG_CONSTRAINT_CONTYPE: i32 = 4;
 const ANUM_PG_CONSTRAINT_CONRELID: i32 = 9;
 const ANUM_PG_AUTHID_ROLNAME: i32 = 2;
+const ANUM_PG_NAMESPACE_NSPNAME: i32 = 2;
 const CONSTRAINT_FOREIGN: i8 = b'f' as i8;
 
 fn tupdesc_for(cache_id: i32) -> &'static TupleDescData<'static> {
@@ -135,6 +144,75 @@ fn sys_cache_invalidate(cache_id: i32, hash_value: u32) -> PgResult<()> {
     Ok(())
 }
 
+fn getattr_name(tuple: &HeapTupleData<'_>, cache_id: i32, attnum: i32) -> NameData {
+    let d = getattr(tuple, cache_id, attnum);
+    let mut name = NameData::default();
+    // SAFETY: a NameData column's datum points at its 64-byte in-tuple buffer.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            d.as_usize() as *const u8,
+            name.data.as_mut_ptr(),
+            name.data.len(),
+        );
+    }
+    name
+}
+
+fn lookup_pg_type_typcache_shape(typid: Oid) -> PgResult<Option<PgTypeTypcacheShape>> {
+    let Some(tuple) = SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(typid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let shape = PgTypeTypcacheShape {
+        typname: getattr_name(&t, TYPEOID, ANUM_PG_TYPE_TYPNAME),
+        typlen: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPLEN).as_i16(),
+        typbyval: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPBYVAL).as_bool(),
+        typalign: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPALIGN).as_i8(),
+        typstorage: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPSTORAGE).as_i8(),
+        typtype: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPTYPE).as_i8(),
+        typisdefined: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPISDEFINED).as_bool(),
+        typrelid: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPRELID).as_oid(),
+        typsubscript: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPSUBSCRIPT).as_oid(),
+        typelem: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPELEM).as_oid(),
+        typarray: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPARRAY).as_oid(),
+        typcollation: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPCOLLATION).as_oid(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
+fn lookup_pg_class_relid_by_name(relname: &str, relnamespace: Oid) -> PgResult<Oid> {
+    GetSysCacheOid(
+        RELNAMENSP,
+        ANUM_PG_CLASS_OID,
+        SysCacheKey::Str(relname),
+        SysCacheKey::Value(Datum::from_oid(relnamespace)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
+fn pg_namespace_nspname(nspid: Oid) -> PgResult<Option<NameData>> {
+    let Some(tuple) = SearchSysCache1(NAMESPACEOID, SysCacheKey::Value(Datum::from_oid(nspid)))?
+    else {
+        return Ok(None);
+    };
+    let name = getattr_name(&tuple.tuple(), NAMESPACEOID, ANUM_PG_NAMESPACE_NSPNAME);
+    ReleaseSysCache(tuple);
+    Ok(Some(name))
+}
+
+fn syscache_hash_value_typeoid(typid: Oid) -> PgResult<u32> {
+    crate::GetSysCacheHashValue(
+        TYPEOID,
+        SysCacheKey::Value(Datum::from_oid(typid)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
 pub(crate) fn install() {
     syscache_seams::search_syscache_exists_reloid::set(search_syscache_exists_reloid);
     syscache_seams::sys_cache_invalidate::set(sys_cache_invalidate);
@@ -146,4 +224,8 @@ pub(crate) fn install() {
     syscache_seams::pg_constraint_fk_target::set(pg_constraint_fk_target);
     syscache_seams::lookup_pg_type_shape::set(lookup_pg_type_shape);
     syscache_seams::lookup_authid_rolname::set(lookup_authid_rolname);
+    syscache_seams::lookup_pg_type_typcache_shape::set(lookup_pg_type_typcache_shape);
+    syscache_seams::syscache_hash_value_typeoid::set(syscache_hash_value_typeoid);
+    syscache_seams::lookup_pg_class_relid_by_name::set(lookup_pg_class_relid_by_name);
+    syscache_seams::pg_namespace_nspname::set(pg_namespace_nspname);
 }
