@@ -1,0 +1,367 @@
+//! xlog.c (PostgreSQL 18.3): control file, XLogCtl, the WAL insert/write/
+//! flush engine, and StartupXLOG. Recovery record-reading is xlogrecovery's;
+//! record assembly is xloginsert's.
+
+#![allow(non_snake_case)]
+#![allow(non_upper_case_globals)]
+#![allow(non_camel_case_types)]
+
+use std::cell::Cell;
+
+use types_core::{pg_time_t, TimeLineID, XLogRecPtr, XLogSegNo};
+use types_error::PgResult;
+
+pub mod control_file;
+pub mod ctl;
+pub mod insert;
+pub mod redo;
+pub mod startup;
+pub mod write;
+
+#[cfg(test)]
+mod tests;
+
+pub use control_file::{
+    CheckPoint, ControlFileData, DataChecksumsEnabled, GetDefaultCharSignedness,
+    GetMockAuthenticationNonce, GetSystemIdentifier, LocalProcessControlFile, ReadControlFile,
+    UpdateControlFile,
+};
+pub use ctl::{XLOGShmemInit, XLOGShmemSize};
+pub use insert::{
+    GetFullPageWriteInfo, GetRedoRecPtr, RecoveryInProgress, XLogInsertAllowed, XLogInsertRecord,
+};
+pub use startup::{CreateCheckPoint, ShutdownXLOG, StartupXLOG};
+pub use write::{XLogFileInit, XLogFileOpen, XLogFlush, XLogNeedsFlush, XLogSetAsyncXactLSN};
+
+pub const InvalidXLogRecPtr: XLogRecPtr = 0;
+pub const XLOG_BLCKSZ: usize = xlogreader_seams::XLOG_BLCKSZ;
+pub const SizeOfXLogRecord: usize = 24;
+pub const SizeOfXLogShortPHD: usize = 24;
+pub const SizeOfXLogLongPHD: usize = 40;
+pub const XLOG_PAGE_MAGIC: u16 = 0xD118;
+pub const XLOGDIR: &str = "pg_wal";
+
+pub const XLP_FIRST_IS_CONTRECORD: u16 = 0x0001;
+pub const XLP_LONG_HEADER: u16 = 0x0002;
+pub const XLP_BKP_REMOVABLE: u16 = 0x0004;
+pub const XLP_FIRST_IS_OVERWRITE_CONTRECORD: u16 = 0x0008;
+
+pub const XLR_INFO_MASK: u8 = 0x0F;
+pub const XLOG_INCLUDE_ORIGIN: u8 = 0x01;
+pub const XLOG_MARK_UNIMPORTANT: u8 = 0x02;
+
+pub const RM_XLOG_ID: u8 = 0;
+
+pub const XLOG_CHECKPOINT_SHUTDOWN: u8 = 0x00;
+pub const XLOG_CHECKPOINT_ONLINE: u8 = 0x10;
+pub const XLOG_NOOP: u8 = 0x20;
+pub const XLOG_NEXTOID: u8 = 0x30;
+pub const XLOG_SWITCH: u8 = 0x40;
+pub const XLOG_BACKUP_END: u8 = 0x50;
+pub const XLOG_PARAMETER_CHANGE: u8 = 0x60;
+pub const XLOG_RESTORE_POINT: u8 = 0x70;
+pub const XLOG_FPW_CHANGE: u8 = 0x80;
+pub const XLOG_END_OF_RECOVERY: u8 = 0x90;
+pub const XLOG_FPI_FOR_HINT: u8 = 0xA0;
+pub const XLOG_FPI: u8 = 0xB0;
+pub const XLOG_OVERWRITE_CONTRECORD: u8 = 0xD0;
+pub const XLOG_CHECKPOINT_REDO: u8 = 0xE0;
+
+pub const CHECKPOINT_IS_SHUTDOWN: i32 = 0x0001;
+pub const CHECKPOINT_END_OF_RECOVERY: i32 = 0x0002;
+pub const CHECKPOINT_IMMEDIATE: i32 = 0x0004;
+pub const CHECKPOINT_FORCE: i32 = 0x0008;
+pub const CHECKPOINT_FLUSH_ALL: i32 = 0x0010;
+pub const CHECKPOINT_WAIT: i32 = 0x0020;
+pub const CHECKPOINT_REQUESTED: i32 = 0x0040;
+pub const CHECKPOINT_CAUSE_XLOG: i32 = 0x0080;
+pub const CHECKPOINT_CAUSE_TIME: i32 = 0x0100;
+
+pub type RecoveryState = i32;
+pub const RECOVERY_STATE_CRASH: RecoveryState = 0;
+pub const RECOVERY_STATE_ARCHIVE: RecoveryState = 1;
+pub const RECOVERY_STATE_DONE: RecoveryState = 2;
+
+pub type DBState = i32;
+pub const DB_STARTUP: DBState = 0;
+pub const DB_SHUTDOWNED: DBState = 1;
+pub const DB_SHUTDOWNED_IN_RECOVERY: DBState = 2;
+pub const DB_SHUTDOWNING: DBState = 3;
+pub const DB_IN_CRASH_RECOVERY: DBState = 4;
+pub const DB_IN_ARCHIVE_RECOVERY: DBState = 5;
+pub const DB_IN_PRODUCTION: DBState = 6;
+
+pub const WAL_LEVEL_MINIMAL: i32 = 0;
+pub const WAL_LEVEL_REPLICA: i32 = 1;
+pub const WAL_LEVEL_LOGICAL: i32 = 2;
+
+pub const WAL_SYNC_METHOD_FSYNC: i32 = 0;
+pub const WAL_SYNC_METHOD_FDATASYNC: i32 = 1;
+pub const WAL_SYNC_METHOD_OPEN: i32 = 2;
+pub const WAL_SYNC_METHOD_FSYNC_WRITETHROUGH: i32 = 3;
+pub const WAL_SYNC_METHOD_OPEN_DSYNC: i32 = 4;
+
+pub const NUM_XLOGINSERT_LOCKS: usize = 8;
+
+pub const fn MAXALIGN(n: usize) -> usize {
+    (n + 7) & !7
+}
+pub const fn MAXALIGN64(n: u64) -> u64 {
+    (n + 7) & !7
+}
+
+pub fn wal_level() -> i32 {
+    guc_tables::vars::wal_level.read()
+}
+pub fn XLogIsNeeded() -> bool {
+    wal_level() >= WAL_LEVEL_REPLICA
+}
+pub fn XLogStandbyInfoActive() -> bool {
+    wal_level() >= WAL_LEVEL_REPLICA
+}
+pub fn XLogLogicalInfoActive() -> bool {
+    wal_level() >= WAL_LEVEL_LOGICAL
+}
+pub fn XLogArchivingActive() -> bool {
+    guc_tables::vars::XLogArchiveMode.read() > 0
+}
+
+// wal_segment_size + UsableBytesInSegment are fixed by ReadControlFile before
+// any WAL access; cached here so per-record arithmetic is a plain load.
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering::Relaxed};
+static WAL_SEGMENT_SIZE: AtomicI32 = AtomicI32::new(16 * 1024 * 1024);
+static USABLE_BYTES_IN_SEGMENT: AtomicU64 = AtomicU64::new(
+    (16 * 1024 * 1024 / XLOG_BLCKSZ as u64) * UsableBytesInPage
+        - (SizeOfXLogLongPHD - SizeOfXLogShortPHD) as u64,
+);
+
+pub const UsableBytesInPage: u64 = (XLOG_BLCKSZ - SizeOfXLogShortPHD) as u64;
+
+pub fn wal_segment_size() -> i32 {
+    WAL_SEGMENT_SIZE.load(Relaxed)
+}
+
+pub(crate) fn set_wal_segment_size(size: i32) {
+    WAL_SEGMENT_SIZE.store(size, Relaxed);
+    let usable = (size as u64 / XLOG_BLCKSZ as u64) * UsableBytesInPage
+        - (SizeOfXLogLongPHD - SizeOfXLogShortPHD) as u64;
+    USABLE_BYTES_IN_SEGMENT.store(usable, Relaxed);
+}
+
+pub fn UsableBytesInSegment() -> u64 {
+    USABLE_BYTES_IN_SEGMENT.load(Relaxed)
+}
+
+pub fn IsValidWalSegSize(size: i32) -> bool {
+    size > 0 && (size & (size - 1)) == 0 && (1024 * 1024..=1024 * 1024 * 1024).contains(&size)
+}
+
+pub fn XLogSegmentsPerXLogId(wal_segsz: i32) -> u64 {
+    0x1_0000_0000_u64 / wal_segsz as u64
+}
+pub fn XLogSegNoOffsetToRecPtr(segno: XLogSegNo, offset: u32, wal_segsz: i32) -> XLogRecPtr {
+    segno * wal_segsz as u64 + offset as u64
+}
+pub fn XLogSegmentOffset(ptr: XLogRecPtr, wal_segsz: i32) -> u32 {
+    (ptr & (wal_segsz as u64 - 1)) as u32
+}
+pub fn XLByteToSeg(ptr: XLogRecPtr, wal_segsz: i32) -> XLogSegNo {
+    ptr / wal_segsz as u64
+}
+pub fn XLByteToPrevSeg(ptr: XLogRecPtr, wal_segsz: i32) -> XLogSegNo {
+    (ptr - 1) / wal_segsz as u64
+}
+pub fn XLByteInPrevSeg(ptr: XLogRecPtr, segno: XLogSegNo, wal_segsz: i32) -> bool {
+    XLByteToPrevSeg(ptr, wal_segsz) == segno
+}
+pub fn XLogMBVarToSegs(mbvar: i32, wal_segsz: i32) -> i32 {
+    mbvar / (wal_segsz / (1024 * 1024))
+}
+pub fn XRecOffIsValid(ptr: XLogRecPtr) -> bool {
+    ptr % XLOG_BLCKSZ as u64 >= SizeOfXLogShortPHD as u64
+}
+pub fn XLogRecPtrIsInvalid(ptr: XLogRecPtr) -> bool {
+    ptr == InvalidXLogRecPtr
+}
+
+pub fn XLogFileName(tli: TimeLineID, segno: XLogSegNo, wal_segsz: i32) -> String {
+    let per_id = XLogSegmentsPerXLogId(wal_segsz);
+    format!("{tli:08X}{:08X}{:08X}", segno / per_id, segno % per_id)
+}
+pub fn XLogFilePath(tli: TimeLineID, segno: XLogSegNo, wal_segsz: i32) -> String {
+    format!("{XLOGDIR}/{}", XLogFileName(tli, segno, wal_segsz))
+}
+
+pub const fn INSERT_FREESPACE(endptr: XLogRecPtr) -> usize {
+    if endptr % XLOG_BLCKSZ as u64 == 0 {
+        0
+    } else {
+        XLOG_BLCKSZ - (endptr % XLOG_BLCKSZ as u64) as usize
+    }
+}
+
+pub fn XLogBytePosToRecPtr(bytepos: u64) -> XLogRecPtr {
+    let usable_seg = UsableBytesInSegment();
+    let fullsegs = bytepos / usable_seg;
+    let mut bytesleft = bytepos % usable_seg;
+    let seg_offset;
+    if bytesleft < (XLOG_BLCKSZ - SizeOfXLogLongPHD) as u64 {
+        seg_offset = bytesleft + SizeOfXLogLongPHD as u64;
+    } else {
+        bytesleft -= (XLOG_BLCKSZ - SizeOfXLogLongPHD) as u64;
+        let fullpages = bytesleft / UsableBytesInPage;
+        bytesleft %= UsableBytesInPage;
+        seg_offset = XLOG_BLCKSZ as u64
+            + fullpages * XLOG_BLCKSZ as u64
+            + bytesleft
+            + SizeOfXLogShortPHD as u64;
+    }
+    XLogSegNoOffsetToRecPtr(fullsegs, seg_offset as u32, wal_segment_size())
+}
+
+pub fn XLogBytePosToEndRecPtr(bytepos: u64) -> XLogRecPtr {
+    let usable_seg = UsableBytesInSegment();
+    let fullsegs = bytepos / usable_seg;
+    let mut bytesleft = bytepos % usable_seg;
+    let seg_offset;
+    if bytesleft < (XLOG_BLCKSZ - SizeOfXLogLongPHD) as u64 {
+        seg_offset = if bytesleft == 0 { 0 } else { bytesleft + SizeOfXLogLongPHD as u64 };
+    } else {
+        bytesleft -= (XLOG_BLCKSZ - SizeOfXLogLongPHD) as u64;
+        let fullpages = bytesleft / UsableBytesInPage;
+        bytesleft %= UsableBytesInPage;
+        let mut off = XLOG_BLCKSZ as u64 + fullpages * XLOG_BLCKSZ as u64 + bytesleft;
+        if bytesleft != 0 {
+            off += SizeOfXLogShortPHD as u64;
+        }
+        seg_offset = off;
+    }
+    XLogSegNoOffsetToRecPtr(fullsegs, seg_offset as u32, wal_segment_size())
+}
+
+pub fn XLogRecPtrToBytePos(ptr: XLogRecPtr) -> u64 {
+    let wal_segsz = wal_segment_size();
+    let usable_seg = UsableBytesInSegment();
+    let fullsegs = XLByteToSeg(ptr, wal_segsz);
+    let fullpages = XLogSegmentOffset(ptr, wal_segsz) as u64 / XLOG_BLCKSZ as u64;
+    let offset = ptr % XLOG_BLCKSZ as u64;
+    if fullpages == 0 {
+        let mut result = fullsegs * usable_seg;
+        if offset > 0 {
+            debug_assert!(offset >= SizeOfXLogLongPHD as u64);
+            result += offset - SizeOfXLogLongPHD as u64;
+        }
+        result
+    } else {
+        let mut result = fullsegs * usable_seg
+            + (XLOG_BLCKSZ - SizeOfXLogLongPHD) as u64
+            + (fullpages - 1) * UsableBytesInPage;
+        if offset > 0 {
+            debug_assert!(offset >= SizeOfXLogShortPHD as u64);
+            result += offset - SizeOfXLogShortPHD as u64;
+        }
+        result
+    }
+}
+
+static CHECK_POINT_SEGMENTS: AtomicI32 = AtomicI32::new(0);
+pub fn CheckPointSegments() -> i32 {
+    CHECK_POINT_SEGMENTS.load(Relaxed)
+}
+pub fn CalculateCheckpointSegments() {
+    let target = XLogMBVarToSegs(guc_tables::vars::max_wal_size_mb.read(), wal_segment_size())
+        as f64
+        / (1.0 + guc_tables::vars::CheckPointCompletionTarget.read());
+    CHECK_POINT_SEGMENTS.store((target as i32).max(1), Relaxed);
+}
+
+pub fn XLogCheckpointNeeded(new_segno: XLogSegNo) -> bool {
+    let old_segno = XLByteToSeg(insert::local_redo_rec_ptr(), wal_segment_size());
+    new_segno >= old_segno + (CheckPointSegments() - 1) as u64
+}
+
+fn assign_max_wal_size(_newval: i32, _extra: Option<&guc_tables::slots::GucHookExtra>) {
+    CalculateCheckpointSegments();
+}
+fn assign_checkpoint_completion_target(
+    _newval: f64,
+    _extra: Option<&guc_tables::slots::GucHookExtra>,
+) {
+    CalculateCheckpointSegments();
+}
+fn check_wal_segment_size_hook(
+    newval: &mut i32,
+    _extra: &mut Option<guc_tables::slots::GucHookExtra>,
+    _source: guc_tables::types_guc::GucSource,
+) -> PgResult<bool> {
+    Ok(IsValidWalSegSize(*newval))
+}
+fn XLOGChooseNumBuffers() -> i32 {
+    let mut xbuffers = init_small::globals::NBuffers() / 32;
+    xbuffers = xbuffers.min(wal_segment_size() / XLOG_BLCKSZ as i32);
+    xbuffers.max(8)
+}
+fn check_wal_buffers_hook(
+    newval: &mut i32,
+    _extra: &mut Option<guc_tables::slots::GucHookExtra>,
+    _source: guc_tables::types_guc::GucSource,
+) -> PgResult<bool> {
+    if *newval == -1 {
+        if guc_tables::vars::XLOGbuffers.read() == -1 {
+            return Ok(true);
+        }
+        *newval = XLOGChooseNumBuffers();
+    }
+    if *newval < 4 {
+        *newval = 4;
+    }
+    Ok(true)
+}
+
+thread_local! {
+    pub(crate) static PROC_LAST_REC_PTR: Cell<XLogRecPtr> = const { Cell::new(0) };
+    pub(crate) static XACT_LAST_REC_END: Cell<XLogRecPtr> = const { Cell::new(0) };
+    pub(crate) static XACT_LAST_COMMIT_END: Cell<XLogRecPtr> = const { Cell::new(0) };
+}
+
+pub fn ProcLastRecPtr() -> XLogRecPtr {
+    PROC_LAST_REC_PTR.get()
+}
+pub fn XactLastRecEnd() -> XLogRecPtr {
+    XACT_LAST_REC_END.get()
+}
+
+pub(crate) fn now_pg_time() -> pg_time_t {
+    // SAFETY: libc::time with a null out-pointer.
+    unsafe { libc::time(std::ptr::null_mut()) as pg_time_t }
+}
+
+pub fn init_seams() {
+    use transam_xlog_seams as s;
+
+    s::xlog_redo::set(redo::xlog_redo);
+    s::xlog_flush::set(write::XLogFlush);
+    s::xlog_needs_flush::set(write::XLogNeedsFlush);
+    s::count_ckpt_slru_written::set(startup::count_ckpt_slru_written);
+    s::xlog_logical_info_active::set(XLogLogicalInfoActive);
+    s::xlog_standby_info_active::set(XLogStandbyInfoActive);
+    s::recovery_in_progress::set(insert::RecoveryInProgress);
+    s::get_flush_rec_ptr::set(write::get_flush_rec_ptr_seam);
+    s::wal_segment_size::set(wal_segment_size);
+    s::xact_last_rec_end::set(XactLastRecEnd);
+    s::set_xact_last_rec_end::set(|lsn| XACT_LAST_REC_END.set(lsn));
+    s::set_xact_last_commit_end::set(|lsn| XACT_LAST_COMMIT_END.set(lsn));
+    s::xlog_set_async_xact_lsn::set(write::XLogSetAsyncXactLSN);
+    s::startup_xlog::set(startup::StartupXLOG);
+    s::shutdown_xlog::set(startup::shutdown_xlog_seam);
+    s::get_redo_rec_ptr::set(insert::GetRedoRecPtr);
+    s::xlog_insert_record::set(insert::xlog_insert_record_seam);
+    s::xlog_insert_allowed::set(insert::XLogInsertAllowed);
+    s::get_full_page_write_info::set(insert::GetFullPageWriteInfo);
+
+    guc_tables::hooks::assign_max_wal_size.install(assign_max_wal_size);
+    guc_tables::hooks::assign_checkpoint_completion_target
+        .install(assign_checkpoint_completion_target);
+    guc_tables::hooks::check_wal_segment_size.install(check_wal_segment_size_hook);
+    guc_tables::hooks::check_wal_buffers.install(check_wal_buffers_hook);
+}

@@ -945,12 +945,14 @@ dependencies = [
  "datum",
  "indexam_seams",
  "mcx",
+ "nbtree",
  "relation_seams",
  "tableam",
  "types_core",
  "types_error",
  "types_nbtree",
  "types_rel",
+ "types_relscan",
  "types_scan",
  "types_slot",
  "types_snapshot",
@@ -1393,6 +1395,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "name"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "elog",
+ "lsyscache",
+ "mbutils_seams",
+ "mcx",
+ "miscinit",
+ "namespace_seams",
+ "pqformat",
+ "stringinfo",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
 name = "namespace_seams"
 version = "0.0.0"
 dependencies = [
@@ -1459,6 +1481,18 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "parser_driver"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "parser_seams",
+ "parser_small1",
+ "types_error",
+ "types_nodes",
+ "wchar",
 ]
 
 [[package]]
@@ -1825,6 +1859,28 @@ dependencies = [
 [[package]]
 name = "pquery"
 version = "0.1.0"
+dependencies = [
+ "cmdtag",
+ "elog",
+ "execmain_seams",
+ "exectuples",
+ "guc_tables",
+ "mcx",
+ "portalmem",
+ "postgres_seams",
+ "pquery_seams",
+ "snapmgr",
+ "tcop_dest",
+ "tuplestore_hold_seams",
+ "types_core",
+ "types_dest",
+ "types_error",
+ "types_nodes",
+ "types_portal",
+ "types_scan",
+ "types_slot",
+ "utility_seams",
+]
 
 [[package]]
 name = "pquery_seams"

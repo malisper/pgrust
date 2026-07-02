@@ -12,3 +12,4 @@ types_error = { path = "../../../_support/types/types_error" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 types_slot = { path = "../../../_support/types/types_slot" }
 heaptuple = { path = "../../access/common/heaptuple" }
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }

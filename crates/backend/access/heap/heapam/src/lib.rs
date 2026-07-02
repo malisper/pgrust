@@ -11,7 +11,7 @@ use core::ptr::NonNull;
 
 use ::bufmgr_seams::BufferPin;
 use ::mcx::{Mcx, PgVec};
-use ::tableam::{
+use ::tableam_vocab::{
     ParallelBlockTableScanDescData, Snapshot, TableAm, TableScanDescData, SO_ALLOW_PAGEMODE,
     SO_ALLOW_STRAT, SO_ALLOW_SYNC, SO_TEMP_SNAPSHOT, SO_TYPE_SAMPLESCAN, SO_TYPE_SEQSCAN,
 };
@@ -58,7 +58,7 @@ pub struct HeapScanDescData<'mcx> {
     rs_ctup: Option<HeapTupleData<'mcx>>,
     pub rs_dir: ScanDirection,
     pub rs_prefetch_block: BlockNumber,
-    pub rs_parallelworkerdata: Option<::tableam::ParallelBlockTableScanWorkerData>,
+    pub rs_parallelworkerdata: Option<::tableam_vocab::ParallelBlockTableScanWorkerData>,
     pub rs_cindex: u32,
     pub rs_ntuples: u32,
     pub rs_vistuples: [OffsetNumber; MaxHeapTuplesPerPage],
@@ -130,6 +130,10 @@ fn MultiXactIdGetUpdateXid(xmax: MultiXactId, t_infomask: u16) -> PgResult<Trans
         }
     })?;
     Ok(update_xact)
+}
+
+pub fn HeapTupleGetUpdateXid(hdr: &HeapTupleHeaderData) -> PgResult<TransactionId> {
+    MultiXactIdGetUpdateXid(hdr.xmax_raw(), hdr.t_infomask)
 }
 
 pub fn HeapTupleHeaderGetUpdateXid(hdr: &HeapTupleHeaderData) -> PgResult<TransactionId> {
@@ -243,12 +247,12 @@ fn initscan(
             scan.rs_base.rs_flags &= !SO_ALLOW_SYNC;
         }
     } else if keep_startblock {
-        if allow_sync && ::tableam::synchronize_seqscans() {
+        if allow_sync && ::tableam_vocab::synchronize_seqscans() {
             scan.rs_base.rs_flags |= SO_ALLOW_SYNC;
         } else {
             scan.rs_base.rs_flags &= !SO_ALLOW_SYNC;
         }
-    } else if allow_sync && ::tableam::synchronize_seqscans() {
+    } else if allow_sync && ::tableam_vocab::synchronize_seqscans() {
         scan.rs_base.rs_flags |= SO_ALLOW_SYNC;
         scan.rs_startblock =
             syncscan_seams::ss_get_location::call(&scan.rs_base.rs_rd, scan.rs_nblocks)?;
@@ -485,9 +489,9 @@ fn parallel_next_block(scan: &mut HeapScanDescData<'_>, first: bool) -> PgResult
         .expect("parallel scan without rs_parallelworkerdata");
 
     if first {
-        ::tableam::table_block_parallelscan_startblock_init(&scan.rs_base.rs_rd, worker, pbscan)?;
+        ::tableam_vocab::table_block_parallelscan_startblock_init(&scan.rs_base.rs_rd, worker, pbscan)?;
     }
-    ::tableam::table_block_parallelscan_nextpage(&scan.rs_base.rs_rd, worker, pbscan)
+    ::tableam_vocab::table_block_parallelscan_nextpage(&scan.rs_base.rs_rd, worker, pbscan)
 }
 
 fn heap_fetch_next_buffer(scan: &mut HeapScanDescData<'_>, dir: ScanDirection) -> PgResult<()> {

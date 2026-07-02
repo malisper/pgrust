@@ -505,3 +505,52 @@ fn wal_read_preads_across_segments() {
     unsafe { libc::close(v.seg.ws_file) };
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn restore_image_pglz_roundtrips() {
+    let mut page_orig = [0u8; BLCKSZ];
+    let phrase = b"wal page payload / wal page payload % ";
+    for (i, b) in page_orig.iter_mut().enumerate() {
+        *b = phrase[i % phrase.len()];
+    }
+
+    // No hole: compress the whole page.
+    let mut comp = [core::mem::MaybeUninit::<u8>::uninit(); pglz::pglz_max_output(BLCKSZ)];
+    let n =
+        pglz::pglz_compress_into(&page_orig, &mut comp, &pglz::PGLZ_STRATEGY_DEFAULT).unwrap();
+    // SAFETY: first n bytes written by the compressor.
+    let image =
+        unsafe { core::slice::from_raw_parts(comp.as_ptr().cast::<u8>(), n) };
+    let mut page = [0xAAu8; BLCKSZ];
+    restore_image_core(image, BKPIMAGE_COMPRESS_PGLZ, 0, 0, &mut page).unwrap();
+    assert_eq!(page, page_orig);
+
+    // With a hole: source is the page minus the hole; hole comes back zeroed.
+    let (hole_offset, hole_length) = (100usize, 800usize);
+    let mut holed: Vec<u8> = Vec::new();
+    holed.extend_from_slice(&page_orig[..hole_offset]);
+    holed.extend_from_slice(&page_orig[hole_offset + hole_length..]);
+    let n = pglz::pglz_compress_into(&holed, &mut comp, &pglz::PGLZ_STRATEGY_DEFAULT).unwrap();
+    // SAFETY: first n bytes written by the compressor.
+    let image =
+        unsafe { core::slice::from_raw_parts(comp.as_ptr().cast::<u8>(), n) };
+    let mut page = [0xAAu8; BLCKSZ];
+    restore_image_core(
+        image,
+        BKPIMAGE_COMPRESS_PGLZ | BKPIMAGE_HAS_HOLE,
+        hole_offset,
+        hole_length,
+        &mut page,
+    )
+    .unwrap();
+    assert_eq!(&page[..hole_offset], &page_orig[..hole_offset]);
+    assert!(page[hole_offset..hole_offset + hole_length].iter().all(|&b| b == 0));
+    assert_eq!(&page[hole_offset + hole_length..], &page_orig[hole_offset + hole_length..]);
+
+    // Corrupt stream fails with the C decompress message, not a panic.
+    let mut page = [0u8; BLCKSZ];
+    let err = restore_image_core(&image[..n / 2], BKPIMAGE_COMPRESS_PGLZ, 0, 0, &mut page)
+        .unwrap_err();
+    assert!(matches!(err, RestoreErr::DecompressFailure));
+    assert!(restore_err_msg(err, 0x1_0000_0000, 3).contains("could not decompress image"));
+}

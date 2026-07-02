@@ -15,3 +15,6 @@ mcx = { path = "../../../../_support/mcx" }
 stringinfo = { path = "../../../../_support/types/stringinfo" }
 elog = { path = "../../../utils/error/elog" }
 xlogreader_seams = { path = "../xlogreader_seams" }
+relmapper = { path = "../../../utils/cache/relmapper" }
+clog = { path = "../clog" }
+transam_xlog_seams = { path = "../transam_xlog_seams" }

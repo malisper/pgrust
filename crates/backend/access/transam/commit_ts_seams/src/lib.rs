@@ -9,3 +9,28 @@ seam_core::seam!(
         node_id: RepOriginId,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // StartupCommitTs() (commit_ts.c).
+    pub fn startup_commit_ts() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // CompleteCommitTsInitialization() (commit_ts.c).
+    pub fn complete_commit_ts_initialization() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // CheckPointCommitTs() (commit_ts.c).
+    pub fn check_point_commit_ts() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // SetCommitTsLimit(oldestXact, newestXact) (commit_ts.c).
+    pub fn set_commit_ts_limit(oldest_xact: TransactionId, newest_xact: TransactionId)
+);
+
+seam_core::seam!(
+    // ExtendCommitTs (commit_ts.c); GetNewTransactionId's per-assignment call.
+    pub fn extend_commit_ts(newest_xact: TransactionId) -> PgResult<()>
+);

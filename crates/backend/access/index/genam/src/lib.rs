@@ -9,7 +9,7 @@ use std::rc::Rc;
 use exectuples::FetchedHeapTuple;
 use indexam::{IndexScanDescData, IndexScanOpaque};
 use mcx::{Mcx, MemoryContext, PgVec};
-use tableam::TableScanDescData;
+use tableam::TableScanDesc;
 use types_core::primitive::AttrNumber;
 use types_core::xact::TransactionIdIsValid;
 use types_core::{Oid, TransactionId};
@@ -113,7 +113,7 @@ pub enum SysScanArm<'mcx> {
         iscan: IndexScanDescData<'mcx>,
     },
     Heap {
-        scan: TableScanDescData<'mcx>,
+        scan: TableScanDesc<'mcx>,
     },
 }
 
@@ -195,7 +195,7 @@ pub fn systable_getnext<'a, 'mcx>(
     let found = match arm {
         SysScanArm::Index { iscan, .. } => {
             let found =
-                indexam::index_getnext_slot(iscan, ForwardScanDirection, slot.base_mut())?;
+                indexam::index_getnext_slot(mcx, iscan, ForwardScanDirection, slot)?;
             if found && iscan.xs_recheck {
                 return Err(lossy_sysscan());
             }
@@ -323,7 +323,7 @@ pub fn systable_getnext_ordered<'a, 'mcx>(
         panic!("systable_getnext_ordered on a heap scan (C Assert(sysscan->irel))");
     };
 
-    let found = indexam::index_getnext_slot(iscan, direction, slot.base_mut())?;
+    let found = indexam::index_getnext_slot(mcx, iscan, direction, slot)?;
     if found && iscan.xs_recheck {
         return Err(lossy_sysscan());
     }

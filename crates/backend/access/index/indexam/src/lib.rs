@@ -1,8 +1,7 @@
 #![allow(non_snake_case)]
 #![allow(clippy::too_many_arguments)]
 
-mod relscan;
-pub use relscan::*;
+pub use types_relscan::*;
 
 #[cfg(test)]
 mod tests;
@@ -22,7 +21,7 @@ use types_rel::{
 };
 use types_scan::scankey::ScanKeyData;
 use types_scan::sdir::ScanDirection;
-use types_slot::TupleTableSlot;
+use types_slot::SlotData;
 use types_snapshot::{IsMVCCSnapshot, SnapshotData};
 use types_tuple::itemptr::{ItemPointerData, ItemPointerEquals, ItemPointerIsValid};
 
@@ -124,12 +123,6 @@ fn unported(what: &str) -> ! {
     panic!("unported: {what}")
 }
 
-#[cold]
-#[inline(never)]
-fn nbtree_unported(f: &str) -> ! {
-    panic!("unported: nbtree {f} (indexam dispatch arm awaits the nbtree-core port)")
-}
-
 // C divergence: IndexInfo not threaded (execnodes unported; btree ignores it).
 pub fn index_insert<'mcx>(
     mcx: Mcx<'mcx>,
@@ -186,7 +179,7 @@ pub fn index_beginscan<'mcx>(
     scan.heapRelation = Some(heapRelation.alias());
     scan.xs_snapshot = Some(snapshot);
 
-    scan.xs_heapfetch = Some(fetch::begin(heapRelation)?);
+    scan.xs_heapfetch = Some(fetch::begin(heapRelation));
 
     Ok(scan)
 }
@@ -235,7 +228,7 @@ pub fn index_rescan<'mcx>(
 
 pub fn index_endscan(mut scan: IndexScanDescData<'_>) -> PgResult<()> {
     if let Some(heapfetch) = scan.xs_heapfetch.take() {
-        fetch::end(heapfetch)?;
+        fetch::end(heapfetch);
     }
 
     am_endscan(&mut scan)?;
@@ -303,23 +296,35 @@ pub fn index_getnext_tid(
 }
 
 /// Fetch the visible heap tuple for the TID from the last `index_getnext_tid`
-/// into `slot`. Caller must check `scan.xs_recheck`.
+/// into `slot`. Caller must check `scan.xs_recheck`. `mcx` is the slot's
+/// owning context. On success `xs_heaptid` is updated to the resolved
+/// HOT-chain member (C mutates the tid through the fetch callback).
 pub fn index_fetch_heap<'mcx>(
+    mcx: Mcx<'mcx>,
     scan: &mut IndexScanDescData<'mcx>,
-    slot: &mut TupleTableSlot<'mcx>,
+    slot: &mut SlotData<'mcx>,
 ) -> PgResult<bool> {
     let mut all_dead = false;
 
-    let heapfetch = scan
-        .xs_heapfetch
+    // Disjoint field borrows: the fetch mutates xs_heaptid/xs_heap_continue
+    // while holding the descriptor.
+    let IndexScanDescData {
+        xs_heapfetch,
+        xs_heaptid,
+        xs_snapshot,
+        xs_heap_continue,
+        ..
+    } = scan;
+    let heapfetch = xs_heapfetch
         .as_mut()
         .expect("index_fetch_heap: xs_heapfetch not armed (C would dereference NULL)");
     let found = fetch::tuple(
+        mcx,
         heapfetch,
-        &scan.xs_heaptid,
-        scan.xs_snapshot.as_deref(),
+        xs_heaptid,
+        xs_snapshot,
         slot,
-        &mut scan.xs_heap_continue,
+        xs_heap_continue,
         &mut all_dead,
     )?;
 
@@ -338,9 +343,10 @@ pub fn index_fetch_heap<'mcx>(
 /// True when a tuple satisfying the scan keys and snapshot landed in `slot`.
 /// Caller must check `scan.xs_recheck`.
 pub fn index_getnext_slot<'mcx>(
+    mcx: Mcx<'mcx>,
     scan: &mut IndexScanDescData<'mcx>,
     direction: ScanDirection,
-    slot: &mut TupleTableSlot<'mcx>,
+    slot: &mut SlotData<'mcx>,
 ) -> PgResult<bool> {
     loop {
         if !scan.xs_heap_continue {
@@ -352,7 +358,7 @@ pub fn index_getnext_slot<'mcx>(
 
         // No visible tuple in this HOT chain: loop for the next TID.
         debug_assert!(ItemPointerIsValid(&scan.xs_heaptid));
-        if index_fetch_heap(scan, slot)? {
+        if index_fetch_heap(mcx, scan, slot)? {
             return Ok(true);
         }
     }
@@ -373,7 +379,7 @@ fn pgstat_count_heap_fetch(scan: &mut IndexScanDescData<'_>) {
     }
 }
 
-// IndexAmRoutine dispatch; args flow into the arms once nbtree-core lands.
+// IndexAmRoutine dispatch (rule-4 enum arms; direct calls, no seams).
 #[allow(unused_variables)]
 fn am_beginscan<'mcx>(
     mcx: Mcx<'mcx>,
@@ -383,7 +389,7 @@ fn am_beginscan<'mcx>(
     norderbys: i32,
 ) -> PgResult<IndexScanDescData<'mcx>> {
     match kind {
-        IndexAmKind::Btree => nbtree_unported("btbeginscan"),
+        IndexAmKind::Btree => nbtree::btbeginscan(mcx, indexRelation, nkeys, norderbys),
         #[cfg(test)]
         IndexAmKind::Mock => Ok(mock::beginscan(mcx, indexRelation, nkeys, norderbys)),
     }
@@ -396,7 +402,7 @@ fn am_rescan(
     orderbys: Option<&[ScanKeyData]>,
 ) -> PgResult<()> {
     match scan.opaque {
-        IndexScanOpaque::Btree(_) => nbtree_unported("btrescan"),
+        IndexScanOpaque::Btree(_) => nbtree::btrescan(scan, keys),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(mock::rescan(scan)),
     }
@@ -404,7 +410,7 @@ fn am_rescan(
 
 fn am_endscan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
     match scan.opaque {
-        IndexScanOpaque::Btree(_) => nbtree_unported("btendscan"),
+        IndexScanOpaque::Btree(_) => nbtree::btendscan(scan),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(()),
     }
@@ -412,7 +418,7 @@ fn am_endscan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
 
 fn am_markpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
     match scan.opaque {
-        IndexScanOpaque::Btree(_) => nbtree_unported("btmarkpos"),
+        IndexScanOpaque::Btree(_) => nbtree::btmarkpos(scan),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(mock::markpos(scan)),
     }
@@ -420,7 +426,7 @@ fn am_markpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
 
 fn am_restrpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
     match scan.opaque {
-        IndexScanOpaque::Btree(_) => nbtree_unported("btrestrpos"),
+        IndexScanOpaque::Btree(_) => nbtree::btrestrpos(scan),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => unreachable!("Mock lacks amrestrpos"),
     }
@@ -430,7 +436,7 @@ fn am_restrpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
 #[allow(unused_variables)]
 fn am_gettuple(scan: &mut IndexScanDescData<'_>, direction: ScanDirection) -> PgResult<bool> {
     match scan.opaque {
-        IndexScanOpaque::Btree(_) => nbtree_unported("btgettuple"),
+        IndexScanOpaque::Btree(_) => nbtree::btgettuple(scan, direction),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(mock::gettuple(scan)),
     }
@@ -449,7 +455,7 @@ fn am_insert<'mcx>(
     indexUnchanged: bool,
 ) -> PgResult<bool> {
     match kind {
-        IndexAmKind::Btree => nbtree_unported("btinsert"),
+        IndexAmKind::Btree => unported("nbtree btinsert (insert lane is phase 2)"),
         #[cfg(test)]
         IndexAmKind::Mock => Ok(true),
     }
@@ -458,38 +464,48 @@ fn am_insert<'mcx>(
 #[allow(unused_variables)]
 fn am_insert_cleanup(kind: IndexAmKind, indexRelation: &Relation<'_>) -> PgResult<()> {
     match kind {
-        IndexAmKind::Btree => nbtree_unported("aminsertcleanup"),
+        IndexAmKind::Btree => unported("nbtree aminsertcleanup (insert lane is phase 2)"),
         #[cfg(test)]
         IndexAmKind::Mock => Ok(()),
     }
 }
 
-// table_index_fetch_* belongs to the in-flight tableam port; loud panics until it lands.
+// The table-AM fetch boundary: direct tableam calls (heapam_handler landed);
+// tests substitute a scripted mock.
 #[cfg(not(test))]
 mod fetch {
     use super::*;
 
-    pub fn begin<'mcx>(_heapRelation: &Relation<'mcx>) -> PgResult<IndexFetchTableData<'mcx>> {
-        unported("tableam table_index_fetch_begin (crates/backend/access/table/tableam)")
+    pub fn begin<'mcx>(heapRelation: &Relation<'mcx>) -> IndexFetchTableData<'mcx> {
+        tableam::table_index_fetch_begin(heapRelation)
     }
 
-    pub fn reset(_heapfetch: &mut IndexFetchTableData<'_>) {
-        unported("tableam table_index_fetch_reset (crates/backend/access/table/tableam)")
+    pub fn reset(heapfetch: &mut IndexFetchTableData<'_>) {
+        tableam::table_index_fetch_reset(heapfetch);
     }
 
-    pub fn end(_heapfetch: IndexFetchTableData<'_>) -> PgResult<()> {
-        unported("tableam table_index_fetch_end (crates/backend/access/table/tableam)")
+    pub fn end(heapfetch: IndexFetchTableData<'_>) {
+        tableam::table_index_fetch_end(heapfetch);
     }
 
     pub fn tuple<'mcx>(
-        _heapfetch: &mut IndexFetchTableData<'mcx>,
-        _tid: &ItemPointerData,
-        _snapshot: Option<&SnapshotData<'mcx>>,
-        _slot: &mut TupleTableSlot<'mcx>,
-        _call_again: &mut bool,
-        _all_dead: &mut bool,
+        mcx: Mcx<'mcx>,
+        heapfetch: &mut IndexFetchTableData<'mcx>,
+        tid: &mut ItemPointerData,
+        snapshot: &mut Option<Rc<SnapshotData<'mcx>>>,
+        slot: &mut SlotData<'mcx>,
+        call_again: &mut bool,
+        all_dead: &mut bool,
     ) -> PgResult<bool> {
-        unported("tableam table_index_fetch_tuple (crates/backend/access/table/tableam)")
+        tableam::table_index_fetch_tuple(
+            mcx,
+            heapfetch,
+            tid,
+            snapshot,
+            slot,
+            call_again,
+            Some(all_dead),
+        )
     }
 }
 
@@ -497,27 +513,26 @@ mod fetch {
 mod fetch {
     use super::*;
 
-    pub fn begin<'mcx>(heapRelation: &Relation<'mcx>) -> PgResult<IndexFetchTableData<'mcx>> {
-        Ok(IndexFetchTableData {
+    pub fn begin<'mcx>(heapRelation: &Relation<'mcx>) -> IndexFetchTableData<'mcx> {
+        IndexFetchTableData {
             rel: heapRelation.alias(),
             mock_fetch: Vec::new(),
             resets: 0,
-        })
+        }
     }
 
     pub fn reset(heapfetch: &mut IndexFetchTableData<'_>) {
         heapfetch.resets += 1;
     }
 
-    pub fn end(_heapfetch: IndexFetchTableData<'_>) -> PgResult<()> {
-        Ok(())
-    }
+    pub fn end(_heapfetch: IndexFetchTableData<'_>) {}
 
     pub fn tuple<'mcx>(
+        _mcx: Mcx<'mcx>,
         heapfetch: &mut IndexFetchTableData<'mcx>,
-        tid: &ItemPointerData,
-        _snapshot: Option<&SnapshotData<'mcx>>,
-        slot: &mut TupleTableSlot<'mcx>,
+        tid: &mut ItemPointerData,
+        _snapshot: &mut Option<Rc<SnapshotData<'mcx>>>,
+        slot: &mut SlotData<'mcx>,
         call_again: &mut bool,
         all_dead: &mut bool,
     ) -> PgResult<bool> {
@@ -525,7 +540,7 @@ mod fetch {
         *call_again = cont;
         *all_dead = dead;
         if found {
-            slot.tts_tid = *tid;
+            slot.base_mut().tts_tid = *tid;
         }
         Ok(found)
     }

@@ -1,0 +1,47 @@
+[package]
+name = "transam_xlog"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "transam_xlog"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+elog = { path = "../../../utils/error/elog" }
+crc32c = { path = "../../../../port/crc32c" }
+fd = { path = "../../../storage/file/fd" }
+lwlock = { path = "../../../storage/lmgr/lwlock" }
+lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
+latch = { path = "../../../storage/ipc/latch" }
+procarray = { path = "../../../storage/ipc/procarray" }
+init_small = { path = "../../../utils/init/init_small" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+clog = { path = "../clog" }
+relmapper = { path = "../../../utils/cache/relmapper" }
+relcache = { path = "../../../utils/cache/relcache" }
+xlogutils = { path = "../xlogutils" }
+xlogreader_seams = { path = "../xlogreader_seams" }
+transam_xlog_seams = { path = "../transam_xlog_seams" }
+xloginsert_seams = { path = "../xloginsert_seams" }
+xlogrecovery_seams = { path = "../xlogrecovery_seams" }
+timeline_seams = { path = "../timeline_seams" }
+subtrans_seams = { path = "../subtrans_seams" }
+commit_ts_seams = { path = "../commit_ts_seams" }
+multixact_seams = { path = "../multixact_seams" }
+twophase_seams = { path = "../twophase_seams" }
+varsup_seams = { path = "../varsup_seams" }
+xact_seams = { path = "../xact_seams" }
+sync_seams = { path = "../../../storage/sync/sync_seams" }
+predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+origin_seams = { path = "../../../replication/origin_seams" }
+snapbuild_seams = { path = "../../../replication/snapbuild_seams" }
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+checkpointer_seams = { path = "../../../postmaster/checkpointer_seams" }
+libc = "0.2"

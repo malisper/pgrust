@@ -97,6 +97,8 @@ fn make<'mcx>(mcx: Mcx<'mcx>, oid: Oid, name: &str, relkind: u8) -> Relation<'mc
         rd_indcollation: PgVec::new_in(mcx),
         rd_options: None,
         pgstat_enabled: Cell::new(false),
+        rd_amcache: Default::default(),
+        rd_supportinfo: Default::default(),
     };
     Relation::open(data, Some(record_close))
 }

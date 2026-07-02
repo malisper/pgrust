@@ -10,7 +10,7 @@ use types_rel::{
     LOCKMODE, RELKIND_INDEX, RELKIND_PARTITIONED_INDEX, RELKIND_RELATION, REPLICA_IDENTITY_DEFAULT,
 };
 use types_scan::sdir::ForwardScanDirection;
-use types_slot::{TupleSlotKind, TupleTableSlot};
+use types_slot::{BufferHeapTupleTableSlot, HeapTupleTableSlot, SlotData, TupleSlotKind, TupleTableSlot};
 use types_snapshot::{SnapshotData, SNAPSHOT_MVCC};
 use types_tuple::itemptr::ItemPointerData;
 use types_tuple::{NameData, TupleDescData};
@@ -85,6 +85,8 @@ fn make<'mcx>(mcx: Mcx<'mcx>, oid: Oid, name: &str, relkind: u8, relam: Oid) -> 
         rd_indcollation: PgVec::new_in(mcx),
         rd_options: None,
         pgstat_enabled: Cell::new(false),
+        rd_amcache: Default::default(),
+        rd_supportinfo: Default::default(),
     };
     Relation::open(data, Some(record_close))
 }
@@ -259,22 +261,29 @@ fn fetch_heap_sets_kill_prior_tuple_except_in_recovery() {
     install();
     let ctx = MemoryContext::new("t");
     let (_heap, _idx, mut scan) = scan_pair(ctx.mcx());
-    let mut slot = TupleTableSlot::new_in(ctx.mcx(), TupleSlotKind::BufferHeapTuple);
+    let mut slot = SlotData::BufferHeap(BufferHeapTupleTableSlot {
+        base: HeapTupleTableSlot {
+            base: TupleTableSlot::new_in(ctx.mcx(), TupleSlotKind::BufferHeapTuple),
+            tuple: None,
+            off: 0,
+        },
+        buffer: types_core::InvalidBuffer,
+    });
     scan.xs_heaptid = tid(3, 7);
 
     scan.xs_heapfetch.as_mut().unwrap().mock_fetch = vec![(true, false, false)];
-    assert!(index_fetch_heap(&mut scan, &mut slot).unwrap());
-    assert_eq!(slot.tts_tid, tid(3, 7));
+    assert!(index_fetch_heap(ctx.mcx(), &mut scan, &mut slot).unwrap());
+    assert_eq!(slot.base().tts_tid, tid(3, 7));
     assert!(!scan.kill_prior_tuple);
 
     scan.xs_heapfetch.as_mut().unwrap().mock_fetch = vec![(false, false, true)];
-    assert!(!index_fetch_heap(&mut scan, &mut slot).unwrap());
+    assert!(!index_fetch_heap(ctx.mcx(), &mut scan, &mut slot).unwrap());
     assert!(scan.kill_prior_tuple);
 
     scan.xactStartedInRecovery = true;
     scan.kill_prior_tuple = false;
     scan.xs_heapfetch.as_mut().unwrap().mock_fetch = vec![(false, false, true)];
-    assert!(!index_fetch_heap(&mut scan, &mut slot).unwrap());
+    assert!(!index_fetch_heap(ctx.mcx(), &mut scan, &mut slot).unwrap());
     assert!(!scan.kill_prior_tuple);
 }
 
@@ -283,14 +292,21 @@ fn getnext_slot_skips_dead_chains_and_propagates_kill() {
     install();
     let ctx = MemoryContext::new("t");
     let (_heap, _idx, mut scan) = scan_pair(ctx.mcx());
-    let mut slot = TupleTableSlot::new_in(ctx.mcx(), TupleSlotKind::BufferHeapTuple);
+    let mut slot = SlotData::BufferHeap(BufferHeapTupleTableSlot {
+        base: HeapTupleTableSlot {
+            base: TupleTableSlot::new_in(ctx.mcx(), TupleSlotKind::BufferHeapTuple),
+            tuple: None,
+            off: 0,
+        },
+        buffer: types_core::InvalidBuffer,
+    });
     mock(&mut scan).tids = vec![tid(0, 1), tid(0, 2)];
     // First TID's chain is all-dead; the second yields a visible tuple.
     scan.xs_heapfetch.as_mut().unwrap().mock_fetch =
         vec![(false, false, true), (true, false, false)];
 
-    assert!(index_getnext_slot(&mut scan, ForwardScanDirection, &mut slot).unwrap());
-    assert_eq!(slot.tts_tid, tid(0, 2));
+    assert!(index_getnext_slot(ctx.mcx(), &mut scan, ForwardScanDirection, &mut slot).unwrap());
+    assert_eq!(slot.base().tts_tid, tid(0, 2));
     // The second amgettuple saw kill_prior_tuple from the dead chain.
     assert_eq!(mock(&mut scan).kill_seen, vec![false, true]);
 }
@@ -300,14 +316,21 @@ fn getnext_slot_continues_hot_chain_without_new_tid() {
     install();
     let ctx = MemoryContext::new("t");
     let (_heap, _idx, mut scan) = scan_pair(ctx.mcx());
-    let mut slot = TupleTableSlot::new_in(ctx.mcx(), TupleSlotKind::BufferHeapTuple);
+    let mut slot = SlotData::BufferHeap(BufferHeapTupleTableSlot {
+        base: HeapTupleTableSlot {
+            base: TupleTableSlot::new_in(ctx.mcx(), TupleSlotKind::BufferHeapTuple),
+            tuple: None,
+            off: 0,
+        },
+        buffer: types_core::InvalidBuffer,
+    });
     mock(&mut scan).tids = vec![tid(0, 1)];
     scan.xs_heapfetch.as_mut().unwrap().mock_fetch =
         vec![(true, true, false), (true, false, false)];
 
-    assert!(index_getnext_slot(&mut scan, ForwardScanDirection, &mut slot).unwrap());
+    assert!(index_getnext_slot(ctx.mcx(), &mut scan, ForwardScanDirection, &mut slot).unwrap());
     assert!(scan.xs_heap_continue);
-    assert!(index_getnext_slot(&mut scan, ForwardScanDirection, &mut slot).unwrap());
+    assert!(index_getnext_slot(ctx.mcx(), &mut scan, ForwardScanDirection, &mut slot).unwrap());
     assert_eq!(mock(&mut scan).next, 1);
     assert!(!scan.xs_heap_continue);
 }
@@ -317,8 +340,15 @@ fn getnext_slot_exhausted_returns_false() {
     install();
     let ctx = MemoryContext::new("t");
     let (_heap, _idx, mut scan) = scan_pair(ctx.mcx());
-    let mut slot = TupleTableSlot::new_in(ctx.mcx(), TupleSlotKind::BufferHeapTuple);
-    assert!(!index_getnext_slot(&mut scan, ForwardScanDirection, &mut slot).unwrap());
+    let mut slot = SlotData::BufferHeap(BufferHeapTupleTableSlot {
+        base: HeapTupleTableSlot {
+            base: TupleTableSlot::new_in(ctx.mcx(), TupleSlotKind::BufferHeapTuple),
+            tuple: None,
+            off: 0,
+        },
+        buffer: types_core::InvalidBuffer,
+    });
+    assert!(!index_getnext_slot(ctx.mcx(), &mut scan, ForwardScanDirection, &mut slot).unwrap());
 }
 
 #[test]

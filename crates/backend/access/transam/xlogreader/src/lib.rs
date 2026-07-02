@@ -1471,8 +1471,6 @@ impl<'mcx> XLogReaderState<'mcx> {
                 blk.bimg_info,
                 blk.hole_offset as usize,
                 blk.hole_length as usize,
-                read_rec_ptr,
-                block_id,
                 page,
             )
         };
@@ -2003,11 +2001,13 @@ fn decode_record<'mcx>(
     })
 }
 
+#[cfg_attr(test, derive(Debug))]
 enum RestoreErr {
     InvalidBlock,
     InvalidState,
     NotSupportedByBuild(&'static str),
     UnknownMethod,
+    DecompressFailure,
 }
 
 #[cold]
@@ -2030,6 +2030,10 @@ fn restore_err_msg(e: RestoreErr, lsn: XLogRecPtr, block_id: u8) -> String {
             "could not restore image at {:X}/{:X} compressed with unknown method, block {}",
             h, l, block_id
         ),
+        RestoreErr::DecompressFailure => format!(
+            "could not decompress image at {:X}/{:X}, block {}",
+            h, l, block_id
+        ),
     }
 }
 
@@ -2038,17 +2042,16 @@ fn restore_image_core(
     bimg_info: u8,
     hole_offset: usize,
     hole_length: usize,
-    lsn: XLogRecPtr,
-    block_id: u8,
     page: &mut [u8],
 ) -> Result<(), RestoreErr> {
+    let mut tmp = [core::mem::MaybeUninit::<u8>::uninit(); BLCKSZ];
     let src: &[u8] = if BKPIMAGE_COMPRESSED(bimg_info) {
         if bimg_info & BKPIMAGE_COMPRESS_PGLZ != 0 {
-            let (h, l) = lsn_fmt(lsn);
-            panic!(
-                "pglz-compressed block image at {:X}/{:X}, block {}: common/pg_lzcompress is not ported",
-                h, l, block_id
-            );
+            match pglz::pglz_decompress(image, &mut tmp[..BLCKSZ - hole_length], true) {
+                // SAFETY: the kernel initialized the first n bytes of tmp.
+                Some(n) => unsafe { core::slice::from_raw_parts(tmp.as_ptr().cast::<u8>(), n) },
+                None => return Err(RestoreErr::DecompressFailure),
+            }
         } else if bimg_info & BKPIMAGE_COMPRESS_LZ4 != 0 {
             // USE_LZ4 not defined in this build (the C #else branch).
             return Err(RestoreErr::NotSupportedByBuild("LZ4"));
@@ -2211,8 +2214,6 @@ fn restore_block_image_seam(
         blk.bimg_info,
         blk.hole_offset as usize,
         blk.hole_length as usize,
-        record.ReadRecPtr,
-        block_id,
         &mut page,
     ) {
         Ok(()) => {

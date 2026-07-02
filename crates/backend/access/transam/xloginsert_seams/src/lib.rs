@@ -21,3 +21,8 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn xlog_reset_insertion()
 );
+
+seam_core::seam!(
+    // InitXLogInsert (xloginsert.c): per-backend WAL construction buffers.
+    pub fn init_xlog_insert() -> PgResult<()>
+);
