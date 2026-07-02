@@ -10,3 +10,6 @@ pub mod getarg;
 
 pub use fcinfo::*;
 pub use getarg::*;
+
+#[cfg(test)]
+mod tests;
