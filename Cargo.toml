@@ -39,6 +39,10 @@ members = [
     "crates/_support/types/hash",
     "crates/_support/pgrust/pg_ffi_fgram",
     "crates/_support/pgrust/trace",
+    "crates/backend/utils/init/init_small",
+    "crates/backend/utils/init/miscinit_seams",
+    "crates/backend/utils/adt/acl_seams",
+    "crates/backend/utils/misc/guc_seams",
 ]
 
 [workspace.package]

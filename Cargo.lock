@@ -3,6 +3,15 @@
 version = 4
 
 [[package]]
+name = "acl_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -83,6 +92,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "guc_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+]
+
+[[package]]
 name = "guc_tables"
 version = "0.0.0"
 dependencies = [
@@ -113,6 +130,20 @@ dependencies = [
  "types_core",
  "types_error",
  "types_tuple",
+]
+
+[[package]]
+name = "init_small"
+version = "0.0.0"
+dependencies = [
+ "acl_seams",
+ "guc_seams",
+ "guc_tables",
+ "init_small_seams",
+ "mcx",
+ "miscinit_seams",
+ "types_core",
+ "types_error",
 ]
 
 [[package]]
@@ -188,6 +219,16 @@ name = "mcxt_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_error",
+]
+
+[[package]]
+name = "miscinit_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_core",
  "types_error",
 ]
 
@@ -358,6 +399,12 @@ dependencies = [
 [[package]]
 name = "types_slot"
 version = "0.1.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "types_core",
+ "types_tuple",
+]
 
 [[package]]
 name = "types_storage"
