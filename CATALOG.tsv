@@ -651,7 +651,7 @@ backend-utils-misc-help_config	*/help_config.c	combined-into:backend-utils-misc-
 backend-utils-misc-more	*/pg_controldata.c,*/ps_status.c,*/rls.c,*/superuser.c	todo			fabled:backend-utils-misc-more; m1-spine
 backend-utils-misc-more2	*/conffiles.c,*/injection_point.c,*/pg_config.c,*/timeout.c,*/tzparser.c	todo			fabled:backend-utils-misc-timeout; m1-spine
 backend-utils-misc-pg_rusage	*/pg_rusage.c	todo			fabled:backend-utils-misc-pg-rusage; m1-dep(stub-ok)
-backend-utils-misc-queryenvironment	*/queryenvironment.c	todo			fabled:backend-utils-misc-queryenvironment; m1-spine
+backend-utils-misc-queryenvironment	*/queryenvironment.c	ported	queryenvironment	cold	m1-spine; ENR registry as PgVec in caller mcx, zero-alloc lookups; fabled queryenvironment_home TLS workaround dissolved (Copy TuplestoreHandle tokens); rd_att Rc::clone replaces fabled clone_in deep copy; 9 tests, density 1.9%
 backend-utils-misc-sampling	*/sampling.c	todo			fabled:backend-utils-misc-sampling
 backend-utils-misc-small	*/help_config.c,*/pg_rusage.c,*/queryenvironment.c,*/sampling.c,*/stack_depth.c	todo			fabled:backend-utils-misc-stack-depth; m1-spine
 backend-utils-misc-stack-depth	src/backend/utils/misc/stack_depth.c	todo			m1-spine
