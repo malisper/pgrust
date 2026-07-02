@@ -508,8 +508,8 @@ backend-storage-page	*/bufpage.c,*/itemptr.c	todo			fabled:backend-storage-page;
 backend-storage-smgr	*/bulk_write.c,*/md.c,*/smgr.c	combined-into:backend-storage-smgr-smgr			m1-spine
 backend-storage-sync	*/sync.c	todo			fabled:backend-storage-sync; m1-dep(stub-ok)
 backend-tcop-backend-startup	src/backend/tcop/backend_startup.c	todo			fabled:backend-tcop-backend-startup; m1-spine
-backend-tcop-cmdtag	*/cmdtag.c	todo			fabled:backend-tcop-cmdtag; m1-spine
-backend-tcop-dest	*/dest.c	todo			m1-spine
+backend-tcop-cmdtag	*/cmdtag.c	ported	cmdtag	cold	m1-spine; tag table GENERATED from cmdtaglist.h then parser-diffed byte-identical (193/193); BuildQueryCompletionString zero-alloc into caller stack buffer (fabled mcx wrapper deleted); 8 tests, density 3.4%
+backend-tcop-dest	*/dest.c	ported	tcop_dest	cold	m1-spine; DestReceiver as rule-4 enum (receive_slot inlined match, per-row hot at M1); printtup plug-in path documented in type; EndCommand stack-buffer wire bytes, no per-statement alloc; 8 tests, density 4.8%
 backend-tcop-fastpath	src/backend/tcop/fastpath.c	todo			fabled:backend-tcop-fastpath; m1-dep(stub-ok)
 backend-tcop-postgres	src/backend/tcop/postgres.c	todo			fabled:backend-tcop-postgres; m1-spine
 backend-tcop-pquery	src/backend/tcop/pquery.c	todo			fabled:backend-tcop-pquery; m1-spine
