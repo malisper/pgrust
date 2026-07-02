@@ -13,6 +13,23 @@ members = [
     "crates/_support/types/types_scan",
     "crates/_support/types/types_guc",
     "crates/_support/types/types_dest",
+    "crates/backend/access/common/heaptuple",
+    "crates/backend/libpq/pqcomm_seams",
+    "crates/backend/postmaster/syslogger_seams",
+    "crates/backend/storage/ipc/ipc_seams",
+    "crates/backend/utils/activity/pgstat_seams",
+    "crates/backend/utils/init/init_small_seams",
+    "crates/backend/utils/error/error_small_seams",
+    "crates/backend/utils/error/elog_seams",
+    "crates/backend/utils/misc/guc_tables",
+    "crates/backend/utils/mb/mbutils_seams",
+    "crates/backend/libpq/pqformat",
+    "crates/_support/types/types_storage",
+    "crates/_support/types/rel",
+    "crates/_support/types/types_resowner",
+    "crates/_support/types/types_slot",
+    "crates/port/crc32c",
+    "crates/backend/libpq/libpq_pqsignal",
 ]
 
 [workspace.package]

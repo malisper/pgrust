@@ -141,6 +141,37 @@ impl<'mcx> StringInfo<'mcx> {
         Ok(())
     }
 
+    // appendBinaryStringInfoNT(buf, s, s.len() + 1): the NUL is counted in len.
+    #[inline]
+    pub fn append_bytes_z(&mut self, bytes: &[u8]) -> PgResult<()> {
+        let n = bytes.len();
+        self.enlarge(n + 1)?;
+        let len = self.data.len();
+        // SAFETY: capacity >= len + n + 2 after enlarge; `bytes` cannot alias
+        // the spare capacity written here.
+        unsafe {
+            let dst = self.data.as_mut_ptr().add(len);
+            ptr::copy_nonoverlapping(bytes.as_ptr(), dst, n);
+            *dst.add(n) = 0;
+            self.data.set_len(len + n + 1);
+        }
+        Ok(())
+    }
+
+    // pq_writeintN shape: space preallocated by an earlier enlarge (C asserts
+    // len + N <= maxlen and skips the capacity check in ship builds).
+    #[inline]
+    pub fn write_fixed<const N: usize>(&mut self, bytes: [u8; N]) {
+        let len = self.data.len();
+        assert!(N <= self.data.capacity() - len);
+        // SAFETY: capacity >= len + N per the check above.
+        unsafe {
+            let dst = self.data.as_mut_ptr().add(len);
+            ptr::copy_nonoverlapping(bytes.as_ptr(), dst, N);
+            self.data.set_len(len + N);
+        }
+    }
+
     #[inline]
     pub fn append_str(&mut self, s: &str) -> PgResult<()> {
         self.append_bytes(s.as_bytes())

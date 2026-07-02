@@ -164,3 +164,42 @@ fn into_vec_roundtrip() {
     let v = s.into_vec();
     assert_eq!(v.as_slice(), b"payload");
 }
+
+#[test]
+fn append_bytes_z_counts_nul_in_len() {
+    let ctx = MemoryContext::new("t");
+    let mut s = StringInfo::new_in(ctx.mcx()).unwrap();
+    s.append_bytes_z(b"hi").unwrap();
+    assert_eq!(s.len(), 3);
+    assert_eq!(s.as_bytes(), b"hi\0");
+    s.append_bytes_z(b"").unwrap();
+    assert_eq!(s.as_bytes(), b"hi\0\0");
+}
+
+#[test]
+fn append_bytes_z_grows() {
+    let ctx = MemoryContext::new("t");
+    let mut s = StringInfo::new_in(ctx.mcx()).unwrap();
+    s.append_bytes(&[b'x'; 1023]).unwrap();
+    s.append_bytes_z(b"").unwrap();
+    assert_eq!(s.capacity(), 2048);
+    assert_eq!(s.len(), 1024);
+}
+
+#[test]
+fn write_fixed_after_enlarge() {
+    let ctx = MemoryContext::new("t");
+    let mut s = StringInfo::with_capacity_in(ctx.mcx(), 8).unwrap();
+    s.enlarge(8).unwrap();
+    s.write_fixed([1, 2, 3, 4]);
+    s.write_fixed(0x0506u16.to_be_bytes());
+    assert_eq!(s.as_bytes(), &[1, 2, 3, 4, 5, 6]);
+}
+
+#[test]
+#[should_panic]
+fn write_fixed_without_room_panics() {
+    let ctx = MemoryContext::new("t");
+    let mut s = StringInfo::with_capacity_in(ctx.mcx(), 2).unwrap();
+    s.write_fixed([1, 2, 3, 4]);
+}
