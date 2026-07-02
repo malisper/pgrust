@@ -121,6 +121,17 @@ name = "types_error"
 version = "0.0.0"
 
 [[package]]
+name = "types_fmgr"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_tuple",
+]
+
+[[package]]
 name = "types_tuple"
 version = "0.1.0"
 dependencies = [
