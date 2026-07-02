@@ -35,6 +35,8 @@ pub fn init_all() {
     pqformat::init_seams();
     vars::init_seams();
     parser_driver::init_seams();
+    parse_expr::init_seams();
+    parser_analyze::init_seams();
     scan_fgram::init_seams();
     interrupt::init_seams();
     launch_backend::init_seams();
