@@ -18,3 +18,8 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn pgaio_error_cleanup()
 );
+
+seam_core::seam!(
+    // pgaio_init_backend (storage/aio/aio_init.c).
+    pub fn pgaio_init_backend()
+);

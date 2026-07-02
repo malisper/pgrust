@@ -32,7 +32,7 @@ fn checkpoint_byte_roundtrip() {
     ckpt.oldestXid = 3;
     ckpt.time = 1_700_000_000;
     ckpt.oldestActiveXid = 99;
-    let bytes = ckpt.as_bytes().to_vec();
+    let bytes = ckpt.to_bytes().to_vec();
     assert_eq!(bytes.len(), 88);
     assert_eq!(CheckPoint::from_bytes(&bytes), ckpt);
 }
@@ -108,25 +108,11 @@ fn control_file_crc_detects_corruption() {
     let mut cf = ControlFileData::ZEROED;
     cf.pg_control_version = PG_CONTROL_VERSION;
     cf.system_identifier = 0xDEADBEEF;
-    // SAFETY: POD byte view.
-    let bytes = unsafe {
-        std::slice::from_raw_parts(
-            &cf as *const ControlFileData as *const u8,
-            offset_of!(ControlFileData, crc),
-        )
-    };
-    let crc = crc32c::fin_crc32c(crc32c::pg_comp_crc32c(crc32c::CRC32C_INIT, bytes));
+    let crc = controldata_utils::crc_of_image(&cf.to_disk_bytes());
     cf.crc = crc;
     let mut other = cf;
     other.system_identifier ^= 1;
-    // SAFETY: POD byte view.
-    let other_bytes = unsafe {
-        std::slice::from_raw_parts(
-            &other as *const ControlFileData as *const u8,
-            offset_of!(ControlFileData, crc),
-        )
-    };
-    let other_crc = crc32c::fin_crc32c(crc32c::pg_comp_crc32c(crc32c::CRC32C_INIT, other_bytes));
+    let other_crc = controldata_utils::crc_of_image(&other.to_disk_bytes());
     assert_ne!(crc, other_crc);
 }
 
@@ -211,23 +197,10 @@ fn insert_flush_smoke() {
         cf.toast_max_chunk_size = TOAST_MAX_CHUNK_SIZE;
         cf.loblksize = 2048;
         cf.float8ByVal = true;
-        // SAFETY: POD byte view.
-        let body = unsafe {
-            std::slice::from_raw_parts(
-                &cf as *const ControlFileData as *const u8,
-                offset_of!(ControlFileData, crc),
-            )
-        };
-        cf.crc = crc32c::fin_crc32c(crc32c::pg_comp_crc32c(crc32c::CRC32C_INIT, body));
+        cf.crc = controldata_utils::crc_of_image(&cf.to_disk_bytes());
         let mut image = vec![0u8; PG_CONTROL_FILE_SIZE];
-        // SAFETY: POD byte view.
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                &cf as *const ControlFileData as *const u8,
-                image.as_mut_ptr(),
-                size_of::<ControlFileData>(),
-            );
-        }
+        image[..controldata_utils::SIZEOF_CONTROL_FILE_DATA]
+            .copy_from_slice(&cf.to_disk_bytes());
         std::fs::write(dir.join("global/pg_control"), &image).unwrap();
     }
     ReadControlFile().unwrap();

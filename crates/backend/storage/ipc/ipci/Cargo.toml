@@ -1,0 +1,9 @@
+[package]
+name = "ipci"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ipci"
+path = "src/lib.rs"
