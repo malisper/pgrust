@@ -15,7 +15,6 @@ fn bringup() -> MutexGuard<'static, ()> {
         guc_tables::vars::pgstat_track_activities.write(true);
         backend_status_seams::backend_status_shmem_init::call().unwrap();
     });
-    // MaxBackends is per-thread; each test thread needs its own copy.
     g::SetMaxBackends(8);
     TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -68,7 +67,6 @@ fn report_activity_stores_and_resets_ids() {
     backend_status_seams::pgstat_report_query_id::call(42, false);
     backend_status_seams::pgstat_report_plan_id::call(43, false);
     assert_eq!(pgstat_get_my_query_id(), 42);
-    // Non-forced nested report is ignored while one is stored.
     backend_status_seams::pgstat_report_query_id::call(77, false);
     assert_eq!(pgstat_get_my_query_id(), 42);
 
@@ -78,7 +76,6 @@ fn report_activity_stores_and_resets_ids() {
     );
     let e = MyBEEntry().unwrap();
     assert_eq!(e.st_state.get(), BackendState::STATE_RUNNING);
-    // STATE_RUNNING resets the identifiers.
     assert_eq!(pgstat_get_my_query_id(), 0);
     assert_eq!(pgstat_get_my_plan_id(), 0);
     assert_eq!(read_activity(e.slot), b"SELECT 1");

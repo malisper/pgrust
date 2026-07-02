@@ -87,6 +87,8 @@ impl GucRegistry {
 
     fn note_stacked(&mut self, idx: usize) {
         self.stacked.push(idx);
+        // A stale-true hint on a non-TLS registry is harmless (see store.rs).
+        crate::store::set_has_stacked_hint(true);
     }
 
     // Invariant (C's): idx is on `reported` iff its GUC_NEEDS_REPORT bit is set.
@@ -95,6 +97,7 @@ impl GucRegistry {
         if g.flags & GUC_REPORT != 0 && g.status & GUC_NEEDS_REPORT == 0 {
             g.status |= GUC_NEEDS_REPORT;
             self.reported.push(idx);
+            crate::store::set_report_pending_hint(true);
         }
     }
 

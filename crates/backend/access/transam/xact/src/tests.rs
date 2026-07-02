@@ -76,6 +76,11 @@ fn callbacks_run_newest_first() {
     reset_xact_state_for_tests();
 }
 
+// Miri: fn-pointer identity is not stable under Miri (casts may mint distinct
+// addresses), so UnregisterXactCallback's pointer-equality match can miss —
+// same class as resowner's fn-pointer-identity test (no UB; pre-existing,
+// verified against a tree with this batch's edits stashed).
+#[cfg_attr(miri, ignore)]
 #[test]
 fn self_unregistration_is_safe() {
     reset_xact_state_for_tests();

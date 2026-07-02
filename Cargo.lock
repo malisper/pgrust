@@ -75,7 +75,6 @@ dependencies = [
  "adt_float",
  "adt_int8",
  "datum",
- "hashfn",
  "mcx",
  "pg_locale",
  "pqformat",
@@ -166,10 +165,8 @@ dependencies = [
 name = "adt_numeric"
 version = "0.1.0"
 dependencies = [
- "datum",
- "types_core",
+ "adt_float",
  "types_error",
- "types_fmgr",
 ]
 
 [[package]]
@@ -177,6 +174,7 @@ name = "adt_oracle_compat"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "init_small",
  "mbutils",
  "mcx",
  "pg_locale",
@@ -916,6 +914,31 @@ dependencies = [
 [[package]]
 name = "execmain"
 version = "0.1.0"
+dependencies = [
+ "backend_status_seams",
+ "datum",
+ "execexpr",
+ "execmain_seams",
+ "exectuples",
+ "executils",
+ "guc_tables",
+ "init_small",
+ "mcx",
+ "postgres_seams",
+ "snapmgr",
+ "syscache_seams",
+ "tcop_dest",
+ "tupdesc",
+ "types_core",
+ "types_dest",
+ "types_error",
+ "types_nodes",
+ "types_portal",
+ "types_scan",
+ "types_slot",
+ "types_tuple",
+ "xact",
+]
 
 [[package]]
 name = "execmain_seams"
@@ -936,6 +959,7 @@ dependencies = [
 name = "execscan"
 version = "0.1.0"
 dependencies = [
+ "datum",
  "execexpr",
  "exectuples",
  "executils",
@@ -1025,9 +1049,14 @@ name = "fmgr_core"
 version = "0.1.0"
 dependencies = [
  "adt_bool",
+ "adt_cash",
  "adt_float",
  "adt_int",
  "adt_int8",
+ "adt_mac",
+ "adt_mac8",
+ "adt_oracle_compat",
+ "adt_pseudotypes",
  "datum",
  "fmgr_seams",
  "name",
@@ -1728,6 +1757,11 @@ dependencies = [
 [[package]]
 name = "localtime"
 version = "0.1.0"
+dependencies = [
+ "pgtz_seams",
+ "types_core",
+ "types_error",
+]
 
 [[package]]
 name = "lock"
@@ -2049,13 +2083,29 @@ dependencies = [
 name = "nodeseqscan"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
+ "bufmgr_seams",
+ "datum",
  "execexpr",
  "execscan",
+ "exectuples",
  "executils",
+ "heapam_visibility_seams",
  "mcx",
+ "miscinit_seams",
+ "predicate_seams",
+ "procarray_seams",
+ "pruneheap_seams",
+ "syscache_seams",
  "tableam",
+ "types_core",
  "types_error",
  "types_nodes",
+ "types_rel",
+ "types_slot",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
 ]
 
 [[package]]
@@ -2092,22 +2142,77 @@ dependencies = [
 [[package]]
 name = "parse_clause"
 version = "0.0.0"
+dependencies = [
+ "mcx",
+ "parse_expr",
+ "parser_small1",
+ "types_error",
+ "types_nodes",
+]
 
 [[package]]
 name = "parse_collate"
 version = "0.0.0"
+dependencies = [
+ "elog",
+ "lsyscache",
+ "mbutils",
+ "mcx",
+ "parse_expr",
+ "parser_small1",
+ "types_core",
+ "types_error",
+ "types_nodes",
+]
 
 [[package]]
 name = "parse_expr"
 version = "0.0.0"
+dependencies = [
+ "elog",
+ "guc_tables",
+ "mbutils",
+ "mcx",
+ "parser_small1",
+ "stack_depth",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "wchar",
+]
 
 [[package]]
 name = "parse_target"
 version = "0.0.0"
+dependencies = [
+ "mcx",
+ "parse_expr",
+ "parser_small1",
+ "types_core",
+ "types_error",
+ "types_nodes",
+]
 
 [[package]]
 name = "parser_analyze"
 version = "0.0.0"
+dependencies = [
+ "analyze_seams",
+ "backend_status",
+ "datum",
+ "guc_tables",
+ "mcx",
+ "parse_clause",
+ "parse_collate",
+ "parse_target",
+ "parser_small1",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_portal",
+ "types_tuple",
+]
 
 [[package]]
 name = "parser_driver"
@@ -2323,6 +2428,14 @@ name = "pgtz"
 version = "0.1.0"
 
 [[package]]
+name = "pgtz_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+]
+
+[[package]]
 name = "plancache"
 version = "0.1.0"
 dependencies = [
@@ -2342,6 +2455,27 @@ dependencies = [
  "seam_core",
  "types_error",
  "types_portal",
+]
+
+[[package]]
+name = "planner"
+version = "0.1.0"
+dependencies = [
+ "backend_status_seams",
+ "clauses",
+ "datum",
+ "guc_tables",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "planner_seams",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_pathnodes",
+ "types_portal",
+ "types_tuple",
 ]
 
 [[package]]
@@ -3119,6 +3253,7 @@ dependencies = [
  "adt_float",
  "adt_timestamp",
  "auth",
+ "autovacuum_seams",
  "backend_startup",
  "backend_status",
  "be_secure",
@@ -3133,6 +3268,7 @@ dependencies = [
  "detoast",
  "dsm_core",
  "elog",
+ "execscan",
  "executils",
  "fd",
  "fmgr_core",
@@ -3140,6 +3276,7 @@ dependencies = [
  "genam",
  "guc",
  "guc_file",
+ "guc_seams",
  "guc_tables",
  "hba",
  "heapam_visibility",
@@ -3151,6 +3288,7 @@ dependencies = [
  "ipci",
  "latch",
  "launch_backend",
+ "launcher_seams",
  "libpq_pqsignal",
  "lmgr",
  "lmgr_proc",
@@ -3158,10 +3296,13 @@ dependencies = [
  "lsyscache",
  "mbutils",
  "miscinit",
+ "miscinit_seams",
+ "nodeseqscan",
  "parser_driver",
  "pg_database",
  "pg_locale",
  "pg_prng",
+ "pg_sema_seams",
  "pgstat",
  "plancache",
  "pmchild",
@@ -3191,6 +3332,7 @@ dependencies = [
  "stack_depth",
  "subtrans",
  "superuser",
+ "syslogger_seams",
  "table",
  "tableam",
  "tcop_dest",
@@ -3198,6 +3340,7 @@ dependencies = [
  "transam",
  "transam_xlog",
  "typcache",
+ "types_guc",
  "utility",
  "varlena",
  "vars",
@@ -3447,6 +3590,9 @@ dependencies = [
 [[package]]
 name = "strftime"
 version = "0.1.0"
+dependencies = [
+ "localtime",
+]
 
 [[package]]
 name = "string_seams"
@@ -3983,6 +4129,7 @@ dependencies = [
  "mcx",
  "types_core",
  "types_hash",
+ "types_nodes",
 ]
 
 [[package]]

@@ -210,8 +210,10 @@ pub fn HoldInterrupts() {
 #[inline]
 pub fn ResumeInterrupts() {
     let count = InterruptHoldoffCount();
-    assert!(count > 0, "InterruptHoldoffCount underflow");
-    SetInterruptHoldoffCount(count - 1);
+    // C's Assert: debug-only. This rides every LWLockRelease (per-snapshot
+    // hot); a release-mode panic branch here is cost C does not pay.
+    debug_assert!(count > 0, "InterruptHoldoffCount underflow");
+    SetInterruptHoldoffCount(count.saturating_sub(1));
 }
 
 /// `HOLD_CANCEL_INTERRUPTS()`

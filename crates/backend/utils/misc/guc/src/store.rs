@@ -15,6 +15,32 @@ thread_local! {
     static GUC_STORE: RefCell<Option<GucRegistry>> = const { RefCell::new(None) };
     // TimestampTz PgReloadTime (guc.c).
     static PG_RELOAD_TIME: Cell<i64> = const { Cell::new(0) };
+    // Fast flags for the per-statement no-op paths (C reads a bare list head;
+    // reaching ours costs a RefCell borrow + Option). Contract: a flag is
+    // NEVER false while the TLS store's list is non-empty; stale TRUE is fine
+    // (the slow path re-checks the real list).
+    static HAS_STACKED_HINT: Cell<bool> = const { Cell::new(false) };
+    static REPORT_PENDING_HINT: Cell<bool> = const { Cell::new(false) };
+}
+
+#[inline]
+pub(crate) fn has_stacked_hint() -> bool {
+    HAS_STACKED_HINT.get()
+}
+
+#[inline]
+pub(crate) fn set_has_stacked_hint(v: bool) {
+    HAS_STACKED_HINT.set(v);
+}
+
+#[inline]
+pub(crate) fn report_pending_hint() -> bool {
+    REPORT_PENDING_HINT.get()
+}
+
+#[inline]
+pub(crate) fn set_report_pending_hint(v: bool) {
+    REPORT_PENDING_HINT.set(v);
 }
 
 pub fn set_pg_reload_time(t: i64) {

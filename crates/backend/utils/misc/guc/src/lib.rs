@@ -135,6 +135,17 @@ pub fn AtEOXact_GUC(is_commit: bool, nest_level: i32) {
             && (nest_level <= GUC_NEST_LEVEL.get()
                 || (nest_level == GUC_NEST_LEVEL.get() + 1 && !is_commit))
     );
+    // A statement that set no GUC pays one Cell load, as C pays one bare
+    // slist_is_empty(&guc_stack_list); the store borrow lives in the cold path.
+    if store::has_stacked_hint() {
+        at_eoxact_guc_haswork(is_commit, nest_level);
+    }
+    GUC_NEST_LEVEL.set(nest_level - 1);
+}
+
+#[cold]
+#[inline(never)]
+fn at_eoxact_guc_haswork(is_commit: bool, nest_level: i32) {
     let has_work = store::with_store(|reg| reg.has_stacked()).unwrap_or(false);
     if has_work {
         let mut deferred_hooks: Vec<registry::DeferredAssignHook> = Vec::new();
@@ -145,7 +156,10 @@ pub fn AtEOXact_GUC(is_commit: bool, nest_level: i32) {
             hook();
         }
     }
-    GUC_NEST_LEVEL.set(nest_level - 1);
+    // Re-arm the hint from the real list (entries can survive to outer levels).
+    store::set_has_stacked_hint(
+        store::with_store(|reg| reg.has_stacked()).unwrap_or(false),
+    );
 }
 
 // set_config_option (guc.c:3342): srole from the source class.

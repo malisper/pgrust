@@ -133,6 +133,10 @@ struct Local {
     nummsgs: Cell<i32>,
     next_lxid: Cell<LocalTransactionId>,
     seg: Cell<Option<SISeg>>,
+    // Our slot in proc_states, cached at SharedInvalBackendInit — C caches the
+    // whole stateP pointer; the per-statement probe must not re-derive it
+    // through the MyProcNumber TLS read. < 0 until initialized.
+    my_procno: Cell<i32>,
 }
 
 thread_local! {
@@ -145,6 +149,7 @@ thread_local! {
             nummsgs: Cell::new(0),
             next_lxid: Cell::new(InvalidLocalTransactionId),
             seg: Cell::new(None),
+            my_procno: Cell::new(-1),
         }
     };
 }
@@ -264,7 +269,10 @@ pub fn SharedInvalBackendInit(sendOnly: bool) -> PgResult<()> {
 
     LWLockRelease(write_lock)?;
 
-    LOCAL.with(|st| st.next_lxid.set(next_lxid));
+    LOCAL.with(|st| {
+        st.next_lxid.set(next_lxid);
+        st.my_procno.set(my);
+    });
 
     ipc_seams::on_shmem_exit::call(cleanup_invalidation_state_callback, 0);
     Ok(())
@@ -409,27 +417,34 @@ pub fn ReceiveSharedInvalidMessages(
     inval_function: &mut dyn FnMut(&SharedInvalidationMessage) -> PgResult<()>,
     reset_function: &mut dyn FnMut() -> PgResult<()>,
 ) -> PgResult<()> {
-    LOCAL.with(|st| receive_impl(st, inval_function, reset_function))
+    LOCAL.with(|st| {
+        // Per-statement empty-queue probe, C's order (sinvaladt.c:473): ONE
+        // Acquire load of hasMessages (through the procno cached at backend
+        // init, C's stateP) before the receive buffer's RefCell or the
+        // message-cursor Cells are touched. No pending outer-recursion
+        // messages (nextmsg == nummsgs holds after every drain), no shared
+        // messages, no catchup: done. Kept out of receive_impl so the empty
+        // statement never pays its buffer-sized frame; the slow path
+        // re-checks everything under SInvalReadLock.
+        if st.nextmsg.get() >= st.nummsgs.get() && !st.catchup_pending.get() {
+            let procno = st.my_procno.get();
+            if procno >= 0 {
+                let seg = st.seg.get().expect("shared invalidation memory is not attached");
+                if !seg.proc_states()[procno as usize].hasMessages.load(Acquire) {
+                    return Ok(());
+                }
+            }
+        }
+        receive_impl(st, inval_function, reset_function)
+    })
 }
 
+#[inline(never)]
 fn receive_impl(
     st: &Local,
     inval_function: &mut dyn FnMut(&SharedInvalidationMessage) -> PgResult<()>,
     reset_function: &mut dyn FnMut() -> PgResult<()>,
 ) -> PgResult<()> {
-    // Per-statement empty-queue probe, C's order (sinvaladt.c:473): ONE
-    // Acquire load of hasMessages before the receive buffer's RefCell or the
-    // message-cursor Cells are touched. No pending outer-recursion messages
-    // (nextmsg == nummsgs holds after every drain), no shared messages, no
-    // catchup: done. The slow path below re-checks under SInvalReadLock.
-    if st.nextmsg.get() >= st.nummsgs.get() && !st.catchup_pending.get() {
-        let seg = st.seg.get().expect("shared invalidation memory is not attached");
-        let my = MyProcNumber();
-        if !seg.proc_states()[my as usize].hasMessages.load(Acquire) {
-            return Ok(());
-        }
-    }
-
     // Messages still pending from an outer recursion. Each message is copied
     // out before the callback runs (C: msg = messages[nextmsg++]), so no
     // borrow is live if inval_function recurses back here.

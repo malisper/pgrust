@@ -62,6 +62,8 @@ impl PgStatState {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(v) => {
                 self.pending_order.push(key);
+                // Stale-true on a test-local state is harmless (see HAVE_PENDING).
+                HAVE_PENDING.with(|c| c.set(true));
                 v.insert(new_pending_data(key, mcx))
             }
         }
@@ -92,6 +94,11 @@ thread_local! {
     static FORCE_NEXT_FLUSH: Cell<bool> = const { Cell::new(false) };
     static PENDING_SINCE: Cell<TimestampTz> = const { Cell::new(0) };
     static LAST_FLUSH: Cell<TimestampTz> = const { Cell::new(0) };
+    // Mirror of !pending.is_empty(), C's bare dlist_is_empty(&pgStatPending)
+    // load: the nothing-pending statement must not pay the STATE RefCell
+    // borrow. Contract: never false while pending is non-empty; stale TRUE
+    // falls through to the real check (which then re-clears it).
+    static HAVE_PENDING: Cell<bool> = const { Cell::new(false) };
 }
 
 pub(crate) fn with_state<R>(f: impl FnOnce(&mut PgStatState) -> R) -> R {
@@ -147,11 +154,19 @@ fn timestamp_difference_exceeds(start: TimestampTz, stop: TimestampTz, msec: i64
 pub fn pgstat_report_stat(mut force: bool) -> i64 {
     debug_assert!(!xact_seams::is_transaction_or_transaction_block::call());
 
-    if FORCE_NEXT_FLUSH.with(|c| c.replace(false)) {
+    // One TLS block, three plain loads and no stores — C's early-exit shape
+    // (pgstat.c:692): forced or not, nothing-pending returns 0.
+    if FORCE_NEXT_FLUSH.with(|c| c.get()) {
+        FORCE_NEXT_FLUSH.with(|c| c.set(false));
         force = true;
     }
 
+    if !HAVE_PENDING.with(|c| c.get()) && !pgstat_report_fixed() {
+        return 0;
+    }
+
     if pending_is_empty() && !pgstat_report_fixed() {
+        HAVE_PENDING.with(|c| c.set(false));
         return 0;
     }
 
@@ -198,6 +213,7 @@ pub fn pgstat_report_stat(mut force: bool) -> i64 {
 
     PENDING_SINCE.with(|c| c.set(0));
     REPORT_FIXED.with(|c| c.set(false));
+    HAVE_PENDING.with(|c| c.set(false));
     0
 }
 

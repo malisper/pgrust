@@ -591,6 +591,48 @@ fn resource_owner_release_internal(
     is_commit: bool,
     is_top_level: bool,
 ) -> PgResult<()> {
+    // Empty-owner fast path — the per-statement TopTransaction/portal owner
+    // that never remembered anything: no children, no items, no aio, no
+    // registered callbacks. One arena resolve per phase (C's empty walk is a
+    // few direct-pointer loads); only the LOCKS-phase side effects remain.
+    let fast = with_arena(|a| {
+        if !a.callbacks.is_empty() {
+            return None;
+        }
+        let d = a.data_mut(owner);
+        if d.firstchild.is_null()
+            && d.narr == 0
+            && d.nhash == 0
+            && d.aio_handles.is_empty()
+        {
+            // The phase bookkeeping the slow path would have done (sorting
+            // zero items is a flag store).
+            d.releasing = true;
+            d.sorted = true;
+            Some((d.nlocks, d.parent.is_null()))
+        } else {
+            None
+        }
+    });
+    if let Some((nlocks, parent_is_null)) = fast {
+        if phase == RESOURCE_RELEASE_LOCKS {
+            if is_top_level {
+                if owner == TopTransactionResourceOwner() {
+                    let save = CURRENT_OWNER.with(|c| c.replace(owner));
+                    let result = ::lmgr_proc::ProcReleaseLocks(is_commit);
+                    CURRENT_OWNER.with(|c| c.set(save));
+                    result?;
+                }
+            } else {
+                debug_assert!(!parent_is_null);
+                if nlocks != 0 {
+                    unported("LockReassignCurrentOwner/LockReleaseCurrentOwner (storage/lmgr/lock.c)");
+                }
+            }
+        }
+        return Ok(());
+    }
+
     let mut child = with_arena(|a| a.data(owner).firstchild);
     while !child.is_null() {
         let next = with_arena(|a| a.data(child).nextchild);
