@@ -152,6 +152,7 @@ dependencies = [
  "miscinit_seams",
  "types_core",
  "types_error",
+ "types_storage",
 ]
 
 [[package]]
@@ -174,6 +175,14 @@ dependencies = [
  "procsignal_seams",
  "types_error",
  "types_guc",
+]
+
+[[package]]
+name = "inval_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
 ]
 
 [[package]]
@@ -209,6 +218,17 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_core",
+ "types_storage",
+]
+
+[[package]]
+name = "lmgr_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_rel",
 ]
 
 [[package]]
@@ -259,6 +279,18 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "namespace_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "rel_vocab",
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_rel",
 ]
 
 [[package]]
@@ -348,11 +380,42 @@ name = "rel_vocab"
 version = "0.1.0"
 
 [[package]]
+name = "relation"
+version = "0.0.0"
+dependencies = [
+ "inval_seams",
+ "lmgr_seams",
+ "mcx",
+ "miscinit_seams",
+ "namespace_seams",
+ "pgstat_seams",
+ "rel_vocab",
+ "relation_seams",
+ "relcache_seams",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_tuple",
+ "xact_seams",
+]
+
+[[package]]
 name = "relation_seams"
 version = "0.0.0"
 dependencies = [
  "mcx",
  "rel_vocab",
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_rel",
+]
+
+[[package]]
+name = "relcache_seams"
+version = "0.0.0"
+dependencies = [
  "seam_core",
  "types_core",
  "types_error",
@@ -424,6 +487,15 @@ dependencies = [
  "seam_core",
  "types_error",
  "types_storage",
+]
+
+[[package]]
+name = "syscache_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
 ]
 
 [[package]]
@@ -518,6 +590,16 @@ dependencies = [
 [[package]]
 name = "types_nbtree"
 version = "0.1.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_scan",
+ "types_storage",
+ "types_tuple",
+]
 
 [[package]]
 name = "types_nodes"
@@ -627,6 +709,13 @@ dependencies = [
 [[package]]
 name = "wchar"
 version = "0.1.0"
+
+[[package]]
+name = "xact_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+]
 
 [[package]]
 name = "xlogutils_seams"

@@ -117,7 +117,7 @@ backend-access-transam-generic-xlog	src/backend/access/transam/generic_xlog.c	to
 backend-access-transam-multixact	src/backend/access/transam/multixact.c	todo			fabled:backend-access-transam-multixact; m1-spine
 backend-access-transam-parallel	src/backend/access/transam/parallel.c	todo			fabled:backend-access-transam-parallel; m1-spine
 backend-access-transam-rmgr	*/rmgr.c	todo			fabled:backend-access-transam-rmgr; m1-spine(boot)
-backend-access-transam-slru	src/backend/access/transam/slru.c	todo			fabled:backend-access-transam-slru; m1-spine(boot)
+backend-access-transam-slru	src/backend/access/transam/slru.c	ported	slru	cold	fabled:slru rewritten for thread model; m1-spine(boot); per-element shmem views (no whole-slice &mut), tolerated C races as relaxed atomics, LwGuard on every lock across ?; caches complete (bank LRU, RecentlyUsed suppression, WriteAll fd cache, ReadOnly fastpath); bench SimpleLruReadPage_ReadOnly when clog ports; 8+4 tests, density 5.0%
 backend-access-transam-subtrans	src/backend/access/transam/subtrans.c	todo			fabled:backend-access-transam-subtrans; m1-spine(boot)
 backend-access-transam-timeline	src/backend/access/transam/timeline.c	todo			fabled:backend-access-transam-timeline; m1-spine(boot)
 backend-access-transam-transam	src/backend/access/transam/transam.c	todo			fabled:backend-access-transam-transam; m1-dep(stub-ok)
