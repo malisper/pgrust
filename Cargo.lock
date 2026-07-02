@@ -879,6 +879,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tupdesc"
+version = "0.1.0"
+dependencies = [
+ "catalog_seams",
+ "datum",
+ "hashfn",
+ "mcx",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_tuple",
+]
+
+[[package]]
 name = "types_array"
 version = "0.1.0"
 dependencies = [
