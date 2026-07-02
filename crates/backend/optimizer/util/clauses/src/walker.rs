@@ -33,7 +33,7 @@ pub const QTW_IGNORE_GROUPEXPRS: u32 = 0x100;
 
 #[cold]
 #[inline(never)]
-pub(crate) fn deferred(what: &str, tag: NodeTag) -> ! {
+pub fn deferred(what: &str, tag: NodeTag) -> ! {
     panic!("optimizer/util deferred arm: {what} ({tag:?}) — node vocabulary unported");
 }
 
@@ -111,7 +111,6 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             let f = node.as_variant::<FromExpr>().unwrap();
             walk_from_expr(f, w)
         }
-        // Sub-Query nodes are the walker's business, not ours (nodeFuncs.c).
         NodeTag::T_Query => Ok(false),
         NodeTag::T_List => walk_list(node.as_list().unwrap(), w),
         other => deferred("expression_tree_walker", other),
@@ -235,8 +234,7 @@ pub fn query_or_expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
     }
 }
 
-/// check_functions_in_node (nodeFuncs.c): apply `checker` to every function
-/// OID the node itself calls (not its children).
+/// Apply `checker` to every function OID the node itself calls.
 pub fn check_functions_in_node<'mcx, F>(node: Node<'mcx>, checker: &mut F) -> PgResult<bool>
 where
     F: FnMut(Oid) -> PgResult<bool>,
@@ -266,8 +264,7 @@ where
     }
 }
 
-/// expression_tree_mutator (nodeFuncs.c), identity-preserving (module doc).
-/// `Ok(None)` = subtree unchanged, share the input node.
+/// Identity-preserving (module doc): `Ok(None)` = unchanged, share input.
 pub fn expression_tree_mutator<'mcx, F>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,

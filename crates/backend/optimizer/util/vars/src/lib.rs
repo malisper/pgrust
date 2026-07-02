@@ -1,0 +1,25 @@
+//! optimizer/util var.c — Var-node collection/inspection walkers over the
+//! opaque `Node` vocabulary (the engine lives in `clauses::walker`).
+//! Unit rows appendinfo.c/paramassign.c/tlist.c have their own catalog rows;
+//! this crate is the var.c half.
+
+pub mod var;
+
+#[cfg(test)]
+mod tests;
+
+pub use var::{
+    contain_var_clause, contain_vars_of_level, contain_vars_returning_old_or_new,
+    flatten_group_exprs, flatten_join_alias_vars, locate_var_of_level, pull_var_clause,
+    pull_varattnos, pull_varnos, pull_varnos_of_level, pull_vars_of_level,
+    PVC_INCLUDE_AGGREGATES, PVC_INCLUDE_PLACEHOLDERS, PVC_INCLUDE_WINDOWFUNCS,
+    PVC_RECURSE_AGGREGATES, PVC_RECURSE_PLACEHOLDERS, PVC_RECURSE_WINDOWFUNCS,
+};
+
+pub fn init_seams() {
+    var_seams::contain_var_clause::set(|node| {
+        // Infallible in C (pure walk); the PgResult exists only for engine
+        // uniformity, so an Err here is a real bug — fail loud.
+        var::contain_var_clause(node).expect("contain_var_clause")
+    });
+}

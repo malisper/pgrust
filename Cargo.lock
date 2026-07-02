@@ -360,6 +360,7 @@ dependencies = [
  "syscache_seams",
  "types_core",
  "types_error",
+ "types_guc",
  "types_rel",
  "types_tuple",
  "varlena",

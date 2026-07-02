@@ -4,8 +4,6 @@ use types_error::PgResult;
 use types_nodes::Node;
 
 seam_core::seam!(
-    // evaluate_expr (clauses.c): pre-evaluate a constant-foldable expression
-    // via the executor; installed by the executor-expression unit.
     pub fn evaluate_expr<'mcx>(
         mcx: Mcx<'mcx>,
         expr: Node<'mcx>,
