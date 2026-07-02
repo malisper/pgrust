@@ -58,9 +58,11 @@ name = "adt_timestamp"
 version = "0.1.0"
 dependencies = [
  "adt_datetime",
+ "libc",
  "timestamp_seams",
  "types_core",
  "types_error",
+ "xact",
 ]
 
 [[package]]
@@ -91,9 +93,26 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 [[package]]
 name = "analyze_seams"
 version = "0.1.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_portal",
+]
 
 [[package]]
 name = "async_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
+name = "auth_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
@@ -176,6 +195,29 @@ dependencies = [
 [[package]]
 name = "be_secure"
 version = "0.0.0"
+dependencies = [
+ "be_secure_seams",
+ "fd",
+ "init_small",
+ "ip",
+ "ipc_seams",
+ "latch",
+ "latch_seams",
+ "libc",
+ "mcx",
+ "miscinit_seams",
+ "pgstat_seams",
+ "postgres_seams",
+ "pqcomm",
+ "pqcomm_seams",
+ "stringinfo",
+ "types_core",
+ "types_error",
+ "types_startup",
+ "types_storage",
+ "waitevent_seams",
+ "waiteventset",
+]
 
 [[package]]
 name = "be_secure_seams"
@@ -321,6 +363,14 @@ name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+
+[[package]]
+name = "checkpointer_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+]
 
 [[package]]
 name = "clog"
@@ -530,8 +580,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "execexpr"
+version = "0.1.0"
+dependencies = [
+ "aclchk_seams",
+ "adt_int",
+ "datum",
+ "exectuples",
+ "fmgr_core",
+ "guc_tables",
+ "lsyscache",
+ "mcx",
+ "miscinit_seams",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_slot",
+ "types_tuple",
+]
+
+[[package]]
 name = "execmain_seams"
 version = "0.1.0"
+dependencies = [
+ "seam_core",
+ "tcop_dest",
+ "types_dest",
+ "types_error",
+ "types_nodes",
+ "types_portal",
+ "types_scan",
+ "types_snapshot",
+ "types_tuple",
+]
 
 [[package]]
 name = "exectuples"
@@ -550,6 +633,20 @@ dependencies = [
 [[package]]
 name = "executils"
 version = "0.1.0"
+dependencies = [
+ "datum",
+ "exectuples",
+ "mbutils_seams",
+ "mcx",
+ "queryenvironment",
+ "snapmgr",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_scan",
+ "types_slot",
+ "types_tuple",
+]
 
 [[package]]
 name = "fd"
@@ -765,6 +862,7 @@ dependencies = [
  "predicate_seams",
  "procarray_seams",
  "pruneheap_seams",
+ "tableam",
  "tableam_vocab",
  "types_core",
  "types_error",
@@ -1366,6 +1464,12 @@ dependencies = [
 [[package]]
 name = "parser_seams"
 version = "0.1.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_error",
+ "types_nodes",
+]
 
 [[package]]
 name = "parser_small1"
@@ -1383,6 +1487,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_nodes",
+ "types_portal",
  "types_rel",
  "types_tuple",
  "wchar",
@@ -1394,6 +1499,28 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_error",
+]
+
+[[package]]
+name = "pg_database_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
+name = "pg_db_role_setting_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "types_rel",
+ "types_snapshot",
 ]
 
 [[package]]
@@ -1416,6 +1543,7 @@ dependencies = [
 name = "pg_locale_seams"
 version = "0.1.0"
 dependencies = [
+ "mcx",
  "seam_core",
  "types_core",
  "types_error",
@@ -1497,6 +1625,13 @@ dependencies = [
 [[package]]
 name = "planner_seams"
 version = "0.1.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_error",
+ "types_nodes",
+ "types_portal",
+]
 
 [[package]]
 name = "pmsignal"
@@ -1901,7 +2036,9 @@ dependencies = [
  "fd",
  "guc_tables",
  "init_small",
+ "init_small_seams",
  "inval",
+ "ipc_seams",
  "libc",
  "lwlock",
  "mcx",
@@ -1982,6 +2119,12 @@ dependencies = [
 [[package]]
 name = "rewrite_handler_seams"
 version = "0.1.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_error",
+ "types_nodes",
+]
 
 [[package]]
 name = "rmgr"
@@ -1992,6 +2135,7 @@ dependencies = [
  "mcx",
  "relmapper",
  "stringinfo",
+ "transam_xlog_seams",
  "types_core",
  "types_error",
  "xlogreader_seams",
@@ -2014,10 +2158,29 @@ dependencies = [
 [[package]]
 name = "scan_fgram"
 version = "0.1.0"
+dependencies = [
+ "elog",
+ "guc_tables",
+ "keywords",
+ "mcx",
+ "numutils",
+ "parser_small1",
+ "types_core",
+ "types_error",
+ "wchar",
+]
 
 [[package]]
 name = "seam_core"
 version = "0.1.0"
+
+[[package]]
+name = "session_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+]
 
 [[package]]
 name = "shmem"
@@ -2068,6 +2231,14 @@ dependencies = [
  "types_core",
  "types_error",
  "types_storage",
+]
+
+[[package]]
+name = "slot_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
 ]
 
 [[package]]
@@ -2238,23 +2409,40 @@ name = "subtrans"
 version = "0.0.0"
 dependencies = [
  "elog",
+ "file_seams",
  "guc",
  "guc_seams",
  "guc_tables",
  "init_small",
+ "libc",
  "lwlock",
+ "pgstat_seams",
  "procarray",
+ "shmem_seams",
  "slru",
  "subtrans_seams",
+ "sync_seams",
+ "transam_xlog_seams",
  "types_core",
  "types_error",
  "types_guc",
  "types_storage",
  "varsup_seams",
+ "waitevent_seams",
+ "xlogutils_seams",
 ]
 
 [[package]]
 name = "subtrans_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
+name = "superuser_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
@@ -2468,11 +2656,22 @@ version = "0.0.0"
 dependencies = [
  "clog",
  "elog",
+ "file_seams",
+ "init_small",
+ "libc",
+ "pgstat_seams",
  "procarray",
+ "shmem_seams",
  "subtrans",
+ "sync_seams",
  "transam_seams",
+ "transam_xlog_seams",
  "types_core",
  "types_error",
+ "varsup_seams",
+ "waitevent_seams",
+ "xloginsert_seams",
+ "xlogutils_seams",
 ]
 
 [[package]]
@@ -2488,9 +2687,42 @@ dependencies = [
 name = "transam_xlog"
 version = "0.0.0"
 dependencies = [
- "mcx",
+ "bufmgr_seams",
+ "checkpointer_seams",
+ "clog",
+ "commit_ts_seams",
+ "crc32c",
+ "elog",
+ "fd",
+ "guc_tables",
+ "init_small",
+ "latch",
+ "libc",
+ "lmgr_proc",
+ "lwlock",
+ "multixact_seams",
+ "origin_seams",
+ "pgstat_seams",
+ "predicate_seams",
+ "procarray",
+ "procarray_seams",
+ "relcache",
+ "relmapper",
+ "snapbuild_seams",
+ "subtrans_seams",
+ "sync_seams",
+ "timeline_seams",
+ "transam_xlog_seams",
+ "twophase_seams",
  "types_core",
  "types_error",
+ "types_storage",
+ "varsup_seams",
+ "xact_seams",
+ "xloginsert_seams",
+ "xlogreader_seams",
+ "xlogrecovery_seams",
+ "xlogutils",
 ]
 
 [[package]]
@@ -2741,6 +2973,15 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 [[package]]
 name = "utility_seams"
 version = "0.1.0"
+dependencies = [
+ "seam_core",
+ "tcop_dest",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_portal",
+ "types_tuple",
+]
 
 [[package]]
 name = "varlena"

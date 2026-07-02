@@ -76,13 +76,14 @@ fn reserve_slot(p: &mut PrivRef) {
 
 /// ReservePrivateRefCountEntry (bufmgr.c): guarantee one free array slot so
 /// the entry fill after a spinlock/CAS section never allocates.
+#[inline]
 pub fn ReservePrivateRefCountEntry() {
     with(reserve_slot);
 }
 
-/// GetPrivateRefCountEntry(buffer, do_move) + NewPrivateRefCountEntry +
-/// `ref->refcount++` fused to one TLS access (C's separate statics are free;
-/// a TLS probe per step is not). Returns the pre-increment refcount.
+/// GetPrivateRefCountEntry(do_move=true) + NewPrivateRefCountEntry + refcount++
+/// fused to one TLS access; returns the pre-increment refcount.
+#[inline]
 pub(crate) fn track_pin(buffer: Buffer) -> i32 {
     debug_assert!(buffer != InvalidBuffer);
     with(|p| {
@@ -119,10 +120,9 @@ pub(crate) fn track_pin(buffer: Buffer) -> i32 {
     })
 }
 
-/// UnpinBufferNoOwner's local half: `ref->refcount--`; at zero, forget the
-/// entry (ForgetPrivateRefCountEntry: an array slot becomes the reserved
-/// entry, so pin→unpin→pin never searches). Returns true when the shared
-/// refcount must be dropped.
+/// refcount--; at zero, ForgetPrivateRefCountEntry (the array slot becomes the
+/// reserved entry so pin→unpin→pin never searches); true = drop the shared ref.
+#[inline]
 pub(crate) fn track_unpin(buffer: Buffer) -> bool {
     with(|p| {
         for (i, e) in p.entries.iter_mut().enumerate() {
@@ -153,7 +153,7 @@ pub(crate) fn track_unpin(buffer: Buffer) -> bool {
     })
 }
 
-/// GetPrivateRefCount (bufmgr.c): this backend's pin count, 0 if unpinned.
+#[inline]
 pub fn GetPrivateRefCount(buffer: Buffer) -> i32 {
     debug_assert!(buffer != InvalidBuffer);
     with(|p| {
@@ -172,7 +172,6 @@ pub fn GetPrivateRefCount(buffer: Buffer) -> i32 {
     })
 }
 
-/// IncrBufferRefCount's local half (caller asserts an existing pin).
 pub(crate) fn track_incr(buffer: Buffer) {
     with(|p| {
         for e in p.entries.iter_mut() {

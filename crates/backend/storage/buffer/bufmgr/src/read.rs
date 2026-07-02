@@ -25,9 +25,8 @@ use crate::buf_table::{
 use crate::counters;
 use crate::freelist::{StrategyFreeBuffer, StrategyGetBuffer};
 use crate::ops::{LockBuffer, LockBufferForCleanup, BUFFER_LOCK_EXCLUSIVE};
-use crate::pin::{
-    buffer_refcount, reserve_entry, GetPrivateRefCount, PinBuffer, PinBuffer_Locked, UnpinBuffer,
-};
+use crate::pin::{buffer_refcount, PinBuffer, PinBuffer_Locked, UnpinBuffer};
+use crate::privref::{GetPrivateRefCount, ReservePrivateRefCountEntry as reserve_entry};
 
 const P_NEW: BlockNumber = InvalidBlockNumber;
 
@@ -46,7 +45,6 @@ fn init_buffer_tag(rlocator: RelFileLocator, forknum: ForkNumber, blkno: BlockNu
     }
 }
 
-/// ReadBufferWithoutRelcache (bufmgr.c).
 pub fn ReadBufferWithoutRelcache(
     rlocator: RelFileLocator,
     forknum: ForkNumber,
@@ -67,9 +65,8 @@ pub fn ReadBufferWithoutRelcache(
     ReadBuffer_common(smgr, persistence, forknum, blkno, mode, strategy)
 }
 
-/// ReadBuffer_common (bufmgr.c), single-block synchronous core: PG18's
-/// StartReadBuffer/WaitReadBuffers pgaio pipeline collapsed to its
-/// io_method=sync behavior (aio unit owns the async lanes).
+/// Single-block synchronous core: PG18's StartReadBuffer/WaitReadBuffers pgaio
+/// pipeline collapsed to its io_method=sync behavior (aio unit owns async).
 pub fn ReadBuffer_common(
     smgr: RelFileLocatorBackend,
     persistence: u8,
@@ -89,16 +86,16 @@ pub fn ReadBuffer_common(
         ZeroAndLockBuffer(buffer, mode, found)?;
         return Ok(buffer);
     }
-    let zero_on_error =
-        mode == ReadBufferMode::ZeroOnError || crate::gucs::zero_damaged_pages();
     let (buffer, found) = PinBufferForBlock(smgr, persistence, forknum, blkno, &strategy)?;
     if !found {
+        // C consults zero_damaged_pages only on the miss/completion side.
+        let zero_on_error =
+            mode == ReadBufferMode::ZeroOnError || crate::gucs::zero_damaged_pages();
         complete_read_sync(smgr, forknum, blkno, buffer, zero_on_error)?;
     }
     Ok(buffer)
 }
 
-/// PinBufferForBlock (bufmgr.c).
 fn PinBufferForBlock(
     smgr: RelFileLocatorBackend,
     persistence: u8,
@@ -117,8 +114,7 @@ fn PinBufferForBlock(
     Ok((buffer, found))
 }
 
-/// BufferAlloc (bufmgr.c): the partitioned mapping lookup, warm-hit pin, and
-/// victim install.
+/// The partitioned mapping lookup, warm-hit pin, and victim install.
 fn BufferAlloc(
     smgr: RelFileLocatorBackend,
     relpersistence: u8,
@@ -183,8 +179,7 @@ fn BufferAlloc(
     Ok((victim_buffer, false))
 }
 
-/// GetVictimBuffer (bufmgr.c): clock-sweep victim, pinned and evicted from the
-/// mapping table. Dirty victims need FlushBuffer (write-back, phase 2).
+/// Clock-sweep victim, pinned, evicted from the mapping table.
 fn GetVictimBuffer(strategy: &BufferAccessStrategy) -> PgResult<Buffer> {
     loop {
         reserve_entry();
@@ -209,7 +204,6 @@ fn GetVictimBuffer(strategy: &BufferAccessStrategy) -> PgResult<Buffer> {
     }
 }
 
-/// InvalidateVictimBuffer (bufmgr.c).
 fn InvalidateVictimBuffer(desc: &BufferDesc) -> PgResult<bool> {
     debug_assert!(desc.state.load(Ordering::Acquire) & BM_TAG_VALID != 0);
     let tag = desc.tag();
@@ -232,8 +226,7 @@ fn InvalidateVictimBuffer(desc: &BufferDesc) -> PgResult<bool> {
     Ok(true)
 }
 
-/// StartBufferIO (bufmgr.c). WaitIO's sleep arm needs the per-buffer condition
-/// variable (only reachable with a second concurrent backend on this buffer).
+/// WaitIO's sleep arm needs the per-buffer CV (second-backend-only).
 pub(crate) fn StartBufferIO(desc: &BufferDesc, for_input: bool, nowait: bool) -> PgResult<bool> {
     loop {
         let buf_state = LockBufHdr(desc);
@@ -319,9 +312,8 @@ fn complete_read_sync(
     Ok(())
 }
 
-/// PageIsVerified (bufpage.c) header-sanity core. The checksum arm needs
-/// ControlFile (DataChecksumsEnabled) — pending the xlog unit; a cluster with
-/// checksums enabled is not yet verified here (C divergence, tracked).
+/// PageIsVerified (bufpage.c) header-sanity core; the checksum arm pends
+/// ControlFile (tracked divergence: checksum-enabled clusters unverified).
 fn page_is_verified(page: *const u8) -> bool {
     // SAFETY: caller owns a pinned BLCKSZ page image; u16 fields are 2-aligned
     // (page images are MAXALIGNed).
@@ -358,7 +350,6 @@ fn relpath_desc(locator: RelFileLocator, forknum: ForkNumber) -> String {
     )
 }
 
-/// ZeroAndLockBuffer (bufmgr.c).
 fn ZeroAndLockBuffer(buffer: Buffer, mode: ReadBufferMode, already_valid: bool) -> PgResult<()> {
     let desc = GetBufferDescriptor(buffer - 1);
     let mut need_to_zero = false;
@@ -383,7 +374,7 @@ fn ZeroAndLockBuffer(buffer: Buffer, mode: ReadBufferMode, already_valid: bool) 
     Ok(())
 }
 
-/// ReadRecentBuffer (bufmgr.c): mapping-table-free re-pin fastpath.
+/// Mapping-table-free re-pin fastpath.
 pub fn ReadRecentBuffer(
     rlocator: RelFileLocator,
     forknum: ForkNumber,

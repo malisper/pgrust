@@ -7,8 +7,7 @@ use types_core::{Buffer, InvalidBuffer, BLCKSZ};
 use types_error::{ErrorLocation, PgResult, ERROR};
 use types_storage::buf::{
     BufferAccessStrategy, BufferAccessStrategyData, BufferAccessStrategyType, IOContext, Victim,
-    BM_DIRTY, BM_LOCKED, BUF_REFCOUNT_MASK, BUF_USAGECOUNT_MASK, BUF_USAGECOUNT_ONE,
-    FREENEXT_END_OF_LIST, FREENEXT_NOT_IN_LIST,
+    BM_LOCKED, BUF_REFCOUNT_MASK, BUF_USAGECOUNT_MASK, BUF_USAGECOUNT_ONE, FREENEXT_NOT_IN_LIST,
 };
 use types_storage::NUM_AUXILIARY_PROCS;
 
@@ -95,9 +94,8 @@ pub fn StrategyInitialize(nbuffers: i32) -> PgResult<()> {
     Ok(())
 }
 
-/// ClockSweepTick (freelist.c): atomic advance; wraparound folds the hand and
-/// bumps completePasses under the spinlock so StrategySyncStart reads a
-/// consistent pair.
+/// Wraparound folds the hand and bumps completePasses under the spinlock so
+/// StrategySyncStart reads a consistent pair.
 fn ClockSweepTick() -> i32 {
     let c = ctl();
     let nbuffers = NBuffersInited() as u32;
@@ -133,8 +131,8 @@ fn ClockSweepTick() -> i32 {
     victim as i32
 }
 
-/// StrategyGetBuffer (freelist.c). Returns the victim with its buffer header
-/// spinlock HELD (the `Victim` type carries that contract) plus `from_ring`.
+/// Returns the victim with its header spinlock HELD (`Victim` carries that
+/// contract) plus `from_ring`.
 pub fn StrategyGetBuffer(strategy: &BufferAccessStrategy) -> PgResult<(Victim, bool)> {
     let c = ctl();
 
@@ -203,7 +201,7 @@ pub fn StrategyGetBuffer(strategy: &BufferAccessStrategy) -> PgResult<(Victim, b
             if trycounter == 0 {
                 UnlockBufHdr(buf, local_buf_state);
                 return Err(Box::new(
-                    types_error::PgError::new(ERROR, "no unpinned buffers available".into())
+                    types_error::PgError::new(ERROR, "no unpinned buffers available")
                         .with_error_location(ErrorLocation::new(
                             "freelist.c",
                             0,
@@ -222,7 +220,6 @@ fn victim(buf_id: i32, buf_state: u32) -> Victim {
     Victim { buf_id, buf_state }
 }
 
-/// StrategyFreeBuffer (freelist.c).
 pub fn StrategyFreeBuffer(buf_id: i32) {
     let c = ctl();
     let buf = GetBufferDescriptor(buf_id);
@@ -241,7 +238,7 @@ pub fn StrategyFreeBuffer(buf_id: i32) {
     });
 }
 
-/// StrategySyncStart (freelist.c) — bgwriter's consistent read of the clock.
+/// Bgwriter's consistent read of the clock pair.
 pub fn StrategySyncStart() -> (i32, u32, u32) {
     let c = ctl();
     let nbuffers = NBuffersInited() as u32;
@@ -265,7 +262,6 @@ pub fn have_free_buffer() -> bool {
     ctl().first_free_buffer.load(Ordering::Relaxed) >= 0
 }
 
-/// GetAccessStrategy (freelist.c).
 pub fn GetAccessStrategy(btype: BufferAccessStrategyType) -> BufferAccessStrategy {
     let ring_size_kb: i32 = match btype {
         BufferAccessStrategyType::BasNormal => return None,
@@ -283,7 +279,6 @@ pub fn GetAccessStrategy(btype: BufferAccessStrategyType) -> BufferAccessStrateg
     GetAccessStrategyWithSize(btype, ring_size_kb)
 }
 
-/// GetAccessStrategyWithSize (freelist.c).
 pub fn GetAccessStrategyWithSize(
     btype: BufferAccessStrategyType,
     ring_size_kb: i32,
@@ -308,7 +303,7 @@ pub fn FreeAccessStrategy(strategy: BufferAccessStrategy) {
     drop(strategy);
 }
 
-/// GetBufferFromRing (freelist.c): header lock held on success.
+/// Header lock held on success.
 fn GetBufferFromRing(s: &mut BufferAccessStrategyData) -> Option<Victim> {
     s.current += 1;
     if s.current >= s.nbuffers {
@@ -333,7 +328,6 @@ fn AddBufferToRing(s: &mut BufferAccessStrategyData, buf: Buffer) {
     s.buffers[s.current as usize] = buf;
 }
 
-/// StrategyRejectBuffer (freelist.c).
 pub fn StrategyRejectBuffer(
     strategy: &BufferAccessStrategy,
     buf_id: i32,
@@ -352,7 +346,6 @@ pub fn StrategyRejectBuffer(
     true
 }
 
-/// IOContextForStrategy (freelist.c).
 pub fn IOContextForStrategy(strategy: &BufferAccessStrategy) -> IOContext {
     match strategy {
         None => IOContext::IOCONTEXT_NORMAL,
@@ -365,8 +358,7 @@ pub fn IOContextForStrategy(strategy: &BufferAccessStrategy) -> IOContext {
     }
 }
 
-/// GetPinLimit (bufmgr.c reads MaxProportionalPins set by
-/// InitBufferManagerAccess).
+/// MaxProportionalPins (bufmgr.c InitBufferManagerAccess).
 pub fn GetPinLimit() -> i32 {
     let max_backends = globals::MaxBackends().max(1);
     NBuffersInited() / (max_backends + NUM_AUXILIARY_PROCS)

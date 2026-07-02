@@ -1,6 +1,5 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU32, Ordering};
-use std::sync::OnceLock;
 
 use init_small::globals;
 use lwlock::{LWLock, LWLockPadded};
@@ -43,16 +42,14 @@ impl BufferDesc {
         }
     }
 
-    /// Caller holds a pin or the header lock (tag writers hold the header lock
-    /// with refcount 0, so pinned readers race nothing).
+    /// Caller holds a pin or the header lock (writers require refcount 0).
     #[inline]
     pub fn tag(&self) -> buftag {
         // SAFETY: caller contract above.
         unsafe { *self.tag.get() }
     }
 
-    /// # Safety
-    /// Header lock held, no other pins (BufferAlloc/Invalidate sites only).
+    /// # Safety: header lock held, no other pins.
     #[inline]
     pub(crate) unsafe fn set_tag(&self, tag: buftag) {
         *self.tag.get() = tag;
@@ -64,8 +61,7 @@ impl BufferDesc {
         unsafe { *self.wait_backend_pgprocno.get() }
     }
 
-    /// # Safety
-    /// Header lock held.
+    /// # Safety: header lock held.
     #[inline]
     pub(crate) unsafe fn set_wait_backend_pgprocno(&self, procno: i32) {
         *self.wait_backend_pgprocno.get() = procno;
@@ -77,8 +73,7 @@ impl BufferDesc {
         unsafe { *self.free_next.get() }
     }
 
-    /// # Safety
-    /// Strategy spinlock held.
+    /// # Safety: strategy spinlock held.
     #[inline]
     pub(crate) unsafe fn set_free_next(&self, next: i32) {
         *self.free_next.get() = next;
@@ -103,40 +98,52 @@ pub fn cleared_buftag() -> buftag {
     }
 }
 
+// C's BufferDescriptors/BufferBlocks/NBuffers globals: published once before
+// any backend touches the pool (thread spawn synchronizes), then read with
+// plain loads — an OnceLock re-check would put an acquire load on every hit.
 struct BufferPool {
-    descs: *const BufferDescPadded,
-    blocks: *mut u8,
-    nbuffers: i32,
+    descs: core::sync::atomic::AtomicPtr<BufferDescPadded>,
+    blocks: core::sync::atomic::AtomicPtr<u8>,
+    nbuffers: core::sync::atomic::AtomicI32,
 }
 
-// SAFETY: `descs`/`blocks` are leaked process-lifetime allocations (C's shmem
-// carve); all mutation goes through BufferDesc's contract or pinned pages.
-unsafe impl Sync for BufferPool {}
-unsafe impl Send for BufferPool {}
+static POOL: BufferPool = BufferPool {
+    descs: core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),
+    blocks: core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),
+    nbuffers: core::sync::atomic::AtomicI32::new(0),
+};
 
-static POOL: OnceLock<BufferPool> = OnceLock::new();
+#[cold]
+#[inline(never)]
+fn pool_uninit() -> ! {
+    panic!("bufmgr: BufferManagerShmemInit (buf_init.c) not called")
+}
 
 #[inline]
-fn pool() -> &'static BufferPool {
-    POOL.get()
-        .expect("bufmgr: BufferManagerShmemInit (buf_init.c) not called")
+fn pool_descs() -> *const BufferDescPadded {
+    let p = POOL.descs.load(Ordering::Relaxed);
+    if p.is_null() {
+        pool_uninit();
+    }
+    p
 }
 
 pub fn buffer_pool_initialized() -> bool {
-    POOL.get().is_some()
+    !POOL.descs.load(Ordering::Relaxed).is_null()
 }
 
 #[inline]
 pub fn NBuffersInited() -> i32 {
-    pool().nbuffers
+    POOL.nbuffers.load(Ordering::Relaxed)
 }
 
 #[inline]
 pub fn GetBufferDescriptor(id: i32) -> &'static BufferDesc {
-    let p = pool();
-    assert!((0..p.nbuffers).contains(&id), "bad buffer id: {id}");
-    // SAFETY: in-bounds (asserted); descriptors live for the process lifetime.
-    unsafe { &(*p.descs.add(id as usize)).desc }
+    let descs = pool_descs();
+    debug_assert!((0..NBuffersInited()).contains(&id), "bad buffer id: {id}");
+    // SAFETY: in-bounds (caller-checked per C, debug-asserted); descriptors
+    // live for the process lifetime.
+    unsafe { &(*descs.add(id as usize)).desc }
 }
 
 #[inline]
@@ -146,15 +153,16 @@ pub fn BufferDescriptorGetBuffer(desc: &BufferDesc) -> Buffer {
 
 #[inline]
 pub fn BufferGetBlockPtr(buffer: Buffer) -> *mut u8 {
-    let p = pool();
-    assert!(buffer > 0 && buffer <= p.nbuffers, "bad buffer ID: {buffer}");
-    // SAFETY: in-bounds (asserted).
-    unsafe { p.blocks.add((buffer as usize - 1) * BLCKSZ) }
+    let blocks = POOL.blocks.load(Ordering::Relaxed);
+    debug_assert!(
+        !blocks.is_null() && buffer > 0 && buffer <= NBuffersInited(),
+        "bad buffer ID: {buffer}"
+    );
+    // SAFETY: in-bounds (caller-checked per C, debug-asserted).
+    unsafe { blocks.add((buffer as usize - 1) * BLCKSZ) }
 }
 
-/// BufferManagerShmemInit (buf_init.c) minus localbuf/checkpoint carve-outs:
-/// descriptor array (64B padded per BUFFERDESC_PAD_TO_SIZE), IO-aligned block
-/// array, freelist chain, then StrategyInitialize + InitBufTable.
+/// BufferManagerShmemInit (buf_init.c) minus localbuf/checkpoint carve-outs.
 pub fn BufferManagerShmemInit() -> PgResult<()> {
     let n = globals::NBuffers();
     assert!(n > 0, "NBuffers not set");
@@ -170,7 +178,7 @@ pub fn BufferManagerShmemInit() -> PgResult<()> {
     let blocks = unsafe { std::alloc::alloc_zeroed(blk_layout) };
     if descs.is_null() || blocks.is_null() {
         return Err(Box::new(
-            types_error::PgError::new(ERROR, "out of memory".into())
+            types_error::PgError::new(ERROR, "out of memory")
                 .with_sqlstate(ERRCODE_OUT_OF_MEMORY),
         ));
     }
@@ -190,12 +198,21 @@ pub fn BufferManagerShmemInit() -> PgResult<()> {
             );
         }
     }
-    POOL.set(BufferPool {
-        descs,
-        blocks,
-        nbuffers: n,
-    })
-    .unwrap_or_else(|_| panic!("bufmgr: buffer pool initialized twice"));
+    POOL.blocks.store(blocks, Ordering::Relaxed);
+    POOL.nbuffers.store(n, Ordering::Relaxed);
+    // `descs` is the publish flag: stored last, Release orders the fields
+    // (and the initialized array) before it.
+    assert!(
+        POOL.descs
+            .compare_exchange(
+                core::ptr::null_mut(),
+                descs,
+                Ordering::Release,
+                Ordering::Relaxed
+            )
+            .is_ok(),
+        "bufmgr: buffer pool initialized twice"
+    );
 
     crate::freelist::StrategyInitialize(n)?;
     Ok(())

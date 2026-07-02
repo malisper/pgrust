@@ -1,5 +1,7 @@
+#![allow(unused_unsafe)]
+
 use super::*;
-use ::types_hash::hsearch::HASH_FUNCTION;
+use ::types_hash::hsearch::{HASH_FUNCTION, HASH_PARTITION, HASH_SHARED_MEM};
 use std::sync::Once;
 
 fn search(t: *mut HTAB, k: *const u8, a: HASHACTION) -> PgResult<(*mut u8, bool)> {
@@ -364,6 +366,51 @@ fn partitioned_freelists_spread_lock_and_borrow() {
         assert_eq!(hash_get_num_entries(table), 0);
     }
     hash_destroy(table);
+}
+
+#[test]
+fn partitioned_shared_fixed_create_works() {
+    install_test_seams();
+    let mut info = ctl(4, 8);
+    info.num_partitions = 4;
+    let table = hash_create(
+        "part_shared",
+        128,
+        &info,
+        HASH_ELEM | HASH_BLOBS | HASH_PARTITION | HASH_SHARED_MEM | HASH_FIXED_SIZE,
+    )
+    .unwrap();
+    unsafe {
+        assert!((*table).isshared);
+        assert!((*table).isfixed);
+        for i in 0u32..96 {
+            let hv = get_hash_value(table, i.to_ne_bytes().as_ptr());
+            let (p, found) = search_hv(table, i.to_ne_bytes().as_ptr(), hv, HASH_ENTER).unwrap();
+            assert!(!found);
+            assert!(!p.is_null());
+        }
+        assert_eq!(hash_get_num_entries(table), 96);
+        let before = (*(*table).hctl).max_bucket;
+        for i in 0u32..96 {
+            let (_, found) = search(table, i.to_ne_bytes().as_ptr(), HASH_FIND).unwrap();
+            assert!(found);
+        }
+        assert_eq!((*(*table).hctl).max_bucket, before, "partitioned tables never split");
+        for i in 0u32..96 {
+            let (_, found) = search(table, i.to_ne_bytes().as_ptr(), HASH_REMOVE).unwrap();
+            assert!(found);
+        }
+        assert_eq!(hash_get_num_entries(table), 0);
+    }
+    hash_destroy(table);
+}
+
+#[test]
+#[should_panic(expected = "HASH_SHARED_MEM requires HASH_FIXED_SIZE")]
+fn shared_without_fixed_size_panics() {
+    install_test_seams();
+    let ctl = ctl(4, 8);
+    let _ = hash_create("shpanic", 8, &ctl, HASH_ELEM | HASH_BLOBS | HASH_SHARED_MEM);
 }
 
 #[test]

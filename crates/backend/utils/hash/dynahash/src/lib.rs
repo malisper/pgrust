@@ -15,7 +15,8 @@ use ::types_error::{PgError, ERRCODE_OUT_OF_MEMORY, WARNING};
 use ::types_error::PgResult;
 use ::types_hash::hsearch::{
     HashCompareFunc, HashValueFunc, HASHACTION, HASHCTL, HASHELEMENT, HASHHDR, HASHSEGMENT, HTAB,
-    HASH_ALLOC, HASH_BLOBS, HASH_COMPARE, HASH_CONTEXT, HASH_DIRSIZE, HASH_ELEM, HASH_ENTER,
+    HASH_ALLOC, HASH_ATTACH, HASH_BLOBS, HASH_COMPARE, HASH_CONTEXT, HASH_DIRSIZE, HASH_ELEM,
+    HASH_ENTER,
     HASH_ENTER_NULL, HASH_FIND, HASH_FIXED_SIZE, HASH_FUNCTION, HASH_KEYCOPY, HASH_PARTITION,
     HASH_REMOVE, HASH_SEGMENT, HASH_SEQ_STATUS, HASH_SHARED_MEM, HASH_STRINGS, DEF_DIRSIZE,
     DEF_SEGSIZE, DEF_SEGSIZE_SHIFT, NO_MAX_DSIZE, NUM_FREELISTS,
@@ -170,20 +171,34 @@ fn dyna_string_hash(key: &[u8], keysize: Size) -> u32 {
     hashfn::hash_bytes(&key[..len])
 }
 
+// C's default match is memcmp; dynahash only tests == 0, so equality (one
+// bcmp) replaces the three-way compare (divergence: nonzero result is 1).
 fn blob_compare(key1: &[u8], key2: &[u8], keysize: Size) -> i32 {
-    match key1[..keysize].cmp(&key2[..keysize]) {
-        core::cmp::Ordering::Equal => 0,
-        core::cmp::Ordering::Less => -1,
-        core::cmp::Ordering::Greater => 1,
+    debug_assert!(key1.len() >= keysize && key2.len() >= keysize);
+    // SAFETY: hsearch contract — both key buffers span keysize bytes.
+    unsafe {
+        (core::slice::from_raw_parts(key1.as_ptr(), keysize)
+            != core::slice::from_raw_parts(key2.as_ptr(), keysize)) as i32
     }
 }
 
+// strlcpy(dst, src, keysize) shape, 8 bytes at a time (C links libc strlcpy;
+// a byte loop loses the instruction gate). May store src bytes past the NUL
+// within the same 8-byte word — invisible to strncmp/strlen-bounded readers.
 fn strlcpy_key(dst: &mut [u8], src: &[u8], keysize: Size) {
     if keysize == 0 {
         return;
     }
     let limit = keysize - 1;
     let mut i = 0usize;
+    while i + 8 <= limit {
+        let v = u64::from_le_bytes(src[i..i + 8].try_into().unwrap());
+        dst[i..i + 8].copy_from_slice(&v.to_le_bytes());
+        if zero_byte_mask(v) != 0 {
+            return;
+        }
+        i += 8;
+    }
     while i < limit {
         let c = src[i];
         dst[i] = c;
@@ -196,7 +211,10 @@ fn strlcpy_key(dst: &mut [u8], src: &[u8], keysize: Size) {
 }
 
 fn mem_copy(dst: &mut [u8], src: &[u8], keysize: Size) {
-    dst[..keysize].copy_from_slice(&src[..keysize]);
+    debug_assert!(dst.len() >= keysize && src.len() >= keysize);
+    // SAFETY: hsearch contract — both buffers span keysize bytes; the entry
+    // key never overlaps the probe key.
+    unsafe { ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr(), keysize) };
 }
 
 fn uint32_hash(key: &[u8], _keysize: Size) -> u32 {
@@ -208,10 +226,17 @@ pub fn hash_create(tabname: &str, nelem: i64, info: &HASHCTL, flags: i32) -> PgR
     debug_assert!(info.keysize > 0);
     debug_assert!(info.entrysize >= info.keysize);
 
-    if flags & HASH_SHARED_MEM != 0 {
-        // Real shmem segments arrive with the threads-as-backends model; a
-        // silent local fallback would corrupt cross-backend semantics.
-        panic!("dynahash: HASH_SHARED_MEM not implemented (table \"{tabname}\")");
+    if flags & HASH_SHARED_MEM != 0 && flags & HASH_FIXED_SIZE == 0 {
+        // One process = one address space, so a shared table lives on the
+        // ordinary heap — but growth allocates through the table's private
+        // (single-threaded) MemoryContext, so only fully preallocated shared
+        // tables are thread-safe under the partition-lock protocol.
+        panic!("dynahash: HASH_SHARED_MEM requires HASH_FIXED_SIZE (table \"{tabname}\")");
+    }
+    if flags & HASH_ATTACH != 0 {
+        // Attach re-finds an existing table by name via the shmem index; that
+        // layer (ShmemInitHash) owns attach semantics in this port.
+        panic!("dynahash: HASH_ATTACH not supported (table \"{tabname}\")");
     }
 
     let context = if flags & HASH_CONTEXT != 0 {
@@ -297,7 +322,7 @@ unsafe fn hash_create_in(
     (*hashp).hctl = ptr::null_mut();
     (*hashp).dir = ptr::null_mut();
     (*hashp).hcxt = cxp as *mut u8;
-    (*hashp).isshared = false;
+    (*hashp).isshared = flags & HASH_SHARED_MEM != 0;
 
     let hdr = hash_alloc(hashp, size_of::<HASHHDR>());
     if hdr.is_null() {

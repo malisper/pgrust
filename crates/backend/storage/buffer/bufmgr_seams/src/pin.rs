@@ -51,6 +51,15 @@ impl BufferPin {
         core::mem::forget(self);
     }
 
+    /// Hand the pin's ownership to a raw slot (e.g. BTScanPosData.buf); the
+    /// slot's owner must balance with `adopt` + `release`.
+    #[inline]
+    pub fn into_buffer(self) -> Buffer {
+        let b = self.buffer;
+        core::mem::forget(self);
+        b
+    }
+
     #[inline]
     pub fn lock_share(&self) -> PgResult<ContentLockGuard<'_>> {
         lock_buffer::call(self.buffer, BUFFER_LOCK_SHARE)?;
