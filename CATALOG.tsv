@@ -109,7 +109,7 @@ backend-access-spgist-core	*/spgdoinsert.c,*/spgkdtreeproc.c,*/spgquadtreeproc.c
 backend-access-spgist-entry	*/spgproc.c,*/spgscan.c	combined-into:backend-access-spgist-core			fabled:backend-access-spgist-core
 backend-access-spgist-insert	*/spginsert.c	combined-into:backend-access-spgist-core			fabled:backend-access-spgist-core
 backend-access-table-table	src/backend/access/table/table.c	ported	table	cold	fabled:crates/backend/access/table/table (uncataloged in fabled - gap reconciled); m1-spine slot 22; per-open not per-tuple; table_close = RAII relation.close (fabled by-OID close workaround deleted); seams: relation.c owners + pg_class errdetail; 8 tests, density 0.9%
-backend-access-tableam	*/tableam.c	todo			fabled:backend-access-table-tableam; m1-spine
+backend-access-tableam	*/tableam.c	ported	tableam	cold	fabled:backend-access-table-tableam; m1-spine; TableAm enum replaces the 45-fn vtable - asm-proven zero blr in every table_* wrapper; rs_am carrier resolve-once at scan_begin; owns tableam.h vocab until heapam hoists it; per-tuple entries bench with heapam-core; 8 tests, density 4.9%
 backend-access-tablesample-core	*/bernoulli.c,*/system.c,*/tablesample.c	todo			fabled:backend-access-tablesample-core; m1-dep(stub-ok)
 backend-access-transam-clog	src/backend/access/transam/clog.c	todo			fabled:backend-access-transam-clog; m1-spine(boot)
 backend-access-transam-commit-ts	src/backend/access/transam/commit_ts.c	todo			fabled:backend-access-transam-commit-ts; m1-dep(stub-ok)
