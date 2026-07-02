@@ -27,6 +27,35 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // die (postgres.c) — SIGTERM's thread-model rendering: flag setter run on
+    // the target backend's own thread; Err is the single-user immediate
+    // ProcessInterrupts leg.
+    pub fn die() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    // StatementCancelHandler (postgres.c) — SIGINT's thread-model rendering;
+    // must run on the target backend's own thread (flags are thread-local).
+    pub fn statement_cancel_handler()
+);
+
+seam_core::seam!(
+    // quickdie (postgres.c) — SIGQUIT rendering; exits the process.
+    pub fn quickdie() -> !
+);
+
+seam_core::seam!(
+    // FloatExceptionHandler (postgres.c); always Err (ereport ERROR).
+    pub fn float_exception_handler() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    // HandleRecoveryConflictInterrupt(reason) (postgres.c); u32 is a
+    // ProcSignalReason discriminant (this decl crate stays types-lean).
+    pub fn handle_recovery_conflict_interrupt(reason: u32)
+);
+
+seam_core::seam!(
     // ResetUsage (postgres.c).
     pub fn reset_usage()
 );
