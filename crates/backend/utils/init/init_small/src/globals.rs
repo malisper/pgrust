@@ -7,6 +7,7 @@ use types_core::{
     DATEORDER_MDY, INTSTYLE_POSTGRES, INVALID_PROC_NUMBER, MAXPGPATH, MAX_CANCEL_KEY_LENGTH,
     PG_DIR_MODE_OWNER, USE_ISO_DATES,
 };
+use types_storage::latch::LatchHandle;
 
 // One backend = one thread; every globals.c variable is a per-backend
 // `thread_local!`, const-init, !needs_drop (AGENTS.md rule 10).
@@ -60,6 +61,9 @@ scalar_global! {
     CRIT_SECTION_COUNT, CritSectionCount, SetCritSectionCount, uint32, 0;
 
     MY_PROC_PID, MyProcPid, SetMyProcPid, i32, 0;
+    // `Latch *MyLatch`: None is C's NULL; miscinit points it at the process-
+    // local latch or PGPROC's procLatch. Storage lives in the latch unit.
+    MY_LATCH, MyLatch, SetMyLatch, Option<LatchHandle>, None;
     MY_START_TIME, MyStartTime, SetMyStartTime, pg_time_t, 0;
     MY_START_TIMESTAMP, MyStartTimestamp, SetMyStartTimestamp, TimestampTz, 0;
     MY_CANCEL_KEY, MyCancelKey, SetMyCancelKey, [uint8; MAX_CANCEL_KEY_LENGTH],

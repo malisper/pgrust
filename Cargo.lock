@@ -193,6 +193,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "latch"
+version = "0.0.0"
+dependencies = [
+ "init_small",
+ "latch_seams",
+ "lmgr_proc_seams",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "waiteventset_seams",
+]
+
+[[package]]
 name = "latch_seams"
 version = "0.0.0"
 dependencies = [
@@ -704,6 +717,16 @@ name = "waitevent_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+]
+
+[[package]]
+name = "waiteventset_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_storage",
 ]
 
 [[package]]

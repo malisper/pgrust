@@ -60,7 +60,7 @@ pub struct Latch {
 }
 
 impl Latch {
-    pub fn new(is_shared: bool, owner_pid: i32) -> Latch {
+    pub const fn new(is_shared: bool, owner_pid: i32) -> Latch {
         Latch {
             is_set: AtomicI32::new(0),
             maybe_sleeping: AtomicI32::new(0),

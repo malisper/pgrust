@@ -46,3 +46,9 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn pg_semaphore_unlock(procno: ProcNumber)
 );
+
+seam_core::seam!(
+    // &ProcGlobal->allProcs[procno].procLatch — shmem is process-lifetime.
+    // Reachable from SetLatch in signal handlers: impl must be allocation-free.
+    pub fn proc_latch(procno: ProcNumber) -> &'static types_storage::latch::Latch
+);

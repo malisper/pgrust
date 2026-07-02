@@ -1,15 +1,14 @@
-use alloc::boxed::Box;
-use alloc::collections::VecDeque;
-use alloc::vec::Vec;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering,
+};
 
 use ::types_core::{
     uint16, uint32, uint64, uint8, LocalTransactionId, Oid, ProcNumber, RelFileNumber, Size,
     TransactionId, XLogRecPtr, XidStatus, INVALID_PROC_NUMBER,
 };
 
-use crate::ilist::{dlist_head, dlist_node};
+use crate::ilist::dlist_head;
 use crate::latch::Latch;
 use crate::lock::{LOCKMASK, LOCKMODE, LOCKTAG};
 
