@@ -1,0 +1,290 @@
+// printtup.c — the DestRemote/DestRemoteExecute per-row output path (PG 18.3).
+#![allow(non_snake_case)]
+
+use core::ffi::CStr;
+use std::rc::Rc;
+
+use ::datum::Datum;
+use ::mcx::{Mcx, PgVec};
+use ::pqformat::{
+    pq_beginmessage_reuse, pq_endmessage_reuse, pq_sendbytes, pq_sendcountedtext, pq_sendint16,
+    pq_sendint32, pq_writeint16, pq_writeint32, pq_writestring,
+};
+use ::pquery_seams::TargetEntrySummary;
+use ::stringinfo::StringInfo;
+use ::types_core::{primitive::InvalidOid, Oid, NAMEDATALEN};
+use ::types_dest::CommandDest;
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
+use ::types_fmgr::{function_call1_coll, FmgrInfo, PackedVarlena};
+use ::types_portal::Portal;
+use ::types_slot::SlotData;
+use ::types_tuple::TupleDescData;
+
+#[cfg(test)]
+mod tests;
+
+const PQMSG_ROW_DESCRIPTION: u8 = b'T';
+const PQMSG_DATA_ROW: u8 = b'D';
+// MAX_CONVERSION_GROWTH (mb/pg_wchar.h).
+const MAX_CONVERSION_GROWTH: usize = 4;
+
+pub struct PrinttupAttrInfo {
+    pub typoutput: Oid,
+    pub typsend: Oid,
+    pub typisvarlena: bool,
+    pub format: i16,
+    pub finfo: FmgrInfo,
+}
+
+pub struct DrPrinttup<'mcx> {
+    pub mydest: CommandDest,
+    pub sendDescrip: bool,
+    portal: Option<Portal<'mcx>>,
+    buf: Option<StringInfo<'mcx>>,
+    // C compares the TupleDesc pointer; the Rc's address is the same token.
+    attrinfo: usize,
+    nattrs: i32,
+    myinfo: Option<PgVec<'mcx, PrinttupAttrInfo>>,
+    conv_needed: bool,
+}
+
+pub fn printtup_create_DR<'mcx>(dest: CommandDest) -> DrPrinttup<'mcx> {
+    DrPrinttup {
+        mydest: dest,
+        sendDescrip: dest == CommandDest::Remote,
+        portal: None,
+        buf: None,
+        attrinfo: 0,
+        nattrs: 0,
+        myinfo: None,
+        conv_needed: false,
+    }
+}
+
+pub fn SetRemoteDestReceiverParams<'mcx>(myState: &mut DrPrinttup<'mcx>, portal: Portal<'mcx>) {
+    debug_assert!(matches!(
+        myState.mydest,
+        CommandDest::Remote | CommandDest::RemoteExecute
+    ));
+    myState.portal = Some(portal);
+}
+
+impl<'mcx> DrPrinttup<'mcx> {
+    pub fn startup(
+        &mut self,
+        mcx: Mcx<'mcx>,
+        _operation: i32,
+        typeinfo: &TupleDescData<'_>,
+    ) -> PgResult<()> {
+        // Reused across all rows; C's per-row tmpcontext has no consumer under
+        // the current out-fn ABI (docs/optimizations/printtup-parity.md).
+        let mut buf = StringInfo::new_in(mcx)?;
+        if self.sendDescrip {
+            let portal = self
+                .portal
+                .as_ref()
+                .expect("printtup_startup: no portal set")
+                .borrow();
+            let targetlist = pquery_seams::fetch_portal_target_list::call(mcx, &portal)?;
+            let formats = (!portal.formats.is_empty()).then_some(&portal.formats[..]);
+            SendRowDescriptionMessage(&mut buf, typeinfo, &targetlist, formats)?;
+        }
+        self.buf = Some(buf);
+        Ok(())
+    }
+
+    fn prepare_info(
+        &mut self,
+        typeinfo: &TupleDescData<'_>,
+        token: usize,
+        numAttrs: i32,
+    ) -> PgResult<()> {
+        self.myinfo = None;
+        self.attrinfo = token;
+        self.nattrs = numAttrs;
+        if numAttrs <= 0 {
+            return Ok(());
+        }
+        // Conversion-needed resolved once here, never in the row loop
+        // (strategy lever 2; the pqformat benchmark record's watch item).
+        self.conv_needed = mbutils_seams::server_to_client_conversion_needed::call();
+
+        let mcx = self
+            .buf
+            .as_ref()
+            .expect("printtup before printtup_startup")
+            .allocator();
+        let portal = self
+            .portal
+            .as_ref()
+            .expect("printtup: no portal set")
+            .borrow();
+        let formats = (!portal.formats.is_empty()).then_some(&portal.formats[..]);
+        // Droppy payload (FmgrInfo's fn_extra), so PgVec::new_in rather than
+        // the !needs_drop capacity helper; resolve-once, never per row.
+        let mut info: PgVec<'mcx, PrinttupAttrInfo> = PgVec::new_in(mcx);
+        info.try_reserve_exact(numAttrs as usize)
+            .map_err(|_| mcx.oom(numAttrs as usize * core::mem::size_of::<PrinttupAttrInfo>()))?;
+        for i in 0..numAttrs as usize {
+            let format = formats.map_or(0, |f| f[i]);
+            let attr = typeinfo.attr(i);
+            let entry = match format {
+                0 => {
+                    let (typoutput, typisvarlena) =
+                        lsyscache_seams::get_type_output_info::call(attr.atttypid)?;
+                    PrinttupAttrInfo {
+                        typoutput,
+                        typsend: InvalidOid,
+                        typisvarlena,
+                        format,
+                        finfo: fmgr_seams::fmgr_info::call(typoutput)?,
+                    }
+                }
+                1 => {
+                    let (typsend, typisvarlena) =
+                        lsyscache_seams::get_type_binary_output_info::call(attr.atttypid)?;
+                    PrinttupAttrInfo {
+                        typoutput: InvalidOid,
+                        typsend,
+                        typisvarlena,
+                        format,
+                        finfo: fmgr_seams::fmgr_info::call(typsend)?,
+                    }
+                }
+                _ => return Err(unsupported_format_code(format)),
+            };
+            info.push(entry);
+        }
+        self.myinfo = Some(info);
+        Ok(())
+    }
+
+    // C: printtup(); false never returned (C returns true unconditionally).
+    pub fn receive_slot(&mut self, slot: &mut SlotData<'mcx>) -> PgResult<bool> {
+        {
+            let desc = slot
+                .base()
+                .tts_tupleDescriptor
+                .as_ref()
+                .expect("printtup: slot without descriptor");
+            let token = Rc::as_ptr(desc) as usize;
+            if self.attrinfo != token || self.nattrs != desc.natts {
+                self.prepare_info(desc, token, desc.natts)?;
+            }
+        }
+        exectuples::slot_getallattrs(slot);
+
+        let base = slot.base();
+        let buf = self.buf.as_mut().expect("printtup before printtup_startup");
+        let myinfo: &mut [PrinttupAttrInfo] = match &mut self.myinfo {
+            Some(v) => &mut v[..],
+            None => &mut [],
+        };
+        let natts = self.nattrs as usize;
+
+        pq_beginmessage_reuse(buf, PQMSG_DATA_ROW);
+        pq_sendint16(buf, natts as u16)?;
+
+        for i in 0..natts {
+            if base.tts_isnull[i] {
+                pq_sendint32(buf, (-1i32) as u32)?;
+                continue;
+            }
+            let attr = base.tts_values[i];
+            let thisState = &mut myinfo[i];
+
+            if thisState.format == 0 {
+                let out = output_function_call(&mut thisState.finfo, attr)?;
+                // SAFETY: text output fns return a NUL-terminated cstring
+                // datum (the contract C's DatumGetCString trusts).
+                let s =
+                    unsafe { CStr::from_ptr(out.as_usize() as *const core::ffi::c_char) }
+                        .to_bytes();
+                if self.conv_needed {
+                    pq_sendcountedtext(buf, s)?;
+                } else {
+                    pq_sendint32(buf, s.len() as u32)?;
+                    buf.append_bytes_nt(s)?;
+                }
+            } else {
+                let out = output_function_call(&mut thisState.finfo, attr)?;
+                // SAFETY: send fns return an untoasted bytea image (C's
+                // DatumGetByteaP); external/compressed panics in from_ptr.
+                let v = unsafe { PackedVarlena::from_ptr(out.as_usize() as *const u8) };
+                let data = v.data();
+                pq_sendint32(buf, data.len() as u32)?;
+                pq_sendbytes(buf, data)?;
+            }
+        }
+
+        pq_endmessage_reuse(buf)?;
+        Ok(true)
+    }
+
+    pub fn shutdown(&mut self) {
+        self.myinfo = None;
+        self.attrinfo = 0;
+        self.buf = None;
+    }
+}
+
+// C: OutputFunctionCall/SendFunctionCall == FunctionCall1 over the resolved
+// carrier; one stack fcinfo, args written in place, isnull checked.
+#[inline]
+fn output_function_call(finfo: &mut FmgrInfo, val: Datum) -> PgResult<Datum> {
+    function_call1_coll(finfo, InvalidOid, val)
+}
+
+pub fn SendRowDescriptionMessage(
+    buf: &mut StringInfo<'_>,
+    typeinfo: &TupleDescData<'_>,
+    targetlist: &[TargetEntrySummary],
+    formats: Option<&[i16]>,
+) -> PgResult<()> {
+    let natts = typeinfo.natts as usize;
+    pq_beginmessage_reuse(buf, PQMSG_ROW_DESCRIPTION);
+    pq_sendint16(buf, natts as u16)?;
+
+    // C preallocates the full message so the unchecked pq_write* inlines run;
+    // here the same reserve makes every write's grow check a dead branch.
+    buf.enlarge((NAMEDATALEN as usize * MAX_CONVERSION_GROWTH + 4 + 2 + 4 + 2 + 4 + 2) * natts)?;
+
+    let mut tlist_item = 0usize;
+    for i in 0..natts {
+        let att = typeinfo.attr(i);
+        let (atttypid, atttypmod) =
+            lsyscache_seams::get_base_type_and_typmod::call(att.atttypid, att.atttypmod)?;
+
+        while targetlist.get(tlist_item).is_some_and(|t| t.resjunk) {
+            tlist_item += 1;
+        }
+        let (resorigtbl, resorigcol) = match targetlist.get(tlist_item) {
+            Some(tle) => {
+                tlist_item += 1;
+                (tle.resorigtbl, tle.resorigcol)
+            }
+            None => (0, 0),
+        };
+        let format = formats.map_or(0, |f| f[i]);
+
+        pq_writestring(buf, att.attname.name_str())?;
+        pq_writeint32(buf, resorigtbl);
+        pq_writeint16(buf, resorigcol as u16);
+        pq_writeint32(buf, atttypid);
+        pq_writeint16(buf, att.attlen as u16);
+        pq_writeint32(buf, atttypmod as u32);
+        pq_writeint16(buf, format as u16);
+    }
+
+    pq_endmessage_reuse(buf)
+}
+
+#[cold]
+#[inline(never)]
+fn unsupported_format_code(format: i16) -> Box<PgError> {
+    PgError::error(format!("unsupported format code: {format}"))
+        .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
+        .into()
+}
+
+pub fn init_seams() {}

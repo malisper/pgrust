@@ -2,12 +2,10 @@ use types_core::Oid;
 use types_error::PgResult;
 
 seam_core::seam!(
-    // getTypeOutputInfo (lsyscache.c): (typoutput, typisvarlena).
     pub fn get_type_output_info(type_oid: Oid) -> PgResult<(Oid, bool)>
 );
 
 seam_core::seam!(
-    // getTypeBinaryOutputInfo (lsyscache.c): (typsend, typisvarlena).
     pub fn get_type_binary_output_info(type_oid: Oid) -> PgResult<(Oid, bool)>
 );
 

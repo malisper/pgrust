@@ -104,6 +104,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend_startup"
+version = "0.1.0"
+
+[[package]]
 name = "backend_status_seams"
 version = "0.0.0"
 dependencies = [
@@ -143,6 +147,20 @@ dependencies = [
 [[package]]
 name = "cache_syscache"
 version = "0.1.0"
+dependencies = [
+ "catcache",
+ "datum",
+ "heaptuple",
+ "init_small",
+ "inval",
+ "lock_seams",
+ "mcx",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "types_tuple",
+]
 
 [[package]]
 name = "catalog"
@@ -428,16 +446,35 @@ dependencies = [
 ]
 
 [[package]]
-name = "genam_seams"
-version = "0.0.0"
+name = "genam"
+version = "0.1.0"
 dependencies = [
- "seam_core",
+ "datum",
+ "elog",
+ "exectuples",
+ "heaptuple",
+ "indexam",
+ "init_small",
+ "mcx",
+ "miscinit",
+ "procarray_seams",
+ "snapmgr_seams",
+ "tableam",
+ "transam_seams",
  "types_core",
  "types_error",
+ "types_nbtree",
  "types_rel",
  "types_scan",
+ "types_slot",
+ "types_snapshot",
  "types_tuple",
+ "xact",
 ]
+
+[[package]]
+name = "genam_seams"
+version = "0.0.0"
 
 [[package]]
 name = "guc"
@@ -575,6 +612,7 @@ dependencies = [
  "miscinit_seams",
  "types_core",
  "types_error",
+ "types_startup",
  "types_storage",
 ]
 
@@ -680,6 +718,10 @@ dependencies = [
  "seam_core",
  "types_storage",
 ]
+
+[[package]]
+name = "launch_backend"
+version = "0.1.0"
 
 [[package]]
 name = "launcher_seams"
@@ -929,12 +971,14 @@ dependencies = [
  "ipc_seams",
  "latch",
  "libc",
+ "libpq_pqsignal",
  "lmgr_proc",
  "mcx",
  "miscinit_seams",
  "pgstat_seams",
  "shmem_seams",
  "syscache_seams",
+ "timestamp_seams",
  "types_core",
  "types_error",
  "types_storage",
@@ -1148,6 +1192,13 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "postgres_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
 ]
 
 [[package]]
@@ -1427,6 +1478,20 @@ dependencies = [
 [[package]]
 name = "resowner"
 version = "0.1.0"
+dependencies = [
+ "datum",
+ "elog",
+ "hashfn",
+ "ipc_seams",
+ "lmgr_proc",
+ "mcx",
+ "resowner_portal_seams",
+ "resowner_seams",
+ "types_error",
+ "types_resowner",
+ "types_snapshot",
+ "types_storage",
+]
 
 [[package]]
 name = "resowner_portal_seams"
@@ -1645,9 +1710,11 @@ dependencies = [
 name = "snapmgr_seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam_core",
  "types_core",
  "types_error",
+ "types_snapshot",
 ]
 
 [[package]]
@@ -1671,6 +1738,13 @@ dependencies = [
 
 [[package]]
 name = "startup_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+]
+
+[[package]]
+name = "string_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
@@ -1823,6 +1897,7 @@ dependencies = [
  "mcx",
  "pqcomm_seams",
  "pqformat",
+ "printtup",
  "types_core",
  "types_dest",
  "types_error",
@@ -1993,6 +2068,7 @@ dependencies = [
 name = "types_nodes"
 version = "0.1.0"
 dependencies = [
+ "datum",
  "mcx",
  "types_core",
  "types_error",
@@ -2067,6 +2143,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "types_startup"
+version = "0.0.0"
+dependencies = [
+ "ip",
+ "types_core",
+]
+
+[[package]]
 name = "types_storage"
 version = "0.1.0"
 dependencies = [
@@ -2101,6 +2185,7 @@ dependencies = [
  "guc_tables",
  "mbutils_seams",
  "mcx",
+ "parser_small1",
  "pg_locale_seams",
  "pqformat",
  "stringinfo",
@@ -2108,6 +2193,7 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_tuple",
+ "wchar",
 ]
 
 [[package]]

@@ -115,6 +115,7 @@ members = [
     "crates/backend/utils/adt/int8",
     "crates/backend/access/index/indexam_seams",
     "crates/backend/access/index/indexam",
+    "crates/backend/access/index/genam",
     "crates/backend/access/transam/xlogreader_seams",
     "crates/backend/access/transam/timeline_seams",
     "crates/backend/access/transam/xlogrecovery_seams",
@@ -199,6 +200,11 @@ members = [
     "crates/backend/utils/adt/scalar_seams",
     "crates/backend/catalog/aclchk_seams",
     "crates/backend/utils/misc/guc",
+    "crates/_support/types/types_startup",
+    "crates/backend/tcop/postgres_seams",
+    "crates/common/string_seams",
+    "crates/backend/tcop/backend_startup",
+    "crates/backend/postmaster/launch_backend",
 ]
 
 [workspace.package]

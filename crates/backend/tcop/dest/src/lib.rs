@@ -5,8 +5,8 @@ use ::mcx::Mcx;
 use ::types_core::CommandTag;
 use ::types_dest::CommandDest;
 use ::types_error::PgResult;
-use ::types_portal::{QueryCompletion, COMPLETION_TAG_BUFSIZE};
-use ::types_slot::TupleTableSlot;
+use ::types_portal::{Portal, QueryCompletion, COMPLETION_TAG_BUFSIZE};
+use ::types_slot::SlotData;
 use ::types_tuple::TupleDescData;
 
 #[cfg(test)]
@@ -20,30 +20,34 @@ const PQMSG_EMPTY_QUERY_RESPONSE: u8 = b'I';
 // (`(DR_printtup *) self`); the receiver set is closed (one constructor per
 // CommandDest in CreateDestReceiver's switch), so dispatch is an enum match
 // (rule 4): receive_slot is per-row hot at M1 and each arm is a direct call.
-// When printtup lands, PrintTup grows its DR_printtup state —
-// `PrintTup(printtup::DrPrinttup<'mcx>)`, lifting the enum to
-// `DestReceiver<'mcx>` — and these arms call into it; other owners likewise.
-pub enum DestReceiver {
-    DoNothing,             // donothingDR (DestNone); fully functional
-    DebugTup,              // debugtupDR shell; callbacks in printtup.c
-    PrintTup(CommandDest), // printtup_create_DR(Remote|RemoteExecute) shell
-    PrintSimple,           // printsimpleDR shell; callbacks in printsimple.c
-    SpiPrintTup,           // spi_printtupDR shell; callbacks in spi.c
+pub enum DestReceiver<'mcx> {
+    DoNothing,                             // donothingDR (DestNone); fully functional
+    DebugTup,                              // debugtupDR shell; callbacks in printtup.c
+    PrintTup(printtup::DrPrinttup<'mcx>),  // printtup_create_DR(Remote|RemoteExecute)
+    PrintSimple,                           // printsimpleDR shell; callbacks in printsimple.c
+    SpiPrintTup,                           // spi_printtupDR shell; callbacks in spi.c
 }
 
-impl DestReceiver {
+impl<'mcx> DestReceiver<'mcx> {
     // false means "stop early, as if the scan ended".
     #[inline]
-    pub fn receive_slot(&mut self, _slot: &mut TupleTableSlot<'_>) -> PgResult<bool> {
+    pub fn receive_slot(&mut self, slot: &mut SlotData<'mcx>) -> PgResult<bool> {
         match self {
             DestReceiver::DoNothing => Ok(true),
+            DestReceiver::PrintTup(dr) => dr.receive_slot(slot),
             other => other.unported("receiveSlot"),
         }
     }
 
-    pub fn startup(&mut self, _operation: i32, _typeinfo: &TupleDescData<'_>) -> PgResult<()> {
+    pub fn startup(
+        &mut self,
+        mcx: Mcx<'mcx>,
+        operation: i32,
+        typeinfo: &TupleDescData<'_>,
+    ) -> PgResult<()> {
         match self {
             DestReceiver::DoNothing => Ok(()),
+            DestReceiver::PrintTup(dr) => dr.startup(mcx, operation, typeinfo),
             other => other.unported("rStartup"),
         }
     }
@@ -54,7 +58,10 @@ impl DestReceiver {
             | DestReceiver::DebugTup
             | DestReceiver::PrintSimple
             | DestReceiver::SpiPrintTup => Ok(()),
-            other @ DestReceiver::PrintTup(_) => other.unported("rShutdown"),
+            DestReceiver::PrintTup(dr) => {
+                dr.shutdown();
+                Ok(())
+            }
         }
     }
 
@@ -65,7 +72,7 @@ impl DestReceiver {
         match self {
             DestReceiver::DoNothing => CommandDest::None,
             DestReceiver::DebugTup => CommandDest::Debug,
-            DestReceiver::PrintTup(dest) => *dest,
+            DestReceiver::PrintTup(dr) => dr.mydest,
             DestReceiver::PrintSimple => CommandDest::RemoteSimple,
             DestReceiver::SpiPrintTup => CommandDest::Spi,
         }
@@ -81,16 +88,27 @@ impl DestReceiver {
     }
 }
 
+// SetRemoteDestReceiverParams (printtup.c) at the enum boundary: C downcasts
+// the DestReceiver*, the match is the same demux.
+pub fn SetRemoteDestReceiverParams<'mcx>(receiver: &mut DestReceiver<'mcx>, portal: Portal<'mcx>) {
+    match receiver {
+        DestReceiver::PrintTup(dr) => printtup::SetRemoteDestReceiverParams(dr, portal),
+        _ => panic!("SetRemoteDestReceiverParams: not a printtup receiver"),
+    }
+}
+
 // DestReceiver *None_Receiver: C's shared static donothingDR.
-pub const NONE_RECEIVER: DestReceiver = DestReceiver::DoNothing;
+pub const NONE_RECEIVER: DestReceiver<'static> = DestReceiver::DoNothing;
 
 pub fn BeginCommand(_commandTag: CommandTag, _dest: CommandDest) {
     // Nothing to do at present
 }
 
-pub fn CreateDestReceiver(dest: CommandDest) -> DestReceiver {
+pub fn CreateDestReceiver<'mcx>(dest: CommandDest) -> DestReceiver<'mcx> {
     match dest {
-        CommandDest::Remote | CommandDest::RemoteExecute => DestReceiver::PrintTup(dest),
+        CommandDest::Remote | CommandDest::RemoteExecute => {
+            DestReceiver::PrintTup(printtup::printtup_create_DR(dest))
+        }
         CommandDest::RemoteSimple => DestReceiver::PrintSimple,
         CommandDest::None => DestReceiver::DoNothing,
         CommandDest::Debug => DestReceiver::DebugTup,

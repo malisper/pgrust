@@ -88,13 +88,20 @@ fn empty_desc(mcx: mcx::Mcx<'_>) -> TupleDescData<'_> {
     }
 }
 
+fn virtual_slot(mcx: mcx::Mcx<'_>) -> SlotData<'_> {
+    SlotData::Virtual(types_slot::VirtualTupleTableSlot {
+        base: types_slot::TupleTableSlot::new_in(mcx, types_slot::TupleSlotKind::Virtual),
+        data: mcx::PgVec::new_in(mcx),
+    })
+}
+
 #[test]
 fn donothing_receiver_is_functional() {
     let ctx = setup();
     let mut r = CreateDestReceiver(CommandDest::None);
     let desc = empty_desc(ctx.mcx());
-    let mut slot = TupleTableSlot::new_in(ctx.mcx(), types_slot::TupleSlotKind::Virtual);
-    r.startup(1, &desc).unwrap();
+    let mut slot = virtual_slot(ctx.mcx());
+    r.startup(ctx.mcx(), 1, &desc).unwrap();
     assert!(r.receive_slot(&mut slot).unwrap());
     r.shutdown().unwrap();
     r.destroy();
@@ -104,10 +111,11 @@ fn donothing_receiver_is_functional() {
 #[test]
 fn shell_receivers_panic_on_dispatch() {
     let ctx = setup();
+    // Remote panics too: printtup's receive_slot on a descriptor-less slot.
     for dest in [CommandDest::Debug, CommandDest::Remote, CommandDest::RemoteSimple] {
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut r = CreateDestReceiver(dest);
-            let mut slot = TupleTableSlot::new_in(ctx.mcx(), types_slot::TupleSlotKind::Virtual);
+            let mut slot = virtual_slot(ctx.mcx());
             let _ = r.receive_slot(&mut slot);
         }))
         .is_err());
