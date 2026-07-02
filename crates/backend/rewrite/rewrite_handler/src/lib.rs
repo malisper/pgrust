@@ -133,8 +133,8 @@ fn fireRIRrules<'mcx>(mcx: Mcx<'mcx>, parsetree: &Query<'mcx>) -> PgResult<()> {
 
     if parsetree.hasSubLinks {
         panic!(
-            "fireRIRrules (rewriteHandler.c): sublink descent needs query_tree_walker \
-             (backend-nodes nodeFuncs.c unported)"
+            "fireRIRrules (rewriteHandler.c): sublink descent needs the walker's \
+             T_SubLink arm (SubLink vocabulary unported)"
         );
     }
 
@@ -225,8 +225,8 @@ pub fn AcquireRewriteLocks<'mcx>(
 
     if parsetree.hasSubLinks {
         panic!(
-            "AcquireRewriteLocks (rewriteHandler.c): sublink descent needs \
-             query_tree_walker (backend-nodes nodeFuncs.c unported)"
+            "AcquireRewriteLocks (rewriteHandler.c): sublink descent needs the \
+             walker's T_SubLink arm (SubLink vocabulary unported)"
         );
     }
 

@@ -1,8 +1,8 @@
 //! optimizer/util/clauses.c — clause inspection/classification over the
 //! opaque `Node` vocabulary, plus the eval_const_expressions fold core.
-//! Hosts the nodeFuncs.c walker/mutator engine until backend-nodes-core
-//! lands (walker.rs documents the divergences). Unported-vocab arms panic
-//! loud; the executor-evaluation leg rides clauses_seams::evaluate_expr.
+//! The nodeFuncs.c walker/mutator engine lives in `nodes_core`. Unported-
+//! vocab arms panic loud; the executor-evaluation leg rides
+//! clauses_seams::evaluate_expr.
 
 pub mod classify;
 pub mod fold;

@@ -382,14 +382,13 @@ pub fn finish_xact_command() -> PgResult<()> {
 }
 
 pub(crate) fn IsTransactionExitStmt(parsetree: Option<Node<'_>>) -> bool {
-    match parsetree {
-        Some(node) if node.node_tag() == NodeTag::T_TransactionStmt => {
-            panic!(
-                "IsTransactionExitStmt (postgres.c:2857): TransactionStmt payload \
-                 (kind) not yet in types_nodes (grammar lane)"
-            )
-        }
-        _ => false,
+    use types_nodes::parsenodes::TransactionStmtKind::*;
+    match parsetree.and_then(|node| node.as_transaction_stmt()) {
+        Some(stmt) => matches!(
+            stmt.kind,
+            TRANS_STMT_COMMIT | TRANS_STMT_PREPARE | TRANS_STMT_ROLLBACK | TRANS_STMT_ROLLBACK_TO
+        ),
+        None => false,
     }
 }
 

@@ -1,5 +1,5 @@
 //! optimizer/util var.c — Var-node collection/inspection walkers over the
-//! opaque `Node` vocabulary (the engine lives in `clauses::walker`).
+//! opaque `Node` vocabulary (the engine lives in `nodes_core`).
 //! Unit rows appendinfo.c/paramassign.c/tlist.c have their own catalog rows;
 //! this crate is the var.c half.
 

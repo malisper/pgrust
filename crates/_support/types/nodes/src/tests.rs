@@ -235,6 +235,48 @@ fn bms_basics() {
 }
 
 #[test]
+fn bms_next_prev_member_match_c_vectors() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    for (members, next_walk, prev_walk) in crate::bms_c_vectors::NEXT_MEMBER_VECTORS {
+        let mut b = Bitmapset::empty();
+        for &x in *members {
+            b.add_member(mcx, x).unwrap();
+        }
+        check_invariants(&b);
+        let mut fwd = Vec::new();
+        let mut x = -1;
+        while {
+            x = b.next_member(x);
+            x >= 0
+        } {
+            fwd.push(x);
+        }
+        assert_eq!(&fwd, next_walk);
+        let mut back = Vec::new();
+        let mut x = -1;
+        while {
+            x = b.prev_member(x);
+            x >= 0
+        } {
+            back.push(x);
+        }
+        assert_eq!(&back, prev_walk);
+    }
+
+    let mut b = Bitmapset::empty();
+    for x in [0, 63, 64, 127, 129, 300] {
+        b.add_member(mcx, x).unwrap();
+    }
+    for &(p, next, prev) in crate::bms_c_vectors::NEXT_FROM_VECTORS {
+        assert_eq!(b.next_member(p), next, "next_member({p})");
+        if p == -1 || p > 0 {
+            assert_eq!(b.prev_member(p), prev, "prev_member({p})");
+        }
+    }
+}
+
+#[test]
 fn bms_property_vs_reference() {
     let ctx = MemoryContext::new_bump("t");
     let mcx = ctx.mcx();
@@ -348,4 +390,470 @@ fn bms_property_vs_reference() {
             if ra.len() == 1 { ra.first().copied() } else { None }
         );
     }
+}
+
+fn strip_c_comments(src: &str) -> StdString {
+    let bytes = src.as_bytes();
+    let mut out = StdString::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i += 2;
+            out.push(' ');
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
+fn strip_pg_node_attr(src: &str) -> StdString {
+    let mut out = StdString::new();
+    let mut rest = src;
+    while let Some(pos) = rest.find("pg_node_attr(") {
+        out.push_str(&rest[..pos]);
+        let tail = &rest[pos + "pg_node_attr(".len()..];
+        let mut depth = 1usize;
+        let mut end = 0;
+        for (j, ch) in tail.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = j + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn c_struct_fields(header: &str, name: &str) -> Vec<StdString> {
+    let start = header
+        .find(&std::format!("typedef struct {name}\n"))
+        .expect("struct present");
+    let body_start = header[start..].find('{').unwrap() + start + 1;
+    let end_marker = std::format!("}} {name};");
+    let body_end = header[body_start..].find(&end_marker).unwrap() + body_start;
+    let body = strip_pg_node_attr(&strip_c_comments(&header[body_start..body_end]));
+    let mut fields = Vec::new();
+    for decl in body.split(';') {
+        let decl = decl.trim();
+        if decl.is_empty() {
+            continue;
+        }
+        let last = decl.split_whitespace().last().unwrap();
+        let field = last.trim_start_matches('*');
+        if field == "type" {
+            continue;
+        }
+        fields.push(StdString::from(field));
+    }
+    fields
+}
+
+fn c_enum_values(header: &str, name: &str) -> Vec<(StdString, u32)> {
+    let start = header
+        .find(&std::format!("typedef enum {name}\n"))
+        .expect("enum present");
+    let body_start = header[start..].find('{').unwrap() + start + 1;
+    let end_marker = std::format!("}} {name};");
+    let body_end = header[body_start..].find(&end_marker).unwrap() + body_start;
+    let body = strip_pg_node_attr(&strip_c_comments(&header[body_start..body_end]));
+    let mut vals = Vec::new();
+    let mut next: u32 = 0;
+    for entry in body.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let (name, val) = match entry.split_once('=') {
+            Some((n, v)) => (n.trim(), v.trim().parse::<u32>().expect("numeric enum value")),
+            None => (entry, next),
+        };
+        next = val + 1;
+        vals.push((StdString::from(name), val));
+    }
+    vals
+}
+
+macro_rules! check_enum {
+    ($header:expr, $cname:literal, $ty:ident, [$($variant:ident),+ $(,)?]) => {{
+        let c = c_enum_values($header, $cname);
+        let rust: Vec<(&str, u32)> = std::vec![$((stringify!($variant), $ty::$variant as u32)),+];
+        assert_eq!(c.len(), rust.len(), "{} variant count", $cname);
+        for ((cn, cv), (rn, rv)) in c.iter().zip(rust.iter()) {
+            assert_eq!((cn.as_str(), *cv), (*rn, *rv), "{} variant", $cname);
+        }
+    }};
+}
+
+#[test]
+fn enum_values_match_c_headers() {
+    let nodes_h = include_str!("../vendor/nodes.h");
+    let parse_h = include_str!("../vendor/parsenodes.h");
+    let prim_h = include_str!("../vendor/primnodes.h");
+    use crate::nodes_enums::{CmdType, LimitOption};
+    use crate::parsenodes::{QuerySource, RTEKind, SetOperation};
+    use crate::primnodes::{CoercionForm, OverridingKind, ParamKind, VarReturningType};
+    use crate::rawnodes::A_Expr_Kind;
+    check_enum!(nodes_h, "CmdType", CmdType, [
+        CMD_UNKNOWN, CMD_SELECT, CMD_UPDATE, CMD_INSERT, CMD_DELETE, CMD_MERGE, CMD_UTILITY,
+        CMD_NOTHING,
+    ]);
+    check_enum!(nodes_h, "LimitOption", LimitOption, [
+        LIMIT_OPTION_COUNT, LIMIT_OPTION_WITH_TIES,
+    ]);
+    check_enum!(nodes_h, "JoinType", JoinType, [
+        JOIN_INNER, JOIN_LEFT, JOIN_FULL, JOIN_RIGHT, JOIN_SEMI, JOIN_ANTI, JOIN_RIGHT_SEMI,
+        JOIN_RIGHT_ANTI, JOIN_UNIQUE_OUTER, JOIN_UNIQUE_INNER,
+    ]);
+    check_enum!(parse_h, "QuerySource", QuerySource, [
+        QSRC_ORIGINAL, QSRC_PARSER, QSRC_INSTEAD_RULE, QSRC_QUAL_INSTEAD_RULE,
+        QSRC_NON_INSTEAD_RULE,
+    ]);
+    check_enum!(parse_h, "SetOperation", SetOperation, [
+        SETOP_NONE, SETOP_UNION, SETOP_INTERSECT, SETOP_EXCEPT,
+    ]);
+    check_enum!(parse_h, "RTEKind", RTEKind, [
+        RTE_RELATION, RTE_SUBQUERY, RTE_JOIN, RTE_FUNCTION, RTE_TABLEFUNC, RTE_VALUES, RTE_CTE,
+        RTE_NAMEDTUPLESTORE, RTE_RESULT, RTE_GROUP,
+    ]);
+    check_enum!(parse_h, "A_Expr_Kind", A_Expr_Kind, [
+        AEXPR_OP, AEXPR_OP_ANY, AEXPR_OP_ALL, AEXPR_DISTINCT, AEXPR_NOT_DISTINCT, AEXPR_NULLIF,
+        AEXPR_IN, AEXPR_LIKE, AEXPR_ILIKE, AEXPR_SIMILAR, AEXPR_BETWEEN, AEXPR_NOT_BETWEEN,
+        AEXPR_BETWEEN_SYM, AEXPR_NOT_BETWEEN_SYM,
+    ]);
+    check_enum!(prim_h, "OverridingKind", OverridingKind, [
+        OVERRIDING_NOT_SET, OVERRIDING_USER_VALUE, OVERRIDING_SYSTEM_VALUE,
+    ]);
+    check_enum!(prim_h, "CoercionForm", CoercionForm, [
+        COERCE_EXPLICIT_CALL, COERCE_EXPLICIT_CAST, COERCE_IMPLICIT_CAST, COERCE_SQL_SYNTAX,
+    ]);
+    check_enum!(prim_h, "ParamKind", ParamKind, [
+        PARAM_EXTERN, PARAM_EXEC, PARAM_SUBLINK, PARAM_MULTIEXPR,
+    ]);
+    check_enum!(prim_h, "VarReturningType", VarReturningType, [
+        VAR_RETURNING_DEFAULT, VAR_RETURNING_OLD, VAR_RETURNING_NEW,
+    ]);
+}
+
+#[test]
+fn query_field_order_matches_c() {
+    let parse_h = include_str!("../vendor/parsenodes.h");
+    // Declaration order of crate::parsenodes::Query, C spellings.
+    let rust_order = [
+        "commandType", "querySource", "queryId", "canSetTag", "utilityStmt", "resultRelation",
+        "hasAggs", "hasWindowFuncs", "hasTargetSRFs", "hasSubLinks", "hasDistinctOn",
+        "hasRecursive", "hasModifyingCTE", "hasForUpdate", "hasRowSecurity", "hasGroupRTE",
+        "isReturn", "cteList", "rtable", "rteperminfos", "jointree", "mergeActionList",
+        "mergeTargetRelation", "mergeJoinCondition", "targetList", "override", "onConflict",
+        "returningOldAlias", "returningNewAlias", "returningList", "groupClause", "groupDistinct",
+        "groupingSets", "havingQual", "windowClause", "distinctClause", "sortClause",
+        "limitOffset", "limitCount", "limitOption", "rowMarks", "setOperations",
+        "constraintDeps", "withCheckOptions", "stmt_location", "stmt_len",
+    ];
+    assert_eq!(c_struct_fields(parse_h, "Query"), rust_order);
+    // Compile-time completeness: every C field exists on the Rust struct.
+    let crate::parsenodes::Query {
+        commandType: _, querySource: _, queryId: _, canSetTag: _, utilityStmt: _,
+        resultRelation: _, hasAggs: _, hasWindowFuncs: _, hasTargetSRFs: _, hasSubLinks: _,
+        hasDistinctOn: _, hasRecursive: _, hasModifyingCTE: _, hasForUpdate: _,
+        hasRowSecurity: _, hasGroupRTE: _, isReturn: _, cteList: _, rtable: _, rteperminfos: _,
+        jointree: _, mergeActionList: _, mergeTargetRelation: _, mergeJoinCondition: _,
+        targetList: _, r#override: _, onConflict: _, returningOldAlias: _, returningNewAlias: _,
+        returningList: _, groupClause: _, groupDistinct: _, groupingSets: _, havingQual: _,
+        windowClause: _, distinctClause: _, sortClause: _, limitOffset: _, limitCount: _,
+        limitOption: _, rowMarks: _, setOperations: _, constraintDeps: _, withCheckOptions: _,
+        stmt_location: _, stmt_len: _,
+    } = crate::parsenodes::Query::default();
+}
+
+#[test]
+fn const_field_order_and_size_match_c() {
+    let prim_h = include_str!("../vendor/primnodes.h");
+    let rust_order = [
+        "consttype", "consttypmod", "constcollid", "constlen", "constvalue", "constisnull",
+        "constbyval", "location",
+    ];
+    let mut c_fields = c_struct_fields(prim_h, "Const");
+    assert_eq!(c_fields.remove(0), "xpr");
+    assert_eq!(c_fields, rust_order);
+    // C sizeof(Const) is 40 (4-byte tag + pad to Datum); ours matches via the
+    // 2-byte tag + repr(C) NodeRep padding to the same 8-aligned payload.
+    assert_eq!(core::mem::size_of::<crate::primnodes::Const>(), 32);
+}
+
+#[test]
+fn rte_and_selectstmt_field_order_match_c() {
+    let parse_h = include_str!("../vendor/parsenodes.h");
+    let rte_order = [
+        "alias", "eref", "rtekind", "relid", "inh", "relkind", "rellockmode", "perminfoindex",
+        "tablesample", "subquery", "security_barrier", "jointype", "joinmergedcols",
+        "joinaliasvars", "joinleftcols", "joinrightcols", "join_using_alias", "functions",
+        "funcordinality", "tablefunc", "values_lists", "ctename", "ctelevelsup",
+        "self_reference", "coltypes", "coltypmods", "colcollations", "enrname", "enrtuples",
+        "groupexprs", "lateral", "inFromCl", "securityQuals",
+    ];
+    assert_eq!(c_struct_fields(parse_h, "RangeTblEntry"), rte_order);
+    let select_order = [
+        "distinctClause", "intoClause", "targetList", "fromClause", "whereClause",
+        "groupClause", "groupDistinct", "havingClause", "windowClause", "valuesLists",
+        "sortClause", "limitOffset", "limitCount", "limitOption", "lockingClause",
+        "withClause", "op", "all", "larg", "rarg",
+    ];
+    assert_eq!(c_struct_fields(parse_h, "SelectStmt"), select_order);
+}
+
+#[test]
+fn plannedstmt_plan_result_field_order_match_c() {
+    let plan_h = include_str!("../vendor/plannodes.h");
+    let stmt_order = [
+        "commandType", "queryId", "planId", "hasReturning", "hasModifyingCTE", "canSetTag",
+        "transientPlan", "dependsOnRole", "parallelModeNeeded", "jitFlags", "planTree",
+        "partPruneInfos", "rtable", "unprunableRelids", "permInfos", "resultRelations",
+        "appendRelations", "subplans", "rewindPlanIDs", "rowMarks", "relationOids", "invalItems",
+        "paramExecTypes", "utilityStmt", "stmt_location", "stmt_len",
+    ];
+    assert_eq!(c_struct_fields(plan_h, "PlannedStmt"), stmt_order);
+    let crate::plannodes::PlannedStmt {
+        commandType: _, queryId: _, planId: _, hasReturning: _, hasModifyingCTE: _, canSetTag: _,
+        transientPlan: _, dependsOnRole: _, parallelModeNeeded: _, jitFlags: _, planTree: _,
+        partPruneInfos: _, rtable: _, unprunableRelids: _, permInfos: _, resultRelations: _,
+        appendRelations: _, subplans: _, rewindPlanIDs: _, rowMarks: _, relationOids: _,
+        invalItems: _, paramExecTypes: _, utilityStmt: _, stmt_location: _, stmt_len: _,
+    } = crate::plannodes::PlannedStmt::default();
+
+    let plan_order = [
+        "disabled_nodes", "startup_cost", "total_cost", "plan_rows", "plan_width",
+        "parallel_aware", "parallel_safe", "async_capable", "plan_node_id", "targetlist", "qual",
+        "lefttree", "righttree", "initPlan", "extParam", "allParam",
+    ];
+    assert_eq!(c_struct_fields(plan_h, "Plan"), plan_order);
+    let crate::plannodes::Plan {
+        disabled_nodes: _, startup_cost: _, total_cost: _, plan_rows: _, plan_width: _,
+        parallel_aware: _, parallel_safe: _, async_capable: _, plan_node_id: _, targetlist: _,
+        qual: _, lefttree: _, righttree: _, initPlan: _, extParam: _, allParam: _,
+    } = crate::plannodes::Plan::default();
+
+    let mut result_fields = c_struct_fields(plan_h, "Result");
+    assert_eq!(result_fields.remove(0), "plan");
+    assert_eq!(result_fields, ["resconstantqual"]);
+    let crate::plannodes::Result { plan: _, resconstantqual: _ } =
+        crate::plannodes::Result::default();
+}
+
+#[test]
+fn plan_node_tag_round_trips() {
+    use crate::plannodes::{PlannedStmt, Result};
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+
+    let stmt = Node::build::<PlannedStmt>(mcx).unwrap().seal();
+    assert_eq!(stmt.node_tag(), NodeTag::T_PlannedStmt);
+    assert!(stmt.as_planned_stmt().is_some());
+    assert!(stmt.as_result().is_none());
+    assert!(stmt.as_plan().is_none());
+    assert!(stmt.as_query().is_none());
+
+    let result = Node::build::<Result>(mcx).unwrap().seal();
+    assert_eq!(result.node_tag(), NodeTag::T_Result);
+    assert!(result.as_result().is_some());
+    assert!(result.as_plan().is_some());
+    assert!(result.as_planned_stmt().is_none());
+
+    let q = Node::build::<crate::parsenodes::Query>(mcx).unwrap().seal();
+    assert!(q.as_plan().is_none());
+    assert!(q.as_planned_stmt().is_none());
+}
+
+#[test]
+fn select1_plan_shape_and_setrefs_mutation() {
+    use crate::plannodes::{PlannedStmt, Result};
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+
+    // createplan.c make_result for `SELECT 1`: Result, no outer plan,
+    // targetlist [TargetEntry(Const 1, resno 1)].
+    let cnst = Node::mk_const(mcx, 23, -1, 0, 4, datum::Datum::from_i32(1), false, true).unwrap();
+    let tle = Node::mk_target_entry(mcx, cnst, 1, Some("?column?"), false).unwrap();
+    let mut result = Node::build::<Result>(mcx).unwrap();
+    result.plan.targetlist = NodeList::make1(mcx, tle).unwrap();
+    result.plan.plan_rows = 1.0;
+    result.plan.plan_width = 4;
+    result.plan.total_cost = 0.01;
+    let plan_tree = result.seal();
+
+    // standard_planner output shell.
+    let mut stmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    stmt.commandType = crate::CmdType::CMD_SELECT;
+    stmt.canSetTag = true;
+    stmt.planTree = Some(plan_tree);
+    stmt.stmt_location = 0;
+    stmt.stmt_len = 8;
+    let stmt = stmt.seal();
+
+    // set_plan_references walk over the sealed tree: assign plan_node_id via
+    // the Plan base, retarget the shared TLE's expr in place.
+    let walked = stmt.as_planned_stmt().unwrap().planTree.unwrap();
+    // SAFETY: this walk is the tree's only accessor; no reference derived
+    // before it is used afterward.
+    unsafe {
+        walked.with_plan_mut(|p| p.plan_node_id = 7).unwrap();
+        let tle0 = walked.as_plan().unwrap().targetlist.nth(0);
+        assert!(tle0.with_mut::<crate::primnodes::Var, _>(|_| ()).is_none());
+        tle0.with_mut::<crate::primnodes::TargetEntry, _>(|t| {
+            t.resorigtbl = 0;
+            t.expr =
+                Node::mk_const(mcx, 23, -1, 0, 4, datum::Datum::from_i32(2), false, true).unwrap();
+        })
+        .unwrap();
+    }
+
+    let s = stmt.as_planned_stmt().unwrap();
+    assert_eq!(s.commandType, crate::CmdType::CMD_SELECT);
+    assert!(s.canSetTag && !s.hasReturning && !s.dependsOnRole);
+    assert!(s.rtable.is_nil() && s.subplans.is_nil() && s.resultRelations.is_nil());
+    assert!(s.unprunableRelids.is_empty() && s.rewindPlanIDs.is_empty());
+    assert_eq!((s.stmt_location, s.stmt_len), (0, 8));
+    let plan = s.planTree.unwrap().as_plan().unwrap();
+    assert_eq!(plan.plan_node_id, 7);
+    assert_eq!((plan.plan_rows, plan.plan_width), (1.0, 4));
+    assert!(plan.lefttree.is_none() && plan.righttree.is_none() && plan.qual.is_nil());
+    let r = s.planTree.unwrap().as_result().unwrap();
+    assert!(r.resconstantqual.is_none());
+    let tle = plan.targetlist.nth(0).as_target_entry().unwrap();
+    assert_eq!(tle.resno, 1);
+    assert_eq!(tle.expr.as_const().unwrap().constvalue.as_i32(), 2);
+}
+
+#[test]
+fn parse_node_tag_round_trips() {
+    use crate::parsenodes::{Query, RTEPermissionInfo, RangeTblEntry};
+    use crate::primnodes::{
+        Alias, FromExpr, FuncExpr, OpExpr, Param, RangeVar, Var,
+    };
+    use crate::rawnodes::{SelectStmt, ValUnion};
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+
+    let cases: Vec<(Node, NodeTag)> = std::vec![
+        (Node::mk_raw_stmt(mcx, None, 0, 0).unwrap(), NodeTag::T_RawStmt),
+        (Node::build::<SelectStmt>(mcx).unwrap().seal(), NodeTag::T_SelectStmt),
+        (Node::mk_res_target(mcx, None, NodeList::nil(), None, -1).unwrap(), NodeTag::T_ResTarget),
+        (
+            Node::mk_a_expr(mcx, crate::rawnodes::A_Expr_Kind::AEXPR_OP, NodeList::nil(), None, None, -1)
+                .unwrap(),
+            NodeTag::T_A_Expr,
+        ),
+        (
+            Node::mk_a_const(mcx, Some(ValUnion::Integer(crate::Integer { ival: 1 })), 7).unwrap(),
+            NodeTag::T_A_Const,
+        ),
+        (Node::mk_column_ref(mcx, NodeList::nil(), -1).unwrap(), NodeTag::T_ColumnRef),
+        (Node::mk_param_ref(mcx, 1, -1).unwrap(), NodeTag::T_ParamRef),
+        (Node::mk_a_star(mcx).unwrap(), NodeTag::T_A_Star),
+        (Node::build::<Query>(mcx).unwrap().seal(), NodeTag::T_Query),
+        (Node::build::<RangeTblEntry>(mcx).unwrap().seal(), NodeTag::T_RangeTblEntry),
+        (Node::build::<RTEPermissionInfo>(mcx).unwrap().seal(), NodeTag::T_RTEPermissionInfo),
+        (Node::build::<Alias>(mcx).unwrap().seal(), NodeTag::T_Alias),
+        (Node::build::<RangeVar>(mcx).unwrap().seal(), NodeTag::T_RangeVar),
+        (Node::build::<Var>(mcx).unwrap().seal(), NodeTag::T_Var),
+        (
+            Node::mk_const(mcx, 23, -1, 0, 4, datum::Datum::from_i32(1), false, true).unwrap(),
+            NodeTag::T_Const,
+        ),
+        (Node::build::<Param>(mcx).unwrap().seal(), NodeTag::T_Param),
+        (
+            Node::mk_target_entry(mcx, Node::mk_a_star(mcx).unwrap(), 1, None, false).unwrap(),
+            NodeTag::T_TargetEntry,
+        ),
+        (Node::mk_from_expr(mcx, NodeList::nil(), None).unwrap(), NodeTag::T_FromExpr),
+        (Node::mk_range_tbl_ref(mcx, 1).unwrap(), NodeTag::T_RangeTblRef),
+        (Node::build::<OpExpr>(mcx).unwrap().seal(), NodeTag::T_OpExpr),
+        (Node::build::<FuncExpr>(mcx).unwrap().seal(), NodeTag::T_FuncExpr),
+    ];
+    for (node, tag) in &cases {
+        assert_eq!(node.node_tag(), *tag);
+    }
+    let a_const = cases[4].0;
+    assert!(a_const.as_a_const().is_some());
+    assert!(a_const.as_a_expr().is_none());
+    assert!(a_const.as_query().is_none());
+    let q = cases[8].0;
+    assert!(q.as_query().is_some());
+    assert!(q.as_select_stmt().is_none());
+    assert!(q.as_range_tbl_entry().is_none());
+}
+
+#[test]
+fn select1_parse_and_analyze_shape() {
+    use crate::parsenodes::Query;
+    use crate::primnodes::FromExpr;
+    use crate::rawnodes::{SelectStmt, ValUnion};
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+
+    // gram.y output for `SELECT 1`.
+    let a_const =
+        Node::mk_a_const(mcx, Some(ValUnion::Integer(crate::Integer { ival: 1 })), 7).unwrap();
+    let res_target = Node::mk_res_target(mcx, None, NodeList::nil(), Some(a_const), 7).unwrap();
+    let mut select = Node::build::<SelectStmt>(mcx).unwrap();
+    select.targetList = NodeList::make1(mcx, res_target).unwrap();
+    let raw = Node::mk_raw_stmt(mcx, Some(select.seal()), 0, 0).unwrap();
+
+    let stmt = raw.as_raw_stmt().unwrap().stmt.unwrap().as_select_stmt().unwrap();
+    assert_eq!(stmt.targetList.len(), 1);
+    assert!(stmt.whereClause.is_none());
+    assert!(stmt.fromClause.is_nil());
+    let rt = stmt.targetList.nth(0).as_res_target().unwrap();
+    assert!(rt.name.is_none());
+    let val = rt.val.unwrap().as_a_const().unwrap();
+    assert!(!val.isnull());
+    assert!(matches!(val.val, Some(ValUnion::Integer(crate::Integer { ival: 1 }))));
+    assert_eq!(val.location, 7);
+
+    // analyze.c output: Query { CMD_SELECT, tlist [TargetEntry(Const 1)],
+    // jointree FromExpr(NIL, NULL) }.
+    let cnst = Node::mk_const(mcx, 23, -1, 0, 4, datum::Datum::from_i32(1), false, true).unwrap();
+    let tle = Node::mk_target_entry(mcx, cnst, 1, Some("?column?"), false).unwrap();
+    let mut query = Node::build::<Query>(mcx).unwrap();
+    query.commandType = crate::CmdType::CMD_SELECT;
+    query.canSetTag = true;
+    query.targetList = NodeList::make1(mcx, tle).unwrap();
+    query.jointree = Some(
+        Node::mk_from_expr(mcx, NodeList::nil(), None).unwrap().as_from_expr().unwrap(),
+    );
+    // In-place mutation before seal (C: parse analysis fixups).
+    query.stmt_location = 0;
+    query.stmt_len = 8;
+    let qnode = query.seal();
+
+    let q = qnode.as_query().unwrap();
+    assert_eq!(q.commandType, crate::CmdType::CMD_SELECT);
+    assert_eq!(q.querySource, crate::QuerySource::QSRC_ORIGINAL);
+    assert!(q.canSetTag);
+    assert!(q.rtable.is_nil());
+    let jt: &FromExpr = q.jointree.unwrap();
+    assert!(jt.fromlist.is_nil() && jt.quals.is_none());
+    let tle = q.targetList.nth(0).as_target_entry().unwrap();
+    assert_eq!(tle.resno, 1);
+    assert_eq!(tle.resname, Some("?column?"));
+    assert!(!tle.resjunk);
+    let c = tle.expr.as_const().unwrap();
+    assert_eq!((c.consttype, c.constlen, c.constbyval, c.constisnull), (23, 4, true, false));
+    assert_eq!(c.constvalue.as_i32(), 1);
+    assert_eq!(c.location, -1);
+    assert_eq!(q.stmt_len, 8);
 }

@@ -82,3 +82,8 @@ seam_core::seam!(
     // CheckPointTwoPhase(redo_horizon) (twophase.c).
     pub fn check_point_two_phase(redo_horizon: XLogRecPtr) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // FinishPreparedTransaction(gid, isCommit) (twophase.c).
+    pub fn finish_prepared_transaction<'a>(gid: &'a str, is_commit: bool) -> PgResult<()>
+);

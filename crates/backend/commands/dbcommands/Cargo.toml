@@ -1,0 +1,16 @@
+[package]
+name = "dbcommands"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "dbcommands"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+datum = { path = "../../../_support/types/datum" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+dbcommands_seams = { path = "../dbcommands_seams" }

@@ -237,13 +237,34 @@ impl<'a> PageRef<'a> {
     /// `*PageGetItemId(page, offnum)` by value; hard-bounded to the page image.
     #[inline]
     pub fn item_id(&self, offnum: OffsetNumber) -> ItemIdData {
-        let offnum = offnum as usize;
         assert!(
+            offnum >= 1
+                && SizeOfPageHeaderData
+                    + offnum as usize * core::mem::size_of::<ItemIdData>()
+                    <= BLCKSZ
+        );
+        // SAFETY: bounds checked above.
+        unsafe { self.item_id_unchecked(offnum) }
+    }
+
+    /// C's 2-insn `PageGetItemId` (per-tuple scan kernel).
+    ///
+    /// # Safety
+    /// `offnum >= 1` and `SizeOfPageHeaderData + offnum * 4 <= BLCKSZ`.
+    /// The intended proof is ONE check per page, not per tuple: any
+    /// `offnum <= max_offset_number()` qualifies once the caller has verified
+    /// `pd_lower <= BLCKSZ` (equivalently `max_offset_number() <=
+    /// MaxOffsetNumber`) for the pinned page — heapam hoists that check to
+    /// page arrival (its `MaxHeapTuplesPerPage` assert implies it).
+    #[inline]
+    pub unsafe fn item_id_unchecked(&self, offnum: OffsetNumber) -> ItemIdData {
+        let offnum = offnum as usize;
+        debug_assert!(
             offnum >= 1
                 && SizeOfPageHeaderData + offnum * core::mem::size_of::<ItemIdData>() <= BLCKSZ
         );
         let off = SizeOfPageHeaderData + (offnum - 1) * core::mem::size_of::<ItemIdData>();
-        // SAFETY: in-bounds (checked above), 4-aligned (header is MAXALIGNed).
+        // SAFETY: in-bounds (caller contract), 4-aligned (header is MAXALIGNed).
         unsafe { self.ptr.as_ptr().add(off).cast::<ItemIdData>().read() }
     }
 
@@ -253,7 +274,28 @@ impl<'a> PageRef<'a> {
         let off = id.lp_off() as usize;
         let len = id.lp_len() as usize;
         assert!(off >= SizeOfPageHeaderData && off + len <= BLCKSZ, "corrupt line pointer");
-        // SAFETY: in-bounds (checked above).
+        // SAFETY: bounds checked above.
+        unsafe { self.item_raw_unchecked(id) }
+    }
+
+    /// C's `PageGetItem` shape: no per-tuple bounds re-check.
+    ///
+    /// # Safety
+    /// `id` is a line pointer read from THIS page whose item lies within the
+    /// image (`lp_off >= SizeOfPageHeaderData`, `lp_off + lp_len <= BLCKSZ`).
+    /// That is the heap page invariant every writer (`PageAddItemExtended`)
+    /// maintains and C reads without checking; scan paths may rely on it for
+    /// LP_NORMAL entries exactly as heapam.c does (offsets from rs_vistuples
+    /// were collected under the content lock with `is_normal` checked).
+    #[inline]
+    pub unsafe fn item_raw_unchecked(&self, id: ItemIdData) -> (*const u8, u32) {
+        let off = id.lp_off() as usize;
+        let len = id.lp_len() as usize;
+        debug_assert!(
+            off >= SizeOfPageHeaderData && off + len <= BLCKSZ,
+            "corrupt line pointer"
+        );
+        // SAFETY: in-bounds (caller contract: page invariant).
         (unsafe { self.ptr.as_ptr().add(off) }, len as u32)
     }
 

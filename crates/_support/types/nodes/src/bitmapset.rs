@@ -112,20 +112,22 @@ impl<'mcx> Bitmapset<'mcx> {
     fn alloc_words(mcx: Mcx<'mcx>, n: usize) -> PgResult<NonNull<bitmapword>> {
         let bytes = n * core::mem::size_of::<bitmapword>();
         check_alloc_size(bytes)?;
-        let layout = Layout::array::<bitmapword>(n).map_err(|_| mcx.oom(bytes))?;
+        let layout = Layout::array::<bitmapword>(n).map_err(|_| crate::oom(mcx, bytes))?;
         Ok(Allocator::allocate(&mcx, layout)
-            .map_err(|_| mcx.oom(bytes))?
+            .map_err(|_| crate::oom(mcx, bytes))?
             .cast())
     }
 
     /// Grow the allocation to hold `n` words; words past `self.nwords` are
     /// zero-filled and `nwords` is set to `n` (bms_add_member's repalloc arm).
+    /// Out of line: inlined, its frame taxes every caller's fast path.
+    #[inline(never)]
     fn enlarge(&mut self, mcx: Mcx<'mcx>, n: usize) -> PgResult<()> {
         debug_assert!(n as i32 > self.nwords);
         if n as i32 > self.awords {
             let bytes = n * core::mem::size_of::<bitmapword>();
             check_alloc_size(bytes)?;
-            let new_layout = Layout::array::<bitmapword>(n).map_err(|_| mcx.oom(bytes))?;
+            let new_layout = Layout::array::<bitmapword>(n).map_err(|_| crate::oom(mcx, bytes))?;
             let ptr = if self.awords == 0 {
                 Allocator::allocate(&mcx, new_layout)
             } else {
@@ -135,7 +137,7 @@ impl<'mcx> Bitmapset<'mcx> {
                 // old_layout; new_layout is strictly larger.
                 unsafe { Allocator::grow(&mcx, self.words.cast(), old_layout, new_layout) }
             };
-            self.words = ptr.map_err(|_| mcx.oom(bytes))?.cast();
+            self.words = ptr.map_err(|_| crate::oom(mcx, bytes))?.cast();
             self.awords = n as i32;
         }
         for i in self.nwords as usize..n {
@@ -201,6 +203,7 @@ impl<'mcx> Bitmapset<'mcx> {
         (unsafe { *self.words.as_ptr().add(wn) } & (1 << bitnum(x))) != 0
     }
 
+    #[inline]
     pub fn add_member(&mut self, mcx: Mcx<'mcx>, x: i32) -> PgResult<()> {
         if x < 0 {
             negative_member();

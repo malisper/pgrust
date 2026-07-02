@@ -408,16 +408,102 @@ fn enr_lookup_through_pstate() {
     assert_eq!(get_visible_ENR(&pstate, "new_rows").unwrap().reliddesc, 1234);
 }
 
-#[test]
-#[should_panic(expected = "query_tree_walker")]
-fn check_variable_parameters_is_deferred() {
-    check_variable_parameters();
+fn query_with_param<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    paramtype: Oid,
+    paramkind: ParamKind,
+) -> &'mcx types_nodes::parsenodes::Query<'mcx> {
+    use types_nodes::{Node, NodeList};
+    let param = Node::mk(
+        mcx,
+        types_nodes::Param {
+            paramkind,
+            paramid: 1,
+            paramtype,
+            paramtypmod: -1,
+            paramcollid: 0,
+            location: 3,
+        },
+    )
+    .unwrap();
+    let te = Node::mk_target_entry(mcx, param, 1, None, false).unwrap();
+    let query = types_nodes::parsenodes::Query {
+        targetList: NodeList::from_slice(mcx, &[te]).unwrap(),
+        ..Default::default()
+    };
+    Node::mk_mut(mcx, query).unwrap().seal_ref()
 }
 
 #[test]
-#[should_panic(expected = "query_tree_walker")]
-fn query_contains_extern_params_is_deferred() {
-    query_contains_extern_params();
+fn check_variable_parameters_passes_and_flags_mismatch() {
+    use types_error::ERRCODE_AMBIGUOUS_PARAMETER;
+
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    let carrier = VarParamState::new();
+    setup_parse_variable_parameters(&mut pstate, carrier.clone());
+
+    // No params generated: vacuous.
+    let q = query_with_param(mcx, INT4OID, ParamKind::PARAM_EXTERN);
+    check_variable_parameters(&pstate, q, PG_UTF8).unwrap();
+
+    carrier.param_types.borrow_mut().push(INT4OID);
+    check_variable_parameters(&pstate, q, PG_UTF8).unwrap();
+
+    let mismatched = query_with_param(mcx, TEXTOID, ParamKind::PARAM_EXTERN);
+    let err = check_variable_parameters(&pstate, mismatched, PG_UTF8).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_AMBIGUOUS_PARAMETER);
+}
+
+#[test]
+fn check_variable_parameters_rejects_unknown_paramno() {
+
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    let carrier = VarParamState::new();
+    setup_parse_variable_parameters(&mut pstate, carrier.clone());
+    carrier.param_types.borrow_mut().push(INT4OID);
+
+    let q = query_with_param(mcx, INT4OID, ParamKind::PARAM_EXTERN);
+    // Shrink after building so paramid 1 is out of range.
+    carrier.param_types.borrow_mut().clear();
+    carrier.param_types.borrow_mut().push(INT4OID);
+    let two = {
+        use types_nodes::{Node, NodeList};
+        let param = Node::mk(
+            mcx,
+            types_nodes::Param {
+                paramkind: ParamKind::PARAM_EXTERN,
+                paramid: 2,
+                paramtype: INT4OID,
+                paramtypmod: -1,
+                paramcollid: 0,
+                location: -1,
+            },
+        )
+        .unwrap();
+        let te = Node::mk_target_entry(mcx, param, 1, None, false).unwrap();
+        let query = types_nodes::parsenodes::Query {
+            targetList: NodeList::from_slice(mcx, &[te]).unwrap(),
+            ..Default::default()
+        };
+        Node::mk_mut(mcx, query).unwrap().seal_ref()
+    };
+    check_variable_parameters(&pstate, q, PG_UTF8).unwrap();
+    let err = check_variable_parameters(&pstate, two, PG_UTF8).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_PARAMETER);
+}
+
+#[test]
+fn query_contains_extern_params_distinguishes_kinds() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let with_extern = query_with_param(mcx, INT4OID, ParamKind::PARAM_EXTERN);
+    assert!(query_contains_extern_params(with_extern).unwrap());
+    let with_exec = query_with_param(mcx, INT4OID, ParamKind::PARAM_EXEC);
+    assert!(!query_contains_extern_params(with_exec).unwrap());
 }
 
 #[test]

@@ -32,7 +32,9 @@ impl HeapFetchResult {
     /// C's filled `*tuple` (`None` = `t_data == NULL`), scoped to the pin-holding `&self`.
     pub fn tuple(&self) -> Option<HeapTupleData<'_>> {
         let pin = self.pin.as_ref()?;
-        let (ptr, len) = pin.page().item_raw(self.lp);
+        // SAFETY: pinned page, normal line pointer (checked in heap_fetch);
+        // normal items satisfy the page invariant (item_raw_unchecked).
+        let (ptr, len) = unsafe { pin.page().item_raw_unchecked(self.lp) };
         // SAFETY: pinned page, normal line pointer (checked in heap_fetch).
         Some(unsafe { HeapTupleData::from_raw_parts(ptr, len, self.tid, self.table_oid) })
     }
@@ -76,7 +78,9 @@ pub fn heap_fetch<'mcx>(
         return Ok(not_found);
     }
 
-    let (ptr, len) = page.item_raw(lp);
+    // SAFETY: pinned + share-locked page, normal line pointer (page
+    // invariant, item_raw_unchecked contract).
+    let (ptr, len) = unsafe { page.item_raw_unchecked(lp) };
     // SAFETY: pinned + share-locked page, normal line pointer.
     let mut tuple =
         unsafe { HeapTupleData::from_raw_parts(ptr, len, tid, relation.rd_id) };
@@ -155,7 +159,8 @@ pub fn heap_hot_search_buffer<'p, 'mcx>(
             break;
         }
 
-        let (ptr, len) = page.item_raw(lp);
+        // SAFETY: normal line pointer on a pinned page (page invariant).
+        let (ptr, len) = unsafe { page.item_raw_unchecked(lp) };
         // SAFETY: caller holds pin + at least share lock (C contract).
         let mut heap_tuple: HeapTupleData<'p> = unsafe {
             HeapTupleData::from_raw_parts(
@@ -271,7 +276,8 @@ pub fn heap_get_latest_tid<'mcx>(
             break;
         }
 
-        let (ptr, len) = page.item_raw(lp);
+        // SAFETY: normal line pointer on a pinned page (page invariant).
+        let (ptr, len) = unsafe { page.item_raw_unchecked(lp) };
         // SAFETY: pinned + share-locked page, normal line pointer.
         let mut tp = unsafe { HeapTupleData::from_raw_parts(ptr, len, ctid, relation.rd_id) };
 

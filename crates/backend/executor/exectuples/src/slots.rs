@@ -335,8 +335,39 @@ pub fn exec_store_minimal_tuple_owned<'mcx>(
     store_minimal(m, mcx, forget_minimal(mtup), true);
 }
 
+// SHOULDFREE arm of the buffer-slot store: off the per-tuple scan path
+// (a scan slot never owns its image between stores).
+#[cold]
+#[inline(never)]
+fn store_buffer_free_owned<'mcx>(b: &mut BufferHeapTupleTableSlot<'mcx>, mcx: Mcx<'mcx>) {
+    // SAFETY: SHOULDFREE marks a slot-owned heaptuple image in mcx.
+    unsafe {
+        free_heap_image(
+            mcx,
+            b.base.tuple.as_ref().expect("SHOULDFREE without tuple"),
+        )
+    };
+    b.base.base.tts_flags &= !TTS_FLAG_SHOULDFREE;
+}
+
+// Buffer-change arm: runs once per page in a scan, not per tuple; outlined so
+// the same-buffer fast path (C's 12-insn tts_buffer_heap_store_tuple hit)
+// carries no seam-call frame.
+#[inline(never)]
+fn store_buffer_new_pin(b: &mut BufferHeapTupleTableSlot<'_>, buffer: Buffer, transfer_pin: bool) {
+    if BufferIsValid(b.buffer) {
+        let _ = bufmgr_seams::release_buffer::call(b.buffer);
+    }
+    b.buffer = buffer;
+    if !transfer_pin {
+        bufmgr_seams::incr_buffer_ref_count::call(buffer);
+    }
+}
+
 // C tts_buffer_heap_store_tuple: the slot keeps its own pin on `buffer`
 // (IncrBufferRefCount) unless the pin is transferred or already held.
+// `transfer_pin` is constant at both callers and folds under inlining.
+#[inline]
 fn store_buffer<'mcx>(
     slot: &mut SlotData<'mcx>,
     mcx: Mcx<'mcx>,
@@ -349,14 +380,7 @@ fn store_buffer<'mcx>(
         wrong_slot("buffer heap")
     };
     if b.base.base.should_free() {
-        // SAFETY: SHOULDFREE marks a slot-owned heaptuple image in mcx.
-        unsafe {
-            free_heap_image(
-                mcx,
-                b.base.tuple.as_ref().expect("SHOULDFREE without tuple"),
-            )
-        };
-        b.base.base.tts_flags &= !TTS_FLAG_SHOULDFREE;
+        store_buffer_free_owned(b, mcx);
     }
 
     b.base.base.tts_nvalid = 0;
@@ -366,13 +390,7 @@ fn store_buffer<'mcx>(
     b.base.base.tts_flags &= !TTS_FLAG_EMPTY;
 
     if buffer != b.buffer {
-        if BufferIsValid(b.buffer) {
-            let _ = bufmgr_seams::release_buffer::call(b.buffer);
-        }
-        b.buffer = buffer;
-        if !transfer_pin {
-            bufmgr_seams::incr_buffer_ref_count::call(buffer);
-        }
+        store_buffer_new_pin(b, buffer, transfer_pin);
     } else if transfer_pin {
         // The slot already holds this pin; drop the transferred extra one.
         let _ = bufmgr_seams::release_buffer::call(buffer);

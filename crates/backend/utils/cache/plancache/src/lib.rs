@@ -1,9 +1,6 @@
-// plancache.c, M1 surface: InitPlanCache's inval wiring plus the callback set
-// it registers. saved_plan_list/cached_expression_list are provably empty —
-// their only writers (CreateCachedPlan/GetCachedExpression) defer loud — so
-// each callback IS C's vacuous empty-dlist walk, not a stub. The callbacks
-// hold no borrows and touch no TLS state (inval re-enters them mid-
-// invalidation; fabled's ResetPlanCache double-borrow incident).
+// plancache.c, M1 surface. saved_plan_list/cached_expression_list are provably
+// empty (their only writers defer loud), so each inval callback IS C's vacuous
+// empty-dlist walk — and holds no borrows (fabled's ResetPlanCache incident).
 #![allow(non_snake_case)]
 
 use cache_syscache::cacheinfo::{
@@ -45,8 +42,7 @@ fn PlanCacheSysCallback(_arg: Datum, _cacheid: i32, _hashvalue: u32) {
 
 pub fn ResetPlanCache() {}
 
-// ReleaseCachedPlan(plan, NULL): a live CachedPlan cannot exist while its
-// builders defer, so any handle reaching here is corruption — refuse loudly.
+// No CachedPlan can exist while the builders defer: refuse loudly.
 pub fn ReleaseCachedPlan(cplan: CachedPlanHandle) {
     panic!(
         "ReleaseCachedPlan (plancache.c): live CachedPlan handle {} but \

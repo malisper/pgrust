@@ -487,8 +487,8 @@ seam_core::seam!(
     pub fn lookup_pg_namespace_oid_by_name(nspname: &str) -> PgResult<Oid>
 );
 
-// The pg_collation columns create_pg_locale / create_pg_locale_builtin /
-// create_pg_locale_libc read off one COLLOID probe (pg_locale.c), decoded once.
+// The pg_collation columns pg_locale.c's create arms read off one COLLOID
+// probe, decoded once.
 #[derive(Debug)]
 pub struct PgCollationLocaleRow<'mcx> {
     pub collname: NameData,

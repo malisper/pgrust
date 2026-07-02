@@ -230,6 +230,10 @@ pub fn postmaster_child_launch(
         .spawn(move || {
             inherited.apply();
 
+            // C records the base once in main() and forked children inherit
+            // it; a spawned thread's stack is its own, so record at spawn.
+            let _ = stack_depth::set_stack_base();
+
             if is_external_connection_backend(child_type) {
                 let StartupData::Backend(bsdata) = &startup_data else { unreachable!() };
                 backend_startup::conn_timing::set_socket_create(bsdata.socket_created);

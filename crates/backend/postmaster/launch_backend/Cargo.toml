@@ -13,6 +13,7 @@ types_core = { path = "../../../_support/types/types_core" }
 types_startup = { path = "../../../_support/types/types_startup" }
 init_small = { path = "../../utils/init/init_small" }
 miscinit = { path = "../../utils/init/miscinit" }
+stack_depth = { path = "../../utils/misc/stack_depth" }
 backend_startup = { path = "../../tcop/backend_startup" }
 timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
 

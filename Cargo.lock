@@ -275,6 +275,7 @@ version = "0.0.0"
 dependencies = [
  "adt_timestamp",
  "backend_status_seams",
+ "guc_seams",
  "guc_tables",
  "init_small",
  "ip",
@@ -1414,6 +1415,7 @@ dependencies = [
  "mbutils_seams",
  "pg_prng",
  "pg_sema_seams",
+ "pgstat",
  "pgstat_seams",
  "pmchild_seams",
  "pmsignal",
@@ -4082,6 +4084,8 @@ dependencies = [
 name = "xlogrecovery"
 version = "0.0.0"
 dependencies = [
+ "controldata_utils",
+ "crc32c",
  "elog",
  "fd",
  "guc_tables",

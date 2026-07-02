@@ -417,6 +417,19 @@ fn receive_impl(
     inval_function: &mut dyn FnMut(&SharedInvalidationMessage) -> PgResult<()>,
     reset_function: &mut dyn FnMut() -> PgResult<()>,
 ) -> PgResult<()> {
+    // Per-statement empty-queue probe, C's order (sinvaladt.c:473): ONE
+    // Acquire load of hasMessages before the receive buffer's RefCell or the
+    // message-cursor Cells are touched. No pending outer-recursion messages
+    // (nextmsg == nummsgs holds after every drain), no shared messages, no
+    // catchup: done. The slow path below re-checks under SInvalReadLock.
+    if st.nextmsg.get() >= st.nummsgs.get() && !st.catchup_pending.get() {
+        let seg = st.seg.get().expect("shared invalidation memory is not attached");
+        let my = MyProcNumber();
+        if !seg.proc_states()[my as usize].hasMessages.load(Acquire) {
+            return Ok(());
+        }
+    }
+
     // Messages still pending from an outer recursion. Each message is copied
     // out before the callback runs (C: msg = messages[nextmsg++]), so no
     // borrow is live if inval_function recurses back here.

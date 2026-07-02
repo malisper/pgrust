@@ -1483,6 +1483,17 @@ impl<'mcx> XLogReaderState<'mcx> {
         }
     }
 
+    /// The page buffer holding the last page read (C `state->readBuf`);
+    /// FinishWalRecovery copies the last partial block out of it.
+    pub fn read_buf(&self) -> &[u8] {
+        &self.read_buf
+    }
+
+    /// (latestPagePtr, latestPageTLI): the last page-header-validated page.
+    pub fn latest_page(&self) -> (XLogRecPtr, TimeLineID) {
+        (self.latestPagePtr, self.latestPageTLI)
+    }
+
     fn marshal_view_record(&mut self) {
         let rec = self.current.as_ref().expect("current record");
         let mut vr = ViewRecord {
