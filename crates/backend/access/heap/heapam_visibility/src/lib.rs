@@ -48,6 +48,8 @@ fn MultiXactIdIsRunning(multi: TransactionId, is_lock_only: bool) -> PgResult<bo
     multixact_seams::multi_xact_id_is_running::call(multi, is_lock_only)
 }
 
+// C-exact `static inline` (heapam_visibility.c); per-tuple on hint-derivation.
+#[inline]
 fn SetHintBits(
     tuple: &mut HeapTupleHeaderData,
     buffer: Buffer,
@@ -1085,6 +1087,8 @@ pub fn init_seams() {
         heap_tuple_satisfies_visibility_read,
     );
     heapam_visibility_seams::heap_tuple_satisfies_vacuum::set(HeapTupleSatisfiesVacuum);
+    heapam_visibility_seams::heap_tuple_satisfies_update::set(HeapTupleSatisfiesUpdate);
+    heapam_visibility_seams::heap_tuple_set_hint_bits::set(HeapTupleSetHintBits);
     heapam_visibility_seams::heap_tuple_is_surely_dead::set(HeapTupleIsSurelyDead);
     heapam_visibility_seams::heap_tuple_header_is_only_locked::set(HeapTupleHeaderIsOnlyLocked);
 }

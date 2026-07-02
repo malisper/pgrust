@@ -242,6 +242,11 @@ members = [
     "crates/backend/access/common/detoast",
     "crates/backend/access/common/toast_internals_seams",
     "crates/backend/libpq/auth_seams",
+    "crates/backend/libpq/auth",
+    "crates/backend/libpq/crypt",
+    "crates/backend/libpq/hba",
+    "crates/backend/libpq/hba_seams",
+    "crates/backend/libpq/ifaddr",
     "crates/backend/utils/misc/superuser_seams",
     "crates/backend/catalog/pg_database_seams",
     "crates/backend/access/session_seams",
@@ -271,6 +276,8 @@ members = [
     "crates/backend/utils/fmgr/funcapi",
     "crates/backend/utils/misc/ps_status",
     "crates/backend/parser/gram_core",
+    "crates/backend/catalog/pg_database",
+    "crates/common/controldata_utils",
 ]
 
 [workspace.package]

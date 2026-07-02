@@ -54,3 +54,10 @@ seam_core::seam!(
         include_implicit: bool,
     ) -> PgResult<mcx::PgVec<'mcx, Oid>>
 );
+
+seam_core::seam!(
+    // FindDefaultConversionProc(for_encoding, to_encoding) (namespace.c):
+    // OID of the default conversion proc on the search path, or InvalidOid.
+    // No Mcx: the owner runs its catalog lookups in a scratch context.
+    pub fn find_default_conversion_proc(for_encoding: i32, to_encoding: i32) -> PgResult<Oid>
+);

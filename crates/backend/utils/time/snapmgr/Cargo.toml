@@ -21,6 +21,7 @@ syscache_seams = { path = "../../cache/syscache_seams" }
 elog = { path = "../../error/elog" }
 
 [dev-dependencies]
+varsup = { path = "../../../access/transam/varsup" }
 lwlock = { path = "../../../storage/lmgr/lwlock" }
 init_small = { path = "../../init/init_small" }
 pg_sema_seams = { path = "../../../port/pg_sema_seams" }

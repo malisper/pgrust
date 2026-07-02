@@ -108,3 +108,8 @@ seam_core::seam!(
     // XLogPutNextOid (xlog.c); OID-prefetch WAL record.
     pub fn xlog_put_next_oid(next_oid: types_core::Oid) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // InitializeWalConsistencyChecking (xlog.c).
+    pub fn initialize_wal_consistency_checking() -> PgResult<()>
+);

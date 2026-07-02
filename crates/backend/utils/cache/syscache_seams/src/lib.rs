@@ -329,6 +329,24 @@ seam_core::seam!(
     ) -> PgResult<Option<(Oid, PgVec<'mcx, Oid>)>>
 );
 
+#[derive(Debug)]
+pub struct PgProcResultArraysShape<'mcx> {
+    pub proallargtypes: Option<PgVec<'mcx, Oid>>,
+    pub proargmodes: Option<PgVec<'mcx, i8>>,
+    pub proargnames: Option<PgVec<'mcx, PgString<'mcx>>>,
+}
+
+seam_core::seam!(
+    // SysCacheGetAttr(PROCOID tuple, proallargtypes/proargmodes/proargnames),
+    // arrays deconstructed; the 1-D/no-null/elemtype/equal-length elogs are the
+    // installer's. Inner None per field mirrors attisnull; outer None mirrors
+    // !HeapTupleIsValid.
+    pub fn pg_proc_result_arrays<'mcx>(
+        mcx: Mcx<'mcx>,
+        funcid: Oid,
+    ) -> PgResult<Option<PgProcResultArraysShape<'mcx>>>
+);
+
 seam_core::seam!(
     pub fn lookup_pg_class_relid_by_name(relname: &str, relnamespace: Oid) -> PgResult<Oid>
 );

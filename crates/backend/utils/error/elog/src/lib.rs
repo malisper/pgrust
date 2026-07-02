@@ -43,6 +43,7 @@ pub use stack::{
     errstart_cold, geterrcode, geterrposition, getinternalerrposition,
     in_error_recursion_trouble, internalerrposition, internalerrquery, pg_re_throw,
     pop_emit_context_callback, push_emit_context_callback, reset_statement_suppressed,
+    clear_emit_context_callbacks, suppress_statement,
     set_errcontext_domain, CopyErrorData, EmitErrorReport, FlushErrorState, FreeErrorData,
     GetErrorContextStack, ReThrowError, ThrowErrorData, ERRORDATA_STACK_SIZE,
 };

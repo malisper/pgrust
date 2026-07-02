@@ -3,3 +3,17 @@ name = "resowner"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+elog = { path = "../../error/elog" }
+hashfn = { path = "../../../../common/hashfn" }
+ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
+lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
+mcx = { path = "../../../../_support/mcx" }
+resowner_portal_seams = { path = "../resowner_portal_seams" }
+resowner_seams = { path = "../resowner_seams" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_resowner = { path = "../../../../_support/types/types_resowner" }
+types_snapshot = { path = "../../../../_support/types/snapshot" }
+types_storage = { path = "../../../../_support/types/types_storage" }

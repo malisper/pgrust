@@ -25,3 +25,22 @@ seam_core::seam!(
         latch: types_storage::latch::LatchHandle,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // ListenServerPort(family, hostname, port, unix_socket_dir, ListenSockets,
+    // &NumListenSockets, maxListen) (pqcomm.c socket half, deferred there).
+    // hostname None = C NULL ("*"/AF_UNIX); Ok = appended fds, Err = STATUS_ERROR.
+    pub fn listen_server_port(
+        hostname: Option<&str>,
+        port: u16,
+        unix_socket_dir: Option<&str>,
+        listen_sockets: &mut Vec<i32>,
+        max_listen: usize,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // AcceptConnection(server_fd, &client_sock) (pqcomm.c socket half);
+    // Err is C's STATUS_ERROR arm.
+    pub fn accept_connection(server_fd: i32) -> PgResult<types_startup::ClientSocket>
+);

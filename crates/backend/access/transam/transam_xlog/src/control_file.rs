@@ -24,7 +24,9 @@ pub const FLOATFORMAT_VALUE: f64 = 1234567.0;
 pub const FirstNormalUnloggedLSN: XLogRecPtr = 1000;
 
 // pg_control.h layout, byte-exact (CRC + on-disk image depend on it; layout
-// asserts in tests.rs mirror a C compile of the header).
+// asserts in tests.rs mirror a C compile of the header). C's implicit padding
+// is explicit _pad fields: byte views stay fully initialized (Miri-clean) and
+// images are deterministic.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CheckPoint {
@@ -32,6 +34,7 @@ pub struct CheckPoint {
     pub ThisTimeLineID: TimeLineID,
     pub PrevTimeLineID: TimeLineID,
     pub fullPageWrites: bool,
+    pub _pad0: [u8; 3],
     pub wal_level: i32,
     pub nextXid: FullTransactionId,
     pub nextOid: Oid,
@@ -41,10 +44,12 @@ pub struct CheckPoint {
     pub oldestXidDB: Oid,
     pub oldestMulti: MultiXactId,
     pub oldestMultiDB: Oid,
+    pub _pad1: [u8; 4],
     pub time: pg_time_t,
     pub oldestCommitTsXid: TransactionId,
     pub newestCommitTsXid: TransactionId,
     pub oldestActiveXid: TransactionId,
+    pub _pad2: [u8; 4],
 }
 
 impl CheckPoint {
@@ -53,6 +58,7 @@ impl CheckPoint {
         ThisTimeLineID: 0,
         PrevTimeLineID: 0,
         fullPageWrites: false,
+        _pad0: [0; 3],
         wal_level: 0,
         nextXid: FullTransactionId { value: 0 },
         nextOid: 0,
@@ -62,10 +68,12 @@ impl CheckPoint {
         oldestXidDB: 0,
         oldestMulti: 0,
         oldestMultiDB: 0,
+        _pad1: [0; 4],
         time: 0,
         oldestCommitTsXid: 0,
         newestCommitTsXid: 0,
         oldestActiveXid: 0,
+        _pad2: [0; 4],
     };
 
     pub fn as_bytes(&self) -> &[u8] {
@@ -99,23 +107,28 @@ pub struct ControlFileData {
     pub pg_control_version: u32,
     pub catalog_version_no: u32,
     pub state: DBState,
+    pub _pad0: [u8; 4],
     pub time: pg_time_t,
     pub checkPoint: XLogRecPtr,
     pub checkPointCopy: CheckPoint,
     pub unloggedLSN: XLogRecPtr,
     pub minRecoveryPoint: XLogRecPtr,
     pub minRecoveryPointTLI: TimeLineID,
+    pub _pad1: [u8; 4],
     pub backupStartPoint: XLogRecPtr,
     pub backupEndPoint: XLogRecPtr,
     pub backupEndRequired: bool,
+    pub _pad2: [u8; 3],
     pub wal_level: i32,
     pub wal_log_hints: bool,
+    pub _pad3: [u8; 3],
     pub MaxConnections: i32,
     pub max_worker_processes: i32,
     pub max_wal_senders: i32,
     pub max_prepared_xacts: i32,
     pub max_locks_per_xact: i32,
     pub track_commit_timestamp: bool,
+    pub _pad4: [u8; 3],
     pub maxAlign: u32,
     pub floatFormat: f64,
     pub blcksz: u32,
@@ -127,9 +140,11 @@ pub struct ControlFileData {
     pub toast_max_chunk_size: u32,
     pub loblksize: u32,
     pub float8ByVal: bool,
+    pub _pad5: [u8; 3],
     pub data_checksum_version: u32,
     pub default_char_signedness: bool,
     pub mock_authentication_nonce: [u8; MOCK_AUTH_NONCE_LEN],
+    pub _pad6: [u8; 3],
     pub crc: u32,
 }
 
@@ -141,23 +156,28 @@ impl ControlFileData {
         pg_control_version: 0,
         catalog_version_no: 0,
         state: 0,
+        _pad0: [0; 4],
         time: 0,
         checkPoint: 0,
         checkPointCopy: CheckPoint::ZEROED,
         unloggedLSN: 0,
         minRecoveryPoint: 0,
         minRecoveryPointTLI: 0,
+        _pad1: [0; 4],
         backupStartPoint: 0,
         backupEndPoint: 0,
         backupEndRequired: false,
+        _pad2: [0; 3],
         wal_level: 0,
         wal_log_hints: false,
+        _pad3: [0; 3],
         MaxConnections: 0,
         max_worker_processes: 0,
         max_wal_senders: 0,
         max_prepared_xacts: 0,
         max_locks_per_xact: 0,
         track_commit_timestamp: false,
+        _pad4: [0; 3],
         maxAlign: 0,
         floatFormat: 0.0,
         blcksz: 0,
@@ -169,9 +189,11 @@ impl ControlFileData {
         toast_max_chunk_size: 0,
         loblksize: 0,
         float8ByVal: false,
+        _pad5: [0; 3],
         data_checksum_version: 0,
         default_char_signedness: false,
         mock_authentication_nonce: [0; MOCK_AUTH_NONCE_LEN],
+        _pad6: [0; 3],
         crc: 0,
     };
 }

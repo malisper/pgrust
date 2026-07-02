@@ -656,6 +656,11 @@ pub fn HistoricSnapshotGetTupleCids() -> ! {
 }
 
 // Callers check TransactionIdIsCurrentTransactionId first, as in C.
+// inline(always): per-tuple hot inside HeapTupleSatisfiesMVCC; the xmin/xmax
+// range exits must fold into the visibility gate (plain #[inline] is refused;
+// the call + by-memory PgResult return cost ~8 insns/tuple — see
+// docs/benchmarks/heapam_visibility.md).
+#[inline(always)]
 pub fn XidInMVCCSnapshot(xid: TransactionId, snapshot: &SnapshotData<'_>) -> PgResult<bool> {
     let mut xid = xid;
 

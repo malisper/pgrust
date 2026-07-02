@@ -70,3 +70,18 @@ seam_core::seam!(
     // process_session_preload_libraries (miscinit.c) — same deferred half.
     pub fn process_session_preload_libraries() -> PgResult<()>
 );
+
+seam_core::seam!(
+    // checkDataDir (miscinit.c) — deferred half of the ported miscinit unit.
+    pub fn check_data_dir() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // process_shared_preload_libraries (miscinit.c) — same deferred half.
+    pub fn process_shared_preload_libraries() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // process_shmem_requests (miscinit.c) — same deferred half.
+    pub fn process_shmem_requests() -> PgResult<()>
+);

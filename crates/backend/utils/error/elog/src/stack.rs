@@ -110,6 +110,17 @@ pub fn reset_statement_suppressed() {
     STATEMENT_SUPPRESSED.with(|c| c.set(false));
 }
 
+/// proc_exit_prepare's `debug_query_string = NULL` (the query string itself
+/// is owned by tcop's log-context provider).
+pub fn suppress_statement() {
+    STATEMENT_SUPPRESSED.with(|c| c.set(true));
+}
+
+/// proc_exit_prepare's `error_context_stack = NULL`.
+pub fn clear_emit_context_callbacks() {
+    EMIT_CONTEXT_CALLBACKS.with(|s| s.borrow_mut().clear());
+}
+
 #[cold]
 #[inline(never)]
 fn errstart_not_called() -> PgError {

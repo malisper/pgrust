@@ -13,6 +13,7 @@ use types_error::PgResult;
 
 pub mod control_file;
 pub mod ctl;
+pub mod guc_vars;
 pub mod insert;
 pub mod redo;
 pub mod startup;
@@ -365,4 +366,10 @@ pub fn init_seams() {
         .install(assign_checkpoint_completion_target);
     guc_tables::hooks::check_wal_segment_size.install(check_wal_segment_size_hook);
     guc_tables::hooks::check_wal_buffers.install(check_wal_buffers_hook);
+    guc_tables::hooks::assign_wal_sync_method.install(write::assign_wal_sync_method);
+    guc_tables::option_sets::wal_sync_method_options.install(guc_vars::WAL_SYNC_METHOD_OPTIONS);
+    guc_tables::option_sets::archive_mode_options.install(guc_vars::ARCHIVE_MODE_OPTIONS);
+    guc_vars::install();
+    guc_vars::install_wal_segment_size();
+    guc_vars::install_checkpoint_completion_target();
 }

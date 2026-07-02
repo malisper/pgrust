@@ -26,3 +26,34 @@ seam_core::seam!(
     // InitXLogInsert (xloginsert.c): per-backend WAL construction buffers.
     pub fn init_xlog_insert() -> PgResult<()>
 );
+
+/// One `XLogRegisterBuffer(block_id, buffer, flags)` plus its
+/// `XLogRegisterBufData` fragments.
+pub struct XLogRegBuf<'a> {
+    pub block_id: u8,
+    pub buffer: types_core::Buffer,
+    pub flags: u8,
+    pub bufdata: &'a [&'a [u8]],
+}
+
+// REGBUF_* (xloginsert.h).
+pub const REGBUF_FORCE_IMAGE: u8 = 0x01;
+pub const REGBUF_NO_IMAGE: u8 = 0x02;
+pub const REGBUF_WILL_INIT: u8 = 0x04;
+pub const REGBUF_STANDARD: u8 = 0x08;
+pub const REGBUF_KEEP_DATA: u8 = 0x10;
+pub const REGBUF_NO_CHANGE: u8 = 0x20;
+
+seam_core::seam!(
+    // XLogBeginInsert + XLogRegisterData(main_data fragments) + one
+    // XLogRegisterBuffer/XLogRegisterBufData group per entry +
+    // XLogSetRecordFlags(record_flags) + XLogInsert(rmid, info): the
+    // buffer-registering record form heap/nbtree DML needs.
+    pub fn xlog_insert_record(
+        rmid: u8,
+        info: u8,
+        record_flags: u8,
+        main_data: &[&[u8]],
+        bufs: &[XLogRegBuf<'_>],
+    ) -> PgResult<XLogRecPtr>
+);

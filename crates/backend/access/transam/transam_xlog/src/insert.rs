@@ -673,11 +673,6 @@ pub fn GetXLogInsertRecPtr() -> XLogRecPtr {
     XLogBytePosToRecPtr(current_bytepos)
 }
 
-pub(crate) fn reset_local_buffer_cache() {
-    CACHED_PAGE.set(0);
-    CACHED_POS.set(std::ptr::null_mut());
-}
-
 const _: () = {
     assert!(XL_TOT_LEN == 0 && XL_PREV == 8 && XL_INFO == 16 && XL_RMID == 17 && XL_CRC == 20);
 };

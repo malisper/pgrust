@@ -88,3 +88,8 @@ seam_core::seam!(
     // twophase_seams; this is the recovery-time oldestActiveXid source.
     pub fn recovery_oldest_active_xid() -> TransactionId
 );
+
+seam_core::seam!(
+    // RemovePromoteSignalFiles (xlogrecovery.c).
+    pub fn remove_promote_signal_files()
+);

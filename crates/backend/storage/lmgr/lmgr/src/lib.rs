@@ -289,6 +289,30 @@ pub fn UnlockDatabaseObject(
     Ok(())
 }
 
+pub fn LockSharedObject(
+    classid: Oid,
+    objid: Oid,
+    objsubid: u16,
+    lockmode: LOCKMODE,
+) -> PgResult<()> {
+    let tag = LOCKTAG::object(types_core::primitive::InvalidOid, classid, objid, objsubid);
+    acquire(tag, lockmode, false)?;
+    // Unconditional in C: syscaches must reflect changes we waited out.
+    inval_seams::accept_invalidation_messages::call()?;
+    Ok(())
+}
+
+pub fn UnlockSharedObject(
+    classid: Oid,
+    objid: Oid,
+    objsubid: u16,
+    lockmode: LOCKMODE,
+) -> PgResult<()> {
+    let tag = LOCKTAG::object(types_core::primitive::InvalidOid, classid, objid, objsubid);
+    lock_seams::lock_release::call(tag, lockmode, false)?;
+    Ok(())
+}
+
 #[cold]
 #[inline(never)]
 fn xact_wait_context(

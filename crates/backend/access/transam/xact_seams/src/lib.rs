@@ -71,3 +71,8 @@ seam_core::seam!(
     // MarkSubxactTopXidLogged() (xact.c).
     pub fn mark_subxact_top_xid_logged()
 );
+
+seam_core::seam!(
+    // GetCurrentTransactionId (xact.c): assigns an XID if none yet.
+    pub fn get_current_transaction_id() -> types_error::PgResult<types_core::TransactionId>
+);

@@ -33,3 +33,19 @@ seam_core::seam!(
         elevel: types_error::ErrorLevel,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // SelectConfigFiles(userDoption, progname) (guc.c) — deferred half of the
+    // ported guc unit; false = C's "exit(2)" failure return.
+    pub fn select_config_files(user_d_option: Option<&str>, progname: &str) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    // InitializeGUCOptions (guc.c) — same deferred half.
+    pub fn initialize_guc_options() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // InitializeShmemGUCs (guc.c) — same deferred half.
+    pub fn initialize_shmem_gucs() -> PgResult<()>
+);

@@ -51,6 +51,41 @@ impl<'mcx> CatCache<'mcx> {
         self.ct_push_head(bucket, slot);
     }
 
+    /// `dlist_move_head` on the hit path — inline and unchecked like C's,
+    /// which is 100% inline dlist stores (the checked `ct_move_head` was an
+    /// outlined call per hit).
+    ///
+    /// # Safety (caller: `found`)
+    /// `bucket` is the masked index of the bucket `slot` is linked on, and
+    /// `slot` came off that bucket's live walk.
+    #[inline(always)]
+    pub(crate) unsafe fn ct_move_head_hot(&mut self, bucket: usize, slot: u32) {
+        unsafe {
+            let head = *self.cc_bucket.get_unchecked(bucket);
+            if head == slot {
+                return;
+            }
+            // Unlink: slot != head, so prev != NONE; head != NONE (the list
+            // holds at least `slot`).
+            let (prev, next) = {
+                let ct = self.tuples.get_unchecked(slot as usize);
+                (ct.prev, ct.next)
+            };
+            self.tuples.get_unchecked_mut(prev as usize).next = next;
+            if next != NONE {
+                self.tuples.get_unchecked_mut(next as usize).prev = prev;
+            }
+            // Push at head.
+            {
+                let ct = self.tuples.get_unchecked_mut(slot as usize);
+                ct.prev = NONE;
+                ct.next = head;
+            }
+            self.tuples.get_unchecked_mut(head as usize).prev = slot;
+            *self.cc_bucket.get_unchecked_mut(bucket) = slot;
+        }
+    }
+
     pub(crate) fn ct_alloc(&mut self, ct: CatCTup) -> u32 {
         if self.ct_free != NONE {
             let slot = self.ct_free;

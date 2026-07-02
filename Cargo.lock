@@ -125,6 +125,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "auth"
+version = "0.0.0"
+
+[[package]]
 name = "auth_seams"
 version = "0.0.0"
 dependencies = [
@@ -503,8 +507,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "controldata_utils"
+version = "0.0.0"
+dependencies = [
+ "crc32c",
+ "elog",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "crc32c"
 version = "0.1.0"
+
+[[package]]
+name = "crypt"
+version = "0.0.0"
 
 [[package]]
 name = "datum"
@@ -901,6 +919,14 @@ name = "hashfn"
 version = "0.1.0"
 
 [[package]]
+name = "hba"
+version = "0.0.0"
+
+[[package]]
+name = "hba_seams"
+version = "0.0.0"
+
+[[package]]
 name = "heapam"
 version = "0.1.0"
 dependencies = [
@@ -1018,6 +1044,10 @@ dependencies = [
  "types_error",
  "types_tuple",
 ]
+
+[[package]]
+name = "ifaddr"
+version = "0.0.0"
 
 [[package]]
 name = "indexam"
@@ -1654,6 +1684,28 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_error",
+]
+
+[[package]]
+name = "pg_database"
+version = "0.0.0"
+dependencies = [
+ "cache_syscache",
+ "datum",
+ "genam",
+ "heaptuple",
+ "mcx",
+ "pg_database_seams",
+ "relcache",
+ "table",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_rel",
+ "types_scan",
+ "types_storage",
+ "types_tuple",
+ "varlena",
 ]
 
 [[package]]
