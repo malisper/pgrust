@@ -1,5 +1,6 @@
 mod actions;
 mod parse;
+mod stack;
 mod tables;
 mod yystype;
 

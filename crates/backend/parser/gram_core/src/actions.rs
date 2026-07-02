@@ -5,12 +5,12 @@ use types_nodes::{Alias, Node, NodeList, RangeVar, RawStmt, SelectStmt, ValUnion
 use types_nodes::{BitString, Boolean, Float, Integer};
 
 use crate::parse::Parser;
-use crate::tables::names::{HAS_ACTION, YYRLINE, YYTNAME};
+use crate::stack::Stacks;
+use crate::tables::names::{YYRLINE, YYTNAME};
 use crate::tables::YYR1;
 use crate::yystype::YYSTYPE;
 
-// gram.y's explicitly-precedenced operator set, in MathOp declaration order
-// (shared by the a_expr/b_expr binary productions and MathOp itself).
+// Explicitly-precedenced operators, MathOp declaration order.
 static MATH_OPS: [&str; 12] =
     ["+", "-", "*", "/", "%", "^", "<", ">", "=", "<=", ">=", "<>"];
 
@@ -24,38 +24,29 @@ fn unimplemented_rule(rule: usize) -> ! {
 }
 
 impl<'mcx> Parser<'mcx> {
-    // gram.y semantic actions, numbered by the generated gram.c reduction
-    // switch. Rules without a case take bison's default `$$ = $1`; cased
-    // rules outside the ported SELECT path panic with their gram.y location.
+    // gram.y actions by generated-gram.c rule number (DISPATCH == 0 rules).
+    #[inline(never)]
     pub(crate) fn reduce(
         &mut self,
+        stk: &mut Stacks<'mcx>,
         rule: usize,
         yylen: usize,
         yyval: &mut YYSTYPE<'mcx>,
         yyloc: i32,
     ) -> PgResult<()> {
-        if !HAS_ACTION[rule] {
-            if yylen >= 1 {
-                *yyval = self.v(yylen, 1);
-            }
-            return Ok(());
-        }
         let mcx = self.mcx;
         let _ = yyloc;
         match rule {
-            // parse_toplevel: stmtmulti
-            2 => self.parsetree = self.v(yylen, 1).list(),
+            2 => self.parsetree = stk.v(yylen, 1).list(),
             // stmtmulti: stmtmulti ';' toplevel_stmt
             8 => {
-                let mut list = self.v(yylen, 1).list();
+                let mut list = stk.v(yylen, 1).list();
                 if !list.is_nil() {
-                    let end = self.l(yylen, 2);
+                    let end = stk.l(yylen, 2);
                     let last = list.last().expect("stmtmulti cell");
-                    // SAFETY: the parse tree is uniquely owned by the parser
-                    // stacks until yyparse returns; no derived refs are live.
+                    // SAFETY: tree is parser-owned; no derived refs live.
                     unsafe {
                         last.with_mut::<RawStmt, _>(|rs| {
-                            // updateRawStmtEnd: keep an already-set length.
                             if rs.stmt_len <= 0 {
                                 rs.stmt_len = end - rs.stmt_location;
                             }
@@ -63,79 +54,51 @@ impl<'mcx> Parser<'mcx> {
                         .expect("llast_node(RawStmt)");
                     }
                 }
-                if let Some(stmt) = self.v(yylen, 3).node() {
-                    let loc = self.l(yylen, 3);
+                if let Some(stmt) = stk.v(yylen, 3).node() {
+                    let loc = stk.l(yylen, 3);
                     list.lappend(mcx, Node::mk_raw_stmt(mcx, Some(stmt), loc, 0)?)?;
                 }
                 *yyval = YYSTYPE::List(list);
             }
             // stmtmulti: toplevel_stmt
             9 => {
-                *yyval = YYSTYPE::List(match self.v(yylen, 1).node() {
+                *yyval = YYSTYPE::List(match stk.v(yylen, 1).node() {
                     Some(stmt) => {
-                        let loc = self.l(yylen, 1);
+                        let loc = stk.l(yylen, 1);
                         NodeList::make1(mcx, Node::mk_raw_stmt(mcx, Some(stmt), loc, 0)?)?
                     }
                     None => NodeList::nil(),
                 });
             }
-            // stmt: /*EMPTY*/
-            136 => *yyval = YYSTYPE::Node(None),
-            // select_with_parens: '(' select_no_parens|select_with_parens ')'
-            1707 | 1708 => *yyval = self.v(yylen, 2),
-            // select_no_parens: simple_select; select_clause: both alts
-            1709 | 1717 | 1718 => *yyval = self.v(yylen, 1),
-            // simple_select: SELECT opt_all_clause opt_target_list into_clause
-            //   from_clause where_clause group_clause having_clause window_clause
             1719 => {
                 let mut n = Node::build::<SelectStmt>(mcx)?;
-                n.targetList = self.v(yylen, 3).list();
-                n.intoClause = self.v(yylen, 4).node();
-                n.fromClause = self.v(yylen, 5).list();
-                n.whereClause = self.v(yylen, 6).node();
-                let (distinct, list) = self.v(yylen, 7).group();
+                n.targetList = stk.v(yylen, 3).list();
+                n.intoClause = stk.v(yylen, 4).node();
+                n.fromClause = stk.v(yylen, 5).list();
+                n.whereClause = stk.v(yylen, 6).node();
+                let (distinct, list) = stk.v(yylen, 7).group();
                 n.groupClause = list;
                 n.groupDistinct = distinct;
-                n.havingClause = self.v(yylen, 8).node();
-                n.windowClause = self.v(yylen, 9).list();
+                n.havingClause = stk.v(yylen, 8).node();
+                n.windowClause = stk.v(yylen, 9).list();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            // into_clause: /*EMPTY*/
-            1744 => *yyval = YYSTYPE::Node(None),
-            // opt_sort_clause: sort_clause
-            1765 => *yyval = self.v(yylen, 1),
-            // opt_sort_clause: /*EMPTY*/
-            1766 => *yyval = YYSTYPE::List(NodeList::nil()),
-            // sort_clause: ORDER BY sortby_list
-            1767 => *yyval = self.v(yylen, 3),
-            // group_clause: /*EMPTY*/
             1799 => {
                 *yyval = YYSTYPE::Group { distinct: false, list: NodeList::nil() };
             }
-            // having_clause: HAVING a_expr
-            1811 => *yyval = self.v(yylen, 2),
-            // having_clause: /*EMPTY*/
-            1812 => *yyval = YYSTYPE::Node(None),
-            // from_clause: FROM from_list
-            1828 => *yyval = self.v(yylen, 2),
-            // from_clause: /*EMPTY*/
-            1829 => *yyval = YYSTYPE::List(NodeList::nil()),
-            // from_list: table_ref
             1830 => {
-                let t = self.v(yylen, 1).node().expect("table_ref");
+                let t = stk.v(yylen, 1).node().expect("table_ref");
                 *yyval = YYSTYPE::List(NodeList::make1(mcx, t)?);
             }
-            // from_list: from_list ',' table_ref
             1831 => {
-                let mut list = self.v(yylen, 1).list();
-                let t = self.v(yylen, 3).node().expect("table_ref");
+                let mut list = stk.v(yylen, 1).list();
+                let t = stk.v(yylen, 3).node().expect("table_ref");
                 list.lappend(mcx, t)?;
                 *yyval = YYSTYPE::List(list);
             }
-            // table_ref: relation_expr opt_alias_clause
             1832 => {
-                let rv = self.v(yylen, 1).node().expect("relation_expr");
-                let alias = self.v(yylen, 2).alias();
+                let rv = stk.v(yylen, 1).node().expect("relation_expr");
+                let alias = stk.v(yylen, 2).alias();
                 // SAFETY: as rule 8 — parser-owned tree, no live derived refs.
                 unsafe {
                     rv.with_mut::<RangeVar, _>(|r| r.alias = alias)
@@ -143,22 +106,14 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::Node(Some(rv));
             }
-            // alias_clause: AS ColId
             1851 => {
-                let name = self.v(yylen, 2).str_val();
+                let name = stk.v(yylen, 2).str_val();
                 *yyval = YYSTYPE::Alias(Some(mk_alias(mcx, name)?));
             }
-            // alias_clause: ColId
             1853 => {
-                let name = self.v(yylen, 1).str_val();
+                let name = stk.v(yylen, 1).str_val();
                 *yyval = YYSTYPE::Alias(Some(mk_alias(mcx, name)?));
             }
-            // opt_alias_clause: alias_clause
-            1854 => *yyval = self.v(yylen, 1),
-            // opt_alias_clause: /*EMPTY*/
-            1855 => *yyval = YYSTYPE::Alias(None),
-            // relation_expr: extended_relation_expr passthrough
-            1872 => *yyval = self.v(yylen, 1),
             // relation_expr: qualified_name; extended_relation_expr:
             //   qualified_name '*' | ONLY qualified_name | ONLY '(' q_n ')'
             1871 | 1873 | 1874 | 1875 => {
@@ -167,7 +122,7 @@ impl<'mcx> Parser<'mcx> {
                     1875 => 3,
                     _ => 1,
                 };
-                let rv = self.v(yylen, arg).node().expect("qualified_name");
+                let rv = stk.v(yylen, arg).node().expect("qualified_name");
                 let inh = rule <= 1873;
                 // SAFETY: as rule 8.
                 unsafe {
@@ -179,171 +134,119 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::Node(Some(rv));
             }
-            // where_clause: WHERE a_expr
-            1893 => *yyval = self.v(yylen, 2),
-            // where_clause: /*EMPTY*/
-            1894 => *yyval = YYSTYPE::Node(None),
-            // a_expr: c_expr
-            2020 => *yyval = self.v(yylen, 1),
-            // a_expr: '+' a_expr %prec UMINUS
             2025 => {
-                let r = self.v(yylen, 2).node();
-                *yyval = self.simple_a_expr("+", None, r, self.l(yylen, 1))?;
+                let r = stk.v(yylen, 2).node();
+                *yyval = self.simple_a_expr("+", None, r, stk.l(yylen, 1))?;
             }
-            // a_expr: '-' a_expr %prec UMINUS (doNegate)
             2026 => {
-                let n = self.v(yylen, 2).node().expect("a_expr");
-                *yyval = self.do_negate(n, self.l(yylen, 1))?;
+                let n = stk.v(yylen, 2).node().expect("a_expr");
+                *yyval = self.do_negate(n, stk.l(yylen, 1))?;
             }
-            // a_expr: a_expr <op> a_expr (bison-precedence operators)
             2027..=2038 => {
                 let op = MATH_OPS[rule - 2027];
-                let l = self.v(yylen, 1).node();
-                let r = self.v(yylen, 3).node();
-                *yyval = self.simple_a_expr(op, l, r, self.l(yylen, 2))?;
+                let l = stk.v(yylen, 1).node();
+                let r = stk.v(yylen, 3).node();
+                *yyval = self.simple_a_expr(op, l, r, stk.l(yylen, 2))?;
             }
-            // a_expr: a_expr qual_Op a_expr %prec Op (makeA_Expr)
             2039 => {
-                let name = self.v(yylen, 2).list();
-                let l = self.v(yylen, 1).node();
-                let r = self.v(yylen, 3).node();
-                *yyval = YYSTYPE::Node(Some(Node::mk_a_expr(
-                    mcx,
-                    AEXPR_OP,
-                    name,
-                    l,
-                    r,
-                    self.l(yylen, 2),
-                )?));
+                let name = stk.v(yylen, 2).list();
+                let l = stk.v(yylen, 1).node();
+                let r = stk.v(yylen, 3).node();
+                *yyval =
+                    YYSTYPE::Node(Some(make_a_expr(mcx, name, l, r, stk.l(yylen, 2))?));
             }
-            // a_expr: qual_Op a_expr %prec Op
             2040 => {
-                let name = self.v(yylen, 1).list();
-                let r = self.v(yylen, 2).node();
-                *yyval = YYSTYPE::Node(Some(Node::mk_a_expr(
-                    mcx,
-                    AEXPR_OP,
-                    name,
-                    None,
-                    r,
-                    self.l(yylen, 1),
-                )?));
+                let name = stk.v(yylen, 1).list();
+                let r = stk.v(yylen, 2).node();
+                *yyval =
+                    YYSTYPE::Node(Some(make_a_expr(mcx, name, None, r, stk.l(yylen, 1))?));
             }
-            // c_expr: columnref | AexprConst
-            2112 | 2113 => *yyval = self.v(yylen, 1),
-            // c_expr: PARAM opt_indirection
+            // c_expr: PARAM / parenthesized a_expr (opt_indirection)
             2114 => {
-                let number = self.v(yylen, 1).ival();
-                let ind = self.v(yylen, 2).list();
+                let number = stk.v(yylen, 1).ival();
+                let ind = stk.v(yylen, 2).list();
                 if !ind.is_nil() {
                     panic!("gram_core: A_Indirection over PARAM not ported (types_nodes gap)");
                 }
-                *yyval = YYSTYPE::Node(Some(Node::mk_param_ref(mcx, number, self.l(yylen, 1))?));
+                *yyval = YYSTYPE::Node(Some(Node::mk_param_ref(mcx, number, stk.l(yylen, 1))?));
             }
-            // c_expr: '(' a_expr ')' opt_indirection
             2115 => {
-                let e = self.v(yylen, 2);
-                let ind = self.v(yylen, 4).list();
+                let e = stk.v(yylen, 2);
+                let ind = stk.v(yylen, 4).list();
                 if !ind.is_nil() {
                     panic!("gram_core: A_Indirection over (a_expr) not ported (types_nodes gap)");
                 }
                 *yyval = e;
             }
-            // all_Op: Op | MathOp
-            2266 | 2267 => *yyval = self.v(yylen, 1),
-            // MathOp: '+' .. NOT_EQUALS
             2268..=2279 => *yyval = YYSTYPE::Keyword(MATH_OPS[rule - 2268]),
-            // qual_Op | qual_all_Op | subquery_Op: all_Op → list_make1(makeString($1))
             2280 | 2282 | 2284 => {
-                let op = self.v(yylen, 1).str_val();
+                let op = stk.v(yylen, 1).str_val();
                 *yyval = YYSTYPE::List(NodeList::make1(mcx, Node::mk_string(mcx, op)?)?);
             }
-            // ... : OPERATOR '(' any_operator ')'
-            2281 | 2283 | 2285 => *yyval = self.v(yylen, 3),
-            // subquery_Op: [NOT_LA] LIKE/ILIKE
             2286..=2289 => {
                 let op = ["~~", "!~~", "~~*", "!~~*"][rule - 2286];
                 *yyval = YYSTYPE::List(NodeList::make1(mcx, Node::mk_string(mcx, op)?)?);
             }
-            // window_clause: WINDOW window_definition_list
-            2228 => *yyval = self.v(yylen, 2),
-            // window_clause: /*EMPTY*/
-            2229 => *yyval = YYSTYPE::List(NodeList::nil()),
-            // columnref: ColId [indirection] (makeColumnRef)
             2338 | 2339 => {
-                let name = self.v(yylen, 1).str_val();
-                let ind = if rule == 2339 { self.v(yylen, 2).list() } else { NodeList::nil() };
+                let name = stk.v(yylen, 1).str_val();
+                let ind = if rule == 2339 { stk.v(yylen, 2).list() } else { NodeList::nil() };
                 *yyval = YYSTYPE::Node(Some(self.make_column_ref(
                     name,
                     ind,
-                    self.l(yylen, 1),
+                    stk.l(yylen, 1),
                 )?));
             }
-            // indirection_el: '.' attr_name | '.' '*' | subscripts
             2340 => {
-                let s = self.v(yylen, 2).str_val();
+                let s = stk.v(yylen, 2).str_val();
                 *yyval = YYSTYPE::Node(Some(Node::mk_string(mcx, s)?));
             }
             2341 => *yyval = YYSTYPE::Node(Some(Node::mk_a_star(mcx)?)),
             2342 | 2343 => {
                 panic!("gram_core: A_Indices subscripting not ported (types_nodes gap)")
             }
-            // opt_slice_bound: a_expr | /*EMPTY*/
-            2344 => *yyval = self.v(yylen, 1),
-            2345 => *yyval = YYSTYPE::Node(None),
-            // indirection: indirection_el | indirection indirection_el
             2346 => {
-                let el = self.v(yylen, 1).node().expect("indirection_el");
+                let el = stk.v(yylen, 1).node().expect("indirection_el");
                 *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
             }
             2347 => {
-                let mut list = self.v(yylen, 1).list();
-                let el = self.v(yylen, 2).node().expect("indirection_el");
+                let mut list = stk.v(yylen, 1).list();
+                let el = stk.v(yylen, 2).node().expect("indirection_el");
                 list.lappend(mcx, el)?;
                 *yyval = YYSTYPE::List(list);
             }
-            // opt_indirection: /*EMPTY*/ | opt_indirection indirection_el
-            2348 => *yyval = YYSTYPE::List(NodeList::nil()),
             2349 => {
-                let mut list = self.v(yylen, 1).list();
-                let el = self.v(yylen, 2).node().expect("indirection_el");
+                let mut list = stk.v(yylen, 1).list();
+                let el = stk.v(yylen, 2).node().expect("indirection_el");
                 list.lappend(mcx, el)?;
                 *yyval = YYSTYPE::List(list);
             }
-            // opt_target_list: target_list
-            2420 => *yyval = self.v(yylen, 1),
-            // opt_target_list: /*EMPTY*/
-            2421 => *yyval = YYSTYPE::List(NodeList::nil()),
-            // target_list: target_el
             2422 => {
-                let t = self.v(yylen, 1).node().expect("target_el");
+                let t = stk.v(yylen, 1).node().expect("target_el");
                 *yyval = YYSTYPE::List(NodeList::make1(mcx, t)?);
             }
-            // target_list: target_list ',' target_el
             2423 => {
-                let mut list = self.v(yylen, 1).list();
-                let t = self.v(yylen, 3).node().expect("target_el");
+                let mut list = stk.v(yylen, 1).list();
+                let t = stk.v(yylen, 3).node().expect("target_el");
                 list.lappend(mcx, t)?;
                 *yyval = YYSTYPE::List(list);
             }
-            // target_el: a_expr AS ColLabel | a_expr BareColLabel | a_expr | '*'
             2424..=2427 => {
                 let (name, val) = match rule {
                     2424 => {
-                        let val = self.v(yylen, 1).node();
-                        (Some(self.v(yylen, 3).str_val()), val)
+                        let val = stk.v(yylen, 1).node();
+                        (Some(stk.v(yylen, 3).str_val()), val)
                     }
                     2425 => {
-                        let val = self.v(yylen, 1).node();
-                        (Some(self.v(yylen, 2).str_val()), val)
+                        let val = stk.v(yylen, 1).node();
+                        (Some(stk.v(yylen, 2).str_val()), val)
                     }
-                    2426 => (None, self.v(yylen, 1).node()),
+                    2426 => (None, stk.v(yylen, 1).node()),
                     _ => {
                         let star = NodeList::make1(mcx, Node::mk_a_star(mcx)?)?;
-                        (None, Some(Node::mk_column_ref(mcx, star, self.l(yylen, 1))?))
+                        (None, Some(Node::mk_column_ref(mcx, star, stk.l(yylen, 1))?))
                     }
                 };
-                let loc = self.l(yylen, 1);
+                let loc = stk.l(yylen, 1);
                 *yyval = YYSTYPE::Node(Some(Node::mk_res_target(
                     mcx,
                     name,
@@ -352,17 +255,35 @@ impl<'mcx> Parser<'mcx> {
                     loc,
                 )?));
             }
-            // qualified_name: ColId (makeRangeVar(NULL, $1, @1))
+            2428 => {
+                let q = stk.v(yylen, 1).node().expect("qualified_name");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, q)?);
+            }
+            2429 => {
+                let mut list = stk.v(yylen, 1).list();
+                let q = stk.v(yylen, 3).node().expect("qualified_name");
+                list.lappend(mcx, q)?;
+                *yyval = YYSTYPE::List(list);
+            }
+            2432 => {
+                let s = stk.v(yylen, 1).str_val();
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, Node::mk_string(mcx, s)?)?);
+            }
+            2433 => {
+                let mut list = stk.v(yylen, 1).list();
+                let s = stk.v(yylen, 3).str_val();
+                list.lappend(mcx, Node::mk_string(mcx, s)?)?;
+                *yyval = YYSTYPE::List(list);
+            }
             2430 => {
-                let relname = self.v(yylen, 1).str_val();
-                let rv = make_range_var(mcx, None, None, Some(relname), self.l(yylen, 1))?;
+                let relname = stk.v(yylen, 1).str_val();
+                let rv = make_range_var(mcx, None, None, Some(relname), stk.l(yylen, 1))?;
                 *yyval = YYSTYPE::Node(Some(rv));
             }
-            // qualified_name: ColId indirection (makeRangeVarFromQualifiedName)
             2431 => {
-                let name = self.v(yylen, 1).str_val();
-                let ind = self.v(yylen, 2).list();
-                let loc = self.l(yylen, 1);
+                let name = stk.v(yylen, 1).str_val();
+                let ind = stk.v(yylen, 2).list();
+                let loc = stk.l(yylen, 1);
                 let mut parts = [None; 2];
                 for (i, n) in ind.iter().enumerate() {
                     // check_qualified_name
@@ -380,47 +301,40 @@ impl<'mcx> Parser<'mcx> {
                 };
                 *yyval = YYSTYPE::Node(Some(rv));
             }
-            // AexprConst: Iconst | FCONST | Sconst | BCONST | XCONST
             2439 => {
-                let v = self.v(yylen, 1).ival();
-                *yyval = self.a_const(ValUnion::Integer(Integer { ival: v }), yylen)?;
+                let v = stk.v(yylen, 1).ival();
+                *yyval = self.a_const(ValUnion::Integer(Integer { ival: v }), stk.l(yylen, 1))?;
             }
             2440 => {
-                let s = self.v(yylen, 1).str_val();
-                *yyval = self.a_const(ValUnion::Float(Float { fval: s }), yylen)?;
+                let s = stk.v(yylen, 1).str_val();
+                *yyval = self.a_const(ValUnion::Float(Float { fval: s }), stk.l(yylen, 1))?;
             }
             2441 => {
-                let s = self.v(yylen, 1).str_val();
+                let s = stk.v(yylen, 1).str_val();
                 *yyval = self.a_const(
                     ValUnion::String(types_nodes::String { sval: s }),
-                    yylen,
+                    stk.l(yylen, 1),
                 )?;
             }
             2442 | 2443 => {
-                let s = self.v(yylen, 1).str_val();
-                *yyval = self.a_const(ValUnion::BitString(BitString { bsval: s }), yylen)?;
+                let s = stk.v(yylen, 1).str_val();
+                *yyval = self.a_const(ValUnion::BitString(BitString { bsval: s }), stk.l(yylen, 1))?;
             }
-            // AexprConst: TRUE_P | FALSE_P | NULL_P
-            2449 => *yyval = self.a_const(ValUnion::Boolean(Boolean { boolval: true }), yylen)?,
-            2450 => *yyval = self.a_const(ValUnion::Boolean(Boolean { boolval: false }), yylen)?,
+            2449 => *yyval = self.a_const(ValUnion::Boolean(Boolean { boolval: true }), stk.l(yylen, 1))?,
+            2450 => *yyval = self.a_const(ValUnion::Boolean(Boolean { boolval: false }), stk.l(yylen, 1))?,
             2451 => {
                 *yyval =
-                    YYSTYPE::Node(Some(Node::mk_a_const(mcx, None, self.l(yylen, 1))?));
+                    YYSTYPE::Node(Some(Node::mk_a_const(mcx, None, stk.l(yylen, 1))?));
             }
-            // Iconst / Sconst / SignedIconst
-            2452 | 2453 | 2454 => *yyval = self.v(yylen, 1),
-            2455 => *yyval = YYSTYPE::Ival(self.v(yylen, 2).ival()),
-            2456 => *yyval = YYSTYPE::Ival(-self.v(yylen, 2).ival()),
-            // ColId / type_function_name / NonReservedWord / ColLabel /
-            // BareColLabel: IDENT passthrough or keyword pstrdup (borrowed
-            // &'static str here; C copies only for writability).
-            2470..=2486 => *yyval = YYSTYPE::Str(self.v(yylen, 1).str_val()),
+            2455 => *yyval = YYSTYPE::Ival(stk.v(yylen, 2).ival()),
+            2456 => *yyval = YYSTYPE::Ival(-stk.v(yylen, 2).ival()),
+            2470..=2486 => *yyval = YYSTYPE::Str(stk.v(yylen, 1).str_val()),
             _ => unimplemented_rule(rule),
         }
         Ok(())
     }
 
-    // makeColumnRef (A_Indices arms are unreachable: rules 2342/2343 panic).
+    // makeColumnRef; A_Indices arms unreachable (rules 2342/2343 panic).
     fn make_column_ref(
         &self,
         colname: &'mcx str,
@@ -445,7 +359,6 @@ impl<'mcx> Parser<'mcx> {
         names: &NodeList<'mcx>,
         location: i32,
     ) -> Box<types_error::PgError> {
-        // NameListToString (namespace.c): dot-join String/A_Star elements.
         let mut joined = std::string::String::new();
         for s in first.into_iter().chain(names.iter().map(|n| {
             if n.as_a_star().is_some() {
@@ -500,7 +413,6 @@ impl<'mcx> Parser<'mcx> {
         self.simple_a_expr("-", None, Some(n), location)
     }
 
-    // makeSimpleA_Expr(AEXPR_OP, name, lexpr, rexpr, location)
     fn simple_a_expr(
         &self,
         op: &'static str,
@@ -509,18 +421,41 @@ impl<'mcx> Parser<'mcx> {
         location: i32,
     ) -> PgResult<YYSTYPE<'mcx>> {
         let name = NodeList::make1(self.mcx, Node::mk_string(self.mcx, op)?)?;
-        Ok(YYSTYPE::Node(Some(Node::mk_a_expr(
-            self.mcx, AEXPR_OP, name, lexpr, rexpr, location,
+        Ok(YYSTYPE::Node(Some(make_a_expr(
+            self.mcx, name, lexpr, rexpr, location,
         )?)))
     }
 
-    fn a_const(&self, val: ValUnion<'mcx>, yylen: usize) -> PgResult<YYSTYPE<'mcx>> {
+    fn a_const(&self, val: ValUnion<'mcx>, location: i32) -> PgResult<YYSTYPE<'mcx>> {
         Ok(YYSTYPE::Node(Some(Node::mk_a_const(
             self.mcx,
             Some(val),
-            self.l(yylen, 1),
+            location,
         )?)))
     }
+}
+
+// makeA_Expr (makefuncs.c): makeNode zero-fill leaves rexpr_list_start/end 0
+// (types_nodes::mk_a_expr's -1 diverges from C; ground truth is gram.c).
+fn make_a_expr<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    name: NodeList<'mcx>,
+    lexpr: Option<Node<'mcx>>,
+    rexpr: Option<Node<'mcx>>,
+    location: i32,
+) -> PgResult<Node<'mcx>> {
+    Node::mk(
+        mcx,
+        types_nodes::A_Expr {
+            kind: AEXPR_OP,
+            name,
+            lexpr,
+            rexpr,
+            rexpr_list_start: 0,
+            rexpr_list_end: 0,
+            location,
+        },
+    )
 }
 
 // makeRangeVar (makefuncs.c): inh = true, permanent persistence.

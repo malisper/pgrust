@@ -10,6 +10,11 @@ pub mod names {
     include!(concat!(env!("OUT_DIR"), "/names.rs"));
 }
 
+const _: () = {
+    assert!(YYPACT.len() == YYNSTATES as usize);
+    assert!(YYR2.len() == YYNRULES + 1);
+};
+
 #[inline]
 pub fn yytranslate(yychar: i32) -> i32 {
     if (0..=YYMAXUTOK).contains(&yychar) {
