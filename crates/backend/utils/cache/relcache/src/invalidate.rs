@@ -1,0 +1,462 @@
+use core::cell::Cell;
+use std::rc::Rc;
+
+use types_core::{InvalidSubTransactionId, Oid, SubTransactionId};
+use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, WARNING};
+use types_rel::{RelationData, RELKIND_INDEX, RELKIND_PARTITIONED_INDEX, RELKIND_RELATION};
+
+use crate::schemapg::CLASS_OID_INDEX_ID;
+use crate::{build, cache_mcx, store, with_state, RelCacheEnt};
+
+const RELATION_RELATION_ID: Oid = types_core::RELATION_RELATION_ID;
+
+// RelationInvalidateRelation; C also closes smgr / frees rd_amcache (absent fields).
+pub(crate) fn RelationInvalidateRelation(rel: &RelationData<'static>) {
+    rel.rd_isvalid.set(false);
+}
+
+// RelationClearRelation: caller has verified refcount-zero, not nailed, and
+// no in-transaction subids.
+pub(crate) fn RelationClearRelation(relid: Oid, rel: &RelationData<'static>) -> PgResult<()> {
+    debug_assert_eq!(rel.rd_createSubid.get(), InvalidSubTransactionId);
+    debug_assert_eq!(rel.rd_firstRelfilelocatorSubid.get(), InvalidSubTransactionId);
+    debug_assert_eq!(rel.rd_droppedSubid.get(), InvalidSubTransactionId);
+    RelationInvalidateRelation(rel);
+    store::delete(relid)
+}
+
+fn copy_preserved(from: &RelationData<'static>, to: &RelationData<'static>) {
+    to.rd_createSubid.set(from.rd_createSubid.get());
+    to.rd_newRelfilelocatorSubid.set(from.rd_newRelfilelocatorSubid.get());
+    to.rd_firstRelfilelocatorSubid.set(from.rd_firstRelfilelocatorSubid.get());
+    to.rd_droppedSubid.set(from.rd_droppedSubid.get());
+    to.pgstat_enabled.set(from.pgstat_enabled.get());
+}
+
+fn replace_entry(relid: Oid, newrel: &Rc<RelationData<'static>>) {
+    with_state(|st| match st.id_cache.get_mut(&relid) {
+        Some(ent) => ent.rel = Rc::clone(newrel),
+        None => {
+            st.id_cache.insert(relid, RelCacheEnt { rel: Rc::clone(newrel), nailed: false });
+        }
+    });
+}
+
+#[cold]
+#[inline(never)]
+fn deleted_while_in_use(relid: Oid) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("relation {relid} deleted while still in use"))
+            .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+    )
+}
+
+// RelationRebuildRelation. C swaps the rebuilt contents in place; here the
+// entry Rc is replaced and live holders keep their invalidated snapshot until
+// they reopen. The swap's keep_* preservation set maps to copying the Cell
+// fields and reusing an equal tupdesc Rc.
+pub(crate) fn RelationRebuildRelation(
+    relid: Oid,
+    held: &Rc<RelationData<'static>>,
+) -> PgResult<Rc<RelationData<'static>>> {
+    debug_assert!(!store::refcount_zero(held, 0));
+    debug_assert_eq!(held.rd_droppedSubid.get(), InvalidSubTransactionId);
+
+    RelationInvalidateRelation(held);
+
+    if matches!(held.rd_rel.relkind, RELKIND_INDEX | RELKIND_PARTITIONED_INDEX)
+        && held.rd_index.is_some()
+    {
+        return RelationReloadIndexInfo(relid, held);
+    }
+    if store::is_nailed(relid) {
+        return RelationReloadNailed(relid, held);
+    }
+
+    let Some(newdata) = build::build_desc_data(relid)? else {
+        if snapmgr::HistoricSnapshotActive() {
+            return Ok(Rc::clone(held));
+        }
+        return Err(deleted_while_in_use(relid));
+    };
+    debug_assert_eq!(held.rd_rel.relkind, newdata.rd_rel.relkind);
+
+    let mut newdata = newdata;
+    if tupdesc::equalTupleDescs(&held.rd_att, &newdata.rd_att) {
+        // keep_tupdesc: preserve descriptor identity for pointer-compare users
+        newdata.rd_att = Rc::clone(&held.rd_att);
+    }
+    let newrel = Rc::new(newdata);
+    copy_preserved(held, &newrel);
+    newrel.rd_isvalid.set(true);
+    replace_entry(relid, &newrel);
+    Ok(newrel)
+}
+
+// RelationReloadIndexInfo. C refreshes rd_rel + the mutable pg_index bools in
+// place; here it's a fresh index-info build, holders keep the old snapshot.
+fn RelationReloadIndexInfo(
+    relid: Oid,
+    held: &Rc<RelationData<'static>>,
+) -> PgResult<Rc<RelationData<'static>>> {
+    debug_assert!(!held.rd_isvalid.get());
+    debug_assert_eq!(held.rd_droppedSubid.get(), InvalidSubTransactionId);
+
+    let critical = crate::criticalRelcachesBuilt();
+    if held.rd_rel.relisshared && !critical {
+        // Shared index before database selection: no pg_class to read, no
+        // significant schema change possible (rd_locator: storage unit).
+        held.rd_isvalid.set(true);
+        return Ok(Rc::clone(held));
+    }
+
+    let index_ok = relid != CLASS_OID_INDEX_ID && critical;
+    let Some(scanned) = relcache_build_seams::scan_pg_relation::call(relid, index_ok, false)?
+    else {
+        return Err(Box::new(
+            PgError::error(format!("could not find pg_class tuple for index {relid}"))
+                .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+        ));
+    };
+    let mcx = cache_mcx();
+    let ii = relcache_build_seams::relation_init_index_access_info::call(mcx, relid, &scanned.form)?;
+
+    let newrel = Rc::new(RelationData {
+        rd_id: relid,
+        rd_backend: held.rd_backend,
+        rd_islocaltemp: held.rd_islocaltemp,
+        rd_isvalid: Cell::new(true),
+        rd_createSubid: Cell::new(InvalidSubTransactionId),
+        rd_newRelfilelocatorSubid: Cell::new(InvalidSubTransactionId),
+        rd_firstRelfilelocatorSubid: Cell::new(InvalidSubTransactionId),
+        rd_droppedSubid: Cell::new(InvalidSubTransactionId),
+        rd_lockInfo: lmgr::RelationInitLockInfo(relid, scanned.form.relisshared),
+        rd_rel: scanned.form,
+        rd_att: Rc::clone(&held.rd_att),
+        rd_index: Some(ii.index),
+        rd_opcintype: ii.opcintype,
+        rd_opfamily: ii.opfamily,
+        rd_indoption: ii.indoption,
+        rd_indcollation: ii.indcollation,
+        rd_options: scanned.options,
+        pgstat_enabled: Cell::new(false),
+    });
+    copy_preserved(held, &newrel);
+    with_state(|st| {
+        if let Some(ent) = st.id_cache.get_mut(&relid) {
+            ent.rel = Rc::clone(&newrel);
+        }
+    });
+    Ok(newrel)
+}
+
+// RelationReloadNailed: only rd_rel content (relfrozenxid etc.) can change.
+fn RelationReloadNailed(
+    relid: Oid,
+    held: &Rc<RelationData<'static>>,
+) -> PgResult<Rc<RelationData<'static>>> {
+    debug_assert!(!held.rd_isvalid.get());
+    debug_assert_eq!(held.rd_rel.relkind, RELKIND_RELATION);
+
+    if !crate::criticalRelcachesBuilt() {
+        // Can't scan pg_class yet: leave invalid but usable.
+        return Ok(Rc::clone(held));
+    }
+
+    // Valid before scanning: the scan re-enters the relcache for pg_class and
+    // must not recurse into this reload.
+    held.rd_isvalid.set(true);
+    let scanned = relcache_build_seams::scan_pg_relation::call(relid, true, false)?
+        .ok_or_else(|| deleted_while_in_use(relid))?;
+
+    let newrel = Rc::new(RelationData {
+        rd_id: relid,
+        rd_backend: held.rd_backend,
+        rd_islocaltemp: held.rd_islocaltemp,
+        rd_isvalid: Cell::new(true),
+        rd_createSubid: Cell::new(InvalidSubTransactionId),
+        rd_newRelfilelocatorSubid: Cell::new(InvalidSubTransactionId),
+        rd_firstRelfilelocatorSubid: Cell::new(InvalidSubTransactionId),
+        rd_droppedSubid: Cell::new(InvalidSubTransactionId),
+        rd_lockInfo: held.rd_lockInfo,
+        rd_rel: scanned.form,
+        rd_att: Rc::clone(&held.rd_att),
+        rd_index: None,
+        rd_opcintype: mcx::PgVec::new_in(cache_mcx()),
+        rd_opfamily: mcx::PgVec::new_in(cache_mcx()),
+        rd_indoption: mcx::PgVec::new_in(cache_mcx()),
+        rd_indcollation: mcx::PgVec::new_in(cache_mcx()),
+        rd_options: scanned.options,
+        pgstat_enabled: Cell::new(false),
+    });
+    copy_preserved(held, &newrel);
+    with_state(|st| {
+        if let Some(ent) = st.id_cache.get_mut(&relid) {
+            debug_assert!(ent.nailed);
+            ent.rel = Rc::clone(&newrel);
+        }
+    });
+    Ok(newrel)
+}
+
+// RelationFlushRelation: rebuild if open, else blow away.
+pub(crate) fn RelationFlushRelation(relid: Oid) -> PgResult<()> {
+    let Some((rel, nailed)) = store::lookup_ent(relid) else {
+        return Ok(());
+    };
+    let in_xact = xact_seams::is_transaction_state::call();
+
+    if rel.rd_createSubid.get() != InvalidSubTransactionId
+        || rel.rd_firstRelfilelocatorSubid.get() != InvalidSubTransactionId
+    {
+        // New-in-transaction rels are rebuilt, never flushed, to keep their
+        // "new" status; our held clone is C's temporary refcount bump.
+        if in_xact && rel.rd_droppedSubid.get() == InvalidSubTransactionId {
+            RelationRebuildRelation(relid, &rel)?;
+        } else {
+            RelationInvalidateRelation(&rel);
+        }
+        return Ok(());
+    }
+
+    if !nailed && store::refcount_zero(&rel, 1) {
+        RelationClearRelation(relid, &rel)
+    } else if !in_xact || (nailed && store::refcount_zero(&rel, 1)) {
+        // No catalog access possible, or an unused nailed rel: defer.
+        RelationInvalidateRelation(&rel);
+        Ok(())
+    } else {
+        RelationRebuildRelation(relid, &rel).map(|_| ())
+    }
+}
+
+// RelationForgetRelation: caller reports that it dropped the relation.
+pub fn RelationForgetRelation(rid: Oid) -> PgResult<()> {
+    let Some((rel, _nailed)) = store::lookup_ent(rid) else {
+        return Ok(());
+    };
+    if !store::refcount_zero(&rel, 1) {
+        return Err(Box::new(
+            PgError::error(format!("relation {rid} is still open"))
+                .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+        ));
+    }
+    debug_assert_eq!(rel.rd_droppedSubid.get(), InvalidSubTransactionId);
+    if rel.rd_createSubid.get() != InvalidSubTransactionId
+        || rel.rd_firstRelfilelocatorSubid.get() != InvalidSubTransactionId
+    {
+        // Preserve rd_*Subid for subxact rollback: mark dropped, keep entry.
+        rel.rd_droppedSubid.set(xact_seams::get_current_sub_transaction_id::call());
+        RelationInvalidateRelation(&rel);
+        Ok(())
+    } else {
+        RelationClearRelation(rid, &rel)
+    }
+}
+
+pub fn RelationCacheInvalidateEntry(relationId: Oid) -> PgResult<()> {
+    let cached = with_state(|st| st.id_cache.contains_key(&relationId));
+    if cached {
+        with_state(|st| st.invals_received += 1);
+        RelationFlushRelation(relationId)
+    } else {
+        with_state(|st| {
+            for ent in st.in_progress.iter_mut() {
+                if ent.reloid == relationId {
+                    ent.invalidated = true;
+                }
+            }
+        });
+        Ok(())
+    }
+}
+
+// Two phases: deletions first (safe against re-entry), then rebuilds ordered
+// pg_class, pg_class_oid_index, other nailed, rest — catalogs must be current
+// before they reload the rest. Phase lists are transient per call, as in C.
+pub fn RelationCacheInvalidate(debug_discard: bool) -> PgResult<()> {
+    relmapper_seams::relation_map_invalidate_all::call();
+
+    let snapshot: Vec<(Oid, Rc<RelationData<'static>>, bool)> = with_state(|st| {
+        st.id_cache.iter().map(|(k, e)| (*k, Rc::clone(&e.rel), e.nailed)).collect()
+    });
+
+    let mut rebuild_first: Vec<(Oid, Rc<RelationData<'static>>, bool)> = Vec::new();
+    let mut rebuild: Vec<(Oid, Rc<RelationData<'static>>, bool)> = Vec::new();
+
+    for (relid, rel, nailed) in snapshot {
+        // New-in-transaction rels can't be targets of cross-backend inval.
+        if rel.rd_createSubid.get() != InvalidSubTransactionId
+            || rel.rd_firstRelfilelocatorSubid.get() != InvalidSubTransactionId
+        {
+            continue;
+        }
+        with_state(|st| st.invals_received += 1);
+
+        if !nailed && store::refcount_zero(&rel, 1) {
+            RelationClearRelation(relid, &rel)?;
+            continue;
+        }
+        // C refreshes mapped rels' rd_locator here (storage unit).
+        if relid == RELATION_RELATION_ID {
+            rebuild_first.insert(0, (relid, rel, nailed));
+        } else if relid == CLASS_OID_INDEX_ID {
+            rebuild_first.push((relid, rel, nailed));
+        } else if nailed {
+            rebuild.insert(0, (relid, rel, nailed));
+        } else {
+            rebuild.push((relid, rel, nailed));
+        }
+    }
+
+    // FDs must be re-opened after possible relfilenumber changes.
+    smgr::smgrreleaseall();
+
+    let in_xact = xact_seams::is_transaction_state::call();
+    for (relid, rel, nailed) in rebuild_first.into_iter().chain(rebuild) {
+        if !in_xact || (nailed && store::refcount_zero(&rel, 1)) {
+            RelationInvalidateRelation(&rel);
+        } else {
+            RelationRebuildRelation(relid, &rel)?;
+        }
+    }
+
+    if !debug_discard {
+        with_state(|st| {
+            for ent in st.in_progress.iter_mut() {
+                ent.invalidated = true;
+            }
+        });
+    }
+    Ok(())
+}
+
+// Copied out so cleanup can re-enter the store (cold, per-EOXact).
+fn eoxact_targets() -> Vec<Oid> {
+    with_state(|st| {
+        if st.eoxact_list_overflowed {
+            st.id_cache.keys().copied().collect()
+        } else {
+            st.eoxact_list[..st.eoxact_list_len].to_vec()
+        }
+    })
+}
+
+pub fn AtEOXact_RelationCache(isCommit: bool) -> PgResult<()> {
+    with_state(|st| {
+        debug_assert!(st.in_progress.is_empty() || !isCommit);
+        st.in_progress.clear();
+    });
+
+    // Duplicates possible in eoxact_list; cleanup is idempotent. No
+    // EOXactTupleDescArray: rd_att is Rc-shared, freed by the last holder.
+    for relid in eoxact_targets() {
+        AtEOXact_cleanup(relid, isCommit)?;
+    }
+
+    with_state(|st| {
+        st.eoxact_list_len = 0;
+        st.eoxact_list_overflowed = false;
+    });
+    Ok(())
+}
+
+fn AtEOXact_cleanup(relid: Oid, isCommit: bool) -> PgResult<()> {
+    let Some((rel, nailed)) = store::lookup_ent(relid) else {
+        return Ok(());
+    };
+    let _ = nailed;
+    #[cfg(debug_assertions)]
+    if !miscinit_seams::is_bootstrap_processing_mode::call() {
+        // C: rd_refcnt == (rd_isnailed ? 1 : 0); the nail lives in the flag.
+        debug_assert!(store::refcount_zero(&rel, 1), "relcache reference leak at EOXact");
+    }
+
+    let clear_relcache = if isCommit {
+        rel.rd_droppedSubid.get() != InvalidSubTransactionId
+    } else {
+        rel.rd_createSubid.get() != InvalidSubTransactionId
+    };
+
+    rel.rd_createSubid.set(InvalidSubTransactionId);
+    rel.rd_newRelfilelocatorSubid.set(InvalidSubTransactionId);
+    rel.rd_firstRelfilelocatorSubid.set(InvalidSubTransactionId);
+    rel.rd_droppedSubid.set(InvalidSubTransactionId);
+
+    if clear_relcache {
+        if store::refcount_zero(&rel, 1) {
+            return RelationClearRelation(relid, &rel);
+        }
+        elog::elog(
+            WARNING,
+            format!(
+                "cannot remove relcache entry for \"{}\" because it has nonzero refcount",
+                rel.name()
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+pub fn AtEOSubXact_RelationCache(
+    isCommit: bool,
+    mySubid: SubTransactionId,
+    parentSubid: SubTransactionId,
+) -> PgResult<()> {
+    with_state(|st| {
+        debug_assert!(st.in_progress.is_empty() || !isCommit);
+        st.in_progress.clear();
+    });
+
+    for relid in eoxact_targets() {
+        AtEOSubXact_cleanup(relid, isCommit, mySubid, parentSubid)?;
+    }
+    // Keep eoxact_list: more cleanup at higher levels and EOXact.
+    Ok(())
+}
+
+fn AtEOSubXact_cleanup(
+    relid: Oid,
+    isCommit: bool,
+    mySubid: SubTransactionId,
+    parentSubid: SubTransactionId,
+) -> PgResult<()> {
+    let Some((rel, _nailed)) = store::lookup_ent(relid) else {
+        return Ok(());
+    };
+
+    if rel.rd_createSubid.get() == mySubid {
+        debug_assert!(
+            rel.rd_droppedSubid.get() == mySubid
+                || rel.rd_droppedSubid.get() == InvalidSubTransactionId
+        );
+        if isCommit && rel.rd_droppedSubid.get() == InvalidSubTransactionId {
+            rel.rd_createSubid.set(parentSubid);
+        } else if store::refcount_zero(&rel, 1) {
+            rel.rd_createSubid.set(InvalidSubTransactionId);
+            rel.rd_newRelfilelocatorSubid.set(InvalidSubTransactionId);
+            rel.rd_firstRelfilelocatorSubid.set(InvalidSubTransactionId);
+            rel.rd_droppedSubid.set(InvalidSubTransactionId);
+            return RelationClearRelation(relid, &rel);
+        } else {
+            rel.rd_createSubid.set(parentSubid);
+            elog::elog(
+                WARNING,
+                format!(
+                    "cannot remove relcache entry for \"{}\" because it has nonzero refcount",
+                    rel.name()
+                ),
+            )?;
+        }
+    }
+
+    let transfer = |cell: &Cell<SubTransactionId>| {
+        if cell.get() == mySubid {
+            cell.set(if isCommit { parentSubid } else { InvalidSubTransactionId });
+        }
+    };
+    transfer(&rel.rd_newRelfilelocatorSubid);
+    transfer(&rel.rd_firstRelfilelocatorSubid);
+    transfer(&rel.rd_droppedSubid);
+    Ok(())
+}
