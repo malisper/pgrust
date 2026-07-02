@@ -36,7 +36,7 @@ backend-access-common-heaptuple	src/backend/access/common/heaptuple.c(form lane)
 backend-access-common-indextuple	*/indextuple.c	todo			fabled:backend-access-common-indextuple; m1-dep(stub-ok)
 backend-access-common-more	*/printtup.c,*/reloptions.c	todo			fabled:backend-access-common-reloptions + backend-access-common-printtup; m1-spine
 backend-access-common-next	*/attmap.c,*/syncscan.c,*/tupconvert.c	todo			fabled:backend-access-common-next; m1-spine
-backend-access-common-relation	*/relation.c	ported	relation	cold	fabled:backend-access-common-relation; m1-spine; per-open not per-tuple; installs relation_seams (table.c port declared them, signatures verified C-faithful); closer = lock release only, relcache decrement is Rc drop (rd_refcnt == strong count, no by-OID close); owner seams created: relcache/lmgr/syscache/inval/namespace/xact + pgstat_init_relation, is_bootstrap_processing_mode appended; no caches/fastpaths in C unit; 12 tests, density 1.7%
+backend-access-common-relation	*/relation.c	ported	relation	cold	fabled counterpart deleted-workaround class; m1-spine; installs relation_seams (table.c signatures verified vs C); relcache close = pure Rc drop (no by-OID seam), lock half via installed closer, drop = abort path; 6 owner seam crates created; 12 tests, density 1.7%
 backend-access-common-small	*/bufmask.c,*/printsimple.c,*/relation.c,*/scankey.c,*/session.c,*/toast_compression.c	todo			
 backend-access-common-tidstore	*/tidstore.c	todo			fabled:backend-access-common-tidstore
 backend-access-common-detoast	*/detoast.c	todo			fabled:backend-access-common-detoast; m1-dep(stub-ok)
