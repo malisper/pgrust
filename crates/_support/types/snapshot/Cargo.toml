@@ -1,0 +1,9 @@
+[package]
+name = "types_snapshot"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../mcx" }
+types_core = { path = "../types_core" }
