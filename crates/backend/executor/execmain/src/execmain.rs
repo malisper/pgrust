@@ -1,0 +1,331 @@
+use std::rc::Rc;
+
+use ::executils::EStateData;
+use ::mcx::{McxOwned, MemoryContext};
+use ::tcop_dest::DestReceiver;
+use ::types_core::CommandId;
+use ::types_error::{PgError, PgResult};
+use ::types_nodes::nodes_enums::CmdType;
+use ::types_nodes::plannodes::PlannedStmt;
+use ::types_portal::QueryDescHandle;
+use ::types_scan::sdir::{ScanDirection, ScanDirectionIsNoMovement};
+use ::types_slot::{
+    SlotData, EXEC_FLAG_BACKWARD, EXEC_FLAG_EXPLAIN_ONLY, EXEC_FLAG_SKIP_TRIGGERS,
+};
+use ::types_tuple::TupleDescData;
+
+use crate::procnode::{exec_end_node, exec_init_node, exec_proc_node, exec_shutdown_node};
+use crate::querydesc::{self, ExecData, ExecTy, QueryDescData};
+
+pub(crate) fn executor_start_seam(h: QueryDescHandle, eflags: i32) -> PgResult<()> {
+    querydesc::with_qd(h, |qd| {
+        backend_status_seams::pgstat_report_query_id::call(qd.plannedstmt().queryId, false);
+        standard_executor_start(qd, eflags)
+    })
+}
+
+pub(crate) fn executor_run_seam(
+    h: QueryDescHandle,
+    direction: ScanDirection,
+    count: u64,
+    dest: &mut DestReceiver<'_>,
+) -> PgResult<()> {
+    querydesc::with_qd(h, |qd| standard_executor_run(qd, direction, count, dest))
+}
+
+pub(crate) fn executor_finish_seam(h: QueryDescHandle) -> PgResult<()> {
+    querydesc::with_qd(h, standard_executor_finish)
+}
+
+pub(crate) fn executor_end_seam(h: QueryDescHandle) -> PgResult<()> {
+    querydesc::with_qd(h, standard_executor_end)
+}
+
+#[cold]
+#[inline(never)]
+fn unrecognized_operation(operation: CmdType) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "unrecognized operation code: {}",
+        operation as i32
+    )))
+}
+
+// ExecCheckXactReadOnly: a read-only SELECT with no permission targets passes
+// vacuously; anything that could write panics until the aclchk/rte lane lands.
+fn exec_check_xact_read_only(pstmt: &PlannedStmt<'_>) {
+    if pstmt.commandType != CmdType::CMD_SELECT
+        || pstmt.hasModifyingCTE
+        || !pstmt.permInfos.is_nil()
+    {
+        panic!("ExecCheckXactReadOnly (execMain.c): read-only enforcement lane not ported");
+    }
+}
+
+fn exec_check_permissions(pstmt: &PlannedStmt<'_>) {
+    if !pstmt.permInfos.is_nil() {
+        panic!("ExecCheckPermissions (execMain.c): RTEPermissionInfo lane not ported");
+    }
+}
+
+/// `standard_ExecutorStart` (execMain.c).
+pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgResult<()> {
+    assert!(qd.exec.is_none(), "ExecutorStart: query already started");
+    #[cfg(debug_assertions)]
+    if let Some(s) = &qd.snapshot {
+        if snapmgr::ActiveSnapshotSet() {
+            debug_assert!(Rc::ptr_eq(s, &snapmgr::GetActiveSnapshot()));
+        }
+    }
+    let pstmt = qd.plannedstmt();
+
+    if (guc_tables::vars::XactReadOnly.read() || xact::IsInParallelMode())
+        && eflags & EXEC_FLAG_EXPLAIN_ONLY == 0
+    {
+        exec_check_xact_read_only(pstmt);
+    }
+
+    if !qd.params.is_null() || !pstmt.paramExecTypes.is_nil() {
+        panic!("standard_ExecutorStart (execMain.c): ParamListInfo/ParamExecData lane not ported");
+    }
+    if !qd.query_env.is_null() {
+        panic!("standard_ExecutorStart (execMain.c): QueryEnvironment wiring not ported");
+    }
+
+    let mut output_cid: CommandId = 0;
+    match qd.operation {
+        CmdType::CMD_SELECT => {
+            if !pstmt.rowMarks.is_nil() || pstmt.hasModifyingCTE {
+                output_cid = xact::GetCurrentCommandId(true)?;
+            }
+            if !pstmt.hasModifyingCTE {
+                eflags |= EXEC_FLAG_SKIP_TRIGGERS;
+            }
+        }
+        CmdType::CMD_INSERT | CmdType::CMD_DELETE | CmdType::CMD_UPDATE | CmdType::CMD_MERGE => {
+            output_cid = xact::GetCurrentCommandId(true)?;
+        }
+        other => return Err(unrecognized_operation(other)),
+    }
+
+    let es_snapshot = snapmgr::RegisterSnapshot(qd.snapshot.as_ref())?;
+    let es_crosscheck = snapmgr::RegisterSnapshot(qd.crosscheck_snapshot.as_ref())?;
+
+    if eflags & (EXEC_FLAG_SKIP_TRIGGERS | EXEC_FLAG_EXPLAIN_ONLY) == 0 {
+        panic!("standard_ExecutorStart (execMain.c): AfterTriggerBeginQuery (trigger.c) not ported");
+    }
+
+    let source_text = qd.source_text();
+    let instrument = qd.instrument_options;
+    let operation = qd.operation;
+
+    let mut exec = McxOwned::<ExecTy>::try_new(
+        MemoryContext::new_bump("ExecutorState"),
+        |mcx| {
+            Ok(ExecData {
+                estate: EStateData::new_in(mcx),
+                planstate: None,
+            })
+        },
+    )?;
+    let tup_desc = exec.with_mut_mcx(|_mcx, data| {
+        // SAFETY: lifetime shortening of the read-only plan tree (PlannedStmt
+        // is invariant only through its lists' GAT pointers); the retention
+        // contract keeps it alive past this bundle (pquery::stmt_list shape).
+        let pstmt = unsafe { querydesc::shorten_pstmt(pstmt) };
+        let es = &mut data.estate;
+        es.es_sourceText = Some(source_text);
+        es.es_output_cid = output_cid;
+        es.es_snapshot = es_snapshot;
+        es.es_crosscheck_snapshot = es_crosscheck;
+        es.es_top_eflags = eflags;
+        es.es_instrument = instrument;
+        es.es_jit_flags = pstmt.jitFlags;
+        init_plan(data, pstmt, operation, eflags)
+    })?;
+    qd.tup_desc = Some(tup_desc);
+    qd.exec = Some(exec);
+    Ok(())
+}
+
+/// `InitPlan` (execMain.c).
+fn init_plan<'mcx>(
+    data: &mut ExecData<'mcx>,
+    pstmt: &'mcx PlannedStmt<'mcx>,
+    operation: CmdType,
+    eflags: i32,
+) -> PgResult<Rc<TupleDescData<'static>>> {
+    exec_check_permissions(pstmt);
+    if !pstmt.rtable.is_nil() {
+        panic!("ExecInitRangeTable (execUtils.c): range-table lane not ported (RangeTblEntry)");
+    }
+    if !pstmt.partPruneInfos.is_nil() {
+        panic!("ExecDoInitialPruning (execPartition.c) not ported");
+    }
+    if !pstmt.rowMarks.is_nil() {
+        panic!("InitPlan (execMain.c): ExecRowMark lane not ported");
+    }
+    if !pstmt.subplans.is_nil() {
+        panic!("InitPlan (execMain.c): SubPlan lane not ported (nodeSubplan.c)");
+    }
+
+    let plan_node = pstmt.planTree.expect("PlannedStmt without planTree");
+    let planstate = exec_init_node(Some(plan_node), &mut data.estate, eflags)?
+        .expect("ExecInitNode of a non-NULL planTree");
+
+    let plan = plan_node.as_plan().expect("planTree is a Plan node");
+    let tup_type = planstate.exec_get_result_type(plan)?;
+
+    if operation == CmdType::CMD_SELECT {
+        for tle_node in plan.targetlist.iter() {
+            let tle = tle_node
+                .as_target_entry()
+                .expect("targetlist entry is a TargetEntry");
+            if tle.resjunk {
+                panic!("InitPlan (execMain.c): junk filter lane not ported (execJunk.c)");
+            }
+        }
+    }
+
+    data.planstate = Some(planstate);
+    Ok(tup_type)
+}
+
+/// `standard_ExecutorRun` (execMain.c).
+pub fn standard_executor_run<'m>(
+    qd: &mut QueryDescData,
+    direction: ScanDirection,
+    count: u64,
+    dest: &mut DestReceiver<'m>,
+) -> PgResult<()> {
+    let operation = qd.operation;
+    let pstmt = qd.plannedstmt();
+    let send_tuples = operation == CmdType::CMD_SELECT || pstmt.hasReturning;
+    let use_parallel_mode = if qd.already_executed || count != 0 {
+        false
+    } else {
+        pstmt.parallelModeNeeded
+    };
+    qd.already_executed = true;
+    let tup_desc = qd.tup_desc.clone();
+    let exec = qd.exec.as_mut().expect("ExecutorRun before ExecutorStart");
+    exec.with_mut_mcx(|_mcx, data| {
+        debug_assert!(data.estate.es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY == 0);
+        data.estate.es_processed = 0;
+        if send_tuples {
+            let desc = tup_desc.as_deref().expect("sendTuples without a result tupdesc");
+            dest.startup(crate::desc_mcx(), operation as i32, desc)?;
+        }
+        if !ScanDirectionIsNoMovement(direction) {
+            execute_plan(data, operation, send_tuples, count, direction, use_parallel_mode, dest)?;
+        }
+        data.estate.es_total_processed += data.estate.es_processed;
+        if send_tuples {
+            dest.shutdown()?;
+        }
+        Ok(())
+    })
+}
+
+/// `ExecutePlan` (execMain.c): THE per-tuple loop.
+fn execute_plan<'m, 'mcx>(
+    data: &mut ExecData<'mcx>,
+    operation: CmdType,
+    send_tuples: bool,
+    number_tuples: u64,
+    direction: ScanDirection,
+    use_parallel_mode: bool,
+    dest: &mut DestReceiver<'m>,
+) -> PgResult<()> {
+    let ExecData { estate, planstate } = data;
+    let planstate = planstate.as_mut().expect("ExecutorRun without a plan state");
+    estate.es_direction = direction;
+    estate.es_use_parallel_mode = use_parallel_mode;
+    if use_parallel_mode {
+        panic!("ExecutePlan (execMain.c): EnterParallelMode lane not ported (execParallel.c)");
+    }
+
+    let mut current_tuple_count: u64 = 0;
+    loop {
+        estate.reset_per_tuple_expr_context();
+
+        let Some(slot_id) = exec_proc_node(planstate, estate)? else {
+            break;
+        };
+
+        if send_tuples {
+            let slot = estate.slot_mut(slot_id);
+            // SAFETY: lifetime bridge at the seam boundary (C passes a raw
+            // TupleTableSlot*). The receiver only copies datums out during
+            // the call and retains no borrow of the slot (printtup keeps an
+            // address token + its own wire buffer).
+            let slot: &mut SlotData<'m> =
+                unsafe { &mut *(slot as *mut SlotData<'mcx>).cast::<SlotData<'m>>() };
+            if !dest.receive_slot(slot)? {
+                break;
+            }
+        }
+
+        if operation == CmdType::CMD_SELECT {
+            estate.es_processed += 1;
+        }
+
+        current_tuple_count += 1;
+        if number_tuples != 0 && number_tuples == current_tuple_count {
+            break;
+        }
+    }
+
+    if estate.es_top_eflags & EXEC_FLAG_BACKWARD == 0 {
+        exec_shutdown_node(planstate);
+    }
+    Ok(())
+}
+
+/// `standard_ExecutorFinish` (execMain.c).
+pub fn standard_executor_finish(qd: &mut QueryDescData) -> PgResult<()> {
+    let exec = qd.exec.as_mut().expect("ExecutorFinish before ExecutorStart");
+    exec.with_mut(|data| {
+        let es = &mut data.estate;
+        debug_assert!(es.es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY == 0);
+        assert!(!es.es_finished, "ExecutorFinish called twice");
+        // ExecPostprocessPlan: only ModifyTable registers aux nodes, unported.
+        debug_assert!(es.es_auxmodifytables.is_empty());
+        if es.es_top_eflags & EXEC_FLAG_SKIP_TRIGGERS == 0 {
+            panic!(
+                "standard_ExecutorFinish (execMain.c): AfterTriggerEndQuery (trigger.c) not ported"
+            );
+        }
+        es.es_finished = true;
+    });
+    Ok(())
+}
+
+/// `standard_ExecutorEnd` (execMain.c); dropping the bundle is
+/// `FreeExecutorState` (MemoryContextDelete of es_query_cxt).
+pub fn standard_executor_end(qd: &mut QueryDescData) -> PgResult<()> {
+    let mut exec = qd.exec.take().expect("ExecutorEnd before ExecutorStart");
+    exec.with_mut(|data| -> PgResult<()> {
+        let ExecData { estate, planstate } = data;
+        debug_assert!(
+            estate.es_finished || estate.es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY != 0
+        );
+        if let Some(ps) = planstate.as_mut() {
+            exec_end_node(ps, estate)?;
+        }
+        estate.exec_reset_tuple_table(false);
+        debug_assert!(estate.es_relations.iter().all(Option::is_none));
+        snapmgr::UnregisterSnapshot(estate.es_snapshot.take().as_ref());
+        snapmgr::UnregisterSnapshot(estate.es_crosscheck_snapshot.take().as_ref());
+        estate.teardown();
+        Ok(())
+    })?;
+    drop(exec);
+    qd.tup_desc = None;
+    Ok(())
+}
+
+// Compile-time check that the seam impls match the declared signatures.
+const _: () = {
+    let _: execmain_seams::executor_run::Signature = executor_run_seam;
+    let _: execmain_seams::executor_start::Signature = executor_start_seam;
+};
