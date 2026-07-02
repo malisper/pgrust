@@ -29,10 +29,14 @@ pub use control_file::{
 };
 pub use ctl::{XLOGShmemInit, XLOGShmemSize};
 pub use insert::{
-    GetFullPageWriteInfo, GetRedoRecPtr, RecoveryInProgress, XLogInsertAllowed, XLogInsertRecord,
+    GetFullPageWriteInfo, GetInsertRecPtr, GetLastImportantRecPtr, GetRedoRecPtr,
+    RecoveryInProgress, XLogInsertAllowed, XLogInsertRecord,
 };
-pub use startup::{CreateCheckPoint, ShutdownXLOG, StartupXLOG};
-pub use write::{XLogFileInit, XLogFileOpen, XLogFlush, XLogNeedsFlush, XLogSetAsyncXactLSN};
+pub use startup::{CreateCheckPoint, ShutdownXLOG, StartupXLOG, UpdateFullPageWrites};
+pub use write::{
+    GetLastSegSwitchData, SetWalWriterSleeping, XLogBackgroundFlush, XLogFileInit, XLogFileOpen,
+    XLogFlush, XLogNeedsFlush, XLogSetAsyncXactLSN,
+};
 
 pub const InvalidXLogRecPtr: XLogRecPtr = 0;
 pub const XLOG_BLCKSZ: usize = xlogreader_seams::XLOG_BLCKSZ;
@@ -366,6 +370,7 @@ pub fn init_seams() {
     use transam_xlog_seams as s;
 
     s::xlog_redo::set(redo::xlog_redo);
+    s::data_checksums_enabled::set(DataChecksumsEnabled);
     s::xlog_flush::set(write::XLogFlush);
     s::xlog_needs_flush::set(write::XLogNeedsFlush);
     s::count_ckpt_slru_written::set(startup::count_ckpt_slru_written);

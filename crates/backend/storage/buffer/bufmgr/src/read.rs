@@ -1,7 +1,7 @@
 use core::sync::atomic::Ordering;
 
 use elog::ereport;
-use lwlock::{LWLockAcquire, LWLockRelease, LW_EXCLUSIVE, LW_SHARED};
+use lwlock::{LWLockAcquire, LWLockConditionalAcquire, LWLockRelease, LW_EXCLUSIVE, LW_SHARED};
 use types_core::{
     BlockNumber, Buffer, BufferIsValid, ForkNumber, InvalidBlockNumber, BLCKSZ, INIT_FORKNUM,
     INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP, RELPERSISTENCE_UNLOGGED,
@@ -191,7 +191,30 @@ fn GetVictimBuffer(strategy: &BufferAccessStrategy) -> PgResult<Buffer> {
         debug_assert!(GetPrivateRefCount(BufferDescriptorGetBuffer(desc)) == 1);
 
         if buf_state & BM_DIRTY != 0 {
-            panic!("unported callee reached from bufmgr.c GetVictimBuffer: FlushBuffer (write-back is phase 2; dirty victim under memory pressure)");
+            debug_assert!(buf_state & BM_TAG_VALID != 0);
+            debug_assert!(buf_state & BM_VALID != 0);
+            // Conditional share-lock: an unconditional wait can deadlock
+            // against a backend already holding this page exclusively.
+            if !LWLockConditionalAcquire(&desc.content_lock, LW_SHARED)? {
+                UnpinBuffer(desc);
+                continue;
+            }
+            if strategy.is_some() {
+                let hdr_state = LockBufHdr(desc);
+                let lsn = crate::ops::buffer_page_get_lsn(BufferDescriptorGetBuffer(desc));
+                UnlockBufHdr(desc, hdr_state);
+                if transam_xlog_seams::xlog_needs_flush::call(lsn)
+                    && crate::freelist::StrategyRejectBuffer(strategy, desc.buf_id, _from_ring)
+                {
+                    LWLockRelease(&desc.content_lock)?;
+                    UnpinBuffer(desc);
+                    continue;
+                }
+            }
+            let flush_result = crate::write::FlushBuffer(desc);
+            LWLockRelease(&desc.content_lock)?;
+            flush_result?;
+            crate::write::schedule_backend_writeback(&desc.tag())?;
         }
         if buf_state & BM_VALID != 0 {
             counters::evict();

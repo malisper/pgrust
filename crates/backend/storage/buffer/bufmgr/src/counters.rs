@@ -9,6 +9,7 @@ thread_local! {
     static SHARED_BLKS_READ: Cell<u64> = const { Cell::new(0) };
     static SHARED_BLKS_DIRTIED: Cell<u64> = const { Cell::new(0) };
     static SHARED_BLKS_EVICTED: Cell<u64> = const { Cell::new(0) };
+    static SHARED_BLKS_WRITTEN: Cell<u64> = const { Cell::new(0) };
 }
 
 #[inline]
@@ -35,6 +36,15 @@ pub(crate) fn dirtied() {
 #[inline]
 pub(crate) fn evict() {
     SHARED_BLKS_EVICTED.with(|c| c.set(c.get() + 1));
+}
+
+#[inline]
+pub(crate) fn written() {
+    SHARED_BLKS_WRITTEN.with(|c| c.set(c.get() + 1));
+}
+
+pub fn shared_blks_written() -> u64 {
+    SHARED_BLKS_WRITTEN.with(|c| c.get())
 }
 
 pub fn shared_blks_hit() -> u64 {

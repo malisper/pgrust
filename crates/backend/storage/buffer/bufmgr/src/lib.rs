@@ -1,11 +1,12 @@
 //! bufmgr.c + buf_init.c + buf_table.c + freelist.c read/pin/mapping/eviction
-//! core. Write-back (FlushBuffer/BufferSync/checkpoint), extend, drop-rel,
-//! localbuf, AIO and hint-bit lanes are phase 2: every entry point is a loud
-//! panic naming its C function.
+//! core, plus the checkpoint write-back lane (FlushBuffer/BufferSync/
+//! CheckPointBuffers). Extend, drop-rel, localbuf, AIO and hint-bit lanes are
+//! phase 2: every entry point is a loud panic naming its C function.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+mod bgwriter_sync;
 mod buf_hdr;
 mod buf_table;
 pub mod counters;
@@ -15,6 +16,7 @@ mod ops;
 mod pin;
 mod privref;
 mod read;
+mod write;
 
 use types_core::{
     BlockNumber, Buffer, ForkNumber, Oid, INVALID_PROC_NUMBER, RELPERSISTENCE_TEMP,
@@ -37,9 +39,11 @@ pub use freelist::{
 pub use ops::{
     buffer_page_get_lsn, buffer_page_is_new, buffer_page_ref, buffer_page_set_lsn,
     overwrite_buffer_page, BufferGetBlockNumber, BufferGetPagePtr, BufferGetTag,
-    ConditionalLockBuffer, FlushOneBuffer, LockBuffer, LockBufferForCleanup, MarkBufferDirty,
+    ConditionalLockBuffer, LockBuffer, LockBufferForCleanup, MarkBufferDirty,
     UnlockReleaseBuffer, BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK,
 };
+pub use bgwriter_sync::{bgwriter_writeback_context_init, pending_bgwriter_stats, BgBufferSync};
+pub use write::{BufferSync, CheckPointBuffers, FlushOneBuffer};
 pub use pin::{
     AtEOXact_Buffers, BufferIsPinned, CheckBufferIsPinnedOnce, IncrBufferRefCount, ReleaseBuffer,
     UnlockBuffers,
@@ -170,8 +174,6 @@ macro_rules! unported {
 }
 
 unported! {
-    fn BufferSync(i32) -> (), "BufferSync";
-    fn CheckPointBuffers(i32) -> (), "CheckPointBuffers";
     fn FlushRelationBuffers(RelFileLocatorBackend) -> (), "FlushRelationBuffers";
     fn FlushDatabaseBuffers(Oid) -> (), "FlushDatabaseBuffers";
     fn DropDatabaseBuffers(Oid) -> (), "DropDatabaseBuffers";
@@ -200,7 +202,8 @@ pub fn init_seams() {
     });
     bufmgr_seams::release_buffer::set(pin::ReleaseBuffer);
     bufmgr_seams::mark_buffer_dirty::set(ops::MarkBufferDirty);
-    bufmgr_seams::flush_one_buffer::set(ops::FlushOneBuffer);
+    bufmgr_seams::flush_one_buffer::set(write::FlushOneBuffer);
+    bufmgr_seams::check_point_buffers::set(write::CheckPointBuffers);
     bufmgr_seams::lock_buffer::set(ops::LockBuffer);
     bufmgr_seams::lock_buffer_for_cleanup::set(ops::LockBufferForCleanup);
     bufmgr_seams::buffer_page_is_new::set(ops::buffer_page_is_new);

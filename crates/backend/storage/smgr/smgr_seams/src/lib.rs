@@ -42,3 +42,25 @@ seam_core::seam!(
     // ProcessBarrierSmgrRelease() (smgr.c); barrier processors may ereport.
     pub fn process_barrier_smgr_release() -> PgResult<bool>
 );
+
+seam_core::seam!(
+    // smgrwrite(smgropen(rlocator), forknum, blocknum, buffer, skipFsync)
+    // (smgr.c); buffer is exactly BLCKSZ.
+    pub fn smgr_write(
+        rlocator: RelFileLocatorBackend,
+        forknum: ForkNumber,
+        blocknum: BlockNumber,
+        buffer: &[u8],
+        skip_fsync: bool,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // smgrwriteback(smgropen(rlocator), forknum, blocknum, nblocks) (smgr.c).
+    pub fn smgr_writeback(
+        rlocator: RelFileLocatorBackend,
+        forknum: ForkNumber,
+        blocknum: BlockNumber,
+        nblocks: BlockNumber,
+    ) -> PgResult<()>
+);

@@ -67,6 +67,7 @@ pub fn init_all() {
     lmgr::init_seams();
     lock::init_seams();
     smgr::init_seams();
+    sync::init_seams();
     backend_startup::init_seams();
     tcop_dest::init_seams();
     postgres::init_seams();

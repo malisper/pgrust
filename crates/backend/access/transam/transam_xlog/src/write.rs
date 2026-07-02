@@ -615,6 +615,94 @@ pub fn XLogSetAsyncXactLSN(async_xact_lsn: XLogRecPtr) {
     }
 }
 
+/// XLogBackgroundFlush (xlog.c). Walsender wakeup (WalSndWakeupProcessRequests)
+/// is omitted like XLogFlush's: no walsender can exist while that unit is
+/// unported.
+pub fn XLogBackgroundFlush() -> PgResult<bool> {
+    thread_local! {
+        static LAST_FLUSH: Cell<i64> = const { Cell::new(0) };
+    }
+
+    if crate::insert::RecoveryInProgress() {
+        return Ok(false);
+    }
+
+    let ctl = XLogCtl();
+    let insert_tli = ctl.InsertTimeLineID.load(Relaxed);
+
+    let (mut write_rqst_write, mut write_rqst_flush) = ctl.info_lck.with(|| {
+        (ctl.LogwrtRqstWrite.load(Relaxed), ctl.LogwrtRqstFlush.load(Relaxed))
+    });
+    let _ = write_rqst_flush;
+    let mut flexible = true;
+
+    write_rqst_write -= write_rqst_write % XLOG_BLCKSZ as u64;
+
+    RefreshXLogWriteResult();
+    if write_rqst_write <= LOGWRT_RESULT.get().1 {
+        write_rqst_write = ctl.info_lck.with(|| ctl.asyncXactLSN.load(Relaxed));
+        flexible = false;
+    }
+
+    if write_rqst_write <= LOGWRT_RESULT.get().1 {
+        if OPEN_LOG_FILE.get() >= 0
+            && !XLByteInPrevSeg(LOGWRT_RESULT.get().0, OPEN_LOG_SEG_NO.get(), wal_segment_size())
+        {
+            XLogFileClose()?;
+        }
+        return Ok(false);
+    }
+
+    let now = timestamp_seams::get_current_timestamp::call();
+    let flushblocks =
+        write_rqst_write as i64 / XLOG_BLCKSZ as i64 - LOGWRT_RESULT.get().1 as i64 / XLOG_BLCKSZ as i64;
+    let flush_after = guc_tables::vars::WalWriterFlushAfter.read();
+    let delay_us = guc_tables::vars::WalWriterDelay.read() as i64 * 1000;
+
+    if flush_after == 0 || LAST_FLUSH.get() == 0 {
+        write_rqst_flush = write_rqst_write;
+        LAST_FLUSH.set(now);
+    } else if now - LAST_FLUSH.get() >= delay_us {
+        write_rqst_flush = write_rqst_write;
+        LAST_FLUSH.set(now);
+    } else if flushblocks >= flush_after as i64 {
+        write_rqst_flush = write_rqst_write;
+        LAST_FLUSH.set(now);
+    } else {
+        write_rqst_flush = 0;
+    }
+
+    init_small::globals::StartCriticalSection();
+
+    WaitXLogInsertionsToFinish(write_rqst_write);
+    LWLockAcquire(WALWriteLock(), LW_EXCLUSIVE, init_small::globals::MyProcNumber())?;
+    RefreshXLogWriteResult();
+    if write_rqst_write > LOGWRT_RESULT.get().0 || write_rqst_flush > LOGWRT_RESULT.get().1 {
+        XLogWrite((write_rqst_write, write_rqst_flush), insert_tli, flexible)?;
+    }
+    LWLockRelease(WALWriteLock())?;
+
+    init_small::globals::EndCriticalSection();
+
+    crate::insert::AdvanceXLInsertBuffer(InvalidXLogRecPtr, insert_tli, true);
+
+    Ok(true)
+}
+
+pub fn SetWalWriterSleeping(sleeping: bool) {
+    let ctl = XLogCtl();
+    ctl.info_lck.with(|| ctl.WalWriterSleeping.store(sleeping, Relaxed));
+}
+
+pub fn GetLastSegSwitchData() -> (i64, XLogRecPtr) {
+    let ctl = XLogCtl();
+    LWLockAcquire(WALWriteLock(), LW_SHARED, init_small::globals::MyProcNumber())
+        .expect("GetLastSegSwitchData");
+    let result = (ctl.lastSegSwitchTime.load(Relaxed), ctl.lastSegSwitchLSN.load(Relaxed));
+    LWLockRelease(WALWriteLock()).expect("GetLastSegSwitchData");
+    result
+}
+
 pub(crate) fn get_flush_rec_ptr_seam() -> (XLogRecPtr, TimeLineID) {
     let ctl = XLogCtl();
     debug_assert_eq!(ctl.SharedRecoveryState.load(Relaxed), RECOVERY_STATE_DONE);

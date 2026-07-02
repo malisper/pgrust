@@ -650,7 +650,7 @@ pub(crate) fn xlog_insert_record_seam(
     XLogInsertRecord(rechdr, rdatas, fpw_lsn, flags, num_fpi, topxid_included)
 }
 
-pub(crate) fn GetLastImportantRecPtr() -> XLogRecPtr {
+pub fn GetLastImportantRecPtr() -> XLogRecPtr {
     let locks = &XLogCtl().Insert.WALInsertLocks;
     let mut res = InvalidXLogRecPtr;
     for l in locks.iter() {

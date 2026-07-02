@@ -677,6 +677,18 @@ pub fn init_seams() {
             }
         })?
     });
+    smgr_seams::smgr_write::set(|rlocator, forknum, blocknum, buffer, skip_fsync| {
+        opened(rlocator, |r| match r.which {
+            SmgrKind::Md => {
+                md::mdwritev(rlocator, &mut r.md, forknum, blocknum, &[buffer], skip_fsync)
+            }
+        })?
+    });
+    smgr_seams::smgr_writeback::set(|rlocator, forknum, blocknum, nblocks| {
+        opened(rlocator, |r| match r.which {
+            SmgrKind::Md => md::mdwriteback(rlocator, &mut r.md, forknum, blocknum, nblocks),
+        })?
+    });
     smgr_seams::smgr_destroy_all::set(smgrdestroyall);
     smgr_seams::at_eoxact_smgr::set(|| {
         // C's AtEOXact_SMgr is void; md close failures are not ERROR in C.

@@ -38,6 +38,7 @@ twophase_seams = { path = "../twophase_seams" }
 varsup_seams = { path = "../varsup_seams" }
 xact_seams = { path = "../xact_seams" }
 sync_seams = { path = "../../../storage/sync/sync_seams" }
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
 predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 origin_seams = { path = "../../../replication/origin_seams" }
