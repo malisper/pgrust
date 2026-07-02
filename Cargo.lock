@@ -611,6 +611,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "conffiles"
+version = "0.0.0"
+dependencies = [
+ "conffiles_seams",
+ "elog",
+ "init_small",
+ "types_error",
+]
+
+[[package]]
 name = "conffiles_seams"
 version = "0.0.0"
 dependencies = [
@@ -1176,6 +1186,7 @@ dependencies = [
  "types_error",
  "types_snapshot",
  "types_tuple",
+ "varsup",
  "waitevent_seams",
  "xact",
  "xact_seams",
@@ -2081,6 +2092,17 @@ dependencies = [
 [[package]]
 name = "pmchild"
 version = "0.0.0"
+dependencies = [
+ "elog",
+ "guc_tables",
+ "init_small",
+ "launch_backend",
+ "pmchild_seams",
+ "pmsignal",
+ "types_core",
+ "types_error",
+ "types_storage",
+]
 
 [[package]]
 name = "pmchild_seams"
@@ -2217,6 +2239,7 @@ dependencies = [
  "genam",
  "guc",
  "guc_tables",
+ "hba_seams",
  "init_small",
  "ipc_seams",
  "latch",
@@ -3672,6 +3695,22 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 [[package]]
 name = "utility"
 version = "0.1.0"
+dependencies = [
+ "cmdtag",
+ "elog",
+ "guc_tables",
+ "miscinit",
+ "tcop_dest",
+ "transam_xlog",
+ "twophase_seams",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_portal",
+ "types_tuple",
+ "utility_seams",
+ "xact",
+]
 
 [[package]]
 name = "utility_seams"

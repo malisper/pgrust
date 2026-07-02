@@ -1,9 +1,85 @@
-//! Startup vocabulary: `tcop/backend_startup.h` plus the `libpq/libpq-be.h`
-//! pre-auth subset (ClientSocket, Port). Port's auth surface (hba, SSL/GSS
-//! state, auth_method) lands with the auth units.
+//! Startup vocabulary: `tcop/backend_startup.h`, the `libpq/libpq-be.h`
+//! pre-auth subset (ClientSocket, Port) plus Port's hba surface and the
+//! `libpq/hba.h` record types. SSL/GSS state is not this build.
+
+#![allow(non_upper_case_globals)]
 
 use ip::SockAddr;
+use types_core::init::UserAuth;
 use types_core::{pid_t, ProtocolVersion, TimestampTz};
+
+pub type ConnType = u32;
+pub const ctLocal: ConnType = 0;
+pub const ctHost: ConnType = 1;
+pub const ctHostSSL: ConnType = 2;
+pub const ctHostNoSSL: ConnType = 3;
+pub const ctHostGSS: ConnType = 4;
+pub const ctHostNoGSS: ConnType = 5;
+
+pub type IPCompareMethod = u32;
+pub const ipCmpMask: IPCompareMethod = 0;
+pub const ipCmpSameHost: IPCompareMethod = 1;
+pub const ipCmpSameNet: IPCompareMethod = 2;
+pub const ipCmpAll: IPCompareMethod = 3;
+
+pub type ClientCertMode = u32;
+pub const clientCertOff: ClientCertMode = 0;
+pub const clientCertCA: ClientCertMode = 1;
+pub const clientCertFull: ClientCertMode = 2;
+
+pub type ClientCertName = u32;
+pub const clientCertCN: ClientCertName = 0;
+pub const clientCertDN: ClientCertName = 1;
+
+// AuthToken (libpq/hba.h) minus the regex handle: regex auth tokens are
+// deferred loud in hba (no regex engine in this tree yet).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AuthToken {
+    pub string: String,
+    pub quoted: bool,
+}
+
+// HbaLine (libpq/hba.h) scoped to the supported build: no ldap/radius/pam/
+// krb/oauth option fields — their methods are rejected or deferred loud at
+// parse time, so the fields are unrepresentable rather than silently unused.
+#[derive(Clone, Debug)]
+pub struct HbaLine {
+    pub sourcefile: String,
+    pub linenumber: i32,
+    pub rawline: String,
+    pub conntype: ConnType,
+    pub databases: Vec<AuthToken>,
+    pub roles: Vec<AuthToken>,
+    pub addr: SockAddr,
+    pub mask: SockAddr,
+    pub ip_cmp_method: IPCompareMethod,
+    pub hostname: Option<String>,
+    pub auth_method: UserAuth,
+    pub usermap: Option<String>,
+    pub clientcert: ClientCertMode,
+    pub clientcertname: ClientCertName,
+}
+
+impl HbaLine {
+    pub fn new_zeroed() -> Self {
+        Self {
+            sourcefile: String::new(),
+            linenumber: 0,
+            rawline: String::new(),
+            conntype: ctLocal,
+            databases: Vec::new(),
+            roles: Vec::new(),
+            addr: SockAddr::zeroed(),
+            mask: SockAddr::zeroed(),
+            ip_cmp_method: ipCmpMask,
+            hostname: None,
+            auth_method: types_core::init::uaReject,
+            usermap: None,
+            clientcert: clientCertOff,
+            clientcertname: clientCertCN,
+        }
+    }
+}
 
 pub const TIMESTAMP_MINUS_INFINITY: TimestampTz = i64::MIN;
 
@@ -83,6 +159,12 @@ pub struct Port {
     pub tcp_user_timeout: i32,
     pub ssl_in_use: bool,
     pub alpn_used: bool,
+    // C: `const HbaLine *hba` borrows the parsed_hba_lines list entry; an
+    // owned clone of the matched line here (once per connection, cold).
+    pub hba: Option<HbaLine>,
+    // +1 forward lookup matches, 0 not checked, -1 mismatch, -2 lookup failed.
+    pub remote_hostname_resolv: i32,
+    pub remote_hostname_errcode: i32,
 }
 
 impl Port {
@@ -111,6 +193,9 @@ impl Port {
             tcp_user_timeout: 0,
             ssl_in_use: false,
             alpn_used: false,
+            hba: None,
+            remote_hostname_resolv: 0,
+            remote_hostname_errcode: 0,
         }
     }
 }

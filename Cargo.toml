@@ -241,6 +241,7 @@ members = [
     "crates/backend/utils/cache/relmapper",
     "crates/common/pg_prng",
     "crates/backend/utils/misc/conffiles_seams",
+    "crates/backend/utils/misc/conffiles",
     "crates/backend/utils/misc/guc_file",
     "crates/backend/parser/scan_fgram",
     "crates/common/keywords",

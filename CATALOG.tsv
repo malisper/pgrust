@@ -350,14 +350,14 @@ backend-lib-rbtree	*/rbtree.c	todo			fabled:backend-lib-rbtree
 backend-libpq-auth-oauth	src/backend/libpq/auth-oauth.c	todo			m1-spine(boot)
 backend-libpq-auth-sasl	src/backend/libpq/auth-sasl.c	todo			m1-spine(boot)
 backend-libpq-auth-scram	src/backend/libpq/auth-scram.c	todo			fabled:backend-libpq-auth-scram; m1-spine(boot)
-backend-libpq-auth	src/backend/libpq/auth.c	todo			fabled:backend-libpq-auth; m1-spine(boot)
+backend-libpq-auth	src/backend/libpq/auth.c	ported	auth	cold	m1-spine(boot); trust/reject arms live end-to-end (28000 surfaces exact); TRUST-PATH PROOF: real AF_UNIX accept -> hba match -> AuthenticationOk on the wire, test-passing; password-family arms loud naming crypt/scram; 7 tests, density 4.6%
 backend-libpq-be-fsstubs	src/backend/libpq/be-fsstubs.c	todo			fabled:backend-libpq-be-fsstubs; m1-spine
 backend-libpq-be-gssapi-common	src/backend/libpq/be-gssapi-common.c	todo			fabled:backend-libpq-be-gssapi-common
 backend-libpq-be-secure-common	src/backend/libpq/be-secure-common.c	todo			fabled:backend-libpq-be-secure-common; m1-spine
 backend-libpq-be-secure-openssl	src/backend/libpq/be-secure-openssl.c	todo			fabled:backend-libpq-be-secure-openssl; m1-spine
 backend-libpq-be-secure	src/backend/libpq/be-secure.c	ported	be_secure	cold	m1-spine(boot); raw secure_read/write arms with C blocking-retry loop through FeBeWaitSet; TLS/GSS loud; AF_UNIX listen/accept/roundtrip integration test PASSES (the M1 transport proof); 2 tests, density 4.4%
-backend-libpq-crypt	src/backend/libpq/crypt.c	todo			fabled:backend-libpq-crypt; m1-spine(boot)
-backend-libpq-hba	src/backend/libpq/hba.c	todo			fabled:backend-libpq-hba; m1-spine(boot)
+backend-libpq-crypt	src/backend/libpq/crypt.c	in-progress	crypt	cold	claim stub only - trust arm verified to touch no crypt.c fn; password-family arms name it
+backend-libpq-hba	src/backend/libpq/hba.c	ported	hba	cold	m1-spine(boot); full tokenizer + parse/check for the no-features build shape; C-initdb pg_hba loads (tested against real initdb); regex/radius/oauth/membership arms loud; 20 tests, density 4.4%
 backend-libpq-ifaddr	src/backend/libpq/ifaddr.c	todo			fabled:backend-libpq-ifaddr; m1-dep(stub-ok)
 backend-libpq-pqcomm	src/backend/libpq/pqcomm.c	benched	pqcomm	0.48-0.93x-instr/0.66-0.98x-ns	m1-spine; recv/send buffering, memcpy fill/drain, ManuallyDrop TLS send buffer (fabled-lessons 8 hit found in profile); socket half PORTED (socket.rs: pq_init/Listen/Accept/keepalives/FeBeWaitSet); OFFICIAL Graviton PASS both legs all lanes (job pgrust-fast-microbench-1783024301, clang-16 -mcpu=neoverse-v2): putmessage 0.93x instr/0.91-0.98x ns, getbyte 0.48x/0.66x, getbytes_16 0.67x/0.74x; closes the prior 1.02x putmessage instr FAIL (jobs 1783022970+1783023141) — SEND TLS slot RefCell<Option<...>> → const-init UnsafeCell (recv-side shape), comm_busy sole release guard + debug SEND_ACTIVE assert, init hoisted in pq_init_buffers with #[cold] lazy fallback; −17 insns/call (RefCell shape had also blocked codegen), asm-verified borrow-flag stores gone; see docs/benchmarks/pqcomm.md; 22 tests, Miri parity, density 5.0%
 backend-libpq-pqformat	src/backend/libpq/pqformat.c	benched	pqformat	0.52x-instr/0.64x-ns	fabled:backend-libpq-pqformat; m1-spine; wire encode/decode, PG11 fast shape day-one; PASS dual gate Graviton clang-16 with wide margin (sendint32 0.49x/0.31x, sendstring 0.31x/0.37x); watch: printtup must hoist conversion resolve (lever 2); docs/benchmarks/pqformat.md
