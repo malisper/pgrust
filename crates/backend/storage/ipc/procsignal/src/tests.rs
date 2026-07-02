@@ -26,10 +26,9 @@ fn thread_globals(procno: ProcNumber, pid: i32) {
 }
 
 fn setup() {
+    thread_globals(0, 9000);
     static SETUP: Once = Once::new();
     SETUP.call_once(|| {
-        thread_globals(0, 9000);
-
         s_lock_seams::perform_spin_delay::set(|_| std::thread::yield_now());
         s_lock_seams::finish_spin_delay::set(|_| {});
         s_lock_seams::set_spins_per_delay::set(|_| {});
@@ -109,7 +108,6 @@ fn init_registers_and_cleanup_releases() {
     );
 
     s.pss_signalFlags[ProcSignalReason::PROCSIG_CATCHUP_INTERRUPT as usize].store(true, Release);
-    // Takeover of a non-empty slot re-registers (LOG path) and clears flags.
     ProcSignalInit(&[]).unwrap();
     assert!(!s.pss_signalFlags[ProcSignalReason::PROCSIG_CATCHUP_INTERRUPT as usize].load(Acquire));
     assert_eq!(s.pss_cancel_key_len.get(), 0);
@@ -137,7 +135,6 @@ fn send_proc_signal_by_procno_sets_flag_and_latch() {
         .load(Acquire));
     assert_eq!(target_latch.is_set.load(SeqCst), 1);
 
-    // Wrong pid in the slot: no signal, ESRCH contract.
     assert_eq!(
         SendProcSignal(9999, ProcSignalReason::PROCSIG_CATCHUP_INTERRUPT, 4),
         -1
@@ -204,8 +201,6 @@ fn barrier_roundtrip_emit_handle_process_wait() {
     assert!(!g::ProcSignalBarrierPending());
     assert_eq!(*BROADCASTS.lock().unwrap(), vec![6]);
 
-    // Our slot is current and every unregistered slot sits at u64::MAX, so
-    // the wait completes without any CV sleep.
     WaitForProcSignalBarrier(generation).unwrap();
     cleanup_current();
 }
@@ -221,14 +216,12 @@ fn barrier_failure_and_error_rearm_the_bits() {
     let generation = EmitProcSignalBarrier(ProcSignalBarrierType::PROCSIGNAL_BARRIER_SMGRRELEASE);
     procsignal_sigusr1_handler();
 
-    // Barrier processor "can't absorb right now": bit re-set, retry armed.
     SMGR_RESULTS.lock().unwrap().push(Ok(false));
     ProcessProcSignalBarrier().unwrap();
     assert_eq!(s.pss_barrierCheckMask.load(Relaxed), 1);
     assert!(g::ProcSignalBarrierPending());
     assert!(s.pss_barrierGeneration.load(Relaxed) < generation);
 
-    // Barrier processor throws: Err propagates, bit re-set, retry armed.
     SMGR_RESULTS
         .lock()
         .unwrap()
@@ -274,11 +267,12 @@ fn seams_installed_and_delegate() {
     let _guard = serial();
     assert!(procsignal_seams::proc_signal_barrier_pending::is_installed());
     assert!(procsignal_seams::process_proc_signal_barrier::is_installed());
+    register(9, 1009, &[]);
 
     g::SetProcSignalBarrierPending(true);
     assert!(procsignal_seams::proc_signal_barrier_pending::call());
     g::SetProcSignalBarrierPending(false);
     assert!(!procsignal_seams::proc_signal_barrier_pending::call());
-    // Nothing pending: the seam-side barrier processing is a no-op Ok.
     procsignal_seams::process_proc_signal_barrier::call().unwrap();
+    cleanup_current();
 }

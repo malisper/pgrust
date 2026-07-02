@@ -1,18 +1,38 @@
-use types_core::TransactionId;
+use types_core::{Buffer, TransactionId};
 use types_error::PgResult;
+use types_rel::RelationData;
+use types_snapshot::SnapshotData;
+use types_tuple::ItemPointerData;
 
 seam_core::seam!(
-    pub fn pre_commit_check_for_serialization_failure() -> PgResult<()>
+    pub fn predicate_lock_relation<'a, 'mcx>(
+        rel: &'a RelationData<'mcx>,
+        snapshot: &'a SnapshotData<'mcx>,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(
-    pub fn register_predicate_locking_xid(xid: TransactionId) -> PgResult<()>
+    pub fn predicate_lock_tid<'a, 'mcx>(
+        rel: &'a RelationData<'mcx>,
+        tid: ItemPointerData,
+        snapshot: &'a SnapshotData<'mcx>,
+        tuple_xid: TransactionId,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(
-    pub fn at_prepare_predicate_locks() -> PgResult<()>
+    // The open Relation crosses whole so the impl reads rd_id/persistence off
+    // the pointer in hand (no relcache re-open per page).
+    pub fn check_for_serializable_conflict_out_needed<'a, 'mcx>(
+        rel: &'a RelationData<'mcx>,
+        snapshot: &'a SnapshotData<'mcx>,
+    ) -> bool
 );
 
 seam_core::seam!(
-    pub fn post_prepare_predicate_locks(xid: TransactionId) -> PgResult<()>
+    pub fn check_for_serializable_conflict_out<'a, 'mcx>(
+        rel: &'a RelationData<'mcx>,
+        xid: TransactionId,
+        snapshot: &'a SnapshotData<'mcx>,
+    ) -> PgResult<()>
 );
