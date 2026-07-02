@@ -83,6 +83,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "file_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+]
+
+[[package]]
 name = "guc_file_seams"
 version = "0.0.0"
 dependencies = [
@@ -193,6 +201,27 @@ name = "libpq_pqsignal"
 version = "0.0.0"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "lmgr_proc_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+]
+
+[[package]]
+name = "lwlock"
+version = "0.0.0"
+dependencies = [
+ "init_small",
+ "lmgr_proc_seams",
+ "s_lock_seams",
+ "shmem_seams",
+ "types_core",
+ "types_error",
+ "waitevent_seams",
 ]
 
 [[package]]
@@ -330,8 +359,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "s_lock_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+]
+
+[[package]]
 name = "seam_core"
 version = "0.1.0"
+
+[[package]]
+name = "shmem_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+]
+
+[[package]]
+name = "slru"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "file_seams",
+ "init_small",
+ "libc",
+ "lwlock",
+ "pgstat_seams",
+ "shmem_seams",
+ "sync_seams",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "waitevent_seams",
+ "xlogutils_seams",
+]
 
 [[package]]
 name = "stringinfo"
@@ -350,6 +414,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "sync_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+ "types_storage",
 ]
 
 [[package]]
@@ -388,6 +461,15 @@ dependencies = [
 [[package]]
 name = "trace"
 version = "0.0.0"
+
+[[package]]
+name = "transam_xlog_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+]
 
 [[package]]
 name = "types_array"
@@ -516,8 +598,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "waitevent_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+]
+
+[[package]]
 name = "wchar"
 version = "0.1.0"
+
+[[package]]
+name = "xlogutils_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+]
 
 [[package]]
 name = "zerocopy"
