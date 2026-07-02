@@ -9,3 +9,4 @@ mcx = { path = "../../mcx" }
 types_core = { path = "../types_core" }
 datum = { path = "../datum" }
 types_hash = { path = "../hash" }
+types_nodes = { path = "../nodes" }
