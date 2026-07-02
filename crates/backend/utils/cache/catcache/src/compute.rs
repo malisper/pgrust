@@ -36,8 +36,7 @@ pub const F_OIDVECTOREQ: Oid = 679;
 /// C's `(CCHashFN, CCFastEqualFN)` fn-pointer pair as a closed-set tag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CCFastKind {
-    // Word kinds first (contiguous discriminants 0..=2): the hit path tests
-    // "is word kind" with one compare instead of a branch ladder.
+    // Word kinds first: "is word kind" is one compare, not a ladder.
     Char,
     Int2,
     Int4,
@@ -117,18 +116,11 @@ pub fn name_hash(payload: &[u8]) -> u32 {
     hashfn::hash_bytes(&payload[..len])
 }
 
-// The by-ref arms carry whole byte-slice hash loops; left in one body they
-// push the function past LLVM's inline threshold and every per-key hash in
-// the hit path becomes an outlined call (measured +5 instr on the 2-key
-// lane). Split like the K1 walk: word arms inline, byte arms one call.
+// Word arms inline; byte-slice arms outlined (fused, every hash is a call).
 #[inline(always)]
 pub fn fast_hash_probe(kind: CCFastKind, key: &CatCKey<'_>) -> u32 {
     match kind {
-        // One murmur of the low 32 bits IS char/int2/int4 hashfast: word
-        // datums are canonical (from_char/from_i16/from_i32/from_oid carry
-        // their extension in the low word, on both the insert side —
-        // tupmacs fetch — and the probe side), so the per-kind extension
-        // is already done and the three arms collapse to one.
+        // Canonical word datums: one low-32 murmur IS all three hashfasts.
         CCFastKind::Char | CCFastKind::Int2 | CCFastKind::Int4 => {
             hashfn::murmurhash32(key.word().as_i32() as u32)
         }

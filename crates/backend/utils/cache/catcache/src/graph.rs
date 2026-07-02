@@ -51,13 +51,10 @@ impl<'mcx> CatCache<'mcx> {
         self.ct_push_head(bucket, slot);
     }
 
-    /// `dlist_move_head` on the hit path — inline and unchecked like C's,
-    /// which is 100% inline dlist stores (the checked `ct_move_head` was an
-    /// outlined call per hit).
+    /// Hit-path `dlist_move_head`, inline and unchecked like C's.
     ///
-    /// # Safety (caller: `found`)
-    /// `bucket` is the masked index of the bucket `slot` is linked on, and
-    /// `slot` came off that bucket's live walk.
+    /// # Safety
+    /// `bucket` is the masked index of the bucket `slot` was walked from.
     #[inline(always)]
     pub(crate) unsafe fn ct_move_head_hot(&mut self, bucket: usize, slot: u32) {
         unsafe {
@@ -65,8 +62,7 @@ impl<'mcx> CatCache<'mcx> {
             if head == slot {
                 return;
             }
-            // Unlink: slot != head, so prev != NONE; head != NONE (the list
-            // holds at least `slot`).
+            // SAFETY: slot != head implies prev != NONE and head != NONE.
             let (prev, next) = {
                 let ct = self.tuples.get_unchecked(slot as usize);
                 (ct.prev, ct.next)
@@ -75,7 +71,6 @@ impl<'mcx> CatCache<'mcx> {
             if next != NONE {
                 self.tuples.get_unchecked_mut(next as usize).prev = prev;
             }
-            // Push at head.
             {
                 let ct = self.tuples.get_unchecked_mut(slot as usize);
                 ct.prev = NONE;
@@ -549,10 +544,7 @@ pub(crate) fn create_entry_positive(
     let t_len = ntp.t_len;
     let payload_len = crate::IMG_PREFIX + t_len as usize;
     let buf = payload_alloc(mcx, payload_len);
-    // SAFETY: `buf` is a fresh IMG_PREFIX + t_len byte allocation; the source
-    // tuple image is live for t_len bytes (HeapTupleData contract). The
-    // prefix mirrors C's in-entry HeapTupleData: t_self at +0, t_tableoid at
-    // +8, t_len at +12, image at +16 (CatCTuple::tuple reads these back).
+    // SAFETY: fresh IMG_PREFIX + t_len bytes; source image live for t_len.
     let image = unsafe {
         let p = buf.as_ptr();
         core::ptr::write_bytes(p, 0, crate::IMG_PREFIX);

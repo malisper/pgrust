@@ -11,14 +11,7 @@ use crate::graph::{create_entry_negative, create_entry_positive, remove_ct};
 use crate::{eq_stored, init, with_state, NONE};
 
 /// A pinned positive entry (C's `&ct->tuple` + `ct->refcount++`); release
-/// with [`ReleaseCatCache`]. The image cannot be freed while pinned.
-///
-/// 16 bytes on purpose: `t_self`/`t_tableoid` live in the payload prefix in
-/// front of the image (C keeps its HeapTupleData inside the CatCTup the same
-/// way), so a pin is pointer + packed words and the probe result crosses the
-/// (possibly outlined) probe call in registers, not through an sret buffer —
-/// the 40-byte sret reload was a measured store-forwarding stall on Neoverse
-/// V2 (49% of hit-lane cycles on one `stur q0`, job 1783026844).
+/// with [`ReleaseCatCache`]. The `IMG_PREFIX`-prefixed image outlives the pin.
 #[must_use]
 pub struct CatCTuple {
     pub(crate) cache_id: i32,
@@ -29,10 +22,7 @@ pub struct CatCTuple {
 impl CatCTuple {
     #[inline]
     pub fn tuple(&self) -> HeapTupleData<'_> {
-        // SAFETY: `image` is the entry's live tuple image with the 16-byte
-        // t_self/t_tableoid/t_len prefix in front (create_entry_positive);
-        // the pin (refcount) keeps it allocated and nothing writes it after
-        // creation.
+        // SAFETY: live IMG_PREFIX-prefixed image, pinned, written once.
         unsafe {
             let base = self.image.as_ptr().sub(crate::IMG_PREFIX);
             let t_self = core::ptr::read(base.cast::<ItemPointerData>());
@@ -48,13 +38,8 @@ impl CatCTuple {
     }
 }
 
-/// Probe result, hand-packed into two words so it returns in registers
-/// (x0/x1) across the probe-closure call. A Rust enum carrying `CatCTuple`
-/// needs an out-of-band tag and comes back through a stack sret buffer; the
-/// caller's wide reload of the callee's narrow stores fails store-to-load
-/// forwarding on Neoverse V2 (docs/graviton.md §4.5) — measured at 49% of
-/// hit-lane cycles. Sentinel addresses 1..=3 tag the non-hit outcomes;
-/// a real image pointer (>= page granularity) tags a hit.
+/// Two-word probe result: returns in registers, not an sret buffer (whose
+/// wide reload stalled on V2 store-forwarding — catcache-parity.md).
 #[derive(Clone, Copy)]
 struct ProbeRet {
     p: *mut u8,
@@ -204,9 +189,7 @@ fn keys_match<K: ProbeKeys>(
     true
 }
 
-/// `SearchCatCacheInternal` up to the miss tail: ONE non-reentrant borrow,
-/// one cache resolve, then hash → bucket walk → compare → move-to-front →
-/// refcount bump; the walk indexes uncheckedly (arena kernel invariants).
+/// `SearchCatCacheInternal` up to the miss tail, under ONE borrow.
 #[inline(always)]
 fn probe<K: ProbeKeys>(cache_id: i32, keys: &K) -> ProbeRet {
     with_state(|st| {
@@ -218,8 +201,7 @@ fn probe<K: ProbeKeys>(cache_id: i32, keys: &K) -> ProbeRet {
         debug_assert!(K::NKEYS < 0 || cache.cc_nkeys == nkeys);
         let kinds = cache.cc_kind;
 
-        // Monomorphized single-Oid-key lane; rare non-Oid 1-key kinds go
-        // through the outlined walk so this closure stays inlinable.
+
         if K::NKEYS == 1 {
             if let (CCFastKind::Int4, CatCKey::Value(w)) = (kinds[0], keys.slot(0)) {
                 return probe_1_int4(cache, w);
@@ -311,8 +293,7 @@ fn search_internal<K: ProbeKeys>(cache_id: i32, keys: &K) -> PgResult<Option<Cat
                 return Ok(Some(CatCTuple {
                     cache_id,
                     slot: r.w as u32,
-                    // SAFETY: a non-sentinel ProbeRet.p is the pinned entry's
-                    // live image pointer (ProbeRet::hit).
+                    // SAFETY: non-sentinel p is the pin's live image.
                     image: unsafe { NonNull::new_unchecked(r.p) },
                 }));
             }
@@ -500,8 +481,7 @@ pub fn SearchCatCache4(
 pub fn ReleaseCatCache(tuple: CatCTuple) {
     with_state(|st| {
         let cache = st.cache_mut(tuple.cache_id);
-        // SAFETY: a pin is only minted by `pin_entry` over a live slot, and a
-        // pinned slot (refcount > 0) is never freed until this release.
+        // SAFETY: pins are minted over live slots, never freed while pinned.
         let ct = unsafe { cache.tuples.get_unchecked_mut(tuple.slot as usize) };
         debug_assert!(ct.refcount > 0);
         ct.refcount -= 1;
