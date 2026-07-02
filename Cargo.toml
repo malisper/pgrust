@@ -65,6 +65,13 @@ members = [
     "crates/backend/access/transam/transam_xlog_seams",
     "crates/backend/access/transam/xlogutils_seams",
     "crates/backend/access/transam/slru",
+    "crates/backend/utils/cache/relcache_seams",
+    "crates/backend/utils/cache/syscache_seams",
+    "crates/backend/utils/cache/inval_seams",
+    "crates/backend/storage/lmgr/lmgr_seams",
+    "crates/backend/catalog/namespace_seams",
+    "crates/backend/access/transam/xact_seams",
+    "crates/backend/access/common/relation",
 ]
 
 [workspace.package]
