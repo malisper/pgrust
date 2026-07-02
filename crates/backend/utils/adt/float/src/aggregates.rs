@@ -92,7 +92,8 @@ fn accum_kernel(trans: [f64; 3], newval: f64) -> PgResult<[f64; 3]> {
     let sx = sx0 + newval;
     let mut sxx = sxx0;
     if n0 > 0.0 {
-        let tmp = newval * n - sx;
+        // fp-contract parity with the compiled C (see float8_regr_accum).
+        let tmp = f64::mul_add(newval, n, -sx);
         sxx += tmp * tmp / (n * n0);
 
         if sx.is_infinite() || sxx.is_infinite() {
@@ -168,12 +169,14 @@ pub fn float8_regr_accum(trans: [f64; 6], newval_y: f64, newval_x: f64) -> PgRes
     let mut sxy = sxy0;
 
     if n0 > 0.0 {
-        let tmp_x = newval_x * n - sx;
-        let tmp_y = newval_y * n - sy;
+        // mul_add mirrors clang/gcc default fp-contract on `S += t*t*scale`
+        // (compiled C emits FMA; without it the last bit diverges from PG).
+        let tmp_x = f64::mul_add(newval_x, n, -sx);
+        let tmp_y = f64::mul_add(newval_y, n, -sy);
         let scale = 1.0 / (n * n0);
-        sxx += tmp_x * tmp_x * scale;
-        syy += tmp_y * tmp_y * scale;
-        sxy += tmp_x * tmp_y * scale;
+        sxx = f64::mul_add(tmp_x * tmp_x, scale, sxx);
+        syy = f64::mul_add(tmp_y * tmp_y, scale, syy);
+        sxy = f64::mul_add(tmp_x * tmp_y, scale, sxy);
 
         if sx.is_infinite()
             || sxx.is_infinite()

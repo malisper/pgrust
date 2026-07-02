@@ -482,10 +482,14 @@ fn nan_payload_len(s: &[u8]) -> usize {
     3
 }
 
-// Order matters: "Infinity" before "inf".
+// Order matters: "Infinity" before "inf". strtod also accepts a signed NaN.
 fn special_float8(s: &[u8]) -> Option<(f64, usize)> {
     if strncasecmp_eq(s, b"NaN") {
         Some((get_float8_nan(), nan_payload_len(s)))
+    } else if (s.first() == Some(&b'+') || s.first() == Some(&b'-')) && strncasecmp_eq(&s[1..], b"NaN")
+    {
+        let v = if s[0] == b'-' { -get_float8_nan() } else { get_float8_nan() };
+        Some((v, 1 + nan_payload_len(&s[1..])))
     } else if strncasecmp_eq(s, b"Infinity") {
         Some((get_float8_infinity(), 8))
     } else if strncasecmp_eq(s, b"+Infinity") {
@@ -506,6 +510,10 @@ fn special_float8(s: &[u8]) -> Option<(f64, usize)> {
 fn special_float4(s: &[u8]) -> Option<(f32, usize)> {
     if strncasecmp_eq(s, b"NaN") {
         Some((get_float4_nan(), nan_payload_len(s)))
+    } else if (s.first() == Some(&b'+') || s.first() == Some(&b'-')) && strncasecmp_eq(&s[1..], b"NaN")
+    {
+        let v = if s[0] == b'-' { -get_float4_nan() } else { get_float4_nan() };
+        Some((v, 1 + nan_payload_len(&s[1..])))
     } else if strncasecmp_eq(s, b"Infinity") {
         Some((get_float4_infinity(), 8))
     } else if strncasecmp_eq(s, b"+Infinity") {

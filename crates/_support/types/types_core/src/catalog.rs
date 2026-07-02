@@ -43,6 +43,8 @@ pub const OIDVECTOROID: Oid = 30;
 pub const INT2ARRAYOID: Oid = 1005;
 pub const OIDARRAYOID: Oid = 1028;
 pub const UNKNOWNOID: Oid = 705;
+pub const FLOAT4OID: Oid = 700;
+pub const FLOAT8OID: Oid = 701;
 pub const BITOID: Oid = 1560;
 pub const NUMERICOID: Oid = 1700;
 

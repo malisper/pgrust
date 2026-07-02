@@ -272,6 +272,24 @@ dependencies = [
 [[package]]
 name = "backend_status"
 version = "0.0.0"
+dependencies = [
+ "adt_timestamp",
+ "backend_status_seams",
+ "guc_tables",
+ "init_small",
+ "ip",
+ "ipc_seams",
+ "lmgr_proc",
+ "mbutils",
+ "miscinit",
+ "pgstat",
+ "shmem",
+ "superuser_seams",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "xact",
+]
 
 [[package]]
 name = "backend_status_seams"
@@ -1461,6 +1479,7 @@ dependencies = [
  "libpq_pqsignal",
  "miscinit",
  "pqcomm_seams",
+ "stack_depth",
  "timestamp_seams",
  "types_core",
  "types_startup",
@@ -1898,6 +1917,7 @@ dependencies = [
  "lsyscache",
  "mbutils",
  "mcx",
+ "nodes_core",
  "numutils",
  "queryenvironment",
  "syscache_seams",
@@ -1996,6 +2016,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_guc",
+ "types_tuple",
  "varlena",
 ]
 
@@ -3059,6 +3080,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "stack_depth"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "guc",
+ "guc_tables",
+ "libc",
+ "types_error",
+ "types_guc",
+]
+
+[[package]]
 name = "standby_seams"
 version = "0.0.0"
 dependencies = [
@@ -3733,6 +3766,7 @@ dependencies = [
  "parallel_seams",
  "tcop_dest",
  "transam_xlog",
+ "transam_xlog_seams",
  "twophase_seams",
  "types_core",
  "types_dest",
@@ -3988,6 +4022,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "xloginsert"
+version = "0.0.0"
+dependencies = [
+ "bufmgr",
+ "crc32c",
+ "elog",
+ "guc_tables",
+ "init_small",
+ "miscinit",
+ "origin_seams",
+ "pglz",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "xact",
+ "xloginsert_seams",
+ "xlogreader_seams",
+]
+
+[[package]]
 name = "xloginsert_seams"
 version = "0.0.0"
 dependencies = [
@@ -4021,6 +4076,27 @@ dependencies = [
  "types_core",
  "types_error",
  "types_storage",
+]
+
+[[package]]
+name = "xlogrecovery"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "fd",
+ "guc_tables",
+ "init_small",
+ "libc",
+ "mcx",
+ "miscinit",
+ "ps_status_seams",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "xlogreader",
+ "xlogreader_seams",
+ "xlogrecovery_seams",
+ "xlogutils",
 ]
 
 [[package]]
