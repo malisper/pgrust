@@ -12,12 +12,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "aclchk"
+version = "0.0.0"
+dependencies = [
+ "aclchk_seams",
+ "adt_acl",
+ "cache_syscache",
+ "datum",
+ "guc",
+ "init_small",
+ "superuser",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "aclchk_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "adt_acl"
+version = "0.0.0"
+dependencies = [
+ "acl_seams",
+ "cache_syscache",
+ "catcache",
+ "datum",
+ "init_small",
+ "inval",
+ "miscinit",
+ "superuser",
+ "types_core",
+ "types_error",
+ "types_tuple",
 ]
 
 [[package]]
@@ -148,6 +180,7 @@ dependencies = [
  "acl_seams",
  "auth_seams",
  "backend_startup",
+ "be_secure",
  "elog",
  "fd",
  "guc_tables",
@@ -608,6 +641,17 @@ name = "datum"
 version = "0.0.0"
 dependencies = [
  "mcx",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
+name = "dbcommands"
+version = "0.0.0"
+dependencies = [
+ "cache_syscache",
+ "datum",
+ "dbcommands_seams",
  "types_core",
  "types_error",
 ]
@@ -1321,6 +1365,43 @@ dependencies = [
 [[package]]
 name = "ipci"
 version = "0.0.0"
+dependencies = [
+ "aclchk_seams",
+ "backend_status_seams",
+ "bufmgr",
+ "clog",
+ "dsm_core",
+ "elog",
+ "guc",
+ "guc_tables",
+ "init_small",
+ "init_small_seams",
+ "ipc_seams",
+ "ipci_seams",
+ "lmgr_proc",
+ "lock",
+ "lwlock",
+ "mbutils_seams",
+ "pg_prng",
+ "pg_sema_seams",
+ "pgstat_seams",
+ "pmchild_seams",
+ "pmsignal",
+ "procarray",
+ "procsignal",
+ "scalar_seams",
+ "shmem",
+ "shmem_seams",
+ "sinval",
+ "subtrans",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "types_storage",
+ "varsup",
+ "xact_seams",
+]
 
 [[package]]
 name = "ipci_seams"
@@ -1732,6 +1813,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodes_core"
+version = "0.1.0"
+dependencies = [
+ "lsyscache",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_nodes",
+]
+
+[[package]]
 name = "numutils"
 version = "0.1.0"
 dependencies = [
@@ -1951,6 +2043,19 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "plancache"
+version = "0.1.0"
+dependencies = [
+ "cache_syscache",
+ "datum",
+ "inval",
+ "plancache_portal_seams",
+ "types_core",
+ "types_error",
+ "types_portal",
 ]
 
 [[package]]
@@ -2977,6 +3082,20 @@ name = "subtrans_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
+name = "superuser"
+version = "0.0.0"
+dependencies = [
+ "cache_syscache",
+ "datum",
+ "init_small",
+ "inval",
+ "miscinit",
+ "superuser_seams",
  "types_core",
  "types_error",
 ]

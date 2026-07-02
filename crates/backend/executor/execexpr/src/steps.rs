@@ -118,14 +118,20 @@ impl<'mcx> FuncFrame<'mcx> {
     pub(crate) fn arg_slot(&self, argno: usize) -> NonNull<NullableDatum> {
         debug_assert!(argno < self.nargs as usize);
         // SAFETY: argno < nargs, inside the frame's live fcinfo image.
-        unsafe {
-            NonNull::new_unchecked(
-                self.fcinfo
-                    .as_ptr()
-                    .add(FCINFO_ARGS_OFFSET + argno * core::mem::size_of::<NullableDatum>())
-                    .cast(),
-            )
-        }
+        unsafe { arg_slot_of(self.fcinfo, argno) }
+    }
+}
+
+/// # Safety
+/// `base` is a live fcinfo image with more than `argno` args.
+#[inline(always)]
+pub(crate) unsafe fn arg_slot_of(base: NonNull<u8>, argno: usize) -> NonNull<NullableDatum> {
+    unsafe {
+        NonNull::new_unchecked(
+            base.as_ptr()
+                .add(FCINFO_ARGS_OFFSET + argno * core::mem::size_of::<NullableDatum>())
+                .cast(),
+        )
     }
 }
 
@@ -323,13 +329,14 @@ pub struct ExprState<'mcx> {
 }
 
 impl<'mcx> ExprState<'mcx> {
-    pub(crate) fn new_in(mcx: Mcx<'mcx>) -> ExprState<'mcx> {
-        ExprState {
-            steps: PgVec::new_in(mcx),
+    // C ExprEvalPushStep allocates 16 steps up front on the first push.
+    pub(crate) fn new_in(mcx: Mcx<'mcx>) -> PgResult<ExprState<'mcx>> {
+        Ok(ExprState {
+            steps: ::mcx::vec_with_capacity_in(mcx, 16)?,
             frames: PgVec::new_in(mcx),
             kernel: Kernel::Program,
             flags: 0,
-        }
+        })
     }
 
     pub fn steps(&self) -> &[Step] {
