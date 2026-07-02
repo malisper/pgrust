@@ -24,10 +24,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "aio_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
+name = "autovacuum_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+]
 
 [[package]]
 name = "be_secure_seams"
@@ -44,6 +58,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "condition_variable_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+]
+
+[[package]]
 name = "crc32c"
 version = "0.1.0"
 
@@ -53,6 +74,14 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types_core",
+ "types_error",
+]
+
+[[package]]
+name = "deadlock_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
  "types_error",
 ]
 
@@ -88,6 +117,29 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_error",
+]
+
+[[package]]
+name = "fd"
+version = "0.0.0"
+dependencies = [
+ "aio_seams",
+ "datum",
+ "elog",
+ "file_seams",
+ "guc_tables",
+ "init_small",
+ "ipc_seams",
+ "libc",
+ "mcx",
+ "pgstat_seams",
+ "startup_seams",
+ "types_core",
+ "types_error",
+ "types_resowner",
+ "types_storage",
+ "waitevent_seams",
+ "xact_seams",
 ]
 
 [[package]]
@@ -197,7 +249,9 @@ dependencies = [
 name = "ipc_seams"
 version = "0.0.0"
 dependencies = [
+ "datum",
  "seam_core",
+ "types_error",
 ]
 
 [[package]]
@@ -218,6 +272,7 @@ name = "latch_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_storage",
 ]
 
 [[package]]
@@ -232,6 +287,10 @@ version = "0.0.0"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "lmgr_proc"
+version = "0.0.0"
 
 [[package]]
 name = "lmgr_proc_seams"
@@ -250,6 +309,15 @@ dependencies = [
  "types_core",
  "types_error",
  "types_rel",
+]
+
+[[package]]
+name = "lock_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
 ]
 
 [[package]]
@@ -343,11 +411,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_sema_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+]
+
+[[package]]
 name = "pgstat_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_core",
+]
+
+[[package]]
+name = "pmsignal_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
 ]
 
 [[package]]
@@ -391,6 +474,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "procarray_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
 ]
 
 [[package]]
@@ -497,6 +589,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "startup_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+]
+
+[[package]]
 name = "stringinfo"
 version = "0.1.0"
 dependencies = [
@@ -525,12 +624,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "syncrep_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+]
+
+[[package]]
 name = "syscache_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+ "types_storage",
+ "types_tuple",
 ]
 
 [[package]]
@@ -564,6 +672,13 @@ dependencies = [
  "types_core",
  "types_error",
  "types_rel",
+]
+
+[[package]]
+name = "timeout_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
 ]
 
 [[package]]
@@ -643,6 +758,16 @@ dependencies = [
  "mcx",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "types_pathnodes"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "types_core",
+ "types_hash",
 ]
 
 [[package]]
@@ -760,6 +885,8 @@ name = "xact_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_core",
+ "types_error",
 ]
 
 [[package]]
