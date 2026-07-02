@@ -57,15 +57,28 @@ pub fn namesend<'mcx>(mcx: Mcx<'mcx>, s: &NameData) -> PgResult<Bytea<'mcx>> {
     Ok(pqformat::pq_endtypsend(buf))
 }
 
-// strncmp over the NUL-padded 64-byte blocks (unsigned char semantics).
+// strncmp semantics, word-at-a-time like glibc's (2.9x-instr byte loop refused).
 fn strncmp_name(a: &[u8; NAMELEN], b: &[u8; NAMELEN]) -> i32 {
-    for i in 0..NAMELEN {
-        if a[i] != b[i] {
-            return if a[i] < b[i] { -1 } else { 1 };
+    const LO: u64 = 0x0101_0101_0101_0101;
+    const HI: u64 = 0x8080_8080_8080_8080;
+    let mut i = 0;
+    while i < NAMELEN {
+        let xa = u64::from_le_bytes(a[i..i + 8].try_into().unwrap());
+        let xb = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
+        let diff = xa ^ xb;
+        let zero = xa.wrapping_sub(LO) & !xa & HI;
+        if diff == 0 {
+            if zero != 0 {
+                return 0;
+            }
+            i += 8;
+            continue;
         }
-        if a[i] == 0 {
+        let di = (diff.trailing_zeros() >> 3) as usize;
+        if zero != 0 && ((zero.trailing_zeros() >> 3) as usize) < di {
             return 0;
         }
+        return if a[i + di] < b[i + di] { -1 } else { 1 };
     }
     0
 }
