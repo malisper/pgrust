@@ -16,6 +16,7 @@ types_hash = { path = "../../../../_support/types/hash" }
 types_resowner = { path = "../../../../_support/types/types_resowner" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 dynahash = { path = "../../../utils/hash/dynahash" }
+s_lock_seams = { path = "../s_lock_seams" }
 lwlock = { path = "../lwlock" }
 lmgr_proc = { path = "../lmgr_proc" }
 lock_seams = { path = "../lock_seams" }
@@ -33,7 +34,6 @@ transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
 timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
 
 [dev-dependencies]
-s_lock_seams = { path = "../s_lock_seams" }
 shmem_seams = { path = "../../ipc/shmem_seams" }
 pg_sema_seams = { path = "../../../port/pg_sema_seams" }
 pmsignal_seams = { path = "../../ipc/pmsignal_seams" }

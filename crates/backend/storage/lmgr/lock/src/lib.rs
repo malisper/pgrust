@@ -27,7 +27,7 @@ pub use shared::{
     GrantLock, LockCheckConflicts, LockManagerShmemInit, LockManagerShmemSize, LockTagHashCode,
 };
 pub use waitqueue::{
-    CheckDeadLock, GetLockHoldersAndWaiters, JoinWaitQueue, ProcLockWakeup, ProcSleep, ProcWakeup,
+    CheckDeadLock, GetLockHoldersAndWaiters, ProcLockWakeup, ProcSleep, ProcWakeup,
     RemoveFromWaitQueue,
 };
 

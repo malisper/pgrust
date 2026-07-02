@@ -18,3 +18,19 @@ seam_core::seam!(
     // miscinit's SetOuterUserId keeps the is_superuser GUC in sync through it.
     pub fn set_config_option_internal_dynamic_default(name: &str, value: &str) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // GUC_check_errdetail(...) (utils/misc/guc.c): record the errdetail a
+    // check hook reports before returning false.
+    pub fn guc_check_errdetail(detail: String)
+);
+
+seam_core::seam!(
+    // ProcessConfigFileInternal(context, applySettings, elevel) (guc.c); the
+    // guc-file.l wrapper reaches back across the guc <-> guc-file cycle.
+    pub fn process_config_file_internal(
+        context: types_guc::GucContext,
+        apply_settings: bool,
+        elevel: types_error::ErrorLevel,
+    ) -> PgResult<()>
+);

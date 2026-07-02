@@ -137,21 +137,20 @@ pub(crate) fn GrantLockLocal(tag: &LOCALLOCKTAG, owner: ResourceOwner) {
 }
 
 pub(crate) fn RemoveLocalLock(tag: &LOCALLOCKTAG) {
+    // Move the owner array out so the seam calls run outside the borrow;
+    // dropping it afterwards is C's pfree(lockOwners).
     let (owners, holds_strong, hashcode) = with_local(|state| {
+        let mcx = state.mcx;
         let ll = state.table.get_mut(tag).expect("missing LOCALLOCK");
-        let owners: Vec<ResourceOwner> = ll
-            .lockOwners
-            .iter()
-            .rev()
-            .filter(|o| !o.owner.is_null())
-            .map(|o| o.owner)
-            .collect();
-        ll.lockOwners.clear();
+        let owners = std::mem::replace(&mut ll.lockOwners, PgVec::new_in(mcx));
         (owners, ll.holdsStrongLockCount, ll.hashcode)
     });
-    for owner in owners {
-        resowner_seams::resource_owner_forget_lock::call(owner, *tag);
+    for o in owners.iter().rev() {
+        if !o.owner.is_null() {
+            resowner_seams::resource_owner_forget_lock::call(o.owner, *tag);
+        }
     }
+    drop(owners);
     if holds_strong {
         decrement_strong_lock_count(hashcode);
     }

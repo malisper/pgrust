@@ -717,8 +717,22 @@ pub fn GotDeadlockTimeout() -> bool {
     GOT_DEADLOCK_TIMEOUT.get()
 }
 
+pub fn ResetGotDeadlockTimeout() {
+    GOT_DEADLOCK_TIMEOUT.set(false);
+}
+
 pub fn DeadlockState() -> DeadLockState {
     DEADLOCK_STATE.get()
+}
+
+pub fn SetDeadlockState(state: DeadLockState) {
+    DEADLOCK_STATE.set(state);
+}
+
+// ProcSleep's reset before arming the deadlock timeout (proc.c).
+pub fn ResetDeadlockWaitState() {
+    DEADLOCK_STATE.set(DeadLockState::NotYetChecked);
+    GOT_DEADLOCK_TIMEOUT.set(false);
 }
 
 pub fn ProcWaitForSignal(wait_event_info: u32) {
