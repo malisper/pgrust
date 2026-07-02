@@ -37,6 +37,8 @@ members = [
     "crates/backend/postmaster/interrupt",
     "crates/backend/utils/error/elog",
     "crates/_support/types/hash",
+    "crates/_support/pgrust/pg_ffi_fgram",
+    "crates/_support/pgrust/trace",
 ]
 
 [workspace.package]
