@@ -281,7 +281,7 @@ backend-executor-execProcnode	src/backend/executor/execProcnode.c	todo			fabled:
 backend-executor-execReplication	src/backend/executor/execReplication.c	todo			fabled:backend-executor-execReplication; m1-dep(stub-ok)
 backend-executor-execSRF	src/backend/executor/execSRF.c	todo			m1-dep(stub-ok)
 backend-executor-execScan	src/backend/executor/execScan.c	todo			fabled:backend-executor-execScan
-backend-executor-execTuples	src/backend/executor/execTuples.c	todo			fabled:backend-executor-execTuples; m1-spine
+backend-executor-execTuples	src/backend/executor/execTuples.c	in-progress	exectuples		fabled:backend-executor-execTuples; m1-spine
 backend-executor-execUtils	src/backend/executor/execUtils.c	todo			fabled:backend-executor-execUtils; m1-spine
 backend-executor-functions	src/backend/executor/functions.c	todo			m1-dep(stub-ok)
 backend-executor-instrument	src/backend/executor/instrument.c	todo			fabled:backend-executor-instrument; m1-dep(stub-ok)
@@ -615,7 +615,7 @@ backend-utils-adt-xml	*/xml.c	todo			fabled:backend-utils-adt-xml; m1-dep(stub-o
 backend-utils-cache-catcache	src/backend/utils/cache/catcache.c,src/include/utils/catcache.h	todo			m1-spine
 backend-utils-cache-evtcache	src/backend/utils/cache/evtcache.c,src/include/utils/evtcache.h	todo			fabled:backend-utils-cache-evtcache
 backend-utils-cache-funccache	src/backend/utils/cache/funccache.c,src/include/utils/funccache.h	todo			fabled:backend-utils-cache-funccache; m1-dep(stub-ok)
-backend-utils-cache-inval	src/backend/utils/cache/inval.c,src/include/storage/sinval.h,src/include/utils/inval.h	in-progress			m1-spine
+backend-utils-cache-inval	src/backend/utils/cache/inval.c,src/include/storage/sinval.h,src/include/utils/inval.h	ported	inval		m1-spine; full inval.c: CacheInvalidate*/Register*/Accept/AtEO(Sub)Xact/inplace/2PC/recovery/LogLogicalInvalidations; fabled late endpoint shape (alloc-free group send under single borrow, per-step Copy copy-out around re-entrant callbacks, reused scratch, retained-capacity dense arrays => 0 mallocs/commit steady state); C fn-pointer callback tables fixed-capacity (registrant units unported, enum dispatch impossible yet); consts vs headers: SysCacheSize 85, MAX_BACKENDS_BITS 18, XLOG_XACT_INVALIDATIONS 0x60, RM_XACT_ID 1; new owner seams: sinval/catcache/relmapper/smgr/snapmgr/xloginsert/catalog/relpath + adds to syscache/relcache/xact/miscinit/transam_xlog seams (loud-panic until owners land); installs inval_seams::accept_invalidation_messages + debug_discard_caches GUC; 14 tests, density 3.7%; bench: AtEOXact/CommandEnd per-commit hot -> bench with xact unit (needs sinval+catcache installed); audit pending
 backend-utils-cache-lsyscache	src/backend/utils/cache/lsyscache.c,src/include/utils/lsyscache.h	todo			fabled:backend-utils-cache-lsyscache; m1-spine
 backend-utils-cache-partcache	src/backend/utils/cache/partcache.c,src/include/utils/partcache.h	todo			m1-dep(stub-ok)
 backend-utils-cache-plancache	src/backend/utils/cache/plancache.c,src/include/utils/plancache.h	todo			fabled:backend-utils-cache-plancache; m1-dep(stub-ok)
@@ -1062,7 +1062,7 @@ probe-next-srv-saslprep	*/saslprep.c	todo
 probe-next-srv-scram-common	*/scram_common.c	combined-into:common-probe-scram-srv			fabled:duplicate-of
 probe-next-srv-string	*/string.c	todo			
 probe-next-srv-stringinfo	*/stringinfo.c	todo			
-probe-next-srv-wchar	src/common/wchar.c,src/include/mb/pg_wchar.h	in-progress	wchar		fabled:common-wchar; m1-spine
+probe-next-srv-wchar	src/common/wchar.c,src/include/mb/pg_wchar.h	benched	wchar	0.75-0.95x-instr/0.77-1.03x-ns(local)	fabled:common-wchar; m1-spine; PASS dual gate: pg_utf8_verifystr instr <=1.0x all corpora (ascii64 0.75x, dense 0.88-0.92x), ns <=1.0x or parity-within-noise w/ instr confirm; C18 ASCII highway (NEON) + shift-DFA op-for-op; parity 13 tests vs unmodified compiled C incl. exhaustive 3-byte UTF-8 space + 42-encoding tables (caught pg_euccn_mblen transcription bug); zero deps, density 1.3%; Graviton verdict pending; docs/optimizations/wchar-parity.md
 probe-next-static-compression	*/compression.c	combined-into:probe-next-srv-compression			fabled:duplicate-of
 probe-next-static-exec	*/exec.c	combined-into:probe-next-srv-exec			fabled:duplicate-of
 probe-next-static-pg_get_line	*/pg_get_line.c	combined-into:probe-next-srv-pg_get_line			fabled:duplicate-of

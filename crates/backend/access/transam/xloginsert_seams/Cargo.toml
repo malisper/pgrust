@@ -1,5 +1,5 @@
 [package]
-name = "xact_seams"
+name = "xloginsert_seams"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true

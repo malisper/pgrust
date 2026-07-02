@@ -8,3 +8,23 @@ seam_core::seam!(
         relation_id: Oid,
     ) -> PgResult<Option<Rc<RelationData<'static>>>>
 );
+
+seam_core::seam!(
+    pub fn relation_cache_invalidate(debug_discard: bool) -> PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn relation_cache_invalidate_entry(relid: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn relation_id_is_in_init_file(relid: Oid) -> bool
+);
+
+seam_core::seam!(
+    pub fn relation_cache_init_file_pre_invalidate() -> PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn relation_cache_init_file_post_invalidate() -> PgResult<()>
+);
