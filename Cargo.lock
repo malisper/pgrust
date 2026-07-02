@@ -564,6 +564,10 @@ dependencies = [
 [[package]]
 name = "types_snapshot"
 version = "0.1.0"
+dependencies = [
+ "mcx",
+ "types_core",
+]
 
 [[package]]
 name = "types_storage"
