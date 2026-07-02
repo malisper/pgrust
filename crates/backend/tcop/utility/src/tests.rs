@@ -262,3 +262,25 @@ fn install_xact_test_seams() {
         transam_xlog_seams::recovery_in_progress::set(|| false);
     });
 }
+
+#[test]
+fn create_command_tag_variable_set() {
+    use types_nodes::parsenodes::{VariableSetKind, VariableSetStmt};
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    for (kind, tag) in [
+        (VariableSetKind::VAR_SET_VALUE, CMDTAG_SET),
+        (VariableSetKind::VAR_SET_CURRENT, CMDTAG_SET),
+        (VariableSetKind::VAR_SET_DEFAULT, CMDTAG_SET),
+        (VariableSetKind::VAR_SET_MULTI, CMDTAG_SET),
+        (VariableSetKind::VAR_RESET, CMDTAG_RESET),
+        (VariableSetKind::VAR_RESET_ALL, CMDTAG_RESET),
+    ] {
+        let node = Node::mk(
+            mcx,
+            VariableSetStmt { kind, name: Some("x"), ..VariableSetStmt::default() },
+        )
+        .unwrap();
+        assert_eq!(CreateCommandTag(node), tag);
+    }
+}

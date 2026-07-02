@@ -32,7 +32,7 @@ pub use parsenodes::{
 pub use plannodes::{Plan, PlanVariant, PlannedStmt, Result};
 pub use primnodes::{
     Alias, CoercionForm, Const, FromExpr, FuncExpr, OpExpr, OverridingKind, Param, ParamKind,
-    RangeTblRef, RangeVar, TargetEntry, Var, VarReturningType,
+    RangeTblRef, RangeVar, RelabelType, TargetEntry, Var, VarReturningType,
 };
 pub use rawnodes::{
     A_Const, A_Expr, A_Expr_Kind, A_Star, ColumnRef, ParamRef, RawStmt, ResTarget, SelectStmt,

@@ -34,8 +34,10 @@ pub fn UtilityTupleDescriptor(
         T_ExplainStmt => panic!(
             "UtilityTupleDescriptor (utility.c:2115): ExplainResultDesc not ported (explain lane)"
         ),
+        // guc_funcs::GetPGVariableResultDesc exists but takes an Mcx; this
+        // 'static-Rc signature must grow an allocator before the arm can flip.
         T_VariableShowStmt => panic!(
-            "UtilityTupleDescriptor (utility.c:2118): GetPGVariableResultDesc not ported (guc SHOW lane)"
+            "UtilityTupleDescriptor (utility.c:2118): GetPGVariableResultDesc needs an mcx-threaded signature (portal lane)"
         ),
         _ => Ok(None),
     }

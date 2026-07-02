@@ -105,7 +105,13 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
         T_CreateTableAsStmt => payload_gap("CreateCommandTag", "CreateTableAsStmt"),
         T_RefreshMatViewStmt => CMDTAG_REFRESH_MATERIALIZED_VIEW,
         T_AlterSystemStmt => CMDTAG_ALTER_SYSTEM,
-        T_VariableSetStmt => payload_gap("CreateCommandTag", "VariableSetStmt"),
+        T_VariableSetStmt => {
+            use types_nodes::parsenodes::VariableSetKind::*;
+            match parsetree.as_variable_set_stmt().unwrap().kind {
+                VAR_SET_VALUE | VAR_SET_CURRENT | VAR_SET_DEFAULT | VAR_SET_MULTI => CMDTAG_SET,
+                VAR_RESET | VAR_RESET_ALL => CMDTAG_RESET,
+            }
+        }
         T_VariableShowStmt => CMDTAG_SHOW,
         T_DiscardStmt => payload_gap("CreateCommandTag", "DiscardStmt"),
         T_CreateTransformStmt => CMDTAG_CREATE_TRANSFORM,

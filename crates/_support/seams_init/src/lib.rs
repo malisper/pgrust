@@ -19,6 +19,7 @@ pub fn init_all() {
     xlogreader::init_seams();
     xlogrecovery::init_seams();
     xlogutils::init_seams();
+    twophase_config::init_seams();
     aclchk::init_seams();
     catalog_namespace::init_seams();
     catalog::init_seams();

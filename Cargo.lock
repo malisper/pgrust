@@ -92,11 +92,15 @@ dependencies = [
  "adt_datetime",
  "adt_timestamp",
  "datum",
+ "elog",
+ "fd",
+ "guc_tables",
  "hashfn",
  "pgtz",
  "types_core",
  "types_error",
  "types_fmgr",
+ "xact_seams",
 ]
 
 [[package]]
@@ -348,6 +352,23 @@ dependencies = [
 [[package]]
 name = "auxprocess"
 version = "0.0.0"
+dependencies = [
+ "backend_status_seams",
+ "condition_variable_seams",
+ "datum",
+ "init_small",
+ "ipc",
+ "lmgr_proc",
+ "lwlock",
+ "miscinit",
+ "postinit",
+ "procsignal",
+ "ps_status",
+ "resowner",
+ "types_core",
+ "types_error",
+ "waitevent_seams",
+]
 
 [[package]]
 name = "backend_progress_seams"
@@ -753,6 +774,20 @@ dependencies = [
 [[package]]
 name = "coerce"
 version = "0.0.0"
+dependencies = [
+ "datum",
+ "fmgr_core",
+ "lsyscache",
+ "mbutils",
+ "mcx",
+ "parser_small1",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_tuple",
+]
 
 [[package]]
 name = "combocid_seams"
@@ -1109,6 +1144,7 @@ version = "0.1.0"
 dependencies = [
  "adt_bool",
  "adt_cash",
+ "adt_date",
  "adt_float",
  "adt_int",
  "adt_int8",
@@ -2047,6 +2083,7 @@ name = "miscinit"
 version = "0.0.0"
 dependencies = [
  "elog",
+ "fd",
  "guc_seams",
  "guc_tables",
  "init_small",
@@ -2274,6 +2311,22 @@ dependencies = [
 [[package]]
 name = "parse_oper"
 version = "0.0.0"
+dependencies = [
+ "cache_syscache",
+ "catalog_namespace",
+ "coerce",
+ "datum",
+ "elog",
+ "inval",
+ "lsyscache",
+ "mbutils",
+ "mcx",
+ "parser_small1",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_nodes",
+]
 
 [[package]]
 name = "parse_target"
@@ -3802,6 +3855,30 @@ dependencies = [
 [[package]]
 name = "sync"
 version = "0.0.0"
+dependencies = [
+ "aio_seams",
+ "checkpointer_seams",
+ "clog",
+ "elog",
+ "fd",
+ "guc_tables",
+ "init_small",
+ "latch",
+ "libc",
+ "mcx",
+ "md",
+ "miscinit",
+ "pgstat_seams",
+ "relpath_seams",
+ "smgr",
+ "sync_seams",
+ "tablespace_seams",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "waitevent_seams",
+ "xact_seams",
+]
 
 [[package]]
 name = "sync_seams"
