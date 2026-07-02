@@ -110,7 +110,7 @@ fn select_1_plus_2() {
         panic!("int consts")
     };
     assert_eq!((li.ival, l.location, ri.ival, r.location), (1, 7, 2, 11));
-    assert_eq!((e.rexpr_list_start, e.rexpr_list_end), (-1, -1));
+    assert_eq!((e.rexpr_list_start, e.rexpr_list_end), (0, 0));
 }
 
 #[test]

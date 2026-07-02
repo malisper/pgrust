@@ -86,6 +86,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_date"
+version = "0.1.0"
+dependencies = [
+ "adt_datetime",
+ "adt_timestamp",
+ "datum",
+ "hashfn",
+ "pgtz",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
 name = "adt_datetime"
 version = "0.1.0"
 dependencies = [
@@ -212,6 +226,7 @@ version = "0.1.0"
 dependencies = [
  "adt_datetime",
  "libc",
+ "pgtz",
  "timestamp_seams",
  "types_core",
  "types_error",
@@ -242,6 +257,23 @@ name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
+name = "amapi"
+version = "0.1.0"
+dependencies = [
+ "cache_syscache",
+ "catcache",
+ "datum",
+ "heaptuple",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_pathnodes",
+ "types_relscan",
+ "types_scan",
+ "types_tuple",
+]
 
 [[package]]
 name = "analyze_seams"
@@ -566,6 +598,7 @@ version = "0.1.0"
 dependencies = [
  "catcache_seams",
  "datum",
+ "genam_seams",
  "hashfn",
  "indexam",
  "init_small",
@@ -621,6 +654,7 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_error",
+ "types_storage",
 ]
 
 [[package]]
@@ -703,6 +737,10 @@ dependencies = [
  "types_core",
  "types_portal",
 ]
+
+[[package]]
+name = "coerce"
+version = "0.0.0"
 
 [[package]]
 name = "combocid_seams"
@@ -1186,6 +1224,7 @@ dependencies = [
  "mcx",
  "miscinit",
  "parser_small1",
+ "pgtz",
  "pqcomm_seams",
  "scalar_seams",
  "timestamp_seams",
@@ -1229,9 +1268,11 @@ dependencies = [
  "elog",
  "guc",
  "guc_tables",
+ "mbutils",
  "mbutils_seams",
  "mcx",
  "miscinit",
+ "pgtz",
  "pqcomm_seams",
  "scalar_seams",
  "snapmgr_seams",
@@ -1241,6 +1282,7 @@ dependencies = [
  "timestamp_seams",
  "tupdesc",
  "types_core",
+ "types_dest",
  "types_error",
  "types_guc",
  "types_nodes",
@@ -2218,6 +2260,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "parse_oper"
+version = "0.0.0"
+
+[[package]]
 name = "parse_target"
 version = "0.0.0"
 dependencies = [
@@ -2636,20 +2682,27 @@ dependencies = [
  "init_small",
  "interrupt",
  "ipc_seams",
+ "latch",
  "libc",
+ "lmgr_proc",
+ "lock_seams",
  "mcx",
+ "mcxt_seams",
  "miscinit",
  "parser_seams",
  "pgstat",
  "planner_seams",
+ "pmsignal",
  "portalmem",
  "postgres_seams",
  "postinit",
  "pqcomm",
  "pqformat",
  "pquery",
+ "procsignal_seams",
  "ps_status_seams",
  "rewrite_handler_seams",
+ "sinval",
  "snapmgr",
  "stringinfo",
  "tcop_dest",
@@ -3353,6 +3406,7 @@ dependencies = [
  "pg_locale",
  "pg_prng",
  "pgstat",
+ "pgtz",
  "plancache",
  "pmchild",
  "pmsignal",
@@ -3726,6 +3780,10 @@ dependencies = [
  "quote",
  "unicode-ident",
 ]
+
+[[package]]
+name = "sync"
+version = "0.0.0"
 
 [[package]]
 name = "sync_seams"
@@ -4294,6 +4352,7 @@ version = "0.1.0"
 dependencies = [
  "cmdtag",
  "elog",
+ "guc_funcs",
  "guc_tables",
  "mcx",
  "miscinit",

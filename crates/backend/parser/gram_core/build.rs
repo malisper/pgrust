@@ -4,12 +4,9 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 
-// Mechanically extracts the bison 2.3 LALR tables from the vendored gram.c
-// (byte copy of the built 18.3 checkout's generated parser) into OUT_DIR:
-//   tables.rs  yytranslate/yypact/yydefact/yypgoto/yydefgoto/yytable/yycheck/
-//              yyr1/yyr2 + the #define'd automaton constants
-//   names.rs   yytname/yyrline/HAS_ACTION (cold: panic messages for
-//              unimplemented rule actions)
+// Mechanical table extraction from the vendored gram.c (byte copy of the
+// built 18.3 checkout's bison 2.3 output): tables.rs (automaton), names.rs
+// (cold rule-name/line/HAS_ACTION metadata for unported-action panics).
 fn main() -> Result<(), Box<dyn Error>> {
     let dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").ok_or("no CARGO_MANIFEST_DIR")?);
     let out = PathBuf::from(env::var_os("OUT_DIR").ok_or("no OUT_DIR")?);
@@ -58,8 +55,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     for (i, &s) in yyr1.iter().enumerate().skip(1) {
         assert!((yyntokens..yyntokens + yynnts).contains(&s), "yyr1[{i}]={s}");
     }
-    // Every shift/goto target in yytable is a valid state; reduce entries are
-    // -rule (rule 0 slots are error, never read as reductions). This licenses
+    // Shift/goto targets are valid states; reduces are -rule — licenses
     // indexing yypact/yydefact by any state the walk produces.
     for (i, &v) in yytable.iter().enumerate() {
         assert!(v < yynstates && -v <= yynrules, "yytable[{i}]={v}");
@@ -69,11 +65,56 @@ fn main() -> Result<(), Box<dyn Error>> {
         assert!((-1..yynstates).contains(&g), "yydefgoto={g}");
     }
 
-    let case_rules = case_labels(&src)?;
-    assert!(case_rules.len() > 2000, "action switch parse: {}", case_rules.len());
-    let mut has_action = vec![false; (yynrules + 1) as usize];
-    for r in case_rules {
-        has_action[r as usize] = true;
+    let cases = case_labels(&src)?;
+    assert!(cases.len() > 2000, "action switch parse: {}", cases.len());
+    // DISPATCH[rule]: CALL = ported/complex action; NONE = no value
+    // (empty rule, no action); EMPTY_LIST/NULL_NODE/NULL_ALIAS = constant
+    // empty actions; else n for `$$ = $n` (incl. the keyword pstrdup arms —
+    // borrowed here). Classified mechanically from the gram.c case bodies.
+    let (call, none, empty_list, null_node, null_alias) = (0u8, 255u8, 254u8, 253u8, 252u8);
+    let mut dispatch = vec![none; (yynrules + 1) as usize];
+    for r in 1..dispatch.len() {
+        if yyr2[r] >= 1 {
+            dispatch[r] = 1;
+        }
+    }
+    let classify = |b: &str| -> Option<u8> {
+        let norm: String = b.split_whitespace().collect::<Vec<_>>().join(" ");
+        let body = norm.trim_start_matches("{ ").trim_end_matches(" ;}").trim();
+        let (lhs, rhs) = body.strip_suffix(';')?.split_once(" = ")?;
+        let lhs_field = lhs.strip_prefix("(yyval.")?.strip_suffix(')')?;
+        // NULL / NIL constants: the consumer accessor decides the variant —
+        // lists are NIL, aliases the Alias variant, every other pointer Node.
+        match (lhs_field, rhs) {
+            ("list", "NIL") => return Some(empty_list),
+            ("alias", "NULL") => return Some(null_alias),
+            (_, "NULL") => return Some(null_node),
+            _ => {}
+        }
+        let rhs = match rhs.strip_prefix("pstrdup(") {
+            Some(r) => {
+                if lhs_field != "str" {
+                    return None;
+                }
+                r.strip_suffix(')')?
+            }
+            None => rhs,
+        };
+        let inner = rhs.strip_prefix("(yyvsp[(")?;
+        let (n, rest) = inner.split_once(')')?;
+        let field = rest.split_once('.')?.1.strip_suffix(')')?;
+        if lhs_field != field && !(lhs_field == "str" && field == "keyword") {
+            return None;
+        }
+        n.trim().parse::<u8>().ok()
+    };
+    for (r, body) in cases {
+        let n = classify(&body).unwrap_or(call);
+        assert!(
+            n == call || n >= 252 || (n >= 1 && (n as i64) <= yyr2[r as usize]),
+            "rule {r}: $${n} out of range"
+        );
+        dispatch[r as usize] = n;
     }
 
     let mut t = String::new();
@@ -94,11 +135,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     emit(&mut t, "YYCHECK", "i16", &yycheck);
     emit(&mut t, "YYR1", "u16", &yyr1);
     emit(&mut t, "YYR2", "u8", &yyr2);
+    emit(&mut t, "DISPATCH", "u8", &dispatch.iter().map(|&b| b as i64).collect::<Vec<_>>());
     fs::write(out.join("tables.rs"), t)?;
 
     let mut n = String::new();
     emit(&mut n, "YYRLINE", "u16", &yyrline);
-    emit(&mut n, "HAS_ACTION", "bool", &has_action.iter().map(|&b| b as i64).collect::<Vec<_>>());
     let _ = writeln!(n, "pub static YYTNAME: [&str; {}] = [", yytname.len());
     for name in &yytname {
         let _ = writeln!(n, "    {name:?},");
@@ -156,22 +197,30 @@ fn strings(src: &str, name: &str) -> Result<Vec<String>, Box<dyn Error>> {
     Ok(out)
 }
 
-// Rule numbers with semantic actions: the `case N:` labels of yyparse's
-// reduction switch (2-space indentation is the bison 2.3 rendering; yydestruct
-// and yy_symbol_value_print switches use different label shapes).
-fn case_labels(src: &str) -> Result<Vec<i64>, Box<dyn Error>> {
+// Rule numbers with semantic actions and their case bodies (label to
+// `break;`), from yyparse's reduction switch.
+fn case_labels(src: &str) -> Result<Vec<(i64, String)>, Box<dyn Error>> {
     let start = src.find("  switch (yyn)").ok_or("missing action switch")?;
     let end = start + src[start..].find("\n/* Line ").ok_or("missing switch end")?;
-    let mut out = Vec::new();
+    let mut out: Vec<(i64, String)> = Vec::new();
     let mut lines = src[start..end].lines().peekable();
     while let Some(line) = lines.next() {
-        // Actions contain their own C switches (numeric or not); a rule label
-        // is followed by the action's `#line NNN "gram.y"` marker.
+        // Rule labels are followed by `#line N "gram.y"`; C switches inside
+        // action bodies are not.
         if let Some(rest) = line.trim_start().strip_prefix("case ") {
             if let Some(num) = rest.strip_suffix(':') {
-                if let (Ok(n), Some(next)) = (num.trim().parse(), lines.peek()) {
+                if let (Ok(n), Some(next)) = (num.trim().parse::<i64>(), lines.peek()) {
                     if next.starts_with("#line ") {
-                        out.push(n);
+                        lines.next();
+                        let mut body = String::new();
+                        while let Some(&b) = lines.peek() {
+                            if b.trim() == "break;" {
+                                break;
+                            }
+                            body.push_str(lines.next().unwrap());
+                            body.push('\n');
+                        }
+                        out.push((n, body));
                     }
                 }
             }
