@@ -52,7 +52,7 @@ impl CatCList {
             let ct = &cache.tuples[m as usize];
             MemberTuple {
                 // SAFETY: list members are positive entries (non-null image).
-                image: unsafe { NonNull::new_unchecked(ct.payload) },
+                image: unsafe { NonNull::new_unchecked(ct.image_ptr()) },
                 t_len: ct.t_len,
                 t_self: ct.t_self,
                 t_tableoid: ct.t_tableoid,

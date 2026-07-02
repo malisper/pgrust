@@ -1,0 +1,17 @@
+[package]
+name = "mbutils"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+datum = { path = "../../../../_support/types/datum" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+wchar = { path = "../../../../common/wchar" }
+mbutils_seams = { path = "../mbutils_seams" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+xact_seams = { path = "../../../access/transam/xact_seams" }
+namespace_seams = { path = "../../../catalog/namespace_seams" }

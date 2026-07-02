@@ -44,6 +44,7 @@ fn setup() {
 
         pgstat_seams::pgstat_set_session_end_cause_fatal::set(|| {});
         init_small_seams::my_proc_pid::set(|| 4242);
+        ipc_seams::proc_exit::set(|_code, _my_pid| -> ! { panic!("test-proc-exit") });
         static WAL_SYNC_METHOD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
         guc_tables::vars::wal_sync_method.install(guc_tables::GucVarAccessors {
             get: || WAL_SYNC_METHOD.load(Ordering::Relaxed),
@@ -247,8 +248,9 @@ fn missing_file_is_fatal_on_load() {
     let dir = scratch_dir("fatal");
     init_small::globals::SetDatabasePath(&dir);
     RelationMapInitialize();
-    let err = RelationMapInitializePhase3().unwrap_err();
-    assert_eq!(err.level(), FATAL);
+    // FATAL is process-fatal: elog routes it to proc_exit (mocked to panic).
+    let died = std::panic::catch_unwind(RelationMapInitializePhase3).is_err();
+    assert!(died);
 }
 
 #[test]

@@ -32,3 +32,5 @@ sinval_seams = { path = "../../../storage/ipc/sinval_seams" }
 shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
 aio_seams = { path = "../../../storage/aio/aio_seams" }
 pgstat_seams = { path = "../../activity/pgstat_seams" }
+init_small_seams = { path = "../../init/init_small_seams" }
+ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
