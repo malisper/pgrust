@@ -358,7 +358,7 @@ backend-libpq-crypt	src/backend/libpq/crypt.c	todo			fabled:backend-libpq-crypt;
 backend-libpq-hba	src/backend/libpq/hba.c	todo			fabled:backend-libpq-hba; m1-spine(boot)
 backend-libpq-ifaddr	src/backend/libpq/ifaddr.c	todo			fabled:backend-libpq-ifaddr; m1-dep(stub-ok)
 backend-libpq-pqcomm	src/backend/libpq/pqcomm.c	todo			fabled:backend-libpq-pqcomm; m1-spine
-backend-libpq-pqformat	src/backend/libpq/pqformat.c	todo			fabled:backend-libpq-pqformat; m1-spine
+backend-libpq-pqformat	src/backend/libpq/pqformat.c	benched	pqformat	0.52x-instr/0.64x-ns	fabled:backend-libpq-pqformat; m1-spine; wire encode/decode, PG11 fast shape day-one; PASS dual gate Graviton clang-16 with wide margin (sendint32 0.49x/0.31x, sendstring 0.31x/0.37x); watch: printtup must hoist conversion resolve (lever 2); docs/benchmarks/pqformat.md
 backend-libpq-pqmq	src/backend/libpq/pqmq.c	todo			fabled:backend-libpq-pqmq
 backend-libpq-pqsignal	*/pqsignal.c	todo			fabled:backend-libpq-pqsignal; m1-spine(boot)
 backend-main-main	src/backend/main/main.c	todo			fabled:backend-main-main; m1-spine

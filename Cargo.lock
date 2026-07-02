@@ -27,12 +27,40 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "crc32c"
+version = "0.1.0"
+
+[[package]]
 name = "datum"
 version = "0.0.0"
 dependencies = [
  "mcx",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "elog_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+]
+
+[[package]]
+name = "error_small_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+]
+
+[[package]]
+name = "guc_tables"
+version = "0.0.0"
+dependencies = [
+ "types_error",
+ "types_guc",
 ]
 
 [[package]]
@@ -50,10 +78,51 @@ name = "hashfn"
 version = "0.1.0"
 
 [[package]]
+name = "heaptuple"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_tuple",
+]
+
+[[package]]
+name = "init_small_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+]
+
+[[package]]
+name = "ipc_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+
+[[package]]
+name = "libpq_pqsignal"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "mbutils_seams"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_error",
+]
 
 [[package]]
 name = "mcx"
@@ -70,6 +139,33 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "pgstat_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+]
+
+[[package]]
+name = "pqcomm_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+]
+
+[[package]]
+name = "pqformat"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mbutils_seams",
+ "mcx",
+ "pqcomm_seams",
+ "stringinfo",
+ "types_error",
+]
 
 [[package]]
 name = "proc-macro2"
@@ -113,7 +209,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "syslogger_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+]
+
+[[package]]
 name = "types_core"
+version = "0.0.0"
+
+[[package]]
+name = "types_dest"
 version = "0.0.0"
 
 [[package]]
@@ -129,6 +236,41 @@ dependencies = [
  "types_core",
  "types_error",
  "types_tuple",
+]
+
+[[package]]
+name = "types_guc"
+version = "0.0.0"
+
+[[package]]
+name = "types_rel"
+version = "0.1.0"
+
+[[package]]
+name = "types_resowner"
+version = "0.1.0"
+
+[[package]]
+name = "types_scan"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "types_core",
+ "types_fmgr",
+]
+
+[[package]]
+name = "types_slot"
+version = "0.1.0"
+
+[[package]]
+name = "types_storage"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "mcx",
+ "types_core",
+ "types_error",
 ]
 
 [[package]]
