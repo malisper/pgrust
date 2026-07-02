@@ -259,7 +259,7 @@ fn build_ps_title() {
         }
         s
     });
-    ps_status_seams::init_ps_display::call(&ps_data);
+    ps_status_seams::init_ps_display::call(Some(&ps_data));
     ps_status_seams::set_ps_display::call("initializing");
 }
 

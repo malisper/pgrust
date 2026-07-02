@@ -17,6 +17,16 @@ pub struct FuncCallContext {
     pub user_fctx: Option<Box<dyn Any>>,
 }
 
+impl core::fmt::Debug for FuncCallContext {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("FuncCallContext")
+            .field("call_cntr", &self.call_cntr)
+            .field("max_calls", &self.max_calls)
+            .field("has_user_fctx", &self.user_fctx.is_some())
+            .finish()
+    }
+}
+
 #[cold]
 fn srf_context_error() -> Box<PgError> {
     Box::new(

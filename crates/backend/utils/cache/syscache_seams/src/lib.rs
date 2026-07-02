@@ -453,3 +453,30 @@ seam_core::seam!(
     // RelationHasSysCache (syscache.c).
     pub fn relation_has_sys_cache(relid: Oid) -> bool
 );
+
+// The pg_type columns lookup_type_cache copies into a TypeCacheEntry, plus
+// the typisdefined/typname pair its shell-type ereport needs.
+#[derive(Clone, Copy, Debug)]
+pub struct PgTypeTypcacheShape {
+    pub typname: NameData,
+    pub typlen: i16,
+    pub typbyval: bool,
+    pub typalign: i8,
+    pub typstorage: i8,
+    pub typtype: i8,
+    pub typisdefined: bool,
+    pub typrelid: Oid,
+    pub typsubscript: Oid,
+    pub typelem: Oid,
+    pub typarray: Oid,
+    pub typcollation: Oid,
+}
+
+seam_core::seam!(
+    pub fn lookup_pg_type_typcache_shape(typid: Oid) -> PgResult<Option<PgTypeTypcacheShape>>
+);
+
+seam_core::seam!(
+    // GetSysCacheHashValue1(TYPEOID, typid).
+    pub fn syscache_hash_value_typeoid(typid: Oid) -> PgResult<u32>
+);
