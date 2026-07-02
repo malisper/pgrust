@@ -131,7 +131,7 @@ backend-access-transam-xlogbackup	*/xlogbackup.c	todo			fabled:backend-access-tr
 backend-access-transam-xlogfuncs	src/backend/access/transam/xlogfuncs.c	todo			fabled:backend-access-transam-xlogfuncs
 backend-access-transam-xloginsert	src/backend/access/transam/xloginsert.c	todo			fabled:backend-access-transam-xloginsert; m1-dep(stub-ok)
 backend-access-transam-xlogprefetcher	src/backend/access/transam/xlogprefetcher.c	todo			fabled:backend-access-transam-xlogprefetcher; m1-dep(stub-ok)
-backend-access-transam-xlogreader	src/backend/access/transam/xlogreader.c	todo			fabled:backend-access-transam-xlogreader; m1-spine(boot)
+backend-access-transam-xlogreader	src/backend/access/transam/xlogreader.c	ported	xlogreader	cold	m1-spine(boot); record decode + cross-page reassembly + CRC validation; trait-generic reader routines (monomorphized, no dyn); retained-scratch decode buffer, zero steady-state allocs; pglz FPIs loud-panic (wal_compression off default); M4 bench targets noted (view marshal, queue.remove); 10 tests, Miri clean, density 2.3%
 backend-access-transam-xlogrecovery	src/backend/access/transam/xlogrecovery.c	todo			fabled:backend-access-transam-xlogrecovery; m1-spine(boot)
 backend-access-transam-xlogstats	*/xlogstats.c	todo			fabled:backend-access-transam-xlogstats
 backend-access-transam-xlogutils	src/backend/access/transam/xlogutils.c	ported	xlogutils	cold	m1-spine(boot); recovery-state store in C home (installs slru in_recovery seam); invalid-page table BTreeMap (cold, deterministic dump); fake relcache entries loud-panic pending rel vocab; created xlogreader/timeline/xlogrecovery/bufmgr seam decl crates; 8 tests, density 3.7%

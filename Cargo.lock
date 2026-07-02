@@ -845,6 +845,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "md"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "fd",
+ "guc_tables",
+ "init_small",
+ "libc",
+ "relpath_seams",
+ "sync_seams",
+ "tablespace_seams",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "xlogutils",
+]
+
+[[package]]
 name = "miscinit"
 version = "0.0.0"
 dependencies = [
@@ -1470,6 +1488,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "smgr"
+version = "0.0.0"
+dependencies = [
+ "bufmgr_seams",
+ "elog",
+ "fd",
+ "inval",
+ "mcx",
+ "md",
+ "smgr_seams",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "xlogutils",
+]
+
+[[package]]
 name = "smgr_seams"
 version = "0.0.0"
 dependencies = [
@@ -1693,6 +1728,15 @@ dependencies = [
 
 [[package]]
 name = "tablecmds_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
+name = "tablespace_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",

@@ -35,6 +35,7 @@ seam_core::seam!(
     pub fn extend_buffered_rel_to(
         smgr_rlocator: RelFileLocatorBackend,
         forknum: ForkNumber,
+        strategy: BufferAccessStrategy,
         flags: u32,
         extend_to: BlockNumber,
         mode: ReadBufferMode,
@@ -42,11 +43,11 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    pub fn release_buffer(buffer: Buffer)
+    pub fn release_buffer(buffer: Buffer) -> PgResult<()>
 );
 
 seam_core::seam!(
-    pub fn mark_buffer_dirty(buffer: Buffer)
+    pub fn mark_buffer_dirty(buffer: Buffer) -> PgResult<()>
 );
 
 seam_core::seam!(
@@ -73,3 +74,87 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn buffer_page_set_lsn(buffer: Buffer, lsn: XLogRecPtr)
 );
+
+seam_core::seam!(
+    // RestoreBlockImage's final memcpy onto BufferGetPage(buffer).
+    pub fn overwrite_buffer_page(buffer: Buffer, page: &[u8])
+);
+
+seam_core::seam!(
+    pub fn at_eoxact_buffers(is_commit: bool)
+);
+
+seam_core::seam!(
+    pub fn unlock_buffers()
+);
+
+seam_core::seam!(
+    // ReadBuffer(reln, blockNum): bufmgr reads what it needs (rd_smgr key,
+    // persistence) off the open Relation, as C does off the pointer in hand.
+    pub fn read_buffer<'a, 'mcx>(
+        rel: &'a types_rel::RelationData<'mcx>,
+        block_num: BlockNumber,
+    ) -> PgResult<Buffer>
+);
+
+seam_core::seam!(
+    pub fn read_buffer_strategy<'a, 'mcx>(
+        rel: &'a types_rel::RelationData<'mcx>,
+        block_num: BlockNumber,
+        strategy: BufferAccessStrategy,
+    ) -> PgResult<Buffer>
+);
+
+seam_core::seam!(
+    pub fn buffer_get_block_number(buffer: Buffer) -> BlockNumber
+);
+
+seam_core::seam!(
+    // BufferGetPage(buffer): BLCKSZ bytes, valid while the buffer stays pinned.
+    pub fn buffer_get_page(buffer: Buffer) -> core::ptr::NonNull<u8>
+);
+
+seam_core::seam!(
+    pub fn incr_buffer_ref_count(buffer: Buffer)
+);
+
+seam_core::seam!(
+    // GetAccessStrategy (storage/buffer/freelist.c).
+    pub fn get_access_strategy(
+        btype: types_storage::buf::BufferAccessStrategyType,
+    ) -> BufferAccessStrategy
+);
+
+seam_core::seam!(
+    pub fn free_access_strategy(strategy: BufferAccessStrategy)
+);
+
+seam_core::seam!(
+    pub fn relation_get_number_of_blocks_in_fork<'a, 'mcx>(
+        rel: &'a types_rel::RelationData<'mcx>,
+        fork_num: ForkNumber,
+    ) -> PgResult<BlockNumber>
+);
+
+seam_core::seam!(
+    // DropRelationBuffers(smgr_reln, forkNum, nforks, firstDelBlock)
+    // (bufmgr.c); the SMgrRelation handle crosses as its locator key.
+    pub fn drop_relation_buffers(
+        rlocator: RelFileLocatorBackend,
+        forknum: &[ForkNumber],
+        first_del_block: &[BlockNumber],
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // DropRelationsAllBuffers(smgr_reln, nlocators) (bufmgr.c).
+    pub fn drop_relations_all_buffers(rlocators: &[RelFileLocatorBackend]) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // FlushRelationsAllBuffers(smgrs, nrels) (bufmgr.c).
+    pub fn flush_relations_all_buffers(rlocators: &[RelFileLocatorBackend]) -> PgResult<()>
+);
+
+pub mod pin;
+pub use pin::{BufferPin, ContentLockGuard};

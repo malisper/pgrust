@@ -190,6 +190,9 @@ members = [
     "crates/backend/storage/ipc/sinval",
     "crates/backend/storage/ipc/waiteventset",
     "crates/backend/utils/cache/lsyscache",
+    "crates/backend/commands/tablespace_seams",
+    "crates/backend/storage/smgr/md",
+    "crates/backend/storage/smgr/smgr",
 ]
 
 [workspace.package]
