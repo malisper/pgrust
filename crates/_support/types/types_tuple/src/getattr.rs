@@ -60,6 +60,7 @@ pub fn heap_attisnull(
     }
 }
 
+#[inline(always)]
 pub fn nocachegetattr(tup: &HeapTupleData<'_>, attnum: i32, tupleDesc: &TupleDescData<'_>) -> Datum {
     let bp = tup.bits_ptr();
     let hasnulls = tup.has_nulls();
@@ -138,7 +139,7 @@ pub fn nocachegetattr(tup: &HeapTupleData<'_>, attnum: i32, tupleDesc: &TupleDes
         let mut i = 0;
         loop {
             let att = &watts[i];
-            let attlen = att.attlen as i32;
+            let attlen = att.attlen;
             // SAFETY: in-bounds for attributes present in the tuple; walk stops at attnum.
             unsafe {
                 if hasnulls && att_isnull(i, bp) {
@@ -168,7 +169,7 @@ pub fn nocachegetattr(tup: &HeapTupleData<'_>, attnum: i32, tupleDesc: &TupleDes
                     break;
                 }
 
-                off = att_addlength_pointer(off, attlen, tp.add(off));
+                off = att_addlength_pointer(off, attlen as i32, tp.add(off));
             }
             if usecache && attlen <= 0 {
                 usecache = false;
@@ -265,7 +266,7 @@ pub fn heap_deform_tuple(
         let thisatt = &atts_n[attnum];
         // Locals: the Cell field makes the struct non-readonly to LLVM, which
         // would otherwise reload these after every attcacheoff store.
-        let attlen = thisatt.attlen as i32;
+        let attlen = thisatt.attlen;
         let attbyval = thisatt.attbyval;
         let attalignby = thisatt.attalignby;
         // SAFETY: bitmap/image reads walk attributes present in the tuple.
@@ -295,9 +296,9 @@ pub fn heap_deform_tuple(
                 }
             }
 
-            values_n[attnum] = fetch_att(tp.add(off), attbyval, attlen);
+            values_n[attnum] = fetch_att(tp.add(off), attbyval, attlen as i32);
 
-            off = att_addlength_pointer(off, attlen, tp.add(off));
+            off = att_addlength_pointer(off, attlen as i32, tp.add(off));
         }
 
         if attlen <= 0 {
