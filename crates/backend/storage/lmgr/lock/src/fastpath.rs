@@ -8,7 +8,7 @@ use types_core::{
 use types_error::PgResult;
 use types_storage::lock::{
     ExclusiveLock, LockMethod, ShareLock, ShareUpdateExclusiveLock, DEFAULT_LOCKMETHOD, LOCKMODE,
-    LOCKTAG, LOCKTAG_RELATION, LOCKACQUIRE_NOT_AVAIL,
+    LOCKTAG, LOCKTAG_RELATION,
 };
 use types_storage::storage::{Spinlock, SyncCell, PGPROC, FP_LOCK_SLOTS_PER_GROUP};
 
@@ -125,6 +125,39 @@ pub(crate) fn ConflictsWithRelationFastPath(locktag: &LOCKTAG, mode: LOCKMODE) -
         && locktag.locktag_type == LOCKTAG_RELATION
         && locktag.locktag_field1 != InvalidOid
         && mode > ShareUpdateExclusiveLock
+}
+
+pub(crate) fn fast_path_group_in_use(relid: Oid) -> bool {
+    local_use_count(fast_path_rel_group(relid)) > 0
+}
+
+/// GetLockConflicts' per-backend fast-path conflict probe.
+/// SAFETY contract: proc's fpInfoLock held.
+pub(crate) unsafe fn fp_group_conflicts(
+    proc: &PGPROC,
+    group: u32,
+    relid: Oid,
+    dbid: Oid,
+    conflict_mask: types_storage::lock::LOCKMASK,
+) -> bool {
+    let view = fp_view(proc);
+    if proc.databaseId.load(Relaxed) != dbid || view.group_bits(group) == 0 {
+        return false;
+    }
+    for j in 0..FP_LOCK_SLOTS_PER_GROUP as u32 {
+        let f = group * FP_LOCK_SLOTS_PER_GROUP as u32 + j;
+        if view.relid(f) != relid {
+            continue;
+        }
+        let lockmask = view.get_bits(f);
+        if lockmask == 0 {
+            continue;
+        }
+        let lockmask = (lockmask << FAST_PATH_LOCKNUMBER_OFFSET) as types_storage::lock::LOCKMASK;
+        // One entry per relation: found and no conflict means done.
+        return lockmask & conflict_mask != 0;
+    }
+    false
 }
 
 pub(crate) fn fast_path_local_can_try(locktag: &LOCKTAG, mode: LOCKMODE) -> bool {
@@ -329,8 +362,8 @@ pub(crate) fn FastPathTransferRelationLocks(
 }
 
 /// Return the PROCLOCK for a fast-path lock, transferring it to the shared
-/// table if necessary (AtPrepare_Locks helper in C; used by LockRelease's
-/// refind path indirectly). Errors if shmem is exhausted.
+/// table if necessary. Sole C caller is AtPrepare_Locks (2PC, phase 2).
+#[allow(dead_code)]
 pub(crate) fn FastPathGetRelationLockEntry(
     tag: &types_storage::lock::LOCALLOCKTAG,
 ) -> PgResult<*mut types_storage::lock::PROCLOCK> {

@@ -1,0 +1,26 @@
+[package]
+name = "launch_backend"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "launch_backend"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_startup = { path = "../../../_support/types/types_startup" }
+init_small = { path = "../../utils/init/init_small" }
+miscinit = { path = "../../utils/init/miscinit" }
+backend_startup = { path = "../../tcop/backend_startup" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+
+[dev-dependencies]
+ip = { path = "../../../common/ip" }
+libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
+waiteventset_seams = { path = "../../storage/ipc/waiteventset_seams" }
+types_storage = { path = "../../../_support/types/types_storage" }
+libc = "0.2"

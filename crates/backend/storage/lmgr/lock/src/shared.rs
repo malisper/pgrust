@@ -44,13 +44,10 @@ pub(crate) fn shared() -> &'static SharedTables {
         .unwrap_or_else(|| panic!("lock manager shmem not initialized"))
 }
 
-// ShmemInitHash stand-in. dynahash's HASH_SHARED_MEM/HASH_PARTITION creation
-// gate is not yet implemented (thread-shmem lane), so this arms the same
-// machinery the way dynahash's own partitioned tests do: create private,
-// flip num_partitions, init freelist mutexes, preallocate every entry
-// single-threaded, then freeze allocation (isfixed) so no mcx allocation can
-// ever race across backends. HASH_ENTER_NULL then plays C's bounded-shmem
-// exhaustion. Revisit when dynahash lands shared-mem creation.
+// ShmemInitHash stand-in until dynahash lands HASH_SHARED_MEM: arm the
+// partitioned machinery post-create, preallocate every entry single-threaded,
+// then freeze (isfixed) so no mcx allocation can race across backends;
+// HASH_ENTER_NULL then plays C's bounded-shmem exhaustion.
 fn shmem_init_hash(
     name: &str,
     max_size: i64,
@@ -64,17 +61,18 @@ fn shmem_init_hash(
         for i in 0..NUM_FREELISTS {
             (*hctl).freeList[i].mutex = std::sync::atomic::AtomicI32::new(0);
         }
-        let keysize = info.keysize;
-        debug_assert!(keysize >= 8);
-        let mut key = vec![0u8; keysize];
+        // Counter lives in bytes 8..16: bytes 0..8 stay zero so a PROCLOCKTAG
+        // key never carries a fake myLock pointer into proclock_hash.
+        assert_eq!(info.keysize, 16);
+        let mut key = [0u8; 16];
         for i in 0..max_size as u64 {
-            key[..8].copy_from_slice(&i.to_ne_bytes());
+            key[8..16].copy_from_slice(&(i + 1).to_ne_bytes());
             let hv = get_hash_value(table, key.as_ptr());
             let p = hash_search_with_hash_value(table, key.as_ptr(), hv, HASH_ENTER, None)?;
             assert!(!p.is_null(), "lock table preallocation failed");
         }
         for i in 0..max_size as u64 {
-            key[..8].copy_from_slice(&i.to_ne_bytes());
+            key[8..16].copy_from_slice(&(i + 1).to_ne_bytes());
             let hv = get_hash_value(table, key.as_ptr());
             hash_search_with_hash_value(table, key.as_ptr(), hv, HASH_REMOVE, None)?;
         }
@@ -83,19 +81,18 @@ fn shmem_init_hash(
     Ok(table)
 }
 
-// The preallocation key loop hashes {u64 counter, zeros}; the LOCK hash uses
-// the default blob hash, but the PROCLOCK hash function derefs myLock — so
-// during preallocation the PROCLOCK table must hash raw bytes. Handled by
-// tolerating a null myLock in proclock_hash.
 fn proclock_hash(key: &[u8], _keysize: Size) -> u32 {
-    let mut ptr_bytes = [0u8; 8];
-    ptr_bytes.copy_from_slice(&key[..8]);
-    let lock = usize::from_ne_bytes(ptr_bytes) as *mut LOCK;
+    // SAFETY: the first 8 key bytes are PROCLOCKTAG.myLock; an unaligned
+    // pointer-typed read keeps its provenance through dynahash's key copies.
+    let lock: *mut LOCK = unsafe { (key.as_ptr() as *const *mut LOCK).read_unaligned() };
     let mut procno_bytes = [0u8; 4];
     procno_bytes.copy_from_slice(&key[8..12]);
     let procno = i32::from_ne_bytes(procno_bytes);
     if lock.is_null() {
-        return (usize::from_ne_bytes(ptr_bytes) as u32) ^ (procno as u32);
+        // Preallocation-pass keys only (myLock is never null in a live tag).
+        let mut rest = [0u8; 4];
+        rest.copy_from_slice(&key[12..16]);
+        return (procno as u32) ^ u32::from_ne_bytes(rest).rotate_left(16);
     }
     // SAFETY: a non-null myLock in a PROCLOCKTAG points at a live LOCK entry
     // (its tag is immutable for the entry's lifetime).
@@ -165,12 +162,9 @@ pub fn LockManagerShmemInit(max_prepared_xacts: i32) -> PgResult<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Intrusive dlist kernel over PROCLOCK links. NULL-terminated (not C's
-// circular sentinel) so an all-None head means empty — the representation
-// lmgr_proc's emptiness asserts already rely on. Deletion therefore takes the
-// list head, which every call site can name.
-// ---------------------------------------------------------------------------
+// circular sentinel), so deletion takes the list head; an all-None head is
+// empty — the representation lmgr_proc's emptiness asserts rely on.
 
 pub(crate) unsafe fn dlist_push_tail(head: *mut dlist_head, node: *mut dlist_node) {
     let h = &mut (*head).head;
@@ -343,8 +337,8 @@ pub(crate) unsafe fn SetupLockInTable(
         };
         (*proclock).holdMask = 0;
         (*proclock).releaseMask = 0;
-        dlist_push_tail(&mut (*lock).procLocks, &mut (*proclock).lockLink);
-        dlist_push_tail(proc.myProcLocks[partition].ptr(), &mut (*proclock).procLink);
+        dlist_push_tail(&raw mut (*lock).procLocks, &raw mut (*proclock).lockLink);
+        dlist_push_tail(proc.myProcLocks[partition].ptr(), &raw mut (*proclock).procLink);
     } else {
         debug_assert!(((*proclock).holdMask & !(*lock).grantMask) == 0);
     }
@@ -427,8 +421,8 @@ pub(crate) unsafe fn CleanUpLock(
         let proclock_hashcode = ProcLockHashCode(&(*proclock).tag, hashcode);
         let partition = LockHashPartition(hashcode) as usize;
         let proc = lmgr_proc::GetPGProcByNumber((*proclock).tag.myProc);
-        dlist_delete(&mut (*lock).procLocks, &mut (*proclock).lockLink);
-        dlist_delete(proc.myProcLocks[partition].ptr(), &mut (*proclock).procLink);
+        dlist_delete(&raw mut (*lock).procLocks, &raw mut (*proclock).lockLink);
+        dlist_delete(proc.myProcLocks[partition].ptr(), &raw mut (*proclock).procLink);
         let tag = (*proclock).tag;
         let removed = hash_search_with_hash_value(
             shared().proclock_hash,

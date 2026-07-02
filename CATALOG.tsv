@@ -68,7 +68,7 @@ backend-access-hashsearch	*/hashsearch.c	combined-into:backend-access-hash-core	
 backend-access-hashutil	*/hashutil.c	combined-into:backend-access-hash-core			fabled:backend-access-hash-core; m1-dep(stub-ok)
 backend-access-hashvalidate	*/hashvalidate.c	todo			fabled:backend-access-hashvalidate
 backend-access-heap-heapam-handler	src/backend/access/heap/heapam_handler.c	in-progress			fabled:backend-access-heap-heapam-handler-core; m1-spine
-backend-access-heap-heapam-visibility	src/backend/access/heap/heapam_visibility.c	todo			fabled:backend-access-heap-heapam-visibility; m1-spine
+backend-access-heap-heapam-visibility	src/backend/access/heap/heapam_visibility.c	in-progress			fabled:backend-access-heap-heapam-visibility; m1-spine
 backend-access-heap-heapam-xlog	src/backend/access/heap/heapam_xlog.c	todo			fabled:backend-access-heap-heapam-xlog; m1-spine
 backend-access-heap-heapam	src/backend/access/heap/heapam.c	ported	heapam	cold(bench w/ bufmgr)	m1-spine; READ LANE (scan/fetch/HOT-search); pin-scoped PageRef borrows (release-while-locked = compile error), zero per-tuple alloc (fabled #308 structurally unneeded); #368 shapes day-one (4-way monomorphized collect, one-probe pgstat, no per-page relcache reopen); DML = phase 2 documented; bench lanes planned when bufmgr lands (pagemode slope, all-visible collect, heap_fetch); 10 tests, Miri SB, density 3.7%
 backend-access-heap-heaptoast	src/backend/access/heap/heaptoast.c	todo			fabled:backend-access-heap-heaptoast; m1-dep(stub-ok)

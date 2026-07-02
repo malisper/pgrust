@@ -53,3 +53,14 @@ seam_core::seam!(
     // get_timeout_start_time(id) (timeout.c).
     pub fn get_timeout_start_time(id: TimeoutId) -> types_core::TimestampTz
 );
+
+seam_core::seam!(
+    // InitializeTimeouts() (utils/misc/timeout.c): reset all timeouts and
+    // establish the SIGALRM handler.
+    pub fn initialize_timeouts()
+);
+
+seam_core::seam!(
+    // RegisterTimeout(id, handler) (utils/misc/timeout.c).
+    pub fn register_timeout(id: TimeoutId, handler: fn()) -> TimeoutId
+);

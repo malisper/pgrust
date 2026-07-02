@@ -7,3 +7,24 @@ publish.workspace = true
 [lib]
 name = "guc"
 path = "src/lib.rs"
+
+[dependencies]
+types_error = { path = "../../../../_support/types/types_error" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+types_dest = { path = "../../../../_support/types/types_dest" }
+mcx = { path = "../../../../_support/mcx" }
+guc_tables = { path = "../guc_tables" }
+guc_seams = { path = "../guc_seams" }
+elog = { path = "../../error/elog" }
+init_small = { path = "../../init/init_small" }
+miscinit = { path = "../../init/miscinit" }
+parser_small1 = { path = "../../../parser/parser_small1" }
+xact_seams = { path = "../../../access/transam/xact_seams" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+pqcomm_seams = { path = "../../../libpq/pqcomm_seams" }
+mbutils_seams = { path = "../../mb/mbutils_seams" }
+scalar_seams = { path = "../../adt/scalar_seams" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+guc_file = { path = "../guc_file" }
+timestamp_seams = { path = "../../adt/timestamp_seams" }

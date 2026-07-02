@@ -319,6 +319,7 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+ "types_tuple",
 ]
 
 [[package]]
@@ -586,6 +587,7 @@ dependencies = [
  "elog",
  "guc_file_seams",
  "guc_seams",
+ "guc_tables",
  "init_small",
  "types_error",
  "types_guc",
@@ -664,6 +666,29 @@ dependencies = [
 [[package]]
 name = "heapam_handler"
 version = "0.1.0"
+
+[[package]]
+name = "heapam_visibility"
+version = "0.0.0"
+dependencies = [
+ "bufmgr_seams",
+ "combocid_seams",
+ "heapam",
+ "heapam_visibility_seams",
+ "mcx",
+ "multixact_seams",
+ "procarray",
+ "procarray_seams",
+ "snapmgr",
+ "tableam",
+ "transam_seams",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_snapshot",
+ "types_tuple",
+ "xact",
+]
 
 [[package]]
 name = "heapam_visibility_seams"
