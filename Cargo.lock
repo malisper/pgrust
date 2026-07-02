@@ -89,11 +89,15 @@ dependencies = [
 name = "adt_datetime"
 version = "0.1.0"
 dependencies = [
+ "elog",
+ "fd",
+ "guc_tables",
  "localtime",
  "numutils",
  "pgtz",
  "types_core",
  "types_error",
+ "xact_seams",
 ]
 
 [[package]]
@@ -3313,6 +3317,7 @@ dependencies = [
  "detoast",
  "dsm_core",
  "elog",
+ "execmain",
  "execscan",
  "executils",
  "fd",
@@ -4345,6 +4350,7 @@ dependencies = [
  "mbutils_seams",
  "mcx",
  "miscinit",
+ "pgtz",
  "pqcomm_seams",
  "scalar_seams",
  "snapmgr",

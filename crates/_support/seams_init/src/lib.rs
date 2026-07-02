@@ -25,6 +25,7 @@ pub fn init_all() {
     pg_database::init_seams();
     dbcommands::init_seams();
     executils::init_seams();
+    execmain::init_seams();
     execscan::init_seams();
     nodeseqscan::init_seams();
     auth::init_seams();

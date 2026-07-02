@@ -4,9 +4,11 @@ use std::sync::Once;
 
 use ::datum::Datum;
 use ::executils::EStateData;
-use ::mcx::MemoryContext;
-use ::types_core::Oid;
-use ::types_tuple::{PgTypeShape, TYPALIGN_INT, TYPSTORAGE_PLAIN};
+use ::mcx::{MemoryContext, PgVec};
+use ::types_core::{Oid, RECORDOID};
+use ::types_tuple::{
+    CompactAttribute, FormData_pg_attribute, PgTypeShape, TYPALIGN_INT, TYPSTORAGE_PLAIN,
+};
 
 const INT4OID: Oid = 23;
 

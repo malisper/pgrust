@@ -12,15 +12,17 @@ use alloc::rc::Rc;
 
 use ::execexpr::{exec_build_projection_info, exec_project, exec_qual, EvalSlots, ExprState};
 use ::executils::{EStateData, EcxtId, ExecSlotId};
-use ::mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox};
 use ::tableam::TableScanDesc;
-use ::types_core::{Index, RECORDOID};
+use ::types_core::{Index, Oid, INT4OID};
 use ::types_error::PgResult;
 use ::types_nodes::list::NodeList;
 use ::types_nodes::node_tree::Node;
+use ::types_nodes::primnodes::CoercionForm;
+use ::types_nodes::NodeTag;
 use ::types_rel::Relation;
 use ::types_slot::{SlotData, TupleSlotKind};
-use ::types_tuple::{CompactAttribute, FormData_pg_attribute, TupleDescData};
+use ::types_tuple::TupleDescData;
 
 pub fn init_seams() {}
 
@@ -236,51 +238,91 @@ fn tlist_matches_tupdesc(tlist: &NodeList<'_>, varno: Index, tupdesc: &TupleDesc
 /// `ExecTypeFromTL` (execTuples.c), skipJunk = false.
 pub fn exec_type_from_tl<'mcx>(
     mcx: Mcx<'mcx>,
-    tlist: &NodeList<'mcx>,
+    tlist: &NodeList<'_>,
 ) -> PgResult<Rc<TupleDescData<'mcx>>> {
-    let mut attrs = PgVec::new_in(mcx);
-    let mut compact = PgVec::new_in(mcx);
-    for (i, item) in tlist.iter().enumerate() {
-        let tle = item.as_target_entry().expect("targetlist member must be a TargetEntry");
-        let typid = execexpr::expr_type(tle.expr);
-        let shape = syscache_seams::lookup_pg_type_shape::call(typid)?
-            .unwrap_or_else(|| panic!("cache lookup failed for type {typid}"));
-        let mut att = FormData_pg_attribute {
-            attnum: (i + 1) as i16,
-            atttypid: typid,
-            atttypmod: expr_typmod(tle.expr),
-            attlen: shape.typlen,
-            attbyval: shape.typbyval,
-            attalign: shape.typalign,
-            attstorage: shape.typstorage,
-            attcollation: shape.typcollation,
-            ..Default::default()
-        };
-        if let Some(name) = tle.resname {
-            att.attname.namestrcpy(name);
-        }
-        compact.push(CompactAttribute::populate_from(&att));
-        attrs.push(att);
-    }
-    Ok(Rc::new(TupleDescData {
-        natts: attrs.len() as i32,
-        tdtypeid: RECORDOID,
-        tdtypmod: -1,
-        tdrefcount: -1,
-        constr: None,
-        compact_attrs: compact,
-        attrs,
-    }))
+    exec_type_from_tl_internal(mcx, tlist, false)
 }
 
-// exprTypmod's default arm is -1; the coercion/length arms land with their
-// node families (none of which execexpr can compile yet).
-fn expr_typmod(node: Node<'_>) -> i32 {
-    if let Some(var) = node.as_var() {
-        return var.vartypmod;
+/// `ExecCleanTypeFromTL` (execTuples.c): resjunk columns omitted.
+pub fn exec_clean_type_from_tl<'mcx>(
+    mcx: Mcx<'mcx>,
+    tlist: &NodeList<'_>,
+) -> PgResult<Rc<TupleDescData<'mcx>>> {
+    exec_type_from_tl_internal(mcx, tlist, true)
+}
+
+fn tle<'mcx>(node: Node<'mcx>) -> &'mcx types_nodes::primnodes::TargetEntry<'mcx> {
+    node.as_target_entry()
+        .unwrap_or_else(|| panic!("expected TargetEntry, got tag {:?}", node.node_tag()))
+}
+
+fn exec_type_from_tl_internal<'mcx>(
+    mcx: Mcx<'mcx>,
+    tlist: &NodeList<'_>,
+    skipjunk: bool,
+) -> PgResult<Rc<TupleDescData<'mcx>>> {
+    let len = tlist.iter().filter(|&n| !(skipjunk && tle(n).resjunk)).count();
+    let mut desc = tupdesc::CreateTemplateTupleDesc(mcx, len as i32)?;
+    let mut cur_resno: i16 = 1;
+    for node in tlist.iter() {
+        let t = tle(node);
+        if skipjunk && t.resjunk {
+            continue;
+        }
+        tupdesc::TupleDescInitEntry(
+            &mut desc,
+            cur_resno,
+            t.resname,
+            execexpr::expr_type(t.expr),
+            expr_typmod(t.expr),
+            0,
+        )?;
+        tupdesc::TupleDescInitEntryCollation(&mut desc, cur_resno, expr_collation(t.expr));
+        cur_resno += 1;
     }
-    if let Some(c) = node.as_const() {
-        return c.consttypmod;
+    Ok(Rc::new(desc))
+}
+
+/// C `exprTypmod` over the ported primnode families.
+pub fn expr_typmod(node: Node<'_>) -> i32 {
+    match node.node_tag() {
+        NodeTag::T_Var => node.as_var().unwrap().vartypmod,
+        NodeTag::T_Const => node.as_const().unwrap().consttypmod,
+        NodeTag::T_Param => node.as_param().unwrap().paramtypmod,
+        NodeTag::T_FuncExpr => {
+            let f = node.as_func_expr().unwrap();
+            length_coercion_typmod(f).unwrap_or(-1)
+        }
+        NodeTag::T_OpExpr => -1,
+        tag => panic!("exprTypmod (nodeFuncs.c): node family {tag:?} not ported"),
     }
-    -1
+}
+
+// C exprIsLengthCoercion: cast-form call, second arg a non-null int4 Const typmod.
+fn length_coercion_typmod(f: &types_nodes::primnodes::FuncExpr<'_>) -> Option<i32> {
+    match f.funcformat {
+        CoercionForm::COERCE_EXPLICIT_CAST | CoercionForm::COERCE_IMPLICIT_CAST => {}
+        _ => return None,
+    }
+    if !(2..=3).contains(&f.args.len()) {
+        return None;
+    }
+    let second = f.args.iter().nth(1)?;
+    let con = second.as_const()?;
+    if con.consttype != INT4OID || con.constisnull {
+        return None;
+    }
+    Some(con.constvalue.as_i32())
+}
+
+/// C `exprCollation` over the ported primnode families.
+pub fn expr_collation(node: Node<'_>) -> Oid {
+    match node.node_tag() {
+        NodeTag::T_Var => node.as_var().unwrap().varcollid,
+        NodeTag::T_Const => node.as_const().unwrap().constcollid,
+        NodeTag::T_Param => node.as_param().unwrap().paramcollid,
+        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
+        NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
+        tag => panic!("exprCollation (nodeFuncs.c): node family {tag:?} not ported"),
+    }
 }
