@@ -69,6 +69,7 @@ pub fn init_all() {
     pgstat::init_seams();
     adt_acl::init_seams();
     adt_timestamp::init_seams();
+    pgtz::init_seams();
     adt_bool::init_seams();
     adt_float::init_seams();
     pg_locale::init_seams();
@@ -91,6 +92,8 @@ pub fn init_all() {
     guc_file::init_seams();
     guc_tables::init_seams();
     guc::init_seams();
+    guc_funcs::init_seams();
+    variable::init_seams();
     ps_status::init_seams();
     queryenvironment::init_seams();
     stack_depth::init_seams();

@@ -1,0 +1,40 @@
+[package]
+name = "guc_funcs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "guc_funcs"
+path = "src/lib.rs"
+
+[dependencies]
+adt_acl = { path = "../../adt/acl" }
+elog = { path = "../../error/elog" }
+guc = { path = "../guc" }
+guc_tables = { path = "../guc_tables" }
+mcx = { path = "../../../../_support/mcx" }
+miscinit = { path = "../../init/miscinit" }
+snapmgr_seams = { path = "../../time/snapmgr_seams" }
+superuser = { path = "../superuser" }
+tcop_dest = { path = "../../../tcop/dest" }
+tupdesc = { path = "../../../access/common/tupdesc" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+xact = { path = "../../../access/transam/xact" }
+
+[dev-dependencies]
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+mbutils_seams = { path = "../../mb/mbutils_seams" }
+pqcomm_seams = { path = "../../../libpq/pqcomm_seams" }
+scalar_seams = { path = "../../adt/scalar_seams" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+timestamp_seams = { path = "../../adt/timestamp_seams" }
+variable = { path = "../../../commands/variable" }
+xact_seams = { path = "../../../access/transam/xact_seams" }
+pgtz = { path = "../../../timezone/pgtz" }
+types_dest = { path = "../../../../_support/types/types_dest" }
+mbutils = { path = "../../mb/mbutils" }

@@ -78,6 +78,7 @@ backend_status = { path = "../../backend/utils/activity/backend_status" }
 pgstat = { path = "../../backend/utils/activity/pgstat" }
 adt_acl = { path = "../../backend/utils/adt/acl" }
 adt_timestamp = { path = "../../backend/utils/adt/adt_timestamp" }
+pgtz = { path = "../../backend/timezone/pgtz" }
 adt_bool = { path = "../../backend/utils/adt/bool" }
 adt_float = { path = "../../backend/utils/adt/float" }
 pg_locale = { path = "../../backend/utils/adt/pg_locale" }
@@ -100,6 +101,8 @@ conffiles = { path = "../../backend/utils/misc/conffiles" }
 guc_file = { path = "../../backend/utils/misc/guc_file" }
 guc_tables = { path = "../../backend/utils/misc/guc_tables" }
 guc = { path = "../../backend/utils/misc/guc" }
+guc_funcs = { path = "../../backend/utils/misc/guc_funcs" }
+variable = { path = "../../backend/commands/variable" }
 ps_status = { path = "../../backend/utils/misc/ps_status" }
 queryenvironment = { path = "../../backend/utils/misc/queryenvironment" }
 stack_depth = { path = "../../backend/utils/misc/stack_depth" }
