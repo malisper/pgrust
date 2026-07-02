@@ -34,6 +34,7 @@ name = "adt_float"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "fmgr_core",
  "guc_tables",
  "ryu",
  "types_array",
@@ -133,7 +134,6 @@ name = "auth_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
- "types_core",
  "types_error",
 ]
 
@@ -402,6 +402,7 @@ dependencies = [
  "fmgr_core",
  "lsyscache",
  "mcx",
+ "syscache_seams",
  "types_core",
  "types_error",
  "types_nodes",
@@ -921,29 +922,53 @@ version = "0.1.0"
 [[package]]
 name = "hba"
 version = "0.0.0"
+dependencies = [
+ "acl_seams",
+ "conffiles_seams",
+ "elog",
+ "guc_tables",
+ "hba_seams",
+ "ifaddr",
+ "ip",
+ "libc",
+ "types_core",
+ "types_error",
+ "types_startup",
+]
 
 [[package]]
 name = "hba_seams"
 version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+]
 
 [[package]]
 name = "heapam"
 version = "0.1.0"
 dependencies = [
  "bufmgr_seams",
+ "combocid_seams",
  "datum",
  "exectuples",
+ "freespace_seams",
  "heapam_visibility_seams",
  "init_small",
+ "inval",
+ "lmgr",
  "mcx",
  "multixact_seams",
+ "pgstat",
  "predicate_seams",
  "procarray_seams",
  "pruneheap_seams",
+ "rmgr",
  "snapmgr_seams",
  "subtrans_seams",
  "syncscan_seams",
  "tableam_vocab",
+ "transam_seams",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -954,6 +979,7 @@ dependencies = [
  "types_storage",
  "types_tuple",
  "xact_seams",
+ "xloginsert_seams",
 ]
 
 [[package]]
@@ -1082,6 +1108,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "indexcmds_seams"
+version = "0.1.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "init_small"
 version = "0.0.0"
 dependencies = [
@@ -1174,6 +1209,7 @@ dependencies = [
  "ipc_portal_seams",
  "ipc_seams",
  "lwlock",
+ "pgstat_seams",
  "types_error",
 ]
 
@@ -2289,6 +2325,7 @@ dependencies = [
  "init_small",
  "miscinit",
  "ps_status_seams",
+ "types_core",
 ]
 
 [[package]]
@@ -3199,6 +3236,19 @@ dependencies = [
 [[package]]
 name = "typcache"
 version = "0.1.0"
+dependencies = [
+ "datum",
+ "fmgr_core",
+ "indexcmds_seams",
+ "inval",
+ "lsyscache",
+ "mcx",
+ "syscache_seams",
+ "typcache_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
 
 [[package]]
 name = "typcache_seams"

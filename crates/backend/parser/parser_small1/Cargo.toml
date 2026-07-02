@@ -13,6 +13,7 @@ datum = { path = "../../../_support/types/datum" }
 elog = { path = "../../utils/error/elog" }
 libc = "0.2"
 lsyscache = { path = "../../utils/cache/lsyscache" }
+mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
 numutils = { path = "../../utils/adt/numutils" }
 queryenvironment = { path = "../../utils/misc/queryenvironment" }
