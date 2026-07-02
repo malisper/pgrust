@@ -145,7 +145,7 @@ pub fn StrategyGetBuffer(strategy: &BufferAccessStrategy) -> PgResult<(Victim, b
     let bgwprocno = c.bgwprocno.load(Ordering::Relaxed);
     if bgwprocno != -1 {
         c.bgwprocno.store(-1, Ordering::Relaxed);
-        panic!("unported callee reached from freelist.c StrategyGetBuffer: SetLatch(bgwriter procLatch) — bgwriter unported");
+        latch::SetLatch(types_storage::latch::LatchHandle::proc(bgwprocno));
     }
 
     c.num_buffer_allocs.fetch_add(1, Ordering::Relaxed);

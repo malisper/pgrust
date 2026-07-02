@@ -132,8 +132,6 @@ pub fn InitSync() -> PgResult<()> {
 }
 
 pub fn SyncPreCheckpoint() -> PgResult<()> {
-    // Absorb before the cycle bump so unlink requests forwarded before the
-    // checkpoint began are processed by this checkpoint, not the next.
     absorb()?;
     CHECKPOINT_CYCLE_CTR.with(|c| c.set(c.get().wrapping_add(1)));
     Ok(())
@@ -151,13 +149,10 @@ pub fn SyncPostCheckpoint() -> PgResult<()> {
             idx += 1;
             continue;
         }
-        // New entries append at the tail; the first current-cycle entry ends
-        // the old prefix (cycle_ctr wraparound only delays an unlink).
         if entry.cycle_ctr == ckpt_ctr {
             break;
         }
 
-        // ENOENT is a benign race with DROP DATABASE's own deletions.
         let r = unlinkfiletag(&entry.tag)?;
         if r.result < 0 && r.errno != libc::ENOENT {
             ereport(WARNING)
@@ -200,12 +195,8 @@ pub fn ProcessSyncRequests() -> PgResult<()> {
         ));
     }
 
-    // Absorb after BufferSync: a backend queues its fsync request before
-    // clearing the buffer's dirty bit, so this closes the race.
     absorb()?;
 
-    // A failed prior pass leaves stale cycle_ctr values; reset them so
-    // wraparound can't make an old entry look new.
     if SYNC_IN_PROGRESS.with(|c| c.get()) {
         let ctr = SYNC_CYCLE_CTR.with(|c| c.get());
         with_pending(|p| {
@@ -221,8 +212,8 @@ pub fn ProcessSyncRequests() -> PgResult<()> {
     });
     SYNC_IN_PROGRESS.with(|c| c.set(true));
 
-    // Key snapshot stands in for C's hash_seq: absorb may insert (new-cycle
-    // entries, skipped below) or cancel mid-loop, but only this loop removes.
+    // Key snapshot replaces C's hash_seq: absorb may insert (new-cycle,
+    // skipped) or cancel mid-loop, but only this loop removes.
     let tags = with_pending(|p| {
         let mut v: PgVec<'static, FileTag> = PgVec::new_in(p.cx.mcx());
         if v.try_reserve(p.ops.len()).is_err() {
@@ -242,7 +233,6 @@ pub fn ProcessSyncRequests() -> PgResult<()> {
             continue;
         }
 
-        // fsync-off is checked per entry so flipping it mid-run behaves.
         if init_small::globals::enableFsync() {
             absorb_counter -= 1;
             if absorb_counter <= 0 {
@@ -263,9 +253,6 @@ pub fn ProcessSyncRequests() -> PgResult<()> {
                     break;
                 }
 
-                // The file may have been dropped since the request was
-                // queued: absorb (mdunlink queues the cancel first) and
-                // retry; a second failure on the same file is real.
                 if r.errno != libc::ENOENT || failures > 0 {
                     return Err(Box::new(
                         ereport(fd::data_sync_elevel(ERROR))

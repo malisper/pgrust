@@ -567,7 +567,7 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
     CKPT_SLRU_WRITTEN.set(0);
 
     if sync_seams::sync_pre_checkpoint::is_installed() {
-        sync_seams::sync_pre_checkpoint::call();
+        sync_seams::sync_pre_checkpoint::call()?;
     }
 
     init_small::globals::StartCriticalSection();

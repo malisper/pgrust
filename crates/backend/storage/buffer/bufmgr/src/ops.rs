@@ -204,7 +204,3 @@ pub fn overwrite_buffer_page(buffer: Buffer, page: &[u8]) {
     unsafe { core::ptr::copy_nonoverlapping(page.as_ptr(), p, page.len()) };
 }
 
-/// FlushOneBuffer (bufmgr.c) — write-back, phase 2.
-pub fn FlushOneBuffer(_buffer: Buffer) -> PgResult<()> {
-    panic!("unported callee reached from bufmgr.c FlushOneBuffer: FlushBuffer (write-back is phase 2)");
-}

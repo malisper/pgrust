@@ -779,10 +779,8 @@ pub fn init_seams() {
         get: maintenance_io_concurrency,
         set: |v| MAINTENANCE_IO_CONCURRENCY.with(|c| c.set(v)),
     });
-    vars::io_combine_limit_guc.install(GucVarAccessors {
-        get: || IO_COMBINE_LIMIT_GUC.with(Cell::get),
-        set: |v| IO_COMBINE_LIMIT_GUC.with(|c| c.set(v)),
-    });
+    // io_combine_limit_guc's backing is bufmgr's (C defines it in bufmgr.c);
+    // installing it here too paniced every boot ("installed twice").
     vars::io_max_combine_limit.install(GucVarAccessors {
         get: || IO_MAX_COMBINE_LIMIT.with(Cell::get),
         set: |v| IO_MAX_COMBINE_LIMIT.with(|c| c.set(v)),

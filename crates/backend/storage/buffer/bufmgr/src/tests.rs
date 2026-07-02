@@ -67,6 +67,8 @@ fn setup_once() {
             Ok(())
         });
 
+        setup_write_seams();
+
         globals::SetNBuffers(TEST_NBUFFERS);
         globals::SetMaxBackends(4);
         lwlock::CreateLWLocks(false).unwrap();
@@ -180,8 +182,32 @@ fn mark_dirty_sets_flags() {
     let state = GetBufferDescriptor(b - 1).state.load(Ordering::Relaxed);
     assert!(state & BM_DIRTY != 0);
     LockBuffer(b, BUFFER_LOCK_UNLOCK).unwrap();
-    // Pin retained for the process lifetime: a dirty victim would (correctly)
-    // panic at the FlushBuffer phase-2 boundary.
+    ReleaseBuffer(b).unwrap();
+}
+
+#[test]
+fn dirty_victim_flushed_on_eviction() {
+    let _g = setup();
+    setup_write_seams();
+    init_small::globals::set_enableFsync(true);
+    let rel = 9300u32;
+    let b = read_blk(rel, 0);
+    LockBuffer(b, BUFFER_LOCK_EXCLUSIVE).unwrap();
+    MarkBufferDirty(b).unwrap();
+    LockBuffer(b, BUFFER_LOCK_UNLOCK).unwrap();
+    let tag = BufferGetTag(b);
+    ReleaseBuffer(b).unwrap();
+    for blk in 0..(TEST_NBUFFERS as u32 * 3) {
+        let v = read_blk(9301, blk);
+        ReleaseBuffer(v).unwrap();
+    }
+    let evicted = WRITES
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|w| w.2 == rel && w.4 == tag.blockNum);
+    assert!(evicted, "dirty victim written back through FlushBuffer");
+    AtEOXact_Buffers(true);
 }
 
 #[test]
@@ -309,4 +335,161 @@ fn buf_table_roundtrip() {
     lwlock::LWLockRelease(lock).unwrap();
     assert_eq!(id, b - 1);
     ReleaseBuffer(b).unwrap();
+}
+
+static WRITES: std::sync::Mutex<Vec<(u32, u32, u32, i32, u32, u16)>> =
+    std::sync::Mutex::new(Vec::new());
+static WRITEBACKS: std::sync::Mutex<Vec<(u32, u32, u32)>> = std::sync::Mutex::new(Vec::new());
+
+fn setup_write_seams() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        smgr_seams::smgr_write::set(|rlocator, forknum, blocknum, buffer, _skip_fsync| {
+            assert_eq!(buffer.len(), BLCKSZ);
+            let checksum = u16::from_ne_bytes([buffer[8], buffer[9]]);
+            WRITES.lock().unwrap().push((
+                rlocator.locator.spcOid,
+                rlocator.locator.dbOid,
+                rlocator.locator.relNumber,
+                forknum as i32,
+                blocknum,
+                checksum,
+            ));
+            Ok(())
+        });
+        smgr_seams::smgr_writeback::set(|rlocator, _forknum, blocknum, nblocks| {
+            WRITEBACKS
+                .lock()
+                .unwrap()
+                .push((rlocator.locator.relNumber, blocknum, nblocks));
+            Ok(())
+        });
+        transam_xlog_seams::xlog_flush::set(|_| Ok(()));
+        transam_xlog_seams::data_checksums_enabled::set(|| true);
+    });
+}
+
+fn dirty_block(rel: u32, blkno: u32) -> Buffer {
+    let b = read_blk(rel, blkno);
+    LockBuffer(b, BUFFER_LOCK_EXCLUSIVE).unwrap();
+    MarkBufferDirty(b).unwrap();
+    LockBuffer(b, BUFFER_LOCK_UNLOCK).unwrap();
+    ReleaseBuffer(b).unwrap();
+    b
+}
+
+#[test]
+fn checkpoint_writes_dirty_buffers_sorted() {
+    let _g = setup();
+    setup_write_seams();
+    init_small::globals::set_enableFsync(true);
+    crate::gucs::set_checkpoint_flush_after(32);
+
+    let rel = 9100u32;
+    let mut bufs = Vec::new();
+    for blk in [2u32, 0, 1] {
+        bufs.push(dirty_block(rel, blk));
+    }
+
+    CheckPointBuffers(0x0001).unwrap();
+
+    let writes: Vec<_> = WRITES
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|w| w.2 == rel)
+        .copied()
+        .collect();
+    let blocks: Vec<u32> = writes.iter().map(|w| w.4).collect();
+    assert_eq!(blocks, vec![0, 1, 2], "ckpt_buforder sort by block");
+    for w in &writes {
+        assert_ne!(w.5, 0, "checksummed image written");
+    }
+
+    for &b in &bufs {
+        let state = GetBufferDescriptor(b - 1).state.load(Ordering::Relaxed);
+        assert_eq!(state & BM_DIRTY, 0);
+        assert_eq!(state & types_storage::buf::BM_CHECKPOINT_NEEDED, 0);
+    }
+
+    // Sorted, consecutive blocks of one fork coalesce into one writeback.
+    let wbs: Vec<_> = WRITEBACKS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|w| w.0 == rel)
+        .copied()
+        .collect();
+    assert_eq!(wbs, vec![(rel, 0, 3)]);
+
+    // A clean pool re-checkpoint writes nothing for this rel.
+    let before = WRITES.lock().unwrap().len();
+    CheckPointBuffers(0x0001).unwrap();
+    let after: Vec<_> = WRITES.lock().unwrap()[before..]
+        .iter()
+        .filter(|w| w.2 == rel)
+        .copied()
+        .collect();
+    assert!(after.is_empty());
+    AtEOXact_Buffers(true);
+}
+
+#[test]
+fn checkpoint_balances_across_tablespaces() {
+    let _g = setup();
+    setup_write_seams();
+    init_small::globals::set_enableFsync(true);
+
+    let rel_a = 9200u32;
+    let rel_b = 9201u32;
+    for blk in 0..4u32 {
+        dirty_block(rel_a, blk);
+    }
+    let b = ReadBufferWithoutRelcache(
+        RelFileLocator { spcOid: 1664, dbOid: 0, relNumber: rel_b },
+        ForkNumber::MAIN_FORKNUM,
+        0,
+        ReadBufferMode::Normal,
+        None,
+        true,
+    )
+    .unwrap();
+    LockBuffer(b, BUFFER_LOCK_EXCLUSIVE).unwrap();
+    MarkBufferDirty(b).unwrap();
+    LockBuffer(b, BUFFER_LOCK_UNLOCK).unwrap();
+    ReleaseBuffer(b).unwrap();
+
+    let before = WRITES.lock().unwrap().len();
+    CheckPointBuffers(0x0001).unwrap();
+    let writes: Vec<_> = WRITES.lock().unwrap()[before..]
+        .iter()
+        .filter(|w| w.2 == rel_a || w.2 == rel_b)
+        .copied()
+        .collect();
+    assert_eq!(writes.len(), 5);
+    // Balancing interleaves tablespaces: the single-buffer 1664 space
+    // finishes before the 4-buffer 1663 space does.
+    let pos_b = writes.iter().position(|w| w.2 == rel_b).unwrap();
+    assert!(pos_b < writes.len() - 1, "small tablespace not starved to the end");
+    let a_blocks: Vec<u32> = writes.iter().filter(|w| w.2 == rel_a).map(|w| w.4).collect();
+    assert_eq!(a_blocks, vec![0, 1, 2, 3]);
+    AtEOXact_Buffers(true);
+}
+
+#[test]
+fn checksum_matches_c_reference() {
+    // clang -O2 of storage/checksum_impl.h on this machine (pd_checksum
+    // zeroed, patterned page byte = (i*37+11) & 0xff).
+    let mut page = [0u8; BLCKSZ];
+    for (i, b) in page.iter_mut().enumerate() {
+        *b = (i.wrapping_mul(37).wrapping_add(11) & 0xff) as u8;
+    }
+    page[8..10].copy_from_slice(&0u16.to_ne_bytes());
+    let expected: [(u32, u16); 5] =
+        [(0, 24367), (1, 24366), (2, 24369), (3, 24368), (4, 24363)];
+    for (blkno, want) in expected {
+        assert_eq!(crate::write::page_checksum_for_tests(&page, blkno), want);
+    }
+    let zero = [0u8; BLCKSZ];
+    assert_eq!(crate::write::page_checksum_for_tests(&zero, 42), 50816);
 }

@@ -14,6 +14,24 @@ thread_local! {
     static IO_COMBINE_LIMIT_GUC: Cell<i32> = const { Cell::new(DEFAULT_IO_COMBINE_LIMIT) };
     static BACKEND_FLUSH_AFTER: Cell<i32> = const { Cell::new(DEFAULT_BACKEND_FLUSH_AFTER) };
     static ZERO_DAMAGED_PAGES: Cell<bool> = const { Cell::new(false) };
+    static CHECKPOINT_FLUSH_AFTER: Cell<i32> =
+        const { Cell::new(guc_tables::consts::DEFAULT_CHECKPOINT_FLUSH_AFTER) };
+    static BGWRITER_FLUSH_AFTER: Cell<i32> =
+        const { Cell::new(guc_tables::consts::DEFAULT_BGWRITER_FLUSH_AFTER) };
+    static BGWRITER_LRU_MAXPAGES: Cell<i32> = const { Cell::new(100) };
+    static BGWRITER_LRU_MULTIPLIER: Cell<f64> = const { Cell::new(2.0) };
+}
+
+pub fn bgwriter_flush_after() -> i32 {
+    BGWRITER_FLUSH_AFTER.with(|c| c.get())
+}
+
+pub(crate) fn bgwriter_lru_maxpages() -> i32 {
+    BGWRITER_LRU_MAXPAGES.with(|c| c.get())
+}
+
+pub(crate) fn bgwriter_lru_multiplier() -> f64 {
+    BGWRITER_LRU_MULTIPLIER.with(|c| c.get())
 }
 
 pub fn effective_io_concurrency() -> i32 {
@@ -32,7 +50,32 @@ pub fn backend_flush_after() -> i32 {
     BACKEND_FLUSH_AFTER.with(|c| c.get())
 }
 
+pub fn checkpoint_flush_after() -> i32 {
+    CHECKPOINT_FLUSH_AFTER.with(|c| c.get())
+}
+
+#[cfg(test)]
+pub(crate) fn set_checkpoint_flush_after(v: i32) {
+    CHECKPOINT_FLUSH_AFTER.with(|c| c.set(v));
+}
+
 pub(crate) fn install_guc_backing() {
+    guc_tables::vars::bgwriter_flush_after.install(GucVarAccessors {
+        get: bgwriter_flush_after,
+        set: |v| BGWRITER_FLUSH_AFTER.with(|c| c.set(v)),
+    });
+    guc_tables::vars::bgwriter_lru_maxpages.install(GucVarAccessors {
+        get: bgwriter_lru_maxpages,
+        set: |v| BGWRITER_LRU_MAXPAGES.with(|c| c.set(v)),
+    });
+    guc_tables::vars::bgwriter_lru_multiplier.install(GucVarAccessors {
+        get: bgwriter_lru_multiplier,
+        set: |v| BGWRITER_LRU_MULTIPLIER.with(|c| c.set(v)),
+    });
+    guc_tables::vars::checkpoint_flush_after.install(GucVarAccessors {
+        get: checkpoint_flush_after,
+        set: |v| CHECKPOINT_FLUSH_AFTER.with(|c| c.set(v)),
+    });
     guc_tables::vars::effective_io_concurrency.install(GucVarAccessors {
         get: effective_io_concurrency,
         set: |v| EFFECTIVE_IO_CONCURRENCY.with(|c| c.set(v)),

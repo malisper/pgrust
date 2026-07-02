@@ -113,3 +113,8 @@ seam_core::seam!(
     // InitializeWalConsistencyChecking (xlog.c).
     pub fn initialize_wal_consistency_checking() -> PgResult<()>
 );
+
+seam_core::seam!(
+    // DataChecksumsEnabled() (xlog.c): ControlFile->data_checksum_version > 0.
+    pub fn data_checksums_enabled() -> bool
+);
