@@ -1,0 +1,826 @@
+//! date.c core: date/time/timetz text I/O over adt_datetime, comparison and
+//! arithmetic cores, and the date<->timestamp conversions through
+//! adt_timestamp. Zero-allocation I/O like adt_timestamp: parse fields borrow
+//! a caller workbuf, output writes into a caller-owned MAXDATELEN buffer.
+//! Interval-typed operators, extract/date_part (numeric image plumbing),
+//! recv/send, typmod in/out, sortsupport/skipsupport, and timetz_zone/izone/
+//! at_local defer; their OIDs stay out of DATE_BUILTINS so fmgr resolves them
+//! to its loud not-ported panic.
+
+#![allow(non_snake_case)]
+
+use adt_datetime::tz::{self};
+use adt_datetime::{
+    date2j, fsec_t, j2date, pg_tm, DateTimeErrorExtra, DateTimeParseError, DecodeDateTime,
+    DecodeTimeOnly, EncodeDateOnly, EncodeTimeOnly, ParseDateTime, Timestamp, TimeOffset,
+    ValidateDate, DTERR_BAD_FORMAT, DTK_DATE, DTK_DATE_M, DTK_EARLY, DTK_EPOCH, DTK_LATE,
+    HOURS_PER_DAY, IS_VALID_JULIAN, MAXDATEFIELDS, MAXDATELEN, MAX_TIME_PRECISION,
+    MINS_PER_HOUR, POSTGRES_EPOCH_JDATE, SECS_PER_MINUTE, USECS_PER_DAY, USECS_PER_HOUR,
+    USECS_PER_MINUTE, USECS_PER_SEC,
+};
+use adt_timestamp::{
+    timestamp2tm, GetEpochTime, DT_NOBEGIN, DT_NOEND, IS_VALID_TIMESTAMP, MIN_TIMESTAMP,
+    TIMESTAMP_IS_NOBEGIN, TIMESTAMP_IS_NOEND, TIMESTAMP_NOT_FINITE,
+};
+use types_core::TimestampTz;
+use types_error::{
+    ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_DATETIME_FIELD_OVERFLOW,
+    ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+};
+
+pub mod builtins;
+
+#[cfg(test)]
+mod tests;
+
+pub type DateADT = i32;
+pub type TimeADT = i64;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TimeTzADT {
+    pub time: TimeADT,
+    /// numeric time zone, in seconds
+    pub zone: i32,
+}
+
+pub const DATEVAL_NOBEGIN: DateADT = i32::MIN;
+pub const DATEVAL_NOEND: DateADT = i32::MAX;
+
+pub const DATETIME_MIN_JULIAN: i32 = 0;
+pub const DATE_END_JULIAN: i32 = 2_147_483_494;
+pub const TIMESTAMP_END_JULIAN: i32 = 109_203_528;
+
+#[inline(always)]
+pub const fn DATE_IS_NOBEGIN(j: DateADT) -> bool {
+    j == DATEVAL_NOBEGIN
+}
+
+#[inline(always)]
+pub const fn DATE_IS_NOEND(j: DateADT) -> bool {
+    j == DATEVAL_NOEND
+}
+
+#[inline(always)]
+pub const fn DATE_NOT_FINITE(j: DateADT) -> bool {
+    DATE_IS_NOBEGIN(j) || DATE_IS_NOEND(j)
+}
+
+#[inline(always)]
+pub const fn IS_VALID_DATE(d: DateADT) -> bool {
+    DATETIME_MIN_JULIAN - POSTGRES_EPOCH_JDATE <= d && d < DATE_END_JULIAN - POSTGRES_EPOCH_JDATE
+}
+
+pub type DateBuf = [u8; MAXDATELEN + 1];
+pub const DATE_WORKBUF: usize = MAXDATELEN + MAXDATEFIELDS;
+
+pub const EARLY: &[u8] = b"-infinity";
+pub const LATE: &[u8] = b"infinity";
+
+#[cold]
+fn date_out_of_range(s: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("date out of range: \"{s}\""))
+            .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+    )
+}
+
+#[cold]
+fn timestamp_out_of_range() -> Box<PgError> {
+    Box::new(
+        PgError::error("timestamp out of range")
+            .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+    )
+}
+
+#[cold]
+fn date_out_of_range_for_timestamp() -> Box<PgError> {
+    Box::new(
+        PgError::error("date out of range for timestamp")
+            .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+    )
+}
+
+// DateTimeErrorExtra borrows the parse workbuf; the error path owns its
+// copies so the buffer can die with the frame (cold path, adt_timestamp
+// precedent).
+struct ExtraOwned {
+    timezone: Option<Vec<u8>>,
+    abbrev: Option<Vec<u8>>,
+}
+
+impl ExtraOwned {
+    fn capture(extra: &DateTimeErrorExtra<'_>) -> Self {
+        Self {
+            timezone: extra.dtee_timezone.map(<[u8]>::to_vec),
+            abbrev: extra.dtee_abbrev.map(<[u8]>::to_vec),
+        }
+    }
+
+    fn parse_error(
+        &self,
+        dterr: i32,
+        s: &str,
+        datatype: &str,
+        escontext: Option<&mut SoftErrorContext>,
+    ) -> PgResult<()> {
+        let extra = DateTimeErrorExtra {
+            dtee_timezone: self.timezone.as_deref(),
+            dtee_abbrev: self.abbrev.as_deref(),
+        };
+        DateTimeParseError(dterr, Some(&extra), s, datatype, escontext)
+    }
+}
+
+struct Decoded {
+    dtype: i32,
+    tm: pg_tm,
+    fsec: fsec_t,
+    tz: i32,
+}
+
+fn decode_str(
+    s: &str,
+    workbuf: &mut [u8; DATE_WORKBUF],
+    time_only: bool,
+) -> Result<Decoded, (i32, ExtraOwned)> {
+    let mut field: [&[u8]; MAXDATEFIELDS] = [b""; MAXDATEFIELDS];
+    let mut ftype = [0i32; MAXDATEFIELDS];
+    let mut nf = 0usize;
+    let mut d = Decoded { dtype: 0, tm: pg_tm::default(), fsec: 0, tz: 0 };
+
+    let mut dterr =
+        ParseDateTime(s.as_bytes(), workbuf, &mut field, &mut ftype, MAXDATEFIELDS, &mut nf);
+    let mut extra = DateTimeErrorExtra::default();
+    if dterr == 0 {
+        dterr = if time_only {
+            DecodeTimeOnly(
+                &field[..nf],
+                &mut ftype[..nf],
+                nf,
+                &mut d.dtype,
+                &mut d.tm,
+                &mut d.fsec,
+                Some(&mut d.tz),
+                &mut extra,
+            )
+        } else {
+            DecodeDateTime(
+                &field[..nf],
+                &ftype[..nf],
+                nf,
+                &mut d.dtype,
+                &mut d.tm,
+                &mut d.fsec,
+                Some(&mut d.tz),
+                &mut extra,
+            )
+        };
+    }
+    if dterr != 0 {
+        return Err((dterr, ExtraOwned::capture(&extra)));
+    }
+    Ok(d)
+}
+
+/// On soft error the sentinel is `Ok(0)` with `escontext.error_occurred()`
+/// set (adt_timestamp convention).
+pub fn date_in(s: &str, mut escontext: Option<&mut SoftErrorContext>) -> PgResult<DateADT> {
+    let mut workbuf = [0u8; DATE_WORKBUF];
+    let mut d = match decode_str(s, &mut workbuf, false) {
+        Ok(d) => d,
+        Err((dterr, extra)) => {
+            extra.parse_error(dterr, s, "date", escontext)?;
+            return Ok(0);
+        }
+    };
+
+    match d.dtype {
+        DTK_DATE => {}
+        DTK_EPOCH => GetEpochTime(&mut d.tm),
+        DTK_LATE => return Ok(DATEVAL_NOEND),
+        DTK_EARLY => return Ok(DATEVAL_NOBEGIN),
+        _ => {
+            DateTimeParseError(DTERR_BAD_FORMAT, None, s, "date", escontext)?;
+            return Ok(0);
+        }
+    }
+
+    if !IS_VALID_JULIAN(d.tm.tm_year, d.tm.tm_mon, d.tm.tm_mday) {
+        return ereturn(escontext.as_deref_mut(), 0, *date_out_of_range(s));
+    }
+
+    let date = date2j(d.tm.tm_year, d.tm.tm_mon, d.tm.tm_mday) - POSTGRES_EPOCH_JDATE;
+
+    if !IS_VALID_DATE(date) {
+        return ereturn(escontext, 0, *date_out_of_range(s));
+    }
+
+    Ok(date)
+}
+
+pub fn EncodeSpecialDate(dt: DateADT, buf: &mut [u8]) -> usize {
+    let s: &[u8] = if DATE_IS_NOBEGIN(dt) {
+        EARLY
+    } else if DATE_IS_NOEND(dt) {
+        LATE
+    } else {
+        panic!("invalid argument for EncodeSpecialDate");
+    };
+    buf[..s.len()].copy_from_slice(s);
+    s.len()
+}
+
+pub fn date_out(date: DateADT, buf: &mut DateBuf) -> usize {
+    if DATE_NOT_FINITE(date) {
+        return EncodeSpecialDate(date, buf);
+    }
+    let mut tm = pg_tm::default();
+    j2date(
+        date + POSTGRES_EPOCH_JDATE,
+        &mut tm.tm_year,
+        &mut tm.tm_mon,
+        &mut tm.tm_mday,
+    );
+    EncodeDateOnly(&tm, adt_datetime::date_style(), buf)
+}
+
+pub fn make_date(year: i32, month: i32, day: i32) -> PgResult<DateADT> {
+    let mut tm = pg_tm { tm_year: year, tm_mon: month, tm_mday: day, ..pg_tm::default() };
+    let mut bc = false;
+
+    #[cold]
+    fn field_out_of_range(y: i32, m: i32, d: i32) -> Box<PgError> {
+        Box::new(
+            PgError::error(format!("date field value out of range: {y}-{m:02}-{d:02}"))
+                .with_sqlstate(ERRCODE_DATETIME_FIELD_OVERFLOW),
+        )
+    }
+
+    if tm.tm_year < 0 {
+        bc = true;
+        let Some(neg) = tm.tm_year.checked_neg() else {
+            return Err(field_out_of_range(year, month, day));
+        };
+        tm.tm_year = neg;
+    }
+
+    if ValidateDate(DTK_DATE_M, false, false, bc, &mut tm) != 0 {
+        return Err(field_out_of_range(year, month, day));
+    }
+
+    if !IS_VALID_JULIAN(tm.tm_year, tm.tm_mon, tm.tm_mday) {
+        return Err(date_out_of_range_ymd(year, month, day));
+    }
+
+    let date = date2j(tm.tm_year, tm.tm_mon, tm.tm_mday) - POSTGRES_EPOCH_JDATE;
+
+    if !IS_VALID_DATE(date) {
+        return Err(date_out_of_range_ymd(year, month, day));
+    }
+
+    Ok(date)
+}
+
+#[cold]
+fn date_out_of_range_ymd(y: i32, m: i32, d: i32) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("date out of range: {y}-{m:02}-{d:02}"))
+            .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+    )
+}
+
+#[inline]
+pub fn date_cmp_internal(d1: DateADT, d2: DateADT) -> i32 {
+    if d1 < d2 {
+        -1
+    } else if d1 > d2 {
+        1
+    } else {
+        0
+    }
+}
+
+pub fn date_mi(d1: DateADT, d2: DateADT) -> PgResult<i32> {
+    if DATE_NOT_FINITE(d1) || DATE_NOT_FINITE(d2) {
+        return Err(Box::new(
+            PgError::error("cannot subtract infinite dates")
+                .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+        ));
+    }
+    Ok(d1.wrapping_sub(d2))
+}
+
+#[cold]
+fn date_out_of_range_plain() -> Box<PgError> {
+    Box::new(
+        PgError::error("date out of range").with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+    )
+}
+
+pub fn date_pli(date: DateADT, days: i32) -> PgResult<DateADT> {
+    if DATE_NOT_FINITE(date) {
+        return Ok(date);
+    }
+    let result = date.wrapping_add(days);
+    if (if days >= 0 { result < date } else { result > date }) || !IS_VALID_DATE(result) {
+        return Err(date_out_of_range_plain());
+    }
+    Ok(result)
+}
+
+pub fn date_mii(date: DateADT, days: i32) -> PgResult<DateADT> {
+    if DATE_NOT_FINITE(date) {
+        return Ok(date);
+    }
+    let result = date.wrapping_sub(days);
+    if (if days >= 0 { result > date } else { result < date }) || !IS_VALID_DATE(result) {
+        return Err(date_out_of_range_plain());
+    }
+    Ok(result)
+}
+
+pub fn date2timestamp_opt_overflow(
+    date: DateADT,
+    mut overflow: Option<&mut i32>,
+) -> PgResult<Timestamp> {
+    if let Some(o) = overflow.as_deref_mut() {
+        *o = 0;
+    }
+
+    if DATE_IS_NOBEGIN(date) {
+        return Ok(DT_NOBEGIN);
+    }
+    if DATE_IS_NOEND(date) {
+        return Ok(DT_NOEND);
+    }
+    // dates share timestamps' lower bound; only the upper needs checking
+    if date >= TIMESTAMP_END_JULIAN - POSTGRES_EPOCH_JDATE {
+        if let Some(o) = overflow {
+            *o = 1;
+            return Ok(DT_NOEND);
+        }
+        return Err(date_out_of_range_for_timestamp());
+    }
+    Ok(date as i64 * USECS_PER_DAY)
+}
+
+pub fn date2timestamp(date: DateADT) -> PgResult<Timestamp> {
+    date2timestamp_opt_overflow(date, None)
+}
+
+pub fn date2timestamptz_opt_overflow(
+    date: DateADT,
+    mut overflow: Option<&mut i32>,
+) -> PgResult<TimestampTz> {
+    if let Some(o) = overflow.as_deref_mut() {
+        *o = 0;
+    }
+
+    if DATE_IS_NOBEGIN(date) {
+        return Ok(DT_NOBEGIN);
+    }
+    if DATE_IS_NOEND(date) {
+        return Ok(DT_NOEND);
+    }
+    if date >= TIMESTAMP_END_JULIAN - POSTGRES_EPOCH_JDATE {
+        if let Some(o) = overflow {
+            *o = 1;
+            return Ok(DT_NOEND);
+        }
+        return Err(date_out_of_range_for_timestamp());
+    }
+
+    let mut tm = pg_tm::default();
+    j2date(
+        date + POSTGRES_EPOCH_JDATE,
+        &mut tm.tm_year,
+        &mut tm.tm_mon,
+        &mut tm.tm_mday,
+    );
+    tm.tm_hour = 0;
+    tm.tm_min = 0;
+    tm.tm_sec = 0;
+    let z = tz::session_timezone()
+        .unwrap_or_else(|| panic!("backend-timezone unit not ported: session_timezone (date2timestamptz)"));
+    let tzoff = tz::DetermineTimeZoneOffset(&mut tm, z);
+
+    let result = date as i64 * USECS_PER_DAY + tzoff as i64 * USECS_PER_SEC;
+
+    // tz shift can push past the timestamptz range; re-check after adding it
+    if !IS_VALID_TIMESTAMP(result) {
+        if let Some(o) = overflow {
+            if result < MIN_TIMESTAMP {
+                *o = -1;
+                return Ok(DT_NOBEGIN);
+            }
+            *o = 1;
+            return Ok(DT_NOEND);
+        }
+        return Err(date_out_of_range_for_timestamp());
+    }
+
+    Ok(result)
+}
+
+pub fn date2timestamptz(date: DateADT) -> PgResult<TimestampTz> {
+    date2timestamptz_opt_overflow(date, None)
+}
+
+pub fn date2timestamp_no_overflow(date: DateADT) -> f64 {
+    if DATE_IS_NOBEGIN(date) {
+        -f64::MAX
+    } else if DATE_IS_NOEND(date) {
+        f64::MAX
+    } else {
+        date as f64 * USECS_PER_DAY as f64
+    }
+}
+
+// timestamp.c timestamp_cmp_internal; moves to adt_timestamp when it grows
+// comparison entry points.
+#[inline]
+pub fn timestamp_cmp_internal(dt1: Timestamp, dt2: Timestamp) -> i32 {
+    if dt1 < dt2 {
+        -1
+    } else if dt1 > dt2 {
+        1
+    } else {
+        0
+    }
+}
+
+pub fn date_cmp_timestamp_internal(date: DateADT, dt2: Timestamp) -> i32 {
+    let mut overflow = 0;
+    let dt1 = date2timestamp_opt_overflow(date, Some(&mut overflow))
+        .expect("date2timestamp_opt_overflow cannot fail with overflow out");
+    if overflow > 0 {
+        // dt1 is larger than any finite timestamp, but less than infinity
+        return if TIMESTAMP_IS_NOEND(dt2) { -1 } else { 1 };
+    }
+    debug_assert!(overflow == 0);
+    timestamp_cmp_internal(dt1, dt2)
+}
+
+pub fn date_cmp_timestamptz_internal(date: DateADT, dt2: TimestampTz) -> i32 {
+    let mut overflow = 0;
+    let dt1 = date2timestamptz_opt_overflow(date, Some(&mut overflow))
+        .expect("date2timestamptz_opt_overflow cannot fail with overflow out");
+    if overflow > 0 {
+        return if TIMESTAMP_IS_NOEND(dt2) { -1 } else { 1 };
+    }
+    if overflow < 0 {
+        return if TIMESTAMP_IS_NOBEGIN(dt2) { 1 } else { -1 };
+    }
+    timestamp_cmp_internal(dt1, dt2)
+}
+
+pub fn timestamp_date(timestamp: Timestamp) -> PgResult<DateADT> {
+    if TIMESTAMP_IS_NOBEGIN(timestamp) {
+        return Ok(DATEVAL_NOBEGIN);
+    }
+    if TIMESTAMP_IS_NOEND(timestamp) {
+        return Ok(DATEVAL_NOEND);
+    }
+    let mut tm = pg_tm::default();
+    let mut fsec: fsec_t = 0;
+    if timestamp2tm(timestamp, None, &mut tm, &mut fsec, None, None).is_err() {
+        return Err(timestamp_out_of_range());
+    }
+    Ok(date2j(tm.tm_year, tm.tm_mon, tm.tm_mday) - POSTGRES_EPOCH_JDATE)
+}
+
+pub fn timestamptz_date(timestamp: TimestampTz) -> PgResult<DateADT> {
+    if TIMESTAMP_IS_NOBEGIN(timestamp) {
+        return Ok(DATEVAL_NOBEGIN);
+    }
+    if TIMESTAMP_IS_NOEND(timestamp) {
+        return Ok(DATEVAL_NOEND);
+    }
+    let mut tm = pg_tm::default();
+    let mut fsec: fsec_t = 0;
+    let mut tzoff = 0;
+    if timestamp2tm(timestamp, Some(&mut tzoff), &mut tm, &mut fsec, None, None).is_err() {
+        return Err(timestamp_out_of_range());
+    }
+    Ok(date2j(tm.tm_year, tm.tm_mon, tm.tm_mday) - POSTGRES_EPOCH_JDATE)
+}
+
+pub fn datetime_timestamp(date: DateADT, time: TimeADT) -> PgResult<Timestamp> {
+    let mut result = date2timestamp(date)?;
+    if !TIMESTAMP_NOT_FINITE(result) {
+        result += time;
+        if !IS_VALID_TIMESTAMP(result) {
+            return Err(timestamp_out_of_range());
+        }
+    }
+    Ok(result)
+}
+
+pub fn datetimetz_timestamptz(date: DateADT, time: &TimeTzADT) -> PgResult<TimestampTz> {
+    if DATE_IS_NOBEGIN(date) {
+        return Ok(DT_NOBEGIN);
+    }
+    if DATE_IS_NOEND(date) {
+        return Ok(DT_NOEND);
+    }
+    if date >= TIMESTAMP_END_JULIAN - POSTGRES_EPOCH_JDATE {
+        return Err(date_out_of_range_for_timestamp());
+    }
+    let result = date as i64 * USECS_PER_DAY + time.time + time.zone as i64 * USECS_PER_SEC;
+    if !IS_VALID_TIMESTAMP(result) {
+        return Err(date_out_of_range_for_timestamp());
+    }
+    Ok(result)
+}
+
+pub fn tm2time(tm: &pg_tm, fsec: fsec_t) -> TimeADT {
+    ((tm.tm_hour * MINS_PER_HOUR + tm.tm_min) * SECS_PER_MINUTE + tm.tm_sec) as i64
+        * USECS_PER_SEC
+        + fsec as i64
+}
+
+pub fn float_time_overflows(hour: i32, min: i32, sec: f64) -> bool {
+    if hour < 0 || hour > HOURS_PER_DAY || min < 0 || min >= MINS_PER_HOUR {
+        return true;
+    }
+    if sec.is_nan() {
+        return true;
+    }
+    // round before range-checking, as C does with rint()
+    let sec = (sec * USECS_PER_SEC as f64).round_ties_even();
+    if sec < 0.0 || sec > (SECS_PER_MINUTE as i64 * USECS_PER_SEC) as f64 {
+        return true;
+    }
+    ((hour * MINS_PER_HOUR + min) * SECS_PER_MINUTE) as i64 * USECS_PER_SEC + sec as i64
+        > USECS_PER_DAY
+}
+
+pub fn time2tm(mut time: TimeADT, tm: &mut pg_tm, fsec: &mut fsec_t) {
+    tm.tm_hour = (time / USECS_PER_HOUR) as i32;
+    time -= tm.tm_hour as i64 * USECS_PER_HOUR;
+    tm.tm_min = (time / USECS_PER_MINUTE) as i32;
+    time -= tm.tm_min as i64 * USECS_PER_MINUTE;
+    tm.tm_sec = (time / USECS_PER_SEC) as i32;
+    time -= tm.tm_sec as i64 * USECS_PER_SEC;
+    *fsec = time as fsec_t;
+}
+
+pub fn time_in(
+    s: &str,
+    typmod: i32,
+    escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<TimeADT> {
+    let mut workbuf = [0u8; DATE_WORKBUF];
+    let d = match decode_str(s, &mut workbuf, true) {
+        Ok(d) => d,
+        Err((dterr, extra)) => {
+            extra.parse_error(dterr, s, "time", escontext)?;
+            return Ok(0);
+        }
+    };
+
+    let mut result = tm2time(&d.tm, d.fsec);
+    AdjustTimeForTypmod(&mut result, typmod);
+    Ok(result)
+}
+
+pub fn time_out(time: TimeADT, buf: &mut DateBuf) -> usize {
+    let mut tm = pg_tm::default();
+    let mut fsec: fsec_t = 0;
+    time2tm(time, &mut tm, &mut fsec);
+    EncodeTimeOnly(&tm, fsec, false, 0, adt_datetime::date_style(), buf)
+}
+
+pub fn make_time(hour: i32, min: i32, sec: f64) -> PgResult<TimeADT> {
+    if float_time_overflows(hour, min, sec) {
+        return Err(Box::new(
+            PgError::error(format!("time field value out of range: {hour}:{min:02}:{sec:02}"))
+                .with_sqlstate(ERRCODE_DATETIME_FIELD_OVERFLOW),
+        ));
+    }
+    Ok(
+        ((hour * MINS_PER_HOUR + min) * SECS_PER_MINUTE) as i64 * USECS_PER_SEC
+            + (sec * USECS_PER_SEC as f64).round_ties_even() as i64,
+    )
+}
+
+const TIME_SCALES: [i64; MAX_TIME_PRECISION as usize + 1] =
+    [1_000_000, 100_000, 10_000, 1_000, 100, 10, 1];
+const TIME_OFFSETS: [i64; MAX_TIME_PRECISION as usize + 1] =
+    [500_000, 50_000, 5_000, 500, 50, 5, 0];
+
+pub fn AdjustTimeForTypmod(time: &mut TimeADT, typmod: i32) {
+    if typmod >= 0 && typmod <= MAX_TIME_PRECISION {
+        let scale = TIME_SCALES[typmod as usize];
+        let offset = TIME_OFFSETS[typmod as usize];
+        if *time >= 0 {
+            *time = ((*time + offset) / scale) * scale;
+        } else {
+            *time = -(((-*time + offset) / scale) * scale);
+        }
+    }
+}
+
+pub fn time_scale(time: TimeADT, typmod: i32) -> TimeADT {
+    let mut result = time;
+    AdjustTimeForTypmod(&mut result, typmod);
+    result
+}
+
+#[inline]
+pub fn time_cmp_internal(t1: TimeADT, t2: TimeADT) -> i32 {
+    if t1 < t2 {
+        -1
+    } else if t1 > t2 {
+        1
+    } else {
+        0
+    }
+}
+
+pub fn timestamp_time(timestamp: Timestamp) -> PgResult<Option<TimeADT>> {
+    if TIMESTAMP_NOT_FINITE(timestamp) {
+        return Ok(None);
+    }
+    let mut tm = pg_tm::default();
+    let mut fsec: fsec_t = 0;
+    if timestamp2tm(timestamp, None, &mut tm, &mut fsec, None, None).is_err() {
+        return Err(timestamp_out_of_range());
+    }
+    Ok(Some(tm2time(&tm, fsec)))
+}
+
+pub fn timestamptz_time(timestamp: TimestampTz) -> PgResult<Option<TimeADT>> {
+    if TIMESTAMP_NOT_FINITE(timestamp) {
+        return Ok(None);
+    }
+    let mut tm = pg_tm::default();
+    let mut fsec: fsec_t = 0;
+    let mut tzoff = 0;
+    if timestamp2tm(timestamp, Some(&mut tzoff), &mut tm, &mut fsec, None, None).is_err() {
+        return Err(timestamp_out_of_range());
+    }
+    Ok(Some(tm2time(&tm, fsec)))
+}
+
+pub fn tm2timetz(tm: &pg_tm, fsec: fsec_t, tz: i32, result: &mut TimeTzADT) {
+    result.time = tm2time(tm, fsec);
+    result.zone = tz;
+}
+
+pub fn timetz_in(
+    s: &str,
+    typmod: i32,
+    escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<TimeTzADT> {
+    let mut workbuf = [0u8; DATE_WORKBUF];
+    let d = match decode_str(s, &mut workbuf, true) {
+        Ok(d) => d,
+        Err((dterr, extra)) => {
+            extra.parse_error(dterr, s, "time with time zone", escontext)?;
+            return Ok(TimeTzADT::default());
+        }
+    };
+
+    let mut result = TimeTzADT::default();
+    tm2timetz(&d.tm, d.fsec, d.tz, &mut result);
+    AdjustTimeForTypmod(&mut result.time, typmod);
+    Ok(result)
+}
+
+pub fn timetz2tm(time: &TimeTzADT, tm: &mut pg_tm, fsec: &mut fsec_t, tzp: Option<&mut i32>) {
+    let mut trem: TimeOffset = time.time;
+    tm.tm_hour = (trem / USECS_PER_HOUR) as i32;
+    trem -= tm.tm_hour as i64 * USECS_PER_HOUR;
+    tm.tm_min = (trem / USECS_PER_MINUTE) as i32;
+    trem -= tm.tm_min as i64 * USECS_PER_MINUTE;
+    tm.tm_sec = (trem / USECS_PER_SEC) as i32;
+    *fsec = (trem - tm.tm_sec as i64 * USECS_PER_SEC) as fsec_t;
+    if let Some(tzp) = tzp {
+        *tzp = time.zone;
+    }
+}
+
+pub fn timetz_out(time: &TimeTzADT, buf: &mut DateBuf) -> usize {
+    let mut tm = pg_tm::default();
+    let mut fsec: fsec_t = 0;
+    let mut tzoff = 0;
+    timetz2tm(time, &mut tm, &mut fsec, Some(&mut tzoff));
+    EncodeTimeOnly(&tm, fsec, true, tzoff, adt_datetime::date_style(), buf)
+}
+
+pub fn timetz_scale(time: &TimeTzADT, typmod: i32) -> TimeTzADT {
+    let mut result = *time;
+    AdjustTimeForTypmod(&mut result.time, typmod);
+    result
+}
+
+pub fn timetz_cmp_internal(time1: &TimeTzADT, time2: &TimeTzADT) -> i32 {
+    // primary sort is by true (GMT-equivalent) time
+    let t1 = time1.time + time1.zone as i64 * USECS_PER_SEC;
+    let t2 = time2.time + time2.zone as i64 * USECS_PER_SEC;
+    if t1 > t2 {
+        return 1;
+    }
+    if t1 < t2 {
+        return -1;
+    }
+    if time1.zone > time2.zone {
+        return 1;
+    }
+    if time1.zone < time2.zone {
+        return -1;
+    }
+    0
+}
+
+pub fn timetz_time(timetz: &TimeTzADT) -> TimeADT {
+    timetz.time
+}
+
+pub fn time_timetz(time: TimeADT) -> TimeTzADT {
+    let mut tm = pg_tm::default();
+    let mut fsec: fsec_t = 0;
+    tz::GetCurrentDateTime(&mut tm);
+    time2tm(time, &mut tm, &mut fsec);
+    let z = tz::session_timezone()
+        .unwrap_or_else(|| panic!("backend-timezone unit not ported: session_timezone (time_timetz)"));
+    let tzoff = tz::DetermineTimeZoneOffset(&mut tm, z);
+    TimeTzADT { time, zone: tzoff }
+}
+
+pub fn timestamptz_timetz(timestamp: TimestampTz) -> PgResult<Option<TimeTzADT>> {
+    if TIMESTAMP_NOT_FINITE(timestamp) {
+        return Ok(None);
+    }
+    let mut tm = pg_tm::default();
+    let mut fsec: fsec_t = 0;
+    let mut tzoff = 0;
+    if timestamp2tm(timestamp, Some(&mut tzoff), &mut tm, &mut fsec, None, None).is_err() {
+        return Err(timestamp_out_of_range());
+    }
+    let mut result = TimeTzADT::default();
+    tm2timetz(&tm, fsec, tzoff, &mut result);
+    Ok(Some(result))
+}
+
+std::thread_local! {
+    // C's static cache in GetSQLCurrentDate: date2j is several divisions and
+    // only changes across local midnight.
+    static SQL_CURRENT_DATE_CACHE: core::cell::Cell<(i32, i32, i32, DateADT)> =
+        const { core::cell::Cell::new((0, 0, 0, 0)) };
+}
+
+pub fn GetSQLCurrentDate() -> DateADT {
+    let mut tm = pg_tm::default();
+    tz::GetCurrentDateTime(&mut tm);
+
+    SQL_CURRENT_DATE_CACHE.with(|c| {
+        let (y, m, d, date) = c.get();
+        if (tm.tm_year, tm.tm_mon, tm.tm_mday) == (y, m, d) {
+            return date;
+        }
+        let date = date2j(tm.tm_year, tm.tm_mon, tm.tm_mday) - POSTGRES_EPOCH_JDATE;
+        c.set((tm.tm_year, tm.tm_mon, tm.tm_mday, date));
+        date
+    })
+}
+
+pub fn GetSQLCurrentTime(typmod: i32) -> TimeTzADT {
+    let mut tm = pg_tm::default();
+    let mut fsec: fsec_t = 0;
+    let mut tzoff = 0;
+    tz::GetCurrentTimeUsec(&mut tm, &mut fsec, Some(&mut tzoff));
+    let mut result = TimeTzADT::default();
+    tm2timetz(&tm, fsec, tzoff, &mut result);
+    AdjustTimeForTypmod(&mut result.time, typmod);
+    result
+}
+
+pub fn GetSQLLocalTime(typmod: i32) -> TimeADT {
+    let mut tm = pg_tm::default();
+    let mut fsec: fsec_t = 0;
+    let mut tzoff = 0;
+    tz::GetCurrentTimeUsec(&mut tm, &mut fsec, Some(&mut tzoff));
+    let mut result = tm2time(&tm, fsec);
+    AdjustTimeForTypmod(&mut result, typmod);
+    result
+}
+
+// hashfunc.c hashint8's fold of int64 to a hashable u32 (hashfunc.c unit
+// unported; time_hash's value core needs it).
+#[inline]
+pub fn int64_hash_fold(val: i64) -> u32 {
+    let lohalf = val as u32;
+    let hihalf = (val >> 32) as u32;
+    lohalf ^ if val >= 0 { hihalf } else { !hihalf }
+}
+
+// C's TimeTzADT has typlen 12; the trailing 4 bytes are padding that on-disk
+// values do not carry, so tuple-borrowed values are read field-by-field
+// (builtins::arg_timetz), never as a whole-struct reference.
+const _: () = {
+    assert!(core::mem::offset_of!(TimeTzADT, time) == 0);
+    assert!(core::mem::offset_of!(TimeTzADT, zone) == 8);
+};

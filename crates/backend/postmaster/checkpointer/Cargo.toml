@@ -1,0 +1,9 @@
+[package]
+name = "checkpointer"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "checkpointer"
+path = "src/lib.rs"

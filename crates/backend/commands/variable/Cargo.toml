@@ -1,0 +1,40 @@
+[package]
+name = "variable"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "variable"
+path = "src/lib.rs"
+
+[dependencies]
+adt_datetime = { path = "../../utils/adt/adt_datetime" }
+adt_acl = { path = "../../utils/adt/acl" }
+backend_status = { path = "../../utils/activity/backend_status" }
+elog = { path = "../../utils/error/elog" }
+guc = { path = "../../utils/misc/guc" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+init_small = { path = "../../utils/init/init_small" }
+mbutils = { path = "../../utils/mb/mbutils" }
+mcx = { path = "../../../_support/mcx" }
+miscinit = { path = "../../utils/init/miscinit" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+superuser = { path = "../../utils/misc/superuser" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_guc = { path = "../../../_support/types/types_guc" }
+varlena = { path = "../../utils/adt/varlena" }
+xact = { path = "../../access/transam/xact" }
+
+[dev-dependencies]
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
+scalar_seams = { path = "../../utils/adt/scalar_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+wchar = { path = "../../../common/wchar" }
+xact_seams = { path = "../../access/transam/xact_seams" }
+pgtz = { path = "../../timezone/pgtz" }

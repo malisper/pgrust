@@ -1,0 +1,9 @@
+[package]
+name = "bgwriter"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "bgwriter"
+path = "src/lib.rs"

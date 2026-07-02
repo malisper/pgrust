@@ -1,0 +1,9 @@
+[package]
+name = "parse_oper"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "parse_oper"
+path = "src/lib.rs"
