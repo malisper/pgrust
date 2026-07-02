@@ -46,6 +46,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "hashfn"
+version = "0.1.0"
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -86,6 +90,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "seam_core"
+version = "0.1.0"
+
+[[package]]
+name = "stringinfo"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "types_error",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.118"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -103,6 +119,16 @@ version = "0.0.0"
 [[package]]
 name = "types_error"
 version = "0.0.0"
+
+[[package]]
+name = "types_tuple"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "types_core",
+ "types_error",
+]
 
 [[package]]
 name = "unicode-ident"
