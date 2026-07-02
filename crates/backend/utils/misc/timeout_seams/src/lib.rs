@@ -54,6 +54,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn get_timeout_indicator(id: TimeoutId, reset_indicator: bool) -> bool
+);
+
+seam_core::seam!(
+    pub fn get_timeout_finish_time(id: TimeoutId) -> types_core::TimestampTz
+);
+
+seam_core::seam!(
     pub fn initialize_timeouts()
 );
 

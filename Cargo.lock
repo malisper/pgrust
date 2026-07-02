@@ -520,16 +520,20 @@ name = "bufmgr"
 version = "0.0.0"
 dependencies = [
  "bufmgr_seams",
+ "checkpointer_seams",
  "dynahash",
  "elog",
+ "fd",
  "guc_tables",
  "init_small",
  "lwlock",
  "mcx",
+ "procsignal_seams",
  "relmapper_seams",
  "seam_core",
  "shmem_seams",
  "smgr_seams",
+ "transam_xlog_seams",
  "types_core",
  "types_error",
  "types_hash",
@@ -1118,6 +1122,10 @@ dependencies = [
  "types_slot",
  "types_tuple",
 ]
+
+[[package]]
+name = "explain"
+version = "0.1.0"
 
 [[package]]
 name = "fd"
@@ -2222,6 +2230,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodeindexonlyscan"
+version = "0.1.0"
+
+[[package]]
+name = "nodeindexscan"
+version = "0.1.0"
+
+[[package]]
 name = "nodes_core"
 version = "0.1.0"
 dependencies = [
@@ -2327,6 +2343,7 @@ dependencies = [
  "guc_tables",
  "mbutils",
  "mcx",
+ "parse_oper",
  "parser_small1",
  "stack_depth",
  "types_core",
@@ -2348,6 +2365,7 @@ dependencies = [
  "lsyscache",
  "mbutils",
  "mcx",
+ "miscinit_seams",
  "parser_small1",
  "syscache_seams",
  "types_core",
@@ -2359,12 +2377,16 @@ dependencies = [
 name = "parse_target"
 version = "0.0.0"
 dependencies = [
+ "coerce",
+ "datum",
  "mcx",
  "parse_expr",
  "parser_small1",
+ "syscache_seams",
  "types_core",
  "types_error",
  "types_nodes",
+ "types_tuple",
 ]
 
 [[package]]
@@ -3543,6 +3565,7 @@ dependencies = [
  "stack_depth",
  "subtrans",
  "superuser",
+ "sync",
  "syslogger",
  "table",
  "tableam",
@@ -4207,6 +4230,7 @@ dependencies = [
  "subtrans_seams",
  "sync_seams",
  "timeline_seams",
+ "timestamp_seams",
  "transam_xlog_seams",
  "twophase_seams",
  "types_core",

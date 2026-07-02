@@ -23,6 +23,11 @@ pub use simple_query::{
 pub fn init_seams() {
     postgres_seams::postgres_main::set(postgres_main_seam);
     postgres_seams::check_for_interrupts::set(check_for_interrupts);
+    postgres_seams::die::set(die);
+    postgres_seams::statement_cancel_handler::set(StatementCancelHandler);
+    postgres_seams::quickdie::set(quickdie);
+    postgres_seams::float_exception_handler::set(FloatExceptionHandler);
+    postgres_seams::handle_recovery_conflict_interrupt::set(HandleRecoveryConflictInterrupt);
     postgres_seams::reset_usage::set(ResetUsage);
     postgres_seams::show_usage::set(ShowUsage);
     postgres_seams::process_client_read_interrupt::set(ProcessClientReadInterrupt);
@@ -83,13 +88,27 @@ pub(crate) fn get_current_timestamp() -> types_core::TimestampTz {
 }
 
 
+// Per-tuple hot: one TLS load + one predictable branch (C's CHECK_FOR_INTERRUPTS).
+#[inline(always)]
 pub fn check_for_interrupts() -> PgResult<()> {
     if init_small::globals::InterruptPending() {
-        ProcessInterrupts()?;
+        return ProcessInterrupts();
     }
     Ok(())
 }
 
+thread_local! {
+    // C's RecoveryConflictPending(Reasons) statics as one ProcSignalReason bitmask.
+    static RECOVERY_CONFLICT_PENDING_REASONS: Cell<u32> = const { Cell::new(0) };
+}
+
+pub fn HandleRecoveryConflictInterrupt(reason: u32) {
+    RECOVERY_CONFLICT_PENDING_REASONS.with(|c| c.set(c.get() | (1 << reason)));
+    init_small::globals::SetInterruptPending(true);
+}
+
+#[cold]
+#[inline(never)]
 pub fn ProcessInterrupts() -> PgResult<()> {
     use init_small::globals as g;
 
@@ -101,6 +120,18 @@ pub fn ProcessInterrupts() -> PgResult<()> {
     if g::ProcDiePending() {
         g::SetProcDiePending(false);
         g::SetQueryCancelPending(false); /* ProcDie trumps QueryCancel */
+        lmgr_proc::LockErrorCleanup()?;
+        if elog::config::client_auth_in_progress() {
+            if elog::config::where_to_send_output() == types_dest::CommandDest::Remote {
+                elog::config::set_where_to_send_output(types_dest::CommandDest::None);
+            }
+            return Err(ereport(FATAL)
+                .errcode(ERRCODE_QUERY_CANCELED)
+                .errmsg("canceling authentication due to timeout")
+                .into_error()
+                .into());
+        }
+        // C's worker-process arms are unreachable: those mains panic at launch.
         return Err(ereport(FATAL)
             .errcode(types_error::ERRCODE_ADMIN_SHUTDOWN)
             .errmsg("terminating connection due to administrator command")
@@ -115,6 +146,8 @@ pub fn ProcessInterrupts() -> PgResult<()> {
     }
     if g::ClientConnectionLost() {
         g::SetQueryCancelPending(false); /* lost connection trumps QueryCancel */
+        lmgr_proc::LockErrorCleanup()?;
+        /* don't send to client, we already know the connection to be dead. */
         elog::config::set_where_to_send_output(types_dest::CommandDest::None);
         return Err(ereport(FATAL)
             .errcode(types_error::ERRCODE_CONNECTION_FAILURE)
@@ -124,11 +157,53 @@ pub fn ProcessInterrupts() -> PgResult<()> {
     }
 
     if g::QueryCancelPending() && g::QueryCancelHoldoffCount() != 0 {
+        // Cancel mustn't fire mid-message-read (FE/BE sync); re-arm for after.
         g::SetInterruptPending(true);
     } else if g::QueryCancelPending() {
         g::SetQueryCancelPending(false);
 
+        // Uninstalled timeout seams are exact here, not a stub: timeout.c is
+        // the only writer of these indicators, so absent it they are false.
+        let (mut lock_timeout_occurred, stmt_timeout_occurred) =
+            if timeout_seams::get_timeout_indicator::is_installed() {
+                (
+                    timeout_seams::get_timeout_indicator::call(timeout_seams::LOCK_TIMEOUT, true),
+                    timeout_seams::get_timeout_indicator::call(
+                        timeout_seams::STATEMENT_TIMEOUT,
+                        true,
+                    ),
+                )
+            } else {
+                (false, false)
+            };
+
+        /* both set: report whichever timeout completed earlier; tie = lock */
+        if lock_timeout_occurred
+            && stmt_timeout_occurred
+            && timeout_seams::get_timeout_finish_time::call(timeout_seams::STATEMENT_TIMEOUT)
+                < timeout_seams::get_timeout_finish_time::call(timeout_seams::LOCK_TIMEOUT)
+        {
+            lock_timeout_occurred = false;
+        }
+
+        if lock_timeout_occurred {
+            lmgr_proc::LockErrorCleanup()?;
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_LOCK_NOT_AVAILABLE)
+                .errmsg("canceling statement due to lock timeout")
+                .into_error()
+                .into());
+        }
+        if stmt_timeout_occurred {
+            lmgr_proc::LockErrorCleanup()?;
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_QUERY_CANCELED)
+                .errmsg("canceling statement due to statement timeout")
+                .into_error()
+                .into());
+        }
         if !DoingCommandRead() {
+            lmgr_proc::LockErrorCleanup()?;
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_QUERY_CANCELED)
                 .errmsg("canceling statement due to user request")
@@ -137,57 +212,158 @@ pub fn ProcessInterrupts() -> PgResult<()> {
         }
     }
 
+    let conflict_reasons = RECOVERY_CONFLICT_PENDING_REASONS.with(Cell::get);
+    if conflict_reasons != 0 {
+        panic!(
+            "ProcessInterrupts: RecoveryConflictPending (reasons bitmask {conflict_reasons:#x}) \
+             but ProcessRecoveryConflictInterrupts is not ported (standby/recovery lane)"
+        );
+    }
+
+    // C rechecks each timeout GUC (> 0) here; unwired backing vars = loud arms.
     if g::IdleInTransactionSessionTimeoutPending() {
         g::SetIdleInTransactionSessionTimeoutPending(false);
-        return Err(ereport(FATAL)
-            .errcode(types_error::ERRCODE_IDLE_IN_TRANSACTION_SESSION_TIMEOUT)
-            .errmsg("terminating connection due to idle-in-transaction timeout")
-            .into_error()
-            .into());
+        panic!(
+            "ProcessInterrupts: IdleInTransactionSessionTimeoutPending set but the \
+             IdleInTransactionSessionTimeout GUC recheck is not wired (guc lane; FATAL 25P03)"
+        );
     }
     if g::TransactionTimeoutPending() {
         g::SetTransactionTimeoutPending(false);
-        return Err(ereport(FATAL)
-            .errcode(types_error::ERRCODE_TRANSACTION_TIMEOUT)
-            .errmsg("terminating connection due to transaction timeout")
-            .into_error()
-            .into());
+        panic!(
+            "ProcessInterrupts: TransactionTimeoutPending set but the TransactionTimeout \
+             GUC recheck is not wired (guc lane; FATAL 25P04)"
+        );
     }
     if g::IdleSessionTimeoutPending() {
         g::SetIdleSessionTimeoutPending(false);
-        return Err(ereport(FATAL)
-            .errcode(types_error::ERRCODE_IDLE_SESSION_TIMEOUT)
-            .errmsg("terminating connection due to idle-session timeout")
-            .into_error()
-            .into());
+        panic!(
+            "ProcessInterrupts: IdleSessionTimeoutPending set but the IdleSessionTimeout \
+             GUC recheck is not wired (guc lane; FATAL 57P05)"
+        );
     }
 
-    if g::IdleStatsUpdateTimeoutPending() {
+    if g::IdleStatsUpdateTimeoutPending()
+        && DoingCommandRead()
+        && !xact::IsTransactionOrTransactionBlock()
+    {
         g::SetIdleStatsUpdateTimeoutPending(false);
         pgstat::pending::pgstat_report_stat(true);
     }
 
     if g::ProcSignalBarrierPending() {
-        panic!("ProcessInterrupts: ProcSignalBarrierPending set but ProcessProcSignalBarrier not ported");
+        procsignal_seams::process_proc_signal_barrier::call()?;
     }
+
     if g::LogMemoryContextPending() {
-        // ProcessLogMemoryContextInterrupt: diagnostics-only; owner unported.
-        g::SetLogMemoryContextPending(false);
+        mcxt_seams::process_log_memory_context_interrupt::call()?;
     }
-    // ParallelMessagePending / ParallelApplyMessagePending / notify+catchup
-    // legs belong to unported owners and their flags cannot be raised yet.
+    // ParallelMessagePending / ParallelApplyMessagePending flags have no
+    // storage yet (parallel/logical-apply owners unported).
 
     Ok(())
 }
 
-// ProcessClientReadInterrupt(blocked) (postgres.c:501); the catchup/notify
-// interrupt processing during reads belongs to sinval/async owners (their
-// pending flags cannot be raised yet).
-pub fn ProcessClientReadInterrupt(_blocked: bool) -> PgResult<()> {
+pub fn die() -> PgResult<()> {
+    use init_small::globals as g;
+    if !elog::config::proc_exit_inprogress() {
+        g::SetInterruptPending(true);
+        g::SetProcDiePending(true);
+    }
+
+    pgstat::database::pgstat_set_session_end_cause(
+        pgstat::database::SessionEndType::DisconnectKilled,
+    );
+
+    latch::SetLatch(g::MyLatch().expect("die: MyLatch is not set"));
+
+    // Single-user mode quits immediately (latches can't cover file stdin).
+    if DoingCommandRead() && elog::config::where_to_send_output() != types_dest::CommandDest::Remote
+    {
+        ProcessInterrupts()?;
+    }
+    Ok(())
+}
+
+pub fn StatementCancelHandler() {
+    use init_small::globals as g;
+    if !elog::config::proc_exit_inprogress() {
+        g::SetInterruptPending(true);
+        g::SetQueryCancelPending(true);
+    }
+    latch::SetLatch(g::MyLatch().expect("StatementCancelHandler: MyLatch is not set"));
+}
+
+pub fn quickdie() -> ! {
+    // C also blocks signals here; no per-thread signal rendering exists.
+    init_small::globals::HoldInterrupts();
+
+    if elog::config::client_auth_in_progress()
+        && elog::config::where_to_send_output() == types_dest::CommandDest::Remote
+    {
+        elog::config::set_where_to_send_output(types_dest::CommandDest::None);
+    }
+
+    elog::clear_emit_context_callbacks();
+
+    use pmsignal::QuitSignalReason::*;
+    let _ = match pmsignal::GetQuitSignalReason() {
+        PMQUIT_NOT_SENT => ereport(types_error::WARNING)
+            .errcode(types_error::ERRCODE_ADMIN_SHUTDOWN)
+            .errmsg("terminating connection because of unexpected SIGQUIT signal")
+            .finish(loc(2983, "quickdie")),
+        PMQUIT_FOR_CRASH => ereport(types_error::WARNING_CLIENT_ONLY)
+            .errcode(types_error::ERRCODE_CRASH_SHUTDOWN)
+            .errmsg("terminating connection because of crash of another server process")
+            .errdetail(
+                "The postmaster has commanded this server process to roll back the \
+                 current transaction and exit, because another server process exited \
+                 abnormally and possibly corrupted shared memory.",
+            )
+            .errhint(
+                "In a moment you should be able to reconnect to the database and \
+                 repeat your command.",
+            )
+            .finish(loc(2989, "quickdie")),
+        PMQUIT_FOR_STOP => ereport(types_error::WARNING_CLIENT_ONLY)
+            .errcode(types_error::ERRCODE_ADMIN_SHUTDOWN)
+            .errmsg("terminating connection due to immediate shutdown command")
+            .finish(loc(3000, "quickdie")),
+    };
+
+    // C's _exit(2): no cleanup callbacks; one address space takes every
+    // backend, as C's crash/immediate-shutdown cycle does anyway.
+    // SAFETY: _exit has no preconditions.
+    unsafe { libc::_exit(2) }
+}
+
+pub fn FloatExceptionHandler() -> PgResult<()> {
+    Err(ereport(ERROR)
+        .errcode(types_error::ERRCODE_FLOATING_POINT_EXCEPTION)
+        .errmsg("floating-point exception")
+        .errdetail(
+            "An invalid floating-point operation was signaled. This probably means \
+             an out-of-range result or an invalid operation, such as division by zero.",
+        )
+        .into_error()
+        .into())
+}
+
+pub fn ProcessClientReadInterrupt(blocked: bool) -> PgResult<()> {
+    use init_small::globals as g;
     if DoingCommandRead() {
         check_for_interrupts()?;
-    } else if init_small::globals::ProcDiePending() {
-        check_for_interrupts()?;
+
+        if sinval::catchupInterruptPending() {
+            sinval::ProcessCatchupInterrupt()?;
+        }
+        // ProcessNotifyInterrupt: async.c lane; its flag cannot be raised yet.
+    } else if g::ProcDiePending() {
+        if blocked {
+            check_for_interrupts()?;
+        } else {
+            latch::SetLatch(g::MyLatch().expect("ProcessClientReadInterrupt: MyLatch is not set"));
+        }
     }
     Ok(())
 }
@@ -197,11 +373,15 @@ pub fn ProcessClientWriteInterrupt(blocked: bool) -> PgResult<()> {
     if g::ProcDiePending() {
         if blocked {
             if g::InterruptHoldoffCount() == 0 && g::CritSectionCount() == 0 {
+                // No error to client: it could block, and a partial protocol
+                // message may already be out.
                 if elog::config::where_to_send_output() == types_dest::CommandDest::Remote {
                     elog::config::set_where_to_send_output(types_dest::CommandDest::None);
                 }
                 check_for_interrupts()?;
             }
+        } else {
+            latch::SetLatch(g::MyLatch().expect("ProcessClientWriteInterrupt: MyLatch is not set"));
         }
     }
     Ok(())
