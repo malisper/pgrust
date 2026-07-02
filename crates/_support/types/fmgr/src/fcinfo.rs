@@ -12,8 +12,7 @@ pub const TRACK_FUNC_OFF: u8 = 0;
 pub const TRACK_FUNC_PL: u8 = 1;
 pub const TRACK_FUNC_ALL: u8 = 2;
 
-// C's `fmNodePtr`: a bare Node pointer of which callees consult only the
-// leading tag (`IsA` demux). Node types that ride here start with an FmNode.
+// C's `fmNodePtr`: node types riding here lead with an FmNode tag (`IsA` demux).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FmNode {
@@ -22,11 +21,8 @@ pub struct FmNode {
 
 pub type FmNodePtr = Option<NonNull<FmNode>>;
 
-// C: `Datum (*PGFunction)(FunctionCallInfo)`. Divergence: `flinfo` travels as
-// the first parameter instead of a self-referential `fcinfo->flinfo` pointer
-// (same register cost; callees that write fn_extra get `&mut` safely; `None`
-// is C's NULL flinfo of the DirectFunctionCall path). Errors return as
-// `Err(PgError)` instead of an ereport longjmp.
+// C's PGFunction; `flinfo` travels as a parameter (`None` = C's NULL flinfo);
+// errors return as `Err`, not an ereport longjmp.
 pub type PGFunction =
     fn(Option<&mut FmgrInfo>, &mut FunctionCallInfoBaseData) -> PgResult<Datum>;
 
@@ -37,11 +33,8 @@ pub struct FmgrInfo {
     pub fn_strict: bool,
     pub fn_retset: bool,
     pub fn_stats: u8,
-    // C's `void *fn_extra` handler cache, owned (C pallocs it into `fn_mcxt`;
-    // here the box's lifetime is the FmgrInfo's, which the owner pins to the
-    // same context lifetime — the dropped `fn_mcxt` field). std Box: the slot
-    // is open-set by design and written once per resolved FmgrInfo, never
-    // per row.
+    // C's `void *fn_extra`; std Box justified: open-set slot written once per
+    // resolved FmgrInfo (its lifetime replaces fn_mcxt), never per row.
     pub fn_extra: Option<Box<dyn Any>>,
     pub fn_expr: Option<FnExprErased>,
 }
@@ -56,15 +49,11 @@ pub struct FunctionCallInfoBaseData<A: ?Sized = [NullableDatum]> {
     pub args: A,
 }
 
-// C's LOCAL_FCINFO(name, N): the same frame with its args[] tail sized
-// on-stack. Unsize-coerces (and Derefs) to the flexible-array form callees
-// receive.
 pub type LocalFcinfo<const N: usize> = FunctionCallInfoBaseData<[NullableDatum; N]>;
 
-// Layout vs C (fmgr.h, LP64): NullableDatum 16 == C 16; header 24 <= C 32
-// (flinfo moved to a call parameter); SizeForFunctionCallInfo(2) 56 <= C 64.
-// FmgrInfo: C is 48; the two fat erased slots (fn_extra, fn_expr) cost +8 each
-// and the dropped fn_mcxt refunds 8 => 56 (resolve-once type; rule-9 cap 128).
+// Layout vs C fmgr.h (LP64): NullableDatum 16 == 16; header 24 <= 32 (flinfo
+// is a parameter); fcinfo(2) 56 <= 64; FmgrInfo 56 vs 48 (two fat erased
+// slots +8 each, dropped fn_mcxt -8; resolve-once type, rule-9 cap 128).
 const _: () = {
     assert!(core::mem::size_of::<NullableDatum>() == 16);
     assert!(core::mem::offset_of!(LocalFcinfo<0>, args) <= 32);
@@ -74,8 +63,6 @@ const _: () = {
 };
 
 impl<const N: usize> LocalFcinfo<N> {
-    // C: LOCAL_FCINFO + InitFunctionCallInfoData(*fcinfo, NULL, N, collation,
-    // NULL, NULL), args cleared.
     #[inline]
     pub const fn new(collation: Oid) -> Self {
         Self {
@@ -133,6 +120,16 @@ impl FunctionCallInfoBaseData {
         self.args[index].value
     }
 
+    // One arity check per call instead of one bounds check per PG_GETARG.
+    #[inline]
+    pub fn args_n<const N: usize>(&self) -> &[NullableDatum; N] {
+        if self.args.len() < N {
+            arity_panic(N, self.args.len());
+        }
+        // SAFETY: length just checked; args are contiguous.
+        unsafe { &*self.args.as_ptr().cast::<[NullableDatum; N]>() }
+    }
+
     #[inline]
     pub fn argisnull(&self, index: usize) -> bool {
         self.args[index].isnull
@@ -140,7 +137,14 @@ impl FunctionCallInfoBaseData {
 
     #[inline]
     pub fn set_arg(&mut self, index: usize, value: Datum) {
-        self.args[index] = NullableDatum::value(value);
+        let slot = &mut self.args[index];
+        // SAFETY: NullableDatum is a 16B/8-align POD; one 16B store (value +
+        // zeroed isnull/pad) where C pays a str+strb pair.
+        unsafe {
+            core::ptr::from_mut(slot)
+                .cast::<[usize; 2]>()
+                .write([value.as_usize(), 0]);
+        }
     }
 
     #[inline]
@@ -154,12 +158,17 @@ impl FunctionCallInfoBaseData {
         self.args[..n].iter().any(|a| a.isnull)
     }
 
-    // PG_RETURN_NULL(): `fcinfo->isnull = true; return (Datum) 0`.
     #[inline]
     pub fn return_null(&mut self) -> Datum {
         self.isnull = true;
         Datum::null()
     }
+}
+
+#[cold]
+#[inline(never)]
+fn arity_panic(wanted: usize, got: usize) -> ! {
+    panic!("fmgr: callee expects {wanted} args, frame carries {got}");
 }
 
 fn unresolved_function(
@@ -187,7 +196,6 @@ impl FmgrInfo {
         Self::new(unresolved_function, ::types_core::primitive::InvalidOid, 0, false, false)
     }
 
-    // C: FunctionCallInvoke(fcinfo) == (*fcinfo->flinfo->fn_addr)(fcinfo).
     #[inline(always)]
     pub fn invoke(&mut self, fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
         let f = self.fn_addr;
@@ -202,8 +210,7 @@ impl FmgrInfo {
         self.fn_extra.is_some()
     }
 
-    // C reads fn_extra with an unchecked cast; a downcast mismatch here is the
-    // wiring bug C would corrupt memory on, so it panics loudly.
+    // Downcast mismatch = the wiring bug C corrupts memory on: panic loudly.
     pub fn fn_extra_ref<T: Any>(&self) -> Option<&T> {
         let any = self.fn_extra.as_ref()?;
         match any.downcast_ref::<T>() {
@@ -228,8 +235,7 @@ impl FmgrInfo {
 }
 
 impl Clone for FmgrInfo {
-    // C fmgr_info_copy: struct copy, then fn_extra = NULL (a fresh frame
-    // rebuilds its handler cache on first call).
+    // C fmgr_info_copy: struct copy with fn_extra reset to NULL.
     fn clone(&self) -> Self {
         Self {
             fn_addr: self.fn_addr,
@@ -310,14 +316,11 @@ define_calls! {
     function_call9_coll direct_function_call9_coll 9 (arg1 0, arg2 1, arg3 2, arg4 3, arg5 4, arg6 5, arg7 6, arg8 7, arg9 8);
 }
 
-// `Pg_finfo_record` (fmgr.h).
 #[derive(Clone, Copy, Debug)]
 pub struct Pg_finfo_record {
     pub api_version: i32,
 }
 
-// `FmgrBuiltin` (fmgr.h): one generated built-in table row (the table itself
-// is the backend-utils-fmgr-core unit).
 #[derive(Clone, Copy)]
 pub struct FmgrBuiltin {
     pub foid: Oid,
