@@ -216,7 +216,7 @@ pub fn StartupSUBTRANS(oldestActiveXID: TransactionId) -> PgResult<()> {
     let ctl = SubTransCtl();
 
     let mut startPage = TransactionIdToPage(oldestActiveXID);
-    let endPage = TransactionIdToPage(varsup_seams::read_next_transaction_id::call());
+    let endPage = TransactionIdToPage(varsup_seams::read_next_transaction_id::call()?);
 
     let mut bank: Option<LwGuard> = None;
     loop {

@@ -18,6 +18,7 @@ xact_seams = { path = "../../../access/transam/xact_seams" }
 transam_seams = { path = "../../../access/transam/transam_seams" }
 subtrans_seams = { path = "../../../access/transam/subtrans_seams" }
 transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+varsup = { path = "../../../access/transam/varsup" }
 
 [dev-dependencies]
 init_small = { path = "../../../utils/init/init_small" }

@@ -1,0 +1,203 @@
+use std::sync::atomic::Ordering::Relaxed;
+
+use types_error::{PgError, PgResult, PANIC};
+use xlogreader_seams::XLogReaderState;
+
+use crate::control_file::{control_file, control_file_update};
+use crate::ctl::XLogCtl;
+use crate::*;
+
+fn main_data(record: &XLogReaderState) -> &[u8] {
+    let rec = record.record.as_ref().expect("xlog_redo with no decoded record");
+    // SAFETY: main_data points into the reader's decode buffer, valid for the
+    // redo callback's duration.
+    unsafe { rec.main_data_bytes() }
+}
+
+fn panic_err(msg: String) -> Box<PgError> {
+    Box::new(PgError::new(PANIC, msg))
+}
+
+fn RecoveryRestartPoint(check_point: &CheckPoint, record: &XLogReaderState) {
+    if xlogutils::XLogHaveInvalidPages() {
+        return;
+    }
+    let ctl = XLogCtl();
+    ctl.info_lck.with(|| {
+        ctl.lastCheckPointRecPtr.store(record.ReadRecPtr, Relaxed);
+        ctl.lastCheckPointEndPtr.store(record.EndRecPtr, Relaxed);
+        // SAFETY: lastCheckPoint written only under info_lck.
+        unsafe { *ctl.lastCheckPoint.get() = *check_point };
+    });
+}
+
+pub fn xlog_redo(record: &mut XLogReaderState) -> PgResult<()> {
+    let rec = record.record.as_ref().expect("xlog_redo with no decoded record");
+    let info = rec.xl_info & !XLR_INFO_MASK;
+    let lsn = record.EndRecPtr;
+
+    debug_assert!(
+        info == XLOG_FPI || info == XLOG_FPI_FOR_HINT || !record.has_block_ref(0)
+    );
+
+    match info {
+        XLOG_NEXTOID => {
+            // OID allocator lives with the unported varsup unit; replaying
+            // its prefetch record needs it.
+            panic!("xlog_redo XLOG_NEXTOID: varsup nextOid store not ported");
+        }
+        XLOG_CHECKPOINT_SHUTDOWN => {
+            let check_point = CheckPoint::from_bytes(main_data(record));
+            procarray::TransamVariables().nextXid.store(check_point.nextXid.value, Relaxed);
+            if multixact_seams::multixact_set_next_mxact::is_installed() {
+                multixact_seams::multixact_set_next_mxact::call(
+                    check_point.nextMulti,
+                    check_point.nextMultiOffset,
+                );
+            }
+            if multixact_seams::multixact_advance_oldest::is_installed() {
+                multixact_seams::multixact_advance_oldest::call(
+                    check_point.oldestMulti,
+                    check_point.oldestMultiDB,
+                )?;
+            }
+            procarray::TransamVariables().oldestXid.store(check_point.oldestXid, Relaxed);
+
+            if xlogrecovery_seams::archive_recovery_requested::call()
+                && !XLogRecPtrIsInvalid(control_file().backupStartPoint)
+                && XLogRecPtrIsInvalid(control_file().backupEndPoint)
+            {
+                return Err(panic_err(
+                    "online backup was canceled, recovery cannot continue".into(),
+                ));
+            }
+
+            if xlogutils::standby_state() >= xlogutils::STANDBY_INITIALIZED {
+                panic!("hot-standby shutdown-checkpoint replay not ported");
+            }
+
+            control_file_update(|cf| cf.checkPointCopy.nextXid = check_point.nextXid);
+            let ctl = XLogCtl();
+            ctl.info_lck.with(|| ctl.ckptFullXid.store(check_point.nextXid.value, Relaxed));
+
+            let (_, replay_tli) = xlogrecovery_seams::get_current_replay_rec_ptr::call();
+            if check_point.ThisTimeLineID != replay_tli {
+                return Err(panic_err(format!(
+                    "unexpected timeline ID {} (should be {}) in shutdown checkpoint record",
+                    check_point.ThisTimeLineID, replay_tli
+                )));
+            }
+
+            RecoveryRestartPoint(&check_point, record);
+            // smgrdestroyall() follows in C; smgr close-all is deferred with
+            // the recovery unit.
+        }
+        XLOG_CHECKPOINT_ONLINE => {
+            let check_point = CheckPoint::from_bytes(main_data(record));
+            let tv = procarray::TransamVariables();
+            let cur = tv.nextXid.load(Relaxed);
+            if cur < check_point.nextXid.value {
+                tv.nextXid.store(check_point.nextXid.value, Relaxed);
+            }
+            if multixact_seams::multixact_advance_next_mxact::is_installed() {
+                multixact_seams::multixact_advance_next_mxact::call(
+                    check_point.nextMulti,
+                    check_point.nextMultiOffset,
+                );
+            }
+            if multixact_seams::multixact_advance_oldest::is_installed() {
+                multixact_seams::multixact_advance_oldest::call(
+                    check_point.oldestMulti,
+                    check_point.oldestMultiDB,
+                )?;
+            }
+            if tv.oldestXid.load(Relaxed) < check_point.oldestXid {
+                tv.oldestXid.store(check_point.oldestXid, Relaxed);
+            }
+            control_file_update(|cf| cf.checkPointCopy.nextXid = check_point.nextXid);
+            let ctl = XLogCtl();
+            ctl.info_lck.with(|| ctl.ckptFullXid.store(check_point.nextXid.value, Relaxed));
+
+            let (_, replay_tli) = xlogrecovery_seams::get_current_replay_rec_ptr::call();
+            if check_point.ThisTimeLineID != replay_tli {
+                return Err(panic_err(format!(
+                    "unexpected timeline ID {} (should be {}) in online checkpoint record",
+                    check_point.ThisTimeLineID, replay_tli
+                )));
+            }
+            RecoveryRestartPoint(&check_point, record);
+        }
+        XLOG_OVERWRITE_CONTRECORD | XLOG_BACKUP_END | XLOG_RESTORE_POINT => {}
+        XLOG_END_OF_RECOVERY => {
+            // xl_end_of_recovery: TimestampTz end_time; TimeLineID this/prev; int wal_level.
+            let data = main_data(record);
+            let this_tli = u32::from_ne_bytes(data[8..12].try_into().unwrap());
+            let (_, replay_tli) = xlogrecovery_seams::get_current_replay_rec_ptr::call();
+            if this_tli != replay_tli {
+                return Err(panic_err(format!(
+                    "unexpected timeline ID {this_tli} (should be {replay_tli}) in end-of-recovery record"
+                )));
+            }
+        }
+        XLOG_NOOP | XLOG_SWITCH | XLOG_CHECKPOINT_REDO => {}
+        XLOG_FPI | XLOG_FPI_FOR_HINT => {
+            panic!("xlog_redo FPI restore: XLogReadBufferForRedo leg not ported");
+        }
+        XLOG_PARAMETER_CHANGE => {
+            let data = main_data(record);
+            let max_connections = i32::from_ne_bytes(data[0..4].try_into().unwrap());
+            let max_worker_processes = i32::from_ne_bytes(data[4..8].try_into().unwrap());
+            let max_wal_senders = i32::from_ne_bytes(data[8..12].try_into().unwrap());
+            let max_prepared_xacts = i32::from_ne_bytes(data[12..16].try_into().unwrap());
+            let max_locks_per_xact = i32::from_ne_bytes(data[16..20].try_into().unwrap());
+            let new_wal_level = i32::from_ne_bytes(data[20..24].try_into().unwrap());
+            let wal_log_hints = data[24] != 0;
+            let track_commit_timestamp = data[25] != 0;
+
+            if track_commit_timestamp != control_file().track_commit_timestamp {
+                panic!("CommitTsParameterChange replay not ported");
+            }
+
+            control_file_update(|cf| {
+                cf.MaxConnections = max_connections;
+                cf.max_worker_processes = max_worker_processes;
+                cf.max_wal_senders = max_wal_senders;
+                cf.max_prepared_xacts = max_prepared_xacts;
+                cf.max_locks_per_xact = max_locks_per_xact;
+                cf.wal_level = new_wal_level;
+                cf.wal_log_hints = wal_log_hints;
+                cf.track_commit_timestamp = track_commit_timestamp;
+            });
+
+            if xlogrecovery_seams::in_archive_recovery::call() {
+                crate::write::LOCAL_MIN_RECOVERY_POINT.set(control_file().minRecoveryPoint);
+                crate::write::LOCAL_MIN_RECOVERY_POINT_TLI.set(control_file().minRecoveryPointTLI);
+            }
+            if crate::write::LOCAL_MIN_RECOVERY_POINT.get() != InvalidXLogRecPtr
+                && crate::write::LOCAL_MIN_RECOVERY_POINT.get() < lsn
+            {
+                let (_, replay_tli) = xlogrecovery_seams::get_current_replay_rec_ptr::call();
+                control_file_update(|cf| {
+                    cf.minRecoveryPoint = lsn;
+                    cf.minRecoveryPointTLI = replay_tli;
+                });
+            }
+            UpdateControlFile()?;
+            control_file::CheckRequiredParameterValues()?;
+        }
+        XLOG_FPW_CHANGE => {
+            let fpw = main_data(record)[0] != 0;
+            if !fpw {
+                let ctl = XLogCtl();
+                ctl.info_lck.with(|| {
+                    if ctl.lastFpwDisableRecPtr.load(Relaxed) < record.ReadRecPtr {
+                        ctl.lastFpwDisableRecPtr.store(record.ReadRecPtr, Relaxed);
+                    }
+                });
+            }
+            crate::startup::set_last_full_page_writes(fpw);
+        }
+        _ => {}
+    }
+    Ok(())
+}

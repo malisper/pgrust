@@ -72,6 +72,7 @@ fn setup() {
             fastpath_lock_groups_per_backend: 1,
         });
         init_seams();
+        varsup::VarsupShmemInit();
         ProcArrayShmemInit();
     });
 }

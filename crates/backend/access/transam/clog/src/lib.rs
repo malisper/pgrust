@@ -579,16 +579,17 @@ fn ZeroCLOGPage(pageno: i64, writeXlog: bool, bank: &mut LwGuard) -> PgResult<us
     Ok(slotno)
 }
 
-pub fn StartupCLOG() {
-    let xid = varsup_seams::read_next_transaction_id::call();
+pub fn StartupCLOG() -> PgResult<()> {
+    let xid = varsup_seams::read_next_transaction_id::call()?;
     let pageno = TransactionIdToPage(xid);
 
     XactCtl().set_latest_page_number(pageno);
+    Ok(())
 }
 
 pub fn TrimCLOG() -> PgResult<()> {
     let ctl = XactCtl();
-    let xid = varsup_seams::read_next_transaction_id::call();
+    let xid = varsup_seams::read_next_transaction_id::call()?;
     let pageno = TransactionIdToPage(xid);
 
     let mut bank = LwGuard::acquire(SimpleLruGetBankLock(ctl, pageno), LW_EXCLUSIVE)?;

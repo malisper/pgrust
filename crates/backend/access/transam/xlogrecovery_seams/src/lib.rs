@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use types_core::{TimeLineID, TransactionId, XLogRecPtr};
 use types_error::PgResult;
 

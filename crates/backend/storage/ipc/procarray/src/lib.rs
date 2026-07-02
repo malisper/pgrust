@@ -3,7 +3,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{fence, Ordering};
 use std::sync::OnceLock;
 
 use lmgr_proc::{GetPGProcByNumber, MyProc, ProcGlobal};
@@ -49,24 +49,11 @@ pub struct ProcArrayStruct {
 // SAFETY: SyncCell fields are serialized by ProcArrayLock as documented.
 unsafe impl Sync for ProcArrayStruct {}
 
-// DIVERGENCE: C's owner is varsup.c (unported); the live instance sits here
-// so the GetSnapshotData fastpath stays seam-free — move when varsup lands.
-// Word atomics mirror C's aligned-word-access assumption.
-pub struct TransamVariablesShared {
-    pub nextXid: AtomicU64,
-    pub oldestXid: AtomicU32,
-    pub latestCompletedXid: AtomicU64, // [PAL]
-    pub xactCompletionCount: AtomicU64, // [PAL]
-}
+// varsup.c owns the live TransamVariables instance; this direct-dep
+// re-export keeps the GetSnapshotData fastpath seam-free.
+pub use varsup::{TransamVariables, TransamVariablesShared};
 
 static PROC_ARRAY: OnceLock<&'static ProcArrayStruct> = OnceLock::new();
-static TRANSAM_VARIABLES: OnceLock<TransamVariablesShared> = OnceLock::new();
-
-pub fn TransamVariables() -> &'static TransamVariablesShared {
-    TRANSAM_VARIABLES
-        .get()
-        .unwrap_or_else(|| panic!("ProcArrayShmemInit has not run"))
-}
 
 fn procArray() -> &'static ProcArrayStruct {
     PROC_ARRAY
@@ -193,20 +180,6 @@ pub fn ProcArrayShmemInit() {
 
     PROC_ARRAY
         .set(array)
-        .unwrap_or_else(|_| panic!("ProcArrayShmemInit called twice"));
-    TRANSAM_VARIABLES
-        .set(TransamVariablesShared {
-            nextXid: AtomicU64::new(
-                FullTransactionId::from_epoch_and_xid(0, FirstNormalTransactionId).value,
-            ),
-            oldestXid: AtomicU32::new(FirstNormalTransactionId),
-            latestCompletedXid: AtomicU64::new(
-                // C: StartupXLOG seeds from the checkpoint; FirstNormal
-                // stands in until the xlog unit owns startup.
-                FullTransactionId::from_epoch_and_xid(0, FirstNormalTransactionId).value,
-            ),
-            xactCompletionCount: AtomicU64::new(1),
-        })
         .unwrap_or_else(|_| panic!("ProcArrayShmemInit called twice"));
 }
 

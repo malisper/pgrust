@@ -280,19 +280,19 @@ pub fn XLogCheckpointNeeded(new_segno: XLogSegNo) -> bool {
     new_segno >= old_segno + (CheckPointSegments() - 1) as u64
 }
 
-fn assign_max_wal_size(_newval: i32, _extra: Option<&guc_tables::slots::GucHookExtra>) {
+fn assign_max_wal_size(_newval: i32, _extra: Option<&guc_tables::GucHookExtra>) {
     CalculateCheckpointSegments();
 }
 fn assign_checkpoint_completion_target(
     _newval: f64,
-    _extra: Option<&guc_tables::slots::GucHookExtra>,
+    _extra: Option<&guc_tables::GucHookExtra>,
 ) {
     CalculateCheckpointSegments();
 }
 fn check_wal_segment_size_hook(
     newval: &mut i32,
-    _extra: &mut Option<guc_tables::slots::GucHookExtra>,
-    _source: guc_tables::types_guc::GucSource,
+    _extra: &mut Option<guc_tables::GucHookExtra>,
+    _source: types_guc::GucSource,
 ) -> PgResult<bool> {
     Ok(IsValidWalSegSize(*newval))
 }
@@ -303,8 +303,8 @@ fn XLOGChooseNumBuffers() -> i32 {
 }
 fn check_wal_buffers_hook(
     newval: &mut i32,
-    _extra: &mut Option<guc_tables::slots::GucHookExtra>,
-    _source: guc_tables::types_guc::GucSource,
+    _extra: &mut Option<guc_tables::GucHookExtra>,
+    _source: types_guc::GucSource,
 ) -> PgResult<bool> {
     if *newval == -1 {
         if guc_tables::vars::XLOGbuffers.read() == -1 {
@@ -358,6 +358,7 @@ pub fn init_seams() {
     s::xlog_insert_record::set(insert::xlog_insert_record_seam);
     s::xlog_insert_allowed::set(insert::XLogInsertAllowed);
     s::get_full_page_write_info::set(insert::GetFullPageWriteInfo);
+    s::xlog_put_next_oid::set(startup::XLogPutNextOid);
 
     guc_tables::hooks::assign_max_wal_size.install(assign_max_wal_size);
     guc_tables::hooks::assign_checkpoint_completion_target
