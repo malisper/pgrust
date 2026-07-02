@@ -1,0 +1,8 @@
+[package]
+name = "pg_prng"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+pg_prng_seams = { path = "../../port/pg_prng_seams" }

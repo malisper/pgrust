@@ -797,7 +797,7 @@ common-prng-base64	*/base64.c,*/pg_prng.c	todo			fabled:common-prng-base64
 common-probe-blkreftable-srv	*/blkreftable.c	combined-into:probe-next-srv-blkreftable			fabled:duplicate-of
 common-probe-lz-rel-frontshlib	*/pg_lzcompress.c,*/relpath.c	combined-into:common-probe-lz-rel-srv			fabled:duplicate-of
 common-probe-lz-rel-frontstatic	*/pg_lzcompress.c,*/relpath.c	combined-into:common-probe-lz-rel-srv			fabled:duplicate-of
-common-probe-lz-rel-srv	*/pg_lzcompress.c,*/relpath.c	todo			
+common-probe-lz-rel-srv	*/pg_lzcompress.c,*/relpath.c	combined-into:common-pglz			c2rust partition artifact aggregating pg_lzcompress.c (-> common-pglz) + relpath.c (-> probe-relpath); no port needed, matches frontshlib/frontstatic siblings
 common-probe-parse-manifest-frontshlib	*/parse_manifest.c	combined-into:common-probe-parse-manifest-srv			fabled:duplicate-of
 common-probe-parse-manifest-frontstatic	*/parse_manifest.c	combined-into:common-probe-parse-manifest-srv			fabled:duplicate-of
 common-probe-parse-manifest-srv	*/parse_manifest.c	todo			
@@ -958,7 +958,7 @@ contrib-unaccent	*/unaccent.c	todo
 contrib-vacuumlo-main-batch1	*/vacuumlo.c	todo			
 contrib-xml2	contrib/xml2/xpath.c,contrib/xml2/xslt_proc.c	todo			
 pg-prng-nostd	*/pg_prng.c	combined-into:pg-prng			fabled:duplicate-of; m1-dep(stub-ok)
-pg-prng	*/pg_prng.c	todo			fabled:pg-prng; m1-dep(stub-ok)
+pg-prng	*/pg_prng.c	ported	pg_prng	cold	m1-spine; xoroshiro128** per-state + TLS global (Cell, Copy state); KATs bit-exact vs compiled REL_18_3 pg_prng.o (normal_f64 to 1e-14, libm); installs both pg_prng_seams; 6 tests, density 1.8%
 port-batch14	*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrsignal.c,*/pthread_barrier_wait.c,*/quotes.c,*/strerror.c,*/tar.c	todo			m1-spine(boot); fabled:port-pg-strong-random; only pg_strong_random.c on spine
 port-batch17	*/bsearch_arg.c,*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrsignal.c,*/pthread_barrier_wait.c,*/qsort.c,*/qsort_arg.c,*/quotes.c,*/strerror.c,*/tar.c	todo			
 port-batch19	*/bsearch_arg.c,*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_bitutils.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_popcount_avx512.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrsignal.c,*/pthread_barrier_wait.c,*/qsort.c,*/qsort_arg.c,*/quotes.c,*/strerror.c,*/tar.c	todo			
