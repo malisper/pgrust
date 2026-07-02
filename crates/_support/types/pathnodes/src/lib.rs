@@ -1444,6 +1444,9 @@ impl<'mcx> PlannerGlobal<'mcx> {
 pub enum ArenaNode<'mcx> {
     /// Index-0 sentinel so `NodeId(0)` stays the NULL handle.
     Reserved,
+    /// Expression payload boundary to types_nodes (discharges the deferral in
+    /// the crate doc): C shares `Expr *` by pointer; `Node` is that pointer.
+    Expr(::types_nodes::node_tree::Node<'mcx>),
     TargetEntry(TargetEntryNode<'mcx>),
     ForeignKey(ForeignKeyOptInfo<'mcx>),
     StatisticExt(StatisticExtInfo<'mcx>),
@@ -1600,6 +1603,7 @@ macro_rules! arena_node_accessors {
 }
 
 arena_node_accessors!(
+    expr_node, expr_node_mut, alloc_expr_node, Expr => ::types_nodes::node_tree::Node<'mcx>,
     targetentry, targetentry_mut, alloc_targetentry, TargetEntry => TargetEntryNode<'mcx>,
     foreign_key, foreign_key_mut, alloc_foreign_key, ForeignKey => ForeignKeyOptInfo<'mcx>,
     statistic_ext, statistic_ext_mut, alloc_statistic_ext, StatisticExt => StatisticExtInfo<'mcx>,

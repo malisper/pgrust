@@ -89,7 +89,9 @@ dependencies = [
 name = "adt_datetime"
 version = "0.1.0"
 dependencies = [
+ "localtime",
  "numutils",
+ "pgtz",
  "types_core",
  "types_error",
 ]
@@ -919,11 +921,13 @@ dependencies = [
  "datum",
  "execexpr",
  "execmain_seams",
+ "execscan",
  "exectuples",
  "executils",
  "guc_tables",
  "init_small",
  "mcx",
+ "nodeseqscan",
  "postgres_seams",
  "snapmgr",
  "syscache_seams",
@@ -1215,6 +1219,32 @@ dependencies = [
 [[package]]
 name = "guc_funcs"
 version = "0.0.0"
+dependencies = [
+ "aclchk_seams",
+ "adt_acl",
+ "elog",
+ "guc",
+ "guc_tables",
+ "mbutils_seams",
+ "mcx",
+ "miscinit",
+ "pqcomm_seams",
+ "scalar_seams",
+ "snapmgr_seams",
+ "superuser",
+ "syscache_seams",
+ "tcop_dest",
+ "timestamp_seams",
+ "tupdesc",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "types_nodes",
+ "types_tuple",
+ "variable",
+ "xact",
+ "xact_seams",
+]
 
 [[package]]
 name = "guc_seams"
@@ -2431,6 +2461,7 @@ version = "0.1.0"
 dependencies = [
  "elog",
  "fd",
+ "guc_tables",
  "init_small",
  "localtime",
  "mcx",
@@ -2438,6 +2469,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_storage",
+ "xact_seams",
 ]
 
 [[package]]
@@ -4301,6 +4333,7 @@ dependencies = [
 name = "variable"
 version = "0.0.0"
 dependencies = [
+ "aclchk_seams",
  "adt_acl",
  "adt_datetime",
  "backend_status",
@@ -4309,17 +4342,23 @@ dependencies = [
  "guc_tables",
  "init_small",
  "mbutils",
+ "mbutils_seams",
  "mcx",
  "miscinit",
+ "pqcomm_seams",
+ "scalar_seams",
  "snapmgr",
  "superuser",
  "syscache_seams",
+ "timestamp_seams",
  "transam_xlog",
  "types_core",
  "types_error",
  "types_guc",
  "varlena",
+ "wchar",
  "xact",
+ "xact_seams",
 ]
 
 [[package]]
