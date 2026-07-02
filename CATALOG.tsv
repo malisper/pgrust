@@ -1,13 +1,13 @@
 unit	c_sources	status	crate	bench_ratio	notes
 types_error	-	ported	types_error	cold	substrate: PgError/PgResult; no C unit
 types_core	-	ported	types_core	cold	substrate: Oid + primitives; no C unit
-mcx	src/backend/utils/mmgr/mcxt.c,src/backend/utils/mmgr/aset.c,src/backend/utils/mmgr/bump.c	ported	mcx	0.68x-instr/0.92x-ns	substrate: arenas; PASS dual gate: aset alloc 0.66x/0.92x, bump alloc 0.63x/0.78x, reset 0.68x/0.90x (bump.c-shaped BumpArena, block-granular accounting, inline(always) allocate); vec_append 1.06x-instr/0.59x-ns kept; docs/optimizations/m0-substrate-parity.md
+mcx	src/backend/utils/mmgr/mcxt.c,src/backend/utils/mmgr/aset.c,src/backend/utils/mmgr/bump.c	ported	mcx	0.68x-instr/0.92x-ns	substrate: arenas; PASS dual gate: aset alloc 0.66x/0.92x, bump alloc 0.63x/0.78x, reset 0.68x/0.90x (bump.c-shaped BumpArena, block-granular accounting, inline(always) allocate); vec_append 1.00x-instr/1.00x-ns on Graviton (1.42x-ns was the harness wrap if-converted onto the len chain, fixed in rig; csel A/B journaled); docs/optimizations/m0-substrate-parity.md
 datum	src/backend/access/common/heaptuple.c(partial)	ported	datum	1.00x-instr/1.00x-ns	substrate: 8B Datum; codecs 1.00x (asm-identical); varlena read via borrowed VarlenaRef lane 1.00x (7=7 instr, matches C VARSIZE/VARDATA); docs/optimizations/m0-substrate-parity.md
-seam-core	-	todo			substrate; fabled:seam-core; m1-spine; seam registry substrate
-types-tuple	-	todo			substrate; fabled:types-tuple; m1-spine; HeapTuple/MinimalTuple/ItemPointer types
-types-fmgr	-	todo			substrate; fabled:types-fmgr; m1-spine; FunctionCallInfoBaseData/FmgrInfo types
+seam-core	-	ported	seam_core	cold	substrate; fabled:seam-core; m1-spine; seam registry substrate; cold: init-time registry, per-call = one relaxed load + indirect call, placement-banned from per-row paths; 6/6 tests, density 5.0%
+types-tuple	-	ported	types_tuple		substrate; fabled:types-tuple; m1-spine; HeapTuple/MinimalTuple/ItemPointer types; 14/14 tests, density 4.5%; bench journal pending (agent resumed)
+types-fmgr	-	in-progress	types_fmgr		substrate; fabled:types-fmgr; m1-spine; FunctionCallInfoBaseData/FmgrInfo types
 types-scan	-	todo			substrate; fabled:types-scan; m1-spine; scankey/scan descriptor types
-types-stringinfo	-	todo			substrate; fabled:types-stringinfo; m1-spine; StringInfo
+types-stringinfo	-	benched	stringinfo	0.57x-instr/0.66x-ns	substrate; fabled:types-stringinfo; m1-spine; StringInfo; PASS dual gate: append_bytes 0.57x/0.66x, append_byte 0.58x/0.32x, growth 1.00x/1.00x vs matched-allocator C (aset always-move realloc flagged as mcx substrate item); 13 tests, Miri clean, density 3.4%; docs/optimizations/stringinfo-parity.md
 types-resowner	-	todo			substrate; fabled:types-resowner; m1-spine; ResourceOwner types
 types-storage	-	todo			substrate; fabled:types-storage; m1-spine; block/buffer/relfilelocator types
 types-rel	-	todo			substrate; fabled:types-rel; m1-spine; Relation/RelationData types
@@ -1165,7 +1165,7 @@ probe-wait_error	*/wait_error.c	todo
 common-ip	*/ip.c	todo			fabled:common-ip; m1-spine
 port-crc32c	src/port/pg_crc32c_sb8.c	todo			fabled:port-crc32c; m1-spine(boot)
 common-pglz	*/pg_lzcompress.c	todo			fabled:common-pglz; m1-dep(stub-ok)
-common-hashfn	*/hashfn.c	todo			fabled:common-hashfn; m1-spine
+common-hashfn	*/hashfn.c	benched	hashfn	0.76x-1.0x-instr/0.68x-1.0x-ns	fabled:common-hashfn; m1-spine; PASS dual gate every cell: hash_bytes len4-256 aligned+offset 0.76-1.0x instr / 0.68-1.006x ns, hash_bytes_uint32 1.00x instr / 0.91x ns; bit-exact vs compiled C on 4000+ vectors (len 0..8000, offsets 0..7, 6 seeds); 8 tests, density 0.2%; docs/optimizations/hashfn-parity.md
 common-keywords	*/keywords.c,*/kwlookup.c	todo			fabled:common-keywords; m1-spine
 common-string	*/string.c	todo			fabled:common-string; m1-dep(stub-ok)
 backend-lib-bipartite-match	*/bipartite_match.c	todo			fabled:backend-lib-bipartite-match; m1-dep(stub-ok)

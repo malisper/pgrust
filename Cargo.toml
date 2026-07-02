@@ -5,6 +5,10 @@ members = [
     "crates/_support/types/types_core",
     "crates/_support/mcx",
     "crates/_support/types/datum",
+    "crates/_support/seam_core",
+    "crates/_support/types/types_tuple",
+    "crates/_support/types/stringinfo",
+    "crates/common/hashfn",
 ]
 
 [workspace.package]
