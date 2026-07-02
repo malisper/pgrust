@@ -474,7 +474,7 @@ backend-storage-aio-read-stream	src/backend/storage/aio/read_stream.c	todo			fab
 backend-storage-buffer-bufmgr	src/backend/storage/buffer/bufmgr.c	todo			fabled:backend-storage-buffer-bufmgr; m1-spine
 backend-storage-buffer-small	*/buf_init.c,*/buf_table.c,*/freelist.c,*/localbuf.c	combined-into:backend-storage-buffer-support			
 backend-storage-buffer-support	src/backend/storage/buffer/buf_init.c,src/backend/storage/buffer/buf_table.c,src/backend/storage/buffer/freelist.c,src/backend/storage/buffer/localbuf.c	todo			fabled:backend-storage-buffer-support; m1-spine
-backend-storage-file	*/buffile.c,*/copydir.c,*/fd.c,*/fileset.c,*/reinit.c,*/sharedfileset.c	todo			fabled:backend-storage-file-buffile; m1-spine
+backend-storage-file	*/buffile.c,*/copydir.c,*/fd.c,*/fileset.c,*/reinit.c,*/sharedfileset.c	ported	fd	cold	m1-spine; VFD cache + descriptor table, OwnedFd concentrated in FdState (no-drop split), single-borrow ops (fixes fabled EMFILE double-borrow); real pg_flush_data (fabled stubbed no-op), PG_IOV_MAX 128 (fabled stale 32); installs all 6 file_seams; IO wrappers syscall-dominated, no bench; 21 tests, density 4.7%
 backend-storage-freespace	*/freespace.c,*/fsmpage.c,*/indexfsm.c	todo			fabled:backend-storage-freespace; m1-dep(stub-ok)
 backend-storage-ipc-dsm-core	*/dsm.c,*/dsm_impl.c	todo			fabled:backend-storage-ipc-dsm-core; m1-spine
 backend-storage-ipc-dsm-registry	*/dsm_registry.c	todo			fabled:backend-storage-ipc-dsm-registry; m1-spine

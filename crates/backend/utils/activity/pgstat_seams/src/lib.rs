@@ -42,3 +42,8 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn pgstat_init_relation(relid: types_core::Oid, relkind: u8) -> bool
 );
+
+seam_core::seam!(
+    // `pgstat_report_tempfile(filesize)` (utils/activity/pgstat_database.c).
+    pub fn pgstat_report_tempfile(file_size: u64)
+);

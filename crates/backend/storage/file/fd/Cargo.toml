@@ -1,0 +1,28 @@
+[package]
+name = "fd"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "fd"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_resowner = { path = "../../../../_support/types/types_resowner" }
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+elog = { path = "../../../utils/error/elog" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+init_small = { path = "../../../utils/init/init_small" }
+file_seams = { path = "../file_seams" }
+ipc_seams = { path = "../../ipc/ipc_seams" }
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+xact_seams = { path = "../../../access/transam/xact_seams" }
+aio_seams = { path = "../../aio/aio_seams" }
+startup_seams = { path = "../../../postmaster/startup_seams" }
+libc = "0.2"
