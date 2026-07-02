@@ -14,9 +14,6 @@ use types_core::{LocalTransactionId, Oid, TimestampTz, TransactionId};
 
 use crate::{SubXactCallbackItem, XactCallbackItem};
 
-pub(crate) const MAX_XACT_CALLBACKS: usize = 64;
-pub(crate) const MAX_SUBXACT_CALLBACKS: usize = 64;
-
 // `TransactionStateData`. C's parent-linked list is the top node inline plus
 // a Vec of subtransaction nodes; `priorContext` and `curTransactionOwner`
 // dissolve (no ambient context; owner value lives in the resowner unit,

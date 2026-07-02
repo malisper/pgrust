@@ -24,3 +24,7 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn transaction_id_did_commit(xid: TransactionId) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    pub fn transaction_id_did_abort(xid: TransactionId) -> PgResult<bool>
+);

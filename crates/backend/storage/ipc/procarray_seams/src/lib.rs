@@ -14,11 +14,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // ProcArrayEndTransaction(MyProc, latestXid); the owner resolves MyProc.
-    pub fn proc_array_end_transaction(latest_xid: types_core::TransactionId) -> types_error::PgResult<()>
-);
-
-seam_core::seam!(
     pub fn proc_array_clear_transaction() -> types_error::PgResult<()>
 );
 
@@ -47,4 +42,16 @@ seam_core::seam!(
         top_xid: types_core::TransactionId,
         subxids: &'a [types_core::TransactionId],
     ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    // GlobalVisTestFor(rel) (procarray.c).
+    pub fn global_vis_test_for<'a, 'mcx>(
+        rel: &'a types_rel::RelationData<'mcx>,
+    ) -> types_core::GlobalVisStateHandle
+);
+
+seam_core::seam!(
+    // ProcArrayEndTransaction(MyProc, latestXid) (procarray.c).
+    pub fn proc_array_end_transaction(procno: ProcNumber, latest_xid: TransactionId) -> PgResult<()>
 );

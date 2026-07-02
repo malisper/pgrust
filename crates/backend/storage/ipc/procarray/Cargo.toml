@@ -1,6 +1,37 @@
 [package]
 name = "procarray"
-version = "0.1.0"
-edition = "2021"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
 
 [dependencies]
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_snapshot = { path = "../../../../_support/types/snapshot" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+lwlock = { path = "../../lmgr/lwlock" }
+lmgr_proc = { path = "../../lmgr/lmgr_proc" }
+lmgr_proc_seams = { path = "../../lmgr/lmgr_proc_seams" }
+procarray_seams = { path = "../procarray_seams" }
+xact_seams = { path = "../../../access/transam/xact_seams" }
+transam_seams = { path = "../../../access/transam/transam_seams" }
+subtrans_seams = { path = "../../../access/transam/subtrans_seams" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+
+[dev-dependencies]
+init_small = { path = "../../../utils/init/init_small" }
+pg_sema_seams = { path = "../../../port/pg_sema_seams" }
+s_lock_seams = { path = "../../lmgr/s_lock_seams" }
+latch_seams = { path = "../latch_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+ipc_seams = { path = "../ipc_seams" }
+deadlock_seams = { path = "../../lmgr/deadlock_seams" }
+pmsignal_seams = { path = "../pmsignal_seams" }
+lock_seams = { path = "../../lmgr/lock_seams" }
+timeout_seams = { path = "../../../utils/misc/timeout_seams" }
+shmem_seams = { path = "../shmem_seams" }
+condition_variable_seams = { path = "../../lmgr/condition_variable_seams" }
+syncrep_seams = { path = "../../../replication/syncrep_seams" }
+autovacuum_seams = { path = "../../../postmaster/autovacuum_seams" }

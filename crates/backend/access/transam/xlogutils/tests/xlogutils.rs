@@ -40,9 +40,9 @@ fn install_seams() {
         bufmgr_seams::read_buffer_without_relcache::set(|_, _, blkno, _, _, _| {
             Ok(blkno as i32 + 1)
         });
-        bufmgr_seams::extend_buffered_rel_to::set(|_, _, _, extend_to, _| Ok(extend_to as i32));
-        bufmgr_seams::release_buffer::set(|_| ());
-        bufmgr_seams::mark_buffer_dirty::set(|_| ());
+        bufmgr_seams::extend_buffered_rel_to::set(|_, _, _, _, extend_to, _| Ok(extend_to as i32));
+        bufmgr_seams::release_buffer::set(|_| Ok(()));
+        bufmgr_seams::mark_buffer_dirty::set(|_| Ok(()));
         bufmgr_seams::flush_one_buffer::set(|_| Ok(()));
         bufmgr_seams::lock_buffer::set(|_, _| Ok(()));
         bufmgr_seams::lock_buffer_for_cleanup::set(|_| Ok(()));

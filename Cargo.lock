@@ -244,6 +244,17 @@ name = "deadlock_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_core",
+ "types_error",
+ "types_storage",
+]
+
+[[package]]
+name = "detoast_seams"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "seam_core",
  "types_error",
 ]
 
@@ -531,6 +542,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ip"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "ipc_portal_seams"
 version = "0.0.0"
 dependencies = [
@@ -653,7 +671,12 @@ dependencies = [
  "types_core",
  "types_error",
  "types_rel",
+ "types_storage",
 ]
+
+[[package]]
+name = "lock"
+version = "0.0.0"
 
 [[package]]
 name = "lock_seams"
@@ -681,6 +704,23 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "lsyscache"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "fmgr_core",
+ "init_small",
+ "lsyscache_seams",
+ "mcx",
+ "miscinit_seams",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_pathnodes",
+ "types_tuple",
 ]
 
 [[package]]
@@ -852,6 +892,15 @@ name = "pg_ffi_fgram"
 version = "0.0.0"
 dependencies = [
  "types_core",
+]
+
+[[package]]
+name = "pg_locale_seams"
+version = "0.1.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
 ]
 
 [[package]]
@@ -1049,6 +1098,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "procarray"
+version = "0.0.0"
+dependencies = [
+ "autovacuum_seams",
+ "condition_variable_seams",
+ "deadlock_seams",
+ "init_small",
+ "ipc_seams",
+ "latch_seams",
+ "lmgr_proc",
+ "lmgr_proc_seams",
+ "lock_seams",
+ "lwlock",
+ "mcx",
+ "miscinit_seams",
+ "pg_sema_seams",
+ "pmsignal_seams",
+ "procarray_seams",
+ "s_lock_seams",
+ "shmem_seams",
+ "subtrans_seams",
+ "syncrep_seams",
+ "timeout_seams",
+ "transam_seams",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_snapshot",
+ "types_storage",
+ "waitevent_seams",
+ "xact_seams",
+]
+
+[[package]]
 name = "procarray_seams"
 version = "0.0.0"
 dependencies = [
@@ -1087,6 +1170,13 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_error",
+]
+
+[[package]]
+name = "ps_status_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
 ]
 
 [[package]]
@@ -1180,6 +1270,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "resowner"
+version = "0.1.0"
+
+[[package]]
 name = "resowner_portal_seams"
 version = "0.0.0"
 dependencies = [
@@ -1194,6 +1288,9 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+ "types_resowner",
+ "types_snapshot",
+ "types_storage",
 ]
 
 [[package]]
@@ -1234,6 +1331,30 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_error",
+]
+
+[[package]]
+name = "sinval"
+version = "0.0.0"
+dependencies = [
+ "condition_variable_seams",
+ "elog",
+ "init_small",
+ "inval_seams",
+ "ipc_seams",
+ "latch",
+ "lmgr_proc",
+ "lwlock",
+ "pg_sema_seams",
+ "procsignal",
+ "s_lock_seams",
+ "shmem",
+ "shmem_seams",
+ "sinval_seams",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "xact_seams",
 ]
 
 [[package]]
@@ -1284,6 +1405,10 @@ dependencies = [
  "types_core",
  "types_error",
 ]
+
+[[package]]
+name = "snapmgr"
+version = "0.1.0"
 
 [[package]]
 name = "snapmgr_portal_seams"
@@ -1483,6 +1608,7 @@ name = "timeout_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_core",
  "types_error",
 ]
 
@@ -1729,6 +1855,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
+name = "varlena"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "detoast_seams",
+ "guc_tables",
+ "mbutils_seams",
+ "mcx",
+ "pg_locale_seams",
+ "pqformat",
+ "stringinfo",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
+]
+
+[[package]]
 name = "varsup_seams"
 version = "0.0.0"
 dependencies = [
@@ -1749,6 +1893,10 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
 ]
+
+[[package]]
+name = "waiteventset"
+version = "0.0.0"
 
 [[package]]
 name = "waiteventset_seams"
@@ -1860,6 +2008,22 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "xlogreader"
+version = "0.0.0"
+dependencies = [
+ "bufmgr_seams",
+ "crc32c",
+ "libc",
+ "mcx",
+ "rmgr",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "xlogreader_seams",
+ "xlogutils",
 ]
 
 [[package]]

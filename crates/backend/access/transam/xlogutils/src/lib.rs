@@ -315,7 +315,7 @@ pub fn XLogReadBufferForRedoExtended(
             bufmgr_seams::buffer_page_set_lsn::call(buf, lsn);
         }
 
-        bufmgr_seams::mark_buffer_dirty::call(buf);
+        bufmgr_seams::mark_buffer_dirty::call(buf)?;
 
         // Init forks bypass shared buffers at end of crash recovery.
         if forknum == ForkNumber::INIT_FORKNUM {
@@ -389,6 +389,7 @@ pub fn XLogReadBufferExtended(
             buffer = bufmgr_seams::extend_buffered_rel_to::call(
                 smgr,
                 forknum,
+                None,
                 bufmgr_seams::EB_PERFORMING_RECOVERY | bufmgr_seams::EB_SKIP_EXTENSION_LOCK,
                 blkno + 1,
                 mode,
@@ -399,7 +400,7 @@ pub fn XLogReadBufferExtended(
     if mode == ReadBufferMode::Normal {
         // PageIsNew without a lock: recovery has no concurrent writers.
         if bufmgr_seams::buffer_page_is_new::call(buffer) {
-            bufmgr_seams::release_buffer::call(buffer);
+            bufmgr_seams::release_buffer::call(buffer)?;
             log_invalid_page(rlocator, forknum, blkno, true)?;
             return Ok(InvalidBuffer);
         }

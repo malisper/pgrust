@@ -13,3 +13,13 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn standby_release_lock_tree<'a>(xid: TransactionId, subxids: &'a [TransactionId])
 );
+
+seam_core::seam!(
+    // LogAccessExclusiveLockPrepare() (standby.c).
+    pub fn log_access_exclusive_lock_prepare() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    // LogAccessExclusiveLock(dbOid, relOid) (standby.c).
+    pub fn log_access_exclusive_lock(db_oid: types_core::Oid, rel_oid: types_core::Oid) -> types_error::PgResult<()>
+);
