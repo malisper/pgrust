@@ -4,9 +4,11 @@
 pub mod compute;
 mod graph;
 mod init;
+pub mod scan_seam;
 mod inval;
 mod list;
 mod search;
+pub mod testing;
 #[cfg(test)]
 mod tests;
 
@@ -34,10 +36,7 @@ pub use search::{
 
 pub(crate) const NONE: u32 = u32::MAX;
 
-/// `CatCTup`. `keys[i]` is C's bare `Datum keys[]`: the scalar word for
-/// by-value kinds; for by-reference kinds a packed `(off << 32) | len` into
-/// `payload` (positive: the tuple image; negative: the copied key buffer) —
-/// C's pointer-into-the-cached-tuple, made realloc-proof.
+/// `CatCTup`; a by-ref key slot packs `(off << 32) | len` into `payload`.
 pub(crate) struct CatCTup {
     pub hash_value: u32,
     pub refcount: i32,
@@ -50,8 +49,7 @@ pub(crate) struct CatCTup {
     pub t_len: u32,
     pub t_self: ItemPointerData,
     pub t_tableoid: Oid,
-    /// Stable allocation in the cache context; entries move on slot-vec
-    /// growth, this never does (hit borrows point here).
+    /// Stable allocation; entries move on slot-vec growth, this never does.
     pub payload: *mut u8,
     pub payload_len: u32,
 }
@@ -104,8 +102,7 @@ pub(crate) struct CatCInProgress {
     pub dead: bool,
 }
 
-/// `CacheHdr` + `SysCache[]` + `catcache_in_progress_stack`. `caches` is
-/// indexed by syscache id (C's `SysCache[cacheId]`).
+/// `CacheHdr` + `SysCache[]` + in-progress stack; indexed by syscache id.
 pub(crate) struct CatCacheState<'mcx> {
     pub mcx: Mcx<'mcx>,
     pub caches: PgVec<'mcx, Option<CatCache<'mcx>>>,
@@ -116,11 +113,8 @@ pub(crate) struct CatCacheState<'mcx> {
 bind!(pub(crate) CatCacheStateTy => CatCacheState<'mcx>);
 
 thread_local! {
-    // UnsafeCell, not RefCell: SearchCatCache1 runs on every catalog lookup
-    // and the borrow-flag traffic is per-access overhead C does not pay
-    // (fabled #292, ~12% suite-wide). ManuallyDrop keeps the payload
-    // !needs_drop; the state lives for the backend's life like C's
-    // CacheMemoryContext statics.
+    // UnsafeCell, not RefCell: borrow-flag traffic on every catalog lookup
+    // is overhead C does not pay (fabled #292, ~12% suite-wide).
     static STATE: UnsafeCell<Option<ManuallyDrop<McxOwned<CatCacheStateTy>>>> =
         const { UnsafeCell::new(None) };
 }
@@ -157,35 +151,36 @@ fn state_init(slot: &mut Option<ManuallyDrop<McxOwned<CatCacheStateTy>>>) {
     *slot = Some(ManuallyDrop::new(owned));
 }
 
-/// Run `f` with `&mut` state — the borrow-flag-free analog of C reaching
-/// `CacheHdr`/`SysCache[]` through bare pointers.
+/// Run `f` with `&mut` state (C reaches `SysCache[]` through bare pointers).
 ///
 /// # Safety
 ///
-/// The `&mut` must not be re-entered while live: one single-threaded backend
-/// owns the thread-local, and every catcache operation confines its borrow
-/// to one `f` and drops it before any call that can re-enter the catcache
-/// (cache init, the miss scan, syscache callbacks, inval). A pure hit calls
-/// no seam and no foreign code inside `f`. The debug/Miri guard turns any
-/// violation into a panic.
+/// Never re-entered while a borrow is live: one single-threaded backend owns
+/// the thread-local; every operation confines its borrow to one `f` and
+/// drops it before any call that can re-enter (init, miss scan, callbacks).
+/// A pure hit calls no foreign code inside `f`. The debug/Miri guard turns
+/// any violation into a panic.
 #[inline(always)]
 pub(crate) fn with_state<R>(f: impl for<'mcx> FnOnce(&mut CatCacheState<'mcx>) -> R) -> R {
-    STATE.with(|cell| {
-        #[cfg(debug_assertions)]
-        let _guard = {
-            BORROW_DEPTH.with(|d| {
-                assert_eq!(d.get(), 0, "catcache state re-entered while a borrow is live");
-                d.set(1);
-            });
-            BorrowGuard
-        };
-        // SAFETY: single-statement, non-reentrant borrow (see above).
-        let slot = unsafe { &mut *cell.get() };
-        if slot.is_none() {
-            state_init(slot);
-        }
-        slot.as_mut().unwrap().with_mut(f)
-    })
+    // Tiny closure so LocalKey::with inlines to the TLS address; the probe
+    // body stays inlinable into callers (LocalKey::with outlines big
+    // closures, which cost the hit path an extra call frame).
+    let cell = STATE.with(|cell| cell as *const UnsafeCell<Option<ManuallyDrop<McxOwned<CatCacheStateTy>>>>);
+    #[cfg(debug_assertions)]
+    let _guard = {
+        BORROW_DEPTH.with(|d| {
+            assert_eq!(d.get(), 0, "catcache state re-entered while a borrow is live");
+            d.set(1);
+        });
+        BorrowGuard
+    };
+    // SAFETY: `cell` is this thread's own TLS slot, used only within this
+    // call; single-statement, non-reentrant borrow (see above).
+    let slot = unsafe { &mut *(*cell).get() };
+    if slot.is_none() {
+        state_init(slot);
+    }
+    slot.as_mut().unwrap().with_mut(f)
 }
 
 impl<'mcx> CatCacheState<'mcx> {
@@ -211,8 +206,6 @@ pub(crate) fn pack_ref(off: u32, len: u32) -> Datum {
     Datum::from_usize(((off as usize) << 32) | len as usize)
 }
 
-/// Borrow a stored by-reference key's payload slice.
-///
 /// # Safety
 /// `key` was written by `pack_ref` against this entry's live `payload`
 /// allocation (insert-time invariant: `off + len <= payload_len`).
@@ -257,8 +250,7 @@ pub(crate) fn compare_tuple(
     true
 }
 
-/// Allocate a stable payload buffer in the cache context (C's single palloc
-/// of the CatCTup + tuple image).
+/// Stable payload buffer in the cache context (C's palloc of the image).
 pub(crate) fn payload_alloc(mcx: Mcx<'_>, len: usize) -> NonNull<u8> {
     use mcx::Allocator;
     let layout = core::alloc::Layout::from_size_align(len.max(1), 8).unwrap();

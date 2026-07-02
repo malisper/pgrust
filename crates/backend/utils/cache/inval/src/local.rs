@@ -51,9 +51,9 @@ pub fn LocalExecuteInvalidationMessage(msg: &SharedInvalidationMessage) -> PgRes
         }
         SharedInvalidationMessage::Relmap(m) => {
             if m.dbId == InvalidOid {
-                relmapper_seams::relation_map_invalidate::call(true);
+                relmapper_seams::relation_map_invalidate::call(true)?;
             } else if m.dbId == my_database_id {
-                relmapper_seams::relation_map_invalidate::call(false);
+                relmapper_seams::relation_map_invalidate::call(false)?;
             }
         }
         SharedInvalidationMessage::Snapshot(m) => {

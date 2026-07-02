@@ -13,8 +13,6 @@ use crate::graph::{
 use crate::search::build_scan_keys;
 use crate::{pack_ref, payload_alloc, with_state, CATCACHE_MAXKEYS, NONE};
 
-/// A pinned `CatCList` (C returns `CatCList *` with `refcount++`). Release
-/// with [`ReleaseCatCacheList`].
 #[must_use]
 pub struct CatCList {
     cache_id: i32,
@@ -23,8 +21,6 @@ pub struct CatCList {
     pub ordered: bool,
 }
 
-/// One list member's tuple, borrowed from the pinned list (C reads
-/// `cl->members[i]->tuple` in place).
 pub struct MemberTuple<'a> {
     image: NonNull<u8>,
     t_len: u32,
@@ -139,8 +135,7 @@ fn compare_list_keys(
     true
 }
 
-/// The list-miss build (`SearchCatCacheList`'s PG_TRY body + finalize), with
-/// the in-progress stack guarding invalidation during the scan.
+/// The list-miss build (the C PG_TRY body + finalize).
 #[cold]
 fn build_list(
     cache_id: i32,
@@ -166,13 +161,12 @@ fn build_list(
     };
     debug_assert!(!in_progress_dead, "list build retry loop exited dead");
 
-    // Finalize: build the CatCList, copy the keys, link the members.
     let (slot, n_members) = with_state(|st| -> PgResult<(u32, i32)> {
         let mcx = st.mcx;
         let cache = st.cache(cache_id);
         let kinds = cache.cc_kind;
 
-        // CatCacheCopyKeys: own the by-ref search-key payloads.
+        /* CatCacheCopyKeys */
         let mut byref_len = 0usize;
         for i in 0..nkeys as usize {
             if matches!(kinds[i], CCFastKind::Name | CCFastKind::Text | CCFastKind::OidVector) {
@@ -240,9 +234,7 @@ fn build_list(
     Ok(CatCList { cache_id, slot, n_members, ordered })
 }
 
-/// The `do { scan } while (in_progress_ent.dead)` retry loop: scan the
-/// catalog, reuse-or-create one entry per matching tuple (temp refcount
-/// held), undo and retry if a concurrent invalidation killed the build.
+/// The `do { scan } while (in_progress_ent.dead)` retry loop.
 fn build_list_scan(
     cache_id: i32,
     nkeys: i32,
@@ -264,7 +256,7 @@ fn build_list_scan(
         let index_ok = crate::init::IndexScanOK(cache_id);
 
         let mut inner_err: Option<Box<types_error::PgError>> = None;
-        let ordered = genam_seams::systable_scan_catalog::call(
+        let ordered = crate::scan_seam::systable_scan_catalog::call(
             &relation,
             indexoid,
             index_ok,
@@ -308,8 +300,7 @@ fn build_list_scan(
     }
 }
 
-/// Find a usable existing entry for `ntp` (same hash + `t_self`, not dead /
-/// negative / already in a list) or create one; bump its temp refcount.
+/// Reuse a usable existing entry for `ntp` or create one; temp refcount++.
 fn reuse_or_create_member(cache_id: i32, ntp: &HeapTupleData<'_>) -> PgResult<u32> {
     let found = with_state(|st| {
         let cache = st.cache(cache_id);

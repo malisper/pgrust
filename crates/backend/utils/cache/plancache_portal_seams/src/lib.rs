@@ -3,3 +3,8 @@ seam_core::seam!(
     // the portal->stmts share of cplan->stmt_list alive (fabled #359).
     pub fn release_cached_plan(cplan: types_portal::CachedPlanHandle)
 );
+
+seam_core::seam!(
+    // InitPlanCache (plancache.c): registers plancache inval callbacks.
+    pub fn init_plan_cache() -> types_error::PgResult<()>
+);

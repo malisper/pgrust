@@ -82,6 +82,7 @@ fn install() {
         });
         relmapper_seams::relation_map_invalidate::set(|shared| {
             log(format!("relmap({shared})"));
+            Ok(())
         });
         smgr_seams::smgr_release_rel_locator::set(|rl| {
             log(format!("smgr({},{})", rl.locator.relNumber, rl.backend));

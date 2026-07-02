@@ -15,7 +15,7 @@ const DATABASEOID: i32 = 21;
 const INDEXRELID: i32 = 34;
 const OIDOID: Oid = 26;
 
-/// `CatalogCacheInitializeCache(cache)`. Must run with no state borrow held:
+/// `CatalogCacheInitializeCache`. Runs with no state borrow held:
 /// `table_open` reaches the relcache, which re-enters the catcache.
 pub(crate) fn catalog_cache_initialize_cache(cache_id: i32) -> PgResult<()> {
     let (reloid, nkeys, keyno) = with_state(|st| {
@@ -28,14 +28,16 @@ pub(crate) fn catalog_cache_initialize_cache(cache_id: i32) -> PgResult<()> {
 
     with_state(|st| -> PgResult<()> {
         let mcx = st.mcx;
-        // CreateTupleDescCopyConstr into CacheMemoryContext; set once for the
-        // backend's life, never rebuilt (catalog schemas are immutable), so
-        // the leaked &'static is honest.
+        // Set once for the backend's life, never rebuilt (catalog schemas
+        // are immutable), so the leak below is honest.
         let copied: TupleDescData<'_> = tupdesc::CreateTupleDescCopyConstr(mcx, relation.descr())?;
-        let leaked: &TupleDescData<'_> = mcx::alloc_leak_in(mcx, copied)?;
-        // SAFETY: `leaked` lives in the ManuallyDrop'd, never-reset
-        // CacheMemoryContext (crate::STATE); it is written once here and no
-        // path frees or rebuilds it, so extending to 'static is sound.
+        // Justified bare Box: the droppy descriptor header cannot live in a
+        // no-drop arena; the leak is C's never-freed CacheMemoryContext copy.
+        let leaked: &mut TupleDescData<'_> = Box::leak(Box::new(copied));
+        // SAFETY: the header is leaked and its inner allocations live in the
+        // ManuallyDrop'd, never-reset CacheMemoryContext (crate::STATE); it
+        // is written once here and no path frees or rebuilds it, so
+        // extending to 'static is sound.
         let td: &'static TupleDescData<'static> =
             unsafe { core::mem::transmute::<&TupleDescData<'_>, &'static TupleDescData<'static>>(leaked) };
 
@@ -77,7 +79,7 @@ pub fn InitCatCachePhase2(cache_id: i32, touch_index: bool) -> PgResult<()> {
             let c = st.cache(cache_id);
             (c.cc_reloid, c.cc_indexoid)
         });
-        // Lock the catalog before opening the index (deadlock avoidance).
+        /* lock the catalog before the index: deadlock avoidance */
         lmgr_seams::lock_relation_oid::call(reloid, AccessShareLock)?;
         let scratch = mcx::MemoryContext::new("InitCatCachePhase2");
         let idesc = indexam::index_open(scratch.mcx(), indexoid, AccessShareLock)?;

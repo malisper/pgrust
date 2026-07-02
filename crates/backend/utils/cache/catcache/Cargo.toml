@@ -18,10 +18,10 @@ hashfn = { path = "../../../../common/hashfn" }
 tupdesc = { path = "../../../access/common/tupdesc" }
 table = { path = "../../../access/table/table" }
 indexam = { path = "../../../access/index/indexam" }
-genam_seams = { path = "../../../access/index/genam_seams" }
 catcache_seams = { path = "../catcache_seams" }
 relcache_seams = { path = "../relcache_seams" }
 lmgr_seams = { path = "../../../storage/lmgr/lmgr_seams" }
 miscinit_seams = { path = "../../init/miscinit_seams" }
 init_small = { path = "../../init/init_small" }
 inval = { path = "../inval" }
+seam_core = { path = "../../../../_support/seam_core" }

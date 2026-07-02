@@ -42,8 +42,7 @@ impl<'mcx> CatCache<'mcx> {
         }
     }
 
-    /// `dlist_move_head` — O(1); already-at-head is the common case.
-    #[inline]
+        #[inline]
     pub(crate) fn ct_move_head(&mut self, bucket: usize, slot: u32) {
         if self.cc_bucket[bucket] == slot {
             return;
@@ -135,7 +134,6 @@ impl<'mcx> CatCache<'mcx> {
     }
 }
 
-/// `InitCatCache(id, reloid, indexoid, nkeys, key, nbuckets)`.
 pub fn InitCatCache(
     id: i32,
     reloid: Oid,
@@ -298,7 +296,7 @@ fn list_refcount(cache: &CatCache<'_>, cl: u32) -> i32 {
 }
 
 pub(crate) fn invalidate_one(st: &mut CatCacheState<'_>, cache_id: i32, hash_value: u32) {
-    // Invalidate *all* CatCLists (C: too hard to tell which are still correct).
+    /* Invalidate *all* CatCLists in this cache */
     let nlbuckets = st.cache(cache_id).cc_nlbuckets;
     for bi in 0..nlbuckets as usize {
         let mut cur = st.cache(cache_id).cc_lbucket[bi];
@@ -341,7 +339,6 @@ pub(crate) fn invalidate_one(st: &mut CatCacheState<'_>, cache_id: i32, hash_val
     }
 }
 
-/// `ResetCatalogCache(cache, debug_discard)`.
 pub(crate) fn reset_catalog_cache(st: &mut CatCacheState<'_>, cache_id: i32, debug_discard: bool) {
     let nlbuckets = st.cache(cache_id).cc_nlbuckets;
     for bi in 0..nlbuckets as usize {
@@ -422,13 +419,9 @@ pub fn CatalogCacheFlushCatalog(cat_id: Oid) -> PgResult<()> {
     Ok(())
 }
 
-/* ---- entry creation ---- */
-
-/// Read the varlena payload at `p` (short or 4-byte header; externals are
-/// rejected before entry creation).
-///
 /// # Safety
-/// `p` points at a live inline varlena image.
+/// `p` points at a live inline (short or 4-byte header) varlena image;
+/// externals are rejected before entry creation.
 pub(crate) unsafe fn varlena_payload(p: *const u8) -> (*const u8, usize) {
     let b = unsafe { *p };
     if b != 0x01 && (b & 0x01) == 0x01 {
@@ -441,10 +434,9 @@ pub(crate) unsafe fn varlena_payload(p: *const u8) -> (*const u8, usize) {
     }
 }
 
-/// `oidvector` element bytes (`hashoidvector` hashes `values, dim1 * 4`).
-///
 /// # Safety
-/// `p` points at a live, plain-storage (4-byte header) oidvector image.
+/// `p` points at a live, plain-storage (4-byte header) oidvector image;
+/// `hashoidvector` hashes `values, dim1 * 4` bytes.
 pub(crate) unsafe fn oidvector_elements(p: *const u8) -> (*const u8, usize) {
     let dim1 = unsafe { core::ptr::read_unaligned(p.add(16).cast::<i32>()) };
     (unsafe { p.add(24) }, dim1 as usize * 4)
@@ -460,8 +452,7 @@ pub(crate) unsafe fn name_payload(p: *const u8) -> (*const u8, usize) {
     (p, len)
 }
 
-/// Borrow one key column of `tuple` as a probe key (the
-/// `CatalogCacheComputeTupleHashValue` extraction).
+/// One key column of `tuple` as a borrowed probe key.
 pub(crate) fn tuple_key<'a>(
     kind: CCFastKind,
     tuple: &HeapTupleData<'a>,
@@ -508,9 +499,8 @@ pub(crate) fn compute_tuple_hash_value(
     compute_hash_value(kinds, nkeys, &keys)
 }
 
-/// `CatalogCacheCreateEntry` (positive): copy the tuple image into the cache
-/// context and point the key slots at it. Returns the entry slot, linked at
-/// its bucket head with refcount 0.
+/// `CatalogCacheCreateEntry` (positive): the entry slot is linked at its
+/// bucket head with refcount 0; keys point into the copied image.
 pub(crate) fn create_entry_positive(
     st: &mut CatCacheState<'_>,
     cache_id: i32,
@@ -518,7 +508,6 @@ pub(crate) fn create_entry_positive(
     hash_value: u32,
 ) -> PgResult<u32> {
     if ntp.has_external() {
-        // C: toast_flatten_tuple under the in-progress guard.
         panic!("catcache: toast_flatten_tuple not ported (unit backend-access-common-toast)");
     }
     let mcx = st.mcx;
@@ -574,8 +563,7 @@ pub(crate) fn create_entry_positive(
     Ok(slot)
 }
 
-/// `CatalogCacheCreateEntry` (negative): `CatCacheCopyKeys` into an owned
-/// payload buffer.
+/// `CatalogCacheCreateEntry` (negative): `CatCacheCopyKeys` into `payload`.
 pub(crate) fn create_entry_negative(
     st: &mut CatCacheState<'_>,
     cache_id: i32,
@@ -642,8 +630,6 @@ pub(crate) fn maybe_rehash(st: &mut CatCacheState<'_>, cache_id: i32) {
         rehash_cat_cache(mcx, cache);
     }
 }
-
-/* ---- in-progress stack ---- */
 
 pub(crate) fn push_in_progress(st: &mut CatCacheState<'_>, cache_id: i32, hash_value: u32, list: bool) {
     st.in_progress.push(CatCInProgress { cache_id, hash_value, list, dead: false });

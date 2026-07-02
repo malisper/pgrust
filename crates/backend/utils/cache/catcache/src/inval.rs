@@ -17,9 +17,8 @@ struct CacheProbe {
     cc_relisshared: bool,
 }
 
-/// `PrepareToInvalidateCacheTuple(relation, tuple, newtuple, function, ...)`
-/// with the per-catcache callback inverted into returned requests (one per
-/// `(*function)` invocation, plus the new tuple's when its hash differs).
+/// `PrepareToInvalidateCacheTuple`, the per-catcache callback inverted into
+/// returned requests.
 pub fn PrepareToInvalidateCacheTuple<'mcx>(
     mcx: Mcx<'mcx>,
     relation: &RelationData<'_>,
@@ -40,8 +39,7 @@ pub fn PrepareToInvalidateCacheTuple<'mcx>(
         n
     });
 
-    // Just in case a cache hasn't finished initialization yet (init re-enters
-    // the catcache; no borrow held).
+    /* just in case cache hasn't finished initialization yet */
     for &id in &matching[..n] {
         if !with_state(|st| st.cache(id).initialized) {
             crate::init::catalog_cache_initialize_cache(id)?;

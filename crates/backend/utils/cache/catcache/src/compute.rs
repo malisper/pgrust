@@ -33,8 +33,7 @@ pub const F_TEXTEQ: Oid = 67;
 pub const F_OIDEQ: Oid = 184;
 pub const F_OIDVECTOREQ: Oid = 679;
 
-/// The de-fmgr'd `(CCHashFN, CCFastEqualFN)` selection (C 18.3's fn-pointer
-/// pair, as a closed-set tag: rule-4 enum dispatch instead of indirect calls).
+/// C's `(CCHashFN, CCFastEqualFN)` fn-pointer pair as a closed-set tag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CCFastKind {
     Char,
@@ -45,10 +44,8 @@ pub enum CCFastKind {
     OidVector,
 }
 
-/// One search key of `SearchCatCache{,1..4}` — C's `Datum v1..v4`. By-value
-/// keys carry the scalar word; by-reference keys borrow the caller's payload
-/// (name: NUL-free bytes; text: detoasted payload; oidvector: element bytes) —
-/// C never copies a search key to hash/compare it (the #292 probe shape).
+/// One search key (C's `Datum v1..v4`); by-reference keys borrow the
+/// caller's payload — C never copies a search key to hash/compare it.
 #[derive(Clone, Copy, Debug)]
 pub enum CatCKey<'a> {
     Value(Datum),
