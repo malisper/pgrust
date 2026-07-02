@@ -89,8 +89,7 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // ReadBuffer(reln, blockNum): bufmgr reads what it needs (rd_smgr key,
-    // persistence) off the open Relation, as C does off the pointer in hand.
+    // ReadBuffer(reln, blockNum); the open Relation crosses whole, as C's pointer.
     pub fn read_buffer<'a, 'mcx>(
         rel: &'a types_rel::RelationData<'mcx>,
         block_num: BlockNumber,
@@ -110,7 +109,7 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // BufferGetPage(buffer): BLCKSZ bytes, valid while the buffer stays pinned.
+    // BufferGetPage: BLCKSZ bytes, valid while pinned.
     pub fn buffer_get_page(buffer: Buffer) -> core::ptr::NonNull<u8>
 );
 
@@ -119,7 +118,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // GetAccessStrategy (storage/buffer/freelist.c).
     pub fn get_access_strategy(
         btype: types_storage::buf::BufferAccessStrategyType,
     ) -> BufferAccessStrategy
