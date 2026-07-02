@@ -23,3 +23,72 @@ seam_core::seam!(
         consume: &mut dyn FnMut(&[types_storage::multixact::MultiXactMember]),
     ) -> PgResult<i32>
 );
+
+seam_core::seam!(
+    // MultiXactIdIsRunning(multi, isLockOnly) (multixact.c).
+    pub fn multi_xact_id_is_running(
+        multi: types_core::MultiXactId,
+        is_lock_only: bool,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    // StartupMultiXact() (multixact.c).
+    pub fn startup_multixact() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // TrimMultiXact() (multixact.c).
+    pub fn trim_multixact() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // CheckPointMultiXact() (multixact.c).
+    pub fn check_point_multixact() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // MultiXactSetNextMXact(nextMulti, nextMultiOffset) (multixact.c).
+    pub fn multixact_set_next_mxact(
+        next_multi: types_core::MultiXactId,
+        next_multi_offset: types_core::MultiXactOffset,
+    )
+);
+
+seam_core::seam!(
+    // SetMultiXactIdLimit(oldestMulti, oldestMultiDB, is_startup) (multixact.c).
+    pub fn set_multixact_id_limit(
+        oldest_multi: types_core::MultiXactId,
+        oldest_multi_db: types_core::Oid,
+        is_startup: bool,
+    )
+);
+
+seam_core::seam!(
+    // MultiXactAdvanceNextMXact(nextMulti, nextMultiOffset) (multixact.c).
+    pub fn multixact_advance_next_mxact(
+        next_multi: types_core::MultiXactId,
+        next_multi_offset: types_core::MultiXactOffset,
+    )
+);
+
+seam_core::seam!(
+    // MultiXactAdvanceOldest(oldestMulti, oldestMultiDB) (multixact.c).
+    pub fn multixact_advance_oldest(
+        oldest_multi: types_core::MultiXactId,
+        oldest_multi_db: types_core::Oid,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // MultiXactGetCheckptMulti(is_shutdown, ...) (multixact.c):
+    // (nextMulti, nextMultiOffset, oldestMulti, oldestMultiDB).
+    pub fn multixact_get_checkpt_multi(
+        is_shutdown: bool,
+    ) -> (
+        types_core::MultiXactId,
+        types_core::MultiXactOffset,
+        types_core::MultiXactId,
+        types_core::Oid,
+    )
+);

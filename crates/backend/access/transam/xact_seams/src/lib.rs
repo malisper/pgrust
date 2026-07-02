@@ -61,3 +61,13 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn is_transaction_state() -> bool
 );
+
+seam_core::seam!(
+    // MarkCurrentTransactionIdLoggedIfAny() (xact.c).
+    pub fn mark_current_transaction_id_logged_if_any()
+);
+
+seam_core::seam!(
+    // MarkSubxactTopXidLogged() (xact.c).
+    pub fn mark_subxact_top_xid_logged()
+);

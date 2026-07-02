@@ -1,0 +1,325 @@
+//! tableam.h/relscan.h vocabulary + block parallel-scan helpers, hoisted
+//! below the heap AM crates so tableam -> heapam_handler -> heapam is acyclic.
+
+#![allow(non_snake_case)]
+#![allow(non_camel_case_types)]
+#![allow(non_upper_case_globals)]
+
+use core::ptr::NonNull;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::cell::Cell;
+use std::rc::Rc;
+
+use ::mcx::PgVec;
+use ::types_core::primitive::{
+    BlockNumber, InvalidBlockNumber, MaxBlockNumber, OffsetNumber, Oid, TransactionId,
+};
+use ::types_core::xact::CommandId;
+use ::types_error::PgResult;
+use ::types_rel::Relation;
+use ::types_scan::scankey::ScanKeyData;
+use ::types_snapshot::SnapshotData;
+use ::types_storage::{RelFileLocator, Spinlock};
+use ::types_tuple::ItemPointerData;
+
+pub const SO_TYPE_SEQSCAN: u32 = 1 << 0;
+pub const SO_TYPE_BITMAPSCAN: u32 = 1 << 1;
+pub const SO_TYPE_SAMPLESCAN: u32 = 1 << 2;
+pub const SO_TYPE_TIDSCAN: u32 = 1 << 3;
+pub const SO_TYPE_TIDRANGESCAN: u32 = 1 << 4;
+pub const SO_TYPE_ANALYZE: u32 = 1 << 5;
+pub const SO_ALLOW_STRAT: u32 = 1 << 6;
+pub const SO_ALLOW_SYNC: u32 = 1 << 7;
+pub const SO_ALLOW_PAGEMODE: u32 = 1 << 8;
+pub const SO_TEMP_SNAPSHOT: u32 = 1 << 9;
+
+pub const TABLE_INSERT_SKIP_FSM: i32 = 0x0002;
+pub const TABLE_INSERT_FROZEN: i32 = 0x0004;
+pub const TABLE_INSERT_NO_LOGICAL: i32 = 0x0008;
+
+pub const TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS: u8 = 1 << 0;
+pub const TUPLE_LOCK_FLAG_FIND_LAST_VERSION: u8 = 1 << 1;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum TM_Result {
+    TM_Ok = 0,
+    TM_Invisible,
+    TM_SelfModified,
+    TM_Updated,
+    TM_Deleted,
+    TM_BeingModified,
+    TM_WouldBlock,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum TU_UpdateIndexes {
+    TU_None = 0,
+    TU_All,
+    TU_Summarizing,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum LockTupleMode {
+    LockTupleKeyShare = 0,
+    LockTupleShare,
+    LockTupleNoKeyExclusive,
+    LockTupleExclusive,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum LockWaitPolicy {
+    LockWaitBlock = 0,
+    LockWaitSkip,
+    LockWaitError,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TM_FailureData {
+    pub ctid: ItemPointerData,
+    pub xmax: TransactionId,
+    pub cmax: CommandId,
+    pub traversed: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TM_IndexDelete {
+    pub tid: ItemPointerData,
+    pub id: i16,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TM_IndexStatus {
+    pub idxoffnum: OffsetNumber,
+    pub knowndeletable: bool,
+    pub promising: bool,
+    pub freespace: i16,
+}
+
+pub struct TM_IndexDeleteOp<'mcx> {
+    pub irel: Relation<'mcx>,
+    pub iblknum: BlockNumber,
+    pub bottomup: bool,
+    pub bottomupfreespace: i32,
+    pub ndeltids: i32,
+    pub deltids: PgVec<'mcx, TM_IndexDelete>,
+    pub status: PgVec<'mcx, TM_IndexStatus>,
+}
+
+// C `Snapshot`: None is InvalidSnapshot/SnapshotAny; Rc = snapmgr's refcount (rule 2.3).
+pub type Snapshot<'mcx> = Option<Rc<SnapshotData<'mcx>>>;
+
+// relscan.h TableScanDescData: the rs_base every AM scan state embeds.
+pub struct TableScanDescData<'mcx> {
+    pub rs_rd: Relation<'mcx>,
+    pub rs_snapshot: Snapshot<'mcx>,
+    pub rs_nkeys: i32,
+    pub rs_key: PgVec<'mcx, ScanKeyData>,
+    pub rs_mintid: ItemPointerData,
+    pub rs_maxtid: ItemPointerData,
+    pub rs_flags: u32,
+    pub rs_parallel: Option<NonNull<ParallelBlockTableScanDescData>>,
+    // Rule-4 carrier, resolved once at scan_begin (SET ACCESS METHOD is
+    // AccessExclusiveLock: it cannot change under a live scan).
+    pub rs_am: TableAm,
+}
+
+pub struct ParallelBlockTableScanDescData {
+    pub phs_locator: RelFileLocator,
+    pub phs_syncscan: bool,
+    pub phs_snapshot_any: bool,
+    pub phs_snapshot_off: usize,
+    pub phs_nblocks: BlockNumber,
+    pub phs_mutex: Spinlock,
+    // Written only under phs_mutex, then read lock-free (C reads it plain).
+    pub phs_startblock: AtomicU32,
+    pub phs_nallocated: AtomicU64,
+}
+
+#[derive(Debug, Default)]
+pub struct ParallelBlockTableScanWorkerData {
+    pub phsw_nallocated: u64,
+    pub phsw_chunk_remaining: u32,
+    pub phsw_chunk_size: u32,
+}
+
+// hio.h BulkInsertStateData, opaque until backend-access-heap-hio lands.
+pub struct BulkInsertStateData {
+    _opaque: (),
+}
+
+// tsmapi.h sample capability; an OPEN extension point in C, so dyn is faithful.
+pub trait SampleScanDriver {
+    fn has_next_sample_block(&self) -> bool;
+    fn next_sample_block(&mut self, nblocks: BlockNumber) -> BlockNumber;
+    fn next_sample_tuple(&mut self, blockno: BlockNumber, maxoffset: OffsetNumber)
+        -> OffsetNumber;
+}
+
+pub const HEAP_TABLE_AM_OID: Oid = 2;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TableAm {
+    Heap,
+}
+
+impl TableAm {
+    #[inline]
+    pub fn of(relation: &Relation<'_>) -> Option<TableAm> {
+        match relation.rd_rel.relam {
+            HEAP_TABLE_AM_OID => Some(TableAm::Heap),
+            _ => None,
+        }
+    }
+}
+
+thread_local! {
+    static SYNCHRONIZE_SEQSCANS_GUC: Cell<bool> = const { Cell::new(true) };
+}
+
+pub fn synchronize_seqscans() -> bool {
+    SYNCHRONIZE_SEQSCANS_GUC.with(Cell::get)
+}
+
+pub fn set_synchronize_seqscans(value: bool) {
+    SYNCHRONIZE_SEQSCANS_GUC.with(|v| v.set(value));
+}
+
+const PARALLEL_SEQSCAN_NCHUNKS: u32 = 2048;
+const PARALLEL_SEQSCAN_RAMPDOWN_CHUNKS: u32 = 64;
+const PARALLEL_SEQSCAN_MAX_CHUNK_SIZE: u32 = 8192;
+
+// pg_bitutils.h pg_nextpower2_32; valid for num in [1, 2^31].
+pub fn pg_nextpower2_32(num: u32) -> u32 {
+    debug_assert!(num > 0);
+    if num & num.wrapping_sub(1) == 0 {
+        return num;
+    }
+    1u32 << (31 - num.leading_zeros() + 1)
+}
+
+struct SpinLockGuard<'a> {
+    lock: &'a Spinlock,
+}
+
+impl<'a> SpinLockGuard<'a> {
+    fn acquire(lock: &'a Spinlock) -> Self {
+        if lock.tas() != 0 {
+            let mut delay =
+                s_lock_seams::SpinDelayStatus::new(file!(), line!() as i32, "phs_mutex");
+            while lock.tas_spin() != 0 {
+                s_lock_seams::perform_spin_delay::call(&mut delay);
+            }
+            s_lock_seams::finish_spin_delay::call(&delay);
+        }
+        SpinLockGuard { lock }
+    }
+}
+
+impl Drop for SpinLockGuard<'_> {
+    fn drop(&mut self) {
+        self.lock.unlock();
+    }
+}
+
+pub fn table_block_parallelscan_startblock_init(
+    rel: &Relation<'_>,
+    pbscanwork: &mut ParallelBlockTableScanWorkerData,
+    pbscan: &ParallelBlockTableScanDescData,
+) -> PgResult<()> {
+    let mut sync_startpage: BlockNumber = InvalidBlockNumber;
+
+    *pbscanwork = ParallelBlockTableScanWorkerData::default();
+
+    const _: () = assert!(
+        MaxBlockNumber <= 0xFFFF_FFFE,
+        "pg_nextpower2_32 may be too small for non-standard BlockNumber width"
+    );
+
+    pbscanwork.phsw_chunk_size = pg_nextpower2_32(core::cmp::max(
+        pbscan.phs_nblocks / PARALLEL_SEQSCAN_NCHUNKS,
+        1,
+    ));
+    pbscanwork.phsw_chunk_size =
+        core::cmp::min(pbscanwork.phsw_chunk_size, PARALLEL_SEQSCAN_MAX_CHUNK_SIZE);
+
+    loop {
+        let guard = SpinLockGuard::acquire(&pbscan.phs_mutex);
+
+        // First worker sets startblock; syncscan probes without the lock, retries.
+        if pbscan.phs_startblock.load(Ordering::Relaxed) == InvalidBlockNumber {
+            if !pbscan.phs_syncscan {
+                pbscan.phs_startblock.store(0, Ordering::Relaxed);
+            } else if sync_startpage != InvalidBlockNumber {
+                pbscan
+                    .phs_startblock
+                    .store(sync_startpage, Ordering::Relaxed);
+            } else {
+                drop(guard);
+                sync_startpage = syncscan_seams::ss_get_location::call(rel, pbscan.phs_nblocks)?;
+                continue; // goto retry
+            }
+        }
+        drop(guard);
+        break;
+    }
+
+    Ok(())
+}
+
+pub fn table_block_parallelscan_nextpage(
+    rel: &Relation<'_>,
+    pbscanwork: &mut ParallelBlockTableScanWorkerData,
+    pbscan: &ParallelBlockTableScanDescData,
+) -> PgResult<BlockNumber> {
+    let nallocated: u64;
+
+    if pbscanwork.phsw_chunk_remaining > 0 {
+        pbscanwork.phsw_nallocated = pbscanwork.phsw_nallocated.wrapping_add(1);
+        nallocated = pbscanwork.phsw_nallocated;
+        pbscanwork.phsw_chunk_remaining = pbscanwork.phsw_chunk_remaining.wrapping_sub(1);
+    } else {
+        // Rampdown near scan end; C wraps in 32-bit BlockNumber arithmetic.
+        if pbscanwork.phsw_chunk_size > 1
+            && pbscanwork.phsw_nallocated
+                > pbscan.phs_nblocks.wrapping_sub(
+                    pbscanwork
+                        .phsw_chunk_size
+                        .wrapping_mul(PARALLEL_SEQSCAN_RAMPDOWN_CHUNKS),
+                ) as u64
+        {
+            pbscanwork.phsw_chunk_size >>= 1;
+        }
+
+        pbscanwork.phsw_nallocated = pbscan
+            .phs_nallocated
+            .fetch_add(pbscanwork.phsw_chunk_size as u64, Ordering::SeqCst);
+        nallocated = pbscanwork.phsw_nallocated;
+
+        pbscanwork.phsw_chunk_remaining = pbscanwork.phsw_chunk_size.wrapping_sub(1);
+    }
+
+    let phs_startblock = pbscan.phs_startblock.load(Ordering::Relaxed);
+
+    let page: BlockNumber = if nallocated >= pbscan.phs_nblocks as u64 {
+        InvalidBlockNumber // all blocks have been allocated
+    } else {
+        (nallocated
+            .wrapping_add(phs_startblock as u64)
+            .wrapping_rem(pbscan.phs_nblocks as u64)) as BlockNumber
+    };
+
+    // At end-of-scan report the STARTING page so later starts don't slew back.
+    if pbscan.phs_syncscan {
+        if page != InvalidBlockNumber {
+            syncscan_seams::ss_report_location::call(rel, page)?;
+        } else if nallocated == pbscan.phs_nblocks as u64 {
+            syncscan_seams::ss_report_location::call(rel, phs_startblock)?;
+        }
+    }
+
+    Ok(page)
+}

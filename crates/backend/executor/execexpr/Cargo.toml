@@ -1,0 +1,25 @@
+[package]
+name = "execexpr"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+exectuples = { path = "../exectuples" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+
+[dev-dependencies]
+adt_int = { path = "../../utils/adt/int" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }

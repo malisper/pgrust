@@ -27,3 +27,23 @@ seam_core::seam!(
         history: &[TimeLineHistoryEntry],
     ) -> (XLogRecPtr, TimeLineID)
 );
+
+seam_core::seam!(
+    // restoreTimeLineHistoryFiles(begin, end) (timeline.c).
+    pub fn restore_timeline_history_files(begin: TimeLineID, end: TimeLineID) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // findNewestTimeLine(startTLI) (timeline.c).
+    pub fn find_newest_timeline(start_tli: TimeLineID) -> PgResult<TimeLineID>
+);
+
+seam_core::seam!(
+    // writeTimeLineHistory(newTLI, parentTLI, switchpoint, reason) (timeline.c).
+    pub fn write_timeline_history<'a>(
+        new_tli: TimeLineID,
+        parent_tli: TimeLineID,
+        switchpoint: XLogRecPtr,
+        reason: &'a str,
+    ) -> PgResult<()>
+);

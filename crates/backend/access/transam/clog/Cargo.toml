@@ -1,0 +1,50 @@
+[package]
+name = "clog"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "clog"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+elog = { path = "../../../utils/error/elog" }
+init_small = { path = "../../../utils/init/init_small" }
+guc = { path = "../../../utils/misc/guc" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+guc_seams = { path = "../../../utils/misc/guc_seams" }
+lwlock = { path = "../../../storage/lmgr/lwlock" }
+lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
+lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
+slru = { path = "../slru" }
+varsup_seams = { path = "../varsup_seams" }
+transam_xlog_seams = { path = "../transam_xlog_seams" }
+xloginsert_seams = { path = "../xloginsert_seams" }
+xlogutils_seams = { path = "../xlogutils_seams" }
+xlogreader_seams = { path = "../xlogreader_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+
+[dev-dependencies]
+libc = "0.2"
+shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
+file_seams = { path = "../../../storage/file/file_seams" }
+sync_seams = { path = "../../../storage/sync/sync_seams" }
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+pg_sema_seams = { path = "../../../port/pg_sema_seams" }
+s_lock_seams = { path = "../../../storage/lmgr/s_lock_seams" }
+latch_seams = { path = "../../../storage/ipc/latch_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
+deadlock_seams = { path = "../../../storage/lmgr/deadlock_seams" }
+pmsignal_seams = { path = "../../../storage/ipc/pmsignal_seams" }
+syncrep_seams = { path = "../../../replication/syncrep_seams" }
+condition_variable_seams = { path = "../../../storage/lmgr/condition_variable_seams" }
+autovacuum_seams = { path = "../../../postmaster/autovacuum_seams" }
+lock_seams = { path = "../../../storage/lmgr/lock_seams" }
+timeout_seams = { path = "../../../utils/misc/timeout_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }

@@ -131,6 +131,8 @@ fn make<'mcx>(mcx: Mcx<'mcx>, oid: Oid, name: &str, relkind: u8, relam: Oid) -> 
         rd_indcollation: PgVec::new_in(mcx),
         rd_options: None,
         pgstat_enabled: Cell::new(false),
+        rd_amcache: Default::default(),
+        rd_supportinfo: Default::default(),
     };
     Relation::open(data, Some(record_close))
 }
@@ -248,11 +250,12 @@ fn concurrent_abort_error_shape() {
     xact::SetCheckXidAlive(0);
 }
 
-// Both scan arms end at the correct unported layer: the heap arm at the
-// heapam-handler unit, the index arm at nbtree's btbeginscan.
+// Both scan arms end at the correct layer: the heap arm runs the real heapam
+// read lane and stops at the first backend seam this crate leaves uninstalled
+// (predicate locking), the index arm at nbtree's btbeginscan.
 #[test]
-#[should_panic(expected = "backend-access-heap-heapam-handler")]
-fn beginscan_heap_arm_stops_at_heapam_handler() {
+#[should_panic(expected = "seam not installed: predicate_seams::predicate_lock_relation")]
+fn beginscan_heap_arm_runs_real_read_lane() {
     install();
     let cx = MemoryContext::new("test");
     let mcx = cx.mcx();
@@ -295,6 +298,13 @@ fn ignore_system_indexes_forces_the_heap_arm() {
     }));
     miscinit::SetIgnoreSystemIndexes(false);
 
-    let msg = *r.unwrap_err().downcast::<String>().unwrap();
-    assert!(msg.contains("backend-access-heap-heapam-handler"), "{msg}");
+    let err = r.unwrap_err();
+    // Forced heap arm now runs real heap_beginscan; it stops at the first
+    // uninstalled backend seam rather than an unported-handler panic.
+    let msg = err
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| err.downcast_ref::<&'static str>().copied())
+        .unwrap();
+    assert!(msg.contains("predicate_lock_relation"), "{msg}");
 }

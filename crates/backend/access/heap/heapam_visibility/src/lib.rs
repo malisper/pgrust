@@ -1,0 +1,1090 @@
+#![allow(non_snake_case)]
+
+use ::heapam::HeapTupleGetUpdateXid;
+use ::procarray::TransactionIdIsInProgress;
+use ::snapmgr::XidInMVCCSnapshot;
+use ::tableam::TM_Result::{self, *};
+use ::types_core::xact::{InvalidTransactionId, TransactionIdIsValid, TransactionIdPrecedes};
+use ::types_core::{Buffer, CommandId, GlobalVisStateHandle, InvalidOid, TransactionId};
+use ::types_error::PgResult;
+use ::types_snapshot::HTSV_Result::{self, *};
+use ::types_snapshot::SnapshotData;
+use ::types_snapshot::SnapshotType::*;
+use ::types_tuple::{
+    HeapTupleData, HeapTupleHeaderData, ItemPointerEquals, ItemPointerIsValid,
+    HEAP_LOCKED_UPGRADED, HEAP_MOVED_IN, HEAP_MOVED_OFF, HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID,
+    HEAP_XMAX_IS_LOCKED_ONLY, HEAP_XMAX_IS_MULTI, HEAP_XMAX_LOCK_ONLY, HEAP_XMIN_COMMITTED,
+    HEAP_XMIN_INVALID,
+};
+use ::xact::TransactionIdIsCurrentTransactionId;
+
+#[cfg(test)]
+mod tests;
+
+#[cold]
+#[inline(never)]
+fn unported(unit: &'static str) -> ! {
+    panic!("backend-access-heap-heapam-visibility reached unported unit: {unit}")
+}
+
+// Seamed while transam.c is in flight; collapse to a direct dep when it lands.
+#[inline]
+fn TransactionIdDidCommit(xid: TransactionId) -> PgResult<bool> {
+    transam_seams::transaction_id_did_commit::call(xid)
+}
+
+#[inline]
+fn HeapTupleHeaderGetCmin(tuple: &HeapTupleHeaderData) -> CommandId {
+    combocid_seams::heap_tuple_header_get_cmin::call(tuple)
+}
+
+#[inline]
+fn HeapTupleHeaderGetCmax(tuple: &HeapTupleHeaderData) -> CommandId {
+    combocid_seams::heap_tuple_header_get_cmax::call(tuple)
+}
+
+#[inline]
+fn MultiXactIdIsRunning(multi: TransactionId, is_lock_only: bool) -> PgResult<bool> {
+    multixact_seams::multi_xact_id_is_running::call(multi, is_lock_only)
+}
+
+fn SetHintBits(
+    tuple: &mut HeapTupleHeaderData,
+    buffer: Buffer,
+    infomask: u16,
+    xid: TransactionId,
+) -> PgResult<()> {
+    if TransactionIdIsValid(xid) {
+        /* NB: xid must be known committed here! */
+        let commit_lsn = transam_seams::transaction_id_get_commit_lsn::call(xid)?;
+
+        if bufmgr_seams::buffer_is_permanent::call(buffer)
+            && transam_xlog_seams::xlog_needs_flush::call(commit_lsn)
+            && bufmgr_seams::buffer_get_lsn_atomic::call(buffer) < commit_lsn
+        {
+            /* not flushed and no LSN interlock, so don't set hint */
+            return Ok(());
+        }
+    }
+
+    tuple.t_infomask |= infomask;
+    bufmgr_seams::mark_buffer_dirty_hint::call(buffer, true)
+}
+
+pub fn HeapTupleSetHintBits(
+    tuple: &mut HeapTupleHeaderData,
+    buffer: Buffer,
+    infomask: u16,
+    xid: TransactionId,
+) -> PgResult<()> {
+    SetHintBits(tuple, buffer, infomask, xid)
+}
+
+pub fn HeapTupleSatisfiesSelf(htup: &mut HeapTupleData<'_>, buffer: Buffer) -> PgResult<bool> {
+    debug_assert!(ItemPointerIsValid(&htup.t_self));
+    debug_assert!(htup.t_tableOid != InvalidOid);
+    let tuple = htup.t_data_mut();
+
+    if !tuple.xmin_committed() {
+        if tuple.xmin_invalid() {
+            return Ok(false);
+        }
+
+        if (tuple.t_infomask & HEAP_MOVED_OFF) != 0 {
+            let xvac = tuple.xvac();
+
+            if TransactionIdIsCurrentTransactionId(xvac) {
+                return Ok(false);
+            }
+            if !TransactionIdIsInProgress(xvac)? {
+                if TransactionIdDidCommit(xvac)? {
+                    SetHintBits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId)?;
+                    return Ok(false);
+                }
+                SetHintBits(tuple, buffer, HEAP_XMIN_COMMITTED, InvalidTransactionId)?;
+            }
+        } else if (tuple.t_infomask & HEAP_MOVED_IN) != 0 {
+            let xvac = tuple.xvac();
+
+            if !TransactionIdIsCurrentTransactionId(xvac) {
+                if TransactionIdIsInProgress(xvac)? {
+                    return Ok(false);
+                }
+                if TransactionIdDidCommit(xvac)? {
+                    SetHintBits(tuple, buffer, HEAP_XMIN_COMMITTED, InvalidTransactionId)?;
+                } else {
+                    SetHintBits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId)?;
+                    return Ok(false);
+                }
+            }
+        } else if TransactionIdIsCurrentTransactionId(tuple.xmin_raw()) {
+            if (tuple.t_infomask & HEAP_XMAX_INVALID) != 0 {
+                return Ok(true);
+            }
+
+            if HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask) {
+                return Ok(true);
+            }
+
+            if (tuple.t_infomask & HEAP_XMAX_IS_MULTI) != 0 {
+                let xmax = HeapTupleGetUpdateXid(tuple)?;
+
+                debug_assert!(TransactionIdIsValid(xmax));
+
+                /* updating subtransaction must have aborted */
+                return Ok(!TransactionIdIsCurrentTransactionId(xmax));
+            }
+
+            if !TransactionIdIsCurrentTransactionId(tuple.xmax_raw()) {
+                /* deleting subtransaction must have aborted */
+                SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId)?;
+                return Ok(true);
+            }
+
+            return Ok(false);
+        } else if TransactionIdIsInProgress(tuple.xmin_raw())? {
+            return Ok(false);
+        } else if TransactionIdDidCommit(tuple.xmin_raw())? {
+            let raw_xmin = tuple.xmin_raw();
+            SetHintBits(tuple, buffer, HEAP_XMIN_COMMITTED, raw_xmin)?;
+        } else {
+            /* it must have aborted or crashed */
+            SetHintBits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId)?;
+            return Ok(false);
+        }
+    }
+
+    /* by here, the inserting transaction has committed */
+
+    if (tuple.t_infomask & HEAP_XMAX_INVALID) != 0 {
+        return Ok(true);
+    }
+
+    if (tuple.t_infomask & HEAP_XMAX_COMMITTED) != 0 {
+        return Ok(HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask));
+    }
+
+    if (tuple.t_infomask & HEAP_XMAX_IS_MULTI) != 0 {
+        if HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask) {
+            return Ok(true);
+        }
+
+        let xmax = HeapTupleGetUpdateXid(tuple)?;
+
+        debug_assert!(TransactionIdIsValid(xmax));
+
+        if TransactionIdIsCurrentTransactionId(xmax) {
+            return Ok(false);
+        }
+        if TransactionIdIsInProgress(xmax)? {
+            return Ok(true);
+        }
+        if TransactionIdDidCommit(xmax)? {
+            return Ok(false);
+        }
+        return Ok(true);
+    }
+
+    if TransactionIdIsCurrentTransactionId(tuple.xmax_raw()) {
+        return Ok(HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask));
+    }
+
+    if TransactionIdIsInProgress(tuple.xmax_raw())? {
+        return Ok(true);
+    }
+
+    if !TransactionIdDidCommit(tuple.xmax_raw())? {
+        SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId)?;
+        return Ok(true);
+    }
+
+    /* xmax transaction committed */
+
+    if HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask) {
+        SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId)?;
+        return Ok(true);
+    }
+
+    let raw_xmax = tuple.xmax_raw();
+    SetHintBits(tuple, buffer, HEAP_XMAX_COMMITTED, raw_xmax)?;
+    Ok(false)
+}
+
+pub fn HeapTupleSatisfiesAny(_htup: &mut HeapTupleData<'_>, _buffer: Buffer) -> PgResult<bool> {
+    Ok(true)
+}
+
+pub fn HeapTupleSatisfiesToast(htup: &mut HeapTupleData<'_>, buffer: Buffer) -> PgResult<bool> {
+    debug_assert!(ItemPointerIsValid(&htup.t_self));
+    debug_assert!(htup.t_tableOid != InvalidOid);
+    let tuple = htup.t_data_mut();
+
+    if !tuple.xmin_committed() {
+        if tuple.xmin_invalid() {
+            return Ok(false);
+        }
+
+        if (tuple.t_infomask & HEAP_MOVED_OFF) != 0 {
+            let xvac = tuple.xvac();
+
+            if TransactionIdIsCurrentTransactionId(xvac) {
+                return Ok(false);
+            }
+            if !TransactionIdIsInProgress(xvac)? {
+                if TransactionIdDidCommit(xvac)? {
+                    SetHintBits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId)?;
+                    return Ok(false);
+                }
+                SetHintBits(tuple, buffer, HEAP_XMIN_COMMITTED, InvalidTransactionId)?;
+            }
+        } else if (tuple.t_infomask & HEAP_MOVED_IN) != 0 {
+            let xvac = tuple.xvac();
+
+            if !TransactionIdIsCurrentTransactionId(xvac) {
+                if TransactionIdIsInProgress(xvac)? {
+                    return Ok(false);
+                }
+                if TransactionIdDidCommit(xvac)? {
+                    SetHintBits(tuple, buffer, HEAP_XMIN_COMMITTED, InvalidTransactionId)?;
+                } else {
+                    SetHintBits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId)?;
+                    return Ok(false);
+                }
+            }
+        } else if !TransactionIdIsValid(tuple.xmin()) {
+            /* invalid xmin left by a canceled (super-deleted) speculative insertion */
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+pub fn HeapTupleSatisfiesUpdate(
+    htup: &mut HeapTupleData<'_>,
+    curcid: CommandId,
+    buffer: Buffer,
+) -> PgResult<TM_Result> {
+    debug_assert!(ItemPointerIsValid(&htup.t_self));
+    debug_assert!(htup.t_tableOid != InvalidOid);
+    let t_self = htup.t_self;
+    let tuple = htup.t_data_mut();
+
+    if !tuple.xmin_committed() {
+        if tuple.xmin_invalid() {
+            return Ok(TM_Invisible);
+        }
+
+        if (tuple.t_infomask & HEAP_MOVED_OFF) != 0 {
+            let xvac = tuple.xvac();
+
+            if TransactionIdIsCurrentTransactionId(xvac) {
+                return Ok(TM_Invisible);
+            }
+            if !TransactionIdIsInProgress(xvac)? {
+                if TransactionIdDidCommit(xvac)? {
+                    SetHintBits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId)?;
+                    return Ok(TM_Invisible);
+                }
+                SetHintBits(tuple, buffer, HEAP_XMIN_COMMITTED, InvalidTransactionId)?;
+            }
+        } else if (tuple.t_infomask & HEAP_MOVED_IN) != 0 {
+            let xvac = tuple.xvac();
+
+            if !TransactionIdIsCurrentTransactionId(xvac) {
+                if TransactionIdIsInProgress(xvac)? {
+                    return Ok(TM_Invisible);
+                }
+                if TransactionIdDidCommit(xvac)? {
+                    SetHintBits(tuple, buffer, HEAP_XMIN_COMMITTED, InvalidTransactionId)?;
+                } else {
+                    SetHintBits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId)?;
+                    return Ok(TM_Invisible);
+                }
+            }
+        } else if TransactionIdIsCurrentTransactionId(tuple.xmin_raw()) {
+            if HeapTupleHeaderGetCmin(tuple) >= curcid {
+                return Ok(TM_Invisible); /* inserted after scan started */
+            }
+
+            if (tuple.t_infomask & HEAP_XMAX_INVALID) != 0 {
+                return Ok(TM_Ok);
+            }
+
+            if HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask) {
+                let xmax = tuple.xmax_raw();
+
+                // Our own tuple may be locked by others: a key-share lock on
+                // the prior version carries over on update.
+                if (tuple.t_infomask & HEAP_XMAX_IS_MULTI) != 0 {
+                    if MultiXactIdIsRunning(xmax, true)? {
+                        return Ok(TM_BeingModified);
+                    }
+                    return Ok(TM_Ok);
+                }
+
+                if !TransactionIdIsInProgress(xmax)? {
+                    return Ok(TM_Ok);
+                }
+                return Ok(TM_BeingModified);
+            }
+
+            if (tuple.t_infomask & HEAP_XMAX_IS_MULTI) != 0 {
+                let xmax = HeapTupleGetUpdateXid(tuple)?;
+
+                debug_assert!(TransactionIdIsValid(xmax));
+
+                if !TransactionIdIsCurrentTransactionId(xmax) {
+                    /* deleting subtransaction must have aborted */
+                    if MultiXactIdIsRunning(tuple.xmax_raw(), false)? {
+                        return Ok(TM_BeingModified);
+                    }
+                    return Ok(TM_Ok);
+                } else if HeapTupleHeaderGetCmax(tuple) >= curcid {
+                    return Ok(TM_SelfModified); /* updated after scan started */
+                } else {
+                    return Ok(TM_Invisible); /* updated before scan started */
+                }
+            }
+
+            if !TransactionIdIsCurrentTransactionId(tuple.xmax_raw()) {
+                /* deleting subtransaction must have aborted */
+                SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId)?;
+                return Ok(TM_Ok);
+            }
+
+            if HeapTupleHeaderGetCmax(tuple) >= curcid {
+                return Ok(TM_SelfModified);
+            } else {
+                return Ok(TM_Invisible);
+            }
+        } else if TransactionIdIsInProgress(tuple.xmin_raw())? {
+            return Ok(TM_Invisible);
+        } else if TransactionIdDidCommit(tuple.xmin_raw())? {
+            let raw_xmin = tuple.xmin_raw();
+            SetHintBits(tuple, buffer, HEAP_XMIN_COMMITTED, raw_xmin)?;
+        } else {
+            SetHintBits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId)?;
+            return Ok(TM_Invisible);
+        }
+    }
+
+    /* by here, the inserting transaction has committed */
+
+    if (tuple.t_infomask & HEAP_XMAX_INVALID) != 0 {
+        return Ok(TM_Ok);
+    }
+
+    if (tuple.t_infomask & HEAP_XMAX_COMMITTED) != 0 {
+        if HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask) {
+            return Ok(TM_Ok);
+        }
+        if !ItemPointerEquals(&t_self, &tuple.t_ctid) {
+            return Ok(TM_Updated);
+        } else {
+            return Ok(TM_Deleted);
+        }
+    }
+
+    if (tuple.t_infomask & HEAP_XMAX_IS_MULTI) != 0 {
+        if HEAP_LOCKED_UPGRADED(tuple.t_infomask) {
+            return Ok(TM_Ok);
+        }
+
+        if HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask) {
+            if MultiXactIdIsRunning(tuple.xmax_raw(), true)? {
+                return Ok(TM_BeingModified);
+            }
+
+            SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId)?;
+            return Ok(TM_Ok);
+        }
+
+        let xmax = HeapTupleGetUpdateXid(tuple)?;
+        if !TransactionIdIsValid(xmax) && MultiXactIdIsRunning(tuple.xmax_raw(), false)? {
+            return Ok(TM_BeingModified);
+        }
+
+        debug_assert!(TransactionIdIsValid(xmax));
+
+        if TransactionIdIsCurrentTransactionId(xmax) {
+            if HeapTupleHeaderGetCmax(tuple) >= curcid {
+                return Ok(TM_SelfModified);
+            } else {
+                return Ok(TM_Invisible);
+            }
+        }
+
+        if MultiXactIdIsRunning(tuple.xmax_raw(), false)? {
+            return Ok(TM_BeingModified);
+        }
+
+        if TransactionIdDidCommit(xmax)? {
+            if !ItemPointerEquals(&t_self, &tuple.t_ctid) {
+                return Ok(TM_Updated);
+            }
+            return Ok(TM_Deleted);
+        }
+
+        /* updater aborted or crashed; other members may still be running */
+
+        if !MultiXactIdIsRunning(tuple.xmax_raw(), false)? {
+            SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId)?;
+            return Ok(TM_Ok);
+        }
+
+        return Ok(TM_BeingModified);
+    }
+
+    if TransactionIdIsCurrentTransactionId(tuple.xmax_raw()) {
+        if HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask) {
+            return Ok(TM_BeingModified);
+        }
+        if HeapTupleHeaderGetCmax(tuple) >= curcid {
+            return Ok(TM_SelfModified);
+        } else {
+            return Ok(TM_Invisible);
+        }
+    }
+
+    if TransactionIdIsInProgress(tuple.xmax_raw())? {
+        return Ok(TM_BeingModified);
+    }
+
+    if !TransactionIdDidCommit(tuple.xmax_raw())? {
+        SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId)?;
+        return Ok(TM_Ok);
+    }
+
+    /* xmax transaction committed */
+
+    if HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask) {
+        SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId)?;
+        return Ok(TM_Ok);
+    }
+
+    let raw_xmax = tuple.xmax_raw();
+    SetHintBits(tuple, buffer, HEAP_XMAX_COMMITTED, raw_xmax)?;
+    if !ItemPointerEquals(&t_self, &tuple.t_ctid) {
+        Ok(TM_Updated)
+    } else {
+        Ok(TM_Deleted)
+    }
+}
+
+pub fn HeapTupleSatisfiesDirty(
+    htup: &mut HeapTupleData<'_>,
+    snapshot: &mut SnapshotData<'_>,
+    buffer: Buffer,
+) -> PgResult<bool> {
+    debug_assert!(ItemPointerIsValid(&htup.t_self));
+    debug_assert!(htup.t_tableOid != InvalidOid);
+    let tuple = htup.t_data_mut();
+
+    snapshot.xmin = InvalidTransactionId;
+    snapshot.xmax = InvalidTransactionId;
+    snapshot.speculativeToken = 0;
+
+    if !tuple.xmin_committed() {
+        if tuple.xmin_invalid() {
+            return Ok(false);
+        }
+
+        if (tuple.t_infomask & HEAP_MOVED_OFF) != 0 {
+            let xvac = tuple.xvac();
+
+            if TransactionIdIsCurrentTransactionId(xvac) {
+                return Ok(false);
+            }
+            if !TransactionIdIsInProgress(xvac)? {
+                if TransactionIdDidCommit(xvac)? {
+                    SetHintBits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId)?;
+                    return Ok(false);
+                }
+                SetHintBits(tuple, buffer, HEAP_XMIN_COMMITTED, InvalidTransactionId)?;
+            }
+        } else if (tuple.t_infomask & HEAP_MOVED_IN) != 0 {
+            let xvac = tuple.xvac();
+
+            if !TransactionIdIsCurrentTransactionId(xvac) {
+                if TransactionIdIsInProgress(xvac)? {
+                    return Ok(false);
+                }
+                if TransactionIdDidCommit(xvac)? {
+                    SetHintBits(tuple, buffer, HEAP_XMIN_COMMITTED, InvalidTransactionId)?;
+                } else {
+                    SetHintBits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId)?;
+                    return Ok(false);
+                }
+            }
+        } else if TransactionIdIsCurrentTransactionId(tuple.xmin_raw()) {
+            if (tuple.t_infomask & HEAP_XMAX_INVALID) != 0 {
+                return Ok(true);
+            }
+
+            if HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask) {
+                return Ok(true);
+            }
+
+            if (tuple.t_infomask & HEAP_XMAX_IS_MULTI) != 0 {
+                let xmax = HeapTupleGetUpdateXid(tuple)?;
+
+                debug_assert!(TransactionIdIsValid(xmax));
+
+                /* updating subtransaction must have aborted */
+                return Ok(!TransactionIdIsCurrentTransactionId(xmax));
+            }
+
+            if !TransactionIdIsCurrentTransactionId(tuple.xmax_raw()) {
+                /* deleting subtransaction must have aborted */
+                SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId)?;
+                return Ok(true);
+            }
+
+            return Ok(false);
+        } else if TransactionIdIsInProgress(tuple.xmin_raw())? {
+            // Hand the caller the speculative token; xmax is the caller's
+            // concern since it needs a conclusively locked row anyway.
+            if tuple.is_speculative() {
+                snapshot.speculativeToken = tuple.speculative_token();
+                debug_assert!(snapshot.speculativeToken != 0);
+            }
+
+            snapshot.xmin = tuple.xmin_raw();
+            return Ok(true); /* in insertion by other */
+        } else if TransactionIdDidCommit(tuple.xmin_raw())? {
+            let raw_xmin = tuple.xmin_raw();
+            SetHintBits(tuple, buffer, HEAP_XMIN_COMMITTED, raw_xmin)?;
+        } else {
+            SetHintBits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId)?;
+            return Ok(false);
+        }
+    }
+
+    /* by here, the inserting transaction has committed */
+
+    if (tuple.t_infomask & HEAP_XMAX_INVALID) != 0 {
+        return Ok(true);
+    }
+
+    if (tuple.t_infomask & HEAP_XMAX_COMMITTED) != 0 {
+        return Ok(HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask));
+    }
+
+    if (tuple.t_infomask & HEAP_XMAX_IS_MULTI) != 0 {
+        if HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask) {
+            return Ok(true);
+        }
+
+        let xmax = HeapTupleGetUpdateXid(tuple)?;
+
+        debug_assert!(TransactionIdIsValid(xmax));
+
+        if TransactionIdIsCurrentTransactionId(xmax) {
+            return Ok(false);
+        }
+        if TransactionIdIsInProgress(xmax)? {
+            snapshot.xmax = xmax;
+            return Ok(true);
+        }
+        if TransactionIdDidCommit(xmax)? {
+            return Ok(false);
+        }
+        return Ok(true);
+    }
+
+    if TransactionIdIsCurrentTransactionId(tuple.xmax_raw()) {
+        return Ok(HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask));
+    }
+
+    if TransactionIdIsInProgress(tuple.xmax_raw())? {
+        if !HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask) {
+            snapshot.xmax = tuple.xmax_raw();
+        }
+        return Ok(true);
+    }
+
+    if !TransactionIdDidCommit(tuple.xmax_raw())? {
+        SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId)?;
+        return Ok(true);
+    }
+
+    /* xmax transaction committed */
+
+    if HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask) {
+        SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId)?;
+        return Ok(true);
+    }
+
+    let raw_xmax = tuple.xmax_raw();
+    SetHintBits(tuple, buffer, HEAP_XMAX_COMMITTED, raw_xmax)?;
+    Ok(false)
+}
+
+pub fn HeapTupleSatisfiesMVCC(
+    htup: &mut HeapTupleData<'_>,
+    snapshot: &SnapshotData<'_>,
+    buffer: Buffer,
+) -> PgResult<bool> {
+    debug_assert!(snapshot.regd_count.get() > 0 || snapshot.active_count.get() > 0);
+    debug_assert!(ItemPointerIsValid(&htup.t_self));
+    debug_assert!(htup.t_tableOid != InvalidOid);
+    let tuple = htup.t_data_mut();
+
+    if !tuple.xmin_committed() {
+        if tuple.xmin_invalid() {
+            return Ok(false);
+        }
+
+        if (tuple.t_infomask & HEAP_MOVED_OFF) != 0 {
+            let xvac = tuple.xvac();
+
+            if TransactionIdIsCurrentTransactionId(xvac) {
+                return Ok(false);
+            }
+            if !XidInMVCCSnapshot(xvac, snapshot)? {
+                if TransactionIdDidCommit(xvac)? {
+                    SetHintBits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId)?;
+                    return Ok(false);
+                }
+                SetHintBits(tuple, buffer, HEAP_XMIN_COMMITTED, InvalidTransactionId)?;
+            }
+        } else if (tuple.t_infomask & HEAP_MOVED_IN) != 0 {
+            let xvac = tuple.xvac();
+
+            if !TransactionIdIsCurrentTransactionId(xvac) {
+                if XidInMVCCSnapshot(xvac, snapshot)? {
+                    return Ok(false);
+                }
+                if TransactionIdDidCommit(xvac)? {
+                    SetHintBits(tuple, buffer, HEAP_XMIN_COMMITTED, InvalidTransactionId)?;
+                } else {
+                    SetHintBits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId)?;
+                    return Ok(false);
+                }
+            }
+        } else if TransactionIdIsCurrentTransactionId(tuple.xmin_raw()) {
+            if HeapTupleHeaderGetCmin(tuple) >= snapshot.curcid.get() {
+                return Ok(false); /* inserted after scan started */
+            }
+
+            if (tuple.t_infomask & HEAP_XMAX_INVALID) != 0 {
+                return Ok(true);
+            }
+
+            if HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask) {
+                return Ok(true);
+            }
+
+            if (tuple.t_infomask & HEAP_XMAX_IS_MULTI) != 0 {
+                let xmax = HeapTupleGetUpdateXid(tuple)?;
+
+                debug_assert!(TransactionIdIsValid(xmax));
+
+                /* updating subtransaction must have aborted */
+                if !TransactionIdIsCurrentTransactionId(xmax) {
+                    return Ok(true);
+                } else if HeapTupleHeaderGetCmax(tuple) >= snapshot.curcid.get() {
+                    return Ok(true); /* updated after scan started */
+                } else {
+                    return Ok(false); /* updated before scan started */
+                }
+            }
+
+            if !TransactionIdIsCurrentTransactionId(tuple.xmax_raw()) {
+                /* deleting subtransaction must have aborted */
+                SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId)?;
+                return Ok(true);
+            }
+
+            if HeapTupleHeaderGetCmax(tuple) >= snapshot.curcid.get() {
+                return Ok(true); /* deleted after scan started */
+            } else {
+                return Ok(false); /* deleted before scan started */
+            }
+        } else if XidInMVCCSnapshot(tuple.xmin_raw(), snapshot)? {
+            return Ok(false);
+        } else if TransactionIdDidCommit(tuple.xmin_raw())? {
+            let raw_xmin = tuple.xmin_raw();
+            SetHintBits(tuple, buffer, HEAP_XMIN_COMMITTED, raw_xmin)?;
+        } else {
+            /* it must have aborted or crashed */
+            SetHintBits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId)?;
+            return Ok(false);
+        }
+    } else {
+        /* xmin is committed, but maybe not according to our snapshot */
+        if !tuple.xmin_frozen() && XidInMVCCSnapshot(tuple.xmin_raw(), snapshot)? {
+            return Ok(false); /* treat as still in progress */
+        }
+    }
+
+    /* by here, the inserting transaction has committed */
+
+    if (tuple.t_infomask & HEAP_XMAX_INVALID) != 0 {
+        return Ok(true);
+    }
+
+    if HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask) {
+        return Ok(true);
+    }
+
+    if (tuple.t_infomask & HEAP_XMAX_IS_MULTI) != 0 {
+        debug_assert!(!HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask));
+
+        let xmax = HeapTupleGetUpdateXid(tuple)?;
+
+        debug_assert!(TransactionIdIsValid(xmax));
+
+        if TransactionIdIsCurrentTransactionId(xmax) {
+            if HeapTupleHeaderGetCmax(tuple) >= snapshot.curcid.get() {
+                return Ok(true); /* deleted after scan started */
+            } else {
+                return Ok(false); /* deleted before scan started */
+            }
+        }
+        if XidInMVCCSnapshot(xmax, snapshot)? {
+            return Ok(true);
+        }
+        if TransactionIdDidCommit(xmax)? {
+            return Ok(false);
+        }
+        return Ok(true);
+    }
+
+    if (tuple.t_infomask & HEAP_XMAX_COMMITTED) == 0 {
+        if TransactionIdIsCurrentTransactionId(tuple.xmax_raw()) {
+            if HeapTupleHeaderGetCmax(tuple) >= snapshot.curcid.get() {
+                return Ok(true); /* deleted after scan started */
+            } else {
+                return Ok(false); /* deleted before scan started */
+            }
+        }
+
+        if XidInMVCCSnapshot(tuple.xmax_raw(), snapshot)? {
+            return Ok(true);
+        }
+
+        if !TransactionIdDidCommit(tuple.xmax_raw())? {
+            /* it must have aborted or crashed */
+            SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId)?;
+            return Ok(true);
+        }
+
+        let raw_xmax = tuple.xmax_raw();
+        SetHintBits(tuple, buffer, HEAP_XMAX_COMMITTED, raw_xmax)?;
+    } else {
+        /* xmax is committed, but maybe not according to our snapshot */
+        if XidInMVCCSnapshot(tuple.xmax_raw(), snapshot)? {
+            return Ok(true); /* treat as still in progress */
+        }
+    }
+
+    /* xmax transaction committed */
+
+    Ok(false)
+}
+
+pub fn HeapTupleSatisfiesVacuum(
+    htup: &mut HeapTupleData<'_>,
+    oldest_xmin: TransactionId,
+    buffer: Buffer,
+) -> PgResult<HTSV_Result> {
+    let mut dead_after = InvalidTransactionId;
+
+    let mut res = HeapTupleSatisfiesVacuumHorizon(htup, buffer, &mut dead_after)?;
+
+    if res == HEAPTUPLE_RECENTLY_DEAD {
+        debug_assert!(TransactionIdIsValid(dead_after));
+
+        if TransactionIdPrecedes(dead_after, oldest_xmin) {
+            res = HEAPTUPLE_DEAD;
+        }
+    } else {
+        debug_assert!(!TransactionIdIsValid(dead_after));
+    }
+
+    Ok(res)
+}
+
+pub fn HeapTupleSatisfiesVacuumHorizon(
+    htup: &mut HeapTupleData<'_>,
+    buffer: Buffer,
+    dead_after: &mut TransactionId,
+) -> PgResult<HTSV_Result> {
+    debug_assert!(ItemPointerIsValid(&htup.t_self));
+    debug_assert!(htup.t_tableOid != InvalidOid);
+    let tuple = htup.t_data_mut();
+
+    *dead_after = InvalidTransactionId;
+
+    /* an aborted inserter means the tuple was never visible to anyone else */
+    if !tuple.xmin_committed() {
+        if tuple.xmin_invalid() {
+            return Ok(HEAPTUPLE_DEAD);
+        } else if (tuple.t_infomask & HEAP_MOVED_OFF) != 0 {
+            let xvac = tuple.xvac();
+
+            if TransactionIdIsCurrentTransactionId(xvac) {
+                return Ok(HEAPTUPLE_DELETE_IN_PROGRESS);
+            }
+            if TransactionIdIsInProgress(xvac)? {
+                return Ok(HEAPTUPLE_DELETE_IN_PROGRESS);
+            }
+            if TransactionIdDidCommit(xvac)? {
+                SetHintBits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId)?;
+                return Ok(HEAPTUPLE_DEAD);
+            }
+            SetHintBits(tuple, buffer, HEAP_XMIN_COMMITTED, InvalidTransactionId)?;
+        } else if (tuple.t_infomask & HEAP_MOVED_IN) != 0 {
+            let xvac = tuple.xvac();
+
+            if TransactionIdIsCurrentTransactionId(xvac) {
+                return Ok(HEAPTUPLE_INSERT_IN_PROGRESS);
+            }
+            if TransactionIdIsInProgress(xvac)? {
+                return Ok(HEAPTUPLE_INSERT_IN_PROGRESS);
+            }
+            if TransactionIdDidCommit(xvac)? {
+                SetHintBits(tuple, buffer, HEAP_XMIN_COMMITTED, InvalidTransactionId)?;
+            } else {
+                SetHintBits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId)?;
+                return Ok(HEAPTUPLE_DEAD);
+            }
+        } else if TransactionIdIsCurrentTransactionId(tuple.xmin_raw()) {
+            if (tuple.t_infomask & HEAP_XMAX_INVALID) != 0 {
+                return Ok(HEAPTUPLE_INSERT_IN_PROGRESS);
+            }
+            /* only locked? run infomask-only check first, for performance */
+            if HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask) || HeapTupleHeaderIsOnlyLocked(tuple)? {
+                return Ok(HEAPTUPLE_INSERT_IN_PROGRESS);
+            }
+            /* inserted and then deleted by same xact */
+            if TransactionIdIsCurrentTransactionId(heapam::HeapTupleHeaderGetUpdateXid(tuple)?) {
+                return Ok(HEAPTUPLE_DELETE_IN_PROGRESS);
+            }
+            /* deleting subtransaction must have aborted */
+            return Ok(HEAPTUPLE_INSERT_IN_PROGRESS);
+        } else if TransactionIdIsInProgress(tuple.xmin_raw())? {
+            // INSERT_IN_PROGRESS without discerning DELETE: correct from other
+            // backends' view, and callers should look at/wait on xmin (C note).
+            return Ok(HEAPTUPLE_INSERT_IN_PROGRESS);
+        } else if TransactionIdDidCommit(tuple.xmin_raw())? {
+            let raw_xmin = tuple.xmin_raw();
+            SetHintBits(tuple, buffer, HEAP_XMIN_COMMITTED, raw_xmin)?;
+        } else {
+            /* not in progress, not committed: aborted or crashed */
+            SetHintBits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId)?;
+            return Ok(HEAPTUPLE_DEAD);
+        }
+
+        /* xmin known committed here, but the hint bit may not have stuck */
+    }
+
+    /* the inserter committed; now what about the deleting transaction? */
+
+    if (tuple.t_infomask & HEAP_XMAX_INVALID) != 0 {
+        return Ok(HEAPTUPLE_LIVE);
+    }
+
+    if HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask) {
+        // Locker never updates: live either way, but hint XMAX_COMMITTED or
+        // XMAX_INVALID once the xact is gone, for future readers.
+        if (tuple.t_infomask & HEAP_XMAX_COMMITTED) == 0 {
+            if (tuple.t_infomask & HEAP_XMAX_IS_MULTI) != 0 {
+                /* a pre-pg_upgrade multixact cannot possibly be running */
+                if !HEAP_LOCKED_UPGRADED(tuple.t_infomask)
+                    && MultiXactIdIsRunning(tuple.xmax_raw(), true)?
+                {
+                    return Ok(HEAPTUPLE_LIVE);
+                }
+                SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId)?;
+            } else {
+                if TransactionIdIsInProgress(tuple.xmax_raw())? {
+                    return Ok(HEAPTUPLE_LIVE);
+                }
+                SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId)?;
+            }
+        }
+
+        return Ok(HEAPTUPLE_LIVE);
+    }
+
+    if (tuple.t_infomask & HEAP_XMAX_IS_MULTI) != 0 {
+        let xmax = HeapTupleGetUpdateXid(tuple)?;
+
+        debug_assert!(!HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask));
+        debug_assert!(TransactionIdIsValid(xmax));
+
+        if TransactionIdIsInProgress(xmax)? {
+            return Ok(HEAPTUPLE_DELETE_IN_PROGRESS);
+        } else if TransactionIdDidCommit(xmax)? {
+            // Lockers may keep the multi running; report the update xid anyway
+            // so below-horizon tuples stay prunable (remaining lockers also
+            // appear in newer tuple versions).
+            *dead_after = xmax;
+            return Ok(HEAPTUPLE_RECENTLY_DEAD);
+        } else if !MultiXactIdIsRunning(tuple.xmax_raw(), false)? {
+            /* updater aborted or crashed, and no live members remain */
+            SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId)?;
+        }
+
+        return Ok(HEAPTUPLE_LIVE);
+    }
+
+    if (tuple.t_infomask & HEAP_XMAX_COMMITTED) == 0 {
+        if TransactionIdIsInProgress(tuple.xmax_raw())? {
+            return Ok(HEAPTUPLE_DELETE_IN_PROGRESS);
+        } else if TransactionIdDidCommit(tuple.xmax_raw())? {
+            let raw_xmax = tuple.xmax_raw();
+            SetHintBits(tuple, buffer, HEAP_XMAX_COMMITTED, raw_xmax)?;
+        } else {
+            /* not in progress, not committed: aborted or crashed */
+            SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId)?;
+            return Ok(HEAPTUPLE_LIVE);
+        }
+
+        /* xmax known committed here, but the hint bit may not have stuck */
+    }
+
+    /* deleter committed; the caller compares dead_after with its horizon */
+    *dead_after = tuple.xmax_raw();
+    Ok(HEAPTUPLE_RECENTLY_DEAD)
+}
+
+pub fn HeapTupleSatisfiesNonVacuumable(
+    htup: &mut HeapTupleData<'_>,
+    snapshot: &SnapshotData<'_>,
+    buffer: Buffer,
+) -> PgResult<bool> {
+    let mut dead_after = InvalidTransactionId;
+
+    let mut res = HeapTupleSatisfiesVacuumHorizon(htup, buffer, &mut dead_after)?;
+
+    if res == HEAPTUPLE_RECENTLY_DEAD {
+        debug_assert!(TransactionIdIsValid(dead_after));
+
+        if procarray_seams::global_vis_test_is_removable_xid::call(snapshot.vistest, dead_after)? {
+            res = HEAPTUPLE_DEAD;
+        }
+    } else {
+        debug_assert!(!TransactionIdIsValid(dead_after));
+    }
+
+    Ok(res != HEAPTUPLE_DEAD)
+}
+
+pub fn HeapTupleIsSurelyDead(
+    htup: &HeapTupleData<'_>,
+    vistest: GlobalVisStateHandle,
+) -> PgResult<bool> {
+    debug_assert!(ItemPointerIsValid(&htup.t_self));
+    debug_assert!(htup.t_tableOid != InvalidOid);
+    let tuple = htup.t_data();
+
+    // Consults neither procarray nor clog: unhinted states answer "in doubt"
+    // (false), on the presumption the hint bits were set moments ago.
+    if !tuple.xmin_committed() {
+        return Ok(tuple.xmin_invalid());
+    }
+
+    if (tuple.t_infomask & HEAP_XMAX_INVALID) != 0 {
+        return Ok(false);
+    }
+
+    if HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask) {
+        return Ok(false);
+    }
+
+    if (tuple.t_infomask & HEAP_XMAX_IS_MULTI) != 0 {
+        return Ok(false);
+    }
+
+    if (tuple.t_infomask & HEAP_XMAX_COMMITTED) == 0 {
+        return Ok(false);
+    }
+
+    procarray_seams::global_vis_test_is_removable_xid::call(vistest, tuple.xmax_raw())
+}
+
+pub fn HeapTupleHeaderIsOnlyLocked(tuple: &HeapTupleHeaderData) -> PgResult<bool> {
+    if (tuple.t_infomask & HEAP_XMAX_INVALID) != 0 {
+        return Ok(true);
+    }
+
+    if (tuple.t_infomask & HEAP_XMAX_LOCK_ONLY) != 0 {
+        return Ok(true);
+    }
+
+    if !TransactionIdIsValid(tuple.xmax_raw()) {
+        return Ok(true);
+    }
+
+    if (tuple.t_infomask & HEAP_XMAX_IS_MULTI) == 0 {
+        return Ok(false);
+    }
+
+    /* a multi's updating xid may have aborted */
+    let xmax = HeapTupleGetUpdateXid(tuple)?;
+
+    debug_assert!(TransactionIdIsValid(xmax));
+
+    if TransactionIdIsCurrentTransactionId(xmax) {
+        return Ok(false);
+    }
+    if TransactionIdIsInProgress(xmax)? {
+        return Ok(false);
+    }
+    if TransactionIdDidCommit(xmax)? {
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+pub fn HeapTupleSatisfiesVisibility(
+    htup: &mut HeapTupleData<'_>,
+    snapshot: &mut SnapshotData<'_>,
+    buffer: Buffer,
+) -> PgResult<bool> {
+    match snapshot.snapshot_type {
+        SNAPSHOT_MVCC => HeapTupleSatisfiesMVCC(htup, snapshot, buffer),
+        SNAPSHOT_SELF => HeapTupleSatisfiesSelf(htup, buffer),
+        SNAPSHOT_ANY => HeapTupleSatisfiesAny(htup, buffer),
+        SNAPSHOT_TOAST => HeapTupleSatisfiesToast(htup, buffer),
+        SNAPSHOT_DIRTY => HeapTupleSatisfiesDirty(htup, snapshot, buffer),
+        SNAPSHOT_HISTORIC_MVCC => {
+            unported("HeapTupleSatisfiesHistoricMVCC (reorderbuffer/logical decoding)")
+        }
+        SNAPSHOT_NON_VACUUMABLE => HeapTupleSatisfiesNonVacuumable(htup, snapshot, buffer),
+    }
+}
+
+// Read-lane marshal for the &SnapshotData seam; DIRTY's snapshot write-back
+// needs &mut and lands with the DML lane.
+fn heap_tuple_satisfies_visibility_read(
+    htup: &mut HeapTupleData<'_>,
+    snapshot: &SnapshotData<'_>,
+    buffer: Buffer,
+) -> PgResult<bool> {
+    match snapshot.snapshot_type {
+        SNAPSHOT_MVCC => HeapTupleSatisfiesMVCC(htup, snapshot, buffer),
+        SNAPSHOT_SELF => HeapTupleSatisfiesSelf(htup, buffer),
+        SNAPSHOT_ANY => HeapTupleSatisfiesAny(htup, buffer),
+        SNAPSHOT_TOAST => HeapTupleSatisfiesToast(htup, buffer),
+        SNAPSHOT_DIRTY => unported("SNAPSHOT_DIRTY snapshot write-back (DML lane)"),
+        SNAPSHOT_HISTORIC_MVCC => {
+            unported("HeapTupleSatisfiesHistoricMVCC (reorderbuffer/logical decoding)")
+        }
+        SNAPSHOT_NON_VACUUMABLE => HeapTupleSatisfiesNonVacuumable(htup, snapshot, buffer),
+    }
+}
+
+pub fn init_seams() {
+    heapam_visibility_seams::heap_tuple_satisfies_visibility::set(
+        heap_tuple_satisfies_visibility_read,
+    );
+    heapam_visibility_seams::heap_tuple_satisfies_vacuum::set(HeapTupleSatisfiesVacuum);
+    heapam_visibility_seams::heap_tuple_is_surely_dead::set(HeapTupleIsSurelyDead);
+    heapam_visibility_seams::heap_tuple_header_is_only_locked::set(HeapTupleHeaderIsOnlyLocked);
+}

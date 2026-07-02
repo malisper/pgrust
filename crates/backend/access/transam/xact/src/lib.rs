@@ -1075,6 +1075,9 @@ fn seam_set_xact_accessed_temp_namespace() {
 pub fn init_seams() {
     use guc_tables::{vars, GucVarAccessors};
 
+    xact_seams::mark_current_transaction_id_logged_if_any::set(MarkCurrentTransactionIdLoggedIfAny);
+    xact_seams::mark_subxact_top_xid_logged::set(MarkSubxactTopXidLogged);
+
     vars::XactIsoLevel.install(GucVarAccessors { get: XactIsoLevel, set: SetXactIsoLevel });
     vars::DefaultXactIsoLevel
         .install(GucVarAccessors { get: DefaultXactIsoLevel, set: SetDefaultXactIsoLevel });

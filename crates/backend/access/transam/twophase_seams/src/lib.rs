@@ -62,3 +62,23 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn prepare_redo_remove(xid: TransactionId, give_warning: bool) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // restoreTwoPhaseData() (twophase.c).
+    pub fn restore_two_phase_data() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // PrescanPreparedTransactions(NULL, NULL) (twophase.c): oldestActiveXid.
+    pub fn prescan_prepared_transactions() -> PgResult<TransactionId>
+);
+
+seam_core::seam!(
+    // RecoverPreparedTransactions() (twophase.c).
+    pub fn recover_prepared_transactions() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // CheckPointTwoPhase(redo_horizon) (twophase.c).
+    pub fn check_point_two_phase(redo_horizon: XLogRecPtr) -> PgResult<()>
+);

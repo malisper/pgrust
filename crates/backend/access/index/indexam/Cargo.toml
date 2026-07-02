@@ -16,4 +16,10 @@ types_slot = { path = "../../../../_support/types/types_slot" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 types_nbtree = { path = "../../../../_support/types/types_nbtree" }
 relation_seams = { path = "../../common/relation_seams" }
+tableam = { path = "../../table/tableam" }
 indexam_seams = { path = "../indexam_seams" }
+types_relscan = { path = "../../../../_support/types/relscan" }
+nbtree = { path = "../../nbtree/nbtree" }
+
+[dev-dependencies]
+types_relscan = { path = "../../../../_support/types/relscan", features = ["mock"] }

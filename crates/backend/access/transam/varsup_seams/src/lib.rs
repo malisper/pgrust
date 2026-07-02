@@ -11,6 +11,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // AdvanceNextFullTransactionIdPastXid (varsup.c); redo-only.
-    pub fn advance_next_full_transaction_id_past_xid(xid: TransactionId)
+    // AdvanceNextFullTransactionIdPastXid (varsup.c); redo-only. PgResult:
+    // takes XidGenLock, whose acquire carries C's ereport surface.
+    pub fn advance_next_full_transaction_id_past_xid(xid: TransactionId) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // AdvanceOldestClogXid (varsup.c); clog truncation + redo.
+    pub fn advance_oldest_clog_xid(oldest_datfrozenxid: TransactionId) -> PgResult<()>
 );

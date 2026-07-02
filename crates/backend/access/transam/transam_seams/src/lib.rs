@@ -28,3 +28,8 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn transaction_id_did_abort(xid: TransactionId) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    // TransactionIdGetCommitLSN (transam.c).
+    pub fn transaction_id_get_commit_lsn(xid: TransactionId) -> PgResult<XLogRecPtr>
+);

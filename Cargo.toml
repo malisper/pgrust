@@ -203,6 +203,7 @@ members = [
     "crates/backend/access/common/detoast_seams",
     "crates/backend/utils/adt/pg_locale_seams",
     "crates/backend/utils/adt/varlena",
+    "crates/backend/utils/adt/name",
     "crates/backend/utils/resowner/resowner",
     "crates/backend/access/transam/xlogreader",
     "crates/backend/storage/ipc/sinval",
@@ -252,6 +253,7 @@ members = [
     "crates/backend/parser/analyze_seams",
     "crates/backend/rewrite/rewrite_handler_seams",
     "crates/backend/optimizer/plan/planner_seams",
+    "crates/backend/parser/parser_driver",
 ]
 
 [workspace.package]

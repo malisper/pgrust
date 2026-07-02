@@ -198,7 +198,7 @@ fn clear_buffer<'mcx>(b: &mut BufferHeapTupleTableSlot<'mcx>, mcx: Mcx<'mcx>) {
         b.base.base.tts_flags &= !TTS_FLAG_SHOULDFREE;
     }
     if BufferIsValid(b.buffer) {
-        bufmgr_unported();
+        let _ = bufmgr_seams::release_buffer::call(b.buffer);
     }
     b.base.base.mark_empty();
     b.base.base.tts_tid = ItemPointerData::invalid();
@@ -335,22 +335,70 @@ pub fn exec_store_minimal_tuple_owned<'mcx>(
     store_minimal(m, mcx, forget_minimal(mtup), true);
 }
 
-pub fn exec_store_buffer_heap_tuple<'mcx>(
-    _slot: &mut SlotData<'mcx>,
-    _mcx: Mcx<'mcx>,
-    _tuple: HeapTupleData<'mcx>,
-    _buffer: Buffer,
-) -> ! {
-    bufmgr_unported()
+// C tts_buffer_heap_store_tuple: the slot keeps its own pin on `buffer`
+// (IncrBufferRefCount) unless the pin is transferred or already held.
+fn store_buffer<'mcx>(
+    slot: &mut SlotData<'mcx>,
+    mcx: Mcx<'mcx>,
+    tuple: HeapTupleData<'mcx>,
+    buffer: Buffer,
+    transfer_pin: bool,
+) {
+    debug_assert!(BufferIsValid(buffer));
+    let SlotData::BufferHeap(b) = slot else {
+        wrong_slot("buffer heap")
+    };
+    if b.base.base.should_free() {
+        // SAFETY: SHOULDFREE marks a slot-owned heaptuple image in mcx.
+        unsafe {
+            free_heap_image(
+                mcx,
+                b.base.tuple.as_ref().expect("SHOULDFREE without tuple"),
+            )
+        };
+        b.base.base.tts_flags &= !TTS_FLAG_SHOULDFREE;
+    }
+
+    b.base.base.tts_nvalid = 0;
+    b.base.base.tts_tid = tuple.t_self;
+    b.base.tuple = Some(tuple);
+    b.base.off = 0;
+    b.base.base.tts_flags &= !TTS_FLAG_EMPTY;
+
+    if buffer != b.buffer {
+        if BufferIsValid(b.buffer) {
+            let _ = bufmgr_seams::release_buffer::call(b.buffer);
+        }
+        b.buffer = buffer;
+        if !transfer_pin {
+            bufmgr_seams::incr_buffer_ref_count::call(buffer);
+        }
+    } else if transfer_pin {
+        // The slot already holds this pin; drop the transferred extra one.
+        let _ = bufmgr_seams::release_buffer::call(buffer);
+    }
 }
 
+/// C `ExecStoreBufferHeapTuple`: caller's pin stays caller's; the slot pins.
+#[inline]
+pub fn exec_store_buffer_heap_tuple<'mcx>(
+    slot: &mut SlotData<'mcx>,
+    mcx: Mcx<'mcx>,
+    tuple: HeapTupleData<'mcx>,
+    buffer: Buffer,
+) {
+    store_buffer(slot, mcx, tuple, buffer, false)
+}
+
+/// C `ExecStorePinnedBufferHeapTuple`: the caller's pin moves into the slot.
+#[inline]
 pub fn exec_store_pinned_buffer_heap_tuple<'mcx>(
-    _slot: &mut SlotData<'mcx>,
-    _mcx: Mcx<'mcx>,
-    _tuple: HeapTupleData<'mcx>,
-    _buffer: Buffer,
-) -> ! {
-    bufmgr_unported()
+    slot: &mut SlotData<'mcx>,
+    mcx: Mcx<'mcx>,
+    tuple: HeapTupleData<'mcx>,
+    buffer: Buffer,
+) {
+    store_buffer(slot, mcx, tuple, buffer, true)
 }
 
 fn virtual_materialize<'mcx>(v: &mut VirtualTupleTableSlot<'mcx>, mcx: Mcx<'mcx>) -> PgResult<()> {
@@ -505,7 +553,7 @@ fn buffer_materialize<'mcx>(
         Some(t) => {
             let new = heap_copytuple(mcx, t)?;
             if BufferIsValid(b.buffer) {
-                bufmgr_unported();
+                let _ = bufmgr_seams::release_buffer::call(b.buffer);
             }
             b.buffer = InvalidBuffer;
             b.base.tuple = Some(forget_heap(new));

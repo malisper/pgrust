@@ -1,5 +1,42 @@
 use types_core::{TimeLineID, XLogRecPtr};
 use types_error::PgResult;
+use xlogreader_seams::XLogReaderState;
+
+seam_core::seam!(
+    // xlog_redo (xlog.c) — the XLOG rmgr rm_redo callback; rmgr's table row
+    // delegates here (a direct rmgr -> transam_xlog dep would cycle through
+    // xlogreader).
+    pub fn xlog_redo(record: &mut XLogReaderState) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // GetRedoRecPtr() (xlog.c).
+    pub fn get_redo_rec_ptr() -> XLogRecPtr
+);
+
+seam_core::seam!(
+    // XLogInsertRecord(rdata, fpw_lsn, flags, num_fpi, topxid_included)
+    // (xlog.c). `rechdr` is the 24-byte XLogRecord header (xl_prev/xl_crc
+    // filled in by the callee); `rdatas` is the rest of the rdata chain.
+    pub fn xlog_insert_record<'a>(
+        rechdr: &'a mut [u8; 24],
+        rdatas: &'a [&'a [u8]],
+        fpw_lsn: XLogRecPtr,
+        flags: u8,
+        num_fpi: i32,
+        topxid_included: bool,
+    ) -> PgResult<XLogRecPtr>
+);
+
+seam_core::seam!(
+    // XLogInsertAllowed() (xlog.c).
+    pub fn xlog_insert_allowed() -> bool
+);
+
+seam_core::seam!(
+    // GetFullPageWriteInfo(&RedoRecPtr, &doPageWrites) (xlog.c).
+    pub fn get_full_page_write_info() -> (XLogRecPtr, bool)
+);
 
 seam_core::seam!(
     pub fn xlog_flush(record: XLogRecPtr) -> PgResult<()>
@@ -50,4 +87,24 @@ seam_core::seam!(
 
 seam_core::seam!(
     pub fn xlog_set_async_xact_lsn(lsn: XLogRecPtr)
+);
+
+seam_core::seam!(
+    // XLogNeedsFlush(record) (xlog.c): no ereport path.
+    pub fn xlog_needs_flush(record: XLogRecPtr) -> bool
+);
+
+seam_core::seam!(
+    // StartupXLOG (xlog.c) — bootstrap/standalone WAL startup.
+    pub fn startup_xlog() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // ShutdownXLOG(code, arg) (xlog.c), before_shmem_exit shape; body reads neither.
+    pub fn shutdown_xlog() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // XLogPutNextOid (xlog.c); OID-prefetch WAL record.
+    pub fn xlog_put_next_oid(next_oid: types_core::Oid) -> PgResult<()>
 );

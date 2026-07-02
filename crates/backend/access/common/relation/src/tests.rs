@@ -89,6 +89,8 @@ fn make_entry(mcx: Mcx<'static>, oid: Oid, name: &str, relpersistence: u8) -> Re
         rd_indcollation: PgVec::new_in(mcx),
         rd_options: None,
         pgstat_enabled: Cell::new(false),
+        rd_amcache: Default::default(),
+        rd_supportinfo: Default::default(),
     }
 }
 

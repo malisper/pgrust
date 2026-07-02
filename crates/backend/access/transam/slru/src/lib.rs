@@ -119,6 +119,16 @@ impl SlruCtlData {
         self.shared.page_number.get(slotno)
     }
 
+    pub fn page_dirty(&self, slotno: usize, bank: &LwGuard) -> bool {
+        debug_assert!(bank.covers(self.bank_lock_for_slot(slotno)) && bank.is_held());
+        self.shared.page_dirty.get(slotno)
+    }
+
+    // C consumers write latest_page_number with pg_atomic_write_u64 (StartupCLOG).
+    pub fn set_latest_page_number(&self, pageno: i64) {
+        self.shared.latest_page_number.store(pageno as u64, Ordering::Relaxed);
+    }
+
     pub fn mark_page_dirty(&self, slotno: usize, bank: &LwGuard) {
         debug_assert!(bank.held_in_mode(self.bank_lock_for_slot(slotno), LW_EXCLUSIVE));
         self.shared.page_dirty.set(slotno, true);

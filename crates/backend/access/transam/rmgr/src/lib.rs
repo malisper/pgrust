@@ -22,6 +22,10 @@ use types_error::{ErrorLocation, PgResult, ERROR};
 use xlogreader_seams::XLogReaderState;
 
 pub type RmRedo = fn(record: &mut XLogReaderState) -> PgResult<()>;
+
+fn xlog_redo(record: &mut XLogReaderState) -> PgResult<()> {
+    transam_xlog_seams::xlog_redo::call(record)
+}
 pub type RmDesc = for<'mcx> fn(buf: &mut StringInfo<'mcx>, record: &XLogReaderState) -> PgResult<()>;
 pub type RmIdentify = fn(info: u8) -> Option<&'static str>;
 // C rm_startup is void(void); the btree/gin/gist/spgist impls create their
@@ -153,14 +157,11 @@ macro_rules! unported_mask {
 }
 
 unported_redo! {
-    xlog_redo => "backend-access-transam-xlog";
     xact_redo => "backend-access-transam-xact";
     smgr_redo => "backend-catalog-storage";
-    clog_redo => "backend-access-transam-clog";
     dbase_redo => "backend-commands-dbcommands";
     tblspc_redo => "backend-commands-tablespace";
     multixact_redo => "backend-access-transam-multixact";
-    relmap_redo => "backend-utils-cache-relmapper";
     standby_redo => "backend-storage-ipc-standby";
     heap2_redo => "backend-access-heap-heapam-xlog";
     heap_redo => "backend-access-heap-heapam-xlog";
@@ -285,7 +286,7 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     },
     RmgrData {
         rm_name: "CLOG",
-        rm_redo: clog_redo,
+        rm_redo: clog::clog_redo,
         rm_desc: clog_desc,
         rm_identify: clog_identify,
         rm_startup: None,
@@ -321,7 +322,7 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     },
     RmgrData {
         rm_name: "RelMap",
-        rm_redo: relmap_redo,
+        rm_redo: relmapper::relmap_redo,
         rm_desc: relmap_desc,
         rm_identify: relmap_identify,
         rm_startup: None,

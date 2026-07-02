@@ -258,7 +258,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
         relnamespace: 2200,
         reltype: 0,
         relowner: 10,
-        relam: ::tableam::HEAP_TABLE_AM_OID,
+        relam: ::tableam_vocab::HEAP_TABLE_AM_OID,
         relfilenode: oid,
         reltablespace: 0,
         relpages: 0,
@@ -298,6 +298,8 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
         rd_indcollation: PgVec::new_in(mcx),
         rd_options: None,
         pgstat_enabled: std::cell::Cell::new(true),
+        rd_amcache: Default::default(),
+        rd_supportinfo: Default::default(),
     };
     Relation::open(data, None)
 }
