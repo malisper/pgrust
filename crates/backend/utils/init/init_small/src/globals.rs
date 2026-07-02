@@ -122,6 +122,9 @@ scalar_global! {
     VACUUM_COST_BALANCE, VacuumCostBalance, SetVacuumCostBalance, i32, 0;
     VACUUM_COST_ACTIVE, VacuumCostActive, SetVacuumCostActive, bool, false;
 
+    AUTOVACUUM_FREEZE_MAX_AGE, autovacuum_freeze_max_age, set_autovacuum_freeze_max_age,
+        i32, 200000000;
+
     COMMIT_TIMESTAMP_BUFFERS, commit_timestamp_buffers, set_commit_timestamp_buffers, i32, 0;
     MULTIXACT_MEMBER_BUFFERS, multixact_member_buffers, set_multixact_member_buffers, i32, 32;
     MULTIXACT_OFFSET_BUFFERS, multixact_offset_buffers, set_multixact_offset_buffers, i32, 16;

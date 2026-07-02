@@ -65,7 +65,7 @@ fn setup() {
         transam_xlog_seams::count_ckpt_slru_written::set(|| {});
         xlogutils_seams::in_recovery::set(|| false);
         xloginsert_seams::xlog_insert::set(|_, _, _| Ok(0x1000));
-        varsup_seams::read_next_transaction_id::set(|| 3);
+        varsup_seams::read_next_transaction_id::set(|| Ok(3));
         varsup_seams::advance_oldest_clog_xid::set(|_| Ok(()));
 
         clog::init_seams();

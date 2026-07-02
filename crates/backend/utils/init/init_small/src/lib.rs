@@ -44,6 +44,7 @@ pub fn init_seams() {
         multixact_offset_buffers: multixact_offset_buffers / set_multixact_offset_buffers;
         notify_buffers: notify_buffers / set_notify_buffers;
         serializable_buffers: serializable_buffers / set_serializable_buffers;
+        autovacuum_freeze_max_age: autovacuum_freeze_max_age / set_autovacuum_freeze_max_age;
         subtransaction_buffers: subtransaction_buffers / set_subtransaction_buffers;
         transaction_buffers: transaction_buffers / set_transaction_buffers;
     }

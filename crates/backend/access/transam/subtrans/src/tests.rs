@@ -65,7 +65,7 @@ fn setup() {
         transam_xlog_seams::xlog_flush::set(|_| Ok(()));
         transam_xlog_seams::count_ckpt_slru_written::set(|| {});
         xlogutils_seams::in_recovery::set(|| false);
-        varsup_seams::read_next_transaction_id::set(|| NEXT_XID.load(Relaxed) as TransactionId);
+        varsup_seams::read_next_transaction_id::set(|| Ok(NEXT_XID.load(Relaxed) as TransactionId));
 
         init_seams();
         SUBTRANSShmemInit().unwrap();

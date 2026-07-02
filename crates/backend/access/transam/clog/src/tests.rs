@@ -92,7 +92,7 @@ fn setup() {
         });
 
         varsup_seams::read_next_transaction_id::set(|| {
-            NEXT_XID.load(std::sync::atomic::Ordering::Relaxed) as TransactionId
+            Ok(NEXT_XID.load(std::sync::atomic::Ordering::Relaxed) as TransactionId)
         });
         varsup_seams::advance_oldest_clog_xid::set(|_| Ok(()));
 
@@ -342,7 +342,7 @@ fn startup_and_trim_zero_page_tail() {
         .unwrap();
 
     NEXT_XID.store((xid + 1) as u64, std::sync::atomic::Ordering::Relaxed);
-    StartupCLOG();
+    StartupCLOG().unwrap();
     TrimCLOG().unwrap();
 
     // xid precedes nextXid: survives; xid+1 is at/after nextXid: zeroed.

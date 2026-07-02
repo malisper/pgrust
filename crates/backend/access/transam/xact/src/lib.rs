@@ -275,7 +275,7 @@ pub fn GetStableLatestTransactionId() -> PgResult<TransactionId> {
     }
     let mut stablexid = GetTopTransactionIdIfAny();
     if stablexid == InvalidTransactionId {
-        stablexid = varsup_seams::read_next_transaction_id::call();
+        stablexid = varsup_seams::read_next_transaction_id::call()?;
     }
     debug_assert!(stablexid != InvalidTransactionId);
     xs(|s| s.stable_latest = (my_lxid, stablexid));

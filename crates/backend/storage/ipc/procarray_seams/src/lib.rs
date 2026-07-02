@@ -63,3 +63,30 @@ seam_core::seam!(
         xid: TransactionId,
     ) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    // CountDBConnections(databaseid) (procarray.c) — dense-array walk, phase 2.
+    pub fn count_db_connections(databaseid: types_core::Oid) -> PgResult<i32>
+);
+
+seam_core::seam!(
+    // GetVirtualXIDsDelayingChkpt + HaveVirtualXIDsDelayingChkpt wait loop
+    // inputs (procarray.c): snapshot the vxids holding `type` delay flags.
+    // Empty result = nothing to wait for.
+    pub fn have_virtual_xids_delaying_chkpt(delay_type: i32) -> bool
+);
+
+seam_core::seam!(
+    // GetOldestActiveTransactionId() (procarray.c).
+    pub fn get_oldest_active_transaction_id() -> TransactionId
+);
+
+seam_core::seam!(
+    // GetOldestTransactionIdConsideredRunning() (procarray.c).
+    pub fn get_oldest_transaction_id_considered_running() -> TransactionId
+);
+
+seam_core::seam!(
+    // MinimumActiveBackends(min) (procarray.c).
+    pub fn minimum_active_backends(min: i32) -> bool
+);

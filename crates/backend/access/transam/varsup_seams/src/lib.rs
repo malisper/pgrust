@@ -7,7 +7,8 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    pub fn read_next_transaction_id() -> TransactionId
+    // ReadNextTransactionId (transam.h); PgResult: takes XidGenLock shared.
+    pub fn read_next_transaction_id() -> PgResult<TransactionId>
 );
 
 seam_core::seam!(

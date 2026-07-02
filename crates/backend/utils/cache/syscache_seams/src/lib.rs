@@ -8,6 +8,11 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // SearchSysCacheExists1(DATABASEOID, dboid).
+    pub fn search_syscache_exists_databaseoid(dboid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
     pub fn sys_cache_invalidate(cache_id: i32, hash_value: u32) -> PgResult<()>
 );
 
