@@ -74,6 +74,36 @@ impl<const N: usize> LocalFcinfo<N> {
             args: [NullableDatum::null(); N],
         }
     }
+
+    // Fresh per-call frame with (fncollation, isnull, pad, nargs) written as
+    // ONE aligned 8B word: LLVM's merge of the field inits produced a store
+    // covering isnull at neither its start nor middle, and the post-call
+    // isnull reload then missed V2 store-to-load forwarding (graviton.md
+    // §4.5) — a measured 1.5× ns stall on fmgr_call2 at 0.86× instructions.
+    #[inline]
+    pub fn fresh(collation: Oid) -> Self {
+        const {
+            assert!(core::mem::offset_of!(LocalFcinfo<N>, fncollation) % 8 == 0);
+            assert!(
+                core::mem::offset_of!(LocalFcinfo<N>, isnull)
+                    == core::mem::offset_of!(LocalFcinfo<N>, fncollation) + 4
+            );
+            assert!(
+                core::mem::offset_of!(LocalFcinfo<N>, nargs)
+                    == core::mem::offset_of!(LocalFcinfo<N>, fncollation) + 6
+            );
+        }
+        let mut fcinfo = Self::new(collation);
+        let word = (collation as u64) | ((N as u16 as u64) << 48);
+        // SAFETY: asserted above — (fncollation, isnull, pad, nargs) is an
+        // 8-aligned 8B span; the pad byte's value is unobserved.
+        unsafe {
+            core::ptr::addr_of_mut!(fcinfo.fncollation)
+                .cast::<u64>()
+                .write(word);
+        }
+        fcinfo
+    }
 }
 
 impl<const N: usize> core::ops::Deref for LocalFcinfo<N> {
@@ -282,8 +312,8 @@ macro_rules! define_calls {
             collation: Oid,
             $($arg: Datum,)+
         ) -> PgResult<Datum> {
-            let mut fcinfo = LocalFcinfo::<$n>::new(collation);
-            $(fcinfo.args[$idx] = NullableDatum::value($arg);)+
+            let mut fcinfo = LocalFcinfo::<$n>::fresh(collation);
+            $(fcinfo.set_arg($idx, $arg);)+
             let result = flinfo.invoke(&mut fcinfo)?;
             if fcinfo.isnull {
                 return Err(returned_null_oid(flinfo.fn_oid));
@@ -293,8 +323,8 @@ macro_rules! define_calls {
 
         #[inline]
         pub fn $dname(func: PGFunction, collation: Oid, $($arg: Datum,)+) -> PgResult<Datum> {
-            let mut fcinfo = LocalFcinfo::<$n>::new(collation);
-            $(fcinfo.args[$idx] = NullableDatum::value($arg);)+
+            let mut fcinfo = LocalFcinfo::<$n>::fresh(collation);
+            $(fcinfo.set_arg($idx, $arg);)+
             let result = func(None, &mut fcinfo)?;
             if fcinfo.isnull {
                 return Err(returned_null_direct(func));

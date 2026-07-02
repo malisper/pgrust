@@ -1491,16 +1491,25 @@ dependencies = [
 name = "smgr"
 version = "0.0.0"
 dependencies = [
+ "aio_seams",
  "bufmgr_seams",
  "elog",
  "fd",
+ "guc_tables",
  "inval",
+ "libc",
  "mcx",
  "md",
+ "pgstat_seams",
+ "relpath_seams",
  "smgr_seams",
+ "sync_seams",
+ "tablespace_seams",
  "types_core",
  "types_error",
  "types_storage",
+ "waitevent_seams",
+ "xact_seams",
  "xlogutils",
 ]
 
