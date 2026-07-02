@@ -1092,8 +1092,10 @@ pub fn init_seams() {
     xact_seams::set_xact_accessed_temp_namespace::set(seam_set_xact_accessed_temp_namespace);
     xact_seams::get_current_command_id::set(GetCurrentCommandId);
     xact_seams::get_current_transaction_nest_level::set(GetCurrentTransactionNestLevel);
+    xact_seams::get_current_transaction_stop_timestamp::set(GetCurrentTransactionStopTimestamp);
     xact_seams::get_top_transaction_id_if_any::set(GetTopTransactionIdIfAny);
     xact_seams::is_transaction_or_transaction_block::set(IsTransactionOrTransactionBlock);
+    xact_seams::is_transaction_state::set(IsTransactionState);
     xact_seams::start_transaction_command::set(StartTransactionCommand);
     xact_seams::commit_transaction_command::set(CommitTransactionCommand);
     xact_seams::is_in_parallel_mode::set(IsInParallelMode);

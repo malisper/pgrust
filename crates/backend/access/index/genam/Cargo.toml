@@ -1,0 +1,32 @@
+[package]
+name = "genam"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+datum = { path = "../../../../_support/types/datum" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_snapshot = { path = "../../../../_support/types/snapshot" }
+types_slot = { path = "../../../../_support/types/types_slot" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+indexam = { path = "../indexam" }
+genam_seams = { path = "../genam_seams" }
+relation_seams = { path = "../../common/relation_seams" }
+tableam = { path = "../../table/tableam" }
+exectuples = { path = "../../../executor/exectuples" }
+heaptuple = { path = "../../common/heaptuple" }
+xact = { path = "../../transam/xact" }
+miscinit = { path = "../../../utils/init/miscinit" }
+init_small = { path = "../../../utils/init/init_small" }
+elog = { path = "../../../utils/error/elog" }
+snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+transam_seams = { path = "../../transam/transam_seams" }
+
+[dev-dependencies]
+types_nbtree = { path = "../../../../_support/types/types_nbtree" }
