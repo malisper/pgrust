@@ -222,6 +222,7 @@ members = [
     "crates/backend/storage/smgr/md",
     "crates/backend/storage/smgr/smgr",
     "crates/backend/utils/adt/scalar_seams",
+    "crates/backend/utils/adt/bool",
     "crates/backend/catalog/aclchk_seams",
     "crates/backend/utils/misc/guc",
     "crates/_support/types/types_startup",

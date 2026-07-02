@@ -21,6 +21,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_bool"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "hashfn",
+ "mcx",
+ "pqformat",
+ "scalar_seams",
+ "stringinfo",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "varlena",
+]
+
+[[package]]
 name = "adt_datetime"
 version = "0.1.0"
 dependencies = [
@@ -3210,6 +3226,7 @@ dependencies = [
  "checkpointer_seams",
  "clog",
  "commit_ts_seams",
+ "controldata_utils",
  "crc32c",
  "elog",
  "fd",
@@ -3225,7 +3242,7 @@ dependencies = [
  "predicate_seams",
  "procarray",
  "procarray_seams",
- "relcache",
+ "relcache_seams",
  "relmapper",
  "shmem",
  "snapbuild_seams",
