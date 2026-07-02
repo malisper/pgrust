@@ -269,8 +269,8 @@ backend-conv-utf8-and-win	*/utf8_and_win.c	todo			fabled:backend-conv-utf8-and-w
 backend-executor-execAmi	src/backend/executor/execAmi.c	todo			fabled:backend-executor-execAmi; m1-dep(stub-ok)
 backend-executor-execAsync	src/backend/executor/execAsync.c	todo			
 backend-executor-execCurrent	src/backend/executor/execCurrent.c	todo			fabled:backend-executor-execCurrent
-backend-executor-execExpr	src/backend/executor/execExpr.c	todo			fabled:backend-executor-execExpr; m1-spine
-backend-executor-execExprInterp	src/backend/executor/execExprInterp.c	todo			fabled:backend-executor-execExprInterp; m1-spine
+backend-executor-execExpr	src/backend/executor/execExpr.c	benched	execexpr	0.56-0.88x-instr/0.31-1.09x-ns(hot); fallback 1.9x tracked	m1-spine; lever 4 realized: flat repr(u8) steps <=64B asserted, resolve-once FuncFrames, monomorphized kernel selection incl. fused QualScanVarCmpConst (0.56x/0.31x - 3.3x faster than C interp, zero fmgr calls); fallback/compile lanes FAIL justified (SlotData probes, mcx substrate - fixed-slot baking deferred on PlanState); V2 finding: match loop overlaps where direct threading serializes; 17 tests, Miri SB+TB, density 5.0%; docs/benchmarks/execexpr.md
+backend-executor-execExprInterp	src/backend/executor/execExprInterp.c	benched	execexpr	0.56-0.88x-instr/0.31-1.09x-ns(hot); fallback 1.9x tracked	m1-spine; lever 4 realized: flat repr(u8) steps <=64B asserted, resolve-once FuncFrames, monomorphized kernel selection incl. fused QualScanVarCmpConst (0.56x/0.31x - 3.3x faster than C interp, zero fmgr calls); fallback/compile lanes FAIL justified (SlotData probes, mcx substrate - fixed-slot baking deferred on PlanState); V2 finding: match loop overlaps where direct threading serializes; 17 tests, Miri SB+TB, density 5.0%; docs/benchmarks/execexpr.md
 backend-executor-execGrouping	src/backend/executor/execGrouping.c	todo			fabled:backend-executor-execGrouping
 backend-executor-execIndexing	src/backend/executor/execIndexing.c	todo			fabled:backend-executor-execIndexing; m1-dep(stub-ok)
 backend-executor-execJunk	src/backend/executor/execJunk.c	todo			fabled:backend-executor-execJunk; m1-dep(stub-ok)

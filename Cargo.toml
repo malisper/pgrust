@@ -201,6 +201,8 @@ members = [
     "crates/backend/commands/portalcmds_seams",
     "crates/backend/storage/ipc/ipc_portal_seams",
     "crates/backend/utils/cache/plancache_portal_seams",
+    "crates/backend/utils/cache/plancache",
+    "crates/backend/nodes/nodes_core",
     "crates/backend/utils/mmgr/portalmem",
     "crates/backend/utils/resowner/resowner_portal_seams",
     "crates/backend/utils/sort/tuplestore_hold_seams",
@@ -285,6 +287,10 @@ members = [
     "crates/backend/parser/gram_core",
     "crates/backend/catalog/pg_database",
     "crates/common/controldata_utils",
+    "crates/backend/utils/misc/superuser",
+    "crates/backend/utils/adt/acl",
+    "crates/backend/catalog/aclchk",
+    "crates/backend/commands/dbcommands",
 ]
 
 [workspace.package]
