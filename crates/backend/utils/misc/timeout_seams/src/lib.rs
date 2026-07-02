@@ -25,3 +25,31 @@ pub struct DisableTimeoutParams {
 seam_core::seam!(
     pub fn disable_timeouts<'a>(timeouts: &'a [DisableTimeoutParams])
 );
+
+seam_core::seam!(
+    pub fn enable_timeout_after(id: TimeoutId, delay_ms: i32) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn disable_timeout(id: TimeoutId, keep_indicator: bool) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn reschedule_timeouts() -> types_error::PgResult<()>
+);
+
+// Only lock.c's TMPARAM_AFTER shape crosses this seam.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EnableTimeoutAfterParams {
+    pub id: TimeoutId,
+    pub delay_ms: i32,
+}
+
+seam_core::seam!(
+    pub fn enable_timeouts<'a>(timeouts: &'a [EnableTimeoutAfterParams]) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    // get_timeout_start_time(id) (timeout.c).
+    pub fn get_timeout_start_time(id: TimeoutId) -> types_core::TimestampTz
+);

@@ -50,20 +50,6 @@ pub struct ProcState {
 
 const _: () = assert!(size_of::<ProcState>() == 16);
 
-impl ProcState {
-    const fn inactive() -> Self {
-        Self {
-            procPid: AtomicI32::new(0),
-            nextMsgNum: AtomicI32::new(0),
-            resetState: AtomicBool::new(false),
-            signaled: AtomicBool::new(false),
-            hasMessages: AtomicBool::new(false),
-            sendOnly: AtomicBool::new(false),
-            nextLXID: AtomicU32::new(InvalidLocalTransactionId),
-        }
-    }
-}
-
 #[repr(C)]
 struct SISegHdr {
     minMsgNum: AtomicI32,

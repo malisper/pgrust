@@ -60,9 +60,6 @@ use mcx::{Mcx, PgString, PgVec};
 use types_core::AttrNumber;
 use types_tuple::NameData;
 
-// lsyscache.c projections. Each shape carries exactly the fixed-width Form
-// fields lsyscache reads (rule 6: lean per-purpose projections); NameData and
-// variable-width columns get their own single-purpose decls.
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PgAmopShape {
@@ -235,7 +232,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // SearchSysCache4(AMOPSTRATEGY) projected to amopopr; InvalidOid on miss.
     pub fn lookup_pg_amop_by_strategy(
         opfamily: Oid,
         lefttype: Oid,
@@ -245,8 +241,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // SearchSysCacheList1(AMOPOPID, opno): one projected row per catlist
-    // member, in catlist order.
     pub fn lookup_pg_amop_members_by_operator<'mcx>(
         mcx: Mcx<'mcx>,
         opno: Oid,
@@ -254,7 +248,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // SearchSysCache4(AMPROCNUM) projected to amproc; InvalidOid on miss.
     pub fn lookup_pg_amproc(
         opfamily: Oid,
         lefttype: Oid,
@@ -271,8 +264,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // SearchSysCacheAttName (filters attisdropped) projected to attnum;
-    // InvalidAttrNumber on miss.
     pub fn lookup_pg_attribute_attnum_by_name(relid: Oid, attname: &str) -> PgResult<AttrNumber>
 );
 
@@ -287,7 +278,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // GetSysCacheOid2(CASTSOURCETARGET); InvalidOid on miss.
     pub fn lookup_pg_cast_oid(sourcetypeid: Oid, targettypeid: Oid) -> PgResult<Oid>
 );
 
@@ -328,7 +318,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // PROCOID projected to (prorettype, proargtypes.values[..pronargs]).
     pub fn lookup_pg_proc_signature<'mcx>(
         mcx: Mcx<'mcx>,
         funcid: Oid,
@@ -336,7 +325,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // GetSysCacheOid2(RELNAMENSP); InvalidOid on miss.
     pub fn lookup_pg_class_relid_by_name(relname: &str, relnamespace: Oid) -> PgResult<Oid>
 );
 
@@ -361,7 +349,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // TYPEOID projected to (typcategory, typispreferred).
     pub fn pg_type_category(typid: Oid) -> PgResult<Option<(i8, bool)>>
 );
 
@@ -386,7 +373,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // SysCacheGetAttr(TYPEOID tuple, typdefaultbin/typdefault) as cstrings.
     pub fn pg_type_default_strings<'mcx>(
         mcx: Mcx<'mcx>,
         typid: Oid,
@@ -398,7 +384,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // SearchSysCache1(RANGEMULTIRANGE) projected to rngtypid.
     pub fn lookup_pg_range_by_multirange(multirange_oid: Oid) -> PgResult<Option<Oid>>
 );
 
@@ -413,7 +398,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // GetSysCacheOid1(PUBLICATIONNAME); InvalidOid on miss.
     pub fn lookup_pg_publication_oid(pubname: &str) -> PgResult<Oid>
 );
 
@@ -431,12 +415,10 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // SearchSysCache3(STATRELATTINH, relid, attnum, inh) projected to stawidth.
     pub fn pg_statistic_stawidth(relid: Oid, attnum: AttrNumber, inh: bool) -> PgResult<Option<i32>>
 );
 
 seam_core::seam!(
-    // GETSTRUCT(statstuple) as Form_pg_statistic, slot metadata columns only.
     pub fn pg_statistic_slot_shape(tuple: &HeapTupleData<'_>) -> PgStatisticSlotShape
 );
 
