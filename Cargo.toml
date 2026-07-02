@@ -105,6 +105,7 @@ members = [
     "crates/backend/tcop/dest",
     "crates/backend/parser/parser_small1",
     "crates/backend/utils/misc/queryenvironment",
+    "crates/backend/access/common/tupdesc",
 ]
 
 [workspace.package]

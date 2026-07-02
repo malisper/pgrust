@@ -1,0 +1,23 @@
+[package]
+name = "pqcomm"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pqcomm"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+stringinfo = { path = "../../../_support/types/stringinfo" }
+types_error = { path = "../../../_support/types/types_error" }
+elog = { path = "../../utils/error/elog" }
+init_small = { path = "../../utils/init/init_small" }
+pqcomm_seams = { path = "../pqcomm_seams" }
+be_secure_seams = { path = "../be_secure_seams" }
+libc = "0.2"
+
+[dev-dependencies]
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
