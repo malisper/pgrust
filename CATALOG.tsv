@@ -3,3 +3,1183 @@ types_error	-	ported	types_error	cold	substrate: PgError/PgResult; no C unit
 types_core	-	ported	types_core	cold	substrate: Oid + primitives; no C unit
 mcx	src/backend/utils/mmgr/mcxt.c,src/backend/utils/mmgr/aset.c,src/backend/utils/mmgr/bump.c	ported	mcx	0.68x-instr/0.92x-ns	substrate: arenas; PASS dual gate: aset alloc 0.66x/0.92x, bump alloc 0.63x/0.78x, reset 0.68x/0.90x (bump.c-shaped BumpArena, block-granular accounting, inline(always) allocate); vec_append 1.06x-instr/0.59x-ns kept; docs/optimizations/m0-substrate-parity.md
 datum	src/backend/access/common/heaptuple.c(partial)	ported	datum	1.00x-instr/1.00x-ns	substrate: 8B Datum; codecs 1.00x (asm-identical); varlena read via borrowed VarlenaRef lane 1.00x (7=7 instr, matches C VARSIZE/VARDATA); docs/optimizations/m0-substrate-parity.md
+seam-core	-	todo			substrate; fabled:seam-core; m1-spine; seam registry substrate
+types-tuple	-	todo			substrate; fabled:types-tuple; m1-spine; HeapTuple/MinimalTuple/ItemPointer types
+types-fmgr	-	todo			substrate; fabled:types-fmgr; m1-spine; FunctionCallInfoBaseData/FmgrInfo types
+types-scan	-	todo			substrate; fabled:types-scan; m1-spine; scankey/scan descriptor types
+types-stringinfo	-	todo			substrate; fabled:types-stringinfo; m1-spine; StringInfo
+types-resowner	-	todo			substrate; fabled:types-resowner; m1-spine; ResourceOwner types
+types-storage	-	todo			substrate; fabled:types-storage; m1-spine; block/buffer/relfilelocator types
+types-rel	-	todo			substrate; fabled:types-rel; m1-spine; Relation/RelationData types
+types-hash	-	todo			substrate; fabled:types-hash; m1-spine; dynahash types
+types-nbtree	-	todo			substrate; fabled:types-nbtree; m1-spine; btree types
+types-slot	-	todo			substrate; fabled:types-slot; m1-spine; TupleTableSlot types
+types-nodes	-	todo			substrate; fabled:types-nodes; m1-spine; Node trees + EEOP interpreter (fabled execexpr.rs lives here)
+types-pathnodes	-	todo			substrate; fabled:types-pathnodes; m1-spine; planner PathNode types
+types-portal	-	todo			substrate; fabled:types-portal; m1-spine; Portal types
+types-array	-	todo			substrate; fabled:types-array; m1-spine; ArrayType types
+common-controldata-utils	src/common/controldata_utils.c	todo			substrate; fabled:common-controldata-utils; m1-spine(boot); pg_control read at boot
+backend-access-brin-core	*/brin_inclusion.c,*/brin_minmax.c,*/brin_revmap.c,*/brin_tuple.c,*/brin_validate.c,*/brin_xlog.c	combined-into:backend-access-brin-family			fabled:backend-access-brin-family
+backend-access-brin-entry	*/brin.c,*/brin_bloom.c,*/brin_minmax_multi.c	todo			
+backend-access-brin-bloom	*/brin_bloom.c	todo			fabled:backend-access-brin-bloom
+backend-access-brin-inclusion	*/brin_inclusion.c	todo			fabled:backend-access-brin-inclusion
+backend-access-brin-minmax	*/brin_minmax.c	todo			fabled:backend-access-brin-minmax
+backend-access-brin-pageops	*/brin_pageops.c,*/brin_revmap.c	todo			fabled:backend-access-brin-pageops
+backend-access-brin-revmap	*/brin_revmap.c	combined-into:backend-access-brin-pageops			fabled:merged-into
+backend-access-brin-scan	*/brin.c	todo			fabled:backend-access-brin-scan
+backend-access-brin-tuple	*/brin_tuple.c	todo			fabled:backend-access-brin-tuple
+backend-access-brin-validate	*/brin_validate.c	todo			fabled:backend-access-brin-validate
+backend-access-brin-xlog	*/brin_xlog.c	todo			fabled:backend-access-brin-xlog; m1-dep(stub-ok)
+backend-access-common-heaptuple	*/heaptuple.c	todo			fabled:backend-access-common-heaptuple; m1-spine; codec lane partial in substrate crate datum
+backend-access-common-indextuple	*/indextuple.c	todo			fabled:backend-access-common-indextuple; m1-dep(stub-ok)
+backend-access-common-more	*/printtup.c,*/reloptions.c	todo			fabled:backend-access-common-reloptions + backend-access-common-printtup; m1-spine
+backend-access-common-next	*/attmap.c,*/syncscan.c,*/tupconvert.c	todo			fabled:backend-access-common-next; m1-spine
+backend-access-common-relation	*/relation.c	todo			fabled:backend-access-common-relation; m1-spine
+backend-access-common-small	*/bufmask.c,*/printsimple.c,*/relation.c,*/scankey.c,*/session.c,*/toast_compression.c	todo			
+backend-access-common-tidstore	*/tidstore.c	todo			fabled:backend-access-common-tidstore
+backend-access-common-detoast	*/detoast.c	todo			fabled:backend-access-common-detoast; m1-dep(stub-ok)
+backend-access-common-toastdesc	*/toast_internals.c	todo			
+backend-access-common-tupdesc	*/tupdesc.c	todo			fabled:backend-access-common-tupdesc; m1-spine
+backend-access-gin-core-probe	*/ginarrayproc.c,*/ginlogic.c,*/ginpostinglist.c,*/ginvalidate.c	todo			fabled:backend-access-gin-core-probe
+backend-access-gin-ginutil	*/ginutil.c	todo			fabled:backend-access-gin-ginutil
+backend-access-gin-ginscan	*/ginscan.c	todo			fabled:backend-access-gin-ginscan
+backend-access-gin-ginxlog	*/ginxlog.c	todo			fabled:backend-access-gin-ginxlog
+backend-access-gin-ginvacuum	*/ginvacuum.c	todo			fabled:backend-access-gin-ginvacuum
+backend-access-gin-ginget	*/ginget.c	todo			fabled:backend-access-gin-ginget
+backend-access-gin-core	*/ginarrayproc.c,*/ginbtree.c,*/ginbulk.c,*/ginentrypage.c,*/ginfast.c,*/ginget.c,*/ginlogic.c,*/ginpostinglist.c,*/ginscan.c,*/ginvacuum.c,*/ginvalidate.c,*/ginxlog.c	todo			
+backend-access-gin-extra	*/gindatapage.c,*/gininsert.c	todo			
+backend-access-gin-gindatapage	*/gindatapage.c	todo			fabled:backend-access-gin-gindatapage
+backend-access-gin-validate-unconstify	*/ginvalidate.c	combined-into:backend-access-gin-core-probe			fabled:backend-access-gin-core-probe
+backend-access-gist-core-probe	*/gist.c,*/gistbuild.c,*/gistbuildbuffers.c,*/gistget.c,*/gistscan.c,*/gistsplit.c,*/gistutil.c,*/gistvacuum.c,*/gistvalidate.c,*/gistxlog.c	combined-into:backend-access-gist-core			fabled:duplicate-of; m1-dep(stub-ok)
+backend-access-gist-core	*/gist.c,*/gistbuild.c,*/gistbuildbuffers.c,*/gistget.c,*/gistscan.c,*/gistsplit.c,*/gistutil.c,*/gistvacuum.c,*/gistvalidate.c,*/gistxlog.c	todo			m1-dep(stub-ok)
+backend-access-gist-build	*/gistbuild.c,*/gistbuildbuffers.c	todo			fabled:backend-access-gist-build
+backend-access-gist-proc	*/gistproc.c	todo			fabled:backend-access-gist-proc
+backend-access-hash-core	*/hashinsert.c,*/hashovfl.c,*/hashpage.c,*/hashsearch.c,*/hashutil.c	todo			fabled:backend-access-hash-core; m1-dep(stub-ok)
+backend-access-hash-entry	*/hash.c,*/hashsort.c	todo			fabled:backend-access-hash-entry; m1-spine
+backend-access-hash-func	*/hashfunc.c	combined-into:backend-access-hashfunc			fabled:duplicate-of
+backend-access-hash-xlog	*/hash_xlog.c	todo			fabled:backend-access-hash-xlog; m1-dep(stub-ok)
+backend-access-hashfunc	*/hashfunc.c	todo			fabled:backend-access-hashfunc; m1-dep(stub-ok)
+backend-access-hashinsert	*/hashinsert.c	combined-into:backend-access-hash-core			fabled:backend-access-hash-core; m1-dep(stub-ok)
+backend-access-hashovfl	*/hashovfl.c	combined-into:backend-access-hash-core			fabled:backend-access-hash-core; m1-dep(stub-ok)
+backend-access-hashpage	*/hashpage.c	combined-into:backend-access-hash-core			fabled:backend-access-hash-core; m1-dep(stub-ok)
+backend-access-hashsearch	*/hashsearch.c	combined-into:backend-access-hash-core			fabled:backend-access-hash-core; m1-dep(stub-ok)
+backend-access-hashutil	*/hashutil.c	combined-into:backend-access-hash-core			fabled:backend-access-hash-core; m1-dep(stub-ok)
+backend-access-hashvalidate	*/hashvalidate.c	todo			fabled:backend-access-hashvalidate
+backend-access-heap-heapam-handler	src/backend/access/heap/heapam_handler.c	todo			fabled:backend-access-heap-heapam-handler-core; m1-spine
+backend-access-heap-heapam-visibility	src/backend/access/heap/heapam_visibility.c	todo			fabled:backend-access-heap-heapam-visibility; m1-spine
+backend-access-heap-heapam-xlog	src/backend/access/heap/heapam_xlog.c	todo			fabled:backend-access-heap-heapam-xlog; m1-spine
+backend-access-heap-heapam	src/backend/access/heap/heapam.c	todo			fabled:backend-access-heap-heapam; m1-spine
+backend-access-heap-heaptoast	src/backend/access/heap/heaptoast.c	todo			fabled:backend-access-heap-heaptoast; m1-dep(stub-ok)
+backend-access-heap-hio	src/backend/access/heap/hio.c	todo			fabled:backend-access-heap-hio; m1-dep(stub-ok)
+backend-access-heap-pruneheap	src/backend/access/heap/pruneheap.c	todo			fabled:backend-access-heap-pruneheap; m1-dep(stub-ok)
+backend-access-heap-rewriteheap	src/backend/access/heap/rewriteheap.c	todo			fabled:backend-access-heap-rewriteheap; m1-dep(stub-ok)
+backend-access-heap-vacuumlazy	src/backend/access/heap/vacuumlazy.c	todo			fabled:backend-access-heap-vacuumlazy; m1-dep(stub-ok)
+backend-access-heap-visibilitymap	src/backend/access/heap/visibilitymap.c	todo			fabled:backend-access-heap-visibilitymap; m1-dep(stub-ok)
+backend-access-index-genam	*/genam.c	todo			m1-spine
+backend-access-index-indexam	*/indexam.c	todo			fabled:backend-access-index-indexam; m1-spine
+backend-access-nbt-compare	*/nbtcompare.c	todo			fabled:backend-access-nbt-compare; m1-dep(stub-ok)
+backend-access-nbt-dedup	*/nbtdedup.c	todo			fabled:backend-access-nbt-dedup; m1-dep(stub-ok)
+backend-access-nbt-insert	*/nbtinsert.c	todo			fabled:backend-access-nbtree-core; m1-spine
+backend-access-nbt-page	*/nbtpage.c	todo			fabled:backend-access-nbtree-core; m1-spine
+backend-access-nbt-preprocess	*/nbtpreprocesskeys.c	todo			fabled:backend-access-nbtree-core; m1-spine
+backend-access-nbt-search	*/nbtsearch.c	todo			fabled:backend-access-nbtree-core; m1-spine
+backend-access-nbt-splitloc	*/nbtsplitloc.c	todo			fabled:backend-access-nbtree-core; m1-spine
+backend-access-nbt-utils	*/nbtutils.c	todo			fabled:backend-access-nbtree-core; m1-spine
+backend-access-nbt-validate	*/nbtvalidate.c	todo			fabled:backend-access-nbt-validate
+backend-access-nbt-xlog	*/nbtxlog.c	todo			fabled:backend-access-nbt-xlog; m1-dep(stub-ok)
+backend-access-nbtree-core	*/nbtsearch.c,*/nbtinsert.c,*/nbtpage.c,*/nbtutils.c,*/nbtsplitloc.c,*/nbtpreprocesskeys.c	todo			fabled:backend-access-nbtree-core; m1-spine
+backend-access-nbtree-nbtree	src/backend/access/nbtree/nbtree.c	todo			fabled:backend-access-nbtree-nbtree; m1-spine
+backend-access-nbtree-nbtsort	src/backend/access/nbtree/nbtsort.c	todo			fabled:backend-access-nbtree-nbtsort
+backend-access-small-core	?	todo			
+backend-access-index-amvalidate	src/backend/access/index/amvalidate.c	todo			fabled:backend-access-index-amvalidate
+backend-access-index-amapi	src/backend/access/index/amapi.c	todo			fabled:backend-access-index-amapi; m1-dep(stub-ok)
+backend-access-spg-doinsert	*/spgdoinsert.c	todo			fabled:backend-access-spgist-core
+backend-access-spg-kdtree	*/spgkdtreeproc.c	todo			fabled:backend-access-spg-kdtree
+backend-access-spg-proc	*/spgproc.c	todo			fabled:backend-access-spg-proc
+backend-access-spg-quadtree	*/spgquadtreeproc.c	todo			fabled:backend-access-spg-quadtree
+backend-access-spg-scan	*/spgscan.c	todo			fabled:backend-access-spgist-core
+backend-access-spg-text	*/spgtextproc.c	todo			
+backend-access-spg-utils	*/spgutils.c	todo			fabled:backend-access-spgist-core
+backend-access-spg-vacuum	*/spgvacuum.c	combined-into:backend-access-spgist-core			fabled:backend-access-spgist-core
+backend-access-spg-validate	*/spgvalidate.c	todo			
+backend-access-spg-xlog	*/spgxlog.c	todo			fabled:backend-access-spgist-core
+backend-access-spgist-core	*/spgdoinsert.c,*/spgkdtreeproc.c,*/spgquadtreeproc.c,*/spgtextproc.c,*/spgutils.c,*/spgvacuum.c,*/spgvalidate.c,*/spgxlog.c	todo			
+backend-access-spgist-entry	*/spgproc.c,*/spgscan.c	combined-into:backend-access-spgist-core			fabled:backend-access-spgist-core
+backend-access-spgist-insert	*/spginsert.c	combined-into:backend-access-spgist-core			fabled:backend-access-spgist-core
+backend-access-tableam	*/tableam.c	todo			fabled:backend-access-table-tableam; m1-spine
+backend-access-tablesample-core	*/bernoulli.c,*/system.c,*/tablesample.c	todo			fabled:backend-access-tablesample-core; m1-dep(stub-ok)
+backend-access-transam-clog	src/backend/access/transam/clog.c	todo			fabled:backend-access-transam-clog; m1-spine(boot)
+backend-access-transam-commit-ts	src/backend/access/transam/commit_ts.c	todo			fabled:backend-access-transam-commit-ts; m1-dep(stub-ok)
+backend-access-transam-generic-xlog	src/backend/access/transam/generic_xlog.c	todo			fabled:backend-access-transam-generic-xlog; m1-dep(stub-ok)
+backend-access-transam-multixact	src/backend/access/transam/multixact.c	todo			fabled:backend-access-transam-multixact; m1-spine
+backend-access-transam-parallel	src/backend/access/transam/parallel.c	todo			fabled:backend-access-transam-parallel; m1-spine
+backend-access-transam-rmgr	*/rmgr.c	todo			fabled:backend-access-transam-rmgr; m1-spine(boot)
+backend-access-transam-slru	src/backend/access/transam/slru.c	todo			fabled:backend-access-transam-slru; m1-spine(boot)
+backend-access-transam-subtrans	src/backend/access/transam/subtrans.c	todo			fabled:backend-access-transam-subtrans; m1-spine(boot)
+backend-access-transam-timeline	src/backend/access/transam/timeline.c	todo			fabled:backend-access-transam-timeline; m1-spine(boot)
+backend-access-transam-transam	src/backend/access/transam/transam.c	todo			fabled:backend-access-transam-transam; m1-dep(stub-ok)
+backend-access-transam-twophase-rmgr	*/twophase_rmgr.c	todo			fabled:backend-access-transam-twophase-rmgr; m1-spine(boot)
+backend-access-transam-twophase	src/backend/access/transam/twophase.c	todo			fabled:backend-access-transam-twophase; m1-spine(boot)
+backend-access-transam-varsup	src/backend/access/transam/varsup.c	todo			fabled:backend-access-transam-varsup; m1-spine
+backend-access-transam-xact	src/backend/access/transam/xact.c	todo			fabled:backend-access-transam-xact; m1-spine
+backend-access-transam-xlog	src/backend/access/transam/xlog.c,src/include/port/atomics.h	todo			fabled:backend-access-transam-xlog; m1-spine
+backend-access-transam-xlogarchive	src/backend/access/transam/xlogarchive.c	todo			fabled:backend-access-transam-xlogarchive; m1-dep(stub-ok)
+backend-access-transam-xlogbackup	*/xlogbackup.c	todo			fabled:backend-access-transam-xlogbackup; m1-dep(stub-ok)
+backend-access-transam-xlogfuncs	src/backend/access/transam/xlogfuncs.c	todo			fabled:backend-access-transam-xlogfuncs
+backend-access-transam-xloginsert	src/backend/access/transam/xloginsert.c	todo			fabled:backend-access-transam-xloginsert; m1-dep(stub-ok)
+backend-access-transam-xlogprefetcher	src/backend/access/transam/xlogprefetcher.c	todo			fabled:backend-access-transam-xlogprefetcher; m1-dep(stub-ok)
+backend-access-transam-xlogreader	src/backend/access/transam/xlogreader.c	todo			fabled:backend-access-transam-xlogreader; m1-spine(boot)
+backend-access-transam-xlogrecovery	src/backend/access/transam/xlogrecovery.c	todo			fabled:backend-access-transam-xlogrecovery; m1-spine(boot)
+backend-access-transam-xlogstats	*/xlogstats.c	todo			fabled:backend-access-transam-xlogstats
+backend-access-transam-xlogutils	src/backend/access/transam/xlogutils.c	todo			fabled:backend-access-transam-xlogutils; m1-spine(boot)
+backend-archive-shell-archive	*/shell_archive.c	todo			fabled:backend-archive-shell-archive
+backend-backup-basebackup	*/basebackup.c	todo			fabled:backend-backup-basebackup; m1-dep(stub-ok)
+backend-backup-copy	*/basebackup_copy.c	todo			fabled:backend-backup-copy
+backend-backup-gzip	*/basebackup_gzip.c	todo			fabled:backend-backup-gzip
+backend-backup-incremental	*/basebackup_incremental.c	todo			fabled:backend-backup-incremental
+backend-backup-lz4	*/basebackup_lz4.c	todo			fabled:backend-backup-lz4
+backend-backup-manifest	*/backup_manifest.c	todo			fabled:backend-backup-manifest
+backend-backup-server	*/basebackup_server.c	todo			fabled:backend-backup-server
+backend-backup-sink-support	*/basebackup_progress.c	todo			fabled:backend-backup-sink-support; m1-dep(stub-ok)
+backend-backup-throttle	*/basebackup_throttle.c	todo			fabled:backend-backup-throttle
+backend-backup-sink	*/basebackup_sink.c	todo			fabled:backend-backup-sink; m1-dep(stub-ok)
+backend-backup-target	*/basebackup_target.c	todo			fabled:backend-backup-basebackup-target; m1-dep(stub-ok)
+backend-backup-walsummary	*/walsummary.c	todo			fabled:backend-backup-walsummary
+backend-backup-walsummaryfuncs	*/walsummaryfuncs.c	todo			fabled:backend-backup-walsummaryfuncs
+backend-backup-zstd	*/basebackup_zstd.c	todo			fabled:backend-backup-zstd
+backend-bootstrap-bootparse	src/backend/bootstrap/bootparse.y,build-clean/src/backend/bootstrap/bootparse.c	todo			fabled:backend-bootstrap-bootparse
+backend-bootstrap-bootscanner	src/backend/bootstrap/bootscanner.l,build-clean/src/backend/bootstrap/bootscanner.c	todo			fabled:backend-bootstrap-bootscanner
+backend-bootstrap-bootstrap	src/backend/bootstrap/bootstrap.c	todo			fabled:backend-bootstrap-bootstrap; m1-dep(stub-ok)
+backend-catalog-catalog	*/catalog.c	todo			fabled:backend-catalog-catalog; m1-spine(boot)
+backend-catalog-aclchk	*/aclchk.c	todo			fabled:backend-catalog-aclchk; m1-dep(stub-ok)
+backend-catalog-dependency	*/dependency.c	todo			fabled:backend-catalog-dependency; m1-dep(stub-ok)
+backend-catalog-heap	*/heap.c	todo			fabled:backend-catalog-heap; m1-dep(stub-ok)
+backend-catalog-index	src/backend/catalog/index.c	todo			fabled:backend-catalog-index; m1-spine
+backend-catalog-indexing	*/indexing.c	todo			fabled:backend-catalog-indexing; m1-dep(stub-ok)
+backend-catalog-namespace	*/namespace.c	todo			fabled:backend-catalog-namespace; m1-spine
+backend-catalog-objectaddress	*/objectaddress.c	todo			fabled:backend-catalog-objectaddress; m1-dep(stub-ok)
+backend-catalog-partition	*/partition.c	todo			fabled:backend-catalog-partition; m1-dep(stub-ok)
+backend-catalog-pg-aggregate	*/pg_aggregate.c	todo			fabled:backend-catalog-pg-aggregate
+backend-catalog-pg-attrdef	*/pg_attrdef.c	todo			fabled:backend-catalog-pg-attrdef; m1-dep(stub-ok)
+backend-catalog-pg-cast	*/pg_cast.c	todo			fabled:backend-catalog-pg-cast
+backend-catalog-pg-collation	*/pg_collation.c	todo			fabled:backend-catalog-pg-collation
+backend-catalog-pg-constraint	*/pg_constraint.c	todo			fabled:backend-catalog-pg-constraint; m1-dep(stub-ok)
+backend-catalog-pg-conversion	*/pg_conversion.c	todo			fabled:backend-catalog-pg-conversion; m1-dep(stub-ok)
+backend-catalog-pg-db-role-setting	*/pg_db_role_setting.c	todo			fabled:backend-catalog-pg-db-role-setting; m1-dep(stub-ok)
+backend-catalog-pg-depend	*/pg_depend.c	todo			fabled:backend-catalog-pg-depend; m1-dep(stub-ok)
+backend-catalog-pg-enum	*/pg_enum.c	todo			fabled:backend-catalog-pg-enum; m1-spine
+backend-catalog-pg-inherits	*/pg_inherits.c	todo			fabled:backend-catalog-pg-inherits; m1-dep(stub-ok)
+backend-catalog-pg-largeobject	*/pg_largeobject.c	todo			fabled:backend-catalog-pg-largeobject; m1-dep(stub-ok)
+backend-catalog-pg-namespace	*/pg_namespace.c	todo			fabled:backend-catalog-pg-namespace; m1-dep(stub-ok)
+backend-catalog-pg-authid	*/pg_authid.c,*/pg_auth_members.c (commands/user.c catalog-write owner)	todo			fabled:backend-catalog-pg-authid
+backend-catalog-pg-operator	*/pg_operator.c	todo			fabled:backend-catalog-pg-operator
+backend-catalog-pg-parameter-acl	*/pg_parameter_acl.c	todo			fabled:backend-catalog-pg-parameter-acl
+backend-catalog-pg-proc	*/pg_proc.c	todo			fabled:backend-catalog-pg-proc; m1-dep(stub-ok)
+backend-catalog-pg-publication	*/pg_publication.c	todo			fabled:backend-catalog-pg-publication; m1-dep(stub-ok)
+backend-catalog-pg-range	*/pg_range.c	todo			fabled:backend-catalog-pg-range
+backend-catalog-pg-shdepend	*/pg_shdepend.c	todo			fabled:backend-catalog-pg-shdepend; m1-dep(stub-ok)
+backend-catalog-pg-subscription	*/pg_subscription.c	todo			fabled:backend-catalog-pg-subscription; m1-dep(stub-ok)
+backend-catalog-pg-type	*/pg_type.c	todo			fabled:backend-catalog-pg-type; m1-dep(stub-ok)
+backend-catalog-probe-catalog	*/catalog.c	todo			fabled:backend-catalog-catalog; m1-spine(boot)
+backend-catalog-probe-objectaccess	*/objectaccess.c	todo			fabled:backend-catalog-objectaccess; m1-dep(stub-ok)
+backend-catalog-probe-pg_class	*/pg_class.c	todo			fabled:backend-catalog-pg-class; m1-dep(stub-ok)
+backend-catalog-small	*/catalog.c,*/objectaccess.c,*/pg_class.c	combined-into:backend-catalog-catalog			
+backend-catalog-storage	*/storage.c	todo			fabled:backend-catalog-storage; m1-spine
+backend-catalog-toasting	*/toasting.c	todo			fabled:backend-catalog-toasting; m1-dep(stub-ok)
+backend-commands-aggregatecmds	src/backend/commands/aggregatecmds.c	todo			fabled:backend-commands-aggregatecmds
+backend-commands-alter	src/backend/commands/alter.c	todo			fabled:backend-commands-alter
+backend-commands-amcmds	src/backend/commands/amcmds.c	todo			fabled:backend-commands-amcmds
+backend-commands-analyze	src/backend/commands/analyze.c	todo			fabled:backend-commands-analyze
+backend-commands-async	src/backend/commands/async.c	todo			fabled:backend-commands-async; m1-spine
+backend-commands-cluster	src/backend/commands/cluster.c	todo			fabled:backend-commands-cluster; m1-dep(stub-ok)
+backend-commands-collationcmds	src/backend/commands/collationcmds.c	todo			m1-dep(stub-ok)
+backend-commands-comment	src/backend/commands/comment.c	todo			fabled:backend-commands-comment; m1-dep(stub-ok)
+backend-commands-constraint	src/backend/commands/constraint.c	todo			fabled:backend-commands-constraint
+backend-commands-conversioncmds	*/conversioncmds.c	todo			fabled:backend-commands-conversioncmds
+backend-commands-copy	src/backend/commands/copy.c	todo			fabled:backend-commands-copy
+backend-commands-copyfrom	src/backend/commands/copyfrom.c	todo			
+backend-commands-copyfromparse	src/backend/commands/copyfromparse.c	todo			fabled:backend-commands-copyfromparse
+backend-commands-copyto	src/backend/commands/copyto.c	todo			fabled:backend-commands-copyto; m1-dep(stub-ok)
+backend-commands-createas	src/backend/commands/createas.c	todo			fabled:backend-commands-createas; m1-dep(stub-ok)
+backend-commands-dbcommands	src/backend/commands/dbcommands.c	todo			fabled:backend-commands-dbcommands; m1-dep(stub-ok)
+backend-commands-define	src/backend/commands/define.c	todo			fabled:backend-commands-define; m1-dep(stub-ok)
+backend-commands-discard	*/discard.c	todo			fabled:backend-commands-discard
+backend-commands-dropcmds	src/backend/commands/dropcmds.c	todo			fabled:backend-commands-dropcmds
+backend-commands-event-trigger	src/backend/commands/event_trigger.c	todo			m1-dep(stub-ok)
+backend-commands-explain-dr	src/backend/commands/explain_dr.c	todo			fabled:backend-commands-explain-dr
+backend-commands-explain-format	src/backend/commands/explain_format.c	todo			fabled:backend-commands-explain-format
+backend-commands-explain-state	src/backend/commands/explain_state.c	todo			fabled:backend-commands-explain-state
+backend-commands-explain	src/backend/commands/explain.c	todo			fabled:backend-commands-explain
+backend-commands-extension	src/backend/commands/extension.c	todo			fabled:backend-commands-extension
+backend-commands-foreigncmds	src/backend/commands/foreigncmds.c	todo			fabled:backend-commands-foreigncmds; m1-dep(stub-ok)
+backend-commands-functioncmds	src/backend/commands/functioncmds.c	todo			fabled:backend-commands-functioncmds; m1-dep(stub-ok)
+backend-commands-indexcmds	src/backend/commands/indexcmds.c	todo			fabled:backend-commands-indexcmds; m1-dep(stub-ok)
+backend-commands-lockcmds	src/backend/commands/lockcmds.c	todo			fabled:backend-commands-lockcmds
+backend-commands-matview	src/backend/commands/matview.c	todo			fabled:backend-commands-matview; m1-dep(stub-ok)
+backend-commands-opclasscmds	src/backend/commands/opclasscmds.c	todo			fabled:backend-commands-opclasscmds; m1-dep(stub-ok)
+backend-commands-operatorcmds	src/backend/commands/operatorcmds.c	todo			fabled:backend-commands-operatorcmds
+backend-commands-policy	src/backend/commands/policy.c	todo			fabled:backend-commands-policy
+backend-commands-portalcmds-helper-check	*/portalcmds.c	combined-into:backend-commands-portalcmds			fabled:backend-commands-portalcmds; m1-spine
+backend-commands-portalcmds	src/backend/commands/portalcmds.c	todo			fabled:backend-commands-portalcmds; m1-spine
+backend-commands-prepare	src/backend/commands/prepare.c	todo			fabled:backend-commands-prepare; m1-dep(stub-ok)
+backend-commands-proclang	src/backend/commands/proclang.c	todo			fabled:backend-commands-proclang; m1-dep(stub-ok)
+backend-commands-publicationcmds	src/backend/commands/publicationcmds.c	todo			fabled:backend-commands-publicationcmds
+backend-commands-schemacmds	src/backend/commands/schemacmds.c	todo			fabled:backend-commands-schemacmds
+backend-commands-seclabel	src/backend/commands/seclabel.c	todo			fabled:backend-commands-seclabel; m1-dep(stub-ok)
+backend-commands-sequence	src/backend/commands/sequence.c	todo			m1-dep(stub-ok)
+backend-commands-statscmds	src/backend/commands/statscmds.c	todo			fabled:backend-commands-statscmds
+backend-commands-subscriptioncmds	src/backend/commands/subscriptioncmds.c	todo			
+backend-commands-tablecmds	src/backend/commands/tablecmds.c	todo			fabled:backend-commands-tablecmds; m1-spine
+backend-commands-tablespace	src/backend/commands/tablespace.c	todo			fabled:backend-commands-tablespace; m1-dep(stub-ok)
+backend-commands-trigger	src/backend/commands/trigger.c	todo			m1-spine
+backend-commands-tsearchcmds	src/backend/commands/tsearchcmds.c	todo			fabled:backend-commands-tsearchcmds
+backend-commands-typecmds	src/backend/commands/typecmds.c	todo			fabled:backend-commands-typecmds; m1-dep(stub-ok)
+backend-commands-user	src/backend/commands/user.c	todo			fabled:backend-commands-user; m1-dep(stub-ok)
+backend-commands-vacuum	src/backend/commands/vacuum.c	todo			fabled:backend-commands-vacuum; m1-dep(stub-ok)
+backend-commands-vacuumparallel	src/backend/commands/vacuumparallel.c	todo			fabled:backend-commands-vacuumparallel
+backend-commands-variable	src/backend/commands/variable.c	todo			fabled:backend-commands-variable; m1-dep(stub-ok)
+backend-commands-view	src/backend/commands/view.c	todo			fabled:backend-commands-view; m1-dep(stub-ok)
+backend-conv-cyrillic-and-mic	*/cyrillic_and_mic.c	todo			fabled:backend-conv-cyrillic-and-mic
+backend-conv-euc-cn-and-mic	*/euc_cn_and_mic.c	todo			fabled:backend-conv-euc-cn-and-mic
+backend-conv-euc-jp-and-sjis	*/euc_jp_and_sjis.c	todo			fabled:backend-conv-euc-jp-and-sjis
+backend-conv-euc-kr-and-mic	*/euc_kr_and_mic.c	todo			fabled:backend-conv-euc-kr-and-mic
+backend-conv-euc-tw-and-big5	*/big5.c,*/euc_tw_and_big5.c	todo			fabled:backend-conv-euc-tw-and-big5
+backend-conv-euc2004-sjis2004	*/euc2004_sjis2004.c	todo			fabled:backend-conv-euc2004-sjis2004
+backend-conv-latin-and-mic	*/latin_and_mic.c	todo			fabled:backend-conv-latin-and-mic
+backend-conv-latin2-and-win1250	*/latin2_and_win1250.c	todo			fabled:backend-conv-latin2-and-win1250
+backend-conv-utf8-and-big5	*/utf8_and_big5.c	todo			fabled:backend-conv-utf8-and-big5
+backend-conv-utf8-and-cyrillic	*/utf8_and_cyrillic.c	todo			fabled:backend-conv-utf8-and-cyrillic
+backend-conv-utf8-and-euc-cn	*/utf8_and_euc_cn.c	todo			fabled:backend-conv-utf8-and-euc-cn
+backend-conv-utf8-and-euc-jp	*/utf8_and_euc_jp.c	todo			fabled:backend-conv-utf8-and-euc-jp
+backend-conv-utf8-and-euc-kr	*/utf8_and_euc_kr.c	todo			fabled:backend-conv-utf8-and-euc-kr
+backend-conv-utf8-and-euc-tw	*/utf8_and_euc_tw.c	todo			fabled:backend-conv-utf8-and-euc-tw
+backend-conv-utf8-and-euc2004	*/utf8_and_euc2004.c	todo			fabled:backend-conv-utf8-and-euc2004
+backend-conv-utf8-and-gb18030	*/utf8_and_gb18030.c	todo			fabled:backend-conv-utf8-and-gb18030
+backend-conv-utf8-and-gbk	*/utf8_and_gbk.c	todo			fabled:backend-conv-utf8-and-gbk
+backend-conv-utf8-and-iso8859-1	*/utf8_and_iso8859_1.c	todo			fabled:backend-conv-utf8-and-iso8859-1
+backend-conv-utf8-and-iso8859	*/utf8_and_iso8859.c	todo			fabled:backend-conv-utf8-and-iso8859
+backend-conv-utf8-and-johab	*/utf8_and_johab.c	todo			fabled:backend-conv-utf8-and-johab
+backend-conv-utf8-and-sjis	*/utf8_and_sjis.c	todo			fabled:backend-conv-utf8-and-sjis
+backend-conv-utf8-and-sjis2004	*/utf8_and_sjis2004.c	todo			fabled:backend-conv-utf8-and-sjis2004
+backend-conv-utf8-and-uhc	*/utf8_and_uhc.c	todo			fabled:backend-conv-utf8-and-uhc
+backend-conv-utf8-and-win	*/utf8_and_win.c	todo			fabled:backend-conv-utf8-and-win
+backend-executor-execAmi	src/backend/executor/execAmi.c	todo			fabled:backend-executor-execAmi; m1-dep(stub-ok)
+backend-executor-execAsync	src/backend/executor/execAsync.c	todo			
+backend-executor-execCurrent	src/backend/executor/execCurrent.c	todo			fabled:backend-executor-execCurrent
+backend-executor-execExpr	src/backend/executor/execExpr.c	todo			fabled:backend-executor-execExpr; m1-spine
+backend-executor-execExprInterp	src/backend/executor/execExprInterp.c	todo			fabled:backend-executor-execExprInterp; m1-spine
+backend-executor-execGrouping	src/backend/executor/execGrouping.c	todo			fabled:backend-executor-execGrouping
+backend-executor-execIndexing	src/backend/executor/execIndexing.c	todo			fabled:backend-executor-execIndexing; m1-dep(stub-ok)
+backend-executor-execJunk	src/backend/executor/execJunk.c	todo			fabled:backend-executor-execJunk; m1-dep(stub-ok)
+backend-executor-execMain	src/backend/executor/execMain.c	todo			fabled:backend-executor-execMain; m1-spine
+backend-executor-execParallel	src/backend/executor/execParallel.c	todo			fabled:backend-executor-execParallel; m1-dep(stub-ok)
+backend-executor-execPartition	src/backend/executor/execPartition.c	todo			fabled:backend-executor-execPartition; m1-dep(stub-ok)
+backend-executor-execProcnode	src/backend/executor/execProcnode.c	todo			fabled:backend-executor-execProcnode; m1-spine
+backend-executor-execReplication	src/backend/executor/execReplication.c	todo			fabled:backend-executor-execReplication; m1-dep(stub-ok)
+backend-executor-execSRF	src/backend/executor/execSRF.c	todo			m1-dep(stub-ok)
+backend-executor-execScan	src/backend/executor/execScan.c	todo			fabled:backend-executor-execScan
+backend-executor-execTuples	src/backend/executor/execTuples.c	todo			fabled:backend-executor-execTuples; m1-spine
+backend-executor-execUtils	src/backend/executor/execUtils.c	todo			fabled:backend-executor-execUtils; m1-spine
+backend-executor-functions	src/backend/executor/functions.c	todo			m1-dep(stub-ok)
+backend-executor-instrument	src/backend/executor/instrument.c	todo			fabled:backend-executor-instrument; m1-dep(stub-ok)
+backend-executor-nodeAgg	src/backend/executor/nodeAgg.c	todo			fabled:backend-executor-nodeAgg; m1-dep(stub-ok)
+backend-executor-nodeAppend	src/backend/executor/nodeAppend.c	todo			fabled:backend-executor-nodeAppend; m1-dep(stub-ok)
+backend-executor-nodeBitmapAnd	src/backend/executor/nodeBitmapAnd.c	todo			fabled:backend-executor-nodeBitmapAnd; m1-dep(stub-ok)
+backend-executor-nodeBitmapHeapscan	src/backend/executor/nodeBitmapHeapscan.c	todo			fabled:backend-executor-nodeBitmapHeapscan; m1-dep(stub-ok)
+backend-executor-nodeBitmapIndexscan	src/backend/executor/nodeBitmapIndexscan.c	todo			fabled:backend-executor-nodeBitmapIndexscan; m1-dep(stub-ok)
+backend-executor-nodeBitmapOr	src/backend/executor/nodeBitmapOr.c	todo			fabled:backend-executor-nodeBitmapOr; m1-dep(stub-ok)
+backend-executor-nodeCtescan	src/backend/executor/nodeCtescan.c	todo			m1-dep(stub-ok)
+backend-executor-nodeCustom	src/backend/executor/nodeCustom.c	todo			fabled:backend-executor-nodeCustom; m1-dep(stub-ok)
+backend-executor-nodeForeignscan	src/backend/executor/nodeForeignscan.c	todo			fabled:backend-executor-nodeForeignscan; m1-dep(stub-ok)
+backend-executor-nodeFunctionscan	src/backend/executor/nodeFunctionscan.c	todo			m1-dep(stub-ok)
+backend-executor-nodeGather	src/backend/executor/nodeGather.c	todo			fabled:backend-executor-nodeGather; m1-dep(stub-ok)
+backend-executor-nodeGatherMerge	src/backend/executor/nodeGatherMerge.c	todo			fabled:backend-executor-nodeGatherMerge; m1-dep(stub-ok)
+backend-executor-nodeGroup	src/backend/executor/nodeGroup.c	todo			fabled:backend-executor-nodeGroup; m1-dep(stub-ok)
+backend-executor-nodeHash	src/backend/executor/nodeHash.c	todo			fabled:backend-executor-nodeHash; m1-dep(stub-ok)
+backend-executor-nodeHashjoin	src/backend/executor/nodeHashjoin.c	todo			fabled:backend-executor-nodeHashjoin; m1-dep(stub-ok)
+backend-executor-nodeIncrementalSort	src/backend/executor/nodeIncrementalSort.c	todo			fabled:backend-executor-nodeIncrementalSort; m1-dep(stub-ok)
+backend-executor-nodeIndexonlyscan	src/backend/executor/nodeIndexonlyscan.c	todo			fabled:backend-executor-nodeIndexonlyscan; m1-dep(stub-ok)
+backend-executor-nodeIndexscan	src/backend/executor/nodeIndexscan.c	todo			fabled:backend-executor-nodeIndexscan; m1-dep(stub-ok)
+backend-executor-nodeLimit	src/backend/executor/nodeLimit.c	todo			fabled:backend-executor-nodeLimit; m1-dep(stub-ok)
+backend-executor-nodeLockRows	src/backend/executor/nodeLockRows.c	todo			m1-dep(stub-ok)
+backend-executor-nodeMaterial	src/backend/executor/nodeMaterial.c	todo			fabled:backend-executor-nodeMaterial; m1-dep(stub-ok)
+backend-executor-nodeMemoize	src/backend/executor/nodeMemoize.c	todo			fabled:backend-executor-nodeMemoize; m1-dep(stub-ok)
+backend-executor-nodeMergeAppend	src/backend/executor/nodeMergeAppend.c	todo			fabled:backend-executor-nodeMergeAppend; m1-dep(stub-ok)
+backend-executor-nodeMergejoin	src/backend/executor/nodeMergejoin.c	todo			fabled:backend-executor-nodeMergejoin; m1-dep(stub-ok)
+backend-executor-nodeModifyTable	src/backend/executor/nodeModifyTable.c	todo			fabled:backend-executor-nodeModifyTable; m1-dep(stub-ok)
+backend-executor-nodeNamedtuplestorescan	src/backend/executor/nodeNamedtuplestorescan.c	todo			fabled:backend-executor-nodeNamedtuplestorescan; m1-dep(stub-ok)
+backend-executor-nodeNestloop	src/backend/executor/nodeNestloop.c	todo			fabled:backend-executor-nodeNestloop; m1-dep(stub-ok)
+backend-executor-nodeProjectSet	src/backend/executor/nodeProjectSet.c	todo			fabled:backend-executor-nodeProjectSet; m1-dep(stub-ok)
+backend-executor-nodeRecursiveunion	src/backend/executor/nodeRecursiveunion.c	todo			fabled:backend-executor-nodeRecursiveunion; m1-dep(stub-ok)
+backend-executor-nodeResult	src/backend/executor/nodeResult.c	todo			fabled:backend-executor-nodeResult; m1-spine
+backend-executor-nodeSamplescan	src/backend/executor/nodeSamplescan.c	todo			fabled:backend-executor-nodeSamplescan; m1-dep(stub-ok)
+backend-executor-nodeSeqscan	src/backend/executor/nodeSeqscan.c	todo			fabled:backend-executor-nodeSeqscan; m1-dep(stub-ok)
+backend-executor-nodeSetOp	src/backend/executor/nodeSetOp.c	todo			fabled:backend-executor-nodeSetOp; m1-dep(stub-ok)
+backend-executor-nodeSort	src/backend/executor/nodeSort.c	todo			fabled:backend-executor-nodeSort; m1-dep(stub-ok)
+backend-executor-nodeSubplan	src/backend/executor/nodeSubplan.c	todo			fabled:backend-executor-nodeSubplan; m1-dep(stub-ok)
+backend-executor-nodeSubqueryscan	src/backend/executor/nodeSubqueryscan.c	todo			fabled:backend-executor-nodeSubqueryscan; m1-dep(stub-ok)
+backend-executor-nodeTableFuncscan	src/backend/executor/nodeTableFuncscan.c	todo			m1-dep(stub-ok)
+backend-executor-nodeTidrangescan	src/backend/executor/nodeTidrangescan.c	todo			fabled:backend-executor-nodeTidrangescan; m1-dep(stub-ok)
+backend-executor-nodeTidscan	src/backend/executor/nodeTidscan.c	todo			fabled:backend-executor-nodeTidscan; m1-dep(stub-ok)
+backend-executor-nodeUnique	src/backend/executor/nodeUnique.c	todo			m1-dep(stub-ok)
+backend-executor-nodeValuesscan	src/backend/executor/nodeValuesscan.c	todo			fabled:backend-executor-nodeValuesscan; m1-dep(stub-ok)
+backend-executor-nodeWindowAgg	src/backend/executor/nodeWindowAgg.c	todo			fabled:backend-executor-nodeWindowAgg; m1-dep(stub-ok)
+backend-executor-nodeWorktablescan	src/backend/executor/nodeWorktablescan.c	todo			fabled:backend-executor-nodeWorktablescan; m1-dep(stub-ok)
+backend-executor-spi	src/backend/executor/spi.c	todo			fabled:backend-executor-spi; m1-spine
+backend-executor-tqueue	src/backend/executor/tqueue.c	todo			fabled:backend-executor-tqueue
+backend-executor-tstoreReceiver	src/backend/executor/tstoreReceiver.c	todo			fabled:backend-executor-tstoreReceiver
+backend-foreign-foreign	*/foreign.c	todo			fabled:backend-foreign-foreign; m1-dep(stub-ok)
+backend-geqo-all	*/geqo_copy.c,*/geqo_cx.c,*/geqo_erx.c,*/geqo_eval.c,*/geqo_main.c,*/geqo_misc.c,*/geqo_mutation.c,*/geqo_ox1.c,*/geqo_ox2.c,*/geqo_pmx.c,*/geqo_pool.c,*/geqo_px.c,*/geqo_random.c,*/geqo_recombination.c,*/geqo_selection.c	todo			fabled:backend-geqo-all; m1-dep(stub-ok)
+backend-geqo-small	*/geqo_copy.c,*/geqo_cx.c,*/geqo_mutation.c,*/geqo_ox1.c,*/geqo_ox2.c,*/geqo_px.c,*/geqo_random.c,*/geqo_recombination.c,*/geqo_selection.c	combined-into:backend-geqo-all			fabled:backend-geqo-all; m1-dep(stub-ok)
+backend-jit-jit	*/jit.c	todo			m1-dep(stub-ok)
+backend-lib-knapsack	*/knapsack.c	todo			fabled:backend-lib-knapsack; m1-dep(stub-ok)
+backend-lib-algorithms	*/binaryheap.c,*/ilist.c	todo			fabled:backend-lib-algorithms
+backend-lib-all	*/bipartite_match.c,*/bloomfilter.c,*/dshash.c,*/hyperloglog.c,*/ilist.c,*/integerset.c,*/knapsack.c,*/pairingheap.c,*/rbtree.c	combined-into:backend-lib-rbtree			
+backend-lib-no-ilist	*/bipartite_match.c,*/bloomfilter.c,*/dshash.c,*/hyperloglog.c,*/integerset.c,*/knapsack.c,*/pairingheap.c,*/rbtree.c	combined-into:backend-lib-rbtree			
+backend-lib-bloomfilter	*/bloomfilter.c	todo			fabled:backend-lib-bloomfilter; m1-dep(stub-ok)
+backend-lib-integerset	*/integerset.c	todo			fabled:backend-lib-integerset
+backend-lib-dshash	*/dshash.c	todo			fabled:backend-lib-dshash; m1-dep(stub-ok)
+backend-lib-radixtree	*/include/lib/radixtree.h	todo			fabled:backend-lib-radixtree
+backend-lib-hyperloglog	*/hyperloglog.c	todo			fabled:backend-lib-hyperloglog; m1-dep(stub-ok)
+backend-lib-ilist	*/ilist.c	todo			fabled:backend-lib-ilist; m1-dep(stub-ok)
+backend-lib-pairingheap	*/pairingheap.c	todo			fabled:backend-lib-pairingheap
+backend-lib-rbtree	*/rbtree.c	todo			fabled:backend-lib-rbtree
+backend-libpq-auth-oauth	src/backend/libpq/auth-oauth.c	todo			m1-spine(boot)
+backend-libpq-auth-sasl	src/backend/libpq/auth-sasl.c	todo			m1-spine(boot)
+backend-libpq-auth-scram	src/backend/libpq/auth-scram.c	todo			fabled:backend-libpq-auth-scram; m1-spine(boot)
+backend-libpq-auth	src/backend/libpq/auth.c	todo			fabled:backend-libpq-auth; m1-spine(boot)
+backend-libpq-be-fsstubs	src/backend/libpq/be-fsstubs.c	todo			fabled:backend-libpq-be-fsstubs; m1-spine
+backend-libpq-be-gssapi-common	src/backend/libpq/be-gssapi-common.c	todo			fabled:backend-libpq-be-gssapi-common
+backend-libpq-be-secure-common	src/backend/libpq/be-secure-common.c	todo			fabled:backend-libpq-be-secure-common; m1-spine
+backend-libpq-be-secure-openssl	src/backend/libpq/be-secure-openssl.c	todo			fabled:backend-libpq-be-secure-openssl; m1-spine
+backend-libpq-be-secure	src/backend/libpq/be-secure.c	todo			fabled:backend-libpq-be-secure; m1-spine
+backend-libpq-crypt	src/backend/libpq/crypt.c	todo			fabled:backend-libpq-crypt; m1-spine(boot)
+backend-libpq-hba	src/backend/libpq/hba.c	todo			fabled:backend-libpq-hba; m1-spine(boot)
+backend-libpq-ifaddr	src/backend/libpq/ifaddr.c	todo			fabled:backend-libpq-ifaddr; m1-dep(stub-ok)
+backend-libpq-pqcomm	src/backend/libpq/pqcomm.c	todo			fabled:backend-libpq-pqcomm; m1-spine
+backend-libpq-pqformat	src/backend/libpq/pqformat.c	todo			fabled:backend-libpq-pqformat; m1-spine
+backend-libpq-pqmq	src/backend/libpq/pqmq.c	todo			fabled:backend-libpq-pqmq
+backend-libpq-pqsignal	*/pqsignal.c	todo			fabled:backend-libpq-pqsignal; m1-spine(boot)
+backend-main-main	src/backend/main/main.c	todo			fabled:backend-main-main; m1-spine
+backend-nodes-copyfuncs	src/backend/nodes/copyfuncs.c	todo			m1-dep(stub-ok)
+backend-nodes-core	*/bitmapset.c,*/list.c,*/makefuncs.c,*/multibitmapset.c,*/nodeFuncs.c,*/params.c,*/print.c,*/read.c,*/tidbitmap.c,*/value.c	todo			fabled:backend-nodes-core; m1-spine
+backend-nodes-extensible	*/extensible.c	todo			fabled:backend-nodes-extensible
+backend-nodes-equalfuncs	src/backend/nodes/equalfuncs.c	todo			fabled:backend-nodes-equalfuncs; m1-dep(stub-ok)
+backend-nodes-outfuncs	src/backend/nodes/outfuncs.c	todo			fabled:backend-nodes-outfuncs; m1-dep(stub-ok)
+backend-nodes-queryjumblefuncs	src/backend/nodes/queryjumblefuncs.c	todo			m1-spine; fabled:backend-nodes-queryjumble
+backend-nodes-readfuncs	src/backend/nodes/readfuncs.c	todo			fabled:backend-nodes-readfuncs; m1-dep(stub-ok)
+backend-optimizer-path-allpaths	*/allpaths.c	todo			m1-spine
+backend-optimizer-path-costsize	*/costsize.c	todo			fabled:backend-optimizer-path-costsize; m1-spine
+backend-optimizer-path-equivclass	*/equivclass.c	todo			fabled:backend-optimizer-path-equivclass; m1-dep(stub-ok)
+backend-optimizer-path-indxpath	*/indxpath.c	todo			fabled:backend-optimizer-path-indxpath; m1-dep(stub-ok)
+backend-optimizer-path-joinpath	*/joinpath.c	todo			fabled:backend-optimizer-path-joinpath; m1-dep(stub-ok)
+backend-optimizer-path-joinrels-pathkeys	*/joinrels.c,*/pathkeys.c	todo			fabled:backend-optimizer-path-joinrels,backend-optimizer-path-pathkeys; m1-spine
+backend-optimizer-path-small	*/clausesel.c,*/tidpath.c	todo			fabled:backend-optimizer-path-small; m1-dep(stub-ok)
+backend-optimizer-plan-createplan	*/createplan.c	todo			fabled:backend-optimizer-plan-createplan; m1-spine
+backend-optimizer-plan-init-subselect	*/initsplan.c,*/subselect.c	todo			fabled:backend-optimizer-plan-init-subselect; m1-spine
+backend-optimizer-plan-planner	*/planner.c	todo			fabled:backend-optimizer-plan-planner; m1-spine
+backend-optimizer-plan-setrefs	*/setrefs.c	todo			fabled:backend-optimizer-plan-setrefs; m1-spine
+backend-optimizer-plan-small	*/analyzejoins.c,*/planagg.c,*/planmain.c	todo			m1-spine
+backend-optimizer-prep-core	*/prepagg.c,*/prepjointree.c,*/prepqual.c,*/preptlist.c,*/prepunion.c	todo			fabled:backend-optimizer-prep-prepqual; m1-dep(stub-ok); m1-spine; fabled:backend-optimizer-prep-prepjointree,backend-optimizer-prep-preptlist
+backend-optimizer-util-clauses	*/clauses.c	todo			fabled:backend-optimizer-util-clauses; m1-spine
+backend-optimizer-util-inherit-predtest	*/inherit.c,*/predtest.c	todo			fabled:backend-optimizer-util-inherit-predtest; m1-dep(stub-ok)
+backend-optimizer-util-joininfo	*/joininfo.c,*/orclauses.c,*/placeholder.c,*/restrictinfo.c	todo			fabled:backend-optimizer-util-joininfo; m1-dep(stub-ok)
+backend-optimizer-util-pathnode	*/pathnode.c	todo			fabled:backend-optimizer-util-pathnode; m1-spine
+backend-optimizer-util-plancat	*/plancat.c	todo			fabled:backend-optimizer-util-plancat; m1-dep(stub-ok)
+backend-optimizer-util-relnode	*/relnode.c	todo			fabled:backend-optimizer-util-relnode; m1-spine
+backend-optimizer-util-vars	*/appendinfo.c,*/paramassign.c,*/tlist.c,*/var.c	todo			fabled:backend-optimizer-util-vars; m1-spine
+backend-optimizer-util-paramassign	*/paramassign.c	todo			fabled:backend-optimizer-util-paramassign; m1-dep(stub-ok)
+backend-parser-analyze	*/analyze.c	todo			fabled:backend-parser-analyze; m1-spine
+backend-parser-clause	*/parse_clause.c	todo			fabled:backend-parser-clause; m1-spine
+backend-parser-coerce	*/parse_coerce.c	todo			fabled:backend-parser-coerce; m1-dep(stub-ok)
+backend-parser-driver	src/backend/parser/parser.c	todo			fabled:backend-parser-driver; m1-spine
+backend-parser-expr	*/parse_expr.c	todo			fabled:backend-parser-parse-expr; m1-spine
+backend-parser-gram	src/backend/parser/gram.y,build-clean/src/backend/parser/gram.c	todo			fabled:backend-parser-gram-core; m1-spine
+backend-parser-medium1	*/parse_cte.c,*/parse_jsontable.c	todo			
+backend-parser-parse-collate	*/parse_collate.c	todo			fabled:backend-parser-parse-collate; m1-spine
+backend-parser-parse-oper	*/parse_oper.c	todo			fabled:backend-parser-parse-oper; m1-dep(stub-ok)
+backend-parser-parse-type	*/parse_type.c	todo			fabled:backend-parser-parse-type; m1-dep(stub-ok)
+backend-parser-medium2		combined-into:backend-parser-agg			fabled:backend-parser-agg; m1-dep(stub-ok)
+backend-parser-func	*/parse_func.c	todo			fabled:backend-parser-func; m1-dep(stub-ok)
+backend-parser-agg	*/parse_agg.c	todo			fabled:backend-parser-agg; m1-dep(stub-ok)
+backend-parser-parse-target	*/parse_target.c	todo			fabled:backend-parser-parse-target; m1-spine
+backend-parser-relation	*/parse_relation.c	todo			fabled:backend-parser-relation; m1-dep(stub-ok)
+backend-parser-scan	src/backend/parser/scan.l,build-clean/src/backend/parser/scan.c	todo			fabled:backend-parser-gram-core; m1-spine
+backend-parser-small1	*/parse_enr.c,*/parse_merge.c,*/parse_node.c,*/parse_param.c,*/scansup.c	todo			fabled:backend-parser-small1; m1-spine
+backend-parser-utilcmd	*/parse_utilcmd.c	todo			fabled:backend-parser-parse-utilcmd; m1-dep(stub-ok)
+backend-partitioning-core	*/partbounds.c,*/partdesc.c,*/partprune.c	todo			m1-dep(stub-ok)
+backend-port-atomics	src/backend/port/atomics.c	todo			fabled:backend-port-atomics
+backend-port-sysv-sema	src/backend/port/sysv_sema.c	todo			fabled:backend-port-sysv-sema
+backend-port-sysv-shmem	src/backend/port/sysv_shmem.c	todo			fabled:backend-port-sysv-shmem; m1-spine(boot)
+backend-postmaster-autovacuum	src/backend/postmaster/autovacuum.c	todo			fabled:backend-postmaster-autovacuum; m1-spine(boot)
+backend-postmaster-auxprocess	src/backend/postmaster/auxprocess.c	todo			fabled:backend-postmaster-auxprocess; m1-dep(stub-ok)
+backend-postmaster-bgworker	src/backend/postmaster/bgworker.c	todo			fabled:backend-postmaster-bgworker; m1-dep(stub-ok)
+backend-postmaster-bgwriter	src/backend/postmaster/bgwriter.c	todo			m1-spine(boot)
+backend-postmaster-checkpointer	src/backend/postmaster/checkpointer.c	todo			fabled:backend-postmaster-checkpointer; m1-spine(boot)
+backend-postmaster-fork-process	src/backend/postmaster/fork_process.c	todo			fabled:backend-postmaster-fork-process; m1-spine
+backend-postmaster-interrupt	src/backend/postmaster/interrupt.c	todo			fabled:backend-postmaster-interrupt; m1-spine
+backend-postmaster-launch-backend	src/backend/postmaster/launch_backend.c	todo			fabled:backend-postmaster-launch-backend; m1-spine
+backend-postmaster-pgarch	src/backend/postmaster/pgarch.c	todo			fabled:backend-postmaster-pgarch; m1-dep(stub-ok)
+backend-postmaster-pmchild	src/backend/postmaster/pmchild.c	todo			fabled:backend-postmaster-pmchild; m1-dep(stub-ok)
+backend-postmaster-postmaster	src/backend/postmaster/postmaster.c	todo			m1-spine
+backend-postmaster-startup	src/backend/postmaster/startup.c	todo			fabled:backend-postmaster-startup; m1-spine(boot)
+backend-postmaster-syslogger	src/backend/postmaster/syslogger.c	todo			fabled:backend-postmaster-syslogger; m1-dep(stub-ok)
+backend-postmaster-walsummarizer	src/backend/postmaster/walsummarizer.c	todo			fabled:backend-postmaster-walsummarizer; m1-dep(stub-ok)
+backend-postmaster-walwriter	src/backend/postmaster/walwriter.c	todo			fabled:backend-postmaster-walwriter; m1-spine(boot)
+backend-regex-core	*/regcomp.c,*/regerror.c,*/regexec.c,*/regexport.c,*/regfree.c,*/regprefix.c	todo			fabled:backend-regex-core; m1-dep(stub-ok)
+backend-replication-libpqwalreceiver	src/backend/replication/libpqwalreceiver/libpqwalreceiver.c	todo			fabled:backend-replication-libpqwalreceiver
+backend-replication-logical-applyparallelworker	src/backend/replication/logical/applyparallelworker.c	todo			fabled:backend-replication-logical-applyparallelworker; m1-dep(stub-ok)
+backend-replication-logical-conflict	src/backend/replication/logical/conflict.c	todo			fabled:backend-replication-logical-conflict
+backend-replication-logical-decode	src/backend/replication/logical/decode.c	todo			fabled:backend-replication-logical-decode; m1-dep(stub-ok)
+backend-replication-logical-launcher	src/backend/replication/logical/launcher.c	todo			fabled:backend-replication-logical-launcher; m1-spine
+backend-replication-logical-logical	src/backend/replication/logical/logical.c	todo			fabled:backend-replication-logical-logical; m1-dep(stub-ok)
+backend-replication-logical-logicalfuncs	src/backend/replication/logical/logicalfuncs.c	todo			fabled:backend-replication-logical-logicalfuncs
+backend-replication-logical-message	*/message.c	todo			fabled:backend-replication-logical-message; m1-dep(stub-ok)
+backend-replication-logical-origin	src/backend/replication/logical/origin.c	todo			fabled:backend-replication-logical-origin; m1-dep(stub-ok)
+backend-replication-logical-proto	src/backend/replication/logical/proto.c	todo			fabled:backend-replication-logical-proto
+backend-replication-logical-relation	src/backend/replication/logical/relation.c	todo			fabled:backend-replication-logical-relation
+backend-replication-logical-reorderbuffer	src/backend/replication/logical/reorderbuffer.c	todo			fabled:backend-replication-logical-reorderbuffer; m1-dep(stub-ok)
+backend-replication-logical-slotsync	src/backend/replication/logical/slotsync.c	todo			fabled:backend-replication-logical-slotsync; m1-dep(stub-ok)
+backend-replication-logical-snapbuild	src/backend/replication/logical/snapbuild.c	todo			fabled:backend-replication-logical-snapbuild; m1-dep(stub-ok)
+backend-replication-logical-tablesync	src/backend/replication/logical/tablesync.c	todo			
+backend-replication-logical-worker	src/backend/replication/logical/worker.c	todo			m1-spine
+backend-replication-pgoutput	src/backend/replication/pgoutput/pgoutput.c	todo			
+backend-replication-repl-gram	src/backend/replication/repl_gram.y,build-clean/src/backend/replication/repl_gram.c	todo			fabled:backend-replication-repl-gram; m1-dep(stub-ok)
+backend-replication-repl-scanner	src/backend/replication/repl_scanner.l,build-clean/src/backend/replication/repl_scanner.c	todo			fabled:backend-replication-repl-scanner; m1-dep(stub-ok)
+backend-replication-slot	src/backend/replication/slot.c	todo			fabled:backend-replication-slot; m1-dep(stub-ok)
+backend-replication-slotfuncs	src/backend/replication/slotfuncs.c	todo			fabled:backend-replication-slotfuncs
+backend-replication-syncrep-scanner	src/backend/replication/syncrep_scanner.l,build-clean/src/backend/replication/syncrep_scanner.c	todo			fabled:backend-replication-syncrep-scanner; m1-dep(stub-ok)
+backend-replication-syncrep-gram	src/backend/replication/syncrep_gram.y,build-clean/src/backend/replication/syncrep_gram.c	todo			fabled:backend-replication-syncrep-gram; m1-dep(stub-ok)
+backend-replication-syncrep	src/backend/replication/syncrep.c	todo			fabled:backend-replication-syncrep; m1-dep(stub-ok)
+backend-replication-walreceiver	src/backend/replication/walreceiver.c	todo			fabled:backend-replication-walreceiver; m1-dep(stub-ok)
+backend-replication-walreceiverfuncs	src/backend/replication/walreceiverfuncs.c	todo			fabled:backend-replication-walreceiverfuncs; m1-dep(stub-ok)
+backend-replication-walsender	src/backend/replication/walsender.c	todo			fabled:backend-replication-walsender; m1-spine
+backend-rewrite-core	*/rewriteDefine.c,*/rewriteHandler.c,*/rewriteManip.c,*/rewriteRemove.c,*/rewriteSearchCycle.c,*/rewriteSupport.c,*/rowsecurity.c	todo			fabled:backend-rewrite-core; m1-dep(stub-ok)
+backend-rmgrdesc-extra-small	*/replorigindesc.c,*/xlogdesc.c	combined-into:backend-access-rmgrdesc-xlogdesc			
+backend-rmgrdesc-extra	*/replorigindesc.c,*/xactdesc.c,*/xlogdesc.c	combined-into:backend-access-rmgrdesc-xlogdesc			
+backend-rmgrdesc-next	*/brindesc.c,*/gindesc.c,*/gistdesc.c,*/hashdesc.c,*/heapdesc.c,*/mxactdesc.c,*/nbtdesc.c,*/spgdesc.c,*/standbydesc.c	todo			fabled:backend-rmgrdesc-next; m1-dep(stub-ok)
+backend-access-rmgrdesc-xactdesc	src/backend/access/rmgrdesc/xactdesc.c	todo			fabled:backend-access-rmgrdesc-xactdesc; m1-dep(stub-ok)
+backend-rmgrdesc-path	*/smgrdesc.c,*/xactdesc.c	combined-into:backend-access-rmgrdesc-smgrdesc			
+backend-rmgrdesc-small	*/clogdesc.c,*/committsdesc.c,*/dbasedesc.c,*/genericdesc.c,*/logicalmsgdesc.c,*/relmapdesc.c,*/rmgrdesc_utils.c,*/seqdesc.c,*/tblspcdesc.c	todo			fabled:backend-access-rmgrdesc-small
+backend-snowball-dict-snowball	*/dict_snowball.c,*/libstemmer/*.c	todo			fabled:backend-snowball-dict-snowball
+backend-statistics-core	*/attribute_stats.c,*/dependencies.c,*/extended_stats.c,*/mcv.c,*/mvdistinct.c,*/relation_stats.c,*/stat_utils.c	todo			m1-dep(stub-ok)
+backend-statistics-dependencies	*/dependencies.c	todo			fabled:backend-statistics-dependencies
+backend-statistics-mvdistinct	*/mvdistinct.c	todo			fabled:backend-statistics-mvdistinct
+backend-storage-aio-core	src/backend/storage/aio/aio.c,src/backend/storage/aio/aio_callback.c,src/backend/storage/aio/aio_funcs.c,src/backend/storage/aio/aio_io.c,src/backend/storage/aio/method_io_uring.c	todo			
+backend-storage-aio-methods	*/aio_init.c,*/aio_target.c,*/method_sync.c,*/method_worker.c	todo			fabled:backend-storage-aio-methods; m1-spine
+backend-storage-aio-read-stream	src/backend/storage/aio/read_stream.c	todo			fabled:backend-storage-aio-read-stream; m1-dep(stub-ok)
+backend-storage-buffer-bufmgr	src/backend/storage/buffer/bufmgr.c	todo			fabled:backend-storage-buffer-bufmgr; m1-spine
+backend-storage-buffer-small	*/buf_init.c,*/buf_table.c,*/freelist.c,*/localbuf.c	combined-into:backend-storage-buffer-support			
+backend-storage-buffer-support	src/backend/storage/buffer/buf_init.c,src/backend/storage/buffer/buf_table.c,src/backend/storage/buffer/freelist.c,src/backend/storage/buffer/localbuf.c	todo			fabled:backend-storage-buffer-support; m1-spine
+backend-storage-file	*/buffile.c,*/copydir.c,*/fd.c,*/fileset.c,*/reinit.c,*/sharedfileset.c	todo			fabled:backend-storage-file-buffile; m1-spine
+backend-storage-freespace	*/freespace.c,*/fsmpage.c,*/indexfsm.c	todo			fabled:backend-storage-freespace; m1-dep(stub-ok)
+backend-storage-ipc-dsm-core	*/dsm.c,*/dsm_impl.c	todo			fabled:backend-storage-ipc-dsm-core; m1-spine
+backend-storage-ipc-dsm-registry	*/dsm_registry.c	todo			fabled:backend-storage-ipc-dsm-registry; m1-spine
+backend-storage-ipc-latch	src/backend/storage/ipc/latch.c	todo			fabled:backend-storage-ipc-latch; m1-spine
+backend-storage-ipc-pmsignal	*/barrier.c,*/ipc.c,*/pmsignal.c,*/signalfuncs.c	todo			fabled:backend-storage-ipc-pmsignal; m1-spine
+backend-storage-ipc-procarray	src/backend/storage/ipc/procarray.c	todo			fabled:backend-storage-ipc-procarray; m1-spine
+backend-storage-ipc-procsignal	src/backend/storage/ipc/procsignal.c	todo			fabled:backend-storage-ipc-procsignal; m1-spine
+backend-storage-ipc-shm-toc	src/backend/storage/ipc/shm_toc.c	todo			fabled:backend-storage-ipc-shm-toc; m1-spine
+backend-storage-ipc-shm-mq	src/backend/storage/ipc/shm_mq.c	todo			fabled:backend-storage-ipc-shm-mq; m1-spine
+backend-storage-ipc-shm	*/dsm_registry.c,*/shm_mq.c,*/shm_toc.c	todo			m1-spine
+backend-storage-ipc-shmem	*/shmem.c	todo			fabled:backend-storage-ipc-shmem; m1-spine
+backend-storage-ipc-sinval	*/sinval.c,*/sinvaladt.c	todo			fabled:backend-storage-ipc-sinval; m1-spine
+backend-storage-ipc	*/ipci.c	todo			fabled:backend-storage-ipc; m1-spine
+backend-storage-ipc-small	*/barrier.c,*/ipc.c,*/pmsignal.c,*/procsignal.c,*/signalfuncs.c	combined-into:backend-storage-ipc-pmsignal			m1-spine
+backend-storage-ipc-standby	src/backend/storage/ipc/standby.c	todo			fabled:backend-storage-ipc-standby; m1-spine
+backend-storage-ipc-wait	*/latch.c,*/waiteventset.c	todo			m1-spine
+backend-storage-ipc-waiteventset	src/backend/storage/ipc/waiteventset.c	todo			fabled:backend-storage-ipc-waiteventset; m1-spine
+backend-storage-large-object	*/inv_api.c	todo			fabled:backend-storage-large-object; m1-dep(stub-ok)
+backend-storage-lmgr-condition-variable	src/backend/storage/lmgr/condition_variable.c	todo			fabled:backend-storage-lmgr-condition-variable; m1-dep(stub-ok)
+backend-storage-lmgr-deadlock	src/backend/storage/lmgr/deadlock.c	todo			fabled:backend-storage-lmgr-deadlock; m1-dep(stub-ok)
+backend-storage-lmgr-lock	src/backend/storage/lmgr/lock.c	todo			fabled:backend-storage-lmgr-lock; m1-spine
+backend-storage-lmgr-lmgr	src/backend/storage/lmgr/lmgr.c	todo			fabled:backend-storage-lmgr-lmgr; m1-spine
+backend-storage-lmgr-lock	src/backend/storage/lmgr/lock.c	todo			m1-spine
+backend-storage-lmgr-lwlock	src/backend/storage/lmgr/lwlock.c	todo			fabled:backend-storage-lmgr-lwlock; m1-spine
+backend-storage-lmgr-predicate	src/backend/storage/lmgr/predicate.c	todo			fabled:backend-storage-lmgr-predicate; m1-spine
+backend-storage-lmgr-proc	src/backend/storage/lmgr/proc.c	todo			fabled:backend-storage-lmgr-proc; m1-spine
+backend-storage-lmgr-s-lock	src/backend/storage/lmgr/s_lock.c	todo			fabled:backend-storage-lmgr-s-lock; m1-dep(stub-ok)
+backend-storage-page-checksum	src/backend/storage/page/checksum.c	todo			fabled:backend-storage-page-checksum; m1-dep(stub-ok)
+common-checksum-helper	src/common/checksum_helper.c	todo			fabled:common-checksum-helper
+backend-storage-page	*/bufpage.c,*/itemptr.c	todo			fabled:backend-storage-page; m1-dep(stub-ok)
+backend-storage-smgr	*/bulk_write.c,*/md.c,*/smgr.c	combined-into:backend-storage-smgr-smgr			m1-spine
+backend-storage-sync	*/sync.c	todo			fabled:backend-storage-sync; m1-dep(stub-ok)
+backend-tcop-backend-startup	src/backend/tcop/backend_startup.c	todo			fabled:backend-tcop-backend-startup; m1-spine
+backend-tcop-cmdtag	*/cmdtag.c	todo			fabled:backend-tcop-cmdtag; m1-spine
+backend-tcop-dest	*/dest.c	todo			m1-spine
+backend-tcop-fastpath	src/backend/tcop/fastpath.c	todo			fabled:backend-tcop-fastpath; m1-dep(stub-ok)
+backend-tcop-postgres	src/backend/tcop/postgres.c	todo			fabled:backend-tcop-postgres; m1-spine
+backend-tcop-pquery	src/backend/tcop/pquery.c	todo			fabled:backend-tcop-pquery; m1-spine
+backend-tcop-utility	src/backend/tcop/utility.c	todo			fabled:backend-tcop-utility; m1-spine
+backend-timezone-localtime	src/timezone/localtime.c	todo			fabled:backend-timezone-localtime; m1-dep(stub-ok)
+backend-timezone-pgtz	src/timezone/pgtz.c	todo			fabled:backend-timezone-pgtz; m1-dep(stub-ok)
+backend-timezone-strftime	src/timezone/strftime.c	todo			fabled:backend-timezone-strftime; m1-dep(stub-ok)
+backend-tsearch-ispell-regis	*/dict_ispell.c,*/regis.c	todo			fabled:backend-tsearch-ispell-regis
+backend-tsearch-parse	*/ts_parse.c,*/wparser.c,*/wparser_def.c	todo			fabled:backend-tsearch-parse; m1-dep(stub-ok)
+backend-tsearch-parse-any	*/to_tsany.c,*/ts_parse.c	todo			m1-dep(stub-ok)
+backend-tsearch-spell	*/spell.c	todo			fabled:backend-tsearch-spell
+backend-tsearch-remaining	*/dict_thesaurus.c,*/ts_selfuncs.c,*/ts_typanalyze.c,*/wparser.c,*/wparser_def.c	todo			
+backend-tsearch-small	*/dict.c,*/dict_simple.c,*/dict_synonym.c,*/ts_locale.c,*/ts_utils.c	todo			
+backend-utils-activity-pgstat	*/pgstat.c	todo			fabled:backend-utils-activity-pgstat; m1-spine
+backend-utils-activity-shmem	*/pgstat_shmem.c	todo			
+backend-utils-activity-small	*/backend_progress.c,*/pgstat_archiver.c,*/pgstat_bgwriter.c,*/pgstat_checkpointer.c	todo			fabled:backend-utils-activity-small; m1-dep(stub-ok)
+backend-utils-activity-stat	*/pgstat_backend.c,*/pgstat_database.c,*/pgstat_function.c,*/pgstat_io.c,*/pgstat_relation.c,*/pgstat_replslot.c,*/pgstat_slru.c,*/pgstat_subscription.c,*/pgstat_wal.c	todo			
+backend-utils-activity-pgstat-slru	*/pgstat_slru.c	todo			fabled:backend-utils-activity-pgstat-slru; m1-spine
+backend-utils-activity-pgstat-backend	*/pgstat_backend.c	todo			fabled:backend-utils-activity-pgstat-backend; m1-spine
+backend-utils-activity-status	*/backend_status.c	todo			fabled:backend-utils-activity-status; m1-spine
+backend-utils-activity-waitevent	*/wait_event.c,*/wait_event_funcs.c	todo			fabled:backend-utils-activity-waitevent; m1-spine
+backend-utils-activity-xact	*/pgstat_xact.c	todo			fabled:backend-utils-activity-xact; m1-spine
+backend-utils-adt-array-more	*/array_selfuncs.c,*/arrayfuncs.c	todo			fabled:backend-utils-adt-arrayfuncs (+ -seams); m1-dep(stub-ok)
+backend-utils-adt-array-small	*/array_expanded.c,*/arraysubs.c	todo			
+backend-utils-adt-array-user	*/array_userfuncs.c	todo			
+backend-utils-adt-ascii	*/ascii.c	todo			fabled:backend-utils-adt-ascii; m1-dep(stub-ok)
+backend-utils-adt-cash	*/cash.c	todo			fabled:backend-utils-adt-cash
+backend-utils-adt-acl	*/acl.c	todo			fabled:backend-utils-adt-acl; m1-spine(boot)
+backend-utils-adt-amutils	*/amutils.c	todo			fabled:backend-utils-adt-amutils; m1-dep(stub-ok)
+backend-utils-adt-catalog-perm	*/orderedsetaggs.c	todo			m1-dep(stub-ok)
+backend-utils-adt-char	*/char.c	todo			fabled:backend-utils-adt-char
+backend-utils-adt-pseudotypes	*/pseudotypes.c	todo			fabled:backend-utils-adt-pseudotypes
+backend-utils-adt-date-datetime	*/date.c,*/datetime.c	combined-into:backend-utils-adt-datetime			
+backend-utils-adt-datetime	*/date.c,*/datetime.c,*/timestamp.c	todo			fabled:backend-utils-adt-datetime; m1-spine
+backend-utils-adt-float	*/float.c	todo			fabled:backend-utils-adt-float
+backend-utils-adt-format-regexp	*/formatting.c,*/regexp.c	combined-into:backend-utils-adt-regexp			fabled:backend-utils-adt-regexp; m1-dep(stub-ok)
+backend-utils-adt-formatting	src/backend/utils/adt/formatting.c	todo			fabled:backend-utils-adt-formatting
+backend-utils-adt-geo-ops	*/geo_ops.c	todo			fabled:backend-utils-adt-geo-ops
+backend-utils-adt-geo-spgist-only	*/geo_spgist.c	todo			fabled:backend-utils-adt-geo-spgist-only
+backend-utils-adt-geo	*/geo_ops.c,*/geo_spgist.c	combined-into:backend-utils-adt-geo-ops			
+backend-utils-adt-json-core	*/json.c	combined-into:backend-utils-adt-json			fabled:duplicate-of; m1-dep(stub-ok)
+backend-utils-adt-json-small	*/jsonb_op.c,*/jsonbsubs.c	todo			fabled:backend-utils-adt-jsonb-op; m1-dep(stub-ok)
+backend-utils-adt-json	*/json.c	todo			fabled:backend-utils-adt-json; m1-dep(stub-ok)
+backend-utils-adt-jsonb-core	*/jsonb.c,*/jsonb_gin.c,*/jsonb_util.c	todo			m1-dep(stub-ok)
+backend-utils-adt-jsonb-gin	*/jsonb_gin.c	todo			fabled:backend-utils-adt-jsonb-gin; m1-dep(stub-ok)
+backend-utils-adt-jsonb	*/jsonb.c	todo			fabled:backend-utils-adt-jsonb; m1-dep(stub-ok)
+backend-utils-adt-jsonb-util	*/jsonb_util.c	todo			fabled:backend-utils-adt-jsonb-util; m1-dep(stub-ok)
+backend-utils-adt-jsonfuncs	*/jsonfuncs.c	todo			fabled:backend-utils-adt-jsonfuncs; m1-dep(stub-ok)
+backend-utils-adt-jsonfuncs-path-small	*/jsonfuncs.c,*/jsonpath.c	todo			m1-dep(stub-ok)
+backend-utils-adt-jsonfuncs-path	*/jsonfuncs.c,*/jsonpath.c,*/jsonpath_exec.c	todo			m1-dep(stub-ok)
+backend-utils-adt-jsonpath	*/jsonpath.c	todo			fabled:backend-utils-adt-jsonpath; m1-dep(stub-ok)
+backend-utils-adt-jsonpath-exec	*/jsonpath_exec.c	todo			fabled:backend-utils-adt-jsonpath-exec; m1-dep(stub-ok)
+backend-utils-adt-jsonpath-gram	src/backend/utils/adt/jsonpath_gram.y,build-clean/src/backend/utils/adt/jsonpath_gram.c	todo			m1-dep(stub-ok)
+backend-utils-adt-jsonpath-scan	src/backend/utils/adt/jsonpath_scan.l,build-clean/src/backend/utils/adt/jsonpath_scan.c	todo			m1-dep(stub-ok)
+backend-utils-adt-lsn-trigfuncs	*/pg_lsn.c,*/trigfuncs.c	todo			fabled:backend-utils-adt-lsn-trigfuncs; m1-dep(stub-ok)
+backend-utils-adt-misc2	*/domains.c,*/expandeddatum.c,*/expandedrecord.c,*/genfile.c,*/hbafuncs.c,*/lockfuncs.c,*/partitionfuncs.c,*/pg_upgrade_support.c,*/regproc.c,*/rowtypes.c,*/tid.c,*/windowfuncs.c	todo			fabled:backend-utils-adt-misc2; m1-dep(stub-ok)
+backend-utils-adt-more-scalars-clean	*/int.c,*/int8.c,*/mac.c,*/mac8.c,*/oracle_compat.c,*/pseudotypes.c	todo			m1-spine; fabled:backend-utils-adt-int
+backend-utils-adt-name	src/backend/utils/adt/name.c	todo			fabled:backend-utils-adt-name; m1-spine(boot)
+backend-utils-adt-more-scalars	*/cash.c,*/int.c,*/int8.c,*/mac.c,*/mac8.c,*/name.c,*/numutils.c,*/oracle_compat.c,*/pseudotypes.c	todo			m1-spine; fabled:backend-utils-adt-int; int.c int4out on printtup path
+backend-utils-adt-mac	*/mac.c	todo			fabled:backend-utils-adt-mac
+backend-utils-adt-mac8	*/mac8.c	todo			fabled:backend-utils-adt-mac8
+backend-utils-adt-network	*/inet_cidr_ntop.c,*/inet_net_pton.c,*/network.c	todo			fabled:backend-utils-adt-network; m1-dep(stub-ok)
+backend-utils-adt-network-gist	*/network_gist.c	todo			fabled:backend-utils-adt-network-gist; m1-dep(stub-ok)
+backend-utils-adt-network-selfuncs	*/network_selfuncs.c	todo			fabled:backend-utils-adt-network-selfuncs; m1-dep(stub-ok)
+backend-utils-adt-network-spgist	*/network_spgist.c	todo			fabled:backend-utils-adt-network-spgist; m1-dep(stub-ok)
+backend-utils-adt-next	*/arrayutils.c,*/cryptohashfuncs.c,*/geo_selfuncs.c,*/pg_locale_builtin.c,*/skipsupport.c,*/waitfuncs.c	todo			
+backend-utils-adt-numeric	src/backend/utils/adt/numeric.c,src/include/utils/numeric.h	todo			m1-dep(stub-ok)
+backend-utils-adt-numutils	*/numutils.c	todo			fabled:backend-utils-adt-numutils; m1-spine
+backend-utils-adt-pg-locale-icu	src/backend/utils/adt/pg_locale_icu.c	todo			fabled:backend-utils-adt-pg-locale-icu; m1-spine(boot)
+backend-utils-adt-pg-locale-libc	src/backend/utils/adt/pg_locale_libc.c	combined-into:backend-utils-adt-pg-locale			m1-spine(boot)
+backend-utils-adt-pg-locale	src/backend/utils/adt/pg_locale.c	todo			fabled:backend-utils-adt-pg-locale; m1-spine(boot)
+backend-utils-adt-quote	*/quote.c	todo			fabled:backend-utils-adt-quote; m1-dep(stub-ok)
+backend-utils-adt-range-core	*/rangetypes_gist.c,*/rangetypes_spgist.c	todo			fabled:backend-utils-adt-rangetypes-gist
+backend-utils-adt-rangetypes	*/rangetypes.c	todo			fabled:backend-utils-adt-rangetypes
+backend-utils-adt-multirangetypes	*/multirangetypes.c	todo			fabled:backend-utils-adt-multirangetypes
+backend-utils-adt-range-selfunc-small	*/multirangetypes_selfuncs.c,*/rangetypes_selfuncs.c,*/rangetypes_typanalyze.c	combined-into:backend-utils-adt-range-selfuncs			
+backend-utils-adt-range-selfuncs	*/multirangetypes_selfuncs.c,*/rangetypes_selfuncs.c	todo			fabled:backend-utils-adt-range-selfuncs
+backend-utils-adt-regexp	*/regexp.c	todo			fabled:backend-utils-adt-regexp; m1-dep(stub-ok)
+backend-utils-adt-ri-triggers	*/ri_triggers.c	todo			fabled:backend-utils-adt-ri-triggers; m1-dep(stub-ok)
+backend-utils-adt-ruleutils	src/backend/utils/adt/ruleutils.c,src/include/utils/ruleutils.h	todo			fabled:backend-utils-adt-ruleutils; m1-dep(stub-ok)
+backend-utils-adt-scalar	*/bool.c,*/datum.c,*/enum.c,*/oid.c,*/uuid.c,*/xid.c	todo			m1-dep(stub-ok)
+backend-utils-adt-xid	src/backend/utils/adt/xid.c	todo			fabled:backend-utils-adt-xid
+backend-utils-adt-selfuncs	*/selfuncs.c	todo			fabled:backend-utils-adt-selfuncs; m1-dep(stub-ok)
+backend-utils-adt-small	*/ascii.c,*/char.c,*/quote.c,*/version.c	combined-into:backend-utils-adt-quote			fabled:backend-utils-adt-quote; m1-dep(stub-ok)
+backend-utils-adt-format-type	*/format_type.c	todo			fabled:backend-utils-adt-format-type; m1-dep(stub-ok)
+backend-utils-adt-sqlhelpers	*/dbsize.c,*/mcxtfuncs.c,*/misc.c,*/pgstatfuncs.c,*/pseudorandomfuncs.c,*/xid8funcs.c	todo			
+backend-utils-adt-dbsize	*/dbsize.c	todo			fabled:backend-utils-adt-dbsize
+backend-utils-adt-xid8funcs	*/xid8funcs.c	todo			fabled:backend-utils-adt-xid8funcs
+backend-utils-adt-mcxtfuncs	*/mcxtfuncs.c	todo			fabled:backend-utils-adt-mcxtfuncs; m1-dep(stub-ok)
+backend-utils-adt-string-byte	*/like_support.c	todo			fabled:backend-utils-adt-selfuncs; m1-dep(stub-ok)
+backend-utils-adt-varbit	*/varbit.c	todo			fabled:backend-utils-adt-varbit
+backend-utils-adt-like	*/like.c,*/like_match.c	todo			fabled:backend-utils-adt-like
+backend-utils-adt-varchar	*/varchar.c	todo			fabled:backend-utils-adt-varchar
+backend-utils-adt-timestamp	*/timestamp.c	combined-into:backend-utils-adt-datetime			
+backend-utils-adt-ts-index-rank	*/tsginidx.c,*/tsgistidx.c,*/tsrank.c	todo			fabled:backend-utils-adt-tsginidx,backend-utils-adt-tsgistidx,backend-utils-adt-tsrank
+backend-utils-adt-ts-small	*/tsquery_cleanup.c,*/tsquery_rewrite.c,*/tsquery_util.c	todo			fabled:backend-utils-adt-ts-small
+backend-utils-adt-tsquery-core	*/tsquery.c,*/tsquery_gist.c,*/tsquery_op.c	todo			fabled:backend-utils-adt-tsquery-core
+backend-utils-adt-tsvector-core	*/tsvector.c,*/tsvector_op.c,*/tsvector_parser.c	todo			fabled:backend-utils-adt-tsvector-core
+backend-utils-adt-typanalyze-small	*/array_typanalyze.c,*/rangetypes_typanalyze.c	combined-into:backend-utils-adt-array-typanalyze			
+backend-utils-adt-varlena	*/varlena.c	todo			fabled:assemble/backend-utils-adt-varlena; m1-spine(boot)
+backend-utils-adt-version	*/version.c	todo			fabled:backend-utils-adt-version
+backend-utils-adt-xml	*/xml.c	todo			fabled:backend-utils-adt-xml; m1-dep(stub-ok)
+backend-utils-cache-catcache	src/backend/utils/cache/catcache.c,src/include/utils/catcache.h	todo			m1-spine
+backend-utils-cache-evtcache	src/backend/utils/cache/evtcache.c,src/include/utils/evtcache.h	todo			fabled:backend-utils-cache-evtcache
+backend-utils-cache-funccache	src/backend/utils/cache/funccache.c,src/include/utils/funccache.h	todo			fabled:backend-utils-cache-funccache; m1-dep(stub-ok)
+backend-utils-cache-inval	src/backend/utils/cache/inval.c,src/include/storage/sinval.h,src/include/utils/inval.h	todo			m1-spine
+backend-utils-cache-lsyscache	src/backend/utils/cache/lsyscache.c,src/include/utils/lsyscache.h	todo			fabled:backend-utils-cache-lsyscache; m1-spine
+backend-utils-cache-partcache	src/backend/utils/cache/partcache.c,src/include/utils/partcache.h	todo			m1-dep(stub-ok)
+backend-utils-cache-plancache	src/backend/utils/cache/plancache.c,src/include/utils/plancache.h	todo			fabled:backend-utils-cache-plancache; m1-dep(stub-ok)
+backend-utils-cache-relcache	src/backend/utils/cache/relcache.c,src/include/utils/relcache.h,src/include/utils/rel.h,src/include/catalog/pg_publication.h	todo			m1-spine
+backend-utils-cache-relcache-nodexform	src/backend/utils/cache/relcache.c	todo			fabled:backend-utils-cache-relcache-nodexform; m1-spine
+backend-utils-cache-relmapper	src/backend/utils/cache/relmapper.c,src/include/utils/relmapper.h	todo			fabled:backend-utils-cache-relmapper; m1-spine(boot)
+backend-utils-cache-small	*/attoptcache.c,*/relfilenumbermap.c,*/spccache.c,*/syscache.c,*/ts_cache.c	todo			fabled:backend-utils-cache-syscache (+attoptcache,spccache,relfilenumbermap,ts-cache); m1-spine
+backend-utils-cache-typcache	src/backend/utils/cache/typcache.c,src/include/utils/typcache.h	todo			fabled:backend-utils-cache-typcache; m1-spine
+backend-utils-error-elog	src/backend/utils/error/elog.c	todo			fabled:backend-utils-error; m1-spine
+backend-utils-error-small	*/assert.c,*/csvlog.c,*/jsonlog.c	todo			fabled:backend-utils-error-small; m1-spine
+backend-utils-fmgr-core	*/fmgr.c	todo			fabled:backend-utils-fmgr-core; m1-spine
+backend-utils-fmgr-dfmgr	*/dfmgr.c	todo			fabled:backend-utils-fmgr-dfmgr; m1-dep(stub-ok)
+backend-utils-fmgr-funcapi	*/funcapi.c	todo			fabled:backend-utils-fmgr-funcapi; m1-dep(stub-ok)
+backend-utils-fmgrtab	build-rust-prng/src/include/utils/fmgrtab.c	combined-into:backend-utils-fmgr-core			
+backend-utils-hash-dynahash	*/dynahash.c	todo			fabled:backend-utils-hash-dynahash; m1-spine
+backend-utils-hash-small	*/pg_crc.c	todo			fabled:port-crc32c,backend-utils-hash-pg-crc; m1-spine(boot)
+backend-utils-init-miscinit	src/backend/utils/init/miscinit.c	todo			fabled:backend-utils-init-miscinit; m1-spine
+backend-utils-init-postinit	src/backend/utils/init/postinit.c	todo			fabled:backend-utils-init-postinit; m1-spine
+backend-utils-init-small	*/globals.c,*/usercontext.c	todo			fabled:backend-utils-init-small; m1-spine
+backend-utils-mb-conv-string-helpers	*/conv.c,*/stringinfo_mb.c,*/wstrcmp.c,*/wstrncmp.c	todo			fabled:backend-utils-mb-conv-string-helpers
+backend-utils-mb-conv	*/conv.c	combined-into:backend-utils-mb-conv-string-helpers			fabled:backend-utils-mb-conv-string-helpers
+backend-utils-mb-mbutils	*/mbutils.c	todo			fabled:backend-utils-mb-mbutils; m1-spine
+backend-utils-mb-string-helpers	*/stringinfo_mb.c,*/wstrcmp.c,*/wstrncmp.c	combined-into:backend-utils-mb-conv-string-helpers			fabled:backend-utils-mb-conv-string-helpers
+backend-utils-mb-stringinfo_mb	*/stringinfo_mb.c	combined-into:backend-utils-mb-conv-string-helpers			fabled:backend-utils-mb-conv-string-helpers
+backend-utils-mb-wstrcmp	*/wstrcmp.c	todo			fabled:backend-utils-mb-wstrcmp
+backend-utils-mb-wstrncmp	*/wstrncmp.c	todo			fabled:backend-utils-mb-wstrncmp
+backend-utils-misc-clean	*/help_config.c,*/pg_rusage.c,*/queryenvironment.c,*/sampling.c	todo			fabled:backend-utils-misc-help-config,backend-utils-misc-pg-rusage,backend-utils-misc-queryenvironment,backend-utils-misc-sampling; m1-spine
+backend-utils-misc-guc-file	src/backend/utils/misc/guc-file.l	todo			fabled:backend-utils-misc-guc-file; m1-spine
+backend-utils-misc-guc-funcs	src/backend/utils/misc/guc_funcs.c,src/include/utils/guc.h,src/include/utils/guc_tables.h	todo			fabled:backend-utils-misc-guc-funcs; m1-spine
+backend-utils-misc-guc-tables	src/backend/utils/misc/guc_tables.c,src/include/utils/guc.h,src/include/utils/guc_tables.h	todo			fabled:backend-utils-misc-guc-tables; m1-spine
+backend-utils-misc-guc	src/backend/utils/misc/guc.c,src/include/utils/guc.h,src/include/utils/guc_tables.h	todo			fabled:backend-utils-misc-guc; m1-spine
+backend-utils-misc-help_config	*/help_config.c	combined-into:backend-utils-misc-help-config			fabled:backend-utils-misc-help-config; m1-dep(stub-ok)
+backend-utils-misc-more	*/pg_controldata.c,*/ps_status.c,*/rls.c,*/superuser.c	todo			fabled:backend-utils-misc-more; m1-spine
+backend-utils-misc-more2	*/conffiles.c,*/injection_point.c,*/pg_config.c,*/timeout.c,*/tzparser.c	todo			fabled:backend-utils-misc-timeout; m1-spine
+backend-utils-misc-pg_rusage	*/pg_rusage.c	todo			fabled:backend-utils-misc-pg-rusage; m1-dep(stub-ok)
+backend-utils-misc-queryenvironment	*/queryenvironment.c	todo			fabled:backend-utils-misc-queryenvironment; m1-spine
+backend-utils-misc-sampling	*/sampling.c	todo			fabled:backend-utils-misc-sampling
+backend-utils-misc-small	*/help_config.c,*/pg_rusage.c,*/queryenvironment.c,*/sampling.c,*/stack_depth.c	todo			fabled:backend-utils-misc-stack-depth; m1-spine
+backend-utils-misc-stack-depth	src/backend/utils/misc/stack_depth.c	todo			m1-spine
+backend-utils-misc-stack_depth	*/stack_depth.c	combined-into:backend-utils-misc-stack-depth			fabled:backend-utils-misc-stack-depth; m1-spine
+backend-utils-mmgr-aset	src/backend/utils/mmgr/aset.c	combined-into:mcx			ported in substrate crate mcx; fabled:mcx; m1-spine
+backend-utils-mmgr-bump	src/backend/utils/mmgr/bump.c	combined-into:mcx			ported in substrate crate mcx; fabled:mcx; m1-spine
+backend-utils-mmgr-dsa	src/backend/utils/mmgr/dsa.c	todo			fabled:backend-utils-mmgr-dsa; m1-dep(stub-ok)
+backend-utils-mmgr-freepage	src/backend/utils/mmgr/freepage.c	todo			fabled:backend-utils-mmgr-freepage; m1-dep(stub-ok)
+backend-utils-mmgr-generation	src/backend/utils/mmgr/generation.c	todo			fabled:mcx; m1-spine
+backend-utils-mmgr-mcxt	src/backend/utils/mmgr/mcxt.c	combined-into:mcx			ported in substrate crate mcx; fabled:mcx; m1-spine
+backend-utils-mmgr-portalmem	src/backend/utils/mmgr/portalmem.c	todo			fabled:backend-utils-mmgr-portalmem; m1-spine
+backend-utils-mmgr-slab	src/backend/utils/mmgr/slab.c	todo			fabled:mcx; m1-spine
+backend-utils-mmgr-small	*/alignedalloc.c,*/memdebug.c	todo			fabled:mcx; m1-spine
+backend-utils-resowner-all	*/resowner.c	todo			m1-spine; fabled:backend-utils-resowner-resowner
+backend-utils-sort-small	*/qsort_interruptible.c	todo			fabled:backend-utils-sort-small
+backend-utils-sort-sortsupport	src/backend/utils/sort/sortsupport.c	todo			fabled:backend-utils-sort-sortsupport
+backend-utils-sort-storage	*/logtape.c,*/sharedtuplestore.c,*/tuplestore.c	todo			fabled:backend-utils-sort-storage; m1-dep(stub-ok)
+backend-utils-sort-tuplesort	*/tuplesort.c,*/tuplesortvariants.c	todo			fabled:backend-utils-sort-tuplesort; m1-dep(stub-ok)
+backend-utils-time-small	*/combocid.c	todo			fabled:backend-utils-time-combocid; m1-spine
+backend-utils-time-snapmgr	src/backend/utils/time/snapmgr.c	todo			fabled:backend-utils-time-snapmgr; m1-spine
+bin-clusterdb-batch1	*/clusterdb.c	todo			
+bin-createdb-batch1	*/createdb.c	todo			
+bin-createuser-batch1	*/createuser.c	todo			
+bin-dropdb-batch1	*/dropdb.c	todo			
+bin-dropuser-batch1	*/dropuser.c	todo			
+bin-pg-amcheck-main-batch1	*/pg_amcheck.c	todo			
+bin-pg-archivecleanup-batch1	*/pg_archivecleanup.c	todo			
+bin-pg-basebackup-astreamer-inject-batch1	*/astreamer_inject.c	todo			
+bin-pg-basebackup-streamutil-batch1	*/streamutil.c	todo			
+bin-pg-basebackup-walmethods-batch1	*/walmethods.c	todo			
+bin-pg-checksums-batch1	*/pg_checksums.c	combined-into:bin-pg-checksums-main-bitfields			fabled:duplicate-of
+bin-pg-checksums-main-bitfields	*/pg_checksums.c	todo			
+bin-pg-checksums-main-probe	*/pg_checksums.c	combined-into:bin-pg-checksums-main-bitfields			fabled:duplicate-of
+bin-pg-checksums-probe	*/pg_checksums.c	combined-into:bin-pg-checksums-main-bitfields			fabled:duplicate-of
+bin-pg-combinebackup-backup-label-batch1	*/backup_label.c	todo			
+bin-pg-combinebackup-copy-file-batch1	*/copy_file.c	todo			
+bin-pg-combinebackup-load-manifest-batch1	*/load_manifest.c	todo			
+bin-pg-combinebackup-reconstruct-batch1	*/reconstruct.c	todo			
+bin-pg-config-batch1	*/pg_config.c	todo			
+bin-pg-ctl-main-batch1	*/pg_ctl.c	todo			
+bin-pg-dump-common-batch1	*/common.c	todo			
+bin-pg-dump-compress-gzip-batch1	*/compress_gzip.c	todo			
+bin-pg-dump-compress-io-batch1	*/compress_io.c	todo			
+bin-pg-dump-compress-lz4-batch1	*/compress_lz4.c	todo			
+bin-pg-dump-compress-none-batch1	*/compress_none.c	todo			
+bin-pg-dump-connectdb-batch1	*/connectdb.c	todo			
+bin-pg-dump-dumputils-batch1	*/dumputils.c	todo			
+bin-pg-dump-filter-batch1	*/filter.c	todo			
+bin-pg-dump-parallel-batch1	*/parallel.c	todo			
+bin-pg-dump-pg-backup-archiver-batch1	*/pg_backup_archiver.c	todo			
+bin-pg-dump-pg-backup-custom-batch1	*/pg_backup_custom.c	todo			
+bin-pg-dump-pg-backup-db-batch1	*/pg_backup_db.c	todo			
+bin-pg-dump-pg-backup-directory-batch1	*/pg_backup_directory.c	todo			
+bin-pg-dump-pg-backup-null-batch1	*/pg_backup_null.c	todo			
+bin-pg-dump-pg-backup-tar-batch1	*/pg_backup_tar.c	todo			
+bin-pg-dump-pg-backup-utils-batch1	*/pg_backup_utils.c	todo			
+bin-pg-dump-pg-dump-main-batch1	*/pg_dump.c	todo			
+bin-pg-dump-pg-dump-sort-batch1	*/pg_dump_sort.c	todo			
+bin-pg-dump-pg-dumpall-main-batch1	*/pg_dumpall.c	todo			
+bin-pg-dump-pg-restore-main-batch1	*/pg_restore.c	todo			
+bin-pg-isready-batch1	*/pg_isready.c	todo			
+bin-pg-resetwal-batch1	*/pg_resetwal.c	combined-into:bin-pg-resetwal-main-bitfields			fabled:duplicate-of
+bin-pg-resetwal-main-bitfields	*/pg_resetwal.c	todo			
+bin-pg-resetwal-probe	*/pg_resetwal.c	combined-into:bin-pg-resetwal-main-bitfields			fabled:duplicate-of
+bin-pg-rewind-datapagemap-batch1	*/datapagemap.c	todo			
+bin-pg-rewind-file-ops-batch1	*/file_ops.c	todo			
+bin-pg-rewind-filemap-batch1	*/filemap.c	todo			
+bin-pg-rewind-libpq-source-batch1	*/libpq_source.c	todo			
+bin-pg-rewind-local-source-batch1	*/local_source.c	todo			
+bin-pg-rewind-timeline-batch1	*/timeline.c	todo			
+bin-pg-test-fsync-batch1	*/pg_test_fsync.c	todo			
+bin-pg-test-timing-batch1	*/pg_test_timing.c	todo			
+bin-pg-verifybackup-astreamer-verify-batch1	*/astreamer_verify.c	todo			
+bin-pg-waldump-compat-batch1	*/compat.c	todo			
+bin-pg-waldump-rmgrdesc-batch1	*/rmgrdesc.c	todo			
+bin-pg-waldump-rmgrdesc-extra-small	*/replorigindesc.c,*/xlogdesc.c	combined-into:backend-rmgrdesc-extra-small			fabled:duplicate-of
+bin-pg-waldump-rmgrdesc-next	*/brindesc.c,*/gindesc.c,*/gistdesc.c,*/hashdesc.c,*/heapdesc.c,*/mxactdesc.c,*/nbtdesc.c,*/spgdesc.c,*/standbydesc.c	combined-into:backend-rmgrdesc-next			fabled:duplicate-of
+bin-pg-waldump-rmgrdesc-path	*/smgrdesc.c,*/xactdesc.c	combined-into:backend-rmgrdesc-path			fabled:duplicate-of
+bin-pg-waldump-rmgrdesc-small	*/clogdesc.c,*/committsdesc.c,*/dbasedesc.c,*/genericdesc.c,*/logicalmsgdesc.c,*/relmapdesc.c,*/rmgrdesc_utils.c,*/seqdesc.c,*/tblspcdesc.c	combined-into:backend-rmgrdesc-small			fabled:duplicate-of
+bin-pg-waldump-xlogstats-batch1	*/xlogstats.c	combined-into:backend-access-transam-xlogstats			fabled:duplicate-of
+bin-pg-walsummary-batch1	*/pg_walsummary.c	todo			
+bin-pg-walsummary-main-batch1	*/pg_walsummary.c	combined-into:bin-pg-walsummary-batch1			fabled:duplicate-of
+bin-reindexdb-batch1	*/reindexdb.c	todo			
+bin-vacuumdb-batch1	*/vacuumdb.c	todo			
+common-batch1	*/base64.c,*/encnames.c,*/hashfn.c,*/keywords.c,*/kwlookup.c,*/pg_prng.c	todo			
+common-batch11	*/base64.c,*/checksum_helper.c,*/file_perm.c,*/hashfn.c,*/ip.c,*/keywords.c,*/kwlookup.c,*/link_canary.c,*/md5_common.c,*/pg_prng.c	todo			
+common-batch15	*/base64.c,*/checksum_helper.c,*/compression.c,*/exec.c,*/file_perm.c,*/hashfn.c,*/ip.c,*/keywords.c,*/kwlookup.c,*/link_canary.c,*/md5_common.c,*/pg_get_line.c,*/pg_prng.c,*/saslprep.c,*/string.c	todo			
+common-batch17	*/base64.c,*/checksum_helper.c,*/compression.c,*/cryptohash_openssl.c,*/exec.c,*/file_perm.c,*/hashfn.c,*/hmac_openssl.c,*/ip.c,*/keywords.c,*/kwlookup.c,*/link_canary.c,*/md5_common.c,*/pg_get_line.c,*/pg_prng.c,*/saslprep.c,*/string.c	todo			
+common-batch19	*/base64.c,*/checksum_helper.c,*/compression.c,*/cryptohash_openssl.c,*/exec.c,*/file_perm.c,*/hashfn.c,*/hmac_openssl.c,*/ip.c,*/keywords.c,*/kwlookup.c,*/link_canary.c,*/md5_common.c,*/pg_get_line.c,*/pg_lzcompress.c,*/pg_prng.c,*/relpath.c,*/saslprep.c,*/string.c	todo			
+common-batch2	*/base64.c,*/hashfn.c,*/keywords.c,*/kwlookup.c,*/pg_prng.c	todo			
+common-batch21	*/base64.c,*/blkreftable.c,*/checksum_helper.c,*/compression.c,*/cryptohash_openssl.c,*/exec.c,*/file_perm.c,*/hashfn.c,*/hmac_openssl.c,*/ip.c,*/keywords.c,*/kwlookup.c,*/link_canary.c,*/md5_common.c,*/pg_get_line.c,*/pg_lzcompress.c,*/pg_prng.c,*/relpath.c,*/saslprep.c,*/scram_common.c,*/string.c	todo			
+common-batch23	*/base64.c,*/blkreftable.c,*/checksum_helper.c,*/compression.c,*/cryptohash_openssl.c,*/exec.c,*/file_perm.c,*/hashfn.c,*/hmac_openssl.c,*/ip.c,*/keywords.c,*/kwlookup.c,*/link_canary.c,*/md5_common.c,*/pg_get_line.c,*/pg_lzcompress.c,*/pg_prng.c,*/relpath.c,*/saslprep.c,*/scram_common.c,*/string.c,*/unicode_case.c,*/unicode_category.c	todo			
+common-batch3	*/base64.c,*/checksum_helper.c,*/hashfn.c,*/keywords.c,*/kwlookup.c,*/md5_common.c,*/pg_lzcompress.c,*/pg_prng.c	todo			
+common-batch4	*/base64.c,*/checksum_helper.c,*/hashfn.c,*/keywords.c,*/kwlookup.c,*/md5_common.c,*/pg_prng.c	todo			
+common-batch5	*/base64.c,*/checksum_helper.c,*/hashfn.c,*/keywords.c,*/kwlookup.c,*/md5_common.c,*/pg_prng.c	combined-into:common-batch4			fabled:duplicate-of
+common-batch6	*/archive.c,*/base64.c,*/checksum_helper.c,*/file_perm.c,*/hashfn.c,*/keywords.c,*/kwlookup.c,*/md5_common.c,*/pg_prng.c,*/pgfnames.c,*/relpath.c,*/rmtree.c,*/username.c,*/wait_error.c	todo			
+common-batch7	*/archive.c,*/base64.c,*/checksum_helper.c,*/file_perm.c,*/hashfn.c,*/keywords.c,*/kwlookup.c,*/md5_common.c,*/pg_prng.c,*/pgfnames.c,*/rmtree.c,*/username.c,*/wait_error.c	todo			
+common-batch8	*/archive.c,*/base64.c,*/checksum_helper.c,*/file_perm.c,*/hashfn.c,*/keywords.c,*/kwlookup.c,*/md5_common.c,*/pg_prng.c,*/username.c,*/wait_error.c	todo			
+common-batch9	*/base64.c,*/checksum_helper.c,*/file_perm.c,*/hashfn.c,*/keywords.c,*/kwlookup.c,*/md5_common.c,*/pg_prng.c	todo			
+common-config-info-frontshlib-batch1	*/config_info.c	combined-into:common-config-info-srv-batch1			fabled:duplicate-of
+common-config-info-frontstatic-batch1	*/config_info.c	combined-into:common-config-info-srv-batch1			fabled:duplicate-of
+common-config-info-srv-batch1	*/config_info.c	todo			
+common-extra-frontshlib-batch2	*/archive.c,*/binaryheap.c	combined-into:common-extra-srv-batch2			fabled:duplicate-of
+common-extra-frontshlib-batch4	*/archive.c,*/binaryheap.c,*/username.c,*/wait_error.c	combined-into:common-extra-srv-batch4			fabled:duplicate-of
+common-extra-frontshlib-batch5	*/archive.c,*/binaryheap.c,*/encnames.c,*/username.c,*/wait_error.c	combined-into:common-extra-srv-batch5			fabled:duplicate-of
+common-extra-frontshlib-encnames-batch1	*/encnames.c	combined-into:probe-srv-encnames			fabled:duplicate-of
+common-extra-frontstatic-batch2	*/archive.c,*/binaryheap.c	combined-into:common-extra-srv-batch2			fabled:duplicate-of
+common-extra-frontstatic-batch4	*/archive.c,*/binaryheap.c,*/username.c,*/wait_error.c	combined-into:common-extra-srv-batch4			fabled:duplicate-of
+common-extra-frontstatic-batch5	*/archive.c,*/binaryheap.c,*/encnames.c,*/username.c,*/wait_error.c	combined-into:common-extra-srv-batch5			fabled:duplicate-of
+common-extra-srv-batch2	*/archive.c,*/binaryheap.c	todo			
+common-extra-srv-batch4	*/archive.c,*/binaryheap.c,*/username.c,*/wait_error.c	todo			
+common-extra-srv-batch5	*/archive.c,*/binaryheap.c,*/encnames.c,*/username.c,*/wait_error.c	todo			
+common-extra-srv-batch6	*/archive.c,*/binaryheap.c,*/encnames.c,*/pgfnames.c,*/username.c,*/wait_error.c	todo			
+common-extra-srv-pgfnames-probe	*/pgfnames.c	combined-into:probe-pgfnames			fabled:duplicate-of
+common-fe-memutils-excluded-shlib-batch1	*/fe_memutils.c	todo			
+common-fe-memutils-frontstatic-batch1	*/fe_memutils.c	combined-into:common-fe-memutils-excluded-shlib-batch1			fabled:duplicate-of
+common-frontend-extra-shlib-batch2	*/restricted_token.c,*/sprompt.c	todo			
+common-frontend-extra-static-batch2	*/restricted_token.c,*/sprompt.c	combined-into:common-frontend-extra-shlib-batch2			fabled:duplicate-of
+common-frontshlib-batch10	*/base64.c,*/checksum_helper.c,*/file_perm.c,*/hashfn.c,*/keywords.c,*/kwlookup.c,*/md5_common.c,*/pg_prng.c,*/pgfnames.c,*/rmtree.c	todo			
+common-frontshlib-batch11	*/base64.c,*/checksum_helper.c,*/file_perm.c,*/hashfn.c,*/ip.c,*/keywords.c,*/kwlookup.c,*/link_canary.c,*/md5_common.c,*/pg_prng.c	combined-into:common-batch11			fabled:duplicate-of
+common-frontshlib-batch12	*/base64.c,*/checksum_helper.c,*/file_perm.c,*/hashfn.c,*/ip.c,*/keywords.c,*/kwlookup.c,*/link_canary.c,*/md5_common.c,*/pg_prng.c,*/saslprep.c,*/string.c	todo			
+common-frontshlib-batch13	*/base64.c,*/checksum_helper.c,*/file_perm.c,*/hashfn.c,*/ip.c,*/keywords.c,*/kwlookup.c,*/link_canary.c,*/md5_common.c,*/pg_get_line.c,*/pg_prng.c,*/saslprep.c,*/string.c	todo			
+common-frontshlib-batch14	*/base64.c,*/checksum_helper.c,*/cryptohash_openssl.c,*/file_perm.c,*/hashfn.c,*/hmac_openssl.c,*/ip.c,*/keywords.c,*/kwlookup.c,*/link_canary.c,*/md5_common.c,*/pg_prng.c,*/saslprep.c,*/string.c	todo			
+common-frontshlib-batch15	*/base64.c,*/checksum_helper.c,*/cryptohash_openssl.c,*/file_perm.c,*/hashfn.c,*/hmac_openssl.c,*/ip.c,*/keywords.c,*/kwlookup.c,*/link_canary.c,*/md5_common.c,*/pg_lzcompress.c,*/pg_prng.c,*/saslprep.c,*/string.c	todo			
+common-frontshlib-batch16	*/base64.c,*/checksum_helper.c,*/cryptohash_openssl.c,*/file_perm.c,*/hashfn.c,*/hmac_openssl.c,*/ip.c,*/keywords.c,*/kwlookup.c,*/link_canary.c,*/md5_common.c,*/pg_lzcompress.c,*/pg_prng.c,*/saslprep.c,*/scram_common.c,*/string.c	todo			
+common-frontshlib-batch18	*/base64.c,*/checksum_helper.c,*/cryptohash_openssl.c,*/file_perm.c,*/hashfn.c,*/hmac_openssl.c,*/ip.c,*/keywords.c,*/kwlookup.c,*/link_canary.c,*/md5_common.c,*/pg_lzcompress.c,*/pg_prng.c,*/saslprep.c,*/scram_common.c,*/string.c,*/unicode_case.c,*/unicode_category.c	todo			
+common-frontshlib-batch9	*/base64.c,*/checksum_helper.c,*/file_perm.c,*/hashfn.c,*/keywords.c,*/kwlookup.c,*/md5_common.c,*/pg_prng.c	combined-into:common-batch9			fabled:duplicate-of
+common-frontstatic-batch10	*/base64.c,*/checksum_helper.c,*/file_perm.c,*/hashfn.c,*/keywords.c,*/kwlookup.c,*/md5_common.c,*/pg_prng.c,*/pgfnames.c,*/rmtree.c	combined-into:common-frontshlib-batch10			fabled:duplicate-of
+common-frontstatic-batch12	*/base64.c,*/checksum_helper.c,*/file_perm.c,*/hashfn.c,*/ip.c,*/keywords.c,*/kwlookup.c,*/link_canary.c,*/md5_common.c,*/pg_prng.c,*/pgfnames.c,*/rmtree.c	todo			
+common-frontstatic-batch17	*/base64.c,*/checksum_helper.c,*/compression.c,*/exec.c,*/file_perm.c,*/hashfn.c,*/ip.c,*/keywords.c,*/kwlookup.c,*/link_canary.c,*/md5_common.c,*/pg_get_line.c,*/pg_prng.c,*/pgfnames.c,*/rmtree.c,*/saslprep.c,*/string.c	todo			
+common-frontstatic-batch19	*/base64.c,*/checksum_helper.c,*/compression.c,*/cryptohash_openssl.c,*/exec.c,*/file_perm.c,*/hashfn.c,*/hmac_openssl.c,*/ip.c,*/keywords.c,*/kwlookup.c,*/link_canary.c,*/md5_common.c,*/pg_get_line.c,*/pg_prng.c,*/pgfnames.c,*/rmtree.c,*/saslprep.c,*/string.c	todo			
+common-frontstatic-batch21	*/base64.c,*/checksum_helper.c,*/compression.c,*/cryptohash_openssl.c,*/exec.c,*/file_perm.c,*/hashfn.c,*/hmac_openssl.c,*/ip.c,*/keywords.c,*/kwlookup.c,*/link_canary.c,*/md5_common.c,*/pg_get_line.c,*/pg_lzcompress.c,*/pg_prng.c,*/pgfnames.c,*/relpath.c,*/rmtree.c,*/saslprep.c,*/string.c	todo			
+common-frontstatic-batch23	*/base64.c,*/blkreftable.c,*/checksum_helper.c,*/compression.c,*/cryptohash_openssl.c,*/exec.c,*/file_perm.c,*/hashfn.c,*/hmac_openssl.c,*/ip.c,*/keywords.c,*/kwlookup.c,*/link_canary.c,*/md5_common.c,*/pg_get_line.c,*/pg_lzcompress.c,*/pg_prng.c,*/pgfnames.c,*/relpath.c,*/rmtree.c,*/saslprep.c,*/scram_common.c,*/string.c	todo			
+common-frontstatic-batch25	*/base64.c,*/blkreftable.c,*/checksum_helper.c,*/compression.c,*/cryptohash_openssl.c,*/exec.c,*/file_perm.c,*/hashfn.c,*/hmac_openssl.c,*/ip.c,*/keywords.c,*/kwlookup.c,*/link_canary.c,*/md5_common.c,*/pg_get_line.c,*/pg_lzcompress.c,*/pg_prng.c,*/pgfnames.c,*/relpath.c,*/rmtree.c,*/saslprep.c,*/scram_common.c,*/string.c,*/unicode_case.c,*/unicode_category.c	todo			
+common-parse-manifest-frontshlib-batch1	*/parse_manifest.c	combined-into:common-probe-parse-manifest-srv			fabled:duplicate-of
+common-parse-manifest-frontstatic-batch1	*/parse_manifest.c	combined-into:common-probe-parse-manifest-srv			fabled:duplicate-of
+common-parse-manifest-srv-batch1	*/parse_manifest.c	combined-into:common-probe-parse-manifest-srv			fabled:duplicate-of
+common-percentrepl-nightly-batch1	*/percentrepl.c	todo			fabled:common-percentrepl
+common-prng-base64	*/base64.c,*/pg_prng.c	todo			fabled:common-prng-base64
+common-probe-blkreftable-srv	*/blkreftable.c	combined-into:probe-next-srv-blkreftable			fabled:duplicate-of
+common-probe-lz-rel-frontshlib	*/pg_lzcompress.c,*/relpath.c	combined-into:common-probe-lz-rel-srv			fabled:duplicate-of
+common-probe-lz-rel-frontstatic	*/pg_lzcompress.c,*/relpath.c	combined-into:common-probe-lz-rel-srv			fabled:duplicate-of
+common-probe-lz-rel-srv	*/pg_lzcompress.c,*/relpath.c	todo			
+common-probe-parse-manifest-frontshlib	*/parse_manifest.c	combined-into:common-probe-parse-manifest-srv			fabled:duplicate-of
+common-probe-parse-manifest-frontstatic	*/parse_manifest.c	combined-into:common-probe-parse-manifest-srv			fabled:duplicate-of
+common-probe-parse-manifest-srv	*/parse_manifest.c	todo			
+common-probe-scram-blk-frontshlib	*/blkreftable.c,*/scram_common.c	todo			
+common-probe-scram-blk-frontstatic	*/blkreftable.c,*/scram_common.c	combined-into:common-probe-scram-blk-frontshlib			fabled:duplicate-of
+common-probe-scram-frontshlib	*/scram_common.c	combined-into:common-probe-scram-srv			fabled:duplicate-of
+common-probe-scram-srv	*/scram_common.c	todo			fabled:common-scram-common
+common-saslprep	*/saslprep.c	todo			fabled:common-saslprep
+common-probe-unicode-case-srv	*/unicode_case.c	todo			fabled:common-unicode-case; m1-dep(stub-ok)
+common-probe-unicode-category-srv	*/unicode_category.c	todo			fabled:common-unicode-category; m1-dep(stub-ok)
+common-probe-unicode-frontshlib	*/unicode_case.c,*/unicode_category.c	todo			
+common-probe-unicode-frontstatic	*/unicode_case.c,*/unicode_category.c	combined-into:common-probe-unicode-frontshlib			fabled:duplicate-of
+common-psprintf-nightly-batch1	*/psprintf.c	combined-into:probe-next-srv-psprintf			fabled:duplicate-of
+common-ryu-frontshlib-batch1	*/d2s.c,*/f2s.c	combined-into:common-ryu-srv-batch1			fabled:duplicate-of
+common-ryu-frontstatic-batch1	*/d2s.c,*/f2s.c	combined-into:common-ryu-srv-batch1			fabled:duplicate-of
+common-ryu-srv-batch1	*/d2s.c,*/f2s.c	todo			fabled:common-ryu
+common-sha2	*/sha2.c	todo			fabled:common-sha2
+common-cryptohash	*/cryptohash.c,*/sha1.c	todo			fabled:common-cryptohash
+common-stringinfo-nightly-batch1	*/stringinfo.c	combined-into:probe-next-srv-stringinfo			fabled:duplicate-of
+common-unicode-norm-bitfields	*/unicode_norm.c	todo			fabled:common-unicode-norm-bitfields; m1-dep(stub-ok)
+common-unicode-norm-frontshlib-bitfields	*/unicode_norm.c	combined-into:common-unicode-norm-bitfields			fabled:duplicate-of
+common-unicode-norm-frontstatic-bitfields	*/unicode_norm.c	combined-into:common-unicode-norm-bitfields			fabled:duplicate-of
+common-unicode-norm-srv-bitfields	*/unicode_norm.c	combined-into:common-unicode-norm-bitfields			fabled:duplicate-of
+common-varargs-frontshlib-batch1	*/percentrepl.c,*/psprintf.c,*/stringinfo.c	combined-into:common-varargs-srv-batch1			fabled:duplicate-of
+common-varargs-frontstatic-batch1	*/percentrepl.c,*/psprintf.c,*/stringinfo.c	combined-into:common-varargs-srv-batch1			fabled:duplicate-of
+common-varargs-srv-batch1	*/percentrepl.c,*/psprintf.c,*/stringinfo.c	todo			
+common-variant-frontshlib-pgfnames-rmtree	*/pgfnames.c,*/rmtree.c	todo			fabled:common-variant-frontshlib-pgfnames-rmtree
+common-variant-frontstatic-pgfnames-rmtree	*/pgfnames.c,*/rmtree.c	combined-into:common-variant-frontshlib-pgfnames-rmtree			fabled:duplicate-of
+common-variant-srv-pgfnames	*/pgfnames.c	combined-into:probe-pgfnames			fabled:duplicate-of
+contrib-amcheck-verify-common	contrib/amcheck/verify_common.c	todo			fabled:contrib-amcheck-verify-common
+contrib-amcheck-verify-gin	contrib/amcheck/verify_gin.c	todo			
+contrib-amcheck-verify-heapam	contrib/amcheck/verify_heapam.c	todo			fabled:contrib-amcheck-verify-heapam
+contrib-amcheck-verify-nbtree	contrib/amcheck/verify_nbtree.c	todo			fabled:contrib-amcheck-verify-nbtree
+contrib-auth-delay-batch1	*/auth_delay.c	todo			
+contrib-auto-explain	contrib/auto_explain/auto_explain.c	todo			
+contrib-basebackup-to-shell-basebackup-to-shell	contrib/basebackup_to_shell/basebackup_to_shell.c	todo			
+contrib-basic-archive-basic-archive	contrib/basic_archive/basic_archive.c	todo			
+contrib-bloom-all-but-insert-bitfields	*/blcost.c,*/blscan.c,*/blutils.c,*/blvacuum.c,*/blvalidate.c	todo			
+contrib-bloom-blinsert	contrib/bloom/blinsert.c	todo			
+contrib-bloom-scan-vacuum-bitfields	*/blscan.c,*/blvacuum.c	todo			
+contrib-bloom-utils-bitfields	*/blcost.c,*/blutils.c,*/blvalidate.c	todo			
+contrib-bloom-utils-probe	*/blcost.c,*/blutils.c,*/blvalidate.c	combined-into:contrib-bloom-utils-bitfields			fabled:duplicate-of
+contrib-bool-plperl	contrib/bool_plperl/bool_plperl.c	todo			
+contrib-btree-gin	*/btree_gin.c	todo			
+contrib-btree-gist-bitfields-batch1	*/btree_bit.c,*/btree_bool.c,*/btree_bytea.c,*/btree_cash.c,*/btree_date.c,*/btree_enum.c,*/btree_gist.c,*/btree_inet.c,*/btree_int2.c,*/btree_int4.c,*/btree_int8.c,*/btree_interval.c,*/btree_macaddr.c,*/btree_macaddr8.c,*/btree_numeric.c,*/btree_oid.c,*/btree_text.c,*/btree_time.c,*/btree_ts.c,*/btree_uuid.c	todo			
+contrib-btree-gist-btree_bool	*/btree_bool.c	todo			
+contrib-btree-gist-btree_float4	*/btree_float4.c	todo			
+contrib-btree-gist-btree_float8	*/btree_float8.c	todo			
+contrib-btree-gist-btree_int2	*/btree_int2.c	todo			
+contrib-btree-gist-btree_int4	*/btree_int4.c	todo			
+contrib-btree-gist-btree_int8	*/btree_int8.c	todo			
+contrib-btree-gist-btree_oid	*/btree_oid.c	todo			
+contrib-btree-gist-btree_utils_var	*/btree_utils_var.c	todo			
+contrib-btree-gist-float-num	contrib/btree_gist/btree_float4.c,contrib/btree_gist/btree_float8.c,contrib/btree_gist/btree_utils_num.c	todo			
+contrib-citext	*/citext.c	todo			
+contrib-cube-cube-bitfields	*/cube.c	todo			
+contrib-cube-cube-nightly-unsafe	*/cube.c	combined-into:contrib-cube-cube-bitfields			fabled:duplicate-of
+contrib-cube-parser	contrib/cube/cubescan.l,contrib/cube/cubeparse.y	todo			
+contrib-dblink	contrib/dblink/dblink.c	todo			
+contrib-dict-int-batch1	*/dict_int.c	todo			
+contrib-dict-xsyn-batch1	*/dict_xsyn.c	todo			
+contrib-earthdistance	*/earthdistance.c	todo			fabled:contrib-earthdistance
+contrib-file-fdw	contrib/file_fdw/file_fdw.c	todo			
+contrib-fuzzystrmatch	*/daitch_mokotoff.c,*/dmetaphone.c,*/fuzzystrmatch.c	todo			
+contrib-hstore-all	contrib/hstore/hstore_compat.c,contrib/hstore/hstore_gin.c,contrib/hstore/hstore_gist.c,contrib/hstore/hstore_io.c,contrib/hstore/hstore_op.c,contrib/hstore/hstore_subs.c	todo			
+contrib-hstore-compat	*/hstore_compat.c	todo			
+contrib-hstore-plperl	contrib/hstore_plperl/hstore_plperl.c	todo			
+contrib-hstore-plpython	contrib/hstore_plpython/hstore_plpython.c	todo			
+contrib-intarray-bool	*/_int_bool.c	todo			
+contrib-intarray-op	*/_int_op.c	todo			
+contrib-intarray-remaining	contrib/intarray/_int_bool.c,contrib/intarray/_int_gin.c,contrib/intarray/_int_gist.c,contrib/intarray/_int_selfuncs.c,contrib/intarray/_int_tool.c,contrib/intarray/_intbig_gist.c	todo			
+contrib-isn	*/isn.c	todo			
+contrib-jsonb-plperl	contrib/jsonb_plperl/jsonb_plperl.c	todo			
+contrib-jsonb-plpython	contrib/jsonb_plpython/jsonb_plpython.c	todo			
+contrib-lo-lo	contrib/lo/lo.c	todo			
+contrib-ltree-_ltree_gist-nightly-unsafe	*/_ltree_gist.c	todo			
+contrib-ltree-_ltree_op-nightly-unsafe	*/_ltree_op.c	todo			
+contrib-ltree-all-bitfields	*/_ltree_gist.c,*/_ltree_op.c,*/crc32.c,*/lquery_op.c,*/ltree_gist.c,*/ltree_io.c,*/ltree_op.c,*/ltxtquery_io.c,*/ltxtquery_op.c	todo			
+contrib-ltree-batch1	*/_ltree_op.c,*/crc32.c,*/lquery_op.c,*/ltree_io.c,*/ltree_op.c,*/ltxtquery_io.c,*/ltxtquery_op.c	todo			
+contrib-ltree-crc32-nightly-unsafe	*/crc32.c	todo			
+contrib-ltree-gist-bitfields	*/_ltree_gist.c,*/ltree_gist.c	todo			
+contrib-ltree-lquery_op-nightly-unsafe	*/lquery_op.c	todo			
+contrib-ltree-ltree_gist-nightly-unsafe	*/ltree_gist.c	todo			
+contrib-ltree-ltree_io-nightly-unsafe	*/ltree_io.c	todo			
+contrib-ltree-ltree_op-nightly-unsafe	*/ltree_op.c	todo			
+contrib-ltree-ltxtquery_io-nightly-unsafe	*/ltxtquery_io.c	todo			
+contrib-ltree-ltxtquery_op-nightly-unsafe	*/ltxtquery_op.c	todo			
+contrib-ltree-plpython	contrib/ltree_plpython/ltree_plpython.c	todo			
+contrib-oid2name-main-batch1	*/oid2name.c	todo			
+contrib-pageinspect-brinfuncs	contrib/pageinspect/brinfuncs.c	todo			
+contrib-pageinspect-btreefuncs	contrib/pageinspect/btreefuncs.c	todo			
+contrib-pageinspect-fsm-bitfields	*/fsmfuncs.c	todo			
+contrib-pageinspect-fsm-probe	*/fsmfuncs.c	combined-into:contrib-pageinspect-fsm-bitfields			fabled:duplicate-of
+contrib-pageinspect-ginfuncs	contrib/pageinspect/ginfuncs.c	todo			
+contrib-pageinspect-gistfuncs	contrib/pageinspect/gistfuncs.c	todo			
+contrib-pageinspect-hashfuncs	contrib/pageinspect/hashfuncs.c	todo			
+contrib-pageinspect-heapfuncs	contrib/pageinspect/heapfuncs.c	todo			
+contrib-pageinspect-rawpage	contrib/pageinspect/rawpage.c	todo			
+contrib-passwordcheck	*/passwordcheck.c	todo			
+contrib-pg-buffercache-pg-buffercache-pages	contrib/pg_buffercache/pg_buffercache_pages.c	todo			
+contrib-pg-freespacemap-batch1	*/pg_freespacemap.c	todo			
+contrib-pg-logicalinspect	contrib/pg_logicalinspect/pg_logicalinspect.c	todo			
+contrib-pg-overexplain	contrib/pg_overexplain/pg_overexplain.c	todo			
+contrib-pg-prewarm-all	contrib/pg_prewarm/pg_prewarm.c,contrib/pg_prewarm/autoprewarm.c	todo			
+contrib-pg-stat-statements	contrib/pg_stat_statements/pg_stat_statements.c	todo			
+contrib-pg-surgery-heap-bitfields	*/heap_surgery.c	todo			
+contrib-pg-surgery-probe	*/heap_surgery.c	combined-into:contrib-pg-surgery-heap-bitfields			fabled:duplicate-of
+contrib-pg-trgm-index	contrib/pg_trgm/trgm_gin.c,contrib/pg_trgm/trgm_gist.c	todo			
+contrib-pg-trgm-op	*/trgm_op.c	todo			
+contrib-pg-trgm-regexp	*/trgm_regexp.c	todo			
+contrib-pg-visibility-pg-visibility	contrib/pg_visibility/pg_visibility.c	todo			
+contrib-pg-walinspect-pg-walinspect	contrib/pg_walinspect/pg_walinspect.c	todo			
+contrib-pgcrypto-batch1	*/crypt_blowfish.c,*/crypt_des.c,*/crypt_gensalt.c,*/crypt_md5.c,*/crypt_sha.c,*/mbuf.c,*/openssl.c,*/pgcrypto.c,*/pgp.c,*/pgp_armor.c,*/pgp_cfb.c,*/pgp_compress.c,*/pgp_decrypt.c,*/pgp_encrypt.c,*/pgp_info.c,*/pgp_mpi.c,*/pgp_mpi_openssl.c,*/pgp_pubdec.c,*/pgp_pubenc.c,*/pgp_pubkey.c,*/pgp_s2k.c,*/px.c,*/px_crypt.c,*/px_hmac.c	todo			
+contrib-pgcrypto-crypt-blowfish-nightly-unsafe	*/crypt_blowfish.c	todo			
+contrib-pgcrypto-crypt-des-nightly-unsafe	*/crypt_des.c	todo			
+contrib-pgcrypto-crypt-gensalt	*/crypt_gensalt.c	todo			
+contrib-pgcrypto-crypt-md5	*/crypt_md5.c	todo			
+contrib-pgcrypto-crypt-sha	*/crypt_sha.c	todo			
+contrib-pgcrypto-mbuf	*/mbuf.c	todo			
+contrib-pgcrypto-openssl-nightly-unsafe	*/openssl.c	todo			
+contrib-pgcrypto-pgcrypto-nightly-unsafe	*/pgcrypto.c	todo			
+contrib-pgcrypto-pgp-armor	*/pgp_armor.c	todo			
+contrib-pgcrypto-pgp-cfb-nightly-unsafe	*/pgp_cfb.c	combined-into:contrib-pgcrypto-pgp-cfb			fabled:duplicate-of
+contrib-pgcrypto-pgp-cfb	*/pgp_cfb.c	todo			
+contrib-pgcrypto-pgp-compress-nightly-unsafe	*/pgp_compress.c	todo			
+contrib-pgcrypto-pgp-decrypt-nightly-unsafe	*/pgp_decrypt.c	todo			
+contrib-pgcrypto-pgp-encrypt-nightly-unsafe	*/pgp_encrypt.c	todo			
+contrib-pgcrypto-pgp-info-nightly-unsafe	*/pgp_info.c	todo			
+contrib-pgcrypto-pgp-mpi-nightly-unsafe	*/pgp_mpi.c	todo			
+contrib-pgcrypto-pgp-mpi-openssl-nightly-unsafe	*/pgp_mpi_openssl.c	todo			
+contrib-pgcrypto-pgp-nightly-unsafe	*/pgp.c	todo			
+contrib-pgcrypto-pgp-pgsql	contrib/pgcrypto/pgp-pgsql.c	todo			
+contrib-pgcrypto-pgp-pubdec-nightly-unsafe	*/pgp_pubdec.c	todo			
+contrib-pgcrypto-pgp-pubenc-nightly-unsafe	*/pgp_pubenc.c	todo			
+contrib-pgcrypto-pgp-pubkey-nightly-unsafe	*/pgp_pubkey.c	todo			
+contrib-pgcrypto-pgp-s2k-nightly-unsafe	*/pgp_s2k.c	todo			
+contrib-pgcrypto-px-crypt-nightly-unsafe	*/px_crypt.c	todo			
+contrib-pgcrypto-px-hmac	*/px_hmac.c	todo			
+contrib-pgcrypto-px-nightly	*/px.c	combined-into:contrib-pgcrypto-px			fabled:duplicate-of
+contrib-pgcrypto-px	*/px.c	todo			
+contrib-pgrowlocks-pgrowlocks	contrib/pgrowlocks/pgrowlocks.c	todo			
+contrib-pgstattuple-all	contrib/pgstattuple/pgstatapprox.c,contrib/pgstattuple/pgstatindex.c,contrib/pgstattuple/pgstattuple.c	todo			
+contrib-postgres-fdw	contrib/postgres_fdw/connection.c,contrib/postgres_fdw/deparse.c,contrib/postgres_fdw/option.c,contrib/postgres_fdw/postgres_fdw.c,contrib/postgres_fdw/shippable.c	todo			
+contrib-seg-parser	contrib/seg/segscan.l,contrib/seg/segparse.y	todo			
+contrib-seg-seg-bitfields	*/seg.c	todo			
+contrib-seg-seg-nightly-unsafe	*/seg.c	combined-into:contrib-seg-seg-bitfields			fabled:duplicate-of
+contrib-spi-autoinc	contrib/spi/autoinc.c	todo			
+contrib-spi-insert_username	contrib/spi/insert_username.c	todo			
+contrib-spi-moddatetime	contrib/spi/moddatetime.c	todo			
+contrib-spi-refint	contrib/spi/refint.c	todo			
+contrib-sslinfo-sslinfo	contrib/sslinfo/sslinfo.c	todo			
+contrib-tablefunc-tablefunc	contrib/tablefunc/tablefunc.c	todo			
+contrib-tcn-tcn	contrib/tcn/tcn.c	todo			
+contrib-test-decoding-test-decoding	contrib/test_decoding/test_decoding.c	todo			
+contrib-tsm-system-rows-tsm-system-rows	contrib/tsm_system_rows/tsm_system_rows.c	todo			
+contrib-tsm-system-time-tsm-system-time	contrib/tsm_system_time/tsm_system_time.c	todo			
+contrib-unaccent	*/unaccent.c	todo			
+contrib-vacuumlo-main-batch1	*/vacuumlo.c	todo			
+contrib-xml2	contrib/xml2/xpath.c,contrib/xml2/xslt_proc.c	todo			
+pg-prng-nostd	*/pg_prng.c	combined-into:pg-prng			fabled:duplicate-of; m1-dep(stub-ok)
+pg-prng	*/pg_prng.c	todo			fabled:pg-prng; m1-dep(stub-ok)
+port-batch14	*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrsignal.c,*/pthread_barrier_wait.c,*/quotes.c,*/strerror.c,*/tar.c	todo			m1-spine(boot); fabled:port-pg-strong-random; only pg_strong_random.c on spine
+port-batch17	*/bsearch_arg.c,*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrsignal.c,*/pthread_barrier_wait.c,*/qsort.c,*/qsort_arg.c,*/quotes.c,*/strerror.c,*/tar.c	todo			
+port-batch19	*/bsearch_arg.c,*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_bitutils.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_popcount_avx512.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrsignal.c,*/pthread_barrier_wait.c,*/qsort.c,*/qsort_arg.c,*/quotes.c,*/strerror.c,*/tar.c	todo			
+port-batch20	*/bsearch_arg.c,*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_bitutils.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_popcount_avx512.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrcasecmp.c,*/pgstrsignal.c,*/pthread_barrier_wait.c,*/qsort.c,*/qsort_arg.c,*/quotes.c,*/strerror.c,*/tar.c	todo			
+port-batch21	*/bsearch_arg.c,*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_bitutils.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_popcount_avx512.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrcasecmp.c,*/pgstrsignal.c,*/pqsignal.c,*/pthread_barrier_wait.c,*/qsort.c,*/qsort_arg.c,*/quotes.c,*/strerror.c,*/tar.c	todo			
+port-batch22	*/bsearch_arg.c,*/chklocale.c,*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_bitutils.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_popcount_avx512.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrcasecmp.c,*/pgstrsignal.c,*/pqsignal.c,*/pthread_barrier_wait.c,*/qsort.c,*/qsort_arg.c,*/quotes.c,*/strerror.c,*/tar.c	todo			
+port-batch23	*/bsearch_arg.c,*/chklocale.c,*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_bitutils.c,*/pg_crc32c_armv8.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_popcount_avx512.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrcasecmp.c,*/pgstrsignal.c,*/pqsignal.c,*/pthread_barrier_wait.c,*/qsort.c,*/qsort_arg.c,*/quotes.c,*/strerror.c,*/tar.c	todo			
+port-batch8	*/explicit_bzero.c,*/noblock.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrsignal.c,*/pthread_barrier_wait.c,*/quotes.c	todo			
+port-chklocale-probe	*/chklocale.c	todo			
+port-crc-armv8-probe	*/pg_crc32c_armv8.c	todo			
+port-frontshlib-batch14	*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrsignal.c,*/pthread_barrier_wait.c,*/quotes.c,*/strerror.c,*/tar.c	combined-into:port-batch14			fabled:duplicate-of
+port-frontshlib-batch17	*/bsearch_arg.c,*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrsignal.c,*/pthread_barrier_wait.c,*/qsort.c,*/qsort_arg.c,*/quotes.c,*/strerror.c,*/tar.c	combined-into:port-batch17			fabled:duplicate-of
+port-frontshlib-batch19	*/bsearch_arg.c,*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_bitutils.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_popcount_avx512.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrsignal.c,*/pthread_barrier_wait.c,*/qsort.c,*/qsort_arg.c,*/quotes.c,*/strerror.c,*/tar.c	combined-into:port-batch19			fabled:duplicate-of
+port-frontshlib-batch20	*/bsearch_arg.c,*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_bitutils.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_popcount_avx512.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrcasecmp.c,*/pgstrsignal.c,*/pthread_barrier_wait.c,*/qsort.c,*/qsort_arg.c,*/quotes.c,*/strerror.c,*/tar.c	combined-into:port-batch20			fabled:duplicate-of
+port-frontshlib-batch21	*/bsearch_arg.c,*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_bitutils.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_popcount_avx512.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrcasecmp.c,*/pgstrsignal.c,*/pqsignal.c,*/pthread_barrier_wait.c,*/qsort.c,*/qsort_arg.c,*/quotes.c,*/strerror.c,*/tar.c	combined-into:port-batch21			fabled:duplicate-of
+port-frontshlib-batch22	*/bsearch_arg.c,*/chklocale.c,*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_bitutils.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_popcount_avx512.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrcasecmp.c,*/pgstrsignal.c,*/pqsignal.c,*/pthread_barrier_wait.c,*/qsort.c,*/qsort_arg.c,*/quotes.c,*/strerror.c,*/tar.c	combined-into:port-batch22			fabled:duplicate-of
+port-frontshlib-batch23	*/bsearch_arg.c,*/chklocale.c,*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_bitutils.c,*/pg_crc32c_armv8.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_popcount_avx512.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrcasecmp.c,*/pgstrsignal.c,*/pqsignal.c,*/pthread_barrier_wait.c,*/qsort.c,*/qsort_arg.c,*/quotes.c,*/strerror.c,*/tar.c	combined-into:port-batch23			fabled:duplicate-of
+port-frontshlib-batch8	*/explicit_bzero.c,*/noblock.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrsignal.c,*/pthread_barrier_wait.c,*/quotes.c	combined-into:port-batch8			fabled:duplicate-of
+port-frontstatic-batch14	*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrsignal.c,*/pthread_barrier_wait.c,*/quotes.c,*/strerror.c,*/tar.c	combined-into:port-batch14			fabled:duplicate-of
+port-frontstatic-batch17	*/bsearch_arg.c,*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrsignal.c,*/pthread_barrier_wait.c,*/qsort.c,*/qsort_arg.c,*/quotes.c,*/strerror.c,*/tar.c	combined-into:port-batch17			fabled:duplicate-of
+port-frontstatic-batch19	*/bsearch_arg.c,*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_bitutils.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_popcount_avx512.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrsignal.c,*/pthread_barrier_wait.c,*/qsort.c,*/qsort_arg.c,*/quotes.c,*/strerror.c,*/tar.c	combined-into:port-batch19			fabled:duplicate-of
+port-frontstatic-batch20	*/bsearch_arg.c,*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_bitutils.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_popcount_avx512.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrcasecmp.c,*/pgstrsignal.c,*/pthread_barrier_wait.c,*/qsort.c,*/qsort_arg.c,*/quotes.c,*/strerror.c,*/tar.c	combined-into:port-batch20			fabled:duplicate-of
+port-frontstatic-batch21	*/bsearch_arg.c,*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_bitutils.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_popcount_avx512.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrcasecmp.c,*/pgstrsignal.c,*/pqsignal.c,*/pthread_barrier_wait.c,*/qsort.c,*/qsort_arg.c,*/quotes.c,*/strerror.c,*/tar.c	combined-into:port-batch21			fabled:duplicate-of
+port-frontstatic-batch22	*/bsearch_arg.c,*/chklocale.c,*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_bitutils.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_popcount_avx512.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrcasecmp.c,*/pgstrsignal.c,*/pqsignal.c,*/pthread_barrier_wait.c,*/qsort.c,*/qsort_arg.c,*/quotes.c,*/strerror.c,*/tar.c	combined-into:port-batch22			fabled:duplicate-of
+port-frontstatic-batch23	*/bsearch_arg.c,*/chklocale.c,*/explicit_bzero.c,*/inet_net_ntop.c,*/noblock.c,*/pg_bitutils.c,*/pg_crc32c_armv8.c,*/pg_localeconv_r.c,*/pg_numa.c,*/pg_popcount_avx512.c,*/pg_strong_random.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrcasecmp.c,*/pgstrsignal.c,*/pqsignal.c,*/pthread_barrier_wait.c,*/qsort.c,*/qsort_arg.c,*/quotes.c,*/strerror.c,*/tar.c	combined-into:port-batch23			fabled:duplicate-of
+port-frontstatic-batch8	*/explicit_bzero.c,*/noblock.c,*/pgcheckdir.c,*/pgmkdirp.c,*/pgsleep.c,*/pgstrsignal.c,*/pthread_barrier_wait.c,*/quotes.c	combined-into:port-batch8			fabled:duplicate-of
+port-popcount-aarch64-srv-batch1	*/pg_popcount_aarch64.c	todo			
+port-snprintf-batch1	src/port/snprintf.c	todo			fabled:port-snprintf
+probe-activity-backend_progress	*/backend_progress.c	todo			
+probe-activity-pgstat_archiver	*/pgstat_archiver.c	todo			
+probe-activity-pgstat_backend	*/pgstat_backend.c	todo			
+probe-activity-pgstat_bgwriter	*/pgstat_bgwriter.c	todo			
+probe-activity-pgstat_checkpointer	*/pgstat_checkpointer.c	todo			
+probe-activity-pgstat_database	*/pgstat_database.c	todo			
+probe-activity-pgstat_function	*/pgstat_function.c	todo			
+probe-activity-pgstat_io	*/pgstat_io.c	todo			
+probe-activity-pgstat_relation	*/pgstat_relation.c	todo			
+probe-activity-pgstat_replslot	*/pgstat_replslot.c	todo			fabled:backend-utils-activity-pgstat-replslot; m1-spine
+probe-activity-pgstat_shmem	*/pgstat_shmem.c	combined-into:backend-utils-activity-shmem			fabled:duplicate-of
+probe-activity-pgstat_slru	*/pgstat_slru.c	todo			
+probe-activity-pgstat_subscription	*/pgstat_subscription.c	todo			fabled:backend-utils-activity-pgstat-subscription; m1-spine
+probe-activity-pgstat_wal	*/pgstat_wal.c	todo			
+probe-adt-arrayutils	*/arrayutils.c	todo			fabled:backend-utils-adt-arrayutils; m1-dep(stub-ok)
+probe-adt-cryptohashfuncs	*/cryptohashfuncs.c	todo			
+probe-adt-geo_selfuncs	*/geo_selfuncs.c	todo			
+probe-adt-pg_locale_builtin	*/pg_locale_builtin.c	todo			fabled:backend-utils-adt-pg-locale-builtin; m1-spine(boot)
+probe-adt-pseudorandomfuncs	*/pseudorandomfuncs.c	todo			
+probe-adt-scalar-bool	*/bool.c	todo			fabled:probe-adt-scalar-bool
+probe-adt-scalar-cash	*/cash.c	combined-into:backend-utils-adt-cash			fabled:duplicate-of
+probe-adt-scalar-datum	*/datum.c	todo			fabled:backend-utils-adt-scalar-datum-core; m1-dep(stub-ok)
+probe-adt-scalar-enum	*/enum.c	todo			fabled:backend-utils-adt-enum
+probe-adt-scalar-numutils	*/numutils.c	combined-into:backend-utils-adt-numutils			fabled:duplicate-of
+probe-adt-scalar-oid	*/oid.c	todo			
+probe-adt-scalar-uuid	*/uuid.c	todo			fabled:backend-utils-adt-uuid
+probe-adt-scalar-xid	*/xid.c	todo			
+probe-adt-skipsupport	*/skipsupport.c	todo			
+probe-adt-waitfuncs	*/waitfuncs.c	todo			
+probe-archive	*/archive.c	todo			
+probe-cache-attoptcache	*/attoptcache.c	combined-into:backend-utils-cache-small			fabled:duplicate-of
+probe-cache-relfilenumbermap	*/relfilenumbermap.c	combined-into:backend-utils-cache-small			fabled:duplicate-of
+probe-cache-spccache	*/spccache.c	combined-into:backend-utils-cache-small			fabled:duplicate-of
+probe-cache-syscache	*/syscache.c	combined-into:backend-utils-cache-small			fabled:duplicate-of
+probe-cache-ts_cache	*/ts_cache.c	combined-into:backend-utils-cache-small			fabled:duplicate-of
+probe-common-extra-shlib-encnames	*/encnames.c	combined-into:probe-srv-encnames			fabled:duplicate-of
+probe-common-extra-shlib-encnames2	*/encnames.c	combined-into:probe-srv-encnames			fabled:duplicate-of
+probe-common-extra-shlib-userwait	*/username.c,*/wait_error.c	combined-into:probe-common-extra-srv-userwait			fabled:duplicate-of
+probe-common-extra-srv-encnames	*/encnames.c	combined-into:probe-srv-encnames			fabled:duplicate-of
+probe-common-extra-srv-encnames2	*/encnames.c	combined-into:probe-srv-encnames			fabled:duplicate-of
+probe-common-extra-srv-userwait	*/username.c,*/wait_error.c	todo			
+probe-common-extra-static-encnames	*/encnames.c	combined-into:probe-srv-encnames			fabled:duplicate-of
+probe-common-extra-static-encnames2	*/encnames.c	combined-into:probe-srv-encnames			fabled:duplicate-of
+probe-common-extra-static-userwait	*/username.c,*/wait_error.c	combined-into:probe-common-extra-srv-userwait			fabled:duplicate-of
+probe-common-shlib-archive	*/archive.c	combined-into:probe-archive			fabled:duplicate-of
+probe-common-shlib-binaryheap	*/binaryheap.c	combined-into:probe-next-srv-binaryheap			fabled:duplicate-of
+probe-common-srv-archive	*/archive.c	combined-into:probe-archive			fabled:duplicate-of
+probe-common-srv-binaryheap	*/binaryheap.c	combined-into:probe-next-srv-binaryheap			fabled:duplicate-of
+probe-common-srv-blkreftable	*/blkreftable.c	combined-into:probe-next-srv-blkreftable			fabled:duplicate-of
+probe-common-srv-jsonapi	*/jsonapi.c	todo			fabled:common-jsonapi
+probe-common-srv-parse_manifest	*/parse_manifest.c	combined-into:common-probe-parse-manifest-srv			fabled:duplicate-of
+probe-common-srv-percentrepl	*/percentrepl.c	combined-into:probe-next-srv-percentrepl			fabled:duplicate-of
+probe-common-srv-psprintf	*/psprintf.c	combined-into:probe-next-srv-psprintf			fabled:duplicate-of
+probe-common-srv-scram_common	*/scram_common.c	combined-into:common-probe-scram-srv			fabled:duplicate-of
+probe-common-srv-stringinfo	*/stringinfo.c	combined-into:probe-next-srv-stringinfo			fabled:duplicate-of
+probe-common-srv-unicode_case	*/unicode_case.c	combined-into:common-probe-unicode-case-srv			fabled:duplicate-of
+probe-common-srv-unicode_category	*/unicode_category.c	combined-into:common-probe-unicode-category-srv			fabled:duplicate-of
+probe-common-srv-unicode_norm	*/unicode_norm.c	combined-into:common-unicode-norm-bitfields			fabled:duplicate-of
+probe-common-srv-wchar	*/wchar.c	combined-into:probe-next-srv-wchar			fabled:duplicate-of
+probe-common-static-archive	*/archive.c	combined-into:probe-archive			fabled:duplicate-of
+probe-common-static-binaryheap	*/binaryheap.c	combined-into:probe-next-srv-binaryheap			fabled:duplicate-of
+probe-file_perm	*/file_perm.c	todo			
+probe-next-shlib-compression	*/compression.c	combined-into:probe-next-srv-compression			fabled:duplicate-of
+probe-next-shlib-exec	*/exec.c	combined-into:probe-next-srv-exec			fabled:duplicate-of
+probe-next-shlib-pg_get_line	*/pg_get_line.c	combined-into:probe-next-srv-pg_get_line			fabled:duplicate-of
+probe-next-shlib-saslprep	*/saslprep.c	combined-into:probe-next-srv-saslprep			fabled:duplicate-of
+probe-next-shlib-string	*/string.c	combined-into:probe-next-srv-string			fabled:duplicate-of
+probe-next-srv-binaryheap	*/binaryheap.c	todo			
+probe-next-srv-blkreftable	*/blkreftable.c	todo			fabled:common-blkreftable
+probe-next-srv-compression	*/compression.c	todo			
+probe-next-srv-exec	*/exec.c	todo			
+probe-next-srv-percentrepl	*/percentrepl.c	todo			
+probe-next-srv-pg_get_line	*/pg_get_line.c	todo			
+probe-next-srv-psprintf	*/psprintf.c	todo			
+probe-next-srv-saslprep	*/saslprep.c	todo			
+probe-next-srv-scram-common	*/scram_common.c	combined-into:common-probe-scram-srv			fabled:duplicate-of
+probe-next-srv-string	*/string.c	todo			
+probe-next-srv-stringinfo	*/stringinfo.c	todo			
+probe-next-srv-wchar	*/wchar.c	todo			fabled:common-wchar; m1-spine
+probe-next-static-compression	*/compression.c	combined-into:probe-next-srv-compression			fabled:duplicate-of
+probe-next-static-exec	*/exec.c	combined-into:probe-next-srv-exec			fabled:duplicate-of
+probe-next-static-pg_get_line	*/pg_get_line.c	combined-into:probe-next-srv-pg_get_line			fabled:duplicate-of
+probe-next-static-saslprep	*/saslprep.c	combined-into:probe-next-srv-saslprep			fabled:duplicate-of
+probe-next-static-string	*/string.c	combined-into:probe-next-srv-string			fabled:duplicate-of
+probe-pgfnames	*/pgfnames.c	todo			
+probe-port-shlib-bsearch_arg	*/bsearch_arg.c	combined-into:probe-port-srv-bsearch_arg			fabled:duplicate-of
+probe-port-shlib-explicit_bzero	*/explicit_bzero.c	combined-into:probe-port-srv-explicit_bzero			fabled:duplicate-of
+probe-port-shlib-noblock	*/noblock.c	combined-into:probe-port-srv-noblock			fabled:duplicate-of
+probe-port-shlib-pgcheckdir	*/pgcheckdir.c	combined-into:probe-port-srv-pgcheckdir			fabled:duplicate-of
+probe-port-shlib-pgmkdirp	*/pgmkdirp.c	combined-into:probe-port-srv-pgmkdirp			fabled:duplicate-of
+probe-port-shlib-pgsleep	*/pgsleep.c	combined-into:probe-port-srv-pgsleep			fabled:duplicate-of
+probe-port-shlib-pgstrcasecmp	*/pgstrcasecmp.c	combined-into:probe-port-srv-pgstrcasecmp			fabled:duplicate-of
+probe-port-shlib-pgstrsignal	*/pgstrsignal.c	combined-into:probe-port-srv-pgstrsignal			fabled:duplicate-of
+probe-port-shlib-pqsignal	*/pqsignal.c	combined-into:backend-libpq-pqsignal			fabled:duplicate-of
+probe-port-shlib-pqsignal2	*/pqsignal.c	combined-into:backend-libpq-pqsignal			fabled:duplicate-of
+probe-port-shlib-pthread_barrier_wait	*/pthread_barrier_wait.c	combined-into:probe-port-srv-pthread_barrier_wait			fabled:duplicate-of
+probe-port-shlib-qsort	*/qsort.c	combined-into:probe-port-srv-qsort			fabled:duplicate-of
+probe-port-shlib-qsort_arg	*/qsort_arg.c	combined-into:probe-port-srv-qsort_arg			fabled:duplicate-of
+probe-port-shlib-quotes	*/quotes.c	combined-into:probe-port-srv-quotes			fabled:duplicate-of
+probe-port-shlib-strsignal	*/pgstrcasecmp.c,*/pqsignal.c	combined-into:probe-port-srv-strsignal			fabled:duplicate-of
+probe-port-shlib-strsignal2	*/pgstrcasecmp.c,*/pqsignal.c	combined-into:probe-port-srv-strsignal			fabled:duplicate-of
+probe-port-srv-bsearch_arg	*/bsearch_arg.c	todo			
+probe-port-srv-chklocale	*/chklocale.c	combined-into:port-chklocale-probe			fabled:duplicate-of
+probe-port-srv-explicit_bzero	*/explicit_bzero.c	todo			
+probe-port-srv-inet_net_ntop	*/inet_net_ntop.c	todo			
+probe-port-srv-noblock	*/noblock.c	todo			
+probe-port-srv-pg_localeconv_r	*/pg_localeconv_r.c	todo			
+probe-port-srv-pg_numa	*/pg_numa.c	todo			
+probe-port-srv-pg_strong_random	*/pg_strong_random.c	todo			
+probe-port-srv-pgcheckdir	*/pgcheckdir.c	todo			
+probe-port-srv-pgmkdirp	*/pgmkdirp.c	todo			
+probe-port-srv-pgsleep	*/pgsleep.c	todo			fabled:port-pgsleep; m1-dep(stub-ok)
+probe-port-srv-pgstrcasecmp	*/pgstrcasecmp.c	todo			fabled:port-pgstrcasecmp; m1-dep(stub-ok)
+probe-port-srv-pgstrsignal	*/pgstrsignal.c	todo			
+probe-port-srv-pqsignal	*/pqsignal.c	todo			fabled:port-pqsignal; m1-dep(stub-ok)
+probe-port-srv-pqsignal2	*/pqsignal.c	combined-into:backend-libpq-pqsignal			fabled:duplicate-of
+probe-port-srv-pthread_barrier_wait	*/pthread_barrier_wait.c	todo			
+probe-port-srv-qsort	*/qsort.c	todo			
+probe-port-srv-qsort_arg	*/qsort_arg.c	todo			
+probe-port-srv-quotes	*/quotes.c	todo			
+probe-port-srv-strerror	*/strerror.c	todo			
+probe-port-srv-strsignal	*/pgstrcasecmp.c,*/pqsignal.c	todo			
+probe-port-srv-strsignal2	*/pgstrcasecmp.c,*/pqsignal.c	combined-into:probe-port-srv-strsignal			fabled:duplicate-of
+probe-port-srv-tar	*/tar.c	todo			
+probe-port-static-bsearch_arg	*/bsearch_arg.c	combined-into:probe-port-srv-bsearch_arg			fabled:duplicate-of
+probe-port-static-explicit_bzero	*/explicit_bzero.c	combined-into:probe-port-srv-explicit_bzero			fabled:duplicate-of
+probe-port-static-noblock	*/noblock.c	combined-into:probe-port-srv-noblock			fabled:duplicate-of
+probe-port-static-pgcheckdir	*/pgcheckdir.c	combined-into:probe-port-srv-pgcheckdir			fabled:duplicate-of
+probe-port-static-pgmkdirp	*/pgmkdirp.c	combined-into:probe-port-srv-pgmkdirp			fabled:duplicate-of
+probe-port-static-pgsleep	*/pgsleep.c	combined-into:probe-port-srv-pgsleep			fabled:duplicate-of
+probe-port-static-pgstrcasecmp	*/pgstrcasecmp.c	combined-into:probe-port-srv-pgstrcasecmp			fabled:duplicate-of
+probe-port-static-pgstrsignal	*/pgstrsignal.c	combined-into:probe-port-srv-pgstrsignal			fabled:duplicate-of
+probe-port-static-pqsignal	*/pqsignal.c	combined-into:backend-libpq-pqsignal			fabled:duplicate-of
+probe-port-static-pqsignal2	*/pqsignal.c	combined-into:backend-libpq-pqsignal			fabled:duplicate-of
+probe-port-static-pthread_barrier_wait	*/pthread_barrier_wait.c	combined-into:probe-port-srv-pthread_barrier_wait			fabled:duplicate-of
+probe-port-static-qsort	*/qsort.c	combined-into:probe-port-srv-qsort			fabled:duplicate-of
+probe-port-static-qsort_arg	*/qsort_arg.c	combined-into:probe-port-srv-qsort_arg			fabled:duplicate-of
+probe-port-static-quotes	*/quotes.c	combined-into:probe-port-srv-quotes			fabled:duplicate-of
+probe-port-static-strsignal	*/pgstrcasecmp.c,*/pqsignal.c	combined-into:probe-port-srv-strsignal			fabled:duplicate-of
+probe-port-static-strsignal2	*/pgstrcasecmp.c,*/pqsignal.c	combined-into:probe-port-srv-strsignal			fabled:duplicate-of
+probe-port2-srv-bsearch_arg	*/bsearch_arg.c	combined-into:probe-port-srv-bsearch_arg			fabled:duplicate-of
+probe-port2-srv-qsort	*/qsort.c	combined-into:probe-port-srv-qsort			fabled:duplicate-of
+probe-port2-srv-qsort_arg	*/qsort_arg.c	combined-into:probe-port-srv-qsort_arg			fabled:duplicate-of
+probe-port3-srv-pg_bitutils	*/pg_bitutils.c	todo			
+probe-port3-srv-pg_crc32c_armv8	*/pg_crc32c_armv8.c	combined-into:port-crc-armv8-probe			fabled:duplicate-of
+probe-port3-srv-pg_popcount_aarch64	*/pg_popcount_aarch64.c	combined-into:port-popcount-aarch64-srv-batch1			fabled:duplicate-of
+probe-port3-srv-pg_popcount_avx512	*/pg_popcount_avx512.c	todo			
+probe-port3-srv-snprintf	*/snprintf.c	todo			fabled:port-snprintf
+probe-relpath	*/relpath.c	todo			fabled:backend-common-relpath; m1-dep(stub-ok)
+probe-rmtree	*/rmtree.c	todo			
+probe-shlib-encnames	*/encnames.c	combined-into:probe-srv-encnames			fabled:duplicate-of
+probe-shlib-ip	*/ip.c	combined-into:probe-srv-ip			fabled:duplicate-of
+probe-shlib-link-canary	*/link_canary.c	combined-into:probe-srv-link-canary			fabled:duplicate-of
+probe-shlib-restricted_token	*/restricted_token.c	todo			
+probe-srv-encnames	*/encnames.c	todo			
+probe-srv-ip	*/ip.c	todo			
+probe-srv-link-canary	*/link_canary.c	todo			
+probe-ssl-shlib-cryptohash_openssl	*/cryptohash_openssl.c	combined-into:probe-ssl-srv-cryptohash_openssl			fabled:duplicate-of
+probe-ssl-shlib-hmac_openssl	*/hmac_openssl.c	combined-into:probe-ssl-srv-hmac_openssl			fabled:duplicate-of
+probe-ssl-srv-cryptohash_openssl	*/cryptohash_openssl.c	todo			
+probe-ssl-srv-hmac_openssl	*/hmac_openssl.c	todo			
+probe-ssl-static-cryptohash_openssl	*/cryptohash_openssl.c	combined-into:probe-ssl-srv-cryptohash_openssl			fabled:duplicate-of
+probe-ssl-static-hmac_openssl	*/hmac_openssl.c	combined-into:probe-ssl-srv-hmac_openssl			fabled:duplicate-of
+probe-ssl2-shlib-cryptohash_openssl	*/cryptohash_openssl.c	combined-into:probe-ssl-srv-cryptohash_openssl			fabled:duplicate-of
+probe-ssl2-shlib-hmac_openssl	*/hmac_openssl.c	combined-into:probe-ssl-srv-hmac_openssl			fabled:duplicate-of
+probe-ssl2-srv-cryptohash_openssl	*/cryptohash_openssl.c	combined-into:probe-ssl-srv-cryptohash_openssl			fabled:duplicate-of
+probe-ssl2-srv-hmac_openssl	*/hmac_openssl.c	combined-into:probe-ssl-srv-hmac_openssl			fabled:duplicate-of
+probe-ssl2-static-cryptohash_openssl	*/cryptohash_openssl.c	combined-into:probe-ssl-srv-cryptohash_openssl			fabled:duplicate-of
+probe-ssl2-static-hmac_openssl	*/hmac_openssl.c	combined-into:probe-ssl-srv-hmac_openssl			fabled:duplicate-of
+probe-static-encnames	*/encnames.c	combined-into:probe-srv-encnames			fabled:duplicate-of
+probe-static-ip	*/ip.c	combined-into:probe-srv-ip			fabled:duplicate-of
+probe-static-link-canary	*/link_canary.c	combined-into:probe-srv-link-canary			fabled:duplicate-of
+probe-static-restricted_token	*/restricted_token.c	combined-into:probe-shlib-restricted_token			fabled:duplicate-of
+probe-username	*/username.c	todo			
+probe-utils-hash-dynahash	*/dynahash.c	combined-into:backend-utils-hash-dynahash			fabled:duplicate-of
+probe-utils-hash-pg_crc	*/pg_crc.c	combined-into:backend-utils-hash-small			fabled:duplicate-of
+probe-utils-init-globals	*/globals.c	todo			
+probe-utils-init-usercontext	*/usercontext.c	todo			
+probe-utils-resowner-resowner	*/resowner.c	combined-into:backend-utils-resowner-all			fabled:duplicate-of
+probe-utils-time-combocid	*/combocid.c	combined-into:backend-utils-time-small			fabled:duplicate-of
+probe-wait_error	*/wait_error.c	todo			
+common-ip	*/ip.c	todo			fabled:common-ip; m1-spine
+port-crc32c	src/port/pg_crc32c_sb8.c	todo			fabled:port-crc32c; m1-spine(boot)
+common-pglz	*/pg_lzcompress.c	todo			fabled:common-pglz; m1-dep(stub-ok)
+common-hashfn	*/hashfn.c	todo			fabled:common-hashfn; m1-spine
+common-keywords	*/keywords.c,*/kwlookup.c	todo			fabled:common-keywords; m1-spine
+common-string	*/string.c	todo			fabled:common-string; m1-dep(stub-ok)
+backend-lib-bipartite-match	*/bipartite_match.c	todo			fabled:backend-lib-bipartite-match; m1-dep(stub-ok)
+backend-access-gin-gininsert	*/gininsert.c	todo			fabled:backend-access-gin-gininsert
+backend-access-gin-ginbulk	*/ginbulk.c,*/gininsert.c	todo			fabled:backend-access-gin-ginbulk
+backend-access-gin-ginfast	*/ginfast.c	todo			fabled:backend-access-gin-ginfast
+backend-utils-adt-encode	*/encode.c	todo			fabled:backend-utils-adt-encode; m1-dep(stub-ok)
+backend-catalog-pg-database	src/include/catalog/pg_database.h	todo			fabled:backend-catalog-pg-database; m1-spine
+backend-rewrite-rewriteDefine	src/backend/rewrite/rewriteDefine.c	todo			fabled:backend-rewrite-rewriteDefine; m1-dep(stub-ok)
+backend-utils-adt-misc	*/misc.c	todo			fabled:backend-utils-adt-misc; m1-dep(stub-ok)
+backend-statistics-mcv	*/mcv.c	todo			fabled:backend-statistics-mcv
+backend-rewrite-rewritehandler	src/backend/rewrite/rewriteHandler.c	todo			fabled:backend-rewrite-rewritehandler; m1-spine
+backend-optimizer-util-appendinfo	*/appendinfo.c	todo			fabled:backend-optimizer-util-appendinfo; m1-dep(stub-ok)
+backend-pl-plpgsql-scanner	src/pl/plpgsql/src/pl_scanner.c	todo			fabled:backend-pl-plpgsql-scanner
+backend-pl-plpgsql-funcs	src/pl/plpgsql/src/pl_funcs.c	todo			fabled:backend-pl-plpgsql-funcs
+backend-statistics-extended-stats	*/extended_stats.c	todo			fabled:backend-statistics-extended-stats
+backend-pl-plpgsql-comp	src/pl/plpgsql/src/pl_comp.c	todo			fabled:backend-pl-plpgsql-comp
