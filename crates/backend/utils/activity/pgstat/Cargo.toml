@@ -1,0 +1,22 @@
+[package]
+name = "pgstat"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgstat"
+path = "src/lib.rs"
+
+[dependencies]
+hashbrown = { version = "0.14", default-features = false, features = ["allocator-api2", "ahash", "inline-more"] }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_rel = { path = "../../../../_support/types/rel" }
+guc_tables = { path = "../../misc/guc_tables" }
+init_small = { path = "../../init/init_small" }
+pgstat_seams = { path = "../pgstat_seams" }
+pgstat_xact_seams = { path = "../pgstat_xact_seams" }
+timestamp_seams = { path = "../../adt/timestamp_seams" }
+xact_seams = { path = "../../../access/transam/xact_seams" }

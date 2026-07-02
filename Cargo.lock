@@ -634,6 +634,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "heapam_handler"
+version = "0.1.0"
+
+[[package]]
 name = "heapam_visibility_seams"
 version = "0.0.0"
 dependencies = [
@@ -1187,6 +1191,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_prng"
+version = "0.1.0"
+dependencies = [
+ "pg_prng_seams",
+]
+
+[[package]]
 name = "pg_prng_seams"
 version = "0.0.0"
 dependencies = [
@@ -1561,6 +1572,7 @@ dependencies = [
 name = "relcache"
 version = "0.1.0"
 dependencies = [
+ "catalog_seams",
  "elog",
  "init_small",
  "lmgr",

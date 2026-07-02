@@ -1,0 +1,418 @@
+// pgstat_relation.c — relation counting keyed by (dboid, relid); the relcache
+// carries only `pgstat_enabled` (checked by callers, C's macro branch), and
+// C's rel->pgstat_info/trans/parent pointer chases become by-key map access.
+// The per-table trans/upper chain is a per-table stack vec (innermost last);
+// each xact level's `first` list carries table keys.
+
+use init_small::globals::MyDatabaseId;
+use mcx::{Mcx, PgVec};
+use types_core::{InvalidOid, Oid};
+use types_rel::{RELKIND_HAS_STORAGE, RELKIND_PARTITIONED_TABLE};
+
+use crate::pending::{self, PendingData, PgStatState, PgStat_HashKey, PGSTAT_KIND_RELATION};
+use crate::xact;
+use crate::PgStat_Counter;
+
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub struct PgStat_TableCounts {
+    pub numscans: PgStat_Counter,
+    pub tuples_returned: PgStat_Counter,
+    pub tuples_fetched: PgStat_Counter,
+    pub tuples_inserted: PgStat_Counter,
+    pub tuples_updated: PgStat_Counter,
+    pub tuples_deleted: PgStat_Counter,
+    pub tuples_hot_updated: PgStat_Counter,
+    pub tuples_newpage_updated: PgStat_Counter,
+    pub truncdropped: bool,
+    pub delta_live_tuples: PgStat_Counter,
+    pub delta_dead_tuples: PgStat_Counter,
+    pub changed_tuples: PgStat_Counter,
+    pub blocks_fetched: PgStat_Counter,
+    pub blocks_hit: PgStat_Counter,
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+pub struct PgStat_TableXactStatus {
+    pub tuples_inserted: PgStat_Counter,
+    pub tuples_updated: PgStat_Counter,
+    pub tuples_deleted: PgStat_Counter,
+    pub truncdropped: bool,
+    pub inserted_pre_truncdrop: PgStat_Counter,
+    pub updated_pre_truncdrop: PgStat_Counter,
+    pub deleted_pre_truncdrop: PgStat_Counter,
+    pub nest_level: i32,
+}
+
+pub struct PgStat_TableStatus {
+    pub id: Oid,
+    pub shared: bool,
+    pub trans: PgVec<'static, PgStat_TableXactStatus>,
+    pub counts: PgStat_TableCounts,
+}
+
+impl PgStat_TableStatus {
+    pub(crate) fn new(mcx: Mcx<'static>) -> Self {
+        PgStat_TableStatus {
+            id: InvalidOid,
+            shared: false,
+            trans: PgVec::new_in(mcx),
+            counts: PgStat_TableCounts::default(),
+        }
+    }
+}
+
+pub(crate) fn relation_key(relid: Oid, relisshared: bool) -> PgStat_HashKey {
+    PgStat_HashKey {
+        kind: PGSTAT_KIND_RELATION,
+        dboid: if relisshared {
+            InvalidOid
+        } else {
+            MyDatabaseId()
+        },
+        objid: relid as u64,
+    }
+}
+
+pub fn pgstat_init_relation(_relid: Oid, relkind: u8) -> bool {
+    if !RELKIND_HAS_STORAGE(relkind) && relkind != RELKIND_PARTITIONED_TABLE {
+        return false;
+    }
+    // C also unlinks rel->pgstat_info here; the keyed model has no link, and
+    // the count paths gate on pgstat_enabled, never on stale pending presence.
+    crate::pgstat_track_counts()
+}
+
+pub fn pgstat_assoc_relation(relid: Oid, relisshared: bool) {
+    pending::with_state(|st| {
+        pgstat_prep_relation_pending(st, relid, relisshared);
+    });
+}
+
+pub fn pgstat_unlink_relation(_relid: Oid, _relisshared: bool) {}
+
+fn pgstat_prep_relation_pending<'a>(
+    st: &'a mut PgStatState,
+    relid: Oid,
+    relisshared: bool,
+) -> &'a mut PgStat_TableStatus {
+    let key = relation_key(relid, relisshared);
+    match st.prep_pending_entry(key) {
+        PendingData::Relation(t) => {
+            t.id = relid;
+            t.shared = relisshared;
+            t
+        }
+        _ => unreachable!("relation key holds non-relation pending data"),
+    }
+}
+
+fn table_mut<'a>(st: &'a mut PgStatState, key: PgStat_HashKey) -> &'a mut PgStat_TableStatus {
+    match st.pending.get_mut(&key) {
+        Some(PendingData::Relation(t)) => t,
+        _ => unreachable!("relation pending entry vanished"),
+    }
+}
+
+fn ensure_tabstat_xact_level(st: &mut PgStatState, relid: Oid, relisshared: bool) {
+    let nest_level = xact_seams::get_current_transaction_nest_level::call();
+    let key = relation_key(relid, relisshared);
+    let need = {
+        let t = pgstat_prep_relation_pending(st, relid, relisshared);
+        t.trans.last().is_none_or(|tr| tr.nest_level != nest_level)
+    };
+    if need {
+        xact::pgstat_get_xact_stack_level_mut(st, nest_level)
+            .first
+            .push(key);
+        table_mut(st, key).trans.push(PgStat_TableXactStatus {
+            nest_level,
+            ..Default::default()
+        });
+    }
+}
+
+fn save_truncdrop_counters(trans: &mut PgStat_TableXactStatus, is_drop: bool) {
+    if !trans.truncdropped || is_drop {
+        trans.inserted_pre_truncdrop = trans.tuples_inserted;
+        trans.updated_pre_truncdrop = trans.tuples_updated;
+        trans.deleted_pre_truncdrop = trans.tuples_deleted;
+        trans.truncdropped = true;
+    }
+}
+
+fn restore_truncdrop_counters(trans: &mut PgStat_TableXactStatus) {
+    if trans.truncdropped {
+        trans.tuples_inserted = trans.inserted_pre_truncdrop;
+        trans.tuples_updated = trans.updated_pre_truncdrop;
+        trans.tuples_deleted = trans.deleted_pre_truncdrop;
+    }
+}
+
+pub fn pgstat_count_heap_insert(relid: Oid, relisshared: bool, n: PgStat_Counter) {
+    pending::with_state(|st| {
+        ensure_tabstat_xact_level(st, relid, relisshared);
+        let t = table_mut(st, relation_key(relid, relisshared));
+        t.trans.last_mut().unwrap().tuples_inserted += n;
+    });
+}
+
+pub fn pgstat_count_heap_update(relid: Oid, relisshared: bool, hot: bool, newpage: bool) {
+    debug_assert!(!(hot && newpage));
+    pending::with_state(|st| {
+        ensure_tabstat_xact_level(st, relid, relisshared);
+        let t = table_mut(st, relation_key(relid, relisshared));
+        t.trans.last_mut().unwrap().tuples_updated += 1;
+        if hot {
+            t.counts.tuples_hot_updated += 1;
+        } else if newpage {
+            t.counts.tuples_newpage_updated += 1;
+        }
+    });
+}
+
+pub fn pgstat_count_heap_delete(relid: Oid, relisshared: bool) {
+    pending::with_state(|st| {
+        ensure_tabstat_xact_level(st, relid, relisshared);
+        let t = table_mut(st, relation_key(relid, relisshared));
+        t.trans.last_mut().unwrap().tuples_deleted += 1;
+    });
+}
+
+pub fn pgstat_count_truncate(relid: Oid, relisshared: bool) {
+    pending::with_state(|st| {
+        ensure_tabstat_xact_level(st, relid, relisshared);
+        let t = table_mut(st, relation_key(relid, relisshared));
+        let trans = t.trans.last_mut().unwrap();
+        save_truncdrop_counters(trans, false);
+        trans.tuples_inserted = 0;
+        trans.tuples_updated = 0;
+        trans.tuples_deleted = 0;
+    });
+}
+
+pub fn pgstat_update_heap_dead_tuples(relid: Oid, relisshared: bool, delta: i32) {
+    with_counts(relid, relisshared, |c| {
+        c.delta_dead_tuples -= delta as PgStat_Counter;
+    });
+}
+
+// The pgstat.h count macros. The caller holds C's pgstat_enabled branch (the
+// relcache Cell); these are the pgstat_info-side add, one map probe with the
+// lazy assoc folded into the same probe (fabled #368 single-probe shape).
+fn with_counts(relid: Oid, relisshared: bool, f: impl FnOnce(&mut PgStat_TableCounts)) {
+    pending::with_state(|st| {
+        f(&mut pgstat_prep_relation_pending(st, relid, relisshared).counts);
+    });
+}
+
+pub fn pgstat_count_heap_scan(relid: Oid, relisshared: bool) {
+    with_counts(relid, relisshared, |c| c.numscans += 1);
+}
+
+pub fn pgstat_count_heap_getnext(relid: Oid, relisshared: bool) {
+    with_counts(relid, relisshared, |c| c.tuples_returned += 1);
+}
+
+pub fn pgstat_count_heap_fetch(relid: Oid, relisshared: bool) {
+    with_counts(relid, relisshared, |c| c.tuples_fetched += 1);
+}
+
+pub fn pgstat_count_index_scan(relid: Oid, relisshared: bool) {
+    with_counts(relid, relisshared, |c| c.numscans += 1);
+}
+
+pub fn pgstat_count_index_tuples(relid: Oid, relisshared: bool, n: PgStat_Counter) {
+    with_counts(relid, relisshared, |c| c.tuples_returned += n);
+}
+
+pub fn pgstat_count_buffer_read(relid: Oid, relisshared: bool) {
+    with_counts(relid, relisshared, |c| c.blocks_fetched += 1);
+}
+
+pub fn pgstat_count_buffer_hit(relid: Oid, relisshared: bool) {
+    with_counts(relid, relisshared, |c| c.blocks_hit += 1);
+}
+
+pub fn pgstat_create_relation(relid: Oid, relisshared: bool) {
+    xact::pgstat_create_transactional(
+        PGSTAT_KIND_RELATION,
+        if relisshared {
+            InvalidOid
+        } else {
+            MyDatabaseId()
+        },
+        relid as u64,
+    );
+}
+
+pub fn pgstat_drop_relation(relid: Oid, relisshared: bool) {
+    let nest_level = xact_seams::get_current_transaction_nest_level::call();
+    xact::pgstat_drop_transactional(
+        PGSTAT_KIND_RELATION,
+        if relisshared {
+            InvalidOid
+        } else {
+            MyDatabaseId()
+        },
+        relid as u64,
+    );
+
+    let key = relation_key(relid, relisshared);
+    pending::with_state(|st| {
+        if !st.have_pending(key) {
+            return;
+        }
+        // Transactionally zero counters so pg_stat_xact_all_tables shows 0.
+        let t = table_mut(st, key);
+        if let Some(trans) = t.trans.last_mut() {
+            if trans.nest_level == nest_level {
+                save_truncdrop_counters(trans, true);
+                trans.tuples_inserted = 0;
+                trans.tuples_updated = 0;
+                trans.tuples_deleted = 0;
+            }
+        }
+    });
+}
+
+// find_tabstat_entry: the copy's counts with live subxact i/u/d reconciled
+// (C returns a palloc'd PgStat_TableStatus copy with trans cleared).
+pub fn find_tabstat_entry(rel_id: Oid) -> Option<PgStat_TableCounts> {
+    let local_key = PgStat_HashKey {
+        kind: PGSTAT_KIND_RELATION,
+        dboid: MyDatabaseId(),
+        objid: rel_id as u64,
+    };
+    let shared_key = PgStat_HashKey {
+        kind: PGSTAT_KIND_RELATION,
+        dboid: InvalidOid,
+        objid: rel_id as u64,
+    };
+    pending::with_state(|st| {
+        let key = if st.have_pending(local_key) {
+            local_key
+        } else if st.have_pending(shared_key) {
+            shared_key
+        } else {
+            return None;
+        };
+        let t = table_mut(st, key);
+        let mut counts = t.counts;
+        for trans in &t.trans {
+            counts.tuples_inserted += trans.tuples_inserted;
+            counts.tuples_updated += trans.tuples_updated;
+            counts.tuples_deleted += trans.tuples_deleted;
+        }
+        Some(counts)
+    })
+}
+
+pub(crate) fn AtEOXact_PgStat_Relations(
+    st: &mut PgStatState,
+    xact_state: &xact::PgStat_SubXactStatus,
+    isCommit: bool,
+) {
+    for &key in &xact_state.first {
+        if !st.have_pending(key) {
+            continue;
+        }
+        let tabstat = table_mut(st, key);
+        let Some(mut trans) = tabstat.trans.pop() else {
+            continue;
+        };
+        debug_assert_eq!(trans.nest_level, 1);
+        debug_assert!(tabstat.trans.is_empty());
+
+        if !isCommit {
+            restore_truncdrop_counters(&mut trans);
+        }
+        tabstat.counts.tuples_inserted += trans.tuples_inserted;
+        tabstat.counts.tuples_updated += trans.tuples_updated;
+        tabstat.counts.tuples_deleted += trans.tuples_deleted;
+        if isCommit {
+            tabstat.counts.truncdropped = trans.truncdropped;
+            if trans.truncdropped {
+                // forget live/dead stats seen by backend thus far
+                tabstat.counts.delta_live_tuples = 0;
+                tabstat.counts.delta_dead_tuples = 0;
+            }
+            tabstat.counts.delta_live_tuples += trans.tuples_inserted - trans.tuples_deleted;
+            tabstat.counts.delta_dead_tuples += trans.tuples_updated + trans.tuples_deleted;
+            tabstat.counts.changed_tuples +=
+                trans.tuples_inserted + trans.tuples_updated + trans.tuples_deleted;
+        } else {
+            // inserted tuples are dead, deleted tuples are unaffected
+            tabstat.counts.delta_dead_tuples += trans.tuples_inserted + trans.tuples_updated;
+        }
+    }
+}
+
+pub(crate) fn AtEOSubXact_PgStat_Relations(
+    st: &mut PgStatState,
+    xact_state: &xact::PgStat_SubXactStatus,
+    isCommit: bool,
+    nestDepth: i32,
+) {
+    for &key in &xact_state.first {
+        if !st.have_pending(key) {
+            continue;
+        }
+        let mut push_to_parent = false;
+        {
+            let tabstat = table_mut(st, key);
+            let Some(mut trans) = tabstat.trans.pop() else {
+                continue;
+            };
+            debug_assert_eq!(trans.nest_level, nestDepth);
+
+            if isCommit {
+                let upper_is_immediate_parent = tabstat
+                    .trans
+                    .last()
+                    .is_some_and(|u| u.nest_level == nestDepth - 1);
+                if upper_is_immediate_parent {
+                    let upper = tabstat.trans.last_mut().unwrap();
+                    if trans.truncdropped {
+                        // propagate truncate/drop one level up, replacing stats
+                        save_truncdrop_counters(upper, false);
+                        upper.tuples_inserted = trans.tuples_inserted;
+                        upper.tuples_updated = trans.tuples_updated;
+                        upper.tuples_deleted = trans.tuples_deleted;
+                    } else {
+                        upper.tuples_inserted += trans.tuples_inserted;
+                        upper.tuples_updated += trans.tuples_updated;
+                        upper.tuples_deleted += trans.tuples_deleted;
+                    }
+                } else {
+                    // no immediate parent: re-stamp the node one level up and
+                    // re-link it into the parent level's list
+                    trans.nest_level = nestDepth - 1;
+                    tabstat.trans.push(trans);
+                    push_to_parent = true;
+                }
+            } else {
+                restore_truncdrop_counters(&mut trans);
+                tabstat.counts.tuples_inserted += trans.tuples_inserted;
+                tabstat.counts.tuples_updated += trans.tuples_updated;
+                tabstat.counts.tuples_deleted += trans.tuples_deleted;
+                tabstat.counts.delta_dead_tuples += trans.tuples_inserted + trans.tuples_updated;
+            }
+        }
+        if push_to_parent {
+            xact::pgstat_get_xact_stack_level_mut(st, nestDepth - 1)
+                .first
+                .push(key);
+        }
+    }
+}
+
+pub(crate) fn PostPrepare_PgStat_Relations(
+    st: &mut PgStatState,
+    xact_state: &xact::PgStat_SubXactStatus,
+) {
+    for &key in &xact_state.first {
+        if st.have_pending(key) {
+            table_mut(st, key).trans.clear();
+        }
+    }
+}

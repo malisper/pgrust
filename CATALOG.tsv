@@ -523,7 +523,7 @@ backend-tsearch-parse-any	*/to_tsany.c,*/ts_parse.c	todo			m1-dep(stub-ok)
 backend-tsearch-spell	*/spell.c	todo			fabled:backend-tsearch-spell
 backend-tsearch-remaining	*/dict_thesaurus.c,*/ts_selfuncs.c,*/ts_typanalyze.c,*/wparser.c,*/wparser_def.c	todo			
 backend-tsearch-small	*/dict.c,*/dict_simple.c,*/dict_synonym.c,*/ts_locale.c,*/ts_utils.c	todo			
-backend-utils-activity-pgstat	*/pgstat.c	todo			fabled:backend-utils-activity-pgstat; m1-spine
+backend-utils-activity-pgstat	*/pgstat.c	ported	pgstat	cold	m1-spine; pending-entry model: #404 O(1) check structural (entry=pending), single-probe counts via entry API (#368/#191); installs all 12 pgstat_seams + 6 pgstat_xact_seams (wiring test-proven); shared-memory flush half = phase 2 documented; watch: per-row nest-level seam -> direct xact dep if heapam bench flags; 24 tests, density 4.7%
 backend-utils-activity-shmem	*/pgstat_shmem.c	todo			
 backend-utils-activity-small	*/backend_progress.c,*/pgstat_archiver.c,*/pgstat_bgwriter.c,*/pgstat_checkpointer.c	todo			fabled:backend-utils-activity-small; m1-dep(stub-ok)
 backend-utils-activity-stat	*/pgstat_backend.c,*/pgstat_database.c,*/pgstat_function.c,*/pgstat_io.c,*/pgstat_relation.c,*/pgstat_replslot.c,*/pgstat_slru.c,*/pgstat_subscription.c,*/pgstat_wal.c	todo			
