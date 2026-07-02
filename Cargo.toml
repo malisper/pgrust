@@ -76,6 +76,20 @@ members = [
     "crates/backend/storage/ipc/latch",
     "crates/backend/libpq/be_secure_seams",
     "crates/backend/libpq/pqcomm",
+    "crates/backend/storage/aio/aio_seams",
+    "crates/backend/postmaster/startup_seams",
+    "crates/backend/storage/file/fd",
+    "crates/backend/port/pg_sema_seams",
+    "crates/backend/storage/ipc/pmsignal_seams",
+    "crates/backend/storage/ipc/procarray_seams",
+    "crates/backend/replication/syncrep_seams",
+    "crates/backend/storage/lmgr/condition_variable_seams",
+    "crates/backend/storage/lmgr/deadlock_seams",
+    "crates/backend/storage/lmgr/lock_seams",
+    "crates/backend/utils/misc/timeout_seams",
+    "crates/backend/postmaster/autovacuum_seams",
+    "crates/backend/storage/lmgr/lmgr_proc",
+    "crates/_support/types/pathnodes",
 ]
 
 [workspace.package]
