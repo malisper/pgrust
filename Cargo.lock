@@ -118,6 +118,7 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+ "types_rel",
  "types_storage",
 ]
 
@@ -126,9 +127,11 @@ name = "catalog"
 version = "0.0.0"
 dependencies = [
  "catalog_seams",
+ "mcx",
  "namespace_seams",
  "types_core",
  "types_rel",
+ "types_tuple",
 ]
 
 [[package]]
@@ -350,6 +353,16 @@ name = "fmgr_core"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
+name = "fmgr_seams"
+version = "0.1.0"
+dependencies = [
+ "seam_core",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -655,6 +668,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lsyscache_seams"
+version = "0.1.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "lwlock"
 version = "0.0.0"
 dependencies = [
@@ -702,12 +724,14 @@ dependencies = [
  "guc_seams",
  "guc_tables",
  "init_small",
+ "init_small_seams",
  "ipc_seams",
  "latch",
  "libc",
  "lmgr_proc",
  "mcx",
  "miscinit_seams",
+ "pgstat_seams",
  "shmem_seams",
  "syscache_seams",
  "types_core",
@@ -849,6 +873,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pmsignal"
+version = "0.0.0"
+dependencies = [
+ "init_small",
+ "ipc_seams",
+ "pmsignal_seams",
+ "shmem_seams",
+ "types_error",
+ "waiteventset_seams",
+]
+
+[[package]]
 name = "pmsignal_seams"
 version = "0.0.0"
 dependencies = [
@@ -901,12 +937,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "pquery_seams"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_portal",
+]
+
+[[package]]
 name = "predicate_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+ "types_rel",
+ "types_snapshot",
+ "types_tuple",
+]
+
+[[package]]
+name = "printtup"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "exectuples",
+ "fmgr_seams",
+ "lsyscache_seams",
+ "mbutils_seams",
+ "mcx",
+ "pqcomm_seams",
+ "pqformat",
+ "pquery_seams",
+ "stringinfo",
+ "types_core",
+ "types_dest",
+ "types_error",
+ "types_fmgr",
+ "types_portal",
+ "types_resowner",
+ "types_slot",
+ "types_tuple",
 ]
 
 [[package]]
@@ -925,6 +999,29 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "procsignal"
+version = "0.0.0"
+dependencies = [
+ "condition_variable_seams",
+ "elog",
+ "init_small",
+ "ipc_seams",
+ "latch",
+ "libc",
+ "lmgr_proc",
+ "mcxt_seams",
+ "pg_sema_seams",
+ "procsignal_seams",
+ "s_lock_seams",
+ "shmem_seams",
+ "sinval_seams",
+ "smgr_seams",
+ "types_core",
+ "types_error",
+ "types_storage",
 ]
 
 [[package]]
@@ -1208,6 +1305,7 @@ dependencies = [
 name = "syscache_seams"
 version = "0.0.0"
 dependencies = [
+ "datum",
  "mcx",
  "seam_core",
  "types_core",
@@ -1285,6 +1383,7 @@ dependencies = [
  "mcx",
  "pqcomm_seams",
  "pqformat",
+ "printtup",
  "types_core",
  "types_dest",
  "types_error",

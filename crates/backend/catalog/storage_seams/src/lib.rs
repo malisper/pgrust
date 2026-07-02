@@ -1,0 +1,36 @@
+use mcx::{Mcx, PgVec};
+use types_error::PgResult;
+use types_storage::RelFileLocator;
+
+seam_core::seam!(
+    // smgrGetPendingDeletes(forCommit, &ptr) (catalog/storage.c); allocates in mcx.
+    pub fn smgr_get_pending_deletes<'mcx>(
+        mcx: Mcx<'mcx>,
+        for_commit: bool,
+    ) -> PgResult<PgVec<'mcx, RelFileLocator>>
+);
+
+seam_core::seam!(
+    pub fn smgr_do_pending_syncs(is_commit: bool, is_parallel_worker: bool) -> PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn smgr_do_pending_deletes(is_commit: bool) -> PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn at_subcommit_smgr()
+);
+
+seam_core::seam!(
+    pub fn at_subabort_smgr() -> PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn post_prepare_smgr()
+);
+
+seam_core::seam!(
+    // DropRelationFiles(delrels, isRedo) (storage.c); redo-only here.
+    pub fn drop_relation_files<'a>(delrels: &'a [RelFileLocator], is_redo: bool) -> PgResult<()>
+);

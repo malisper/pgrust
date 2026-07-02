@@ -153,7 +153,7 @@ backend-backup-zstd	*/basebackup_zstd.c	todo			fabled:backend-backup-zstd
 backend-bootstrap-bootparse	src/backend/bootstrap/bootparse.y,build-clean/src/backend/bootstrap/bootparse.c	todo			fabled:backend-bootstrap-bootparse
 backend-bootstrap-bootscanner	src/backend/bootstrap/bootscanner.l,build-clean/src/backend/bootstrap/bootscanner.c	todo			fabled:backend-bootstrap-bootscanner
 backend-bootstrap-bootstrap	src/backend/bootstrap/bootstrap.c	todo			fabled:backend-bootstrap-bootstrap; m1-dep(stub-ok)
-backend-catalog-catalog	*/catalog.c	todo			fabled:backend-catalog-catalog; m1-spine(boot)
+backend-catalog-catalog	*/catalog.c	ported	catalog	cold	m1-spine(boot); all 14 classification predicates, 48 OIDs verified vs generated _d.h headers; installs all 4 catalog_seams tupdesc/inval consume; OID-generation half deferred (callee seam families absent, documented); 6 tests, density 3.4%
 backend-catalog-aclchk	*/aclchk.c	todo			fabled:backend-catalog-aclchk; m1-dep(stub-ok)
 backend-catalog-dependency	*/dependency.c	todo			fabled:backend-catalog-dependency; m1-dep(stub-ok)
 backend-catalog-heap	*/heap.c	todo			fabled:backend-catalog-heap; m1-dep(stub-ok)
@@ -485,7 +485,7 @@ backend-storage-ipc-procsignal	src/backend/storage/ipc/procsignal.c	todo			fable
 backend-storage-ipc-shm-toc	src/backend/storage/ipc/shm_toc.c	todo			fabled:backend-storage-ipc-shm-toc; m1-spine
 backend-storage-ipc-shm-mq	src/backend/storage/ipc/shm_mq.c	todo			fabled:backend-storage-ipc-shm-mq; m1-spine
 backend-storage-ipc-shm	*/dsm_registry.c,*/shm_mq.c,*/shm_toc.c	todo			m1-spine
-backend-storage-ipc-shmem	*/shmem.c	todo			fabled:backend-storage-ipc-shmem; m1-spine
+backend-storage-ipc-shmem	*/shmem.c	ported	shmem	cold	m1-spine(boot); leaked 128B-aligned allocations model (C never frees shmem either); ShmemIndex as Mutex registry (init-only); installs all 6 shmem_seams slru/lwlock/lmgr_proc consume; C error surface exact; 7 tests, density 4.8%
 backend-storage-ipc-sinval	*/sinval.c,*/sinvaladt.c	todo			fabled:backend-storage-ipc-sinval; m1-spine
 backend-storage-ipc	*/ipci.c	todo			fabled:backend-storage-ipc; m1-spine
 backend-storage-ipc-small	*/barrier.c,*/ipc.c,*/pmsignal.c,*/procsignal.c,*/signalfuncs.c	combined-into:backend-storage-ipc-pmsignal			m1-spine
