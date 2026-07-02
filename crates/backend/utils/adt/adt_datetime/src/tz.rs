@@ -1,133 +1,198 @@
-//! Boundary to the tz engine (backend/timezone: localtime.c/pgtz.c) and to the
-//! not-yet-ported endpoints this file's C code calls. The engine's builtin GMT
-//! arm (localtime.c gmtload/gmtsub — no tzdata files) is live here so the
-//! timestamp unit and a `timezone=GMT` session behave exactly as C; every
-//! IANA-zone path panics loudly until backend-timezone lands.
+//! Boundary to the tz engine (backend/timezone: localtime/pgtz crates) plus
+//! the datetime.c helpers that sit directly on it (DetermineTimeZoneOffset
+//! family, TimeZoneAbbrevIsKnown). The engine's PgTm is POSIX-convention
+//! (tm_year-1900, 0-based tm_mon) and pg_localtime/pg_gmtime results keep
+//! that convention, exactly as C's callers expect; timestamp2tm converts.
 
-use core::cell::Cell;
+use crate::calendar::date2j;
+use crate::consts::{
+    fsec_t, pg_tm, DateTimeErrorExtra, DateTkn, IS_VALID_JULIAN, MINS_PER_HOUR, SECS_PER_DAY,
+    SECS_PER_MINUTE, UNIX_EPOCH_JDATE,
+};
 
-use crate::consts::{fsec_t, pg_tm, DateTimeErrorExtra, DateTkn, SECS_PER_DAY};
+pub use localtime::PgTz;
+pub use pgtz::{
+    log_timezone, pg_timezone_initialize, pg_tzset, pg_tzset_offset, session_timezone,
+    set_log_timezone, set_session_timezone,
+};
 
-/// C `pg_tz`. Only the builtin GMT zone exists until the tz engine is ported.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PgTz {
-    Gmt,
-}
-
-pub static GMT: PgTz = PgTz::Gmt;
-
-thread_local! {
-    static SESSION_TIMEZONE: Cell<Option<&'static PgTz>> = const { Cell::new(None) };
-}
-
-/// C global `session_timezone` (NULL before `pg_timezone_initialize`).
-#[inline]
-pub fn session_timezone() -> Option<&'static PgTz> {
-    SESSION_TIMEZONE.with(Cell::get)
-}
-
-pub fn set_session_timezone(tz: Option<&'static PgTz>) {
-    SESSION_TIMEZONE.with(|c| c.set(tz));
-}
-
-/// `pg_timezone_initialize` (pgtz.c): the GUC boot value is "GMT".
-pub fn pg_timezone_initialize() {
-    set_session_timezone(pg_tzset(b"GMT"));
-}
+use localtime::{NextDstBoundary, TZ_STRLEN_MAX};
 
 #[cold]
 #[inline(never)]
 fn unported(what: &str) -> ! {
-    panic!("backend-timezone unit not ported: {what} (adt_datetime tz boundary)");
+    panic!("adt_datetime tz boundary: {what} not ported");
 }
 
-pub fn pg_tzset(name: &[u8]) -> Option<&'static PgTz> {
-    if name.eq_ignore_ascii_case(b"gmt") {
-        return Some(&GMT);
-    }
-    unported("pg_tzset (non-GMT zone)");
+pub fn pg_tz_acceptable(tz: &PgTz) -> bool {
+    localtime::pg_tz_acceptable(tz)
 }
 
+pub fn pg_get_timezone_name(tz: &'static PgTz) -> Option<&'static str> {
+    core::str::from_utf8(localtime::pg_get_timezone_name(tz)).ok()
+}
+
+/// datetime.c `DetermineTimeZoneOffset`: GMT offset and DST status for the
+/// datetime-convention y/m/d/h/m/s in `tm` under `tzp`; sets tm_isdst.
+/// Out-of-range dates yield offset 0 / isdst 0 (no error here).
 #[allow(non_snake_case)]
 pub fn DetermineTimeZoneOffset(tm: &mut pg_tm, tzp: &PgTz) -> i32 {
-    match *tzp {
-        PgTz::Gmt => {
-            tm.tm_isdst = 0;
-            0
-        }
-    }
+    determine_time_zone_offset_internal(tm, tzp).0
 }
 
-#[allow(non_snake_case)]
-pub fn DetermineTimeZoneAbbrevOffset(_tm: &mut pg_tm, _abbr: &[u8], tzp: &PgTz) -> i32 {
-    match *tzp {
-        PgTz::Gmt => unported("DetermineTimeZoneAbbrevOffset"),
+// datetime.c DetermineTimeZoneOffsetInternal: also returns the UTC time
+// imputed to the date/time (0 on overflow). DST boundaries assumed >= 48
+// hours apart, zone offsets < 24h, so back up 24h and find the next boundary.
+fn determine_time_zone_offset_internal(tm: &mut pg_tm, tzp: &PgTz) -> (i32, i64) {
+    #[cold]
+    fn overflow(tm: &mut pg_tm) -> (i32, i64) {
+        // Given date is out of range, so assume UTC.
+        tm.tm_isdst = 0;
+        (0, 0)
     }
+
+    if !IS_VALID_JULIAN(tm.tm_year, tm.tm_mon, tm.tm_mday) {
+        return overflow(tm);
+    }
+    let date = date2j(tm.tm_year, tm.tm_mon, tm.tm_mday) - UNIX_EPOCH_JDATE;
+
+    let Some(day) = (date as i64).checked_mul(SECS_PER_DAY as i64) else {
+        return overflow(tm);
+    };
+    let sec = tm.tm_sec as i64
+        + (tm.tm_min as i64 + tm.tm_hour as i64 * MINS_PER_HOUR as i64) * SECS_PER_MINUTE as i64;
+    let mytime = day.wrapping_add(sec);
+    // since sec >= 0, overflow could only be from +day to -mytime
+    if mytime < 0 && day > 0 {
+        return overflow(tm);
+    }
+
+    let prevtime = mytime.wrapping_sub(SECS_PER_DAY as i64);
+    if mytime < 0 && prevtime > 0 {
+        return overflow(tm);
+    }
+
+    let b = match localtime::pg_next_dst_boundary(prevtime, tzp) {
+        NextDstBoundary::Overflow => return overflow(tm),
+        NextDstBoundary::NoTransition {
+            before_gmtoff,
+            before_isdst,
+        } => {
+            // Non-DST zone, life is simple.
+            tm.tm_isdst = before_isdst;
+            return (-(before_gmtoff as i32), mytime - before_gmtoff);
+        }
+        NextDstBoundary::Boundary(b) => b,
+    };
+
+    let beforetime = mytime.wrapping_sub(b.before_gmtoff);
+    if (b.before_gmtoff > 0 && mytime < 0 && beforetime > 0)
+        || (b.before_gmtoff <= 0 && mytime > 0 && beforetime < 0)
+    {
+        return overflow(tm);
+    }
+    let aftertime = mytime.wrapping_sub(b.after_gmtoff);
+    if (b.after_gmtoff > 0 && mytime < 0 && aftertime > 0)
+        || (b.after_gmtoff <= 0 && mytime > 0 && aftertime < 0)
+    {
+        return overflow(tm);
+    }
+
+    // The boundary instant itself counts as after the transition.
+    if beforetime < b.boundary && aftertime < b.boundary {
+        tm.tm_isdst = b.before_isdst;
+        return (-(b.before_gmtoff as i32), beforetime);
+    }
+    if beforetime > b.boundary && aftertime >= b.boundary {
+        tm.tm_isdst = b.after_isdst;
+        return (-(b.after_gmtoff as i32), aftertime);
+    }
+
+    // Invalid or ambiguous time at a transition: spring-forward prefers the
+    // "before" interpretation, fall-back prefers "after" (not "standard
+    // time" — Europe/Moscow Oct 2014, Europe/Dublin).
+    if beforetime > aftertime {
+        tm.tm_isdst = b.before_isdst;
+        return (-(b.before_gmtoff as i32), beforetime);
+    }
+    tm.tm_isdst = b.after_isdst;
+    (-(b.after_gmtoff as i32), aftertime)
+}
+
+fn upcase_abbrev(abbr: &[u8]) -> ([u8; TZ_STRLEN_MAX + 1], usize) {
+    let mut up = [0u8; TZ_STRLEN_MAX + 1];
+    let n = abbr.len().min(TZ_STRLEN_MAX);
+    for (dst, src) in up.iter_mut().zip(abbr[..n].iter()) {
+        *dst = src.to_ascii_uppercase();
+    }
+    (up, n)
+}
+
+/// datetime.c `DetermineTimeZoneAbbrevOffset`: offset/DST flag for a dynamic
+/// abbreviation at the local time in `tm`; a std/dst abbreviation forces its
+/// own offset even when the zone was then in the other mode; otherwise falls
+/// back to DetermineTimeZoneOffset's answers.
+#[allow(non_snake_case)]
+pub fn DetermineTimeZoneAbbrevOffset(tm: &mut pg_tm, abbr: &[u8], tzp: &PgTz) -> i32 {
+    let (zone_offset, t) = determine_time_zone_offset_internal(tm, tzp);
+
+    let (up, n) = upcase_abbrev(abbr);
+    if let Some((gmtoff, isdst)) = localtime::pg_interpret_timezone_abbrev(&up[..n], t, tzp) {
+        tm.tm_isdst = isdst;
+        // Change sign to agree with DetermineTimeZoneOffset().
+        return -(gmtoff as i32);
+    }
+
+    zone_offset
 }
 
 #[allow(non_snake_case)]
 pub fn pg_get_timezone_offset(tzp: &PgTz, gmtoff: &mut i64) -> bool {
-    match *tzp {
-        PgTz::Gmt => {
-            *gmtoff = 0;
+    match localtime::pg_get_timezone_offset(tzp) {
+        Some(off) => {
+            *gmtoff = off;
             true
         }
+        None => false,
     }
 }
 
-/// C `TimeZoneAbbrevIsKnown` probe of `session_timezone`; returns
-/// (isfixed, offset, isdst) with the sign convention of zoneabbrevtbl's
-/// caller (C flips once more at the call site — net zero for GMT).
+/// datetime.c `TimeZoneAbbrevIsKnown` probe of `session_timezone`: returns
+/// (isfixed, offset, isdst) with the sign flipped to the
+/// DetermineTimeZoneOffset convention (the caller flips once more to match
+/// zoneabbrevtbl's convention).
 pub fn session_tz_abbrev_probe(lowtoken: &[u8]) -> Option<(bool, i32, i32)> {
-    match session_timezone()? {
-        PgTz::Gmt => lowtoken.eq_ignore_ascii_case(b"gmt").then_some((true, 0, 0)),
+    let tz = session_timezone()?;
+    let (up, n) = upcase_abbrev(lowtoken);
+    let (isfixed, gmtoff, isdst) = localtime::pg_timezone_abbrev_is_known(&up[..n], tz)?;
+    Some((isfixed, -(gmtoff as i32), isdst))
+}
+
+fn convert(tx: localtime::PgTm<'static>) -> pg_tm {
+    pg_tm {
+        tm_sec: tx.tm_sec,
+        tm_min: tx.tm_min,
+        tm_hour: tx.tm_hour,
+        tm_mday: tx.tm_mday,
+        tm_mon: tx.tm_mon,
+        tm_year: tx.tm_year,
+        tm_wday: tx.tm_wday,
+        tm_yday: tx.tm_yday,
+        tm_isdst: tx.tm_isdst,
+        tm_gmtoff: tx.tm_gmtoff,
+        tm_zone: tx.tm_zone,
     }
 }
 
-/// POSIX-convention broken-down time (localtime.c `struct pg_tm` semantics):
-/// tm_year is year-1900, tm_mon is 0-based — unlike the datetime-convention
-/// `pg_tm` elsewhere in this crate. Converted at the timestamp2tm boundary.
+/// POSIX-convention result (see the engine's PgTm doc): tm_year is year-1900,
+/// tm_mon 0-based — converted at the timestamp2tm boundary, not here.
 #[allow(non_snake_case)]
-pub fn pg_localtime(t: i64, tzp: &PgTz) -> Option<pg_tm> {
-    match *tzp {
-        PgTz::Gmt => Some(gmtsub(t)),
-    }
+pub fn pg_localtime(t: i64, tzp: &'static PgTz) -> Option<pg_tm> {
+    localtime::pg_localtime(t, tzp).map(convert)
 }
 
 pub fn pg_gmtime(t: i64) -> Option<pg_tm> {
-    Some(gmtsub(t))
-}
-
-// localtime.c gmtsub/timesub for the zero-offset zone.
-fn gmtsub(t: i64) -> pg_tm {
-    let days = t.div_euclid(SECS_PER_DAY as i64);
-    let rem = t.rem_euclid(SECS_PER_DAY as i64);
-
-    // civil-from-days, exact over the full Julian range.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if m <= 2 { y + 1 } else { y };
-
-    pg_tm {
-        tm_sec: (rem % 60) as i32,
-        tm_min: ((rem / 60) % 60) as i32,
-        tm_hour: (rem / 3600) as i32,
-        tm_mday: d as i32,
-        tm_mon: (m - 1) as i32,
-        tm_year: (year - 1900) as i32,
-        tm_wday: (days + 4).rem_euclid(7) as i32,
-        tm_yday: 0,
-        tm_isdst: 0,
-        tm_gmtoff: 0,
-        tm_zone: Some("GMT"),
-    }
+    localtime::pg_gmtime(t).map(convert)
 }
 
 /// C `zoneabbrevtbl` (installed by the `timezone_abbreviations` GUC via
@@ -147,7 +212,7 @@ pub fn FetchDynamicTimeZone(
     _tp: &DateTkn,
     _extra: &mut DateTimeErrorExtra<'_>,
 ) -> Option<&'static PgTz> {
-    unported("FetchDynamicTimeZone");
+    unported("FetchDynamicTimeZone (zoneabbrevtbl)");
 }
 
 /// C `GetCurrentDateTime` (needs timestamp2tm + session_timezone).

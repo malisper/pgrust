@@ -288,16 +288,48 @@ fn decode_rejects_bad_inputs_with_c_error_codes() {
     assert_eq!(decode_ts("04:05:06 04:05:06", false).unwrap_err(), DTERR_BAD_FORMAT);
 }
 
-#[test]
-#[should_panic(expected = "backend-timezone unit not ported")]
-fn unknown_string_field_panics_until_tz_engine_lands() {
-    let _ = decode_ts("junk", false);
+fn setup_tz_engine() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        std::env::set_var("PGRUST_TZDIR", "/usr/share/zoneinfo");
+        pgtz::init_seams();
+        guc_tables::init_seams();
+        elog::init_seams();
+        fd::init_seams();
+        xact_seams::get_current_sub_transaction_id::set(|| 1);
+    });
 }
 
 #[test]
-#[should_panic(expected = "backend-timezone unit not ported")]
-fn session_zone_resolution_panics_until_tz_engine_lands() {
-    let _ = decode_ts("1999-01-08 04:05:06", true);
+fn unknown_string_field_is_bad_timezone() {
+    setup_tz_engine();
+    // The all-alpha UNKNOWN_FIELD arm tries pg_tzset and gives BAD_FORMAT on
+    // failure (C DecodeDateTime); no more unported-engine panic.
+    assert_eq!(decode_ts("junk", false).unwrap_err(), DTERR_BAD_FORMAT);
+    assert_eq!(decode_ts("junk", true).unwrap_err(), DTERR_BAD_FORMAT);
+}
+
+#[test]
+fn session_zone_resolution_uses_the_engine() {
+    setup_tz_engine();
+    tz::pg_timezone_initialize();
+    let (_, _, _, tzv) = decode_ts("1999-01-08 04:05:06", true).unwrap();
+    assert_eq!(tzv, 0, "GMT session timezone");
+
+    // Session zone with DST: EST in January (+18000 west), EDT in July.
+    tz::set_session_timezone(tz::pg_tzset(b"America/New_York"));
+    let (_, tm, _, tzv) = decode_ts("1999-01-08 04:05:06", true).unwrap();
+    assert_eq!((tzv, tm.tm_isdst), (5 * 3600, 0));
+    let (_, tm, _, tzv) = decode_ts("1999-07-08 04:05:06", true).unwrap();
+    assert_eq!((tzv, tm.tm_isdst), (4 * 3600, 1));
+    tz::pg_timezone_initialize();
+}
+
+#[test]
+fn named_zone_field_resolves_through_pg_tzset() {
+    setup_tz_engine();
+    let (_, tm, _, tzv) = decode_ts("2024-07-01 04:05:06 America/New_York", true).unwrap();
+    assert_eq!((tzv, tm.tm_isdst), (4 * 3600, 1));
 }
 
 #[test]

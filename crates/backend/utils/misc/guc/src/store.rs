@@ -132,9 +132,11 @@ fn build_variable(setting: GucSetting) -> Option<GucVariable> {
     })
 }
 
-// InitializeGUCOptions (guc.c:1530). pg_timezone_initialize (pgtz.c) is its
-// unported first step; deferred with the pgtz unit, not stubbed.
+// InitializeGUCOptions (guc.c:1530).
 pub fn initialize_guc_options() -> PgResult<()> {
+    // Before log_line_prefix-style GUCs can demand elog timestamps.
+    pgtz::pg_timezone_initialize();
+
     let mut reg = GucRegistry::new();
     for setting in all_settings() {
         let Some(mut var) = build_variable(setting) else { continue };
