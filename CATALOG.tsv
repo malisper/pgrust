@@ -649,7 +649,7 @@ backend-utils-misc-clean	*/help_config.c,*/pg_rusage.c,*/queryenvironment.c,*/sa
 backend-utils-misc-guc-file	src/backend/utils/misc/guc-file.l	todo			fabled:backend-utils-misc-guc-file; m1-spine
 backend-utils-misc-guc-funcs	src/backend/utils/misc/guc_funcs.c,src/include/utils/guc.h,src/include/utils/guc_tables.h	todo			fabled:backend-utils-misc-guc-funcs; m1-spine
 backend-utils-misc-guc-tables	src/backend/utils/misc/guc_tables.c,src/include/utils/guc.h,src/include/utils/guc_tables.h	ported	guc_tables	cold	fabled:guc-tables; m1-spine; 404 entries verified value-exact vs preprocessed C by parser diff (caught 3 fabled transcription bugs: max_stack_depth boot 2048->100, IntervalStyle hook, compression opts); 12 tests, density 0.5%
-backend-utils-misc-guc	src/backend/utils/misc/guc.c,src/include/utils/guc.h,src/include/utils/guc_tables.h	in-progress	guc		fabled:backend-utils-misc-guc; m1-spine
+backend-utils-misc-guc	src/backend/utils/misc/guc.c,src/include/utils/guc.h,src/include/utils/guc_tables.h	todo			fabled:backend-utils-misc-guc; m1-spine
 backend-utils-misc-help_config	*/help_config.c	combined-into:backend-utils-misc-help-config			fabled:backend-utils-misc-help-config; m1-dep(stub-ok)
 backend-utils-misc-more	*/pg_controldata.c,*/ps_status.c,*/rls.c,*/superuser.c	todo			fabled:backend-utils-misc-more; m1-spine
 backend-utils-misc-more2	*/conffiles.c,*/injection_point.c,*/pg_config.c,*/timeout.c,*/tzparser.c	todo			fabled:backend-utils-misc-timeout; m1-spine

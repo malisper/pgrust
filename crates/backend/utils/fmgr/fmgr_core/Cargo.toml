@@ -1,0 +1,15 @@
+[package]
+name = "fmgr_core"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "fmgr_core"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
