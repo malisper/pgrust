@@ -195,7 +195,7 @@ fn guc_var_slots_reach_globals() {
     assert_eq!(globals::work_mem(), 8192);
     globals::set_work_mem(4096);
     assert_eq!(vars::NBuffers.read(), 16384);
-    assert!(!vars::ExitOnAnyError.read());
+    // ExitOnAnyError slot ownership moved to elog (deferred.md double-install).
     assert_eq!(vars::VacuumCostDelay.read(), 0.0);
     assert_eq!(vars::IntervalStyle.read(), INTSTYLE_POSTGRES);
     assert_eq!(init_small_seams::my_proc_pid::call(), globals::MyProcPid());

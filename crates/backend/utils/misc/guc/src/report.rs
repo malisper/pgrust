@@ -56,8 +56,10 @@ pub fn report_changed_guc_options() {
         return;
     }
 
-    // in_hot_standby can only transition true -> false.
-    if guc_tables::vars::in_hot_standby_guc.read()
+    // in_hot_standby can only transition true -> false. Read the backing bool
+    // directly (the accessor-slot fn pointer defeats inlining; the install is
+    // always guc_tables::backing, so this is the same load C does).
+    if guc_tables::backing::in_hot_standby_guc()
         && transam_xlog_seams::recovery_in_progress::is_installed()
         && !transam_xlog_seams::recovery_in_progress::call()
     {
@@ -65,6 +67,18 @@ pub fn report_changed_guc_options() {
             crate::SetConfigOption("in_hot_standby", Some("false"), PGC_INTERNAL, PGC_S_OVERRIDE);
     }
 
+    // Nothing noted since the last drain: one Cell load, C's empty
+    // slist_is_empty(&guc_report_list) shape — no store borrow, no mem::take.
+    if !crate::store::report_pending_hint() {
+        return;
+    }
+    report_changed_haswork();
+}
+
+#[cold]
+#[inline(never)]
+fn report_changed_haswork() {
+    crate::store::set_report_pending_hint(false);
     let drained: Vec<usize> = with_store_mut(|reg| reg.drain_report_list()).unwrap_or_default();
     if drained.is_empty() {
         return;

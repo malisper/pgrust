@@ -18,17 +18,14 @@ mod tests;
 
 const NAMELEN: usize = NAMEDATALEN as usize;
 
-// PROGRESS_COMMAND_INVALID .. (backend_progress.h); the progress fields live
-// here so backend_progress.c can land against this array.
 pub const PROGRESS_COMMAND_INVALID: i32 = 0;
 pub const PGSTAT_NUM_PROGRESS_PARAM: usize = 20;
 
-// PgBackendStatus (backend_status.h). One address space: the NAMEDATALEN
-// string buffers are inline arrays (C's separate shmem buffers exist only to
-// re-fix pointers per process); st_activity_raw stays a shared runtime-sized
-// buffer, indexed by slot. Cross-thread readable via SyncCell under the
-// st_changecount seqlock, the PGPROC precedent; string reads are racy by
-// design exactly as C documents.
+// PgBackendStatus (backend_status.h). The NAMEDATALEN buffers are inline (C's
+// separate shmem buffers only re-fix pointers per process); st_activity_raw is
+// a shared runtime-sized buffer indexed by slot. Cross-thread SyncCell reads
+// under the st_changecount seqlock (PGPROC precedent); string reads racy by
+// design, as in C.
 pub struct PgBackendStatus {
     st_changecount: AtomicI32,
     slot: i32,
@@ -91,8 +88,8 @@ fn query_size() -> usize {
     guc_tables::vars::pgstat_track_activity_query_size.read() as usize
 }
 
-// PGSTAT_BEGIN/END_WRITE_ACTIVITY (backend_status.h): odd changecount marks a
-// write in progress; fences replace pg_write_barrier.
+// PGSTAT_BEGIN/END_WRITE_ACTIVITY: odd changecount = write in progress;
+// fences replace pg_write_barrier.
 fn begin_write_activity(e: &PgBackendStatus) {
     g::StartCriticalSection();
     e.st_changecount.store(e.st_changecount.load(Relaxed).wrapping_add(1), Relaxed);
@@ -131,9 +128,8 @@ fn activity_ptr(slot: i32) -> *mut u8 {
     unsafe { buf.base.add(slot as usize * buf.query_size) }
 }
 
-// Writer side of st_activity_raw: single memcpy + NUL, inside the caller's
-// write bracket. Truncation to query_size-1 is byte-wise as in C; multibyte
-// correction happens on read (pgstat_clip_activity).
+// Single memcpy + NUL inside the caller's write bracket; byte-wise truncation
+// per C, multibyte-corrected on read (pgstat_clip_activity).
 fn write_activity(slot: i32, s: &[u8]) {
     let qsize = BACKEND_ACTIVITY_BUFFER.get().unwrap().query_size;
     let len = s.len().min(qsize - 1);
@@ -278,8 +274,7 @@ pub fn pgstat_bestart_initial() -> PgResult<()> {
     beentry.st_progress_command_target.set(InvalidOid);
     beentry.st_query_id.set(0);
     beentry.st_plan_id.set(0);
-    // st_progress_param stays unzeroed as in C: invalid until
-    // st_progress_command says otherwise.
+    // st_progress_param stays unzeroed as in C.
     beentry.st_appname.set([0; NAMELEN]);
     beentry.st_clienthostname.set(clienthostname);
     write_activity(beentry.slot, b"");
@@ -291,8 +286,7 @@ pub fn pgstat_bestart_security() -> PgResult<()> {
     let beentry = my_beentry();
     assert!(g::HaveMyProcPort());
 
-    // No USE_SSL / ENABLE_GSS build arms in this tree yet: both flags report
-    // false, the C shape of a build without them.
+    // No USE_SSL / ENABLE_GSS arms in this build: both report false, as C.
     begin_write_activity(beentry);
     beentry.st_ssl.set(false);
     beentry.st_gss.set(false);
@@ -319,8 +313,7 @@ pub fn pgstat_bestart_final() -> PgResult<()> {
     beentry.st_state.set(BackendState::STATE_UNDEFINED);
     end_write_activity(beentry);
 
-    // pgstat_create_backend (pgstat_backend.c) is that unit's landing, not a
-    // stub here: per-backend cumulative stats do not exist yet.
+    // pgstat_create_backend lands with pgstat_backend.c, not stubbed here.
 
     if guc_tables::vars::application_name.installed() {
         if let Some(appname) = guc_tables::vars::application_name.read() {
@@ -383,8 +376,7 @@ pub fn pgstat_report_activity(state: BackendState, cmd_str: Option<&str>) {
     beentry.st_state.set(state);
     beentry.st_state_start_timestamp.set(current_timestamp);
 
-    // A new query resets the identifiers: they are only known after parse
-    // analysis, and stale ones must not leak into the new statement.
+    // A new query resets the ids: only known after parse analysis.
     if state == BackendState::STATE_RUNNING {
         beentry.st_query_id.set(0);
         beentry.st_plan_id.set(0);
@@ -402,8 +394,7 @@ pub fn pgstat_report_query_id(query_id: i64, force: bool) {
     if !track_activities() {
         return;
     }
-    // Only top-level identifiers are reported: a nonzero saved id means a
-    // nested command, ignored unless the caller forces a reset.
+    // Top-level ids only: nonzero saved id = nested command, unless forced.
     if beentry.st_query_id.get() != 0 && !force {
         return;
     }
@@ -455,7 +446,6 @@ pub fn pgstat_get_my_plan_id() -> i64 {
 }
 
 pub fn pgstat_get_backend_type_by_proc_number(procNumber: ProcNumber) -> BackendType {
-    // Bypasses the changecount protocol as C does: a single word read.
     backend_status_array()[procNumber as usize].st_backendType.get()
 }
 
@@ -497,7 +487,6 @@ pub fn pgstat_get_crashed_backend_activity(pid: i32) -> Option<String> {
             if raw.is_empty() {
                 return None;
             }
-            // ASCII-safe copy: no encoding hazards in a crash report.
             let safe: String = raw
                 .iter()
                 .map(|&b| if (32..127).contains(&b) { b as char } else { '?' })
@@ -508,8 +497,7 @@ pub fn pgstat_get_crashed_backend_activity(pid: i32) -> Option<String> {
     None
 }
 
-// pgstat_clip_activity: multibyte-aware truncation of a possibly mid-character
-// truncated buffer (server encodings self-describe length from byte one).
+// Multibyte-aware truncation of a possibly mid-character truncated buffer.
 pub fn pgstat_clip_activity(raw_activity: &[u8]) -> String {
     let limit = (query_size() - 1).min(raw_activity.len());
     let raw = &raw_activity[..limit];
@@ -521,14 +509,12 @@ pub fn appname_of(beentry: &PgBackendStatus) -> String {
     name_to_string(&beentry.st_appname.get())
 }
 
-// The transaction-local snapshot half (pgstat_read_current_status,
-// localBackendStatusTable, pgstat_get_local_beentry_*,
-// pgstat_fetch_stat_numbackends, pgstat_clear_backend_activity_snapshot)
-// lands with its only consumer, the pg_stat_activity SRF unit; it also needs
-// procarray's ProcNumberGetTransactionIds, which does not exist yet.
+// The transaction-local snapshot half (pgstat_read_current_status and the
+// localBackendStatusTable accessors) lands with its only consumer, the
+// pg_stat_activity SRF unit; it needs procarray's ProcNumberGetTransactionIds.
 
-// The two GUCs backend_status.c owns; C static initializers (the GUC boot
-// values overwrite these when InitializeGUCOptions runs).
+// The two GUCs backend_status.c owns; C static initializers, overwritten by
+// GUC boot values.
 static TRACK_ACTIVITIES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static TRACK_ACTIVITY_QUERY_SIZE: AtomicI32 = AtomicI32::new(1024);
 

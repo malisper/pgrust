@@ -17,7 +17,11 @@ fn RecordTransactionCommit() -> PgResult<TransactionId> {
     RECORD_COMMIT_SCRATCH.with(|cell| {
         let mut scratch = cell.borrow_mut();
         let out = RecordTransactionCommitGuts(scratch.mcx());
-        scratch.reset();
+        // The empty commit allocates nothing (C has no scratch on this path
+        // at all): reset only if something was charged since the last reset.
+        if scratch.peak() != 0 {
+            scratch.reset();
+        }
         out
     })
 }
@@ -250,15 +254,15 @@ fn StartTransaction() -> PgResult<()> {
         let rate = (guc_tables::vars::log_xact_sample_rate.get().get)();
         let sampled = rate != 0.0
             && (rate == 1.0 || pg_prng_seams::global_prng_double::call() <= rate);
-        xs(|s| s.xact_is_sampled = sampled);
+        // One state borrow for the adjacent field writes (no seam between).
+        xs(|s| {
+            s.xact_is_sampled = sampled;
+            let mut n = s.current_mut();
+            n.nesting_level = 1;
+            n.guc_nest_level = 1;
+            n.child_xids = Vec::new();
+        });
     }
-
-    xs(|s| {
-        let mut n = s.current_mut();
-        n.nesting_level = 1;
-        n.guc_nest_level = 1;
-        n.child_xids = Vec::new();
-    });
 
     let (prev_user, prev_sec_context) = miscinit_seams::get_user_id_and_sec_context::call();
     debug_assert_eq!(prev_sec_context, 0);
@@ -267,18 +271,15 @@ fn StartTransaction() -> PgResult<()> {
         s.current_mut().prev_sec_context = prev_sec_context;
     });
 
-    if xlog_seams::recovery_in_progress::call() {
-        xs(|s| {
+    let in_recovery = xlog_seams::recovery_in_progress::call();
+    xs(|s| {
+        if in_recovery {
             s.current_mut().started_in_recovery = true;
             s.XactReadOnly = true;
-        });
-    } else {
-        xs(|s| {
+        } else {
             s.current_mut().started_in_recovery = false;
             s.XactReadOnly = s.DefaultXactReadOnly;
-        });
-    }
-    xs(|s| {
+        }
         s.XactDeferrable = s.DefaultXactDeferrable;
         s.XactIsoLevel = s.DefaultXactIsoLevel;
         s.force_sync_commit = false;
@@ -307,18 +308,27 @@ fn StartTransaction() -> PgResult<()> {
         proc.vxid.lxid.store(vxid.localTransactionId, Relaxed);
     }
 
-    if !parallel_seams::is_parallel_worker::call() {
+    // One borrow covers start/stop timestamp bookkeeping and hands the seam
+    // its argument (the seam reads nothing from this state).
+    let xact_start = if !parallel_seams::is_parallel_worker::call() {
         let ts = if !spi_seams::spi_inside_nonatomic_context::call() {
-            xs(|s| s.stmt_start_timestamp)
+            None
         } else {
-            timestamp_seams::get_current_timestamp::call()
+            Some(timestamp_seams::get_current_timestamp::call())
         };
-        xs(|s| s.xact_start_timestamp = ts);
+        xs(|s| {
+            s.xact_start_timestamp = ts.unwrap_or(s.stmt_start_timestamp);
+            s.xact_stop_timestamp = 0;
+            s.xact_start_timestamp
+        })
     } else {
-        debug_assert!(xs(|s| s.xact_start_timestamp) != 0);
-    }
-    backend_status_seams::pgstat_report_xact_timestamp::call(xs(|s| s.xact_start_timestamp));
-    xs(|s| s.xact_stop_timestamp = 0);
+        xs(|s| {
+            debug_assert!(s.xact_start_timestamp != 0);
+            s.xact_stop_timestamp = 0;
+            s.xact_start_timestamp
+        })
+    };
+    backend_status_seams::pgstat_report_xact_timestamp::call(xact_start);
 
     guc_seams::at_start_guc::call();
     AtStart_Cache()?;
@@ -347,8 +357,9 @@ fn CommitTransaction() -> PgResult<()> {
 
     ShowTransactionState("CommitTransaction");
 
-    if xs(|s| s.current().state) != TRANS_INPROGRESS {
-        let st = TransStateAsString(xs(|s| s.current().state));
+    let cur_state = xs(|s| s.current().state);
+    if cur_state != TRANS_INPROGRESS {
+        let st = TransStateAsString(cur_state);
         warn_internal(&format!("CommitTransaction while in {st} state"));
     }
     debug_assert!(!xs(|s| s.is_subxact()));

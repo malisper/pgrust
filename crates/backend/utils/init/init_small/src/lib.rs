@@ -18,8 +18,8 @@ pub fn init_seams() {
             });)+
         };
     }
+    // ExitOnAnyError's GUC backing lives in elog::config (its only readers).
     install_var! {
-        ExitOnAnyError: ExitOnAnyError / SetExitOnAnyError;
         NBuffers: NBuffers / SetNBuffers;
         MaxConnections: MaxConnections / SetMaxConnections;
         max_worker_processes: max_worker_processes / set_max_worker_processes;

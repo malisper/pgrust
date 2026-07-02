@@ -52,32 +52,64 @@ pub fn init_seams() {
 const PORTALS_PER_USER: usize = 16;
 
 // dynahash HASH_STRINGS key: strlcpy to MAX_PORTALNAME_LEN-1 bytes (backed off
-// to a char boundary), NUL-padded — over-long names collide exactly as in C.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct PortalName([u8; MAX_PORTALNAME_LEN]);
+// to a char boundary) — over-long names collide exactly as in C. Hash/Eq run
+// over the used prefix only, as C's string_hash runs over strlen(name) bytes
+// (the per-statement unnamed portal hashes 0 bytes, not 64).
+#[derive(Clone, Copy)]
+struct PortalName {
+    len: u8,
+    buf: [u8; MAX_PORTALNAME_LEN],
+}
 
 impl PortalName {
     fn new(name: &str) -> PortalName {
-        let mut key = [0u8; MAX_PORTALNAME_LEN];
+        let mut buf = [0u8; MAX_PORTALNAME_LEN];
         let mut end = name.len().min(MAX_PORTALNAME_LEN - 1);
         while end > 0 && !name.is_char_boundary(end) {
             end -= 1;
         }
-        key[..end].copy_from_slice(&name.as_bytes()[..end]);
-        PortalName(key)
+        buf[..end].copy_from_slice(&name.as_bytes()[..end]);
+        PortalName { len: end as u8, buf }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        &self.buf[..self.len as usize]
     }
 
     fn as_str(&self) -> &str {
-        let end = self.0.iter().position(|&b| b == 0).unwrap_or(MAX_PORTALNAME_LEN);
-        core::str::from_utf8(&self.0[..end]).expect("PortalName built from &str")
+        core::str::from_utf8(self.bytes()).expect("PortalName built from &str")
     }
 }
+
+impl PartialEq for PortalName {
+    fn eq(&self, other: &PortalName) -> bool {
+        self.bytes() == other.bytes()
+    }
+}
+
+impl Eq for PortalName {}
+
+impl core::hash::Hash for PortalName {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        state.write(self.bytes());
+    }
+}
+
+// Pool caps: C parks up to 100 small contexts (aset.c context_freelists) and
+// pfrees PortalData into TopPortalContext's freelists; a backend rarely has
+// more than a few portals alive, so a small cap bounds parked keeper blocks.
+const PORTAL_POOL_MAX: usize = 16;
 
 struct PortalManager {
     top: &'static MemoryContext,
     entries: PgVec<'static, Portal<'static>>,
     index: PgHashMap<'static, PortalName, u32>,
     unnamed_counter: u32,
+    // Per-statement recycling, C's shape: dropped PortalContexts park whole
+    // (keeper block intact — aset.c context_freelists) and dropped portal
+    // slots park for overwrite (C's pfree into the TopPortalContext freelist).
+    free_contexts: Vec<PgBox<'static, MemoryContext>>,
+    free_portals: Vec<Portal<'static>>,
 }
 
 thread_local! {
@@ -127,6 +159,8 @@ pub fn EnablePortalManager() {
             entries,
             index: PgHashMap::with_capacity_in(PORTALS_PER_USER, top.mcx()),
             unnamed_counter: 0,
+            free_contexts: Vec::new(),
+            free_portals: Vec::new(),
         }));
     });
 }
@@ -170,17 +204,22 @@ pub fn CreatePortal(name: &str, allowDup: bool, dupSilent: bool) -> PgResult<Por
                 .into());
         }
         let name_copy = PgString::from_str_in(key.as_str(), mcx)?;
-        let portal_context = m.top.new_child("PortalContext");
+        // Parked contexts are already reset (PortalDrop): reuse is a pop, as
+        // C's context_freelists hit in AllocSetContextCreate.
+        let portal_context = match m.free_contexts.pop() {
+            Some(ctx) => ctx,
+            None => PgBox::new_in(m.top.new_child("PortalContext"), mcx),
+        };
         if !name_copy.is_empty() {
             // C: MemoryContextSetIdentifier(portalContext, name or "<unnamed>").
             // Skipped for the unnamed portal: set_ident allocates a String per
             // call where C stores a static pointer (fabled #422's 100 Ir/q).
             portal_context.set_ident(Some(name_copy.as_str()));
         }
-        let portal = Portal::new(PortalData {
+        let data = PortalData {
             name: name_copy,
             prepStmtName: None,
-            portalContext: Some(PgBox::new_in(portal_context, mcx)),
+            portalContext: Some(portal_context),
             resowner,
             cleanup: PortalCleanupHook::PortalCleanup,
             createSubid: create_subid,
@@ -210,7 +249,17 @@ pub fn CreatePortal(name: &str, allowDup: bool, dupSilent: bool) -> PgResult<Por
             portalPos: 0,
             creation_time,
             visible: true,
-        });
+        };
+        // Portal-slot reuse: overwrite a parked slot no clone can still see
+        // (is_unique); otherwise a fresh allocation. The overwrite drops the
+        // previous portal's strings here, where C pfree'd them at drop time.
+        let portal = match m.free_portals.pop() {
+            Some(slot) if slot.is_unique() => {
+                *slot.borrow_mut() = data;
+                slot
+            }
+            _ => Portal::new(data),
+        };
         let i = m.entries.len() as u32;
         m.entries.push(portal.clone());
         m.index.insert(key, i);
@@ -446,10 +495,36 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
         tuplestore_hold_seams::tuplestore_end::call(hold_store);
     }
 
-    let mut p = portal.borrow_mut();
-    p.tupDesc = None; // may live in portalContext/holdContext: free before the arenas
-    p.holdContext = None;
-    p.portalContext = None;
+    let ctx = {
+        let mut p = portal.borrow_mut();
+        p.tupDesc = None; // may live in portalContext/holdContext: free before the arenas
+        p.holdContext = None;
+        p.portalContext.take()
+    };
+    // Park the empty context whole (C's AllocSetDelete → context_freelists):
+    // reset runs outside the manager borrow (reset callbacks are user code).
+    // A context with live (leaked-in) allocations takes the full destroy path.
+    let parked_ctx = ctx.and_then(|mut cb| {
+        if cb.used() == 0 {
+            cb.reset();
+            cb.set_ident(None);
+            Some(cb)
+        } else {
+            None
+        }
+    });
+    with_mgr(|m| {
+        if let Some(cb) = parked_ctx {
+            if m.free_contexts.len() < PORTAL_POOL_MAX {
+                m.free_contexts.push(cb);
+            }
+        }
+        // Park the slot for reuse; CreatePortal only overwrites it once every
+        // outside clone is gone (Portal::is_unique).
+        if m.free_portals.len() < PORTAL_POOL_MAX {
+            m.free_portals.push(portal.clone());
+        }
+    });
     Ok(())
 }
 

@@ -45,7 +45,3 @@ seam_core::seam!(
     pub fn initialize_guc_options() -> PgResult<()>
 );
 
-seam_core::seam!(
-    // InitializeShmemGUCs (guc.c) — same deferred half.
-    pub fn initialize_shmem_gucs() -> PgResult<()>
-);
