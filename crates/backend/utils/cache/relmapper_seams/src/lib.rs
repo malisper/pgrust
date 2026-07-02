@@ -14,3 +14,28 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn at_prepare_relation_map() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    pub fn relation_map_invalidate_all()
+);
+
+seam_core::seam!(
+    pub fn relation_map_initialize()
+);
+
+seam_core::seam!(
+    pub fn relation_map_initialize_phase2() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn relation_map_initialize_phase3() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn relation_map_update_map(
+        relation_id: types_core::Oid,
+        file_number: types_core::Oid,
+        shared: bool,
+        immediate: bool,
+    ) -> types_error::PgResult<()>
+);

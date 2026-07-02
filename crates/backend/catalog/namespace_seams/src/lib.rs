@@ -30,3 +30,13 @@ seam_core::seam!(
         parent_subid: types_core::SubTransactionId,
     )
 );
+
+seam_core::seam!(
+    // isTempOrTempToastNamespace(namespaceId) (namespace.c): infallible.
+    pub fn is_temp_or_temp_toast_namespace(namespace_id: Oid) -> bool
+);
+
+seam_core::seam!(
+    // GetTempNamespaceProcNumber(namespaceId) (namespace.c): infallible.
+    pub fn get_temp_namespace_proc_number(namespace_id: Oid) -> types_core::ProcNumber
+);

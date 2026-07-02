@@ -211,6 +211,13 @@ members = [
     "crates/backend/utils/cache/relcache_build_seams",
     "crates/backend/utils/cache/relcache",
     "crates/common/pg_prng",
+    "crates/backend/utils/misc/conffiles_seams",
+    "crates/backend/utils/misc/guc_file",
+    "crates/backend/parser/scan_fgram",
+    "crates/common/keywords",
+    "crates/common/pglz",
+    "crates/backend/access/common/detoast",
+    "crates/backend/access/common/toast_internals_seams",
 ]
 
 [workspace.package]

@@ -339,6 +339,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "conffiles_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+]
+
+[[package]]
 name = "crc32c"
 version = "0.1.0"
 
@@ -360,6 +368,10 @@ dependencies = [
  "types_error",
  "types_storage",
 ]
+
+[[package]]
+name = "detoast"
+version = "0.1.0"
 
 [[package]]
 name = "detoast_seams"
@@ -547,6 +559,7 @@ version = "0.0.0"
 dependencies = [
  "aclchk_seams",
  "elog",
+ "guc_file",
  "guc_seams",
  "guc_tables",
  "init_small",
@@ -556,12 +569,26 @@ dependencies = [
  "parser_small1",
  "pqcomm_seams",
  "scalar_seams",
+ "timestamp_seams",
  "transam_xlog_seams",
  "types_core",
  "types_dest",
  "types_error",
  "types_guc",
  "xact_seams",
+]
+
+[[package]]
+name = "guc_file"
+version = "0.0.0"
+dependencies = [
+ "conffiles_seams",
+ "elog",
+ "guc_file_seams",
+ "guc_seams",
+ "init_small",
+ "types_error",
+ "types_guc",
 ]
 
 [[package]]
@@ -579,6 +606,7 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_error",
+ "types_guc",
 ]
 
 [[package]]
@@ -787,6 +815,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "keywords"
+version = "0.1.0"
+
+[[package]]
 name = "latch"
 version = "0.0.0"
 dependencies = [
@@ -812,13 +844,18 @@ name = "launch_backend"
 version = "0.0.0"
 dependencies = [
  "backend_startup",
+ "guc_tables",
  "init_small",
  "ip",
+ "libc",
  "libpq_pqsignal",
  "miscinit",
+ "pqcomm_seams",
  "timestamp_seams",
  "types_core",
  "types_startup",
+ "types_storage",
+ "waiteventset_seams",
 ]
 
 [[package]]
@@ -1213,6 +1250,10 @@ dependencies = [
  "seam_core",
  "types_core",
 ]
+
+[[package]]
+name = "pglz"
+version = "0.1.0"
 
 [[package]]
 name = "pgstat"
@@ -1701,6 +1742,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "scan_fgram"
+version = "0.1.0"
+
+[[package]]
 name = "seam_core"
 version = "0.1.0"
 
@@ -2095,6 +2140,10 @@ dependencies = [
  "types_core",
  "types_error",
 ]
+
+[[package]]
+name = "toast_internals_seams"
+version = "0.1.0"
 
 [[package]]
 name = "trace"
