@@ -1,0 +1,594 @@
+#![allow(non_snake_case)]
+#![allow(clippy::too_many_arguments)]
+
+#[cfg(test)]
+mod tests;
+
+use std::rc::Rc;
+
+use exectuples::FetchedHeapTuple;
+use indexam::{IndexScanDescData, IndexScanOpaque};
+use mcx::{slice_in, vec_with_capacity_in, Mcx, MemoryContext, PgVec};
+use tableam::TableScanDescData;
+use types_core::primitive::AttrNumber;
+use types_core::xact::TransactionIdIsValid;
+use types_core::{Oid, TransactionId};
+use types_error::{
+    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TRANSACTION_STATE,
+    ERRCODE_TRANSACTION_ROLLBACK, WARNING,
+};
+use types_rel::{AccessShareLock, NoLock, Relation, RelationData};
+use types_scan::scankey::ScanKeyData;
+use types_scan::sdir::{ForwardScanDirection, ScanDirection};
+use types_slot::SlotData;
+use types_snapshot::SnapshotData;
+use types_tuple::itemptr::{ItemPointerData, ItemPointerEquals};
+use types_tuple::HeapTupleData;
+
+pub fn init_seams() {
+    genam_seams::systable_scan_catalog::set(systable_scan_catalog);
+}
+
+// The genam_seams marshal for below-genam consumers (catcache's miss path).
+// The per-scan context stands in for C's CurrentMemoryContext palloc of the
+// sysscan machinery; direct consumers use the Mcx-taking API instead.
+fn systable_scan_catalog(
+    relation: &RelationData<'_>,
+    index_oid: Oid,
+    index_ok: bool,
+    keys: &[ScanKeyData],
+    consume: &mut dyn FnMut(&HeapTupleData<'_>) -> PgResult<bool>,
+) -> PgResult<bool> {
+    let scan_cx = MemoryContext::new("systable_scan_catalog");
+    scan_catalog(scan_cx.mcx(), relation.rd_id, index_oid, index_ok, keys, consume)
+}
+
+fn scan_catalog<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap_relid: Oid,
+    index_oid: Oid,
+    index_ok: bool,
+    keys: &[ScanKeyData],
+    consume: &mut dyn FnMut(&HeapTupleData<'_>) -> PgResult<bool>,
+) -> PgResult<bool> {
+    // The seam trimmed the caller's open handle to &RelationData; NoLock
+    // re-acquires it (the analog of C aliasing the passed pointer).
+    let heap_rel = relation_seams::relation_open::call(mcx, heap_relid, NoLock)?;
+    let mut scan = systable_beginscan(mcx, &heap_rel, index_oid, index_ok, None, keys)?;
+    let ordered = matches!(scan.arm, SysScanArm::Index { .. });
+    loop {
+        let Some(ntp) = systable_getnext(mcx, &mut scan)? else {
+            break;
+        };
+        if !consume(ntp)? {
+            break;
+        }
+    }
+    systable_endscan(mcx, scan)?;
+    heap_rel.close(NoLock)?;
+    Ok(ordered)
+}
+
+pub fn RelationGetIndexScan<'mcx>(
+    mcx: Mcx<'mcx>,
+    indexRelation: &Relation<'mcx>,
+    nkeys: i32,
+    norderbys: i32,
+    opaque: IndexScanOpaque<'mcx>,
+) -> PgResult<IndexScanDescData<'mcx>> {
+    let xactStartedInRecovery = xact::TransactionStartedDuringRecovery();
+    Ok(IndexScanDescData {
+        heapRelation: None,
+        indexRelation: indexRelation.alias(),
+        xs_snapshot: None,
+        numberOfKeys: nkeys,
+        numberOfOrderBys: norderbys,
+        // Key workspace; filled by amrescan.
+        keyData: vec_with_capacity_in(mcx, nkeys.max(0) as usize)?,
+        orderByData: vec_with_capacity_in(mcx, norderbys.max(0) as usize)?,
+        xs_want_itup: false,
+        xs_temp_snap: false,
+        kill_prior_tuple: false,
+        // In recovery killed-tuple hints are ignored: the standby xmin may
+        // precede the primary's, so "killed" rows can still be visible here.
+        ignore_killed_tuples: !xactStartedInRecovery,
+        xactStartedInRecovery,
+        opaque,
+        xs_heaptid: ItemPointerData::invalid(),
+        xs_heap_continue: false,
+        xs_heapfetch: None,
+        xs_recheck: false,
+        xs_pgstat_index_tuples: 0,
+        xs_pgstat_heap_fetches: 0,
+    })
+}
+
+// C IndexScanEnd dissolves: dropping the IndexScanDescData value is the pfree.
+
+// genam.h SysScanDescData. C's irel/iscan/scan nullable-pointer trio is the
+// closed heap-or-index arm (rule 4); descriptors held by value, no erasure.
+pub enum SysScanArm<'mcx> {
+    Index {
+        irel: Relation<'mcx>,
+        iscan: IndexScanDescData<'mcx>,
+    },
+    Heap {
+        scan: TableScanDescData<'mcx>,
+    },
+}
+
+pub struct SysScanDescData<'mcx> {
+    pub heap_rel: Relation<'mcx>,
+    pub slot: SlotData<'mcx>,
+    // Some only when begin registered the catalog snapshot (caller passed None);
+    // registered snapshots are snapmgr-owned ('static) per snapmgr_seams.
+    pub snapshot: Option<Rc<SnapshotData<'static>>>,
+    pub arm: SysScanArm<'mcx>,
+}
+
+pub type SysScanDesc<'mcx> = SysScanDescData<'mcx>;
+
+pub fn systable_beginscan<'mcx>(
+    mcx: Mcx<'mcx>,
+    heapRelation: &Relation<'mcx>,
+    indexId: Oid,
+    indexOK: bool,
+    snapshot: Option<Rc<SnapshotData<'mcx>>>,
+    key: &[ScanKeyData],
+) -> PgResult<SysScanDescData<'mcx>> {
+    let irel = if indexOK
+        && !miscinit::IgnoreSystemIndexes()
+        && !reindex_is_processing_index(indexId)
+    {
+        Some(indexam::index_open(mcx, indexId, AccessShareLock)?)
+    } else {
+        None
+    };
+
+    let slot = tableam::table_slot_create(mcx, heapRelation)?;
+    let (snap, registered) = setup_snapshot(mcx, heapRelation.rd_id, snapshot)?;
+
+    let nkeys = key.len() as i32;
+    let arm = match irel {
+        Some(irel) => {
+            let idxkey = convert_scan_keys(mcx, &irel, key)?;
+            let mut iscan =
+                indexam::index_beginscan(mcx, heapRelation, &irel, snap, nkeys, 0)?;
+            indexam::index_rescan(&mut iscan, Some(&idxkey), None)?;
+            SysScanArm::Index { irel, iscan }
+        }
+        None => {
+            // No syncscan on a forced catalog heapscan: wanted rows cluster at
+            // the front, an unpredictable start point only hurts.
+            let scan = tableam::table_beginscan_strat(
+                mcx,
+                heapRelation,
+                Some(snap),
+                nkeys,
+                slice_in(mcx, key)?,
+                true,
+                false,
+            )?;
+            SysScanArm::Heap { scan }
+        }
+    };
+
+    if TransactionIdIsValid(xact::CheckXidAlive()) {
+        xact::SetBsysscan(true);
+    }
+
+    Ok(SysScanDescData {
+        heap_rel: heapRelation.alias(),
+        slot,
+        snapshot: registered,
+        arm,
+    })
+}
+
+/// Returned tuple borrows the scan's slot: valid until the next
+/// `systable_getnext`/`systable_endscan`, exactly C's contract.
+pub fn systable_getnext<'a, 'mcx>(
+    mcx: Mcx<'mcx>,
+    sysscan: &'a mut SysScanDescData<'mcx>,
+) -> PgResult<Option<&'a HeapTupleData<'mcx>>> {
+    let SysScanDescData { arm, slot, .. } = sysscan;
+    let found = match arm {
+        SysScanArm::Index { iscan, .. } => {
+            let found =
+                indexam::index_getnext_slot(iscan, ForwardScanDirection, slot.base_mut())?;
+            if found && iscan.xs_recheck {
+                return Err(lossy_sysscan());
+            }
+            found
+        }
+        SysScanArm::Heap { scan } => {
+            tableam::table_scan_getnextslot(mcx, scan, ForwardScanDirection, slot)?
+        }
+    };
+
+    handle_concurrent_abort()?;
+
+    if !found {
+        return Ok(None);
+    }
+    fetch_slot_tuple(mcx, slot).map(Some)
+}
+
+pub fn systable_recheck_tuple<'mcx>(
+    _mcx: Mcx<'mcx>,
+    sysscan: &mut SysScanDescData<'mcx>,
+    tup: &HeapTupleData<'_>,
+) -> PgResult<bool> {
+    debug_assert!(slot_holds(&sysscan.slot, tup));
+
+    let freshsnap = Some(snapmgr_seams::register_snapshot::call(
+        snapmgr_seams::get_catalog_snapshot::call(sysscan.heap_rel.rd_id)?,
+    )?);
+
+    let result = tableam::table_tuple_satisfies_snapshot(
+        &sysscan.heap_rel,
+        &mut sysscan.slot,
+        &freshsnap,
+    )?;
+
+    snapmgr_seams::unregister_snapshot::call(freshsnap.expect("registered above"));
+
+    handle_concurrent_abort()?;
+
+    Ok(result)
+}
+
+pub fn systable_endscan<'mcx>(mcx: Mcx<'mcx>, sysscan: SysScanDescData<'mcx>) -> PgResult<()> {
+    let SysScanDescData {
+        heap_rel: _,
+        mut slot,
+        snapshot,
+        arm,
+    } = sysscan;
+
+    // ExecDropSingleTupleTableSlot: the clear releases any pin, the drop frees.
+    exectuples::exec_clear_tuple(&mut slot, mcx);
+    drop(slot);
+
+    match arm {
+        SysScanArm::Index { irel, iscan } => {
+            indexam::index_endscan(iscan)?;
+            indexam::index_close(irel, AccessShareLock)?;
+        }
+        SysScanArm::Heap { scan } => tableam::table_endscan(scan)?,
+    }
+
+    if let Some(snap) = snapshot {
+        snapmgr_seams::unregister_snapshot::call(snap);
+    }
+
+    if TransactionIdIsValid(xact::CheckXidAlive()) {
+        xact::SetBsysscan(false);
+    }
+
+    Ok(())
+}
+
+/// Unlike `systable_beginscan` the index is opened and locked by the caller.
+pub fn systable_beginscan_ordered<'mcx>(
+    mcx: Mcx<'mcx>,
+    heapRelation: &Relation<'mcx>,
+    indexRelation: &Relation<'mcx>,
+    snapshot: Option<Rc<SnapshotData<'mcx>>>,
+    key: &[ScanKeyData],
+) -> PgResult<SysScanDescData<'mcx>> {
+    if reindex_is_processing_index(indexRelation.rd_id) {
+        return Err(reindex_in_progress(indexRelation));
+    }
+    if miscinit::IgnoreSystemIndexes() {
+        elog::elog(
+            WARNING,
+            format!(
+                "using index \"{}\" despite IgnoreSystemIndexes",
+                indexRelation.name()
+            ),
+        )?;
+    }
+
+    let slot = tableam::table_slot_create(mcx, heapRelation)?;
+    let (snap, registered) = setup_snapshot(mcx, heapRelation.rd_id, snapshot)?;
+
+    let idxkey = convert_scan_keys(mcx, indexRelation, key)?;
+    let mut iscan =
+        indexam::index_beginscan(mcx, heapRelation, indexRelation, snap, key.len() as i32, 0)?;
+    indexam::index_rescan(&mut iscan, Some(&idxkey), None)?;
+
+    if TransactionIdIsValid(xact::CheckXidAlive()) {
+        xact::SetBsysscan(true);
+    }
+
+    Ok(SysScanDescData {
+        heap_rel: heapRelation.alias(),
+        slot,
+        snapshot: registered,
+        arm: SysScanArm::Index {
+            irel: indexRelation.alias(),
+            iscan,
+        },
+    })
+}
+
+pub fn systable_getnext_ordered<'a, 'mcx>(
+    mcx: Mcx<'mcx>,
+    sysscan: &'a mut SysScanDescData<'mcx>,
+    direction: ScanDirection,
+) -> PgResult<Option<&'a HeapTupleData<'mcx>>> {
+    let SysScanDescData { arm, slot, .. } = sysscan;
+    let SysScanArm::Index { iscan, .. } = arm else {
+        panic!("systable_getnext_ordered on a heap scan (C Assert(sysscan->irel))");
+    };
+
+    let found = indexam::index_getnext_slot(iscan, direction, slot.base_mut())?;
+    if found && iscan.xs_recheck {
+        return Err(lossy_sysscan());
+    }
+
+    handle_concurrent_abort()?;
+
+    if !found {
+        return Ok(None);
+    }
+    fetch_slot_tuple(mcx, slot).map(Some)
+}
+
+/// The caller closes the index relation itself (it opened it).
+pub fn systable_endscan_ordered<'mcx>(
+    mcx: Mcx<'mcx>,
+    sysscan: SysScanDescData<'mcx>,
+) -> PgResult<()> {
+    let SysScanDescData {
+        heap_rel: _,
+        mut slot,
+        snapshot,
+        arm,
+    } = sysscan;
+
+    exectuples::exec_clear_tuple(&mut slot, mcx);
+    drop(slot);
+
+    let SysScanArm::Index { irel, iscan } = arm else {
+        panic!("systable_endscan_ordered on a heap scan (C Assert(sysscan->irel))");
+    };
+    indexam::index_endscan(iscan)?;
+    drop(irel);
+
+    if let Some(snap) = snapshot {
+        snapmgr_seams::unregister_snapshot::call(snap);
+    }
+
+    if TransactionIdIsValid(xact::CheckXidAlive()) {
+        xact::SetBsysscan(false);
+    }
+
+    Ok(())
+}
+
+/// C's begin/finish/cancel out-param protocol: `state` is the live scan.
+pub fn systable_inplace_update_begin<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation: &Relation<'mcx>,
+    indexId: Oid,
+    indexOK: bool,
+    key: &[ScanKeyData],
+) -> PgResult<Option<(heaptuple::HeapTuple<'mcx>, SysScanDescData<'mcx>)>> {
+    if xact::IsInParallelMode() {
+        return Err(parallel_inplace_update());
+    }
+
+    // The C snapshot arg is Assert(NULL); begin advances the catalog snapshot.
+    let mut retries = 0;
+    loop {
+        if init_small::globals::InterruptPending() {
+            interrupts_unported();
+        }
+        retries += 1;
+        if retries > 10000 {
+            return Err(too_many_overwrite_tries());
+        }
+
+        let mut scan = systable_beginscan(mcx, relation, indexId, indexOK, None, key)?;
+        if systable_getnext(mcx, &mut scan)?.is_none() {
+            systable_endscan(mcx, scan)?;
+            return Ok(None);
+        }
+
+        heapam_unported("heap_inplace_lock");
+    }
+}
+
+pub fn systable_inplace_update_finish(
+    _state: SysScanDescData<'_>,
+    _tuple: &HeapTupleData<'_>,
+) -> PgResult<()> {
+    heapam_unported("heap_inplace_update_and_unlock")
+}
+
+pub fn systable_inplace_update_cancel(_state: SysScanDescData<'_>) -> PgResult<()> {
+    heapam_unported("heap_inplace_unlock")
+}
+
+pub fn BuildIndexValueDescription<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _indexRelation: &Relation<'mcx>,
+    _values: &[datum::Datum],
+    _isnull: &[bool],
+) -> PgResult<Option<mcx::PgString<'mcx>>> {
+    unported("BuildIndexValueDescription (needs rls check_enable_rls, aclchk pg_class_aclcheck, ruleutils pg_get_indexdef_columns; callers are unique/exclusion ereport DETAILs)")
+}
+
+pub fn index_compute_xid_horizon_for_tuples(
+    _irel: &Relation<'_>,
+    _hrel: &Relation<'_>,
+    _ibuf: types_core::primitive::Buffer,
+    _itemnos: &[types_core::primitive::OffsetNumber],
+) -> PgResult<TransactionId> {
+    unported("index_compute_xid_horizon_for_tuples (needs bufmgr BufferGetPage; callers hash/gist)")
+}
+
+// Convert heap attribute numbers to index column numbers (idxkey[i].sk_attno =
+// j+1 where key[i].sk_attno == indkey[j]).
+fn convert_scan_keys<'mcx>(
+    mcx: Mcx<'mcx>,
+    irel: &Relation<'mcx>,
+    key: &[ScanKeyData],
+) -> PgResult<PgVec<'mcx, ScanKeyData>> {
+    let indkey = &irel
+        .rd_index
+        .as_ref()
+        .expect("systable scan index has no rd_index (C would deref NULL)")
+        .indkey;
+
+    let mut idxkey = vec_with_capacity_in(mcx, key.len())?;
+    for k in key {
+        let Some(j) = indkey.iter().position(|&col| col == k.sk_attno) else {
+            return Err(column_not_in_index());
+        };
+        let mut ik = k.clone();
+        ik.sk_attno = (j + 1) as AttrNumber;
+        idxkey.push(ik);
+    }
+    Ok(idxkey)
+}
+
+// Caller-provided snapshot: caller owns it (nothing to unregister). None:
+// RegisterSnapshot(GetCatalogSnapshot(relid)), unregistered at endscan.
+fn setup_snapshot<'mcx>(
+    _mcx: Mcx<'mcx>,
+    relid: Oid,
+    snapshot: Option<Rc<SnapshotData<'mcx>>>,
+) -> PgResult<(Rc<SnapshotData<'mcx>>, Option<Rc<SnapshotData<'static>>>)> {
+    match snapshot {
+        Some(s) => Ok((s, None)),
+        None => {
+            let s = snapmgr_seams::register_snapshot::call(
+                snapmgr_seams::get_catalog_snapshot::call(relid)?,
+            )?;
+            Ok((s.clone(), Some(s)))
+        }
+    }
+}
+
+// ExecFetchSlotHeapTuple(slot, false, &shouldFree) + Assert(!shouldFree).
+#[inline]
+fn fetch_slot_tuple<'a, 'mcx>(
+    mcx: Mcx<'mcx>,
+    slot: &'a mut SlotData<'mcx>,
+) -> PgResult<&'a HeapTupleData<'mcx>> {
+    match exectuples::exec_fetch_slot_heap_tuple(slot, false, mcx, mcx)? {
+        FetchedHeapTuple::Slot(htup) => Ok(htup),
+        FetchedHeapTuple::Copied(_) => non_heap_sysscan_slot(),
+    }
+}
+
+fn slot_holds(slot: &SlotData<'_>, tup: &HeapTupleData<'_>) -> bool {
+    let stored = match slot {
+        SlotData::Heap(h) => h.tuple.as_ref(),
+        SlotData::BufferHeap(b) => b.base.tuple.as_ref(),
+        _ => None,
+    };
+    stored.is_some_and(|t| ItemPointerEquals(&t.t_self, &tup.t_self))
+}
+
+// Error out if CheckXidAlive aborted concurrently (logical decoding of an
+// in-progress transaction); see the xact.c comments on CheckXidAlive/bsysscan.
+#[inline]
+fn handle_concurrent_abort() -> PgResult<()> {
+    let xid = xact::CheckXidAlive();
+    if TransactionIdIsValid(xid) {
+        return concurrent_abort_check(xid);
+    }
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn concurrent_abort_check(xid: TransactionId) -> PgResult<()> {
+    if !procarray_seams::transaction_id_is_in_progress::call(xid)?
+        && !transam_seams::transaction_id_did_commit::call(xid)?
+    {
+        return Err(Box::new(
+            PgError::error("transaction aborted during system catalog scan")
+                .with_sqlstate(ERRCODE_TRANSACTION_ROLLBACK),
+        ));
+    }
+    Ok(())
+}
+
+// REINDEX is unimplemented repo-wide (C's pendingReindexedIndexes statically
+// empty); reroute via catalog/index.c when it lands. Mirrors indexam.
+#[inline]
+fn reindex_is_processing_index(_indexId: Oid) -> bool {
+    false
+}
+
+#[cold]
+#[inline(never)]
+fn reindex_in_progress(r: &RelationData<'_>) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "cannot access index \"{}\" while it is being reindexed",
+            r.name()
+        ))
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn column_not_in_index() -> Box<PgError> {
+    Box::new(PgError::error("column is not in index"))
+}
+
+#[cold]
+#[inline(never)]
+fn lossy_sysscan() -> Box<PgError> {
+    Box::new(PgError::error(
+        "system catalog scans with lossy index conditions are not implemented",
+    ))
+}
+
+#[cold]
+#[inline(never)]
+fn parallel_inplace_update() -> Box<PgError> {
+    Box::new(
+        PgError::error("cannot update tuples during a parallel operation")
+            .with_sqlstate(ERRCODE_INVALID_TRANSACTION_STATE),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn too_many_overwrite_tries() -> Box<PgError> {
+    Box::new(PgError::error(
+        "giving up after too many tries to overwrite row",
+    ))
+}
+
+#[cold]
+#[inline(never)]
+fn non_heap_sysscan_slot() -> ! {
+    panic!("systable slot is not heap/buffer-backed (C Assert(!shouldFree))")
+}
+
+#[cold]
+#[inline(never)]
+fn unported(what: &str) -> ! {
+    panic!("unported: {what}")
+}
+
+#[cold]
+#[inline(never)]
+fn heapam_unported(f: &str) -> ! {
+    panic!("unported: heapam {f} (backend-access-heap-heapam in flight)")
+}
+
+#[cold]
+#[inline(never)]
+fn interrupts_unported() -> ! {
+    panic!("unported callee reached from genam.c: ProcessInterrupts (tcop/postgres.c)")
+}

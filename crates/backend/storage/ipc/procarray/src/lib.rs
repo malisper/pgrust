@@ -36,8 +36,8 @@ fn XidGenLock() -> &'static lwlock::LWLock {
     lwlock::main_lock(XID_GEN_LOCK)
 }
 
-// ProcArrayStruct (procarray.c). The KnownAssignedXids fields are the
-// recovery/standby half, tracked as phase 2 (notes/procarray-scope.md).
+// ProcArrayStruct minus KnownAssignedXids (recovery half, phase 2 —
+// notes/procarray-scope.md).
 pub struct ProcArrayStruct {
     numProcs: SyncCell<i32>,          // [PAL]
     maxProcs: i32,
@@ -49,12 +49,9 @@ pub struct ProcArrayStruct {
 // SAFETY: SyncCell fields are serialized by ProcArrayLock as documented.
 unsafe impl Sync for ProcArrayStruct {}
 
-// TransamVariablesData's live shared instance. DIVERGENCE: C's owner is
-// varsup.c (ShmemInitStruct in VariableCacheData shape), unported; the
-// instance lives here so the GetSnapshotData fastpath stays seam-free.
-// Move to the varsup unit when it lands. Word-sized atomics mirror C's
-// assumption that aligned word reads/writes are atomic; lock domains as in
-// types_core::TransamVariablesData.
+// DIVERGENCE: C's owner is varsup.c (unported); the live instance sits here
+// so the GetSnapshotData fastpath stays seam-free — move when varsup lands.
+// Word atomics mirror C's aligned-word-access assumption.
 pub struct TransamVariablesShared {
     pub nextXid: AtomicU64,
     pub oldestXid: AtomicU32,
@@ -84,8 +81,8 @@ struct GlobalVisState {
 }
 
 thread_local! {
-    // TransactionXmin/RecentXmin are snapmgr.c globals in C; the hot writer
-    // is GetSnapshotData(Reuse), so the cells live here (snapmgr re-exports).
+    // DIVERGENCE: TransactionXmin/RecentXmin are snapmgr.c globals in C; the
+    // hot writer is GetSnapshotData(Reuse), so they live here (snapmgr re-exports).
     static TRANSACTION_XMIN: Cell<TransactionId> = const { Cell::new(FirstNormalTransactionId) };
     static RECENT_XMIN: Cell<TransactionId> = const { Cell::new(FirstNormalTransactionId) };
     static CACHED_XID_NOT_IN_PROGRESS: Cell<TransactionId> = const { Cell::new(InvalidTransactionId) };
@@ -93,7 +90,6 @@ thread_local! {
     static GLOBAL_VIS_CATALOG_RELS: Cell<GlobalVisState> = const { Cell::new(GlobalVisState { definitely_needed: FullTransactionId { value: 0 }, maybe_needed: FullTransactionId { value: 0 } }) };
     static GLOBAL_VIS_DATA_RELS: Cell<GlobalVisState> = const { Cell::new(GlobalVisState { definitely_needed: FullTransactionId { value: 0 }, maybe_needed: FullTransactionId { value: 0 } }) };
     static GLOBAL_VIS_TEMP_RELS: Cell<GlobalVisState> = const { Cell::new(GlobalVisState { definitely_needed: FullTransactionId { value: 0 }, maybe_needed: FullTransactionId { value: 0 } }) };
-    // TransactionIdIsInProgress's malloc'd-once xids workspace, capacity retained.
     static IN_PROGRESS_XIDS: RefCell<Vec<TransactionId>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -121,8 +117,7 @@ pub fn RecentXmin() -> TransactionId {
     RECENT_XMIN.get()
 }
 
-// snapmgr's SnapshotResetXmin writes MyProc->xmin and TransactionXmin as one
-// pair; the setter keeps that pairing in the cell's owner crate.
+// For snapmgr's SnapshotResetXmin (pairs with its MyProc->xmin write).
 pub fn set_transaction_xmin(xmin: TransactionId) {
     TRANSACTION_XMIN.set(xmin);
 }
@@ -180,8 +175,7 @@ fn latest_completed_xid() -> FullTransactionId {
 
 pub fn ProcArrayShmemInit() {
     let all_procs = ProcGlobal().allProcs.len();
-    // PROCARRAY_MAXPROCS = MaxBackends + max_prepared_xacts; allProcs also
-    // carries the auxiliary slots, which never join the array.
+    // PROCARRAY_MAXPROCS: auxiliary slots never join the array.
     let max_procs = all_procs - NUM_AUXILIARY_PROCS as usize;
 
     let pgprocnos: &'static [SyncCell<i32>] = (0..max_procs)
@@ -207,9 +201,8 @@ pub fn ProcArrayShmemInit() {
             ),
             oldestXid: AtomicU32::new(FirstNormalTransactionId),
             latestCompletedXid: AtomicU64::new(
-                // C: StartupXLOG seeds this from the checkpoint (nextXid - 1);
-                // BootstrapTransactionId+1..: seed with FirstNormal-1 shape is
-                // invalid, so use FirstNormal until the xlog unit owns startup.
+                // C: StartupXLOG seeds from the checkpoint; FirstNormal
+                // stands in until the xlog unit owns startup.
                 FullTransactionId::from_epoch_and_xid(0, FirstNormalTransactionId).value,
             ),
             xactCompletionCount: AtomicU64::new(1),
@@ -243,7 +236,6 @@ pub fn ProcArrayAdd(procno: ProcNumber) -> PgResult<()> {
         ));
     }
 
-    // Keep the array sorted by proc number for traversal locality.
     let mut index = 0usize;
     while index < num_procs as usize {
         let this_procno = arrayP.pgprocnos[index].get();
@@ -341,7 +333,6 @@ pub fn ProcArrayEndTransaction(procno: ProcNumber, latestXid: TransactionId) -> 
             ProcArrayGroupClearXid(procno, latestXid)
         }
     } else {
-        // No XID: no lock needed, we can't affect anyone's snapshot.
         debug_assert!(!TransactionIdIsValid(proc.xid.read()));
         debug_assert_eq!(proc.subxidStatus.get().count, 0);
         debug_assert!(!proc.subxidStatus.get().overflowed);
@@ -420,7 +411,6 @@ fn ProcArrayGroupClearXid(procno: ProcNumber, latestXid: TransactionId) -> PgRes
     }
 
     if nextidx != INVALID_PROC_NUMBER as u32 {
-        // A leader exists; sleep until it clears our XID.
         let mut extra_waits = 0;
         loop {
             // PGSemaphoreLock acts as a read barrier.
@@ -494,8 +484,7 @@ fn GetSnapshotDataReuse(snapshot: &mut SnapshotData<'_>) -> bool {
         return false;
     }
 
-    // Same xactCompletionCount => the set of running xids cannot have
-    // changed, so re-entering the snapshot's xmin into PGPROC is safe.
+    // Same count => the running-xid set cannot have changed (transam/README).
     let my_proc = GetPGProcByNumber(MyProc().expect("GetSnapshotData requires MyProc"));
     if !TransactionIdIsValid(my_proc.xmin.read()) {
         my_proc.xmin.value.store(snapshot.xmin, Relaxed);
@@ -523,8 +512,7 @@ pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgR
     let myprocno = MyProc().expect("GetSnapshotData requires MyProc");
     let my_proc = GetPGProcByNumber(myprocno);
 
-    // First call for this snapshot struct: size the arrays once and reuse
-    // them on every later acquisition (C mallocs them once per static).
+    // First call for this struct: size the arrays once, reuse forever (C shape).
     if snapshot.xip.capacity() == 0 {
         reserve_exact(&mut snapshot.xip, GetMaxSnapshotXidCount(), mcx)?;
         debug_assert_eq!(snapshot.subxip.capacity(), 0);
@@ -547,13 +535,11 @@ pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgR
     let oldestxid = TransamVariables().oldestXid.load(Relaxed);
     let cur_xact_completion_count = TransamVariables().xactCompletionCount.load(Relaxed);
 
-    // xmax is always latestCompletedXid + 1.
     let mut xmax = latest_completed.xid();
     TransactionIdAdvance(&mut xmax);
     debug_assert!(TransactionIdIsNormal(xmax));
 
     let mut xmin = xmax;
-    // Take our own xid into account outside the loop.
     if TransactionIdIsNormal(myxid) && NormalTransactionIdPrecedes(myxid, xmin) {
         xmin = myxid;
     }
@@ -577,12 +563,10 @@ pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgR
             if xid == InvalidTransactionId {
                 continue;
             }
-            // Our own XIDs are never included; xmin took ours above.
             if pgxactoff == mypgxactoff {
                 continue;
             }
             debug_assert!(TransactionIdIsNormal(xid));
-            // XIDs >= xmax are treated as running anyway.
             if !NormalTransactionIdPrecedes(xid, xmax) {
                 continue;
             }
@@ -635,7 +619,6 @@ pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgR
         );
     }
 
-    // Fetch under the lock; LWLockRelease is the barrier.
     let replication_slot_xmin = arrayP.replication_slot_xmin.get();
     let replication_slot_catalog_xmin = arrayP.replication_slot_catalog_xmin.get();
 
@@ -646,7 +629,6 @@ pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgR
 
     LWLockRelease(ProcArrayLock())?;
 
-    // Maintain state for GlobalVis*.
     {
         let oldestfxid = FullXidRelativeTo(latest_completed, oldestxid);
         let def_vis_xid_data = TransactionIdOlder(xmin, replication_slot_xmin);
