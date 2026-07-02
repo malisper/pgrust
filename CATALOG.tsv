@@ -1164,7 +1164,7 @@ probe-utils-resowner-resowner	*/resowner.c	combined-into:backend-utils-resowner-
 probe-utils-time-combocid	*/combocid.c	combined-into:backend-utils-time-small			fabled:duplicate-of
 probe-wait_error	*/wait_error.c	todo			
 common-ip	*/ip.c	todo			fabled:common-ip; m1-spine
-port-crc32c	src/port/pg_crc32c_sb8.c	in-progress	crc32c		fabled:port-crc32c; m1-spine(boot)
+port-crc32c	src/port/pg_crc32c_armv8.c,src/port/pg_crc32c_sb8.c,src/port/pg_crc32c_armv8_choose.c,src/backend/utils/hash/pg_crc.c	benched	crc32c	0.77-0.83x-instr/0.71-1.05x-ns(local)	fabled:port-crc32c; m1-spine(boot); PASS dual gate: hw path 0.77-0.83x instr all lengths/offsets, ns <=1.0x except 32/64/256-aligned inside +-8% noise band; sb8 0.92x/0.90-1.02x; resolve-once dispatch (compile-time direct on apple/neoverse builds); 1232 C-generated vectors bit-exact, Miri clean; 6/6 tests, density 1.5%; Graviton confirm pending next fleet batch; docs/optimizations/crc32c-parity.md
 common-pglz	*/pg_lzcompress.c	todo			fabled:common-pglz; m1-dep(stub-ok)
 common-keywords	*/keywords.c,*/kwlookup.c	todo			fabled:common-keywords; m1-spine
 common-string	*/string.c	todo			fabled:common-string; m1-dep(stub-ok)
