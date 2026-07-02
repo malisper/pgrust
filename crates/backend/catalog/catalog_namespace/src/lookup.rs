@@ -1,8 +1,9 @@
+use mcx::MemoryContext;
 use rel_vocab::RangeVar;
 use types_core::{InvalidOid, Oid, RELPERSISTENCE_TEMP};
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TABLE_DEFINITION,
-    ERRCODE_UNDEFINED_SCHEMA, ERRCODE_UNDEFINED_TABLE,
+    ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_SCHEMA, ERRCODE_UNDEFINED_TABLE,
 };
 use types_rel::{NoLock, LOCKMODE};
 
@@ -114,6 +115,86 @@ pub fn RelnameGetRelid(relname: &str) -> PgResult<Oid> {
         let relid = lsyscache::get_relname_relid(relname, base_path_nth(i))?;
         if OidIsValid(relid) {
             return Ok(relid);
+        }
+    }
+    Ok(InvalidOid)
+}
+
+#[cold]
+#[inline(never)]
+fn improper_qualified_name(names: &[&str]) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "improper qualified name (too many dotted names): {}",
+            names.join(".")
+        ))
+        .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+    )
+}
+
+// C takes a List of String nodes; callers here pass the extracted parts.
+pub fn DeconstructQualifiedName<'a>(names: &[&'a str]) -> PgResult<(Option<&'a str>, &'a str)> {
+    match names {
+        [objname] => Ok((None, objname)),
+        [schemaname, objname] => Ok((Some(schemaname), objname)),
+        [catalogname, schemaname, objname] => {
+            let dbname =
+                dbcommands_seams::get_database_name::call(init_small::globals::MyDatabaseId())?;
+            if dbname.as_deref() != Some(*catalogname) {
+                return Err(Box::new(
+                    PgError::error(format!(
+                        "cross-database references are not implemented: {}",
+                        names.join(".")
+                    ))
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                ));
+            }
+            Ok((Some(schemaname), objname))
+        }
+        _ => Err(improper_qualified_name(names)),
+    }
+}
+
+pub fn OpernameGetOprid(names: &[&str], oprleft: Oid, oprright: Oid) -> PgResult<Oid> {
+    let (schemaname, opername) = DeconstructQualifiedName(names)?;
+
+    if let Some(schemaname) = schemaname {
+        let namespaceId = LookupExplicitNamespace(schemaname, true)?;
+        if OidIsValid(namespaceId) {
+            let result = syscache_seams::lookup_pg_operator_oid_exact::call(
+                opername, oprleft, oprright, namespaceId,
+            )?;
+            if OidIsValid(result) {
+                return Ok(result);
+            }
+        }
+        return Ok(InvalidOid);
+    }
+
+    // Per-call scratch is fine here: callers sit behind parse_oper's OprCache
+    // memo (C allocates the CatCList per call too).
+    let scratch = MemoryContext::new("OpernameGetOprid");
+    let candidates = syscache_seams::lookup_pg_operator_candidates::call(
+        scratch.mcx(),
+        opername,
+        oprleft,
+        oprright,
+    )?;
+    if candidates.is_empty() {
+        return Ok(InvalidOid);
+    }
+
+    recomputeNamespacePath()?;
+    let mtn = my_temp_namespace();
+    for i in 0..base_path_len() {
+        let namespaceId = base_path_nth(i);
+        if namespaceId == mtn {
+            continue;
+        }
+        for &(oid, oprnamespace) in candidates.iter() {
+            if oprnamespace == namespaceId {
+                return Ok(oid);
+            }
         }
     }
     Ok(InvalidOid)

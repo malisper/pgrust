@@ -514,6 +514,35 @@ dependencies = [
 [[package]]
 name = "bgwriter"
 version = "0.0.0"
+dependencies = [
+ "aio_seams",
+ "auxprocess",
+ "bufmgr",
+ "checkpointer",
+ "condition_variable_seams",
+ "dynahash",
+ "elog",
+ "fd",
+ "guc_tables",
+ "init_small",
+ "interrupt",
+ "ipc",
+ "latch",
+ "libpq_pqsignal",
+ "lwlock",
+ "miscinit",
+ "pgstat_seams",
+ "resowner",
+ "smgr",
+ "standby_seams",
+ "timestamp_seams",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_startup",
+ "types_storage",
+ "waitevent_seams",
+]
 
 [[package]]
 name = "bufmgr"
@@ -526,6 +555,7 @@ dependencies = [
  "fd",
  "guc_tables",
  "init_small",
+ "latch",
  "lwlock",
  "mcx",
  "procsignal_seams",
@@ -702,6 +732,47 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 [[package]]
 name = "checkpointer"
 version = "0.0.0"
+dependencies = [
+ "aio_seams",
+ "auxprocess",
+ "bufmgr",
+ "checkpointer_seams",
+ "condition_variable_seams",
+ "datum",
+ "dynahash",
+ "elog",
+ "fd",
+ "guc_file",
+ "guc_tables",
+ "init_small",
+ "interrupt",
+ "ipc",
+ "latch",
+ "libpq_pqsignal",
+ "lmgr_proc",
+ "lwlock",
+ "mcx",
+ "mcxt_seams",
+ "miscinit",
+ "pgstat_seams",
+ "pmsignal",
+ "postgres_seams",
+ "procsignal_seams",
+ "resowner",
+ "s_lock_seams",
+ "smgr",
+ "sync",
+ "sync_seams",
+ "syncrep_seams",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "types_startup",
+ "types_storage",
+ "waitevent_seams",
+ "xlogrecovery_seams",
+]
 
 [[package]]
 name = "checkpointer_seams"
@@ -2343,9 +2414,11 @@ dependencies = [
  "guc_tables",
  "mbutils",
  "mcx",
+ "miscinit_seams",
  "parse_oper",
  "parser_small1",
  "stack_depth",
+ "syscache_seams",
  "types_core",
  "types_error",
  "types_nodes",
@@ -2398,6 +2471,7 @@ dependencies = [
  "datum",
  "guc_tables",
  "mcx",
+ "miscinit_seams",
  "parse_clause",
  "parse_collate",
  "parse_target",
@@ -3297,6 +3371,7 @@ dependencies = [
 name = "relcache_seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam_core",
  "types_core",
  "types_error",

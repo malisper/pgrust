@@ -43,7 +43,75 @@ fn target_list_resnos_names_and_origins() {
     assert_eq!(pstate.p_next_resno, 3);
 
     markTargetListOrigins(&pstate, &tlist).unwrap();
-    resolveTargetListUnknowns(&pstate, &tlist).unwrap();
+    resolveTargetListUnknowns(mcx, &pstate, &tlist).unwrap();
+}
+
+fn install_fixture() {
+    use std::sync::Once;
+    use types_core::catalog::TEXTOID;
+    use types_core::InvalidOid;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        syscache_seams::pg_type_base_shape::set(|typid| {
+            Ok(Some(syscache_seams::PgTypeBaseShape {
+                typtype: if typid == types_core::catalog::UNKNOWNOID { b'p' as i8 } else { b'b' as i8 },
+                typbasetype: InvalidOid,
+                typtypmod: -1,
+                typelem: InvalidOid,
+                typsubscript: InvalidOid,
+            }))
+        });
+        syscache_seams::pg_type_io_shape::set(|typid| {
+            Ok((typid == TEXTOID).then_some(syscache_seams::PgTypeIoShape {
+                oid: TEXTOID,
+                typinput: 46,
+                typoutput: 47,
+                typreceive: 2414,
+                typsend: 2415,
+                typmodin: InvalidOid,
+                typmodout: InvalidOid,
+                typelem: InvalidOid,
+                typlen: -1,
+                typbyval: false,
+                typalign: b'i' as i8,
+                typdelim: b',' as i8,
+                typisdefined: true,
+            }))
+        });
+        syscache_seams::lookup_pg_type_shape::set(|typid| {
+            Ok(Some(types_tuple::PgTypeShape {
+                typlen: if typid == TEXTOID { -1 } else { 4 },
+                typbyval: typid != TEXTOID,
+                typalign: b'i' as i8,
+                typstorage: b'p' as i8,
+                typcollation: if typid == TEXTOID { 100 } else { InvalidOid },
+            }))
+        });
+    });
+}
+
+#[test]
+fn unknown_target_resolves_to_text() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    let sconst = Node::mk_a_const(mcx, Some(ValUnion::String(PgStr { sval: "x" })), 7).unwrap();
+    let raw = NodeList::make1(mcx, res_target(mcx, None, sconst)).unwrap();
+
+    let tlist =
+        transformTargetList(mcx, &mut pstate, &raw, ParseExprKind::EXPR_KIND_SELECT_TARGET)
+            .unwrap();
+    resolveTargetListUnknowns(mcx, &pstate, &tlist).unwrap();
+
+    let te = tlist.nth(0).as_target_entry().unwrap();
+    let c = te.expr.as_const().unwrap();
+    assert_eq!(c.consttype, types_core::catalog::TEXTOID);
+    assert_eq!((c.constlen, c.constbyval, c.constisnull), (-1, false, false));
+    assert_eq!(c.constcollid, 100);
+    // SAFETY: the datum points at a flat 4B-header text varlena copied into mcx.
+    let v = unsafe { datum::varlena::VarlenaRef::from_ptr(c.constvalue.as_usize() as *const u8) };
+    assert_eq!(v.data(), b"x");
 }
 
 #[test]

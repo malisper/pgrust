@@ -455,6 +455,27 @@ pub fn fetch_search_path<'mcx>(
     Ok(result)
 }
 
+/// C `fetch_search_path_array`: fills `sarray` (temp namespace excluded) and
+/// returns the would-be count, which may exceed `sarray.len()`.
+pub fn fetch_search_path_array(sarray: &mut [Oid]) -> PgResult<usize> {
+    recomputeNamespacePath()?;
+
+    let mtn = MY_TEMP_NAMESPACE.with(Cell::get);
+    Ok(with_path_state(|ps| {
+        let mut count = 0;
+        for &namespaceId in ps.base_search_path.iter() {
+            if namespaceId == mtn {
+                continue;
+            }
+            if count < sarray.len() {
+                sarray[count] = namespaceId;
+            }
+            count += 1;
+        }
+        count
+    }))
+}
+
 pub struct SearchPathMatcher<'mcx> {
     pub schemas: PgVec<'mcx, Oid>,
     pub addCatalog: bool,

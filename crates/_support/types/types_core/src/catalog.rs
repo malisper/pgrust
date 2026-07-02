@@ -47,6 +47,21 @@ pub const FLOAT4OID: Oid = 700;
 pub const FLOAT8OID: Oid = 701;
 pub const BITOID: Oid = 1560;
 pub const NUMERICOID: Oid = 1700;
+pub const INTERVALOID: Oid = 1186;
+pub const CSTRINGOID: Oid = 2275;
+pub const RECORDARRAYOID: Oid = 2287;
+pub const ANYOID: Oid = 2276;
+pub const ANYARRAYOID: Oid = 2277;
+pub const ANYELEMENTOID: Oid = 2283;
+pub const ANYNONARRAYOID: Oid = 2776;
+pub const ANYENUMOID: Oid = 3500;
+pub const ANYRANGEOID: Oid = 3831;
+pub const ANYMULTIRANGEOID: Oid = 4537;
+pub const ANYCOMPATIBLEOID: Oid = 5077;
+pub const ANYCOMPATIBLEARRAYOID: Oid = 5078;
+pub const ANYCOMPATIBLENONARRAYOID: Oid = 5079;
+pub const ANYCOMPATIBLERANGEOID: Oid = 5080;
+pub const ANYCOMPATIBLEMULTIRANGEOID: Oid = 4538;
 
 pub const BTREE_AM_OID: Oid = 403;
 

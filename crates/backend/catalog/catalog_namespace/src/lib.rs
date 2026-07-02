@@ -3,8 +3,9 @@
 // temp-namespace predicates. Deferred loud (named panics): temp-namespace
 // creation (AccessTempTableNamespace/InitTempTableNamespace/RemoveTempRelations
 // and the AtEOXact lifecycle it arms), the creation/DDL half
-// (RangeVarGetCreationNamespace family, CheckSetNamespace), and every
-// non-relation object lookup (Funcname/Opername/Type/visibility family).
+// (RangeVarGetCreationNamespace family, CheckSetNamespace), and the
+// non-relation object lookups except OpernameGetOprid (Funcname/
+// OpernameGetCandidates/Type/visibility family).
 // C divergences: objectaccess is unported, so InvokeNamespaceSearchHook passes
 // and object_access_hook is never set (forceRecompute stays false); the
 // active*/base* variable pairs always alias after PG16, so one set is kept.
@@ -26,12 +27,13 @@ mod path;
 mod tests;
 
 pub use lookup::{
-    get_namespace_oid, LookupExplicitNamespace, LookupNamespaceNoError, RangeVarGetRelid,
-    RangeVarGetRelidExtended, RelnameGetRelid, RVR_MISSING_OK, RVR_NOWAIT, RVR_SKIP_LOCKED,
+    get_namespace_oid, DeconstructQualifiedName, LookupExplicitNamespace, LookupNamespaceNoError,
+    OpernameGetOprid, RangeVarGetRelid, RangeVarGetRelidExtended, RelnameGetRelid, RVR_MISSING_OK,
+    RVR_NOWAIT, RVR_SKIP_LOCKED,
 };
 pub use path::{
-    assign_search_path, check_search_path, fetch_search_path, CopySearchPathMatcher,
-    GetSearchPathMatcher, InitializeSearchPath, SearchPathMatcher,
+    assign_search_path, check_search_path, fetch_search_path, fetch_search_path_array,
+    CopySearchPathMatcher, GetSearchPathMatcher, InitializeSearchPath, SearchPathMatcher,
     SearchPathMatchesCurrentEnvironment,
 };
 

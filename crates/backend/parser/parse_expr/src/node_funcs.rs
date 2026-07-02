@@ -17,6 +17,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_Param => node.as_param().unwrap().paramtype,
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         other => deferred("exprType", other),
     }
 }
@@ -26,6 +27,7 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_Const => node.as_const().unwrap().consttypmod,
         NodeTag::T_Var => node.as_var().unwrap().vartypmod,
         NodeTag::T_Param => node.as_param().unwrap().paramtypmod,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttypmod,
         NodeTag::T_OpExpr | NodeTag::T_FuncExpr => -1,
         other => deferred("exprTypmod", other),
     }
@@ -38,6 +40,7 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_Param => node.as_param().unwrap().paramcollid,
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
         other => deferred("exprCollation", other),
     }
 }
@@ -49,6 +52,7 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         NodeTag::T_Param => node.as_param().unwrap().location,
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().location,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().location,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().location,
         NodeTag::T_A_Const => node.as_a_const().unwrap().location,
         NodeTag::T_A_Expr => node.as_a_expr().unwrap().location,
         NodeTag::T_ColumnRef => node.as_column_ref().unwrap().location,

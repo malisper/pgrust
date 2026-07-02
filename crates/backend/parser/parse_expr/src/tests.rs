@@ -61,9 +61,54 @@ fn paramref_without_hook_is_42p02() {
     assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_PARAMETER);
 }
 
+fn install_oper_fixture() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        miscinit_seams::get_user_id::set(|| 10);
+        syscache_seams::lookup_pg_operator_candidates::set(|mcx, name, l, r| {
+            let mut v = mcx::vec_with_capacity_in(mcx, 1)?;
+            if name == "+" && l == INT4OID && r == INT4OID {
+                v.push((551, 11));
+            }
+            Ok(v)
+        });
+        syscache_seams::lookup_pg_operator_shape::set(|opno| {
+            Ok((opno == 551).then_some(syscache_seams::PgOperatorShape {
+                oprleft: INT4OID,
+                oprright: INT4OID,
+                oprresult: INT4OID,
+                oprcom: 551,
+                oprnegate: InvalidOid,
+                oprcode: 177,
+                oprrest: InvalidOid,
+                oprjoin: InvalidOid,
+                oprcanmerge: false,
+                oprcanhash: false,
+            }))
+        });
+        syscache_seams::pg_operator_name_candidates_exist::set(|name, _| Ok(name == "+"));
+        syscache_seams::lookup_pg_proc_shape::set(|funcid| {
+            Ok((funcid == 177).then_some(syscache_seams::PgProcShape {
+                pronamespace: 11,
+                prorettype: INT4OID,
+                provariadic: InvalidOid,
+                prosupport: InvalidOid,
+                pronargs: 2,
+                prokind: b'f' as i8,
+                provolatile: b'i' as i8,
+                proparallel: b's' as i8,
+                proretset: false,
+                proisstrict: true,
+                proleakproof: false,
+            }))
+        });
+    });
+}
+
 #[test]
-#[should_panic(expected = "make_op")]
-fn a_expr_op_panics_at_oper_lookup() {
+fn a_expr_op_transforms_to_op_expr() {
+    install_oper_fixture();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut pstate = make_parsestate(mcx, None);
@@ -77,7 +122,17 @@ fn a_expr_op_panics_at_oper_lookup() {
         9,
     )
     .unwrap();
-    let _ = transformExpr(mcx, &mut pstate, aexpr, ParseExprKind::EXPR_KIND_SELECT_TARGET);
+
+    let out = transformExpr(mcx, &mut pstate, aexpr, ParseExprKind::EXPR_KIND_SELECT_TARGET)
+        .unwrap();
+
+    let op = out.as_op_expr().unwrap();
+    assert_eq!((op.opno, op.opfuncid, op.opresulttype), (551, 177, INT4OID));
+    assert!(!op.opretset);
+    assert_eq!(op.args.len(), 2);
+    assert_eq!(op.args.nth(0).as_const().unwrap().consttype, INT4OID);
+    assert_eq!(op.location, 9);
+    assert_eq!(expr_type(out), INT4OID);
 }
 
 #[test]

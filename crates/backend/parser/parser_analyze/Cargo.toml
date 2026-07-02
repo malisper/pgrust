@@ -23,6 +23,7 @@ types_nodes = { path = "../../../_support/types/nodes" }
 types_portal = { path = "../../../_support/types/portal" }
 
 [dev-dependencies]
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 datum = { path = "../../../_support/types/datum" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
