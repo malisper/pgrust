@@ -26,3 +26,8 @@ seam_core::seam!(
         callback: &mut dyn FnMut(&str) -> PgResult<bool>,
     ) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    // BasicOpenFile(fileName, fileFlags) (fd.c): fd, or -1 with errno set.
+    pub fn basic_open_file(file_name: &str, file_flags: i32) -> i32
+);
