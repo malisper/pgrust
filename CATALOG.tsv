@@ -577,7 +577,7 @@ backend-utils-adt-network-selfuncs	*/network_selfuncs.c	todo			fabled:backend-ut
 backend-utils-adt-network-spgist	*/network_spgist.c	todo			fabled:backend-utils-adt-network-spgist; m1-dep(stub-ok)
 backend-utils-adt-next	*/arrayutils.c,*/cryptohashfuncs.c,*/geo_selfuncs.c,*/pg_locale_builtin.c,*/skipsupport.c,*/waitfuncs.c	todo			
 backend-utils-adt-numeric	src/backend/utils/adt/numeric.c,src/include/utils/numeric.h	todo			m1-dep(stub-ok)
-backend-utils-adt-numutils	*/numutils.c	todo			fabled:backend-utils-adt-numutils; m1-spine
+backend-utils-adt-numutils	*/numutils.c	benched	numutils	0.59-1.09x-instr/0.28-1.09x-ns	m1-spine; C fast/slow split kept (fabled generic-loop shape rejected); SWAR parse via length-carrying &str (C cannot: NUL-chained) 0.59x/0.35x int8-parse; no trailing-NUL stores; 437k+2.5M differential fuzz byte-identical; ltoa 1.02-1.09x tracked w/ local fix awaiting fleet reconfirm; docs/benchmarks/numutils.md
 backend-utils-adt-pg-locale-icu	src/backend/utils/adt/pg_locale_icu.c	todo			fabled:backend-utils-adt-pg-locale-icu; m1-spine(boot)
 backend-utils-adt-pg-locale-libc	src/backend/utils/adt/pg_locale_libc.c	combined-into:backend-utils-adt-pg-locale			m1-spine(boot)
 backend-utils-adt-pg-locale	src/backend/utils/adt/pg_locale.c	todo			fabled:backend-utils-adt-pg-locale; m1-spine(boot)

@@ -30,6 +30,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "be_secure_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -340,6 +348,20 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_core",
+]
+
+[[package]]
+name = "pqcomm"
+version = "0.0.0"
+dependencies = [
+ "be_secure_seams",
+ "elog",
+ "init_small",
+ "libc",
+ "mcx",
+ "pqcomm_seams",
+ "stringinfo",
+ "types_error",
 ]
 
 [[package]]
