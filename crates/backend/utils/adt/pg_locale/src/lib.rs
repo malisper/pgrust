@@ -1,9 +1,10 @@
 //! pg_locale.c, C/builtin provider arm: the pg_locale_t framework
 //! (c_locale, default_locale, collation cache + MRU), init_database_collation,
 //! pg_perm_setlocale/check_locale + the lc_* GUC hooks, collation versions,
-//! and the builtin-provider validators. Deferred loud: libc locale_t
-//! collations (make_libc_collator's newlocale arm), ICU, PGLC_localeconv /
-//! cache_locale_time, and the case-mapping/strxfrm dispatch families.
+//! and the builtin-provider validators. PGLC_localeconv serves the C-locale
+//! lconv (non-C lc_monetary/lc_numeric = loud, needs pg_localeconv_r).
+//! Deferred loud: libc locale_t collations (make_libc_collator's newlocale
+//! arm), ICU, cache_locale_time, and the case-mapping/strxfrm families.
 
 #![allow(clippy::result_large_err)]
 
@@ -14,10 +15,12 @@ use types_core::catalog::{C_COLLATION_OID, DEFAULT_COLLATION_OID};
 use types_core::{Oid, OidIsValid};
 use types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE, ErrorLocation, WARNING};
 
+mod lconv;
 mod setup;
 #[cfg(test)]
 mod tests;
 
+pub use lconv::{pglc_localeconv, PgLconv, CHAR_MAX};
 pub use setup::{
     assign_locale_messages, assign_locale_monetary, assign_locale_numeric, assign_locale_time,
     check_locale, check_locale_messages, check_locale_monetary, check_locale_numeric,
