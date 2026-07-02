@@ -145,23 +145,33 @@ dependencies = [
 name = "auth"
 version = "0.0.0"
 dependencies = [
+ "acl_seams",
  "auth_seams",
  "backend_startup",
  "elog",
+ "fd",
+ "guc_tables",
  "hba",
+ "hba_seams",
  "init_small",
  "ip",
  "ipc_seams",
+ "latch",
  "libc",
  "mcx",
  "miscinit",
+ "miscinit_seams",
+ "pgstat_seams",
  "postgres_seams",
  "pqcomm",
+ "pqcomm_seams",
  "pqformat",
  "stringinfo",
  "types_core",
  "types_error",
  "types_startup",
+ "waitevent_seams",
+ "waiteventset",
 ]
 
 [[package]]
@@ -906,6 +916,15 @@ dependencies = [
 [[package]]
 name = "gram_core"
 version = "0.1.0"
+dependencies = [
+ "mcx",
+ "parser_seams",
+ "parser_small1",
+ "scan_fgram",
+ "types_core",
+ "types_error",
+ "types_nodes",
+]
 
 [[package]]
 name = "guc"

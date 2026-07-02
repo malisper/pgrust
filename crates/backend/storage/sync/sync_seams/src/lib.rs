@@ -8,3 +8,28 @@ seam_core::seam!(
         retry_on_error: bool,
     ) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    // InitSync (sync.c); reads IsUnderPostmaster/AmCheckpointerProcess itself.
+    pub fn init_sync() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // SyncPreCheckpoint() (sync.c).
+    pub fn sync_pre_checkpoint()
+);
+
+seam_core::seam!(
+    // SyncPostCheckpoint() (sync.c).
+    pub fn sync_post_checkpoint() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // ProcessSyncRequests() (sync.c).
+    pub fn process_sync_requests() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // AbsorbSyncRequests() (checkpointer.c home in C; fronted here with sync).
+    pub fn absorb_sync_requests() -> PgResult<()>
+);

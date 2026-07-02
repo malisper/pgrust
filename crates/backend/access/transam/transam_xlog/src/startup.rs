@@ -170,7 +170,7 @@ pub fn StartupXLOG() -> PgResult<()> {
     }
     ctl.info_lck.with(|| ctl.ckptFullXid.store(check_point.nextXid.value, Relaxed));
 
-    relcache::initfile::RelationCacheInitFileRemove();
+    relcache_seams::relation_cache_init_file_remove::call();
 
     require_empty_or_seam("pg_replslot", false, "StartupReplicationSlots (replication/slot.c)");
     if origin_seams::startup_replication_origin::is_installed() {
@@ -684,7 +684,7 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
         xloginsert_seams::xlog_insert::call(
             RM_XLOG_ID,
             if shutdown { XLOG_CHECKPOINT_SHUTDOWN } else { XLOG_CHECKPOINT_ONLINE },
-            &[check_point.as_bytes()],
+            &[&check_point.to_bytes()],
         )?;
     XLogFlush(recptr)?;
 

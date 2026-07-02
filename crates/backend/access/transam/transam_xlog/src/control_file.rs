@@ -1,202 +1,22 @@
 use std::cell::UnsafeCell;
-use std::mem::{offset_of, size_of};
 
-use crc32c::{fin_crc32c, pg_comp_crc32c, CRC32C_INIT};
 use elog::ereport;
-use types_core::{
-    pg_time_t, FullTransactionId, MultiXactId, MultiXactOffset, Oid, TimeLineID, TransactionId,
-    XLogRecPtr,
-};
+use types_core::XLogRecPtr;
 use types_error::{
-    ErrorLocation, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_INVALID_PARAMETER_VALUE,
-    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, FATAL, PANIC,
+    ErrorLocation, PgResult, ERRCODE_INVALID_PARAMETER_VALUE,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, FATAL,
 };
 
-use crate::{DBState, IsValidWalSegSize, XLogMBVarToSegs, WAL_LEVEL_REPLICA};
+use crate::{IsValidWalSegSize, XLogMBVarToSegs, WAL_LEVEL_REPLICA};
 
-pub const PG_CONTROL_VERSION: u32 = 1800;
-pub const CATALOG_VERSION_NO: u32 = 202506291;
-pub const PG_CONTROL_FILE_SIZE: usize = 8192;
-pub const PG_CONTROL_MAX_SAFE_SIZE: usize = 512;
-pub const MOCK_AUTH_NONCE_LEN: usize = 32;
-pub const XLOG_CONTROL_FILE: &str = "global/pg_control";
+pub use controldata_utils::{
+    CATALOG_VERSION_NO, MOCK_AUTH_NONCE_LEN, PG_CONTROL_FILE_SIZE, PG_CONTROL_VERSION,
+    XLOG_CONTROL_FILE,
+};
 pub const FLOATFORMAT_VALUE: f64 = 1234567.0;
 pub const FirstNormalUnloggedLSN: XLogRecPtr = 1000;
 
-// pg_control.h layout, byte-exact (CRC + on-disk image depend on it; layout
-// asserts in tests.rs mirror a C compile of the header). C's implicit padding
-// is explicit _pad fields: byte views stay fully initialized (Miri-clean) and
-// images are deterministic.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CheckPoint {
-    pub redo: XLogRecPtr,
-    pub ThisTimeLineID: TimeLineID,
-    pub PrevTimeLineID: TimeLineID,
-    pub fullPageWrites: bool,
-    pub _pad0: [u8; 3],
-    pub wal_level: i32,
-    pub nextXid: FullTransactionId,
-    pub nextOid: Oid,
-    pub nextMulti: MultiXactId,
-    pub nextMultiOffset: MultiXactOffset,
-    pub oldestXid: TransactionId,
-    pub oldestXidDB: Oid,
-    pub oldestMulti: MultiXactId,
-    pub oldestMultiDB: Oid,
-    pub _pad1: [u8; 4],
-    pub time: pg_time_t,
-    pub oldestCommitTsXid: TransactionId,
-    pub newestCommitTsXid: TransactionId,
-    pub oldestActiveXid: TransactionId,
-    pub _pad2: [u8; 4],
-}
-
-impl CheckPoint {
-    pub const ZEROED: CheckPoint = CheckPoint {
-        redo: 0,
-        ThisTimeLineID: 0,
-        PrevTimeLineID: 0,
-        fullPageWrites: false,
-        _pad0: [0; 3],
-        wal_level: 0,
-        nextXid: FullTransactionId { value: 0 },
-        nextOid: 0,
-        nextMulti: 0,
-        nextMultiOffset: 0,
-        oldestXid: 0,
-        oldestXidDB: 0,
-        oldestMulti: 0,
-        oldestMultiDB: 0,
-        _pad1: [0; 4],
-        time: 0,
-        oldestCommitTsXid: 0,
-        newestCommitTsXid: 0,
-        oldestActiveXid: 0,
-        _pad2: [0; 4],
-    };
-
-    pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: repr(C) POD view; padding bytes read as whatever the zeroed
-        // initialization left (all images originate from ZEROED copies).
-        unsafe {
-            std::slice::from_raw_parts(self as *const CheckPoint as *const u8, size_of::<CheckPoint>())
-        }
-    }
-
-    pub fn from_bytes(data: &[u8]) -> CheckPoint {
-        assert!(data.len() >= size_of::<CheckPoint>());
-        let mut ckpt = CheckPoint::ZEROED;
-        // SAFETY: repr(C) POD, any bit pattern valid (bool fields come from
-        // images this struct wrote).
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                data.as_ptr(),
-                &mut ckpt as *mut CheckPoint as *mut u8,
-                size_of::<CheckPoint>(),
-            );
-        }
-        ckpt
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct ControlFileData {
-    pub system_identifier: u64,
-    pub pg_control_version: u32,
-    pub catalog_version_no: u32,
-    pub state: DBState,
-    pub _pad0: [u8; 4],
-    pub time: pg_time_t,
-    pub checkPoint: XLogRecPtr,
-    pub checkPointCopy: CheckPoint,
-    pub unloggedLSN: XLogRecPtr,
-    pub minRecoveryPoint: XLogRecPtr,
-    pub minRecoveryPointTLI: TimeLineID,
-    pub _pad1: [u8; 4],
-    pub backupStartPoint: XLogRecPtr,
-    pub backupEndPoint: XLogRecPtr,
-    pub backupEndRequired: bool,
-    pub _pad2: [u8; 3],
-    pub wal_level: i32,
-    pub wal_log_hints: bool,
-    pub _pad3: [u8; 3],
-    pub MaxConnections: i32,
-    pub max_worker_processes: i32,
-    pub max_wal_senders: i32,
-    pub max_prepared_xacts: i32,
-    pub max_locks_per_xact: i32,
-    pub track_commit_timestamp: bool,
-    pub _pad4: [u8; 3],
-    pub maxAlign: u32,
-    pub floatFormat: f64,
-    pub blcksz: u32,
-    pub relseg_size: u32,
-    pub xlog_blcksz: u32,
-    pub xlog_seg_size: u32,
-    pub nameDataLen: u32,
-    pub indexMaxKeys: u32,
-    pub toast_max_chunk_size: u32,
-    pub loblksize: u32,
-    pub float8ByVal: bool,
-    pub _pad5: [u8; 3],
-    pub data_checksum_version: u32,
-    pub default_char_signedness: bool,
-    pub mock_authentication_nonce: [u8; MOCK_AUTH_NONCE_LEN],
-    pub _pad6: [u8; 3],
-    pub crc: u32,
-}
-
-const _: () = assert!(size_of::<ControlFileData>() <= PG_CONTROL_MAX_SAFE_SIZE);
-
-impl ControlFileData {
-    pub const ZEROED: ControlFileData = ControlFileData {
-        system_identifier: 0,
-        pg_control_version: 0,
-        catalog_version_no: 0,
-        state: 0,
-        _pad0: [0; 4],
-        time: 0,
-        checkPoint: 0,
-        checkPointCopy: CheckPoint::ZEROED,
-        unloggedLSN: 0,
-        minRecoveryPoint: 0,
-        minRecoveryPointTLI: 0,
-        _pad1: [0; 4],
-        backupStartPoint: 0,
-        backupEndPoint: 0,
-        backupEndRequired: false,
-        _pad2: [0; 3],
-        wal_level: 0,
-        wal_log_hints: false,
-        _pad3: [0; 3],
-        MaxConnections: 0,
-        max_worker_processes: 0,
-        max_wal_senders: 0,
-        max_prepared_xacts: 0,
-        max_locks_per_xact: 0,
-        track_commit_timestamp: false,
-        _pad4: [0; 3],
-        maxAlign: 0,
-        floatFormat: 0.0,
-        blcksz: 0,
-        relseg_size: 0,
-        xlog_blcksz: 0,
-        xlog_seg_size: 0,
-        nameDataLen: 0,
-        indexMaxKeys: 0,
-        toast_max_chunk_size: 0,
-        loblksize: 0,
-        float8ByVal: false,
-        _pad5: [0; 3],
-        data_checksum_version: 0,
-        default_char_signedness: false,
-        mock_authentication_nonce: [0; MOCK_AUTH_NONCE_LEN],
-        _pad6: [0; 3],
-        crc: 0,
-    };
-}
+pub use controldata_utils::{CheckPoint, ControlFileData};
 
 struct ControlFileCell(UnsafeCell<ControlFileData>);
 // SAFETY: mutations happen in the startup/checkpoint paths under
@@ -223,17 +43,6 @@ fn loc(func: &'static str) -> ErrorLocation {
     ErrorLocation::new("xlog.c", 0, func)
 }
 
-fn control_file_crc(cf: &ControlFileData) -> u32 {
-    // SAFETY: repr(C) POD byte view over the CRC-covered prefix.
-    let bytes = unsafe {
-        std::slice::from_raw_parts(
-            cf as *const ControlFileData as *const u8,
-            offset_of!(ControlFileData, crc),
-        )
-    };
-    fin_crc32c(pg_comp_crc32c(CRC32C_INIT, bytes))
-}
-
 fn incompatible(detail: String, hint: &str) -> PgResult<()> {
     ereport(FATAL)
         .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
@@ -248,35 +57,7 @@ const RECOMPILE_HINT: &str = "It looks like you need to recompile or initdb.";
 
 pub fn ReadControlFile() -> PgResult<()> {
     let dir = init_small::globals::DataDir().unwrap_or(".");
-    let path = format!("{dir}/{XLOG_CONTROL_FILE}");
-    let data = match std::fs::read(&path) {
-        Ok(d) => d,
-        Err(e) => {
-            return ereport(PANIC)
-                .errmsg(format!("could not open file \"{XLOG_CONTROL_FILE}\": {e}"))
-                .finish(loc("ReadControlFile"));
-        }
-    };
-    if data.len() < size_of::<ControlFileData>() {
-        return ereport(PANIC)
-            .errcode(ERRCODE_DATA_CORRUPTED)
-            .errmsg(format!(
-                "could not read file \"{XLOG_CONTROL_FILE}\": read {} of {}",
-                data.len(),
-                size_of::<ControlFileData>()
-            ))
-            .finish(loc("ReadControlFile"));
-    }
-
-    let mut cf = ControlFileData::ZEROED;
-    // SAFETY: length checked; repr(C) POD copy of the on-disk image.
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            data.as_ptr(),
-            &mut cf as *mut ControlFileData as *mut u8,
-            size_of::<ControlFileData>(),
-        );
-    }
+    let (cf, crc_ok) = controldata_utils::get_controlfile(dir)?;
 
     if cf.pg_control_version != PG_CONTROL_VERSION
         && cf.pg_control_version % 65536 == 0
@@ -300,7 +81,7 @@ pub fn ReadControlFile() -> PgResult<()> {
         )?;
     }
 
-    if control_file_crc(&cf) != cf.crc {
+    if !crc_ok {
         return ereport(FATAL)
             .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
             .errmsg("incorrect checksum in control file")
@@ -398,39 +179,14 @@ pub fn control_file_loaded() -> bool {
     CONTROL_FILE_READ.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-// update_controlfile(DataDir, ControlFile, do_sync=true)
-// (common/controldata_utils.c): recompute CRC, single atomic pwrite of
-// sizeof(ControlFileData) bytes at offset 0, fsync.
 pub fn UpdateControlFile() -> PgResult<()> {
     let mut image = *control_file();
-    image.crc = control_file_crc(&image);
-    control_file_update(|dst| dst.crc = image.crc);
-
     let dir = init_small::globals::DataDir().unwrap_or(".");
-    let path = format!("{dir}/{XLOG_CONTROL_FILE}");
-
-    use std::io::{Seek, Write};
-    let res = (|| -> std::io::Result<()> {
-        let mut f = std::fs::OpenOptions::new().write(true).open(&path)?;
-        // SAFETY: repr(C) POD byte view of the full struct.
-        let bytes = unsafe {
-            std::slice::from_raw_parts(
-                &image as *const ControlFileData as *const u8,
-                size_of::<ControlFileData>(),
-            )
-        };
-        f.seek(std::io::SeekFrom::Start(0))?;
-        f.write_all(bytes)?;
-        if init_small::globals::enableFsync() {
-            f.sync_all()?;
-        }
-        Ok(())
-    })();
-    if let Err(e) = res {
-        return ereport(PANIC)
-            .errmsg(format!("could not write to file \"{XLOG_CONTROL_FILE}\": {e}"))
-            .finish(loc("UpdateControlFile"));
-    }
+    controldata_utils::update_controlfile(dir, &mut image, init_small::globals::enableFsync())?;
+    control_file_update(|dst| {
+        dst.time = image.time;
+        dst.crc = image.crc;
+    });
     Ok(())
 }
 

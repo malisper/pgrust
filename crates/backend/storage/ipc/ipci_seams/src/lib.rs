@@ -7,3 +7,9 @@ seam_core::seam!(
         fastpath_lock_groups_per_backend: i32,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    // InitializeShmemGUCs (storage/ipc/ipci.c); fastpath groups passed as a
+    // parameter for the same reason as above.
+    pub fn initialize_shmem_gucs(fastpath_lock_groups_per_backend: i32) -> types_error::PgResult<()>
+);

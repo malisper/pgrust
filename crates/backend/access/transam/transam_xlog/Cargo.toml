@@ -14,6 +14,7 @@ types_error = { path = "../../../../_support/types/types_error" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 elog = { path = "../../../utils/error/elog" }
 crc32c = { path = "../../../../port/crc32c" }
+controldata_utils = { path = "../../../../common/controldata_utils" }
 fd = { path = "../../../storage/file/fd" }
 lwlock = { path = "../../../storage/lmgr/lwlock" }
 lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
@@ -23,7 +24,7 @@ init_small = { path = "../../../utils/init/init_small" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 clog = { path = "../clog" }
 relmapper = { path = "../../../utils/cache/relmapper" }
-relcache = { path = "../../../utils/cache/relcache" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
 xlogutils = { path = "../xlogutils" }
 xlogreader_seams = { path = "../xlogreader_seams" }
 transam_xlog_seams = { path = "../transam_xlog_seams" }
