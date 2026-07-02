@@ -632,7 +632,7 @@ backend-utils-hash-dynahash	*/dynahash.c	todo			fabled:backend-utils-hash-dynaha
 backend-utils-hash-small	*/pg_crc.c	todo			fabled:port-crc32c,backend-utils-hash-pg-crc; m1-spine(boot)
 backend-utils-init-miscinit	src/backend/utils/init/miscinit.c	todo			fabled:backend-utils-init-miscinit; m1-spine
 backend-utils-init-postinit	src/backend/utils/init/postinit.c	todo			fabled:backend-utils-init-postinit; m1-spine
-backend-utils-init-small	*/globals.c,*/usercontext.c	todo			fabled:backend-utils-init-small; m1-spine
+backend-utils-init-small	*/globals.c,*/usercontext.c	ported	init_small	cold	fabled:backend-utils-init-small; m1-spine; all globals.c vars as const-init !needs_drop thread_locals; DataDir/DatabasePath leaked &'static str (read = plain load, fabled cloned per read); elog-shared five stored here; 27 GUC slots installed single-owner; miscadmin interrupt/crit helpers are the per-query-hot family - bench rides tcop/xlog statement gates; MyClientSocket/MyProcPort/MyLatch deferred until libpq-be/latch vocabulary; 11 tests, density 3.4%
 backend-utils-mb-conv-string-helpers	*/conv.c,*/stringinfo_mb.c,*/wstrcmp.c,*/wstrncmp.c	todo			fabled:backend-utils-mb-conv-string-helpers
 backend-utils-mb-conv	*/conv.c	combined-into:backend-utils-mb-conv-string-helpers			fabled:backend-utils-mb-conv-string-helpers
 backend-utils-mb-mbutils	*/mbutils.c	todo			fabled:backend-utils-mb-mbutils; m1-spine
