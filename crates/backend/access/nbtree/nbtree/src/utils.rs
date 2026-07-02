@@ -96,7 +96,6 @@ unsafe fn bt_check_compare(
         let mut required_opposite_dir_only = false;
 
         if forcenonrequired {
-            // treating scan's keys as non-required
         } else if ((key.sk_flags & SK_BT_REQFWD) != 0 && ScanDirectionIsForward(dir))
             || ((key.sk_flags & SK_BT_REQBKWD) != 0 && ScanDirectionIsBackward(dir))
         {
@@ -108,7 +107,6 @@ unsafe fn bt_check_compare(
         }
 
         if key.sk_attno as i32 > tupnatts {
-            // Truncated high-key attribute: assume it passes.
             debug_assert!(bt_tuple_is_pivot(tuple));
             *ikey += 1;
             continue;
@@ -126,7 +124,6 @@ unsafe fn bt_check_compare(
         let datum = index_getattr(tuple, key.sk_attno, tupdesc, &mut is_null);
 
         if key.sk_flags & SK_ISNULL != 0 {
-            // IS NULL / IS NOT NULL tests
             let satisfied = if key.sk_flags & SK_SEARCHNULL != 0 {
                 is_null
             } else {
@@ -145,7 +142,6 @@ unsafe fn bt_check_compare(
 
         if is_null {
             if key.sk_flags & SK_BT_NULLS_FIRST != 0 {
-                // NULLs sort first: on a backward scan a required key ends it.
                 if (required_same_dir || required_opposite_dir_only)
                     && ScanDirectionIsBackward(dir)
                 {
@@ -284,7 +280,6 @@ pub(crate) unsafe fn bt_set_startikey(
             break; // "unsafe": row compares not supported here
         }
         if key.sk_strategy != BTEqualStrategyNumber {
-            // Scalar inequality: safe iff first and last tuples both satisfy
             // it and no prior attribute has multiple distinct values.
             if key.sk_attno as i32 > firstchangingattnum {
                 break;
@@ -295,7 +290,6 @@ pub(crate) unsafe fn bt_set_startikey(
             let lastdatum = index_getattr(lasttup, key.sk_attno, tupdesc, &mut lastnull);
 
             if key.sk_flags & SK_ISNULL != 0 {
-                // IS NOT NULL key
                 if firstnull || lastnull {
                     break;
                 }
@@ -315,14 +309,12 @@ pub(crate) unsafe fn bt_set_startikey(
 
         debug_assert!(key.sk_flags & SK_SEARCHARRAY == 0, "array lane is phase 2");
 
-        // Scalar = key (possibly IS NULL): needs a single distinct attr value.
         if key.sk_attno as i32 >= firstchangingattnum {
             break;
         }
         let mut firstnull = false;
         let firstdatum = index_getattr(firsttup, key.sk_attno, tupdesc, &mut firstnull);
         if key.sk_flags & SK_ISNULL != 0 {
-            // IS NULL key
             debug_assert!(key.sk_flags & SK_SEARCHNULL != 0);
             if !firstnull {
                 break;
@@ -337,14 +329,12 @@ pub(crate) unsafe fn bt_set_startikey(
         startikey += 1;
     }
 
-    // forcenonrequired only arises with arrays (phase 2); scalar scans keep it
-    // false and use startikey alone.
+    // forcenonrequired only arises with arrays (phase 2).
     pstate.forcenonrequired = false;
     pstate.startikey = startikey;
     Ok(())
 }
 
-// Raw hint writes onto a locked page: LP_DEAD line pointers + BTP_HAS_GARBAGE.
 unsafe fn mark_itemid_dead(page: &PageRef<'_>, offnum: OffsetNumber) {
     let off = SizeOfPageHeaderData + (offnum as usize - 1) * core::mem::size_of::<ItemIdData>();
     let p = page.as_ptr().add(off).cast::<ItemIdData>().cast_mut();
@@ -362,7 +352,7 @@ unsafe fn set_has_garbage(page: &PageRef<'_>) {
     p.write(p.read() | BTP_HAS_GARBAGE);
 }
 
-/// _bt_killitems: mark seen-dead index tuples LP_DEAD before leaving the page.
+/// _bt_killitems.
 pub(crate) fn bt_killitems(
     rel: &Relation<'_>,
     so: &mut BTScanOpaqueData<'_>,
@@ -371,11 +361,8 @@ pub(crate) fn bt_killitems(
     debug_assert!(num_killed > 0);
     debug_assert!(BTScanPosIsValid(&so.currPos));
 
-    // Always invalidate so->killedItems[] before leaving so->currPos.
     so.numKilled = 0;
 
-    // `owned` pins are this function's (dropPin rereads); otherwise the pin
-    // stays so->currPos's and we only couple the lock.
     let (buf, owned) = if !so.dropPin {
         debug_assert!(BTScanPosIsPinned(&so.currPos));
         bufmgr::lock_buffer::call(so.currPos.buf, BT_READ)?;
@@ -387,7 +374,6 @@ pub(crate) fn bt_killitems(
         let latestlsn: XLogRecPtr = bufmgr::buffer_get_lsn_atomic::call(pin.buffer());
         debug_assert!(so.currPos.lsn <= latestlsn);
         if so.currPos.lsn != latestlsn {
-            // Modified since we read it: give up on hinting.
             bt_relbuf(rel, pin)?;
             return Ok(());
         }
@@ -431,7 +417,6 @@ pub(crate) fn bt_killitems(
                             break;
                         }
                         debug_assert!(kitem.indexOffset == offnum || !so.dropPin);
-                        // Read ahead to later kitems (ascending-TID convention).
                         if pi < num_killed {
                             kitem = so.currPos.item(so.killedItems[pi] as usize);
                             pi += 1;

@@ -1633,6 +1633,7 @@ dependencies = [
  "elog",
  "libc",
  "lsyscache",
+ "mbutils",
  "mcx",
  "numutils",
  "queryenvironment",

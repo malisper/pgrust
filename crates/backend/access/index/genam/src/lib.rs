@@ -22,7 +22,7 @@ use types_scan::scankey::ScanKeyData;
 use types_scan::sdir::{ForwardScanDirection, ScanDirection};
 use types_slot::SlotData;
 use types_snapshot::SnapshotData;
-use types_tuple::itemptr::{ItemPointerData, ItemPointerEquals};
+use types_tuple::itemptr::ItemPointerEquals;
 use types_tuple::HeapTupleData;
 
 pub fn init_seams() {
@@ -76,31 +76,14 @@ pub fn RelationGetIndexScan<'mcx>(
     norderbys: i32,
     opaque: IndexScanOpaque<'mcx>,
 ) -> PgResult<IndexScanDescData<'mcx>> {
-    let xactStartedInRecovery = xact::TransactionStartedDuringRecovery();
-    Ok(IndexScanDescData {
-        heapRelation: None,
-        indexRelation: indexRelation.alias(),
-        xs_snapshot: None,
-        numberOfKeys: nkeys,
-        numberOfOrderBys: norderbys,
-        // Key workspace; filled by amrescan.
-        keyData: skey_vec(mcx, nkeys.max(0) as usize)?,
-        orderByData: skey_vec(mcx, norderbys.max(0) as usize)?,
-        xs_want_itup: false,
-        xs_temp_snap: false,
-        kill_prior_tuple: false,
-        // In recovery killed-tuple hints are ignored: the standby xmin may
-        // precede the primary's, so "killed" rows can still be visible here.
-        ignore_killed_tuples: !xactStartedInRecovery,
-        xactStartedInRecovery,
+    indexam::relation_get_index_scan(
+        mcx,
+        indexRelation,
+        nkeys,
+        norderbys,
         opaque,
-        xs_heaptid: ItemPointerData::invalid(),
-        xs_heap_continue: false,
-        xs_heapfetch: None,
-        xs_recheck: false,
-        xs_pgstat_index_tuples: 0,
-        xs_pgstat_heap_fetches: 0,
-    })
+        xact::TransactionStartedDuringRecovery(),
+    )
 }
 
 // C IndexScanEnd dissolves: dropping the IndexScanDescData value is the pfree.

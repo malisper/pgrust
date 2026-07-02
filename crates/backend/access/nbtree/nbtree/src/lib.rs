@@ -1,12 +1,10 @@
-//! B-tree access method, READ path (nbtree.c scan entry points + nbtsearch.c
-//! descent/scan runtime + nbtpage.c page access + nbtutils.c/
-//! nbtpreprocesskeys.c scan-key machinery). Phase 2 (loud panics, never
-//! silent): insert/split/vacuum/dedup/parallel scans, SAOP arrays, skip scan,
-//! row comparisons, mark/restore across primitive scans, index-only xs_itup.
+//! B-tree access method, READ path (nbtree.c/nbtsearch.c/nbtpage.c/
+//! nbtutils.c/nbtpreprocesskeys.c). Phase 2, loud panics, never silent:
+//! insert/split/vacuum/dedup/parallel scans, SAOP arrays, skip scan, row
+//! comparisons, mark/restore across primitive scans, index-only xs_itup.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
-// One-variant IndexScanOpaque without the mock feature.
 #![allow(irrefutable_let_patterns)]
 
 mod fcframe;
@@ -80,8 +78,7 @@ macro_rules! split_scan {
     }};
 }
 
-/// btbeginscan (C: RelationGetIndexScan + the opaque setup). xs_itupdesc has
-/// no home yet (index-only scan lane).
+/// btbeginscan; xs_itupdesc has no home yet (index-only scan lane).
 pub fn btbeginscan<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
@@ -100,8 +97,7 @@ pub fn btbeginscan<'mcx>(
     )
 }
 
-// RelationNeedsWAL (rel.h); XLogIsNeeded == wal_level >= replica, which is the
-// xlog_standby_info_active seam's predicate.
+// RelationNeedsWAL (rel.h); XLogIsNeeded ≡ the xlog_standby_info_active seam.
 fn relation_needs_wal(rel: &Relation<'_>) -> bool {
     rel.is_permanent()
         && (transam_xlog_seams::xlog_standby_info_active::call()
@@ -114,7 +110,6 @@ pub fn btrescan(
     scan: &mut IndexScanDescData<'_>,
     scankey: Option<&[ScanKeyData]>,
 ) -> PgResult<()> {
-    // No read locks held here, but pins must go.
     {
         let IndexScanOpaque::Btree(so) = &mut scan.opaque else {
             non_btree_opaque()
@@ -127,7 +122,6 @@ pub fn btrescan(
             BTScanPosInvalidate(&mut so.currPos);
         }
 
-        // Eagerly dropping leaf pins keeps VACUUM from waiting on us; unsafe
         // for index-only scans, non-MVCC snapshots, unlogged relations (the
         // LSN-based TID recycle check needs WAL), and bitmap scans.
         so.dropPin = !scan.xs_want_itup
@@ -144,7 +138,6 @@ pub fn btrescan(
 
         if scan.xs_want_itup && so.currTuples.is_none() {
             let mcx = *so.keyData.allocator();
-            // C pallocs 2*BLCKSZ without zeroing; length tracks written bytes.
             so.currTuples = Some(::mcx::vec_with_capacity_in(mcx, BLCKSZ)?);
             so.markTuples = Some(::mcx::vec_with_capacity_in(mcx, BLCKSZ)?);
         }
@@ -167,13 +160,11 @@ pub fn btrescan(
 pub fn btgettuple(scan: &mut IndexScanDescData<'_>, dir: ScanDirection) -> PgResult<bool> {
     debug_assert!(scan.heapRelation.is_some());
 
-    // btree indexes are never lossy
     scan.xs_recheck = false;
 
     let kill_prior_tuple = scan.kill_prior_tuple;
     let mut ctx = split_scan!(&mut *scan);
 
-    // C loops per primitive index scan; arrays are phase 2, so one pass.
     let res = if !BTScanPosIsValid(&ctx.so.currPos) {
         bt_first(&mut ctx, dir)?
     } else {
@@ -209,10 +200,8 @@ pub fn btmarkpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         non_btree_opaque()
     };
 
-    // There may be an old mark with a pin (but no lock).
     pos_unpin_if_pinned(&mut so.markPos)?;
 
-    // Record the itemIndex only; _bt_steppage copies the full position iff
     // the scan leaves the page before the mark is moved.
     if BTScanPosIsValid(&so.currPos) {
         so.markItemIndex = so.currPos.itemIndex;
@@ -230,12 +219,10 @@ pub fn btrestrpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
     };
 
     if so.markItemIndex >= 0 {
-        // Never left the marked page: just restore the item index.
         so.currPos.itemIndex = so.markItemIndex;
         return Ok(());
     }
 
-    // Restoring to the marked page: drop the current position's pin first.
     if BTScanPosIsValid(&so.currPos) {
         if so.numKilled > 0 {
             bt_killitems(&scan.indexRelation, so)?;
@@ -244,7 +231,6 @@ pub fn btrestrpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
     }
 
     if BTScanPosIsValid(&so.markPos) {
-        // Bump the mark's pin for its new life as the current position.
         if BTScanPosIsPinned(&so.markPos) {
             bufmgr_seams::incr_buffer_ref_count::call(so.markPos.buf);
         }

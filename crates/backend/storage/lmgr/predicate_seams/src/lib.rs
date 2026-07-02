@@ -12,6 +12,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn predicate_lock_page<'a, 'mcx>(
+        rel: &'a RelationData<'mcx>,
+        blkno: types_core::BlockNumber,
+        snapshot: &'a SnapshotData<'mcx>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     pub fn predicate_lock_tid<'a, 'mcx>(
         rel: &'a RelationData<'mcx>,
         tid: ItemPointerData,
@@ -51,4 +59,18 @@ seam_core::seam!(
 
 seam_core::seam!(
     pub fn post_prepare_predicate_locks(xid: TransactionId) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // CheckPointPredicate() (predicate.c).
+    pub fn check_point_predicate() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // CheckForSerializableConflictIn (predicate.c); InvalidBlockNumber = relation-level only.
+    pub fn check_for_serializable_conflict_in<'a, 'mcx>(
+        rel: &'a RelationData<'mcx>,
+        tid: Option<&'a ItemPointerData>,
+        blkno: types_core::BlockNumber,
+    ) -> PgResult<()>
 );

@@ -1,7 +1,6 @@
-//! access/itup.h + the nbtree.h tuple macros over raw on-page bytes.
-//! Unsafe page kernel: every entry takes an `itup` pointer that must point at
-//! a live, MAXALIGNed index tuple that stays mapped for the call (pin held).
-//! Moves to the common indextuple unit when that lands.
+//! itup.h + nbtree.h tuple macros over raw on-page bytes. Unsafe kernel:
+//! `itup` must point at a live, MAXALIGNed index tuple (pin held). Moves to
+//! the common indextuple unit when that lands.
 
 use ::datum::Datum;
 use ::types_core::AttrNumber;
@@ -19,7 +18,6 @@ pub const INDEX_VAR_MASK: u16 = 0x4000;
 pub const INDEX_NULL_MASK: u16 = 0x8000;
 
 const INDEX_TUPLE_DATA_SIZE: usize = 8;
-// MAXALIGN(sizeof(IndexTupleData) + sizeof(IndexAttributeBitMapData))
 const INDEX_TUPLE_DATA_WITH_NULLS_SIZE: usize = 16;
 
 pub type ITup = *const u8;
@@ -98,7 +96,7 @@ pub unsafe fn bt_tuple_get_downlink(pivot: ITup) -> ::types_core::BlockNumber {
     ItemPointerGetBlockNumberNoCheck(&t_tid(pivot))
 }
 
-/// BTreeTupleGetHeapTID: lowest heap TID, `None` when a pivot truncated it away.
+
 pub unsafe fn bt_tuple_get_heap_tid(itup: ITup) -> Option<ItemPointerData> {
     if bt_tuple_is_pivot(itup) {
         if (t_tid(itup).ip_posid & BT_PIVOT_HEAP_TID_ATTR) != 0 {
@@ -122,8 +120,8 @@ pub unsafe fn bt_tuple_get_max_heap_tid(itup: ITup) -> ItemPointerData {
     }
 }
 
-/// index_getattr (itup.h): borrowed deform — by-ref values are pointers into
-/// the page image (family-2 rule); attcacheoff is live via CompactAttribute.
+/// index_getattr: borrowed deform — by-ref values point into the page image
+/// (family-2 rule); attcacheoff live via CompactAttribute (rule-5).
 ///
 /// # Safety
 /// `itup` per module contract; `attnum` in `1..=natts` for this tuple/desc.
@@ -155,9 +153,6 @@ pub unsafe fn index_getattr(
     }
 }
 
-/// nocache_index_getattr (indextuple.c); mirrors types_tuple::nocachegetattr
-/// with the index tuple's header size and null-bitmap placement.
-///
 /// # Safety
 /// As [`index_getattr`].
 unsafe fn nocache_index_getattr(

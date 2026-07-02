@@ -3,9 +3,9 @@ use ::types_error::{PgError, PgResult};
 use ::types_fmgr::LocalFcinfo;
 use ::types_scan::scankey::ScanKeyData;
 
-// The scan-owned fcinfo carrier (fmgr_core M2 watch item): one frame lives for
-// a whole descent/readpage and every sk_func call rewrites collation + args in
-// place — never function_call2_coll's fresh 56B frame per tuple.
+// The scan-owned fcinfo carrier (fmgr_core M2 watch item): one frame per
+// descent/readpage; per-tuple sk_func calls rewrite collation + args in place
+// — never function_call2_coll's fresh 56B frame per tuple.
 pub(crate) struct OrderProcFrame {
     fcinfo: LocalFcinfo<2>,
 }

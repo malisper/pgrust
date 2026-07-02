@@ -29,4 +29,7 @@ procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
 transam_seams = { path = "../../transam/transam_seams" }
 
 [dev-dependencies]
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 types_nbtree = { path = "../../../../_support/types/types_nbtree" }

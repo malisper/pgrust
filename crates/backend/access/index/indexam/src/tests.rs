@@ -238,7 +238,7 @@ fn getnext_tid_sequence_kill_reset_and_exhaustion() {
 
     // Exhaustion resets the heap fetch (buffer-pin release in C).
     assert_eq!(index_getnext_tid(&mut scan, ForwardScanDirection).unwrap(), None);
-    assert_eq!(scan.xs_heapfetch.as_ref().unwrap().resets, 1);
+    assert_eq!(scan.xs_heapfetch.as_ref().unwrap().mock().resets, 1);
 }
 
 #[test]
@@ -271,18 +271,18 @@ fn fetch_heap_sets_kill_prior_tuple_except_in_recovery() {
     });
     scan.xs_heaptid = tid(3, 7);
 
-    scan.xs_heapfetch.as_mut().unwrap().mock_fetch = vec![(true, false, false)];
+    scan.xs_heapfetch.as_mut().unwrap().mock_mut().mock_fetch = vec![(true, false, false)];
     assert!(index_fetch_heap(ctx.mcx(), &mut scan, &mut slot).unwrap());
     assert_eq!(slot.base().tts_tid, tid(3, 7));
     assert!(!scan.kill_prior_tuple);
 
-    scan.xs_heapfetch.as_mut().unwrap().mock_fetch = vec![(false, false, true)];
+    scan.xs_heapfetch.as_mut().unwrap().mock_mut().mock_fetch = vec![(false, false, true)];
     assert!(!index_fetch_heap(ctx.mcx(), &mut scan, &mut slot).unwrap());
     assert!(scan.kill_prior_tuple);
 
     scan.xactStartedInRecovery = true;
     scan.kill_prior_tuple = false;
-    scan.xs_heapfetch.as_mut().unwrap().mock_fetch = vec![(false, false, true)];
+    scan.xs_heapfetch.as_mut().unwrap().mock_mut().mock_fetch = vec![(false, false, true)];
     assert!(!index_fetch_heap(ctx.mcx(), &mut scan, &mut slot).unwrap());
     assert!(!scan.kill_prior_tuple);
 }
@@ -302,7 +302,7 @@ fn getnext_slot_skips_dead_chains_and_propagates_kill() {
     });
     mock(&mut scan).tids = vec![tid(0, 1), tid(0, 2)];
     // First TID's chain is all-dead; the second yields a visible tuple.
-    scan.xs_heapfetch.as_mut().unwrap().mock_fetch =
+    scan.xs_heapfetch.as_mut().unwrap().mock_mut().mock_fetch =
         vec![(false, false, true), (true, false, false)];
 
     assert!(index_getnext_slot(ctx.mcx(), &mut scan, ForwardScanDirection, &mut slot).unwrap());
@@ -325,7 +325,7 @@ fn getnext_slot_continues_hot_chain_without_new_tid() {
         buffer: types_core::InvalidBuffer,
     });
     mock(&mut scan).tids = vec![tid(0, 1)];
-    scan.xs_heapfetch.as_mut().unwrap().mock_fetch =
+    scan.xs_heapfetch.as_mut().unwrap().mock_mut().mock_fetch =
         vec![(true, true, false), (true, false, false)];
 
     assert!(index_getnext_slot(ctx.mcx(), &mut scan, ForwardScanDirection, &mut slot).unwrap());
@@ -362,7 +362,7 @@ fn rescan_resets_flags_fetch_and_calls_am() {
     index_rescan(&mut scan, None, None).unwrap();
     assert!(!scan.kill_prior_tuple);
     assert!(!scan.xs_heap_continue);
-    assert_eq!(scan.xs_heapfetch.as_ref().unwrap().resets, 1);
+    assert_eq!(scan.xs_heapfetch.as_ref().unwrap().mock().resets, 1);
     assert_eq!(mock(&mut scan).rescans, 1);
 }
 

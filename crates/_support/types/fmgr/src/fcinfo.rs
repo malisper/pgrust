@@ -94,15 +94,38 @@ impl<const N: usize> LocalFcinfo<N> {
             );
         }
         let mut fcinfo = Self::new(collation);
+        fcinfo.rearm(collation);
+        fcinfo
+    }
+
+    // Persistent-carrier reuse (the fmgr_call2 M2 watch item's remedy): reset
+    // (fncollation, isnull, nargs) as the same ONE aligned 8B store; args are
+    // rewritten in place by the caller.
+    #[inline]
+    pub fn rearm(&mut self, collation: Oid) {
+        const {
+            assert!(core::mem::offset_of!(LocalFcinfo<N>, fncollation) % 8 == 0);
+            assert!(
+                core::mem::offset_of!(LocalFcinfo<N>, isnull)
+                    == core::mem::offset_of!(LocalFcinfo<N>, fncollation) + 4
+            );
+            assert!(
+                core::mem::offset_of!(LocalFcinfo<N>, nargs)
+                    == core::mem::offset_of!(LocalFcinfo<N>, fncollation) + 6
+            );
+        }
         let word = (collation as u64) | ((N as u16 as u64) << 48);
         // SAFETY: asserted above — (fncollation, isnull, pad, nargs) is an
-        // 8-aligned 8B span; the pad byte's value is unobserved.
+        // 8-aligned 8B span; the pad byte's value is unobserved. Pointer is
+        // derived from `self` so its provenance covers the whole 8B span
+        // (a field-raw pointer would carry 4B provenance: Miri SB violation).
         unsafe {
-            core::ptr::addr_of_mut!(fcinfo.fncollation)
+            (self as *mut Self)
+                .cast::<u8>()
+                .add(core::mem::offset_of!(LocalFcinfo<N>, fncollation))
                 .cast::<u64>()
                 .write(word);
         }
-        fcinfo
     }
 }
 
@@ -261,6 +284,17 @@ impl FmgrInfo {
                 core::any::type_name::<T>()
             ),
         }
+    }
+}
+
+impl core::fmt::Debug for FmgrInfo {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("FmgrInfo")
+            .field("fn_oid", &self.fn_oid)
+            .field("fn_nargs", &self.fn_nargs)
+            .field("fn_strict", &self.fn_strict)
+            .field("fn_retset", &self.fn_retset)
+            .finish_non_exhaustive()
     }
 }
 

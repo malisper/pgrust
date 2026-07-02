@@ -1,6 +1,5 @@
-//! nbtpage.c, READ side: metapage decode + rd_amcache, root descent entry,
-//! and the pinned-buffer traffic helpers. Write side (root creation,
-//! _bt_allocbuf, page deletion, delitems) is phase 2.
+//! nbtpage.c, READ side: metapage decode + rd_amcache, _bt_getroot, buffer
+//! traffic helpers. The write side is phase 2.
 
 use ::bufmgr_seams::{self as bufmgr, BufferPin};
 use ::types_core::{BlockNumber, BLCKSZ};
@@ -26,7 +25,7 @@ pub(crate) fn page_special_off(page: &PageRef<'_>) -> usize {
     off
 }
 
-/// BTPageGetOpaque, by value (16B; read-only users only — killitems writes raw).
+/// BTPageGetOpaque, by value (read-only users; killitems writes raw).
 #[inline]
 pub(crate) fn page_opaque(page: &PageRef<'_>) -> BTPageOpaqueData {
     let off = page_special_off(page);
@@ -35,7 +34,7 @@ pub(crate) fn page_opaque(page: &PageRef<'_>) -> BTPageOpaqueData {
     unsafe { page.as_ptr().add(off).cast::<BTPageOpaqueData>().read() }
 }
 
-/// PageGetItem for an index tuple: raw pointer + length, page-bounded.
+
 #[inline]
 pub(crate) fn page_item(page: &PageRef<'_>, id: ItemIdData) -> crate::itup::ITup {
     page.item_raw(id).0
@@ -62,7 +61,7 @@ fn index_corrupted(msg: std::string::String) -> Box<PgError> {
     )
 }
 
-/// _bt_getmeta: decode + sanity-check the metapage held in `metapin`.
+/// _bt_getmeta.
 fn bt_getmeta(rel: &Relation<'_>, metapin: &BufferPin) -> PgResult<BTMetaPageData> {
     let page = metapin.page();
     let metaopaque = page_opaque(&page);
@@ -104,7 +103,7 @@ pub(crate) fn bt_checkpage(rel: &Relation<'_>, pin: &BufferPin) -> PgResult<()> 
     Ok(())
 }
 
-/// _bt_lockbuf (Valgrind client requests are cfg'd out of this build).
+/// _bt_lockbuf (no Valgrind client requests in this build).
 #[inline]
 pub(crate) fn bt_lockbuf(_rel: &Relation<'_>, pin: &BufferPin, access: i32) -> PgResult<()> {
     bufmgr::lock_buffer::call(pin.buffer(), access)
@@ -116,7 +115,7 @@ pub(crate) fn bt_unlockbuf(_rel: &Relation<'_>, pin: &BufferPin) -> PgResult<()>
     bufmgr::lock_buffer::call(pin.buffer(), bufmgr::BUFFER_LOCK_UNLOCK)
 }
 
-/// _bt_getbuf: pin + lock + checkpage. Returned pin is locked per `access`.
+/// _bt_getbuf: pin + lock + checkpage.
 pub(crate) fn bt_getbuf(
     rel: &Relation<'_>,
     blkno: BlockNumber,
@@ -129,7 +128,7 @@ pub(crate) fn bt_getbuf(
     Ok(pin)
 }
 
-/// _bt_relandgetbuf: lock-coupling step — unlock+unpin `obuf`, pin+lock blkno.
+/// _bt_relandgetbuf: the lock-coupling step.
 pub(crate) fn bt_relandgetbuf(
     rel: &Relation<'_>,
     obuf: Option<BufferPin>,
@@ -157,7 +156,6 @@ pub(crate) fn bt_relbuf(rel: &Relation<'_>, pin: BufferPin) -> PgResult<()> {
     Ok(())
 }
 
-// Fields of the cached metapage that _bt_getroot trusts (Assert set in C).
 #[inline]
 fn amcache_sane(metad: &BTMetaPageData) -> bool {
     metad.btm_magic == BTREE_MAGIC
@@ -167,18 +165,13 @@ fn amcache_sane(metad: &BTMetaPageData) -> bool {
         && metad.btm_root != P_NONE
 }
 
-/// _bt_getroot, BT_READ arm: locate + read-lock the (fast) root. Returns None
-/// for an empty index. BT_WRITE root creation is nbtinsert's phase 2.
-///
-/// Batched-descent lever (docs/graviton.md §1.5): point lookups descend one
-/// level per lock-couple; a future change could prefetch the child while the
-/// parent binary search finishes. Noted, not forced — needs bufmgr support.
+/// _bt_getroot, BT_READ arm: the pinned+read-locked (fast) root, or None for
+/// an empty index. BT_WRITE root creation is nbtinsert's phase 2.
 pub(crate) fn bt_getroot(rel: &Relation<'_>, access: i32) -> PgResult<Option<BufferPin>> {
     if access != BT_READ {
         unported_phase2("_bt_getroot(BT_WRITE) root creation (nbtinsert lane)");
     }
 
-    // rd_amcache fast path: skip the metapage read (rule-5 cache).
     if let Some(metad) = rel.rd_amcache.get() {
         debug_assert!(amcache_sane(&metad));
         let rootblkno = metad.btm_fastroot;
@@ -188,7 +181,6 @@ pub(crate) fn bt_getroot(rel: &Relation<'_>, access: i32) -> PgResult<Option<Buf
         let rootpin = bt_getbuf(rel, rootblkno, BT_READ)?;
         let rootopaque = page_opaque(&rootpin.page());
 
-        // Stale-cache re-validation: must not be deleted, must be alone on
         // its level (no P_ISROOT check — fast roots don't set it).
         if !P_IGNORE(&rootopaque)
             && rootopaque.btpo_level == rootlevel
@@ -205,7 +197,6 @@ pub(crate) fn bt_getroot(rel: &Relation<'_>, access: i32) -> PgResult<Option<Buf
     let metad = bt_getmeta(rel, &metapin)?;
 
     if metad.btm_root == P_NONE {
-        // Empty index; BT_READ callers get no root.
         bt_relbuf(rel, metapin)?;
         return Ok(None);
     }
@@ -216,7 +207,6 @@ pub(crate) fn bt_getroot(rel: &Relation<'_>, access: i32) -> PgResult<Option<Buf
 
     rel.rd_amcache.set(Some(metad));
 
-    // Metapage pin trades in via the first relandgetbuf, as in C.
     let mut rootpin = metapin;
     let mut rootblkno = rootblkno;
     let rootopaque = loop {
@@ -252,7 +242,6 @@ fn prime_amcache(rel: &Relation<'_>) -> PgResult<Option<BTMetaPageData>> {
         let metapin = bt_getbuf(rel, BTREE_METAPAGE, BT_READ)?;
         let metad = bt_getmeta(rel, &metapin)?;
         if metad.btm_root == P_NONE {
-            // No root yet: _bt_getroot doesn't expect a cache to exist.
             bt_relbuf(rel, metapin)?;
             return Ok(Some(metad));
         }
@@ -274,7 +263,7 @@ pub fn bt_getrootheight(rel: &Relation<'_>) -> PgResult<i32> {
     Ok(metad.btm_fastlevel as i32)
 }
 
-/// _bt_metaversion: (heapkeyspace, allequalimage) for the insertion scankey.
+/// _bt_metaversion -> (heapkeyspace, allequalimage).
 pub fn bt_metaversion(rel: &Relation<'_>) -> PgResult<(bool, bool)> {
     if let Some(uncached) = prime_amcache(rel)? {
         return Ok((

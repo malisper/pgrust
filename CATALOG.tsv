@@ -89,7 +89,7 @@ backend-access-nbt-splitloc	*/nbtsplitloc.c	todo			fabled:backend-access-nbtree-
 backend-access-nbt-utils	*/nbtutils.c	todo			fabled:backend-access-nbtree-core; m1-spine
 backend-access-nbt-validate	*/nbtvalidate.c	todo			fabled:backend-access-nbt-validate
 backend-access-nbt-xlog	*/nbtxlog.c	todo			fabled:backend-access-nbt-xlog; m1-dep(stub-ok)
-backend-access-nbtree-core	*/nbtsearch.c,*/nbtinsert.c,*/nbtpage.c,*/nbtutils.c,*/nbtsplitloc.c,*/nbtpreprocesskeys.c	todo			fabled:backend-access-nbtree-core; m1-spine
+backend-access-nbtree-core	*/nbtsearch.c,*/nbtinsert.c,*/nbtpage.c,*/nbtutils.c,*/nbtsplitloc.c,*/nbtpreprocesskeys.c	ported	nbtree	bench-w/-composition	m1-spine; READ path complete (search/binsrch/compare/readpage/steppage/preprocess/checkkeys/killitems); OrderProcFrame scan-owned fcinfo (fmgr M2 watch item honored - zero per-tuple function_call2); rule-5 caches implemented+tested (rd_amcache, rd_supportinfo, attcacheoff); indexam arms direct; insert/vacuum/SAOP/skip-scan loud phase 2; 13 tests Miri-clean, density 4.9%
 backend-access-nbtree-nbtree	src/backend/access/nbtree/nbtree.c	todo			fabled:backend-access-nbtree-nbtree; m1-spine
 backend-access-nbtree-nbtsort	src/backend/access/nbtree/nbtsort.c	todo			fabled:backend-access-nbtree-nbtsort
 backend-access-small-core	?	todo			
