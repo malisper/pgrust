@@ -64,7 +64,7 @@ pub fn standard_ProcessUtility<'p, 'a, 's, 'd, 'q, 'mcx>(
     context: ProcessUtilityContext,
     _params: ParamListHandle,
     _query_env: QueryEnvHandle,
-    _dest: &'d mut DestReceiver<'mcx>,
+    dest: &'d mut DestReceiver<'mcx>,
     qc: Option<&'q mut QueryCompletion>,
 ) -> PgResult<()> {
     let is_top_level = context == PROCESS_UTILITY_TOPLEVEL;
@@ -109,7 +109,7 @@ pub fn standard_ProcessUtility<'p, 'a, 's, 'd, 'q, 'mcx>(
     // still loud, so its construction rides the parser/analyze lane.
 
     let mut qc = qc;
-    dispatch_switch(parsetree, is_top_level, &mut qc)?;
+    dispatch_switch(parsetree, is_top_level, dest, &mut qc)?;
 
     xact::CommandCounterIncrement()?;
     Ok(())
@@ -118,6 +118,7 @@ pub fn standard_ProcessUtility<'p, 'a, 's, 'd, 'q, 'mcx>(
 fn dispatch_switch(
     parsetree: Node<'_>,
     is_top_level: bool,
+    dest: &mut DestReceiver<'_>,
     qc: &mut Option<&mut QueryCompletion>,
 ) -> PgResult<()> {
     use NodeTag::*;
@@ -127,10 +128,15 @@ fn dispatch_switch(
             match stmt.kind {
                 TRANS_STMT_BEGIN | TRANS_STMT_START => {
                     xact::BeginTransactionBlock()?;
-                    if stmt.options.len() != 0 {
-                        // C: SetPGVariable("transaction_isolation"/..., item->arg, true)
-                        // per DefElem; DefElem + SetPGVariable land with the guc lane.
-                        handler_gap("BEGIN options: SetPGVariable (guc SET lane)")
+                    for item in stmt.options.iter() {
+                        let item = item.as_def_elem().expect("BEGIN options: DefElem list");
+                        match item.defname.unwrap_or("") {
+                            name @ ("transaction_isolation" | "transaction_read_only"
+                            | "transaction_deferrable") => {
+                                guc_funcs::SetPGVariable(name, item.arg, true)?;
+                            }
+                            other => panic!("unexpected BEGIN option: {other}"),
+                        }
                     }
                 }
 
@@ -253,8 +259,14 @@ fn dispatch_switch(
             xact::PreventInTransactionBlock(is_top_level, "ALTER SYSTEM")?;
             handler_gap("AlterSystemSetConfigFile (guc lane)")
         }
-        T_VariableSetStmt => handler_gap("ExecSetVariableStmt (guc SET lane)"),
-        T_VariableShowStmt => handler_gap("GetPGVariable (guc SHOW lane)"),
+        T_VariableSetStmt => {
+            let stmt = parsetree.as_variable_set_stmt().unwrap();
+            guc_funcs::ExecSetVariableStmt(stmt, is_top_level)?;
+        }
+        T_VariableShowStmt => {
+            let n = parsetree.as_variable_show_stmt().unwrap();
+            guc_funcs::GetPGVariable(n.name.unwrap_or(""), dest)?;
+        }
         T_DiscardStmt => {
             CheckRestrictedOperation("DISCARD")?;
             handler_gap("DiscardCommand (discard lane)")

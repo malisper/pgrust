@@ -60,6 +60,12 @@ seam_core::seam!(
     ) -> PgResult<Option<mcx::PgString<'mcx>>>
 );
 
+seam_core::seam!(
+    // SearchSysCache1(AUTHNAME, rolname) projected to (oid, rolsuper) — the
+    // check_session_authorization/check_role read; None mirrors !HeapTupleIsValid.
+    pub fn lookup_authid_by_rolname(rolname: &str) -> PgResult<Option<(Oid, bool)>>
+);
+
 use datum::Datum;
 use mcx::{Mcx, PgString, PgVec};
 use types_core::AttrNumber;
@@ -284,6 +290,50 @@ seam_core::seam!(
 
 seam_core::seam!(
     pub fn lookup_pg_cast_oid(sourcetypeid: Oid, targettypeid: Oid) -> PgResult<Oid>
+);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgCastShape {
+    pub oid: Oid,
+    pub castfunc: Oid,
+    pub castcontext: i8,
+    pub castmethod: i8,
+}
+
+seam_core::seam!(
+    // SearchSysCache2(CASTSOURCETARGET, src, tgt); None mirrors !HeapTupleIsValid.
+    pub fn lookup_pg_cast_shape(
+        sourcetypeid: Oid,
+        targettypeid: Oid,
+    ) -> PgResult<Option<PgCastShape>>
+);
+
+seam_core::seam!(
+    // SearchSysCache4(OPERNAMENSP, oprname, oprleft, oprright, oprnamespace)
+    // projected to the operator oid; InvalidOid on a miss.
+    pub fn lookup_pg_operator_oid_exact(
+        opername: &str,
+        oprleft: Oid,
+        oprright: Oid,
+        oprnamespace: Oid,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    // SearchSysCacheList3(OPERNAMENSP, oprname, oprleft, oprright) projected
+    // to (oid, oprnamespace) per member, catcache list order.
+    pub fn lookup_pg_operator_candidates<'mcx>(
+        mcx: Mcx<'mcx>,
+        opername: &str,
+        oprleft: Oid,
+        oprright: Oid,
+    ) -> PgResult<PgVec<'mcx, (Oid, Oid)>>
+);
+
+seam_core::seam!(
+    // SearchSysCacheList1(OPERNAMENSP, oprname): any member with this oprkind
+    // (OpernameGetCandidates' existence question, pre-visibility).
+    pub fn pg_operator_name_candidates_exist(opername: &str, oprkind: i8) -> PgResult<bool>
 );
 
 seam_core::seam!(

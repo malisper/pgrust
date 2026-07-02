@@ -547,6 +547,37 @@ fn enum_values_match_c_headers() {
     check_enum!(prim_h, "VarReturningType", VarReturningType, [
         VAR_RETURNING_DEFAULT, VAR_RETURNING_OLD, VAR_RETURNING_NEW,
     ]);
+    use crate::parsenodes::{DefElemAction, VariableSetKind};
+    check_enum!(parse_h, "VariableSetKind", VariableSetKind, [
+        VAR_SET_VALUE, VAR_SET_DEFAULT, VAR_SET_CURRENT, VAR_SET_MULTI, VAR_RESET, VAR_RESET_ALL,
+    ]);
+    check_enum!(parse_h, "DefElemAction", DefElemAction, [
+        DEFELEM_UNSPEC, DEFELEM_SET, DEFELEM_ADD, DEFELEM_DROP,
+    ]);
+}
+
+#[test]
+fn variable_set_stmt_field_order_matches_c() {
+    let parse_h = include_str!("../vendor/parsenodes.h");
+    assert_eq!(
+        c_struct_fields(parse_h, "VariableSetStmt"),
+        ["kind", "name", "args", "jumble_args", "is_local", "location"]
+    );
+    let crate::parsenodes::VariableSetStmt {
+        kind: _, name: _, args: _, jumble_args: _, is_local: _, location: _,
+    } = crate::parsenodes::VariableSetStmt::default();
+
+    assert_eq!(c_struct_fields(parse_h, "VariableShowStmt"), ["name"]);
+    let crate::parsenodes::VariableShowStmt { name: _ } =
+        crate::parsenodes::VariableShowStmt::default();
+
+    assert_eq!(
+        c_struct_fields(parse_h, "DefElem"),
+        ["defnamespace", "defname", "arg", "defaction", "location"]
+    );
+    let crate::parsenodes::DefElem {
+        defnamespace: _, defname: _, arg: _, defaction: _, location: _,
+    } = crate::parsenodes::DefElem::default();
 }
 
 #[test]

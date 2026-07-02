@@ -200,6 +200,64 @@ impl Default for TransactionStmt<'_> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum DefElemAction {
+    #[default]
+    DEFELEM_UNSPEC = 0,
+    DEFELEM_SET = 1,
+    DEFELEM_ADD = 2,
+    DEFELEM_DROP = 3,
+}
+
+#[derive(Default)]
+pub struct DefElem<'mcx> {
+    pub defnamespace: Option<&'mcx str>,
+    pub defname: Option<&'mcx str>,
+    pub arg: Option<Node<'mcx>>,
+    pub defaction: DefElemAction,
+    pub location: ParseLoc,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum VariableSetKind {
+    #[default]
+    VAR_SET_VALUE = 0,
+    VAR_SET_DEFAULT = 1,
+    VAR_SET_CURRENT = 2,
+    VAR_SET_MULTI = 3,
+    VAR_RESET = 4,
+    VAR_RESET_ALL = 5,
+}
+
+pub struct VariableSetStmt<'mcx> {
+    pub kind: VariableSetKind,
+    pub name: Option<&'mcx str>,
+    pub args: NodeList<'mcx>,
+    pub jumble_args: bool,
+    pub is_local: bool,
+    pub location: ParseLoc,
+}
+
+impl Default for VariableSetStmt<'_> {
+    fn default() -> Self {
+        VariableSetStmt {
+            kind: VariableSetKind::VAR_SET_VALUE,
+            name: None,
+            args: NodeList::nil(),
+            jumble_args: false,
+            is_local: false,
+            location: -1,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct VariableShowStmt<'mcx> {
+    pub name: Option<&'mcx str>,
+}
+
 // SAFETY (each): tag/type pairing mirrors parsenodes.h.
 unsafe impl<'mcx> NodeVariant<'mcx> for Query<'mcx> {
     const TAG: NodeTag = NodeTag::T_Query;
@@ -212,6 +270,15 @@ unsafe impl<'mcx> NodeVariant<'mcx> for RTEPermissionInfo<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for TransactionStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_TransactionStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for DefElem<'mcx> {
+    const TAG: NodeTag = NodeTag::T_DefElem;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for VariableSetStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_VariableSetStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for VariableShowStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_VariableShowStmt;
 }
 
 impl<'mcx> Node<'mcx> {
@@ -232,6 +299,21 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_transaction_stmt(self) -> Option<&'mcx TransactionStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_def_elem(self) -> Option<&'mcx DefElem<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_variable_set_stmt(self) -> Option<&'mcx VariableSetStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_variable_show_stmt(self) -> Option<&'mcx VariableShowStmt<'mcx>> {
         self.as_variant()
     }
 }

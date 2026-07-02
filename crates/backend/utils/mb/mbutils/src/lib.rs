@@ -80,6 +80,142 @@ fn enc_name(encoding: pg_enc) -> &'static str {
     PG_ENC2NAME[encoding as usize]
 }
 
+// pg_encname_tbl (common/encnames.c), sorted by clean name for binary search.
+static PG_ENCNAME: [(&str, pg_enc); 81] = [
+    ("abc", wchar::PG_WIN1258),
+    ("alt", wchar::PG_WIN866),
+    ("big5", wchar::PG_BIG5),
+    ("euccn", wchar::PG_EUC_CN),
+    ("eucjis2004", wchar::PG_EUC_JIS_2004),
+    ("eucjp", PG_EUC_JP),
+    ("euckr", wchar::PG_EUC_KR),
+    ("euctw", wchar::PG_EUC_TW),
+    ("gb18030", wchar::PG_GB18030),
+    ("gbk", wchar::PG_GBK),
+    ("iso88591", wchar::PG_LATIN1),
+    ("iso885910", wchar::PG_LATIN6),
+    ("iso885913", wchar::PG_LATIN7),
+    ("iso885914", wchar::PG_LATIN8),
+    ("iso885915", wchar::PG_LATIN9),
+    ("iso885916", wchar::PG_LATIN10),
+    ("iso88592", wchar::PG_LATIN2),
+    ("iso88593", wchar::PG_LATIN3),
+    ("iso88594", wchar::PG_LATIN4),
+    ("iso88595", wchar::PG_ISO_8859_5),
+    ("iso88596", wchar::PG_ISO_8859_6),
+    ("iso88597", wchar::PG_ISO_8859_7),
+    ("iso88598", wchar::PG_ISO_8859_8),
+    ("iso88599", wchar::PG_LATIN5),
+    ("johab", wchar::PG_JOHAB),
+    ("koi8", wchar::PG_KOI8R),
+    ("koi8r", wchar::PG_KOI8R),
+    ("koi8u", wchar::PG_KOI8U),
+    ("latin1", wchar::PG_LATIN1),
+    ("latin10", wchar::PG_LATIN10),
+    ("latin2", wchar::PG_LATIN2),
+    ("latin3", wchar::PG_LATIN3),
+    ("latin4", wchar::PG_LATIN4),
+    ("latin5", wchar::PG_LATIN5),
+    ("latin6", wchar::PG_LATIN6),
+    ("latin7", wchar::PG_LATIN7),
+    ("latin8", wchar::PG_LATIN8),
+    ("latin9", wchar::PG_LATIN9),
+    ("mskanji", wchar::PG_SJIS),
+    ("muleinternal", wchar::PG_MULE_INTERNAL),
+    ("shiftjis", wchar::PG_SJIS),
+    ("shiftjis2004", wchar::PG_SHIFT_JIS_2004),
+    ("sjis", wchar::PG_SJIS),
+    ("sqlascii", PG_SQL_ASCII),
+    ("tcvn", wchar::PG_WIN1258),
+    ("tcvn5712", wchar::PG_WIN1258),
+    ("uhc", wchar::PG_UHC),
+    ("unicode", PG_UTF8),
+    ("utf8", PG_UTF8),
+    ("vscii", wchar::PG_WIN1258),
+    ("win", wchar::PG_WIN1251),
+    ("win1250", wchar::PG_WIN1250),
+    ("win1251", wchar::PG_WIN1251),
+    ("win1252", wchar::PG_WIN1252),
+    ("win1253", wchar::PG_WIN1253),
+    ("win1254", wchar::PG_WIN1254),
+    ("win1255", wchar::PG_WIN1255),
+    ("win1256", wchar::PG_WIN1256),
+    ("win1257", wchar::PG_WIN1257),
+    ("win1258", wchar::PG_WIN1258),
+    ("win866", wchar::PG_WIN866),
+    ("win874", wchar::PG_WIN874),
+    ("win932", wchar::PG_SJIS),
+    ("win936", wchar::PG_GBK),
+    ("win949", wchar::PG_UHC),
+    ("win950", wchar::PG_BIG5),
+    ("windows1250", wchar::PG_WIN1250),
+    ("windows1251", wchar::PG_WIN1251),
+    ("windows1252", wchar::PG_WIN1252),
+    ("windows1253", wchar::PG_WIN1253),
+    ("windows1254", wchar::PG_WIN1254),
+    ("windows1255", wchar::PG_WIN1255),
+    ("windows1256", wchar::PG_WIN1256),
+    ("windows1257", wchar::PG_WIN1257),
+    ("windows1258", wchar::PG_WIN1258),
+    ("windows866", wchar::PG_WIN866),
+    ("windows874", wchar::PG_WIN874),
+    ("windows932", wchar::PG_SJIS),
+    ("windows936", wchar::PG_GBK),
+    ("windows949", wchar::PG_UHC),
+    ("windows950", wchar::PG_BIG5),
+];
+
+const NAMEDATALEN: usize = 64;
+
+// clean_encoding_name (encnames.c): keep alnum, ASCII-lowercase.
+fn clean_encoding_name(key: &str, buf: &mut [u8; NAMEDATALEN]) -> usize {
+    let mut n = 0;
+    for &b in key.as_bytes() {
+        if b.is_ascii_alphanumeric() {
+            buf[n] = b.to_ascii_lowercase();
+            n += 1;
+        }
+    }
+    n
+}
+
+pub fn pg_char_to_encoding(name: &str) -> pg_enc {
+    if name.is_empty() || name.len() >= NAMEDATALEN {
+        return -1;
+    }
+    let mut buf = [0u8; NAMEDATALEN];
+    let n = clean_encoding_name(name, &mut buf);
+    let key = &buf[..n];
+    match PG_ENCNAME.binary_search_by(|(nm, _)| nm.as_bytes().cmp(key)) {
+        Ok(idx) => PG_ENCNAME[idx].1,
+        Err(_) => -1,
+    }
+}
+
+pub fn pg_valid_client_encoding(name: &str) -> pg_enc {
+    let enc = pg_char_to_encoding(name);
+    if enc < 0 || !pg_valid_fe_encoding(enc) {
+        return -1;
+    }
+    enc
+}
+
+pub fn pg_valid_server_encoding(name: &str) -> pg_enc {
+    let enc = pg_char_to_encoding(name);
+    if enc < 0 || !pg_valid_be_encoding(enc) {
+        return -1;
+    }
+    enc
+}
+
+pub fn pg_encoding_to_char(encoding: pg_enc) -> &'static str {
+    if pg_valid_encoding(encoding) {
+        enc_name(encoding)
+    } else {
+        ""
+    }
+}
+
 /// The resolved conversion procedure (C caches a `FmgrInfo`; the resolved
 /// `fn_addr` is the resolve-once payload — conversion procs use no `fn_extra`).
 #[derive(Clone, Copy)]

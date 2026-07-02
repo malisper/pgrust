@@ -156,6 +156,16 @@ pub struct OpExpr<'mcx> {
     pub location: ParseLoc,
 }
 
+// C `Expr *arg` is never NULL in a live RelabelType; modeled non-optional.
+pub struct RelabelType<'mcx> {
+    pub arg: Node<'mcx>,
+    pub resulttype: Oid,
+    pub resulttypmod: i32,
+    pub resultcollid: Oid,
+    pub relabelformat: CoercionForm,
+    pub location: ParseLoc,
+}
+
 #[derive(Default)]
 pub struct FuncExpr<'mcx> {
     pub funcid: Oid,
@@ -199,6 +209,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for OpExpr<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for FuncExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_FuncExpr;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for RelabelType<'mcx> {
+    const TAG: NodeTag = NodeTag::T_RelabelType;
 }
 
 impl<'mcx> Node<'mcx> {
@@ -335,6 +348,33 @@ impl<'mcx> Node<'mcx> {
     #[inline]
     pub fn as_op_expr(self) -> Option<&'mcx OpExpr<'mcx>> {
         self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_relabel_type(self) -> Option<&'mcx RelabelType<'mcx>> {
+        self.as_variant()
+    }
+
+    /// C `makeRelabelType`.
+    pub fn mk_relabel_type(
+        mcx: Mcx<'mcx>,
+        arg: Node<'mcx>,
+        rtype: Oid,
+        typmod: i32,
+        rcollid: Oid,
+        rformat: CoercionForm,
+    ) -> PgResult<Node<'mcx>> {
+        Self::mk(
+            mcx,
+            RelabelType {
+                arg,
+                resulttype: rtype,
+                resulttypmod: typmod,
+                resultcollid: rcollid,
+                relabelformat: rformat,
+                location: -1,
+            },
+        )
     }
 
     #[inline]

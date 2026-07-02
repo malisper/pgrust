@@ -368,3 +368,23 @@ fn seams_installed() {
         .is_none());
     assert_eq!(ctx.used(), 0);
 }
+
+#[test]
+fn encname_lookup_matches_encnames_c() {
+    for w in crate::PG_ENCNAME.windows(2) {
+        assert!(w[0].0 < w[1].0, "pg_encname_tbl order: {} < {}", w[0].0, w[1].0);
+    }
+    assert_eq!(pg_char_to_encoding("UTF8"), PG_UTF8);
+    assert_eq!(pg_char_to_encoding("utf-8"), PG_UTF8);
+    assert_eq!(pg_char_to_encoding("UNICODE"), PG_UTF8);
+    assert_eq!(pg_char_to_encoding("SQL_ASCII"), PG_SQL_ASCII);
+    assert_eq!(pg_char_to_encoding("Latin-1"), wchar::PG_LATIN1);
+    assert_eq!(pg_char_to_encoding("nonsense"), -1);
+    assert_eq!(pg_char_to_encoding(""), -1);
+    assert_eq!(pg_valid_client_encoding("UTF8"), PG_UTF8);
+    assert_eq!(pg_valid_client_encoding("MULE_INTERNAL"), wchar::PG_MULE_INTERNAL);
+    assert_eq!(pg_valid_server_encoding("SJIS"), -1);
+    assert_eq!(pg_encoding_to_char(PG_UTF8), "UTF8");
+    assert_eq!(pg_encoding_to_char(-1), "");
+    assert_eq!(pg_encoding_to_char(9999), "");
+}
