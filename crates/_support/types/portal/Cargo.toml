@@ -1,0 +1,12 @@
+[package]
+name = "types_portal"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../mcx" }
+types_core = { path = "../types_core" }
+types_resowner = { path = "../types_resowner" }
+types_snapshot = { path = "../snapshot" }
+types_tuple = { path = "../types_tuple" }
