@@ -4,7 +4,7 @@
 
 use core::mem::offset_of;
 
-use types_core::{Cardinality, Cost, ParseLoc};
+use types_core::{Cardinality, Cost, Index, ParseLoc};
 
 use crate::bitmapset::Bitmapset;
 use crate::list::{IntList, NodeList, OidList};
@@ -129,6 +129,20 @@ pub struct Result<'mcx> {
     pub resconstantqual: Option<Node<'mcx>>,
 }
 
+/// Abstract second-level base for all scan nodes (C never instantiates it).
+#[derive(Default)]
+#[repr(C)]
+pub struct Scan<'mcx> {
+    pub plan: Plan<'mcx>,
+    pub scanrelid: Index,
+}
+
+#[derive(Default)]
+#[repr(C)]
+pub struct SeqScan<'mcx> {
+    pub scan: Scan<'mcx>,
+}
+
 /// # Safety: implementors must be `repr(C)` with a [`Plan`] first field, so a
 /// `NodeRep<Self>` reads as a `NodeRep<Plan>` prefix, and their tag must be
 /// listed in [`is_plan_tag`].
@@ -141,18 +155,28 @@ unsafe impl<'mcx> NodeVariant<'mcx> for PlannedStmt<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for Result<'mcx> {
     const TAG: NodeTag = NodeTag::T_Result;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for SeqScan<'mcx> {
+    const TAG: NodeTag = NodeTag::T_SeqScan;
+}
 // SAFETY: repr(C), Plan first (offset asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for Result<'mcx> {}
+// SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
+unsafe impl<'mcx> PlanVariant<'mcx> for SeqScan<'mcx> {}
 
 const _: () = {
     assert!(offset_of!(Result, plan) == 0);
     assert!(
         offset_of!(NodeRep<Result>, payload) == offset_of!(NodeRep<Plan>, payload)
     );
+    assert!(offset_of!(Scan, plan) == 0);
+    assert!(offset_of!(SeqScan, scan) == 0);
+    assert!(
+        offset_of!(NodeRep<SeqScan>, payload) == offset_of!(NodeRep<Plan>, payload)
+    );
 };
 
 fn is_plan_tag(tag: NodeTag) -> bool {
-    matches!(tag, NodeTag::T_Result)
+    matches!(tag, NodeTag::T_Result | NodeTag::T_SeqScan)
 }
 
 impl<'mcx> Node<'mcx> {
@@ -163,6 +187,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_result(self) -> Option<&'mcx Result<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_seq_scan(self) -> Option<&'mcx SeqScan<'mcx>> {
         self.as_variant()
     }
 
