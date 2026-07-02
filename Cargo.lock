@@ -294,6 +294,7 @@ name = "pgstat_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_core",
 ]
 
 [[package]]
@@ -474,6 +475,9 @@ dependencies = [
 [[package]]
 name = "types_array"
 version = "0.1.0"
+dependencies = [
+ "types_core",
+]
 
 [[package]]
 name = "types_core"
@@ -518,10 +522,22 @@ version = "0.1.0"
 [[package]]
 name = "types_nodes"
 version = "0.1.0"
+dependencies = [
+ "mcx",
+ "types_core",
+ "types_error",
+]
 
 [[package]]
 name = "types_portal"
 version = "0.1.0"
+dependencies = [
+ "mcx",
+ "types_core",
+ "types_resowner",
+ "types_snapshot",
+ "types_tuple",
+]
 
 [[package]]
 name = "types_rel"
