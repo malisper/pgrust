@@ -1,0 +1,19 @@
+[package]
+name = "catalog"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "catalog"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_rel = { path = "../../../_support/types/rel" }
+catalog_seams = { path = "../catalog_seams" }
+namespace_seams = { path = "../namespace_seams" }
+
+[dev-dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_tuple = { path = "../../../_support/types/types_tuple" }

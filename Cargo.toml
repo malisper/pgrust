@@ -156,6 +156,12 @@ members = [
     "crates/backend/catalog/catalog",
     "crates/backend/storage/ipc/dsm_core",
     "crates/backend/utils/init/miscinit",
+    "crates/backend/storage/ipc/procsignal",
+    "crates/backend/storage/ipc/pmsignal",
+    "crates/backend/utils/cache/lsyscache_seams",
+    "crates/backend/utils/fmgr/fmgr_seams",
+    "crates/backend/tcop/pquery_seams",
+    "crates/backend/access/common/printtup",
 ]
 
 [workspace.package]
