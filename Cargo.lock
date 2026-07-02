@@ -30,6 +30,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_float"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "guc_tables",
+ "ryu",
+ "types_array",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
 name = "adt_int"
 version = "0.1.0"
 dependencies = [
@@ -298,6 +311,10 @@ dependencies = [
  "types_core",
  "types_error",
 ]
+
+[[package]]
+name = "catalog_namespace"
+version = "0.0.0"
 
 [[package]]
 name = "catalog_seams"
@@ -1074,6 +1091,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ipci_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+]
+
+[[package]]
 name = "keywords"
 version = "0.1.0"
 
@@ -1084,6 +1109,7 @@ dependencies = [
  "init_small",
  "latch_seams",
  "lmgr_proc_seams",
+ "timeout_seams",
  "types_core",
  "types_error",
  "types_storage",
@@ -1306,6 +1332,22 @@ dependencies = [
  "types_core",
  "types_error",
  "waitevent_seams",
+]
+
+[[package]]
+name = "mbutils"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "fmgr_seams",
+ "mbutils_seams",
+ "mcx",
+ "namespace_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "wchar",
+ "xact_seams",
 ]
 
 [[package]]
@@ -1673,6 +1715,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pmchild_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+]
+
+[[package]]
 name = "pmsignal"
 version = "0.0.0"
 dependencies = [
@@ -1747,11 +1797,13 @@ dependencies = [
  "ipc_seams",
  "libc",
  "mcx",
+ "miscinit",
  "parser_seams",
  "pgstat",
  "planner_seams",
  "portalmem",
  "postgres_seams",
+ "postinit",
  "pqcomm",
  "pqformat",
  "pquery",
@@ -1764,6 +1816,7 @@ dependencies = [
  "types_core",
  "types_dest",
  "types_error",
+ "types_guc",
  "types_nodes",
  "types_portal",
  "utility_seams",
@@ -1844,6 +1897,43 @@ dependencies = [
 [[package]]
 name = "postmaster"
 version = "0.0.0"
+dependencies = [
+ "auth_seams",
+ "autovacuum_seams",
+ "elog",
+ "fd",
+ "guc",
+ "guc_file",
+ "guc_seams",
+ "guc_tables",
+ "init_small",
+ "ipc_seams",
+ "ipci_seams",
+ "latch",
+ "launch_backend",
+ "launcher_seams",
+ "libc",
+ "libpq_pqsignal",
+ "mcx",
+ "miscinit",
+ "miscinit_seams",
+ "pg_prng",
+ "pmchild_seams",
+ "pmsignal",
+ "postinit",
+ "pqcomm_seams",
+ "syslogger_seams",
+ "timestamp_seams",
+ "transam_xlog",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "types_startup",
+ "types_storage",
+ "waiteventset",
+ "xlogrecovery_seams",
+]
 
 [[package]]
 name = "postmaster_seams"
@@ -2270,6 +2360,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rewrite_handler"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "relation_seams",
+ "rewrite_handler_seams",
+ "table",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_tuple",
+]
+
+[[package]]
 name = "rewrite_handler_seams"
 version = "0.1.0"
 dependencies = [
@@ -2293,6 +2398,10 @@ dependencies = [
  "types_error",
  "xlogreader_seams",
 ]
+
+[[package]]
+name = "ryu"
+version = "0.1.0"
 
 [[package]]
 name = "s_lock_seams"
@@ -2774,6 +2883,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "timeout"
+version = "0.0.0"
+dependencies = [
+ "init_small",
+ "latch",
+ "timeout_seams",
+ "timestamp_seams",
+ "types_core",
+ "types_error",
+ "types_storage",
+]
+
+[[package]]
 name = "timeout_seams"
 version = "0.0.0"
 dependencies = [
@@ -2862,6 +2984,7 @@ dependencies = [
  "procarray_seams",
  "relcache",
  "relmapper",
+ "shmem",
  "snapbuild_seams",
  "subtrans_seams",
  "sync_seams",
@@ -2931,6 +3054,10 @@ dependencies = [
  "types_core",
  "types_error",
 ]
+
+[[package]]
+name = "typcache"
+version = "0.1.0"
 
 [[package]]
 name = "typcache_seams"

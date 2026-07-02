@@ -153,9 +153,20 @@ pub fn WaitLatch(
     } else {
         -1
     };
-    match wes::wait_event_set_wait_one::call(set, timeout, wait_event_info)? {
+    let res = match wes::wait_event_set_wait_one::call(set, timeout, wait_event_info)? {
         None => Ok(WL_TIMEOUT),
         Some(event) => Ok(event.events),
+    };
+    drain_timeout_interrupt();
+    res
+}
+
+// The thread model's SIGALRM delivery point: C's handler interrupts the sleep
+// itself; here the timeout timer thread posts + SetLatches, and the woken
+// backend fires its timeout handlers before returning (notes/timeout-threads.md).
+fn drain_timeout_interrupt() {
+    if timeout_seams::process_timeout_interrupt::is_installed() {
+        timeout_seams::process_timeout_interrupt::call();
     }
 }
 
@@ -215,6 +226,7 @@ fn wait_latch_or_socket(
             ret |= event.events & (WL_LATCH_SET | WL_POSTMASTER_DEATH | WL_SOCKET_MASK);
         }
     }
+    drain_timeout_interrupt();
     Ok(ret)
 }
 

@@ -45,3 +45,19 @@ seam_core::seam!(
     // C: GetDatabaseEncodingName() (mbutils.c).
     pub fn get_database_encoding_name() -> &'static str
 );
+
+seam_core::seam!(
+    // SetDatabaseEncoding(encoding) (mbutils.c); ERROR on non-server encoding.
+    pub fn set_database_encoding(encoding: i32) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // InitializeClientEncoding (mbutils.c).
+    pub fn initialize_client_encoding() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // pg_mbcliplen(mbstr, len, limit) (mbutils.c): byte length of the longest
+    // encoded-character-boundary prefix <= limit bytes; no ereport.
+    pub fn pg_mbcliplen(mbstr: &[u8], len: i32, limit: i32) -> i32
+);

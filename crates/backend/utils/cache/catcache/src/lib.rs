@@ -50,8 +50,25 @@ pub(crate) struct CatCTup {
     pub t_self: ItemPointerData,
     pub t_tableoid: Oid,
     /// Stable allocation; entries move on slot-vec growth, this never does.
+    /// Positive entries: `[t_self; pad; t_tableoid; t_len]` 16-byte prefix,
+    /// then the tuple image (see `IMG_PREFIX`) — C keeps HeapTupleData inside
+    /// the CatCTup the same way, and it lets a pin be pointer-sized.
     pub payload: *mut u8,
     pub payload_len: u32,
+}
+
+/// Positive-entry payload prefix: `t_self` at +0 (6 bytes), `t_tableoid` at
+/// +8, `t_len` at +12; image at +16 (keeps the image 8-aligned).
+pub(crate) const IMG_PREFIX: usize = 16;
+
+impl CatCTup {
+    /// Tuple image pointer of a live POSITIVE entry.
+    #[inline(always)]
+    pub(crate) fn image_ptr(&self) -> *mut u8 {
+        debug_assert!(!self.negative && !self.payload.is_null());
+        // SAFETY: positive-entry payloads are IMG_PREFIX + t_len bytes.
+        unsafe { self.payload.add(IMG_PREFIX) }
+    }
 }
 
 const _: () = assert!(core::mem::size_of::<CatCTup>() <= 128);

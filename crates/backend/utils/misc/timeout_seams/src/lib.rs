@@ -50,16 +50,26 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // get_timeout_start_time(id) (timeout.c).
     pub fn get_timeout_start_time(id: TimeoutId) -> types_core::TimestampTz
 );
 
 seam_core::seam!(
-    // InitializeTimeouts (timeout.c).
     pub fn initialize_timeouts()
 );
 
 seam_core::seam!(
-    // RegisterTimeout(id, handler) (utils/misc/timeout.c).
     pub fn register_timeout(id: TimeoutId, handler: fn()) -> TimeoutId
+);
+
+seam_core::seam!(
+    pub fn get_timeout_active(id: TimeoutId) -> bool
+);
+
+seam_core::seam!(
+    pub fn disable_all_timeouts(keep_indicators: bool) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    // Synchronous SIGALRM delivery (notes/timeout-threads.md).
+    pub fn process_timeout_interrupt()
 );

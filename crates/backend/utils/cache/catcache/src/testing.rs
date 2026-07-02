@@ -40,13 +40,20 @@ pub fn insert_positive(cache_id: i32, keys: &[CatCKey<'_>; 4], image: &[u8]) {
                 byref_len += keys[i].bytes().len();
             }
         }
-        let total = image.len() + byref_len;
+        let t_self = types_tuple::ItemPointerData::new(0, 1);
+        let t_tableoid: u32 = 1;
+        let total = crate::IMG_PREFIX + image.len() + byref_len;
         let buf = payload_alloc(st.mcx, total);
-        // SAFETY: fresh `total`-byte buffer.
+        // SAFETY: fresh `total`-byte buffer; prefix layout per IMG_PREFIX.
         unsafe {
-            core::ptr::copy_nonoverlapping(image.as_ptr(), buf.as_ptr(), image.len());
+            let p = buf.as_ptr();
+            core::ptr::write_bytes(p, 0, crate::IMG_PREFIX);
+            core::ptr::write(p.cast::<types_tuple::ItemPointerData>(), t_self);
+            core::ptr::write(p.add(8).cast::<u32>(), t_tableoid);
+            core::ptr::write(p.add(12).cast::<u32>(), image.len() as u32);
+            core::ptr::copy_nonoverlapping(image.as_ptr(), p.add(crate::IMG_PREFIX), image.len());
         }
-        let mut off = image.len();
+        let mut off = crate::IMG_PREFIX + image.len();
         let mut key_words = [Datum::null(); CATCACHE_MAXKEYS];
         for i in 0..nkeys as usize {
             key_words[i] = match kinds[i] {
@@ -74,8 +81,8 @@ pub fn insert_positive(cache_id: i32, keys: &[CatCKey<'_>; 4], image: &[u8]) {
             c_list: NONE,
             keys: key_words,
             t_len: image.len() as u32,
-            t_self: types_tuple::ItemPointerData::new(0, 1),
-            t_tableoid: 1,
+            t_self,
+            t_tableoid,
             payload: buf.as_ptr(),
             payload_len: total as u32,
         };

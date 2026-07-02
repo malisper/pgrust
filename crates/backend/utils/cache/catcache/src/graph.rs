@@ -512,15 +512,25 @@ pub(crate) fn create_entry_positive(
     }
     let mcx = st.mcx;
     let t_len = ntp.t_len;
-    let image = payload_alloc(mcx, t_len as usize);
-    // SAFETY: `image` is a fresh t_len-byte allocation; the source tuple
-    // image is live for t_len bytes (HeapTupleData contract).
-    unsafe {
-        core::ptr::copy_nonoverlapping(ntp.header_ptr(), image.as_ptr(), t_len as usize);
-    }
+    let payload_len = crate::IMG_PREFIX + t_len as usize;
+    let buf = payload_alloc(mcx, payload_len);
+    // SAFETY: `buf` is a fresh IMG_PREFIX + t_len byte allocation; the source
+    // tuple image is live for t_len bytes (HeapTupleData contract). The
+    // prefix mirrors C's in-entry HeapTupleData: t_self at +0, t_tableoid at
+    // +8, t_len at +12, image at +16 (CatCTuple::tuple reads these back).
+    let image = unsafe {
+        let p = buf.as_ptr();
+        core::ptr::write_bytes(p, 0, crate::IMG_PREFIX);
+        core::ptr::write(p.cast::<types_tuple::ItemPointerData>(), ntp.t_self);
+        core::ptr::write(p.add(8).cast::<Oid>(), ntp.t_tableOid);
+        core::ptr::write(p.add(12).cast::<u32>(), t_len);
+        let image = p.add(crate::IMG_PREFIX);
+        core::ptr::copy_nonoverlapping(ntp.header_ptr(), image, t_len as usize);
+        image
+    };
     // SAFETY: `image` now holds a valid tuple image (verbatim copy).
     let cached_view: HeapTupleData<'_> = unsafe {
-        HeapTupleData::from_raw_parts(image.as_ptr(), t_len, ntp.t_self, ntp.t_tableOid)
+        HeapTupleData::from_raw_parts(image, t_len, ntp.t_self, ntp.t_tableOid)
     };
 
     let cache = st.cache(cache_id);
@@ -531,7 +541,8 @@ pub(crate) fn create_entry_positive(
         keys[i] = match tuple_key(kinds[i], &cached_view, keyno[i], tupdesc) {
             CatCKey::Value(d) => d,
             CatCKey::Bytes(b) => {
-                let off = b.as_ptr() as usize - image.as_ptr() as usize;
+                // Offsets are payload-relative (stored_bytes contract).
+                let off = b.as_ptr() as usize - buf.as_ptr() as usize;
                 pack_ref(off as u32, b.len() as u32)
             }
             CatCKey::Str(_) => unreachable!(),
@@ -550,8 +561,8 @@ pub(crate) fn create_entry_positive(
         t_len,
         t_self: ntp.t_self,
         t_tableoid: ntp.t_tableOid,
-        payload: image.as_ptr(),
-        payload_len: t_len,
+        payload: buf.as_ptr(),
+        payload_len: payload_len as u32,
     };
     let cache = st.cache_mut(cache_id);
     let slot = cache.ct_alloc(ct);

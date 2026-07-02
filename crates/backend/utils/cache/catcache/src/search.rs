@@ -12,23 +12,33 @@ use crate::{eq_stored, init, with_state, NONE};
 
 /// A pinned positive entry (C's `&ct->tuple` + `ct->refcount++`); release
 /// with [`ReleaseCatCache`]. The image cannot be freed while pinned.
+///
+/// 16 bytes on purpose: `t_self`/`t_tableoid` live in the payload prefix in
+/// front of the image (C keeps its HeapTupleData inside the CatCTup the same
+/// way), so a pin is pointer + packed words and the probe result crosses the
+/// (possibly outlined) probe call in registers, not through an sret buffer —
+/// the 40-byte sret reload was a measured store-forwarding stall on Neoverse
+/// V2 (49% of hit-lane cycles on one `stur q0`, job 1783026844).
 #[must_use]
 pub struct CatCTuple {
     pub(crate) cache_id: i32,
     pub(crate) slot: u32,
     image: NonNull<u8>,
-    t_len: u32,
-    t_self: ItemPointerData,
-    t_tableoid: Oid,
 }
 
 impl CatCTuple {
     #[inline]
     pub fn tuple(&self) -> HeapTupleData<'_> {
-        // SAFETY: `image` is the entry's live tuple image; the pin (refcount)
-        // keeps it allocated and nothing writes it after creation.
+        // SAFETY: `image` is the entry's live tuple image with the 16-byte
+        // t_self/t_tableoid/t_len prefix in front (create_entry_positive);
+        // the pin (refcount) keeps it allocated and nothing writes it after
+        // creation.
         unsafe {
-            HeapTupleData::from_raw_parts(self.image.as_ptr(), self.t_len, self.t_self, self.t_tableoid)
+            let base = self.image.as_ptr().sub(crate::IMG_PREFIX);
+            let t_self = core::ptr::read(base.cast::<ItemPointerData>());
+            let t_tableoid = core::ptr::read(base.add(8).cast::<Oid>());
+            let t_len = core::ptr::read(base.add(12).cast::<u32>());
+            HeapTupleData::from_raw_parts(self.image.as_ptr(), t_len, t_self, t_tableoid)
         }
     }
 
@@ -38,11 +48,40 @@ impl CatCTuple {
     }
 }
 
-enum Probe {
-    Hit(CatCTuple),
-    NegativeHit,
-    Miss { hash_value: u32 },
-    NeedsInit,
+/// Probe result, hand-packed into two words so it returns in registers
+/// (x0/x1) across the probe-closure call. A Rust enum carrying `CatCTuple`
+/// needs an out-of-band tag and comes back through a stack sret buffer; the
+/// caller's wide reload of the callee's narrow stores fails store-to-load
+/// forwarding on Neoverse V2 (docs/graviton.md §4.5) — measured at 49% of
+/// hit-lane cycles. Sentinel addresses 1..=3 tag the non-hit outcomes;
+/// a real image pointer (>= page granularity) tags a hit.
+#[derive(Clone, Copy)]
+struct ProbeRet {
+    p: *mut u8,
+    w: u64,
+}
+
+const PROBE_NEG: usize = 1;
+const PROBE_MISS: usize = 2;
+const PROBE_INIT: usize = 3;
+
+impl ProbeRet {
+    #[inline(always)]
+    fn hit(image: *mut u8, slot: u32) -> Self {
+        ProbeRet { p: image, w: slot as u64 }
+    }
+    #[inline(always)]
+    fn negative() -> Self {
+        ProbeRet { p: core::ptr::without_provenance_mut(PROBE_NEG), w: 0 }
+    }
+    #[inline(always)]
+    fn miss(hash_value: u32) -> Self {
+        ProbeRet { p: core::ptr::without_provenance_mut(PROBE_MISS), w: hash_value as u64 }
+    }
+    #[inline(always)]
+    fn needs_init() -> Self {
+        ProbeRet { p: core::ptr::without_provenance_mut(PROBE_INIT), w: 0 }
+    }
 }
 
 #[inline]
@@ -50,11 +89,8 @@ fn pin_entry(cache_id: i32, slot: u32, ct: &crate::CatCTup) -> CatCTuple {
     CatCTuple {
         cache_id,
         slot,
-        // SAFETY: positive entries always carry a non-null image.
-        image: unsafe { NonNull::new_unchecked(ct.payload) },
-        t_len: ct.t_len,
-        t_self: ct.t_self,
-        t_tableoid: ct.t_tableoid,
+        // SAFETY: positive entries always carry a non-null prefixed image.
+        image: unsafe { NonNull::new_unchecked(ct.image_ptr()) },
     }
 }
 
@@ -172,11 +208,11 @@ fn keys_match<K: ProbeKeys>(
 /// one cache resolve, then hash → bucket walk → compare → move-to-front →
 /// refcount bump; the walk indexes uncheckedly (arena kernel invariants).
 #[inline(always)]
-fn probe<K: ProbeKeys>(cache_id: i32, keys: &K) -> Probe {
+fn probe<K: ProbeKeys>(cache_id: i32, keys: &K) -> ProbeRet {
     with_state(|st| {
         let cache = st.cache_mut(cache_id);
         if !cache.initialized {
-            return Probe::NeedsInit;
+            return ProbeRet::needs_init();
         }
         let nkeys = if K::NKEYS > 0 { K::NKEYS } else { cache.cc_nkeys };
         debug_assert!(K::NKEYS < 0 || cache.cc_nkeys == nkeys);
@@ -186,23 +222,22 @@ fn probe<K: ProbeKeys>(cache_id: i32, keys: &K) -> Probe {
         // through the outlined walk so this closure stays inlinable.
         if K::NKEYS == 1 {
             if let (CCFastKind::Int4, CatCKey::Value(w)) = (kinds[0], keys.slot(0)) {
-                return probe_1_int4(cache_id, cache, w);
+                return probe_1_int4(cache, w);
             }
-            return probe_walk_outlined(cache_id, cache, nkeys, &kinds, keys);
+            return probe_walk_outlined(cache, nkeys, &kinds, keys);
         }
 
-        probe_walk(cache_id, cache, nkeys, &kinds, keys)
+        probe_walk(cache, nkeys, &kinds, keys)
     })
 }
 
 #[inline(always)]
 fn probe_walk<K: ProbeKeys>(
-    cache_id: i32,
     cache: &mut crate::CatCache<'_>,
     nkeys: i32,
     kinds: &[CCFastKind; 4],
     keys: &K,
-) -> Probe {
+) -> ProbeRet {
     let hash_value = hash_keys(kinds, nkeys, keys);
     let bi = hash_index(hash_value, cache.cc_nbuckets);
     // SAFETY: bi is masked below cc_bucket.len() (power-of-two invariant).
@@ -211,26 +246,25 @@ fn probe_walk<K: ProbeKeys>(
         // SAFETY: bucket links reference live slots (arena invariant).
         let ct = unsafe { cache.tuples.get_unchecked(cur as usize) };
         if !ct.dead && ct.hash_value == hash_value && keys_match(kinds, nkeys, ct, keys) {
-            return found(cache_id, cache, bi, cur);
+            return found(cache, bi, cur);
         }
         cur = ct.next;
     }
-    Probe::Miss { hash_value }
+    ProbeRet::miss(hash_value)
 }
 
 #[inline(never)]
 fn probe_walk_outlined<K: ProbeKeys>(
-    cache_id: i32,
     cache: &mut crate::CatCache<'_>,
     nkeys: i32,
     kinds: &[CCFastKind; 4],
     keys: &K,
-) -> Probe {
-    probe_walk(cache_id, cache, nkeys, kinds, keys)
+) -> ProbeRet {
+    probe_walk(cache, nkeys, kinds, keys)
 }
 
 #[inline(always)]
-fn probe_1_int4(cache_id: i32, cache: &mut crate::CatCache<'_>, w: Datum) -> Probe {
+fn probe_1_int4(cache: &mut crate::CatCache<'_>, w: Datum) -> ProbeRet {
     let hash_value = int4_hash(w);
     let bi = hash_index(hash_value, cache.cc_nbuckets);
     let key = w.as_i32();
@@ -240,39 +274,46 @@ fn probe_1_int4(cache_id: i32, cache: &mut crate::CatCache<'_>, w: Datum) -> Pro
         // SAFETY: bucket links reference live slots (arena invariant).
         let ct = unsafe { cache.tuples.get_unchecked(cur as usize) };
         if !ct.dead && ct.hash_value == hash_value && ct.keys[0].as_i32() == key {
-            return found(cache_id, cache, bi, cur);
+            return found(cache, bi, cur);
         }
         cur = ct.next;
     }
-    Probe::Miss { hash_value }
+    ProbeRet::miss(hash_value)
 }
 
 #[inline(always)]
-fn found(cache_id: i32, cache: &mut crate::CatCache<'_>, bucket: usize, slot: u32) -> Probe {
+fn found(cache: &mut crate::CatCache<'_>, bucket: usize, slot: u32) -> ProbeRet {
     cache.ct_move_head(bucket, slot);
     // SAFETY: `slot` came off the bucket walk (live slot).
     let ct = unsafe { cache.tuples.get_unchecked_mut(slot as usize) };
     if ct.negative {
-        Probe::NegativeHit
+        ProbeRet::negative()
     } else {
         // C also RememberCatCacheRef's; resowner integration follows xact.
         ct.refcount += 1;
-        Probe::Hit(pin_entry(cache_id, slot, ct))
+        ProbeRet::hit(ct.image_ptr(), slot)
     }
 }
 
 #[inline(always)]
 fn search_internal<K: ProbeKeys>(cache_id: i32, keys: &K) -> PgResult<Option<CatCTuple>> {
     loop {
-        match probe(cache_id, keys) {
-            Probe::Hit(t) => return Ok(Some(t)),
-            Probe::NegativeHit => return Ok(None),
-            Probe::Miss { hash_value } => {
-                return search_miss(cache_id, hash_value, &keys.to_array());
-            }
-            Probe::NeedsInit => {
+        let r = probe(cache_id, keys);
+        match r.p.addr() {
+            PROBE_NEG => return Ok(None),
+            PROBE_MISS => return search_miss(cache_id, r.w as u32, &keys.to_array()),
+            PROBE_INIT => {
                 /* init re-enters the catcache; no borrow held, then retry */
                 init::catalog_cache_initialize_cache(cache_id)?;
+            }
+            _ => {
+                return Ok(Some(CatCTuple {
+                    cache_id,
+                    slot: r.w as u32,
+                    // SAFETY: a non-sentinel ProbeRet.p is the pinned entry's
+                    // live image pointer (ProbeRet::hit).
+                    image: unsafe { NonNull::new_unchecked(r.p) },
+                }));
             }
         }
     }
