@@ -395,7 +395,7 @@ backend-optimizer-util-paramassign	*/paramassign.c	todo			fabled:backend-optimiz
 backend-parser-analyze	*/analyze.c	todo			fabled:backend-parser-analyze; m1-spine
 backend-parser-clause	*/parse_clause.c	todo			fabled:backend-parser-clause; m1-spine
 backend-parser-coerce	*/parse_coerce.c	todo			fabled:backend-parser-coerce; m1-dep(stub-ok)
-backend-parser-driver	src/backend/parser/parser.c	todo			fabled:backend-parser-driver; m1-spine
+backend-parser-driver	src/backend/parser/parser.c	in-progress	parser_driver	cold	m1-spine; PARTIAL: str_udeescape/unicode real; raw_parser installed as loud seam pending scan_fgram (other session, actively porting - hand-written DFA story documented) + gram c2rust unit; 8 tests, density 4.8%
 backend-parser-expr	*/parse_expr.c	todo			fabled:backend-parser-parse-expr; m1-spine
 backend-parser-gram	src/backend/parser/gram.y,build-clean/src/backend/parser/gram.c	todo			fabled:backend-parser-gram-core; m1-spine
 backend-parser-medium1	*/parse_cte.c,*/parse_jsontable.c	todo			
@@ -408,7 +408,7 @@ backend-parser-agg	*/parse_agg.c	todo			fabled:backend-parser-agg; m1-dep(stub-o
 backend-parser-parse-target	*/parse_target.c	todo			fabled:backend-parser-parse-target; m1-spine
 backend-parser-relation	*/parse_relation.c	todo			fabled:backend-parser-relation; m1-dep(stub-ok)
 backend-parser-scan	src/backend/parser/scan.l,build-clean/src/backend/parser/scan.c	in-progress	scan_fgram		fabled:backend-parser-gram-core; m1-spine
-backend-parser-small1	*/parse_enr.c,*/parse_merge.c,*/parse_node.c,*/parse_param.c,*/scansup.c	in-progress	parser_small1	cold	m1-spine; PARTIAL: scansup.c complete + parser_errposition value-form; parse_node remainder/parse_param/parse_enr/merge blocked on types_nodes (notes/parser-small1-boundary.md); 11 tests, density 5.0%
+backend-parser-small1	*/parse_enr.c,*/parse_merge.c,*/parse_node.c,*/parse_param.c,*/scansup.c	ported	parser_small1	cold	m1-spine; ParseState full field set w/ borrowed parent spine (fabled deep-copied), rule-4 hook enum, make_const live arms (numeric/varbit loud pending adt units); container subscripts blocked on types_nodes SubscriptingRef vocab; 26 tests, density 4.2%
 backend-parser-utilcmd	*/parse_utilcmd.c	todo			fabled:backend-parser-parse-utilcmd; m1-dep(stub-ok)
 backend-partitioning-core	*/partbounds.c,*/partdesc.c,*/partprune.c	todo			m1-dep(stub-ok)
 backend-port-atomics	src/backend/port/atomics.c	todo			fabled:backend-port-atomics

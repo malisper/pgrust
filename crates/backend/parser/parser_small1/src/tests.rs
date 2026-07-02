@@ -2,8 +2,8 @@ use mcx::MemoryContext;
 use wchar::{PG_LATIN1, PG_UTF8};
 
 use crate::{
-    downcase_identifier, downcase_truncate_identifier, parser_errposition, scanner_isspace,
-    truncate_identifier, NAMEDATALEN,
+    downcase_identifier, downcase_truncate_identifier, parser_errposition_source,
+    scanner_isspace, truncate_identifier, NAMEDATALEN,
 };
 
 #[test]
@@ -90,14 +90,348 @@ fn scanner_isspace_matches_scan_l() {
 
 #[test]
 fn errposition_missing_inputs() {
-    assert_eq!(parser_errposition(Some(b"select 1"), -1, PG_UTF8), 0);
-    assert_eq!(parser_errposition(None, 3, PG_UTF8), 0);
+    assert_eq!(parser_errposition_source(Some(b"select 1"), -1, PG_UTF8), 0);
+    assert_eq!(parser_errposition_source(None, 3, PG_UTF8), 0);
 }
 
 #[test]
 fn errposition_counts_characters_not_bytes() {
     let src = "s\u{00e9}lect 1".as_bytes();
-    assert_eq!(parser_errposition(Some(src), 3, PG_UTF8), 3);
-    assert_eq!(parser_errposition(Some(src), 0, PG_UTF8), 1);
-    assert_eq!(parser_errposition(Some(src), 3, PG_LATIN1), 4);
+    assert_eq!(parser_errposition_source(Some(src), 3, PG_UTF8), 3);
+    assert_eq!(parser_errposition_source(Some(src), 0, PG_UTF8), 1);
+    assert_eq!(parser_errposition_source(Some(src), 3, PG_LATIN1), 4);
+}
+
+extern crate std;
+
+use types_core::catalog::{
+    BOOLOID, INT2ARRAYOID, INT2VECTOROID, INT4OID, INT8OID, TEXTOID, UNKNOWNOID, VOIDOID,
+};
+use types_core::{InvalidOid, Oid};
+use types_error::{ERRCODE_TOO_MANY_COLUMNS, ERRCODE_UNDEFINED_PARAMETER};
+use types_nodes::node_tree::{Boolean, Float, Integer};
+use types_nodes::{A_Const, ParamKind, ParamRef, ValUnion};
+use types_tuple::htup::MaxTupleAttributeNumber;
+
+use crate::parse_param::VarParamState;
+use crate::{
+    check_variable_parameters, fixed_paramref_hook, free_parsestate, get_visible_ENR, make_const,
+    make_parsestate, name_matches_visible_ENR, query_contains_extern_params,
+    setup_parse_fixed_parameters, setup_parse_variable_parameters, transformContainerSubscripts,
+    transformContainerType, variable_coerce_param_hook, variable_paramref_hook, ParseExprKind,
+    ParseRefHookState,
+};
+
+const DOMAIN_OID: Oid = 90000;
+const DOMAIN_BASE_TYPMOD: i32 = 7;
+
+fn install_type_fixture() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        syscache_seams::lookup_pg_type_shape::set(|typid| {
+            Ok(Some(types_tuple::PgTypeShape {
+                typlen: -2,
+                typbyval: false,
+                typalign: b'i' as i8,
+                typstorage: b'p' as i8,
+                typcollation: if typid == TEXTOID { 100 } else { InvalidOid },
+            }))
+        });
+        syscache_seams::pg_type_base_shape::set(|typid| {
+            Ok(Some(if typid == DOMAIN_OID {
+                syscache_seams::PgTypeBaseShape {
+                    typtype: b'd' as i8,
+                    typbasetype: TEXTOID,
+                    typtypmod: DOMAIN_BASE_TYPMOD,
+                    typelem: InvalidOid,
+                    typsubscript: InvalidOid,
+                }
+            } else {
+                syscache_seams::PgTypeBaseShape {
+                    typtype: b'b' as i8,
+                    typbasetype: InvalidOid,
+                    typtypmod: -1,
+                    typelem: InvalidOid,
+                    typsubscript: InvalidOid,
+                }
+            }))
+        });
+    });
+}
+
+#[test]
+fn parsestate_defaults_and_inheritance() {
+    let ctx = MemoryContext::new("t");
+    let mut parent = make_parsestate(ctx.mcx(), None);
+    assert_eq!(parent.p_next_resno, 1);
+    assert!(parent.p_resolve_unknowns);
+    assert!(parent.parentParseState.is_none());
+
+    parent.p_sourcetext = Some(b"select $1");
+    let carrier = VarParamState::new();
+    setup_parse_variable_parameters(&mut parent, carrier.clone());
+
+    let child = make_parsestate(ctx.mcx(), Some(&parent));
+    assert_eq!(child.p_sourcetext, Some(b"select $1".as_slice()));
+    let child_carrier = child.p_ref_hook_state.as_var_params().unwrap();
+    // C aliases p_ref_hook_state into the child: same shared array.
+    assert!(alloc::rc::Rc::ptr_eq(&carrier.param_types, &child_carrier.param_types));
+}
+
+#[test]
+fn free_parsestate_checks_resno_limit() {
+    let ctx = MemoryContext::new("t");
+    let pstate = make_parsestate(ctx.mcx(), None);
+    free_parsestate(pstate).unwrap();
+
+    let mut pstate = make_parsestate(ctx.mcx(), None);
+    pstate.p_next_resno = MaxTupleAttributeNumber + 2;
+    let err = free_parsestate(pstate).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_TOO_MANY_COLUMNS);
+}
+
+#[test]
+fn parser_errposition_via_pstate() {
+    let ctx = MemoryContext::new("t");
+    let mut pstate = make_parsestate(ctx.mcx(), None);
+    assert_eq!(crate::parser_errposition(&pstate, 3, PG_UTF8), 0);
+    pstate.p_sourcetext = Some("s\u{00e9}lect 1".as_bytes());
+    assert_eq!(crate::parser_errposition(&pstate, 3, PG_UTF8), 3);
+    assert_eq!(crate::parser_errposition(&pstate, -1, PG_UTF8), 0);
+}
+
+#[test]
+fn make_const_natural_types() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let pstate = make_parsestate(mcx, None);
+
+    let null = A_Const { val: None, location: 5 };
+    let con = make_const(mcx, &pstate, &null).unwrap();
+    let con = con.as_const().unwrap();
+    assert!(con.constisnull);
+    assert_eq!(
+        (con.consttype, con.consttypmod, con.constlen, con.constbyval, con.location),
+        (UNKNOWNOID, -1, -2, false, 5)
+    );
+
+    let int = A_Const { val: Some(ValUnion::Integer(Integer { ival: -42 })), location: 1 };
+    let con = make_const(mcx, &pstate, &int).unwrap();
+    let con = con.as_const().unwrap();
+    assert_eq!((con.consttype, con.constlen, con.constbyval), (INT4OID, 4, true));
+    assert_eq!(con.constvalue.as_i32(), -42);
+
+    // "Float" that is an oversize integer fitting int32 / int64.
+    let f32fit =
+        A_Const { val: Some(ValUnion::Float(Float { fval: "2147483647" })), location: 2 };
+    let con = make_const(mcx, &pstate, &f32fit).unwrap();
+    assert_eq!(con.as_const().unwrap().consttype, INT4OID);
+
+    let f64fit =
+        A_Const { val: Some(ValUnion::Float(Float { fval: "3000000000" })), location: 2 };
+    let con = make_const(mcx, &pstate, &f64fit).unwrap();
+    let con = con.as_const().unwrap();
+    assert_eq!((con.consttype, con.constlen, con.constbyval), (INT8OID, 8, true));
+    assert_eq!(con.constvalue.as_i64(), 3_000_000_000);
+
+    let b = A_Const { val: Some(ValUnion::Boolean(Boolean { boolval: true })), location: 3 };
+    let con = make_const(mcx, &pstate, &b).unwrap();
+    let con = con.as_const().unwrap();
+    assert_eq!((con.consttype, con.constlen, con.constbyval), (BOOLOID, 1, true));
+    assert!(con.constvalue.as_bool());
+
+    let s = A_Const {
+        val: Some(ValUnion::String(types_nodes::node_tree::String { sval: "abc" })),
+        location: 4,
+    };
+    let con = make_const(mcx, &pstate, &s).unwrap();
+    let con = con.as_const().unwrap();
+    assert_eq!((con.consttype, con.constlen, con.constbyval), (UNKNOWNOID, -2, false));
+    let bytes =
+        unsafe { core::slice::from_raw_parts(con.constvalue.as_usize() as *const u8, 4) };
+    assert_eq!(bytes, b"abc\0");
+}
+
+#[test]
+#[should_panic(expected = "numeric_in")]
+fn make_const_numeric_literal_is_deferred() {
+    let ctx = MemoryContext::new("t");
+    let pstate = make_parsestate(ctx.mcx(), None);
+    let f = A_Const { val: Some(ValUnion::Float(Float { fval: "1.5" })), location: 0 };
+    let _ = make_const(ctx.mcx(), &pstate, &f);
+}
+
+#[test]
+#[should_panic(expected = "bit_in")]
+fn make_const_bitstring_literal_is_deferred() {
+    let ctx = MemoryContext::new("t");
+    let pstate = make_parsestate(ctx.mcx(), None);
+    let b = A_Const {
+        val: Some(ValUnion::BitString(types_nodes::node_tree::BitString { bsval: "b101" })),
+        location: 0,
+    };
+    let _ = make_const(ctx.mcx(), &pstate, &b);
+}
+
+#[test]
+fn fixed_paramref_hook_resolves_and_rejects() {
+    install_type_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    let types = [TEXTOID, InvalidOid];
+    setup_parse_fixed_parameters(&mut pstate, &types);
+
+    let node =
+        fixed_paramref_hook(mcx, &pstate, &ParamRef { number: 1, location: 7 }, PG_UTF8).unwrap();
+    let param = node.as_param().unwrap();
+    assert_eq!(param.paramkind, ParamKind::PARAM_EXTERN);
+    assert_eq!(
+        (param.paramid, param.paramtype, param.paramtypmod, param.paramcollid, param.location),
+        (1, TEXTOID, -1, 100, 7)
+    );
+
+    for number in [0, 2, 3] {
+        let err = fixed_paramref_hook(
+            mcx,
+            &pstate,
+            &ParamRef { number, location: -1 },
+            PG_UTF8,
+        )
+        .unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_PARAMETER);
+    }
+}
+
+#[test]
+fn variable_paramref_hook_grows_shared_array() {
+    install_type_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    let carrier = VarParamState::new();
+    setup_parse_variable_parameters(&mut pstate, carrier.clone());
+
+    let node =
+        variable_paramref_hook(mcx, &pstate, &ParamRef { number: 3, location: 2 }, PG_UTF8)
+            .unwrap();
+    let param = node.as_param().unwrap();
+    assert_eq!((param.paramid, param.paramtype), (3, UNKNOWNOID));
+    assert_eq!(&*carrier.param_types.borrow(), &[InvalidOid, InvalidOid, UNKNOWNOID]);
+
+    let err = variable_paramref_hook(mcx, &pstate, &ParamRef { number: 0, location: -1 }, PG_UTF8)
+        .unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_PARAMETER);
+
+    // JDBC hack: VOID param in a CALL argument reads as unknown.
+    carrier.param_types.borrow_mut()[0] = VOIDOID;
+    pstate.p_expr_kind = ParseExprKind::EXPR_KIND_CALL_ARGUMENT;
+    let node =
+        variable_paramref_hook(mcx, &pstate, &ParamRef { number: 1, location: 0 }, PG_UTF8)
+            .unwrap();
+    assert_eq!(node.as_param().unwrap().paramtype, UNKNOWNOID);
+    assert_eq!(carrier.param_types.borrow()[0], UNKNOWNOID);
+}
+
+#[test]
+fn variable_coerce_param_hook_backwrites_type() {
+    install_type_fixture();
+    let ctx = MemoryContext::new("t");
+    let mut pstate = make_parsestate(ctx.mcx(), None);
+    let carrier = VarParamState::new();
+    carrier.param_types.borrow_mut().extend_from_slice(&[UNKNOWNOID]);
+    setup_parse_variable_parameters(&mut pstate, carrier.clone());
+
+    let mut param = types_nodes::Param {
+        paramkind: ParamKind::PARAM_EXTERN,
+        paramid: 1,
+        paramtype: UNKNOWNOID,
+        paramtypmod: -1,
+        paramcollid: InvalidOid,
+        location: 9,
+    };
+    assert!(variable_coerce_param_hook(&pstate, &mut param, TEXTOID, 44, 4, PG_UTF8).unwrap());
+    assert_eq!(carrier.param_types.borrow()[0], TEXTOID);
+    assert_eq!((param.paramtype, param.paramtypmod, param.paramcollid), (TEXTOID, -1, 100));
+    // Leftmost of the param's and coercion's locations.
+    assert_eq!(param.location, 4);
+
+    // Re-coercion to the same type is accepted.
+    param.paramtype = UNKNOWNOID;
+    assert!(variable_coerce_param_hook(&pstate, &mut param, TEXTOID, -1, -1, PG_UTF8).unwrap());
+
+    // Non-extern / known params fall through to normal coercion.
+    param.paramkind = ParamKind::PARAM_EXEC;
+    assert!(!variable_coerce_param_hook(&pstate, &mut param, TEXTOID, -1, -1, PG_UTF8).unwrap());
+}
+
+#[test]
+fn transform_container_type_smashes_domains_and_vectors() {
+    install_type_fixture();
+    let mut ty = INT2VECTOROID;
+    let mut typmod = -1;
+    transformContainerType(&mut ty, &mut typmod).unwrap();
+    assert_eq!((ty, typmod), (INT2ARRAYOID, -1));
+
+    let mut ty = DOMAIN_OID;
+    let mut typmod = -1;
+    transformContainerType(&mut ty, &mut typmod).unwrap();
+    assert_eq!((ty, typmod), (TEXTOID, DOMAIN_BASE_TYPMOD));
+}
+
+#[test]
+fn enr_lookup_through_pstate() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut env = queryenvironment::create_queryEnv(mcx);
+    queryenvironment::register_ENR(
+        &mut env,
+        queryenvironment::EphemeralNamedRelationData {
+            md: queryenvironment::EphemeralNamedRelationMetadataData {
+                name: mcx::PgString::from_str_in("new_rows", mcx).unwrap(),
+                reliddesc: 1234,
+                tupdesc: None,
+                enrtype: queryenvironment::ENR_NAMED_TUPLESTORE,
+                enrtuples: 3.0,
+            },
+            reldata: types_portal::TuplestoreHandle(1),
+        },
+    )
+    .unwrap();
+
+    let mut pstate = make_parsestate(mcx, None);
+    assert!(!name_matches_visible_ENR(&pstate, "new_rows"));
+    pstate.p_queryEnv = Some(&env);
+    assert!(name_matches_visible_ENR(&pstate, "new_rows"));
+    assert!(!name_matches_visible_ENR(&pstate, "old_rows"));
+    assert_eq!(get_visible_ENR(&pstate, "new_rows").unwrap().reliddesc, 1234);
+}
+
+#[test]
+#[should_panic(expected = "query_tree_walker")]
+fn check_variable_parameters_is_deferred() {
+    check_variable_parameters();
+}
+
+#[test]
+#[should_panic(expected = "query_tree_walker")]
+fn query_contains_extern_params_is_deferred() {
+    query_contains_extern_params();
+}
+
+#[test]
+#[should_panic(expected = "SubscriptingRef")]
+fn transform_container_subscripts_is_deferred() {
+    transformContainerSubscripts();
+}
+
+// Keep the ref-hook enum honest: default is None (no hooks installed).
+#[test]
+fn ref_hook_state_defaults_none() {
+    let ctx = MemoryContext::new("t");
+    let pstate = make_parsestate(ctx.mcx(), None);
+    assert!(matches!(pstate.p_ref_hook_state, ParseRefHookState::None));
+    assert!(pstate.p_ref_hook_state.as_fixed_params().is_none());
+    assert!(pstate.p_ref_hook_state.as_var_params().is_none());
 }

@@ -118,6 +118,22 @@ pub fn TransactionIdPrecedesOrEquals(id1: TransactionId, id2: TransactionId) -> 
     (id1.wrapping_sub(id2) as i32) <= 0
 }
 
+#[inline]
+pub fn TransactionIdFollows(id1: TransactionId, id2: TransactionId) -> bool {
+    if !TransactionIdIsNormal(id1) || !TransactionIdIsNormal(id2) {
+        return id1 > id2;
+    }
+    (id1.wrapping_sub(id2) as i32) > 0
+}
+
+#[inline]
+pub fn TransactionIdFollowsOrEquals(id1: TransactionId, id2: TransactionId) -> bool {
+    if !TransactionIdIsNormal(id1) || !TransactionIdIsNormal(id2) {
+        return id1 >= id2;
+    }
+    (id1.wrapping_sub(id2) as i32) >= 0
+}
+
 // Multixacts have no Bootstrap/Frozen values: always the plain modular compare.
 #[inline]
 pub fn MultiXactIdPrecedes(
