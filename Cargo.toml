@@ -164,6 +164,9 @@ members = [
     "crates/port/pg_prng_seams",
     "crates/backend/storage/ipc/shmem",
     "crates/backend/catalog/catalog",
+    "crates/backend/access/index/genam_seams",
+    "crates/backend/utils/cache/catcache",
+    "crates/backend/utils/cache/cache_syscache",
     "crates/backend/storage/ipc/dsm_core",
     "crates/backend/utils/init/miscinit",
     "crates/common/ip",
@@ -193,6 +196,9 @@ members = [
     "crates/backend/commands/tablespace_seams",
     "crates/backend/storage/smgr/md",
     "crates/backend/storage/smgr/smgr",
+    "crates/backend/utils/adt/scalar_seams",
+    "crates/backend/catalog/aclchk_seams",
+    "crates/backend/utils/misc/guc",
 ]
 
 [workspace.package]

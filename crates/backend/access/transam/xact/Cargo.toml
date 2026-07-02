@@ -72,3 +72,4 @@ smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
 guc_seams = { path = "../../../utils/misc/guc_seams" }
 waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 condition_variable_seams = { path = "../../../storage/lmgr/condition_variable_seams" }
+xact_portal_seams = { path = "../xact_portal_seams" }

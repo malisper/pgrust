@@ -12,6 +12,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aclchk_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "adt_datetime"
 version = "0.1.0"
 dependencies = [
@@ -132,6 +141,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cache_syscache"
+version = "0.1.0"
+
+[[package]]
 name = "catalog"
 version = "0.0.0"
 dependencies = [
@@ -170,6 +183,32 @@ dependencies = [
  "types_core",
  "types_error",
  "types_storage",
+]
+
+[[package]]
+name = "catcache"
+version = "0.1.0"
+dependencies = [
+ "catcache_seams",
+ "datum",
+ "genam_seams",
+ "hashfn",
+ "indexam",
+ "init_small",
+ "inval",
+ "lmgr_seams",
+ "mcx",
+ "miscinit_seams",
+ "relcache_seams",
+ "table",
+ "tupdesc",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_rel",
+ "types_scan",
+ "types_storage",
+ "types_tuple",
 ]
 
 [[package]]
@@ -387,6 +426,22 @@ dependencies = [
  "types_error",
  "types_fmgr",
 ]
+
+[[package]]
+name = "genam_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+]
+
+[[package]]
+name = "guc"
+version = "0.0.0"
 
 [[package]]
 name = "guc_file_seams"
@@ -1413,6 +1468,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "scalar_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+]
+
+[[package]]
 name = "seam_core"
 version = "0.1.0"
 
@@ -2075,6 +2137,18 @@ dependencies = [
 [[package]]
 name = "waiteventset"
 version = "0.0.0"
+dependencies = [
+ "fd",
+ "init_small",
+ "latch",
+ "latch_seams",
+ "libc",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "waitevent_seams",
+ "waiteventset_seams",
+]
 
 [[package]]
 name = "waiteventset_seams"
@@ -2156,6 +2230,7 @@ dependencies = [
  "types_storage",
  "varsup_seams",
  "waitevent_seams",
+ "xact_portal_seams",
  "xact_seams",
  "xloginsert_seams",
  "xlogrecovery_seams",

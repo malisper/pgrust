@@ -124,7 +124,7 @@ backend-access-transam-transam	src/backend/access/transam/transam.c	todo			fable
 backend-access-transam-twophase-rmgr	*/twophase_rmgr.c	todo			fabled:backend-access-transam-twophase-rmgr; m1-spine(boot)
 backend-access-transam-twophase	src/backend/access/transam/twophase.c	todo			fabled:backend-access-transam-twophase; m1-spine(boot)
 backend-access-transam-varsup	src/backend/access/transam/varsup.c	todo			fabled:backend-access-transam-varsup; m1-spine
-backend-access-transam-xact	src/backend/access/transam/xact.c	in-progress	xact		fabled:backend-access-transam-xact; m1-spine
+backend-access-transam-xact	src/backend/access/transam/xact.c	ported	xact	cold	m1-spine; TransactionState stack w/ owner-value teardown; AtEOXact orderings verified statement-by-statement vs C (phase boundaries + ProcArray-before-locks exact); fabled #347/#319/#396 endpoints day-one (plain commit allocates nothing); installs all 13 xact_seams; 31 new owner seam decl crates; xact_redo ready pending xlogreader field marshal; commit empty-case = M2 bench target; 16 tests, density 3.6%
 backend-access-transam-xlog	src/backend/access/transam/xlog.c,src/include/port/atomics.h	todo			fabled:backend-access-transam-xlog; m1-spine
 backend-access-transam-xlogarchive	src/backend/access/transam/xlogarchive.c	todo			fabled:backend-access-transam-xlogarchive; m1-dep(stub-ok)
 backend-access-transam-xlogbackup	*/xlogbackup.c	todo			fabled:backend-access-transam-xlogbackup; m1-dep(stub-ok)
@@ -491,7 +491,7 @@ backend-storage-ipc	*/ipci.c	todo			fabled:backend-storage-ipc; m1-spine
 backend-storage-ipc-small	*/barrier.c,*/ipc.c,*/pmsignal.c,*/procsignal.c,*/signalfuncs.c	combined-into:backend-storage-ipc-pmsignal			m1-spine
 backend-storage-ipc-standby	src/backend/storage/ipc/standby.c	todo			fabled:backend-storage-ipc-standby; m1-spine
 backend-storage-ipc-wait	*/latch.c,*/waiteventset.c	todo			m1-spine
-backend-storage-ipc-waiteventset	src/backend/storage/ipc/waiteventset.c	todo			fabled:backend-storage-ipc-waiteventset; m1-spine
+backend-storage-ipc-waiteventset	src/backend/storage/ipc/waiteventset.c	in-progress	waiteventset		fabled:backend-storage-ipc-waiteventset; m1-spine; claimed (sinval+waiteventset session)
 backend-storage-large-object	*/inv_api.c	todo			fabled:backend-storage-large-object; m1-dep(stub-ok)
 backend-storage-lmgr-condition-variable	src/backend/storage/lmgr/condition_variable.c	todo			fabled:backend-storage-lmgr-condition-variable; m1-dep(stub-ok)
 backend-storage-lmgr-deadlock	src/backend/storage/lmgr/deadlock.c	todo			fabled:backend-storage-lmgr-deadlock; m1-dep(stub-ok)

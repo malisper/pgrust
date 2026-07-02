@@ -233,9 +233,10 @@ pub(crate) fn eq_stored(kind: CCFastKind, stored: Datum, payload: *const u8, pro
         CCFastKind::Int4 => stored.as_i32() == probe.word().as_i32(),
         // SAFETY: stored by-ref keys always pack a live in-payload slice.
         CCFastKind::Name => compute::name_eq(unsafe { stored_bytes(payload, stored) }, probe.bytes()),
-        // SAFETY: as above.
         CCFastKind::Text | CCFastKind::OidVector => {
-            unsafe { stored_bytes(payload, stored) } == probe.bytes()
+            // SAFETY: as above.
+            let s = unsafe { stored_bytes(payload, stored) };
+            s == probe.bytes()
         }
     }
 }

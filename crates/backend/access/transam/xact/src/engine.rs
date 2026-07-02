@@ -9,12 +9,6 @@ use types_core::VirtualTransactionId;
 use types_error::ERRCODE_FEATURE_NOT_SUPPORTED;
 use types_storage::DELAY_CHKPT_START;
 
-/// `RecordTransactionCommit` — returns the latest XID among the xact and its
-/// children, or InvalidTransactionId if the xact has no XID.
-///
-/// C pallocs the commit-record inputs in the ambient TopTransactionContext;
-/// a reused thread-local scratch, reset per call (O(1) in the common
-/// empty-lists case), carries the same lifetime at C's cost (fabled #319).
 fn RecordTransactionCommit() -> PgResult<TransactionId> {
     thread_local! {
         static RECORD_COMMIT_SCRATCH: core::cell::RefCell<MemoryContext> =
@@ -34,25 +28,21 @@ fn RecordTransactionCommitGuts(mcx: mcx::Mcx<'_>) -> PgResult<TransactionId> {
     #[allow(unused_assignments)]
     let mut latest_xid = InvalidTransactionId;
 
-    // Log pending invalidations for logical decoding of in-progress xacts.
     if xlog_seams::xlog_logical_info_active::call() {
-        inval::LogLogicalInvalidations()?;
+        inval::eoxact::LogLogicalInvalidations()?;
     }
 
     let rels = catalog_storage_seams::smgr_get_pending_deletes::call(mcx, true)?;
     let children = xactGetCommittedChildren()?;
     let dropped_stats = pgstat_xact_seams::pgstat_get_transactional_drops::call(mcx, true)?;
     let (inval_msgs, relcache_init_file_inval) = if xlog_seams::xlog_standby_info_active::call() {
-        inval::xactGetCommittedInvalidationMessages(mcx)?
+        inval::eoxact::xactGetCommittedInvalidationMessages(mcx)?
     } else {
         (mcx::PgVec::new_in(mcx), false)
     };
     let mut wrote_xlog = xlog_seams::xact_last_rec_end::call() != 0;
 
     if !mark_xid_committed {
-        // No XID: we neither can nor want to write a COMMIT record. Every
-        // RelationDropStorage is followed by a catalog update (hence XID
-        // assignment), so pending deletes here are a real error, not Assert.
         if !rels.is_empty() || !dropped_stats.is_empty() {
             return Err(Box::new(PgError::error(
                 "cannot commit a transaction that deleted files but has no xid",
@@ -60,8 +50,6 @@ fn RecordTransactionCommitGuts(mcx: mcx::Mcx<'_>) -> PgResult<TransactionId> {
         }
         debug_assert!(children.is_empty());
 
-        // XID-less transactions can still carry invalidation messages
-        // (inplace updates; extensions): emit the bespoke standby record.
         if !inval_msgs.is_empty() {
             standby_seams::log_standby_invalidations::call(
                 &inval_msgs,
@@ -70,8 +58,6 @@ fn RecordTransactionCommitGuts(mcx: mcx::Mcx<'_>) -> PgResult<TransactionId> {
             wrote_xlog = true; // not strictly necessary
         }
 
-        // If we didn't create XLOG entries we're done; otherwise flush them
-        // the same as a commit record would (HOT pruning and the like).
         if !wrote_xlog {
             return Ok(InvalidTransactionId); // goto cleanup
         }
@@ -107,8 +93,6 @@ fn RecordTransactionCommitGuts(mcx: mcx::Mcx<'_>) -> PgResult<TransactionId> {
             )?;
         }
 
-        // Commit timestamp: plain commit time unless replication already set
-        // replorigin_session_origin_timestamp.
         if !replorigin || origin_seams::replorigin_session_origin_timestamp::call() == 0 {
             origin_seams::set_replorigin_session_origin_timestamp::call(
                 GetCurrentTransactionStopTimestamp(),
@@ -123,8 +107,6 @@ fn RecordTransactionCommitGuts(mcx: mcx::Mcx<'_>) -> PgResult<TransactionId> {
         )?;
     }
 
-    // Asynchronous commit allowed if synchronous_commit=off or no WAL/XID;
-    // forced synchronous for non-temp rel cleanup or ForceSyncCommit.
     if (wrote_xlog && mark_xid_committed && synchronous_commit() > SYNCHRONOUS_COMMIT_OFF)
         || xs(|s| s.force_sync_commit)
         || !rels.is_empty()
@@ -134,8 +116,6 @@ fn RecordTransactionCommitGuts(mcx: mcx::Mcx<'_>) -> PgResult<TransactionId> {
             transam_seams::transaction_id_commit_tree::call(xid, &children)?;
         }
     } else {
-        // Report the latest async commit LSN so the WAL writer flushes it;
-        // the CLOG update is deferred behind that LSN.
         xlog_seams::xlog_set_async_xact_lsn::call(xlog_seams::xact_last_rec_end::call());
         if mark_xid_committed {
             transam_seams::transaction_id_async_commit_tree::call(
@@ -154,8 +134,6 @@ fn RecordTransactionCommitGuts(mcx: mcx::Mcx<'_>) -> PgResult<TransactionId> {
 
     latest_xid = transam_seams::transaction_id_latest::call(xid, &children);
 
-    // Wait for synchronous replication if this backend assigned an xid and
-    // wrote WAL (clog is marked, but we still appear running in procarray).
     if wrote_xlog && mark_xid_committed {
         syncrep_seams::sync_rep_wait_for_lsn::call(xlog_seams::xact_last_rec_end::call(), true)?;
     }
@@ -166,11 +144,9 @@ fn RecordTransactionCommitGuts(mcx: mcx::Mcx<'_>) -> PgResult<TransactionId> {
     Ok(latest_xid)
 }
 
-/// `RecordTransactionAbort`.
 fn RecordTransactionAbort(is_subxact: bool) -> PgResult<TransactionId> {
     let xid = GetCurrentTransactionIdIfAny();
 
-    // No XID: nobody cares whether we aborted.
     if xid == InvalidTransactionId {
         if !is_subxact {
             xlog_seams::set_xact_last_rec_end::call(0);
@@ -178,7 +154,6 @@ fn RecordTransactionAbort(is_subxact: bool) -> PgResult<TransactionId> {
         return Ok(InvalidTransactionId);
     }
 
-    // Guard against aborting halfway through RecordTransactionCommit.
     if transam_seams::transaction_id_did_commit::call(xid)? {
         return Err(Box::new(PgError::new(
             types_error::PANIC,
@@ -237,14 +212,10 @@ fn record_transaction_abort_guts(
             )?;
         }
 
-        // Report the latest async abort LSN (keeps streaming replication's
-        // backlog short).
         if !is_subxact {
             xlog_seams::xlog_set_async_xact_lsn::call(xlog_seams::xact_last_rec_end::call());
         }
 
-        // Mark aborted in clog (helpful for XactLockTableWait; OK without
-        // flushing the ABORT record).
         transam_seams::transaction_id_abort_tree::call(xid, &children)?;
         Ok(())
     })();
@@ -254,8 +225,6 @@ fn record_transaction_abort_guts(
 
     let latest_xid = transam_seams::transaction_id_latest::call(xid, &children);
 
-    // Subxact abort: immediately remove failed XIDs from PGPROC's cache of
-    // running child XIDs.
     if is_subxact {
         procarray_seams::xid_cache_remove_running_xids::call(xid, &children, latest_xid)?;
     }
@@ -267,7 +236,6 @@ fn record_transaction_abort_guts(
     Ok(latest_xid)
 }
 
-/// `StartTransaction`.
 fn StartTransaction() -> PgResult<()> {
     debug_assert!(xs(|s| s.stack_len() == 1));
     debug_assert!(!xs(|s| s.top_full_xid().is_valid()));
@@ -278,7 +246,6 @@ fn StartTransaction() -> PgResult<()> {
         s.current_mut().full_transaction_id = InvalidFullTransactionId; // until assigned
     });
 
-    // Determine if statements are logged in this transaction.
     {
         let rate = (guc_tables::vars::log_xact_sample_rate.get().get)();
         let sampled = rate != 0.0
@@ -286,7 +253,6 @@ fn StartTransaction() -> PgResult<()> {
         xs(|s| s.xact_is_sampled = sampled);
     }
 
-    // initialize current transaction state fields
     xs(|s| {
         let mut n = s.current_mut();
         n.nesting_level = 1;
@@ -294,8 +260,6 @@ fn StartTransaction() -> PgResult<()> {
         n.child_xids = Vec::new();
     });
 
-    // Once fetched, user ID and security context flags will be properly
-    // reset even if transaction startup fails.
     let (prev_user, prev_sec_context) = miscinit_seams::get_user_id_and_sec_context::call();
     debug_assert_eq!(prev_sec_context, 0);
     xs(|s| {
@@ -320,22 +284,18 @@ fn StartTransaction() -> PgResult<()> {
         s.force_sync_commit = false;
         s.MyXactFlags = 0;
 
-        // reinitialize within-transaction counters
         s.current_mut().sub_transaction_id = TopSubTransactionId;
         s.current_sub_transaction_id = TopSubTransactionId;
         s.set_command_id(FirstCommandId);
         s.set_command_id_used(false);
 
-        // initialize reported xid accounting
         s.unreported_xids.clear();
         s.current_mut().did_log_xid = false;
     });
 
-    // resource-management stuff first
     AtStart_Memory();
     AtStart_ResourceOwner()?;
 
-    // Assign a new LocalTransactionId, form the vxid, lock it, advertise it.
     let vxid = VirtualTransactionId {
         procNumber: init_small::globals::MyProcNumber(),
         localTransactionId: sinval_seams::get_next_local_transaction_id::call(),
@@ -343,13 +303,10 @@ fn StartTransaction() -> PgResult<()> {
     lock_seams::virtual_xact_lock_table_insert::call(vxid)?;
     {
         let proc = lmgr_proc::GetPGProcByNumber(lmgr_proc::MyProc().expect("MyProc is not set"));
-        debug_assert_eq!(proc.vxid.procNumber, vxid.procNumber);
+        debug_assert_eq!(proc.vxid.procNumber.load(Relaxed), vxid.procNumber);
         proc.vxid.lxid.store(vxid.localTransactionId, Relaxed);
     }
 
-    // transaction_timestamp(): normally the first command's
-    // statement_timestamp(); advanced for xacts started inside nonatomic SPI
-    // contexts; a parallel worker got it via SetParallelStartTimestamps().
     if !parallel_seams::is_parallel_worker::call() {
         let ts = if !spi_seams::spi_inside_nonatomic_context::call() {
             xs(|s| s.stmt_start_timestamp)
@@ -363,14 +320,13 @@ fn StartTransaction() -> PgResult<()> {
     backend_status_seams::pgstat_report_xact_timestamp::call(xs(|s| s.xact_start_timestamp));
     xs(|s| s.xact_stop_timestamp = 0);
 
-    // initialize other subsystems for new transaction
     guc_seams::at_start_guc::call();
     AtStart_Cache()?;
     trigger_seams::after_trigger_begin_xact::call()?;
 
     xs(|s| s.current_mut().state = TRANS_INPROGRESS);
 
-    let transaction_timeout = lmgr_proc::TransactionTimeout();
+    let transaction_timeout = lmgr_proc::globals::TransactionTimeout();
     if transaction_timeout > 0 {
         timeout_seams::enable_timeout_after::call(
             timeout_seams::TRANSACTION_TIMEOUT,
@@ -382,7 +338,6 @@ fn StartTransaction() -> PgResult<()> {
     Ok(())
 }
 
-/// `CommitTransaction`.
 fn CommitTransaction() -> PgResult<()> {
     let is_parallel_worker = cur_block_state() == TBLOCK_PARALLEL_INPROGRESS;
 
@@ -398,8 +353,6 @@ fn CommitTransaction() -> PgResult<()> {
     }
     debug_assert!(!xs(|s| s.is_subxact()));
 
-    // Pre-commit processing that calls user-defined code (closing cursors
-    // can queue triggers, triggers can open cursors...): loop to quiescence.
     loop {
         trigger_seams::after_trigger_fire_deferred::call()?;
         if !portalmem_seams::pre_commit_portals::call(false)? {
@@ -413,7 +366,6 @@ fn CommitTransaction() -> PgResult<()> {
         XACT_EVENT_PRE_COMMIT
     })?;
 
-    // Clean up any unfinished parallel operation, warning about leaks.
     parallel_seams::at_eoxact_parallel::call(true)?;
     let level = xs(|s| s.current().parallel_mode_level);
     if is_parallel_worker {
@@ -430,7 +382,6 @@ fn CommitTransaction() -> PgResult<()> {
 
     trigger_seams::after_trigger_end_xact::call(true)?;
 
-    // ON COMMIT management (after closing cursors, to avoid dangling refs).
     tablecmds_seams::pre_commit_on_commit_actions::call()?;
 
     // Sync files created but not WAL-logged; must precede
@@ -443,8 +394,6 @@ fn CommitTransaction() -> PgResult<()> {
     // before serializable cleanup).
     async_seams::pre_commit_notify::call()?;
 
-    // Serializable completion as late as possible, but not in a parallel
-    // worker (the leader's serializable state lives on).
     if !is_parallel_worker {
         predicate_seams::pre_commit_check_for_serialization_failure::call()?;
     }
@@ -459,15 +408,13 @@ fn CommitTransaction() -> PgResult<()> {
         s.current_mut().parallel_child_xact = false; // should be false already
     });
 
-    if lmgr_proc::TransactionTimeout() > 0 {
+    if lmgr_proc::globals::TransactionTimeout() > 0 {
         timeout_seams::disable_timeout::call(timeout_seams::TRANSACTION_TIMEOUT, false)?;
     }
 
     let latest_xid = if !is_parallel_worker {
-        // This is where we durably commit.
         RecordTransactionCommit()?
     } else {
-        // The leader marks the XID committed; report our WAL position.
         parallel_seams::parallel_worker_report_last_rec_end::call(
             xlog_seams::xact_last_rec_end::call(),
         )?;
@@ -500,7 +447,7 @@ fn CommitTransaction() -> PgResult<()> {
 
     // Make catalog changes visible to all backends: after relcache refs are
     // dropped, before locks are released.
-    inval::AtEOXact_Inval(true)?;
+    inval::eoxact::AtEOXact_Inval(true)?;
 
     multixact_seams::at_eoxact_multixact::call();
 
@@ -509,10 +456,8 @@ fn CommitTransaction() -> PgResult<()> {
     // Drop deleted files (after relcache/buffer pins and locks are gone).
     catalog_storage_seams::smgr_do_pending_deletes::call(true)?;
 
-    // Notify other backends only once fully done from their viewpoint.
     async_seams::at_commit_notify::call()?;
 
-    // Everything below is purely internal-to-this-backend cleanup.
     guc_seams::at_eoxact_guc::call(true, 1)?;
     spi_seams::at_eoxact_spi::call(true)?;
     pg_enum_seams::at_eoxact_enum::call();
@@ -551,7 +496,6 @@ fn CommitTransaction() -> PgResult<()> {
     Ok(())
 }
 
-/// `PrepareTransaction`.
 fn PrepareTransaction() -> PgResult<()> {
     let xid = GetCurrentTransactionId()?;
     debug_assert!(!IsInParallelMode());
@@ -577,16 +521,13 @@ fn PrepareTransaction() -> PgResult<()> {
 
     tablecmds_seams::pre_commit_on_commit_actions::call()?;
 
-    // before EndPrepare()
     catalog_storage_seams::smgr_do_pending_syncs::call(true, false)?;
 
     be_fsstubs_seams::at_eoxact_large_object::call(true)?;
 
-    // NOTIFY requires no work at this point
 
     predicate_seams::pre_commit_check_for_serialization_failure::call()?;
 
-    // Checked after ON COMMIT actions, which might still touch a temp rel.
     if (MyXactFlags() & XACT_FLAGS_ACCESSEDTEMPNAMESPACE) != 0 {
         return ereport(ERROR)
             .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
@@ -605,13 +546,12 @@ fn PrepareTransaction() -> PgResult<()> {
 
     xs(|s| s.current_mut().state = TRANS_PREPARE);
 
-    if lmgr_proc::TransactionTimeout() > 0 {
+    if lmgr_proc::globals::TransactionTimeout() > 0 {
         timeout_seams::disable_timeout::call(timeout_seams::TRANSACTION_TIMEOUT, false)?;
     }
 
     let prepared_at = timestamp_seams::get_current_timestamp::call();
 
-    // Reserve the GID (fails if invalid or already in use).
     let gid = xs(|s| s.prepare_gid.take())
         .ok_or_else(|| PgError::error("PrepareTransaction: no prepared-transaction GID set"))?;
     let databaseid = init_small::globals::MyDatabaseId();
@@ -632,7 +572,7 @@ fn PrepareTransaction() -> PgResult<()> {
     let children = xactGetCommittedChildren()?;
     let commitstats = pgstat_xact_seams::pgstat_get_transactional_drops::call(prep_mcx, true)?;
     let abortstats = pgstat_xact_seams::pgstat_get_transactional_drops::call(prep_mcx, false)?;
-    let (invalmsgs, initfileinval) = inval::xactGetCommittedInvalidationMessages(prep_mcx)?;
+    let (invalmsgs, initfileinval) = inval::eoxact::xactGetCommittedInvalidationMessages(prep_mcx)?;
 
     let start_args = twophase_seams::StartPrepareArgs {
         xid,
@@ -662,7 +602,6 @@ fn PrepareTransaction() -> PgResult<()> {
     multixact_seams::at_prepare_multixact::call()?;
     relmapper_seams::at_prepare_relation_map::call()?;
 
-    // Here is where we really truly prepare.
     twophase_seams::end_prepare::call()?;
 
     xlog_seams::set_xact_last_rec_end::call(0);
@@ -671,10 +610,8 @@ fn PrepareTransaction() -> PgResult<()> {
     // GetLockConflicts can't conclude "xact already ended" for our locks.
     lock_seams::post_prepare_locks::call(xid)?;
 
-    // Only after the prepared transaction has been marked valid.
     procarray_seams::proc_array_clear_transaction::call()?;
 
-    // Too late to abort if an error is raised from here on.
     CallXactCallbacks(XACT_EVENT_PREPARE)?;
 
     // Unlike Commit/Abort, Prepare does NOT reset CurrentResourceOwner here
@@ -689,11 +626,10 @@ fn PrepareTransaction() -> PgResult<()> {
 
     typcache_seams::at_eoxact_type_cache::call();
 
-    // notify doesn't need a postprepare call
 
     pgstat_xact_seams::post_prepare_pgstat::call();
 
-    inval::PostPrepare_Inval()?;
+    inval::eoxact::PostPrepare_Inval()?;
 
     catalog_storage_seams::post_prepare_smgr::call();
 
@@ -703,10 +639,8 @@ fn PrepareTransaction() -> PgResult<()> {
 
     resowner_seams::release_transaction_owner_locks::call(true)?;
 
-    // After this the transaction is completely detached from our backend.
     twophase_seams::post_prepare_twophase::call();
 
-    // PREPARE acts the same as COMMIT as far as GUC is concerned.
     guc_seams::at_eoxact_guc::call(true, 1)?;
     spi_seams::at_eoxact_spi::call(true)?;
     pg_enum_seams::at_eoxact_enum::call();
@@ -717,7 +651,6 @@ fn PrepareTransaction() -> PgResult<()> {
     combocid_seams::at_eoxact_combocid::call();
     // AtEOXact_HashTables dissolves; no AtEOXact_PgStat (pgstat fixed above).
     snapmgr_seams::at_eoxact_snapshot::call(true, true)?;
-    // we treat PREPARE as ROLLBACK so far as waking workers goes
     launcher_seams::at_eoxact_apply_launcher::call(false);
     logical_worker_seams::at_eoxact_logical_rep_workers::call(false);
     backend_status_seams::pgstat_report_xact_timestamp::call(0);
@@ -746,20 +679,16 @@ fn PrepareTransaction() -> PgResult<()> {
     Ok(())
 }
 
-/// `AbortTransaction`.
 fn AbortTransaction() -> PgResult<()> {
     init_small::globals::HoldInterrupts();
 
-    if lmgr_proc::TransactionTimeout() > 0 {
+    if lmgr_proc::globals::TransactionTimeout() > 0 {
         timeout_seams::disable_timeout::call(timeout_seams::TRANSACTION_TIMEOUT, false)?;
     }
 
     AtAbort_Memory();
     AtAbort_ResourceOwner();
 
-    // Release LW locks ASAP (regular locks are held till we finish
-    // aborting); the abort path swallows the release error, as C's
-    // error-recovery LWLockReleaseAll does.
     let _ = lwlock::LWLockReleaseAll();
 
     waitevent_seams::pgstat_report_wait_end::call();
@@ -773,14 +702,10 @@ fn AbortTransaction() -> PgResult<()> {
 
     let _ = condition_variable_seams::condition_variable_cancel_sleep::call();
 
-    // The lock manager would choke on a new wait otherwise.
-    lmgr_proc::LockErrorCleanup();
+    lmgr_proc::LockErrorCleanup()?;
 
-    // After LockErrorCleanup, to avoid uselessly rescheduling lock/deadlock
-    // timeouts.
     timeout_seams::reschedule_timeouts::call()?;
 
-    // Re-enable signals, in case we longjmp'd out of a signal handler.
     libpq_pqsignal::unblock_signals();
 
     let is_parallel_worker = cur_block_state() == TBLOCK_PARALLEL_INPROGRESS;
@@ -795,8 +720,6 @@ fn AbortTransaction() -> PgResult<()> {
 
     xs(|s| s.current_mut().state = TRANS_ABORT);
 
-    // Reset user ID which might have been changed transiently (SECURITY
-    // DEFINER escape); restores SecurityRestrictionContext too.
     let (prev_user, prev_sec) = xs(|s| (s.current().prev_user, s.current().prev_sec_context));
     miscinit_seams::set_user_id_and_sec_context::call(prev_user, prev_sec);
 
@@ -806,14 +729,12 @@ fn AbortTransaction() -> PgResult<()> {
 
     snapbuild_seams::snap_build_reset_exported_snapshot_state::call();
 
-    // Clean up any unfinished parallel operation; no leak warnings.
     parallel_seams::at_eoxact_parallel::call(false)?;
     xs(|s| {
         s.current_mut().parallel_mode_level = 0;
         s.current_mut().parallel_child_xact = false; // should be false already
     });
 
-    // do abort processing
     trigger_seams::after_trigger_end_xact::call(false)?;
     portalmem_seams::at_abort_portals::call()?;
     catalog_storage_seams::smgr_do_pending_syncs::call(false, is_parallel_worker)?;
@@ -822,9 +743,6 @@ fn AbortTransaction() -> PgResult<()> {
     relmapper_seams::at_eoxact_relation_map::call(false, is_parallel_worker)?;
     twophase_seams::at_abort_twophase::call();
 
-    // Advertise the abort in pg_xact (if we got an XID); in a parallel
-    // worker the leader writes the abort record, so just nudge the WAL
-    // writer.
     let latest_xid = if !is_parallel_worker {
         RecordTransactionAbort(false)?
     } else {
@@ -839,8 +757,6 @@ fn AbortTransaction() -> PgResult<()> {
         latest_xid,
     )?;
 
-    // Post-abort cleanup; skippable if we failed before creating a resource
-    // owner.
     if xs(|s| s.current().has_resource_owner) {
         CallXactCallbacks(if is_parallel_worker {
             XACT_EVENT_PARALLEL_ABORT
@@ -853,7 +769,7 @@ fn AbortTransaction() -> PgResult<()> {
         bufmgr_seams::at_eoxact_buffers::call(false);
         relcache_seams::at_eoxact_relation_cache::call(false)?;
         typcache_seams::at_eoxact_type_cache::call();
-        inval::AtEOXact_Inval(false)?;
+        inval::eoxact::AtEOXact_Inval(false)?;
         multixact_seams::at_eoxact_multixact::call();
         resowner_seams::release_transaction_owner_locks::call(false)?;
         catalog_storage_seams::smgr_do_pending_deletes::call(false)?;
@@ -873,12 +789,10 @@ fn AbortTransaction() -> PgResult<()> {
         backend_status_seams::pgstat_report_xact_timestamp::call(0);
     }
 
-    // State remains TRANS_ABORT until CleanupTransaction().
     init_small::globals::ResumeInterrupts();
     Ok(())
 }
 
-/// `CleanupTransaction`.
 fn CleanupTransaction() -> PgResult<()> {
     if xs(|s| s.current().state) != TRANS_ABORT {
         return Err(Box::new(PgError::new(
@@ -917,20 +831,15 @@ fn CleanupTransaction() -> PgResult<()> {
     Ok(())
 }
 
-/// `StartTransactionCommand`.
 pub fn StartTransactionCommand() -> PgResult<()> {
     match cur_block_state() {
-        // not in a transaction block
         TBLOCK_DEFAULT => {
             StartTransaction()?;
             xs(|s| s.current_mut().block_state = TBLOCK_STARTED);
         }
 
-        // New command inside a (sub)transaction block: nothing to do (CCI
-        // happened in the previous CommitTransactionCommand).
         TBLOCK_INPROGRESS | TBLOCK_IMPLICIT_INPROGRESS | TBLOCK_SUBINPROGRESS => {}
 
-        // Failed block: stay aborted until ROLLBACK.
         TBLOCK_ABORT | TBLOCK_SUBABORT => {}
 
         other => {
@@ -962,7 +871,6 @@ pub fn RestoreTransactionCharacteristics(saved: SavedTransactionCharacteristics)
     });
 }
 
-/// `CommitTransactionCommand`.
 pub fn CommitTransactionCommand() -> PgResult<()> {
     while !CommitTransactionCommandInternal()? {}
     Ok(())
@@ -973,7 +881,6 @@ fn CommitTransactionCommandInternal() -> PgResult<bool> {
     let savetc = SaveTransactionCharacteristics();
 
     match cur_block_state() {
-        // Someone forgot StartTransactionCommand.
         TBLOCK_DEFAULT | TBLOCK_PARALLEL_INPROGRESS => {
             return Err(Box::new(PgError::new(
                 FATAL,
@@ -984,7 +891,6 @@ fn CommitTransactionCommandInternal() -> PgResult<bool> {
             )));
         }
 
-        // Not in a block: shut down the whole transaction.
         TBLOCK_STARTED => {
             CommitTransaction()?;
             xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
@@ -994,12 +900,10 @@ fn CommitTransactionCommandInternal() -> PgResult<bool> {
             xs(|s| s.current_mut().block_state = TBLOCK_INPROGRESS);
         }
 
-        // Command done inside a live (sub)block: bump the command counter.
         TBLOCK_INPROGRESS | TBLOCK_IMPLICIT_INPROGRESS | TBLOCK_SUBINPROGRESS => {
             CommandCounterIncrement()?;
         }
 
-        // COMMIT received.
         TBLOCK_END => {
             CommitTransaction()?;
             xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
@@ -1015,7 +919,6 @@ fn CommitTransactionCommandInternal() -> PgResult<bool> {
 
         TBLOCK_ABORT | TBLOCK_SUBABORT => {}
 
-        // ROLLBACK in an already-aborted block.
         TBLOCK_ABORT_END => {
             CleanupTransaction()?;
             xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
@@ -1029,7 +932,6 @@ fn CommitTransactionCommandInternal() -> PgResult<bool> {
             }
         }
 
-        // ROLLBACK in a live block.
         TBLOCK_ABORT_PENDING => {
             AbortTransaction()?;
             CleanupTransaction()?;
@@ -1049,13 +951,11 @@ fn CommitTransactionCommandInternal() -> PgResult<bool> {
             xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
         }
 
-        // Just completed a SAVEPOINT.
         TBLOCK_SUBBEGIN => {
             StartSubTransaction()?;
             xs(|s| s.current_mut().block_state = TBLOCK_SUBINPROGRESS);
         }
 
-        // RELEASE: commit subtransactions up to and including the target.
         TBLOCK_SUBRELEASE => {
             loop {
                 CommitSubTransaction()?;
@@ -1069,7 +969,6 @@ fn CommitTransactionCommandInternal() -> PgResult<bool> {
             ));
         }
 
-        // COMMIT: pop all open subtransactions, then finish the main xact.
         TBLOCK_SUBCOMMIT => {
             loop {
                 CommitSubTransaction()?;
@@ -1106,7 +1005,6 @@ fn CommitTransactionCommandInternal() -> PgResult<bool> {
             }
         }
 
-        // Failed subtransaction with a pending ROLLBACK TO: loop.
         TBLOCK_SUBABORT_END => {
             CleanupSubTransaction()?;
             return Ok(false);
@@ -1118,7 +1016,6 @@ fn CommitTransactionCommandInternal() -> PgResult<bool> {
             return Ok(false);
         }
 
-        // ROLLBACK TO: abort + pop the live subtransaction, then restart it.
         TBLOCK_SUBRESTART => {
             let (name, savepoint_level) = xs(|s| {
                 let name = s.current_mut().name.take();
@@ -1136,8 +1033,6 @@ fn CommitTransactionCommandInternal() -> PgResult<bool> {
             xs(|s| s.current_mut().block_state = TBLOCK_SUBINPROGRESS);
         }
 
-        // Same, but the subtransaction had already failed. (C's FATAL
-        // default arm is statically unreachable: the match is exhaustive.)
         TBLOCK_SUBABORT_RESTART => {
             let (name, savepoint_level) = xs(|s| {
                 let name = s.current_mut().name.take();
@@ -1158,7 +1053,6 @@ fn CommitTransactionCommandInternal() -> PgResult<bool> {
     Ok(true)
 }
 
-/// `AbortCurrentTransaction`.
 pub fn AbortCurrentTransaction() -> PgResult<()> {
     while !AbortCurrentTransactionInternal()? {}
     Ok(())
@@ -1168,10 +1062,7 @@ fn AbortCurrentTransactionInternal() -> PgResult<bool> {
     match cur_block_state() {
         TBLOCK_DEFAULT => {
             if xs(|s| s.current().state) == TRANS_DEFAULT {
-                // we are idle, so nothing to do
             } else {
-                // Error during transaction start (TRANS_START): adjust the
-                // low-level state to suppress AbortTransaction's warning.
                 if xs(|s| s.current().state) == TRANS_START {
                     xs(|s| s.current_mut().state = TRANS_INPROGRESS);
                 }
@@ -1186,21 +1077,18 @@ fn AbortCurrentTransactionInternal() -> PgResult<bool> {
             xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
         }
 
-        // BEGIN itself failed.
         TBLOCK_BEGIN => {
             AbortTransaction()?;
             CleanupTransaction()?;
             xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
         }
 
-        // Failure in a live block: abort, await ROLLBACK.
         TBLOCK_INPROGRESS | TBLOCK_PARALLEL_INPROGRESS => {
             AbortTransaction()?;
             xs(|s| s.current_mut().block_state = TBLOCK_ABORT);
             // CleanupTransaction happens when we exit TBLOCK_ABORT_END
         }
 
-        // COMMIT failed.
         TBLOCK_END => {
             AbortTransaction()?;
             CleanupTransaction()?;
@@ -1209,7 +1097,6 @@ fn AbortCurrentTransactionInternal() -> PgResult<bool> {
 
         TBLOCK_ABORT | TBLOCK_SUBABORT => {}
 
-        // ROLLBACK failed after AbortTransaction had run.
         TBLOCK_ABORT_END => {
             CleanupTransaction()?;
             xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
@@ -1221,20 +1108,17 @@ fn AbortCurrentTransactionInternal() -> PgResult<bool> {
             xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
         }
 
-        // PREPARE failed.
         TBLOCK_PREPARE => {
             AbortTransaction()?;
             CleanupTransaction()?;
             xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
         }
 
-        // Error in a live subtransaction.
         TBLOCK_SUBINPROGRESS => {
             AbortSubTransaction()?;
             xs(|s| s.current_mut().block_state = TBLOCK_SUBABORT);
         }
 
-        // Failure while completing a subxact operation: abort + pop, loop.
         TBLOCK_SUBBEGIN | TBLOCK_SUBRELEASE | TBLOCK_SUBCOMMIT | TBLOCK_SUBABORT_PENDING
         | TBLOCK_SUBRESTART => {
             AbortSubTransaction()?;
@@ -1242,7 +1126,6 @@ fn AbortCurrentTransactionInternal() -> PgResult<bool> {
             return Ok(false);
         }
 
-        // As above, but AbortSubTransaction already ran.
         TBLOCK_SUBABORT_END | TBLOCK_SUBABORT_RESTART => {
             CleanupSubTransaction()?;
             return Ok(false);
@@ -1252,7 +1135,6 @@ fn AbortCurrentTransactionInternal() -> PgResult<bool> {
     Ok(true)
 }
 
-/// `BeginTransactionBlock`.
 pub fn BeginTransactionBlock() -> PgResult<()> {
     match cur_block_state() {
         TBLOCK_STARTED | TBLOCK_IMPLICIT_INPROGRESS => {
@@ -1271,13 +1153,10 @@ pub fn BeginTransactionBlock() -> PgResult<()> {
     }
 }
 
-/// Returns true if the PREPARE was scheduled, false if it degraded to a
-/// plain commit.
 pub fn PrepareTransactionBlock(gid: &str) -> PgResult<bool> {
     let mut result = EndTransactionBlock(false)?;
 
     if result {
-        // the topmost transaction state carries the END/PREPARE mark
         let top_state = xs(|s| s.node(0).block_state);
         if top_state == TBLOCK_END {
             let gid = try_strdup(gid, "out of memory saving prepared-transaction GID")?;
@@ -1286,7 +1165,6 @@ pub fn PrepareTransactionBlock(gid: &str) -> PgResult<bool> {
                 s.node_mut(0).block_state = TBLOCK_PREPARE;
             });
         } else {
-            // Not in a transaction: EndTransactionBlock already warned.
             debug_assert!(matches!(
                 top_state,
                 TBLOCK_STARTED | TBLOCK_IMPLICIT_INPROGRESS
@@ -1297,7 +1175,6 @@ pub fn PrepareTransactionBlock(gid: &str) -> PgResult<bool> {
     Ok(result)
 }
 
-/// Returns true if a commit is scheduled, false if the block must abort.
 pub fn EndTransactionBlock(chain: bool) -> PgResult<bool> {
     let mut result = false;
     match cur_block_state() {
@@ -1323,12 +1200,10 @@ pub fn EndTransactionBlock(chain: bool) -> PgResult<bool> {
             result = true;
         }
 
-        // Failed block: COMMIT works like ROLLBACK here.
         TBLOCK_ABORT => {
             xs(|s| s.current_mut().block_state = TBLOCK_ABORT_END);
         }
 
-        // Live subtransactions: subcommit them all, then commit main.
         TBLOCK_SUBINPROGRESS => {
             let bad: Option<TBlockState> = xs(|s| {
                 let last = s.stack_len() - 1;
@@ -1354,7 +1229,6 @@ pub fn EndTransactionBlock(chain: bool) -> PgResult<bool> {
             result = true;
         }
 
-        // Failed subtransaction: abort everything, exit the main xact too.
         TBLOCK_SUBABORT => {
             let bad: Option<TBlockState> = xs(|s| {
                 let last = s.stack_len() - 1;
@@ -1384,7 +1258,6 @@ pub fn EndTransactionBlock(chain: bool) -> PgResult<bool> {
             }
         }
 
-        // COMMIT outside a block: warn (error for AND CHAIN) but commit.
         TBLOCK_STARTED => {
             if chain {
                 return ereport(ERROR)
@@ -1411,12 +1284,10 @@ pub fn EndTransactionBlock(chain: bool) -> PgResult<bool> {
         other => return Err(unexpected_block_state("EndTransactionBlock", other)),
     }
 
-    // C walks s up to the TOP node before `s->chain = chain`.
     xs(|s| s.node_mut(0).chain = chain);
     Ok(result)
 }
 
-/// `UserAbortTransactionBlock`.
 pub fn UserAbortTransactionBlock(chain: bool) -> PgResult<()> {
     match cur_block_state() {
         TBLOCK_INPROGRESS => {
@@ -1427,7 +1298,6 @@ pub fn UserAbortTransactionBlock(chain: bool) -> PgResult<()> {
             xs(|s| s.current_mut().block_state = TBLOCK_ABORT_END);
         }
 
-        // In a subtransaction: abort all of them + the main transaction.
         TBLOCK_SUBINPROGRESS | TBLOCK_SUBABORT => {
             let bad: Option<TBlockState> = xs(|s| {
                 let last = s.stack_len() - 1;
@@ -1457,7 +1327,6 @@ pub fn UserAbortTransactionBlock(chain: bool) -> PgResult<()> {
             }
         }
 
-        // ROLLBACK outside a block: warn (error for AND CHAIN), abort anyway.
         TBLOCK_STARTED | TBLOCK_IMPLICIT_INPROGRESS => {
             if chain {
                 return ereport(ERROR)
@@ -1515,16 +1384,12 @@ pub fn DefineSavepoint(name: Option<&str>) -> PgResult<()> {
     match cur_block_state() {
         TBLOCK_INPROGRESS | TBLOCK_SUBINPROGRESS => {
             PushTransaction()?;
-            // The name is allocated in the parent transaction's lifetime: no
-            // transaction context exists for the new node yet.
             if let Some(name) = name {
                 let name = try_strdup(name, "out of memory saving savepoint name")?;
                 xs(|s| s.current_mut().name = Some(name));
             }
             Ok(())
         }
-        // Disallowed in an implicit block: the savepoint would be
-        // unreleasable after the multi-statement command ends.
         TBLOCK_IMPLICIT_INPROGRESS => ereport(ERROR)
             .errcode(ERRCODE_NO_ACTIVE_SQL_TRANSACTION)
             // translator: %s represents an SQL statement name
@@ -1534,7 +1399,6 @@ pub fn DefineSavepoint(name: Option<&str>) -> PgResult<()> {
     }
 }
 
-/// `ReleaseSavepoint`.
 pub fn ReleaseSavepoint(name: &str) -> PgResult<()> {
     if IsInParallelMode() || parallel_seams::is_parallel_worker::call() {
         return ereport(ERROR)
@@ -1544,7 +1408,6 @@ pub fn ReleaseSavepoint(name: &str) -> PgResult<()> {
     }
 
     match cur_block_state() {
-        // In a transaction block with no savepoints defined.
         TBLOCK_INPROGRESS => {
             return ereport(ERROR)
                 .errcode(ERRCODE_S_E_INVALID_SPECIFICATION)
@@ -1564,8 +1427,6 @@ pub fn ReleaseSavepoint(name: &str) -> PgResult<()> {
 
     let target = find_savepoint(name, "ReleaseSavepoint")?;
 
-    // Mark "commit pending" all subtransactions up to the target; the
-    // commits happen when control returns to the main loop.
     xs(|s| {
         let last = s.stack_len() - 1;
         for i in (target..=last).rev() {
@@ -1608,7 +1469,6 @@ fn find_savepoint(name: &str, function: &'static str) -> PgResult<usize> {
     }
 }
 
-/// `RollbackToSavepoint`.
 pub fn RollbackToSavepoint(name: &str) -> PgResult<()> {
     if IsInParallelMode() || parallel_seams::is_parallel_worker::call() {
         return ereport(ERROR)
@@ -1637,8 +1497,6 @@ pub fn RollbackToSavepoint(name: &str) -> PgResult<()> {
 
     let target = find_savepoint(name, "RollbackToSavepoint")?;
 
-    // Mark "abort pending" all subtransactions up to the target, the target
-    // itself "restart pending".
     let bad: Option<TBlockState> = xs(|s| {
         let last = s.stack_len() - 1;
         for i in ((target + 1)..=last).rev() {
@@ -1671,14 +1529,9 @@ pub fn RollbackToSavepoint(name: &str) -> PgResult<()> {
 /// Like DefineSavepoint, but allowed in implicit blocks, parallel mode, and
 /// the STARTED/END/PREPARE states; immediately starts the subtransaction.
 pub fn BeginInternalSubTransaction(name: Option<&str>) -> PgResult<()> {
-    // Errors here are improbable, but C forces a FATAL exit (ExitOnAnyError):
-    // callers can't handle losing control and the state may be corrupted.
     let save_exit_on_any_error = elog::config::exit_on_any_error();
     elog::config::set_exit_on_any_error(true);
 
-    // No parallel-mode check: internal subtransactions are fine in parallel
-    // mode as long as no XIDs/command IDs are assigned (enforced in
-    // AssignTransactionId / CommandCounterIncrement).
     let result = (|| -> PgResult<()> {
         match cur_block_state() {
             TBLOCK_STARTED
@@ -1707,7 +1560,6 @@ pub fn BeginInternalSubTransaction(name: Option<&str>) -> PgResult<()> {
     result
 }
 
-/// RELEASE (commit) the innermost subtransaction regardless of its name.
 pub fn ReleaseCurrentSubTransaction() -> PgResult<()> {
     if cur_block_state() != TBLOCK_SUBINPROGRESS {
         return Err(Box::new(PgError::new(
@@ -1756,9 +1608,7 @@ pub fn RollbackAndReleaseCurrentSubTransaction() -> PgResult<()> {
     Ok(())
 }
 
-/// Abort any active transaction or block, leaving a known idle state.
 pub fn AbortOutOfAnyTransaction() -> PgResult<()> {
-    // Ensure we're not running in a doomed memory context.
     AtAbort_Memory();
 
     loop {
@@ -1767,8 +1617,6 @@ pub fn AbortOutOfAnyTransaction() -> PgResult<()> {
                 if xs(|s| s.current().state) == TRANS_DEFAULT {
                     // Not in a transaction, do nothing.
                 } else {
-                    // Incomplete start (TRANS_START): clean up, suppressing
-                    // AbortTransaction's warning.
                     if xs(|s| s.current().state) == TRANS_START {
                         xs(|s| s.current_mut().state = TRANS_INPROGRESS);
                     }
@@ -1789,14 +1637,10 @@ pub fn AbortOutOfAnyTransaction() -> PgResult<()> {
                 xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
             }
             TBLOCK_ABORT | TBLOCK_ABORT_END => {
-                // AbortTransaction already done, still need Cleanup. If we
-                // failed partway through ROLLBACK, a portal may still be
-                // running that command: shut portals down first.
                 portalmem_seams::at_abort_portals::call()?;
                 CleanupTransaction()?;
                 xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
             }
-            // In a subtransaction: clean it up and abort the parent too.
             TBLOCK_SUBBEGIN
             | TBLOCK_SUBINPROGRESS
             | TBLOCK_SUBRELEASE
@@ -1807,7 +1651,6 @@ pub fn AbortOutOfAnyTransaction() -> PgResult<()> {
                 CleanupSubTransaction()?;
             }
             TBLOCK_SUBABORT | TBLOCK_SUBABORT_END | TBLOCK_SUBABORT_RESTART => {
-                // AbortSubTransaction already done; a live portal may remain.
                 if xs(|s| s.current().has_resource_owner) {
                     let (my, parent) = subxact_ids();
                     portalmem_seams::at_subabort_portals::call(my, parent)?;
@@ -1838,7 +1681,6 @@ fn subxact_ids() -> (SubTransactionId, SubTransactionId) {
     })
 }
 
-/// `StartSubTransaction`.
 fn StartSubTransaction() -> PgResult<()> {
     if xs(|s| s.current().state) != TRANS_DEFAULT {
         warn_internal(&format!(
@@ -1848,7 +1690,6 @@ fn StartSubTransaction() -> PgResult<()> {
     }
     xs(|s| s.current_mut().state = TRANS_START);
 
-    // resource-management stuff first
     AtSubStart_Memory();
     AtSubStart_ResourceOwner()?;
     trigger_seams::after_trigger_begin_sub_xact::call()?;
@@ -1862,7 +1703,6 @@ fn StartSubTransaction() -> PgResult<()> {
     Ok(())
 }
 
-/// `CommitSubTransaction`.
 fn CommitSubTransaction() -> PgResult<()> {
     ShowTransactionState("CommitSubTransaction");
 
@@ -1873,11 +1713,9 @@ fn CommitSubTransaction() -> PgResult<()> {
         ));
     }
 
-    // Pre-commit processing goes here.
     let (my, parent) = subxact_ids();
     CallSubXactCallbacks(SUBXACT_EVENT_PRE_COMMIT_SUB, my, parent)?;
 
-    // Clean up any unfinished parallel operation; warn about leaks.
     parallel_seams::at_eosubxact_parallel::call(true, my)?;
     let level = xs(|s| s.current().parallel_mode_level);
     if level != 0 {
@@ -1887,14 +1725,10 @@ fn CommitSubTransaction() -> PgResult<()> {
         xs(|s| s.current_mut().parallel_mode_level = 0);
     }
 
-    // The actual "commit", such as it is.
     xs(|s| s.current_mut().state = TRANS_COMMIT);
 
-    // CCI so commands of the subtransaction are seen as done.
     CommandCounterIncrement()?;
 
-    // (Subcommit-in-clog happens, if needed, as part of the atomic
-    // transaction-tree update at top-level commit/abort.)
     if xs(|s| s.current().full_transaction_id.is_valid()) {
         AtSubCommit_childXids()?;
     }
@@ -1912,16 +1746,14 @@ fn CommitSubTransaction() -> PgResult<()> {
     resowner_seams::release_subxact_owner_before_locks::call(true)?;
     relcache_seams::at_eosubxact_relation_cache::call(true, my, parent)?;
     typcache_seams::at_eosubxact_type_cache::call();
-    inval::AtEOSubXact_Inval(true)?;
+    inval::eoxact::AtEOSubXact_Inval(true)?;
     catalog_storage_seams::at_subcommit_smgr::call();
 
-    // The only lock actually released here is the subtransaction XID lock.
     if xs(|s| s.current().full_transaction_id.is_valid()) {
         let xid = xs(|s| s.current().full_transaction_id.xid());
         lmgr_seams::xact_lock_table_delete::call(xid)?;
     }
 
-    // Other locks transfer to the parent resource owner.
     resowner_seams::release_subxact_owner_locks::call(true)?;
 
     let (guc_nest_level, nesting_level) =
@@ -1930,13 +1762,11 @@ fn CommitSubTransaction() -> PgResult<()> {
     spi_seams::at_eosubxact_spi::call(true, my)?;
     tablecmds_seams::at_eosubxact_on_commit_actions::call(true, my, parent);
     namespace_seams::at_eosubxact_namespace::call(true, my, parent);
-    fd::AtEOSubXact_Files(true, my, parent)?;
+    fd::AtEOSubXact_Files(true, my, parent);
     // AtEOSubXact_HashTables dissolves.
     pgstat_xact_seams::at_eosubxact_pgstat::call(true, nesting_level);
     snapmgr_seams::at_subcommit_snapshot::call(nesting_level);
 
-    // Restore the upper transaction's read-only state (the upper may be
-    // read-write while the child is read-only).
     xs(|s| {
         s.XactReadOnly = s.current().prev_xact_read_only;
     });
@@ -1951,7 +1781,6 @@ fn CommitSubTransaction() -> PgResult<()> {
     PopTransaction()
 }
 
-/// `AbortSubTransaction`.
 fn AbortSubTransaction() -> PgResult<()> {
     init_small::globals::HoldInterrupts();
 
@@ -1971,7 +1800,7 @@ fn AbortSubTransaction() -> PgResult<()> {
 
     let _ = condition_variable_seams::condition_variable_cancel_sleep::call();
 
-    lmgr_proc::LockErrorCleanup();
+    lmgr_proc::LockErrorCleanup()?;
 
     timeout_seams::reschedule_timeouts::call()?;
     libpq_pqsignal::unblock_signals();
@@ -1994,14 +1823,11 @@ fn AbortSubTransaction() -> PgResult<()> {
 
     logical_seams::reset_logical_streaming_state::call();
 
-    // (No SnapBuildResetExportedSnapshotState: snapshot exports are not
-    // supported in subtransactions.)
 
     let (my, parent) = subxact_ids();
     parallel_seams::at_eosubxact_parallel::call(false, my)?;
     xs(|s| s.current_mut().parallel_mode_level = 0);
 
-    // Skippable if the subxact failed before creating a ResourceOwner.
     if xs(|s| s.current().has_resource_owner) {
         trigger_seams::after_trigger_end_sub_xact::call(false)?;
         portalmem_seams::at_subabort_portals::call(my, parent)?;
@@ -2021,7 +1847,7 @@ fn AbortSubTransaction() -> PgResult<()> {
         aio_seams::at_eoxact_aio::call(false);
         relcache_seams::at_eosubxact_relation_cache::call(false, my, parent)?;
         typcache_seams::at_eosubxact_type_cache::call();
-        inval::AtEOSubXact_Inval(false)?;
+        inval::eoxact::AtEOSubXact_Inval(false)?;
         resowner_seams::release_subxact_owner_locks::call(false)?;
         catalog_storage_seams::at_subabort_smgr::call()?;
 
@@ -2031,20 +1857,18 @@ fn AbortSubTransaction() -> PgResult<()> {
         spi_seams::at_eosubxact_spi::call(false, my)?;
         tablecmds_seams::at_eosubxact_on_commit_actions::call(false, my, parent);
         namespace_seams::at_eosubxact_namespace::call(false, my, parent);
-        fd::AtEOSubXact_Files(false, my, parent)?;
+        fd::AtEOSubXact_Files(false, my, parent);
         // AtEOSubXact_HashTables dissolves.
         pgstat_xact_seams::at_eosubxact_pgstat::call(false, nesting_level);
         snapmgr_seams::at_subabort_snapshot::call(nesting_level)?;
     }
 
-    // Redundant with GUC's cleanup, but consistent with the commit case.
     xs(|s| s.XactReadOnly = s.current().prev_xact_read_only);
 
     init_small::globals::ResumeInterrupts();
     Ok(())
 }
 
-/// `CleanupSubTransaction`.
 fn CleanupSubTransaction() -> PgResult<()> {
     ShowTransactionState("CleanupSubTransaction");
 
@@ -2070,9 +1894,7 @@ fn CleanupSubTransaction() -> PgResult<()> {
     PopTransaction()
 }
 
-/// `PushTransaction` — stack a state entry for a subtransaction.
 fn PushTransaction() -> PgResult<()> {
-    // Assign a subtransaction ID, watching out for counter wraparound.
     let wrapped = xs(|s| {
         s.current_sub_transaction_id = s.current_sub_transaction_id.wrapping_add(1);
         if s.current_sub_transaction_id == InvalidSubTransactionId {
@@ -2092,8 +1914,6 @@ fn PushTransaction() -> PgResult<()> {
     let guc_nest_level = guc_seams::new_guc_nest_level::call();
     let (prev_user, prev_sec_context) = miscinit_seams::get_user_id_and_sec_context::call();
 
-    // From here Abort/CleanupSubTransaction can cope with the entry: no
-    // transaction context, resource owner, or XID yet.
     xs(|s| {
         let parent = s.current();
         let parent_nesting = parent.nesting_level;
@@ -2132,7 +1952,6 @@ fn PushTransaction() -> PgResult<()> {
     })
 }
 
-/// `PopTransaction`.
 fn PopTransaction() -> PgResult<()> {
     if xs(|s| s.current().state) != TRANS_DEFAULT {
         warn_internal(&format!(
@@ -2164,12 +1983,9 @@ pub fn EstimateTransactionStateSpace() -> usize {
     })
 }
 
-/// Write the transaction-state details a parallel worker needs into `out`
-/// (at least `EstimateTransactionStateSpace()` bytes); XIDs emitted sorted.
 pub fn SerializeTransactionState(out: &mut [u8]) -> PgResult<usize> {
     let (iso, deferrable, top_full, cur_full, cur_cid, xids) = xs(|s| {
         let xids: Vec<TransactionId> = if !s.parallel_current_xids.is_empty() {
-            // Already in a parallel worker: pass along what we were given.
             let mut xids = Vec::new();
             if xids.try_reserve_exact(s.parallel_current_xids.len()).is_err() {
                 return Err(PgError::error("out of memory serializing transaction state"));
@@ -2189,7 +2005,6 @@ pub fn SerializeTransactionState(out: &mut [u8]) -> PgResult<usize> {
                 }
                 workspace.extend_from_slice(&node.child_xids);
             }
-            // qsort(..., xidComparator): plain numeric order.
             workspace.sort_unstable();
             workspace
         };
@@ -2222,8 +2037,6 @@ pub fn SerializeTransactionState(out: &mut [u8]) -> PgResult<usize> {
     Ok(total)
 }
 
-/// Start a parallel worker transaction, restoring `SerializeTransactionState`'s
-/// stream.
 pub fn StartParallelWorkerTransaction(tstatespace: &[u8]) -> PgResult<()> {
     debug_assert_eq!(cur_block_state(), TBLOCK_DEFAULT);
     StartTransaction()?;

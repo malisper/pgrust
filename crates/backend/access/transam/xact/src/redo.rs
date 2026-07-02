@@ -10,7 +10,6 @@ use types_storage::{RelFileLocator, SharedInvalidationMessage, SHARED_INVALIDATI
 use types_core::xact::XlXactStatsItem;
 use xlogutils::{STANDBY_DISABLED, STANDBY_INITIALIZED};
 
-/// Everything C's `xact_redo` reads from its `XLogReaderState`.
 #[derive(Clone, Copy, Debug)]
 pub struct XactRedoInfo<'a> {
     /// `XLogRecGetInfo(record)` (the full xl_info byte).
@@ -44,7 +43,6 @@ pub struct ParsedCommit {
     pub origin_timestamp: TimestampTz,
 }
 
-/// `xl_xact_parsed_abort`.
 #[derive(Clone, Debug, Default)]
 pub struct ParsedAbort {
     pub xact_time: TimestampTz,
@@ -110,7 +108,6 @@ impl<'a> Cursor<'a> {
         Ok(s)
     }
 
-    /// NUL-terminated C string (the twophase_gid).
     fn cstr(&mut self) -> PgResult<Vec<u8>> {
         let start = self.pos;
         while self.data.get(self.pos).copied().ok_or_else(truncated)? != 0 {
@@ -148,7 +145,6 @@ fn parse_rel(c: &mut Cursor<'_>) -> PgResult<RelFileLocator> {
     Ok(RelFileLocator { spcOid: spc, dbOid: db, relNumber: rel })
 }
 
-/// 16-byte `xl_xact_stats_item`; the 64-bit objid reassembles from halves.
 fn parse_stat(c: &mut Cursor<'_>) -> PgResult<XlXactStatsItem> {
     let kind = c.i32()?;
     let dboid = c.u32()?;
@@ -277,7 +273,6 @@ pub fn parse_abort_record(info: u8, data: &[u8]) -> PgResult<ParsedAbort> {
     Ok(parsed)
 }
 
-/// `xact_redo_commit`.
 fn xact_redo_commit(
     parsed: &ParsedCommit,
     xid: TransactionId,
@@ -312,39 +307,29 @@ fn xact_redo_commit(
     if xlogutils::standby_state() == STANDBY_DISABLED {
         transam_seams::transaction_id_commit_tree::call(xid, &parsed.subxacts)?;
     } else {
-        // As-yet-unobserved subxacts need bookkeeping again here (the main
-        // loop's RecordKnownAssignedTransactionIds doesn't cover this case).
         procarray_seams::record_known_assigned_transaction_ids::call(max_xid)?;
 
-        // Async protocol during recovery: hint bits must not be set until
-        // minRecoveryPoint passes this commit record.
         transam_seams::transaction_id_async_commit_tree::call(xid, &parsed.subxacts, lsn)?;
 
-        // We must mark clog before we update the ProcArray.
         procarray_seams::expire_tree_known_assigned_transaction_ids::call(
             xid,
             &parsed.subxacts,
             max_xid,
         )?;
 
-        // Cache invalidations attached to the commit (same inval-then-
-        // release-locks order as CommitTransaction).
-        inval::ProcessCommittedInvalidationMessages(
+        inval::eoxact::ProcessCommittedInvalidationMessages(
             &parsed.msgs,
             XactCompletionRelcacheInitFileInval(parsed.xinfo),
             parsed.db_id,
             parsed.ts_id,
         )?;
 
-        // Release locks, if any (2PC and normal alike: in effect we skip the
-        // prepare phase and go straight to lock release).
         if (parsed.xinfo & XACT_XINFO_HAS_AE_LOCKS) != 0 {
             standby_seams::standby_release_lock_tree::call(xid, &parsed.subxacts);
         }
     }
 
     if (parsed.xinfo & XACT_XINFO_HAS_ORIGIN) != 0 {
-        // recover apply progress
         origin_seams::replorigin_advance::call(
             origin_id,
             parsed.origin_lsn,
@@ -354,26 +339,20 @@ fn xact_redo_commit(
         )?;
     }
 
-    // Dropped files: first push the minimum recovery point past this record
-    // (we bypass the buffer manager, so we enforce WAL-first ourselves).
     if !parsed.xlocators.is_empty() {
         xlog_seams::xlog_flush::call(lsn)?;
         catalog_storage_seams::drop_relation_files::call(&parsed.xlocators, true)?;
     }
 
     if !parsed.stats.is_empty() {
-        // see equivalent call for relations above
         xlog_seams::xlog_flush::call(lsn)?;
         pgstat_xact_seams::pgstat_execute_transactional_drops::call(&parsed.stats, true)?;
     }
 
-    // Same reason ForceSyncCommit exists in normal operation (e.g. CREATE
-    // DATABASE's window between file copy and commit).
     if XactCompletionForceSyncCommit(parsed.xinfo) {
         xlog_seams::xlog_flush::call(lsn)?;
     }
 
-    // synchronous_commit = remote_apply: reply immediately.
     if XactCompletionApplyFeedback(parsed.xinfo) {
         xlogrecovery_seams::xlog_request_wal_receiver_reply::call();
     }
@@ -381,7 +360,6 @@ fn xact_redo_commit(
     Ok(())
 }
 
-/// `xact_redo_abort` — may be for a subtransaction and its children.
 fn xact_redo_abort(
     parsed: &ParsedAbort,
     xid: TransactionId,
@@ -396,19 +374,16 @@ fn xact_redo_abort(
     if xlogutils::standby_state() == STANDBY_DISABLED {
         transam_seams::transaction_id_abort_tree::call(xid, &parsed.subxacts)?;
     } else {
-        // See xact_redo_commit about this call.
         procarray_seams::record_known_assigned_transaction_ids::call(max_xid)?;
 
         transam_seams::transaction_id_abort_tree::call(xid, &parsed.subxacts)?;
 
-        // Update the ProcArray only after clog is marked.
         procarray_seams::expire_tree_known_assigned_transaction_ids::call(
             xid,
             &parsed.subxacts,
             max_xid,
         )?;
 
-        // There are no invalidation messages to send or undo.
 
         if (parsed.xinfo & XACT_XINFO_HAS_AE_LOCKS) != 0 {
             standby_seams::standby_release_lock_tree::call(xid, &parsed.subxacts);
@@ -438,8 +413,6 @@ fn xact_redo_abort(
     Ok(())
 }
 
-/// `xact_redo` — PANIC on an unknown op code. (Backup blocks are not used in
-/// xact records.)
 pub fn xact_redo(record: XactRedoInfo<'_>) -> PgResult<()> {
     let info = record.info & XLOG_XACT_OPMASK;
 
@@ -475,8 +448,6 @@ pub fn xact_redo(record: XactRedoInfo<'_>) -> PgResult<()> {
             twophase_seams::prepare_redo_remove::call(parsed.twophase_xid, false)
         }
         XLOG_XACT_PREPARE => {
-            // Store xid and start/end pointers of the WAL record in the
-            // TwoPhaseState gxact entry.
             twophase_seams::prepare_redo_add::call(
                 record.data,
                 record.read_rec_ptr,
@@ -498,8 +469,6 @@ pub fn xact_redo(record: XactRedoInfo<'_>) -> PgResult<()> {
             Ok(())
         }
         XLOG_XACT_INVALIDATIONS => {
-            // Ignored: what matters are the invalidations written into the
-            // commit record.
             Ok(())
         }
         other => Err(Box::new(PgError::new(

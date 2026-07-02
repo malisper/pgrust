@@ -10,3 +10,11 @@ seam_core::seam!(
     // fd/iovcnt/offset triple crosses (fd.c:2241).
     pub fn pgaio_io_start_readv(fd: i32, iovcnt: i32, offset: i64)
 );
+
+seam_core::seam!(
+    pub fn at_eoxact_aio(is_commit: bool)
+);
+
+seam_core::seam!(
+    pub fn pgaio_error_cleanup()
+);

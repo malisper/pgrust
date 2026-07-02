@@ -371,8 +371,8 @@ fn init_my_proc_common(proc: &PGPROC, vxid_procno: ProcNumber) {
     proc.statusFlags.store(0, Relaxed);
     proc.lwWaiting.store(LW_WS_NOT_WAITING, Relaxed);
     proc.lwWaitMode.store(0, Relaxed);
-    proc.waitLock.set(None);
-    proc.waitProcLock.set(None);
+    proc.waitLock.set(core::ptr::null_mut());
+    proc.waitProcLock.set(core::ptr::null_mut());
     proc.waitStart.write(0);
     for i in 0..NUM_LOCK_PARTITIONS as usize {
         // Last owner should have released all locks.
