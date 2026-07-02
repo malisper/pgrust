@@ -332,7 +332,7 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
 
     miscinit_seams::process_shmem_requests::call()?;
 
-    guc_seams::initialize_shmem_gucs::call()?;
+    ipci_seams::initialize_shmem_gucs::call(fastpath_groups)?;
 
     transam_xlog_seams::initialize_wal_consistency_checking::call()?;
 
