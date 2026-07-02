@@ -1,6 +1,3 @@
-//! GUC home for max_prepared_xacts (twophase.c, unported); shmem sizing
-//! (ipci InitializeShmemGUCs) reads it at boot.
-
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use guc_tables::{vars, GucVarAccessors};

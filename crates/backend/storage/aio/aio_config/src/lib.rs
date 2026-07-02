@@ -1,7 +1,3 @@
-//! GUC/config surface of storage/aio: io_method + its options table and
-//! assign hook (aio.c), io_workers (method_worker.c). The AIO engine is
-//! unported; any method beyond sync panics at the ops-resolution point.
-
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use guc_tables::consts::{IOMETHOD_SYNC, IOMETHOD_WORKER};
@@ -30,8 +26,6 @@ pub enum IoMethodOps {
     Sync,
 }
 
-// C's pgaio_method_ops table resolution (assign_io_method): sync is the only
-// registered method; the worker/io_uring ops land with the aio-core port.
 pub fn pgaio_method_ops() -> IoMethodOps {
     match io_method() {
         IOMETHOD_SYNC => IoMethodOps::Sync,

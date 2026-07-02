@@ -1,6 +1,5 @@
-//! PGSemaphore (port/posix_sema.c unnamed-sema arm): one backend = one
-//! thread, so C's cross-process semaphores reduce to in-process
-//! Mutex+Condvar counters keyed by ProcNumber.
+//! One backend = one thread, so C's cross-process PGSemaphores reduce to
+//! in-process counters keyed by ProcNumber.
 
 #![allow(non_snake_case)]
 
@@ -13,8 +12,6 @@ struct PgSemaphore {
     cv: Condvar,
 }
 
-// Created sequentially by InitProcGlobal at boot; lock/unlock only ever see
-// an existing entry, so the read lock is uncontended after boot.
 static SEMAS: RwLock<Vec<&'static PgSemaphore>> = RwLock::new(Vec::new());
 
 fn sema(procno: ProcNumber) -> &'static PgSemaphore {
@@ -30,8 +27,8 @@ pub fn PGSemaphoreCreate(procno: ProcNumber) {
         procno as usize,
         "pg_sema: creates must arrive in ProcNumber order"
     );
-    // sem_init(sem, 1, 1): initial value 1.
     semas.push(Box::leak(Box::new(PgSemaphore {
+        // sem_init(sem, 1, 1): initial value 1.
         count: Mutex::new(1),
         cv: Condvar::new(),
     })));
