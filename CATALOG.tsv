@@ -1182,7 +1182,7 @@ backend-catalog-pg-database	src/include/catalog/pg_database.h	todo			fabled:back
 backend-rewrite-rewriteDefine	src/backend/rewrite/rewriteDefine.c	todo			fabled:backend-rewrite-rewriteDefine; m1-dep(stub-ok)
 backend-utils-adt-misc	*/misc.c	todo			fabled:backend-utils-adt-misc; m1-dep(stub-ok)
 backend-statistics-mcv	*/mcv.c	todo			fabled:backend-statistics-mcv
-backend-rewrite-rewritehandler	src/backend/rewrite/rewriteHandler.c	todo			fabled:backend-rewrite-rewritehandler; m1-spine
+backend-rewrite-rewritehandler	src/backend/rewrite/rewriteHandler.c	ported	rewrite_handler	cold	m1-spine; QueryRewrite pass-through spine; SELECT-1 byte-stability PROVEN (pointer-identical, zero copies); AcquireRewriteLocks RTE arms live over lmgr; rules/view/RLS/WITH arms loud w/ should_panic pins; 15 tests, density 1.7%
 backend-optimizer-util-appendinfo	*/appendinfo.c	todo			fabled:backend-optimizer-util-appendinfo; m1-dep(stub-ok)
 backend-pl-plpgsql-scanner	src/pl/plpgsql/src/pl_scanner.c	todo			fabled:backend-pl-plpgsql-scanner
 backend-pl-plpgsql-funcs	src/pl/plpgsql/src/pl_funcs.c	todo			fabled:backend-pl-plpgsql-funcs

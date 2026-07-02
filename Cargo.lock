@@ -390,6 +390,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "clauses"
+version = "0.1.0"
+dependencies = [
+ "clauses_seams",
+ "datum",
+ "fmgr_core",
+ "lsyscache",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "var_seams",
+]
+
+[[package]]
+name = "clauses_seams"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_nodes",
+]
+
+[[package]]
 name = "clog"
 version = "0.0.0"
 dependencies = [
@@ -719,6 +745,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "funcapi"
+version = "0.1.0"
+dependencies = [
+ "catalog_seams",
+ "datum",
+ "lsyscache",
+ "mcx",
+ "syscache_seams",
+ "tupdesc",
+ "typcache_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_tuple",
+]
+
+[[package]]
 name = "genam"
 version = "0.1.0"
 dependencies = [
@@ -943,6 +987,7 @@ name = "heapam_visibility_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "tableam_vocab",
  "types_core",
  "types_error",
  "types_snapshot",
@@ -1072,6 +1117,20 @@ name = "ip"
 version = "0.0.0"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "ipc"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "dsm_core",
+ "elog",
+ "init_small",
+ "ipc_portal_seams",
+ "ipc_seams",
+ "lwlock",
+ "types_error",
 ]
 
 [[package]]
@@ -2154,6 +2213,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ps_status"
+version = "0.1.0"
+dependencies = [
+ "guc_tables",
+ "init_small",
+ "miscinit",
+ "ps_status_seams",
+]
+
+[[package]]
 name = "ps_status_seams"
 version = "0.0.0"
 dependencies = [
@@ -2363,6 +2432,7 @@ dependencies = [
 name = "rewrite_handler"
 version = "0.1.0"
 dependencies = [
+ "datum",
  "mcx",
  "relation_seams",
  "rewrite_handler_seams",
@@ -2963,6 +3033,7 @@ dependencies = [
 name = "transam_xlog"
 version = "0.0.0"
 dependencies = [
+ "aio_seams",
  "bufmgr_seams",
  "checkpointer_seams",
  "clog",
@@ -2996,6 +3067,7 @@ dependencies = [
  "types_guc",
  "types_storage",
  "varsup_seams",
+ "waitevent_seams",
  "xact_seams",
  "xloginsert_seams",
  "xlogreader_seams",
@@ -3063,9 +3135,11 @@ version = "0.1.0"
 name = "typcache_seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam_core",
  "types_core",
  "types_error",
+ "types_tuple",
 ]
 
 [[package]]
@@ -3268,6 +3342,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "var_seams"
+version = "0.1.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+ "types_nodes",
+]
+
+[[package]]
 name = "varlena"
 version = "0.1.0"
 dependencies = [
@@ -3285,6 +3368,19 @@ dependencies = [
  "types_fmgr",
  "types_tuple",
  "wchar",
+]
+
+[[package]]
+name = "vars"
+version = "0.1.0"
+dependencies = [
+ "clauses",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_tuple",
+ "var_seams",
 ]
 
 [[package]]
