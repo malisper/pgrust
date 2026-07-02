@@ -408,7 +408,7 @@ backend-parser-agg	*/parse_agg.c	todo			fabled:backend-parser-agg; m1-dep(stub-o
 backend-parser-parse-target	*/parse_target.c	todo			fabled:backend-parser-parse-target; m1-spine
 backend-parser-relation	*/parse_relation.c	todo			fabled:backend-parser-relation; m1-dep(stub-ok)
 backend-parser-scan	src/backend/parser/scan.l,build-clean/src/backend/parser/scan.c	todo			fabled:backend-parser-gram-core; m1-spine
-backend-parser-small1	*/parse_enr.c,*/parse_merge.c,*/parse_node.c,*/parse_param.c,*/scansup.c	todo			fabled:backend-parser-small1; m1-spine
+backend-parser-small1	*/parse_enr.c,*/parse_merge.c,*/parse_node.c,*/parse_param.c,*/scansup.c	in-progress	parser_small1	cold	m1-spine; PARTIAL: scansup.c complete + parser_errposition value-form; parse_node remainder/parse_param/parse_enr/merge blocked on types_nodes (notes/parser-small1-boundary.md); 11 tests, density 5.0%
 backend-parser-utilcmd	*/parse_utilcmd.c	todo			fabled:backend-parser-parse-utilcmd; m1-dep(stub-ok)
 backend-partitioning-core	*/partbounds.c,*/partdesc.c,*/partprune.c	todo			m1-dep(stub-ok)
 backend-port-atomics	src/backend/port/atomics.c	todo			fabled:backend-port-atomics
