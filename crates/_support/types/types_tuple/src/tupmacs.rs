@@ -21,13 +21,8 @@ fn unsupported_byval_length(attlen: i32) -> ! {
 /// `t` points to live tuple data of the given byval/len shape, attalignby-aligned.
 #[inline]
 pub unsafe fn fetch_att(t: *const u8, attbyval: bool, attlen: i32) -> Datum {
-    // C's ladder (access/tupmacs.h fetch_att: 3 compares, Assert-only length
-    // check). An equality `match`/chain over {1,2,4,8} trips LLVM 22's
-    // power-of-two switch lowering (ispow2 guard + rbit/clz, +6 insns per
-    // fetch), and reachable panic arms push fastgetattr past the inline
-    // threshold at its callers — see the parity journal. This mixed ==/>
-    // shape wins inside heap_deform_tuple's walk; fetchatt carries the
-    // bit-tested variant that wins at the getattr call sites.
+    // Mixed ==/> ladder: eq-chains over {1,2,4,8} trip LLVM 22's pow2 switch
+    // lowering (+6 insns/fetch), panic arms break inlining (parity journal).
     if attbyval {
         debug_assert!(matches!(attlen, 1 | 2 | 4 | 8), "unsupported byval length: {attlen}");
         if attlen == 4 {
@@ -48,10 +43,7 @@ pub unsafe fn fetch_att(t: *const u8, attbyval: bool, attlen: i32) -> Datum {
 /// As [`fetch_att`].
 #[inline]
 pub unsafe fn fetchatt(att: &CompactAttribute, t: *const u8) -> Datum {
-    // fetch_att's contract, bit-tested: the valid byval lengths are distinct
-    // single bits, so each arm dispatches on one tbnz with no sign-extend.
-    // Measured per call site: this shape wins at the getattr sites (cacheoff
-    // hit + nocache walk), the eq/gt ladder wins in heap_deform_tuple.
+    // Bit-tested (one tbnz/arm): wins at the getattr sites, not in deform.
     let attlen = att.attlen as i32;
     if att.attbyval {
         debug_assert!(matches!(attlen, 1 | 2 | 4 | 8), "unsupported byval length: {attlen}");
@@ -73,9 +65,7 @@ pub unsafe fn fetchatt(att: &CompactAttribute, t: *const u8) -> Datum {
 /// `t` is writable for `attlen` bytes, aligned per the attribute.
 #[inline]
 pub unsafe fn store_att_byval(t: *mut u8, newdatum: Datum, attlen: i32) {
-    // Inequality tree, not `match`/eq-ladder: LLVM re-forms those into its
-    // power-of-two switch lowering (ispow2 guard + rbit/clz, +6 insns/store);
-    // clang compiles the C switch to this cmp tree.
+    // Inequality tree, not `match`/eq-ladder: fetch_att's pow2-switch trap.
     if attlen >= 4 {
         if attlen == 4 {
             t.cast::<i32>().write_unaligned(newdatum.as_i32())
@@ -142,10 +132,7 @@ pub unsafe fn att_addlength_datum(cur_offset: usize, attlen: i32, attdatum: Datu
     att_addlength_pointer(cur_offset, attlen, attdatum.as_usize() as *const u8)
 }
 
-// Outlined: LLVM idiom-recognizes the scan as a strlen() CALL, and a callable
-// inside heap_deform_tuple's walk costs every caller ~5 preheader spills +
-// callee-saved traffic. cstring columns are catalog-only; keep them off the
-// per-tuple path.
+// Outlined: the scan idiom becomes a strlen() CALL (~5 spills in deform).
 #[cold]
 #[inline(never)]
 unsafe fn addlength_cstring(cur_offset: usize, attptr: *const u8) -> usize {

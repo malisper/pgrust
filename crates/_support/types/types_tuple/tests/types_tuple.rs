@@ -235,10 +235,10 @@ fn deform_fixed_width_and_attcacheoff() {
     assert_eq!(offs, [0, 8, 16, 18]);
 
     let mut isnull = true;
-    let v = heap_getattr(&tup, 2, &desc, &mut isnull);
+    let v = unsafe { heap_getattr(&tup, 2, &desc, &mut isnull) };
     assert!(!isnull);
     assert_eq!(v.as_i64(), 0x1122_3344_5566_7788);
-    let v = fastgetattr(&tup, 4, &desc, &mut isnull);
+    let v = unsafe { fastgetattr(&tup, 4, &desc, &mut isnull) };
     assert!(v.as_bool());
 }
 
@@ -254,10 +254,10 @@ fn nocachegetattr_fills_leading_fixed_offsets() {
     let (t_len, _) = build_tuple(&mut image, 3, None, &data);
     let tup = tuple_from(&image, t_len);
 
-    assert_eq!(nocachegetattr(&tup, 3, &desc).as_i64(), 3);
+    assert_eq!(unsafe { nocachegetattr(&tup, 3, &desc) }.as_i64(), 3);
     let offs: Vec<i32> = desc.compact_attrs.iter().map(|a| a.attcacheoff.get()).collect();
     assert_eq!(offs, [0, 4, 8]);
-    assert_eq!(nocachegetattr(&tup, 2, &desc).as_i32(), 2);
+    assert_eq!(unsafe { nocachegetattr(&tup, 2, &desc) }.as_i32(), 2);
 }
 
 #[test]
@@ -296,9 +296,9 @@ fn deform_varlena_short_and_aligned() {
     assert_eq!(desc.compact_attrs[1].attcacheoff.get(), 4);
     assert_eq!(desc.compact_attrs[2].attcacheoff.get(), -1);
 
-    assert_eq!(nocachegetattr(&tup, 3, &desc).as_i64(), 99);
+    assert_eq!(unsafe { nocachegetattr(&tup, 3, &desc) }.as_i64(), 99);
     let mut isnull = false;
-    assert_eq!(fastgetattr(&tup, 1, &desc, &mut isnull).as_i32(), 42);
+    assert_eq!(unsafe { fastgetattr(&tup, 1, &desc, &mut isnull) }.as_i32(), 42);
 }
 
 #[test]
@@ -361,10 +361,10 @@ fn deform_with_nulls_and_attisnull() {
     assert!(!heap_attisnull(&tup, -1, Some(&desc)));
 
     let mut isnull = false;
-    let v = fastgetattr(&tup, 3, &desc, &mut isnull);
+    let v = unsafe { fastgetattr(&tup, 3, &desc, &mut isnull) };
     assert!(!isnull);
     assert_eq!(v.as_i32(), 456);
-    assert!(fastgetattr(&tup, 2, &desc, &mut isnull).as_usize() == 0 && isnull);
+    assert!(unsafe { fastgetattr(&tup, 2, &desc, &mut isnull) }.as_usize() == 0 && isnull);
 }
 
 #[test]
@@ -408,12 +408,12 @@ fn missing_and_absent_attributes() {
     assert!(!nulls[2]);
 
     let mut isnull = false;
-    assert_eq!(heap_getattr(&tup, 3, &desc, &mut isnull).as_i32(), 777);
+    assert_eq!(unsafe { heap_getattr(&tup, 3, &desc, &mut isnull) }.as_i32(), 777);
     assert!(!isnull);
     assert!(!heap_attisnull(&tup, 3, Some(&desc)));
 
     desc.compact_attrs[2].atthasmissing = false;
-    let v = heap_getattr(&tup, 3, &desc, &mut isnull);
+    let v = unsafe { heap_getattr(&tup, 3, &desc, &mut isnull) };
     assert!(isnull && v.as_usize() == 0);
     assert!(heap_attisnull(&tup, 3, Some(&desc)));
     assert!(heap_attisnull(&tup, 3, None));
