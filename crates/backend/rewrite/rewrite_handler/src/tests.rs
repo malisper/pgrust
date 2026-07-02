@@ -336,7 +336,7 @@ fn with_clause_defers_loud() {
 }
 
 #[test]
-#[should_panic(expected = "sublink descent needs query_tree_walker")]
+#[should_panic(expected = "sublink descent needs the walker's T_SubLink arm")]
 fn sublinks_defer_loud() {
     install();
     let ctx = MemoryContext::new("t");

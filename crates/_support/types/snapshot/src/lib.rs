@@ -51,7 +51,9 @@ pub struct SnapshotData<'mcx> {
     pub suboverflowed: bool,
     pub takenDuringRecovery: bool,
     pub copied: bool,
-    pub curcid: CommandId,
+    // Cell: CommandCounterIncrement propagates curcid through shared handles
+    // (SnapshotSetCommandId / UpdateActiveSnapshotCommandId).
+    pub curcid: Cell<CommandId>,
     pub speculativeToken: u32,
     pub vistest: GlobalVisStateHandle,
     pub active_count: Cell<u32>,
@@ -73,7 +75,7 @@ impl<'mcx> SnapshotData<'mcx> {
             suboverflowed: false,
             takenDuringRecovery: false,
             copied: false,
-            curcid: 0,
+            curcid: Cell::new(0),
             speculativeToken: 0,
             vistest: GlobalVisStateHandle::new(0),
             active_count: Cell::new(0),

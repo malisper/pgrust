@@ -10,3 +10,5 @@ types_core = { path = "../types_core" }
 types_error = { path = "../types_error" }
 types_storage = { path = "../types_storage" }
 types_tuple = { path = "../types_tuple" }
+types_fmgr = { path = "../fmgr" }
+types_nbtree = { path = "../types_nbtree" }

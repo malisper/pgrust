@@ -829,9 +829,6 @@ pub fn LWLockAcquire(
     mode: LWLockMode,
     my_proc_number: ProcNumber,
 ) -> PgResult<bool> {
-    let mut result = true;
-    let mut extra_waits = 0_i32;
-
     debug_assert!(mode == LW_SHARED || mode == LW_EXCLUSIVE);
 
     if !with_held(|held| held.num_held < MAX_SIMUL_LWLOCKS) {
@@ -840,12 +837,32 @@ pub fn LWLockAcquire(
 
     globals::HoldInterrupts();
 
-    loop {
-        let mustwait = LWLockAttemptLock(lock, mode);
-        if !mustwait {
-            break;
-        }
+    let result = if LWLockAttemptLock(lock, mode) {
+        // Contended: queue/sleep/retry lives out of line so the uncontended
+        // acquire (the per-page scan path) carries no wait-loop frame — C's
+        // small-frame LWLockAcquire shape.
+        lwlock_acquire_wait(lock, mode, my_proc_number)?
+    } else {
+        true
+    };
 
+    record_held(lock, mode);
+    Ok(result)
+}
+
+// The mustwait arm of LWLockAcquire (queue self, re-attempt, sleep, repay
+// absorbed semaphore wakeups).
+#[cold]
+#[inline(never)]
+fn lwlock_acquire_wait(
+    lock: &LWLock,
+    mode: LWLockMode,
+    my_proc_number: ProcNumber,
+) -> PgResult<bool> {
+    let mut result = true;
+    let mut extra_waits = 0_i32;
+
+    loop {
         LWLockQueueSelf(lock, mode, my_proc_number)?;
 
         let mustwait = LWLockAttemptLock(lock, mode);
@@ -860,9 +877,12 @@ pub fn LWLockAcquire(
         LWLockReportWaitEnd();
 
         result = false;
-    }
 
-    record_held(lock, mode);
+        let mustwait = LWLockAttemptLock(lock, mode);
+        if !mustwait {
+            break;
+        }
+    }
 
     while extra_waits > 0 {
         extra_waits -= 1;

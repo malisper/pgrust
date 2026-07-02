@@ -1,4 +1,4 @@
-use clauses::walker::{
+use nodes_core::{
     deferred, expression_tree_walker, query_or_expression_tree_walker, query_tree_walker,
     NodeWalker,
 };

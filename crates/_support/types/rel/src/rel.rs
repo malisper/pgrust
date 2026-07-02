@@ -1,7 +1,9 @@
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use ::mcx::PgVec;
+use ::types_fmgr::FmgrInfo;
+use ::types_nbtree::BTMetaPageData;
 use ::types_core::{
     InvalidRelFileNumber, Oid, ProcNumber, SubTransactionId, BLCKSZ, RELPERSISTENCE_PERMANENT,
     RELPERSISTENCE_TEMP,
@@ -39,7 +41,18 @@ pub struct RelationData<'mcx> {
     pub rd_indcollation: PgVec<'mcx, Oid>,
     pub rd_options: Option<RdOptions>,
     pub pgstat_enabled: Cell<bool>,
+    // C rd_amcache (rule-5 cache): btree keeps a BTMetaPageData copy here so
+    // descents skip the metapage read; becomes an enum when another AM lands.
+    // Cleared with the entry on relcache rebuild, as C pfrees it.
+    pub rd_amcache: Cell<Option<RdAmCacheBtree>>,
+    // C rd_support/rd_supportinfo (rule-5 cache): support procs resolved once
+    // per column per relcache entry; None until index_getprocinfo's first use.
+    // std Vec justified: the entry is an Rc-owned owner structure outside the
+    // arenas (like rd_att), written once per relation, and FmgrInfo is droppy.
+    pub rd_supportinfo: RefCell<Vec<Option<FmgrInfo>>>,
 }
+
+pub type RdAmCacheBtree = BTMetaPageData;
 
 impl<'mcx> RelationData<'mcx> {
     #[inline]
@@ -283,6 +296,8 @@ mod tests {
             rd_indcollation: PgVec::new_in(mcx),
             rd_options: None,
             pgstat_enabled: Cell::new(false),
+            rd_amcache: Default::default(),
+            rd_supportinfo: Default::default(),
         }
     }
 

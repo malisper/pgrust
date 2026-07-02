@@ -5,9 +5,14 @@ use core::cell::RefCell;
 
 use elog::ereport;
 use mcx::{Mcx, MAX_ALLOC_SIZE};
+use nodes_core::{expression_tree_walker, query_tree_walker, NodeWalker};
 use types_core::catalog::{UNKNOWNOID, VOIDOID};
 use types_core::{InvalidOid, Oid, OidIsValid};
-use types_error::{ErrorLocation, PgError, PgResult, ERRCODE_UNDEFINED_PARAMETER, ERROR};
+use types_error::{
+    ErrorLocation, PgError, PgResult, ERRCODE_AMBIGUOUS_PARAMETER, ERRCODE_UNDEFINED_PARAMETER,
+    ERROR,
+};
+use types_nodes::parsenodes::Query;
 use types_nodes::{Node, Param, ParamKind, ParamRef};
 use wchar::pg_enc;
 
@@ -229,16 +234,105 @@ pub fn variable_coerce_param_hook(
     Ok(true)
 }
 
-pub fn check_variable_parameters() -> ! {
-    panic!(
-        "check_variable_parameters (parse_param.c): needs query_tree_walker/\
-         expression_tree_walker (backend-nodes nodeFuncs.c unported)"
-    )
+struct CheckParamResolution<'a, 'p, 'mcx> {
+    pstate: &'a ParseState<'p, 'mcx>,
+    encoding: pg_enc,
 }
 
-pub fn query_contains_extern_params() -> ! {
-    panic!(
-        "query_contains_extern_params (parse_param.c): needs query_tree_walker/\
-         expression_tree_walker (backend-nodes nodeFuncs.c unported)"
-    )
+impl<'mcx> NodeWalker<'mcx> for CheckParamResolution<'_, '_, 'mcx> {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        if let Some(param) = node.as_param() {
+            if param.paramkind == ParamKind::PARAM_EXTERN {
+                let parstate = self
+                    .pstate
+                    .p_ref_hook_state
+                    .as_var_params()
+                    .expect("check_variable_parameters: p_ref_hook_state is not VarParams");
+                let paramno = param.paramid;
+                // Borrow released before returning: the errposition path calls
+                // back into pstate helpers.
+                let expected = {
+                    let param_types = parstate.param_types.borrow();
+                    if paramno <= 0 || paramno as usize > param_types.len() {
+                        None
+                    } else {
+                        Some(param_types[(paramno - 1) as usize])
+                    }
+                };
+                let Some(expected) = expected else {
+                    return Err(no_parameter_err(
+                        paramno,
+                        parser_errposition(self.pstate, param.location, self.encoding),
+                        "check_parameter_resolution_walker",
+                    ));
+                };
+                if param.paramtype != expected {
+                    return Err(Box::new(
+                        ereport(ERROR)
+                            .errcode(ERRCODE_AMBIGUOUS_PARAMETER)
+                            .errmsg(alloc::format!(
+                                "could not determine data type of parameter ${paramno}"
+                            ))
+                            .errposition(parser_errposition(
+                                self.pstate,
+                                param.location,
+                                self.encoding,
+                            ))
+                            .into_error()
+                            .with_error_location(loc("check_parameter_resolution_walker")),
+                    ));
+                }
+            }
+            return Ok(false);
+        }
+        if let Some(q) = node.as_query() {
+            return query_tree_walker(q, self, 0);
+        }
+        expression_tree_walker(node, self)
+    }
+
+    // Recurse into RTE subqueries (C's IsA(node, Query) arm).
+    fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
+        query_tree_walker(q, self, 0)
+    }
+}
+
+pub fn check_variable_parameters<'mcx>(
+    pstate: &ParseState<'_, 'mcx>,
+    query: &'mcx Query<'mcx>,
+    encoding: pg_enc,
+) -> PgResult<()> {
+    let parstate = pstate
+        .p_ref_hook_state
+        .as_var_params()
+        .expect("check_variable_parameters: p_ref_hook_state is not VarParams");
+    // C: *parstate->numParams == 0 — no Params were generated.
+    if parstate.param_types.borrow().is_empty() {
+        return Ok(());
+    }
+    let mut cx = CheckParamResolution { pstate, encoding };
+    query_tree_walker(query, &mut cx, 0)?;
+    Ok(())
+}
+
+struct HasExternParam;
+
+impl<'mcx> NodeWalker<'mcx> for HasExternParam {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        if let Some(param) = node.as_param() {
+            return Ok(param.paramkind == ParamKind::PARAM_EXTERN);
+        }
+        if let Some(q) = node.as_query() {
+            return query_tree_walker(q, self, 0);
+        }
+        expression_tree_walker(node, self)
+    }
+
+    fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
+        query_tree_walker(q, self, 0)
+    }
+}
+
+pub fn query_contains_extern_params<'mcx>(query: &'mcx Query<'mcx>) -> PgResult<bool> {
+    query_tree_walker(query, &mut HasExternParam, 0)
 }

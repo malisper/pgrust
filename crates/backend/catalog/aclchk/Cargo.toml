@@ -1,0 +1,22 @@
+[package]
+name = "aclchk"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "aclchk"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+datum = { path = "../../../_support/types/datum" }
+superuser = { path = "../../utils/misc/superuser" }
+adt_acl = { path = "../../utils/adt/acl" }
+guc = { path = "../../utils/misc/guc" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+aclchk_seams = { path = "../aclchk_seams" }
+
+[dev-dependencies]
+init_small = { path = "../../utils/init/init_small" }

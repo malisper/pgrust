@@ -185,6 +185,14 @@ impl<'mcx> Portal<'mcx> {
     pub fn ptr_eq(&self, other: &Portal<'mcx>) -> bool {
         Rc::ptr_eq(&self.0, &other.0)
     }
+
+    /// True iff this is the only handle (no other clone can observe a reuse).
+    /// Portal-slot recycling gate: portalmem parks dropped portals and only
+    /// overwrites one whose every outstanding clone is gone (C pfrees the
+    /// PortalData into an aset freelist; this is that reuse, made alias-safe).
+    pub fn is_unique(&self) -> bool {
+        Rc::strong_count(&self.0) == 1
+    }
 }
 
 #[cfg(test)]

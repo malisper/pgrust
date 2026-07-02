@@ -15,6 +15,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // MaxLivePostmasterChildren (pmchild.c); panics before
+    // InitPostmasterChildSlots ran (C elog(ERROR)); sizes pmsignal's flags.
+    pub fn max_live_postmaster_children() -> i32
+);
+
+seam_core::seam!(
     // AssignPostmasterChildSlot(btype); None is C's NULL (no free slot).
     pub fn assign_postmaster_child_slot(btype: BackendType) -> Option<PmChildSlot>
 );

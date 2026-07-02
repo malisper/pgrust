@@ -5,6 +5,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // BackendStatusShmemSize (backend_status.c); ipci's CalculateShmemSize leg.
+    pub fn backend_status_shmem_size() -> types_error::PgResult<usize>
+);
+
+seam_core::seam!(
+    // BackendStatusShmemInit (backend_status.c); ipci's CreateOrAttachShmemStructs leg.
+    pub fn backend_status_shmem_init() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     // pgstat_beinit (backend_status.c).
     pub fn pgstat_beinit() -> types_error::PgResult<()>
 );
@@ -36,6 +46,7 @@ pub enum BackendState {
     STATE_FASTPATH,
     STATE_IDLEINTRANSACTION_ABORTED,
     STATE_DISABLED,
+    STATE_STARTING,
 }
 
 seam_core::seam!(

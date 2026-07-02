@@ -189,7 +189,33 @@ fn get_bool(b: &[u8], off: usize) -> bool {
 }
 
 impl CheckPoint {
-    fn from_bytes(b: &[u8]) -> CheckPoint {
+    pub const ZEROED: CheckPoint = CheckPoint {
+        redo: 0,
+        ThisTimeLineID: 0,
+        PrevTimeLineID: 0,
+        fullPageWrites: false,
+        wal_level: 0,
+        nextXid: FullTransactionId { value: 0 },
+        nextOid: 0,
+        nextMulti: 0,
+        nextMultiOffset: 0,
+        oldestXid: 0,
+        oldestXidDB: 0,
+        oldestMulti: 0,
+        oldestMultiDB: 0,
+        time: 0,
+        oldestCommitTsXid: 0,
+        newestCommitTsXid: 0,
+        oldestActiveXid: 0,
+    };
+
+    pub fn to_bytes(&self) -> [u8; SIZEOF_CHECKPOINT] {
+        let mut b = [0u8; SIZEOF_CHECKPOINT];
+        self.write_bytes(&mut b);
+        b
+    }
+
+    pub fn from_bytes(b: &[u8]) -> CheckPoint {
         macro_rules! o {
             ($f:ident) => {
                 offset_of!(CheckPoint, $f)
@@ -218,7 +244,7 @@ impl CheckPoint {
         }
     }
 
-    fn write_bytes(&self, out: &mut [u8]) {
+    pub fn write_bytes(&self, out: &mut [u8]) {
         macro_rules! o {
             ($f:ident) => {
                 offset_of!(CheckPoint, $f)
@@ -245,6 +271,45 @@ impl CheckPoint {
 }
 
 impl ControlFileData {
+    pub const ZEROED: ControlFileData = ControlFileData {
+        system_identifier: 0,
+        pg_control_version: 0,
+        catalog_version_no: 0,
+        state: 0,
+        time: 0,
+        checkPoint: 0,
+        checkPointCopy: CheckPoint::ZEROED,
+        unloggedLSN: 0,
+        minRecoveryPoint: 0,
+        minRecoveryPointTLI: 0,
+        backupStartPoint: 0,
+        backupEndPoint: 0,
+        backupEndRequired: false,
+        wal_level: 0,
+        wal_log_hints: false,
+        MaxConnections: 0,
+        max_worker_processes: 0,
+        max_wal_senders: 0,
+        max_prepared_xacts: 0,
+        max_locks_per_xact: 0,
+        track_commit_timestamp: false,
+        maxAlign: 0,
+        floatFormat: 0.0,
+        blcksz: 0,
+        relseg_size: 0,
+        xlog_blcksz: 0,
+        xlog_seg_size: 0,
+        nameDataLen: 0,
+        indexMaxKeys: 0,
+        toast_max_chunk_size: 0,
+        loblksize: 0,
+        float8ByVal: false,
+        data_checksum_version: 0,
+        default_char_signedness: false,
+        mock_authentication_nonce: [0; MOCK_AUTH_NONCE_LEN],
+        crc: 0,
+    };
+
     pub fn from_disk_bytes(b: &[u8]) -> ControlFileData {
         assert!(b.len() >= SIZEOF_CONTROL_FILE_DATA);
         macro_rules! o {

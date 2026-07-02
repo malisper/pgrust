@@ -301,9 +301,15 @@ pub fn heap_setscanlimits(
 }
 
 // Const generics stand in for C's four constant-folded call sites.
+//
+// # Safety
+// `lines <= MaxHeapTuplesPerPage` was checked by the caller for THIS page
+// (heap_prepare_pagescan's one-per-page bound): that proves every
+// `item_id_unchecked(lineoff)` for `lineoff <= lines` is in the image and
+// every `vistuples[ntup]` store (`ntup < lineoff <= lines`) is in bounds.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn page_collect_tuples<const ALL_VISIBLE: bool, const CHECK_SERIALIZABLE: bool>(
+unsafe fn page_collect_tuples<const ALL_VISIBLE: bool, const CHECK_SERIALIZABLE: bool>(
     vistuples: &mut [OffsetNumber; MaxHeapTuplesPerPage],
     relation: &RelationData<'_>,
     snapshot: &SnapshotData<'_>,
@@ -315,7 +321,8 @@ fn page_collect_tuples<const ALL_VISIBLE: bool, const CHECK_SERIALIZABLE: bool>(
     let mut ntup: u32 = 0;
 
     for lineoff in FirstOffsetNumber..=lines {
-        let lpp = page.item_id(lineoff);
+        // SAFETY: lineoff <= lines <= MaxHeapTuplesPerPage (fn contract).
+        let lpp = unsafe { page.item_id_unchecked(lineoff) };
         if !lpp.is_normal() {
             continue;
         }
@@ -324,7 +331,9 @@ fn page_collect_tuples<const ALL_VISIBLE: bool, const CHECK_SERIALIZABLE: bool>(
             // Vacuumed-table fast path: the tuple header is never consulted.
             true
         } else {
-            let (ptr, len) = page.item_raw(lpp);
+            // SAFETY: normal line pointer on a pinned + share-locked heap
+            // page (page invariant, item_raw_unchecked contract).
+            let (ptr, len) = unsafe { page.item_raw_unchecked(lpp) };
             // SAFETY: pinned + share-locked page; a normal line pointer carries a full tuple image.
             let mut loctup = unsafe {
                 HeapTupleData::from_raw_parts(
@@ -348,7 +357,9 @@ fn page_collect_tuples<const ALL_VISIBLE: bool, const CHECK_SERIALIZABLE: bool>(
         };
 
         if valid {
-            vistuples[ntup as usize] = lineoff;
+            // SAFETY: ntup < lineoff <= lines <= MaxHeapTuplesPerPage
+            // (fn contract), matching C's unchecked rs_vistuples store.
+            unsafe { *vistuples.get_unchecked_mut(ntup as usize) = lineoff };
             ntup += 1;
         }
     }
@@ -383,22 +394,34 @@ pub fn heap_prepare_pagescan(scan: &mut HeapScanDescData<'_>) -> PgResult<()> {
     let lock = pin.lock_share()?;
     let page = pin.page();
     let lines = page.max_offset_number();
+    // ONE bounds check per page — the proof obligation of every _unchecked
+    // line-pointer access below AND of the pagemode walk over rs_vistuples
+    // (rs_ntuples <= lines). C trusts this implicitly (its rs_vistuples array
+    // would overflow on the same corruption); the hard check is per page, not
+    // per tuple, per heapam's hoisting model.
+    assert!(
+        lines as usize <= MaxHeapTuplesPerPage,
+        "corrupt heap page: pd_lower implies {lines} line pointers"
+    );
     let all_visible = page.is_all_visible() && !snapshot.takenDuringRecovery;
 
     let vist = &mut scan.rs_vistuples;
-    let ntuples = match (all_visible, check_serializable) {
-        (true, false) => page_collect_tuples::<true, false>(
-            vist, relation, snapshot, &page, buffer, block, lines,
-        )?,
-        (true, true) => page_collect_tuples::<true, true>(
-            vist, relation, snapshot, &page, buffer, block, lines,
-        )?,
-        (false, false) => page_collect_tuples::<false, false>(
-            vist, relation, snapshot, &page, buffer, block, lines,
-        )?,
-        (false, true) => page_collect_tuples::<false, true>(
-            vist, relation, snapshot, &page, buffer, block, lines,
-        )?,
+    // SAFETY: lines bound checked above (page_collect_tuples contract).
+    let ntuples = unsafe {
+        match (all_visible, check_serializable) {
+            (true, false) => page_collect_tuples::<true, false>(
+                vist, relation, snapshot, &page, buffer, block, lines,
+            )?,
+            (true, true) => page_collect_tuples::<true, true>(
+                vist, relation, snapshot, &page, buffer, block, lines,
+            )?,
+            (false, false) => page_collect_tuples::<false, false>(
+                vist, relation, snapshot, &page, buffer, block, lines,
+            )?,
+            (false, true) => page_collect_tuples::<false, true>(
+                vist, relation, snapshot, &page, buffer, block, lines,
+            )?,
+        }
     };
     drop(lock);
 
@@ -613,6 +636,11 @@ fn heap_key_test(
     Ok(true)
 }
 
+// C TU shape: heapgettup/heapgettup_pagemode are standalone functions, not
+// inlined into every heap_getnext* entry — fusing them there drags the cold
+// arms' register pressure onto the per-tuple prologue (8 callee-save pairs
+// observed in the composed lane).
+#[inline(never)]
 fn heapgettup<'mcx>(scan: &mut HeapScanDescData<'mcx>, dir: ScanDirection) -> PgResult<()> {
     let nkeys = scan.rs_base.rs_nkeys;
     let mut linesleft: i32 = 0;
@@ -635,6 +663,12 @@ fn heapgettup<'mcx>(scan: &mut HeapScanDescData<'mcx>, dir: ScanDirection) -> Pg
             debug_assert!(pin.block_number() == scan.rs_cblock);
             let _lock = pin.lock_share()?;
             let page = pin.page();
+            // ONE bounds check per page (see heap_prepare_pagescan): proves
+            // every lineoff <= max_offset_number() below is in the image.
+            assert!(
+                page.max_offset_number() as usize <= MaxHeapTuplesPerPage,
+                "corrupt heap page: pd_lower overflows the line-pointer bound"
+            );
             if continue_page {
                 heapgettup_continue_page(&page, scan.rs_coffset, dir, &mut linesleft, &mut lineoff);
             } else {
@@ -642,9 +676,14 @@ fn heapgettup<'mcx>(scan: &mut HeapScanDescData<'mcx>, dir: ScanDirection) -> Pg
             }
 
             while linesleft > 0 {
-                let lpp = page.item_id(lineoff);
+                // SAFETY: lineoff stays in 1..=max_offset_number() (start/
+                // continue_page establish it, the walk steps by ±1 within
+                // linesleft), bounded per the page check above.
+                let lpp = unsafe { page.item_id_unchecked(lineoff) };
                 if lpp.is_normal() {
-                    let (ptr, len) = page.item_raw(lpp);
+                    // SAFETY: normal line pointer on a pinned + share-locked
+                    // heap page (page invariant, item_raw_unchecked contract).
+                    let (ptr, len) = unsafe { page.item_raw_unchecked(lpp) };
                     // SAFETY: pinned + share-locked page, normal line pointer.
                     let mut tuple = unsafe {
                         HeapTupleData::from_raw_parts(
@@ -711,6 +750,12 @@ fn heapgettup<'mcx>(scan: &mut HeapScanDescData<'mcx>, dir: ScanDirection) -> Pg
     Ok(())
 }
 
+// Also #[inline(never)]: the call boundary between the rs_ctup narrow stores
+// here and heap_getnextslot's wide reload for the slot store lets the stores
+// retire — fusing them puts a failed store-to-load forward (strh trio → ldr d)
+// on every returned tuple (measured 2x ns for -12 instr). C gets the same
+// separation from its noinline tts_buffer_heap_store_tuple.
+#[inline(never)]
 fn heapgettup_pagemode<'mcx>(scan: &mut HeapScanDescData<'mcx>, dir: ScanDirection) -> PgResult<()> {
     let nkeys = scan.rs_base.rs_nkeys;
     let relid = scan.rs_base.rs_rd.rd_id;
@@ -744,55 +789,70 @@ fn heapgettup_pagemode<'mcx>(scan: &mut HeapScanDescData<'mcx>, dir: ScanDirecti
         }
         continue_page = false;
 
-        let mut found: Option<(u32, OffsetNumber, *const u8, u32)> = None;
-        {
-            let pin = scan.rs_cbuf.as_ref().expect("scan lost its buffer");
-            // No content lock: rs_vistuples entries stay good under the pin.
-            let page = pin.page();
+        // C's `page = BufferGetPage(scan->rs_cbuf)`: read once per call. The
+        // lifetime is erased from the rs_cbuf borrow so the walk can write
+        // scan fields directly (C writes rs_ctup inside the same loop).
+        // SAFETY: the rs_cbuf pin stays held until the next
+        // heap_fetch_next_buffer/end_of_scan; `page` is re-derived before any
+        // use after those.
+        let page: PageRef<'_> = unsafe {
+            PageRef::from_raw(NonNull::new_unchecked(
+                scan.rs_cbuf
+                    .as_ref()
+                    .expect("scan lost its buffer")
+                    .page()
+                    .as_ptr()
+                    .cast_mut(),
+            ))
+        };
 
-            while linesleft > 0 {
-                debug_assert!((lineindex as u32) < scan.rs_ntuples);
-                let lineoff = scan.rs_vistuples[lineindex as usize];
-                let lpp = page.item_id(lineoff);
+        // No content lock: rs_vistuples entries stay good under the pin.
+        while linesleft > 0 {
+            debug_assert!((lineindex as u32) < scan.rs_ntuples);
+            // SAFETY: 0 <= lineindex < rs_ntuples (linesleft counts it down)
+            // and rs_ntuples <= MaxHeapTuplesPerPage (heap_prepare_pagescan's
+            // per-page bound).
+            let lineoff = unsafe { *scan.rs_vistuples.get_unchecked(lineindex as usize) };
+            // SAFETY: lineoff came from page_collect_tuples on this pinned
+            // page under the per-page line-pointer bound; it was is_normal at
+            // collect time and normal items satisfy the page invariant
+            // (item_raw_unchecked contract). Both stay good under the pin.
+            let (ptr, len) = unsafe {
+                let lpp = page.item_id_unchecked(lineoff);
                 debug_assert!(lpp.is_normal());
-                let (ptr, len) = page.item_raw(lpp);
+                page.item_raw_unchecked(lpp)
+            };
 
-                let matches = if nkeys == 0 {
-                    true
-                } else {
-                    // SAFETY: pinned page, offset from rs_vistuples.
-                    let tuple = unsafe {
-                        HeapTupleData::from_raw_parts(
-                            ptr,
-                            len,
-                            ItemPointerData::new(scan.rs_cblock, lineoff),
-                            relid,
-                        )
-                    };
-                    heap_key_test(&tuple, &scan.rs_base.rs_rd.rd_att, &mut scan.rs_base.rs_key)?
+            let matches = if nkeys == 0 {
+                true
+            } else {
+                // SAFETY: pinned page, offset from rs_vistuples.
+                let tuple = unsafe {
+                    HeapTupleData::from_raw_parts(
+                        ptr,
+                        len,
+                        ItemPointerData::new(scan.rs_cblock, lineoff),
+                        relid,
+                    )
                 };
+                heap_key_test(&tuple, &scan.rs_base.rs_rd.rd_att, &mut scan.rs_base.rs_key)?
+            };
 
-                if matches {
-                    found = Some((lineindex as u32, lineoff, ptr, len));
-                    break;
-                }
-                linesleft -= 1;
-                lineindex += dir as i32;
+            if matches {
+                scan.rs_cindex = lineindex as u32;
+                // SAFETY: image on the page pinned by rs_cbuf (struct invariant).
+                scan.rs_ctup = Some(unsafe {
+                    HeapTupleData::from_raw_parts(
+                        ptr,
+                        len,
+                        ItemPointerData::new(scan.rs_cblock, lineoff),
+                        relid,
+                    )
+                });
+                return Ok(());
             }
-        }
-
-        if let Some((idx, off, ptr, len)) = found {
-            scan.rs_cindex = idx;
-            // SAFETY: image on the page pinned by rs_cbuf (struct invariant).
-            scan.rs_ctup = Some(unsafe {
-                HeapTupleData::from_raw_parts(
-                    ptr,
-                    len,
-                    ItemPointerData::new(scan.rs_cblock, off),
-                    relid,
-                )
-            });
-            return Ok(());
+            linesleft -= 1;
+            lineindex += dir as i32;
         }
     }
 
@@ -960,6 +1020,7 @@ pub fn heap_getnextslot<'mcx>(
     Ok(true)
 }
 
+#[inline]
 fn store_ctup_into_slot<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut HeapScanDescData<'mcx>,

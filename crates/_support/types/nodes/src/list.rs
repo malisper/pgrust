@@ -135,6 +135,30 @@ impl<'mcx, F: ListFlavor> List<'mcx, F> {
         self.as_slice().last().copied()
     }
 
+    // new_list(1) shape: a first append always allocates the constant initial
+    // capacity, so the size formula folds away.
+    #[inline(never)]
+    fn first_cell_alloc(&mut self, mcx: Mcx<'mcx>) -> PgResult<()> {
+        const FIRST_CAP: usize = 5;
+        debug_assert!(self.max_length == 0);
+        let layout = Layout::array::<F::Cell<'mcx>>(FIRST_CAP).expect("const layout");
+        let ptr = Allocator::allocate(&mcx, layout).map_err(|_| crate::oom(mcx, layout.size()))?;
+        self.elements = ptr.cast();
+        self.max_length = FIRST_CAP as i32;
+        Ok(())
+    }
+
+    #[inline]
+    fn grow_for_append(&mut self, mcx: Mcx<'mcx>) -> PgResult<()> {
+        if self.max_length == 0 {
+            self.first_cell_alloc(mcx)
+        } else {
+            self.enlarge(mcx, self.length + 1)
+        }
+    }
+
+    // Out of line: inlined, its frame taxes every lappend fast path.
+    #[inline(never)]
     fn enlarge(&mut self, mcx: Mcx<'mcx>, min_size: i32) -> PgResult<()> {
         debug_assert!(min_size > self.max_length);
         let cell = core::mem::size_of::<F::Cell<'mcx>>();
@@ -147,7 +171,7 @@ impl<'mcx, F: ListFlavor> List<'mcx, F> {
         };
         check_alloc_size(new_max as usize * cell)?;
         let new_layout = Layout::array::<F::Cell<'mcx>>(new_max as usize)
-            .map_err(|_| mcx.oom(new_max as usize * cell))?;
+            .map_err(|_| crate::oom(mcx, new_max as usize * cell))?;
         let ptr = if self.max_length == 0 {
             Allocator::allocate(&mcx, new_layout)
         } else {
@@ -157,7 +181,7 @@ impl<'mcx, F: ListFlavor> List<'mcx, F> {
             // with old_layout; new_layout is strictly larger.
             unsafe { Allocator::grow(&mcx, self.elements.cast(), old_layout, new_layout) }
         };
-        self.elements = ptr.map_err(|_| mcx.oom(new_layout.size()))?.cast();
+        self.elements = ptr.map_err(|_| crate::oom(mcx, new_layout.size()))?.cast();
         self.max_length = new_max;
         Ok(())
     }
@@ -165,7 +189,7 @@ impl<'mcx, F: ListFlavor> List<'mcx, F> {
     #[inline]
     pub fn lappend(&mut self, mcx: Mcx<'mcx>, v: F::Cell<'mcx>) -> PgResult<()> {
         if self.length >= self.max_length {
-            self.enlarge(mcx, self.length + 1)?;
+            self.grow_for_append(mcx)?;
         }
         // SAFETY: capacity > length after the enlarge check.
         unsafe { self.elements.as_ptr().add(self.length as usize).write(v) };
@@ -175,7 +199,7 @@ impl<'mcx, F: ListFlavor> List<'mcx, F> {
 
     pub fn lcons(&mut self, mcx: Mcx<'mcx>, v: F::Cell<'mcx>) -> PgResult<()> {
         if self.length >= self.max_length {
-            self.enlarge(mcx, self.length + 1)?;
+            self.grow_for_append(mcx)?;
         }
         // SAFETY: capacity > length; shifting the live prefix up one slot.
         unsafe {
@@ -190,7 +214,7 @@ impl<'mcx, F: ListFlavor> List<'mcx, F> {
     pub fn insert_nth(&mut self, mcx: Mcx<'mcx>, pos: usize, v: F::Cell<'mcx>) -> PgResult<()> {
         assert!(pos <= self.len());
         if self.length >= self.max_length {
-            self.enlarge(mcx, self.length + 1)?;
+            self.grow_for_append(mcx)?;
         }
         // SAFETY: capacity > length; shifting cells [pos, length) up one slot.
         unsafe {

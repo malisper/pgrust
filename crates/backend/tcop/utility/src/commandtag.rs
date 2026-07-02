@@ -1,0 +1,199 @@
+use types_core::CommandTag;
+use types_error::WARNING;
+use types_nodes::node_tree::Node;
+use types_nodes::nodes_enums::CmdType;
+use types_nodes::parsenodes::{Query, TransactionStmtKind::*};
+use types_nodes::plannodes::PlannedStmt;
+use types_nodes::rawnodes::RawStmt;
+use types_nodes::NodeTag;
+
+use crate::consts::*;
+use crate::{loc, payload_gap};
+
+pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
+    use NodeTag::*;
+    match parsetree.node_tag() {
+        T_RawStmt => {
+            let raw: &RawStmt<'_> = parsetree.as_variant().unwrap();
+            CreateCommandTag(raw.stmt.expect("RawStmt.stmt is NULL"))
+        }
+
+        T_InsertStmt => CMDTAG_INSERT,
+        T_DeleteStmt => CMDTAG_DELETE,
+        T_UpdateStmt => CMDTAG_UPDATE,
+        T_MergeStmt => CMDTAG_MERGE,
+        T_SelectStmt => CMDTAG_SELECT,
+        T_PLAssignStmt => CMDTAG_SELECT,
+
+        T_TransactionStmt => {
+            let stmt = parsetree.as_transaction_stmt().unwrap();
+            match stmt.kind {
+                TRANS_STMT_BEGIN => CMDTAG_BEGIN,
+                TRANS_STMT_START => CMDTAG_START_TRANSACTION,
+                TRANS_STMT_COMMIT => CMDTAG_COMMIT,
+                TRANS_STMT_ROLLBACK | TRANS_STMT_ROLLBACK_TO => CMDTAG_ROLLBACK,
+                TRANS_STMT_SAVEPOINT => CMDTAG_SAVEPOINT,
+                TRANS_STMT_RELEASE => CMDTAG_RELEASE,
+                TRANS_STMT_PREPARE => CMDTAG_PREPARE_TRANSACTION,
+                TRANS_STMT_COMMIT_PREPARED => CMDTAG_COMMIT_PREPARED,
+                TRANS_STMT_ROLLBACK_PREPARED => CMDTAG_ROLLBACK_PREPARED,
+            }
+        }
+
+        T_DeclareCursorStmt => CMDTAG_DECLARE_CURSOR,
+        T_ClosePortalStmt => payload_gap("CreateCommandTag", "ClosePortalStmt"),
+        T_FetchStmt => payload_gap("CreateCommandTag", "FetchStmt"),
+        T_CreateDomainStmt => CMDTAG_CREATE_DOMAIN,
+        T_CreateSchemaStmt => CMDTAG_CREATE_SCHEMA,
+        T_CreateStmt => CMDTAG_CREATE_TABLE,
+        T_CreateTableSpaceStmt => CMDTAG_CREATE_TABLESPACE,
+        T_DropTableSpaceStmt => CMDTAG_DROP_TABLESPACE,
+        T_AlterTableSpaceOptionsStmt => CMDTAG_ALTER_TABLESPACE,
+        T_CreateExtensionStmt => CMDTAG_CREATE_EXTENSION,
+        T_AlterExtensionStmt => CMDTAG_ALTER_EXTENSION,
+        T_AlterExtensionContentsStmt => CMDTAG_ALTER_EXTENSION,
+        T_CreateFdwStmt => CMDTAG_CREATE_FOREIGN_DATA_WRAPPER,
+        T_AlterFdwStmt => CMDTAG_ALTER_FOREIGN_DATA_WRAPPER,
+        T_CreateForeignServerStmt => CMDTAG_CREATE_SERVER,
+        T_AlterForeignServerStmt => CMDTAG_ALTER_SERVER,
+        T_CreateUserMappingStmt => CMDTAG_CREATE_USER_MAPPING,
+        T_AlterUserMappingStmt => CMDTAG_ALTER_USER_MAPPING,
+        T_DropUserMappingStmt => CMDTAG_DROP_USER_MAPPING,
+        T_CreateForeignTableStmt => CMDTAG_CREATE_FOREIGN_TABLE,
+        T_ImportForeignSchemaStmt => CMDTAG_IMPORT_FOREIGN_SCHEMA,
+        T_DropStmt => payload_gap("CreateCommandTag", "DropStmt"),
+        T_TruncateStmt => CMDTAG_TRUNCATE_TABLE,
+        T_CommentStmt => CMDTAG_COMMENT,
+        T_SecLabelStmt => CMDTAG_SECURITY_LABEL,
+        T_CopyStmt => CMDTAG_COPY,
+        T_RenameStmt => payload_gap("CreateCommandTag", "RenameStmt"),
+        T_AlterObjectDependsStmt => payload_gap("CreateCommandTag", "AlterObjectDependsStmt"),
+        T_AlterObjectSchemaStmt => payload_gap("CreateCommandTag", "AlterObjectSchemaStmt"),
+        T_AlterOwnerStmt => payload_gap("CreateCommandTag", "AlterOwnerStmt"),
+        T_AlterTableMoveAllStmt => payload_gap("CreateCommandTag", "AlterTableMoveAllStmt"),
+        T_AlterTableStmt => payload_gap("CreateCommandTag", "AlterTableStmt"),
+        T_AlterDomainStmt => CMDTAG_ALTER_DOMAIN,
+        T_AlterFunctionStmt => payload_gap("CreateCommandTag", "AlterFunctionStmt"),
+        T_GrantStmt => payload_gap("CreateCommandTag", "GrantStmt"),
+        T_GrantRoleStmt => payload_gap("CreateCommandTag", "GrantRoleStmt"),
+        T_AlterDefaultPrivilegesStmt => CMDTAG_ALTER_DEFAULT_PRIVILEGES,
+        T_DefineStmt => payload_gap("CreateCommandTag", "DefineStmt"),
+        T_CompositeTypeStmt => CMDTAG_CREATE_TYPE,
+        T_CreateEnumStmt => CMDTAG_CREATE_TYPE,
+        T_CreateRangeStmt => CMDTAG_CREATE_TYPE,
+        T_AlterEnumStmt => CMDTAG_ALTER_TYPE,
+        T_ViewStmt => CMDTAG_CREATE_VIEW,
+        T_CreateFunctionStmt => payload_gap("CreateCommandTag", "CreateFunctionStmt"),
+        T_IndexStmt => CMDTAG_CREATE_INDEX,
+        T_RuleStmt => CMDTAG_CREATE_RULE,
+        T_CreateSeqStmt => CMDTAG_CREATE_SEQUENCE,
+        T_AlterSeqStmt => CMDTAG_ALTER_SEQUENCE,
+        T_DoStmt => CMDTAG_DO,
+        T_CreatedbStmt => CMDTAG_CREATE_DATABASE,
+        T_AlterDatabaseStmt | T_AlterDatabaseRefreshCollStmt | T_AlterDatabaseSetStmt => {
+            CMDTAG_ALTER_DATABASE
+        }
+        T_DropdbStmt => CMDTAG_DROP_DATABASE,
+        T_NotifyStmt => CMDTAG_NOTIFY,
+        T_ListenStmt => CMDTAG_LISTEN,
+        T_UnlistenStmt => CMDTAG_UNLISTEN,
+        T_LoadStmt => CMDTAG_LOAD,
+        T_CallStmt => CMDTAG_CALL,
+        T_ClusterStmt => CMDTAG_CLUSTER,
+        T_VacuumStmt => payload_gap("CreateCommandTag", "VacuumStmt"),
+        T_ExplainStmt => CMDTAG_EXPLAIN,
+        T_CreateTableAsStmt => payload_gap("CreateCommandTag", "CreateTableAsStmt"),
+        T_RefreshMatViewStmt => CMDTAG_REFRESH_MATERIALIZED_VIEW,
+        T_AlterSystemStmt => CMDTAG_ALTER_SYSTEM,
+        T_VariableSetStmt => payload_gap("CreateCommandTag", "VariableSetStmt"),
+        T_VariableShowStmt => CMDTAG_SHOW,
+        T_DiscardStmt => payload_gap("CreateCommandTag", "DiscardStmt"),
+        T_CreateTransformStmt => CMDTAG_CREATE_TRANSFORM,
+        T_CreateTrigStmt => CMDTAG_CREATE_TRIGGER,
+        T_CreateEventTrigStmt => CMDTAG_CREATE_EVENT_TRIGGER,
+        T_AlterEventTrigStmt => CMDTAG_ALTER_EVENT_TRIGGER,
+        T_CreatePLangStmt => CMDTAG_CREATE_LANGUAGE,
+        T_CreateRoleStmt => CMDTAG_CREATE_ROLE,
+        T_AlterRoleStmt => CMDTAG_ALTER_ROLE,
+        T_AlterRoleSetStmt => CMDTAG_ALTER_ROLE,
+        T_DropRoleStmt => CMDTAG_DROP_ROLE,
+        T_DropOwnedStmt => CMDTAG_DROP_OWNED,
+        T_ReassignOwnedStmt => CMDTAG_REASSIGN_OWNED,
+        T_LockStmt => CMDTAG_LOCK_TABLE,
+        T_ConstraintsSetStmt => CMDTAG_SET_CONSTRAINTS,
+        T_CheckPointStmt => CMDTAG_CHECKPOINT,
+        T_ReindexStmt => CMDTAG_REINDEX,
+        T_CreateConversionStmt => CMDTAG_CREATE_CONVERSION,
+        T_CreateCastStmt => CMDTAG_CREATE_CAST,
+        T_CreateOpClassStmt => CMDTAG_CREATE_OPERATOR_CLASS,
+        T_CreateOpFamilyStmt => CMDTAG_CREATE_OPERATOR_FAMILY,
+        T_AlterOpFamilyStmt => CMDTAG_ALTER_OPERATOR_FAMILY,
+        T_AlterOperatorStmt => CMDTAG_ALTER_OPERATOR,
+        T_AlterTypeStmt => CMDTAG_ALTER_TYPE,
+        T_AlterTSDictionaryStmt => CMDTAG_ALTER_TEXT_SEARCH_DICTIONARY,
+        T_AlterTSConfigurationStmt => CMDTAG_ALTER_TEXT_SEARCH_CONFIGURATION,
+        T_CreatePolicyStmt => CMDTAG_CREATE_POLICY,
+        T_AlterPolicyStmt => CMDTAG_ALTER_POLICY,
+        T_CreateAmStmt => CMDTAG_CREATE_ACCESS_METHOD,
+        T_CreatePublicationStmt => CMDTAG_CREATE_PUBLICATION,
+        T_AlterPublicationStmt => CMDTAG_ALTER_PUBLICATION,
+        T_CreateSubscriptionStmt => CMDTAG_CREATE_SUBSCRIPTION,
+        T_AlterSubscriptionStmt => CMDTAG_ALTER_SUBSCRIPTION,
+        T_DropSubscriptionStmt => CMDTAG_DROP_SUBSCRIPTION,
+        T_AlterCollationStmt => CMDTAG_ALTER_COLLATION,
+        T_PrepareStmt => CMDTAG_PREPARE,
+        T_ExecuteStmt => CMDTAG_EXECUTE,
+        T_CreateStatsStmt => CMDTAG_CREATE_STATISTICS,
+        T_AlterStatsStmt => CMDTAG_ALTER_STATISTICS,
+        T_DeallocateStmt => payload_gap("CreateCommandTag", "DeallocateStmt"),
+
+        T_PlannedStmt => {
+            let stmt: &PlannedStmt<'_> = parsetree.as_variant().unwrap();
+            tag_for_command_type(stmt.commandType, stmt.rowMarks.len() != 0, stmt.utilityStmt)
+        }
+
+        T_Query => {
+            let stmt: &Query<'_> = parsetree.as_variant().unwrap();
+            tag_for_command_type(stmt.commandType, stmt.rowMarks.len() != 0, stmt.utilityStmt)
+        }
+
+        other => {
+            let _ = ::elog::ereport(WARNING)
+                .errmsg(format!("unrecognized node type: {}", other as u16))
+                .finish(loc("CreateCommandTag"));
+            CMDTAG_UNKNOWN
+        }
+    }
+}
+
+// The shared CMD_* body of the T_PlannedStmt / T_Query arms. The rowMarks
+// refinement (SELECT FOR ... variants) needs RowMarkClause/PlanRowMark, which
+// the FOR UPDATE grammar lane owns.
+fn tag_for_command_type(
+    command_type: CmdType,
+    has_row_marks: bool,
+    utility_stmt: Option<Node<'_>>,
+) -> CommandTag {
+    match command_type {
+        CmdType::CMD_SELECT => {
+            if has_row_marks {
+                payload_gap("CreateCommandTag", "RowMarkClause/PlanRowMark")
+            } else {
+                CMDTAG_SELECT
+            }
+        }
+        CmdType::CMD_UPDATE => CMDTAG_UPDATE,
+        CmdType::CMD_INSERT => CMDTAG_INSERT,
+        CmdType::CMD_DELETE => CMDTAG_DELETE,
+        CmdType::CMD_MERGE => CMDTAG_MERGE,
+        CmdType::CMD_UTILITY => {
+            CreateCommandTag(utility_stmt.expect("CMD_UTILITY with NULL utilityStmt"))
+        }
+        other => {
+            let _ = ::elog::ereport(WARNING)
+                .errmsg(format!("unrecognized commandType: {}", other as i32))
+                .finish(loc("CreateCommandTag"));
+            CMDTAG_UNKNOWN
+        }
+    }
+}

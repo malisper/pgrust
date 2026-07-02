@@ -200,6 +200,9 @@ pub fn BufferManagerShmemInit() -> PgResult<()> {
     }
     POOL.blocks.store(blocks, Ordering::Relaxed);
     POOL.nbuffers.store(n, Ordering::Relaxed);
+    // C's extern BufferBlocks: lets BufferGetPage stay a header inline in
+    // pin-holding consumers (bufmgr_seams::BufferPin::page()).
+    bufmgr_seams::publish_buffer_blocks(blocks);
     // `descs` is the publish flag: stored last, Release orders the fields
     // (and the initialized array) before it.
     assert!(

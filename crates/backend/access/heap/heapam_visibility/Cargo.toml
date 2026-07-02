@@ -43,3 +43,4 @@ autovacuum_seams = { path = "../../../postmaster/autovacuum_seams" }
 lock_seams = { path = "../../../storage/lmgr/lock_seams" }
 timeout_seams = { path = "../../../utils/misc/timeout_seams" }
 shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
+varsup = { path = "../../transam/varsup" }

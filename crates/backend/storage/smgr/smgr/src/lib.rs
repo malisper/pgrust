@@ -97,30 +97,41 @@ fn reln<R>(key: RelFileLocatorBackend, f: impl FnOnce(&mut SMgrRelation) -> R) -
     with_reln(key, f).expect("smgr operation on an unopened SMgrRelation")
 }
 
+// smgropen's dynahash HASH_ENTER "found" arm miss path: entry creation is
+// off the warm-hit path (C's found=false branch), including the capacity
+// reservation the fallible-insert contract needs.
+#[cold]
+#[inline(never)]
+fn open_entry<'c>(
+    c: &'c mut SmgrCache,
+    key: RelFileLocatorBackend,
+) -> PgResult<&'c mut SMgrRelation> {
+    if c.relns.len() == c.relns.capacity() && c.relns.try_reserve(1).is_err() {
+        return Err(oom("SMgrRelation hashtable"));
+    }
+    let r = c.relns.entry(key).or_insert_with(|| {
+        let mut r = SMgrRelation::new();
+        match r.which {
+            SmgrKind::Md => md::mdopen(&mut r.md),
+        }
+        r
+    });
+    c.unpinned.set(c.unpinned.get() + 1);
+    Ok(r)
+}
+
 fn opened<R>(
     key: RelFileLocatorBackend,
     f: impl FnOnce(&mut SMgrRelation) -> R,
 ) -> PgResult<R> {
     debug_assert!(key.locator.relNumber != 0, "smgropen: invalid RelFileNumber");
     with_cache(|c| {
-        if c.relns.len() == c.relns.capacity()
-            && c.relns.try_reserve(1).is_err()
-        {
-            return Err(oom("SMgrRelation hashtable"));
+        // Warm hit = ONE probe (C smgropen's HASH_ENTER-found), no capacity
+        // bookkeeping.
+        if let Some(r) = c.relns.get_mut(&key) {
+            return Ok(f(r));
         }
-        let mut inserted = false;
-        let r = c.relns.entry(key).or_insert_with(|| {
-            inserted = true;
-            let mut r = SMgrRelation::new();
-            match r.which {
-                SmgrKind::Md => md::mdopen(&mut r.md),
-            }
-            r
-        });
-        if inserted {
-            c.unpinned.set(c.unpinned.get() + 1);
-        }
-        Ok(f(r))
+        open_entry(c, key).map(f)
     })
 }
 
@@ -642,9 +653,29 @@ pub fn init_seams() {
         smgrcreate(rlocator, forknum, is_redo)
     });
     smgr_seams::smgr_nblocks::set(|rlocator, forknum| {
-        // smgrnblocks(smgropen(rlocator), forknum).
-        smgropen(rlocator.locator, rlocator.backend)?;
-        smgrnblocks(rlocator, forknum)
+        // smgrnblocks(smgropen(rlocator), forknum): C resolves the handle
+        // once; one cache probe serves both the open and the nblocks body.
+        opened(rlocator, |r| -> PgResult<BlockNumber> {
+            let cached = r.smgr_cached_nblocks[forknum as usize];
+            // Believed only in recovery: no shared inval for fork-size changes.
+            if xlogutils::in_recovery() && cached != InvalidBlockNumber {
+                return Ok(cached);
+            }
+            let result = match r.which {
+                SmgrKind::Md => md::mdnblocks(rlocator, &mut r.md, forknum)?,
+            };
+            r.smgr_cached_nblocks[forknum as usize] = result;
+            Ok(result)
+        })?
+    });
+    smgr_seams::smgr_read::set(|rlocator, forknum, blocknum, buffer| {
+        // smgrread(smgropen(rlocator), ...): one probe, as above.
+        opened(rlocator, |r| {
+            let mut buffers: [&mut [u8]; 1] = [buffer];
+            match r.which {
+                SmgrKind::Md => md::mdreadv(rlocator, &mut r.md, forknum, blocknum, &mut buffers),
+            }
+        })?
     });
     smgr_seams::smgr_destroy_all::set(smgrdestroyall);
     smgr_seams::at_eoxact_smgr::set(|| {
