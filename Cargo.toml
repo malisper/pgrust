@@ -74,6 +74,8 @@ members = [
     "crates/backend/access/common/relation",
     "crates/backend/storage/ipc/waiteventset_seams",
     "crates/backend/storage/ipc/latch",
+    "crates/backend/libpq/be_secure_seams",
+    "crates/backend/libpq/pqcomm",
 ]
 
 [workspace.package]
