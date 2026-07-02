@@ -116,7 +116,7 @@ backend-access-transam-commit-ts	src/backend/access/transam/commit_ts.c	todo			f
 backend-access-transam-generic-xlog	src/backend/access/transam/generic_xlog.c	todo			fabled:backend-access-transam-generic-xlog; m1-dep(stub-ok)
 backend-access-transam-multixact	src/backend/access/transam/multixact.c	todo			fabled:backend-access-transam-multixact; m1-spine
 backend-access-transam-parallel	src/backend/access/transam/parallel.c	todo			fabled:backend-access-transam-parallel; m1-spine
-backend-access-transam-rmgr	*/rmgr.c	todo			fabled:backend-access-transam-rmgr; m1-spine(boot)
+backend-access-transam-rmgr	*/rmgr.c	ported	rmgr	cold	m1-spine(boot); static RmgrTable indexed by repr(u8) enum (no TLS table, better than fabled); custom-rmgr slots omitted (no extension ABI); unported callbacks are named loud panics wired by direct dep as managers land; 9 tests, density 3.4%
 backend-access-transam-slru	src/backend/access/transam/slru.c	ported	slru	cold	fabled:slru rewritten for thread model; m1-spine(boot); per-element shmem views (no whole-slice &mut), tolerated C races as relaxed atomics, LwGuard on every lock across ?; caches complete (bank LRU, RecentlyUsed suppression, WriteAll fd cache, ReadOnly fastpath); bench SimpleLruReadPage_ReadOnly when clog ports; 8+4 tests, density 5.0%
 backend-access-transam-subtrans	src/backend/access/transam/subtrans.c	todo			fabled:backend-access-transam-subtrans; m1-spine(boot)
 backend-access-transam-timeline	src/backend/access/transam/timeline.c	todo			fabled:backend-access-transam-timeline; m1-spine(boot)
@@ -134,7 +134,7 @@ backend-access-transam-xlogprefetcher	src/backend/access/transam/xlogprefetcher.
 backend-access-transam-xlogreader	src/backend/access/transam/xlogreader.c	todo			fabled:backend-access-transam-xlogreader; m1-spine(boot)
 backend-access-transam-xlogrecovery	src/backend/access/transam/xlogrecovery.c	todo			fabled:backend-access-transam-xlogrecovery; m1-spine(boot)
 backend-access-transam-xlogstats	*/xlogstats.c	todo			fabled:backend-access-transam-xlogstats
-backend-access-transam-xlogutils	src/backend/access/transam/xlogutils.c	todo			fabled:backend-access-transam-xlogutils; m1-spine(boot)
+backend-access-transam-xlogutils	src/backend/access/transam/xlogutils.c	ported	xlogutils	cold	m1-spine(boot); recovery-state store in C home (installs slru in_recovery seam); invalid-page table BTreeMap (cold, deterministic dump); fake relcache entries loud-panic pending rel vocab; created xlogreader/timeline/xlogrecovery/bufmgr seam decl crates; 8 tests, density 3.7%
 backend-archive-shell-archive	*/shell_archive.c	todo			fabled:backend-archive-shell-archive
 backend-backup-basebackup	*/basebackup.c	todo			fabled:backend-backup-basebackup; m1-dep(stub-ok)
 backend-backup-copy	*/basebackup_copy.c	todo			fabled:backend-backup-copy

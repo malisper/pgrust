@@ -16,7 +16,6 @@ pub const BKPBLOCK_HAS_DATA: u8 = 0x20;
 pub const BKPBLOCK_WILL_INIT: u8 = 0x40;
 pub const BKPBLOCK_SAME_REL: u8 = 0x80;
 
-// WALOpenSegment (xlogreader.h); ws_file is the OS fd, -1 when closed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WALOpenSegment {
     pub ws_file: i32,
@@ -34,14 +33,11 @@ impl Default for WALOpenSegment {
     }
 }
 
-// WALSegmentContext trimmed to ws_segsize (ws_dir unused by current ports).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WALSegmentContext {
     pub ws_segsize: i32,
 }
 
-// DecodedBkpBlock (xlogreader.h) trimmed to the tag/flag fields the redo
-// fetchers consume; the xlogreader port widens it as decoding lands.
 #[derive(Clone, Copy, Debug)]
 pub struct DecodedBkpBlock {
     pub in_use: bool,
@@ -89,9 +85,8 @@ impl Default for DecodedXLogRecord {
     }
 }
 
-// XLogReaderState (xlogreader.h) trimmed to what rmgr callbacks and
-// xlogutils read/write. `private_end_of_wal` is the
-// ReadLocalXLogPageNoWaitPrivate.end_of_wal flag C reaches via private_data.
+// Trimmed to what rmgr callbacks and xlogutils touch; `private_end_of_wal`
+// is C's ReadLocalXLogPageNoWaitPrivate.end_of_wal reached via private_data.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct XLogReaderState {
     pub ReadRecPtr: XLogRecPtr,
@@ -108,7 +103,6 @@ pub struct XLogReaderState {
 }
 
 impl XLogReaderState {
-    // XLogRecHasBlockRef(record, block_id) (xlogreader.h inline).
     pub fn has_block_ref(&self, block_id: u8) -> bool {
         match &self.record {
             Some(r) => (block_id as i8) <= r.max_block_id && r.blocks[block_id as usize].in_use,
@@ -116,7 +110,6 @@ impl XLogReaderState {
         }
     }
 
-    // XLogRecGetBlock(record, i) (xlogreader.h inline).
     pub fn block(&self, block_id: u8) -> &DecodedBkpBlock {
         &self
             .record
@@ -125,7 +118,6 @@ impl XLogReaderState {
             .blocks[block_id as usize]
     }
 
-    // XLogRecGetBlockTagExtended (xlogreader.c); None is the C `false`.
     pub fn block_tag_extended(
         &self,
         block_id: u8,
@@ -137,18 +129,15 @@ impl XLogReaderState {
         Some((blk.rlocator, blk.forknum, blk.blkno, blk.prefetch_buffer))
     }
 
-    // XLogRecHasBlockImage(record, block_id) (xlogreader.h inline).
     pub fn has_block_image(&self, block_id: u8) -> bool {
         self.block(block_id).has_image
     }
 
-    // XLogRecBlockImageApply(record, block_id) (xlogreader.h inline).
     pub fn block_image_apply(&self, block_id: u8) -> bool {
         self.block(block_id).apply_image
     }
 }
 
-// WALReadError (xlogreader.h); wre_seg carries the segment state at failure.
 #[derive(Clone, Copy, Debug)]
 pub struct WALReadError {
     pub wre_errno: i32,
@@ -159,10 +148,8 @@ pub struct WALReadError {
 }
 
 seam_core::seam!(
-    // RestoreBlockImage(record, block_id, page) (xlogreader.c): decompress /
-    // copy the full-page image onto the buffer's page. Inner Err carries C's
-    // `false` + record->errormsg_buf; the page is reached through `buf` on the
-    // bufmgr side. Outer Err is unused by C (kept for the seam ABI).
+    // RestoreBlockImage: inner Err is C's `false` + record->errormsg_buf;
+    // the target page is reached through `buf` on the bufmgr side.
     pub fn restore_block_image(
         record: &XLogReaderState,
         block_id: u8,
@@ -171,9 +158,8 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // WALRead(state, buf, startptr, count, tli, &errinfo) (xlogreader.c).
-    // Inner Err is C's `false` + errinfo; outer Err carries the segment_open
-    // callback's ereport surface.
+    // WALRead: inner Err is C's `false` + errinfo; outer Err is the
+    // segment_open callback's ereport surface.
     pub fn wal_read<'a>(
         state: &'a mut XLogReaderState,
         buf: &'a mut [u8],
