@@ -206,6 +206,9 @@ members = [
     "crates/backend/tcop/backend_startup",
     "crates/backend/postmaster/launch_backend",
     "crates/backend/storage/buffer/bufmgr",
+    "crates/backend/utils/activity/pgstat",
+    "crates/backend/utils/cache/relcache_build_seams",
+    "crates/backend/utils/cache/relcache",
 ]
 
 [workspace.package]

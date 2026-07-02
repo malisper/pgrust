@@ -701,12 +701,16 @@ pub fn table_slot_callbacks(relation: &Relation<'_>) -> TupleSlotKind {
 }
 
 pub fn table_slot_create<'mcx>(
-    _mcx: Mcx<'mcx>,
-    relation: &Relation<'_>,
+    mcx: Mcx<'mcx>,
+    relation: &Relation<'mcx>,
 ) -> PgResult<SlotData<'mcx>> {
-    let _tts_cb = table_slot_callbacks(relation);
+    let tts_cb = table_slot_callbacks(relation);
     // MakeSingleTupleTableSlot(RelationGetDescr(relation), tts_cb)
-    unported("backend-executor-exectuples (MakeSingleTupleTableSlot)")
+    Ok(exectuples::make_tuple_table_slot(
+        mcx,
+        tts_cb,
+        Some(relation.rd_att.clone()),
+    ))
 }
 
 // --- Table scan functions (tableam.h wrappers + tableam.c) ---
