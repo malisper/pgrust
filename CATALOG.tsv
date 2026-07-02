@@ -611,7 +611,7 @@ backend-utils-adt-ts-small	*/tsquery_cleanup.c,*/tsquery_rewrite.c,*/tsquery_uti
 backend-utils-adt-tsquery-core	*/tsquery.c,*/tsquery_gist.c,*/tsquery_op.c	todo			fabled:backend-utils-adt-tsquery-core
 backend-utils-adt-tsvector-core	*/tsvector.c,*/tsvector_op.c,*/tsvector_parser.c	todo			fabled:backend-utils-adt-tsvector-core
 backend-utils-adt-typanalyze-small	*/array_typanalyze.c,*/rangetypes_typanalyze.c	combined-into:backend-utils-adt-array-typanalyze			
-backend-utils-adt-varlena	*/varlena.c	todo			fabled:assemble/backend-utils-adt-varlena; m1-spine(boot)
+backend-utils-adt-varlena	*/varlena.c	benched	varlena	0.59-0.84x-instr/0.57-0.95x-ns	m1-spine(boot); text/bytea I/O + cmp core; PASS dual gate Graviton clang-16 (texteq 0.59x - C pays 5 out-of-line calls per op we replace with 2 compares); C-collation fastpath seam-free; #341 sort cores + #277/#314 output endpoints day-one; regex/format/pattern lanes deferred to their rows; detoast seamed loud; 14 tests, Miri, density 4.8%; docs/benchmarks/varlena.md
 backend-utils-adt-version	*/version.c	todo			fabled:backend-utils-adt-version
 backend-utils-adt-xml	*/xml.c	todo			fabled:backend-utils-adt-xml; m1-dep(stub-ok)
 backend-utils-cache-catcache	src/backend/utils/cache/catcache.c,src/include/utils/catcache.h	in-progress	catcache		m1-spine
