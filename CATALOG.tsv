@@ -360,7 +360,7 @@ backend-libpq-ifaddr	src/backend/libpq/ifaddr.c	todo			fabled:backend-libpq-ifad
 backend-libpq-pqcomm	src/backend/libpq/pqcomm.c	todo			fabled:backend-libpq-pqcomm; m1-spine
 backend-libpq-pqformat	src/backend/libpq/pqformat.c	benched	pqformat	0.52x-instr/0.64x-ns	fabled:backend-libpq-pqformat; m1-spine; wire encode/decode, PG11 fast shape day-one; PASS dual gate Graviton clang-16 with wide margin (sendint32 0.49x/0.31x, sendstring 0.31x/0.37x); watch: printtup must hoist conversion resolve (lever 2); docs/benchmarks/pqformat.md
 backend-libpq-pqmq	src/backend/libpq/pqmq.c	todo			fabled:backend-libpq-pqmq
-backend-libpq-pqsignal	*/pqsignal.c	todo			fabled:backend-libpq-pqsignal; m1-spine(boot)
+backend-libpq-pqsignal	*/pqsignal.c	ported	libpq_pqsignal	cold	fabled:backend-libpq-libpq_pqsignal; m1-spine(boot); pqinitmask+sigprocmask, once per backend startup; 5 tests, density 4.6%
 backend-main-main	src/backend/main/main.c	todo			fabled:backend-main-main; m1-spine
 backend-nodes-copyfuncs	src/backend/nodes/copyfuncs.c	todo			m1-dep(stub-ok)
 backend-nodes-core	*/bitmapset.c,*/list.c,*/makefuncs.c,*/multibitmapset.c,*/nodeFuncs.c,*/params.c,*/print.c,*/read.c,*/tidbitmap.c,*/value.c	todo			fabled:backend-nodes-core; m1-spine
@@ -418,7 +418,7 @@ backend-postmaster-bgworker	src/backend/postmaster/bgworker.c	todo			fabled:back
 backend-postmaster-bgwriter	src/backend/postmaster/bgwriter.c	todo			m1-spine(boot)
 backend-postmaster-checkpointer	src/backend/postmaster/checkpointer.c	todo			fabled:backend-postmaster-checkpointer; m1-spine(boot)
 backend-postmaster-fork-process	src/backend/postmaster/fork_process.c	todo			fabled:backend-postmaster-fork-process; m1-spine
-backend-postmaster-interrupt	src/backend/postmaster/interrupt.c	todo			fabled:backend-postmaster-interrupt; m1-spine
+backend-postmaster-interrupt	src/backend/postmaster/interrupt.c	ported	interrupt	cold	fabled:backend-postmaster-interrupt; m1-spine; TLS atomic flags Release/Acquire per graviton doc, handlers allocation-free, C arm order exact; 4 seam decl crates (latch/procsignal/guc-file/mcxt); 9 tests, density 3.6%
 backend-postmaster-launch-backend	src/backend/postmaster/launch_backend.c	todo			fabled:backend-postmaster-launch-backend; m1-spine
 backend-postmaster-pgarch	src/backend/postmaster/pgarch.c	todo			fabled:backend-postmaster-pgarch; m1-dep(stub-ok)
 backend-postmaster-pmchild	src/backend/postmaster/pmchild.c	todo			fabled:backend-postmaster-pmchild; m1-dep(stub-ok)
