@@ -42,3 +42,31 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn get_user_id() -> Oid
 );
+
+seam_core::seam!(
+    pub fn create_socket_lock_file(
+        socketfile: &str,
+        am_postmaster: bool,
+        socket_dir: &str,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // InitializeSessionUserId(rolename, roleid, bypass_login_check) — the
+    // pg_authid-syscache half deferred from the ported miscinit unit.
+    pub fn initialize_session_user_id(
+        rolename: Option<&str>,
+        roleid: Oid,
+        bypass_login_check: bool,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // has_rolreplication(roleid) (miscinit.c) — same deferred half.
+    pub fn has_rolreplication(roleid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    // process_session_preload_libraries (miscinit.c) — same deferred half.
+    pub fn process_session_preload_libraries() -> PgResult<()>
+);

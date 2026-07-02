@@ -5,3 +5,14 @@ seam_core::seam!(
         roleid: types_core::Oid,
     ) -> types_error::PgResult<bool>
 );
+
+seam_core::seam!(
+    // object_aclcheck(classid, objectid, roleid, mode) (aclchk.c); AclMode is
+    // uint64 (parsenodes.h), 0 == ACLCHECK_OK (acl.h AclResult).
+    pub fn object_aclcheck(
+        classid: types_core::Oid,
+        objectid: types_core::Oid,
+        roleid: types_core::Oid,
+        mode: u64,
+    ) -> types_error::PgResult<i32>
+);

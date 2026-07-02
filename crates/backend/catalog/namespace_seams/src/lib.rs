@@ -40,3 +40,17 @@ seam_core::seam!(
     // GetTempNamespaceProcNumber(namespaceId) (namespace.c): infallible.
     pub fn get_temp_namespace_proc_number(namespace_id: Oid) -> types_core::ProcNumber
 );
+
+seam_core::seam!(
+    // InitializeSearchPath (namespace.c).
+    pub fn initialize_search_path() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // fetch_search_path(includeImplicit) (namespace.c); recomputes the path,
+    // which can require catalog access.
+    pub fn fetch_search_path<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        include_implicit: bool,
+    ) -> PgResult<mcx::PgVec<'mcx, Oid>>
+);

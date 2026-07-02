@@ -61,6 +61,7 @@ impl ConnectionTiming {
 #[derive(Debug)]
 pub struct Port {
     pub sock: i32,
+    pub noblock: bool,
     pub proto: ProtocolVersion,
     pub laddr: SockAddr,
     pub raddr: SockAddr,
@@ -72,6 +73,14 @@ pub struct Port {
     pub cmdline_options: Option<String>,
     pub guc_options: Vec<String>,
     pub application_name: Option<String>,
+    pub default_keepalives_idle: i32,
+    pub default_keepalives_interval: i32,
+    pub default_keepalives_count: i32,
+    pub default_tcp_user_timeout: i32,
+    pub keepalives_idle: i32,
+    pub keepalives_interval: i32,
+    pub keepalives_count: i32,
+    pub tcp_user_timeout: i32,
     pub ssl_in_use: bool,
     pub alpn_used: bool,
 }
@@ -80,6 +89,7 @@ impl Port {
     pub fn new(client_sock: &ClientSocket) -> Self {
         Self {
             sock: client_sock.sock,
+            noblock: false,
             proto: 0,
             laddr: SockAddr::zeroed(),
             raddr: client_sock.raddr,
@@ -91,6 +101,14 @@ impl Port {
             cmdline_options: None,
             guc_options: Vec::new(),
             application_name: None,
+            default_keepalives_idle: 0,
+            default_keepalives_interval: 0,
+            default_keepalives_count: 0,
+            default_tcp_user_timeout: 0,
+            keepalives_idle: 0,
+            keepalives_interval: 0,
+            keepalives_count: 0,
+            tcp_user_timeout: 0,
             ssl_in_use: false,
             alpn_used: false,
         }

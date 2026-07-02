@@ -761,5 +761,8 @@ pub fn init_seams() {
     pqcomm_seams::pq_flush::set(pq_flush);
 }
 
+pub mod socket;
+pub use socket::*;
+
 #[cfg(test)]
 mod tests;
