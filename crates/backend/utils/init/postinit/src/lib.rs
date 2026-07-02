@@ -547,7 +547,7 @@ pub fn InitPostgres(
         miscinit_seams::initialize_session_user_id::call(username, useroid, false)?;
         let (authn_id, auth_method) = miscinit::client_connection_info();
         if let Some(authn_id) = authn_id {
-            miscinit::InitializeSystemUser(authn_id, auth_seams::hba_authname::call(auth_method));
+            miscinit::InitializeSystemUser(authn_id, hba_seams::hba_authname::call(auth_method));
         }
         am_superuser = superuser_seams::superuser::call()?;
     }
