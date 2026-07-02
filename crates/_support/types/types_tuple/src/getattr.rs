@@ -60,7 +60,6 @@ pub fn heap_attisnull(
     }
 }
 
-#[inline(always)]
 pub fn nocachegetattr(tup: &HeapTupleData<'_>, attnum: i32, tupleDesc: &TupleDescData<'_>) -> Datum {
     let bp = tup.bits_ptr();
     let hasnulls = tup.has_nulls();
