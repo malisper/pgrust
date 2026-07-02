@@ -1,0 +1,109 @@
+[package]
+name = "seams_init"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "seams_init"
+path = "src/lib.rs"
+
+[dependencies]
+detoast = { path = "../../backend/access/common/detoast" }
+printtup = { path = "../../backend/access/common/printtup" }
+relation = { path = "../../backend/access/common/relation" }
+heapam_visibility = { path = "../../backend/access/heap/heapam_visibility" }
+genam = { path = "../../backend/access/index/genam" }
+indexam = { path = "../../backend/access/index/indexam" }
+table = { path = "../../backend/access/table/table" }
+tableam = { path = "../../backend/access/table/tableam" }
+clog = { path = "../../backend/access/transam/clog" }
+rmgr = { path = "../../backend/access/transam/rmgr" }
+subtrans = { path = "../../backend/access/transam/subtrans" }
+transam_xlog = { path = "../../backend/access/transam/transam_xlog" }
+transam = { path = "../../backend/access/transam/transam" }
+varsup = { path = "../../backend/access/transam/varsup" }
+xact = { path = "../../backend/access/transam/xact" }
+xloginsert = { path = "../../backend/access/transam/xloginsert" }
+xlogreader = { path = "../../backend/access/transam/xlogreader" }
+xlogrecovery = { path = "../../backend/access/transam/xlogrecovery" }
+xlogutils = { path = "../../backend/access/transam/xlogutils" }
+aclchk = { path = "../../backend/catalog/aclchk" }
+catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
+catalog = { path = "../../backend/catalog/catalog" }
+pg_database = { path = "../../backend/catalog/pg_database" }
+dbcommands = { path = "../../backend/commands/dbcommands" }
+executils = { path = "../../backend/executor/executils" }
+execscan = { path = "../../backend/executor/execscan" }
+nodeseqscan = { path = "../../backend/executor/nodeseqscan" }
+auth = { path = "../../backend/libpq/auth" }
+be_secure = { path = "../../backend/libpq/be_secure" }
+hba = { path = "../../backend/libpq/hba" }
+libpq_pqsignal = { path = "../../backend/libpq/libpq_pqsignal" }
+pqcomm = { path = "../../backend/libpq/pqcomm" }
+pqformat = { path = "../../backend/libpq/pqformat" }
+vars = { path = "../../backend/optimizer/util/vars" }
+parser_driver = { path = "../../backend/parser/parser_driver" }
+scan_fgram = { path = "../../backend/parser/scan_fgram" }
+interrupt = { path = "../../backend/postmaster/interrupt" }
+launch_backend = { path = "../../backend/postmaster/launch_backend" }
+pmchild = { path = "../../backend/postmaster/pmchild" }
+postmaster = { path = "../../backend/postmaster/postmaster" }
+rewrite_handler = { path = "../../backend/rewrite/rewrite_handler" }
+bufmgr = { path = "../../backend/storage/buffer/bufmgr" }
+fd = { path = "../../backend/storage/file/fd" }
+dsm_core = { path = "../../backend/storage/ipc/dsm_core" }
+ipc = { path = "../../backend/storage/ipc/ipc" }
+ipci = { path = "../../backend/storage/ipc/ipci" }
+latch = { path = "../../backend/storage/ipc/latch" }
+pmsignal = { path = "../../backend/storage/ipc/pmsignal" }
+procarray = { path = "../../backend/storage/ipc/procarray" }
+procsignal = { path = "../../backend/storage/ipc/procsignal" }
+shmem = { path = "../../backend/storage/ipc/shmem" }
+sinval = { path = "../../backend/storage/ipc/sinval" }
+waiteventset = { path = "../../backend/storage/ipc/waiteventset" }
+lmgr_proc = { path = "../../backend/storage/lmgr/lmgr_proc" }
+lmgr = { path = "../../backend/storage/lmgr/lmgr" }
+lock = { path = "../../backend/storage/lmgr/lock" }
+smgr = { path = "../../backend/storage/smgr/smgr" }
+backend_startup = { path = "../../backend/tcop/backend_startup" }
+tcop_dest = { path = "../../backend/tcop/dest" }
+postgres = { path = "../../backend/tcop/postgres" }
+pquery = { path = "../../backend/tcop/pquery" }
+utility = { path = "../../backend/tcop/utility" }
+backend_status = { path = "../../backend/utils/activity/backend_status" }
+pgstat = { path = "../../backend/utils/activity/pgstat" }
+adt_acl = { path = "../../backend/utils/adt/acl" }
+adt_timestamp = { path = "../../backend/utils/adt/adt_timestamp" }
+adt_bool = { path = "../../backend/utils/adt/bool" }
+adt_float = { path = "../../backend/utils/adt/float" }
+pg_locale = { path = "../../backend/utils/adt/pg_locale" }
+varlena = { path = "../../backend/utils/adt/varlena" }
+cache_syscache = { path = "../../backend/utils/cache/cache_syscache" }
+catcache = { path = "../../backend/utils/cache/catcache" }
+inval = { path = "../../backend/utils/cache/inval" }
+lsyscache = { path = "../../backend/utils/cache/lsyscache" }
+plancache = { path = "../../backend/utils/cache/plancache" }
+relcache = { path = "../../backend/utils/cache/relcache" }
+relmapper = { path = "../../backend/utils/cache/relmapper" }
+typcache = { path = "../../backend/utils/cache/typcache" }
+elog = { path = "../../backend/utils/error/elog" }
+fmgr_core = { path = "../../backend/utils/fmgr/fmgr_core" }
+funcapi = { path = "../../backend/utils/fmgr/funcapi" }
+init_small = { path = "../../backend/utils/init/init_small" }
+miscinit = { path = "../../backend/utils/init/miscinit" }
+mbutils = { path = "../../backend/utils/mb/mbutils" }
+conffiles = { path = "../../backend/utils/misc/conffiles" }
+guc_file = { path = "../../backend/utils/misc/guc_file" }
+guc_tables = { path = "../../backend/utils/misc/guc_tables" }
+guc = { path = "../../backend/utils/misc/guc" }
+ps_status = { path = "../../backend/utils/misc/ps_status" }
+queryenvironment = { path = "../../backend/utils/misc/queryenvironment" }
+stack_depth = { path = "../../backend/utils/misc/stack_depth" }
+superuser = { path = "../../backend/utils/misc/superuser" }
+timeout = { path = "../../backend/utils/misc/timeout" }
+portalmem = { path = "../../backend/utils/mmgr/portalmem" }
+resowner = { path = "../../backend/utils/resowner/resowner" }
+snapmgr = { path = "../../backend/utils/time/snapmgr" }
+pg_prng = { path = "../../common/pg_prng" }
+guc_seams = { path = "../../backend/utils/misc/guc_seams" }

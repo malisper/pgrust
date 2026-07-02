@@ -759,6 +759,28 @@ pub fn init_seams() {
     pqcomm_seams::pq_putmessage::set(pq_putmessage);
     pqcomm_seams::pq_putmessage_v2::set(pq_putmessage_v2);
     pqcomm_seams::pq_flush::set(pq_flush);
+    pqcomm_seams::listen_server_port::set(
+        |hostname, port, unix_socket_dir, listen_sockets, max_listen| {
+            let family =
+                if unix_socket_dir.is_some() { libc::AF_UNIX } else { libc::AF_UNSPEC };
+            let status = socket::ListenServerPort(
+                family,
+                hostname,
+                port,
+                unix_socket_dir,
+                listen_sockets,
+                max_listen,
+            )?;
+            if status == types_core::STATUS_OK {
+                Ok(())
+            } else {
+                Err(Box::new(types_error::PgError::new(
+                    types_error::WARNING,
+                    "could not create listen socket",
+                )))
+            }
+        },
+    );
 }
 
 pub mod socket;

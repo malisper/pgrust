@@ -965,8 +965,8 @@ dependencies = [
  "executils",
  "init_small",
  "mcx",
- "syscache_seams",
  "tableam",
+ "tupdesc",
  "types_core",
  "types_error",
  "types_nodes",
@@ -2436,6 +2436,7 @@ dependencies = [
  "pgtz_seams",
  "types_core",
  "types_error",
+ "types_storage",
 ]
 
 [[package]]

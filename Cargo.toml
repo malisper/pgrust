@@ -314,6 +314,7 @@ members = [
     "crates/backend/commands/dbcommands",
     "crates/backend/commands/variable",
     "crates/backend/utils/misc/guc_funcs",
+    "crates/backend/timezone/pgtz_seams",
     "crates/backend/timezone/localtime",
     "crates/backend/timezone/pgtz",
     "crates/backend/timezone/strftime",
