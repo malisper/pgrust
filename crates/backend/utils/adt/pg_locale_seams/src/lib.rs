@@ -17,3 +17,33 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn collation_is_deterministic(collid: Oid) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    // pg_perm_setlocale(category, locale) (pg_locale.c); category is the POSIX
+    // LC_* value; Ok(None) is C's NULL return (setlocale failure).
+    pub fn pg_perm_setlocale<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        category: i32,
+        locale: &str,
+    ) -> PgResult<Option<mcx::PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    // database_ctype_is_c = v (pg_locale.c global; postinit writes it once).
+    pub fn set_database_ctype_is_c(v: bool)
+);
+
+seam_core::seam!(
+    // init_database_collation (pg_locale.c).
+    pub fn init_database_collation() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // get_collation_actual_version(collprovider, locale) (pg_locale.c);
+    // Ok(None) is C's NULL (no version for this provider).
+    pub fn get_collation_actual_version<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        collprovider: u8,
+        locale: &str,
+    ) -> PgResult<Option<mcx::PgString<'mcx>>>
+);

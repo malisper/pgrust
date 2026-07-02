@@ -92,3 +92,8 @@ seam_core::seam!(
         types_core::Oid,
     )
 );
+
+seam_core::seam!(
+    // MultiXactIdSetOldestMember (multixact.c): per-backend pre-DML bookkeeping.
+    pub fn multi_xact_id_set_oldest_member() -> PgResult<()>
+);

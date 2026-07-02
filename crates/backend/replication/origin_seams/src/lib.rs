@@ -31,3 +31,13 @@ seam_core::seam!(
         wal_log: bool,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // StartupReplicationOrigin() (origin.c).
+    pub fn startup_replication_origin() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // CheckPointReplicationOrigin() (origin.c).
+    pub fn check_point_replication_origin() -> PgResult<()>
+);

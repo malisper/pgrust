@@ -38,6 +38,20 @@ pub(crate) fn set_logwrt_result(write: XLogRecPtr, flush: XLogRecPtr) {
     LOGWRT_RESULT.set((write, flush));
 }
 
+// assign_wal_sync_method (xlog.c): a changed sync method invalidates the
+// open-flag/fsync posture of the open segment; close it (fsync first).
+pub(crate) fn assign_wal_sync_method(new_val: i32, _extra: Option<&guc_tables::GucHookExtra>) {
+    if wal_sync_method() != new_val && OPEN_LOG_FILE.get() >= 0 {
+        if fd::pg_fsync(OPEN_LOG_FILE.get()) != 0 {
+            panic!(
+                "could not fsync file \"{}\"",
+                XLogFileName(OPEN_LOG_TLI.get(), OPEN_LOG_SEG_NO.get(), wal_segment_size())
+            );
+        }
+        let _ = XLogFileClose();
+    }
+}
+
 fn wal_sync_method() -> i32 {
     guc_tables::vars::wal_sync_method.read()
 }
@@ -466,10 +480,6 @@ pub(crate) fn UpdateMinRecoveryPoint(lsn: XLogRecPtr, force: bool) -> PgResult<(
     }
     LWLockRelease(ControlFileLock())?;
     Ok(())
-}
-
-pub(crate) fn set_update_min_recovery_point(v: bool) {
-    UPDATE_MIN_RECOVERY_POINT.set(v);
 }
 
 pub fn XLogFlush(record: XLogRecPtr) -> PgResult<()> {

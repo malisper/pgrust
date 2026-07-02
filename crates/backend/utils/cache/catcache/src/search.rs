@@ -283,7 +283,8 @@ fn probe_1_int4(cache: &mut crate::CatCache<'_>, w: Datum) -> ProbeRet {
 
 #[inline(always)]
 fn found(cache: &mut crate::CatCache<'_>, bucket: usize, slot: u32) -> ProbeRet {
-    cache.ct_move_head(bucket, slot);
+    // SAFETY: `bucket` is the masked bucket `slot` was walked from.
+    unsafe { cache.ct_move_head_hot(bucket, slot) };
     // SAFETY: `slot` came off the bucket walk (live slot).
     let ct = unsafe { cache.tuples.get_unchecked_mut(slot as usize) };
     if ct.negative {

@@ -46,3 +46,8 @@ procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
 checkpointer_seams = { path = "../../../postmaster/checkpointer_seams" }
 types_guc = { path = "../../../../_support/types/types_guc" }
 libc = "0.2"
+
+[dev-dependencies]
+shmem = { path = "../../../storage/ipc/shmem" }
+aio_seams = { path = "../../../storage/aio/aio_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }

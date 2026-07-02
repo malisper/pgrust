@@ -1,0 +1,11 @@
+[package]
+name = "ps_status"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+guc_tables = { path = "../guc_tables" }
+init_small = { path = "../../init/init_small" }
+miscinit = { path = "../../init/miscinit" }
+ps_status_seams = { path = "../ps_status_seams" }

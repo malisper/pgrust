@@ -1,0 +1,11 @@
+[package]
+name = "crypt"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "crypt"
+path = "src/lib.rs"
+
+[dependencies]

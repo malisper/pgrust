@@ -30,3 +30,22 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn heap_tuple_header_is_only_locked<'a>(hdr: &'a HeapTupleHeaderData) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    // HeapTupleSatisfiesUpdate (heapam_visibility.c); DML write lane.
+    pub fn heap_tuple_satisfies_update<'a, 'tup>(
+        htup: &'a mut HeapTupleData<'tup>,
+        curcid: types_core::CommandId,
+        buffer: Buffer,
+    ) -> PgResult<tableam_vocab::TM_Result>
+);
+
+seam_core::seam!(
+    // HeapTupleSetHintBits (heapam_visibility.c): hint store + dirty-hint.
+    pub fn heap_tuple_set_hint_bits<'a>(
+        tuple: &'a mut HeapTupleHeaderData,
+        buffer: Buffer,
+        infomask: u16,
+        xid: TransactionId,
+    ) -> PgResult<()>
+);

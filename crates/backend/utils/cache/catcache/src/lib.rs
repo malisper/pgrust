@@ -235,12 +235,30 @@ pub(crate) unsafe fn stored_bytes<'a>(payload: *const u8, key: Datum) -> &'a [u8
 }
 
 /// `cc_fastequal[i](cachekeys[i], searchkeys[i])`, de-fmgr'd.
-#[inline]
+///
+/// Split like `fast_hash_probe`: the word arms collapse to one low-32-bit
+/// compare (both sides are canonical datums — tupmacs fetch on the insert
+/// side, `Datum::from_char/from_i16/from_i32/from_oid` on the probe side —
+/// so the per-kind extension is already identical) and inline; the by-ref
+/// arms carry slice-compare loops and go through one outlined call.
+#[inline(always)]
 pub(crate) fn eq_stored(kind: CCFastKind, stored: Datum, payload: *const u8, probe: &CatCKey<'_>) -> bool {
     match kind {
-        CCFastKind::Char => stored.as_char() == probe.word().as_char(),
-        CCFastKind::Int2 => stored.as_i16() == probe.word().as_i16(),
-        CCFastKind::Int4 => stored.as_i32() == probe.word().as_i32(),
+        CCFastKind::Char | CCFastKind::Int2 | CCFastKind::Int4 => {
+            stored.as_i32() == probe.word().as_i32()
+        }
+        _ => eq_stored_bytes_outlined(kind, stored, payload, probe),
+    }
+}
+
+#[inline(never)]
+fn eq_stored_bytes_outlined(
+    kind: CCFastKind,
+    stored: Datum,
+    payload: *const u8,
+    probe: &CatCKey<'_>,
+) -> bool {
+    match kind {
         // SAFETY: stored by-ref keys always pack a live in-payload slice.
         CCFastKind::Name => compute::name_eq(unsafe { stored_bytes(payload, stored) }, probe.bytes()),
         CCFastKind::Text | CCFastKind::OidVector => {
@@ -248,6 +266,7 @@ pub(crate) fn eq_stored(kind: CCFastKind, stored: Datum, payload: *const u8, pro
             let s = unsafe { stored_bytes(payload, stored) };
             s == probe.bytes()
         }
+        _ => unreachable!("word kinds are handled inline"),
     }
 }
 

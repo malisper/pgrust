@@ -88,11 +88,24 @@ fn fmgr_info_non_builtin_panics() {
 #[test]
 #[should_panic(expected = "not ported")]
 fn unported_builtin_invocation_panics() {
+    let mut f = fmgr_info(1242).unwrap();
+    let mut fci = LocalFcinfo::<1>::new(InvalidOid);
+    fci.set_arg(0, Datum::from_i32(1));
+    let _ = f.invoke(&mut fci);
+}
+
+#[test]
+fn ported_builtin_invokes() {
     let mut f = fmgr_info(177).unwrap();
     let mut fci = LocalFcinfo::<2>::new(InvalidOid);
-    fci.set_arg(0, Datum::from_i32(1));
+    fci.set_arg(0, Datum::from_i32(40));
     fci.set_arg(1, Datum::from_i32(2));
-    let _ = f.invoke(&mut fci);
+    assert_eq!(f.invoke(&mut fci).unwrap().as_i32(), 42);
+    let mut eq = fmgr_info(65).unwrap();
+    let mut fci = LocalFcinfo::<2>::new(InvalidOid);
+    fci.set_arg(0, Datum::from_i32(7));
+    fci.set_arg(1, Datum::from_i32(7));
+    assert!(eq.invoke(&mut fci).unwrap().as_bool());
 }
 
 #[test]
