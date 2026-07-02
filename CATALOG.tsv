@@ -77,7 +77,7 @@ backend-access-heap-pruneheap	src/backend/access/heap/pruneheap.c	todo			fabled:
 backend-access-heap-rewriteheap	src/backend/access/heap/rewriteheap.c	todo			fabled:backend-access-heap-rewriteheap; m1-dep(stub-ok)
 backend-access-heap-vacuumlazy	src/backend/access/heap/vacuumlazy.c	todo			fabled:backend-access-heap-vacuumlazy; m1-dep(stub-ok)
 backend-access-heap-visibilitymap	src/backend/access/heap/visibilitymap.c	todo			fabled:backend-access-heap-visibilitymap; m1-dep(stub-ok)
-backend-access-index-genam	*/genam.c	todo			m1-spine
+backend-access-index-genam	*/genam.c	in-progress	genam		m1-spine
 backend-access-index-indexam	*/indexam.c	ported	indexam	cold	m1-spine; IndexAmKind enum resolved once from relam (rule 4, sets the AM-dispatch pattern); index_getnext_tid exact C cost shape (one-probe pgstat, kill_prior_tuple ordering) - THE M2 bench target when nbtree-core lands; scan descriptors by value (no palloc, structural win); tableam fetch fns loud-panic until that lane lands; 16 tests, density 4.0%
 backend-access-nbt-compare	*/nbtcompare.c	todo			fabled:backend-access-nbt-compare; m1-dep(stub-ok)
 backend-access-nbt-dedup	*/nbtdedup.c	todo			fabled:backend-access-nbt-dedup; m1-dep(stub-ok)
@@ -281,7 +281,7 @@ backend-executor-execProcnode	src/backend/executor/execProcnode.c	todo			fabled:
 backend-executor-execReplication	src/backend/executor/execReplication.c	todo			fabled:backend-executor-execReplication; m1-dep(stub-ok)
 backend-executor-execSRF	src/backend/executor/execSRF.c	todo			m1-dep(stub-ok)
 backend-executor-execScan	src/backend/executor/execScan.c	todo			fabled:backend-executor-execScan
-backend-executor-execTuples	src/backend/executor/execTuples.c	in-progress	exectuples		fabled:backend-executor-execTuples; m1-spine
+backend-executor-execTuples	src/backend/executor/execTuples.c	benched	exectuples	0.90-0.92x-instr/0.71-0.89x-ns(graviton4)	fabled:backend-executor-execTuples; m1-spine; slot impls over types_slot SlotData: store/clear/deform(slot_getsomeattrs_int)/materialize/copyslot/fetch; dual gate PASS (clang-16 -mcpu=neoverse-v2, job pgrust-fast-microbench-1783022974): getsome_heap4 0.92x/0.89x, getsome_heapv 0.90x/0.71x, materialize 1.02x/1.01x; store_min_copy 1.18x-instr justified (mcx+PgResult fixed tax, heaptuple-form1 class) with 0.78x ns; generic SlotData slot_getattr 1.40x-instr FAIL justified (types_slot variant-dependent base offset; monomorphized lane 0.93x/0.90x PASS — hot callers hold concrete kind); buffer-pin paths loud-panic until storage-bufmgr; ExecTypeFromTL/tuple-table-list deferred to executor-state unit; 17 tests, Miri SB+TB clean, density 4.0%; docs/benchmarks/exectuples.md; docs/optimizations/exectuples-parity.md
 backend-executor-execUtils	src/backend/executor/execUtils.c	todo			fabled:backend-executor-execUtils; m1-spine
 backend-executor-functions	src/backend/executor/functions.c	todo			m1-dep(stub-ok)
 backend-executor-instrument	src/backend/executor/instrument.c	todo			fabled:backend-executor-instrument; m1-dep(stub-ok)
@@ -566,9 +566,11 @@ backend-utils-adt-jsonpath-gram	src/backend/utils/adt/jsonpath_gram.y,build-clea
 backend-utils-adt-jsonpath-scan	src/backend/utils/adt/jsonpath_scan.l,build-clean/src/backend/utils/adt/jsonpath_scan.c	todo			m1-dep(stub-ok)
 backend-utils-adt-lsn-trigfuncs	*/pg_lsn.c,*/trigfuncs.c	todo			fabled:backend-utils-adt-lsn-trigfuncs; m1-dep(stub-ok)
 backend-utils-adt-misc2	*/domains.c,*/expandeddatum.c,*/expandedrecord.c,*/genfile.c,*/hbafuncs.c,*/lockfuncs.c,*/partitionfuncs.c,*/pg_upgrade_support.c,*/regproc.c,*/rowtypes.c,*/tid.c,*/windowfuncs.c	todo			fabled:backend-utils-adt-misc2; m1-dep(stub-ok)
-backend-utils-adt-more-scalars-clean	*/int.c,*/int8.c,*/mac.c,*/mac8.c,*/oracle_compat.c,*/pseudotypes.c	todo			m1-spine; fabled:backend-utils-adt-int; int.c/int8.c decomposing into adt_int/adt_int8 (in flight)
+backend-utils-adt-int	src/backend/utils/adt/int.c	benched	adt_int	0.84-1.01x-instr/0.97-1.0x-ns(local)	fabled:backend-utils-adt-int; m1-spine; decomposed out of backend-utils-adt-more-scalars; 76 cores + 85 fmgr wrappers (OIDs vs pg_proc.dat), INT_BUILTINS table for fmgr-core; int4out through-fmgr 1.01x/0.99x, core 0.84x/0.97x; int4pl/eq callee bodies asm-identical to C, excess = types_fmgr justified floor; fn_extra dyn-downcast refuted (1.20x) -> const-init TLS scratch; 11 tests Miri-clean both modes, density 3.2%; Graviton confirm pending; docs/optimizations/adt_int-parity.md
+backend-utils-adt-int8	src/backend/utils/adt/int8.c	benched	adt_int8	0.78-1.01x-instr/0.89-1.04x-ns(local)	fabled:backend-utils-adt-int8; m1-spine; decomposed out of backend-utils-adt-more-scalars; 74 cores + 84 wrappers (INT8_BUILTINS); int8out through-fmgr 0.78x/0.89x (no render->palloc->memcpy copy, structural win); core residual = numutils pg_lltoa (tracked there); SQLSTATEs/messages byte-exact, MIN/-1 corners; 9 tests Miri-clean both modes, density 3.2%; Graviton confirm pending; docs/optimizations/adt_int8-parity.md
+backend-utils-adt-more-scalars-clean	*/int.c,*/int8.c,*/mac.c,*/mac8.c,*/oracle_compat.c,*/pseudotypes.c	todo			m1-spine; fabled:backend-utils-adt-int; int.c/int8.c decomposed into rows backend-utils-adt-int/int8 (benched); remaining c_sources still todo
 backend-utils-adt-name	src/backend/utils/adt/name.c	todo			fabled:backend-utils-adt-name; m1-spine(boot)
-backend-utils-adt-more-scalars	*/cash.c,*/int.c,*/int8.c,*/mac.c,*/mac8.c,*/name.c,*/numutils.c,*/oracle_compat.c,*/pseudotypes.c	todo			m1-spine; fabled:backend-utils-adt-int; int.c int4out on printtup path; int.c/int8.c decomposing into adt_int/adt_int8 (in flight)
+backend-utils-adt-more-scalars	*/cash.c,*/int.c,*/int8.c,*/mac.c,*/mac8.c,*/name.c,*/numutils.c,*/oracle_compat.c,*/pseudotypes.c	todo			m1-spine; fabled:backend-utils-adt-int; int.c int4out on printtup path; int.c/int8.c decomposed into rows backend-utils-adt-int/int8 (benched); remaining c_sources still todo
 backend-utils-adt-mac	*/mac.c	todo			fabled:backend-utils-adt-mac
 backend-utils-adt-mac8	*/mac8.c	todo			fabled:backend-utils-adt-mac8
 backend-utils-adt-network	*/inet_cidr_ntop.c,*/inet_net_pton.c,*/network.c	todo			fabled:backend-utils-adt-network; m1-dep(stub-ok)
@@ -633,7 +635,7 @@ backend-utils-fmgr-funcapi	*/funcapi.c	todo			fabled:backend-utils-fmgr-funcapi;
 backend-utils-fmgrtab	build-rust-prng/src/include/utils/fmgrtab.c	combined-into:backend-utils-fmgr-core			
 backend-utils-hash-dynahash	*/dynahash.c	in-progress	dynahash		fabled:backend-utils-hash-dynahash; m1-spine
 backend-utils-hash-small	*/pg_crc.c	todo			fabled:port-crc32c,backend-utils-hash-pg-crc; m1-spine(boot)
-backend-utils-init-miscinit	src/backend/utils/init/miscinit.c	todo			fabled:backend-utils-init-miscinit; m1-spine
+backend-utils-init-miscinit	src/backend/utils/init/miscinit.c	ported	miscinit		fabled:backend-utils-init-miscinit; m1-spine; cold (no per-query entry points) => rationale not bench; installs all 8 miscinit_seams (signatures verified vs C, no call-site fixes needed); owns Mode/MyBackendType/IgnoreSystemIndexes/user-id+sec-context TLS, SecContextGuard (no-drop.md guard for C save/restore pairs), LocalLatchData home (per-thread latch-slab slot, consumes latch::allocate_local_latch+SetMyLatch), ClientConnectionInfo ser/de, lock-file interlock (CreateDataDir/SocketLockFile, AddTo/Recheck/Touch/Unlink); seam adds (loud-panic until owners): guc set_config_option_internal_dynamic_default, syscache lookup_authid_rolname, ipc on_proc_exit, shmem pg_shared_memory_is_in_use; direct deps latch/lmgr_proc/init_small; FeBeWaitSet latch repoint lands with socket/port unit; deferred: InitPostmasterChild/InitStandaloneProcess/checkDataDir/SetDataDir/InitializeSessionUserId/has_rolreplication/library-preload+shmem-request-hooks/system_user() SQL wrapper; 12 tests, density 4.9%; audit pending
 backend-utils-init-postinit	src/backend/utils/init/postinit.c	todo			fabled:backend-utils-init-postinit; m1-spine
 backend-utils-init-small	*/globals.c,*/usercontext.c	ported	init_small	cold	fabled:backend-utils-init-small; m1-spine; all globals.c vars as const-init !needs_drop thread_locals; DataDir/DatabasePath leaked &'static str (read = plain load, fabled cloned per read); elog-shared five stored here; 27 GUC slots installed single-owner; miscadmin interrupt/crit helpers are the per-query-hot family - bench rides tcop/xlog statement gates; MyClientSocket/MyProcPort deferred until libpq-be vocabulary; MyLatch slot landed with the latch port; 11 tests, density 3.4%
 backend-utils-mb-conv-string-helpers	*/conv.c,*/stringinfo_mb.c,*/wstrcmp.c,*/wstrncmp.c	todo			fabled:backend-utils-mb-conv-string-helpers
@@ -647,7 +649,7 @@ backend-utils-misc-clean	*/help_config.c,*/pg_rusage.c,*/queryenvironment.c,*/sa
 backend-utils-misc-guc-file	src/backend/utils/misc/guc-file.l	todo			fabled:backend-utils-misc-guc-file; m1-spine
 backend-utils-misc-guc-funcs	src/backend/utils/misc/guc_funcs.c,src/include/utils/guc.h,src/include/utils/guc_tables.h	todo			fabled:backend-utils-misc-guc-funcs; m1-spine
 backend-utils-misc-guc-tables	src/backend/utils/misc/guc_tables.c,src/include/utils/guc.h,src/include/utils/guc_tables.h	ported	guc_tables	cold	fabled:guc-tables; m1-spine; 404 entries verified value-exact vs preprocessed C by parser diff (caught 3 fabled transcription bugs: max_stack_depth boot 2048->100, IntervalStyle hook, compression opts); 12 tests, density 0.5%
-backend-utils-misc-guc	src/backend/utils/misc/guc.c,src/include/utils/guc.h,src/include/utils/guc_tables.h	todo			fabled:backend-utils-misc-guc; m1-spine
+backend-utils-misc-guc	src/backend/utils/misc/guc.c,src/include/utils/guc.h,src/include/utils/guc_tables.h	in-progress	guc		fabled:backend-utils-misc-guc; m1-spine
 backend-utils-misc-help_config	*/help_config.c	combined-into:backend-utils-misc-help-config			fabled:backend-utils-misc-help-config; m1-dep(stub-ok)
 backend-utils-misc-more	*/pg_controldata.c,*/ps_status.c,*/rls.c,*/superuser.c	todo			fabled:backend-utils-misc-more; m1-spine
 backend-utils-misc-more2	*/conffiles.c,*/injection_point.c,*/pg_config.c,*/timeout.c,*/tzparser.c	todo			fabled:backend-utils-misc-timeout; m1-spine
@@ -663,10 +665,10 @@ backend-utils-mmgr-dsa	src/backend/utils/mmgr/dsa.c	todo			fabled:backend-utils-
 backend-utils-mmgr-freepage	src/backend/utils/mmgr/freepage.c	todo			fabled:backend-utils-mmgr-freepage; m1-dep(stub-ok)
 backend-utils-mmgr-generation	src/backend/utils/mmgr/generation.c	todo			fabled:mcx; m1-spine
 backend-utils-mmgr-mcxt	src/backend/utils/mmgr/mcxt.c	combined-into:mcx			ported in substrate crate mcx; fabled:mcx; m1-spine
-backend-utils-mmgr-portalmem	src/backend/utils/mmgr/portalmem.c	todo			fabled:backend-utils-mmgr-portalmem; m1-spine
+backend-utils-mmgr-portalmem	src/backend/utils/mmgr/portalmem.c	ported	portalmem	cold	m1-spine; monomorphized portal hash w/ stack [u8;64] keys (zero-alloc lookup); #359 stmts as Copy handle stores, #422 sweep costs structurally absent; PortalGetPrimaryStmt compile-time absent until stmt-list owner; sourceText copy = watch item vs C pointer share; CreatePortal/Drop are M1 bench targets; 23 tests, density 4.7%
 backend-utils-mmgr-slab	src/backend/utils/mmgr/slab.c	todo			fabled:mcx; m1-spine
 backend-utils-mmgr-small	*/alignedalloc.c,*/memdebug.c	todo			fabled:mcx; m1-spine
-backend-utils-resowner-all	*/resowner.c	todo			m1-spine; fabled:backend-utils-resowner-resowner
+backend-utils-resowner-all	*/resowner.c	in-progress	resowner		m1-spine; fabled:backend-utils-resowner-resowner
 backend-utils-sort-small	*/qsort_interruptible.c	todo			fabled:backend-utils-sort-small
 backend-utils-sort-sortsupport	src/backend/utils/sort/sortsupport.c	todo			fabled:backend-utils-sort-sortsupport
 backend-utils-sort-storage	*/logtape.c,*/sharedtuplestore.c,*/tuplestore.c	todo			fabled:backend-utils-sort-storage; m1-dep(stub-ok)
@@ -1166,7 +1168,7 @@ probe-utils-init-usercontext	*/usercontext.c	todo
 probe-utils-resowner-resowner	*/resowner.c	combined-into:backend-utils-resowner-all			fabled:duplicate-of
 probe-utils-time-combocid	*/combocid.c	combined-into:backend-utils-time-small			fabled:duplicate-of
 probe-wait_error	*/wait_error.c	todo			
-common-ip	*/ip.c	todo			fabled:common-ip; m1-spine
+common-ip	*/ip.c	ported	ip		fabled:common-ip; m1-spine; cold (connection/startup-frequency resolver wrappers) => rationale not bench; leaf unit — no consumers ported yet, so vocab (SockAddr/AddrInfoHint/PgAddrInfo) lives in the crate and consumers take a direct dep (no ip_seams until a cycle forces one); C malloc addrinfo list => owned Vec<PgAddrInfo> (drop = pg_freeaddrinfo_all); getnameinfo_unix re-imposes C callers' NI_MAXHOST/NI_MAXSERV bounds so EAI_MEMORY fires under C's predicate; abstract @-socket addrlen convention kept; ss_family via unaligned read; 12 tests incl. live resolver loopback round-trip; density 4.9%; audit pending
 port-crc32c	src/port/pg_crc32c_armv8.c,src/port/pg_crc32c_sb8.c,src/port/pg_crc32c_armv8_choose.c,src/backend/utils/hash/pg_crc.c	benched	crc32c	0.61x-instr/0.81x-ns	m1-spine(boot); hw CRC32CX in C shape, dispatch resolved once; DUAL PASS Graviton clang-16 (0.42-0.61x instr - LLVM out-unrolls clang); 3-stream+PMULL refuted on V2 (single chain saturates the pipe, journaled; 0.34x on Apple only); 6 tests, KAT vs compiled C; docs/benchmarks/crc32c.md
 common-pglz	*/pg_lzcompress.c	todo			fabled:common-pglz; m1-dep(stub-ok)
 common-keywords	*/keywords.c,*/kwlookup.c	todo			fabled:common-keywords; m1-spine

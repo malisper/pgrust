@@ -1,0 +1,849 @@
+// portalmem.c — portal lifecycle + the per-backend portal hash. The table is
+// PRIVATE and per-statement-hot (CreatePortal/PortalDrop per simple query), so
+// it is a monomorphized PgHashMap in TopPortalContext, not dynahash.
+// stmts/cplan are opaque handles (plancache unported): sharing
+// cplan->stmt_list into portal->stmts is a handle copy (fabled #359), and the
+// refcount touchpoint crosses plancache_portal_seams.
+#![allow(non_snake_case)]
+#![allow(non_upper_case_globals)]
+
+use core::cell::RefCell;
+use core::fmt::Write as _;
+use core::mem::ManuallyDrop;
+
+use ::elog::{elog, ereport};
+use ::mcx::{Mcx, MemoryContext, PgBox, PgHashMap, PgString, PgVec};
+use ::types_core::{InvalidSubTransactionId, SubTransactionId, TimestampTz};
+use ::types_error::{
+    ErrorLocation, PgResult, ERRCODE_DUPLICATE_CURSOR, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_INVALID_CURSOR_STATE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, WARNING,
+};
+use ::types_portal::{
+    CachedPlanHandle, ParamListHandle, Portal, PortalCleanupHook, PortalData, QueryCompletion,
+    QueryDescHandle, QueryEnvHandle, StmtListHandle, TuplestoreHandle, CMDTAG_UNKNOWN,
+    CURSOR_OPT_BINARY, CURSOR_OPT_HOLD, CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL,
+    MAX_PORTALNAME_LEN, PORTAL_ACTIVE, PORTAL_DEFINED, PORTAL_DONE, PORTAL_FAILED,
+    PORTAL_MULTI_QUERY, PORTAL_NEW, PORTAL_ONE_SELECT, PORTAL_READY,
+};
+use ::types_resowner::{
+    ResourceOwner, RESOURCE_RELEASE_AFTER_LOCKS, RESOURCE_RELEASE_BEFORE_LOCKS,
+    RESOURCE_RELEASE_LOCKS,
+};
+
+pub use ::types_core::CommandTag;
+
+#[cfg(test)]
+mod tests;
+
+pub fn init_seams() {
+    portalmem_seams::pre_commit_portals::set(PreCommit_Portals);
+    portalmem_seams::at_abort_portals::set(AtAbort_Portals);
+    portalmem_seams::at_cleanup_portals::set(AtCleanup_Portals);
+    portalmem_seams::at_subcommit_portals::set(|my_subid, parent_subid, parent_level| {
+        at_subcommit_inner(my_subid, parent_subid, parent_level, None);
+        Ok(())
+    });
+    portalmem_seams::at_subabort_portals::set(|my_subid, parent_subid| {
+        at_subabort_inner(my_subid, parent_subid, None)
+    });
+    portalmem_seams::at_subcleanup_portals::set(AtSubCleanup_Portals);
+}
+
+const PORTALS_PER_USER: usize = 16;
+
+// dynahash HASH_STRINGS key: strlcpy to MAX_PORTALNAME_LEN-1 bytes (backed off
+// to a char boundary), NUL-padded — over-long names collide exactly as in C.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct PortalName([u8; MAX_PORTALNAME_LEN]);
+
+impl PortalName {
+    fn new(name: &str) -> PortalName {
+        let mut key = [0u8; MAX_PORTALNAME_LEN];
+        let mut end = name.len().min(MAX_PORTALNAME_LEN - 1);
+        while end > 0 && !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        key[..end].copy_from_slice(&name.as_bytes()[..end]);
+        PortalName(key)
+    }
+
+    fn as_str(&self) -> &str {
+        let end = self.0.iter().position(|&b| b == 0).unwrap_or(MAX_PORTALNAME_LEN);
+        core::str::from_utf8(&self.0[..end]).expect("PortalName built from &str")
+    }
+}
+
+struct PortalManager {
+    top: &'static MemoryContext,
+    entries: PgVec<'static, Portal<'static>>,
+    index: PgHashMap<'static, PortalName, u32>,
+    unnamed_counter: u32,
+}
+
+thread_local! {
+    // ManuallyDrop keeps the TLS payload !needs_drop; C's TopPortalContext
+    // lives for the whole backend anyway.
+    static PORTAL_MGR: RefCell<Option<ManuallyDrop<PortalManager>>> =
+        const { RefCell::new(None) };
+}
+
+fn with_mgr<R>(f: impl FnOnce(&mut PortalManager) -> R) -> Option<R> {
+    PORTAL_MGR.with(|m| m.borrow_mut().as_mut().map(|mgr| f(mgr)))
+}
+
+fn mgr<R>(func: &str, f: impl FnOnce(&mut PortalManager) -> R) -> PgResult<R> {
+    with_mgr(f).ok_or_else(|| {
+        ereport(ERROR)
+            .errmsg_internal(format!("{func}: EnablePortalManager has not run"))
+            .into_error()
+            .into()
+    })
+}
+
+fn table_len() -> usize {
+    with_mgr(|m| m.entries.len()).unwrap_or(0)
+}
+
+fn portal_at(i: usize) -> Option<Portal<'static>> {
+    with_mgr(|m| m.entries.get(i).cloned()).flatten()
+}
+
+fn loc(funcname: &'static str) -> ErrorLocation {
+    ErrorLocation::new("portalmem.c", 0, funcname)
+}
+
+pub fn EnablePortalManager() {
+    PORTAL_MGR.with(|m| {
+        let mut slot = m.borrow_mut();
+        debug_assert!(slot.is_none(), "portal manager already enabled");
+        // Backend-lifetime leak: C never deletes TopPortalContext (bare Box is
+        // the leak vehicle, not an engine allocation).
+        let top: &'static MemoryContext =
+            Box::leak(Box::new(MemoryContext::new("TopPortalContext")));
+        let mut entries: PgVec<'static, Portal<'static>> = PgVec::new_in(top.mcx());
+        entries.reserve(PORTALS_PER_USER);
+        *slot = Some(ManuallyDrop::new(PortalManager {
+            top,
+            entries,
+            index: PgHashMap::with_capacity_in(PORTALS_PER_USER, top.mcx()),
+            unnamed_counter: 0,
+        }));
+    });
+}
+
+pub fn GetPortalByName(name: Option<&str>) -> Option<Portal<'static>> {
+    let name = name?;
+    let key = PortalName::new(name);
+    with_mgr(|m| m.index.get(&key).map(|&i| m.entries[i as usize].clone())).flatten()
+}
+
+pub fn CreatePortal(name: &str, allowDup: bool, dupSilent: bool) -> PgResult<Portal<'static>> {
+    if let Some(existing) = GetPortalByName(Some(name)) {
+        if !allowDup {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_DUPLICATE_CURSOR)
+                .errmsg(format!("cursor \"{name}\" already exists"))
+                .into_error()
+                .into());
+        }
+        if !dupSilent {
+            ereport(WARNING)
+                .errcode(ERRCODE_DUPLICATE_CURSOR)
+                .errmsg(format!("closing existing cursor \"{name}\""))
+                .finish(loc("CreatePortal"))?;
+        }
+        PortalDrop(&existing, false)?;
+    }
+
+    let resowner = resowner_portal_seams::resource_owner_create_portal::call();
+    let create_subid = xact_seams::get_current_sub_transaction_id::call();
+    let create_level = xact_seams::get_current_transaction_nest_level::call();
+    let creation_time = xact_portal_seams::get_current_statement_start_timestamp::call();
+
+    mgr("CreatePortal", |m| -> PgResult<Portal<'static>> {
+        let mcx = m.top.mcx();
+        let key = PortalName::new(name);
+        if m.index.contains_key(&key) {
+            return Err(ereport(ERROR)
+                .errmsg_internal("duplicate portal name")
+                .into_error()
+                .into());
+        }
+        let name_copy = PgString::from_str_in(key.as_str(), mcx)?;
+        let portal_context = m.top.new_child("PortalContext");
+        if !name_copy.is_empty() {
+            // C: MemoryContextSetIdentifier(portalContext, name or "<unnamed>").
+            // Skipped for the unnamed portal: set_ident allocates a String per
+            // call where C stores a static pointer (fabled #422's 100 Ir/q).
+            portal_context.set_ident(Some(name_copy.as_str()));
+        }
+        let portal = Portal::new(PortalData {
+            name: name_copy,
+            prepStmtName: None,
+            portalContext: Some(PgBox::new_in(portal_context, mcx)),
+            resowner,
+            cleanup: PortalCleanupHook::PortalCleanup,
+            createSubid: create_subid,
+            activeSubid: create_subid,
+            createLevel: create_level,
+            sourceText: None,
+            commandTag: CMDTAG_UNKNOWN,
+            qc: QueryCompletion::default(),
+            stmts: StmtListHandle::NULL,
+            cplan: CachedPlanHandle::NULL,
+            portalParams: ParamListHandle::NULL,
+            queryEnv: QueryEnvHandle::NULL,
+            strategy: PORTAL_MULTI_QUERY,
+            cursorOptions: CURSOR_OPT_NO_SCROLL,
+            status: PORTAL_NEW,
+            portalPinned: false,
+            autoHeld: false,
+            queryDesc: QueryDescHandle::NULL,
+            tupDesc: None,
+            formats: PgVec::new_in(mcx),
+            portalSnapshot: None,
+            holdStore: TuplestoreHandle::NULL,
+            holdContext: None,
+            holdSnapshot: None,
+            atStart: true,
+            atEnd: true, // disallow fetches until the query is set
+            portalPos: 0,
+            creation_time,
+            visible: true,
+        });
+        let i = m.entries.len() as u32;
+        m.entries.push(portal.clone());
+        m.index.insert(key, i);
+        Ok(portal)
+    })?
+}
+
+struct NameBuf {
+    buf: [u8; MAX_PORTALNAME_LEN],
+    len: usize,
+}
+
+impl core::fmt::Write for NameBuf {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let n = s.len().min(self.buf.len() - self.len);
+        self.buf[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
+        self.len += n;
+        Ok(())
+    }
+}
+
+pub fn CreateNewPortal() -> PgResult<Portal<'static>> {
+    loop {
+        let count = mgr("CreateNewPortal", |m| {
+            m.unnamed_counter = m.unnamed_counter.wrapping_add(1);
+            m.unnamed_counter
+        })?;
+        let mut name = NameBuf { buf: [0; MAX_PORTALNAME_LEN], len: 0 };
+        write!(name, "<unnamed portal {count}>").expect("NameBuf never errors");
+        let name = core::str::from_utf8(&name.buf[..name.len]).expect("ASCII");
+        if GetPortalByName(Some(name)).is_none() {
+            return CreatePortal(name, false, false);
+        }
+    }
+}
+
+// Stores the passed values; the stmts/cplan handles are Copy stores written
+// before anything fallible, so a failed pstrdup cannot leak the plancache
+// refcount the caller handed off (C's no-elog-before-storing-cplan rule). The
+// source-text/prep-name copies are the single pstrdup analog; C shares the
+// caller's pointer.
+pub fn PortalDefineQuery(
+    portal: &Portal<'static>,
+    prepStmtName: Option<&str>,
+    sourceText: &str,
+    commandTag: CommandTag,
+    stmts: StmtListHandle,
+    cplan: CachedPlanHandle,
+) -> PgResult<()> {
+    let mcx: Mcx<'static> = mgr("PortalDefineQuery", |m| m.top.mcx())?;
+    let mut p = portal.borrow_mut();
+    debug_assert_eq!(p.status, PORTAL_NEW);
+    debug_assert!(commandTag != CMDTAG_UNKNOWN || stmts.is_null());
+
+    p.stmts = stmts;
+    p.cplan = cplan;
+    p.qc = QueryCompletion { commandTag, nprocessed: 0 };
+    p.commandTag = commandTag;
+    p.prepStmtName = match prepStmtName {
+        Some(s) => Some(PgString::from_str_in(s, mcx)?),
+        None => None,
+    };
+    p.sourceText = Some(PgString::from_str_in(sourceText, mcx)?);
+    p.status = PORTAL_DEFINED;
+    Ok(())
+}
+
+fn PortalReleaseCachedPlan(portal: &Portal<'static>) {
+    let cplan = {
+        let mut p = portal.borrow_mut();
+        let cplan = p.cplan;
+        if cplan.is_null() {
+            return;
+        }
+        p.cplan = CachedPlanHandle::NULL;
+        // portal->stmts is now a dangling reference into the released plan.
+        p.stmts = StmtListHandle::NULL;
+        cplan
+    };
+    plancache_portal_seams::release_cached_plan::call(cplan);
+}
+
+pub fn PortalCreateHoldStore(portal: &Portal<'static>) -> PgResult<()> {
+    let top = mgr("PortalCreateHoldStore", |m| m.top)?;
+    let random_access = {
+        let mut p = portal.borrow_mut();
+        debug_assert!(p.holdContext.is_none());
+        debug_assert!(p.holdStore.is_null());
+        debug_assert!(p.holdSnapshot.is_none());
+        // NOT a child of portalContext: the store must survive the source
+        // transaction.
+        let hold = top.new_child("PortalHoldContext");
+        p.holdContext = Some(PgBox::new_in(hold, top.mcx()));
+        (p.cursorOptions & CURSOR_OPT_SCROLL) != 0
+    };
+    let store = tuplestore_hold_seams::tuplestore_begin_heap_hold::call(random_access)?;
+    portal.borrow_mut().holdStore = store;
+    Ok(())
+}
+
+pub fn PinPortal(portal: &Portal<'static>) -> PgResult<()> {
+    let mut p = portal.borrow_mut();
+    if p.portalPinned {
+        return Err(ereport(ERROR).errmsg_internal("portal already pinned").into_error().into());
+    }
+    p.portalPinned = true;
+    Ok(())
+}
+
+pub fn UnpinPortal(portal: &Portal<'static>) -> PgResult<()> {
+    let mut p = portal.borrow_mut();
+    if !p.portalPinned {
+        return Err(ereport(ERROR).errmsg_internal("portal not pinned").into_error().into());
+    }
+    p.portalPinned = false;
+    Ok(())
+}
+
+pub fn MarkPortalActive(portal: &Portal<'static>) -> PgResult<()> {
+    // Runtime test, not just an assert, as in C.
+    if portal.borrow().status != PORTAL_READY {
+        let name = portal.borrow().name.as_str().to_owned();
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .errmsg(format!("portal \"{name}\" cannot be run"))
+            .into_error()
+            .into());
+    }
+    let subid = xact_seams::get_current_sub_transaction_id::call();
+    let mut p = portal.borrow_mut();
+    p.status = PORTAL_ACTIVE;
+    p.activeSubid = subid;
+    Ok(())
+}
+
+fn run_cleanup_hook(portal: &Portal<'static>) -> PgResult<()> {
+    if portal.borrow().cleanup == PortalCleanupHook::PortalCleanup {
+        portalcmds_seams::portal_cleanup::call(portal)?;
+        portal.borrow_mut().cleanup = PortalCleanupHook::None;
+    }
+    Ok(())
+}
+
+pub fn MarkPortalDone(portal: &Portal<'static>) -> PgResult<()> {
+    {
+        let mut p = portal.borrow_mut();
+        debug_assert_eq!(p.status, PORTAL_ACTIVE);
+        p.status = PORTAL_DONE;
+    }
+    run_cleanup_hook(portal)
+}
+
+pub fn MarkPortalFailed(portal: &Portal<'static>) -> PgResult<()> {
+    {
+        let mut p = portal.borrow_mut();
+        debug_assert!(p.status != PORTAL_DONE);
+        p.status = PORTAL_FAILED;
+    }
+    run_cleanup_hook(portal)
+}
+
+pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
+    {
+        let p = portal.borrow();
+        if p.portalPinned {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_INVALID_CURSOR_STATE)
+                .errmsg(format!("cannot drop pinned portal \"{}\"", p.name.as_str()))
+                .into_error()
+                .into());
+        }
+        if p.status == PORTAL_ACTIVE {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_INVALID_CURSOR_STATE)
+                .errmsg(format!("cannot drop active portal \"{}\"", p.name.as_str()))
+                .into_error()
+                .into());
+        }
+    }
+
+    run_cleanup_hook(portal)?;
+
+    debug_assert!(portal.borrow().portalSnapshot.is_none() || !isTopCommit);
+
+    // Remove from the table first so an error below cannot retry the removal.
+    let key = PortalName::new(&portal.borrow().name);
+    let removed = with_mgr(|m| {
+        let i = m.index.remove(&key)?;
+        let last = m.entries.len() - 1;
+        let removed = m.entries.swap_remove(i as usize);
+        if (i as usize) != last {
+            let moved = PortalName::new(&m.entries[i as usize].borrow().name);
+            m.index.insert(moved, i);
+        }
+        Some(removed)
+    })
+    .flatten();
+    if removed.is_none() {
+        elog(WARNING, "trying to delete portal name that does not exist")?;
+    }
+
+    PortalReleaseCachedPlan(portal);
+
+    let resowner = portal.borrow().resowner;
+    let hold_snapshot = portal.borrow_mut().holdSnapshot.take();
+    if let Some(snap) = hold_snapshot {
+        // Registration rides the portal's resowner; after abort the owner (and
+        // the registration) are already gone.
+        if !resowner.is_null() {
+            snapmgr_portal_seams::unregister_snapshot_from_owner::call(snap, resowner);
+        }
+    }
+
+    let status = portal.borrow().status;
+    if !resowner.is_null() && (!isTopCommit || status == PORTAL_FAILED) {
+        let is_commit = status != PORTAL_FAILED;
+        for phase in [
+            RESOURCE_RELEASE_BEFORE_LOCKS,
+            RESOURCE_RELEASE_LOCKS,
+            RESOURCE_RELEASE_AFTER_LOCKS,
+        ] {
+            resowner_portal_seams::resource_owner_release::call(resowner, phase, is_commit, false);
+        }
+        resowner_portal_seams::resource_owner_delete::call(resowner);
+    }
+    portal.borrow_mut().resowner = ResourceOwner::NULL;
+
+    let hold_store = {
+        let mut p = portal.borrow_mut();
+        core::mem::replace(&mut p.holdStore, TuplestoreHandle::NULL)
+    };
+    if !hold_store.is_null() {
+        tuplestore_hold_seams::tuplestore_end::call(hold_store);
+    }
+
+    let mut p = portal.borrow_mut();
+    p.tupDesc = None; // may live in portalContext/holdContext: free before the arenas
+    p.holdContext = None;
+    p.portalContext = None;
+    Ok(())
+}
+
+// CLOSE ALL / DISCARD ALL; restarts the scan after each drop, as C's
+// hash_seq_term/hash_seq_init dance.
+pub fn PortalHashTableDeleteAll() -> PgResult<()> {
+    loop {
+        let next = with_mgr(|m| {
+            m.entries
+                .iter()
+                .find(|p| p.borrow().status != PORTAL_ACTIVE)
+                .cloned()
+        });
+        match next {
+            Some(Some(portal)) => PortalDrop(&portal, false)?,
+            _ => return Ok(()),
+        }
+    }
+}
+
+fn HoldPortal(portal: &Portal<'static>) -> PgResult<()> {
+    PortalCreateHoldStore(portal)?;
+    portalcmds_seams::persist_holdable_portal::call(portal)?;
+    PortalReleaseCachedPlan(portal);
+    let mut p = portal.borrow_mut();
+    p.resowner = ResourceOwner::NULL;
+    p.createSubid = InvalidSubTransactionId;
+    p.activeSubid = InvalidSubTransactionId;
+    p.createLevel = 0;
+    Ok(())
+}
+
+pub fn PreCommit_Portals(isPrepare: bool) -> PgResult<bool> {
+    let mut result = false;
+    'restart: loop {
+        for i in 0..table_len() {
+            let Some(portal) = portal_at(i) else { break };
+            let (pinned, auto_held, status, cursor_options, create_subid) = {
+                let p = portal.borrow();
+                (p.portalPinned, p.autoHeld, p.status, p.cursorOptions, p.createSubid)
+            };
+
+            if pinned && !auto_held {
+                return Err(ereport(ERROR)
+                    .errmsg_internal("cannot commit while a portal is pinned")
+                    .into_error()
+                    .into());
+            }
+
+            // Active portals (multi-transaction utility command / commit in a
+            // procedure): only detach their resources.
+            if status == PORTAL_ACTIVE {
+                let resowner = portal.borrow().resowner;
+                let snap = portal.borrow_mut().holdSnapshot.take();
+                if let Some(snap) = snap {
+                    if !resowner.is_null() {
+                        snapmgr_portal_seams::unregister_snapshot_from_owner::call(snap, resowner);
+                    }
+                }
+                let mut p = portal.borrow_mut();
+                p.resowner = ResourceOwner::NULL;
+                p.portalSnapshot = None;
+                continue;
+            }
+
+            if (cursor_options & CURSOR_OPT_HOLD) != 0
+                && create_subid != InvalidSubTransactionId
+                && status == PORTAL_READY
+            {
+                if isPrepare {
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                        .errmsg("cannot PREPARE a transaction that has created a cursor WITH HOLD")
+                        .into_error()
+                        .into());
+                }
+                HoldPortal(&portal)?;
+                result = true;
+            } else if create_subid == InvalidSubTransactionId {
+                continue;
+            } else {
+                PortalDrop(&portal, true)?;
+                result = true;
+            }
+
+            // Holding or dropping may have run user code that dropped other
+            // portals: restart, as C restarts its hash_seq.
+            continue 'restart;
+        }
+        return Ok(result);
+    }
+}
+
+pub fn AtAbort_Portals() -> PgResult<()> {
+    for i in 0..table_len() {
+        let Some(portal) = portal_at(i) else { break };
+
+        if portal.borrow().status == PORTAL_ACTIVE
+            && ipc_portal_seams::shmem_exit_inprogress::call()
+        {
+            MarkPortalFailed(&portal)?;
+        }
+
+        let (create_subid, auto_held) = {
+            let p = portal.borrow();
+            (p.createSubid, p.autoHeld)
+        };
+        if create_subid == InvalidSubTransactionId || auto_held {
+            continue;
+        }
+
+        // Created in this transaction: a READY portal might refer to objects
+        // created in the failed transaction.
+        if portal.borrow().status == PORTAL_READY {
+            MarkPortalFailed(&portal)?;
+        }
+
+        run_cleanup_hook(&portal)?;
+        PortalReleaseCachedPlan(&portal);
+        // Resources are released in the upcoming transaction-wide cleanup.
+        portal.borrow_mut().resowner = ResourceOwner::NULL;
+        // MemoryContextDeleteChildren(portalContext): child contexts here are
+        // RAII-owned by their creators and already dropped; portalContext's own
+        // allocations are preserved, as in C.
+    }
+    Ok(())
+}
+
+pub fn AtCleanup_Portals() -> PgResult<()> {
+    let mut i = 0;
+    while let Some(portal) = portal_at(i) {
+        let (status, create_subid, auto_held) = {
+            let p = portal.borrow();
+            (p.status, p.createSubid, p.autoHeld)
+        };
+        if status == PORTAL_ACTIVE {
+            i += 1;
+            continue;
+        }
+        if create_subid == InvalidSubTransactionId || auto_held {
+            debug_assert!(portal.borrow().resowner.is_null());
+            i += 1;
+            continue;
+        }
+
+        // PortalDrop refuses pinned portals; whoever pinned it was aborted too.
+        portal.borrow_mut().portalPinned = false;
+
+        // No user-defined code during cleanup: skip an unrun cleanup hook.
+        if portal.borrow().cleanup == PortalCleanupHook::PortalCleanup {
+            let name = portal.borrow().name.as_str().to_owned();
+            elog(WARNING, format!("skipping cleanup for portal \"{name}\""))?;
+            portal.borrow_mut().cleanup = PortalCleanupHook::None;
+        }
+
+        // Removes slot i (swap_remove backfills it): do not advance.
+        PortalDrop(&portal, false)?;
+    }
+    Ok(())
+}
+
+pub fn PortalErrorCleanup() -> PgResult<()> {
+    let mut i = 0;
+    while let Some(portal) = portal_at(i) {
+        if !portal.borrow().autoHeld {
+            i += 1;
+            continue;
+        }
+        portal.borrow_mut().portalPinned = false;
+        PortalDrop(&portal, false)?;
+    }
+    Ok(())
+}
+
+pub fn AtSubCommit_Portals(
+    mySubid: SubTransactionId,
+    parentSubid: SubTransactionId,
+    parentLevel: i32,
+    parentXactOwner: ResourceOwner,
+) {
+    at_subcommit_inner(mySubid, parentSubid, parentLevel, Some(parentXactOwner));
+}
+
+fn at_subcommit_inner(
+    mySubid: SubTransactionId,
+    parentSubid: SubTransactionId,
+    parentLevel: i32,
+    parent_owner: Option<ResourceOwner>,
+) {
+    for i in 0..table_len() {
+        let Some(portal) = portal_at(i) else { break };
+        let reparent = {
+            let mut p = portal.borrow_mut();
+            let mine = p.createSubid == mySubid;
+            if mine {
+                p.createSubid = parentSubid;
+                p.createLevel = parentLevel;
+            }
+            if p.activeSubid == mySubid {
+                p.activeSubid = parentSubid;
+            }
+            (mine && !p.resowner.is_null()).then_some(p.resowner)
+        };
+        if let Some(owner) = reparent {
+            // C: ResourceOwnerNewParent(portal->resowner, parentXactOwner). The
+            // portalmem_seams decl dissolved the owner parameter; refuse loudly
+            // rather than skip the reparent.
+            let new_parent = parent_owner.unwrap_or_else(|| {
+                panic!("at_subcommit_portals: portal resowner reparent needs parentXactOwner")
+            });
+            resowner_portal_seams::resource_owner_new_parent::call(owner, new_parent);
+        }
+    }
+}
+
+pub fn AtSubAbort_Portals(
+    mySubid: SubTransactionId,
+    parentSubid: SubTransactionId,
+    myXactOwner: ResourceOwner,
+    _parentXactOwner: ResourceOwner,
+) -> PgResult<()> {
+    at_subabort_inner(mySubid, parentSubid, Some(myXactOwner))
+}
+
+fn at_subabort_inner(
+    mySubid: SubTransactionId,
+    parentSubid: SubTransactionId,
+    my_owner: Option<ResourceOwner>,
+) -> PgResult<()> {
+    for i in 0..table_len() {
+        let Some(portal) = portal_at(i) else { break };
+
+        if portal.borrow().createSubid != mySubid {
+            // Not created here — but was it used in this subtransaction?
+            if portal.borrow().activeSubid == mySubid {
+                portal.borrow_mut().activeSubid = parentSubid;
+
+                // An upper-level portal left ACTIVE can't happen, but fail it.
+                if portal.borrow().status == PORTAL_ACTIVE {
+                    MarkPortalFailed(&portal)?;
+                }
+
+                // If failed during this subtransaction, reattach its resources
+                // to this subtransaction's owner so they release with it.
+                let reparent = {
+                    let mut p = portal.borrow_mut();
+                    if p.status == PORTAL_FAILED && !p.resowner.is_null() {
+                        let owner = p.resowner;
+                        p.resowner = ResourceOwner::NULL;
+                        Some(owner)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(owner) = reparent {
+                    let new_parent = my_owner.unwrap_or_else(|| {
+                        panic!(
+                            "at_subabort_portals: portal resowner reparent needs myXactOwner"
+                        )
+                    });
+                    resowner_portal_seams::resource_owner_new_parent::call(owner, new_parent);
+                }
+            }
+            continue;
+        }
+
+        let status = portal.borrow().status;
+        if status == PORTAL_READY || status == PORTAL_ACTIVE {
+            MarkPortalFailed(&portal)?;
+        }
+
+        run_cleanup_hook(&portal)?;
+        PortalReleaseCachedPlan(&portal);
+        portal.borrow_mut().resowner = ResourceOwner::NULL;
+        // MemoryContextDeleteChildren: no-op here, as in AtAbort_Portals.
+    }
+    Ok(())
+}
+
+pub fn AtSubCleanup_Portals(mySubid: SubTransactionId) -> PgResult<()> {
+    let mut i = 0;
+    while let Some(portal) = portal_at(i) {
+        if portal.borrow().createSubid != mySubid {
+            i += 1;
+            continue;
+        }
+
+        portal.borrow_mut().portalPinned = false;
+
+        if portal.borrow().cleanup == PortalCleanupHook::PortalCleanup {
+            let name = portal.borrow().name.as_str().to_owned();
+            elog(WARNING, format!("skipping cleanup for portal \"{name}\""))?;
+            portal.borrow_mut().cleanup = PortalCleanupHook::None;
+        }
+
+        PortalDrop(&portal, false)?;
+    }
+    Ok(())
+}
+
+pub struct PgCursorRow<'a> {
+    pub name: PgString<'a>,
+    pub statement: PgString<'a>,
+    pub is_holdable: bool,
+    pub is_binary: bool,
+    pub is_scrollable: bool,
+    pub creation_time: TimestampTz,
+}
+
+// pg_cursor() minus the SRF plumbing: the visible, defined portals in table
+// scan order; the funcapi owner materializes these into its tuplestore.
+pub fn pg_cursor_rows<'a>(mcx: Mcx<'a>) -> PgResult<PgVec<'a, PgCursorRow<'a>>> {
+    let mut rows: PgVec<'a, PgCursorRow<'a>> = PgVec::new_in(mcx);
+    with_mgr(|m| -> PgResult<()> {
+        for portal in m.entries.iter() {
+            let p = portal.borrow();
+            if !p.visible {
+                continue;
+            }
+            let Some(source_text) = &p.sourceText else { continue };
+            rows.push(PgCursorRow {
+                name: p.name.clone_in(mcx)?,
+                statement: source_text.clone_in(mcx)?,
+                is_holdable: (p.cursorOptions & CURSOR_OPT_HOLD) != 0,
+                is_binary: (p.cursorOptions & CURSOR_OPT_BINARY) != 0,
+                is_scrollable: (p.cursorOptions & CURSOR_OPT_SCROLL) != 0,
+                creation_time: p.creation_time,
+            });
+        }
+        Ok(())
+    })
+    .transpose()?;
+    Ok(rows)
+}
+
+pub fn ThereAreNoReadyPortals() -> bool {
+    with_mgr(|m| m.entries.iter().all(|p| p.borrow().status != PORTAL_READY)).unwrap_or(true)
+}
+
+pub fn HoldPinnedPortals() -> PgResult<()> {
+    for i in 0..table_len() {
+        let Some(portal) = portal_at(i) else { break };
+        let (pinned, auto_held, strategy, status) = {
+            let p = portal.borrow();
+            (p.portalPinned, p.autoHeld, p.strategy, p.status)
+        };
+        if pinned && !auto_held {
+            if strategy != PORTAL_ONE_SELECT {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                    .errmsg(
+                        "cannot perform transaction commands inside a cursor loop that is not read-only",
+                    )
+                    .into_error()
+                    .into());
+            }
+            if status != PORTAL_READY {
+                return Err(ereport(ERROR)
+                    .errmsg_internal("pinned portal is not ready to be auto-held")
+                    .into_error()
+                    .into());
+            }
+            HoldPortal(&portal)?;
+            portal.borrow_mut().autoHeld = true;
+        }
+    }
+    Ok(())
+}
+
+pub fn ForgetPortalSnapshots() -> PgResult<()> {
+    let mut num_portal_snaps: i32 = 0;
+    with_mgr(|m| {
+        for portal in m.entries.iter() {
+            let mut p = portal.borrow_mut();
+            if p.portalSnapshot.take().is_some() {
+                num_portal_snaps += 1;
+            }
+            // portal->holdSnapshot is cleaned up in PreCommit_Portals.
+        }
+    });
+
+    let mut num_active_snaps: i32 = 0;
+    while snapmgr_portal_seams::active_snapshot_set::call() {
+        snapmgr_portal_seams::pop_active_snapshot::call()?;
+        num_active_snaps += 1;
+    }
+
+    if num_portal_snaps != num_active_snaps {
+        return Err(ereport(ERROR)
+            .errmsg_internal(format!(
+                "portal snapshots ({num_portal_snaps}) did not account for all active snapshots ({num_active_snaps})"
+            ))
+            .into_error()
+            .into());
+    }
+    Ok(())
+}

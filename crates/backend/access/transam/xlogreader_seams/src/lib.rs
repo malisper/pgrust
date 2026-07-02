@@ -2,7 +2,10 @@
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 
-use types_core::{BlockNumber, Buffer, ForkNumber, TimeLineID, XLogRecPtr, XLogSegNo};
+use types_core::{
+    BlockNumber, Buffer, ForkNumber, RepOriginId, RmgrId, TimeLineID, TransactionId, XLogRecPtr,
+    XLogSegNo,
+};
 use types_error::PgResult;
 use types_storage::RelFileLocator;
 
@@ -38,6 +41,9 @@ pub struct WALSegmentContext {
     pub ws_segsize: i32,
 }
 
+// `bkp_image`/`data` are C's `char *` payload pointers into the owning
+// reader's decode buffer; valid only while that reader's current record is
+// unchanged (the reader re-marshals them per XLogNextRecord).
 #[derive(Clone, Copy, Debug)]
 pub struct DecodedBkpBlock {
     pub in_use: bool,
@@ -48,6 +54,14 @@ pub struct DecodedBkpBlock {
     pub flags: u8,
     pub has_image: bool,
     pub apply_image: bool,
+    pub bkp_image: *const u8,
+    pub hole_offset: u16,
+    pub hole_length: u16,
+    pub bimg_len: u16,
+    pub bimg_info: u8,
+    pub has_data: bool,
+    pub data: *const u8,
+    pub data_len: u16,
 }
 
 impl DecodedBkpBlock {
@@ -60,7 +74,34 @@ impl DecodedBkpBlock {
         flags: 0,
         has_image: false,
         apply_image: false,
+        bkp_image: core::ptr::null(),
+        hole_offset: 0,
+        hole_length: 0,
+        bimg_len: 0,
+        bimg_info: 0,
+        has_data: false,
+        data: core::ptr::null(),
+        data_len: 0,
     };
+
+    /// # Safety
+    /// The owning reader's current record must still be the one this block
+    /// was marshaled from (the pointer targets its decode buffer).
+    pub unsafe fn bkp_image_bytes(&self) -> &[u8] {
+        if self.bkp_image.is_null() {
+            return &[];
+        }
+        core::slice::from_raw_parts(self.bkp_image, self.bimg_len as usize)
+    }
+
+    /// # Safety
+    /// Same contract as [`Self::bkp_image_bytes`].
+    pub unsafe fn data_bytes(&self) -> &[u8] {
+        if self.data.is_null() {
+            return &[];
+        }
+        core::slice::from_raw_parts(self.data, self.data_len as usize)
+    }
 }
 
 impl Default for DecodedBkpBlock {
@@ -69,16 +110,50 @@ impl Default for DecodedBkpBlock {
     }
 }
 
-// DecodedXLogRecord trimmed to the block references.
+// The consumer-facing projection of C's DecodedXLogRecord; `main_data` is a
+// payload pointer with the same validity contract as DecodedBkpBlock's.
 #[derive(Clone, Copy, Debug)]
 pub struct DecodedXLogRecord {
+    pub lsn: XLogRecPtr,
+    pub next_lsn: XLogRecPtr,
+    pub xl_tot_len: u32,
+    pub xl_xid: TransactionId,
+    pub xl_prev: XLogRecPtr,
+    pub xl_info: u8,
+    pub xl_rmid: RmgrId,
+    pub record_origin: RepOriginId,
+    pub toplevel_xid: TransactionId,
+    pub main_data: *const u8,
+    pub main_data_len: u32,
     pub max_block_id: i8,
     pub blocks: [DecodedBkpBlock; XLR_MAX_BLOCK_ID + 1],
+}
+
+impl DecodedXLogRecord {
+    /// # Safety
+    /// Same contract as [`DecodedBkpBlock::bkp_image_bytes`].
+    pub unsafe fn main_data_bytes(&self) -> &[u8] {
+        if self.main_data.is_null() {
+            return &[];
+        }
+        core::slice::from_raw_parts(self.main_data, self.main_data_len as usize)
+    }
 }
 
 impl Default for DecodedXLogRecord {
     fn default() -> Self {
         DecodedXLogRecord {
+            lsn: 0,
+            next_lsn: 0,
+            xl_tot_len: 0,
+            xl_xid: 0,
+            xl_prev: 0,
+            xl_info: 0,
+            xl_rmid: 0,
+            record_origin: 0,
+            toplevel_xid: 0,
+            main_data: core::ptr::null(),
+            main_data_len: 0,
             max_block_id: -1,
             blocks: [DecodedBkpBlock::EMPTY; XLR_MAX_BLOCK_ID + 1],
         }

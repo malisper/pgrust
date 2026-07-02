@@ -19,3 +19,37 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn get_current_transaction_nest_level() -> i32
 );
+
+seam_core::seam!(
+    pub fn get_top_transaction_id_if_any() -> types_core::TransactionId
+);
+
+seam_core::seam!(
+    pub fn is_transaction_or_transaction_block() -> bool
+);
+
+seam_core::seam!(
+    // StartTransactionCommand() (xact.c) — can ereport.
+    pub fn start_transaction_command() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn commit_transaction_command() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn is_in_parallel_mode() -> bool
+);
+
+seam_core::seam!(
+    // IsolationUsesXactSnapshot() (xact.h): XactIsoLevel >= REPEATABLE READ.
+    pub fn isolation_uses_xact_snapshot() -> bool
+);
+
+seam_core::seam!(
+    pub fn isolation_is_serializable() -> bool
+);
+
+seam_core::seam!(
+    pub fn transaction_id_is_current_transaction_id(xid: types_core::TransactionId) -> bool
+);

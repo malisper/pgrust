@@ -1,0 +1,510 @@
+// xact_redo / xact_redo_commit / xact_redo_abort, plus the record parsers
+// ParseCommitRecord / ParseAbortRecord (xactdesc.c pairs with wal.rs; the
+// rmgrdesc unit reuses these exports). Order of execution in the redo
+// bodies is critical and mirrors the C.
+
+use crate::*;
+use types_core::{Oid, RepOriginId};
+use types_error::PANIC;
+use types_storage::{RelFileLocator, SharedInvalidationMessage, SHARED_INVALIDATION_MESSAGE_SIZE};
+use types_core::xact::XlXactStatsItem;
+use xlogutils::{STANDBY_DISABLED, STANDBY_INITIALIZED};
+
+/// Everything C's `xact_redo` reads from its `XLogReaderState`.
+#[derive(Clone, Copy, Debug)]
+pub struct XactRedoInfo<'a> {
+    /// `XLogRecGetInfo(record)` (the full xl_info byte).
+    pub info: u8,
+    /// `XLogRecGetXid(record)`
+    pub xid: TransactionId,
+    /// `XLogRecGetOrigin(record)`
+    pub origin_id: RepOriginId,
+    /// `record->ReadRecPtr`
+    pub read_rec_ptr: XLogRecPtr,
+    /// `record->EndRecPtr`
+    pub end_rec_ptr: XLogRecPtr,
+    /// `XLogRecGetData(record)` (the record body, sans the WAL header).
+    pub data: &'a [u8],
+}
+
+/// `xl_xact_parsed_commit` (recovery-only: std collections stage the decode).
+#[derive(Clone, Debug, Default)]
+pub struct ParsedCommit {
+    pub xact_time: TimestampTz,
+    pub xinfo: u32,
+    pub db_id: Oid,
+    pub ts_id: Oid,
+    pub subxacts: Vec<TransactionId>,
+    pub xlocators: Vec<RelFileLocator>,
+    pub stats: Vec<XlXactStatsItem>,
+    pub msgs: Vec<SharedInvalidationMessage>,
+    pub twophase_xid: TransactionId,
+    pub twophase_gid: Vec<u8>,
+    pub origin_lsn: XLogRecPtr,
+    pub origin_timestamp: TimestampTz,
+}
+
+/// `xl_xact_parsed_abort`.
+#[derive(Clone, Debug, Default)]
+pub struct ParsedAbort {
+    pub xact_time: TimestampTz,
+    pub xinfo: u32,
+    pub db_id: Oid,
+    pub ts_id: Oid,
+    pub subxacts: Vec<TransactionId>,
+    pub xlocators: Vec<RelFileLocator>,
+    pub stats: Vec<XlXactStatsItem>,
+    pub twophase_xid: TransactionId,
+    pub twophase_gid: Vec<u8>,
+    pub origin_lsn: XLogRecPtr,
+    pub origin_timestamp: TimestampTz,
+}
+
+fn truncated() -> Box<PgError> {
+    Box::new(PgError::error("truncated transaction WAL record"))
+}
+
+// Bounds-checked native-endian cursor: a malformed on-disk record surfaces a
+// recoverable error; element counts are validated against the remaining
+// bytes before any collection grows.
+struct Cursor<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+
+    fn remaining(&self) -> usize {
+        self.data.len().saturating_sub(self.pos)
+    }
+
+    fn u32(&mut self) -> PgResult<u32> {
+        let end = self.pos + 4;
+        let bytes = self.data.get(self.pos..end).ok_or_else(truncated)?;
+        self.pos = end;
+        Ok(u32::from_ne_bytes(bytes.try_into().unwrap()))
+    }
+
+    fn i32(&mut self) -> PgResult<i32> {
+        self.u32().map(|v| v as i32)
+    }
+
+    fn i64(&mut self) -> PgResult<i64> {
+        let end = self.pos + 8;
+        let bytes = self.data.get(self.pos..end).ok_or_else(truncated)?;
+        self.pos = end;
+        Ok(i64::from_ne_bytes(bytes.try_into().unwrap()))
+    }
+
+    fn u64(&mut self) -> PgResult<u64> {
+        self.i64().map(|v| v as u64)
+    }
+
+    fn take(&mut self, n: usize) -> PgResult<&'a [u8]> {
+        let end = self.pos.checked_add(n).ok_or_else(truncated)?;
+        let s = self.data.get(self.pos..end).ok_or_else(truncated)?;
+        self.pos = end;
+        Ok(s)
+    }
+
+    /// NUL-terminated C string (the twophase_gid).
+    fn cstr(&mut self) -> PgResult<Vec<u8>> {
+        let start = self.pos;
+        while self.data.get(self.pos).copied().ok_or_else(truncated)? != 0 {
+            self.pos += 1;
+        }
+        let mut s = Vec::new();
+        s.try_reserve(self.pos - start)
+            .map_err(|_| PgError::error("out of memory parsing transaction WAL record"))?;
+        s.extend_from_slice(&self.data[start..self.pos]);
+        self.pos += 1;
+        Ok(s)
+    }
+
+    fn read_count<T>(&mut self, min_elem_bytes: usize, into: &mut Vec<T>) -> PgResult<i32> {
+        let n = self.i32()?;
+        if n < 0 {
+            return Err(Box::new(PgError::error(
+                "negative element count in transaction WAL record",
+            )));
+        }
+        let count = n as usize;
+        if min_elem_bytes != 0 && count.saturating_mul(min_elem_bytes) > self.remaining() {
+            return Err(truncated());
+        }
+        into.try_reserve(count)
+            .map_err(|_| PgError::error("out of memory parsing transaction WAL record"))?;
+        Ok(n)
+    }
+}
+
+fn parse_rel(c: &mut Cursor<'_>) -> PgResult<RelFileLocator> {
+    let spc = c.u32()?;
+    let db = c.u32()?;
+    let rel = c.u32()?;
+    Ok(RelFileLocator { spcOid: spc, dbOid: db, relNumber: rel })
+}
+
+/// 16-byte `xl_xact_stats_item`; the 64-bit objid reassembles from halves.
+fn parse_stat(c: &mut Cursor<'_>) -> PgResult<XlXactStatsItem> {
+    let kind = c.i32()?;
+    let dboid = c.u32()?;
+    let objid_lo = c.u32()?;
+    let objid_hi = c.u32()?;
+    Ok(XlXactStatsItem {
+        kind,
+        dboid,
+        objid: ((objid_hi as u64) << 32) | (objid_lo as u64),
+    })
+}
+
+/// `ParseCommitRecord` (xactdesc.c); `info` is the full xl_info byte.
+pub fn parse_commit_record(info: u8, data: &[u8]) -> PgResult<ParsedCommit> {
+    let mut c = Cursor::new(data);
+    let mut parsed = ParsedCommit {
+        xact_time: c.i64()?,
+        ..Default::default()
+    };
+
+    let xinfo = if (info & XLOG_XACT_HAS_INFO) != 0 { c.u32()? } else { 0 };
+    parsed.xinfo = xinfo;
+
+    if (xinfo & XACT_XINFO_HAS_DBINFO) != 0 {
+        parsed.db_id = c.u32()?;
+        parsed.ts_id = c.u32()?;
+    }
+
+    if (xinfo & XACT_XINFO_HAS_SUBXACTS) != 0 {
+        let n = c.read_count(4, &mut parsed.subxacts)?;
+        for _ in 0..n {
+            parsed.subxacts.push(c.u32()?);
+        }
+    }
+
+    if (xinfo & XACT_XINFO_HAS_RELFILELOCATORS) != 0 {
+        let n = c.read_count(12, &mut parsed.xlocators)?;
+        for _ in 0..n {
+            parsed.xlocators.push(parse_rel(&mut c)?);
+        }
+    }
+
+    if (xinfo & XACT_XINFO_HAS_DROPPED_STATS) != 0 {
+        let n = c.read_count(16, &mut parsed.stats)?;
+        for _ in 0..n {
+            parsed.stats.push(parse_stat(&mut c)?);
+        }
+    }
+
+    if (xinfo & XACT_XINFO_HAS_INVALS) != 0 {
+        let n = c.read_count(SHARED_INVALIDATION_MESSAGE_SIZE, &mut parsed.msgs)?;
+        for _ in 0..n {
+            let bytes: [u8; SHARED_INVALIDATION_MESSAGE_SIZE] =
+                c.take(SHARED_INVALIDATION_MESSAGE_SIZE)?.try_into().unwrap();
+            let msg = SharedInvalidationMessage::from_wire_bytes(bytes).ok_or_else(|| {
+                PgError::error("invalid shared-invalidation message in transaction WAL record")
+            })?;
+            parsed.msgs.push(msg);
+        }
+    }
+
+    if (xinfo & XACT_XINFO_HAS_TWOPHASE) != 0 {
+        parsed.twophase_xid = c.u32()?;
+        if (xinfo & XACT_XINFO_HAS_GID) != 0 {
+            parsed.twophase_gid = c.cstr()?;
+        }
+    }
+
+    if (xinfo & XACT_XINFO_HAS_ORIGIN) != 0 {
+        parsed.origin_lsn = c.u64()?;
+        parsed.origin_timestamp = c.i64()?;
+    }
+
+    Ok(parsed)
+}
+
+/// `ParseAbortRecord` (xactdesc.c).
+pub fn parse_abort_record(info: u8, data: &[u8]) -> PgResult<ParsedAbort> {
+    let mut c = Cursor::new(data);
+    let mut parsed = ParsedAbort {
+        xact_time: c.i64()?,
+        ..Default::default()
+    };
+
+    let xinfo = if (info & XLOG_XACT_HAS_INFO) != 0 { c.u32()? } else { 0 };
+    parsed.xinfo = xinfo;
+
+    if (xinfo & XACT_XINFO_HAS_DBINFO) != 0 {
+        parsed.db_id = c.u32()?;
+        parsed.ts_id = c.u32()?;
+    }
+
+    if (xinfo & XACT_XINFO_HAS_SUBXACTS) != 0 {
+        let n = c.read_count(4, &mut parsed.subxacts)?;
+        for _ in 0..n {
+            parsed.subxacts.push(c.u32()?);
+        }
+    }
+
+    if (xinfo & XACT_XINFO_HAS_RELFILELOCATORS) != 0 {
+        let n = c.read_count(12, &mut parsed.xlocators)?;
+        for _ in 0..n {
+            parsed.xlocators.push(parse_rel(&mut c)?);
+        }
+    }
+
+    if (xinfo & XACT_XINFO_HAS_DROPPED_STATS) != 0 {
+        let n = c.read_count(16, &mut parsed.stats)?;
+        for _ in 0..n {
+            parsed.stats.push(parse_stat(&mut c)?);
+        }
+    }
+
+    if (xinfo & XACT_XINFO_HAS_TWOPHASE) != 0 {
+        parsed.twophase_xid = c.u32()?;
+        if (xinfo & XACT_XINFO_HAS_GID) != 0 {
+            parsed.twophase_gid = c.cstr()?;
+        }
+    }
+
+    if (xinfo & XACT_XINFO_HAS_ORIGIN) != 0 {
+        parsed.origin_lsn = c.u64()?;
+        parsed.origin_timestamp = c.i64()?;
+    }
+
+    Ok(parsed)
+}
+
+/// `xact_redo_commit`.
+fn xact_redo_commit(
+    parsed: &ParsedCommit,
+    xid: TransactionId,
+    lsn: XLogRecPtr,
+    origin_id: RepOriginId,
+) -> PgResult<()> {
+    debug_assert!(xid != InvalidTransactionId);
+
+    let max_xid = transam_seams::transaction_id_latest::call(xid, &parsed.subxacts);
+
+    // Make sure nextXid is beyond any XID mentioned in the record.
+    varsup_seams::advance_next_full_transaction_id_past_xid::call(max_xid);
+
+    debug_assert_eq!(
+        (parsed.xinfo & XACT_XINFO_HAS_ORIGIN) == 0,
+        origin_id == types_core::InvalidRepOriginId
+    );
+
+    let commit_time = if (parsed.xinfo & XACT_XINFO_HAS_ORIGIN) != 0 {
+        parsed.origin_timestamp
+    } else {
+        parsed.xact_time
+    };
+
+    commit_ts_seams::transaction_tree_set_commit_ts_data::call(
+        xid,
+        &parsed.subxacts,
+        commit_time,
+        origin_id,
+    )?;
+
+    if xlogutils::standby_state() == STANDBY_DISABLED {
+        transam_seams::transaction_id_commit_tree::call(xid, &parsed.subxacts)?;
+    } else {
+        // As-yet-unobserved subxacts need bookkeeping again here (the main
+        // loop's RecordKnownAssignedTransactionIds doesn't cover this case).
+        procarray_seams::record_known_assigned_transaction_ids::call(max_xid)?;
+
+        // Async protocol during recovery: hint bits must not be set until
+        // minRecoveryPoint passes this commit record.
+        transam_seams::transaction_id_async_commit_tree::call(xid, &parsed.subxacts, lsn)?;
+
+        // We must mark clog before we update the ProcArray.
+        procarray_seams::expire_tree_known_assigned_transaction_ids::call(
+            xid,
+            &parsed.subxacts,
+            max_xid,
+        )?;
+
+        // Cache invalidations attached to the commit (same inval-then-
+        // release-locks order as CommitTransaction).
+        inval::ProcessCommittedInvalidationMessages(
+            &parsed.msgs,
+            XactCompletionRelcacheInitFileInval(parsed.xinfo),
+            parsed.db_id,
+            parsed.ts_id,
+        )?;
+
+        // Release locks, if any (2PC and normal alike: in effect we skip the
+        // prepare phase and go straight to lock release).
+        if (parsed.xinfo & XACT_XINFO_HAS_AE_LOCKS) != 0 {
+            standby_seams::standby_release_lock_tree::call(xid, &parsed.subxacts);
+        }
+    }
+
+    if (parsed.xinfo & XACT_XINFO_HAS_ORIGIN) != 0 {
+        // recover apply progress
+        origin_seams::replorigin_advance::call(
+            origin_id,
+            parsed.origin_lsn,
+            lsn,
+            false, // backward
+            false, // WAL
+        )?;
+    }
+
+    // Dropped files: first push the minimum recovery point past this record
+    // (we bypass the buffer manager, so we enforce WAL-first ourselves).
+    if !parsed.xlocators.is_empty() {
+        xlog_seams::xlog_flush::call(lsn)?;
+        catalog_storage_seams::drop_relation_files::call(&parsed.xlocators, true)?;
+    }
+
+    if !parsed.stats.is_empty() {
+        // see equivalent call for relations above
+        xlog_seams::xlog_flush::call(lsn)?;
+        pgstat_xact_seams::pgstat_execute_transactional_drops::call(&parsed.stats, true)?;
+    }
+
+    // Same reason ForceSyncCommit exists in normal operation (e.g. CREATE
+    // DATABASE's window between file copy and commit).
+    if XactCompletionForceSyncCommit(parsed.xinfo) {
+        xlog_seams::xlog_flush::call(lsn)?;
+    }
+
+    // synchronous_commit = remote_apply: reply immediately.
+    if XactCompletionApplyFeedback(parsed.xinfo) {
+        xlogrecovery_seams::xlog_request_wal_receiver_reply::call();
+    }
+
+    Ok(())
+}
+
+/// `xact_redo_abort` — may be for a subtransaction and its children.
+fn xact_redo_abort(
+    parsed: &ParsedAbort,
+    xid: TransactionId,
+    lsn: XLogRecPtr,
+    origin_id: RepOriginId,
+) -> PgResult<()> {
+    debug_assert!(xid != InvalidTransactionId);
+
+    let max_xid = transam_seams::transaction_id_latest::call(xid, &parsed.subxacts);
+    varsup_seams::advance_next_full_transaction_id_past_xid::call(max_xid);
+
+    if xlogutils::standby_state() == STANDBY_DISABLED {
+        transam_seams::transaction_id_abort_tree::call(xid, &parsed.subxacts)?;
+    } else {
+        // See xact_redo_commit about this call.
+        procarray_seams::record_known_assigned_transaction_ids::call(max_xid)?;
+
+        transam_seams::transaction_id_abort_tree::call(xid, &parsed.subxacts)?;
+
+        // Update the ProcArray only after clog is marked.
+        procarray_seams::expire_tree_known_assigned_transaction_ids::call(
+            xid,
+            &parsed.subxacts,
+            max_xid,
+        )?;
+
+        // There are no invalidation messages to send or undo.
+
+        if (parsed.xinfo & XACT_XINFO_HAS_AE_LOCKS) != 0 {
+            standby_seams::standby_release_lock_tree::call(xid, &parsed.subxacts);
+        }
+    }
+
+    if (parsed.xinfo & XACT_XINFO_HAS_ORIGIN) != 0 {
+        origin_seams::replorigin_advance::call(
+            origin_id,
+            parsed.origin_lsn,
+            lsn,
+            false, // backward
+            false, // WAL
+        )?;
+    }
+
+    if !parsed.xlocators.is_empty() {
+        xlog_seams::xlog_flush::call(lsn)?;
+        catalog_storage_seams::drop_relation_files::call(&parsed.xlocators, true)?;
+    }
+
+    if !parsed.stats.is_empty() {
+        xlog_seams::xlog_flush::call(lsn)?;
+        pgstat_xact_seams::pgstat_execute_transactional_drops::call(&parsed.stats, true)?;
+    }
+
+    Ok(())
+}
+
+/// `xact_redo` — PANIC on an unknown op code. (Backup blocks are not used in
+/// xact records.)
+pub fn xact_redo(record: XactRedoInfo<'_>) -> PgResult<()> {
+    let info = record.info & XLOG_XACT_OPMASK;
+
+    match info {
+        XLOG_XACT_COMMIT => {
+            let parsed = parse_commit_record(record.info, record.data)?;
+            xact_redo_commit(&parsed, record.xid, record.end_rec_ptr, record.origin_id)
+        }
+        XLOG_XACT_COMMIT_PREPARED => {
+            let parsed = parse_commit_record(record.info, record.data)?;
+            xact_redo_commit(
+                &parsed,
+                parsed.twophase_xid,
+                record.end_rec_ptr,
+                record.origin_id,
+            )?;
+            // Delete the TwoPhaseState gxact entry and/or 2PC file (C holds
+            // TwoPhaseStateLock around this; the installed impl carries it).
+            twophase_seams::prepare_redo_remove::call(parsed.twophase_xid, false)
+        }
+        XLOG_XACT_ABORT => {
+            let parsed = parse_abort_record(record.info, record.data)?;
+            xact_redo_abort(&parsed, record.xid, record.end_rec_ptr, record.origin_id)
+        }
+        XLOG_XACT_ABORT_PREPARED => {
+            let parsed = parse_abort_record(record.info, record.data)?;
+            xact_redo_abort(
+                &parsed,
+                parsed.twophase_xid,
+                record.end_rec_ptr,
+                record.origin_id,
+            )?;
+            twophase_seams::prepare_redo_remove::call(parsed.twophase_xid, false)
+        }
+        XLOG_XACT_PREPARE => {
+            // Store xid and start/end pointers of the WAL record in the
+            // TwoPhaseState gxact entry.
+            twophase_seams::prepare_redo_add::call(
+                record.data,
+                record.read_rec_ptr,
+                record.end_rec_ptr,
+                record.origin_id,
+            )
+        }
+        XLOG_XACT_ASSIGNMENT => {
+            if xlogutils::standby_state() >= STANDBY_INITIALIZED {
+                let mut c = Cursor::new(record.data);
+                let xtop = c.u32()?;
+                let mut subxids: Vec<TransactionId> = Vec::new();
+                let nsub = c.read_count(4, &mut subxids)?;
+                for _ in 0..nsub {
+                    subxids.push(c.u32()?);
+                }
+                procarray_seams::proc_array_apply_xid_assignment::call(xtop, &subxids)?;
+            }
+            Ok(())
+        }
+        XLOG_XACT_INVALIDATIONS => {
+            // Ignored: what matters are the invalidations written into the
+            // commit record.
+            Ok(())
+        }
+        other => Err(Box::new(PgError::new(
+            PANIC,
+            format!("xact_redo: unknown op code {other}"),
+        ))),
+    }
+}
