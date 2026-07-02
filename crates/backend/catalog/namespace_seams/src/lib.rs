@@ -37,8 +37,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // GetTempNamespaceProcNumber(namespaceId) (namespace.c): infallible.
-    pub fn get_temp_namespace_proc_number(namespace_id: Oid) -> types_core::ProcNumber
+    // GetTempNamespaceProcNumber(namespaceId) (namespace.c): reads the
+    // pg_namespace syscache (get_namespace_name), so it carries that lookup's
+    // elog(ERROR) surface.
+    pub fn get_temp_namespace_proc_number(
+        namespace_id: Oid,
+    ) -> PgResult<types_core::ProcNumber>
 );
 
 seam_core::seam!(

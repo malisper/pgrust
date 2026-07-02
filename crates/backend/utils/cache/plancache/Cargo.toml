@@ -1,0 +1,17 @@
+[package]
+name = "plancache"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_portal = { path = "../../../../_support/types/portal" }
+inval = { path = "../inval" }
+cache_syscache = { path = "../cache_syscache" }
+plancache_portal_seams = { path = "../plancache_portal_seams" }

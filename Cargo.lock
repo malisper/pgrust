@@ -512,6 +512,7 @@ dependencies = [
  "fmgr_core",
  "lsyscache",
  "mcx",
+ "nodes_core",
  "syscache_seams",
  "types_core",
  "types_error",
@@ -1980,7 +1981,23 @@ dependencies = [
 
 [[package]]
 name = "pg_locale"
-version = "0.1.0"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "guc_tables",
+ "init_small",
+ "libc",
+ "lsyscache",
+ "mbutils",
+ "mcx",
+ "pg_database_seams",
+ "pg_locale_seams",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "varlena",
+]
 
 [[package]]
 name = "pg_locale_seams"
@@ -2099,6 +2116,7 @@ dependencies = [
  "launch_backend",
  "pmchild_seams",
  "pmsignal",
+ "shmem",
  "types_core",
  "types_error",
  "types_storage",
@@ -3342,6 +3360,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "toastdesc"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_snapshot",
+ "types_tuple",
+]
+
+[[package]]
 name = "trace"
 version = "0.0.0"
 
@@ -3699,11 +3728,14 @@ dependencies = [
  "cmdtag",
  "elog",
  "guc_tables",
+ "mcx",
  "miscinit",
+ "parallel_seams",
  "tcop_dest",
  "transam_xlog",
  "twophase_seams",
  "types_core",
+ "types_dest",
  "types_error",
  "types_nodes",
  "types_portal",
@@ -3758,8 +3790,8 @@ dependencies = [
 name = "vars"
 version = "0.1.0"
 dependencies = [
- "clauses",
  "mcx",
+ "nodes_core",
  "types_core",
  "types_error",
  "types_nodes",

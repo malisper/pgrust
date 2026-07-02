@@ -50,3 +50,8 @@ seam_core::seam!(
         parent_subid: types_core::SubTransactionId,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    // RelationCacheInitFileRemove() (relcache.c init file half).
+    pub fn relation_cache_init_file_remove()
+);

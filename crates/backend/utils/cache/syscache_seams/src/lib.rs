@@ -480,3 +480,31 @@ seam_core::seam!(
     // GetSysCacheHashValue1(TYPEOID, typid).
     pub fn syscache_hash_value_typeoid(typid: Oid) -> PgResult<u32>
 );
+
+seam_core::seam!(
+    // GetSysCacheOid1(NAMESPACENAME, Anum_pg_namespace_oid, nspname);
+    // InvalidOid on a miss.
+    pub fn lookup_pg_namespace_oid_by_name(nspname: &str) -> PgResult<Oid>
+);
+
+// The pg_collation columns create_pg_locale / create_pg_locale_builtin /
+// create_pg_locale_libc read off one COLLOID probe (pg_locale.c), decoded once.
+#[derive(Debug)]
+pub struct PgCollationLocaleRow<'mcx> {
+    pub collname: NameData,
+    pub collnamespace: Oid,
+    pub collprovider: u8,
+    pub collisdeterministic: bool,
+    pub collcollate: Option<PgString<'mcx>>,
+    pub collctype: Option<PgString<'mcx>>,
+    pub colllocale: Option<PgString<'mcx>>,
+    pub collversion: Option<PgString<'mcx>>,
+}
+
+seam_core::seam!(
+    // SearchSysCache1(COLLOID, collid); None mirrors !HeapTupleIsValid.
+    pub fn lookup_pg_collation_locale_row<'mcx>(
+        mcx: Mcx<'mcx>,
+        collid: Oid,
+    ) -> PgResult<Option<PgCollationLocaleRow<'mcx>>>
+);

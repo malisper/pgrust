@@ -103,6 +103,7 @@ pub fn init_seams() {
     relcache_seams::relation_cache_invalidate::set(invalidate::RelationCacheInvalidate);
     relcache_seams::relation_cache_invalidate_entry::set(invalidate::RelationCacheInvalidateEntry);
     relcache_seams::relation_id_is_in_init_file::set(initfile::RelationIdIsInInitFile);
+    relcache_seams::relation_cache_init_file_remove::set(initfile::RelationCacheInitFileRemove);
     relcache_seams::relation_cache_init_file_pre_invalidate::set(
         initfile::RelationCacheInitFilePreInvalidate,
     );
