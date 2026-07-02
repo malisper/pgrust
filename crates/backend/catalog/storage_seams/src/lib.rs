@@ -34,3 +34,9 @@ seam_core::seam!(
     // DropRelationFiles(delrels, isRedo) (storage.c); redo-only here.
     pub fn drop_relation_files<'a>(delrels: &'a [RelFileLocator], is_redo: bool) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // RelationPreserveStorage(rlocator, atCommit) (storage.c): unlinks pending
+    // deletes for rlocator; list surgery only, no ereport.
+    pub fn relation_preserve_storage(rlocator: RelFileLocator, at_commit: bool)
+);

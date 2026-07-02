@@ -65,10 +65,20 @@ pub fn SwitchToSharedLatch() {
     let proc_latch = LatchHandle::proc(g::MyProcNumber());
     g::SetMyLatch(Some(proc_latch));
 
-    // C: if (FeBeWaitSet) ModifyWaitEvent(..., FeBeWaitSetLatchPos, ...); pqcomm
-    // defers FeBeWaitSet to the socket/port unit — the repoint lands with it.
+    repoint_fe_be_wait_set(proc_latch);
+
     // Set the shared latch as the local one might have been set.
     latch::SetLatch(proc_latch);
+}
+
+// C: if (FeBeWaitSet) ModifyWaitEvent(..., FeBeWaitSetLatchPos, WL_LATCH_SET,
+// MyLatch). Uninstalled seam = a binary with no pqcomm socket half, i.e. no
+// FeBeWaitSet; the installed impl no-ops on the unset case itself.
+fn repoint_fe_be_wait_set(latch: LatchHandle) {
+    if pqcomm_seams::modify_fe_be_wait_set_latch::is_installed() {
+        pqcomm_seams::modify_fe_be_wait_set_latch::call(latch)
+            .expect("ModifyWaitEvent(FeBeWaitSet, FeBeWaitSetLatchPos)");
+    }
 }
 
 pub fn SwitchBackToLocalLatch() {
@@ -78,7 +88,9 @@ pub fn SwitchBackToLocalLatch() {
 
     g::SetMyLatch(Some(l));
 
-    latch::SetLatch(l); // FeBeWaitSet repoint deferred as above
+    repoint_fe_be_wait_set(l);
+
+    latch::SetLatch(l);
 }
 
 pub fn ChangeToDataDir() -> PgResult<()> {

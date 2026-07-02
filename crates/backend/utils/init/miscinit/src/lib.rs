@@ -175,6 +175,7 @@ pub fn init_seams() {
     s::clear_database_path::set(init_small::globals::ClearDatabasePath);
     s::switch_to_shared_latch::set(SwitchToSharedLatch);
     s::switch_back_to_local_latch::set(SwitchBackToLocalLatch);
+    s::create_socket_lock_file::set(CreateSocketLockFile);
 }
 
 #[cfg(test)]
