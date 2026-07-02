@@ -41,9 +41,7 @@ pub struct WALSegmentContext {
     pub ws_segsize: i32,
 }
 
-// `bkp_image`/`data` are C's `char *` payload pointers into the owning
-// reader's decode buffer; valid only while that reader's current record is
-// unchanged (the reader re-marshals them per XLogNextRecord).
+// `bkp_image`/`data`: C's `char *` payloads; valid while the reader's current record is unchanged.
 #[derive(Clone, Copy, Debug)]
 pub struct DecodedBkpBlock {
     pub in_use: bool,
@@ -86,7 +84,7 @@ impl DecodedBkpBlock {
 
     /// # Safety
     /// The owning reader's current record must still be the one this block
-    /// was marshaled from (the pointer targets its decode buffer).
+    /// was marshaled from (the pointers target its decode buffer).
     pub unsafe fn bkp_image_bytes(&self) -> &[u8] {
         if self.bkp_image.is_null() {
             return &[];
@@ -110,8 +108,7 @@ impl Default for DecodedBkpBlock {
     }
 }
 
-// The consumer-facing projection of C's DecodedXLogRecord; `main_data` is a
-// payload pointer with the same validity contract as DecodedBkpBlock's.
+// The consumer-facing projection of C's DecodedXLogRecord.
 #[derive(Clone, Copy, Debug)]
 pub struct DecodedXLogRecord {
     pub lsn: XLogRecPtr,
@@ -223,8 +220,7 @@ pub struct WALReadError {
 }
 
 seam_core::seam!(
-    // RestoreBlockImage: inner Err is C's `false` + record->errormsg_buf;
-    // the target page is reached through `buf` on the bufmgr side.
+    // RestoreBlockImage: inner Err is C's `false` + errormsg; page reached via `buf` (bufmgr).
     pub fn restore_block_image(
         record: &XLogReaderState,
         block_id: u8,
@@ -233,8 +229,7 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // WALRead: inner Err is C's `false` + errinfo; outer Err is the
-    // segment_open callback's ereport surface.
+    // WALRead: inner Err is C's `false` + errinfo; outer Err is segment_open's ereport surface.
     pub fn wal_read<'a>(
         state: &'a mut XLogReaderState,
         buf: &'a mut [u8],
