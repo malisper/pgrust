@@ -302,3 +302,79 @@ pub fn init_seams() {
         set: set_bytea_output,
     });
 }
+
+// SplitIdentifierString (varlena.c). Owned std strings: cold GUC-list parsing,
+// C builds a palloc'd List the caller frees. None is C's `return false`.
+pub fn split_identifier_string(
+    mcx: Mcx<'_>,
+    rawstring: &str,
+    separator: u8,
+    encoding: wchar::pg_enc,
+) -> PgResult<Option<Vec<String>>> {
+    use parser_small1::{downcase_truncate_identifier, scanner_isspace, truncate_identifier};
+
+    let s = rawstring.as_bytes();
+    let mut namelist: Vec<String> = Vec::new();
+    let mut p = 0usize;
+
+    while p < s.len() && scanner_isspace(s[p]) {
+        p += 1;
+    }
+    if p == s.len() {
+        return Ok(Some(namelist));
+    }
+
+    loop {
+        let mut curname: PgVec<'_, u8>;
+        if s[p] == b'"' {
+            curname = mcx::vec_with_capacity_in(mcx, 0)?;
+            let mut q = p + 1;
+            loop {
+                let Some(rel) = s[q..].iter().position(|&b| b == b'"') else {
+                    return Ok(None);
+                };
+                let endp = q + rel;
+                mcx::vec_append_bytes(&mut curname, &s[q..endp])?;
+                if s.get(endp + 1) == Some(&b'"') {
+                    mcx::vec_append_bytes(&mut curname, b"\"")?;
+                    q = endp + 2;
+                } else {
+                    p = endp + 1;
+                    break;
+                }
+            }
+        } else {
+            let start = p;
+            while p < s.len() && s[p] != separator && !scanner_isspace(s[p]) {
+                p += 1;
+            }
+            if p == start {
+                return Ok(None);
+            }
+            curname = downcase_truncate_identifier(mcx, &s[start..p], false, encoding)?;
+        }
+
+        while p < s.len() && scanner_isspace(s[p]) {
+            p += 1;
+        }
+
+        let done = if p < s.len() && s[p] == separator {
+            p += 1;
+            while p < s.len() && scanner_isspace(s[p]) {
+                p += 1;
+            }
+            false
+        } else if p == s.len() {
+            true
+        } else {
+            return Ok(None);
+        };
+
+        truncate_identifier(&mut curname, false, encoding)?;
+        namelist.push(String::from_utf8_lossy(&curname).into_owned());
+
+        if done {
+            return Ok(Some(namelist));
+        }
+    }
+}

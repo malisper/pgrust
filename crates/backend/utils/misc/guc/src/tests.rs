@@ -469,6 +469,7 @@ fn process_config_file_applies_and_reverts() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let conf = dir.join("postgresql.conf");
+    init_small::globals::SetDataDir(dir.to_str().unwrap());
 
     std::fs::write(&conf, "work_mem = 2MB\nwork_mem = 8MB\napplication_name = 'from_file'\nnot.known = 'kept'\n").unwrap();
     SetConfigOption("config_file", Some(conf.to_str().unwrap()), PGC_POSTMASTER, PGC_S_OVERRIDE)

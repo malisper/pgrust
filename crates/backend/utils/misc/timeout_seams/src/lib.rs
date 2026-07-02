@@ -55,8 +55,7 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // InitializeTimeouts() (utils/misc/timeout.c): reset all timeouts and
-    // establish the SIGALRM handler.
+    // InitializeTimeouts (timeout.c).
     pub fn initialize_timeouts()
 );
 

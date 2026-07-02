@@ -304,6 +304,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "clog"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "guc",
+ "guc_seams",
+ "guc_tables",
+ "init_small",
+ "lmgr_proc",
+ "lmgr_proc_seams",
+ "lwlock",
+ "slru",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "types_storage",
+ "varsup_seams",
+ "waitevent_seams",
+ "xloginsert_seams",
+ "xlogreader_seams",
+ "xlogutils_seams",
+]
+
+[[package]]
 name = "cmdtag"
 version = "0.1.0"
 dependencies = [
@@ -356,6 +381,16 @@ name = "datum"
 version = "0.0.0"
 dependencies = [
  "mcx",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
+name = "dbcommands_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam_core",
  "types_core",
  "types_error",
 ]
@@ -559,6 +594,7 @@ name = "guc"
 version = "0.0.0"
 dependencies = [
  "aclchk_seams",
+ "conffiles_seams",
  "elog",
  "guc_file",
  "guc_seams",
@@ -666,6 +702,25 @@ dependencies = [
 [[package]]
 name = "heapam_handler"
 version = "0.1.0"
+dependencies = [
+ "bufmgr_seams",
+ "exectuples",
+ "heapam",
+ "heapam_visibility_seams",
+ "mcx",
+ "predicate_seams",
+ "procarray_seams",
+ "pruneheap_seams",
+ "tableam_vocab",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_scan",
+ "types_slot",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+]
 
 [[package]]
 name = "heapam_visibility"
@@ -1390,6 +1445,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "postinit"
+version = "0.0.0"
+
+[[package]]
+name = "postinit_seams"
+version = "0.0.0"
+
+[[package]]
+name = "postmaster"
+version = "0.0.0"
+
+[[package]]
+name = "postmaster_seams"
+version = "0.0.0"
+
+[[package]]
 name = "pqcomm"
 version = "0.0.0"
 dependencies = [
@@ -1989,6 +2060,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "subtrans"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "guc",
+ "guc_seams",
+ "guc_tables",
+ "init_small",
+ "procarray",
+ "slru",
+ "subtrans_seams",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "types_storage",
+ "varsup_seams",
+]
+
+[[package]]
 name = "subtrans_seams"
 version = "0.0.0"
 dependencies = [
@@ -2103,6 +2193,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tableam_vocab"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "s_lock_seams",
+ "syncscan_seams",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_scan",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+]
+
+[[package]]
 name = "tablecmds_seams"
 version = "0.0.0"
 dependencies = [
@@ -2175,10 +2281,32 @@ name = "trace"
 version = "0.0.0"
 
 [[package]]
+name = "transam"
+version = "0.0.0"
+dependencies = [
+ "clog",
+ "elog",
+ "procarray",
+ "subtrans",
+ "transam_seams",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "transam_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
+name = "transam_xlog"
+version = "0.0.0"
+dependencies = [
+ "mcx",
  "types_core",
  "types_error",
 ]
@@ -2429,6 +2557,32 @@ dependencies = [
  "types_fmgr",
  "types_tuple",
  "wchar",
+]
+
+[[package]]
+name = "varsup"
+version = "0.0.0"
+dependencies = [
+ "clog",
+ "commit_ts_seams",
+ "dbcommands_seams",
+ "elog",
+ "guc_tables",
+ "init_small",
+ "lmgr_proc",
+ "lwlock",
+ "mcx",
+ "miscinit",
+ "miscinit_seams",
+ "pmsignal",
+ "subtrans_seams",
+ "syscache_seams",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "varsup_seams",
+ "xact_seams",
 ]
 
 [[package]]

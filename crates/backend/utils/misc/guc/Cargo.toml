@@ -28,3 +28,6 @@ scalar_seams = { path = "../../adt/scalar_seams" }
 aclchk_seams = { path = "../../../catalog/aclchk_seams" }
 guc_file = { path = "../guc_file" }
 timestamp_seams = { path = "../../adt/timestamp_seams" }
+
+[dev-dependencies]
+conffiles_seams = { path = "../conffiles_seams" }
