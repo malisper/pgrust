@@ -2534,6 +2534,7 @@ dependencies = [
  "types_storage",
  "varsup",
  "waitevent_seams",
+ "xact",
  "xact_seams",
 ]
 
