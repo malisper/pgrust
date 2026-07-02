@@ -4,7 +4,7 @@ use types_core::Oid;
 use types_error::PgResult;
 use types_storage::SharedInvalidationMessage;
 
-use crate::local::{nth_subgroup_message, LocalExecuteInvalidationMessage};
+use crate::local::LocalExecuteInvalidationMessage;
 use crate::msgs::{append_invalidation_messages, subgroup_slice, InvalidationMsgsGroup};
 use crate::{with_state, InvalState, CAT_CACHE_MSGS, REL_CACHE_MSGS};
 
@@ -13,18 +13,22 @@ pub(crate) const RM_XACT_ID: u8 = 1;
 pub(crate) const XLOG_XACT_INVALIDATIONS: u8 = 0x60;
 
 // Borrow released around each execute (it re-enters inval): one Copy message
-// per step against the re-selected live group — no snapshot allocation.
-fn process_group_locally(
+// image per step, no snapshot allocation. The group and walk bound are fixed
+// at entry and the array base re-probed per message — C's
+// ProcessMessageSubGroup shape (_endmsg cached, msgs pointer reloaded), so
+// mid-walk registrations are seen by neither side.
+pub(crate) fn process_group_locally(
     select: impl Fn(&InvalState<'_>) -> Option<InvalidationMsgsGroup>,
 ) -> PgResult<()> {
+    let Some(group) = with_state(|state| select(state)) else {
+        return Ok(());
+    };
     for subgroup in [CAT_CACHE_MSGS, REL_CACHE_MSGS] {
-        let mut off = 0usize;
-        while let Some(msg) = with_state(|state| {
-            let group = select(state)?;
-            nth_subgroup_message(&state.msg_arrays, &group, subgroup, off)
-        }) {
+        let end = group.num_in_sub_group(subgroup);
+        for off in 0..end {
+            let msg =
+                with_state(|state| subgroup_slice(&state.msg_arrays, &group, subgroup)[off]);
             LocalExecuteInvalidationMessage(&msg)?;
-            off += 1;
         }
     }
     Ok(())

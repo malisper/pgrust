@@ -1110,6 +1110,8 @@ dependencies = [
  "guc_tables",
  "init_small",
  "mcx",
+ "nodeindexonlyscan",
+ "nodeindexscan",
  "nodeseqscan",
  "postgres_seams",
  "snapmgr",
@@ -1793,6 +1795,7 @@ dependencies = [
  "aclchk_seams",
  "backend_status_seams",
  "bufmgr",
+ "checkpointer",
  "clog",
  "dsm_core",
  "elog",
@@ -2294,6 +2297,7 @@ dependencies = [
  "init_small",
  "lsyscache",
  "mcx",
+ "nbt_compare",
  "predicate_seams",
  "seam_core",
  "transam_xlog_seams",
@@ -2307,6 +2311,7 @@ dependencies = [
  "types_snapshot",
  "types_storage",
  "types_tuple",
+ "varlena",
  "xact",
 ]
 
@@ -3084,6 +3089,7 @@ dependencies = [
  "pmsignal",
  "postgres_seams",
  "postinit",
+ "postmaster_seams",
  "pqcomm_seams",
  "syslogger_seams",
  "timestamp_seams",
@@ -4686,6 +4692,15 @@ dependencies = [
  "mcx",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "tzparser"
+version = "0.0.0"
+dependencies = [
+ "adt_datetime",
+ "guc",
+ "mcx",
 ]
 
 [[package]]

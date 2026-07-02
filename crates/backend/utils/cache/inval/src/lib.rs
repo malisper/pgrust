@@ -1,6 +1,8 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+#[cfg(feature = "bench-internals")]
+pub mod bench_internals;
 pub mod eoxact;
 pub mod invalidate;
 pub mod local;
