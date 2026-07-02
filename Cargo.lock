@@ -40,6 +40,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "elog"
+version = "0.0.0"
+dependencies = [
+ "elog_seams",
+ "error_small_seams",
+ "guc_tables",
+ "init_small_seams",
+ "ipc_seams",
+ "libc",
+ "pgstat_seams",
+ "pqcomm_seams",
+ "syslogger_seams",
+ "types_core",
+ "types_dest",
+ "types_error",
+]
+
+[[package]]
 name = "elog_seams"
 version = "0.0.0"
 dependencies = [
@@ -53,6 +71,15 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_error",
+]
+
+[[package]]
+name = "guc_file_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+ "types_guc",
 ]
 
 [[package]]
@@ -96,7 +123,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "interrupt"
+version = "0.0.0"
+dependencies = [
+ "guc_file_seams",
+ "init_small_seams",
+ "ipc_seams",
+ "latch_seams",
+ "libc",
+ "mcxt_seams",
+ "procsignal_seams",
+ "types_error",
+ "types_guc",
+]
+
+[[package]]
 name = "ipc_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+]
+
+[[package]]
+name = "latch_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
@@ -131,6 +180,14 @@ dependencies = [
  "allocator-api2",
  "hashbrown",
  "libc",
+ "types_error",
+]
+
+[[package]]
+name = "mcxt_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
  "types_error",
 ]
 
@@ -174,6 +231,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "procsignal_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
 ]
 
 [[package]]
@@ -243,12 +308,32 @@ name = "types_guc"
 version = "0.0.0"
 
 [[package]]
+name = "types_hash"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "types_core",
+ "types_tuple",
+]
+
+[[package]]
 name = "types_rel"
 version = "0.1.0"
+dependencies = [
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_tuple",
+]
 
 [[package]]
 name = "types_resowner"
 version = "0.1.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "types_error",
+]
 
 [[package]]
 name = "types_scan"
