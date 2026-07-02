@@ -90,6 +90,16 @@ members = [
     "crates/backend/postmaster/autovacuum_seams",
     "crates/backend/storage/lmgr/lmgr_proc",
     "crates/_support/types/pathnodes",
+    "crates/backend/storage/ipc/sinval_seams",
+    "crates/backend/utils/cache/catcache_seams",
+    "crates/backend/utils/cache/relmapper_seams",
+    "crates/backend/storage/smgr/smgr_seams",
+    "crates/backend/utils/time/snapmgr_seams",
+    "crates/backend/access/transam/xloginsert_seams",
+    "crates/backend/catalog/catalog_seams",
+    "crates/common/relpath_seams",
+    "crates/backend/utils/cache/inval",
+    "crates/backend/executor/exectuples",
 ]
 
 [workspace.package]

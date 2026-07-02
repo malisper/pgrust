@@ -21,3 +21,20 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn is_bootstrap_processing_mode() -> bool
 );
+
+seam_core::seam!(
+    // Recovery-only DatabasePath poke (ProcessCommittedInvalidationMessages).
+    pub fn set_database_path(path: &str)
+);
+
+seam_core::seam!(
+    pub fn clear_database_path()
+);
+
+seam_core::seam!(
+    pub fn switch_to_shared_latch()
+);
+
+seam_core::seam!(
+    pub fn switch_back_to_local_latch()
+);
