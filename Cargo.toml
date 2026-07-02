@@ -100,6 +100,11 @@ members = [
     "crates/common/relpath_seams",
     "crates/backend/utils/cache/inval",
     "crates/backend/executor/exectuples",
+    "crates/backend/tcop/cmdtag",
+    "crates/backend/access/transam/xact_seams",
+    "crates/backend/tcop/dest",
+    "crates/backend/parser/parser_small1",
+    "crates/backend/utils/misc/queryenvironment",
 ]
 
 [workspace.package]

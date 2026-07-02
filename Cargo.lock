@@ -80,6 +80,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "cmdtag"
+version = "0.1.0"
+dependencies = [
+ "numutils",
+ "types_core",
+ "types_portal",
+]
+
+[[package]]
 name = "condition_variable_seams"
 version = "0.0.0"
 dependencies = [
@@ -484,6 +493,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "parser_small1"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "libc",
+ "mcx",
+ "types_core",
+ "types_error",
+ "wchar",
+]
+
+[[package]]
 name = "pg_class_seams"
 version = "0.0.0"
 dependencies = [
@@ -581,6 +602,20 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_error",
+]
+
+[[package]]
+name = "queryenvironment"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "relation_seams",
+ "table",
+ "types_core",
+ "types_error",
+ "types_portal",
+ "types_rel",
+ "types_tuple",
 ]
 
 [[package]]
@@ -804,6 +839,23 @@ dependencies = [
  "types_core",
  "types_error",
  "types_rel",
+]
+
+[[package]]
+name = "tcop_dest"
+version = "0.1.0"
+dependencies = [
+ "cmdtag",
+ "mcx",
+ "pqcomm_seams",
+ "pqformat",
+ "types_core",
+ "types_dest",
+ "types_error",
+ "types_portal",
+ "types_slot",
+ "types_tuple",
+ "xact_seams",
 ]
 
 [[package]]
