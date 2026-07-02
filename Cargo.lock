@@ -683,6 +683,7 @@ dependencies = [
 name = "fmgr_core"
 version = "0.1.0"
 dependencies = [
+ "adt_int",
  "datum",
  "types_core",
  "types_error",
@@ -703,6 +704,7 @@ dependencies = [
 name = "genam"
 version = "0.1.0"
 dependencies = [
+ "bufmgr_seams",
  "datum",
  "elog",
  "exectuples",
@@ -717,6 +719,7 @@ dependencies = [
  "snapmgr_seams",
  "tableam",
  "transam_seams",
+ "transam_xlog_seams",
  "types_core",
  "types_error",
  "types_nbtree",
@@ -1729,6 +1732,41 @@ dependencies = [
 [[package]]
 name = "postgres"
 version = "0.1.0"
+dependencies = [
+ "analyze_seams",
+ "backend_status_seams",
+ "cmdtag",
+ "elog",
+ "guc",
+ "guc_file",
+ "guc_tables",
+ "init_small",
+ "interrupt",
+ "ipc_seams",
+ "libc",
+ "mcx",
+ "parser_seams",
+ "pgstat",
+ "planner_seams",
+ "portalmem",
+ "postgres_seams",
+ "pqcomm",
+ "pqformat",
+ "pquery",
+ "ps_status_seams",
+ "rewrite_handler_seams",
+ "snapmgr",
+ "stringinfo",
+ "tcop_dest",
+ "timeout_seams",
+ "types_core",
+ "types_dest",
+ "types_error",
+ "types_nodes",
+ "types_portal",
+ "utility_seams",
+ "xact",
+]
 
 [[package]]
 name = "postgres_seams"
@@ -1750,6 +1788,7 @@ dependencies = [
  "backend_status_seams",
  "bufmgr",
  "cache_syscache",
+ "datum",
  "elog",
  "fd",
  "genam",
@@ -1794,14 +1833,11 @@ dependencies = [
  "types_core",
  "types_error",
  "types_guc",
+ "types_resowner",
  "types_storage",
  "xact",
  "xloginsert_seams",
 ]
-
-[[package]]
-name = "postinit_seams"
-version = "0.0.0"
 
 [[package]]
 name = "postmaster"
@@ -2454,6 +2490,7 @@ dependencies = [
  "types_error",
  "types_resowner",
  "types_snapshot",
+ "varsup",
  "waitevent_seams",
  "xact_seams",
 ]
@@ -3007,6 +3044,7 @@ name = "types_relscan"
 version = "0.1.0"
 dependencies = [
  "mcx",
+ "tableam",
  "types_core",
  "types_error",
  "types_nbtree",
@@ -3123,26 +3161,45 @@ dependencies = [
 name = "varsup"
 version = "0.0.0"
 dependencies = [
+ "autovacuum_seams",
  "clog",
  "commit_ts_seams",
+ "condition_variable_seams",
  "dbcommands_seams",
+ "deadlock_seams",
  "elog",
+ "file_seams",
  "guc_tables",
  "init_small",
+ "ipc_seams",
+ "latch_seams",
+ "libc",
  "lmgr_proc",
+ "lock_seams",
  "lwlock",
  "mcx",
  "miscinit",
  "miscinit_seams",
+ "pg_sema_seams",
+ "pgstat_seams",
  "pmsignal",
+ "pmsignal_seams",
+ "procarray_seams",
+ "s_lock_seams",
+ "shmem_seams",
  "subtrans_seams",
+ "sync_seams",
+ "syncrep_seams",
  "syscache_seams",
+ "timeout_seams",
  "transam_xlog_seams",
  "types_core",
  "types_error",
  "types_storage",
  "varsup_seams",
+ "waitevent_seams",
  "xact_seams",
+ "xloginsert_seams",
  "xlogutils_seams",
 ]
 
