@@ -246,6 +246,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "pg_class_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+]
+
+[[package]]
 name = "pg_ffi_fgram"
 version = "0.0.0"
 dependencies = [
@@ -306,6 +314,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "rel_vocab"
+version = "0.1.0"
+dependencies = [
+ "types_core",
+]
+
+[[package]]
+name = "relation_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "rel_vocab",
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "seam_core"
 version = "0.1.0"
 
@@ -333,6 +359,30 @@ name = "syslogger_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+]
+
+[[package]]
+name = "table"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "pg_class_seams",
+ "rel_vocab",
+ "relation_seams",
+ "table_seams",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
+name = "table_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "rel_vocab",
+ "seam_core",
+ "types_core",
+ "types_error",
 ]
 
 [[package]]
