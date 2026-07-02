@@ -1,4 +1,13 @@
 seam_core::seam!(
+    pub fn transaction_block_status_code() -> u8
+);
+
+seam_core::seam!(
+    // GetCurrentSubTransactionId() (xact.c); consumed by fd.c's AllocateDesc.
+    pub fn get_current_sub_transaction_id() -> types_core::SubTransactionId
+);
+
+seam_core::seam!(
     pub fn set_xact_accessed_temp_namespace()
 );
 
@@ -9,9 +18,4 @@ seam_core::seam!(
 
 seam_core::seam!(
     pub fn get_current_transaction_nest_level() -> i32
-);
-
-seam_core::seam!(
-    // `GetCurrentSubTransactionId()` (xact.c).
-    pub fn get_current_sub_transaction_id() -> types_core::SubTransactionId
 );
