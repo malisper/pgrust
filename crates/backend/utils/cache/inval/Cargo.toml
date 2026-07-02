@@ -4,6 +4,9 @@ version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
 
+[features]
+bench-internals = []
+
 [dependencies]
 mcx = { path = "../../../../_support/mcx" }
 datum = { path = "../../../../_support/types/datum" }

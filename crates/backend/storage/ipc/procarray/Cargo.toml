@@ -15,6 +15,9 @@ lmgr_proc = { path = "../../lmgr/lmgr_proc" }
 lmgr_proc_seams = { path = "../../lmgr/lmgr_proc_seams" }
 procarray_seams = { path = "../procarray_seams" }
 xact_seams = { path = "../../../access/transam/xact_seams" }
+# Direct dep for the per-snapshot curcid read (GetCurrentCommandId(false) is a
+# TLS mirror load; the seam fn-pointer defeated inlining on the reuse HIT).
+xact = { path = "../../../access/transam/xact" }
 transam_seams = { path = "../../../access/transam/transam_seams" }
 subtrans_seams = { path = "../../../access/transam/subtrans_seams" }
 transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }

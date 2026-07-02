@@ -57,7 +57,6 @@ fn setup() {
             Ok(Box::leak(vec![0u8; size].into_boxed_slice()).as_mut_ptr())
         });
 
-        xact_seams::get_current_command_id::set(|_| Ok(7));
         xact_seams::transaction_id_is_current_transaction_id::set(|_| false);
         transam_xlog_seams::recovery_in_progress::set(|| false);
         transam_seams::transaction_id_did_abort::set(|_| Ok(false));
@@ -154,7 +153,9 @@ fn snapshot_includes_running_xacts_and_computes_bounds() {
     assert_eq!(snap.xcnt, 1);
     assert_eq!(snap.xip[0], 90);
     assert!(!snap.suboverflowed);
-    assert_eq!(snap.curcid.get(), 7);
+    // curcid comes from the direct xact dep now (no seam to stub): outside a
+    // transaction the mirror holds xact's boot value.
+    assert_eq!(snap.curcid.get(), xact::GetCurrentCommandId(false).unwrap());
     assert_eq!(RecentXmin(), 90);
     assert_eq!(GetPGProcByNumber(me).xmin.read(), 90);
 

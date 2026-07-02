@@ -448,7 +448,7 @@ fn MaintainLatestCompletedXid(latestXid: TransactionId) {
     }
 }
 
-fn GetSnapshotDataReuse(snapshot: &mut SnapshotData<'_>) -> bool {
+fn GetSnapshotDataReuse(snapshot: &mut SnapshotData<'_>, my_proc: &PGPROC) -> bool {
     if snapshot.snapXactCompletionCount == 0 {
         return false;
     }
@@ -458,7 +458,6 @@ fn GetSnapshotDataReuse(snapshot: &mut SnapshotData<'_>) -> bool {
     }
 
     // Same count => the running-xid set cannot have changed (transam/README).
-    let my_proc = GetPGProcByNumber(MyProc().expect("GetSnapshotData requires MyProc"));
     if !TransactionIdIsValid(my_proc.xmin.read()) {
         my_proc.xmin.value.store(snapshot.xmin, Relaxed);
         TRANSACTION_XMIN.set(snapshot.xmin);
@@ -494,9 +493,9 @@ pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgR
 
     LWLockAcquire(ProcArrayLock(), LW_SHARED, myprocno)?;
 
-    if GetSnapshotDataReuse(snapshot) {
+    if GetSnapshotDataReuse(snapshot, my_proc) {
         LWLockRelease(ProcArrayLock())?;
-        snapshot.curcid.set(xact_seams::get_current_command_id::call(false)?);
+        snapshot.curcid.set(xact::GetCurrentCommandId(false)?);
         return Ok(());
     }
 
@@ -663,7 +662,7 @@ pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgR
     snapshot.subxcnt = subcount as i32;
     snapshot.suboverflowed = suboverflowed;
     snapshot.snapXactCompletionCount = cur_xact_completion_count;
-    snapshot.curcid.set(xact_seams::get_current_command_id::call(false)?);
+    snapshot.curcid.set(xact::GetCurrentCommandId(false)?);
     snapshot.active_count.set(0);
     snapshot.regd_count.set(0);
     snapshot.copied = false;
@@ -684,11 +683,9 @@ fn reserve_exact<'m>(
 }
 
 pub fn TransactionIdIsInProgress(xid: TransactionId) -> PgResult<bool> {
-    let arrayP = procArray();
-    let hdr = ProcGlobal();
-
     // Nothing older than RecentXmin can still be running; this also rejects
-    // Invalid/Frozen/Bootstrap ids.
+    // Invalid/Frozen/Bootstrap ids. Fast exits run before any shared-state
+    // resolution (C touches only two globals here; bench procarray_xidinprog_recent).
     if TransactionIdPrecedes(xid, RECENT_XMIN.get()) {
         return Ok(false);
     }
@@ -708,6 +705,8 @@ pub fn TransactionIdIsInProgress(xid: TransactionId) -> PgResult<bool> {
         );
     }
 
+    let arrayP = procArray();
+    let hdr = ProcGlobal();
     let myprocno = MyProc().expect("TransactionIdIsInProgress requires MyProc");
     let mypgxactoff = GetPGProcByNumber(myprocno).pgxactoff.load(Relaxed);
 

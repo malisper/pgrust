@@ -129,17 +129,6 @@ pub fn AcceptInvalidationMessages() -> PgResult<()> {
     Ok(())
 }
 
-// Copied out so callers release the borrow before executing (re-entrant);
-// the live bound is re-read per step like C's in-place walk.
-pub(crate) fn nth_subgroup_message<'mcx>(
-    arrays: &MsgArrays<'mcx>,
-    group: &InvalidationMsgsGroup,
-    subgroup: usize,
-    off: usize,
-) -> Option<SharedInvalidationMessage> {
-    subgroup_slice(arrays, group, subgroup).get(off).copied()
-}
-
 pub fn ProcessInvalidationMessages(
     group: &InvalidationMsgsGroup,
     func: &mut dyn FnMut(&SharedInvalidationMessage) -> PgResult<()>,
