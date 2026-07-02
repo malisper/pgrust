@@ -40,11 +40,17 @@ pub fn init_all() {
     parse_expr::init_seams();
     parser_analyze::init_seams();
     scan_fgram::init_seams();
+    pg_sema::init_seams();
+    autovacuum::init_seams();
     interrupt::init_seams();
     launch_backend::init_seams();
     pmchild::init_seams();
     postmaster::init_seams();
+    syslogger::init_seams();
+    launcher::init_seams();
+    walsender_config::init_seams();
     rewrite_handler::init_seams();
+    aio_config::init_seams();
     bufmgr::init_seams();
     fd::init_seams();
     dsm_core::init_seams();
@@ -104,8 +110,4 @@ pub fn init_all() {
     resowner::init_seams();
     snapmgr::init_seams();
     pg_prng::init_seams();
-
-    // Trivial-gap wire pending the guc lane's init_seams (notes/boot-gap-trail.md):
-    // the function exists in guc; only the seam install was missing.
-    guc_seams::initialize_guc_options::set(guc::initialize_guc_options);
 }

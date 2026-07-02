@@ -250,6 +250,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aio_config"
+version = "0.0.0"
+dependencies = [
+ "guc_tables",
+ "types_guc",
+]
+
+[[package]]
 name = "aio_seams"
 version = "0.0.0"
 dependencies = [
@@ -339,6 +347,16 @@ name = "auth_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_error",
+]
+
+[[package]]
+name = "autovacuum"
+version = "0.0.0"
+dependencies = [
+ "autovacuum_seams",
+ "elog",
+ "guc_tables",
  "types_error",
 ]
 
@@ -1782,6 +1800,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "launcher"
+version = "0.0.0"
+dependencies = [
+ "guc_tables",
+ "init_small",
+ "launcher_seams",
+]
+
+[[package]]
 name = "launcher_seams"
 version = "0.0.0"
 dependencies = [
@@ -2520,6 +2547,14 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "pg_sema"
+version = "0.0.0"
+dependencies = [
+ "pg_sema_seams",
+ "types_core",
 ]
 
 [[package]]
@@ -3424,7 +3459,9 @@ dependencies = [
  "adt_bool",
  "adt_float",
  "adt_timestamp",
+ "aio_config",
  "auth",
+ "autovacuum",
  "backend_startup",
  "backend_status",
  "be_secure",
@@ -3449,7 +3486,6 @@ dependencies = [
  "guc",
  "guc_file",
  "guc_funcs",
- "guc_seams",
  "guc_tables",
  "hba",
  "heapam_visibility",
@@ -3461,6 +3497,7 @@ dependencies = [
  "ipci",
  "latch",
  "launch_backend",
+ "launcher",
  "libpq_pqsignal",
  "lmgr",
  "lmgr_proc",
@@ -3475,6 +3512,7 @@ dependencies = [
  "pg_database",
  "pg_locale",
  "pg_prng",
+ "pg_sema",
  "pgstat",
  "pgtz",
  "plancache",
@@ -3505,12 +3543,14 @@ dependencies = [
  "stack_depth",
  "subtrans",
  "superuser",
+ "syslogger",
  "table",
  "tableam",
  "tcop_dest",
  "timeout",
  "transam",
  "transam_xlog",
+ "twophase_config",
  "typcache",
  "utility",
  "variable",
@@ -3518,6 +3558,7 @@ dependencies = [
  "vars",
  "varsup",
  "waiteventset",
+ "walsender_config",
  "xact",
  "xloginsert",
  "xlogreader",
@@ -3922,6 +3963,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "syslogger"
+version = "0.0.0"
+dependencies = [
+ "guc_tables",
+ "syslogger_seams",
+]
+
+[[package]]
 name = "syslogger_seams"
 version = "0.0.0"
 dependencies = [
@@ -4214,6 +4263,13 @@ dependencies = [
  "types_error",
  "types_portal",
  "types_slot",
+]
+
+[[package]]
+name = "twophase_config"
+version = "0.0.0"
+dependencies = [
+ "guc_tables",
 ]
 
 [[package]]
@@ -4646,6 +4702,13 @@ dependencies = [
  "types_core",
  "types_error",
  "types_storage",
+]
+
+[[package]]
+name = "walsender_config"
+version = "0.0.0"
+dependencies = [
+ "guc_tables",
 ]
 
 [[package]]
