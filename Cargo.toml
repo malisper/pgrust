@@ -10,6 +10,9 @@ members = [
     "crates/_support/types/stringinfo",
     "crates/common/hashfn",
     "crates/_support/types/fmgr",
+    "crates/_support/types/types_scan",
+    "crates/_support/types/types_guc",
+    "crates/_support/types/types_dest",
 ]
 
 [workspace.package]
