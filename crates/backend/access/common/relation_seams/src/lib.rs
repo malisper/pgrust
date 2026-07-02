@@ -1,7 +1,8 @@
 use mcx::Mcx;
-use rel_vocab::{RangeVar, Relation, LOCKMODE};
+use rel_vocab::RangeVar;
 use types_core::Oid;
 use types_error::PgResult;
+use types_rel::{Relation, LOCKMODE};
 
 seam_core::seam!(
     pub fn relation_open<'mcx>(
@@ -11,6 +12,7 @@ seam_core::seam!(
     ) -> PgResult<Relation<'mcx>>
 );
 
+// Ok(None) on the try_/missing_ok flavors is the C NULL for a missing relation.
 seam_core::seam!(
     pub fn try_relation_open<'mcx>(
         mcx: Mcx<'mcx>,
@@ -34,9 +36,4 @@ seam_core::seam!(
         lockmode: LOCKMODE,
         missing_ok: bool,
     ) -> PgResult<Option<Relation<'mcx>>>
-);
-
-// Consumes the handle: refcount drop plus, when lockmode != NoLock, lock release.
-seam_core::seam!(
-    pub fn relation_close(relation: Relation<'_>, lockmode: LOCKMODE) -> PgResult<()>
 );
