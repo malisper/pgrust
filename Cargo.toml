@@ -44,6 +44,11 @@ members = [
     "crates/backend/utils/adt/acl_seams",
     "crates/backend/utils/misc/guc_seams",
     "crates/backend/utils/adt/numutils",
+    "crates/_support/types/rel_vocab",
+    "crates/backend/access/common/relation_seams",
+    "crates/backend/catalog/pg_class_seams",
+    "crates/backend/access/table/table_seams",
+    "crates/backend/access/table/table",
 ]
 
 [workspace.package]
