@@ -2,3 +2,4 @@
 **/target
 CI-results/
 *.profraw
+**/target-*/

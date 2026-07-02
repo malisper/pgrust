@@ -256,6 +256,300 @@ impl<'a> PageRef<'a> {
         // SAFETY: in-bounds (checked above).
         (unsafe { self.ptr.as_ptr().add(off) }, len as u32)
     }
+
+    #[inline]
+    pub fn pd_flags(&self) -> uint16 {
+        self.read_u16(core::mem::offset_of!(PageHeaderData, pd_flags))
+    }
+
+    #[inline]
+    pub fn pd_lower(&self) -> uint16 {
+        self.read_u16(core::mem::offset_of!(PageHeaderData, pd_lower))
+    }
+
+    #[inline]
+    pub fn pd_upper(&self) -> uint16 {
+        self.read_u16(core::mem::offset_of!(PageHeaderData, pd_upper))
+    }
+
+    #[inline]
+    pub fn pd_special(&self) -> uint16 {
+        self.read_u16(core::mem::offset_of!(PageHeaderData, pd_special))
+    }
+
+    #[inline]
+    pub fn is_full(&self) -> bool {
+        (self.pd_flags() & PD_PAGE_FULL) != 0
+    }
+
+    #[inline]
+    pub fn has_free_line_pointers(&self) -> bool {
+        (self.pd_flags() & PD_HAS_FREE_LINES) != 0
+    }
+
+    #[inline]
+    pub fn prune_xid(&self) -> uint32 {
+        let off = core::mem::offset_of!(PageHeaderData, pd_prune_xid);
+        // SAFETY: in-bounds, 4-aligned (from_raw contract).
+        unsafe { self.ptr.as_ptr().add(off).cast::<uint32>().read() }
+    }
+
+    #[inline]
+    pub fn lsn(&self) -> XLogRecPtr {
+        // SAFETY: in-bounds; PageXLogRecPtr is two u32s (4-aligned).
+        let p = unsafe { self.ptr.as_ptr().cast::<PageXLogRecPtr>().read() };
+        p.lsn()
+    }
+
+    /// `PageGetFreeSpace`: usable space assuming one new line pointer.
+    pub fn free_space(&self) -> Size {
+        let space = self.pd_upper() as isize - self.pd_lower() as isize;
+        if space < core::mem::size_of::<ItemIdData>() as isize {
+            return 0;
+        }
+        space as Size - core::mem::size_of::<ItemIdData>()
+    }
+
+    /// `PageGetExactFreeSpace`.
+    pub fn exact_free_space(&self) -> Size {
+        let space = self.pd_upper() as isize - self.pd_lower() as isize;
+        if space < 0 {
+            0
+        } else {
+            space as Size
+        }
+    }
+
+    /// `PageGetHeapFreeSpace`: 0 once the heap line-pointer limit is reached
+    /// with no recyclable LP_UNUSED slot.
+    pub fn heap_free_space(&self) -> Size {
+        let space = self.free_space();
+        if space > 0 {
+            let nline = self.max_offset_number() as usize;
+            if nline >= MaxHeapTuplesPerPage {
+                if self.has_free_line_pointers() {
+                    for off in 1..=nline as OffsetNumber {
+                        let id = self.item_id(off);
+                        if !id.is_used() {
+                            return space;
+                        }
+                    }
+                }
+                return 0;
+            }
+        }
+        space
+    }
+}
+
+// C's `Page`, write view: requires the exclusive content lock (or a local /
+// not-yet-visible page). The page-write kernel under safe heap DML.
+pub struct PageMut<'a> {
+    ptr: core::ptr::NonNull<u8>,
+    _page: core::marker::PhantomData<&'a mut [u8]>,
+}
+
+impl<'a> PageMut<'a> {
+    /// # Safety
+    /// `ptr` is a live, MAXALIGN-aligned, `BLCKSZ`-writable page image,
+    /// exclusively owned for `'a` (C: exclusive buffer content lock held).
+    #[inline]
+    pub unsafe fn from_raw(ptr: core::ptr::NonNull<u8>) -> PageMut<'a> {
+        PageMut {
+            ptr,
+            _page: core::marker::PhantomData,
+        }
+    }
+
+    #[inline]
+    pub fn as_ref(&self) -> PageRef<'_> {
+        // SAFETY: same image, narrower (read) view for a shorter borrow.
+        unsafe { PageRef::from_raw(self.ptr) }
+    }
+
+    #[inline]
+    fn write_u16(&mut self, off: usize, v: uint16) {
+        debug_assert!(off + 2 <= BLCKSZ && off % 2 == 0);
+        // SAFETY: in-bounds, 2-aligned (from_raw contract).
+        unsafe { self.ptr.as_ptr().add(off).cast::<uint16>().write(v) }
+    }
+
+    #[inline]
+    pub fn set_pd_lower(&mut self, v: uint16) {
+        self.write_u16(core::mem::offset_of!(PageHeaderData, pd_lower), v);
+    }
+
+    #[inline]
+    pub fn set_pd_upper(&mut self, v: uint16) {
+        self.write_u16(core::mem::offset_of!(PageHeaderData, pd_upper), v);
+    }
+
+    #[inline]
+    pub fn set_pd_flags(&mut self, v: uint16) {
+        self.write_u16(core::mem::offset_of!(PageHeaderData, pd_flags), v);
+    }
+
+    #[inline]
+    pub fn clear_all_visible(&mut self) {
+        self.set_pd_flags(self.as_ref().pd_flags() & !PD_ALL_VISIBLE);
+    }
+
+    #[inline]
+    pub fn set_all_visible(&mut self) {
+        self.set_pd_flags(self.as_ref().pd_flags() | PD_ALL_VISIBLE);
+    }
+
+    #[inline]
+    pub fn set_full(&mut self) {
+        self.set_pd_flags(self.as_ref().pd_flags() | PD_PAGE_FULL);
+    }
+
+    #[inline]
+    pub fn set_lsn(&mut self, lsn: XLogRecPtr) {
+        let v = PageXLogRecPtr::from_lsn(lsn);
+        // SAFETY: in-bounds at offset 0; two 4-aligned u32 stores.
+        unsafe { self.ptr.as_ptr().cast::<PageXLogRecPtr>().write(v) }
+    }
+
+    #[inline]
+    pub fn set_prune_xid(&mut self, xid: uint32) {
+        let off = core::mem::offset_of!(PageHeaderData, pd_prune_xid);
+        // SAFETY: in-bounds, 4-aligned.
+        unsafe { self.ptr.as_ptr().add(off).cast::<uint32>().write(xid) }
+    }
+
+    #[inline]
+    pub fn set_item_id(&mut self, offnum: OffsetNumber, id: ItemIdData) {
+        let offnum = offnum as usize;
+        assert!(
+            offnum >= 1
+                && SizeOfPageHeaderData + offnum * core::mem::size_of::<ItemIdData>() <= BLCKSZ
+        );
+        let off = SizeOfPageHeaderData + (offnum - 1) * core::mem::size_of::<ItemIdData>();
+        // SAFETY: in-bounds (checked above), 4-aligned.
+        unsafe { self.ptr.as_ptr().add(off).cast::<ItemIdData>().write(id) }
+    }
+
+    /// `PageInit(page, BLCKSZ, specialSize)`.
+    pub fn init(&mut self, special_size: Size) {
+        let special_size = (special_size + 7) & !7;
+        assert!(special_size < BLCKSZ - SizeOfPageHeaderData);
+        // SAFETY: whole-page zero fill within the from_raw contract.
+        unsafe { core::ptr::write_bytes(self.ptr.as_ptr(), 0, BLCKSZ) };
+        let special = (BLCKSZ - special_size) as uint16;
+        self.set_pd_flags(0);
+        self.set_pd_lower(SizeOfPageHeaderData as uint16);
+        self.set_pd_upper(special);
+        self.write_u16(core::mem::offset_of!(PageHeaderData, pd_special), special);
+        self.write_u16(
+            core::mem::offset_of!(PageHeaderData, pd_pagesize_version),
+            BLCKSZ as uint16 | PG_PAGE_LAYOUT_VERSION as uint16,
+        );
+        self.set_prune_xid(0);
+    }
+
+    /// `PageAddItemExtended`; `None` is C's `InvalidOffsetNumber` (the C
+    /// WARNING text lives at the caller). Panics on corrupt page pointers
+    /// (C ereport PANIC).
+    pub fn add_item(
+        &mut self,
+        item: &[u8],
+        offset_number: OffsetNumber,
+        flags: i32,
+    ) -> Option<OffsetNumber> {
+        let overwrite = (flags & PAI_OVERWRITE) != 0;
+        let is_heap = (flags & PAI_IS_HEAP) != 0;
+        let r = self.as_ref();
+        let pd_lower = r.pd_lower() as usize;
+        let pd_upper = r.pd_upper() as usize;
+        let pd_special = r.pd_special() as usize;
+        assert!(
+            pd_lower >= SizeOfPageHeaderData
+                && pd_lower <= pd_upper
+                && pd_upper <= pd_special
+                && pd_special <= BLCKSZ,
+            "corrupted page pointers: lower = {pd_lower}, upper = {pd_upper}, special = {pd_special}"
+        );
+
+        let limit = r.max_offset_number() + 1;
+        let mut offset_number = offset_number;
+        let mut needshuffle = false;
+        if offset_number != 0 {
+            if offset_number < limit {
+                let id = r.item_id(offset_number);
+                if overwrite {
+                    if id.is_used() || id.has_storage() {
+                        return None;
+                    }
+                } else {
+                    needshuffle = true;
+                }
+            }
+        } else {
+            if r.has_free_line_pointers() {
+                for off in 1..limit {
+                    let id = r.item_id(off);
+                    if !id.is_used() && !id.has_storage() {
+                        offset_number = off;
+                        break;
+                    }
+                }
+                if offset_number == 0 {
+                    self.set_pd_flags(r.pd_flags() & !PD_HAS_FREE_LINES);
+                }
+            }
+            if offset_number == 0 {
+                offset_number = limit;
+            }
+        }
+
+        if offset_number > limit {
+            return None;
+        }
+        if is_heap && offset_number as usize > MaxHeapTuplesPerPage {
+            return None;
+        }
+
+        let lower = if offset_number == limit || needshuffle {
+            pd_lower + core::mem::size_of::<ItemIdData>()
+        } else {
+            pd_lower
+        };
+        let aligned_size = (item.len() + 7) & !7;
+        if pd_upper < aligned_size {
+            return None;
+        }
+        let upper = pd_upper - aligned_size;
+        if lower > upper {
+            return None;
+        }
+
+        if needshuffle {
+            let base = SizeOfPageHeaderData;
+            let idx = (offset_number - 1) as usize;
+            let n = (limit - offset_number) as usize;
+            // SAFETY: source and destination line-pointer ranges are within
+            // pd_lower (validated above); overlapping move.
+            unsafe {
+                let src = self.ptr.as_ptr().add(base + idx * 4).cast::<ItemIdData>();
+                core::ptr::copy(src, src.add(1), n);
+            }
+        }
+
+        self.set_item_id(
+            offset_number,
+            ItemIdData::new(upper as ItemOffset, LP_NORMAL, item.len() as ItemLength),
+        );
+        // SAFETY: upper + len <= pd_upper(old) <= pd_special <= BLCKSZ; item
+        // region is disjoint from the header/line array by lower <= upper.
+        unsafe {
+            core::ptr::copy_nonoverlapping(item.as_ptr(), self.ptr.as_ptr().add(upper), item.len())
+        };
+        self.set_pd_lower(lower as uint16);
+        self.set_pd_upper(upper as uint16);
+
+        Some(offset_number)
+    }
 }
 
 // Owned local scratch page: PageGetTempPage*'s palloc(pageSize), always a full
@@ -352,5 +646,155 @@ mod tests {
         assert!(PageTemp::new(BLCKSZ + 1).is_err());
         let p = PageTemp::new(512).unwrap();
         assert_eq!(p.as_bytes().len(), BLCKSZ);
+    }
+
+    #[repr(align(8))]
+    struct AlignedPage([u8; BLCKSZ]);
+
+    fn temp_page() -> alloc::boxed::Box<AlignedPage> {
+        alloc::boxed::Box::new(AlignedPage([0u8; BLCKSZ]))
+    }
+
+    fn page_mut(t: &mut AlignedPage) -> PageMut<'_> {
+        let ptr = core::ptr::NonNull::new(t.0.as_mut_ptr()).unwrap();
+        // SAFETY: owned MAXALIGNed BLCKSZ image, exclusively borrowed.
+        unsafe { PageMut::from_raw(ptr) }
+    }
+
+    #[test]
+    fn page_init_layout() {
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        pm.init(0);
+        let r = pm.as_ref();
+        assert_eq!(r.pd_lower() as usize, SizeOfPageHeaderData);
+        assert_eq!(r.pd_upper() as usize, BLCKSZ);
+        assert_eq!(r.pd_special() as usize, BLCKSZ);
+        assert_eq!(r.max_offset_number(), 0);
+        assert_eq!(r.free_space(), BLCKSZ - SizeOfPageHeaderData - 4);
+        assert!(!r.is_all_visible() && !r.is_full());
+
+        let mut pm = page_mut(&mut t);
+        pm.init(16);
+        assert_eq!(pm.as_ref().pd_special() as usize, BLCKSZ - 16);
+        assert_eq!(pm.as_ref().pd_upper() as usize, BLCKSZ - 16);
+    }
+
+    #[test]
+    fn add_item_appends_and_copies() {
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        pm.init(0);
+        let item1 = [0xAAu8; 60];
+        let item2 = [0xBBu8; 33];
+        let off1 = pm.add_item(&item1, 0, PAI_IS_HEAP).unwrap();
+        let off2 = pm.add_item(&item2, 0, PAI_IS_HEAP).unwrap();
+        assert_eq!((off1, off2), (1, 2));
+        let r = pm.as_ref();
+        assert_eq!(r.max_offset_number(), 2);
+        let id1 = r.item_id(1);
+        let id2 = r.item_id(2);
+        assert_eq!(id1.lp_len(), 60);
+        assert_eq!(id1.lp_off() as usize, BLCKSZ - 64);
+        assert_eq!(id2.lp_len(), 33);
+        assert_eq!(id2.lp_off() as usize, BLCKSZ - 64 - 40);
+        let (p1, l1) = r.item_raw(id1);
+        // SAFETY: item_raw bounds-checked.
+        assert_eq!(unsafe { core::slice::from_raw_parts(p1, l1 as usize) }, &item1);
+        assert_eq!(
+            r.free_space(),
+            BLCKSZ - SizeOfPageHeaderData - 2 * 4 - 104 - 4
+        );
+    }
+
+    #[test]
+    fn add_item_rejects_when_full() {
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        pm.init(0);
+        let big = [0u8; 4000];
+        assert!(pm.add_item(&big, 0, PAI_IS_HEAP).is_some());
+        assert!(pm.add_item(&big, 0, PAI_IS_HEAP).is_some());
+        assert!(pm.add_item(&big, 0, PAI_IS_HEAP).is_none());
+        // offnum beyond limit refused
+        assert!(pm.add_item(&[0u8; 8], 9, 0).is_none());
+    }
+
+    #[test]
+    fn add_item_recycles_unused_line_pointer() {
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        pm.init(0);
+        let item = [0x11u8; 24];
+        let o1 = pm.add_item(&item, 0, PAI_IS_HEAP).unwrap();
+        let _o2 = pm.add_item(&item, 0, PAI_IS_HEAP).unwrap();
+        let mut id = pm.as_ref().item_id(o1);
+        id.set_unused();
+        pm.set_item_id(o1, id);
+        pm.set_pd_flags(pm.as_ref().pd_flags() | PD_HAS_FREE_LINES);
+        let o3 = pm.add_item(&item, 0, PAI_IS_HEAP).unwrap();
+        assert_eq!(o3, o1);
+        assert_eq!(pm.as_ref().max_offset_number(), 2);
+    }
+
+    #[test]
+    fn add_item_shuffles_line_pointers() {
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        pm.init(0);
+        let a = [0xAAu8; 16];
+        let b = [0xBBu8; 16];
+        let c = [0xCCu8; 16];
+        pm.add_item(&a, 0, 0).unwrap();
+        pm.add_item(&b, 0, 0).unwrap();
+        // insert at 1, shifting a/b to 2/3 (index redo shape)
+        assert_eq!(pm.add_item(&c, 1, 0), Some(1));
+        let r = pm.as_ref();
+        assert_eq!(r.max_offset_number(), 3);
+        let get = |off| {
+            let (p, l) = r.item_raw(r.item_id(off));
+            // SAFETY: item_raw bounds-checked.
+            (unsafe { core::slice::from_raw_parts(p, l as usize) })[0]
+        };
+        assert_eq!((get(1), get(2), get(3)), (0xCCu8, 0xAAu8, 0xBBu8));
+    }
+
+    #[test]
+    fn header_flag_and_lsn_writes() {
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        pm.init(0);
+        pm.set_all_visible();
+        assert!(pm.as_ref().is_all_visible());
+        pm.clear_all_visible();
+        assert!(!pm.as_ref().is_all_visible());
+        pm.set_full();
+        assert!(pm.as_ref().is_full());
+        pm.set_lsn(0x0102_0304_0506_0708);
+        assert_eq!(pm.as_ref().lsn(), 0x0102_0304_0506_0708);
+        pm.set_prune_xid(77);
+        assert_eq!(pm.as_ref().prune_xid(), 77);
+    }
+
+    #[test]
+    fn heap_free_space_line_pointer_limit() {
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        pm.init(0);
+        let tiny = [0u8; 8];
+        for _ in 0..MaxHeapTuplesPerPage {
+            pm.add_item(&tiny, 0, PAI_IS_HEAP).unwrap();
+        }
+        let r = pm.as_ref();
+        assert!(r.free_space() > 0);
+        assert_eq!(r.heap_free_space(), 0);
+        assert!(pm.add_item(&tiny, 0, PAI_IS_HEAP).is_none());
+        // one recyclable slot restores heap free space
+        let mut id = pm.as_ref().item_id(5);
+        id.set_unused();
+        pm.set_item_id(5, id);
+        pm.set_pd_flags(pm.as_ref().pd_flags() | PD_HAS_FREE_LINES);
+        assert!(pm.as_ref().heap_free_space() > 0);
+        assert_eq!(pm.add_item(&tiny, 0, PAI_IS_HEAP), Some(5));
     }
 }

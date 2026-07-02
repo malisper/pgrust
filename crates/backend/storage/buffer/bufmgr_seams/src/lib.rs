@@ -186,3 +186,21 @@ seam_core::seam!(
     // CheckPointBuffers(flags) (bufmgr.c).
     pub fn check_point_buffers(flags: i32) -> PgResult<()>
 );
+
+pub const EB_CREATE_FORK_IF_NEEDED: u32 = 1 << 2;
+pub const EB_LOCK_FIRST: u32 = 1 << 3;
+pub const EB_CLEAR_SIZE_CACHE: u32 = 1 << 4;
+pub const EB_LOCK_TARGET: u32 = 1 << 5;
+
+seam_core::seam!(
+    // ExtendBufferedRelBy(BMR_REL(rel), fork, strategy, flags, extend_by):
+    // returns (first new buffer, extended_by); EB_LOCK_FIRST leaves the first
+    // buffer exclusively locked (heap DML extension arm).
+    pub fn extend_buffered_rel_by<'a, 'mcx>(
+        rel: &'a types_rel::RelationData<'mcx>,
+        fork: ForkNumber,
+        strategy: BufferAccessStrategy,
+        flags: u32,
+        extend_by: u32,
+    ) -> PgResult<(Buffer, u32)>
+);

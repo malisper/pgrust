@@ -38,8 +38,12 @@ use ::types_tuple::{
 
 use heapam_visibility_seams as hv_seam;
 
+pub mod dml;
 pub mod fetch;
+pub mod hio;
 pub use fetch::{heap_fetch, heap_get_latest_tid, heap_hot_search_buffer};
+pub use dml::{heap_delete, heap_insert, heap_update, simple_heap_delete, simple_heap_insert, simple_heap_update};
+pub use hio::{RelationGetBufferForTuple, RelationPutHeapTuple};
 #[cfg(test)]
 mod tests;
 

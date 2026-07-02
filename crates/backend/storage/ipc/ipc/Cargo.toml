@@ -17,3 +17,6 @@ lwlock = { path = "../../lmgr/lwlock" }
 dsm_core = { path = "../dsm_core" }
 ipc_seams = { path = "../ipc_seams" }
 ipc_portal_seams = { path = "../ipc_portal_seams" }
+
+[dev-dependencies]
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
