@@ -112,6 +112,41 @@ pub unsafe fn vartag_external(p: *const u8) -> u8 {
 }
 
 /// # Safety
+/// As [`varatt_is_1b`].
+#[inline]
+pub unsafe fn varatt_is_external_expanded(p: *const u8) -> bool {
+    varatt_is_1b_e(p) && vartag_is_expanded(vartag_external(p))
+}
+
+/// # Safety
+/// `p` points to a live varlena readable through its 4-byte header.
+#[inline]
+pub unsafe fn varatt_can_make_short(p: *const u8) -> bool {
+    varatt_is_4b_u(p) && (varsize_4b(p) - VARHDRSZ + VARHDRSZ_SHORT) <= VARATT_SHORT_MAX
+}
+
+/// # Safety
+/// As [`varatt_can_make_short`].
+#[inline]
+pub unsafe fn varatt_converted_short_size(p: *const u8) -> usize {
+    varsize_4b(p) - VARHDRSZ + VARHDRSZ_SHORT
+}
+
+/// # Safety
+/// `p` is writable; `len <= VARATT_SHORT_MAX`.
+#[inline]
+pub unsafe fn set_varsize_short(p: *mut u8, len: usize) {
+    #[cfg(target_endian = "little")]
+    {
+        *p = ((len as u8) << 1) | 0x01;
+    }
+    #[cfg(target_endian = "big")]
+    {
+        *p = (len as u8) | 0x80;
+    }
+}
+
+/// # Safety
 /// `p` points to a live external TOAST pointer.
 #[inline]
 pub unsafe fn varsize_external(p: *const u8) -> usize {
