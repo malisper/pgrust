@@ -319,6 +319,33 @@ dependencies = [
 [[package]]
 name = "catalog_namespace"
 version = "0.0.0"
+dependencies = [
+ "aclchk_seams",
+ "cache_syscache",
+ "datum",
+ "dbcommands_seams",
+ "elog",
+ "guc_seams",
+ "guc_tables",
+ "init_small",
+ "inval",
+ "inval_seams",
+ "lmgr_seams",
+ "lsyscache",
+ "mbutils_seams",
+ "mcx",
+ "miscinit_seams",
+ "namespace_seams",
+ "rel_vocab",
+ "sinval",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_tuple",
+ "varlena",
+ "wchar",
+]
 
 [[package]]
 name = "catalog_seams"
@@ -406,6 +433,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_nodes",
+ "types_tuple",
  "var_seams",
 ]
 
@@ -949,6 +977,7 @@ name = "heapam"
 version = "0.1.0"
 dependencies = [
  "bufmgr_seams",
+ "catalog_seams",
  "combocid_seams",
  "datum",
  "exectuples",
@@ -958,6 +987,7 @@ dependencies = [
  "inval",
  "lmgr",
  "mcx",
+ "miscinit_seams",
  "multixact_seams",
  "pgstat",
  "predicate_seams",
@@ -1781,6 +1811,10 @@ version = "0.0.0"
 dependencies = [
  "types_core",
 ]
+
+[[package]]
+name = "pg_locale"
+version = "0.1.0"
 
 [[package]]
 name = "pg_locale_seams"
@@ -3446,6 +3480,10 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "utility"
+version = "0.1.0"
 
 [[package]]
 name = "utility_seams"

@@ -1,0 +1,319 @@
+use super::*;
+use ::datum::Datum;
+use ::fmgr::{FmNode, LocalFcinfo};
+use ::mcx::MemoryContext;
+use ::types_core::{INT4OID, TEXTOID};
+use ::types_tuple::{NameData, PgTypeShape, TYPALIGN_INT, TYPSTORAGE_EXTENDED, TYPSTORAGE_PLAIN};
+use std::sync::Once;
+
+const COMPOSITE_TYPE: Oid = 7777;
+const F_SCALAR: Oid = 1001;
+const F_COMPOSITE: Oid = 1002;
+const F_RECORD_BARE: Oid = 1003;
+const F_RECORD_OUT: Oid = 1004;
+const F_RECORD_ONE_OUT: Oid = 1005;
+const P_ONE_OUT: Oid = 1006;
+const F_POLY: Oid = 1007;
+
+fn proc_shape(prorettype: Oid, prokind: i8, pronargs: i16) -> PgProcShape {
+    PgProcShape {
+        pronamespace: 11,
+        prorettype,
+        provariadic: InvalidOid,
+        prosupport: InvalidOid,
+        pronargs,
+        prokind,
+        provolatile: b'i' as i8,
+        proparallel: b's' as i8,
+        proretset: false,
+        proisstrict: true,
+        proleakproof: false,
+    }
+}
+
+// vec_with_capacity_in forbids droppy T; PgString elements own allocations.
+fn vec_droppy_with_capacity<'mcx, T>(mcx: Mcx<'mcx>, n: usize) -> PgResult<PgVec<'mcx, T>> {
+    let mut v = PgVec::new_in(mcx);
+    v.try_reserve_exact(n)
+        .map_err(|_| Box::new(mcx.oom(n.saturating_mul(core::mem::size_of::<T>()))))?;
+    Ok(v)
+}
+
+static SEAMS: Once = Once::new();
+
+fn install_seams() {
+    SEAMS.call_once(|| {
+        syscache_seams::lookup_pg_proc_shape::set(|funcid| {
+            Ok(match funcid {
+                F_SCALAR => Some(proc_shape(INT4OID, PROKIND_FUNCTION, 1)),
+                F_COMPOSITE => Some(proc_shape(COMPOSITE_TYPE, PROKIND_FUNCTION, 0)),
+                F_RECORD_BARE => Some(proc_shape(RECORDOID, PROKIND_FUNCTION, 0)),
+                F_RECORD_OUT => Some(proc_shape(RECORDOID, PROKIND_FUNCTION, 1)),
+                F_RECORD_ONE_OUT => Some(proc_shape(RECORDOID, PROKIND_FUNCTION, 1)),
+                P_ONE_OUT => Some(proc_shape(RECORDOID, PROKIND_PROCEDURE, 1)),
+                F_POLY => Some(proc_shape(ANYELEMENTOID, PROKIND_FUNCTION, 1)),
+                _ => None,
+            })
+        });
+        syscache_seams::pg_proc_proname::set(|funcid| {
+            let mut name = NameData::default();
+            name.namestrcpy(match funcid {
+                F_POLY => "poly_fn",
+                _ => "test_fn",
+            });
+            Ok(Some(name))
+        });
+        syscache_seams::lookup_pg_proc_signature::set(|mcx, funcid| {
+            let mut args: PgVec<'_, Oid> = vec_with_capacity_in(mcx, 2)?;
+            match funcid {
+                F_SCALAR | F_RECORD_OUT | F_RECORD_ONE_OUT | P_ONE_OUT => args.push(INT4OID),
+                F_POLY => args.push(ANYELEMENTOID),
+                _ => {}
+            }
+            Ok(Some((InvalidOid, args)))
+        });
+        syscache_seams::pg_proc_result_arrays::set(|mcx, funcid| {
+            let arrays = |types: &[Oid],
+                          modes: &[i8],
+                          names: Option<&[&str]>|
+             -> PgResult<syscache_seams::PgProcResultArraysShape<'_>> {
+                let mut t: PgVec<'_, Oid> = vec_with_capacity_in(mcx, types.len())?;
+                t.extend_from_slice(types);
+                let mut m: PgVec<'_, i8> = vec_with_capacity_in(mcx, modes.len())?;
+                m.extend_from_slice(modes);
+                let n = match names {
+                    Some(names) => {
+                        let mut v: PgVec<'_, PgString<'_>> =
+                            vec_droppy_with_capacity(mcx, names.len())?;
+                        for s in names {
+                            v.push(PgString::from_str_in(s, mcx)?);
+                        }
+                        Some(v)
+                    }
+                    None => None,
+                };
+                Ok(syscache_seams::PgProcResultArraysShape {
+                    proallargtypes: Some(t),
+                    proargmodes: Some(m),
+                    proargnames: n,
+                })
+            };
+            Ok(match funcid {
+                F_RECORD_OUT => Some(arrays(
+                    &[INT4OID, INT4OID, TEXTOID],
+                    &[PROARGMODE_IN, PROARGMODE_OUT, PROARGMODE_OUT],
+                    Some(&["a", "b", ""]),
+                )?),
+                F_RECORD_ONE_OUT | P_ONE_OUT => Some(arrays(
+                    &[INT4OID, INT4OID],
+                    &[PROARGMODE_IN, PROARGMODE_OUT],
+                    None,
+                )?),
+                F_RECORD_BARE | F_SCALAR | F_COMPOSITE | F_POLY => {
+                    Some(syscache_seams::PgProcResultArraysShape {
+                        proallargtypes: None,
+                        proargmodes: None,
+                        proargnames: None,
+                    })
+                }
+                _ => None,
+            })
+        });
+        syscache_seams::pg_type_typtype::set(|typid| {
+            Ok(match typid {
+                INT4OID | TEXTOID => Some(b'b' as i8),
+                COMPOSITE_TYPE => Some(b'c' as i8),
+                RECORDOID | VOIDOID | CSTRINGOID => Some(b'p' as i8),
+                _ => None,
+            })
+        });
+        syscache_seams::lookup_pg_type_shape::set(|typid| {
+            Ok(match typid {
+                INT4OID => Some(PgTypeShape {
+                    typlen: 4,
+                    typbyval: true,
+                    typalign: TYPALIGN_INT,
+                    typstorage: TYPSTORAGE_PLAIN,
+                    typcollation: InvalidOid,
+                }),
+                TEXTOID => Some(PgTypeShape {
+                    typlen: -1,
+                    typbyval: false,
+                    typalign: TYPALIGN_INT,
+                    typstorage: TYPSTORAGE_EXTENDED,
+                    typcollation: 100,
+                }),
+                _ => None,
+            })
+        });
+        typcache_seams::assign_record_type_typmod::set(|desc| {
+            desc.tdtypmod = 42;
+            Ok(())
+        });
+        typcache_seams::lookup_rowtype_tupdesc_copy::set(|mcx, type_id, typmod| {
+            assert_eq!(type_id, COMPOSITE_TYPE);
+            assert_eq!(typmod, -1);
+            let mut desc = tupdesc::CreateTemplateTupleDesc(mcx, 1)?;
+            tupdesc::TupleDescInitEntry(&mut desc, 1, Some("x"), INT4OID, -1, 0)?;
+            desc.tdtypeid = COMPOSITE_TYPE;
+            desc.tdtypmod = 0;
+            Ok(desc)
+        });
+    });
+}
+
+fn dummy(
+    _flinfo: Option<&mut FmgrInfo>,
+    _fcinfo: &mut ::fmgr::FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    Ok(Datum::from_i32(0))
+}
+
+fn flinfo_for(oid: Oid) -> FmgrInfo {
+    FmgrInfo::new(dummy, oid, 1, true, false)
+}
+
+#[test]
+fn scalar_function() {
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let r = get_call_result_type(ctx.mcx(), &flinfo_for(F_SCALAR), None).unwrap();
+    assert_eq!(r.class, TypeFuncClass::Scalar);
+    assert_eq!(r.result_type_id, INT4OID);
+    assert!(r.result_tuple_desc.is_none());
+}
+
+#[test]
+fn composite_function_copies_rowtype() {
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let r = get_func_result_type(ctx.mcx(), F_COMPOSITE).unwrap();
+    assert_eq!(r.class, TypeFuncClass::Composite);
+    assert_eq!(r.result_type_id, COMPOSITE_TYPE);
+    let desc = r.result_tuple_desc.unwrap();
+    assert_eq!(desc.natts, 1);
+    assert_eq!(desc.attr(0).atttypid, INT4OID);
+}
+
+#[test]
+fn bare_record_without_context_stays_record() {
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let r = get_call_result_type(ctx.mcx(), &flinfo_for(F_RECORD_BARE), None).unwrap();
+    assert_eq!(r.class, TypeFuncClass::Record);
+    assert_eq!(r.result_type_id, RECORDOID);
+    assert!(r.result_tuple_desc.is_none());
+}
+
+#[test]
+fn bare_record_with_expected_desc_resolves_composite() {
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut expected = tupdesc::CreateTemplateTupleDesc(mcx, 1).unwrap();
+    tupdesc::TupleDescInitEntry(&mut expected, 1, Some("n"), INT4OID, -1, 0).unwrap();
+    let r = get_call_result_type(mcx, &flinfo_for(F_RECORD_BARE), Some(&expected)).unwrap();
+    assert_eq!(r.class, TypeFuncClass::Composite);
+    let desc = r.result_tuple_desc.unwrap();
+    assert_eq!(desc.natts, 1);
+    assert_eq!(desc.attr(0).attname.name_str(), b"n");
+}
+
+#[test]
+fn out_params_build_record_tupdesc() {
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let r = get_call_result_type(ctx.mcx(), &flinfo_for(F_RECORD_OUT), None).unwrap();
+    assert_eq!(r.class, TypeFuncClass::Composite);
+    assert_eq!(r.result_type_id, RECORDOID);
+    let desc = r.result_tuple_desc.unwrap();
+    assert_eq!(desc.natts, 2);
+    assert_eq!(desc.attr(0).attname.name_str(), b"b");
+    assert_eq!(desc.attr(0).atttypid, INT4OID);
+    // Unnamed OUT column gins up "column2" (build_function_result_tupdesc_d).
+    assert_eq!(desc.attr(1).attname.name_str(), b"column2");
+    assert_eq!(desc.attr(1).atttypid, TEXTOID);
+    assert_eq!(desc.tdtypmod, 42, "assign_record_type_typmod stamped the typmod");
+}
+
+#[test]
+fn single_out_function_is_not_composite() {
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let r = get_func_result_type(ctx.mcx(), F_RECORD_ONE_OUT).unwrap();
+    assert_eq!(r.class, TypeFuncClass::Record);
+    assert!(r.result_tuple_desc.is_none());
+}
+
+#[test]
+fn single_out_procedure_is_composite() {
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let r = get_func_result_type(ctx.mcx(), P_ONE_OUT).unwrap();
+    assert_eq!(r.class, TypeFuncClass::Composite);
+    let desc = r.result_tuple_desc.unwrap();
+    assert_eq!(desc.natts, 1);
+    assert_eq!(desc.attr(0).attname.name_str(), b"column1");
+}
+
+#[test]
+fn polymorphic_rettype_without_call_expr_errors() {
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let err = get_func_result_type(ctx.mcx(), F_POLY).unwrap_err();
+    assert!(err
+        .message()
+        .contains("could not determine actual result type for function \"poly_fn\""));
+}
+
+#[test]
+fn missing_function_errors() {
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let err = get_func_result_type(ctx.mcx(), 999999).unwrap_err();
+    assert!(err.message().contains("cache lookup failed for function 999999"));
+}
+
+#[test]
+fn get_type_func_class_pseudo_scalars() {
+    install_seams();
+    assert_eq!(get_type_func_class(VOIDOID).unwrap().0, TypeFuncClass::Scalar);
+    assert_eq!(get_type_func_class(CSTRINGOID).unwrap().0, TypeFuncClass::Scalar);
+    assert_eq!(get_type_func_class(RECORDOID).unwrap().0, TypeFuncClass::Record);
+}
+
+#[test]
+fn multi_func_call_lifecycle() {
+    install_seams();
+    let mut flinfo = flinfo_for(F_SCALAR);
+    let mut fcinfo = LocalFcinfo::<0>::new(0);
+    let mut rsinfo = FmNode { tag: NodeTag::T_ReturnSetInfo as u32 };
+    fcinfo.resultinfo = Some(core::ptr::NonNull::from(&mut rsinfo));
+
+    let fctx = init_MultiFuncCall(&mut flinfo, &fcinfo).unwrap();
+    fctx.max_calls = 3;
+    fctx.user_fctx = Some(Box::new(7i32));
+
+    let again = per_MultiFuncCall(&mut flinfo);
+    again.call_cntr += 1;
+    assert_eq!(again.call_cntr, 1);
+    assert_eq!(again.max_calls, 3);
+    assert_eq!(*again.user_fctx.as_ref().unwrap().downcast_ref::<i32>().unwrap(), 7);
+
+    let err = init_MultiFuncCall(&mut flinfo, &fcinfo).unwrap_err();
+    assert!(err.message().contains("cannot be called more than once"));
+
+    end_MultiFuncCall(&mut flinfo);
+    assert!(!flinfo.has_fn_extra());
+}
+
+#[test]
+fn multi_func_call_requires_rsinfo() {
+    install_seams();
+    let mut flinfo = flinfo_for(F_SCALAR);
+    let fcinfo = LocalFcinfo::<0>::new(0);
+    let err = init_MultiFuncCall(&mut flinfo, &fcinfo).unwrap_err();
+    assert!(err
+        .message()
+        .contains("set-valued function called in context that cannot accept a set"));
+}
