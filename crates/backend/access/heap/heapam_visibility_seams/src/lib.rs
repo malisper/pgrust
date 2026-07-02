@@ -1,0 +1,32 @@
+use types_core::{Buffer, GlobalVisStateHandle, TransactionId};
+use types_error::PgResult;
+use types_snapshot::{HTSV_Result, SnapshotData};
+use types_tuple::{HeapTupleData, HeapTupleHeaderData};
+
+seam_core::seam!(
+    // &SnapshotData covers the read lane; the Dirty write-back lane is DML phase 2.
+    pub fn heap_tuple_satisfies_visibility<'a, 'tup, 'mcx>(
+        htup: &'a mut HeapTupleData<'tup>,
+        snapshot: &'a SnapshotData<'mcx>,
+        buffer: Buffer,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    pub fn heap_tuple_satisfies_vacuum<'a, 'tup>(
+        htup: &'a mut HeapTupleData<'tup>,
+        oldest_xmin: TransactionId,
+        buffer: Buffer,
+    ) -> PgResult<HTSV_Result>
+);
+
+seam_core::seam!(
+    pub fn heap_tuple_is_surely_dead<'a, 'tup>(
+        htup: &'a HeapTupleData<'tup>,
+        vistest: GlobalVisStateHandle,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    pub fn heap_tuple_header_is_only_locked<'a>(hdr: &'a HeapTupleHeaderData) -> PgResult<bool>
+);

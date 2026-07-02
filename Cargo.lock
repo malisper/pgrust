@@ -105,7 +105,40 @@ dependencies = [
 
 [[package]]
 name = "backend_startup"
-version = "0.1.0"
+version = "0.0.0"
+dependencies = [
+ "be_secure_seams",
+ "elog",
+ "fd",
+ "guc_seams",
+ "guc_tables",
+ "init_small",
+ "ip",
+ "ipc_seams",
+ "libc",
+ "libpq_pqsignal",
+ "lmgr_proc",
+ "mbutils_seams",
+ "mcx",
+ "miscinit",
+ "pgstat_seams",
+ "postgres_seams",
+ "pqcomm",
+ "pqformat",
+ "procsignal",
+ "ps_status_seams",
+ "scalar_seams",
+ "string_seams",
+ "timeout_seams",
+ "types_core",
+ "types_dest",
+ "types_error",
+ "types_guc",
+ "types_startup",
+ "varlena",
+ "wchar",
+ "xlogrecovery_seams",
+]
 
 [[package]]
 name = "backend_status_seams"
@@ -131,6 +164,27 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_error",
+]
+
+[[package]]
+name = "bufmgr"
+version = "0.0.0"
+dependencies = [
+ "bufmgr_seams",
+ "dynahash",
+ "elog",
+ "guc_tables",
+ "init_small",
+ "lwlock",
+ "mcx",
+ "seam_core",
+ "shmem_seams",
+ "smgr_seams",
+ "types_core",
+ "types_error",
+ "types_hash",
+ "types_rel",
+ "types_storage",
 ]
 
 [[package]]
@@ -209,7 +263,6 @@ version = "0.1.0"
 dependencies = [
  "catcache_seams",
  "datum",
- "genam_seams",
  "hashfn",
  "indexam",
  "init_small",
@@ -218,6 +271,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "relcache_seams",
+ "seam_core",
  "table",
  "tupdesc",
  "types_core",
@@ -452,12 +506,14 @@ dependencies = [
  "datum",
  "elog",
  "exectuples",
+ "genam_seams",
  "heaptuple",
  "indexam",
  "init_small",
  "mcx",
  "miscinit",
  "procarray_seams",
+ "relation_seams",
  "snapmgr_seams",
  "tableam",
  "transam_seams",
@@ -475,6 +531,14 @@ dependencies = [
 [[package]]
 name = "genam_seams"
 version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+]
 
 [[package]]
 name = "guc"
@@ -1223,6 +1287,7 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_error",
+ "types_startup",
 ]
 
 [[package]]
@@ -1856,6 +1921,7 @@ dependencies = [
 name = "tableam"
 version = "0.1.0"
 dependencies = [
+ "exectuples",
  "guc_tables",
  "mcx",
  "s_lock_seams",

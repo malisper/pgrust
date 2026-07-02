@@ -205,6 +205,7 @@ members = [
     "crates/common/string_seams",
     "crates/backend/tcop/backend_startup",
     "crates/backend/postmaster/launch_backend",
+    "crates/backend/storage/buffer/bufmgr",
 ]
 
 [workspace.package]
