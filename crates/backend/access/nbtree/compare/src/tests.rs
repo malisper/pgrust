@@ -57,21 +57,19 @@ fn fc_wrappers_round_trip() {
 
 #[test]
 fn oidvector_cmp_and_validation() {
-    fn ov(values: &[u32]) -> Vec<u8> {
-        let mut img = vec![0u8; 24 + 4 * values.len()];
-        let vl_len = (img.len() as i32) << 2;
-        img[0..4].copy_from_slice(&vl_len.to_ne_bytes());
-        img[4..8].copy_from_slice(&1i32.to_ne_bytes());
-        img[8..12].copy_from_slice(&0i32.to_ne_bytes());
-        img[12..16].copy_from_slice(&26u32.to_ne_bytes());
-        img[16..20].copy_from_slice(&(values.len() as i32).to_ne_bytes());
-        img[20..24].copy_from_slice(&0i32.to_ne_bytes());
-        for (i, v) in values.iter().enumerate() {
-            img[24 + 4 * i..28 + 4 * i].copy_from_slice(&v.to_ne_bytes());
-        }
+    // u32-backed for the datum's int alignment (typalign 'i').
+    fn ov(values: &[u32]) -> Vec<u32> {
+        let mut img = vec![0u32; 6 + values.len()];
+        img[0] = ((img.len() as u32) * 4) << 2;
+        img[1] = 1; // ndim
+        img[2] = 0; // dataoffset
+        img[3] = 26; // elemtype = OIDOID
+        img[4] = values.len() as u32; // dim1
+        img[5] = 0; // lbound1
+        img[6..].copy_from_slice(values);
         img
     }
-    let d = |img: &Vec<u8>| Datum::from_usize(img.as_ptr() as usize);
+    let d = |img: &Vec<u32>| Datum::from_usize(img.as_ptr() as usize);
 
     let a = ov(&[1, 2, 3]);
     let b = ov(&[1, 2, 4]);
@@ -82,7 +80,7 @@ fn oidvector_cmp_and_validation() {
     assert_eq!(call2(fc_btoidvectorcmp, d(&short), d(&a)), -1);
 
     let mut bad = ov(&[1]);
-    bad[4..8].copy_from_slice(&2i32.to_ne_bytes());
+    bad[1] = 2; // ndim != 1
     let mut fcinfo = LocalFcinfo::<2>::new(0);
     fcinfo.set_arg(0, d(&bad));
     fcinfo.set_arg(1, d(&a));
