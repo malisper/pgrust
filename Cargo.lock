@@ -1823,7 +1823,6 @@ dependencies = [
  "mcx",
  "pqcomm_seams",
  "pqformat",
- "printtup",
  "types_core",
  "types_dest",
  "types_error",
@@ -1994,7 +1993,6 @@ dependencies = [
 name = "types_nodes"
 version = "0.1.0"
 dependencies = [
- "datum",
  "mcx",
  "types_core",
  "types_error",

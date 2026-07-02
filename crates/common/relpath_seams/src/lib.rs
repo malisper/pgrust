@@ -19,3 +19,13 @@ seam_core::seam!(
         forknum: types_core::ForkNumber,
     ) -> String
 );
+
+seam_core::seam!(
+    // GetRelationPath(dbOid, spcOid, relNumber, backend, forknum) via the
+    // relpathbackend() macro (relpath.h); md.c's segment-open paths.
+    pub fn relpathbackend(
+        rlocator: types_storage::RelFileLocator,
+        backend: types_core::ProcNumber,
+        forknum: types_core::ForkNumber,
+    ) -> String
+);
