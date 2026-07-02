@@ -15,7 +15,7 @@ types-hash	-	ported	types_hash	cold	fabled:types-hash; m1-spine; dynahash+hash-A
 types-nbtree	-	ported	types_nbtree	cold	fabled:types-nbtree; m1-spine; on-page structs offset-asserted vs nbtree.h; BTScanPos items as MaybeUninit (kills fabled 27KB/scan memset); fabled gaps fixed (MIN_FILLFACTOR, 4 missing proc numbers); vacuum/dedup/parallel shapes deferred to their units; bench _bt_compare at nbtree-core; 5 tests, density 4.7%
 types-slot	-	benched	types_slot	0.80x-instr/0.85x-ns(local)	substrate; fabled:types-slot; m1-spine; TupleTableSlot types; PASS dual gate: slot_getattr hit path 0.80x instr (12 vs 15) / 0.85x ns, noalias hoists slot loads clang must reload; TTS flag values fixed vs fabled divergence (C 18.3 1<<1..1<<4); ops table -> TupleSlotKind enum per rule 4; 4/4 tests, Miri clean, density 4.2%; Graviton re-verdict at executor milestone; docs/optimizations/types_slot-parity.md
 types-snapshot	-	ported	types_snapshot	cold	substrate; fabled:types-snapshot; m1-dep(stub-ok); snapshot.h vocabulary; cold: snapshot.h vocabulary + HTSV_Result; visibility hot loops land in heapam/procarray; 4 tests, density 4.5%
-types-nodes	-	in-progress	types_nodes		substrate; fabled:types-nodes; m1-spine; Node trees + EEOP interpreter (fabled execexpr.rs lives here); phase 1 in flight: node_tree/list/bitmapset core only
+types-nodes	-	in-progress	types_nodes	0.34-1.00x-instr/0.23-0.93x-ns(core)	substrate; fabled:types-nodes; m1-spine; Node trees + EEOP interpreter (fabled execexpr.rs lives here); phase 1 BENCHED: opaque Node (tag-at-0, 480 tags parity-tested vs nodetags.h) + List + Bitmapset; all 14 hot ops PASS dual gate (lappend 0.34-0.73x instr, bms 0.52-0.71x, foreach 0.44-0.73x); 10 tests, Miri clean both modes, density 3.5%; phase 2 = mutation model + parse node set; docs/optimizations/types_nodes-parity.md
 types-pathnodes	-	ported	types_pathnodes	cold	fabled:types-pathnodes ENDPOINT (PtId arena handles #295, Rc<IndexOptInfo> Cell-on-C-mutated-fields #356, Rc<SpecialJoinInfo> #401, scansel_cache present w/ lesson-10 comment); day-one upgrade: fabled retrofit-residue std fields -> PgVec/PgString in planner mcx; NodeId boundary to in-flight types_nodes documented; 6 tests, density 2.3%
 types-portal	-	ported	types_portal	cold	substrate; fabled:types-portal; m1-spine; Portal types; cold: per-statement portal bookkeeping; cmdtag positions verified vs cmdtaglist.h, cleanup as closed-set enum per rule 4; 4 tests, density 4.3%
 types-array	-	ported	types_array	cold	substrate; fabled:types-array; m1-spine; ArrayType types; cold: array.h header layout only (16/24/24B const-asserted); ARR_* decode lanes land in arrayfuncs; 2 tests, density 4.6%
@@ -41,7 +41,7 @@ backend-access-common-small	*/bufmask.c,*/printsimple.c,*/relation.c,*/scankey.c
 backend-access-common-tidstore	*/tidstore.c	todo			fabled:backend-access-common-tidstore
 backend-access-common-detoast	*/detoast.c	todo			fabled:backend-access-common-detoast; m1-dep(stub-ok)
 backend-access-common-toastdesc	*/toast_internals.c	todo			
-backend-access-common-tupdesc	*/tupdesc.c	todo			fabled:backend-access-common-tupdesc; m1-spine
+backend-access-common-tupdesc	*/tupdesc.c	ported	tupdesc	cold	m1-spine; Rc strong count IS the refcount (rel.rs precedent); attcacheoff reset-to--1 + lazy arm via deform lanes; TupleDescGetDefaultBin until read.c (no stub); attmissing datum kernels flagged for datum.c-unit reconciliation; future bench: equalTupleDescs/hashRowType at plancache; 13 tests, density 3.0%
 backend-access-gin-core-probe	*/ginarrayproc.c,*/ginlogic.c,*/ginpostinglist.c,*/ginvalidate.c	todo			fabled:backend-access-gin-core-probe
 backend-access-gin-ginutil	*/ginutil.c	todo			fabled:backend-access-gin-ginutil
 backend-access-gin-ginscan	*/ginscan.c	todo			fabled:backend-access-gin-ginscan
@@ -566,9 +566,9 @@ backend-utils-adt-jsonpath-gram	src/backend/utils/adt/jsonpath_gram.y,build-clea
 backend-utils-adt-jsonpath-scan	src/backend/utils/adt/jsonpath_scan.l,build-clean/src/backend/utils/adt/jsonpath_scan.c	todo			m1-dep(stub-ok)
 backend-utils-adt-lsn-trigfuncs	*/pg_lsn.c,*/trigfuncs.c	todo			fabled:backend-utils-adt-lsn-trigfuncs; m1-dep(stub-ok)
 backend-utils-adt-misc2	*/domains.c,*/expandeddatum.c,*/expandedrecord.c,*/genfile.c,*/hbafuncs.c,*/lockfuncs.c,*/partitionfuncs.c,*/pg_upgrade_support.c,*/regproc.c,*/rowtypes.c,*/tid.c,*/windowfuncs.c	todo			fabled:backend-utils-adt-misc2; m1-dep(stub-ok)
-backend-utils-adt-more-scalars-clean	*/int.c,*/int8.c,*/mac.c,*/mac8.c,*/oracle_compat.c,*/pseudotypes.c	todo			m1-spine; fabled:backend-utils-adt-int
+backend-utils-adt-more-scalars-clean	*/int.c,*/int8.c,*/mac.c,*/mac8.c,*/oracle_compat.c,*/pseudotypes.c	todo			m1-spine; fabled:backend-utils-adt-int; int.c/int8.c decomposing into adt_int/adt_int8 (in flight)
 backend-utils-adt-name	src/backend/utils/adt/name.c	todo			fabled:backend-utils-adt-name; m1-spine(boot)
-backend-utils-adt-more-scalars	*/cash.c,*/int.c,*/int8.c,*/mac.c,*/mac8.c,*/name.c,*/numutils.c,*/oracle_compat.c,*/pseudotypes.c	todo			m1-spine; fabled:backend-utils-adt-int; int.c int4out on printtup path
+backend-utils-adt-more-scalars	*/cash.c,*/int.c,*/int8.c,*/mac.c,*/mac8.c,*/name.c,*/numutils.c,*/oracle_compat.c,*/pseudotypes.c	todo			m1-spine; fabled:backend-utils-adt-int; int.c int4out on printtup path; int.c/int8.c decomposing into adt_int/adt_int8 (in flight)
 backend-utils-adt-mac	*/mac.c	todo			fabled:backend-utils-adt-mac
 backend-utils-adt-mac8	*/mac8.c	todo			fabled:backend-utils-adt-mac8
 backend-utils-adt-network	*/inet_cidr_ntop.c,*/inet_net_pton.c,*/network.c	todo			fabled:backend-utils-adt-network; m1-dep(stub-ok)
@@ -630,7 +630,7 @@ backend-utils-fmgr-core	*/fmgr.c	todo			fabled:backend-utils-fmgr-core; m1-spine
 backend-utils-fmgr-dfmgr	*/dfmgr.c	todo			fabled:backend-utils-fmgr-dfmgr; m1-dep(stub-ok)
 backend-utils-fmgr-funcapi	*/funcapi.c	todo			fabled:backend-utils-fmgr-funcapi; m1-dep(stub-ok)
 backend-utils-fmgrtab	build-rust-prng/src/include/utils/fmgrtab.c	combined-into:backend-utils-fmgr-core			
-backend-utils-hash-dynahash	*/dynahash.c	todo			fabled:backend-utils-hash-dynahash; m1-spine
+backend-utils-hash-dynahash	*/dynahash.c	in-progress	dynahash		fabled:backend-utils-hash-dynahash; m1-spine
 backend-utils-hash-small	*/pg_crc.c	todo			fabled:port-crc32c,backend-utils-hash-pg-crc; m1-spine(boot)
 backend-utils-init-miscinit	src/backend/utils/init/miscinit.c	todo			fabled:backend-utils-init-miscinit; m1-spine
 backend-utils-init-postinit	src/backend/utils/init/postinit.c	todo			fabled:backend-utils-init-postinit; m1-spine

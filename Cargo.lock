@@ -12,6 +12,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_int"
+version = "0.1.0"
+
+[[package]]
+name = "adt_int8"
+version = "0.1.0"
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -115,6 +123,10 @@ dependencies = [
  "seam_core",
  "types_error",
 ]
+
+[[package]]
+name = "dynahash"
+version = "0.1.0"
 
 [[package]]
 name = "elog"
@@ -242,6 +254,35 @@ dependencies = [
  "types_core",
  "types_error",
  "types_tuple",
+]
+
+[[package]]
+name = "indexam"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "indexam_seams",
+ "mcx",
+ "relation_seams",
+ "types_core",
+ "types_error",
+ "types_nbtree",
+ "types_rel",
+ "types_scan",
+ "types_slot",
+ "types_snapshot",
+ "types_tuple",
+]
+
+[[package]]
+name = "indexam_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_rel",
 ]
 
 [[package]]
@@ -689,6 +730,7 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+ "types_storage",
 ]
 
 [[package]]
@@ -744,6 +786,7 @@ name = "smgr_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_core",
  "types_error",
  "types_storage",
 ]

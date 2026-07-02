@@ -12,3 +12,7 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn is_shared_relation(relid: Oid) -> bool
 );
+
+seam_core::seam!(
+    pub fn is_catalog_relation_oid(relid: Oid) -> bool
+);
