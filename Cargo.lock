@@ -60,6 +60,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bufmgr_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_storage",
+]
+
+[[package]]
 name = "catalog_seams"
 version = "0.0.0"
 dependencies = [
@@ -734,6 +744,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rmgr"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "mcx",
+ "stringinfo",
+ "types_core",
+ "types_error",
+ "xlogreader_seams",
+]
+
+[[package]]
 name = "s_lock_seams"
 version = "0.0.0"
 dependencies = [
@@ -885,6 +907,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "tableam"
+version = "0.1.0"
+dependencies = [
+ "guc_tables",
+ "mcx",
+ "s_lock_seams",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "types_rel",
+ "types_scan",
+ "types_slot",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+ "xact_seams",
+]
+
+[[package]]
 name = "tcop_dest"
 version = "0.1.0"
 dependencies = [
@@ -899,6 +940,16 @@ dependencies = [
  "types_slot",
  "types_tuple",
  "xact_seams",
+]
+
+[[package]]
+name = "timeline_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_core",
+ "types_error",
 ]
 
 [[package]]
@@ -1137,6 +1188,46 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "xlogreader_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_storage",
+]
+
+[[package]]
+name = "xlogrecovery_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+]
+
+[[package]]
+name = "xlogutils"
+version = "0.0.0"
+dependencies = [
+ "bufmgr_seams",
+ "elog",
+ "file_seams",
+ "guc_tables",
+ "libc",
+ "mcx",
+ "relpath_seams",
+ "smgr_seams",
+ "timeline_seams",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "xlogreader_seams",
+ "xlogrecovery_seams",
+ "xlogutils_seams",
 ]
 
 [[package]]

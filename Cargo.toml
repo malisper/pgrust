@@ -111,6 +111,13 @@ members = [
     "crates/backend/utils/adt/int8",
     "crates/backend/access/index/indexam_seams",
     "crates/backend/access/index/indexam",
+    "crates/backend/access/transam/xlogreader_seams",
+    "crates/backend/access/transam/timeline_seams",
+    "crates/backend/access/transam/xlogrecovery_seams",
+    "crates/backend/storage/buffer/bufmgr_seams",
+    "crates/backend/access/transam/rmgr",
+    "crates/backend/access/transam/xlogutils",
+    "crates/backend/access/table/tableam",
 ]
 
 [workspace.package]

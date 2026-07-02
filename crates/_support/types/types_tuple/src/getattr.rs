@@ -60,7 +60,13 @@ pub fn heap_attisnull(
     }
 }
 
-pub fn nocachegetattr(tup: &HeapTupleData<'_>, attnum: i32, tupleDesc: &TupleDescData<'_>) -> Datum {
+/// # Safety
+/// As [`fastgetattr`] (C's nocachegetattr contract: heaptuple.c trusts attnum).
+pub unsafe fn nocachegetattr(
+    tup: &HeapTupleData<'_>,
+    attnum: i32,
+    tupleDesc: &TupleDescData<'_>,
+) -> Datum {
     let bp = tup.bits_ptr();
     let hasnulls = tup.has_nulls();
     let mut slow = false;
@@ -85,11 +91,14 @@ pub fn nocachegetattr(tup: &HeapTupleData<'_>, attnum: i32, tupleDesc: &TupleDes
     }
 
     let tp = tup.getstruct();
-    let atts = &tupleDesc.compact_attrs[..tupleDesc.natts as usize];
+    // Full slice: compact_attrs.len() == natts (TupleDesc invariant).
+    let atts: &[crate::tupdesc::CompactAttribute] = &tupleDesc.compact_attrs;
+    debug_assert!(atts.len() == tupleDesc.natts as usize && attnum < atts.len());
     let mut off: usize;
 
     if !slow {
-        let att = &atts[attnum];
+        // SAFETY: attnum < natts == atts.len() (caller contract).
+        let att = unsafe { atts.get_unchecked(attnum) };
         if att.attcacheoff.get() >= 0 {
             // SAFETY: cached offset points at the live attribute within the image.
             return unsafe { fetchatt(att, tp.add(att.attcacheoff.get() as usize)) };
@@ -128,13 +137,15 @@ pub fn nocachegetattr(tup: &HeapTupleData<'_>, attnum: i32, tupleDesc: &TupleDes
         }
 
         debug_assert!(j > attnum);
-        off = atts[attnum].attcacheoff.get() as usize;
+        // SAFETY: attnum < atts.len() (caller contract).
+        off = unsafe { atts.get_unchecked(attnum) }.attcacheoff.get() as usize;
     } else {
         let mut usecache = true;
         off = 0;
         // Slicing to ..=attnum makes the i <= attnum loop bound the slice bound,
         // so the per-iteration indexing check folds away.
-        let watts = &atts[..=attnum];
+        // SAFETY: attnum < atts.len() (caller contract).
+        let watts = unsafe { atts.get_unchecked(..=attnum) };
         let mut i = 0;
         loop {
             let att = &watts[i];
@@ -177,8 +188,8 @@ pub fn nocachegetattr(tup: &HeapTupleData<'_>, attnum: i32, tupleDesc: &TupleDes
         }
     }
 
-    // SAFETY: off is the attribute's computed in-image offset.
-    unsafe { fetchatt(&atts[attnum], tp.add(off)) }
+    // SAFETY: attnum < atts.len(); off is the attribute's computed in-image offset.
+    unsafe { fetchatt(atts.get_unchecked(attnum), tp.add(off)) }
 }
 
 pub fn heap_getsysattr(tup: &HeapTupleData<'_>, attnum: i32, isnull: &mut bool) -> Datum {
@@ -195,22 +206,27 @@ pub fn heap_getsysattr(tup: &HeapTupleData<'_>, attnum: i32, isnull: &mut bool) 
     }
 }
 
+/// # Safety
+/// `1 <= attnum <= tupleDesc.natts`, descriptor matches the tuple image,
+/// attribute present in the tuple (C's fastgetattr contract; unchecked).
 #[inline]
-pub fn fastgetattr(
+pub unsafe fn fastgetattr(
     tup: &HeapTupleData<'_>,
     attnum: i32,
     tupleDesc: &TupleDescData<'_>,
     isnull: &mut bool,
 ) -> Datum {
-    debug_assert!(attnum > 0);
+    debug_assert!(attnum > 0 && attnum <= tupleDesc.natts);
     *isnull = false;
     if tup.no_nulls() {
-        let att = &tupleDesc.compact_attrs[(attnum - 1) as usize];
+        // SAFETY: attnum <= natts == compact_attrs.len() (caller contract).
+        let att = unsafe { tupleDesc.compact_attrs.get_unchecked((attnum - 1) as usize) };
         if att.attcacheoff.get() >= 0 {
             // SAFETY: cached offset points at the live attribute within the image.
             unsafe { fetchatt(att, tup.getstruct().add(att.attcacheoff.get() as usize)) }
         } else {
-            nocachegetattr(tup, attnum, tupleDesc)
+            // SAFETY: caller contract.
+            unsafe { nocachegetattr(tup, attnum, tupleDesc) }
         }
     } else {
         // SAFETY: HASNULL bitmap covers attnum-1 (attnum <= natts, caller contract).
@@ -218,13 +234,16 @@ pub fn fastgetattr(
             *isnull = true;
             Datum::null()
         } else {
-            nocachegetattr(tup, attnum, tupleDesc)
+            // SAFETY: caller contract.
+            unsafe { nocachegetattr(tup, attnum, tupleDesc) }
         }
     }
 }
 
+/// # Safety
+/// For attnum > 0, as [`fastgetattr`] minus tuple-presence (checked here).
 #[inline]
-pub fn heap_getattr(
+pub unsafe fn heap_getattr(
     tup: &HeapTupleData<'_>,
     attnum: i32,
     tupleDesc: &TupleDescData<'_>,
@@ -234,7 +253,8 @@ pub fn heap_getattr(
         if attnum > tup.t_data().natts() as i32 {
             getmissingattr(tupleDesc, attnum, isnull)
         } else {
-            fastgetattr(tup, attnum, tupleDesc, isnull)
+            // SAFETY: attnum <= tuple natts (checked); rest is caller contract.
+            unsafe { fastgetattr(tup, attnum, tupleDesc, isnull) }
         }
     } else {
         heap_getsysattr(tup, attnum, isnull)
@@ -249,10 +269,12 @@ pub fn heap_deform_tuple(
 ) {
     let tup = tuple.t_data();
     let hasnulls = tuple.has_nulls();
-    let tdesc_natts = tupleDesc.natts as usize;
+    // Vec length == natts (TupleDesc invariant); slicing by it is check-free.
+    let atts: &[crate::tupdesc::CompactAttribute] = &tupleDesc.compact_attrs;
+    let tdesc_natts = atts.len();
+    debug_assert!(tdesc_natts == tupleDesc.natts as usize);
     // Inheritance can hand a tuple wider than the descriptor; clamp to both.
     let natts = (tup.natts() as usize).min(tdesc_natts);
-    let atts = &tupleDesc.compact_attrs[..tdesc_natts];
 
     let tp = tuple.getstruct();
     let bp = tuple.bits_ptr();
@@ -260,12 +282,15 @@ pub fn heap_deform_tuple(
     let mut slow = false;
 
     let atts_n = &atts[..natts];
+    // Tail first (disjoint ranges): slice lengths die before the walk.
+    if natts < tdesc_natts {
+        deform_missing_tail(tupleDesc, values, isnull, natts);
+    }
     let (values_n, isnull_n) = (&mut values[..natts], &mut isnull[..natts]);
     for attnum in 0..natts {
         let thisatt = &atts_n[attnum];
-        // Locals: the Cell field makes the struct non-readonly to LLVM, which
-        // would otherwise reload these after every attcacheoff store.
-        let attlen = thisatt.attlen;
+        // Locals: the Cell makes the struct non-readonly to LLVM.
+        let attlen = thisatt.attlen as i32;
         let attbyval = thisatt.attbyval;
         let attalignby = thisatt.attalignby;
         // SAFETY: bitmap/image reads walk attributes present in the tuple.
@@ -295,17 +320,27 @@ pub fn heap_deform_tuple(
                 }
             }
 
-            values_n[attnum] = fetch_att(tp.add(off), attbyval, attlen as i32);
+            values_n[attnum] = fetch_att(tp.add(off), attbyval, attlen);
 
-            off = att_addlength_pointer(off, attlen as i32, tp.add(off));
+            off = att_addlength_pointer(off, attlen, tp.add(off));
         }
 
         if attlen <= 0 {
             slow = true;
         }
     }
+}
 
-    for attnum in natts..tdesc_natts {
+// Cold: only post-ADD-COLUMN scans see tuples narrower than the descriptor.
+#[cold]
+#[inline(never)]
+fn deform_missing_tail(
+    tupleDesc: &TupleDescData<'_>,
+    values: &mut [Datum],
+    isnull: &mut [bool],
+    natts: usize,
+) {
+    for attnum in natts..tupleDesc.natts as usize {
         values[attnum] = getmissingattr(tupleDesc, (attnum + 1) as i32, &mut isnull[attnum]);
     }
 }

@@ -1,0 +1,598 @@
+#![allow(non_snake_case)]
+#![allow(clippy::too_many_arguments)]
+
+mod relscan;
+pub use relscan::*;
+
+#[cfg(test)]
+mod tests;
+
+use std::rc::Rc;
+
+use datum::Datum;
+use mcx::Mcx;
+use types_core::Oid;
+use types_error::{
+    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_WRONG_OBJECT_TYPE,
+};
+use types_nbtree::IndexUniqueCheck;
+use types_rel::{
+    MaxLockMode, NoLock, Relation, RelationData, LOCKMODE, RELKIND_INDEX,
+    RELKIND_PARTITIONED_INDEX,
+};
+use types_scan::scankey::ScanKeyData;
+use types_scan::sdir::ScanDirection;
+use types_slot::TupleTableSlot;
+use types_snapshot::{IsMVCCSnapshot, SnapshotData};
+use types_tuple::itemptr::{ItemPointerData, ItemPointerEquals, ItemPointerIsValid};
+
+pub fn init_seams() {
+    indexam_seams::index_open::set(index_open);
+    indexam_seams::try_index_open::set(try_index_open);
+}
+
+pub fn index_open<'mcx>(
+    mcx: Mcx<'mcx>,
+    relationId: Oid,
+    lockmode: LOCKMODE,
+) -> PgResult<Relation<'mcx>> {
+    let r = relation_seams::relation_open::call(mcx, relationId, lockmode)?;
+
+    validate_relation_kind(&r)?;
+
+    Ok(r)
+}
+
+pub fn try_index_open<'mcx>(
+    mcx: Mcx<'mcx>,
+    relationId: Oid,
+    lockmode: LOCKMODE,
+) -> PgResult<Option<Relation<'mcx>>> {
+    let Some(r) = relation_seams::try_relation_open::call(mcx, relationId, lockmode)? else {
+        return Ok(None);
+    };
+
+    validate_relation_kind(&r)?;
+
+    Ok(Some(r))
+}
+
+/// Consumes the handle; a lock held past close is released at xact end, as in C.
+pub fn index_close(relation: Relation<'_>, lockmode: LOCKMODE) -> PgResult<()> {
+    debug_assert!(lockmode >= NoLock && lockmode <= MaxLockMode);
+    relation.close(lockmode)
+}
+
+fn validate_relation_kind(r: &Relation<'_>) -> PgResult<()> {
+    let relkind = r.rd_rel.relkind;
+
+    if relkind != RELKIND_INDEX && relkind != RELKIND_PARTITIONED_INDEX {
+        return Err(not_an_index(r));
+    }
+
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn not_an_index(r: &RelationData<'_>) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("\"{}\" is not an index", r.name()))
+            .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE),
+    )
+}
+
+// RELATION_CHECKS: the compiled-hot reindex ereport (the validity Asserts live in the types).
+fn relation_checks(indexRelation: &Relation<'_>) -> PgResult<()> {
+    if reindex_is_processing_index(indexRelation.rd_id) {
+        return Err(reindex_in_progress(indexRelation));
+    }
+    Ok(())
+}
+
+// REINDEX is unimplemented repo-wide (C's list statically empty); reroute via catalog/index.c when it lands.
+#[inline]
+fn reindex_is_processing_index(_indexId: Oid) -> bool {
+    false
+}
+
+#[cold]
+#[inline(never)]
+fn reindex_in_progress(r: &RelationData<'_>) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "cannot access index \"{}\" while it is being reindexed",
+            r.name()
+        ))
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
+}
+
+// CHECK_*_PROCEDURE: required callbacks exist per IndexAmKind by construction; optional ones keep the C elog.
+#[cold]
+#[inline(never)]
+fn missing_procedure(pname: &str, r: &RelationData<'_>) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "function \"{pname}\" is not defined for index \"{}\"",
+        r.name()
+    )))
+}
+
+#[cold]
+#[inline(never)]
+fn unported(what: &str) -> ! {
+    panic!("unported: {what}")
+}
+
+#[cold]
+#[inline(never)]
+fn nbtree_unported(f: &str) -> ! {
+    panic!("unported: nbtree {f} (indexam dispatch arm awaits the nbtree-core port)")
+}
+
+// C divergence: IndexInfo not threaded (execnodes unported; btree ignores it).
+pub fn index_insert<'mcx>(
+    mcx: Mcx<'mcx>,
+    indexRelation: &Relation<'mcx>,
+    values: &[Datum],
+    isnull: &[bool],
+    heap_t_ctid: &ItemPointerData,
+    heapRelation: &Relation<'mcx>,
+    checkUnique: IndexUniqueCheck,
+    indexUnchanged: bool,
+) -> PgResult<bool> {
+    relation_checks(indexRelation)?;
+    let kind = IndexAmKind::from_relam(indexRelation.rd_rel.relam);
+
+    if !kind.ampredlocks() {
+        unported("predicate CheckForSerializableConflictIn (backend/storage/lmgr/predicate)");
+    }
+
+    am_insert(
+        mcx,
+        kind,
+        indexRelation,
+        values,
+        isnull,
+        heap_t_ctid,
+        heapRelation,
+        checkUnique,
+        indexUnchanged,
+    )
+}
+
+pub fn index_insert_cleanup(indexRelation: &Relation<'_>) -> PgResult<()> {
+    relation_checks(indexRelation)?;
+    let kind = IndexAmKind::from_relam(indexRelation.rd_rel.relam);
+
+    if kind.has_aminsertcleanup() {
+        am_insert_cleanup(kind, indexRelation)?;
+    }
+    Ok(())
+}
+
+/// Caller must be holding suitable locks on the heap and the index.
+pub fn index_beginscan<'mcx>(
+    mcx: Mcx<'mcx>,
+    heapRelation: &Relation<'mcx>,
+    indexRelation: &Relation<'mcx>,
+    snapshot: Rc<SnapshotData<'mcx>>,
+    nkeys: i32,
+    norderbys: i32,
+) -> PgResult<IndexScanDescData<'mcx>> {
+    let mut scan = index_beginscan_internal(mcx, indexRelation, nkeys, norderbys, false)?;
+
+    // Everything else was set up by ambeginscan (C RelationGetIndexScan).
+    scan.heapRelation = Some(heapRelation.alias());
+    scan.xs_snapshot = Some(snapshot);
+
+    scan.xs_heapfetch = Some(fetch::begin(heapRelation)?);
+
+    Ok(scan)
+}
+
+fn index_beginscan_internal<'mcx>(
+    mcx: Mcx<'mcx>,
+    indexRelation: &Relation<'mcx>,
+    nkeys: i32,
+    norderbys: i32,
+    temp_snap: bool,
+) -> PgResult<IndexScanDescData<'mcx>> {
+    relation_checks(indexRelation)?;
+    let kind = IndexAmKind::from_relam(indexRelation.rd_rel.relam);
+
+    if !kind.ampredlocks() {
+        unported("predicate PredicateLockRelation (backend/storage/lmgr/predicate)");
+    }
+
+    // RelationIncrementReferenceCount: the scan's alias Rc is rd_refcnt, held throughout.
+    let mut scan = am_beginscan(mcx, kind, indexRelation, nkeys, norderbys)?;
+
+    scan.xs_temp_snap = temp_snap;
+
+    Ok(scan)
+}
+
+/// Key counts must equal what `index_beginscan` was told; `None` restarts the
+/// scan without changing keys (the C NULL).
+pub fn index_rescan<'mcx>(
+    scan: &mut IndexScanDescData<'mcx>,
+    keys: Option<&[ScanKeyData]>,
+    orderbys: Option<&[ScanKeyData]>,
+) -> PgResult<()> {
+    debug_assert!(keys.map_or(true, |k| k.len() as i32 == scan.numberOfKeys));
+    debug_assert!(orderbys.map_or(true, |k| k.len() as i32 == scan.numberOfOrderBys));
+
+    if let Some(heapfetch) = scan.xs_heapfetch.as_mut() {
+        fetch::reset(heapfetch);
+    }
+
+    scan.kill_prior_tuple = false; // for safety
+    scan.xs_heap_continue = false;
+
+    am_rescan(scan, keys, orderbys)
+}
+
+pub fn index_endscan(mut scan: IndexScanDescData<'_>) -> PgResult<()> {
+    if let Some(heapfetch) = scan.xs_heapfetch.take() {
+        fetch::end(heapfetch)?;
+    }
+
+    am_endscan(&mut scan)?;
+
+    if scan.xs_temp_snap {
+        unported("snapmgr UnregisterSnapshot (backend/utils/time/snapmgr)");
+    }
+
+    // RelationDecrementReferenceCount + IndexScanEnd: the drop of the scan value.
+    Ok(())
+}
+
+pub fn index_markpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
+    let kind = scan.opaque.kind();
+    if !kind.has_ammarkpos() {
+        return Err(missing_procedure("ammarkpos", &scan.indexRelation));
+    }
+
+    am_markpos(scan)
+}
+
+pub fn index_restrpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
+    debug_assert!(scan.xs_snapshot.as_ref().is_some_and(|s| IsMVCCSnapshot(s)));
+
+    let kind = scan.opaque.kind();
+    if !kind.has_amrestrpos() {
+        return Err(missing_procedure("amrestrpos", &scan.indexRelation));
+    }
+
+    if let Some(heapfetch) = scan.xs_heapfetch.as_mut() {
+        fetch::reset(heapfetch);
+    }
+
+    scan.kill_prior_tuple = false; // for safety
+    scan.xs_heap_continue = false;
+
+    am_restrpos(scan)
+}
+
+/// Next TID satisfying the scan keys, or `None` when exhausted. On success the
+/// TID is also `scan.xs_heaptid`.
+pub fn index_getnext_tid(
+    scan: &mut IndexScanDescData<'_>,
+    direction: ScanDirection,
+) -> PgResult<Option<ItemPointerData>> {
+    // amgettuple sets xs_heaptid/xs_recheck, reading kill_prior_tuple before the reset below.
+    let found = am_gettuple(scan, direction)?;
+
+    // Reset kill flag immediately for safety
+    scan.kill_prior_tuple = false;
+    scan.xs_heap_continue = false;
+
+    if !found {
+        // release resources (like buffer pins) from table accesses
+        if let Some(heapfetch) = scan.xs_heapfetch.as_mut() {
+            fetch::reset(heapfetch);
+        }
+        return Ok(None);
+    }
+    debug_assert!(ItemPointerIsValid(&scan.xs_heaptid));
+
+    pgstat_count_index_tuples(scan, 1);
+
+    Ok(Some(scan.xs_heaptid))
+}
+
+/// Fetch the visible heap tuple for the TID from the last `index_getnext_tid`
+/// into `slot`. Caller must check `scan.xs_recheck`.
+pub fn index_fetch_heap<'mcx>(
+    scan: &mut IndexScanDescData<'mcx>,
+    slot: &mut TupleTableSlot<'mcx>,
+) -> PgResult<bool> {
+    let mut all_dead = false;
+
+    let heapfetch = scan
+        .xs_heapfetch
+        .as_mut()
+        .expect("index_fetch_heap: xs_heapfetch not armed (C would dereference NULL)");
+    let found = fetch::tuple(
+        heapfetch,
+        &scan.xs_heaptid,
+        scan.xs_snapshot.as_deref(),
+        slot,
+        &mut scan.xs_heap_continue,
+        &mut all_dead,
+    )?;
+
+    if found {
+        pgstat_count_heap_fetch(scan);
+    }
+
+    // A fully-dead HOT chain kills the AM's entry on the next amgettuple — never in recovery (MVCC hazard).
+    if !scan.xactStartedInRecovery {
+        scan.kill_prior_tuple = all_dead;
+    }
+
+    Ok(found)
+}
+
+/// True when a tuple satisfying the scan keys and snapshot landed in `slot`.
+/// Caller must check `scan.xs_recheck`.
+pub fn index_getnext_slot<'mcx>(
+    scan: &mut IndexScanDescData<'mcx>,
+    direction: ScanDirection,
+    slot: &mut TupleTableSlot<'mcx>,
+) -> PgResult<bool> {
+    loop {
+        if !scan.xs_heap_continue {
+            let Some(tid) = index_getnext_tid(scan, direction)? else {
+                return Ok(false);
+            };
+            debug_assert!(ItemPointerEquals(&tid, &scan.xs_heaptid));
+        }
+
+        // No visible tuple in this HOT chain: loop for the next TID.
+        debug_assert!(ItemPointerIsValid(&scan.xs_heaptid));
+        if index_fetch_heap(scan, slot)? {
+            return Ok(true);
+        }
+    }
+}
+
+// One probe on the enabled flag then one add: C's pgstat_should_count_relation shape.
+#[inline]
+fn pgstat_count_index_tuples(scan: &mut IndexScanDescData<'_>, n: u64) {
+    if scan.indexRelation.pgstat_enabled.get() {
+        scan.xs_pgstat_index_tuples += n;
+    }
+}
+
+#[inline]
+fn pgstat_count_heap_fetch(scan: &mut IndexScanDescData<'_>) {
+    if scan.indexRelation.pgstat_enabled.get() {
+        scan.xs_pgstat_heap_fetches += 1;
+    }
+}
+
+// IndexAmRoutine dispatch; args flow into the arms once nbtree-core lands.
+#[allow(unused_variables)]
+fn am_beginscan<'mcx>(
+    mcx: Mcx<'mcx>,
+    kind: IndexAmKind,
+    indexRelation: &Relation<'mcx>,
+    nkeys: i32,
+    norderbys: i32,
+) -> PgResult<IndexScanDescData<'mcx>> {
+    match kind {
+        IndexAmKind::Btree => nbtree_unported("btbeginscan"),
+        #[cfg(test)]
+        IndexAmKind::Mock => Ok(mock::beginscan(mcx, indexRelation, nkeys, norderbys)),
+    }
+}
+
+#[allow(unused_variables)]
+fn am_rescan(
+    scan: &mut IndexScanDescData<'_>,
+    keys: Option<&[ScanKeyData]>,
+    orderbys: Option<&[ScanKeyData]>,
+) -> PgResult<()> {
+    match scan.opaque {
+        IndexScanOpaque::Btree(_) => nbtree_unported("btrescan"),
+        #[cfg(test)]
+        IndexScanOpaque::Mock(_) => Ok(mock::rescan(scan)),
+    }
+}
+
+fn am_endscan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
+    match scan.opaque {
+        IndexScanOpaque::Btree(_) => nbtree_unported("btendscan"),
+        #[cfg(test)]
+        IndexScanOpaque::Mock(_) => Ok(()),
+    }
+}
+
+fn am_markpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
+    match scan.opaque {
+        IndexScanOpaque::Btree(_) => nbtree_unported("btmarkpos"),
+        #[cfg(test)]
+        IndexScanOpaque::Mock(_) => Ok(mock::markpos(scan)),
+    }
+}
+
+fn am_restrpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
+    match scan.opaque {
+        IndexScanOpaque::Btree(_) => nbtree_unported("btrestrpos"),
+        #[cfg(test)]
+        IndexScanOpaque::Mock(_) => unreachable!("Mock lacks amrestrpos"),
+    }
+}
+
+// CHECK_SCAN_PROCEDURE(amgettuple) folds in: a bitmap-only AM would get an error arm here.
+#[allow(unused_variables)]
+fn am_gettuple(scan: &mut IndexScanDescData<'_>, direction: ScanDirection) -> PgResult<bool> {
+    match scan.opaque {
+        IndexScanOpaque::Btree(_) => nbtree_unported("btgettuple"),
+        #[cfg(test)]
+        IndexScanOpaque::Mock(_) => Ok(mock::gettuple(scan)),
+    }
+}
+
+#[allow(unused_variables)]
+fn am_insert<'mcx>(
+    mcx: Mcx<'mcx>,
+    kind: IndexAmKind,
+    indexRelation: &Relation<'mcx>,
+    values: &[Datum],
+    isnull: &[bool],
+    heap_t_ctid: &ItemPointerData,
+    heapRelation: &Relation<'mcx>,
+    checkUnique: IndexUniqueCheck,
+    indexUnchanged: bool,
+) -> PgResult<bool> {
+    match kind {
+        IndexAmKind::Btree => nbtree_unported("btinsert"),
+        #[cfg(test)]
+        IndexAmKind::Mock => Ok(true),
+    }
+}
+
+#[allow(unused_variables)]
+fn am_insert_cleanup(kind: IndexAmKind, indexRelation: &Relation<'_>) -> PgResult<()> {
+    match kind {
+        IndexAmKind::Btree => nbtree_unported("aminsertcleanup"),
+        #[cfg(test)]
+        IndexAmKind::Mock => Ok(()),
+    }
+}
+
+// table_index_fetch_* belongs to the in-flight tableam port; loud panics until it lands.
+#[cfg(not(test))]
+mod fetch {
+    use super::*;
+
+    pub fn begin<'mcx>(_heapRelation: &Relation<'mcx>) -> PgResult<IndexFetchTableData<'mcx>> {
+        unported("tableam table_index_fetch_begin (crates/backend/access/table/tableam)")
+    }
+
+    pub fn reset(_heapfetch: &mut IndexFetchTableData<'_>) {
+        unported("tableam table_index_fetch_reset (crates/backend/access/table/tableam)")
+    }
+
+    pub fn end(_heapfetch: IndexFetchTableData<'_>) -> PgResult<()> {
+        unported("tableam table_index_fetch_end (crates/backend/access/table/tableam)")
+    }
+
+    pub fn tuple<'mcx>(
+        _heapfetch: &mut IndexFetchTableData<'mcx>,
+        _tid: &ItemPointerData,
+        _snapshot: Option<&SnapshotData<'mcx>>,
+        _slot: &mut TupleTableSlot<'mcx>,
+        _call_again: &mut bool,
+        _all_dead: &mut bool,
+    ) -> PgResult<bool> {
+        unported("tableam table_index_fetch_tuple (crates/backend/access/table/tableam)")
+    }
+}
+
+#[cfg(test)]
+mod fetch {
+    use super::*;
+
+    pub fn begin<'mcx>(heapRelation: &Relation<'mcx>) -> PgResult<IndexFetchTableData<'mcx>> {
+        Ok(IndexFetchTableData {
+            rel: heapRelation.alias(),
+            mock_fetch: Vec::new(),
+            resets: 0,
+        })
+    }
+
+    pub fn reset(heapfetch: &mut IndexFetchTableData<'_>) {
+        heapfetch.resets += 1;
+    }
+
+    pub fn end(_heapfetch: IndexFetchTableData<'_>) -> PgResult<()> {
+        Ok(())
+    }
+
+    pub fn tuple<'mcx>(
+        heapfetch: &mut IndexFetchTableData<'mcx>,
+        tid: &ItemPointerData,
+        _snapshot: Option<&SnapshotData<'mcx>>,
+        slot: &mut TupleTableSlot<'mcx>,
+        call_again: &mut bool,
+        all_dead: &mut bool,
+    ) -> PgResult<bool> {
+        let (found, cont, dead) = heapfetch.mock_fetch.remove(0);
+        *call_again = cont;
+        *all_dead = dead;
+        if found {
+            slot.tts_tid = *tid;
+        }
+        Ok(found)
+    }
+}
+
+#[cfg(test)]
+mod mock {
+    use super::*;
+    use mcx::PgVec;
+
+    pub fn beginscan<'mcx>(
+        mcx: Mcx<'mcx>,
+        indexRelation: &Relation<'mcx>,
+        nkeys: i32,
+        norderbys: i32,
+    ) -> IndexScanDescData<'mcx> {
+        IndexScanDescData {
+            heapRelation: None,
+            indexRelation: indexRelation.alias(),
+            xs_snapshot: None,
+            numberOfKeys: nkeys,
+            numberOfOrderBys: norderbys,
+            keyData: PgVec::new_in(mcx),
+            orderByData: PgVec::new_in(mcx),
+            xs_want_itup: false,
+            xs_temp_snap: false,
+            kill_prior_tuple: false,
+            ignore_killed_tuples: true,
+            xactStartedInRecovery: false,
+            opaque: IndexScanOpaque::Mock(MockOpaque::default()),
+            xs_heaptid: ItemPointerData::invalid(),
+            xs_heap_continue: false,
+            xs_heapfetch: None,
+            xs_recheck: false,
+            xs_pgstat_index_tuples: 0,
+            xs_pgstat_heap_fetches: 0,
+        }
+    }
+
+    pub fn gettuple(scan: &mut IndexScanDescData<'_>) -> bool {
+        let kill = scan.kill_prior_tuple;
+        let IndexScanOpaque::Mock(m) = &mut scan.opaque else {
+            unreachable!()
+        };
+        m.kill_seen.push(kill);
+        if m.next < m.tids.len() {
+            let tid = m.tids[m.next];
+            m.next += 1;
+            scan.xs_heaptid = tid;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn rescan(scan: &mut IndexScanDescData<'_>) {
+        let IndexScanOpaque::Mock(m) = &mut scan.opaque else {
+            unreachable!()
+        };
+        m.rescans += 1;
+        m.next = 0;
+    }
+
+    pub fn markpos(scan: &mut IndexScanDescData<'_>) {
+        let IndexScanOpaque::Mock(m) = &mut scan.opaque else {
+            unreachable!()
+        };
+        m.markpos_calls += 1;
+    }
+}
