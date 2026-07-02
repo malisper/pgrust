@@ -76,7 +76,13 @@ pub fn scanner_isspace(ch: u8) -> bool {
     matches!(ch, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
 }
 
-pub fn parser_errposition(sourcetext: Option<&[u8]>, location: i32, encoding: pg_enc) -> i32 {
+// Value form of parse_node.c parser_errposition; the ParseState wrapper is
+// parse_node::parser_errposition.
+pub fn parser_errposition_source(
+    sourcetext: Option<&[u8]>,
+    location: i32,
+    encoding: pg_enc,
+) -> i32 {
     if location < 0 {
         return 0;
     }
@@ -162,6 +168,22 @@ fn locale_isupper(_ch: u8) -> bool {
 fn locale_tolower(ch: u8) -> u8 {
     ch
 }
+
+pub mod parse_enr;
+pub mod parse_node;
+pub mod parse_param;
+
+pub use parse_enr::{get_visible_ENR, name_matches_visible_ENR};
+pub use parse_node::{
+    cancel_parser_errposition_callback, free_parsestate, make_const, make_parsestate,
+    parser_errposition, setup_parser_errposition_callback, transformContainerSubscripts,
+    transformContainerType, ParseExprKind, ParseNamespaceColumn, ParseNamespaceItem, ParseState,
+};
+pub use parse_param::{
+    check_variable_parameters, fixed_paramref_hook, query_contains_extern_params,
+    setup_parse_fixed_parameters, setup_parse_variable_parameters, variable_coerce_param_hook,
+    variable_paramref_hook, FixedParamState, ParseRefHookState, VarParamState,
+};
 
 #[cfg(test)]
 mod tests;

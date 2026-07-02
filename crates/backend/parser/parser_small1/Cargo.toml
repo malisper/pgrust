@@ -9,9 +9,21 @@ name = "parser_small1"
 path = "src/lib.rs"
 
 [dependencies]
+datum = { path = "../../../_support/types/datum" }
 elog = { path = "../../utils/error/elog" }
 libc = "0.2"
+lsyscache = { path = "../../utils/cache/lsyscache" }
 mcx = { path = "../../../_support/mcx" }
+numutils = { path = "../../utils/adt/numutils" }
+queryenvironment = { path = "../../utils/misc/queryenvironment" }
+table = { path = "../../access/table/table" }
 types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
 wchar = { path = "../../../common/wchar" }
+
+[dev-dependencies]
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+types_portal = { path = "../../../_support/types/portal" }

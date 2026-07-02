@@ -1880,6 +1880,7 @@ dependencies = [
  "types_scan",
  "types_slot",
  "utility_seams",
+ "xact",
 ]
 
 [[package]]
@@ -1968,6 +1969,7 @@ dependencies = [
  "types_error",
  "types_snapshot",
  "types_storage",
+ "varsup",
  "waitevent_seams",
  "xact_seams",
 ]
@@ -3141,6 +3143,7 @@ dependencies = [
  "types_storage",
  "varsup_seams",
  "xact_seams",
+ "xlogutils_seams",
 ]
 
 [[package]]

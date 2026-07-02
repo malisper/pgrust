@@ -38,6 +38,13 @@ pub const INTERNALOID: Oid = 2281;
 pub const TEXTOID: Oid = 25;
 pub const TEXTARRAYOID: Oid = 1009;
 pub const RECORDOID: Oid = 2249;
+pub const INT2VECTOROID: Oid = 22;
+pub const OIDVECTOROID: Oid = 30;
+pub const INT2ARRAYOID: Oid = 1005;
+pub const OIDARRAYOID: Oid = 1028;
+pub const UNKNOWNOID: Oid = 705;
+pub const BITOID: Oid = 1560;
+pub const NUMERICOID: Oid = 1700;
 
 pub const BTREE_AM_OID: Oid = 403;
 
