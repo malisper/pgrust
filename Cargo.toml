@@ -43,6 +43,7 @@ members = [
     "crates/backend/utils/init/miscinit_seams",
     "crates/backend/utils/adt/acl_seams",
     "crates/backend/utils/misc/guc_seams",
+    "crates/backend/utils/adt/numutils",
 ]
 
 [workspace.package]
