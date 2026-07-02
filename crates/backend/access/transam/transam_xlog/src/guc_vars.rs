@@ -49,6 +49,19 @@ xlog_guc! {
     TRACK_WAL_IO_TIMING, track_wal_io_timing, bool, false;
 }
 
+// wal_consistency_checking_string (xlog.c): stored as a leaked &'static str
+// so the cell stays !needs_drop; changes are boot-rare.
+thread_local! {
+    static WAL_CONSISTENCY_CHECKING_STRING: Cell<Option<&'static str>> = const { Cell::new(None) };
+}
+
+pub(crate) fn install_wal_consistency_checking_string() {
+    vars::wal_consistency_checking_string.install(GucVarAccessors {
+        get: || WAL_CONSISTENCY_CHECKING_STRING.get().map(str::to_string),
+        set: |v| WAL_CONSISTENCY_CHECKING_STRING.set(v.map(|s| &*s.leak())),
+    });
+}
+
 // C owner is checkpointer.c (unported); CalculateCheckpointSegments reads it
 // at boot, so the slot is installed here until that unit lands.
 thread_local! {

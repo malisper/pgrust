@@ -88,9 +88,9 @@ fn fmgr_info_non_builtin_panics() {
 #[test]
 #[should_panic(expected = "not ported")]
 fn unported_builtin_invocation_panics() {
-    let mut f = fmgr_info(1242).unwrap();
-    let mut fci = LocalFcinfo::<1>::new(InvalidOid);
-    fci.set_arg(0, Datum::from_i32(1));
+    assert!(ported::PORTED.iter().all(|(o, _)| *o != 1299));
+    let mut f = fmgr_info(1299).unwrap();
+    let mut fci = LocalFcinfo::<0>::new(InvalidOid);
     let _ = f.invoke(&mut fci);
 }
 
@@ -147,6 +147,46 @@ fn resolve_once_carrier_reuse() {
         assert_eq!(r.unwrap().as_i32(), i + 1);
     }
     assert_eq!(flinfo.fn_oid, 65);
+}
+
+#[test]
+fn merged_family_builtins_invoke() {
+    let mut f = fmgr_info(60).unwrap();
+    assert_eq!(f.fn_oid, 60);
+    let mut fci = LocalFcinfo::<2>::new(InvalidOid);
+    fci.set_arg(0, Datum::from_bool(true));
+    fci.set_arg(1, Datum::from_bool(true));
+    assert!(f.invoke(&mut fci).unwrap().as_bool());
+
+    let mut f = fmgr_info(463).unwrap();
+    let mut fci = LocalFcinfo::<2>::new(InvalidOid);
+    fci.set_arg(0, Datum::from_i64(40));
+    fci.set_arg(1, Datum::from_i64(2));
+    assert_eq!(f.invoke(&mut fci).unwrap().as_i64(), 42);
+
+    let mut f = fmgr_info(218).unwrap();
+    let mut fci = LocalFcinfo::<2>::new(InvalidOid);
+    fci.set_arg(0, Datum::from_f64(1.5));
+    fci.set_arg(1, Datum::from_f64(2.25));
+    assert_eq!(f.invoke(&mut fci).unwrap().as_f64(), 3.75);
+}
+
+#[test]
+fn merged_family_overlay_covers_all_tables() {
+    for name in ["booleq", "float8pl", "int4pl", "int8pl", "nameeq", "texteq", "textout"] {
+        let oid = fmgr_internal_function(name);
+        assert!(
+            ported::PORTED.iter().any(|(o, _)| *o == oid),
+            "{name} ({oid}) missing from the merged PORTED overlay"
+        );
+    }
+}
+
+#[test]
+fn init_seams_installs_fmgr_info() {
+    init_seams();
+    let f = fmgr_seams::fmgr_info::call(177).unwrap();
+    assert_eq!((f.fn_oid, f.fn_nargs), (177, 2));
 }
 
 #[test]

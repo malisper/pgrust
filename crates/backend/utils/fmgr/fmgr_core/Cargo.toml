@@ -13,4 +13,11 @@ types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 datum = { path = "../../../../_support/types/datum" }
 fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
+fmgr_seams = { path = "../fmgr_seams" }
+adt_bool = { path = "../../adt/bool" }
+adt_float = { path = "../../adt/float" }
 adt_int = { path = "../../adt/int" }
+adt_int8 = { path = "../../adt/int8" }
+name = { path = "../../adt/name" }
+nbt_compare = { path = "../../../access/nbtree/compare" }
+varlena = { path = "../../adt/varlena" }

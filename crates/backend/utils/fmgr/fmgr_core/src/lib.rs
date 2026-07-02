@@ -21,6 +21,10 @@ pub use ::fmgr::{
 };
 pub use canonical::{CANONICAL, CANONICAL_LAST_BUILTIN_OID};
 
+pub fn init_seams() {
+    fmgr_seams::fmgr_info::set(fmgr_info);
+}
+
 /// C: `InvalidOidBuiltinMapping` (fmgrtab.h).
 pub const INVALID_OID_BUILTIN_MAPPING: u16 = u16::MAX;
 

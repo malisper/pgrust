@@ -1,16 +1,42 @@
-use ::adt_int::builtins::INT_BUILTINS;
-use ::fmgr::PGFunction;
+use ::fmgr::{FmgrBuiltin, PGFunction};
 use ::types_core::Oid;
 
-const N: usize = INT_BUILTINS.len();
+const TABLES: &[&[FmgrBuiltin]] = &[
+    ::adt_bool::builtins::BOOL_BUILTINS,
+    ::adt_float::builtins::FLOAT_BUILTINS,
+    ::adt_int::builtins::INT_BUILTINS,
+    ::adt_int8::builtins::INT8_BUILTINS,
+    ::name::builtins::NAME_BUILTINS,
+    ::nbt_compare::builtins::NBT_BUILTINS,
+    ::varlena::builtins::VARLENA_BUILTINS,
+];
+
+const fn total() -> usize {
+    let mut n = 0;
+    let mut i = 0;
+    while i < TABLES.len() {
+        n += TABLES[i].len();
+        i += 1;
+    }
+    n
+}
+
+const N: usize = total();
 
 // CANONICAL wants strict OID order; the adt tables keep pg_proc.dat grouping.
 const fn oid_sorted() -> [(Oid, PGFunction); N] {
-    let mut t: [(Oid, PGFunction); N] = [(0, INT_BUILTINS[0].func); N];
-    let mut i = 0;
-    while i < N {
-        t[i] = (INT_BUILTINS[i].foid, INT_BUILTINS[i].func);
-        i += 1;
+    let mut t: [(Oid, PGFunction); N] = [(0, TABLES[0][0].func); N];
+    let mut n = 0;
+    let mut ti = 0;
+    while ti < TABLES.len() {
+        let table = TABLES[ti];
+        let mut i = 0;
+        while i < table.len() {
+            t[n] = (table[i].foid, table[i].func);
+            n += 1;
+            i += 1;
+        }
+        ti += 1;
     }
     let mut i = 1;
     while i < N {
