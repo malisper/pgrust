@@ -1,6 +1,3 @@
-//! logical/launcher.c boot surface: the GUC homes, ApplyLauncherRegister,
-//! and AtEOXact_ApplyLauncher's empty-state arm.
-
 #![allow(non_snake_case)]
 
 use std::cell::Cell;
@@ -12,9 +9,8 @@ static MAX_LOGICAL_REPLICATION_WORKERS: AtomicI32 = AtomicI32::new(4);
 static MAX_SYNC_WORKERS_PER_SUBSCRIPTION: AtomicI32 = AtomicI32::new(2);
 static MAX_PARALLEL_APPLY_WORKERS_PER_SUBSCRIPTION: AtomicI32 = AtomicI32::new(2);
 
-// The bgworker registry the C registration lands in (bgworker.c) is unported
-// and statically empty; the registration is recorded here and the launcher is
-// never launched — nothing consults it until a subscription exists.
+// C divergence: bgworker.c's registry is unported, so the registration is
+// recorded here and never launched — nothing consults it until a subscription exists.
 static LAUNCHER_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {

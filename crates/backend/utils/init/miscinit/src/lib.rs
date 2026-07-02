@@ -2,8 +2,7 @@
 //! security-restriction state machine, the LocalLatchData home,
 //! ClientConnectionInfo serialization, and the lock-file interlock.
 //! Deferred (owners unported): InitStandaloneProcess,
-//! checkDataDir/SetDataDir, InitializeSessionUserId, has_rolreplication,
-//! library preload / shmem-request hooks, the system_user() SQL wrapper.
+//! InitializeSessionUserId, has_rolreplication, the system_user() SQL wrapper.
 
 #![allow(non_snake_case)]
 
@@ -12,12 +11,19 @@ use std::cell::Cell;
 use types_core::{uaReject, BackendType, ProcessingMode, UserAuth};
 use types_error::{PgError, PgResult};
 
+mod datadir;
 mod guard;
 mod lockfile;
+mod preload;
 mod process;
 mod userid;
 
+pub use datadir::{checkDataDir, make_absolute_path, SetDataDir};
 pub use guard::SecContextGuard;
+pub use preload::{
+    process_shared_preload_libraries, process_shared_preload_libraries_done,
+    process_shmem_requests,
+};
 pub use lockfile::{
     AddToDataDirLockFile, CreateDataDirLockFile, CreateSocketLockFile, RecheckDataDirLockFile,
     TouchSocketLockFiles, UnlinkLockFiles,
@@ -176,6 +182,10 @@ pub fn init_seams() {
     s::switch_to_shared_latch::set(SwitchToSharedLatch);
     s::switch_back_to_local_latch::set(SwitchBackToLocalLatch);
     s::create_socket_lock_file::set(CreateSocketLockFile);
+    s::check_data_dir::set(checkDataDir);
+    s::process_shared_preload_libraries::set(process_shared_preload_libraries);
+    s::process_shmem_requests::set(process_shmem_requests);
+    preload::install_preload_guc_vars();
 }
 
 #[cfg(test)]

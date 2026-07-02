@@ -52,13 +52,15 @@ fn getInstallationPaths(_argv0: &str) {
 }
 
 fn checkControlFile() {
-    let path = "global/pg_control";
-    match std::fs::File::open(path) {
+    // C: snprintf(path, "%s/%s", DataDir, XLOG_CONTROL_FILE) — absolute, this
+    // runs before ChangeToDataDir.
+    let data_dir = init_small::globals::DataDir().unwrap_or("");
+    let path = format!("{data_dir}/global/pg_control");
+    match std::fs::File::open(&path) {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             write_stderr(format!(
-                "{PROGNAME}: could not find the database system\nExpected to find it in the directory \"{}\",\nbut could not open file \"{path}\": {e}\n",
-                init_small::globals::DataDir().unwrap_or("")
+                "{PROGNAME}: could not find the database system\nExpected to find it in the directory \"{data_dir}\",\nbut could not open file \"{path}\": {e}\n"
             ));
             ExitPostmaster(2);
         }

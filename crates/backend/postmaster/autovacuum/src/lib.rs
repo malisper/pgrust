@@ -58,7 +58,6 @@ av_int! {
     AV_VAC_MAX_THRESH, autovacuum_vac_max_thresh, autovacuum_vac_max_thresh, 100000000;
     AV_VAC_INS_THRESH, autovacuum_vac_ins_thresh, autovacuum_vac_ins_thresh, 1000;
     AV_ANL_THRESH, autovacuum_anl_thresh, autovacuum_anl_thresh, 50;
-    AV_FREEZE_MAX_AGE, autovacuum_freeze_max_age, autovacuum_freeze_max_age, 200000000;
     AV_MXID_FREEZE_MAX_AGE, autovacuum_multixact_freeze_max_age, autovacuum_multixact_freeze_max_age, 400000000;
     AV_VAC_COST_LIMIT, autovacuum_vac_cost_limit, autovacuum_vac_cost_limit, -1;
     LOG_AV_MIN_DURATION, Log_autovacuum_min_duration, Log_autovacuum_min_duration, 600000;

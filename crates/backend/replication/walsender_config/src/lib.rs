@@ -1,7 +1,3 @@
-//! GUC homes for the replication boot surface: max_wal_senders (walsender.c)
-//! and max_replication_slots (slot.c). Both units are unported; the postmaster
-//! and shmem sizing read these at boot.
-
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use guc_tables::{vars, GucVarAccessors};

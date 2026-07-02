@@ -15,6 +15,7 @@ types_storage = { path = "../../../../_support/types/types_storage" }
 mcx = { path = "../../../../_support/mcx" }
 init_small = { path = "../init_small" }
 latch = { path = "../../../storage/ipc/latch" }
+fd = { path = "../../../storage/file/fd" }
 lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
 elog = { path = "../../error/elog" }
 guc_tables = { path = "../../misc/guc_tables" }

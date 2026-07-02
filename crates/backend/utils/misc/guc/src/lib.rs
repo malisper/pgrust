@@ -11,6 +11,7 @@ pub mod name;
 pub mod process_config;
 pub mod registry;
 pub mod report;
+pub mod select;
 pub mod store;
 pub mod units;
 
@@ -38,6 +39,7 @@ pub use registry::{
     reset_value_string, show_guc_option, GucAction, GucRegistry, GucVariable,
 };
 pub use report::{begin_reporting_guc_options, report_changed_guc_options};
+pub use select::SelectConfigFiles;
 pub use store::{
     get_bool, get_enum, get_int, get_real, get_string, initialize_guc_options, is_initialized,
     pg_reload_time, set_config_option_global, set_pg_reload_time, with_store, with_store_mut,
@@ -363,4 +365,6 @@ pub fn init_seams() {
     s::process_config_file_internal::set(|context, apply_settings, elevel| {
         process_config::process_config_file_internal(context, apply_settings, elevel).map(|_| ())
     });
+    s::select_config_files::set(SelectConfigFiles);
+    s::initialize_guc_options::set(initialize_guc_options);
 }

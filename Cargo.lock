@@ -2307,6 +2307,39 @@ version = "0.1.0"
 [[package]]
 name = "nodeindexscan"
 version = "0.1.0"
+dependencies = [
+ "aclchk_seams",
+ "bufmgr_seams",
+ "datum",
+ "execexpr",
+ "execscan",
+ "exectuples",
+ "executils",
+ "fmgr_core",
+ "heapam_visibility_seams",
+ "indexam",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "miscinit_seams",
+ "predicate_seams",
+ "procarray_seams",
+ "pruneheap_seams",
+ "syscache_seams",
+ "tableam",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nbtree",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_slot",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+]
 
 [[package]]
 name = "nodes_core"
@@ -4813,6 +4846,33 @@ dependencies = [
 [[package]]
 name = "walwriter"
 version = "0.0.0"
+dependencies = [
+ "aio_seams",
+ "auxprocess",
+ "bufmgr",
+ "condition_variable_seams",
+ "dynahash",
+ "elog",
+ "fd",
+ "guc_tables",
+ "init_small",
+ "interrupt",
+ "ipc",
+ "latch",
+ "libpq_pqsignal",
+ "lmgr_proc",
+ "lwlock",
+ "miscinit",
+ "pgstat_seams",
+ "resowner",
+ "smgr",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_startup",
+ "types_storage",
+ "waitevent_seams",
+]
 
 [[package]]
 name = "wchar"
