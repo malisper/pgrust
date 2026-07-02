@@ -17,3 +17,7 @@ seam_core::seam!(
         noerr: bool,
     ) -> PgResult<Option<PgString<'mcx>>>
 );
+
+seam_core::seam!(
+    pub fn is_bootstrap_processing_mode() -> bool
+);
