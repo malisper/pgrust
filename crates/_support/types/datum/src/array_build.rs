@@ -6,9 +6,8 @@ use types_error::PgResult;
 pub const MAXDIM: usize = 6;
 const INIT_ELEMS: usize = 64;
 
-// C's ArrayBuildState private subcontext model: `mcx` is a caller-owned child
-// context; element storage (dvalues/dnulls and every by-ref copy) lives in it,
-// so teardown is the caller's context reset and memory is context-accounted.
+// C's ArrayBuildState private-subcontext model: element storage lives in the
+// caller-owned child `mcx`, so teardown is that context's reset.
 pub struct ArrayBuildState<'mcx> {
     pub mcx: Mcx<'mcx>,
     pub dvalues: PgVec<'mcx, Datum>,
@@ -36,8 +35,7 @@ impl<'mcx> ArrayBuildState<'mcx> {
         })
     }
 
-    // C: datumCopy into astate->mcontext. Chunk addresses are stable, so the
-    // returned datum word may point into the copy for the state's lifetime.
+    // C: datumCopy into astate->mcontext; stable chunk addresses outlive the call.
     pub fn copy_byref(&self, bytes: &[u8]) -> PgResult<Datum> {
         let copy = slice_borrow_in(self.mcx, bytes)?;
         Ok(Datum::from_usize(copy.as_ptr() as usize))

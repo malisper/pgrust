@@ -1,5 +1,5 @@
 unit	c_sources	status	crate	bench_ratio	notes
 types_error	-	ported	types_error	cold	substrate: PgError/PgResult; no C unit
 types_core	-	ported	types_core	cold	substrate: Oid + primitives; no C unit
-mcx	src/backend/utils/mmgr/mcxt.c,src/backend/utils/mmgr/aset.c,src/backend/utils/mmgr/bump.c	ported	mcx	3.35x-instr	substrate: arenas; FAIL gate: bump alloc 3.35x/aset 1.59x C instructions (per-chunk shadow accounting, charge, inlined cold arms); ns~parity on M4; docs/optimizations/m0-substrate-parity.md
-datum	src/backend/access/common/heaptuple.c(partial)	ported	datum	1.57x-instr	substrate: 8B Datum; codecs 1.00x (asm-identical reg moves); FAIL gate: varlena read via owning Varlena 1.57x instr (needs borrowed raw-image lane); docs/optimizations/m0-substrate-parity.md
+mcx	src/backend/utils/mmgr/mcxt.c,src/backend/utils/mmgr/aset.c,src/backend/utils/mmgr/bump.c	ported	mcx	0.68x-instr/0.92x-ns	substrate: arenas; PASS dual gate: aset alloc 0.66x/0.92x, bump alloc 0.63x/0.78x, reset 0.68x/0.90x (bump.c-shaped BumpArena, block-granular accounting, inline(always) allocate); vec_append 1.06x-instr/0.59x-ns kept; docs/optimizations/m0-substrate-parity.md
+datum	src/backend/access/common/heaptuple.c(partial)	ported	datum	1.00x-instr/1.00x-ns	substrate: 8B Datum; codecs 1.00x (asm-identical); varlena read via borrowed VarlenaRef lane 1.00x (7=7 instr, matches C VARSIZE/VARDATA); docs/optimizations/m0-substrate-parity.md

@@ -21,15 +21,13 @@ macro_rules! bind {
 }
 
 /// # Safety
-/// `p`: live exposed-provenance `MemoryContext` outliving the return (the exposed
-/// rebuild is not a borrow-stack sibling, so wrapper retags cannot invalidate it).
+/// `p`: live exposed-provenance `MemoryContext` outliving the return (exposed rebuild, not a borrow-stack sibling).
 unsafe fn ctx_from_exposed<'a>(p: *const MemoryContext) -> &'a MemoryContext {
     let exposed = p.expose_provenance();
     &*core::ptr::with_exposed_provenance::<MemoryContext>(exposed)
 }
 
-/// Heap context + state allocated in it, movable as one value; built/accessed
-/// only through `for<'mcx>` closures so no borrow escapes; state drops first.
+/// Heap context + its state, movable as one value; `for<'mcx>` closure access only; state drops first.
 #[doc = "```compile_fail"]
 #[doc = "mcx::bind!(VTy => V<'mcx>);"]
 #[doc = "struct V<'mcx> { v: mcx::PgVec<'mcx, u8> }"]

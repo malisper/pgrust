@@ -16,6 +16,7 @@ use ::types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY};
 
 mod arena_safe;
 mod aset;
+mod bump;
 mod owned;
 mod string;
 pub use arena_safe::ArenaSafe;
@@ -23,8 +24,7 @@ pub use aset::alloc_stats;
 pub use owned::{Bind, McxOwned};
 pub use string::PgString;
 
-/// # Safety
-/// Caller asserts the full [`ArenaSafe`] contract; the field list is only a guard.
+/// # Safety: caller asserts the full [`ArenaSafe`] contract; the field list is only a guard.
 #[macro_export]
 macro_rules! assert_arena_safe {
     ($($ty:ty { $($field:ident : $fty:ty),* $(,)? }),+ $(,)?) => {
@@ -54,10 +54,10 @@ enum Backend {
     // UnsafeCell, not RefCell: palloc's hot path pays no borrow flag (see aset_mut).
     Aset(core::cell::UnsafeCell<aset::AllocSet>),
     Malloc,
-    Bump(bumpalo::Bump, RefCell<BumpBlocks>),
+    Bump(core::cell::UnsafeCell<bump::BumpArena>),
     // Bump + drop list: leaked owned values run their destructor once at reset.
-    BumpDrop(bumpalo::Bump, RefCell<BumpBlocks>, RefCell<DropList>),
-    BumpForget(bumpalo::Bump, RefCell<BumpBlocks>),
+    BumpDrop(core::cell::UnsafeCell<bump::BumpArena>, RefCell<DropList>),
+    BumpForget(core::cell::UnsafeCell<bump::BumpArena>),
 }
 
 // Exposed-provenance address (not a borrow-stack sibling of the returned &mut).
@@ -78,15 +78,13 @@ impl DropList {
     // Pop-before-run: a panicking destructor leaks unrun entries, never double-runs.
     fn run(&mut self) {
         while let Some(entry) = self.entries.pop() {
-            // SAFETY: live value of glue's type, leaked with Drop suppressed; sole
-            // drop, before bump.reset(), no live borrows.
+            // SAFETY: live leaked value of glue's type, Drop suppressed; sole drop, before arena reset.
             unsafe { (entry.glue)(entry.addr) };
         }
     }
 }
 
-/// # Safety
-/// `addr` must be an exposed, live, aligned `T` never otherwise dropped.
+/// # Safety: `addr` must be an exposed, live, aligned `T` never otherwise dropped.
 unsafe fn drop_glue<T>(addr: *mut u8) {
     let p = core::ptr::with_exposed_provenance_mut::<T>(addr as usize);
     core::ptr::drop_in_place(p);
@@ -95,8 +93,7 @@ unsafe fn drop_glue<T>(addr: *mut u8) {
 unsafe fn drop_glue_noop(_addr: *mut u8) {}
 
 // Element-only glue for a leaked PgVec: never Vec::drop (deallocate through the leaked Mcx is the SB trap).
-/// # Safety
-/// `addr`: exposed address of a live arena `PgVec` header, element drops unrun.
+/// # Safety: `addr` — exposed address of a live arena `PgVec` header, element drops unrun.
 unsafe fn drop_glue_vec_elems<T>(addr: *mut u8) {
     let header = core::ptr::with_exposed_provenance_mut::<PgVec<'static, T>>(addr as usize);
     let v: &mut PgVec<'static, T> = &mut *header;
@@ -107,101 +104,61 @@ unsafe fn drop_glue_vec_elems<T>(addr: *mut u8) {
     core::ptr::drop_in_place(core::ptr::slice_from_raw_parts_mut(data, len));
 }
 
-const BUMP_INIT_BLOCK_SIZE: usize = 8 * 1024;
-const BUMP_MAX_BLOCK_SIZE: usize = 8 * 1024 * 1024;
-const BUMP_BLOCK_HDR_SZ: usize = 40;
-
-struct BumpBlocks {
-    mem_allocated: usize,
-    nblocks: usize,
-    head_free: usize,
-    alloc_chunk_limit: usize,
-    next_block_size: usize,
-}
-
-impl BumpBlocks {
-    fn new() -> Self {
-        let mut alloc_chunk_limit = BUMP_MAX_BLOCK_SIZE;
-        let bound = (BUMP_MAX_BLOCK_SIZE - BUMP_BLOCK_HDR_SZ) / 8;
-        while alloc_chunk_limit > bound {
-            alloc_chunk_limit >>= 1;
-        }
-        BumpBlocks {
-            mem_allocated: BUMP_INIT_BLOCK_SIZE,
-            nblocks: 1,
-            head_free: BUMP_INIT_BLOCK_SIZE - BUMP_BLOCK_HDR_SZ,
-            alloc_chunk_limit,
-            next_block_size: BUMP_INIT_BLOCK_SIZE,
-        }
-    }
-
-    fn alloc(&mut self, size: usize) {
-        let chunk_size = (size + 7) & !7;
-
-        if chunk_size > self.alloc_chunk_limit {
-            let blksize = chunk_size + BUMP_BLOCK_HDR_SZ;
-            self.mem_allocated += blksize;
-            self.nblocks += 1;
-            return;
-        }
-
-        if chunk_size <= self.head_free {
-            self.head_free -= chunk_size;
-            return;
-        }
-
-        let mut blksize = self.next_block_size;
-        let required = chunk_size + BUMP_BLOCK_HDR_SZ;
-        while blksize < required {
-            blksize = (blksize * 2).min(BUMP_MAX_BLOCK_SIZE);
-            if blksize >= required {
-                break;
-            }
-            if blksize == BUMP_MAX_BLOCK_SIZE {
-                blksize = required;
-                break;
-            }
-        }
-        self.mem_allocated += blksize;
-        self.nblocks += 1;
-        self.head_free = blksize - BUMP_BLOCK_HDR_SZ - chunk_size;
-        self.next_block_size = (self.next_block_size * 2).min(BUMP_MAX_BLOCK_SIZE);
-    }
-
-    fn reset(&mut self) {
-        *self = BumpBlocks::new();
-    }
-}
-
 // Subtree totals summed on demand (C's recursive MemoryContextMemAllocated); charge never walks ancestors.
-struct Acct {
+pub(crate) struct Acct {
     name: &'static str,
     ident: RefCell<Option<alloc::string::String>>,
-    self_used: Cell<usize>,
-    self_peak: Cell<usize>,
-    limit: Cell<usize>,
-    limited_path: Cell<bool>,
-    arena_footprint: Cell<usize>,
-    arena_nblocks: Cell<usize>,
-    is_bump: bool,
-    // bump.c: no BumpFree — frees don't uncharge until reset (see with_accounted_free).
-    uncharge_on_free: Cell<bool>,
-    parent: Option<AcctRc>,
-    children: RefCell<alloc::vec::Vec<AcctWeak>>,
+    pub(crate) self_used: Cell<usize>,
+    pub(crate) self_peak: Cell<usize>,
+    pub(crate) limit: Cell<usize>,
+    pub(crate) limited_path: Cell<bool>,
+    pub(crate) arena_footprint: Cell<usize>,
+    pub(crate) arena_nblocks: Cell<usize>,
+    pub(crate) is_bump: bool,
+    pub(crate) parent: Option<AcctRc>,
+    pub(crate) children: RefCell<alloc::vec::Vec<AcctWeak>>,
 }
 
-impl AcctRc {
+impl Acct {
     fn ancestors(&self) -> impl Iterator<Item = &Acct> {
-        let mut cur: Option<&Acct> = Some(&**self);
+        let mut cur: Option<&Acct> = Some(self);
         core::iter::from_fn(move || {
             let node = cur?;
             cur = node.parent.as_deref();
             Some(node)
         })
     }
-}
 
-impl Acct {
+    #[cold]
+    #[inline(never)]
+    fn check_limit_slow(&self, n: usize) -> Result<(), AllocError> {
+        for node in self.ancestors() {
+            let new = node.subtree_sum().checked_add(n).ok_or(AllocError)?;
+            if new > node.limit.get() {
+                return Err(AllocError);
+            }
+        }
+        Ok(())
+    }
+
+    #[inline]
+    pub(crate) fn check_limit(&self, n: usize) -> Result<(), AllocError> {
+        if self.limited_path.get() {
+            return self.check_limit_slow(n);
+        }
+        Ok(())
+    }
+
+    // Block-granular charge (bump backends): the C mem_allocated shape, block transitions only.
+    pub(crate) fn commit_block(&self, n: usize, footprint: usize, nblocks: usize) {
+        let self_new = self.self_used.get() + n;
+        self.self_used.set(self_new);
+        if self_new > self.self_peak.get() {
+            self.self_peak.set(self_new);
+        }
+        self.arena_footprint.set(footprint);
+        self.arena_nblocks.set(nblocks);
+    }
     fn subtree_sum(&self) -> usize {
         let mut total = self.self_used.get();
         self.children.borrow_mut().retain(|w| match w.upgrade() {
@@ -306,67 +263,6 @@ fn acct_give_to(pool: &AcctPool, p: NonNull<AcctInner>) {
     if full {
         // SAFETY: from acct_alloc_global; `val` already dropped, nothing else owns it.
         unsafe { Global.deallocate(p.cast(), Layout::new::<AcctInner>()) };
-    }
-}
-
-struct BumpPool {
-    stack: UnsafeCell<alloc::vec::Vec<bumpalo::Bump>>,
-}
-// SAFETY: single-threaded backend, as ACCT_POOL.
-unsafe impl Sync for BumpPool {}
-static BUMP_POOL: BumpPool = BumpPool { stack: UnsafeCell::new(alloc::vec::Vec::new()) };
-
-const BUMP_POOL_MAX: usize = 8;
-const BUMP_POOL_MAX_RETAINED: usize = 1 << 20;
-
-impl BumpPool {
-    #[inline]
-    fn with<R>(&self, f: impl FnOnce(&mut alloc::vec::Vec<bumpalo::Bump>) -> R) -> R {
-        // SAFETY: single-threaded backend — no other live access to `stack`.
-        f(unsafe { &mut *self.stack.get() })
-    }
-}
-
-#[inline]
-fn bump_take() -> bumpalo::Bump {
-    #[cfg(not(test))]
-    {
-        return bump_take_from(&BUMP_POOL);
-    }
-    #[cfg(test)]
-    bumpalo::Bump::new()
-}
-
-#[inline]
-fn bump_give(b: bumpalo::Bump) {
-    #[cfg(not(test))]
-    {
-        bump_give_to(&BUMP_POOL, b);
-    }
-    #[cfg(test)]
-    drop(b);
-}
-
-#[inline]
-fn bump_take_from(pool: &BumpPool) -> bumpalo::Bump {
-    pool.with(|s| s.pop()).unwrap_or_default()
-}
-
-#[inline]
-fn bump_give_to(pool: &BumpPool, mut b: bumpalo::Bump) {
-    b.reset();
-    if b.chunk_capacity() <= BUMP_POOL_MAX_RETAINED {
-        let parked = pool.with(|s| {
-            if s.len() < BUMP_POOL_MAX {
-                s.push(b);
-                true
-            } else {
-                false
-            }
-        });
-        if parked {
-            return;
-        }
     }
 }
 
@@ -496,7 +392,7 @@ impl MemoryContext {
     }
 
     pub fn new_bump(name: &'static str) -> Self {
-        Self::with_backend(name, Backend::Bump(bump_take(), RefCell::new(BumpBlocks::new())), None)
+        Self::with_backend(name, Backend::Bump(new_arena()), None)
     }
 
     pub fn new_child(&self, name: &'static str) -> MemoryContext {
@@ -508,17 +404,13 @@ impl MemoryContext {
     }
 
     pub fn new_child_bump(&self, name: &'static str) -> MemoryContext {
-        Self::with_backend(name, Backend::Bump(bump_take(), RefCell::new(BumpBlocks::new())), Some(self.acct.clone()))
+        Self::with_backend(name, Backend::Bump(new_arena()), Some(self.acct.clone()))
     }
 
     pub fn new_bumpdrop(name: &'static str) -> Self {
         Self::with_backend(
             name,
-            Backend::BumpDrop(
-                bump_take(),
-                RefCell::new(BumpBlocks::new()),
-                RefCell::new(DropList::new()),
-            ),
+            Backend::BumpDrop(new_arena(), RefCell::new(DropList::new())),
             None,
         )
     }
@@ -526,29 +418,17 @@ impl MemoryContext {
     pub fn new_child_bumpdrop(&self, name: &'static str) -> MemoryContext {
         Self::with_backend(
             name,
-            Backend::BumpDrop(
-                bump_take(),
-                RefCell::new(BumpBlocks::new()),
-                RefCell::new(DropList::new()),
-            ),
+            Backend::BumpDrop(new_arena(), RefCell::new(DropList::new())),
             Some(self.acct.clone()),
         )
     }
 
     pub fn new_bumpforget(name: &'static str) -> Self {
-        Self::with_backend(
-            name,
-            Backend::BumpForget(bump_take(), RefCell::new(BumpBlocks::new())),
-            None,
-        )
+        Self::with_backend(name, Backend::BumpForget(new_arena()), None)
     }
 
     pub fn new_child_bumpforget(&self, name: &'static str) -> MemoryContext {
-        Self::with_backend(
-            name,
-            Backend::BumpForget(bump_take(), RefCell::new(BumpBlocks::new())),
-            Some(self.acct.clone()),
-        )
+        Self::with_backend(name, Backend::BumpForget(new_arena()), Some(self.acct.clone()))
     }
 
     fn with_backend(
@@ -559,11 +439,10 @@ impl MemoryContext {
         let (is_bump, init_footprint, init_nblocks) = match &backend {
             Backend::Aset(_) => (false, 0usize, 0usize),
             Backend::Malloc => (false, 0usize, 0usize),
-            Backend::Bump(_, blocks)
-            | Backend::BumpDrop(_, blocks, _)
-            | Backend::BumpForget(_, blocks) => {
-                let b = blocks.borrow();
-                (true, b.mem_allocated, b.nblocks)
+            Backend::Bump(a) | Backend::BumpDrop(a, _) | Backend::BumpForget(a) => {
+                // SAFETY: exclusive during construction.
+                let a = unsafe { &*a.get() };
+                (true, a.footprint(), a.nblocks())
             }
         };
         let limited_path = parent.as_ref().is_some_and(|p| {
@@ -579,7 +458,6 @@ impl MemoryContext {
             arena_footprint: Cell::new(init_footprint),
             arena_nblocks: Cell::new(init_nblocks),
             is_bump,
-            uncharge_on_free: Cell::new(!is_bump),
             parent,
             children: RefCell::new(alloc::vec::Vec::new()),
         });
@@ -603,11 +481,6 @@ impl MemoryContext {
             self.acct.limited_path.set(true);
         }
         self.acct.limit.set(limit);
-        self
-    }
-
-    pub fn with_accounted_free(self) -> Self {
-        self.acct.uncharge_on_free.set(true);
         self
     }
 
@@ -653,10 +526,8 @@ impl MemoryContext {
 
     pub fn reset(&mut self) {
         self.fire_reset_callbacks();
-        // Leak check only for exact-accounting backends.
-        if !self.acct.is_bump
-            || (matches!(self.backend, Backend::Bump(..)) && self.acct.uncharge_on_free.get())
-        {
+        // Leak check only for exact-accounting backends (bump charges release wholesale here).
+        if !self.acct.is_bump {
             debug_assert_eq!(
                 self.acct.self_used.get(),
                 0,
@@ -665,37 +536,26 @@ impl MemoryContext {
                 self.acct.self_used.get(),
             );
         }
-        if let Backend::Aset(set) = &mut self.backend {
-            set.get_mut().reset();
+        match &mut self.backend {
+            Backend::Aset(set) => set.get_mut().reset(),
+            Backend::Malloc => {}
+            Backend::Bump(a) | Backend::BumpForget(a) => a.get_mut().reset(),
+            Backend::BumpDrop(a, droplist) => {
+                // Run destructors BEFORE the bytes are reclaimed (order load-bearing).
+                droplist.get_mut().run();
+                a.get_mut().reset();
+            }
         }
-        if let Backend::Bump(bump, blocks) = &mut self.backend {
-            bump.reset();
-            blocks.get_mut().reset();
-        }
-        if let Backend::BumpDrop(bump, blocks, droplist) = &mut self.backend {
-            // Run destructors BEFORE the bytes are reclaimed (order load-bearing).
-            droplist.get_mut().run();
-            bump.reset();
-            blocks.get_mut().reset();
-        }
-        if let Backend::BumpForget(bump, blocks) = &mut self.backend {
-            bump.reset();
-            blocks.get_mut().reset();
-        }
-        if matches!(self.backend, Backend::BumpDrop(..) | Backend::BumpForget(..))
-            || (matches!(self.backend, Backend::Bump(..)) && !self.acct.uncharge_on_free.get())
+        if let Backend::Bump(a) | Backend::BumpDrop(a, _) | Backend::BumpForget(a) =
+            &mut self.backend
         {
+            let a = a.get_mut();
             self.acct.self_used.set(0);
-        }
-        self.acct.arena_footprint.set(0);
-        self.acct.arena_nblocks.set(0);
-        if let Backend::Bump(_, blocks)
-        | Backend::BumpDrop(_, blocks, _)
-        | Backend::BumpForget(_, blocks) = &self.backend
-        {
-            let b = blocks.borrow();
-            self.acct.arena_footprint.set(b.mem_allocated);
-            self.acct.arena_nblocks.set(b.nblocks);
+            self.acct.arena_footprint.set(a.footprint());
+            self.acct.arena_nblocks.set(a.nblocks());
+        } else {
+            self.acct.arena_footprint.set(0);
+            self.acct.arena_nblocks.set(0);
         }
         self.acct.self_peak.set(0);
     }
@@ -711,9 +571,10 @@ impl MemoryContext {
             limit: self.acct.limit.get(),
             arena_footprint: match &self.backend {
                 Backend::Aset(_) | Backend::Malloc => self.acct.self_used.get(),
-                Backend::Bump(_, blocks)
-                | Backend::BumpDrop(_, blocks, _)
-                | Backend::BumpForget(_, blocks) => blocks.borrow().mem_allocated,
+                Backend::Bump(a) | Backend::BumpDrop(a, _) | Backend::BumpForget(a) => {
+                    // SAFETY: single-statement borrow, never re-entered (as aset_mut).
+                    unsafe { &*a.get() }.footprint()
+                }
             },
         }
     }
@@ -762,10 +623,9 @@ impl MemoryContext {
         matches!(self.backend, Backend::BumpForget(..))
     }
 
-    /// # Safety
-    /// `addr`: live `T` (glue's type) in this arena, Drop suppressed, valid until reset.
+    /// # Safety: `addr` — live `T` (glue's type) in this arena, Drop suppressed, valid until reset.
     unsafe fn register_drop(&self, addr: *mut u8, glue: unsafe fn(*mut u8)) -> bool {
-        if let Backend::BumpDrop(_, _, droplist) = &self.backend {
+        if let Backend::BumpDrop(_, droplist) = &self.backend {
             droplist.borrow_mut().entries.push(DropEntry { addr, glue });
             true
         } else {
@@ -786,15 +646,8 @@ impl MemoryContext {
     // Single-node charge, no ancestor walk (as C); the limit walk validates first.
     #[inline]
     fn charge(&self, n: usize) -> Result<(), AllocError> {
-        if self.acct.limited_path.get() {
-            for node in self.acct.ancestors() {
-                let new = node.subtree_sum().checked_add(n).ok_or(AllocError)?;
-                if new > node.limit.get() {
-                    return Err(AllocError);
-                }
-            }
-        }
         let acct = &*self.acct;
+        acct.check_limit(n)?;
         let self_new = acct.self_used.get() + n;
         acct.self_used.set(self_new);
         if self_new > acct.self_peak.get() {
@@ -828,17 +681,11 @@ pub fn oom_named(context_name: &str, request: usize) -> PgError {
 impl Drop for MemoryContext {
     fn drop(&mut self) {
         self.fire_reset_callbacks();
-        if let Backend::BumpDrop(_, _, droplist) = &self.backend {
+        if let Backend::BumpDrop(_, droplist) = &self.backend {
             droplist.borrow_mut().run();
         }
         self.acct.ident.borrow_mut().take();
         self.acct.self_used.set(0);
-        if let Backend::Bump(bump, _)
-        | Backend::BumpDrop(bump, _, _)
-        | Backend::BumpForget(bump, _) = &mut self.backend
-        {
-            bump_give(core::mem::replace(bump, bumpalo::Bump::new()));
-        }
     }
 }
 
@@ -924,32 +771,45 @@ unsafe fn aset_mut(set: &core::cell::UnsafeCell<aset::AllocSet>) -> &mut aset::A
     &mut *set.get()
 }
 
-// SAFETY (trait contract): delegates to aset/Global/bumpalo; accounting is undone on failure.
+// SAFETY contract: as aset_mut.
+#[inline(always)]
+unsafe fn bump_mut(a: &core::cell::UnsafeCell<bump::BumpArena>) -> &mut bump::BumpArena {
+    &mut *a.get()
+}
+
+#[inline]
+fn new_arena() -> core::cell::UnsafeCell<bump::BumpArena> {
+    core::cell::UnsafeCell::new(bump::BumpArena::new())
+}
+
+// SAFETY (trait contract): delegates to aset/Global/bump; accounting is undone on failure.
 unsafe impl Allocator for Mcx<'_> {
-    #[inline]
+    // always-inline: out-of-line, the fast lanes grow a fat frame + call (measured +12 instr/op).
+    #[inline(always)]
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        self.0.charge(layout.size())?;
-        let result = match &self.0.backend {
-            // SAFETY: single-statement borrow, never re-entered (aset_mut).
-            Backend::Aset(set) => unsafe { aset_mut(set) }.alloc(layout),
-            Backend::Malloc => Global.allocate(layout),
-            Backend::Bump(bump, blocks)
-            | Backend::BumpDrop(bump, blocks, _)
-            | Backend::BumpForget(bump, blocks) => {
-                let r = bump.allocate(layout);
-                if r.is_ok() {
-                    let mut b = blocks.borrow_mut();
-                    b.alloc(layout.size());
-                    self.0.acct.arena_footprint.set(b.mem_allocated);
-                    self.0.acct.arena_nblocks.set(b.nblocks);
+        match &self.0.backend {
+            Backend::Aset(set) => {
+                self.0.charge(layout.size())?;
+                // SAFETY: single-statement borrow, never re-entered (aset_mut).
+                let result = unsafe { aset_mut(set) }.alloc(layout);
+                if result.is_err() {
+                    self.0.uncharge(layout.size());
                 }
-                r
+                result
             }
-        };
-        if result.is_err() {
-            self.0.uncharge(layout.size());
+            Backend::Malloc => {
+                self.0.charge(layout.size())?;
+                let result = Global.allocate(layout);
+                if result.is_err() {
+                    self.0.uncharge(layout.size());
+                }
+                result
+            }
+            Backend::Bump(a) | Backend::BumpDrop(a, _) | Backend::BumpForget(a) => {
+                // SAFETY: single-statement borrow, never re-entered (bump_mut).
+                unsafe { bump_mut(a) }.alloc(layout, &self.0.acct)
+            }
         }
-        result
     }
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
@@ -967,15 +827,8 @@ unsafe impl Allocator for Mcx<'_> {
                 crate::churn_probe::bump();
                 Global.deallocate(ptr, layout)
             }
-            // bump.c: no BumpFree; with_accounted_free keeps the exact path.
-            Backend::Bump(bump, _)
-            | Backend::BumpDrop(bump, _, _)
-            | Backend::BumpForget(bump, _) => {
-                if self.0.acct.uncharge_on_free.get() {
-                    self.0.uncharge(layout.size());
-                    bump.deallocate(ptr, layout)
-                }
-            }
+            // bump.c: no BumpFree — bytes and charge release wholesale at reset.
+            Backend::Bump(_) | Backend::BumpDrop(..) | Backend::BumpForget(_) => {}
         }
     }
 
@@ -985,29 +838,31 @@ unsafe impl Allocator for Mcx<'_> {
         old_layout: Layout,
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
-        let delta = new_layout.size() - old_layout.size();
-        self.0.charge(delta)?;
-        let result = match &self.0.backend {
-            // SAFETY: single-statement borrow, never re-entered (aset_mut).
-            Backend::Aset(set) => unsafe { aset_mut(set) }.realloc(ptr, old_layout, new_layout),
-            Backend::Malloc => Global.grow(ptr, old_layout, new_layout),
-            Backend::Bump(bump, blocks)
-            | Backend::BumpDrop(bump, blocks, _)
-            | Backend::BumpForget(bump, blocks) => {
-                let r = bump.grow(ptr, old_layout, new_layout);
-                if r.is_ok() {
-                    let mut b = blocks.borrow_mut();
-                    b.alloc(delta);
-                    self.0.acct.arena_footprint.set(b.mem_allocated);
-                    self.0.acct.arena_nblocks.set(b.nblocks);
+        match &self.0.backend {
+            Backend::Aset(set) => {
+                let delta = new_layout.size() - old_layout.size();
+                self.0.charge(delta)?;
+                // SAFETY: single-statement borrow, never re-entered (aset_mut).
+                let result = unsafe { aset_mut(set) }.realloc(ptr, old_layout, new_layout);
+                if result.is_err() {
+                    self.0.uncharge(delta);
                 }
-                r
+                result
             }
-        };
-        if result.is_err() {
-            self.0.uncharge(delta);
+            Backend::Malloc => {
+                let delta = new_layout.size() - old_layout.size();
+                self.0.charge(delta)?;
+                let result = Global.grow(ptr, old_layout, new_layout);
+                if result.is_err() {
+                    self.0.uncharge(delta);
+                }
+                result
+            }
+            Backend::Bump(a) | Backend::BumpDrop(a, _) | Backend::BumpForget(a) => {
+                // SAFETY: single-statement borrow (bump_mut); ptr/layouts per trait contract.
+                unsafe { bump_mut(a).grow(ptr, old_layout, new_layout, &self.0.acct) }
+            }
         }
-        result
     }
 
     unsafe fn shrink(
@@ -1016,20 +871,39 @@ unsafe impl Allocator for Mcx<'_> {
         old_layout: Layout,
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
-        let result = match &self.0.backend {
-            // SAFETY: single-statement borrow, never re-entered (aset_mut).
-            Backend::Aset(set) => unsafe { aset_mut(set) }.realloc(ptr, old_layout, new_layout),
-            Backend::Malloc => Global.shrink(ptr, old_layout, new_layout),
-            Backend::Bump(bump, _)
-            | Backend::BumpDrop(bump, _, _)
-            | Backend::BumpForget(bump, _) => bump.shrink(ptr, old_layout, new_layout),
-        };
-        if result.is_ok()
-            && (!self.0.acct.is_bump || self.0.acct.uncharge_on_free.get())
-        {
-            self.0.uncharge(old_layout.size() - new_layout.size());
+        match &self.0.backend {
+            Backend::Aset(set) => {
+                // SAFETY: single-statement borrow, never re-entered (aset_mut).
+                let result = unsafe { aset_mut(set) }.realloc(ptr, old_layout, new_layout);
+                if result.is_ok() {
+                    self.0.uncharge(old_layout.size() - new_layout.size());
+                }
+                result
+            }
+            Backend::Malloc => {
+                let result = Global.shrink(ptr, old_layout, new_layout);
+                if result.is_ok() {
+                    self.0.uncharge(old_layout.size() - new_layout.size());
+                }
+                result
+            }
+            // bump.c model: narrow in place, nothing to uncharge.
+            Backend::Bump(a) | Backend::BumpDrop(a, _) | Backend::BumpForget(a) => {
+                if ptr.as_ptr() as usize % new_layout.align() == 0 {
+                    return Ok(NonNull::slice_from_raw_parts(ptr, new_layout.size()));
+                }
+                // SAFETY: single-statement borrow (bump_mut); copy fits new_layout.
+                unsafe {
+                    let new = bump_mut(a).alloc(new_layout, &self.0.acct)?;
+                    core::ptr::copy_nonoverlapping(
+                        ptr.as_ptr(),
+                        new.cast::<u8>().as_ptr(),
+                        new_layout.size(),
+                    );
+                    Ok(new)
+                }
+            }
         }
-        result
     }
 }
 
@@ -1181,8 +1055,7 @@ where
 }
 
 /// Move payload `P` out of an unsized `PgBox` without dropping `P`.
-/// # Safety
-/// `data`: the payload's data pointer inside `sized`; runtime type `P` (tag-checked).
+/// # Safety: `data` — the payload's data pointer inside `sized`; runtime type `P` (tag-checked).
 pub unsafe fn box_read_payload<'mcx, P, U>(sized: PgBox<'mcx, U>, data: *const P) -> P
 where
     P: 'mcx,
