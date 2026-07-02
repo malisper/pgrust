@@ -129,6 +129,7 @@ members = [
     "crates/backend/access/heap/heapam_visibility_seams",
     "crates/backend/access/transam/subtrans_seams",
     "crates/backend/access/heap/heapam",
+    "crates/backend/access/heap/heapam_handler",
     "crates/backend/utils/fmgr/fmgr_core",
     "crates/backend/access/transam/subtrans_seams",
     "crates/backend/storage/lmgr/lmgr",
@@ -209,6 +210,7 @@ members = [
     "crates/backend/utils/activity/pgstat",
     "crates/backend/utils/cache/relcache_build_seams",
     "crates/backend/utils/cache/relcache",
+    "crates/common/pg_prng",
 ]
 
 [workspace.package]
