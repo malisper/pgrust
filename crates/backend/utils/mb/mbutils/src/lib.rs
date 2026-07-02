@@ -8,7 +8,7 @@
 use core::cell::{Cell, RefCell};
 
 use datum::Datum;
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use mcx::{slice_in, vec_with_capacity_in, Mcx, PgVec};
 use types_core::{InvalidOid, Oid};
 use types_error::{
     PgError, PgResult, ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -474,14 +474,14 @@ pub fn pg_unicode_to_server<'mcx>(mcx: Mcx<'mcx>, c: pg_wchar) -> PgResult<PgVec
         return Err(invalid_codepoint_error());
     }
     if c <= 0x7F {
-        return byte_vec_in(mcx, &[c as u8]);
+        return slice_in(mcx, &[c as u8]);
     }
     let server_encoding = database_encoding();
     if server_encoding == PG_UTF8 {
         let mut buf = [0u8; MAX_MULTIBYTE_CHAR_LEN];
         unicode_to_utf8(c, &mut buf);
         let n = pg_utf_mblen(&buf) as usize;
-        return byte_vec_in(mcx, &buf[..n]);
+        return slice_in(mcx, &buf[..n]);
     }
 
     let Some(proc) = UTF8_TO_SERVER_CONV_PROC.with(|p| p.get()) else {
@@ -503,14 +503,14 @@ pub fn pg_unicode_to_server_noerror<'mcx>(
         return Ok(None);
     }
     if c <= 0x7F {
-        return Ok(Some(byte_vec_in(mcx, &[c as u8])?));
+        return Ok(Some(slice_in(mcx, &[c as u8])?));
     }
     let server_encoding = database_encoding();
     if server_encoding == PG_UTF8 {
         let mut buf = [0u8; MAX_MULTIBYTE_CHAR_LEN];
         unicode_to_utf8(c, &mut buf);
         let n = pg_utf_mblen(&buf) as usize;
-        return Ok(Some(byte_vec_in(mcx, &buf[..n])?));
+        return Ok(Some(slice_in(mcx, &buf[..n])?));
     }
 
     let Some(proc) = UTF8_TO_SERVER_CONV_PROC.with(|p| p.get()) else {
@@ -1001,12 +1001,6 @@ fn byte_sequence(mbstr: &[u8], mblen: i32, len: i32) -> String {
 
 fn c_string_len(bytes: &[u8]) -> usize {
     bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len())
-}
-
-fn byte_vec_in<'mcx>(mcx: Mcx<'mcx>, src: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    let mut v = vec_with_capacity_in(mcx, src.len())?;
-    v.extend_from_slice(src);
-    Ok(v)
 }
 
 #[cold]

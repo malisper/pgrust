@@ -640,7 +640,7 @@ backend-utils-init-postinit	src/backend/utils/init/postinit.c	ported	postinit	co
 backend-utils-init-small	*/globals.c,*/usercontext.c	ported	init_small	cold	fabled:backend-utils-init-small; m1-spine; all globals.c vars as const-init !needs_drop thread_locals; DataDir/DatabasePath leaked &'static str (read = plain load, fabled cloned per read); elog-shared five stored here; 27 GUC slots installed single-owner; miscadmin interrupt/crit helpers are the per-query-hot family - bench rides tcop/xlog statement gates; MyClientSocket/MyProcPort deferred until libpq-be vocabulary; MyLatch slot landed with the latch port; 11 tests, density 3.4%
 backend-utils-mb-conv-string-helpers	*/conv.c,*/stringinfo_mb.c,*/wstrcmp.c,*/wstrncmp.c	todo			fabled:backend-utils-mb-conv-string-helpers
 backend-utils-mb-conv	*/conv.c	combined-into:backend-utils-mb-conv-string-helpers			fabled:backend-utils-mb-conv-string-helpers
-backend-utils-mb-mbutils	*/mbutils.c	todo			fabled:backend-utils-mb-mbutils; m1-spine
+backend-utils-mb-mbutils	*/mbutils.c	ported	mbutils	cold	m1-spine; installs all 10 mbutils_seams (printtup/pqformat/guc/parser live); pointer-identity zero-copy contract test-proven (identity path = 0 allocations); conversion procs resolve-once at the C fmgr_info_cxt site; SQL wrappers loud (fmgr cycle); parser_small1 mirrors migrated home; 28 tests, density 4.8%
 backend-utils-mb-string-helpers	*/stringinfo_mb.c,*/wstrcmp.c,*/wstrncmp.c	combined-into:backend-utils-mb-conv-string-helpers			fabled:backend-utils-mb-conv-string-helpers
 backend-utils-mb-stringinfo_mb	*/stringinfo_mb.c	combined-into:backend-utils-mb-conv-string-helpers			fabled:backend-utils-mb-conv-string-helpers
 backend-utils-mb-wstrcmp	*/wstrcmp.c	todo			fabled:backend-utils-mb-wstrcmp

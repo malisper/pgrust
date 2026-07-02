@@ -9,7 +9,7 @@ use alloc::string::String;
 use elog::ereport;
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_error::{ErrorLocation, PgResult, ERRCODE_NAME_TOO_LONG, NOTICE};
-use wchar::{pg_enc, pg_encoding_max_length, pg_encoding_mblen};
+use wchar::{pg_enc, pg_encoding_max_length};
 
 pub const NAMEDATALEN: usize = types_core::fmgr::NAMEDATALEN as usize;
 
@@ -55,7 +55,12 @@ pub fn downcase_identifier<'mcx>(
 
 pub fn truncate_identifier(ident: &mut PgVec<'_, u8>, warn: bool, encoding: pg_enc) -> PgResult<()> {
     if ident.len() >= NAMEDATALEN {
-        let clipped = encoding_mbcliplen(encoding, ident, NAMEDATALEN - 1);
+        let clipped = mbutils::pg_encoding_mbcliplen(
+            encoding,
+            ident,
+            ident.len() as i32,
+            (NAMEDATALEN - 1) as i32,
+        ) as usize;
         if warn {
             ereport(NOTICE)
                 .errcode(ERRCODE_NAME_TOO_LONG)
@@ -89,7 +94,8 @@ pub fn parser_errposition_source(
     let Some(src) = sourcetext else {
         return 0;
     };
-    mbstrlen_with_len(encoding, src, location) + 1
+    let limit = (location as usize).min(src.len());
+    mbutils::pg_encoding_mbstrlen_with_len(encoding, &src[..limit]) + 1
 }
 
 pub fn transformMergeStmt() -> ! {
@@ -97,50 +103,6 @@ pub fn transformMergeStmt() -> ! {
         "transformMergeStmt (parse_merge.c): sibling parser layer \
          (parse_clause/parse_relation/parse_target/analyze) is unported"
     )
-}
-
-// The two helpers below mirror mbutils.c pg_encoding_mbcliplen /
-// pg_mbstrlen_with_len over an explicit encoding; they migrate to the
-// backend-utils-mb-mbutils unit when it lands.
-fn encoding_mbcliplen(encoding: pg_enc, s: &[u8], limit: usize) -> usize {
-    if pg_encoding_max_length(encoding) == 1 {
-        return cliplen(s, limit);
-    }
-    let mut clen = 0usize;
-    while clen < s.len() && s[clen] != 0 {
-        let l = pg_encoding_mblen(encoding, &s[clen..]) as usize;
-        if clen + l > limit {
-            break;
-        }
-        clen += l;
-        if clen == limit {
-            break;
-        }
-    }
-    clen
-}
-
-fn cliplen(s: &[u8], limit: usize) -> usize {
-    let len = s.len().min(limit);
-    s[..len].iter().position(|&b| b == 0).unwrap_or(len)
-}
-
-// C's pg_mblen_with_len ereports on a char overrunning `limit`; sourcetext is
-// server-encoding-valid on this path, so overrun just ends the count.
-fn mbstrlen_with_len(encoding: pg_enc, s: &[u8], limit: i32) -> i32 {
-    if pg_encoding_max_length(encoding) == 1 {
-        return limit;
-    }
-    let mut len = 0;
-    let mut off = 0usize;
-    let mut limit = limit;
-    while limit > 0 && off < s.len() && s[off] != 0 {
-        let l = pg_encoding_mblen(encoding, &s[off..]);
-        limit -= l;
-        off += l as usize;
-        len += 1;
-    }
-    len
 }
 
 #[cfg(not(target_family = "wasm"))]

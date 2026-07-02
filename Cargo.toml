@@ -173,6 +173,7 @@ members = [
     "crates/backend/utils/time/combocid_seams",
     "crates/backend/utils/cache/typcache_seams",
     "crates/backend/utils/cache/typcache",
+    "crates/backend/commands/indexcmds_seams",
     "crates/backend/utils/adt/timestamp_seams",
     "crates/backend/utils/activity/pgstat_xact_seams",
     "crates/backend/utils/activity/backend_status_seams",
