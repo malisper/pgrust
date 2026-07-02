@@ -2426,6 +2426,16 @@ dependencies = [
 [[package]]
 name = "pgtz"
 version = "0.1.0"
+dependencies = [
+ "elog",
+ "fd",
+ "init_small",
+ "localtime",
+ "mcx",
+ "pgtz_seams",
+ "types_core",
+ "types_error",
+]
 
 [[package]]
 name = "pgtz_seams"
@@ -3253,7 +3263,6 @@ dependencies = [
  "adt_float",
  "adt_timestamp",
  "auth",
- "autovacuum_seams",
  "backend_startup",
  "backend_status",
  "be_secure",
@@ -3288,7 +3297,6 @@ dependencies = [
  "ipci",
  "latch",
  "launch_backend",
- "launcher_seams",
  "libpq_pqsignal",
  "lmgr",
  "lmgr_proc",
@@ -3296,13 +3304,11 @@ dependencies = [
  "lsyscache",
  "mbutils",
  "miscinit",
- "miscinit_seams",
  "nodeseqscan",
  "parser_driver",
  "pg_database",
  "pg_locale",
  "pg_prng",
- "pg_sema_seams",
  "pgstat",
  "plancache",
  "pmchild",
@@ -3332,7 +3338,6 @@ dependencies = [
  "stack_depth",
  "subtrans",
  "superuser",
- "syslogger_seams",
  "table",
  "tableam",
  "tcop_dest",
@@ -3340,7 +3345,6 @@ dependencies = [
  "transam",
  "transam_xlog",
  "typcache",
- "types_guc",
  "utility",
  "varlena",
  "vars",
