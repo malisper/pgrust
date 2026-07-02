@@ -319,6 +319,31 @@ fn check_wal_buffers_hook(
     Ok(true)
 }
 
+// wal_consistency_checking[] stays all-false until the FPW cross-check
+// machinery ports: a non-empty setting is a loud stop, never a silent skip.
+fn check_wal_consistency_checking_hook(
+    newval: &mut Option<String>,
+    _extra: &mut Option<guc_tables::GucHookExtra>,
+    _source: types_guc::GucSource,
+) -> PgResult<bool> {
+    match newval.as_deref() {
+        None | Some("") => Ok(true),
+        Some(v) => panic!("wal_consistency_checking not ported (xlog.c): \"{v}\""),
+    }
+}
+fn assign_wal_consistency_checking_hook(
+    _newval: Option<&str>,
+    _extra: Option<&guc_tables::GucHookExtra>,
+) {
+}
+pub fn InitializeWalConsistencyChecking() -> PgResult<()> {
+    debug_assert!(matches!(
+        guc_tables::vars::wal_consistency_checking_string.read().as_deref(),
+        None | Some("")
+    ));
+    Ok(())
+}
+
 thread_local! {
     pub(crate) static PROC_LAST_REC_PTR: Cell<XLogRecPtr> = const { Cell::new(0) };
     pub(crate) static XACT_LAST_REC_END: Cell<XLogRecPtr> = const { Cell::new(0) };
@@ -360,6 +385,7 @@ pub fn init_seams() {
     s::xlog_insert_allowed::set(insert::XLogInsertAllowed);
     s::get_full_page_write_info::set(insert::GetFullPageWriteInfo);
     s::xlog_put_next_oid::set(startup::XLogPutNextOid);
+    s::initialize_wal_consistency_checking::set(InitializeWalConsistencyChecking);
 
     guc_tables::hooks::assign_max_wal_size.install(assign_max_wal_size);
     guc_tables::hooks::assign_checkpoint_completion_target
@@ -367,6 +393,11 @@ pub fn init_seams() {
     guc_tables::hooks::check_wal_segment_size.install(check_wal_segment_size_hook);
     guc_tables::hooks::check_wal_buffers.install(check_wal_buffers_hook);
     guc_tables::hooks::assign_wal_sync_method.install(write::assign_wal_sync_method);
+    guc_tables::hooks::check_wal_consistency_checking
+        .install(check_wal_consistency_checking_hook);
+    guc_tables::hooks::assign_wal_consistency_checking
+        .install(assign_wal_consistency_checking_hook);
+    guc_vars::install_wal_consistency_checking_string();
     guc_tables::option_sets::wal_sync_method_options.install(guc_vars::WAL_SYNC_METHOD_OPTIONS);
     guc_tables::option_sets::archive_mode_options.install(guc_vars::ARCHIVE_MODE_OPTIONS);
     guc_vars::install();

@@ -69,6 +69,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_cash"
+version = "0.1.0"
+dependencies = [
+ "adt_float",
+ "adt_int8",
+ "datum",
+ "hashfn",
+ "mcx",
+ "pg_locale",
+ "pqformat",
+ "stringinfo",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "varlena",
+]
+
+[[package]]
 name = "adt_datetime"
 version = "0.1.0"
 dependencies = [
@@ -113,6 +131,75 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+]
+
+[[package]]
+name = "adt_mac"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "hashfn",
+ "mcx",
+ "pqformat",
+ "stringinfo",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
+name = "adt_mac8"
+version = "0.1.0"
+dependencies = [
+ "adt_mac",
+ "datum",
+ "hashfn",
+ "mcx",
+ "pqformat",
+ "stringinfo",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
+name = "adt_numeric"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
+name = "adt_oracle_compat"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mbutils",
+ "mcx",
+ "pg_locale",
+ "pg_locale_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "varlena",
+ "wchar",
+]
+
+[[package]]
+name = "adt_pseudotypes"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "pqformat",
+ "stringinfo",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "varlena",
 ]
 
 [[package]]
@@ -509,6 +596,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc"
+version = "1.2.65"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e228eec9be7c17ccb640b59b36a5cd805ea2a564a4c5e162c2f659fea30d3b96"
+dependencies = [
+ "find-msvc-tools",
+ "shlex",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -817,6 +914,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "execmain"
+version = "0.1.0"
+
+[[package]]
 name = "execmain_seams"
 version = "0.1.0"
 dependencies = [
@@ -828,6 +929,25 @@ dependencies = [
  "types_portal",
  "types_scan",
  "types_snapshot",
+ "types_tuple",
+]
+
+[[package]]
+name = "execscan"
+version = "0.1.0"
+dependencies = [
+ "execexpr",
+ "exectuples",
+ "executils",
+ "init_small",
+ "mcx",
+ "syscache_seams",
+ "tableam",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_slot",
  "types_tuple",
 ]
 
@@ -895,14 +1015,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "find-msvc-tools"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+
+[[package]]
 name = "fmgr_core"
 version = "0.1.0"
 dependencies = [
+ "adt_bool",
+ "adt_float",
  "adt_int",
+ "adt_int8",
  "datum",
+ "fmgr_seams",
+ "name",
+ "nbt_compare",
  "types_core",
  "types_error",
  "types_fmgr",
+ "varlena",
 ]
 
 [[package]]
@@ -1048,6 +1181,10 @@ dependencies = [
  "types_error",
  "types_guc",
 ]
+
+[[package]]
+name = "guc_funcs"
+version = "0.0.0"
 
 [[package]]
 name = "guc_seams"
@@ -1506,6 +1643,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
+name = "libmimalloc-sys"
+version = "0.1.49"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "libpq_pqsignal"
 version = "0.0.0"
 dependencies = [
@@ -1580,6 +1726,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "localtime"
+version = "0.1.0"
+
+[[package]]
 name = "lock"
 version = "0.0.0"
 dependencies = [
@@ -1647,7 +1797,7 @@ name = "lsyscache"
 version = "0.1.0"
 dependencies = [
  "datum",
- "fmgr_core",
+ "fmgr_seams",
  "init_small",
  "lsyscache_seams",
  "mcx",
@@ -1655,6 +1805,7 @@ dependencies = [
  "syscache_seams",
  "types_core",
  "types_error",
+ "types_fmgr",
  "types_pathnodes",
  "types_tuple",
 ]
@@ -1679,6 +1830,23 @@ dependencies = [
  "types_core",
  "types_error",
  "waitevent_seams",
+]
+
+[[package]]
+name = "main_main"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "init_small",
+ "libc",
+ "mcx",
+ "mimalloc",
+ "pg_locale",
+ "postmaster",
+ "ps_status",
+ "seams_init",
+ "stack_depth",
+ "types_error",
 ]
 
 [[package]]
@@ -1740,6 +1908,15 @@ dependencies = [
  "types_error",
  "types_storage",
  "xlogutils",
+]
+
+[[package]]
+name = "mimalloc"
+version = "0.1.52"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
+dependencies = [
+ "libmimalloc-sys",
 ]
 
 [[package]]
@@ -1821,6 +1998,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nbt_compare"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "types_array",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
 name = "nbtree"
 version = "0.1.0"
 dependencies = [
@@ -1858,6 +2046,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodeseqscan"
+version = "0.1.0"
+dependencies = [
+ "execexpr",
+ "execscan",
+ "executils",
+ "mcx",
+ "tableam",
+ "types_error",
+ "types_nodes",
+]
+
+[[package]]
 name = "numutils"
 version = "0.1.0"
 dependencies = [
@@ -1887,6 +2088,26 @@ dependencies = [
  "types_core",
  "types_error",
 ]
+
+[[package]]
+name = "parse_clause"
+version = "0.0.0"
+
+[[package]]
+name = "parse_collate"
+version = "0.0.0"
+
+[[package]]
+name = "parse_expr"
+version = "0.0.0"
+
+[[package]]
+name = "parse_target"
+version = "0.0.0"
+
+[[package]]
+name = "parser_analyze"
+version = "0.0.0"
 
 [[package]]
 name = "parser_driver"
@@ -2096,6 +2317,10 @@ dependencies = [
  "types_core",
  "types_error",
 ]
+
+[[package]]
+name = "pgtz"
+version = "0.1.0"
 
 [[package]]
 name = "plancache"
@@ -2885,12 +3110,119 @@ name = "seam_core"
 version = "0.1.0"
 
 [[package]]
+name = "seams_init"
+version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "adt_acl",
+ "adt_bool",
+ "adt_float",
+ "adt_timestamp",
+ "auth",
+ "backend_startup",
+ "backend_status",
+ "be_secure",
+ "bufmgr",
+ "cache_syscache",
+ "catalog",
+ "catalog_namespace",
+ "catcache",
+ "clog",
+ "conffiles",
+ "dbcommands",
+ "detoast",
+ "dsm_core",
+ "elog",
+ "executils",
+ "fd",
+ "fmgr_core",
+ "funcapi",
+ "genam",
+ "guc",
+ "guc_file",
+ "guc_tables",
+ "hba",
+ "heapam_visibility",
+ "indexam",
+ "init_small",
+ "interrupt",
+ "inval",
+ "ipc",
+ "ipci",
+ "latch",
+ "launch_backend",
+ "libpq_pqsignal",
+ "lmgr",
+ "lmgr_proc",
+ "lock",
+ "lsyscache",
+ "mbutils",
+ "miscinit",
+ "parser_driver",
+ "pg_database",
+ "pg_locale",
+ "pg_prng",
+ "pgstat",
+ "plancache",
+ "pmchild",
+ "pmsignal",
+ "portalmem",
+ "postgres",
+ "postmaster",
+ "pqcomm",
+ "pqformat",
+ "pquery",
+ "printtup",
+ "procarray",
+ "procsignal",
+ "ps_status",
+ "queryenvironment",
+ "relation",
+ "relcache",
+ "relmapper",
+ "resowner",
+ "rewrite_handler",
+ "rmgr",
+ "scan_fgram",
+ "shmem",
+ "sinval",
+ "smgr",
+ "snapmgr",
+ "stack_depth",
+ "subtrans",
+ "superuser",
+ "table",
+ "tableam",
+ "tcop_dest",
+ "timeout",
+ "transam",
+ "transam_xlog",
+ "typcache",
+ "utility",
+ "varlena",
+ "vars",
+ "varsup",
+ "waiteventset",
+ "xact",
+ "xloginsert",
+ "xlogreader",
+ "xlogrecovery",
+ "xlogutils",
+]
+
+[[package]]
 name = "session_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_error",
 ]
+
+[[package]]
+name = "shlex"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "shmem"
@@ -3111,6 +3443,10 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
 ]
+
+[[package]]
+name = "strftime"
+version = "0.1.0"
 
 [[package]]
 name = "string_seams"
@@ -3805,6 +4141,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "variable"
+version = "0.0.0"
+
+[[package]]
 name = "varlena"
 version = "0.1.0"
 dependencies = [
@@ -4029,21 +4369,32 @@ dependencies = [
 name = "xloginsert"
 version = "0.0.0"
 dependencies = [
+ "aio_seams",
  "bufmgr",
+ "controldata_utils",
  "crc32c",
  "elog",
+ "fd",
  "guc_tables",
  "init_small",
+ "libc",
+ "lwlock",
+ "mcx",
  "miscinit",
  "origin_seams",
  "pglz",
+ "shmem",
  "transam_xlog",
  "types_core",
  "types_error",
  "types_storage",
+ "waitevent_seams",
  "xact",
+ "xact_seams",
  "xloginsert_seams",
+ "xlogreader",
  "xlogreader_seams",
+ "xlogutils",
 ]
 
 [[package]]

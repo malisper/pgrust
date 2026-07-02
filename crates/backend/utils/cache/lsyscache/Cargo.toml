@@ -15,4 +15,5 @@ syscache_seams = { path = "../syscache_seams" }
 lsyscache_seams = { path = "../lsyscache_seams" }
 miscinit_seams = { path = "../../init/miscinit_seams" }
 init_small = { path = "../../init/init_small" }
-fmgr_core = { path = "../../fmgr/fmgr_core" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }

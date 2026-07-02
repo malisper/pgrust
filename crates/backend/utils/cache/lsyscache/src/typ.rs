@@ -347,6 +347,7 @@ pub fn getSubscriptingRoutines(typid: Oid) -> PgResult<Option<(Datum, Oid)>> {
     if typsubscript == InvalidOid {
         return Ok(None);
     }
-    let routines = fmgr_core::oid_function_call0_coll(typsubscript, InvalidOid)?;
+    let mut flinfo = fmgr_seams::fmgr_info::call(typsubscript)?;
+    let routines = types_fmgr::function_call0_coll(&mut flinfo, InvalidOid)?;
     Ok(Some((routines, typelem)))
 }
