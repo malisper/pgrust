@@ -17,3 +17,4 @@ init_small_seams = { path = "../init_small_seams" }
 miscinit_seams = { path = "../miscinit_seams" }
 acl_seams = { path = "../../adt/acl_seams" }
 guc_seams = { path = "../../misc/guc_seams" }
+types_storage = { path = "../../../../_support/types/types_storage" }

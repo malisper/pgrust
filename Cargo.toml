@@ -72,6 +72,8 @@ members = [
     "crates/backend/catalog/namespace_seams",
     "crates/backend/access/transam/xact_seams",
     "crates/backend/access/common/relation",
+    "crates/backend/storage/ipc/waiteventset_seams",
+    "crates/backend/storage/ipc/latch",
 ]
 
 [workspace.package]
