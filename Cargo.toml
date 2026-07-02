@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/_support/types/types_error",
+    "crates/_support/types/types_core",
+    "crates/_support/mcx",
+    "crates/_support/types/datum",
+]
+
+[workspace.package]
+edition = "2021"
+publish = false
+
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+incremental = false
+
+# Iterate on fast-profile (no LTO tail); numbers only from release/dist.
+[profile.fast-profile]
+inherits = "release"
+lto = false
+codegen-units = 16
+
+[profile.release]
+debug = 0
+strip = "symbols"
+lto = "thin"
+codegen-units = 1
+
+# The official benchmark artifact.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+[profile.profiling]
+inherits = "release"
+debug = 1
+strip = false

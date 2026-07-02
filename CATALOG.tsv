@@ -1,0 +1,5 @@
+unit	c_sources	status	crate	bench_ratio	notes
+types_error	-	ported	types_error	cold	substrate: PgError/PgResult; no C unit
+types_core	-	ported	types_core	cold	substrate: Oid + primitives; no C unit
+mcx	src/backend/utils/mmgr/mcxt.c,src/backend/utils/mmgr/aset.c,src/backend/utils/mmgr/bump.c	ported	mcx	3.35x-instr	substrate: arenas; FAIL gate: bump alloc 3.35x/aset 1.59x C instructions (per-chunk shadow accounting, charge, inlined cold arms); ns~parity on M4; docs/optimizations/m0-substrate-parity.md
+datum	src/backend/access/common/heaptuple.c(partial)	ported	datum	1.57x-instr	substrate: 8B Datum; codecs 1.00x (asm-identical reg moves); FAIL gate: varlena read via owning Varlena 1.57x instr (needs borrowed raw-image lane); docs/optimizations/m0-substrate-parity.md

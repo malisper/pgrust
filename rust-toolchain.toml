@@ -1,0 +1,5 @@
+[toolchain]
+# 1.96.0/LLVM 22: required for aarch64 (LLVM 21 SIGTRAPs on thin-LTO; see
+# fabled docs/optimizations/arm64-thinlto-sigtrap.md).
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]
