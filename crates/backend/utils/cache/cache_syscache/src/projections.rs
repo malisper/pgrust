@@ -10,7 +10,7 @@ use syscache_seams::PgTypeTypcacheShape;
 use types_tuple::{HeapTupleData, NameData, PgTypeShape, TupleDescData};
 
 use crate::{GetSysCacheOid, ReleaseSysCache, SearchSysCache1, SearchSysCacheExists, SysCacheKey};
-use crate::cacheinfo::{ATTNUM, AUTHOID, CONSTROID, INDEXRELID, NAMESPACEOID, RELNAMENSP, RELOID, TYPEOID};
+use crate::cacheinfo::{ATTNUM, AUTHOID, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, RELNAMENSP, RELOID, TYPEOID};
 
 const ANUM_PG_CLASS_OID: i32 = 1;
 const ANUM_PG_CLASS_RELISSHARED: i32 = 16;
@@ -31,6 +31,7 @@ const ANUM_PG_INDEX_INDEXRELID: i32 = 1;
 const ANUM_PG_CONSTRAINT_CONTYPE: i32 = 4;
 const ANUM_PG_CONSTRAINT_CONRELID: i32 = 9;
 const ANUM_PG_AUTHID_ROLNAME: i32 = 2;
+const ANUM_PG_NAMESPACE_OID: i32 = 1;
 const ANUM_PG_NAMESPACE_NSPNAME: i32 = 2;
 const CONSTRAINT_FOREIGN: i8 = b'f' as i8;
 
@@ -193,6 +194,17 @@ fn lookup_pg_class_relid_by_name(relname: &str, relnamespace: Oid) -> PgResult<O
     )
 }
 
+fn lookup_pg_namespace_oid_by_name(nspname: &str) -> PgResult<Oid> {
+    GetSysCacheOid(
+        NAMESPACENAME,
+        ANUM_PG_NAMESPACE_OID,
+        SysCacheKey::Str(nspname),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
 fn pg_namespace_nspname(nspid: Oid) -> PgResult<Option<NameData>> {
     let Some(tuple) = SearchSysCache1(NAMESPACEOID, SysCacheKey::Value(Datum::from_oid(nspid)))?
     else {
@@ -228,4 +240,5 @@ pub(crate) fn install() {
     syscache_seams::syscache_hash_value_typeoid::set(syscache_hash_value_typeoid);
     syscache_seams::lookup_pg_class_relid_by_name::set(lookup_pg_class_relid_by_name);
     syscache_seams::pg_namespace_nspname::set(pg_namespace_nspname);
+    syscache_seams::lookup_pg_namespace_oid_by_name::set(lookup_pg_namespace_oid_by_name);
 }

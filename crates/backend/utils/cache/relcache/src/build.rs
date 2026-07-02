@@ -38,7 +38,7 @@ fn resolve_backend(form: &FormData_pg_class) -> PgResult<(ProcNumber, bool)> {
                 Ok((init_small::globals::MyProcNumber(), true))
             } else {
                 let backend =
-                    namespace_seams::get_temp_namespace_proc_number::call(form.relnamespace);
+                    namespace_seams::get_temp_namespace_proc_number::call(form.relnamespace)?;
                 debug_assert!(backend != INVALID_PROC_NUMBER);
                 Ok((backend, false))
             }

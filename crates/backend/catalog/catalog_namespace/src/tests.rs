@@ -1,0 +1,283 @@
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+
+use mcx::MemoryContext;
+use types_core::{InvalidOid, Oid, PG_CATALOG_NAMESPACE, RELPERSISTENCE_PERMANENT};
+use types_error::PgResult;
+use types_tuple::NameData;
+
+use crate::*;
+
+const USER_A: Oid = 10;
+const NS_PUBLIC: Oid = 2200;
+const NS_S1: Oid = 5001;
+const NS_TEMP: Oid = 16700;
+const NS_TEMP_TOAST: Oid = 16701;
+const REL_T1: Oid = 20001;
+
+thread_local! {
+    static NS_BY_NAME: RefCell<HashMap<String, Oid>> = RefCell::new(HashMap::new());
+    static RELS: RefCell<HashMap<(String, Oid), Oid>> = RefCell::new(HashMap::new());
+    static ROLNAME: RefCell<Option<String>> = const { RefCell::new(None) };
+    static USER: Cell<Oid> = const { Cell::new(USER_A) };
+    static ACL_DENIED: RefCell<Vec<Oid>> = const { RefCell::new(Vec::new()) };
+}
+
+fn install_fakes() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        miscinit_seams::get_user_id::set(|| USER.with(Cell::get));
+        miscinit_seams::is_bootstrap_processing_mode::set(|| false);
+        aclchk_seams::object_aclcheck::set(|_classid, objid, _roleid, _mode| {
+            Ok(if ACL_DENIED.with(|d| d.borrow().contains(&objid)) { 1 } else { 0 })
+        });
+        aclchk_seams::aclcheck_error::set(|_result, _objtype, name| {
+            Err(Box::new(types_error::PgError::error(format!(
+                "permission denied for schema {name}"
+            ))))
+        });
+        syscache_seams::lookup_authid_rolname::set(|mcx, _roleid| {
+            Ok(match ROLNAME.with(|r| r.borrow().clone()) {
+                Some(n) => Some(mcx::PgString::from_str_in(&n, mcx)?),
+                None => None,
+            })
+        });
+        syscache_seams::pg_namespace_nspname::set(|nspid| {
+            Ok(NS_BY_NAME.with(|m| {
+                m.borrow().iter().find(|(_, &v)| v == nspid).map(|(k, _)| {
+                    let mut nd = NameData::default();
+                    nd.namestrcpy(k);
+                    nd
+                })
+            }))
+        });
+        syscache_seams::lookup_pg_namespace_oid_by_name::set(|nspname| {
+            Ok(NS_BY_NAME.with(|m| m.borrow().get(nspname).copied()).unwrap_or(InvalidOid))
+        });
+        syscache_seams::lookup_pg_class_relid_by_name::set(|relname, nsp| {
+            Ok(RELS
+                .with(|m| m.borrow().get(&(relname.to_string(), nsp)).copied())
+                .unwrap_or(InvalidOid))
+        });
+        inval_seams::accept_invalidation_messages::set(|| Ok(()));
+        lmgr_seams::lock_relation_oid::set(|_, _| Ok(()));
+        lmgr_seams::unlock_relation_oid::set(|_, _| Ok(()));
+        crate::init_seams();
+    });
+
+    NS_BY_NAME.with(|m| {
+        let mut m = m.borrow_mut();
+        m.clear();
+        m.insert("pg_catalog".into(), PG_CATALOG_NAMESPACE);
+        m.insert("public".into(), NS_PUBLIC);
+        m.insert("s1".into(), NS_S1);
+        m.insert("pg_temp_7".into(), NS_TEMP);
+        m.insert("pg_toast_temp_7".into(), NS_TEMP_TOAST);
+    });
+    RELS.with(|m| {
+        let mut m = m.borrow_mut();
+        m.clear();
+        m.insert(("t1".into(), NS_PUBLIC), REL_T1);
+    });
+    ROLNAME.with(|r| *r.borrow_mut() = None);
+    ACL_DENIED.with(|d| d.borrow_mut().clear());
+    USER.with(|u| u.set(USER_A));
+}
+
+fn set_search_path(v: &str) {
+    NAMESPACE_SEARCH_PATH.with(|s| *s.borrow_mut() = Some(v.to_string()));
+    assign_search_path(Some(v));
+}
+
+#[test]
+fn temp_predicates_and_state() {
+    install_fakes();
+
+    assert!(!isTempNamespace(NS_TEMP));
+    assert!(!isTempToastNamespace(NS_TEMP_TOAST));
+    assert!(!isTempOrTempToastNamespace(NS_TEMP));
+    assert_eq!(GetTempNamespaceState(), (InvalidOid, InvalidOid));
+
+    SetTempNamespaceState(NS_TEMP, NS_TEMP_TOAST);
+    assert!(isTempNamespace(NS_TEMP));
+    assert!(!isTempNamespace(NS_TEMP_TOAST));
+    assert!(isTempToastNamespace(NS_TEMP_TOAST));
+    assert!(isTempOrTempToastNamespace(NS_TEMP));
+    assert!(isTempOrTempToastNamespace(NS_TEMP_TOAST));
+    assert_eq!(GetTempToastNamespace(), NS_TEMP_TOAST);
+    assert_eq!(GetTempNamespaceState(), (NS_TEMP, NS_TEMP_TOAST));
+
+    assert!(isAnyTempNamespace(NS_TEMP).unwrap());
+    assert!(isAnyTempNamespace(NS_TEMP_TOAST).unwrap());
+    assert!(!isAnyTempNamespace(NS_PUBLIC).unwrap());
+    assert!(!isOtherTempNamespace(NS_TEMP).unwrap());
+
+    assert_eq!(GetTempNamespaceProcNumber(NS_TEMP).unwrap(), 7);
+    assert_eq!(GetTempNamespaceProcNumber(NS_TEMP_TOAST).unwrap(), 7);
+    assert_eq!(
+        GetTempNamespaceProcNumber(NS_PUBLIC).unwrap(),
+        types_core::INVALID_PROC_NUMBER
+    );
+    assert_eq!(
+        GetTempNamespaceProcNumber(99999).unwrap(),
+        types_core::INVALID_PROC_NUMBER
+    );
+}
+
+#[test]
+fn at_eoxact_noop_without_temp_creation() {
+    install_fakes();
+    AtEOXact_Namespace(true, false);
+    AtEOXact_Namespace(false, true);
+    AtEOSubXact_Namespace(true, 5, 4);
+    AtEOSubXact_Namespace(false, 5, 4);
+}
+
+fn get_relname_relid_in_path(relname: &str) -> Oid {
+    RelnameGetRelid(relname).unwrap()
+}
+
+#[test]
+fn search_path_resolution_and_caching() {
+    install_fakes();
+    set_search_path("public, s1");
+
+    assert_eq!(get_relname_relid_in_path("t1"), REL_T1);
+    assert_eq!(get_relname_relid_in_path("nope"), InvalidOid);
+
+    let ctx = MemoryContext::new("test");
+    let path = fetch_search_path(ctx.mcx(), true).unwrap();
+    assert_eq!(path.as_slice(), &[PG_CATALOG_NAMESPACE, NS_PUBLIC, NS_S1]);
+    let explicit = fetch_search_path(ctx.mcx(), false).unwrap();
+    assert_eq!(explicit.as_slice(), &[NS_PUBLIC, NS_S1]);
+
+    // ACL-denied schemas drop out of the path after invalidation.
+    ACL_DENIED.with(|d| d.borrow_mut().push(NS_S1));
+    set_search_path("public, s1");
+    // Same string, still-valid cache: oidlist is cached, so s1 stays until a
+    // syscache invalidation clears the cache.
+    let cached = fetch_search_path(ctx.mcx(), false).unwrap();
+    assert_eq!(cached.as_slice(), &[NS_PUBLIC, NS_S1]);
+
+    crate::path::invalidate_search_path_cache();
+    assign_search_path(Some("public, s1"));
+    let after_inval = fetch_search_path(ctx.mcx(), false).unwrap();
+    assert_eq!(after_inval.as_slice(), &[NS_PUBLIC]);
+}
+
+#[test]
+fn dollar_user_and_missing_schemas() {
+    install_fakes();
+    ROLNAME.with(|r| *r.borrow_mut() = Some("s1".to_string()));
+    set_search_path("\"$user\", missing_schema, public");
+
+    let ctx = MemoryContext::new("test");
+    let path = fetch_search_path(ctx.mcx(), false).unwrap();
+    assert_eq!(path.as_slice(), &[NS_S1, NS_PUBLIC]);
+}
+
+#[test]
+fn user_change_invalidates_path() {
+    install_fakes();
+    set_search_path("public");
+    let ctx = MemoryContext::new("test");
+    assert_eq!(fetch_search_path(ctx.mcx(), false).unwrap().as_slice(), &[NS_PUBLIC]);
+
+    ACL_DENIED.with(|d| d.borrow_mut().push(NS_PUBLIC));
+    crate::path::invalidate_search_path_cache();
+    USER.with(|u| u.set(USER_A + 1));
+    // Different roleid forces recompute even though the string is unchanged.
+    assert_eq!(fetch_search_path(ctx.mcx(), false).unwrap().as_slice(), &[] as &[Oid]);
+}
+
+#[test]
+fn matcher_generation_fast_path() {
+    install_fakes();
+    set_search_path("public");
+    let ctx = MemoryContext::new("test");
+
+    let mut matcher = GetSearchPathMatcher(ctx.mcx()).unwrap();
+    assert!(matcher.addCatalog);
+    assert!(!matcher.addTemp);
+    assert_eq!(matcher.schemas.as_slice(), &[NS_PUBLIC]);
+    assert!(SearchPathMatchesCurrentEnvironment(&mut matcher).unwrap());
+
+    let copy = CopySearchPathMatcher(ctx.mcx(), &matcher).unwrap();
+    assert_eq!(copy.generation, matcher.generation);
+
+    set_search_path("s1, public");
+    assert!(!SearchPathMatchesCurrentEnvironment(&mut matcher).unwrap());
+
+    set_search_path("public");
+    // Path content is back to the original; matcher matches again and its
+    // generation is refreshed to the new active generation.
+    assert!(SearchPathMatchesCurrentEnvironment(&mut matcher).unwrap());
+    let gen_now = GetSearchPathMatcher(ctx.mcx()).unwrap().generation;
+    assert_eq!(matcher.generation, gen_now);
+
+    let mut zero_gen = SearchPathMatcher {
+        schemas: mcx::slice_in(ctx.mcx(), &[NS_PUBLIC]).unwrap(),
+        addCatalog: true,
+        addTemp: false,
+        generation: 0,
+    };
+    assert!(SearchPathMatchesCurrentEnvironment(&mut zero_gen).unwrap());
+}
+
+#[test]
+fn range_var_lookups() {
+    install_fakes();
+    set_search_path("public");
+
+    let rv = |schema: Option<&'static str>, name: &'static str| rel_vocab::RangeVar {
+        catalogname: None,
+        schemaname: schema,
+        relname: name,
+        inh: true,
+        relpersistence: RELPERSISTENCE_PERMANENT,
+        location: -1,
+    };
+
+    assert_eq!(RangeVarGetRelid(&rv(None, "t1"), 1, false).unwrap(), REL_T1);
+    assert_eq!(RangeVarGetRelid(&rv(None, "gone"), 1, true).unwrap(), InvalidOid);
+
+    let err = RangeVarGetRelid(&rv(None, "gone"), 1, false).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_TABLE);
+    assert!(err.message().contains("relation \"gone\" does not exist"));
+
+    let err = RangeVarGetRelid(&rv(Some("no_such"), "t1"), 1, false).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_SCHEMA);
+
+    assert_eq!(RangeVarGetRelid(&rv(Some("no_such"), "t1"), 1, true).unwrap(), InvalidOid);
+}
+
+#[test]
+fn check_search_path_validates_syntax() {
+    install_fakes();
+    let ctx = MemoryContext::new("test");
+    assert!(check_search_path(ctx.mcx(), "a, b, \"quoted, name\"").unwrap());
+    assert!(check_search_path(ctx.mcx(), "").unwrap());
+
+    // The syntax check needs no live GUC error sink until it fails; install
+    // one for the failure case.
+    if !guc_seams::guc_check_errdetail::is_installed() {
+        guc_seams::guc_check_errdetail::set(|_| {});
+    }
+    assert!(!check_search_path(ctx.mcx(), "a,, b").unwrap());
+    assert!(!check_search_path(ctx.mcx(), "\"unterminated").unwrap());
+}
+
+#[test]
+fn lookup_namespace_helpers() {
+    install_fakes();
+
+    assert_eq!(LookupNamespaceNoError("pg_temp").unwrap(), InvalidOid);
+    assert_eq!(LookupExplicitNamespace("pg_temp", true).unwrap(), InvalidOid);
+
+    let denied: PgResult<Oid> = {
+        ACL_DENIED.with(|d| d.borrow_mut().push(NS_S1));
+        LookupExplicitNamespace("s1", false)
+    };
+    assert!(denied.unwrap_err().message().contains("permission denied"));
+}

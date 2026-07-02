@@ -283,6 +283,7 @@ members = [
     "crates/backend/parser/parser_driver",
     "crates/common/ryu",
     "crates/backend/utils/adt/float",
+    "crates/backend/access/common/toastdesc",
     "crates/backend/utils/fmgr/funcapi",
     "crates/backend/utils/misc/ps_status",
     "crates/backend/parser/gram_core",

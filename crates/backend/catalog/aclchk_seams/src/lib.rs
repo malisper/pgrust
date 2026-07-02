@@ -16,3 +16,14 @@ seam_core::seam!(
         mode: u64,
     ) -> types_error::PgResult<i32>
 );
+
+seam_core::seam!(
+    // aclcheck_error(aclresult, objtype, objectname) (aclchk.c); objtype is
+    // the parsenodes.h ObjectType discriminant. Always ereport(ERROR)s, so a
+    // call only ever returns Err.
+    pub fn aclcheck_error(
+        aclresult: i32,
+        objtype: i32,
+        objectname: &str,
+    ) -> types_error::PgResult<()>
+);
