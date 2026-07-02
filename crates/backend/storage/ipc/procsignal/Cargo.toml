@@ -28,6 +28,3 @@ libc = "0.2"
 
 [dev-dependencies]
 pg_sema_seams = { path = "../../../port/pg_sema_seams" }
-latch_seams = { path = "../latch_seams" }
-waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
-waiteventset_seams = { path = "../waiteventset_seams" }

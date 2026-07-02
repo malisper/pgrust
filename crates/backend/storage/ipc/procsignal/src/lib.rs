@@ -58,7 +58,6 @@ struct ProcSignalHeader {
 static PROC_SIGNAL: OnceLock<ProcSignalHeader> = OnceLock::new();
 
 thread_local! {
-    // static ProcSignalSlot *MyProcSignalSlot — our index into psh_slot.
     static MY_PROC_SIGNAL_SLOT: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
@@ -129,8 +128,7 @@ pub fn ProcSignalInit(cancel_key: &[u8]) -> PgResult<()> {
     for flag in &slot.pss_signalFlags {
         flag.store(false, Relaxed);
     }
-    // Brand-new process: broadcast the latest barrier generation and discard
-    // stale check bits; must run before any invalidatable state is cached.
+    // Brand-new process: adopt the latest generation, discard stale bits.
     slot.pss_barrierCheckMask.store(0, Relaxed);
     let barrier_generation = header.psh_barrierGeneration.load(Relaxed);
     slot.pss_barrierGeneration.store(barrier_generation, Relaxed);
@@ -172,7 +170,6 @@ fn CleanupProcSignalState(_code: i32, _arg: usize) {
     let old_pid = slot.pss_pid.load(Relaxed);
     if old_pid != my_pid {
         slot.pss_mutex.unlock();
-        // Exiting anyway: LOG, not ERROR.
         let _ = elog(
             LOG,
             format!(
@@ -190,11 +187,10 @@ fn CleanupProcSignalState(_code: i32, _arg: usize) {
     condition_variable_seams::proc_signal_barrier_cv_broadcast::call(slot_index as i32);
 }
 
-// C's kill(pid, SIGUSR1): the target's SIGUSR1 handler drains its slot flags
-// and sets its own latch. One backend = one thread here, so the sender cannot
-// run the drain (it writes the target's thread-locals); delivery is the latch
-// half only — set the target's procLatch (slot index == ProcNumber) — and the
-// target's dispatch loop runs procsignal_sigusr1_handler when it wakes.
+// C's kill(pid, SIGUSR1). One backend = one thread: the sender cannot run the
+// drain (target thread-locals), so delivery is the handler's latch half only —
+// set the target's procLatch (slot index == ProcNumber); the target's dispatch
+// loop runs procsignal_sigusr1_handler when it wakes.
 fn deliver_sigusr1(slot_index: usize) {
     latch::set_latch(&lmgr_proc::GetPGProcByNumber(slot_index as ProcNumber).procLatch);
 }
@@ -214,8 +210,7 @@ pub fn SendProcSignal(pid: i32, reason: ProcSignalReason, procNumber: ProcNumber
         }
         slot.pss_mutex.unlock();
     } else {
-        // No procNumber: search back to front (auxiliary processes, the likely
-        // targets of this shape, live near the end of the array).
+        // Search back to front: likely targets (aux procs) sit near the end.
         for i in (0..header.psh_slot.len()).rev() {
             let slot = &header.psh_slot[i];
             if slot.pss_pid.load(Relaxed) == pid {
@@ -304,8 +299,8 @@ pub fn WaitForProcSignalBarrier(generation: u64) -> PgResult<()> {
         ),
     )?;
 
-    // pg_memory_barrier(): the generation reads were unlocked; fully separate
-    // them from the caller's subsequent shared-state access.
+    // pg_memory_barrier(): separate the unlocked generation reads from the
+    // caller's subsequent shared-state access.
     fence(SeqCst);
     Ok(())
 }
@@ -313,7 +308,6 @@ pub fn WaitForProcSignalBarrier(generation: u64) -> PgResult<()> {
 fn HandleProcSignalBarrierInterrupt() {
     g::SetInterruptPending(true);
     g::SetProcSignalBarrierPending(true);
-    // latch is set by procsignal_sigusr1_handler
 }
 
 pub fn ProcessProcSignalBarrier() -> PgResult<()> {
@@ -337,10 +331,9 @@ pub fn ProcessProcSignalBarrier() -> PgResult<()> {
         return Ok(());
     }
 
-    // The SeqCst exchange keeps the generation reads above ordered before the
-    // flag extraction (C's full-barrier pg_atomic_exchange_u32). Bits must be
-    // cleared BEFORE processing: a bit arriving mid-processing must survive,
-    // so failures put their bits back rather than racing a late clear.
+    // SeqCst exchange = C's full-barrier pg_atomic_exchange_u32: generation
+    // reads above stay ordered before the flag extraction. Bits are cleared
+    // BEFORE processing; failures put theirs back (never a late clear race).
     let mut flags = my_slot.pss_barrierCheckMask.swap(0, SeqCst);
 
     if flags != 0 {
@@ -365,8 +358,7 @@ pub fn ProcessProcSignalBarrier() -> PgResult<()> {
         })();
 
         if let Err(e) = result {
-            // PG_CATCH: re-arm the unhandled bits (the failing type's bit is
-            // still in `flags`) and retry from a later CHECK_FOR_INTERRUPTS.
+            // PG_CATCH: `flags` still holds the failing bit; re-arm a retry.
             ResetProcSignalBarrierBits(flags);
             return Err(e);
         }
@@ -462,8 +454,7 @@ pub fn SendCancelRequest(backend_pid: i32, cancel_key: &[u8]) {
         return;
     }
 
-    // pss_pid/key reads are racy by design: a backend may die and vacate its
-    // slot at any time, and PIDs are reused; C accepts the same window.
+    // pss_pid/key reads are racy by design (C accepts the same window).
     let header = proc_signal();
     for slot in header.psh_slot {
         if slot.pss_pid.load(Relaxed) != backend_pid {
@@ -488,9 +479,8 @@ pub fn SendCancelRequest(backend_pid: i32, cancel_key: &[u8]) {
                     ))
                     .finish(loc("SendCancelRequest")),
             );
-            // C: kill(-backendPID, SIGINT). SIGINT's effect is the target's
-            // StatementCancelHandler (thread-local pending flags); no owner
-            // for cross-thread cancel dispatch is ported yet.
+            // C: kill(-backendPID, SIGINT); no cross-thread cancel-dispatch
+            // owner (tcop's StatementCancelHandler) is ported yet.
             panic!("cancel-request delivery (SIGINT to backend {backend_pid}) is not ported");
         } else {
             log_never_raises(

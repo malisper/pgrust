@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
+#![allow(non_camel_case_types)]
 
 use std::cell::Cell;
 use std::sync::atomic::{
@@ -8,9 +9,8 @@ use std::sync::atomic::{
 };
 use std::sync::OnceLock;
 
-use ::elog::elog;
 use init_small::globals as g;
-use types_error::{PgResult, FATAL};
+use types_error::{PgError, PgResult, FATAL};
 
 pub const PM_CHILD_UNUSED: u8 = 0;
 pub const PM_CHILD_ASSIGNED: u8 = 1;
@@ -52,9 +52,8 @@ impl QuitSignalReason {
     }
 }
 
-// C's volatile sig_atomic_t fields carry no explicit barriers (the kill(2)
-// round trip orders them); Release stores / Acquire loads keep that
-// publication sound across backend threads without full fences.
+// C's volatile sig_atomic_t fields carry no explicit barriers (kill(2) orders
+// them); Release stores / Acquire loads keep that sound across threads.
 struct PMSignalData {
     PMSignalFlags: [AtomicBool; NUM_PMSIGNALS],
     sigquit_reason: AtomicU32,
@@ -62,7 +61,7 @@ struct PMSignalData {
     PMChildFlags: &'static [AtomicU8],
 }
 
-const _: () = assert!(!core::mem::needs_drop::<[AtomicU8; 4]>());
+const _: () = assert!(!core::mem::needs_drop::<PMSignalData>());
 
 static PM_SIGNAL_STATE: OnceLock<PMSignalData> = OnceLock::new();
 
@@ -101,14 +100,12 @@ pub fn PMSignalShmemInit(max_live_children: i32) {
 }
 
 pub fn SendPostmasterSignal(reason: PMSignalReason) {
-    // Standalone backend: nothing to signal.
     if !g::IsUnderPostmaster() {
         return;
     }
     state().PMSignalFlags[reason as usize].store(true, Release);
-    // C: kill(PostmasterPid, SIGUSR1). The postmaster's handler half (drain
-    // via CheckPostmasterSignal) belongs to its event loop; delivery here is
-    // the wait-loop kick for the postmaster thread's pid.
+    // C: kill(PostmasterPid, SIGUSR1); the CheckPostmasterSignal drain
+    // belongs to the postmaster loop, delivery is its wait-loop kick.
     waiteventset_seams::wakeup_other_proc::call(g::PostmasterPid());
 }
 
@@ -142,7 +139,10 @@ pub fn MarkPostmasterChildSlotAssigned(slot: i32) -> PgResult<()> {
     debug_assert!(slot > 0 && slot <= NUM_CHILD_FLAGS.get());
     let flag = &state().PMChildFlags[(slot - 1) as usize];
     if flag.load(Acquire) != PM_CHILD_UNUSED {
-        return elog(FATAL, "postmaster child slot is already in use");
+        return Err(Box::new(PgError::new(
+            FATAL,
+            "postmaster child slot is already in use",
+        )));
     }
     flag.store(PM_CHILD_ASSIGNED, Release);
     Ok(())
@@ -151,8 +151,7 @@ pub fn MarkPostmasterChildSlotAssigned(slot: i32) -> PgResult<()> {
 pub fn MarkPostmasterChildSlotUnassigned(slot: i32) -> bool {
     debug_assert!(slot > 0 && slot <= NUM_CHILD_FLAGS.get());
     let flag = &state().PMChildFlags[(slot - 1) as usize];
-    // May legitimately already be UNUSED: postmaster.c can call this twice
-    // for a crashed child, so no state assertion.
+    // May already be UNUSED (called twice for a crashed child): no assert.
     let result = flag.load(Acquire) == PM_CHILD_ASSIGNED;
     flag.store(PM_CHILD_UNUSED, Release);
     result
@@ -196,11 +195,9 @@ fn MarkPostmasterChildInactive(_code: i32, _arg: usize) {
     flag.store(PM_CHILD_ASSIGNED, Release);
 }
 
-// C watches the postmaster through a parent-death signal and/or the
-// postmaster_alive_fds pipe; neither survives one-process-many-threads (a
-// thread's exit closes no pipe and raises no PDEATHSIG). Death observation
-// must be redesigned by the postmaster/waiteventset port, so these panic
-// loudly instead of stubbing "alive".
+// C watches the postmaster via PDEATHSIG / the postmaster_alive_fds pipe;
+// neither exists between threads. The postmaster port owns the redesign, so
+// these panic loudly instead of stubbing "alive".
 pub fn PostmasterIsAlive() -> bool {
     PostmasterIsAliveInternal()
 }

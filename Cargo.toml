@@ -162,6 +162,15 @@ members = [
     "crates/backend/utils/fmgr/fmgr_seams",
     "crates/backend/tcop/pquery_seams",
     "crates/backend/access/common/printtup",
+    "crates/backend/access/transam/xact_portal_seams",
+    "crates/backend/commands/portalcmds_seams",
+    "crates/backend/storage/ipc/ipc_portal_seams",
+    "crates/backend/utils/cache/plancache_portal_seams",
+    "crates/backend/utils/mmgr/portalmem",
+    "crates/backend/utils/resowner/resowner_portal_seams",
+    "crates/backend/utils/sort/tuplestore_hold_seams",
+    "crates/backend/utils/time/snapmgr_portal_seams",
+    "crates/backend/utils/adt/adt_datetime",
 ]
 
 [workspace.package]

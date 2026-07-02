@@ -12,6 +12,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_datetime"
+version = "0.1.0"
+dependencies = [
+ "numutils",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "adt_int"
 version = "0.1.0"
 dependencies = [
@@ -522,6 +531,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ipc_portal_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+]
+
+[[package]]
 name = "ipc_seams"
 version = "0.0.0"
 dependencies = [
@@ -756,6 +772,7 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+ "types_storage",
 ]
 
 [[package]]
@@ -873,6 +890,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "plancache_portal_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_portal",
+]
+
+[[package]]
 name = "pmsignal"
 version = "0.0.0"
 dependencies = [
@@ -889,6 +914,37 @@ name = "pmsignal_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+]
+
+[[package]]
+name = "portalcmds_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+ "types_portal",
+]
+
+[[package]]
+name = "portalmem"
+version = "0.1.0"
+dependencies = [
+ "elog",
+ "ipc_portal_seams",
+ "mcx",
+ "plancache_portal_seams",
+ "portalcmds_seams",
+ "portalmem_seams",
+ "resowner_portal_seams",
+ "snapmgr_portal_seams",
+ "tuplestore_hold_seams",
+ "types_core",
+ "types_error",
+ "types_portal",
+ "types_resowner",
+ "types_snapshot",
+ "xact_portal_seams",
+ "xact_seams",
 ]
 
 [[package]]
@@ -999,6 +1055,7 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+ "types_rel",
 ]
 
 [[package]]
@@ -1123,6 +1180,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "resowner_portal_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_resowner",
+]
+
+[[package]]
 name = "resowner_seams"
 version = "0.0.0"
 dependencies = [
@@ -1218,6 +1283,16 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "snapmgr_portal_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+ "types_resowner",
+ "types_snapshot",
 ]
 
 [[package]]
@@ -1463,6 +1538,15 @@ dependencies = [
  "types_core",
  "types_error",
  "types_tuple",
+]
+
+[[package]]
+name = "tuplestore_hold_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+ "types_portal",
 ]
 
 [[package]]
@@ -1750,6 +1834,14 @@ dependencies = [
  "xloginsert_seams",
  "xlogrecovery_seams",
  "xlogutils",
+]
+
+[[package]]
+name = "xact_portal_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
 ]
 
 [[package]]

@@ -10,7 +10,6 @@ path = "src/lib.rs"
 
 [dependencies]
 types_error = { path = "../../../../_support/types/types_error" }
-elog = { path = "../../../utils/error/elog" }
 init_small = { path = "../../../utils/init/init_small" }
 pmsignal_seams = { path = "../pmsignal_seams" }
 ipc_seams = { path = "../ipc_seams" }
