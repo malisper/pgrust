@@ -2,3 +2,4 @@
 **/target
 fleet-results/
 *.profraw
+**/target-*/

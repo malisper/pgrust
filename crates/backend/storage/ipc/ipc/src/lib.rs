@@ -1,11 +1,7 @@
-//! ipc.c: exit-time cleanup — the proc_exit/shmem_exit callback stacks.
-//! Thread model: one backend = one thread, so the three callback arrays and
-//! both in-progress flags are per-thread TLS, and proc_exit ends the backend
-//! THREAD, never the process — after the callbacks it unwinds with a
-//! [`ProcExitThread`] payload that the postmaster-side reaper downcasts at
-//! join (design: notes/ipc-proc-exit-threads.md). C's atexit backstop has no
-//! per-thread analogue: a backend thread must never call process exit(); only
-//! postmaster paths may end the process.
+//! ipc.c: the proc_exit/shmem_exit exit-callback stacks. One backend = one
+//! thread: the arrays and flags are TLS, and proc_exit ends the backend
+//! THREAD by unwinding a [`ProcExitThread`] payload — never the process
+//! (design + atexit divergence: notes/ipc-proc-exit-threads.md).
 
 #![allow(non_snake_case)]
 
@@ -48,9 +44,8 @@ thread_local! {
     static SHMEM_EXIT_INPROGRESS: Cell<bool> = const { Cell::new(false) };
 }
 
-/// The unwind payload of a normal backend-thread exit; the joiner recovers
-/// the C exit code via `downcast_ref::<ProcExitThread>()`. Any other panic
-/// payload reaching the thread top is a backend crash.
+/// Unwind payload of a normal backend-thread exit; the joiner recovers the C
+/// exit code via downcast. Any other payload at the thread top is a crash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcExitThread {
     pub code: i32,
@@ -67,8 +62,7 @@ pub fn shmem_exit_inprogress() -> bool {
 }
 
 pub fn proc_exit(code: i32, my_pid: i32) -> ! {
-    // C guards `MyProcPid != getpid()` (fork by system()); the thread-model
-    // hazard is a callable migrating to a thread that isn't its backend.
+    // C's `MyProcPid != getpid()` guard, thread-model form.
     if my_pid != init_small::globals::MyProcPid() {
         panic!("proc_exit() called in child process");
     }
@@ -79,8 +73,7 @@ pub fn proc_exit(code: i32, my_pid: i32) -> ! {
 }
 
 fn proc_exit_prepare(code: i32) {
-    // Committed to exit: ereport(ERROR) now promotes to FATAL (elog reads
-    // this flag) and lands back here instead of the idle loop.
+    // Committed to exit: elog now promotes ERROR to FATAL.
     PROC_EXIT_INPROGRESS.with(|c| c.set(true));
     elog::config::set_proc_exit_inprogress(true);
 
@@ -113,7 +106,6 @@ pub fn shmem_exit(code: i32) -> PgResult<()> {
 fn shmem_exit_internal(code: i32) {
     SHMEM_EXIT_INPROGRESS.with(|c| c.set(true));
 
-    // Release LWLocks before callbacks run (they may acquire new ones).
     lwlock::LWLockReleaseAll().expect("LWLockReleaseAll failed in shmem_exit");
 
     while BEFORE_SHMEM_EXIT_INDEX.with(Cell::get) > 0 {
@@ -126,8 +118,7 @@ fn shmem_exit_internal(code: i32) {
         }
     }
 
-    // Explicit call, not an on_shmem_exit entry: dsm's own progressive logic
-    // must keep running the remaining dsm callbacks after one errors.
+    // Explicit call, not an on_shmem_exit entry (C comment: progressive logic).
     if let Err(e) = dsm_core::dsm::dsm_backend_shutdown() {
         rethrow_callback_error(*e);
     }
@@ -143,22 +134,19 @@ fn shmem_exit_internal(code: i32) {
     SHMEM_EXIT_INPROGRESS.with(|c| c.set(false));
 }
 
-// The C control flow for an ereport inside an exit callback: errstart sees
-// proc_exit_inprogress, promotes ERROR to FATAL, errfinish emits and calls
-// proc_exit(1) — which re-enters here and finishes the remaining (already
-// decremented) callbacks before unwinding with code 1.
+// C's ereport-inside-exit-callback flow: errstart promotes to FATAL (flag),
+// errfinish emits and re-enters proc_exit(1), finishing the remaining
+// already-decremented callbacks before unwinding with code 1.
 #[cold]
 fn rethrow_callback_error(e: PgError) {
     let _ = elog::ThrowErrorData(e);
-    // Not in proc_exit (postmaster shmem_exit): ThrowErrorData returned the
-    // ERROR instead of exiting; C would longjmp to the caller's handler.
+    // Outside proc_exit ThrowErrorData returns the ERROR (C longjmps).
     panic!("shmem_exit callback failed outside proc_exit");
 }
 
 #[cold]
 fn out_of_slots(which: &str) -> ! {
-    // ereport(FATAL, ERRCODE_PROGRAM_LIMIT_EXCEEDED); FATAL never returns
-    // (errfinish exits the thread through the proc_exit seam).
+    // FATAL never returns: errfinish exits the thread via the proc_exit seam.
     let _ = elog::ereport(FATAL)
         .errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
         .errmsg_internal(format!("out of {which} slots"))

@@ -753,3 +753,356 @@ fn buffer_pin_guard_drop_is_abort_path() {
     quiesced();
     assert!(BufferPin::adopt(InvalidBuffer).is_none());
 }
+
+// --- DML phase 2 ---
+
+use ::tableam_vocab::{LockTupleMode, TM_FailureData, TM_Result, TU_UpdateIndexes};
+use ::types_storage::bufpage::PageMut;
+use ::types_tuple::{HEAP_KEYS_UPDATED, HEAP_UPDATED};
+
+const FAKE_XID: u32 = 100;
+
+static DML_INIT: Once = Once::new();
+static XLOG_RECS: Mutex<Vec<(u8, Vec<u8>, usize)>> = Mutex::new(Vec::new());
+static NEXT_LSN: AtomicUsize = AtomicUsize::new(0x1000);
+
+fn install_dml_seams() {
+    install_seams();
+    DML_INIT.call_once(|| {
+        bufmgr_seams::mark_buffer_dirty::set(|_buf| Ok(()));
+        bufmgr_seams::extend_buffered_rel_by::set(|rel, _fork, _strategy, flags, extend_by| {
+            assert_eq!(extend_by, 1);
+            assert!(flags & bufmgr_seams::EB_LOCK_FIRST != 0);
+            let page = Box::new(TestPage([0u8; BLCKSZ]));
+            let rd_id = rel.rd_id;
+            Ok(with_fake(|f| {
+                let addr = Box::leak(page).as_mut_ptr() as usize;
+                f.pages.push(addr);
+                f.pins.push(1);
+                f.locks.push(1);
+                let buf = f.pages.len() as Buffer;
+                f.tables.get_mut(&rd_id).unwrap().push(buf);
+                (buf, 1)
+            }))
+        });
+        xact_seams::get_current_transaction_id::set(|| Ok(FAKE_XID));
+        xact_seams::get_current_command_id::set(|_used| Ok(7));
+        xact_seams::is_in_parallel_mode::set(|| false);
+        xact_seams::get_current_transaction_nest_level::set(|| 1);
+        xact_seams::transaction_id_is_current_transaction_id::set(|xid| xid == FAKE_XID);
+        heapam_visibility_seams::heap_tuple_satisfies_update::set(|htup, _cid, _buf| {
+            let hdr = htup.t_data();
+            if hdr.xmin_raw() == INVISIBLE_XMIN {
+                return Ok(TM_Result::TM_Invisible);
+            }
+            if (hdr.t_infomask & HEAP_XMAX_INVALID) != 0 {
+                return Ok(TM_Result::TM_Ok);
+            }
+            if hdr.xmax_raw() == FAKE_XID {
+                Ok(TM_Result::TM_SelfModified)
+            } else {
+                Ok(TM_Result::TM_BeingModified)
+            }
+        });
+        heapam_visibility_seams::heap_tuple_set_hint_bits::set(|hdr, _buf, infomask, _xid| {
+            hdr.t_infomask |= infomask;
+            Ok(())
+        });
+        combocid_seams::heap_tuple_header_adjust_cmax::set(|_hdr, cid| Ok((cid, false)));
+        combocid_seams::heap_tuple_header_get_cmax::set(|hdr| hdr.raw_command_id());
+        multixact_seams::multi_xact_id_set_oldest_member::set(|| Ok(()));
+        predicate_seams::check_for_serializable_conflict_in::set(|_rel, _tid, _blk| Ok(()));
+        freespace_seams::get_page_with_free_space::set(|_rel, _need| Ok(InvalidBlockNumber));
+        freespace_seams::record_and_get_page_with_free_space::set(|_rel, _old, _avail, _need| {
+            Ok(InvalidBlockNumber)
+        });
+        freespace_seams::record_page_with_free_space::set(|_rel, _blk, _avail| Ok(()));
+        xloginsert_seams::xlog_insert_record::set(|_rmid, info, _flags, main_data, bufs| {
+            let mut main = Vec::new();
+            for frag in main_data {
+                main.extend_from_slice(frag);
+            }
+            XLOG_RECS.lock().unwrap().push((info, main, bufs.len()));
+            Ok(NEXT_LSN.fetch_add(8, Ordering::Relaxed) as u64)
+        });
+        miscinit_seams::is_bootstrap_processing_mode::set(|| false);
+        catalog_seams::is_catalog_relation::set(|_rel| false);
+    });
+}
+
+fn take_xlog() -> Vec<(u8, Vec<u8>, usize)> {
+    core::mem::take(&mut *XLOG_RECS.lock().unwrap())
+}
+
+fn make_writable_tuple(img: &[u8]) -> HeapTupleData<'static> {
+    let words = img.len().div_ceil(8);
+    // Leaked (test-only): moving a Box would invalidate the derived pointer.
+    let buf: &'static mut [u64] = Box::leak(vec![0u64; words].into_boxed_slice());
+    // SAFETY: buf is words*8 >= img.len() writable bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(img.as_ptr(), buf.as_mut_ptr().cast::<u8>(), img.len())
+    };
+    // SAFETY: 8-aligned leaked image, header-complete, unique.
+    unsafe {
+        HeapTupleData::from_raw_parts(
+            buf.as_mut_ptr().cast::<u8>(),
+            img.len() as u32,
+            ItemPointerData::invalid(),
+            0,
+        )
+    }
+}
+
+fn page_tuple_at(oid: Oid, page_idx: usize, off: u16) -> HeapTupleData<'static> {
+    let buf = with_fake(|f| f.tables[&oid][page_idx]);
+    let addr = with_fake(|f| f.pages[(buf - 1) as usize]);
+    // SAFETY: leaked test page, always live.
+    let page = unsafe { PageRef::from_raw(NonNull::new(addr as *mut u8).unwrap()) };
+    let id = page.item_id(off);
+    let (ptr, len) = page.item_raw(id);
+    // SAFETY: in-page image.
+    unsafe {
+        HeapTupleData::from_raw_parts(
+            ptr,
+            len,
+            ItemPointerData::new(page_idx as u32, off),
+            oid,
+        )
+    }
+}
+
+#[test]
+fn dml_insert_extends_stamps_and_logs() {
+    install_dml_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(oid, vec![]);
+    let rel = test_relation(mcx, oid);
+    let _ = take_xlog();
+
+    let mut tup = make_writable_tuple(&tuple_image(0, 0, 41));
+    dml::heap_insert(&rel, &mut tup, 7, 0).unwrap();
+    assert_eq!(tup.t_self, ItemPointerData::new(0, 1));
+
+    let stored = page_tuple_at(oid, 0, 1);
+    assert_eq!(stored.t_data().xmin_raw(), FAKE_XID);
+    assert_eq!(stored.t_data().raw_command_id(), 7);
+    assert!((stored.t_data().t_infomask & HEAP_XMAX_INVALID) != 0);
+    assert_eq!(stored.t_data().t_ctid, tup.t_self);
+
+    let mut tup2 = make_writable_tuple(&tuple_image(0, 0, 42));
+    dml::heap_insert(&rel, &mut tup2, 7, 0).unwrap();
+    assert_eq!(tup2.t_self, ItemPointerData::new(0, 2));
+
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 2);
+    assert_eq!(recs[0].0, dml::XLOG_HEAP_INSERT | dml::XLOG_HEAP_INIT_PAGE);
+    assert_eq!(recs[0].2, 1);
+    assert_eq!(recs[1].0, dml::XLOG_HEAP_INSERT);
+    // xl_heap_insert: offnum + flags
+    assert_eq!(u16::from_ne_bytes([recs[1].1[0], recs[1].1[1]]), 2);
+    assert_eq!(
+        hio::relation_get_target_block(&rel),
+        0,
+        "target-block cache primed"
+    );
+    quiesced();
+}
+
+#[test]
+fn dml_delete_stamps_xmax_and_logs() {
+    install_dml_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(
+        oid,
+        vec![build_page(&[Item::Tuple(tuple_image(10, 0, 1))], false)],
+    );
+    let rel = test_relation(mcx, oid);
+    let _ = take_xlog();
+
+    let tid = ItemPointerData::new(0, 1);
+    let mut tmfd = TM_FailureData::default();
+    let r = dml::heap_delete(&rel, &tid, 7, None, true, &mut tmfd, false).unwrap();
+    assert_eq!(r, TM_Result::TM_Ok);
+
+    let stored = page_tuple_at(oid, 0, 1);
+    assert_eq!(stored.t_data().xmax_raw(), FAKE_XID);
+    assert!((stored.t_data().t_infomask & HEAP_XMAX_INVALID) == 0);
+    assert!((stored.t_data().t_infomask2 & HEAP_KEYS_UPDATED) != 0);
+    assert_eq!(stored.t_data().t_ctid, tid);
+
+    let buf = with_fake(|f| f.tables[&oid][0]);
+    let addr = with_fake(|f| f.pages[(buf - 1) as usize]);
+    // SAFETY: leaked test page.
+    let page = unsafe { PageRef::from_raw(NonNull::new(addr as *mut u8).unwrap()) };
+    assert_eq!(page.prune_xid(), FAKE_XID);
+
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].0, dml::XLOG_HEAP_DELETE);
+    assert_eq!(
+        u32::from_ne_bytes(recs[0].1[0..4].try_into().unwrap()),
+        FAKE_XID
+    );
+    quiesced();
+}
+
+#[test]
+fn dml_delete_self_modified_fails_without_wal() {
+    install_dml_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    let mut img = tuple_image(10, FAKE_XID, 1);
+    set_infomask(&mut img, 0, 0); // xmax valid: deleted by "us"
+    register_table(oid, vec![build_page(&[Item::Tuple(img)], false)]);
+    let rel = test_relation(mcx, oid);
+    let _ = take_xlog();
+
+    let tid = ItemPointerData::new(0, 1);
+    let mut tmfd = TM_FailureData::default();
+    let r = dml::heap_delete(&rel, &tid, 7, None, true, &mut tmfd, false).unwrap();
+    assert_eq!(r, TM_Result::TM_SelfModified);
+    assert_eq!(tmfd.xmax, FAKE_XID);
+    assert!(take_xlog().is_empty());
+    quiesced();
+}
+
+#[test]
+fn dml_hot_update_same_page() {
+    install_dml_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(
+        oid,
+        vec![build_page(&[Item::Tuple(tuple_image(10, 0, 1))], false)],
+    );
+    let rel = test_relation(mcx, oid);
+    let _ = take_xlog();
+
+    let otid = ItemPointerData::new(0, 1);
+    let mut newtup = make_writable_tuple(&tuple_image(0, 0, 2));
+    let mut tmfd = TM_FailureData::default();
+    let mut lockmode = LockTupleMode::LockTupleNoKeyExclusive;
+    let mut update_indexes = TU_UpdateIndexes::TU_None;
+    let r = dml::heap_update(
+        &rel,
+        &otid,
+        &mut newtup,
+        7,
+        None,
+        true,
+        &mut tmfd,
+        &mut lockmode,
+        &mut update_indexes,
+    )
+    .unwrap();
+    assert_eq!(r, TM_Result::TM_Ok);
+    assert_eq!(update_indexes, TU_UpdateIndexes::TU_None);
+    assert_eq!(newtup.t_self, ItemPointerData::new(0, 2));
+
+    let old = page_tuple_at(oid, 0, 1);
+    assert!(old.t_data().is_hot_updated());
+    assert_eq!(old.t_data().xmax_raw(), FAKE_XID);
+    assert_eq!(old.t_data().t_ctid, newtup.t_self);
+    let new = page_tuple_at(oid, 0, 2);
+    assert!(new.t_data().is_heap_only());
+    assert_eq!(new.t_data().xmin_raw(), FAKE_XID);
+    assert!((new.t_data().t_infomask & HEAP_UPDATED) != 0);
+
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].0, dml::XLOG_HEAP_HOT_UPDATE);
+    assert_eq!(recs[0].2, 1, "same-page update registers one buffer");
+    quiesced();
+}
+
+#[test]
+fn dml_update_moves_to_new_page_when_full() {
+    install_dml_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    let mut filler = tuple_image(10, 0, 0);
+    filler.resize(1900, 0);
+    register_table(
+        oid,
+        vec![build_page(
+            &[
+                Item::Tuple(tuple_image(10, 0, 1)),
+                Item::Tuple(filler.clone()),
+                Item::Tuple(filler.clone()),
+                Item::Tuple(filler.clone()),
+                Item::Tuple(filler),
+            ],
+            false,
+        )],
+    );
+    let rel = test_relation(mcx, oid);
+    let _ = take_xlog();
+
+    let otid = ItemPointerData::new(0, 1);
+    let mut big = tuple_image(0, 0, 2);
+    big.resize(600, 0);
+    let mut newtup = make_writable_tuple(&big);
+    let mut tmfd = TM_FailureData::default();
+    let mut lockmode = LockTupleMode::LockTupleNoKeyExclusive;
+    let mut update_indexes = TU_UpdateIndexes::TU_None;
+    let r = dml::heap_update(
+        &rel,
+        &otid,
+        &mut newtup,
+        7,
+        None,
+        true,
+        &mut tmfd,
+        &mut lockmode,
+        &mut update_indexes,
+    )
+    .unwrap();
+    assert_eq!(r, TM_Result::TM_Ok);
+    assert_eq!(update_indexes, TU_UpdateIndexes::TU_All);
+    assert_eq!(newtup.t_self, ItemPointerData::new(1, 1));
+
+    let old = page_tuple_at(oid, 0, 1);
+    assert!(!old.t_data().is_hot_updated());
+    assert_eq!(old.t_data().t_ctid, newtup.t_self);
+    let new = page_tuple_at(oid, 1, 1);
+    assert!(!new.t_data().is_heap_only());
+
+    let old_buf = with_fake(|f| f.tables[&oid][0]);
+    let addr = with_fake(|f| f.pages[(old_buf - 1) as usize]);
+    // SAFETY: leaked test page.
+    let page = unsafe { PageRef::from_raw(NonNull::new(addr as *mut u8).unwrap()) };
+    assert!(page.is_full(), "old page hinted full");
+
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 2, "xl_heap_lock then xl_heap_update");
+    assert_eq!(recs[0].0, dml::XLOG_HEAP_LOCK);
+    assert_eq!(recs[1].0, dml::XLOG_HEAP_UPDATE | dml::XLOG_HEAP_INIT_PAGE);
+    assert_eq!(recs[1].2, 2, "cross-page update registers both buffers");
+    quiesced();
+}
+
+#[test]
+fn dml_row_too_big_is_54000() {
+    install_dml_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(oid, vec![]);
+    let rel = test_relation(mcx, oid);
+    let err = hio::RelationGetBufferForTuple(&rel, BLCKSZ, None, 0).unwrap_err();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    quiesced();
+}

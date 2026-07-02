@@ -605,7 +605,7 @@ backend-utils-adt-string-byte	*/like_support.c	todo			fabled:backend-utils-adt-s
 backend-utils-adt-varbit	*/varbit.c	todo			fabled:backend-utils-adt-varbit
 backend-utils-adt-like	*/like.c,*/like_match.c	todo			fabled:backend-utils-adt-like
 backend-utils-adt-varchar	*/varchar.c	todo			fabled:backend-utils-adt-varchar
-backend-utils-adt-timestamp	*/timestamp.c	combined-into:backend-utils-adt-datetime			
+backend-utils-adt-timestamp	*/timestamp.c	benched	adt_timestamp	0.70-0.73x-instr/0.60-0.79x-ns	m1-spine; timestamp I/O zero-alloc (borrowed workbuf fields, caller MAXDATELEN out); PASS dual gate Graviton clang-16 beating C; live differential vs real PG (16 goldens + error surfaces); GMT tz arm live in adt_datetime; installs get_current_timestamp (launch_backend blocker closed); 14 tests, density 3.6%; docs/benchmarks/adt_timestamp.md
 backend-utils-adt-ts-index-rank	*/tsginidx.c,*/tsgistidx.c,*/tsrank.c	todo			fabled:backend-utils-adt-tsginidx,backend-utils-adt-tsgistidx,backend-utils-adt-tsrank
 backend-utils-adt-ts-small	*/tsquery_cleanup.c,*/tsquery_rewrite.c,*/tsquery_util.c	todo			fabled:backend-utils-adt-ts-small
 backend-utils-adt-tsquery-core	*/tsquery.c,*/tsquery_gist.c,*/tsquery_op.c	todo			fabled:backend-utils-adt-tsquery-core

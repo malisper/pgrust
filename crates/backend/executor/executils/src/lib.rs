@@ -1,12 +1,8 @@
-// execUtils.c executor-state half: EState + ExprContext lifecycle.
-// EState is the per-query resource owner (docs/no-drop.md): every droppy
-// resource (per-tuple contexts, snapshot Rcs, relation opens, slots) lives
-// here by value; arena-resident executor nodes hold u32 handles (EcxtId,
-// ExecSlotId). Both the "ExecutorState" context and each ExprContext's
-// per-tuple context are bump arenas; ResetExprContext is a wholesale rewind.
-// PlanState-coupled routines (slot-ops probes, projection assignment, scan
-// init, ResultRelInfo/range-table internals, GetAttributeBy*) land with
-// nodes phase 3 / execExpr; their EState fields are `*P3` handles below.
+// execUtils.c executor-state half. EState is the per-query resource owner
+// (docs/no-drop.md): droppy resources live here by value, arena-resident
+// nodes hold u32 handles. Query + per-tuple contexts are bump arenas;
+// ResetExprContext is a wholesale rewind. PlanState-coupled routines land
+// with nodes phase 3 / execExpr; their EState fields are `*P3` handles.
 #![no_std]
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -34,8 +30,7 @@ macro_rules! p3 {
         pub struct $name(core::convert::Infallible);
     )+};
 }
-// Unconstructible placeholders: the field exists (EState shape is complete),
-// its value is provably None until the owning unit lands and swaps the type.
+// Unconstructible placeholders: provably None until the owning unit lands.
 p3!(
     PlannedStmtP3,
     RangeTableP3,
@@ -106,8 +101,7 @@ impl<'mcx> ExprContextData<'mcx> {
         self.per_tuple.mcx()
     }
 
-    /// `ResetExprContext(econtext)` (executor.h): THE per-row arena reset —
-    /// bump rewind, no callbacks, no per-object work.
+    /// `ResetExprContext`: THE per-row arena reset — bump rewind only.
     #[inline]
     pub fn reset(&mut self) {
         self.per_tuple.reset();
@@ -131,8 +125,7 @@ impl<'mcx> ExprContextData<'mcx> {
             .retain(|cb| !(cb.function == function && cb.arg == arg));
     }
 
-    /// `ShutdownExprContext`: fire callbacks newest-first inside the
-    /// per-tuple context; `is_commit=false` empties the list without calling.
+    /// `ShutdownExprContext`: newest-first; `is_commit=false` only empties.
     pub fn shutdown(&mut self, is_commit: bool) {
         if self.callbacks.is_empty() {
             return;
@@ -245,15 +238,13 @@ impl<'mcx> EStateData<'mcx> {
         id
     }
 
-    /// `CreateWorkExprContext(estate)`. C caps the AllocSet max block size at
-    /// prevpower2(work_mem KB / 16); the bump backend has no block-size dial,
-    /// so this is the default context (growth policy is the arena's).
+    /// `CreateWorkExprContext`. C caps AllocSet block size by work_mem; the
+    /// bump backend has no block-size dial (growth policy is the arena's).
     pub fn create_work_expr_context(&mut self) -> EcxtId {
         self.create_expr_context()
     }
 
-    /// `ExecAssignExprContext(estate, planstate)`: the returned id is what
-    /// PlanState.ps_ExprContext stores when execProcnode lands.
+    /// `ExecAssignExprContext`: PlanState.ps_ExprContext stores the id.
     pub fn exec_assign_expr_context(&mut self) -> EcxtId {
         self.create_expr_context()
     }
@@ -277,8 +268,7 @@ impl<'mcx> EStateData<'mcx> {
         self.ecxt_mut(id).reset();
     }
 
-    /// `FreeExprContext(econtext, isCommit)`: shutdown callbacks, delete the
-    /// per-tuple context, unlink from the EState.
+    /// `FreeExprContext(econtext, isCommit)`.
     pub fn free_expr_context(&mut self, id: EcxtId, is_commit: bool) {
         if let Some(mut ecxt) = self.es_exprcontexts[id.0 as usize].take() {
             ecxt.shutdown(is_commit);
@@ -306,8 +296,7 @@ impl<'mcx> EStateData<'mcx> {
         self.ecxt(id).per_tuple.mcx()
     }
 
-    /// `ResetPerTupleExprContext(estate)`: per-row wholesale rewind of the
-    /// output ExprContext, no-op when it was never made.
+    /// `ResetPerTupleExprContext(estate)`: no-op when never made.
     #[inline]
     pub fn reset_per_tuple_expr_context(&mut self) {
         if let Some(id) = self.es_per_tuple_exprcontext {
@@ -315,8 +304,7 @@ impl<'mcx> EStateData<'mcx> {
         }
     }
 
-    /// `ExecInitExtraTupleSlot(estate, tupledesc, tts_ops)` (execTuples.c):
-    /// EState-lifetime slot registered in es_tupleTable.
+    /// `ExecInitExtraTupleSlot` (execTuples.c).
     pub fn exec_init_extra_tuple_slot(
         &mut self,
         desc: Option<Rc<TupleDescData<'mcx>>>,
@@ -359,8 +347,7 @@ impl<'mcx> EStateData<'mcx> {
         panic!("executils::exec_get_range_table_relation: pending nodes phase 3 (RangeTblEntry)");
     }
 
-    /// `FreeExecutorState`'s non-memory teardown, exposed for ExecutorEnd:
-    /// shut down remaining ExprContexts newest-first (C walks the lcons list).
+    /// `FreeExecutorState` non-memory half; newest-first (C lcons order).
     pub fn teardown(&mut self) {
         for i in (0..self.es_exprcontexts.len()).rev() {
             if self.es_exprcontexts[i].is_some() {
@@ -372,27 +359,23 @@ impl<'mcx> EStateData<'mcx> {
 
 ::mcx::bind!(pub EStateTy => EStateData<'mcx>);
 
-/// The C `EState*`: the per-query "ExecutorState" bump context and the state
-/// it owns, movable as one value.
+/// The C `EState*`: the "ExecutorState" context + state, one movable value.
 pub type ExecutorState = McxOwned<EStateTy>;
 
-/// `CreateExecutorState()`; `parent` is C's CurrentMemoryContext. Bump
-/// backend: C never pfrees out of this context (wholesale delete at end),
-/// while droppy owner fields (Rc, MemoryContext, Relation) still drop.
+/// `CreateExecutorState()`; `parent` is C's CurrentMemoryContext. Bump: C
+/// never pfrees out of this context; droppy owner fields still drop.
 pub fn create_executor_state(parent: &MemoryContext) -> PgResult<ExecutorState> {
     McxOwned::try_new(parent.new_child_bump("ExecutorState"), |mcx| {
         Ok(EStateData::new_in(mcx))
     })
 }
 
-/// `FreeExecutorState(estate)`: fire remaining ExprContext shutdowns, then
-/// the consumed bundle's drop is C's `MemoryContextDelete(es_query_cxt)`.
+/// `FreeExecutorState`: bundle drop = `MemoryContextDelete(es_query_cxt)`.
 pub fn free_executor_state(mut estate: ExecutorState) {
     estate.with_mut(|es| es.teardown());
 }
 
-/// Standalone `ExprContext` (`CreateStandaloneExprContext`): per-query memory
-/// is the caller's context; caller frees / rescans it.
+/// `CreateStandaloneExprContext`: per-query memory is the caller's context.
 #[derive(Debug)]
 pub struct StandaloneExprContext<'mcx>(ExprContextData<'mcx>);
 
@@ -416,8 +399,7 @@ impl<'mcx> core::ops::DerefMut for StandaloneExprContext<'mcx> {
     }
 }
 
-/// `executor_errposition(estate, location)`: returns the 1-based character
-/// position for the caller's errposition(), 0 when unavailable.
+/// `executor_errposition`: 1-based char position for errposition(), else 0.
 pub fn executor_errposition(estate: Option<&EStateData<'_>>, location: i32) -> i32 {
     if location < 0 {
         return 0;

@@ -93,7 +93,6 @@ fn shutdown_callbacks_fire_newest_first() {
         e.register_shutdown_callback(cb_b, Datum::from_usize(2));
         e.rescan();
         assert_eq!(FIRED.with(|f| f.get()), 21);
-        // Rescan emptied the list: nothing re-fires.
         e.rescan();
         assert_eq!(FIRED.with(|f| f.get()), 21);
     });
@@ -150,7 +149,6 @@ fn free_executor_state_fires_remaining_reverse() {
             .register_shutdown_callback(cb_a, Datum::from_usize(2));
     });
     free_executor_state(estate);
-    // Newest context first (C lcons order): b's callback, then a's.
     assert_eq!(FIRED.with(|f| f.get()), 21);
 }
 

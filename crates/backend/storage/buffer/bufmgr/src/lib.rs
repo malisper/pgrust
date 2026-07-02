@@ -195,6 +195,9 @@ pub fn init_seams() {
     bufmgr_seams::extend_buffered_rel_to::set(|_, _, _, _, _, _| {
         panic!("unported callee reached from bufmgr.c: ExtendBufferedRelTo (extend machinery, phase 2)")
     });
+    bufmgr_seams::extend_buffered_rel_by::set(|_, _, _, _, _| {
+        panic!("unported callee reached from bufmgr.c: ExtendBufferedRelBy (extend machinery, phase 2)")
+    });
     bufmgr_seams::release_buffer::set(pin::ReleaseBuffer);
     bufmgr_seams::mark_buffer_dirty::set(ops::MarkBufferDirty);
     bufmgr_seams::flush_one_buffer::set(ops::FlushOneBuffer);
