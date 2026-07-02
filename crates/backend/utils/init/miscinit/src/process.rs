@@ -22,6 +22,36 @@ fn local_latch() -> LatchHandle {
     h
 }
 
+// fork's pid channel is a parameter; identity is never the thread id (M5).
+pub fn InitProcessGlobals(my_proc_pid: i32) {
+    g::SetMyProcPid(my_proc_pid);
+    let ts = timestamp_seams::get_current_timestamp::call();
+    g::SetMyStartTimestamp(ts);
+    g::SetMyStartTime(timestamptz_to_time_t(ts));
+}
+
+const PG_UNIX_EPOCH_OFFSET_SECS: i64 = 946_684_800;
+
+fn timestamptz_to_time_t(t: i64) -> i64 {
+    t.div_euclid(1_000_000) + PG_UNIX_EPOCH_OFFSET_SECS
+}
+
+// C's child-init order; process-wide arms are postmaster-signal design.
+pub fn InitPostmasterChild(my_proc_pid: i32) -> PgResult<()> {
+    g::SetIsUnderPostmaster(true);
+
+    InitProcessGlobals(my_proc_pid);
+
+    libpq_pqsignal::pqinitmask();
+
+    InitProcessLocalLatch();
+    latch::InitializeLatchWaitSet()?;
+
+    libpq_pqsignal::block_sig_delete(libc::SIGQUIT);
+    libpq_pqsignal::block_signals();
+    Ok(())
+}
+
 pub fn InitProcessLocalLatch() {
     let l = local_latch();
     g::SetMyLatch(Some(l));

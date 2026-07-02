@@ -55,3 +55,11 @@ seam_core::seam!(
     // ProcArrayEndTransaction(MyProc, latestXid) (procarray.c).
     pub fn proc_array_end_transaction(procno: ProcNumber, latest_xid: TransactionId) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // GlobalVisTestIsRemovableXid(vistest, xid) (procarray.c).
+    pub fn global_vis_test_is_removable_xid(
+        vistest: types_core::GlobalVisStateHandle,
+        xid: TransactionId,
+    ) -> PgResult<bool>
+);

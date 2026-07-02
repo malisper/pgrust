@@ -1,7 +1,7 @@
 //! miscinit.c: processing-mode/backend-type globals, the user-id /
 //! security-restriction state machine, the LocalLatchData home,
 //! ClientConnectionInfo serialization, and the lock-file interlock.
-//! Deferred (owners unported): InitPostmasterChild/InitStandaloneProcess,
+//! Deferred (owners unported): InitStandaloneProcess,
 //! checkDataDir/SetDataDir, InitializeSessionUserId, has_rolreplication,
 //! library preload / shmem-request hooks, the system_user() SQL wrapper.
 
@@ -23,8 +23,8 @@ pub use lockfile::{
     TouchSocketLockFiles, UnlinkLockFiles,
 };
 pub use process::{
-    ChangeToDataDir, InitProcessLocalLatch, SwitchBackToLocalLatch, SwitchToSharedLatch,
-    ValidatePgVersion,
+    ChangeToDataDir, InitPostmasterChild, InitProcessGlobals, InitProcessLocalLatch,
+    SwitchBackToLocalLatch, SwitchToSharedLatch, ValidatePgVersion,
 };
 pub use userid::*;
 

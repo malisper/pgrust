@@ -24,6 +24,8 @@ ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
 shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
 miscinit_seams = { path = "../miscinit_seams" }
 libc = "0.2"
+libpq_pqsignal = { path = "../../../libpq/libpq_pqsignal" }
+timestamp_seams = { path = "../../adt/timestamp_seams" }
 
 [dev-dependencies]
 pgstat_seams = { path = "../../activity/pgstat_seams" }

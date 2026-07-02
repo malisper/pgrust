@@ -277,7 +277,9 @@ fn pg_euccn2wchar_with_len(from: &[u8], to: &mut [pg_wchar]) -> i32 {
 }
 
 fn pg_euccn_mblen(s: &[u8]) -> i32 {
-    if is_highbit_set(s[0]) {
+    if s[0] == SS2 || s[0] == SS3 {
+        3
+    } else if is_highbit_set(s[0]) {
         2
     } else {
         1
@@ -1117,23 +1119,22 @@ fn pg_utf8_verifychar(s: &[u8]) -> i32 {
 /// character verifier.
 #[inline]
 fn verify_str(s: &[u8], verifychar: impl Fn(&[u8]) -> i32) -> i32 {
-    let mut pos = 0usize;
-    while pos < s.len() {
-        let l;
-        if !is_highbit_set(s[pos]) {
-            if s[pos] == 0 {
+    let mut rest = s;
+    while let Some((&b, tail)) = rest.split_first() {
+        if !is_highbit_set(b) {
+            if b == 0 {
                 break;
             }
-            l = 1;
-        } else {
-            l = verifychar(&s[pos..]);
-            if l == -1 {
-                break;
-            }
+            rest = tail;
+            continue;
         }
-        pos += l as usize;
+        let l = verifychar(rest);
+        if l == -1 {
+            break;
+        }
+        rest = &rest[l as usize..];
     }
-    pos as i32
+    (s.len() - rest.len()) as i32
 }
 
 const STRIDE_LENGTH: usize = 32;
@@ -1208,11 +1209,21 @@ const CR2: u32 = (END << CS1) | (CS1 << CS2) | (CS2 << CS3) | (CS1 << P3B) | (CS
 const CR3: u32 = (END << CS1) | (CS1 << CS2) | (CS2 << CS3) | (CS1 << P3A) | (CS2 << P4A);
 const ILL: u32 = ERR;
 
+// Extracting bytes from u64 words keeps the byte feed scalar; a plain byte
+// loop is auto-vectorized into ld1 + per-byte umov, which stalls the state
+// chain (dense-multibyte ns 1.04x C, see docs/optimizations/wchar-parity.md).
 #[inline]
 fn utf8_advance(chunk: &[u8; STRIDE_LENGTH], state: &mut u32) {
     let mut st = *state;
-    for &b in chunk {
-        st = UTF8_TRANSITION[b as usize] >> (st & 31);
+    let mut i = 0;
+    while i < STRIDE_LENGTH {
+        let w = u64::from_le_bytes(chunk[i..i + 8].try_into().unwrap());
+        let mut k = 0;
+        while k < 64 {
+            st = UTF8_TRANSITION[((w >> k) & 0xff) as usize] >> (st & 31);
+            k += 8;
+        }
+        i += 8;
     }
     *state = st & 31;
 }
@@ -1243,22 +1254,22 @@ fn pg_utf8_verifystr(s: &[u8]) -> i32 {
             }
         }
     }
-    while pos < len {
-        let l;
-        if !is_highbit_set(s[pos]) {
-            if s[pos] == 0 {
+    let mut rest = &s[pos..];
+    while let Some((&b, tail)) = rest.split_first() {
+        if !is_highbit_set(b) {
+            if b == 0 {
                 break;
             }
-            l = 1;
-        } else {
-            l = pg_utf8_verifychar(&s[pos..]);
-            if l == -1 {
-                break;
-            }
+            rest = tail;
+            continue;
         }
-        pos += l as usize;
+        let l = pg_utf8_verifychar(rest);
+        if l == -1 {
+            break;
+        }
+        rest = &rest[l as usize..];
     }
-    pos as i32
+    (len - rest.len()) as i32
 }
 
 pub fn pg_utf8_islegal(source: &[u8], length: i32) -> bool {
