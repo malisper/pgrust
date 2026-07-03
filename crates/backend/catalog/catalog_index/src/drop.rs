@@ -11,8 +11,6 @@ const IndexIndrelidIndexId: Oid = 2678;
 const Anum_pg_index_indexrelid: usize = 1;
 const Anum_pg_index_indrelid: usize = 2;
 const Anum_pg_index_indexprs: i32 = 20;
-const InheritsRelidSeqnoIndexId: Oid = 2680;
-const InheritsRelationId: Oid = 2611;
 
 // IndexGetRelation: pg_index.indrelid for the index.
 pub fn IndexGetRelation<'mcx>(mcx: Mcx<'mcx>, indexId: Oid, missing_ok: bool) -> PgResult<Oid> {
@@ -87,25 +85,11 @@ pub fn index_drop<'mcx>(mcx: Mcx<'mcx>, indexId: Oid, concurrent: bool) -> PgRes
     catalog_heap::DeleteAttributeTuples(mcx, indexId)?;
     catalog_heap::DeleteRelationTuple(mcx, indexId)?;
 
-    DeleteInheritsTuple(mcx, indexId)?;
+    pg_inherits::DeleteInheritsTuple(mcx, indexId, InvalidOid, false, None)?;
 
     inval::invalidate::CacheInvalidateRelcache(&userHeapRelation)?;
 
     userHeapRelation.close(NoLock)
-}
-
-// DeleteInheritsTuple (pg_inherits.c): a plain index has no pg_inherits rows;
-// finding one means the partitioned-index lane leaked in.
-fn DeleteInheritsTuple<'mcx>(mcx: Mcx<'mcx>, inhrelid: Oid) -> PgResult<()> {
-    let rel = table::table_open(mcx, InheritsRelationId, RowExclusiveLock)?;
-    let key = oid_scankey(1, inhrelid);
-    let mut scan =
-        genam::systable_beginscan(mcx, &rel, InheritsRelidSeqnoIndexId, true, None, &[key])?;
-    if genam::systable_getnext(mcx, &mut scan)?.is_some() {
-        unported("DeleteInheritsTuple: pg_inherits rows on a dropped index");
-    }
-    genam::systable_endscan(mcx, scan)?;
-    rel.close(RowExclusiveLock)
 }
 
 const _: () = assert!(IndexIndrelidIndexId == 2678);
