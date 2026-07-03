@@ -46,7 +46,7 @@ pub fn gistbuild<'mcx>(
     }
 
     let mut giststate = initGISTstate(index)?;
-    let temp = MemoryContext::new("GiST temporary context");
+    let mut temp = MemoryContext::new("GiST temporary context");
 
     {
         let buffer = gistNewBuffer(index, heap)?;
@@ -92,7 +92,7 @@ pub fn gistbuild<'mcx>(
             if indtuples % BUFFERING_MODE_SWITCH_CHECK_STEP == 0 {
                 let nblocks =
                     bufmgr::RelationGetNumberOfBlocksInFork(index_rel, ForkNumber::MAIN_FORKNUM)?;
-                let effective_cache_size = guc_tables::vars::effective_cache_size.get() as u64;
+                let effective_cache_size = (guc_tables::vars::effective_cache_size.get().get)() as u64;
                 if effective_cache_size < nblocks as u64 {
                     panic!(
                         "unported: gist buffered build (index grew past \
