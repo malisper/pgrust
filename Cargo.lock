@@ -5362,6 +5362,7 @@ dependencies = [
  "init_small",
  "lsyscache",
  "mcx",
+ "nodehash",
  "postgres_seams",
  "types_core",
  "types_error",

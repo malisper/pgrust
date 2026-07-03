@@ -45,6 +45,12 @@ const TUPLE_PREFIX: usize = 8;
 
 const INVALID: u32 = u32::MAX;
 
+#[derive(Clone, Copy)]
+struct KeyAttr {
+    byval: bool,
+    len: i16,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MemoStatus {
     CacheLookup,
@@ -79,7 +85,7 @@ pub struct MemoizeState<'mcx> {
     param_exprs: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>,
     hash_expr: Option<PgBox<'mcx, ExprState<'mcx>>>,
     eq_expr: Option<PgBox<'mcx, ExprState<'mcx>>>,
-    key_attrs: PgVec<'mcx, (bool, i16)>,
+    key_attrs: PgVec<'mcx, KeyAttr>,
     binary_mode: bool,
     singlerow: bool,
     entries: PgVec<'mcx, Option<CacheEntry>>,
@@ -152,10 +158,10 @@ pub fn exec_init_memoize<'mcx>(
             .push(execexpr::exec_init_expr(mcx, Some(expr), params)?.expect("cache key expr"));
     }
 
-    let mut key_attrs: PgVec<'mcx, (bool, i16)> = ::mcx::vec_with_capacity_in(mcx, nkeys)?;
+    let mut key_attrs: PgVec<'mcx, KeyAttr> = ::mcx::vec_with_capacity_in(mcx, nkeys)?;
     for i in 0..nkeys {
         let att = hashkeydesc.attr(i);
-        key_attrs.push((att.attbyval, att.attlen));
+        key_attrs.push(KeyAttr { byval: att.attbyval, len: att.attlen });
     }
 
     let (hash_expr, eq_expr) = if node.binary_mode {
@@ -214,7 +220,7 @@ pub fn exec_init_memoize<'mcx>(
         lru_tail: INVALID,
         table_ctx: make_table_ctx(mcx)?,
         mem_used: 0,
-        mem_limit: execgrouping::get_hash_memory_limit() as u64,
+        mem_limit: nodehash::get_hash_memory_limit() as u64,
         entry: INVALID,
         last_tuple: None,
         stats: MemoizeInstrumentation::default(),
@@ -399,7 +405,7 @@ fn probe_hash<'mcx>(
     if node.binary_mode {
         let mut hashkey: u32 = 0;
         let base = node.probeslot.base();
-        for (i, &(byval, len)) in node.key_attrs.iter().enumerate() {
+        for (i, &KeyAttr { byval, len }) in node.key_attrs.iter().enumerate() {
             hashkey = hashkey.rotate_left(1);
             if !base.tts_isnull[i] {
                 hashkey ^= datum_image_hash(per_tuple, base.tts_values[i], byval, len)?;
@@ -423,7 +429,7 @@ fn probe_equal<'mcx>(
     tableslot: &mut SlotData<'mcx>,
     probeslot: &mut SlotData<'mcx>,
     eq_expr: Option<&mut PgBox<'mcx, ExprState<'mcx>>>,
-    key_attrs: &[(bool, i16)],
+    key_attrs: &[KeyAttr],
     binary_mode: bool,
     per_tuple: Mcx<'_>,
     slot_mcx: Mcx<'mcx>,
@@ -436,7 +442,7 @@ fn probe_equal<'mcx>(
         exectuples::slot_getallattrs(probeslot);
         let t = tableslot.base();
         let p = probeslot.base();
-        for (i, &(byval, len)) in key_attrs.iter().enumerate() {
+        for (i, &KeyAttr { byval, len }) in key_attrs.iter().enumerate() {
             if t.tts_isnull[i] != p.tts_isnull[i] {
                 return Ok(false);
             }
@@ -714,12 +720,13 @@ pub fn exec_memoize<'mcx, C: MemoizeChild<'mcx>>(
                         };
                         node.mstatus = MemoStatus::FetchNextTuple;
                         let slot = node.ps_ResultTupleSlot;
+                        let mcx = estate.es_query_cxt;
                         // SAFETY: cached image lives until eviction; no
                         // inserts happen while fetching from this entry.
                         unsafe {
                             exectuples::exec_store_minimal_tuple_ptr(
                                 estate.slot_mut(slot),
-                                estate.es_query_cxt,
+                                mcx,
                                 tuple_of(t),
                             )
                         };
@@ -763,11 +770,12 @@ pub fn exec_memoize<'mcx, C: MemoizeChild<'mcx>>(
                     return Ok(None);
                 };
                 let slot = node.ps_ResultTupleSlot;
+                let mcx = estate.es_query_cxt;
                 // SAFETY: cached image lives until eviction.
                 unsafe {
                     exectuples::exec_store_minimal_tuple_ptr(
                         estate.slot_mut(slot),
-                        estate.es_query_cxt,
+                        mcx,
                         tuple_of(t),
                     )
                 };
@@ -885,12 +893,12 @@ pub fn memoize_stats(node: &MemoizeState<'_>) -> MemoizeInstrumentation {
 
 // Exempt: cache memory is released via exec_end_memoize and the table
 // context's registered destructor.
+mcx::forget_safe_nodrop!(MemoStatus, KeyAttr);
 mcx::forget_safe_struct!(
     CacheEntry { params, tuplehead, hash, complete, lru_prev, lru_next },
     MemoizeState<'_> { plan, ps_ExprContext, ps_ResultTupleSlot, mstatus, nkeys,
         key_attrs, binary_mode, singlerow, entries, free_slots, built,
-        lru_head, lru_tail, table_ctx, mem_used, mem_limit, entry, last_tuple,
-        stats;
+        lru_head, lru_tail, table_ctx, mem_used, mem_limit, entry, last_tuple;
         ps_ResultTupleDesc, tableslot, probeslot, param_exprs, hash_expr,
-        eq_expr, hashtab },
+        eq_expr, hashtab, stats },
 );
