@@ -67,15 +67,16 @@ pub trait ScanNode<'mcx> {
 
 #[cold]
 #[inline(never)]
-fn interrupt_unported() -> ! {
-    panic!("execscan: ProcessInterrupts (tcop/postgres.c) unported")
+fn process_interrupts() -> PgResult<()> {
+    postgres_seams::check_for_interrupts::call()
 }
 
 #[inline(always)]
-fn check_for_interrupts() {
+fn check_for_interrupts() -> PgResult<()> {
     if init_small::globals::InterruptPending() {
-        interrupt_unported();
+        return process_interrupts();
     }
+    Ok(())
 }
 
 enum EpqFetch {
@@ -123,7 +124,7 @@ fn exec_scan_fetch<'mcx, N: ScanNode<'mcx>, const EPQ: bool>(
     node: &mut N,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
-    check_for_interrupts();
+    check_for_interrupts()?;
     if EPQ {
         match epq_fetch(node, estate)? {
             EpqFetch::Tuple(id) => return Ok(Some(id)),
