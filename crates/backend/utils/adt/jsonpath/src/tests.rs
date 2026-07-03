@@ -120,7 +120,8 @@ fn audit_extra_vectors() {
     }
     for (input, msg) in EXTRA_ERR {
         let cx = MemoryContext::new("jsonpath extra err");
-        match jsonpath_in(cx.mcx(), input.as_bytes(), None) {
+        let res = jsonpath_in(cx.mcx(), input.as_bytes(), None);
+        match res {
             Err(e) => assert_eq!(e.message(), *msg, "message for {input:?}"),
             Ok(v) => panic!(
                 "expected error {msg:?} for {input:?}, got {:?}",
