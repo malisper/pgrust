@@ -6,6 +6,7 @@ mod domain;
 mod index;
 mod triggers;
 mod pg_class;
+mod rules;
 #[cfg(test)]
 mod tests;
 
@@ -22,6 +23,7 @@ use types_tuple::{HeapTupleData, NameData, TupleDescData};
 
 pub fn init_seams() {
     relcache_build_seams::scan_pg_relation::set(pg_class::scan_pg_relation);
+    relcache_build_seams::scan_pg_rewrite::set(rules::scan_pg_rewrite);
     relcache_build_seams::relation_build_tuple_desc::set(attrs::relation_build_tuple_desc);
     relcache_build_seams::relation_init_index_access_info::set(
         index::relation_init_index_access_info,
@@ -29,6 +31,7 @@ pub fn init_seams() {
     relcache_build_seams::scan_pg_index_shapes::set(index::scan_pg_index_shapes);
     relcache_build_seams::build_trigger_desc::set(triggers::build_trigger_desc);
     typcache_seams::scan_domain_check_constraints::set(domain::scan_domain_check_constraints);
+    relcache_build_seams::scan_pg_statistic_ext_oids::set(index::scan_pg_statistic_ext_oids);
 }
 
 pub(crate) fn scan_key(attno: i32, strategy: StrategyNumber, func: RegProcedure, arg: Datum) -> ScanKeyData {

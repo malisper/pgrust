@@ -29,6 +29,7 @@ use types_nodes::rawnodes::{
     FKCONSTR_ACTION_CASCADE, FKCONSTR_ACTION_NOACTION, FKCONSTR_ACTION_RESTRICT,
     FKCONSTR_ACTION_SETDEFAULT, FKCONSTR_ACTION_SETNULL, FKCONSTR_MATCH_FULL,
     FKCONSTR_MATCH_SIMPLE,
+    PartitionBoundSpec, PartitionElem, PartitionSpec, PartitionStrategy,
     RangeSubselect, TableLikeClause, WindowDef, CREATE_TABLE_LIKE_ALL,
     CREATE_TABLE_LIKE_COMMENTS, CREATE_TABLE_LIKE_COMPRESSION, CREATE_TABLE_LIKE_CONSTRAINTS,
     CREATE_TABLE_LIKE_DEFAULTS, CREATE_TABLE_LIKE_GENERATED, CREATE_TABLE_LIKE_IDENTITY,
@@ -392,6 +393,119 @@ impl<'mcx> Parser<'mcx> {
                 n.oncommit = on_commit_action(view.v(12).ival());
                 n.tablespacename = opt_str(view.v(13));
                 n.if_not_exists = false;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // PartitionBoundSpec: FOR VALUES WITH (hash_partbound) — HASH lane.
+            393 => panic!("gram_core: HASH partition bounds unported (rule 393)"),
+            // PartitionBoundSpec: FOR VALUES IN_P '(' expr_list ')'
+            394 => {
+                let mut n = Node::build::<PartitionBoundSpec>(mcx)?;
+                n.strategy = PartitionStrategy::List as u8;
+                n.listdatums = view.v(5).list();
+                n.location = view.l(3);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // PartitionBoundSpec: FOR VALUES FROM '(' expr_list ')' TO '(' expr_list ')'
+            395 => {
+                let mut n = Node::build::<PartitionBoundSpec>(mcx)?;
+                n.strategy = PartitionStrategy::Range as u8;
+                n.lowerdatums = view.v(5).list();
+                n.upperdatums = view.v(9).list();
+                n.location = view.l(3);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // PartitionBoundSpec: DEFAULT
+            396 => {
+                let mut n = Node::build::<PartitionBoundSpec>(mcx)?;
+                n.is_default = true;
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // CreateStmt: CREATE OptTemp TABLE qualified_name PARTITION OF
+            // qualified_name OptTypedTableElementList PartitionBoundSpec
+            // OptPartitionSpec table_access_method_clause OptWith
+            // OnCommitOption OptTableSpace
+            459 => {
+                let persistence = view.v(2).ival() as u8;
+                let relation = view.v(4).node().expect("qualified_name");
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    relation
+                        .with_mut::<RangeVar, _>(|r| r.relpersistence = persistence)
+                        .expect("qualified_name is RangeVar");
+                }
+                let parent = view.v(7).node().expect("qualified_name");
+                let mut n = Node::build::<CreateStmt>(mcx)?;
+                n.relation = relation.as_variant::<RangeVar>();
+                n.tableElts = view.v(8).list();
+                n.inhRelations = NodeList::make1(mcx, parent)?;
+                n.partbound = view.v(9).node();
+                n.partspec = view.v(10).node();
+                n.accessMethod = opt_str(view.v(11));
+                n.options = view.v(12).list();
+                n.oncommit = on_commit_action(view.v(13).ival());
+                n.tablespacename = opt_str(view.v(14));
+                n.if_not_exists = false;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // PartitionSpec: PARTITION BY ColId '(' part_params ')'
+            591 => {
+                let strategy = view.v(3).str_val();
+                let mut n = Node::build::<PartitionSpec>(mcx)?;
+                n.strategy = if strategy.eq_ignore_ascii_case("list") {
+                    PartitionStrategy::List
+                } else if strategy.eq_ignore_ascii_case("range") {
+                    PartitionStrategy::Range
+                } else if strategy.eq_ignore_ascii_case("hash") {
+                    PartitionStrategy::Hash
+                } else {
+                    return Err(Box::new(
+                        (*self.errposition_error(
+                            format!("unrecognized partitioning strategy \"{strategy}\""),
+                            view.l(3),
+                        ))
+                        .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+                    ));
+                };
+                n.partParams = view.v(5).list();
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // part_params: part_elem | part_params ',' part_elem
+            592 => {
+                let el = view.v(1).node().expect("part_elem");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            593 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("part_elem"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // part_elem: ColId opt_collate opt_qualified_name
+            594 => {
+                let mut n = Node::build::<PartitionElem>(mcx)?;
+                n.name = Some(view.v(1).str_val());
+                n.collation = view.v(2).list();
+                n.opclass = view.v(3).list();
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // part_elem: func_expr_windowless opt_collate opt_qualified_name
+            595 => {
+                let mut n = Node::build::<PartitionElem>(mcx)?;
+                n.expr = view.v(1).node();
+                n.collation = view.v(2).list();
+                n.opclass = view.v(3).list();
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // part_elem: '(' a_expr ')' opt_collate opt_qualified_name
+            596 => {
+                let mut n = Node::build::<PartitionElem>(mcx)?;
+                n.expr = view.v(2).node();
+                n.collation = view.v(4).list();
+                n.opclass = view.v(5).list();
+                n.location = view.l(1);
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // OptTemp (GLOBAL-deprecated and UNLOGGED variants stay unported).
@@ -956,6 +1070,46 @@ impl<'mcx> Parser<'mcx> {
                         .expect("index_elem_options is IndexElem");
                 }
                 *yyval = YYSTYPE::Node(Some(node));
+            }
+            // opt_qualified_name
+            139 => *yyval = view.v(1),
+            140 => *yyval = YYSTYPE::List(NodeList::nil()),
+            // opt_name_list
+            1579 => *yyval = view.v(2),
+            1580 => *yyval = YYSTYPE::List(NodeList::nil()),
+            // CreateStatsStmt: CREATE STATISTICS [IF NOT EXISTS]
+            // opt_qualified_name opt_name_list ON stats_params FROM from_list
+            611 | 612 => {
+                let b = if rule == 612 { 3 } else { 0 };
+                let mut n = Node::build::<types_nodes::rawnodes::CreateStatsStmt>(mcx)?;
+                n.defnames = view.v(3 + b).list();
+                n.stat_types = view.v(4 + b).list();
+                n.exprs = view.v(6 + b).list();
+                n.relations = view.v(8 + b).list();
+                n.if_not_exists = rule == 612;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // stats_params
+            613 => {
+                let el = view.v(1).node().expect("stats_param");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            614 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("stats_param"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // stats_param: ColId | func_expr_windowless | '(' a_expr ')'
+            615 => {
+                let mut n = Node::build::<types_nodes::rawnodes::StatsElem>(mcx)?;
+                n.name = Some(view.v(1).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            616 | 617 => {
+                let i = if rule == 617 { 2 } else { 1 };
+                let mut n = Node::build::<types_nodes::rawnodes::StatsElem>(mcx)?;
+                n.expr = view.v(i).node();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // OnCommitOption
             602 => *yyval = YYSTYPE::Ival(OnCommitAction::ONCOMMIT_DROP as i32),

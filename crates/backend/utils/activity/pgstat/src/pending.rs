@@ -140,8 +140,10 @@ pub fn pgstat_force_next_flush() {
     FORCE_NEXT_FLUSH.with(|c| c.set(true));
 }
 
-// Snapshot teardown (pgstat_clear_snapshot): reader half, phase 2.
-pub fn pgstat_clear_snapshot() {}
+pub fn pgstat_clear_snapshot() {
+    crate::shmem::clear_snapshot();
+    backend_status_seams::pgstat_clear_backend_status_snapshot::call();
+}
 
 pub const PGSTAT_MIN_INTERVAL: i64 = 1000;
 pub const PGSTAT_MAX_INTERVAL: i64 = 60000;
@@ -225,8 +227,7 @@ fn report_stat_slow(mut force: bool) -> i64 {
 
 // pgstat_flush_pending_entries: relation entries fold into their database's
 // pending entry (pgstat_relation_flush_cb's tail), which this same pass then
-// flushes (C's append-during-iteration dlist walk). The shared-memory apply of
-// each drained entry is the pgstat_shmem.c phase-2 boundary; local flush never
+// flushes (C's append-during-iteration dlist walk). Local flush never
 // contends, so this never reports partial.
 pub(crate) fn pgstat_flush_pending_entries(_nowait: bool) -> bool {
     with_state(|st| {
@@ -238,10 +239,18 @@ pub(crate) fn pgstat_flush_pending_entries(_nowait: bool) -> bool {
                 let Some(PendingData::Relation(tab)) = st.pending.remove(&key) else {
                     continue;
                 };
+                // Ignore entries that never accumulated counts (planner-only opens).
+                if tab.counts == PgStat_TableCounts::default() {
+                    continue;
+                }
+                crate::shmem::flush_relation(key, &tab.counts);
                 flush_relation_into_db(st, key.dboid, &tab.counts);
             } else {
                 debug_assert_eq!(key.kind, PGSTAT_KIND_DATABASE);
-                st.pending.remove(&key);
+                let Some(PendingData::Database(db)) = st.pending.remove(&key) else {
+                    continue;
+                };
+                crate::shmem::flush_database(key, &db);
             }
         }
         st.pending_order.clear();
@@ -255,10 +264,6 @@ pub(crate) fn flush_relation_into_db(
     dboid: Oid,
     counts: &PgStat_TableCounts,
 ) {
-    // Ignore entries that never accumulated counts (e.g. planner-only opens).
-    if *counts == PgStat_TableCounts::default() {
-        return;
-    }
     let dbentry = database::pgstat_prep_database_pending_in(st, dboid);
     dbentry.tuples_returned += counts.tuples_returned;
     dbentry.tuples_fetched += counts.tuples_fetched;

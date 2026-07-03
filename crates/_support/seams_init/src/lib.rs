@@ -11,6 +11,7 @@ pub fn init_all() {
     tableam::init_seams();
     vacuumlazy::init_seams();
     commands_vacuum::init_seams();
+    commands_analyze::init_seams();
     commands_tablespace::init_seams();
     sequence::init_seams();
     clog::init_seams();
@@ -154,7 +155,10 @@ pub fn init_all() {
     fmgr_core::register_late_builtins(adt_acl::builtins::ACL_BUILTINS);
     fmgr_core::register_late_builtins(adt_misc::MISC_BUILTINS);
     fmgr_core::register_late_builtins(dbcommands::builtins::DBCOMMANDS_BUILTINS);
+    fmgr_core::register_late_builtins(adt_rowtypes::ROWTYPES_BUILTINS);
     sql_functions::init_seams();
+    fmgr_core::register_late_builtins(adt_geo::builtins::GEO_BUILTINS);
+    fmgr_core::register_late_builtins(gistproc::GISTPROC_BUILTINS);
     funcapi::init_seams();
     init_small::init_seams();
     miscinit::init_seams();

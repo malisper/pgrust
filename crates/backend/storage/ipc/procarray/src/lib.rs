@@ -314,6 +314,53 @@ pub fn ProcArrayRemove(procno: ProcNumber, latestXid: TransactionId) -> PgResult
     LWLockRelease(ProcArrayLock())
 }
 
+/// (xid, xmin, nsubxid, overflowed); may be out of date arbitrarily quickly.
+pub fn ProcNumberGetTransactionIds(
+    procNumber: ProcNumber,
+) -> (TransactionId, TransactionId, i32, bool) {
+    if procNumber < 0 || procNumber as usize >= ProcGlobal().allProcs.len() {
+        return (InvalidTransactionId, InvalidTransactionId, 0, false);
+    }
+    let proc = GetPGProcByNumber(procNumber);
+    let myprocno = MyProc().expect("ProcNumberGetTransactionIds requires MyProc");
+
+    LWLockAcquire(ProcArrayLock(), LW_SHARED, myprocno).expect("ProcArrayLock");
+    let result = if proc.pid.load(Relaxed) != 0 {
+        let substate = proc.subxidStatus.get();
+        (
+            proc.xid.read(),
+            proc.xmin.read(),
+            substate.count as i32,
+            substate.overflowed,
+        )
+    } else {
+        (InvalidTransactionId, InvalidTransactionId, 0, false)
+    };
+    LWLockRelease(ProcArrayLock()).expect("ProcArrayLock release");
+    result
+}
+
+pub fn BackendPidGetProc(pid: i32) -> Option<&'static PGPROC> {
+    if pid == 0 {
+        return None; // never match dummy PGPROCs
+    }
+    let arrayP = procArray();
+    let hdr = ProcGlobal();
+    let myprocno = MyProc().expect("BackendPidGetProc requires MyProc");
+
+    LWLockAcquire(ProcArrayLock(), LW_SHARED, myprocno).expect("ProcArrayLock");
+    let mut result = None;
+    for index in 0..arrayP.numProcs.get() as usize {
+        let proc = &hdr.allProcs[arrayP.pgprocnos[index].get() as usize];
+        if proc.pid.load(Relaxed) == pid {
+            result = Some(proc);
+            break;
+        }
+    }
+    LWLockRelease(ProcArrayLock()).expect("ProcArrayLock release");
+    result
+}
+
 pub fn ProcArrayEndTransaction(procno: ProcNumber, latestXid: TransactionId) -> PgResult<()> {
     let proc = GetPGProcByNumber(procno);
 

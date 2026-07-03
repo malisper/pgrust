@@ -38,7 +38,9 @@ pub const BTREE_AM_OID: Oid = 403;
 pub const HASH_AM_OID: Oid = 405;
 pub const GIN_AM_OID: Oid = 2742;
 const TEXTOID: Oid = 25;
+pub const GIST_AM_OID: Oid = 783;
 const INT4OID: Oid = 23;
+const BOXOID: Oid = 603;
 const OpclassOidIndexId: Oid = 2687;
 const IndexRelidIndexId: Oid = 2679;
 const Anum_pg_opclass_opcintype: usize = 7;
@@ -99,9 +101,9 @@ fn ConstructTupleDescriptor<'mcx>(
     collationIds: &[Oid],
     opclassIds: &[Oid],
 ) -> PgResult<TupleDescData<'mcx>> {
-    // amroutine->amkeytype: InvalidOid for btree/gin, INT4OID for hash.
+    // amroutine->amkeytype: InvalidOid for btree/gin/gist/brin, INT4OID for hash.
     let amkeytype = match accessMethodId {
-        BTREE_AM_OID | GIN_AM_OID => InvalidOid,
+        BTREE_AM_OID | GIN_AM_OID | GIST_AM_OID | types_core::BRIN_AM_OID => InvalidOid,
         HASH_AM_OID => INT4OID,
         other => unported(&format!("ConstructTupleDescriptor: index AM {other}")),
     };
@@ -158,8 +160,9 @@ fn ConstructTupleDescriptor<'mcx>(
             }
         }
         if keyType != InvalidOid && keyType != indexTupDesc.attr(i).atttypid {
-            // C reads the pg_type row for keyType; the closed AM set reaches
-            // INT4 (hash amkeytype) and text (jsonb_ops opckeytype).
+            // C reads the pg_type row for keyType; closed-set arms: INT4
+            // (hash amkeytype), text (jsonb_ops opckeytype), BOX (gist
+            // point_ops opckeytype).
             let to = indexTupDesc.attr_mut(i);
             match keyType {
                 INT4OID => {
@@ -174,12 +177,19 @@ fn ConstructTupleDescriptor<'mcx>(
                     to.attalign = b'i' as i8;
                     to.attstorage = b'x' as i8;
                 }
+                BOXOID => {
+                    to.attlen = 32;
+                    to.attbyval = false;
+                    to.attalign = b'd' as i8;
+                    to.attstorage = b'p' as i8;
+                }
                 other => unported(&format!(
                     "ConstructTupleDescriptor: opclass keytype override to {other}"
                 )),
             }
             to.atttypid = keyType;
             to.atttypmod = -1;
+
             to.attcompression = 0;
         }
         tupdesc::populate_compact_attribute(&mut indexTupDesc, i);
@@ -350,8 +360,10 @@ pub fn index_create<'mcx>(
     if accessMethodId != BTREE_AM_OID
         && accessMethodId != HASH_AM_OID
         && accessMethodId != GIN_AM_OID
+        && accessMethodId != GIST_AM_OID
+        && accessMethodId != types_core::BRIN_AM_OID
     {
-        unported("index_create: index AMs beyond btree/hash/gin");
+        unported("index_create: index AMs beyond btree/hash/gin/gist/brin");
     }
 
     let pg_class = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
@@ -620,8 +632,10 @@ pub fn index_build<'mcx>(
     if indexRelation.rd_rel.relam != BTREE_AM_OID
         && indexRelation.rd_rel.relam != HASH_AM_OID
         && indexRelation.rd_rel.relam != GIN_AM_OID
+        && indexRelation.rd_rel.relam != GIST_AM_OID
+        && indexRelation.rd_rel.relam != types_core::BRIN_AM_OID
     {
-        unported("index_build: index AMs beyond btree/hash/gin");
+        unported("index_build: index AMs beyond btree/hash/gin/gist/brin");
     }
 
     let guard = miscinit::SecContextGuard::security_restricted(heapRelation.rd_rel.relowner);
@@ -634,8 +648,14 @@ pub fn index_build<'mcx>(
     } else if indexRelation.rd_rel.relam == HASH_AM_OID {
         let r = hashsort::hashbuild(mcx, heapRelation, indexRelation, indexInfo)?;
         (r.heap_tuples, r.index_tuples)
-    } else {
+    } else if indexRelation.rd_rel.relam == types_core::BRIN_AM_OID {
+        let r = brin_build::brinbuild(mcx, heapRelation, indexRelation, indexInfo)?;
+        (r.heap_tuples, r.index_tuples)
+    } else if indexRelation.rd_rel.relam == GIN_AM_OID {
         let r = ginbuild::ginbuild(mcx, heapRelation, indexRelation, indexInfo)?;
+        (r.heap_tuples, r.index_tuples)
+    } else {
+        let r = gistbuild::gistbuild(mcx, heapRelation, indexRelation, indexInfo)?;
         (r.heap_tuples, r.index_tuples)
     };
 

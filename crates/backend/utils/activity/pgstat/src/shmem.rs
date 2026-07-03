@@ -1,0 +1,242 @@
+// pgstat_shmem.c's shared store + pgstat.c's fetch/snapshot half. C keeps the
+// entries in DSM dshash outside memory contexts; one process-global mutex
+// replaces the dshash partitions and per-entry lwlocks on this cold path.
+
+use core::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+use rustc_hash::FxBuildHasher;
+use types_core::{InvalidOid, TimestampTz};
+
+use crate::database::PgStat_StatDBEntry;
+use crate::pending::{
+    PgStat_HashKey, PGSTAT_KIND_ARCHIVER, PGSTAT_KIND_DATABASE, PGSTAT_KIND_WAL,
+};
+use crate::relation::PgStat_TableCounts;
+use crate::{
+    PgStat_Counter, PGSTAT_FETCH_CONSISTENCY_CACHE, PGSTAT_FETCH_CONSISTENCY_NONE,
+    PGSTAT_FETCH_CONSISTENCY_SNAPSHOT,
+};
+
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub struct PgStat_StatTabEntry {
+    pub numscans: PgStat_Counter,
+    pub lastscan: TimestampTz,
+    pub tuples_returned: PgStat_Counter,
+    pub tuples_fetched: PgStat_Counter,
+    pub tuples_inserted: PgStat_Counter,
+    pub tuples_updated: PgStat_Counter,
+    pub tuples_deleted: PgStat_Counter,
+    pub tuples_hot_updated: PgStat_Counter,
+    pub tuples_newpage_updated: PgStat_Counter,
+    pub live_tuples: PgStat_Counter,
+    pub dead_tuples: PgStat_Counter,
+    pub mod_since_analyze: PgStat_Counter,
+    pub ins_since_vacuum: PgStat_Counter,
+    pub blocks_fetched: PgStat_Counter,
+    pub blocks_hit: PgStat_Counter,
+    pub last_vacuum_time: TimestampTz,
+    pub vacuum_count: PgStat_Counter,
+    pub last_autovacuum_time: TimestampTz,
+    pub autovacuum_count: PgStat_Counter,
+    pub last_analyze_time: TimestampTz,
+    pub analyze_count: PgStat_Counter,
+    pub last_autoanalyze_time: TimestampTz,
+    pub autoanalyze_count: PgStat_Counter,
+    // times in milliseconds
+    pub total_vacuum_time: PgStat_Counter,
+    pub total_autovacuum_time: PgStat_Counter,
+    pub total_analyze_time: PgStat_Counter,
+    pub total_autoanalyze_time: PgStat_Counter,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum SharedEntry {
+    Relation(PgStat_StatTabEntry),
+    Database(PgStat_StatDBEntry),
+}
+
+type Store = HashMap<PgStat_HashKey, SharedEntry, FxBuildHasher>;
+
+static SHARED_STATS: Mutex<Store> = Mutex::new(HashMap::with_hasher(FxBuildHasher));
+
+pub(crate) fn flush_relation(key: PgStat_HashKey, counts: &PgStat_TableCounts) {
+    let scan_ts = if counts.numscans != 0 {
+        xact_seams::get_current_transaction_stop_timestamp::call()
+    } else {
+        0
+    };
+    let mut store = SHARED_STATS.lock().unwrap();
+    let SharedEntry::Relation(tabentry) = store
+        .entry(key)
+        .or_insert(SharedEntry::Relation(PgStat_StatTabEntry::default()))
+    else {
+        unreachable!("relation key holds non-relation shared entry")
+    };
+
+    tabentry.numscans += counts.numscans;
+    if counts.numscans != 0 && scan_ts > tabentry.lastscan {
+        tabentry.lastscan = scan_ts;
+    }
+    tabentry.tuples_returned += counts.tuples_returned;
+    tabentry.tuples_fetched += counts.tuples_fetched;
+    tabentry.tuples_inserted += counts.tuples_inserted;
+    tabentry.tuples_updated += counts.tuples_updated;
+    tabentry.tuples_deleted += counts.tuples_deleted;
+    tabentry.tuples_hot_updated += counts.tuples_hot_updated;
+    tabentry.tuples_newpage_updated += counts.tuples_newpage_updated;
+
+    if counts.truncdropped {
+        tabentry.live_tuples = 0;
+        tabentry.dead_tuples = 0;
+        tabentry.ins_since_vacuum = 0;
+    }
+
+    tabentry.live_tuples += counts.delta_live_tuples;
+    tabentry.dead_tuples += counts.delta_dead_tuples;
+    tabentry.mod_since_analyze += counts.changed_tuples;
+    tabentry.ins_since_vacuum += counts.tuples_inserted;
+    tabentry.blocks_fetched += counts.blocks_fetched;
+    tabentry.blocks_hit += counts.blocks_hit;
+
+    tabentry.live_tuples = tabentry.live_tuples.max(0);
+    tabentry.dead_tuples = tabentry.dead_tuples.max(0);
+}
+
+pub(crate) fn flush_database(key: PgStat_HashKey, pending: &PgStat_StatDBEntry) {
+    let mut store = SHARED_STATS.lock().unwrap();
+    let SharedEntry::Database(shared) = store
+        .entry(key)
+        .or_insert(SharedEntry::Database(PgStat_StatDBEntry::default()))
+    else {
+        unreachable!("database key holds non-database shared entry")
+    };
+
+    shared.xact_commit += pending.xact_commit;
+    shared.xact_rollback += pending.xact_rollback;
+    shared.blocks_fetched += pending.blocks_fetched;
+    shared.blocks_hit += pending.blocks_hit;
+    shared.tuples_returned += pending.tuples_returned;
+    shared.tuples_fetched += pending.tuples_fetched;
+    shared.tuples_inserted += pending.tuples_inserted;
+    shared.tuples_updated += pending.tuples_updated;
+    shared.tuples_deleted += pending.tuples_deleted;
+    // last_autovac_time / checksum failures are reported immediately in C;
+    // stat_reset_timestamp is never accumulated.
+    debug_assert_eq!(pending.last_autovac_time, 0);
+    debug_assert_eq!(pending.checksum_failures, 0);
+    debug_assert_eq!(pending.last_checksum_failure, 0);
+    shared.conflict_tablespace += pending.conflict_tablespace;
+    shared.conflict_lock += pending.conflict_lock;
+    shared.conflict_snapshot += pending.conflict_snapshot;
+    shared.conflict_logicalslot += pending.conflict_logicalslot;
+    shared.conflict_bufferpin += pending.conflict_bufferpin;
+    shared.conflict_startup_deadlock += pending.conflict_startup_deadlock;
+    shared.temp_bytes += pending.temp_bytes;
+    shared.temp_files += pending.temp_files;
+    shared.deadlocks += pending.deadlocks;
+    shared.blk_read_time += pending.blk_read_time;
+    shared.blk_write_time += pending.blk_write_time;
+    shared.sessions += pending.sessions;
+    shared.session_time += pending.session_time;
+    shared.active_time += pending.active_time;
+    shared.idle_in_transaction_time += pending.idle_in_transaction_time;
+    shared.sessions_abandoned += pending.sessions_abandoned;
+    shared.sessions_fatal += pending.sessions_fatal;
+    shared.sessions_killed += pending.sessions_killed;
+    shared.parallel_workers_to_launch += pending.parallel_workers_to_launch;
+    shared.parallel_workers_launched += pending.parallel_workers_launched;
+}
+
+pub(crate) fn drop_entry(key: PgStat_HashKey) {
+    SHARED_STATS.lock().unwrap().remove(&key);
+}
+
+struct SnapshotState {
+    mode: i32,
+    stats: HashMap<PgStat_HashKey, Option<SharedEntry>, FxBuildHasher>,
+}
+
+thread_local! {
+    static SNAPSHOT: RefCell<SnapshotState> = RefCell::new(SnapshotState {
+        mode: PGSTAT_FETCH_CONSISTENCY_NONE,
+        stats: HashMap::with_hasher(FxBuildHasher),
+    });
+}
+
+fn build_snapshot() {
+    SNAPSHOT.with(|s| {
+        let mut snap = s.borrow_mut();
+        if snap.mode == PGSTAT_FETCH_CONSISTENCY_SNAPSHOT {
+            return;
+        }
+        debug_assert!(snap.stats.is_empty());
+        let my_dboid = init_small::globals::MyDatabaseId();
+        let store = SHARED_STATS.lock().unwrap();
+        for (&key, &entry) in store.iter() {
+            // database stats are accessed_across_databases in C
+            if key.dboid != my_dboid
+                && key.dboid != InvalidOid
+                && key.kind != PGSTAT_KIND_DATABASE
+            {
+                continue;
+            }
+            snap.stats.insert(key, Some(entry));
+        }
+        snap.mode = PGSTAT_FETCH_CONSISTENCY_SNAPSHOT;
+    });
+}
+
+// Returns an owned copy; C hands back a pointer into snapshot memory. The
+// negative-lookup caching in CACHE mode mirrors C's entry->data = NULL.
+pub(crate) fn fetch_entry(key: PgStat_HashKey) -> Option<SharedEntry> {
+    let consistency = crate::pgstat_fetch_consistency();
+
+    if consistency == PGSTAT_FETCH_CONSISTENCY_SNAPSHOT {
+        build_snapshot();
+    }
+
+    if consistency > PGSTAT_FETCH_CONSISTENCY_NONE {
+        let cached = SNAPSHOT.with(|s| s.borrow().stats.get(&key).copied());
+        if let Some(entry) = cached {
+            return entry;
+        }
+        if consistency == PGSTAT_FETCH_CONSISTENCY_SNAPSHOT {
+            return None;
+        }
+    }
+
+    let entry = SHARED_STATS.lock().unwrap().get(&key).copied();
+    if consistency == PGSTAT_FETCH_CONSISTENCY_CACHE {
+        SNAPSHOT.with(|s| {
+            let mut snap = s.borrow_mut();
+            snap.mode = PGSTAT_FETCH_CONSISTENCY_CACHE;
+            snap.stats.insert(key, entry);
+        });
+    }
+    entry
+}
+
+pub(crate) fn clear_snapshot() {
+    SNAPSHOT.with(|s| {
+        let mut snap = s.borrow_mut();
+        snap.mode = PGSTAT_FETCH_CONSISTENCY_NONE;
+        snap.stats.clear();
+    });
+}
+
+pub fn pgstat_have_entry(kind: u32, dboid: types_core::Oid, objid: u64) -> bool {
+    if (PGSTAT_KIND_ARCHIVER.0..=PGSTAT_KIND_WAL.0).contains(&kind) {
+        return true;
+    }
+    let key = PgStat_HashKey {
+        kind: crate::pending::PgStat_Kind(kind),
+        dboid,
+        objid,
+    };
+    // C creates the shared entry at pending-prep time, so unflushed pending
+    // counts already answer true there; here shared entries appear at flush.
+    SHARED_STATS.lock().unwrap().contains_key(&key)
+        || crate::pending::pgstat_have_pending(key)
+}

@@ -917,16 +917,13 @@ pub(crate) fn get_restriction_variable<'mcx>(
 
     // estimate_expression_value: Consts pass through and a PARAM_EXEC stays a
     // Param (no bound value at plan time); other shapes keep the loud arm.
+    // C runs estimate_expression_value over the non-var side (stable-fn
+    // folding); unfolded expressions land on the var_eq_non_const leg, which
+    // matches C exactly whenever the var side has no MCV stats.
     if vardata.rel.is_some() && rdata.rel.is_none() {
-        if !matches!(right.node_tag(), NodeTag::T_Const | NodeTag::T_Param) {
-            panic!("estimate_expression_value (clauses.c): M2 expression lane");
-        }
         return Ok(Some((vardata, right, true)));
     }
     if vardata.rel.is_none() && rdata.rel.is_some() {
-        if !matches!(left.node_tag(), NodeTag::T_Const | NodeTag::T_Param) {
-            panic!("estimate_expression_value (clauses.c): M2 expression lane");
-        }
         return Ok(Some((rdata, left, false)));
     }
     Ok(None)
@@ -981,8 +978,11 @@ fn examine_simple_variable<'mcx>(
     varattno: i16,
 ) -> PgResult<Option<PgStatisticBundle<'mcx>>> {
     let rte = run.rte(varno as usize);
-    if rte.rtekind != RTEKind::RTE_RELATION {
-        panic!("examine_simple_variable (selfuncs.c): {:?}; M2 lane", rte.rtekind);
+    match rte.rtekind {
+        RTEKind::RTE_RELATION => {}
+        // C falls through with no stats for these RTE kinds.
+        RTEKind::RTE_FUNCTION | RTEKind::RTE_VALUES | RTEKind::RTE_JOIN => return Ok(None),
+        other => panic!("examine_simple_variable (selfuncs.c): {other:?}; M2 lane"),
     }
     syscache_seams::lookup_pg_statistic_bundle::call(run.mcx, rte.relid, varattno, rte.inh)
 }
@@ -1125,9 +1125,65 @@ pub fn amcostestimate(
         types_relscan::IndexAmKind::Btree => btcostestimate(run, path_id, loop_count),
         types_relscan::IndexAmKind::Hash => hashcostestimate(run, path_id, loop_count),
         types_relscan::IndexAmKind::Gin => gincostestimate(run, path_id, loop_count),
+        types_relscan::IndexAmKind::Gist => gistcostestimate(run, path_id, loop_count),
+        types_relscan::IndexAmKind::Brin => brincostestimate(run, path_id, loop_count),
         #[allow(unreachable_patterns)]
         other => panic!("amcostestimate (selfuncs.c): {other:?}; M2 index-AM lane"),
     }
+}
+
+// gistcostestimate (selfuncs.c): genericcostestimate + log-fanout-100 descent.
+fn gistcostestimate(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    loop_count: f64,
+) -> PgResult<AmCostEstimate> {
+    let (index_tuples, tree_height) = {
+        let PathNode::IndexPath(ip) = run.root.path(path_id) else {
+            panic!("gistcostestimate: not an IndexPath")
+        };
+        let index = ip.indexinfo.as_ref().expect("indexinfo set");
+        let mut tree_height = index.tree_height.get();
+        if tree_height < 0 {
+            tree_height = if index.pages > 1 {
+                ((index.pages as f64).ln() / 100.0f64.ln()) as i32
+            } else {
+                0
+            };
+            index.tree_height.set(tree_height);
+        }
+        (index.tuples, tree_height)
+    };
+
+    let mut costs = GenericCosts {
+        num_index_tuples: 0.0,
+        num_sa_scans: 1.0,
+        index_startup_cost: 0.0,
+        index_total_cost: 0.0,
+        index_selectivity: 0.0,
+        index_correlation: 0.0,
+        num_index_pages: 0.0,
+    };
+    genericcostestimate(run, path_id, loop_count, &mut costs)?;
+
+    let cpu_operator_cost = gucs::cpu_operator_cost();
+    if index_tuples > 1.0 {
+        let descent_cost = index_tuples.ln().ceil() * cpu_operator_cost;
+        costs.index_startup_cost += descent_cost;
+        costs.index_total_cost += costs.num_sa_scans * descent_cost;
+    }
+    let descent_cost =
+        (tree_height as f64 + 1.0) * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
+    costs.index_startup_cost += descent_cost;
+    costs.index_total_cost += costs.num_sa_scans * descent_cost;
+
+    Ok(AmCostEstimate {
+        index_startup_cost: costs.index_startup_cost,
+        index_total_cost: costs.index_total_cost,
+        index_selectivity: costs.index_selectivity,
+        index_correlation: costs.index_correlation,
+        index_pages: costs.num_index_pages,
+    })
 }
 
 struct GenericCosts {
@@ -1285,6 +1341,118 @@ fn hashcostestimate(
         index_selectivity: costs.index_selectivity,
         index_correlation: 0.0,
         index_pages: costs.num_index_pages,
+    })
+}
+
+// brincostestimate (selfuncs.c): search behavior completely different from
+// other index types.
+fn brincostestimate(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    loop_count: f64,
+) -> PgResult<AmCostEstimate> {
+    let (index_quals, index_pages, index_rel, reltablespace, indexoid, clause_attnums) = {
+        let PathNode::IndexPath(ip) = run.root.path(path_id) else {
+            panic!("brincostestimate: not an IndexPath")
+        };
+        let index = ip.indexinfo.as_ref().expect("indexinfo set");
+        let mut attnums: Vec<i16> = Vec::new();
+        for ic in ip.indexclauses.iter() {
+            attnums.push(index.indexkeys[ic.indexcol as usize] as i16);
+        }
+        (
+            get_quals_from_indexclauses(run, path_id),
+            index.pages,
+            index.rel.expect("index rel set"),
+            index.reltablespace,
+            index.indexoid,
+            attnums,
+        )
+    };
+    let num_pages = index_pages as f64;
+    let baserel_relid = run.root.rel(index_rel).relid as i32;
+    let baserel_pages = run.root.rel(index_rel).pages as f64;
+
+    let (spc_random_page_cost, spc_seq_page_cost) =
+        crate::costsize::get_tablespace_page_costs(reltablespace);
+
+    // Fetch pagesPerRange/revmapNumPages from the index itself (a lock is
+    // already held from plancat).
+    let mcx = run.mcx;
+    let (pages_per_range, revmap_num_pages) = {
+        let index_rel_open = indexam::index_open(mcx, indexoid, types_rel::NoLock)?;
+        let stats = brin::brinGetStats(&index_rel_open)?;
+        indexam::index_close(index_rel_open, types_rel::NoLock)?;
+        (stats.pagesPerRange as f64, stats.revmapNumPages as f64)
+    };
+    let index_ranges = (baserel_pages / pages_per_range).ceil().max(1.0);
+
+    // Index correlation: the largest absolute correlation among the queried
+    // columns (0 when no stats).
+    let mut index_correlation = 0.0f64;
+    let rte_relid = run.rte(baserel_relid as usize).relid;
+    let rte_inh = run.rte(baserel_relid as usize).inh;
+    for &attnum in &clause_attnums {
+        if attnum == 0 {
+            panic!("brincostestimate (selfuncs.c): expression index column; M2 lane");
+        }
+        if let Some(bundle) =
+            syscache_seams::lookup_pg_statistic_bundle::call(mcx, rte_relid, attnum, rte_inh)?
+        {
+            if let Some(slot) =
+                bundle.slots.iter().find(|sl| sl.kind == STATISTIC_KIND_CORRELATION)
+            {
+                let numbers = slot.numbers()?;
+                let var_correlation = if !numbers.is_empty() {
+                    (numbers[0] as f64).abs()
+                } else {
+                    0.0
+                };
+                if var_correlation > index_correlation {
+                    index_correlation = var_correlation;
+                }
+            }
+        }
+    }
+
+    let qual_selectivity = crate::clausesel::clauselist_selectivity(
+        run,
+        &index_quals,
+        baserel_relid,
+        JOIN_INNER,
+        None,
+    )?;
+
+    let minimal_ranges = (index_ranges * qual_selectivity).ceil();
+    let estimated_ranges = if index_correlation < 1.0e-10 {
+        index_ranges
+    } else {
+        (minimal_ranges / index_correlation).min(index_ranges)
+    };
+
+    let selec = clamp_probability(estimated_ranges / index_ranges);
+
+    let qual_arg_cost = index_other_operands_eval_cost(run, &index_quals)?;
+
+    // Startup: read the whole revmap sequentially, plus the qual setup.
+    let mut index_startup_cost = spc_seq_page_cost * revmap_num_pages * loop_count;
+    index_startup_cost += qual_arg_cost;
+
+    // Total: the rest of the index in random order.
+    let mut index_total_cost = index_startup_cost
+        + spc_random_page_cost * (num_pages - revmap_num_pages) * loop_count;
+
+    // Small per-matched-range charge, scaled by pages per range (bitmap
+    // manipulation cost).
+    index_total_cost +=
+        0.1 * gucs::cpu_operator_cost() * estimated_ranges * pages_per_range;
+
+    Ok(AmCostEstimate {
+        index_startup_cost,
+        index_total_cost,
+        index_selectivity: selec,
+        index_correlation: index_correlation,
+        index_pages: num_pages,
     })
 }
 
@@ -1609,16 +1777,46 @@ pub fn estimate_num_groups_pgset<'mcx>(
         let mut relmaxndistinct = 1.0f64;
         let mut relvarcount = 0usize;
         let mut rest: mcx::PgVec<'_, GroupVarInfo> = mcx::PgVec::new_in(mcx);
+        let mut relvars: mcx::PgVec<'_, GroupVarInfo> = mcx::PgVec::new_in(mcx);
         for vi in remaining {
             if vi.rel == rel_id {
-                reldistinct *= vi.ndistinct;
-                if relmaxndistinct < vi.ndistinct {
-                    relmaxndistinct = vi.ndistinct;
-                }
-                relvarcount += 1;
+                relvars.push(vi);
             } else {
                 rest.push(vi);
             }
+        }
+        // estimate_multivariate_ndistinct loop (selfuncs.c): consume vars
+        // covered by ndistinct extended statistics first.
+        while relvars.len() >= 2 && !run.root.rel(rel_id).statlist.is_empty() {
+            let mut varattnos: mcx::PgVec<'_, i16> = mcx::PgVec::new_in(mcx);
+            for vi in relvars.iter() {
+                varattnos.push(run.root.expr_node(vi.var).as_var().unwrap().varattno);
+            }
+            let Some((mvndistinct, covered)) =
+                crate::extended_stats::estimate_multivariate_ndistinct(run, rel_id, &varattnos)?
+            else {
+                break;
+            };
+            reldistinct *= mvndistinct;
+            if relmaxndistinct < mvndistinct {
+                relmaxndistinct = mvndistinct;
+            }
+            relvarcount += 1;
+            let mut kept: mcx::PgVec<'_, GroupVarInfo> = mcx::PgVec::new_in(mcx);
+            for vi in relvars {
+                let attno = run.root.expr_node(vi.var).as_var().unwrap().varattno;
+                if !covered.contains(&attno) {
+                    kept.push(vi);
+                }
+            }
+            relvars = kept;
+        }
+        for vi in relvars {
+            reldistinct *= vi.ndistinct;
+            if relmaxndistinct < vi.ndistinct {
+                relmaxndistinct = vi.ndistinct;
+            }
+            relvarcount += 1;
         }
         let (rel_tuples, rel_rows) = {
             let rel = run.root.rel(rel_id);

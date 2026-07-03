@@ -181,6 +181,7 @@ fn fake_index_info(
         indoption: PgVec::new_in(mcx),
         indcollation: PgVec::new_in(mcx),
         supportinfo: Vec::new(),
+        support: PgVec::new_in(mcx),
     })
 }
 

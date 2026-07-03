@@ -262,9 +262,11 @@ fn pull_window_input_vars<'mcx>(node: Node<'mcx>, out: &mut PgVec<'_, Node<'mcx>
         NodeTag::T_Const => {}
         NodeTag::T_WindowFunc => {
             let wf = node.as_window_func().unwrap();
-            debug_assert!(wf.aggfilter.is_none());
             for arg in &wf.args {
                 pull_window_input_vars(arg, out);
+            }
+            if let Some(f) = wf.aggfilter {
+                pull_window_input_vars(f, out);
             }
         }
         NodeTag::T_TargetEntry => {

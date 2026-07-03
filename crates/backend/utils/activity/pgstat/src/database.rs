@@ -184,6 +184,19 @@ pub(crate) fn pgstat_update_dbstats(_ts: TimestampTz) {
     });
 }
 
+pub fn pgstat_fetch_stat_dbentry(dboid: Oid) -> Option<PgStat_StatDBEntry> {
+    let key = PgStat_HashKey {
+        kind: PGSTAT_KIND_DATABASE,
+        dboid,
+        objid: 0,
+    };
+    match crate::shmem::fetch_entry(key) {
+        Some(crate::shmem::SharedEntry::Database(d)) => Some(d),
+        Some(_) => unreachable!("database key holds non-database shared entry"),
+        None => None,
+    }
+}
+
 pub(crate) fn pgstat_prep_database_pending_in<'a>(
     st: &'a mut PgStatState,
     dboid: Oid,

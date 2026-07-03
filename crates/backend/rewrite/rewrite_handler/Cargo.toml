@@ -26,6 +26,8 @@ format_type = { path = "../../utils/adt/format_type" }
 pg_depend = { path = "../../catalog/pg_depend" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+funcapi = { path = "../../utils/fmgr/funcapi" }
 
 [dev-dependencies]
 transam_seams = { path = "../../access/transam/transam_seams" }

@@ -173,28 +173,42 @@ fn pull_up_simple_subquery<'mcx>(
     rte_node: Node<'mcx>,
 ) -> PgResult<()> {
     let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
-    let sub = rte.subquery.expect("RTE_SUBQUERY has a subquery");
+    let shared_sub = rte.subquery.expect("RTE_SUBQUERY has a subquery");
 
-    if sub.hasSubLinks {
+    if shared_sub.hasSubLinks {
         panic!("pull_up_sublinks (prepjointree.c): sublinks in pulled-up subquery; M2 lane");
     }
     assert!(
-        !sub.hasRowSecurity,
+        !shared_sub.hasRowSecurity,
         "pull_up_simple_subquery (prepjointree.c): hasRowSecurity propagation unported"
     );
     assert!(
-        sub.rowMarks.is_nil(),
+        shared_sub.rowMarks.is_nil(),
         "pull_up_simple_subquery (prepjointree.c): rowMarks concat unported"
     );
-    for srte_node in &sub.rtable {
-        let srte = srte_node.as_range_tbl_entry().expect("rtable cell");
-        if srte.rtekind == RTEKind::RTE_SUBQUERY {
-            panic!(
-                "pull_up_simple_subquery (prepjointree.c): recursive pull_up_subqueries \
-                 (nested subquery / view-on-view) not ported"
-            );
+    // C recursively completes pull_up_subqueries for the child before
+    // splicing it in; runs on a cells-copy (C copyObject), the shared tree
+    // is never written.
+    let sub: &Query<'mcx> = if shared_sub
+        .rtable
+        .iter()
+        .any(|n| n.as_range_tbl_entry().expect("rtable cell").rtekind == RTEKind::RTE_SUBQUERY)
+    {
+        let mut sub_local = crate::subselect::query_cells_copy(mcx, shared_sub)?;
+        // Fresh RTE nodes: the recursive pass ends with a with_mut fixup
+        // (subquery = None) that must never write a shared node.
+        let mut fresh_rtable = NodeList::nil();
+        for srte_node in &sub_local.rtable {
+            let srte = srte_node.as_range_tbl_entry().expect("rtable cell");
+            fresh_rtable
+                .lappend(mcx, rte_copy_with_perminfoindex(mcx, srte, srte.perminfoindex)?)?;
         }
-    }
+        sub_local.rtable = fresh_rtable;
+        pull_up_subqueries(mcx, &mut sub_local)?;
+        mcx::alloc_leak_in(mcx, sub_local)?
+    } else {
+        shared_sub
+    };
     let sub_jt = sub.jointree.expect("jointree is a FromExpr");
     if sub_jt.fromlist.is_nil() {
         panic!(
@@ -213,16 +227,7 @@ fn pull_up_simple_subquery<'mcx>(
     };
     let mut off_fromlist = NodeList::nil();
     for jnode in &sub_jt.fromlist {
-        match jnode.node_tag() {
-            NodeTag::T_RangeTblRef => {
-                let r = jnode.as_range_tbl_ref().expect("RangeTblRef");
-                off_fromlist
-                    .lappend(mcx, Node::mk_range_tbl_ref(mcx, r.rtindex + rtoffset)?)?;
-            }
-            other => panic!(
-                "OffsetVarNodes (rewriteManip.c): {other:?} jointree arm; M2 join lane"
-            ),
-        }
+        off_fromlist.lappend(mcx, offset_jointree(mcx, jnode, rtoffset)?)?;
     }
     let off_quals = offset_opt(mcx, sub_jt.quals, rtoffset)?;
 
@@ -271,10 +276,30 @@ fn pull_up_simple_subquery<'mcx>(
         };
         // Copy, don't scribble: the subquery may be shared with a cached
         // parse tree (sublink pull-up) and a replan re-runs this offset.
-        parse.rtable.lappend(
-            mcx,
-            rte_copy_with_perminfoindex(mcx, srte, new_index)?,
-        )?;
+        let copy = rte_copy_with_perminfoindex(mcx, srte, new_index)?;
+        // range_table_walker's RTE legs of OffsetVarNodes: join alias vars and
+        // function expressions carry Vars into the combined rtable.
+        if srte.rtekind == RTEKind::RTE_JOIN {
+            let off_aliasvars = match clauses::walker::mutate_list(
+                mcx,
+                &srte.joinaliasvars,
+                &mut |n| offset_expr(mcx, n, rtoffset),
+            )? {
+                Some(l) => l,
+                None => srte.joinaliasvars.clone_in(mcx)?,
+            };
+            // SAFETY: exclusive pre-seal fixup of the fresh copy.
+            unsafe { copy.with_mut::<RangeTblEntry, _>(|r| r.joinaliasvars = off_aliasvars) };
+        }
+        if srte.rtekind == RTEKind::RTE_FUNCTION {
+            if let Some(l) = clauses::walker::mutate_list(mcx, &srte.functions, &mut |n| {
+                offset_expr(mcx, n, rtoffset)
+            })? {
+                // SAFETY: exclusive pre-seal fixup of the fresh copy.
+                unsafe { copy.with_mut::<RangeTblEntry, _>(|r| r.functions = l) };
+            }
+        }
+        parse.rtable.lappend(mcx, copy)?;
     }
     for p in &sub.rteperminfos {
         parse.rteperminfos.lappend(mcx, p)?;
@@ -340,6 +365,40 @@ fn splice_and_replace<'mcx>(
 }
 
 // OffsetVarNodes (rewriteManip.c), functional: changed nodes are rebuilt.
+// OffsetVarNodes' jointree leg (rewriteManip.c): RangeTblRef rtindex and
+// JoinExpr rtindex/quals shift by rtoffset; the tree is rebuilt, not scribbled.
+fn offset_jointree<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    rtoffset: i32,
+) -> PgResult<Node<'mcx>> {
+    match node.node_tag() {
+        NodeTag::T_RangeTblRef => {
+            let r = node.as_range_tbl_ref().expect("RangeTblRef");
+            Node::mk_range_tbl_ref(mcx, r.rtindex + rtoffset)
+        }
+        NodeTag::T_JoinExpr => {
+            let j = node.as_join_expr().expect("JoinExpr");
+            let quals = offset_opt(mcx, j.quals, rtoffset)?;
+            Node::mk(
+                mcx,
+                types_nodes::JoinExpr {
+                    jointype: j.jointype,
+                    isNatural: j.isNatural,
+                    larg: offset_jointree(mcx, j.larg, rtoffset)?,
+                    rarg: offset_jointree(mcx, j.rarg, rtoffset)?,
+                    usingClause: j.usingClause.clone_in(mcx)?,
+                    join_using_alias: j.join_using_alias,
+                    quals,
+                    alias: j.alias,
+                    rtindex: j.rtindex + rtoffset,
+                },
+            )
+        }
+        other => panic!("OffsetVarNodes (rewriteManip.c): {other:?} jointree arm"),
+    }
+}
+
 fn offset_expr<'mcx>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,
@@ -373,7 +432,14 @@ fn offset_var<'mcx>(mcx: Mcx<'mcx>, v: &Var<'mcx>, rtoffset: i32) -> PgResult<Va
         vartype: v.vartype,
         vartypmod: v.vartypmod,
         varcollid: v.varcollid,
-        varnullingrels: v.varnullingrels.clone_in(mcx)?,
+        varnullingrels: {
+            // offset_relid_set: nulling relids (incl. ojrelids) shift too.
+            let mut out = types_nodes::Bitmapset::default();
+            for m in v.varnullingrels.iter() {
+                out.add_member(mcx, m + rtoffset)?;
+            }
+            out
+        },
         varlevelsup: v.varlevelsup,
         varreturningtype: v.varreturningtype,
         varnosyn: if v.varnosyn > 0 { v.varnosyn + rtoffset as u32 } else { v.varnosyn },

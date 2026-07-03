@@ -1032,6 +1032,8 @@ mod tests {
             pgstat_enabled: Cell::new(false),
             rd_amcache: Default::default(),
             rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
+            rd_support: PgVec::new_in(mcx),
+            rd_support: PgVec::new_in(cx.mcx()),
             rd_supportinfo: Default::default(),
             rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),

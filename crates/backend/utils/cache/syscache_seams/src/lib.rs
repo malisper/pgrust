@@ -230,6 +230,7 @@ pub struct PgClassLsShape {
     pub relkind: i8,
     pub relpersistence: i8,
     pub relispartition: bool,
+    pub relhassubclass: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -771,6 +772,36 @@ seam_core::seam!(
 seam_core::seam!(
     // pg_type.typanalyze regproc for examine_attribute; InvalidOid = none.
     pub fn pg_type_typanalyze(typid: Oid) -> PgResult<Oid>
+);
+
+pub struct StatExtForm<'mcx> {
+    pub stxrelid: Oid,
+    pub keys: PgVec<'mcx, i16>,
+    pub kinds: PgVec<'mcx, u8>,
+    pub stattarget: i32,
+    pub has_exprs: bool,
+}
+
+seam_core::seam!(
+    // SearchSysCache1(STATEXTOID) projected to the planner's reads.
+    pub fn statext_form<'mcx>(mcx: Mcx<'mcx>, statoid: Oid) -> PgResult<Option<StatExtForm<'mcx>>>
+);
+
+seam_core::seam!(
+    // SearchSysCache2(STATEXTDATASTXOID) per-kind non-null flags
+    // (ndistinct, dependencies, mcv, expressions); None = no data row.
+    pub fn statext_data_kinds(statoid: Oid, inh: bool) -> PgResult<Option<(bool, bool, bool, bool)>>
+);
+
+seam_core::seam!(
+    // SysCacheGetAttr(STATEXTDATASTXOID, anum) detoasted varlena image
+    // (4-byte header included); None = NULL or no data row.
+    pub fn statext_data_blob<'mcx>(
+        mcx: Mcx<'mcx>,
+        statoid: Oid,
+        inh: bool,
+        anum: i32,
+    ) -> PgResult<Option<PgVec<'mcx, u8>>>
 );
 
 seam_core::seam!(
