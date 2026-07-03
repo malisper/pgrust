@@ -916,7 +916,7 @@ fn bt_insert(tag: &types_storage::buf::buftag, id: i32) -> i32 {
     let hash = BufTableHashCode(tag);
     let lock = BufMappingPartitionLock(hash);
     lwlock::LWLockAcquire(lock, lwlock::LW_EXCLUSIVE, globals::MyProcNumber()).unwrap();
-    let r = BufTableInsert(tag, hash, id).unwrap();
+    let r = crate::buf_table::BufTableInsert(tag, hash, id).unwrap();
     lwlock::LWLockRelease(lock).unwrap();
     r
 }
@@ -934,7 +934,7 @@ fn bt_delete(tag: &types_storage::buf::buftag) -> types_error::PgResult<()> {
     let hash = BufTableHashCode(tag);
     let lock = BufMappingPartitionLock(hash);
     lwlock::LWLockAcquire(lock, lwlock::LW_EXCLUSIVE, globals::MyProcNumber()).unwrap();
-    let r = BufTableDelete(tag, hash);
+    let r = crate::buf_table::BufTableDelete(tag, hash);
     lwlock::LWLockRelease(lock).unwrap();
     r
 }
