@@ -92,8 +92,8 @@ unsafe fn wq_delete(lock: *mut LOCK, procno: ProcNumber) {
     q.count -= 1;
 }
 
-// Deletion-safe iteration (next captured before yield).
-unsafe fn wq_foreach(lock: *mut LOCK, mut body: impl FnMut(ProcNumber) -> bool) {
+// Deletion-safe iteration; SAFETY contract: the lock's partition LWLock held.
+pub unsafe fn wq_foreach(lock: *mut LOCK, mut body: impl FnMut(ProcNumber) -> bool) {
     let mut cur = (*lock).waitProcs.list.head;
     while cur != INVALID_PROC_NUMBER {
         let next = links_of(cur).get().next;
@@ -101,6 +101,17 @@ unsafe fn wq_foreach(lock: *mut LOCK, mut body: impl FnMut(ProcNumber) -> bool) 
             break;
         }
         cur = next;
+    }
+}
+
+/// DeadLockCheck's queue rearrangement; SAFETY contract: all partition LWLocks held exclusive.
+pub unsafe fn SetWaitQueueOrder(lock: *mut LOCK, procs: &[ProcNumber]) {
+    debug_assert_eq!((*lock).waitProcs.count as usize, procs.len());
+    (*lock).waitProcs.list.head = INVALID_PROC_NUMBER;
+    (*lock).waitProcs.list.tail = INVALID_PROC_NUMBER;
+    (*lock).waitProcs.count = 0;
+    for &procno in procs {
+        wq_push_tail(lock, procno);
     }
 }
 
@@ -333,10 +344,10 @@ pub fn ProcSleep(localtag: &LOCALLOCKTAG) -> PgResult<ProcWaitStatus> {
 
 #[cold]
 fn cancel_blocking_autovacuum(_lock: *mut LOCK, _lockmode: LOCKMODE) -> PgResult<()> {
-    // Only deadlock.c's check sets BlockedByAutoVacuum; unreachable until
-    // that unit (and backend signaling) lands.
+    // Reachable only when a live autovacuum worker directly hard-blocks us.
+    let blocker = deadlock_seams::get_blocking_autovacuum_procno::call();
     let _ = lwlock::main_lock(PROC_ARRAY_LOCK);
-    panic!("cancel of blocking autovacuum requires deadlock.c + procsignal (phase 2)");
+    panic!("cancel of blocking autovacuum (procno {blocker:?}) requires procsignal (phase 2)");
 }
 
 #[cold]
