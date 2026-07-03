@@ -119,7 +119,7 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
         T_SecLabelStmt => CMDTAG_SECURITY_LABEL,
         T_CopyStmt => CMDTAG_COPY,
         // AlterObjectTypeCommandTag over stmt->renameType; ported grammar
-        // productions only emit OBJECT_TABLE / OBJECT_COLUMN-on-table.
+        // productions only emit OBJECT_TABLE / OBJECT_COLUMN-on-table / OBJECT_POLICY.
         T_RenameStmt => {
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::RenameStmt>()
@@ -127,6 +127,7 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
             match stmt.renameType {
                 types_nodes::parsenodes::ObjectType::OBJECT_TABLE
                 | types_nodes::parsenodes::ObjectType::OBJECT_COLUMN => CMDTAG_ALTER_TABLE,
+                types_nodes::parsenodes::ObjectType::OBJECT_POLICY => CMDTAG_ALTER_POLICY,
                 _ => payload_gap("CreateCommandTag", "RenameStmt non-table"),
             }
         }

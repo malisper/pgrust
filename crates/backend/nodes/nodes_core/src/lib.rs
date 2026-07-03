@@ -113,6 +113,9 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
         | NodeTag::T_SortGroupClause
         | NodeTag::T_CTESearchClause
         | NodeTag::T_MergeSupportFunc => Ok(false),
+        NodeTag::T_WithCheckOption => {
+            walk_opt(node.as_with_check_option().unwrap().qual, w)
+        }
         NodeTag::T_Aggref => {
             let a = node.as_variant::<Aggref>().unwrap();
             Ok(walk_list(&a.aggdirectargs, w)?
@@ -563,6 +566,26 @@ where
         | NodeTag::T_NextValueExpr
         | NodeTag::T_RangeTblRef
         | NodeTag::T_SortGroupClause => Ok(None),
+        NodeTag::T_WithCheckOption => {
+            let wco = node.as_with_check_option().unwrap();
+            let qual = match wco.qual {
+                Some(q) => m(q)?.map(Some),
+                None => None,
+            };
+            match qual {
+                None => Ok(None),
+                Some(qual) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::parsenodes::WithCheckOption {
+                        kind: wco.kind,
+                        relname: wco.relname,
+                        polname: wco.polname,
+                        qual,
+                        cascaded: wco.cascaded,
+                    },
+                )?)),
+            }
+        }
         NodeTag::T_CoerceToDomain => {
             let cd = node.as_coerce_to_domain().unwrap();
             match m(cd.arg)? {
