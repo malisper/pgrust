@@ -19,7 +19,7 @@ mod typefromtl;
 #[cfg(test)]
 mod tests;
 
-pub use execami::{exec_re_scan, exec_re_scan_result};
+pub use execami::{exec_re_scan, exec_re_scan_result, exec_supports_backward_scan};
 pub use execmain::{
     standard_executor_end, standard_executor_finish, standard_executor_run,
     standard_executor_start,
@@ -39,6 +39,7 @@ pub fn init_seams() {
     execmain_seams::executor_start::set(execmain::executor_start_seam);
     execmain_seams::executor_run::set(execmain::executor_run_seam);
     execmain_seams::executor_finish::set(execmain::executor_finish_seam);
+    execmain_seams::executor_rewind::set(execmain::executor_rewind_seam);
     execmain_seams::executor_end::set(execmain::executor_end_seam);
     execmain_seams::query_desc_es_processed::set(querydesc::query_desc_es_processed_seam);
     execmain_seams::query_desc_snapshot::set(querydesc::query_desc_snapshot_seam);

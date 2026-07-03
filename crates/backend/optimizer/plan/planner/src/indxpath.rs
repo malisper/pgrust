@@ -286,8 +286,29 @@ fn build_index_paths<'mcx>(
 
     let loop_count = 1.0;
 
-    // query_pathkeys is NIL on this lane: no useful index pathkeys.
-    debug_assert!(run.root.query_pathkeys.is_empty());
+    // build_index_pathkeys is unported: an index whose leading column could
+    // satisfy query_pathkeys is loud (losing that plan silently would diverge
+    // from C's plan choice); otherwise useful_pathkeys is NIL as C computes.
+    if !run.root.query_pathkeys.is_empty() && !index.sortopfamily.is_empty() {
+        let leading_attno = index.indexkeys[0];
+        for pk in run.root.query_pathkeys.iter() {
+            let ec = pk.pk_eclass.expect("canonical pathkey has an eclass");
+            for &em_id in run.root.ec(ec).ec_members.iter() {
+                let em = run.root.em(em_id);
+                let node = *run.root.expr_node(em.em_expr);
+                if let Some(var) = node.as_var() {
+                    if var.varno as u32 == run.root.rel(rel).relid
+                        && var.varattno as i32 == leading_attno
+                    {
+                        panic!(
+                            "build_index_pathkeys (pathkeys.c): index-provided ordering; \
+                             M2 index-order lane"
+                        );
+                    }
+                }
+            }
+        }
+    }
     let useful_pathkeys: PgVec<'mcx, types_pathnodes::PathKey> = PgVec::new_in(mcx);
 
     let index_only_scan = check_index_only(run, rel, index);

@@ -39,6 +39,19 @@ pub(crate) fn executor_finish_seam(h: QueryDescHandle) -> PgResult<()> {
     querydesc::with_qd(h, standard_executor_finish)
 }
 
+/// `ExecutorRewind` (execMain.c).
+pub(crate) fn executor_rewind_seam(h: QueryDescHandle) -> PgResult<()> {
+    querydesc::with_qd(h, |qd| {
+        debug_assert_eq!(qd.operation, CmdType::CMD_SELECT);
+        let exec = qd.exec.as_mut().expect("ExecutorRewind before ExecutorStart");
+        exec.with_mut(|data| {
+            let ExecData { estate, planstate } = data;
+            let ps = planstate.as_mut().expect("ExecutorRewind without a plan state");
+            crate::execami::exec_re_scan(ps, estate)
+        })
+    })
+}
+
 pub(crate) fn executor_end_seam(h: QueryDescHandle) -> PgResult<()> {
     querydesc::with_qd(h, standard_executor_end)
 }
@@ -53,6 +66,7 @@ fn unrecognized_operation(operation: CmdType) -> Box<PgError> {
 }
 
 // acl.h values (transcribed like execexpr's ACL_EXECUTE).
+const ACL_INSERT: u64 = 1 << 0;
 const ACL_SELECT: u64 = 1 << 1;
 const ACLCHECK_OK: i32 = 0;
 
@@ -82,14 +96,14 @@ fn exec_check_permissions(pstmt: &PlannedStmt<'_>) -> PgResult<()> {
     Ok(())
 }
 
-/// `ExecCheckOneRelPerms`: the RTE_RELATION SELECT arm; write privileges and
-/// the column-level fallback are loud.
+/// `ExecCheckOneRelPerms`: the RTE_RELATION SELECT/INSERT arms; other write
+/// privileges and the column-level fallback are loud.
 fn exec_check_one_rel_perms(pi: &RTEPermissionInfo<'_>) -> PgResult<()> {
     let required = pi.requiredPerms;
     debug_assert!(required != 0);
-    if required & !ACL_SELECT != 0 {
+    if required & !(ACL_SELECT | ACL_INSERT) != 0 {
         panic!(
-            "ExecCheckOneRelPerms (execMain.c): non-SELECT requiredPerms lane not ported"
+            "ExecCheckOneRelPerms (execMain.c): UPDATE/DELETE requiredPerms lane not ported"
         );
     }
     let userid = if pi.checkAsUser != 0 {
@@ -100,7 +114,7 @@ fn exec_check_one_rel_perms(pi: &RTEPermissionInfo<'_>) -> PgResult<()> {
     let r = aclchk_seams::object_aclcheck::call(RELATION_RELATION_ID, pi.relid, userid, required)?;
     if r != ACLCHECK_OK {
         panic!(
-            "ExecCheckOneRelPerms (execMain.c): relation-level SELECT denied for relation {} — \
+            "ExecCheckOneRelPerms (execMain.c): relation-level access denied for relation {} — \
              column-level fallback (pg_attribute_aclcheck) and aclcheck_error not ported",
             pi.relid
         );
@@ -151,9 +165,10 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
     let es_snapshot = snapmgr::RegisterSnapshot(qd.snapshot.as_ref())?;
     let es_crosscheck = snapmgr::RegisterSnapshot(qd.crosscheck_snapshot.as_ref())?;
 
-    if eflags & (EXEC_FLAG_SKIP_TRIGGERS | EXEC_FLAG_EXPLAIN_ONLY) == 0 {
-        panic!("standard_ExecutorStart (execMain.c): AfterTriggerBeginQuery (trigger.c) not ported");
-    }
+    // AfterTriggerBeginQuery (trigger.c): a bare query-depth bump. No CREATE
+    // TRIGGER path exists, so the after-trigger queue is provably empty and
+    // the begin/end pair is a no-op; revisit when trigger.c lands.
+    let _after_trigger_begin_query = eflags & (EXEC_FLAG_SKIP_TRIGGERS | EXEC_FLAG_EXPLAIN_ONLY);
 
     let source_text = qd.source_text();
     let instrument = qd.instrument_options;
@@ -218,16 +233,28 @@ pub(crate) fn init_plan<'mcx>(
         .expect("ExecInitNode of a non-NULL planTree");
 
     let plan = plan_node.as_plan().expect("planTree is a Plan node");
-    let tup_type = planstate.exec_get_result_type(plan)?;
+    let mut tup_type = planstate.exec_get_result_type(plan)?;
 
     if operation == CmdType::CMD_SELECT {
-        for tle_node in plan.targetlist.iter() {
-            let tle = tle_node
+        let junk_filter_needed = plan.targetlist.iter().any(|tle_node| {
+            tle_node
                 .as_target_entry()
-                .expect("targetlist entry is a TargetEntry");
-            if tle.resjunk {
-                panic!("InitPlan (execMain.c): junk filter lane not ported (execJunk.c)");
-            }
+                .expect("targetlist entry is a TargetEntry")
+                .resjunk
+        });
+        if junk_filter_needed {
+            let slot = data
+                .estate
+                .exec_init_extra_tuple_slot(None, types_slot::TupleSlotKind::Virtual);
+            let clean = crate::exec_clean_type_from_tl(&plan.targetlist)?;
+            tup_type = clean.clone();
+            let j = execjunk::exec_init_junk_filter(
+                &mut data.estate,
+                &plan.targetlist,
+                clean,
+                slot,
+            )?;
+            data.estate.es_junkFilter = Some(j);
         }
     }
 
@@ -278,7 +305,7 @@ pub fn standard_executor_run<'m>(
 }
 
 /// `ExecutePlan` (execMain.c): THE per-tuple loop.
-fn execute_plan<'m, 'mcx>(
+pub(crate) fn execute_plan<'m, 'mcx>(
     data: &mut ExecData<'mcx>,
     operation: CmdType,
     send_tuples: bool,
@@ -299,9 +326,13 @@ fn execute_plan<'m, 'mcx>(
     loop {
         estate.reset_per_tuple_expr_context();
 
-        let Some(slot_id) = exec_proc_node(planstate, estate)? else {
+        let Some(mut slot_id) = exec_proc_node(planstate, estate)? else {
             break;
         };
+
+        if estate.es_junkFilter.is_some() {
+            slot_id = execjunk::exec_filter_junk(estate, slot_id);
+        }
 
         if send_tuples {
             let slot = estate.slot_mut(slot_id);
@@ -341,11 +372,8 @@ pub fn standard_executor_finish(qd: &mut QueryDescData) -> PgResult<()> {
         assert!(!es.es_finished, "ExecutorFinish called twice");
         // ExecPostprocessPlan: only ModifyTable registers aux nodes, unported.
         debug_assert!(es.es_auxmodifytables.is_empty());
-        if es.es_top_eflags & EXEC_FLAG_SKIP_TRIGGERS == 0 {
-            panic!(
-                "standard_ExecutorFinish (execMain.c): AfterTriggerEndQuery (trigger.c) not ported"
-            );
-        }
+        // AfterTriggerEndQuery: no-op while the after-trigger queue is
+        // provably empty (see AfterTriggerBeginQuery in standard_executor_start).
         es.es_finished = true;
     });
     Ok(())
@@ -364,8 +392,7 @@ pub fn standard_executor_end(qd: &mut QueryDescData) -> PgResult<()> {
             exec_end_node(ps, estate)?;
         }
         estate.exec_reset_tuple_table(false);
-        // ExecCloseResultRelations: result-relation lanes are loud upstream.
-        debug_assert!(estate.es_opened_result_relations.is_empty());
+        estate.exec_close_result_relations();
         estate.exec_close_range_table_relations()?;
         snapmgr::UnregisterSnapshot(estate.es_snapshot.take().as_ref());
         snapmgr::UnregisterSnapshot(estate.es_crosscheck_snapshot.take().as_ref());

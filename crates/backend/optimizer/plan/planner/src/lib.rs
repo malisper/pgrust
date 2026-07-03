@@ -9,6 +9,7 @@ pub mod createplan;
 pub mod grouping;
 pub mod indxpath;
 pub mod initsplan;
+pub mod pathkeys;
 pub mod pathnode;
 pub mod plancat;
 pub mod selfuncs;
@@ -96,6 +97,9 @@ pub mod gucs {
     bool_guc!(ENABLE_INDEXSCAN, enable_indexscan, set_enable_indexscan, true);
     bool_guc!(ENABLE_INDEXONLYSCAN, enable_indexonlyscan, set_enable_indexonlyscan, true);
     bool_guc!(ENABLE_BITMAPSCAN, enable_bitmapscan, set_enable_bitmapscan, true);
+    bool_guc!(ENABLE_HASHAGG, enable_hashagg, set_enable_hashagg, true);
+    bool_guc!(ENABLE_SORT, enable_sort, set_enable_sort, true);
+    bool_guc!(ENABLE_INCREMENTAL_SORT, enable_incremental_sort, set_enable_incremental_sort, true);
     real_guc!(CURSOR_TUPLE_FRACTION, cursor_tuple_fraction, set_cursor_tuple_fraction, 0.1);
     real_guc!(JIT_ABOVE_COST, jit_above_cost, set_jit_above_cost, 100000.0);
     real_guc!(JIT_OPTIMIZE_ABOVE_COST, jit_optimize_above_cost, set_jit_optimize_above_cost, 500000.0);
@@ -141,6 +145,12 @@ pub fn init_seams() {
     guc_tables::vars::enable_bitmapscan.install(GucVarAccessors {
         get: gucs::enable_bitmapscan,
         set: gucs::set_enable_bitmapscan,
+    });
+    guc_tables::vars::enable_sort
+        .install(GucVarAccessors { get: gucs::enable_sort, set: gucs::set_enable_sort });
+    guc_tables::vars::enable_incremental_sort.install(GucVarAccessors {
+        get: gucs::enable_incremental_sort,
+        set: gucs::set_enable_incremental_sort,
     });
     guc_tables::vars::cursor_tuple_fraction.install(GucVarAccessors {
         get: gucs::cursor_tuple_fraction,

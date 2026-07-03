@@ -46,6 +46,8 @@ fn create_plan_recurse<'mcx>(
         PathNode::ProjectionPath(_) => create_projection_plan(run, path_id, flags),
         PathNode::GroupResultPath(_) => create_group_result_plan(run, path_id),
         PathNode::AggPath(_) => create_agg_plan(run, path_id),
+        PathNode::SortPath(_) => create_sort_plan(run, path_id, flags),
+        PathNode::LimitPath(_) => create_limit_plan(run, path_id, flags),
         PathNode::ModifyTablePath(_) => create_modifytable_plan(run, path_id),
         other => panic!(
             "create_plan_recurse (createplan.c): pathtype {}; M2 plan lane",
@@ -335,15 +337,14 @@ fn create_bitmap_scan_plan<'mcx>(
     let (bitmapqualplan, indexquals, mut bitmapqualorig) =
         create_bitmap_subplan(run, bitmapqual)?;
 
-    // scan_clauses minus indexquals; arena identity stands in for C's equal()
-    // (this lane shares the RestrictInfo clause nodes verbatim).
+    // scan_clauses minus indexquals (C list_member -> equal()).
     let mut qpqual_rinfos: mcx::PgVec<'mcx, RinfoId> = mcx::PgVec::new_in(mcx);
     for &rid in scan_clauses.iter() {
         if run.root.rinfo(rid).pseudoconstant {
             continue;
         }
         let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
-        if indexquals.iter().any(|q| q.ptr_eq(clause)) {
+        if indexquals.iter().any(|q| types_nodes::equal(q, clause)) {
             continue;
         }
         if !clauses::contain_mutable_functions(clause)? {
@@ -667,14 +668,14 @@ fn create_group_result_plan<'mcx>(
     Ok(plan.seal())
 }
 
-// create_agg_plan + make_agg (createplan.c), plain-aggregation arm.
+// create_agg_plan + make_agg (createplan.c); HAVING quals are the M3 lane.
 fn create_agg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResult<Node<'mcx>> {
     let (subpath_id, target_id, aggstrategy, aggsplit, num_groups, transition_space) =
         match run.root.path(path_id) {
             PathNode::AggPath(ap) => {
                 assert!(
-                    ap.groupClause.is_empty() && ap.qual.is_empty(),
-                    "create_agg_plan (createplan.c): grouping cols/HAVING; M3 grouping lane"
+                    ap.qual.is_empty(),
+                    "create_agg_plan (createplan.c): HAVING quals; M3 having lane"
                 );
                 (
                     ap.subpath.expect("AggPath has a subpath"),
@@ -688,9 +689,42 @@ fn create_agg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResul
             _ => unreachable!(),
         };
 
-    // Agg can project, so no need to be picky about the child tlist.
+    // Agg can project, so no need to be picky about the child tlist, but the
+    // grouping columns must be available (CP_LABEL_TLIST).
     let subplan = create_plan_recurse(run, subpath_id, CP_LABEL_TLIST)?;
     let tlist = build_path_tlist(run, target_id)?;
+
+    // extract_grouping_cols/ops/collations (tlist.c) against the subplan tlist.
+    let group_clause = match run.root.path(path_id) {
+        PathNode::AggPath(ap) => {
+            crate::relnode::pgvec_clone_shallow(run.mcx, &ap.groupClause)
+        }
+        _ => unreachable!(),
+    };
+    let num_cols = group_clause.len();
+    let mut grp_col_idx: mcx::PgVec<'mcx, i16> = mcx::PgVec::new_in(run.mcx);
+    let mut grp_operators: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(run.mcx);
+    let mut grp_collations: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(run.mcx);
+    let subplan_tlist = &subplan.as_plan().expect("plan node").targetlist;
+    for i in 0..num_cols {
+        let (sgref, eqop) = {
+            let scl = run
+                .root
+                .expr_node(group_clause[i])
+                .as_sort_group_clause()
+                .expect("AggPath.groupClause cell");
+            (scl.tleSortGroupRef, scl.eqop)
+        };
+        // get_sortgroupclause_tle (tlist.c); a miss is C's elog(ERROR).
+        let tle_node = subplan_tlist
+            .iter()
+            .find(|n| n.as_target_entry().expect("tlist cell").ressortgroupref == sgref)
+            .unwrap_or_else(|| panic!("ORDER/GROUP BY expression not found in targetlist"));
+        let tle = tle_node.as_target_entry().unwrap();
+        grp_col_idx.push(tle.resno);
+        grp_operators.push(eqop);
+        grp_collations.push(expr_collation(tle.expr));
+    }
 
     let mut plan = Node::build::<Agg>(run.mcx)?;
     plan.plan.targetlist = tlist;
@@ -698,11 +732,26 @@ fn create_agg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResul
     plan.plan.lefttree = Some(subplan);
     plan.aggstrategy = aggstrategy;
     plan.aggsplit = aggsplit;
-    plan.numCols = 0;
+    plan.numCols = num_cols as i32;
+    plan.grpColIdx = mcx::vec_borrow_in(run.mcx, grp_col_idx)?;
+    plan.grpOperators = mcx::vec_borrow_in(run.mcx, grp_operators)?;
+    plan.grpCollations = mcx::vec_borrow_in(run.mcx, grp_collations)?;
     plan.numGroups = clamp_cardinality_to_long(num_groups);
     plan.transitionSpace = transition_space;
     copy_generic_path_info(run, &mut plan.plan, path_id);
     Ok(plan.seal())
+}
+
+// exprCollation (nodeFuncs.c) over the grouping-column families.
+fn expr_collation(node: Node<'_>) -> types_core::Oid {
+    match node.node_tag() {
+        NodeTag::T_Var => node.as_var().unwrap().varcollid,
+        NodeTag::T_Const => node.as_const().unwrap().constcollid,
+        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
+        NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
+        tag => panic!("exprCollation (nodeFuncs.c): node family {tag:?} not ported here"),
+    }
 }
 
 fn clamp_cardinality_to_long(x: f64) -> i64 {
@@ -759,4 +808,172 @@ fn apply_tlist_labeling<'mcx>(plan: Node<'mcx>, src_tlist: &NodeList<'mcx>) {
         }
         .expect("dest tlist cell is a TargetEntry");
     }
+}
+
+// create_sort_plan + make_sort_from_pathkeys + make_sort (createplan.c).
+fn create_sort_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let (subpath_id, pathkeys) = {
+        let PathNode::SortPath(sp) = run.root.path(path_id) else { unreachable!() };
+        (
+            sp.subpath.expect("SortPath has a subpath"),
+            crate::relnode::pgvec_clone_shallow(run.mcx, &sp.path.pathkeys),
+        )
+    };
+    // Sort can't project: request a tlist without excess columns.
+    let subplan = create_plan_recurse(run, subpath_id, flags | CP_SMALL_TLIST)?;
+    // IS_OTHER_REL child sorts can't arise (append lanes are loud).
+    let plan = make_sort_from_pathkeys(run, subplan, &pathkeys)?;
+    // SAFETY: plan was freshly built above; no other handle exists yet.
+    unsafe {
+        plan.with_plan_mut(|p| {
+            let base = run.root.path(path_id).base();
+            p.disabled_nodes = base.disabled_nodes;
+            p.startup_cost = base.startup_cost;
+            p.total_cost = base.total_cost;
+            p.plan_rows = base.rows;
+            p.plan_width = base
+                .pathtarget_id
+                .map(|id| run.root.pathtarget(id).width)
+                .unwrap_or(0);
+            p.parallel_aware = base.parallel_aware;
+            p.parallel_safe = base.parallel_safe;
+        })
+    }
+    .expect("Sort embeds a Plan base");
+    Ok(plan)
+}
+
+// find_ec_member_matching_expr (equivclass.c); relids=NULL so child members
+// are skipped.
+fn find_ec_member_matching_expr<'mcx>(
+    run: &PlannerRun<'mcx>,
+    ec: types_pathnodes::EcId,
+    expr: Node<'mcx>,
+) -> Option<types_pathnodes::EmId> {
+    let mut expr = expr;
+    while let Some(r) = expr.as_relabel_type() {
+        expr = r.arg;
+    }
+    for &em_id in run.root.ec(ec).ec_members.iter() {
+        let em = run.root.em(em_id);
+        if em.em_is_child || em.em_is_const {
+            continue;
+        }
+        let mut em_expr = *run.root.expr_node(em.em_expr);
+        while let Some(r) = em_expr.as_relabel_type() {
+            em_expr = r.arg;
+        }
+        if types_nodes::equal(em_expr, expr) {
+            return Some(em_id);
+        }
+    }
+    None
+}
+
+// prepare_sort_from_pathkeys + make_sort (createplan.c): every pathkey must
+// match an existing tlist column (the resjunk-entry-injection leg is loud).
+fn make_sort_from_pathkeys<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    lefttree: Node<'mcx>,
+    pathkeys: &[types_pathnodes::PathKey],
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    // C shares lefttree->targetlist by pointer; flat cell copy, shared nodes.
+    let tlist = NodeList::from_slice(mcx, lefttree.as_plan().expect("plan node").targetlist.as_slice())?;
+    let mut sort_col_idx: mcx::PgVec<'mcx, i16> = mcx::PgVec::new_in(mcx);
+    let mut sort_operators: mcx::PgVec<'mcx, u32> = mcx::PgVec::new_in(mcx);
+    let mut collations: mcx::PgVec<'mcx, u32> = mcx::PgVec::new_in(mcx);
+    let mut nulls_first: mcx::PgVec<'mcx, bool> = mcx::PgVec::new_in(mcx);
+
+    for pathkey in pathkeys {
+        let ec = pathkey.pk_eclass.expect("canonical pathkey has an eclass");
+        assert!(
+            !run.root.ec(ec).ec_has_volatile,
+            "prepare_sort_from_pathkeys (createplan.c): volatile sortref leg; M2 lane"
+        );
+        let mut found: Option<(i16, u32)> = None;
+        for tle_node in &tlist {
+            let tle = tle_node.as_target_entry().expect("TargetEntry");
+            if let Some(em_id) = find_ec_member_matching_expr(run, ec, tle.expr) {
+                found = Some((tle.resno, run.root.em(em_id).em_datatype));
+                break;
+            }
+        }
+        let Some((resno, pk_datatype)) = found else {
+            panic!(
+                "prepare_sort_from_pathkeys (createplan.c): resjunk sort-column injection; \
+                 M2 lane"
+            );
+        };
+        let sortop = lsyscache::amop::get_opfamily_member_for_cmptype(
+            pathkey.pk_opfamily,
+            pk_datatype,
+            pk_datatype,
+            pathkey.pk_cmptype,
+        )?;
+        assert!(
+            sortop != 0,
+            "missing operator {}({},{}) in opfamily {}",
+            pathkey.pk_cmptype,
+            pk_datatype,
+            pk_datatype,
+            pathkey.pk_opfamily
+        );
+        sort_col_idx.push(resno);
+        sort_operators.push(sortop);
+        collations.push(run.root.ec(ec).ec_collation);
+        nulls_first.push(pathkey.pk_nulls_first);
+    }
+
+    let mut plan = Node::build::<types_nodes::plannodes::Sort>(mcx)?;
+    plan.plan.targetlist = tlist;
+    plan.plan.disabled_nodes = lefttree.as_plan().unwrap().disabled_nodes
+        + if crate::gucs::enable_sort() { 0 } else { 1 };
+    plan.plan.qual = NodeList::nil();
+    plan.plan.lefttree = Some(lefttree);
+    plan.numCols = sort_col_idx.len() as i32;
+    plan.sortColIdx = mcx::slice_borrow_in(mcx, &sort_col_idx)?;
+    plan.sortOperators = mcx::slice_borrow_in(mcx, &sort_operators)?;
+    plan.collations = mcx::slice_borrow_in(mcx, &collations)?;
+    plan.nullsFirst = mcx::slice_borrow_in(mcx, &nulls_first)?;
+    Ok(plan.seal())
+}
+
+// create_limit_plan + make_limit (createplan.c); WITH TIES is loud.
+fn create_limit_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let (subpath_id, limit_offset, limit_count, limit_option) = {
+        let PathNode::LimitPath(lp) = run.root.path(path_id) else { unreachable!() };
+        (
+            lp.subpath.expect("LimitPath has a subpath"),
+            lp.limitOffset.map(|id| *run.root.expr_node(id)),
+            lp.limitCount.map(|id| *run.root.expr_node(id)),
+            lp.limitOption,
+        )
+    };
+    assert!(
+        limit_option == types_nodes::nodes_enums::LimitOption::LIMIT_OPTION_COUNT as u32,
+        "create_limit_plan (createplan.c): WITH TIES uniq keys; M2 ties lane"
+    );
+    // Limit doesn't project, so tlist requirements pass through.
+    let subplan = create_plan_recurse(run, subpath_id, flags)?;
+
+    let mut plan = Node::build::<types_nodes::plannodes::Limit>(mcx)?;
+    plan.plan.targetlist =
+        NodeList::from_slice(mcx, subplan.as_plan().expect("plan node").targetlist.as_slice())?;
+    plan.plan.qual = NodeList::nil();
+    plan.plan.lefttree = Some(subplan);
+    plan.limitOffset = limit_offset;
+    plan.limitCount = limit_count;
+    plan.limitOption = types_nodes::nodes_enums::LimitOption::LIMIT_OPTION_COUNT;
+    copy_generic_path_info(run, &mut plan.plan, path_id);
+    Ok(plan.seal())
 }

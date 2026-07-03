@@ -11,6 +11,7 @@ pub(crate) fn oom(mcx: mcx::Mcx<'_>, request: usize) -> alloc::boxed::Box<types_
 }
 
 pub mod bitmapset;
+pub mod equal;
 pub mod jointype;
 pub mod list;
 pub mod node_tree;
@@ -22,6 +23,7 @@ pub mod rawnodes;
 mod tags;
 
 pub use bitmapset::{bitmapword, Bitmapset, BmsComparison, BmsMembership, BITS_PER_BITMAPWORD};
+pub use equal::{equal, equal_opt, NodeEqual};
 pub use jointype::JoinType;
 pub use list::{IntList, List, ListFlavor, NodeList, OidList, XidList};
 pub use node_tree::{BitString, Boolean, Float, Integer, Node, NodeMut, NodeVariant, String};
@@ -38,9 +40,9 @@ pub use primnodes::{
 };
 pub use plannodes::ModifyTable;
 pub use rawnodes::{
-    A_Const, A_Expr, A_Expr_Kind, A_Star, ColumnRef, DistinctClause, FuncCall, InsertStmt,
-    ParamRef, RawStmt, ResTarget, SelectStmt, SortBy, SortByDir, SortByNulls, TypeCast, TypeName,
-    ValUnion,
+    A_Const, A_Expr, A_Expr_Kind, A_Star, ColumnRef, DeleteStmt, DistinctClause, FuncCall,
+    InsertStmt, ParamRef, RawStmt, ResTarget, SelectStmt, SortBy, SortByDir, SortByNulls,
+    TypeCast, TypeName, UpdateStmt, ValUnion,
 };
 pub use tags::NodeTag;
 

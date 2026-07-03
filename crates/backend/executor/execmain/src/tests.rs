@@ -96,28 +96,60 @@ fn install_seams() {
                 _ => None,
             })
         });
-        // int4 btree sort-operator lookups (nodesort seam recipe).
+        // int4 btree sort-operator + hash grouping lookups.
         syscache_seams::lookup_pg_amop_members_by_operator::set(|mcx, opno| {
-            assert_eq!(opno, INT4_LT);
             let mut v = ::mcx::PgVec::new_in(mcx);
-            v.push(syscache_seams::PgAmopMemberShape {
-                amopfamily: INTEGER_BTREE_FAM,
-                amoplefttype: INT4OID,
-                amoprighttype: INT4OID,
-                amopstrategy: 1,
-                amopmethod: BTREE_AM,
-            });
+            match opno {
+                INT4_LT => v.push(syscache_seams::PgAmopMemberShape {
+                    amopfamily: INTEGER_BTREE_FAM,
+                    amoplefttype: INT4OID,
+                    amoprighttype: INT4OID,
+                    amopstrategy: 1,
+                    amopmethod: BTREE_AM,
+                }),
+                INT4_EQ => v.push(syscache_seams::PgAmopMemberShape {
+                    amopfamily: INTEGER_HASH_FAM,
+                    amoplefttype: INT4OID,
+                    amoprighttype: INT4OID,
+                    amopstrategy: 1,
+                    amopmethod: HASH_AM,
+                }),
+                other => panic!("unexpected amop probe for operator {other}"),
+            }
             Ok(v)
         });
         syscache_seams::lookup_pg_amproc::set(|opfamily, left, right, procnum| {
-            assert_eq!(
-                (opfamily, left, right, procnum),
-                (INTEGER_BTREE_FAM, INT4OID, INT4OID, 2)
-            );
-            Ok(F_BTINT4SORTSUPPORT)
+            Ok(match (opfamily, left, right, procnum) {
+                (INTEGER_BTREE_FAM, INT4OID, INT4OID, 2) => F_BTINT4SORTSUPPORT,
+                (INTEGER_HASH_FAM, INT4OID, INT4OID, 1) => F_HASHINT4,
+                other => panic!("unexpected amproc probe {other:?}"),
+            })
         });
+        syscache_seams::lookup_pg_operator_shape::set(|opno| {
+            Ok((opno == INT4_EQ).then_some(syscache_seams::PgOperatorShape {
+                oprleft: INT4OID,
+                oprright: INT4OID,
+                oprresult: BOOLOID,
+                oprcom: INT4_EQ,
+                oprnegate: 518,
+                oprcode: F_INT4EQ,
+                oprrest: 101,
+                oprjoin: 105,
+                oprcanmerge: true,
+                oprcanhash: true,
+            }))
+        });
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
     });
 }
+
+const INT4_EQ: u32 = 96;
+const INTEGER_HASH_FAM: u32 = 1977;
+const HASH_AM: u32 = 405;
+const F_HASHINT4: u32 = 450;
+const F_INT4EQ: u32 = 65;
 
 fn mk_int4_const(mcx: ::mcx::Mcx<'_>, v: i32) -> Node<'_> {
     Node::mk_const(mcx, INT4OID, -1, 0, 4, Datum::from_i32(v), false, true).unwrap()
@@ -318,6 +350,7 @@ mod scanfix {
         tables: HashMap<Oid, Vec<Buffer>>,
         pages: Vec<usize>,
         pins: Vec<i32>,
+        two_col: std::collections::HashSet<Oid>,
     }
 
     static FAKE: Mutex<Option<Fake>> = Mutex::new(None);
@@ -328,6 +361,7 @@ mod scanfix {
             tables: HashMap::new(),
             pages: Vec::new(),
             pins: Vec::new(),
+            two_col: std::collections::HashSet::new(),
         }))
     }
 
@@ -405,26 +439,28 @@ mod scanfix {
         relation_seams::relation_open::set(fake_relation_open);
     }
 
-    fn tuple_image(val: i32) -> Vec<u8> {
-        let mut img = vec![0u8; 28];
+    fn tuple_image(vals: &[i32]) -> Vec<u8> {
+        let mut img = vec![0u8; 24 + 4 * vals.len()];
         img[0..4].copy_from_slice(&10u32.to_ne_bytes());
-        img[18..20].copy_from_slice(&1u16.to_ne_bytes());
+        img[18..20].copy_from_slice(&(vals.len() as u16).to_ne_bytes());
         img[20..22].copy_from_slice(&HEAP_XMAX_INVALID.to_ne_bytes());
         img[22] = 24;
-        img[24..28].copy_from_slice(&val.to_ne_bytes());
+        for (i, val) in vals.iter().enumerate() {
+            img[24 + 4 * i..28 + 4 * i].copy_from_slice(&val.to_ne_bytes());
+        }
         img
     }
 
     #[repr(align(8))]
     struct TestPage([u8; BLCKSZ]);
 
-    fn build_page(vals: &[i32]) -> Box<TestPage> {
+    fn build_page(rows: &[&[i32]]) -> Box<TestPage> {
         let mut page = Box::new(TestPage([0u8; BLCKSZ]));
-        let n = vals.len();
+        let n = rows.len();
         let lower = SizeOfPageHeaderData + n * 4;
         let mut upper = BLCKSZ;
-        for (i, val) in vals.iter().enumerate() {
-            let img = tuple_image(*val);
+        for (i, row) in rows.iter().enumerate() {
+            let img = tuple_image(row);
             upper = (upper - img.len()) & !7;
             page.0[upper..upper + img.len()].copy_from_slice(&img);
             let id = ItemIdData::new(upper as u16, LP_NORMAL, img.len() as u16);
@@ -444,12 +480,29 @@ mod scanfix {
         with_fake(|f| {
             let mut bufs = Vec::new();
             for vals in pages {
-                let addr = Box::leak(build_page(vals)).0.as_mut_ptr() as usize;
+                let rows: Vec<&[i32]> = vals.iter().map(std::slice::from_ref).collect();
+                let addr = Box::leak(build_page(&rows)).0.as_mut_ptr() as usize;
                 f.pages.push(addr);
                 f.pins.push(0);
                 bufs.push(f.pages.len() as Buffer);
             }
             f.tables.insert(relid, bufs);
+        });
+    }
+
+    pub fn register_table_2col(relid: Oid, pages: &[&[(i32, i32)]]) {
+        with_fake(|f| {
+            let mut bufs = Vec::new();
+            for rows in pages {
+                let rows: Vec<[i32; 2]> = rows.iter().map(|&(a, b)| [a, b]).collect();
+                let rows: Vec<&[i32]> = rows.iter().map(|r| r.as_slice()).collect();
+                let addr = Box::leak(build_page(&rows)).0.as_mut_ptr() as usize;
+                f.pages.push(addr);
+                f.pins.push(0);
+                bufs.push(f.pages.len() as Buffer);
+            }
+            f.tables.insert(relid, bufs);
+            f.two_col.insert(relid);
         });
     }
 
@@ -459,23 +512,25 @@ mod scanfix {
         });
     }
 
-    fn int4_tupdesc<'mcx>(mcx: Mcx<'mcx>) -> Rc<TupleDescData<'mcx>> {
-        let att = FormData_pg_attribute {
-            attnum: 1,
-            atttypid: 23,
-            atttypmod: -1,
-            attlen: 4,
-            attbyval: true,
-            attalign: TYPALIGN_INT,
-            attstorage: TYPSTORAGE_PLAIN,
-            ..Default::default()
-        };
+    fn int4_tupdesc<'mcx>(mcx: Mcx<'mcx>, natts: i16) -> Rc<TupleDescData<'mcx>> {
         let mut attrs = PgVec::new_in(mcx);
         let mut compact = PgVec::new_in(mcx);
-        compact.push(CompactAttribute::populate_from(&att));
-        attrs.push(att);
+        for attnum in 1..=natts {
+            let att = FormData_pg_attribute {
+                attnum,
+                atttypid: 23,
+                atttypmod: -1,
+                attlen: 4,
+                attbyval: true,
+                attalign: TYPALIGN_INT,
+                attstorage: TYPSTORAGE_PLAIN,
+                ..Default::default()
+            };
+            compact.push(CompactAttribute::populate_from(&att));
+            attrs.push(att);
+        }
         Rc::new(TupleDescData {
-            natts: 1,
+            natts: natts as i32,
             tdtypeid: 0,
             tdtypmod: -1,
             tdrefcount: -1,
@@ -537,7 +592,7 @@ mod scanfix {
                 },
             },
             rd_rel,
-            rd_att: int4_tupdesc(mcx),
+            rd_att: int4_tupdesc(mcx, if with_fake(|f| f.two_col.contains(&relid)) { 2 } else { 1 }),
             rd_index: None,
             rd_opcintype: PgVec::new_in(mcx),
             rd_opfamily: PgVec::new_in(mcx),
@@ -1166,6 +1221,285 @@ fn limit_pushes_bound_into_sort_state() {
             },
             _ => panic!("expected Limit root"),
         }
+        crate::exec_end_node(ps, estate).unwrap();
+        estate.exec_reset_tuple_table(false);
+        estate.exec_close_range_table_relations().unwrap();
+    });
+    scanfix::quiesced();
+}
+
+// SELECT a FROM t ORDER BY b LIMIT 2: Limit->Sort->SeqScan with a resjunk sort
+// column, through the REAL InitPlan junk-filter arm and ExecutePlan filter.
+fn mk_junk_sort_limit_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx PlannedStmt<'mcx> {
+    use ::types_nodes::bitmapset::Bitmapset;
+    use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+    use ::types_nodes::plannodes::{Limit, Plan, Scan, SeqScan, Sort};
+    use ::types_nodes::primnodes::OUTER_VAR;
+
+    let mk_tlist = |varno: i32| {
+        let a = Node::mk_var(mcx, varno, 1, INT4OID, -1, 0, 0).unwrap();
+        let b = Node::mk_var(mcx, varno, 2, INT4OID, -1, 0, 0).unwrap();
+        NodeList::make2(
+            mcx,
+            Node::mk_target_entry(mcx, a, 1, Some("a"), false).unwrap(),
+            Node::mk_target_entry(mcx, b, 2, Some("b"), true).unwrap(),
+        )
+        .unwrap()
+    };
+
+    let scan = Node::mk(
+        mcx,
+        SeqScan {
+            scan: Scan {
+                plan: Plan { targetlist: mk_tlist(1), ..Default::default() },
+                scanrelid: 1,
+            },
+        },
+    )
+    .unwrap();
+
+    let mut sort = Node::build::<Sort>(mcx).unwrap();
+    sort.plan.targetlist = mk_tlist(OUTER_VAR);
+    sort.plan.lefttree = Some(scan);
+    sort.numCols = 1;
+    sort.sortColIdx = ::mcx::slice_borrow_in(mcx, &[2i16]).unwrap();
+    sort.sortOperators = ::mcx::slice_borrow_in(mcx, &[INT4_LT]).unwrap();
+    sort.collations = ::mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+    sort.nullsFirst = ::mcx::slice_borrow_in(mcx, &[false]).unwrap();
+
+    let mut limit = Node::build::<Limit>(mcx).unwrap();
+    limit.plan.targetlist = mk_tlist(OUTER_VAR);
+    limit.plan.lefttree = Some(sort.seal());
+    limit.limitCount =
+        Some(Node::mk_const(mcx, INT8OID, -1, 0, 8, Datum::from_i64(2), false, true).unwrap());
+
+    let rte = Node::mk(
+        mcx,
+        RangeTblEntry {
+            rtekind: RTEKind::RTE_RELATION,
+            relid,
+            relkind: ::types_rel::RELKIND_RELATION,
+            rellockmode: ::types_rel::AccessShareLock,
+            perminfoindex: 1,
+            inFromCl: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let perminfo = Node::mk(
+        mcx,
+        RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+    )
+    .unwrap();
+    let mut unpruned = Bitmapset::empty();
+    unpruned.add_member(mcx, 1).unwrap();
+
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(limit.seal());
+    pstmt.rtable = NodeList::make1(mcx, rte).unwrap();
+    pstmt.permInfos = NodeList::make1(mcx, perminfo).unwrap();
+    pstmt.unprunableRelids = unpruned;
+    pstmt.seal_ref()
+}
+
+#[test]
+fn junk_filter_removes_order_by_column_end_to_end() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let relid: u32 = 70011;
+    scanfix::register_table_2col(relid, &[&[(3, 30), (1, 10), (2, 20)], &[(5, 50), (4, 5)]]);
+    let pstmt = mk_junk_sort_limit_pstmt(mcx, relid);
+
+    let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+    let snapshot: snapmgr::Snapshot = std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+        snap_ctx.mcx(),
+        ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+    ));
+
+    with_exec_data(pstmt, |data, pstmt| {
+        data.estate.es_snapshot = Some(snapshot);
+        let desc = crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+        assert_eq!(desc.natts, 1, "junk column excluded from the result type");
+        assert_eq!(desc.attr(0).attname.name_str(), b"a");
+        assert!(data.estate.es_junkFilter.is_some());
+
+        let store = tuplestore::Tuplestore::begin_heap(true, false, 1024);
+        let h = tuplestore::hold::register(store);
+        let mut dr = tstore_receiver::tstore_create_DR();
+        tstore_receiver::set_params(&mut dr, h, false);
+        let mut dest = DestReceiver::Tuplestore(dr);
+        crate::execmain::execute_plan(
+            data,
+            CmdType::CMD_SELECT,
+            true,
+            0,
+            ForwardScanDirection,
+            false,
+            &mut dest,
+        )
+        .unwrap();
+        assert_eq!(data.estate.es_processed, 2);
+
+        let read_cx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("read")));
+        let mut slot = exectuples::make_tuple_table_slot(
+            read_cx.mcx(),
+            ::types_slot::TupleSlotKind::MinimalTuple,
+            Some(desc.clone()),
+        );
+        let mut rows = Vec::new();
+        loop {
+            let got = tuplestore::hold::with_store(h, |ts| {
+                ts.gettupleslot(true, true, &mut slot, read_cx.mcx())
+            })
+            .unwrap();
+            if !got {
+                break;
+            }
+            assert_eq!(slot.base().tts_values.len(), 1, "only column a in output tuples");
+            let mut isnull = false;
+            let v = exectuples::slot_getattr(&mut slot, 1, &mut isnull);
+            assert!(!isnull);
+            rows.push(v.as_i32());
+        }
+        tuplestore::hold::end(h);
+        // b values 30,10,20,50,5 sort to 5,10 -> a = [4, 1].
+        assert_eq!(rows, vec![4, 1]);
+
+        let ExecData { estate, planstate } = data;
+        crate::exec_end_node(planstate.as_mut().unwrap(), estate).unwrap();
+        estate.exec_reset_tuple_table(false);
+        estate.exec_close_range_table_relations().unwrap();
+    });
+    scanfix::quiesced();
+}
+
+// Agg(AGG_HASHED) over SeqScan on the fake-heap fixture: SELECT a, count(*)
+// FROM t GROUP BY a, through the REAL InitPlan path.
+fn mk_hashed_agg_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx PlannedStmt<'mcx> {
+    use ::types_nodes::bitmapset::Bitmapset;
+    use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+    use ::types_nodes::plannodes::{Agg, Plan, Scan, SeqScan};
+    use ::types_nodes::primnodes::{Aggref, OUTER_VAR};
+
+    let scan_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let scan_tle = Node::mk_target_entry(mcx, scan_var, 1, Some("a"), false).unwrap();
+    let scan_node = Node::mk(
+        mcx,
+        SeqScan {
+            scan: Scan {
+                plan: Plan {
+                    targetlist: NodeList::make1(mcx, scan_tle).unwrap(),
+                    plan_width: 4,
+                    ..Default::default()
+                },
+                scanrelid: 1,
+            },
+        },
+    )
+    .unwrap();
+
+    let group_var = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+    let group_tle = Node::mk_target_entry(mcx, group_var, 1, Some("a"), false).unwrap();
+    let mut aggref = Node::build::<Aggref>(mcx).unwrap();
+    aggref.aggfnoid = 2803;
+    aggref.aggtype = INT8OID;
+    aggref.aggtranstype = INT8OID;
+    aggref.aggstar = true;
+    aggref.aggno = 0;
+    aggref.aggtransno = 0;
+    let count_tle = Node::mk_target_entry(mcx, aggref.seal(), 2, Some("count"), false).unwrap();
+    let mut tlist = NodeList::make1(mcx, group_tle).unwrap();
+    tlist.lappend(mcx, count_tle).unwrap();
+
+    let mut agg = Node::build::<Agg>(mcx).unwrap();
+    agg.plan.targetlist = tlist;
+    agg.plan.lefttree = Some(scan_node);
+    agg.aggstrategy = 2;
+    agg.numCols = 1;
+    agg.grpColIdx = ::mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+    agg.grpOperators = ::mcx::slice_borrow_in(mcx, &[INT4_EQ]).unwrap();
+    agg.grpCollations = ::mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+    agg.numGroups = 4;
+    let agg_node = agg.seal();
+
+    let rte = Node::mk(
+        mcx,
+        RangeTblEntry {
+            rtekind: RTEKind::RTE_RELATION,
+            relid,
+            relkind: ::types_rel::RELKIND_RELATION,
+            rellockmode: ::types_rel::AccessShareLock,
+            perminfoindex: 1,
+            inFromCl: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let perminfo = Node::mk(
+        mcx,
+        RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+    )
+    .unwrap();
+    let mut unpruned = Bitmapset::empty();
+    unpruned.add_member(mcx, 1).unwrap();
+
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(agg_node);
+    pstmt.rtable = NodeList::make1(mcx, rte).unwrap();
+    pstmt.permInfos = NodeList::make1(mcx, perminfo).unwrap();
+    pstmt.unprunableRelids = unpruned;
+    pstmt.seal_ref()
+}
+
+#[test]
+fn hashed_group_by_over_fake_heap_end_to_end() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let relid: u32 = 70012;
+    scanfix::register_table(relid, &[&[1, 2, 1], &[3, 2, 1]]);
+    let pstmt = mk_hashed_agg_pstmt(mcx, relid);
+
+    let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+    let snapshot: snapmgr::Snapshot = std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+        snap_ctx.mcx(),
+        ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+    ));
+    with_exec_data(pstmt, |data, pstmt| {
+        data.estate.es_snapshot = Some(snapshot);
+        let desc = crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+        assert_eq!(desc.natts, 2);
+        assert_eq!(desc.attr(0).atttypid, INT4OID);
+        assert_eq!(desc.attr(1).atttypid, INT8OID);
+
+        let ExecData { estate, planstate } = data;
+        let ps = planstate.as_mut().unwrap();
+        let mut got: Vec<(i32, i64)> = Vec::new();
+        while let Some(slot_id) = exec_proc_node(ps, estate).unwrap() {
+            let base = estate.slot_mut(slot_id).base();
+            assert!(!base.tts_isnull[0] && !base.tts_isnull[1]);
+            got.push((base.tts_values[0].as_i32(), base.tts_values[1].as_i64()));
+        }
+        got.sort_unstable();
+        assert_eq!(got, vec![(1, 3), (2, 2), (3, 1)]);
+
+        // Rescan reuses the filled table.
+        exec_re_scan(ps, estate).unwrap();
+        let mut again: Vec<(i32, i64)> = Vec::new();
+        while let Some(slot_id) = exec_proc_node(ps, estate).unwrap() {
+            let base = estate.slot_mut(slot_id).base();
+            again.push((base.tts_values[0].as_i32(), base.tts_values[1].as_i64()));
+        }
+        again.sort_unstable();
+        assert_eq!(again, vec![(1, 3), (2, 2), (3, 1)]);
+
         crate::exec_end_node(ps, estate).unwrap();
         estate.exec_reset_tuple_table(false);
         estate.exec_close_range_table_relations().unwrap();
