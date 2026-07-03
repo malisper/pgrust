@@ -4259,6 +4259,7 @@ dependencies = [
  "sinval",
  "subtrans",
  "transam_xlog",
+ "twophase",
  "types_core",
  "types_error",
  "types_guc",
@@ -4486,6 +4487,7 @@ dependencies = [
  "timeout_seams",
  "timestamp_seams",
  "transam_xlog_seams",
+ "twophase_seams",
  "types_core",
  "types_error",
  "types_hash",
@@ -4739,6 +4741,7 @@ dependencies = [
  "sync_seams",
  "transam_seams",
  "transam_xlog_seams",
+ "twophase_seams",
  "types_core",
  "types_error",
  "types_guc",
@@ -6446,6 +6449,7 @@ dependencies = [
  "pgstat_seams",
  "rustc-hash",
  "timestamp_seams",
+ "twophase_seams",
  "types_core",
  "types_error",
  "types_rel",
@@ -8366,6 +8370,7 @@ dependencies = [
  "trigger",
  "tuplesort",
  "tuplestore",
+ "twophase",
  "twophase_config",
  "typcache",
  "utility",
@@ -9660,10 +9665,72 @@ dependencies = [
 ]
 
 [[package]]
+name = "twophase"
+version = "0.0.0"
+dependencies = [
+ "catalog_storage",
+ "commit_ts_seams",
+ "crc32c",
+ "datum",
+ "elog",
+ "fd",
+ "fmgr_core",
+ "funcapi",
+ "guc_tables",
+ "heaptuple",
+ "init_small",
+ "ipc",
+ "libc",
+ "lmgr_proc",
+ "lwlock",
+ "mcx",
+ "miscinit",
+ "origin_seams",
+ "pgstat",
+ "predicate",
+ "procarray",
+ "relcache_seams",
+ "sinval",
+ "subtrans",
+ "superuser_seams",
+ "syncrep_seams",
+ "timestamp_seams",
+ "transam",
+ "transam_xlog",
+ "transam_xlog_seams",
+ "tupdesc",
+ "twophase_config",
+ "twophase_rmgr",
+ "twophase_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_storage",
+ "varlena",
+ "varsup",
+ "xact",
+ "xloginsert_seams",
+ "xlogreader",
+ "xlogrecovery_seams",
+ "xlogutils",
+]
+
+[[package]]
 name = "twophase_config"
 version = "0.0.0"
 dependencies = [
  "guc_tables",
+]
+
+[[package]]
+name = "twophase_rmgr"
+version = "0.0.0"
+dependencies = [
+ "lock",
+ "multixact",
+ "pgstat",
+ "types_core",
+ "types_error",
 ]
 
 [[package]]
