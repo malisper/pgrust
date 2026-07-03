@@ -83,17 +83,26 @@ pub fn uuid_in(source: &[u8], escontext: Option<&mut SoftErrorContext>) -> PgRes
 
 pub fn uuid_out_into(uuid: &PgUuid, buf: &mut [u8; UUID_OUT_LEN]) -> usize {
     const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
-    let mut p = 0;
-    for (i, byte) in uuid.iter().enumerate() {
-        if i == 4 || i == 6 || i == 8 || i == 10 {
-            buf[p] = b'-';
-            p += 1;
+    // Const-offset group writes: the C loop's data-dependent cursor defeats
+    // bounds-check elision here (uuid_out lane measured 1.44x ns).
+    #[inline(always)]
+    fn put<const N: usize>(dst: &mut [u8], src: &[u8]) {
+        let dst: &mut [u8; N] = dst.try_into().unwrap();
+        for i in 0..N / 2 {
+            dst[2 * i] = HEX_CHARS[(src[i] >> 4) as usize];
+            dst[2 * i + 1] = HEX_CHARS[(src[i] & 0x0F) as usize];
         }
-        buf[p] = HEX_CHARS[(byte >> 4) as usize];
-        buf[p + 1] = HEX_CHARS[(byte & 0x0F) as usize];
-        p += 2;
     }
-    p
+    put::<8>(&mut buf[0..8], &uuid[0..4]);
+    buf[8] = b'-';
+    put::<4>(&mut buf[9..13], &uuid[4..6]);
+    buf[13] = b'-';
+    put::<4>(&mut buf[14..18], &uuid[6..8]);
+    buf[18] = b'-';
+    put::<4>(&mut buf[19..23], &uuid[8..10]);
+    buf[23] = b'-';
+    put::<12>(&mut buf[24..36], &uuid[10..16]);
+    UUID_OUT_LEN
 }
 
 #[inline]

@@ -19,7 +19,7 @@ const F_BTOIDSORTSUPPORT: Oid = 3134;
 
 /// C's `ssup->comparator` fn pointer as a closed enum: identity is switchable
 /// (tuplesort_sort_memtuples specialization dispatch) and calls monomorphize.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub enum SortComparator {
     /// `ssup_datum_unsigned_cmp` (abbreviated-key comparisons).
     Unsigned,
