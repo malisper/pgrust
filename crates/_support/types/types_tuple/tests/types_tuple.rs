@@ -368,6 +368,107 @@ fn deform_with_nulls_and_attisnull() {
 }
 
 #[test]
+fn deform_cstring_walk() {
+    let ctx = MemoryContext::new("t");
+    // (int4, cstring, int8 NULL, short text, int2): the cstring hands the
+    // rest of the walk to the cold continuation.
+    let desc = make_desc(
+        ctx.mcx(),
+        &[
+            attr(4, true, 4),
+            attr(-2, false, 1),
+            attr(8, true, 8),
+            attr(-1, false, 4),
+            attr(2, true, 2),
+        ],
+    );
+
+    let mut data = [0u8; 16];
+    data[0..4].copy_from_slice(&42i32.to_ne_bytes());
+    data[4..8].copy_from_slice(b"abc\0");
+    // col3 is null; short varlena "xyz" directly at 8 (packed), int2 at 12.
+    data[8] = ((1 + 3) as u8) << 1 | 0x01;
+    data[9..12].copy_from_slice(b"xyz");
+    data[12..14].copy_from_slice(&7i16.to_ne_bytes());
+
+    let mut image = Image([0; 256]);
+    let (t_len, _) =
+        build_tuple_mask(&mut image, 5, Some(0b11011), &data[..14], HEAP_HASVARWIDTH);
+    let tup = tuple_from(&image, t_len);
+
+    let mut values = [Datum::null(); 5];
+    let mut nulls = [false; 5];
+    heap_deform_tuple(&tup, &desc, &mut values, &mut nulls);
+    assert_eq!(values[0].as_i32(), 42);
+    let cp = values[1].as_usize() as *const u8;
+    unsafe {
+        assert_eq!(core::slice::from_raw_parts(cp, 4), b"abc\0");
+    }
+    assert!(nulls[2]);
+    let vp = values[3].as_usize() as *const u8;
+    unsafe {
+        assert_eq!(varsize_any(vp), 4);
+        assert_eq!(core::slice::from_raw_parts(vp.add(1), 3), b"xyz");
+    }
+    assert_eq!(values[4].as_i16(), 7);
+    assert_eq!(nulls, [false, false, true, false, false]);
+
+    let offs: Vec<i32> = desc.compact_attrs.iter().map(|a| a.attcacheoff.get()).collect();
+    assert_eq!(offs, [0, 4, -1, -1, -1]);
+}
+
+#[test]
+fn deform_cstring_then_missing_tail() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut desc = make_desc(
+        mcx,
+        &[attr(4, true, 4), attr(-2, false, 1), attr(2, true, 2), attr(4, true, 4)],
+    );
+    desc.compact_attrs[3].atthasmissing = true;
+    let mut missing: PgVec<AttrMissing> = PgVec::new_in(mcx);
+    for _ in 0..3 {
+        missing.push(AttrMissing { am_present: false, am_value: Datum::null() });
+    }
+    missing.push(AttrMissing { am_present: true, am_value: Datum::from_i32(777) });
+    desc.constr = Some(mcx::alloc_in(
+        mcx,
+        TupleConstr {
+            defval: PgVec::new_in(mcx),
+            check: PgVec::new_in(mcx),
+            missing,
+            num_defval: 0,
+            num_check: 0,
+            has_not_null: false,
+            has_generated_stored: false,
+            has_generated_virtual: false,
+        },
+    )
+    .unwrap());
+
+    let mut data = [0u8; 8];
+    data[0..4].copy_from_slice(&5i32.to_ne_bytes());
+    data[4..6].copy_from_slice(b"q\0");
+    data[6..8].copy_from_slice(&33i16.to_ne_bytes());
+
+    let mut image = Image([0; 256]);
+    let (t_len, _) = build_tuple_mask(&mut image, 3, None, &data, HEAP_HASVARWIDTH);
+    let tup = tuple_from(&image, t_len);
+
+    let mut values = [Datum::null(); 4];
+    let mut nulls = [true; 4];
+    heap_deform_tuple(&tup, &desc, &mut values, &mut nulls);
+    assert_eq!(values[0].as_i32(), 5);
+    let cp = values[1].as_usize() as *const u8;
+    unsafe {
+        assert_eq!(core::slice::from_raw_parts(cp, 2), b"q\0");
+    }
+    assert_eq!(values[2].as_i16(), 33);
+    assert_eq!(values[3].as_i32(), 777);
+    assert_eq!(nulls, [false; 4]);
+}
+
+#[test]
 fn missing_and_absent_attributes() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();

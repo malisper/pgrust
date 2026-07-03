@@ -274,26 +274,55 @@ pub fn heap_deform_tuple(
     let tdesc_natts = atts.len();
     debug_assert!(tdesc_natts == tupleDesc.natts as usize);
     // Inheritance can hand a tuple wider than the descriptor; clamp to both.
-    let natts = (tup.natts() as usize).min(tdesc_natts);
+    // The narrow-tuple case (missing-attr tail) leaves at entry so neither
+    // length stays live across the walk.
+    let natts = tup.natts() as usize;
+    if natts < tdesc_natts {
+        return deform_narrow(tuple, tupleDesc, values, isnull, natts);
+    }
+    let natts = tdesc_natts;
 
     let tp = tuple.getstruct();
     let bp = tuple.bits_ptr();
-    let mut off = 0usize;
-    let mut slow = false;
 
     let atts_n = &atts[..natts];
-    // Tail first (disjoint ranges): slice lengths die before the walk.
-    if natts < tdesc_natts {
-        deform_missing_tail(tupleDesc, values, isnull, natts);
-    }
     let (values_n, isnull_n) = (&mut values[..natts], &mut isnull[..natts]);
-    for attnum in 0..natts {
+    // SAFETY: descriptor matches the image; natts <= tuple natts.
+    if let Some((attnum, off)) = unsafe { deform_walk(atts_n, values_n, isnull_n, tp, bp, hasnulls) } {
+        // SAFETY: same walk contract; resumes at the cstring attribute's
+        // length step with its datum already stored.
+        unsafe {
+            deform_cstring_rest(atts_n, values_n, isnull_n, tp, bp, hasnulls, attnum, off);
+        }
+    }
+}
+
+/// The walk must stay call-free: a non-diverging call inside (or before) the
+/// loop pushes the loop state into callee-saved registers — a 6-pair
+/// prologue/epilogue paid on every deform. The cstring arm (the strlen call C
+/// also pays) exits to a cold continuation via the returned resume point.
+///
+/// # Safety
+/// Slices are same-length; bitmap/image reads walk attributes present in the
+/// tuple (caller clamps to the tuple's natts).
+#[inline(always)]
+unsafe fn deform_walk(
+    atts_n: &[crate::tupdesc::CompactAttribute],
+    values_n: &mut [Datum],
+    isnull_n: &mut [bool],
+    tp: *const u8,
+    bp: *const crate::htup::bits8,
+    hasnulls: bool,
+) -> Option<(usize, usize)> {
+    let mut off = 0usize;
+    let mut slow = false;
+    for attnum in 0..atts_n.len() {
         let thisatt = &atts_n[attnum];
         // Locals: the Cell makes the struct non-readonly to LLVM.
         let attlen = thisatt.attlen as i32;
         let attbyval = thisatt.attbyval;
         let attalignby = thisatt.attalignby;
-        // SAFETY: bitmap/image reads walk attributes present in the tuple.
+        // SAFETY: caller contract.
         unsafe {
             if hasnulls && att_isnull(attnum, bp) {
                 values_n[attnum] = Datum::null();
@@ -322,11 +351,84 @@ pub fn heap_deform_tuple(
 
             values_n[attnum] = fetch_att(tp.add(off), attbyval, attlen);
 
-            off = att_addlength_pointer(off, attlen, tp.add(off));
+            if attlen > 0 {
+                off += attlen as usize;
+            } else if attlen == -1 {
+                off += crate::varatt::varsize_any(tp.add(off));
+                slow = true;
+            } else {
+                debug_assert!(attlen == -2);
+                return Some((attnum, off));
+            }
         }
+    }
+    None
+}
 
-        if attlen <= 0 {
-            slow = true;
+// Cold: only post-ADD-COLUMN scans see tuples narrower than the descriptor.
+#[cold]
+#[inline(never)]
+fn deform_narrow(
+    tuple: &HeapTupleData<'_>,
+    tupleDesc: &TupleDescData<'_>,
+    values: &mut [Datum],
+    isnull: &mut [bool],
+    natts: usize,
+) {
+    let hasnulls = tuple.has_nulls();
+    let tp = tuple.getstruct();
+    let bp = tuple.bits_ptr();
+    let cstring_rest = {
+        let atts_n = &tupleDesc.compact_attrs[..natts];
+        let (values_n, isnull_n) = (&mut values[..natts], &mut isnull[..natts]);
+        // SAFETY: as heap_deform_tuple; natts == tuple natts here.
+        unsafe { deform_walk(atts_n, values_n, isnull_n, tp, bp, hasnulls) }
+    };
+    if let Some((attnum, off)) = cstring_rest {
+        let atts_n = &tupleDesc.compact_attrs[..natts];
+        let (values_n, isnull_n) = (&mut values[..natts], &mut isnull[..natts]);
+        // SAFETY: as heap_deform_tuple.
+        unsafe {
+            deform_cstring_rest(atts_n, values_n, isnull_n, tp, bp, hasnulls, attnum, off);
+        }
+    }
+    deform_missing_tail(tupleDesc, values, isnull, natts);
+}
+
+// Cold: cstring attributes exist only in catalog-shaped descriptors. From the
+// first one on, slow is true for every later attribute (attlen <= 0), so the
+// cacheoff branches drop out of the resumed walk.
+#[cold]
+#[inline(never)]
+unsafe fn deform_cstring_rest(
+    atts_n: &[crate::tupdesc::CompactAttribute],
+    values_n: &mut [Datum],
+    isnull_n: &mut [bool],
+    tp: *const u8,
+    bp: *const crate::htup::bits8,
+    hasnulls: bool,
+    attnum: usize,
+    mut off: usize,
+) {
+    // SAFETY: caller contract — the walk covers attributes present in the tuple.
+    unsafe {
+        off = att_addlength_pointer(off, -2, tp.add(off));
+        for i in attnum + 1..atts_n.len() {
+            let thisatt = &atts_n[i];
+            let attlen = thisatt.attlen as i32;
+            if hasnulls && att_isnull(i, bp) {
+                values_n[i] = Datum::null();
+                isnull_n[i] = true;
+                continue;
+            }
+            isnull_n[i] = false;
+            if attlen == -1 {
+                off = att_pointer_alignby(off, thisatt.attalignby, -1, tp.add(off));
+            } else {
+                off = att_nominal_alignby(off, thisatt.attalignby);
+            }
+            values_n[i] = fetch_att(tp.add(off), thisatt.attbyval, attlen);
+            off = att_addlength_pointer(off, attlen, tp.add(off));
         }
     }
 }
