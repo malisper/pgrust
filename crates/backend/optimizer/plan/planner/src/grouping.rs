@@ -1409,13 +1409,15 @@ fn create_ordered_paths<'mcx>(
             .base()
             .pathtarget_id
             .expect("sorted path has a pathtarget");
-        if !crate::pathnode::exprs_same(
+        let sorted_path = if !crate::pathnode::exprs_same(
             run,
             &run.root.pathtarget(sorted_target).exprs,
             &run.root.pathtarget(target).exprs,
         ) {
-            panic!("apply_projection_to_path (pathnode.c): post-sort projection; M2 sort lane");
-        }
+            crate::pathnode::apply_projection_to_path(run, ordered_rel, sorted_path, target)?
+        } else {
+            sorted_path
+        };
         crate::pathnode::add_path(run, ordered_rel, sorted_path);
     }
     debug_assert!(run.root.rel(input_rel).partial_pathlist.is_empty());
