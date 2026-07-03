@@ -5109,8 +5109,11 @@ dependencies = [
 name = "postmaster"
 version = "0.0.0"
 dependencies = [
+ "aclchk_seams",
+ "aio_config",
  "auth_seams",
  "autovacuum_seams",
+ "backend_status_seams",
  "controldata_utils",
  "dsm_core",
  "elog",
@@ -5122,6 +5125,7 @@ dependencies = [
  "init_small",
  "ipc",
  "ipc_seams",
+ "ipci",
  "ipci_seams",
  "latch",
  "launch_backend",
@@ -5130,12 +5134,14 @@ dependencies = [
  "libpq_pqsignal",
  "lmgr_proc",
  "lwlock",
+ "mbutils_seams",
  "mcx",
  "miscinit",
  "miscinit_seams",
  "pg_path",
  "pg_prng",
  "pg_sema_seams",
+ "pgstat",
  "pmchild",
  "pmchild_seams",
  "pmsignal",
@@ -5145,6 +5151,7 @@ dependencies = [
  "pqcomm_seams",
  "procsignal",
  "s_lock_seams",
+ "scalar_seams",
  "shmem",
  "syslogger_seams",
  "timestamp_seams",
@@ -5158,6 +5165,7 @@ dependencies = [
  "types_storage",
  "varsup",
  "waiteventset",
+ "xact_seams",
  "xlogrecovery_seams",
 ]
 
