@@ -3,6 +3,8 @@
 // children and runtime pruning are loud.
 #![allow(non_snake_case)]
 
+pub mod pruning;
+
 use datum::Datum;
 use mcx::Mcx;
 use types_core::Oid;

@@ -718,6 +718,21 @@ pub fn ExplainNode<'mcx>(
         }
     }
 
+    // ExplainMissingMembers: subplans removed by initial runtime pruning.
+    let append_valid: Option<Vec<i32>> = match node.as_append() {
+        Some(a) if a.part_prune_index >= 0 && !es.qd.is_null() => {
+            execmain_seams::query_desc_prune_result::call(es.qd, a.part_prune_index)
+        }
+        _ => None,
+    };
+    if let Some(a) = node.as_append() {
+        let nchildren = a.appendplans.len() as i64;
+        let nplans = append_valid.as_ref().map_or(nchildren, |v| v.len() as i64);
+        if nplans < nchildren || es.format != EXPLAIN_FORMAT_TEXT {
+            ExplainPropertyInteger("Subplans Removed", None, nchildren - nplans, es);
+        }
+    }
+
     let pushed = Ancestors { entry: AncestorEntry::Plan(node), parent: ancestors };
     // ExplainSubPlans over initPlan.
     for sp_node in plan.initPlan.iter() {
@@ -740,8 +755,17 @@ pub fn ExplainNode<'mcx>(
         ExplainNode(r, Some("Inner"), None, Some(&pushed), es)?;
     }
     if let Some(a) = node.as_append() {
-        for child in &a.appendplans {
-            ExplainNode(child, Some("Member"), None, Some(&pushed), es)?;
+        match &append_valid {
+            Some(valid) => {
+                for &i in valid {
+                    ExplainNode(a.appendplans.nth(i as usize), Some("Member"), None, Some(&pushed), es)?;
+                }
+            }
+            None => {
+                for child in &a.appendplans {
+                    ExplainNode(child, Some("Member"), None, Some(&pushed), es)?;
+                }
+            }
         }
     }
     // ExplainMemberNodes over the bitmap combiners' member lists.
