@@ -91,6 +91,7 @@ const ANUM_PG_AGGREGATE_AGGFINALEXTRA: i32 = 12;
 const ANUM_PG_AGGREGATE_AGGMFINALEXTRA: i32 = 13;
 const ANUM_PG_AGGREGATE_AGGFINALMODIFY: i32 = 14;
 const ANUM_PG_AGGREGATE_AGGMFINALMODIFY: i32 = 15;
+const ANUM_PG_AGGREGATE_AGGSORTOP: i32 = 16;
 const ANUM_PG_AGGREGATE_AGGTRANSTYPE: i32 = 17;
 const ANUM_PG_AGGREGATE_AGGTRANSSPACE: i32 = 18;
 const ANUM_PG_AGGREGATE_AGGMTRANSTYPE: i32 = 19;
@@ -1132,6 +1133,7 @@ fn lookup_pg_aggregate_shape(
         aggmfinalextra: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGMFINALEXTRA).as_bool(),
         aggfinalmodify: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGFINALMODIFY).as_i8(),
         aggmfinalmodify: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGMFINALMODIFY).as_i8(),
+        aggsortop: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGSORTOP).as_oid(),
         aggtranstype: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGTRANSTYPE).as_oid(),
         aggtransspace: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGTRANSSPACE).as_i32(),
         aggmtranstype: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGMTRANSTYPE).as_oid(),

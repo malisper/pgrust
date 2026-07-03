@@ -1690,6 +1690,12 @@ fn finalize_plan<'mcx>(
             finalize_primnode_list(run, &s.indexqual, &mut paramids)?;
             finalize_primnode_list(run, &s.indexorderby, &mut paramids)?;
         }
+        NodeTag::T_IndexOnlyScan => {
+            let s = plan.as_index_only_scan().unwrap();
+            finalize_primnode_list(run, &s.indexqual, &mut paramids)?;
+            finalize_primnode_list(run, &s.recheckqual, &mut paramids)?;
+            finalize_primnode_list(run, &s.indexorderby, &mut paramids)?;
+        }
         NodeTag::T_BitmapIndexScan => {
             finalize_primnode_list(
                 run,
@@ -1810,6 +1816,22 @@ impl<'a, 'mcx> clauses::NodeWalker<'mcx> for FinalizePrimnode<'a, 'mcx> {
             }
             return Ok(false);
         }
+        if node.node_tag() == NodeTag::T_Aggref {
+            // The Aggref becomes an InitPlan output Param in setrefs; account
+            // for that Param here (C's find_minmax_agg_replacement_param wart).
+            if let Some(prm) =
+                crate::setrefs::find_minmax_agg_replacement_param(self.run, node)
+            {
+                let paramid = self
+                    .run
+                    .root
+                    .expr_node(prm)
+                    .as_param()
+                    .expect("minmax output param")
+                    .paramid;
+                self.paramids.add_member(self.run.mcx, paramid)?;
+            }
+        }
         if let Some(sp) = node.as_sub_plan() {
             let plan = self.run.glob.subplans.nth((sp.plan_id - 1) as usize);
             if let Some(te) = sp.testexpr {
@@ -1848,4 +1870,49 @@ fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
     let bytes = mcx::slice_in(mcx, s.as_bytes())?.leak();
     // SAFETY: byte-for-byte copy of a &str.
     Ok(unsafe { core::str::from_utf8_unchecked(bytes) })
+}
+
+/// SS_make_initplan_from_plan (subselect.c): attach a finished plan tree as an
+/// InitPlan of the current level; prm is the pre-made output Param's NodeId.
+pub(crate) fn ss_make_initplan_from_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    subroot: crate::run::SubrootState<'mcx>,
+    plan: Node<'mcx>,
+    prm_id: types_pathnodes::NodeId,
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    run.glob.subplans.lappend(mcx, plan)?;
+    run.subroots.push(subroot);
+    debug_assert_eq!(run.subroots.len(), run.glob.subplans.len());
+    let plan_id = run.glob.subplans.len() as i32;
+
+    let (first_col_type, first_col_typmod, first_col_collation) = get_first_col_type(plan);
+    let paramid = run
+        .root
+        .expr_node(prm_id)
+        .as_param()
+        .expect("minmax output param")
+        .paramid;
+    let mut splan = SubPlan {
+        subLinkType: SubLinkType::EXPR_SUBLINK,
+        testexpr: None,
+        paramIds: IntList::nil(),
+        plan_id,
+        plan_name: Some(str_in(mcx, &format!("InitPlan {plan_id}"))?),
+        firstColType: first_col_type,
+        firstColTypmod: first_col_typmod,
+        firstColCollation: first_col_collation,
+        useHashTable: false,
+        unknownEqFalse: false,
+        parallel_safe: plan.as_plan().expect("plan node").parallel_safe,
+        setParam: IntList::make1(mcx, paramid)?,
+        parParam: IntList::nil(),
+        args: NodeList::nil(),
+        startup_cost: 0.0,
+        per_call_cost: 0.0,
+    };
+    cost_subplan(&mut splan, plan);
+    let splan_id = run.intern_expr(Node::mk(mcx, splan)?);
+    run.root.init_plans.push(splan_id);
+    Ok(())
 }

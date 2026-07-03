@@ -832,7 +832,7 @@ pub fn get_cheapest_fractional_path(run: &PlannerRun<'_>, rel_id: RelId, tuple_f
     best
 }
 
-fn compare_fractional_path_costs(path1: &Path<'_>, path2: &Path<'_>, fraction: f64) -> i32 {
+pub fn compare_fractional_path_costs(path1: &Path<'_>, path2: &Path<'_>, fraction: f64) -> i32 {
     if path1.disabled_nodes != path2.disabled_nodes {
         return if path1.disabled_nodes < path2.disabled_nodes { -1 } else { 1 };
     }
@@ -1648,4 +1648,89 @@ pub fn create_setop_path<'mcx>(
 
 const fn maxalign8(n: usize) -> usize {
     (n + 7) & !7
+}
+
+// apply_projection_to_path (pathnode.c); Gather/GatherMerge pushdown arms are
+// dead (loud upstream).
+pub fn apply_projection_to_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    path_id: PathId,
+    target_id: PtId,
+) -> PgResult<PathId> {
+    let pathtype = run.root.path(path_id).base().pathtype;
+    if !is_projection_capable_pathtype(pathtype) {
+        let safe = crate::is_parallel_safe_exprs(run, target_id)?;
+        let pn = create_projection_path(run, rel_id, path_id, target_id, safe);
+        return Ok(run.root.alloc_path(pn));
+    }
+    let old_target = run.root.path(path_id).base().pathtarget_id.expect("path has a pathtarget");
+    let oldcost = run.root.pathtarget(old_target).cost;
+    let newcost = run.root.pathtarget(target_id).cost;
+    let p = run.root.path_mut(path_id).base_mut();
+    p.pathtarget_id = Some(target_id);
+    p.startup_cost += newcost.startup - oldcost.startup;
+    p.total_cost += newcost.startup - oldcost.startup
+        + (newcost.per_tuple - oldcost.per_tuple) * p.rows;
+    Ok(path_id)
+}
+
+// create_minmaxagg_path (pathnode.c).
+pub fn create_minmaxagg_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    target_id: PtId,
+    mmaggregates: PgVec<'mcx, types_pathnodes::MinMaxAggInfo>,
+    quals: PgVec<'mcx, types_pathnodes::NodeId>,
+) -> PgResult<PathId> {
+    let mut path = base_path(run, NodeTag::T_MinMaxAggPath, NodeTag::T_Result, rel_id);
+    path.pathtarget_id = Some(target_id);
+    path.parallel_safe = true;
+    path.rows = 1.0;
+
+    let mut initplan_cost = 0.0;
+    let mut initplan_disabled_nodes = 0;
+    for mminfo in mmaggregates.iter() {
+        let sub = crate::planagg::subroot_path_base(run, mminfo);
+        initplan_disabled_nodes += sub.disabled_nodes;
+        initplan_cost += mminfo.pathcost;
+        if !sub.parallel_safe {
+            path.parallel_safe = false;
+        }
+    }
+
+    let tcost = run.root.pathtarget(target_id).cost;
+    path.disabled_nodes = initplan_disabled_nodes;
+    path.startup_cost = initplan_cost + tcost.startup;
+    path.total_cost =
+        initplan_cost + tcost.startup + tcost.per_tuple + gucs::cpu_tuple_cost();
+
+    if !quals.is_empty() {
+        let mut qual_cost = types_pathnodes::QualCost::default();
+        for &qid in quals.iter() {
+            let c = crate::costsize::cost_qual_eval_node(*run.root.expr_node(qid))?;
+            qual_cost.startup += c.startup;
+            qual_cost.per_tuple += c.per_tuple;
+        }
+        path.startup_cost += qual_cost.startup;
+        path.total_cost += qual_cost.startup + qual_cost.per_tuple;
+    }
+
+    if path.parallel_safe {
+        path.parallel_safe = crate::is_parallel_safe_exprs(run, target_id)?;
+        if path.parallel_safe {
+            for &qid in quals.iter() {
+                if !crate::is_parallel_safe_opt(run, Some(*run.root.expr_node(qid)))? {
+                    path.parallel_safe = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(run.root.alloc_path(PathNode::MinMaxAggPath(types_pathnodes::MinMaxAggPath {
+        path,
+        mmaggregates,
+        quals,
+    })))
 }

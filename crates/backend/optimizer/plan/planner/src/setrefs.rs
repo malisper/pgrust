@@ -171,13 +171,28 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
         NodeTag::T_IndexScan => {
             let s = plan.as_index_scan().unwrap();
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
-            assert_eq!(rtoffset, 0, "set_plan_refs (setrefs.c): IndexScan in a subplan; M2 lane");
-            fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
-            fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
-            fix_scan_list(run, &s.indexqual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
-            fix_scan_list(run, &s.indexqualorig, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
-            fix_scan_list(run, &s.indexorderby, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
-            fix_scan_list(run, &s.indexorderbyorig, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            let nr = s.scan.plan.plan_rows;
+            let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, nr)?;
+            let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * nr)?;
+            let iq = fix_scan_list(run, &s.indexqual, rtoffset, 2.0 * nr)?;
+            let iqo = fix_scan_list(run, &s.indexqualorig, rtoffset, 2.0 * nr)?;
+            let iob = fix_scan_list(run, &s.indexorderby, rtoffset, 2.0 * nr)?;
+            let iobo = fix_scan_list(run, &s.indexorderbyorig, rtoffset, 2.0 * nr)?;
+            if rtoffset != 0 {
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::plannodes::IndexScan, _>(|p| {
+                        p.scan.scanrelid += rtoffset as u32;
+                        if let Some(v) = tl { p.scan.plan.targetlist = v; }
+                        if let Some(v) = qual { p.scan.plan.qual = v; }
+                        if let Some(v) = iq { p.indexqual = v; }
+                        if let Some(v) = iqo { p.indexqualorig = v; }
+                        if let Some(v) = iob { p.indexorderby = v; }
+                        if let Some(v) = iobo { p.indexorderbyorig = v; }
+                    })
+                }
+                .expect("IndexScan node");
+            }
         }
         NodeTag::T_IndexOnlyScan => set_indexonlyscan_references(run, plan, rtoffset)?,
         NodeTag::T_BitmapIndexScan => {
@@ -452,7 +467,6 @@ fn set_indexonlyscan_references<'mcx>(
     rtoffset: i32,
 ) -> PgResult<()> {
     let mcx = run.mcx;
-    assert_eq!(rtoffset, 0, "set_plan_refs (setrefs.c): IndexOnlyScan in a subplan; M2 lane");
     let (stripped, tlist, qual, recheckqual) = {
         let s = plan.as_index_only_scan().expect("IndexOnlyScan node");
         debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
@@ -500,17 +514,26 @@ fn set_indexonlyscan_references<'mcx>(
     for qual_node in &recheckqual {
         new_recheck.lappend(mcx, fix_upper_expr(run, qual_node, &stripped, rtoffset, INDEX_VAR, 2.0 * plan_rows)?)?;
     }
-    {
+    let (iq, itl) = {
         let s = plan.as_index_only_scan().unwrap();
-        fix_scan_list(run, &s.indexqual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
-        fix_scan_list(run, &s.indextlist, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
-    }
+        (
+            fix_scan_list(run, &s.indexqual, rtoffset, 2.0 * s.scan.plan.plan_rows)?,
+            fix_scan_list(run, &s.indextlist, rtoffset, 2.0 * s.scan.plan.plan_rows)?,
+        )
+    };
     // SAFETY: exclusive plan-tree ownership (prologue note).
     unsafe {
         plan.with_mut::<types_nodes::plannodes::IndexOnlyScan, _>(|s| {
+            s.scan.scanrelid += rtoffset as u32;
             s.scan.plan.targetlist = new_tlist;
             s.scan.plan.qual = new_qual;
             s.recheckqual = new_recheck;
+            if let Some(v) = iq {
+                s.indexqual = v;
+            }
+            if let Some(v) = itl {
+                s.indextlist = v;
+            }
         })
     }
     .expect("IndexOnlyScan node");
@@ -618,6 +641,9 @@ fn fix_upper_expr<'mcx>(
             Ok(node)
         }
         NodeTag::T_Aggref => {
+            if let Some(prm) = find_minmax_agg_replacement_param(run, node) {
+                return Ok(*run.root.expr_node(prm));
+            }
             let a = node.as_aggref().expect("Aggref");
             record_plan_function_dependency(run, a.aggfnoid)?;
             debug_assert!(a.aggdirectargs.is_nil() && a.aggfilter.is_none());
@@ -872,8 +898,7 @@ fn fix_scan_list<'mcx>(
     num_exec: f64,
 ) -> PgResult<Option<NodeList<'mcx>>> {
     debug_assert!(run.root.multiexpr_params.is_empty());
-    debug_assert!(run.root.minmax_aggs.is_empty());
-    if rtoffset == 0 && !run.glob.has_alternative_subplans {
+    if rtoffset == 0 && !run.glob.has_alternative_subplans && run.root.minmax_aggs.is_empty() {
         for node in list {
             fix_scan_expr_walker(run, node)?;
         }
@@ -922,6 +947,11 @@ fn fix_scan_expr_mutator<'mcx>(
         NodeTag::T_Param | NodeTag::T_Const | NodeTag::T_SQLValueFunction => {
             fix_scan_expr_walker(run, node)?;
             Ok(node)
+        }
+        NodeTag::T_Aggref => {
+            let prm = find_minmax_agg_replacement_param(run, node)
+                .expect("Aggref outside a minmax Result reaches fix_upper_expr");
+            Ok(*run.root.expr_node(prm))
         }
         NodeTag::T_TargetEntry => {
             let tle = node.as_target_entry().unwrap();
@@ -1885,4 +1915,31 @@ fn clean_up_removed_plan_level<'mcx>(
     }
     crate::createplan::apply_tlist_labeling(child, &pplan.targetlist);
     Ok(child)
+}
+
+/// find_minmax_agg_replacement_param (setrefs.c); the returned NodeId is the
+/// InitPlan output Param in the current root's arena.
+pub(crate) fn find_minmax_agg_replacement_param<'mcx>(
+    run: &PlannerRun<'mcx>,
+    node: Node<'mcx>,
+) -> Option<types_pathnodes::NodeId> {
+    let aggref = node.as_aggref()?;
+    if run.root.minmax_aggs.is_empty() || aggref.args.len() != 1 {
+        return None;
+    }
+    let cur_target = aggref
+        .args
+        .nth(0)
+        .as_target_entry()
+        .expect("Aggref.args holds TargetEntries")
+        .expr;
+    for i in 0..run.root.minmax_aggs.len() {
+        let mm = *run.root.minmax_agg_info(run.root.minmax_aggs[i]);
+        if mm.aggfnoid == aggref.aggfnoid
+            && types_nodes::equal(*run.root.expr_node(mm.target), cur_target)
+        {
+            return Some(mm.param);
+        }
+    }
+    None
 }

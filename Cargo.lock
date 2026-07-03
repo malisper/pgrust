@@ -5410,6 +5410,7 @@ dependencies = [
  "coerce",
  "datum",
  "execmain",
+ "exectuples",
  "fmgr_core",
  "guc_tables",
  "indexam",
@@ -5424,6 +5425,7 @@ dependencies = [
  "parser_analyze",
  "parser_small1",
  "planner_seams",
+ "procarray_seams",
  "relation_seams",
  "relcache",
  "relcache_build_seams",
@@ -5441,8 +5443,12 @@ dependencies = [
  "types_portal",
  "types_rel",
  "types_relscan",
+ "types_scan",
+ "types_slot",
+ "types_snapshot",
  "types_tuple",
  "vars",
+ "visibilitymap",
 ]
 
 [[package]]

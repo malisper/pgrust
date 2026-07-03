@@ -803,6 +803,7 @@ pub struct PgAggregateShape {
     pub aggmfinalextra: bool,
     pub aggfinalmodify: i8,
     pub aggmfinalmodify: i8,
+    pub aggsortop: Oid,
     pub aggtranstype: Oid,
     pub aggtransspace: i32,
     pub aggmtranstype: Oid,

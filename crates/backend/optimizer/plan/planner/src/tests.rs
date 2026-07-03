@@ -39,6 +39,9 @@ fn install_fixtures() {
                 _ => None,
             })
         });
+        syscache_seams::pg_type_typtype::set(|typid| {
+            Ok(matches!(typid, 16 | 20 | 23 | 25).then_some(b'b' as i8))
+        });
         syscache_seams::pg_type_io_shape::set(|typid| {
             // (typinput, typoutput) = int4in/out, int8in/out.
             let (typlen, typbyval, typalign, io) = match typid {
@@ -75,6 +78,7 @@ const JT4: u32 = 16403;
 const STT: u32 = 16410;
 const INT4EQ_OP: u32 = 96;
 const INT4_LT_OP: u32 = 97;
+const INT4_GT_OP: u32 = 521;
 const INT8GT_OP: u32 = 413;
 const INT4EQ_PROC: u32 = 65;
 const INT4_BTREE_FAM: u32 = 1976;
@@ -105,6 +109,9 @@ fn install_scan_fixtures() {
             2108 => Some(shape(20, 1, b'a', false)),
             1219 => Some(shape(20, 1, b'f', true)),
             1841 => Some(shape(20, 2, b'f', false)),
+            // max(int4)/min(int4) + int4larger/int4smaller (minmax lane).
+            2116 | 2132 => Some(shape(23, 1, b'a', false)),
+            768 | 769 => Some(shape(23, 2, b'f', true)),
             _ => None,
         })
     });
@@ -135,6 +142,18 @@ fn install_scan_fixtures() {
                 oprcanmerge: false,
                 oprcanhash: false,
             }),
+            INT4_GT_OP => Some(syscache_seams::PgOperatorShape {
+                oprleft: 23,
+                oprright: 23,
+                oprresult: 16,
+                oprcom: INT4_LT_OP,
+                oprnegate: 523,
+                oprcode: 147,
+                oprrest: 104,
+                oprjoin: 108,
+                oprcanmerge: false,
+                oprcanhash: false,
+            }),
             // int8 > int8 (HAVING-lane tests).
             INT8GT_OP => Some(syscache_seams::PgOperatorShape {
                 oprleft: 20,
@@ -152,27 +171,44 @@ fn install_scan_fixtures() {
         })
     });
     syscache_seams::lookup_pg_amop_by_operator::set(|opno, purpose, opfamily| {
-        Ok(
-            if opno == INT4EQ_OP && purpose == b's' && opfamily == INT4_BTREE_FAM {
-                Some(syscache_seams::PgAmopShape {
+        Ok(if purpose == b's' && opfamily == INT4_BTREE_FAM {
+            match opno {
+                INT4EQ_OP => Some(syscache_seams::PgAmopShape {
                     amopstrategy: 3,
                     amopsortfamily: 0,
                     amoplefttype: 23,
                     amoprighttype: 23,
-                })
-            } else {
-                None
-            },
-        )
+                }),
+                INT4_LT_OP => Some(syscache_seams::PgAmopShape {
+                    amopstrategy: 1,
+                    amopsortfamily: 0,
+                    amoplefttype: 23,
+                    amoprighttype: 23,
+                }),
+                INT4_GT_OP => Some(syscache_seams::PgAmopShape {
+                    amopstrategy: 5,
+                    amopsortfamily: 0,
+                    amoplefttype: 23,
+                    amoprighttype: 23,
+                }),
+                _ => None,
+            }
+        } else {
+            None
+        })
     });
     syscache_seams::lookup_pg_amop_members_by_operator::set(|mcx, opno| {
         let mut v = mcx::PgVec::new_in(mcx);
-        if opno == INT4EQ_OP || opno == INT4_LT_OP {
+        if opno == INT4EQ_OP || opno == INT4_LT_OP || opno == INT4_GT_OP {
             v.push(syscache_seams::PgAmopMemberShape {
                 amopfamily: INT4_BTREE_FAM,
                 amoplefttype: 23,
                 amoprighttype: 23,
-                amopstrategy: if opno == INT4EQ_OP { 3 } else { 1 },
+                amopstrategy: match opno {
+                    INT4EQ_OP => 3,
+                    INT4_LT_OP => 1,
+                    _ => 5,
+                },
                 amopmethod: 403,
             });
         }
@@ -193,7 +229,7 @@ fn install_scan_fixtures() {
     });
     syscache_seams::pg_proc_cost_shape::set(|funcid| {
         Ok(match funcid {
-            INT4EQ_PROC | 66 | 1219 | 1841 | 470 | 2108 => {
+            INT4EQ_PROC | 66 | 1219 | 1841 | 470 | 2108 | 768 | 769 | 147 => {
                 Some(syscache_seams::PgProcCostShape { procost: 1.0, prorows: 0.0, prosupport: 0 })
             }
             // row_number/rank/dense_rank carry live prosupport rows; the
@@ -228,6 +264,7 @@ fn install_scan_fixtures() {
             aggmfinalextra: false,
             aggfinalmodify: b'r' as i8,
             aggmfinalmodify: b'r' as i8,
+            aggsortop: 0,
             aggtranstype: 20,
             aggtransspace: 0,
             aggmtranstype: 0,
@@ -235,13 +272,27 @@ fn install_scan_fixtures() {
         Ok(match aggfnoid {
             2803 => Some(shape(1219)),
             2108 => Some(shape(1841)),
+            2116 => Some(syscache_seams::PgAggregateShape {
+                aggtransfn: 768,
+                aggsortop: INT4_GT_OP,
+                aggtranstype: 23,
+                aggcombinefn: 768,
+                ..shape(768)
+            }),
+            2132 => Some(syscache_seams::PgAggregateShape {
+                aggtransfn: 769,
+                aggsortop: INT4_LT_OP,
+                aggtranstype: 23,
+                aggcombinefn: 769,
+                ..shape(769)
+            }),
             _ => None,
         })
     });
     syscache_seams::pg_aggregate_agginitval::set(|mcx, aggfnoid| {
         Ok(match aggfnoid {
             2803 => Some(Some(mcx::PgString::from_str_in("0", mcx)?)),
-            2108 => Some(None),
+            2108 | 2116 | 2132 => Some(None),
             _ => None,
         })
     });
@@ -1342,6 +1393,140 @@ fn insert_values_plans_to_modifytable_over_result() {
 }
 
 // GROUP BY hashed lane: SELECT pk, count(*) FROM t GROUP BY pk.
+// planagg lane: SELECT max(pk)/min(pk) FROM t rewrites to a Param-fed Result
+// over an InitPlan Limit -> ordered Index Only Scan.
+mod minmax_agg {
+    use super::*;
+    use types_nodes::primnodes::Aggref;
+
+    const MAX_INT4: u32 = 2116;
+    const MIN_INT4: u32 = 2132;
+
+    fn minmax_aggref<'mcx>(mcx: Mcx<'mcx>, fnoid: u32, attno: i16) -> Node<'mcx> {
+        let var = Node::mk_var(mcx, 1, attno, 23, -1, 0, 0).unwrap();
+        let arg = Node::mk_target_entry(mcx, var, 1, None, false).unwrap();
+        let mut aggargtypes = types_nodes::list::OidList::nil();
+        aggargtypes.lappend(mcx, 23).unwrap();
+        Node::mk(
+            mcx,
+            Aggref {
+                aggfnoid: fnoid,
+                aggtype: 23,
+                aggargtypes,
+                args: NodeList::make1(mcx, arg).unwrap(),
+                ..Aggref::default()
+            },
+        )
+        .unwrap()
+    }
+
+    fn minmax_query<'mcx>(mcx: Mcx<'mcx>, fnoid: u32, attno: i16) -> Query<'mcx> {
+        let mut parse = table_query(mcx, None);
+        let name = if fnoid == MAX_INT4 { "max" } else { "min" };
+        let tle =
+            Node::mk_target_entry(mcx, minmax_aggref(mcx, fnoid, attno), 1, Some(name), false)
+                .unwrap();
+        parse.targetList = NodeList::make1(mcx, tle).unwrap();
+        parse.hasAggs = true;
+        parse
+    }
+
+    fn plan_minmax<'mcx>(
+        mcx: Mcx<'mcx>,
+        fnoid: u32,
+        attno: i16,
+    ) -> types_nodes::plannodes::PlannedStmt<'mcx> {
+        install_fixtures();
+        planner(
+            mcx,
+            minmax_query(mcx, fnoid, attno),
+            "SELECT max(pk) FROM t",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn max_pk_plans_to_result_with_ios_backward_initplan() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let stmt = plan_minmax(mcx, MAX_INT4, 1);
+
+        let plan = stmt.planTree.unwrap();
+        assert_eq!(plan.node_tag(), NodeTag::T_Result);
+        let result = plan.as_result().unwrap();
+        assert!(result.plan.lefttree.is_none());
+        assert!(result.resconstantqual.is_none());
+
+        // tlist: the Aggref was swapped for the InitPlan output Param $0.
+        assert_eq!(result.plan.targetlist.len(), 1);
+        let tle = result.plan.targetlist.nth(0).as_target_entry().unwrap();
+        assert_eq!(tle.resname, Some("max"));
+        let prm = tle.expr.as_param().unwrap();
+        assert_eq!(prm.paramid, 0);
+        assert_eq!(prm.paramtype, 23);
+
+        // The InitPlan SubPlan hangs off the Result.
+        assert_eq!(result.plan.initPlan.len(), 1);
+        let sp = result.plan.initPlan.nth(0).as_sub_plan().unwrap();
+        assert_eq!(sp.plan_id, 1);
+        assert_eq!(sp.plan_name, Some("InitPlan 1"));
+        assert_eq!(sp.firstColType, 23);
+        let mut set_param = sp.setParam.iter();
+        assert_eq!((set_param.next(), set_param.next()), (Some(0), None));
+
+        // subplans[0]: Limit 1 -> Index Only Scan Backward on t_pkey with the
+        // IS NOT NULL index qual.
+        assert_eq!(stmt.subplans.len(), 1);
+        let limit_node = stmt.subplans.nth(0);
+        assert_eq!(limit_node.node_tag(), NodeTag::T_Limit);
+        let limit = limit_node.as_limit().unwrap();
+        assert_eq!(limit.plan.plan_rows, 1.0);
+        assert!(limit.limitOffset.is_none());
+        assert_eq!(limit.limitCount.unwrap().as_const().unwrap().constvalue.as_i64(), 1);
+
+        let ios_node = limit.plan.lefttree.unwrap();
+        assert_eq!(ios_node.node_tag(), NodeTag::T_IndexOnlyScan);
+        let ios = ios_node.as_index_only_scan().unwrap();
+        assert_eq!(ios.indexid, IDX);
+        assert_eq!(ios.indexorderdir, -1);
+        // pk is NOT NULL: restriction_is_always_true (initsplan.c) drops the
+        // generated IS NOT NULL qual, so no Index Cond survives (C 18 same).
+        assert!(ios.indexqual.is_nil());
+        assert!(ios.scan.plan.qual.is_nil());
+        assert_eq!(ios.scan.plan.plan_rows, 10000.0);
+        // The subplan's flattened RTE joins the top one.
+        assert_eq!(ios.scan.scanrelid, 2);
+        assert_eq!(stmt.rtable.len(), 2);
+
+        assert_eq!(stmt.paramExecTypes.len(), 1);
+    }
+
+    #[test]
+    fn min_pk_initplan_scans_forward() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let stmt = plan_minmax(mcx, MIN_INT4, 1);
+        assert_eq!(stmt.planTree.unwrap().node_tag(), NodeTag::T_Result);
+        assert_eq!(stmt.subplans.len(), 1);
+        let limit = stmt.subplans.nth(0).as_limit().unwrap();
+        let ios = limit.plan.lefttree.unwrap().as_index_only_scan().unwrap();
+        assert_eq!(ios.indexorderdir, 1);
+    }
+
+    #[test]
+    fn max_on_unindexed_column_keeps_plain_agg() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let stmt = plan_minmax(mcx, MAX_INT4, 2);
+        let plan = stmt.planTree.unwrap();
+        assert_eq!(plan.node_tag(), NodeTag::T_Agg);
+        assert!(stmt.subplans.is_nil());
+        assert!(stmt.paramExecTypes.is_nil() || stmt.paramExecTypes.len() == 1);
+    }
+}
+
 mod group_by_hashed {
     use super::*;
     use types_nodes::parsenodes::SortGroupClause;

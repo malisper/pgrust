@@ -56,6 +56,7 @@ fn create_plan_recurse<'mcx>(
         PathNode::ProjectionPath(_) => create_projection_plan(run, path_id, flags),
         PathNode::GroupResultPath(_) => create_group_result_plan(run, path_id),
         PathNode::AggPath(_) => create_agg_plan(run, path_id),
+        PathNode::MinMaxAggPath(_) => create_minmaxagg_plan(run, path_id),
         PathNode::WindowAggPath(_) => create_windowagg_plan(run, path_id),
         PathNode::UpperUniquePath(_) => create_upper_unique_plan(run, path_id, flags),
         PathNode::SortPath(_) => create_sort_plan(run, path_id, flags),
@@ -841,6 +842,20 @@ fn fix_indexqual_clause<'mcx>(
                 },
             )
         }
+        NodeTag::T_NullTest => {
+            let nt = clause.as_null_test().unwrap();
+            let fixed_arg =
+                fix_indexqual_operand(run, index, indexcol, nt.arg.expect("NullTest.arg"))?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::NullTest {
+                    arg: Some(fixed_arg),
+                    nulltesttype: nt.nulltesttype,
+                    argisrow: nt.argisrow,
+                    location: nt.location,
+                },
+            )
+        }
         other => panic!("fix_indexqual_clause (createplan.c): {other:?}; M2 lane"),
     }
 }
@@ -1131,6 +1146,88 @@ fn create_agg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResul
 }
 
 
+// create_minmaxagg_plan (createplan.c/planagg.c): one InitPlan per agg, then
+// a Param-fed Result.
+fn create_minmaxagg_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let (mmaggregates, qual_ids, target_id) = match run.root.path(path_id) {
+        PathNode::MinMaxAggPath(p) => (
+            crate::relnode::pgvec_clone_shallow(mcx, &p.mmaggregates),
+            crate::relnode::pgvec_clone_shallow(mcx, &p.quals),
+            p.path.pathtarget_id.unwrap(),
+        ),
+        _ => unreachable!(),
+    };
+
+    for mminfo in mmaggregates.iter() {
+        let idx = mminfo.subroot_idx.expect("minmax agg has a subroot");
+        let sub_path = mminfo.subroot_path.expect("minmax agg has a path");
+        let sub_state = run.minmax_subroots[idx].take().expect("minmax subroot taken once");
+        let saved_root = core::mem::replace(&mut run.root, sub_state.root);
+        let saved_tlist =
+            core::mem::replace(&mut run.processed_tlist, sub_state.processed_tlist);
+
+        // create_plan, not create_plan_recurse: a different planner context.
+        let subplan = create_plan(run, sub_path)?;
+        let subparse = run.parse();
+
+        let mut lim = Node::build::<types_nodes::plannodes::Limit>(mcx)?;
+        lim.plan.targetlist = NodeList::from_slice(
+            mcx,
+            subplan.as_plan().expect("plan node").targetlist.as_slice(),
+        )?;
+        lim.plan.qual = NodeList::nil();
+        lim.plan.lefttree = Some(subplan);
+        lim.limitOffset = subparse.limitOffset;
+        lim.limitCount = subparse.limitCount;
+        lim.limitOption = types_nodes::nodes_enums::LimitOption::LIMIT_OPTION_COUNT;
+        {
+            let p = run.root.path(sub_path).base();
+            let width = p.pathtarget_id.map_or(0, |pt| run.root.pathtarget(pt).width);
+            lim.plan.disabled_nodes = p.disabled_nodes;
+            lim.plan.startup_cost = p.startup_cost;
+            lim.plan.total_cost = mminfo.pathcost;
+            lim.plan.plan_rows = 1.0;
+            lim.plan.plan_width = width;
+            lim.plan.parallel_aware = false;
+            lim.plan.parallel_safe = p.parallel_safe;
+        }
+        let limit_plan = lim.seal();
+
+        let sub_root = core::mem::replace(&mut run.root, saved_root);
+        let sub_tlist = core::mem::replace(&mut run.processed_tlist, saved_tlist);
+        crate::subselect::ss_make_initplan_from_plan(
+            run,
+            crate::run::SubrootState { root: sub_root, processed_tlist: sub_tlist },
+            limit_plan,
+            mminfo.param,
+        )?;
+    }
+
+    let tlist = build_path_tlist(run, target_id)?;
+    let qual_list = order_bare_qual_clauses(run, &qual_ids)?;
+
+    let mut plan = Node::build::<ResultPlan>(mcx)?;
+    plan.plan.targetlist = tlist;
+    if !qual_list.is_nil() {
+        plan.resconstantqual = Some(Node::mk_list(mcx, qual_list)?);
+    }
+    copy_generic_path_info(run, &mut plan.plan, path_id);
+
+    // setrefs swaps the residual Aggrefs for the InitPlan output Params.
+    debug_assert!(run.root.minmax_aggs.is_empty());
+    for mm in mmaggregates.iter() {
+        let id = run.root.alloc_minmax_agg_info(*mm);
+        run.root.minmax_aggs.push(id);
+    }
+    Ok(plan.seal())
+}
+
+// create_windowagg_plan (createplan.c); runCondition/qual/frame-offset legs
+// dead (loud upstream), startOffset/endOffset always None (default frame).
 // create_windowagg_plan (createplan.c); runCondition/qual legs dead (loud
 // upstream).
 fn create_windowagg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResult<Node<'mcx>> {

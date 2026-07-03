@@ -457,6 +457,7 @@ fn install_type_fixture() {
                 aggdeserialfn: InvalidOid,
                 aggfinalextra: false,
                 aggfinalmodify: b'r' as i8,
+                aggsortop: 0,
                 aggtranstype: 20,
                 aggmtransfn: 0,
                 aggminvtransfn: 0,
