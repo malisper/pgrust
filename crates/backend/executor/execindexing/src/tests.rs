@@ -238,6 +238,7 @@ fn install() {
         catalog_seams::is_catalog_relation::set(|_rel| false);
 
         heapam_visibility_seams::heap_tuple_satisfies_visibility::set(|_h, _s, _b| Ok(true));
+        heapam_visibility_seams::heap_tuple_satisfies_mvcc_page::set(|_h, _s, _b, _m| Ok(true));
         heapam_visibility_seams::heap_tuple_is_surely_dead::set(|_h, _v| Ok(false));
         heapam_visibility_seams::heap_tuple_header_is_only_locked::set(|_h| Ok(false));
 

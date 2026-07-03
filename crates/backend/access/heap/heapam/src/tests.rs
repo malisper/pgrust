@@ -110,6 +110,10 @@ fn install_seams() {
             VIS_CALLS.fetch_add(1, Ordering::Relaxed);
             Ok(htup.t_data().xmin_raw() != INVISIBLE_XMIN)
         });
+        heapam_visibility_seams::heap_tuple_satisfies_mvcc_page::set(|htup, _snap, _buf, _memo| {
+            VIS_CALLS.fetch_add(1, Ordering::Relaxed);
+            Ok(htup.t_data().xmin_raw() != INVISIBLE_XMIN)
+        });
         heapam_visibility_seams::heap_tuple_is_surely_dead::set(|_htup, _vt| Ok(false));
         heapam_visibility_seams::heap_tuple_header_is_only_locked::set(|_hdr| Ok(false));
 

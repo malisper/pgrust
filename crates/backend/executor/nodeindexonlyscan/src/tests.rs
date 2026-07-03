@@ -171,6 +171,9 @@ fn install_seams() {
         heapam_visibility_seams::heap_tuple_satisfies_visibility::set(
             |_htup, _snap, _buf| Ok(true),
         );
+        heapam_visibility_seams::heap_tuple_satisfies_mvcc_page::set(
+            |_htup, _snap, _buf, _memo| Ok(true),
+        );
         heapam_visibility_seams::heap_tuple_is_surely_dead::set(|_htup, _vt| Ok(false));
         heapam_visibility_seams::heap_tuple_header_is_only_locked::set(|_hdr| Ok(false));
         pruneheap_seams::heap_page_prune_opt::set(|_rel, _buf| Ok(()));
