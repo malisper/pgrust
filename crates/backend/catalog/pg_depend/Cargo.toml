@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [lib]
+name = "pg_depend"
 path = "src/lib.rs"
 
 [dependencies]
