@@ -44,6 +44,10 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn get_session_user_id() -> Oid
+);
+
+seam_core::seam!(
     pub fn create_socket_lock_file(
         socketfile: &str,
         am_postmaster: bool,

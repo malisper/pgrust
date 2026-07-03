@@ -1203,8 +1203,19 @@ pub(crate) fn init_expr_rec<'mcx>(
             push_step(state, mcx, step)
         }
         NodeTag::T_SQLValueFunction => {
+            use ::types_nodes::primnodes::SQLValueFunctionOp as Op;
             let svf = node.as_sql_value_function().unwrap();
-            let layout = core::alloc::Layout::from_size_align(12, 8).expect("timetz layout");
+            // 12-byte TimeTz image, or a 64-byte NameData for the name ops.
+            let size = match svf.op {
+                Op::SVFOP_CURRENT_ROLE
+                | Op::SVFOP_CURRENT_USER
+                | Op::SVFOP_USER
+                | Op::SVFOP_SESSION_USER
+                | Op::SVFOP_CURRENT_CATALOG
+                | Op::SVFOP_CURRENT_SCHEMA => 64,
+                _ => 12,
+            };
+            let layout = core::alloc::Layout::from_size_align(size, 8).expect("svf scratch layout");
             let timetz = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?.cast();
             push_step(
                 state,
