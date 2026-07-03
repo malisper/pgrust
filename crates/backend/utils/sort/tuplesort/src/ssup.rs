@@ -1,6 +1,8 @@
 use ::datum::Datum;
+use ::mcx::Mcx;
 use ::types_core::Oid;
 use ::types_error::PgResult;
+use ::types_fmgr::{direct_function_call2_coll_in, PGFunction};
 use ::lsyscache::COMPARE_GT;
 use ::types_nbtree::{BTORDER_PROC, BTSORTSUPPORT_PROC};
 
@@ -30,6 +32,16 @@ pub enum SortComparator {
     /// `varstrfastcmp_c`, no abbreviation (bttextsortsupport, collate-is-C
     /// only); datums must point at live untoasted varlenas.
     TextC,
+    /// `PrepareSortSupportComparisonShim`: the opfamily's BTORDER_PROC,
+    /// resolved once, invoked per comparison (C builds an fcinfo per call
+    /// too). Needs an mcx-threaded apply; the mcx-less lane panics.
+    Shim(ShimCmp),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShimCmp {
+    pub fn_addr: PGFunction,
+    pub fn_oid: Oid,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -69,6 +81,31 @@ pub fn apply_cmp(cmp: SortComparator, x: Datum, y: Datum) -> i32 {
         SortComparator::TextC => unsafe {
             varlena::varstrfastcmp_c(varlena_payload(x), varlena_payload(y))
         },
+        SortComparator::Shim(shim) => panic!(
+            "comparison shim (proc {}) reached an mcx-less comparator lane \
+             (merge join over shim-compared types not ported)",
+            shim.fn_oid
+        ),
+    }
+}
+
+#[inline(always)]
+pub fn apply_cmp_in(cmp: SortComparator, x: Datum, y: Datum, collation: Oid, mcx: Mcx<'_>) -> i32 {
+    match cmp {
+        SortComparator::Shim(shim) => {
+            match direct_function_call2_coll_in(shim.fn_addr, collation, mcx, x, y) {
+                Ok(d) => d.as_i32(),
+                // The comparator sits under infallible qsort plumbing; a
+                // failing btree proc is C's ereport-out-of-sort, surfaced
+                // here as a panic.
+                Err(e) => panic!(
+                    "sort comparison proc {} failed: {}",
+                    shim.fn_oid,
+                    e.message()
+                ),
+            }
+        }
+        other => apply_cmp(other, x, y),
     }
 }
 
@@ -132,6 +169,54 @@ pub fn apply_sort_comparator(
     apply_sort_comparator_as(ssup.comparator, datum1, isnull1, datum2, isnull2, ssup)
 }
 
+/// `ApplySortComparator` with the comparison-shim arm live (needs an mcx for
+/// the shim'd proc's per-call allocations).
+#[inline(always)]
+pub fn apply_sort_comparator_as_in(
+    cmp: SortComparator,
+    mcx: Mcx<'_>,
+    datum1: Datum,
+    isnull1: bool,
+    datum2: Datum,
+    isnull2: bool,
+    ssup: &SortSupport,
+) -> i32 {
+    if isnull1 {
+        if isnull2 {
+            0
+        } else if ssup.ssup_nulls_first {
+            -1
+        } else {
+            1
+        }
+    } else if isnull2 {
+        if ssup.ssup_nulls_first {
+            1
+        } else {
+            -1
+        }
+    } else {
+        let compare = apply_cmp_in(cmp, datum1, datum2, ssup.ssup_collation, mcx);
+        if ssup.ssup_reverse {
+            -compare
+        } else {
+            compare
+        }
+    }
+}
+
+#[inline(always)]
+pub fn apply_sort_comparator_in(
+    mcx: Mcx<'_>,
+    datum1: Datum,
+    isnull1: bool,
+    datum2: Datum,
+    isnull2: bool,
+    ssup: &SortSupport,
+) -> i32 {
+    apply_sort_comparator_as_in(ssup.comparator, mcx, datum1, isnull1, datum2, isnull2, ssup)
+}
+
 /// `PrepareSortSupportFromOrderingOp` (sortsupport.c). The comparator set is
 /// the closed enum above; a sortsupport routine outside it, the btree-proc
 /// shim, and abbreviated keys (bttextsortsupport et al.) all panic loudly.
@@ -170,12 +255,21 @@ pub fn comparator_for_opfamily(
         F_BTINT4SORTSUPPORT | F_DATE_SORTSUPPORT => SortComparator::Int32,
         F_BTINT8SORTSUPPORT | F_TIMESTAMP_SORTSUPPORT => SortComparator::SignedI64,
         0 => {
+            // C: PrepareSortSupportComparisonShim — fmgr_info the BTORDER_PROC
+            // once; comparisons go through the resolved fn pointer.
             let sort_function =
                 lsyscache::get_opfamily_proc(opfamily, lefttype, righttype, BTORDER_PROC as i16)?;
-            panic!(
-                "PrepareSortSupportComparisonShim (sortsupport.c) not ported: \
-                 btree comparison proc {sort_function} for opfamily {opfamily}"
-            );
+            if sort_function == 0 {
+                panic!(
+                    "missing support function {}({lefttype},{righttype}) in opfamily {opfamily}",
+                    BTORDER_PROC
+                );
+            }
+            let flinfo = ::fmgr_seams::fmgr_info::call(sort_function)?;
+            SortComparator::Shim(ShimCmp {
+                fn_addr: flinfo.fn_addr,
+                fn_oid: sort_function,
+            })
         }
         other => panic!(
             "sortsupport routine {other} (opfamily {opfamily}) has no comparator arm; \
