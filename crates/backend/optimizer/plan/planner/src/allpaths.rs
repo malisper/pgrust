@@ -86,7 +86,8 @@ fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()
             debug_assert!(
                 rte.relkind == types_rel::RELKIND_RELATION
                     || rte.relkind == types_rel::RELKIND_TOASTVALUE
-                    || rte.relkind == types_rel::RELKIND_SEQUENCE,
+                    || rte.relkind == types_rel::RELKIND_SEQUENCE
+                    || rte.relkind == types_rel::RELKIND_MATVIEW,
                 "set_rel_size relkind {}",
                 rte.relkind
             );
