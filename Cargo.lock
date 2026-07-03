@@ -1709,6 +1709,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "commands_cluster"
+version = "0.1.0"
+dependencies = [
+ "catalog",
+ "catalog_dependency",
+ "catalog_heap",
+ "catalog_indexing",
+ "catalog_toasting",
+ "datum",
+ "fmgr_seams",
+ "genam",
+ "heaptuple",
+ "mcx",
+ "multixact",
+ "pg_depend",
+ "procarray",
+ "relcache",
+ "table",
+ "tablecmds_seams",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+ "xact",
+]
+
+[[package]]
 name = "commands_comment"
 version = "0.1.0"
 dependencies = [
@@ -5378,6 +5407,7 @@ dependencies = [
  "genam",
  "heaptuple",
  "mcx",
+ "nodes_core",
  "outfuncs",
  "pg_depend",
  "table",
@@ -8198,12 +8228,15 @@ dependencies = [
  "catalog_toasting",
  "clauses",
  "coerce",
+ "commands_cluster",
  "datum",
  "elog_seams",
  "execexpr",
+ "exectuples",
  "fmgr_seams",
  "format_type",
  "genam",
+ "heapam",
  "heaptuple",
  "init_small",
  "inval",
@@ -8211,6 +8244,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "miscinit",
+ "nodes_core",
  "outfuncs",
  "parse_collate",
  "parse_expr",
@@ -8220,9 +8254,11 @@ dependencies = [
  "pg_attrdef",
  "pg_constraint",
  "pg_depend",
+ "pg_type",
  "pgstat",
  "predicate_seams",
  "rel_vocab",
+ "relation_seams",
  "relcache",
  "relcache_seams",
  "rewrite_handler",
@@ -8231,6 +8267,7 @@ dependencies = [
  "syscache_seams",
  "table",
  "tableam",
+ "tableam_vocab",
  "tablecmds_seams",
  "trigger",
  "tupdesc",
@@ -8240,6 +8277,7 @@ dependencies = [
  "types_nodes",
  "types_rel",
  "types_scan",
+ "types_slot",
  "types_trigger",
  "types_tuple",
  "vars",
@@ -8250,6 +8288,7 @@ dependencies = [
 name = "tablecmds_seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam_core",
  "types_core",
  "types_error",
