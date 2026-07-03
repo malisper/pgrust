@@ -1,5 +1,5 @@
 // InvalidateBuffer / FindAndDropRelationBuffers / DropRelationsAllBuffers
-// (bufmgr.c); local (temp) buffers stay unported.
+// (bufmgr.c); temp-relation arms divert to localbuf.
 use types_core::{BlockNumber, ForkNumber, InvalidBlockNumber, MAX_FORKNUM};
 use types_error::PgResult;
 use types_storage::buf::{BM_TAG_VALID, BUF_FLAG_MASK, BUF_USAGECOUNT_MASK};
@@ -15,6 +15,24 @@ use crate::freelist::StrategyFreeBuffer;
 use lwlock::{LWLockAcquire, LWLockRelease, LW_EXCLUSIVE, LW_SHARED};
 
 pub(crate) const RELS_BSEARCH_THRESHOLD: usize = 20;
+
+/// DropRelationBuffers (bufmgr.c): local arm live; the shared arm serves
+/// smgrtruncate, whose callers are unported — loud until that lane lands.
+pub fn DropRelationBuffers(
+    rlocator: RelFileLocatorBackend,
+    forknum: &[ForkNumber],
+    first_del_block: &[BlockNumber],
+) -> PgResult<()> {
+    if rlocator.backend != types_core::INVALID_PROC_NUMBER {
+        if rlocator.backend == init_small::globals::MyProcNumber() {
+            for (fork, first) in forknum.iter().zip(first_del_block) {
+                crate::localbuf::DropRelationLocalBuffers(rlocator.locator, *fork, *first)?;
+            }
+        }
+        return Ok(());
+    }
+    panic!("unported callee reached from bufmgr.c: DropRelationBuffers shared arm (smgrtruncate lane)");
+}
 
 fn buf_drop_full_scan_threshold() -> u64 {
     (NBuffersInited() as u64) / 32
@@ -111,9 +129,12 @@ pub fn DropRelationsAllBuffers(smgr_reln: &[RelFileLocatorBackend]) -> PgResult<
     let mut rels: Vec<RelFileLocatorBackend> = Vec::with_capacity(smgr_reln.len());
     for r in smgr_reln {
         if r.backend != types_core::INVALID_PROC_NUMBER {
-            panic!("unported callee reached from bufmgr.c: DropRelationAllLocalBuffers (temp relations)");
+            if r.backend == init_small::globals::MyProcNumber() {
+                crate::localbuf::DropRelationAllLocalBuffers(r.locator)?;
+            }
+        } else {
+            rels.push(*r);
         }
-        rels.push(*r);
     }
     if rels.is_empty() {
         return Ok(());

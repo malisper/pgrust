@@ -1,4 +1,4 @@
-use types_core::catalog::RELPERSISTENCE_PERMANENT;
+use types_core::catalog::{RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP};
 use types_error::PgResult;
 use types_nodes::parsenodes::{
     AlterTableCmd, AlterTableStmt, AlterTableType, CTEMaterialize, ClosePortalStmt, CommentStmt, CommonTableExpr, CopyStmt, CreateSchemaStmt,
@@ -336,7 +336,8 @@ impl<'mcx> Parser<'mcx> {
                 n.if_not_exists = false;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            // OptTemp: /*EMPTY*/ (TEMP/UNLOGGED variants stay unported).
+            // OptTemp (GLOBAL-deprecated and UNLOGGED variants stay unported).
+            461..=464 => *yyval = YYSTYPE::Ival(RELPERSISTENCE_TEMP as i32),
             468 => *yyval = YYSTYPE::Ival(RELPERSISTENCE_PERMANENT as i32),
             // TableElementList: TableElement | TableElementList ',' TableElement
             473 => {
@@ -544,7 +545,10 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::Node(Some(node));
             }
-            // OnCommitOption: /*EMPTY*/
+            // OnCommitOption
+            602 => *yyval = YYSTYPE::Ival(OnCommitAction::ONCOMMIT_DROP as i32),
+            603 => *yyval = YYSTYPE::Ival(OnCommitAction::ONCOMMIT_DELETE_ROWS as i32),
+            604 => *yyval = YYSTYPE::Ival(OnCommitAction::ONCOMMIT_PRESERVE_ROWS as i32),
             605 => *yyval = YYSTYPE::Ival(OnCommitAction::ONCOMMIT_NOOP as i32),
             1710 => {
                 let stmt = view.v(1).node().expect("select_clause");

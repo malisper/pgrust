@@ -511,7 +511,7 @@ pub fn index_build<'mcx>(
 
     let stats = nbtsort::btbuild(mcx, heapRelation, indexRelation, indexInfo)?;
 
-    if indexRelation.rd_rel.relpersistence != types_core::RELPERSISTENCE_PERMANENT {
+    if indexRelation.rd_rel.relpersistence == types_core::RELPERSISTENCE_UNLOGGED {
         unported("index_build: unlogged-index INIT_FORKNUM ambuildempty");
     }
 

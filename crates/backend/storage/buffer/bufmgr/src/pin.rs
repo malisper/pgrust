@@ -30,7 +30,8 @@ fn ResOwnerReleaseBufferPin(res: Datum) {
     let buffer = res.as_i32();
     assert!(BufferIsValid(buffer), "bad buffer ID: {buffer}");
     if buffer < 0 {
-        panic!("unported callee reached from bufmgr.c ResOwnerReleaseBufferPin: UnpinLocalBufferNoOwner (localbuf.c)");
+        crate::localbuf::UnpinLocalBufferNoOwner(buffer);
+        return;
     }
     UnpinBufferNoOwner(GetBufferDescriptor(buffer - 1));
 }
@@ -44,13 +45,18 @@ fn ResOwnerPrintBufferPin<'a>(mcx: mcx::Mcx<'a>, res: Datum) -> PgResult<mcx::Pg
 }
 
 #[inline]
-fn RememberBufferPin(b: Buffer) {
+pub(crate) fn RememberBufferPin(b: Buffer) {
     resowner::ResourceOwnerRemember(
         resowner::CurrentResourceOwner(),
         Datum::from_i32(b),
         &BUFFER_PIN_DESC,
     )
     .expect("ResourceOwnerRememberBuffer");
+}
+
+#[inline]
+pub(crate) fn buffer_pin_desc() -> &'static ResourceOwnerDesc {
+    &BUFFER_PIN_DESC
 }
 
 #[inline]
@@ -195,7 +201,8 @@ pub fn ReleaseBuffer(buffer: Buffer) -> PgResult<()> {
         return Err(bad_buffer_id(buffer, "ReleaseBuffer"));
     }
     if buffer < 0 {
-        panic!("unported callee reached from bufmgr.c ReleaseBuffer: UnpinLocalBuffer (localbuf.c)");
+        crate::localbuf::UnpinLocalBuffer(buffer);
+        return Ok(());
     }
     UnpinBuffer(GetBufferDescriptor(buffer - 1));
     Ok(())
@@ -205,7 +212,9 @@ pub fn IncrBufferRefCount(buffer: Buffer) {
     assert!(BufferIsPinned(buffer), "buffer {buffer} is not pinned");
     resowner_enlarge_for_pin().expect("ResourceOwnerEnlarge");
     if buffer < 0 {
-        panic!("unported callee reached from bufmgr.c IncrBufferRefCount: LocalRefCount (localbuf.c)");
+        crate::localbuf::incr_local_ref_count(buffer);
+        RememberBufferPin(buffer);
+        return;
     }
     privref::track_incr(buffer);
     RememberBufferPin(buffer);
@@ -216,18 +225,17 @@ pub fn BufferIsPinned(buffer: Buffer) -> bool {
         return false;
     }
     if buffer < 0 {
-        panic!("unported callee reached from bufmgr.c BufferIsPinned: LocalRefCount (localbuf.c)");
+        return crate::localbuf::local_ref_count(buffer) > 0;
     }
     GetPrivateRefCount(buffer) > 0
 }
 
 pub fn CheckBufferIsPinnedOnce(buffer: Buffer) -> PgResult<()> {
-    if buffer < 0 {
-        panic!(
-            "unported callee reached from bufmgr.c CheckBufferIsPinnedOnce: LocalRefCount (localbuf.c)"
-        );
-    }
-    let count = GetPrivateRefCount(buffer);
+    let count = if buffer < 0 {
+        crate::localbuf::local_ref_count(buffer)
+    } else {
+        GetPrivateRefCount(buffer)
+    };
     if count != 1 {
         return Err(Box::new(
             types_error::PgError::new(ERROR, format!("incorrect local pin count: {count}"))
@@ -267,11 +275,12 @@ pub fn UnlockBuffers() {
 
 /// AtEOXact_Buffers (bufmgr.c): leak check only — pins remembered on the
 /// resource owner were already dropped by ResourceOwnerRelease(BEFORE_LOCKS).
-pub fn AtEOXact_Buffers(_is_commit: bool) {
+pub fn AtEOXact_Buffers(is_commit: bool) {
     if cfg!(debug_assertions) {
         CheckForBufferLeaks();
     }
     debug_assert!(privref::overflow_count() == 0);
+    crate::localbuf::AtEOXact_LocalBuffers(is_commit);
 }
 
 fn CheckForBufferLeaks() {

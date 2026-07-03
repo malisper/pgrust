@@ -66,10 +66,11 @@ fn create_toast_table<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<bo
         tupdesc::populate_compact_attribute(&mut tupdesc, i);
     }
 
-    if catalog_namespace::isTempOrTempToastNamespace(rel.rd_rel.relnamespace) {
-        unported("create_toast_table: GetTempToastNamespace (temp relations)");
-    }
-    let namespaceid = PG_TOAST_NAMESPACE;
+    let namespaceid = if catalog_namespace::isTempOrTempToastNamespace(rel.rd_rel.relnamespace) {
+        catalog_namespace::GetTempToastNamespace()
+    } else {
+        PG_TOAST_NAMESPACE
+    };
 
     if rel.rd_rel.relisshared || rel.is_mapped() {
         unported("create_toast_table: shared/mapped parent relations");

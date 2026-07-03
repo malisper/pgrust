@@ -34,6 +34,8 @@ elog_seams = { path = "../../utils/error/elog_seams" }
 superuser = { path = "../../utils/misc/superuser" }
 init_small = { path = "../../utils/init/init_small" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
+tablecmds_seams = { path = "../tablecmds_seams" }
+snapmgr = { path = "../../utils/time/snapmgr" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
 catalog_index = { path = "../../catalog/catalog_index" }
 lmgr = { path = "../../storage/lmgr/lmgr" }

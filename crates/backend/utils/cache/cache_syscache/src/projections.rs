@@ -988,32 +988,22 @@ fn varlena_image<'mcx>(
         return Ok(None);
     };
     let p = d.as_usize() as *const u8;
-    // SAFETY: non-null varlena attr datum points into the live tuple.
-    let b0 = unsafe { *p };
-    assert!(
-        b0 != 0x01 && (b0 & 0x03) != 0x02,
-        "pg_statistic array attr is toasted/compressed: detoast (heaptoast) gap in stats decode"
-    );
-    if b0 & 0x01 != 0 {
-        // PG_DETOAST_DATUM's short-header expansion to a 4-byte-header image.
-        let raw = (b0 as usize >> 1) & 0x7F;
-        let total = raw - 1 + 4;
-        let mut out: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
-        mcx::vec_append_bytes(&mut out, &((total as u32) << 2).to_ne_bytes())?;
-        // SAFETY: short varlena addresses `raw` in-tuple bytes.
-        mcx::vec_append_bytes(&mut out, unsafe { core::slice::from_raw_parts(p.add(1), raw - 1) })?;
-        return Ok(Some(out));
-    }
-    let len = {
-        // SAFETY: 4-byte varlena header verified above.
-        let w = unsafe { u32::from_ne_bytes(*(p as *const [u8; 4])) };
-        (w >> 2) as usize
+    // SAFETY: non-null varlena attr datum points into the live tuple; the
+    // image spans exactly its header-declared size (external = 2 + tag size,
+    // short = 7-bit length, else the 4-byte word).
+    let src = unsafe {
+        let b0 = *p;
+        let len = if b0 == 0x01 {
+            2 + types_tuple::varatt::vartag_size(*p.add(1))
+        } else if b0 & 0x01 != 0 {
+            (b0 as usize >> 1) & 0x7F
+        } else {
+            (u32::from_ne_bytes(*(p as *const [u8; 4])) >> 2) as usize
+        };
+        core::slice::from_raw_parts(p, len)
     };
-    // SAFETY: the datum addresses `len` in-tuple bytes.
-    let src = unsafe { core::slice::from_raw_parts(p, len) };
-    let mut out: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, len)?;
-    mcx::vec_append_bytes(&mut out, src)?;
-    Ok(Some(out))
+    // PG_DETOAST_DATUM: fetch/decompress/unpack to a plain 4B-header image.
+    Ok(Some(detoast::detoast_attr(mcx, src)?))
 }
 
 fn pg_statistic_stawidth(

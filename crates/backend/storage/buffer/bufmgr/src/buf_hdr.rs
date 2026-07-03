@@ -31,7 +31,7 @@ unsafe impl Sync for BufferDesc {}
 unsafe impl Send for BufferDesc {}
 
 impl BufferDesc {
-    fn initial(buf_id: i32, free_next: i32) -> BufferDesc {
+    pub(crate) fn initial(buf_id: i32, free_next: i32) -> BufferDesc {
         BufferDesc {
             tag: UnsafeCell::new(cleared_buftag()),
             buf_id,

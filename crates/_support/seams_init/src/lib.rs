@@ -27,6 +27,8 @@ pub fn init_all() {
     twophase_config::init_seams();
     aclchk::init_seams();
     catalog_namespace::init_seams();
+    catalog_dependency::init_seams();
+    tablecmds::init_seams();
     catalog::init_seams();
     catalog_storage::init_seams();
     pg_database::init_seams();

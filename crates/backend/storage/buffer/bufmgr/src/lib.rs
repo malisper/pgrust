@@ -1,8 +1,9 @@
 //! bufmgr.c + buf_init.c + buf_table.c + freelist.c read/pin/mapping/eviction
 //! core, the checkpoint write-back lane (FlushBuffer/BufferSync/
-//! CheckPointBuffers), and the extend lane (ExtendBufferedRelBy/To shared
-//! arm). Drop-rel, localbuf, AIO and hint-bit lanes are phase 2: every entry
-//! point is a loud panic naming its C function.
+//! CheckPointBuffers), the extend lane (ExtendBufferedRelBy/To), and localbuf
+//! (backend-local temp buffers, negative Buffer ids). AIO and the remaining
+//! write-back arms are phase 2: every entry point is a loud panic naming its
+//! C function.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -14,6 +15,7 @@ pub mod counters;
 mod extend;
 mod freelist;
 mod gucs;
+mod localbuf;
 mod ops;
 mod pin;
 mod privref;
@@ -53,6 +55,10 @@ pub use pin::{
     UnlockBuffers,
 };
 pub use privref::{GetPrivateRefCount, ReservePrivateRefCountEntry};
+pub use localbuf::{
+    AtEOXact_LocalBuffers, AtProcExit_LocalBuffers, DropRelationAllLocalBuffers,
+    DropRelationLocalBuffers,
+};
 pub use read::{ReadBufferWithoutRelcache, ReadBuffer_common, ReadRecentBuffer};
 pub use extend::{ExtendBufferedRelBy, ExtendBufferedRelTo, ExtendBufferedRelToSmgr};
 
@@ -158,7 +164,18 @@ pub fn ReleaseAndReadBuffer(
     if types_core::BufferIsValid(buffer) {
         debug_assert!(BufferIsPinned(buffer));
         if buffer < 0 {
-            panic!("unported callee reached from bufmgr.c ReleaseAndReadBuffer: local buffers (localbuf.c)");
+            let tag = localbuf::local_desc(buffer).tag();
+            let loc = rel_locator_backend(rel).locator;
+            if tag.blockNum == block_num
+                && tag.spcOid == loc.spcOid
+                && tag.dbOid == loc.dbOid
+                && tag.relNumber == loc.relNumber
+                && tag.forkNum == ForkNumber::MAIN_FORKNUM
+            {
+                return Ok(buffer);
+            }
+            localbuf::UnpinLocalBuffer(buffer);
+            return ReadBuffer(rel, block_num);
         }
         let tag = GetBufferDescriptor(buffer - 1).tag();
         let loc = rel_locator_backend(rel).locator;
@@ -191,8 +208,16 @@ macro_rules! unported {
     };
 }
 
+/// FlushRelationBuffers (bufmgr.c): local arm live; shared write-back arm
+/// stays loud with its C name.
+pub fn FlushRelationBuffers(rlocator: RelFileLocatorBackend) -> PgResult<()> {
+    if rlocator.backend != INVALID_PROC_NUMBER {
+        return localbuf::FlushRelationLocalBuffers(rlocator.locator);
+    }
+    panic!("unported callee reached from bufmgr.c: FlushRelationBuffers shared arm (phase 2)");
+}
+
 unported! {
-    fn FlushRelationBuffers(RelFileLocatorBackend) -> (), "FlushRelationBuffers";
     fn FlushDatabaseBuffers(Oid) -> (), "FlushDatabaseBuffers";
     fn DropDatabaseBuffers(Oid) -> (), "DropDatabaseBuffers";
     fn IsBufferCleanupOK(Buffer) -> bool, "IsBufferCleanupOK";
@@ -242,7 +267,8 @@ pub fn MarkBufferDirtyHint(buffer: Buffer, buffer_std: bool) -> PgResult<()> {
         )));
     }
     if buffer < 0 {
-        panic!("unported callee reached from bufmgr.c MarkBufferDirtyHint: MarkLocalBufferDirty (localbuf.c)");
+        localbuf::MarkLocalBufferDirty(buffer);
+        return Ok(());
     }
     let desc = GetBufferDescriptor(buffer - 1);
     debug_assert!(GetPrivateRefCount(buffer) > 0);
@@ -306,6 +332,7 @@ pub fn InitBufferManagerAccess() {}
 
 pub fn init_seams() {
     gucs::install_guc_backing();
+    localbuf::install_check_temp_buffers_hook();
 
     bufmgr_seams::read_recent_buffer::set(read::ReadRecentBuffer);
     bufmgr_seams::read_buffer_without_relcache::set(read::ReadBufferWithoutRelcache);
@@ -355,9 +382,7 @@ pub fn init_seams() {
     bufmgr_seams::get_access_strategy::set(freelist::GetAccessStrategy);
     bufmgr_seams::free_access_strategy::set(freelist::FreeAccessStrategy);
     bufmgr_seams::relation_get_number_of_blocks_in_fork::set(RelationGetNumberOfBlocksInFork);
-    bufmgr_seams::drop_relation_buffers::set(|_, _, _| {
-        panic!("unported callee reached from bufmgr.c: DropRelationBuffers (phase 2)")
-    });
+    bufmgr_seams::drop_relation_buffers::set(drop_buffers::DropRelationBuffers);
     bufmgr_seams::drop_relations_all_buffers::set(drop_buffers::DropRelationsAllBuffers);
     bufmgr_seams::flush_relations_all_buffers::set(write::FlushRelationsAllBuffers);
     bufmgr_seams::mark_buffer_dirty_hint::set(MarkBufferDirtyHint);

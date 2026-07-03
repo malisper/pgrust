@@ -23,8 +23,14 @@ use types_error::PgResult;
 
 mod lookup;
 mod path;
+mod temp;
 #[cfg(test)]
 mod tests;
+
+pub use temp::{
+    AccessTempTableNamespace, GetTempTableNamespace, RangeVarAdjustRelationPersistence,
+    RangeVarGetCreationNamespace, ResetTempTableNamespace,
+};
 
 pub use lookup::{
     get_namespace_oid, DeconstructQualifiedName, FuncCandidate, FuncnameGetCandidates,
@@ -193,10 +199,17 @@ pub fn ResetTempTableNamespace() {
 }
 
 pub fn AtEOXact_Namespace(isCommit: bool, parallel: bool) {
-    // Reachable only after InitTempTableNamespace sets myTempNamespaceSubID.
     if MY_TEMP_NAMESPACE_SUB_ID.with(Cell::get) != InvalidSubTransactionId && !parallel {
-        let _ = isCommit;
-        deferred("AtEOXact_Namespace temp-namespace lifecycle");
+        if isCommit {
+            ipc::before_shmem_exit(temp::RemoveTempRelationsCallback, datum::Datum::null())
+                .expect("before_shmem_exit");
+        } else {
+            MY_TEMP_NAMESPACE.with(|c| c.set(InvalidOid));
+            MY_TEMP_TOAST_NAMESPACE.with(|c| c.set(InvalidOid));
+            BASE_SEARCH_PATH_VALID.with(|c| c.set(false));
+            path::invalidate_search_path_cache();
+        }
+        MY_TEMP_NAMESPACE_SUB_ID.with(|c| c.set(InvalidSubTransactionId));
     }
 }
 
@@ -209,7 +222,11 @@ pub fn AtEOSubXact_Namespace(
         if isCommit {
             MY_TEMP_NAMESPACE_SUB_ID.with(|c| c.set(parentSubid));
         } else {
-            deferred("AtEOSubXact_Namespace temp-namespace abort reset");
+            MY_TEMP_NAMESPACE_SUB_ID.with(|c| c.set(InvalidSubTransactionId));
+            MY_TEMP_NAMESPACE.with(|c| c.set(InvalidOid));
+            MY_TEMP_TOAST_NAMESPACE.with(|c| c.set(InvalidOid));
+            BASE_SEARCH_PATH_VALID.with(|c| c.set(false));
+            path::invalidate_search_path_cache();
         }
     }
 }

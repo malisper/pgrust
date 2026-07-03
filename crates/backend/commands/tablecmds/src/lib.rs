@@ -4,14 +4,26 @@
 mod alter;
 mod constraints;
 mod drop;
+mod oncommit;
 mod truncate;
 pub use alter::{AlterTable, AlterTableGetLockLevel, AlterTableLookupRelation};
 pub use drop::RemoveRelations;
+pub use oncommit::{
+    register_on_commit_action, remove_on_commit_action, AtEOSubXact_on_commit_actions,
+    AtEOXact_on_commit_actions, PreCommit_on_commit_actions,
+};
 pub use truncate::ExecuteTruncate;
+
+pub fn init_seams() {
+    tablecmds_seams::pre_commit_on_commit_actions::set(PreCommit_on_commit_actions);
+    tablecmds_seams::at_eoxact_on_commit_actions::set(AtEOXact_on_commit_actions);
+    tablecmds_seams::at_eosubxact_on_commit_actions::set(AtEOSubXact_on_commit_actions);
+    tablecmds_seams::remove_on_commit_action::set(remove_on_commit_action);
+}
 
 use mcx::Mcx;
 use types_core::{AttrNumber, InvalidOid, Oid, NAMEDATALEN};
-use types_error::{PgError, PgResult, ERRCODE_UNDEFINED_SCHEMA, ERROR};
+use types_error::{PgError, PgResult, ERROR};
 use types_nodes::rawnodes::{ColumnDef, CreateStmt, OnCommitAction, TypeName};
 use types_rel::RELKIND_RELATION;
 use types_tuple::TupleDescData;
@@ -84,9 +96,6 @@ pub fn DefineRelation<'mcx>(
     if relname.len() >= NAMEDATALEN as usize {
         unported("overlength relation name truncation");
     }
-    if stmt.oncommit != OnCommitAction::ONCOMMIT_NOOP {
-        unported("ON COMMIT clauses");
-    }
     if !stmt.options.is_nil() {
         unported("transformRelOptions/heap_reloptions (WITH options)");
     }
@@ -104,26 +113,25 @@ pub fn DefineRelation<'mcx>(
 
     // RangeVarGetAndCheckCreationNamespace resolve-only: CREATE ACL check and
     // oid-collision retry ride with the aclchk lane.
-    let namespace_id = match rv.schemaname {
-        Some(schemaname) => catalog_namespace::get_namespace_oid(schemaname, false)?,
-        None => {
-            let path = catalog_namespace::fetch_search_path(mcx, false)?;
-            match path.first() {
-                Some(&ns) => ns,
-                None => {
-                    return Err(Box::new(
-                        PgError::new(
-                            ERROR,
-                            "no schema has been selected to create in".to_string(),
-                        )
-                        .with_sqlstate(ERRCODE_UNDEFINED_SCHEMA),
-                    ))
-                }
-            }
-        }
+    let creation_rv = rel_vocab::RangeVar {
+        catalogname: rv.catalogname,
+        schemaname: rv.schemaname,
+        relname,
+        inh: rv.inh,
+        relpersistence: rv.relpersistence,
+        location: rv.location,
     };
-    if catalog_namespace::isAnyTempNamespace(namespace_id)? {
-        unported("temp-namespace relation creation");
+    let namespace_id = catalog_namespace::RangeVarGetCreationNamespace(mcx, &creation_rv)?;
+    let relpersistence =
+        catalog_namespace::RangeVarAdjustRelationPersistence(rv.relpersistence, namespace_id)?;
+
+    if stmt.oncommit != OnCommitAction::ONCOMMIT_NOOP
+        && relpersistence != types_core::RELPERSISTENCE_TEMP
+    {
+        return Err(Box::new(
+            PgError::new(ERROR, "ON COMMIT can only be used on temporary tables".to_string())
+                .with_sqlstate(types_error::ERRCODE_INVALID_TABLE_DEFINITION),
+        ));
     }
 
     let owner_id = if owner_id != InvalidOid { owner_id } else { miscinit::GetUserId() };
@@ -139,11 +147,13 @@ pub fn DefineRelation<'mcx>(
             ownerid: owner_id,
             accessmtd: access_method_id,
             relkind,
-            relpersistence: rv.relpersistence,
+            relpersistence,
             allow_system_table_mods: false,
         },
         &descriptor,
     )?;
+
+    register_on_commit_action(relation_id, stmt.oncommit);
 
     xact::CommandCounterIncrement()?;
 

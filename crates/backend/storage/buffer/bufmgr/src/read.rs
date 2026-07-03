@@ -134,7 +134,11 @@ fn PinBufferForBlock(
 ) -> PgResult<(Buffer, bool)> {
     debug_assert!(blkno != P_NEW);
     if persistence == RELPERSISTENCE_TEMP {
-        panic!("unported callee reached from bufmgr.c PinBufferForBlock: LocalBufferAlloc (localbuf.c)");
+        let (buffer, found) = crate::localbuf::LocalBufferAlloc(smgr, forknum, blkno)?;
+        if found {
+            counters::local_hit();
+        }
+        return Ok((buffer, found));
     }
     let (buffer, found) = BufferAlloc(smgr, persistence, forknum, blkno, strategy)?;
     if found {
@@ -374,6 +378,47 @@ fn AbortBufferIO(buffer: Buffer) {
     TerminateBufferIO(desc, false, BM_IO_ERROR, false);
 }
 
+fn complete_read_local(
+    smgr: RelFileLocatorBackend,
+    forknum: ForkNumber,
+    blkno: BlockNumber,
+    buffer: Buffer,
+    zero_on_error: bool,
+) -> PgResult<()> {
+    if !crate::localbuf::StartLocalBufferIO(buffer, true) {
+        return Ok(());
+    }
+    let blk = crate::localbuf::local_block_ptr(buffer);
+    // SAFETY: pinned local block, single thread; image not yet valid.
+    let page = unsafe { core::slice::from_raw_parts_mut(blk, BLCKSZ) };
+    smgr_seams::smgr_read::call(smgr, forknum, blkno, page)?;
+    counters::local_read();
+    if !page_is_verified(blk) {
+        if zero_on_error {
+            let _ = elog::elog(
+                WARNING,
+                format!(
+                    "invalid page in block {blkno} of relation {}; zeroing out page",
+                    relpath_desc(smgr.locator, forknum)
+                ),
+            );
+            // SAFETY: as above; zeroed page is the C zero_damaged_pages result.
+            unsafe { core::ptr::write_bytes(blk, 0, BLCKSZ) };
+        } else {
+            ereport(ERROR)
+                .errcode(ERRCODE_DATA_CORRUPTED)
+                .errmsg(format!(
+                    "invalid page in block {blkno} of relation {}",
+                    relpath_desc(smgr.locator, forknum)
+                ))
+                .finish(loc("WaitReadBuffers"))?;
+            unreachable!("ERROR reported");
+        }
+    }
+    crate::localbuf::TerminateLocalBufferIO(buffer, false, BM_VALID);
+    Ok(())
+}
+
 fn complete_read_sync(
     smgr: RelFileLocatorBackend,
     forknum: ForkNumber,
@@ -381,6 +426,9 @@ fn complete_read_sync(
     buffer: Buffer,
     zero_on_error: bool,
 ) -> PgResult<()> {
+    if buffer < 0 {
+        return complete_read_local(smgr, forknum, blkno, buffer, zero_on_error);
+    }
     let desc = GetBufferDescriptor(buffer - 1);
     if !StartBufferIO(desc, true, false)? {
         return Ok(());
@@ -459,6 +507,15 @@ fn relpath_desc(locator: RelFileLocator, forknum: ForkNumber) -> String {
 }
 
 fn ZeroAndLockBuffer(buffer: Buffer, mode: ReadBufferMode, already_valid: bool) -> PgResult<()> {
+    if buffer < 0 {
+        if !already_valid && crate::localbuf::StartLocalBufferIO(buffer, true) {
+            let blk = crate::localbuf::local_block_ptr(buffer);
+            // SAFETY: pinned local block, single thread; we own the image.
+            unsafe { core::ptr::write_bytes(blk, 0, BLCKSZ) };
+            crate::localbuf::TerminateLocalBufferIO(buffer, false, BM_VALID);
+        }
+        return Ok(());
+    }
     let desc = GetBufferDescriptor(buffer - 1);
     let mut need_to_zero = false;
     if !already_valid {
@@ -494,7 +551,14 @@ pub fn ReadRecentBuffer(
     crate::pin::resowner_enlarge_for_pin()?;
     let tag = init_buffer_tag(rlocator, forknum, blkno);
     if recent_buffer < 0 {
-        panic!("unported callee reached from bufmgr.c ReadRecentBuffer: local buffers (localbuf.c)");
+        let desc = crate::localbuf::local_desc(recent_buffer);
+        let state = desc.state.load(Ordering::Relaxed);
+        if state & BM_VALID != 0 && desc.tag() == tag {
+            crate::localbuf::PinLocalBuffer(recent_buffer, true);
+            counters::local_hit();
+            return Ok(true);
+        }
+        return Ok(false);
     }
     let desc = GetBufferDescriptor(recent_buffer - 1);
     let have_private_ref = GetPrivateRefCount(recent_buffer) > 0;
