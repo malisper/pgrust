@@ -1,9 +1,13 @@
 //! Hand-written recursive-descent equivalent of the bison grammar in
 //! jsonpath_gram.y (small, unambiguous under the declared precedences; the
 //! reductions and makeItem* actions are mirrored 1:1). Produces the
-//! JsonPathParseItem tree the flattener consumes.
+//! JsonPathParseItem tree the flattener consumes. Nodes are leaked into the
+//! caller's mcx (C's palloc model, bulk-freed at context reset), so the tree
+//! is drop-free.
 
-use ::mcx::{alloc_in, slice_in, Mcx, PgBox, PgVec};
+use core::cell::Cell;
+
+use ::mcx::{alloc_in, leak_in, slice_in, Mcx, PgVec};
 use ::types_core::DEFAULT_COLLATION_OID;
 use ::types_error::{ereturn, PgError, PgResult, SoftErrorContext};
 use ::types_error::{
@@ -15,40 +19,42 @@ use crate::scan::{jsonpath_yyerror, jsonpath_yyerror_yytext, Lexeme, Lexer, Toke
 
 pub struct ParseItem<'mcx> {
     pub typ: ItemType,
-    pub next: Option<PgBox<'mcx, ParseItem<'mcx>>>,
+    pub next: Cell<Option<&'mcx ParseItem<'mcx>>>,
     pub value: ParseValue<'mcx>,
 }
 
+#[derive(Clone, Copy)]
 pub enum ParseValue<'mcx> {
     None,
     Args {
-        left: Option<PgBox<'mcx, ParseItem<'mcx>>>,
-        right: Option<PgBox<'mcx, ParseItem<'mcx>>>,
+        left: Option<&'mcx ParseItem<'mcx>>,
+        right: Option<&'mcx ParseItem<'mcx>>,
     },
-    Arg(Option<PgBox<'mcx, ParseItem<'mcx>>>),
-    Array(PgVec<'mcx, Subscript<'mcx>>),
+    Arg(Option<&'mcx ParseItem<'mcx>>),
+    Array(&'mcx [Subscript<'mcx>]),
     AnyBounds {
         first: u32,
         last: u32,
     },
     LikeRegex {
-        expr: Option<PgBox<'mcx, ParseItem<'mcx>>>,
-        pattern: PgVec<'mcx, u8>,
+        expr: Option<&'mcx ParseItem<'mcx>>,
+        pattern: &'mcx [u8],
         flags: u32,
     },
     /// Full on-disk numeric varlena bytes (header included).
-    Numeric(PgVec<'mcx, u8>),
+    Numeric(&'mcx [u8]),
     Boolean(bool),
-    String(PgVec<'mcx, u8>),
+    String(&'mcx [u8]),
 }
 
+#[derive(Clone, Copy)]
 pub struct Subscript<'mcx> {
-    pub from: Option<PgBox<'mcx, ParseItem<'mcx>>>,
-    pub to: Option<PgBox<'mcx, ParseItem<'mcx>>>,
+    pub from: Option<&'mcx ParseItem<'mcx>>,
+    pub to: Option<&'mcx ParseItem<'mcx>>,
 }
 
 pub struct ParseResult<'mcx> {
-    pub expr: PgBox<'mcx, ParseItem<'mcx>>,
+    pub expr: &'mcx ParseItem<'mcx>,
     pub lax: bool,
 }
 
@@ -58,34 +64,37 @@ pub const JSP_REGEX_MLINE: u32 = 0x04;
 pub const JSP_REGEX_WSPACE: u32 = 0x08;
 pub const JSP_REGEX_QUOTE: u32 = 0x10;
 
-type Item<'mcx> = PgBox<'mcx, ParseItem<'mcx>>;
+type Item<'mcx> = &'mcx ParseItem<'mcx>;
 type POut<T> = PgResult<Option<T>>;
 
-fn make_item_type<'mcx>(mcx: Mcx<'mcx>, typ: ItemType) -> PgResult<Item<'mcx>> {
-    alloc_in(mcx, ParseItem { typ, next: None, value: ParseValue::None })
+fn make_item<'mcx>(
+    mcx: Mcx<'mcx>,
+    typ: ItemType,
+    value: ParseValue<'mcx>,
+) -> PgResult<Item<'mcx>> {
+    Ok(leak_in(alloc_in(
+        mcx,
+        ParseItem { typ, next: Cell::new(None), value },
+    )?))
 }
 
-fn make_item_string<'mcx>(mcx: Mcx<'mcx>, s: Option<PgVec<'mcx, u8>>) -> PgResult<Item<'mcx>> {
+fn make_item_type<'mcx>(mcx: Mcx<'mcx>, typ: ItemType) -> PgResult<Item<'mcx>> {
+    make_item(mcx, typ, ParseValue::None)
+}
+
+fn make_item_string<'mcx>(mcx: Mcx<'mcx>, s: Option<&'mcx [u8]>) -> PgResult<Item<'mcx>> {
     match s {
         None => make_item_type(mcx, ItemType::Null),
-        Some(s) => {
-            let mut v = make_item_type(mcx, ItemType::String)?;
-            v.value = ParseValue::String(s);
-            Ok(v)
-        }
+        Some(s) => make_item(mcx, ItemType::String, ParseValue::String(s)),
     }
 }
 
-fn make_item_variable<'mcx>(mcx: Mcx<'mcx>, s: PgVec<'mcx, u8>) -> PgResult<Item<'mcx>> {
-    let mut v = make_item_type(mcx, ItemType::Variable)?;
-    v.value = ParseValue::String(s);
-    Ok(v)
+fn make_item_variable<'mcx>(mcx: Mcx<'mcx>, s: &'mcx [u8]) -> PgResult<Item<'mcx>> {
+    make_item(mcx, ItemType::Variable, ParseValue::String(s))
 }
 
-fn make_item_key<'mcx>(mcx: Mcx<'mcx>, s: PgVec<'mcx, u8>) -> PgResult<Item<'mcx>> {
-    let mut v = make_item_string(mcx, Some(s))?;
-    v.typ = ItemType::Key;
-    Ok(v)
+fn make_item_key<'mcx>(mcx: Mcx<'mcx>, s: &'mcx [u8]) -> PgResult<Item<'mcx>> {
+    make_item(mcx, ItemType::Key, ParseValue::String(s))
 }
 
 /// C: numeric_in(s->val, InvalidOid, -1) — hard error, matching the grammar
@@ -94,15 +103,12 @@ fn make_item_numeric<'mcx>(mcx: Mcx<'mcx>, s: &[u8]) -> PgResult<Item<'mcx>> {
     let text = core::str::from_utf8(s).expect("scanner numerics are ASCII");
     let img = adt_numeric::numeric_in(text, -1, None)?
         .expect("hard numeric_in returns Err, not soft None");
-    let mut v = make_item_type(mcx, ItemType::Numeric)?;
-    v.value = ParseValue::Numeric(slice_in(mcx, img.as_bytes())?);
-    Ok(v)
+    let bytes = slice_in(mcx, img.as_bytes())?.leak();
+    make_item(mcx, ItemType::Numeric, ParseValue::Numeric(bytes))
 }
 
 fn make_item_bool<'mcx>(mcx: Mcx<'mcx>, val: bool) -> PgResult<Item<'mcx>> {
-    let mut v = make_item_type(mcx, ItemType::Bool)?;
-    v.value = ParseValue::Boolean(val);
-    Ok(v)
+    make_item(mcx, ItemType::Bool, ParseValue::Boolean(val))
 }
 
 fn make_item_binary<'mcx>(
@@ -111,29 +117,24 @@ fn make_item_binary<'mcx>(
     la: Option<Item<'mcx>>,
     ra: Option<Item<'mcx>>,
 ) -> PgResult<Item<'mcx>> {
-    let mut v = make_item_type(mcx, typ)?;
-    v.value = ParseValue::Args { left: la, right: ra };
-    Ok(v)
+    make_item(mcx, typ, ParseValue::Args { left: la, right: ra })
 }
 
 /// C: makeItemUnary — folds +/- over a lone numeric literal.
 fn make_item_unary<'mcx>(mcx: Mcx<'mcx>, typ: ItemType, a: Item<'mcx>) -> PgResult<Item<'mcx>> {
-    if typ == ItemType::Plus && a.typ == ItemType::Numeric && a.next.is_none() {
+    if typ == ItemType::Plus && a.typ == ItemType::Numeric && a.next.get().is_none() {
         return Ok(a);
     }
-    if typ == ItemType::Minus && a.typ == ItemType::Numeric && a.next.is_none() {
-        let num = match &a.value {
+    if typ == ItemType::Minus && a.typ == ItemType::Numeric && a.next.get().is_none() {
+        let num = match a.value {
             ParseValue::Numeric(n) => n,
             _ => unreachable!("Numeric item without Numeric value"),
         };
         let negated = adt_numeric::numeric_uminus(adt_numeric::Num::from_payload(&num[4..]));
-        let mut v = make_item_type(mcx, ItemType::Numeric)?;
-        v.value = ParseValue::Numeric(slice_in(mcx, negated.as_bytes())?);
-        return Ok(v);
+        let bytes = slice_in(mcx, negated.as_bytes())?.leak();
+        return make_item(mcx, ItemType::Numeric, ParseValue::Numeric(bytes));
     }
-    let mut v = make_item_type(mcx, typ)?;
-    v.value = ParseValue::Arg(Some(a));
-    Ok(v)
+    make_item(mcx, typ, ParseValue::Arg(Some(a)))
 }
 
 fn make_item_unary_optional<'mcx>(
@@ -141,25 +142,20 @@ fn make_item_unary_optional<'mcx>(
     typ: ItemType,
     arg: Option<Item<'mcx>>,
 ) -> PgResult<Item<'mcx>> {
-    let mut v = make_item_type(mcx, typ)?;
-    v.value = ParseValue::Arg(arg);
-    Ok(v)
+    make_item(mcx, typ, ParseValue::Arg(arg))
 }
 
 /// C: makeItemList — chain the accessor list through ->next.
-fn make_item_list<'mcx>(list: PgVec<'mcx, Item<'mcx>>) -> Item<'mcx> {
+fn make_item_list<'mcx>(list: &[Item<'mcx>]) -> Item<'mcx> {
     debug_assert!(!list.is_empty());
-    let mut iter = list.into_iter();
-    let mut head = iter.next().unwrap();
-    {
-        let mut end: &mut ParseItem<'mcx> = &mut head;
-        while end.next.is_some() {
-            end = end.next.as_mut().unwrap();
-        }
-        for c in iter {
-            end.next = Some(c);
-            end = end.next.as_mut().unwrap();
-        }
+    let head = list[0];
+    let mut end = head;
+    while let Some(n) = end.next.get() {
+        end = n;
+    }
+    for &c in &list[1..] {
+        end.next.set(Some(c));
+        end = c;
     }
     head
 }
@@ -167,26 +163,21 @@ fn make_item_list<'mcx>(list: PgVec<'mcx, Item<'mcx>>) -> Item<'mcx> {
 fn make_index_array<'mcx>(mcx: Mcx<'mcx>, list: PgVec<'mcx, Item<'mcx>>) -> PgResult<Item<'mcx>> {
     debug_assert!(!list.is_empty());
     let mut elems: PgVec<'mcx, Subscript<'mcx>> = ::mcx::vec_with_capacity_in(mcx, list.len())?;
-    for jpi in list {
+    for jpi in list.iter() {
         debug_assert_eq!(jpi.typ, ItemType::Subscript);
-        let inner = ::mcx::box_into_inner(jpi);
-        let (from, to) = match inner.value {
+        let (from, to) = match jpi.value {
             ParseValue::Args { left, right } => (left, right),
             _ => unreachable!("Subscript item without Args value"),
         };
         elems.push(Subscript { from, to });
     }
-    let mut v = make_item_type(mcx, ItemType::IndexArray)?;
-    v.value = ParseValue::Array(elems);
-    Ok(v)
+    make_item(mcx, ItemType::IndexArray, ParseValue::Array(elems.leak()))
 }
 
 fn make_any<'mcx>(mcx: Mcx<'mcx>, first: i32, last: i32) -> PgResult<Item<'mcx>> {
-    let mut v = make_item_type(mcx, ItemType::Any)?;
     let f = if first >= 0 { first as u32 } else { u32::MAX };
     let l = if last >= 0 { last as u32 } else { u32::MAX };
-    v.value = ParseValue::AnyBounds { first: f, last: l };
-    Ok(v)
+    make_item(mcx, ItemType::Any, ParseValue::AnyBounds { first: f, last: l })
 }
 
 /// One server-encoding character starting the unrecognized flag text
@@ -206,7 +197,7 @@ fn first_char_lossy(rest: &[u8]) -> String {
 fn make_item_like_regex<'mcx>(
     mcx: Mcx<'mcx>,
     expr: Option<Item<'mcx>>,
-    pattern: PgVec<'mcx, u8>,
+    pattern: &'mcx [u8],
     flags: Option<&[u8]>,
     escontext: &mut Option<&mut SoftErrorContext>,
 ) -> POut<Item<'mcx>> {
@@ -241,13 +232,10 @@ fn make_item_like_regex<'mcx>(
     };
 
     // C: validity check only — pg_regcomp + pg_regfree over the wide pattern.
-    let wpattern = mbutils::pg_mb2wchar_with_len(mcx, &pattern)?;
-    if let Err(e) = regex_core::regex_compile::pg_regcomp(
-        mcx,
-        &wpattern,
-        cflags,
-        DEFAULT_COLLATION_OID,
-    ) {
+    let wpattern = mbutils::pg_mb2wchar_with_len(mcx, pattern)?;
+    if let Err(e) =
+        regex_core::regex_compile::pg_regcomp(mcx, &wpattern, cflags, DEFAULT_COLLATION_OID)
+    {
         let msg = regex_core::regex_export_free_error::pg_regerror(e.0);
         return ereturn(
             escontext.as_deref_mut(),
@@ -257,9 +245,11 @@ fn make_item_like_regex<'mcx>(
         );
     }
 
-    let mut v = make_item_type(mcx, ItemType::LikeRegex)?;
-    v.value = ParseValue::LikeRegex { expr, pattern, flags: xflags };
-    Ok(Some(v))
+    Ok(Some(make_item(
+        mcx,
+        ItemType::LikeRegex,
+        ParseValue::LikeRegex { expr, pattern, flags: xflags },
+    )?))
 }
 
 /// C: jspConvertRegexFlags (jsonpath_gram.y) — XQuery flag bits to REG_* cflags.
@@ -337,11 +327,10 @@ impl<'e, 's, 'mcx> Parser<'e, 's, 'mcx> {
         }
     }
 
-    fn take_str(&mut self) -> PgVec<'mcx, u8> {
-        let mcx = self.mcx;
+    fn take_str(&mut self) -> &'mcx [u8] {
         let l = &mut self.toks[self.idx];
         self.idx += 1;
-        l.value.take().unwrap_or_else(|| PgVec::new_in(mcx))
+        l.value.take().unwrap_or(&[])
     }
 
     fn parse_result(&mut self) -> POut<Option<ParseResult<'mcx>>> {
@@ -460,13 +449,8 @@ impl<'e, 's, 'mcx> Parser<'e, 's, 'mcx> {
             } else {
                 None
             };
-            let res = make_item_like_regex(
-                self.mcx,
-                Some(left),
-                pattern,
-                flags.as_deref(),
-                self.escontext,
-            )?;
+            let res =
+                make_item_like_regex(self.mcx, Some(left), pattern, flags, self.escontext)?;
             match res {
                 Some(v) => return Ok(Some(v)),
                 None => {
@@ -611,7 +595,7 @@ impl<'e, 's, 'mcx> Parser<'e, 's, 'mcx> {
                 };
                 list.push(op);
             }
-            return Ok(Some(make_item_list(list)));
+            return Ok(Some(make_item_list(&list)));
         }
 
         Ok(Some(inner))
@@ -631,7 +615,7 @@ impl<'e, 's, 'mcx> Parser<'e, 's, 'mcx> {
             };
             list.push(op);
         }
-        Ok(Some(make_item_list(list)))
+        Ok(Some(make_item_list(&list)))
     }
 
     fn parse_delimited_predicate(&mut self) -> POut<Item<'mcx>> {
@@ -697,7 +681,7 @@ impl<'e, 's, 'mcx> Parser<'e, 's, 'mcx> {
             }
             Some(Token::NumericP) | Some(Token::IntP) => {
                 let s = self.take_str();
-                Ok(Some(make_item_numeric(self.mcx, &s)?))
+                Ok(Some(make_item_numeric(self.mcx, s)?))
             }
             Some(Token::VariableP) => {
                 let s = self.take_str();
@@ -794,7 +778,7 @@ impl<'e, 's, 'mcx> Parser<'e, 's, 'mcx> {
             }
             let arg = if self.peek_tok() == Some(Token::IntP) {
                 let s = self.take_str();
-                Some(make_item_numeric(self.mcx, &s)?)
+                Some(make_item_numeric(self.mcx, s)?)
             } else {
                 None
             };
@@ -893,7 +877,7 @@ impl<'e, 's, 'mcx> Parser<'e, 's, 'mcx> {
         match self.peek_tok() {
             Some(Token::IntP) => {
                 let s = self.take_str();
-                let text = core::str::from_utf8(&s).expect("scanner ints are ASCII");
+                let text = core::str::from_utf8(s).expect("scanner ints are ASCII");
                 let n = numutils::pg_strtoint32(text)?;
                 Ok(Some(n))
             }
@@ -962,7 +946,7 @@ impl<'e, 's, 'mcx> Parser<'e, 's, 'mcx> {
                 return Ok(None);
             }
             let s = self.take_str();
-            let num = make_item_numeric(self.mcx, &s)?;
+            let num = make_item_numeric(self.mcx, s)?;
             return Ok(Some(make_item_unary(self.mcx, ItemType::Plus, num)?));
         }
         if self.at_char(b'-') {
@@ -971,12 +955,12 @@ impl<'e, 's, 'mcx> Parser<'e, 's, 'mcx> {
                 return Ok(None);
             }
             let s = self.take_str();
-            let num = make_item_numeric(self.mcx, &s)?;
+            let num = make_item_numeric(self.mcx, s)?;
             return Ok(Some(make_item_unary(self.mcx, ItemType::Minus, num)?));
         }
         if self.peek_tok() == Some(Token::IntP) {
             let s = self.take_str();
-            return Ok(Some(make_item_numeric(self.mcx, &s)?));
+            return Ok(Some(make_item_numeric(self.mcx, s)?));
         }
         Ok(None)
     }
@@ -1016,7 +1000,7 @@ impl<'e, 's, 'mcx> Parser<'e, 's, 'mcx> {
         }
     }
 
-    fn try_key_name(&mut self) -> Option<PgVec<'mcx, u8>> {
+    fn try_key_name(&mut self) -> Option<&'mcx [u8]> {
         let tok = self.peek_tok()?;
         let is_key_name = matches!(
             tok,
