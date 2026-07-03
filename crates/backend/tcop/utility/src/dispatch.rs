@@ -489,6 +489,7 @@ fn dispatch_switch<'mcx>(
                 }
                 OBJECT_INDEX | OBJECT_TABLE | OBJECT_SEQUENCE | OBJECT_VIEW | OBJECT_MATVIEW
                 | OBJECT_FOREIGN_TABLE => tablecmds::RemoveRelations(mcx, stmt)?,
+                OBJECT_RULE => dropcmds::RemoveObjects(mcx, stmt)?,
                 _ => handler_gap("RemoveObjects (dropcmds lane)"),
             }
         }
@@ -725,6 +726,19 @@ fn dispatch_switch<'mcx>(
             let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
             let stmt = stmt_node.as_alter_enum_stmt().expect("AlterEnumStmt");
             typecmds::AlterEnum(mcx, stmt)?;
+        }
+        T_RuleStmt => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = parsetree
+                .as_variant::<types_nodes::rawnodes::RuleStmt>()
+                .expect("RuleStmt");
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::rawnodes::RuleStmt<'_>,
+                    &types_nodes::rawnodes::RuleStmt<'mcx>,
+                >(stmt)
+            };
+            rewrite_define::DefineRule(mcx, stmt, source_text)?;
         }
         T_ViewStmt => {
             // Retention contract as unify_stmt_lifetime: the statement arena

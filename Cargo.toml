@@ -489,6 +489,8 @@ members = [
     "crates/backend/rewrite/rewrite_manip",
     "crates/backend/rewrite/rewrite_handler_seams",
     "crates/backend/rewrite/rewrite_define",
+    "crates/backend/rewrite/rewrite_define_seams",
+    "crates/backend/commands/dropcmds",
     "crates/backend/rewrite/rewrite_handler",
     "crates/backend/optimizer/plan/planner_seams",
     "crates/backend/optimizer/plan/planner",

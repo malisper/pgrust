@@ -149,7 +149,7 @@ fn finish_relcache_entries() -> PgResult<()> {
             rd_supportinfo: Default::default(),
             rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
         });
         crate::build::RelationInitPhysicalAddr(&newrel)?;
         with_state(|st| {

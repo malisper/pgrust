@@ -1,0 +1,22 @@
+[package]
+name = "dropcmds"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+table = { path = "../../access/table/table" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+catalog_dependency = { path = "../../catalog/catalog_dependency" }
+pg_depend = { path = "../../catalog/pg_depend" }
+rewrite_define = { path = "../../rewrite/rewrite_define" }
+elog_seams = { path = "../../utils/error/elog_seams" }
+relcache = { path = "../../utils/cache/relcache" }
