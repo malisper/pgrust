@@ -336,6 +336,7 @@ pub struct PlScanner<'mcx> {
     scanbuf: &'mcx [u8],
     pub yyleng: i32,
     yytoken: i32,
+    latest_lloc: i32,
     num_pushbacks: usize,
     pushback_token: [i32; MAX_PUSHBACKS],
     pushback_aux: [TokenAux; MAX_PUSHBACKS],
@@ -358,6 +359,7 @@ impl<'mcx> PlScanner<'mcx> {
             scanbuf,
             yyleng: 0,
             yytoken: 0,
+            latest_lloc: 0,
             num_pushbacks: 0,
             pushback_token: [0; MAX_PUSHBACKS],
             pushback_aux: Default::default(),
@@ -560,6 +562,7 @@ impl<'mcx> PlScanner<'mcx> {
 
         self.yyleng = aux1.leng;
         self.yytoken = tok1;
+        self.latest_lloc = aux1.lloc;
         Ok((tok1, aux1.lval, aux1.lloc))
     }
 
@@ -572,6 +575,11 @@ impl<'mcx> PlScanner<'mcx> {
     pub fn lineno_for(&mut self, location: i32) -> i32 {
         let _ = (self.cur_line_start, self.cur_line_end, self.cur_line_num);
         location_to_lineno(self.scanbuf, location)
+    }
+
+    /// plpgsql_latest_lineno.
+    pub fn latest_lineno(&self) -> i32 {
+        location_to_lineno(self.scanbuf, self.latest_lloc)
     }
 
     /// plpgsql_scanner_errposition/yyerror: "syntax error at or near ..."

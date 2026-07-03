@@ -353,7 +353,10 @@ fn do_compile(
         fn_prokind: proc.prokind,
         scratch: scan_cx.mcx(),
     };
-    let action = parser.parse_function_body().map_err(|e| attach_compile_context(e, &proc.proname))?;
+    let parse_result = parser.parse_function_body();
+    let latest_line = parser.sc.latest_lineno();
+    let action =
+        parse_result.map_err(|e| attach_compile_context(e, &proc.proname, latest_line))?;
 
     let fn_signature = format_signature(&proc.proname, &proc.argtypes)?;
     Ok(PlFunction {
@@ -387,12 +390,13 @@ fn do_compile(
 fn attach_compile_context(
     mut e: Box<types_error::PgError>,
     fname: &str,
+    line: i32,
 ) -> Box<types_error::PgError> {
-    // plpgsql_compile_error_callback: "compilation of PL/pgSQL function
-    // \"%s\" near line %d" — line tracking rides the scanner; the name-only
-    // form is used when unavailable.
+    // plpgsql_compile_error_callback.
     if e.context.is_none() {
-        e.context = Some(format!("compilation of PL/pgSQL function \"{fname}\""));
+        e.context = Some(format!(
+            "compilation of PL/pgSQL function \"{fname}\" near line {line}"
+        ));
     }
     e
 }
