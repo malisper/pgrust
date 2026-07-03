@@ -839,7 +839,7 @@ fn finalize_grouping_exprs<'mcx>(
             finalize_grouping_exprs(mcx, pstate, qry, hnvg, node.as_relabel_type().unwrap().arg)
         }
         NodeTag::T_CollateExpr => {
-            finalize_grouping_exprs(mcx, pstate, qry, node.as_collate_expr().unwrap().arg)
+            finalize_grouping_exprs(mcx, pstate, qry, hnvg, node.as_collate_expr().unwrap().arg)
         }
         NodeTag::T_BoolExpr => {
             for arg in &node.as_bool_expr().unwrap().args {
@@ -1019,7 +1019,7 @@ fn check_ungrouped_columns<'mcx>(
             check_ungrouped_columns(pstate, qry, hnvg, node.as_relabel_type().unwrap().arg)
         }
         NodeTag::T_CollateExpr => {
-            check_ungrouped_columns(pstate, qry, node.as_collate_expr().unwrap().arg)
+            check_ungrouped_columns(pstate, qry, hnvg, node.as_collate_expr().unwrap().arg)
         }
         NodeTag::T_BoolExpr => {
             for arg in &node.as_bool_expr().unwrap().args {
