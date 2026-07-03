@@ -313,13 +313,17 @@ pub fn exec_re_scan_with_chg<'mcx>(
             ::nodememoize::exec_rescan_memoize(&mut m.state);
             let outer_plan = base.lefttree.expect("Memoize outer plan");
             // C purges when outerPlan->chgParam (= chg ∩ outer allParam) has
-            // members outside the cache keys.
-            let outer_chg = chg.intersect(
-                &outer_plan.as_plan().expect("plan node").allParam,
-                estate.es_query_cxt,
-            )?;
-            if outer_chg.nonempty_difference(::nodememoize::keyparamids(&m.state)) {
-                ::nodememoize::exec_rescan_memoize_purge(&mut m.state);
+            // members outside the cache keys; alloc-free member walk (this
+            // runs per outer tuple).
+            let outer_allparam = &outer_plan.as_plan().expect("plan node").allParam;
+            let keyparamids = ::nodememoize::keyparamids(&m.state);
+            let mut x = chg.next_member(-1);
+            while x >= 0 {
+                if outer_allparam.is_member(x) && !keyparamids.is_member(x) {
+                    ::nodememoize::exec_rescan_memoize_purge(&mut m.state);
+                    break;
+                }
+                x = chg.next_member(x);
             }
             exec_re_scan_with_chg(&mut m.outer, outer_plan, estate, chg)?;
         }
