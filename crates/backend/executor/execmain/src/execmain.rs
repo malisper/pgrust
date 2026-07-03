@@ -18,6 +18,31 @@ use ::types_tuple::TupleDescData;
 use crate::procnode::{exec_end_node, exec_init_node, exec_proc_node, exec_shutdown_node};
 use crate::querydesc::{self, ExecData, ExecTy, QueryDescData};
 
+// One parked ExecutorState context (C's context_freelists): raw pointer keeps
+// the TLS payload !needs_drop; nested executors overflow to a plain delete.
+mod exec_ctx_pool {
+    use ::mcx::MemoryContext;
+
+    thread_local! {
+        static SLOT: core::cell::Cell<*mut MemoryContext> =
+            const { core::cell::Cell::new(core::ptr::null_mut()) };
+    }
+
+    pub(crate) fn take() -> Option<Box<MemoryContext>> {
+        let p = SLOT.with(|s| s.replace(core::ptr::null_mut()));
+        // SAFETY: parked via Box::into_raw below; slot nulled above (sole owner).
+        (!p.is_null()).then(|| unsafe { Box::from_raw(p) })
+    }
+
+    pub(crate) fn park(ctx: Box<MemoryContext>) {
+        let old = SLOT.with(|s| s.replace(Box::into_raw(ctx)));
+        if !old.is_null() {
+            // SAFETY: parked via Box::into_raw; displaced (nested executor) — delete.
+            drop(unsafe { Box::from_raw(old) });
+        }
+    }
+}
+
 pub(crate) fn executor_start_seam(h: QueryDescHandle, eflags: i32) -> PgResult<()> {
     querydesc::with_qd(h, |qd| {
         backend_status_seams::pgstat_report_query_id::call(qd.plannedstmt().queryId, false);
@@ -306,8 +331,10 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
     let operation = qd.operation;
     let params = qd.params;
 
-    let mut exec = McxOwned::<ExecTy>::try_new_in_place(
-        MemoryContext::new_bump("ExecutorState"),
+    let ctx = exec_ctx_pool::take()
+        .unwrap_or_else(|| Box::new(MemoryContext::new_bump("ExecutorState")));
+    let mut exec = McxOwned::<ExecTy>::try_new_in_place_boxed(
+        ctx,
         |mcx, slot| {
             let d = slot.as_mut_ptr();
             // SAFETY: field-wise init of the whole uninit slot; sret lands
@@ -636,9 +663,10 @@ pub fn standard_executor_end(qd: &mut QueryDescData) -> PgResult<()> {
         debug_assert!(estate.owners_released());
         Ok(())
     })?;
-    // FreeExecutorState: one context delete, no per-object glue (the walk
-    // above released every census-exempt owner; Drop stays the abort path).
-    (*exec).free_forget();
+    // FreeExecutorState: one context reset, no per-object glue (the walk
+    // above released every census-exempt owner; Drop stays the abort path);
+    // the reset context parks for the next ExecutorStart (C context_freelists).
+    exec_ctx_pool::park((*exec).free_recycle());
     qd.tup_desc = None;
     Ok(())
 }
