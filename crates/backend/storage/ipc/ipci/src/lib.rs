@@ -59,6 +59,7 @@ pub fn CalculateShmemSize(cfg: &ProcGlobalConfig) -> PgResult<(usize, i32)> {
     size = shmem::add_size(size, transam_xlog::XLOGShmemSize())?;
     size = shmem::add_size(size, clog::CLOGShmemSize())?;
     size = shmem::add_size(size, subtrans::SUBTRANSShmemSize())?;
+    size = shmem::add_size(size, multixact::MultiXactShmemSize())?;
     size = shmem::add_size(size, lwlock::LWLockShmemSize()?)?;
     size = shmem::add_size(size, backend_status_seams::backend_status_shmem_size::call()?)?;
     size = shmem::add_size(size, sinval::SharedInvalShmemSize()?)?;
@@ -111,6 +112,7 @@ pub fn CreateOrAttachShmemStructs(cfg: &ProcGlobalConfig) -> PgResult<()> {
     transam_xlog::XLOGShmemInit();
     clog::CLOGShmemInit()?;
     subtrans::SUBTRANSShmemInit()?;
+    multixact::MultiXactShmemInit()?;
     bufmgr::BufferManagerShmemInit()?;
 
     lock::LockManagerShmemInit(cfg.max_prepared_xacts)?;

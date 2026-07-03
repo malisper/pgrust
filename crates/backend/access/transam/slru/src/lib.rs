@@ -129,6 +129,10 @@ impl SlruCtlData {
         self.shared.latest_page_number.store(pageno as u64, Ordering::Relaxed);
     }
 
+    pub fn latest_page_number(&self) -> i64 {
+        self.shared.latest_page_number.load(Ordering::Relaxed) as i64
+    }
+
     pub fn mark_page_dirty(&self, slotno: usize, bank: &LwGuard) {
         debug_assert!(bank.held_in_mode(self.bank_lock_for_slot(slotno), LW_EXCLUSIVE));
         self.shared.page_dirty.set(slotno, true);

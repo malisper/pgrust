@@ -19,6 +19,7 @@ miscinit = { path = "../../../utils/init/miscinit" }
 smgr = { path = "../../smgr/smgr" }
 md = { path = "../../smgr/md" }
 clog = { path = "../../../access/transam/clog" }
+multixact = { path = "../../../access/transam/multixact" }
 fd = { path = "../../file/fd" }
 latch = { path = "../../ipc/latch" }
 sync_seams = { path = "../sync_seams" }

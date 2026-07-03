@@ -78,9 +78,25 @@ fn syncfiletag(tag: &FileTag) -> PgResult<FileTagOpResult> {
                 errno: md::last_errno(),
             })
         }
+        SyncRequestHandler::SYNC_HANDLER_MULTIXACT_OFFSET => {
+            let (result, path) = multixact::multixactoffsetssyncfiletag(tag)?;
+            Ok(FileTagOpResult {
+                result,
+                path: path.as_str().to_string(),
+                errno: md::last_errno(),
+            })
+        }
+        SyncRequestHandler::SYNC_HANDLER_MULTIXACT_MEMBER => {
+            let (result, path) = multixact::multixactmemberssyncfiletag(tag)?;
+            Ok(FileTagOpResult {
+                result,
+                path: path.as_str().to_string(),
+                errno: md::last_errno(),
+            })
+        }
         h => panic!(
             "unported callee reached from sync.c syncsw[]: {h:?} sync_syncfiletag \
-             (commit_ts/multixact units unported)"
+             (commit_ts unit unported)"
         ),
     }
 }

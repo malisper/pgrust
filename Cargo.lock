@@ -1303,7 +1303,9 @@ dependencies = [
  "tableam",
  "tcop_dest",
  "tidbitmap",
+ "tstore_receiver",
  "tupdesc",
+ "tuplestore",
  "types_core",
  "types_dest",
  "types_error",
@@ -2305,6 +2307,7 @@ dependencies = [
  "backend_startup",
  "bgwriter",
  "checkpointer",
+ "guc",
  "guc_tables",
  "init_small",
  "interrupt",
@@ -2317,6 +2320,7 @@ dependencies = [
  "postmaster_startup",
  "pqcomm_seams",
  "procsignal",
+ "scalar_seams",
  "stack_depth",
  "timestamp_seams",
  "types_core",
@@ -2324,6 +2328,7 @@ dependencies = [
  "types_storage",
  "waiteventset_seams",
  "walwriter",
+ "xact_seams",
 ]
 
 [[package]]
@@ -2811,8 +2816,7 @@ dependencies = [
  "execscan",
  "exectuples",
  "executils",
- "guc",
- "guc_tables",
+ "init_small",
  "lsyscache",
  "mcx",
  "miscinit_seams",
@@ -2975,6 +2979,8 @@ name = "nodemodifytable"
 version = "0.1.0"
 dependencies = [
  "aclchk_seams",
+ "adt_bool",
+ "adt_float",
  "aio_seams",
  "async_seams",
  "autovacuum_seams",

@@ -17,4 +17,7 @@ elog = { path = "../../../utils/error/elog" }
 xlogreader_seams = { path = "../xlogreader_seams" }
 relmapper = { path = "../../../utils/cache/relmapper" }
 clog = { path = "../clog" }
+multixact = { path = "../multixact" }
 transam_xlog_seams = { path = "../transam_xlog_seams" }
+heapam_xlog = { path = "../../heap/heapam_xlog" }
+xact = { path = "../xact" }

@@ -26,6 +26,7 @@ varsup = { path = "../../../access/transam/varsup" }
 transam_xlog = { path = "../../../access/transam/transam_xlog" }
 clog = { path = "../../../access/transam/clog" }
 subtrans = { path = "../../../access/transam/subtrans" }
+multixact = { path = "../../../access/transam/multixact" }
 sinval = { path = "../sinval" }
 pmsignal = { path = "../pmsignal" }
 procsignal = { path = "../procsignal" }

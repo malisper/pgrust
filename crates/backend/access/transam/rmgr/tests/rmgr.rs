@@ -87,10 +87,13 @@ fn table_names_match_rmgrlist() {
 #[test]
 fn startup_cleanup_mask_pattern_matches_rmgrlist() {
     for (i, row) in RmgrTable.iter().enumerate() {
-        let has_startup = matches!(i, 11 | 13 | 14 | 16);
+        // C rows 11|13|14|16 (btree/gin/gist/spgist) carry rm_startup/
+        // rm_cleanup; here those slots are None until their xlog units land
+        // (the startup fns only allocate scratch their redo callbacks read,
+        // and those redo callbacks are loud panics).
         let has_mask = matches!(i, 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 20);
-        assert_eq!(row.rm_startup.is_some(), has_startup, "row {i} startup");
-        assert_eq!(row.rm_cleanup.is_some(), has_startup, "row {i} cleanup");
+        assert!(row.rm_startup.is_none(), "row {i} startup");
+        assert!(row.rm_cleanup.is_none(), "row {i} cleanup");
         assert_eq!(row.rm_mask.is_some(), has_mask, "row {i} mask");
     }
 }
@@ -114,10 +117,10 @@ fn get_rmgr_unregistered_errors_like_rmgr_not_found() {
 }
 
 #[test]
-#[should_panic(expected = "rmgr callback not ported: heap_redo — land backend-access-heap-heapam-xlog")]
+#[should_panic(expected = "rmgr callback not ported: btree_redo — land backend-access-nbtree-nbtxlog")]
 fn unported_redo_panics_loudly() {
     let mut record = xlogreader_seams::XLogReaderState::default();
-    let _ = (GetRmgr(RM_HEAP_ID as u8).unwrap().rm_redo)(&mut record);
+    let _ = (GetRmgr(RM_BTREE_ID as u8).unwrap().rm_redo)(&mut record);
 }
 
 #[test]
