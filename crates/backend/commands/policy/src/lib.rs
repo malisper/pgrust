@@ -148,7 +148,7 @@ fn oid_array_datum<'mcx>(mcx: Mcx<'mcx>, oids: &[Oid]) -> PgResult<PgVec<'mcx, u
     datum::array_build::construct_array_image(mcx, &v, OIDOID, 4, true, b'i')
 }
 
-fn text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
+fn text_datum(mcx: Mcx<'_>, s: &str) -> PgResult<Datum> {
     let t = varlena::cstring_to_text(mcx, s.as_bytes())?;
     Ok(Datum::from_usize(t.as_bytes().as_ptr() as usize))
 }
