@@ -184,15 +184,20 @@ pub fn btgettuple(scan: &mut IndexScanDescData<'_>, dir: ScanDirection) -> PgRes
     let kill_prior_tuple = scan.kill_prior_tuple;
     let mut ctx = split_scan!(&mut *scan);
 
-    let res = if !BTScanPosIsValid(&ctx.so.currPos) {
-        bt_first(&mut ctx, dir)?
-    } else {
-        bt_gettuple_continue(&mut ctx, dir, kill_prior_tuple)?
-    };
-    if !res && ctx.so.numArrayKeys != 0 {
-        unported_phase2("_bt_start_prim_scan (SAOP/skip-scan lane)");
+    // Each loop iteration performs another primitive index scan.
+    loop {
+        let res = if !BTScanPosIsValid(&ctx.so.currPos) {
+            bt_first(&mut ctx, dir)?
+        } else {
+            bt_gettuple_continue(&mut ctx, dir, kill_prior_tuple)?
+        };
+        if res {
+            return Ok(true);
+        }
+        if ctx.so.numArrayKeys == 0 || !utils::bt_start_prim_scan(ctx.so) {
+            return Ok(false);
+        }
     }
-    Ok(res)
 }
 
 /// btgetbitmap: drain all matching heap TIDs into `tbm`, forward only.
@@ -204,25 +209,28 @@ pub fn btgetbitmap(
     let mut ntids: i64 = 0;
 
     let mut ctx = split_scan!(&mut *scan);
-    if bt_first(&mut ctx, ::types_scan::sdir::ForwardScanDirection)? {
-        tbm.add_tuples(core::slice::from_ref(ctx.xs_heaptid), false)?;
-        ntids += 1;
-
-        loop {
-            ctx.so.currPos.itemIndex += 1;
-            if ctx.so.currPos.itemIndex > ctx.so.currPos.lastItem {
-                if !search::bt_next(&mut ctx, ::types_scan::sdir::ForwardScanDirection)? {
-                    break;
-                }
-            }
-            // SAFETY: itemIndex in [firstItem, lastItem], written by bt_readpage.
-            let item = unsafe { ctx.so.currPos.item(ctx.so.currPos.itemIndex as usize) };
-            tbm.add_tuples(core::slice::from_ref(&item.heapTid), false)?;
+    // Each loop iteration performs another primitive index scan.
+    loop {
+        if bt_first(&mut ctx, ::types_scan::sdir::ForwardScanDirection)? {
+            tbm.add_tuples(core::slice::from_ref(ctx.xs_heaptid), false)?;
             ntids += 1;
+
+            loop {
+                ctx.so.currPos.itemIndex += 1;
+                if ctx.so.currPos.itemIndex > ctx.so.currPos.lastItem {
+                    if !search::bt_next(&mut ctx, ::types_scan::sdir::ForwardScanDirection)? {
+                        break;
+                    }
+                }
+                // SAFETY: itemIndex in [firstItem, lastItem], written by bt_readpage.
+                let item = unsafe { ctx.so.currPos.item(ctx.so.currPos.itemIndex as usize) };
+                tbm.add_tuples(core::slice::from_ref(&item.heapTid), false)?;
+                ntids += 1;
+            }
         }
-    }
-    if ctx.so.numArrayKeys != 0 {
-        unported_phase2("_bt_start_prim_scan (SAOP/skip-scan lane)");
+        if ctx.so.numArrayKeys == 0 || !utils::bt_start_prim_scan(ctx.so) {
+            break;
+        }
     }
     Ok(ntids)
 }
@@ -286,8 +294,10 @@ pub fn btrestrpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
             bufmgr_seams::incr_buffer_ref_count::call(so.markPos.buf);
         }
         restore_scanpos(so);
+        // Reset the scan's array keys (see _bt_steppage for why).
         if so.numArrayKeys != 0 {
-            unported_phase2("mark/restore with array keys (_bt_start_array_keys)");
+            utils::bt_start_array_keys(so, so.currPos.dir);
+            so.needPrimScan = false;
         }
     } else {
         BTScanPosInvalidate(&mut so.currPos);
