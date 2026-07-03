@@ -626,6 +626,51 @@ pub fn fc_numerictypmodin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
     Ok(Datum::from_i32(typmod))
 }
 
+pub fn fc_numeric_round(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
+    let num = unsafe { num_arg(fcinfo, 0) }?;
+    let img = crate::numeric_round_common(num, fcinfo.arg_i32(1))?;
+    img_result(fcinfo, &img)
+}
+
+pub fn fc_numeric_trunc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
+    let num = unsafe { num_arg(fcinfo, 0) }?;
+    let img = crate::numeric_trunc_common(num, fcinfo.arg_i32(1))?;
+    img_result(fcinfo, &img)
+}
+
+pub fn fc_numeric_int2(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
+    let num = unsafe { num_arg(fcinfo, 0) }?;
+    Ok(Datum::from_i16(crate::numeric_int2(num)?))
+}
+
+pub fn fc_numeric_scale(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
+    let num = unsafe { num_arg(fcinfo, 0) }?;
+    if num.is_special() {
+        return Ok(fcinfo.return_null());
+    }
+    Ok(Datum::from_i32(num.dscale()))
+}
+
+pub fn fc_numeric_min_scale(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
+    let num = unsafe { num_arg(fcinfo, 0) }?;
+    if num.is_special() {
+        return Ok(fcinfo.return_null());
+    }
+    Ok(Datum::from_i32(crate::numeric_min_scale(num)))
+}
+
+pub fn fc_numeric_trim_scale(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
+    let num = unsafe { num_arg(fcinfo, 0) }?;
+    let img = crate::numeric_trim_scale(num)?;
+    img_result(fcinfo, &img)
+}
+
 const fn b(foid: ::types_core::Oid, name: &'static str, nargs: i16, strict: bool, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict, retset: false, func }
 }
@@ -685,6 +730,13 @@ pub const NUMERIC_BUILTINS: &[FmgrBuiltin] = &[
     b(1963, "int4_avg_accum", 2, true, fc_int4_avg_accum),
     b(1964, "int8_avg", 1, true, fc_int8_avg),
     b(1915, "numeric_uplus", 1, true, fc_numeric_uplus),
+    b(1707, "numeric_round", 2, true, fc_numeric_round),
+    b(1709, "numeric_trunc", 2, true, fc_numeric_trunc),
+    b(1783, "numeric_int2", 1, true, fc_numeric_int2),
+    b(1973, "numeric_div_trunc", 2, true, fc_numeric_div_trunc),
+    b(3281, "numeric_scale", 1, true, fc_numeric_scale),
+    b(5042, "numeric_min_scale", 1, true, fc_numeric_min_scale),
+    b(5043, "numeric_trim_scale", 1, true, fc_numeric_trim_scale),
     b(1980, "numeric_div_trunc", 2, true, fc_numeric_div_trunc),
     b(2169, "power", 2, true, fc_numeric_power),
     b(2170, "width_bucket", 4, true, fc_width_bucket_numeric),

@@ -795,3 +795,39 @@ pub fn int64_div_fast_to_numeric(val1: i64, log10val2: i32) -> PgResult<NumericI
 
     make_result(result.view())
 }
+
+fn get_min_scale(var: &NumericVar) -> i32 {
+    let digits = var.digits();
+    let mut last = var.ndigits - 1;
+    while last >= 0 && digits[last as usize] == 0 {
+        last -= 1;
+    }
+    if last < 0 {
+        return 0;
+    }
+    let mut min_scale = (last - var.weight) * DEC_DIGITS;
+    if min_scale > 0 {
+        let mut last_digit = digits[last as usize];
+        while last_digit % 10 == 0 {
+            min_scale -= 1;
+            last_digit /= 10;
+        }
+    } else {
+        min_scale = 0;
+    }
+    min_scale
+}
+
+pub fn numeric_min_scale(num: Num<'_>) -> i32 {
+    let var = NumericVar::from_view(num.view());
+    get_min_scale(&var)
+}
+
+pub fn numeric_trim_scale(num: Num<'_>) -> PgResult<NumericImage> {
+    if num.is_special() {
+        return Ok(NumericImage::from_num(num));
+    }
+    let mut result = NumericVar::from_view(num.view());
+    result.dscale = get_min_scale(&result);
+    make_result(result.view())
+}

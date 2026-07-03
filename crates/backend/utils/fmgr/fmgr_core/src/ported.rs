@@ -18,6 +18,7 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::adt_regexp::builtins::REGEXP_BUILTINS,
     ::adt_mac::builtins::MAC_BUILTINS,
     ::adt_mac8::builtins::MAC8_BUILTINS,
+    ::adt_pg_lsn::builtins::PG_LSN_BUILTINS,
     ::adt_uuid::builtins::UUID_BUILTINS,
     ::adt_network::builtins::NETWORK_BUILTINS,
     ::adt_regproc::builtins::REGPROC_BUILTINS,

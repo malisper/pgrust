@@ -419,6 +419,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_pg_lsn"
+version = "0.1.0"
+dependencies = [
+ "adt_numeric",
+ "datum",
+ "hashfn",
+ "mcx",
+ "pqformat",
+ "stringinfo",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
 name = "adt_pseudotypes"
 version = "0.1.0"
 dependencies = [
@@ -2714,6 +2729,7 @@ dependencies = [
  "adt_network",
  "adt_numeric",
  "adt_oracle_compat",
+ "adt_pg_lsn",
  "adt_pseudotypes",
  "adt_quote",
  "adt_regexp",

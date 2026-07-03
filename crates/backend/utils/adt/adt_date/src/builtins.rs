@@ -971,6 +971,15 @@ pub fn fc_timestamptz_timetz(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo
     }
 }
 
+pub fn fc_timestamp_bin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let stride = arg_interval(fcinfo, 0);
+    Ok(Datum::from_i64(interval::timestamp_bin(
+        &stride,
+        fcinfo.arg_i64(1),
+        fcinfo.arg_i64(2),
+    )?))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
@@ -1123,6 +1132,8 @@ pub const DATE_BUILTINS: &[FmgrBuiltin] = &[
     b(1385, "time_part", 2, fc_time_part),
     b(2037, "timetz_zone", 2, fc_timetz_zone),
     b(2038, "timetz_izone", 2, fc_timetz_izone),
+    b(6177, "timestamp_bin", 3, fc_timestamp_bin),
+    b(6178, "timestamptz_bin", 3, fc_timestamp_bin),
     b(6199, "extract_date", 2, fc_extract_date),
     b(6200, "extract_time", 2, fc_extract_time),
     b(6201, "extract_timetz", 2, fc_extract_timetz),
