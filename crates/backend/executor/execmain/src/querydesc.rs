@@ -71,19 +71,16 @@ pub(crate) unsafe fn shorten_pstmt<'a>(p: &PlannedStmt<'_>) -> &'a PlannedStmt<'
 
 struct Entry {
     generation: u32,
-    // Excludes aliasing: with_qd sets it around `f`; remove() refuses an
-    // in-use entry, so the &mut handed to `f` cannot dangle.
+    // with_qd sets it around `f`; remove() refuses an in-use entry, so the
+    // &mut handed to `f` cannot dangle.
     in_use: Cell<bool>,
     qd: QueryDescData,
 }
 
-// ManuallyDrop: entries reach guard drops (BufferPin, Relation closers) that
-// call seams, and a panic in a TLS destructor is a process abort (rust
-// runtime aborts the whole postmaster). Entries surviving a FATAL exit leak,
-// exactly as C's backend-process death leaves them.
-// Boxed for address stability: with_qd hands out a pointer into the entry
-// while nested executors register/free (Vec realloc). The box is C's
-// palloc'd QueryDesc.
+// ManuallyDrop: entries reach guard drops that call seams, and a panic in a
+// TLS destructor aborts the postmaster; FATAL-exit leaks match C. Boxed for
+// address stability: with_qd hands out a pointer into the entry while nested
+// executors register/free (Vec realloc). The box is C's palloc'd QueryDesc.
 thread_local! {
     static ENTRIES: RefCell<core::mem::ManuallyDrop<Vec<Option<Box<Entry>>>>> =
         const { RefCell::new(core::mem::ManuallyDrop::new(Vec::new())) };

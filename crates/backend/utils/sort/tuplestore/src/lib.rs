@@ -81,10 +81,9 @@ fn spill_unported(allowed_mem: i64) -> ! {
     )
 }
 
-// C's tuplestore_begin_heap creates no memory context (state pallocs into
-// CurrentMemoryContext); our two-context shell must not be a per-call create +
-// destroy pair. One parked shell covers the FillPortalStore-per-statement
-// pattern; nested stores displace and fall back to fresh construction.
+// C's tuplestore_begin_heap creates no memory context; our two-context shell
+// must not be a per-call create+destroy pair (nested stores fall back to
+// fresh construction).
 mod ts_pool {
     thread_local! {
         static SLOT: core::cell::RefCell<Option<super::Tuplestore>> =
@@ -246,9 +245,7 @@ impl Tuplestore {
     }
 
     pub fn end(mut self) {
-        // Park a capacity-bounded store cleared (C: pfrees + context
-        // freelists); a grown one takes the destroy path so a big result
-        // can't pin memory.
+        // A grown store takes the destroy path so a big result can't pin memory.
         let park = self.0.with_mut(|st| {
             st.memtuples.capacity() <= INITIAL_MEMTUPSIZE && st.readptrs.capacity() <= 8
         });
