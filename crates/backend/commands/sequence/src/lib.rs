@@ -416,7 +416,7 @@ fn init_params<'mcx>(mcx: Mcx<'mcx>, options: &NodeList<'mcx>) -> PgResult<InitP
 
     if let Some(d) = as_type {
         let tn = d.arg.expect("AS arg").as_variant::<TypeName>().expect("AS TypeName");
-        let (newtypid, _) = parse_utilcmd::typenameTypeIdAndMod(mcx, tn)?;
+        let (newtypid, _) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
         if newtypid != INT2OID && newtypid != INT4OID && newtypid != INT8OID {
             return Err(err(
                 "sequence type must be smallint, integer, or bigint".into(),
