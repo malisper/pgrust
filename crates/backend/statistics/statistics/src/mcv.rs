@@ -500,10 +500,8 @@ pub fn statext_mcv_deserialize<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<MC
                 PgError::error(format!("invalid MCV nbytes ({nbytes}) in MCVList")).into()
             );
         }
-        if typbyval && !(1..=8).contains(&typlen) {
-            return Err(
-                PgError::error(format!("invalid MCV typlen ({typlen}) in MCVList")).into()
-            );
+        if typbyval && !matches!(typlen, 1 | 2 | 4 | 8) {
+            return Err(PgError::error(format!("unsupported byval length: {typlen}")).into());
         }
         info.push(DimInfo {
             nvalues: nvalues as usize,
