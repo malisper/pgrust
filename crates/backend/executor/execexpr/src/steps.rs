@@ -9,6 +9,7 @@ use ::types_error::PgResult;
 use ::types_fmgr::{AggStateNode, FmgrInfo, FunctionCallInfoBaseData, LocalFcinfo, PGFunction};
 
 pub const EEO_FLAG_IS_QUAL: u8 = 1 << 0;
+pub const EEO_FLAG_HAS_SUBPLAN: u8 = 1 << 1;
 pub const EEO_FLAG_INTERPRETER_INITIALIZED: u8 = 1 << 5;
 pub const EEO_FLAG_STILL_VALID_CHECKED: u8 = 1 << 7;
 
@@ -80,6 +81,7 @@ pub enum Step {
     AggPlainTransInitStrictByRef { call: FuncCall, pergroup: NonNull<AggPerGroup>, byref: AggByRef },
     AggPlainTransStrictByRef { call: FuncCall, pergroup: NonNull<AggPerGroup>, byref: AggByRef },
     AggPlainTransByRef { call: FuncCall, pergroup: NonNull<AggPerGroup>, byref: AggByRef },
+    AggPlainTransInitStrictByVal { call: FuncCall, pergroup: NonNull<AggPerGroup> },
     // Hashed-agg trans: pergroup resolves per tuple through a cell nodeAgg
     // repoints after each hash lookup (C's setoff into all_pergroups).
     AggTransByValIndirect { call: FuncCall, base: NonNull<NonNull<AggPerGroup>>, transno: u16 },
@@ -106,11 +108,21 @@ pub enum Step {
         transno: u16,
         byref: AggByRef,
     },
+    AggTransInitStrictByValIndirect {
+        call: FuncCall,
+        base: NonNull<NonNull<AggPerGroup>>,
+        transno: u16,
+    },
     HashDatumSetInitVal { init_value: Datum, out: OutRef },
     HashDatumFirst { call: FuncCall, out: OutRef },
     // iresult: build-owned intermediate hash slot the rotate-xor chain reads.
     HashDatumNext32 { call: FuncCall, iresult: NonNull<NullableDatum>, out: OutRef },
     NotDistinct { call: FuncCall, out: OutRef },
+    ParamSet { prm: NonNull<::types_portal::params::ParamExecData>, out: OutRef },
+    // EEOP_SUBPLAN: the interpreter suspends; the caller's driver runs
+    // ExecSubPlan (nodeSubplan.c in execmain) with the full estate and
+    // resumes with the result (see interp::EvalOutcome).
+    SubPlan { sstate: NonNull<()>, out: OutRef },
     // slots: nelems compile-allocated NullableDatum arg targets (C's
     // d.minmax.values/nulls); call is the type's btree cmp proc.
     MinMax { call: FuncCall, slots: NonNull<NullableDatum>, nelems: u16, least: bool, out: OutRef },
@@ -453,6 +465,11 @@ impl<'mcx> ExprState<'mcx> {
 
     pub fn is_qual(&self) -> bool {
         self.flags & EEO_FLAG_IS_QUAL != 0
+    }
+
+    #[inline]
+    pub fn has_subplan(&self) -> bool {
+        self.flags & EEO_FLAG_HAS_SUBPLAN != 0
     }
 
     // Result-mcx convention: every frame's fcinfo is armed with the context

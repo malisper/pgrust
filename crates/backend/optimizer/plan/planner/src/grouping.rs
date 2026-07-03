@@ -474,6 +474,21 @@ fn pull_agg_input_vars<'mcx>(
         NodeTag::T_RelabelType => {
             pull_agg_input_vars(node.as_relabel_type().unwrap().arg, out)
         }
+        NodeTag::T_Param => {}
+        NodeTag::T_AlternativeSubPlan => {
+            for a in &node.as_alternative_sub_plan().unwrap().subplans {
+                pull_agg_input_vars(a, out);
+            }
+        }
+        NodeTag::T_SubPlan => {
+            let sp = node.as_sub_plan().unwrap();
+            if let Some(te) = sp.testexpr {
+                pull_agg_input_vars(te, out);
+            }
+            for a in &sp.args {
+                pull_agg_input_vars(a, out);
+            }
+        }
         other => panic!("pull_var_clause (var.c): {other:?}; M3 expression lane"),
     }
 }

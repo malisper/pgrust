@@ -54,6 +54,40 @@ fn param_exec_plan_pending() -> ! {
     )
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct Suspension {
+    pub sstate: core::ptr::NonNull<()>,
+    step: u32,
+    regs: NullableDatum,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Resume {
+    step: u32,
+    regs: NullableDatum,
+    result: NullableDatum,
+}
+
+impl Suspension {
+    pub fn resume_with(self, result: NullableDatum) -> Resume {
+        Resume { step: self.step, regs: self.regs, result }
+    }
+}
+
+pub enum EvalOutcome {
+    Done(NullableDatum),
+    Suspended(Suspension),
+}
+
+#[cold]
+#[inline(never)]
+fn subplan_without_driver() -> ! {
+    panic!(
+        "execexpr EEOP_SUBPLAN: SubPlan expression evaluated through a subplan-less \
+         entry point — owning node must use the executils subplan driver"
+    )
+}
+
 /// C `ExecEvalExprSwitchContext`/`ExecInterpExprStillValid`: one-time Var
 /// validity check, then kernel dispatch.
 #[inline(always)]
@@ -62,7 +96,53 @@ pub fn exec_eval_expr<'mcx>(
     slots: &mut EvalSlots<'_, 'mcx>,
 ) -> PgResult<NullableDatum> {
     check_still_valid(state, slots)?;
-    eval(state, slots, None)
+    match eval(state, slots, None, None)? {
+        EvalOutcome::Done(nd) => Ok(nd),
+        EvalOutcome::Suspended(_) => subplan_without_driver(),
+    }
+}
+
+pub fn exec_eval_expr_outcome<'mcx>(
+    state: &mut ExprState<'mcx>,
+    slots: &mut EvalSlots<'_, 'mcx>,
+    resume: Option<Resume>,
+) -> PgResult<EvalOutcome> {
+    check_still_valid(state, slots)?;
+    eval(state, slots, None, resume)
+}
+
+pub enum QualOutcome {
+    Done(bool),
+    Suspended(Suspension),
+}
+
+pub fn exec_qual_outcome<'mcx>(
+    state: &mut ExprState<'mcx>,
+    slots: &mut EvalSlots<'_, 'mcx>,
+    resume: Option<Resume>,
+) -> PgResult<QualOutcome> {
+    debug_assert!(state.is_qual());
+    check_still_valid(state, slots)?;
+    Ok(match eval(state, slots, None, resume)? {
+        EvalOutcome::Done(r) => {
+            debug_assert!(!r.isnull);
+            QualOutcome::Done(r.value.as_bool())
+        }
+        EvalOutcome::Suspended(s) => QualOutcome::Suspended(s),
+    })
+}
+
+pub fn exec_project_outcome<'mcx>(
+    state: &mut ExprState<'mcx>,
+    slots: &mut EvalSlots<'_, 'mcx>,
+    result_slot: &mut SlotData<'mcx>,
+    resume: Option<Resume>,
+) -> PgResult<Option<Suspension>> {
+    check_still_valid(state, slots)?;
+    Ok(match eval(state, slots, Some(result_slot), resume)? {
+        EvalOutcome::Done(_) => None,
+        EvalOutcome::Suspended(s) => Some(s),
+    })
 }
 
 /// C `ExecQual`: false on NULL, expression compiled by [`exec_init_qual`];
@@ -83,7 +163,10 @@ pub fn exec_qual<'mcx>(
         let v = exectuples::slot_getattr(scan, attnum as i32 + 1, &mut isnull);
         return Ok(!isnull && cmp.eval(v, konst));
     }
-    let r = eval(state, slots, None)?;
+    let r = match eval(state, slots, None, None)? {
+        EvalOutcome::Done(nd) => nd,
+        EvalOutcome::Suspended(_) => subplan_without_driver(),
+    };
     debug_assert!(!r.isnull);
     Ok(r.value.as_bool())
 }
@@ -99,7 +182,10 @@ pub fn exec_project<'mcx>(
     check_still_valid(state, slots)?;
     state.arm_result_mcx(result_mcx);
     exectuples::exec_clear_tuple(result_slot, result_mcx);
-    eval(state, slots, Some(result_slot))?;
+    match eval(state, slots, Some(result_slot), None)? {
+        EvalOutcome::Done(_) => {}
+        EvalOutcome::Suspended(_) => subplan_without_driver(),
+    }
     exectuples::exec_store_virtual_tuple(result_slot);
     Ok(())
 }
@@ -109,9 +195,23 @@ fn eval<'mcx>(
     state: &mut ExprState<'mcx>,
     slots: &mut EvalSlots<'_, 'mcx>,
     result_slot: Option<&mut SlotData<'mcx>>,
+    resume: Option<Resume>,
+) -> PgResult<EvalOutcome> {
+    if let Kernel::Program = state.kernel {
+        return run_program(state, slots, result_slot, resume);
+    }
+    debug_assert!(resume.is_none());
+    eval_kernel(state, slots, result_slot).map(EvalOutcome::Done)
+}
+
+#[inline(always)]
+fn eval_kernel<'mcx>(
+    state: &mut ExprState<'mcx>,
+    slots: &mut EvalSlots<'_, 'mcx>,
+    result_slot: Option<&mut SlotData<'mcx>>,
 ) -> PgResult<NullableDatum> {
     match state.kernel {
-        Kernel::Program => run_program(state, slots, result_slot),
+        Kernel::Program => unreachable!("run_program handled by eval"),
         Kernel::JustConst { value, isnull } => Ok(NullableDatum { value, isnull }),
         Kernel::JustConstAssign { value, isnull, resultnum } => {
             let rslot = result_slot.unwrap_or_else(|| no_result_slot());
@@ -243,7 +343,8 @@ fn run_program<'mcx>(
     state: &mut ExprState<'mcx>,
     slots: &mut EvalSlots<'_, 'mcx>,
     mut result_slot: Option<&mut SlotData<'mcx>>,
-) -> PgResult<NullableDatum> {
+    resume: Option<Resume>,
+) -> PgResult<EvalOutcome> {
     let ExprState { steps, frames, .. } = state;
     let steps = steps.as_slice();
     let mut scan = slots.scan.as_deref_mut();
@@ -252,15 +353,48 @@ fn run_program<'mcx>(
     let mut regs = ResultRegs { value: Datum::null(), isnull: true };
     let base = steps.as_ptr();
     let mut sp = base;
+    if let Some(r) = resume {
+        regs.value = r.regs.value;
+        regs.isnull = r.regs.isnull;
+        let Step::SubPlan { out, .. } = steps[r.step as usize] else {
+            panic!("resume target is not a SubPlan step")
+        };
+        write_out(out, &mut regs, r.result.value, r.result.isnull);
+        // SAFETY: r.step is a validated in-bounds index; the program is
+        // Done-terminated so step+1 is in bounds.
+        sp = unsafe { base.add(r.step as usize + 1) };
+    }
     loop {
         // SAFETY: ready_expr validated Done-termination and every jump
         // target; the cursor only advances by 1 or to a validated target.
         let step = unsafe { &*sp };
         match step {
             Step::DoneReturn => {
-                return Ok(NullableDatum { value: regs.value, isnull: regs.isnull })
+                return Ok(EvalOutcome::Done(NullableDatum {
+                    value: regs.value,
+                    isnull: regs.isnull,
+                }))
             }
-            Step::DoneNoReturn => return Ok(NullableDatum::null()),
+            Step::DoneNoReturn => return Ok(EvalOutcome::Done(NullableDatum::null())),
+            Step::ParamSet { prm, out } => {
+                let r = read_out(*out, &regs);
+                // SAFETY: compile-resolved pointer into stable es_param_exec_vals.
+                unsafe {
+                    let p = prm.as_ptr();
+                    (*p).value = r.value;
+                    (*p).isnull = r.isnull;
+                    (*p).exec_plan = false;
+                }
+            }
+            Step::SubPlan { sstate, out: _ } => {
+                // SAFETY: sp is derived from base and in bounds.
+                let step_ix = unsafe { sp.offset_from(base) } as u32;
+                return Ok(EvalOutcome::Suspended(Suspension {
+                    sstate: *sstate,
+                    step: step_ix,
+                    regs: NullableDatum { value: regs.value, isnull: regs.isnull },
+                }));
+            }
             Step::ScanFetchSome { last_var } => {
                 exectuples::slot_getsomeattrs(need_slot(&mut scan), *last_var as i32);
             }
@@ -555,6 +689,45 @@ fn run_program<'mcx>(
                 unsafe {
                     let pg = pergroup.as_ptr();
                     if !(*pg).trans_value_is_null {
+                        crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
+                            value: (*pg).trans_value,
+                            isnull: false,
+                        });
+                        let (value, isnull) = invoke(frames, call)?;
+                        (*pg).trans_value = value;
+                        (*pg).trans_value_is_null = isnull;
+                    }
+                }
+            }
+            Step::AggPlainTransInitStrictByVal { call, pergroup } => {
+                unsafe {
+                    let pg = pergroup.as_ptr();
+                    if (*pg).no_trans_value {
+                        let a1 = crate::steps::arg_slot_of(call.fcinfo, 1).read();
+                        (*pg).trans_value = a1.value;
+                        (*pg).trans_value_is_null = false;
+                        (*pg).no_trans_value = false;
+                    } else if !(*pg).trans_value_is_null {
+                        crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
+                            value: (*pg).trans_value,
+                            isnull: false,
+                        });
+                        let (value, isnull) = invoke(frames, call)?;
+                        (*pg).trans_value = value;
+                        (*pg).trans_value_is_null = isnull;
+                    }
+                }
+            }
+            Step::AggTransInitStrictByValIndirect { call, base, transno } => {
+                // SAFETY: as AggTransByValIndirect.
+                unsafe {
+                    let pg = base.read().as_ptr().add(*transno as usize);
+                    if (*pg).no_trans_value {
+                        let a1 = crate::steps::arg_slot_of(call.fcinfo, 1).read();
+                        (*pg).trans_value = a1.value;
+                        (*pg).trans_value_is_null = false;
+                        (*pg).no_trans_value = false;
+                    } else if !(*pg).trans_value_is_null {
                         crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
                             value: (*pg).trans_value,
                             isnull: false,

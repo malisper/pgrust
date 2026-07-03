@@ -17,7 +17,6 @@ pub fn set_plan_references<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>) -
     add_rtes_to_flat_rtable(run)?;
     debug_assert!(run.root.rowMarks.is_empty());
     debug_assert!(run.root.append_rel_list.is_empty());
-    debug_assert!(!run.root.hasAlternativeSubPlans);
     set_plan_refs(run, plan, rtoffset)
 }
 
@@ -122,14 +121,14 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 set_upper_references(run, plan, rtoffset)?;
             } else {
                 debug_assert!(r.plan.qual.is_nil());
-                if let Some(tl) = fix_scan_list(run, &r.plan.targetlist, rtoffset)? {
+                if let Some(tl) = fix_scan_list(run, &r.plan.targetlist, rtoffset, r.plan.plan_rows)? {
                     // SAFETY: exclusive plan-tree ownership (prologue note).
                     unsafe { plan.with_plan_mut(|p| p.targetlist = tl) }.expect("plan node");
                 }
             }
             if let Some(rcq) = plan.as_result().unwrap().resconstantqual {
                 let list = rcq.as_list().expect("resconstantqual is a List");
-                if let Some(fixed) = fix_scan_list(run, list, rtoffset)? {
+                if let Some(fixed) = fix_scan_list(run, list, rtoffset, 1.0)? {
                     let fixed = Node::mk_list(run.mcx, fixed)?;
                     // SAFETY: exclusive plan-tree ownership (prologue note).
                     unsafe {
@@ -144,8 +143,8 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
         NodeTag::T_SeqScan => {
             let s = plan.as_seq_scan().unwrap();
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
-            let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset)?;
-            let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset)?;
+            let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
+            let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
             if rtoffset != 0 || tl.is_some() || qual.is_some() {
                 // SAFETY: exclusive plan-tree ownership (prologue note).
                 unsafe {
@@ -166,12 +165,12 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             let s = plan.as_index_scan().unwrap();
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
             assert_eq!(rtoffset, 0, "set_plan_refs (setrefs.c): IndexScan in a subplan; M2 lane");
-            fix_scan_list(run, &s.scan.plan.targetlist, rtoffset)?;
-            fix_scan_list(run, &s.scan.plan.qual, rtoffset)?;
-            fix_scan_list(run, &s.indexqual, rtoffset)?;
-            fix_scan_list(run, &s.indexqualorig, rtoffset)?;
-            fix_scan_list(run, &s.indexorderby, rtoffset)?;
-            fix_scan_list(run, &s.indexorderbyorig, rtoffset)?;
+            fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
+            fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            fix_scan_list(run, &s.indexqual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            fix_scan_list(run, &s.indexqualorig, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            fix_scan_list(run, &s.indexorderby, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            fix_scan_list(run, &s.indexorderbyorig, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
         }
         NodeTag::T_IndexOnlyScan => set_indexonlyscan_references(run, plan, rtoffset)?,
         NodeTag::T_BitmapIndexScan => {
@@ -179,22 +178,22 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
             assert_eq!(rtoffset, 0, "set_plan_refs (setrefs.c): bitmap scan in a subplan; M2 lane");
             debug_assert!(s.scan.plan.targetlist.is_nil() && s.scan.plan.qual.is_nil());
-            fix_scan_list(run, &s.indexqual, rtoffset)?;
-            fix_scan_list(run, &s.indexqualorig, rtoffset)?;
+            fix_scan_list(run, &s.indexqual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            fix_scan_list(run, &s.indexqualorig, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
         }
         NodeTag::T_BitmapHeapScan => {
             let s = plan.as_bitmap_heap_scan().unwrap();
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
             assert_eq!(rtoffset, 0, "set_plan_refs (setrefs.c): bitmap scan in a subplan; M2 lane");
-            fix_scan_list(run, &s.scan.plan.targetlist, rtoffset)?;
-            fix_scan_list(run, &s.scan.plan.qual, rtoffset)?;
-            fix_scan_list(run, &s.bitmapqualorig, rtoffset)?;
+            fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
+            fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            fix_scan_list(run, &s.bitmapqualorig, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
         }
         NodeTag::T_FunctionScan => {
             let s = plan.as_function_scan().unwrap();
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
-            fix_scan_list(run, &s.scan.plan.targetlist, rtoffset)?;
-            fix_scan_list(run, &s.scan.plan.qual, rtoffset)?;
+            fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
+            fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
             for rtfunc_node in &s.functions {
                 let rtfunc = rtfunc_node.as_range_tbl_function().expect("functions cell");
                 if let Some(fexpr) = rtfunc.funcexpr {
@@ -205,9 +204,9 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
         NodeTag::T_ValuesScan => {
             let s = plan.as_values_scan().unwrap();
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
-            let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset)?;
-            let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset)?;
-            let vls = fix_scan_list(run, &s.values_lists, rtoffset)?;
+            let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
+            let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            let vls = fix_scan_list(run, &s.values_lists, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
             if rtoffset != 0 || tl.is_some() || qual.is_some() || vls.is_some() {
                 // SAFETY: exclusive plan-tree ownership (prologue note).
                 unsafe {
@@ -230,8 +229,8 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
         NodeTag::T_CteScan => {
             let s = plan.as_cte_scan().unwrap();
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
-            let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset)?;
-            let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset)?;
+            let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
+            let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
             if rtoffset != 0 || tl.is_some() || qual.is_some() {
                 // SAFETY: exclusive plan-tree ownership (prologue note).
                 unsafe {
@@ -313,7 +312,7 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 debug_assert_eq!(m.returningLists.len(), m.resultRelations.len());
                 for rlist_node in &m.returningLists {
                     let rlist = rlist_node.as_list().expect("returningLists cell is a List");
-                    let fixed = fix_scan_list(run, rlist, rtoffset)?;
+                    let fixed = fix_scan_list(run, rlist, rtoffset, m.plan.plan_rows)?;
                     debug_assert!(fixed.is_none());
                 }
             }
@@ -388,7 +387,7 @@ fn set_upper_references<'mcx>(
             None
         };
         if newexpr.is_none() {
-            newexpr = Some(fix_upper_expr(run, tle.expr, subplan_tlist, rtoffset, types_nodes::primnodes::OUTER_VAR)?);
+            newexpr = Some(fix_upper_expr(run, tle.expr, subplan_tlist, rtoffset, types_nodes::primnodes::OUTER_VAR, base.plan_rows)?);
         }
         let newexpr = newexpr.unwrap();
         // flatCopyTargetEntry + new expr.
@@ -408,7 +407,7 @@ fn set_upper_references<'mcx>(
     }
     let mut output_qual = NodeList::nil();
     for qual_node in &base.qual {
-        output_qual.lappend(mcx, fix_upper_expr(run, qual_node, subplan_tlist, rtoffset, types_nodes::primnodes::OUTER_VAR)?)?;
+        output_qual.lappend(mcx, fix_upper_expr(run, qual_node, subplan_tlist, rtoffset, types_nodes::primnodes::OUTER_VAR, 2.0 * base.plan_rows)?)?;
     }
     // SAFETY: exclusive plan-tree ownership (C rewrites the same lists in place).
     unsafe {
@@ -448,10 +447,11 @@ fn set_indexonlyscan_references<'mcx>(
         )
     };
     const INDEX_VAR: i32 = types_nodes::primnodes::INDEX_VAR;
+    let plan_rows = plan.as_plan().expect("plan node").plan_rows;
     let mut new_tlist = NodeList::nil();
     for tle_node in &tlist {
         let tle = tle_node.as_target_entry().expect("TargetEntry");
-        let newexpr = fix_upper_expr(run, tle.expr, &stripped, rtoffset, INDEX_VAR)?;
+        let newexpr = fix_upper_expr(run, tle.expr, &stripped, rtoffset, INDEX_VAR, plan_rows)?;
         new_tlist.lappend(
             mcx,
             Node::mk(
@@ -470,16 +470,16 @@ fn set_indexonlyscan_references<'mcx>(
     }
     let mut new_qual = NodeList::nil();
     for qual_node in &qual {
-        new_qual.lappend(mcx, fix_upper_expr(run, qual_node, &stripped, rtoffset, INDEX_VAR)?)?;
+        new_qual.lappend(mcx, fix_upper_expr(run, qual_node, &stripped, rtoffset, INDEX_VAR, 2.0 * plan_rows)?)?;
     }
     let mut new_recheck = NodeList::nil();
     for qual_node in &recheckqual {
-        new_recheck.lappend(mcx, fix_upper_expr(run, qual_node, &stripped, rtoffset, INDEX_VAR)?)?;
+        new_recheck.lappend(mcx, fix_upper_expr(run, qual_node, &stripped, rtoffset, INDEX_VAR, 2.0 * plan_rows)?)?;
     }
     {
         let s = plan.as_index_only_scan().unwrap();
-        fix_scan_list(run, &s.indexqual, rtoffset)?;
-        fix_scan_list(run, &s.indextlist, rtoffset)?;
+        fix_scan_list(run, &s.indexqual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+        fix_scan_list(run, &s.indextlist, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
     }
     // SAFETY: exclusive plan-tree ownership (prologue note).
     unsafe {
@@ -552,6 +552,7 @@ fn fix_upper_expr<'mcx>(
     subplan_tlist: &NodeList<'mcx>,
     rtoffset: i32,
     newvarno: i32,
+    num_exec: f64,
 ) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
     // search_indexed_tlist_for_non_var: an upper node consuming a value the
@@ -599,7 +600,7 @@ fn fix_upper_expr<'mcx>(
             let mut args = NodeList::nil();
             for arg_node in &a.args {
                 let arg = arg_node.as_target_entry().expect("agg arg is a TLE");
-                let newexpr = fix_upper_expr(run, arg.expr, subplan_tlist, rtoffset, newvarno)?;
+                let newexpr = fix_upper_expr(run, arg.expr, subplan_tlist, rtoffset, newvarno, num_exec)?;
                 let new_tle = Node::mk(
                     mcx,
                     types_nodes::primnodes::TargetEntry {
@@ -646,7 +647,7 @@ fn fix_upper_expr<'mcx>(
             debug_assert!(wf.aggfilter.is_none() && wf.runCondition.is_nil());
             let mut args = NodeList::nil();
             for arg in &wf.args {
-                args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset, newvarno)?)?;
+                args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset, newvarno, num_exec)?)?;
             }
             Node::mk(
                 mcx,
@@ -671,7 +672,7 @@ fn fix_upper_expr<'mcx>(
             record_plan_function_dependency(run, opfuncid)?;
             let mut args = NodeList::nil();
             for arg in &o.args {
-                args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset, newvarno)?)?;
+                args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset, newvarno, num_exec)?)?;
             }
             Node::mk(
                 mcx,
@@ -692,7 +693,7 @@ fn fix_upper_expr<'mcx>(
             record_plan_function_dependency(run, f.funcid)?;
             let mut args = NodeList::nil();
             for arg in &f.args {
-                args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset, newvarno)?)?;
+                args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset, newvarno, num_exec)?)?;
             }
             Node::mk(
                 mcx,
@@ -711,7 +712,7 @@ fn fix_upper_expr<'mcx>(
         }
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().expect("RelabelType");
-            let arg = fix_upper_expr(run, r.arg, subplan_tlist, rtoffset, newvarno)?;
+            let arg = fix_upper_expr(run, r.arg, subplan_tlist, rtoffset, newvarno, num_exec)?;
             Node::mk(
                 mcx,
                 types_nodes::primnodes::RelabelType {
@@ -728,7 +729,7 @@ fn fix_upper_expr<'mcx>(
             let b = node.as_bool_expr().expect("BoolExpr");
             let mut args = NodeList::nil();
             for arg in &b.args {
-                args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset, newvarno)?)?;
+                args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset, newvarno, num_exec)?)?;
             }
             Node::mk(
                 mcx,
@@ -737,7 +738,7 @@ fn fix_upper_expr<'mcx>(
         }
         NodeTag::T_NullTest => {
             let nt = node.as_null_test().unwrap();
-            let arg = fix_upper_expr(run, nt.arg.expect("NullTest.arg"), subplan_tlist, rtoffset, newvarno)?;
+            let arg = fix_upper_expr(run, nt.arg.expect("NullTest.arg"), subplan_tlist, rtoffset, newvarno, num_exec)?;
             Node::mk(
                 mcx,
                 types_nodes::primnodes::NullTest {
@@ -747,6 +748,43 @@ fn fix_upper_expr<'mcx>(
                     location: nt.location,
                 },
             )
+        }
+        NodeTag::T_SubPlan => {
+            let sp = node.as_sub_plan().unwrap();
+            let testexpr = match sp.testexpr {
+                None => None,
+                Some(te) => Some(fix_upper_expr(run, te, subplan_tlist, rtoffset, newvarno, num_exec)?),
+            };
+            let mut args = NodeList::nil();
+            for arg in &sp.args {
+                args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset, newvarno, num_exec)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::SubPlan {
+                    subLinkType: sp.subLinkType,
+                    testexpr,
+                    paramIds: sp.paramIds.clone_in(mcx)?,
+                    plan_id: sp.plan_id,
+                    plan_name: sp.plan_name,
+                    firstColType: sp.firstColType,
+                    firstColTypmod: sp.firstColTypmod,
+                    firstColCollation: sp.firstColCollation,
+                    useHashTable: sp.useHashTable,
+                    unknownEqFalse: sp.unknownEqFalse,
+                    parallel_safe: sp.parallel_safe,
+                    setParam: sp.setParam.clone_in(mcx)?,
+                    parParam: sp.parParam.clone_in(mcx)?,
+                    args,
+                    startup_cost: sp.startup_cost,
+                    per_call_cost: sp.per_call_cost,
+                },
+            )
+        }
+        NodeTag::T_AlternativeSubPlan => {
+            let chosen =
+                fix_alternative_subplan(run, node.as_alternative_sub_plan().unwrap(), num_exec);
+            fix_upper_expr(run, chosen, subplan_tlist, rtoffset, newvarno, num_exec)
         }
         other => panic!("fix_upper_expr_mutator (setrefs.c): {other:?}; M3 expression lane"),
     }
@@ -806,10 +844,11 @@ fn fix_scan_list<'mcx>(
     run: &mut PlannerRun<'mcx>,
     list: &NodeList<'mcx>,
     rtoffset: i32,
+    num_exec: f64,
 ) -> PgResult<Option<NodeList<'mcx>>> {
     debug_assert!(run.root.multiexpr_params.is_empty());
     debug_assert!(run.root.minmax_aggs.is_empty());
-    if rtoffset == 0 {
+    if rtoffset == 0 && !run.glob.has_alternative_subplans {
         for node in list {
             fix_scan_expr_walker(run, node)?;
         }
@@ -817,7 +856,7 @@ fn fix_scan_list<'mcx>(
     }
     let mut out = NodeList::nil();
     for node in list {
-        out.lappend(run.mcx, fix_scan_expr_mutator(run, node, rtoffset)?)?;
+        out.lappend(run.mcx, fix_scan_expr_mutator(run, node, rtoffset, num_exec)?)?;
     }
     Ok(Some(out))
 }
@@ -827,6 +866,7 @@ fn fix_scan_expr_mutator<'mcx>(
     run: &mut PlannerRun<'mcx>,
     node: Node<'mcx>,
     rtoffset: i32,
+    num_exec: f64,
 ) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
     match node.node_tag() {
@@ -860,7 +900,7 @@ fn fix_scan_expr_mutator<'mcx>(
         }
         NodeTag::T_TargetEntry => {
             let tle = node.as_target_entry().unwrap();
-            let newexpr = fix_scan_expr_mutator(run, tle.expr, rtoffset)?;
+            let newexpr = fix_scan_expr_mutator(run, tle.expr, rtoffset, num_exec)?;
             Node::mk(
                 mcx,
                 types_nodes::primnodes::TargetEntry {
@@ -880,7 +920,7 @@ fn fix_scan_expr_mutator<'mcx>(
             record_plan_function_dependency(run, opfuncid)?;
             let mut args = NodeList::nil();
             for arg in &o.args {
-                args.lappend(mcx, fix_scan_expr_mutator(run, arg, rtoffset)?)?;
+                args.lappend(mcx, fix_scan_expr_mutator(run, arg, rtoffset, num_exec)?)?;
             }
             Node::mk(
                 mcx,
@@ -901,7 +941,7 @@ fn fix_scan_expr_mutator<'mcx>(
             record_plan_function_dependency(run, f.funcid)?;
             let mut args = NodeList::nil();
             for arg in &f.args {
-                args.lappend(mcx, fix_scan_expr_mutator(run, arg, rtoffset)?)?;
+                args.lappend(mcx, fix_scan_expr_mutator(run, arg, rtoffset, num_exec)?)?;
             }
             Node::mk(
                 mcx,
@@ -920,7 +960,7 @@ fn fix_scan_expr_mutator<'mcx>(
         }
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().unwrap();
-            let arg = fix_scan_expr_mutator(run, r.arg, rtoffset)?;
+            let arg = fix_scan_expr_mutator(run, r.arg, rtoffset, num_exec)?;
             Node::mk(
                 mcx,
                 types_nodes::primnodes::RelabelType {
@@ -937,7 +977,7 @@ fn fix_scan_expr_mutator<'mcx>(
             let b = node.as_bool_expr().unwrap();
             let mut args = NodeList::nil();
             for arg in &b.args {
-                args.lappend(mcx, fix_scan_expr_mutator(run, arg, rtoffset)?)?;
+                args.lappend(mcx, fix_scan_expr_mutator(run, arg, rtoffset, num_exec)?)?;
             }
             Node::mk(
                 mcx,
@@ -946,7 +986,7 @@ fn fix_scan_expr_mutator<'mcx>(
         }
         NodeTag::T_NullTest => {
             let nt = node.as_null_test().unwrap();
-            let arg = fix_scan_expr_mutator(run, nt.arg.expect("NullTest.arg"), rtoffset)?;
+            let arg = fix_scan_expr_mutator(run, nt.arg.expect("NullTest.arg"), rtoffset, num_exec)?;
             Node::mk(
                 mcx,
                 types_nodes::primnodes::NullTest {
@@ -956,6 +996,43 @@ fn fix_scan_expr_mutator<'mcx>(
                     location: nt.location,
                 },
             )
+        }
+        NodeTag::T_SubPlan => {
+            let sp = node.as_sub_plan().unwrap();
+            let testexpr = match sp.testexpr {
+                None => None,
+                Some(te) => Some(fix_scan_expr_mutator(run, te, rtoffset, num_exec)?),
+            };
+            let mut args = NodeList::nil();
+            for arg in &sp.args {
+                args.lappend(mcx, fix_scan_expr_mutator(run, arg, rtoffset, num_exec)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::SubPlan {
+                    subLinkType: sp.subLinkType,
+                    testexpr,
+                    paramIds: sp.paramIds.clone_in(mcx)?,
+                    plan_id: sp.plan_id,
+                    plan_name: sp.plan_name,
+                    firstColType: sp.firstColType,
+                    firstColTypmod: sp.firstColTypmod,
+                    firstColCollation: sp.firstColCollation,
+                    useHashTable: sp.useHashTable,
+                    unknownEqFalse: sp.unknownEqFalse,
+                    parallel_safe: sp.parallel_safe,
+                    setParam: sp.setParam.clone_in(mcx)?,
+                    parParam: sp.parParam.clone_in(mcx)?,
+                    args,
+                    startup_cost: sp.startup_cost,
+                    per_call_cost: sp.per_call_cost,
+                },
+            )
+        }
+        NodeTag::T_AlternativeSubPlan => {
+            let chosen =
+                fix_alternative_subplan(run, node.as_alternative_sub_plan().unwrap(), num_exec);
+            fix_scan_expr_mutator(run, chosen, rtoffset, num_exec)
         }
         other => panic!("fix_scan_expr_mutator (setrefs.c): {other:?}; M2 expression lane"),
     }
@@ -1022,8 +1099,40 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
             Some(arg) => fix_scan_expr_walker(run, arg),
             None => Ok(()),
         },
+        NodeTag::T_SubPlan => {
+            let sp = node.as_sub_plan().unwrap();
+            if let Some(te) = sp.testexpr {
+                fix_scan_expr_walker(run, te)?;
+            }
+            for arg in &sp.args {
+                fix_scan_expr_walker(run, arg)?;
+            }
+            Ok(())
+        }
         other => panic!("fix_scan_expr_walker (setrefs.c): {other:?}; M2 expression lane"),
     }
+}
+
+// fix_alternative_subplan (setrefs.c): keep the cheapest member for the
+// expected execution count. Divergence: C NULLs the losers out of
+// glob->subplans so the executor never initializes them; here they stay
+// (initialized but never executed or displayed).
+fn fix_alternative_subplan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    asplan: &'mcx types_nodes::primnodes::AlternativeSubPlan<'mcx>,
+    num_exec: f64,
+) -> Node<'mcx> {
+    let _ = run;
+    let mut best: Option<(Node<'mcx>, f64)> = None;
+    for sub_node in &asplan.subplans {
+        let sp = sub_node.as_sub_plan().expect("AlternativeSubPlan member");
+        let curcost = sp.startup_cost + num_exec * sp.per_call_cost;
+        // Ties prefer the later plan (bias against fast-start), as C.
+        if best.as_ref().is_none_or(|(_, c)| curcost <= *c) {
+            best = Some((sub_node, curcost));
+        }
+    }
+    best.expect("AlternativeSubPlan has members").0
 }
 
 // set_opfuncid (nodeFuncs.c): get_switched_clauses hands over commuted
@@ -1134,11 +1243,16 @@ fn set_join_references<'mcx>(
     } else {
         NrmMatch::Superset
     };
-    let joinqual =
-        fix_join_expr_list(run, joinqual_src, outer_tlist, inner_tlist, rtoffset, NrmMatch::Equal)?;
-    let targetlist =
-        fix_join_expr_list(run, &base.targetlist, outer_tlist, inner_tlist, rtoffset, above_nrm)?;
-    let qual = fix_join_expr_list(run, &base.qual, outer_tlist, inner_tlist, rtoffset, above_nrm)?;
+    let joinqual = fix_join_expr_list(
+        run, joinqual_src, outer_tlist, inner_tlist, rtoffset, NrmMatch::Equal,
+        2.0 * base.plan_rows,
+    )?;
+    let targetlist = fix_join_expr_list(
+        run, &base.targetlist, outer_tlist, inner_tlist, rtoffset, above_nrm, base.plan_rows,
+    )?;
+    let qual = fix_join_expr_list(
+        run, &base.qual, outer_tlist, inner_tlist, rtoffset, above_nrm, 2.0 * base.plan_rows,
+    )?;
 
     if is_hash {
         let hj = plan.as_hash_join().unwrap();
@@ -1149,11 +1263,14 @@ fn set_join_references<'mcx>(
             inner_tlist,
             rtoffset,
             NrmMatch::Equal,
+            2.0 * base.plan_rows,
         )?;
         // HashJoin's hashkeys look up outer tuples: outer itlist -> OUTER_VAR.
         let empty = NodeList::nil();
-        let hashkeys =
-            fix_join_expr_list(run, &hj.hashkeys, outer_tlist, &empty, rtoffset, NrmMatch::Equal)?;
+        let hashkeys = fix_join_expr_list(
+            run, &hj.hashkeys, outer_tlist, &empty, rtoffset, NrmMatch::Equal,
+            2.0 * base.plan_rows,
+        )?;
         // SAFETY: exclusive plan-tree ownership (C rewrites in place).
         unsafe {
             plan.with_mut::<types_nodes::plannodes::HashJoin, _>(|p| {
@@ -1174,6 +1291,7 @@ fn set_join_references<'mcx>(
             inner_tlist,
             rtoffset,
             NrmMatch::Equal,
+            2.0 * base.plan_rows,
         )?;
         // SAFETY: exclusive plan-tree ownership (C rewrites in place).
         unsafe {
@@ -1219,7 +1337,7 @@ fn set_hash_references<'mcx>(
         &hash.plan.lefttree.expect("Hash outer plan").as_plan().unwrap().targetlist;
     let empty = NodeList::nil();
     let hashkeys =
-        fix_join_expr_list(run, &hash.hashkeys, outer_tlist, &empty, rtoffset, NrmMatch::Equal)?;
+        fix_join_expr_list(run, &hash.hashkeys, outer_tlist, &empty, rtoffset, NrmMatch::Equal, 2.0 * hash.plan.plan_rows)?;
     // SAFETY: exclusive plan-tree ownership (C rewrites in place).
     unsafe { plan.with_mut::<types_nodes::plannodes::Hash, _>(|p| p.hashkeys = hashkeys) }
         .expect("Hash node");
@@ -1235,12 +1353,13 @@ fn fix_join_expr_list<'mcx>(
     inner_tlist: &NodeList<'mcx>,
     rtoffset: i32,
     nrm_match: NrmMatch,
+    num_exec: f64,
 ) -> PgResult<NodeList<'mcx>> {
     let mut out = NodeList::nil();
     for node in list {
         out.lappend(
             run.mcx,
-            fix_join_expr_mutator(run, node, outer_tlist, inner_tlist, rtoffset, nrm_match)?,
+            fix_join_expr_mutator(run, node, outer_tlist, inner_tlist, rtoffset, nrm_match, num_exec)?,
         )?;
     }
     Ok(out)
@@ -1254,6 +1373,7 @@ fn fix_join_expr_mutator<'mcx>(
     inner_tlist: &NodeList<'mcx>,
     rtoffset: i32,
     nrm_match: NrmMatch,
+    num_exec: f64,
 ) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
     match node.node_tag() {
@@ -1288,7 +1408,7 @@ fn fix_join_expr_mutator<'mcx>(
         NodeTag::T_TargetEntry => {
             let tle = node.as_target_entry().unwrap();
             let newexpr =
-                fix_join_expr_mutator(run, tle.expr, outer_tlist, inner_tlist, rtoffset, nrm_match)?;
+                fix_join_expr_mutator(run, tle.expr, outer_tlist, inner_tlist, rtoffset, nrm_match, num_exec)?;
             Node::mk(
                 mcx,
                 types_nodes::primnodes::TargetEntry {
@@ -1310,7 +1430,7 @@ fn fix_join_expr_mutator<'mcx>(
             for arg in &o.args {
                 args.lappend(
                     mcx,
-                    fix_join_expr_mutator(run, arg, outer_tlist, inner_tlist, rtoffset, nrm_match)?,
+                    fix_join_expr_mutator(run, arg, outer_tlist, inner_tlist, rtoffset, nrm_match, num_exec)?,
                 )?;
             }
             Node::mk(
@@ -1329,7 +1449,7 @@ fn fix_join_expr_mutator<'mcx>(
         }
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().unwrap();
-            let arg = fix_join_expr_mutator(run, r.arg, outer_tlist, inner_tlist, rtoffset, nrm_match)?;
+            let arg = fix_join_expr_mutator(run, r.arg, outer_tlist, inner_tlist, rtoffset, nrm_match, num_exec)?;
             Node::mk(
                 mcx,
                 types_nodes::primnodes::RelabelType {
@@ -1341,6 +1461,109 @@ fn fix_join_expr_mutator<'mcx>(
                     location: r.location,
                 },
             )
+        }
+        NodeTag::T_BoolExpr => {
+            let b = node.as_bool_expr().unwrap();
+            let mut args = NodeList::nil();
+            for arg in &b.args {
+                args.lappend(
+                    mcx,
+                    fix_join_expr_mutator(run, arg, outer_tlist, inner_tlist, rtoffset, nrm_match, num_exec)?,
+                )?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::BoolExpr { boolop: b.boolop, args, location: b.location },
+            )
+        }
+        NodeTag::T_FuncExpr => {
+            let f = node.as_func_expr().unwrap();
+            record_plan_function_dependency(run, f.funcid)?;
+            let mut args = NodeList::nil();
+            for arg in &f.args {
+                args.lappend(
+                    mcx,
+                    fix_join_expr_mutator(run, arg, outer_tlist, inner_tlist, rtoffset, nrm_match, num_exec)?,
+                )?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::FuncExpr {
+                    funcid: f.funcid,
+                    funcresulttype: f.funcresulttype,
+                    funcretset: f.funcretset,
+                    funcvariadic: f.funcvariadic,
+                    funcformat: f.funcformat,
+                    funccollid: f.funccollid,
+                    inputcollid: f.inputcollid,
+                    args,
+                    location: f.location,
+                },
+            )
+        }
+        NodeTag::T_NullTest => {
+            let nt = node.as_null_test().unwrap();
+            let arg = match nt.arg {
+                None => None,
+                Some(a) => Some(fix_join_expr_mutator(
+                    run, a, outer_tlist, inner_tlist, rtoffset, nrm_match, num_exec,
+                )?),
+            };
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::NullTest {
+                    arg,
+                    nulltesttype: nt.nulltesttype,
+                    argisrow: nt.argisrow,
+                    location: nt.location,
+                },
+            )
+        }
+        NodeTag::T_Param => {
+            fix_scan_expr_walker(run, node)?;
+            Ok(node)
+        }
+        NodeTag::T_SubPlan => {
+            let sp = node.as_sub_plan().unwrap();
+            let testexpr = match sp.testexpr {
+                None => None,
+                Some(te) => Some(fix_join_expr_mutator(
+                    run, te, outer_tlist, inner_tlist, rtoffset, nrm_match, num_exec,
+                )?),
+            };
+            let mut args = NodeList::nil();
+            for arg in &sp.args {
+                args.lappend(
+                    mcx,
+                    fix_join_expr_mutator(run, arg, outer_tlist, inner_tlist, rtoffset, nrm_match, num_exec)?,
+                )?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::SubPlan {
+                    subLinkType: sp.subLinkType,
+                    testexpr,
+                    paramIds: sp.paramIds.clone_in(mcx)?,
+                    plan_id: sp.plan_id,
+                    plan_name: sp.plan_name,
+                    firstColType: sp.firstColType,
+                    firstColTypmod: sp.firstColTypmod,
+                    firstColCollation: sp.firstColCollation,
+                    useHashTable: sp.useHashTable,
+                    unknownEqFalse: sp.unknownEqFalse,
+                    parallel_safe: sp.parallel_safe,
+                    setParam: sp.setParam.clone_in(mcx)?,
+                    parParam: sp.parParam.clone_in(mcx)?,
+                    args,
+                    startup_cost: sp.startup_cost,
+                    per_call_cost: sp.per_call_cost,
+                },
+            )
+        }
+        NodeTag::T_AlternativeSubPlan => {
+            let chosen =
+                fix_alternative_subplan(run, node.as_alternative_sub_plan().unwrap(), num_exec);
+            fix_join_expr_mutator(run, chosen, outer_tlist, inner_tlist, rtoffset, nrm_match, num_exec)
         }
         other => panic!("fix_join_expr_mutator (setrefs.c): {other:?}; M2 expression lane"),
     }
@@ -1473,8 +1696,8 @@ fn set_subqueryscan_references<'mcx>(
     }
 
     let s = plan.as_subquery_scan().unwrap();
-    let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset)?;
-    let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset)?;
+    let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
+    let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
     // SAFETY: exclusive plan-tree ownership (prologue note).
     unsafe {
         plan.with_mut::<types_nodes::plannodes::SubqueryScan, _>(|p| {

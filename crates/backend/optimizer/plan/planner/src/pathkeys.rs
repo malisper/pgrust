@@ -426,6 +426,20 @@ pub fn expr_collation(node: Node<'_>) -> u32 {
         NodeTag::T_Param => node.as_param().unwrap().paramcollid,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggcollid,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wincollid,
+        NodeTag::T_SubPlan => {
+            use types_nodes::primnodes::SubLinkType;
+            let sp = node.as_sub_plan().unwrap();
+            match sp.subLinkType {
+                SubLinkType::EXPR_SUBLINK | SubLinkType::ARRAY_SUBLINK => sp.firstColCollation,
+                SubLinkType::MULTIEXPR_SUBLINK => {
+                    panic!("exprCollation (nodeFuncs.c): MULTIEXPR SubPlan not ported")
+                }
+                _ => 0,
+            }
+        }
+        NodeTag::T_AlternativeSubPlan => expr_collation(
+            node.as_alternative_sub_plan().unwrap().subplans.first().expect("alternatives"),
+        ),
         other => panic!("exprCollation (nodeFuncs.c): {other:?}; M2 expression lane"),
     }
 }

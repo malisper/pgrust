@@ -205,21 +205,36 @@ fn exec_scan_impl<'mcx, N: ScanNode<'mcx>, const QUAL: bool, const PROJ: bool, c
 
         let ss = node.ss_mut();
         let passes = if QUAL {
-            let mut slots = EvalSlots {
-                scan: Some(estate.slot_mut(scan_id)),
-                inner: None,
-                outer: None,
-            };
-            exec_qual(ss.qual.as_deref_mut(), &mut slots)?
+            if ss.qual.as_deref().is_some_and(|q| q.has_subplan()) {
+                let ecxt = ss.ps_ExprContext;
+                executils::exec_qual_with_subplans(ss.qual.as_deref_mut(), estate, ecxt)?
+            } else {
+                let mut slots = EvalSlots {
+                    scan: Some(estate.slot_mut(scan_id)),
+                    inner: None,
+                    outer: None,
+                };
+                exec_qual(ss.qual.as_deref_mut(), &mut slots)?
+            }
         } else {
             true
         };
 
         if passes {
             if PROJ {
-                let mcx = estate.es_query_cxt;
+                let ecxt = ss.ps_ExprContext;
                 let proj = ss.ps_ProjInfo.as_mut().unwrap();
                 let result_id = proj.pi_result_slot;
+                if proj.pi_state.has_subplan() {
+                    executils::exec_project_with_subplans(
+                        &mut proj.pi_state,
+                        estate,
+                        ecxt,
+                        result_id,
+                    )?;
+                    return Ok(Some(result_id));
+                }
+                let mcx = estate.es_query_cxt;
                 let (scan_slot, result_slot) = slot_pair(estate, scan_id, result_id);
                 let mut slots = EvalSlots { scan: Some(scan_slot), inner: None, outer: None };
                 exec_project(&mut proj.pi_state, &mut slots, result_slot, mcx)?;
@@ -306,7 +321,10 @@ pub fn exec_conditional_assign_projection_info<'mcx>(
     }
     let result_desc = exec_type_from_tl(mcx, tlist)?;
     let result_slot = estate.exec_init_extra_tuple_slot(Some(result_desc), TupleSlotKind::Virtual);
-    let pi_state = exec_build_projection_info(mcx, tlist, Some(input_desc), estate.param_bind())?;
+    let params = estate.param_bind();
+    let pi_state = executils::with_subplan_compile_env(estate, |env| {
+        execexpr::exec_build_projection_info_subplans(mcx, tlist, Some(input_desc), params, env)
+    })?;
     Ok(Some(ProjectionInfo { pi_state, pi_result_slot: result_slot }))
 }
 
@@ -399,6 +417,15 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_OpExpr => -1,
         NodeTag::T_Aggref => -1,
         NodeTag::T_WindowFunc => -1,
+        NodeTag::T_SubLink => -1,
+        NodeTag::T_SubPlan => {
+            use types_nodes::primnodes::SubLinkType;
+            let sp = node.as_sub_plan().unwrap();
+            match sp.subLinkType {
+                SubLinkType::EXPR_SUBLINK | SubLinkType::ARRAY_SUBLINK => sp.firstColTypmod,
+                _ => -1,
+            }
+        }
         tag => panic!("exprTypmod (nodeFuncs.c): node family {tag:?} not ported"),
     }
 }
@@ -430,6 +457,14 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggcollid,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wincollid,
+        NodeTag::T_SubPlan => {
+            use types_nodes::primnodes::SubLinkType;
+            let sp = node.as_sub_plan().unwrap();
+            match sp.subLinkType {
+                SubLinkType::EXPR_SUBLINK | SubLinkType::ARRAY_SUBLINK => sp.firstColCollation,
+                _ => 0,
+            }
+        }
         tag => panic!("exprCollation (nodeFuncs.c): node family {tag:?} not ported"),
     }
 }

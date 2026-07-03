@@ -1246,6 +1246,26 @@ impl<'mcx> Parser<'mcx> {
                 let r = view.v(2).node();
                 *yyval = self.simple_a_expr("+", None, r, view.l(1))?;
             }
+            // a_expr subquery_Op sub_type select_with_parens
+            2078 => {
+                let sub_type = view.v(3).ival();
+                let link = if sub_type == types_nodes::SubLinkType::ALL_SUBLINK as i32 {
+                    types_nodes::SubLinkType::ALL_SUBLINK
+                } else {
+                    types_nodes::SubLinkType::ANY_SUBLINK
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::SubLink {
+                        subLinkType: link,
+                        subLinkId: 0,
+                        testexpr: view.v(1).node(),
+                        operName: view.v(2).list(),
+                        subselect: view.v(4).node().expect("select_with_parens"),
+                        location: view.l(2),
+                    },
+                )?));
+            }
             // a_expr [NOT] IN_P select_with_parens
             2074 | 2076 => {
                 let subselect_i = if rule == 2074 { 3 } else { 4 };
@@ -1518,6 +1538,11 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::Node(Some(f));
             }
+            // sub_type: ANY/SOME -> ANY_SUBLINK, ALL -> ALL_SUBLINK
+            2263 | 2264 => {
+                *yyval = YYSTYPE::Ival(types_nodes::SubLinkType::ANY_SUBLINK as i32)
+            }
+            2265 => *yyval = YYSTYPE::Ival(types_nodes::SubLinkType::ALL_SUBLINK as i32),
             2268..=2279 => *yyval = YYSTYPE::Keyword(MATH_OPS[rule - 2268]),
             2280 | 2282 | 2284 => {
                 let op = view.v(1).str_val();

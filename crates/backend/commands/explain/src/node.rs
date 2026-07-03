@@ -71,7 +71,7 @@ pub fn ExplainPrintPlan<'mcx>(
         }
     }
     // Gather-invisible skip: Gather vocabulary is unported; plan_of is loud.
-    ExplainNode(root, None, None, es)?;
+    ExplainNode(root, None, None, None, es)?;
     if es.settings {
         node_gap(
             "ExplainPrintSettings",
@@ -126,10 +126,16 @@ fn ExplainPreScanNode<'mcx>(
         _ => {}
     }
     let plan = plan_of(node);
-    // planstate_tree_walker's initPlan leg: reach each SubPlan's plan tree
-    // through PlannedStmt.subplans (the walk here is Plan-based, not PlanState).
+    // planstate_tree_walker's initPlan + subPlan legs: reach each referenced
+    // SubPlan's plan tree through PlannedStmt.subplans (the walk here is
+    // Plan-based, not PlanState). Unreferenced alt-subplan losers stay out of
+    // rels_used, as C's NULLed glob->subplans cells do.
     for sp_node in plan.initPlan.iter() {
         let sp = sp_node.as_sub_plan().expect("initPlan holds SubPlan nodes");
+        let child = subplans.nth(sp.plan_id as usize - 1);
+        ExplainPreScanNode(mcx, child, subplans, rels_used)?;
+    }
+    for sp in collect_node_subplans(mcx, node)?.iter() {
         let child = subplans.nth(sp.plan_id as usize - 1);
         ExplainPreScanNode(mcx, child, subplans, rels_used)?;
     }
@@ -203,10 +209,110 @@ fn plan_is_disabled(node: Node<'_>) -> bool {
     plan.disabled_nodes > child_disabled
 }
 
+#[derive(Clone, Copy)]
+pub enum AncestorEntry<'mcx> {
+    Plan(Node<'mcx>),
+    Sub(&'mcx types_nodes::primnodes::SubPlan<'mcx>),
+}
+
+pub struct Ancestors<'a, 'mcx> {
+    entry: AncestorEntry<'mcx>,
+    parent: Option<&'a Ancestors<'a, 'mcx>>,
+}
+
+fn collect_node_subplans<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+) -> PgResult<PgVec<'mcx, &'mcx types_nodes::primnodes::SubPlan<'mcx>>> {
+    let plan = plan_of(node);
+    let mut out: PgVec<'mcx, &'mcx types_nodes::primnodes::SubPlan<'mcx>> = PgVec::new_in(mcx);
+    let mut walk_list = |out: &mut PgVec<'mcx, &'mcx types_nodes::primnodes::SubPlan<'mcx>>,
+                         list: &NodeList<'mcx>| {
+        for n in list {
+            collect_subplans_expr(n, out);
+        }
+    };
+    match node.node_tag() {
+        NodeTag::T_NestLoop | NodeTag::T_MergeJoin | NodeTag::T_HashJoin => {
+            walk_list(&mut out, &plan.qual);
+            let joinqual = match node.node_tag() {
+                NodeTag::T_NestLoop => &node.as_nest_loop().unwrap().join.joinqual,
+                NodeTag::T_MergeJoin => &node.as_merge_join().unwrap().join.joinqual,
+                _ => &node.as_hash_join().unwrap().join.joinqual,
+            };
+            walk_list(&mut out, joinqual);
+            walk_list(&mut out, &plan.targetlist);
+        }
+        NodeTag::T_Result => {
+            walk_list(&mut out, &plan.targetlist);
+            walk_list(&mut out, &plan.qual);
+            if let Some(q) = node.as_result().unwrap().resconstantqual {
+                if let Some(l) = q.as_list() {
+                    walk_list(&mut out, l);
+                }
+            }
+        }
+        // Scans: projection compiles before the qual (C ExecInitSeqScan).
+        _ => {
+            walk_list(&mut out, &plan.targetlist);
+            walk_list(&mut out, &plan.qual);
+        }
+    }
+    Ok(out)
+}
+
+fn collect_subplans_expr<'mcx>(
+    node: Node<'mcx>,
+    out: &mut PgVec<'mcx, &'mcx types_nodes::primnodes::SubPlan<'mcx>>,
+) {
+    if let Some(sp) = node.as_sub_plan() {
+        out.push(sp);
+        if let Some(te) = sp.testexpr {
+            collect_subplans_expr(te, out);
+        }
+        return;
+    }
+    match node.node_tag() {
+        NodeTag::T_TargetEntry => {
+            collect_subplans_expr(node.as_target_entry().unwrap().expr, out)
+        }
+        NodeTag::T_OpExpr => {
+            for a in &node.as_op_expr().unwrap().args {
+                collect_subplans_expr(a, out);
+            }
+        }
+        NodeTag::T_FuncExpr => {
+            for a in &node.as_func_expr().unwrap().args {
+                collect_subplans_expr(a, out);
+            }
+        }
+        NodeTag::T_BoolExpr => {
+            for a in &node.as_bool_expr().unwrap().args {
+                collect_subplans_expr(a, out);
+            }
+        }
+        NodeTag::T_RelabelType => {
+            collect_subplans_expr(node.as_relabel_type().unwrap().arg, out)
+        }
+        NodeTag::T_NullTest => {
+            if let Some(a) = node.as_null_test().unwrap().arg {
+                collect_subplans_expr(a, out);
+            }
+        }
+        NodeTag::T_Aggref => {
+            for a in &node.as_aggref().unwrap().args {
+                collect_subplans_expr(a, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub fn ExplainNode<'mcx>(
     node: Node<'mcx>,
     relationship: Option<&str>,
     plan_name: Option<&str>,
+    ancestors: Option<&Ancestors<'_, 'mcx>>,
     es: &mut ExplainState<'mcx>,
 ) -> PgResult<()> {
     let plan = plan_of(node);
@@ -380,33 +486,33 @@ pub fn ExplainNode<'mcx>(
     }
 
     if es.verbose {
-        show_plan_tlist(node, es)?;
+        show_plan_tlist(node, ancestors, es)?;
     }
 
     match node.node_tag() {
         NodeTag::T_SeqScan | NodeTag::T_FunctionScan | NodeTag::T_CteScan => {
-            show_scan_qual(&plan.qual, "Filter", node, es)?;
+            show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
             filtered_count_gap(&plan.qual, es);
         }
         NodeTag::T_IndexScan => {
             let s = node.as_index_scan().unwrap();
-            show_scan_qual(&s.indexqualorig, "Index Cond", node, es)?;
+            show_scan_qual(&s.indexqualorig, "Index Cond", node, ancestors, es)?;
             if !s.indexqualorig.is_nil() {
                 show_instrumentation_count("Rows Removed by Index Recheck", 2, &instrument, es);
             }
-            show_scan_qual(&s.indexorderbyorig, "Order By", node, es)?;
-            show_scan_qual(&plan.qual, "Filter", node, es)?;
+            show_scan_qual(&s.indexorderbyorig, "Order By", node, ancestors, es)?;
+            show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
             filtered_count_gap(&plan.qual, es);
             show_indexsearches_info(es);
         }
         NodeTag::T_IndexOnlyScan => {
             let s = node.as_index_only_scan().unwrap();
-            show_scan_qual(&s.indexqual, "Index Cond", node, es)?;
+            show_scan_qual(&s.indexqual, "Index Cond", node, ancestors, es)?;
             if !s.recheckqual.is_nil() {
                 show_instrumentation_count("Rows Removed by Index Recheck", 2, &instrument, es);
             }
-            show_scan_qual(&s.indexorderby, "Order By", node, es)?;
-            show_scan_qual(&plan.qual, "Filter", node, es)?;
+            show_scan_qual(&s.indexorderby, "Order By", node, ancestors, es)?;
+            show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
             filtered_count_gap(&plan.qual, es);
             if es.analyze {
                 crate::format::ExplainPropertyFloat(
@@ -421,25 +527,25 @@ pub fn ExplainNode<'mcx>(
         }
         NodeTag::T_NestLoop => {
             let nl = node.as_nest_loop().unwrap();
-            show_upper_qual(&nl.join.joinqual, "Join Filter", node, es)?;
+            show_upper_qual(&nl.join.joinqual, "Join Filter", node, ancestors, es)?;
             filtered_count_gap(&nl.join.joinqual, es);
-            show_upper_qual(&plan.qual, "Filter", node, es)?;
+            show_upper_qual(&plan.qual, "Filter", node, ancestors, es)?;
             filtered_count_gap(&plan.qual, es);
         }
         NodeTag::T_HashJoin => {
             let hj = node.as_hash_join().unwrap();
-            show_upper_qual(&hj.hashclauses, "Hash Cond", node, es)?;
-            show_upper_qual(&hj.join.joinqual, "Join Filter", node, es)?;
+            show_upper_qual(&hj.hashclauses, "Hash Cond", node, ancestors, es)?;
+            show_upper_qual(&hj.join.joinqual, "Join Filter", node, ancestors, es)?;
             filtered_count_gap(&hj.join.joinqual, es);
-            show_upper_qual(&plan.qual, "Filter", node, es)?;
+            show_upper_qual(&plan.qual, "Filter", node, ancestors, es)?;
             filtered_count_gap(&plan.qual, es);
         }
         NodeTag::T_MergeJoin => {
             let mj = node.as_merge_join().unwrap();
-            show_upper_qual(&mj.mergeclauses, "Merge Cond", node, es)?;
-            show_upper_qual(&mj.join.joinqual, "Join Filter", node, es)?;
+            show_upper_qual(&mj.mergeclauses, "Merge Cond", node, ancestors, es)?;
+            show_upper_qual(&mj.join.joinqual, "Join Filter", node, ancestors, es)?;
             filtered_count_gap(&mj.join.joinqual, es);
-            show_upper_qual(&plan.qual, "Filter", node, es)?;
+            show_upper_qual(&plan.qual, "Filter", node, ancestors, es)?;
             filtered_count_gap(&plan.qual, es);
         }
         NodeTag::T_Hash => {
@@ -447,9 +553,9 @@ pub fn ExplainNode<'mcx>(
         }
         NodeTag::T_Result => {
             if let Some(q) = node.as_result().unwrap().resconstantqual {
-                show_one_time_filter(q, node, es)?;
+                show_one_time_filter(q, node, ancestors, es)?;
             }
-            show_scan_qual(&plan.qual, "Filter", node, es)?;
+            show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
             filtered_count_gap(&plan.qual, es);
         }
         NodeTag::T_Sort => {
@@ -464,12 +570,12 @@ pub fn ExplainNode<'mcx>(
             show_window_def(node, es)?;
             let w = node.as_window_agg().unwrap();
             debug_assert!(w.runCondition.is_nil());
-            show_upper_qual(&plan.qual, "Filter", node, es)?;
+            show_upper_qual(&plan.qual, "Filter", node, ancestors, es)?;
             filtered_count_gap(&plan.qual, es);
         }
         NodeTag::T_Agg => {
-            show_agg_keys(node, es)?;
-            show_upper_qual(&plan.qual, "Filter", node, es)?;
+            show_agg_keys(node, ancestors, es)?;
+            show_upper_qual(&plan.qual, "Filter", node, ancestors, es)?;
             show_hashagg_info(node, es)?;
             filtered_count_gap(&plan.qual, es);
         }
@@ -482,7 +588,7 @@ pub fn ExplainNode<'mcx>(
             }
         }
         NodeTag::T_SubqueryScan => {
-            show_scan_qual(&plan.qual, "Filter", node, es)?;
+            show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
             filtered_count_gap(&plan.qual, es);
         }
         // Unique, Limit, Append and SetOp show nothing extra without ANALYZE.
@@ -496,16 +602,11 @@ pub fn ExplainNode<'mcx>(
         }
     }
 
-    // ExplainSubPlans over initPlan (printed_subplans dedup unneeded:
-    // initplans attach once).
+    let pushed = Ancestors { entry: AncestorEntry::Plan(node), parent: ancestors };
+    // ExplainSubPlans over initPlan.
     for sp_node in plan.initPlan.iter() {
         let sp = sp_node.as_sub_plan().expect("initPlan holds SubPlan nodes");
-        let child = es
-            .pstmt
-            .expect("ExplainNode before ExplainPrintPlan")
-            .subplans
-            .nth(sp.plan_id as usize - 1);
-        ExplainNode(child, Some("InitPlan"), sp.plan_name, es)?;
+        explain_sub_plan(sp, "InitPlan", &pushed, es)?;
     }
     let haschildren = plan.lefttree.is_some()
         || plan.righttree.is_some()
@@ -515,21 +616,26 @@ pub fn ExplainNode<'mcx>(
         ExplainOpenGroup("Plans", Some("Plans"), false, es);
     }
     if let Some(l) = plan.lefttree {
-        ExplainNode(l, Some("Outer"), None, es)?;
+        ExplainNode(l, Some("Outer"), None, Some(&pushed), es)?;
     }
     if let Some(r) = plan.righttree {
-        ExplainNode(r, Some("Inner"), None, es)?;
+        ExplainNode(r, Some("Inner"), None, Some(&pushed), es)?;
     }
     if let Some(a) = node.as_append() {
         for child in &a.appendplans {
-            ExplainNode(child, Some("Member"), None, es)?;
+            ExplainNode(child, Some("Member"), None, Some(&pushed), es)?;
         }
     }
     if let Some(sq) = node.as_subquery_scan() {
-        ExplainNode(sq.subplan.expect("SubqueryScan subplan"), Some("Subquery"), None, es)?;
+        ExplainNode(sq.subplan.expect("SubqueryScan subplan"), Some("Subquery"), None, Some(&pushed), es)?;
     }
     if haschildren {
         ExplainCloseGroup("Plans", Some("Plans"), false, es);
+    }
+    // ExplainSubPlans over planstate->subPlan.
+    let member_subplans = collect_node_subplans(es.str.allocator(), node)?;
+    for sp in member_subplans.iter() {
+        explain_sub_plan(sp, "SubPlan", &pushed, es)?;
     }
 
     es.indent = save_indent;
@@ -537,7 +643,27 @@ pub fn ExplainNode<'mcx>(
     Ok(())
 }
 
-fn show_plan_tlist<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResult<()> {
+fn explain_sub_plan<'mcx>(
+    sp: &'mcx types_nodes::primnodes::SubPlan<'mcx>,
+    relationship: &str,
+    pushed: &Ancestors<'_, 'mcx>,
+    es: &mut ExplainState<'mcx>,
+) -> PgResult<()> {
+    if es.printed_subplans.is_member(sp.plan_id) {
+        return Ok(());
+    }
+    es.printed_subplans
+        .add_member(es.str.allocator(), sp.plan_id)?;
+    let child = es
+        .pstmt
+        .expect("ExplainNode before ExplainPrintPlan")
+        .subplans
+        .nth(sp.plan_id as usize - 1);
+    let sub = Ancestors { entry: AncestorEntry::Sub(sp), parent: Some(pushed) };
+    ExplainNode(child, Some(relationship), sp.plan_name, Some(&sub), es)
+}
+
+fn show_plan_tlist<'mcx>(node: Node<'mcx>, ancestors: Option<&Ancestors<'_, 'mcx>>, es: &mut ExplainState<'mcx>) -> PgResult<()> {
     let plan = plan_of(node);
     if plan.targetlist.is_nil() {
         return Ok(());
@@ -551,7 +677,7 @@ fn show_plan_tlist<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgRes
     for tle_node in plan.targetlist.iter() {
         let tle = tle_node.as_target_entry().expect("targetlist holds TargetEntries");
         let mut buf = PgString::new_in(mcx);
-        deparse_expr(es, node, tle.expr, useprefix, &mut buf)?;
+        deparse_expr(es, node, ancestors, tle.expr, useprefix, &mut buf)?;
         result.push(buf);
     }
     ExplainPropertyList("Output", &result, es);
@@ -698,7 +824,7 @@ fn show_incremental_sort_info<'mcx>(
 // show_agg_keys -> show_sort_group_keys (explain.c): key columns resolve in
 // the child plan's tlist. Divergence: C deparses with showimplicit=true; a
 // top-level implicit cast on a group key prints without its ::type here.
-fn show_agg_keys<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResult<()> {
+fn show_agg_keys<'mcx>(node: Node<'mcx>, ancestors: Option<&Ancestors<'_, 'mcx>>, es: &mut ExplainState<'mcx>) -> PgResult<()> {
     let agg = node.as_agg().expect("Agg plan node");
     if agg.numCols <= 0 && agg.groupingSets.is_nil() {
         return Ok(());
@@ -715,7 +841,7 @@ fn show_agg_keys<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResul
         let tle = get_tle_by_resno(child_tlist, resno)
             .unwrap_or_else(|| node_gap("show_sort_group_keys", "no tlist entry for key column"));
         let mut buf = PgString::new_in(mcx);
-        deparse_expr(es, child, tle.expr, useprefix, &mut buf)?;
+        deparse_expr(es, child, ancestors, tle.expr, useprefix, &mut buf)?;
         result.push(buf);
     }
     ExplainPropertyList("Group Key", &result, es);
@@ -902,7 +1028,7 @@ fn get_window_frame_options<'mcx>(
     } else if frame_options & FRAMEOPTION_START_CURRENT_ROW != 0 {
         buf.try_push_str("CURRENT ROW ")?;
     } else if frame_options & FRAMEOPTION_START_OFFSET != 0 {
-        deparse_expr(es, plan_node, start_offset.expect("startOffset"), useprefix, buf)?;
+        deparse_expr(es, plan_node, None, start_offset.expect("startOffset"), useprefix, buf)?;
         if frame_options & FRAMEOPTION_START_OFFSET_PRECEDING != 0 {
             buf.try_push_str(" PRECEDING ")?;
         } else if frame_options & FRAMEOPTION_START_OFFSET_FOLLOWING != 0 {
@@ -920,7 +1046,7 @@ fn get_window_frame_options<'mcx>(
         } else if frame_options & FRAMEOPTION_END_CURRENT_ROW != 0 {
             buf.try_push_str("CURRENT ROW ")?;
         } else if frame_options & FRAMEOPTION_END_OFFSET != 0 {
-            deparse_expr(es, plan_node, end_offset.expect("endOffset"), useprefix, buf)?;
+            deparse_expr(es, plan_node, None, end_offset.expect("endOffset"), useprefix, buf)?;
             if frame_options & FRAMEOPTION_END_OFFSET_PRECEDING != 0 {
                 buf.try_push_str(" PRECEDING ")?;
             } else if frame_options & FRAMEOPTION_END_OFFSET_FOLLOWING != 0 {
@@ -976,7 +1102,7 @@ fn deparse_plan_var<'mcx>(
             .unwrap_or_else(|| node_gap("get_variable", "bogus varattno for OUTER_VAR"));
         if tle.expr.as_var().is_none() {
             buf.try_push('(')?;
-            deparse_expr(es, child, tle.expr, useprefix, buf)?;
+            deparse_expr(es, child, None, tle.expr, useprefix, buf)?;
             buf.try_push(')')?;
             return Ok(());
         }
@@ -1055,6 +1181,7 @@ fn execscan_expr_type(node: Node<'_>) -> types_core::primitive::Oid {
 fn show_one_time_filter<'mcx>(
     qual: Node<'mcx>,
     node: Node<'mcx>,
+    ancestors: Option<&Ancestors<'_, 'mcx>>,
     es: &mut ExplainState<'mcx>,
 ) -> PgResult<()> {
     let list = qual.as_list().expect("resconstantqual is a List");
@@ -1065,14 +1192,14 @@ fn show_one_time_filter<'mcx>(
     let useprefix = es.rtable_size > 1 || es.verbose;
     let mut buf = PgString::new_in(mcx);
     if list.len() == 1 {
-        deparse_expr(es, node, list.nth(0), useprefix, &mut buf)?;
+        deparse_expr(es, node, ancestors, list.nth(0), useprefix, &mut buf)?;
     } else {
         buf.try_push('(')?;
         for (i, item) in list.iter().enumerate() {
             if i > 0 {
                 buf.try_push_str(" AND ")?;
             }
-            deparse_expr(es, node, item, useprefix, &mut buf)?;
+            deparse_expr(es, node, ancestors, item, useprefix, &mut buf)?;
         }
         buf.try_push(')')?;
     }
@@ -1144,26 +1271,29 @@ fn show_scan_qual<'mcx>(
     qual: &NodeList<'mcx>,
     qlabel: &str,
     node: Node<'mcx>,
+    ancestors: Option<&Ancestors<'_, 'mcx>>,
     es: &mut ExplainState<'mcx>,
 ) -> PgResult<()> {
     let useprefix = node.node_tag() == NodeTag::T_SubqueryScan || es.verbose;
-    show_qual(qual, qlabel, node, useprefix, es)
+    show_qual(qual, qlabel, node, ancestors, useprefix, es)
 }
 
 fn show_upper_qual<'mcx>(
     qual: &NodeList<'mcx>,
     qlabel: &str,
     node: Node<'mcx>,
+    ancestors: Option<&Ancestors<'_, 'mcx>>,
     es: &mut ExplainState<'mcx>,
 ) -> PgResult<()> {
     let useprefix = es.rtable_size > 1 || es.verbose;
-    show_qual(qual, qlabel, node, useprefix, es)
+    show_qual(qual, qlabel, node, ancestors, useprefix, es)
 }
 
 fn show_qual<'mcx>(
     qual: &NodeList<'mcx>,
     qlabel: &str,
     node: Node<'mcx>,
+    ancestors: Option<&Ancestors<'_, 'mcx>>,
     useprefix: bool,
     es: &mut ExplainState<'mcx>,
 ) -> PgResult<()> {
@@ -1185,7 +1315,7 @@ fn show_qual<'mcx>(
             },
         )?
     };
-    deparse_expr(es, node, expr, useprefix, &mut buf)?;
+    deparse_expr(es, node, ancestors, expr, useprefix, &mut buf)?;
     crate::format::ExplainPropertyText(qlabel, buf.as_str(), es);
     Ok(())
 }
@@ -1196,13 +1326,14 @@ fn show_qual<'mcx>(
 fn deparse_expr<'mcx>(
     es: &ExplainState<'mcx>,
     plan_node: Node<'mcx>,
+    ancestors: Option<&Ancestors<'_, 'mcx>>,
     expr: Node<'mcx>,
     useprefix: bool,
     buf: &mut PgString<'mcx>,
 ) -> PgResult<()> {
     match expr.node_tag() {
         NodeTag::T_Const => get_const_expr(expr.as_const().unwrap(), buf, 0),
-        NodeTag::T_Var => deparse_var(es, plan_node, expr.as_var().unwrap(), useprefix, buf),
+        NodeTag::T_Var => deparse_var(es, plan_node, ancestors, expr.as_var().unwrap(), useprefix, buf),
         NodeTag::T_OpExpr => {
             let o = expr.as_op_expr().unwrap();
             if o.args.len() != 2 {
@@ -1211,9 +1342,9 @@ fn deparse_expr<'mcx>(
             let opname = lsyscache::get_opname(es.str.allocator(), o.opno)?
                 .expect("operator of a planned expression exists");
             buf.try_push('(')?;
-            deparse_expr(es, plan_node, o.args.nth(0), useprefix, buf)?;
+            deparse_expr(es, plan_node, ancestors, o.args.nth(0), useprefix, buf)?;
             write!(buf, " {} ", opname.as_str()).expect("PgString write");
-            deparse_expr(es, plan_node, o.args.nth(1), useprefix, buf)?;
+            deparse_expr(es, plan_node, ancestors, o.args.nth(1), useprefix, buf)?;
             buf.try_push(')')?;
             Ok(())
         }
@@ -1222,7 +1353,7 @@ fn deparse_expr<'mcx>(
             if r.relabelformat != types_nodes::CoercionForm::COERCE_IMPLICIT_CAST {
                 node_gap("get_rule_expr", "explicit RelabelType deparse (ruleutils lane)");
             }
-            deparse_expr(es, plan_node, r.arg, useprefix, buf)
+            deparse_expr(es, plan_node, ancestors, r.arg, useprefix, buf)
         }
         // get_rule_expr T_BoolExpr, non-pretty form: outer parens always.
         NodeTag::T_BoolExpr => {
@@ -1236,14 +1367,14 @@ fn deparse_expr<'mcx>(
                         if i > 0 {
                             buf.try_push_str(sep)?;
                         }
-                        deparse_expr(es, plan_node, arg, useprefix, buf)?;
+                        deparse_expr(es, plan_node, ancestors, arg, useprefix, buf)?;
                     }
                     buf.try_push(')')?;
                     Ok(())
                 }
                 BoolExprType::NOT_EXPR => {
                     buf.try_push_str("(NOT ")?;
-                    deparse_expr(es, plan_node, b.args.nth(0), useprefix, buf)?;
+                    deparse_expr(es, plan_node, ancestors, b.args.nth(0), useprefix, buf)?;
                     buf.try_push(')')?;
                     Ok(())
                 }
@@ -1260,7 +1391,7 @@ fn deparse_expr<'mcx>(
                 node_gap("get_rule_expr", "row-type NullTest deparse (ruleutils lane)");
             }
             buf.try_push('(')?;
-            deparse_expr(es, plan_node, arg, useprefix, buf)?;
+            deparse_expr(es, plan_node, ancestors, arg, useprefix, buf)?;
             buf.try_push_str(match nt.nulltesttype {
                 NullTestType::IS_NULL => " IS NULL",
                 NullTestType::IS_NOT_NULL => " IS NOT NULL",
@@ -1303,7 +1434,7 @@ fn deparse_expr<'mcx>(
                         buf.try_push_str(", ")?;
                     }
                     nargs += 1;
-                    deparse_expr(es, plan_node, tle.expr, useprefix, buf)?;
+                    deparse_expr(es, plan_node, ancestors, tle.expr, useprefix, buf)?;
                 }
             }
             buf.try_push(')')?;
@@ -1339,11 +1470,142 @@ fn deparse_expr<'mcx>(
             }
             Ok(())
         }
+        // get_rule_expr T_SubPlan: reference the subplan by name; a testexpr
+        // shows the combining expression instead, with its output Params
+        // rendered by the Param arm below.
+        NodeTag::T_SubPlan => {
+            use types_nodes::primnodes::SubLinkType;
+            let sp = expr.as_sub_plan().unwrap();
+            let prefix = match sp.subLinkType {
+                SubLinkType::EXISTS_SUBLINK => "EXISTS(",
+                SubLinkType::ALL_SUBLINK => "(ALL ",
+                SubLinkType::ANY_SUBLINK => "(ANY ",
+                SubLinkType::ROWCOMPARE_SUBLINK | SubLinkType::EXPR_SUBLINK => "(",
+                SubLinkType::MULTIEXPR_SUBLINK => "(rescan ",
+                SubLinkType::ARRAY_SUBLINK => "ARRAY(",
+                SubLinkType::CTE_SUBLINK => "CTE(",
+            };
+            buf.try_push_str(prefix)?;
+            if let Some(te) = sp.testexpr {
+                let sub = Ancestors { entry: AncestorEntry::Sub(sp), parent: ancestors };
+                deparse_expr(es, plan_node, Some(&sub), te, useprefix, buf)?;
+                buf.try_push(')')?;
+            } else {
+                if sp.useHashTable {
+                    buf.try_push_str("hashed ")?;
+                }
+                buf.try_push_str(sp.plan_name.expect("planned SubPlan has a name"))?;
+                buf.try_push(')')?;
+            }
+            Ok(())
+        }
+        NodeTag::T_Param => {
+            deparse_param(es, plan_node, ancestors, expr.as_param().unwrap(), buf)
+        }
         other => node_gap(
             "deparse_expression",
             &format!("{other:?} deparse unported (ruleutils lane)"),
         ),
     }
+}
+
+// get_parameter (ruleutils.c): a PARAM_EXEC prints as its referent expression
+// (input to the subplan being displayed) or as a subplan-output reference
+// "(SubPlan n).colN"; anything unresolved prints "$n".
+fn deparse_param<'mcx>(
+    es: &ExplainState<'mcx>,
+    plan_node: Node<'mcx>,
+    ancestors: Option<&Ancestors<'_, 'mcx>>,
+    p: &types_nodes::primnodes::Param,
+    buf: &mut PgString<'mcx>,
+) -> PgResult<()> {
+    use types_nodes::primnodes::ParamKind;
+    if p.paramkind == ParamKind::PARAM_EXEC {
+        // find_param_referent: an ancestral SubPlan passing this param down.
+        let mut chain = ancestors;
+        while let Some(a) = chain {
+            if let AncestorEntry::Sub(sp) = a.entry {
+                if let Some(i) = sp.parParam.iter().position(|id| id == p.paramid) {
+                    let arg = sp.args.nth(i);
+                    // push_ancestor_plan: deparse in the SubPlan's owner
+                    // node's context, Var prefixes forced.
+                    let mut owner = a.parent;
+                    let owner_plan = loop {
+                        match owner {
+                            Some(o) => match o.entry {
+                                AncestorEntry::Plan(pn) => break pn,
+                                AncestorEntry::Sub(_) => owner = o.parent,
+                            },
+                            None => node_gap("get_parameter", "SubPlan ancestor without a plan"),
+                        }
+                    };
+                    let need_paren = !matches!(
+                        arg.node_tag(),
+                        NodeTag::T_Var | NodeTag::T_Aggref | NodeTag::T_Param
+                    );
+                    if need_paren {
+                        buf.try_push('(')?;
+                    }
+                    deparse_expr(es, owner_plan, owner.and_then(|o| o.parent), arg, true, buf)?;
+                    if need_paren {
+                        buf.try_push(')')?;
+                    }
+                    return Ok(());
+                }
+            }
+            chain = a.parent;
+        }
+        // find_param_generator: subplan/initplan output columns.
+        if let Some((name, hashed, col)) = find_param_generator(plan_node, ancestors, p.paramid) {
+            write!(
+                buf,
+                "({}{}).col{}",
+                if hashed { "hashed " } else { "" },
+                name,
+                col + 1
+            )
+            .expect("PgString write");
+            return Ok(());
+        }
+    }
+    write!(buf, "${}", p.paramid).expect("PgString write");
+    Ok(())
+}
+
+fn find_param_generator<'mcx>(
+    plan_node: Node<'mcx>,
+    ancestors: Option<&Ancestors<'_, 'mcx>>,
+    paramid: i32,
+) -> Option<(&'mcx str, bool, usize)> {
+    let check_initplans = |n: Node<'mcx>| -> Option<(&'mcx str, bool, usize)> {
+        for sp_node in plan_of(n).initPlan.iter() {
+            let sp = sp_node.as_sub_plan().expect("initPlan holds SubPlan nodes");
+            if let Some(i) = sp.setParam.iter().position(|id| id == paramid) {
+                return Some((sp.plan_name.expect("named"), sp.useHashTable, i));
+            }
+        }
+        None
+    };
+    if let Some(hit) = check_initplans(plan_node) {
+        return Some(hit);
+    }
+    let mut chain = ancestors;
+    while let Some(a) = chain {
+        match a.entry {
+            AncestorEntry::Sub(sp) => {
+                if let Some(i) = sp.paramIds.iter().position(|id| id == paramid) {
+                    return Some((sp.plan_name.expect("named"), sp.useHashTable, i));
+                }
+            }
+            AncestorEntry::Plan(pn) => {
+                if let Some(hit) = check_initplans(pn) {
+                    return Some(hit);
+                }
+            }
+        }
+        chain = a.parent;
+    }
+    None
 }
 
 // exprType (nodeFuncs.c) over the tags deparse_expr accepts.
@@ -1365,6 +1627,7 @@ fn deparse_expr_type(node: Node<'_>) -> types_core::Oid {
 fn deparse_var<'mcx>(
     es: &ExplainState<'mcx>,
     plan_node: Node<'mcx>,
+    ancestors: Option<&Ancestors<'_, 'mcx>>,
     var: &types_nodes::Var<'mcx>,
     useprefix: bool,
     buf: &mut PgString<'mcx>,
@@ -1374,7 +1637,7 @@ fn deparse_var<'mcx>(
         // C get_variable: a non-Var referent prints parenthesized.
         ResolvedVar::Expr(expr, ctx) => {
             buf.try_push('(')?;
-            deparse_expr(es, ctx, expr, useprefix, buf)?;
+            deparse_expr(es, ctx, ancestors, expr, useprefix, buf)?;
             buf.try_push(')')?;
             return Ok(());
         }

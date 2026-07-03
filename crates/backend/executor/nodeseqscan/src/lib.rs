@@ -161,7 +161,10 @@ pub fn exec_init_seq_scan_rel<'mcx>(
         ss_ScanTupleSlot,
     };
     execscan::exec_assign_scan_projection_info(mcx, estate, &mut ss, &node.scan.plan.targetlist)?;
-    ss.qual = exec_init_qual(mcx, &node.scan.plan.qual, estate.param_bind())?;
+    let params = estate.param_bind();
+    ss.qual = ::executils::with_subplan_compile_env(estate, |env| {
+        ::execexpr::exec_init_qual_subplans(mcx, &node.scan.plan.qual, params, env)
+    })?;
 
     let variant = if estate.es_epq_active {
         SeqScanVariant::Epq

@@ -496,7 +496,18 @@ pub fn examine_variable<'mcx>(
         // Var-free expressions (HAVING Aggrefs, PARAM_EXEC initplan outputs):
         // C's expression leg finds no relids and returns "don't know".
         NodeTag::T_Aggref | NodeTag::T_Param => Ok(vardata),
-        other => panic!("examine_variable (selfuncs.c): {other:?}; M2 expression lane"),
+        // C's general expression leg: a single-rel expression keeps its rel
+        // (tuple-count clamps) but has no stats (extended statistics absent).
+        _ => {
+            let varnos = vars::pull_varnos(run.mcx, node)?;
+            if let Some(v) = varnos.get_singleton_member() {
+                if varrelid == 0 || varrelid == v {
+                    vardata.var = Some(node_id);
+                    vardata.rel = Some(crate::relnode::find_base_rel(&run.root, v));
+                }
+            }
+            Ok(vardata)
+        }
     }
 }
 
@@ -1027,14 +1038,29 @@ pub fn estimate_num_groups<'mcx>(
     }
     let mcx = run.mcx;
     let mut varinfos: mcx::PgVec<'_, GroupVarInfo> = mcx::PgVec::new_in(mcx);
+    let mut work: mcx::PgVec<'_, (NodeId, Node<'mcx>)> = mcx::PgVec::new_in(mcx);
     for &(id, node) in group_exprs {
-        match node.node_tag() {
-            NodeTag::T_Const => continue,
-            NodeTag::T_Var => {}
-            other => panic!(
-                "estimate_num_groups (selfuncs.c): grouping expr {other:?}; M3 expression lane"
-            ),
+        if node.node_tag() == NodeTag::T_Const {
+            continue;
         }
+        if node.node_tag() == NodeTag::T_Var {
+            work.push((id, node));
+            continue;
+        }
+        // C's expression leg: no expression stats, so decompose to the
+        // contained Vars (a Var-free volatile expr keeps every row distinct).
+        let vars_here = vars::pull_var_clause(mcx, node, 0)?;
+        if vars_here.is_nil() {
+            if clauses::contain_volatile_functions(node)? {
+                return Ok(input_rows);
+            }
+            continue;
+        }
+        for v in &vars_here {
+            work.push((run.intern_expr(v), v));
+        }
+    }
+    for &(id, node) in work.iter() {
         let v = node.as_var().unwrap();
         let dup = varinfos.iter().any(|vi| {
             let u = run.root.expr_node(vi.var).as_var().unwrap();

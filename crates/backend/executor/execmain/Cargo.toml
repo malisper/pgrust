@@ -25,6 +25,7 @@ executils = { path = "../executils" }
 instrument = { path = "../instrument" }
 execexpr = { path = "../execexpr" }
 execscan = { path = "../execscan" }
+execgrouping = { path = "../execgrouping" }
 nodefunctionscan = { path = "../nodefunctionscan" }
 nodevaluesscan = { path = "../nodevaluesscan" }
 nodectescan = { path = "../nodectescan" }
@@ -48,6 +49,10 @@ nodemergejoin = { path = "../nodemergejoin" }
 nodewindowagg = { path = "../nodewindowagg" }
 nodenestloop = { path = "../nodenestloop" }
 exectuples = { path = "../exectuples" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+hashfn = { path = "../../../common/hashfn" }
 tupdesc = { path = "../../access/common/tupdesc" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 xact = { path = "../../access/transam/xact" }

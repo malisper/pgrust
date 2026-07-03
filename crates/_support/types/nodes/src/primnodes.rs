@@ -65,6 +65,12 @@ pub struct SubLink<'mcx> {
     pub location: ParseLoc,
 }
 
+/// primnodes.h AlternativeSubPlan: equivalent SubPlan implementations;
+/// setrefs picks one (fix_alternative_subplan), the executor never sees it.
+pub struct AlternativeSubPlan<'mcx> {
+    pub subplans: NodeList<'mcx>,
+}
+
 pub struct SubPlan<'mcx> {
     pub subLinkType: SubLinkType,
     pub testexpr: Option<Node<'mcx>>,
@@ -536,6 +542,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for SubLink<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for SubPlan<'mcx> {
     const TAG: NodeTag = NodeTag::T_SubPlan;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for AlternativeSubPlan<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlternativeSubPlan;
+}
 
 impl<'mcx> Node<'mcx> {
     /// C `makeConst` (constvalue passed in, location -1).
@@ -767,6 +776,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_sub_link(self) -> Option<&'mcx SubLink<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_alternative_sub_plan(self) -> Option<&'mcx AlternativeSubPlan<'mcx>> {
         self.as_variant()
     }
 

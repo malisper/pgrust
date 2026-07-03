@@ -159,6 +159,14 @@ pub fn text_cmp(arg1: &[u8], arg2: &[u8], collid: Oid) -> PgResult<i32> {
     varstr_cmp(arg1, arg2, collid)
 }
 
+pub(crate) fn check_collation_set_pub(collid: Oid) -> PgResult<()> {
+    check_collation_set(collid)
+}
+
+pub(crate) fn collation_is_c_known_pub(collid: Oid) -> bool {
+    collation_is_c_known(collid)
+}
+
 pub fn texteq(t1: &[u8], t2: &[u8], collid: Oid) -> PgResult<bool> {
     check_collation_set(collid)?;
     if collation_is_c_known(collid) {

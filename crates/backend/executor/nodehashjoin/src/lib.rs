@@ -721,6 +721,27 @@ fn accum_instrumentation<'mcx>(
     }
 }
 
+/// ExecReScanHashJoin (nodeHashjoin.c), inner-chgParam-nonnull arm: the
+/// build side changed, so the table must be rebuilt.
+pub fn exec_rescan_hash_join_chg<'mcx>(
+    node: &mut HashJoinState<'mcx>,
+    hash_state: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    if hash_state.table.is_some() {
+        accum_instrumentation(node, hash_state, estate);
+        hash_state.table.as_mut().expect("just checked").destroy()?;
+        hash_state.table = None;
+    }
+    node.hj_JoinState = HJ_BUILD_HASHTABLE;
+    node.hj_CurHashValue = 0;
+    node.hj_CurBucketNo = 0;
+    node.hj_CurTuple = ::nodehash::HashJoinTable::chain_end();
+    node.hj_MatchedOuter = false;
+    node.hj_OuterNotEmpty = false;
+    Ok(())
+}
+
 /// Multi-batch rescan destroys the table, so the caller must rescan the Hash
 /// child subtree too (C's `ExecReScan(innerPlan)`).
 #[derive(PartialEq, Eq)]

@@ -1130,6 +1130,24 @@ pub fn exec_end_agg(_node: &mut AggStateData<'_>) {}
 
 /// `ExecReScanAgg` (nodeAgg.c) AGG_PLAIN arm; the caller rescans the outer
 /// child (chgParam is always NULL until the Param lanes land).
+/// ExecReScanAgg (nodeAgg.c), chgParam-nonnull arm: input changed, so hashed
+/// results are rebuilt (C reuses only when no params changed in the subtree).
+pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EStateData<'mcx>) {
+    node.agg_done = false;
+    if let Some(ph) = node.perhash.as_mut() {
+        ph.table_filled = false;
+        ph.hashiter = 0;
+        ph.hash_ngroups_current = 0;
+        ph.hashtable.reset();
+    }
+    if let Some(ps) = node.persort.as_mut() {
+        ps.have_pending = false;
+    }
+    // SAFETY: sole access path to the node during the reset; frees hashed
+    // entry images too (they live in aggcontext).
+    unsafe { node.agg_node.as_mut() }.reset();
+}
+
 pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EStateData<'mcx>) {
     node.agg_done = false;
     if let Some(ph) = node.perhash.as_mut() {

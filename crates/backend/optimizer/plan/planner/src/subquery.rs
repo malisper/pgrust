@@ -243,8 +243,8 @@ pub fn subquery_planner<'mcx>(
 
     grouping_planner(run, tuple_fraction, setops)?;
 
-    // SS_identify_outer_params ran at run.push_root (see run.rs); correlated
-    // plan_params cannot exist on this lane.
+    // Correlation params requested of this level were consumed by each
+    // make_subplan (outer_params recomputes at pop; see run.rs).
     debug_assert!(run.root.plan_params.is_empty());
 
     let final_rel = fetch_final_rel(run);
@@ -278,11 +278,14 @@ pub fn preprocess_expression<'mcx>(
     if kind == EXPRKIND_QUAL || kind == EXPRKIND_TARGET {
         clauses::convert_saop_to_hashed_saop(expr)?;
     }
+    // C order: replace correlation Vars first, then expand SubLinks — each
+    // sub-level repeats the pair, so uplevel Vars inside sublink bodies are
+    // parked exactly once (subselect.c header comment).
+    if run.root.query_level > 1 {
+        expr = crate::subselect::ss_replace_correlation_vars(run, expr)?;
+    }
     if has_sublinks {
         expr = crate::subselect::ss_process_sublinks(run, expr, kind == EXPRKIND_QUAL)?;
-    }
-    if run.root.query_level > 1 {
-        expr = crate::subselect::ss_replace_correlation_vars(expr)?;
     }
     // make_ands_implicit runs last in C; constant TRUE reduces to None.
     if kind == EXPRKIND_QUAL {

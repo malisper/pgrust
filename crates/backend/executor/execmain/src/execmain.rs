@@ -265,6 +265,8 @@ pub(crate) fn init_plan<'mcx>(
         }
         data.estate.es_subplan_hook = Some(crate::nodesubplan::subplan_hook);
         data.estate.es_cte_proc_hook = Some(crate::nodesubplan::cte_proc_hook);
+        data.estate.es_subplan_init_hook = Some(crate::nodesubplan::subplan_expr_init_hook);
+        data.estate.es_subplan_eval_hook = Some(crate::nodesubplan::subplan_expr_eval_hook);
     }
 
     let plan_node = pstmt.planTree.expect("PlannedStmt without planTree");
@@ -441,6 +443,10 @@ pub fn standard_executor_end(qd: &mut QueryDescData) -> PgResult<()> {
                 exec_end_node(&mut ps, estate)?;
                 // Dropping runs the Rc releases arena reset can't (no-drop rule).
             }
+        }
+        while let Some((p, dropper)) = estate.es_subplan_expr_states.pop() {
+            // SAFETY: registered by exec_init_sub_plan_expr; dropped once here.
+            unsafe { dropper(p) };
         }
         estate.exec_reset_tuple_table(false);
         estate.exec_close_result_relations();

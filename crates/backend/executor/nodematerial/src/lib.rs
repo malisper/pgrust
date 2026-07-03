@@ -103,6 +103,18 @@ pub fn exec_end_material(node: &mut MaterialState<'_>) {
 /// `ExecReScanMaterial`; chgParam is always NULL until the Param lanes land,
 /// so a built store is simply rewound. Returns true when the caller must
 /// rescan the child (no store to replay).
+/// ExecReScanMaterial (nodeMaterial.c), chgParam-nonnull arm: params changed
+/// somewhere below, so the stored results are stale — drop and re-read.
+pub fn exec_rescan_material_chg<'mcx>(
+    node: &mut MaterialState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) {
+    let mcx = estate.es_query_cxt;
+    exectuples::exec_clear_tuple(estate.slot_mut(node.ps_ResultTupleSlot), mcx);
+    node.tuplestorestate = None;
+    node.eof_underlying = false;
+}
+
 pub fn exec_rescan_material<'mcx>(
     node: &mut MaterialState<'mcx>,
     estate: &mut EStateData<'mcx>,

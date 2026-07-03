@@ -202,6 +202,20 @@ pub fn exec_sort_restr_pos(node: &mut SortState<'_>) {
 
 /// `ExecReScanSort` node-local half. Returns true when the caller must rescan
 /// the outer child (C's chgParam is always NULL until the Param lanes land).
+/// ExecReScanSort (nodeSort.c), chgParam-nonnull arm: the input changed, so
+/// any finished sort is stale.
+pub fn exec_rescan_sort_chg<'mcx>(
+    node: &mut SortState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) {
+    if node.sort_Done {
+        let mcx = estate.es_query_cxt;
+        exectuples::exec_clear_tuple(estate.slot_mut(node.ps_ResultTupleSlot), mcx);
+    }
+    node.sort_Done = false;
+    node.tuplesortstate = None;
+}
+
 pub fn exec_rescan_sort<'mcx>(
     node: &mut SortState<'mcx>,
     estate: &mut EStateData<'mcx>,

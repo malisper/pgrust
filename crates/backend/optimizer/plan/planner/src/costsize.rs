@@ -114,6 +114,19 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             Some(arg) => cost_qual_eval_walker(arg, cost),
             None => Ok(()),
         },
+        // C arbitrarily uses the first alternative's cost.
+        NodeTag::T_AlternativeSubPlan => {
+            let asp = node.as_alternative_sub_plan().unwrap();
+            cost_qual_eval_walker(asp.subplans.first().expect("alternatives"), cost)
+        }
+        // The SubPlan's own costs, precomputed by cost_subplan; C does not
+        // descend into the testexpr (already included) or args.
+        NodeTag::T_SubPlan => {
+            let sp = node.as_sub_plan().unwrap();
+            cost.startup += sp.startup_cost;
+            cost.per_tuple += sp.per_call_cost;
+            Ok(())
+        }
         other => panic!("cost_qual_eval_walker (costsize.c): {other:?}; M2 expression lane"),
     }
 }
@@ -793,6 +806,22 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
             let svf = node.as_sql_value_function().unwrap();
             (svf.r#type, svf.typmod)
         }
+        NodeTag::T_SubPlan => {
+            use types_nodes::primnodes::SubLinkType;
+            let sp = node.as_sub_plan().unwrap();
+            match sp.subLinkType {
+                SubLinkType::EXPR_SUBLINK | SubLinkType::ARRAY_SUBLINK => {
+                    (sp.firstColType, sp.firstColTypmod)
+                }
+                SubLinkType::MULTIEXPR_SUBLINK => {
+                    panic!("exprType (nodeFuncs.c): MULTIEXPR SubPlan not ported")
+                }
+                _ => (types_core::catalog::BOOLOID, -1),
+            }
+        }
+        NodeTag::T_AlternativeSubPlan => expr_type_typmod(
+            node.as_alternative_sub_plan().unwrap().subplans.first().expect("alternatives"),
+        ),
         other => panic!("exprType (nodeFuncs.c): {other:?}; M2 expression lane"),
     }
 }

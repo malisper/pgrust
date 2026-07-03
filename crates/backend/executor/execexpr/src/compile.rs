@@ -85,6 +85,15 @@ fn grow_steps(state: &mut ExprState<'_>, mcx: Mcx<'_>) -> PgResult<()> {
     Ok(())
 }
 
+/// C ExecInitSubPlan linkage, type-erased against the execexpr<->execmain
+/// crate cycle: `estate` is a live `*mut EStateData` the caller must not
+/// alias during compile; `init` builds a query-lifetime SubPlanState.
+#[derive(Clone, Copy)]
+pub struct SubplanCompileEnv {
+    pub estate: NonNull<()>,
+    pub init: for<'x> unsafe fn(NonNull<()>, Node<'x>) -> PgResult<NonNull<()>>,
+}
+
 /// C `ExecInitExpr` (parent-less form; PlanState vocab is the execProcnode
 /// unit). NULL expression -> None, as C.
 pub fn exec_init_expr<'mcx>(
@@ -92,12 +101,22 @@ pub fn exec_init_expr<'mcx>(
     node: Option<Node<'mcx>>,
     params: ParamBind<'mcx>,
 ) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
+    exec_init_expr_subplans(mcx, node, params, None)
+}
+
+/// [`exec_init_expr`] with SubPlan compile support wired.
+pub fn exec_init_expr_subplans<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Option<Node<'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
     let Some(node) = node else {
         return Ok(None);
     };
     let mut state = ExprState::new_boxed_in(mcx)?;
     create_expr_setup_steps(&mut state, mcx, &[node])?;
-    init_expr_rec(node, &mut state, mcx, OutRef::RESULT, None, params)?;
+    init_expr_rec(node, &mut state, mcx, OutRef::RESULT, None, params, sub)?;
     push_step(&mut state, mcx, Step::DoneReturn)?;
     ready_expr(&mut state);
     Ok(Some(state))
@@ -109,6 +128,16 @@ pub fn exec_init_qual<'mcx>(
     qual: &NodeList<'mcx>,
     params: ParamBind<'mcx>,
 ) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
+    exec_init_qual_subplans(mcx, qual, params, None)
+}
+
+/// [`exec_init_qual`] with SubPlan compile support wired.
+pub fn exec_init_qual_subplans<'mcx>(
+    mcx: Mcx<'mcx>,
+    qual: &NodeList<'mcx>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
     if qual.is_nil() {
         return Ok(None);
     }
@@ -117,7 +146,7 @@ pub fn exec_init_qual<'mcx>(
     create_expr_setup_steps(&mut state, mcx, qual.as_slice())?;
 
     for node in qual.iter() {
-        init_expr_rec(node, &mut state, mcx, OutRef::RESULT, None, params)?;
+        init_expr_rec(node, &mut state, mcx, OutRef::RESULT, None, params, sub)?;
         push_step(&mut state, mcx, Step::Qual { jumpdone: u32::MAX })?;
     }
     let done = state.steps.len() as u32;
@@ -148,7 +177,7 @@ pub fn exec_build_agg_qual<'mcx>(
     create_expr_setup_steps(&mut state, mcx, qual.as_slice())?;
 
     for node in qual.iter() {
-        init_expr_rec(node, &mut state, mcx, OutRef::RESULT, Some(Bind::Agg(agg)), params)?;
+        init_expr_rec(node, &mut state, mcx, OutRef::RESULT, Some(Bind::Agg(agg)), params, None)?;
         push_step(&mut state, mcx, Step::Qual { jumpdone: u32::MAX })?;
     }
     let done = state.steps.len() as u32;
@@ -171,7 +200,18 @@ pub fn exec_build_projection_info<'mcx>(
     input_desc: Option<&TupleDescData<'mcx>>,
     params: ParamBind<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    build_projection_info(mcx, target_list, input_desc, None, params)
+    build_projection_info(mcx, target_list, input_desc, None, params, None)
+}
+
+/// [`exec_build_projection_info`] with SubPlan compile support wired.
+pub fn exec_build_projection_info_subplans<'mcx>(
+    mcx: Mcx<'mcx>,
+    target_list: &NodeList<'mcx>,
+    input_desc: Option<&TupleDescData<'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    build_projection_info(mcx, target_list, input_desc, None, params, sub)
 }
 
 /// Agg-node projection: Aggrefs bound to the AggState's result arrays.
@@ -182,7 +222,7 @@ pub fn exec_build_agg_projection_info<'mcx>(
     agg: AggBind,
     params: ParamBind<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    build_projection_info(mcx, target_list, input_desc, Some(Bind::Agg(agg)), params)
+    build_projection_info(mcx, target_list, input_desc, Some(Bind::Agg(agg)), params, None)
 }
 
 /// WindowAgg-node projection: WindowFuncs bound to the result arrays by
@@ -194,7 +234,7 @@ pub fn exec_build_window_projection_info<'mcx>(
     win: WinBind<'_, 'mcx>,
     params: ParamBind<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    build_projection_info(mcx, target_list, input_desc, Some(Bind::Win(win)), params)
+    build_projection_info(mcx, target_list, input_desc, Some(Bind::Win(win)), params, None)
 }
 
 fn build_projection_info<'mcx>(
@@ -203,6 +243,7 @@ fn build_projection_info<'mcx>(
     input_desc: Option<&TupleDescData<'mcx>>,
     agg: Option<Bind<'_, 'mcx>>,
     params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
     let mut state = ExprState::new_boxed_in(mcx)?;
     create_expr_setup_steps(&mut state, mcx, target_list.as_slice())?;
@@ -243,7 +284,7 @@ fn build_projection_info<'mcx>(
             };
             push_step(&mut state, mcx, step)?;
         } else {
-            init_expr_rec(tle.expr, &mut state, mcx, OutRef::RESULT, agg, params)?;
+            init_expr_rec(tle.expr, &mut state, mcx, OutRef::RESULT, agg, params, sub)?;
             let resultnum = (tle.resno - 1) as u16;
             let step = if lsyscache::get_typlen(expr_type(tle.expr))? == -1 {
                 Step::AssignTmpMakeRo { resultnum }
@@ -321,9 +362,7 @@ fn build_agg_trans<'mcx>(
         if flinfo.fn_retset {
             return Err(retset_error());
         }
-        if flinfo.fn_strict && spec.init_value_is_null && spec.transtype_byval {
-            unported("EEOP_AGG_PLAIN_TRANS_INIT_STRICT_BYVAL (strict transfn, NULL initval)");
-        }
+        let init_strict = flinfo.fn_strict && spec.init_value_is_null;
         let fn_addr = flinfo.fn_addr;
         let fn_strict = flinfo.fn_strict;
         let frame = FuncFrame::new_in(mcx, flinfo, nargs as u16, spec.inputcollid)?;
@@ -347,7 +386,7 @@ fn build_agg_trans<'mcx>(
             // SAFETY: argno + 1 <= num_trans_inputs < nargs of `call.fcinfo`.
             let arg_out =
                 OutRef(Some(unsafe { crate::steps::arg_slot_of(call.fcinfo, argno + 1) }));
-            init_expr_rec(tle.expr, &mut state, mcx, arg_out, None, params)?;
+            init_expr_rec(tle.expr, &mut state, mcx, arg_out, None, params, None)?;
         }
         let mut bailout: Option<usize> = None;
         if fn_strict && num_trans_inputs > 0 {
@@ -366,13 +405,21 @@ fn build_agg_trans<'mcx>(
             push_step(&mut state, mcx, step)?;
         }
         let step = if spec.transtype_byval {
-            match (indirect_base, fn_strict) {
-                (None, true) => Step::AggPlainTransStrictByVal { call, pergroup: spec.pergroup },
-                (None, false) => Step::AggPlainTransByVal { call, pergroup: spec.pergroup },
-                (Some(base), true) => {
+            match (indirect_base, fn_strict, init_strict) {
+                (None, _, true) => {
+                    Step::AggPlainTransInitStrictByVal { call, pergroup: spec.pergroup }
+                }
+                (None, true, false) => {
+                    Step::AggPlainTransStrictByVal { call, pergroup: spec.pergroup }
+                }
+                (None, false, false) => Step::AggPlainTransByVal { call, pergroup: spec.pergroup },
+                (Some(base), _, true) => {
+                    Step::AggTransInitStrictByValIndirect { call, base, transno: transno as u16 }
+                }
+                (Some(base), true, false) => {
                     Step::AggTransStrictByValIndirect { call, base, transno: transno as u16 }
                 }
-                (Some(base), false) => {
+                (Some(base), false, false) => {
                     Step::AggTransByValIndirect { call, base, transno: transno as u16 }
                 }
             }
@@ -583,6 +630,17 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
         NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().r#type,
         NodeTag::T_BoolExpr | NodeTag::T_NullTest => 16,
+        NodeTag::T_SubPlan => {
+            use ::types_nodes::primnodes::SubLinkType;
+            let sp = node.as_sub_plan().unwrap();
+            match sp.subLinkType {
+                SubLinkType::EXPR_SUBLINK | SubLinkType::ARRAY_SUBLINK => sp.firstColType,
+                SubLinkType::MULTIEXPR_SUBLINK => {
+                    panic!("exprType (nodeFuncs.c): MULTIEXPR SubPlan not ported")
+                }
+                _ => 16,
+            }
+        }
         tag => panic!("execexpr exprType: node family {tag:?} not ported"),
     }
 }
@@ -673,6 +731,15 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
                 setup_walker(a, info);
             }
         }
+        NodeTag::T_SubPlan => {
+            let sp = node.as_sub_plan().unwrap();
+            if let Some(t) = sp.testexpr {
+                setup_walker(t, info);
+            }
+            for a in sp.args.iter() {
+                setup_walker(a, info);
+            }
+        }
         tag => panic!("execexpr setup walker: node family {tag:?} not ported"),
     }
 }
@@ -685,6 +752,7 @@ fn init_expr_rec<'mcx>(
     out: OutRef,
     agg: Option<Bind<'_, 'mcx>>,
     params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
 ) -> PgResult<()> {
     match node.node_tag() {
         NodeTag::T_Var => {
@@ -739,14 +807,14 @@ fn init_expr_rec<'mcx>(
         NodeTag::T_FuncExpr => {
             let func = node.as_func_expr().unwrap();
             let step = init_func(
-                node, &func.args, func.funcid, func.inputcollid, state, mcx, out, agg, params,
+                node, &func.args, func.funcid, func.inputcollid, state, mcx, out, agg, params, sub,
             )?;
             push_step(state, mcx, step)
         }
         NodeTag::T_OpExpr => {
             let op = node.as_op_expr().unwrap();
             let step = init_func(
-                node, &op.args, op.opfuncid, op.inputcollid, state, mcx, out, agg, params,
+                node, &op.args, op.opfuncid, op.inputcollid, state, mcx, out, agg, params, sub,
             )?;
             push_step(state, mcx, step)
         }
@@ -796,7 +864,7 @@ fn init_expr_rec<'mcx>(
         }
         NodeTag::T_MinMaxExpr => {
             let mm = node.as_min_max_expr().unwrap();
-            let step = init_minmax(node, mm, state, mcx, out, agg, params)?;
+            let step = init_minmax(node, mm, state, mcx, out, agg, params, sub)?;
             push_step(state, mcx, step)
         }
         NodeTag::T_SQLValueFunction => {
@@ -809,14 +877,45 @@ fn init_expr_rec<'mcx>(
                 Step::SqlValueFunction { op: svf.op, typmod: svf.typmod, timetz, out },
             )
         }
-        NodeTag::T_BoolExpr => init_bool_expr(node, state, mcx, out, agg, params),
+        NodeTag::T_BoolExpr => init_bool_expr(node, state, mcx, out, agg, params, sub),
+        NodeTag::T_SubPlan => {
+            let sp = node.as_sub_plan().unwrap();
+            let Some(env) = sub else {
+                panic!(
+                    "ExecInitSubPlanExpr (execExpr.c): SubPlan in an expression context \
+                     without a subplan driver (owning node not wired)"
+                )
+            };
+            assert!(
+                sp.subLinkType != ::types_nodes::primnodes::SubLinkType::MULTIEXPR_SUBLINK,
+                "ExecInitExprRec (execExpr.c): MULTIEXPR SubPlan not ported"
+            );
+            debug_assert_eq!(sp.parParam.len(), sp.args.len());
+            for (paramid, arg) in sp.parParam.iter().zip(sp.args.iter()) {
+                init_expr_rec(arg, state, mcx, out, agg, params, sub)?;
+                assert!(
+                    paramid >= 0 && (paramid as u32) < params.n_exec,
+                    "EEOP_PARAM_SET: paramid {paramid} outside es_param_exec_vals[0..{}]",
+                    params.n_exec
+                );
+                let base = params.exec_vals.expect("n_exec > 0 implies a base pointer");
+                // SAFETY: paramid bounds-checked against the once-sized array.
+                let prm = unsafe { NonNull::new_unchecked(base.as_ptr().add(paramid as usize)) };
+                push_step(state, mcx, Step::ParamSet { prm, out })?;
+            }
+            // SAFETY: env.estate is the caller's live estate (SubplanCompileEnv
+            // contract: no aliasing borrows during compile).
+            let sstate = unsafe { (env.init)(env.estate, node) }?;
+            state.flags |= crate::steps::EEO_FLAG_HAS_SUBPLAN;
+            push_step(state, mcx, Step::SubPlan { sstate, out })
+        }
         NodeTag::T_NullTest => {
             use ::types_nodes::primnodes::NullTestType;
             let nt = node.as_null_test().unwrap();
             if nt.argisrow {
                 unported("EEOP_NULLTEST_ROWISNULL/ROWISNOTNULL");
             }
-            init_expr_rec(nt.arg.expect("NullTest.arg"), state, mcx, out, agg, params)?;
+            init_expr_rec(nt.arg.expect("NullTest.arg"), state, mcx, out, agg, params, sub)?;
             let step = match nt.nulltesttype {
                 NullTestType::IS_NULL => Step::NullTestIsNull { out },
                 NullTestType::IS_NOT_NULL => Step::NullTestIsNotNull { out },
@@ -836,13 +935,14 @@ fn init_bool_expr<'mcx>(
     out: OutRef,
     agg: Option<Bind<'_, 'mcx>>,
     params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
 ) -> PgResult<()> {
     use ::types_nodes::primnodes::BoolExprType;
     let b = node.as_bool_expr().unwrap();
     let nargs = b.args.len();
     if b.boolop == BoolExprType::NOT_EXPR {
         assert!(nargs == 1, "NOT with {nargs} args");
-        init_expr_rec(b.args.nth(0), state, mcx, out, agg, params)?;
+        init_expr_rec(b.args.nth(0), state, mcx, out, agg, params, sub)?;
         return push_step(state, mcx, Step::BoolNotStep { out });
     }
     assert!(nargs >= 2, "{:?} with {nargs} args", b.boolop);
@@ -850,7 +950,7 @@ fn init_bool_expr<'mcx>(
     let is_and = b.boolop == BoolExprType::AND_EXPR;
     let mut adjust_jumps: PgVec<'_, usize> = PgVec::new_in(mcx);
     for (off, arg) in b.args.iter().enumerate() {
-        init_expr_rec(arg, state, mcx, out, agg, params)?;
+        init_expr_rec(arg, state, mcx, out, agg, params, sub)?;
         let step = match (is_and, off) {
             (true, 0) => Step::BoolAndStepFirst { anynull, jumpdone: u32::MAX, out },
             (true, o) if o + 1 == nargs => Step::BoolAndStepLast { anynull, out },
@@ -899,6 +999,7 @@ fn init_minmax<'mcx>(
     out: OutRef,
     agg: Option<Bind<'_, 'mcx>>,
     params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
 ) -> PgResult<Step> {
     let nelems = mm.args.len();
     let entry = typcache::lookup_type_cache(mm.minmaxtype, typcache::TYPECACHE_CMP_PROC)?;
@@ -922,7 +1023,7 @@ fn init_minmax<'mcx>(
     for (i, arg) in mm.args.iter().enumerate() {
         // SAFETY: i < nelems of the freshly allocated slot array.
         let arg_out = OutRef(Some(unsafe { NonNull::new_unchecked(slots.as_ptr().add(i)) }));
-        init_expr_rec(arg, state, mcx, arg_out, agg, params)?;
+        init_expr_rec(arg, state, mcx, arg_out, agg, params, sub)?;
     }
     Ok(Step::MinMax {
         call,
@@ -1041,6 +1142,7 @@ fn init_func<'mcx>(
     out: OutRef,
     agg: Option<Bind<'_, 'mcx>>,
     params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
 ) -> PgResult<Step> {
     let nargs = args.len();
 
@@ -1096,7 +1198,7 @@ fn init_func<'mcx>(
         if arg.as_const().is_none() {
             // SAFETY: argno < nargs of the image `call.fcinfo` points at.
             let arg_out = OutRef(Some(unsafe { crate::steps::arg_slot_of(call.fcinfo, argno) }));
-            init_expr_rec(arg, state, mcx, arg_out, agg, params)?;
+            init_expr_rec(arg, state, mcx, arg_out, agg, params, sub)?;
         }
     }
 
@@ -1162,6 +1264,8 @@ fn ready_expr(state: &mut ExprState<'_>) {
             | Step::AggTransInitStrictByRefIndirect { call, .. }
             | Step::AggTransStrictByRefIndirect { call, .. }
             | Step::AggTransByRefIndirect { call, .. }
+            | Step::AggPlainTransInitStrictByVal { call, .. }
+            | Step::AggTransInitStrictByValIndirect { call, .. }
             | Step::HashDatumFirst { call, .. }
             | Step::HashDatumNext32 { call, .. }
             | Step::NotDistinct { call, .. }

@@ -188,9 +188,15 @@ impl<'a, 'mcx> NodeWalker<'mcx> for MaxParallelHazard<'a> {
                 expression_tree_walker(node, self)
             }
             NodeTag::T_NextValueExpr => Ok(self.test(PROPARALLEL_UNSAFE)),
-            t @ (NodeTag::T_RestrictInfo | NodeTag::T_SubPlan) => {
-                deferred("max_parallel_hazard_walker", t)
+            NodeTag::T_SubPlan => {
+                if !node.as_sub_plan().unwrap().parallel_safe
+                    && self.test(PROPARALLEL_RESTRICTED)
+                {
+                    return Ok(true);
+                }
+                expression_tree_walker(node, self)
             }
+            t @ NodeTag::T_RestrictInfo => deferred("max_parallel_hazard_walker", t),
             NodeTag::T_Param => {
                 let p: &Param = node.as_param().unwrap();
                 if p.paramkind == ParamKind::PARAM_EXTERN {

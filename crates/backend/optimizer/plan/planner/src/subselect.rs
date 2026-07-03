@@ -1,6 +1,9 @@
-//! subselect.c slice: uncorrelated EXISTS/EXPR initplans plus the real
-//! pull_up_sublinks transform (prepjointree.c) — top-level ANY/EXISTS
-//! sublinks become SEMI/ANTI joins; testexpr-bearing SubPlans stay loud.
+//! subselect.c: initplans, the pull_up_sublinks transform (prepjointree.c),
+//! and the regular SubPlan lane — make_subplan/build_subplan for correlated
+//! and testexpr-bearing EXISTS/EXPR/ANY/ALL sublinks, hashed-ANY selection,
+//! SS_replace_correlation_vars, and finalize's SubPlan legs.
+//! MULTIEXPR/ROWCOMPARE/ARRAY/CTE-expression arms and the
+//! convert_EXISTS_to_ANY AlternativeSubPlan lane are loud.
 
 use clauses::NodeWalker;
 use mcx::Mcx;
@@ -677,27 +680,66 @@ pub fn ss_process_sublinks<'mcx>(
     Ok(process_sublinks_mutator(run, expr, is_qual)?.unwrap_or(expr))
 }
 
-// C's AND/OR-flatness arms are unreachable: BoolExpr panicked upstream in
-// eval_const_expressions/canonicalize_qual.
 fn process_sublinks_mutator<'mcx>(
     run: &mut PlannerRun<'mcx>,
     node: Node<'mcx>,
     is_top_qual: bool,
 ) -> PgResult<Option<Node<'mcx>>> {
+    let mcx = run.mcx;
     if node.node_tag() == NodeTag::T_SubLink {
         let sl = node.as_sub_link().unwrap();
-        assert!(
-            sl.testexpr.is_none(),
-            "make_subplan (subselect.c): testexpr-bearing {:?} SubPlan (hashed/linear \
-             subplan execution) unported — NOT IN and un-pulled-up ANY stay loud",
-            sl.subLinkType
-        );
-        return Ok(Some(make_subplan(run, sl, is_top_qual)?));
+        // The lefthand side is no longer at qual top level.
+        let testexpr = match sl.testexpr {
+            None => None,
+            Some(te) => Some(process_sublinks_mutator(run, te, false)?.unwrap_or(te)),
+        };
+        return Ok(Some(make_subplan(run, sl, testexpr, is_top_qual)?));
+    }
+    if let Some(a) = node.as_aggref() {
+        if a.agglevelsup > 0 {
+            panic!("process_sublinks_mutator (subselect.c): uplevel Aggref; agg lane");
+        }
     }
     debug_assert!(!matches!(
         node.node_tag(),
         NodeTag::T_SubPlan | NodeTag::T_AlternativeSubPlan | NodeTag::T_Query
     ));
+    // AND/OR flatness is preserved and isTopQual propagates through them
+    // (NULL and FALSE are interchangeable anywhere in the top AND/OR shell).
+    if let Some(b) = node.as_bool_expr() {
+        use types_nodes::BoolExprType;
+        if matches!(b.boolop, BoolExprType::AND_EXPR | BoolExprType::OR_EXPR) {
+            let is_and = b.boolop == BoolExprType::AND_EXPR;
+            let mut newargs = NodeList::nil();
+            for arg in &b.args {
+                let newarg = process_sublinks_mutator(run, arg, is_top_qual)?.unwrap_or(arg);
+                let flat = match newarg.as_bool_expr() {
+                    Some(nb) if nb.boolop == b.boolop => Some(&nb.args),
+                    _ => None,
+                };
+                match flat {
+                    Some(args) => {
+                        for a in args {
+                            newargs.lappend(mcx, a)?;
+                        }
+                    }
+                    None => newargs.lappend(mcx, newarg)?,
+                }
+            }
+            return Ok(Some(Node::mk(
+                mcx,
+                types_nodes::primnodes::BoolExpr {
+                    boolop: if is_and {
+                        BoolExprType::AND_EXPR
+                    } else {
+                        BoolExprType::OR_EXPR
+                    },
+                    args: newargs,
+                    location: -1,
+                },
+            )?));
+        }
+    }
     clauses::expression_tree_mutator(run.mcx, node, &mut |n| {
         process_sublinks_mutator(run, n, false)
     })
@@ -709,6 +751,7 @@ fn process_sublinks_mutator<'mcx>(
 fn make_subplan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     sublink: &SubLink<'mcx>,
+    testexpr: Option<Node<'mcx>>,
     is_top_qual: bool,
 ) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
@@ -718,14 +761,16 @@ fn make_subplan<'mcx>(
         .expect("make_subplan on an untransformed sublink");
     let mut subquery = query_cells_copy(mcx, orig)?;
 
+    let mut simple_exists = false;
     let tuple_fraction = match sublink.subLinkType {
         SubLinkType::EXISTS_SUBLINK => {
-            simplify_exists_query(run, &mut subquery)?;
+            simple_exists = simplify_exists_query(run, &mut subquery)?;
             1.0
         }
+        SubLinkType::ANY_SUBLINK | SubLinkType::ALL_SUBLINK => 0.5,
         SubLinkType::EXPR_SUBLINK => 0.0,
         other => panic!(
-            "make_subplan (subselect.c): {other:?} sublink; M2 sublink lane"
+            "make_subplan (subselect.c): {other:?} sublink not ported"
         ),
     };
 
@@ -737,69 +782,567 @@ fn make_subplan<'mcx>(
     let best_path = get_cheapest_fractional_path(run, final_rel, tuple_fraction);
     let plan = create_plan(run, best_path)?;
     run.pop_root_to_subroot();
-    // Correlated references park plan_params on the parent root (loud upstream).
-    debug_assert!(run.root.plan_params.is_empty());
+    // Isolate the params this subplan needs from the current level.
+    let plan_params = core::mem::replace(&mut run.root.plan_params, mcx::PgVec::new_in(mcx));
 
-    build_subplan(run, plan, sublink.subLinkType, is_top_qual)
+    let result = build_subplan(
+        run,
+        plan,
+        plan_params,
+        sublink.subLinkType,
+        testexpr,
+        IntList::nil(),
+        is_top_qual,
+    )?;
+
+    if simple_exists && result.node_tag() == NodeTag::T_SubPlan {
+        let mut subquery = query_cells_copy(mcx, orig)?;
+        let ok = simplify_exists_query(run, &mut subquery)?;
+        debug_assert!(ok);
+        if let Some((subquery, newtestexpr, param_ids)) =
+            convert_exists_to_any(run, subquery)?
+        {
+            run.push_root()?;
+            crate::subquery::subquery_planner(run, subquery, 0.0, None)?;
+            let final_rel = fetch_final_rel(run);
+            let best_path = get_cheapest_fractional_path(run, final_rel, 0.0);
+            let hashable = {
+                let path = run.root.path(best_path).base();
+                let width = run
+                    .root
+                    .pathtarget(path.pathtarget_id.expect("path has a target"))
+                    .width;
+                path.rows * (maxalign(width as usize) + maxalign(SIZEOF_HEAPTUPLEHEADER)) as f64
+                    <= get_hash_memory_limit()
+            };
+            if hashable {
+                let plan = create_plan(run, best_path)?;
+                run.pop_root_to_subroot();
+                let plan_params =
+                    core::mem::replace(&mut run.root.plan_params, mcx::PgVec::new_in(mcx));
+                debug_assert!(plan_params.is_empty());
+                let hashplan = build_subplan(
+                    run,
+                    plan,
+                    plan_params,
+                    SubLinkType::ANY_SUBLINK,
+                    Some(newtestexpr),
+                    param_ids,
+                    true,
+                )?;
+                let hsp = hashplan.as_sub_plan().expect("build_subplan yields a SubPlan");
+                debug_assert!(hsp.parParam.is_nil() && hsp.useHashTable);
+                let asplan = Node::mk(
+                    mcx,
+                    types_nodes::primnodes::AlternativeSubPlan {
+                        subplans: NodeList::make2(mcx, result, hashplan)?,
+                    },
+                )?;
+                run.root.hasAlternativeSubPlans = true;
+                run.glob.has_alternative_subplans = true;
+                return Ok(asplan);
+            }
+            // Not hashable: abandon the twin. C never planned it (path-level
+            // check before create_plan); the extra subroot never registers.
+            run.pop_root_discard();
+        }
+    }
+    Ok(result)
 }
 
-// build_subplan (subselect.c), parParam==NIL EXISTS/EXPR initplan arms only.
+fn convert_exists_to_any<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    mut subselect: Query<'mcx>,
+) -> PgResult<Option<(Query<'mcx>, Node<'mcx>, IntList<'mcx>)>> {
+    let mcx = run.mcx;
+    debug_assert!(subselect.targetList.is_nil());
+    let jt = subselect.jointree.expect("jointree is a FromExpr");
+    let Some(where_clause) = jt.quals else { return Ok(None) };
+    subselect.jointree = Some(mcx::alloc_leak_in(
+        mcx,
+        FromExpr { fromlist: jt.fromlist.clone_in(mcx)?, quals: None },
+    )?);
+    let sub_node = Node::mk(mcx, query_cells_copy(mcx, &subselect)?)?;
+    if vars::contain_vars_of_level(sub_node, 1)? {
+        return Ok(None);
+    }
+    if clauses::contain_volatile_functions(where_clause)? {
+        return Ok(None);
+    }
+    let where_clause = clauses::eval_const_expressions_with_params(
+        mcx,
+        where_clause,
+        run.glob.bound_params,
+    )?;
+    let where_clause = crate::prepqual::canonicalize_qual(mcx, where_clause, false)?;
+    let clauses_list = clauses::make_ands_implicit(mcx, Some(where_clause))?;
+
+    let mut leftargs: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+    let mut rightargs: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+    let mut opids: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(mcx);
+    let mut opcollations: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(mcx);
+    let mut newwhere = NodeList::nil();
+    'clause: for cl in &clauses_list {
+        if let Some(expr) = cl.as_op_expr() {
+            if hash_ok_operator(expr)? {
+                let leftarg = expr.args.nth(0);
+                let rightarg = expr.args.nth(1);
+                if vars::contain_vars_of_level(leftarg, 1)? {
+                    leftargs.push(leftarg);
+                    rightargs.push(rightarg);
+                    opids.push(expr.opno);
+                    opcollations.push(expr.inputcollid);
+                    continue 'clause;
+                }
+                if vars::contain_vars_of_level(rightarg, 1)? {
+                    let comm = lsyscache::get_commutator(expr.opno)?;
+                    if comm != 0 {
+                        let commuted = types_nodes::primnodes::OpExpr {
+                            opno: comm,
+                            args: expr.args.clone_in(mcx)?,
+                            ..*expr
+                        };
+                        if hash_ok_operator(&commuted)? {
+                            leftargs.push(rightarg);
+                            rightargs.push(leftarg);
+                            opids.push(comm);
+                            opcollations.push(expr.inputcollid);
+                            continue 'clause;
+                        }
+                    }
+                    return Ok(None);
+                }
+            }
+        }
+        newwhere.lappend(mcx, cl)?;
+    }
+    if leftargs.is_empty() {
+        return Ok(None);
+    }
+    for n in newwhere.iter().chain(rightargs.iter().copied()) {
+        if vars::contain_vars_of_level(n, 1)? {
+            return Ok(None);
+        }
+        if run.parse().hasAggs && contain_aggs_of_level(n, 1)? {
+            return Ok(None);
+        }
+    }
+    for n in leftargs.iter() {
+        if vars::contain_vars_of_level(*n, 0)? {
+            return Ok(None);
+        }
+        if clauses::contain_subplans(*n)? {
+            return Ok(None);
+        }
+    }
+
+    // IncrementVarSublevelsUp(-1, 1) over the pulled-up left args.
+    let mut pulled: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+    for n in leftargs.iter() {
+        pulled.push(decrement_sublevels(mcx, *n)?);
+    }
+
+    if !newwhere.is_nil() {
+        let quals = if newwhere.len() == 1 {
+            newwhere.nth(0)
+        } else {
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::BoolExpr {
+                    boolop: types_nodes::BoolExprType::AND_EXPR,
+                    args: newwhere,
+                    location: -1,
+                },
+            )?
+        };
+        let jt = subselect.jointree.expect("jointree is a FromExpr");
+        subselect.jointree = Some(mcx::alloc_leak_in(
+            mcx,
+            FromExpr { fromlist: jt.fromlist.clone_in(mcx)?, quals: Some(quals) },
+        )?);
+    }
+
+    let mut tlist = NodeList::nil();
+    let mut testlist = NodeList::nil();
+    let mut param_ids = IntList::nil();
+    for (i, rightarg) in rightargs.iter().enumerate() {
+        let (ty, tm) = crate::costsize::expr_type_typmod(*rightarg);
+        let (prm, prm_node) =
+            generate_new_exec_param(run, ty, tm, crate::pathkeys::expr_collation(*rightarg))?;
+        tlist.lappend(
+            mcx,
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::TargetEntry {
+                    expr: *rightarg,
+                    resno: (i + 1) as i16,
+                    resname: None,
+                    ressortgroupref: 0,
+                    resorigtbl: 0,
+                    resorigcol: 0,
+                    resjunk: false,
+                },
+            )?,
+        )?;
+        // make_opclause; opfuncid resolved now (C leaves InvalidOid for
+        // setrefs' set_opfuncid — same value either way).
+        testlist.lappend(
+            mcx,
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::OpExpr {
+                    opno: opids[i],
+                    opfuncid: lsyscache::get_opcode(opids[i])?,
+                    opresulttype: BOOLOID,
+                    opretset: false,
+                    opcollid: 0,
+                    inputcollid: opcollations[i],
+                    args: NodeList::make2(mcx, pulled[i], prm_node)?,
+                    location: -1,
+                },
+            )?,
+        )?;
+        param_ids.lappend(mcx, prm.paramid)?;
+    }
+    subselect.targetList = tlist;
+    let testexpr = if testlist.len() == 1 {
+        testlist.nth(0)
+    } else {
+        Node::mk(
+            mcx,
+            types_nodes::primnodes::BoolExpr {
+                boolop: types_nodes::BoolExprType::AND_EXPR,
+                args: testlist,
+                location: -1,
+            },
+        )?
+    };
+    Ok(Some((subselect, testexpr, param_ids)))
+}
+
+fn decrement_sublevels<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>> {
+    fn mutate<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Option<Node<'mcx>>> {
+        if let Some(v) = node.as_var() {
+            if v.varlevelsup >= 1 {
+                return Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::primnodes::Var {
+                        varlevelsup: v.varlevelsup - 1,
+                        varnullingrels: v.varnullingrels.clone_in(mcx)?,
+                        ..*v
+                    },
+                )?));
+            }
+            return Ok(None);
+        }
+        if let Some(a) = node.as_aggref() {
+            if a.agglevelsup >= 1 {
+                panic!("IncrementVarSublevelsUp (rewriteManip.c): uplevel Aggref not ported");
+            }
+        }
+        clauses::expression_tree_mutator(mcx, node, &mut |n| mutate(mcx, n))
+    }
+    Ok(mutate(mcx, node)?.unwrap_or(node))
+}
+
+struct ContainAggsOfLevel(i32, bool);
+impl<'mcx> clauses::NodeWalker<'mcx> for ContainAggsOfLevel {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        if let Some(a) = node.as_aggref() {
+            if a.agglevelsup as i32 == self.0 {
+                self.1 = true;
+                return Ok(true);
+            }
+        }
+        clauses::expression_tree_walker(node, self)
+    }
+}
+
+fn contain_aggs_of_level(node: Node<'_>, level: i32) -> PgResult<bool> {
+    let mut w = ContainAggsOfLevel(level, false);
+    w.visit(node)?;
+    Ok(w.1)
+}
+
+
+
+// build_subplan (subselect.c). MULTIEXPR/ROWCOMPARE/ARRAY arms are loud.
 fn build_subplan<'mcx>(
     run: &mut PlannerRun<'mcx>,
-    plan: Node<'mcx>,
+    mut plan: Node<'mcx>,
+    plan_params: mcx::PgVec<'mcx, types_pathnodes::NodeId>,
     sub_link_type: SubLinkType,
+    testexpr: Option<Node<'mcx>>,
+    testexpr_paramids: IntList<'mcx>,
     unknown_eq_false: bool,
 ) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
     let (first_col_type, first_col_typmod, first_col_collation) = get_first_col_type(plan);
     let parallel_safe = plan.as_plan().expect("plan node").parallel_safe;
 
-    let (prm, prm_node) = match sub_link_type {
-        SubLinkType::EXISTS_SUBLINK => generate_new_exec_param(run, BOOLOID, -1, 0)?,
-        SubLinkType::EXPR_SUBLINK => {
-            let te = plan
-                .as_plan()
-                .unwrap()
-                .targetlist
-                .first()
-                .expect("EXPR subplan tlist")
-                .as_target_entry()
-                .expect("tlist entry");
-            debug_assert!(!te.resjunk);
-            let (ty, tm) = crate::costsize::expr_type_typmod(te.expr);
-            generate_new_exec_param(run, ty, tm, crate::pathkeys::expr_collation(te.expr))?
-        }
-        other => panic!("build_subplan (subselect.c): {other:?}; M2 sublink lane"),
-    };
-
-    run.glob.subplans.lappend(mcx, plan)?;
-    let plan_id = run.glob.subplans.len() as i32;
-    debug_assert_eq!(run.subroots.len(), run.glob.subplans.len());
+    let mut par_param = IntList::nil();
+    let mut args = NodeList::nil();
+    for &ppid in plan_params.iter() {
+        let pitem = *run.root.planner_param_item(ppid);
+        let arg = *run.root.expr_node(pitem.item);
+        // Vars only: replace_outer_var is the sole plan_params writer here
+        // (PHV/Aggref/GroupingFunc/Returning replacement legs are loud).
+        debug_assert!(arg.as_var().is_some());
+        par_param.lappend(mcx, pitem.paramId)?;
+        args.lappend(mcx, arg)?;
+    }
 
     let mut splan = SubPlan {
         subLinkType: sub_link_type,
         testexpr: None,
         paramIds: IntList::nil(),
-        plan_id,
-        plan_name: Some(str_in(mcx, &format!("InitPlan {plan_id}"))?),
+        plan_id: 0,
+        plan_name: None,
         firstColType: first_col_type,
         firstColTypmod: first_col_typmod,
         firstColCollation: first_col_collation,
         useHashTable: false,
         unknownEqFalse: unknown_eq_false,
         parallel_safe,
-        setParam: IntList::make1(mcx, prm.paramid)?,
-        parParam: IntList::nil(),
-        args: NodeList::nil(),
+        setParam: IntList::nil(),
+        parParam: par_param,
+        args,
         startup_cost: 0.0,
         per_call_cost: 0.0,
     };
-    cost_subplan(&mut splan, plan);
-    let splan_node = Node::mk(mcx, splan)?;
-    let splan_id = run.intern_expr(splan_node);
-    run.root.init_plans.push(splan_id);
 
-    Ok(prm_node)
+    let mut is_init_plan = false;
+    let mut result: Option<Node<'mcx>> = None;
+    if splan.parParam.is_nil() && sub_link_type == SubLinkType::EXISTS_SUBLINK {
+        debug_assert!(testexpr.is_none());
+        let (prm, prm_node) = generate_new_exec_param(run, BOOLOID, -1, 0)?;
+        splan.setParam = IntList::make1(mcx, prm.paramid)?;
+        is_init_plan = true;
+        result = Some(prm_node);
+    } else if splan.parParam.is_nil() && sub_link_type == SubLinkType::EXPR_SUBLINK {
+        let te = plan
+            .as_plan()
+            .unwrap()
+            .targetlist
+            .first()
+            .expect("EXPR subplan tlist")
+            .as_target_entry()
+            .expect("tlist entry");
+        debug_assert!(!te.resjunk);
+        debug_assert!(testexpr.is_none());
+        let (ty, tm) = crate::costsize::expr_type_typmod(te.expr);
+        let (prm, prm_node) =
+            generate_new_exec_param(run, ty, tm, crate::pathkeys::expr_collation(te.expr))?;
+        splan.setParam = IntList::make1(mcx, prm.paramid)?;
+        is_init_plan = true;
+        result = Some(prm_node);
+    } else if matches!(
+        sub_link_type,
+        SubLinkType::ARRAY_SUBLINK | SubLinkType::ROWCOMPARE_SUBLINK | SubLinkType::MULTIEXPR_SUBLINK
+    ) {
+        panic!("build_subplan (subselect.c): {sub_link_type:?} not ported");
+    } else {
+        // Regular SubPlan: rewrite the testexpr's PARAM_SUBLINK Params into
+        // fresh PARAM_EXEC output params.
+        if let Some(te) = testexpr {
+            if testexpr_paramids.is_nil() {
+                let (params, param_ids) =
+                    generate_subquery_params(run, &plan.as_plan().unwrap().targetlist)?;
+                splan.testexpr = Some(convert_testexpr(mcx, te, &params)?);
+                splan.paramIds = param_ids;
+            } else {
+                splan.testexpr = Some(te);
+                splan.paramIds = testexpr_paramids;
+            }
+        }
+        if sub_link_type == SubLinkType::ANY_SUBLINK
+            && splan.parParam.is_nil()
+            && subplan_is_hashable(plan)
+            && testexpr_is_hashable(splan.testexpr.expect("ANY testexpr"), &splan.paramIds)?
+        {
+            splan.useHashTable = true;
+        } else if splan.parParam.is_nil()
+            && guc_tables::vars::enable_material.read()
+            && !exec_materializes_output(plan.node_tag())
+        {
+            plan = materialize_finished_plan(mcx, plan)?;
+        }
+        is_init_plan = false;
+    }
+
+    run.glob.subplans.lappend(mcx, plan)?;
+    let plan_id = run.glob.subplans.len() as i32;
+    debug_assert_eq!(run.subroots.len(), run.glob.subplans.len());
+    splan.plan_id = plan_id;
+
+    if !is_init_plan && splan.parParam.is_nil() && !splan.useHashTable {
+        run.glob.rewind_plan_ids.add_member(mcx, plan_id)?;
+    }
+    splan.plan_name = Some(str_in(
+        mcx,
+        &format!("{} {plan_id}", if is_init_plan { "InitPlan" } else { "SubPlan" }),
+    )?);
+    cost_subplan(&mut splan, plan)?;
+    let splan_node = Node::mk(mcx, splan)?;
+    if is_init_plan {
+        let splan_id = run.intern_expr(splan_node);
+        run.root.init_plans.push(splan_id);
+        Ok(result.expect("initplan replacement expression"))
+    } else {
+        Ok(splan_node)
+    }
+}
+
+fn generate_subquery_params<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    tlist: &NodeList<'mcx>,
+) -> PgResult<(mcx::PgVec<'mcx, Node<'mcx>>, IntList<'mcx>)> {
+    let mut params: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(run.mcx);
+    let mut ids = IntList::nil();
+    for te_node in tlist {
+        let te = te_node.as_target_entry().expect("tlist entry");
+        if te.resjunk {
+            continue;
+        }
+        let (ty, tm) = crate::costsize::expr_type_typmod(te.expr);
+        let (prm, prm_node) =
+            generate_new_exec_param(run, ty, tm, crate::pathkeys::expr_collation(te.expr))?;
+        params.push(prm_node);
+        ids.lappend(run.mcx, prm.paramid)?;
+    }
+    Ok((params, ids))
+}
+
+fn subplan_is_hashable(plan: Node<'_>) -> bool {
+    let p = plan.as_plan().expect("plan node");
+    let subquery_size =
+        p.plan_rows * (maxalign(p.plan_width as usize) + maxalign(SIZEOF_HEAPTUPLEHEADER)) as f64;
+    subquery_size <= get_hash_memory_limit()
+}
+
+fn get_hash_memory_limit() -> f64 {
+    let work_mem = init_small::globals::work_mem() as f64;
+    let mult = guc_tables::vars::hash_mem_multiplier.read();
+    work_mem * mult * 1024.0
+}
+
+// SizeofHeapTupleHeader (htup_details.h): offsetof(HeapTupleHeaderData, t_bits).
+const SIZEOF_HEAPTUPLEHEADER: usize = 23;
+
+const fn maxalign(n: usize) -> usize {
+    (n + 7) & !7
+}
+
+fn testexpr_is_hashable<'mcx>(testexpr: Node<'mcx>, param_ids: &IntList<'mcx>) -> PgResult<bool> {
+    if let Some(op) = testexpr.as_op_expr() {
+        return test_opexpr_is_hashable(op, param_ids);
+    }
+    if let Some(b) = testexpr.as_bool_expr() {
+        if b.boolop == types_nodes::BoolExprType::AND_EXPR {
+            for arg in &b.args {
+                let Some(op) = arg.as_op_expr() else { return Ok(false) };
+                if !test_opexpr_is_hashable(op, param_ids)? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn test_opexpr_is_hashable<'mcx>(
+    op: &types_nodes::primnodes::OpExpr<'mcx>,
+    param_ids: &IntList<'mcx>,
+) -> PgResult<bool> {
+    if !hash_ok_operator(op)? {
+        return Ok(false);
+    }
+    if op.args.len() != 2 {
+        return Ok(false);
+    }
+    if contain_exec_param(op.args.nth(0), param_ids)? {
+        return Ok(false);
+    }
+    if vars::contain_var_clause(op.args.nth(1))? {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+struct ContainExecParam<'a, 'mcx>(&'a IntList<'mcx>, bool);
+impl<'a, 'mcx> clauses::NodeWalker<'mcx> for ContainExecParam<'a, 'mcx> {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        if let Some(p) = node.as_param() {
+            if p.paramkind == ParamKind::PARAM_EXEC && self.0.iter().any(|id| id == p.paramid) {
+                self.1 = true;
+                return Ok(true);
+            }
+        }
+        clauses::expression_tree_walker(node, self)
+    }
+}
+
+fn contain_exec_param<'mcx>(node: Node<'mcx>, ids: &IntList<'mcx>) -> PgResult<bool> {
+    let mut w = ContainExecParam(ids, false);
+    w.visit(node)?;
+    Ok(w.1)
+}
+
+// hash_ok_operator (subselect.c): hashable + strict. ARRAY_EQ/RECORD_EQ take
+// the input-type-sensitive check.
+fn hash_ok_operator(expr: &types_nodes::primnodes::OpExpr<'_>) -> PgResult<bool> {
+    const ARRAY_EQ_OP: types_core::Oid = 1070;
+    const RECORD_EQ_OP: types_core::Oid = 2988;
+    let opid = expr.opno;
+    if expr.args.len() != 2 {
+        return Ok(false);
+    }
+    if opid == ARRAY_EQ_OP || opid == RECORD_EQ_OP {
+        let (lty, _) = crate::costsize::expr_type_typmod(expr.args.nth(0));
+        return lsyscache::op_hashjoinable(opid, lty);
+    }
+    if !lsyscache::op_hashjoinable(opid, 0)? {
+        return Ok(false);
+    }
+    lsyscache::func_strict(lsyscache::get_opcode(opid)?)
+}
+
+// materialize_finished_plan (createplan.c) + cost_material (costsize.c):
+// Material shield so repeated rescans of an uncorrelated subplan are cheap.
+fn materialize_finished_plan<'mcx>(mcx: Mcx<'mcx>, subplan: Node<'mcx>) -> PgResult<Node<'mcx>> {
+    let sub = subplan.as_plan().expect("plan node");
+    assert!(
+        sub.initPlan.is_nil(),
+        "materialize_finished_plan (createplan.c): initPlan hoist not ported"
+    );
+    let mut tlist = NodeList::nil();
+    for te in &sub.targetlist {
+        tlist.lappend(mcx, te)?;
+    }
+    let mut plan = Node::build::<types_nodes::plannodes::Material>(mcx)?;
+    plan.plan.targetlist = tlist;
+    plan.plan.qual = NodeList::nil();
+    plan.plan.lefttree = Some(subplan);
+    plan.plan.righttree = None;
+
+    // cost_material's arithmetic, inline (no Path here).
+    let startup_cost = sub.startup_cost;
+    let mut run_cost = sub.total_cost - sub.startup_cost;
+    run_cost += 2.0 * crate::gucs::cpu_operator_cost() * sub.plan_rows;
+    let nbytes = crate::costsize::relation_byte_size(sub.plan_rows, sub.plan_width);
+    let work_mem_bytes = init_small::globals::work_mem() as f64 * 1024.0;
+    if nbytes > work_mem_bytes {
+        let npages = (nbytes / 8192.0).ceil();
+        run_cost += crate::gucs::seq_page_cost() * npages;
+    }
+    plan.plan.startup_cost = startup_cost;
+    plan.plan.total_cost = startup_cost + run_cost;
+    plan.plan.plan_rows = sub.plan_rows;
+    plan.plan.plan_width = sub.plan_width;
+    plan.plan.parallel_aware = false;
+    plan.plan.parallel_safe = sub.parallel_safe;
+    Ok(plan.seal())
 }
 
 /// generate_new_exec_param (paramassign.c).
@@ -833,28 +1376,44 @@ pub(crate) fn get_first_col_type(plan: Node<'_>) -> (types_core::Oid, i32, types
     (VOIDOID, -1, 0)
 }
 
-// cost_subplan (costsize.c), initplan slice (NULL testexpr: qual costs drop out).
-pub(crate) fn cost_subplan<'mcx>(splan: &mut SubPlan<'mcx>, plan: Node<'mcx>) {
+// cost_subplan (costsize.c). The testexpr qual cost is computed root-less,
+// as C (NULL root).
+pub(crate) fn cost_subplan<'mcx>(
+    splan: &mut SubPlan<'mcx>,
+    plan: Node<'mcx>,
+) -> PgResult<()> {
     let p = plan.as_plan().expect("plan node");
-    let mut startup = 0.0;
-    let mut per_tuple = 0.0;
-    let plan_run_cost = p.total_cost - p.startup_cost;
-    match splan.subLinkType {
-        SubLinkType::EXISTS_SUBLINK => {
-            per_tuple += plan_run_cost / crate::costsize::clamp_row_est(p.plan_rows);
-        }
-        SubLinkType::ALL_SUBLINK | SubLinkType::ANY_SUBLINK => {
-            unreachable!("ALL/ANY subplans are loud upstream")
-        }
-        _ => per_tuple += plan_run_cost,
-    }
-    if splan.parParam.is_nil() && exec_materializes_output(plan.node_tag()) {
-        startup += p.startup_cost;
+    // cost_qual_eval's walker charges nothing for the AND shell itself, so
+    // walking the testexpr whole equals C's implicit-AND list walk.
+    let cost = match splan.testexpr {
+        Some(te) => crate::costsize::cost_qual_eval_node(te)?,
+        None => Default::default(),
+    };
+    let mut startup = cost.startup;
+    let mut per_tuple = cost.per_tuple;
+    if splan.useHashTable {
+        startup += p.total_cost + crate::gucs::cpu_operator_cost() * p.plan_rows;
     } else {
-        per_tuple += p.startup_cost;
+        let plan_run_cost = p.total_cost - p.startup_cost;
+        match splan.subLinkType {
+            SubLinkType::EXISTS_SUBLINK => {
+                per_tuple += plan_run_cost / crate::costsize::clamp_row_est(p.plan_rows);
+            }
+            SubLinkType::ALL_SUBLINK | SubLinkType::ANY_SUBLINK => {
+                per_tuple += 0.5 * plan_run_cost;
+                per_tuple += 0.5 * p.plan_rows * crate::gucs::cpu_operator_cost();
+            }
+            _ => per_tuple += plan_run_cost,
+        }
+        if splan.parParam.is_nil() && exec_materializes_output(plan.node_tag()) {
+            startup += p.startup_cost;
+        } else {
+            per_tuple += p.startup_cost;
+        }
     }
     splan.startup_cost = startup;
     splan.per_call_cost = per_tuple;
+    Ok(())
 }
 
 // ExecMaterializesOutput (execAmi.c) over the ported node set.
@@ -956,33 +1515,34 @@ pub(crate) fn query_cells_copy<'mcx>(mcx: Mcx<'mcx>, q: &Query<'mcx>) -> PgResul
     })
 }
 
-/// SS_replace_correlation_vars (subselect.c): the uncorrelated lane proves no
-/// uplevel Var exists (replace_outer_var parks correlation on the parent's
-/// plan_params — M2 correlated-subquery lane).
-pub fn ss_replace_correlation_vars<'mcx>(expr: Node<'mcx>) -> PgResult<Node<'mcx>> {
-    if contains_uplevel_var(expr)? {
-        panic!("replace_outer_var (paramassign.c): correlated subquery; M2 sublink lane");
-    }
-    Ok(expr)
+/// SS_replace_correlation_vars (subselect.c): uplevel Vars become PARAM_EXEC
+/// Params, parked on the owning ancestor's plan_params. Uplevel PHV/Aggref/
+/// GroupingFunc/MergeSupport/Returning replacement legs are loud.
+pub fn ss_replace_correlation_vars<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    Ok(replace_correlation_vars_mutator(run, expr)?.unwrap_or(expr))
 }
 
-struct ContainsUplevel;
-impl<'mcx> clauses::NodeWalker<'mcx> for ContainsUplevel {
-    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
-        if let Some(v) = node.as_var() {
-            return Ok(v.varlevelsup > 0);
+fn replace_correlation_vars_mutator<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    node: Node<'mcx>,
+) -> PgResult<Option<Node<'mcx>>> {
+    if let Some(v) = node.as_var() {
+        if v.varlevelsup > 0 {
+            return Ok(Some(crate::paramassign::replace_outer_var(run, v)?));
         }
-        if let Some(a) = node.as_aggref() {
-            if a.agglevelsup > 0 {
-                panic!("replace_outer_agg (paramassign.c): uplevel Aggref; M2 sublink lane");
-            }
-        }
-        clauses::expression_tree_walker(node, self)
+        return Ok(None);
     }
-}
-
-fn contains_uplevel_var(expr: Node<'_>) -> PgResult<bool> {
-    ContainsUplevel.visit(expr)
+    if let Some(a) = node.as_aggref() {
+        if a.agglevelsup > 0 {
+            panic!("replace_outer_agg (paramassign.c): uplevel Aggref not ported");
+        }
+    }
+    clauses::expression_tree_mutator(run.mcx, node, &mut |n| {
+        replace_correlation_vars_mutator(run, n)
+    })
 }
 
 /// SS_charge_for_initplans (subselect.c).
@@ -1232,8 +1792,26 @@ impl<'a, 'mcx> clauses::NodeWalker<'mcx> for FinalizePrimnode<'a, 'mcx> {
             }
             return Ok(false);
         }
-        if node.node_tag() == NodeTag::T_SubPlan {
-            panic!("finalize_primnode (subselect.c): in-expression SubPlan; M2 sublink lane");
+        if let Some(sp) = node.as_sub_plan() {
+            let plan = self.run.glob.subplans.nth((sp.plan_id - 1) as usize);
+            if let Some(te) = sp.testexpr {
+                self.visit(te)?;
+            }
+            // Output params of this subplan aren't change signals: it is
+            // re-evaluated per call anyway.
+            for id in sp.paramIds.iter() {
+                self.paramids.del_member(id);
+            }
+            for arg in &sp.args {
+                self.visit(arg)?;
+            }
+            let mut subparamids =
+                plan.as_plan().expect("plan node").extParam.clone_in(self.run.mcx)?;
+            for id in sp.parParam.iter() {
+                subparamids.del_member(id);
+            }
+            self.paramids.add_members(self.run.mcx, &subparamids)?;
+            return Ok(false);
         }
         clauses::expression_tree_walker(node, self)
     }

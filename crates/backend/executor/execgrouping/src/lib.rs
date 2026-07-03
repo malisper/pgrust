@@ -305,6 +305,36 @@ impl<'mcx> TupleHashTable<'mcx> {
         Ok((Some(ix), true))
     }
 
+    /// C `FindTupleHashEntry`: find-only probe with a caller-supplied
+    /// (potentially cross-type) equality; the hash must come from the
+    /// caller's own input-side hash functions.
+    pub fn find_entry_with(
+        &self,
+        hash: u32,
+        mut eq: impl FnMut(u32) -> PgResult<bool>,
+    ) -> PgResult<Option<u32>> {
+        let mut eq_err: Option<Box<PgError>> = None;
+        let found = self
+            .hashtab
+            .find(hash as u64, |ix: &u32| {
+                if self.entries[*ix as usize].hash != hash {
+                    return false;
+                }
+                match eq(*ix) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eq_err = Some(e);
+                        false
+                    }
+                }
+            })
+            .copied();
+        if let Some(e) = eq_err {
+            return Err(e);
+        }
+        Ok(found)
+    }
+
     #[inline]
     pub fn num_entries(&self) -> usize {
         self.entries.len()

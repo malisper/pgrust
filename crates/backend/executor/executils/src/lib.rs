@@ -60,6 +60,15 @@ pub type CteProcHook = for<'a, 'mcx> unsafe fn(
     &'a mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>>;
 
+pub type SubplanInitHook =
+    for<'x> unsafe fn(core::ptr::NonNull<()>, types_nodes::Node<'x>) -> PgResult<core::ptr::NonNull<()>>;
+
+pub type SubplanEvalHook = for<'a, 'mcx> unsafe fn(
+    core::ptr::NonNull<()>,
+    &'a mut EStateData<'mcx>,
+    EcxtId,
+) -> PgResult<::datum::NullableDatum>;
+
 /// C's CteScanState leader fields (cte_table/eof_cte), hoisted to the estate
 /// keyed by cteParam: the leader/follower alias becomes an owned entry.
 pub struct CteShared {
@@ -92,6 +101,124 @@ fn exec_set_param_plan(estate: &mut EStateData<'_>, pid: u32) -> PgResult<()> {
         .expect("pending PARAM_EXEC before execmain installed the subplan hook");
     // SAFETY: cell installed by execmain's ExecInitSubPlan on this estate.
     unsafe { hook(sstate.0, estate) }
+}
+
+pub fn with_subplan_compile_env<'mcx, R>(
+    estate: &mut EStateData<'mcx>,
+    f: impl FnOnce(Option<execexpr::SubplanCompileEnv>) -> R,
+) -> R {
+    let env = estate.es_subplan_init_hook.map(|init| execexpr::SubplanCompileEnv {
+        estate: core::ptr::NonNull::from(&mut *estate).cast(),
+        init,
+    });
+    f(env)
+}
+
+pub fn with_ecxt_eval_slots<'mcx, R>(
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+    result: Option<ExecSlotId>,
+    f: impl FnOnce(&mut execexpr::EvalSlots<'_, 'mcx>, Option<&mut SlotData<'mcx>>, Mcx<'mcx>) -> PgResult<R>,
+) -> PgResult<R> {
+    let mcx = estate.es_query_cxt;
+    let (scan, inner, outer) = {
+        let e = estate.ecxt(ecxt);
+        (e.ecxt_scantuple, e.ecxt_innertuple, e.ecxt_outertuple)
+    };
+    let table: &mut [SlotData<'mcx>] = &mut estate.es_tupleTable;
+    let ids = [scan, inner, outer, result];
+    for (i, id) in ids.iter().enumerate() {
+        if let Some(a) = id {
+            assert!((a.0 as usize) < table.len(), "slot id out of range");
+            for later in &ids[i + 1..] {
+                assert!(Some(*a) != *later, "aliased slot ids in expression eval");
+            }
+        }
+    }
+    let base = table.as_mut_ptr();
+    // SAFETY: indices bounds-checked and pairwise-distinct above, so the four
+    // derived &mut are disjoint elements of one live slice.
+    let get = |id: Option<ExecSlotId>| id.map(|i| unsafe { &mut *base.add(i.0 as usize) });
+    let mut slots =
+        execexpr::EvalSlots { scan: get(scan), inner: get(inner), outer: get(outer) };
+    f(&mut slots, get(result), mcx)
+}
+
+#[cold]
+#[inline(never)]
+fn run_subplan_eval_hook<'mcx>(
+    sstate: core::ptr::NonNull<()>,
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+) -> PgResult<::datum::NullableDatum> {
+    let hook = estate
+        .es_subplan_eval_hook
+        .expect("SubPlan step before execmain installed the eval hook");
+    // SAFETY: sstate was installed by execmain's ExecInitSubPlan on this estate.
+    unsafe { hook(sstate, estate, ecxt) }
+}
+
+pub fn exec_qual_with_subplans<'mcx>(
+    state: Option<&mut execexpr::ExprState<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+) -> PgResult<bool> {
+    let Some(state) = state else {
+        return Ok(true);
+    };
+    let mut resume: Option<execexpr::Resume> = None;
+    loop {
+        let outcome = {
+            let r = resume.take();
+            let state = &mut *state;
+            with_ecxt_eval_slots(estate, ecxt, None, move |slots, _, _| {
+                execexpr::exec_qual_outcome(state, slots, r)
+            })?
+        };
+        match outcome {
+            execexpr::QualOutcome::Done(b) => return Ok(b),
+            execexpr::QualOutcome::Suspended(s) => {
+                let r = run_subplan_eval_hook(s.sstate, estate, ecxt)?;
+                resume = Some(s.resume_with(r));
+            }
+        }
+    }
+}
+
+pub fn exec_project_with_subplans<'mcx>(
+    state: &mut execexpr::ExprState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+    result: ExecSlotId,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    state.arm_result_mcx(mcx);
+    exectuples::exec_clear_tuple(estate.slot_mut(result), mcx);
+    let mut resume: Option<execexpr::Resume> = None;
+    loop {
+        let suspended = {
+            let r = resume.take();
+            let state = &mut *state;
+            with_ecxt_eval_slots(estate, ecxt, Some(result), move |slots, rslot, _| {
+                execexpr::exec_project_outcome(
+                    state,
+                    slots,
+                    rslot.expect("projection result slot"),
+                    r,
+                )
+            })?
+        };
+        match suspended {
+            None => {
+                exectuples::exec_store_virtual_tuple(estate.slot_mut(result));
+                return Ok(());
+            }
+            Some(s) => {
+                let r = run_subplan_eval_hook(s.sstate, estate, ecxt)?;
+                resume = Some(s.resume_with(r));
+            }
+        }
+    }
 }
 
 /// C JunkFilter (execnodes.h); construction/filtering live in execjunk.
@@ -256,6 +383,11 @@ pub struct EStateData<'mcx> {
     /// paramid -> initplan SubPlanState (C's ParamExecData.execPlan pointer).
     pub es_param_subplans: PgVec<'mcx, Option<SubplanStateCell>>,
     pub es_subplan_hook: Option<SubplanHook>,
+    pub es_subplan_init_hook: Option<SubplanInitHook>,
+    pub es_subplan_eval_hook: Option<SubplanEvalHook>,
+    /// Droppy SubPlan expr states: explicit take+drop at executor end.
+    pub es_subplan_expr_states:
+        PgVec<'mcx, (core::ptr::NonNull<()>, unsafe fn(core::ptr::NonNull<()>))>,
     /// cteParam -> shared CTE state; the leader installs, followers replay.
     pub es_cte_shared: PgVec<'mcx, Option<CteShared>>,
     pub es_cte_proc_hook: Option<CteProcHook>,
@@ -320,6 +452,9 @@ impl<'mcx> EStateData<'mcx> {
             es_subplanstates: PgVec::new_in(mcx),
             es_param_subplans: PgVec::new_in(mcx),
             es_subplan_hook: None,
+            es_subplan_init_hook: None,
+            es_subplan_eval_hook: None,
+            es_subplan_expr_states: PgVec::new_in(mcx),
             es_cte_shared: PgVec::new_in(mcx),
             es_cte_proc_hook: None,
             es_auxmodifytables: PgVec::new_in(mcx),
