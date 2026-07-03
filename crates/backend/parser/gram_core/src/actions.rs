@@ -1,9 +1,10 @@
 use types_core::catalog::RELPERSISTENCE_PERMANENT;
 use types_error::PgResult;
-use types_nodes::parsenodes::{CopyStmt, DefElem, DefElemAction};
+use types_nodes::parsenodes::{CopyStmt, DefElem, DefElemAction, VacuumRelation, VacuumStmt};
 use types_nodes::rawnodes::A_Expr_Kind::AEXPR_OP;
 use types_nodes::{
-    Alias, DeleteStmt, InsertStmt, Node, NodeList, RangeVar, RawStmt, SelectStmt, UpdateStmt,
+    Alias, DeleteStmt, InsertStmt, Node, NodeList, RangeFunction, RangeVar, RawStmt, SelectStmt,
+    UpdateStmt,
     ValUnion,
 };
 use types_nodes::{BitString, Boolean, Float, Integer};
@@ -472,6 +473,22 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::Node(Some(rv));
             }
+            // table_ref: [LATERAL_P] func_table func_alias_clause
+            1834 | 1835 => {
+                let fpos = if rule == 1835 { 2 } else { 1 };
+                let rf = stk.v(yylen, fpos).node().expect("func_table");
+                let (alias, coldeflist) = stk.v(yylen, fpos + 1).func_alias();
+                // SAFETY: as rule 8.
+                unsafe {
+                    rf.with_mut::<RangeFunction, _>(|n| {
+                        n.lateral = rule == 1835;
+                        n.alias = alias;
+                        n.coldeflist = coldeflist;
+                    })
+                    .expect("func_table is RangeFunction");
+                }
+                *yyval = YYSTYPE::Node(Some(rf));
+            }
             1851 => {
                 let name = stk.v(yylen, 2).str_val();
                 *yyval = YYSTYPE::Alias(Some(mk_alias(mcx, name)?));
@@ -480,6 +497,30 @@ impl<'mcx> Parser<'mcx> {
                 let name = stk.v(yylen, 1).str_val();
                 *yyval = YYSTYPE::Alias(Some(mk_alias(mcx, name)?));
             }
+            // func_alias_clause: alias_clause | /*EMPTY*/ (the coldeflist arms
+            // stay unimplemented-rule louds with TableFuncElementList).
+            1858 => {
+                let alias = stk.v(yylen, 1).alias();
+                *yyval = YYSTYPE::FuncAlias { alias, coldeflist: NodeList::nil() };
+            }
+            1862 => {
+                *yyval = YYSTYPE::FuncAlias { alias: None, coldeflist: NodeList::nil() };
+            }
+            // func_table: func_expr_windowless opt_ordinality; DIVERGENCE:
+            // functions holds bare funcexprs, not C's (funcexpr, coldeflist)
+            // sublists — the ROWS FROM lane (rule 1885, loud) restores the
+            // pair shape when per-function coldeflists arrive.
+            1884 => {
+                let fexpr = stk.v(yylen, 1).node().expect("func_expr_windowless");
+                let ordinality = stk.v(yylen, 2).boolean();
+                let mut n = Node::build::<RangeFunction>(mcx)?;
+                n.ordinality = ordinality;
+                n.functions = NodeList::make1(mcx, fexpr)?;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // opt_ordinality: WITH_LA ORDINALITY | /*EMPTY*/
+            1891 => *yyval = YYSTYPE::Boolean(true),
+            1892 => *yyval = YYSTYPE::Boolean(false),
             // relation_expr: qualified_name; extended_relation_expr:
             //   qualified_name '*' | ONLY qualified_name | ONLY '(' q_n ')'
             1871 | 1873 | 1874 | 1875 => {
@@ -779,6 +820,44 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = e;
             }
+            // c_expr: select_with_parens %prec UMINUS
+            2118 => {
+                let subselect = stk.v(yylen, 1).node().expect("select_with_parens");
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::SubLink {
+                        subLinkType: types_nodes::SubLinkType::EXPR_SUBLINK,
+                        subLinkId: 0,
+                        testexpr: None,
+                        operName: NodeList::nil(),
+                        subselect,
+                        location: stk.l(yylen, 1),
+                    },
+                )?));
+            }
+            2119 => panic!(
+                "gram_core: indirection over a sub-SELECT (A_Indirection) not ported \
+                 (unit backend-parser-gram)"
+            ),
+            // c_expr: EXISTS select_with_parens
+            2120 => {
+                let subselect = stk.v(yylen, 2).node().expect("select_with_parens");
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::SubLink {
+                        subLinkType: types_nodes::SubLinkType::EXISTS_SUBLINK,
+                        subLinkId: 0,
+                        testexpr: None,
+                        operName: NodeList::nil(),
+                        subselect,
+                        location: stk.l(yylen, 1),
+                    },
+                )?));
+            }
+            2121 => panic!(
+                "gram_core: ARRAY_SUBLINK (ARRAY select_with_parens) not ported \
+                 (unit backend-parser-gram)"
+            ),
             // func_application: func_name '(' [args] ')' shapes.
             2126 => {
                 let funcname = stk.v(yylen, 1).list();
@@ -1246,6 +1325,71 @@ impl<'mcx> Parser<'mcx> {
             454 | 562 => {
                 let s = stk.v(yylen, 1).str_val();
                 *yyval = YYSTYPE::Node(Some(Node::mk_string(mcx, s)?));
+            }
+            // VACUUM/ANALYZE productions; rule numbers pinned by
+            // vacuum_analyze_rule_numbers_match_tables.
+            1556 => {
+                let mut options = NodeList::nil();
+                for (slot, name) in [(2, "full"), (3, "freeze"), (4, "verbose"), (5, "analyze")] {
+                    if stk.v(yylen, slot).boolean() {
+                        let d = def_elem(mcx, name, None, stk.l(yylen, slot))?.node().unwrap();
+                        options.lappend(mcx, d)?;
+                    }
+                }
+                let mut n = Node::build::<VacuumStmt>(mcx)?;
+                n.options = options;
+                n.rels = stk.v(yylen, 6).list();
+                n.is_vacuumcmd = true;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1557 | 1559 => {
+                let mut n = Node::build::<VacuumStmt>(mcx)?;
+                n.options = stk.v(yylen, 3).list();
+                n.rels = stk.v(yylen, 5).list();
+                n.is_vacuumcmd = rule == 1557;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1558 => {
+                let mut options = NodeList::nil();
+                if stk.v(yylen, 2).boolean() {
+                    let d = def_elem(mcx, "verbose", None, stk.l(yylen, 2))?.node().unwrap();
+                    options.lappend(mcx, d)?;
+                }
+                let mut n = Node::build::<VacuumStmt>(mcx)?;
+                n.options = options;
+                n.rels = stk.v(yylen, 3).list();
+                n.is_vacuumcmd = false;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1560 | 1582 => {
+                let d = stk.v(yylen, 1).node().expect("list item");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, d)?);
+            }
+            1561 | 1583 => {
+                let mut list = stk.v(yylen, 1).list();
+                let d = stk.v(yylen, 3).node().expect("list item");
+                list.lappend(mcx, d)?;
+                *yyval = YYSTYPE::List(list);
+            }
+            1564 => {
+                let name = stk.v(yylen, 1).str_val();
+                let arg = stk.v(yylen, 2).node();
+                *yyval = def_elem(mcx, name, arg, stk.l(yylen, 1))?;
+            }
+            1566 => *yyval = YYSTYPE::Str("analyze"),
+            1567 => *yyval = YYSTYPE::Str("format"),
+            1568 => {
+                let s = stk.v(yylen, 1).str_val();
+                *yyval = YYSTYPE::Node(Some(Node::mk_string(mcx, s)?));
+            }
+            1571 | 1573 | 1575 | 1577 => *yyval = YYSTYPE::Boolean(true),
+            1572 | 1574 | 1576 | 1578 => *yyval = YYSTYPE::Boolean(false),
+            1581 => {
+                let mut n = Node::build::<VacuumRelation>(mcx)?;
+                n.relation = stk.v(yylen, 1).node();
+                n.oid = 0;
+                n.va_cols = stk.v(yylen, 2).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             _ => unimplemented_rule(rule),
         }

@@ -160,7 +160,7 @@ pub fn StartupXLOG() -> PgResult<()> {
         );
     }
     varsup_seams::advance_oldest_clog_xid::call(check_point.oldestXid)?;
-    procarray::TransamVariables().oldestXid.store(check_point.oldestXid, Relaxed);
+    varsup_seams::set_transaction_id_limit::call(check_point.oldestXid, check_point.oldestXidDB)?;
     if multixact_seams::set_multixact_id_limit::is_installed() {
         multixact_seams::set_multixact_id_limit::call(
             check_point.oldestMulti,

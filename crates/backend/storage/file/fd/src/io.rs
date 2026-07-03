@@ -87,7 +87,7 @@ pub fn FileClose(file: File) -> PgResult<()> {
     let close_failure = with_fd(|fd| {
         if !vfd::FileIsNotOpen(fd, file) {
             let handle = fd.vfd_cache[file as usize].fd.take().unwrap();
-            aio_seams::pgaio_closing_fd::call(handle.as_raw());
+            crate::pgaio_closing_fd_if_engine_present(handle.as_raw());
 
             let raw = handle.into_raw_fd();
             // SAFETY: live descriptor released from its guard; closed once here.

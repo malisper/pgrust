@@ -44,7 +44,13 @@ fn RecordTransactionCommitGuts(xp: XsPtr, mcx: mcx::Mcx<'_>) -> PgResult<Transac
         inval::eoxact::LogLogicalInvalidations()?;
     }
 
-    let rels = catalog_storage_seams::smgr_get_pending_deletes::call(mcx, true)?;
+    // storage.c's pending lists have no writer while RelationCreateStorage/
+    // DropStorage are unported; guarded like the other provably-empty registries.
+    let rels = if catalog_storage_seams::smgr_get_pending_deletes::is_installed() {
+        catalog_storage_seams::smgr_get_pending_deletes::call(mcx, true)?
+    } else {
+        mcx::PgVec::new_in(mcx)
+    };
     let children = committed_children_in(xp)?;
     let dropped_stats = pgstat::xact::pgstat_get_transactional_drops(mcx, true)?;
     let (inval_msgs, relcache_init_file_inval) = if xlog_seams::xlog_standby_info_active::call() {
@@ -74,7 +80,13 @@ fn RecordTransactionCommitGuts(xp: XsPtr, mcx: mcx::Mcx<'_>) -> PgResult<Transac
             return Ok(InvalidTransactionId); // goto cleanup
         }
     } else {
-        let session_origin = origin_seams::replorigin_session_origin::call();
+        // Uninstalled origin seams = C defaults (origin.c globals): origins
+        // and commit_ts are unported units (wal.rs/xloginsert precedent).
+        let session_origin = if origin_seams::replorigin_session_origin::is_installed() {
+            origin_seams::replorigin_session_origin::call()
+        } else {
+            types_core::InvalidRepOriginId
+        };
         let replorigin = session_origin != types_core::InvalidRepOriginId
             && session_origin != DoNotReplicateId;
 
@@ -105,18 +117,26 @@ fn RecordTransactionCommitGuts(xp: XsPtr, mcx: mcx::Mcx<'_>) -> PgResult<Transac
             )?;
         }
 
-        if !replorigin || origin_seams::replorigin_session_origin_timestamp::call() == 0 {
-            origin_seams::set_replorigin_session_origin_timestamp::call(
-                GetCurrentTransactionStopTimestamp(),
-            );
-        }
+        let origin_timestamp = if origin_seams::replorigin_session_origin_timestamp::is_installed()
+        {
+            if !replorigin || origin_seams::replorigin_session_origin_timestamp::call() == 0 {
+                origin_seams::set_replorigin_session_origin_timestamp::call(
+                    GetCurrentTransactionStopTimestamp(),
+                );
+            }
+            origin_seams::replorigin_session_origin_timestamp::call()
+        } else {
+            GetCurrentTransactionStopTimestamp()
+        };
 
-        commit_ts_seams::transaction_tree_set_commit_ts_data::call(
-            xid,
-            &children,
-            origin_seams::replorigin_session_origin_timestamp::call(),
-            session_origin,
-        )?;
+        if commit_ts_seams::transaction_tree_set_commit_ts_data::is_installed() {
+            commit_ts_seams::transaction_tree_set_commit_ts_data::call(
+                xid,
+                &children,
+                origin_timestamp,
+                session_origin,
+            )?;
+        }
     }
 
     if (wrote_xlog && mark_xid_committed && synchronous_commit() > SYNCHRONOUS_COMMIT_OFF)
@@ -146,7 +166,8 @@ fn RecordTransactionCommitGuts(xp: XsPtr, mcx: mcx::Mcx<'_>) -> PgResult<Transac
 
     latest_xid = transam_seams::transaction_id_latest::call(xid, &children);
 
-    if wrote_xlog && mark_xid_committed {
+    // C SyncRepWaitForLSN no-ops without sync standbys; syncrep unported.
+    if wrote_xlog && mark_xid_committed && syncrep_seams::sync_rep_wait_for_lsn::is_installed() {
         syncrep_seams::sync_rep_wait_for_lsn::call(xlog_seams::xact_last_rec_end::call(), true)?;
     }
 
@@ -195,7 +216,11 @@ fn record_transaction_abort_guts(
     xid: TransactionId,
     replorigin: bool,
 ) -> PgResult<TransactionId> {
-    let rels = catalog_storage_seams::smgr_get_pending_deletes::call(mcx, false)?;
+    let rels = if catalog_storage_seams::smgr_get_pending_deletes::is_installed() {
+        catalog_storage_seams::smgr_get_pending_deletes::call(mcx, false)?
+    } else {
+        mcx::PgVec::new_in(mcx)
+    };
     let children = xactGetCommittedChildren()?;
     let dropped_stats = pgstat::xact::pgstat_get_transactional_drops(mcx, false)?;
 
@@ -401,17 +426,29 @@ fn CommitTransaction(xp: XsPtr) -> PgResult<()> {
 
     trigger_seams::after_trigger_end_xact::call(true)?;
 
-    tablecmds_seams::pre_commit_on_commit_actions::call()?;
+    // No on_commits writer exists while tablecmds is unported; guarded like
+    // the other provably-empty registries.
+    if tablecmds_seams::pre_commit_on_commit_actions::is_installed() {
+        tablecmds_seams::pre_commit_on_commit_actions::call()?;
+    }
 
     // Sync files created but not WAL-logged; must precede
     // AtEOXact_RelationMap to avoid committed-but-broken files.
-    catalog_storage_seams::smgr_do_pending_syncs::call(true, is_parallel_worker)?;
+    if catalog_storage_seams::smgr_do_pending_syncs::is_installed() {
+        catalog_storage_seams::smgr_do_pending_syncs::call(true, is_parallel_worker)?;
+    }
 
-    be_fsstubs_seams::at_eoxact_large_object::call(true)?;
+    // No LO descriptor can exist while lo_open is unported; guarded.
+    if be_fsstubs_seams::at_eoxact_large_object::is_installed() {
+        be_fsstubs_seams::at_eoxact_large_object::call(true)?;
+    }
 
     // NOTIFY enqueue late (minimize lock hold time; may take a snapshot, so
     // before serializable cleanup).
-    async_seams::pre_commit_notify::call()?;
+    // No pending LISTEN/NOTIFY state can exist while async.c is unported; guarded.
+    if async_seams::pre_commit_notify::is_installed() {
+        async_seams::pre_commit_notify::call()?;
+    }
 
     if !is_parallel_worker {
         predicate_seams::pre_commit_check_for_serialization_failure::call()?;
@@ -473,23 +510,39 @@ fn CommitTransaction(xp: XsPtr) -> PgResult<()> {
     release_transaction_owner_locks(true)?;
 
     // Drop deleted files (after relcache/buffer pins and locks are gone).
-    catalog_storage_seams::smgr_do_pending_deletes::call(true)?;
+    if catalog_storage_seams::smgr_do_pending_deletes::is_installed() {
+        catalog_storage_seams::smgr_do_pending_deletes::call(true)?;
+    }
 
-    async_seams::at_commit_notify::call()?;
+    if async_seams::at_commit_notify::is_installed() {
+        async_seams::at_commit_notify::call()?;
+    }
 
     guc::AtEOXact_GUC(true, 1);
     spi_seams::at_eoxact_spi::call(true)?;
-    pg_enum_seams::at_eoxact_enum::call();
-    tablecmds_seams::at_eoxact_on_commit_actions::call(true);
+    // uncommitted_enum_types has no writer while pg_enum.c is unported; guarded.
+    if pg_enum_seams::at_eoxact_enum::is_installed() {
+        pg_enum_seams::at_eoxact_enum::call();
+    }
+    if tablecmds_seams::at_eoxact_on_commit_actions::is_installed() {
+        tablecmds_seams::at_eoxact_on_commit_actions::call(true);
+    }
     namespace_seams::at_eoxact_namespace::call(true, is_parallel_worker);
     { let _ = smgr::AtEOXact_SMgr(); }
     fd::AtEOXact_Files(true)?;
-    combocid_seams::at_eoxact_combocid::call();
+    // No combo CID can exist while combocid.c is unported (heapam's adjust_cmax
+    // arm panics first); guarded.
+    if combocid_seams::at_eoxact_combocid::is_installed() {
+        combocid_seams::at_eoxact_combocid::call();
+    }
     // AtEOXact_HashTables dissolves (crate docs).
     pgstat::xact::AtEOXact_PgStat(true, is_parallel_worker);
     snapmgr_seams::at_eoxact_snapshot::call(true, false)?;
     launcher::AtEOXact_ApplyLauncher(true);
-    logical_worker_seams::at_eoxact_logical_rep_workers::call(true);
+    // on_commit_launcher_wakeup/workers list has no writer while logical rep is unported; guarded.
+    if logical_worker_seams::at_eoxact_logical_rep_workers::is_installed() {
+        logical_worker_seams::at_eoxact_logical_rep_workers::call(true);
+    }
     backend_status_seams::pgstat_report_xact_timestamp::call(0);
 
     delete_transaction_owner()?;
@@ -538,11 +591,20 @@ fn PrepareTransaction(xp: XsPtr) -> PgResult<()> {
 
     trigger_seams::after_trigger_end_xact::call(true)?;
 
-    tablecmds_seams::pre_commit_on_commit_actions::call()?;
+    // No on_commits writer exists while tablecmds is unported; guarded like
+    // the other provably-empty registries.
+    if tablecmds_seams::pre_commit_on_commit_actions::is_installed() {
+        tablecmds_seams::pre_commit_on_commit_actions::call()?;
+    }
 
-    catalog_storage_seams::smgr_do_pending_syncs::call(true, false)?;
+    if catalog_storage_seams::smgr_do_pending_syncs::is_installed() {
+        catalog_storage_seams::smgr_do_pending_syncs::call(true, false)?;
+    }
 
-    be_fsstubs_seams::at_eoxact_large_object::call(true)?;
+    // No LO descriptor can exist while lo_open is unported; guarded.
+    if be_fsstubs_seams::at_eoxact_large_object::is_installed() {
+        be_fsstubs_seams::at_eoxact_large_object::call(true)?;
+    }
 
 
     predicate_seams::pre_commit_check_for_serialization_failure::call()?;
@@ -662,16 +724,27 @@ fn PrepareTransaction(xp: XsPtr) -> PgResult<()> {
 
     guc::AtEOXact_GUC(true, 1);
     spi_seams::at_eoxact_spi::call(true)?;
-    pg_enum_seams::at_eoxact_enum::call();
-    tablecmds_seams::at_eoxact_on_commit_actions::call(true);
+    // uncommitted_enum_types has no writer while pg_enum.c is unported; guarded.
+    if pg_enum_seams::at_eoxact_enum::is_installed() {
+        pg_enum_seams::at_eoxact_enum::call();
+    }
+    if tablecmds_seams::at_eoxact_on_commit_actions::is_installed() {
+        tablecmds_seams::at_eoxact_on_commit_actions::call(true);
+    }
     namespace_seams::at_eoxact_namespace::call(true, false);
     { let _ = smgr::AtEOXact_SMgr(); }
     fd::AtEOXact_Files(true)?;
-    combocid_seams::at_eoxact_combocid::call();
+    // No combo CID can exist while combocid.c is unported (heapam's adjust_cmax
+    // arm panics first); guarded.
+    if combocid_seams::at_eoxact_combocid::is_installed() {
+        combocid_seams::at_eoxact_combocid::call();
+    }
     // AtEOXact_HashTables dissolves; no AtEOXact_PgStat (pgstat fixed above).
     snapmgr_seams::at_eoxact_snapshot::call(true, true)?;
     launcher::AtEOXact_ApplyLauncher(false);
-    logical_worker_seams::at_eoxact_logical_rep_workers::call(false);
+    if logical_worker_seams::at_eoxact_logical_rep_workers::is_installed() {
+        logical_worker_seams::at_eoxact_logical_rep_workers::call(false);
+    }
     backend_status_seams::pgstat_report_xact_timestamp::call(0);
 
     resowner::SetCurrentResourceOwner(types_resowner::ResourceOwner::NULL);
@@ -711,7 +784,10 @@ fn AbortTransaction(xp: XsPtr) -> PgResult<()> {
     let _ = lwlock::LWLockReleaseAll();
 
     waitevent::pgstat_report_wait_end();
-    backend_progress_seams::pgstat_progress_end_command::call();
+    // No progress command can start while backend_progress is unported; guarded.
+    if backend_progress_seams::pgstat_progress_end_command::is_installed() {
+        backend_progress_seams::pgstat_progress_end_command::call();
+    }
 
     aio_seams::pgaio_error_cleanup::call();
 
@@ -742,7 +818,10 @@ fn AbortTransaction(xp: XsPtr) -> PgResult<()> {
     let (prev_user, prev_sec) = xp.with(|s| (s.current().prev_user, s.current().prev_sec_context));
     miscinit::SetUserIdAndSecContext(prev_user, prev_sec);
 
-    catalog_index_seams::reset_reindex_state::call(xp.with(|s| s.current().nesting_level));
+    // No REINDEX state can exist while catalog/index.c is unported; guarded.
+    if catalog_index_seams::reset_reindex_state::is_installed() {
+        catalog_index_seams::reset_reindex_state::call(xp.with(|s| s.current().nesting_level));
+    }
 
     logical_seams::reset_logical_streaming_state::call();
 
@@ -756,9 +835,15 @@ fn AbortTransaction(xp: XsPtr) -> PgResult<()> {
 
     trigger_seams::after_trigger_end_xact::call(false)?;
     portalmem::AtAbort_Portals()?;
-    catalog_storage_seams::smgr_do_pending_syncs::call(false, is_parallel_worker)?;
-    be_fsstubs_seams::at_eoxact_large_object::call(false)?;
-    async_seams::at_abort_notify::call();
+    if catalog_storage_seams::smgr_do_pending_syncs::is_installed() {
+        catalog_storage_seams::smgr_do_pending_syncs::call(false, is_parallel_worker)?;
+    }
+    if be_fsstubs_seams::at_eoxact_large_object::is_installed() {
+        be_fsstubs_seams::at_eoxact_large_object::call(false)?;
+    }
+    if async_seams::at_abort_notify::is_installed() {
+        async_seams::at_abort_notify::call();
+    }
     relmapper::AtEOXact_RelationMap(false, is_parallel_worker)?;
     twophase_seams::at_abort_twophase::call();
 
@@ -791,20 +876,30 @@ fn AbortTransaction(xp: XsPtr) -> PgResult<()> {
         inval::eoxact::AtEOXact_Inval(false)?;
         multixact_seams::at_eoxact_multixact::call();
         release_transaction_owner_locks(false)?;
-        catalog_storage_seams::smgr_do_pending_deletes::call(false)?;
+        if catalog_storage_seams::smgr_do_pending_deletes::is_installed() {
+            catalog_storage_seams::smgr_do_pending_deletes::call(false)?;
+        }
 
         guc::AtEOXact_GUC(false, 1);
         spi_seams::at_eoxact_spi::call(false)?;
-        pg_enum_seams::at_eoxact_enum::call();
-        tablecmds_seams::at_eoxact_on_commit_actions::call(false);
+        if pg_enum_seams::at_eoxact_enum::is_installed() {
+            pg_enum_seams::at_eoxact_enum::call();
+        }
+        if tablecmds_seams::at_eoxact_on_commit_actions::is_installed() {
+            tablecmds_seams::at_eoxact_on_commit_actions::call(false);
+        }
         namespace_seams::at_eoxact_namespace::call(false, is_parallel_worker);
         { let _ = smgr::AtEOXact_SMgr(); }
         fd::AtEOXact_Files(false)?;
-        combocid_seams::at_eoxact_combocid::call();
+        if combocid_seams::at_eoxact_combocid::is_installed() {
+            combocid_seams::at_eoxact_combocid::call();
+        }
         // AtEOXact_HashTables dissolves.
         pgstat::xact::AtEOXact_PgStat(false, is_parallel_worker);
         launcher::AtEOXact_ApplyLauncher(false);
-        logical_worker_seams::at_eoxact_logical_rep_workers::call(false);
+        if logical_worker_seams::at_eoxact_logical_rep_workers::is_installed() {
+            logical_worker_seams::at_eoxact_logical_rep_workers::call(false);
+        }
         backend_status_seams::pgstat_report_xact_timestamp::call(0);
     }
 
@@ -1775,8 +1870,12 @@ fn CommitSubTransaction() -> PgResult<()> {
         parent_nesting,
         resowner::ResourceOwnerGetParent(resowner::CurTransactionResourceOwner()),
     );
-    be_fsstubs_seams::at_eosubxact_large_object::call(true, my, parent)?;
-    async_seams::at_subcommit_notify::call()?;
+    if be_fsstubs_seams::at_eosubxact_large_object::is_installed() {
+        be_fsstubs_seams::at_eosubxact_large_object::call(true, my, parent)?;
+    }
+    if async_seams::at_subcommit_notify::is_installed() {
+        async_seams::at_subcommit_notify::call()?;
+    }
 
     CallSubXactCallbacks(SUBXACT_EVENT_COMMIT_SUB, my, parent)?;
 
@@ -1784,7 +1883,9 @@ fn CommitSubTransaction() -> PgResult<()> {
     relcache_seams::at_eosubxact_relation_cache::call(true, my, parent)?;
     typcache_seams::at_eosubxact_type_cache::call();
     inval::eoxact::AtEOSubXact_Inval(true)?;
-    catalog_storage_seams::at_subcommit_smgr::call();
+    if catalog_storage_seams::at_subcommit_smgr::is_installed() {
+        catalog_storage_seams::at_subcommit_smgr::call();
+    }
 
     if xs(|s| s.current().full_transaction_id.is_valid()) {
         let xid = xs(|s| s.current().full_transaction_id.xid());
@@ -1797,7 +1898,9 @@ fn CommitSubTransaction() -> PgResult<()> {
         xs(|s| (s.current().guc_nest_level, s.current().nesting_level));
     guc::AtEOXact_GUC(true, guc_nest_level);
     spi_seams::at_eosubxact_spi::call(true, my)?;
-    tablecmds_seams::at_eosubxact_on_commit_actions::call(true, my, parent);
+    if tablecmds_seams::at_eosubxact_on_commit_actions::is_installed() {
+        tablecmds_seams::at_eosubxact_on_commit_actions::call(true, my, parent);
+    }
     namespace_seams::at_eosubxact_namespace::call(true, my, parent);
     fd::AtEOSubXact_Files(true, my, parent);
     // AtEOSubXact_HashTables dissolves.
@@ -1827,7 +1930,10 @@ fn AbortSubTransaction() -> PgResult<()> {
     let _ = lwlock::LWLockReleaseAll();
 
     waitevent::pgstat_report_wait_end();
-    backend_progress_seams::pgstat_progress_end_command::call();
+    // No progress command can start while backend_progress is unported; guarded.
+    if backend_progress_seams::pgstat_progress_end_command::is_installed() {
+        backend_progress_seams::pgstat_progress_end_command::call();
+    }
 
     aio_seams::pgaio_error_cleanup::call();
 
@@ -1856,7 +1962,9 @@ fn AbortSubTransaction() -> PgResult<()> {
     let (prev_user, prev_sec) = xs(|s| (s.current().prev_user, s.current().prev_sec_context));
     miscinit::SetUserIdAndSecContext(prev_user, prev_sec);
 
-    catalog_index_seams::reset_reindex_state::call(xs(|s| s.current().nesting_level));
+    if catalog_index_seams::reset_reindex_state::is_installed() {
+        catalog_index_seams::reset_reindex_state::call(xs(|s| s.current().nesting_level));
+    }
 
     logical_seams::reset_logical_streaming_state::call();
 
@@ -1873,8 +1981,12 @@ fn AbortSubTransaction() -> PgResult<()> {
                         resowner::CurTransactionResourceOwner(),
                         resowner::ResourceOwnerGetParent(resowner::CurTransactionResourceOwner()),
                     )?;
-        be_fsstubs_seams::at_eosubxact_large_object::call(false, my, parent)?;
-        async_seams::at_subabort_notify::call();
+        if be_fsstubs_seams::at_eosubxact_large_object::is_installed() {
+            be_fsstubs_seams::at_eosubxact_large_object::call(false, my, parent)?;
+        }
+        if async_seams::at_subabort_notify::is_installed() {
+            async_seams::at_subabort_notify::call();
+        }
 
         // Advertise the fact that we aborted in pg_xact.
         RecordTransactionAbort(true)?;
@@ -1891,13 +2003,17 @@ fn AbortSubTransaction() -> PgResult<()> {
         typcache_seams::at_eosubxact_type_cache::call();
         inval::eoxact::AtEOSubXact_Inval(false)?;
         release_subxact_owner_locks(false)?;
-        catalog_storage_seams::at_subabort_smgr::call()?;
+        if catalog_storage_seams::at_subabort_smgr::is_installed() {
+            catalog_storage_seams::at_subabort_smgr::call()?;
+        }
 
         let (guc_nest_level, nesting_level) =
             xs(|s| (s.current().guc_nest_level, s.current().nesting_level));
         guc::AtEOXact_GUC(false, guc_nest_level);
         spi_seams::at_eosubxact_spi::call(false, my)?;
-        tablecmds_seams::at_eosubxact_on_commit_actions::call(false, my, parent);
+        if tablecmds_seams::at_eosubxact_on_commit_actions::is_installed() {
+            tablecmds_seams::at_eosubxact_on_commit_actions::call(false, my, parent);
+        }
         namespace_seams::at_eosubxact_namespace::call(false, my, parent);
         fd::AtEOSubXact_Files(false, my, parent);
         // AtEOSubXact_HashTables dissolves.

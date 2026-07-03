@@ -215,6 +215,16 @@ pub struct FuncCall<'mcx> {
 }
 
 #[derive(Default)]
+pub struct RangeFunction<'mcx> {
+    pub lateral: bool,
+    pub ordinality: bool,
+    pub is_rowsfrom: bool,
+    pub functions: NodeList<'mcx>,
+    pub alias: Option<&'mcx crate::primnodes::Alias<'mcx>>,
+    pub coldeflist: NodeList<'mcx>,
+}
+
+#[derive(Default)]
 pub struct TypeName<'mcx> {
     pub names: NodeList<'mcx>,
     pub typeOid: Oid,
@@ -272,6 +282,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for SortBy<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for FuncCall<'mcx> {
     const TAG: NodeTag = NodeTag::T_FuncCall;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for RangeFunction<'mcx> {
+    const TAG: NodeTag = NodeTag::T_RangeFunction;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for TypeName<'mcx> {
     const TAG: NodeTag = NodeTag::T_TypeName;
@@ -396,6 +409,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_sort_by(self) -> Option<&'mcx SortBy<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_range_function(self) -> Option<&'mcx RangeFunction<'mcx>> {
         self.as_variant()
     }
 

@@ -205,6 +205,14 @@ pub struct BitmapHeapScan<'mcx> {
     pub bitmapqualorig: NodeList<'mcx>,
 }
 
+#[derive(Default)]
+#[repr(C)]
+pub struct FunctionScan<'mcx> {
+    pub scan: Scan<'mcx>,
+    pub functions: NodeList<'mcx>,
+    pub funcordinality: bool,
+}
+
 /// Per-key arrays are C's `pg_node_attr(array_size(numCols))` parallel arrays.
 #[derive(Default)]
 #[repr(C)]
@@ -215,6 +223,17 @@ pub struct Sort<'mcx> {
     pub sortOperators: &'mcx [Oid],
     pub collations: &'mcx [Oid],
     pub nullsFirst: &'mcx [bool],
+}
+
+/// Per-key arrays as in [`Sort`].
+#[derive(Default)]
+#[repr(C)]
+pub struct Unique<'mcx> {
+    pub plan: Plan<'mcx>,
+    pub numCols: i32,
+    pub uniqColIdx: &'mcx [i16],
+    pub uniqOperators: &'mcx [Oid],
+    pub uniqCollations: &'mcx [Oid],
 }
 
 /// `aggstrategy`/`aggsplit` carry the C AggStrategy/AggSplit values
@@ -380,8 +399,14 @@ unsafe impl<'mcx> NodeVariant<'mcx> for BitmapIndexScan<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for BitmapHeapScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_BitmapHeapScan;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for FunctionScan<'mcx> {
+    const TAG: NodeTag = NodeTag::T_FunctionScan;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for Sort<'mcx> {
     const TAG: NodeTag = NodeTag::T_Sort;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for Unique<'mcx> {
+    const TAG: NodeTag = NodeTag::T_Unique;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for Agg<'mcx> {
     const TAG: NodeTag = NodeTag::T_Agg;
@@ -411,8 +436,12 @@ unsafe impl<'mcx> PlanVariant<'mcx> for BitmapOr<'mcx> {}
 unsafe impl<'mcx> PlanVariant<'mcx> for BitmapIndexScan<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
 unsafe impl<'mcx> PlanVariant<'mcx> for BitmapHeapScan<'mcx> {}
+// SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
+unsafe impl<'mcx> PlanVariant<'mcx> for FunctionScan<'mcx> {}
 // SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for Sort<'mcx> {}
+// SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
+unsafe impl<'mcx> PlanVariant<'mcx> for Unique<'mcx> {}
 // SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for Agg<'mcx> {}
 // SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
@@ -456,8 +485,14 @@ const _: () = {
     assert!(
         offset_of!(NodeRep<BitmapHeapScan>, payload) == offset_of!(NodeRep<Plan>, payload)
     );
+    assert!(offset_of!(FunctionScan, scan) == 0);
+    assert!(
+        offset_of!(NodeRep<FunctionScan>, payload) == offset_of!(NodeRep<Plan>, payload)
+    );
     assert!(offset_of!(Sort, plan) == 0);
     assert!(offset_of!(NodeRep<Sort>, payload) == offset_of!(NodeRep<Plan>, payload));
+    assert!(offset_of!(Unique, plan) == 0);
+    assert!(offset_of!(NodeRep<Unique>, payload) == offset_of!(NodeRep<Plan>, payload));
     assert!(offset_of!(Agg, plan) == 0);
     assert!(offset_of!(NodeRep<Agg>, payload) == offset_of!(NodeRep<Plan>, payload));
     assert!(offset_of!(ModifyTable, plan) == 0);
@@ -484,7 +519,9 @@ fn is_plan_tag(tag: NodeTag) -> bool {
             | NodeTag::T_BitmapOr
             | NodeTag::T_BitmapIndexScan
             | NodeTag::T_BitmapHeapScan
+            | NodeTag::T_FunctionScan
             | NodeTag::T_Sort
+            | NodeTag::T_Unique
             | NodeTag::T_Agg
             | NodeTag::T_ModifyTable
             | NodeTag::T_Limit
@@ -539,7 +576,17 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_function_scan(self) -> Option<&'mcx FunctionScan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_sort(self) -> Option<&'mcx Sort<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_unique(self) -> Option<&'mcx Unique<'mcx>> {
         self.as_variant()
     }
 
