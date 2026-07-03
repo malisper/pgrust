@@ -20,6 +20,7 @@ use crate::steps::{
 
 pub const INNER_VAR: i32 = -1;
 pub const OUTER_VAR: i32 = -2;
+pub const INDEX_VAR: i32 = -3;
 
 #[cold]
 #[inline(never)]

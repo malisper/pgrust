@@ -217,6 +217,370 @@ fn run_with_count_limit_stops_early() {
     execmain_seams::free_query_desc::call(qd);
 }
 
+mod scanfix {
+    use core::ptr::NonNull;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    use ::mcx::{Mcx, PgVec};
+    use ::types_core::{
+        Buffer, GlobalVisStateHandle, Oid, BLCKSZ, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT,
+    };
+    use ::types_rel::{
+        FormData_pg_class, LockInfoData, LockRelId, Relation, RelationData, LOCKMODE,
+        RELKIND_RELATION,
+    };
+    use ::types_storage::bufpage::{ItemIdData, SizeOfPageHeaderData, LP_NORMAL};
+    use ::types_tuple::{
+        CompactAttribute, FormData_pg_attribute, NameData, TupleDescData, HEAP_XMAX_INVALID,
+        TYPALIGN_INT, TYPSTORAGE_PLAIN,
+    };
+
+    pub static CLOSED: AtomicUsize = AtomicUsize::new(0);
+    pub static ACLCHECKED_RELID: AtomicU32 = AtomicU32::new(0);
+
+    struct Fake {
+        tables: HashMap<Oid, Vec<Buffer>>,
+        pages: Vec<usize>,
+        pins: Vec<i32>,
+    }
+
+    static FAKE: Mutex<Option<Fake>> = Mutex::new(None);
+
+    fn with_fake<R>(f: impl FnOnce(&mut Fake) -> R) -> R {
+        let mut g = FAKE.lock().unwrap_or_else(|e| e.into_inner());
+        f(g.get_or_insert_with(|| Fake {
+            tables: HashMap::new(),
+            pages: Vec::new(),
+            pins: Vec::new(),
+        }))
+    }
+
+    pub fn install() {
+        bufmgr_seams::read_buffer::set(|rel, block| {
+            with_fake(|f| {
+                let buf = f.tables[&rel.rd_id][block as usize];
+                f.pins[(buf - 1) as usize] += 1;
+                Ok(buf)
+            })
+        });
+        bufmgr_seams::read_buffer_strategy::set(|rel, block, _strategy| {
+            bufmgr_seams::read_buffer::call(rel, block)
+        });
+        bufmgr_seams::buffer_get_block_number::set(|buf| {
+            with_fake(|f| {
+                for pages in f.tables.values() {
+                    if let Some(i) = pages.iter().position(|b| *b == buf) {
+                        return i as u32;
+                    }
+                }
+                panic!("unknown buffer {buf}")
+            })
+        });
+        bufmgr_seams::buffer_get_page::set(|buf| {
+            let addr = with_fake(|f| {
+                assert!(f.pins[(buf - 1) as usize] > 0, "page access without pin");
+                f.pages[(buf - 1) as usize]
+            });
+            NonNull::new(addr as *mut u8).unwrap()
+        });
+        bufmgr_seams::release_buffer::set(|buf| {
+            with_fake(|f| {
+                let p = &mut f.pins[(buf - 1) as usize];
+                assert!(*p > 0, "double release of buffer {buf}");
+                *p -= 1;
+            });
+            Ok(())
+        });
+        bufmgr_seams::incr_buffer_ref_count::set(|buf| {
+            with_fake(|f| f.pins[(buf - 1) as usize] += 1);
+        });
+        bufmgr_seams::lock_buffer::set(|_buf, _mode| Ok(()));
+        bufmgr_seams::get_access_strategy::set(|_| None);
+        bufmgr_seams::free_access_strategy::set(|_| {});
+        bufmgr_seams::relation_get_number_of_blocks_in_fork::set(|rel, _fork| {
+            with_fake(|f| Ok(f.tables[&rel.rd_id].len() as u32))
+        });
+
+        heapam_visibility_seams::heap_tuple_satisfies_visibility::set(|_h, _s, _b| Ok(true));
+        heapam_visibility_seams::heap_tuple_is_surely_dead::set(|_h, _v| Ok(false));
+        heapam_visibility_seams::heap_tuple_header_is_only_locked::set(|_h| Ok(false));
+        predicate_seams::check_for_serializable_conflict_out_needed::set(|_r, _s| false);
+        predicate_seams::predicate_lock_relation::set(|_r, _s| Ok(()));
+        predicate_seams::predicate_lock_tid::set(|_r, _t, _s, _x| Ok(()));
+        pruneheap_seams::heap_page_prune_opt::set(|_r, _b| Ok(()));
+        procarray_seams::global_vis_test_for::set(|_r| GlobalVisStateHandle::new(0));
+
+        resowner_seams::current_resource_owner::set(|| types_resowner::ResourceOwner::NULL);
+        resowner_seams::resource_owner_enlarge::set(|_| Ok(()));
+        resowner_seams::resource_owner_remember_snapshot::set(|_, _| {});
+        resowner_seams::resource_owner_forget_snapshot::set(|_, _| {});
+
+        miscinit_seams::get_user_id::set(|| 10);
+        aclchk_seams::object_aclcheck::set(|classid, objid, _roleid, _mode| {
+            assert_eq!(classid, ::types_core::catalog::RELATION_RELATION_ID);
+            ACLCHECKED_RELID.store(objid, Ordering::Relaxed);
+            Ok(0)
+        });
+
+        relation_seams::relation_open::set(fake_relation_open);
+    }
+
+    fn tuple_image(val: i32) -> Vec<u8> {
+        let mut img = vec![0u8; 28];
+        img[0..4].copy_from_slice(&10u32.to_ne_bytes());
+        img[18..20].copy_from_slice(&1u16.to_ne_bytes());
+        img[20..22].copy_from_slice(&HEAP_XMAX_INVALID.to_ne_bytes());
+        img[22] = 24;
+        img[24..28].copy_from_slice(&val.to_ne_bytes());
+        img
+    }
+
+    #[repr(align(8))]
+    struct TestPage([u8; BLCKSZ]);
+
+    fn build_page(vals: &[i32]) -> Box<TestPage> {
+        let mut page = Box::new(TestPage([0u8; BLCKSZ]));
+        let n = vals.len();
+        let lower = SizeOfPageHeaderData + n * 4;
+        let mut upper = BLCKSZ;
+        for (i, val) in vals.iter().enumerate() {
+            let img = tuple_image(*val);
+            upper = (upper - img.len()) & !7;
+            page.0[upper..upper + img.len()].copy_from_slice(&img);
+            let id = ItemIdData::new(upper as u16, LP_NORMAL, img.len() as u16);
+            let off = SizeOfPageHeaderData + i * 4;
+            // SAFETY: repr(transparent) over u32.
+            let raw: u32 = unsafe { core::mem::transmute(id) };
+            page.0[off..off + 4].copy_from_slice(&raw.to_ne_bytes());
+        }
+        page.0[12..14].copy_from_slice(&(lower as u16).to_ne_bytes());
+        page.0[14..16].copy_from_slice(&(upper as u16).to_ne_bytes());
+        page.0[16..18].copy_from_slice(&(BLCKSZ as u16).to_ne_bytes());
+        page.0[18..20].copy_from_slice(&((BLCKSZ as u16) | 4).to_ne_bytes());
+        page
+    }
+
+    pub fn register_table(relid: Oid, pages: &[&[i32]]) {
+        with_fake(|f| {
+            let mut bufs = Vec::new();
+            for vals in pages {
+                let addr = Box::leak(build_page(vals)).0.as_mut_ptr() as usize;
+                f.pages.push(addr);
+                f.pins.push(0);
+                bufs.push(f.pages.len() as Buffer);
+            }
+            f.tables.insert(relid, bufs);
+        });
+    }
+
+    pub fn quiesced() {
+        with_fake(|f| {
+            assert!(f.pins.iter().all(|p| *p == 0), "leaked pins: {:?}", f.pins);
+        });
+    }
+
+    fn int4_tupdesc<'mcx>(mcx: Mcx<'mcx>) -> Rc<TupleDescData<'mcx>> {
+        let att = FormData_pg_attribute {
+            attnum: 1,
+            atttypid: 23,
+            atttypmod: -1,
+            attlen: 4,
+            attbyval: true,
+            attalign: TYPALIGN_INT,
+            attstorage: TYPSTORAGE_PLAIN,
+            ..Default::default()
+        };
+        let mut attrs = PgVec::new_in(mcx);
+        let mut compact = PgVec::new_in(mcx);
+        compact.push(CompactAttribute::populate_from(&att));
+        attrs.push(att);
+        Rc::new(TupleDescData {
+            natts: 1,
+            tdtypeid: 0,
+            tdtypmod: -1,
+            tdrefcount: -1,
+            constr: None,
+            compact_attrs: compact,
+            attrs,
+        })
+    }
+
+    fn record_close(_relid: Oid, _lockmode: LOCKMODE) -> ::types_error::PgResult<()> {
+        CLOSED.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn fake_relation_open<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        _lockmode: LOCKMODE,
+    ) -> ::types_error::PgResult<Relation<'mcx>> {
+        let mut relname = NameData::default();
+        relname.namestrcpy("t");
+        let rd_rel = FormData_pg_class {
+            relname,
+            relnamespace: 2200,
+            reltype: 0,
+            relowner: 10,
+            relam: tableam::HEAP_TABLE_AM_OID,
+            relfilenode: relid,
+            reltablespace: 0,
+            relpages: 0,
+            reltuples: -1.0,
+            relallvisible: 0,
+            reltoastrelid: 0,
+            relhasindex: false,
+            relisshared: false,
+            relpersistence: RELPERSISTENCE_PERMANENT,
+            relkind: RELKIND_RELATION,
+            relhassubclass: false,
+            relrowsecurity: false,
+            relispopulated: true,
+            relreplident: b'd',
+            relispartition: false,
+            relfrozenxid: 3,
+            relminmxid: 1,
+        };
+        let data = RelationData {
+            rd_id: relid,
+            rd_backend: INVALID_PROC_NUMBER,
+            rd_islocaltemp: false,
+            rd_isvalid: std::cell::Cell::new(true),
+            rd_createSubid: std::cell::Cell::new(0),
+            rd_newRelfilelocatorSubid: std::cell::Cell::new(0),
+            rd_firstRelfilelocatorSubid: std::cell::Cell::new(0),
+            rd_droppedSubid: std::cell::Cell::new(0),
+            rd_lockInfo: LockInfoData {
+                lockRelId: LockRelId {
+                    relId: relid,
+                    dbId: 5,
+                },
+            },
+            rd_rel,
+            rd_att: int4_tupdesc(mcx),
+            rd_index: None,
+            rd_opcintype: PgVec::new_in(mcx),
+            rd_opfamily: PgVec::new_in(mcx),
+            rd_indoption: PgVec::new_in(mcx),
+            rd_indcollation: PgVec::new_in(mcx),
+            rd_options: None,
+            pgstat_enabled: std::cell::Cell::new(true),
+            rd_amcache: Default::default(),
+            rd_supportinfo: Default::default(),
+        };
+        Ok(Relation::open(data, Some(record_close)))
+    }
+}
+
+fn mk_seqscan_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx PlannedStmt<'mcx> {
+    use ::types_nodes::bitmapset::Bitmapset;
+    use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+    use ::types_nodes::plannodes::{Plan, Scan, SeqScan};
+
+    let var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let tle = Node::mk_target_entry(mcx, var, 1, Some("a"), false).unwrap();
+    let tlist = NodeList::make1(mcx, tle).unwrap();
+    let scan_node = Node::mk(
+        mcx,
+        SeqScan {
+            scan: Scan {
+                plan: Plan {
+                    targetlist: tlist,
+                    ..Default::default()
+                },
+                scanrelid: 1,
+            },
+        },
+    )
+    .unwrap();
+
+    let rte = Node::mk(
+        mcx,
+        RangeTblEntry {
+            rtekind: RTEKind::RTE_RELATION,
+            relid,
+            relkind: ::types_rel::RELKIND_RELATION,
+            rellockmode: ::types_rel::AccessShareLock,
+            perminfoindex: 1,
+            inFromCl: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let perminfo = Node::mk(
+        mcx,
+        RTEPermissionInfo {
+            relid,
+            requiredPerms: 1 << 1, // ACL_SELECT
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut unpruned = Bitmapset::empty();
+    unpruned.add_member(mcx, 1).unwrap();
+
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(scan_node);
+    pstmt.rtable = NodeList::make1(mcx, rte).unwrap();
+    pstmt.permInfos = NodeList::make1(mcx, perminfo).unwrap();
+    pstmt.unprunableRelids = unpruned;
+    pstmt.seal_ref()
+}
+
+#[test]
+fn seqscan_end_to_end_through_real_init_path() {
+    install_seams();
+    scanfix::install();
+    let mcx = leaked_mcx();
+
+    let relid: u32 = 70001;
+    scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
+    let pstmt = mk_seqscan_pstmt(mcx, relid);
+
+    let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+    let snapshot: snapmgr::Snapshot = std::rc::Rc::new(
+        ::types_snapshot::SnapshotData::sentinel(
+            snap_ctx.mcx(),
+            ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+        ),
+    );
+
+    let qd = execmain_seams::create_query_desc::call(
+        pstmt,
+        "SELECT a FROM t",
+        Some(snapshot),
+        None,
+        CommandDest::None,
+        ParamListHandle::NULL,
+        QueryEnvHandle::NULL,
+        0,
+    )
+    .unwrap();
+    execmain_seams::executor_start::call(qd, 0).unwrap();
+    assert_eq!(
+        scanfix::ACLCHECKED_RELID.load(std::sync::atomic::Ordering::Relaxed),
+        relid
+    );
+    let desc = execmain_seams::query_desc_result_tupdesc::call(qd).unwrap();
+    assert_eq!(desc.natts, 1);
+    assert_eq!(desc.attr(0).atttypid, INT4OID);
+
+    let mut dest = DestReceiver::DoNothing;
+    execmain_seams::executor_run::call(qd, ForwardScanDirection, 0, &mut dest).unwrap();
+    assert_eq!(execmain_seams::query_desc_es_processed::call(qd), 5);
+
+    execmain_seams::executor_finish::call(qd).unwrap();
+    execmain_seams::executor_end::call(qd).unwrap();
+    assert_eq!(scanfix::CLOSED.load(std::sync::atomic::Ordering::Relaxed), 1);
+    execmain_seams::free_query_desc::call(qd);
+    scanfix::quiesced();
+}
+
 #[test]
 fn exec_clean_type_from_tl_skips_junk() {
     install_seams();

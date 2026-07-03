@@ -578,6 +578,10 @@ fn variable_set_stmt_field_order_matches_c() {
     let crate::parsenodes::DefElem {
         defnamespace: _, defname: _, arg: _, defaction: _, location: _,
     } = crate::parsenodes::DefElem::default();
+
+    assert_eq!(c_struct_fields(parse_h, "ExplainStmt"), ["query", "options"]);
+    let crate::parsenodes::ExplainStmt { query: _, options: _ } =
+        crate::parsenodes::ExplainStmt::default();
 }
 
 #[test]

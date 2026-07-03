@@ -258,6 +258,14 @@ pub struct VariableShowStmt<'mcx> {
     pub name: Option<&'mcx str>,
 }
 
+// C: raw grammar output holds the untransformed statement in `query`;
+// transformExplainStmt replaces it with the analyzed Query node in place.
+#[derive(Default)]
+pub struct ExplainStmt<'mcx> {
+    pub query: Option<Node<'mcx>>,
+    pub options: NodeList<'mcx>,
+}
+
 // SAFETY (each): tag/type pairing mirrors parsenodes.h.
 unsafe impl<'mcx> NodeVariant<'mcx> for Query<'mcx> {
     const TAG: NodeTag = NodeTag::T_Query;
@@ -279,6 +287,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for VariableSetStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for VariableShowStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_VariableShowStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ExplainStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ExplainStmt;
 }
 
 impl<'mcx> Node<'mcx> {
@@ -314,6 +325,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_variable_show_stmt(self) -> Option<&'mcx VariableShowStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_explain_stmt(self) -> Option<&'mcx ExplainStmt<'mcx>> {
         self.as_variant()
     }
 }
