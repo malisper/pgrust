@@ -74,7 +74,7 @@ pub fn fc_varcharin(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
 
 fn fc_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo, name: &'static str) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null bpchar/varchar varlena (strict fn).
-    let payload = unsafe { fcinfo.arg_varlena_packed(0) }.data();
+    let payload = unsafe { fcinfo.arg_varlena_packed(0)? }.data();
     let buf = out_scratch(flinfo, name);
     buf.clear();
     buf.reserve(payload.len() + 1);
@@ -109,21 +109,21 @@ pub fn fc_varcharrecv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
 
 pub fn fc_bpcharsend(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null bpchar varlena (strict fn).
-    let payload = unsafe { fcinfo.arg_varlena_packed(0) }.data();
+    let payload = unsafe { fcinfo.arg_varlena_packed(0)? }.data();
     let mcx = fcinfo.result_mcx();
     Ok(varlena_result(crate::bpcharsend(mcx, payload)?))
 }
 
 pub fn fc_varcharsend(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null varchar varlena (strict fn).
-    let payload = unsafe { fcinfo.arg_varlena_packed(0) }.data();
+    let payload = unsafe { fcinfo.arg_varlena_packed(0)? }.data();
     let mcx = fcinfo.result_mcx();
     Ok(varlena_result(crate::varcharsend(mcx, payload)?))
 }
 
 pub fn fc_bpchar(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null bpchar varlena (strict fn).
-    let src = unsafe { fcinfo.arg_varlena_packed(0) };
+    let src = unsafe { fcinfo.arg_varlena_packed(0)? };
     let maxlen = fcinfo.arg_i32(1);
     let is_explicit = fcinfo.arg_bool(2);
     let mcx = fcinfo.result_mcx();
@@ -135,7 +135,7 @@ pub fn fc_bpchar(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
 
 pub fn fc_varchar(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null varchar varlena (strict fn).
-    let src = unsafe { fcinfo.arg_varlena_packed(0) };
+    let src = unsafe { fcinfo.arg_varlena_packed(0)? };
     let typmod = fcinfo.arg_i32(1);
     let is_explicit = fcinfo.arg_bool(2);
     let mcx = fcinfo.result_mcx();
@@ -153,7 +153,7 @@ pub fn fc_char_bpchar(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
 
 pub fn fc_bpchar_name(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null bpchar varlena (strict fn).
-    let payload = unsafe { fcinfo.arg_varlena_packed(0) }.data();
+    let payload = unsafe { fcinfo.arg_varlena_packed(0)? }.data();
     let name = crate::bpchar_name(payload);
     let mcx = fcinfo.result_mcx();
     byref_result(mcx, &name)
@@ -214,7 +214,7 @@ macro_rules! fc_bpcharcmp {
         pub fn $fname(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             // SAFETY: catalog args are non-null bpchar varlenas (strict fn).
             let (a, b) = unsafe {
-                (fcinfo.arg_varlena_packed(0), fcinfo.arg_varlena_packed(1))
+                (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?)
             };
             Ok(Datum::$conv(crate::$core(a.data(), b.data(), fcinfo.get_collation())?))
         }
@@ -234,7 +234,7 @@ fc_bpcharcmp! {
 // C returns one of the input pointers — so do larger/smaller.
 pub fn fc_bpchar_larger(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog args are non-null bpchar varlenas (strict fn).
-    let (a, b) = unsafe { (fcinfo.arg_varlena_packed(0), fcinfo.arg_varlena_packed(1)) };
+    let (a, b) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
     Ok(
         if crate::bpcharcmp(a.data(), b.data(), fcinfo.get_collation())? >= 0 {
             fcinfo.arg(0)
@@ -246,7 +246,7 @@ pub fn fc_bpchar_larger(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
 
 pub fn fc_bpchar_smaller(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog args are non-null bpchar varlenas (strict fn).
-    let (a, b) = unsafe { (fcinfo.arg_varlena_packed(0), fcinfo.arg_varlena_packed(1)) };
+    let (a, b) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
     Ok(
         if crate::bpcharcmp(a.data(), b.data(), fcinfo.get_collation())? <= 0 {
             fcinfo.arg(0)
@@ -258,19 +258,19 @@ pub fn fc_bpchar_smaller(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
 
 pub fn fc_bpcharlen(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null bpchar varlena (strict fn).
-    let payload = unsafe { fcinfo.arg_varlena_packed(0) }.data();
+    let payload = unsafe { fcinfo.arg_varlena_packed(0)? }.data();
     Ok(Datum::from_i32(crate::bpcharlen(payload)))
 }
 
 pub fn fc_bpcharoctetlen(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null bpchar varlena (strict fn).
-    let payload = unsafe { fcinfo.arg_varlena_packed(0) }.data();
+    let payload = unsafe { fcinfo.arg_varlena_packed(0)? }.data();
     Ok(Datum::from_i32(crate::bpcharoctetlen(payload)))
 }
 
 pub fn fc_hashbpchar(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null bpchar varlena (strict fn).
-    let payload = unsafe { fcinfo.arg_varlena_packed(0) }.data();
+    let payload = unsafe { fcinfo.arg_varlena_packed(0)? }.data();
     Ok(Datum::from_i32(
         crate::hashbpchar(payload, fcinfo.get_collation())? as i32,
     ))
@@ -281,7 +281,7 @@ pub fn fc_hashbpcharextended(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null bpchar varlena (strict fn).
-    let payload = unsafe { fcinfo.arg_varlena_packed(0) }.data();
+    let payload = unsafe { fcinfo.arg_varlena_packed(0)? }.data();
     let seed = fcinfo.arg_i64(1) as u64;
     Ok(Datum::from_i64(crate::hashbpcharextended(
         payload,
@@ -295,7 +295,7 @@ macro_rules! fc_bpchar_pattern {
         pub fn $fname(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             // SAFETY: catalog args are non-null bpchar varlenas (strict fn).
             let (a, b) = unsafe {
-                (fcinfo.arg_varlena_packed(0), fcinfo.arg_varlena_packed(1))
+                (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?)
             };
             Ok(Datum::$conv(crate::$core(a.data(), b.data())))
         }

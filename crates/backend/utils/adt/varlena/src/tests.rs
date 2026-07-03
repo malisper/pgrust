@@ -197,7 +197,7 @@ fn byteain_hex_digit_message_is_c_exact() {
 
 #[test]
 fn bytea_substring_and_pos() {
-    detoast::init_seams();
+    install_detoast_seams();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut img = vec![0u8; 4];
@@ -314,19 +314,24 @@ fn builtin_table_matches_declared_arity() {
 fn install_mb_for_levenshtein() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        // UTF-8 test encoding.
-        mbutils_seams::pg_mbstrlen_with_len::set(|s| {
-            std::str::from_utf8(s).unwrap().chars().count() as i32
-        });
-        mbutils_seams::pg_mblen_range::set(|s| {
-            Ok(std::str::from_utf8(s).unwrap().chars().next().unwrap().len_utf8() as i32)
-        });
+        // Real mbutils fns: tests flip encodings via SetDatabaseEncoding.
+        mbutils_seams::pg_database_encoding_max_length::set(
+            mbutils::pg_database_encoding_max_length,
+        );
+        mbutils_seams::pg_mbstrlen_with_len::set(mbutils::pg_mbstrlen_with_len);
+        mbutils_seams::pg_mblen_range::set(mbutils::pg_mblen_range);
     });
+}
+
+fn install_detoast_seams() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(detoast::init_seams);
 }
 
 #[test]
 fn levenshtein_matches_c_values() {
     install_mb_for_levenshtein();
+    mbutils::SetDatabaseEncoding(wchar::PG_UTF8).unwrap();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let ln = |s: &str, t: &str| {
@@ -348,6 +353,7 @@ fn levenshtein_matches_c_values() {
 #[test]
 fn levenshtein_less_equal_bound_and_multibyte() {
     install_mb_for_levenshtein();
+    mbutils::SetDatabaseEncoding(wchar::PG_UTF8).unwrap();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let lle = |s: &str, t: &str, max_d: i32| {
@@ -489,13 +495,27 @@ mod text_surface {
 
     const C: u32 = C_COLLATION_OID;
 
+    fn text_image(t: &str) -> Vec<u8> {
+        let mut img = vec![0u8; 4];
+        img.extend_from_slice(t.as_bytes());
+        let hdr = datum::varlena::set_varsize_4b(img.len());
+        img[..4].copy_from_slice(&hdr);
+        img
+    }
+
     fn substr(mcx: Mcx<'_>, t: &str, s: i32, l: i32) -> String {
-        String::from_utf8(text_substring(mcx, t.as_bytes(), s, l, false).unwrap().data().to_vec())
+        crate::tests::install_mb_for_levenshtein();
+        crate::tests::install_detoast_seams();
+        let img = text_image(t);
+        String::from_utf8(text_substring(mcx, &img, s, l, false).unwrap().data().to_vec())
             .unwrap()
     }
 
     fn substr_no_len(mcx: Mcx<'_>, t: &str, s: i32) -> String {
-        String::from_utf8(text_substring(mcx, t.as_bytes(), s, -1, true).unwrap().data().to_vec())
+        crate::tests::install_mb_for_levenshtein();
+        crate::tests::install_detoast_seams();
+        let img = text_image(t);
+        String::from_utf8(text_substring(mcx, &img, s, -1, true).unwrap().data().to_vec())
             .unwrap()
     }
 

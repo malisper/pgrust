@@ -112,7 +112,7 @@ macro_rules! fc_text_n {
     ($($fname:ident: $core:ident;)*) => {$(
         pub fn $fname(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
-            let s = unsafe { fcinfo.arg_varlena_packed(0) }.data();
+            let s = unsafe { fcinfo.arg_varlena_packed(0)? }.data();
             let n = fcinfo.arg_i32(1);
             let mcx = fcinfo.result_mcx();
             Ok(varlena_result(crate::$core(mcx, s, n)?))
@@ -127,7 +127,7 @@ fc_text_n! {
 
 pub fn fc_text_reverse(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
-    let s = unsafe { fcinfo.arg_varlena_packed(0) }.data();
+    let s = unsafe { fcinfo.arg_varlena_packed(0)? }.data();
     let mcx = fcinfo.result_mcx();
     Ok(varlena_result(crate::text_reverse(mcx, s)?))
 }

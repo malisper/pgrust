@@ -149,7 +149,12 @@ fn node(out: &mut String, n: Node<'_>) {
         out.push('}');
     } else if let Some(e) = n.as_a_expr() {
         out.push_str("{A_EXPR");
-        assert!(matches!(e.kind, A_Expr_Kind::AEXPR_OP), "only AEXPR_OP rendered");
+        match e.kind {
+            A_Expr_Kind::AEXPR_OP => {}
+            A_Expr_Kind::AEXPR_LIKE => out.push_str(" LIKE"),
+            A_Expr_Kind::AEXPR_ILIKE => out.push_str(" ILIKE"),
+            other => panic!("A_Expr kind {other:?} not rendered"),
+        }
         list_field(out, "name", &e.name);
         node_field(out, "lexpr", e.lexpr);
         node_field(out, "rexpr", e.rexpr);

@@ -7,14 +7,14 @@ use ::types_fmgr::{
 
 pub fn fc_quote_ident(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is non-null text (strict fn).
-    let t = unsafe { fcinfo.arg_varlena_packed(0) };
+    let t = unsafe { fcinfo.arg_varlena_packed(0)? };
     let mcx = fcinfo.result_mcx();
     Ok(varlena_result(crate::quote_ident(mcx, t.data())?))
 }
 
 pub fn fc_quote_literal(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is non-null text (strict fn).
-    let t = unsafe { fcinfo.arg_varlena_packed(0) };
+    let t = unsafe { fcinfo.arg_varlena_packed(0)? };
     let mcx = fcinfo.result_mcx();
     Ok(varlena_result(crate::quote_literal(mcx, t.data())?))
 }
@@ -25,7 +25,7 @@ pub fn fc_quote_nullable(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
         return Ok(varlena_result(varlena::cstring_to_text(mcx, b"NULL")?));
     }
     // SAFETY: nullness checked above; catalog arg 0 is text.
-    let t = unsafe { fcinfo.arg_varlena_packed(0) };
+    let t = unsafe { fcinfo.arg_varlena_packed(0)? };
     Ok(varlena_result(crate::quote_literal(mcx, t.data())?))
 }
 

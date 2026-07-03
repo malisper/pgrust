@@ -18,6 +18,11 @@ const ERR: &str = "ERR:";
 
 fn set_utf8() {
     mbutils::SetDatabaseEncoding(wchar::PG_UTF8).unwrap();
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        mbutils::init_seams();
+        detoast::init_seams();
+    });
 }
 
 fn render<T: std::fmt::Display>(r: Result<T, Box<types_error::PgError>>) -> String {
@@ -133,8 +138,12 @@ fn substr_differential() {
     let mut checked = 0;
     let mut mismatches = Vec::new();
     for (i, (s, st, l)) in corpus.iter().enumerate() {
+        let mut img = vec![0u8; 4];
+        img.extend_from_slice(s.as_bytes());
+        let hdr = datum::varlena::set_varsize_4b(img.len());
+        img[..4].copy_from_slice(&hdr);
         let got = render(
-            text_substring(mcx, s.as_bytes(), *st, l.unwrap_or(-1), l.is_none())
+            text_substring(mcx, &img, *st, l.unwrap_or(-1), l.is_none())
                 .map(|v| String::from_utf8(v.data().to_vec()).unwrap()),
         );
         checked += 1;
