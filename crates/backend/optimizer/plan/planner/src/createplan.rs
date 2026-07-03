@@ -88,7 +88,11 @@ fn use_physical_tlist(run: &PlannerRun<'_>, best_path: PathId, flags: i32) -> bo
     let base = run.root.path(best_path).base();
     let rel_id = base.parent;
     let rel = run.root.rel(rel_id);
-    if rel.rtekind != types_pathnodes::RTE_RELATION
+    // C also admits SUBQUERY/FUNCTION/TABLEFUNC/VALUES; those arms of
+    // build_physical_tlist are unported, so their scans keep the path tlist
+    // (a VERBOSE Output divergence only, not a semantic one).
+    if (rel.rtekind != types_pathnodes::RTE_RELATION
+        && rel.rtekind != types_pathnodes::RTE_CTE)
         || rel.reloptkind != types_pathnodes::RELOPT_BASEREL
     {
         return false;
@@ -168,14 +172,27 @@ fn apply_pathtarget_labeling_to_tlist(
     }
 }
 
-// build_physical_tlist (plancat.c), heap-relation arm.
+// build_physical_tlist (plancat.c), heap-relation + CTE arms.
 fn build_physical_tlist<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: types_pathnodes::RelId,
 ) -> PgResult<NodeList<'mcx>> {
     let mcx = run.mcx;
     let varno = run.root.rel(rel_id).relid;
-    let reloid = run.rte(varno as usize).relid;
+    let rte = run.rte(varno as usize);
+    if run.root.rel(rel_id).rtekind == types_pathnodes::RTE_CTE {
+        // expandRTE's CTE leg: one Var per output column.
+        let mut tlist = NodeList::nil();
+        for (i, (typid, typmod)) in rte.coltypes.iter().zip(rte.coltypmods.iter()).enumerate() {
+            let coll = rte.colcollations.iter().nth(i).unwrap_or(0);
+            let var =
+                Node::mk_var(mcx, varno as i32, (i + 1) as i16, typid, typmod, coll, 0)?;
+            let tle = Node::mk_target_entry(mcx, var, (i + 1) as i16, None, false)?;
+            tlist.lappend(mcx, tle)?;
+        }
+        return Ok(tlist);
+    }
+    let reloid = rte.relid;
     let relation = table::table_open(mcx, reloid, 0)?;
     let mut tlist = NodeList::nil();
     for att in relation.rd_att.attrs.iter() {
