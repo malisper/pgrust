@@ -1155,11 +1155,14 @@ pub fn exec_end_agg(node: &mut AggStateData<'_>) {
     node.qual = None;
     node.perhash = None;
     node.persort = None;
+    node.gsets = None;
     for pa in node.peragg.iter_mut() {
         pa.finalfn = None;
     }
     node.proj.release_frames();
-    node.evaltrans.release_frames();
+    if let Some(et) = node.evaltrans.as_mut() {
+        et.release_frames();
+    }
     node.ps_ResultTupleDesc = None;
 }
 
@@ -1216,5 +1219,5 @@ mcx::forget_safe_struct!(
     AggStateData<'_> { plan, ps_ExprContext, tmpcontext, agg_node,
         ps_ResultTupleSlot, peragg, trans_init, trans_typ, _pergroup,
         pergroup_base, agg_values_base, agg_nulls_base, agg_done, numtrans;
-        ps_ResultTupleDesc, proj, evaltrans, perhash, persort, qual },
+        ps_ResultTupleDesc, proj, evaltrans, perhash, persort, gsets, qual },
 );
