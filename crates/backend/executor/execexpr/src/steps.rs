@@ -249,15 +249,23 @@ pub struct IoCoerceCalls {
     pub in_strict: bool,
 }
 
+// Resolved once at compile; the interpreter never indexes frames. fn_addr
+// rides in the FmgrInfo header (same line as the flinfo deref every call
+// makes) — keeping a copy here would push ScalarArrayOp/MinMax steps >64B.
 #[derive(Clone, Copy, Debug)]
 pub struct FuncCall {
-    pub fn_addr: PGFunction,
     pub(crate) fcinfo: NonNull<u8>,
-    // Resolved once at compile (C keeps the same extra copies in d.func "to
-    // save an indirection at runtime"); the interpreter never indexes frames.
     pub(crate) flinfo: NonNull<FmgrInfo>,
     pub frame: u32,
     pub nargs: u16,
+}
+
+impl FuncCall {
+    #[inline(always)]
+    pub(crate) fn fn_addr(&self) -> PGFunction {
+        // SAFETY: frame-owned mcx-boxed FmgrInfo, live for 'mcx.
+        unsafe { self.flinfo.as_ref() }.fn_addr
+    }
 }
 
 // Step-owned call state: the FmgrInfo carrier plus its heap fcinfo image

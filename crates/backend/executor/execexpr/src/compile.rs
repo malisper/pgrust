@@ -416,7 +416,6 @@ fn build_agg_trans<'mcx>(
             return Err(retset_error());
         }
         let init_strict = flinfo.fn_strict && spec.init_value_is_null;
-        let fn_addr = flinfo.fn_addr;
         let fn_strict = flinfo.fn_strict;
         if let Some(ord) = spec.ordered {
             if spec.aggfilter.is_some() {
@@ -433,7 +432,7 @@ fn build_agg_trans<'mcx>(
         unsafe { crate::steps::fcinfo_mut(frame.fcinfo, nargs as u16).context = agg_node };
         let frame_ix = state.frames.len() as u32;
         let call =
-            FuncCall { fn_addr, fcinfo: frame.fcinfo, flinfo: frame.flinfo, frame: frame_ix, nargs: nargs as u16 };
+            FuncCall { fcinfo: frame.fcinfo, flinfo: frame.flinfo, frame: frame_ix, nargs: nargs as u16 };
         state
             .frames
             .try_reserve(1)
@@ -659,10 +658,9 @@ pub fn exec_build_hash32_from_attrs<'mcx>(
     for i in 0..num_cols {
         let attnum = (key_col_idx[i] - 1) as u16;
         let flinfo = fmgr_core::fmgr_info(hash_fn_oids[i])?;
-        let fn_addr = flinfo.fn_addr;
         let frame = FuncFrame::new_in(mcx, flinfo, 1, collations[i])?;
         let frame_ix = state.frames.len() as u32;
-        let call = FuncCall { fn_addr, fcinfo: frame.fcinfo, flinfo: frame.flinfo, frame: frame_ix, nargs: 1 };
+        let call = FuncCall { fcinfo: frame.fcinfo, flinfo: frame.flinfo, frame: frame_ix, nargs: 1 };
         state
             .frames
             .try_reserve(1)
@@ -729,10 +727,9 @@ pub fn exec_build_grouping_equal<'mcx>(
             return Err(permission_denied(mcx, foid)?);
         }
         let flinfo = fmgr_core::fmgr_info(foid)?;
-        let fn_addr = flinfo.fn_addr;
         let frame = FuncFrame::new_in(mcx, flinfo, 2, collations[natt])?;
         let frame_ix = state.frames.len() as u32;
-        let call = FuncCall { fn_addr, fcinfo: frame.fcinfo, flinfo: frame.flinfo, frame: frame_ix, nargs: 2 };
+        let call = FuncCall { fcinfo: frame.fcinfo, flinfo: frame.flinfo, frame: frame_ix, nargs: 2 };
         state
             .frames
             .try_reserve(1)
@@ -1334,7 +1331,6 @@ fn init_scalar_array_op<'mcx>(
 
     let mut flinfo = fmgr_core::fmgr_info(opfuncid)?;
     flinfo.fn_expr = Some(erase_fn_expr(mcx, node)?);
-    let fn_addr = flinfo.fn_addr;
     let strict = flinfo.fn_strict;
     let mut frame = FuncFrame::new_in(mcx, flinfo, 2, saop.inputcollid)?;
 
@@ -1348,7 +1344,7 @@ fn init_scalar_array_op<'mcx>(
             })
         };
     }
-    let call = FuncCall { fn_addr, fcinfo: frame.fcinfo, flinfo: frame.flinfo, frame: frame_ix, nargs: 2 };
+    let call = FuncCall { fcinfo: frame.fcinfo, flinfo: frame.flinfo, frame: frame_ix, nargs: 2 };
     state.frames.try_reserve(1).map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
     state.frames.push(frame);
 
@@ -1741,10 +1737,9 @@ fn init_minmax<'mcx>(
     }
     let mut flinfo = fmgr_core::fmgr_info(cmp_proc)?;
     flinfo.fn_expr = Some(erase_fn_expr(mcx, node)?);
-    let fn_addr = flinfo.fn_addr;
     let frame = FuncFrame::new_in(mcx, flinfo, 2, mm.inputcollid)?;
     let frame_ix = state.frames.len() as u32;
-    let call = FuncCall { fn_addr, fcinfo: frame.fcinfo, flinfo: frame.flinfo, frame: frame_ix, nargs: 2 };
+    let call = FuncCall { fcinfo: frame.fcinfo, flinfo: frame.flinfo, frame: frame_ix, nargs: 2 };
     state.frames.try_reserve(1).map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
     state.frames.push(frame);
 
@@ -1883,10 +1878,8 @@ fn init_coerce_via_io<'mcx>(
     let (infunc, typioparam) = lsyscache::getTypeInputInfo(cio.resulttype)?;
 
     let flinfo_out = fmgr_core::fmgr_info(outfunc)?;
-    let out_addr = flinfo_out.fn_addr;
     let frame_out = FuncFrame::new_in(mcx, flinfo_out, 1, ::types_core::primitive::InvalidOid)?;
     let outcall = FuncCall {
-        fn_addr: out_addr,
         fcinfo: frame_out.fcinfo,
         flinfo: frame_out.flinfo,
         frame: state.frames.len() as u32,
@@ -1896,7 +1889,6 @@ fn init_coerce_via_io<'mcx>(
     state.frames.push(frame_out);
 
     let flinfo_in = fmgr_core::fmgr_info(infunc)?;
-    let in_addr = flinfo_in.fn_addr;
     let in_strict = flinfo_in.fn_strict;
     let frame_in = FuncFrame::new_in(mcx, flinfo_in, 3, ::types_core::primitive::InvalidOid)?;
     // SAFETY: slots 1/2 of the frame's freshly allocated 3-arg fcinfo,
@@ -1912,7 +1904,6 @@ fn init_coerce_via_io<'mcx>(
         });
     }
     let incall = FuncCall {
-        fn_addr: in_addr,
         fcinfo: frame_in.fcinfo,
         flinfo: frame_in.flinfo,
         frame: state.frames.len() as u32,
@@ -1961,7 +1952,6 @@ fn init_func<'mcx>(
         return Err(retset_error());
     }
 
-    let fn_addr = flinfo.fn_addr;
     let fn_strict = flinfo.fn_strict;
     let fn_stats = flinfo.fn_stats;
     let mut frame = FuncFrame::new_in(mcx, flinfo, nargs as u16, inputcollid)?;
@@ -1989,7 +1979,7 @@ fn init_func<'mcx>(
     }
     frame.const_args = const_bits;
     frame.const_null_args = const_null_bits;
-    let call = FuncCall { fn_addr, fcinfo: frame.fcinfo, flinfo: frame.flinfo, frame: frame_ix, nargs: nargs as u16 };
+    let call = FuncCall { fcinfo: frame.fcinfo, flinfo: frame.flinfo, frame: frame_ix, nargs: nargs as u16 };
     state.frames.try_reserve(1).map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
     state.frames.push(frame);
     for (argno, arg) in args.iter().enumerate() {
@@ -2122,7 +2112,7 @@ fn select_kernel(state: &ExprState<'_>) -> Kernel {
                 if state.is_result(*out) && all_args_const(state, *call) =>
             {
                 Kernel::JustFunc {
-                    fn_addr: call.fn_addr,
+                    fn_addr: call.fn_addr(),
                     frame: call.frame,
                     nargs: call.nargs,
                     strict: !matches!(steps[0], Step::FuncExpr { .. }),
