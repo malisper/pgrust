@@ -14,6 +14,7 @@ pub(crate) fn loc(funcname: &'static str) -> ErrorLocation {
 }
 
 mod access;
+mod cursor;
 mod execute;
 mod plan;
 mod tuptable;
@@ -22,9 +23,11 @@ pub use access::{SPI_fnumber, SPI_getbinval, SPI_getvalue, SPI_gettypeid};
 pub use execute::{
     SPI_exec, SPI_execp, SPI_execute, SPI_execute_plan, SPI_execute_snapshot, SpiExecuteOptions,
 };
+pub use cursor::{SPI_cursor_close, SPI_cursor_fetch, SPI_cursor_open, SpiCursor};
 pub use plan::{
-    SPI_freeplan, SPI_getargcount, SPI_getargtypeid, SPI_keepplan, SPI_plan_is_valid, SPI_prepare,
-    SPI_prepare_cursor, SpiPlanPtr,
+    SPI_freeplan, SPI_getargcount, SPI_getargtypeid, SPI_keepplan, SPI_plan_command_tags,
+    SPI_plan_is_valid, SPI_plan_single_source, SPI_prepare, SPI_prepare_cursor,
+    SPI_prepare_plpgsql, SpiPlanPtr,
 };
 pub use tuptable::{tuptable_with, SPI_freetuptable, TuptabData, TuptabHandle};
 
@@ -338,10 +341,6 @@ pub fn debug_stack_depth() -> usize {
 pub fn debug_live_counts() -> (usize, usize) {
     let tuptables = SPI_STACK.with(|s| s.borrow().iter().map(|c| c.tuptables.len()).sum());
     (tuptables, plan::debug_live_plans())
-}
-
-pub fn SPI_cursor_open(_name: &str, _plan: SpiPlanPtr) -> ! {
-    panic!("SPI_cursor_open (spi.c): SPI cursor lane not ported")
 }
 
 pub fn SPI_cursor_find(_name: &str) -> ! {

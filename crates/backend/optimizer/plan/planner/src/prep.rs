@@ -36,19 +36,54 @@ pub fn replace_empty_jointree<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) -> 
     Ok(())
 }
 
-// A lone RangeTblRef under the top FromExpr can never be elided or dropped.
-pub fn remove_useless_result_rtes(run: &PlannerRun<'_>, parse: &Query<'_>) {
+// remove_useless_results_recurse, all-RangeTblRef top FromExpr slice: C
+// deletes each RESULT child while more than one child remains (joining to a
+// one-row table changes nothing). remove_result_refs is a no-op here —
+// PlaceHolderVar creation is loud, so no PHV can reference the dropped rel.
+pub fn remove_useless_result_rtes<'mcx>(
+    run: &PlannerRun<'mcx>,
+    parse: &mut Query<'mcx>,
+) -> PgResult<()> {
+    let mcx = run.mcx;
     let f = parse.jointree.expect("top jointree is a FromExpr");
-    // A FromExpr of plain RangeTblRefs has no RTE_RESULT children to remove
-    // (RTE_RESULT only enters via replace_empty_jointree's single-item form).
-    if f.fromlist.iter().all(|n| n.node_tag() == NodeTag::T_RangeTblRef) {
-        let _ = run;
-        return;
+    if !f.fromlist.iter().all(|n| n.node_tag() == NodeTag::T_RangeTblRef) {
+        panic!(
+            "remove_useless_results_recurse (prepjointree.c): non-trivial jointree; \
+             M2 join lane"
+        );
     }
-    panic!(
-        "remove_useless_results_recurse (prepjointree.c): non-trivial jointree; \
-         M2 join lane"
+    let is_result = |n: types_nodes::Node<'mcx>| {
+        let rti = n.as_range_tbl_ref().expect("RangeTblRef").rtindex;
+        parse
+            .rtable
+            .nth(rti as usize - 1)
+            .as_range_tbl_entry()
+            .expect("rtable cell")
+            .rtekind
+            == RTEKind::RTE_RESULT
+    };
+    let total = f.fromlist.len();
+    let mut dropped = 0usize;
+    let mut fromlist = NodeList::nil();
+    for n in &f.fromlist {
+        if total - dropped > 1 && is_result(n) {
+            dropped += 1;
+            continue;
+        }
+        fromlist.lappend(mcx, n)?;
+    }
+    if dropped == 0 {
+        return Ok(());
+    }
+    // C also drops any PlanRowMark on a RESULT RTE; the rowmark store is
+    // id-indexed here, so removal would dangle ids — loud until a lane needs it.
+    assert!(
+        run.root.rowMarks.is_empty(),
+        "remove_useless_result_rtes (prepjointree.c): PlanRowMark drop on RESULT; \
+         M2 rowmark lane"
     );
+    parse.jointree = Some(alloc_leak_in(mcx, FromExpr { fromlist, quals: f.quals })?);
+    Ok(())
 }
 
 // preprocess_rowmarks (planner.c); UPDATE/DELETE non-target marks stay loud.

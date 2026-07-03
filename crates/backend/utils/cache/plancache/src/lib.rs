@@ -391,6 +391,50 @@ pub fn CachedPlanIsValid(h: CachedPlanSourceHandle) -> bool {
     with_source(h, |src| src.is_valid)
 }
 
+// C CachedPlanIsSimplyValid (plancache.c) minus the resowner arm: true only
+// while `cplan` is the source's current generic plan, both are valid, and the
+// captured search_path still matches the current environment. Caller must
+// hold a refcount on `cplan`.
+pub fn CachedPlanIsSimplyValid(
+    h: CachedPlanSourceHandle,
+    cplan: CachedPlanHandle,
+) -> PgResult<bool> {
+    let ok = with_cache(|pc| {
+        let (src_valid, gplan) = {
+            let src = source_mut(pc, h);
+            (src.is_valid, src.gplan)
+        };
+        src_valid && gplan == Some(cplan) && plan_mut(pc, cplan).is_valid
+    });
+    if !ok {
+        return Ok(false);
+    }
+    // Matcher taken out of the registry: SearchPathMatchesCurrentEnvironment
+    // probes catalogs and must run outside the cache borrow.
+    let mut matcher = with_source(h, |src| src.search_path.take());
+    let matches = match matcher.as_mut() {
+        Some(m) => catalog_namespace::SearchPathMatchesCurrentEnvironment(m),
+        None => panic!("CachedPlanIsSimplyValid: valid revalidatable source lost its search_path"),
+    };
+    with_source(h, |src| src.search_path = matcher);
+    matches
+}
+
+thread_local! {
+    // Monotonic count of plancache invalidation events; consumers holding
+    // uncached coercion expressions (plpgsql cast cache) rebuild on any bump
+    // (conservative stand-in for C's CachedExpression is_valid).
+    static INVAL_COUNTER: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
+pub fn PlanCacheInvalCounter() -> u64 {
+    INVAL_COUNTER.with(core::cell::Cell::get)
+}
+
+fn bump_inval_counter() {
+    INVAL_COUNTER.with(|c| c.set(c.get().wrapping_add(1)));
+}
+
 /// Valid while the caller holds a refcount on `cplan` (C: cplan->stmt_list).
 pub fn CachedPlanStmtList(cplan: CachedPlanHandle) -> &'static [PlannedStmt<'static>] {
     with_plan(cplan, |plan| {
@@ -1204,6 +1248,7 @@ fn invalidate_source(h: CachedPlanSourceHandle) {
 }
 
 pub fn PlanCacheRelCallback(_arg: Datum, relid: Oid) {
+    bump_inval_counter();
     with_cache(|pc| {
         for i in 0..pc.saved_plan_list.len() {
             let h = pc.saved_plan_list[i];
@@ -1248,6 +1293,7 @@ pub fn PlanCacheRelCallback(_arg: Datum, relid: Oid) {
 }
 
 pub fn PlanCacheObjectCallback(_arg: Datum, cacheid: i32, hashvalue: u32) {
+    bump_inval_counter();
     with_cache(|pc| {
         for i in 0..pc.saved_plan_list.len() {
             let h = pc.saved_plan_list[i];
@@ -1289,6 +1335,7 @@ pub fn PlanCacheSysCallback(_arg: Datum, _cacheid: i32, _hashvalue: u32) {
 }
 
 pub fn ResetPlanCache() {
+    bump_inval_counter();
     with_cache(|pc| {
         for i in 0..pc.saved_plan_list.len() {
             let h = pc.saved_plan_list[i];

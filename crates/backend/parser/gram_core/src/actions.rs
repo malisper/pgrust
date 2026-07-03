@@ -133,6 +133,78 @@ impl<'mcx> Parser<'mcx> {
                 self.parsetree =
                     NodeList::make1(mcx, view.v(2).node().expect("Typename node"))?;
             }
+            // parse_toplevel: MODE_PLPGSQL_EXPR PLpgSQL_Expr
+            //              | MODE_PLPGSQL_ASSIGN{1,2,3} PLAssignStmt
+            4..=7 => {
+                let stmt = view.v(2).node().expect("plpgsql toplevel node");
+                if rule >= 5 {
+                    // SAFETY: as rule 8 — parser-owned tree, no live derived refs.
+                    unsafe {
+                        stmt.with_mut::<types_nodes::PLAssignStmt, _>(|n| {
+                            n.nnames = rule as i32 - 4;
+                        })
+                        .expect("PLAssignStmt");
+                    }
+                }
+                self.parsetree =
+                    NodeList::make1(mcx, Node::mk_raw_stmt(mcx, Some(stmt), view.l(2), 0)?)?;
+            }
+            // PLpgSQL_Expr: opt_distinct_clause opt_target_list from_clause
+            //   where_clause group_clause having_clause window_clause
+            //   opt_sort_clause opt_select_limit opt_for_locking_clause
+            2464 => {
+                let mut n = Node::build::<SelectStmt>(mcx)?;
+                let v = view.v(1);
+                if v.is_distinct_all() {
+                    n.distinctClause = DistinctClause::All;
+                } else {
+                    let l = v.list();
+                    if !l.is_nil() {
+                        n.distinctClause = DistinctClause::On(l);
+                    }
+                }
+                n.targetList = view.v(2).list();
+                n.fromClause = view.v(3).list();
+                n.whereClause = view.v(4).node();
+                let (distinct, list) = view.v(5).group();
+                n.groupClause = list;
+                n.groupDistinct = distinct;
+                n.havingClause = view.v(6).node();
+                n.windowClause = view.v(7).list();
+                n.sortClause = view.v(8).list();
+                if let Some(l) = view.v(9).limit() {
+                    n.limitOffset = l.limitOffset;
+                    n.limitCount = l.limitCount;
+                    if n.sortClause.is_nil()
+                        && l.limitOption == LimitOption::LIMIT_OPTION_WITH_TIES
+                    {
+                        return Err(self.errposition_error(
+                            "WITH TIES cannot be specified without ORDER BY clause".into(),
+                            l.optionLoc,
+                        ));
+                    }
+                    n.limitOption = l.limitOption;
+                }
+                n.lockingClause = view.v(10).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // PLAssignStmt: plassign_target opt_indirection plassign_equals PLpgSQL_Expr
+            2465 => {
+                let mut n = Node::build::<types_nodes::PLAssignStmt>(mcx)?;
+                n.name = view.v(1).str_val();
+                // check_indirection is a no-op: A_Indices construction is an
+                // unported loud.
+                n.indirection = view.v(2).list();
+                n.val = view.v(4).node();
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // plassign_target: ColId | PARAM
+            2467 => {
+                let txt = format!("${}", view.v(1).ival());
+                let bytes = mcx::slice_borrow_in(mcx, txt.as_bytes())?;
+                *yyval = YYSTYPE::Str(core::str::from_utf8(bytes).expect("ascii"));
+            }
             // stmtmulti: stmtmulti ';' toplevel_stmt
             8 => {
                 let mut list = view.v(1).list();

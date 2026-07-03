@@ -14,6 +14,8 @@ use crate::relnode::{
     relids_is_subset, relids_overlap, relids_union,
 };
 use crate::run::PlannerRun;
+pub use types_pathnodes::run::{init_dummy_sjinfo, rinfo_is_pushed_down};
+use crate::costsize::set_joinrel_size_estimates;
 
 const RTE_JOIN: u32 = types_nodes::parsenodes::RTEKind::RTE_JOIN as u32;
 
@@ -209,30 +211,6 @@ pub fn is_dummy_rel(root: &types_pathnodes::PlannerInfo<'_>, rel: RelId) -> bool
         }
     }
     matches!(path, types_pathnodes::PathNode::GroupResultPath(_))
-}
-
-pub fn init_dummy_sjinfo<'mcx>(
-    run: &PlannerRun<'mcx>,
-    left_relids: Relids<'mcx>,
-    right_relids: Relids<'mcx>,
-) -> SpecialJoinInfo<'mcx> {
-    SpecialJoinInfo {
-        min_lefthand: relids_copy(run.mcx, &left_relids),
-        min_righthand: relids_copy(run.mcx, &right_relids),
-        syn_lefthand: left_relids,
-        syn_righthand: right_relids,
-        jointype: JOIN_INNER,
-        ojrelid: 0,
-        commute_above_l: None,
-        commute_above_r: None,
-        commute_below_l: None,
-        commute_below_r: None,
-        lhs_strict: false,
-        semi_can_btree: false,
-        semi_can_hash: false,
-        semi_operators: PgVec::new_in(run.mcx),
-        semi_rhs_exprs: PgVec::new_in(run.mcx),
-    }
 }
 
 pub fn make_join_rel(
@@ -691,92 +669,3 @@ fn build_joinrel_joinlist(run: &mut PlannerRun<'_>, joinrel: RelId, outer_rel: R
     run.root.rel_mut(joinrel).joininfo = result;
 }
 
-// RINFO_IS_PUSHED_DOWN (pathnodes.h).
-pub fn rinfo_is_pushed_down(
-    run: &PlannerRun<'_>,
-    rid: types_pathnodes::RinfoId,
-    joinrelids: &Relids<'_>,
-) -> bool {
-    let ri = run.root.rinfo(rid);
-    ri.is_pushed_down || !relids_is_subset(&ri.required_relids, joinrelids)
-}
-
-// set_joinrel_size_estimates + calc_joinrel_size_estimate (costsize.c),
-// INNER/LEFT/SEMI/ANTI arms; FK selectivity is 1.0 while fkey_list stays
-// empty. Outer joins (incl. ANTI) split joinquals from pushed-down quals;
-// INNER and SEMI use the whole restrictlist.
-fn set_joinrel_size_estimates<'mcx>(
-    run: &mut PlannerRun<'mcx>,
-    joinrel: RelId,
-    outer_rel: RelId,
-    inner_rel: RelId,
-    sjinfo: &SpecialJoinInfo<'mcx>,
-    restrictlist: &[types_pathnodes::RinfoId],
-) -> PgResult<()> {
-    debug_assert!(run.root.fkey_list.is_empty());
-    let outer_rows = run.root.rel(outer_rel).rows;
-    let inner_rows = run.root.rel(inner_rel).rows;
-    let jointype = sjinfo.jointype;
-    let is_outer = crate::joinpath::is_outer_join(jointype);
-    let (jselec, pselec) = if is_outer {
-        let joinrelids = relids_copy(run.mcx, &run.root.rel(joinrel).relids);
-        let mut joinquals: PgVec<'mcx, types_pathnodes::RinfoId> = PgVec::new_in(run.mcx);
-        let mut pushedquals: PgVec<'mcx, types_pathnodes::RinfoId> = PgVec::new_in(run.mcx);
-        for &rid in restrictlist {
-            if rinfo_is_pushed_down(run, rid, &joinrelids) {
-                pushedquals.push(rid);
-            } else {
-                joinquals.push(rid);
-            }
-        }
-        let jselec = crate::clausesel::clauselist_selectivity(
-            run,
-            &joinquals,
-            0,
-            jointype,
-            Some(sjinfo),
-        )?;
-        let pselec = crate::clausesel::clauselist_selectivity(
-            run,
-            &pushedquals,
-            0,
-            jointype,
-            Some(sjinfo),
-        )?;
-        (jselec, pselec)
-    } else {
-        let jselec = crate::clausesel::clauselist_selectivity(
-            run,
-            restrictlist,
-            0,
-            jointype,
-            Some(sjinfo),
-        )?;
-        (jselec, 0.0)
-    };
-    let nrows = match jointype {
-        JOIN_INNER => outer_rows * inner_rows * jselec,
-        JOIN_LEFT => {
-            let mut nrows = outer_rows * inner_rows * jselec;
-            if nrows < outer_rows {
-                nrows = outer_rows;
-            }
-            nrows * pselec
-        }
-        types_pathnodes::JOIN_SEMI => outer_rows * jselec,
-        types_pathnodes::JOIN_ANTI => outer_rows * (1.0 - jselec) * pselec,
-        types_pathnodes::JOIN_FULL => {
-            let mut nrows = outer_rows * inner_rows * jselec;
-            if nrows < outer_rows {
-                nrows = outer_rows;
-            }
-            if nrows < inner_rows {
-                nrows = inner_rows;
-            }
-            nrows * pselec
-        }
-        other => panic!("calc_joinrel_size_estimate (costsize.c): jointype {other}"),
-    };
-    run.root.rel_mut(joinrel).rows = crate::costsize::clamp_row_est(nrows);
-    Ok(())
-}

@@ -148,6 +148,7 @@ pub fn init_all() {
     lsyscache::init_seams();
     plancache::init_seams();
     planner::init_seams();
+    costsize::init_seams();
     relcache::init_seams();
     relcache_build::init_seams();
     relmapper::init_seams();
@@ -163,6 +164,7 @@ pub fn init_all() {
     fmgr_core::register_late_builtins(dbcommands::builtins::DBCOMMANDS_BUILTINS);
     fmgr_core::register_late_builtins(adt_rowtypes::ROWTYPES_BUILTINS);
     sql_functions::init_seams();
+    plpgsql::init_seams();
     fmgr_core::register_late_builtins(adt_geo::builtins::GEO_BUILTINS);
     fmgr_core::register_late_builtins(gistproc::GISTPROC_BUILTINS);
     fmgr_core::register_late_builtins(spgist_text::SPGIST_TEXT_BUILTINS);

@@ -677,9 +677,22 @@ pub struct AlterEnumStmt<'mcx> {
     pub skipIfNewValExists: bool,
 }
 
+/// `val` is a SelectStmt node (the PLpgSQL_Expr production's result).
+#[derive(Default)]
+pub struct PLAssignStmt<'mcx> {
+    pub name: &'mcx str,
+    pub indirection: NodeList<'mcx>,
+    pub nnames: i32,
+    pub val: Option<Node<'mcx>>,
+    pub location: ParseLoc,
+}
+
 // SAFETY (each): tag/type pairing mirrors parsenodes.h.
 unsafe impl<'mcx> NodeVariant<'mcx> for RawStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_RawStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for PLAssignStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_PLAssignStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for CreateDomainStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CreateDomainStmt;
@@ -893,6 +906,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_raw_stmt(self) -> Option<&'mcx RawStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_pl_assign_stmt(self) -> Option<&'mcx PLAssignStmt<'mcx>> {
         self.as_variant()
     }
 
