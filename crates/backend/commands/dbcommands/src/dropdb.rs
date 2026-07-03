@@ -92,7 +92,7 @@ fn count_db_subscriptions(mcx: Mcx<'_>, dbid: Oid) -> PgResult<i32> {
 fn name_key<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<(mcx::PgBox<'mcx, NameData>, ScanKeyData)> {
     let mut nd = NameData::default();
     nd.namestrcpy(name);
-    let boxed = mcx::PgBox::new_in(nd, mcx)?;
+    let boxed = mcx::PgBox::new_in(nd, mcx);
     let mut key = ScanKeyData::empty();
     key.sk_attno = Anum_pg_database_datname as AttrNumber;
     key.sk_strategy = BTEqualStrategyNumber;
