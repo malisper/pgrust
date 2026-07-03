@@ -1305,6 +1305,10 @@ fn release_owned(node: &mut PlanStateNode<'_>) {
             end_base(&mut rs.ps);
             rs.resconstantqual = None;
         }
+        PlanStateNode::ProjectSet(ps) => {
+            end_base(&mut ps.ps);
+            crate::nodeprojectset::release_project_set(ps);
+        }
         PlanStateNode::SeqScan(ss) => end_scan(&mut ss.ss),
         PlanStateNode::FunctionScan(fs) => end_scan(&mut fs.ss),
         PlanStateNode::ValuesScan(vs) => end_scan(&mut vs.ss),
@@ -1803,6 +1807,6 @@ pub(crate) fn with_eval_slots<'mcx, R>(
         IncrementalSort(x), Unique(x), Limit(x), BitmapHeapScan(x),
         BitmapIndexScan(x), Append(x), SubqueryScan(x), SetOp(x), LockRows(x),
         BitmapAnd(x), BitmapOr(x), ModifyTable(x), NestLoop(x), HashJoin(x),
-        MergeJoin(x), WindowAgg(x), Instrumented(x),
+        MergeJoin(x), WindowAgg(x), ProjectSet(x), Instrumented(x),
     },
 );

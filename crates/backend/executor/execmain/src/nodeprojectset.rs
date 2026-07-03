@@ -300,3 +300,13 @@ pub fn exec_re_scan_project_set_local(node: &mut ProjectSetState<'_>) {
         }
     }
 }
+
+pub(crate) fn release_project_set(node: &mut ProjectSetState<'_>) {
+    node.elems.clear();
+}
+
+// Exempt: elems (compiled ExprStates + FmgrInfo fn_extra Boxes) released in
+// release_owned; elemdone is drop-free (foreign Copy enum, uncensusable here).
+::mcx::forget_safe_struct!(
+    ProjectSetState<'_> { ps, outer, pending_srf_tuples; elems, elemdone },
+);
