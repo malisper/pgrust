@@ -946,6 +946,60 @@ fn heapgettup_pagemode<'mcx>(scan: &mut HeapScanDescData<'mcx>, dir: ScanDirecti
     Ok(())
 }
 
+// Page-batch scan feed (upstream batch table-AM scan design, CF 6176):
+// forward pagemode only, whole pages consumed by the fused executor drive.
+// INVARIANT: no interleaving with per-tuple getnext calls on the same scan
+// (rs_cindex parks at the page end so a stray continue-walk advances pages).
+pub fn heap_getnextpagebatch(scan: &mut HeapScanDescData<'_>) -> PgResult<u32> {
+    debug_assert!((scan.rs_base.rs_flags & SO_ALLOW_PAGEMODE) != 0);
+    debug_assert!(scan.rs_base.rs_nkeys == 0);
+    loop {
+        if !pagemode_next_page(scan, ScanDirection::ForwardScanDirection)? {
+            end_of_scan(scan);
+            return Ok(0);
+        }
+        if scan.rs_ntuples > 0 {
+            scan.rs_cindex = scan.rs_ntuples - 1;
+            if scan.rs_base.rs_rd.pgstat_enabled.get() {
+                scan.rs_pgstat_getnext += scan.rs_ntuples as u64;
+            }
+            return Ok(scan.rs_ntuples);
+        }
+    }
+}
+
+pub fn heap_batch_store_slot<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut HeapScanDescData<'mcx>,
+    i: u32,
+    slot: &mut SlotData<'mcx>,
+) {
+    debug_assert!(i < scan.rs_ntuples && !scan.rs_cpage.is_null());
+    // SAFETY: the heapgettup_pagemode walk verbatim — i < rs_ntuples <=
+    // MaxHeapTuplesPerPage (heap_prepare_pagescan's per-page bound), lineoff
+    // from page_collect_tuples on the page pinned by rs_cbuf.
+    let (ptr, len, lineoff) = unsafe {
+        let lineoff = *scan.rs_vistuples.get_unchecked(i as usize);
+        let page: PageRef<'_> = PageRef::from_raw(NonNull::new_unchecked(scan.rs_cpage));
+        let lpp = page.item_id_unchecked(lineoff);
+        debug_assert!(lpp.is_normal());
+        let (ptr, len) = page.item_raw_unchecked(lpp);
+        (ptr, len, lineoff)
+    };
+    let pin = scan.rs_cbuf.as_ref().expect("batch store without buffer");
+    // SAFETY: image on the page pinned by rs_cbuf; the buffer-slot store
+    // takes its own pin (C contract).
+    let tuple = unsafe {
+        HeapTupleData::from_raw_parts(
+            ptr,
+            len,
+            ItemPointerData::new(scan.rs_cblock, lineoff),
+            scan.rs_base.rs_rd.rd_id,
+        )
+    };
+    exectuples::exec_store_buffer_heap_tuple(slot, mcx, tuple, pin.buffer());
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn heap_beginscan<'mcx>(
     _mcx: Mcx<'mcx>,

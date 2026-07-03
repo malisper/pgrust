@@ -1404,6 +1404,15 @@ where
         }
         estate.reset_expr_context(node.tmpcontext);
     }
+    plain_finish(node, estate)
+}
+
+// exec_agg's post-drain tail (finalize + HAVING + project), shared with the
+// batched drive.
+fn plain_finish<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
     process_ordered_aggregates(node, estate)?;
     estate.reset_expr_context(node.ps_ExprContext);
     finalize_aggregates(node, estate, node.pergroup_base)?;
@@ -1419,6 +1428,115 @@ where
     let mut slots = EvalSlots { scan: None, inner: None, outer: None };
     exec_project(&mut node.proj, &mut slots, result_slot, mcx)?;
     Ok(Some(node.ps_ResultTupleSlot))
+}
+
+/// Page-batch feed for the fused agg-over-scan drive (upstream batch
+/// executor design, CF 6176); implemented over the concrete scan node by the
+/// dispatcher, which owns both sides.
+pub trait AggBatchSource<'mcx> {
+    /// Stage the next page batch; 0 = input exhausted.
+    fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32>;
+    /// Store staged tuple `i` into the outer slot and apply the scan qual;
+    /// false = filtered out.
+    fn fetch_tuple(&mut self, i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool>;
+    fn outer_slot(&self) -> ExecSlotId;
+    fn has_qual(&self) -> bool;
+}
+
+/// Shapes `exec_agg_batched` handles; the dispatcher falls back to the
+/// per-tuple drive otherwise.
+pub fn agg_batch_drainable(node: &AggStateData<'_>) -> bool {
+    node.gsets.is_none()
+        && node.pertrans_sort.is_empty()
+        && (node.plan.aggstrategy == AGG_PLAIN || node.plan.aggstrategy == AGG_HASHED)
+        && node.evaltrans.is_some()
+}
+
+/// `exec_agg` over a page-batch source: identical per-row transition order,
+/// minus the per-tuple node recursion (and minus the slot store for
+/// input-free transition kernels).
+pub fn exec_agg_batched<'mcx, S: AggBatchSource<'mcx>>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    mut src: S,
+) -> PgResult<Option<ExecSlotId>> {
+    debug_assert!(agg_batch_drainable(node));
+    if node.agg_done {
+        return Ok(None);
+    }
+    if node.plan.aggstrategy == AGG_HASHED {
+        if !node.perhash.as_ref().expect("hashed Agg has perhash").table_filled {
+            agg_fill_hash_table_batched(node, estate, &mut src)?;
+        }
+        return agg_retrieve_hash_table(node, estate);
+    }
+    initialize_aggregates(node)?;
+
+    let storeless = !src.has_qual()
+        && matches!(
+            node.evaltrans.as_deref().unwrap().kernel(),
+            ::execexpr::Kernel::AggTransByVal { .. }
+        );
+    loop {
+        let n = src.next_batch(estate)?;
+        if n == 0 {
+            break;
+        }
+        if storeless {
+            for _ in 0..n {
+                let mut slots = EvalSlots::default();
+                exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
+                estate.reset_expr_context(node.tmpcontext);
+            }
+        } else {
+            for i in 0..n {
+                if !src.fetch_tuple(i, estate)? {
+                    continue;
+                }
+                let outer_id = src.outer_slot();
+                estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
+                let outer_slot = estate.slot_mut(outer_id);
+                let mut slots =
+                    EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+                exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
+                estate.reset_expr_context(node.tmpcontext);
+            }
+        }
+    }
+    plain_finish(node, estate)
+}
+
+fn agg_fill_hash_table_batched<'mcx, S: AggBatchSource<'mcx>>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    src: &mut S,
+) -> PgResult<()> {
+    loop {
+        let n = src.next_batch(estate)?;
+        if n == 0 {
+            break;
+        }
+        for i in 0..n {
+            if !src.fetch_tuple(i, estate)? {
+                continue;
+            }
+            let outer_id = src.outer_slot();
+            estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
+            lookup_hash_entry(node, estate, outer_id)?;
+            {
+                let outer_slot = estate.slot_mut(outer_id);
+                let mut slots =
+                    EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+                exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
+            }
+            estate.reset_expr_context(node.tmpcontext);
+        }
+    }
+    let ph = node.perhash.as_mut().unwrap();
+    ph.table_filled = true;
+    ph.hashiter = 0;
+    hash_agg_update_metrics(node, estate);
+    Ok(())
 }
 
 const MAX_FINAL_ARGS: usize = 4;
