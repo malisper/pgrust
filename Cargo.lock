@@ -8165,6 +8165,7 @@ dependencies = [
  "plancache",
  "rewrite_handler_seams",
  "snapmgr",
+ "stack_depth",
  "tcop_dest",
  "tuplestore",
  "types_array",
