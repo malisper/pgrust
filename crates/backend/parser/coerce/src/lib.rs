@@ -174,7 +174,8 @@ pub fn coerce_type<'mcx>(
             return Ok(node);
         }
     }
-    // Push the coercion underneath the COLLATE so it acts before collation.
+    // Push the coercion underneath the COLLATE so it acts before collation —
+    // unless the target type is not collatable, where COLLATE is dropped.
     if let Some(coll) = node.as_collate_expr() {
         let arg = coerce_type(
             mcx,
@@ -187,6 +188,9 @@ pub fn coerce_type<'mcx>(
             cformat,
             location,
         )?;
+        if !lsyscache::type_is_collatable(targetTypeId)? {
+            return Ok(arg);
+        }
         return Node::mk(
             mcx,
             types_nodes::CollateExpr { arg, collOid: coll.collOid, location: coll.location },
@@ -1599,28 +1603,26 @@ pub fn coerce_to_target_type<'mcx>(
     if !can_coerce_type(&[exprtype], &[targettype], ccontext)? {
         return Ok(None);
     }
-    if expr.node_tag() == NodeTag::T_CollateExpr {
-        // C: strip the CollateExpr, coerce, and put a new one back on top.
-        let coll = expr.as_collate_expr().unwrap();
-        let Some(arg) = coerce_to_target_type(
-            mcx, pstate, coll.arg, exprtype, targettype, targettypmod, ccontext, cformat,
-            location,
-        )?
-        else {
-            return Ok(None);
-        };
-        return Ok(Some(Node::mk(
-            mcx,
-            CollateExpr { arg, collOid: coll.collOid, location: coll.location },
-        )?));
+    // C: strip ALL stacked CollateExprs, coerce, and reinstall only the
+    // topmost — and only when the target type is collatable.
+    let mut inner = expr;
+    while inner.node_tag() == NodeTag::T_CollateExpr {
+        inner = inner.as_collate_expr().unwrap().arg;
     }
     let result = coerce_type(
-        mcx, pstate, expr, exprtype, targettype, targettypmod, ccontext, cformat, location,
+        mcx, pstate, inner, exprtype, targettype, targettypmod, ccontext, cformat, location,
     )?;
     let hide = exprtype != targettype && result.as_variant::<Const>().is_none();
     let result = coerce_type_typmod(
         mcx, result, targettype, targettypmod, ccontext, cformat, location, hide,
     )?;
+    if expr.node_tag() == NodeTag::T_CollateExpr && lsyscache::type_is_collatable(targettype)? {
+        let coll = expr.as_collate_expr().unwrap();
+        return Ok(Some(Node::mk(
+            mcx,
+            CollateExpr { arg: result, collOid: coll.collOid, location: coll.location },
+        )?));
+    }
     Ok(Some(result))
 }
 

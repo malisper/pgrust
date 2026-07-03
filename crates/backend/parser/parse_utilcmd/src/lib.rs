@@ -668,13 +668,7 @@ fn transformColumnDefinition<'mcx>(
     let (type_oid, _typmod) = typenameTypeIdAndMod(mcx, None, tn)?;
     if let Some(cc) = column.collClause {
         let cc = cc.as_variant::<types_nodes::CollateClause>().expect("CollateClause");
-        let mut names: [&str; 4] = [""; 4];
-        let nnames = cc.collname.len();
-        assert!((1..=3).contains(&nnames), "improper collation name list length");
-        for (i, n) in cc.collname.iter().enumerate() {
-            names[i] = n.as_string().expect("collname cell").sval;
-        }
-        catalog_namespace::get_collation_oid(&names[..nnames], false)
+        catalog_namespace::get_collation_oid_list(&cc.collname, false)
             .map_err(|e| position_on_src(e, src, cc.location))?;
         let typcollation = syscache_seams::lookup_pg_type_shape::call(type_oid)?
             .expect("pg_type row vanished")

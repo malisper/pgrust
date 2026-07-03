@@ -457,13 +457,7 @@ fn transformCollateClause<'mcx>(
         return Err(collations_not_supported(pstate, argtype, c.location));
     }
 
-    let mut names: [&str; 4] = [""; 4];
-    let nnames = c.collname.len();
-    assert!(nnames >= 1 && nnames <= 3, "improper collation name list length");
-    for (i, n) in c.collname.iter().enumerate() {
-        names[i] = n.as_string().expect("collname cell").sval;
-    }
-    let coll_oid = catalog_namespace::get_collation_oid(&names[..nnames], false)
+    let coll_oid = catalog_namespace::get_collation_oid_list(&c.collname, false)
         .map_err(|e| collation_lookup_position(pstate, e, c.location))?;
 
     Node::mk(mcx, CollateExpr { arg, collOid: coll_oid, location: c.location })
