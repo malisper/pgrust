@@ -1256,7 +1256,6 @@ name = "execjunk"
 version = "0.0.0"
 dependencies = [
  "datum",
- "execscan",
  "exectuples",
  "executils",
  "mcx",

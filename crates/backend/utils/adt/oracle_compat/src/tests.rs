@@ -210,3 +210,50 @@ mod fc_results {
         assert_eq!(text_of(d), b"A");
     }
 }
+
+fn install_builtin_cutf8_collation_stub() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        syscache_seams::lookup_pg_collation_locale_row::set(|mcx, _collid| {
+            let mut collname = types_tuple::NameData::default();
+            collname.namestrcpy("c_utf8_test");
+            Ok(Some(syscache_seams::PgCollationLocaleRow {
+                collname,
+                collnamespace: 11,
+                collprovider: pg_locale::COLLPROVIDER_BUILTIN,
+                collisdeterministic: true,
+                collcollate: None,
+                collctype: None,
+                colllocale: Some(mcx::PgString::from_str_in("C.UTF-8", mcx)?),
+                collversion: None,
+            }))
+        });
+    });
+}
+
+// Verified against live PG 18.3 (builtin C.UTF-8 database, simple mappings).
+#[test]
+fn case_functions_builtin_cutf8_collation() {
+    utf8();
+    install_builtin_cutf8_collation_stub();
+    let coll = 33333;
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    assert_eq!(
+        lower(mcx, "ΣΟΦΟΣ Ёлка İ".as_bytes(), coll).unwrap().data(),
+        "σοφοσ ёлка i".as_bytes()
+    );
+    assert_eq!(
+        upper(mcx, "straße ﬁ 剣".as_bytes(), coll).unwrap().data(),
+        "STRAßE ﬁ 剣".as_bytes()
+    );
+    assert_eq!(
+        initcap(mcx, "über-cool σοφος don't".as_bytes(), coll).unwrap().data(),
+        "Über-Cool Σοφος Don'T".as_bytes()
+    );
+    assert_eq!(
+        casefold(mcx, "ΣΟΦΟΣ ẞ".as_bytes(), coll).unwrap().data(),
+        "σοφοσ ß".as_bytes()
+    );
+}

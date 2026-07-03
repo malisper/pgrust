@@ -1,10 +1,11 @@
 //! str_tolower/str_toupper/str_initcap/str_casefold case kernels, decomposed
 //! out of formatting.c for their oracle_compat.c consumers (lower/upper/
 //! initcap/casefold). ctype_is_c collations take the asc_* fast path; the
-//! non-C arms (pg_strlower/pg_strupper/pg_strtitle/pg_strfold provider
-//! dispatch) are loud until the pg_locale casemap lane lands.
+//! non-C arms dispatch through pg_locale's pg_strlower/strtitle/strupper/
+//! strfold (builtin + libc providers; ICU loud there).
 
 use mcx::{Mcx, PgVec};
+use pg_locale::PgLocale;
 use types_core::{Oid, OidIsValid};
 use types_error::{PgError, PgResult, ERRCODE_INDETERMINATE_COLLATION, ERRCODE_SYNTAX_ERROR};
 
@@ -25,17 +26,33 @@ fn casefold_encoding_err() -> PgError {
         .with_sqlstate(ERRCODE_SYNTAX_ERROR)
 }
 
-#[cold]
-#[inline(never)]
-fn non_c_ctype_unported(fname: &str) -> ! {
-    panic!("{fname}: non-C ctype arm requires the pg_locale casemap lane (pg_strlower/upper/title/fold unported)")
-}
-
-fn ctype_is_c(collid: Oid, fname: &str) -> PgResult<bool> {
+fn locale_for(collid: Oid, fname: &str) -> PgResult<&'static PgLocale> {
     if !OidIsValid(collid) {
         return Err(indeterminate_collation_err(fname).into());
     }
-    Ok(pg_locale::pg_newlocale_from_collation(collid)?.ctype_is_c)
+    pg_locale::pg_newlocale_from_collation(collid)
+}
+
+// formatting.c's non-ctype_is_c tail: equal-size buffer first, one grow-and-
+// retry using the returned length; result is the cstring prefix (first NUL).
+fn pg_case<'mcx>(
+    mcx: Mcx<'mcx>,
+    buff: &[u8],
+    locale: &PgLocale,
+    worker: fn(Mcx<'mcx>, &mut [u8], &[u8], &PgLocale) -> PgResult<usize>,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let mut dstsize = buff.len() + 1;
+    let mut dst: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, dstsize)?;
+    dst.resize(dstsize, 0);
+    let mut needed = worker(mcx, &mut dst, buff, locale)?;
+    if needed + 1 > dstsize {
+        dstsize = needed + 1;
+        dst.resize(dstsize, 0);
+        needed = worker(mcx, &mut dst, buff, locale)?;
+        debug_assert!(needed + 1 <= dstsize);
+    }
+    dst.truncate(nul_pos(&dst[..needed]));
+    Ok(dst)
 }
 
 // strnlen word-at-a-time (C pays glibc's SIMD strnlen inside pnstrdup;
@@ -95,26 +112,29 @@ pub fn asc_initcap<'mcx>(mcx: Mcx<'mcx>, buff: &[u8]) -> PgResult<PgVec<'mcx, u8
 }
 
 pub fn str_tolower<'mcx>(mcx: Mcx<'mcx>, buff: &[u8], collid: Oid) -> PgResult<PgVec<'mcx, u8>> {
-    if ctype_is_c(collid, "lower()")? {
+    let locale = locale_for(collid, "lower()")?;
+    if locale.ctype_is_c {
         asc_tolower(mcx, buff)
     } else {
-        non_c_ctype_unported("str_tolower")
+        pg_case(mcx, buff, locale, pg_locale::pg_strlower)
     }
 }
 
 pub fn str_toupper<'mcx>(mcx: Mcx<'mcx>, buff: &[u8], collid: Oid) -> PgResult<PgVec<'mcx, u8>> {
-    if ctype_is_c(collid, "upper()")? {
+    let locale = locale_for(collid, "upper()")?;
+    if locale.ctype_is_c {
         asc_toupper(mcx, buff)
     } else {
-        non_c_ctype_unported("str_toupper")
+        pg_case(mcx, buff, locale, pg_locale::pg_strupper)
     }
 }
 
 pub fn str_initcap<'mcx>(mcx: Mcx<'mcx>, buff: &[u8], collid: Oid) -> PgResult<PgVec<'mcx, u8>> {
-    if ctype_is_c(collid, "initcap()")? {
+    let locale = locale_for(collid, "initcap()")?;
+    if locale.ctype_is_c {
         asc_initcap(mcx, buff)
     } else {
-        non_c_ctype_unported("str_initcap")
+        pg_case(mcx, buff, locale, pg_locale::pg_strtitle)
     }
 }
 
@@ -126,9 +146,10 @@ pub fn str_casefold<'mcx>(mcx: Mcx<'mcx>, buff: &[u8], collid: Oid) -> PgResult<
     if mbutils::GetDatabaseEncoding() != wchar::PG_UTF8 {
         return Err(casefold_encoding_err().into());
     }
-    if pg_locale::pg_newlocale_from_collation(collid)?.ctype_is_c {
+    let locale = pg_locale::pg_newlocale_from_collation(collid)?;
+    if locale.ctype_is_c {
         asc_tolower(mcx, buff)
     } else {
-        non_c_ctype_unported("str_casefold")
+        pg_case(mcx, buff, locale, pg_locale::pg_strfold)
     }
 }

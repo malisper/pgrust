@@ -1,0 +1,9 @@
+[package]
+name = "unicode_case"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+unicode_category = { path = "../unicode_category" }
+wchar = { path = "../wchar" }
