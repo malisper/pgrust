@@ -22,7 +22,10 @@ tableam_vocab = { path = "../../access/table/tableam_vocab" }
 xact = { path = "../../access/transam/xact" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
+types_core = { path = "../../../_support/types/types_core" }
 datum = { path = "../../../_support/types/datum" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+execscan = { path = "../execscan" }
 
 [dev-dependencies]
 transam_seams = { path = "../../access/transam/transam_seams" }

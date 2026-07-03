@@ -392,7 +392,7 @@ fn flush_multi_insert<'mcx>(
     if index_state.num_indices() > 0 {
         for (i, slot) in refs.into_iter().enumerate() {
             cstate.cur_lineno = linenos[i];
-            execindexing::ExecInsertIndexTuples(mcx, index_state, rel, slot)?;
+            execindexing::ExecInsertIndexTuples(mcx, index_state, rel, slot, false, None, &[])?;
         }
     }
 

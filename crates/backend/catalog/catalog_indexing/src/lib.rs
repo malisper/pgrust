@@ -41,7 +41,7 @@ fn CatalogIndexInsert<'mcx>(
         HeapTupleData::from_raw_parts(tup.header_ptr(), tup.t_len, tup.t_self, tup.t_tableOid)
     };
     exectuples::exec_store_heap_tuple(&mut slot, mcx, view);
-    execindexing::ExecInsertIndexTuples(mcx, indstate, heap_rel, &mut slot)?;
+    execindexing::ExecInsertIndexTuples(mcx, indstate, heap_rel, &mut slot, false, None, &[])?;
     exectuples::exec_clear_tuple(&mut slot, mcx);
     Ok(())
 }
