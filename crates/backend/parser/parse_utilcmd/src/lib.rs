@@ -653,8 +653,8 @@ fn transformColumnDefinition<'mcx>(
         let colname = column.colname.expect("ColumnDef.colname");
         nnconstraints.lappend(mcx, make_not_null_constraint(mcx, colname)?)?;
     }
-    if column.collClause.is_some() || column.collOid != InvalidOid {
-        unported("COLLATE clauses");
+    if column.identity != 0 || column.generated != 0 {
+        unported("identity/generated columns");
     }
     if column.is_from_type {
         unported("is_from_type columns (OF type / LIKE)");
@@ -664,9 +664,46 @@ fn transformColumnDefinition<'mcx>(
         .expect("ColumnDef.typeName")
         .as_variant::<TypeName>()
         .expect("TypeName");
-    // transformColumnType: validate the type reference.
-    typenameTypeIdAndMod(mcx, None, tn)?;
+    // transformColumnType: validate the type reference and any COLLATE spec.
+    let (type_oid, _typmod) = typenameTypeIdAndMod(mcx, None, tn)?;
+    if let Some(cc) = column.collClause {
+        let cc = cc.as_variant::<types_nodes::CollateClause>().expect("CollateClause");
+        catalog_namespace::get_collation_oid_list(&cc.collname, false)
+            .map_err(|e| position_on_src(e, src, cc.location))?;
+        let typcollation = syscache_seams::lookup_pg_type_shape::call(type_oid)?
+            .expect("pg_type row vanished")
+            .typcollation;
+        if typcollation == InvalidOid {
+            return Err(position_on_src(
+                Box::new(
+                    types_error::PgError::error(format!(
+                        "collations are not supported by type {}",
+                        format_type::format_type_be(type_oid)?
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
+                ),
+                src,
+                cc.location,
+            ));
+        }
+    }
     Ok(())
+}
+
+#[cold]
+fn position_on_src(
+    e: Box<types_error::PgError>,
+    src: Option<&str>,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    if e.cursor_position().is_some() {
+        return e;
+    }
+    Box::new((*e).with_cursor_position(parser_small1::parser_errposition_source(
+        src.map(str::as_bytes),
+        location,
+        mbutils::GetDatabaseEncoding(),
+    )))
 }
 
 pub fn transformCreateStmt<'mcx>(
@@ -680,9 +717,6 @@ pub fn transformCreateStmt<'mcx>(
 
     if stmt.if_not_exists {
         unported("IF NOT EXISTS");
-    }
-    if !stmt.inhRelations.is_nil() && stmt.partbound.is_none() {
-        unported("inheritance (inhRelations)");
     }
     if stmt.partbound.is_some() && !stmt.tableElts.is_nil() {
         unported("PARTITION OF with a column/constraint list");

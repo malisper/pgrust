@@ -2,6 +2,7 @@
 #![allow(non_snake_case, non_upper_case_globals)]
 
 mod alter;
+mod inheritance;
 mod partition;
 mod constraints;
 mod fk;
@@ -89,6 +90,30 @@ pub(crate) fn unported(what: &str) -> ! {
     panic!("unported: tablecmds {what}")
 }
 
+// GetColumnDefCollation (parse_type.c).
+fn GetColumnDefCollation(coldef: &ColumnDef<'_>, type_oid: Oid) -> PgResult<Oid> {
+    let typcollation = syscache_seams::lookup_pg_type_shape::call(type_oid)?
+        .expect("pg_type row vanished")
+        .typcollation;
+    let result = if let Some(cc) = coldef.collClause {
+        let cc = cc.as_collate_clause().expect("CollateClause");
+        catalog_namespace::get_collation_oid_list(&cc.collname, false)?
+    } else if coldef.collOid != types_core::InvalidOid {
+        coldef.collOid
+    } else {
+        typcollation
+    };
+    if result != types_core::InvalidOid && typcollation == types_core::InvalidOid {
+        return Err(types_error::PgError::error(format!(
+            "collations are not supported by type {}",
+            format_type::format_type_be(type_oid)?
+        ))
+        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
+        .into());
+    }
+    Ok(result)
+}
+
 // BuildDescForRelation (tablecmds.c in 18.3).
 pub fn BuildDescForRelation<'mcx>(
     mcx: Mcx<'mcx>,
@@ -110,15 +135,7 @@ pub fn BuildDescForRelation<'mcx>(
             .as_variant::<TypeName>()
             .expect("TypeName");
         let (atttypid, atttypmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
-        // GetColumnDefCollation: collClause is loud upstream; collOid is the
-        // pre-cooked (LIKE) carrier, else the type's default.
-        let attcollation = if entry.collOid != InvalidOid {
-            entry.collOid
-        } else {
-            syscache_seams::lookup_pg_type_shape::call(atttypid)?
-                .expect("pg_type row vanished")
-                .typcollation
-        };
+        let attcollation = GetColumnDefCollation(entry, atttypid)?;
         tupdesc::TupleDescInitEntry(&mut desc, attnum, Some(colname), atttypid, atttypmod, 0)?;
         tupdesc::TupleDescInitEntryCollation(&mut desc, attnum, attcollation);
 
@@ -167,31 +184,17 @@ pub fn DefineRelation<'mcx>(
     if stmt.tablespacename.is_some() {
         unported("TABLESPACE clauses");
     }
-    if !stmt.inhRelations.is_nil() && stmt.partbound.is_none() {
-        unported("MergeAttributes inheritance");
-    }
     // PARTITION OF: the parent's partition descriptor changes — take an
     // exclusive lock (C parentLockmode).
+    let parent_lockmode = if stmt.partbound.is_some() {
+        types_rel::AccessExclusiveLock
+    } else {
+        types_rel::ShareUpdateExclusiveLock
+    };
+    let inherit_oids = inheritance::lookup_inherit_oids(mcx, stmt, parent_lockmode)?;
     let parent_oid = if stmt.partbound.is_some() {
-        assert_eq!(stmt.inhRelations.len(), 1);
-        let prv = stmt
-            .inhRelations
-            .nth(0)
-            .as_variant::<types_nodes::RangeVar>()
-            .expect("inhRelations RangeVar");
-        let creation_rv = rel_vocab::RangeVar {
-            catalogname: prv.catalogname,
-            schemaname: prv.schemaname,
-            relname: prv.relname.expect("RangeVar.relname"),
-            inh: prv.inh,
-            relpersistence: prv.relpersistence,
-            location: prv.location,
-        };
-        Some(catalog_namespace::RangeVarGetRelid(
-            &creation_rv,
-            types_rel::AccessExclusiveLock,
-            false,
-        )?)
+        assert_eq!(inherit_oids.len(), 1);
+        Some(inherit_oids[0])
     } else {
         None
     };
@@ -230,6 +233,28 @@ pub fn DefineRelation<'mcx>(
 
     let owner_id = if owner_id != InvalidOid { owner_id } else { miscinit::GetUserId() };
 
+    if partitioned && stmt.partbound.is_none() && !inherit_oids.is_empty() {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "cannot create partitioned table as inheritance child".to_string(),
+            )
+            // C raises this in transformCreateStmt (parse_utilcmd.c:261);
+            // here parents are already locked -- the error unwinds them.
+            .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
+        ));
+    }
+    let merged = if stmt.partbound.is_none() && !inherit_oids.is_empty() {
+        Some(inheritance::MergeAttributes(
+            mcx,
+            &stmt.tableElts,
+            &inherit_oids,
+            relpersistence as u8,
+        )?)
+    } else {
+        None
+    };
+
     let descriptor = match parent_oid {
         // MergeAttributes, empty-column partition arm: the partition's
         // columns are exactly the parent's (attislocal=false, attinhcount=1).
@@ -266,7 +291,10 @@ pub fn DefineRelation<'mcx>(
             parent.close(types_rel::NoLock)?;
             desc
         }
-        None => BuildDescForRelation(mcx, &stmt.tableElts)?,
+        None => match &merged {
+            Some(m) => BuildDescForRelation(mcx, &m.columns)?,
+            None => BuildDescForRelation(mcx, &stmt.tableElts)?,
+        },
     };
 
     let relation_id = catalog_heap::heap_create_with_catalog(
@@ -283,6 +311,12 @@ pub fn DefineRelation<'mcx>(
         },
         &descriptor,
     )?;
+
+    // C StoreConstraints runs inside heap_create_with_catalog: inherited
+    // cooked CHECKs land before pg_inherits/pg_depend rows.
+    if let Some(m) = &merged {
+        inheritance::store_inherited_checks(mcx, relation_id, &m.checks)?;
+    }
 
     register_on_commit_action(relation_id, stmt.oncommit);
 
@@ -350,8 +384,23 @@ pub fn DefineRelation<'mcx>(
         xact::CommandCounterIncrement()?;
     }
 
-    let raw_defaults = constraints::collect_raw_defaults(mcx, &stmt.tableElts)?;
-    if !raw_defaults.is_empty() || !stmt.constraints.is_nil() || !stmt.nnconstraints.is_nil() {
+    if !inherit_oids.is_empty() && stmt.partbound.is_none() {
+        inheritance::StoreCatalogInheritance(mcx, relation_id, &inherit_oids, false)?;
+        xact::CommandCounterIncrement()?;
+    }
+
+    // Merged columns re-number local attributes; raw defaults ride them.
+    let raw_defaults = match &merged {
+        Some(m) => constraints::collect_raw_defaults(mcx, &m.columns)?,
+        None => constraints::collect_raw_defaults(mcx, &stmt.tableElts)?,
+    };
+    let old_notnulls: &[inheritance::InheritedNotNull<'mcx>] =
+        merged.as_ref().map(|m| &m.notnulls[..]).unwrap_or(&[]);
+    if !raw_defaults.is_empty()
+        || !stmt.constraints.is_nil()
+        || !stmt.nnconstraints.is_nil()
+        || !old_notnulls.is_empty()
+    {
         let rel = table::table_open(mcx, relation_id, types_rel::AccessExclusiveLock)?;
         if !raw_defaults.is_empty() {
             constraints::add_relation_new_constraints(
@@ -363,17 +412,46 @@ pub fn DefineRelation<'mcx>(
             )?;
             xact::CommandCounterIncrement()?;
         }
+        let mut connames: mcx::PgVec<'_, &str> = mcx::PgVec::new_in(mcx);
         if !stmt.constraints.is_nil() {
-            constraints::add_relation_new_constraints(
+            let conlist = constraints::add_relation_new_constraints(
                 mcx,
                 &rel,
                 &[],
                 &stmt.constraints,
                 query_string,
             )?;
+            for con in conlist.iter() {
+                connames.push(con.name);
+            }
         }
-        if !stmt.nnconstraints.is_nil() {
-            constraints::add_relation_not_null_constraints(mcx, &rel, &stmt.nnconstraints)?;
+        if !stmt.nnconstraints.is_nil() || !old_notnulls.is_empty() {
+            let nncols = constraints::add_relation_not_null_constraints(
+                mcx,
+                &rel,
+                &stmt.nnconstraints,
+                old_notnulls,
+                &connames,
+            )?;
+            // set_attnotnull leg (tablecmds.c:1357): a table-level NOT NULL
+            // naming an inherited column has no local ColumnDef carrying it.
+            let mut updated = false;
+            for &attnum in nncols.iter() {
+                let att = rel.rd_att.attr(attnum as usize - 1);
+                if att.attisdropped || att.attnotnull {
+                    continue;
+                }
+                alter::update_pg_attribute(
+                    mcx,
+                    rel.rd_id,
+                    attnum,
+                    &[(alter::Anum_pg_attribute_attnotnull, ::datum::Datum::from_bool(true))],
+                )?;
+                updated = true;
+            }
+            if updated {
+                xact::CommandCounterIncrement()?;
+            }
         }
         table::table_close(rel, types_rel::NoLock)?;
         xact::CommandCounterIncrement()?;

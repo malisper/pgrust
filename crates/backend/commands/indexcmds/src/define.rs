@@ -288,10 +288,6 @@ fn ComputeIndexAttrs<'mcx>(
         if !attribute.opclass.is_nil() || !attribute.opclassopts.is_nil() {
             unported("ComputeIndexAttrs: named operator classes (ResolveOpClass)");
         }
-        if !attribute.collation.is_nil() {
-            unported("ComputeIndexAttrs: COLLATE overrides (get_collation_oid)");
-        }
-
         let desc = rel.descr();
         let mut found = None;
         for i in 0..desc.natts as usize {
@@ -311,13 +307,20 @@ fn ComputeIndexAttrs<'mcx>(
         };
         indexInfo.ii_IndexAttrNumbers[attn] = attform.attnum;
         let atttype = attform.atttypid;
-        let attcollation = attform.attcollation;
+        let mut attcollation = attform.attcollation;
+
+        if !attribute.collation.is_nil() {
+            attcollation = catalog_namespace::get_collation_oid_list(&attribute.collation, false)?;
+        }
 
         if lsyscache::type_is_collatable(atttype)? {
             if attcollation == InvalidOid {
-                return Err(err(
-                    "could not determine which collation to use for index expression".into(),
-                    ERRCODE_INDETERMINATE_COLLATION,
+                return Err(Box::new(
+                    (*err(
+                        "could not determine which collation to use for index expression".into(),
+                        ERRCODE_INDETERMINATE_COLLATION,
+                    ))
+                    .with_hint("Use the COLLATE clause to set the collation explicitly."),
                 ));
             }
         } else if attcollation != InvalidOid {

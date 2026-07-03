@@ -9,6 +9,7 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::adt_domains::DOMAINS_BUILTINS,
     ::adt_date::builtins::DATE_BUILTINS,
     ::adt_encode::builtins::ENCODE_BUILTINS,
+    ::adt_enum::builtins::ENUM_BUILTINS,
     ::adt_float::builtins::FLOAT_BUILTINS,
     ::adt_formatting::fmgr_builtins::FORMATTING_BUILTINS,
     ::adt_int::builtins::INT_BUILTINS,

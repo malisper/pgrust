@@ -1,25 +1,30 @@
 // typecmds.c DefineDomain lane (CREATE DOMAIN with NOT NULL/CHECK/NULL
-// constraints). ALTER DOMAIN, COLLATE, DEFAULT expressions, and inherited
-// base-type defaults are loud.
+// constraints) + enum lane (DefineEnum/AlterEnum/checkEnumOwner). ALTER
+// DOMAIN, COLLATE, DEFAULT expressions, and inherited base-type defaults are
+// loud.
 #![allow(non_snake_case)]
 
 use datum::Datum;
-use mcx::Mcx;
+use mcx::{Mcx, PgVec};
 use parser_small1::{make_parsestate, ParseExprKind, ParseState, PreColumnRefHook};
 use types_core::{AttrNumber, InvalidOid, Oid, NAMESPACE_RELATION_ID, TYPE_RELATION_ID};
 use types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_DUPLICATE_OBJECT,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INVALID_COLUMN_REFERENCE, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_SYNTAX_ERROR,
+    ERRCODE_WRONG_OBJECT_TYPE,
     ERROR,
 };
 use types_nodes::primnodes::CoerceToDomainValue;
-use types_nodes::rawnodes::{Constraint, ConstrType, CreateDomainStmt, TypeName};
+use types_nodes::rawnodes::{AlterEnumStmt, Constraint, ConstrType, CreateDomainStmt, CreateEnumStmt, TypeName};
 use types_nodes::NodeTag;
 use types_rel::AccessShareLock;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
-use pg_type::{ObjectAddress, TypeCreateParams, TYPCATEGORY_ARRAY, TYPTYPE_BASE, TYPTYPE_DOMAIN};
+use pg_type::{
+    ObjectAddress, TypeCreateParams, DEFAULT_TYPDELIM, TYPCATEGORY_ARRAY, TYPTYPE_BASE,
+    TYPTYPE_DOMAIN,
+};
 
 const F_DOMAIN_IN: Oid = 2597;
 const F_DOMAIN_RECV: Oid = 2598;
@@ -28,6 +33,14 @@ const TYPTYPE_ENUM: i8 = b'e' as i8;
 const TYPTYPE_RANGE: i8 = b'r' as i8;
 const TYPTYPE_MULTIRANGE: i8 = b'm' as i8;
 const TYPSTORAGE_EXTENDED: i8 = b'x' as i8;
+const TYPCATEGORY_ENUM: i8 = b'E' as i8;
+const TYPALIGN_INT: i8 = b'i' as i8;
+const TYPSTORAGE_PLAIN: i8 = b'p' as i8;
+
+const F_ENUM_IN: Oid = 3506;
+const F_ENUM_OUT: Oid = 3507;
+const F_ENUM_RECV: Oid = 3532;
+const F_ENUM_SEND: Oid = 3533;
 
 #[cold]
 #[inline(never)]
@@ -448,6 +461,195 @@ pub fn DefineDomain<'mcx>(
     Ok(address)
 }
 
+// QualifiedNameGetCreationNamespace + the CREATE aclcheck, shared shape with
+// the domains lane's DefineDomain preamble.
+fn creation_namespace<'mcx, 'a>(
+    mcx: Mcx<'mcx>,
+    qualified: &types_nodes::NodeList<'a>,
+    what: &str,
+) -> PgResult<(Oid, &'a str)> {
+    let mut names: [&str; 4] = [""; 4];
+    let nnames = qualified.len();
+    assert!((1..=3).contains(&nnames), "improper qualified name");
+    for (i, n) in qualified.iter().enumerate() {
+        names[i] = n.as_string().expect("qualified name").sval;
+    }
+    let (schemaname, name) = catalog_namespace::DeconstructQualifiedName(&names[..nnames])?;
+    let namespace = match schemaname {
+        // C resolves the alias via AccessTempTableNamespace (namespace.c:3498).
+        Some("pg_temp") => {
+            unported(&format!("{what} (typecmds.c): pg_temp-alias type creation"))
+        }
+        Some(schemaname) => catalog_namespace::get_namespace_oid(schemaname, false)?,
+        None => {
+            let path = catalog_namespace::fetch_search_path(mcx, false)?;
+            match path.first() {
+                Some(&ns) => ns,
+                None => return Err(no_creation_schema()),
+            }
+        }
+    };
+    if catalog_namespace::isAnyTempNamespace(namespace)? {
+        unported(&format!("{what} (typecmds.c): temp-namespace type creation"));
+    }
+    if aclchk::object_aclcheck(
+        NAMESPACE_RELATION_ID,
+        namespace,
+        miscinit::GetUserId(),
+        adt_acl::ACL_CREATE,
+    )? != aclchk::ACLCHECK_OK
+    {
+        return Err(permission_denied_schema(namespace)?);
+    }
+    Ok((namespace, name))
+}
+
+pub fn DefineEnum<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateEnumStmt<'mcx>) -> PgResult<ObjectAddress> {
+    let (enum_namespace, enum_name) = creation_namespace(mcx, &stmt.typeName, "DefineEnum")?;
+    let user_id = miscinit::GetUserId();
+
+    let old_type_oid =
+        syscache_seams::lookup_pg_type_oid_by_name::call(enum_name, enum_namespace)?;
+    if old_type_oid != InvalidOid
+        && !pg_type::moveArrayTypeName(old_type_oid, enum_name, enum_namespace)?
+    {
+        return Err(type_already_exists(enum_name));
+    }
+
+    let enum_array_oid = pg_type::AssignTypeArrayOid(mcx)?;
+
+    let enum_type_addr = pg_type::TypeCreate(
+        mcx,
+        &TypeCreateParams {
+            newTypeOid: InvalidOid,
+            typeName: enum_name,
+            typeNamespace: enum_namespace,
+            relationOid: InvalidOid,
+            relationKind: 0,
+            ownerId: user_id,
+            internalSize: core::mem::size_of::<Oid>() as i16,
+            typeType: TYPTYPE_ENUM,
+            typeCategory: TYPCATEGORY_ENUM,
+            typePreferred: false,
+            typDelim: DEFAULT_TYPDELIM,
+            inputProcedure: F_ENUM_IN,
+            outputProcedure: F_ENUM_OUT,
+            receiveProcedure: F_ENUM_RECV,
+            sendProcedure: F_ENUM_SEND,
+            typmodinProcedure: InvalidOid,
+            typmodoutProcedure: InvalidOid,
+            analyzeProcedure: InvalidOid,
+            subscriptProcedure: InvalidOid,
+            elementType: InvalidOid,
+            isImplicitArray: false,
+            arrayType: enum_array_oid,
+            baseType: InvalidOid,
+            passedByValue: true,
+            alignment: TYPALIGN_INT,
+            storage: TYPSTORAGE_PLAIN,
+            typeMod: -1,
+            typNDims: 0,
+            typeNotNull: false,
+            typeCollation: InvalidOid,
+        },
+    )?;
+
+    let mut vals: PgVec<'mcx, &str> = PgVec::with_capacity_in(stmt.vals.len(), mcx);
+    for v in stmt.vals.iter() {
+        vals.push(v.as_string().expect("enum_val_list String").sval);
+    }
+    pg_enum::EnumValuesCreate(mcx, enum_type_addr.objectId, &vals)?;
+
+    let enum_array_name = pg_type::makeArrayTypeName(enum_name, enum_namespace)?;
+    pg_type::TypeCreate(
+        mcx,
+        &TypeCreateParams {
+            newTypeOid: enum_array_oid,
+            typeName: core::str::from_utf8(enum_array_name.name_str()).expect("array type name"),
+            typeNamespace: enum_namespace,
+            relationOid: InvalidOid,
+            relationKind: 0,
+            ownerId: user_id,
+            internalSize: -1,
+            typeType: TYPTYPE_BASE,
+            typeCategory: TYPCATEGORY_ARRAY,
+            typePreferred: false,
+            typDelim: DEFAULT_TYPDELIM,
+            inputProcedure: pg_type::F_ARRAY_IN,
+            outputProcedure: pg_type::F_ARRAY_OUT,
+            receiveProcedure: pg_type::F_ARRAY_RECV,
+            sendProcedure: pg_type::F_ARRAY_SEND,
+            typmodinProcedure: InvalidOid,
+            typmodoutProcedure: InvalidOid,
+            analyzeProcedure: pg_type::F_ARRAY_TYPANALYZE,
+            subscriptProcedure: pg_type::F_ARRAY_SUBSCRIPT_HANDLER,
+            elementType: enum_type_addr.objectId,
+            isImplicitArray: true,
+            arrayType: InvalidOid,
+            baseType: InvalidOid,
+            passedByValue: false,
+            alignment: TYPALIGN_INT,
+            storage: TYPSTORAGE_EXTENDED,
+            typeMod: -1,
+            typNDims: 0,
+            typeNotNull: false,
+            typeCollation: InvalidOid,
+        },
+    )?;
+
+    Ok(enum_type_addr)
+}
+
+pub fn AlterEnum<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterEnumStmt<'mcx>) -> PgResult<ObjectAddress> {
+    // C shares the list pointer (makeTypeNameFromNameList); cold DDL copy.
+    let typename = TypeName {
+        names: stmt.typeName.clone_in(mcx)?,
+        typemod: -1,
+        location: -1,
+        ..Default::default()
+    };
+    let (enum_type_oid, _typmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, &typename)?;
+
+    checkEnumOwner(enum_type_oid)?;
+
+    match stmt.oldVal {
+        Some(old_val) => {
+            pg_enum::RenameEnumLabel(
+                mcx,
+                enum_type_oid,
+                old_val,
+                stmt.newVal.expect("AlterEnumStmt.newVal"),
+            )?;
+        }
+        None => {
+            pg_enum::AddEnumLabel(
+                mcx,
+                enum_type_oid,
+                stmt.newVal.expect("AlterEnumStmt.newVal"),
+                stmt.newValNeighbor,
+                stmt.newValIsAfter,
+                stmt.skipIfNewValExists,
+            )?;
+        }
+    }
+
+    Ok(ObjectAddress::set(TYPE_RELATION_ID, enum_type_oid))
+}
+
+fn checkEnumOwner(type_oid: Oid) -> PgResult<()> {
+    let typtype = syscache_seams::pg_type_typtype::call(type_oid)?
+        .unwrap_or_else(|| panic!("cache lookup failed for type {type_oid}"));
+    if typtype != TYPTYPE_ENUM {
+        return Err(not_an_enum(type_oid)?);
+    }
+    // object_ownercheck (aclchk.c): superuser fast path; role ACL walks are
+    // the drop.rs precedent.
+    if !superuser::superuser_arg(miscinit::GetUserId())? {
+        unported("checkEnumOwner: object_ownercheck for non-superusers");
+    }
+    Ok(())
+}
+
 fn constraint_name<'mcx>(
     mcx: Mcx<'mcx>,
     domain_oid: Oid,
@@ -671,4 +873,14 @@ mod tests {
         assert_eq!(e.sqlstate(), ERRCODE_SYNTAX_ERROR);
         assert_eq!(e.message(), "multiple default expressions");
     }
+}
+
+#[cold]
+#[inline(never)]
+fn not_an_enum(type_oid: Oid) -> PgResult<Box<PgError>> {
+    let name = format_type::format_type_be(type_oid)?;
+    Ok(Box::new(
+        PgError::new(ERROR, format!("{name} is not an enum"))
+            .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE),
+    ))
 }

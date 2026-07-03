@@ -134,6 +134,80 @@ pub fn fc_pg_get_statisticsobjdef_columns(
     crate::gap("pg_get_statisticsobjdef_columns", "extended-statistics deparse")
 }
 
+fn viewdef(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+    viewoid: Oid,
+    pretty_flags: i32,
+    wrap_column: i32,
+) -> PgResult<Datum> {
+    let ctx = MemoryContext::new("pg_get_viewdef");
+    let res = crate::pg_get_viewdef_worker(ctx.mcx(), viewoid, pretty_flags, wrap_column)?;
+    Ok(match res {
+        Some(s) => text_result(flinfo, "pg_get_viewdef", &s),
+        None => fcinfo.return_null(),
+    })
+}
+
+fn viewdef_name_arg(fcinfo: &mut Fcinfo) -> PgResult<Oid> {
+    // SAFETY: arg 0 of the strict by-name pg_get_viewdef forms is text.
+    let raw = unsafe { fcinfo.arg_varlena_packed(0) }?;
+    let name = core::str::from_utf8(raw.data()).expect("non-UTF-8 view name").to_owned();
+    let ctx = MemoryContext::new("pg_get_viewdef_name");
+    crate::viewdef::view_name_to_oid(ctx.mcx(), &name)
+}
+
+pub fn fc_pg_get_viewdef(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let viewoid = fcinfo.arg_oid(0);
+    viewdef(flinfo, fcinfo, viewoid, PRETTYFLAG_INDENT, crate::viewdef::WRAP_COLUMN_DEFAULT)
+}
+
+pub fn fc_pg_get_viewdef_ext(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let viewoid = fcinfo.arg_oid(0);
+    let pretty = fcinfo.arg_bool(1);
+    viewdef(flinfo, fcinfo, viewoid, get_pretty_flags(pretty), crate::viewdef::WRAP_COLUMN_DEFAULT)
+}
+
+pub fn fc_pg_get_viewdef_wrap(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let viewoid = fcinfo.arg_oid(0);
+    let wrap = fcinfo.arg_i32(1);
+    viewdef(flinfo, fcinfo, viewoid, get_pretty_flags(true), wrap)
+}
+
+pub fn fc_pg_get_viewdef_name(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let viewoid = viewdef_name_arg(fcinfo)?;
+    viewdef(flinfo, fcinfo, viewoid, PRETTYFLAG_INDENT, crate::viewdef::WRAP_COLUMN_DEFAULT)
+}
+
+pub fn fc_pg_get_viewdef_name_ext(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let viewoid = viewdef_name_arg(fcinfo)?;
+    let pretty = fcinfo.arg_bool(1);
+    viewdef(flinfo, fcinfo, viewoid, get_pretty_flags(pretty), crate::viewdef::WRAP_COLUMN_DEFAULT)
+}
+
+pub fn fc_pg_get_ruledef(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    crate::gap("pg_get_ruledef", "make_ruledef (non-view rule deparse)")
+}
+
+pub fn fc_pg_get_functiondef(
+    _flinfo: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    crate::gap("pg_get_functiondef", "CREATE FUNCTION deparse (function lane in flight)")
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
@@ -141,11 +215,19 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
 // pg_proc.dat rows (all proisstrict, none retset), OID-ascending.
 pub const RULEUTILS_BUILTINS: &[FmgrBuiltin] = &[
     b(1387, "pg_get_constraintdef", 1, fc_pg_get_constraintdef),
+    b(1573, "pg_get_ruledef", 1, fc_pg_get_ruledef),
+    b(1640, "pg_get_viewdef_name", 1, fc_pg_get_viewdef_name),
+    b(1641, "pg_get_viewdef", 1, fc_pg_get_viewdef),
     b(1642, "pg_get_userbyid", 1, fc_pg_get_userbyid),
     b(1643, "pg_get_indexdef", 1, fc_pg_get_indexdef),
     b(1716, "pg_get_expr", 2, fc_pg_get_expr),
+    b(2098, "pg_get_functiondef", 1, fc_pg_get_functiondef),
+    b(2504, "pg_get_ruledef_ext", 2, fc_pg_get_ruledef),
+    b(2505, "pg_get_viewdef_name_ext", 2, fc_pg_get_viewdef_name_ext),
+    b(2506, "pg_get_viewdef_ext", 2, fc_pg_get_viewdef_ext),
     b(2507, "pg_get_indexdef_ext", 3, fc_pg_get_indexdef_ext),
     b(2508, "pg_get_constraintdef_ext", 2, fc_pg_get_constraintdef_ext),
     b(2509, "pg_get_expr_ext", 3, fc_pg_get_expr_ext),
+    b(3159, "pg_get_viewdef_wrap", 2, fc_pg_get_viewdef_wrap),
     b(6174, "pg_get_statisticsobjdef_columns", 1, fc_pg_get_statisticsobjdef_columns),
 ];

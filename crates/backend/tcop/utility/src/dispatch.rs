@@ -761,6 +761,18 @@ fn dispatch_switch<'mcx>(
                 pstmt.stmt_len,
             )?;
         }
+        T_CreateEnumStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node.as_create_enum_stmt().expect("CreateEnumStmt");
+            typecmds::DefineEnum(mcx, stmt)?;
+        }
+        T_AlterEnumStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node.as_alter_enum_stmt().expect("AlterEnumStmt");
+            typecmds::AlterEnum(mcx, stmt)?;
+        }
         _ => handler_gap("ProcessUtilitySlow DDL fan-out (utility slow lane)"),
     }
     Ok(())

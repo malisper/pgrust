@@ -19,6 +19,7 @@ types_error = { path = "../../../_support/types/types_error" }
 types_rel = { path = "../../../_support/types/rel" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 heaptuple = { path = "../../access/common/heaptuple" }
+init_small = { path = "../../utils/init/init_small" }
 table = { path = "../../access/table/table" }
 catalog = { path = "../catalog" }
 catalog_indexing = { path = "../catalog_indexing" }

@@ -12,6 +12,7 @@ pub mod createplan;
 pub mod grouping;
 pub mod groupingsets;
 pub mod indxpath;
+mod inherit;
 pub mod initsplan;
 pub mod joinpath;
 pub mod joinrels;

@@ -245,10 +245,61 @@ pub fn build_simple_rel<'mcx>(
 
     if rtekind == RTEKind::RTE_RELATION {
         let rte = run.rte(relid as usize);
-        assert!(!rte.inh, "expand_inherited_rtentry: M2 partition lane");
-        crate::plancat::get_relation_info(run, rte.relid, false, id)?;
+        crate::plancat::get_relation_info(run, rte.relid, rte.inh, id)?;
     }
 
+    Ok(id)
+}
+
+// build_simple_rel (relnode.c), inheritance-child arm: RELOPT_OTHER_MEMBER_REL
+// plus parent back-links and apply_child_basequals.
+pub fn build_simple_rel_child<'mcx>(
+    run: &mut crate::run::PlannerRun<'mcx>,
+    relid: u32,
+    parent: RelId,
+) -> types_error::PgResult<RelId> {
+    let rte = run.rte(relid as usize);
+    debug_assert!(rte.rtekind == RTEKind::RTE_RELATION);
+    let root = &mut run.root;
+    assert!(relid > 0 && (relid as i32) < root.simple_rel_array_size);
+    assert!(root.simple_rel_array[relid as usize].is_none(), "rel {relid} already exists");
+
+    let mcx = root.mcx;
+    let mut rel = RelOptInfo::new(mcx);
+    rel.reloptkind = types_pathnodes::RELOPT_OTHER_MEMBER_REL;
+    rel.relids = relids_singleton(mcx, relid);
+    rel.consider_startup = root.tuple_fraction > 0.0;
+    rel.relid = relid;
+    rel.rtekind = RTEKind::RTE_RELATION as u32;
+    rel.rel_parallel_workers = -1;
+    rel.nparts = -1;
+    rel.baserestrict_min_security = u32::MAX;
+    rel.pathtarget_id = Some(empty_pathtarget_id(root));
+    rel.userid = root.rel(parent).userid;
+    rel.parent = Some(parent);
+    let top = root.rel(parent).top_parent.unwrap_or(parent);
+    rel.top_parent = Some(top);
+    rel.top_parent_relids = relids_copy(mcx, &root.rel(top).relids);
+    debug_assert!(
+        root.rel(parent).nulling_relids.is_none()
+            && root.rel(parent).lateral_relids.is_none()
+            && root.rel(parent).direct_lateral_relids.is_none()
+            && root.rel(parent).lateral_referencers.is_none(),
+        "inherited outer-join/lateral propagation unported (loud upstream)"
+    );
+
+    let id = root.alloc_rel(rel);
+    run.root.simple_rel_array[relid as usize] = Some(id);
+
+    crate::plancat::get_relation_info(run, rte.relid, rte.inh, id)?;
+
+    let appinfo = run.root.append_rel_array[relid as usize]
+        .clone()
+        .expect("child rel has an AppendRelInfo");
+    if !crate::inherit::apply_child_basequals(run, parent, id, &appinfo)? {
+        // mark_dummy_rel: constant-FALSE child qual, skip scanning.
+        crate::allpaths::set_dummy_rel_pathlist(run, id)?;
+    }
     Ok(id)
 }
 

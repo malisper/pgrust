@@ -645,6 +645,20 @@ fn node(out: &mut String, n: Node<'_>) {
         node_field(out, "collClause", c.collClause);
         list_field(out, "constraints", &c.constraints);
         out.push('}');
+    } else if let Some(c) = n.as_create_enum_stmt() {
+        out.push_str("{CREATEENUMSTMT");
+        list_field(out, "typeName", &c.typeName);
+        list_field(out, "vals", &c.vals);
+        out.push('}');
+    } else if let Some(c) = n.as_alter_enum_stmt() {
+        out.push_str("{ALTERENUMSTMT");
+        list_field(out, "typeName", &c.typeName);
+        string_field(out, "oldVal", c.oldVal);
+        string_field(out, "newVal", c.newVal);
+        string_field(out, "newValNeighbor", c.newValNeighbor);
+        bool_field(out, "newValIsAfter", c.newValIsAfter);
+        bool_field(out, "skipIfNewValExists", c.skipIfNewValExists);
+        out.push('}');
     } else if let Some(c) = n.as_variant::<types_nodes::rawnodes::Constraint>() {
         // Fields absent from the ported Constraint render as palloc0 defaults.
         out.push_str("{CONSTRAINT");

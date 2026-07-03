@@ -891,6 +891,24 @@ seam_core::seam!(
     ) -> PgResult<Option<PgCollationLocaleRow<'mcx>>>
 );
 
+// The pg_collation columns namespace.c's lookup_collation reads off one
+// COLLNAMEENCNSP probe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgCollationNameEncNspRow {
+    pub oid: Oid,
+    pub collprovider: u8,
+}
+
+seam_core::seam!(
+    // SearchSysCache3(COLLNAMEENCNSP, collname, encoding, collnamespace);
+    // None mirrors !HeapTupleIsValid.
+    pub fn lookup_pg_collation_by_name_enc_nsp(
+        collname: &str,
+        encoding: i32,
+        collnamespace: Oid,
+    ) -> PgResult<Option<PgCollationNameEncNspRow>>
+);
+
 // The pg_aggregate columns parse_func/prepagg/ExecInitAgg read off one
 // AGGFNOID probe, decoded once.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -957,4 +975,24 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         proname: &str,
     ) -> PgResult<PgVec<'mcx, PgProcCandidate<'mcx>>>
+);
+
+// Form_pg_enum + the tuple-header xmin facts check_safe_enum_use reads.
+#[derive(Clone, Copy)]
+pub struct PgEnumShape {
+    pub oid: Oid,
+    pub enumtypid: Oid,
+    pub enumlabel: NameData,
+    pub xmin: types_core::TransactionId,
+    pub xmin_committed: bool,
+}
+
+seam_core::seam!(
+    // SearchSysCache1(ENUMOID, enum_oid); None mirrors !HeapTupleIsValid.
+    pub fn lookup_pg_enum_by_oid(enum_oid: Oid) -> PgResult<Option<PgEnumShape>>
+);
+
+seam_core::seam!(
+    // SearchSysCache2(ENUMTYPOIDNAME, typid, label).
+    pub fn lookup_pg_enum_by_typid_label(typid: Oid, label: &str) -> PgResult<Option<PgEnumShape>>
 );

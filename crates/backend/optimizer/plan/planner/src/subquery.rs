@@ -70,14 +70,11 @@ pub fn subquery_planner<'mcx>(
                     let rel = table::table_open(mcx, rte.relid, types_rel::NoLock)?;
                     let sub = rel.rd_rel.relhassubclass;
                     table::table_close(rel, types_rel::NoLock)?;
-                    if sub {
-                        panic!("expand_inherited_rtes (inherit.c): M2 scan lane");
-                    }
                     // SAFETY: pre-seal Query owned by this invocation; the
                     // shared `rte` borrow is not read past this write.
                     unsafe {
                         rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
-                            r.inh = false
+                            r.inh = sub
                         })
                     };
                 }

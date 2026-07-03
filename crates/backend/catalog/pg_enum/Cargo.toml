@@ -1,0 +1,31 @@
+[package]
+name = "pg_enum"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_enum"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+heaptuple = { path = "../../access/common/heaptuple" }
+table = { path = "../../access/table/table" }
+genam = { path = "../../access/index/genam" }
+indexam = { path = "../../access/index/indexam" }
+xact = { path = "../../access/transam/xact" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+init_small = { path = "../../utils/init/init_small" }
+catalog = { path = "../catalog" }
+catalog_indexing = { path = "../catalog_indexing" }
+pg_enum_seams = { path = "../pg_enum_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+elog_seams = { path = "../../utils/error/elog_seams" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }

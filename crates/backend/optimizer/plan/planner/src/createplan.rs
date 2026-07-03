@@ -1109,7 +1109,30 @@ fn create_projection_plan<'mcx>(
         _ => unreachable!(),
     };
     if !is_projection_capable_pathtype(run.root.path(subpath_id).base().pathtype) {
-        panic!("create_projection_plan (createplan.c): separate Result arm; M2 lane");
+        // Result arm (projection-incapable subplan, e.g. Append).
+        let subplan = create_plan_recurse(run, subpath_id, 0)?;
+        let tlist = build_path_tlist(run, target_id)?;
+        if !tlist_same_exprs(&tlist, &subplan.as_plan().expect("plan node").targetlist) {
+            let mut plan = Node::build::<ResultPlan<'mcx>>(run.mcx)?;
+            plan.plan.targetlist = tlist;
+            plan.plan.lefttree = Some(subplan);
+            copy_generic_path_info(run, &mut plan.plan, path_id);
+            return Ok(plan.seal());
+        }
+        let width = run.root.pathtarget(target_id).width;
+        // SAFETY: subplan was created above; no other handle to it exists yet.
+        unsafe {
+            subplan.with_plan_mut(|p| {
+                p.targetlist = tlist;
+                p.startup_cost = path_costs.0;
+                p.total_cost = path_costs.1;
+                p.plan_rows = path_costs.2;
+                p.plan_width = width;
+                p.parallel_safe = path_costs.3;
+            })
+        }
+        .expect("subplan embeds a Plan base");
+        return Ok(subplan);
     }
 
     let subplan = create_plan_recurse(run, subpath_id, CP_IGNORE_TLIST)?;
@@ -2912,4 +2935,19 @@ fn list_concat_unique<'mcx>(
         }
     }
     Ok(())
+}
+
+// tlist_same_exprs (tlist.c).
+fn tlist_same_exprs(tlist1: &NodeList<'_>, tlist2: &NodeList<'_>) -> bool {
+    if tlist1.len() != tlist2.len() {
+        return false;
+    }
+    for (a, b) in tlist1.iter().zip(tlist2.iter()) {
+        let ta = a.as_target_entry().expect("tlist cell");
+        let tb = b.as_target_entry().expect("tlist cell");
+        if !types_nodes::equal::equal(ta.expr, tb.expr) {
+            return false;
+        }
+    }
+    true
 }

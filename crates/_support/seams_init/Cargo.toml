@@ -156,6 +156,7 @@ relcache = { path = "../../backend/utils/cache/relcache" }
 relcache_build = { path = "../../backend/utils/cache/relcache_build" }
 relmapper = { path = "../../backend/utils/cache/relmapper" }
 typcache = { path = "../../backend/utils/cache/typcache" }
+pg_enum = { path = "../../backend/catalog/pg_enum" }
 elog = { path = "../../backend/utils/error/elog" }
 fmgr_core = { path = "../../backend/utils/fmgr/fmgr_core" }
 funcapi = { path = "../../backend/utils/fmgr/funcapi" }
