@@ -2269,26 +2269,20 @@ mod from_where {
         assert_eq!(q.targetList.len(), 1);
     }
 
-    // The 0A000 "invalid UNION/INTERSECT/EXCEPT ORDER BY clause" arm is
-    // ported but unreachable: expression sort keys panic loudly upstream in
-    // findTargetlistEntrySQL99 (equalfuncs unported for non-Var exprs).
+    // Reachable since findTargetlistEntrySQL99's equal() leg went live
+    // (grouping-sets lane): expression sort keys land as resjunk and hit C's
+    // 0A000 arm.
     #[test]
-    fn union_order_by_expression_is_loud() {
+    fn union_order_by_expression_is_0a000() {
         install();
         let ctx = MemoryContext::new("t");
         let mcx = ctx.mcx();
 
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = analyze_sql(mcx, "SELECT 1 AS x UNION ALL SELECT 2 ORDER BY x + 1");
-        }));
-        let payload = r.expect_err("must be loud");
-        let msg = payload
-            .downcast_ref::<&str>()
-            .copied()
-            .map(std::string::String::from)
-            .or_else(|| payload.downcast_ref::<std::string::String>().cloned())
-            .unwrap();
-        assert!(msg.contains("findTargetlistEntrySQL99"), "{msg}");
+        let err = analyze_sql(mcx, "SELECT 1 AS x UNION ALL SELECT 2 ORDER BY x + 1")
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(err.message(), "invalid UNION/INTERSECT/EXCEPT ORDER BY clause");
     }
 
     #[test]

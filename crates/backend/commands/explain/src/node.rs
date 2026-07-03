@@ -942,6 +942,10 @@ fn show_hash_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResu
             hi.nbatch,
             space_peak_kb
         );
+    }
+    Ok(())
+}
+
 // show_grouping_sets + show_grouping_set_keys (explain.c): keys resolve in
 // the outer child's tlist; the chain's vestigial Sort contributes a Sort Key
 // line and one indent level.
