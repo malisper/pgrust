@@ -26,7 +26,6 @@ static SEAMS: Once = Once::new();
 fn install_seams() {
     SEAMS.call_once(|| {
         miscinit_seams::get_user_id::set(|| 10);
-        namespace_seams::type_is_visible::set(|_| Ok(true));
         namespace_seams::is_temp_namespace::set(|_| false);
         syscache_seams::pg_type_typnamespace::set(|_| Ok(Some(11)));
         syscache_seams::pg_type_element_shape::set(|typid| {
