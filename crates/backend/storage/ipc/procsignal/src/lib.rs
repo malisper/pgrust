@@ -29,6 +29,8 @@ pub struct ProcSignalSlot {
     // kill(pid,sig)'s thread rendering: bit = signo, drained by the owner
     // thread (no C counterpart; the kernel's pending-signal set).
     pss_pendingThreadSignals: AtomicU32,
+    // Owner's leaked InterruptPending flag: CFI-visible pend delivery.
+    pss_interruptFlag: std::sync::atomic::AtomicPtr<AtomicBool>,
     pss_mutex: Spinlock,
 
     pss_barrierGeneration: AtomicU64,
@@ -47,6 +49,7 @@ impl ProcSignalSlot {
             pss_cancel_key: SyncCell::new([0; MAX_CANCEL_KEY_LENGTH]),
             pss_signalFlags: std::array::from_fn(|_| AtomicBool::new(false)),
             pss_pendingThreadSignals: AtomicU32::new(0),
+            pss_interruptFlag: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             pss_mutex: Spinlock::new(),
             pss_barrierGeneration: AtomicU64::new(u64::MAX),
             pss_barrierCheckMask: AtomicU32::new(0),
@@ -121,6 +124,7 @@ pub fn ProcSignalShmemResetAfterCrash() {
             flag.store(false, Relaxed);
         }
         slot.pss_pendingThreadSignals.store(0, Relaxed);
+        slot.pss_interruptFlag.store(std::ptr::null_mut(), Relaxed);
         slot.pss_mutex.unlock();
         slot.pss_barrierGeneration.store(u64::MAX, Relaxed);
         slot.pss_barrierCheckMask.store(0, Relaxed);
@@ -156,6 +160,10 @@ pub fn ProcSignalInit(cancel_key: &[u8]) -> PgResult<()> {
     }
     // Brand-new process: adopt the latest generation, discard stale bits.
     slot.pss_pendingThreadSignals.store(0, Relaxed);
+    slot.pss_interruptFlag.store(
+        g::interrupt_pending_flag() as *const _ as *mut AtomicBool,
+        Relaxed,
+    );
     slot.pss_barrierCheckMask.store(0, Relaxed);
     let barrier_generation = header.psh_barrierGeneration.load(Relaxed);
     slot.pss_barrierGeneration.store(barrier_generation, Relaxed);
@@ -254,6 +262,11 @@ pub fn SendThreadSignal(pid: i32, signo: i32) -> i32 {
             spin_acquire(&slot.pss_mutex);
             if slot.pss_pid.load(Relaxed) == pid {
                 slot.pss_pendingThreadSignals.fetch_or(bit, SeqCst);
+                let flag = slot.pss_interruptFlag.load(Relaxed);
+                if !flag.is_null() {
+                    // SAFETY: only ever a Box::leak'd 'static (never freed).
+                    unsafe { &*flag }.store(true, SeqCst);
+                }
                 slot.pss_mutex.unlock();
                 latch::set_latch(&lmgr_proc::GetPGProcByNumber(i as ProcNumber).procLatch);
                 return 0;
@@ -326,6 +339,7 @@ fn CleanupProcSignalState(_code: i32, _arg: usize) {
     }
     slot.pss_pid.store(0, Relaxed);
     slot.pss_cancel_key_len.set(0);
+    slot.pss_interruptFlag.store(std::ptr::null_mut(), Relaxed);
     // Look absorbed-of-everything so no barrier wait blocks on this slot.
     slot.pss_barrierGeneration.store(u64::MAX, Relaxed);
     slot.pss_mutex.unlock();

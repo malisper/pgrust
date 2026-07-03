@@ -869,21 +869,21 @@ fn datum_null() -> datum::Datum {
     datum::Datum::from_usize(0)
 }
 
-/// STATEMENT_TIMEOUT handler. C self-signals SIGINT/SIGTERM to re-enter
-/// StatementCancelHandler/die; process-directed signals cannot target one
-/// backend thread — the delivery redesign is postmaster-signal work, and
-/// timeout.c (the only caller) is unported.
+/// C self-signals SIGINT (SIGTERM during authentication_timeout use) to enter
+/// StatementCancelHandler/die; SendThreadSignal is kill(MyProcPid, sig)'s
+/// thread rendering, routing through the same installed dispositions. The
+/// kill(-MyProcPid) process-group leg has no thread analog (no children).
 pub fn StatementTimeoutHandler() {
-    let during_auth = elog::config::client_auth_in_progress();
-    panic!(
-        "StatementTimeoutHandler: kill({}) delivery is postmaster-signal design under threads (timeout.c unported)",
-        if during_auth { "SIGTERM" } else { "SIGINT" }
-    );
+    let sig = if elog::config::client_auth_in_progress() {
+        libc::SIGTERM
+    } else {
+        libc::SIGINT
+    };
+    procsignal::SendThreadSignal(init_small::globals::MyProcPid(), sig);
 }
 
-/// LOCK_TIMEOUT handler; same thread-model deferral as StatementTimeoutHandler.
 pub fn LockTimeoutHandler() {
-    panic!("LockTimeoutHandler: kill(SIGINT) delivery is postmaster-signal design under threads (timeout.c unported)");
+    procsignal::SendThreadSignal(init_small::globals::MyProcPid(), libc::SIGINT);
 }
 
 fn set_latch_on_my_latch() {

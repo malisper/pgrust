@@ -85,6 +85,9 @@ struct TimerSlot {
     deadline: Option<Instant>,
     latch: Option<LatchHandle>,
     posted: Arc<AtomicBool>,
+    // The owner's InterruptPending: raised with `posted` so a CPU-bound
+    // CHECK_FOR_INTERRUPTS reaches the drain, as C's SIGALRM preempts it.
+    interrupt_flag: &'static AtomicBool,
 }
 
 struct TimerShared {
@@ -112,12 +115,13 @@ fn timer_thread(shared: &'static TimerShared) -> ! {
     loop {
         let now = Instant::now();
         let mut nearest: Option<Instant> = None;
-        let mut fired: Vec<(Arc<AtomicBool>, Option<LatchHandle>)> = Vec::new();
+        let mut fired: Vec<(Arc<AtomicBool>, &'static AtomicBool, Option<LatchHandle>)> =
+            Vec::new();
         for slot in slots.values_mut() {
             if let Some(dl) = slot.deadline {
                 if dl <= now {
                     slot.deadline = None;
-                    fired.push((Arc::clone(&slot.posted), slot.latch));
+                    fired.push((Arc::clone(&slot.posted), slot.interrupt_flag, slot.latch));
                 } else if nearest.map_or(true, |n| dl < n) {
                     nearest = Some(dl);
                 }
@@ -125,9 +129,10 @@ fn timer_thread(shared: &'static TimerShared) -> ! {
         }
         if !fired.is_empty() {
             drop(slots);
-            for (posted, latch) in fired {
+            for (posted, interrupt_flag, latch) in fired {
                 // The kill(pid, SIGALRM) edge: post, then wake the backend.
                 posted.store(true, Ordering::SeqCst);
+                interrupt_flag.store(true, Ordering::SeqCst);
                 if let Some(latch) = latch {
                     latch::SetLatch(latch);
                 }
@@ -162,6 +167,7 @@ fn arm_timer(delay: Duration) {
             deadline: Some(Instant::now() + delay),
             latch: globals::MyLatch(),
             posted,
+            interrupt_flag: globals::interrupt_pending_flag(),
         },
     );
     shared.cv.notify_one();
@@ -399,6 +405,7 @@ pub fn InitializeTimeouts() {
             deadline: None,
             latch: globals::MyLatch(),
             posted,
+            interrupt_flag: globals::interrupt_pending_flag(),
         },
     );
 }
@@ -607,7 +614,9 @@ pub fn init_seams() {
         Ok(())
     });
     s::get_timeout_active::set(get_timeout_active);
+    s::get_timeout_indicator::set(get_timeout_indicator);
     s::get_timeout_start_time::set(get_timeout_start_time);
+    s::get_timeout_finish_time::set(get_timeout_finish_time);
     s::process_timeout_interrupt::set(ProcessTimeoutInterrupt);
 }
 

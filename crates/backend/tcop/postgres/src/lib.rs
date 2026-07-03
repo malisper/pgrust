@@ -96,7 +96,8 @@ pub(crate) fn get_current_timestamp() -> types_core::TimestampTz {
 }
 
 
-// Per-tuple hot: one TLS load + one predictable branch (C's CHECK_FOR_INTERRUPTS).
+// Per-tuple hot: TLS pointer + Relaxed load + one predictable branch (C's
+// CHECK_FOR_INTERRUPTS; the shared flag is how async senders reach us).
 #[inline(always)]
 pub fn check_for_interrupts() -> PgResult<()> {
     if init_small::globals::InterruptPending() {
@@ -120,6 +121,15 @@ pub fn HandleRecoveryConflictInterrupt(reason: u32) {
 pub fn ProcessInterrupts() -> PgResult<()> {
     use init_small::globals as g;
 
+    // C's SIGALRM/kill handlers already ran asynchronously by this point;
+    // the thread model runs them here: senders raised InterruptPending, the
+    // drains fire the pended timeout handlers and signal dispositions on
+    // this thread before the flags below are inspected.
+    if timeout_seams::process_timeout_interrupt::is_installed() {
+        timeout_seams::process_timeout_interrupt::call();
+    }
+    procsignal::DrainThreadSignals()?;
+
     if g::InterruptHoldoffCount() != 0 || g::CritSectionCount() != 0 {
         return Ok(());
     }
@@ -137,6 +147,7 @@ pub fn ProcessInterrupts() -> PgResult<()> {
                 .errcode(ERRCODE_QUERY_CANCELED)
                 .errmsg("canceling authentication due to timeout")
                 .into_error()
+                .with_error_location(loc(3316, "ProcessInterrupts"))
                 .into());
         }
         // C's worker-process arms are unreachable: those mains panic at launch.
@@ -144,12 +155,13 @@ pub fn ProcessInterrupts() -> PgResult<()> {
             .errcode(types_error::ERRCODE_ADMIN_SHUTDOWN)
             .errmsg("terminating connection due to administrator command")
             .into_error()
+            .with_error_location(loc(3355, "ProcessInterrupts"))
             .into());
     }
 
     if g::CheckClientConnectionPending() {
-        // pq_check_connection() polling is pqcomm-owner work; the flag can only
-        // be set by CLIENT_CONNECTION_CHECK_TIMEOUT (timeout lane, unported).
+        // pq_check_connection() polling is pqcomm-owner work; reachable only
+        // with client_connection_check_interval > 0 (boot default 0).
         panic!("ProcessInterrupts: CheckClientConnectionPending set but pq_check_connection not ported");
     }
     if g::ClientConnectionLost() {
@@ -161,6 +173,7 @@ pub fn ProcessInterrupts() -> PgResult<()> {
             .errcode(types_error::ERRCODE_CONNECTION_FAILURE)
             .errmsg("connection to client lost")
             .into_error()
+            .with_error_location(loc(3386, "ProcessInterrupts"))
             .into());
     }
 
@@ -200,6 +213,7 @@ pub fn ProcessInterrupts() -> PgResult<()> {
                 .errcode(types_error::ERRCODE_LOCK_NOT_AVAILABLE)
                 .errmsg("canceling statement due to lock timeout")
                 .into_error()
+                .with_error_location(loc(3438, "ProcessInterrupts"))
                 .into());
         }
         if stmt_timeout_occurred {
@@ -208,6 +222,7 @@ pub fn ProcessInterrupts() -> PgResult<()> {
                 .errcode(ERRCODE_QUERY_CANCELED)
                 .errmsg("canceling statement due to statement timeout")
                 .into_error()
+                .with_error_location(loc(3445, "ProcessInterrupts"))
                 .into());
         }
         if !DoingCommandRead() {
@@ -216,6 +231,7 @@ pub fn ProcessInterrupts() -> PgResult<()> {
                 .errcode(ERRCODE_QUERY_CANCELED)
                 .errmsg("canceling statement due to user request")
                 .into_error()
+                .with_error_location(loc(3465, "ProcessInterrupts"))
                 .into());
         }
     }
@@ -228,27 +244,40 @@ pub fn ProcessInterrupts() -> PgResult<()> {
         );
     }
 
-    // C rechecks each timeout GUC (> 0) here; unwired backing vars = loud arms.
     if g::IdleInTransactionSessionTimeoutPending() {
+        // A GUC reset to zero between firing and here means ignore the signal
+        // (the update itself doesn't disable a pending interrupt).
         g::SetIdleInTransactionSessionTimeoutPending(false);
-        panic!(
-            "ProcessInterrupts: IdleInTransactionSessionTimeoutPending set but the \
-             IdleInTransactionSessionTimeout GUC recheck is not wired (guc lane; FATAL 25P03)"
-        );
+        if lmgr_proc::globals::IdleInTransactionSessionTimeout() > 0 {
+            return Err(ereport(FATAL)
+                .errcode(types_error::ERRCODE_IDLE_IN_TRANSACTION_SESSION_TIMEOUT)
+                .errmsg("terminating connection due to idle-in-transaction timeout")
+                .into_error()
+                .with_error_location(loc(3486, "ProcessInterrupts"))
+                .into());
+        }
     }
     if g::TransactionTimeoutPending() {
         g::SetTransactionTimeoutPending(false);
-        panic!(
-            "ProcessInterrupts: TransactionTimeoutPending set but the TransactionTimeout \
-             GUC recheck is not wired (guc lane; FATAL 25P04)"
-        );
+        if lmgr_proc::globals::TransactionTimeout() > 0 {
+            return Err(ereport(FATAL)
+                .errcode(types_error::ERRCODE_TRANSACTION_TIMEOUT)
+                .errmsg("terminating connection due to transaction timeout")
+                .into_error()
+                .with_error_location(loc(3499, "ProcessInterrupts"))
+                .into());
+        }
     }
     if g::IdleSessionTimeoutPending() {
         g::SetIdleSessionTimeoutPending(false);
-        panic!(
-            "ProcessInterrupts: IdleSessionTimeoutPending set but the IdleSessionTimeout \
-             GUC recheck is not wired (guc lane; FATAL 57P05)"
-        );
+        if lmgr_proc::globals::IdleSessionTimeout() > 0 {
+            return Err(ereport(FATAL)
+                .errcode(types_error::ERRCODE_IDLE_SESSION_TIMEOUT)
+                .errmsg("terminating connection due to idle-session timeout")
+                .into_error()
+                .with_error_location(loc(3512, "ProcessInterrupts"))
+                .into());
+        }
     }
 
     if g::IdleStatsUpdateTimeoutPending()

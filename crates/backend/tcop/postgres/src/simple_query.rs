@@ -457,13 +457,14 @@ pub(crate) fn check_log_duration(was_logged: bool) -> (i32, String) {
     (0, String::new())
 }
 
-// enable_statement_timeout (postgres.c:5203). The StatementTimeout /
-// TransactionTimeout GUC backing vars land with the guc lane; boot default 0
-// takes the disable leg, as a fresh C backend does.
 fn enable_statement_timeout() -> PgResult<()> {
     debug_assert!(xact_started());
-    let statement_timeout = 0i32;
-    if statement_timeout > 0 {
+    let statement_timeout = lmgr_proc::globals::StatementTimeout();
+    let transaction_timeout = lmgr_proc::globals::TransactionTimeout();
+    // An earlier-or-equal TRANSACTION_TIMEOUT subsumes the statement timer.
+    if statement_timeout > 0
+        && (statement_timeout < transaction_timeout || transaction_timeout == 0)
+    {
         if !timeout_seams::get_timeout_active::call(timeout_seams::STATEMENT_TIMEOUT) {
             timeout_seams::enable_timeout_after::call(
                 timeout_seams::STATEMENT_TIMEOUT,

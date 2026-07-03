@@ -76,6 +76,7 @@ fn setup() {
             cv.notify_all();
         });
 
+        postgres_seams::check_for_interrupts::set(|| Ok(()));
         s_lock_seams::perform_spin_delay::set(|_| std::thread::yield_now());
         s_lock_seams::finish_spin_delay::set(|_| {});
         s_lock_seams::set_spins_per_delay::set(|_| {});
