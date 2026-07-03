@@ -55,6 +55,9 @@ struct CachedPlanSource {
     search_path: Option<SearchPathMatcher<'static>>,
     result_desc: Option<Rc<TupleDescData<'static>>>,
     gplan: Option<CachedPlanHandle>,
+    depends_on_rls: bool,
+    rewrite_role_id: Oid,
+    rewrite_row_security: bool,
     is_complete: bool,
     is_saved: bool,
     is_valid: bool,
@@ -233,6 +236,9 @@ pub fn CreateCachedPlan(
             search_path: None,
             result_desc: None,
             gplan: None,
+            depends_on_rls: false,
+            rewrite_role_id: InvalidOid,
+            rewrite_row_security: false,
             is_complete: false,
             is_saved: false,
             is_valid: false,
@@ -297,8 +303,14 @@ pub fn CompleteCachedPlan(
     let result_desc = plan_cache_compute_result_desc(source_mcx, query_list)?;
     let param_types: &'static [Oid] = mcx::slice_borrow_in(source_mcx, param_types)?;
 
+    let depends_on_rls = query_list.iter().any(|q| q.hasRowSecurity);
+    let rewrite_role_id = miscinit::GetUserId();
+    let rewrite_row_security = guc_tables::backing::row_security();
     with_source(h, |src| {
         src.query_list = query_list;
+        src.depends_on_rls = depends_on_rls;
+        src.rewrite_role_id = rewrite_role_id;
+        src.rewrite_row_security = rewrite_row_security;
         src.relation_oids = relation_oids;
         src.search_path = search_path;
         src.result_desc = result_desc;
@@ -537,6 +549,17 @@ fn RevalidateCachedQuery(h: CachedPlanSourceHandle, _queryEnv: QueryEnvHandle) -
         }
     }
 
+    // The rewrite had an RLS dependency: redo it if the role or the
+    // row_security setting changed (C plancache.c:714).
+    if with_source(h, |src| src.is_valid && src.depends_on_rls)
+        && with_source(h, |src| {
+            src.rewrite_role_id != miscinit::GetUserId()
+                || src.rewrite_row_security != guc_tables::backing::row_security()
+        })
+    {
+        invalidate_source(h);
+    }
+
     if with_source(h, |src| src.is_valid) {
         let query_list = with_source(h, |src| src.query_list);
         AcquirePlannerLocks(query_list, true)?;
@@ -630,7 +653,7 @@ fn BuildCachedPlan(
         }
     };
 
-    let mut depends_on_role = false;
+    let mut depends_on_role = with_source(h, |src| src.depends_on_rls);
     let mut is_transient = false;
     for stmt in stmt_list {
         if stmt.commandType == CmdType::CMD_UTILITY {

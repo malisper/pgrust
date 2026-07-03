@@ -20,6 +20,7 @@ nodes_core = { path = "../../nodes/nodes_core" }
 readfuncs = { path = "../../nodes/readfuncs" }
 rewrite_manip = { path = "../rewrite_manip" }
 relcache = { path = "../../utils/cache/relcache" }
+rowsecurity = { path = "../rowsecurity" }
 coerce = { path = "../../parser/coerce" }
 parse_expr = { path = "../../parser/parse_expr" }
 parser_small1 = { path = "../../parser/parser_small1" }
