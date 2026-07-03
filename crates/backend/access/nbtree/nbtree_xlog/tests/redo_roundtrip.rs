@@ -534,20 +534,21 @@ fn btree_redo_rebuilds_pages_byte_exact() {
         .borrow_mut()
         .push(Some(FmgrInfo::new(test_int4cmp, 351, 2, true, false)));
 
-    let insert = |key: i32| {
+    let insert_tid = |key: i32, posid: u16| {
         let icx = MemoryContext::new("ins");
         nbtree::btinsert(
             icx.mcx(),
             &rel,
             &[::datum::Datum::from_i32(key)],
             &[false],
-            &ItemPointerData::new(key as u32, 1),
+            &ItemPointerData::new(key as u32, posid),
             &rel,
             IndexUniqueCheck::UNIQUE_CHECK_NO,
             false,
         )
         .unwrap();
     };
+    let insert = |key: i32| insert_tid(key, 1);
 
     // Even keys ascending until the root leaf splits (SPLIT_R + NEWROOT), then
     // odd keys into the now-interior left page until it splits too (SPLIT_L
@@ -562,6 +563,72 @@ fn btree_redo_rebuilds_pages_byte_exact() {
         insert(odd);
         odd += 2;
     }
+
+    // Posting-split lane: install a deduplicated posting tuple for a fresh
+    // max key on the rightmost leaf exactly as bt_insertonpg's leaf arm would
+    // (PageAddItem + INSERT_LEAF record + LSN), then insert a duplicate whose
+    // TID falls inside its range: INSERT_POST on the write side, replayed via
+    // the redo-side _bt_swap_posting.
+    // The fixture metapage says allequalimage=false so the split phases skip
+    // the loud _bt_dedup_pass lane; the posting phase needs the key-space
+    // flag, which descents read from the rd_amcache copy.
+    let mut amc = rel.rd_amcache.get().expect("amcache primed by inserts");
+    amc.btm_allequalimage = true;
+    rel.rd_amcache.set(Some(amc));
+
+    let postkey = evens + 2;
+    let rightmost_leaf: BlockNumber = {
+        let nblocks = with_fake(|f| f.pages.len());
+        (1..nblocks)
+            .find(|blk| {
+                let page = page_bytes(*blk);
+                let special = BLCKSZ - core::mem::size_of::<BTPageOpaqueData>();
+                let flags = u16::from_ne_bytes([page[special + 12], page[special + 13]]);
+                let next = u32::from_ne_bytes(page[special + 4..special + 8].try_into().unwrap());
+                flags & types_nbtree::BTP_LEAF != 0 && next == P_NONE
+            })
+            .expect("a rightmost leaf") as BlockNumber
+    };
+    let tid = |posid: u16| -> [u8; 6] {
+        let mut b = [0u8; 6];
+        b[2..4].copy_from_slice(&(postkey as u16).to_ne_bytes()); // bi_lo
+        b[4..6].copy_from_slice(&posid.to_ne_bytes());
+        b
+    };
+    let mut post = [0u8; 28];
+    post[2..4].copy_from_slice(&16u16.to_ne_bytes()); // alt TID blkid = posting offset
+    post[4..6].copy_from_slice(&(types_nbtree::BT_IS_POSTING | 2).to_ne_bytes());
+    post[6..8].copy_from_slice(&(types_nbtree::INDEX_ALT_TID_MASK | 28).to_ne_bytes());
+    post[8..12].copy_from_slice(&postkey.to_ne_bytes());
+    post[16..22].copy_from_slice(&tid(1));
+    post[22..28].copy_from_slice(&tid(5));
+    {
+        let leaf_addr = with_fake(|f| f.pages[rightmost_leaf as usize]);
+        // SAFETY: leaked test page; no concurrent access.
+        let mut pm = unsafe {
+            types_storage::bufpage::PageMut::from_raw(NonNull::new(leaf_addr as *mut u8).unwrap())
+        };
+        let postoff = pm.as_ref().max_offset_number() + 1;
+        assert!(pm.add_item(&post, postoff, 0).is_some());
+        let xlrec = postoff.to_ne_bytes();
+        let frag: [&[u8]; 1] = [&post];
+        let lsn = xloginsert_seams::xlog_insert_record::call(
+            RM_BTREE_ID,
+            types_nbtree::XLOG_BTREE_INSERT_LEAF,
+            0,
+            &[&xlrec],
+            &[xloginsert_seams::XLogRegBuf {
+                block_id: 0,
+                buffer: rightmost_leaf as Buffer + 1,
+                flags: xloginsert_seams::REGBUF_STANDARD,
+                bufdata: &frag,
+            }],
+        )
+        .unwrap();
+        pm.set_lsn(lsn);
+    }
+    insert_tid(postkey, 3);
+
     with_fake(|f| assert!(f.pins.iter().all(|p| *p == 0), "leaked pins"));
 
     let nblocks = with_fake(|f| f.pages.len());
@@ -604,6 +671,11 @@ fn btree_redo_rebuilds_pages_byte_exact() {
     assert_eq!(seen[(XLOG_BTREE_SPLIT_R >> 4) as usize], 1, "SPLIT_R replayed");
     assert_eq!(seen[(XLOG_BTREE_SPLIT_L >> 4) as usize], 1, "SPLIT_L replayed");
     assert_eq!(seen[(XLOG_BTREE_NEWROOT >> 4) as usize], 2, "NEWROOT x2 replayed");
+    assert_eq!(
+        seen[(types_nbtree::XLOG_BTREE_INSERT_POST >> 4) as usize],
+        1,
+        "INSERT_POST replayed"
+    );
 
     with_fake(|f| assert!(f.pins.iter().all(|p| *p == 0), "replay leaked pins"));
     assert_eq!(with_fake(|f| f.pages.len()), nblocks);

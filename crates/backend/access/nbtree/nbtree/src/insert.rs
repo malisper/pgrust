@@ -1,8 +1,8 @@
 //! nbtinsert.c: descent-for-insert (rightmost-block fastpath cache),
-//! _bt_check_unique (UNIQUE_CHECK_YES arm), _bt_findinsertloc, _bt_insertonpg,
-//! _bt_split + parent insertion + root split. Loud: posting-list splits and
-//! deduplication (nbtdedup unit), simple/bottom-up deletion, speculative and
-//! deferred unique checks, unique-conflict waits, !heapkeyspace indexes.
+//! _bt_check_unique (UNIQUE_CHECK_YES arm), _bt_findinsertloc, _bt_insertonpg
+//! incl. posting splits (_bt_binsrch_posting, _bt_swap_posting), _bt_split +
+//! parent insertion + root split. Loud: dedup (nbtdedup unit), posting split
+//! during a page split, deletion, deferred unique checks, !heapkeyspace.
 
 use std::cell::Cell;
 
@@ -15,19 +15,22 @@ use ::types_nbtree::{
     BTMetaPageData, BTPageOpaqueData, BTP_HAS_GARBAGE, BTP_INCOMPLETE_SPLIT, BTP_ROOT,
     BTP_SPLIT_END, BTREE_METAPAGE, BTREE_NOVAC_VERSION, BT_READ, BT_WRITE, P_FIRSTDATAKEY,
     P_FIRSTKEY, P_HIKEY, P_IGNORE, P_INCOMPLETE_SPLIT, P_ISLEAF, P_ISROOT, P_LEFTMOST, P_NONE,
-    P_RIGHTMOST, XLOG_BTREE_INSERT_LEAF, XLOG_BTREE_INSERT_META, XLOG_BTREE_INSERT_UPPER,
-    XLOG_BTREE_NEWROOT, XLOG_BTREE_SPLIT_L, XLOG_BTREE_SPLIT_R,
+    P_RIGHTMOST, XLOG_BTREE_INSERT_LEAF, XLOG_BTREE_INSERT_META, XLOG_BTREE_INSERT_POST,
+    XLOG_BTREE_INSERT_UPPER, XLOG_BTREE_NEWROOT, XLOG_BTREE_SPLIT_L, XLOG_BTREE_SPLIT_R,
 };
 use ::types_nbtree::genam::IndexUniqueCheck;
 use ::types_rel::Relation;
 use ::types_snapshot::{SnapshotData, SnapshotType};
 use ::types_storage::bufpage::{PageMut, PageRef, SizeOfPageHeaderData};
-use ::types_tuple::itemptr::{InvalidOffsetNumber, ItemPointerData};
+use ::types_tuple::itemptr::{
+    InvalidOffsetNumber, ItemPointerCompare, ItemPointerData, ItemPointerGetBlockNumberNoCheck,
+};
 use ::xloginsert_seams::{XLogRegBuf, REGBUF_STANDARD, REGBUF_WILL_INIT};
 
 use crate::fcframe::OrderProcFrame;
 use crate::itup::{
-    bt_tuple_get_downlink, bt_tuple_get_natts, bt_tuple_is_pivot, bt_tuple_is_posting,
+    bt_tuple_get_downlink, bt_tuple_get_max_heap_tid, bt_tuple_get_natts, bt_tuple_get_nposting,
+    bt_tuple_get_posting_n, bt_tuple_get_posting_offset, bt_tuple_is_pivot, bt_tuple_is_posting,
     bt_tuple_set_downlink, bt_tuple_set_natts, copy_index_tuple, index_form_tuple,
     index_tuple_size, maxalign, set_t_info, set_t_tid, t_tid, ITup, ItupBuf,
     INDEX_TUPLE_HEADER_SIZE,
@@ -168,9 +171,10 @@ fn bt_doinsert<'mcx>(
         )?;
         let buf = insertstate.buf.take().expect("leaf pinned");
         let itemsz = insertstate.itemsz;
+        let postingoff = insertstate.postingoff;
         bt_insertonpg(
             mcx, rel, Some(insertstate.itup_key), &mut frame, buf, None, &mut stack, itup,
-            itemsz, newitemoff, false,
+            itemsz, newitemoff, postingoff, false,
         )?;
     }
 
@@ -383,10 +387,10 @@ unsafe fn bt_binsrch_insert(
         }
 
         if result == 0 && key.scantid.is_some() {
-            let itup = page_item(&page, page.item_id(mid));
-            if bt_tuple_is_posting(itup) {
-                unported_phase2("_bt_binsrch_posting split (nbtdedup posting lane)");
+            if insertstate.postingoff != 0 {
+                return Err(no_insert_offset(rel, key, low, stricthigh, pin.block_number()));
             }
+            insertstate.postingoff = bt_binsrch_posting(key, &page, mid);
         }
     }
 
@@ -394,6 +398,130 @@ unsafe fn bt_binsrch_insert(
     insertstate.stricthigh = stricthigh;
     insertstate.bounds_valid = true;
     Ok(low)
+}
+
+/// _bt_binsrch_posting (nbtsearch.c): 0 if not a posting list, -1 if LP_DEAD.
+///
+/// # Safety
+/// `page` pinned + locked; `offnum` a live offset on it.
+unsafe fn bt_binsrch_posting(
+    key: &BtScanInsert,
+    page: &PageRef<'_>,
+    offnum: OffsetNumber,
+) -> i32 {
+    let itemid = page.item_id(offnum);
+    let itup = page_item(page, itemid);
+    if !bt_tuple_is_posting(itup) {
+        return 0;
+    }
+    debug_assert!(key.heapkeyspace && key.allequalimage);
+
+    if itemid.is_dead() {
+        return -1;
+    }
+
+    let scantid = key.scantid.as_ref().expect("posting binsrch requires scantid");
+    let mut low: i32 = 0;
+    let mut high: i32 = bt_tuple_get_nposting(itup) as i32;
+    debug_assert!(high >= 2);
+
+    while high > low {
+        let mid = low + (high - low) / 2;
+        let res = ItemPointerCompare(scantid, &bt_tuple_get_posting_n(itup, mid as usize));
+        if res > 0 {
+            low = mid + 1;
+        } else if res < 0 {
+            high = mid;
+        } else {
+            return mid;
+        }
+    }
+
+    low
+}
+
+/// _bt_swap_posting (nbtdedup.c): the gap gets `newitem`'s TID and `newitem`
+/// takes oposting's rightmost TID.
+///
+/// # Safety
+/// `newitem` owned + writable; `oposting` a live posting tuple.
+unsafe fn bt_swap_posting<'mcx>(
+    mcx: Mcx<'mcx>,
+    newitem: *mut u8,
+    oposting: ITup,
+    postingoff: i32,
+) -> PgResult<ItupBuf<'mcx>> {
+    const IPD_SIZE: usize = core::mem::size_of::<ItemPointerData>();
+    let nhtids = bt_tuple_get_nposting(oposting) as i32;
+
+    if !(postingoff > 0 && postingoff < nhtids) {
+        return Err(posting_split_failed(nhtids, postingoff));
+    }
+
+    let mut nposting = copy_index_tuple(mcx, oposting)?;
+    let postoff = bt_tuple_get_posting_offset(nposting.as_ptr());
+    let replacepos = nposting.as_mut_ptr().add(postoff + postingoff as usize * IPD_SIZE);
+    let replaceposright = replacepos.add(IPD_SIZE);
+    let nmovebytes = (nhtids - postingoff - 1) as usize * IPD_SIZE;
+    core::ptr::copy(replacepos, replaceposright, nmovebytes);
+
+    debug_assert!(!bt_tuple_is_pivot(newitem) && !bt_tuple_is_posting(newitem));
+    replacepos.cast::<ItemPointerData>().write_unaligned(t_tid(newitem));
+
+    set_t_tid(newitem, bt_tuple_get_max_heap_tid(oposting));
+
+    debug_assert!(
+        ItemPointerCompare(&bt_tuple_get_max_heap_tid(nposting.as_ptr()), &t_tid(newitem)) < 0
+    );
+    Ok(nposting)
+}
+
+#[cold]
+#[inline(never)]
+fn no_insert_offset(
+    rel: &Relation<'_>,
+    key: &BtScanInsert,
+    low: OffsetNumber,
+    stricthigh: OffsetNumber,
+    blkno: BlockNumber,
+) -> Box<PgError> {
+    let scantid = key.scantid.as_ref().expect("posting corruption check has scantid");
+    Box::new(
+        PgError::error(format!(
+            "table tid from new index tuple ({},{}) cannot find insert offset between offsets {low} and {stricthigh} of block {blkno} in index \"{}\"",
+            ItemPointerGetBlockNumberNoCheck(scantid),
+            scantid.ip_posid,
+            rel.name()
+        ))
+        .with_sqlstate(::types_error::ERRCODE_INDEX_CORRUPTED),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn posting_split_failed(nhtids: i32, postingoff: i32) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "posting list tuple with {nhtids} items cannot be split at offset {postingoff}"
+    )))
+}
+
+#[cold]
+#[inline(never)]
+fn invalid_duplicate_tuple(
+    rel: &Relation<'_>,
+    tid: &ItemPointerData,
+    offnum: OffsetNumber,
+    blkno: BlockNumber,
+) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "table tid from new index tuple ({},{}) overlaps with invalid duplicate tuple at offset {offnum} of block {blkno} in index \"{}\"",
+            ItemPointerGetBlockNumberNoCheck(tid),
+            tid.ip_posid,
+            rel.name()
+        ))
+        .with_sqlstate(::types_error::ERRCODE_INDEX_CORRUPTED),
+    )
 }
 
 /// _bt_check_unique, UNIQUE_CHECK_YES arm: dirty-snapshot visibility recheck
@@ -648,8 +776,17 @@ unsafe fn bt_findinsertloc(
             || bt_compare(rel, insertstate.itup_key, &page, P_HIKEY, frame)? <= 0
     });
 
-    let newitemoff = bt_binsrch_insert(rel, insertstate, frame)?;
-    debug_assert!(insertstate.postingoff == 0);
+    let mut newitemoff = bt_binsrch_insert(rel, insertstate, frame)?;
+
+    if insertstate.postingoff == -1 {
+        // overlapping posting tuple is LP_DEAD: simple deletion, re-search
+        bt_delete_or_dedup_one_page(rel, insertstate, true, false, false)?;
+        debug_assert!(!insertstate.bounds_valid);
+        insertstate.postingoff = 0;
+        newitemoff = bt_binsrch_insert(rel, insertstate, frame)?;
+        debug_assert!(insertstate.postingoff == 0);
+    }
+
     Ok(newitemoff)
 }
 
@@ -735,8 +872,8 @@ unsafe fn bt_delete_or_dedup_one_page(
     Ok(())
 }
 
-/// _bt_insertonpg; postingoff arms panic earlier (nbtdedup lane), parameter
-/// dropped; `cbuf` given iff inserting a downlink on an internal page.
+/// _bt_insertonpg; `cbuf` given iff inserting a downlink on an internal page;
+/// `postingoff != 0` splits the posting tuple at `newitemoff` first.
 ///
 /// # Safety
 /// `buf` pinned + write-locked; `itup` a live owned tuple image.
@@ -751,6 +888,7 @@ unsafe fn bt_insertonpg<'mcx>(
     itup: ITup,
     itemsz: usize,
     newitemoff: OffsetNumber,
+    postingoff: i32,
     split_only_page: bool,
 ) -> PgResult<()> {
     let (isleaf, isroot, isrightmost, isonly, level) = {
@@ -777,8 +915,41 @@ unsafe fn bt_insertonpg<'mcx>(
     debug_assert!(!P_INCOMPLETE_SPLIT(&page_opaque(&buf.page())));
     debug_assert!(isleaf || newitemoff > P_FIRSTDATAKEY(&page_opaque(&buf.page())));
 
+    // posting split: itup becomes a copy carrying oposting's max TID
+    let mut itup = itup;
+    let mut newitemoff = newitemoff;
+    let mut swapped: Option<(ItupBuf<'mcx>, ItupBuf<'mcx>, ITup)> = None;
+    if postingoff != 0 {
+        let page = buf.page();
+        let itemid = page.item_id(newitemoff);
+        debug_assert!(isleaf);
+        debug_assert!(itup_key
+            .as_ref()
+            .is_some_and(|k| k.heapkeyspace && k.allequalimage));
+        let oposting = page_item(&page, itemid);
+
+        if !bt_tuple_is_posting(oposting) || itemid.is_dead() {
+            return Err(invalid_duplicate_tuple(
+                rel,
+                &t_tid(itup),
+                newitemoff,
+                buf.block_number(),
+            ));
+        }
+
+        let origitup = itup;
+        let mut itupcopy = copy_index_tuple(mcx, origitup)?;
+        let nposting = bt_swap_posting(mcx, itupcopy.as_mut_ptr(), oposting, postingoff)?;
+        itup = itupcopy.as_ptr();
+        newitemoff += 1;
+        swapped = Some((itupcopy, nposting, origitup));
+    }
+
     if buf.page().free_space() < itemsz {
         debug_assert!(!split_only_page);
+        if postingoff != 0 {
+            unported_phase2("_bt_split posting-split coincidence (nbtdedup lane)");
+        }
         let rbuf = bt_split(mcx, rel, itup_key, frame, &buf, cbuf, newitemoff, itemsz, itup)?;
         predicate_seams::predicate_lock_page_split::call(
             rel,
@@ -804,6 +975,16 @@ unsafe fn bt_insertonpg<'mcx>(
         // critical section: page image mutation + WAL, no early returns.
         {
             let mut page = page_of_mut(&buf);
+            if let Some((_, nposting, _)) = swapped.as_ref() {
+                // overwrite oposting in place (same size — nposting is its copy)
+                let itemid = page.as_ref().item_id(newitemoff - 1);
+                let dst = page.as_ref().as_ptr().cast_mut().add(itemid.lp_off() as usize);
+                core::ptr::copy_nonoverlapping(
+                    nposting.as_ptr(),
+                    dst,
+                    maxalign(index_tuple_size(nposting.as_ptr())),
+                );
+            }
             if page
                 .add_item(
                     core::slice::from_raw_parts(itup, index_tuple_size(itup)),
@@ -845,13 +1026,24 @@ unsafe fn bt_insertonpg<'mcx>(
 
         if relation_needs_wal(rel) {
             let xlrec = crate::wal::xl_btree_insert(newitemoff);
-            let itup_bytes = core::slice::from_raw_parts(itup, index_tuple_size(itup));
-            let itup_frag: [&[u8]; 1] = [itup_bytes];
+            // INSERT_POST block-0 data is uint16 postingoff + origitup
+            let upostingoff = (postingoff as u16).to_ne_bytes();
+            let itup_frag: [&[u8]; 1] = [core::slice::from_raw_parts(itup, index_tuple_size(itup))];
+            let posting_frags: [&[u8]; 2];
+            let bufdata: &[&[u8]] = if let Some((_, _, origitup)) = swapped.as_ref() {
+                posting_frags = [
+                    &upostingoff,
+                    core::slice::from_raw_parts(*origitup, index_tuple_size(*origitup)),
+                ];
+                &posting_frags
+            } else {
+                &itup_frag
+            };
             let reg0 = XLogRegBuf {
                 block_id: 0,
                 buffer: buf.buffer(),
                 flags: REGBUF_STANDARD,
-                bufdata: &itup_frag,
+                bufdata,
             };
 
             let call = |xlinfo: u8, regbufs: &[XLogRegBuf<'_>]| {
@@ -864,8 +1056,11 @@ unsafe fn bt_insertonpg<'mcx>(
                 )
             };
 
-            let recptr = if isleaf {
+            let recptr = if isleaf && postingoff == 0 {
                 call(XLOG_BTREE_INSERT_LEAF, &[reg0])?
+            } else if postingoff != 0 {
+                debug_assert!(isleaf);
+                call(XLOG_BTREE_INSERT_POST, &[reg0])?
             } else {
                 let reg1 = XLogRegBuf {
                     block_id: 1,
@@ -1362,6 +1557,7 @@ unsafe fn bt_insert_parent<'mcx>(
         new_item.as_ptr(),
         sz,
         top.offset + 1,
+        0,
         isonly,
     )
 }

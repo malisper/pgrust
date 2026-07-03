@@ -6657,6 +6657,7 @@ dependencies = [
  "origin_seams",
  "parallel_seams",
  "parse_expr",
+ "parse_relation",
  "parser_analyze",
  "parser_driver",
  "parser_seams",

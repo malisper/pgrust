@@ -1,6 +1,6 @@
 //! nbtxlog.c — btree rmgr redo. Live arms cover exactly what the write side
-//! (nbtree insert lane) emits: INSERT_LEAF/UPPER/META, SPLIT_L/R, NEWROOT.
-//! Every other op is a loud panic naming its C function and owning unit.
+//! (nbtree insert lane) emits: INSERT_LEAF/UPPER/META/POST, SPLIT_L/R,
+//! NEWROOT. Every other op is a loud panic naming its C function and unit.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -185,9 +185,40 @@ fn bt_clear_incomplete_split(record: &mut XLogReaderState, block_id: u8) -> PgRe
     Ok(())
 }
 
+// _bt_swap_posting (nbtdedup.c), redo-side transcription over raw images
+// (the write-side twin lives in the nbtree crate; this crate cannot depend on
+// it). `nposting` starts as a copy of oposting; TIDs are 6-byte raw moves.
+fn bt_swap_posting(newitem: &mut [u8], nposting: &mut [u8], postingoff: usize) -> PgResult<()> {
+    const IPD_SIZE: usize = 6;
+    let u16_at = |b: &[u8], o: usize| u16::from_ne_bytes([b[o], b[o + 1]]);
+    let nhtids = (u16_at(nposting, 4) & types_nbtree::BT_OFFSET_MASK) as usize;
+
+    if !(postingoff > 0 && postingoff < nhtids) {
+        return Err(error_err(format!(
+            "posting list tuple with {nhtids} items cannot be split at offset {postingoff}"
+        )));
+    }
+
+    // posting offset = ip_blkid of the alt TID (bi_hi << 16 | bi_lo).
+    let postoff =
+        ((u16_at(nposting, 0) as u32) << 16 | u16_at(nposting, 2) as u32) as usize;
+    let replacepos = postoff + postingoff * IPD_SIZE;
+    let nmovebytes = (nhtids - postingoff - 1) * IPD_SIZE;
+
+    let omax_pos = postoff + (nhtids - 1) * IPD_SIZE;
+    let omax: [u8; IPD_SIZE] = nposting[omax_pos..omax_pos + IPD_SIZE].try_into().unwrap();
+    let newtid: [u8; IPD_SIZE] = newitem[0..IPD_SIZE].try_into().unwrap();
+
+    nposting.copy_within(replacepos..replacepos + nmovebytes, replacepos + IPD_SIZE);
+    nposting[replacepos..replacepos + IPD_SIZE].copy_from_slice(&newtid);
+    newitem[0..IPD_SIZE].copy_from_slice(&omax);
+    Ok(())
+}
+
 fn btree_xlog_insert(
     isleaf: bool,
     ismeta: bool,
+    posting: bool,
     record: &mut XLogReaderState,
 ) -> PgResult<()> {
     let lsn = record.EndRecPtr;
@@ -202,8 +233,53 @@ fn btree_xlog_insert(
         let datapos = block_data(record, 0);
         // SAFETY: pin + exclusive lock per the redo protocol (module contract).
         let mut pm = unsafe { page_mut(buffer) };
-        if pm.add_item(datapos, offnum, 0).is_none() {
-            return Err(panic_err("failed to add new item".into()));
+        if !posting {
+            if pm.add_item(datapos, offnum, 0).is_none() {
+                return Err(panic_err("failed to add new item".into()));
+            }
+        } else {
+            // block data = uint16 postingoff + orignewitem; repeat the
+            // primary's _bt_swap_posting against oposting at offnum - 1.
+            debug_assert!(isleaf);
+            let postingoff = u16::from_ne_bytes(datapos[0..2].try_into().unwrap());
+            let orignewitem = &datapos[2..];
+            debug_assert!(postingoff > 0);
+
+            let itemid = pm.as_ref().item_id(offnum - 1);
+            let opos_off = itemid.lp_off() as usize;
+            let oposting_size =
+                (u16_le_native(pm.as_ref(), opos_off + 6) & INDEX_SIZE_MASK) as usize;
+
+            #[repr(C, align(8))]
+            struct ItupImage([u8; BLCKSZ]);
+            let mut newitem = ItupImage([0u8; BLCKSZ]);
+            newitem.0[..orignewitem.len()].copy_from_slice(orignewitem);
+            let mut nposting = ItupImage([0u8; BLCKSZ]);
+            // SAFETY: in-bounds page item read under the redo lock.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    pm.as_ref().as_ptr().add(opos_off),
+                    nposting.0.as_mut_ptr(),
+                    oposting_size,
+                );
+            }
+            bt_swap_posting(
+                &mut newitem.0[..orignewitem.len()],
+                &mut nposting.0[..oposting_size],
+                postingoff as usize,
+            )?;
+
+            // SAFETY: same-size in-place overwrite of oposting; exclusive.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    nposting.0.as_ptr(),
+                    pm.as_ref().as_ptr().cast_mut().add(opos_off),
+                    maxalign(oposting_size),
+                );
+            }
+            if pm.add_item(&newitem.0[..orignewitem.len()], offnum, 0).is_none() {
+                return Err(panic_err("failed to add posting split new item".into()));
+            }
         }
         pm.set_lsn(lsn);
         bufmgr_seams::mark_buffer_dirty::call(buffer)?;
@@ -216,6 +292,11 @@ fn btree_xlog_insert(
         bt_restore_meta(record, 2)?;
     }
     Ok(())
+}
+
+fn u16_le_native(page: PageRef<'_>, off: usize) -> u16 {
+    // SAFETY: in-bounds header read of a live page item.
+    unsafe { page.as_ptr().add(off).cast::<u16>().read_unaligned() }
 }
 
 fn btree_xlog_split(newitemonleft: bool, record: &mut XLogReaderState) -> PgResult<()> {
@@ -413,15 +494,13 @@ pub fn btree_redo(record: &mut XLogReaderState) -> PgResult<()> {
     let info = record.record.as_ref().expect("btree_redo with no decoded record").xl_info
         & !XLR_INFO_MASK;
     match info {
-        XLOG_BTREE_INSERT_LEAF => btree_xlog_insert(true, false, record),
-        XLOG_BTREE_INSERT_UPPER => btree_xlog_insert(false, false, record),
-        XLOG_BTREE_INSERT_META => btree_xlog_insert(false, true, record),
+        XLOG_BTREE_INSERT_LEAF => btree_xlog_insert(true, false, false, record),
+        XLOG_BTREE_INSERT_UPPER => btree_xlog_insert(false, false, false, record),
+        XLOG_BTREE_INSERT_META => btree_xlog_insert(false, true, false, record),
         XLOG_BTREE_SPLIT_L => btree_xlog_split(true, record),
         XLOG_BTREE_SPLIT_R => btree_xlog_split(false, record),
         XLOG_BTREE_NEWROOT => btree_xlog_newroot(record),
-        XLOG_BTREE_INSERT_POST => {
-            panic!("btree_redo arm not ported: btree_xlog_insert posting — land backend-access-nbt-dedup")
-        }
+        XLOG_BTREE_INSERT_POST => btree_xlog_insert(true, false, true, record),
         XLOG_BTREE_DEDUP => {
             panic!("btree_redo arm not ported: btree_xlog_dedup — land backend-access-nbt-dedup")
         }
