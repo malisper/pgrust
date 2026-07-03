@@ -31,6 +31,7 @@ fd = { path = "../../storage/file/fd" }
 ipc = { path = "../../storage/ipc/ipc" }
 lwlock = { path = "../../storage/lmgr/lwlock" }
 dsm_core = { path = "../../storage/ipc/dsm_core" }
+ipci = { path = "../../storage/ipc/ipci" }
 varsup = { path = "../../access/transam/varsup" }
 transam_xlog = { path = "../../access/transam/transam_xlog" }
 launch_backend = { path = "../launch_backend" }
@@ -62,3 +63,10 @@ lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
 s_lock_seams = { path = "../../storage/lmgr/s_lock_seams" }
 pg_sema_seams = { path = "../../port/pg_sema_seams" }
 controldata_utils = { path = "../../../common/controldata_utils" }
+pgstat = { path = "../../utils/activity/pgstat" }
+xact_seams = { path = "../../access/transam/xact_seams" }
+scalar_seams = { path = "../../utils/adt/scalar_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+backend_status_seams = { path = "../../utils/activity/backend_status_seams" }
+aio_config = { path = "../../storage/aio/aio_config" }

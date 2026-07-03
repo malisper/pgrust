@@ -181,6 +181,29 @@ pub fn CheckpointerShmemInit(nbuffers: i32) {
         .unwrap_or_else(|_| panic!("CheckpointerShmemInit called twice"));
 }
 
+/// Crash-cycle reset in place to the CheckpointerShmemInit boot image
+/// (notes/crash-restart-design.md); every child is dead, so the postmaster
+/// thread has exclusive access. SHUTDOWN_XLOG_PENDING is a process static
+/// under the thread model (C: per-process, reborn on fork) — reset with it.
+pub fn CheckpointerShmemResetAfterCrash() {
+    let cp = shmem();
+    cp.ckpt_lck.unlock();
+    cp.checkpointer_pid.store(0, Relaxed);
+    cp.ckpt_started.store(0, Relaxed);
+    cp.ckpt_done.store(0, Relaxed);
+    cp.ckpt_failed.store(0, Relaxed);
+    cp.ckpt_flags.store(0, Relaxed);
+    cp.num_requests.set(0);
+    let zero = CheckpointerRequest {
+        req_type: SyncRequestType::SYNC_REQUEST,
+        ftag: FileTag::default(),
+    };
+    for r in cp.requests {
+        r.set(zero);
+    }
+    SHUTDOWN_XLOG_PENDING.store(false, Relaxed);
+}
+
 fn time_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

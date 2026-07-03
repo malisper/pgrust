@@ -1,13 +1,13 @@
-//! Catchable-class crash choreography end to end: a fake backend crashes →
-//! HandleChildCrash SIGQUITs the sibling (observed quickdie-style) → the
-//! reaper drains → the reinit arm runs the reset walk and panics loudly at
-//! the first non-resettable subsystem (notes/crash-restart-design.md).
+//! Catchable-class crash choreography end to end over REAL shared state: full
+//! ipci bringup → a fake backend crashes → HandleChildCrash SIGQUITs the
+//! sibling (observed quickdie-style) → the reaper drains → the reinit arm runs
+//! shmem_exit(1) + the full reset walk and re-arms PM_STARTUP with a live
+//! startup child (notes/crash-restart-design.md).
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
 
-use postmaster::{with_pm, PMState};
+use postmaster::{with_pm, PMState, StartupStatusEnum};
 use types_core::init::BackendType;
 
 static SIGQUIT_SEEN: AtomicBool = AtomicBool::new(false);
@@ -44,57 +44,88 @@ const VICTIM_PID: i32 = 9001;
 const SIBLING_PID: i32 = 9002;
 
 #[test]
-fn crash_fans_out_sigquit_and_reinit_names_first_blocker() {
+fn crash_fans_out_sigquit_and_reinit_completes() {
     guc_tables::init_seams();
-    {
-        use std::sync::atomic::AtomicI32;
-        static WAL_SENDERS: AtomicI32 = AtomicI32::new(10);
-        static AV_SLOTS: AtomicI32 = AtomicI32::new(16);
-        guc_tables::vars::max_wal_senders.install(guc_tables::GucVarAccessors {
-            get: || WAL_SENDERS.load(Ordering::Relaxed),
-            set: |v| WAL_SENDERS.store(v, Ordering::Relaxed),
-        });
-        guc_tables::vars::autovacuum_worker_slots.install(guc_tables::GucVarAccessors {
-            get: || AV_SLOTS.load(Ordering::Relaxed),
-            set: |v| AV_SLOTS.store(v, Ordering::Relaxed),
-        });
-    }
     init_small::init_seams();
     transam_xlog::init_seams();
     shmem::init_seams();
     ipc::init_seams();
+    ipci::init_seams();
     pmchild::init_seams();
     postmaster::init_seams();
+    pgstat::init_seams();
+    pg_prng::init_seams();
     s_lock_seams::perform_spin_delay::set(|_| std::thread::yield_now());
     s_lock_seams::finish_spin_delay::set(|_| {});
     pg_sema_seams::pg_semaphore_create::set(|_| {});
+    xact_seams::is_in_parallel_mode::set(|| false);
+    xact_seams::get_current_transaction_nest_level::set(|| 1);
+    scalar_seams::parse_bool::set(|value| match value {
+        "on" | "true" | "yes" | "1" => Some(true),
+        "off" | "false" | "no" | "0" => Some(false),
+        _ => None,
+    });
+    aclchk_seams::pg_parameter_aclcheck_set::set(|_, _| Ok(true));
+    mbutils_seams::get_database_encoding::set(|| 6);
+    backend_status_seams::backend_status_shmem_size::set(|| Ok(4096));
+    backend_status_seams::backend_status_shmem_init::set(|| Ok(()));
+    static BE_STATUS_RESETS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    backend_status_seams::backend_status_shmem_reset_after_crash::set(|| {
+        BE_STATUS_RESETS.fetch_add(1, Ordering::Relaxed);
+    });
+    {
+        use std::sync::atomic::AtomicI32;
+        use std::sync::atomic::Ordering::Relaxed;
+        static AV_SLOTS: AtomicI32 = AtomicI32::new(16);
+        static WAL_SENDERS: AtomicI32 = AtomicI32::new(10);
+        static MAX_PREPARED: AtomicI32 = AtomicI32::new(0);
+        static MAX_LOCKS: AtomicI32 = AtomicI32::new(64);
+        guc_tables::vars::autovacuum_worker_slots.install(guc_tables::GucVarAccessors {
+            get: || AV_SLOTS.load(Relaxed),
+            set: |v| AV_SLOTS.store(v, Relaxed),
+        });
+        guc_tables::vars::max_wal_senders.install(guc_tables::GucVarAccessors {
+            get: || WAL_SENDERS.load(Relaxed),
+            set: |v| WAL_SENDERS.store(v, Relaxed),
+        });
+        guc_tables::vars::max_prepared_xacts.install(guc_tables::GucVarAccessors {
+            get: || MAX_PREPARED.load(Relaxed),
+            set: |v| MAX_PREPARED.store(v, Relaxed),
+        });
+        guc_tables::vars::max_locks_per_xact.install(guc_tables::GucVarAccessors {
+            get: || MAX_LOCKS.load(Relaxed),
+            set: |v| MAX_LOCKS.store(v, Relaxed),
+        });
+    }
+    aio_config::init_seams();
 
+    guc::store::initialize_guc_options().unwrap();
+    guc_tables::vars::io_method.write(0); // boot value is worker; IoWorkerMain unported
+    pg_prng::global_prng(|prng| prng.seed(42));
+
+    init_small::globals::SetIsPostmasterEnvironment(true);
     init_small::globals::SetMaxConnections(10);
     init_small::globals::set_max_worker_processes(8);
+    init_small::globals::SetNBuffers(16);
+    // MaxConnections + av_slots(16) + workers + wal_senders(10) + specials.
     init_small::globals::SetMaxBackends(
-        10 + 3 + 8 + 2 + types_storage::storage::NUM_SPECIAL_WORKER_PROCS,
+        10 + 16 + 8 + 10 + types_storage::storage::NUM_SPECIAL_WORKER_PROCS,
     );
     pmchild_seams::init_postmaster_child_slots::call();
-    lmgr_proc::InitProcGlobal(&lmgr_proc::ProcGlobalConfig {
-        autovacuum_worker_slots: 3,
-        max_wal_senders: 2,
-        max_prepared_xacts: 2,
-        fastpath_lock_groups_per_backend: 1,
-    });
-    procsignal::ProcSignalShmemInit();
-    pmsignal::PMSignalShmemInit(pmchild_seams::max_live_postmaster_children::call());
-    lwlock::CreateLWLocks(false).unwrap();
-    varsup::VarsupShmemInit();
-
-    waiteventset::InitializeWaitEventSupport().unwrap();
-    miscinit::InitProcessLocalLatch();
 
     let dir = std::env::temp_dir().join(format!("pgrust-crash-restart-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let dir: &'static str = Box::leak(dir.to_str().unwrap().to_string().into_boxed_str());
     write_valid_control_file(dir);
     init_small::globals::SetDataDir(dir);
+
+    ipci_seams::create_shared_memory_and_semaphores::call(1).unwrap();
+
     guc_tables::vars::remove_temp_files_after_crash.write(false);
+
+    waiteventset::InitializeWaitEventSupport().unwrap();
+    miscinit::InitProcessLocalLatch();
 
     let victim_slot =
         pmchild_seams::assign_postmaster_child_slot::call(BackendType::Backend).unwrap();
@@ -152,29 +183,32 @@ fn crash_fans_out_sigquit_and_reinit_names_first_blocker() {
         .state
         .store(lwlock::LW_FLAG_RELEASE_OK | 5, Ordering::Relaxed);
 
-    let err = catch_unwind(AssertUnwindSafe(|| {
-        postmaster::process_pm_child_exit().unwrap();
-    }))
-    .expect_err("reinit arm must panic at the first non-resettable subsystem");
-    let msg = err
-        .downcast_ref::<String>()
-        .cloned()
-        .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
-        .unwrap_or_default();
-    assert!(
-        msg.contains("crash-restart reinit blocked") && msg.contains("transam_xlog"),
-        "panic must name the blocker, got: {msg}"
-    );
+    postmaster::process_pm_child_exit().unwrap();
 
-    assert_eq!(with_pm(|pm| pm.pm_state), PMState::PM_NO_CHILDREN);
     assert_eq!(
         varsup::TransamVariables().nextOid.load(Ordering::Relaxed),
         0,
-        "VarsupShmemReset must restore the boot image before the blocker"
+        "VarsupShmemReset must restore the boot image"
     );
     assert_eq!(
         lock0.state.load(Ordering::Relaxed),
         lwlock::LW_FLAG_RELEASE_OK,
-        "LWLockResetAfterCrash must re-arm locks before the blocker"
+        "LWLockResetAfterCrash must re-arm locks"
     );
+    assert_eq!(BE_STATUS_RESETS.load(Ordering::Relaxed), 1);
+
+    assert_eq!(
+        with_pm(|pm| pm.pm_state),
+        PMState::PM_STARTUP,
+        "reinit arm must re-enter PM_STARTUP"
+    );
+    assert!(with_pm(|pm| pm.startup.is_some()), "a fresh startup child must be launched");
+    assert_eq!(with_pm(|pm| pm.startup_status), StartupStatusEnum::Running);
+    assert_eq!(with_pm(|pm| pm.abort_start_time), 0);
+    assert!(
+        with_pm(|pm| pm.fatal_error),
+        "fatal_error clears only at PMSIGNAL_RECOVERY_STARTED, as in C"
+    );
+    // The real startup thread recovers against the scratch datadir in the
+    // background; its eventual exit stays queued and unreaped here.
 }
