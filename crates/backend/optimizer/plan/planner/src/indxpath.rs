@@ -687,7 +687,12 @@ fn match_boolean_index_clause<'mcx>(
             0,
         )?);
     } else if clauses::is_notclause(clause) {
-        let arg = clause.as_bool_expr().unwrap().args[0];
+        let arg = clause
+            .as_bool_expr()
+            .unwrap()
+            .args
+            .first()
+            .expect("NOT has one arg");
         if match_index_to_operand(run, arg, indexcol, index) {
             op = Some(crate::like_support::make_opclause(
                 mcx,
@@ -700,7 +705,7 @@ fn match_boolean_index_clause<'mcx>(
     } else if clause.node_tag() == NodeTag::T_BooleanTest {
         use types_nodes::primnodes::BoolTestType;
         let btest = clause.as_boolean_test().unwrap();
-        let arg = btest.arg;
+        let arg = btest.arg.expect("BooleanTest carries its arg");
         let wanted = match btest.booltesttype {
             BoolTestType::IS_TRUE => Some(true),
             BoolTestType::IS_FALSE => Some(false),
@@ -732,9 +737,9 @@ fn match_boolean_index_clause<'mcx>(
     }))
 }
 
-pub fn indexcol_is_bool_constant_for_query(
-    run: &mut PlannerRun<'_>,
-    index: &IndexOptInfo<'_>,
+pub fn indexcol_is_bool_constant_for_query<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    index: &IndexOptInfo<'mcx>,
     indexcol: usize,
 ) -> PgResult<bool> {
     if !is_boolean_opfamily(index.opfamily[indexcol])? {
