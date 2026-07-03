@@ -402,6 +402,18 @@ fn node(out: &mut String, n: Node<'_>) {
         bool_field(out, "missing_ok", d.missing_ok);
         bool_field(out, "concurrent", d.concurrent);
         out.push('}');
+    } else if let Some(c) = n.as_create_event_trig_stmt() {
+        out.push_str("{CREATEEVENTTRIGSTMT");
+        string_field(out, "trigname", c.trigname);
+        string_field(out, "eventname", c.eventname);
+        list_field(out, "whenclause", &c.whenclause);
+        list_field(out, "funcname", &c.funcname);
+        out.push('}');
+    } else if let Some(a) = n.as_alter_event_trig_stmt() {
+        out.push_str("{ALTEREVENTTRIGSTMT");
+        string_field(out, "trigname", a.trigname);
+        char_field(out, "tgenabled", a.tgenabled as u8);
+        out.push('}');
     } else if let Some(v) = n.as_variable_set_stmt() {
         out.push_str("{VARIABLESETSTMT");
         int_field(out, "kind", v.kind as i32);

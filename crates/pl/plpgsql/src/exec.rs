@@ -270,6 +270,20 @@ impl<'a> Estate<'a> {
         self.set_var(dno, Datum::from_bool(state), false);
     }
 
+    // assign_text_var; the image lives in the invocation datum context and is
+    // reclaimed by its wholesale reset (C pfrees per-value).
+    pub fn assign_text_var(&mut self, dno: Dno, s: &str) -> PgResult<()> {
+        let mcx = self.datum_ctx.mcx();
+        let total = datum::VARHDRSZ + s.len();
+        let mut image = mcx::vec_with_capacity_in(mcx, total)?;
+        mcx::vec_append_bytes(&mut image, &datum::set_varsize_4b(total))?;
+        mcx::vec_append_bytes(&mut image, s.as_bytes())?;
+        let p = image.as_ptr();
+        core::mem::forget(image);
+        self.set_var(dno, Datum::from_usize(p as usize), false);
+        Ok(())
+    }
+
     // exec_eval_cleanup.
     fn exec_eval_cleanup(&mut self) {
         if let Some(t) = self.eval_tuptable.take() {
