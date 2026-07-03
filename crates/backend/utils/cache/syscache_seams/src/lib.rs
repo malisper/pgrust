@@ -978,3 +978,8 @@ seam_core::seam!(
     // SearchSysCache2(ENUMTYPOIDNAME, typid, label).
     pub fn lookup_pg_enum_by_typid_label(typid: Oid, label: &str) -> PgResult<Option<PgEnumShape>>
 );
+
+seam_core::seam!(
+    // SearchSysCache1(TYPEOID, typid) -> typnamespace only.
+    pub fn pg_type_typnamespace(typid: Oid) -> PgResult<Option<Oid>>
+);
