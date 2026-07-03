@@ -54,3 +54,21 @@ commit_ts_seams = { path = "../commit_ts_seams" }
 twophase_seams = { path = "../twophase_seams" }
 twophase_config = { path = "../twophase_config" }
 twophase_rmgr = { path = "../twophase_rmgr" }
+
+[dev-dependencies]
+pg_sema_seams = { path = "../../../port/pg_sema_seams" }
+s_lock_seams = { path = "../../../storage/lmgr/s_lock_seams" }
+latch_seams = { path = "../../../storage/ipc/latch_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
+deadlock_seams = { path = "../../../storage/lmgr/deadlock_seams" }
+pmsignal_seams = { path = "../../../storage/ipc/pmsignal_seams" }
+lock_seams = { path = "../../../storage/lmgr/lock_seams" }
+timeout_seams = { path = "../../../utils/misc/timeout_seams" }
+shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
+condition_variable_seams = { path = "../../../storage/lmgr/condition_variable_seams" }
+autovacuum_seams = { path = "../../../postmaster/autovacuum_seams" }
+xact_seams = { path = "../xact_seams" }
+transam_seams = { path = "../transam_seams" }
+subtrans_seams = { path = "../subtrans_seams" }
