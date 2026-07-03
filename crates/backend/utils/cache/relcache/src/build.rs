@@ -245,6 +245,7 @@ pub fn formrdesc(cat: &BootstrapCatalog) -> PgResult<()> {
         relisshared: cat.shared,
         relpersistence: RELPERSISTENCE_PERMANENT,
         relkind: RELKIND_RELATION,
+        relhastriggers: false,
         relhassubclass: false,
         relrowsecurity: false,
         relispopulated: true,

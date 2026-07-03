@@ -89,6 +89,7 @@ fn form(oid: Oid, name: &str, relkind: u8) -> FormData_pg_class {
         relisshared: false,
         relpersistence: RELPERSISTENCE_PERMANENT,
         relkind,
+        relhastriggers: false,
         relhassubclass: false,
         relrowsecurity: false,
         relispopulated: true,

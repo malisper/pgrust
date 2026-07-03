@@ -110,6 +110,7 @@ fn make<'mcx>(mcx: Mcx<'mcx>, oid: Oid, name: &str, relkind: u8, rls: bool) -> R
             relisshared: false,
             relpersistence: RELPERSISTENCE_PERMANENT,
             relkind,
+            relhastriggers: false,
             relhassubclass: false,
             relrowsecurity: rls,
             relispopulated: true,

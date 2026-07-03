@@ -48,6 +48,7 @@ fn rel_with_ns(mcx: Mcx<'_>, relid: Oid, relnamespace: Oid) -> RelationData<'_> 
             relisshared: false,
             relpersistence: RELPERSISTENCE_PERMANENT,
             relkind: RELKIND_RELATION,
+            relhastriggers: false,
             relhassubclass: false,
             relrowsecurity: false,
             relispopulated: true,

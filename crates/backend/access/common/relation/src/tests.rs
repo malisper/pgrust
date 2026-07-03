@@ -65,6 +65,7 @@ fn make_entry(mcx: Mcx<'static>, oid: Oid, name: &str, relpersistence: u8) -> Re
             relisshared: false,
             relpersistence,
             relkind: RELKIND_RELATION,
+            relhastriggers: false,
             relhassubclass: false,
             relrowsecurity: false,
             relispopulated: true,

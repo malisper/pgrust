@@ -101,6 +101,7 @@ fn make<'mcx>(mcx: Mcx<'mcx>, oid: Oid, name: &str, cols: &[Col]) -> Relation<'m
             relisshared: false,
             relpersistence: RELPERSISTENCE_PERMANENT,
             relkind: RELKIND_RELATION,
+            relhastriggers: false,
             relhassubclass: false,
             relrowsecurity: false,
             relispopulated: true,
