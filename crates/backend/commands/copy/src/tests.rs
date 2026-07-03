@@ -84,6 +84,7 @@ fn mk_state<'mcx>(
             force_notnull_all: false,
             force_null: None,
             force_null_all: false,
+            convert_selectively: false,
             on_error: crate::CopyOnErrorChoice::Stop,
             log_verbosity: crate::CopyLogVerbosityChoice::Default,
             reject_limit: 0,

@@ -77,6 +77,7 @@ pub struct CopyFormatOptions<'s> {
     pub force_notnull_all: bool,
     pub force_null: Option<&'s NodeList<'s>>,
     pub force_null_all: bool,
+    pub convert_selectively: bool,
     pub on_error: CopyOnErrorChoice,
     pub log_verbosity: CopyLogVerbosityChoice,
     pub reject_limit: i64,
@@ -449,6 +450,7 @@ pub fn ProcessCopyOptions<'s>(
         force_notnull_all: false,
         force_null: None,
         force_null_all: false,
+        convert_selectively: false,
         on_error: CopyOnErrorChoice::Stop,
         log_verbosity: CopyLogVerbosityChoice::Default,
         reject_limit: 0,
@@ -548,7 +550,21 @@ pub fn ProcessCopyOptions<'s>(
                 }
                 (opts.force_null, opts.force_null_all) = def_list_or_star(d, src)?;
             }
-            "convert_selectively" => unported("convert_selectively"),
+            "convert_selectively" => {
+                if opts.convert_selectively {
+                    return Err(conflicting_option(src, d.location));
+                }
+                opts.convert_selectively = true;
+                if !(d.arg.is_none() || d.arg.is_some_and(|a| a.as_list().is_some())) {
+                    return Err(Box::new(
+                        PgError::error(format!(
+                            "argument to option \"{name}\" must be a list of column names"
+                        ))
+                        .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
+                        .with_cursor_position(errpos(src, d.location)),
+                    ));
+                }
+            }
             "encoding" => {
                 if opts.file_encoding >= 0 {
                     return Err(conflicting_option(src, d.location));

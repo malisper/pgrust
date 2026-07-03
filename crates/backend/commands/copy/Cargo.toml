@@ -43,6 +43,7 @@ parse_collate = { path = "../../parser/parse_collate" }
 planner = { path = "../../optimizer/plan/planner" }
 wchar = { path = "../../../common/wchar" }
 snapmgr = { path = "../../utils/time/snapmgr" }
+portalmem = { path = "../../utils/mmgr/portalmem" }
 table = { path = "../../access/table/table" }
 tableam = { path = "../../access/table/tableam" }
 tableam_vocab = { path = "../../access/table/tableam_vocab" }
