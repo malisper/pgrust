@@ -26,6 +26,13 @@ pub fn nodeToString<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<PgString
     Ok(out)
 }
 
+// Query reachable only as RangeTblEntry.subquery's &Query (no node handle).
+pub fn queryToString<'mcx>(mcx: Mcx<'mcx>, q: &Query<'_>) -> PgResult<PgString<'mcx>> {
+    let mut out = PgString::new_in(mcx);
+    out_query(&mut out, q)?;
+    Ok(out)
+}
+
 macro_rules! w {
     ($out:expr, $($arg:tt)*) => {
         write!($out, $($arg)*).expect("outfuncs append")

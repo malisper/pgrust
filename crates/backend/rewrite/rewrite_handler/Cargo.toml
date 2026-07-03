@@ -18,6 +18,7 @@ table = { path = "../../access/table/table" }
 rewrite_handler_seams = { path = "../rewrite_handler_seams" }
 nodes_core = { path = "../../nodes/nodes_core" }
 readfuncs = { path = "../../nodes/readfuncs" }
+rewrite_manip = { path = "../rewrite_manip" }
 relcache = { path = "../../utils/cache/relcache" }
 coerce = { path = "../../parser/coerce" }
 parse_expr = { path = "../../parser/parse_expr" }
