@@ -107,9 +107,8 @@ pub fn exec_estimate_cache_entry_overhead_bytes(ntuples: f64) -> f64 {
     (SIZEOF_MEMOIZE_ENTRY + SIZEOF_MEMOIZE_KEY) as f64 + SIZEOF_MEMOIZE_TUPLE as f64 * ntuples
 }
 
-// The table context is droppy inside a no-drop arena: the query context's
-// reset callback is its destructor (docs/no-drop.md guard rule; nodeagg
-// precedent), so error paths free the cache too.
+// Droppy context inside a no-drop arena: the query context's reset callback
+// is its destructor (docs/no-drop.md; nodeagg precedent) — error paths too.
 fn make_table_ctx(mcx: Mcx<'_>) -> PgResult<NonNull<MemoryContext>> {
     let layout = Layout::new::<MemoryContext>();
     let raw = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?;
@@ -308,8 +307,7 @@ unsafe fn tuple_t_len(node: NonNull<u8>) -> u32 {
     unsafe { tuple_of(node).as_ref().t_len }
 }
 
-/// `datum_image_hash` (datum.c); detoast scratch lands in `mcx` (C's
-/// per-tuple context).
+/// `datum_image_hash` (datum.c); detoast scratch lands in the per-tuple mcx.
 fn datum_image_hash(mcx: Mcx<'_>, value: Datum, byval: bool, len: i16) -> PgResult<u32> {
     if byval {
         let raw = value.as_usize().to_ne_bytes();
@@ -354,8 +352,8 @@ fn datum_image_eq(mcx: Mcx<'_>, a: Datum, b: Datum, byval: bool, len: i16) -> Pg
     }
 }
 
-// Raw payload of a varlena datum, detoasted when external/compressed
-// (C compares/hashes VARDATA_ANY over toast_raw_datum_size bytes).
+// Raw payload, detoasted when external/compressed (C hashes/compares
+// VARDATA_ANY over toast_raw_datum_size bytes).
 fn varlena_data<'m>(mcx: Mcx<'m>, p: *const u8) -> PgResult<&'m [u8]> {
     // SAFETY: by-ref varlena datum readable through its header.
     unsafe {
@@ -425,7 +423,6 @@ fn probe_hash<'mcx>(
     }
 }
 
-/// `MemoizeHash_equal`: candidate entry params vs the prepared probeslot.
 fn probe_equal<'mcx>(
     tableslot: &mut SlotData<'mcx>,
     probeslot: &mut SlotData<'mcx>,
@@ -521,7 +518,23 @@ fn remove_cache_entry(node: &mut MemoizeState<'_>, ix: u32) {
 
 fn cache_purge_all(node: &mut MemoizeState<'_>) {
     let evictions = node.entries.iter().filter(|e| e.is_some()).count() as u64;
-    // SAFETY: sole reference; wholesale reset frees every image at once.
+    cache_free_all(node);
+    node.stats.cache_evictions += evictions;
+}
+
+// C resets the table context wholesale; this aset's accounting demands
+// balanced frees, so walk the entries first (purge/end only — rare).
+fn cache_free_all(node: &mut MemoizeState<'_>) {
+    let mcx = table_mcx(node.table_ctx);
+    for i in 0..node.entries.len() {
+        if node.entries[i].is_some() {
+            entry_purge_tuples(node, i as u32);
+            let entry = node.entries[i].take().expect("live entry");
+            // SAFETY: the key image is owned by this entry.
+            unsafe { free_image(mcx, entry.params.cast(), entry.params.as_ref().t_len as usize) };
+        }
+    }
+    // SAFETY: sole reference; every allocation was just freed.
     unsafe { (*node.table_ctx.as_ptr()).reset() };
     node.entries.clear();
     node.free_slots.clear();
@@ -531,10 +544,9 @@ fn cache_purge_all(node: &mut MemoizeState<'_>) {
     node.last_tuple = None;
     node.entry = INVALID;
     node.mem_used = 0;
-    node.stats.cache_evictions += evictions;
 }
 
-/// `cache_reduce_memory`; returns false when `specialkey` got evicted.
+/// Returns false when `specialkey` got evicted.
 fn cache_reduce_memory(node: &mut MemoizeState<'_>, specialkey: u32) -> bool {
     let mut specialkey_intact = true;
     let mut evictions: u64 = 0;
@@ -559,8 +571,7 @@ fn cache_reduce_memory(node: &mut MemoizeState<'_>, specialkey: u32) -> bool {
     specialkey_intact
 }
 
-/// `cache_lookup`. Stable entry handles make C's post-eviction re-find
-/// unnecessary.
+/// `cache_lookup`; stable handles skip C's post-eviction re-find.
 fn cache_lookup<'mcx>(
     node: &mut MemoizeState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -845,9 +856,7 @@ pub fn exec_end_memoize(node: &mut MemoizeState<'_>) {
         }
         debug_assert!(mem == node.mem_used, "memoize memory accounting drift");
     }
-    // SAFETY: sole reference; drops every cached image.
-    unsafe { (*node.table_ctx.as_ptr()).reset() };
-    node.entries.clear();
+    cache_free_all(node);
     node.hashtab = hashbrown::HashTable::new();
     for e in node.param_exprs.iter_mut() {
         e.release_frames();
