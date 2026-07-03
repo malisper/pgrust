@@ -9,6 +9,7 @@ use ::types_nbtree::{BTORDER_PROC, BTSORTSUPPORT_PROC};
 // pg_proc.dat oids for the sortsupport routines with a live comparator arm.
 const F_BTINT2SORTSUPPORT: Oid = 3129;
 const F_BTINT4SORTSUPPORT: Oid = 3130;
+const F_BTOIDSORTSUPPORT: Oid = 3134;
 const F_BTINT8SORTSUPPORT: Oid = 3131;
 const F_DATE_SORTSUPPORT: Oid = 3136;
 const F_TIMESTAMP_SORTSUPPORT: Oid = 3137;
@@ -255,6 +256,9 @@ pub fn comparator_for_opfamily(
         lsyscache::get_opfamily_proc(opfamily, lefttype, righttype, BTSORTSUPPORT_PROC as i16)?;
     Ok(match sort_support_function {
         F_BTINT4SORTSUPPORT | F_DATE_SORTSUPPORT => SortComparator::Int32,
+        // btoidfastcmp: oid compares unsigned; the zero-extended datum word
+        // makes the u64 compare exact.
+        F_BTOIDSORTSUPPORT => SortComparator::Unsigned,
         F_BTINT8SORTSUPPORT | F_TIMESTAMP_SORTSUPPORT => SortComparator::SignedI64,
         // C DIVERGENCE: uuid 3300 / network 5033 name abbrev sortsupport
         // routines (unported); the shim on their BTORDER_PROC is
