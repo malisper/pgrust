@@ -125,7 +125,7 @@ fn decode_pg_class_roundtrips_a_formed_row() {
     nulls[33] = true;
 
     let tup = heaptuple::heap_form_tuple(mcx, &td, &values, &nulls).unwrap();
-    let scanned = pg_class::decode(&td, tup.as_tuple(), 1259).unwrap();
+    let scanned = pg_class::decode(mcx, &td, tup.as_tuple(), 1259).unwrap();
     let f = &scanned.form;
     assert_eq!(f.relname.name_str(), b"pg_class");
     assert_eq!(f.relnamespace, 11);

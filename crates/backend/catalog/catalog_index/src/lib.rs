@@ -355,15 +355,16 @@ fn UpdateIndexRelation<'mcx>(
     pg_index.close(RowExclusiveLock)
 }
 
-pub struct IndexCreateExtra {
+pub struct IndexCreateExtra<'a> {
     pub flags: u16,
     pub constr_flags: u16,
     pub allow_system_table_mods: bool,
     pub is_internal: bool,
+    pub reloptions: Option<&'a [u8]>,
 }
 
 // index_create; parentIndexRelid/parentConstraintId/relFileNumber/
-// opclassOptions/stattargets/reloptions fixed at their toast-lane values.
+// opclassOptions/stattargets fixed at their toast-lane values.
 #[allow(clippy::too_many_arguments)]
 pub fn index_create<'mcx>(
     mcx: Mcx<'mcx>,
@@ -377,7 +378,7 @@ pub fn index_create<'mcx>(
     collationIds: &[Oid],
     opclassIds: &[Oid],
     coloptions: &[i16],
-    extra: &IndexCreateExtra,
+    extra: &IndexCreateExtra<'_>,
 ) -> PgResult<Oid> {
     let heapRelationId = heapRelation.rd_id;
     let concurrent = extra.flags & INDEX_CREATE_CONCURRENT != 0;
@@ -498,6 +499,7 @@ pub fn index_create<'mcx>(
         &form,
         indexTupDesc.natts as i16,
         indexRelationId,
+        extra.reloptions,
     )?;
     pg_class.close(RowExclusiveLock)?;
 
@@ -796,8 +798,9 @@ fn index_update_stats<'mcx>(
         RELKIND_RELATION | RELKIND_TOASTVALUE | RELKIND_MATVIEW
     ) {
         if autovacuum_seams::autovacuuming_active::call() {
-            if rel.rd_options.is_some() {
-                unported("index_update_stats: StdRdOptions autovacuum.enabled check");
+            if rel.rd_options.as_ref().and_then(|o| o.std()).is_some_and(|o| !o.autovacuum.enabled)
+            {
+                update_stats = false;
             }
         } else {
             update_stats = false;

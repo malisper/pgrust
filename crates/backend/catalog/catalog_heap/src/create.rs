@@ -148,6 +148,7 @@ pub fn InsertPgClassTuple<'mcx>(
     rd_rel: &types_rel::FormData_pg_class,
     natts: i16,
     new_rel_oid: Oid,
+    reloptions: Option<&[u8]>,
 ) -> PgResult<()> {
     let mut values = [Datum::null(); Natts_pg_class];
     let mut nulls = [false; Natts_pg_class];
@@ -184,7 +185,12 @@ pub fn InsertPgClassTuple<'mcx>(
     values[29] = Datum::from_transaction_id(rd_rel.relfrozenxid);
     values[30] = Datum::from_transaction_id(rd_rel.relminmxid);
     nulls[Anum_pg_class_relacl - 1] = true;
-    nulls[Anum_pg_class_reloptions - 1] = true;
+    match reloptions {
+        Some(img) => {
+            values[Anum_pg_class_reloptions - 1] = Datum::from_usize(img.as_ptr() as usize)
+        }
+        None => nulls[Anum_pg_class_reloptions - 1] = true,
+    }
     nulls[Anum_pg_class_relpartbound - 1] = true;
 
     let mut tup = heaptuple::heap_form_tuple(mcx, pg_class_desc.descr(), &values, &nulls)?;
@@ -202,6 +208,7 @@ fn AddNewRelationTuple<'mcx>(
     relkind: u8,
     relfrozenxid: TransactionId,
     relminmxid: MultiXactId,
+    reloptions: Option<&[u8]>,
 ) -> PgResult<()> {
     let mut form = new_rel_desc.rd_rel.clone();
     form.relpages = 0;
@@ -216,7 +223,14 @@ fn AddNewRelationTuple<'mcx>(
     form.relowner = relowner;
     form.reltype = new_type_oid;
     form.relispartition = false;
-    InsertPgClassTuple(mcx, pg_class_desc, &form, new_rel_desc.rd_att.natts as i16, new_rel_oid)
+    InsertPgClassTuple(
+        mcx,
+        pg_class_desc,
+        &form,
+        new_rel_desc.rd_att.natts as i16,
+        new_rel_oid,
+        reloptions,
+    )
 }
 
 pub fn insert_pg_attribute_tuple<'mcx>(
@@ -308,6 +322,7 @@ pub struct HeapCreateParams<'a> {
     pub relkind: u8,
     pub relpersistence: u8,
     pub allow_system_table_mods: bool,
+    pub reloptions: Option<&'a [u8]>,
 }
 
 pub fn heap_create_with_catalog<'mcx>(
@@ -455,6 +470,7 @@ pub fn heap_create_with_catalog<'mcx>(
         p.relkind,
         relfrozenxid,
         relminmxid,
+        p.reloptions,
     )?;
 
     AddNewAttributeTuples(mcx, relid, &new_rel_desc.rd_att, p.relkind)?;

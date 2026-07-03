@@ -70,9 +70,6 @@ pub fn DefineIndex<'mcx>(
     if !stmt.indexIncludingParams.is_nil() {
         unported("DefineIndex: INCLUDE columns");
     }
-    if !stmt.options.is_nil() {
-        unported("DefineIndex: WITH reloptions");
-    }
     if stmt.tableSpace.is_some() {
         unported("DefineIndex: TABLESPACE");
     }
@@ -106,6 +103,10 @@ pub fn DefineIndex<'mcx>(
     if let Some(wc) = stmt.whereClause {
         CheckPredicate(mcx, wc)?;
     }
+
+    let reloptions =
+        reloptions::transformRelOptions(mcx, None, &stmt.options, None, &[], false, false)?;
+    reloptions::index_reloptions(mcx, accessMethodId, reloptions.as_deref(), true)?;
 
     let root_save_nestlevel = guc::NewGUCNestLevel();
     guc::RestrictSearchPath()?;
@@ -277,6 +278,7 @@ pub fn DefineIndex<'mcx>(
             constr_flags: if stmt.primary { INDEX_CONSTR_CREATE_MARK_AS_PRIMARY } else { 0 },
             allow_system_table_mods: false,
             is_internal: !check_rights,
+            reloptions: reloptions.as_deref(),
         },
     )?;
 
