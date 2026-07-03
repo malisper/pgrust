@@ -25,6 +25,7 @@ guc_file = { path = "../../utils/misc/guc_file" }
 latch = { path = "../../storage/ipc/latch" }
 waiteventset = { path = "../../storage/ipc/waiteventset" }
 pmsignal = { path = "../../storage/ipc/pmsignal" }
+procsignal = { path = "../../storage/ipc/procsignal" }
 fd = { path = "../../storage/file/fd" }
 transam_xlog = { path = "../../access/transam/transam_xlog" }
 launch_backend = { path = "../launch_backend" }
@@ -35,6 +36,7 @@ timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
 ipc_seams = { path = "../../storage/ipc/ipc_seams" }
 ipci_seams = { path = "../../storage/ipc/ipci_seams" }
 pmchild_seams = { path = "../pmchild_seams" }
+postmaster_seams = { path = "../postmaster_seams" }
 pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
 guc_seams = { path = "../../utils/misc/guc_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }

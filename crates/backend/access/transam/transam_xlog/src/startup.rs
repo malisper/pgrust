@@ -132,6 +132,12 @@ pub fn StartupXLOG() -> PgResult<()> {
 
     ValidateXLOGDirectoryStructure()?;
 
+    // C: RegisterTimeout(STARTUP_PROGRESS_TIMEOUT, ...) unless bootstrapping;
+    // the installed fn (postmaster_startup) does the bootstrap check itself.
+    if startup_seams::register_startup_progress_timeout::is_installed() {
+        startup_seams::register_startup_progress_timeout::call();
+    }
+
     let did_crash = if state != DB_SHUTDOWNED && state != DB_SHUTDOWNED_IN_RECOVERY {
         RemoveTempXlogFiles()?;
         // SyncDataDirectory() (fd.c) — crash-restart durability sweep.
@@ -429,7 +435,10 @@ pub fn XLogReportParameters() -> PgResult<()> {
     let max_senders = guc_tables::vars::max_wal_senders.read();
     let max_prepared = guc_tables::vars::max_prepared_xacts.read();
     let max_locks = guc_tables::vars::max_locks_per_xact.read();
-    let track_cts = guc_tables::vars::track_commit_timestamp.read();
+    // Var home is commit_ts.c (unported): the slot stays at its boot-default
+    // false until that owner installs it.
+    let track_cts = guc_tables::vars::track_commit_timestamp.installed()
+        && guc_tables::vars::track_commit_timestamp.read();
 
     if wal_level_now != cf.wal_level
         || wal_log_hints != cf.wal_log_hints

@@ -191,7 +191,10 @@ name = "adt_numeric"
 version = "0.1.0"
 dependencies = [
  "adt_float",
+ "datum",
+ "types_core",
  "types_error",
+ "types_fmgr",
 ]
 
 [[package]]
@@ -536,10 +539,12 @@ dependencies = [
  "interrupt",
  "ipc",
  "latch",
+ "libc",
  "libpq_pqsignal",
  "lwlock",
  "miscinit",
  "pgstat_seams",
+ "procsignal",
  "resowner",
  "smgr",
  "standby_seams",
@@ -756,6 +761,7 @@ dependencies = [
  "interrupt",
  "ipc",
  "latch",
+ "libc",
  "libpq_pqsignal",
  "lmgr_proc",
  "lwlock",
@@ -765,6 +771,7 @@ dependencies = [
  "pgstat_seams",
  "pmsignal",
  "postgres_seams",
+ "procsignal",
  "procsignal_seams",
  "resowner",
  "s_lock_seams",
@@ -877,6 +884,7 @@ name = "coerce"
 version = "0.0.0"
 dependencies = [
  "datum",
+ "detoast",
  "fmgr_core",
  "lsyscache",
  "mbutils",
@@ -1355,6 +1363,7 @@ dependencies = [
  "adt_int8",
  "adt_mac",
  "adt_mac8",
+ "adt_numeric",
  "adt_oracle_compat",
  "adt_pseudotypes",
  "datum",
@@ -1375,6 +1384,18 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+]
+
+[[package]]
+name = "format_type"
+version = "0.1.0"
+dependencies = [
+ "keywords",
+ "lsyscache",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_tuple",
 ]
 
 [[package]]
@@ -2457,6 +2478,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodeagg"
+version = "0.0.0"
+
+[[package]]
 name = "nodeindexonlyscan"
 version = "0.1.0"
 dependencies = [
@@ -2638,6 +2663,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "parse_agg"
+version = "0.0.0"
+
+[[package]]
 name = "parse_clause"
 version = "0.0.0"
 dependencies = [
@@ -2684,6 +2713,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "parse_func"
+version = "0.0.0"
+
+[[package]]
 name = "parse_oper"
 version = "0.0.0"
 dependencies = [
@@ -2692,6 +2725,7 @@ dependencies = [
  "coerce",
  "datum",
  "elog",
+ "format_type",
  "inval",
  "lsyscache",
  "mbutils",
@@ -2702,6 +2736,31 @@ dependencies = [
  "types_core",
  "types_error",
  "types_nodes",
+ "types_tuple",
+]
+
+[[package]]
+name = "parse_relation"
+version = "0.0.0"
+dependencies = [
+ "catalog_namespace",
+ "elog",
+ "lmgr_seams",
+ "lsyscache",
+ "mbutils",
+ "mcx",
+ "namespace_seams",
+ "parser_small1",
+ "pg_class_seams",
+ "rel_vocab",
+ "relation_seams",
+ "table",
+ "tupdesc",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_tuple",
 ]
 
 [[package]]
@@ -3112,6 +3171,7 @@ dependencies = [
  "init_small",
  "ipc_seams",
  "pmsignal_seams",
+ "postmaster_seams",
  "shmem_seams",
  "types_error",
  "waiteventset_seams",
@@ -3322,6 +3382,7 @@ dependencies = [
  "postinit",
  "postmaster_seams",
  "pqcomm_seams",
+ "procsignal",
  "syslogger_seams",
  "timestamp_seams",
  "transam_xlog",
@@ -3353,9 +3414,11 @@ dependencies = [
  "guc_tables",
  "init_small",
  "ipc",
+ "libc",
  "libpq_pqsignal",
  "mcxt_seams",
  "miscinit",
+ "procsignal",
  "procsignal_seams",
  "standby_seams",
  "startup_seams",
@@ -3463,6 +3526,56 @@ dependencies = [
  "types_rel",
  "types_snapshot",
  "types_tuple",
+]
+
+[[package]]
+name = "prepare"
+version = "0.1.0"
+dependencies = [
+ "aclchk_seams",
+ "analyze_seams",
+ "catalog_seams",
+ "cmdtag",
+ "datum",
+ "elog",
+ "execmain_seams",
+ "guc_tables",
+ "inval_seams",
+ "ipc_portal_seams",
+ "lock_seams",
+ "mcx",
+ "miscinit",
+ "miscinit_seams",
+ "parallel_seams",
+ "parser_analyze",
+ "parser_seams",
+ "plancache",
+ "planner_seams",
+ "portalcmds_seams",
+ "portalmem",
+ "postgres",
+ "postgres_seams",
+ "pquery",
+ "resowner_portal_seams",
+ "rewrite_handler_seams",
+ "snapmgr",
+ "syscache_seams",
+ "tcop_dest",
+ "transam_xlog_seams",
+ "types_core",
+ "types_dest",
+ "types_error",
+ "types_nodes",
+ "types_portal",
+ "types_resowner",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+ "utility",
+ "utility_seams",
+ "xact",
+ "xact_portal_seams",
+ "xact_seams",
 ]
 
 [[package]]
@@ -3934,6 +4047,7 @@ dependencies = [
  "condition_variable_seams",
  "conffiles",
  "dbcommands",
+ "deadlock_seams",
  "detoast",
  "dsm_core",
  "elog",
@@ -3970,6 +4084,7 @@ dependencies = [
  "nodeindexonlyscan",
  "nodeindexscan",
  "nodeseqscan",
+ "parallel_seams",
  "parse_expr",
  "parser_analyze",
  "parser_driver",
@@ -3990,9 +4105,11 @@ dependencies = [
  "pqcomm_seams",
  "pqformat",
  "pquery",
+ "predicate_seams",
  "printtup",
  "procarray",
  "procsignal",
+ "pruneheap_seams",
  "ps_status",
  "queryenvironment",
  "relation",
@@ -4010,7 +4127,9 @@ dependencies = [
  "slot",
  "smgr",
  "snapmgr",
+ "spi_seams",
  "stack_depth",
+ "string_seams",
  "subtrans",
  "superuser",
  "sync",
@@ -4021,6 +4140,8 @@ dependencies = [
  "timeout",
  "transam",
  "transam_xlog",
+ "trigger_seams",
+ "tuplestore",
  "twophase_config",
  "typcache",
  "utility",
@@ -4560,6 +4681,7 @@ dependencies = [
  "pqcomm_seams",
  "pqformat",
  "printtup",
+ "tstore_receiver",
  "types_core",
  "types_dest",
  "types_error",
@@ -4736,6 +4858,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tstore_receiver"
+version = "0.1.0"
+dependencies = [
+ "tuplestore",
+ "types_error",
+ "types_portal",
+ "types_slot",
+ "types_tuple",
+]
+
+[[package]]
 name = "tupdesc"
 version = "0.1.0"
 dependencies = [
@@ -4763,6 +4896,22 @@ dependencies = [
  "types_core",
  "types_error",
  "types_nbtree",
+ "types_slot",
+ "types_tuple",
+]
+
+[[package]]
+name = "tuplestore"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "exectuples",
+ "heaptuple",
+ "init_small",
+ "mcx",
+ "tuplestore_hold_seams",
+ "types_error",
+ "types_portal",
  "types_slot",
  "types_tuple",
 ]
@@ -5035,6 +5184,7 @@ dependencies = [
  "mcx",
  "miscinit",
  "parallel_seams",
+ "prepare",
  "syscache_seams",
  "tcop_dest",
  "transam_xlog",
@@ -5279,11 +5429,13 @@ dependencies = [
  "interrupt",
  "ipc",
  "latch",
+ "libc",
  "libpq_pqsignal",
  "lmgr_proc",
  "lwlock",
  "miscinit",
  "pgstat_seams",
+ "procsignal",
  "resowner",
  "smgr",
  "transam_xlog",

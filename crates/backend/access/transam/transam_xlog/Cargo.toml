@@ -47,6 +47,7 @@ pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
 procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
 checkpointer_seams = { path = "../../../postmaster/checkpointer_seams" }
 types_guc = { path = "../../../../_support/types/types_guc" }
+startup_seams = { path = "../../../postmaster/startup_seams" }
 libc = "0.2"
 
 [dev-dependencies]

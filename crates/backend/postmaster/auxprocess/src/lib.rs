@@ -1,6 +1,4 @@
-//! auxprocess.c. Thread-model divergence: the PostmasterContext release is a
-//! no-op (no forked copy of the postmaster's context exists to free); the
-//! caller sets MyBackendType before entry, as in C.
+//! auxprocess.c (PostmasterContext release: thread-model no-op).
 
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]
@@ -40,9 +38,6 @@ pub fn AuxiliaryProcessMainCommon() -> PgResult<()> {
 
 pub(crate) fn ShutdownAuxiliaryProcess(_code: i32, _arg: datum::Datum) -> PgResult<()> {
     lwlock::LWLockReleaseAll()?;
-    // ConditionVariableCancelSleep: while the CV unit is unported no thread
-    // can have prepared a sleep (any sleep call panics first), so skipping
-    // the uninstalled seam is exactly C's no-pending-sleep no-op arm.
     if condition_variable_seams::condition_variable_cancel_sleep::is_installed() {
         condition_variable_seams::condition_variable_cancel_sleep::call();
     }

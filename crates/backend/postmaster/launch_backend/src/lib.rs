@@ -76,12 +76,12 @@ static CHILD_PROCESS_KINDS: [ChildProcessKind; BACKEND_NUM_TYPES] = [
     },
     ChildProcessKind {
         name: "bgwriter",
-        main_fn: Main::Unported("BackgroundWriterMain (backend-postmaster-bgwriter)"),
+        main_fn: Main::Ported(bgwriter::BackgroundWriterMain),
         shmem_attach: true,
     },
     ChildProcessKind {
         name: "checkpointer",
-        main_fn: Main::Unported("CheckpointerMain (backend-postmaster-checkpointer)"),
+        main_fn: Main::Ported(checkpointer::CheckpointerMain),
         shmem_attach: true,
     },
     ChildProcessKind {
@@ -91,7 +91,7 @@ static CHILD_PROCESS_KINDS: [ChildProcessKind; BACKEND_NUM_TYPES] = [
     },
     ChildProcessKind {
         name: "startup",
-        main_fn: Main::Unported("StartupProcessMain (backend-postmaster-startup)"),
+        main_fn: Main::Ported(postmaster_startup::StartupProcessMain),
         shmem_attach: true,
     },
     ChildProcessKind {
@@ -106,7 +106,7 @@ static CHILD_PROCESS_KINDS: [ChildProcessKind; BACKEND_NUM_TYPES] = [
     },
     ChildProcessKind {
         name: "wal_writer",
-        main_fn: Main::Unported("WalWriterMain (backend-postmaster-walwriter)"),
+        main_fn: Main::Ported(walwriter::WalWriterMain),
         shmem_attach: true,
     },
     ChildProcessKind {
@@ -253,7 +253,22 @@ pub fn postmaster_child_launch(
                 init_small::globals::SetMyClientSocket(cs);
             }
 
-            main_fn(&startup_data)
+            let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                main_fn(&startup_data)
+            })) else {
+                unreachable!("child main_fn returns !")
+            };
+            // C wait-status encoding: proc_exit(code) == WIFEXITED(code<<8);
+            // any other unwind payload is a crash == WTERMSIG(SIGABRT).
+            let exitstatus = payload
+                .downcast_ref::<ipc::ProcExitThread>()
+                .map(|p| p.code << 8)
+                .unwrap_or(libc::SIGABRT);
+            if postmaster_seams::announce_child_exit::is_installed() {
+                postmaster_seams::announce_child_exit::call(child_pid, exitstatus);
+            } else {
+                std::panic::resume_unwind(payload);
+            }
         });
 
     match spawned {

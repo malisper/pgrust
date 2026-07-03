@@ -57,10 +57,8 @@ pub fn signal_child(pmchild: &PmChild, signal: i32) {
         3455,
         "signal_child",
     );
-    panic!(
-        "signal_child: delivering {} to a backend THREAD is the pmchild unit's redesign (backend-postmaster-pmchild)",
-        pm_signame(signal)
-    );
+    // kill(pid, signal)'s thread rendering; C ignores kill() failures here.
+    let _ = procsignal::SendThreadSignal(pmchild.pid, signal);
 }
 
 pub fn SignalChildren(signal: i32, target_mask: BackendTypeMask) -> bool {
