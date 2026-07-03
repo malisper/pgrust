@@ -17,7 +17,7 @@ use mcx::Mcx;
 use pg_depend::{object_address_comparator, ObjectAddress};
 use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID, TYPE_RELATION_ID};
 use types_error::{PgError, PgResult, ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST};
-use types_rel::{AccessExclusiveLock, Relation, RowExclusiveLock, RELKIND_INDEX, RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE};
+use types_rel::{AccessExclusiveLock, Relation, RowExclusiveLock, RELKIND_INDEX, RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE, RELKIND_VIEW};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::{HeapTupleData, TupleDescData};
 
@@ -293,11 +293,13 @@ fn findDependentObjects<'mcx>(
         return Ok(());
     }
     if catalog::IsPinnedObject(object.classId, object.objectId) {
-        return Err(dependent_objects_error(format!(
-            "cannot drop {} because it is required by the database system",
-            describe(mcx, object)?
-        ))
-        .into());
+        let desc = getObjectDescription(mcx, object)?.expect("pinned objects are describable");
+        return Err(Box::new(
+            PgError::error(format!(
+                "cannot drop {desc} because it is required by the database system"
+            ))
+            .with_sqlstate(ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST),
+        ));
     }
 
     // Scan what this object depends on (owner detection).
@@ -536,8 +538,7 @@ fn dependent_objects_exist(
 
 const MAX_REPORTED_DEPS: i32 = 100;
 
-// The auto/internal cascade arm stays a silent DEBUG2 no-op; the CASCADE
-// NOTICE report is loud.
+// The auto/internal cascade arm stays a silent DEBUG2 no-op.
 fn reportDependentObjects<'mcx>(
     mcx: Mcx<'mcx>,
     targetObjects: &ObjectAddresses,
@@ -545,23 +546,14 @@ fn reportDependentObjects<'mcx>(
     flags: i32,
     origObject: Option<&ObjectAddress>,
 ) -> PgResult<()> {
-    let quietly = flags & PERFORM_DELETION_QUIETLY != 0;
-    let mut ok = true;
-    let mut clientdetail = String::new();
-    let mut logdetail = String::new();
-    let mut numReportedClient = 0usize;
-    let mut numNotReportedClient = 0usize;
-
     for i in 0..targetObjects.refs.len() {
         let extra = &targetObjects.extras[i];
         if extra.flags & DEPFLAG_IS_PART != 0 && extra.flags & DEPFLAG_PARTITION == 0 {
-            let otherObjDesc = describe(mcx, &extra.dependee)?;
-            return Err(dependent_objects_error(format!(
-                "cannot drop {} because {otherObjDesc} requires it",
-                describe(mcx, &targetObjects.refs[i])?
-            ))
-            .with_hint(format!("You can drop {otherObjDesc} instead."))
-            .into());
+            let otherObjDesc = getObjectDescription(mcx, &extra.dependee)?
+                .expect("partition dependee is describable");
+            let objDesc = getObjectDescription(mcx, &targetObjects.refs[i])?
+                .expect("partition member is describable");
+            return Err(cannot_drop_required(&objDesc, &otherObjDesc));
         }
     }
 
@@ -581,9 +573,6 @@ fn reportDependentObjects<'mcx>(
         if extra.flags & DEPFLAG_SUBOBJECT != 0 {
             continue;
         }
-        let Some(objDesc) = catalog_objectaddress::getObjectDescription(mcx, obj, false)? else {
-            continue; // dropped concurrently
-        };
         if extra.flags & (DEPFLAG_AUTO | DEPFLAG_INTERNAL | DEPFLAG_PARTITION | DEPFLAG_EXTENSION)
             != 0
         {
