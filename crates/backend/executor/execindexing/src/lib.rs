@@ -16,9 +16,12 @@ use ::types_tuple::itemptr::ItemPointerIsValid;
 #[cfg(test)]
 mod tests;
 
+mod build_scan;
+pub use build_scan::table_index_build_scan;
+
 #[cold]
 #[inline(never)]
-fn unported(what: &str) -> ! {
+pub(crate) fn unported(what: &str) -> ! {
     panic!("unported: execIndexing {what}")
 }
 
@@ -32,6 +35,8 @@ pub struct IndexInfo {
     pub ii_NullsNotDistinct: bool,
     pub ii_ReadyForInserts: bool,
     pub ii_Summarizing: bool,
+    pub ii_Concurrent: bool,
+    pub ii_BrokenHotChain: bool,
 }
 
 /// BuildIndexInfo (catalog/index.c), pg_index arm.
@@ -62,6 +67,8 @@ pub fn BuildIndexInfo(index: &Relation<'_>) -> IndexInfo {
         ii_NullsNotDistinct: indexstruct.indnullsnotdistinct,
         ii_ReadyForInserts: indexstruct.indisready && indexstruct.indisvalid,
         ii_Summarizing: false, // btree only (relam gates in indexam)
+        ii_Concurrent: false,
+        ii_BrokenHotChain: false,
     }
 }
 
