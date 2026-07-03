@@ -280,8 +280,9 @@ pub fn estimate_rel_size(
 ) -> PgResult<(BlockNumber, f64, f64)> {
     let relkind = rel.rd_rel.relkind;
     if !relkind_has_table_am(relkind) {
-        if relkind == RELKIND_SEQUENCE {
-            // C final else arm: just use whatever's in pg_class.
+        if relkind == RELKIND_SEQUENCE || relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+            // C final else arm: just use whatever's in pg_class (partitioned
+            // tables are storageless; reached with ONLY / zero partitions).
             return Ok((rel.rd_rel.relpages as BlockNumber, rel.rd_rel.reltuples as f64, 0.0));
         }
         panic!("estimate_rel_size (plancat.c): relkind {relkind}; M2 lane");
