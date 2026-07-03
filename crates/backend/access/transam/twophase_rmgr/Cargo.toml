@@ -1,0 +1,9 @@
+[package]
+name = "twophase_rmgr"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "twophase_rmgr"
+path = "src/lib.rs"
