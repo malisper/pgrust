@@ -15,6 +15,7 @@ parse_utilcmd = { path = "../../parser/parse_utilcmd" }
 parse_clause = { path = "../../parser/parse_clause" }
 tablecmds = { path = "../../commands/tablecmds" }
 typecmds = { path = "../../commands/typecmds" }
+collationcmds = { path = "../../commands/collationcmds" }
 schemacmds = { path = "../../commands/schemacmds" }
 dbcommands = { path = "../../commands/dbcommands" }
 functioncmds = { path = "../../commands/functioncmds" }

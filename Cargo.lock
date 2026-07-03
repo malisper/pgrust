@@ -1901,6 +1901,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "collationcmds"
+version = "0.1.0"
+dependencies = [
+ "aclchk",
+ "adt_acl",
+ "catalog_namespace",
+ "dbcommands",
+ "explain",
+ "mbutils",
+ "mcx",
+ "miscinit",
+ "parser_small1",
+ "pg_collation",
+ "pg_depend",
+ "pg_locale",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "xact",
+]
+
+[[package]]
 name = "combocid"
 version = "0.0.0"
 dependencies = [
@@ -6413,6 +6436,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_collation"
+version = "0.1.0"
+dependencies = [
+ "catalog",
+ "catalog_indexing",
+ "datum",
+ "elog",
+ "heaptuple",
+ "mbutils",
+ "mcx",
+ "pg_database_seams",
+ "pg_depend",
+ "syscache_seams",
+ "table",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
 name = "pg_constraint"
 version = "0.1.0"
 dependencies = [
@@ -10647,6 +10692,7 @@ dependencies = [
  "catalog_toasting",
  "checkpointer_seams",
  "cmdtag",
+ "collationcmds",
  "commands_analyze",
  "commands_async",
  "commands_cluster",

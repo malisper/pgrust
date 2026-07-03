@@ -46,7 +46,7 @@ pub use primnodes::{
 pub use plannodes::ModifyTable;
 pub use rawnodes::{
 A_Const, A_Expr, A_Expr_Kind, A_Star, AlterEnumStmt, AlterSeqStmt, CollateClause, ColumnRef,
-    CreateDomainStmt, CreateEnumStmt, CreateSeqStmt, DeleteStmt, DistinctClause, FuncCall, IndexElem, IndexStmt,
+    CreateDomainStmt, CreateEnumStmt, CreateSeqStmt, DefineStmt, DeleteStmt, DistinctClause, FuncCall, IndexElem, IndexStmt,
     InferClause, InsertStmt, LockingClause, OnConflictClause, PLAssignStmt, ParamRef, RangeFunction, RawStmt,
     ResTarget, ReturningClause, SelectStmt, SortBy, SortByDir, SortByNulls, TypeCast, TypeName,
     UpdateStmt, ValUnion,

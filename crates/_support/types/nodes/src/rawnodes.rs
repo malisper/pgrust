@@ -668,6 +668,17 @@ pub struct CreateEnumStmt<'mcx> {
 }
 
 #[derive(Default)]
+pub struct DefineStmt<'mcx> {
+    pub kind: crate::parsenodes::ObjectType,
+    pub oldstyle: bool,
+    pub defnames: NodeList<'mcx>,
+    pub args: NodeList<'mcx>,
+    pub definition: NodeList<'mcx>,
+    pub if_not_exists: bool,
+    pub replace: bool,
+}
+
+#[derive(Default)]
 pub struct AlterEnumStmt<'mcx> {
     pub typeName: NodeList<'mcx>,
     pub oldVal: Option<&'mcx str>,
@@ -699,6 +710,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CreateDomainStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for CreateEnumStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CreateEnumStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for DefineStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_DefineStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for AlterEnumStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterEnumStmt;
@@ -1047,6 +1061,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_create_domain_stmt(self) -> Option<&'mcx CreateDomainStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_define_stmt(self) -> Option<&'mcx DefineStmt<'mcx>> {
         self.as_variant()
     }
 }

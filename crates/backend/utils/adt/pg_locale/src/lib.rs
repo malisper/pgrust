@@ -263,7 +263,18 @@ fn create_pg_locale(collid: Oid, cache_mcx: Mcx<'static>) -> PgResult<PgLocale> 
     let mut result = if row.collprovider == COLLPROVIDER_BUILTIN {
         create_pg_locale_builtin(cache_mcx, &req(&row.colllocale, "colllocale")?)?
     } else if row.collprovider == COLLPROVIDER_ICU {
-        panic!("pg_locale: ICU provider arm not ported (pg_locale_icu.c): collation {collid}");
+        // Loadable stub (rows exist; comparisons/case ops LOUD per method,
+        // pg_locale_icu.c unported): collate_is_c/ctype_is_c false as in C.
+        PgLocale {
+            provider: COLLPROVIDER_ICU,
+            deterministic: true,
+            collate_is_c: false,
+            ctype_is_c: false,
+            is_default: false,
+            builtin_locale: None,
+            builtin_casemap_full: false,
+            lt: libc_locale::LibcLocale::NONE,
+        }
     } else if row.collprovider == COLLPROVIDER_LIBC {
         create_pg_locale_libc(
             &req(&row.collcollate, "collcollate")?,
@@ -274,7 +285,8 @@ fn create_pg_locale(collid: Oid, cache_mcx: Mcx<'static>) -> PgResult<PgLocale> 
     };
     result.is_default = false;
     result.deterministic = row.collisdeterministic;
-    if !row.collisdeterministic {
+    // Non-ICU nondeterministic rows are unreachable via SQL (collationcmds.c:309).
+    if !row.collisdeterministic && row.collprovider != COLLPROVIDER_ICU {
         panic!(
             "pg_locale: nondeterministic collation {collid} not ported \
              (hashtext/pattern-op arms, varstr equality via pg_strncoll)"
