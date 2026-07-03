@@ -287,6 +287,68 @@ pub fn DefineIndex<'mcx>(
     Ok(indexRelationId)
 }
 
+// ResolveOpClass (indexcmds.c), named-opclass arm; the NIL arm stays inline
+// in ComputeIndexAttrs.
+fn ResolveOpClass(
+    opclass: &types_nodes::NodeList<'_>,
+    attrType: Oid,
+    accessMethodName: &str,
+    accessMethodId: Oid,
+) -> PgResult<Oid> {
+    let mut names: [&str; 4] = [""; 4];
+    let nnames = opclass.len();
+    if nnames == 0 || nnames > 3 {
+        unported("ResolveOpClass: improper qualified opclass name");
+    }
+    for (i, n) in opclass.iter().enumerate() {
+        names[i] = n.as_string().expect("opclass holds Strings").sval;
+    }
+    let (schemaname, opcname) = catalog_namespace::DeconstructQualifiedName(&names[..nnames])?;
+
+    let opClassId = if let Some(schemaname) = schemaname {
+        let namespaceId = catalog_namespace::LookupExplicitNamespace(schemaname, false)?;
+        syscache_seams::lookup_pg_opclass_oid_by_name::call(
+            accessMethodId,
+            opcname,
+            namespaceId,
+        )?
+    } else {
+        catalog_namespace::OpclassnameGetOpcid(accessMethodId, opcname)?
+    };
+    if opClassId == InvalidOid {
+        return Err(err(
+            format!(
+                "operator class \"{}\" does not exist for access method \"{}\"",
+                if schemaname.is_some() { names[..nnames].join(".") } else { opcname.to_string() },
+                accessMethodName
+            ),
+            ERRCODE_UNDEFINED_OBJECT,
+        ));
+    }
+
+    let Some(shape) = syscache_seams::lookup_pg_opclass_shape::call(opClassId)? else {
+        return Err(err(
+            format!(
+                "operator class \"{}\" does not exist for access method \"{}\"",
+                names[..nnames].join("."),
+                accessMethodName
+            ),
+            ERRCODE_UNDEFINED_OBJECT,
+        ));
+    };
+    if !coerce::IsBinaryCoercible(attrType, shape.opcintype)? {
+        return Err(err(
+            format!(
+                "operator class \"{}\" does not accept data type {}",
+                names[..nnames].join("."),
+                format_type::format_type_be(attrType)?
+            ),
+            ERRCODE_DATATYPE_MISMATCH,
+        ));
+    }
+    Ok(opClassId)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ComputeIndexAttrs<'mcx>(
     mcx: Mcx<'mcx>,
@@ -305,8 +367,8 @@ fn ComputeIndexAttrs<'mcx>(
         let attribute = node
             .as_variant::<IndexElem>()
             .unwrap_or_else(|| panic!("IndexElem expected in indexParams"));
-        if !attribute.opclass.is_nil() || !attribute.opclassopts.is_nil() {
-            unported("ComputeIndexAttrs: named operator classes (ResolveOpClass)");
+        if !attribute.opclassopts.is_nil() {
+            unported("ComputeIndexAttrs: opclass options (attoptions)");
         }
         let (atttype, attcollation) = if let Some(name) = attribute.name {
             let desc = rel.descr();
@@ -373,15 +435,19 @@ fn ComputeIndexAttrs<'mcx>(
         }
         collationIds[attn] = attcollation;
 
-        opclassIds[attn] = GetDefaultOpClass(atttype, accessMethodId)?;
-        if opclassIds[attn] == InvalidOid {
-            return Err(err(
-                format!(
-                    "data type {} has no default operator class for access method \"{amname}\"",
-                    format_type::format_type_be(atttype)?
-                ),
-                ERRCODE_UNDEFINED_OBJECT,
-            ));
+        if !attribute.opclass.is_nil() {
+            opclassIds[attn] = ResolveOpClass(&attribute.opclass, atttype, amname, accessMethodId)?;
+        } else {
+            opclassIds[attn] = GetDefaultOpClass(atttype, accessMethodId)?;
+            if opclassIds[attn] == InvalidOid {
+                return Err(err(
+                    format!(
+                        "data type {} has no default operator class for access method \"{amname}\"",
+                        format_type::format_type_be(atttype)?
+                    ),
+                    ERRCODE_UNDEFINED_OBJECT,
+                ));
+            }
         }
 
         coloptions[attn] = 0;
