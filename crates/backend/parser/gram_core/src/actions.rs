@@ -3695,19 +3695,25 @@ impl<'mcx> Parser<'mcx> {
                 n.options = view.v(3).list();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            // table_ref: select_with_parens opt_alias_clause.
-            1838 => {
+            // table_ref: select_with_parens opt_alias_clause
+            //          | LATERAL_P select_with_parens opt_alias_clause.
+            1838 | 1839 => {
+                let off = if rule == 1839 { 1 } else { 0 };
                 let mut n = Node::build::<RangeSubselect>(mcx)?;
-                n.lateral = false;
-                n.subquery = view.v(1).node();
-                n.alias = view.v(2).alias();
+                n.lateral = rule == 1839;
+                n.subquery = view.v(1 + off).node();
+                n.alias = view.v(2 + off).alias();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            // alias_clause: AS ColId '(' name_list ')'.
-            1850 => {
+            // alias_clause: AS ColId '(' name_list ')' | ColId '(' name_list ')'.
+            1850 | 1852 => {
+                let off = if rule == 1850 { 1 } else { 0 };
                 let a = Node::mk_mut(
                     mcx,
-                    Alias { aliasname: Some(view.v(2).str_val()), colnames: view.v(4).list() },
+                    Alias {
+                        aliasname: Some(view.v(1 + off).str_val()),
+                        colnames: view.v(3 + off).list(),
+                    },
                 )?;
                 *yyval = YYSTYPE::Alias(Some(a.seal_ref()));
             }
