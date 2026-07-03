@@ -35,6 +35,7 @@ subtrans_seams = { path = "../subtrans_seams" }
 commit_ts_seams = { path = "../commit_ts_seams" }
 multixact_seams = { path = "../multixact_seams" }
 twophase_seams = { path = "../twophase_seams" }
+varsup = { path = "../varsup" }
 varsup_seams = { path = "../varsup_seams" }
 xact_seams = { path = "../xact_seams" }
 sync_seams = { path = "../../../storage/sync/sync_seams" }

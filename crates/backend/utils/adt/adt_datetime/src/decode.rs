@@ -1500,7 +1500,7 @@ pub fn DecodeDateTime<'a>(
                 return DTERR_BAD_FORMAT;
             }
             let Some(z) = tz::session_timezone() else {
-                panic!("backend-timezone unit not ported: session_timezone (DecodeDateTime)");
+                panic!("session timezone not initialized (pg_timezone_initialize) — DecodeDateTime");
             };
             tzv = DetermineTimeZoneOffset(tm, z);
         }
@@ -1945,7 +1945,7 @@ pub fn DecodeTimeOnly<'a>(
         tt.tm_min = tm.tm_min;
         tt.tm_sec = tm.tm_sec;
         let Some(z) = tz::session_timezone() else {
-            panic!("backend-timezone unit not ported: session_timezone (DecodeTimeOnly)");
+            panic!("session timezone not initialized (pg_timezone_initialize) — DecodeTimeOnly");
         };
         tzv = DetermineTimeZoneOffset(&mut tt, z);
         tm.tm_isdst = tt.tm_isdst;

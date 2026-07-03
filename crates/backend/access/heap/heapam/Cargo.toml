@@ -37,6 +37,7 @@ transam_seams = { path = "../../transam/transam_seams" }
 combocid_seams = { path = "../../../utils/time/combocid_seams" }
 xloginsert_seams = { path = "../../transam/xloginsert_seams" }
 freespace_seams = { path = "../../../storage/freespace/freespace_seams" }
+tidbitmap = { path = "../../../nodes/tidbitmap" }
 
 [dev-dependencies]
 miscinit_seams = { path = "../../../utils/init/miscinit_seams" }

@@ -25,6 +25,7 @@ miscinit = { path = "../../../utils/init/miscinit" }
 init_small = { path = "../../../utils/init/init_small" }
 elog = { path = "../../../utils/error/elog" }
 snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
 procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
 transam_seams = { path = "../../transam/transam_seams" }
 

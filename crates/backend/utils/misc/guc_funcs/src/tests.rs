@@ -160,6 +160,26 @@ fn flatten_rejects_multiple_args_for_scalar_guc() {
 }
 
 #[test]
+fn flatten_quotes_list_quote_identifiers() {
+    setup();
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let args = [
+        string_const(mcx, "user"),
+        string_const(mcx, "MixedCase"),
+        string_const(mcx, "public"),
+    ];
+    // search_path is GUC_LIST_QUOTE: reserved keywords and non-vanilla
+    // identifiers get quoted, plain ones pass through.
+    let flat = flatten_set_variable_args("search_path", &args).unwrap();
+    assert_eq!(flat.as_deref(), Some("\"user\", \"MixedCase\", public"));
+
+    // DateStyle lacks GUC_LIST_QUOTE: no quoting even for keywords.
+    let flat = flatten_set_variable_args("DateStyle", &[string_const(mcx, "user")]).unwrap();
+    assert_eq!(flat.as_deref(), Some("user"));
+}
+
+#[test]
 fn extract_set_current_reads_live_value() {
     setup();
     let stmt = set_stmt(

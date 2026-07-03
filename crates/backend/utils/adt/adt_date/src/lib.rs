@@ -406,7 +406,7 @@ pub fn date2timestamptz_opt_overflow(
     tm.tm_min = 0;
     tm.tm_sec = 0;
     let z = tz::session_timezone()
-        .unwrap_or_else(|| panic!("backend-timezone unit not ported: session_timezone (date2timestamptz)"));
+        .unwrap_or_else(|| panic!("session timezone not initialized (pg_timezone_initialize) — date2timestamptz"));
     let tzoff = tz::DetermineTimeZoneOffset(&mut tm, z);
 
     let result = date as i64 * USECS_PER_DAY + tzoff as i64 * USECS_PER_SEC;
@@ -749,7 +749,7 @@ pub fn time_timetz(time: TimeADT) -> TimeTzADT {
     tz::GetCurrentDateTime(&mut tm);
     time2tm(time, &mut tm, &mut fsec);
     let z = tz::session_timezone()
-        .unwrap_or_else(|| panic!("backend-timezone unit not ported: session_timezone (time_timetz)"));
+        .unwrap_or_else(|| panic!("session timezone not initialized (pg_timezone_initialize) — time_timetz"));
     let tzoff = tz::DetermineTimeZoneOffset(&mut tm, z);
     TimeTzADT { time, zone: tzoff }
 }

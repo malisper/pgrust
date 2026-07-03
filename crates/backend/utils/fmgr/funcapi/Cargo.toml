@@ -12,6 +12,7 @@ types_tuple = { path = "../../../../_support/types/types_tuple" }
 fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
 nodes = { package = "types_nodes", path = "../../../../_support/types/nodes" }
 tupdesc = { path = "../../../access/common/tupdesc" }
+format_type = { path = "../../adt/format_type" }
 lsyscache = { path = "../../cache/lsyscache" }
 syscache_seams = { path = "../../cache/syscache_seams" }
 typcache_seams = { path = "../../cache/typcache_seams" }

@@ -34,11 +34,11 @@ pub fn max_stack_depth_bytes() -> isize {
     MAX_STACK_DEPTH_BYTES.get()
 }
 
-// C's __builtin_frame_address(0); inline(never) keeps the frame real.
+// C's __builtin_frame_address(0); inline(never) keeps the frame real; no black_box (it spills — docs/benchmarks/stack_depth.md).
 #[inline(never)]
 fn current_stack_addr() -> usize {
     let stack_loc: u8 = 0;
-    core::hint::black_box(&stack_loc as *const u8 as usize)
+    &raw const stack_loc as usize
 }
 
 // One backend = one thread: recorded at backend-thread spawn (C: in main()).
@@ -56,9 +56,7 @@ pub fn restore_stack_base(base: pg_stack_base_t) {
 pub fn stack_is_too_deep() -> bool {
     let stack_top_loc: u8 = 0;
     let stack_base_ptr = STACK_BASE_PTR.get();
-    let stack_depth =
-        stack_base_ptr.abs_diff(core::hint::black_box(&stack_top_loc as *const u8 as usize))
-            as isize;
+    let stack_depth = stack_base_ptr.abs_diff(&raw const stack_top_loc as usize) as isize;
     // base != 0 (NULL) guard last: no wasted cycles in the normal case.
     stack_depth > MAX_STACK_DEPTH_BYTES.get() && stack_base_ptr != 0
 }
@@ -104,7 +102,6 @@ pub fn check_max_stack_depth(newval: i32, _source: GucSource) -> bool {
     true
 }
 
-// The kilobyte global itself is written by the GUC machinery (vars accessor).
 pub fn assign_max_stack_depth(newval: i32) {
     MAX_STACK_DEPTH_BYTES.set(newval as isize * 1024);
 }

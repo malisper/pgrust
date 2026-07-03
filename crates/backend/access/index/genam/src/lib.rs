@@ -29,7 +29,6 @@ pub fn init_seams() {
     genam_seams::systable_scan_catalog::set(systable_scan_catalog);
 }
 
-// The genam_seams marshal for below-genam consumers (catcache's miss path).
 // The per-scan context stands in for C's CurrentMemoryContext palloc of the
 // sysscan machinery; direct consumers use the Mcx-taking API instead.
 fn systable_scan_catalog(
@@ -366,9 +365,7 @@ pub fn systable_inplace_update_begin<'mcx>(
     // The C snapshot arg is Assert(NULL); begin advances the catalog snapshot.
     let mut retries = 0;
     loop {
-        if init_small::globals::InterruptPending() {
-            interrupts_unported();
-        }
+        postgres_seams::check_for_interrupts::call()?;
         retries += 1;
         if retries > 10000 {
             return Err(too_many_overwrite_tries());
@@ -410,11 +407,10 @@ pub fn index_compute_xid_horizon_for_tuples(
     _ibuf: types_core::primitive::Buffer,
     _itemnos: &[types_core::primitive::OffsetNumber],
 ) -> PgResult<TransactionId> {
-    unported("index_compute_xid_horizon_for_tuples (needs bufmgr BufferGetPage; callers hash/gist)")
+    unported("index_compute_xid_horizon_for_tuples (needs tableam table_index_delete_tuples / heapam heap_index_delete_tuples; callers hash/gist)")
 }
 
-// Convert heap attribute numbers to index column numbers (idxkey[i].sk_attno =
-// j+1 where key[i].sk_attno == indkey[j]).
+// idxkey[i].sk_attno = j+1 where key[i].sk_attno == indkey[j].
 fn convert_scan_keys<'mcx>(
     mcx: Mcx<'mcx>,
     irel: &Relation<'mcx>,
@@ -588,10 +584,4 @@ fn unported(what: &str) -> ! {
 #[inline(never)]
 fn heapam_unported(f: &str) -> ! {
     panic!("unported: heapam {f} (backend-access-heap-heapam in flight)")
-}
-
-#[cold]
-#[inline(never)]
-fn interrupts_unported() -> ! {
-    panic!("unported callee reached from genam.c: ProcessInterrupts (tcop/postgres.c)")
 }
