@@ -69,6 +69,9 @@ pub fn make_new_heap<'mcx>(
         &old_heap.rd_att,
     )?;
 
+    xact::CommandCounterIncrement()?;
+    // C threads relrewrite through heap_create_with_catalog; setting it on the
+    // now-visible row is the same catalog end-state.
     set_relrewrite(mcx, oid_new_heap, old_heap_oid)?;
     xact::CommandCounterIncrement()?;
 

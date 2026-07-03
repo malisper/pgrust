@@ -133,7 +133,7 @@ pub fn RenameRelationInternal<'mcx>(
     is_index: bool,
 ) -> PgResult<()> {
     let lock = if is_index { ShareUpdateExclusiveLock } else { AccessExclusiveLock };
-    let targetrelation = table::table_open(mcx, myrelid, lock)?;
+    let targetrelation = relation_seams::relation_open::call(mcx, myrelid, lock)?;
     let namespace_id = targetrelation.rd_rel.relnamespace;
 
     if lsyscache::get_relname_relid(newrelname, namespace_id)? != InvalidOid {
