@@ -146,6 +146,26 @@ fn install_seams() {
                 _ => None,
             })
         });
+        syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
+            Ok((typid == ANYELEMENTOID).then(|| {
+                let mut name = NameData::default();
+                name.namestrcpy("anyelement");
+                syscache_seams::PgTypeTypcacheShape {
+                    typname: name,
+                    typlen: 4,
+                    typbyval: true,
+                    typalign: TYPALIGN_INT,
+                    typstorage: TYPSTORAGE_PLAIN,
+                    typtype: b'p' as i8,
+                    typisdefined: true,
+                    typrelid: InvalidOid,
+                    typsubscript: InvalidOid,
+                    typelem: InvalidOid,
+                    typarray: InvalidOid,
+                    typcollation: InvalidOid,
+                }
+            }))
+        });
         typcache_seams::assign_record_type_typmod::set(|desc| {
             desc.tdtypmod = 42;
             Ok(())
@@ -261,9 +281,11 @@ fn polymorphic_rettype_without_call_expr_errors() {
     install_seams();
     let ctx = MemoryContext::new("t");
     let err = get_func_result_type(ctx.mcx(), F_POLY).unwrap_err();
-    assert!(err
-        .message()
-        .contains("could not determine actual result type for function \"poly_fn\""));
+    assert_eq!(
+        err.message(),
+        "could not determine actual result type for function \"poly_fn\" \
+         declared to return type anyelement"
+    );
 }
 
 #[test]

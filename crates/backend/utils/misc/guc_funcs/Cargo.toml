@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 adt_acl = { path = "../../adt/acl" }
 elog = { path = "../../error/elog" }
+format_type = { path = "../../adt/format_type" }
 guc = { path = "../guc" }
 guc_tables = { path = "../guc_tables" }
 mcx = { path = "../../../../_support/mcx" }

@@ -42,9 +42,20 @@ pub fn xlog_redo(record: &mut XLogReaderState) -> PgResult<()> {
 
     match info {
         XLOG_NEXTOID => {
-            // OID allocator lives with the unported varsup unit; replaying
-            // its prefetch record needs it.
-            panic!("xlog_redo XLOG_NEXTOID: varsup nextOid store not ported");
+            // Believe the record exactly rather than max() against the
+            // counter: max() breaks on OID wraparound, and no OID allocation
+            // happens during replay anyway.
+            let next_oid = u32::from_ne_bytes(main_data(record)[..4].try_into().unwrap());
+            let oid_gen_lock = lwlock::main_lock(varsup::OID_GEN_LOCK);
+            lwlock::LWLockAcquire(
+                oid_gen_lock,
+                lwlock::LW_EXCLUSIVE,
+                init_small::globals::MyProcNumber(),
+            )?;
+            let tv = varsup::TransamVariables();
+            tv.nextOid.store(next_oid, Relaxed);
+            tv.oidCount.store(0, Relaxed);
+            lwlock::LWLockRelease(oid_gen_lock)?;
         }
         XLOG_CHECKPOINT_SHUTDOWN => {
             let check_point = CheckPoint::from_bytes(main_data(record));

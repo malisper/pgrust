@@ -38,6 +38,7 @@ use ::types_tuple::{
 
 use heapam_visibility_seams as hv_seam;
 
+pub mod bitmap;
 pub mod dml;
 pub mod fetch;
 pub mod hio;

@@ -62,8 +62,9 @@ pub(crate) fn install_wal_consistency_checking_string() {
     });
 }
 
-// C owner is checkpointer.c (unported); CalculateCheckpointSegments reads it
-// at boot, so the slot is installed here until that unit lands.
+// C owner is checkpointer.c, but CalculateCheckpointSegments reads it at
+// boot before the checkpointer unit initializes, so the backing stays here
+// (the checkpointer crate documents the same layering).
 thread_local! {
     static CHECKPOINT_COMPLETION_TARGET: Cell<f64> = const { Cell::new(0.9) };
 }

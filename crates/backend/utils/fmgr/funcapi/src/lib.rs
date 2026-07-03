@@ -114,10 +114,13 @@ fn unresolved_polymorphic_rettype(funcid: Oid, rettype: Oid) -> Box<PgError> {
         .flatten()
         .map(|n| String::from_utf8_lossy(n.name_str()).into_owned())
         .unwrap_or_default();
-    // C renders the type via format_type_be (format_type.c, unported).
+    let tname = match format_type::format_type_be(rettype) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
     Box::new(
         PgError::error(format!(
-            "could not determine actual result type for function \"{name}\" declared to return type {rettype}"
+            "could not determine actual result type for function \"{name}\" declared to return type {tname}"
         ))
         .with_sqlstate(ERRCODE_DATATYPE_MISMATCH),
     )
@@ -251,9 +254,11 @@ pub fn get_expr_result_tupdesc<'mcx>(
 
     if !no_error {
         let expr_type_id = expr_type(expr);
-        // C renders the type via format_type_be (format_type.c, unported).
         let err = if expr_type_id != RECORDOID {
-            PgError::error(format!("type {expr_type_id} is not composite"))
+            PgError::error(format!(
+                "type {} is not composite",
+                format_type::format_type_be(expr_type_id)?
+            ))
         } else {
             PgError::error("record type has not been registered")
         };

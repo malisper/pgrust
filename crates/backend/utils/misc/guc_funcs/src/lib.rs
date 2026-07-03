@@ -187,9 +187,10 @@ pub fn flatten_set_variable_args(name: &str, args: &[Node<'_>]) -> PgResult<Opti
             Some(ValUnion::Float(f)) => buf.push_str(f.fval),
             Some(ValUnion::String(s)) => {
                 if (flags & GUC_LIST_QUOTE) != 0 {
-                    unported("flatten_set_variable_args quote_identifier (ruleutils lane)");
+                    buf.push_str(&format_type::quote_identifier(s.sval));
+                } else {
+                    buf.push_str(s.sval);
                 }
-                buf.push_str(s.sval);
             }
             _ => panic!("unrecognized node type in SET argument"),
         }

@@ -476,7 +476,7 @@ pub fn heap_delete(
         .expect("ReadBuffer returned InvalidBuffer");
 
     if pin.page().is_all_visible() {
-        unported("visibilitymap_pin (heap_delete all-visible page, visibilitymap.c)");
+        unported("visibilitymap_clear write side (heap_delete all-visible page, visibilitymap.c)");
     }
     bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
 
@@ -489,7 +489,7 @@ pub fn heap_delete(
 
     let mut result = 'l1: loop {
         if pin.page().is_all_visible() {
-            unported("visibilitymap_pin (heap_delete all-visible page, visibilitymap.c)");
+            unported("visibilitymap_clear write side (heap_delete all-visible page, visibilitymap.c)");
         }
         let mut result = hv_seam::heap_tuple_satisfies_update::call(&mut tp, cid, pin.buffer())?;
 
@@ -818,7 +818,7 @@ pub fn heap_update(
     let pin = BufferPin::adopt(bufmgr_seams::read_buffer::call(relation, block)?)
         .expect("ReadBuffer returned InvalidBuffer");
     if pin.page().is_all_visible() {
-        unported("visibilitymap_pin (heap_update all-visible page, visibilitymap.c)");
+        unported("visibilitymap_clear write side (heap_update all-visible page, visibilitymap.c)");
     }
     bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
 
@@ -921,7 +921,7 @@ pub fn heap_update(
         }
 
         if pin.page().is_all_visible() {
-            unported("visibilitymap_pin (heap_update all-visible page, visibilitymap.c)");
+            unported("visibilitymap_clear write side (heap_update all-visible page, visibilitymap.c)");
         }
         break 'l2 result;
     };
