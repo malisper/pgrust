@@ -511,10 +511,114 @@ fn result_desc_is_one_text_column() {
     assert_eq!(desc.attr(0).attname.name_str(), b"QUERY PLAN");
 }
 
+fn off<'mcx>(mcx: Mcx<'mcx>, name: &'static str) -> Node<'mcx> {
+    let b = Node::mk_boolean(mcx, false).unwrap();
+    opt(mcx, name, Some(b))
+}
+
+fn es_text<'a>(es: &'a ExplainState<'_>) -> &'a str {
+    std::str::from_utf8(es.str.as_bytes()).unwrap()
+}
+
+// Pinned against real PostgreSQL 18.3: EXPLAIN (ANALYZE, TIMING OFF,
+// SUMMARY OFF, BUFFERS OFF) SELECT 1 (captured 2026-07-02, Homebrew 18.3).
 #[test]
-#[should_panic(expected = "instrument lane")]
-fn analyze_is_loud() {
-    let _ = run_explain(&["analyze"]);
+fn explain_analyze_timing_off_matches_pg() {
+    install_fixtures();
+    let mcx = leaked_mcx();
+    let opts = [
+        opt(mcx, "analyze", None),
+        off(mcx, "timing"),
+        off(mcx, "summary"),
+        off(mcx, "buffers"),
+    ];
+    let stmt = mcx::alloc_leak_in(mcx, explain_stmt(mcx, &opts)).unwrap();
+    assert_eq!(
+        run_explain_stmt(mcx, stmt),
+        ["Result  (cost=0.00..0.01 rows=1 width=4) (actual rows=1.00 loops=1)"]
+    );
+}
+
+// Pinned against real PostgreSQL 18.3 EXPLAIN (ANALYZE, BUFFERS OFF) SELECT 1
+// with actual/planning/execution times normalized (the regress-harness rule:
+// row counts, loops, and shape exact; times variable).
+#[test]
+fn explain_analyze_timed_shape_matches_pg() {
+    install_fixtures();
+    let mcx = leaked_mcx();
+    let opts = [opt(mcx, "analyze", None), off(mcx, "buffers")];
+    let stmt = mcx::alloc_leak_in(mcx, explain_stmt(mcx, &opts)).unwrap();
+    let rows = run_explain_stmt(mcx, stmt);
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    let head = "Result  (cost=0.00..0.01 rows=1 width=4) (actual time=";
+    let tail = " rows=1.00 loops=1)";
+    assert!(rows[0].starts_with(head) && rows[0].ends_with(tail), "{}", rows[0]);
+    let times = &rows[0][head.len()..rows[0].len() - tail.len()];
+    let (start, total) = times.split_once("..").expect("time=START..TOTAL");
+    for t in [start, total] {
+        let (_, frac) = t.split_once('.').expect("ms with fraction");
+        assert_eq!(frac.len(), 3, "%.3f millisecond format: {t}");
+    }
+    assert!(rows[1].starts_with("Planning Time: ") && rows[1].ends_with(" ms"), "{}", rows[1]);
+    assert!(rows[2].starts_with("Execution Time: ") && rows[2].ends_with(" ms"), "{}", rows[2]);
+}
+
+// Pinned against real PostgreSQL 18.3: EXPLAIN (ANALYZE, TIMING OFF, SUMMARY
+// OFF, BUFFERS OFF, COSTS OFF) SELECT 1 LIMIT 0.
+#[test]
+fn explain_analyze_never_executed_matches_pg() {
+    install_fixtures();
+    let mcx = leaked_mcx();
+    let zero = Node::mk_const(mcx, 20, -1, 0, 8, Datum::from_i64(0), false, true).unwrap();
+    let query =
+        Node::mk(mcx, Query { limitCount: Some(zero), ..select_1_query(mcx) }).unwrap();
+    let opts: Vec<Node<'_>> = ["timing", "summary", "buffers", "costs"]
+        .iter()
+        .map(|n| off(mcx, n))
+        .chain([opt(mcx, "analyze", None)])
+        .collect();
+    let stmt = mcx::alloc_leak_in(
+        mcx,
+        ExplainStmt { query: Some(query), options: NodeList::from_slice(mcx, &opts).unwrap() },
+    )
+    .unwrap();
+    assert_eq!(
+        run_explain_stmt(mcx, stmt),
+        ["Limit (actual rows=0.00 loops=1)", "  ->  Result (never executed)"]
+    );
+}
+
+#[test]
+#[should_panic(expected = "xloginsert lane")]
+fn analyze_wal_is_loud() {
+    install_fixtures();
+    let mcx = leaked_mcx();
+    let opts = [opt(mcx, "analyze", None), opt(mcx, "wal", None)];
+    let stmt = mcx::alloc_leak_in(mcx, explain_stmt(mcx, &opts)).unwrap();
+    let _ = run_explain_stmt(mcx, stmt);
+}
+
+// show_buffer_usage text arm, values chosen to cover C's comma placement.
+#[test]
+fn show_buffer_usage_matches_c_shape() {
+    install_fixtures();
+    let mcx = leaked_mcx();
+    let mut es = NewExplainState(mcx).unwrap();
+    let mut u = types_core::instrument::BufferUsage {
+        shared_blks_hit: 3,
+        shared_blks_read: 2,
+        temp_blks_written: 5,
+        ..Default::default()
+    };
+    assert!(crate::peek_buffer_usage(&es, &u));
+    crate::show_buffer_usage(&mut es, &u);
+    assert_eq!(es_text(&es), "Buffers: shared hit=3 read=2, temp written=5\n");
+
+    u = Default::default();
+    assert!(!crate::peek_buffer_usage(&es, &u));
+    let mut es = NewExplainState(mcx).unwrap();
+    crate::show_buffer_usage(&mut es, &u);
+    assert_eq!(es_text(&es), "");
 }
 
 #[test]
@@ -527,4 +631,276 @@ fn json_format_is_loud() {
     let stmt = explain_stmt(mcx, &opts);
     let mut dest = DestReceiver::DoNothing;
     let _ = ExplainQuery(mcx, &stmt, "q", ParamListHandle::NULL, QueryEnvHandle::NULL, &mut dest);
+}
+
+// EXPLAIN SELECT pk FROM t ORDER BY val LIMIT 2 through the REAL pipeline
+// (rewrite -> planner ORDER BY/LIMIT lane -> ExecutorStart(EXPLAIN_ONLY) ->
+// text). Expected lines pinned against real PostgreSQL 18.3 (psql EXPLAIN over
+// a 45-page table, rescaled to this 100-page fixture; formulas verified
+// identical 2026-07-02).
+mod order_by_limit_e2e {
+    use super::*;
+    use types_nodes::parsenodes::{RTEKind, SortGroupClause};
+    use types_nodes::primnodes::Alias;
+
+    const TBL: u32 = 24680;
+    const INT4EQ_OP: u32 = 96;
+    const INT4_LT_OP: u32 = 97;
+    const INT4_GT_OP: u32 = 521;
+    const INT4_BTREE_FAM: u32 = 1976;
+    const INT4_BTREE_OPCLASS: u32 = 1978;
+    const INT8OID: u32 = 20;
+
+    fn install_scan_fixtures() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            relation_seams::relation_open::set(|mcx, relid, _lockmode| {
+                assert_eq!(relid, TBL);
+                Ok(make_heap_rel(mcx))
+            });
+            bufmgr_seams::relation_get_number_of_blocks_in_fork::set(|_rel, _fork| Ok(100));
+            syscache_seams::pg_class_relname::set(|relid| {
+                let mut n = types_tuple::NameData::default();
+                n.namestrcpy("t");
+                Ok((relid == TBL).then_some(n))
+            });
+            syscache_seams::lookup_pg_statistic_shape::set(|_, _, _| Ok(None));
+            syscache_seams::pg_statistic_stawidth::set(|_, _, _| Ok(None));
+            syscache_seams::lookup_pg_amop_members_by_operator::set(|mcx, opno| {
+                let mut v = ::mcx::PgVec::new_in(mcx);
+                if opno == INT4EQ_OP || opno == INT4_LT_OP {
+                    v.push(syscache_seams::PgAmopMemberShape {
+                        amopfamily: INT4_BTREE_FAM,
+                        amoplefttype: INT4OID,
+                        amoprighttype: INT4OID,
+                        amopstrategy: if opno == INT4EQ_OP { 3 } else { 1 },
+                        amopmethod: 403,
+                    });
+                }
+                Ok(v)
+            });
+            syscache_seams::lookup_pg_opfamily_shape::set(|opfid| {
+                Ok((opfid == INT4_BTREE_FAM).then(|| syscache_seams::PgOpfamilyShape {
+                    opfmethod: 403,
+                    opfname: types_tuple::NameData::default(),
+                }))
+            });
+            syscache_seams::lookup_pg_amop_by_strategy::set(|opfamily, left, right, strategy| {
+                Ok(match (opfamily, left, right, strategy) {
+                    (INT4_BTREE_FAM, INT4OID, INT4OID, 1) => INT4_LT_OP,
+                    (INT4_BTREE_FAM, INT4OID, INT4OID, 3) => INT4EQ_OP,
+                    (INT4_BTREE_FAM, INT4OID, INT4OID, 5) => INT4_GT_OP,
+                    _ => 0,
+                })
+            });
+            syscache_seams::syscache_hash_value_typeoid::set(|typid| {
+                Ok(typid.wrapping_mul(0x9e37_79b1))
+            });
+            indexcmds_seams::get_default_opclass::set(|typid, am| {
+                Ok(if typid == INT4OID && am == 403 { INT4_BTREE_OPCLASS } else { 0 })
+            });
+            syscache_seams::lookup_pg_opclass_shape::set(|opclass| {
+                Ok((opclass == INT4_BTREE_OPCLASS).then(|| syscache_seams::PgOpclassShape {
+                    opcmethod: 403,
+                    opcfamily: INT4_BTREE_FAM,
+                    opcintype: INT4OID,
+                }))
+            });
+        });
+    }
+
+    fn int4_attr(attnum: i16, name: &str) -> types_tuple::FormData_pg_attribute {
+        let mut attname = types_tuple::NameData::default();
+        attname.namestrcpy(name);
+        types_tuple::FormData_pg_attribute {
+            attrelid: TBL,
+            attname,
+            atttypid: INT4OID,
+            attlen: 4,
+            attnum,
+            atttypmod: -1,
+            attbyval: true,
+            attalign: types_tuple::TYPALIGN_INT,
+            attstorage: types_tuple::TYPSTORAGE_PLAIN,
+            attislocal: true,
+            ..Default::default()
+        }
+    }
+
+    fn make_heap_rel<'mcx>(mcx: Mcx<'mcx>) -> types_rel::Relation<'mcx> {
+        use std::cell::Cell;
+        let mut attrs = ::mcx::PgVec::new_in(mcx);
+        attrs.push(int4_attr(1, "pk"));
+        attrs.push(int4_attr(2, "val"));
+        let mut compact_attrs = ::mcx::PgVec::new_in(mcx);
+        for a in attrs.iter() {
+            compact_attrs.push(types_tuple::CompactAttribute::populate_from(a));
+        }
+        let rd_att = Rc::new(types_tuple::TupleDescData {
+            natts: 2,
+            tdtypeid: 0,
+            tdtypmod: -1,
+            tdrefcount: 1,
+            constr: None,
+            compact_attrs,
+            attrs,
+        });
+        let mut relname = types_tuple::NameData::default();
+        relname.namestrcpy("t");
+        let rd_rel = types_rel::FormData_pg_class {
+            relname,
+            relnamespace: 2200,
+            reltype: 0,
+            relowner: 10,
+            relam: 2,
+            relfilenode: TBL,
+            reltablespace: 0,
+            relpages: 100,
+            reltuples: 10000.0,
+            relallvisible: 0,
+            reltoastrelid: 0,
+            relhasindex: false,
+            relisshared: false,
+            relpersistence: b'p',
+            relkind: types_rel::RELKIND_RELATION,
+            relhassubclass: false,
+            relrowsecurity: false,
+            relispopulated: true,
+            relreplident: types_rel::REPLICA_IDENTITY_DEFAULT,
+            relispartition: false,
+            relfrozenxid: 3,
+            relminmxid: 1,
+        };
+        types_rel::Relation::open(
+            types_rel::RelationData {
+                rd_locator: Default::default(),
+                rd_smgr: Default::default(),
+                rd_id: TBL,
+                rd_backend: types_core::INVALID_PROC_NUMBER,
+                rd_islocaltemp: false,
+                rd_isvalid: Cell::new(true),
+                rd_createSubid: Cell::new(0),
+                rd_newRelfilelocatorSubid: Cell::new(0),
+                rd_firstRelfilelocatorSubid: Cell::new(0),
+                rd_droppedSubid: Cell::new(0),
+                rd_lockInfo: types_rel::LockInfoData {
+                    lockRelId: types_rel::LockRelId { relId: TBL, dbId: 5 },
+                },
+                rd_rel,
+                rd_att,
+                rd_index: None,
+                rd_opcintype: ::mcx::PgVec::new_in(mcx),
+                rd_opfamily: ::mcx::PgVec::new_in(mcx),
+                rd_indoption: ::mcx::PgVec::new_in(mcx),
+                rd_indcollation: ::mcx::PgVec::new_in(mcx),
+                rd_options: None,
+                pgstat_enabled: Cell::new(false),
+                rd_amcache: Default::default(),
+                rd_supportinfo: Default::default(),
+                rd_indexlist: Default::default(),
+            },
+            None,
+        )
+    }
+
+    // Analyzer output for `SELECT pk FROM t ORDER BY val LIMIT 2`.
+    fn order_by_limit_query(mcx: Mcx<'static>) -> Query<'static> {
+        let mut colnames = NodeList::nil();
+        colnames.lappend(mcx, Node::mk_string(mcx, "pk").unwrap()).unwrap();
+        colnames.lappend(mcx, Node::mk_string(mcx, "val").unwrap()).unwrap();
+        let eref =
+            mcx::alloc_leak_in(mcx, Alias { aliasname: Some("t"), colnames }).unwrap();
+        let mut rte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+        rte.rtekind = RTEKind::RTE_RELATION;
+        rte.relid = TBL;
+        rte.relkind = b'r';
+        rte.rellockmode = 1;
+        rte.inh = false;
+        rte.eref = Some(eref);
+        let rtable = NodeList::make1(mcx, rte.seal()).unwrap();
+        let rtr = Node::mk_range_tbl_ref(mcx, 1).unwrap();
+        let jointree = mcx::alloc_leak_in(
+            mcx,
+            FromExpr { fromlist: NodeList::make1(mcx, rtr).unwrap(), quals: None },
+        )
+        .unwrap();
+
+        let pk = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+        let val = Node::mk_var(mcx, 1, 2, INT4OID, -1, 0, 0).unwrap();
+        let mut tl = NodeList::make1(
+            mcx,
+            Node::mk_target_entry(mcx, pk, 1, Some("pk"), false).unwrap(),
+        )
+        .unwrap();
+        tl.lappend(
+            mcx,
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::TargetEntry {
+                    expr: val,
+                    resno: 2,
+                    resname: Some("val"),
+                    ressortgroupref: 1,
+                    resorigtbl: 0,
+                    resorigcol: 0,
+                    resjunk: true,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            jointree: Some(jointree),
+            rtable,
+            targetList: tl,
+            sortClause: NodeList::make1(
+                mcx,
+                Node::mk(
+                    mcx,
+                    SortGroupClause {
+                        tleSortGroupRef: 1,
+                        eqop: INT4EQ_OP,
+                        sortop: INT4_LT_OP,
+                        reverse_sort: false,
+                        nulls_first: false,
+                        hashable: true,
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+            limitCount: Some(
+                Node::mk_const(mcx, INT8OID, -1, 0, 8, Datum::from_i64(2), false, true).unwrap(),
+            ),
+            limitOption: types_nodes::nodes_enums::LimitOption::LIMIT_OPTION_COUNT,
+            stmt_location: 0,
+            stmt_len: 38,
+            ..Query::default()
+        }
+    }
+
+    #[test]
+    fn explain_order_by_limit_matches_pg() {
+        install_fixtures();
+        install_scan_fixtures();
+        let mcx = leaked_mcx();
+        let query = Node::mk(mcx, order_by_limit_query(mcx)).unwrap();
+        let stmt = mcx::alloc_leak_in(
+            mcx,
+            ExplainStmt { query: Some(query), options: NodeList::nil() },
+        )
+        .unwrap();
+        assert_eq!(
+            run_explain_stmt(mcx, stmt),
+            [
+                "Limit  (cost=300.00..300.01 rows=2 width=8)",
+                "  ->  Sort  (cost=300.00..325.00 rows=10000 width=8)",
+                "        Sort Key: val",
+                "        ->  Seq Scan on t  (cost=0.00..200.00 rows=10000 width=8)",
+            ]
+        );
+    }
 }

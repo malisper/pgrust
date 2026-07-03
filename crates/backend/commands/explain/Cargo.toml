@@ -16,10 +16,12 @@ types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
 types_portal = { path = "../../../_support/types/portal" }
 types_slot = { path = "../../../_support/types/types_slot" }
+types_scan = { path = "../../../_support/types/types_scan" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 types_dest = { path = "../../../_support/types/types_dest" }
 elog = { path = "../../utils/error/elog" }
 execmain_seams = { path = "../../executor/execmain_seams" }
+instrument = { path = "../../executor/instrument" }
 exectuples_output = { path = "../../executor/exectuples_output" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 format_type = { path = "../../utils/adt/format_type" }
@@ -27,11 +29,13 @@ guc_tables = { path = "../../utils/misc/guc_tables" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 keywords = { path = "../../../common/keywords" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+typcache = { path = "../../utils/cache/typcache" }
 postgres = { path = "../../tcop/postgres" }
 rewrite_handler_seams = { path = "../../rewrite/rewrite_handler_seams" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 tcop_dest = { path = "../../tcop/dest" }
 tupdesc = { path = "../../access/common/tupdesc" }
+xact = { path = "../../access/transam/xact" }
 
 [dev-dependencies]
 autovacuum_seams = { path = "../../postmaster/autovacuum_seams" }
@@ -71,3 +75,7 @@ types_fmgr = { path = "../../../_support/types/fmgr" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
 xact = { path = "../../access/transam/xact" }
 xact_seams = { path = "../../access/transam/xact_seams" }
+relation_seams = { path = "../../access/common/relation_seams" }
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+indexcmds_seams = { path = "../../commands/indexcmds_seams" }
+types_rel = { path = "../../../_support/types/rel" }

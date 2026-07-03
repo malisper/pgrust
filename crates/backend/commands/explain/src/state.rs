@@ -50,6 +50,9 @@ pub struct ExplainState<'mcx> {
     pub serialize: ExplainSerializeOption,
     pub format: ExplainFormat,
     pub indent: i32,
+    // C's ExplainPrintPlan(es, queryDesc) argument: live while the plan walk
+    // may read per-node Instrumentation, NULL otherwise.
+    pub qd: types_portal::QueryDescHandle,
     pub pstmt: Option<&'mcx PlannedStmt<'mcx>>,
     pub rtable: Option<&'mcx NodeList<'mcx>>,
     pub rtable_size: i32,
@@ -73,6 +76,7 @@ pub fn NewExplainState(mcx: Mcx<'_>) -> PgResult<ExplainState<'_>> {
         serialize: EXPLAIN_SERIALIZE_NONE,
         format: EXPLAIN_FORMAT_TEXT,
         indent: 0,
+        qd: types_portal::QueryDescHandle::NULL,
         pstmt: None,
         rtable: None,
         rtable_size: 0,

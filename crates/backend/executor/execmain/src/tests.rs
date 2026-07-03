@@ -1657,3 +1657,206 @@ fn hashed_group_by_over_fake_heap_end_to_end() {
     });
     scanfix::quiesced();
 }
+
+// Inner nestloop end-to-end: NestLoop(joinqual a = c) over two fake-heap
+// seqscans, result asserted against the hand-computed join; second pass
+// exercises ExecReScanNestLoop (outer rescan + per-outer-tuple inner rescans
+// through the committed rescan arms).
+fn mk_nestloop_pstmt<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    outer_relid: u32,
+    inner_relid: u32,
+) -> &'mcx PlannedStmt<'mcx> {
+    use ::types_nodes::bitmapset::Bitmapset;
+    use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+    use ::types_nodes::plannodes::{Join, NestLoop, Plan, Scan, SeqScan};
+    use ::types_nodes::primnodes::{INNER_VAR, OUTER_VAR};
+
+    let scan_tlist = |varno: i32| {
+        let a = Node::mk_var(mcx, varno, 1, INT4OID, -1, 0, 0).unwrap();
+        let b = Node::mk_var(mcx, varno, 2, INT4OID, -1, 0, 0).unwrap();
+        NodeList::make2(
+            mcx,
+            Node::mk_target_entry(mcx, a, 1, Some("c1"), false).unwrap(),
+            Node::mk_target_entry(mcx, b, 2, Some("c2"), false).unwrap(),
+        )
+        .unwrap()
+    };
+    let mk_scan = |scanrelid: u32, varno: i32| {
+        Node::mk(
+            mcx,
+            SeqScan {
+                scan: Scan {
+                    plan: Plan { targetlist: scan_tlist(varno), ..Default::default() },
+                    scanrelid,
+                },
+            },
+        )
+        .unwrap()
+    };
+
+    let mut join_tlist = NodeList::nil();
+    for (i, (varno, attno)) in
+        [(OUTER_VAR, 1i16), (OUTER_VAR, 2), (INNER_VAR, 1), (INNER_VAR, 2)]
+            .into_iter()
+            .enumerate()
+    {
+        let v = Node::mk_var(mcx, varno, attno, INT4OID, -1, 0, 0).unwrap();
+        join_tlist
+            .lappend(mcx, Node::mk_target_entry(mcx, v, i as i16 + 1, Some("x"), false).unwrap())
+            .unwrap();
+    }
+    let joinqual = {
+        let l = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+        let r = Node::mk_var(mcx, INNER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+        Node::mk(
+            mcx,
+            ::types_nodes::primnodes::OpExpr {
+                opno: 96,      // int4eq
+                opfuncid: 65,  // pg_proc int4eq
+                opresulttype: BOOLOID,
+                opretset: false,
+                opcollid: 0,
+                inputcollid: 0,
+                args: NodeList::make2(mcx, l, r).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap()
+    };
+
+    let mut nl = Node::build::<NestLoop>(mcx).unwrap();
+    nl.join = Join {
+        plan: Plan {
+            targetlist: join_tlist,
+            lefttree: Some(mk_scan(1, 1)),
+            righttree: Some(mk_scan(2, 2)),
+            ..Default::default()
+        },
+        jointype: ::types_nodes::JoinType::JOIN_INNER,
+        inner_unique: false,
+        joinqual: NodeList::make1(mcx, joinqual).unwrap(),
+    };
+    nl.nestParams = NodeList::nil();
+
+    let mk_rte = |relid: u32, perminfoindex: u32| {
+        Node::mk(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_RELATION,
+                relid,
+                relkind: ::types_rel::RELKIND_RELATION,
+                rellockmode: ::types_rel::AccessShareLock,
+                perminfoindex,
+                inFromCl: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    let mk_perm = |relid: u32| {
+        Node::mk(
+            mcx,
+            RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+        )
+        .unwrap()
+    };
+    let mut rtable = NodeList::make1(mcx, mk_rte(outer_relid, 1)).unwrap();
+    rtable.lappend(mcx, mk_rte(inner_relid, 2)).unwrap();
+    let mut perms = NodeList::make1(mcx, mk_perm(outer_relid)).unwrap();
+    perms.lappend(mcx, mk_perm(inner_relid)).unwrap();
+    let mut unpruned = Bitmapset::empty();
+    unpruned.add_member(mcx, 1).unwrap();
+    unpruned.add_member(mcx, 2).unwrap();
+
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(nl.seal());
+    pstmt.rtable = rtable;
+    pstmt.permInfos = perms;
+    pstmt.unprunableRelids = unpruned;
+    pstmt.seal_ref()
+}
+
+fn drain_wide_rows(
+    pstmt: &'static PlannedStmt<'static>,
+    natts: usize,
+    passes: usize,
+) -> Vec<Vec<Vec<i32>>> {
+    let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+    let snapshot: snapmgr::Snapshot = std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+        snap_ctx.mcx(),
+        ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+    ));
+    with_exec_data(pstmt, |data, pstmt| {
+        data.estate.es_snapshot = Some(snapshot);
+        let desc = crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+        assert_eq!(desc.natts as usize, natts);
+
+        let ExecData { estate, planstate } = data;
+        let ps = planstate.as_mut().unwrap();
+        let mut runs = Vec::new();
+        for pass in 0..passes {
+            if pass > 0 {
+                exec_re_scan(ps, estate).unwrap();
+            }
+            let mut rows = Vec::new();
+            while let Some(slot_id) = exec_proc_node(ps, estate).unwrap() {
+                let mut row = Vec::new();
+                for attno in 1..=natts {
+                    let mut isnull = false;
+                    let v = exectuples::slot_getattr(
+                        estate.slot_mut(slot_id),
+                        attno as i32,
+                        &mut isnull,
+                    );
+                    assert!(!isnull);
+                    row.push(v.as_i32());
+                }
+                rows.push(row);
+            }
+            runs.push(rows);
+        }
+        crate::exec_end_node(ps, estate).unwrap();
+        estate.exec_reset_tuple_table(false);
+        estate.exec_close_range_table_relations().unwrap();
+        runs
+    })
+}
+
+#[test]
+fn nestloop_inner_join_over_fake_heaps_end_to_end() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let outer: u32 = 70020;
+    let inner: u32 = 70021;
+    scanfix::register_table_2col(outer, &[&[(1, 10), (2, 20), (3, 30)]]);
+    scanfix::register_table_2col(inner, &[&[(2, 200), (3, 300), (3, 301), (4, 400)]]);
+    // Hand-computed inner join on a = c, nestloop order (outer-major).
+    let expected = vec![
+        vec![2, 20, 2, 200],
+        vec![3, 30, 3, 300],
+        vec![3, 30, 3, 301],
+    ];
+    let runs = drain_wide_rows(mk_nestloop_pstmt(mcx, outer, inner), 4, 2);
+    assert_eq!(runs, vec![expected.clone(), expected]);
+    scanfix::quiesced();
+}
+
+#[test]
+fn nestloop_with_empty_inner_returns_nothing() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let outer: u32 = 70022;
+    let inner: u32 = 70023;
+    scanfix::register_table_2col(outer, &[&[(1, 10), (2, 20)]]);
+    scanfix::register_table_2col(inner, &[]);
+    let runs = drain_wide_rows(mk_nestloop_pstmt(mcx, outer, inner), 4, 1);
+    assert_eq!(runs, vec![Vec::<Vec<i32>>::new()]);
+    scanfix::quiesced();
+}

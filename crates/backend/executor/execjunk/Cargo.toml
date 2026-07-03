@@ -1,0 +1,21 @@
+[package]
+name = "execjunk"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "execjunk"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../../_support/types/datum" }
+exectuples = { path = "../exectuples" }
+executils = { path = "../executils" }
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+
+[dev-dependencies]
+types_slot = { path = "../../../_support/types/types_slot" }
