@@ -2,7 +2,7 @@
 //! Numeric results follow the result-mcx convention with the pool-backed
 //! NumericImage as call scratch (notes/fc-result-convention.md); numeric_out
 //! keeps the retained-cstring-scratch precedent. Still deferred: recv/send
-//! (pqformat frame), mod/gcd/transcendentals, sortsupport/hash (see ops.rs).
+//! (pqformat frame), sortsupport/hash (see ops.rs).
 
 use ::datum::Datum;
 use ::types_error::PgResult;
@@ -65,23 +65,20 @@ fn img_result(fcinfo: &Fcinfo, img: &NumericImage) -> PgResult<Datum> {
     byref_result(fcinfo.result_mcx(), img.as_bytes())
 }
 
-#[cold]
-#[inline(never)]
-fn soft_context_unported(name: &str) -> ! {
-    panic!("{name}: fcinfo.context soft-error demux is fmgr-core's unit (not ported)")
-}
-
 pub fn fc_numeric_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    if fcinfo.context.is_some() {
-        soft_context_unported("numeric_in");
-    }
     // SAFETY: catalog arg 0 of numeric_in is a non-null cstring (strict fn).
     let s = unsafe { fcinfo.arg_cstring(0) };
     let s = String::from_utf8_lossy(s.to_bytes());
     let typmod = fcinfo.arg_i32(2);
-    let img = crate::io::numeric_in(&s, typmod, None)?
-        .expect("numeric_in: soft-error escape without an escontext");
-    img_result(fcinfo, &img)
+    // SAFETY: context, if set, rides per the ErrorSaveNode contract for this call.
+    let esc = unsafe { fcinfo.soft_error_context() };
+    let had_esc = esc.is_some();
+    match crate::io::numeric_in(&s, typmod, esc)? {
+        Some(img) => img_result(fcinfo, &img),
+        // Soft error already saved; the value is C's garbage datum.
+        None if had_esc => Ok(Datum::null()),
+        None => panic!("numeric_in: soft-error escape without an escontext"),
+    }
 }
 
 // C pallocs the cstring per row; the resolved FmgrInfo owns retained scratch
@@ -128,6 +125,11 @@ fc_num_binop! {
     fc_numeric_mul: numeric_mul_common;
     fc_numeric_div: numeric_div_common;
     fc_numeric_div_trunc: numeric_div_trunc_common;
+    fc_numeric_mod: numeric_mod_common;
+    fc_numeric_gcd: numeric_gcd_common;
+    fc_numeric_lcm: numeric_lcm_common;
+    fc_numeric_log: numeric_log;
+    fc_numeric_power: numeric_power;
 }
 
 macro_rules! fc_num_cmp {
@@ -165,6 +167,41 @@ fc_num_unary! {
     fc_numeric_abs: numeric_abs;
     fc_numeric_uminus: numeric_uminus;
     fc_numeric_uplus: numeric_uplus;
+}
+
+macro_rules! fc_num_unary_res {
+    ($($fc:ident: $core:ident;)*) => {$(
+        pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
+            let num = unsafe { num_arg(fcinfo, 0) };
+            let img = crate::$core(num)?;
+            img_result(fcinfo, &img)
+        }
+    )*};
+}
+
+fc_num_unary_res! {
+    fc_numeric_sqrt: numeric_sqrt;
+    fc_numeric_exp: numeric_exp;
+    fc_numeric_ln: numeric_ln;
+}
+
+pub fn fc_numeric_fac(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let img = crate::numeric_fac(fcinfo.arg_i64(0))?;
+    img_result(fcinfo, &img)
+}
+
+pub fn fc_width_bucket_numeric(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    // SAFETY: catalog args 0-2 are non-null numeric varlenas (strict fn).
+    let (operand, b1, b2) =
+        unsafe { (num_arg(fcinfo, 0), num_arg(fcinfo, 1), num_arg(fcinfo, 2)) };
+    let count = fcinfo.arg_i32(3);
+    Ok(Datum::from_i32(crate::width_bucket_numeric(
+        operand, b1, b2, count,
+    )?))
 }
 
 // C returns one of the input pointers — so do smaller/larger.
@@ -216,6 +253,7 @@ const fn b(foid: ::types_core::Oid, name: &'static str, nargs: i16, strict: bool
 
 // pg_proc.dat rows, OID-ascending (1840/1841 proisstrict 'f', rest 't').
 pub const NUMERIC_BUILTINS: &[FmgrBuiltin] = &[
+    b(1376, "factorial", 1, true, fc_numeric_fac),
     b(1701, "numeric_in", 3, true, fc_numeric_in),
     b(1702, "numeric_out", 1, true, fc_numeric_out),
     b(1703, "numeric", 2, true, fc_numeric),
@@ -230,6 +268,18 @@ pub const NUMERIC_BUILTINS: &[FmgrBuiltin] = &[
     b(1725, "numeric_sub", 2, true, fc_numeric_sub),
     b(1726, "numeric_mul", 2, true, fc_numeric_mul),
     b(1727, "numeric_div", 2, true, fc_numeric_div),
+    b(1728, "mod", 2, true, fc_numeric_mod),
+    b(1729, "numeric_mod", 2, true, fc_numeric_mod),
+    b(1730, "sqrt", 1, true, fc_numeric_sqrt),
+    b(1731, "numeric_sqrt", 1, true, fc_numeric_sqrt),
+    b(1732, "exp", 1, true, fc_numeric_exp),
+    b(1733, "numeric_exp", 1, true, fc_numeric_exp),
+    b(1734, "ln", 1, true, fc_numeric_ln),
+    b(1735, "numeric_ln", 1, true, fc_numeric_ln),
+    b(1736, "log", 2, true, fc_numeric_log),
+    b(1737, "numeric_log", 2, true, fc_numeric_log),
+    b(1738, "pow", 2, true, fc_numeric_power),
+    b(1739, "numeric_power", 2, true, fc_numeric_power),
     b(1740, "int4_numeric", 1, true, fc_int4_numeric),
     b(1742, "float4_numeric", 1, true, fc_float4_numeric),
     b(1743, "float8_numeric", 1, true, fc_float8_numeric),
@@ -243,4 +293,8 @@ pub const NUMERIC_BUILTINS: &[FmgrBuiltin] = &[
     b(1841, "int4_sum", 2, false, fc_int4_sum),
     b(1915, "numeric_uplus", 1, true, fc_numeric_uplus),
     b(1980, "numeric_div_trunc", 2, true, fc_numeric_div_trunc),
+    b(2169, "power", 2, true, fc_numeric_power),
+    b(2170, "width_bucket", 4, true, fc_width_bucket_numeric),
+    b(5048, "gcd", 2, true, fc_numeric_gcd),
+    b(5049, "lcm", 2, true, fc_numeric_lcm),
 ];

@@ -278,42 +278,45 @@ impl NumericVar {
         di %= DEC_DIGITS;
 
         if ndigits < self.ndigits || (ndigits == self.ndigits && di > 0) {
+            debug_assert!(ndigits <= self.ndigits && self.offset >= 1);
             self.ndigits = ndigits;
-            let off = self.offset as i32;
-            let buf = self.buf.as_mut_slice();
+            let off = self.offset as isize;
+            // SAFETY throughout: accesses sit at off + i for -1 <= i <=
+            // ndigits <= the old ndigits; offset >= 1 leaves one spare digit
+            // below (alloc invariant) — C's round_var pointer walk verbatim.
+            let buf = self.buf.as_mut_slice().as_mut_ptr();
             let mut carry: i32;
 
-            if di == 0 {
-                carry = if buf[(off + ndigits) as usize] as i32 >= HALF_NBASE {
-                    1
+            unsafe {
+                let at = |i: i32| buf.offset(off + i as isize);
+                if di == 0 {
+                    carry = if *at(ndigits) as i32 >= HALF_NBASE { 1 } else { 0 };
                 } else {
-                    0
-                };
-            } else {
-                let pow10 = ROUND_POWERS[di as usize];
-                ndigits -= 1;
-                let extra = buf[(off + ndigits) as usize] as i32 % pow10;
-                buf[(off + ndigits) as usize] -= extra as NumericDigit;
-                carry = 0;
-                if extra >= pow10 / 2 {
-                    let mut p = pow10 + buf[(off + ndigits) as usize] as i32;
-                    if p >= NBASE {
-                        p -= NBASE;
-                        carry = 1;
-                    }
-                    buf[(off + ndigits) as usize] = p as NumericDigit;
-                }
-            }
-
-            while carry != 0 {
-                ndigits -= 1;
-                let c = carry + buf[(off + ndigits) as usize] as i32;
-                if c >= NBASE {
-                    buf[(off + ndigits) as usize] = (c - NBASE) as NumericDigit;
-                    carry = 1;
-                } else {
-                    buf[(off + ndigits) as usize] = c as NumericDigit;
+                    let pow10 = ROUND_POWERS[di as usize];
+                    ndigits -= 1;
+                    let extra = *at(ndigits) as i32 % pow10;
+                    *at(ndigits) -= extra as NumericDigit;
                     carry = 0;
+                    if extra >= pow10 / 2 {
+                        let mut p = pow10 + *at(ndigits) as i32;
+                        if p >= NBASE {
+                            p -= NBASE;
+                            carry = 1;
+                        }
+                        *at(ndigits) = p as NumericDigit;
+                    }
+                }
+
+                while carry != 0 {
+                    ndigits -= 1;
+                    let c = carry + *at(ndigits) as i32;
+                    if c >= NBASE {
+                        *at(ndigits) = (c - NBASE) as NumericDigit;
+                        carry = 1;
+                    } else {
+                        *at(ndigits) = c as NumericDigit;
+                        carry = 0;
+                    }
                 }
             }
 
@@ -354,17 +357,21 @@ impl NumericVar {
     }
 
     pub fn strip(&mut self) {
-        let digits = self.digits();
+        let mut n = self.ndigits as usize;
+        // SAFETY: reads stay in [offset, offset + ndigits), within the
+        // allocation by the digits() invariant.
+        let d = unsafe { self.buf.as_slice().as_ptr().add(self.offset as usize) };
         let mut start = 0usize;
-        let mut n = digits.len();
         let mut weight_drop = 0;
-        while n > 0 && digits[start] == 0 {
-            start += 1;
-            weight_drop += 1;
-            n -= 1;
-        }
-        while n > 0 && digits[start + n - 1] == 0 {
-            n -= 1;
+        unsafe {
+            while n > 0 && *d.add(start) == 0 {
+                start += 1;
+                weight_drop += 1;
+                n -= 1;
+            }
+            while n > 0 && *d.add(start + n - 1) == 0 {
+                n -= 1;
+            }
         }
         self.weight -= weight_drop;
         if n == 0 {
