@@ -281,6 +281,7 @@ pub fn call_template_init<'mcx>(
     dictoptions: &[DefItem<'mcx>],
 ) -> PgResult<Datum> {
     let mut options: PgVec<'mcx, (PgVec<'mcx, u8>, PgVec<'mcx, u8>)> = PgVec::new_in(mcx);
+    let mut int_options: PgVec<'mcx, Option<i64>> = PgVec::new_in(mcx);
     for item in dictoptions {
         let val = def_value_string(mcx, item)?;
         let mut n: PgVec<'mcx, u8> = PgVec::new_in(mcx);
@@ -288,8 +289,12 @@ pub fn call_template_init<'mcx>(
         let mut v: PgVec<'mcx, u8> = PgVec::new_in(mcx);
         mcx::vec_append_bytes(&mut v, val.as_bytes())?;
         options.push((n, v));
+        int_options.push(match item.value {
+            Some(crate::deflist::DefValue::Int(i)) => Some(i as i64),
+            _ => None,
+        });
     }
-    let initdata = ts_locale::dict_api::DictInitData { mcx, dict_options: options };
+    let initdata = ts_locale::dict_api::DictInitData { mcx, dict_options: options, int_options };
     let mut flinfo = fmgr_seams::fmgr_info::call(initmethod)?;
     types_fmgr::function_call1_coll(
         &mut flinfo,
