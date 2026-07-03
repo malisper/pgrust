@@ -42,7 +42,7 @@ use ::types_snapshot::IsMVCCSnapshot;
 use search::{bt_first, bt_gettuple_continue, pos_unpin_if_pinned, restore_scanpos, ScanCtx};
 use utils::bt_killitems;
 
-pub use search::BtScanInsert;
+pub use search::{bt_peek_same_block_tids, BtScanInsert};
 pub use utils::{bt_check_third_page, bt_keep_natts_fast, bt_mkscankey, bt_truncate};
 pub use fcframe::OrderProcFrame;
 
