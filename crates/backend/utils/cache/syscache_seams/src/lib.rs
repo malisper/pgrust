@@ -8,6 +8,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // InitCatalogCachePhase2 (syscache.c): opens every syscache's catalog +
+    // index so first-plan buffer counts match C (relcache.c needNewCacheFile).
+    pub fn init_catalog_cache_phase2() -> PgResult<()>
+);
+
+seam_core::seam!(
     // SearchSysCacheExists2(ATTNUM, relid, attnum).
     pub fn search_syscache_exists_attnum(relid: Oid, attnum: i16) -> PgResult<bool>
 );

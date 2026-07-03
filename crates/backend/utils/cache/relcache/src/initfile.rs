@@ -84,7 +84,10 @@ pub fn RelationCacheInitializePhase3() -> PgResult<()> {
     finish_relcache_entries()?;
 
     if need_new_cache_file {
-        // C: InitCatalogCachePhase2() + write_relcache_init_file(true/false).
+        // Without this pre-warm the lazy relcache builds of syscache
+        // catalogs land inside the first planning window and EXPLAIN
+        // (BUFFERS) Planning counts diverge from C (+20-26 touches).
+        syscache_seams::init_catalog_cache_phase2::call()?;
         write_relcache_init_file(true)?;
         write_relcache_init_file(false)?;
     }
