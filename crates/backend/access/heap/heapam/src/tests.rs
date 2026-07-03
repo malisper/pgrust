@@ -1245,3 +1245,29 @@ fn dml_speculative_insert_abort_super_deletes() {
     assert_eq!(recs[0].1[7], dml::XLH_DELETE_IS_SUPER);
     quiesced();
 }
+
+#[test]
+fn index_delete_sort_orders_by_block_then_offset() {
+    use ::tableam_vocab::TM_IndexDelete;
+    let tid = |b: u32, p: u16| ::types_tuple::ItemPointerData::new(b, p);
+    let mut deltids: Vec<TM_IndexDelete> = [
+        (7, 3), (1, 2), (7, 1), (0, 5), (1, 1), (2048, 9), (0, 4),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, &(b, p))| TM_IndexDelete { tid: tid(b, p), id: i as i16 })
+    .collect();
+
+    index_delete::index_delete_sort(&mut deltids);
+
+    let got: Vec<(u32, u16)> = deltids
+        .iter()
+        .map(|d| {
+            (
+                ::types_tuple::ItemPointerGetBlockNumber(&d.tid),
+                ::types_tuple::ItemPointerGetOffsetNumber(&d.tid),
+            )
+        })
+        .collect();
+    assert_eq!(got, vec![(0, 4), (0, 5), (1, 1), (1, 2), (7, 1), (7, 3), (2048, 9)]);
+}

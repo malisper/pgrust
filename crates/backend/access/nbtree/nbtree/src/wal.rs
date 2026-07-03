@@ -109,3 +109,18 @@ pub(crate) fn xl_btree_metadata(metad: &BTMetaPageData) -> [u8; 28] {
 pub(crate) fn xl_btree_dedup(nintervals: u16) -> [u8; 2] {
     nintervals.to_ne_bytes()
 }
+
+// SizeOfBtreeDelete = offsetof(isCatalogRel) + sizeof(bool) = 9.
+pub(crate) fn xl_btree_delete(
+    snapshot_conflict_horizon: ::types_core::TransactionId,
+    ndeleted: u16,
+    nupdated: u16,
+    is_catalog_rel: bool,
+) -> [u8; 9] {
+    let mut b = [0u8; 9];
+    b[0..4].copy_from_slice(&snapshot_conflict_horizon.to_ne_bytes());
+    b[4..6].copy_from_slice(&ndeleted.to_ne_bytes());
+    b[6..8].copy_from_slice(&nupdated.to_ne_bytes());
+    b[8] = is_catalog_rel as u8;
+    b
+}

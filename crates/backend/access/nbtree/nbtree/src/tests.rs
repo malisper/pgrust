@@ -144,6 +144,10 @@ fn install() {
         smgr_seams::smgr_set_cached_nblocks::set(|_loc, _fork, _n| Ok(()));
         smgr_seams::smgr_exists::set(|_loc, _fork| Ok(false));
         heapam_visibility::init_seams();
+        procarray_seams::global_vis_test_for::set(|_rel| {
+            ::types_core::GlobalVisStateHandle::new(1)
+        });
+        procarray_seams::global_vis_test_is_removable_xid::set(|_vistest, xid| Ok(xid < 1000));
     });
 }
 
@@ -785,7 +789,7 @@ fn insert_key(rel: &Relation<'_>, heap: &Relation<'_>, key: i32, heap_tid: ItemP
         ::types_nbtree::genam::IndexUniqueCheck::UNIQUE_CHECK_NO,
         false,
     )
-    .unwrap();
+    .unwrap_or_else(|e| panic!("assertion: insert_key({key}, {heap_tid:?}) -> {e:?}"));
 }
 
 fn drain_forward(mcx: Mcx<'_>, rel: &Relation<'_>) -> Vec<ItemPointerData> {
@@ -1249,4 +1253,106 @@ fn mkscankey_builds_insertion_key() {
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0].sk_flags & types_scan::scankey::SK_ISNULL, types_scan::scankey::SK_ISNULL);
     assert_eq!(keys[0].sk_func.fn_oid, 351);
+}
+
+// Committed-delete heap tuple: xmin/xmax hinted committed, xmax removable per
+// the vistest seam, so SnapshotNonVacuumable sees it as DEAD.
+fn dead_heap_tuple_image(val: i32) -> [u8; 28] {
+    let mut img = [0u8; 28];
+    img[0..4].copy_from_slice(&10u32.to_ne_bytes()); // xmin
+    img[4..8].copy_from_slice(&20u32.to_ne_bytes()); // xmax
+    img[18..20].copy_from_slice(&1u16.to_ne_bytes()); // natts
+    let infomask = ::types_tuple::HEAP_XMIN_COMMITTED | ::types_tuple::HEAP_XMAX_COMMITTED;
+    img[20..22].copy_from_slice(&infomask.to_ne_bytes());
+    img[22] = 24; // t_hoff
+    img[24..28].copy_from_slice(&val.to_ne_bytes());
+    img
+}
+
+fn build_dead_heap_page(n: usize) -> Box<FakePage> {
+    let mut page = Box::new(FakePage([0u8; BLCKSZ]));
+    let lower = SizeOfPageHeaderData + n * 4;
+    let mut upper = BLCKSZ;
+    for i in 0..n {
+        let img = dead_heap_tuple_image(i as i32);
+        upper = (upper - img.len()) & !7;
+        page.0[upper..upper + img.len()].copy_from_slice(&img);
+        let mut id = ::types_storage::bufpage::ItemIdData::new(0, 0, 0);
+        id.set_normal(upper as u16, img.len() as u16);
+        let off = SizeOfPageHeaderData + i * 4;
+        // SAFETY: repr(transparent) over u32.
+        let raw: u32 = unsafe { core::mem::transmute(id) };
+        page.0[off..off + 4].copy_from_slice(&raw.to_ne_bytes());
+    }
+    page.0[12..14].copy_from_slice(&(lower as u16).to_ne_bytes());
+    page.0[14..16].copy_from_slice(&(upper as u16).to_ne_bytes());
+    page.0[16..18].copy_from_slice(&(BLCKSZ as u16).to_ne_bytes());
+    page.0[18..20].copy_from_slice(&((BLCKSZ as u16) | 4).to_ne_bytes());
+    page
+}
+
+// killitems-shape LP_DEAD stores over every data item on leaf block `blk`.
+fn mark_leaf_items_dead(blk: usize) {
+    PAGES.with(|p| {
+        let mut pages = p.borrow_mut();
+        let page = &mut pages[blk];
+        let lower = u16::from_ne_bytes([page.0[12], page.0[13]]) as usize;
+        let nitems = (lower - SizeOfPageHeaderData) / 4;
+        for i in 0..nitems {
+            let off = SizeOfPageHeaderData + i * 4;
+            let raw = u32::from_ne_bytes(page.0[off..off + 4].try_into().unwrap());
+            // SAFETY: repr(transparent) over u32.
+            let mut id: ::types_storage::bufpage::ItemIdData = unsafe { core::mem::transmute(raw) };
+            id.mark_dead();
+            let raw: u32 = unsafe { core::mem::transmute(id) };
+            page.0[off..off + 4].copy_from_slice(&raw.to_ne_bytes());
+        }
+    });
+}
+
+#[test]
+fn lp_dead_page_fill_runs_simple_deletion_instead_of_split() {
+    install();
+    build_empty_index(false); // allequalimage=false: dedup can't mask deletion
+    let cx = MemoryContext::new("t");
+    let rel = index_rel(cx.mcx());
+    prime_supportinfo(&rel);
+    let heap = heap_relation(cx.mcx());
+
+    // 220 x (28B tuple, 32B stride) + 220 line pointers fits one page
+    HEAP_PAGES.with(|p| {
+        let mut pages = p.borrow_mut();
+        pages.push(build_dead_heap_page(220));
+        pages.push(build_dead_heap_page(220));
+    });
+
+    let setup = 380u32;
+    for k in 1..=setup {
+        let (blk, pos) = (((k - 1) / 220) as u32, ((k - 1) % 220 + 1) as u16);
+        insert_key(&rel, &heap, k as i32, tid(blk, pos));
+    }
+    mark_leaf_items_dead(1);
+    reset_wal();
+
+    // TIDs continue the sequence: heap_index_delete_tuples' shellsort asserts
+    // strict TID uniqueness on a leaf, as C
+    for k in setup + 1..=setup + 60 {
+        let (blk, pos) = (((k - 1) / 220) as u32, ((k - 1) % 220 + 1) as u16);
+        insert_key(&rel, &heap, k as i32, tid(blk, pos));
+    }
+
+    let infos = wal_infos();
+    assert!(
+        infos.contains(&::types_nbtree::XLOG_BTREE_DELETE),
+        "simple deletion must have fired: {infos:?}"
+    );
+    assert!(
+        !infos.contains(&::types_nbtree::XLOG_BTREE_SPLIT_L)
+            && !infos.contains(&::types_nbtree::XLOG_BTREE_SPLIT_R),
+        "page split avoided: {infos:?}"
+    );
+
+    let seen = drain_forward(cx.mcx(), &rel);
+    assert!(seen.len() <= 60, "deleted tuples stay deleted: {}", seen.len());
+    assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
 }

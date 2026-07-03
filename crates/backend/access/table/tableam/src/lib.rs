@@ -215,11 +215,11 @@ mod heap {
     }
 
     pub(super) fn index_delete_tuples<'mcx>(
-        _mcx: Mcx<'mcx>,
-        _rel: &Relation<'mcx>,
-        _delstate: &mut TM_IndexDeleteOp<'mcx>,
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        delstate: &mut TM_IndexDeleteOp<'mcx>,
     ) -> PgResult<TransactionId> {
-        unported("backend-access-heap-heapam (heap_index_delete_tuples)")
+        ::heapam::heap_index_delete_tuples(mcx, rel, delstate)
     }
 
     // heapam_tuple_insert (heapam_handler.c): fetch the slot's heap tuple in

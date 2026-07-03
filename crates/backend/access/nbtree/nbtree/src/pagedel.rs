@@ -39,7 +39,7 @@ fn needs_wal(rel: &Relation<'_>) -> bool {
     crate::relation_needs_wal(rel)
 }
 
-fn offsets_as_bytes(offs: &[OffsetNumber]) -> &[u8] {
+pub(crate) fn offsets_as_bytes(offs: &[OffsetNumber]) -> &[u8] {
     // SAFETY: OffsetNumber is u16 POD; the WAL image is native-endian, as C.
     unsafe { core::slice::from_raw_parts(offs.as_ptr().cast::<u8>(), offs.len() * 2) }
 }
@@ -124,7 +124,7 @@ pub(crate) fn bt_delitems_vacuum<'s>(
 
 /// _bt_delitems_update: generate replacement posting tuples and the WAL
 /// xl_btree_update stream.
-fn bt_delitems_update<'s>(
+pub(crate) fn bt_delitems_update<'s>(
     scx: Mcx<'s>,
     updatable: &mut PgVec<'s, VacPosting<'s>>,
     updatedoffsets: &mut [OffsetNumber],
