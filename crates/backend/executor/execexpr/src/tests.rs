@@ -1205,6 +1205,8 @@ fn case_expr_searched_form() {
         assert!(eval(Some(2)).isnull);
         assert!(eval(None).isnull);
     });
+}
+
 fn mk_domain_coercion(mcx: Mcx<'_>, value: Option<i32>) -> Node<'_> {
     let konst = Node::mk_const(
         mcx,
