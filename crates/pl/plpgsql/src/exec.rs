@@ -154,6 +154,35 @@ pub struct Estate<'a> {
     pub err_text: Option<&'static str>,
 }
 
+// _SPI_error_callback (spi.c): position becomes internal query/position;
+// otherwise a parse-mode-shaped context line.
+#[cold]
+fn spi_ctx_err(
+    mut e: Box<PgError>,
+    query: &str,
+    mode: parser_seams::RawParseMode,
+) -> Box<PgError> {
+    use parser_seams::RawParseMode as M;
+    if let Some(p) = e.cursor_position.filter(|&p| p > 0) {
+        e.cursor_position = None;
+        e.internal_position = Some(p);
+        e.internal_query = Some(query.to_string());
+        return e;
+    }
+    let line = match mode {
+        M::RAW_PARSE_PLPGSQL_EXPR => format!("SQL expression \"{query}\""),
+        M::RAW_PARSE_PLPGSQL_ASSIGN1
+        | M::RAW_PARSE_PLPGSQL_ASSIGN2
+        | M::RAW_PARSE_PLPGSQL_ASSIGN3 => format!("PL/pgSQL assignment \"{query}\""),
+        _ => format!("SQL statement \"{query}\""),
+    };
+    match e.context.take() {
+        Some(prev) => e.context = Some(format!("{prev}\n{line}")),
+        None => e.context = Some(line),
+    }
+    e
+}
+
 #[cold]
 pub(crate) fn exec_err(code: SqlState, msg: String) -> Box<PgError> {
     Box::new(elog::ereport(ERROR).errcode(code).errmsg(msg).into_error())
@@ -288,7 +317,8 @@ impl<'a> Estate<'a> {
             },
             used: &used,
         };
-        let plan = spi::SPI_prepare_plpgsql(&expr.query, expr.parse_mode, &hooks, cursor_options)?;
+        let plan = spi::SPI_prepare_plpgsql(&expr.query, expr.parse_mode, &hooks, cursor_options)
+            .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
         if spi::SPI_keepplan(plan) != 0 {
             panic!("plpgsql exec_prepare_plan: SPI_keepplan failed");
         }
@@ -683,7 +713,8 @@ impl<'a> Estate<'a> {
             (e.plan, e.paramnos.clone(), e.argtypes.clone())
         });
         let (values, nulls) = self.setup_params(&paramnos, &argtypes)?;
-        let rc = spi::SPI_execute_plan(plan, &values, &nulls, self.readonly_func, maxtuples)?;
+        let rc = spi::SPI_execute_plan(plan, &values, &nulls, self.readonly_func, maxtuples)
+            .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
         self.eval_processed = spi::SPI_processed();
         if let Some(t) = self.eval_tuptable.take() {
             let _ = spi::SPI_freetuptable(t);
@@ -1227,7 +1258,8 @@ impl<'a> Estate<'a> {
             (e.plan, e.paramnos.clone(), e.argtypes.clone())
         });
         let (values, nulls) = self.setup_params(&paramnos, &argtypes)?;
-        let cursor = SPI_cursor_open(None, plan, &values, &nulls, self.readonly_func)?;
+        let cursor = SPI_cursor_open(None, plan, &values, &nulls, self.readonly_func)
+            .map_err(|e| spi_ctx_err(e, &query.query, query.parse_mode))?;
 
         let result = self.exec_for_query(label, var, &cursor, body, true);
 
@@ -1683,7 +1715,8 @@ impl<'a> Estate<'a> {
         };
 
         let (values, nulls) = self.setup_params(&paramnos, &argtypes)?;
-        let rc = spi::SPI_execute_plan(plan, &values, &nulls, self.readonly_func, tcount)?;
+        let rc = spi::SPI_execute_plan(plan, &values, &nulls, self.readonly_func, tcount)
+            .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
 
         match rc {
             spi::SPI_OK_SELECT
