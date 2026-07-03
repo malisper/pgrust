@@ -249,6 +249,7 @@ members = [
     "crates/backend/catalog/catalog_heap",
     "crates/backend/catalog/catalog_indexing",
     "crates/backend/catalog/catalog_storage",
+    "crates/backend/catalog/storage_xlog",
     "crates/backend/access/index/genam_seams",
     "crates/backend/utils/cache/catcache",
     "crates/backend/utils/cache/cache_syscache",

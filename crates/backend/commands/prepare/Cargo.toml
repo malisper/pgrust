@@ -25,6 +25,7 @@ xact = { path = "../../access/transam/xact" }
 parser_seams = { path = "../../parser/parser_seams" }
 utility_seams = { path = "../../tcop/utility_seams" }
 postgres = { path = "../../tcop/postgres" }
+prepare_seams = { path = "../prepare_seams" }
 
 [dev-dependencies]
 datum = { path = "../../../_support/types/datum" }

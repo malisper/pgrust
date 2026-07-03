@@ -25,6 +25,7 @@ pub fn init_all() {
     aclchk::init_seams();
     catalog_namespace::init_seams();
     catalog::init_seams();
+    catalog_storage::init_seams();
     pg_database::init_seams();
     pg_db_role_setting::init_seams();
     dbcommands::init_seams();
@@ -121,6 +122,7 @@ pub fn init_all() {
     inval::init_seams();
     lsyscache::init_seams();
     plancache::init_seams();
+    planner::init_seams();
     relcache::init_seams();
     relcache_build::init_seams();
     relmapper::init_seams();

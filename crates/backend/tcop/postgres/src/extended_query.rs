@@ -1,0 +1,867 @@
+// exec_parse/bind/execute/describe_message — the extended-query protocol
+// (postgres.c). Loud arms: binary-format parameter decode (typreceive fc ABI),
+// BuildParamLogString (log_parameter_max_length_on_error != 0).
+use core::cell::Cell;
+use std::ffi::CStr;
+
+use ::elog::ereport;
+use ::mcx::{Mcx, MemoryContext, PgString, PgVec};
+use ::plancache::CachedPlanSourceHandle;
+use ::stringinfo::StringInfo;
+use ::types_core::{Oid, OidIsValid};
+use ::types_dest::CommandDest;
+use ::types_error::{
+    PgResult, ERRCODE_INDETERMINATE_DATATYPE, ERRCODE_INVALID_PARAMETER_VALUE,
+    ERRCODE_IN_FAILED_SQL_TRANSACTION, ERRCODE_PROTOCOL_VIOLATION, ERRCODE_SYNTAX_ERROR,
+    ERRCODE_UNDEFINED_CURSOR, ERRCODE_UNDEFINED_PSTATEMENT, ERROR, LOG,
+};
+use ::types_nodes::nodes_enums::CmdType;
+use ::types_nodes::parsenodes::Query;
+use ::types_nodes::plannodes::PlannedStmt;
+use ::types_nodes::rawnodes::RawStmt;
+use ::types_nodes::NodeTag;
+use ::types_portal::params::{ParamExternData, PARAM_FLAG_CONST};
+use ::types_portal::{
+    ParamListHandle, Portal, QueryCompletion, QueryEnvHandle, CMDTAG_UNKNOWN,
+    CURSOR_OPT_PARALLEL_OK, FETCH_ALL,
+};
+
+use crate::simple_query::{
+    check_log_duration, finish_xact_command, pg_parse_query, pg_rewrite_query,
+    start_xact_command, IsTransactionExitStmt,
+};
+use crate::{check_for_interrupts, loc, ResetUsage, ShowUsage};
+
+mod pqmsg {
+    pub const PARSE_COMPLETE: u8 = b'1';
+    pub const BIND_COMPLETE: u8 = b'2';
+    pub const PORTAL_SUSPENDED: u8 = b's';
+    pub const PARAMETER_DESCRIPTION: u8 = b't';
+    pub const NO_DATA: u8 = b'n';
+}
+
+const UNKNOWNOID: Oid = 705;
+
+thread_local! {
+    static UNNAMED_STMT_PSRC: Cell<Option<CachedPlanSourceHandle>> = const { Cell::new(None) };
+}
+
+pub fn drop_unnamed_stmt() {
+    // Cleared before the drop (C's dangling-pointer paranoia).
+    if let Some(psrc) = UNNAMED_STMT_PSRC.take() {
+        plancache::DropCachedPlan(psrc);
+    }
+}
+
+fn log_statement_stats() -> bool {
+    guc_tables::backing::log_statement_stats()
+}
+
+#[cold]
+fn unnamed_stmt_missing() -> Box<types_error::PgError> {
+    ereport(ERROR)
+        .errcode(ERRCODE_UNDEFINED_PSTATEMENT)
+        .errmsg("unnamed prepared statement does not exist")
+        .into_error()
+        .into()
+}
+
+fn lookup_plansource(stmt_name: &str) -> PgResult<CachedPlanSourceHandle> {
+    if !stmt_name.is_empty() {
+        let plansource = prepare_seams::fetch_prepared_statement_plansource::call(stmt_name, true)?
+            .expect("throwError returned entry");
+        Ok(plansource)
+    } else {
+        UNNAMED_STMT_PSRC.with(Cell::get).ok_or_else(unnamed_stmt_missing)
+    }
+}
+
+#[cold]
+fn aborted_xact_error() -> Box<types_error::PgError> {
+    ereport(ERROR)
+        .errcode(ERRCODE_IN_FAILED_SQL_TRANSACTION)
+        .errmsg("current transaction is aborted, commands ignored until end of transaction block")
+        .into_error()
+        .into()
+}
+
+fn pg_analyze_and_rewrite_varparams<'mcx>(
+    mcx: Mcx<'mcx>,
+    parsetree: &RawStmt<'mcx>,
+    query_string: &str,
+    param_types: &[Oid],
+    query_env: QueryEnvHandle,
+) -> PgResult<(PgVec<'mcx, Query<'mcx>>, PgVec<'mcx, Oid>)> {
+    if guc_tables::backing::log_parser_stats() {
+        ResetUsage();
+    }
+
+    let (query, resolved) = analyze_seams::parse_analyze_varparams::call(
+        mcx,
+        parsetree,
+        query_string,
+        param_types,
+        query_env,
+    )?;
+
+    for (i, &ptype) in resolved.iter().enumerate() {
+        if !OidIsValid(ptype) || ptype == UNKNOWNOID {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_INDETERMINATE_DATATYPE)
+                .errmsg(format!("could not determine data type of parameter ${}", i + 1))
+                .into_error()
+                .into());
+        }
+    }
+
+    if guc_tables::backing::log_parser_stats() {
+        ShowUsage("PARSE ANALYSIS STATISTICS")?;
+    }
+
+    Ok((pg_rewrite_query(mcx, query)?, resolved))
+}
+
+pub fn exec_parse_message<'mcx>(
+    mcx: Mcx<'mcx>,
+    query_string: &str,
+    stmt_name: &str,
+    param_types: &[Oid],
+) -> PgResult<()> {
+    let save_log_statement_stats = log_statement_stats();
+
+    backend_status_seams::pgstat_report_activity::call(
+        backend_status_seams::BackendState::STATE_RUNNING,
+        Some(query_string),
+    );
+    ps_status_seams::set_ps_display::call("PARSE");
+
+    if save_log_statement_stats {
+        ResetUsage();
+    }
+
+    start_xact_command()?;
+
+    /*
+     * C's named/unnamed context strategy (MessageContext + copy vs
+     * unnamed_stmt_context reparenting) collapses onto the plancache's
+     * per-source query arena: the re-parse goes straight into it for both
+     * (prepare.c port precedent), so nothing is copied at CompleteCachedPlan.
+     */
+    let is_named = !stmt_name.is_empty();
+    if !is_named {
+        drop_unnamed_stmt();
+    }
+
+    let parsetree_list = pg_parse_query(mcx, query_string)?;
+
+    if parsetree_list.len() > 1 {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg("cannot insert multiple commands into a prepared statement")
+            .into_error()
+            .into());
+    }
+
+    let psrc = if let Some(raw) = parsetree_list.first() {
+        let stmt = raw.stmt.expect("RawStmt has a stmt");
+        if xact::IsAbortedTransactionBlockState() && !IsTransactionExitStmt(Some(stmt)) {
+            return Err(aborted_xact_error());
+        }
+
+        let tag = utility_seams::create_command_tag::call(stmt);
+        let psrc = plancache::CreateCachedPlan(Some(raw), query_string, tag)?;
+
+        let filled = fill_parse_plansource(psrc, raw, query_string, param_types);
+        if let Err(e) = filled {
+            // C leaves the transient plansource to xact-abort cleanup; the
+            // registry has no abort hook, so reclaim here (prepare precedent).
+            plancache::DropCachedPlan(psrc);
+            return Err(e);
+        }
+        psrc
+    } else {
+        /* Empty input string.  This is legal. */
+        let psrc = plancache::CreateCachedPlan(None, query_string, CMDTAG_UNKNOWN)?;
+        let qmcx = plancache::SourceQueryMcx(psrc);
+        let complete = plancache::CompleteCachedPlan(
+            psrc,
+            PgVec::new_in(qmcx),
+            param_types,
+            CURSOR_OPT_PARALLEL_OK,
+            true,
+        );
+        if let Err(e) = complete {
+            plancache::DropCachedPlan(psrc);
+            return Err(e);
+        }
+        psrc
+    };
+
+    check_for_interrupts()?;
+
+    if is_named {
+        if let Err(e) = prepare_seams::store_prepared_statement::call(stmt_name, psrc, false) {
+            plancache::DropCachedPlan(psrc);
+            return Err(e);
+        }
+    } else {
+        plancache::SaveCachedPlan(psrc)?;
+        UNNAMED_STMT_PSRC.with(|c| c.set(Some(psrc)));
+    }
+
+    xact::CommandCounterIncrement()?;
+
+    if elog::config::where_to_send_output() == CommandDest::Remote {
+        pqformat::pq_putemptymessage(pqmsg::PARSE_COMPLETE)?;
+    }
+
+    match check_log_duration(false) {
+        (1, msec_str) => {
+            ereport(LOG)
+                .errmsg(format!("duration: {msec_str} ms"))
+                .errhidestmt(true)
+                .finish(loc(1596, "exec_parse_message"))?;
+        }
+        (2, msec_str) => {
+            let name = if is_named { stmt_name } else { "<unnamed>" };
+            ereport(LOG)
+                .errmsg(format!("duration: {msec_str} ms  parse {name}: {query_string}"))
+                .errhidestmt(true)
+                .finish(loc(1601, "exec_parse_message"))?;
+        }
+        _ => {}
+    }
+
+    if save_log_statement_stats {
+        ShowUsage("PARSE MESSAGE STATISTICS")?;
+    }
+
+    Ok(())
+}
+
+fn fill_parse_plansource(
+    psrc: CachedPlanSourceHandle,
+    raw: &RawStmt<'_>,
+    query_string: &str,
+    param_types: &[Oid],
+) -> PgResult<()> {
+    let mut snapshot_set = false;
+    if analyze_seams::analyze_requires_snapshot::call(raw) {
+        let snap = snapmgr::GetTransactionSnapshot()?;
+        snapmgr::PushActiveSnapshot(&snap)?;
+        snapshot_set = true;
+    }
+
+    let outcome = (|| -> PgResult<()> {
+        // Message-arena raw tree re-parsed into the plansource's query arena
+        // (lifetime laundering; once per Parse, prepare.c port precedent).
+        let qmcx = plancache::SourceQueryMcx(psrc);
+        let raw_list = parser_seams::raw_parser::call(
+            qmcx,
+            query_string,
+            parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
+        )?;
+        let reparsed = raw_list
+            .first()
+            .expect("re-parse reproduces the statement");
+
+        let (query_list, resolved) = pg_analyze_and_rewrite_varparams(
+            qmcx,
+            reparsed,
+            query_string,
+            param_types,
+            QueryEnvHandle::NULL,
+        )?;
+
+        plancache::CompleteCachedPlan(
+            psrc,
+            query_list,
+            &resolved,
+            CURSOR_OPT_PARALLEL_OK,
+            true,
+        )
+    })();
+
+    if snapshot_set {
+        snapmgr::PopActiveSnapshot()?;
+    }
+    outcome
+}
+
+fn portal_mcx(portal: &Portal<'static>) -> Mcx<'static> {
+    // SAFETY: portalContext is PgBox'd for address stability and outlives
+    // every use of this Mcx (freed only in PortalDrop, which first frees the
+    // params registry handle whose datums live here); the Ref is released
+    // before use (pquery precedent).
+    let ctx: &'static MemoryContext = unsafe {
+        let p = portal.borrow();
+        &*(&**p.portalContext.as_ref().expect("portal has portalContext")
+            as *const MemoryContext)
+    };
+    ctx.mcx()
+}
+
+pub fn exec_bind_message<'mcx>(
+    mcx: Mcx<'mcx>,
+    input_message: &mut StringInfo<'mcx>,
+) -> PgResult<()> {
+    let portal_name = owned_msg_string(mcx, input_message)?;
+    let stmt_name = owned_msg_string(mcx, input_message)?;
+
+    let psrc = lookup_plansource(stmt_name.as_str())?;
+    let query_string = plancache::CachedPlanQueryString(psrc);
+    let save_log_statement_stats = log_statement_stats();
+
+    backend_status_seams::pgstat_report_activity::call(
+        backend_status_seams::BackendState::STATE_RUNNING,
+        Some(query_string),
+    );
+    for query in plancache::CachedPlanQueryList(psrc) {
+        if query.queryId != 0 {
+            backend_status_seams::pgstat_report_query_id::call(query.queryId, false);
+            break;
+        }
+    }
+    ps_status_seams::set_ps_display::call("BIND");
+
+    if save_log_statement_stats {
+        ResetUsage();
+    }
+
+    start_xact_command()?;
+
+    let num_pformats = pqformat::pq_getmsgint(input_message, 2)? as usize;
+    let mut pformats: PgVec<'mcx, i16> = PgVec::new_in(mcx);
+    pformats.try_reserve_exact(num_pformats).map_err(|_| mcx.oom(num_pformats))?;
+    for _ in 0..num_pformats {
+        pformats.push(pqformat::pq_getmsgint(input_message, 2)? as i16);
+    }
+
+    let num_params = pqformat::pq_getmsgint(input_message, 2)? as usize;
+
+    if num_pformats > 1 && num_pformats != num_params {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_PROTOCOL_VIOLATION)
+            .errmsg(format!(
+                "bind message has {num_pformats} parameter formats but {num_params} parameters"
+            ))
+            .into_error()
+            .into());
+    }
+
+    if num_params != plancache::CachedPlanNumParams(psrc) {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_PROTOCOL_VIOLATION)
+            .errmsg(format!(
+                "bind message supplies {} parameters, but prepared statement \"{}\" requires {}",
+                num_params,
+                stmt_name.as_str(),
+                plancache::CachedPlanNumParams(psrc)
+            ))
+            .into_error()
+            .into());
+    }
+
+    if xact::IsAbortedTransactionBlockState()
+        && (!plancache::CachedPlanIsTransactionExitStmt(psrc) || num_params != 0)
+    {
+        return Err(aborted_xact_error());
+    }
+
+    let portal = if portal_name.is_empty() {
+        portalmem::CreatePortal("", true, true)?
+    } else {
+        portalmem::CreatePortal(portal_name.as_str(), false, false)?
+    };
+
+    let pmcx = portal_mcx(&portal);
+
+    let mut snapshot_set = false;
+    if num_params > 0 || plancache::CachedPlanRequiresSnapshot(psrc) {
+        let snap = snapmgr::GetTransactionSnapshot()?;
+        snapmgr::PushActiveSnapshot(&snap)?;
+        snapshot_set = true;
+    }
+
+    let params = if num_params > 0 {
+        let param_types = plancache::CachedPlanParamTypes(psrc);
+        let mut params: PgVec<'static, ParamExternData> = PgVec::new_in(pmcx);
+        params.try_reserve_exact(num_params).map_err(|_| pmcx.oom(num_params))?;
+
+        for paramno in 0..num_params {
+            let ptype = param_types[paramno];
+            let plength = pqformat::pq_getmsgint(input_message, 4)? as i32;
+            let is_null = plength == -1;
+
+            let pformat: i16 = if num_pformats > 1 {
+                pformats[paramno]
+            } else if num_pformats > 0 {
+                pformats[0]
+            } else {
+                0 /* default = text */
+            };
+
+            let pval = match pformat {
+                0 => {
+                    let (typinput, typioparam) = lsyscache::typ::getTypeInputInfo(ptype)?;
+                    let pstring = if is_null {
+                        None
+                    } else {
+                        let raw = pqformat::pq_getmsgbytes(input_message, plength as usize)?;
+                        Some(client_to_server_cstring(pmcx, raw)?)
+                    };
+                    if guc_tables::backing::log_parameter_max_length_on_error() != 0 {
+                        panic!(
+                            "exec_bind_message (postgres.c): knownTextValues/\
+                             BuildParamLogString need the params-logging lane \
+                             (log_parameter_max_length_on_error != 0)"
+                        );
+                    }
+                    let cstr = pstring.as_ref().map(|v| {
+                        CStr::from_bytes_with_nul(v)
+                            .expect("client_to_server_cstring NUL-terminates")
+                    });
+                    let mut finfo = fmgr_seams::fmgr_info::call(typinput)?;
+                    types_fmgr::input_function_call(&mut finfo, cstr, typioparam, -1, pmcx)?
+                }
+                1 => {
+                    let (typreceive, _typioparam) =
+                        lsyscache::typ::getTypeBinaryInputInfo(ptype)?;
+                    panic!(
+                        "exec_bind_message (postgres.c:1930): binary-format parameter \
+                         decode needs the typreceive fc ABI (fmgr recv lane; typreceive \
+                         oid {typreceive})"
+                    );
+                }
+                other => {
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                        .errmsg(format!("unsupported format code: {other}"))
+                        .into_error()
+                        .into());
+                }
+            };
+
+            // PARAM_FLAG_CONST so custom plans use the value (C).
+            params.push(ParamExternData {
+                value: pval,
+                isnull: is_null,
+                pflags: PARAM_FLAG_CONST,
+                ptype,
+            });
+        }
+
+        let slice: &'static [ParamExternData] = params.leak();
+        // SAFETY: the datums and the slice live in the portal context;
+        // PortalDrop frees the handle before that context dies.
+        let h = unsafe { types_portal::params::register(slice) };
+        // Stored now so an error below reaches PortalDrop's registry cleanup.
+        portal.borrow_mut().portalParams = h;
+        h
+    } else {
+        ParamListHandle::NULL
+    };
+
+    let num_rformats = pqformat::pq_getmsgint(input_message, 2)? as usize;
+    let mut rformats: PgVec<'mcx, i16> = PgVec::new_in(mcx);
+    rformats.try_reserve_exact(num_rformats).map_err(|_| mcx.oom(num_rformats))?;
+    for _ in 0..num_rformats {
+        rformats.push(pqformat::pq_getmsgint(input_message, 2)? as i16);
+    }
+
+    pqformat::pq_getmsgend(input_message)?;
+
+    let cplan = plancache::GetCachedPlan(psrc, params, None, QueryEnvHandle::NULL)?;
+
+    let stmt_slice = plancache::CachedPlanStmtList(cplan);
+    // SAFETY: the cplan refcount taken by GetCachedPlan pins stmt_slice until
+    // PortalDrop releases it (which also frees this handle). NIL stays the
+    // null handle (empty query string).
+    let stmts = if stmt_slice.is_empty() {
+        types_portal::StmtListHandle::NULL
+    } else {
+        unsafe { pquery::stmt_list::register(stmt_slice) }
+    };
+    // No fallible call between GetCachedPlan and PortalDefineQuery (C's
+    // refcount-leak rule; the Copy stores in DefineQuery land first).
+    portalmem::PortalDefineQuery(
+        &portal,
+        (!stmt_name.is_empty()).then(|| stmt_name.as_str()),
+        query_string,
+        plancache::CachedPlanCommandTag(psrc),
+        stmts,
+        cplan,
+    )?;
+
+    for stmt in stmt_slice {
+        if stmt.planId != 0 {
+            backend_status_seams::pgstat_report_plan_id::call(stmt.planId, false);
+            break;
+        }
+    }
+
+    if snapshot_set {
+        snapmgr::PopActiveSnapshot()?;
+    }
+
+    pquery::PortalStart(&portal, params, 0, None)?;
+
+    pquery::PortalSetResultFormat(&portal, &rformats)?;
+
+    if elog::config::where_to_send_output() == CommandDest::Remote {
+        pqformat::pq_putemptymessage(pqmsg::BIND_COMPLETE)?;
+    }
+
+    match check_log_duration(false) {
+        (1, msec_str) => {
+            ereport(LOG)
+                .errmsg(format!("duration: {msec_str} ms"))
+                .errhidestmt(true)
+                .finish(loc(2065, "exec_bind_message"))?;
+        }
+        (2, msec_str) => {
+            let name = if stmt_name.is_empty() { "<unnamed>" } else { stmt_name.as_str() };
+            let sep = if portal_name.is_empty() { "" } else { "/" };
+            ereport(LOG)
+                .errmsg(format!(
+                    "duration: {msec_str} ms  bind {name}{sep}{}: {query_string}",
+                    portal_name.as_str()
+                ))
+                .errhidestmt(true)
+                .finish(loc(2070, "exec_bind_message"))?;
+        }
+        _ => {}
+    }
+
+    if save_log_statement_stats {
+        ShowUsage("BIND MESSAGE STATISTICS")?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn owned_msg_string<'mcx>(
+    mcx: Mcx<'mcx>,
+    msg: &mut StringInfo<'_>,
+) -> PgResult<PgString<'mcx>> {
+    let s = pqformat::pq_getmsgstring(mcx, msg)?;
+    let text = core::str::from_utf8(s.as_bytes()).map_err(|_| {
+        ereport(ERROR)
+            .errcode(ERRCODE_PROTOCOL_VIOLATION)
+            .errmsg("invalid string in message")
+            .into_error()
+    })?;
+    PgString::from_str_in(text, mcx).map_err(Into::into)
+}
+
+// pg_client_to_server + the trailing NUL C scribbles onto the message buffer.
+fn client_to_server_cstring<'mcx>(
+    mcx: Mcx<'mcx>,
+    raw: &[u8],
+) -> PgResult<PgVec<'mcx, u8>> {
+    let mut v = match mbutils::pg_client_to_server(mcx, raw)? {
+        Some(converted) => converted,
+        None => {
+            let mut v: PgVec<'mcx, u8> = PgVec::new_in(mcx);
+            v.try_reserve_exact(raw.len() + 1).map_err(|_| mcx.oom(raw.len() + 1))?;
+            mcx::vec_append_bytes(&mut v, raw)?;
+            v
+        }
+    };
+    v.try_reserve_exact(1).map_err(|_| mcx.oom(1))?;
+    v.push(0);
+    Ok(v)
+}
+
+pub fn exec_execute_message<'mcx>(
+    mcx: Mcx<'mcx>,
+    portal_name: &str,
+    max_rows: i64,
+) -> PgResult<()> {
+    let mut dest = elog::config::where_to_send_output();
+    if dest == CommandDest::Remote {
+        dest = CommandDest::RemoteExecute;
+    }
+
+    let Some(portal) = portalmem::GetPortalByName(Some(portal_name)) else {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_CURSOR)
+            .errmsg(format!("portal \"{portal_name}\" does not exist"))
+            .into_error()
+            .into());
+    };
+
+    if portal.borrow().commandTag == CMDTAG_UNKNOWN {
+        debug_assert!(portal.borrow().stmts.is_null());
+        return tcop_dest::NullCommand(dest);
+    }
+
+    // sourceText/prepStmtName copied into MessageContext: the portal may be
+    // destroyed during finish_xact_command (C's pstrdup pair).
+    let (is_xact_command, source_text, prep_stmt_name) = {
+        let p = portal.borrow();
+        let stmts = p.stmts;
+        let is_xact = !stmts.is_null()
+            && pquery::stmt_list::with(stmts, IsTransactionStmtList);
+        let src = PgString::from_str_in(
+            p.sourceText.as_ref().map(|s| s.as_str()).unwrap_or(""),
+            mcx,
+        )?;
+        let prep = PgString::from_str_in(
+            p.prepStmtName.as_ref().map(|s| s.as_str()).unwrap_or("<unnamed>"),
+            mcx,
+        )?;
+        (is_xact, src, prep)
+    };
+    let source_text = source_text.as_str();
+    let prep_stmt_name = prep_stmt_name.as_str();
+
+    backend_status_seams::pgstat_report_activity::call(
+        backend_status_seams::BackendState::STATE_RUNNING,
+        Some(source_text),
+    );
+    {
+        let stmts = portal.borrow().stmts;
+        if !stmts.is_null() {
+            pquery::stmt_list::with(stmts, |stmts| {
+                if let Some(stmt) = stmts.iter().find(|s| s.queryId != 0) {
+                    backend_status_seams::pgstat_report_query_id::call(stmt.queryId, false);
+                }
+                if let Some(stmt) = stmts.iter().find(|s| s.planId != 0) {
+                    backend_status_seams::pgstat_report_plan_id::call(stmt.planId, false);
+                }
+            });
+        }
+    }
+
+    let command_tag = portal.borrow().commandTag;
+    let (cmdtagname, _len) = cmdtag::GetCommandTagNameAndLen(command_tag);
+    ps_status_seams::set_ps_display::call(cmdtagname);
+
+    let save_log_statement_stats = log_statement_stats();
+    if save_log_statement_stats {
+        ResetUsage();
+    }
+
+    tcop_dest::BeginCommand(command_tag, dest);
+
+    let mut receiver = tcop_dest::CreateDestReceiver(dest);
+    if dest == CommandDest::RemoteExecute {
+        tcop_dest::SetRemoteDestReceiverParams(&mut receiver, portal.clone());
+    }
+
+    start_xact_command()?;
+
+    let execute_is_fetch = !portal.borrow().atStart;
+
+    let mut was_logged = false;
+    if check_log_statement_planned(&portal) {
+        let verb = if execute_is_fetch { "execute fetch from" } else { "execute" };
+        let sep = if portal_name.is_empty() { "" } else { "/" };
+        ereport(LOG)
+            .errmsg(format!("{verb} {prep_stmt_name}{sep}{portal_name}: {source_text}"))
+            .errhidestmt(true)
+            .finish(loc(2231, "exec_execute_message"))?;
+        was_logged = true;
+    }
+
+    if xact::IsAbortedTransactionBlockState() {
+        let stmts = portal.borrow().stmts;
+        let exit_ok = !stmts.is_null()
+            && pquery::stmt_list::with(stmts, IsTransactionExitStmtList);
+        if !exit_ok {
+            return Err(aborted_xact_error());
+        }
+    }
+
+    check_for_interrupts()?;
+
+    let max_rows = if max_rows <= 0 { FETCH_ALL } else { max_rows };
+
+    let mut qc = QueryCompletion::default();
+    let completed = pquery::PortalRun(
+        &portal,
+        max_rows,
+        true, /* always top level */
+        &mut receiver,
+        None, /* altdest aliases dest, as in C */
+        Some(&mut qc),
+    )?;
+
+    receiver.destroy();
+
+    if completed {
+        if is_xact_command
+            || (xact::MyXactFlags() & types_core::xact::XACT_FLAGS_NEEDIMMEDIATECOMMIT) != 0
+        {
+            finish_xact_command()?;
+        } else {
+            xact::CommandCounterIncrement()?;
+
+            xact::OrMyXactFlags(types_core::xact::XACT_FLAGS_PIPELINING);
+
+            crate::simple_query::disable_statement_timeout()?;
+        }
+
+        tcop_dest::EndCommand(&qc, dest, false)?;
+    } else {
+        if elog::config::where_to_send_output() == CommandDest::Remote {
+            pqformat::pq_putemptymessage(pqmsg::PORTAL_SUSPENDED)?;
+        }
+        xact::OrMyXactFlags(types_core::xact::XACT_FLAGS_PIPELINING);
+    }
+
+    match check_log_duration(was_logged) {
+        (1, msec_str) => {
+            ereport(LOG)
+                .errmsg(format!("duration: {msec_str} ms"))
+                .errhidestmt(true)
+                .finish(loc(2343, "exec_execute_message"))?;
+        }
+        (2, msec_str) => {
+            let verb = if execute_is_fetch { "execute fetch from" } else { "execute" };
+            let sep = if portal_name.is_empty() { "" } else { "/" };
+            ereport(LOG)
+                .errmsg(format!(
+                    "duration: {msec_str} ms  {verb} {prep_stmt_name}{sep}{portal_name}: {source_text}"
+                ))
+                .errhidestmt(true)
+                .finish(loc(2348, "exec_execute_message"))?;
+        }
+        _ => {}
+    }
+
+    if save_log_statement_stats {
+        ShowUsage("EXECUTE MESSAGE STATISTICS")?;
+    }
+
+    Ok(())
+}
+
+// check_log_statement (postgres.c), PlannedStmt-list flavor; the per-stmt
+// probe is GetCommandLogLevel's T_PlannedStmt arm inlined (no Node wrapper
+// exists for a bare PlannedStmt).
+fn check_log_statement_planned(portal: &Portal<'static>) -> bool {
+    use guc_tables::consts::{LOGSTMT_ALL, LOGSTMT_NONE};
+    let log_statement = guc_tables::backing::log_statement();
+
+    if log_statement == LOGSTMT_NONE {
+        return false;
+    }
+    if log_statement == LOGSTMT_ALL {
+        return true;
+    }
+
+    let stmts = portal.borrow().stmts;
+    if stmts.is_null() {
+        return false;
+    }
+    pquery::stmt_list::with(stmts, |stmts| {
+        stmts.iter().any(|stmt| planned_stmt_log_level(stmt) <= log_statement)
+    })
+}
+
+fn planned_stmt_log_level(stmt: &PlannedStmt<'_>) -> i32 {
+    use guc_tables::consts::{LOGSTMT_ALL, LOGSTMT_MOD};
+    match stmt.commandType {
+        CmdType::CMD_SELECT => LOGSTMT_ALL,
+        CmdType::CMD_INSERT | CmdType::CMD_UPDATE | CmdType::CMD_DELETE | CmdType::CMD_MERGE => {
+            LOGSTMT_MOD
+        }
+        CmdType::CMD_UTILITY => utility_seams::get_command_log_level::call(
+            stmt.utilityStmt.expect("CMD_UTILITY stmt has utilityStmt"),
+        ),
+        _ => LOGSTMT_ALL,
+    }
+}
+
+fn IsTransactionStmtList(pstmts: &[PlannedStmt<'_>]) -> bool {
+    if pstmts.len() == 1 {
+        let pstmt = &pstmts[0];
+        return pstmt.commandType == CmdType::CMD_UTILITY
+            && pstmt.utilityStmt.map(|u| u.node_tag()) == Some(NodeTag::T_TransactionStmt);
+    }
+    false
+}
+
+fn IsTransactionExitStmtList(pstmts: &[PlannedStmt<'_>]) -> bool {
+    if pstmts.len() == 1 {
+        let pstmt = &pstmts[0];
+        return pstmt.commandType == CmdType::CMD_UTILITY
+            && IsTransactionExitStmt(pstmt.utilityStmt);
+    }
+    false
+}
+
+pub fn exec_describe_statement_message<'mcx>(mcx: Mcx<'mcx>, stmt_name: &str) -> PgResult<()> {
+    start_xact_command()?;
+
+    let psrc = lookup_plansource(stmt_name)?;
+
+    debug_assert!(plancache::CachedPlanFixedResult(psrc));
+
+    let result_desc = plancache::CachedPlanResultDesc(psrc);
+
+    if xact::IsAbortedTransactionBlockState() && result_desc.is_some() {
+        return Err(aborted_xact_error());
+    }
+
+    if elog::config::where_to_send_output() != CommandDest::Remote {
+        return Ok(()); /* can't actually do anything... */
+    }
+
+    let param_types = plancache::CachedPlanParamTypes(psrc);
+    let mut buf = pqformat::pq_beginmessage(mcx, pqmsg::PARAMETER_DESCRIPTION)?;
+    pqformat::pq_sendint16(&mut buf, param_types.len() as u16)?;
+    for &ptype in param_types {
+        pqformat::pq_sendint32(&mut buf, ptype)?;
+    }
+    pqformat::pq_endmessage(buf)?;
+
+    match result_desc {
+        Some(desc) => {
+            let tlist = plancache::CachedPlanGetTargetList(mcx, psrc, QueryEnvHandle::NULL)?;
+            let mut rbuf = StringInfo::new_in(mcx)?;
+            printtup::SendRowDescriptionMessage(&mut rbuf, &desc, &tlist, None)
+        }
+        None => pqformat::pq_putemptymessage(pqmsg::NO_DATA),
+    }
+}
+
+pub fn exec_describe_portal_message<'mcx>(mcx: Mcx<'mcx>, portal_name: &str) -> PgResult<()> {
+    start_xact_command()?;
+
+    let Some(portal) = portalmem::GetPortalByName(Some(portal_name)) else {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_CURSOR)
+            .errmsg(format!("portal \"{portal_name}\" does not exist"))
+            .into_error()
+            .into());
+    };
+
+    if xact::IsAbortedTransactionBlockState() && portal.borrow().tupDesc.is_some() {
+        return Err(aborted_xact_error());
+    }
+
+    if elog::config::where_to_send_output() != CommandDest::Remote {
+        return Ok(()); /* can't actually do anything... */
+    }
+
+    let tup_desc = portal.borrow().tupDesc.clone();
+    match tup_desc {
+        Some(desc) => {
+            let p = portal.borrow();
+            let tlist = pquery::FetchPortalTargetList(mcx, &p)?;
+            let formats = (!p.formats.is_empty()).then_some(&p.formats[..]);
+            let mut rbuf = StringInfo::new_in(mcx)?;
+            printtup::SendRowDescriptionMessage(&mut rbuf, &desc, &tlist, formats)
+        }
+        None => pqformat::pq_putemptymessage(pqmsg::NO_DATA),
+    }
+}
+
+/// The plan-cache probe used by tests: (num_generic_plans, num_custom_plans)
+/// of the named or unnamed source.
+pub fn plan_cache_counts(stmt_name: &str) -> PgResult<(i64, i64)> {
+    Ok(plancache::CachedPlanCounts(lookup_plansource(stmt_name)?))
+}

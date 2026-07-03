@@ -377,7 +377,7 @@ pub fn cost_bitmap_heap_scan(
     p.total_cost = startup_cost + run_cost;
 }
 
-// cost_agg (costsize.c), AGG_PLAIN/AGG_HASHED no-quals arms.
+// cost_agg (costsize.c), AGG_PLAIN/AGG_SORTED/AGG_HASHED arms.
 #[allow(clippy::too_many_arguments)]
 pub fn cost_agg(
     run: &mut PlannerRun<'_>,
@@ -386,18 +386,16 @@ pub fn cost_agg(
     aggcosts: &types_pathnodes::AggClauseCosts,
     num_group_cols: i32,
     num_groups: f64,
-    quals_empty: bool,
+    quals: &[types_pathnodes::NodeId],
     input_disabled_nodes: i32,
     input_startup_cost: f64,
     input_total_cost: f64,
     input_tuples: f64,
     input_width: i32,
-) {
-    assert!(quals_empty, "cost_agg (costsize.c): HAVING quals; M3 having lane");
-    let _ = input_startup_cost;
+) -> PgResult<()> {
     let mut disabled_nodes = input_disabled_nodes;
 
-    let (mut startup_cost, mut total_cost, output_tuples);
+    let (mut startup_cost, mut total_cost, mut output_tuples);
     if aggstrategy == types_pathnodes::AGG_PLAIN {
         debug_assert!(num_group_cols == 0 && num_groups == 1.0);
         startup_cost = input_total_cost;
@@ -407,6 +405,17 @@ pub fn cost_agg(
         startup_cost += aggcosts.finalCost.per_tuple;
         total_cost = startup_cost + gucs::cpu_tuple_cost();
         output_tuples = 1.0;
+    } else if aggstrategy == types_pathnodes::AGG_SORTED {
+        // Output is delivered on-the-fly, one group at a time.
+        startup_cost = input_startup_cost;
+        total_cost = input_total_cost;
+        total_cost += aggcosts.transCost.startup;
+        total_cost += aggcosts.transCost.per_tuple * input_tuples;
+        total_cost += gucs::cpu_operator_cost() * num_group_cols as f64 * input_tuples;
+        total_cost += aggcosts.finalCost.startup;
+        total_cost += aggcosts.finalCost.per_tuple * num_groups;
+        total_cost += gucs::cpu_tuple_cost() * num_groups;
+        output_tuples = num_groups;
     } else if aggstrategy == types_pathnodes::AGG_HASHED {
         startup_cost = input_total_cost;
         if !gucs::enable_hashagg() {
@@ -421,7 +430,7 @@ pub fn cost_agg(
         total_cost += gucs::cpu_tuple_cost() * num_groups;
         output_tuples = num_groups;
     } else {
-        panic!("cost_agg (costsize.c): AGG_SORTED/AGG_MIXED; M3 sorted-grouping lane");
+        panic!("cost_agg (costsize.c): AGG_MIXED; M3 grouping-sets lane");
     }
 
     if aggstrategy == types_pathnodes::AGG_HASHED {
@@ -449,11 +458,42 @@ pub fn cost_agg(
         total_cost += spill_cost;
     }
 
+    // HAVING quals: charged per output tuple, then filter selectivity.
+    if !quals.is_empty() {
+        let mut qual_cost = QualCost { startup: 0.0, per_tuple: 0.0 };
+        for &q in quals {
+            let c = cost_qual_eval_node(*run.root.expr_node(q))?;
+            qual_cost.startup += c.startup;
+            qual_cost.per_tuple += c.per_tuple;
+        }
+        startup_cost += qual_cost.startup;
+        total_cost += qual_cost.startup + output_tuples * qual_cost.per_tuple;
+
+        // C passes the bare clauses; the transient RestrictInfo wrap feeds
+        // the same restriction_selectivity legs.
+        let mut rids: mcx::PgVec<'_, RinfoId> = mcx::PgVec::new_in(run.mcx);
+        for &q in quals {
+            let clause = *run.root.expr_node(q);
+            rids.push(crate::initsplan::make_restrictinfo(
+                run, clause, true, false, false, false, 0, None, None, None,
+            )?);
+        }
+        let sel = crate::clausesel::clauselist_selectivity(
+            run,
+            &rids,
+            0,
+            types_pathnodes::JOIN_INNER,
+            None,
+        )?;
+        output_tuples = clamp_row_est(output_tuples * sel);
+    }
+
     let p = run.root.path_mut(path_id).base_mut();
     p.rows = output_tuples;
     p.disabled_nodes = disabled_nodes;
     p.startup_cost = startup_cost;
     p.total_cost = total_cost;
+    Ok(())
 }
 
 const BLCKSZ: usize = 8192;

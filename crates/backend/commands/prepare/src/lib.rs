@@ -21,6 +21,14 @@ use types_nodes::rawnodes::RawStmt;
 use types_core::ParseLoc;
 use types_portal::{ParamListHandle, QueryCompletion, QueryEnvHandle, CURSOR_OPT_PARALLEL_OK, FETCH_ALL};
 
+pub fn init_seams() {
+    prepare_seams::store_prepared_statement::set(StorePreparedStatement);
+    prepare_seams::fetch_prepared_statement_plansource::set(|stmt_name, throw_error| {
+        Ok(FetchPreparedStatement(stmt_name, throw_error)?.map(|p| p.plansource))
+    });
+    prepare_seams::drop_prepared_statement::set(DropPreparedStatement);
+}
+
 #[derive(Clone, Copy)]
 pub struct PreparedStatement {
     pub plansource: CachedPlanSourceHandle,

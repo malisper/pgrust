@@ -1,7 +1,7 @@
 use mcx::{Mcx, PgVec};
 use types_core::{AttrNumber, Oid};
 use types_error::PgResult;
-use types_portal::PortalData;
+use types_portal::{PortalData, StmtListHandle};
 
 // A TargetEntry projected to the fields row-description senders read.
 #[derive(Clone, Copy, Debug, Default)]
@@ -17,4 +17,10 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         portal: &'a PortalData<'a>,
     ) -> PgResult<PgVec<'mcx, TargetEntrySummary>>
+);
+
+seam_core::seam!(
+    // stmt_list::free — PortalDrop releases the portal's registry handle
+    // (idempotent; C's portal->stmts dies with the portal contexts).
+    pub fn stmt_list_free(h: StmtListHandle)
 );

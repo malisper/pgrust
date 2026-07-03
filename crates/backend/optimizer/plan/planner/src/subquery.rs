@@ -140,8 +140,28 @@ pub fn subquery_planner<'mcx>(
     if !parse.groupingSets.is_nil() {
         panic!("expand_grouping_sets (parse_agg.c): M2 grouping lane");
     }
-    if parse.havingQual.is_some() {
-        panic!("subquery_planner (planner.c): HAVING-to-WHERE move; M2 lane");
+    // C's newHaving loop over the implicit-AND list; havingQual here is a
+    // single clause (make_ands_implicit is not performed — canonicalize_qual
+    // panics on AND trees upstream), so the loop degenerates to one arm.
+    if let Some(hc) = parse.havingQual {
+        debug_assert!(parse.groupingSets.is_nil());
+        if clauses::contain_agg_clause(hc)?
+            || clauses::contain_volatile_functions(hc)?
+            || clauses::contain_subplans(hc)?
+        {
+            // keep it in HAVING
+        } else if !parse.groupClause.is_nil() {
+            let whereclause =
+                preprocess_expression(run, Some(hc), EXPRKIND_QUAL)?.expect("clause in, clause out");
+            move_qual_to_where(run, &mut parse, whereclause)?;
+            parse.havingQual = None;
+        } else {
+            // Degenerate grouping: a copy goes to WHERE, the clause stays in
+            // HAVING (C copyObject; the arena share is our copy model).
+            let whereclause =
+                preprocess_expression(run, Some(hc), EXPRKIND_QUAL)?.expect("clause in, clause out");
+            move_qual_to_where(run, &mut parse, whereclause)?;
+        }
     }
     if has_outer_joins {
         panic!("reduce_outer_joins (prepjointree.c): M2 join lane");
@@ -230,6 +250,30 @@ fn canonicalize_qual(qual: Node<'_>) -> Node<'_> {
         }
         _ => qual,
     }
+}
+
+// C list_concats the moved HAVING clause onto jointree->quals; without the
+// implicit-AND list form only the empty-quals arm is expressible.
+fn move_qual_to_where<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    parse: &mut Query<'mcx>,
+    whereclause: Node<'mcx>,
+) -> PgResult<()> {
+    let f = parse.jointree.expect("jointree is a FromExpr");
+    if f.quals.is_some() {
+        panic!(
+            "subquery_planner (planner.c): HAVING-to-WHERE concat onto existing quals \
+             needs the implicit-AND list form; M2 qual lane"
+        );
+    }
+    parse.jointree = Some(alloc_leak_in(
+        run.mcx,
+        types_nodes::primnodes::FromExpr {
+            fromlist: f.fromlist.clone_in(run.mcx)?,
+            quals: Some(whereclause),
+        },
+    )?);
+    Ok(())
 }
 
 // C mutates jointree->quals in place; the FromExpr is shared here, so an

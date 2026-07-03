@@ -32,6 +32,7 @@ xlogrecovery = { path = "../../backend/access/transam/xlogrecovery" }
 xlogutils = { path = "../../backend/access/transam/xlogutils" }
 aclchk = { path = "../../backend/catalog/aclchk" }
 catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
+catalog_storage = { path = "../../backend/catalog/catalog_storage" }
 catalog = { path = "../../backend/catalog/catalog" }
 pg_database = { path = "../../backend/catalog/pg_database" }
 pg_db_role_setting = { path = "../../backend/catalog/pg_db_role_setting" }
@@ -119,6 +120,7 @@ catcache = { path = "../../backend/utils/cache/catcache" }
 inval = { path = "../../backend/utils/cache/inval" }
 lsyscache = { path = "../../backend/utils/cache/lsyscache" }
 plancache = { path = "../../backend/utils/cache/plancache" }
+planner = { path = "../../backend/optimizer/plan/planner" }
 relcache = { path = "../../backend/utils/cache/relcache" }
 relcache_build = { path = "../../backend/utils/cache/relcache_build" }
 relmapper = { path = "../../backend/utils/cache/relmapper" }

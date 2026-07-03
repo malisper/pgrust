@@ -47,6 +47,7 @@ struct CachedPlanSource {
     fixed_result: bool,
     requires_reval: bool,
     requires_snapshot: bool,
+    is_xact_exit_stmt: bool,
     query_list: &'static [Query<'static>],
     relation_oids: &'static [Oid],
     search_path: Option<SearchPathMatcher<'static>>,
@@ -183,12 +184,13 @@ pub fn CreateCachedPlan(
     query_string: &str,
     commandTag: CommandTag,
 ) -> PgResult<CachedPlanSourceHandle> {
-    let (requires_reval, requires_snapshot) = match raw_parse_tree {
+    let (requires_reval, requires_snapshot, is_xact_exit_stmt) = match raw_parse_tree {
         Some(raw) => (
             parser_analyze::stmt_requires_parse_analysis(raw),
             parser_analyze::analyze_requires_snapshot(raw),
+            is_transaction_exit_stmt(raw),
         ),
-        None => (false, false),
+        None => (false, false, false),
     };
 
     let source_ctx = leak_ctx("CachedPlanSource");
@@ -208,6 +210,7 @@ pub fn CreateCachedPlan(
             fixed_result: false,
             requires_reval,
             requires_snapshot,
+            is_xact_exit_stmt,
             query_list: &[],
             relation_oids: &[],
             search_path: None,
@@ -979,6 +982,79 @@ fn plan_cache_compute_result_desc(
         }
         PORTAL_MULTI_QUERY => Ok(None),
     }
+}
+
+// IsTransactionExitStmt (postgres.c), captured at create because the raw
+// parse tree is not retained.
+fn is_transaction_exit_stmt(raw: &RawStmt<'_>) -> bool {
+    use types_nodes::parsenodes::TransactionStmtKind::*;
+    match raw.stmt.and_then(|node| node.as_transaction_stmt()) {
+        Some(stmt) => matches!(
+            stmt.kind,
+            TRANS_STMT_COMMIT | TRANS_STMT_PREPARE | TRANS_STMT_ROLLBACK | TRANS_STMT_ROLLBACK_TO
+        ),
+        None => false,
+    }
+}
+
+/// C CachedPlanGetTargetList: the primary query's targetlist, projected to the
+/// row-description fields (exec_describe_statement_message's only consumer).
+pub fn CachedPlanGetTargetList<'mcx>(
+    mcx: Mcx<'mcx>,
+    h: CachedPlanSourceHandle,
+    queryEnv: QueryEnvHandle,
+) -> PgResult<PgVec<'mcx, pquery_seams::TargetEntrySummary>> {
+    let mut out: PgVec<'mcx, pquery_seams::TargetEntrySummary> = PgVec::new_in(mcx);
+    if with_source(h, |src| src.result_desc.is_none()) {
+        return Ok(out);
+    }
+
+    RevalidateCachedQuery(h, queryEnv)?;
+
+    let query_list = with_source(h, |src| src.query_list);
+    let primary = query_list
+        .iter()
+        .find(|q| q.canSetTag)
+        .expect("QueryListGetPrimaryStmt: fixed-result source has a canSetTag query");
+    if primary.commandType == CmdType::CMD_UTILITY {
+        panic!(
+            "FetchStatementTargetList (pquery.c): utility statement targetlist \
+             (FETCH/EXECUTE recursion) is the portalcmds lane"
+        );
+    }
+    out.try_reserve(primary.targetList.len())
+        .map_err(|_| mcx.oom(primary.targetList.len()))?;
+    for node in primary.targetList.iter() {
+        let tle = node.as_target_entry().expect("targetlist entry is a TargetEntry");
+        out.push(pquery_seams::TargetEntrySummary {
+            resjunk: tle.resjunk,
+            resorigtbl: tle.resorigtbl,
+            resorigcol: tle.resorigcol,
+        });
+    }
+    Ok(out)
+}
+
+pub fn CachedPlanParamTypes(h: CachedPlanSourceHandle) -> &'static [Oid] {
+    with_source(h, |src| src.param_types)
+}
+
+/// Valid while the caller holds the source handle (C: plansource->query_list).
+pub fn CachedPlanQueryList(h: CachedPlanSourceHandle) -> &'static [Query<'static>] {
+    with_source(h, |src| src.query_list)
+}
+
+pub fn CachedPlanRequiresSnapshot(h: CachedPlanSourceHandle) -> bool {
+    with_source(h, |src| src.requires_snapshot)
+}
+
+pub fn CachedPlanIsTransactionExitStmt(h: CachedPlanSourceHandle) -> bool {
+    with_source(h, |src| src.is_xact_exit_stmt)
+}
+
+/// (num_generic_plans, num_custom_plans) — the plan-cache-hit probe.
+pub fn CachedPlanCounts(h: CachedPlanSourceHandle) -> (i64, i64) {
+    with_source(h, |src| (src.num_generic_plans, src.num_custom_plans))
 }
 
 pub fn CachedPlanResultDesc(h: CachedPlanSourceHandle) -> Option<Rc<TupleDescData<'static>>> {

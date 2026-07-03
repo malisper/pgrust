@@ -31,6 +31,7 @@ pub fn init_seams() {
     analyze_seams::parse_analyze_fixedparams::set(parse_analyze_fixedparams);
     analyze_seams::parse_analyze_varparams::set(parse_analyze_varparams);
     analyze_seams::analyze_requires_snapshot::set(analyze_requires_snapshot);
+    analyze_seams::parse_sub_analyze::set(parse_sub_analyze);
 }
 
 pub fn parse_analyze_fixedparams<'a, 'mcx>(
@@ -340,13 +341,22 @@ fn transformSelectStmt<'mcx>(
     )?;
     qry.groupDistinct = stmt.groupDistinct;
 
-    if !stmt.distinctClause.is_none() {
-        panic!(
-            "transformSelectStmt (analyze.c): transformDistinctClause/\
-             transformDistinctOnClause unported (gram repr: DistinctClause::All = \
-             C's one-NULL-cell list, DistinctClause::On = DISTINCT ON exprs) — \
-             unit backend-parser-clause"
-        );
+    match &stmt.distinctClause {
+        types_nodes::rawnodes::DistinctClause::None => {}
+        types_nodes::rawnodes::DistinctClause::All => {
+            qry.distinctClause = parse_clause::transformDistinctClause(
+                mcx,
+                pstate,
+                &mut qry.targetList,
+                &qry.sortClause,
+                false,
+            )?;
+            qry.hasDistinctOn = false;
+        }
+        types_nodes::rawnodes::DistinctClause::On(_) => panic!(
+            "transformSelectStmt (analyze.c): transformDistinctOnClause (DISTINCT ON) \
+             unported — unit backend-parser-clause"
+        ),
     }
 
     qry.limitOffset = transformLimitClause(

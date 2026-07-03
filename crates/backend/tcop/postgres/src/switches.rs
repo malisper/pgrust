@@ -161,12 +161,7 @@ mod tests {
 
     // FATAL emits and proc_exits, so FATAL arms assert on a panicking stub.
     fn setup() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            pgstat_seams::pgstat_set_session_end_cause_fatal::set(|| {});
-            init_small_seams::my_proc_pid::set(|| 4242);
-            ipc_seams::proc_exit::set(|code, _pid| panic!("proc_exit({code})"));
-        });
+        crate::session_tests::install_shared_stubs();
     }
 
     fn av(args: &[&str]) -> Vec<String> {

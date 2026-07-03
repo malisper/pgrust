@@ -192,6 +192,8 @@ fn install() {
             },
         );
         execmain_seams::free_query_desc::set(|_| {});
+        execmain_seams::release_query_desc::set(|_| {});
+        pquery::init_seams();
         execmain_seams::executor_start::set(|_, _| Ok(()));
         execmain_seams::executor_run::set(|_, _, _, _| {
             QD_RUNS.with(|c| c.set(c.get() + 1));

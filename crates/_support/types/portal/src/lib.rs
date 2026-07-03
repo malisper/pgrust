@@ -11,6 +11,8 @@ use ::types_resowner::ResourceOwner;
 use ::types_snapshot::SnapshotData;
 use ::types_tuple::TupleDescData;
 
+pub mod params;
+
 pub const CMDTAG_UNKNOWN: CommandTag = CommandTag(0);
 pub const CMDTAG_DELETE: CommandTag = CommandTag(103);
 pub const CMDTAG_FETCH: CommandTag = CommandTag(154);
@@ -28,18 +30,8 @@ pub struct QueryCompletion {
     pub nprocessed: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u32)]
-pub enum FetchDirection {
-    FETCH_FORWARD = 0,
-    FETCH_BACKWARD,
-    FETCH_ABSOLUTE,
-    FETCH_RELATIVE,
-}
-
-pub use FetchDirection::*;
-
-pub const FETCH_ALL: i64 = i64::MAX;
+pub use ::types_nodes::parsenodes::FetchDirection::{self, *};
+pub use ::types_nodes::parsenodes::FETCH_ALL;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[repr(u32)]

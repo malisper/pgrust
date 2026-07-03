@@ -26,6 +26,14 @@ pub fn preprocess_aggrefs<'mcx>(
     Ok(())
 }
 
+/// The single-node entry (C passes the bare havingQual to the same walker).
+pub fn preprocess_aggrefs_node<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    node: Node<'mcx>,
+) -> PgResult<()> {
+    preprocess_aggrefs_walker(run, node)
+}
+
 // C returns without descending into a matched Aggref (no same-level nesting).
 fn preprocess_aggrefs_walker<'mcx>(
     run: &mut PlannerRun<'mcx>,
