@@ -1284,6 +1284,37 @@ struct GenericCosts {
 }
 
 // genericcostestimate (selfuncs.c); num_sa_scans arrives preset (no SAOP).
+// add_predicate_to_index_quals (selfuncs.c): AND the partial-index predicate
+// (as fresh RestrictInfos) into a qual list for selectivity purposes.
+fn add_predicate_to_index_quals<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: types_pathnodes::PathId,
+    index_quals: &[RinfoId],
+) -> PgResult<mcx::PgVec<'mcx, RinfoId>> {
+    let mcx = run.mcx;
+    let indpred = {
+        let PathNode::IndexPath(ip) = run.root.path(path_id) else { unreachable!() };
+        ip.indexinfo.as_ref().expect("indexinfo set").indpred.clone()
+    };
+    let mut result: mcx::PgVec<'mcx, RinfoId> = mcx::PgVec::new_in(mcx);
+    if !indpred.is_empty() {
+        let mut qual_nodes: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+        for &rid in index_quals {
+            qual_nodes.push(*run.root.expr_node(run.root.rinfo(rid).clause));
+        }
+        for &pid in indpred.iter() {
+            let pred = *run.root.expr_node(pid);
+            if !crate::predtest::predicate_implied_by(mcx, &[pred], &qual_nodes, false)? {
+                result.push(crate::initsplan::make_restrictinfo(
+                    run, pred, true, false, false, false, 0, None, None, None,
+                )?);
+            }
+        }
+    }
+    result.extend(index_quals.iter().copied());
+    Ok(result)
+}
+
 fn genericcostestimate(
     run: &mut PlannerRun<'_>,
     path_id: types_pathnodes::PathId,
@@ -1306,13 +1337,13 @@ fn genericcostestimate(
     let index_rel_relid = run.root.rel(index_rel).relid as i32;
     let index_rel_tuples = run.root.rel(index_rel).tuples;
 
-    // add_predicate_to_index_quals: identity for a non-partial index.
     debug_assert!(costs.num_sa_scans >= 1.0);
     let num_sa_scans = costs.num_sa_scans;
 
+    let selectivity_quals = add_predicate_to_index_quals(run, path_id, &index_quals)?;
     let index_selectivity = crate::clausesel::clauselist_selectivity(
         run,
-        &index_quals,
+        &selectivity_quals,
         index_rel_relid,
         JOIN_INNER,
         None,
@@ -1629,9 +1660,11 @@ fn btcostestimate(
                     break 'buildquals;
                 }
                 if !index_skip_quals.is_empty() {
+                    let partial_skip_quals =
+                        add_predicate_to_index_quals(run, path_id, &index_skip_quals)?;
                     let ndistinctfrac = crate::clausesel::clauselist_selectivity(
                         run,
-                        &index_skip_quals,
+                        &partial_skip_quals,
                         index_rel_relid,
                         JOIN_INNER,
                         None,
@@ -1695,9 +1728,10 @@ fn btcostestimate(
     {
         1.0
     } else {
+        let selectivity_quals = add_predicate_to_index_quals(run, path_id, &index_bound_quals)?;
         let btree_selectivity = crate::clausesel::clauselist_selectivity(
             run,
-            &index_bound_quals,
+            &selectivity_quals,
             index_rel_relid,
             JOIN_INNER,
             None,
@@ -2812,7 +2846,6 @@ fn gincostestimate(
     let (index_quals, index_pages, index_tuples, index_rel, reltablespace, gin_stats, opfamily0, opcintype0) = {
         let PathNode::IndexPath(ip) = run.root.path(path_id) else { unreachable!() };
         let index = ip.indexinfo.as_ref().expect("indexinfo set");
-        debug_assert!(index.indpred.is_empty());
         (
             get_quals_from_indexclauses(run, path_id),
             index.pages,
@@ -2862,10 +2895,10 @@ fn gincostestimate(
         num_entries = 1.0;
     }
 
-    // add_predicate_to_index_quals: identity for a non-partial index.
+    let selectivity_quals = add_predicate_to_index_quals(run, path_id, &index_quals)?;
     let index_selectivity = crate::clausesel::clauselist_selectivity(
         run,
-        &index_quals,
+        &selectivity_quals,
         index_rel_relid,
         JOIN_INNER,
         None,
