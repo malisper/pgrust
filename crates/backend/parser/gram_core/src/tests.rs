@@ -850,3 +850,27 @@ fn listen_notify_unlisten() {
     let n = only_stmt(&parse("NOTIFY ch, 'pay';")).stmt.unwrap().as_notify_stmt().unwrap();
     assert_eq!((n.conditionname, n.payload), (Some("ch"), Some("pay")));
 }
+
+#[test]
+fn create_index_statements_parse() {
+    for s in [
+        "CREATE INDEX ON t (a)",
+        "CREATE INDEX i ON t (a, b)",
+        "CREATE UNIQUE INDEX i ON t (a)",
+        "CREATE INDEX i ON t (a DESC NULLS LAST, b ASC)",
+        "CREATE INDEX i ON t USING btree (a)",
+        "CREATE INDEX IF NOT EXISTS i ON t (a)",
+        "CREATE INDEX i ON t ((a + b))",
+        "CREATE INDEX i ON t (a) WHERE a > 0",
+        "CREATE INDEX i ON t (a COLLATE \"C\")",
+        "CREATE INDEX i ON t (a text_pattern_ops)",
+        "CREATE UNIQUE INDEX CONCURRENTLY i ON t (a)",
+        "CREATE INDEX i ON t (a) INCLUDE (b)",
+        "CREATE INDEX i ON t (a) WITH (fillfactor = 70)",
+        "CREATE INDEX i ON t (a) TABLESPACE ts",
+        "CREATE INDEX i ON t (lower(a))",
+    ] {
+        let l = parse(s);
+        assert_eq!(l.len(), 1, "{s}");
+    }
+}

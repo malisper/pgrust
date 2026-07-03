@@ -182,20 +182,7 @@ fn node(out: &mut String, n: Node<'_>) {
     } else if n.as_a_star().is_some() {
         out.push_str("{A_STAR}");
     } else if let Some(rv) = n.as_range_var() {
-        out.push_str("{RANGEVAR");
-        string_field(out, "catalogname", rv.catalogname);
-        string_field(out, "schemaname", rv.schemaname);
-        string_field(out, "relname", rv.relname);
-        bool_field(out, "inh", rv.inh);
-        out.push_str(" :relpersistence ");
-        out_token(out, Some(std::str::from_utf8(&[rv.relpersistence]).unwrap()));
-        out.push_str(" :alias ");
-        match rv.alias {
-            Some(a) => alias(out, a),
-            None => out.push_str("<>"),
-        }
-        int_field(out, "location", rv.location);
-        out.push('}');
+        range_var(out, rv);
     } else if let Some(sb) = n.as_sort_by() {
         out.push_str("{SORTBY");
         node_field(out, "node", sb.node);
@@ -422,9 +409,69 @@ fn node(out: &mut String, n: Node<'_>) {
         assert!(c.ctecoltypes.is_nil() && c.ctecoltypmods.is_nil() && c.ctecolcollations.is_nil());
         out.push_str(" :ctecoltypes <> :ctecoltypmods <> :ctecolcollations <>");
         out.push('}');
+    } else if let Some(e) = n.as_variant::<types_nodes::rawnodes::IndexElem>() {
+        out.push_str("{INDEXELEM");
+        string_field(out, "name", e.name);
+        node_field(out, "expr", e.expr);
+        string_field(out, "indexcolname", e.indexcolname);
+        list_field(out, "collation", &e.collation);
+        list_field(out, "opclass", &e.opclass);
+        list_field(out, "opclassopts", &e.opclassopts);
+        int_field(out, "ordering", e.ordering as i32);
+        int_field(out, "nulls_ordering", e.nulls_ordering as i32);
+        out.push('}');
+    } else if let Some(s) = n.as_variant::<types_nodes::rawnodes::IndexStmt>() {
+        out.push_str("{INDEXSTMT");
+        string_field(out, "idxname", s.idxname);
+        out.push_str(" :relation ");
+        match s.relation {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        string_field(out, "accessMethod", s.accessMethod);
+        string_field(out, "tableSpace", s.tableSpace);
+        list_field(out, "indexParams", &s.indexParams);
+        list_field(out, "indexIncludingParams", &s.indexIncludingParams);
+        list_field(out, "options", &s.options);
+        node_field(out, "whereClause", s.whereClause);
+        list_field(out, "excludeOpNames", &s.excludeOpNames);
+        string_field(out, "idxcomment", s.idxcomment);
+        out.push_str(&format!(" :indexOid {}", s.indexOid));
+        out.push_str(&format!(" :oldNumber {}", s.oldNumber));
+        out.push_str(&format!(" :oldCreateSubid {}", s.oldCreateSubid));
+        out.push_str(&format!(" :oldFirstRelfilelocatorSubid {}", s.oldFirstRelfilelocatorSubid));
+        bool_field(out, "unique", s.unique);
+        bool_field(out, "nulls_not_distinct", s.nulls_not_distinct);
+        bool_field(out, "primary", s.primary);
+        bool_field(out, "isconstraint", s.isconstraint);
+        bool_field(out, "iswithoutoverlaps", s.iswithoutoverlaps);
+        bool_field(out, "deferrable", s.deferrable);
+        bool_field(out, "initdeferred", s.initdeferred);
+        bool_field(out, "transformed", s.transformed);
+        bool_field(out, "concurrent", s.concurrent);
+        bool_field(out, "if_not_exists", s.if_not_exists);
+        bool_field(out, "reset_default_tblspc", s.reset_default_tblspc);
+        out.push('}');
     } else {
         panic!("tests_dump: unrendered node tag {:?}", n.node_tag());
     }
+}
+
+fn range_var(out: &mut String, rv: &types_nodes::RangeVar<'_>) {
+    out.push_str("{RANGEVAR");
+    string_field(out, "catalogname", rv.catalogname);
+    string_field(out, "schemaname", rv.schemaname);
+    string_field(out, "relname", rv.relname);
+    bool_field(out, "inh", rv.inh);
+    out.push_str(" :relpersistence ");
+    out_token(out, Some(std::str::from_utf8(&[rv.relpersistence]).unwrap()));
+    out.push_str(" :alias ");
+    match rv.alias {
+        Some(a) => alias(out, a),
+        None => out.push_str("<>"),
+    }
+    int_field(out, "location", rv.location);
+    out.push('}');
 }
 
 fn alias(out: &mut String, a: &types_nodes::Alias<'_>) {
