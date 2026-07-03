@@ -7992,6 +7992,7 @@ dependencies = [
  "clauses",
  "clog",
  "combocid",
+ "commands_analyze",
  "commands_async",
  "commands_cluster",
  "commands_tablespace",

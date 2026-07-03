@@ -21,6 +21,7 @@ table = { path = "../../backend/access/table/table" }
 tableam = { path = "../../backend/access/table/tableam" }
 vacuumlazy = { path = "../../backend/access/heap/vacuumlazy" }
 commands_vacuum = { path = "../../backend/commands/vacuum" }
+commands_analyze = { path = "../../backend/commands/analyze" }
 commands_tablespace = { path = "../../backend/commands/tablespace" }
 clog = { path = "../../backend/access/transam/clog" }
 multixact = { path = "../../backend/access/transam/multixact" }
