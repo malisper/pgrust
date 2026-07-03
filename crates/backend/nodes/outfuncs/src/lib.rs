@@ -48,6 +48,7 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
         NodeTag::T_RelabelType => {
             out_relabel_type(out, node.as_variant::<RelabelType>().expect("RelabelType"))?
         }
+        NodeTag::T_List => out_list(out, node.as_list().expect("List"))?,
         NodeTag::T_CoerceViaIO => {
             out_coerce_via_io(out, node.as_variant::<CoerceViaIO>().expect("CoerceViaIO"))?
         }

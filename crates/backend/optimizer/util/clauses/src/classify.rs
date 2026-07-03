@@ -110,8 +110,45 @@ pub fn contain_mutable_functions(clause: Node<'_>) -> PgResult<bool> {
     ContainMutable.visit(clause)
 }
 
-pub fn contain_mutable_functions_after_planning(_expr: Node<'_>) -> PgResult<bool> {
-    panic!("contain_mutable_functions_after_planning deferred: expression_planner unported");
+// expression_planner reduces to eval_const_expressions on this lane; C also
+// reaches inline_function there, which can flip the mutability verdict in
+// either direction (clauses.c:476-495) — SQL-language functions stay loud.
+pub fn contain_mutable_functions_after_planning<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<bool> {
+    let planned = crate::eval_const_expressions(mcx, expr)?;
+    ContainSqlLanguageFunc.visit(planned)?;
+    contain_mutable_functions(planned)
+}
+
+struct ContainSqlLanguageFunc;
+
+impl<'mcx> NodeWalker<'mcx> for ContainSqlLanguageFunc {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        check_functions_in_node(node, &mut |f| {
+            let prolang = syscache_seams::lookup_pg_proc_fmgr::call(f)?.map(|s| s.prolang);
+            if prolang == Some(fmgr_core::SQL_LANGUAGE_ID) {
+                panic!(
+                    "contain_mutable_functions_after_planning: SQL-language function {f} — \
+                     inline_function (clauses.c) unported"
+                );
+            }
+            Ok(false)
+        })?;
+        match node.node_tag() {
+            NodeTag::T_GroupingFunc => walk_grouping_func_args(node, self),
+            NodeTag::T_Query => query_tree_walker(node.as_query().unwrap(), self, 0),
+            _ => expression_tree_walker(node, self),
+        }
+    }
+
+    fn visit_query_ref(
+        &mut self,
+        q: &'mcx types_nodes::parsenodes::Query<'mcx>,
+    ) -> PgResult<bool> {
+        query_tree_walker(q, self, 0)
+    }
 }
 
 struct ContainVolatile {
@@ -719,11 +756,17 @@ fn find_nonnullable_rels_walker<'mcx>(
         }
         // C has strictness arms for these; skipping silently would
         // under-reduce vs C (silent plan-shape divergence).
+        NodeTag::T_CollateExpr => {
+            result = find_nonnullable_rels_walker(
+                mcx,
+                Some(node.as_collate_expr().unwrap().arg),
+                top_level,
+            )?;
+        }
         NodeTag::T_SubPlan
         | NodeTag::T_PlaceHolderVar
         | NodeTag::T_ArrayCoerceExpr
-        | NodeTag::T_ConvertRowtypeExpr
-        | NodeTag::T_CollateExpr => panic!(
+        | NodeTag::T_ConvertRowtypeExpr => panic!(
             "find_nonnullable_rels_walker (clauses.c): {:?} strictness arm unported",
             node.node_tag()
         ),
@@ -895,6 +938,13 @@ fn find_nonnullable_vars_walker<'mcx>(
                 result = nonnullable_vars_args(mcx, &sa.args, false)?;
             }
         }
+        NodeTag::T_CollateExpr => {
+            result = find_nonnullable_vars_walker(
+                mcx,
+                Some(node.as_collate_expr().unwrap().arg),
+                top_level,
+            )?;
+        }
         NodeTag::T_BooleanTest => {
             use types_nodes::BoolTestType;
             let bt = node.as_boolean_test().unwrap();
@@ -912,8 +962,7 @@ fn find_nonnullable_vars_walker<'mcx>(
         NodeTag::T_SubPlan
         | NodeTag::T_PlaceHolderVar
         | NodeTag::T_ArrayCoerceExpr
-        | NodeTag::T_ConvertRowtypeExpr
-        | NodeTag::T_CollateExpr => panic!(
+        | NodeTag::T_ConvertRowtypeExpr => panic!(
             "find_nonnullable_vars_walker (clauses.c): {:?} strictness arm unported",
             node.node_tag()
         ),
@@ -1038,7 +1087,7 @@ pub fn make_notclause<'mcx>(mcx: mcx::Mcx<'mcx>, arg: Node<'mcx>) -> PgResult<No
 }
 
 // make_ands_implicit (clauses.c): explicit AND -> flat list; constant TRUE ->
-// NIL; the AND's arg list is shared, matching C's pointer share.
+// NIL; the cell copy shares the arg nodes (C returns the AND's own list).
 pub fn make_ands_implicit<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     clause: Option<Node<'mcx>>,

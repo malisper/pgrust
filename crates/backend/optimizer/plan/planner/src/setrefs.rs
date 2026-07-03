@@ -362,8 +362,6 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             debug_assert!(l.uniqNumCols == 0);
         }
         NodeTag::T_NestLoop => {
-            let nl = plan.as_nest_loop().unwrap();
-            debug_assert!(nl.nestParams.is_nil());
             set_join_references(run, plan, rtoffset)?;
         }
         NodeTag::T_MergeJoin | NodeTag::T_HashJoin => {
@@ -1674,6 +1672,49 @@ fn set_join_references<'mcx>(
     } else {
         NrmMatch::Superset
     };
+    // nestParams reference the outer plan's tlist (paths were never
+    // reparameterized, so translate via the outer itlist like C's
+    // fix_upper_expr(OUTER_VAR) leg).
+    if !is_hash && !is_merge {
+        let nl = plan.as_nest_loop().unwrap();
+        if !nl.nestParams.is_nil() {
+            let mcx = run.mcx;
+            let empty = NodeList::nil();
+            let mut new_params = NodeList::nil();
+            for nlp_node in &nl.nestParams {
+                let nlp = nlp_node.as_nest_loop_param().expect("nestParams cell");
+                let mut single = NodeList::nil();
+                single.lappend(mcx, nlp.paramval)?;
+                let fixed = fix_join_expr_list(
+                    run, &single, outer_tlist, &empty, rtoffset, NrmMatch::Equal, 0,
+                    base.plan_rows,
+                )?;
+                let paramval = fixed.nth(0);
+                let ok = paramval
+                    .as_var()
+                    .is_some_and(|v| v.varno == types_nodes::primnodes::OUTER_VAR);
+                assert!(ok, "NestLoopParam was not reduced to a simple Var");
+                new_params.lappend(
+                    mcx,
+                    types_nodes::Node::mk(
+                        mcx,
+                        types_nodes::plannodes::NestLoopParam {
+                            paramno: nlp.paramno,
+                            paramval,
+                        },
+                    )?,
+                )?;
+            }
+            // SAFETY: exclusive plan-tree ownership (C rewrites in place).
+            unsafe {
+                plan.with_mut::<types_nodes::plannodes::NestLoop, _>(|p| {
+                    p.nestParams = new_params;
+                })
+            }
+            .expect("NestLoop");
+        }
+    }
+
     let joinqual = fix_join_expr_list(
         run, joinqual_src, outer_tlist, inner_tlist, rtoffset, NrmMatch::Equal, 0,
         2.0 * base.plan_rows,

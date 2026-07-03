@@ -1,5 +1,5 @@
 // nodeNestloop.c, INNER/LEFT/SEMI/ANTI arms; children stay with the
-// ExecProcNode dispatcher via NestLoopChild. nestParams are loud at init.
+// ExecProcNode dispatcher via NestLoopChild.
 #![allow(non_snake_case)]
 
 use std::rc::Rc;
@@ -28,6 +28,13 @@ fn cfi() -> PgResult<()> {
 pub trait NestLoopChild<'mcx> {
     fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>;
     fn rescan(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()>;
+    /// ExecReScan after this join bound fresh nestParams (chgParam-driven).
+    fn rescan_with_chg(
+        &mut self,
+        plan: ::types_nodes::Node<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        chg: &::types_nodes::bitmapset::Bitmapset<'mcx>,
+    ) -> PgResult<()>;
 }
 
 pub struct NestLoopState<'mcx> {
@@ -43,6 +50,15 @@ pub struct NestLoopState<'mcx> {
     nl_NullInnerTupleSlot: Option<ExecSlotId>,
     pub nl_NeedNewOuter: bool,
     pub nl_MatchedOuter: bool,
+    // Outer-tlist source per nestParam, resolved once at init.
+    nest_params: ::mcx::PgVec<'mcx, NestParamSlot>,
+    nest_param_set: ::types_nodes::bitmapset::Bitmapset<'mcx>,
+}
+
+#[derive(Clone, Copy)]
+struct NestParamSlot {
+    paramno: i32,
+    attno: i16,
 }
 
 /// `ExecInitNestLoop` minus child linkage: the caller inits the outer child
@@ -79,11 +95,21 @@ pub fn exec_init_nest_loop<'mcx>(
     } else {
         None
     };
-    assert!(
-        node.nestParams.is_nil(),
-        "ExecInitNestLoop (nodeNestloop.c): nestParams; parameterized-inner lane unported"
-    );
     let mcx = estate.es_query_cxt;
+    let mut nest_params: ::mcx::PgVec<'mcx, NestParamSlot> = ::mcx::PgVec::new_in(mcx);
+    let mut nest_param_set = ::types_nodes::bitmapset::Bitmapset::empty();
+    for nlp_node in &node.nestParams {
+        let nlp = nlp_node
+            .as_nest_loop_param()
+            .expect("nestParams cell is a NestLoopParam");
+        let v = nlp
+            .paramval
+            .as_var()
+            .expect("NestLoopParam value is a simple Var");
+        debug_assert!(v.varno == ::types_nodes::primnodes::OUTER_VAR && v.varattno > 0);
+        nest_params.push(NestParamSlot { paramno: nlp.paramno, attno: v.varattno });
+        nest_param_set.add_member(mcx, nlp.paramno)?;
+    }
     let ps_ExprContext = estate.exec_assign_expr_context();
 
     let ps_ResultTupleSlot =
@@ -107,6 +133,8 @@ pub fn exec_init_nest_loop<'mcx>(
         nl_NullInnerTupleSlot,
         nl_NeedNewOuter: true,
         nl_MatchedOuter: false,
+        nest_params,
+        nest_param_set,
     })
 }
 
@@ -132,7 +160,26 @@ where
             estate.ecxt_mut(ecxt).ecxt_outertuple = Some(outer_slot);
             node.nl_NeedNewOuter = false;
             node.nl_MatchedOuter = false;
-            inner.rescan(estate)?;
+            if node.nest_params.is_empty() {
+                inner.rescan(estate)?;
+            } else {
+                // Bind the outer Vars into their PARAM_EXEC slots, then
+                // rescan the inner with the changed-param set.
+                for &NestParamSlot { paramno, attno } in node.nest_params.iter() {
+                    let mut isnull = false;
+                    let value = exectuples::slot_getattr(
+                        &mut estate.es_tupleTable[outer_slot.0 as usize],
+                        attno as i32,
+                        &mut isnull,
+                    );
+                    let prm = &mut estate.es_param_exec_vals[paramno as usize];
+                    prm.value = value;
+                    prm.isnull = isnull;
+                }
+                let inner_plan =
+                    node.plan.join.plan.righttree.expect("nestloop inner plan");
+                inner.rescan_with_chg(inner_plan, estate, &node.nest_param_set)?;
+            }
         }
 
         let inner_slot = inner.exec_proc(estate)?;
@@ -240,8 +287,9 @@ fn project_join_tuple<'mcx>(
 
 // Exempt: all released in exec_end_nest_loop (proj via release_frames).
 mcx::forget_safe_struct!(
+    NestParamSlot { paramno, attno },
     NestLoopState<'_> { plan, ps_ExprContext, ps_ResultTupleSlot,
         js_single_match, nl_fill_outer, nl_NullInnerTupleSlot,
-        nl_NeedNewOuter, nl_MatchedOuter;
+        nl_NeedNewOuter, nl_MatchedOuter, nest_params, nest_param_set;
         ps_ResultTupleDesc, proj, joinqual, otherqual },
 );

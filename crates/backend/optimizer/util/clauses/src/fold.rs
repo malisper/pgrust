@@ -386,6 +386,21 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
             )
             .map(Some)
         }
+        // C: CollateExpr is replaced with an equivalent RelabelType.
+        NodeTag::T_CollateExpr => {
+            let c = node.as_collate_expr().unwrap();
+            let arg = ece_mutator(c.arg, cx)?.unwrap_or(c.arg);
+            nodes_core::node_funcs::apply_relabel_type(
+                cx.mcx,
+                arg,
+                nodes_core::node_funcs::expr_type(arg),
+                nodes_core::node_funcs::expr_typmod(arg),
+                c.collOid,
+                CoercionForm::COERCE_IMPLICIT_CAST,
+                c.location,
+            )
+            .map(Some)
+        }
         NodeTag::T_CoerceViaIO => {
             let e = node.as_coerce_via_io().unwrap();
             let mut args = NodeList::make1(cx.mcx, e.arg)?;

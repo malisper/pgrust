@@ -566,16 +566,24 @@ impl<'mcx> Parser<'mcx> {
                 let quals = view.v(6).list();
                 // SplitColQualList: COLLATE splits out; Constraints stay.
                 let mut constraints = NodeList::nil();
+                let mut coll_clause: Option<Node<'_>> = None;
                 for q in quals.iter() {
                     match q.node_tag() {
                         NodeTag::T_Constraint => constraints.lappend(mcx, q)?,
-                        NodeTag::T_CollateClause => panic!(
-                            "gram_core: SplitColQualList COLLATE arm unported"
-                        ),
+                        NodeTag::T_CollateClause => {
+                            if coll_clause.is_some() {
+                                return Err(self.errposition_error(
+                                    "multiple COLLATE clauses not allowed".into(),
+                                    q.as_collate_clause().unwrap().location,
+                                ));
+                            }
+                            coll_clause = Some(q);
+                        }
                         other => panic!("unexpected node type {other:?} in ColQualList"),
                     }
                 }
                 let mut n = Node::build::<ColumnDef>(mcx)?;
+                n.collClause = coll_clause;
                 n.colname = Some(colname);
                 n.typeName = type_name;
                 n.storage_name = storage_name;
@@ -585,6 +593,14 @@ impl<'mcx> Parser<'mcx> {
                 n.fdwoptions = fdwoptions;
                 n.location = view.l(1);
                 *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ColConstraintElem: COLLATE any_name
+            498 => {
+                let collname = view.v(2).list();
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    CollateClause { arg: None, collname, location: view.l(1) },
+                )?));
             }
             // ColQualList: ColQualList ColConstraint
             493 => {
@@ -3703,19 +3719,25 @@ impl<'mcx> Parser<'mcx> {
                 n.options = view.v(3).list();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            // table_ref: select_with_parens opt_alias_clause.
-            1838 => {
+            // table_ref: select_with_parens opt_alias_clause
+            //          | LATERAL_P select_with_parens opt_alias_clause.
+            1838 | 1839 => {
+                let off = if rule == 1839 { 1 } else { 0 };
                 let mut n = Node::build::<RangeSubselect>(mcx)?;
-                n.lateral = false;
-                n.subquery = view.v(1).node();
-                n.alias = view.v(2).alias();
+                n.lateral = rule == 1839;
+                n.subquery = view.v(1 + off).node();
+                n.alias = view.v(2 + off).alias();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            // alias_clause: AS ColId '(' name_list ')'.
-            1850 => {
+            // alias_clause: AS ColId '(' name_list ')' | ColId '(' name_list ')'.
+            1850 | 1852 => {
+                let off = if rule == 1850 { 1 } else { 0 };
                 let a = Node::mk_mut(
                     mcx,
-                    Alias { aliasname: Some(view.v(2).str_val()), colnames: view.v(4).list() },
+                    Alias {
+                        aliasname: Some(view.v(1 + off).str_val()),
+                        colnames: view.v(3 + off).list(),
+                    },
                 )?;
                 *yyval = YYSTYPE::Alias(Some(a.seal_ref()));
             }

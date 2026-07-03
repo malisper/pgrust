@@ -15,8 +15,9 @@ use crate::parsenodes::{
     WithClause,
 };
 use crate::primnodes::{
-    Aggref, Alias, ArrayExpr, BoolExpr, BooleanTest, CoerceViaIO, Const, DistinctExpr, FromExpr,
-    FuncExpr, GroupingFunc, NullTest, OpExpr, Param, RangeTblRef, RangeVar, RelabelType, RowExpr,
+    Aggref, Alias, ArrayExpr, BoolExpr, BooleanTest, CoerceViaIO, CollateExpr, Const,
+    DistinctExpr, FromExpr, FuncExpr, GroupingFunc, NullTest, OpExpr, Param, RangeTblRef,
+    RangeVar, RelabelType, RowExpr,
     ScalarArrayOpExpr, TargetEntry, Var, WindowFunc,
 };
 use crate::rawnodes::{
@@ -61,6 +62,7 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_ArrayExpr => cmp!(as_array_expr),
         NodeTag::T_BoolExpr => cmp!(as_bool_expr),
         NodeTag::T_RelabelType => cmp!(as_relabel_type),
+        NodeTag::T_CollateExpr => cmp!(as_collate_expr),
         NodeTag::T_CoerceViaIO => cmp!(as_coerce_via_io),
         NodeTag::T_NullTest => cmp!(as_null_test),
         NodeTag::T_BooleanTest => cmp!(as_boolean_test),
@@ -411,6 +413,12 @@ impl NodeEqual for RelabelType<'_> {
             && self.resulttype == b.resulttype
             && self.resulttypmod == b.resulttypmod
             && self.resultcollid == b.resultcollid
+    }
+}
+
+impl NodeEqual for CollateExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal(self.arg, b.arg) && self.collOid == b.collOid
     }
 }
 

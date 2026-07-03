@@ -10,6 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 aclchk = { path = "../../catalog/aclchk" }
 parse_utilcmd = { path = "../../parser/parse_utilcmd" }
+parse_clause = { path = "../../parser/parse_clause" }
 tablecmds = { path = "../../commands/tablecmds" }
 typecmds = { path = "../../commands/typecmds" }
 schemacmds = { path = "../../commands/schemacmds" }

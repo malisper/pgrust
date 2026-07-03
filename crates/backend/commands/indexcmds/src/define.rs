@@ -1,8 +1,7 @@
-// DefineIndex + ComputeIndexAttrs + ChooseIndex*Name* (indexcmds.c), plain
-// btree lane. Loud: CONCURRENTLY, INCLUDE, WHERE, expression columns, named
+// DefineIndex + ComputeIndexAttrs + CheckPredicate + ChooseIndex*Name*
+// (indexcmds.c), btree/hash lane. Loud: CONCURRENTLY, INCLUDE, named
 // opclasses/collations, WITH options, TABLESPACE, exclusion/WITHOUT OVERLAPS,
-// partitioned tables, constraint-backed (PRIMARY KEY/UNIQUE ... ADD
-// CONSTRAINT) indexes, non-btree AMs.
+// partitioned tables, non-btree/hash AMs.
 use catalog_index::{
     IndexCreateExtra, BTREE_AM_OID, INDEX_CONSTR_CREATE_MARK_AS_PRIMARY,
     INDEX_CREATE_ADD_CONSTRAINT, INDEX_CREATE_IS_PRIMARY,
@@ -71,9 +70,6 @@ pub fn DefineIndex<'mcx>(
     if !stmt.indexIncludingParams.is_nil() {
         unported("DefineIndex: INCLUDE columns");
     }
-    if stmt.whereClause.is_some() {
-        unported("DefineIndex: partial-index predicates");
-    }
     if !stmt.options.is_nil() {
         unported("DefineIndex: WITH reloptions");
     }
@@ -96,6 +92,7 @@ pub fn DefineIndex<'mcx>(
             Some("hash") => (catalog_index::HASH_AM_OID, "hash", false, false, false),
             Some("gin") => (catalog_index::GIN_AM_OID, "gin", false, false, true),
             Some("gist") => (catalog_index::GIST_AM_OID, "gist", false, false, true),
+            Some("spgist") => (types_core::SPGIST_AM_OID, "spgist", false, false, true),
             Some("brin") => (types_core::BRIN_AM_OID, "brin", false, false, true),
             other => unported(&format!("DefineIndex: access method {other:?} (AMNAME lookup)")),
         };
@@ -104,6 +101,10 @@ pub fn DefineIndex<'mcx>(
             format!("access method \"{amname}\" does not support unique indexes"),
             types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
         ));
+    }
+
+    if let Some(wc) = stmt.whereClause {
+        CheckPredicate(mcx, wc)?;
     }
 
     let root_save_nestlevel = guc::NewGUCNestLevel();
@@ -193,6 +194,10 @@ pub fn DefineIndex<'mcx>(
         ii_AmCache: None,
         ii_NumIndexKeyAttrs: numberOfKeyAttributes as i32,
         ii_IndexAttrNumbers: [0; INDEX_MAX_KEYS as usize],
+        ii_Expressions: types_nodes::NodeList::nil(),
+        ii_ExpressionsState: PgVec::new_in(mcx),
+        ii_Predicate: clauses::make_ands_implicit(mcx, stmt.whereClause)?,
+        ii_PredicateState: None,
         ii_Unique: stmt.unique,
         ii_NullsNotDistinct: stmt.nulls_not_distinct,
         ii_ReadyForInserts: true,
@@ -228,6 +233,25 @@ pub fn DefineIndex<'mcx>(
                 types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
             ));
         }
+    }
+    if !indexInfo.ii_Expressions.is_nil() || !indexInfo.ii_Predicate.is_nil() {
+        let mut check = |list: &types_nodes::NodeList<'mcx>| -> PgResult<()> {
+            for e in list.iter() {
+                for v in vars::pull_var_clause(mcx, e, 0)?.iter() {
+                    if v.as_var().expect("pull_var_clause").varattno < 0 {
+                        return Err(err(
+                            "index creation on system columns is not supported".into(),
+                            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        };
+        check(&indexInfo.ii_Expressions)?;
+        check(&indexInfo.ii_Predicate)?;
+        // attgenerated is 0 on every ported lane, so the virtual-generated
+        // column error arm is dead.
     }
 
     let mut colname_refs: PgVec<'_, &str> = PgVec::new_in(mcx);
@@ -267,7 +291,7 @@ pub fn DefineIndex<'mcx>(
 fn ComputeIndexAttrs<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    indexInfo: &mut IndexInfo,
+    indexInfo: &mut IndexInfo<'mcx>,
     collationIds: &mut [Oid],
     opclassIds: &mut [Oid],
     coloptions: &mut [i16],
@@ -277,47 +301,65 @@ fn ComputeIndexAttrs<'mcx>(
     amname: &str,
     amcanorder: bool,
 ) -> PgResult<()> {
-    let _ = mcx;
     for (attn, node) in attList.iter().enumerate() {
         let attribute = node
             .as_variant::<IndexElem>()
             .unwrap_or_else(|| panic!("IndexElem expected in indexParams"));
-        let Some(name) = attribute.name else {
-            unported("ComputeIndexAttrs: expression index columns");
-        };
         if !attribute.opclass.is_nil() || !attribute.opclassopts.is_nil() {
             unported("ComputeIndexAttrs: named operator classes (ResolveOpClass)");
         }
-        if !attribute.collation.is_nil() {
-            unported("ComputeIndexAttrs: COLLATE overrides (get_collation_oid)");
-        }
-
-        let desc = rel.descr();
-        let mut found = None;
-        for i in 0..desc.natts as usize {
-            let att = desc.attr(i);
-            if !att.attisdropped && att.attname.name_str() == name.as_bytes() {
-                found = Some(*att);
-                break;
+        let (atttype, attcollation) = if let Some(name) = attribute.name {
+            let desc = rel.descr();
+            let mut found = None;
+            for i in 0..desc.natts as usize {
+                let att = desc.attr(i);
+                if !att.attisdropped && att.attname.name_str() == name.as_bytes() {
+                    found = Some(*att);
+                    break;
+                }
             }
-        }
-        let Some(attform) = found else {
-            let msg = if isconstraint {
-                format!("column \"{name}\" named in key does not exist")
-            } else {
-                format!("column \"{name}\" does not exist")
+            let Some(attform) = found else {
+                let msg = if isconstraint {
+                    format!("column \"{name}\" named in key does not exist")
+                } else {
+                    format!("column \"{name}\" does not exist")
+                };
+                return Err(err(msg, ERRCODE_UNDEFINED_COLUMN));
             };
-            return Err(err(msg, ERRCODE_UNDEFINED_COLUMN));
+            indexInfo.ii_IndexAttrNumbers[attn] = attform.attnum;
+            (attform.atttypid, attform.attcollation)
+        } else {
+            // Expression column. Top-level CollateExpr stripping is dead:
+            // COLLATE stays loud upstream (no transformed CollateExpr node).
+            let expr = attribute.expr.expect("IndexElem without name or expr");
+            let atttype = nodes_core::expr_type(expr);
+            let attcollation = nodes_core::expr_collation(expr);
+            if let Some(var) = expr.as_var() {
+                if var.varattno != 0 {
+                    indexInfo.ii_IndexAttrNumbers[attn] = var.varattno;
+                } else {
+                    push_index_expression(mcx, indexInfo, attn, expr)?;
+                }
+            } else {
+                push_index_expression(mcx, indexInfo, attn, expr)?;
+            }
+            (atttype, attcollation)
         };
-        indexInfo.ii_IndexAttrNumbers[attn] = attform.attnum;
-        let atttype = attform.atttypid;
-        let attcollation = attform.attcollation;
+        let mut attcollation = attcollation;
+        // COLLATE clause overrides either leg's collation (indexcmds.c:2050-2062,
+        // resolved before the collatable check).
+        if !attribute.collation.is_nil() {
+            attcollation = catalog_namespace::get_collation_oid_list(&attribute.collation, false)?;
+        }
 
         if lsyscache::type_is_collatable(atttype)? {
             if attcollation == InvalidOid {
-                return Err(err(
-                    "could not determine which collation to use for index expression".into(),
-                    ERRCODE_INDETERMINATE_COLLATION,
+                return Err(Box::new(
+                    (*err(
+                        "could not determine which collation to use for index expression".into(),
+                        ERRCODE_INDETERMINATE_COLLATION,
+                    ))
+                    .with_hint("Use the COLLATE clause to set the collation explicitly."),
                 ));
             }
         } else if attcollation != InvalidOid {
@@ -372,6 +414,34 @@ fn ComputeIndexAttrs<'mcx>(
                 ));
             }
         }
+    }
+    Ok(())
+}
+
+fn push_index_expression<'mcx>(
+    mcx: Mcx<'mcx>,
+    indexInfo: &mut IndexInfo<'mcx>,
+    attn: usize,
+    expr: types_nodes::Node<'mcx>,
+) -> PgResult<()> {
+    indexInfo.ii_IndexAttrNumbers[attn] = 0;
+    indexInfo.ii_Expressions.lappend(mcx, expr)?;
+    if clauses::contain_mutable_functions_after_planning(mcx, expr)? {
+        return Err(err(
+            "functions in index expression must be marked IMMUTABLE".into(),
+            ERRCODE_INVALID_OBJECT_DEFINITION,
+        ));
+    }
+    Ok(())
+}
+
+// CheckPredicate (indexcmds.c).
+fn CheckPredicate<'mcx>(mcx: Mcx<'mcx>, predicate: types_nodes::Node<'mcx>) -> PgResult<()> {
+    if clauses::contain_mutable_functions_after_planning(mcx, predicate)? {
+        return Err(err(
+            "functions in index predicate must be marked IMMUTABLE".into(),
+            ERRCODE_INVALID_OBJECT_DEFINITION,
+        ));
     }
     Ok(())
 }

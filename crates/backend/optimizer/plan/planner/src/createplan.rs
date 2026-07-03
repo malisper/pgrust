@@ -44,7 +44,8 @@ fn create_plan_recurse<'mcx>(
             if p.pathtype == crate::pathnode::tag16(NodeTag::T_SeqScan)
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_FunctionScan)
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_ValuesScan)
-                || p.pathtype == crate::pathnode::tag16(NodeTag::T_CteScan) =>
+                || p.pathtype == crate::pathnode::tag16(NodeTag::T_CteScan)
+                || p.pathtype == crate::pathnode::tag16(NodeTag::T_Result) =>
         {
             create_scan_plan(run, path_id, flags)
         }
@@ -217,6 +218,45 @@ fn build_physical_tlist<'mcx>(
 }
 
 // create_scan_plan (createplan.c).
+// replace_nestloop_params + _mutator (createplan.c), Var arm (PHVs loud).
+fn replace_nestloop_params<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    node: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    Ok(replace_nestloop_params_mutator(run, node)?.unwrap_or(node))
+}
+
+fn replace_nestloop_params_mutator<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    node: Node<'mcx>,
+) -> PgResult<Option<Node<'mcx>>> {
+    if let Some(v) = node.as_var() {
+        debug_assert!(v.varlevelsup == 0);
+        if v.varno <= 0 || !crate::relnode::relids_is_member(v.varno, &run.root.curOuterRels) {
+            return Ok(None);
+        }
+        return Ok(Some(crate::paramassign::replace_nestloop_param_var(run, v, node)?));
+    }
+    if node.node_tag() == NodeTag::T_PlaceHolderVar {
+        panic!("replace_nestloop_params_mutator (createplan.c): PlaceHolderVar");
+    }
+    clauses::walker::expression_tree_mutator(run.mcx, node, &mut |n| {
+        replace_nestloop_params_mutator(run, n)
+    })
+}
+
+fn replace_nestloop_params_list<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    list: &NodeList<'mcx>,
+) -> PgResult<NodeList<'mcx>> {
+    match clauses::walker::mutate_list(run.mcx, list, &mut |n| {
+        replace_nestloop_params_mutator(run, n)
+    })? {
+        Some(l) => Ok(l),
+        None => Ok(list.clone_in(run.mcx)?),
+    }
+}
+
 fn create_scan_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     best_path: PathId,
@@ -241,9 +281,16 @@ fn create_scan_plan<'mcx>(
         } else {
             v.extend(run.root.rel(rel_id).baserestrictinfo.iter().copied());
         }
+        // Parameterized paths enforce their movable join clauses at the scan.
+        if let Some(ppi) = run.root.path(best_path).base().param_info.as_deref() {
+            for &rid in ppi.ppi_clauses.iter() {
+                if !v.iter().any(|&x| x == rid) {
+                    v.push(rid);
+                }
+            }
+        }
         v
     };
-    debug_assert!(run.root.path(best_path).base().param_info.is_none());
 
     let gating_clauses = get_gating_quals(run, &scan_clauses)?;
     // A gating Result can project, so the scan needn't honor tlist flags.
@@ -293,6 +340,9 @@ fn create_scan_plan<'mcx>(
         }
         t if t == crate::pathnode::tag16(NodeTag::T_SubqueryScan) => {
             create_subqueryscan_plan(run, best_path, tlist, scan_clauses)?
+        }
+        t if t == crate::pathnode::tag16(NodeTag::T_Result) => {
+            create_resultscan_plan(run, best_path, tlist, scan_clauses)?
         }
         other => panic!("create_scan_plan (createplan.c): pathtype {other}; M2 scan lane"),
     };
@@ -462,8 +512,7 @@ fn create_seqscan_plan<'mcx>(
     Ok(plan.seal())
 }
 
-// create_functionscan_plan (createplan.c); replace_nestloop_params is dead
-// (param_info asserted None upstream).
+// create_functionscan_plan (createplan.c).
 fn create_functionscan_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     best_path: PathId,
@@ -485,7 +534,35 @@ fn create_functionscan_plan<'mcx>(
     let funcordinality = rte.funcordinality;
 
     let ordered = order_qual_clauses(run, &scan_clauses)?;
-    let qpqual = extract_actual_clauses(run, &ordered);
+    let mut qpqual = extract_actual_clauses(run, &ordered);
+
+    if run.root.path(best_path).base().param_info.is_some() {
+        qpqual = replace_nestloop_params_list(run, &qpqual)?;
+        let mut new_functions = NodeList::nil();
+        for f_node in &functions {
+            let f = f_node.as_range_tbl_function().expect("functions cell");
+            let funcexpr = match f.funcexpr {
+                Some(e) => Some(replace_nestloop_params(run, e)?),
+                None => None,
+            };
+            new_functions.lappend(
+                mcx,
+                Node::mk(
+                    mcx,
+                    types_nodes::parsenodes::RangeTblFunction {
+                        funcexpr,
+                        funccolcount: f.funccolcount,
+                        funccolnames: f.funccolnames.clone_in(mcx)?,
+                        funccoltypes: f.funccoltypes.clone_in(mcx)?,
+                        funccoltypmods: f.funccoltypmods.clone_in(mcx)?,
+                        funccolcollations: f.funccolcollations.clone_in(mcx)?,
+                        funcparams: f.funcparams.clone_in(mcx)?,
+                    },
+                )?,
+            )?;
+        }
+        functions = new_functions;
+    }
 
     let mut plan = Node::build::<types_nodes::plannodes::FunctionScan<'mcx>>(mcx)?;
     plan.scan.plan.targetlist = tlist;
@@ -497,8 +574,7 @@ fn create_functionscan_plan<'mcx>(
     Ok(plan.seal())
 }
 
-// create_valuesscan_plan (createplan.c); replace_nestloop_params is dead
-// (param_info asserted None upstream).
+// create_valuesscan_plan (createplan.c).
 fn create_valuesscan_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     best_path: PathId,
@@ -519,7 +595,12 @@ fn create_valuesscan_plan<'mcx>(
     }
 
     let ordered = order_qual_clauses(run, &scan_clauses)?;
-    let qpqual = extract_actual_clauses(run, &ordered);
+    let mut qpqual = extract_actual_clauses(run, &ordered);
+
+    if run.root.path(best_path).base().param_info.is_some() {
+        qpqual = replace_nestloop_params_list(run, &qpqual)?;
+        values_lists = replace_nestloop_params_list(run, &values_lists)?;
+    }
 
     let mut plan = Node::build::<types_nodes::plannodes::ValuesScan<'mcx>>(mcx)?;
     plan.scan.plan.targetlist = tlist;
@@ -527,6 +608,36 @@ fn create_valuesscan_plan<'mcx>(
     plan.scan.scanrelid = scan_relid;
     plan.values_lists = values_lists;
     copy_generic_path_info(run, &mut plan.scan.plan, best_path);
+    Ok(plan.seal())
+}
+
+// create_resultscan_plan (createplan.c): an RTE_RESULT scan is a childless
+// Result whose quals ride resconstantqual (C's make_result second arg).
+fn create_resultscan_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: NodeList<'mcx>,
+    scan_clauses: mcx::PgVec<'mcx, RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let rel_id = run.root.path(best_path).base().parent;
+    debug_assert!(run.root.rel(rel_id).relid > 0);
+    debug_assert!(
+        run.root.rel(rel_id).rtekind == types_nodes::parsenodes::RTEKind::RTE_RESULT as u32
+    );
+
+    let ordered = order_qual_clauses(run, &scan_clauses)?;
+    let mut quals = extract_actual_clauses(run, &ordered);
+    if run.root.path(best_path).base().param_info.is_some() {
+        quals = replace_nestloop_params_list(run, &quals)?;
+    }
+
+    let mut plan = Node::build::<types_nodes::plannodes::Result<'mcx>>(mcx)?;
+    plan.plan.targetlist = tlist;
+    plan.plan.qual = NodeList::nil();
+    plan.resconstantqual =
+        if quals.is_nil() { None } else { Some(Node::mk_list(mcx, quals)?) };
+    copy_generic_path_info(run, &mut plan.plan, best_path);
     Ok(plan.seal())
 }
 
@@ -1055,7 +1166,7 @@ fn fix_indexqual_clause<'mcx>(
     }
 }
 
-// fix_indexqual_operand (createplan.c), simple-column arm.
+// fix_indexqual_operand (createplan.c).
 fn fix_indexqual_operand<'mcx>(
     run: &mut PlannerRun<'mcx>,
     index: &IndexOptInfo<'mcx>,
@@ -1067,9 +1178,11 @@ fn fix_indexqual_operand<'mcx>(
         node = node.as_relabel_type().unwrap().arg;
     }
     let index_relid = run.root.rel(index.rel.expect("index rel set")).relid;
-    if let Some(var) = node.as_var() {
-        if var.varno as u32 == index_relid && index.indexkeys[indexcol as usize] != 0 {
-            if index.indexkeys[indexcol as usize] == var.varattno as i32 {
+    if index.indexkeys[indexcol as usize] != 0 {
+        if let Some(var) = node.as_var() {
+            if var.varno as u32 == index_relid
+                && index.indexkeys[indexcol as usize] == var.varattno as i32
+            {
                 return Node::mk_var(
                     mcx,
                     INDEX_VAR,
@@ -1080,10 +1193,33 @@ fn fix_indexqual_operand<'mcx>(
                     0,
                 );
             }
-            panic!("index key does not match expected index column");
+        }
+        panic!("index key does not match expected index column");
+    }
+    let mut pos = 0usize;
+    for i in 0..indexcol as usize {
+        if index.indexkeys[i] == 0 {
+            pos += 1;
         }
     }
-    panic!("fix_indexqual_operand (createplan.c): expression column; M2 lane");
+    let id = *index.indexprs.get(pos).expect("too few entries in indexprs list");
+    let raw = *run.root.expr_node(id);
+    let mut indexkey = raw;
+    if indexkey.node_tag() == NodeTag::T_RelabelType {
+        indexkey = indexkey.as_relabel_type().unwrap().arg;
+    }
+    if types_nodes::equal(node, indexkey) {
+        return Node::mk_var(
+            mcx,
+            INDEX_VAR,
+            (indexcol + 1) as i16,
+            nodes_core::expr_type(raw),
+            -1,
+            nodes_core::expr_collation(raw),
+            0,
+        );
+    }
+    panic!("index key does not match expected index column");
 }
 
 // use_physical_tlist is false on every reachable input: the parent rel is
@@ -2213,7 +2349,7 @@ fn create_lockrows_plan<'mcx>(
 
 // create_join_plan (createplan.c), T_NestLoop arm -> create_nestloop_plan +
 // make_nestloop. Gating (pseudoconstant) clauses are loud upstream; the
-// reparameterize/nestParams legs are dead while param_info is always None.
+// reparameterize leg is dead (no appendrels).
 // create_material_plan + make_material (createplan.c): the tlist shares the
 // child's (Material never projects).
 fn create_material_plan<'mcx>(
@@ -2242,19 +2378,17 @@ fn create_material_plan<'mcx>(
 
 fn create_join_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
-    let (outer_path, inner_path, jointype, inner_unique, restrict, target_id) =
+    let (outer_path, inner_path, jointype, inner_unique, restrict, target_id, has_param) =
         match run.root.path(path_id) {
-            PathNode::NestPath(np) => {
-                debug_assert!(np.jpath.path.param_info.is_none());
-                (
-                    np.jpath.outerjoinpath.expect("nestloop outer path"),
-                    np.jpath.innerjoinpath.expect("nestloop inner path"),
-                    np.jpath.jointype,
-                    np.jpath.inner_unique,
-                    crate::relnode::pgvec_clone_shallow(mcx, &np.jpath.joinrestrictinfo),
-                    np.jpath.path.pathtarget_id.unwrap(),
-                )
-            }
+            PathNode::NestPath(np) => (
+                np.jpath.outerjoinpath.expect("nestloop outer path"),
+                np.jpath.innerjoinpath.expect("nestloop inner path"),
+                np.jpath.jointype,
+                np.jpath.inner_unique,
+                crate::relnode::pgvec_clone_shallow(mcx, &np.jpath.joinrestrictinfo),
+                np.jpath.path.pathtarget_id.unwrap(),
+                np.jpath.path.param_info.is_some(),
+            ),
             other => panic!(
                 "create_join_plan (createplan.c): pathtype {}; M2 merge/hash lane",
                 other.base().pathtype
@@ -2265,11 +2399,23 @@ fn create_join_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResu
     let tlist = build_path_tlist(run, target_id)?;
     // NestLoop can project, so no need to be picky about child tlists.
     let outer_plan = create_plan_recurse(run, outer_path, 0)?;
-    debug_assert!(run.root.curOuterRels.is_none() && run.root.curOuterParams.is_empty());
+
+    // The inner side sees the outer rels as nestloop-param sources.
+    let save_outer_rels =
+        crate::relnode::relids_copy(mcx, &run.root.curOuterRels);
+    let outerrelids = {
+        let r = run.root.path(outer_path).base().parent;
+        crate::relnode::relids_copy(mcx, &run.root.rel(r).relids)
+    };
+    run.root.curOuterRels =
+        crate::relnode::relids_union(mcx, &run.root.curOuterRels, &outerrelids);
+
     let inner_plan = create_plan_recurse(run, inner_path, 0)?;
 
+    run.root.curOuterRels = save_outer_rels;
+
     let ordered = order_qual_clauses(run, &restrict)?;
-    let (joinclauses, otherclauses) = if crate::joinpath::is_outer_join(jointype) {
+    let (mut joinclauses, mut otherclauses) = if crate::joinpath::is_outer_join(jointype) {
         let joinrelids = crate::relnode::relids_copy(
             mcx,
             &run.root.rel(run.root.path(path_id).base().parent).relids,
@@ -2279,6 +2425,14 @@ fn create_join_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResu
         (extract_actual_clauses(run, &ordered), NodeList::nil())
     };
 
+    if has_param {
+        joinclauses = replace_nestloop_params_list(run, &joinclauses)?;
+        otherclauses = replace_nestloop_params_list(run, &otherclauses)?;
+    }
+
+    let nest_params =
+        crate::paramassign::identify_current_nestloop_params(run, &outerrelids)?;
+
     let mut plan = Node::build::<types_nodes::plannodes::NestLoop>(mcx)?;
     plan.join.plan.targetlist = tlist;
     plan.join.plan.qual = otherclauses;
@@ -2287,7 +2441,7 @@ fn create_join_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResu
     plan.join.jointype = jointype_enum(jointype);
     plan.join.inner_unique = inner_unique;
     plan.join.joinqual = joinclauses;
-    plan.nestParams = NodeList::nil();
+    plan.nestParams = nest_params;
     copy_generic_path_info(run, &mut plan.join.plan, path_id);
     Ok(plan.seal())
 }
@@ -2909,8 +3063,16 @@ fn create_subqueryscan_plan<'mcx>(
     let subplan = subplan?;
 
     let ordered = order_qual_clauses(run, &scan_clauses)?;
-    let qual = extract_actual_clauses(run, &ordered);
-    debug_assert!(run.root.path(best_path).base().param_info.is_none());
+    let mut qual = extract_actual_clauses(run, &ordered);
+
+    if run.root.path(best_path).base().param_info.is_some() {
+        qual = replace_nestloop_params_list(run, &qual)?;
+        let subplan_params = crate::relnode::pgvec_clone_shallow(
+            mcx,
+            &run.root.rel(rel_id).subplan_params,
+        );
+        crate::paramassign::process_subquery_nestloop_params(run, &subplan_params)?;
+    }
 
     let mut plan = Node::build::<SubqueryScan<'mcx>>(mcx)?;
     plan.scan.plan.targetlist = tlist;

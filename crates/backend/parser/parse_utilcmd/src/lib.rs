@@ -653,8 +653,8 @@ fn transformColumnDefinition<'mcx>(
         let colname = column.colname.expect("ColumnDef.colname");
         nnconstraints.lappend(mcx, make_not_null_constraint(mcx, colname)?)?;
     }
-    if column.collClause.is_some() || column.collOid != InvalidOid {
-        unported("COLLATE clauses");
+    if column.identity != 0 || column.generated != 0 {
+        unported("identity/generated columns");
     }
     if column.is_from_type {
         unported("is_from_type columns (OF type / LIKE)");
@@ -664,9 +664,46 @@ fn transformColumnDefinition<'mcx>(
         .expect("ColumnDef.typeName")
         .as_variant::<TypeName>()
         .expect("TypeName");
-    // transformColumnType: validate the type reference.
-    typenameTypeIdAndMod(mcx, None, tn)?;
+    // transformColumnType: validate the type reference and any COLLATE spec.
+    let (type_oid, _typmod) = typenameTypeIdAndMod(mcx, None, tn)?;
+    if let Some(cc) = column.collClause {
+        let cc = cc.as_variant::<types_nodes::CollateClause>().expect("CollateClause");
+        catalog_namespace::get_collation_oid_list(&cc.collname, false)
+            .map_err(|e| position_on_src(e, src, cc.location))?;
+        let typcollation = syscache_seams::lookup_pg_type_shape::call(type_oid)?
+            .expect("pg_type row vanished")
+            .typcollation;
+        if typcollation == InvalidOid {
+            return Err(position_on_src(
+                Box::new(
+                    types_error::PgError::error(format!(
+                        "collations are not supported by type {}",
+                        format_type::format_type_be(type_oid)?
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
+                ),
+                src,
+                cc.location,
+            ));
+        }
+    }
     Ok(())
+}
+
+#[cold]
+fn position_on_src(
+    e: Box<types_error::PgError>,
+    src: Option<&str>,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    if e.cursor_position().is_some() {
+        return e;
+    }
+    Box::new((*e).with_cursor_position(parser_small1::parser_errposition_source(
+        src.map(str::as_bytes),
+        location,
+        mbutils::GetDatabaseEncoding(),
+    )))
 }
 
 pub fn transformCreateStmt<'mcx>(
@@ -1444,30 +1481,6 @@ fn multiple_defaults(colname: &str, relname: &str) -> Box<PgError> {
         )
         .with_sqlstate(ERRCODE_SYNTAX_ERROR),
     )
-}
-
-/// transformIndexStmt: a no-op for plain-column, no-predicate statements
-/// (C only transforms index expressions and WHERE); those lanes are loud.
-pub fn transformIndexStmt(
-    _relid: Oid,
-    stmt: &types_nodes::rawnodes::IndexStmt<'_>,
-    _query_string: &str,
-) -> PgResult<()> {
-    if stmt.transformed {
-        return Ok(());
-    }
-    if stmt.whereClause.is_some() {
-        unported("transformIndexStmt: WHERE predicates");
-    }
-    for node in stmt.indexParams.iter() {
-        let elem = node
-            .as_variant::<types_nodes::rawnodes::IndexElem>()
-            .expect("IndexElem in indexParams");
-        if elem.expr.is_some() {
-            unported("transformIndexStmt: expression index columns");
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

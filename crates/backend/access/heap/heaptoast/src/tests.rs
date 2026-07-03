@@ -324,7 +324,7 @@ fn rel_from<'mcx>(
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
         rd_support: vec_of(&vec![0; opcintype.len()]),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
@@ -402,6 +402,8 @@ fn fixture_rel<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
                     indisready: false,
                     indkey,
                     has_indpred: false,
+        indexprs_src: None,
+        indpred_src: None,
                 }),
                 &[26, 23],
             );

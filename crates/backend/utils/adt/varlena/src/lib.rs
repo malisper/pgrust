@@ -6,7 +6,7 @@
 //! catalog rows: position/substring/overlay/replace, split/format/concat/
 //! string_agg, name<->text + pattern ops, sortsupport abbreviation, regex
 //! tails, misc encoding. External/compressed images and non-C collations go
-//! through detoast_seams / pg_locale_seams (loud until those units land).
+//! through detoast_seams / pg_locale_seams.
 
 pub mod builtins;
 pub mod bytea;

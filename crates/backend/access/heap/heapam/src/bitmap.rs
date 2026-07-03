@@ -73,7 +73,7 @@ fn bitmap_next_block(
 
     let serializable = xact_seams::isolation_is_serializable::call();
     let (blockno, lossy, res_recheck, noffsets, offsets) = loop {
-        crate::check_for_interrupts();
+        crate::check_for_interrupts()?;
         let Some(tbmres) = iterator.next(tbm) else {
             return Ok(false);
         };
