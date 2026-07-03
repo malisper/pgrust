@@ -299,9 +299,227 @@ pub fn get_relation_info<'mcx>(
     // affects plan choice, never results. The plancat FK unit owns the fix.
     debug_assert!(run.root.fkey_list.is_empty());
 
+    if inhparent && relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+        set_relation_partition_info(run, rel, &relation)?;
+    }
+
     relation.close(NoLock)?;
     Ok(())
 }
+
+// set_relation_partition_info (plancat.c); the PartitionDirectory is subsumed
+// by partdesc's relid-keyed cache (no concurrent-detach snapshot isolation).
+fn set_relation_partition_info<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    relation: &Relation<'mcx>,
+) -> PgResult<()> {
+    let partdesc = partdesc::RelationGetPartitionDesc(relation)?;
+    let key = partcache::RelationGetPartitionKey(relation)?;
+    let scheme = find_partition_scheme(run, &key)?;
+    let bcopy = match partdesc.boundinfo.as_ref() {
+        Some(bi) => Some(mcx::alloc_in(run.mcx, copy_boundinfo_for_planner(run.mcx, bi, &key)?)?),
+        None => None,
+    };
+    {
+        let r = run.root.rel_mut(rel);
+        r.part_scheme = Some(scheme);
+        r.boundinfo = bcopy;
+        r.nparts = partdesc.nparts as i32;
+    }
+    set_baserel_partition_key_exprs(run, rel, &key)?;
+    set_baserel_partition_constraint(run, rel, relation)?;
+    Ok(())
+}
+
+// find_partition_scheme (plancat.c). C shares one palloc'd scheme by pointer;
+// here each rel owns an equal-by-value copy and root->part_schemes keeps the
+// canonical set (PartitionSchemeData::PartialEq compares supfuncs by fn_oid).
+fn find_partition_scheme<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    key: &partcache::PartitionKeyData,
+) -> PgResult<mcx::PgBox<'mcx, types_pathnodes::PartitionSchemeData<'mcx>>> {
+    let mcx = run.mcx;
+    let build = |mcx: mcx::Mcx<'mcx>| -> PgResult<types_pathnodes::PartitionSchemeData<'mcx>> {
+        let n = key.partnatts as usize;
+        let mut ps = types_pathnodes::PartitionSchemeData::new(mcx);
+        ps.strategy = key.strategy;
+        ps.partnatts = key.partnatts;
+        ps.partopfamily.reserve(n);
+        ps.partopcintype.reserve(n);
+        ps.partcollation.reserve(n);
+        ps.parttyplen.reserve(n);
+        ps.parttypbyval.reserve(n);
+        ps.partsupfunc.reserve(n);
+        for i in 0..n {
+            ps.partopfamily.push(key.partopfamily[i]);
+            ps.partopcintype.push(key.partopcintype[i]);
+            ps.partcollation.push(key.partcollation[i]);
+            ps.parttyplen.push(key.parttyplen[i]);
+            ps.parttypbyval.push(key.parttypbyval[i]);
+            let fn_oid = key.partsupfunc[i].borrow().fn_oid;
+            ps.partsupfunc.push(
+                fmgr_core::fmgr_info(fn_oid)
+                    .unwrap_or_else(|e| panic!("fmgr_info({fn_oid}) failed: {e:?}")),
+            );
+        }
+        Ok(ps)
+    };
+    let fresh = build(mcx)?;
+    let found = run
+        .root
+        .part_schemes
+        .iter()
+        .any(|ps| ps.as_ref().is_some_and(|ps| **ps == fresh));
+    if !found {
+        run.root.part_schemes.push(Some(mcx::alloc_in(mcx, build(mcx)?)?));
+    }
+    mcx::alloc_in(mcx, fresh)
+}
+
+// partition_bounds_copy (partbounds.c) into the planner's DatumImage form;
+// hash rows are two byval int4 datums regardless of the key types.
+fn copy_boundinfo_for_planner<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    bi: &partbounds::PartitionBoundInfoData<'_>,
+    key: &partcache::PartitionKeyData,
+) -> PgResult<types_pathnodes::PartitionBoundInfoData<'mcx>> {
+    use types_pathnodes::DatumImage;
+    let hash = bi.strategy as u8 == b'h';
+    let mut out = types_pathnodes::PartitionBoundInfoData::new(mcx);
+    out.strategy = bi.strategy;
+    out.ndatums = bi.ndatums as i32;
+    out.nindexes = bi.indexes.len() as i32;
+    out.null_index = bi.null_index;
+    out.default_index = bi.default_index;
+    out.indexes.reserve(bi.indexes.len());
+    for &ix in bi.indexes.iter() {
+        out.indexes.push(ix);
+    }
+    let width = bi.width;
+    let has_kind = !bi.kind.is_empty();
+    let mut kinds: PgVec<'mcx, PgVec<'mcx, i8>> = PgVec::new_in(mcx);
+    out.datums.reserve(bi.ndatums);
+    for i in 0..bi.ndatums {
+        let mut row: PgVec<'mcx, DatumImage<'mcx>> = mcx::vec_with_capacity_in(mcx, width)?;
+        let mut krow: PgVec<'mcx, i8> = PgVec::new_in(mcx);
+        for j in 0..width {
+            let kind = if has_kind { bi.kind_at(i, j) } else { partbounds::KIND_VALUE };
+            if has_kind {
+                krow.push(kind);
+            }
+            if kind != partbounds::KIND_VALUE {
+                row.push(DatumImage::ByVal(0));
+                continue;
+            }
+            let (byval, typlen) =
+                if hash { (true, 4i16) } else { (key.parttypbyval[j], key.parttyplen[j]) };
+            let d = bi.datum(i, j);
+            if byval {
+                row.push(DatumImage::ByVal(d.as_usize()));
+            } else {
+                let p = d.as_usize() as *const u8;
+                // SAFETY: byref bound datums are live inline images owned by
+                // the partdesc cache; length from typlen or varlena header.
+                let len = unsafe {
+                    match typlen {
+                        l if l > 0 => l as usize,
+                        -1 => {
+                            let b0 = *p;
+                            if b0 & 0x01 != 0 {
+                                (b0 as usize >> 1) & 0x7F
+                            } else {
+                                (u32::from_ne_bytes(
+                                    core::slice::from_raw_parts(p, 4).try_into().unwrap(),
+                                ) as usize)
+                                    >> 2
+                            }
+                        }
+                        other => panic!("copy_boundinfo_for_planner: typlen {other} unported"),
+                    }
+                };
+                let mut buf: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, len)?;
+                // SAFETY: len derived from the datum's own image.
+                buf.extend_from_slice(unsafe { core::slice::from_raw_parts(p, len) });
+                row.push(DatumImage::Bytes(buf));
+            }
+        }
+        out.datums.push(row);
+        if has_kind {
+            kinds.push(krow);
+        }
+    }
+    out.kind = if has_kind { Some(kinds) } else { None };
+    Ok(out)
+}
+
+// set_baserel_partition_key_exprs (plancat.c), column-key arm (expression
+// keys are loud at partcache build).
+fn set_baserel_partition_key_exprs<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    key: &partcache::PartitionKeyData,
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    let varno = run.root.rel(rel).relid;
+    let n = key.partnatts as usize;
+    let mut ids: PgVec<'mcx, NodeId> = mcx::vec_with_capacity_in(mcx, n)?;
+    for i in 0..n {
+        let attno = key.partattrs[i];
+        assert!(attno > 0, "expression partition keys unported");
+        let mut v = types_nodes::Node::build::<types_nodes::primnodes::Var>(mcx)?;
+        v.varno = varno as i32;
+        v.varattno = attno;
+        v.vartype = key.parttypid[i];
+        v.vartypmod = key.parttypmod[i];
+        v.varcollid = key.parttypcoll[i];
+        v.varnosyn = varno;
+        v.varattnosyn = attno;
+        v.location = -1;
+        ids.push(run.intern_expr(v.seal()));
+    }
+    let mut partexprs: PgVec<'mcx, PgVec<'mcx, NodeId>> = mcx::vec_with_capacity_in(mcx, n)?;
+    let mut nullable: PgVec<'mcx, PgVec<'mcx, NodeId>> = mcx::vec_with_capacity_in(mcx, n)?;
+    for &id in ids.iter() {
+        let mut col: PgVec<'mcx, NodeId> = mcx::vec_with_capacity_in(mcx, 1)?;
+        col.push(id);
+        partexprs.push(col);
+        nullable.push(PgVec::new_in(mcx));
+    }
+    let r = run.root.rel_mut(rel);
+    r.partexprs = partexprs;
+    r.nullable_partexprs = nullable;
+    Ok(())
+}
+
+// set_baserel_partition_constraint (plancat.c); canonicalize_qual skipped as
+// in C (partition quals are already canonical).
+fn set_baserel_partition_constraint<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    relation: &Relation<'mcx>,
+) -> PgResult<()> {
+    if !run.root.rel(rel).partition_qual.is_empty() {
+        return Ok(());
+    }
+    let mcx = run.mcx;
+    let varno = run.root.rel(rel).relid;
+    let partconstr = partdesc::RelationGetPartitionQual(mcx, relation)?;
+    if partconstr.is_nil() {
+        return Ok(());
+    }
+    let mut folded_ids: PgVec<'mcx, NodeId> = PgVec::new_in(mcx);
+    for q in partconstr.iter() {
+        let folded = clauses::eval_const_expressions(mcx, q)?;
+        if varno != 1 {
+            change_var_nodes(folded, varno as i32);
+        }
+        folded_ids.push(run.intern_expr(folded));
+    }
+    run.root.rel_mut(rel).partition_qual = folded_ids;
+    Ok(())
+}
+
 fn btcanreturn() -> bool {
     true
 }

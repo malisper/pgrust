@@ -1071,7 +1071,7 @@ fn simplify_bool_arguments<'mcx>(
 
 // negate_clause (prepqual.c): C's unlisted tags fall through to an explicit
 // NOT; tags C simplifies but this vocabulary lacks stay loud above.
-fn negate_clause<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>> {
+pub fn negate_clause<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>> {
     match node.node_tag() {
         NodeTag::T_Const => {
             let c = node.as_const().unwrap();

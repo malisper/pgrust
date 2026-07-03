@@ -235,6 +235,99 @@ impl Default for Append<'_> {
     }
 }
 
+#[repr(C)]
+pub struct PartitionPruneInfo<'mcx> {
+    pub relids: Bitmapset<'mcx>,
+    pub prune_infos: NodeList<'mcx>,
+    pub other_subplans: Bitmapset<'mcx>,
+}
+
+impl Default for PartitionPruneInfo<'_> {
+    fn default() -> Self {
+        PartitionPruneInfo {
+            relids: Bitmapset::empty(),
+            prune_infos: NodeList::nil(),
+            other_subplans: Bitmapset::empty(),
+        }
+    }
+}
+
+/// Per-partition maps use C's empty entries: -1 (subplan/subpart maps) and
+/// 0 (leafpart_rti/relid maps).
+#[repr(C)]
+pub struct PartitionedRelPruneInfo<'mcx> {
+    pub rtindex: Index,
+    pub present_parts: Bitmapset<'mcx>,
+    pub nparts: i32,
+    pub subplan_map: &'mcx [i32],
+    pub subpart_map: &'mcx [i32],
+    pub leafpart_rti_map: &'mcx [i32],
+    pub relid_map: &'mcx [Oid],
+    pub initial_pruning_steps: NodeList<'mcx>,
+    pub exec_pruning_steps: NodeList<'mcx>,
+    pub execparamids: Bitmapset<'mcx>,
+}
+
+impl Default for PartitionedRelPruneInfo<'_> {
+    fn default() -> Self {
+        PartitionedRelPruneInfo {
+            rtindex: 0,
+            present_parts: Bitmapset::empty(),
+            nparts: 0,
+            subplan_map: &[],
+            subpart_map: &[],
+            leafpart_rti_map: &[],
+            relid_map: &[],
+            initial_pruning_steps: NodeList::nil(),
+            exec_pruning_steps: NodeList::nil(),
+            execparamids: Bitmapset::empty(),
+        }
+    }
+}
+
+/// `opstrategy` 0 (InvalidStrategy) marks the IS NULL-only step and the list
+/// `<>` special case, per C.
+#[repr(C)]
+pub struct PartitionPruneStepOp<'mcx> {
+    pub step_id: i32,
+    pub opstrategy: u16,
+    pub exprs: NodeList<'mcx>,
+    pub cmpfns: OidList<'mcx>,
+    pub nullkeys: Bitmapset<'mcx>,
+}
+
+impl Default for PartitionPruneStepOp<'_> {
+    fn default() -> Self {
+        PartitionPruneStepOp {
+            step_id: 0,
+            opstrategy: 0,
+            exprs: NodeList::nil(),
+            cmpfns: OidList::nil(),
+            nullkeys: Bitmapset::empty(),
+        }
+    }
+}
+
+pub const PARTPRUNE_COMBINE_UNION: u32 = 0;
+pub const PARTPRUNE_COMBINE_INTERSECT: u32 = 1;
+
+#[repr(C)]
+pub struct PartitionPruneStepCombine<'mcx> {
+    pub step_id: i32,
+    pub combineOp: u32,
+    pub source_stepids: IntList<'mcx>,
+}
+
+impl Default for PartitionPruneStepCombine<'_> {
+    fn default() -> Self {
+        PartitionPruneStepCombine {
+            step_id: 0,
+            combineOp: PARTPRUNE_COMBINE_UNION,
+            source_stepids: IntList::nil(),
+        }
+    }
+}
+
 /// `scanstatus` carries the C SubqueryScanStatus value (0 = UNKNOWN).
 #[derive(Default)]
 #[repr(C)]
@@ -644,6 +737,18 @@ unsafe impl<'mcx> NodeVariant<'mcx> for BitmapHeapScan<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for Append<'mcx> {
     const TAG: NodeTag = NodeTag::T_Append;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for PartitionPruneInfo<'mcx> {
+    const TAG: NodeTag = NodeTag::T_PartitionPruneInfo;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for PartitionedRelPruneInfo<'mcx> {
+    const TAG: NodeTag = NodeTag::T_PartitionedRelPruneInfo;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for PartitionPruneStepOp<'mcx> {
+    const TAG: NodeTag = NodeTag::T_PartitionPruneStepOp;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for PartitionPruneStepCombine<'mcx> {
+    const TAG: NodeTag = NodeTag::T_PartitionPruneStepCombine;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for SubqueryScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_SubqueryScan;
 }
@@ -974,6 +1079,26 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_append(self) -> Option<&'mcx Append<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_partition_prune_info(self) -> Option<&'mcx PartitionPruneInfo<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_partitioned_rel_prune_info(self) -> Option<&'mcx PartitionedRelPruneInfo<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_partition_prune_step_op(self) -> Option<&'mcx PartitionPruneStepOp<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_partition_prune_step_combine(self) -> Option<&'mcx PartitionPruneStepCombine<'mcx>> {
         self.as_variant()
     }
 

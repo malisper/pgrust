@@ -50,6 +50,9 @@ bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 table = { path = "../../../access/table/table" }
 pg_inherits = { path = "../../../catalog/pg_inherits" }
 partdesc = { path = "../../../partitioning/partdesc" }
+partcache = { path = "../../../utils/cache/partcache" }
+partbounds = { path = "../../../partitioning/partbounds" }
+partprune = { path = "../../../partitioning/partprune" }
 tableam = { path = "../../../access/table/tableam" }
 indexam = { path = "../../../access/index/indexam" }
 brin = { path = "../../../access/brin/brin" }
