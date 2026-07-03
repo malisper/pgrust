@@ -31,4 +31,5 @@ catalog_indexing = { path = "../../catalog/catalog_indexing" }
 pg_depend = { path = "../../catalog/pg_depend" }
 relcache = { path = "../../utils/cache/relcache" }
 inval = { path = "../../utils/cache/inval" }
+init_small = { path = "../../utils/init/init_small" }
 miscinit = { path = "../../utils/init/miscinit" }

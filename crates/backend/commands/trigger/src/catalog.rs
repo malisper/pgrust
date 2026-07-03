@@ -173,3 +173,59 @@ fn empty_bytea<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, u32>> {
     buf.push(types_tuple::varatt::set_varsize_4b_word(4));
     Ok(buf)
 }
+
+// RemoveTriggerById (trigger.c). Divergence: the relkind gate accepts what the
+// live trigger-creation lanes emit; other relkinds panic instead of 42809.
+pub fn RemoveTriggerById<'mcx>(mcx: Mcx<'mcx>, trigOid: Oid) -> PgResult<()> {
+    let tgrel = table::table_open(mcx, TRIGGER_RELATION_ID, RowExclusiveLock)?;
+    let mut key = ScanKeyData::empty();
+    key.sk_attno = Anum_pg_trigger_oid;
+    key.sk_strategy = BTEqualStrategyNumber;
+    key.sk_collation = types_core::C_COLLATION_OID;
+    key.sk_func = fmgr_seams::fmgr_info::call(F_OIDEQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
+    key.sk_argument = Datum::from_oid(trigOid);
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &tgrel,
+        TRIGGER_OID_INDEX_ID,
+        true,
+        None,
+        core::slice::from_ref(&key),
+    )?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("could not find tuple for trigger {trigOid}"));
+    let td = tgrel.descr();
+    let mut isnull = false;
+    // SAFETY: tgrelid is a fixed NOT NULL pg_trigger column.
+    let relid = unsafe { types_tuple::heap_getattr(tup, 2, td, &mut isnull) }.as_oid();
+    let tid = tup.t_self;
+
+    let rel = table::table_open(mcx, relid, types_rel::AccessExclusiveLock)?;
+    let relkind = rel.rd_rel.relkind;
+    if !matches!(
+        relkind,
+        types_rel::RELKIND_RELATION
+            | types_rel::RELKIND_VIEW
+            | types_rel::RELKIND_FOREIGN_TABLE
+            | types_rel::RELKIND_PARTITIONED_TABLE
+    ) {
+        panic!("RemoveTriggerById: relation {relid} relkind {relkind} cannot have triggers");
+    }
+    if catalog::IsSystemRelation(&rel) && !init_small::globals::allowSystemTableMods() {
+        return Err(Box::new(
+            types_error::PgError::new(
+                types_error::ERROR,
+                format!("permission denied: \"{}\" is a system catalog", rel.name()),
+            )
+            .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE),
+        ));
+    }
+
+    catalog_indexing::CatalogTupleDelete(&tgrel, &tid)?;
+    genam::systable_endscan(mcx, scan)?;
+    tgrel.close(RowExclusiveLock)?;
+
+    inval::invalidate::CacheInvalidateRelcacheByRelid(relid)?;
+    rel.close(types_rel::NoLock)
+}

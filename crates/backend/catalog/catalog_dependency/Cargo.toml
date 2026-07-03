@@ -26,6 +26,7 @@ types_nodes = { path = "../../../_support/types/nodes" }
 pg_attrdef = { path = "../pg_attrdef" }
 statscmds = { path = "../../commands/statscmds" }
 pg_constraint = { path = "../pg_constraint" }
+commands_trigger = { path = "../../commands/trigger", package = "trigger" }
 pg_depend = { path = "../pg_depend" }
 pg_type = { path = "../pg_type" }
 table = { path = "../../access/table/table" }
