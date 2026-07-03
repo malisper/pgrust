@@ -9,9 +9,7 @@ use types_nodes::nodes_enums::CmdType;
 use types_nodes::parsenodes::{
     Query, RTEKind, RangeTblEntry, WCOKind, WithCheckOption, ACL_SELECT, ACL_UPDATE,
 };
-use types_nodes::primnodes::{
-    BoolExpr, BoolExprType, Const, JoinExpr, OnConflictAction, RangeTblRef, Var,
-};
+use types_nodes::primnodes::{BoolExpr, BoolExprType, Const, OnConflictAction};
 use types_nodes::NodeTag;
 use types_rel::{NoLock, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
 
@@ -362,7 +360,7 @@ fn add_security_quals<'mcx>(
             let policy = &policies[i as usize];
             if let Some(src) = policy.qual_src.as_ref() {
                 let qual = readfuncs::stringToNode(mcx, src.as_str())?;
-                change_var_nodes(qual, 1, rt_index, 0)?;
+                rewrite_manip::ChangeVarNodes(mcx, qual, 1, rt_index, 0)?;
                 list_append_unique(&mut out.security_quals, qual);
                 out.has_sub_links |= policy_hassublinks(mcx, policy)?;
             }
@@ -373,7 +371,7 @@ fn add_security_quals<'mcx>(
         } else {
             make_or_expr(mcx, &permissive_quals)?
         };
-        change_var_nodes(rowsec_expr, 1, rt_index, 0)?;
+        rewrite_manip::ChangeVarNodes(mcx, rowsec_expr, 1, rt_index, 0)?;
         list_append_unique(&mut out.security_quals, rowsec_expr);
     } else {
         out.security_quals.push(make_false_const(mcx)?);
@@ -418,7 +416,7 @@ fn add_with_check_options<'mcx>(
         } else {
             make_or_expr(mcx, &permissive_quals)?
         };
-        change_var_nodes(qual, 1, rt_index, 0)?;
+        rewrite_manip::ChangeVarNodes(mcx, qual, 1, rt_index, 0)?;
 
         let wco = Node::mk(
             mcx,
@@ -436,7 +434,7 @@ fn add_with_check_options<'mcx>(
             let policy = &policies[i as usize];
             if let Some(src) = qual_for_wco(policy, force_using) {
                 let qual = readfuncs::stringToNode(mcx, src)?;
-                change_var_nodes(qual, 1, rt_index, 0)?;
+                rewrite_manip::ChangeVarNodes(mcx, qual, 1, rt_index, 0)?;
                 let wco = Node::mk(
                     mcx,
                     WithCheckOption {
@@ -504,101 +502,6 @@ pub fn expr_has_sublink<'mcx>(node: Node<'mcx>) -> PgResult<bool> {
     let mut f = F;
     use nodes_core::NodeWalker as _;
     f.visit(node)
-}
-
-struct Cvn {
-    rt_index: i32,
-    new_index: i32,
-    sublevels_up: u32,
-}
-
-impl<'mcx> nodes_core::NodeWalker<'mcx> for Cvn {
-    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
-        match node.node_tag() {
-            NodeTag::T_Var => {
-                let lvl = self.sublevels_up;
-                let (rt, new) = (self.rt_index, self.new_index);
-                // SAFETY: the tree was freshly stringToNode'd; exclusively ours.
-                unsafe {
-                    node.with_mut::<Var, _>(|v| {
-                        if v.varlevelsup == lvl {
-                            if v.varno == rt {
-                                v.varno = new;
-                            }
-                            assert!(
-                                v.varnullingrels.is_empty() || !v.varnullingrels.is_member(rt),
-                                "ChangeVarNodes (rewriteManip.c): varnullingrels \
-                                 adjust_relid_set arm unreachable for policy quals"
-                            );
-                            if v.varnosyn == rt as u32 {
-                                v.varnosyn = new as u32;
-                            }
-                        }
-                    })
-                };
-                Ok(false)
-            }
-            NodeTag::T_CurrentOfExpr => {
-                // EXPR_KIND_POLICY rejects CURRENT OF at parse time.
-                panic!("ChangeVarNodes (rewriteManip.c): CurrentOfExpr in a policy qual")
-            }
-            NodeTag::T_RangeTblRef => {
-                let (rt, new, lvl) = (self.rt_index, self.new_index, self.sublevels_up);
-                // SAFETY: as above.
-                unsafe {
-                    node.with_mut::<RangeTblRef, _>(|r| {
-                        if lvl == 0 && r.rtindex == rt {
-                            r.rtindex = new;
-                        }
-                    })
-                };
-                Ok(false)
-            }
-            NodeTag::T_JoinExpr => {
-                let (rt, new, lvl) = (self.rt_index, self.new_index, self.sublevels_up);
-                // SAFETY: as above.
-                unsafe {
-                    node.with_mut::<JoinExpr, _>(|j| {
-                        if lvl == 0 && j.rtindex == rt {
-                            j.rtindex = new;
-                        }
-                    })
-                };
-                nodes_core::expression_tree_walker(node, self)
-            }
-            NodeTag::T_Query => {
-                let q = node.as_query().expect("Query");
-                self.sublevels_up += 1;
-                let r = nodes_core::query_tree_walker(q, self, 0);
-                self.sublevels_up -= 1;
-                r
-            }
-            NodeTag::T_PlaceHolderVar | NodeTag::T_PlanRowMark | NodeTag::T_AppendRelInfo => {
-                panic!(
-                    "ChangeVarNodes (rewriteManip.c): planner node {:?} in a policy qual",
-                    node.node_tag()
-                )
-            }
-            _ => nodes_core::expression_tree_walker(node, self),
-        }
-    }
-
-    fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
-        self.sublevels_up += 1;
-        let r = nodes_core::query_tree_walker(q, self, 0);
-        self.sublevels_up -= 1;
-        r
-    }
-}
-
-// In-place ChangeVarNodes over an expression tree (never a Query at top);
-// rebase rule: rules-lane lands rewrite_manip::ChangeVarNodes — switch to it.
-pub fn change_var_nodes(node: Node<'_>, rt_index: i32, new_index: i32, sublevels_up: u32) -> PgResult<()> {
-    debug_assert!(node.node_tag() != NodeTag::T_Query);
-    let mut w = Cvn { rt_index, new_index, sublevels_up };
-    use nodes_core::NodeWalker as _;
-    w.visit(node)?;
-    Ok(())
 }
 
 // setRuleCheckAsUser (rewriteDefine.c) over a bare expression: stamp every

@@ -21,4 +21,5 @@ parse_relation = { path = "../../parser/parse_relation" }
 adt_acl = { path = "../../utils/adt/acl" }
 miscinit = { path = "../../utils/init/miscinit" }
 rls_seams = { path = "../../utils/misc/rls_seams" }
+rewrite_manip = { path = "../rewrite_manip" }
 table = { path = "../../access/table/table" }
