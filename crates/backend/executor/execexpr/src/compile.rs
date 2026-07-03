@@ -39,9 +39,6 @@ pub struct AggTransSpec<'a, 'mcx> {
     // C build_aggregate_transfn_expr's arg types: [transtype, input types..].
     pub arg_types: &'a [Oid],
     pub args: &'a NodeList<'mcx>,
-    // The Aggref node: C fmgr_info_set_expr for get_fn_expr_argtype
-    // consumers; None for the WindowAgg builder (its fn_expr lane is unarmed).
-    pub aggref: Option<Node<'mcx>>,
     pub pergroup: NonNull<AggPerGroup>,
     pub transtype_byval: bool,
     pub transtype_len: i16,
@@ -405,9 +402,6 @@ fn build_agg_trans<'mcx>(
         flinfo.fn_expr = Some(unsafe { FnExprErased::from_node_ref(agg_argtypes) });
         if flinfo.fn_retset {
             return Err(retset_error());
-        }
-        if let Some(aggref) = spec.aggref {
-            flinfo.fn_expr = Some(erase_fn_expr(mcx, aggref)?);
         }
         let init_strict = flinfo.fn_strict && spec.init_value_is_null;
         let fn_addr = flinfo.fn_addr;
