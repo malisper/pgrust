@@ -342,7 +342,10 @@ name = "adt_network"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "hashfn",
  "mcx",
+ "pqformat",
+ "stringinfo",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -448,8 +451,12 @@ dependencies = [
 name = "adt_uuid"
 version = "0.1.0"
 dependencies = [
+ "adt_datetime",
  "datum",
+ "hashfn",
  "mcx",
+ "pqformat",
+ "stringinfo",
  "types_core",
  "types_error",
  "types_fmgr",

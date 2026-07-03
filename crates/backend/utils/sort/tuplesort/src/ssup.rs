@@ -13,6 +13,8 @@ const F_BTINT8SORTSUPPORT: Oid = 3131;
 const F_DATE_SORTSUPPORT: Oid = 3136;
 const F_TIMESTAMP_SORTSUPPORT: Oid = 3137;
 const F_BTTEXTSORTSUPPORT: Oid = 3255;
+const F_UUID_SORTSUPPORT: Oid = 3300;
+const F_NETWORK_SORTSUPPORT: Oid = 5033;
 const F_BTOIDSORTSUPPORT: Oid = 3134;
 
 /// C's `ssup->comparator` fn pointer as a closed enum: identity is switchable
@@ -254,7 +256,10 @@ pub fn comparator_for_opfamily(
     Ok(match sort_support_function {
         F_BTINT4SORTSUPPORT | F_DATE_SORTSUPPORT => SortComparator::Int32,
         F_BTINT8SORTSUPPORT | F_TIMESTAMP_SORTSUPPORT => SortComparator::SignedI64,
-        0 => {
+        // C DIVERGENCE: uuid 3300 / network 5033 name abbrev sortsupport
+        // routines (unported); the shim on their BTORDER_PROC is
+        // order-identical (CATALOG perf watch).
+        0 | F_UUID_SORTSUPPORT | F_NETWORK_SORTSUPPORT => {
             // C: PrepareSortSupportComparisonShim — fmgr_info the BTORDER_PROC
             // once; comparisons go through the resolved fn pointer.
             let sort_function =
