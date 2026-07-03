@@ -6936,6 +6936,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "plpgsql"
+version = "0.0.0"
+dependencies = [
+ "cache_syscache",
+ "coerce",
+ "datum",
+ "detoast",
+ "elog",
+ "execexpr",
+ "fmgr_core",
+ "format_type",
+ "guc_tables",
+ "lsyscache",
+ "mcx",
+ "nodes_core",
+ "parse_utilcmd",
+ "parser_seams",
+ "parser_small1",
+ "plancache",
+ "scan_fgram",
+ "snapmgr",
+ "spi",
+ "types_array",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_portal",
+ "types_tuple",
+ "xact",
+]
+
+[[package]]
 name = "pmchild"
 version = "0.0.0"
 dependencies = [
@@ -8709,6 +8742,7 @@ dependencies = [
  "pgtz",
  "plancache",
  "planner",
+ "plpgsql",
  "pmchild",
  "pmsignal",
  "portalcmds",
@@ -9214,12 +9248,14 @@ dependencies = [
  "parser_analyze",
  "parser_driver",
  "parser_seams",
+ "parser_small1",
  "pg_enum_seams",
  "pg_sema_seams",
  "pgstat",
  "plancache",
  "planner",
  "pmsignal_seams",
+ "portalmem",
  "pquery",
  "predicate_seams",
  "procarray",
