@@ -78,8 +78,21 @@ pub fn BeginCopyFrom<'mcx, 's>(
     filename: Option<&'s str>,
     attnamelist: &NodeList<'_>,
     options: &NodeList<'s>,
+    source_text: Option<&str>,
 ) -> PgResult<CopyFromState<'mcx, 's>> {
-    let opts = ProcessCopyOptions(true, options)?;
+    let opts = ProcessCopyOptions(true, options, source_text)?;
+    if opts.binary {
+        unported("FORMAT binary (text-only lane)");
+    }
+    if opts.default_print.is_some() {
+        unported("DEFAULT marker (defaults rewrite gap)");
+    }
+    if opts.on_error == crate::CopyOnErrorChoice::Ignore {
+        unported("ON_ERROR ignore (soft-error skip lane)");
+    }
+    if opts.freeze {
+        unported("FREEZE (multi-insert/frozen lane)");
+    }
     let tup_desc = &rel.rd_att;
     let attnumlist = CopyGetAttnums(mcx, tup_desc, rel, attnamelist)?;
     let num_phys_attrs = tup_desc.natts as usize;
