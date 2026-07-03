@@ -887,7 +887,7 @@ fn show_agg_keys<'mcx>(node: Node<'mcx>, ancestors: Option<&Ancestors<'_, 'mcx>>
         return Ok(());
     }
     if !agg.groupingSets.is_nil() {
-        node_gap("show_grouping_sets", "grouping-sets key display (grouping sets lane)");
+        return show_grouping_sets(node, es);
     }
     let child = agg.plan.lefttree.expect("Agg has an outer plan");
     let child_tlist = &plan_of(child).targetlist;
@@ -942,6 +942,78 @@ fn show_hash_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResu
             hi.nbatch,
             space_peak_kb
         );
+// show_grouping_sets + show_grouping_set_keys (explain.c): keys resolve in
+// the outer child's tlist; the chain's vestigial Sort contributes a Sort Key
+// line and one indent level.
+fn show_grouping_sets<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResult<()> {
+    let agg = node.as_agg().expect("Agg plan node");
+    let child = agg.plan.lefttree.expect("Agg has an outer plan");
+    show_grouping_set_keys(child, agg, None, es)?;
+    for chain_node in agg.chain.iter() {
+        let aggnode = chain_node.as_agg().expect("Agg.chain cell");
+        let sortnode = aggnode.plan.lefttree.and_then(Node::as_sort);
+        show_grouping_set_keys(child, aggnode, sortnode, es)?;
+    }
+    Ok(())
+}
+
+fn show_grouping_set_keys<'mcx>(
+    child: Node<'mcx>,
+    aggnode: &types_nodes::plannodes::Agg<'mcx>,
+    sortnode: Option<&types_nodes::plannodes::Sort<'mcx>>,
+    es: &mut ExplainState<'mcx>,
+) -> PgResult<()> {
+    let mcx = es.str.allocator();
+    let useprefix = es.rtable_size > 1 || es.verbose;
+    let child_tlist = &plan_of(child).targetlist;
+    let keyname =
+        if aggnode.aggstrategy == 2 || aggnode.aggstrategy == 3 { "Hash Key" } else { "Group Key" };
+
+    if let Some(sort) = sortnode {
+        let mut result: PgVec<'mcx, PgString<'mcx>> = PgVec::new_in(mcx);
+        for keyno in 0..sort.numCols as usize {
+            let resno = sort.sortColIdx[keyno];
+            let tle = get_tle_by_resno(child_tlist, resno).unwrap_or_else(|| {
+                node_gap("show_sort_group_keys", "no tlist entry for key column")
+            });
+            let mut buf = PgString::new_in(mcx);
+            deparse_expr(es, child, tle.expr, useprefix, &mut buf)?;
+            show_sortorder_options(
+                &mut buf,
+                tle.expr,
+                sort.sortOperators[keyno],
+                sort.collations[keyno],
+                sort.nullsFirst[keyno],
+            )?;
+            result.push(buf);
+        }
+        ExplainPropertyList("Sort Key", &result, es);
+        es.indent += 1;
+    }
+
+    for set in aggnode.groupingSets.iter() {
+        let set = set
+            .as_int_list()
+            .unwrap_or_else(|| node_gap("show_grouping_set_keys", "groupingSets cell shape"));
+        let mut result: PgVec<'mcx, PgString<'mcx>> = PgVec::new_in(mcx);
+        for &i in set.as_slice() {
+            let keyresno = aggnode.grpColIdx[i as usize];
+            let tle = get_tle_by_resno(child_tlist, keyresno).unwrap_or_else(|| {
+                node_gap("show_grouping_set_keys", "no tlist entry for key column")
+            });
+            let mut buf = PgString::new_in(mcx);
+            deparse_expr(es, child, tle.expr, useprefix, &mut buf)?;
+            result.push(buf);
+        }
+        if result.is_empty() {
+            crate::format::ExplainPropertyText(keyname, "()", es);
+        } else {
+            ExplainPropertyList(keyname, &result, es);
+        }
+    }
+
+    if sortnode.is_some() {
+        es.indent -= 1;
     }
     Ok(())
 }
