@@ -21,7 +21,11 @@ rel_vocab = { path = "../../../_support/types/rel_vocab" }
 types_slot = { path = "../../../_support/types/types_slot" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 types_scan = { path = "../../../_support/types/types_scan" }
+types_dest = { path = "../../../_support/types/types_dest" }
 elog = { path = "../../utils/error/elog" }
+init_small = { path = "../../utils/init/init_small" }
+pqcomm = { path = "../../libpq/pqcomm" }
+pqformat = { path = "../../libpq/pqformat" }
 exectuples = { path = "../../executor/exectuples" }
 execindexing = { path = "../../executor/execindexing" }
 fd = { path = "../../storage/file/fd" }

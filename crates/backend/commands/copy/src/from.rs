@@ -1,10 +1,12 @@
-// copyfrom.c, text format from file, CIM_MULTI lane (heap_multi_insert
-// buffering with a shared BulkInsertState, matching C's default insert method
-// and its bulk relation-extension page geometry).
+// copyfrom.c, text/CSV from file or frontend, CIM_MULTI lane
+// (heap_multi_insert buffering with a shared BulkInsertState, matching C's
+// default insert method and its bulk relation-extension page geometry).
 
 use elog::ereport;
 use mcx::{vec_from_elem_in, Mcx, MemoryContext, PgVec};
+use stringinfo::StringInfo;
 use types_core::Oid;
+use types_dest::CommandDest;
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_NOT_NULL_VIOLATION, ERRCODE_UNDEFINED_FUNCTION,
     ERRCODE_WRONG_OBJECT_TYPE, ERROR,
@@ -15,12 +17,18 @@ use types_rel::Relation;
 use types_tuple::NameData;
 
 use crate::fromparse::{EolType, INPUT_BUF_SIZE, RAW_BUF_SIZE};
-use crate::{unported, CopyFormatOptions, CopyGetAttnums, ProcessCopyOptions, RELKIND_RELATION};
+use crate::{
+    force_flags, unported, CopyFormatOptions, CopyGetAttnums, ProcessCopyOptions, RELKIND_RELATION,
+};
+
+pub(crate) enum CopySrc<'mcx, 's> {
+    File { fd: i32, filename: &'s str },
+    Frontend { msgbuf: StringInfo<'mcx> },
+}
 
 pub struct CopyFromState<'mcx, 's> {
     pub opts: CopyFormatOptions<'s>,
-    pub(crate) copy_file: i32,
-    pub(crate) filename: &'s str,
+    pub(crate) src: CopySrc<'mcx, 's>,
     pub(crate) raw_buf: PgVec<'mcx, u8>,
     pub(crate) raw_buf_index: usize,
     pub(crate) raw_buf_len: usize,
@@ -31,11 +39,14 @@ pub struct CopyFromState<'mcx, 's> {
     pub(crate) input_buf_index: usize,
     pub(crate) input_buf_len: usize,
     pub(crate) line_buf: PgVec<'mcx, u8>,
+    pub(crate) line_buf_valid: bool,
     pub(crate) attribute_buf: PgVec<'mcx, u8>,
     pub(crate) raw_fields: PgVec<'mcx, i32>,
     pub(crate) max_fields: usize,
     pub(crate) eol_type: EolType,
     pub cur_lineno: u64,
+    pub(crate) cur_attidx: Option<usize>,
+    pub(crate) cur_attval_off: Option<i32>,
     pub(crate) file_encoding: i32,
     pub(crate) need_transcoding: bool,
     pub(crate) conversion_proc: Oid,
@@ -45,6 +56,8 @@ pub struct CopyFromState<'mcx, 's> {
     pub(crate) typioparams: PgVec<'mcx, Oid>,
     pub(crate) atttypmods: PgVec<'mcx, i32>,
     pub(crate) attnames: PgVec<'mcx, NameData>,
+    pub(crate) force_notnull_flags: PgVec<'mcx, bool>,
+    pub(crate) force_null_flags: PgVec<'mcx, bool>,
     pub(crate) bytes_processed: u64,
 }
 
@@ -58,11 +71,11 @@ fn loc(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("copyfrom.c", 0, funcname)
 }
 
-/// `BeginCopyFrom` (copyfrom.c), text-from-file arm.
+/// `BeginCopyFrom` (copyfrom.c), text/CSV from file or frontend.
 pub fn BeginCopyFrom<'mcx, 's>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    filename: &'s str,
+    filename: Option<&'s str>,
     attnamelist: &NodeList<'_>,
     options: &NodeList<'s>,
 ) -> PgResult<CopyFromState<'mcx, 's>> {
@@ -70,6 +83,25 @@ pub fn BeginCopyFrom<'mcx, 's>(
     let tup_desc = &rel.rd_att;
     let attnumlist = CopyGetAttnums(mcx, tup_desc, rel, attnamelist)?;
     let num_phys_attrs = tup_desc.natts as usize;
+
+    let force_notnull_flags = force_flags(
+        mcx,
+        tup_desc,
+        rel,
+        &attnumlist,
+        opts.force_notnull,
+        opts.force_notnull_all,
+        "FORCE_NOT_NULL",
+    )?;
+    let force_null_flags = force_flags(
+        mcx,
+        tup_desc,
+        rel,
+        &attnumlist,
+        opts.force_null,
+        opts.force_null_all,
+        "FORCE_NULL",
+    )?;
 
     let file_encoding = if opts.file_encoding < 0 {
         mbutils::pg_get_client_encoding()
@@ -126,34 +158,44 @@ pub fn BeginCopyFrom<'mcx, 's>(
         unported("FROM with generated columns (ExecComputeStoredGenerated lane)");
     }
 
-    let copy_file = fd::AllocateFile(filename, "rb")?;
-    if copy_file < 0 {
-        ereport(ERROR)
-            .with_saved_errno(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
-            .errcode_for_file_access()
-            .errmsg(format!("could not open file \"{filename}\" for reading: %m"))
-            .errhint(
-                "COPY FROM instructs the PostgreSQL server process to read a file. You may \
-                 want a client-side facility such as psql's \\copy.",
-            )
-            .finish(loc("BeginCopyFrom"))?;
-    }
-    let is_dir = fd::with_allocated_stdio(copy_file, |f| {
-        f.metadata().map(|m| m.is_dir()).unwrap_or(false)
-    })
-    .unwrap_or(false);
-    if is_dir {
-        return Err(Box::new(
-            PgError::error(format!("\"{filename}\" is a directory"))
-                .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE),
-        ));
-    }
+    let src = match filename {
+        Some(filename) => {
+            let fd = fd::AllocateFile(filename, "rb")?;
+            if fd < 0 {
+                ereport(ERROR)
+                    .with_saved_errno(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+                    .errcode_for_file_access()
+                    .errmsg(format!("could not open file \"{filename}\" for reading: %m"))
+                    .errhint(
+                        "COPY FROM instructs the PostgreSQL server process to read a file. You \
+                         may want a client-side facility such as psql's \\copy.",
+                    )
+                    .finish(loc("BeginCopyFrom"))?;
+            }
+            let is_dir = fd::with_allocated_stdio(fd, |f| {
+                f.metadata().map(|m| m.is_dir()).unwrap_or(false)
+            })
+            .unwrap_or(false);
+            if is_dir {
+                return Err(Box::new(
+                    PgError::error(format!("\"{filename}\" is a directory"))
+                        .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE),
+                ));
+            }
+            CopySrc::File { fd, filename }
+        }
+        None => {
+            if elog::config::where_to_send_output() != CommandDest::Remote {
+                unported("FROM STDIN outside a remote session (stdin file arm)");
+            }
+            receive_copy_begin(mcx, attnumlist.len())?
+        }
+    };
 
     let max_fields = attnumlist.len();
     Ok(CopyFromState {
         opts,
-        copy_file,
-        filename,
+        src,
         raw_buf: vec_from_elem_in(mcx, 0u8, RAW_BUF_SIZE + 1),
         raw_buf_index: 0,
         raw_buf_len: 0,
@@ -164,11 +206,14 @@ pub fn BeginCopyFrom<'mcx, 's>(
         input_buf_index: 0,
         input_buf_len: 0,
         line_buf: PgVec::new_in(mcx),
+        line_buf_valid: false,
         attribute_buf: PgVec::new_in(mcx),
         raw_fields: PgVec::new_in(mcx),
         max_fields,
         eol_type: EolType::Unknown,
         cur_lineno: 0,
+        cur_attidx: None,
+        cur_attval_off: None,
         file_encoding,
         need_transcoding,
         conversion_proc,
@@ -178,8 +223,25 @@ pub fn BeginCopyFrom<'mcx, 's>(
         typioparams,
         atttypmods,
         attnames,
+        force_notnull_flags,
+        force_null_flags,
         bytes_processed: 0,
     })
+}
+
+// ReceiveCopyBegin (copyfromparse.c): CopyInResponse, then flush so the
+// frontend knows it can send.
+fn receive_copy_begin<'mcx, 's>(mcx: Mcx<'mcx>, natts: usize) -> PgResult<CopySrc<'mcx, 's>> {
+    let mut buf = pqformat::pq_beginmessage(mcx, b'G')?;
+    pqformat::pq_sendbyte(&mut buf, 0)?;
+    pqformat::pq_sendint16(&mut buf, natts as u16)?;
+    for _ in 0..natts {
+        pqformat::pq_sendint16(&mut buf, 0)?;
+    }
+    pqformat::pq_endmessage(buf)?;
+    let msgbuf = StringInfo::new_in(mcx)?;
+    pqcomm::pq_flush()?;
+    Ok(CopySrc::Frontend { msgbuf })
 }
 
 // copyfrom.c MAX_BUFFERED_TUPLES / MAX_BUFFERED_BYTES.
@@ -197,7 +259,20 @@ pub fn CopyFrom<'mcx>(
     if rel.rd_rel.relkind != RELKIND_RELATION {
         return Err(cannot_copy_to_relkind(rel));
     }
+    // CopyFromErrorCallback scope: C installs error_context_stack here, after
+    // the relkind checks; buffered-but-unflushed slots on the Err path are
+    // simply dropped, as C's are (the aborted xact kills flushed ones).
+    match copy_from_body(mcx, cstate, rel) {
+        Ok(n) => Ok(n),
+        Err(e) => Err(copy_from_error_context(cstate, rel, e)),
+    }
+}
 
+fn copy_from_body<'mcx>(
+    mcx: Mcx<'mcx>,
+    cstate: &mut CopyFromState<'mcx, '_>,
+    rel: &Relation<'mcx>,
+) -> PgResult<u64> {
     let mycid = xact::GetCurrentCommandId(true)?;
     let ti_options = 0;
 
@@ -206,6 +281,7 @@ pub fn CopyFrom<'mcx>(
     // std Vec: SlotData owns droppy state via the arena-erased views; the
     // slot pool itself is per-statement (CopyMultiInsertBuffer.slots).
     let mut slots: Vec<types_slot::SlotData<'mcx>> = Vec::new();
+    let mut linenos: Vec<u64> = Vec::new();
     let mut bistate = heapam::GetBulkInsertState();
     let mut nused = 0usize;
     let mut buffered_bytes = 0usize;
@@ -214,6 +290,7 @@ pub fn CopyFrom<'mcx>(
     loop {
         if nused == slots.len() {
             slots.push(tableam::table_slot_create(mcx, rel)?);
+            linenos.push(0);
         }
         let slot = &mut slots[nused];
         exectuples::exec_clear_tuple(slot, mcx);
@@ -240,6 +317,7 @@ pub fn CopyFrom<'mcx>(
         }
 
         exectuples::exec_materialize_slot(slot, mcx)?;
+        linenos[nused] = cstate.cur_lineno;
         nused += 1;
         buffered_bytes += cstate.line_buf.len();
         processed += 1;
@@ -247,8 +325,10 @@ pub fn CopyFrom<'mcx>(
         if nused >= MAX_BUFFERED_TUPLES || buffered_bytes >= MAX_BUFFERED_BYTES {
             flush_multi_insert(
                 mcx,
+                cstate,
                 rel,
                 &mut slots[..nused],
+                &linenos[..nused],
                 mycid,
                 ti_options,
                 &mut bistate,
@@ -262,8 +342,10 @@ pub fn CopyFrom<'mcx>(
     if nused > 0 {
         flush_multi_insert(
             mcx,
+            cstate,
             rel,
             &mut slots[..nused],
+            &linenos[..nused],
             mycid,
             ti_options,
             &mut bistate,
@@ -276,24 +358,88 @@ pub fn CopyFrom<'mcx>(
 }
 
 // CopyMultiInsertBufferFlush (copyfrom.c), single non-partitioned table.
+// Errors here report the buffered tuple's line number, not the read cursor's
+// (C saves/restores cur_lineno and clears line_buf_valid around the flush).
+#[allow(clippy::too_many_arguments)]
 fn flush_multi_insert<'mcx>(
     mcx: Mcx<'mcx>,
+    cstate: &mut CopyFromState<'mcx, '_>,
     rel: &Relation<'mcx>,
     slots: &mut [types_slot::SlotData<'mcx>],
+    linenos: &[u64],
     mycid: types_core::CommandId,
     ti_options: i32,
     bistate: &mut tableam_vocab::BulkInsertStateData,
     index_state: &mut execindexing::ResultRelIndexState<'mcx>,
 ) -> PgResult<()> {
+    let save_cur_lineno = cstate.cur_lineno;
+    let save_line_buf_valid = cstate.line_buf_valid;
+    cstate.line_buf_valid = false;
+
     let mut refs: Vec<&mut types_slot::SlotData<'mcx>> = slots.iter_mut().collect();
     tableam::table_multi_insert(mcx, rel, &mut refs, mycid, ti_options, Some(bistate))?;
 
     if index_state.num_indices() > 0 {
-        for slot in refs {
+        for (i, slot) in refs.into_iter().enumerate() {
+            cstate.cur_lineno = linenos[i];
             execindexing::ExecInsertIndexTuples(mcx, index_state, rel, slot)?;
         }
     }
+
+    cstate.line_buf_valid = save_line_buf_valid;
+    cstate.cur_lineno = save_cur_lineno;
     Ok(())
+}
+
+// CopyFromErrorCallback + CopyLimitPrintoutLength (copyfrom.c), text arm,
+// attached on Err propagation instead of via error_context_stack.
+#[cold]
+#[inline(never)]
+fn copy_from_error_context(
+    cstate: &CopyFromState<'_, '_>,
+    rel: &Relation<'_>,
+    e: Box<PgError>,
+) -> Box<PgError> {
+    let relname = rel.name();
+    let lineno = cstate.cur_lineno;
+    let ctx = match cstate.cur_attidx {
+        Some(m) => {
+            let attname = cstate.attname(m);
+            match cstate.cur_attval_off {
+                Some(off) => {
+                    let bytes = &cstate.attribute_buf[off as usize..];
+                    let nul = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                    let attval = limit_printout_length(&bytes[..nul]);
+                    format!("COPY {relname}, line {lineno}, column {attname}: \"{attval}\"")
+                }
+                None => {
+                    format!("COPY {relname}, line {lineno}, column {attname}: null input")
+                }
+            }
+        }
+        None => {
+            if cstate.line_buf_valid {
+                let lineval = limit_printout_length(&cstate.line_buf);
+                format!("COPY {relname}, line {lineno}: \"{lineval}\"")
+            } else {
+                format!("COPY {relname}, line {lineno}")
+            }
+        }
+    };
+    Box::new(e.add_context(ctx))
+}
+
+const MAX_COPY_DATA_DISPLAY: i32 = 100;
+
+fn limit_printout_length(bytes: &[u8]) -> String {
+    let slen = bytes.len() as i32;
+    if slen <= MAX_COPY_DATA_DISPLAY {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    let len = mbutils::pg_mbcliplen(bytes, slen, MAX_COPY_DATA_DISPLAY) as usize;
+    let mut s = String::from_utf8_lossy(&bytes[..len]).into_owned();
+    s.push_str("...");
+    s
 }
 
 fn not_null_constraints<'mcx>(
@@ -325,12 +471,14 @@ fn not_null_violation(rel: &Relation<'_>, attidx: usize) -> Box<PgError> {
 
 /// `EndCopyFrom` (copyfrom.c).
 pub fn EndCopyFrom(cstate: CopyFromState<'_, '_>) -> PgResult<()> {
-    if fd::FreeFile(cstate.copy_file)? != 0 {
-        ereport(ERROR)
-            .with_saved_errno(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
-            .errcode_for_file_access()
-            .errmsg(format!("could not close file \"{}\": %m", cstate.filename))
-            .finish(loc("EndCopyFrom"))?;
+    if let CopySrc::File { fd, filename } = cstate.src {
+        if fd::FreeFile(fd)? != 0 {
+            ereport(ERROR)
+                .with_saved_errno(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+                .errcode_for_file_access()
+                .errmsg(format!("could not close file \"{filename}\": %m"))
+                .finish(loc("EndCopyFrom"))?;
+        }
     }
     Ok(())
 }
