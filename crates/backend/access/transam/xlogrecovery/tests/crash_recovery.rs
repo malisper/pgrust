@@ -20,7 +20,13 @@ use types_core::{
     BackendType, BlockNumber, ForkNumber, InvalidBlockNumber, Oid, XLogRecPtr, BLCKSZ,
     INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT,
 };
-use types_rel::{FormData_pg_class, LockInfoData, LockRelId, RelationData, RELKIND_RELATION};
+use types_error::PgResult;
+use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData};
+use types_nbtree::{BTPageOpaqueData, BTP_LEAF, P_NONE};
+use types_rel::{
+    FormData_pg_class, FormData_pg_index, LockInfoData, LockRelId, Relation, RelationData,
+    LOCKMODE, RELKIND_INDEX, RELKIND_RELATION,
+};
 use types_snapshot::{SnapshotData, SnapshotType};
 use types_storage::bufpage::{PageMut, PageRef};
 use types_storage::RelFileLocator;
@@ -34,9 +40,14 @@ const SYS_ID: u64 = 0x5544_3322_1100_AACE;
 const REL_OID: Oid = 61000;
 const REL2_OID: Oid = 61001;
 const REL3_OID: Oid = 61002;
+const IDX_OID: Oid = 61003;
 const RLOC: RelFileLocator = RelFileLocator::new(1663, 5, REL_OID);
 const RLOC2: RelFileLocator = RelFileLocator::new(1663, 5, REL2_OID);
 const RLOC3: RelFileLocator = RelFileLocator::new(1663, 5, REL3_OID);
+const RLOC4: RelFileLocator = RelFileLocator::new(1663, 5, IDX_OID);
+// evens then odds: forces rightmost and interior leaf splits (SPLIT_R,
+// SPLIT_L + right-sibling arm, INSERT_UPPER) plus NEWROOT.
+const NIDX_KEYS: i32 = 900;
 // MAXALIGN(SizeOfPageHeaderData): first VM map byte; heap block 0's
 // all-visible bit is its low bit.
 const VM_FIRST_MAP_BYTE: usize = 24;
@@ -148,6 +159,7 @@ fn install_stub_seams() {
     backend_progress_seams::pgstat_progress_end_command::set(|| {});
     predicate_seams::pre_commit_check_for_serialization_failure::set(|| Ok(()));
     predicate_seams::check_for_serializable_conflict_in::set(|_rel, _tid, _blk| Ok(()));
+    predicate_seams::predicate_lock_page_split::set(|_rel, _o, _n| Ok(()));
     predicate_seams::check_for_serializable_conflict_out_needed::set(|_r, _s| false);
     predicate_seams::register_predicate_locking_xid::set(|_| Ok(()));
     pruneheap_seams::heap_page_prune_opt::set(|_r, _b| Ok(()));
@@ -189,6 +201,11 @@ fn install_real() {
     // conflicts with this rig's heavyweight-lock stubs, so back the slot only.
     guc_tables::vars::max_locks_per_xact.install(guc_tables::GucVarAccessors {
         get: || 64,
+        set: |_| {},
+    });
+    // walwriter's slot; the index lane's WAL volume crosses page-init writes.
+    guc_tables::vars::WalWriterFlushAfter.install(guc_tables::GucVarAccessors {
+        get: || 128,
         set: |_| {},
     });
     snapmgr::init_seams();
@@ -314,6 +331,108 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> RelationData<'mcx> {
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
     }
+}
+
+fn noop_close(_oid: Oid, _mode: LOCKMODE) -> PgResult<()> {
+    Ok(())
+}
+
+fn test_int4cmp(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> PgResult<datum::Datum> {
+    let a = fcinfo.arg(0).as_i32();
+    let b = fcinfo.arg(1).as_i32();
+    Ok(datum::Datum::from_i32((a > b) as i32 - (a < b) as i32))
+}
+
+fn index_rel<'mcx>(mcx: Mcx<'mcx>) -> Relation<'mcx> {
+    let mut relname = NameData::default();
+    relname.namestrcpy("t_idx");
+    let one = |v: Oid| {
+        let mut vec = PgVec::new_in(mcx);
+        vec.push(v);
+        vec
+    };
+    let mut indkey = PgVec::new_in(mcx);
+    indkey.push(1i16);
+    let mut indoption = PgVec::new_in(mcx);
+    indoption.push(0i16);
+    let data = RelationData {
+        rd_locator: Default::default(),
+        rd_smgr: Default::default(),
+        rd_id: IDX_OID,
+        rd_backend: INVALID_PROC_NUMBER,
+        rd_islocaltemp: false,
+        rd_isvalid: Cell::new(true),
+        rd_createSubid: Cell::new(0),
+        rd_newRelfilelocatorSubid: Cell::new(0),
+        rd_firstRelfilelocatorSubid: Cell::new(0),
+        rd_droppedSubid: Cell::new(0),
+        rd_lockInfo: LockInfoData {
+            lockRelId: LockRelId { relId: IDX_OID, dbId: 5 },
+        },
+        rd_rel: FormData_pg_class {
+            relname,
+            relnamespace: 2200,
+            reltype: 0,
+            relowner: 10,
+            relam: types_core::BTREE_AM_OID,
+            relfilenode: IDX_OID,
+            reltablespace: 0,
+            relpages: 0,
+            reltuples: -1.0,
+            relallvisible: 0,
+            reltoastrelid: 0,
+            relhasindex: false,
+            relisshared: false,
+            relpersistence: RELPERSISTENCE_PERMANENT,
+            relkind: RELKIND_INDEX,
+            relhassubclass: false,
+            relrowsecurity: false,
+            relispopulated: true,
+            relreplident: b'd',
+            relispartition: false,
+            relfrozenxid: 3,
+            relminmxid: 1,
+        },
+        rd_att: int4_tupdesc(mcx),
+        rd_index: Some(FormData_pg_index {
+            indexrelid: IDX_OID,
+            indrelid: REL_OID,
+            indnatts: 1,
+            indnkeyatts: 1,
+            indisunique: false,
+            indnullsnotdistinct: false,
+            indisprimary: false,
+            indisexclusion: false,
+            indimmediate: true,
+            indisvalid: true,
+            indisready: true,
+            indkey,
+            has_indpred: false,
+        }),
+        rd_opcintype: one(23),
+        rd_opfamily: one(1976),
+        rd_indoption: indoption,
+        rd_indcollation: one(0),
+        rd_options: None,
+        pgstat_enabled: Cell::new(false),
+        rd_amcache: Default::default(),
+        rd_supportinfo: Default::default(),
+        rd_indexlist: Default::default(),
+    };
+    let rel = Relation::open(data, Some(noop_close));
+    rel.rd_supportinfo
+        .borrow_mut()
+        .push(Some(FmgrInfo::new(test_int4cmp, 351, 2, true, false)));
+    rel
+}
+
+fn bt_opaque(page: &PageRef<'_>) -> BTPageOpaqueData {
+    let off = page.pd_special() as usize;
+    // SAFETY: in-bounds 4-aligned special area of a btree page.
+    unsafe { page.as_ptr().add(off).cast::<BTPageOpaqueData>().read() }
 }
 
 const CKPT_LOC: XLogRecPtr = SEG as u64 + 40;
@@ -529,6 +648,54 @@ fn crash_recovery_child() {
     bufmgr::ReleaseBuffer(vmbuf).unwrap();
     assert_eq!(vm_byte, 0, "replay cleared the VM all-visible bit");
 
+    // btree_redo replay: chain-walk the rebuilt leaf level through the live
+    // buffer manager and assert the full ordered key set survives.
+    let idx = index_rel(mcx);
+    let idx_key = types_storage::RelFileLocatorBackend {
+        locator: RLOC4,
+        backend: INVALID_PROC_NUMBER,
+    };
+    smgr::smgropen(RLOC4, INVALID_PROC_NUMBER).unwrap();
+    let idx_nblocks = smgr::smgrnblocks(idx_key, ForkNumber::MAIN_FORKNUM).unwrap();
+    let mut leftmost = None;
+    for b in 1..idx_nblocks {
+        let buf = bufmgr::ReadBuffer(&idx, b).unwrap();
+        // SAFETY: pinned page image.
+        let page = unsafe { PageRef::from_raw(bufmgr::BufferGetPagePtr(buf)) };
+        let opaque = bt_opaque(&page);
+        if opaque.btpo_flags & BTP_LEAF != 0 && opaque.btpo_prev == P_NONE {
+            assert!(leftmost.is_none(), "one leftmost leaf");
+            leftmost = Some(b);
+        }
+        bufmgr::ReleaseBuffer(buf).unwrap();
+    }
+    let mut blk = leftmost.expect("leftmost leaf found");
+    let mut keys: Vec<i32> = Vec::new();
+    loop {
+        let buf = bufmgr::ReadBuffer(&idx, blk).unwrap();
+        // SAFETY: pinned page image, held for the walk of this page.
+        let page = unsafe { PageRef::from_raw(bufmgr::BufferGetPagePtr(buf)) };
+        let opaque = bt_opaque(&page);
+        let first = if opaque.btpo_next == P_NONE { 1 } else { 2 };
+        for off in first..=page.max_offset_number() {
+            let id = page.item_id(off);
+            let (ptr, _) = page.item_raw(id);
+            // SAFETY: int4 key at the 8-byte index-tuple header boundary.
+            keys.push(unsafe { ptr.add(8).cast::<i32>().read_unaligned() });
+        }
+        let next = opaque.btpo_next;
+        bufmgr::ReleaseBuffer(buf).unwrap();
+        if next == P_NONE {
+            break;
+        }
+        blk = next;
+    }
+    assert_eq!(keys.len(), NIDX_KEYS as usize, "replayed index holds every key");
+    assert!(
+        keys.iter().copied().eq(1..=NIDX_KEYS),
+        "replayed index scan order is 1..={NIDX_KEYS}"
+    );
+
     println!("CRASH_RECOVERY_CHILD_OK");
 }
 
@@ -691,6 +858,69 @@ fn crash_recovery_replays_dml_to_precrash_state() {
         xact::CommitTransactionCommand().unwrap();
     }
 
+    // Index lane: empty-metapage fixture (btbuild's unlogged image, C shape),
+    // then committed btinserts across leaf splits and a root split; crash
+    // replay must rebuild every index page through btree_redo alone (buffer
+    // contents are never flushed pre-crash).
+    let idx = index_rel(mcx);
+    let idx_key = types_storage::RelFileLocatorBackend {
+        locator: RLOC4,
+        backend: INVALID_PROC_NUMBER,
+    };
+    smgr::smgropen(RLOC4, INVALID_PROC_NUMBER).unwrap();
+    smgr::smgrcreate(idx_key, ForkNumber::MAIN_FORKNUM, false).unwrap();
+    {
+        #[repr(align(8))]
+        struct P([u8; BLCKSZ]);
+        let mut p = P([0u8; BLCKSZ]);
+        // SAFETY: aligned, exclusively owned stack page.
+        let mut pm =
+            unsafe { PageMut::from_raw(core::ptr::NonNull::new(p.0.as_mut_ptr()).unwrap()) };
+        nbtree::bt_initmetapage(&mut pm, P_NONE, 0, false);
+        smgr::smgrextend(idx_key, ForkNumber::MAIN_FORKNUM, 0, &p.0, false).unwrap();
+    }
+    {
+        xact::StartTransactionCommand().unwrap();
+        let insert_key = |k: i32| {
+            let icx = MemoryContext::new("btins");
+            nbtree::btinsert(
+                icx.mcx(),
+                &idx,
+                &[datum::Datum::from_i32(k)],
+                &[false],
+                &ItemPointerData::new((k as u32 - 1) / 200, ((k - 1) % 200 + 1) as u16),
+                &idx,
+                types_nbtree::genam::IndexUniqueCheck::UNIQUE_CHECK_NO,
+                false,
+            )
+            .unwrap();
+        };
+        let mut k = 2;
+        while k <= NIDX_KEYS {
+            insert_key(k);
+            k += 2;
+        }
+        k = 1;
+        while k <= NIDX_KEYS {
+            insert_key(k);
+            k += 2;
+        }
+        xact::CommitTransactionCommand().unwrap();
+    }
+    smgr::smgropen(RLOC4, INVALID_PROC_NUMBER).unwrap();
+    let idx_nblocks = smgr::smgrnblocks(idx_key, ForkNumber::MAIN_FORKNUM).unwrap();
+    assert!(idx_nblocks >= 5, "splits + root split happened (nblocks={idx_nblocks})");
+    let mut idx_expected: Vec<u8> = Vec::new();
+    {
+        // Read-only xact: buffer pins need a live resource owner.
+        xact::StartTransactionCommand().unwrap();
+        for b in 0..idx_nblocks {
+            idx_expected.extend_from_slice(&read_page_from_buffer(&idx, b));
+        }
+        xact::CommitTransactionCommand().unwrap();
+    }
+    std::fs::write(base.join("expected_idx.bin"), &idx_expected).unwrap();
+
     // Transaction 2: insert 44, never committed (lost in the crash). The rel3
     // insert lands on an all-visible page: heap_insert clears PD_ALL_VISIBLE
     // and the VM bit (buffers only) and stamps XLH_INSERT_ALL_VISIBLE_CLEARED.
@@ -809,6 +1039,23 @@ fn crash_recovery_replays_dml_to_precrash_state() {
     assert_eq!(replayed3, expected_page3.to_vec(), "VM-cleared heap page is byte-exact");
     let vm3 = std::fs::read(dd2.join("base/5").join(format!("{REL3_OID}_vm"))).unwrap();
     assert_eq!(vm3[VM_FIRST_MAP_BYTE], 0, "replay cleared the VM bit");
+
+    // The btree replay: every index block byte-equal to the pre-crash buffer
+    // images (none of which had been flushed).
+    let replayed_idx = std::fs::read(dd2.join("base/5").join(IDX_OID.to_string())).unwrap();
+    assert_eq!(replayed_idx.len(), idx_expected.len());
+    for b in 0..idx_nblocks as usize {
+        let got = &replayed_idx[b * BLCKSZ..(b + 1) * BLCKSZ];
+        let want = &idx_expected[b * BLCKSZ..(b + 1) * BLCKSZ];
+        if got != want {
+            let first = got.iter().zip(want).position(|(a, c)| a != c).unwrap();
+            panic!(
+                "replayed index block {b} differs at byte {first}: got {:02x?} want {:02x?}",
+                &got[first..(first + 16).min(BLCKSZ)],
+                &want[first..(first + 16).min(BLCKSZ)]
+            );
+        }
+    }
 
     let _ = std::fs::remove_dir_all(&base);
 }

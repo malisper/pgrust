@@ -289,7 +289,7 @@ fn heap_xlog_insert(record: &mut XLogReaderState) -> PgResult<()> {
     // C updates the FSM only when the page fills past 80% and the block was
     // not restored from a full-page image.
     if action == BLK_NEEDS_REDO && freespace < BLCKSZ / 5 {
-        freespace::XLogRecordPageWithFreeSpace(target_locator, blkno, freespace);
+        freespace::XLogRecordPageWithFreeSpace(target_locator, blkno, freespace)?;
     }
     Ok(())
 }

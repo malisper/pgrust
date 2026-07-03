@@ -127,7 +127,6 @@ macro_rules! unported_mask {
 unported_redo! {
     dbase_redo => "backend-commands-dbcommands";
     tblspc_redo => "backend-commands-tablespace";
-    btree_redo => "backend-access-nbtree-nbtxlog";
     hash_redo => "backend-access-hash-xlog";
     gin_redo => "backend-access-gin-xlog";
     gist_redo => "backend-access-gist-xlog";
@@ -191,8 +190,8 @@ unported_identify! {
 }
 
 // btree/gin/gist/spgist rm_startup/rm_cleanup only allocate the recovery
-// scratch their (loud, unported) redo callbacks read; the rows carry None
-// until those xlog units land so RmgrStartup can run for crash recovery.
+// scratch their redo callbacks read; the rows carry None (gin/gist/spgist
+// redo still loud; btree redo uses stack scratch instead of C's opCtx).
 unported_mask! {
     heap_mask => "backend-access-heap-heapam-xlog";
     btree_mask => "backend-access-nbtree-nbtxlog";
@@ -309,7 +308,7 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     },
     RmgrData {
         rm_name: "Btree",
-        rm_redo: btree_redo,
+        rm_redo: nbtree_xlog::btree_redo,
         rm_desc: btree_desc,
         rm_identify: btree_identify,
         rm_startup: None,
