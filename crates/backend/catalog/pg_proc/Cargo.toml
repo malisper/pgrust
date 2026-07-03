@@ -1,0 +1,10 @@
+[package]
+name = "pg_proc"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
