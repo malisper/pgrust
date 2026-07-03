@@ -1,0 +1,11 @@
+[package]
+name = "pg_operator"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_operator"
+path = "src/lib.rs"
+
+[dependencies]

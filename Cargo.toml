@@ -464,6 +464,12 @@ members = [
     "crates/backend/main/main_main",
     "crates/backend/utils/adt/json",
     "crates/backend/utils/adt/jsonb",
+    "crates/backend/commands/operatorcmds",
+    "crates/backend/commands/opclasscmds",
+    "crates/backend/commands/commands_define",
+    "crates/backend/catalog/pg_operator",
+    "crates/backend/access/index/index_amvalidate",
+    "crates/backend/access/nbtree/nbt_validate",
 ]
 
 [workspace.package]
