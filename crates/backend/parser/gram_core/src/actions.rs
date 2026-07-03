@@ -32,7 +32,7 @@ use types_nodes::rawnodes::{
     FKCONSTR_ACTION_CASCADE, FKCONSTR_ACTION_NOACTION, FKCONSTR_ACTION_RESTRICT,
     FKCONSTR_ACTION_SETDEFAULT, FKCONSTR_ACTION_SETNULL, FKCONSTR_MATCH_FULL,
     FKCONSTR_MATCH_SIMPLE,
-    PartitionBoundSpec, PartitionElem, PartitionSpec, PartitionStrategy,
+    PartitionBoundSpec, PartitionCmd, PartitionElem, PartitionSpec, PartitionStrategy,
     RangeSubselect, RefreshMatViewStmt, TableLikeClause, ViewCheckOption, ViewStmt, WindowDef,
     CREATE_TABLE_LIKE_ALL,
     CREATE_TABLE_LIKE_COMMENTS, CREATE_TABLE_LIKE_COMPRESSION, CREATE_TABLE_LIKE_CONSTRAINTS,
