@@ -354,6 +354,9 @@ fn install_catalog_fixture() {
     syscache_seams::lookup_pg_proc_shape::set(|funcid| {
         Ok(match funcid {
             1066 | 1067 => Some(syscache_seams::PgProcShape {
+                prolang: 12,
+                prosecdef: false,
+                proconfig_isnull: true,
                 pronamespace: 11,
                 prorettype: INT4OID,
                 provariadic: 0,
@@ -367,6 +370,9 @@ fn install_catalog_fixture() {
                 proleakproof: false,
             }),
             2803 | 2108 => Some(syscache_seams::PgProcShape {
+                prolang: 12,
+                prosecdef: false,
+                proconfig_isnull: true,
                 pronamespace: 11,
                 prorettype: INT8OID,
                 provariadic: 0,

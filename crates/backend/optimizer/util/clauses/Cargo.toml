@@ -24,6 +24,9 @@ fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
 clauses_seams = { path = "../clauses_seams" }
 typcache_seams = { path = "../../../utils/cache/typcache_seams" }
 var_seams = { path = "../var_seams" }
+stack_depth = { path = "../../../utils/misc/stack_depth" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
 
 [dev-dependencies]
 types_tuple = { path = "../../../../_support/types/types_tuple" }

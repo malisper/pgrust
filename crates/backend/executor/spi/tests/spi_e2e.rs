@@ -514,6 +514,9 @@ fn install_parser_fixture_seams() {
     syscache_seams::lookup_pg_proc_shape::set(|funcid| {
         Ok(match funcid {
             65 | 177 => Some(syscache_seams::PgProcShape {
+                prolang: 12,
+                prosecdef: false,
+                proconfig_isnull: true,
                 pronamespace: 11,
                 prorettype: if funcid == 65 { BOOLOID } else { INT4OID },
                 provariadic: InvalidOid,

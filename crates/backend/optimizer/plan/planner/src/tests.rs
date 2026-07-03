@@ -113,6 +113,9 @@ fn install_scan_fixtures() {
     });
     syscache_seams::lookup_pg_proc_shape::set(|funcid| {
         let shape = |rettype, nargs, kind: u8, strict| syscache_seams::PgProcShape {
+            prolang: 12,
+            prosecdef: false,
+            proconfig_isnull: true,
             pronamespace: 11,
             prorettype: rettype,
             provariadic: 0,

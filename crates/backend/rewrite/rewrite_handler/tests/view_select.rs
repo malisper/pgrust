@@ -453,6 +453,9 @@ fn install_parser_fixture_seams() {
     syscache_seams::lookup_pg_proc_shape::set(|funcid| {
         Ok(match funcid {
             INT4GT_PROC => Some(syscache_seams::PgProcShape {
+                prolang: 12,
+                prosecdef: false,
+                proconfig_isnull: true,
                 pronamespace: 11,
                 prorettype: 16,
                 provariadic: 0,

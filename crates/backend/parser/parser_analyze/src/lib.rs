@@ -86,6 +86,7 @@ pub fn parse_analyze_sql_fn<'a, 'mcx>(
     fname: &'a str,
     argtypes: &'a [Oid],
     argnames: &'a [&'a str],
+    input_collation: Oid,
     query_env: QueryEnvHandle,
 ) -> PgResult<Query<'mcx>> {
     let mut pstate = make_parsestate(mcx, None);
@@ -93,7 +94,7 @@ pub fn parse_analyze_sql_fn<'a, 'mcx>(
 
     parser_small1::setup_parse_sql_fn_parameters(
         &mut pstate,
-        parser_small1::SqlFnParamState { fname, argtypes, argnames },
+        parser_small1::SqlFnParamState { fname, argtypes, argnames, input_collation },
     );
 
     if !query_env.is_null() {
