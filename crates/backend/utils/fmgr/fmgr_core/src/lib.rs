@@ -352,6 +352,23 @@ fn fmgr_info_pg_proc(function_id: Oid, finfo: &mut FmgrInfo) -> PgResult<()> {
             // valid PGFunction.
             unsafe { core::mem::transmute::<usize, ::fmgr::PGFunction>(h) }
         }
+        // C's fmgr_info_C_lang dlopen leg; in-core libraries resolve by prosrc
+        // symbol (probin check dropped: one flat namespace of shipped symbols).
+        C_LANGUAGE_ID => {
+            let cx = ::mcx::MemoryContext::new("fmgr_info prosrc");
+            let prosrc = syscache_seams::lookup_pg_proc_prosrc::call(cx.mcx(), function_id)?
+                .unwrap_or_else(|| panic!("fmgr: null prosrc for function {function_id}"));
+            match ::dict_snowball::builtins::SNOWBALL_CLANG
+                .iter()
+                .find(|(name, _, _)| *name == prosrc.as_str())
+            {
+                Some(&(_, _, func)) => func,
+                None => panic!(
+                    "fmgr: C-language function \"{}\" not in the native library table (function {function_id})",
+                    prosrc.as_str()
+                ),
+            }
+        }
         lang => panic!(
             "fmgr: language {lang} handler not ported (function {function_id})"
         ),
