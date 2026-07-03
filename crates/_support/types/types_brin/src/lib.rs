@@ -375,14 +375,12 @@ pub struct BrinColInfo {
     pub oi_nstored: u16,
     pub oi_regular_nulls: bool,
     pub kind: BrinOpcKind,
-    // oi_typcache[i]->type_id: type of stored column i (drives bd_disktdesc).
     pub oi_typids: [Oid; BRIN_MAX_NSTORED],
     pub minmax: MinmaxOpaque,
-    // PROCNUM_DISTANCE cache (MinmaxMultiOpaque.extra_procinfos in C).
     pub distance_procinfo: RefCell<Option<FmgrInfo>>,
 }
 
-/// datumCopy for a stored value; by-ref copies land in `mcx`.
+/// datumCopy; by-ref copies land in `mcx`.
 pub fn datum_copy<'mcx>(
     mcx: Mcx<'mcx>,
     value: Datum,
@@ -409,9 +407,6 @@ pub fn datum_copy<'mcx>(
     Ok(Datum::from_usize(v.leak().as_ptr() as usize))
 }
 
-// Ranges (brin_minmax_multi.c): the in-memory minmax-multi summary held in
-// bv_mem_value across add_value calls. values layout: 2*nranges boundary
-// values, then nvalues single points (nsorted of them sorted).
 pub struct MinMaxMultiRanges {
     pub typid: Oid,
     pub colloid: Oid,
@@ -452,8 +447,6 @@ pub struct BrinValues {
     pub bv_hasnulls: bool,
     pub bv_allnulls: bool,
     pub bv_values: [Datum; BRIN_MAX_NSTORED],
-    // C's bv_mem_value + bv_serialize: Some = live minmax-multi buffer that
-    // brin_form_tuple must serialize into bv_values[0].
     pub bv_mem_value: Option<Box<MinMaxMultiRanges>>,
 }
 
