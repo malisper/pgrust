@@ -1,8 +1,10 @@
 use core::sync::atomic::Ordering;
 
+use datum::Datum;
 use init_small::globals;
 use types_core::{Buffer, BufferIsValid};
 use types_error::{ErrorLocation, PgResult, ERROR};
+use types_resowner::{ResourceOwnerDesc, RELEASE_PRIO_BUFFER_PINS, RESOURCE_RELEASE_BEFORE_LOCKS};
 use types_storage::buf::{
     BufferAccessStrategy, BM_LOCKED, BM_MAX_USAGE_COUNT, BM_PIN_COUNT_WAITER, BM_VALID,
     BUF_REFCOUNT_MASK, BUF_REFCOUNT_ONE, BUF_USAGECOUNT_MASK, BUF_USAGECOUNT_ONE,
@@ -13,6 +15,48 @@ use crate::buf_hdr::{
     WaitBufHdrUnlocked,
 };
 use crate::privref::{self, GetPrivateRefCount};
+
+// buffer_pin_resowner_desc (bufmgr.c): abort's ResourceOwnerRelease
+// (BEFORE_LOCKS) drops pins the error path never reached an unpin for.
+static BUFFER_PIN_DESC: ResourceOwnerDesc = ResourceOwnerDesc {
+    name: "buffer pin",
+    release_phase: RESOURCE_RELEASE_BEFORE_LOCKS,
+    release_priority: RELEASE_PRIO_BUFFER_PINS,
+    ReleaseResource: ResOwnerReleaseBufferPin,
+    DebugPrint: Some(ResOwnerPrintBufferPin),
+};
+
+fn ResOwnerReleaseBufferPin(res: Datum) {
+    let buffer = res.as_i32();
+    assert!(BufferIsValid(buffer), "bad buffer ID: {buffer}");
+    if buffer < 0 {
+        panic!("unported callee reached from bufmgr.c ResOwnerReleaseBufferPin: UnpinLocalBufferNoOwner (localbuf.c)");
+    }
+    UnpinBufferNoOwner(GetBufferDescriptor(buffer - 1));
+}
+
+fn ResOwnerPrintBufferPin<'a>(mcx: mcx::Mcx<'a>, res: Datum) -> PgResult<mcx::PgString<'a>> {
+    let buffer = res.as_i32();
+    mcx::PgString::from_str_in(
+        &format!("buffer {buffer} (refcount={})", GetPrivateRefCount(buffer)),
+        mcx,
+    )
+}
+
+#[inline]
+fn RememberBufferPin(b: Buffer) {
+    resowner::ResourceOwnerRemember(
+        resowner::CurrentResourceOwner(),
+        Datum::from_i32(b),
+        &BUFFER_PIN_DESC,
+    )
+    .expect("ResourceOwnerRememberBuffer");
+}
+
+#[inline]
+pub(crate) fn resowner_enlarge_for_pin() -> PgResult<()> {
+    resowner::ResourceOwnerEnlarge(resowner::CurrentResourceOwner())
+}
 
 #[inline]
 pub(crate) fn buffer_usagecount(state: u32) -> u32 {
@@ -26,7 +70,7 @@ pub(crate) fn buffer_refcount(state: u32) -> u32 {
 
 /// PinBuffer (bufmgr.c): the PG9.6 single-atomic pin — one CAS on the header
 /// word, usage bump fused in; returns whether the buffer is valid. Caller has
-/// run ReservePrivateRefCountEntry (+ resowner enlarge, pre-resowner a no-op).
+/// run ReservePrivateRefCountEntry and resowner_enlarge_for_pin.
 //
 // M2 swizzling decision site: under swizzling + optimistic latching a warm-hit
 // pin becomes a version-validated read with zero atomics; this CAS (and the
@@ -36,6 +80,7 @@ pub(crate) fn PinBuffer(desc: &BufferDesc, strategy: &BufferAccessStrategy) -> b
     let b = BufferDescriptorGetBuffer(desc);
     let already = privref::track_pin(b);
     if already > 0 {
+        RememberBufferPin(b);
         return desc.state.load(Ordering::Acquire) & BM_VALID != 0;
     }
 
@@ -69,6 +114,7 @@ pub(crate) fn PinBuffer(desc: &BufferDesc, strategy: &BufferAccessStrategy) -> b
             Err(v) => old = v,
         }
     }
+    RememberBufferPin(b);
     result
 }
 
@@ -84,10 +130,23 @@ pub(crate) fn PinBuffer_Locked(desc: &BufferDesc) {
     UnlockBufHdr(desc, old_state + BUF_REFCOUNT_ONE);
     let prev = privref::track_pin(b);
     debug_assert!(prev == 0);
+    RememberBufferPin(b);
 }
 
 #[inline]
 pub(crate) fn UnpinBuffer(desc: &BufferDesc) {
+    let b = BufferDescriptorGetBuffer(desc);
+    resowner::ResourceOwnerForget(
+        resowner::CurrentResourceOwner(),
+        Datum::from_i32(b),
+        &BUFFER_PIN_DESC,
+    )
+    .expect("ResourceOwnerForgetBuffer");
+    UnpinBufferNoOwner(desc);
+}
+
+#[inline]
+pub(crate) fn UnpinBufferNoOwner(desc: &BufferDesc) {
     let b = BufferDescriptorGetBuffer(desc);
     if !privref::track_unpin(b) {
         return;
@@ -144,10 +203,12 @@ pub fn ReleaseBuffer(buffer: Buffer) -> PgResult<()> {
 
 pub fn IncrBufferRefCount(buffer: Buffer) {
     assert!(BufferIsPinned(buffer), "buffer {buffer} is not pinned");
+    resowner_enlarge_for_pin().expect("ResourceOwnerEnlarge");
     if buffer < 0 {
         panic!("unported callee reached from bufmgr.c IncrBufferRefCount: LocalRefCount (localbuf.c)");
     }
     privref::track_incr(buffer);
+    RememberBufferPin(buffer);
 }
 
 pub fn BufferIsPinned(buffer: Buffer) -> bool {
@@ -204,8 +265,8 @@ pub fn UnlockBuffers() {
     }
 }
 
-/// AtEOXact_Buffers (bufmgr.c): leak check; pre-resowner the private refcount
-/// ledger is authoritative, so leaked pins surface here as warnings.
+/// AtEOXact_Buffers (bufmgr.c): leak check only — pins remembered on the
+/// resource owner were already dropped by ResourceOwnerRelease(BEFORE_LOCKS).
 pub fn AtEOXact_Buffers(_is_commit: bool) {
     if cfg!(debug_assertions) {
         CheckForBufferLeaks();

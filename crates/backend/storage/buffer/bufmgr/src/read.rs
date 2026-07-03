@@ -1,6 +1,12 @@
 use core::sync::atomic::Ordering;
 
+use condition_variable::{
+    ConditionVariableBroadcast, ConditionVariableCancelSleep, ConditionVariablePrepareToSleep,
+    ConditionVariableSleep,
+};
+use datum::Datum;
 use elog::ereport;
+use types_resowner::{ResourceOwnerDesc, RELEASE_PRIO_BUFFER_IOS, RESOURCE_RELEASE_BEFORE_LOCKS};
 use lwlock::{LWLockAcquire, LWLockConditionalAcquire, LWLockRelease, LW_EXCLUSIVE, LW_SHARED};
 use types_core::{
     BlockNumber, Buffer, BufferIsValid, ForkNumber, InvalidBlockNumber, BLCKSZ, INIT_FORKNUM,
@@ -16,8 +22,8 @@ use types_storage::buf::{
 use types_storage::{ReadBufferMode, RelFileLocator, RelFileLocatorBackend};
 
 use crate::buf_hdr::{
-    cleared_buftag, BufferDesc, BufferDescriptorGetBuffer, BufferGetBlockPtr, GetBufferDescriptor,
-    LockBufHdr, UnlockBufHdr,
+    cleared_buftag, BufferDesc, BufferDescriptorGetBuffer, BufferDescriptorGetIOCV,
+    BufferGetBlockPtr, GetBufferDescriptor, LockBufHdr, UnlockBufHdr,
 };
 use crate::buf_table::{
     BufMappingPartitionLock, BufTableDelete, BufTableHashCode, BufTableInsert, BufTableLookup,
@@ -29,6 +35,29 @@ use crate::pin::{buffer_refcount, PinBuffer, PinBuffer_Locked, UnpinBuffer};
 use crate::privref::{GetPrivateRefCount, ReservePrivateRefCountEntry as reserve_entry};
 
 const P_NEW: BlockNumber = InvalidBlockNumber;
+
+const PG_WAIT_IPC: u32 = 0x0800_0000;
+const WAIT_EVENT_BUFFER_IO: u32 = PG_WAIT_IPC + 8;
+
+// Abort-time cleanup of unterminated IO; without it WaitIO sleepers hang.
+static BUFFER_IO_DESC: ResourceOwnerDesc = ResourceOwnerDesc {
+    name: "buffer io",
+    release_phase: RESOURCE_RELEASE_BEFORE_LOCKS,
+    release_priority: RELEASE_PRIO_BUFFER_IOS,
+    ReleaseResource: ResOwnerReleaseBufferIO,
+    DebugPrint: Some(ResOwnerPrintBufferIO),
+};
+
+fn ResOwnerReleaseBufferIO(res: Datum) {
+    AbortBufferIO(res.as_i32());
+}
+
+fn ResOwnerPrintBufferIO<'a>(mcx: mcx::Mcx<'a>, res: Datum) -> PgResult<mcx::PgString<'a>> {
+    mcx::PgString::from_str_in(
+        &format!("lost track of buffer IO on buffer {}", res.as_i32()),
+        mcx,
+    )
+}
 
 #[cold]
 fn loc(funcname: &'static str) -> ErrorLocation {
@@ -123,6 +152,7 @@ fn BufferAlloc(
     strategy: &BufferAccessStrategy,
 ) -> PgResult<(Buffer, bool)> {
     reserve_entry();
+    crate::pin::resowner_enlarge_for_pin()?;
 
     let new_tag = init_buffer_tag(smgr.locator, forknum, blkno);
     let new_hash = BufTableHashCode(&new_tag);
@@ -135,13 +165,11 @@ fn BufferAlloc(
     let existing_id = BufTableLookup(&new_tag, new_hash)?;
     if existing_id >= 0 {
         let desc = GetBufferDescriptor(existing_id);
+        // !valid: in-progress or failed read. No StartBufferIO here —
+        // complete_read_sync owns it; claiming both self-deadlocks WaitIO.
         let valid = PinBuffer(desc, strategy);
         LWLockRelease(partition_lock)?;
-        let mut found = true;
-        if !valid && StartBufferIO(desc, true, false)? {
-            found = false;
-        }
-        return Ok((BufferDescriptorGetBuffer(desc), found));
+        return Ok((BufferDescriptorGetBuffer(desc), valid));
     }
     LWLockRelease(partition_lock)?;
 
@@ -152,15 +180,13 @@ fn BufferAlloc(
     let existing_id = BufTableInsert(&new_tag, new_hash, victim_desc.buf_id)?;
     if existing_id >= 0 {
         let existing_desc = GetBufferDescriptor(existing_id);
-        let valid = PinBuffer(existing_desc, strategy);
-        LWLockRelease(partition_lock)?;
+        // Unpin-before-pin is load-bearing: dropping the victim's last local
+        // ref refills the reserved privref entry PinBuffer consumes (as in C).
         UnpinBuffer(victim_desc);
         StrategyFreeBuffer(victim_desc.buf_id);
-        let mut found = true;
-        if !valid && StartBufferIO(existing_desc, true, false)? {
-            found = false;
-        }
-        return Ok((BufferDescriptorGetBuffer(existing_desc), found));
+        let valid = PinBuffer(existing_desc, strategy);
+        LWLockRelease(partition_lock)?;
+        return Ok((BufferDescriptorGetBuffer(existing_desc), valid));
     }
 
     let mut victim_state = LockBufHdr(victim_desc);
@@ -183,6 +209,7 @@ fn BufferAlloc(
 pub(crate) fn GetVictimBuffer(strategy: &BufferAccessStrategy) -> PgResult<Buffer> {
     loop {
         reserve_entry();
+        crate::pin::resowner_enlarge_for_pin()?;
         let (victim, _from_ring) = StrategyGetBuffer(strategy)?;
         let (buf_id, buf_state) = victim.into_parts();
         let desc = GetBufferDescriptor(buf_id);
@@ -249,33 +276,69 @@ fn InvalidateVictimBuffer(desc: &BufferDesc) -> PgResult<bool> {
     Ok(true)
 }
 
-/// WaitIO's sleep arm needs the per-buffer CV (second-backend-only).
-pub(crate) fn StartBufferIO(desc: &BufferDesc, for_input: bool, nowait: bool) -> PgResult<bool> {
+/// WaitIO (bufmgr.c) with the pgaio wait arm collapsed away (io_method=sync).
+fn WaitIO(desc: &BufferDesc) -> PgResult<()> {
+    let cv = BufferDescriptorGetIOCV(desc);
+    ConditionVariablePrepareToSleep(cv);
     loop {
         let buf_state = LockBufHdr(desc);
+        let wref_armed = desc.io_wref_armed();
+        UnlockBufHdr(desc, buf_state);
         if buf_state & BM_IO_IN_PROGRESS == 0 {
-            let done = if for_input {
-                buf_state & BM_VALID != 0
-            } else {
-                buf_state & BM_DIRTY == 0
-            };
-            if done {
-                UnlockBufHdr(desc, buf_state);
-                return Ok(false);
-            }
-            UnlockBufHdr(desc, buf_state | BM_IO_IN_PROGRESS);
-            return Ok(true);
+            break;
+        }
+        if wref_armed {
+            panic!("unported callee reached from bufmgr.c WaitIO: pgaio_wref_wait (aio; sync reads never arm io_wref)");
+        }
+        if let Err(e) = ConditionVariableSleep(cv, WAIT_EVENT_BUFFER_IO) {
+            // C divergence: C cancels at abort; PgResult must de-list here.
+            ConditionVariableCancelSleep();
+            return Err(e);
+        }
+    }
+    ConditionVariableCancelSleep();
+    Ok(())
+}
+
+pub(crate) fn StartBufferIO(desc: &BufferDesc, for_input: bool, nowait: bool) -> PgResult<bool> {
+    resowner::ResourceOwnerEnlarge(resowner::CurrentResourceOwner())?;
+    let buf_state = loop {
+        let buf_state = LockBufHdr(desc);
+        if buf_state & BM_IO_IN_PROGRESS == 0 {
+            break buf_state;
         }
         UnlockBufHdr(desc, buf_state);
         if nowait {
             return Ok(false);
         }
-        panic!("unported callee reached from bufmgr.c WaitIO: ConditionVariableSleep on BufferIO CV (condition_variable unported)");
+        WaitIO(desc)?;
+    };
+    let done = if for_input {
+        buf_state & BM_VALID != 0
+    } else {
+        buf_state & BM_DIRTY == 0
+    };
+    if done {
+        UnlockBufHdr(desc, buf_state);
+        return Ok(false);
     }
+    UnlockBufHdr(desc, buf_state | BM_IO_IN_PROGRESS);
+    resowner::ResourceOwnerRemember(
+        resowner::CurrentResourceOwner(),
+        Datum::from_i32(BufferDescriptorGetBuffer(desc)),
+        &BUFFER_IO_DESC,
+    )
+    .expect("ResourceOwnerRememberBufferIO");
+    Ok(true)
 }
 
-/// TerminateBufferIO (bufmgr.c), sans the pgaio release arm.
-pub(crate) fn TerminateBufferIO(desc: &BufferDesc, clear_dirty: bool, set_flag_bits: u32) {
+/// TerminateBufferIO (bufmgr.c), sans the release_aio arm (aio unit).
+pub(crate) fn TerminateBufferIO(
+    desc: &BufferDesc,
+    clear_dirty: bool,
+    set_flag_bits: u32,
+    forget_owner: bool,
+) {
     let mut buf_state = LockBufHdr(desc);
     debug_assert!(buf_state & BM_IO_IN_PROGRESS != 0);
     buf_state &= !(BM_IO_IN_PROGRESS | BM_IO_ERROR);
@@ -284,9 +347,31 @@ pub(crate) fn TerminateBufferIO(desc: &BufferDesc, clear_dirty: bool, set_flag_b
     }
     buf_state |= set_flag_bits;
     UnlockBufHdr(desc, buf_state);
-    // ConditionVariableBroadcast(BufferDescriptorGetIOCV): sound to elide —
-    // any would-be waiter panics in StartBufferIO/WaitIO before sleeping, so
-    // no waiter can exist until the condition_variable unit lands.
+    if forget_owner {
+        resowner::ResourceOwnerForget(
+            resowner::CurrentResourceOwner(),
+            Datum::from_i32(BufferDescriptorGetBuffer(desc)),
+            &BUFFER_IO_DESC,
+        )
+        .expect("ResourceOwnerForgetBufferIO");
+    }
+    ConditionVariableBroadcast(BufferDescriptorGetIOCV(desc));
+}
+
+/// AbortBufferIO (bufmgr.c): resowner release callback only; buffer still
+/// pinned (IOs release before pins, prio 100 < 200).
+fn AbortBufferIO(buffer: Buffer) {
+    let desc = GetBufferDescriptor(buffer - 1);
+    let buf_state = LockBufHdr(desc);
+    debug_assert!(buf_state & (BM_IO_IN_PROGRESS | BM_TAG_VALID) != 0);
+    if buf_state & BM_VALID == 0 {
+        debug_assert!(buf_state & BM_DIRTY == 0);
+        UnlockBufHdr(desc, buf_state);
+    } else {
+        UnlockBufHdr(desc, buf_state);
+        panic!("unported arm reached from bufmgr.c AbortBufferIO: dirty-write abort (every FlushBuffer error terminates inline; no write path leaks BM_IO_IN_PROGRESS)");
+    }
+    TerminateBufferIO(desc, false, BM_IO_ERROR, false);
 }
 
 fn complete_read_sync(
@@ -304,7 +389,7 @@ fn complete_read_sync(
     // SAFETY: pinned + BM_IO_IN_PROGRESS: we own the (not yet valid) page image.
     let page = unsafe { core::slice::from_raw_parts_mut(blk, BLCKSZ) };
     if let Err(e) = smgr_seams::smgr_read::call(smgr, forknum, blkno, page) {
-        TerminateBufferIO(desc, false, BM_IO_ERROR);
+        TerminateBufferIO(desc, false, BM_IO_ERROR, true);
         return Err(e);
     }
     counters::read();
@@ -320,7 +405,7 @@ fn complete_read_sync(
             // SAFETY: as above; zeroed page is the C zero_damaged_pages result.
             unsafe { core::ptr::write_bytes(blk, 0, BLCKSZ) };
         } else {
-            TerminateBufferIO(desc, false, BM_IO_ERROR);
+            TerminateBufferIO(desc, false, BM_IO_ERROR, true);
             ereport(ERROR)
                 .errcode(ERRCODE_DATA_CORRUPTED)
                 .errmsg(format!(
@@ -331,7 +416,7 @@ fn complete_read_sync(
             unreachable!("ERROR reported");
         }
     }
-    TerminateBufferIO(desc, false, BM_VALID);
+    TerminateBufferIO(desc, false, BM_VALID, true);
     Ok(())
 }
 
@@ -388,7 +473,7 @@ fn ZeroAndLockBuffer(buffer: Buffer, mode: ReadBufferMode, already_valid: bool) 
             LW_EXCLUSIVE,
             init_small::globals::MyProcNumber(),
         )?;
-        TerminateBufferIO(desc, false, BM_VALID);
+        TerminateBufferIO(desc, false, BM_VALID, true);
     } else if mode == ReadBufferMode::ZeroAndLock {
         LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE)?;
     } else {
@@ -406,6 +491,7 @@ pub fn ReadRecentBuffer(
 ) -> PgResult<bool> {
     debug_assert!(BufferIsValid(recent_buffer));
     reserve_entry();
+    crate::pin::resowner_enlarge_for_pin()?;
     let tag = init_buffer_tag(rlocator, forknum, blkno);
     if recent_buffer < 0 {
         panic!("unported callee reached from bufmgr.c ReadRecentBuffer: local buffers (localbuf.c)");

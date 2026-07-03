@@ -94,6 +94,22 @@ pub fn StrategyInitialize(nbuffers: i32) -> PgResult<()> {
     Ok(())
 }
 
+/// Crash-cycle reset to the StrategyInitialize boot image; the caller's
+/// descriptor walk relinked every free_next.
+pub(crate) fn StrategyResetAfterCrash(nbuffers: i32) {
+    let c = ctl();
+    c.buffer_strategy_lock.release();
+    c.next_victim_buffer.store(0, Ordering::Relaxed);
+    c.first_free_buffer.store(0, Ordering::Relaxed);
+    // SAFETY: exclusive postmaster access (crash choreography).
+    unsafe {
+        *c.last_free_buffer.get() = nbuffers - 1;
+        *c.complete_passes.get() = 0;
+    }
+    c.num_buffer_allocs.store(0, Ordering::Relaxed);
+    c.bgwprocno.store(-1, Ordering::Relaxed);
+}
+
 /// Wraparound folds the hand and bumps completePasses under the spinlock so
 /// StrategySyncStart reads a consistent pair.
 fn ClockSweepTick() -> i32 {

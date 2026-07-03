@@ -10,12 +10,17 @@ path = "src/lib.rs"
 
 [dependencies]
 bufmgr_seams = { path = "../bufmgr_seams" }
+datum = { path = "../../../../_support/types/datum" }
 dynahash = { path = "../../../utils/hash/dynahash" }
+resowner = { path = "../../../utils/resowner/resowner" }
+types_resowner = { path = "../../../../_support/types/types_resowner" }
 elog = { path = "../../../utils/error/elog" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 init_small = { path = "../../../utils/init/init_small" }
+condition_variable = { path = "../../lmgr/condition_variable" }
 lmgr = { path = "../../lmgr/lmgr" }
 lmgr_proc = { path = "../../lmgr/lmgr_proc" }
+lmgr_proc_seams = { path = "../../lmgr/lmgr_proc_seams" }
 lwlock = { path = "../../lmgr/lwlock" }
 mcx = { path = "../../../../_support/mcx" }
 xloginsert_seams = { path = "../../../access/transam/xloginsert_seams" }
@@ -35,3 +40,10 @@ latch = { path = "../../ipc/latch" }
 
 [dev-dependencies]
 shmem_seams = { path = "../../ipc/shmem_seams" }
+ipc_seams = { path = "../../ipc/ipc_seams" }
+pg_sema = { path = "../../../port/pg_sema" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+s_lock_seams = { path = "../../lmgr/s_lock_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+waiteventset = { path = "../../ipc/waiteventset" }
+xact_seams = { path = "../../../access/transam/xact_seams" }

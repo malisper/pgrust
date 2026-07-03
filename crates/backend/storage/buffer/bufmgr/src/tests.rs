@@ -1,19 +1,28 @@
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::Once;
 
 use init_small::globals;
-use types_core::{ForkNumber, BLCKSZ};
+use types_core::{ForkNumber, BLCKSZ, INVALID_PROC_NUMBER};
 use types_error::PgError;
 use types_storage::buf::{
     BufferAccessStrategyType, BM_DIRTY, BM_LOCKED, BM_VALID, BUF_REFCOUNT_MASK,
 };
+use types_storage::storage::NUM_SPECIAL_WORKER_PROCS;
 use types_storage::{ReadBufferMode, RelFileLocator};
 
 use super::*;
 
 static SMGR_READS: AtomicU64 = AtomicU64::new(0);
+static REL_READS: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+// Widens the BM_IO_IN_PROGRESS window so a second reader lands in WaitIO.
+const SLOW_READ_REL: u32 = 9400;
 
 const TEST_NBUFFERS: i32 = 64;
+const TEST_MAX_CONNECTIONS: i32 = 16;
+
+fn test_max_backends() -> i32 {
+    TEST_MAX_CONNECTIONS + 3 + 2 + 2 + NUM_SPECIAL_WORKER_PROCS
+}
 
 fn valid_page_into(buffer: &mut [u8], blkno: u32) {
     buffer.fill(0);
@@ -25,14 +34,36 @@ fn valid_page_into(buffer: &mut [u8], blkno: u32) {
     buffer[24..28].copy_from_slice(&blkno.to_ne_bytes());
 }
 
-// LWLock's contended wait path needs PGPROC (unported): serialize tests so
-// exclusive partition-lock acquisitions never actually wait.
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn setup() -> std::sync::MutexGuard<'static, ()> {
     let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     setup_once();
+    become_backend();
+    // Pins register with CurrentResourceOwner (thread-local), as in C.
+    if resowner::CurrentResourceOwner().is_null() {
+        let owner =
+            resowner::ResourceOwnerCreate(types_resowner::ResourceOwner::NULL, "bufmgr-tests")
+                .unwrap();
+        resowner::SetCurrentResourceOwner(owner);
+    }
     guard
+}
+
+fn become_backend() {
+    if globals::MyProcNumber() != INVALID_PROC_NUMBER {
+        return;
+    }
+    static NEXT_PROCNO: AtomicI32 = AtomicI32::new(0);
+    let procno = NEXT_PROCNO.fetch_add(1, Ordering::Relaxed);
+    assert!(procno < test_max_backends(), "proc slots exhausted");
+    globals::SetMyProcNumber(procno);
+    globals::SetMyProcPid(7000 + procno);
+    waiteventset::InitializeWaitEventSupport().unwrap();
+    let h = types_storage::latch::LatchHandle::proc(procno);
+    latch::OwnLatch(h).unwrap();
+    globals::SetMyLatch(Some(h));
+    latch::InitializeLatchWaitSet().unwrap();
 }
 
 fn setup_once() {
@@ -61,22 +92,51 @@ fn setup_once() {
         });
         shmem_seams::shmem_lock_release::set(|| SHMEM_LOCK.store(false, Ordering::Release));
 
-        smgr_seams::smgr_read::set(|_, _, blocknum, buffer| {
+        smgr_seams::smgr_read::set(|rlb, _, blocknum, buffer| {
             SMGR_READS.fetch_add(1, Ordering::Relaxed);
+            REL_READS.lock().unwrap().push(rlb.locator.relNumber);
+            if rlb.locator.relNumber == SLOW_READ_REL {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
             valid_page_into(buffer, blocknum);
             Ok(())
         });
 
         setup_write_seams();
 
+        s_lock_seams::perform_spin_delay::set(|_| std::thread::yield_now());
+        s_lock_seams::finish_spin_delay::set(|_| {});
+        ipc_seams::on_shmem_exit::set(|_, _| {});
+        waitevent_seams::pgstat_report_wait_start::set(|_| {});
+        waitevent_seams::pgstat_report_wait_end::set(|| {});
+        postgres_seams::check_for_interrupts::set(|| Ok(()));
+        xact_seams::get_current_transaction_nest_level::set(|| 1);
+        pg_sema::init_seams();
+
+        globals::SetIsUnderPostmaster(false);
+        globals::SetMaxConnections(TEST_MAX_CONNECTIONS);
+        globals::set_max_worker_processes(2);
         globals::SetNBuffers(TEST_NBUFFERS);
-        globals::SetMaxBackends(4);
+        globals::SetMaxBackends(test_max_backends());
+        lmgr_proc::init_seams();
+        lmgr_proc::InitProcGlobal(&lmgr_proc::ProcGlobalConfig {
+            autovacuum_worker_slots: 3,
+            max_wal_senders: 2,
+            max_prepared_xacts: 2,
+            fastpath_lock_groups_per_backend: 1,
+        });
+        waiteventset::init_seams();
+        latch::init_seams();
         lwlock::CreateLWLocks(false).unwrap();
         BufferManagerShmemInit().unwrap();
         init_seams();
     });
     globals::SetNBuffers(TEST_NBUFFERS);
-    globals::SetMaxBackends(4);
+    globals::SetMaxBackends(test_max_backends());
+}
+
+fn rel_reads(rel: u32) -> usize {
+    REL_READS.lock().unwrap().iter().filter(|&&r| r == rel).count()
 }
 
 fn rloc(rel: u32) -> RelFileLocator {
@@ -307,6 +367,12 @@ fn concurrent_warm_hit_pins() {
     let handles: Vec<_> = (0..4)
         .map(|_| {
             std::thread::spawn(|| {
+                let owner = resowner::ResourceOwnerCreate(
+                    types_resowner::ResourceOwner::NULL,
+                    "bufmgr-tests",
+                )
+                .unwrap();
+                resowner::SetCurrentResourceOwner(owner);
                 for _ in 0..20_000 {
                     let b = read_blk(9011, 0);
                     ReleaseBuffer(b).unwrap();
@@ -518,4 +584,143 @@ fn checksum_matches_c_reference() {
     }
     let zero = [0u8; BLCKSZ];
     assert_eq!(crate::write::page_checksum_for_tests(&zero, 42), 50816);
+}
+
+// The VACUUM error-path contract: a pin the error path never released is
+// dropped by ResourceOwnerRelease(BEFORE_LOCKS) at abort, C's only mechanism.
+#[test]
+fn abort_resowner_release_drops_leaked_pin() {
+    let _g = setup();
+    use types_resowner::{ResourceOwner, RESOURCE_RELEASE_BEFORE_LOCKS};
+
+    let save = resowner::CurrentResourceOwner();
+    let owner = resowner::ResourceOwnerCreate(ResourceOwner::NULL, "xact-like").unwrap();
+    resowner::SetCurrentResourceOwner(owner);
+
+    let b1 = read_blk(9021, 0);
+    let b2 = read_blk(9021, 1);
+    IncrBufferRefCount(b1);
+    ReleaseBuffer(b2).unwrap();
+    assert_eq!(GetPrivateRefCount(b1), 2);
+    assert_eq!(GetPrivateRefCount(b2), 0);
+
+    resowner::ResourceOwnerRelease(owner, RESOURCE_RELEASE_BEFORE_LOCKS, false, true).unwrap();
+    assert_eq!(GetPrivateRefCount(b1), 0);
+    assert_eq!(
+        GetBufferDescriptor(b1 - 1).state.load(Ordering::Relaxed) & BUF_REFCOUNT_MASK,
+        0
+    );
+    AtEOXact_Buffers(false);
+
+    resowner::SetCurrentResourceOwner(ResourceOwner::NULL);
+    resowner::ResourceOwnerDelete(owner);
+    resowner::SetCurrentResourceOwner(save);
+}
+
+#[test]
+fn crash_reset_restores_boot_image() {
+    let _g = setup();
+    setup_write_seams();
+
+    let b = dirty_block(9031, 5);
+    let desc = GetBufferDescriptor(b - 1);
+    assert!(desc.state.load(Ordering::Relaxed) & BM_DIRTY != 0);
+    let tag = desc.tag();
+    let hashcode = BufTableHashCode(&tag);
+
+    BufferManagerShmemResetAfterCrash();
+
+    assert_eq!(desc.state.load(Ordering::Relaxed), 0);
+    assert_eq!(desc.tag().blockNum, types_core::InvalidBlockNumber);
+    assert_eq!(BufTableLookup(&tag, hashcode).unwrap(), -1);
+    assert_eq!(
+        desc.content_lock.state.load(Ordering::Relaxed),
+        lwlock::LW_FLAG_RELEASE_OK
+    );
+    assert!(have_free_buffer());
+    assert_eq!(StrategySyncStart(), (0, 0, 0));
+
+    let before = SMGR_READS.load(Ordering::Relaxed);
+    let b2 = read_blk(9032, 0);
+    assert_eq!(b2, 1, "freelist must hand out buffer 0 first after reset");
+    assert_eq!(SMGR_READS.load(Ordering::Relaxed), before + 1);
+    ReleaseBuffer(b2).unwrap();
+}
+
+fn spawn_reader(
+    rel: u32,
+    delay: std::time::Duration,
+) -> std::thread::JoinHandle<(Buffer, types_storage::buf::buftag)> {
+    std::thread::spawn(move || {
+        become_backend();
+        let owner =
+            resowner::ResourceOwnerCreate(types_resowner::ResourceOwner::NULL, "bufmgr-tests")
+                .unwrap();
+        resowner::SetCurrentResourceOwner(owner);
+        std::thread::sleep(delay);
+        let b = read_blk(rel, 0);
+        let state = GetBufferDescriptor(b - 1).state.load(Ordering::Acquire);
+        assert!(state & BM_VALID != 0, "reader got an invalid buffer");
+        let tag = BufferGetTag(b);
+        ReleaseBuffer(b).unwrap();
+        (b, tag)
+    })
+}
+
+// Two backends race ReadBuffer on one uncached block: loser sleeps in WaitIO.
+#[test]
+fn concurrent_cold_read_second_backend_waits_for_io() {
+    let _g = setup();
+    assert_eq!(rel_reads(SLOW_READ_REL), 0);
+    let t1 = spawn_reader(SLOW_READ_REL, std::time::Duration::ZERO);
+    // 200ms slow read: +40ms lands inside the BM_IO_IN_PROGRESS window.
+    let t2 = spawn_reader(SLOW_READ_REL, std::time::Duration::from_millis(40));
+    let (b1, tag1) = t1.join().unwrap();
+    let (b2, tag2) = t2.join().unwrap();
+    assert_eq!(b1, b2, "both readers must resolve to the same buffer");
+    assert_eq!(tag1, tag2);
+    assert_eq!(
+        rel_reads(SLOW_READ_REL),
+        1,
+        "loser must WaitIO on the winner's read, not issue its own"
+    );
+    AtEOXact_Buffers(true);
+}
+
+// ResourceOwnerRelease(BEFORE_LOCKS) runs AbortBufferIO before pin release
+// (prio 100 < 200) and must wake CV waiters — C's only mid-IO error mechanism.
+#[test]
+fn abort_resowner_release_aborts_leaked_io_and_wakes_waiter() {
+    let _g = setup();
+    use types_resowner::{ResourceOwner, RESOURCE_RELEASE_BEFORE_LOCKS};
+    let rel = 9501u32;
+
+    let save = resowner::CurrentResourceOwner();
+    let owner = resowner::ResourceOwnerCreate(ResourceOwner::NULL, "io-leak").unwrap();
+    resowner::SetCurrentResourceOwner(owner);
+
+    let b = read_blk(rel, 0);
+    let desc = GetBufferDescriptor(b - 1);
+    // extend.rs beyond-EOF shape: invalidate, take input IO, "error out".
+    let s = LockBufHdr(desc);
+    UnlockBufHdr(desc, s & !BM_VALID);
+    assert!(crate::read::StartBufferIO(desc, true, false).unwrap());
+
+    let waiter = spawn_reader(rel, std::time::Duration::ZERO);
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    resowner::ResourceOwnerRelease(owner, RESOURCE_RELEASE_BEFORE_LOCKS, false, true).unwrap();
+
+    let (b2, _) = waiter.join().unwrap();
+    assert_eq!(b2, b, "waiter must land on the aborted buffer");
+    let state = desc.state.load(Ordering::Acquire);
+    assert!(state & BM_VALID != 0, "waiter must redo the IO after abort");
+    assert!(state & types_storage::buf::BM_IO_ERROR == 0);
+    assert_eq!(rel_reads(rel), 2, "abort forces the waiter to reissue the read");
+    assert_eq!(GetPrivateRefCount(b), 0);
+
+    AtEOXact_Buffers(false);
+    resowner::SetCurrentResourceOwner(ResourceOwner::NULL);
+    resowner::ResourceOwnerDelete(owner);
+    resowner::SetCurrentResourceOwner(save);
 }

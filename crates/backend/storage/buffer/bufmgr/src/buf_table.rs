@@ -103,6 +103,27 @@ pub fn BufMappingPartitionLock(hashcode: u32) -> &'static LWLock {
     unsafe { &(*base.add((hashcode % NUM_BUFFER_PARTITIONS as u32) as usize)).lock }
 }
 
+/// Crash-cycle reset: empty the table in place, no partition locks (exclusive
+/// postmaster access); deleting the returned entry mid-scan is dynahash-legal.
+pub(crate) fn BufTableResetAfterCrash() {
+    use dynahash::{hash_seq_init, hash_seq_search};
+    use types_hash::hsearch::HASH_SEQ_STATUS;
+
+    let h = htab();
+    let mut status = HASH_SEQ_STATUS::new();
+    hash_seq_init(&mut status, h).expect("BufTableResetAfterCrash: hash_seq_init");
+    loop {
+        let entry = hash_seq_search(&mut status).expect("BufTableResetAfterCrash: hash_seq_search");
+        if entry.is_null() {
+            break;
+        }
+        // SAFETY: live BufferLookupEnt returned by the scan.
+        let tag = unsafe { (*(entry as *const BufferLookupEnt)).key };
+        let hashcode = BufTableHashCode(&tag);
+        BufTableDelete(&tag, hashcode).expect("BufTableResetAfterCrash: delete");
+    }
+}
+
 /// Caller holds the partition lock (shared or better).
 pub fn BufTableLookup(tag: &buftag, hashcode: u32) -> PgResult<i32> {
     let entry = hash_search_with_hash_value(

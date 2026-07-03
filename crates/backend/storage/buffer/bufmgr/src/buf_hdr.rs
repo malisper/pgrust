@@ -1,6 +1,7 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use condition_variable::ConditionVariable;
 use init_small::globals;
 use lwlock::{LWLock, LWLockPadded};
 use types_core::{Buffer, ForkNumber, InvalidBlockNumber, InvalidOid, BLCKSZ, INVALID_PROC_NUMBER};
@@ -78,6 +79,14 @@ impl BufferDesc {
     pub(crate) unsafe fn set_free_next(&self, next: i32) {
         *self.free_next.get() = next;
     }
+
+    /// Read under the header lock; armed == unported aio writer appeared.
+    #[inline]
+    pub(crate) fn io_wref_armed(&self) -> bool {
+        // SAFETY: header lock held per contract above.
+        let w = unsafe { &*self.io_wref.get() };
+        w.aio_index != 0 || w.generation_upper != 0 || w.generation_lower != 0
+    }
 }
 
 #[repr(C, align(64))]
@@ -104,12 +113,14 @@ pub fn cleared_buftag() -> buftag {
 struct BufferPool {
     descs: core::sync::atomic::AtomicPtr<BufferDescPadded>,
     blocks: core::sync::atomic::AtomicPtr<u8>,
+    io_cvs: core::sync::atomic::AtomicPtr<ConditionVariable>,
     nbuffers: core::sync::atomic::AtomicI32,
 }
 
 static POOL: BufferPool = BufferPool {
     descs: core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),
     blocks: core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),
+    io_cvs: core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),
     nbuffers: core::sync::atomic::AtomicI32::new(0),
 };
 
@@ -151,6 +162,15 @@ pub fn BufferDescriptorGetBuffer(desc: &BufferDesc) -> Buffer {
     desc.buf_id + 1
 }
 
+/// C's BufferIOCVArray (buf_init.c): one CV per buffer, off the padded desc.
+#[inline]
+pub(crate) fn BufferDescriptorGetIOCV(desc: &BufferDesc) -> &'static ConditionVariable {
+    let cvs = POOL.io_cvs.load(Ordering::Relaxed);
+    debug_assert!(!cvs.is_null());
+    // SAFETY: published before `descs` (the Release-ordered flag); in-bounds.
+    unsafe { &*cvs.add(desc.buf_id as usize) }
+}
+
 #[inline]
 pub fn BufferGetBlockPtr(buffer: Buffer) -> *mut u8 {
     let blocks = POOL.blocks.load(Ordering::Relaxed);
@@ -176,7 +196,10 @@ pub fn BufferManagerShmemInit() -> PgResult<()> {
         .expect("buffer block layout");
     // SAFETY: non-zero layout; zeroed like a fresh shmem segment.
     let blocks = unsafe { std::alloc::alloc_zeroed(blk_layout) };
-    if descs.is_null() || blocks.is_null() {
+    let cv_layout = core::alloc::Layout::array::<ConditionVariable>(nu).expect("buffer IO CV layout");
+    // SAFETY: non-zero layout; initialized element-by-element below before publish.
+    let io_cvs = unsafe { std::alloc::alloc(cv_layout) } as *mut ConditionVariable;
+    if descs.is_null() || blocks.is_null() || io_cvs.is_null() {
         return Err(Box::new(
             types_error::PgError::new(ERROR, "out of memory")
                 .with_sqlstate(ERRCODE_OUT_OF_MEMORY),
@@ -196,9 +219,11 @@ pub fn BufferManagerShmemInit() -> PgResult<()> {
                     desc: BufferDesc::initial(i as i32, free_next),
                 },
             );
+            core::ptr::write(io_cvs.add(i), ConditionVariable::new());
         }
     }
     POOL.blocks.store(blocks, Ordering::Relaxed);
+    POOL.io_cvs.store(io_cvs, Ordering::Relaxed);
     POOL.nbuffers.store(n, Ordering::Relaxed);
     // C's extern BufferBlocks: lets BufferGetPage stay a header inline in
     // pin-holding consumers (bufmgr_seams::BufferPin::page()).
@@ -219,6 +244,50 @@ pub fn BufferManagerShmemInit() -> PgResult<()> {
 
     crate::freelist::StrategyInitialize(n)?;
     Ok(())
+}
+
+/// Crash-cycle reset in place to the BufferManagerShmemInit boot image — never
+/// re-run init (leaks NBuffers×8K). Page bytes stay: cleared tags make them
+/// unreachable (notes/crash-restart-design.md).
+pub fn BufferManagerShmemResetAfterCrash() {
+    let n = NBuffersInited();
+    assert!(
+        n > 0 && n == globals::NBuffers(),
+        "bufmgr: NBuffers changed across the crash cycle"
+    );
+    for i in 0..n {
+        let desc = GetBufferDescriptor(i);
+        let free_next = if i + 1 < n {
+            i + 1
+        } else {
+            FREENEXT_END_OF_LIST
+        };
+        // SAFETY: every child is dead (crash choreography); the postmaster
+        // thread has exclusive access — no pin, lock holder, or waiter exists.
+        unsafe {
+            desc.set_tag(cleared_buftag());
+            desc.set_wait_backend_pgprocno(INVALID_PROC_NUMBER);
+            desc.set_free_next(free_next);
+            *desc.io_wref.get() = PgAioWaitRef::default();
+            *desc.content_lock.waiters.get() = lmgr_proc_seams::proclist_head {
+                head: INVALID_PROC_NUMBER,
+                tail: INVALID_PROC_NUMBER,
+            };
+        }
+        desc.state.store(0, Ordering::Relaxed);
+        desc.content_lock
+            .state
+            .store(lwlock::LW_FLAG_RELEASE_OK, Ordering::Relaxed);
+        // SAFETY: exclusive access as above; drops dead procs off the IO CV.
+        unsafe {
+            core::ptr::write(
+                POOL.io_cvs.load(Ordering::Relaxed).add(i as usize),
+                ConditionVariable::new(),
+            );
+        }
+    }
+    crate::buf_table::BufTableResetAfterCrash();
+    crate::freelist::StrategyResetAfterCrash(n);
 }
 
 pub fn LockBufHdr(desc: &BufferDesc) -> u32 {

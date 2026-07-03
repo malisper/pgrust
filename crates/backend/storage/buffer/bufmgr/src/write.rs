@@ -244,7 +244,7 @@ pub(crate) fn FlushBuffer(desc: &crate::buf_hdr::BufferDesc) -> PgResult<()> {
     // WAL-before-data; unlogged pages can carry fake LSNs past insert.
     if buf_state & BM_PERMANENT != 0 {
         if let Err(e) = transam_xlog_seams::xlog_flush::call(recptr) {
-            TerminateBufferIO(desc, false, BM_IO_ERROR);
+            TerminateBufferIO(desc, false, BM_IO_ERROR, true);
             return Err(e);
         }
     }
@@ -253,12 +253,12 @@ pub(crate) fn FlushBuffer(desc: &crate::buf_hdr::BufferDesc) -> PgResult<()> {
         smgr_seams::smgr_write::call(tag_locator(&tag), tag.forkNum, tag.blockNum, page, false)
     });
     if let Err(e) = write_result {
-        TerminateBufferIO(desc, false, BM_IO_ERROR);
+        TerminateBufferIO(desc, false, BM_IO_ERROR, true);
         return Err(e);
     }
 
     counters::written();
-    TerminateBufferIO(desc, true, 0);
+    TerminateBufferIO(desc, true, 0, true);
     Ok(())
 }
 
@@ -276,6 +276,7 @@ pub(crate) fn SyncOneBuffer(buf_id: i32, skip_recently_used: bool, wb: &mut Writ
     let mut result = 0;
 
     ReservePrivateRefCountEntry();
+    crate::pin::resowner_enlarge_for_pin()?;
 
     // Dirty-marking precedes XLogInsert in the AMs, so an unlocked dirty
     // check can only over-write (see C's SyncOneBuffer header comment).
