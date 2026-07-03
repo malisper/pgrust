@@ -361,6 +361,44 @@ fn check_agg_arguments_walker<'mcx>(
             }
             Ok(())
         }
+        NodeTag::T_JsonValueExpr => {
+            let j = node.as_json_value_expr().unwrap();
+            for e in [j.raw_expr, j.formatted_expr].into_iter().flatten() {
+                check_agg_arguments_walker(pstate, e, ctx)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            let c = node.as_json_constructor_expr().unwrap();
+            for arg in &c.args {
+                check_agg_arguments_walker(pstate, arg, ctx)?;
+            }
+            for e in [c.func, c.coercion].into_iter().flatten() {
+                check_agg_arguments_walker(pstate, e, ctx)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_JsonIsPredicate => match node.as_json_is_predicate().unwrap().expr {
+            Some(e) => check_agg_arguments_walker(pstate, e, ctx),
+            None => Ok(()),
+        },
+        NodeTag::T_JsonBehavior => match node.as_json_behavior().unwrap().expr {
+            Some(e) => check_agg_arguments_walker(pstate, e, ctx),
+            None => Ok(()),
+        },
+        NodeTag::T_JsonExpr => {
+            let j = node.as_json_expr().unwrap();
+            for e in [j.formatted_expr, j.path_spec, j.on_empty, j.on_error]
+                .into_iter()
+                .flatten()
+            {
+                check_agg_arguments_walker(pstate, e, ctx)?;
+            }
+            for v in &j.passing_values {
+                check_agg_arguments_walker(pstate, v, ctx)?;
+            }
+            Ok(())
+        }
         NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_CaseTestExpr => Ok(()),
         other => panic!(
             "check_agg_arguments_walker (parse_agg.c): arm for {other:?} unported — \
@@ -845,6 +883,44 @@ fn finalize_grouping_exprs<'mcx>(
             Some(arg) => finalize_grouping_exprs(mcx, pstate, qry, arg),
             None => Ok(()),
         },
+        NodeTag::T_JsonValueExpr => {
+            let j = node.as_json_value_expr().unwrap();
+            for e in [j.raw_expr, j.formatted_expr].into_iter().flatten() {
+                finalize_grouping_exprs(mcx, pstate, qry, e)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            let c = node.as_json_constructor_expr().unwrap();
+            for arg in &c.args {
+                finalize_grouping_exprs(mcx, pstate, qry, arg)?;
+            }
+            for e in [c.func, c.coercion].into_iter().flatten() {
+                finalize_grouping_exprs(mcx, pstate, qry, e)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_JsonIsPredicate => match node.as_json_is_predicate().unwrap().expr {
+            Some(e) => finalize_grouping_exprs(mcx, pstate, qry, e),
+            None => Ok(()),
+        },
+        NodeTag::T_JsonBehavior => match node.as_json_behavior().unwrap().expr {
+            Some(e) => finalize_grouping_exprs(mcx, pstate, qry, e),
+            None => Ok(()),
+        },
+        NodeTag::T_JsonExpr => {
+            let j = node.as_json_expr().unwrap();
+            for e in [j.formatted_expr, j.path_spec, j.on_empty, j.on_error]
+                .into_iter()
+                .flatten()
+            {
+                finalize_grouping_exprs(mcx, pstate, qry, e)?;
+            }
+            for v in &j.passing_values {
+                finalize_grouping_exprs(mcx, pstate, qry, v)?;
+            }
+            Ok(())
+        }
         other => panic!(
             "finalize_grouping_exprs (parse_agg.c): arm for {other:?} unported — \
              backend-parser-agg"
@@ -999,6 +1075,44 @@ fn check_ungrouped_columns<'mcx>(
         NodeTag::T_RowExpr => {
             for arg in &node.as_row_expr().unwrap().args {
                 check_ungrouped_columns(pstate, qry, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_JsonValueExpr => {
+            let j = node.as_json_value_expr().unwrap();
+            for e in [j.raw_expr, j.formatted_expr].into_iter().flatten() {
+                check_ungrouped_columns(pstate, qry, e)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            let c = node.as_json_constructor_expr().unwrap();
+            for arg in &c.args {
+                check_ungrouped_columns(pstate, qry, arg)?;
+            }
+            for e in [c.func, c.coercion].into_iter().flatten() {
+                check_ungrouped_columns(pstate, qry, e)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_JsonIsPredicate => match node.as_json_is_predicate().unwrap().expr {
+            Some(e) => check_ungrouped_columns(pstate, qry, e),
+            None => Ok(()),
+        },
+        NodeTag::T_JsonBehavior => match node.as_json_behavior().unwrap().expr {
+            Some(e) => check_ungrouped_columns(pstate, qry, e),
+            None => Ok(()),
+        },
+        NodeTag::T_JsonExpr => {
+            let j = node.as_json_expr().unwrap();
+            for e in [j.formatted_expr, j.path_spec, j.on_empty, j.on_error]
+                .into_iter()
+                .flatten()
+            {
+                check_ungrouped_columns(pstate, qry, e)?;
+            }
+            for v in &j.passing_values {
+                check_ungrouped_columns(pstate, qry, v)?;
             }
             Ok(())
         }
