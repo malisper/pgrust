@@ -419,7 +419,6 @@ fn transformColumnDefinition<'mcx>(
 
     let mut saw_default = false;
     let mut saw_nullable = false;
-    let mut need_notnull = false;
     let mut col_not_null = column.is_not_null;
     for cnode in column.constraints.iter() {
         let constraint = cnode.as_variant::<Constraint>().expect("column constraint");
@@ -1116,11 +1115,22 @@ pub fn transformAlterTableCmd<'mcx>(
             let cd = defnode.as_variant::<ColumnDef>().expect("ColumnDef");
             let mut ixconstraints = NodeList::nil();
             let mut fkconstraints = NodeList::nil();
+            let mut rv = RangeVar::default();
+            rv.relname = Some({
+                let mut s = PgString::new_in(mcx);
+                s.try_push_str(relname)?;
+                leak_str(s)
+            });
+            rv.inh = true;
+            rv.relpersistence = types_core::RELPERSISTENCE_PERMANENT;
+            rv.location = -1;
+            let mut cxt = CreateStmtCxt { blist: NodeList::nil(), alist: NodeList::nil() };
             transformColumnDefinition(
                 mcx,
                 defnode,
                 cd,
-                relname,
+                &rv,
+                &mut cxt,
                 &mut ckconstraints,
                 &mut nnconstraints,
                 &mut ixconstraints,
@@ -1128,6 +1138,9 @@ pub fn transformAlterTableCmd<'mcx>(
             )?;
             if !ixconstraints.is_nil() || !fkconstraints.is_nil() {
                 unported("ALTER TABLE ADD COLUMN with PRIMARY KEY/UNIQUE/REFERENCES");
+            }
+            if !cxt.blist.is_nil() || !cxt.alist.is_nil() {
+                unported("ALTER TABLE ADD COLUMN serial (extra sequence statements)");
             }
             // SAFETY: parse tree is analyze-owned; no derived refs live.
             unsafe {

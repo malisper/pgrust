@@ -131,15 +131,6 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
 }
 
 // pg_proc.dat rows (all proisstrict, none retset), OID-ascending.
-pub fn fc_namein(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    // SAFETY: catalog arg 0 of namein is cstring (typlen -2).
-    let s = unsafe { fcinfo.arg_cstring(0) };
-    let name = crate::namein(s.to_bytes());
-    let mcx = fcinfo.result_mcx();
-    let out = mcx::leak_in(mcx::box_new_in(mcx, name));
-    Ok(Datum::from_usize(out as *const NameData as usize))
-}
-
 pub const NAME_BUILTINS: &[FmgrBuiltin] = &[
     b(34, "namein", 1, fc_namein),
     b(35, "nameout", 1, fc_nameout),
