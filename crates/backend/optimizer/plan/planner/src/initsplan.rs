@@ -157,6 +157,11 @@ pub(crate) fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<
                 pull_var_nodes(a, out);
             }
         }
+        NodeTag::T_ArrayExpr => {
+            for a in &node.as_array_expr().unwrap().elements {
+                pull_var_nodes(a, out);
+            }
+        }
         other => panic!("pull_var_clause (var.c): {other:?}; M2 expression lane"),
     }
 }

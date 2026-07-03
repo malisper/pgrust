@@ -62,6 +62,7 @@ transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
 varsup = { path = "../../access/transam/varsup" }
 waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
 backend_status_seams = { path = "../../utils/activity/backend_status_seams" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
 execmain = { path = "../../executor/execmain" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 lsyscache_seams = { path = "../../utils/cache/lsyscache_seams" }

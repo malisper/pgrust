@@ -674,12 +674,20 @@ fn convert_to_scalar(
     const TEXTOID: Oid = 25;
     const BPCHAROID: Oid = 1042;
     const VARCHAROID: Oid = 1043;
+    const INETOID: Oid = 869;
+    const CIDROID: Oid = 650;
     match valuetypid {
         CHAROID | BPCHAROID | VARCHAROID | TEXTOID | NAMEOID => {
             let val = convert_string_datum(mcx, value, valuetypid, collid)?;
             let lostr = convert_string_datum(mcx, lobound, boundstypid, collid)?;
             let histr = convert_string_datum(mcx, hibound, boundstypid, collid)?;
             Some(convert_string_to_scalar(val, lostr, histr))
+        }
+        INETOID | CIDROID => {
+            let v = convert_network_to_scalar(value, valuetypid)?;
+            let lo = convert_network_to_scalar(lobound, boundstypid)?;
+            let hi = convert_network_to_scalar(hibound, boundstypid)?;
+            Some((v, lo, hi))
         }
         _ => {
             let v = convert_numeric_to_scalar(value, valuetypid)?;
@@ -688,6 +696,23 @@ fn convert_to_scalar(
             Some((v, lo, hi))
         }
     }
+}
+
+// convert_network_to_scalar (selfuncs.c), inet/cidr arm (mac arms deferred).
+fn convert_network_to_scalar(value: Datum, typid: Oid) -> Option<f64> {
+    const INETOID: Oid = 869;
+    const CIDROID: Oid = 650;
+    if typid != INETOID && typid != CIDROID {
+        return None;
+    }
+    let ip = crate::network_selfuncs::inet_ref(value);
+    let len = if ip.family == adt_network::PGSQL_AF_INET { 4 } else { 16 };
+    let mut res = ip.family as f64;
+    for i in 0..len {
+        res *= 256.0;
+        res += ip.addr[i] as f64;
+    }
+    Some(res)
 }
 
 // convert_string_datum (selfuncs.c); the non-C-collation pg_strxfrm leg is
@@ -939,6 +964,14 @@ pub fn examine_variable<'mcx>(
     let (vartype, _) = crate::costsize::expr_type_typmod(node);
     let mut vardata =
         VariableStatData { var: None, rel: None, vartype, isunique: false, stats: None };
+
+    // C: look inside any binary-compatible relabeling (vartype stays the
+    // exposed type; the Var is returned without relabeling).
+    let (basenode, node_id) = match node.as_relabel_type() {
+        Some(r) => (r.arg, run.intern_expr(r.arg)),
+        None => (node, node_id),
+    };
+    let node = basenode;
 
     if let Some(var) = node.as_var() {
         if varrelid == 0 || varrelid == var.varno {
@@ -1899,6 +1932,51 @@ pub fn eqjoinsel<'mcx>(
     Ok(clamp_probability(selec))
 }
 
+// neqjoinsel (selfuncs.c).
+pub fn neqjoinsel<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    operator: u32,
+    args: &[NodeId],
+    jointype: JoinType,
+    sjinfo: Option<&SpecialJoinInfo<'mcx>>,
+) -> PgResult<f64> {
+    if jointype == types_pathnodes::JOIN_SEMI || jointype == types_pathnodes::JOIN_ANTI {
+        let sjinfo = sjinfo.expect("SEMI/ANTI neqjoinsel has an sjinfo");
+        let (vardata1, vardata2, reversed) = get_join_variables(run, args, sjinfo)?;
+        let nullfrac =
+            if reversed { vardata2.nullfrac() } else { vardata1.nullfrac() };
+        return Ok(1.0 - nullfrac);
+    }
+    let eqop = lsyscache::get_negator(operator)?;
+    let result = if eqop != 0 {
+        eqjoinsel(run, eqop, args, jointype, sjinfo)?
+    } else {
+        DEFAULT_EQ_SEL
+    };
+    Ok(1.0 - result)
+}
+
+// get_join_variables (selfuncs.c); returns (vardata1, vardata2, reversed).
+pub(crate) fn get_join_variables<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    args: &[NodeId],
+    sjinfo: &SpecialJoinInfo<'mcx>,
+) -> PgResult<(VariableStatData<'mcx>, VariableStatData<'mcx>, bool)> {
+    assert!(args.len() == 2, "get_join_variables (selfuncs.c): non-binary clause");
+    let left = *run.root.expr_node(args[0]);
+    let right = *run.root.expr_node(args[1]);
+    let vardata1 = examine_variable(run, args[0], left, 0)?;
+    let vardata2 = examine_variable(run, args[1], right, 0)?;
+    let rel_subset = |rel: Option<RelId>, side: &types_pathnodes::Relids<'mcx>| {
+        rel.is_some_and(|r| crate::relnode::relids_is_subset(&run.root.rel(r).relids, side))
+    };
+    let join_is_reversed = rel_subset(vardata1.rel, &sjinfo.syn_righthand)
+        || rel_subset(vardata2.rel, &sjinfo.syn_lefthand);
+    Ok((vardata1, vardata2, join_is_reversed))
+}
+
+pub const DEFAULT_MATCHING_SEL: f64 = 0.010;
+
 // eqjoinsel_semi (selfuncs.c), non-MCV arm (the MCV-x-MCV arm panics above).
 #[allow(clippy::too_many_arguments)]
 fn eqjoinsel_semi(
@@ -2543,7 +2621,7 @@ fn generic_restriction_selectivity<'mcx>(
     Ok(clamp_probability(selec))
 }
 
-// matchingsel (selfuncs.c). DEFAULT_MATCHING_SEL = 2 * DEFAULT_EQ_SEL.
+// matchingsel (selfuncs.c); DEFAULT_MATCHING_SEL = 2 * DEFAULT_EQ_SEL.
 pub fn matchingsel<'mcx>(
     run: &mut PlannerRun<'mcx>,
     operator: Oid,
@@ -2551,7 +2629,6 @@ pub fn matchingsel<'mcx>(
     varrelid: i32,
     collation: Oid,
 ) -> PgResult<f64> {
-    const DEFAULT_MATCHING_SEL: f64 = 0.010;
     generic_restriction_selectivity(run, operator, collation, args, varrelid, DEFAULT_MATCHING_SEL)
 }
 
