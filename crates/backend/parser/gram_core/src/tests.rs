@@ -1286,7 +1286,7 @@ fn create_recursive_view_is_loud() {
 fn create_rule_full_shape() {
     let list = parse(
         "CREATE OR REPLACE RULE r1 AS ON UPDATE TO s.t WHERE old.a = 1 DO INSTEAD \
-         (INSERT INTO log VALUES (new.a); NOTHING)",
+         (INSERT INTO log VALUES (new.a); DELETE FROM log2)",
     );
     let rs = only_stmt(&list);
     let r = rs
@@ -1302,8 +1302,9 @@ fn create_rule_full_shape() {
     let rel = r.relation.expect("relation");
     assert_eq!(rel.schemaname, Some("s"));
     assert_eq!(rel.relname, Some("t"));
-    assert_eq!(r.actions.len(), 1);
+    assert_eq!(r.actions.len(), 2);
     assert!(r.actions.nth(0).as_insert_stmt().is_some());
+    assert!(r.actions.nth(1).as_delete_stmt().is_some());
 }
 
 #[test]
