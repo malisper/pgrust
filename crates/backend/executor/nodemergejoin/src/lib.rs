@@ -123,8 +123,6 @@ pub fn exec_init_merge_join<'mcx>(
 
     let ps_ResultTupleSlot =
         estate.exec_init_extra_tuple_slot(Some(result_desc.clone()), TupleSlotKind::Virtual);
-    // Marked inner slot uses the inner descriptor + minimal ops (the inner is a
-    // Sort or Material producing minimal tuples).
     let mj_MarkedTupleSlot =
         estate.exec_init_extra_tuple_slot(Some(inner_desc.clone()), TupleSlotKind::MinimalTuple);
 
@@ -171,8 +169,6 @@ pub fn inner_child_eflags(eflags: i32, skip_mark_restore: bool) -> i32 {
     }
 }
 
-// MJExamineQuals: compile each mergeclause's two operand exprs and build the
-// per-clause comparator from (opfamily, collation, reversal, nulls_first).
 fn examine_quals<'mcx>(
     node: &'mcx MergeJoin<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -197,11 +193,9 @@ fn examine_quals<'mcx>(
         let reversed = node.mergeReversals[i];
         let nulls_first = node.mergeNullsFirst[i];
 
-        // Operator's declared input types (op_strategy is EQ, guaranteed by
-        // op_mergejoinable at plan time). The comparator resolve keys on
-        // (lefttype, righttype) like C: a cross-type clause without a
-        // sortsupport proc lands on the loud BTORDER-shim panic instead of a
-        // silently wrong same-type comparator.
+        // Comparator resolve keys on (lefttype, righttype) like C: a
+        // cross-type clause lands on the loud BTORDER-shim panic instead of
+        // a silently wrong same-type comparator.
         let (op_strategy, lefttype, righttype) =
             lsyscache::amop::get_op_opfamily_properties(op.opno, opfamily, false)?;
         assert!(
@@ -348,7 +342,6 @@ fn project_result<'mcx>(
     Ok(result_id)
 }
 
-// MarkInnerTuple: copy the current inner tuple into the marked slot.
 fn mark_inner_tuple<'mcx>(
     node: &mut MergeJoinState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -483,7 +476,6 @@ where
                 }
             }
             EXEC_MJ_TESTOUTER => {
-                // Compare the new outer against the marked inner run.
                 let marked = Some(node.mj_MarkedTupleSlot);
                 eval_inner_values(node, estate, marked)?;
                 let cmp = mj_compare(node, estate);
@@ -491,14 +483,11 @@ where
                     if !node.mj_SkipMarkRestore {
                         inner.restr_pos(estate)?;
                         // ExecRestrPos gives no slot back: the marked slot
-                        // stands in for the current inner, as C. With
-                        // skip_mark_restore the current inner is already the
-                        // first possible match and stays current.
+                        // stands in for the current inner, as C.
                         node.mj_InnerTupleSlot = Some(node.mj_MarkedTupleSlot);
                     }
                     node.mj_JoinState = EXEC_MJ_JOINTUPLES;
                 } else if cmp > 0 {
-                    // Marked run exhausted: reload the current inner.
                     match eval_inner_values(node, estate, node.mj_InnerTupleSlot)? {
                         MJEvalResult::Matchable => node.mj_JoinState = EXEC_MJ_SKIP_TEST,
                         MJEvalResult::NonMatchable => {

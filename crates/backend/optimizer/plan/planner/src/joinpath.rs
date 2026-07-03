@@ -134,8 +134,6 @@ fn sort_inner_and_outer<'mcx>(
     let all_pathkeys = select_outer_pathkeys_for_merge(run, mergeclause_list, joinrel)?;
 
     for i in 0..all_pathkeys.len() {
-        // Front pathkey first, the rest in the original order (C's lcons +
-        // list_delete_nth_cell shape).
         let mut outerkeys: PgVec<'mcx, PathKey> = PgVec::new_in(run.mcx);
         if i == 0 {
             outerkeys.extend(all_pathkeys.iter().copied());
@@ -194,7 +192,6 @@ fn generate_mergejoin_paths<'mcx>(
     let mergeclauses =
         find_mergeclauses_for_outer_pathkeys(run, &outer_pathkeys, mergeclause_list)?;
     if mergeclauses.is_empty() {
-        // The JOIN_FULL clauseless-merge arm is loud upstream.
         return Ok(());
     }
 
@@ -376,8 +373,7 @@ fn innerrel_is_unique(
         }
     }
 
-    // Clauses usable for the proof: sides must line up with this join.
-    let mut clause_list: Vec<RinfoId> = Vec::new();
+    let mut clause_list: PgVec<'_, RinfoId> = PgVec::new_in(run.mcx);
     for &rid in restrictlist {
         if !clause_sides_match_join(run, rid, outerrel, innerrel) {
             continue;
@@ -385,8 +381,6 @@ fn innerrel_is_unique(
         clause_list.push(rid);
     }
 
-    // relation_has_unique_index_for: every key column of some unique index
-    // must be equated (via an index-opfamily equality) to the outer side.
     let inner_relid = run.root.rel(innerrel).relid;
     let n_indexes = run.root.rel(innerrel).indexlist.len();
     for i in 0..n_indexes {
@@ -446,7 +440,6 @@ fn match_unsorted_outer<'mcx>(
     restrictlist: &[RinfoId],
     mergeclause_list: &[RinfoId],
 ) -> PgResult<()> {
-    // JOIN_INNER: nestjoinOK = true, useallclauses = false.
     let inner_cheapest_total = run
         .root
         .rel(innerrel)
@@ -1340,7 +1333,6 @@ fn initial_cost_mergejoin(
         innerendsel = 1.0;
     }
 
-    // C rint().
     let outer_skip_rows = (outer_path_rows * outerstartsel).round_ties_even();
     let inner_skip_rows = (inner_path_rows * innerstartsel).round_ties_even();
     let outer_rows = crate::costsize::clamp_row_est(outer_path_rows * outerendsel);
@@ -1395,8 +1387,6 @@ fn initial_cost_mergejoin(
             innersortkeys,
             &run.root.path(inner_path).base().pathkeys
         ));
-        // Incremental sort is never considered for the inner side (no
-        // mark/restore support), as C.
         let inner = run.root.path(inner_path).base();
         let (i_disabled, i_total) = (inner.disabled_nodes, inner.total_cost);
         let width = run.root.path_pathtarget(inner_path).width;
@@ -1495,7 +1485,6 @@ fn final_cost_mergejoin(
 
     let mergejointuples = approx_tuple_count(run, outer_path, inner_path, &mergeclauses)?;
 
-    // Outer input is never a UniquePath on this lane.
     let rescannedtuples = if path.skip_mark_restore {
         0.0
     } else {
@@ -1512,7 +1501,6 @@ fn final_cost_mergejoin(
     } else if gucs::enable_material() && mat_inner_cost < bare_inner_cost {
         true
     } else if path.innersortkeys.is_empty() && !exec_supports_mark_restore(run, inner_path) {
-        // Required for correctness regardless of enable_material, as C.
         true
     } else if gucs::enable_material()
         && !path.innersortkeys.is_empty()
