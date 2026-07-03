@@ -195,7 +195,7 @@ pub(crate) fn transformSetOperationStmt<'mcx>(
         || !qry.groupingSets.is_nil()
         || qry.havingQual.is_some()
     {
-        parse_agg::parseCheckAggregates(pstate, &qry)?;
+        parse_agg::parseCheckAggregates(mcx, pstate, &mut qry)?;
     }
 
     Ok(qry)

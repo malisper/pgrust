@@ -719,7 +719,7 @@ fn fix_upper_expr<'mcx>(
             };
             let mut args = NodeList::nil();
             for arg in &g.args {
-                args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset)?)?;
+                args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset, newvarno)?)?;
             }
             Node::mk(
                 mcx,

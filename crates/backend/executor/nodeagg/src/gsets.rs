@@ -92,8 +92,10 @@ pub(crate) fn init_grouping_sets<'mcx>(
     numtrans: usize,
     fm_agg_node: FmNodePtr,
     params: ParamBind<'mcx>,
+    tmpcontext: ::executils::EcxtId,
 ) -> PgResult<PgBox<'mcx, GroupingSetsState<'mcx>>> {
     let mcx = estate.es_query_cxt;
+    let per_tuple = estate.ecxt(tmpcontext).per_tuple_mcx();
     let numphases = 1 + node.chain.len();
 
     let mut maxsets = 1usize;
@@ -190,13 +192,16 @@ pub(crate) fn init_grouping_sets<'mcx>(
         }
 
         let nsets_eff = numsets.max(1);
-        let evaltrans = exec_build_agg_trans_gsets(
+        let mut evaltrans = exec_build_agg_trans_gsets(
             mcx,
             specs,
             &pergroup_bases[..nsets_eff],
             fm_agg_node,
             params,
         )?;
+        // By-ref transfn results ride the armed per-tuple mcx (lib.rs note).
+        // SAFETY: the tmpcontext ExprContext outlives every phase program.
+        unsafe { evaltrans.arm_result_mcx_raw(per_tuple) };
 
         phases.push(PerPhaseData {
             aggstrategy: aggnode.aggstrategy,
