@@ -777,6 +777,7 @@ const ANUM_PG_RANGE_RNGSUBDIFF: i32 = 7;
 const ANUM_PG_PROC_PROARGDEFAULTS: i32 = 24;
 const ANUM_PG_PROC_PROLANG: i32 = 5;
 const ANUM_PG_PROC_PROSRC: i32 = 26;
+const ANUM_PG_PROC_PROCONFIG: i32 = 29;
 const ANUM_PG_AMPROC_AMPROCRIGHTTYPE: i32 = 4;
 const ANUM_PG_AMPROC_AMPROCNUM: i32 = 5;
 const ANUM_PG_AMPROC_AMPROC: i32 = 6;
@@ -1085,6 +1086,7 @@ fn lookup_pg_proc_shape(funcid: Oid) -> PgResult<Option<syscache_seams::PgProcSh
         prorettype: getattr(&t, PROCOID, ANUM_PG_PROC_PRORETTYPE).as_oid(),
         provariadic: getattr(&t, PROCOID, ANUM_PG_PROC_PROVARIADIC).as_oid(),
         prosupport: getattr(&t, PROCOID, ANUM_PG_PROC_PROSUPPORT).as_oid(),
+        prolang: getattr(&t, PROCOID, ANUM_PG_PROC_PROLANG).as_oid(),
         pronargs: getattr(&t, PROCOID, ANUM_PG_PROC_PRONARGS).as_i16(),
         prokind: getattr(&t, PROCOID, ANUM_PG_PROC_PROKIND).as_i8(),
         provolatile: getattr(&t, PROCOID, ANUM_PG_PROC_PROVOLATILE).as_i8(),
@@ -1092,6 +1094,8 @@ fn lookup_pg_proc_shape(funcid: Oid) -> PgResult<Option<syscache_seams::PgProcSh
         proretset: getattr(&t, PROCOID, ANUM_PG_PROC_PRORETSET).as_bool(),
         proisstrict: getattr(&t, PROCOID, ANUM_PG_PROC_PROISSTRICT).as_bool(),
         proleakproof: getattr(&t, PROCOID, ANUM_PG_PROC_PROLEAKPROOF).as_bool(),
+        prosecdef: getattr(&t, PROCOID, ANUM_PG_PROC_PROSECDEF).as_bool(),
+        proconfig_isnull: getattr_nullable(&t, PROCOID, ANUM_PG_PROC_PROCONFIG).is_none(),
     };
     drop(t);
     ReleaseSysCache(tuple);

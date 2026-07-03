@@ -126,6 +126,9 @@ fn install_oper_fixture() {
         });
         syscache_seams::lookup_pg_proc_shape::set(|funcid| {
             Ok(matches!(funcid, 177 | 65 | 144).then_some(syscache_seams::PgProcShape {
+                prolang: 12,
+                prosecdef: false,
+                proconfig_isnull: true,
                 pronamespace: 11,
                 prorettype: if funcid == 177 { INT4OID } else { types_core::catalog::BOOLOID },
                 provariadic: InvalidOid,

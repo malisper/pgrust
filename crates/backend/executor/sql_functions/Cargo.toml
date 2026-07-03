@@ -46,3 +46,8 @@ exectuples = { path = "../exectuples" }
 tcop_dest = { path = "../../tcop/dest" }
 tuplestore = { path = "../../utils/sort/tuplestore" }
 array = { package = "types_array", path = "../../../_support/types/array" }
+clauses = { path = "../../optimizer/util/clauses" }
+clauses_seams = { path = "../../optimizer/util/clauses_seams" }
+planner = { path = "../../optimizer/plan/planner" }
+nodes_core = { path = "../../nodes/nodes_core" }
+readfuncs = { path = "../../nodes/readfuncs" }

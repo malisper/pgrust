@@ -729,6 +729,9 @@ fn install_func() {
     INIT.call_once(|| {
         syscache_seams::lookup_pg_proc_shape::set(|funcid| {
             let shape = |prorettype| syscache_seams::PgProcShape {
+                prolang: 12,
+                prosecdef: false,
+                proconfig_isnull: true,
                 pronamespace: 11,
                 prorettype,
                 provariadic: InvalidOid,

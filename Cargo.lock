@@ -1838,6 +1838,7 @@ dependencies = [
 name = "clauses"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
  "arrayfuncs",
  "arrayutils",
  "clauses_seams",
@@ -1845,7 +1846,9 @@ dependencies = [
  "fmgr_core",
  "lsyscache",
  "mcx",
+ "miscinit_seams",
  "nodes_core",
+ "stack_depth",
  "syscache_seams",
  "typcache_seams",
  "types_core",
@@ -9763,6 +9766,8 @@ version = "0.1.0"
 dependencies = [
  "analyze_seams",
  "cache_syscache",
+ "clauses",
+ "clauses_seams",
  "cmdtag",
  "coerce",
  "datum",
@@ -9776,11 +9781,14 @@ dependencies = [
  "init_small",
  "lsyscache",
  "mcx",
+ "nodes_core",
  "parse_collate",
  "parse_expr",
  "parser_seams",
  "parser_small1",
  "plancache",
+ "planner",
+ "readfuncs",
  "rewrite_handler_seams",
  "snapmgr",
  "stack_depth",

@@ -201,6 +201,7 @@ pub struct PgProcShape {
     pub prorettype: Oid,
     pub provariadic: Oid,
     pub prosupport: Oid,
+    pub prolang: Oid,
     pub pronargs: i16,
     pub prokind: i8,
     pub provolatile: i8,
@@ -208,6 +209,8 @@ pub struct PgProcShape {
     pub proretset: bool,
     pub proisstrict: bool,
     pub proleakproof: bool,
+    pub prosecdef: bool,
+    pub proconfig_isnull: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

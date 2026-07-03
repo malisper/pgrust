@@ -586,6 +586,9 @@ fn install_syscache_fixture_overrides() {
     });
     syscache_seams::lookup_pg_proc_shape::set(|funcid| {
         let shape = |rettype, nargs| syscache_seams::PgProcShape {
+            prolang: 12,
+            prosecdef: false,
+            proconfig_isnull: true,
             pronamespace: 11,
             prorettype: rettype,
             provariadic: 0,
