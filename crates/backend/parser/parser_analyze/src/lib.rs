@@ -2,6 +2,8 @@
 
 pub mod parse_cte;
 mod set_op;
+mod rules;
+pub use rules::transformRuleStmt;
 
 #[cfg(test)]
 mod tests;

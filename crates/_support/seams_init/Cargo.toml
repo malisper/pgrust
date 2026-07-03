@@ -86,6 +86,7 @@ bgwriter = { path = "../../backend/postmaster/bgwriter" }
 walwriter = { path = "../../backend/postmaster/walwriter" }
 postmaster_startup = { path = "../../backend/postmaster/startup" }
 rewrite_handler = { path = "../../backend/rewrite/rewrite_handler" }
+rewrite_define = { path = "../../backend/rewrite/rewrite_define" }
 bufmgr = { path = "../../backend/storage/buffer/bufmgr" }
 fd = { path = "../../backend/storage/file/fd" }
 dsm_core = { path = "../../backend/storage/ipc/dsm_core" }

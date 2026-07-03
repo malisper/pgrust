@@ -56,6 +56,16 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
         NodeTag::T_CoerceViaIO => {
             out_coerce_via_io(out, node.as_variant::<CoerceViaIO>().expect("CoerceViaIO"))?
         }
+        NodeTag::T_SetToDefault => {
+            let d = node
+                .as_variant::<types_nodes::primnodes::SetToDefault>()
+                .expect("SetToDefault");
+            w!(
+                out,
+                "{{SETTODEFAULT :typeId {} :typeMod {} :collation {} :location -1}}",
+                d.typeId, d.typeMod, d.collation
+            );
+        }
         NodeTag::T_Query => out_query(out, node.as_variant::<Query>().expect("Query"))?,
         NodeTag::T_RangeTblEntry => {
             out_range_tbl_entry(out, node.as_variant::<RangeTblEntry>().expect("RangeTblEntry"))?
@@ -514,6 +524,16 @@ fn out_range_tbl_entry(out: &mut PgString<'_>, r: &RangeTblEntry<'_>) -> PgResul
             out_int_list(out, &r.joinrightcols);
             w!(out, " :join_using_alias ");
             out_opt_alias(out, r.join_using_alias)?;
+        }
+        RTEKind::RTE_VALUES => {
+            w!(out, " :values_lists ");
+            out_list(out, &r.values_lists)?;
+            w!(out, " :coltypes ");
+            out_oid_list(out, &r.coltypes);
+            w!(out, " :coltypmods ");
+            out_int_list(out, &r.coltypmods);
+            w!(out, " :colcollations ");
+            out_oid_list(out, &r.colcollations);
         }
         RTEKind::RTE_GROUP => {
             w!(out, " :groupexprs ");

@@ -41,6 +41,5 @@ pg_depend = { path = "../../catalog/pg_depend" }
 commands_comment = { path = "../../commands/comment" }
 readfuncs = { path = "../../nodes/readfuncs" }
 outfuncs = { path = "../../nodes/outfuncs" }
-rewrite_manip = { path = "../../rewrite/rewrite_manip" }
 relcache = { path = "../../utils/cache/relcache" }
 indexcmds_seams = { path = "../../commands/indexcmds_seams" }

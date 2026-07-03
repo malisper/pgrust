@@ -23,6 +23,7 @@ init_small = { path = "../../utils/init/init_small" }
 types_nodes = { path = "../../../_support/types/nodes" }
 pg_attrdef = { path = "../pg_attrdef" }
 pg_constraint = { path = "../pg_constraint" }
+rewrite_define_seams = { path = "../../rewrite/rewrite_define_seams" }
 pg_depend = { path = "../pg_depend" }
 pg_type = { path = "../pg_type" }
 table = { path = "../../access/table/table" }

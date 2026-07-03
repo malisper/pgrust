@@ -26,6 +26,7 @@ const AT_PASS_ADD_COL: usize = 2;
 const AT_PASS_ADD_CONSTR: usize = 6;
 const AT_PASS_COL_ATTRS: usize = 7;
 const AT_PASS_ADD_OTHERCONSTR: usize = 10;
+const AT_PASS_MISC: usize = 11;
 const AT_REWRITE_DEFAULT_VAL: i32 = 1 << 1;
 const AT_REWRITE_COLUMN_REWRITE: i32 = 1 << 2;
 
@@ -286,6 +287,10 @@ fn ATPrepCmd<'mcx>(
             AT_PASS_ALTER_TYPE
         }
         AlterTableType::AT_CookedColumnDefault => AT_PASS_ADD_OTHERCONSTR,
+        AlterTableType::AT_EnableRule
+        | AlterTableType::AT_EnableAlwaysRule
+        | AlterTableType::AT_EnableReplicaRule
+        | AlterTableType::AT_DisableRule => AT_PASS_MISC,
         other => unported(&format!("ATPrepCmd {other:?}")),
     };
     tab.subcmds[pass].lappend(mcx, cnode)?;
@@ -334,6 +339,38 @@ fn ATRewriteCatalogs<'mcx>(
                 }
                 AlterTableType::AT_AlterColumnType => {
                     ATExecAlterColumnType(mcx, tab, &rel, cmd)?;
+                }
+                AlterTableType::AT_EnableRule => {
+                    rewrite_define::EnableDisableRule(
+                        mcx,
+                        &rel,
+                        cmd.name.expect("ENABLE RULE has a name"),
+                        b'O',
+                    )?;
+                }
+                AlterTableType::AT_EnableAlwaysRule => {
+                    rewrite_define::EnableDisableRule(
+                        mcx,
+                        &rel,
+                        cmd.name.expect("ENABLE ALWAYS RULE has a name"),
+                        b'A',
+                    )?;
+                }
+                AlterTableType::AT_EnableReplicaRule => {
+                    rewrite_define::EnableDisableRule(
+                        mcx,
+                        &rel,
+                        cmd.name.expect("ENABLE REPLICA RULE has a name"),
+                        b'R',
+                    )?;
+                }
+                AlterTableType::AT_DisableRule => {
+                    rewrite_define::EnableDisableRule(
+                        mcx,
+                        &rel,
+                        cmd.name.expect("DISABLE RULE has a name"),
+                        b'D',
+                    )?;
                 }
                 other => unported(&format!("ATExecCmd {other:?}")),
             }
