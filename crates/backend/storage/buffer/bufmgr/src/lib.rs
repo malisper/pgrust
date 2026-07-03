@@ -1,7 +1,8 @@
 //! bufmgr.c + buf_init.c + buf_table.c + freelist.c read/pin/mapping/eviction
-//! core, plus the checkpoint write-back lane (FlushBuffer/BufferSync/
-//! CheckPointBuffers). Extend, drop-rel, localbuf, AIO and hint-bit lanes are
-//! phase 2: every entry point is a loud panic naming its C function.
+//! core, the checkpoint write-back lane (FlushBuffer/BufferSync/
+//! CheckPointBuffers), and the extend lane (ExtendBufferedRelBy/To shared
+//! arm). Drop-rel, localbuf, AIO and hint-bit lanes are phase 2: every entry
+//! point is a loud panic naming its C function.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -10,6 +11,7 @@ mod bgwriter_sync;
 mod buf_hdr;
 mod buf_table;
 pub mod counters;
+mod extend;
 mod freelist;
 mod gucs;
 mod ops;
@@ -50,12 +52,33 @@ pub use pin::{
 };
 pub use privref::{GetPrivateRefCount, ReservePrivateRefCountEntry};
 pub use read::{ReadBufferWithoutRelcache, ReadBuffer_common, ReadRecentBuffer};
+pub use extend::{ExtendBufferedRelBy, ExtendBufferedRelTo, ExtendBufferedRelToSmgr};
 
 const DEFAULTTABLESPACE_OID: Oid = 1663;
 const GLOBALTABLESPACE_OID: Oid = 1664;
 
-/// RelationInitPhysicalAddr's steady-state rules (relcache.c), pending rd_locator.
+/// rd_locator read; the compute arm backfills entries built outside relcache
+/// (tests, pre-InitPhysicalAddr builds) with RelationInitPhysicalAddr's
+/// steady-state rules — C's invariant is "valid before any smgr access".
 fn rel_locator_backend(rel: &RelationData<'_>) -> RelFileLocatorBackend {
+    let mut locator = rel.rd_locator.get();
+    if locator.relNumber == 0 {
+        locator = compute_rel_locator(rel);
+        rel.rd_locator.set(locator);
+    }
+    RelFileLocatorBackend {
+        locator,
+        backend: if rel.rd_rel.relpersistence == RELPERSISTENCE_TEMP {
+            rel.rd_backend
+        } else {
+            INVALID_PROC_NUMBER
+        },
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn compute_rel_locator(rel: &RelationData<'_>) -> RelFileLocator {
     let form = &rel.rd_rel;
     let rel_number = if form.relfilenode == 0 {
         let n = relmapper_seams::relation_map_oid_to_filenumber::call(rel.rd_id, form.relisshared);
@@ -80,17 +103,10 @@ fn rel_locator_backend(rel: &RelationData<'_>) -> RelFileLocatorBackend {
     } else {
         init_small::globals::MyDatabaseId()
     };
-    RelFileLocatorBackend {
-        locator: RelFileLocator {
-            spcOid: spc,
-            dbOid: db,
-            relNumber: rel_number,
-        },
-        backend: if form.relpersistence == RELPERSISTENCE_TEMP {
-            rel.rd_backend
-        } else {
-            INVALID_PROC_NUMBER
-        },
+    RelFileLocator {
+        spcOid: spc,
+        dbOid: db,
+        relNumber: rel_number,
     }
 }
 
@@ -194,12 +210,20 @@ pub fn init_seams() {
 
     bufmgr_seams::read_recent_buffer::set(read::ReadRecentBuffer);
     bufmgr_seams::read_buffer_without_relcache::set(read::ReadBufferWithoutRelcache);
-    bufmgr_seams::extend_buffered_rel_to::set(|_, _, _, _, _, _| {
-        panic!("unported callee reached from bufmgr.c: ExtendBufferedRelTo (extend machinery, phase 2)")
+    // The BMR_SMGR seam form carries no relpersistence: its only callers
+    // (recovery/init paths) extend permanent relations, per C's call sites.
+    bufmgr_seams::extend_buffered_rel_to::set(|smgr, fork, strategy, flags, extend_to, mode| {
+        extend::ExtendBufferedRelToSmgr(
+            smgr,
+            types_core::RELPERSISTENCE_PERMANENT,
+            fork,
+            strategy,
+            flags,
+            extend_to,
+            mode,
+        )
     });
-    bufmgr_seams::extend_buffered_rel_by::set(|_, _, _, _, _| {
-        panic!("unported callee reached from bufmgr.c: ExtendBufferedRelBy (extend machinery, phase 2)")
-    });
+    bufmgr_seams::extend_buffered_rel_by::set(extend::ExtendBufferedRelBy);
     bufmgr_seams::release_buffer::set(pin::ReleaseBuffer);
     bufmgr_seams::mark_buffer_dirty::set(ops::MarkBufferDirty);
     bufmgr_seams::flush_one_buffer::set(write::FlushOneBuffer);

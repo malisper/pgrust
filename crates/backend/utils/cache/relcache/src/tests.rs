@@ -198,6 +198,7 @@ fn install() {
         relmapper_seams::relation_map_initialize_phase2::set(|| Ok(()));
         relmapper_seams::relation_map_initialize_phase3::set(|| Ok(()));
         relmapper_seams::relation_map_update_map::set(|_, _, _, _| Ok(()));
+        relmapper_seams::relation_map_oid_to_filenumber::set(|relid, _| relid);
         namespace_seams::is_temp_or_temp_toast_namespace::set(|_| true);
         namespace_seams::get_temp_namespace_proc_number::set(|_| Ok(7));
         syscache_seams::relation_has_sys_cache::set(|relid| {

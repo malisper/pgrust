@@ -277,7 +277,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
         relfrozenxid: 3,
         relminmxid: 1,
     };
-    let data = ::types_rel::RelationData {
+    let data = ::types_rel::RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
         rd_id: oid,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,

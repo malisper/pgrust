@@ -10,10 +10,12 @@ use crate::{build, cache_mcx, store, with_state, RelCacheEnt};
 
 const RELATION_RELATION_ID: Oid = types_core::RELATION_RELATION_ID;
 
-// RelationInvalidateRelation; C also closes smgr / frees rd_amcache (absent fields).
+// RelationInvalidateRelation; C also frees rd_amcache (absent clearing, prior gap).
 // rd_indexlist cleared here = C freeing it in RelationClearRelation/rebuild;
 // every inval arm passes through here before the entry is dropped or replaced.
 pub(crate) fn RelationInvalidateRelation(rel: &RelationData<'static>) {
+    // C RelationCloseSmgr is void; mdclose cannot fail.
+    let _ = smgr::RelationCloseSmgr(rel);
     rel.rd_isvalid.set(false);
     *rel.rd_indexlist.borrow_mut() = None;
 }
@@ -124,7 +126,7 @@ fn RelationReloadIndexInfo(
     let mcx = cache_mcx();
     let ii = relcache_build_seams::relation_init_index_access_info::call(mcx, relid, &scanned.form)?;
 
-    let newrel = Rc::new(RelationData {
+    let newrel = Rc::new(RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
         rd_id: relid,
         rd_backend: held.rd_backend,
         rd_islocaltemp: held.rd_islocaltemp,
@@ -147,6 +149,7 @@ fn RelationReloadIndexInfo(
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
     });
+    build::RelationInitPhysicalAddr(&newrel)?;
     copy_preserved(held, &newrel);
     with_state(|st| {
         if let Some(ent) = st.id_cache.get_mut(&relid) {
@@ -175,7 +178,7 @@ fn RelationReloadNailed(
     let scanned = relcache_build_seams::scan_pg_relation::call(relid, true, false)?
         .ok_or_else(|| deleted_while_in_use(relid))?;
 
-    let newrel = Rc::new(RelationData {
+    let newrel = Rc::new(RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
         rd_id: relid,
         rd_backend: held.rd_backend,
         rd_islocaltemp: held.rd_islocaltemp,
@@ -198,6 +201,7 @@ fn RelationReloadNailed(
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
     });
+    build::RelationInitPhysicalAddr(&newrel)?;
     copy_preserved(held, &newrel);
     with_state(|st| {
         if let Some(ent) = st.id_cache.get_mut(&relid) {
@@ -306,7 +310,9 @@ pub fn RelationCacheInvalidate(debug_discard: bool) -> PgResult<()> {
             RelationClearRelation(relid, &rel)?;
             continue;
         }
-        // C refreshes mapped rels' rd_locator here (storage unit).
+        if rel.is_mapped() {
+            build::RelationInitPhysicalAddr(&rel)?;
+        }
         if relid == RELATION_RELATION_ID {
             rebuild_first.insert(0, (relid, rel, nailed));
         } else if relid == CLASS_OID_INDEX_ID {

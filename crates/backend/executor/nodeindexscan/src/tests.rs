@@ -383,7 +383,7 @@ fn heap_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
         relfrozenxid: 3,
         relminmxid: 1,
     };
-    let data = RelationData {
+    let data = RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
         rd_id: oid,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,
@@ -427,7 +427,7 @@ fn index_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid, heap_oid: Oid) -> Relation<'mc
     indkey.push(1);
     let mut indoption = PgVec::new_in(mcx);
     indoption.push(0i16);
-    let data = RelationData {
+    let data = RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
         rd_id: oid,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,

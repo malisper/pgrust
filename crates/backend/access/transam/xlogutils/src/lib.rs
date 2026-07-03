@@ -2,8 +2,8 @@
 //! `standbyState` / `ignore_invalid_pages` stores live here (C's home for
 //! them is xlogutils.c); xlog/xlogrecovery write via the setters (direct
 //! dep), slru reads via xlogutils_seams::in_recovery. The fake-relcache pair
-//! is a loud panic: rel vocab lacks rd_locator/rd_smgr and all consumers
-//! (heapam/storage redo) are unported.
+//! is a loud panic: rd_locator/rd_smgr vocabulary landed, the fake-entry
+//! construction lands with the first redo consumer (heapam/storage redo).
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -416,8 +416,8 @@ pub struct FakeRelcacheEntry {
 #[cold]
 pub fn CreateFakeRelcacheEntry(rlocator: RelFileLocator) -> FakeRelcacheEntry {
     panic!(
-        "CreateFakeRelcacheEntry({rlocator:?}) not ported: rel vocab lacks rd_locator/rd_smgr; \
-         land with the first redo consumer"
+        "CreateFakeRelcacheEntry({rlocator:?}) not ported: rd_locator/rd_smgr vocabulary landed; \
+         the fake-entry FormData_pg_class/tupdesc construction lands with the first redo consumer"
     );
 }
 

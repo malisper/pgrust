@@ -202,32 +202,28 @@ fn add_to_array<'mcx>(
     true
 }
 
-// DIVERGENCE from ParseTzFile's get_share_path(my_exec_path): src/port/path.c
-// is unported; PGRUST_PGSHAREDIR (runtime or build) / PGRUST_TZDIR's parent
-// stand in. Swap to a direct path-unit dep when it lands.
-fn tzsets_dir() -> Option<&'static str> {
-    static DIR: OnceLock<Option<String>> = OnceLock::new();
+// DIVERGENCE from ParseTzFile's get_share_path(my_exec_path): the PGRUST_*
+// runtime env / PGRUST_TZDIR's parent take precedence over C's get_share_path
+// resolution (harness override; boot-smoke.sh exports them).
+fn tzsets_dir() -> &'static str {
+    static DIR: OnceLock<String> = OnceLock::new();
     DIR.get_or_init(|| {
         if let Ok(share) = std::env::var("PGRUST_PGSHAREDIR") {
-            return Some(format!("{share}/timezonesets"));
+            return format!("{share}/timezonesets");
         }
         if let Ok(tzdir) = std::env::var("PGRUST_TZDIR") {
             if let Some((parent, _)) = tzdir.rsplit_once('/') {
-                return Some(format!("{parent}/timezonesets"));
+                return format!("{parent}/timezonesets");
             }
         }
-        option_env!("PGRUST_PGSHAREDIR").map(|share| format!("{share}/timezonesets"))
+        if let Some(share) = option_env!("PGRUST_PGSHAREDIR") {
+            return format!("{share}/timezonesets");
+        }
+        let exec = init_small::globals::my_exec_path();
+        let len = exec.iter().position(|&b| b == 0).unwrap_or(exec.len());
+        let share = pg_path::get_share_path(&String::from_utf8_lossy(&exec[..len]));
+        format!("{share}/timezonesets")
     })
-    .as_deref()
-}
-
-#[cold]
-fn tzsets_dir_unknown() -> ! {
-    panic!(
-        "tzparser ParseTzFile: timezonesets directory unknown \
-         (get_share_path in src/port/path.c is unported; \
-         set PGRUST_PGSHAREDIR or PGRUST_TZDIR, or build with PGRUST_PGSHAREDIR)"
-    );
 }
 
 fn parse_tz_file<'mcx>(
@@ -361,6 +357,6 @@ fn load_tzoffsets_from(dir: &str, filename: &str) -> Option<&'static ZoneAbbrevT
 
 /// On failure returns None with the details in the GUC check-error slots.
 pub fn load_tzoffsets(filename: &str) -> Option<&'static ZoneAbbrevTable> {
-    let Some(dir) = tzsets_dir() else { tzsets_dir_unknown() };
+    let dir = tzsets_dir();
     load_tzoffsets_from(dir, filename)
 }

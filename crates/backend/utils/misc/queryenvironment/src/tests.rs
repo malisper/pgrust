@@ -168,7 +168,7 @@ fn fake_relation_open(mcx: Mcx<'_>, oid: Oid, lockmode: LOCKMODE) -> PgResult<Re
     assert_eq!(oid, TBL);
     let mut relname = NameData::default();
     relname.namestrcpy("tbl");
-    let data = RelationData {
+    let data = RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
         rd_id: oid,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,

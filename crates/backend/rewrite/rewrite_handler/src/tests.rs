@@ -49,7 +49,7 @@ fn entry(oid: Oid) -> Option<(&'static str, u8, bool)> {
 fn make<'mcx>(mcx: Mcx<'mcx>, oid: Oid, name: &str, relkind: u8, rls: bool) -> Relation<'mcx> {
     let mut relname = NameData::default();
     relname.namestrcpy(name);
-    let data = RelationData {
+    let data = RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
         rd_id: oid,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,
@@ -314,13 +314,13 @@ fn acquire_locks_recurses_into_subquery_rte() {
 }
 
 #[test]
-#[should_panic(expected = "INSERT/UPDATE/DELETE/MERGE rewrite")]
+#[should_panic(expected = "rewriteTargetListIU UPDATE/DELETE/MERGE arms")]
 fn dml_rewrite_defers_loud() {
     install();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut query = select1(mcx);
-    query.commandType = CmdType::CMD_INSERT;
+    query.commandType = CmdType::CMD_UPDATE;
     query.resultRelation = 1;
     let _ = QueryRewrite(mcx, query);
 }

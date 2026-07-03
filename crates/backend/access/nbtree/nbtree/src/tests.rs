@@ -38,20 +38,31 @@ struct FakePage([u8; BLCKSZ]);
 #[repr(C, align(8))]
 struct Img<const N: usize>([u8; N]);
 
+// heap fixture pages live above HEAP_BUF_BASE in buffer-id space.
+const HEAP_BUF_BASE: Buffer = 10000;
+const HEAP_OID: Oid = 4999;
+
 thread_local! {
     static PAGES: RefCell<Vec<Box<FakePage>>> = const { RefCell::new(Vec::new()) };
+    static HEAP_PAGES: RefCell<Vec<Box<FakePage>>> = const { RefCell::new(Vec::new()) };
     static PINS: Cell<i32> = const { Cell::new(0) };
     static READS: Cell<u32> = const { Cell::new(0) };
     static DIRTY_HINTS: Cell<u32> = const { Cell::new(0) };
+    static WAL: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static NEXT_LSN: Cell<u64> = const { Cell::new(0x1000) };
 }
 
 fn install() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        bufmgr_seams::read_buffer::set(|_rel, blkno| {
+        bufmgr_seams::read_buffer::set(|rel, blkno| {
             READS.with(|c| c.set(c.get() + 1));
             PINS.with(|c| c.set(c.get() + 1));
-            Ok(blkno as Buffer + 1)
+            if rel.rd_id == HEAP_OID {
+                Ok(HEAP_BUF_BASE + blkno as Buffer + 1)
+            } else {
+                Ok(blkno as Buffer + 1)
+            }
         });
         bufmgr_seams::release_buffer::set(|_buf| {
             PINS.with(|c| c.set(c.get() - 1));
@@ -59,7 +70,7 @@ fn install() {
         });
         bufmgr_seams::release_and_read_buffer::set(|buf, rel, blkno| {
             if buf != InvalidBuffer {
-                if buf == blkno as Buffer + 1 {
+                if buf == blkno as Buffer + 1 && rel.rd_id != HEAP_OID {
                     return Ok(buf); // C's same-block pin-keeping fastpath
                 }
                 bufmgr_seams::release_buffer::call(buf)?;
@@ -67,21 +78,82 @@ fn install() {
             bufmgr_seams::read_buffer::call(rel, blkno)
         });
         bufmgr_seams::lock_buffer::set(|_buf, _mode| Ok(()));
-        bufmgr_seams::buffer_get_block_number::set(|buf| (buf - 1) as BlockNumber);
+        bufmgr_seams::conditional_lock_buffer::set(|_buf| Ok(true));
+        bufmgr_seams::buffer_get_block_number::set(|buf| {
+            if buf > HEAP_BUF_BASE {
+                (buf - HEAP_BUF_BASE - 1) as BlockNumber
+            } else {
+                (buf - 1) as BlockNumber
+            }
+        });
         bufmgr_seams::buffer_get_page::set(|buf| {
-            PAGES.with(|p| {
-                core::ptr::NonNull::new(p.borrow_mut()[(buf - 1) as usize].0.as_mut_ptr())
+            if buf > HEAP_BUF_BASE {
+                HEAP_PAGES.with(|p| {
+                    core::ptr::NonNull::new(
+                        p.borrow_mut()[(buf - HEAP_BUF_BASE - 1) as usize].0.as_mut_ptr(),
+                    )
                     .expect("page")
-            })
+                })
+            } else {
+                PAGES.with(|p| {
+                    core::ptr::NonNull::new(p.borrow_mut()[(buf - 1) as usize].0.as_mut_ptr())
+                        .expect("page")
+                })
+            }
         });
         bufmgr_seams::incr_buffer_ref_count::set(|_buf| PINS.with(|c| c.set(c.get() + 1)));
         bufmgr_seams::mark_buffer_dirty_hint::set(|_buf, _std| {
             DIRTY_HINTS.with(|c| c.set(c.get() + 1));
             Ok(())
         });
+        bufmgr_seams::mark_buffer_dirty::set(|_buf| Ok(()));
         bufmgr_seams::buffer_get_lsn_atomic::set(|_buf| 0x1234);
+        bufmgr_seams::extend_buffered_rel_by::set(|rel, _fork, _strategy, flags, n| {
+            assert!(rel.rd_id != HEAP_OID);
+            assert_eq!(n, 1);
+            assert!(flags & bufmgr_seams::EB_LOCK_FIRST != 0);
+            let buf = PAGES.with(|p| {
+                let mut pages = p.borrow_mut();
+                pages.push(Box::new(FakePage([0u8; BLCKSZ])));
+                pages.len() as Buffer
+            });
+            PINS.with(|c| c.set(c.get() + 1));
+            Ok((buf, 1))
+        });
         transam_xlog_seams::xlog_standby_info_active::set(|| false);
+        xloginsert_seams::xlog_insert_record::set(|rmid, info, _flags, _main, _bufs| {
+            assert_eq!(rmid, ::rmgr::RM_BTREE_ID as u8);
+            WAL.with(|w| w.borrow_mut().push(info));
+            let lsn = NEXT_LSN.get() + 8;
+            NEXT_LSN.set(lsn);
+            Ok(lsn)
+        });
+        predicate_seams::check_for_serializable_conflict_in::set(|_rel, _tid, _blk| Ok(()));
+        predicate_seams::predicate_lock_page_split::set(|_rel, _o, _n| Ok(()));
+        predicate_seams::predicate_lock_tid::set(|_rel, _tid, _snap, _xid| Ok(()));
+        predicate_seams::check_for_serializable_conflict_out_needed::set(|_rel, _snap| false);
+        pruneheap_seams::heap_page_prune_opt::set(|_rel, _buf| Ok(()));
+        bufmgr_seams::relation_smgr_locator::set(|rel| ::types_storage::RelFileLocatorBackend {
+            locator: ::types_storage::RelFileLocator {
+                spcOid: 0,
+                dbOid: 5,
+                relNumber: rel.rd_rel.relfilenode,
+            },
+            backend: INVALID_PROC_NUMBER,
+        });
+        smgr_seams::smgr_cached_nblocks::set(|_loc, _fork| 0);
+        smgr_seams::smgr_set_cached_nblocks::set(|_loc, _fork, _n| Ok(()));
+        smgr_seams::smgr_exists::set(|_loc, _fork| Ok(false));
+        heapam_visibility::init_seams();
     });
+}
+
+fn wal_infos() -> Vec<u8> {
+    WAL.with(|w| w.borrow().clone())
+}
+
+fn reset_wal() {
+    WAL.with(|w| w.borrow_mut().clear());
 }
 
 // ------------------------------------------------------------------
@@ -121,6 +193,10 @@ fn new_page(
 }
 
 fn meta_page(root: BlockNumber, level: u32) -> Box<FakePage> {
+    meta_page_opts(root, level, true)
+}
+
+fn meta_page_opts(root: BlockNumber, level: u32, allequalimage: bool) -> Box<FakePage> {
     let mut p = new_page(BTP_META, 0, P_NONE, P_NONE);
     let metad = BTMetaPageData {
         btm_magic: BTREE_MAGIC,
@@ -131,7 +207,7 @@ fn meta_page(root: BlockNumber, level: u32) -> Box<FakePage> {
         btm_fastlevel: level,
         btm_last_cleanup_num_delpages: 0,
         btm_last_cleanup_num_heap_tuples: -1.0,
-        btm_allequalimage: true,
+        btm_allequalimage: allequalimage,
     };
     // SAFETY: metapage contents at +24 on an owned page.
     unsafe {
@@ -221,6 +297,10 @@ fn noop_close(_oid: Oid, _mode: LOCKMODE) -> PgResult<()> {
 }
 
 fn index_rel(mcx: Mcx<'_>) -> Relation<'_> {
+    index_rel_opts(mcx, false)
+}
+
+fn index_rel_opts(mcx: Mcx<'_>, unique: bool) -> Relation<'_> {
     let mut relname = ::types_tuple::NameData::default();
     relname.namestrcpy("t_idx");
     let mut indkey = PgVec::new_in(mcx);
@@ -232,7 +312,7 @@ fn index_rel(mcx: Mcx<'_>) -> Relation<'_> {
     };
     let mut indoption = PgVec::new_in(mcx);
     indoption.push(0i16);
-    let data = RelationData {
+    let data = RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
         rd_id: 5000,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,
@@ -274,7 +354,7 @@ fn index_rel(mcx: Mcx<'_>) -> Relation<'_> {
             indrelid: 4999,
             indnatts: 1,
             indnkeyatts: 1,
-            indisunique: false,
+            indisunique: unique,
             indnullsnotdistinct: false,
             indisprimary: false,
             indisexclusion: false,
@@ -591,8 +671,309 @@ fn redundant_inequalities_are_eliminated() {
 }
 
 // ------------------------------------------------------------------
-// itup kernel (Miri target: no seams, pure in-memory bytes).
+// Insert lane: empty-index fixture, heap fixture for unique checks.
 // ------------------------------------------------------------------
+
+fn heap_relation(mcx: Mcx<'_>) -> Relation<'_> {
+    let mut relname = ::types_tuple::NameData::default();
+    relname.namestrcpy("t");
+    let data = RelationData {
+        rd_locator: Default::default(),
+        rd_smgr: Default::default(),
+        rd_id: HEAP_OID,
+        rd_backend: INVALID_PROC_NUMBER,
+        rd_islocaltemp: false,
+        rd_isvalid: Cell::new(true),
+        rd_createSubid: Cell::new(0),
+        rd_newRelfilelocatorSubid: Cell::new(0),
+        rd_firstRelfilelocatorSubid: Cell::new(0),
+        rd_droppedSubid: Cell::new(0),
+        rd_lockInfo: LockInfoData {
+            lockRelId: LockRelId { relId: HEAP_OID, dbId: 5 },
+        },
+        rd_rel: FormData_pg_class {
+            relname,
+            relnamespace: 2200,
+            reltype: 0,
+            relowner: 10,
+            relam: ::types_core::HEAP_TABLE_AM_OID,
+            relfilenode: HEAP_OID,
+            reltablespace: 0,
+            relpages: 0,
+            reltuples: -1.0,
+            relallvisible: 0,
+            reltoastrelid: 0,
+            relhasindex: true,
+            relisshared: false,
+            relpersistence: RELPERSISTENCE_PERMANENT,
+            relkind: ::types_rel::RELKIND_RELATION,
+            relhassubclass: false,
+            relrowsecurity: false,
+            relispopulated: true,
+            relreplident: REPLICA_IDENTITY_DEFAULT,
+            relispartition: false,
+            relfrozenxid: 3,
+            relminmxid: 1,
+        },
+        rd_att: Rc::new(int4_tupdesc(mcx)),
+        rd_index: None,
+        rd_opcintype: PgVec::new_in(mcx),
+        rd_opfamily: PgVec::new_in(mcx),
+        rd_indoption: PgVec::new_in(mcx),
+        rd_indcollation: PgVec::new_in(mcx),
+        rd_options: None,
+        pgstat_enabled: Cell::new(false),
+        rd_amcache: Default::default(),
+        rd_supportinfo: Default::default(),
+        rd_indexlist: Default::default(),
+    };
+    Relation::open(data, Some(noop_close))
+}
+
+// Committed-hint heap tuple (28B header+int4): the dirty-snapshot recheck
+// resolves it without transam/procarray probes.
+fn heap_tuple_image(val: i32) -> [u8; 28] {
+    let mut img = [0u8; 28];
+    img[0..4].copy_from_slice(&10u32.to_ne_bytes()); // xmin
+    img[18..20].copy_from_slice(&1u16.to_ne_bytes()); // natts
+    let infomask = ::types_tuple::HEAP_XMAX_INVALID | ::types_tuple::HEAP_XMIN_COMMITTED;
+    img[20..22].copy_from_slice(&infomask.to_ne_bytes());
+    img[22] = 24; // t_hoff
+    img[24..28].copy_from_slice(&val.to_ne_bytes());
+    img
+}
+
+fn build_heap_page(vals: &[i32]) -> Box<FakePage> {
+    let mut page = Box::new(FakePage([0u8; BLCKSZ]));
+    let n = vals.len();
+    let lower = SizeOfPageHeaderData + n * 4;
+    let mut upper = BLCKSZ;
+    for (i, val) in vals.iter().enumerate() {
+        let img = heap_tuple_image(*val);
+        upper = (upper - img.len()) & !7;
+        page.0[upper..upper + img.len()].copy_from_slice(&img);
+        let mut id = ::types_storage::bufpage::ItemIdData::new(0, 0, 0);
+        id.set_normal(upper as u16, img.len() as u16);
+        let off = SizeOfPageHeaderData + i * 4;
+        // SAFETY: repr(transparent) over u32.
+        let raw: u32 = unsafe { core::mem::transmute(id) };
+        page.0[off..off + 4].copy_from_slice(&raw.to_ne_bytes());
+    }
+    page.0[12..14].copy_from_slice(&(lower as u16).to_ne_bytes());
+    page.0[14..16].copy_from_slice(&(upper as u16).to_ne_bytes());
+    page.0[16..18].copy_from_slice(&(BLCKSZ as u16).to_ne_bytes());
+    page.0[18..20].copy_from_slice(&((BLCKSZ as u16) | 4).to_ne_bytes());
+    page
+}
+
+fn build_empty_index(allequalimage: bool) {
+    PAGES.with(|p| {
+        let mut pages = p.borrow_mut();
+        pages.clear();
+        pages.push(meta_page_opts(P_NONE, 0, allequalimage));
+    });
+    HEAP_PAGES.with(|p| p.borrow_mut().clear());
+    READS.with(|c| c.set(0));
+    reset_wal();
+}
+
+fn insert_key(rel: &Relation<'_>, heap: &Relation<'_>, key: i32, heap_tid: ItemPointerData) {
+    let cx = MemoryContext::new("ins");
+    crate::btinsert(
+        cx.mcx(),
+        rel,
+        &[Datum::from_i32(key)],
+        &[false],
+        &heap_tid,
+        heap,
+        ::types_nbtree::genam::IndexUniqueCheck::UNIQUE_CHECK_NO,
+        false,
+    )
+    .unwrap();
+}
+
+fn drain_forward(mcx: Mcx<'_>, rel: &Relation<'_>) -> Vec<ItemPointerData> {
+    let mut scan = begin_scan(mcx, rel, &[]);
+    let mut seen = Vec::new();
+    while crate::btgettuple(&mut scan, ForwardScanDirection).unwrap() {
+        seen.push(scan.xs_heaptid);
+    }
+    crate::btendscan(&mut scan).unwrap();
+    seen
+}
+
+#[test]
+fn insert_into_empty_index_builds_root() {
+    install();
+    build_empty_index(false);
+    let cx = MemoryContext::new("t");
+    let rel = index_rel(cx.mcx());
+    prime_supportinfo(&rel);
+
+    for k in [30, 10, 20, 40, 5] {
+        insert_key(&rel, &rel, k, tid(100 + k as u32, 1));
+    }
+
+    let seen = drain_forward(cx.mcx(), &rel);
+    let blocks: Vec<u32> = seen.iter().map(ItemPointerGetBlockNumber).collect();
+    assert_eq!(blocks, vec![105, 110, 120, 130, 140]); // key order
+
+    // root creation (NEWROOT) then five leaf inserts.
+    assert_eq!(
+        wal_infos(),
+        vec![
+            ::types_nbtree::XLOG_BTREE_NEWROOT,
+            ::types_nbtree::XLOG_BTREE_INSERT_LEAF,
+            ::types_nbtree::XLOG_BTREE_INSERT_LEAF,
+            ::types_nbtree::XLOG_BTREE_INSERT_LEAF,
+            ::types_nbtree::XLOG_BTREE_INSERT_LEAF,
+            ::types_nbtree::XLOG_BTREE_INSERT_LEAF,
+        ]
+    );
+    assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
+}
+
+#[test]
+fn sequential_inserts_split_and_stay_navigable() {
+    install();
+    build_empty_index(false);
+    let cx = MemoryContext::new("t");
+    let rel = index_rel(cx.mcx());
+    prime_supportinfo(&rel);
+
+    let n = 1500u32;
+    for k in 1..=n {
+        insert_key(&rel, &rel, k as i32, tid(k, 1));
+    }
+
+    let seen = drain_forward(cx.mcx(), &rel);
+    assert_eq!(seen.len(), n as usize);
+    for (i, t) in seen.iter().enumerate() {
+        assert_eq!(ItemPointerGetBlockNumber(t), i as u32 + 1);
+    }
+
+    // rightmost splits + a root split happened, WAL shape recorded.
+    let infos = wal_infos();
+    let splits = infos
+        .iter()
+        .filter(|i| {
+            **i == ::types_nbtree::XLOG_BTREE_SPLIT_R || **i == ::types_nbtree::XLOG_BTREE_SPLIT_L
+        })
+        .count();
+    let newroots = infos
+        .iter()
+        .filter(|i| **i == ::types_nbtree::XLOG_BTREE_NEWROOT)
+        .count();
+    let uppers = infos
+        .iter()
+        .filter(|i| **i == ::types_nbtree::XLOG_BTREE_INSERT_UPPER)
+        .count();
+    assert!(splits >= 3, "expected several leaf splits, saw {splits}");
+    assert_eq!(newroots, 2, "root creation + root split");
+    assert_eq!(uppers, splits - 1, "each non-root split posts a downlink");
+
+    assert_eq!(crate::bt_getrootheight(&rel).unwrap(), 1);
+
+    // descent still finds point values after the splits.
+    for probe in [1i32, 366, 367, 1000, 1500] {
+        let keys = [key(1, probe, test_int4eq, BTEqualStrategyNumber)];
+        let mut scan = begin_scan(cx.mcx(), &rel, &keys);
+        assert!(crate::btgettuple(&mut scan, ForwardScanDirection).unwrap());
+        assert_eq!(ItemPointerGetBlockNumber(&scan.xs_heaptid), probe as u32);
+        assert!(!crate::btgettuple(&mut scan, ForwardScanDirection).unwrap());
+        crate::btendscan(&mut scan).unwrap();
+    }
+
+    // backward over the whole tree too.
+    let mut scan = begin_scan(cx.mcx(), &rel, &[]);
+    let mut back = Vec::new();
+    while crate::btgettuple(&mut scan, ::types_scan::sdir::BackwardScanDirection).unwrap() {
+        back.push(ItemPointerGetBlockNumber(&scan.xs_heaptid));
+    }
+    crate::btendscan(&mut scan).unwrap();
+    assert_eq!(back.len(), n as usize);
+    assert!(back.windows(2).all(|w| w[0] > w[1]));
+
+    assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
+}
+
+#[test]
+fn interleaved_inserts_split_interior_pages() {
+    install();
+    build_empty_index(false);
+    let cx = MemoryContext::new("t");
+    let rel = index_rel(cx.mcx());
+    prime_supportinfo(&rel);
+
+    for k in (0..2000i32).step_by(2) {
+        insert_key(&rel, &rel, k, tid(k as u32 + 1, 1));
+    }
+    for k in (1..2000i32).step_by(2).rev() {
+        insert_key(&rel, &rel, k, tid(k as u32 + 1, 1));
+    }
+
+    let seen = drain_forward(cx.mcx(), &rel);
+    assert_eq!(seen.len(), 2000);
+    for (i, t) in seen.iter().enumerate() {
+        assert_eq!(ItemPointerGetBlockNumber(t), i as u32 + 1);
+    }
+    assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
+}
+
+#[test]
+fn unique_index_rejects_live_duplicate() {
+    install();
+    build_empty_index(false);
+    HEAP_PAGES.with(|p| {
+        p.borrow_mut().push(build_heap_page(&[10, 20, 30]));
+    });
+    let cx = MemoryContext::new("t");
+    let rel = index_rel_opts(cx.mcx(), true);
+    prime_supportinfo(&rel);
+    let heap = heap_relation(cx.mcx());
+
+    let unique_insert = |k: i32, htid: ItemPointerData| {
+        let icx = MemoryContext::new("ins");
+        crate::btinsert(
+            icx.mcx(),
+            &rel,
+            &[Datum::from_i32(k)],
+            &[false],
+            &htid,
+            &heap,
+            ::types_nbtree::genam::IndexUniqueCheck::UNIQUE_CHECK_YES,
+            false,
+        )
+    };
+
+    assert!(unique_insert(10, tid(0, 1)).unwrap());
+    assert!(unique_insert(20, tid(0, 2)).unwrap());
+    assert!(unique_insert(30, tid(0, 3)).unwrap());
+
+    // key 20 again, pointing at another live row: 23505.
+    let err = unique_insert(20, tid(0, 3)).unwrap_err();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_UNIQUE_VIOLATION);
+    assert!(err.message().contains("duplicate key value"));
+
+    // distinct key still fine after the failure.
+    assert!(unique_insert(25, tid(0, 1)).unwrap());
+
+    assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
+}
+
+#[test]
+#[should_panic(expected = "nbtdedup")]
+fn allequalimage_full_page_routes_to_loud_dedup_arm() {
+    install();
+    build_empty_index(true);
+    let cx = MemoryContext::new("t");
+    let rel = index_rel(cx.mcx());
+    prime_supportinfo(&rel);
+
+    for k in 1..=500i32 {
+        insert_key(&rel, &rel, k, tid(k as u32, 1));
+    }
+}
 
 #[test]
 fn index_getattr_reads_values_and_caches_offsets() {

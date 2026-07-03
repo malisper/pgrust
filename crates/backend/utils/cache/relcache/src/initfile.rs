@@ -121,7 +121,7 @@ fn finish_relcache_entries() -> PgResult<()> {
         }
         // formrdesc set up rd_att correctly by construction (C asserts, never
         // copies it: catcache entries may already share it).
-        let newrel = std::rc::Rc::new(types_rel::RelationData {
+        let newrel = std::rc::Rc::new(types_rel::RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
             rd_id: relid,
             rd_backend: rel.rd_backend,
             rd_islocaltemp: rel.rd_islocaltemp,
@@ -144,6 +144,7 @@ fn finish_relcache_entries() -> PgResult<()> {
             rd_supportinfo: Default::default(),
             rd_indexlist: Default::default(),
         });
+        crate::build::RelationInitPhysicalAddr(&newrel)?;
         with_state(|st| {
             if let Some(ent) = st.id_cache.get_mut(&relid) {
                 ent.rel = std::rc::Rc::clone(&newrel);

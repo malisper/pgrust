@@ -249,7 +249,7 @@ fn make_rel_data<'mcx>(
     rd_att: std::rc::Rc<types_tuple::TupleDescData<'mcx>>,
 ) -> types_rel::RelationData<'mcx> {
     use std::cell::Cell;
-    types_rel::RelationData {
+    types_rel::RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
         rd_id: oid,
         rd_backend: types_core::INVALID_PROC_NUMBER,
         rd_islocaltemp: false,
@@ -995,4 +995,97 @@ mod agg {
         assert_eq!((a0.aggno, a0.aggtransno), (0, 0));
         assert_eq!((a1.aggno, a1.aggtransno), (0, 0));
     }
+}
+
+// The analyzer's output for `INSERT INTO t (pk) VALUES (7)` over t(pk, val).
+fn insert_query<'mcx>(mcx: Mcx<'mcx>) -> Query<'mcx> {
+    let mut rte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+    rte.rtekind = RTEKind::RTE_RELATION;
+    rte.relid = TBL;
+    rte.relkind = b'r';
+    rte.rellockmode = 3;
+    rte.perminfoindex = 1;
+    let rtable = NodeList::make1(mcx, rte.seal()).unwrap();
+    let perminfo = Node::mk(
+        mcx,
+        types_nodes::parsenodes::RTEPermissionInfo {
+            relid: TBL,
+            requiredPerms: types_nodes::parsenodes::ACL_INSERT,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let jointree =
+        alloc_leak_in(mcx, FromExpr { fromlist: NodeList::nil(), quals: None }).unwrap();
+    let c = Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(7), false, true).unwrap();
+    let tle = Node::mk_target_entry(mcx, c, 1, Some("pk"), false).unwrap();
+    Query {
+        commandType: CmdType::CMD_INSERT,
+        canSetTag: true,
+        resultRelation: 1,
+        jointree: Some(jointree),
+        rtable,
+        rteperminfos: NodeList::make1(mcx, perminfo).unwrap(),
+        targetList: NodeList::make1(mcx, tle).unwrap(),
+        stmt_location: 0,
+        stmt_len: 29,
+        ..Query::default()
+    }
+}
+
+#[test]
+fn insert_values_plans_to_modifytable_over_result() {
+    let cx = cx();
+    let mcx = cx.mcx();
+    syscache_seams::pg_type_base_shape::set(|_| {
+        Ok(Some(syscache_seams::PgTypeBaseShape {
+            typtype: b'b' as i8,
+            typbasetype: 0,
+            typtypmod: -1,
+            typelem: 0,
+            typsubscript: 0,
+        }))
+    });
+    let parse = insert_query(mcx);
+    let stmt = planner(
+        mcx,
+        parse,
+        "INSERT INTO t (pk) VALUES (7)",
+        CURSOR_OPT_PARALLEL_OK,
+        ParamListHandle::NULL,
+    )
+    .unwrap();
+
+    assert_eq!(stmt.commandType, CmdType::CMD_INSERT);
+    assert!(!stmt.hasReturning);
+    let mut rr = stmt.resultRelations.iter();
+    assert_eq!((rr.next(), rr.next()), (Some(1), None));
+    assert_eq!(stmt.rtable.len(), 2);
+    assert_eq!(stmt.permInfos.len(), 1);
+    let flat_rte = stmt.rtable.nth(0).as_range_tbl_entry().unwrap();
+    assert_eq!(flat_rte.perminfoindex, 1);
+
+    let mt_node = stmt.planTree.unwrap();
+    assert_eq!(mt_node.node_tag(), NodeTag::T_ModifyTable);
+    let mt = mt_node.as_modify_table().unwrap();
+    assert_eq!(mt.operation, CmdType::CMD_INSERT);
+    assert!(mt.canSetTag);
+    assert_eq!(mt.nominalRelation, 1);
+    assert_eq!(mt.rootRelation, 0);
+    assert!(mt.plan.targetlist.is_nil());
+    assert_eq!(mt.plan.plan_rows, 0.0);
+
+    let sub = mt.plan.lefttree.unwrap();
+    assert_eq!(sub.node_tag(), NodeTag::T_Result);
+    let result = sub.as_result().unwrap();
+    // Subplan tlist = processed tlist: (pk = 7, val = NULL) in attno order.
+    assert_eq!(result.plan.targetlist.len(), 2);
+    let t0 = result.plan.targetlist.nth(0).as_target_entry().unwrap();
+    assert_eq!((t0.resno, t0.resname), (1, Some("pk")));
+    assert_eq!(t0.expr.as_const().unwrap().constvalue.as_i32(), 7);
+    let t1 = result.plan.targetlist.nth(1).as_target_entry().unwrap();
+    assert_eq!((t1.resno, t1.resname), (2, Some("val")));
+    let c1 = t1.expr.as_const().unwrap();
+    assert!(c1.constisnull);
+    assert_eq!(c1.consttype, 23);
 }

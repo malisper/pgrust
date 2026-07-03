@@ -12,6 +12,7 @@ path = "src/lib.rs"
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_storage = { path = "../../../../_support/types/types_storage" }
+types_rel = { path = "../../../../_support/types/rel" }
 mcx = { path = "../../../../_support/mcx" }
 elog = { path = "../../../utils/error/elog" }
 md = { path = "../md" }
@@ -22,6 +23,7 @@ smgr_seams = { path = "../smgr_seams" }
 bufmgr_seams = { path = "../../buffer/bufmgr_seams" }
 
 [dev-dependencies]
+types_tuple = { path = "../../../../_support/types/types_tuple" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 xact_seams = { path = "../../../access/transam/xact_seams" }
 aio_seams = { path = "../../aio/aio_seams" }

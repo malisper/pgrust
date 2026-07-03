@@ -345,3 +345,166 @@ mod result_mcx {
         assert_eq!(text_of(d), b"kept");
     }
 }
+
+mod soft {
+    use ::datum::Datum;
+    use ::mcx::MemoryContext;
+    use ::types_error::{ereturn, PgError, PgResult};
+
+    use crate::fcinfo::*;
+    use crate::soft::*;
+
+    fn parse_i32(
+        _flinfo: Option<&mut FmgrInfo>,
+        fcinfo: &mut FunctionCallInfoBaseData,
+    ) -> PgResult<Datum> {
+        // SAFETY: test arg 0 is a live NUL-terminated cstring.
+        let s = unsafe { fcinfo.arg_cstring(0) }.to_bytes();
+        match core::str::from_utf8(s)
+            .ok()
+            .and_then(|s| s.parse::<i32>().ok())
+        {
+            Some(v) => Ok(Datum::from_i32(v)),
+            None => {
+                // SAFETY: context, if set, was armed by input_function_call_safe.
+                let esc = unsafe { fcinfo.soft_error_context() };
+                ereturn(esc, Datum::null(), PgError::error("bad int"))
+            }
+        }
+    }
+
+    fn null_returning(
+        _flinfo: Option<&mut FmgrInfo>,
+        fcinfo: &mut FunctionCallInfoBaseData,
+    ) -> PgResult<Datum> {
+        Ok(fcinfo.return_null())
+    }
+
+    fn strict_flinfo(f: PGFunction) -> FmgrInfo {
+        FmgrInfo::new(f, 42, 3, true, false)
+    }
+
+    fn call(
+        flinfo: &mut FmgrInfo,
+        s: Option<&core::ffi::CStr>,
+        esc: Option<&mut ErrorSaveNode>,
+    ) -> (PgResult<bool>, Datum) {
+        let ctx = MemoryContext::new_bump("soft-test");
+        let mut result = Datum::null();
+        let ok = input_function_call_safe(flinfo, s, 0, -1, ctx.mcx(), esc, &mut result);
+        (ok, result)
+    }
+
+    #[test]
+    fn success_returns_true_and_the_datum() {
+        let mut fl = strict_flinfo(parse_i32);
+        let (ok, result) = call(&mut fl, Some(c"123"), None);
+        assert!(ok.unwrap());
+        assert_eq!(result.as_i32(), 123);
+    }
+
+    #[test]
+    fn soft_error_with_details_saves_and_returns_false() {
+        let mut fl = strict_flinfo(parse_i32);
+        let mut esc = ErrorSaveNode::new(true);
+        let (ok, _) = call(&mut fl, Some(c"nope"), Some(&mut esc));
+        assert!(!ok.unwrap());
+        assert!(esc.ctx.error_occurred());
+        assert_eq!(esc.ctx.error().unwrap().message(), "bad int");
+    }
+
+    #[test]
+    fn soft_error_without_details_only_marks() {
+        let mut fl = strict_flinfo(parse_i32);
+        let mut esc = ErrorSaveNode::new(false);
+        let (ok, _) = call(&mut fl, Some(c"nope"), Some(&mut esc));
+        assert!(!ok.unwrap());
+        assert!(esc.ctx.error_occurred());
+        assert!(esc.ctx.error().is_none());
+    }
+
+    #[test]
+    fn no_context_is_a_hard_error() {
+        let mut fl = strict_flinfo(parse_i32);
+        let (ok, _) = call(&mut fl, Some(c"nope"), None);
+        assert!(ok.is_err());
+    }
+
+    #[test]
+    fn strict_null_input_short_circuits() {
+        let mut fl = strict_flinfo(parse_i32);
+        let mut esc = ErrorSaveNode::new(true);
+        let (ok, result) = call(&mut fl, None, Some(&mut esc));
+        assert!(ok.unwrap());
+        assert_eq!(result.as_usize(), 0);
+        assert!(!esc.ctx.error_occurred());
+    }
+
+    fn const_seven(
+        _flinfo: Option<&mut FmgrInfo>,
+        _fcinfo: &mut FunctionCallInfoBaseData,
+    ) -> PgResult<Datum> {
+        Ok(Datum::from_i32(7))
+    }
+
+    #[test]
+    fn non_strict_null_input_runs_and_must_return_null() {
+        let mut fl = FmgrInfo::new(null_returning, 42, 3, false, false);
+        let (ok, _) = call(&mut fl, None, None);
+        assert!(ok.unwrap());
+
+        let mut fl = FmgrInfo::new(const_seven, 42, 3, false, false);
+        let (ok, _) = call(&mut fl, None, None);
+        let err = ok.unwrap_err();
+        assert!(err.message().contains("returned non-NULL"), "{}", err.message());
+    }
+
+    #[test]
+    fn null_result_for_present_input_is_a_hard_error() {
+        let mut fl = strict_flinfo(null_returning);
+        let (ok, _) = call(&mut fl, Some(c"1"), None);
+        let err = ok.unwrap_err();
+        assert!(err.message().contains("returned NULL"), "{}", err.message());
+    }
+
+    #[test]
+    fn direct_soft_and_success() {
+        let ctx = MemoryContext::new_bump("soft-test");
+        let mut result = Datum::null();
+        assert!(direct_input_function_call_safe(
+            parse_i32, Some(c"7"), 0, -1, ctx.mcx(), None, &mut result
+        )
+        .unwrap());
+        assert_eq!(result.as_i32(), 7);
+
+        let mut esc = ErrorSaveNode::new(true);
+        assert!(!direct_input_function_call_safe(
+            parse_i32, Some(c"x"), 0, -1, ctx.mcx(), Some(&mut esc), &mut result
+        )
+        .unwrap());
+        assert!(esc.ctx.error_occurred());
+
+        assert!(direct_input_function_call_safe(
+            parse_i32, None, 0, -1, ctx.mcx(), None, &mut result
+        )
+        .unwrap());
+        assert_eq!(result.as_usize(), 0);
+    }
+
+    #[test]
+    fn input_function_call_hard_success() {
+        let mut fl = strict_flinfo(parse_i32);
+        let ctx = MemoryContext::new_bump("soft-test");
+        let d = input_function_call(&mut fl, Some(c"55"), 0, -1, ctx.mcx()).unwrap();
+        assert_eq!(d.as_i32(), 55);
+    }
+
+    #[test]
+    fn foreign_context_tag_demuxes_to_none() {
+        let mut node = FmNode { tag: 383 };
+        let mut fci = LocalFcinfo::<1>::fresh(0);
+        fci.context = Some(core::ptr::NonNull::from(&mut node));
+        // SAFETY: node outlives the call; tag != T_ErrorSaveContext.
+        assert!(unsafe { fci.soft_error_context() }.is_none());
+    }
+}

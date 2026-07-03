@@ -20,7 +20,7 @@ fn install_seams() {
 fn rel_with_ns(mcx: Mcx<'_>, relid: Oid, relnamespace: Oid) -> RelationData<'_> {
     let mut relname = NameData::default();
     relname.namestrcpy("t");
-    RelationData {
+    RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
         rd_id: relid,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,

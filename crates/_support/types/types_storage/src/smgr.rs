@@ -21,10 +21,7 @@ pub const EXTENSION_CREATE: i32 = 1 << 2;
 pub const EXTENSION_CREATE_RECOVERY: i32 = 1 << 3;
 pub const EXTENSION_DONT_OPEN: i32 = 1 << 5;
 
-// C's `SMgrRelation` pointer, as a slab slot index + generation: slot reuse
-// bumps `gen`, so a handle outliving its entry fails loudly instead of
-// aliasing a recycled entry. Pinned entries never move or die (smgr.c pin
-// contract), which is what makes caching this in rd_smgr sound.
+// C's `SMgrRelation` pointer as slab idx+gen: slot reuse bumps `gen` (stale handle = loud); pinned entries never move or die (smgr.c pin contract), so rd_smgr may cache this.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SmgrHandle {
     pub idx: u32,
@@ -71,8 +68,7 @@ impl Default for MdfdVec {
     }
 }
 
-// Backend-local kernel fds; _fdvec_resize keeps high-water-mark capacity. std
-// Vec justified: backend-lifetime owner state (C's MdCxt), no spill reads it.
+// Backend-local kernel fds; _fdvec_resize keeps high-water-mark capacity. std Vec justified: backend-lifetime owner state (C's MdCxt), no spill reads it.
 #[derive(Clone, Debug, Default)]
 pub struct MdRelnState {
     pub md_num_open_segs: [i32; SMGR_NFORKS],
