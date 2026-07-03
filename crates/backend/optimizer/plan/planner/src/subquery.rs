@@ -145,7 +145,7 @@ pub fn subquery_planner<'mcx>(
         // relation-level object_aclcheck arm covers relkind 'v'.
     }
 
-    preprocess_rowmarks(&parse);
+    preprocess_rowmarks(run, &parse)?;
     run.root.hasHavingQual = parse.havingQual.is_some();
 
     let has_sublinks = parse.hasSubLinks;

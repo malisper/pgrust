@@ -2,8 +2,9 @@ use mcx::{Mcx, PgVec};
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::list::{IntList, NodeList, OidList};
 use types_nodes::parsenodes::{Query, RangeTblEntry};
+use types_nodes::plannodes::PlanRowMark;
 use types_pathnodes::{
-    NodeId, PathTarget, PlannerInfo, PtId, QueryId, RangeTblEntryId, RelId,
+    NodeId, PathTarget, PlanRowMarkId, PlannerInfo, PtId, QueryId, RangeTblEntryId, RelId,
 };
 
 // PlannerGlobal, types_nodes-payload form. C shares one glob by pointer across
@@ -94,6 +95,10 @@ pub struct PlannerRun<'mcx> {
     pub active_windows: PgVec<'mcx, types_nodes::Node<'mcx>>,
     /// C qp_extra.setop.
     pub qp_setop: Option<&'mcx types_nodes::parsenodes::SetOperationStmt<'mcx>>,
+    /// PlanRowMark store: C shares the nodes by pointer between
+    /// root->rowMarks and plan nodes; levels' root.rowMarks hold ids here
+    /// (all-scalar payload, materialized as nodes at createplan/setrefs).
+    pub rowmarks: PgVec<'mcx, PlanRowMark>,
 }
 
 // A run is forgotten at the planner boundary (mcx reset reclaims), never
@@ -108,7 +113,7 @@ mcx::forget_safe_struct!(
     SubrootState<'_> { root, processed_tlist },
     PlannerRun<'_> { mcx, root, glob, queries, processed_tlist,
         assess_parallel, suspended_roots, subroots, rel_subroots,
-        active_windows, qp_setop },
+        active_windows, qp_setop, rowmarks },
 );
 
 impl<'mcx> PlannerRun<'mcx> {
@@ -125,7 +130,18 @@ impl<'mcx> PlannerRun<'mcx> {
             rel_subroots: PgVec::new_in(mcx),
             active_windows: PgVec::new_in(mcx),
             qp_setop: None,
+            rowmarks: PgVec::new_in(mcx),
         }
+    }
+
+    pub fn add_rowmark(&mut self, rm: PlanRowMark) -> PlanRowMarkId {
+        let id = PlanRowMarkId(self.rowmarks.len() as u32);
+        self.rowmarks.push(rm);
+        id
+    }
+
+    pub fn rowmark(&self, id: PlanRowMarkId) -> &PlanRowMark {
+        &self.rowmarks[id.0 as usize]
     }
 
     /// Suspend the current level and make a fresh child root current

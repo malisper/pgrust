@@ -658,17 +658,34 @@ pub fn parserOpenTable<'mcx>(
     }
 }
 
-pub fn isLockedRefname(pstate: &ParseState<'_, '_>, _refname: Option<&str>) -> bool {
+pub fn isLockedRefname(pstate: &ParseState<'_, '_>, refname: Option<&str>) -> bool {
     if pstate.p_locked_from_parent {
         return true;
     }
-    if !pstate.p_locking_clause.is_nil() {
-        panic!(
-            "isLockedRefname (parse_relation.c): LockingClause scan unported \
-             (FOR UPDATE/SHARE lane) — unit backend-parser-relation"
-        );
+    for lc_node in &pstate.p_locking_clause {
+        let lc = lc_node.as_locking_clause().expect("p_locking_clause cell");
+        if lc.lockedRels.is_nil() {
+            return true;
+        }
+        for rel_node in &lc.lockedRels {
+            let thisrel = rel_node.as_range_var().expect("lockedRels cell");
+            if refname == thisrel.relname {
+                return true;
+            }
+        }
     }
     false
+}
+
+/// `get_parse_rowmark` (parse_relation.c); returns the node handle so
+/// applyLockingClause can merge strengths in place.
+pub fn get_parse_rowmark<'mcx>(
+    qry: &types_nodes::Query<'mcx>,
+    rtindex: Index,
+) -> Option<Node<'mcx>> {
+    qry.rowMarks
+        .iter()
+        .find(|rc| rc.as_row_mark_clause().expect("rowMarks cell").rti == rtindex)
 }
 
 pub fn addRangeTableEntry<'mcx>(

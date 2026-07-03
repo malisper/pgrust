@@ -362,6 +362,7 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_IncrementalSort => "Incremental Sort",
         NodeTag::T_WindowAgg => "WindowAgg",
         NodeTag::T_Limit => "Limit",
+        NodeTag::T_LockRows => "LockRows",
         t => node_gap("ExplainNode", &format!("{t:?} display arm unported (M2+ plan lanes)")),
     };
 
@@ -591,8 +592,9 @@ pub fn ExplainNode<'mcx>(
             show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
             filtered_count_gap(&plan.qual, es);
         }
-        // Unique, Limit, Append and SetOp show nothing extra without ANALYZE.
-        NodeTag::T_Unique | NodeTag::T_Limit | NodeTag::T_Append | NodeTag::T_SetOp => {}
+        // Unique, Limit, Append, SetOp, LockRows show nothing extra without ANALYZE.
+        NodeTag::T_Unique | NodeTag::T_Limit | NodeTag::T_Append | NodeTag::T_SetOp
+        | NodeTag::T_LockRows => {}
         _ => unreachable!(),
     }
 

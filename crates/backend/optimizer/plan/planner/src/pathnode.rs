@@ -998,6 +998,40 @@ pub fn create_limit_path<'mcx>(
     }))
 }
 
+// create_lockrows_path (pathnode.c): result order is not assumed preserved
+// (pathkeys NIL); row locking charged at cpu_tuple_cost per row.
+pub fn create_lockrows_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    subpath_id: PathId,
+    row_marks: PgVec<'mcx, types_pathnodes::PlanRowMarkId>,
+    epq_param: i32,
+) -> PathId {
+    let mcx = run.mcx;
+    let sub = run.root.path(subpath_id).base();
+    let path = Path {
+        type_: tag16(NodeTag::T_LockRowsPath),
+        pathtype: tag16(NodeTag::T_LockRows),
+        parent: rel_id,
+        pathtarget_id: sub.pathtarget_id,
+        param_info: None,
+        parallel_aware: false,
+        parallel_safe: false,
+        parallel_workers: 0,
+        rows: sub.rows,
+        disabled_nodes: sub.disabled_nodes,
+        startup_cost: sub.startup_cost,
+        total_cost: sub.total_cost + gucs::cpu_tuple_cost() * sub.rows,
+        pathkeys: PgVec::new_in(mcx),
+    };
+    run.root.alloc_path(PathNode::LockRowsPath(types_pathnodes::LockRowsPath {
+        path,
+        subpath: Some(subpath_id),
+        rowMarks: row_marks,
+        epqParam: epq_param,
+    }))
+}
+
 pub fn adjust_limit_rows_costs(
     rows: &mut f64,
     startup_cost: &mut f64,

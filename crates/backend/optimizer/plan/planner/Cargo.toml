@@ -11,6 +11,7 @@ path = "src/lib.rs"
 execmain = { path = "../../../executor/execmain" }
 nodes_core = { path = "../../../nodes/nodes_core" }
 parse_relation = { path = "../../../parser/parse_relation" }
+parser_analyze = { path = "../../../parser/parser_analyze" }
 mcx = { path = "../../../../_support/mcx" }
 datum = { path = "../../../../_support/types/datum" }
 types_core = { path = "../../../../_support/types/types_core" }

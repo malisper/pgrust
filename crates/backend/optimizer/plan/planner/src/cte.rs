@@ -94,7 +94,7 @@ pub fn ss_process_ctes<'mcx>(run: &mut PlannerRun<'mcx>, parse: &Query<'mcx>) ->
 }
 
 // SS_assign_special_exec_param (paramassign.c).
-fn assign_special_exec_param(run: &mut PlannerRun<'_>) -> PgResult<i32> {
+pub(crate) fn assign_special_exec_param(run: &mut PlannerRun<'_>) -> PgResult<i32> {
     let paramid = run.glob.param_exec_types.len() as i32;
     run.glob.param_exec_types.lappend(run.mcx, 0)?;
     Ok(paramid)
