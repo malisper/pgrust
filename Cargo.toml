@@ -137,6 +137,7 @@ members = [
     "crates/backend/utils/sort/tuplestore",
     "crates/backend/executor/tstore_receiver",
     "crates/backend/storage/freespace/freespace_seams",
+    "crates/backend/storage/freespace/freespace",
     "crates/backend/tcop/cmdtag",
     "crates/backend/access/transam/xact_seams",
     "crates/backend/tcop/dest",

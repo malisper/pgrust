@@ -36,6 +36,7 @@ pub fn init_all() {
     hba::init_seams();
     libpq_pqsignal::init_seams();
     pqcomm::init_seams();
+    pqcomm::init_socket_seams();
     pqformat::init_seams();
     vars::init_seams();
     parser_driver::init_seams();
@@ -121,6 +122,7 @@ pub fn init_all() {
     superuser::init_seams();
     timeout::init_seams();
     portalmem::init_seams();
+    tuplestore::init_seams();
     resowner::init_seams();
     snapmgr::init_seams();
     pg_prng::init_seams();

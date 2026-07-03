@@ -44,7 +44,28 @@ pub fn set_pgstat_fetch_consistency(v: i32) {
     FETCH_CONSISTENCY.with(|c| c.set(v));
 }
 
+thread_local! {
+    static IS_INITIALIZED: Cell<bool> = const { Cell::new(false) };
+}
+
+pub fn pgstat_initialize() -> types_error::PgResult<()> {
+    debug_assert!(!IS_INITIALIZED.with(|c| c.get()));
+    ipc_seams::before_shmem_exit::call(pgstat_shutdown_hook, datum::Datum::from_usize(0))?;
+    IS_INITIALIZED.with(|c| c.set(true));
+    Ok(())
+}
+
+fn pgstat_shutdown_hook(_code: i32, _arg: datum::Datum) -> types_error::PgResult<()> {
+    debug_assert!(IS_INITIALIZED.with(|c| c.get()));
+    if init_small::globals::MyDatabaseId() != types_core::InvalidOid {
+        database::pgstat_report_disconnect(init_small::globals::MyDatabaseId());
+    }
+    pending::pgstat_report_stat(true);
+    Ok(())
+}
+
 pub fn init_seams() {
+    pgstat_seams::pgstat_initialize::set(pgstat_initialize);
     pgstat_seams::pgstat_set_session_end_cause_fatal::set(
         database::pgstat_set_session_end_cause_fatal,
     );

@@ -14,9 +14,10 @@ use syscache_seams::PgCastShape;
 
 use crate::{
     GetSysCacheOid, ReleaseSysCache, ReleaseSysCacheList, SearchSysCache1, SearchSysCache2,
-    SearchSysCache4, SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1, SysCacheKey,
+    SearchSysCache3, SearchSysCache4, SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1,
+    SysCacheKey,
 };
-use crate::cacheinfo::{ATTNUM, AUTHNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, OPEROID, RELNAMENSP, RELOID, TYPEOID};
+use crate::cacheinfo::{ATTNUM, AUTHNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, OPEROID, PROCOID, RELNAMENSP, RELOID, STATRELATTINH, TYPEOID};
 
 const ANUM_PG_CLASS_OID: i32 = 1;
 const ANUM_PG_CLASS_RELISSHARED: i32 = 16;
@@ -39,6 +40,8 @@ const ANUM_PG_CONSTRAINT_CONRELID: i32 = 9;
 const ANUM_PG_AUTHID_OID: i32 = 1;
 const ANUM_PG_AUTHID_ROLNAME: i32 = 2;
 const ANUM_PG_AUTHID_ROLSUPER: i32 = 3;
+const ANUM_PG_AUTHID_ROLCANLOGIN: i32 = 7;
+const ANUM_PG_AUTHID_ROLCONNLIMIT: i32 = 10;
 const ANUM_PG_NAMESPACE_OID: i32 = 1;
 const ANUM_PG_NAMESPACE_NSPNAME: i32 = 2;
 const CONSTRAINT_FOREIGN: i8 = b'f' as i8;
@@ -55,6 +58,11 @@ const ANUM_PG_OPERATOR_OPRNEGATE: i32 = 12;
 const ANUM_PG_OPERATOR_OPRCODE: i32 = 13;
 const ANUM_PG_OPERATOR_OPRREST: i32 = 14;
 const ANUM_PG_OPERATOR_OPRJOIN: i32 = 15;
+const ANUM_PG_PROC_PROCOST: i32 = 6;
+const ANUM_PG_PROC_PROSUPPORT: i32 = 9;
+const ANUM_PG_STATISTIC_STANULLFRAC: i32 = 4;
+const ANUM_PG_STATISTIC_STAWIDTH: i32 = 5;
+const ANUM_PG_STATISTIC_STADISTINCT: i32 = 6;
 const ANUM_PG_CAST_OID: i32 = 1;
 const ANUM_PG_CAST_CASTFUNC: i32 = 4;
 const ANUM_PG_CAST_CASTCONTEXT: i32 = 5;
@@ -145,6 +153,45 @@ fn lookup_authid_by_rolname(rolname: &str) -> PgResult<Option<(Oid, bool)>> {
     drop(t);
     ReleaseSysCache(tuple);
     Ok(Some((oid, rolsuper)))
+}
+
+fn authid_session_shape(
+    tuple: &HeapTupleData<'_>,
+    cache_id: i32,
+) -> syscache_seams::AuthIdSessionShape {
+    let d = getattr(tuple, cache_id, ANUM_PG_AUTHID_ROLNAME);
+    // SAFETY: rolname is a NameData column; the datum points at its 64-byte
+    // NUL-padded buffer inside the pinned tuple image.
+    let rolname = unsafe { *(d.as_usize() as *const types_tuple::NameData) };
+    syscache_seams::AuthIdSessionShape {
+        roleid: getattr(tuple, cache_id, ANUM_PG_AUTHID_OID).as_oid(),
+        rolname,
+        rolsuper: getattr(tuple, cache_id, ANUM_PG_AUTHID_ROLSUPER).as_bool(),
+        rolcanlogin: getattr(tuple, cache_id, ANUM_PG_AUTHID_ROLCANLOGIN).as_bool(),
+        rolconnlimit: getattr(tuple, cache_id, ANUM_PG_AUTHID_ROLCONNLIMIT).as_i32(),
+    }
+}
+
+fn lookup_authid_session_by_rolname(
+    rolname: &str,
+) -> PgResult<Option<syscache_seams::AuthIdSessionShape>> {
+    let Some(tuple) = SearchSysCache1(AUTHNAME, SysCacheKey::Str(rolname))? else {
+        return Ok(None);
+    };
+    let shape = authid_session_shape(&tuple.tuple(), AUTHNAME);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
+fn lookup_authid_session_by_oid(
+    roleid: Oid,
+) -> PgResult<Option<syscache_seams::AuthIdSessionShape>> {
+    let Some(tuple) = SearchSysCache1(AUTHOID, SysCacheKey::Value(Datum::from_oid(roleid)))? else {
+        return Ok(None);
+    };
+    let shape = authid_session_shape(&tuple.tuple(), AUTHOID);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
 }
 
 fn lookup_authid_rolname<'mcx>(mcx: Mcx<'mcx>, roleid: Oid) -> PgResult<Option<PgString<'mcx>>> {
@@ -368,6 +415,45 @@ fn lookup_pg_cast_shape(sourcetypeid: Oid, targettypeid: Oid) -> PgResult<Option
     Ok(Some(shape))
 }
 
+fn pg_proc_cost_shape(funcid: Oid) -> PgResult<Option<syscache_seams::PgProcCostShape>> {
+    let Some(tuple) = SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(funcid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let shape = syscache_seams::PgProcCostShape {
+        procost: getattr(&t, PROCOID, ANUM_PG_PROC_PROCOST).as_f32(),
+        prosupport: getattr(&t, PROCOID, ANUM_PG_PROC_PROSUPPORT).as_oid(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
+fn lookup_pg_statistic_shape(
+    relid: Oid,
+    attnum: types_core::AttrNumber,
+    inh: bool,
+) -> PgResult<Option<syscache_seams::PgStatisticShape>> {
+    let Some(tuple) = SearchSysCache3(
+        STATRELATTINH,
+        SysCacheKey::Value(Datum::from_oid(relid)),
+        SysCacheKey::Value(Datum::from_i16(attnum)),
+        SysCacheKey::Value(Datum::from_bool(inh)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let shape = syscache_seams::PgStatisticShape {
+        stanullfrac: getattr(&t, STATRELATTINH, ANUM_PG_STATISTIC_STANULLFRAC).as_f32(),
+        stawidth: getattr(&t, STATRELATTINH, ANUM_PG_STATISTIC_STAWIDTH).as_i32(),
+        stadistinct: getattr(&t, STATRELATTINH, ANUM_PG_STATISTIC_STADISTINCT).as_f32(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
 pub(crate) fn install() {
     syscache_seams::search_syscache_exists_reloid::set(search_syscache_exists_reloid);
     syscache_seams::sys_cache_invalidate::set(sys_cache_invalidate);
@@ -380,6 +466,8 @@ pub(crate) fn install() {
     syscache_seams::lookup_pg_type_shape::set(lookup_pg_type_shape);
     syscache_seams::lookup_authid_rolname::set(lookup_authid_rolname);
     syscache_seams::lookup_authid_by_rolname::set(lookup_authid_by_rolname);
+    syscache_seams::lookup_authid_session_by_rolname::set(lookup_authid_session_by_rolname);
+    syscache_seams::lookup_authid_session_by_oid::set(lookup_authid_session_by_oid);
     syscache_seams::lookup_pg_type_typcache_shape::set(lookup_pg_type_typcache_shape);
     syscache_seams::syscache_hash_value_typeoid::set(syscache_hash_value_typeoid);
     syscache_seams::lookup_pg_class_relid_by_name::set(lookup_pg_class_relid_by_name);
@@ -390,4 +478,6 @@ pub(crate) fn install() {
     syscache_seams::lookup_pg_operator_candidates::set(lookup_pg_operator_candidates);
     syscache_seams::pg_operator_name_candidates_exist::set(pg_operator_name_candidates_exist);
     syscache_seams::lookup_pg_cast_shape::set(lookup_pg_cast_shape);
+    syscache_seams::pg_proc_cost_shape::set(pg_proc_cost_shape);
+    syscache_seams::lookup_pg_statistic_shape::set(lookup_pg_statistic_shape);
 }

@@ -606,3 +606,55 @@ seam_core::seam!(
         collid: Oid,
     ) -> PgResult<Option<PgCollationLocaleRow<'mcx>>>
 );
+
+// The pg_aggregate columns parse_func/prepagg/ExecInitAgg read off one
+// AGGFNOID probe, decoded once.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgAggregateShape {
+    pub aggkind: i8,
+    pub aggnumdirectargs: i16,
+    pub aggtransfn: Oid,
+    pub aggfinalfn: Oid,
+    pub aggcombinefn: Oid,
+    pub aggserialfn: Oid,
+    pub aggdeserialfn: Oid,
+    pub aggfinalextra: bool,
+    pub aggfinalmodify: i8,
+    pub aggtranstype: Oid,
+    pub aggtransspace: i32,
+}
+
+seam_core::seam!(
+    // SearchSysCache1(AGGFNOID, aggfnoid); None mirrors !HeapTupleIsValid.
+    pub fn lookup_pg_aggregate_shape(aggfnoid: Oid) -> PgResult<Option<PgAggregateShape>>
+);
+
+seam_core::seam!(
+    // SysCacheGetAttr(AGGFNOID tuple, agginitval) as text; outer None mirrors
+    // !HeapTupleIsValid, inner None mirrors attisnull.
+    pub fn pg_aggregate_agginitval<'mcx>(
+        mcx: Mcx<'mcx>,
+        aggfnoid: Oid,
+    ) -> PgResult<Option<Option<PgString<'mcx>>>>
+);
+
+// One SearchSysCacheList1(PROCNAMEARGSNSP, proname) member, projected to
+// FuncnameGetCandidates' reads (proargtypes.values only — the variadic/
+// defaults expansions read the fields and panic upstream).
+#[derive(Debug)]
+pub struct PgProcCandidate<'mcx> {
+    pub oid: Oid,
+    pub pronamespace: Oid,
+    pub pronargs: i16,
+    pub pronargdefaults: i16,
+    pub provariadic: Oid,
+    pub proargtypes: PgVec<'mcx, Oid>,
+}
+
+seam_core::seam!(
+    // SearchSysCacheList1(PROCNAMEARGSNSP, proname), catcache list order.
+    pub fn lookup_pg_proc_name_candidates<'mcx>(
+        mcx: Mcx<'mcx>,
+        proname: &str,
+    ) -> PgResult<PgVec<'mcx, PgProcCandidate<'mcx>>>
+);

@@ -756,6 +756,20 @@ pub fn pq_putmessage_noblock(msgtype: u8, s: &[u8]) -> PgResult<()> {
 }
 
 pub fn init_seams() {
+    pqcomm_seams::accept_connection::set(|server_fd| {
+        let mut cs = types_startup::ClientSocket {
+            sock: types_core::PGINVALID_SOCKET,
+            raddr: ip::SockAddr::zeroed(),
+        };
+        if socket::AcceptConnection(server_fd, &mut cs) == types_core::STATUS_OK {
+            Ok(cs)
+        } else {
+            Err(Box::new(types_error::PgError::new(
+                types_error::LOG,
+                "could not accept new connection",
+            )))
+        }
+    });
     pqcomm_seams::pq_putmessage::set(pq_putmessage);
     pqcomm_seams::pq_putmessage_v2::set(pq_putmessage_v2);
     pqcomm_seams::pq_flush::set(pq_flush);

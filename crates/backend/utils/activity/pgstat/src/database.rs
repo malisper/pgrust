@@ -102,6 +102,26 @@ pub fn pgstat_set_session_end_cause_fatal() {
     });
 }
 
+fn pgstat_should_report_connstat() -> bool {
+    miscinit::GetMyBackendType() == types_core::BackendType::Backend
+}
+
+pub fn pgstat_report_disconnect(dboid: Oid) {
+    debug_assert_eq!(dboid, MyDatabaseId());
+    if !pgstat_should_report_connstat() {
+        return;
+    }
+    pending::with_state(|st| {
+        let dbentry = pgstat_prep_database_pending_in(st, MyDatabaseId());
+        match SESSION_END_CAUSE.with(|c| c.get()) {
+            SessionEndType::DisconnectNotYet | SessionEndType::DisconnectNormal => {}
+            SessionEndType::DisconnectClientEof => dbentry.sessions_abandoned += 1,
+            SessionEndType::DisconnectFatal => dbentry.sessions_fatal += 1,
+            SessionEndType::DisconnectKilled => dbentry.sessions_killed += 1,
+        }
+    });
+}
+
 pub fn pgstat_drop_database(databaseid: Oid) {
     xact::pgstat_drop_transactional(PGSTAT_KIND_DATABASE, databaseid, 0);
 }
