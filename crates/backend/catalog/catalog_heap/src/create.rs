@@ -142,17 +142,13 @@ fn name_datum(name: &types_tuple::NameData) -> Datum {
     Datum::from_usize(name.data.as_ptr() as usize)
 }
 
-fn InsertPgClassTuple<'mcx>(
+pub fn InsertPgClassTuple<'mcx>(
     mcx: Mcx<'mcx>,
     pg_class_desc: &Relation<'mcx>,
-    new_rel_desc: &RelationData<'static>,
+    rd_rel: &types_rel::FormData_pg_class,
+    natts: i16,
     new_rel_oid: Oid,
-    ownerid: Oid,
-    relfrozenxid: TransactionId,
-    relminmxid: MultiXactId,
 ) -> PgResult<()> {
-    let rd_rel = &new_rel_desc.rd_rel;
-    let natts = new_rel_desc.rd_att.natts;
     let mut values = [Datum::null(); Natts_pg_class];
     let mut nulls = [false; Natts_pg_class];
     // Anum_pg_class_* order (pg_class.h, 18.3: relallfrozen is column 13).
@@ -161,7 +157,7 @@ fn InsertPgClassTuple<'mcx>(
     values[2] = Datum::from_oid(rd_rel.relnamespace);
     values[3] = Datum::from_oid(rd_rel.reltype);
     values[4] = Datum::from_oid(InvalidOid); // reloftype
-    values[5] = Datum::from_oid(ownerid);
+    values[5] = Datum::from_oid(rd_rel.relowner);
     values[6] = Datum::from_oid(rd_rel.relam);
     values[7] = Datum::from_oid(rd_rel.relfilenode);
     values[8] = Datum::from_oid(rd_rel.reltablespace);
@@ -174,7 +170,7 @@ fn InsertPgClassTuple<'mcx>(
     values[15] = Datum::from_bool(rd_rel.relisshared);
     values[16] = Datum::from_char(rd_rel.relpersistence as i8);
     values[17] = Datum::from_char(rd_rel.relkind as i8);
-    values[18] = Datum::from_i16(natts as i16);
+    values[18] = Datum::from_i16(natts);
     values[19] = Datum::from_i16(0); // relchecks
     values[20] = Datum::from_bool(false); // relhasrules
     values[21] = Datum::from_bool(false); // relhastriggers
@@ -185,8 +181,8 @@ fn InsertPgClassTuple<'mcx>(
     values[26] = Datum::from_char(rd_rel.relreplident as i8);
     values[27] = Datum::from_bool(rd_rel.relispartition);
     values[28] = Datum::from_oid(InvalidOid); // relrewrite
-    values[29] = Datum::from_transaction_id(relfrozenxid);
-    values[30] = Datum::from_transaction_id(relminmxid);
+    values[29] = Datum::from_transaction_id(rd_rel.relfrozenxid);
+    values[30] = Datum::from_transaction_id(rd_rel.relminmxid);
     nulls[Anum_pg_class_relacl - 1] = true;
     nulls[Anum_pg_class_reloptions - 1] = true;
     nulls[Anum_pg_class_relpartbound - 1] = true;
@@ -195,7 +191,32 @@ fn InsertPgClassTuple<'mcx>(
     catalog_indexing::CatalogTupleInsert(mcx, pg_class_desc, &mut tup)
 }
 
-fn insert_pg_attribute_tuple<'mcx>(
+#[allow(clippy::too_many_arguments)]
+fn AddNewRelationTuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    pg_class_desc: &Relation<'mcx>,
+    new_rel_desc: &RelationData<'static>,
+    new_rel_oid: Oid,
+    new_type_oid: Oid,
+    relowner: Oid,
+    relkind: u8,
+    relfrozenxid: TransactionId,
+    relminmxid: MultiXactId,
+) -> PgResult<()> {
+    debug_assert!(relkind != types_rel::RELKIND_SEQUENCE);
+    let mut form = new_rel_desc.rd_rel.clone();
+    form.relpages = 0;
+    form.reltuples = -1.0;
+    form.relallvisible = 0;
+    form.relfrozenxid = relfrozenxid;
+    form.relminmxid = relminmxid;
+    form.relowner = relowner;
+    form.reltype = new_type_oid;
+    form.relispartition = false;
+    InsertPgClassTuple(mcx, pg_class_desc, &form, new_rel_desc.rd_att.natts as i16, new_rel_oid)
+}
+
+pub fn insert_pg_attribute_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     pg_attribute_rel: &Relation<'mcx>,
     attrs: &FormData_pg_attribute,
@@ -291,7 +312,11 @@ pub fn heap_create_with_catalog<'mcx>(
     p: &HeapCreateParams<'_>,
     tupdesc: &TupleDescData<'_>,
 ) -> PgResult<Oid> {
-    debug_assert!(p.relkind == RELKIND_RELATION, "only plain tables ported");
+    debug_assert!(
+        p.relkind == RELKIND_RELATION || p.relkind == types_rel::RELKIND_TOASTVALUE,
+        "only plain tables and toast tables ported"
+    );
+    let make_rowtype = p.relkind != types_rel::RELKIND_TOASTVALUE;
     let pg_class_desc = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
 
     CheckAttributeNamesTypes(tupdesc, p.relkind)?;
@@ -329,8 +354,8 @@ pub fn heap_create_with_catalog<'mcx>(
     // inside TypeCreate; both are hoisted here so the relcache entry can carry
     // reltype at build time. GetNewObjectId order (relid, array, composite)
     // and both TypeCreate calls' catalog effects are unchanged.
-    let new_array_oid = pg_type::AssignTypeArrayOid(mcx)?;
-    let new_type_oid = {
+    let (new_array_oid, new_type_oid) = if make_rowtype {
+        let array_oid = pg_type::AssignTypeArrayOid(mcx)?;
         let pg_type_rel = table::table_open(mcx, types_core::TYPE_RELATION_ID, AccessShareLock)?;
         let oid = catalog::GetNewOidWithIndex(
             mcx,
@@ -339,7 +364,9 @@ pub fn heap_create_with_catalog<'mcx>(
             pg_type::Anum_pg_type_oid,
         )?;
         pg_type_rel.close(AccessShareLock)?;
-        oid
+        (array_oid, oid)
+    } else {
+        (InvalidOid, InvalidOid)
     };
 
     // relacl: get_user_default_acl unported; pg_default_acl entries (if any)
@@ -359,6 +386,7 @@ pub fn heap_create_with_catalog<'mcx>(
         p.allow_system_table_mods,
     )?;
 
+    if make_rowtype {
     AddNewRelationType(
         mcx,
         p.relname,
@@ -406,20 +434,25 @@ pub fn heap_create_with_catalog<'mcx>(
             typeCollation: InvalidOid,
         },
     )?;
+    }
 
-    InsertPgClassTuple(
+    AddNewRelationTuple(
         mcx,
         &pg_class_desc,
         &new_rel_desc,
         relid,
+        new_type_oid,
         p.ownerid,
+        p.relkind,
         relfrozenxid,
         relminmxid,
     )?;
 
     AddNewAttributeTuples(mcx, relid, &new_rel_desc.rd_att, p.relkind)?;
 
-    if !miscinit_seams::is_bootstrap_processing_mode::call() {
+    if p.relkind != types_rel::RELKIND_TOASTVALUE
+        && !miscinit_seams::is_bootstrap_processing_mode::call()
+    {
         let myself = ObjectAddress::set(RELATION_RELATION_ID, relid);
         pg_depend::recordDependencyOnOwner(RELATION_RELATION_ID, relid, p.ownerid);
         // recordDependencyOnNewAcl: relacl is always NULL here (divergence

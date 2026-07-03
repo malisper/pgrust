@@ -112,6 +112,51 @@ pub struct Instrumentation {
     pub walusage: WalUsage,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TuplesortMethod {
+    #[default]
+    StillInProgress,
+    TopNHeapsort,
+    Quicksort,
+    ExternalSort,
+    ExternalMerge,
+}
+
+impl TuplesortMethod {
+    pub fn name(self) -> &'static str {
+        match self {
+            TuplesortMethod::StillInProgress => "still in progress",
+            TuplesortMethod::TopNHeapsort => "top-N heapsort",
+            TuplesortMethod::Quicksort => "quicksort",
+            TuplesortMethod::ExternalSort => "external sort",
+            TuplesortMethod::ExternalMerge => "external merge",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TuplesortSpaceType {
+    Disk,
+    #[default]
+    Memory,
+}
+
+impl TuplesortSpaceType {
+    pub fn name(self) -> &'static str {
+        match self {
+            TuplesortSpaceType::Disk => "Disk",
+            TuplesortSpaceType::Memory => "Memory",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TuplesortInstrumentation {
+    pub sortMethod: TuplesortMethod,
+    pub spaceType: TuplesortSpaceType,
+    pub spaceUsed: i64,
+}
+
 // C AggregateInstrumentation (nodeAgg.h) + hash_planned_partitions (an
 // AggState field in C; rides this carrier so EXPLAIN reads one struct).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

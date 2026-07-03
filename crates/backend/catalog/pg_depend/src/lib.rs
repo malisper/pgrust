@@ -1,4 +1,5 @@
-// pg_depend.c recording slice; deletion/scan half and pg_shdepend unported.
+// pg_depend.c recording slice; the deletion half rides in catalog_dependency
+// (deleteOneObject's scans); pg_shdepend writes unported.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -131,7 +132,7 @@ pub fn record_object_address_dependencies<'mcx>(
     recordMultipleDependencies(mcx, depender, &referenced[..kept], behavior)
 }
 
-fn object_address_comparator(a: &ObjectAddress, b: &ObjectAddress) -> core::cmp::Ordering {
+pub fn object_address_comparator(a: &ObjectAddress, b: &ObjectAddress) -> core::cmp::Ordering {
     b.objectId
         .cmp(&a.objectId)
         .then(a.classId.cmp(&b.classId))

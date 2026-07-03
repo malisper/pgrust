@@ -2,6 +2,8 @@
 #![allow(non_snake_case)]
 
 mod constraints;
+mod drop;
+pub use drop::RemoveRelations;
 
 use mcx::Mcx;
 use types_core::{AttrNumber, InvalidOid, Oid, NAMEDATALEN};
@@ -123,11 +125,6 @@ pub fn DefineRelation<'mcx>(
     let owner_id = if owner_id != InvalidOid { owner_id } else { miscinit::GetUserId() };
 
     let descriptor = BuildDescForRelation(mcx, &stmt.tableElts)?;
-    for i in 0..descriptor.natts as usize {
-        if descriptor.attr(i).attlen < 0 {
-            unported("NewRelationCreateToastTable (varlena column => TOAST decision)");
-        }
-    }
 
     let relation_id = catalog_heap::heap_create_with_catalog(
         mcx,

@@ -192,12 +192,11 @@ fn mcv_selectivity<'mcx>(
     let mut mcv_selec = 0.0;
     let mut sumcommon = 0.0;
     if let Some(sslot) = vardata.slot(STATISTIC_KIND_MCV, 0) {
-        let numbers = sslot.numbers()?;
         for (i, &v) in sslot.values()?.iter().enumerate() {
             if op_test(opproc, collation, v, constval, varonleft)? {
-                mcv_selec += numbers[i] as f64;
+                mcv_selec += sslot.numbers()?[i] as f64;
             }
-            sumcommon += numbers[i] as f64;
+            sumcommon += sslot.numbers()?[i] as f64;
         }
     }
     Ok((mcv_selec, sumcommon))
@@ -230,8 +229,7 @@ fn ineq_histogram_selectivity<'mcx>(
     let Some(sslot) = vardata.slot(STATISTIC_KIND_HISTOGRAM, 0) else {
         return Ok(hist_selec);
     };
-    let values = sslot.values()?;
-    let nvalues = values.len() as i32;
+    let nvalues = sslot.values()?.len() as i32;
     if nvalues > 1
         && sslot.stacoll == collation
         && lsyscache::comparison_ops_are_compatible(sslot.staop, opoid)?
@@ -249,7 +247,7 @@ fn ineq_histogram_selectivity<'mcx>(
                 // Endpoint replacement rides get_actual_variable_range.
                 let _ = get_actual_variable_range(run, vardata);
             }
-            let mut ltcmp = op_test(opproc, collation, values[probe as usize], constval, true)?;
+            let mut ltcmp = op_test(opproc, collation, sslot.values()?[probe as usize], constval, true)?;
             if isgt {
                 ltcmp = !ltcmp;
             }
@@ -280,8 +278,8 @@ fn ineq_histogram_selectivity<'mcx>(
 
             let binfrac = match (
                 convert_numeric_to_scalar(constval, consttype),
-                convert_numeric_to_scalar(values[i as usize - 1], vardata.vartype),
-                convert_numeric_to_scalar(values[i as usize], vardata.vartype),
+                convert_numeric_to_scalar(sslot.values()?[i as usize - 1], vardata.vartype),
+                convert_numeric_to_scalar(sslot.values()?[i as usize], vardata.vartype),
             ) {
                 (Some(val), Some(low), Some(high)) => {
                     if high <= low {
@@ -319,7 +317,7 @@ fn ineq_histogram_selectivity<'mcx>(
         }
     } else if nvalues > 1 {
         let mut nmatch = 0;
-        for &v in values.iter() {
+        for &v in sslot.values()?.iter() {
             if op_test(opproc, collation, v, constval, true)? {
                 nmatch += 1;
             }
@@ -409,17 +407,13 @@ fn eqsel_internal<'mcx>(
             varonleft,
             negate,
         )?,
-        None => var_eq_non_const(run, &vardata, negate)?,
+        None => var_eq_non_const(run, &vardata, negate),
     };
     Ok(selec)
 }
 
 // var_eq_non_const (selfuncs.c).
-fn var_eq_non_const(
-    run: &PlannerRun<'_>,
-    vardata: &VariableStatData<'_>,
-    negate: bool,
-) -> PgResult<f64> {
+fn var_eq_non_const(run: &PlannerRun<'_>, vardata: &VariableStatData<'_>, negate: bool) -> f64 {
     let nullfrac = vardata.nullfrac();
     let selec = if vardata.isunique
         && vardata.rel.is_some_and(|r| run.root.rel(r).tuples >= 1.0)
@@ -432,7 +426,7 @@ fn var_eq_non_const(
             selec /= nd;
         }
         if let Some(sslot) = vardata.slot(STATISTIC_KIND_MCV, 0) {
-            if let Some(&first) = sslot.numbers()?.first() {
+            if let Some(&first) = sslot.numbers().ok().and_then(|n| n.first()) {
                 if selec > first as f64 {
                     selec = first as f64;
                 }
@@ -443,7 +437,7 @@ fn var_eq_non_const(
         1.0 / get_variable_numdistinct(run, vardata).0
     };
     let selec = if negate { 1.0 - selec - nullfrac } else { selec };
-    Ok(clamp_probability(selec))
+    clamp_probability(selec)
 }
 fn get_restriction_variable<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -588,7 +582,6 @@ fn var_eq_const<'mcx>(
         match vardata.slot(STATISTIC_KIND_MCV, 0) {
             Some(sslot) => {
                 let mut eqproc = opproc_for(oproid)?;
-                let numbers = sslot.numbers()?;
                 let mut matched = None;
                 for (i, &v) in sslot.values()?.iter().enumerate() {
                     if op_test(&mut eqproc, collation, v, constval, varonleft)? {
@@ -597,18 +590,19 @@ fn var_eq_const<'mcx>(
                     }
                 }
                 match matched {
-                    Some(i) => numbers[i] as f64,
+                    Some(i) => sslot.numbers()?[i] as f64,
                     None => {
-                        let sumcommon: f64 = numbers.iter().map(|&n| n as f64).sum();
+                        let sumcommon: f64 =
+                            sslot.numbers()?.iter().map(|&n| n as f64).sum();
                         let mut selec =
                             clamp_probability(1.0 - sumcommon - nullfrac);
                         let otherdistinct = get_variable_numdistinct(run, vardata).0
-                            - numbers.len() as f64;
+                            - sslot.numbers()?.len() as f64;
                         if otherdistinct > 1.0 {
                             selec /= otherdistinct;
                         }
-                        let least = numbers.last().copied().unwrap_or(0.0) as f64;
-                        if !numbers.is_empty() && selec > least {
+                        let least = sslot.numbers()?.last().copied().unwrap_or(0.0) as f64;
+                        if !sslot.numbers()?.is_empty() && selec > least {
                             selec = least;
                         }
                         selec
@@ -926,9 +920,8 @@ fn btcostestimate(
                 .iter()
                 .find(|sl| sl.kind == STATISTIC_KIND_CORRELATION && sl.staop == sortop);
             if let (true, Some(slot)) = (sortop != 0, slot) {
-                let numbers = slot.numbers()?;
-                debug_assert!(numbers.len() == 1);
-                let mut corr = numbers[0] as f64;
+                debug_assert!(slot.numbers()?.len() == 1);
+                let mut corr = slot.numbers()?[0] as f64;
                 if reverse0 {
                     corr = -corr;
                 }
@@ -1370,9 +1363,8 @@ fn get_variable_range<'mcx>(
     let mut range: Option<(Datum, Datum)> = None;
 
     if let Some(sslot) = vardata.slot(STATISTIC_KIND_HISTOGRAM, sortop) {
-        let values = sslot.values()?;
-        if sslot.stacoll == collation && !values.is_empty() {
-            range = Some((values[0], values[values.len() - 1]));
+        if sslot.stacoll == collation && !sslot.values()?.is_empty() {
+            range = Some((sslot.values()?[0], sslot.values()?[sslot.values()?.len() - 1]));
         }
     }
     if range.is_none() {

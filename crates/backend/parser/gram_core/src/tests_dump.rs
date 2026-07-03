@@ -280,6 +280,14 @@ fn node(out: &mut String, n: Node<'_>) {
         bool_field(out, "isall", d.isall);
         int_field(out, "location", d.location);
         out.push('}');
+    } else if let Some(d) = n.as_drop_stmt() {
+        out.push_str("{DROPSTMT");
+        list_field(out, "objects", &d.objects);
+        int_field(out, "removeType", d.removeType as i32);
+        int_field(out, "behavior", d.behavior as i32);
+        bool_field(out, "missing_ok", d.missing_ok);
+        bool_field(out, "concurrent", d.concurrent);
+        out.push('}');
     } else if let Some(v) = n.as_variable_set_stmt() {
         out.push_str("{VARIABLESETSTMT");
         int_field(out, "kind", v.kind as i32);

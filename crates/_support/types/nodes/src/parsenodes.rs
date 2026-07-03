@@ -489,6 +489,81 @@ pub struct VacuumRelation<'mcx> {
     pub va_cols: NodeList<'mcx>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum ObjectType {
+    #[default]
+    OBJECT_ACCESS_METHOD = 0,
+    OBJECT_AGGREGATE,
+    OBJECT_AMOP,
+    OBJECT_AMPROC,
+    OBJECT_ATTRIBUTE,
+    OBJECT_CAST,
+    OBJECT_COLUMN,
+    OBJECT_COLLATION,
+    OBJECT_CONVERSION,
+    OBJECT_DATABASE,
+    OBJECT_DEFAULT,
+    OBJECT_DEFACL,
+    OBJECT_DOMAIN,
+    OBJECT_DOMCONSTRAINT,
+    OBJECT_EVENT_TRIGGER,
+    OBJECT_EXTENSION,
+    OBJECT_FDW,
+    OBJECT_FOREIGN_SERVER,
+    OBJECT_FOREIGN_TABLE,
+    OBJECT_FUNCTION,
+    OBJECT_INDEX,
+    OBJECT_LANGUAGE,
+    OBJECT_LARGEOBJECT,
+    OBJECT_MATVIEW,
+    OBJECT_OPCLASS,
+    OBJECT_OPERATOR,
+    OBJECT_OPFAMILY,
+    OBJECT_PARAMETER_ACL,
+    OBJECT_POLICY,
+    OBJECT_PROCEDURE,
+    OBJECT_PUBLICATION,
+    OBJECT_PUBLICATION_NAMESPACE,
+    OBJECT_PUBLICATION_REL,
+    OBJECT_ROLE,
+    OBJECT_ROUTINE,
+    OBJECT_RULE,
+    OBJECT_SCHEMA,
+    OBJECT_SEQUENCE,
+    OBJECT_SUBSCRIPTION,
+    OBJECT_STATISTIC_EXT,
+    OBJECT_TABCONSTRAINT,
+    OBJECT_TABLE,
+    OBJECT_TABLESPACE,
+    OBJECT_TRANSFORM,
+    OBJECT_TRIGGER,
+    OBJECT_TSCONFIGURATION,
+    OBJECT_TSDICTIONARY,
+    OBJECT_TSPARSER,
+    OBJECT_TSTEMPLATE,
+    OBJECT_TYPE,
+    OBJECT_USER_MAPPING,
+    OBJECT_VIEW,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum DropBehavior {
+    #[default]
+    DROP_RESTRICT = 0,
+    DROP_CASCADE = 1,
+}
+
+#[derive(Default)]
+pub struct DropStmt<'mcx> {
+    pub objects: NodeList<'mcx>,
+    pub removeType: ObjectType,
+    pub behavior: DropBehavior,
+    pub missing_ok: bool,
+    pub concurrent: bool,
+}
+
 // C: isall is redundant with name == NULL but kept for query jumbling.
 pub struct DeallocateStmt<'mcx> {
     pub name: Option<&'mcx str>,
@@ -556,6 +631,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for ClosePortalStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for DeallocateStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_DeallocateStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for DropStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_DropStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for WithClause<'mcx> {
     const TAG: NodeTag = NodeTag::T_WithClause;
@@ -678,6 +756,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_deallocate_stmt(self) -> Option<&'mcx DeallocateStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_drop_stmt(self) -> Option<&'mcx DropStmt<'mcx>> {
         self.as_variant()
     }
 }

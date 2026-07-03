@@ -374,6 +374,28 @@ fn dispatch_switch<'mcx>(
         }
         T_CheckPointStmt => handler_gap("RequestCheckpoint (checkpointer lane)"),
 
+        T_DropStmt => {
+            use types_nodes::parsenodes::ObjectType::*;
+            let stmt = parsetree.as_drop_stmt().unwrap();
+            // Retention contract as unify_stmt_lifetime: nothing derived from
+            // the statement arena escapes the utility call.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::DropStmt<'_>,
+                    &types_nodes::parsenodes::DropStmt<'mcx>,
+                >(stmt)
+            };
+            match stmt.removeType {
+                OBJECT_INDEX if stmt.concurrent => {
+                    xact::PreventInTransactionBlock(is_top_level, "DROP INDEX CONCURRENTLY")?;
+                    tablecmds::RemoveRelations(mcx, stmt)?;
+                }
+                OBJECT_INDEX | OBJECT_TABLE | OBJECT_SEQUENCE | OBJECT_VIEW | OBJECT_MATVIEW
+                | OBJECT_FOREIGN_TABLE => tablecmds::RemoveRelations(mcx, stmt)?,
+                _ => handler_gap("RemoveObjects (dropcmds lane)"),
+            }
+        }
+
         // Everything else — the GRANT/DROP/RENAME/ALTER.../COMMENT/SECURITY
         // LABEL fast paths and the event-trigger-fenced DDL fan-out.
         T_CreateStmt => {
@@ -388,7 +410,7 @@ fn dispatch_switch<'mcx>(
                         let cstmt = stmt
                             .as_variant::<types_nodes::rawnodes::CreateStmt>()
                             .expect("CreateStmt");
-                        tablecmds::DefineRelation(
+                        let relid = tablecmds::DefineRelation(
                             mcx,
                             cstmt,
                             types_rel::RELKIND_RELATION,
@@ -396,8 +418,9 @@ fn dispatch_switch<'mcx>(
                             source_text,
                         )?;
                         xact::CommandCounterIncrement()?;
-                        // NewRelationCreateToastTable: the varlena gate lives
-                        // in DefineRelation; int-only tables need no TOAST.
+                        // toast_options: stmt.options is nil (gated in
+                        // DefineRelation), so transformRelOptions yields 0.
+                        catalog_toasting::NewRelationCreateToastTable(mcx, relid)?;
                     }
                     _ => handler_gap("ProcessUtilitySlow side statements (blist/alist)"),
                 }

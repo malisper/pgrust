@@ -13,7 +13,9 @@ use ::datum::Datum;
 use ::mcx::{Mcx, McxOwned, MemoryContext, PgVec};
 use ::queryenvironment::QueryEnvironment;
 use ::snapmgr::Snapshot;
-use ::types_core::instrument::{AggregateInstrumentation, Instrumentation};
+use ::types_core::instrument::{
+    AggregateInstrumentation, Instrumentation, TuplesortInstrumentation,
+};
 use ::types_core::CommandId;
 use ::types_error::{PgError, PgResult};
 use ::types_nodes::bitmapset::Bitmapset;
@@ -238,6 +240,7 @@ pub struct EStateData<'mcx> {
     pub es_instrumentation: PgVec<'mcx, Instrumentation>,
     // (plan_node_id, metrics); C's AggState fields, hoisted for the Plan walk.
     pub es_agg_instrumentation: PgVec<'mcx, (i32, AggregateInstrumentation)>,
+    pub es_sort_instrumentation: PgVec<'mcx, (i32, TuplesortInstrumentation)>,
     pub es_finished: bool,
     es_exprcontexts: PgVec<'mcx, Option<ExprContextData<'mcx>>>,
     pub es_subplanstates: PgVec<'mcx, SubplanStateCell>,
@@ -289,6 +292,7 @@ impl<'mcx> EStateData<'mcx> {
             es_instrument: 0,
             es_instrumentation: PgVec::new_in(mcx),
             es_agg_instrumentation: PgVec::new_in(mcx),
+            es_sort_instrumentation: PgVec::new_in(mcx),
             es_finished: false,
             es_exprcontexts: PgVec::new_in(mcx),
             es_subplanstates: PgVec::new_in(mcx),
@@ -338,22 +342,16 @@ impl<'mcx> EStateData<'mcx> {
         self.create_expr_context()
     }
 
-    // Ids are estate-minted, tables append-only: index always in bounds
-    // (bounds checks were a per-row tax in every node's fetch loop).
     #[inline]
     pub fn ecxt(&self, id: EcxtId) -> &ExprContextData<'mcx> {
-        debug_assert!((id.0 as usize) < self.es_exprcontexts.len());
-        // SAFETY: id provenance above.
-        unsafe { self.es_exprcontexts.get_unchecked(id.0 as usize) }
+        self.es_exprcontexts[id.0 as usize]
             .as_ref()
             .expect("ExprContext used after FreeExprContext")
     }
 
     #[inline]
     pub fn ecxt_mut(&mut self, id: EcxtId) -> &mut ExprContextData<'mcx> {
-        debug_assert!((id.0 as usize) < self.es_exprcontexts.len());
-        // SAFETY: id provenance above.
-        unsafe { self.es_exprcontexts.get_unchecked_mut(id.0 as usize) }
+        self.es_exprcontexts[id.0 as usize]
             .as_mut()
             .expect("ExprContext used after FreeExprContext")
     }
@@ -429,16 +427,12 @@ impl<'mcx> EStateData<'mcx> {
 
     #[inline]
     pub fn slot(&self, id: ExecSlotId) -> &SlotData<'mcx> {
-        debug_assert!((id.0 as usize) < self.es_tupleTable.len());
-        // SAFETY: id provenance (ecxt note).
-        unsafe { self.es_tupleTable.get_unchecked(id.0 as usize) }
+        &self.es_tupleTable[id.0 as usize]
     }
 
     #[inline]
     pub fn slot_mut(&mut self, id: ExecSlotId) -> &mut SlotData<'mcx> {
-        debug_assert!((id.0 as usize) < self.es_tupleTable.len());
-        // SAFETY: id provenance (ecxt note).
-        unsafe { self.es_tupleTable.get_unchecked_mut(id.0 as usize) }
+        &mut self.es_tupleTable[id.0 as usize]
     }
 
     /// `ExecResetTupleTable(estate->es_tupleTable, shouldFree)` (execTuples.c).

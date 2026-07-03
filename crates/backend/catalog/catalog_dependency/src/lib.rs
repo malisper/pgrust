@@ -1,0 +1,720 @@
+// dependency.c deletion half, bounded to dropping plain tables and the
+// objects their INTERNAL/AUTO closure reaches (rowtype + array type, toast
+// table + toast index, pg_attrdef/pg_constraint entries); every other object
+// class or error-report arm is loud with its C symbol.
+#![allow(non_snake_case)]
+#![allow(non_upper_case_globals)]
+
+use datum::Datum;
+use mcx::Mcx;
+use pg_depend::{object_address_comparator, ObjectAddress};
+use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID, TYPE_RELATION_ID};
+use types_error::PgResult;
+use types_rel::{AccessExclusiveLock, Relation, RowExclusiveLock, RELKIND_INDEX, RELKIND_RELATION, RELKIND_TOASTVALUE};
+use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use types_tuple::{HeapTupleData, TupleDescData};
+
+pub use types_nodes::parsenodes::DropBehavior;
+
+pub const PERFORM_DELETION_INTERNAL: i32 = 0x0001;
+pub const PERFORM_DELETION_CONCURRENTLY: i32 = 0x0002;
+pub const PERFORM_DELETION_QUIETLY: i32 = 0x0004;
+pub const PERFORM_DELETION_SKIP_ORIGINAL: i32 = 0x0008;
+pub const PERFORM_DELETION_SKIP_EXTENSIONS: i32 = 0x0010;
+pub const PERFORM_DELETION_CONCURRENT_LOCK: i32 = 0x0020;
+
+const DEPFLAG_ORIGINAL: i32 = 0x0001;
+const DEPFLAG_NORMAL: i32 = 0x0002;
+const DEPFLAG_AUTO: i32 = 0x0004;
+const DEPFLAG_INTERNAL: i32 = 0x0008;
+const DEPFLAG_PARTITION: i32 = 0x0010;
+const DEPFLAG_EXTENSION: i32 = 0x0020;
+const DEPFLAG_REVERSE: i32 = 0x0040;
+const DEPFLAG_IS_PART: i32 = 0x0080;
+const DEPFLAG_SUBOBJECT: i32 = 0x0100;
+
+const Anum_pg_depend_classid: usize = 1;
+const Anum_pg_depend_objid: usize = 2;
+const Anum_pg_depend_objsubid: usize = 3;
+const Anum_pg_depend_refclassid: usize = 4;
+const Anum_pg_depend_refobjid: usize = 5;
+const Anum_pg_depend_refobjsubid: usize = 6;
+const Anum_pg_depend_deptype: usize = 7;
+
+const DescriptionRelationId: Oid = 2609;
+const DescriptionObjIndexId: Oid = 2675;
+const InitPrivsRelationId: Oid = 3394;
+const InitPrivsObjIndexId: Oid = 3395;
+const SecLabelRelationId: Oid = 3596;
+const AttrDefaultRelationId: Oid = 2604;
+const ConstraintRelationId: Oid = 2606;
+const AuthMemRelationId: Oid = 1261;
+
+#[cold]
+#[inline(never)]
+fn unported(what: &str) -> ! {
+    panic!("unported: dependency.c {what}")
+}
+
+// dependee feeds only the loud report arms today.
+#[derive(Clone, Copy)]
+struct ObjectAddressExtra {
+    flags: i32,
+    #[allow(dead_code)]
+    dependee: ObjectAddress,
+}
+
+impl Default for ObjectAddressExtra {
+    fn default() -> Self {
+        ObjectAddressExtra { flags: 0, dependee: ObjectAddress::set(InvalidOid, InvalidOid) }
+    }
+}
+
+pub struct ObjectAddresses {
+    refs: Vec<ObjectAddress>,
+    extras: Vec<ObjectAddressExtra>,
+}
+
+impl ObjectAddresses {
+    pub fn new() -> Self {
+        ObjectAddresses { refs: Vec::new(), extras: Vec::new() }
+    }
+
+    pub fn add_exact_object_address(&mut self, obj: ObjectAddress) {
+        self.refs.push(obj);
+        self.extras.push(ObjectAddressExtra::default());
+    }
+
+    fn add_exact_object_address_extra(&mut self, obj: ObjectAddress, extra: ObjectAddressExtra) {
+        self.refs.push(obj);
+        self.extras.push(extra);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.refs.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.refs.len()
+    }
+}
+
+impl Default for ObjectAddresses {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn object_address_present(object: &ObjectAddress, addrs: &ObjectAddresses) -> bool {
+    addrs.refs.iter().rev().any(|thisobj| {
+        object.classId == thisobj.classId
+            && object.objectId == thisobj.objectId
+            && (object.objectSubId == thisobj.objectSubId || thisobj.objectSubId == 0)
+    })
+}
+
+fn object_address_present_add_flags(
+    object: &ObjectAddress,
+    flags: i32,
+    addrs: &mut ObjectAddresses,
+) -> bool {
+    let mut result = false;
+    for i in (0..addrs.refs.len()).rev() {
+        let thisobj = addrs.refs[i];
+        if object.classId == thisobj.classId && object.objectId == thisobj.objectId {
+            if object.objectSubId == thisobj.objectSubId {
+                addrs.extras[i].flags |= flags;
+                result = true;
+            } else if thisobj.objectSubId == 0 {
+                result = true;
+            } else if object.objectSubId == 0 && flags != 0 {
+                addrs.extras[i].flags |= flags | DEPFLAG_SUBOBJECT;
+            }
+        }
+    }
+    result
+}
+
+struct StackEntry {
+    object: ObjectAddress,
+    flags: i32,
+}
+
+fn stack_address_present_add_flags(
+    object: &ObjectAddress,
+    flags: i32,
+    stack: &mut [StackEntry],
+) -> bool {
+    let mut result = false;
+    for entry in stack.iter_mut() {
+        let thisobj = entry.object;
+        if object.classId == thisobj.classId && object.objectId == thisobj.objectId {
+            if object.objectSubId == thisobj.objectSubId {
+                entry.flags |= flags;
+                result = true;
+            } else if thisobj.objectSubId == 0 {
+                result = true;
+            } else if object.objectSubId == 0 && flags != 0 {
+                entry.flags |= flags | DEPFLAG_SUBOBJECT;
+            }
+        }
+    }
+    result
+}
+
+pub fn AcquireDeletionLock(object: &ObjectAddress, flags: i32) -> PgResult<()> {
+    if object.classId == RELATION_RELATION_ID {
+        if flags & PERFORM_DELETION_CONCURRENTLY != 0 {
+            unported("AcquireDeletionLock: concurrent (ShareUpdateExclusiveLock) lane");
+        }
+        lmgr::LockRelationOid(object.objectId, AccessExclusiveLock)
+    } else if object.classId == AuthMemRelationId {
+        unported("AcquireDeletionLock: LockSharedObject (pg_auth_members)");
+    } else {
+        lmgr::LockDatabaseObject(object.classId, object.objectId, 0, AccessExclusiveLock)
+    }
+}
+
+pub fn ReleaseDeletionLock(object: &ObjectAddress) -> PgResult<()> {
+    if object.classId == RELATION_RELATION_ID {
+        lmgr::UnlockRelationOid(object.objectId, AccessExclusiveLock)
+    } else {
+        lmgr::UnlockDatabaseObject(object.classId, object.objectId, 0, AccessExclusiveLock)
+    }
+}
+
+fn scankey(attno: usize, func: types_core::primitive::RegProcedure, arg: Datum) -> ScanKeyData {
+    let mut key = ScanKeyData::empty();
+    key.sk_attno = attno as AttrNumber;
+    key.sk_strategy = BTEqualStrategyNumber;
+    key.sk_collation = 0;
+    key.sk_func = fmgr_seams::fmgr_info::call(func)
+        .unwrap_or_else(|e| panic!("fmgr_info({func}) failed: {e:?}"));
+    key.sk_argument = arg;
+    key
+}
+
+fn oid_key(attno: usize, oid: Oid) -> ScanKeyData {
+    scankey(attno, types_core::fmgr::F_OIDEQ, Datum::from_oid(oid))
+}
+
+fn int4_key(attno: usize, v: i32) -> ScanKeyData {
+    scankey(attno, types_core::fmgr::F_INT4EQ, Datum::from_i32(v))
+}
+
+fn getattr(tup: &HeapTupleData<'_>, attnum: usize, desc: &TupleDescData<'_>) -> Datum {
+    let mut isnull = false;
+    // SAFETY: fixed NOT NULL catalog column under the relation's descriptor.
+    let d = unsafe { types_tuple::heap_getattr(tup, attnum as i32, desc, &mut isnull) };
+    debug_assert!(!isnull);
+    d
+}
+
+pub fn performDeletion<'mcx>(
+    mcx: Mcx<'mcx>,
+    object: &ObjectAddress,
+    behavior: DropBehavior,
+    flags: i32,
+) -> PgResult<()> {
+    let depRel = table::table_open(mcx, pg_depend::DependRelationId, RowExclusiveLock)?;
+    AcquireDeletionLock(object, 0)?;
+    let mut targetObjects = ObjectAddresses::new();
+    let mut stack: Vec<StackEntry> = Vec::new();
+    findDependentObjects(
+        mcx,
+        object,
+        DEPFLAG_ORIGINAL,
+        flags,
+        &mut stack,
+        &mut targetObjects,
+        None,
+        &depRel,
+    )?;
+    reportDependentObjects(&targetObjects, behavior, flags)?;
+    deleteObjectsInList(mcx, &targetObjects, &depRel, flags)?;
+    depRel.close(RowExclusiveLock)
+}
+
+pub fn performMultipleDeletions<'mcx>(
+    mcx: Mcx<'mcx>,
+    objects: &ObjectAddresses,
+    behavior: DropBehavior,
+    flags: i32,
+) -> PgResult<()> {
+    if objects.is_empty() {
+        return Ok(());
+    }
+    let depRel = table::table_open(mcx, pg_depend::DependRelationId, RowExclusiveLock)?;
+    let mut targetObjects = ObjectAddresses::new();
+    for thisobj in objects.refs.iter() {
+        AcquireDeletionLock(thisobj, flags)?;
+        let mut stack: Vec<StackEntry> = Vec::new();
+        findDependentObjects(
+            mcx,
+            thisobj,
+            DEPFLAG_ORIGINAL,
+            flags,
+            &mut stack,
+            &mut targetObjects,
+            Some(objects),
+            &depRel,
+        )?;
+    }
+    reportDependentObjects(&targetObjects, behavior, flags)?;
+    deleteObjectsInList(mcx, &targetObjects, &depRel, flags)?;
+    depRel.close(RowExclusiveLock)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn findDependentObjects<'mcx>(
+    mcx: Mcx<'mcx>,
+    object: &ObjectAddress,
+    objflags: i32,
+    flags: i32,
+    stack: &mut Vec<StackEntry>,
+    targetObjects: &mut ObjectAddresses,
+    pendingObjects: Option<&ObjectAddresses>,
+    depRel: &Relation<'mcx>,
+) -> PgResult<()> {
+    let mut objflags = objflags;
+
+    if stack_address_present_add_flags(object, objflags, stack) {
+        return Ok(());
+    }
+    if object_address_present_add_flags(object, objflags, targetObjects) {
+        return Ok(());
+    }
+    if catalog::IsPinnedObject(object.classId, object.objectId) {
+        unported("findDependentObjects: DROP of a pinned object (needs getObjectDescription)");
+    }
+
+    // Scan what this object depends on (owner detection).
+    let mut owningObject = ObjectAddress::set(InvalidOid, InvalidOid);
+    {
+        let mut keys: Vec<ScanKeyData> = vec![
+            oid_key(Anum_pg_depend_classid, object.classId),
+            oid_key(Anum_pg_depend_objid, object.objectId),
+        ];
+        if object.objectSubId != 0 {
+            keys.push(int4_key(Anum_pg_depend_objsubid, object.objectSubId));
+        }
+        let mut scan = genam::systable_beginscan(
+            mcx,
+            depRel,
+            pg_depend::DependDependerIndexId,
+            true,
+            None,
+            &keys,
+        )?;
+        let desc = depRel.descr();
+        loop {
+            let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else { break };
+            // SAFETY: aliases the slot-held image for the recheck call below.
+            let view = unsafe {
+                HeapTupleData::from_raw_parts(tup.header_ptr(), tup.t_len, tup.t_self, tup.t_tableOid)
+            };
+            let tup = &view;
+            let otherObject = ObjectAddress::sub_set(
+                getattr(tup, Anum_pg_depend_refclassid, desc).as_oid(),
+                getattr(tup, Anum_pg_depend_refobjid, desc).as_oid(),
+                getattr(tup, Anum_pg_depend_refobjsubid, desc).as_i32(),
+            );
+            let deptype = getattr(tup, Anum_pg_depend_deptype, desc).as_i8() as u8;
+
+            if otherObject.classId == object.classId
+                && otherObject.objectId == object.objectId
+                && object.objectSubId == 0
+            {
+                continue;
+            }
+
+            match deptype {
+                b'n' | b'a' | b'x' => {}
+                b'e' | b'i' => {
+                    if deptype == b'e' && flags & PERFORM_DELETION_SKIP_EXTENSIONS != 0 {
+                        continue;
+                    }
+                    // creating_extension is always false (no extension lane).
+                    if stack.is_empty() {
+                        if let Some(pending) = pendingObjects {
+                            if object_address_present(&otherObject, pending) {
+                                genam::systable_endscan(mcx, scan)?;
+                                ReleaseDeletionLock(object)?;
+                                return Ok(());
+                            }
+                        }
+                        if owningObject.classId == InvalidOid || deptype == b'e' {
+                            owningObject = otherObject;
+                        }
+                        continue;
+                    }
+                    if stack_address_present_add_flags(&otherObject, 0, stack) {
+                        continue;
+                    }
+                    // Recurse to the owning object instead.
+                    ReleaseDeletionLock(object)?;
+                    AcquireDeletionLock(&otherObject, 0)?;
+                    if !genam::systable_recheck_tuple(mcx, &mut scan, tup)? {
+                        genam::systable_endscan(mcx, scan)?;
+                        ReleaseDeletionLock(&otherObject)?;
+                        return Ok(());
+                    }
+                    genam::systable_endscan(mcx, scan)?;
+                    findDependentObjects(
+                        mcx,
+                        &otherObject,
+                        DEPFLAG_REVERSE,
+                        flags,
+                        stack,
+                        targetObjects,
+                        pendingObjects,
+                        depRel,
+                    )?;
+                    if !object_address_present_add_flags(object, objflags, targetObjects) {
+                        panic!(
+                            "deletion of owning object {:?} failed to delete {:?}",
+                            otherObject, object
+                        );
+                    }
+                    return Ok(());
+                }
+                b'P' | b'S' => {
+                    unported("findDependentObjects: partition dependencies");
+                }
+                other => panic!(
+                    "unrecognized dependency type '{}' for {:?}",
+                    other as char, object
+                ),
+            }
+        }
+        genam::systable_endscan(mcx, scan)?;
+    }
+
+    if owningObject.classId != InvalidOid {
+        unported(
+            "findDependentObjects: 2BP01 cannot-drop-required-object report \
+             (getObjectDescription)",
+        );
+    }
+
+    // Scan what depends on this object.
+    let mut dependentObjects: Vec<(ObjectAddress, i32)> = Vec::new();
+    {
+        let mut keys: Vec<ScanKeyData> = vec![
+            oid_key(Anum_pg_depend_refclassid, object.classId),
+            oid_key(Anum_pg_depend_refobjid, object.objectId),
+        ];
+        if object.objectSubId != 0 {
+            keys.push(int4_key(Anum_pg_depend_refobjsubid, object.objectSubId));
+        }
+        let mut scan = genam::systable_beginscan(
+            mcx,
+            depRel,
+            pg_depend::DependReferenceIndexId,
+            true,
+            None,
+            &keys,
+        )?;
+        let desc = depRel.descr();
+        loop {
+            let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else { break };
+            // SAFETY: aliases the slot-held image for the recheck call below.
+            let view = unsafe {
+                HeapTupleData::from_raw_parts(tup.header_ptr(), tup.t_len, tup.t_self, tup.t_tableOid)
+            };
+            let tup = &view;
+            let otherObject = ObjectAddress::sub_set(
+                getattr(tup, Anum_pg_depend_classid, desc).as_oid(),
+                getattr(tup, Anum_pg_depend_objid, desc).as_oid(),
+                getattr(tup, Anum_pg_depend_objsubid, desc).as_i32(),
+            );
+            let deptype = getattr(tup, Anum_pg_depend_deptype, desc).as_i8() as u8;
+
+            if otherObject.classId == object.classId
+                && otherObject.objectId == object.objectId
+                && object.objectSubId == 0
+            {
+                continue;
+            }
+
+            AcquireDeletionLock(&otherObject, 0)?;
+            if !genam::systable_recheck_tuple(mcx, &mut scan, tup)? {
+                ReleaseDeletionLock(&otherObject)?;
+                continue;
+            }
+
+            let subflags = match deptype {
+                b'n' => DEPFLAG_NORMAL,
+                b'a' | b'x' => DEPFLAG_AUTO,
+                b'i' => DEPFLAG_INTERNAL,
+                b'P' | b'S' => DEPFLAG_PARTITION,
+                b'e' => DEPFLAG_EXTENSION,
+                other => panic!(
+                    "unrecognized dependency type '{}' for {:?}",
+                    other as char, object
+                ),
+            };
+            dependentObjects.push((otherObject, subflags));
+        }
+        genam::systable_endscan(mcx, scan)?;
+    }
+
+    dependentObjects.sort_by(|a, b| object_address_comparator(&a.0, &b.0));
+
+    stack.push(StackEntry { object: *object, flags: objflags });
+    for (depObj, subflags) in dependentObjects.iter() {
+        findDependentObjects(
+            mcx,
+            depObj,
+            *subflags,
+            flags,
+            stack,
+            targetObjects,
+            pendingObjects,
+            depRel,
+        )?;
+    }
+    let top = stack.pop().expect("stack imbalance");
+    objflags = top.flags;
+
+    let extra = ObjectAddressExtra {
+        flags: objflags,
+        dependee: if objflags & DEPFLAG_IS_PART != 0 {
+            unported("findDependentObjects: partition dependee bookkeeping");
+        } else if let Some(prev) = stack.last() {
+            prev.object
+        } else {
+            ObjectAddress::set(InvalidOid, InvalidOid)
+        },
+    };
+    targetObjects.add_exact_object_address_extra(*object, extra);
+    Ok(())
+}
+
+// reportDependentObjects: the happy paths are AUTO/INTERNAL cascades (DEBUG2,
+// suppressed) and no dependents; the NOTICE/RESTRICT-error report needs
+// getObjectDescription and is loud.
+fn reportDependentObjects(
+    targetObjects: &ObjectAddresses,
+    behavior: DropBehavior,
+    flags: i32,
+) -> PgResult<()> {
+    let _ = flags;
+    for i in (0..targetObjects.refs.len()).rev() {
+        let extra = &targetObjects.extras[i];
+        if extra.flags & DEPFLAG_IS_PART != 0 && extra.flags & DEPFLAG_PARTITION == 0 {
+            unported("reportDependentObjects: partition-drop 2BP01 report");
+        }
+    }
+    for i in (0..targetObjects.refs.len()).rev() {
+        let extra = &targetObjects.extras[i];
+        if extra.flags & DEPFLAG_ORIGINAL != 0 {
+            continue;
+        }
+        if extra.flags & DEPFLAG_SUBOBJECT != 0 {
+            continue;
+        }
+        if extra.flags & (DEPFLAG_AUTO | DEPFLAG_INTERNAL | DEPFLAG_PARTITION | DEPFLAG_EXTENSION)
+            != 0
+        {
+            // drop auto-cascades: DEBUG2, not client-visible.
+        } else if behavior == DropBehavior::DROP_RESTRICT {
+            unported("reportDependentObjects: DROP RESTRICT dependency report (2BP01)");
+        } else {
+            unported("reportDependentObjects: DROP CASCADE NOTICE report");
+        }
+    }
+    Ok(())
+}
+
+fn deleteObjectsInList<'mcx>(
+    mcx: Mcx<'mcx>,
+    targetObjects: &ObjectAddresses,
+    depRel: &Relation<'mcx>,
+    flags: i32,
+) -> PgResult<()> {
+    // trackDroppedObjectsNeeded() is false (no event-trigger lane).
+    for i in 0..targetObjects.refs.len() {
+        let thisobj = &targetObjects.refs[i];
+        let thisextra = &targetObjects.extras[i];
+        if flags & PERFORM_DELETION_SKIP_ORIGINAL != 0 && thisextra.flags & DEPFLAG_ORIGINAL != 0 {
+            continue;
+        }
+        deleteOneObject(mcx, thisobj, depRel, flags)?;
+    }
+    Ok(())
+}
+
+fn deleteOneObject<'mcx>(
+    mcx: Mcx<'mcx>,
+    object: &ObjectAddress,
+    depRel: &Relation<'mcx>,
+    flags: i32,
+) -> PgResult<()> {
+    debug_assert!(flags & PERFORM_DELETION_CONCURRENTLY == 0);
+
+    doDeletion(mcx, object, flags)?;
+
+    let mut keys: Vec<ScanKeyData> = vec![
+        oid_key(Anum_pg_depend_classid, object.classId),
+        oid_key(Anum_pg_depend_objid, object.objectId),
+    ];
+    if object.objectSubId != 0 {
+        keys.push(int4_key(Anum_pg_depend_objsubid, object.objectSubId));
+    }
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        depRel,
+        pg_depend::DependDependerIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let tid = tup.t_self;
+        catalog_indexing::CatalogTupleDelete(depRel, &tid)?;
+    }
+    genam::systable_endscan(mcx, scan)?;
+
+    deleteSharedDependencyRecordsFor(mcx, object.classId, object.objectId, object.objectSubId)?;
+
+    DeleteComments(mcx, object.objectId, object.classId, object.objectSubId)?;
+    DeleteSecurityLabel(mcx, object)?;
+    DeleteInitPrivs(mcx, object)?;
+
+    xact::CommandCounterIncrement()?;
+    Ok(())
+}
+
+fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgResult<()> {
+    match object.classId {
+        RELATION_RELATION_ID => {
+            let relKind = lsyscache::get_rel_relkind(object.objectId)? as u8;
+            if relKind == RELKIND_INDEX {
+                debug_assert!(object.objectSubId == 0);
+                catalog_index::index_drop(
+                    mcx,
+                    object.objectId,
+                    flags & PERFORM_DELETION_CONCURRENTLY != 0,
+                )?;
+            } else if object.objectSubId != 0 {
+                unported("doDeletion: RemoveAttributeById (DROP COLUMN lane)");
+            } else if matches!(relKind, RELKIND_RELATION | RELKIND_TOASTVALUE) {
+                catalog_heap::heap_drop_with_catalog(mcx, object.objectId)?;
+            } else {
+                unported("doDeletion: non-table relkind (sequence/view/matview lanes)");
+            }
+        }
+        TYPE_RELATION_ID => pg_type::RemoveTypeById(mcx, object.objectId)?,
+        AttrDefaultRelationId => {
+            unported("doDeletion: RemoveAttrDefaultById (pg_attrdef.c)");
+        }
+        ConstraintRelationId => {
+            unported("doDeletion: RemoveConstraintById (pg_constraint.c)");
+        }
+        other => panic!("unported: doDeletion object class {other}"),
+    }
+    Ok(())
+}
+
+// deleteSharedDependencyRecordsFor (pg_shdepend.c) via shdepDropDependency's
+// dependent-object scan.
+fn deleteSharedDependencyRecordsFor<'mcx>(
+    mcx: Mcx<'mcx>,
+    classId: Oid,
+    objectId: Oid,
+    objectSubId: i32,
+) -> PgResult<()> {
+    let sdepRel = table::table_open(mcx, catalog::SharedDependRelationId, RowExclusiveLock)?;
+    let dbid = if catalog::IsSharedRelation(classId) {
+        InvalidOid
+    } else {
+        init_small::globals::MyDatabaseId()
+    };
+    let mut keys: Vec<ScanKeyData> = vec![
+        oid_key(1, dbid),
+        oid_key(2, classId),
+        oid_key(3, objectId),
+    ];
+    if objectSubId != 0 {
+        keys.push(int4_key(4, objectSubId));
+    }
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &sdepRel,
+        catalog::SharedDependDependerIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let tid = tup.t_self;
+        catalog_indexing::CatalogTupleDelete(&sdepRel, &tid)?;
+    }
+    genam::systable_endscan(mcx, scan)?;
+    sdepRel.close(RowExclusiveLock)
+}
+
+// DeleteComments (comment.c).
+fn DeleteComments<'mcx>(mcx: Mcx<'mcx>, oid: Oid, classoid: Oid, subid: i32) -> PgResult<()> {
+    let rel = table::table_open(mcx, DescriptionRelationId, RowExclusiveLock)?;
+    let mut keys: Vec<ScanKeyData> = vec![oid_key(1, oid), oid_key(2, classoid)];
+    if subid != 0 {
+        keys.push(int4_key(3, subid));
+    }
+    let mut scan =
+        genam::systable_beginscan(mcx, &rel, DescriptionObjIndexId, true, None, &keys)?;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let tid = tup.t_self;
+        catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(RowExclusiveLock)
+}
+
+// DeleteSecurityLabel (seclabel.c), local-object arm; pg_seclabel has no
+// usable index scan without the provider column, so scan by (objoid,
+// classoid, objsubid) prefix of pg_seclabel_object_index.
+fn DeleteSecurityLabel<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress) -> PgResult<()> {
+    if catalog::IsSharedRelation(object.classId) {
+        unported("DeleteSharedSecurityLabel (pg_shseclabel)");
+    }
+    let rel = table::table_open(mcx, SecLabelRelationId, RowExclusiveLock)?;
+    let mut keys: Vec<ScanKeyData> =
+        vec![oid_key(1, object.objectId), oid_key(2, object.classId)];
+    if object.objectSubId != 0 {
+        keys.push(int4_key(3, object.objectSubId));
+    }
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &rel,
+        catalog::SecLabelObjectIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let tid = tup.t_self;
+        catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(RowExclusiveLock)
+}
+
+// DeleteInitPrivs (aclchk.c).
+fn DeleteInitPrivs<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress) -> PgResult<()> {
+    let rel = table::table_open(mcx, InitPrivsRelationId, RowExclusiveLock)?;
+    let keys = [
+        oid_key(1, object.objectId),
+        oid_key(2, object.classId),
+        int4_key(3, object.objectSubId),
+    ];
+    let mut scan =
+        genam::systable_beginscan(mcx, &rel, InitPrivsObjIndexId, true, None, &keys)?;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let tid = tup.t_self;
+        catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(RowExclusiveLock)
+}

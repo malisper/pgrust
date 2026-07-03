@@ -797,6 +797,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "bulkwrite"
+version = "0.1.0"
+dependencies = [
+ "bufmgr",
+ "lmgr_proc",
+ "smgr",
+ "transam_xlog",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_storage",
+ "xloginsert",
+]
+
+[[package]]
 name = "cache_syscache"
 version = "0.1.0"
 dependencies = [
@@ -839,6 +855,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "catalog_dependency"
+version = "0.1.0"
+dependencies = [
+ "catalog",
+ "catalog_heap",
+ "catalog_index",
+ "catalog_indexing",
+ "datum",
+ "fmgr_seams",
+ "genam",
+ "init_small",
+ "lmgr",
+ "lsyscache",
+ "mcx",
+ "pg_attrdef",
+ "pg_constraint",
+ "pg_depend",
+ "pg_type",
+ "table",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+ "xact",
+]
+
+[[package]]
 name = "catalog_heap"
 version = "0.0.0"
 dependencies = [
@@ -846,6 +891,8 @@ dependencies = [
  "catalog_indexing",
  "catalog_storage",
  "datum",
+ "fmgr_seams",
+ "genam",
  "heaptuple",
  "init_small",
  "lmgr",
@@ -854,6 +901,7 @@ dependencies = [
  "miscinit_seams",
  "pg_depend",
  "pg_type",
+ "pgstat",
  "relcache",
  "syscache_seams",
  "table",
@@ -861,7 +909,49 @@ dependencies = [
  "types_core",
  "types_error",
  "types_rel",
+ "types_scan",
  "types_tuple",
+ "xact",
+]
+
+[[package]]
+name = "catalog_index"
+version = "0.1.0"
+dependencies = [
+ "autovacuum",
+ "bufmgr",
+ "catalog",
+ "catalog_heap",
+ "catalog_index_seams",
+ "catalog_indexing",
+ "catalog_storage",
+ "datum",
+ "execindexing",
+ "fmgr_seams",
+ "genam",
+ "guc",
+ "heaptuple",
+ "indexam",
+ "inval",
+ "lmgr",
+ "lsyscache",
+ "mcx",
+ "miscinit",
+ "miscinit_seams",
+ "nbtsort",
+ "pg_depend",
+ "pgstat",
+ "relcache",
+ "snapmgr",
+ "table",
+ "tupdesc",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+ "visibilitymap",
+ "xact",
 ]
 
 [[package]]
@@ -943,6 +1033,7 @@ dependencies = [
  "transam_xlog",
  "types_core",
  "types_error",
+ "types_rel",
  "types_storage",
  "xact",
  "xloginsert_seams",
@@ -957,6 +1048,34 @@ dependencies = [
  "types_core",
  "types_error",
  "types_storage",
+]
+
+[[package]]
+name = "catalog_toasting"
+version = "0.1.0"
+dependencies = [
+ "catalog",
+ "catalog_heap",
+ "catalog_index",
+ "catalog_indexing",
+ "catalog_namespace",
+ "datum",
+ "execindexing",
+ "fmgr_seams",
+ "genam",
+ "heaptuple",
+ "mcx",
+ "miscinit_seams",
+ "pg_depend",
+ "table",
+ "tableam",
+ "tupdesc",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+ "xact",
 ]
 
 [[package]]
@@ -2146,15 +2265,18 @@ dependencies = [
 name = "format_type"
 version = "0.1.0"
 dependencies = [
+ "adt_numeric",
  "datum",
  "fmgr_seams",
  "keywords",
  "lsyscache",
+ "mbutils_seams",
  "syscache_seams",
  "types_core",
  "types_error",
  "types_fmgr",
  "types_tuple",
+ "wchar",
 ]
 
 [[package]]
@@ -3530,6 +3652,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "nbtsort"
+version = "0.1.0"
+dependencies = [
+ "bufmgr",
+ "bulkwrite",
+ "datum",
+ "fmgr_seams",
+ "lsyscache",
+ "nbtree",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_rel",
+ "types_storage",
+]
+
+[[package]]
 name = "nodeagg"
 version = "0.0.0"
 dependencies = [
@@ -4653,6 +4792,8 @@ dependencies = [
  "catalog",
  "catalog_indexing",
  "datum",
+ "fmgr_seams",
+ "genam",
  "heaptuple",
  "mbutils_seams",
  "mcx",
@@ -4663,6 +4804,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_rel",
+ "types_scan",
  "types_tuple",
 ]
 
@@ -6248,6 +6390,7 @@ dependencies = [
  "bufmgr",
  "cache_syscache",
  "catalog",
+ "catalog_index",
  "catalog_namespace",
  "catalog_storage",
  "catcache",
@@ -6899,6 +7042,7 @@ dependencies = [
  "bufmgr_seams",
  "catalog_storage",
  "exectuples",
+ "format_type",
  "guc_tables",
  "heapam",
  "heapam_handler",
@@ -6954,15 +7098,19 @@ name = "tablecmds"
 version = "0.1.0"
 dependencies = [
  "catalog",
+ "catalog_dependency",
  "catalog_heap",
  "catalog_indexing",
  "catalog_namespace",
  "coerce",
  "datum",
+ "elog_seams",
  "fmgr_seams",
  "format_type",
  "genam",
  "heaptuple",
+ "init_small",
+ "inval",
  "mcx",
  "miscinit",
  "outfuncs",
@@ -6973,6 +7121,9 @@ dependencies = [
  "parser_small1",
  "pg_attrdef",
  "pg_constraint",
+ "pg_depend",
+ "rel_vocab",
+ "superuser",
  "syscache_seams",
  "table",
  "tupdesc",
@@ -7554,6 +7705,7 @@ version = "0.1.0"
 name = "utility"
 version = "0.1.0"
 dependencies = [
+ "catalog_toasting",
  "cmdtag",
  "commands_analyze",
  "commands_vacuum",

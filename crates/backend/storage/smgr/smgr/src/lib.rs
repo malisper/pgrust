@@ -805,6 +805,7 @@ pub fn init_seams() {
         })?
     });
     smgr_seams::smgr_cached_nblocks::set(smgr_cached_nblocks_raw);
+    smgr_seams::smgr_nblocks_cached::set(smgrnblocks_cached);
     smgr_seams::smgr_set_cached_nblocks::set(smgr_set_cached_nblocks);
     smgr_seams::smgr_create::set(|rlocator, forknum, is_redo| {
         // smgrcreate(smgropen(rlocator), forknum, isRedo); open is idempotent.

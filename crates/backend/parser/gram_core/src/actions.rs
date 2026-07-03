@@ -2,8 +2,9 @@ use types_core::catalog::RELPERSISTENCE_PERMANENT;
 use types_error::PgResult;
 use types_nodes::parsenodes::{
     CTEMaterialize, CommonTableExpr, CopyStmt, DeallocateStmt, DefElem, DefElemAction,
-    ExecuteStmt, PrepareStmt, TransactionStmt, TransactionStmtKind, VacuumRelation, VacuumStmt,
-    VariableSetKind, VariableSetStmt, VariableShowStmt, WithClause,
+    DropBehavior, DropStmt, ExecuteStmt, ObjectType, PrepareStmt, TransactionStmt,
+    TransactionStmtKind, VacuumRelation, VacuumStmt, VariableSetKind, VariableSetStmt,
+    VariableShowStmt, WithClause,
 };
 use types_nodes::primnodes::{CaseExpr, CaseWhen, CoalesceExpr, JoinExpr, MinMaxExpr, MinMaxOp};
 use types_nodes::JoinType;
@@ -1661,11 +1662,30 @@ impl<'mcx> Parser<'mcx> {
                 list.lappend(mcx, view.v(3).node().expect("Typename"))?;
                 *yyval = YYSTYPE::List(list);
             }
-            // ExplainStmt: EXPLAIN ExplainableStmt; legacy keyword arms
-            // 1587/1588 stay unimplemented-rule louds.
+            // ExplainStmt: EXPLAIN [analyze_keyword opt_verbose | VERBOSE |
+            // '(' utility_option_list ')'] ExplainableStmt.
             1586 => {
                 let mut n = Node::build::<types_nodes::parsenodes::ExplainStmt>(mcx)?;
                 n.query = view.v(2).node();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1587 => {
+                let mut n = Node::build::<types_nodes::parsenodes::ExplainStmt>(mcx)?;
+                n.query = view.v(4).node();
+                let analyze = def_elem(mcx, "analyze", None, view.l(2))?.node().unwrap();
+                let mut options = NodeList::make1(mcx, analyze)?;
+                if view.v(3).boolean() {
+                    let verbose = def_elem(mcx, "verbose", None, view.l(3))?.node().unwrap();
+                    options.lappend(mcx, verbose)?;
+                }
+                n.options = options;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1588 => {
+                let mut n = Node::build::<types_nodes::parsenodes::ExplainStmt>(mcx)?;
+                n.query = view.v(3).node();
+                let verbose = def_elem(mcx, "verbose", None, view.l(2))?.node().unwrap();
+                n.options = NodeList::make1(mcx, verbose)?;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             1581 => {
@@ -1952,6 +1972,53 @@ impl<'mcx> Parser<'mcx> {
                 n.frameOptions = FRAMEOPTION_DEFAULTS;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // opt_drop_behavior: CASCADE | RESTRICT | /*EMPTY*/.
+            143 => *yyval = YYSTYPE::Ival(DropBehavior::DROP_CASCADE as i32),
+            144 | 145 => *yyval = YYSTYPE::Ival(DropBehavior::DROP_RESTRICT as i32),
+            // DropStmt: DROP {object_type_any_name any_name_list |
+            // drop_type_name name_list} [IF EXISTS] opt_drop_behavior
+            // (TYPE/DOMAIN/INDEX CONCURRENTLY/ON-name forms 922-929 stay loud).
+            918 | 920 => {
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = object_type(view.v(2).ival());
+                n.missing_ok = true;
+                n.objects = view.v(5).list();
+                n.behavior = drop_behavior(view.v(6).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            919 | 921 => {
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = object_type(view.v(2).ival());
+                n.objects = view.v(3).list();
+                n.behavior = drop_behavior(view.v(4).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // object_type_any_name / object_type_name / drop_type_name /
+            // object_type_name_on_any_name constants (943 rides DISPATCH).
+            930..=942 => *yyval = YYSTYPE::Ival(OBJECT_TYPE_ANY_NAME[rule - 930] as i32),
+            944..=947 => *yyval = YYSTYPE::Ival(OBJECT_TYPE_NAME[rule - 944] as i32),
+            948..=955 => *yyval = YYSTYPE::Ival(DROP_TYPE_NAME[rule - 948] as i32),
+            956..=958 => *yyval = YYSTYPE::Ival(OBJECT_TYPE_ON_ANY_NAME[rule - 956] as i32),
+            // any_name_list / any_name (attrs is 963/964 above).
+            959 => {
+                let n = Node::mk_list(mcx, view.v(1).list())?;
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, n)?);
+            }
+            960 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, Node::mk_list(mcx, view.v(3).list())?)?;
+                *yyval = YYSTYPE::List(list);
+            }
+            961 => {
+                let s = view.v(1).str_val();
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, Node::mk_string(mcx, s)?)?);
+            }
+            962 => {
+                let s = view.v(1).str_val();
+                let mut list = view.v(2).list();
+                list.lcons(mcx, Node::mk_string(mcx, s)?)?;
+                *yyval = YYSTYPE::List(list);
+            }
             _ => unimplemented_rule(rule),
         }
         Ok(())
@@ -2227,6 +2294,58 @@ fn make_a_expr<'mcx>(
     )
 }
 
+
+// gram.y declaration order within each object-type production.
+static OBJECT_TYPE_ANY_NAME: [ObjectType; 13] = [
+    ObjectType::OBJECT_TABLE,
+    ObjectType::OBJECT_SEQUENCE,
+    ObjectType::OBJECT_VIEW,
+    ObjectType::OBJECT_MATVIEW,
+    ObjectType::OBJECT_INDEX,
+    ObjectType::OBJECT_FOREIGN_TABLE,
+    ObjectType::OBJECT_COLLATION,
+    ObjectType::OBJECT_CONVERSION,
+    ObjectType::OBJECT_STATISTIC_EXT,
+    ObjectType::OBJECT_TSPARSER,
+    ObjectType::OBJECT_TSDICTIONARY,
+    ObjectType::OBJECT_TSTEMPLATE,
+    ObjectType::OBJECT_TSCONFIGURATION,
+];
+static OBJECT_TYPE_NAME: [ObjectType; 4] = [
+    ObjectType::OBJECT_DATABASE,
+    ObjectType::OBJECT_ROLE,
+    ObjectType::OBJECT_SUBSCRIPTION,
+    ObjectType::OBJECT_TABLESPACE,
+];
+static DROP_TYPE_NAME: [ObjectType; 8] = [
+    ObjectType::OBJECT_ACCESS_METHOD,
+    ObjectType::OBJECT_EVENT_TRIGGER,
+    ObjectType::OBJECT_EXTENSION,
+    ObjectType::OBJECT_FDW,
+    ObjectType::OBJECT_LANGUAGE,
+    ObjectType::OBJECT_PUBLICATION,
+    ObjectType::OBJECT_SCHEMA,
+    ObjectType::OBJECT_FOREIGN_SERVER,
+];
+static OBJECT_TYPE_ON_ANY_NAME: [ObjectType; 3] =
+    [ObjectType::OBJECT_POLICY, ObjectType::OBJECT_RULE, ObjectType::OBJECT_TRIGGER];
+
+fn object_type(v: i32) -> ObjectType {
+    [&OBJECT_TYPE_ANY_NAME[..], &OBJECT_TYPE_NAME, &DROP_TYPE_NAME, &OBJECT_TYPE_ON_ANY_NAME]
+        .into_iter()
+        .flatten()
+        .copied()
+        .find(|t| *t as i32 == v)
+        .unwrap_or_else(|| panic!("invalid ObjectType {v}"))
+}
+
+fn drop_behavior(v: i32) -> DropBehavior {
+    match v {
+        0 => DropBehavior::DROP_RESTRICT,
+        1 => DropBehavior::DROP_CASCADE,
+        _ => panic!("invalid DropBehavior {v}"),
+    }
+}
 
 fn on_commit_action(v: i32) -> OnCommitAction {
     match v {

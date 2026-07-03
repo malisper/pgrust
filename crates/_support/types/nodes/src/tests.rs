@@ -569,6 +569,22 @@ fn enum_values_match_c_headers() {
     ]);
     check_enum!(prim_h, "BoolExprType", BoolExprType, [AND_EXPR, OR_EXPR, NOT_EXPR]);
     check_enum!(prim_h, "NullTestType", NullTestType, [IS_NULL, IS_NOT_NULL]);
+    use crate::parsenodes::{DropBehavior, ObjectType};
+    check_enum!(parse_h, "ObjectType", ObjectType, [
+        OBJECT_ACCESS_METHOD, OBJECT_AGGREGATE, OBJECT_AMOP, OBJECT_AMPROC, OBJECT_ATTRIBUTE,
+        OBJECT_CAST, OBJECT_COLUMN, OBJECT_COLLATION, OBJECT_CONVERSION, OBJECT_DATABASE,
+        OBJECT_DEFAULT, OBJECT_DEFACL, OBJECT_DOMAIN, OBJECT_DOMCONSTRAINT, OBJECT_EVENT_TRIGGER,
+        OBJECT_EXTENSION, OBJECT_FDW, OBJECT_FOREIGN_SERVER, OBJECT_FOREIGN_TABLE,
+        OBJECT_FUNCTION, OBJECT_INDEX, OBJECT_LANGUAGE, OBJECT_LARGEOBJECT, OBJECT_MATVIEW,
+        OBJECT_OPCLASS, OBJECT_OPERATOR, OBJECT_OPFAMILY, OBJECT_PARAMETER_ACL, OBJECT_POLICY,
+        OBJECT_PROCEDURE, OBJECT_PUBLICATION, OBJECT_PUBLICATION_NAMESPACE,
+        OBJECT_PUBLICATION_REL, OBJECT_ROLE, OBJECT_ROUTINE, OBJECT_RULE, OBJECT_SCHEMA,
+        OBJECT_SEQUENCE, OBJECT_SUBSCRIPTION, OBJECT_STATISTIC_EXT, OBJECT_TABCONSTRAINT,
+        OBJECT_TABLE, OBJECT_TABLESPACE, OBJECT_TRANSFORM, OBJECT_TRIGGER,
+        OBJECT_TSCONFIGURATION, OBJECT_TSDICTIONARY, OBJECT_TSPARSER, OBJECT_TSTEMPLATE,
+        OBJECT_TYPE, OBJECT_USER_MAPPING, OBJECT_VIEW,
+    ]);
+    check_enum!(parse_h, "DropBehavior", DropBehavior, [DROP_RESTRICT, DROP_CASCADE]);
 }
 
 #[test]
@@ -743,6 +759,14 @@ fn variable_set_stmt_field_order_matches_c() {
     assert_eq!(direction, crate::parsenodes::FetchDirection::FETCH_FORWARD);
     assert_eq!(howMany, 0);
     assert_eq!(crate::parsenodes::FETCH_ALL, i64::MAX);
+
+    assert_eq!(
+        c_struct_fields(parse_h, "DropStmt"),
+        ["objects", "removeType", "behavior", "missing_ok", "concurrent"]
+    );
+    let crate::parsenodes::DropStmt {
+        objects: _, removeType: _, behavior: _, missing_ok: _, concurrent: _,
+    } = crate::parsenodes::DropStmt::default();
 }
 
 #[test]

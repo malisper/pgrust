@@ -4,7 +4,9 @@
 #![allow(non_upper_case_globals)]
 
 pub mod create;
-pub use create::{heap_create, heap_create_with_catalog, HeapCreateParams};
+pub mod drop;
+pub use create::{heap_create, heap_create_with_catalog, HeapCreateParams, InsertPgClassTuple};
+pub use drop::{heap_drop_with_catalog, CheckTableNotInUse, DeleteAttributeTuples, DeleteRelationTuple, RemoveStatistics};
 
 use types_core::catalog::{CIDOID, OIDOID, TIDOID, XIDOID};
 use types_core::{AttrNumber, InvalidOid, NAMEDATALEN};

@@ -380,6 +380,51 @@ mod heap {
         unported("backend-catalog-storage (RelationTruncate)")
     }
 
+    pub(super) fn relation_needs_toast_table(rel: &Relation<'_>) -> bool {
+        use ::types_tuple::tupmacs::att_nominal_alignby;
+        use ::types_tuple::{BITMAPLEN, MAXALIGN, SizeofHeapTupleHeader, TYPSTORAGE_PLAIN};
+        const ATTRIBUTE_GENERATED_VIRTUAL: i8 = b'v' as i8;
+
+        let tupdesc = &rel.rd_att;
+        let mut data_length: usize = 0;
+        let mut maxlength_unknown = false;
+        let mut has_toastable_attrs = false;
+        for i in 0..tupdesc.natts as usize {
+            let att = tupdesc.attr(i);
+            if att.attisdropped || att.attgenerated == ATTRIBUTE_GENERATED_VIRTUAL {
+                continue;
+            }
+            data_length =
+                att_nominal_alignby(data_length, tupdesc.compact_attr(i).attalignby);
+            if att.attlen > 0 {
+                data_length += att.attlen as usize;
+            } else {
+                let maxlen = format_type::type_maximum_size(att.atttypid, att.atttypmod);
+                if maxlen < 0 {
+                    maxlength_unknown = true;
+                } else {
+                    data_length += maxlen as usize;
+                }
+                if att.attstorage != TYPSTORAGE_PLAIN {
+                    has_toastable_attrs = true;
+                }
+            }
+        }
+        if !has_toastable_attrs {
+            return false;
+        }
+        if maxlength_unknown {
+            return true;
+        }
+        let tuple_length = MAXALIGN(SizeofHeapTupleHeader + BITMAPLEN(tupdesc.natts) as usize)
+            + MAXALIGN(data_length);
+        tuple_length > ::heapam::dml::TOAST_TUPLE_THRESHOLD
+    }
+
+    pub(super) fn relation_toast_am(rel: &Relation<'_>) -> ::types_core::Oid {
+        rel.rd_rel.relam
+    }
+
     pub(super) fn relation_size(rel: &Relation<'_>, fork_number: ForkNumber) -> PgResult<u64> {
         table_block_relation_size(rel, fork_number)
     }
@@ -1210,6 +1255,18 @@ pub fn table_relation_set_new_filelocator(
 pub fn table_relation_nontransactional_truncate(rel: &Relation<'_>) -> PgResult<()> {
     match am(rel) {
         TableAm::Heap => heap::relation_nontransactional_truncate(rel),
+    }
+}
+
+pub fn table_relation_needs_toast_table(rel: &Relation<'_>) -> bool {
+    match am(rel) {
+        TableAm::Heap => heap::relation_needs_toast_table(rel),
+    }
+}
+
+pub fn table_relation_toast_am(rel: &Relation<'_>) -> ::types_core::Oid {
+    match am(rel) {
+        TableAm::Heap => heap::relation_toast_am(rel),
     }
 }
 

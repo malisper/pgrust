@@ -228,26 +228,26 @@ fn install_scan_fixtures() {
         mcv_values.extend([datum::Datum::from_i32(1), datum::Datum::from_i32(2)]);
         let mut mcv_numbers = mcx::PgVec::new_in(mcx);
         mcv_numbers.extend([0.30f32, 0.20f32]);
-        slots.push(syscache_seams::PgStatisticSlotData::from_decoded(
-            1,
-            INT4EQ_OP,
-            0,
-            23,
-            mcv_values,
-            mcv_numbers,
-            mcx::PgVec::new_in(mcx),
-        ));
+        slots.push(syscache_seams::PgStatisticSlotData {
+            kind: 1,
+            staop: INT4EQ_OP,
+            stacoll: 0,
+            valuetype: 23,
+            values: mcv_values,
+            numbers: mcv_numbers,
+            values_image: mcx::PgVec::new_in(mcx),
+        });
         let mut hist_values = mcx::PgVec::new_in(mcx);
         hist_values.extend([0i32, 10, 20, 30, 40].map(datum::Datum::from_i32));
-        slots.push(syscache_seams::PgStatisticSlotData::from_decoded(
-            2,
-            INT4_LT_OP,
-            0,
-            23,
-            hist_values,
-            mcx::PgVec::new_in(mcx),
-            mcx::PgVec::new_in(mcx),
-        ));
+        slots.push(syscache_seams::PgStatisticSlotData {
+            kind: 2,
+            staop: INT4_LT_OP,
+            stacoll: 0,
+            valuetype: 23,
+            values: hist_values,
+            numbers: mcx::PgVec::new_in(mcx),
+            values_image: mcx::PgVec::new_in(mcx),
+        });
         Ok(Some(syscache_seams::PgStatisticBundle {
             stanullfrac: 0.0,
             stawidth: 4,

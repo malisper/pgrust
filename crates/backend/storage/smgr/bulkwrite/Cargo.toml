@@ -1,0 +1,17 @@
+[package]
+name = "bulkwrite"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+bufmgr = { path = "../../buffer/bufmgr" }
+lmgr_proc = { path = "../../lmgr/lmgr_proc" }
+smgr = { path = "../smgr" }
+transam_xlog = { path = "../../../access/transam/transam_xlog" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+xloginsert = { path = "../../../access/transam/xloginsert" }

@@ -74,6 +74,21 @@ pub fn RelationCreateStorage(
     Ok(key)
 }
 
+pub fn RelationDropStorage(rel: &types_rel::RelationData<'_>) -> PgResult<()> {
+    PENDING.with_borrow_mut(|p| {
+        p.insert(
+            0,
+            PendingRelDelete {
+                rlocator: rel.rd_locator.get(),
+                proc_number: rel.rd_backend,
+                at_commit: true,
+                nest_level: xact::GetCurrentTransactionNestLevel(),
+            },
+        )
+    });
+    smgr::RelationCloseSmgr(rel)
+}
+
 pub fn log_smgrcreate(rlocator: &RelFileLocator, fork_num: ForkNumber) -> PgResult<()> {
     // xl_smgr_create image: RelFileLocator{spcOid,dbOid,relNumber} + ForkNumber.
     let mut xlrec = [0u8; 16];

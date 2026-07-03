@@ -1,5 +1,4 @@
-// indexing.c, insert/update lanes. CatalogTupleDelete lands with the DDL that
-// needs it.
+// indexing.c, insert/update/delete lanes.
 #![allow(non_snake_case)]
 
 use heaptuple::HeapTuple;
@@ -77,6 +76,10 @@ pub fn CatalogTupleUpdate<'mcx>(
         ),
     }
     CatalogCloseIndexes(indstate)
+}
+
+pub fn CatalogTupleDelete(heap_rel: &Relation<'_>, tid: &ItemPointerData) -> PgResult<()> {
+    heapam::simple_heap_delete(heap_rel.data_rc(), tid)
 }
 
 pub fn CatalogTupleInsertWithInfo<'mcx>(
