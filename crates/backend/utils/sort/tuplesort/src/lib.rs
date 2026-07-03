@@ -85,6 +85,11 @@ pub struct TuplesortData<'m> {
     bound: i32,
     avail_mem: i64,
     allowed_mem: i64,
+    // Largest count below which a tuplen==0 put provably takes the pure
+    // store-and-return path (no grow, no bounded transition, no lackmem);
+    // 0 whenever status != Initial. u32 so the fast-path load cannot be
+    // ldp-merged with the vec len (narrow-store→wide-load stall on V2).
+    put_watermark: u32,
     grow_memtuples: bool,
     memtuples: PgVec<'m, SortTuple>,
     current: usize,
@@ -264,6 +269,7 @@ impl Tuplesort {
                 bound: 0,
                 avail_mem,
                 allowed_mem,
+                put_watermark: 0,
                 grow_memtuples: true,
                 memtuples,
                 current: 0,
@@ -290,6 +296,7 @@ impl Tuplesort {
             }
             st.bounded = true;
             st.bound = bound as i32;
+            st.recompute_put_watermark();
         })
     }
 
@@ -338,6 +345,22 @@ impl Tuplesort {
         })
     }
 
+    /// C divergence (structural lever): batched putdatum — the per-call len
+    /// memory round-trip is ~43 cyc/put on V2 (docs/benchmarks/tuplesort.md).
+    #[inline]
+    pub fn putdatum_batch<R>(
+        &mut self,
+        f: impl for<'a, 'm> FnOnce(&mut DatumPutter<'a, 'm>) -> PgResult<R>,
+    ) -> PgResult<R> {
+        self.0.with_mut(|st| {
+            debug_assert!(matches!(st.variant, SortVariant::Datum));
+            let mut putter = DatumPutter::new(st);
+            let result = f(&mut putter);
+            putter.flush();
+            result
+        })
+    }
+
     #[inline]
     pub fn performsort(&mut self) -> PgResult<()> {
         self.0.with_mut(|st| {
@@ -351,6 +374,7 @@ impl Tuplesort {
                     return Err(invalid_state("tuplesort_performsort"))
                 }
             }
+            st.put_watermark = 0;
             st.current = 0;
             st.eof_reached = false;
             st.markpos_offset = 0;
@@ -443,6 +467,80 @@ impl Tuplesort {
     pub fn end(self) {}
 }
 
+/// Register-resident put cursor over the TSS_INITIAL window [len, watermark).
+/// Perf constraint: the slow leg travels BY VALUE through `datum_put_slow`;
+/// `&mut self` into an outlined callee forces next/stop back into memory.
+pub struct DatumPutter<'a, 'm> {
+    st: &'a mut TuplesortData<'m>,
+    next: *mut SortTuple,
+    stop: *mut SortTuple,
+}
+
+impl<'a, 'm> DatumPutter<'a, 'm> {
+    #[inline]
+    fn new(st: &'a mut TuplesortData<'m>) -> Self {
+        let (next, stop) = datum_put_window(st);
+        DatumPutter { st, next, stop }
+    }
+
+    #[inline(always)]
+    pub fn put(&mut self, val: Datum, is_null: bool) -> PgResult<()> {
+        let next = self.next;
+        if next >= self.stop {
+            let (next, stop) = datum_put_slow(self.st, next, val, is_null)?;
+            self.next = next;
+            self.stop = stop;
+            return Ok(());
+        }
+        let datum1 = if is_null { Datum::null() } else { val };
+        // SAFETY: next < stop = base + put_watermark <= base + capacity - 1
+        // (recompute_put_watermark invariant).
+        unsafe {
+            core::ptr::write(
+                next,
+                SortTuple { tuple: core::ptr::null_mut(), datum1, isnull1: is_null },
+            );
+            self.next = next.add(1);
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn flush(&mut self) {
+        datum_put_flush(self.st, self.next);
+    }
+}
+
+#[inline]
+fn datum_put_window<'m>(st: &mut TuplesortData<'m>) -> (*mut SortTuple, *mut SortTuple) {
+    let base = st.memtuples.as_mut_ptr();
+    // SAFETY: len <= capacity and put_watermark <= capacity - 1.
+    unsafe { (base.add(st.memtuples.len()), base.add(st.put_watermark as usize)) }
+}
+
+fn datum_put_flush<'m>(st: &mut TuplesortData<'m>, next: *mut SortTuple) {
+    let base = st.memtuples.as_mut_ptr();
+    // SAFETY: next derives from base by in-bounds adds; all below it written.
+    unsafe {
+        let len = next.offset_from(base) as usize;
+        debug_assert!(len <= st.memtuples.capacity());
+        st.memtuples.set_len(len);
+    }
+}
+
+#[inline(never)]
+fn datum_put_slow<'m>(
+    st: &mut TuplesortData<'m>,
+    next: *mut SortTuple,
+    val: Datum,
+    is_null: bool,
+) -> PgResult<(*mut SortTuple, *mut SortTuple)> {
+    datum_put_flush(st, next);
+    let datum1 = if is_null { Datum::null() } else { val };
+    st.puttuple_common(core::ptr::null_mut(), datum1, is_null, 0)?;
+    Ok(datum_put_window(st))
+}
+
 impl<'m> TuplesortData<'m> {
     /// `tuplesort_puttuple_common`; `useAbbrev` is structurally false here.
     /// SortTuple fields arrive as scalars (registers), not by-ref like C's
@@ -450,6 +548,36 @@ impl<'m> TuplesortData<'m> {
     /// into a wide reload that defeats store-to-load forwarding.
     #[inline]
     fn puttuple_common(
+        &mut self,
+        tuple: *mut MinimalTupleData,
+        datum1: Datum,
+        isnull1: bool,
+        tuplen: i64,
+    ) -> PgResult<()> {
+        if tuplen == 0 {
+            let len = self.memtuples.len();
+            if len < self.put_watermark as usize {
+                // SAFETY: put_watermark <= capacity - 1 (recompute_put_watermark
+                // invariant), so len < capacity; tuplen == 0 leaves avail_mem
+                // untouched, matching C's no-USEMEM by-value datum put.
+                unsafe {
+                    core::ptr::write(
+                        self.memtuples.as_mut_ptr().add(len),
+                        SortTuple { tuple, datum1, isnull1 },
+                    );
+                    self.memtuples.set_len(len + 1);
+                }
+                return Ok(());
+            }
+            if self.status == TupSortStatus::Bounded {
+                return self.puttuple_bounded(SortTuple { tuple, datum1, isnull1 });
+            }
+        }
+        self.puttuple_full(tuple, datum1, isnull1, tuplen)
+    }
+
+    #[inline(never)]
+    fn puttuple_full(
         &mut self,
         tuple: *mut MinimalTupleData,
         datum1: Datum,
@@ -480,10 +608,12 @@ impl<'m> TuplesortData<'m> {
                         || (self.memtuples.len() > self.bound as usize && self.lackmem()))
                 {
                     self.make_bounded_heap()?;
+                    self.recompute_put_watermark();
                     return Ok(());
                 }
 
                 if self.memtuples.len() < self.memtuples.capacity() && !self.lackmem() {
+                    self.recompute_put_watermark();
                     return Ok(());
                 }
                 external_sort_unported();
@@ -493,6 +623,20 @@ impl<'m> TuplesortData<'m> {
             }
             TupSortStatus::SortedInMem => Err(invalid_state("tuplesort_puttuple_common")),
         }
+    }
+
+    fn recompute_put_watermark(&mut self) {
+        self.put_watermark = if self.status != TupSortStatus::Initial || self.lackmem() {
+            0
+        } else {
+            // capacity <= i32::MAX (grow_memtuples clamp), bound >= 0.
+            let cap_limit = (self.memtuples.capacity() - 1) as u32;
+            if self.bounded {
+                cap_limit.min(self.bound as u32)
+            } else {
+                cap_limit
+            }
+        };
     }
 
     /// TSS_BOUNDED arm; out of line so the TSS_INITIAL fast path stays lean

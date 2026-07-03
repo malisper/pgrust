@@ -128,6 +128,75 @@ fn datum_sort_grows_memtuples_past_initial_size() {
     assert_eq!(got, datum_sort_oracle(input, false, false));
 }
 
+fn run_datum_sort_batched(
+    input: &[Option<i32>],
+    sortopt: i32,
+    bound: Option<i64>,
+) -> (Tuplesort, Vec<Option<i32>>) {
+    let mut ts = Tuplesort::begin_datum_with_key(int32_key(1, false, false), 1024, sortopt);
+    if let Some(b) = bound {
+        ts.set_bound(b);
+    }
+    for chunk in input.chunks(777) {
+        ts.putdatum_batch(|p| {
+            for v in chunk {
+                p.put(v.map_or(Datum::null(), Datum::from_i32), v.is_none())?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        ts.putdatum(Datum::from_i32(-1), false).unwrap();
+    }
+    ts.performsort().unwrap();
+    let mut out = Vec::new();
+    let limit = bound.map_or(usize::MAX, |b| b as usize);
+    while out.len() < limit {
+        let Some(nd) = ts.getdatum(true).unwrap() else { break };
+        out.push(if nd.isnull { None } else { Some(nd.value.as_i32()) });
+    }
+    (ts, out)
+}
+
+#[test]
+fn batched_putdatum_matches_oracle_across_grow_and_bounds() {
+    let mut seed = 11u64;
+    let input: Vec<Option<i32>> = (0..20_000)
+        .map(|_| {
+            let r = lcg(&mut seed);
+            if r % 13 == 0 { None } else { Some(r as i32) }
+        })
+        .collect();
+    let mut expected: Vec<Option<i32>> = input.clone();
+    expected.extend(std::iter::repeat(Some(-1)).take(input.chunks(777).count()));
+    let oracle = datum_sort_oracle(expected.clone(), false, false);
+
+    let (_ts, got) = run_datum_sort_batched(&input, TUPLESORT_NONE, None);
+    assert_eq!(got, oracle);
+
+    let (ts, got) = run_datum_sort_batched(&input, TUPLESORT_ALLOWBOUNDED, Some(50));
+    assert!(ts.used_bound());
+    assert_eq!(got, oracle[..50]);
+}
+
+#[test]
+fn batched_putdatum_small_batches_and_empty() {
+    let mut ts = Tuplesort::begin_datum_with_key(int32_key(1, false, false), 1024, TUPLESORT_NONE);
+    ts.putdatum_batch(|_| Ok(())).unwrap();
+    ts.putdatum_batch(|p| p.put(Datum::from_i32(3), false)).unwrap();
+    ts.putdatum_batch(|p| {
+        p.put(Datum::from_i32(1), false)?;
+        p.put(Datum::null(), true)?;
+        p.put(Datum::from_i32(2), false)
+    })
+    .unwrap();
+    ts.performsort().unwrap();
+    let mut out = Vec::new();
+    while let Some(nd) = ts.getdatum(true).unwrap() {
+        out.push(if nd.isnull { None } else { Some(nd.value.as_i32()) });
+    }
+    assert_eq!(out, vec![Some(1), Some(2), Some(3), None]);
+}
+
 #[test]
 fn bounded_top_n_heapsort_used_and_correct() {
     let mut seed = 99u64;
@@ -326,7 +395,13 @@ fn miri_scale_unsafe_paths() {
 
     let (ts, got) = run_datum_sort(&input, true, true, TUPLESORT_ALLOWBOUNDED, Some(15));
     assert!(ts.used_bound());
-    assert_eq!(got, datum_sort_oracle(input, true, true)[..15]);
+    assert_eq!(got, datum_sort_oracle(input.clone(), true, true)[..15]);
+
+    let (ts, got) = run_datum_sort_batched(&input, TUPLESORT_ALLOWBOUNDED, Some(15));
+    assert!(ts.used_bound());
+    let mut expected = input.clone();
+    expected.extend(std::iter::repeat(Some(-1)).take(input.chunks(777).count()));
+    assert_eq!(got, datum_sort_oracle(expected, false, false)[..15]);
 
     let mcx = leaked_mcx();
     let desc = int4_desc(mcx, 2);
