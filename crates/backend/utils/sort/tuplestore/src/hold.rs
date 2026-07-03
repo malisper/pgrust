@@ -110,9 +110,14 @@ fn rescan_hold(h: TuplestoreHandle) {
     with_store(h, |store| store.rescan())
 }
 
+fn skiptuples_hold(h: TuplestoreHandle, ntuples: i64, forward: bool) -> bool {
+    with_store(h, |store| store.skiptuples(ntuples, forward))
+}
+
 pub(crate) fn install_seams() {
     tuplestore_hold_seams::tuplestore_begin_heap_hold::set(begin_heap_hold);
     tuplestore_hold_seams::tuplestore_end::set(end);
     tuplestore_hold_seams::tuplestore_gettupleslot::set(gettupleslot_hold);
     tuplestore_hold_seams::tuplestore_rescan::set(rescan_hold);
+    tuplestore_hold_seams::tuplestore_skiptuples::set(skiptuples_hold);
 }
