@@ -868,6 +868,33 @@ pub fn table_scan_getnextslot<'mcx>(
     }
 }
 
+pub fn table_scan_supports_pagebatch(scan: &TableScanDesc<'_>) -> bool {
+    match scan {
+        TableScanDesc::Heap(h) => {
+            (h.rs_base.rs_flags & SO_ALLOW_PAGEMODE) != 0 && h.rs_base.rs_parallel.is_none()
+        }
+    }
+}
+
+/// Page-batch scan feed (upstream batch scan API, CF 6176): 0 = exhausted.
+pub fn table_scan_getnextpagebatch<'mcx>(scan: &mut TableScanDesc<'mcx>) -> PgResult<u32> {
+    match scan {
+        TableScanDesc::Heap(h) => ::heapam::heap_getnextpagebatch(h),
+    }
+}
+
+/// Store tuple `i` of the staged page batch into `slot`.
+pub fn table_scan_batch_store_slot<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut TableScanDesc<'mcx>,
+    i: u32,
+    slot: &mut SlotData<'mcx>,
+) {
+    match scan {
+        TableScanDesc::Heap(h) => ::heapam::heap_batch_store_slot(mcx, h, i, slot),
+    }
+}
+
 pub fn table_beginscan_tidrange<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,

@@ -151,6 +151,9 @@ fn install_seams() {
         heapam_visibility_seams::heap_tuple_satisfies_visibility::set(|htup, _snap, _buf| {
             Ok((htup.t_data().t_infomask & HEAP_XMAX_INVALID) != 0)
         });
+        heapam_visibility_seams::heap_tuple_satisfies_mvcc_page::set(|htup, _snap, _buf, _memo| {
+            Ok((htup.t_data().t_infomask & HEAP_XMAX_INVALID) != 0)
+        });
         heapam_visibility_seams::heap_tuple_is_surely_dead::set(|_, _| Ok(false));
         heapam_visibility_seams::heap_tuple_header_is_only_locked::set(|_| Ok(false));
         heapam_visibility_seams::heap_tuple_satisfies_update::set(|htup, _cid, _buf| {
