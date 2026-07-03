@@ -1297,7 +1297,14 @@ fn fix_scan_expr_mutator<'mcx>(
                 newvar.varno += rtoffset;
             }
             if newvar.varnosyn > 0 {
-                newvar.varnosyn += rtoffset as u32;
+                newvar.varnosyn = newvar.varnosyn.checked_add(rtoffset as u32).unwrap_or_else(
+                    || {
+                        panic!(
+                            "fix_scan_expr_mutator: varnosyn {} + rtoffset {} overflows (varno {} varattno {})",
+                            newvar.varnosyn, rtoffset, var.varno, var.varattno
+                        )
+                    },
+                );
             }
             Node::mk(mcx, newvar)
         }
