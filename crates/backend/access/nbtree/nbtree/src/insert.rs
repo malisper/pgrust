@@ -1009,8 +1009,14 @@ unsafe fn bt_delete_or_dedup_one_page<'mcx>(
         unported_phase2("_bt_bottomupdel_pass (bottom-up deletion lane)");
     }
 
-    // BTGetDeduplicateItems: index reloptions unported, default is on.
-    if insertstate.itup_key.allequalimage {
+    // BTGetDeduplicateItems
+    let dedup_items = rel
+        .rd_options
+        .as_ref()
+        .and_then(|o| o.btree())
+        .map(|o| o.deduplicate_items)
+        .unwrap_or(true);
+    if insertstate.itup_key.allequalimage && dedup_items {
         let pin = insertstate.buf.as_ref().expect("pinned");
         crate::dedup::bt_dedup_pass(rel, pin, insertstate.itup, insertstate.itemsz, uniquedup)?;
     }

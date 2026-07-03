@@ -378,12 +378,9 @@ const fn maxalign(sz: usize) -> usize {
     (sz + 7) & !7
 }
 
-// HashGetFillFactor: reloptions ride the DefineIndex WITH lane (loud there).
+// HashGetFillFactor
 fn hash_get_fill_factor(rel: &Relation<'_>) -> i32 {
-    if rel.rd_options.is_some() {
-        panic!("unported: hash reloptions fillfactor (hashoptions/build_reloptions)");
-    }
-    HASH_DEFAULT_FILLFACTOR
+    rel.get_fillfactor(HASH_DEFAULT_FILLFACTOR)
 }
 
 fn hash_get_target_page_usage(rel: &Relation<'_>) -> i32 {
