@@ -73,6 +73,11 @@ pub fn init_seams() {
             get: vfd::file_extend_method,
             set: vfd::set_file_extend_method,
         });
+        // C home is copydir.c; storage hosted with the other fd-owned GUCs.
+        vars::file_copy_method.install(GucVarAccessors {
+            get: vfd::file_copy_method,
+            set: vfd::set_file_copy_method,
+        });
         // C home is tablespace.c; hosted here until that unit ports so
         // PrepareTempTablespaces sees SET values (non-empty stays loud there).
         vars::temp_tablespaces.install(GucVarAccessors {

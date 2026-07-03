@@ -34,7 +34,7 @@ pub fn copydir(fromdir: &str, todir: &str, recurse: bool) -> PgResult<()> {
             .unwrap_err());
     }
 
-    if guc_tables::vars::file_copy_method.read() != FILE_COPY_METHOD_COPY {
+    if crate::vfd::file_copy_method() != FILE_COPY_METHOD_COPY {
         panic!("file_copy_method=clone not ported: land clone_file (copydir.c)");
     }
 
