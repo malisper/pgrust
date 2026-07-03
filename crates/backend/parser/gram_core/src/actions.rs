@@ -3277,14 +3277,6 @@ fn make_type_name<'mcx>(
 }
 
 // SystemFuncName (parse_type.h shape): pg_catalog-qualified function name.
-fn system_func_name<'mcx>(mcx: mcx::Mcx<'mcx>, name: &'mcx str) -> PgResult<NodeList<'mcx>> {
-    NodeList::make2(
-        mcx,
-        Node::mk_string(mcx, "pg_catalog")?,
-        Node::mk_string(mcx, name)?,
-    )
-}
-
 fn system_type_name<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     name: &'mcx str,

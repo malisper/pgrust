@@ -2,18 +2,18 @@ use datum::Datum;
 use types_error::PgResult;
 use types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 
-fn text_arg_or_empty<'a>(fcinfo: &'a Fcinfo, i: usize) -> &'a [u8] {
+fn text_arg_or_empty<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<&'a [u8]> {
     if fcinfo.argisnull(i) {
-        b""
+        Ok(b"")
     } else {
         // SAFETY: non-null text varlena per catalog signature.
-        unsafe { fcinfo.arg_varlena_packed(i) }.data()
+        Ok(unsafe { fcinfo.arg_varlena_packed(i)? }.data())
     }
 }
 
 pub fn fc_pg_notify(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let channel = str::from_utf8(text_arg_or_empty(fcinfo, 0)).expect("server-encoded channel");
-    let payload = str::from_utf8(text_arg_or_empty(fcinfo, 1)).expect("server-encoded payload");
+    let channel = str::from_utf8(text_arg_or_empty(fcinfo, 0)?).expect("server-encoded channel");
+    let payload = str::from_utf8(text_arg_or_empty(fcinfo, 1)?).expect("server-encoded payload");
 
     // PreventCommandDuringRecovery("NOTIFY"); the statement form is checked
     // in ProcessUtility (inlined here: a utility dep would cycle).

@@ -251,13 +251,13 @@ pub fn fc_timestamptz_timestamp(
 
 pub fn fc_timestamp_zone(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn — arg 0 is a non-null text varlena.
-    let zone = unsafe { fcinfo.arg_varlena_packed(0) };
+    let zone = unsafe { fcinfo.arg_varlena_packed(0)? };
     Ok(Datum::from_i64(crate::timestamp_zone(zone.data(), fcinfo.arg_i64(1))?))
 }
 
 pub fn fc_timestamptz_zone(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn — arg 0 is a non-null text varlena.
-    let zone = unsafe { fcinfo.arg_varlena_packed(0) };
+    let zone = unsafe { fcinfo.arg_varlena_packed(0)? };
     Ok(Datum::from_i64(crate::timestamptz_zone(zone.data(), fcinfo.arg_i64(1))?))
 }
 
@@ -299,7 +299,7 @@ pub fn fc_make_timestamptz_at_timezone(
         s.value.as_f64(),
     );
     // SAFETY: strict fn — arg 6 is a non-null text varlena.
-    let zone = unsafe { fcinfo.arg_varlena_packed(6) };
+    let zone = unsafe { fcinfo.arg_varlena_packed(6)? };
     Ok(Datum::from_i64(crate::make_timestamptz_at_timezone(
         y,
         mo,
@@ -313,7 +313,7 @@ pub fn fc_make_timestamptz_at_timezone(
 
 pub fn fc_timestamp_trunc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn — arg 0 is a non-null text varlena.
-    let units = unsafe { fcinfo.arg_varlena_packed(0) };
+    let units = unsafe { fcinfo.arg_varlena_packed(0)? };
     Ok(Datum::from_i64(crate::timestamp_trunc(units.data(), fcinfo.arg_i64(1))?))
 }
 
@@ -322,7 +322,7 @@ pub fn fc_timestamptz_trunc(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     // SAFETY: strict fn — arg 0 is a non-null text varlena.
-    let units = unsafe { fcinfo.arg_varlena_packed(0) };
+    let units = unsafe { fcinfo.arg_varlena_packed(0)? };
     Ok(Datum::from_i64(crate::timestamptz_trunc(units.data(), fcinfo.arg_i64(1))?))
 }
 
@@ -331,7 +331,7 @@ pub fn fc_timestamptz_trunc_zone(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     // SAFETY: strict fn — args 0/2 are non-null text varlenas.
-    let (units, zone) = unsafe { (fcinfo.arg_varlena_packed(0), fcinfo.arg_varlena_packed(2)) };
+    let (units, zone) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(2)?) };
     Ok(Datum::from_i64(crate::timestamptz_trunc_zone(
         units.data(),
         fcinfo.arg_i64(1),
@@ -351,7 +351,7 @@ macro_rules! ts_part {
     ($($fc:ident: $core:ident($retnumeric:literal);)*) => {$(
         pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             // SAFETY: strict fn — arg 0 is a non-null text varlena.
-            let units = unsafe { fcinfo.arg_varlena_packed(0) };
+            let units = unsafe { fcinfo.arg_varlena_packed(0)? };
             let v = crate::$core(units.data(), fcinfo.arg_i64(1), $retnumeric)?;
             part_result(fcinfo, v)
         }
