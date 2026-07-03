@@ -180,31 +180,33 @@ pub fn subquery_planner<'mcx>(
     if !parse.groupingSets.is_nil() {
         panic!("expand_grouping_sets (parse_agg.c): M2 grouping lane");
     }
-    // C's newHaving loop over the implicit-AND list; havingQual here is a
-    // single clause (make_ands_implicit is not performed — canonicalize_qual
-    // panics on AND trees upstream), so the loop degenerates to one arm.
-    if let Some(hc) = parse.havingQual {
+    if let Some(hq) = parse.havingQual {
         debug_assert!(parse.groupingSets.is_nil());
-        if clauses::contain_agg_clause(hc)?
-            || clauses::contain_volatile_functions(hc)?
-            || clauses::contain_subplans(hc)?
-        {
-            // keep it in HAVING
-        } else if !parse.groupClause.is_nil() {
-            let whereclause = preprocess_expression(run, Some(hc), EXPRKIND_QUAL, has_sublinks)?
-                .expect("clause in, clause out");
-            move_qual_to_where(run, &mut parse, whereclause)?;
-            parse.havingQual = None;
-        } else {
-            // Degenerate grouping: a copy goes to WHERE, the clause stays in
-            // HAVING (C copyObject; the arena share is our copy model).
-            let whereclause = preprocess_expression(run, Some(hc), EXPRKIND_QUAL, has_sublinks)?
-                .expect("clause in, clause out");
-            move_qual_to_where(run, &mut parse, whereclause)?;
+        let havinglist = hq.as_list().expect("preprocessed havingQual is a list");
+        let mut new_having = NodeList::nil();
+        for hc in havinglist {
+            if clauses::contain_agg_clause(hc)?
+                || clauses::contain_volatile_functions(hc)?
+                || clauses::contain_subplans(hc)?
+            {
+                new_having.lappend(mcx, hc)?;
+            } else if !parse.groupClause.is_nil() {
+                move_qual_to_where(run, &mut parse, hc)?;
+            } else {
+                // Degenerate grouping: a copy goes to WHERE, the clause stays
+                // in HAVING (C copyObject; the arena share is our copy model).
+                move_qual_to_where(run, &mut parse, hc)?;
+                new_having.lappend(mcx, hc)?;
+            }
         }
+        parse.havingQual = if new_having.is_nil() {
+            None
+        } else {
+            Some(Node::mk_list(mcx, new_having)?)
+        };
     }
     if has_outer_joins {
-        panic!("reduce_outer_joins (prepjointree.c): M2 join lane");
+        crate::prepjointree::reduce_outer_joins(mcx, &mut parse)?;
     }
 
     // Mutation done; seal the Query (C shares root->parse by pointer).
@@ -261,7 +263,7 @@ pub fn preprocess_expression<'mcx>(
         )?;
     }
     if kind == EXPRKIND_QUAL {
-        expr = canonicalize_qual(expr);
+        expr = crate::prepqual::canonicalize_qual(run.mcx, expr, false)?;
     }
     if kind == EXPRKIND_QUAL || kind == EXPRKIND_TARGET {
         clauses::convert_saop_to_hashed_saop(expr)?;
@@ -271,6 +273,14 @@ pub fn preprocess_expression<'mcx>(
     }
     if run.root.query_level > 1 {
         expr = crate::subselect::ss_replace_correlation_vars(expr)?;
+    }
+    // make_ands_implicit runs last in C; constant TRUE reduces to None.
+    if kind == EXPRKIND_QUAL {
+        let list = clauses::make_ands_implicit(run.mcx, Some(expr))?;
+        if list.is_nil() {
+            return Ok(None);
+        }
+        expr = Node::mk_list(run.mcx, list)?;
     }
     Ok(Some(expr))
 }
@@ -294,36 +304,23 @@ fn preprocess_expression_list<'mcx>(
     }
 }
 
-// canonicalize_qual (prepqual.c): find_duplicate_ors leaves a non-AND/OR
-// clause untouched; the boolean-connective rewrites are the M2 qual lane.
-fn canonicalize_qual(qual: Node<'_>) -> Node<'_> {
-    match qual.node_tag() {
-        NodeTag::T_BoolExpr | NodeTag::T_List => {
-            panic!("find_duplicate_ors (prepqual.c): AND/OR tree; M2 qual lane")
-        }
-        _ => qual,
-    }
-}
-
-// C list_concats the moved HAVING clause onto jointree->quals; without the
-// implicit-AND list form only the empty-quals arm is expressible.
+// The shared FromExpr is rebuilt to carry the lappended implicit-AND list.
 fn move_qual_to_where<'mcx>(
     run: &mut PlannerRun<'mcx>,
     parse: &mut Query<'mcx>,
-    whereclause: Node<'mcx>,
+    havingclause: Node<'mcx>,
 ) -> PgResult<()> {
     let f = parse.jointree.expect("jointree is a FromExpr");
-    if f.quals.is_some() {
-        panic!(
-            "subquery_planner (planner.c): HAVING-to-WHERE concat onto existing quals \
-             needs the implicit-AND list form; M2 qual lane"
-        );
-    }
+    let mut quals = match f.quals {
+        Some(q) => q.as_list().expect("preprocessed quals are a list").clone_in(run.mcx)?,
+        None => NodeList::nil(),
+    };
+    quals.lappend(run.mcx, havingclause)?;
     parse.jointree = Some(alloc_leak_in(
         run.mcx,
         types_nodes::primnodes::FromExpr {
             fromlist: f.fromlist.clone_in(run.mcx)?,
-            quals: Some(whereclause),
+            quals: Some(Node::mk_list(run.mcx, quals)?),
         },
     )?);
     Ok(())

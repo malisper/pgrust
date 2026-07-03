@@ -179,24 +179,14 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_SeqScan => "Seq Scan",
         NodeTag::T_FunctionScan => "Function Scan",
         NodeTag::T_CteScan => "CTE Scan",
+        // C interpolates the join type into the node name in TEXT format:
+        // "Hash"/"Merge" + " <Jointype> Join" (inner non-nestloop gets a bare
+        // " Join"); see the jointype append below.
         NodeTag::T_NestLoop => "Nested Loop",
-        // INNER-only lane: C composes "<method> <jointype> Join" for outer
-        // joins; non-INNER jointypes cannot be planned yet (join-outer lane).
-        NodeTag::T_HashJoin => {
-            debug_assert_eq!(
-                node.as_hash_join().unwrap().join.jointype,
-                types_nodes::JoinType::JOIN_INNER
-            );
-            "Hash Join"
-        }
-        NodeTag::T_MergeJoin => {
-            debug_assert_eq!(
-                node.as_merge_join().unwrap().join.jointype,
-                types_nodes::JoinType::JOIN_INNER
-            );
-            "Merge Join"
-        }
+        NodeTag::T_HashJoin => "Hash",
+        NodeTag::T_MergeJoin => "Merge",
         NodeTag::T_Hash => "Hash",
+        NodeTag::T_Material => "Materialize",
         NodeTag::T_Sort => "Sort",
         NodeTag::T_WindowAgg => "WindowAgg",
         NodeTag::T_Limit => "Limit",
@@ -225,6 +215,30 @@ pub fn ExplainNode<'mcx>(
         append!(es, "Async ");
     }
     append!(es, "{pname}");
+    let join_type = match node.node_tag() {
+        NodeTag::T_NestLoop => Some(node.as_nest_loop().unwrap().join.jointype),
+        NodeTag::T_HashJoin => Some(node.as_hash_join().unwrap().join.jointype),
+        NodeTag::T_MergeJoin => Some(node.as_merge_join().unwrap().join.jointype),
+        _ => None,
+    };
+    if let Some(jt) = join_type {
+        let jtname = match jt {
+            types_nodes::JoinType::JOIN_INNER => "Inner",
+            types_nodes::JoinType::JOIN_LEFT => "Left",
+            types_nodes::JoinType::JOIN_FULL => "Full",
+            types_nodes::JoinType::JOIN_RIGHT => "Right",
+            types_nodes::JoinType::JOIN_SEMI => "Semi",
+            types_nodes::JoinType::JOIN_RIGHT_SEMI => "Right Semi",
+            types_nodes::JoinType::JOIN_ANTI => "Anti",
+            types_nodes::JoinType::JOIN_RIGHT_ANTI => "Right Anti",
+            other => panic!("unrecognized join type: {other:?}"),
+        };
+        if jt != types_nodes::JoinType::JOIN_INNER {
+            append!(es, " {jtname} Join");
+        } else if node.node_tag() != NodeTag::T_NestLoop {
+            append!(es, " Join");
+        }
+    }
     es.indent += 1;
 
     if node.node_tag() == NodeTag::T_SeqScan {
@@ -602,13 +616,15 @@ fn filtered_count_gap(qual: &NodeList<'_>, es: &ExplainState<'_>) {
     }
 }
 
+// C: scan quals prefix only under VERBOSE (or SubqueryScan, loud elsewhere).
 fn show_scan_qual<'mcx>(
     qual: &NodeList<'mcx>,
     qlabel: &str,
     node: Node<'mcx>,
     es: &mut ExplainState<'mcx>,
 ) -> PgResult<()> {
-    show_qual(qual, qlabel, node, es)
+    let useprefix = es.verbose;
+    show_qual(qual, qlabel, node, useprefix, es)
 }
 
 fn show_upper_qual<'mcx>(
@@ -617,25 +633,36 @@ fn show_upper_qual<'mcx>(
     node: Node<'mcx>,
     es: &mut ExplainState<'mcx>,
 ) -> PgResult<()> {
-    show_qual(qual, qlabel, node, es)
+    let useprefix = es.rtable_size > 1 || es.verbose;
+    show_qual(qual, qlabel, node, useprefix, es)
 }
 
 fn show_qual<'mcx>(
     qual: &NodeList<'mcx>,
     qlabel: &str,
     node: Node<'mcx>,
+    useprefix: bool,
     es: &mut ExplainState<'mcx>,
 ) -> PgResult<()> {
     if qual.is_nil() {
         return Ok(());
     }
-    if qual.len() > 1 {
-        node_gap("show_qual", "multi-item qual needs make_ands_explicit (ruleutils lane)");
-    }
     let mcx = es.str.allocator();
-    let useprefix = es.rtable_size > 1 || es.verbose;
     let mut buf = PgString::new_in(mcx);
-    deparse_expr(es, node, qual.nth(0), useprefix, &mut buf)?;
+    // make_ands_explicit: a multi-item qual deparses as one AND expression.
+    let expr = if qual.len() == 1 {
+        qual.nth(0)
+    } else {
+        Node::mk(
+            mcx,
+            types_nodes::primnodes::BoolExpr {
+                boolop: types_nodes::primnodes::BoolExprType::AND_EXPR,
+                args: qual.clone_in(mcx)?,
+                location: -1,
+            },
+        )?
+    };
+    deparse_expr(es, node, expr, useprefix, &mut buf)?;
     crate::format::ExplainPropertyText(qlabel, buf.as_str(), es);
     Ok(())
 }
@@ -673,6 +700,31 @@ fn deparse_expr<'mcx>(
                 node_gap("get_rule_expr", "explicit RelabelType deparse (ruleutils lane)");
             }
             deparse_expr(es, plan_node, r.arg, useprefix, buf)
+        }
+        // get_rule_expr T_BoolExpr, non-pretty form: outer parens always.
+        NodeTag::T_BoolExpr => {
+            use types_nodes::primnodes::BoolExprType;
+            let b = expr.as_bool_expr().unwrap();
+            match b.boolop {
+                BoolExprType::AND_EXPR | BoolExprType::OR_EXPR => {
+                    let sep = if b.boolop == BoolExprType::AND_EXPR { " AND " } else { " OR " };
+                    buf.try_push('(')?;
+                    for (i, arg) in b.args.iter().enumerate() {
+                        if i > 0 {
+                            buf.try_push_str(sep)?;
+                        }
+                        deparse_expr(es, plan_node, arg, useprefix, buf)?;
+                    }
+                    buf.try_push(')')?;
+                    Ok(())
+                }
+                BoolExprType::NOT_EXPR => {
+                    buf.try_push_str("(NOT ")?;
+                    deparse_expr(es, plan_node, b.args.nth(0), useprefix, buf)?;
+                    buf.try_push(')')?;
+                    Ok(())
+                }
+            }
         }
         other => node_gap(
             "deparse_expression",

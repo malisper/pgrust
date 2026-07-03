@@ -1,5 +1,5 @@
-// nodeNestloop.c, inner-join arm; children stay with the ExecProcNode
-// dispatcher via NestLoopChild. LEFT/SEMI/ANTI and nestParams are loud at init.
+// nodeNestloop.c, INNER/LEFT arms; children stay with the ExecProcNode
+// dispatcher via NestLoopChild. SEMI/ANTI and nestParams are loud at init.
 #![allow(non_snake_case)]
 
 use std::rc::Rc;
@@ -39,6 +39,8 @@ pub struct NestLoopState<'mcx> {
     joinqual: Option<PgBox<'mcx, ExprState<'mcx>>>,
     otherqual: Option<PgBox<'mcx, ExprState<'mcx>>>,
     js_single_match: bool,
+    nl_fill_outer: bool,
+    nl_NullInnerTupleSlot: Option<ExecSlotId>,
     pub nl_NeedNewOuter: bool,
     pub nl_MatchedOuter: bool,
 }
@@ -50,13 +52,26 @@ pub fn exec_init_nest_loop<'mcx>(
     estate: &mut EStateData<'mcx>,
     eflags: i32,
     result_desc: Rc<TupleDescData<'static>>,
+    inner_desc: &Rc<TupleDescData<'static>>,
 ) -> PgResult<NestLoopState<'mcx>> {
     debug_assert!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0);
     assert!(
-        node.join.jointype == JoinType::JOIN_INNER,
-        "ExecInitNestLoop (nodeNestloop.c): jointype {:?}; LEFT/SEMI/ANTI lane unported",
+        matches!(node.join.jointype, JoinType::JOIN_INNER | JoinType::JOIN_LEFT),
+        "ExecInitNestLoop (nodeNestloop.c): jointype {:?}; SEMI/ANTI lane unported",
         node.join.jointype
     );
+    let nl_fill_outer = node.join.jointype == JoinType::JOIN_LEFT;
+    let nl_NullInnerTupleSlot = if nl_fill_outer {
+        let slot_id = estate
+            .exec_init_extra_tuple_slot(Some(inner_desc.clone()), TupleSlotKind::Virtual);
+        exectuples::exec_store_all_null_tuple(
+            &mut estate.es_tupleTable[slot_id.0 as usize],
+            estate.es_query_cxt,
+        );
+        Some(slot_id)
+    } else {
+        None
+    };
     assert!(
         node.nestParams.is_nil(),
         "ExecInitNestLoop (nodeNestloop.c): nestParams; parameterized-inner lane unported"
@@ -80,6 +95,8 @@ pub fn exec_init_nest_loop<'mcx>(
         joinqual,
         otherqual,
         js_single_match: node.join.inner_unique,
+        nl_fill_outer,
+        nl_NullInnerTupleSlot,
         nl_NeedNewOuter: true,
         nl_MatchedOuter: false,
     })
@@ -115,7 +132,19 @@ where
 
         if inner_slot.is_none() {
             node.nl_NeedNewOuter = true;
-            // JOIN_LEFT/JOIN_ANTI null-extension is loud at init.
+            if !node.nl_MatchedOuter && node.nl_fill_outer {
+                let null_inner = node.nl_NullInnerTupleSlot.expect("null inner slot");
+                estate.ecxt_mut(ecxt).ecxt_innertuple = Some(null_inner);
+                let otherqual = node.otherqual.as_deref_mut();
+                let pass = with_qual_slots(estate, ecxt, |slots| exec_qual(otherqual, slots))?;
+                if pass {
+                    let result_slot = node.ps_ResultTupleSlot;
+                    let proj = &mut *node.proj;
+                    project_join_tuple(estate, ecxt, result_slot, proj)?;
+                    return Ok(Some(result_slot));
+                }
+                estate.reset_expr_context(ecxt);
+            }
             continue;
         }
 

@@ -78,11 +78,15 @@ fn transformJoinExpr<'mcx>(
              (transformJoinUsingClause/buildMergedJoinVar) unported — join-using lane"
         );
     }
-    if j.jointype != types_nodes::JoinType::JOIN_INNER {
+    if !matches!(
+        j.jointype,
+        types_nodes::JoinType::JOIN_INNER
+            | types_nodes::JoinType::JOIN_LEFT
+            | types_nodes::JoinType::JOIN_RIGHT
+    ) {
         panic!(
-            "transformFromClauseItem (parse_clause.c): {:?} (markRelsAsNulledBy) and the \
-             planner's outer-join state (SpecialJoinInfo/deconstruct) unported — \
-             join-outer lane",
+            "transformFromClauseItem (parse_clause.c): {:?} planner state \
+             (SpecialJoinInfo/deconstruct FULL arm) unported — join-outer lane",
             j.jointype
         );
     }
@@ -105,6 +109,15 @@ fn transformJoinExpr<'mcx>(
     };
 
     let rtindex = pstate.p_rtable.len() as i32 + 1;
+
+    // Child joins and this join's quals are transformed; every later Var
+    // referencing the nullable side (including the alias Vars built below)
+    // must carry this join's nulling bit.
+    match j.jointype {
+        types_nodes::JoinType::JOIN_LEFT => markRelsAsNulledBy(mcx, pstate, rarg, rtindex)?,
+        types_nodes::JoinType::JOIN_RIGHT => markRelsAsNulledBy(mcx, pstate, larg, rtindex)?,
+        _ => {}
+    }
 
     let l_count = l_nsitem.p_names.colnames.len();
     let r_count = r_nsitem.p_names.colnames.len();
@@ -210,6 +223,29 @@ fn transformJoinExpr<'mcx>(
     namespace.push(nsitem);
 
     Ok((jnode, namespace))
+}
+
+// markRelsAsNulledBy (parse_clause.c) over the transformed jointree node.
+fn markRelsAsNulledBy<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    n: Node<'mcx>,
+    jindex: i32,
+) -> PgResult<()> {
+    let varno = match n.node_tag() {
+        NodeTag::T_RangeTblRef => n.as_range_tbl_ref().unwrap().rtindex,
+        NodeTag::T_JoinExpr => {
+            let j = n.as_join_expr().unwrap();
+            markRelsAsNulledBy(mcx, pstate, j.larg, jindex)?;
+            markRelsAsNulledBy(mcx, pstate, j.rarg, jindex)?;
+            j.rtindex
+        }
+        other => panic!("unrecognized node type: {other:?}"),
+    };
+    while pstate.p_nullingrels.len() < varno as usize {
+        pstate.p_nullingrels.push(types_nodes::Bitmapset::empty());
+    }
+    pstate.p_nullingrels[varno as usize - 1].add_member(mcx, jindex)
 }
 
 // transformJoinOnClause (parse_clause.c): the ON expression sees exactly the

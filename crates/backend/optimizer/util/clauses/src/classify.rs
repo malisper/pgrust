@@ -274,8 +274,14 @@ impl<'mcx> NodeWalker<'mcx> for ContainNonstrict {
             | NodeTag::T_NullTest
             | NodeTag::T_BooleanTest
             | NodeTag::T_JsonConstructorExpr => return Ok(true),
+            NodeTag::T_BoolExpr => {
+                use types_nodes::primnodes::BoolExprType;
+                let b = node.as_bool_expr().unwrap();
+                if matches!(b.boolop, BoolExprType::AND_EXPR | BoolExprType::OR_EXPR) {
+                    return Ok(true);
+                }
+            }
             t @ (NodeTag::T_SubscriptingRef
-            | NodeTag::T_BoolExpr
             | NodeTag::T_CoerceViaIO
             | NodeTag::T_ArrayCoerceExpr) => {
                 deferred("contain_nonstrict_functions_walker", t)
@@ -498,18 +504,428 @@ pub fn find_window_functions<'mcx>(
     Ok(lists)
 }
 
-pub fn find_nonnullable_rels(_clause: Node<'_>) -> ! {
-    panic!("find_nonnullable_rels deferred: BoolExpr/NullTest vocabulary unported");
+// sysattr.h FirstLowInvalidHeapAttributeNumber.
+const FIRST_LOW_INVALID_HEAP_ATTR: i32 = -7;
+
+fn strict_opfuncid(o: &types_nodes::primnodes::OpExpr<'_>) -> PgResult<bool> {
+    let funcid = if o.opfuncid != 0 { o.opfuncid } else { lsyscache::get_opcode(o.opno)? };
+    func_strict(funcid)
 }
 
-pub fn find_nonnullable_vars(_clause: Node<'_>) -> ! {
-    panic!("find_nonnullable_vars deferred: BoolExpr/NullTest vocabulary unported");
+pub fn find_nonnullable_rels<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    clause: Option<Node<'mcx>>,
+) -> PgResult<Bitmapset<'mcx>> {
+    find_nonnullable_rels_walker(mcx, clause, true)
 }
 
-pub fn find_forced_null_vars(_clause: Node<'_>) -> ! {
-    panic!("find_forced_null_vars deferred: BoolExpr/NullTest vocabulary unported");
+fn find_nonnullable_rels_walker<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    node: Option<Node<'mcx>>,
+    top_level: bool,
+) -> PgResult<Bitmapset<'mcx>> {
+    let mut result = Bitmapset::empty();
+    let Some(node) = node else { return Ok(result) };
+    match node.node_tag() {
+        NodeTag::T_Var => {
+            let var = node.as_var().unwrap();
+            if var.varlevelsup == 0 {
+                result.add_member(mcx, var.varno)?;
+            }
+        }
+        NodeTag::T_List => {
+            for item in node.as_list().unwrap() {
+                let sub = find_nonnullable_rels_walker(mcx, Some(item), top_level)?;
+                result.add_members(mcx, &sub)?;
+            }
+        }
+        NodeTag::T_FuncExpr => {
+            let f = node.as_func_expr().unwrap();
+            if func_strict(f.funcid)? {
+                result = nonnullable_rels_args(mcx, &f.args, false)?;
+            }
+        }
+        NodeTag::T_OpExpr => {
+            let o = node.as_op_expr().unwrap();
+            if strict_opfuncid(o)? {
+                result = nonnullable_rels_args(mcx, &o.args, false)?;
+            }
+        }
+        NodeTag::T_BoolExpr => {
+            let b = node.as_bool_expr().unwrap();
+            match b.boolop {
+                types_nodes::primnodes::BoolExprType::AND_EXPR if top_level => {
+                    result = nonnullable_rels_args(mcx, &b.args, true)?;
+                }
+                types_nodes::primnodes::BoolExprType::AND_EXPR
+                | types_nodes::primnodes::BoolExprType::OR_EXPR => {
+                    let mut first = true;
+                    for item in &b.args {
+                        let sub = find_nonnullable_rels_walker(mcx, Some(item), top_level)?;
+                        if first {
+                            result = sub;
+                            first = false;
+                        } else {
+                            result.int_members(&sub);
+                        }
+                        if result.is_empty() {
+                            break;
+                        }
+                    }
+                }
+                types_nodes::primnodes::BoolExprType::NOT_EXPR => {
+                    result = nonnullable_rels_args(mcx, &b.args, false)?;
+                }
+            }
+        }
+        NodeTag::T_RelabelType => {
+            result = find_nonnullable_rels_walker(
+                mcx,
+                Some(node.as_relabel_type().unwrap().arg),
+                top_level,
+            )?;
+        }
+        NodeTag::T_CoerceViaIO => {
+            result = find_nonnullable_rels_walker(
+                mcx,
+                Some(node.as_coerce_via_io().unwrap().arg),
+                top_level,
+            )?;
+        }
+        NodeTag::T_NullTest => {
+            let nt = node.as_null_test().unwrap();
+            if top_level
+                && nt.nulltesttype == types_nodes::primnodes::NullTestType::IS_NOT_NULL
+                && !nt.argisrow
+            {
+                result = find_nonnullable_rels_walker(mcx, nt.arg, false)?;
+            }
+        }
+        // C has strictness arms for these; skipping silently would
+        // under-reduce vs C (silent plan-shape divergence).
+        NodeTag::T_ScalarArrayOpExpr
+        | NodeTag::T_BooleanTest
+        | NodeTag::T_SubPlan
+        | NodeTag::T_PlaceHolderVar
+        | NodeTag::T_ArrayCoerceExpr
+        | NodeTag::T_ConvertRowtypeExpr
+        | NodeTag::T_CollateExpr => panic!(
+            "find_nonnullable_rels_walker (clauses.c): {:?} strictness arm unported",
+            node.node_tag()
+        ),
+        _ => {}
+    }
+    Ok(result)
 }
 
-pub fn find_forced_null_var(_clause: Node<'_>) -> ! {
-    panic!("find_forced_null_var deferred: BoolExpr/NullTest vocabulary unported");
+fn nonnullable_rels_args<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    args: &types_nodes::list::NodeList<'mcx>,
+    top_level: bool,
+) -> PgResult<Bitmapset<'mcx>> {
+    let mut result = Bitmapset::empty();
+    for item in args {
+        let sub = find_nonnullable_rels_walker(mcx, Some(item), top_level)?;
+        result.add_members(mcx, &sub)?;
+    }
+    Ok(result)
+}
+
+/// C multibitmapset: entry `varno` holds attnos offset by
+/// `-FIRST_LOW_INVALID_HEAP_ATTR`.
+pub type MultiBitmapset<'mcx> = mcx::PgVec<'mcx, Bitmapset<'mcx>>;
+
+pub fn mbms_add_member<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    a: &mut MultiBitmapset<'mcx>,
+    listidx: i32,
+    bitidx: i32,
+) -> PgResult<()> {
+    while a.len() <= listidx as usize {
+        a.push(Bitmapset::empty());
+    }
+    a[listidx as usize].add_member(mcx, bitidx)
+}
+
+pub fn mbms_add_members<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    a: &mut MultiBitmapset<'mcx>,
+    b: &MultiBitmapset<'mcx>,
+) -> PgResult<()> {
+    while a.len() < b.len() {
+        a.push(Bitmapset::empty());
+    }
+    for (i, bs) in b.iter().enumerate() {
+        a[i].add_members(mcx, bs)?;
+    }
+    Ok(())
+}
+
+/// mbms_overlap_sets: the set of list indexes whose bitmapsets overlap.
+pub fn mbms_overlap_sets<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    a: &MultiBitmapset<'mcx>,
+    b: &MultiBitmapset<'mcx>,
+) -> PgResult<Bitmapset<'mcx>> {
+    let mut result = Bitmapset::empty();
+    for i in 0..a.len().min(b.len()) {
+        if a[i].overlap(&b[i]) {
+            result.add_member(mcx, i as i32)?;
+        }
+    }
+    Ok(result)
+}
+
+pub fn find_nonnullable_vars<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    clause: Option<Node<'mcx>>,
+) -> PgResult<MultiBitmapset<'mcx>> {
+    find_nonnullable_vars_walker(mcx, clause, true)
+}
+
+fn find_nonnullable_vars_walker<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    node: Option<Node<'mcx>>,
+    top_level: bool,
+) -> PgResult<MultiBitmapset<'mcx>> {
+    let mut result: MultiBitmapset<'mcx> = mcx::PgVec::new_in(mcx);
+    let Some(node) = node else { return Ok(result) };
+    match node.node_tag() {
+        NodeTag::T_Var => {
+            let var = node.as_var().unwrap();
+            if var.varlevelsup == 0 {
+                mbms_add_member(
+                    mcx,
+                    &mut result,
+                    var.varno,
+                    var.varattno as i32 - FIRST_LOW_INVALID_HEAP_ATTR,
+                )?;
+            }
+        }
+        NodeTag::T_List => {
+            for item in node.as_list().unwrap() {
+                let sub = find_nonnullable_vars_walker(mcx, Some(item), top_level)?;
+                mbms_add_members(mcx, &mut result, &sub)?;
+            }
+        }
+        NodeTag::T_FuncExpr => {
+            let f = node.as_func_expr().unwrap();
+            if func_strict(f.funcid)? {
+                result = nonnullable_vars_args(mcx, &f.args, false)?;
+            }
+        }
+        NodeTag::T_OpExpr => {
+            let o = node.as_op_expr().unwrap();
+            if strict_opfuncid(o)? {
+                result = nonnullable_vars_args(mcx, &o.args, false)?;
+            }
+        }
+        NodeTag::T_BoolExpr => {
+            let b = node.as_bool_expr().unwrap();
+            match b.boolop {
+                types_nodes::primnodes::BoolExprType::AND_EXPR if top_level => {
+                    result = nonnullable_vars_args(mcx, &b.args, true)?;
+                }
+                types_nodes::primnodes::BoolExprType::AND_EXPR
+                | types_nodes::primnodes::BoolExprType::OR_EXPR => {
+                    let mut first = true;
+                    for item in &b.args {
+                        let sub = find_nonnullable_vars_walker(mcx, Some(item), top_level)?;
+                        if first {
+                            result = sub;
+                            first = false;
+                        } else {
+                            // mbms_int_members: pairwise intersect + truncate.
+                            let n = result.len().min(sub.len());
+                            result.truncate(n);
+                            for (i, bs) in result.iter_mut().enumerate() {
+                                bs.int_members(&sub[i]);
+                            }
+                        }
+                        if result.iter().all(|bs| bs.is_empty()) {
+                            break;
+                        }
+                    }
+                }
+                types_nodes::primnodes::BoolExprType::NOT_EXPR => {
+                    result = nonnullable_vars_args(mcx, &b.args, false)?;
+                }
+            }
+        }
+        NodeTag::T_RelabelType => {
+            result = find_nonnullable_vars_walker(
+                mcx,
+                Some(node.as_relabel_type().unwrap().arg),
+                top_level,
+            )?;
+        }
+        NodeTag::T_CoerceViaIO => {
+            result = find_nonnullable_vars_walker(
+                mcx,
+                Some(node.as_coerce_via_io().unwrap().arg),
+                top_level,
+            )?;
+        }
+        NodeTag::T_NullTest => {
+            let nt = node.as_null_test().unwrap();
+            if top_level
+                && nt.nulltesttype == types_nodes::primnodes::NullTestType::IS_NOT_NULL
+                && !nt.argisrow
+            {
+                result = find_nonnullable_vars_walker(mcx, nt.arg, false)?;
+            }
+        }
+        NodeTag::T_ScalarArrayOpExpr
+        | NodeTag::T_BooleanTest
+        | NodeTag::T_SubPlan
+        | NodeTag::T_PlaceHolderVar
+        | NodeTag::T_ArrayCoerceExpr
+        | NodeTag::T_ConvertRowtypeExpr
+        | NodeTag::T_CollateExpr => panic!(
+            "find_nonnullable_vars_walker (clauses.c): {:?} strictness arm unported",
+            node.node_tag()
+        ),
+        _ => {}
+    }
+    Ok(result)
+}
+
+fn nonnullable_vars_args<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    args: &types_nodes::list::NodeList<'mcx>,
+    top_level: bool,
+) -> PgResult<MultiBitmapset<'mcx>> {
+    let mut result: MultiBitmapset<'mcx> = mcx::PgVec::new_in(mcx);
+    for item in args {
+        let sub = find_nonnullable_vars_walker(mcx, Some(item), top_level)?;
+        mbms_add_members(mcx, &mut result, &sub)?;
+    }
+    Ok(result)
+}
+
+pub fn find_forced_null_vars<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    node: Option<Node<'mcx>>,
+) -> PgResult<MultiBitmapset<'mcx>> {
+    let mut result: MultiBitmapset<'mcx> = mcx::PgVec::new_in(mcx);
+    let Some(node) = node else { return Ok(result) };
+    if let Some(var) = find_forced_null_var(node) {
+        mbms_add_member(
+            mcx,
+            &mut result,
+            var.varno,
+            var.varattno as i32 - FIRST_LOW_INVALID_HEAP_ATTR,
+        )?;
+    } else if node.node_tag() == NodeTag::T_List {
+        for item in node.as_list().unwrap() {
+            let sub = find_forced_null_vars(mcx, Some(item))?;
+            mbms_add_members(mcx, &mut result, &sub)?;
+        }
+    } else if let Some(b) = node.as_bool_expr() {
+        if b.boolop == types_nodes::primnodes::BoolExprType::AND_EXPR {
+            for item in &b.args {
+                let sub = find_forced_null_vars(mcx, Some(item))?;
+                mbms_add_members(mcx, &mut result, &sub)?;
+            }
+        }
+    }
+    Ok(result)
+}
+
+// BooleanTest IS UNKNOWN arm dead: that tag is loud in the walkers above.
+pub fn find_forced_null_var<'mcx>(
+    node: Node<'mcx>,
+) -> Option<&'mcx types_nodes::primnodes::Var<'mcx>> {
+    let nt = node.as_null_test()?;
+    if nt.nulltesttype != types_nodes::primnodes::NullTestType::IS_NULL || nt.argisrow {
+        return None;
+    }
+    let var = nt.arg?.as_var()?;
+    if var.varlevelsup == 0 {
+        Some(var)
+    } else {
+        None
+    }
+}
+
+pub fn is_andclause(node: Node<'_>) -> bool {
+    matches!(node.as_bool_expr(), Some(b) if b.boolop == types_nodes::primnodes::BoolExprType::AND_EXPR)
+}
+
+pub fn is_orclause(node: Node<'_>) -> bool {
+    matches!(node.as_bool_expr(), Some(b) if b.boolop == types_nodes::primnodes::BoolExprType::OR_EXPR)
+}
+
+pub fn is_notclause(node: Node<'_>) -> bool {
+    matches!(node.as_bool_expr(), Some(b) if b.boolop == types_nodes::primnodes::BoolExprType::NOT_EXPR)
+}
+
+pub fn make_andclause<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    args: types_nodes::NodeList<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    Node::mk(
+        mcx,
+        types_nodes::primnodes::BoolExpr {
+            boolop: types_nodes::primnodes::BoolExprType::AND_EXPR,
+            args,
+            location: -1,
+        },
+    )
+}
+
+pub fn make_orclause<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    args: types_nodes::NodeList<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    Node::mk(
+        mcx,
+        types_nodes::primnodes::BoolExpr {
+            boolop: types_nodes::primnodes::BoolExprType::OR_EXPR,
+            args,
+            location: -1,
+        },
+    )
+}
+
+pub fn make_notclause<'mcx>(mcx: mcx::Mcx<'mcx>, arg: Node<'mcx>) -> PgResult<Node<'mcx>> {
+    Node::mk(
+        mcx,
+        types_nodes::primnodes::BoolExpr {
+            boolop: types_nodes::primnodes::BoolExprType::NOT_EXPR,
+            args: types_nodes::NodeList::make1(mcx, arg)?,
+            location: -1,
+        },
+    )
+}
+
+// make_ands_implicit (clauses.c): explicit AND -> flat list; constant TRUE ->
+// NIL; the AND's arg list is shared, matching C's pointer share.
+pub fn make_ands_implicit<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    clause: Option<Node<'mcx>>,
+) -> PgResult<types_nodes::NodeList<'mcx>> {
+    let Some(clause) = clause else {
+        return Ok(types_nodes::NodeList::nil());
+    };
+    if is_andclause(clause) {
+        return clause.as_bool_expr().unwrap().args.clone_in(mcx);
+    }
+    if let Some(c) = clause.as_const() {
+        if !c.constisnull && c.constvalue.as_bool() {
+            return Ok(types_nodes::NodeList::nil());
+        }
+    }
+    types_nodes::NodeList::make1(mcx, clause)
+}
+
+pub fn make_ands_explicit<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    andclauses: &types_nodes::NodeList<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    match andclauses.len() {
+        0 => crate::fold::make_bool_const(mcx, true, false),
+        1 => Ok(andclauses.nth(0)),
+        _ => make_andclause(mcx, andclauses.clone_in(mcx)?),
+    }
 }

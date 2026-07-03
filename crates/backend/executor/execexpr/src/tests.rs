@@ -878,3 +878,78 @@ fn minmax_greatest_least_and_null_handling() {
         assert!(out.as_const().unwrap().constisnull);
     });
 }
+
+fn mk_bool_const<'mcx>(mcx: Mcx<'mcx>, v: Option<bool>) -> Node<'mcx> {
+    Node::mk_const(
+        mcx,
+        16,
+        -1,
+        0,
+        1,
+        v.map_or(Datum::null(), Datum::from_bool),
+        v.is_none(),
+        true,
+    )
+    .unwrap()
+}
+
+fn mk_boolexpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    op: ::types_nodes::primnodes::BoolExprType,
+    args: &[Option<bool>],
+) -> Node<'mcx> {
+    let mut list = NodeList::nil();
+    for &a in args {
+        list.lappend(mcx, mk_bool_const(mcx, a)).unwrap();
+    }
+    Node::mk(mcx, ::types_nodes::primnodes::BoolExpr { boolop: op, args: list, location: -1 })
+        .unwrap()
+}
+
+fn eval_bool<'mcx>(mcx: Mcx<'mcx>, expr: Node<'mcx>) -> Option<bool> {
+    let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+    let mut slots = EvalSlots::default();
+    let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+    if r.isnull {
+        None
+    } else {
+        Some(r.value.as_bool())
+    }
+}
+
+#[test]
+fn boolexpr_three_valued_truth_tables() {
+    use ::types_nodes::primnodes::BoolExprType::{AND_EXPR, NOT_EXPR, OR_EXPR};
+    with_mcx(|mcx| {
+        let vals = [Some(true), Some(false), None];
+        for a in vals {
+            for b in vals {
+                let and = eval_bool(mcx, mk_boolexpr(mcx, AND_EXPR, &[a, b]));
+                let expect_and = match (a, b) {
+                    (Some(false), _) | (_, Some(false)) => Some(false),
+                    (Some(true), Some(true)) => Some(true),
+                    _ => None,
+                };
+                assert_eq!(and, expect_and, "AND {a:?} {b:?}");
+                let or = eval_bool(mcx, mk_boolexpr(mcx, OR_EXPR, &[a, b]));
+                let expect_or = match (a, b) {
+                    (Some(true), _) | (_, Some(true)) => Some(true),
+                    (Some(false), Some(false)) => Some(false),
+                    _ => None,
+                };
+                assert_eq!(or, expect_or, "OR {a:?} {b:?}");
+                for c in vals {
+                    let and3 = eval_bool(mcx, mk_boolexpr(mcx, AND_EXPR, &[a, b, c]));
+                    let expect3 = match (expect_and, c) {
+                        (Some(false), _) | (_, Some(false)) => Some(false),
+                        (Some(true), Some(true)) => Some(true),
+                        _ => None,
+                    };
+                    assert_eq!(and3, expect3, "AND {a:?} {b:?} {c:?}");
+                }
+            }
+            let not = eval_bool(mcx, mk_boolexpr(mcx, NOT_EXPR, &[a]));
+            assert_eq!(not, a.map(|v| !v), "NOT {a:?}");
+        }
+    });
+}

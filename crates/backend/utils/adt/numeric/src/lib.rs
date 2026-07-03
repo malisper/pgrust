@@ -34,7 +34,9 @@ pub use math::{
     numeric_sqrt, numeric_sqrt_into, power_var, sqrt_var, width_bucket_numeric,
 };
 pub use ops::*;
-pub use var::{make_result, make_result_opt_error, NumericImage, NumericVar, VarView};
+pub use var::{
+    make_result, make_result_into, make_result_opt_error, NumericImage, NumericVar, VarView,
+};
 
 pub type NumericDigit = i16;
 

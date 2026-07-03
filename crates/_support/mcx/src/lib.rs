@@ -422,9 +422,6 @@ pub struct MemoryContext {
     acct: AcctRc,
     backend: Backend,
     reset_cbs: RefCell<alloc::vec::Vec<alloc::boxed::Box<dyn FnOnce()>>>,
-    // C's isReset: cleared on every allocate/grow/register; reset() early-exits
-    // on it (per-row ResetExprContext is 2 loads, not the arena walk).
-    is_reset: Cell<bool>,
 }
 
 impl MemoryContext {
@@ -561,12 +558,7 @@ impl MemoryContext {
             }
             children.push(acct.downgrade());
         }
-        MemoryContext {
-            acct,
-            backend,
-            reset_cbs: RefCell::new(alloc::vec::Vec::new()),
-            is_reset: Cell::new(true),
-        }
+        MemoryContext { acct, backend, reset_cbs: RefCell::new(alloc::vec::Vec::new()) }
     }
 
     /// Contract: set the limit before creating children (limited_path cache).
@@ -619,25 +611,13 @@ impl MemoryContext {
     }
 
     pub fn register_reset_callback(&self, cb: impl FnOnce() + 'static) {
-        self.is_reset.set(false);
         self.reset_cbs.borrow_mut().push(alloc::boxed::Box::new(cb));
     }
 
     // Bump re-opens the keeper's window at reset (BumpArena::reset), so the
     // keeper stays charged (C's mem_allocated shape). Per-tuple/per-query
     // resets ride the plain-Bump arm; every other backend is out of line.
-    #[inline]
     pub fn reset(&mut self) {
-        if *self.is_reset.get_mut() {
-            return;
-        }
-        self.reset_dirty();
-    }
-
-    // is_reset flips only after the work: a panicking destructor unwinds with
-    // the flag still false, so the retried reset re-drains (test-pinned).
-    #[inline(never)]
-    fn reset_dirty(&mut self) {
         if !self.reset_cbs.get_mut().is_empty() {
             self.fire_reset_callbacks();
         }
@@ -650,11 +630,9 @@ impl MemoryContext {
             acct.self_peak.set(footprint);
             acct.arena_footprint.set(footprint);
             acct.arena_nblocks.set(a.nblocks());
-            self.is_reset.set(true);
             return;
         }
         self.reset_noncore();
-        self.is_reset.set(true);
     }
 
     #[cold]
@@ -784,7 +762,6 @@ impl MemoryContext {
     /// # Safety: `addr` — live `T` (glue's type) in this arena, Drop suppressed, valid until reset.
     unsafe fn register_drop(&self, addr: *mut u8, glue: unsafe fn(*mut u8)) -> bool {
         if let Backend::BumpDrop(_, droplist) = &self.backend {
-            self.is_reset.set(false);
             droplist.borrow_mut().entries.push(DropEntry { addr, glue });
             true
         } else {
@@ -946,7 +923,6 @@ unsafe impl Allocator for Mcx<'_> {
     // always-inline: out-of-line, the fast lanes grow a fat frame + call (measured +12 instr/op).
     #[inline(always)]
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        self.0.is_reset.set(false);
         match &self.0.backend {
             Backend::Aset(set) => {
                 self.0.charge(layout.size())?;
@@ -1012,7 +988,6 @@ unsafe impl Allocator for Mcx<'_> {
         old_layout: Layout,
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
-        self.0.is_reset.set(false);
         match &self.0.backend {
             Backend::Aset(set) => {
                 let delta = new_layout.size() - old_layout.size();

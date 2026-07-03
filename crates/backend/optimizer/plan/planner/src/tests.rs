@@ -1828,8 +1828,9 @@ mod join {
     }
 
     // Cost crossover: over two 100-page/10000-row tables both nestloop and
-    // hash paths are candidates, and hash wins. Verifies the planner picks
-    // HashJoin and that its cost is far below the nestloop it beat.
+    // hash paths are candidates, and hash wins once the merge path (which C
+    // prefers here) is disabled. Live PG 18.3, no pg_statistic, mergejoin
+    // off: Hash Join (cost=325.00..18050.00 rows=500000 width=16).
     #[test]
     fn large_comma_join_plans_to_hash_join() {
         let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1839,14 +1840,16 @@ mod join {
         if !guc_tables::vars::work_mem.installed() {
             init_small::init_seams();
         }
+        crate::gucs::set_enable_mergejoin(false);
         let stmt = planner(
             mcx,
             join_query_rels(mcx, JT3, JT4),
             "SELECT * FROM jt3, jt4 WHERE jt3.a = jt4.a",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
-        )
-        .unwrap();
+        );
+        crate::gucs::set_enable_mergejoin(true);
+        let stmt = stmt.unwrap();
 
         let hj = stmt
             .planTree
@@ -1870,9 +1873,8 @@ mod join {
         assert_outer_inner_var(hj.hashkeys.nth(0), OUTER_VAR, 1);
         assert_outer_inner_var(hash.hashkeys.nth(0), OUTER_VAR, 1);
 
-        // A nestloop over the same 10000x10000 inputs would cost ~1e8 cpu; the
-        // chosen hash plan is orders of magnitude cheaper.
-        assert!(hj.join.plan.total_cost < 1.0e6, "{}", hj.join.plan.total_cost);
+        assert!((hj.join.plan.startup_cost - 325.0).abs() < 1e-9, "{}", hj.join.plan.startup_cost);
+        assert!((hj.join.plan.total_cost - 18050.0).abs() < 1e-9, "{}", hj.join.plan.total_cost);
     }
 
     // Mergejoin lane: with nestloop and hashjoin disabled the explicit-sort
@@ -2062,6 +2064,258 @@ mod join {
         assert_eq!(outer.scan.scanrelid, 1);
         let inner = nl.join.plan.righttree.unwrap().as_seq_scan().expect("inner SeqScan");
         assert_eq!(inner.scan.scanrelid, 2);
+    }
+
+    // Parser output for `jt1 <jointype> JOIN jt2 ON jt1.a = jt2.a`: the
+    // nullable side's Vars carry the join RTE's index in varnullingrels
+    // (markRelsAsNulledBy), including in the SELECT-list.
+    fn outer_join_query<'mcx>(
+        mcx: Mcx<'mcx>,
+        jointype: types_nodes::JoinType,
+        quals: Option<Node<'mcx>>,
+    ) -> Query<'mcx> {
+        let mut q = join_on_query(mcx);
+        let f = q.jointree.unwrap();
+        let join = f.fromlist.nth(0).as_join_expr().unwrap();
+        let nulled_varno = if jointype == types_nodes::JoinType::JOIN_LEFT { 2 } else { 1 };
+        let nulled_var = |attno: i16| {
+            let mut nulling = types_nodes::Bitmapset::empty();
+            nulling.add_member(mcx, 3).unwrap();
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::Var {
+                    varno: nulled_varno,
+                    varattno: attno,
+                    vartype: 23,
+                    vartypmod: -1,
+                    varnullingrels: nulling,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let mut tlist = NodeList::nil();
+        for (i, te) in q.targetList.iter().enumerate() {
+            let te = te.as_target_entry().unwrap();
+            let v = te.expr.as_var().unwrap();
+            let expr = if v.varno == nulled_varno { nulled_var(v.varattno) } else { te.expr };
+            tlist
+                .lappend(
+                    mcx,
+                    Node::mk_target_entry(mcx, expr, i as i16 + 1, te.resname, false).unwrap(),
+                )
+                .unwrap();
+        }
+        q.targetList = tlist;
+        let new_join = Node::mk(
+            mcx,
+            types_nodes::JoinExpr {
+                jointype,
+                isNatural: false,
+                larg: join.larg,
+                rarg: join.rarg,
+                usingClause: NodeList::nil(),
+                join_using_alias: None,
+                quals: join.quals,
+                alias: None,
+                rtindex: 3,
+            },
+        )
+        .unwrap();
+        q.jointree = Some(
+            alloc_leak_in(
+                mcx,
+                FromExpr { fromlist: NodeList::make1(mcx, new_join).unwrap(), quals },
+            )
+            .unwrap(),
+        );
+        let jrte = q.rtable.nth(2);
+        // SAFETY: freshly built query fixture, no other handles.
+        unsafe {
+            jrte.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| r.jointype = jointype)
+        };
+        q
+    }
+
+    // Live PG 18.3, same fixture stats:
+    //   Nested Loop Left Join  (cost=0.00..2.06 rows=1 width=16)
+    //     Join Filter: (jt1.a = jt2.a)
+    //     ->  Seq Scan on jt1  (cost=0.00..1.01 rows=1 width=8)
+    //     ->  Seq Scan on jt2  (cost=0.00..1.02 rows=2 width=8)
+    #[test]
+    fn left_join_plans_nestloop_left_join() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        let mcx = cx.mcx();
+        let stmt = planner(
+            mcx,
+            outer_join_query(mcx, types_nodes::JoinType::JOIN_LEFT, None),
+            "SELECT * FROM jt1 LEFT JOIN jt2 ON jt1.a = jt2.a",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        let nl = stmt.planTree.unwrap().as_nest_loop().expect("NestLoop root");
+        assert_eq!(nl.join.jointype, types_nodes::JoinType::JOIN_LEFT);
+        assert_eq!(nl.join.plan.startup_cost, 0.0);
+        assert!((nl.join.plan.total_cost - 2.055).abs() < 1e-9, "{}", nl.join.plan.total_cost);
+        assert_eq!(nl.join.plan.plan_rows, 1.0);
+        assert_eq!(nl.join.plan.plan_width, 16);
+        assert_eq!(nl.join.joinqual.len(), 1);
+        assert!(nl.join.plan.qual.is_nil());
+        let op = nl.join.joinqual.nth(0).as_op_expr().expect("join filter OpExpr");
+        assert_outer_inner_var(op.args.nth(0), OUTER_VAR, 1);
+        assert_outer_inner_var(op.args.nth(1), INNER_VAR, 1);
+        let outer = nl.join.plan.lefttree.unwrap().as_seq_scan().expect("outer SeqScan");
+        assert_eq!(outer.scan.scanrelid, 1);
+        let inner = nl.join.plan.righttree.unwrap().as_seq_scan().expect("inner SeqScan");
+        assert_eq!(inner.scan.scanrelid, 2);
+    }
+
+    // RIGHT flips to LEFT in reduce_outer_joins. Live PG 18.3:
+    //   Nested Loop Left Join  (cost=0.00..2.06 rows=2 width=16)
+    //     Join Filter: (jt1.a = jt2.a)
+    //     ->  Seq Scan on jt2  (cost=0.00..1.02 rows=2 width=8)
+    //     ->  Materialize  (cost=0.00..1.01 rows=1 width=8)
+    //           ->  Seq Scan on jt1  (cost=0.00..1.01 rows=1 width=8)
+    #[test]
+    fn right_join_flips_to_nestloop_left_join() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        let mcx = cx.mcx();
+        let stmt = planner(
+            mcx,
+            outer_join_query(mcx, types_nodes::JoinType::JOIN_RIGHT, None),
+            "SELECT * FROM jt1 RIGHT JOIN jt2 ON jt1.a = jt2.a",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        let nl = stmt.planTree.unwrap().as_nest_loop().expect("NestLoop root");
+        assert_eq!(nl.join.jointype, types_nodes::JoinType::JOIN_LEFT);
+        assert_eq!(nl.join.plan.plan_rows, 2.0);
+        assert!((nl.join.plan.total_cost - 2.0625).abs() < 1e-9, "{}", nl.join.plan.total_cost);
+        let outer = nl.join.plan.lefttree.unwrap().as_seq_scan().expect("outer SeqScan jt2");
+        assert_eq!(outer.scan.scanrelid, 2);
+        let mat = nl.join.plan.righttree.unwrap().as_material().expect("Materialize inner");
+        let inner = mat.plan.lefttree.unwrap().as_seq_scan().expect("SeqScan jt1");
+        assert_eq!(inner.scan.scanrelid, 1);
+        // The flipped join's RTE was updated in place.
+        let jrte = stmt.rtable.nth(2).as_range_tbl_entry().unwrap();
+        assert_eq!(jrte.jointype, types_nodes::JoinType::JOIN_LEFT);
+    }
+
+    // A strict WHERE on the nullable side reduces LEFT to INNER
+    // (reduce_outer_joins). Live PG 18.3:
+    //   Nested Loop  (cost=0.00..2.05 rows=1 width=16)
+    //     Join Filter: (jt1.a = jt2.a)
+    //     ->  Seq Scan on jt1  (cost=0.00..1.01 rows=1 width=8)
+    //     ->  Seq Scan on jt2  (cost=0.00..1.02 rows=1 width=8)
+    //           Filter: (pad = 5)
+    #[test]
+    fn left_join_with_strict_where_reduces_to_inner() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut nulling = types_nodes::Bitmapset::empty();
+        nulling.add_member(mcx, 3).unwrap();
+        let where_qual = Node::mk(
+            mcx,
+            types_nodes::primnodes::OpExpr {
+                opno: INT4EQ_OP,
+                opfuncid: INT4EQ_PROC,
+                opresulttype: 16,
+                opretset: false,
+                opcollid: 0,
+                inputcollid: 0,
+                args: NodeList::make2(
+                    mcx,
+                    Node::mk(
+                        mcx,
+                        types_nodes::primnodes::Var {
+                            varno: 2,
+                            varattno: 2,
+                            vartype: 23,
+                            vartypmod: -1,
+                            varnullingrels: nulling,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap(),
+                    Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(5), false, true).unwrap(),
+                )
+                .unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap();
+        let stmt = planner(
+            mcx,
+            outer_join_query(mcx, types_nodes::JoinType::JOIN_LEFT, Some(where_qual)),
+            "SELECT * FROM jt1 LEFT JOIN jt2 ON jt1.a = jt2.a WHERE jt2.pad = 5",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        let nl = stmt.planTree.unwrap().as_nest_loop().expect("NestLoop root");
+        assert_eq!(nl.join.jointype, types_nodes::JoinType::JOIN_INNER);
+        assert_eq!(nl.join.plan.plan_rows, 1.0);
+        let inner = nl.join.plan.righttree.unwrap().as_seq_scan().expect("inner SeqScan");
+        assert_eq!(inner.scan.scanrelid, 2);
+        assert_eq!(inner.scan.plan.qual.len(), 1);
+        assert_eq!(inner.scan.plan.plan_rows, 1.0);
+        // Reduction stripped the join's nulling bit everywhere.
+        let jrte = stmt.rtable.nth(2).as_range_tbl_entry().unwrap();
+        assert_eq!(jrte.jointype, types_nodes::JoinType::JOIN_INNER);
+    }
+
+    // No-stats large LEFT join picks the merge path. Live PG 18.3 (100-page,
+    // 10000-row tables, no pg_statistic):
+    //   Merge Left Join  (cost=1728.77..9278.77 rows=500000 width=16)
+    //     Merge Cond: (jt3.a = jt4.a)
+    //     ->  Sort (cost=864.39..889.39 rows=10000) -> Seq Scan on jt3
+    //     ->  Sort (cost=864.39..889.39 rows=10000) -> Seq Scan on jt4
+    #[test]
+    fn large_left_join_plans_merge_left_join() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        let mcx = cx.mcx();
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        let mut q = join_query_rels(mcx, JT3, JT4);
+        // Rebuild as jt3 LEFT JOIN jt4 with parser-marked nullable Vars.
+        let base = outer_join_query(mcx, types_nodes::JoinType::JOIN_LEFT, None);
+        let f = base.jointree.unwrap();
+        q.targetList = base.targetList;
+        q.jointree = Some(f);
+        q.rtable = base.rtable;
+        // Point the copied rtable at the large fixtures.
+        for (i, relid) in [(0usize, JT3), (1usize, JT4)] {
+            // SAFETY: freshly built query fixture, no other handles.
+            unsafe {
+                q.rtable
+                    .nth(i)
+                    .with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| r.relid = relid)
+            };
+        }
+        let stmt = planner(
+            mcx,
+            q,
+            "SELECT * FROM jt3 LEFT JOIN jt4 ON jt3.a = jt4.a",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        let mj = stmt.planTree.unwrap().as_merge_join().expect("MergeJoin root");
+        assert_eq!(mj.join.jointype, types_nodes::JoinType::JOIN_LEFT);
+        assert_eq!(mj.join.plan.plan_rows, 500000.0);
+        assert!((mj.join.plan.startup_cost - 1728.77).abs() < 5e-3, "{}", mj.join.plan.startup_cost);
+        assert!((mj.join.plan.total_cost - 9278.77).abs() < 5e-3, "{}", mj.join.plan.total_cost);
+        let osort = mj.join.plan.lefttree.unwrap().as_sort().expect("outer Sort");
+        assert!((osort.plan.startup_cost - 864.39).abs() < 5e-3, "{}", osort.plan.startup_cost);
+        let oscan = osort.plan.lefttree.unwrap().as_seq_scan().expect("Sort over SeqScan");
+        assert_eq!(oscan.scan.scanrelid, 1);
     }
 }
 

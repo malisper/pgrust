@@ -21,11 +21,12 @@ pub trait HashBuildInput<'mcx> {
     fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>;
 }
 
-// C HashJoinTupleData; next is a u32 index into `entries` (u32::MAX = end).
+// C HashJoinTupleData; matched = HeapTupleHeaderSetMatch; u32::MAX ends chains.
 #[derive(Clone, Copy)]
 pub struct HashJoinTupleEntry {
     pub next: u32,
     pub hashvalue: u32,
+    pub matched: bool,
     pub tuple: NonNull<MinimalTupleData>,
 }
 
@@ -75,6 +76,7 @@ impl<'mcx> HashJoinTable<'mcx> {
         self.entries.push(HashJoinTupleEntry {
             next: self.buckets[bucketno],
             hashvalue,
+            matched: false,
             tuple,
         });
         self.buckets[bucketno] = ix;
@@ -105,6 +107,23 @@ impl<'mcx> HashJoinTable<'mcx> {
     #[inline]
     pub const fn chain_end() -> u32 {
         END
+    }
+
+    #[inline]
+    pub fn set_matched(&mut self, ix: u32) {
+        self.entries[ix as usize].matched = true;
+    }
+
+    #[inline]
+    pub fn nbuckets(&self) -> u32 {
+        self.bucket_mask + 1
+    }
+
+    /// ExecHashTableResetMatchFlags.
+    pub fn reset_match_flags(&mut self) {
+        for e in self.entries.iter_mut() {
+            e.matched = false;
+        }
     }
 }
 

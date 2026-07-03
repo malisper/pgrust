@@ -225,6 +225,16 @@ fn write_out(out: OutRef, regs: &mut ResultRegs, value: Datum, isnull: bool) {
     }
 }
 
+// Bool steps read-modify their own output (C's resv/resnull aliasing).
+#[inline(always)]
+fn read_out(out: OutRef, regs: &ResultRegs) -> NullableDatum {
+    match out.0 {
+        None => NullableDatum { value: regs.value, isnull: regs.isnull },
+        // SAFETY: as write_out.
+        Some(p) => unsafe { p.read() },
+    }
+}
+
 // The interpreter: flat step array walked by a pointer cursor, loop { match }
 // over the dense tags (perf-doctrine rule 12), enregisterable (cursor,
 // result) state; slot bindings hoisted out of the loop as C does.
@@ -415,6 +425,58 @@ fn run_program<'mcx>(
                     sp = unsafe { base.add(*jumpdone as usize) };
                     continue;
                 }
+            }
+            Step::BoolAndStepFirst { anynull, jumpdone, out }
+            | Step::BoolAndStep { anynull, jumpdone, out } => {
+                if matches!(step, Step::BoolAndStepFirst { .. }) {
+                    // SAFETY: compile-allocated scratch, live for 'mcx.
+                    unsafe { anynull.write(false) };
+                }
+                let r = read_out(*out, &regs);
+                if r.isnull {
+                    // SAFETY: as above.
+                    unsafe { anynull.write(true) };
+                } else if !r.value.as_bool() {
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+            }
+            Step::BoolAndStepLast { anynull, out } => {
+                let r = read_out(*out, &regs);
+                // SAFETY: compile-allocated scratch, live for 'mcx.
+                if !r.isnull && r.value.as_bool() && unsafe { anynull.read() } {
+                    write_out(*out, &mut regs, Datum::null(), true);
+                }
+            }
+            Step::BoolOrStepFirst { anynull, jumpdone, out }
+            | Step::BoolOrStep { anynull, jumpdone, out } => {
+                if matches!(step, Step::BoolOrStepFirst { .. }) {
+                    // SAFETY: compile-allocated scratch, live for 'mcx.
+                    unsafe { anynull.write(false) };
+                }
+                let r = read_out(*out, &regs);
+                if r.isnull {
+                    // SAFETY: as above.
+                    unsafe { anynull.write(true) };
+                } else if r.value.as_bool() {
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+            }
+            Step::BoolOrStepLast { anynull, out } => {
+                let r = read_out(*out, &regs);
+                // SAFETY: compile-allocated scratch, live for 'mcx.
+                if !r.isnull && !r.value.as_bool() && unsafe { anynull.read() } {
+                    write_out(*out, &mut regs, Datum::null(), true);
+                }
+            }
+            Step::BoolNotStep { out } => {
+                // NULL in gives NULL out: isnull rides through untouched (C
+                // flips the datum even when nominally null).
+                let r = read_out(*out, &regs);
+                write_out(*out, &mut regs, Datum::from_bool(!r.value.as_bool()), r.isnull);
             }
             Step::AggStrictInputCheck { args, nargs, jumpnull } => {
                 // SAFETY: args[0..nargs] live fcinfo slots; jumps ready-checked.

@@ -1,6 +1,6 @@
-// nodeMergejoin.c, JOIN_INNER MJ_* state machine; the MergeJoinInner trait
-// carries ExecMarkPos/ExecRestrPos. LEFT/SEMI/ANTI, fill states,
-// mj_ConstFalseJoin, and clauseless/parallel merge are loud named panics.
+// nodeMergejoin.c INNER/LEFT/RIGHT MJ_* state machine; the MergeJoinInner
+// trait carries ExecMarkPos/ExecRestrPos. FULL, SEMI/ANTI, mj_ConstFalseJoin
+// and clauseless/parallel merge are loud.
 #![allow(non_snake_case)]
 
 use std::rc::Rc;
@@ -30,6 +30,8 @@ const EXEC_MJ_NEXTINNER: u8 = 6;
 const EXEC_MJ_SKIP_TEST: u8 = 7;
 const EXEC_MJ_SKIPOUTER_ADVANCE: u8 = 8;
 const EXEC_MJ_SKIPINNER_ADVANCE: u8 = 9;
+const EXEC_MJ_ENDOUTER: u8 = 10;
+const EXEC_MJ_ENDINNER: u8 = 11;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MJEvalResult {
@@ -89,6 +91,10 @@ pub struct MergeJoinState<'mcx> {
     mj_SkipMarkRestore: bool,
     mj_ExtraMarks: bool,
     js_single_match: bool,
+    mj_FillOuter: bool,
+    mj_FillInner: bool,
+    mj_NullInnerTupleSlot: Option<ExecSlotId>,
+    mj_NullOuterTupleSlot: Option<ExecSlotId>,
     mj_MatchedOuter: bool,
     mj_MatchedInner: bool,
     mj_OuterTupleSlot: Option<ExecSlotId>,
@@ -102,14 +108,18 @@ pub fn exec_init_merge_join<'mcx>(
     node: &'mcx MergeJoin<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
+    outer_desc: &Rc<TupleDescData<'static>>,
     inner_desc: &Rc<TupleDescData<'static>>,
     result_desc: Rc<TupleDescData<'static>>,
     inner_is_material: bool,
 ) -> PgResult<MergeJoinState<'mcx>> {
     debug_assert!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0);
     assert!(
-        node.join.jointype == JoinType::JOIN_INNER,
-        "ExecInitMergeJoin (nodeMergejoin.c): jointype {:?}; LEFT/SEMI/ANTI + fill lane unported",
+        matches!(
+            node.join.jointype,
+            JoinType::JOIN_INNER | JoinType::JOIN_LEFT | JoinType::JOIN_RIGHT
+        ),
+        "ExecInitMergeJoin (nodeMergejoin.c): jointype {:?}; FULL fill + SEMI/ANTI lane unported",
         node.join.jointype
     );
     assert!(
@@ -125,6 +135,21 @@ pub fn exec_init_merge_join<'mcx>(
         estate.exec_init_extra_tuple_slot(Some(result_desc.clone()), TupleSlotKind::Virtual);
     let mj_MarkedTupleSlot =
         estate.exec_init_extra_tuple_slot(Some(inner_desc.clone()), TupleSlotKind::MinimalTuple);
+    let mj_FillOuter = node.join.jointype == JoinType::JOIN_LEFT;
+    let mj_FillInner = node.join.jointype == JoinType::JOIN_RIGHT;
+    let mut null_slot = |desc: &Rc<TupleDescData<'static>>, estate: &mut EStateData<'mcx>| {
+        let slot_id =
+            estate.exec_init_extra_tuple_slot(Some(desc.clone()), TupleSlotKind::Virtual);
+        exectuples::exec_store_all_null_tuple(
+            &mut estate.es_tupleTable[slot_id.0 as usize],
+            estate.es_query_cxt,
+        );
+        slot_id
+    };
+    let mj_NullInnerTupleSlot =
+        if mj_FillOuter { Some(null_slot(inner_desc, estate)) } else { None };
+    let mj_NullOuterTupleSlot =
+        if mj_FillInner { Some(null_slot(outer_desc, estate)) } else { None };
 
     let params = estate.param_bind();
     let proj = exec_build_projection_info(mcx, &node.join.plan.targetlist, None, params)?;
@@ -152,6 +177,10 @@ pub fn exec_init_merge_join<'mcx>(
         mj_SkipMarkRestore: node.skip_mark_restore,
         mj_ExtraMarks,
         js_single_match: node.join.inner_unique,
+        mj_FillOuter,
+        mj_FillInner,
+        mj_NullInnerTupleSlot,
+        mj_NullOuterTupleSlot,
         mj_MatchedOuter: false,
         mj_MatchedInner: false,
         mj_OuterTupleSlot: None,
@@ -241,7 +270,8 @@ fn eval_outer_values<'mcx>(
         node.clauses[i].ldatum = v.value;
         node.clauses[i].lisnull = v.isnull;
         if v.isnull {
-            if i == 0 && !node.clauses[0].ssup.ssup_nulls_first {
+            // A fill-outer join must still emit NULL-keyed outers.
+            if i == 0 && !node.clauses[0].ssup.ssup_nulls_first && !node.mj_FillOuter {
                 return Ok(MJEvalResult::EndOfJoin);
             }
             if result == MJEvalResult::Matchable {
@@ -269,7 +299,7 @@ fn eval_inner_values<'mcx>(
         node.clauses[i].rdatum = v.value;
         node.clauses[i].risnull = v.isnull;
         if v.isnull {
-            if i == 0 && !node.clauses[0].ssup.ssup_nulls_first {
+            if i == 0 && !node.clauses[0].ssup.ssup_nulls_first && !node.mj_FillInner {
                 return Ok(MJEvalResult::EndOfJoin);
             }
             if result == MJEvalResult::Matchable {
@@ -307,10 +337,17 @@ fn eval_qual<'mcx>(
     estate: &mut EStateData<'mcx>,
     which: Qual,
 ) -> PgResult<bool> {
-    let (outer_id, inner_id) = (
-        node.mj_OuterTupleSlot.expect("outer slot set"),
-        node.mj_InnerTupleSlot.expect("inner slot set"),
-    );
+    let inner_id = node.mj_InnerTupleSlot.expect("inner slot set");
+    eval_qual_with(node, estate, which, inner_id)
+}
+
+fn eval_qual_with<'mcx>(
+    node: &mut MergeJoinState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    which: Qual,
+    inner_id: ExecSlotId,
+) -> PgResult<bool> {
+    let outer_id = node.mj_OuterTupleSlot.expect("outer slot set");
     let table = &mut estate.es_tupleTable[..];
     let [inner, outer] = table
         .get_disjoint_mut([inner_id.0 as usize, outer_id.0 as usize])
@@ -327,11 +364,17 @@ fn project_result<'mcx>(
     node: &mut MergeJoinState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<ExecSlotId> {
+    let inner_id = node.mj_InnerTupleSlot.expect("inner slot set");
+    project_result_with(node, estate, inner_id)
+}
+
+fn project_result_with<'mcx>(
+    node: &mut MergeJoinState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    inner_id: ExecSlotId,
+) -> PgResult<ExecSlotId> {
     let mcx = estate.es_query_cxt;
-    let (outer_id, inner_id) = (
-        node.mj_OuterTupleSlot.expect("outer slot set"),
-        node.mj_InnerTupleSlot.expect("inner slot set"),
-    );
+    let outer_id = node.mj_OuterTupleSlot.expect("outer slot set");
     let result_id = node.ps_ResultTupleSlot;
     let table = &mut estate.es_tupleTable[..];
     let [inner, outer, result] = table
@@ -356,7 +399,39 @@ fn mark_inner_tuple<'mcx>(
     exectuples::exec_copy_slot(dst, src, mcx, mcx)
 }
 
-/// `ExecMergeJoin`, JOIN_INNER.
+// MJFillOuter: null-extended outer emission (otherqual over outer + nulls).
+fn mj_fill_outer<'mcx>(
+    node: &mut MergeJoinState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    let null_inner = node.mj_NullInnerTupleSlot.expect("null inner slot");
+    if eval_qual_with(node, estate, Qual::Other, null_inner)? {
+        return Ok(Some(project_result_with(node, estate, null_inner)?));
+    }
+    estate.reset_expr_context(node.ps_ExprContext);
+    Ok(None)
+}
+
+// MJFillInner: null-extended inner emission (otherqual over nulls + inner).
+fn mj_fill_inner<'mcx>(
+    node: &mut MergeJoinState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    let null_outer = node.mj_NullOuterTupleSlot.expect("null outer slot");
+    let saved = node.mj_OuterTupleSlot;
+    node.mj_OuterTupleSlot = Some(null_outer);
+    let emit = (|| -> PgResult<Option<ExecSlotId>> {
+        if eval_qual(node, estate, Qual::Other)? {
+            return Ok(Some(project_result(node, estate)?));
+        }
+        estate.reset_expr_context(node.ps_ExprContext);
+        Ok(None)
+    })();
+    node.mj_OuterTupleSlot = saved;
+    emit
+}
+
+/// `ExecMergeJoin`, INNER/LEFT/RIGHT.
 pub fn exec_merge_join<'mcx, O, I>(
     node: &mut MergeJoinState<'mcx>,
     outer: &mut O,
@@ -376,8 +451,21 @@ where
                 node.mj_OuterTupleSlot = outer.exec_proc(estate)?;
                 match eval_outer_values(node, estate)? {
                     MJEvalResult::Matchable => node.mj_JoinState = EXEC_MJ_INITIALIZE_INNER,
-                    MJEvalResult::NonMatchable => {} // fetch next outer
-                    MJEvalResult::EndOfJoin => return Ok(None),
+                    MJEvalResult::NonMatchable => {
+                        // Fetch next outer; a fill-outer join emits this one.
+                        if node.mj_FillOuter {
+                            if let Some(r) = mj_fill_outer(node, estate)? {
+                                return Ok(Some(r));
+                            }
+                        }
+                    }
+                    MJEvalResult::EndOfJoin => {
+                        if node.mj_FillInner {
+                            node.mj_JoinState = EXEC_MJ_ENDOUTER;
+                        } else {
+                            return Ok(None);
+                        }
+                    }
                 }
             }
             EXEC_MJ_INITIALIZE_INNER => {
@@ -388,8 +476,20 @@ where
                         if node.mj_ExtraMarks {
                             inner.mark_pos(estate)?;
                         }
+                        // Fetch next inner; a fill-inner join emits this one.
+                        if node.mj_FillInner {
+                            if let Some(r) = mj_fill_inner(node, estate)? {
+                                return Ok(Some(r));
+                            }
+                        }
                     }
-                    MJEvalResult::EndOfJoin => return Ok(None),
+                    MJEvalResult::EndOfJoin => {
+                        if node.mj_FillOuter {
+                            node.mj_JoinState = EXEC_MJ_ENDINNER;
+                        } else {
+                            return Ok(None);
+                        }
+                    }
                 }
             }
             EXEC_MJ_SKIP_TEST => {
@@ -407,15 +507,33 @@ where
                 }
             }
             EXEC_MJ_SKIPOUTER_ADVANCE => {
+                if node.mj_FillOuter && !node.mj_MatchedOuter {
+                    node.mj_MatchedOuter = true;
+                    if let Some(r) = mj_fill_outer(node, estate)? {
+                        return Ok(Some(r));
+                    }
+                }
                 node.mj_OuterTupleSlot = outer.exec_proc(estate)?;
                 node.mj_MatchedOuter = false;
                 match eval_outer_values(node, estate)? {
                     MJEvalResult::Matchable => node.mj_JoinState = EXEC_MJ_SKIP_TEST,
                     MJEvalResult::NonMatchable => {}
-                    MJEvalResult::EndOfJoin => return Ok(None),
+                    MJEvalResult::EndOfJoin => {
+                        if node.mj_FillInner && node.mj_InnerTupleSlot.is_some() {
+                            node.mj_JoinState = EXEC_MJ_ENDOUTER;
+                        } else {
+                            return Ok(None);
+                        }
+                    }
                 }
             }
             EXEC_MJ_SKIPINNER_ADVANCE => {
+                if node.mj_FillInner && !node.mj_MatchedInner {
+                    node.mj_MatchedInner = true;
+                    if let Some(r) = mj_fill_inner(node, estate)? {
+                        return Ok(Some(r));
+                    }
+                }
                 if node.mj_ExtraMarks {
                     inner.mark_pos(estate)?;
                 }
@@ -424,7 +542,13 @@ where
                 match eval_inner_values(node, estate, node.mj_InnerTupleSlot)? {
                     MJEvalResult::Matchable => node.mj_JoinState = EXEC_MJ_SKIP_TEST,
                     MJEvalResult::NonMatchable => {}
-                    MJEvalResult::EndOfJoin => return Ok(None),
+                    MJEvalResult::EndOfJoin => {
+                        if node.mj_FillOuter && node.mj_OuterTupleSlot.is_some() {
+                            node.mj_JoinState = EXEC_MJ_ENDINNER;
+                        } else {
+                            return Ok(None);
+                        }
+                    }
                 }
             }
             EXEC_MJ_JOINTUPLES => {
@@ -443,6 +567,12 @@ where
                 estate.reset_expr_context(node.ps_ExprContext);
             }
             EXEC_MJ_NEXTINNER => {
+                if node.mj_FillInner && !node.mj_MatchedInner {
+                    node.mj_MatchedInner = true;
+                    if let Some(r) = mj_fill_inner(node, estate)? {
+                        return Ok(Some(r));
+                    }
+                }
                 // NB: no ExtraMarks here -- we may still restore to the mark.
                 node.mj_InnerTupleSlot = inner.exec_proc(estate)?;
                 node.mj_MatchedInner = false;
@@ -467,12 +597,24 @@ where
                 }
             }
             EXEC_MJ_NEXTOUTER => {
+                if node.mj_FillOuter && !node.mj_MatchedOuter {
+                    node.mj_MatchedOuter = true;
+                    if let Some(r) = mj_fill_outer(node, estate)? {
+                        return Ok(Some(r));
+                    }
+                }
                 node.mj_OuterTupleSlot = outer.exec_proc(estate)?;
                 node.mj_MatchedOuter = false;
                 match eval_outer_values(node, estate)? {
                     MJEvalResult::Matchable => node.mj_JoinState = EXEC_MJ_TESTOUTER,
                     MJEvalResult::NonMatchable => {}
-                    MJEvalResult::EndOfJoin => return Ok(None),
+                    MJEvalResult::EndOfJoin => {
+                        if node.mj_FillInner && node.mj_InnerTupleSlot.is_some() {
+                            node.mj_JoinState = EXEC_MJ_ENDOUTER;
+                        } else {
+                            return Ok(None);
+                        }
+                    }
                 }
             }
             EXEC_MJ_TESTOUTER => {
@@ -493,14 +635,53 @@ where
                         MJEvalResult::NonMatchable => {
                             node.mj_JoinState = EXEC_MJ_SKIPINNER_ADVANCE
                         }
-                        MJEvalResult::EndOfJoin => return Ok(None),
+                        MJEvalResult::EndOfJoin => {
+                            if node.mj_FillOuter {
+                                node.mj_JoinState = EXEC_MJ_ENDINNER;
+                            } else {
+                                return Ok(None);
+                            }
+                        }
                     }
                 } else {
                     panic!("ExecMergeJoin (nodeMergejoin.c): mergejoin input data is out of order");
                 }
             }
+            // EXEC_MJ_ENDOUTER: outer exhausted; null-fill remaining inners.
+            EXEC_MJ_ENDOUTER => {
+                debug_assert!(node.mj_FillInner);
+                if !node.mj_MatchedInner {
+                    node.mj_MatchedInner = true;
+                    if let Some(r) = mj_fill_inner(node, estate)? {
+                        return Ok(Some(r));
+                    }
+                }
+                if node.mj_ExtraMarks {
+                    inner.mark_pos(estate)?;
+                }
+                node.mj_InnerTupleSlot = inner.exec_proc(estate)?;
+                node.mj_MatchedInner = false;
+                if node.mj_InnerTupleSlot.is_none() {
+                    return Ok(None);
+                }
+            }
+            // EXEC_MJ_ENDINNER: inner exhausted; null-fill remaining outers.
+            EXEC_MJ_ENDINNER => {
+                debug_assert!(node.mj_FillOuter);
+                if !node.mj_MatchedOuter {
+                    node.mj_MatchedOuter = true;
+                    if let Some(r) = mj_fill_outer(node, estate)? {
+                        return Ok(Some(r));
+                    }
+                }
+                node.mj_OuterTupleSlot = outer.exec_proc(estate)?;
+                node.mj_MatchedOuter = false;
+                if node.mj_OuterTupleSlot.is_none() {
+                    return Ok(None);
+                }
+            }
             other => {
-                panic!("ExecMergeJoin (nodeMergejoin.c): state {other} not reachable for inner join")
+                panic!("ExecMergeJoin (nodeMergejoin.c): unrecognized state {other}")
             }
         }
     }

@@ -70,6 +70,40 @@ fn op_test(
     Ok(types_fmgr::function_call2_coll(opproc, collation, a0, a1)?.as_bool())
 }
 
+const DEFAULT_UNK_SEL: f64 = 0.005;
+const DEFAULT_NOT_UNK_SEL: f64 = 1.0 - DEFAULT_UNK_SEL;
+
+// nulltestsel (selfuncs.c); C's jointype/sjinfo params are unused there too.
+pub fn nulltestsel<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    is_null: bool,
+    arg: Node<'mcx>,
+    varrelid: i32,
+) -> PgResult<f64> {
+    let node_id = run.intern_expr(arg);
+    let vardata = examine_variable(run, node_id, arg, varrelid)?;
+    let selec = if let Some(stats) = &vardata.stats {
+        let freq_null = stats.stanullfrac as f64;
+        if is_null {
+            freq_null
+        } else {
+            1.0 - freq_null
+        }
+    } else if matches!(arg.as_var(), Some(v) if v.varattno < 0) {
+        // System attributes are never NULL (C's varattno < 0 arm).
+        if is_null {
+            0.0
+        } else {
+            1.0
+        }
+    } else if is_null {
+        DEFAULT_UNK_SEL
+    } else {
+        DEFAULT_NOT_UNK_SEL
+    };
+    Ok(clamp_probability(selec))
+}
+
 // scalarltsel/scalarlesel/scalargtsel/scalargesel via scalarineqsel_wrapper
 // (selfuncs.c).
 pub fn scalarineqsel_wrapper<'mcx>(
@@ -331,8 +365,36 @@ pub fn eqsel<'mcx>(
     varrelid: i32,
     collation: u32,
 ) -> PgResult<f64> {
+    eqsel_internal(run, operator, args, varrelid, collation, false)
+}
+
+pub fn neqsel<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    operator: u32,
+    args: &[NodeId],
+    varrelid: i32,
+    collation: u32,
+) -> PgResult<f64> {
+    eqsel_internal(run, operator, args, varrelid, collation, true)
+}
+
+fn eqsel_internal<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    mut operator: u32,
+    args: &[NodeId],
+    varrelid: i32,
+    collation: u32,
+    negate: bool,
+) -> PgResult<f64> {
+    if negate {
+        // Stats probes run against the negator (the equality operator).
+        operator = lsyscache::get_negator(operator)?;
+        if operator == 0 {
+            return Ok(1.0 - DEFAULT_EQ_SEL);
+        }
+    }
     let Some((vardata, other, varonleft)) = get_restriction_variable(run, args, varrelid)? else {
-        return Ok(DEFAULT_EQ_SEL);
+        return Ok(if negate { 1.0 - DEFAULT_EQ_SEL } else { DEFAULT_EQ_SEL });
     };
     let selec = match other.as_const() {
         Some(c) => var_eq_const(
@@ -343,14 +405,15 @@ pub fn eqsel<'mcx>(
             c.constvalue,
             c.constisnull,
             varonleft,
+            negate,
         )?,
-        None => var_eq_non_const(run, &vardata),
+        None => var_eq_non_const(run, &vardata, negate),
     };
     Ok(selec)
 }
 
-// var_eq_non_const (selfuncs.c), negate=false (neqsel is unported).
-fn var_eq_non_const(run: &PlannerRun<'_>, vardata: &VariableStatData<'_>) -> f64 {
+// var_eq_non_const (selfuncs.c).
+fn var_eq_non_const(run: &PlannerRun<'_>, vardata: &VariableStatData<'_>, negate: bool) -> f64 {
     let nullfrac = vardata.nullfrac();
     let selec = if vardata.isunique
         && vardata.rel.is_some_and(|r| run.root.rel(r).tuples >= 1.0)
@@ -373,6 +436,7 @@ fn var_eq_non_const(run: &PlannerRun<'_>, vardata: &VariableStatData<'_>) -> f64
     } else {
         1.0 / get_variable_numdistinct(run, vardata).0
     };
+    let selec = if negate { 1.0 - selec - nullfrac } else { selec };
     clamp_probability(selec)
 }
 fn get_restriction_variable<'mcx>(
@@ -502,7 +566,9 @@ fn var_eq_const<'mcx>(
     constval: Datum,
     constisnull: bool,
     varonleft: bool,
+    negate: bool,
 ) -> PgResult<f64> {
+    // NULL const: strict operator never returns TRUE, even for the negator.
     if constisnull {
         return Ok(0.0);
     }
@@ -557,6 +623,7 @@ fn var_eq_const<'mcx>(
     } else {
         1.0 / get_variable_numdistinct(run, vardata).0
     };
+    let selec = if negate { 1.0 - selec - nullfrac } else { selec };
     Ok(clamp_probability(selec))
 }
 
@@ -1011,8 +1078,20 @@ pub fn estimate_hash_bucket_stats<'mcx>(
 ) -> PgResult<(f64, f64)> {
     let node_id = run.intern_expr(hashkey);
     let vardata = examine_variable(run, node_id, hashkey, 0)?;
-    let (mut ndistinct, _isdefault) = get_variable_numdistinct(run, &vardata);
+    let (mut ndistinct, isdefault) = get_variable_numdistinct(run, &vardata);
     let mcvfreq = 0.0;
+    if isdefault {
+        return Ok((mcvfreq, 0.1f64.max(mcvfreq)));
+    }
+    // stanullfrac is 0 on the no-stats lane; scale ndistinct by the
+    // restriction selectivity as C does.
+    if let Some(rel) = vardata.rel {
+        let (tuples, rows) = (run.root.rel(rel).tuples, run.root.rel(rel).rows);
+        if tuples > 0.0 {
+            ndistinct *= rows / tuples;
+            ndistinct = crate::costsize::clamp_row_est(ndistinct);
+        }
+    }
     if ndistinct <= 0.0 {
         ndistinct = 1.0;
     }

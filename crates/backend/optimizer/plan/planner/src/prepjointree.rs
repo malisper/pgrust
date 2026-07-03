@@ -341,6 +341,287 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>> {
     }
 }
 
+// reduce_outer_joins (prepjointree.c), LEFT/RIGHT slice. FULL never parses;
+// SEMI/ANTI never arise (pull_up_sublinks leaves sublinks as initplans); the
+// LEFT->ANTI reduction target is loud (semi/anti executor lane unported).
+struct RojPass1<'mcx> {
+    relids: types_nodes::Bitmapset<'mcx>,
+    contains_outer: bool,
+    sub_states: mcx::PgVec<'mcx, RojPass1<'mcx>>,
+}
+
+pub fn reduce_outer_joins<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) -> PgResult<()> {
+    let f = parse.jointree.expect("jointree is a FromExpr");
+    let mut state1 = RojPass1 {
+        relids: types_nodes::Bitmapset::empty(),
+        contains_outer: false,
+        sub_states: mcx::PgVec::new_in(mcx),
+    };
+    for child in &f.fromlist {
+        let sub = reduce_outer_joins_pass1(mcx, child)?;
+        state1.relids.add_members(mcx, &sub.relids)?;
+        state1.contains_outer |= sub.contains_outer;
+        state1.sub_states.push(sub);
+    }
+    assert!(state1.contains_outer, "so where are the outer joins?");
+
+    let mut inner_reduced = types_nodes::Bitmapset::empty();
+    let pass_nonnullable = clauses::find_nonnullable_rels(mcx, f.quals)?;
+    let pass_forced = clauses::find_forced_null_vars(mcx, f.quals)?;
+    let mut fromlist = NodeList::nil();
+    for (i, child) in f.fromlist.iter().enumerate() {
+        let sub = &state1.sub_states[i];
+        if sub.contains_outer {
+            fromlist.lappend(
+                mcx,
+                reduce_outer_joins_pass2(
+                    mcx,
+                    parse,
+                    child,
+                    sub,
+                    &mut inner_reduced,
+                    &pass_nonnullable,
+                    &pass_forced,
+                )?,
+            )?;
+        } else {
+            fromlist.lappend(mcx, child)?;
+        }
+    }
+    parse.jointree = Some(mcx::alloc_leak_in(
+        mcx,
+        FromExpr { fromlist, quals: f.quals },
+    )?);
+
+    if !inner_reduced.is_empty() {
+        remove_nulling_relids(parse, &inner_reduced)?;
+    }
+    Ok(())
+}
+
+fn reduce_outer_joins_pass1<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<RojPass1<'mcx>> {
+    let mut result = RojPass1 {
+        relids: types_nodes::Bitmapset::empty(),
+        contains_outer: false,
+        sub_states: mcx::PgVec::new_in(mcx),
+    };
+    match node.node_tag() {
+        NodeTag::T_RangeTblRef => {
+            result.relids.add_member(mcx, node.as_range_tbl_ref().unwrap().rtindex)?;
+        }
+        NodeTag::T_JoinExpr => {
+            let j = node.as_join_expr().unwrap();
+            if j.jointype.is_outer_join() {
+                result.contains_outer = true;
+            }
+            for arg in [j.larg, j.rarg] {
+                let sub = reduce_outer_joins_pass1(mcx, arg)?;
+                result.relids.add_members(mcx, &sub.relids)?;
+                result.contains_outer |= sub.contains_outer;
+                result.sub_states.push(sub);
+            }
+        }
+        other => panic!("reduce_outer_joins_pass1 (prepjointree.c): {other:?}"),
+    }
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reduce_outer_joins_pass2<'mcx>(
+    mcx: Mcx<'mcx>,
+    parse: &Query<'mcx>,
+    node: Node<'mcx>,
+    state1: &RojPass1<'mcx>,
+    inner_reduced: &mut types_nodes::Bitmapset<'mcx>,
+    nonnullable_rels: &types_nodes::Bitmapset<'mcx>,
+    forced_null_vars: &clauses::MultiBitmapset<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let j = node
+        .as_join_expr()
+        .unwrap_or_else(|| panic!("reduce_outer_joins_pass2: reached {:?}", node.node_tag()));
+    let rtindex = j.rtindex;
+    let mut jointype = j.jointype;
+    let (mut larg, mut rarg) = (j.larg, j.rarg);
+    let mut left_ix = 0usize;
+    let mut right_ix = 1usize;
+
+    match jointype {
+        types_nodes::JoinType::JOIN_INNER => {}
+        types_nodes::JoinType::JOIN_LEFT => {
+            if nonnullable_rels.overlap(&state1.sub_states[1].relids) {
+                jointype = types_nodes::JoinType::JOIN_INNER;
+            }
+        }
+        types_nodes::JoinType::JOIN_RIGHT => {
+            if nonnullable_rels.overlap(&state1.sub_states[0].relids) {
+                jointype = types_nodes::JoinType::JOIN_INNER;
+            }
+        }
+        other => panic!(
+            "reduce_outer_joins_pass2 (prepjointree.c): {other:?}; join-outer lane covers \
+             LEFT/RIGHT only"
+        ),
+    }
+
+    // JOIN_RIGHT -> JOIN_LEFT by swapping inputs.
+    if jointype == types_nodes::JoinType::JOIN_RIGHT {
+        core::mem::swap(&mut larg, &mut rarg);
+        jointype = types_nodes::JoinType::JOIN_LEFT;
+        left_ix = 1;
+        right_ix = 0;
+    }
+
+    if jointype == types_nodes::JoinType::JOIN_LEFT {
+        let nonnullable_vars = clauses::find_nonnullable_vars(mcx, j.quals)?;
+        let overlap = clauses::mbms_overlap_sets(mcx, &nonnullable_vars, forced_null_vars)?;
+        if overlap.overlap(&state1.sub_states[right_ix].relids) {
+            panic!(
+                "reduce_outer_joins_pass2 (prepjointree.c): LEFT -> ANTI reduction; \
+                 semi/anti-join lane unported"
+            );
+        }
+    }
+
+    if rtindex != 0 && jointype != j.jointype {
+        let rte_node = parse.rtable.nth(rtindex as usize - 1);
+        let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+        debug_assert_eq!(rte.rtekind, RTEKind::RTE_JOIN);
+        debug_assert_eq!(rte.jointype, j.jointype);
+        // SAFETY: pre-seal tree owned by this planner invocation; the shared
+        // borrow is not read past this write.
+        unsafe { rte_node.with_mut::<RangeTblEntry, _>(|r| r.jointype = jointype) };
+        if jointype == types_nodes::JoinType::JOIN_INNER {
+            inner_reduced.add_member(mcx, rtindex)?;
+        }
+    }
+
+    let left_state = &state1.sub_states[left_ix];
+    let right_state = &state1.sub_states[right_ix];
+    if left_state.contains_outer || right_state.contains_outer {
+        // INNER passes local+upper constraints down; LEFT passes upper to the
+        // outer side and local to the nullable side (C's comment block).
+        let mut local_nonnullable = clauses::find_nonnullable_rels(mcx, j.quals)?;
+        let mut local_forced = clauses::find_forced_null_vars(mcx, j.quals)?;
+        if jointype == types_nodes::JoinType::JOIN_INNER {
+            local_nonnullable.add_members(mcx, nonnullable_rels)?;
+            clauses::mbms_add_members(mcx, &mut local_forced, forced_null_vars)?;
+        }
+
+        if left_state.contains_outer {
+            let (nn, fv) = if jointype == types_nodes::JoinType::JOIN_INNER {
+                (&local_nonnullable, &local_forced)
+            } else {
+                (nonnullable_rels, forced_null_vars)
+            };
+            larg = reduce_outer_joins_pass2(mcx, parse, larg, left_state, inner_reduced, nn, fv)?;
+        }
+        if right_state.contains_outer {
+            rarg = reduce_outer_joins_pass2(
+                mcx,
+                parse,
+                rarg,
+                right_state,
+                inner_reduced,
+                &local_nonnullable,
+                &local_forced,
+            )?;
+        }
+    }
+
+    Node::mk(
+        mcx,
+        types_nodes::JoinExpr {
+            jointype,
+            isNatural: j.isNatural,
+            larg,
+            rarg,
+            usingClause: j.usingClause.clone_in(mcx)?,
+            join_using_alias: j.join_using_alias,
+            quals: j.quals,
+            alias: j.alias,
+            rtindex: j.rtindex,
+        },
+    )
+}
+
+// remove_nulling_relids (rewriteManip.c), level-0 in-place form: strips the
+// reduced joins' bits from every Var reachable at this query level. Sublevel
+// Vars referencing these joins imply correlation, which is loud downstream.
+fn remove_nulling_relids<'mcx>(
+    parse: &Query<'mcx>,
+    removable: &types_nodes::Bitmapset<'mcx>,
+) -> PgResult<()> {
+    use nodes_core::NodeWalker;
+    struct W<'a, 'x> {
+        removable: &'a types_nodes::Bitmapset<'x>,
+    }
+    impl<'mcx> nodes_core::NodeWalker<'mcx> for W<'_, '_> {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            match node.node_tag() {
+                NodeTag::T_Var => {
+                    let v = node.as_var().unwrap();
+                    if v.varlevelsup == 0 && v.varnullingrels.overlap(self.removable) {
+                        // SAFETY: pre-seal tree owned by this planner
+                        // invocation; the shared borrow ends before the write.
+                        unsafe {
+                            node.with_mut::<Var, _>(|v| {
+                                v.varnullingrels.del_members(self.removable)
+                            })
+                        };
+                    }
+                    Ok(false)
+                }
+                NodeTag::T_SubLink | NodeTag::T_Query => Ok(false),
+                NodeTag::T_PlaceHolderVar => {
+                    panic!("remove_nulling_relids_mutator (rewriteManip.c): PlaceHolderVar")
+                }
+                _ => nodes_core::expression_tree_walker(node, self),
+            }
+        }
+    }
+    fn walk_jt<'mcx>(node: Node<'mcx>, w: &mut impl nodes_core::NodeWalker<'mcx>) -> PgResult<()> {
+        match node.node_tag() {
+            NodeTag::T_RangeTblRef => {}
+            NodeTag::T_JoinExpr => {
+                let j = node.as_join_expr().unwrap();
+                walk_jt(j.larg, w)?;
+                walk_jt(j.rarg, w)?;
+                if let Some(q) = j.quals {
+                    w.visit(q)?;
+                }
+            }
+            other => panic!("remove_nulling_relids: {other:?} jointree arm"),
+        }
+        Ok(())
+    }
+    let mut w = W { removable };
+    // query_tree_walker needs &'mcx Query; the parse is still a pre-seal
+    // local, so walk its expression-bearing fields directly.
+    for te in &parse.targetList {
+        w.visit(te)?;
+    }
+    for te in &parse.returningList {
+        w.visit(te)?;
+    }
+    if let Some(h) = parse.havingQual {
+        w.visit(h)?;
+    }
+    if let Some(n) = parse.limitOffset {
+        w.visit(n)?;
+    }
+    if let Some(n) = parse.limitCount {
+        w.visit(n)?;
+    }
+    let f = parse.jointree.expect("jointree is a FromExpr");
+    for item in &f.fromlist {
+        walk_jt(item, &mut w)?;
+    }
+    if let Some(q) = f.quals {
+        w.visit(q)?;
+    }
+    Ok(())
+}
+
 #[cold]
 #[inline(never)]
 fn missing_attribute(attno: i16) -> Box<PgError> {

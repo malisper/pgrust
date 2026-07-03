@@ -35,6 +35,7 @@ nodebitmapindexscan = { path = "../nodebitmapindexscan" }
 nodebitmapheapscan = { path = "../nodebitmapheapscan" }
 tidbitmap = { path = "../../nodes/tidbitmap" }
 nodeagg = { path = "../nodeagg" }
+nodematerial = { path = "../nodematerial" }
 nodesort = { path = "../nodesort" }
 nodeunique = { path = "../nodeunique" }
 nodelimit = { path = "../nodelimit" }

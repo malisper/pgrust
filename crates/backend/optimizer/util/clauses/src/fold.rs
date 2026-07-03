@@ -206,7 +206,7 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
             }
             if o.opno == BOOLEAN_EQUAL_OPERATOR || o.opno == BOOLEAN_NOT_EQUAL_OPERATOR {
                 let args = new_args.as_ref().unwrap_or(&o.args);
-                if let Some(simple) = simplify_boolean_equality(o.opno, args) {
+                if let Some(simple) = simplify_boolean_equality(cx.mcx, o.opno, args)? {
                     return Ok(Some(simple));
                 }
             }
@@ -712,6 +712,8 @@ fn simplify_bool_arguments<'mcx>(
     Ok(false)
 }
 
+// negate_clause (prepqual.c): C's unlisted tags fall through to an explicit
+// NOT; tags C simplifies but this vocabulary lacks stay loud above.
 fn negate_clause<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>> {
     match node.node_tag() {
         NodeTag::T_Const => {
@@ -722,14 +724,78 @@ fn negate_clause<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>>
             }
             make_bool_const(mcx, !c.constvalue.as_bool(), false)
         }
-        other => panic!(
-            "negate_clause (prepqual.c): arm for {other:?} unported — \
+        NodeTag::T_OpExpr => {
+            let o = node.as_op_expr().unwrap();
+            let negator = lsyscache::get_negator(o.opno)?;
+            if negator != InvalidOid {
+                // C leaves opfuncid InvalidOid for set_opfuncid's lazy memo
+                // write-back; sealed shared nodes can't take the memo, so the
+                // same get_opcode probe runs here instead.
+                return Node::mk(
+                    mcx,
+                    OpExpr {
+                        opno: negator,
+                        opfuncid: lsyscache::get_opcode(negator)?,
+                        opresulttype: o.opresulttype,
+                        opretset: o.opretset,
+                        opcollid: o.opcollid,
+                        inputcollid: o.inputcollid,
+                        args: o.args.clone_in(mcx)?,
+                        location: o.location,
+                    },
+                );
+            }
+            crate::classify::make_notclause(mcx, node)
+        }
+        NodeTag::T_BoolExpr => {
+            let b = node.as_bool_expr().unwrap();
+            match b.boolop {
+                // NOT over AND/OR: the negated args can't yield same-op
+                // BoolExprs (recursion already simplified), so flatness holds
+                // without pull_ands/pull_ors (C's argument verbatim).
+                BoolExprType::AND_EXPR | BoolExprType::OR_EXPR => {
+                    let mut nargs = NodeList::nil();
+                    for arg in &b.args {
+                        nargs.lappend(mcx, negate_clause(mcx, arg)?)?;
+                    }
+                    if b.boolop == BoolExprType::AND_EXPR {
+                        crate::classify::make_orclause(mcx, nargs)
+                    } else {
+                        crate::classify::make_andclause(mcx, nargs)
+                    }
+                }
+                BoolExprType::NOT_EXPR => Ok(b.args.nth(0)),
+            }
+        }
+        NodeTag::T_NullTest => {
+            let nt = node.as_null_test().unwrap();
+            if !nt.argisrow {
+                use types_nodes::primnodes::{NullTest, NullTestType};
+                return Node::mk(
+                    mcx,
+                    NullTest {
+                        arg: nt.arg,
+                        nulltesttype: if nt.nulltesttype == NullTestType::IS_NULL {
+                            NullTestType::IS_NOT_NULL
+                        } else {
+                            NullTestType::IS_NULL
+                        },
+                        argisrow: false,
+                        location: nt.location,
+                    },
+                );
+            }
+            crate::classify::make_notclause(mcx, node)
+        }
+        other @ (NodeTag::T_ScalarArrayOpExpr | NodeTag::T_BooleanTest) => panic!(
+            "negate_clause (prepqual.c): {other:?} simplification unported — \
              unit backend-optimizer-prep-prepqual"
         ),
+        _ => crate::classify::make_notclause(mcx, node),
     }
 }
 
-fn make_bool_const<'mcx>(mcx: Mcx<'mcx>, value: bool, isnull: bool) -> PgResult<Node<'mcx>> {
+pub fn make_bool_const<'mcx>(mcx: Mcx<'mcx>, value: bool, isnull: bool) -> PgResult<Node<'mcx>> {
     Node::mk(
         mcx,
         Const {
@@ -759,29 +825,32 @@ fn coerce_arg_type(node: Node<'_>) -> Oid {
     }
 }
 
-/// Reduce "x = true" to "x", "x <> false" to "x"; the NOT-wrapping legs
-/// need negate_clause + BoolExpr vocabulary — deferred loud.
-fn simplify_boolean_equality<'mcx>(opno: Oid, args: &NodeList<'mcx>) -> Option<Node<'mcx>> {
+/// Reduce "x = true" to "x", "x = false" to NOT x (ditto <>, inverted).
+fn simplify_boolean_equality<'mcx>(
+    mcx: Mcx<'mcx>,
+    opno: Oid,
+    args: &NodeList<'mcx>,
+) -> PgResult<Option<Node<'mcx>>> {
     debug_assert_eq!(args.len(), 2);
     let (leftop, rightop) = (args.nth(0), args.nth(1));
     let eq = opno == BOOLEAN_EQUAL_OPERATOR;
     if let Some(c) = leftop.as_const() {
         debug_assert!(!c.constisnull);
-        return if c.constvalue.as_bool() == eq {
-            Some(rightop)
+        return Ok(Some(if c.constvalue.as_bool() == eq {
+            rightop
         } else {
-            panic!("simplify_boolean_equality deferred: negate_clause (prepqual) unported");
-        };
+            negate_clause(mcx, rightop)?
+        }));
     }
     if let Some(c) = rightop.as_const() {
         debug_assert!(!c.constisnull);
-        return if c.constvalue.as_bool() == eq {
-            Some(leftop)
+        return Ok(Some(if c.constvalue.as_bool() == eq {
+            leftop
         } else {
-            panic!("simplify_boolean_equality deferred: negate_clause (prepqual) unported");
-        };
+            negate_clause(mcx, leftop)?
+        }));
     }
-    None
+    Ok(None)
 }
 
 /// ece_all_arguments_const: no non-Const among the node's children.
