@@ -891,7 +891,7 @@ fn dml_insert_extends_stamps_and_logs() {
     let _ = take_xlog();
 
     let mut tup = make_writable_tuple(&tuple_image(0, 0, 41));
-    dml::heap_insert(&rel, &mut tup, 7, 0).unwrap();
+    dml::heap_insert(&rel, &mut tup, 7, 0, None).unwrap();
     assert_eq!(tup.t_self, ItemPointerData::new(0, 1));
 
     let stored = page_tuple_at(oid, 0, 1);
@@ -901,7 +901,7 @@ fn dml_insert_extends_stamps_and_logs() {
     assert_eq!(stored.t_data().t_ctid, tup.t_self);
 
     let mut tup2 = make_writable_tuple(&tuple_image(0, 0, 42));
-    dml::heap_insert(&rel, &mut tup2, 7, 0).unwrap();
+    dml::heap_insert(&rel, &mut tup2, 7, 0, None).unwrap();
     assert_eq!(tup2.t_self, ItemPointerData::new(0, 2));
 
     let recs = take_xlog();
@@ -1185,7 +1185,7 @@ fn dml_speculative_insert_finish() {
 
     let mut tup = make_writable_tuple(&tuple_image(0, 0, 41));
     tup.t_data_mut().set_speculative_token(7);
-    dml::heap_insert(&rel, &mut tup, 7, hio::HEAP_INSERT_SPECULATIVE).unwrap();
+    dml::heap_insert(&rel, &mut tup, 7, hio::HEAP_INSERT_SPECULATIVE, None).unwrap();
     let tid = tup.t_self;
 
     let stored = page_tuple_at(oid, 0, 1);
@@ -1222,7 +1222,7 @@ fn dml_speculative_insert_abort_super_deletes() {
 
     let mut tup = make_writable_tuple(&tuple_image(0, 0, 41));
     tup.t_data_mut().set_speculative_token(9);
-    dml::heap_insert(&rel, &mut tup, 7, hio::HEAP_INSERT_SPECULATIVE).unwrap();
+    dml::heap_insert(&rel, &mut tup, 7, hio::HEAP_INSERT_SPECULATIVE, None).unwrap();
     let tid = tup.t_self;
     let _ = take_xlog();
 

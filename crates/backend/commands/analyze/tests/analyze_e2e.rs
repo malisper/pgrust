@@ -779,7 +779,7 @@ fn insert_rows() {
         let values = [Datum::from_i32(v), Datum::from_i32(g)];
         let nulls = [false, false];
         let mut tup = heaptuple::heap_form_tuple(mcx, rel.descr(), &values, &nulls).unwrap();
-        heapam::simple_heap_insert(&rel, tup.as_tuple_mut()).unwrap();
+        heapam::simple_heap_insert(&rel, tup.as_tuple_mut(), None).unwrap();
     }
     table::table_close(rel, 3).unwrap();
     xact::CommitTransactionCommand().unwrap();

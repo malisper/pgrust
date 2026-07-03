@@ -683,6 +683,23 @@ fn dispatch_switch<'mcx>(
                 }
             }
         }
+        T_CreateTableAsStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::CreateTableAsStmt>()
+                .expect("CreateTableAsStmt");
+            commands_createas::ExecCreateTableAs(
+                mcx,
+                stmt,
+                source_text,
+                params,
+                query_env,
+                qc.as_deref_mut(),
+            )?;
+        }
         T_CreateSeqStmt => {
             let stmt_node =
                 unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };

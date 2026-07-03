@@ -125,6 +125,7 @@ tcop_dest = { path = "../../backend/tcop/dest" }
 postgres = { path = "../../backend/tcop/postgres" }
 pquery = { path = "../../backend/tcop/pquery" }
 explain = { path = "../../backend/commands/explain" }
+commands_createas = { path = "../../backend/commands/createas" }
 prepare = { path = "../../backend/commands/prepare" }
 commands_async = { path = "../../backend/commands/commands_async" }
 portalcmds = { path = "../../backend/commands/portalcmds" }
