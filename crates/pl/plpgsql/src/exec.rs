@@ -48,7 +48,7 @@ pub(crate) struct Ctx(*mut MemoryContext);
 
 impl Ctx {
     pub fn new(name: &'static str) -> Ctx {
-        Ctx(Box::into_raw(Box::new(MemoryContext::new(name))))
+        Ctx(Box::into_raw(Box::new(MemoryContext::new_bump(name))))
     }
     pub fn mcx(&self) -> Mcx<'static> {
         // SAFETY: reclaimed only in Drop; handles do not outlive the estate.
