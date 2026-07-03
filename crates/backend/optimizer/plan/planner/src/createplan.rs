@@ -571,7 +571,7 @@ fn ios_indextlist_copy<'mcx>(
     let mcx = run.mcx;
     let index = {
         let PathNode::IndexPath(p) = run.root.path(best_path) else { unreachable!() };
-        std::rc::Rc::clone(p.indexinfo.as_ref().expect("indexinfo set"))
+        *p.indexinfo.as_ref().expect("indexinfo set")
     };
     let mut tlist = NodeList::nil();
     for (i, &tle_id) in index.indextlist.iter().enumerate() {
