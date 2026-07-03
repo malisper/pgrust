@@ -795,6 +795,97 @@ mod from_where {
     }
 
     #[test]
+    fn insert_values_end_to_end() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "INSERT INTO t VALUES (1, 'foo')").unwrap();
+        assert_eq!(q.commandType, CmdType::CMD_INSERT);
+        assert_eq!(q.resultRelation, 1);
+        assert_eq!(q.rtable.len(), 1);
+        let rte = q.rtable.nth(0).as_range_tbl_entry().unwrap();
+        assert_eq!(rte.rtekind, RTEKind::RTE_RELATION);
+        assert_eq!(rte.relid, T_OID);
+        assert_eq!(rte.rellockmode, types_rel::RowExclusiveLock);
+        assert!(!rte.inh && !rte.inFromCl);
+        assert!(q.jointree.unwrap().fromlist.is_nil());
+
+        assert_eq!(q.targetList.len(), 2);
+        let te0 = q.targetList.nth(0).as_target_entry().unwrap();
+        assert_eq!((te0.resno, te0.resname), (1, Some("x")));
+        let c0 = te0.expr.as_const().unwrap();
+        assert_eq!((c0.consttype, c0.constvalue.as_i32()), (INT4OID, 1));
+        let te1 = q.targetList.nth(1).as_target_entry().unwrap();
+        assert_eq!((te1.resno, te1.resname), (2, Some("y")));
+        // 'foo' (unknown) is coerced to the column type text.
+        assert_eq!(parse_expr::expr_type(te1.expr), TEXTOID);
+
+        let perminfo = q.rteperminfos.nth(0).as_rte_permission_info().unwrap();
+        assert_eq!(perminfo.requiredPerms, types_nodes::parsenodes::ACL_INSERT);
+        assert!(perminfo.insertedCols.is_member(1 - FirstLowInvalidHeapAttributeNumber));
+        assert!(perminfo.insertedCols.is_member(2 - FirstLowInvalidHeapAttributeNumber));
+    }
+
+    #[test]
+    fn insert_multi_row_values_builds_values_rte() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "INSERT INTO t (x) VALUES (1), (2)").unwrap();
+        assert_eq!(q.commandType, CmdType::CMD_INSERT);
+        assert_eq!(q.resultRelation, 1);
+        assert_eq!(q.rtable.len(), 2);
+        let vrte = q.rtable.nth(1).as_range_tbl_entry().unwrap();
+        assert_eq!(vrte.rtekind, RTEKind::RTE_VALUES);
+        assert_eq!(vrte.values_lists.len(), 2);
+        assert_eq!(vrte.eref.unwrap().aliasname, Some("*VALUES*"));
+        assert_eq!(vrte.coltypes.nth(0), INT4OID);
+        assert_eq!(q.jointree.unwrap().fromlist.len(), 1);
+
+        assert_eq!(q.targetList.len(), 1);
+        let te = q.targetList.nth(0).as_target_entry().unwrap();
+        assert_eq!((te.resno, te.resname), (1, Some("x")));
+        let var = te.expr.as_var().unwrap();
+        assert_eq!((var.varno, var.varattno, var.vartype), (2, 1, INT4OID));
+    }
+
+    #[test]
+    fn insert_default_values_yields_empty_targetlist() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "INSERT INTO t DEFAULT VALUES").unwrap();
+        assert_eq!(q.commandType, CmdType::CMD_INSERT);
+        assert!(q.targetList.is_nil());
+    }
+
+    #[test]
+    fn insert_error_shapes() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(mcx, "INSERT INTO t VALUES (1, 'a', 3)").map(|_| ()).unwrap_err();
+        assert_eq!(err.message, "INSERT has more expressions than target columns");
+
+        let err = analyze_sql(mcx, "INSERT INTO t (x, y) VALUES (1)").map(|_| ()).unwrap_err();
+        assert_eq!(err.message, "INSERT has more target columns than expressions");
+
+        let err = analyze_sql(mcx, "INSERT INTO t (nope) VALUES (1)").map(|_| ()).unwrap_err();
+        assert_eq!(err.message, "column \"nope\" of relation \"t\" does not exist");
+
+        let err = analyze_sql(mcx, "INSERT INTO t (x, x) VALUES (1, 2)").map(|_| ()).unwrap_err();
+        assert_eq!(err.message, "column \"x\" specified more than once");
+
+        let err =
+            analyze_sql(mcx, "INSERT INTO t (x) VALUES (1), (2, 3)").map(|_| ()).unwrap_err();
+        assert_eq!(err.message, "VALUES lists must all be the same length");
+    }
+
+    #[test]
     fn missing_table_is_42p01_with_position() {
         install();
         let ctx = MemoryContext::new("t");

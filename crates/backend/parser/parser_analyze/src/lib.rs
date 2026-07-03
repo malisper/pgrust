@@ -152,8 +152,10 @@ pub fn transformStmt<'mcx>(
                 );
             }
         }
-        t @ (NodeTag::T_InsertStmt
-        | NodeTag::T_DeleteStmt
+        NodeTag::T_InsertStmt => {
+            transformInsertStmt(mcx, pstate, parse_tree.as_insert_stmt().unwrap())?
+        }
+        t @ (NodeTag::T_DeleteStmt
         | NodeTag::T_UpdateStmt
         | NodeTag::T_MergeStmt
         | NodeTag::T_ReturnStmt
@@ -338,4 +340,261 @@ fn transformSelectStmt<'mcx>(
     }
 
     Ok(qry)
+}
+
+fn transformInsertStmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    stmt: &types_nodes::InsertStmt<'mcx>,
+) -> PgResult<Query<'mcx>> {
+    use types_nodes::parsenodes::ACL_INSERT;
+
+    let mut qry = Query::default();
+    debug_assert!(pstate.p_ctenamespace.is_nil());
+    qry.commandType = CmdType::CMD_INSERT;
+    pstate.p_is_insert = true;
+
+    if stmt.withClause.is_some() {
+        panic!(
+            "transformInsertStmt (analyze.c): transformWithClause (parse_cte.c) \
+             unported — unit backend-parser-medium1"
+        );
+    }
+    qry.r#override = stmt.r#override;
+    if stmt.onConflictClause.is_some() {
+        panic!(
+            "transformInsertStmt (analyze.c): transformOnConflictClause unported — \
+             unit backend-parser-analyze"
+        );
+    }
+
+    let select_stmt = stmt.selectStmt.map(|n| n.as_select_stmt().expect("grammar builds SelectStmt"));
+    let is_general_select = select_stmt.is_some_and(|s| {
+        s.valuesLists.is_nil()
+            || !s.sortClause.is_nil()
+            || s.limitOffset.is_some()
+            || s.limitCount.is_some()
+            || !s.lockingClause.is_nil()
+            || s.withClause.is_some()
+    });
+    if is_general_select {
+        panic!(
+            "transformInsertStmt (analyze.c): INSERT ... SELECT arm \
+             (sub-pstate + addRangeTableEntryForSubquery) unported — \
+             unit backend-parser-analyze"
+        );
+    }
+    // The CREATE RULE rtable pass-down only matters for isGeneralSelect.
+    debug_assert!(pstate.p_rtable.is_nil());
+
+    let relation = stmt
+        .relation
+        .expect("grammar always sets InsertStmt.relation")
+        .as_range_var()
+        .expect("insert_target is a RangeVar");
+    qry.resultRelation =
+        parse_clause::setTargetTable(mcx, pstate, relation, false, false, ACL_INSERT)?;
+
+    let (icolumns, attrnos) = parse_target::checkInsertTargets(mcx, pstate, &stmt.cols)?;
+    debug_assert_eq!(icolumns.len(), attrnos.len());
+
+    let expr_list: types_nodes::NodeList<'mcx> = match select_stmt {
+        None => types_nodes::NodeList::nil(),
+        Some(sel) if sel.valuesLists.len() > 1 => {
+            let mut exprs_lists = types_nodes::NodeList::nil();
+            let mut coltypes = types_nodes::list::OidList::nil();
+            let mut coltypmods = types_nodes::list::IntList::nil();
+            let mut colcollations = types_nodes::list::OidList::nil();
+            let mut sublist_length: i64 = -1;
+            for sublist_node in &sel.valuesLists {
+                let sublist = sublist_node.as_list().expect("VALUES row is a List");
+                let sublist = parse_target::transformExpressionList(
+                    mcx,
+                    pstate,
+                    sublist,
+                    ParseExprKind::EXPR_KIND_VALUES,
+                    true,
+                )?;
+                if sublist_length < 0 {
+                    sublist_length = sublist.len() as i64;
+                } else if sublist_length != sublist.len() as i64 {
+                    return Err(values_length_mismatch(pstate, &sublist));
+                }
+                let sublist =
+                    transformInsertRow(mcx, pstate, sublist, &stmt.cols, &icolumns, &attrnos, true)?;
+                parse_collate::assign_list_collations(mcx, pstate, &sublist)?;
+                exprs_lists.lappend(mcx, Node::mk_list(mcx, sublist)?)?;
+            }
+
+            for val in exprs_lists.nth(0).as_list().expect("row list").iter() {
+                coltypes.lappend(mcx, parse_expr::expr_type(val))?;
+                coltypmods.lappend(mcx, parse_expr::expr_typmod(val))?;
+                colcollations.lappend(mcx, 0)?;
+            }
+
+            // contain_vars_of_level lateral marking only fires inside CREATE
+            // RULE (NEW/OLD in the rtable); the target rel is the only RTE.
+            debug_assert_eq!(pstate.p_rtable.len(), 1);
+            let nsitem = parse_relation::addRangeTableEntryForValues(
+                mcx,
+                pstate,
+                exprs_lists,
+                coltypes,
+                coltypmods,
+                colcollations,
+                None,
+                false,
+                true,
+            )?;
+            let (vars, _names) = parse_relation::expandNSItemVars(mcx, pstate, nsitem, 0, -1)?;
+            parse_relation::addNSItemToQuery(mcx, pstate, nsitem, true, false, false)?;
+            transformInsertRow(mcx, pstate, vars, &stmt.cols, &icolumns, &attrnos, false)?
+        }
+        Some(sel) => {
+            debug_assert_eq!(sel.valuesLists.len(), 1);
+            debug_assert!(sel.intoClause.is_none());
+            let values = sel.valuesLists.nth(0).as_list().expect("VALUES row is a List");
+            let expr_list = parse_target::transformExpressionList(
+                mcx,
+                pstate,
+                values,
+                ParseExprKind::EXPR_KIND_VALUES_SINGLE,
+                true,
+            )?;
+            transformInsertRow(mcx, pstate, expr_list, &stmt.cols, &icolumns, &attrnos, false)?
+        }
+    };
+
+    let perminfo = pstate
+        .p_target_nsitem
+        .expect("setTargetTable set p_target_nsitem")
+        .p_perminfo
+        .expect("target nsitem has perminfo");
+    debug_assert!(expr_list.len() <= icolumns.len());
+    let mut target_list = types_nodes::NodeList::nil();
+    for (i, (expr, icol)) in expr_list.iter().zip(icolumns.iter()).enumerate() {
+        let col = icol.as_res_target().expect("icolumns are ResTargets");
+        let attr_num = attrnos[i] as i16;
+        let tle = Node::mk_target_entry(mcx, expr, attr_num, col.name, false)?;
+        target_list.lappend(mcx, tle)?;
+        // SAFETY: perminfo nodes are read only through transient as_*
+        // lookups; no derived reference is live across this write.
+        unsafe {
+            perminfo.with_mut::<types_nodes::RTEPermissionInfo, _>(|p| {
+                p.insertedCols.add_member(
+                    mcx,
+                    attr_num as i32 - types_tuple::htup::FirstLowInvalidHeapAttributeNumber,
+                )
+            })
+        }
+        .expect("p_perminfo is RTEPermissionInfo")?;
+    }
+    qry.targetList = target_list;
+
+    if stmt.returningClause.is_some() {
+        panic!(
+            "transformInsertStmt (analyze.c): transformReturningClause unported — \
+             unit backend-parser-analyze"
+        );
+    }
+
+    qry.rtable = mem::take(&mut pstate.p_rtable);
+    qry.rteperminfos = mem::take(&mut pstate.p_rteperminfos);
+    qry.jointree = Some(
+        Node::mk_mut(mcx, FromExpr { fromlist: mem::take(&mut pstate.p_joinlist), quals: None })?
+            .seal_ref(),
+    );
+    qry.hasTargetSRFs = pstate.p_hasTargetSRFs;
+    qry.hasSubLinks = pstate.p_hasSubLinks;
+
+    assign_query_collations(mcx, pstate, &qry)?;
+    Ok(qry)
+}
+
+// C transformInsertRow (analyze.c). strip_indirection is inert: FieldStore/
+// SubscriptingRef construction panics upstream (transformAssignedExpr).
+fn transformInsertRow<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    exprlist: types_nodes::NodeList<'mcx>,
+    stmtcols: &types_nodes::NodeList<'mcx>,
+    icolumns: &types_nodes::NodeList<'mcx>,
+    attrnos: &[i32],
+    strip_indirection: bool,
+) -> PgResult<types_nodes::NodeList<'mcx>> {
+    let _ = strip_indirection;
+    if exprlist.len() > icolumns.len() {
+        return Err(insert_row_length_error(
+            pstate,
+            "INSERT has more expressions than target columns",
+            parse_expr::expr_location(exprlist.nth(icolumns.len())),
+        ));
+    }
+    if !stmtcols.is_nil() && exprlist.len() < icolumns.len() {
+        let col = icolumns.nth(exprlist.len()).as_res_target().expect("ResTarget");
+        return Err(insert_row_length_error(
+            pstate,
+            "INSERT has more target columns than expressions",
+            col.location,
+        ));
+    }
+
+    let mut result = types_nodes::NodeList::nil();
+    for (i, (expr, icol)) in exprlist.iter().zip(icolumns.iter()).enumerate() {
+        let col = icol.as_res_target().expect("icolumns are ResTargets");
+        let expr = parse_target::transformAssignedExpr(
+            mcx,
+            pstate,
+            expr,
+            ParseExprKind::EXPR_KIND_INSERT_TARGET,
+            col.name,
+            attrnos[i],
+            &col.indirection,
+            col.location,
+        )?;
+        result.lappend(mcx, expr)?;
+    }
+    Ok(result)
+}
+
+#[cold]
+fn insert_row_length_error(
+    pstate: &ParseState<'_, '_>,
+    msg: &str,
+    location: i32,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg(msg.to_string())
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("analyze.c", 0, "transformInsertRow")),
+    )
+}
+
+#[cold]
+fn values_length_mismatch(
+    pstate: &ParseState<'_, '_>,
+    sublist: &types_nodes::NodeList<'_>,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, ERROR};
+    let location = sublist.iter().next().map(parse_expr::expr_location).unwrap_or(-1);
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg("VALUES lists must all be the same length".to_string())
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("analyze.c", 0, "transformInsertStmt")),
+    )
 }
