@@ -565,17 +565,93 @@ fn node(out: &mut String, n: Node<'_>) {
         string_field(out, "cooked_expr", c.cooked_expr);
         char_field(out, "generated_when", 0);
         char_field(out, "generated_kind", 0);
-        bool_field(out, "nulls_not_distinct", false);
+        bool_field(out, "nulls_not_distinct", c.nulls_not_distinct);
         list_field(out, "keys", &c.keys);
         bool_field(out, "without_overlaps", false);
-        out.push_str(" :including <> :exclusions <> :options <> :indexname <> :indexspace <>");
+        list_field(out, "including", &c.including);
+        out.push_str(" :exclusions <>");
+        list_field(out, "options", &c.options);
+        string_field(out, "indexname", c.indexname);
+        string_field(out, "indexspace", c.indexspace);
         bool_field(out, "reset_default_tblspc", false);
-        out.push_str(" :access_method <> :where_clause <> :pktable <> :fk_attrs <> :pk_attrs <>");
-        bool_field(out, "fk_with_period", false);
-        bool_field(out, "pk_with_period", false);
-        out.push_str(" :fk_matchtype <> :fk_upd_action <> :fk_del_action <> :fk_del_set_cols <> :old_conpfeqop <>");
-        int_field(out, "old_pktable_oid", 0);
+        out.push_str(" :access_method <> :where_clause <> :pktable ");
+        match c.pktable {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        list_field(out, "fk_attrs", &c.fk_attrs);
+        list_field(out, "pk_attrs", &c.pk_attrs);
+        bool_field(out, "fk_with_period", c.fk_with_period);
+        bool_field(out, "pk_with_period", c.pk_with_period);
+        char_field(out, "fk_matchtype", c.fk_matchtype);
+        char_field(out, "fk_upd_action", c.fk_upd_action);
+        char_field(out, "fk_del_action", c.fk_del_action);
+        list_field(out, "fk_del_set_cols", &c.fk_del_set_cols);
+        list_field(out, "old_conpfeqop", &c.old_conpfeqop);
+        int_field(out, "old_pktable_oid", c.old_pktable_oid as i32);
         int_field(out, "location", c.location);
+        out.push('}');
+    } else if let Some(st) = n.as_string() {
+        out.push('"');
+        if !st.sval.is_empty() {
+            out_token(out, Some(st.sval));
+        }
+        out.push('"');
+    } else if let Some(cs) = n.as_variant::<types_nodes::rawnodes::CreateStmt>() {
+        out.push_str("{CREATESTMT :relation ");
+        match cs.relation {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        list_field(out, "tableElts", &cs.tableElts);
+        list_field(out, "inhRelations", &cs.inhRelations);
+        node_field(out, "partbound", cs.partbound);
+        node_field(out, "partspec", cs.partspec);
+        node_field(out, "ofTypename", cs.ofTypename);
+        list_field(out, "constraints", &cs.constraints);
+        list_field(out, "nnconstraints", &cs.nnconstraints);
+        list_field(out, "options", &cs.options);
+        int_field(out, "oncommit", cs.oncommit as i32);
+        string_field(out, "tablespacename", cs.tablespacename);
+        string_field(out, "accessMethod", cs.accessMethod);
+        bool_field(out, "if_not_exists", cs.if_not_exists);
+        out.push('}');
+    } else if let Some(cd) = n.as_variant::<types_nodes::rawnodes::ColumnDef>() {
+        out.push_str("{COLUMNDEF");
+        string_field(out, "colname", cd.colname);
+        node_field(out, "typeName", cd.typeName);
+        string_field(out, "compression", cd.compression);
+        int_field(out, "inhcount", cd.inhcount as i32);
+        bool_field(out, "is_local", cd.is_local);
+        bool_field(out, "is_not_null", cd.is_not_null);
+        bool_field(out, "is_from_type", cd.is_from_type);
+        char_field(out, "storage", cd.storage);
+        string_field(out, "storage_name", cd.storage_name);
+        node_field(out, "raw_default", cd.raw_default);
+        node_field(out, "cooked_default", cd.cooked_default);
+        char_field(out, "identity", cd.identity);
+        out.push_str(" :identitySequence ");
+        match cd.identitySequence {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        char_field(out, "generated", cd.generated);
+        node_field(out, "collClause", cd.collClause);
+        int_field(out, "collOid", cd.collOid as i32);
+        list_field(out, "constraints", &cd.constraints);
+        list_field(out, "fdwoptions", &cd.fdwoptions);
+        int_field(out, "location", cd.location);
+        out.push('}');
+    } else if let Some(tn) = n.as_variant::<types_nodes::rawnodes::TypeName>() {
+        out.push_str("{TYPENAME");
+        list_field(out, "names", &tn.names);
+        int_field(out, "typeOid", tn.typeOid as i32);
+        bool_field(out, "setof", tn.setof);
+        bool_field(out, "pct_type", tn.pct_type);
+        list_field(out, "typmods", &tn.typmods);
+        int_field(out, "typemod", tn.typemod);
+        list_field(out, "arrayBounds", &tn.arrayBounds);
+        int_field(out, "location", tn.location);
         out.push('}');
     } else if let Some(lc) = n.as_locking_clause() {
         out.push_str("{LOCKINGCLAUSE");

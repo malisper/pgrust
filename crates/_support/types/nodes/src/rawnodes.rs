@@ -452,6 +452,16 @@ pub struct IndexStmt<'mcx> {
 }
 
 // DEFAULT/CHECK slice of C's Constraint; index/FK fields arrive with their DDL.
+pub const FKCONSTR_ACTION_NOACTION: u8 = b'a';
+pub const FKCONSTR_ACTION_RESTRICT: u8 = b'r';
+pub const FKCONSTR_ACTION_CASCADE: u8 = b'c';
+pub const FKCONSTR_ACTION_SETNULL: u8 = b'n';
+pub const FKCONSTR_ACTION_SETDEFAULT: u8 = b'd';
+
+pub const FKCONSTR_MATCH_FULL: u8 = b'f';
+pub const FKCONSTR_MATCH_PARTIAL: u8 = b'p';
+pub const FKCONSTR_MATCH_SIMPLE: u8 = b's';
+
 #[derive(Default)]
 pub struct Constraint<'mcx> {
     pub contype: ConstrType,
@@ -464,7 +474,23 @@ pub struct Constraint<'mcx> {
     pub is_no_inherit: bool,
     pub raw_expr: Option<Node<'mcx>>,
     pub cooked_expr: Option<&'mcx str>,
+    pub nulls_not_distinct: bool,
     pub keys: NodeList<'mcx>,
+    pub including: NodeList<'mcx>,
+    pub options: NodeList<'mcx>,
+    pub indexname: Option<&'mcx str>,
+    pub indexspace: Option<&'mcx str>,
+    pub pktable: Option<&'mcx crate::RangeVar<'mcx>>,
+    pub fk_attrs: NodeList<'mcx>,
+    pub pk_attrs: NodeList<'mcx>,
+    pub fk_with_period: bool,
+    pub pk_with_period: bool,
+    pub fk_matchtype: u8,
+    pub fk_upd_action: u8,
+    pub fk_del_action: u8,
+    pub fk_del_set_cols: NodeList<'mcx>,
+    pub old_conpfeqop: NodeList<'mcx>,
+    pub old_pktable_oid: Oid,
     pub location: ParseLoc,
 }
 

@@ -19,6 +19,9 @@ use types_nodes::JoinType;
 use types_nodes::rawnodes::A_Expr_Kind::{self, AEXPR_OP};
 use types_nodes::rawnodes::{
     ColumnDef, Constraint, ConstrType, CreateStmt, IndexElem, IndexStmt, OnCommitAction,
+    FKCONSTR_ACTION_CASCADE, FKCONSTR_ACTION_NOACTION, FKCONSTR_ACTION_RESTRICT,
+    FKCONSTR_ACTION_SETDEFAULT, FKCONSTR_ACTION_SETNULL, FKCONSTR_MATCH_FULL,
+    FKCONSTR_MATCH_SIMPLE,
     RangeSubselect, WindowDef, FRAMEOPTION_BETWEEN, FRAMEOPTION_DEFAULTS,
     FRAMEOPTION_END_CURRENT_ROW, FRAMEOPTION_END_OFFSET_PRECEDING,
     FRAMEOPTION_END_UNBOUNDED_PRECEDING, FRAMEOPTION_EXCLUDE_CURRENT_ROW,
@@ -43,9 +46,35 @@ use crate::parse::Parser;
 use crate::stack::ActionView;
 use crate::tables::names::{YYRLINE, YYTNAME};
 use crate::tables::YYR1;
-use crate::yystype::{SelectLimit, YYSTYPE};
+use crate::yystype::{KeyAction, KeyActions, SelectLimit, YYSTYPE};
 
 // Explicitly-precedenced operators, MathOp declaration order.
+const CAS_NOT_DEFERRABLE: i32 = 0x01;
+const CAS_DEFERRABLE: i32 = 0x02;
+const CAS_INITIALLY_IMMEDIATE: i32 = 0x04;
+const CAS_INITIALLY_DEFERRED: i32 = 0x08;
+const CAS_NOT_VALID: i32 = 0x10;
+const CAS_NO_INHERIT: i32 = 0x20;
+const CAS_NOT_ENFORCED: i32 = 0x40;
+const CAS_ENFORCED: i32 = 0x80;
+
+// Which pointers C's processCASbits caller passes (NULL target + bit = error).
+struct CasTargets {
+    deferrable: bool,
+    initdeferred: bool,
+    is_enforced: bool,
+    not_valid: bool,
+    no_inherit: bool,
+}
+
+struct CasBits {
+    deferrable: bool,
+    initdeferred: bool,
+    is_enforced: bool,
+    not_valid: bool,
+    no_inherit: bool,
+}
+
 static MATH_OPS: [&str; 12] =
     ["+", "-", "*", "/", "%", "^", "<", ">", "=", "<=", ">=", "<>"];
 
@@ -444,6 +473,279 @@ impl<'mcx> Parser<'mcx> {
                 n.raw_expr = view.v(2).node();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // ColConstraintElem: UNIQUE opt_unique_null_treatment
+            // opt_definition OptConsTableSpace
+            501 => {
+                let mut n = Node::build::<Constraint>(mcx)?;
+                n.contype = ConstrType::CONSTR_UNIQUE;
+                n.location = view.l(1);
+                n.nulls_not_distinct = !view.v(2).boolean();
+                n.options = view.v(3).list();
+                n.indexspace = opt_str(view.v(4));
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ColConstraintElem: PRIMARY KEY opt_definition OptConsTableSpace
+            502 => {
+                let mut n = Node::build::<Constraint>(mcx)?;
+                n.contype = ConstrType::CONSTR_PRIMARY;
+                n.location = view.l(1);
+                n.options = view.v(3).list();
+                n.indexspace = opt_str(view.v(4));
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ColConstraintElem: REFERENCES qualified_name opt_column_list
+            // key_match key_actions
+            507 => {
+                let mut n = Node::build::<Constraint>(mcx)?;
+                n.contype = ConstrType::CONSTR_FOREIGN;
+                n.location = view.l(1);
+                n.pktable = view.v(2).node().and_then(|n| n.as_range_var());
+                n.fk_attrs = NodeList::nil();
+                n.pk_attrs = view.v(3).list();
+                n.fk_matchtype = view.v(4).ival() as u8;
+                let ka = view.v(5).key_actions();
+                n.fk_upd_action = ka.update_action.action;
+                n.fk_del_action = ka.delete_action.action;
+                n.fk_del_set_cols = core::mem::take(&mut ka.delete_action.cols);
+                n.is_enforced = true;
+                n.skip_validation = false;
+                n.initially_valid = true;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // TableConstraint: CONSTRAINT name ConstraintElem
+            536 => {
+                let name = view.v(2).str_val();
+                let node = view.v(3).node().expect("ConstraintElem");
+                let loc = view.l(1);
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    node.with_mut::<Constraint, _>(|c| {
+                        c.conname = Some(name);
+                        c.location = loc;
+                    })
+                    .expect("ConstraintElem is Constraint");
+                }
+                *yyval = YYSTYPE::Node(Some(node));
+            }
+            // ConstraintElem: CHECK '(' a_expr ')' ConstraintAttributeSpec
+            538 => {
+                let mut n = Node::build::<Constraint>(mcx)?;
+                n.contype = ConstrType::CONSTR_CHECK;
+                n.location = view.l(1);
+                n.raw_expr = view.v(3).node();
+                n.cooked_expr = Option::None;
+                let cas = self.process_cas_bits(
+                    view.v(5).ival(),
+                    view.l(5),
+                    "CHECK",
+                    CasTargets { deferrable: false, initdeferred: false, is_enforced: true, not_valid: true, no_inherit: true },
+                )?;
+                n.is_enforced = cas.is_enforced;
+                n.skip_validation = cas.not_valid;
+                n.is_no_inherit = cas.no_inherit;
+                n.initially_valid = !n.skip_validation;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ConstraintElem: UNIQUE opt_unique_null_treatment '(' columnList
+            // opt_without_overlaps ')' opt_c_include opt_definition
+            // OptConsTableSpace ConstraintAttributeSpec
+            540 => {
+                let mut n = Node::build::<Constraint>(mcx)?;
+                n.contype = ConstrType::CONSTR_UNIQUE;
+                n.location = view.l(1);
+                n.nulls_not_distinct = !view.v(2).boolean();
+                n.keys = view.v(4).list();
+                if view.v(5).boolean() {
+                    panic!("gram_core: WITHOUT OVERLAPS (temporal constraint) unported");
+                }
+                n.including = view.v(7).list();
+                n.options = view.v(8).list();
+                n.indexspace = opt_str(view.v(9));
+                let cas = self.process_cas_bits(
+                    view.v(10).ival(),
+                    view.l(10),
+                    "UNIQUE",
+                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false },
+                )?;
+                n.deferrable = cas.deferrable;
+                n.initdeferred = cas.initdeferred;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ConstraintElem: PRIMARY KEY '(' columnList opt_without_overlaps
+            // ')' opt_c_include opt_definition OptConsTableSpace
+            // ConstraintAttributeSpec
+            542 => {
+                let mut n = Node::build::<Constraint>(mcx)?;
+                n.contype = ConstrType::CONSTR_PRIMARY;
+                n.location = view.l(1);
+                n.keys = view.v(4).list();
+                if view.v(5).boolean() {
+                    panic!("gram_core: WITHOUT OVERLAPS (temporal constraint) unported");
+                }
+                n.including = view.v(7).list();
+                n.options = view.v(8).list();
+                n.indexspace = opt_str(view.v(9));
+                let cas = self.process_cas_bits(
+                    view.v(10).ival(),
+                    view.l(10),
+                    "PRIMARY KEY",
+                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false },
+                )?;
+                n.deferrable = cas.deferrable;
+                n.initdeferred = cas.initdeferred;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ConstraintElem: FOREIGN KEY '(' columnList optionalPeriodName ')'
+            // REFERENCES qualified_name opt_column_and_period_list key_match
+            // key_actions ConstraintAttributeSpec
+            545 => {
+                let mut n = Node::build::<Constraint>(mcx)?;
+                n.contype = ConstrType::CONSTR_FOREIGN;
+                n.location = view.l(1);
+                n.pktable = view.v(8).node().and_then(|n| n.as_range_var());
+                n.fk_attrs = view.v(4).list();
+                if view.v(5).node().is_some() {
+                    panic!("gram_core: PERIOD FK columns (temporal FK) unported");
+                }
+                // opt_column_and_period_list flattened: rule 560 panics on a
+                // PERIOD name, so the pair collapses to its column list.
+                n.pk_attrs = view.v(9).list();
+                n.fk_matchtype = view.v(10).ival() as u8;
+                let ka = view.v(11).key_actions();
+                n.fk_upd_action = ka.update_action.action;
+                n.fk_del_action = ka.delete_action.action;
+                n.fk_del_set_cols = core::mem::take(&mut ka.delete_action.cols);
+                let cas = self.process_cas_bits(
+                    view.v(12).ival(),
+                    view.l(12),
+                    "FOREIGN KEY",
+                    CasTargets { deferrable: true, initdeferred: true, is_enforced: true, not_valid: true, no_inherit: false },
+                )?;
+                n.deferrable = cas.deferrable;
+                n.initdeferred = cas.initdeferred;
+                n.is_enforced = cas.is_enforced;
+                n.skip_validation = cas.not_valid;
+                n.initially_valid = !n.skip_validation;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // columnList: columnElem | columnList ',' columnElem
+            556 => {
+                let el = view.v(1).node().expect("columnElem");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            557 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("columnElem"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // opt_column_and_period_list: '(' columnList optionalPeriodName ')'
+            // C: list_make2($2, $3); flattened to the column list (PERIOD loud).
+            560 => {
+                if view.v(3).node().is_some() {
+                    panic!("gram_core: PERIOD referenced columns (temporal FK) unported");
+                }
+                *yyval = YYSTYPE::List(view.v(2).list());
+            }
+            561 => *yyval = YYSTYPE::List(NodeList::nil()),
+            // columnElem: ColId
+            562 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::String { sval: view.v(1).str_val() },
+                )?));
+            }
+            // key_match: MATCH FULL | MATCH PARTIAL | MATCH SIMPLE | /*EMPTY*/
+            565 => *yyval = YYSTYPE::Ival(FKCONSTR_MATCH_FULL as i32),
+            566 => {
+                return Err(Box::new(
+                    (*self.errposition_error(
+                        "MATCH PARTIAL not yet implemented".into(),
+                        view.l(1),
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                ));
+            }
+            567 | 568 => *yyval = YYSTYPE::Ival(FKCONSTR_MATCH_SIMPLE as i32),
+            // key_actions: key_update | key_delete | both orders | /*EMPTY*/
+            575 | 576 | 577 | 578 | 579 => {
+                let noaction = || KeyAction { action: FKCONSTR_ACTION_NOACTION, cols: NodeList::nil() };
+                let (upd, del) = match rule {
+                    575 => (core::mem::take(view.v(1).key_action()), noaction()),
+                    576 => (noaction(), core::mem::take(view.v(1).key_action())),
+                    577 => (core::mem::take(view.v(1).key_action()), core::mem::take(view.v(2).key_action())),
+                    578 => (core::mem::take(view.v(2).key_action()), core::mem::take(view.v(1).key_action())),
+                    _ => (noaction(), noaction()),
+                };
+                *yyval = YYSTYPE::KeyActionsV(mcx::leak_in(mcx::alloc_in(
+                    mcx,
+                    KeyActions { update_action: upd, delete_action: del },
+                )?));
+            }
+            // key_update: ON UPDATE key_action
+            580 => {
+                let ka = view.v(3).key_action();
+                if !ka.cols.is_nil() {
+                    let which = if ka.action == FKCONSTR_ACTION_SETNULL { "SET NULL" } else { "SET DEFAULT" };
+                    return Err(Box::new(
+                        (*self.errposition_error(
+                            format!("a column list with {which} is only supported for ON DELETE actions"),
+                            view.l(1),
+                        ))
+                        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                    ));
+                }
+                *yyval = YYSTYPE::KeyActionV(ka);
+            }
+            // key_action: NO ACTION | RESTRICT | CASCADE | SET NULL | SET DEFAULT
+            582 | 583 | 584 | 585 | 586 => {
+                let (action, cols) = match rule {
+                    582 => (FKCONSTR_ACTION_NOACTION, NodeList::nil()),
+                    583 => (FKCONSTR_ACTION_RESTRICT, NodeList::nil()),
+                    584 => (FKCONSTR_ACTION_CASCADE, NodeList::nil()),
+                    585 => (FKCONSTR_ACTION_SETNULL, view.v(3).list()),
+                    _ => (FKCONSTR_ACTION_SETDEFAULT, view.v(3).list()),
+                };
+                *yyval = YYSTYPE::KeyActionV(mcx::leak_in(mcx::alloc_in(
+                    mcx,
+                    KeyAction { action, cols },
+                )?));
+            }
+            // ConstraintAttributeSpec: /*EMPTY*/ | spec ConstraintAttributeElem
+            825 => *yyval = YYSTYPE::Ival(0),
+            826 => {
+                let newspec = view.v(1).ival() | view.v(2).ival();
+                if (newspec & (CAS_NOT_DEFERRABLE | CAS_INITIALLY_DEFERRED))
+                    == (CAS_NOT_DEFERRABLE | CAS_INITIALLY_DEFERRED)
+                {
+                    return Err(self.errposition_error(
+                        "constraint declared INITIALLY DEFERRED must be DEFERRABLE".into(),
+                        view.l(2),
+                    ));
+                }
+                if (newspec & (CAS_NOT_DEFERRABLE | CAS_DEFERRABLE)) == (CAS_NOT_DEFERRABLE | CAS_DEFERRABLE)
+                    || (newspec & (CAS_INITIALLY_IMMEDIATE | CAS_INITIALLY_DEFERRED))
+                        == (CAS_INITIALLY_IMMEDIATE | CAS_INITIALLY_DEFERRED)
+                    || (newspec & (CAS_NOT_ENFORCED | CAS_ENFORCED)) == (CAS_NOT_ENFORCED | CAS_ENFORCED)
+                {
+                    return Err(self.errposition_error(
+                        "conflicting constraint properties".into(),
+                        view.l(2),
+                    ));
+                }
+                *yyval = YYSTYPE::Ival(newspec);
+            }
+            // ConstraintAttributeElem
+            827 => *yyval = YYSTYPE::Ival(CAS_NOT_DEFERRABLE),
+            828 => *yyval = YYSTYPE::Ival(CAS_DEFERRABLE),
+            829 => *yyval = YYSTYPE::Ival(CAS_INITIALLY_IMMEDIATE),
+            830 => *yyval = YYSTYPE::Ival(CAS_INITIALLY_DEFERRED),
+            831 => *yyval = YYSTYPE::Ival(CAS_NOT_VALID),
+            832 => *yyval = YYSTYPE::Ival(CAS_NO_INHERIT),
+            833 => *yyval = YYSTYPE::Ival(CAS_NOT_ENFORCED),
+            834 => *yyval = YYSTYPE::Ival(CAS_ENFORCED),
+            // opt_without_overlaps: WITHOUT OVERLAPS | /*EMPTY*/
+            552 => *yyval = YYSTYPE::Boolean(true),
+            553 => *yyval = YYSTYPE::Boolean(false),
             // opt_no_inherit: NO INHERIT | /*EMPTY*/
             550 => *yyval = YYSTYPE::Boolean(true),
             551 => *yyval = YYSTYPE::Boolean(false),
@@ -3655,6 +3957,91 @@ impl<'mcx> Parser<'mcx> {
             err?;
         }
         Ok(())
+    }
+
+    // processCASbits (gram.y): C's error surface for misplaced attributes;
+    // attributes C supports but this port does not are loud panics.
+    fn process_cas_bits(
+        &self,
+        cas_bits: i32,
+        location: i32,
+        constr_type: &str,
+        t: CasTargets,
+    ) -> PgResult<CasBits> {
+        let mut out = CasBits {
+            deferrable: false,
+            initdeferred: false,
+            is_enforced: true,
+            not_valid: false,
+            no_inherit: false,
+        };
+        let err = |msg: std::string::String| {
+            Box::new(
+                (*self.errposition_error(msg, location))
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            )
+        };
+        if cas_bits & (CAS_DEFERRABLE | CAS_INITIALLY_DEFERRED) != 0 {
+            if !t.deferrable {
+                return Err(err(format!(
+                    "{constr_type} constraints cannot be marked DEFERRABLE"
+                )));
+            }
+            out.deferrable = true;
+        }
+        if cas_bits & CAS_INITIALLY_DEFERRED != 0 {
+            if !t.initdeferred {
+                return Err(err(format!(
+                    "{constr_type} constraints cannot be marked DEFERRABLE"
+                )));
+            }
+            out.initdeferred = true;
+        }
+        if cas_bits & CAS_NOT_VALID != 0 {
+            if !t.not_valid {
+                return Err(err(format!(
+                    "{constr_type} constraints cannot be marked NOT VALID"
+                )));
+            }
+            out.not_valid = true;
+        }
+        if cas_bits & CAS_NO_INHERIT != 0 {
+            if !t.no_inherit {
+                return Err(err(format!(
+                    "{constr_type} constraints cannot be marked NO INHERIT"
+                )));
+            }
+            out.no_inherit = true;
+        }
+        if cas_bits & CAS_NOT_ENFORCED != 0 {
+            if !t.is_enforced {
+                return Err(err(format!(
+                    "{constr_type} constraints cannot be marked NOT ENFORCED"
+                )));
+            }
+            out.is_enforced = false;
+            if t.not_valid {
+                out.not_valid = true;
+            }
+        }
+        if cas_bits & CAS_ENFORCED != 0 {
+            if !t.is_enforced {
+                return Err(err(format!(
+                    "{constr_type} constraints cannot be marked ENFORCED"
+                )));
+            }
+            out.is_enforced = true;
+        }
+        if out.deferrable || out.initdeferred {
+            panic!("gram_core: DEFERRABLE {constr_type} constraints unported");
+        }
+        if out.not_valid {
+            panic!("gram_core: NOT VALID {constr_type} constraints unported");
+        }
+        if !out.is_enforced {
+            panic!("gram_core: NOT ENFORCED {constr_type} constraints unported");
+        }
+        Ok(out)
     }
 
     #[cold]
