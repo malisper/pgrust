@@ -16,3 +16,9 @@ types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 types_rel = { path = "../../../../_support/types/rel" }
 types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_nbtree = { path = "../../../../_support/types/types_nbtree" }
+mcx = { path = "../../../../_support/mcx" }
+execindexing = { path = "../../../executor/execindexing" }
+tuplesort = { path = "../../../utils/sort/tuplesort" }
+init_small = { path = "../../../utils/init/init_small" }

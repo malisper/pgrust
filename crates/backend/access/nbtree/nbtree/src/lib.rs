@@ -21,7 +21,7 @@ mod wal;
 mod tests;
 
 pub use insert::btinsert;
-pub use page::{bt_getrootheight, bt_initmetapage, bt_metaversion};
+pub use page::{bt_getrootheight, bt_initmetapage, bt_metaversion, bt_pageinit};
 
 use ::mcx::Mcx;
 use ::types_core::{BLCKSZ, InvalidSubTransactionId};
@@ -37,7 +37,8 @@ use search::{bt_first, bt_gettuple_continue, pos_unpin_if_pinned, restore_scanpo
 use utils::bt_killitems;
 
 pub use search::BtScanInsert;
-pub use utils::bt_mkscankey;
+pub use utils::{bt_check_third_page, bt_keep_natts_fast, bt_mkscankey, bt_truncate};
+pub use fcframe::OrderProcFrame;
 
 #[cold]
 #[inline(never)]

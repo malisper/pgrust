@@ -598,6 +598,77 @@ impl<'a> PageMut<'a> {
         Some(offset_number)
     }
 
+    /// `PageIndexTupleOverwrite`; false = new tuple would overflow the page.
+    /// Panics on corrupt page/line pointers (C ereport ERROR, DATA_CORRUPTED).
+    pub fn index_tuple_overwrite(&mut self, offnum: OffsetNumber, newtup: &[u8]) -> bool {
+        let r = self.as_ref();
+        let pd_lower = r.pd_lower() as usize;
+        let pd_upper = r.pd_upper() as usize;
+        let pd_special = r.pd_special() as usize;
+        assert!(
+            pd_lower >= SizeOfPageHeaderData
+                && pd_lower <= pd_upper
+                && pd_upper <= pd_special
+                && pd_special <= BLCKSZ
+                && pd_special == (pd_special + 7) & !7,
+            "corrupted page pointers: lower = {pd_lower}, upper = {pd_upper}, special = {pd_special}"
+        );
+
+        let itemcount = r.max_offset_number();
+        assert!(offnum >= 1 && offnum <= itemcount, "invalid index offnum: {offnum}");
+
+        let tupid = r.item_id(offnum);
+        debug_assert!(tupid.has_storage());
+        let oldsize = tupid.lp_len() as usize;
+        let offset = tupid.lp_off() as usize;
+        assert!(
+            offset >= pd_upper && offset + oldsize <= pd_special && offset == (offset + 7) & !7,
+            "corrupted line pointer: offset = {offset}, size = {oldsize}"
+        );
+
+        let oldsize = (oldsize + 7) & !7;
+        let alignednewsize = (newtup.len() + 7) & !7;
+        if alignednewsize > oldsize + (pd_upper - pd_lower) {
+            return false;
+        }
+
+        let size_diff = oldsize as isize - alignednewsize as isize;
+        if size_diff != 0 {
+            // SAFETY: [pd_upper, offset) moved by size_diff stays within
+            // [pd_lower, pd_special) by the overflow check above.
+            unsafe {
+                let addr = self.ptr.as_ptr().add(pd_upper);
+                core::ptr::copy(addr, addr.offset(size_diff), offset - pd_upper);
+            }
+            self.set_pd_upper((pd_upper as isize + size_diff) as uint16);
+            for i in 1..=itemcount {
+                let mut ii = self.as_ref().item_id(i);
+                if ii.has_storage() && (ii.lp_off() as usize) <= offset {
+                    ii.set_storage(
+                        (ii.lp_off() as isize + size_diff) as ItemOffset,
+                        ii.lp_len(),
+                    );
+                    self.set_item_id(i, ii);
+                }
+            }
+        }
+
+        let mut tupid = self.as_ref().item_id(offnum);
+        let newoff = (offset as isize + size_diff) as ItemOffset;
+        tupid.set_storage(newoff, newtup.len() as ItemLength);
+        self.set_item_id(offnum, tupid);
+        // SAFETY: destination [newoff, newoff+len) within tuple space by the
+        // checks above.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                newtup.as_ptr(),
+                self.ptr.as_ptr().add(newoff as usize),
+                newtup.len(),
+            )
+        };
+        true
+    }
+
     /// `PageRepairFragmentation`; caller holds the buffer cleanup lock.
     /// Panics on corruption (in prune's crit section C's ERROR promotes to PANIC).
     pub fn repair_fragmentation(&mut self) {

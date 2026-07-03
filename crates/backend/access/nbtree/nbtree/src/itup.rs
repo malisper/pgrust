@@ -122,7 +122,7 @@ pub unsafe fn bt_tuple_get_max_heap_tid(itup: ITup) -> ItemPointerData {
     }
 }
 
-pub(crate) const fn maxalign(l: usize) -> usize {
+pub const fn maxalign(l: usize) -> usize {
     (l + 7) & !7
 }
 
@@ -130,14 +130,14 @@ pub(crate) const fn maxalign(l: usize) -> usize {
 /// `itup` per module contract; the image is writable (owned scratch, never a
 /// locked page).
 #[inline]
-pub(crate) unsafe fn set_t_info(itup: *mut u8, info: u16) {
+pub unsafe fn set_t_info(itup: *mut u8, info: u16) {
     itup.add(6).cast::<u16>().write(info);
 }
 
 /// # Safety
 /// As [`set_t_info`].
 #[inline]
-pub(crate) unsafe fn set_t_tid(itup: *mut u8, tid: ItemPointerData) {
+pub unsafe fn set_t_tid(itup: *mut u8, tid: ItemPointerData) {
     itup.cast::<ItemPointerData>().write_unaligned(tid);
 }
 
@@ -145,7 +145,7 @@ pub(crate) unsafe fn set_t_tid(itup: *mut u8, tid: ItemPointerData) {
 ///
 /// # Safety
 /// As [`set_t_info`].
-pub(crate) unsafe fn bt_tuple_set_natts(itup: *mut u8, nkeyatts: u16, heaptid: bool) {
+pub unsafe fn bt_tuple_set_natts(itup: *mut u8, nkeyatts: u16, heaptid: bool) {
     debug_assert!(nkeyatts <= INDEX_MAX_KEYS as u16);
     debug_assert!(nkeyatts & BT_STATUS_OFFSET_MASK == 0);
     debug_assert!(!heaptid || nkeyatts != 0);
@@ -165,7 +165,7 @@ const BT_STATUS_OFFSET_MASK: u16 = !BT_OFFSET_MASK;
 ///
 /// # Safety
 /// As [`set_t_info`].
-pub(crate) unsafe fn bt_tuple_set_downlink(itup: *mut u8, blkno: ::types_core::BlockNumber) {
+pub unsafe fn bt_tuple_set_downlink(itup: *mut u8, blkno: ::types_core::BlockNumber) {
     let mut tid = t_tid(itup);
     tid.ip_blkid.bi_hi = (blkno >> 16) as u16;
     tid.ip_blkid.bi_lo = (blkno & 0xffff) as u16;
@@ -283,7 +283,7 @@ pub fn index_form_tuple<'mcx>(
 ///
 /// # Safety
 /// `itup` per module contract.
-pub(crate) unsafe fn copy_index_tuple<'mcx>(
+pub unsafe fn copy_index_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     itup: ITup,
 ) -> PgResult<ItupBuf<'mcx>> {
