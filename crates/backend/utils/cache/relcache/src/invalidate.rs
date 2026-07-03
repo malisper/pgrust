@@ -148,6 +148,7 @@ fn RelationReloadIndexInfo(
         rd_options: scanned.options,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
+        rd_amcache_hash: Default::default(),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
     });
@@ -200,6 +201,7 @@ fn RelationReloadNailed(
         rd_options: scanned.options,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
+        rd_amcache_hash: Default::default(),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
     });

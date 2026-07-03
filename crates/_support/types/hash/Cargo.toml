@@ -8,3 +8,4 @@ publish.workspace = true
 mcx = { path = "../../mcx" }
 types_core = { path = "../types_core" }
 types_tuple = { path = "../types_tuple" }
+types_error = { path = "../types_error" }

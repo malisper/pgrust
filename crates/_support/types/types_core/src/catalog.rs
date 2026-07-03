@@ -87,6 +87,7 @@ pub const ANYCOMPATIBLERANGEOID: Oid = 5080;
 pub const ANYCOMPATIBLEMULTIRANGEOID: Oid = 4538;
 
 pub const BTREE_AM_OID: Oid = 403;
+pub const HASH_AM_OID: Oid = 405;
 
 pub const INDEX_AM_HANDLEROID: Oid = 325;
 

@@ -1069,6 +1069,7 @@ dependencies = [
  "fmgr_seams",
  "genam",
  "guc",
+ "hashsort",
  "heaptuple",
  "indexam",
  "inval",
@@ -2825,6 +2826,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "hash"
+version = "0.1.0"
+dependencies = [
+ "bufmgr",
+ "bufmgr_seams",
+ "datum",
+ "fmgr_core",
+ "hashfn",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "nbtree",
+ "predicate_seams",
+ "smgr",
+ "tidbitmap",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_hash",
+ "types_rel",
+ "types_relscan",
+ "types_scan",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+ "xact",
+ "xloginsert",
+ "xloginsert_seams",
+]
+
+[[package]]
+name = "hash_xlog"
+version = "0.1.0"
+dependencies = [
+ "bufmgr_seams",
+ "types_core",
+ "types_error",
+ "types_hash",
+ "types_storage",
+ "xlogreader_seams",
+ "xlogutils",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2837,6 +2883,27 @@ dependencies = [
 [[package]]
 name = "hashfn"
 version = "0.1.0"
+
+[[package]]
+name = "hashsort"
+version = "0.1.0"
+dependencies = [
+ "bufmgr",
+ "bufmgr_seams",
+ "datum",
+ "execindexing",
+ "hash",
+ "init_small",
+ "mcx",
+ "nbtree",
+ "planner",
+ "tuplesort",
+ "types_core",
+ "types_error",
+ "types_hash",
+ "types_rel",
+ "types_tuple",
+]
 
 [[package]]
 name = "hba"
@@ -3208,6 +3275,7 @@ name = "indexam"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "hash",
  "indexam_seams",
  "mcx",
  "nbtree",
@@ -6900,6 +6968,7 @@ version = "0.0.0"
 dependencies = [
  "clog",
  "elog",
+ "hash_xlog",
  "heapam_xlog",
  "mcx",
  "multixact",
@@ -8207,6 +8276,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_hash",
  "types_nbtree",
  "types_rel",
  "types_slot",
@@ -8331,6 +8401,7 @@ version = "0.1.0"
 dependencies = [
  "mcx",
  "types_core",
+ "types_error",
  "types_tuple",
 ]
 
@@ -8391,6 +8462,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_hash",
  "types_nbtree",
  "types_storage",
  "types_tuple",
@@ -8404,6 +8476,7 @@ dependencies = [
  "tableam",
  "types_core",
  "types_error",
+ "types_hash",
  "types_nbtree",
  "types_rel",
  "types_scan",

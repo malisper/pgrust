@@ -25,6 +25,7 @@ miscinit = { path = "../../utils/init/miscinit" }
 mcx = { path = "../../../_support/mcx" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 nbtsort = { path = "../../access/nbtree/nbtsort" }
+hashsort = { path = "../../access/hash/hashsort" }
 pg_depend = { path = "../pg_depend" }
 pgstat = { path = "../../utils/activity/pgstat" }
 relcache = { path = "../../utils/cache/relcache" }

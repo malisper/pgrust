@@ -19,8 +19,12 @@ const INDEX_INDRELID_INDEX_ID: Oid = 2678;
 const OID_BTREE_OPS_OID: Oid = 1981;
 const INT2_BTREE_OPS_OID: Oid = 1979;
 const BTREE_AM_OID: Oid = 403;
+const HASH_AM_OID: Oid = 405;
 const BTNProcs: usize = 6;
+// BTORDER_PROC == HASHSTANDARD_PROC == 1: slot 0 is the preloaded proc for
+// both committed AMs.
 const BTORDER_PROC: usize = 1;
+const HASHNProcs: usize = 3;
 
 const Anum_pg_amproc_amprocfamily: i32 = 2;
 const Anum_pg_amproc_amproclefttype: i32 = 3;
@@ -90,9 +94,10 @@ pub(crate) fn relation_init_index_access_info(
 
     let amsupport = match form.relam {
         BTREE_AM_OID => BTNProcs,
+        HASH_AM_OID => HASHNProcs,
         other => panic!(
             "relcache_build: index AM {other} for index {relid} unported \
-             (amapi closed set is btree-only)"
+             (amapi closed set is btree+hash)"
         ),
     };
     let mut opfamily: PgVec<'static, Oid> = mcx::vec_with_capacity_in(mcx, nkey)?;

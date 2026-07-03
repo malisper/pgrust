@@ -285,6 +285,7 @@ fn test_relation<'mcx>(mcx: mcx::Mcx<'mcx>) -> RelationData<'mcx> {
         rd_options: None,
         pgstat_enabled: Cell::new(true),
         rd_amcache: Default::default(),
+        rd_amcache_hash: Default::default(),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
     }

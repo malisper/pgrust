@@ -11,6 +11,7 @@ use types_relscan::IndexAmKind;
 use types_scan::scankey::{BTMaxStrategyNumber, InvalidStrategy, StrategyNumber};
 
 pub const F_BTHANDLER: Oid = 330;
+pub const F_HASHHANDLER: Oid = 331;
 const AMTYPE_INDEX: i8 = b'i' as i8;
 const Anum_pg_am_amname: i32 = 2;
 const Anum_pg_am_amhandler: i32 = 3;
@@ -23,6 +24,7 @@ const NAMEDATALEN: usize = 64;
 pub fn GetIndexAmRoutine(amhandler: Oid) -> IndexAmKind {
     match amhandler {
         F_BTHANDLER => IndexAmKind::Btree,
+        F_HASHHANDLER => IndexAmKind::Hash,
         other => unported_handler(other),
     }
 }
@@ -76,6 +78,14 @@ pub fn IndexAmTranslateStrategy(
     let result = match kind {
         // bttranslatestrategy outside 1..=5 (the shortcut covered the rest).
         IndexAmKind::Btree => COMPARE_INVALID,
+        // hashtranslatestrategy: only HTEqualStrategyNumber -> COMPARE_EQ.
+        IndexAmKind::Hash => {
+            if strategy == 1 {
+                types_pathnodes::COMPARE_EQ
+            } else {
+                COMPARE_INVALID
+            }
+        }
         #[allow(unreachable_patterns)]
         _ => unported_translate(amoid),
     };
@@ -103,6 +113,14 @@ pub fn IndexAmTranslateCompareType(
     let result = match kind {
         // bttranslatecmptype outside COMPARE_LT..=COMPARE_GT.
         IndexAmKind::Btree => InvalidStrategy,
+        // hashtranslatecmptype: only COMPARE_EQ -> HTEqualStrategyNumber.
+        IndexAmKind::Hash => {
+            if cmptype == types_pathnodes::COMPARE_EQ {
+                1 as StrategyNumber
+            } else {
+                InvalidStrategy
+            }
+        }
         #[allow(unreachable_patterns)]
         _ => unported_translate(amoid),
     };

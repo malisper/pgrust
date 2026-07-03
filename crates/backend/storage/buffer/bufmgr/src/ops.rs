@@ -126,6 +126,22 @@ pub fn ConditionalLockBufferForCleanup(buffer: Buffer) -> PgResult<bool> {
     Ok(false)
 }
 
+/// IsBufferCleanupOK (bufmgr.c): caller holds pin + exclusive content lock.
+pub fn IsBufferCleanupOK(buffer: Buffer) -> bool {
+    debug_assert!(BufferIsValid(buffer));
+    if buffer < 0 {
+        panic!("unported callee reached from bufmgr.c IsBufferCleanupOK: LocalRefCount (localbuf.c)");
+    }
+    debug_assert!(BufferIsPinned(buffer));
+    let desc = shared_desc(buffer);
+    debug_assert!(LWLockHeldByMeInMode(&desc.content_lock, LW_EXCLUSIVE));
+    let buf_state = LockBufHdr(desc);
+    debug_assert!(buffer_refcount(buf_state) > 0);
+    let ok = buffer_refcount(buf_state) == 1 && crate::privref::GetPrivateRefCount(buffer) == 1;
+    UnlockBufHdr(desc, buf_state);
+    ok
+}
+
 pub fn UnlockReleaseBuffer(buffer: Buffer) -> PgResult<()> {
     LockBuffer(buffer, BUFFER_LOCK_UNLOCK)?;
     ReleaseBuffer(buffer)

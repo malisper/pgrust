@@ -48,6 +48,8 @@ pub struct RelationData<'mcx> {
     pub pgstat_enabled: Cell<bool>,
     // C rd_amcache (rule-5 cache): btree metapage copy so descents skip the read; enum when another AM lands; cleared with the entry as C pfrees it.
     pub rd_amcache: Cell<Option<RdAmCacheBtree>>,
+    // C rd_amcache, hash arm (HashMetaPageData is 4.5KB - boxed, read via borrow).
+    pub rd_amcache_hash: RefCell<Option<std::boxed::Box<types_hash::HashMetaPageData>>>,
     // C rd_support/rd_supportinfo (rule-5 cache), resolved once per column;
     // std Vec justified: Rc-owned owner structure outside the arenas, FmgrInfo is droppy.
     pub rd_supportinfo: RefCell<Vec<Option<FmgrInfo>>>,
@@ -311,6 +313,7 @@ mod tests {
             rd_options: None,
             pgstat_enabled: Cell::new(false),
             rd_amcache: Default::default(),
+            rd_amcache_hash: Default::default(),
             rd_supportinfo: Default::default(),
             rd_indexlist: Default::default(),
         }

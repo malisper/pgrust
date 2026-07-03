@@ -83,9 +83,18 @@ pub fn DefineIndex<'mcx>(
     if stmt.oldNumber != 0 || skip_build {
         unported("DefineIndex: skip_build / oldNumber reuse");
     }
-    match stmt.accessMethod {
-        Some("btree") => {}
-        other => unported(&format!("DefineIndex: access method {other:?} (AMNAME lookup)")),
+    // Closed-set AM name resolution (C: get_index_am_oid + GetIndexAmRoutine).
+    let (accessMethodId, amname, amcanorder, amcanunique, amcanmulticol) =
+        match stmt.accessMethod {
+            Some("btree") => (BTREE_AM_OID, "btree", true, true, true),
+            Some("hash") => (catalog_index::HASH_AM_OID, "hash", false, false, false),
+            other => unported(&format!("DefineIndex: access method {other:?} (AMNAME lookup)")),
+        };
+    if stmt.unique && !amcanunique {
+        return Err(err(
+            format!("access method \"{amname}\" does not support unique indexes"),
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
     }
 
     let root_save_nestlevel = guc::NewGUCNestLevel();
@@ -93,6 +102,12 @@ pub fn DefineIndex<'mcx>(
 
     let numberOfKeyAttributes = stmt.indexParams.len();
     let numberOfAttributes = numberOfKeyAttributes;
+    if numberOfKeyAttributes > 1 && !amcanmulticol {
+        return Err(err(
+            format!("access method \"{amname}\" does not support multicolumn indexes"),
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
+    }
     if numberOfAttributes == 0 {
         return Err(err("must specify at least one column".into(), ERRCODE_INVALID_OBJECT_DEFINITION));
     }
@@ -181,6 +196,9 @@ pub fn DefineIndex<'mcx>(
         &mut coloptions,
         &stmt.indexParams,
         stmt.isconstraint,
+        accessMethodId,
+        amname,
+        amcanorder,
     )?;
 
     for i in 0..numberOfAttributes {
@@ -204,7 +222,7 @@ pub fn DefineIndex<'mcx>(
         indexRelationId,
         &mut indexInfo,
         &colname_refs,
-        BTREE_AM_OID,
+        accessMethodId,
         tablespaceId,
         &collationIds[..numberOfAttributes],
         &opclassIds[..numberOfAttributes],
@@ -234,6 +252,9 @@ fn ComputeIndexAttrs<'mcx>(
     coloptions: &mut [i16],
     attList: &types_nodes::NodeList<'mcx>,
     isconstraint: bool,
+    accessMethodId: Oid,
+    amname: &str,
+    amcanorder: bool,
 ) -> PgResult<()> {
     let _ = mcx;
     for (attn, node) in attList.iter().enumerate() {
@@ -289,30 +310,46 @@ fn ComputeIndexAttrs<'mcx>(
         }
         collationIds[attn] = attcollation;
 
-        opclassIds[attn] = GetDefaultOpClass(atttype, BTREE_AM_OID)?;
+        opclassIds[attn] = GetDefaultOpClass(atttype, accessMethodId)?;
         if opclassIds[attn] == InvalidOid {
             return Err(err(
                 format!(
-                    "data type {} has no default operator class for access method \"btree\"",
+                    "data type {} has no default operator class for access method \"{amname}\"",
                     format_type::format_type_be(atttype)?
                 ),
                 ERRCODE_UNDEFINED_OBJECT,
             ));
         }
 
-        // amcanorder arm (btree).
         coloptions[attn] = 0;
-        if attribute.ordering == SortByDir::SORTBY_DESC {
-            coloptions[attn] |= INDOPTION_DESC;
-        }
-        match attribute.nulls_ordering {
-            SortByNulls::SORTBY_NULLS_DEFAULT => {
-                if attribute.ordering == SortByDir::SORTBY_DESC {
-                    coloptions[attn] |= INDOPTION_NULLS_FIRST;
-                }
+        if amcanorder {
+            if attribute.ordering == SortByDir::SORTBY_DESC {
+                coloptions[attn] |= INDOPTION_DESC;
             }
-            SortByNulls::SORTBY_NULLS_FIRST => coloptions[attn] |= INDOPTION_NULLS_FIRST,
-            SortByNulls::SORTBY_NULLS_LAST => {}
+            match attribute.nulls_ordering {
+                SortByNulls::SORTBY_NULLS_DEFAULT => {
+                    if attribute.ordering == SortByDir::SORTBY_DESC {
+                        coloptions[attn] |= INDOPTION_NULLS_FIRST;
+                    }
+                }
+                SortByNulls::SORTBY_NULLS_FIRST => coloptions[attn] |= INDOPTION_NULLS_FIRST,
+                SortByNulls::SORTBY_NULLS_LAST => {}
+            }
+        } else {
+            if attribute.ordering != SortByDir::SORTBY_DEFAULT {
+                return Err(err(
+                    format!("access method \"{amname}\" does not support ASC/DESC options"),
+                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                ));
+            }
+            if attribute.nulls_ordering != SortByNulls::SORTBY_NULLS_DEFAULT {
+                return Err(err(
+                    format!(
+                        "access method \"{amname}\" does not support NULLS FIRST/LAST options"
+                    ),
+                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                ));
+            }
         }
     }
     Ok(())

@@ -108,12 +108,13 @@ pub fn get_relation_info<'mcx>(
             if index_rel.rd_rel.relkind != types_rel::RELKIND_INDEX {
                 panic!("get_relation_info (plancat.c): partitioned index; M2 partition lane");
             }
-            if index_rel.rd_rel.relam != BTREE_AM_OID {
-                panic!(
-                    "get_relation_info (plancat.c): index AM {}; M2 non-btree lane",
-                    index_rel.rd_rel.relam
-                );
-            }
+            let am_is_btree = match index_rel.rd_rel.relam {
+                BTREE_AM_OID => true,
+                types_core::HASH_AM_OID => false,
+                other => panic!(
+                    "get_relation_info (plancat.c): index AM {other}; M2 non-btree lane"
+                ),
+            };
             if ind.has_indpred {
                 panic!("get_relation_info (plancat.c): partial index; M2 partial-index lane");
             }
@@ -139,23 +140,28 @@ pub fn get_relation_info<'mcx>(
             for i in 0..nkeycolumns as usize {
                 info.opfamily.push(index_rel.rd_opfamily[i]);
                 info.opcintype.push(index_rel.rd_opcintype[i]);
-                info.canreturn.push(btcanreturn());
+                info.canreturn.push(if am_is_btree { btcanreturn() } else { false });
             }
             info.relam = index_rel.rd_rel.relam;
             info.amcanorderbyop = false;
-            info.amoptionalkey = true;
-            info.amsearcharray = true;
-            info.amsearchnulls = true;
-            info.amcanparallel = true;
+            // Per-AM IndexAmRoutine flags (bthandler/hashhandler).
+            info.amoptionalkey = am_is_btree;
+            info.amsearcharray = am_is_btree;
+            info.amsearchnulls = am_is_btree;
+            info.amcanparallel = am_is_btree;
             info.amhasgettuple = true;
             info.amhasgetbitmap = true;
-            info.amcanmarkpos = true;
+            info.amcanmarkpos = am_is_btree;
 
-            for i in 0..nkeycolumns as usize {
-                let opt = index_rel.rd_indoption[i];
-                info.sortopfamily.push(info.opfamily[i]);
-                info.reverse_sort.push(opt & INDOPTION_DESC != 0);
-                info.nulls_first.push(opt & INDOPTION_NULLS_FIRST != 0);
+            // amcanorder arm: a non-ordering AM leaves the sort vectors empty
+            // (C's NULL sortopfamily).
+            if am_is_btree {
+                for i in 0..nkeycolumns as usize {
+                    let opt = index_rel.rd_indoption[i];
+                    info.sortopfamily.push(info.opfamily[i]);
+                    info.reverse_sort.push(opt & INDOPTION_DESC != 0);
+                    info.nulls_first.push(opt & INDOPTION_NULLS_FIRST != 0);
+                }
             }
 
             // build_index_tlist (plancat.c): simple columns only (expression
@@ -191,7 +197,11 @@ pub fn get_relation_info<'mcx>(
                 types_core::ForkNumber::MAIN_FORKNUM,
             )?;
             info.tuples = run.root.rel(rel).tuples;
-            info.tree_height = Cell::new(nbtree::bt_getrootheight(&index_rel)?);
+            info.tree_height = Cell::new(if am_is_btree {
+                nbtree::bt_getrootheight(&index_rel)?
+            } else {
+                -1
+            });
 
             indexam::index_close(index_rel, NoLock)?;
             indexinfos.insert(0, &*mcx::forget_box_in(mcx, info)?);
