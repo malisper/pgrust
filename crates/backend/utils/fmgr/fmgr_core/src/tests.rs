@@ -195,3 +195,146 @@ fn ported_overlay_is_subset_of_canonical() {
         assert!(fmgr_isbuiltin(*oid).is_some());
     }
 }
+
+// Result-mcx convention, end-to-end through fmgr_info-resolved carriers
+// (notes/fc-result-convention.md).
+mod result_convention {
+    use super::*;
+    use ::datum::VarlenaRef;
+    use ::mcx::MemoryContext;
+    use alloc::vec::Vec;
+
+    fn text_image(s: &[u8]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(4 + s.len());
+        v.extend_from_slice(&::datum::varlena::set_varsize_4b(4 + s.len()));
+        v.extend_from_slice(s);
+        v
+    }
+
+    fn call2_in(oid: Oid, coll: Oid, ctx: &MemoryContext, a: Datum, b: Datum) -> Datum {
+        let mut flinfo = fmgr_info(oid).unwrap();
+        let mut fci = LocalFcinfo::<2>::fresh(coll);
+        // SAFETY: ctx outlives the single call below.
+        unsafe { fci.set_result_mcx(ctx.mcx()) };
+        fci.set_arg(0, a);
+        fci.set_arg(1, b);
+        let d = flinfo.invoke(&mut fci).unwrap();
+        assert!(!fci.isnull);
+        d
+    }
+
+    #[test]
+    fn textcat_allocates_in_armed_context_and_reset_frees() {
+        let mut ctx = MemoryContext::new_bump("textcat");
+        let a = text_image(b"hello");
+        let b = text_image(b"world");
+        let before = ctx.used();
+        let d = call2_in(
+            1258,
+            InvalidOid,
+            &ctx,
+            Datum::from_usize(a.as_ptr() as usize),
+            Datum::from_usize(b.as_ptr() as usize),
+        );
+        // SAFETY: textcat result is a live 4B-header varlena in ctx.
+        let r = unsafe { VarlenaRef::from_ptr(d.as_usize() as *const u8) };
+        assert_eq!(r.data(), b"helloworld");
+        assert!(ctx.used() > before);
+        // Reset reclaims the results: repeated call+reset cycles never grow
+        // the arena past the keeper block it retains.
+        ctx.reset();
+        let keeper = ctx.used();
+        for _ in 0..64 {
+            let d = call2_in(
+                1258,
+                InvalidOid,
+                &ctx,
+                Datum::from_usize(a.as_ptr() as usize),
+                Datum::from_usize(b.as_ptr() as usize),
+            );
+            // SAFETY: as above.
+            let r = unsafe { VarlenaRef::from_ptr(d.as_usize() as *const u8) };
+            assert_eq!(r.data(), b"helloworld");
+            ctx.reset();
+        }
+        assert_eq!(ctx.used(), keeper);
+    }
+
+    #[test]
+    fn lower_through_fmgr_info() {
+        let ctx = MemoryContext::new_bump("lower");
+        let mut flinfo = fmgr_info(870).unwrap();
+        assert!(flinfo.fn_strict);
+        let arg = text_image(b"MiXeD");
+        let mut fci = LocalFcinfo::<1>::fresh(::types_core::C_COLLATION_OID);
+        // SAFETY: ctx outlives the single call below.
+        unsafe { fci.set_result_mcx(ctx.mcx()) };
+        fci.set_arg(0, Datum::from_usize(arg.as_ptr() as usize));
+        let d = flinfo.invoke(&mut fci).unwrap();
+        // SAFETY: lower result is a live 4B-header varlena in ctx.
+        let r = unsafe { VarlenaRef::from_ptr(d.as_usize() as *const u8) };
+        assert_eq!(r.data(), b"mixed");
+    }
+
+    #[test]
+    fn numeric_add_result_owned_by_context() {
+        let mut ctx = MemoryContext::new_bump("numeric");
+        let a = ::adt_numeric::int64_to_numeric(20);
+        let b = ::adt_numeric::int64_to_numeric(22);
+        let d = call2_in(
+            1724,
+            InvalidOid,
+            &ctx,
+            Datum::from_usize(a.as_bytes().as_ptr() as usize),
+            Datum::from_usize(b.as_bytes().as_ptr() as usize),
+        );
+        let p = d.as_usize() as *const u8;
+        assert_eq!(p as usize % 8, 0);
+        // SAFETY: numeric_add result is a live 4B-header varlena in ctx.
+        let r = unsafe { VarlenaRef::from_ptr(p) };
+        let want = ::adt_numeric::int64_to_numeric(42);
+        assert_eq!(r.as_bytes(), want.as_bytes());
+        ctx.reset();
+        let keeper = ctx.used();
+        for _ in 0..64 {
+            let _ = call2_in(
+                1724,
+                InvalidOid,
+                &ctx,
+                Datum::from_usize(a.as_bytes().as_ptr() as usize),
+                Datum::from_usize(b.as_bytes().as_ptr() as usize),
+            );
+            ctx.reset();
+        }
+        assert_eq!(ctx.used(), keeper);
+    }
+
+    #[test]
+    fn numeric_cmp_needs_no_arming() {
+        let a = ::adt_numeric::int64_to_numeric(7);
+        let b = ::adt_numeric::int64_to_numeric(9);
+        let mut flinfo = fmgr_info(1769).unwrap();
+        let d = function_call2_coll(
+            &mut flinfo,
+            InvalidOid,
+            Datum::from_usize(a.as_bytes().as_ptr() as usize),
+            Datum::from_usize(b.as_bytes().as_ptr() as usize),
+        )
+        .unwrap();
+        assert_eq!(d.as_i32(), -1);
+    }
+
+    #[test]
+    #[should_panic(expected = "never armed")]
+    fn varlena_result_without_arming_panics() {
+        let a = text_image(b"x");
+        let b = text_image(b"y");
+        let mut flinfo = fmgr_info(1258).unwrap();
+        let _ = function_call2_coll(
+            &mut flinfo,
+            InvalidOid,
+            Datum::from_usize(a.as_ptr() as usize),
+            Datum::from_usize(b.as_ptr() as usize),
+        );
+    }
+}

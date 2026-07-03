@@ -15,6 +15,7 @@ datum = { path = "../../../../_support/types/datum" }
 fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
 fmgr_seams = { path = "../fmgr_seams" }
 adt_bool = { path = "../../adt/bool" }
+adt_scalar = { path = "../../adt/scalar" }
 adt_cash = { path = "../../adt/cash" }
 adt_date = { path = "../../adt/adt_date" }
 adt_float = { path = "../../adt/float" }
@@ -29,3 +30,6 @@ adt_pseudotypes = { path = "../../adt/pseudotypes" }
 name = { path = "../../adt/name" }
 nbt_compare = { path = "../../../access/nbtree/compare" }
 varlena = { path = "../../adt/varlena" }
+
+[dev-dependencies]
+mcx = { path = "../../../../_support/mcx" }

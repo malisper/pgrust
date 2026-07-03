@@ -234,3 +234,172 @@ fn builtin_table_matches_declared_arity() {
         assert!(row.nargs == 1 || row.nargs == 2, "{}", row.name);
     }
 }
+
+fn install_mb_for_levenshtein() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // UTF-8 test encoding.
+        mbutils_seams::pg_mbstrlen_with_len::set(|s| {
+            std::str::from_utf8(s).unwrap().chars().count() as i32
+        });
+        mbutils_seams::pg_mblen_range::set(|s| {
+            Ok(std::str::from_utf8(s).unwrap().chars().next().unwrap().len_utf8() as i32)
+        });
+    });
+}
+
+#[test]
+fn levenshtein_matches_c_values() {
+    install_mb_for_levenshtein();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let ln = |s: &str, t: &str| {
+        levenshtein::varstr_levenshtein(mcx, s.as_bytes(), t.as_bytes(), 1, 1, 1, false).unwrap()
+    };
+    assert_eq!(ln("kitten", "sitting"), 3);
+    assert_eq!(ln("", "abc"), 3);
+    assert_eq!(ln("abc", ""), 3);
+    assert_eq!(ln("same", "same"), 0);
+    assert_eq!(ln("ctid", "cttid"), 1);
+    // Pinned against live PG 18.3 fuzzystrmatch: levenshtein('extensive','exhaustive',2,1,5).
+    assert_eq!(
+        levenshtein::varstr_levenshtein(mcx, b"extensive", b"exhaustive", 2, 1, 5, false)
+            .unwrap(),
+        11
+    );
+}
+
+#[test]
+fn levenshtein_less_equal_bound_and_multibyte() {
+    install_mb_for_levenshtein();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let lle = |s: &str, t: &str, max_d: i32| {
+        levenshtein::varstr_levenshtein_less_equal(
+            mcx,
+            s.as_bytes(),
+            t.as_bytes(),
+            1,
+            1,
+            1,
+            max_d,
+            true,
+        )
+        .unwrap()
+    };
+    assert_eq!(lle("kitten", "sitting", 2), 3);
+    assert_eq!(lle("kitten", "sitting", 3), 3);
+    assert_eq!(lle("kitten", "sitting", 10), 3);
+    // Pinned against live PG 18.3: levenshtein_less_equal('extensive','exhaustive',2) = 3.
+    assert_eq!(lle("extensive", "exhaustive", 2), 3);
+    assert_eq!(lle("café", "cafe", 4), 1);
+    assert_eq!(lle("日本語", "日本", 4), 1);
+    assert_eq!(lle("colname", "colname", 3), 0);
+    assert_eq!(lle("a", "zzzzzzzz", 3), 4);
+}
+
+#[test]
+fn levenshtein_untrusted_length_cap_is_22023() {
+    install_mb_for_levenshtein();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let long = "x".repeat(256);
+    let err = levenshtein::varstr_levenshtein(mcx, long.as_bytes(), b"y", 1, 1, 1, false)
+        .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_PARAMETER_VALUE);
+    assert_eq!(
+        err.message,
+        "levenshtein argument exceeds maximum length of 255 characters"
+    );
+    assert!(
+        levenshtein::varstr_levenshtein(mcx, long.as_bytes(), b"y", 1, 1, 1, true).is_ok()
+    );
+}
+
+mod fc_results {
+    use datum::{Datum, VarlenaRef};
+    use mcx::MemoryContext;
+    use types_fmgr::{direct_function_call1_coll_in, direct_function_call2_coll_in};
+
+    use crate::builtins::*;
+
+    fn text_image(s: &[u8]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(4 + s.len());
+        v.extend_from_slice(&datum::varlena::set_varsize_4b(4 + s.len()));
+        v.extend_from_slice(s);
+        v
+    }
+
+    fn text_of(d: Datum) -> &'static [u8] {
+        // SAFETY: test results are live 4B-header varlenas kept in the ctx.
+        unsafe { VarlenaRef::from_ptr(d.as_usize() as *const u8) }.data()
+    }
+
+    #[test]
+    fn textcat_and_byteacat() {
+        let ctx = MemoryContext::new_bump("t");
+        let a = text_image(b"foo");
+        let b = text_image(b"bar");
+        let d = direct_function_call2_coll_in(
+            fc_textcat,
+            0,
+            ctx.mcx(),
+            Datum::from_usize(a.as_ptr() as usize),
+            Datum::from_usize(b.as_ptr() as usize),
+        )
+        .unwrap();
+        assert_eq!(text_of(d), b"foobar");
+        let d = direct_function_call2_coll_in(
+            fc_byteacat,
+            0,
+            ctx.mcx(),
+            Datum::from_usize(a.as_ptr() as usize),
+            Datum::from_usize(b.as_ptr() as usize),
+        )
+        .unwrap();
+        assert_eq!(text_of(d), b"foobar");
+    }
+
+    #[test]
+    fn byteain_hex() {
+        let ctx = MemoryContext::new_bump("t");
+        let d = direct_function_call1_coll_in(
+            fc_byteain,
+            0,
+            ctx.mcx(),
+            Datum::from_usize(b"\\x6465616462656566\0".as_ptr() as usize),
+        )
+        .unwrap();
+        assert_eq!(text_of(d), b"deadbeef");
+    }
+
+    #[test]
+    fn unknownin_copies_cstring() {
+        let ctx = MemoryContext::new_bump("t");
+        let src = b"who knows\0";
+        let d = direct_function_call1_coll_in(
+            fc_unknownin,
+            0,
+            ctx.mcx(),
+            Datum::from_usize(src.as_ptr() as usize),
+        )
+        .unwrap();
+        let p = d.as_usize() as *const u8;
+        assert_ne!(p, src.as_ptr());
+        // SAFETY: unknownin result is a live NUL-terminated cstring in ctx.
+        let got = unsafe { core::ffi::CStr::from_ptr(p.cast()) };
+        assert_eq!(got.to_bytes(), b"who knows");
+    }
+
+    #[test]
+    #[should_panic(expected = "never armed")]
+    fn textcat_unarmed_panics() {
+        let a = text_image(b"x");
+        let _ = types_fmgr::direct_function_call2_coll(
+            fc_textcat,
+            0,
+            Datum::from_usize(a.as_ptr() as usize),
+            Datum::from_usize(a.as_ptr() as usize),
+        );
+    }
+}

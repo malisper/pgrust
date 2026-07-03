@@ -1,7 +1,6 @@
-//! fmgr wrappers (`fc_*`) + `BOOL_BUILTINS` for fmgr-core. boolrecv/boolsend
-//! need the wire convention at the frame, booltext the text-result
-//! convention, and the bool_accum family the agg internal-state frame
-//! (the int.c/varlena precedents); their value cores live in the crate root.
+//! fmgr wrappers (`fc_*`) + `BOOL_BUILTINS` for fmgr-core. Still deferred:
+//! boolrecv/boolsend (pqformat wire frame is a separate unit) and the
+//! bool_accum family (agg internal-state frame); value cores in the crate root.
 
 use alloc::borrow::Cow;
 use alloc::string::String;
@@ -9,7 +8,9 @@ use alloc::string::String;
 use ::datum::Datum;
 use ::types_core::Oid;
 use ::types_error::PgResult;
-use ::types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
+use ::types_fmgr::{
+    varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
+};
 
 #[cold]
 #[inline(never)]
@@ -71,6 +72,12 @@ fc_bool2! {
     fc_boolor_statefunc: boolor_statefunc;
 }
 
+pub fn fc_booltext(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a] = fcinfo.args_n::<1>();
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::booltext(mcx, a.value.as_bool())?))
+}
+
 pub fn fc_hashbool(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
     Ok(Datum::from_u32(crate::hashbool(a.value.as_bool())))
@@ -107,6 +114,7 @@ pub const BOOL_BUILTINS: &[FmgrBuiltin] = &[
     b(1692, "boolge", 2, fc_boolge),
     b(2515, "booland_statefunc", 2, fc_booland_statefunc),
     b(2516, "boolor_statefunc", 2, fc_boolor_statefunc),
+    b(2971, "booltext", 1, fc_booltext),
     b(6417, "hashbool", 1, fc_hashbool),
     b(6418, "hashboolextended", 2, fc_hashboolextended),
 ];

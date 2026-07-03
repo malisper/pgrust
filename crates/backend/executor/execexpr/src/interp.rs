@@ -95,6 +95,7 @@ pub fn exec_project<'mcx>(
     result_mcx: ::mcx::Mcx<'mcx>,
 ) -> PgResult<()> {
     check_still_valid(state, slots)?;
+    state.arm_result_mcx(result_mcx);
     exectuples::exec_clear_tuple(result_slot, result_mcx);
     eval(state, slots, Some(result_slot))?;
     exectuples::exec_store_virtual_tuple(result_slot);
@@ -268,6 +269,23 @@ fn run_program<'mcx>(
             Step::OuterVar { attnum, out, .. } => {
                 let nd = read_var(need_slot(&mut outer), *attnum);
                 write_out(*out, &mut regs, nd.value, nd.isnull);
+            }
+            Step::ScanSysVar { attnum, out } => {
+                let mut isnull = false;
+                let d = exectuples::slot_getsysattr(need_slot(&mut scan), *attnum as i32, &mut isnull)?;
+                write_out(*out, &mut regs, d, isnull);
+            }
+            Step::InnerSysVar { attnum, out } => {
+                let mut isnull = false;
+                let d =
+                    exectuples::slot_getsysattr(need_slot(&mut inner), *attnum as i32, &mut isnull)?;
+                write_out(*out, &mut regs, d, isnull);
+            }
+            Step::OuterSysVar { attnum, out } => {
+                let mut isnull = false;
+                let d =
+                    exectuples::slot_getsysattr(need_slot(&mut outer), *attnum as i32, &mut isnull)?;
+                write_out(*out, &mut regs, d, isnull);
             }
             Step::AssignScanVar { attnum, resultnum } => {
                 let nd = read_var(need_slot(&mut scan), *attnum);

@@ -41,6 +41,9 @@ pub enum Step {
     ScanVar { attnum: u16, vartype: Oid, out: OutRef },
     InnerVar { attnum: u16, vartype: Oid, out: OutRef },
     OuterVar { attnum: u16, vartype: Oid, out: OutRef },
+    ScanSysVar { attnum: i16, out: OutRef },
+    InnerSysVar { attnum: i16, out: OutRef },
+    OuterSysVar { attnum: i16, out: OutRef },
     AssignScanVar { attnum: u16, resultnum: u16 },
     AssignInnerVar { attnum: u16, resultnum: u16 },
     AssignOuterVar { attnum: u16, resultnum: u16 },
@@ -343,6 +346,7 @@ pub struct ExprState<'mcx> {
 
 impl<'mcx> ExprState<'mcx> {
     // C ExprEvalPushStep allocates 16 steps up front on the first push.
+    #[inline]
     pub(crate) fn new_in(mcx: Mcx<'mcx>) -> PgResult<ExprState<'mcx>> {
         Ok(ExprState {
             steps: ::mcx::vec_with_capacity_in(mcx, 16)?,
@@ -362,6 +366,17 @@ impl<'mcx> ExprState<'mcx> {
 
     pub fn is_qual(&self) -> bool {
         self.flags & EEO_FLAG_IS_QUAL != 0
+    }
+
+    // Result-mcx convention: every frame's fcinfo is armed with the context
+    // that owns by-ref call results (C's CurrentMemoryContext at eval).
+    pub fn arm_result_mcx(&mut self, mcx: Mcx<'mcx>) {
+        for f in self.frames.iter() {
+            // SAFETY: the frame's fcinfo image is live for 'mcx and this is
+            // the sole reference; 'mcx also bounds the armed context, so it
+            // outlives every call through the frame.
+            unsafe { fcinfo_mut(f.fcinfo, f.nargs).set_result_mcx(mcx) };
+        }
     }
 
     #[cfg(any(test, feature = "bench-internals"))]

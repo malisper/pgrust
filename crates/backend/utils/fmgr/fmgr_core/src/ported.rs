@@ -14,6 +14,7 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::adt_numeric::builtins::NUMERIC_BUILTINS,
     ::adt_oracle_compat::builtins::ORACLE_COMPAT_BUILTINS,
     ::adt_pseudotypes::builtins::PSEUDOTYPES_BUILTINS,
+    ::adt_scalar::builtins::SCALAR_BUILTINS,
     ::name::builtins::NAME_BUILTINS,
     ::nbt_compare::builtins::NBT_BUILTINS,
     ::varlena::builtins::VARLENA_BUILTINS,

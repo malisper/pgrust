@@ -398,3 +398,82 @@ fn maximum_size() {
     assert_eq!(numeric_maximum_size(-1), -1);
     assert_eq!(numeric_maximum_size(make_numeric_typmod(10, 2)), 8 + 4 * 2);
 }
+
+mod fc_results {
+    use datum::Datum;
+    use mcx::MemoryContext;
+    use types_fmgr::{
+        direct_function_call1_coll_in, direct_function_call2_coll_in,
+        direct_function_call3_coll_in, FmgrInfo, LocalFcinfo,
+    };
+
+    use crate::builtins::*;
+    use crate::{int64_to_numeric, Num};
+
+    fn num_datum(img: &crate::NumericImage) -> Datum {
+        Datum::from_usize(img.as_bytes().as_ptr() as usize)
+    }
+
+    fn result_num(d: Datum) -> Num<'static> {
+        let p = d.as_usize() as *const u8;
+        assert_eq!(p as usize % 8, 0);
+        // SAFETY: results are live 4B-header numeric varlenas kept in the ctx.
+        let r = unsafe { datum::VarlenaRef::from_ptr(p) };
+        Num::from_payload(r.data())
+    }
+
+    #[test]
+    fn arith_through_fc_frames() {
+        let ctx = MemoryContext::new_bump("t");
+        let a = int64_to_numeric(6);
+        let b = int64_to_numeric(7);
+        let d = direct_function_call2_coll_in(fc_numeric_mul, 0, ctx.mcx(), num_datum(&a), num_datum(&b))
+            .unwrap();
+        assert_eq!(crate::cmp_numerics(result_num(d), int64_to_numeric(42).num()), 0);
+        let d = direct_function_call2_coll_in(fc_numeric_add, 0, ctx.mcx(), num_datum(&a), num_datum(&b))
+            .unwrap();
+        assert_eq!(crate::cmp_numerics(result_num(d), int64_to_numeric(13).num()), 0);
+    }
+
+    #[test]
+    fn cmp_and_pointer_returning_rows() {
+        let a = int64_to_numeric(1);
+        let b = int64_to_numeric(2);
+        let d = types_fmgr::direct_function_call2_coll(fc_numeric_cmp, 0, num_datum(&a), num_datum(&b))
+            .unwrap();
+        assert_eq!(d.as_i32(), -1);
+        let d = types_fmgr::direct_function_call2_coll(fc_numeric_larger, 0, num_datum(&a), num_datum(&b))
+            .unwrap();
+        assert_eq!(d.as_usize(), num_datum(&b).as_usize());
+    }
+
+    #[test]
+    fn in_out_round_trip() {
+        let ctx = MemoryContext::new_bump("t");
+        let d = direct_function_call3_coll_in(
+            fc_numeric_in,
+            0,
+            ctx.mcx(),
+            Datum::from_usize(b"12.75\0".as_ptr() as usize),
+            Datum::from_oid(0),
+            Datum::from_i32(-1),
+        )
+        .unwrap();
+        // numeric_out needs a resolved FmgrInfo (retained cstring scratch).
+        let mut flinfo = FmgrInfo::new(fc_numeric_out, 1702, 1, true, false);
+        let mut fci = LocalFcinfo::<1>::fresh(0);
+        fci.set_arg(0, d);
+        let out = flinfo.invoke(&mut fci).unwrap();
+        // SAFETY: numeric_out result is a live NUL-terminated cstring scratch.
+        let s = unsafe { core::ffi::CStr::from_ptr((out.as_usize() as *const u8).cast()) };
+        assert_eq!(s.to_bytes(), b"12.75");
+    }
+
+    #[test]
+    fn int_and_typmod_rows() {
+        let ctx = MemoryContext::new_bump("t");
+        let d = direct_function_call1_coll_in(fc_int8_numeric, 0, ctx.mcx(), Datum::from_i64(-9))
+            .unwrap();
+        assert_eq!(crate::cmp_numerics(result_num(d), int64_to_numeric(-9).num()), 0);
+    }
+}

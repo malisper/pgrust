@@ -606,3 +606,48 @@ fn agg_trans_strict_with_args_panics() {
         let _ = exec_build_agg_trans(mcx, &specs);
     });
 }
+
+fn eval_sysvar<'m>(
+    mcx: Mcx<'m>,
+    slot: &mut SlotData<'m>,
+    attno: i16,
+    typ: u32,
+) -> ::types_error::PgResult<::datum::NullableDatum> {
+    let mut state = exec_init_expr(mcx, Some(mk_scan_var(mcx, attno, typ))).unwrap().unwrap();
+    assert!(matches!(state.kernel(), Kernel::Program));
+    let mut slots = EvalSlots { scan: Some(slot), inner: None, outer: None };
+    exec_eval_expr(&mut state, &mut slots)
+}
+
+#[test]
+fn sysvar_steps_read_slot_and_tuple_header() {
+    with_mcx(|mcx| {
+        let desc = desc_int4(mcx, 1);
+        let vals = [Datum::from_i32(9)];
+        let nulls = [false];
+        let mut tuple = heaptuple::heap_form_tuple(mcx, &desc, &vals, &nulls).unwrap();
+        tuple.t_data_mut().set_xmin(77);
+        tuple.t_data_mut().set_cmin(5);
+        let mut slot = exectuples::make_tuple_table_slot(mcx, TupleSlotKind::HeapTuple, Some(desc));
+        exectuples::exec_store_heap_tuple_owned(&mut slot, mcx, tuple);
+        slot.base_mut().tts_tableOid = 424242;
+        slot.base_mut().tts_tid = ::types_tuple::ItemPointerData::new(7, 3);
+
+        let ctid = eval_sysvar(mcx, &mut slot, -1, 27).unwrap();
+        assert!(!ctid.isnull);
+        let tid = unsafe { &*(ctid.value.as_usize() as *const ::types_tuple::ItemPointerData) };
+        assert_eq!(*tid, ::types_tuple::ItemPointerData::new(7, 3));
+
+        assert_eq!(eval_sysvar(mcx, &mut slot, -2, 28).unwrap().value.as_u32(), 77);
+        assert_eq!(eval_sysvar(mcx, &mut slot, -3, 29).unwrap().value.as_u32(), 5);
+        assert_eq!(eval_sysvar(mcx, &mut slot, -5, 29).unwrap().value.as_u32(), 5);
+        assert_eq!(eval_sysvar(mcx, &mut slot, -6, 26).unwrap().value.as_oid(), 424242);
+
+        // Virtual slots surface xmin only through the 0A000 arm.
+        let mut vslot = virtual_slot(mcx, &[Some(1)]);
+        vslot.base_mut().tts_tableOid = 7;
+        assert_eq!(eval_sysvar(mcx, &mut vslot, -6, 26).unwrap().value.as_oid(), 7);
+        let err = eval_sysvar(mcx, &mut vslot, -2, 28).unwrap_err();
+        assert_eq!(err.message, "cannot retrieve a system column in this context");
+    });
+}

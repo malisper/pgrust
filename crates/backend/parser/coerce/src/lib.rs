@@ -249,8 +249,10 @@ fn coerce_unknown_const<'mcx>(
     Ok(result)
 }
 
-// C stringTypeDatum → OidInputFunctionCall; the result is copied into `mcx`
-// (C's per-call palloc boundary — the fc_ scratch dies with the FmgrInfo).
+// C stringTypeDatum → OidInputFunctionCall; the frame is armed with `mcx`
+// (result-mcx convention) and the result is still copied by own_datum —
+// pre-convention wrappers (textin) return FmgrInfo-scratch that dies with
+// the FmgrInfo, and the varlena arm detoasts.
 fn string_type_datum<'mcx>(
     mcx: Mcx<'mcx>,
     io: &syscache_seams::PgTypeIoShape,
@@ -271,9 +273,10 @@ fn string_type_datum<'mcx>(
         }
         unported("stringTypeDatum (parse_type.c): non-strict typinput with NULL input");
     }
-    let d = fmgr_core::function_call3_coll(
+    let d = fmgr_core::function_call3_coll_in(
         &mut flinfo,
         InvalidOid,
+        mcx,
         value,
         Datum::from_oid(typioparam),
         Datum::from_i32(typmod),
@@ -488,9 +491,11 @@ pub fn enforce_generic_type_consistency(
 #[cold]
 #[inline(never)]
 fn conversion_not_found(inputTypeId: Oid, targetTypeId: Oid) -> Box<PgError> {
-    // C renders type names via format_type_be (format_type.c, unported).
+    let src = format_type::format_type_be(inputTypeId).unwrap_or_else(|_| inputTypeId.to_string());
+    let dst =
+        format_type::format_type_be(targetTypeId).unwrap_or_else(|_| targetTypeId.to_string());
     Box::new(PgError::error(format!(
-        "failed to find conversion function from {inputTypeId} to {targetTypeId}"
+        "failed to find conversion function from {src} to {dst}"
     )))
 }
 
