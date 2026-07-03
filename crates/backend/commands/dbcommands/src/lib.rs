@@ -142,12 +142,14 @@ pub fn have_createdb_privilege() -> PgResult<bool> {
 pub fn errdetail_busy_db(notherbackends: i32, npreparedxacts: i32) -> String {
     if notherbackends > 0 && npreparedxacts > 0 {
         format!(
-            "There are {notherbackends} other sessions and {npreparedxacts} prepared transactions using the database."
+            "There are {notherbackends} other session(s) and {npreparedxacts} prepared transaction(s) using the database."
         )
-    } else if notherbackends == 1 && npreparedxacts == 0 {
-        "There is 1 other session using the database.".into()
-    } else if notherbackends > 1 {
-        format!("There are {notherbackends} other sessions using the database.")
+    } else if notherbackends > 0 {
+        if notherbackends == 1 {
+            "There is 1 other session using the database.".into()
+        } else {
+            format!("There are {notherbackends} other sessions using the database.")
+        }
     } else if npreparedxacts == 1 {
         "There is 1 prepared transaction using the database.".into()
     } else {
@@ -244,10 +246,8 @@ pub(crate) fn get_parent_directory(path: &str) -> &str {
 const PG_TBLSPC_DIR_SLASH: &str = "pg_tblspc/";
 
 fn recovery_create_dbdir(path: &str, only_tblspc: bool) -> PgResult<()> {
-    if let Ok(md) = std::fs::metadata(path) {
-        if md.is_dir() {
-            return Ok(());
-        }
+    if std::fs::metadata(path).is_ok() {
+        return Ok(());
     }
     if only_tblspc && !path.contains(PG_TBLSPC_DIR_SLASH) {
         return Err(ereport(PANIC)
@@ -255,12 +255,22 @@ fn recovery_create_dbdir(path: &str, only_tblspc: bool) -> PgResult<()> {
             .into_error()
             .into());
     }
-    // C gates on reachedConsistency + allow_in_place_tablespaces; crash
-    // recovery of a self-contained datadir only reaches here before
-    // consistency, the expected drop-then-recreate case.
-    ereport(WARNING)
-        .errmsg(format!("creating missing directory: {path}"))
-        .finish(loc("recovery_create_dbdir"))?;
+    let reached_consistency = xlogrecovery_seams::reached_consistency::call();
+    let in_place_ok = guc_tables::vars::allow_in_place_tablespaces.installed()
+        && guc_tables::vars::allow_in_place_tablespaces.read();
+    // After consistency a missing tablespace dir means tablespace loss, never
+    // the expected drop-then-recreate case; masking it corrupts silently.
+    if reached_consistency && !in_place_ok {
+        return Err(ereport(PANIC)
+            .errmsg(format!("missing directory \"{path}\""))
+            .into_error()
+            .into());
+    }
+    if reached_consistency {
+        ereport(WARNING)
+            .errmsg(format!("creating missing directory: {path}"))
+            .finish(loc("recovery_create_dbdir"))?;
+    }
     fd::pg_mkdir_p(path)
 }
 
@@ -300,10 +310,20 @@ pub fn dbase_redo(record: &mut XLogReaderState) -> PgResult<()> {
         }
 
         let parent = get_parent_directory(dst_path.as_str());
-        if std::fs::metadata(parent).is_err() {
+        if let Err(e) = std::fs::metadata(parent) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                // C names dst_path here, not the parent it stat'ed.
+                return Err(ereport(types_error::FATAL)
+                    .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                    .errmsg(format!("could not stat directory \"{}\": %m", dst_path.as_str()))
+                    .into_error()
+                    .into());
+            }
             recovery_create_dbdir(parent, true)?;
         }
-        if std::fs::metadata(src_path.as_str()).is_err() {
+        if matches!(std::fs::metadata(src_path.as_str()),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+        {
             recovery_create_dbdir(src_path.as_str(), false)?;
         }
 
@@ -324,8 +344,9 @@ pub fn dbase_redo(record: &mut XLogReaderState) -> PgResult<()> {
         let db_id = u32_at(0);
         let ntablespaces = i32::from_ne_bytes(data[4..8].try_into().expect("short drop record"));
 
-        // InHotStandby arms (session locks, recovery-conflict resolution,
-        // replication-slot drops) ride the standby lane.
+        // InHotStandby arms (session locks, recovery-conflict resolution) ride
+        // the standby lane. ReplicationSlotsDropDBSlots is unconditional in C
+        // (slot.c home): wire it as a named loud when the slot crate lands.
         bufmgr::DropDatabaseBuffers(db_id)?;
         smgr::ForgetDatabaseSyncRequests(db_id)?;
         xlogutils::XLogDropDatabase(db_id)?;

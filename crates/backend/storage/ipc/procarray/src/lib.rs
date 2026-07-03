@@ -18,7 +18,8 @@ use types_error::{PgError, PgResult, ERRCODE_TOO_MANY_CONNECTIONS, FATAL};
 use types_snapshot::SnapshotData;
 use types_storage::storage::{
     SyncCell, NUM_AUXILIARY_PROCS, PGPROC, PGPROC_MAX_CACHED_SUBXIDS,
-    PROC_AFFECTS_ALL_HORIZONS, PROC_IN_LOGICAL_DECODING, PROC_IN_VACUUM, PROC_VACUUM_STATE_MASK,
+    PROC_AFFECTS_ALL_HORIZONS, PROC_IN_LOGICAL_DECODING, PROC_IN_VACUUM, PROC_IS_AUTOVACUUM,
+    PROC_VACUUM_STATE_MASK,
 };
 
 mod running;
@@ -1114,6 +1115,7 @@ pub fn GlobalVisCheckRemovableFullXid(
 }
 
 pub fn GetOldestActiveTransactionId() -> PgResult<TransactionId> {
+    debug_assert!(!transam_xlog_seams::recovery_in_progress::call());
     let arrayP = procArray();
     let hdr = ProcGlobal();
     let my_procno = MyProc().expect("no MyProc");
@@ -1150,9 +1152,8 @@ pub fn HaveVirtualXIDsDelayingChkpt(delay_type: i32) -> bool {
     let hdr = ProcGlobal();
     let my_procno = MyProc().expect("no MyProc");
 
-    if LWLockAcquire(ProcArrayLock(), LW_SHARED, my_procno).is_err() {
-        return false;
-    }
+    LWLockAcquire(ProcArrayLock(), LW_SHARED, my_procno)
+        .expect("ProcArrayLock for HaveVirtualXIDsDelayingChkpt");
     let mut result = false;
     for index in 0..arrayP.numProcs.get() as usize {
         let pgprocno = arrayP.pgprocnos[index].get();
@@ -1180,7 +1181,10 @@ pub fn CountDBConnections(databaseid: types_core::Oid) -> PgResult<i32> {
         if proc.pid.load(Relaxed) == 0 {
             continue;
         }
-        if proc.databaseId.load(Relaxed) == databaseid {
+        if !proc.isRegularBackend.load(Relaxed) {
+            continue;
+        }
+        if databaseid == types_core::InvalidOid || proc.databaseId.load(Relaxed) == databaseid {
             count += 1;
         }
     }
@@ -1195,11 +1199,13 @@ pub fn CountOtherDBBackends(databaseid: types_core::Oid) -> PgResult<Option<(i32
     let hdr = ProcGlobal();
     let my_procno = MyProc().expect("no MyProc");
 
+    let mut nbackends = 0;
+    let mut nprepared = 0;
     for _ in 0..50 {
         postgres_seams::check_for_interrupts::call()?;
 
-        let mut nbackends = 0;
-        let mut nprepared = 0;
+        nbackends = 0;
+        nprepared = 0;
         let mut found = false;
 
         LWLockAcquire(ProcArrayLock(), LW_SHARED, my_procno)?;
@@ -1216,6 +1222,12 @@ pub fn CountOtherDBBackends(databaseid: types_core::Oid) -> PgResult<Option<(i32
             if proc.pid.load(Relaxed) == 0 {
                 nprepared += 1;
             } else {
+                // C SIGTERMs conflicting autovacuum workers here; none exist
+                // yet — trip if one ever does rather than wait out the 5s.
+                debug_assert!(
+                    hdr.statusFlags[index].load(Relaxed) & PROC_IS_AUTOVACUUM == 0,
+                    "CountOtherDBBackends: autovacuum SIGTERM step unported"
+                );
                 nbackends += 1;
             }
         }
@@ -1227,22 +1239,7 @@ pub fn CountOtherDBBackends(databaseid: types_core::Oid) -> PgResult<Option<(i32
 
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    let mut nbackends = 0;
-    let mut nprepared = 0;
-    LWLockAcquire(ProcArrayLock(), LW_SHARED, my_procno)?;
-    for index in 0..arrayP.numProcs.get() as usize {
-        let pgprocno = arrayP.pgprocnos[index].get();
-        let proc = &hdr.allProcs[pgprocno as usize];
-        if proc.databaseId.load(Relaxed) != databaseid || pgprocno == my_procno {
-            continue;
-        }
-        if proc.pid.load(Relaxed) == 0 {
-            nprepared += 1;
-        } else {
-            nbackends += 1;
-        }
-    }
-    LWLockRelease(ProcArrayLock())?;
+    // Timed out: C returns the counts from the final try, no recount.
     Ok(Some((nbackends, nprepared)))
 }
 

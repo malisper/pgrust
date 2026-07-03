@@ -2041,6 +2041,7 @@ dependencies = [
  "fd",
  "fmgr_seams",
  "genam",
+ "guc_tables",
  "heaptuple",
  "init_small",
  "libc",
@@ -2048,6 +2049,7 @@ dependencies = [
  "mbutils",
  "mcx",
  "miscinit",
+ "numutils",
  "pg_database",
  "pg_database_seams",
  "pg_depend",
@@ -2073,6 +2075,7 @@ dependencies = [
  "xact",
  "xloginsert",
  "xlogreader_seams",
+ "xlogrecovery_seams",
  "xlogutils",
 ]
 

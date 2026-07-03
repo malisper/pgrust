@@ -335,7 +335,14 @@ fn dispatch_switch<'mcx>(
                 let d = opt.as_def_elem().expect("dropdb options are DefElems");
                 match d.defname.unwrap_or("") {
                     "force" => force = true,
-                    other => panic!("dropdb: unrecognized option \"{other}\""),
+                    other => {
+                        return Err(elog::ereport(types_error::ERROR)
+                            .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+                            .errmsg(format!("unrecognized DROP DATABASE option \"{other}\""))
+                            .errposition(d.location + 1)
+                            .into_error()
+                            .into())
+                    }
                 }
             }
             dbcommands::dropdb(mcx, stmt.dbname.unwrap_or(""), stmt.missing_ok, force)?;

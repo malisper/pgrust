@@ -154,6 +154,10 @@ pub fn copy_file(fromfile: &str, tofile: &str) -> PgResult<()> {
         offset += nbytes as i64;
     }
 
+    if offset > flush_offset {
+        pg_flush_data(dst_raw, flush_offset, offset - flush_offset)?;
+    }
+
     if CloseTransientFile(dstfd) != 0 {
         return Err(ereport(ERROR)
             .with_saved_errno(get_errno())
@@ -185,8 +189,12 @@ pub fn rmtree(path: &str, rmtopdir: bool) -> PgResult<bool> {
         let full = format!("{path}/{name}");
         let md = match std::fs::symlink_metadata(&full) {
             Ok(md) => md,
-            Err(_) => {
-                result = false;
+            // PGFILETYPE_ERROR arm: log and press on, result stays true.
+            Err(e) => {
+                ereport(WARNING)
+                    .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                    .errmsg(format!("could not stat file \"{full}\": %m"))
+                    .finish(loc("rmtree"))?;
                 continue;
             }
         };
@@ -194,18 +202,24 @@ pub fn rmtree(path: &str, rmtopdir: bool) -> PgResult<bool> {
             if !rmtree(&full, true)? {
                 result = false;
             }
-        } else if std::fs::remove_file(&full).is_err() {
+        } else if let Err(e) = std::fs::remove_file(&full) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                ereport(WARNING)
+                    .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                    .errmsg(format!("could not remove file \"{full}\": %m"))
+                    .finish(loc("rmtree"))?;
+                result = false;
+            }
+        }
+    }
+    if rmtopdir {
+        if let Err(e) = std::fs::remove_dir(path) {
             ereport(WARNING)
-                .errmsg(format!("could not remove file \"{full}\""))
+                .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                .errmsg(format!("could not remove directory \"{path}\": %m"))
                 .finish(loc("rmtree"))?;
             result = false;
         }
-    }
-    if rmtopdir && std::fs::remove_dir(path).is_err() {
-        ereport(WARNING)
-            .errmsg(format!("could not remove directory \"{path}\""))
-            .finish(loc("rmtree"))?;
-        result = false;
     }
     Ok(result)
 }
