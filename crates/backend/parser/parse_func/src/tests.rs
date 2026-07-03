@@ -275,7 +275,7 @@ fn star_on_normal_function_is_42809() {
 }
 
 #[test]
-#[should_panic(expected = "transformDistinctClause")]
+#[should_panic(expected = "seam not installed: parse_clause_seams::transform_agg_order_distinct")]
 fn distinct_aggregate_panics() {
     install_fixture();
     let ctx = MemoryContext::new("t");
