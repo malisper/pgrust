@@ -163,6 +163,15 @@ pub fn exec_qual<'mcx>(
         let v = exectuples::slot_getattr(scan, attnum as i32 + 1, &mut isnull);
         return Ok(!isnull && cmp.eval(v, konst));
     }
+    if let Kernel::QualVarCmpVar { a_src, a_attnum, b_src, b_attnum, cmp } = state.kernel {
+        let mut isnull = false;
+        let a = exectuples::slot_getattr(slots.get(a_src), a_attnum as i32 + 1, &mut isnull);
+        if isnull {
+            return Ok(false);
+        }
+        let b = exectuples::slot_getattr(slots.get(b_src), b_attnum as i32 + 1, &mut isnull);
+        return Ok(!isnull && cmp.eval(a, b));
+    }
     let r = match eval(state, slots, None, None)? {
         EvalOutcome::Done(nd) => nd,
         EvalOutcome::Suspended(_) => subplan_without_driver(),
@@ -266,6 +275,33 @@ fn eval_kernel<'mcx>(
                 value: Datum::from_bool(!isnull && cmp.eval(v, konst)),
                 isnull: false,
             })
+        }
+        Kernel::QualVarCmpVar { a_src, a_attnum, b_src, b_attnum, cmp } => {
+            let mut isnull = false;
+            let a = exectuples::slot_getattr(slots.get(a_src), a_attnum as i32 + 1, &mut isnull);
+            if isnull {
+                return Ok(NullableDatum { value: Datum::from_bool(false), isnull: false });
+            }
+            let b = exectuples::slot_getattr(slots.get(b_src), b_attnum as i32 + 1, &mut isnull);
+            Ok(NullableDatum {
+                value: Datum::from_bool(!isnull && cmp.eval(a, b)),
+                isnull: false,
+            })
+        }
+        Kernel::Hash32Var { src, attnum, frame } => {
+            let mut isnull = false;
+            let v = exectuples::slot_getattr(slots.get(src), attnum as i32 + 1, &mut isnull);
+            if isnull {
+                return Ok(NullableDatum { value: Datum::from_u32(0), isnull: false });
+            }
+            let f = &mut state.frames[frame as usize];
+            // SAFETY: the frame's 1-arg fcinfo image is live and exclusively
+            // referenced during this call (HashDatumFirst's contract).
+            let fcinfo = unsafe { fcinfo_mut(f.fcinfo, 1) };
+            unsafe { f.arg_slot(0).write(NullableDatum { value: v, isnull: false }) };
+            fcinfo.isnull = false;
+            let value = (f.flinfo.fn_addr)(Some(&mut f.flinfo), fcinfo)?;
+            Ok(NullableDatum { value, isnull: false })
         }
         Kernel::JustFunc { fn_addr, frame, nargs, strict } => {
             let f = &mut state.frames[frame as usize];

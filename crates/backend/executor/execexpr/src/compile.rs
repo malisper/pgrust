@@ -2145,9 +2145,73 @@ fn select_kernel(state: &ExprState<'_>) -> Kernel {
             }
             Kernel::Program
         }
+        4 => select_hash32_var(state).unwrap_or(Kernel::Program),
         5 => select_fused_qual(state).unwrap_or(Kernel::Program),
+        7 => select_qual_var_cmp_var(state).unwrap_or(Kernel::Program),
         _ => Kernel::Program,
     }
+}
+
+// Single-key hash [FETCHSOME, VAR->arg0, HASHDATUM_FIRST->result, DONE].
+fn select_hash32_var(state: &ExprState<'_>) -> Option<Kernel> {
+    let steps = state.steps.as_slice();
+    let fsrc = fetch_src(&steps[0])?;
+    let (src, attnum, var_out) = var_src(&steps[1])?;
+    if fsrc != src {
+        return None;
+    }
+    let Step::HashDatumFirst { call, out } = &steps[2] else {
+        return None;
+    };
+    if !out.is_result() || !matches!(steps[3], Step::DoneReturn) {
+        return None;
+    }
+    let frame = &state.frames[call.frame as usize];
+    if var_out.0 != Some(frame.arg_slot(0)) {
+        return None;
+    }
+    Some(Kernel::Hash32Var { src, attnum, frame: call.frame })
+}
+
+// [FETCHSOME x2, VAR->arg x2, FUNCEXPR_STRICT_2 int comparator, QUAL, DONE].
+fn select_qual_var_cmp_var(state: &ExprState<'_>) -> Option<Kernel> {
+    let steps = state.steps.as_slice();
+    let f0 = fetch_src(&steps[0])?;
+    let f1 = fetch_src(&steps[1])?;
+    let (s0, a0, out0) = var_src(&steps[2])?;
+    let (s1, a1, out1) = var_src(&steps[3])?;
+    if !((s0 == f0 && s1 == f1) || (s0 == f1 && s1 == f0)) || s0 == s1 {
+        return None;
+    }
+    let Step::FuncExprStrict2 { call, out } = &steps[4] else {
+        return None;
+    };
+    if !out.is_result() {
+        return None;
+    }
+    let Step::Qual { jumpdone } = steps[5] else {
+        return None;
+    };
+    if jumpdone != 6 || !matches!(steps[6], Step::DoneReturn) {
+        return None;
+    }
+    let frame = &state.frames[call.frame as usize];
+    let cmp = CmpOp::for_fn_oid(frame.flinfo.fn_oid)?;
+    let (arg0, arg1) = (frame.arg_slot(0), frame.arg_slot(1));
+    let (a, b) = if out0.0 == Some(arg0) && out1.0 == Some(arg1) {
+        ((s0, a0), (s1, a1))
+    } else if out1.0 == Some(arg0) && out0.0 == Some(arg1) {
+        ((s1, a1), (s0, a0))
+    } else {
+        return None;
+    };
+    Some(Kernel::QualVarCmpVar {
+        a_src: a.0,
+        a_attnum: a.1,
+        b_src: b.0,
+        b_attnum: b.1,
+        cmp,
+    })
 }
 
 fn all_args_const(state: &ExprState<'_>, call: FuncCall) -> bool {
