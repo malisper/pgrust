@@ -137,12 +137,121 @@ fn repeat_exact() {
     assert_eq!(err.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
 }
 
+// C: asc_tolower's pnstrdup strnlen-copies, so the NUL and tail are dropped.
 #[test]
-fn embedded_nul_stops_case_walk() {
+fn embedded_nul_truncates_case_result() {
     utf8();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
-    assert_eq!(lower(mcx, b"AB\x00CD", C_COLLATION_OID).unwrap().data(), b"ab\x00CD");
+    assert_eq!(lower(mcx, b"AB\x00CD", C_COLLATION_OID).unwrap().data(), b"ab");
+    assert_eq!(upper(mcx, b"ab\x00cd", C_COLLATION_OID).unwrap().data(), b"AB");
+    assert_eq!(initcap(mcx, b"ab\x00cd", C_COLLATION_OID).unwrap().data(), b"Ab");
+}
+
+#[test]
+fn left_right_exact() {
+    utf8();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    assert_eq!(text_left(mcx, b"hello", 2).unwrap().data(), b"he");
+    assert_eq!(text_left(mcx, b"hello", 0).unwrap().data(), b"");
+    assert_eq!(text_left(mcx, b"hello", 99).unwrap().data(), b"hello");
+    assert_eq!(text_left(mcx, b"hello", -1).unwrap().data(), b"hell");
+    assert_eq!(text_left(mcx, b"hello", -99).unwrap().data(), b"");
+    assert_eq!(text_left(mcx, b"", 3).unwrap().data(), b"");
+    assert_eq!(text_left(mcx, b"hello", i32::MAX).unwrap().data(), b"hello");
+    assert_eq!(text_left(mcx, b"hello", i32::MIN).unwrap().data(), b"");
+    assert_eq!(text_left(mcx, "日本語".as_bytes(), 2).unwrap().data(), "日本".as_bytes());
+    assert_eq!(text_left(mcx, "🐘é".as_bytes(), 1).unwrap().data(), "🐘".as_bytes());
+    assert_eq!(text_left(mcx, "日本語".as_bytes(), -1).unwrap().data(), "日本".as_bytes());
+
+    assert_eq!(text_right(mcx, b"hello", 2).unwrap().data(), b"lo");
+    assert_eq!(text_right(mcx, b"hello", 0).unwrap().data(), b"");
+    assert_eq!(text_right(mcx, b"hello", 99).unwrap().data(), b"hello");
+    assert_eq!(text_right(mcx, b"hello", -1).unwrap().data(), b"ello");
+    assert_eq!(text_right(mcx, b"hello", -99).unwrap().data(), b"");
+    assert_eq!(text_right(mcx, b"", 3).unwrap().data(), b"");
+    assert_eq!(text_right(mcx, b"hello", i32::MAX).unwrap().data(), b"hello");
+    // C: n = -n wraps at INT32_MIN, stays negative, clips to whole string.
+    assert_eq!(text_right(mcx, b"hello", i32::MIN).unwrap().data(), b"hello");
+    assert_eq!(text_right(mcx, "日本語".as_bytes(), 2).unwrap().data(), "本語".as_bytes());
+    assert_eq!(text_right(mcx, "é🐘".as_bytes(), 1).unwrap().data(), "🐘".as_bytes());
+    assert_eq!(text_right(mcx, "日本語".as_bytes(), -1).unwrap().data(), "本語".as_bytes());
+}
+
+#[test]
+fn reverse_exact() {
+    utf8();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    assert_eq!(text_reverse(mcx, b"").unwrap().data(), b"");
+    assert_eq!(text_reverse(mcx, b"abc").unwrap().data(), b"cba");
+    assert_eq!(text_reverse(mcx, "日本語".as_bytes()).unwrap().data(), "語本日".as_bytes());
+    assert_eq!(text_reverse(mcx, "a🐘é".as_bytes()).unwrap().data(), "é🐘a".as_bytes());
+}
+
+#[test]
+fn left_right_reverse_single_byte_encoding() {
+    mbutils::SetDatabaseEncoding(wchar::PG_LATIN1).unwrap();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    assert_eq!(text_left(mcx, b"ab\xE9d", 3).unwrap().data(), b"ab\xE9");
+    assert_eq!(text_right(mcx, b"ab\xE9d", 3).unwrap().data(), b"b\xE9d");
+    assert_eq!(text_reverse(mcx, b"ab\xE9d").unwrap().data(), b"d\xE9ba");
+}
+
+#[test]
+fn chr_ascii_non_utf8_encodings() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    mbutils::SetDatabaseEncoding(wchar::PG_LATIN1).unwrap();
+    assert_eq!(chr(mcx, 255).unwrap().data(), b"\xFF");
+    assert_eq!(
+        chr(mcx, 256).unwrap_err().message(),
+        "requested character too large for encoding: 256"
+    );
+    assert_eq!(ascii(b"\xE9").unwrap(), 0xE9);
+
+    mbutils::SetDatabaseEncoding(wchar::PG_EUC_JP).unwrap();
+    assert_eq!(chr(mcx, 127).unwrap().data(), b"\x7F");
+    let err = chr(mcx, 128).unwrap_err();
+    assert_eq!(err.message(), "requested character too large for encoding: 128");
+    assert_eq!(err.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    let err = ascii(&[0xA1, 0xA1]).unwrap_err();
+    assert_eq!(err.message(), "requested character too large");
+    assert_eq!(err.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+}
+
+#[test]
+fn pad_repeat_translate_edges() {
+    utf8();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    assert_eq!(rpad(mcx, b"hi", -3, b"xy").unwrap().data(), b"");
+    assert_eq!(rpad(mcx, b"hello", 3, b"").unwrap().data(), b"hel");
+    assert_eq!(lpad(mcx, b"", 3, b"ab").unwrap().data(), b"aba");
+    let err = rpad(mcx, b"x", i32::MAX, b"y").unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    assert_eq!(err.message(), "requested length too large");
+    // Empty pad collapses len to s1len before the overflow guard.
+    assert_eq!(lpad(mcx, b"x", i32::MAX, b"").unwrap().data(), b"x");
+
+    assert_eq!(repeat(mcx, b"", 1_000_000).unwrap().data(), b"");
+    let err = repeat(mcx, b"Pg", i32::MAX).unwrap_err();
+    assert_eq!(err.message(), "requested length too large");
+
+    assert_eq!(translate(mcx, b"abc", b"abc", b"").unwrap().data(), b"");
+    assert_eq!(translate(mcx, b"abc", b"", b"xyz").unwrap().data(), b"abc");
+    assert_eq!(
+        translate(mcx, "a日b".as_bytes(), "日".as_bytes(), "🐘x".as_bytes())
+            .unwrap()
+            .data(),
+        "a🐘b".as_bytes()
+    );
+    assert_eq!(
+        translate(mcx, "aéb".as_bytes(), "xé".as_bytes(), b"y").unwrap().data(),
+        b"ab"
+    );
 }
 
 mod fc_results {
