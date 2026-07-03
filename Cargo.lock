@@ -6961,6 +6961,7 @@ dependencies = [
  "pg_proc",
  "plancache",
  "rel_vocab",
+ "rustc-hash",
  "scan_fgram",
  "snapmgr",
  "spi",

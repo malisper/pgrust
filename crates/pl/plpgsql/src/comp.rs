@@ -4,8 +4,7 @@
 // polymorphic argument resolution, OUT/INOUT/TABLE arg modes.
 use types_core::{Oid, OidIsValid};
 use types_error::{
-    PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
-    ERRCODE_UNDEFINED_OBJECT, ERROR,
+    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
 
 use crate::ast::*;
@@ -375,14 +374,6 @@ pub fn comp_err(code: types_error::SqlState, msg: String) -> Box<PgError> {
             .errcode(code)
             .errmsg(msg)
             .into_error(),
-    )
-}
-
-#[cold]
-pub fn duplicate_declaration(name: &str) -> Box<PgError> {
-    comp_err(
-        ERRCODE_DUPLICATE_OBJECT,
-        format!("duplicate declaration at or near \"{name}\""),
     )
 }
 

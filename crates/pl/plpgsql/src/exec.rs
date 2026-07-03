@@ -18,6 +18,8 @@
 // never per row on a steady path).
 use std::collections::HashMap;
 
+type FxHashMap<K, V> = HashMap<K, V, rustc_hash::FxBuildHasher>;
+
 use datum::Datum;
 use mcx::{Mcx, MemoryContext};
 use spi::{
@@ -36,7 +38,6 @@ pub const RC_RETURN: i32 = 2;
 pub const RC_CONTINUE: i32 = 3;
 
 const BOOLOID: Oid = 16;
-const INT4OID: Oid = 23;
 const INT8OID: Oid = 20;
 const UNKNOWNOID: Oid = 705;
 const RECORDOID: Oid = 2249;
@@ -100,8 +101,8 @@ std::thread_local! {
     // expr_id -> saved SPI plan (C stores expr->plan in the function AST;
     // the side table keeps the shared AST immutable). Entries die with the
     // compiled function (free_function_plans).
-    static EXPR_PLANS: core::cell::RefCell<HashMap<u32, PlanEntry>> =
-        core::cell::RefCell::new(HashMap::new());
+    static EXPR_PLANS: core::cell::RefCell<FxHashMap<u32, PlanEntry>> =
+        core::cell::RefCell::new(FxHashMap::default());
 }
 
 pub fn free_function_plans(expr_ids: &[u32]) {
@@ -144,8 +145,8 @@ pub struct Estate<'a> {
     // Stable param image for compiled expressions (address baked into
     // cached ExprStates; the Box never moves while cached states live).
     param_buf: Box<[ParamExternData]>,
-    simple_cache: HashMap<u32, Option<SimpleExpr>>,
-    cast_cache: HashMap<(Oid, i32, Oid, i32), CastEntry>,
+    simple_cache: FxHashMap<u32, Option<SimpleExpr>>,
+    cast_cache: FxHashMap<(Oid, i32, Oid, i32), CastEntry>,
     // Invocation-lifetime var values (C's "procedure" context).
     datum_ctx: Ctx,
     // Per-evaluation scratch (C's eval_mcontext); reset by exec_eval_cleanup.
@@ -227,8 +228,8 @@ impl<'a> Estate<'a> {
             readonly_func,
             atomic,
             param_buf: param_buf.into_boxed_slice(),
-            simple_cache: HashMap::new(),
-            cast_cache: HashMap::new(),
+            simple_cache: FxHashMap::default(),
+            cast_cache: FxHashMap::default(),
             datum_ctx: Ctx::new("PLpgSQL per-invocation values"),
             eval_ctx: Ctx::new("PLpgSQL eval scratch"),
             err_stmt: None,
@@ -807,7 +808,7 @@ impl<'a> Estate<'a> {
             },
         )?;
 
-        let mut pstate = parser_small1::make_parsestate(mcx, None);
+        let pstate = parser_small1::make_parsestate(mcx, None);
         let cast_expr = if srctype == UNKNOWNOID || srctype == RECORDOID {
             None
         } else {
