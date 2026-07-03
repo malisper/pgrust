@@ -508,9 +508,12 @@ pub enum Kernel {
     QualVarCmpVar { a_src: SlotSrc, a_attnum: u16, b_src: SlotSrc, b_attnum: u16, cmp: CmpOp },
     Hash32Var { src: SlotSrc, attnum: u16, frame: u32 },
     JustFunc { fn_addr: PGFunction, frame: u32, nargs: u16, strict: bool },
+    // Argless byval transition (count(*)-class 2-step programs): the whole
+    // per-row program without the interpreter loop (ExecJust* precedent).
+    AggTransByVal { call: FuncCall, pergroup: NonNull<AggPerGroup>, strict: bool },
 }
 
-const _: () = assert!(core::mem::size_of::<Kernel>() <= 24);
+const _: () = assert!(core::mem::size_of::<Kernel>() <= 48);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]

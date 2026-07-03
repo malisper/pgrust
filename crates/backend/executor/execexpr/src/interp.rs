@@ -303,6 +303,23 @@ fn eval_kernel<'mcx>(
             let value = (f.flinfo.fn_addr)(Some(&mut f.flinfo), fcinfo)?;
             Ok(NullableDatum { value, isnull: false })
         }
+        Kernel::AggTransByVal { call, pergroup, strict } => {
+            // SAFETY: once-allocated stable pergroup, sole access here (the
+            // interp AggPlainTrans[Strict]ByVal arms' contract verbatim).
+            unsafe {
+                let pg = pergroup.as_ptr();
+                if !strict || !(*pg).trans_value_is_null {
+                    crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
+                        value: (*pg).trans_value,
+                        isnull: (*pg).trans_value_is_null,
+                    });
+                    let (value, isnull) = invoke(&mut state.frames, &call)?;
+                    (*pg).trans_value = value;
+                    (*pg).trans_value_is_null = isnull;
+                }
+            }
+            Ok(NullableDatum::null())
+        }
         Kernel::JustFunc { fn_addr, frame, nargs, strict } => {
             let f = &mut state.frames[frame as usize];
             // SAFETY: the frame's fcinfo image is live for 'mcx; no other
