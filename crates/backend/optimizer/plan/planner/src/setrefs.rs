@@ -1042,6 +1042,20 @@ fn fix_upper_expr<'mcx>(
                 },
             )
         }
+        NodeTag::T_CoerceViaIO => {
+            let c = node.as_coerce_via_io().expect("CoerceViaIO");
+            let arg = fix_upper_expr(run, c.arg, subplan_tlist, rtoffset, newvarno, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::CoerceViaIO {
+                    arg,
+                    resulttype: c.resulttype,
+                    resultcollid: c.resultcollid,
+                    coerceformat: c.coerceformat,
+                    location: c.location,
+                },
+            )
+        }
         NodeTag::T_BoolExpr => {
             let b = node.as_bool_expr().expect("BoolExpr");
             let mut args = NodeList::nil();
@@ -1559,6 +1573,20 @@ fn fix_scan_expr_mutator<'mcx>(
                     resultcollid: r.resultcollid,
                     relabelformat: r.relabelformat,
                     location: r.location,
+                },
+            )
+        }
+        NodeTag::T_CoerceViaIO => {
+            let c = node.as_coerce_via_io().unwrap();
+            let arg = fix_scan_expr_mutator(run, c.arg, rtoffset, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::CoerceViaIO {
+                    arg,
+                    resulttype: c.resulttype,
+                    resultcollid: c.resultcollid,
+                    coerceformat: c.coerceformat,
+                    location: c.location,
                 },
             )
         }
@@ -2486,6 +2514,20 @@ fn fix_join_expr_mutator<'mcx>(
                     resultcollid: r.resultcollid,
                     relabelformat: r.relabelformat,
                     location: r.location,
+                },
+            )
+        }
+        NodeTag::T_CoerceViaIO => {
+            let c = node.as_coerce_via_io().unwrap();
+            let arg = fix_join_expr_mutator(run, c.arg, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::CoerceViaIO {
+                    arg,
+                    resulttype: c.resulttype,
+                    resultcollid: c.resultcollid,
+                    coerceformat: c.coerceformat,
+                    location: c.location,
                 },
             )
         }
