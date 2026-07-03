@@ -204,7 +204,7 @@ fn relation_needs_wal(rel: &RelationData<'_>) -> bool {
 }
 
 const XLOG_HEAP2_VISIBLE: u8 = 0x40;
-const RM_HEAP2_ID: u8 = rmgr::RmgrIds::RM_HEAP2_ID as u8;
+const RM_HEAP2_ID: u8 = types_core::RmgrIds::RM_HEAP2_ID as u8;
 
 // log_heap_visible (heapam.c); RelationIsAccessibleInLogicalDecoding const-false
 // (heapam DML divergence), so VISIBILITYMAP_XLOG_CATALOG_REL is never set.

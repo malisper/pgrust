@@ -27,6 +27,35 @@ pub type uint64 = u64;
 pub type int64 = i64;
 pub type bits32 = uint32;
 pub type RmgrId = uint8;
+
+// rmgrlist.h order: entry order fixes the WAL-visible numeric ids.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RmgrIds {
+    RM_XLOG_ID = 0,
+    RM_XACT_ID,
+    RM_SMGR_ID,
+    RM_CLOG_ID,
+    RM_DBASE_ID,
+    RM_TBLSPC_ID,
+    RM_MULTIXACT_ID,
+    RM_RELMAP_ID,
+    RM_STANDBY_ID,
+    RM_HEAP2_ID,
+    RM_HEAP_ID,
+    RM_BTREE_ID,
+    RM_HASH_ID,
+    RM_GIN_ID,
+    RM_GIST_ID,
+    RM_SEQ_ID,
+    RM_SPGIST_ID,
+    RM_BRIN_ID,
+    RM_COMMIT_TS_ID,
+    RM_REPLORIGIN_ID,
+    RM_GENERIC_ID,
+    RM_LOGICALMSG_ID,
+    RM_NEXT_ID,
+}
 pub type XLogSegNo = uint64;
 pub type pg_crc32c = uint32;
 pub type RelFileNumber = Oid;
