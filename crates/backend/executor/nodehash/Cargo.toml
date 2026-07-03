@@ -1,0 +1,20 @@
+[package]
+name = "nodehash"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+execexpr = { path = "../execexpr" }
+exectuples = { path = "../exectuples" }
+executils = { path = "../executils" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+
+[dev-dependencies]
+init_small = { path = "../../utils/init/init_small" }
