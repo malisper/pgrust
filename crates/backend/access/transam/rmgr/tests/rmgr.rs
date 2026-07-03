@@ -124,15 +124,16 @@ fn unported_redo_panics_loudly() {
 }
 
 #[test]
-#[should_panic(expected = "btree_redo arm not ported: btree_xlog_vacuum")]
-fn btree_redo_vacuum_arm_panics_loudly() {
+fn btree_redo_unknown_opcode_errors_loudly() {
     let mut rec = xlogreader_seams::DecodedXLogRecord::default();
-    rec.xl_info = 0xC0;
+    rec.xl_info = 0xF0;
     let mut record = xlogreader_seams::XLogReaderState {
         record: Some(rec),
         ..Default::default()
     };
-    let _ = (GetRmgr(RM_BTREE_ID as u8).unwrap().rm_redo)(&mut record);
+    let err = (GetRmgr(RM_BTREE_ID as u8).unwrap().rm_redo)(&mut record)
+        .expect_err("unknown btree opcode must not redo silently");
+    assert!(err.message.contains("btree_redo: unknown op code"));
 }
 
 #[test]
