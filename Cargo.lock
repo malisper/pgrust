@@ -1401,8 +1401,10 @@ dependencies = [
  "catalog_index",
  "catalog_indexing",
  "catalog_namespace",
+ "catalog_objectaddress",
  "datum",
  "dependency_seams",
+ "elog_seams",
  "fmgr_seams",
  "format_type",
  "genam",
@@ -1414,9 +1416,11 @@ dependencies = [
  "pg_constraint",
  "pg_depend",
  "pg_type",
+ "rewrite_remove",
  "sequence_seams",
  "statscmds",
  "table",
+ "trigger",
  "types_core",
  "types_error",
  "types_nodes",
@@ -1589,6 +1593,36 @@ dependencies = [
  "varlena",
  "wchar",
  "xact",
+]
+
+[[package]]
+name = "catalog_objectaddress"
+version = "0.0.0"
+dependencies = [
+ "catalog",
+ "catalog_namespace",
+ "datum",
+ "dbcommands_seams",
+ "fmgr_seams",
+ "format_type",
+ "genam",
+ "lmgr",
+ "lsyscache",
+ "mcx",
+ "miscinit",
+ "pg_attrdef",
+ "pg_depend",
+ "rel_vocab",
+ "relation",
+ "sinval",
+ "syscache_seams",
+ "table",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
 ]
 
 [[package]]
@@ -2160,6 +2194,28 @@ dependencies = [
  "types_scan",
  "types_tuple",
  "varlena",
+]
+
+[[package]]
+name = "commands_dropcmds"
+version = "0.0.0"
+dependencies = [
+ "catalog_dependency",
+ "catalog_namespace",
+ "catalog_objectaddress",
+ "elog_seams",
+ "lsyscache",
+ "mcx",
+ "miscinit",
+ "pg_depend",
+ "rel_vocab",
+ "superuser",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "xact",
 ]
 
 [[package]]
@@ -8208,6 +8264,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rewrite_remove"
+version = "0.1.0"
+dependencies = [
+ "catalog",
+ "catalog_indexing",
+ "datum",
+ "fmgr_seams",
+ "genam",
+ "inval",
+ "mcx",
+ "relcache",
+ "table",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+]
+
+[[package]]
 name = "rewriteheap"
 version = "0.0.0"
 dependencies = [
@@ -9871,6 +9947,7 @@ dependencies = [
  "genam",
  "heapam",
  "heaptuple",
+ "init_small",
  "inval",
  "mcx",
  "miscinit",
@@ -10370,6 +10447,7 @@ dependencies = [
  "commands_async",
  "commands_cluster",
  "commands_comment",
+ "commands_dropcmds",
  "commands_vacuum",
  "commands_view",
  "copy_cmd",

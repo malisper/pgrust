@@ -117,7 +117,7 @@ pub fn heap_drop_with_catalog<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> 
 
     match rel.rd_rel.relkind {
         types_rel::RELKIND_RELATION | types_rel::RELKIND_TOASTVALUE
-        | types_rel::RELKIND_SEQUENCE => {}
+        | types_rel::RELKIND_SEQUENCE | types_rel::RELKIND_VIEW => {}
         other => unported(&format!(
             "heap_drop_with_catalog: relkind {:?} arm",
             other as char

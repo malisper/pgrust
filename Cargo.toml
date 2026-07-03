@@ -489,6 +489,7 @@ members = [
     "crates/backend/parser/parser_seams",
     "crates/backend/parser/analyze_seams",
     "crates/backend/rewrite/rewrite_manip",
+    "crates/backend/rewrite/rewrite_remove",
     "crates/backend/rewrite/rewrite_handler_seams",
     "crates/backend/rewrite/rewrite_define",
     "crates/backend/rewrite/rewrite_handler",

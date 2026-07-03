@@ -18,11 +18,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // TypeIsVisible (namespace.c): search-path shadow check.
-    pub fn type_is_visible(typid: Oid) -> PgResult<bool>
-);
-
-seam_core::seam!(
     // isTempToastNamespace(namespaceId) (namespace.c): infallible, no catalog
     // access — reads only myTempToastNamespace.
     pub fn is_temp_toast_namespace(namespace_id: Oid) -> bool

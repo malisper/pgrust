@@ -22,7 +22,6 @@ fn notice(msg: String) -> PgResult<()> {
     elog_seams::ereport_msg::call(NOTICE, msg, None)
 }
 
-// schema_does_not_exist_skipping (dropcmds.c).
 fn schema_does_not_exist_skipping(names: &NodeList<'_>) -> PgResult<Option<String>> {
     let rv = catalog_objectaddress::makeRangeVarFromNameList(names);
     if let Some(schemaname) = rv.schemaname {
@@ -35,7 +34,6 @@ fn schema_does_not_exist_skipping(names: &NodeList<'_>) -> PgResult<Option<Strin
     Ok(None)
 }
 
-// does_not_exist_skipping (dropcmds.c) for the live objtypes.
 fn does_not_exist_skipping(objtype: ObjectType, object: Node<'_>) -> PgResult<()> {
     let msg = match objtype {
         ObjectType::OBJECT_TYPE | ObjectType::OBJECT_DOMAIN => {
@@ -57,7 +55,6 @@ fn does_not_exist_skipping(objtype: ObjectType, object: Node<'_>) -> PgResult<()
     notice(msg)
 }
 
-// RemoveObjects (dropcmds.c).
 pub fn RemoveObjects<'mcx>(mcx: Mcx<'mcx>, stmt: &DropStmt<'mcx>) -> PgResult<()> {
     let mut objects = catalog_dependency::ObjectAddresses::new();
 
@@ -80,8 +77,7 @@ pub fn RemoveObjects<'mcx>(mcx: Mcx<'mcx>, stmt: &DropStmt<'mcx>) -> PgResult<()
             unported("RemoveObjects OBJECT_FUNCTION prokind gate");
         }
 
-        // C: namespace-owner shortcut, else check_object_ownership; the
-        // superuser fast path covers both, anything else is loud.
+        // C: namespace-owner shortcut, else check_object_ownership.
         let namespaceId = catalog_objectaddress::get_object_namespace(&address)?;
         if !superuser::superuser_arg(miscinit::GetUserId())? {
             unported("RemoveObjects check_object_ownership for non-superusers");
