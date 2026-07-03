@@ -768,7 +768,11 @@ fn exec_index_stmt<'mcx>(
         handler_gap("CREATE INDEX partitioned-table recursion");
     }
     let is_alter_table = stmt.transformed;
-    parse_utilcmd::transformIndexStmt(relid, stmt, source_text)?;
+    parse_clause::transformIndexStmt(mcx, relid, stmt_node, source_text)?;
+    // Re-acquire: transformIndexStmt mutated the stmt node in place.
+    let stmt = stmt_node
+        .as_variant::<types_nodes::rawnodes::IndexStmt>()
+        .expect("IndexStmt");
     let index_relid = indexcmds::DefineIndex(
         mcx,
         relid,

@@ -41,5 +41,9 @@ aclchk = { path = "../../catalog/aclchk" }
 adt_acl = { path = "../../utils/adt/acl" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
 
+clauses = { path = "../../optimizer/util/clauses" }
+vars = { path = "../../optimizer/util/vars" }
+nodes_core = { path = "../../nodes/nodes_core" }
+
 [dev-dependencies]
 syscache_seams = { path = "../../utils/cache/syscache_seams" }

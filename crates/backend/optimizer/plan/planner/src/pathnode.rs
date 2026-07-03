@@ -1570,7 +1570,6 @@ pub(crate) fn relation_has_unique_index_for<'mcx>(
     if run.root.rel(rel_id).indexlist.is_empty() {
         return Ok(false);
     }
-    let rel_relid = run.root.rel(rel_id).relid;
     let mut restrict_rids: PgVec<'_, types_pathnodes::RinfoId> = PgVec::new_in(run.mcx);
     restrict_rids.extend(restrictlist.iter().copied());
     for i in 0..run.root.rel(rel_id).baserestrictinfo.len() {
@@ -1609,11 +1608,6 @@ pub(crate) fn relation_has_unique_index_for<'mcx>(
         let mut all_matched = true;
         for c in 0..ind.nkeycolumns as usize {
             let mut matched = false;
-            if ind.indexkeys[c] == 0 {
-                // match_index_to_operand: expression columns never match.
-                all_matched = false;
-                break;
-            }
             for &rid in restrict_rids.iter() {
                 let ri = run.root.rinfo(rid);
                 if !ri.mergeopfamilies.iter().any(|&f| f == ind.opfamily[c]) {
@@ -1626,24 +1620,15 @@ pub(crate) fn relation_has_unique_index_for<'mcx>(
                 } else {
                     o.args.nth(0)
                 });
-                if let Some(var) = rexpr.as_var() {
-                    if var.varno as u32 == rel_relid
-                        && var.varattno != 0
-                        && ind.indexkeys[c] == var.varattno as i32
-                    {
-                        matched = true;
-                        break;
-                    }
+                if crate::indxpath::match_index_to_operand(run, rexpr, c, ind) {
+                    matched = true;
+                    break;
                 }
             }
             if !matched {
                 for (j, &expr_id) in exprlist.iter().enumerate() {
                     let expr = strip_relabel(*run.root.expr_node(expr_id));
-                    let Some(var) = expr.as_var() else { continue };
-                    if !(var.varno as u32 == rel_relid
-                        && var.varattno != 0
-                        && ind.indexkeys[c] == var.varattno as i32)
-                    {
+                    if !crate::indxpath::match_index_to_operand(run, expr, c, ind) {
                         continue;
                     }
                     if !lsyscache::amop::op_in_opfamily(oprlist[j], ind.opfamily[c])? {

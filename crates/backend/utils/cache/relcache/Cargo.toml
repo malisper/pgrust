@@ -19,6 +19,10 @@ lmgr = { path = "../../../storage/lmgr/lmgr" }
 lwlock = { path = "../../../storage/lmgr/lwlock" }
 smgr = { path = "../../../storage/smgr/smgr" }
 snapmgr = { path = "../../time/snapmgr" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+readfuncs = { path = "../../../nodes/readfuncs" }
+clauses = { path = "../../../optimizer/util/clauses" }
 relcache_seams = { path = "../relcache_seams" }
 relcache_build_seams = { path = "../relcache_build_seams" }
 relmapper_seams = { path = "../relmapper_seams" }

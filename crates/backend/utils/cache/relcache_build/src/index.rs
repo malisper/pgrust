@@ -57,6 +57,7 @@ const Anum_pg_index_indkey: i32 = 16;
 const Anum_pg_index_indcollation: i32 = 17;
 const Anum_pg_index_indclass: i32 = 18;
 const Anum_pg_index_indoption: i32 = 19;
+const Anum_pg_index_indexprs: i32 = 20;
 const Anum_pg_index_indpred: i32 = 21;
 
 const Anum_pg_opclass_opcfamily: i32 = 6;
@@ -160,6 +161,14 @@ pub(crate) fn relation_init_index_access_info(
         indisready: get(Anum_pg_index_indisready)?.as_bool(),
         indkey,
         has_indpred: !SysCacheGetAttr(INDEXRELID, &tup, Anum_pg_index_indpred)?.1,
+        indexprs_src: {
+            let (d, isnull) = SysCacheGetAttr(INDEXRELID, &tup, Anum_pg_index_indexprs)?;
+            if isnull { None } else { Some(crate::attrs::text_str(mcx, mcx, d)?) }
+        },
+        indpred_src: {
+            let (d, isnull) = SysCacheGetAttr(INDEXRELID, &tup, Anum_pg_index_indpred)?;
+            if isnull { None } else { Some(crate::attrs::text_str(mcx, mcx, d)?) }
+        },
     };
     ReleaseSysCache(tup);
 

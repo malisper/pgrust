@@ -2229,10 +2229,12 @@ fn resolve_plan_var<'mcx>(plan_node: Node<'mcx>, varno: i32, varattno: i16) -> R
             node_gap("get_variable", "INDEX_VAR outside IndexOnlyScan (ruleutils lane)");
         };
         let tle = find_tle_by_resno(&ios.indextlist, varattno);
-        let Some(v) = tle.expr.as_var() else {
-            node_gap("get_variable", "non-Var indextlist deparse (ruleutils lane)");
+        return match tle.expr.as_var() {
+            Some(v) => ResolvedVar::Base(v.varno, v.varattno),
+            // Expression index column: deparse the heap-var expression in the
+            // scan's own context (C get_variable non-Var index_tlist arm).
+            None => ResolvedVar::Expr(tle.expr, plan_node),
         };
-        return ResolvedVar::Base(v.varno, v.varattno);
     }
     let child = match varno {
         types_nodes::primnodes::OUTER_VAR => outer_child(plan_node),

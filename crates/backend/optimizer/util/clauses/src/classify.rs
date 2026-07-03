@@ -110,8 +110,13 @@ pub fn contain_mutable_functions(clause: Node<'_>) -> PgResult<bool> {
     ContainMutable.visit(clause)
 }
 
-pub fn contain_mutable_functions_after_planning(_expr: Node<'_>) -> PgResult<bool> {
-    panic!("contain_mutable_functions_after_planning deferred: expression_planner unported");
+// expression_planner reduces to eval_const_expressions on this lane.
+pub fn contain_mutable_functions_after_planning<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<bool> {
+    let planned = crate::eval_const_expressions(mcx, expr)?;
+    contain_mutable_functions(planned)
 }
 
 struct ContainVolatile {
