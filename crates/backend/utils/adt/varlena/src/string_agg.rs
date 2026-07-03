@@ -101,14 +101,14 @@ pub fn string_agg_transfn(fcinfo: &mut Fcinfo) -> PgResult<*mut StringAggState> 
         let st = unsafe { &mut *state };
         if !c.isnull {
             // SAFETY: a non-null arg is a live text/bytea varlena.
-            let delim = unsafe { fcinfo.arg_varlena_packed(2) }.data();
+            let delim = unsafe { fcinfo.arg_varlena_packed(2)? }.data();
             st.append(agg_mcx, delim)?;
             if isfirst {
                 st.cursor = delim.len() as u32;
             }
         }
         // SAFETY: a non-null arg is a live text/bytea varlena.
-        let value = unsafe { fcinfo.arg_varlena_packed(1) }.data();
+        let value = unsafe { fcinfo.arg_varlena_packed(1)? }.data();
         st.append(agg_mcx, value)?;
     }
     Ok(state)

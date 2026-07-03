@@ -58,7 +58,7 @@ fc_textcmp! {
 // nondeterministic (ICU sort-key) leg is loud.
 pub fn fc_hashtext(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg is a non-null text varlena (strict fn).
-    let key = unsafe { fcinfo.arg_varlena_packed(0) }?;
+    let key = unsafe { fcinfo.arg_varlena_packed(0)? };
     hashtext_check_collation(fcinfo.get_collation())?;
     Ok(Datum::from_u32(::hashfn::hash_bytes(key.data())))
 }
@@ -68,7 +68,7 @@ pub fn fc_hashtextextended(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
-    let key = unsafe { fcinfo.arg_varlena_packed(0) }?;
+    let key = unsafe { fcinfo.arg_varlena_packed(0)? };
     let [_, seed] = fcinfo.args_n::<2>();
     hashtext_check_collation(fcinfo.get_collation())?;
     Ok(Datum::from_u64(::hashfn::hash_bytes_extended(key.data(), seed.value.as_u64())))
@@ -387,7 +387,7 @@ pub fn fc_btvarstrequalimage(
 
 pub fn fc_textpos(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog args are non-null text varlenas (strict fn).
-    let (a, b) = unsafe { (fcinfo.arg_varlena_packed(0), fcinfo.arg_varlena_packed(1)) };
+    let (a, b) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
     Ok(Datum::from_i32(crate::text_position(
         a.data(),
         b.data(),
@@ -395,29 +395,10 @@ pub fn fc_textpos(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
     )?))
 }
 
-pub fn fc_text_substr(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
-    let t = unsafe { fcinfo.arg_varlena_packed(0) };
-    let s = fcinfo.arg_i32(1);
-    let l = fcinfo.arg_i32(2);
-    let mcx = fcinfo.result_mcx();
-    Ok(varlena_result(crate::text_substring(mcx, t.data(), s, l, false)?))
-}
-
-pub fn fc_text_substr_no_len(
-    _flinfo: Option<&mut FmgrInfo>,
-    fcinfo: &mut Fcinfo,
-) -> PgResult<Datum> {
-    // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
-    let t = unsafe { fcinfo.arg_varlena_packed(0) };
-    let s = fcinfo.arg_i32(1);
-    let mcx = fcinfo.result_mcx();
-    Ok(varlena_result(crate::text_substring(mcx, t.data(), s, -1, true)?))
-}
 
 pub fn fc_split_part(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog args 0/1 are non-null text varlenas (strict fn).
-    let (a, b) = unsafe { (fcinfo.arg_varlena_packed(0), fcinfo.arg_varlena_packed(1)) };
+    let (a, b) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
     let fldnum = fcinfo.arg_i32(2);
     let mcx = fcinfo.result_mcx();
     Ok(varlena_result(crate::split_part(
@@ -558,10 +539,6 @@ pub const VARLENA_BUILTINS: &[FmgrBuiltin] = &[
     b(1954, "byteacmp", 2, fc_byteacmp),
     b(2010, "byteaoctetlen", 1, fc_byteaoctetlen),
     b(2011, "byteacat", 2, fc_byteacat),
-    b(877, "text_substr", 3, fc_text_substr),
-    b(883, "text_substr_no_len", 2, fc_text_substr_no_len),
-    b(936, "text_substr", 3, fc_text_substr),
-    b(937, "text_substr_no_len", 2, fc_text_substr_no_len),
     b(2012, "bytea_substr", 3, fc_bytea_substr),
     b(2013, "bytea_substr_no_len", 2, fc_bytea_substr_no_len),
     b(2014, "byteapos", 2, fc_byteapos),
