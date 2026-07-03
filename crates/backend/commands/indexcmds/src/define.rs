@@ -103,7 +103,7 @@ pub fn DefineIndex<'mcx>(
         ));
     }
 
-    let root_save_nestlevel = guc::NewGUCNestLevel();
+    let mut root_save_nestlevel = guc::NewGUCNestLevel();
     guc::RestrictSearchPath()?;
 
     let numberOfKeyAttributes = stmt.indexParams.len();
@@ -215,6 +215,7 @@ pub fn DefineIndex<'mcx>(
         accessMethodId,
         amname,
         amcanorder,
+        &mut root_save_nestlevel,
     )?;
 
     for i in 0..numberOfAttributes {
@@ -272,6 +273,7 @@ fn ComputeIndexAttrs<'mcx>(
     accessMethodId: Oid,
     amname: &str,
     amcanorder: bool,
+    ddl_save_nestlevel: &mut i32,
 ) -> PgResult<()> {
     let _ = mcx;
     for (attn, node) in attList.iter().enumerate() {
@@ -327,19 +329,25 @@ fn ComputeIndexAttrs<'mcx>(
         }
         collationIds[attn] = attcollation;
 
-        if !attribute.opclass.is_nil() {
-            opclassIds[attn] = resolve_op_class(&attribute.opclass, atttype, amname, accessMethodId)?;
+        // ResolveOpClass runs under the DDL owner's original search path
+        // (the RestrictSearchPath nest level pops around it, as in C).
+        guc::AtEOXact_GUC(false, *ddl_save_nestlevel);
+        let resolved = if !attribute.opclass.is_nil() {
+            resolve_op_class(&attribute.opclass, atttype, amname, accessMethodId)
         } else {
-            opclassIds[attn] = GetDefaultOpClass(atttype, accessMethodId)?;
-            if opclassIds[attn] == InvalidOid {
-                return Err(err(
-                    format!(
-                        "data type {} has no default operator class for access method \"{amname}\"",
-                        format_type::format_type_be(atttype)?
-                    ),
-                    ERRCODE_UNDEFINED_OBJECT,
-                ));
-            }
+            GetDefaultOpClass(atttype, accessMethodId)
+        };
+        *ddl_save_nestlevel = guc::NewGUCNestLevel();
+        guc::RestrictSearchPath()?;
+        opclassIds[attn] = resolved?;
+        if opclassIds[attn] == InvalidOid {
+            return Err(err(
+                format!(
+                    "data type {} has no default operator class for access method \"{amname}\"",
+                    format_type::format_type_be(atttype)?
+                ),
+                ERRCODE_UNDEFINED_OBJECT,
+            ));
         }
 
         coloptions[attn] = 0;
