@@ -19,6 +19,7 @@ lmgr_proc = { path = "../../lmgr/lmgr_proc" }
 procsignal_seams = { path = "../procsignal_seams" }
 ipc_seams = { path = "../ipc_seams" }
 shmem_seams = { path = "../shmem_seams" }
+async_seams = { path = "../../../commands/async_seams" }
 sinval_seams = { path = "../sinval_seams" }
 s_lock_seams = { path = "../../lmgr/s_lock_seams" }
 condition_variable_seams = { path = "../../lmgr/condition_variable_seams" }

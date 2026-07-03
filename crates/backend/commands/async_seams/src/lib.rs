@@ -23,3 +23,7 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn at_prepare_notify() -> PgResult<()>
 );
+
+seam_core::seam!(
+    pub fn handle_notify_interrupt()
+);

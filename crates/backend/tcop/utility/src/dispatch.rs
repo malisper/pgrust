@@ -320,14 +320,31 @@ fn dispatch_switch<'mcx>(
             handler_gap("dropdb (dbcommands lane)")
         }
 
-        T_NotifyStmt => handler_gap("Async_Notify (async lane)"),
+        T_NotifyStmt => {
+            let stmt = parsetree.as_notify_stmt().unwrap();
+            commands_async::Async_Notify(stmt.conditionname.unwrap_or(""), stmt.payload)?;
+        }
         T_ListenStmt => {
+            let stmt = parsetree.as_listen_stmt().unwrap();
             CheckRestrictedOperation("LISTEN")?;
-            handler_gap("Async_Listen (async lane)")
+            // Background processes have no way to drain NOTIFY messages and
+            // would block async SLRU cleanout indefinitely (utility.c:811).
+            if miscinit::GetMyBackendType() != types_core::BackendType::Backend {
+                return Err(elog::ereport(types_error::ERROR)
+                    .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errmsg("cannot execute LISTEN within a background process")
+                    .into_error()
+                    .into());
+            }
+            commands_async::Async_Listen(stmt.conditionname.unwrap_or(""))?;
         }
         T_UnlistenStmt => {
+            let stmt = parsetree.as_unlisten_stmt().unwrap();
             CheckRestrictedOperation("UNLISTEN")?;
-            handler_gap("Async_Unlisten (async lane)")
+            match stmt.conditionname {
+                Some(name) => commands_async::Async_Unlisten(name)?,
+                None => commands_async::Async_UnlistenAll()?,
+            }
         }
 
         T_LoadStmt => handler_gap("load_file (dfmgr lane)"),

@@ -114,6 +114,7 @@ postgres = { path = "../../backend/tcop/postgres" }
 pquery = { path = "../../backend/tcop/pquery" }
 explain = { path = "../../backend/commands/explain" }
 prepare = { path = "../../backend/commands/prepare" }
+commands_async = { path = "../../backend/commands/commands_async" }
 portalcmds = { path = "../../backend/commands/portalcmds" }
 utility = { path = "../../backend/tcop/utility" }
 backend_status = { path = "../../backend/utils/activity/backend_status" }

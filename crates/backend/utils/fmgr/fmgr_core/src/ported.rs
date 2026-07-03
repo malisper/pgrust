@@ -26,6 +26,7 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::nbt_compare::builtins::NBT_BUILTINS,
     ::varlena::builtins::VARLENA_BUILTINS,
     ::adt_windowfuncs::WINDOWFUNCS_BUILTINS,
+    ::commands_async::builtins::ASYNC_BUILTINS,
 ];
 
 const fn total() -> usize {

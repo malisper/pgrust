@@ -389,7 +389,9 @@ pub fn ProcessClientReadInterrupt(blocked: bool) -> PgResult<()> {
         if sinval::catchupInterruptPending() {
             sinval::ProcessCatchupInterrupt()?;
         }
-        // ProcessNotifyInterrupt: async.c lane; its flag cannot be raised yet.
+        if commands_async::notifyInterruptPending() {
+            commands_async::ProcessNotifyInterrupt(true)?;
+        }
     } else if g::ProcDiePending() {
         if blocked {
             check_for_interrupts()?;

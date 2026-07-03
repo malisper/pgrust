@@ -1475,6 +1475,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "commands_async"
+version = "0.1.0"
+dependencies = [
+ "adt_timestamp",
+ "async_seams",
+ "datum",
+ "elog",
+ "funcapi",
+ "guc_seams",
+ "guc_tables",
+ "init_small",
+ "ipc",
+ "latch",
+ "lmgr",
+ "lwlock",
+ "mcx",
+ "parallel",
+ "pqcomm_seams",
+ "pqformat",
+ "procsignal",
+ "ps_status_seams",
+ "rustc-hash",
+ "shmem",
+ "slru",
+ "snapmgr",
+ "transam",
+ "transam_xlog",
+ "types_core",
+ "types_dest",
+ "types_error",
+ "types_fmgr",
+ "types_guc",
+ "types_storage",
+ "varlena",
+ "xact",
+]
+
+[[package]]
 name = "commands_comment"
 version = "0.1.0"
 dependencies = [
@@ -2369,6 +2407,7 @@ dependencies = [
  "adt_timestamp",
  "adt_windowfuncs",
  "arrayfuncs",
+ "commands_async",
  "conv",
  "datum",
  "fmgr_seams",
@@ -3199,8 +3238,10 @@ dependencies = [
  "bufmgr",
  "checkpointer",
  "clog",
+ "commands_async",
  "dsm_core",
  "elog",
+ "file_seams",
  "guc",
  "guc_tables",
  "init_small",
@@ -5433,6 +5474,7 @@ dependencies = [
  "catalog_storage_seams",
  "cmdtag",
  "combocid_seams",
+ "commands_async",
  "condition_variable_seams",
  "deadlock_seams",
  "elog",
@@ -6032,6 +6074,7 @@ dependencies = [
 name = "procsignal"
 version = "0.0.0"
 dependencies = [
+ "async_seams",
  "condition_variable_seams",
  "elog",
  "init_small",
@@ -6734,6 +6777,7 @@ dependencies = [
  "checkpointer",
  "clog",
  "combocid",
+ "commands_async",
  "commands_tablespace",
  "commands_vacuum",
  "condition_variable",
@@ -8068,6 +8112,7 @@ dependencies = [
  "catalog_toasting",
  "cmdtag",
  "commands_analyze",
+ "commands_async",
  "commands_comment",
  "commands_vacuum",
  "copy_cmd",
