@@ -45,12 +45,10 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // The open Relation crosses whole so the impl reads rd_id/persistence off
-    // the pointer in hand (no relcache re-open per page).
     pub fn check_for_serializable_conflict_out_needed<'a, 'mcx>(
         rel: &'a RelationData<'mcx>,
         snapshot: &'a SnapshotData<'mcx>,
-    ) -> bool
+    ) -> PgResult<bool>
 );
 
 seam_core::seam!(
@@ -78,15 +76,37 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // CheckPointPredicate() (predicate.c).
     pub fn check_point_predicate() -> PgResult<()>
 );
 
 seam_core::seam!(
-    // CheckForSerializableConflictIn (predicate.c); InvalidBlockNumber = relation-level only.
     pub fn check_for_serializable_conflict_in<'a, 'mcx>(
         rel: &'a RelationData<'mcx>,
         tid: Option<&'a ItemPointerData>,
         blkno: types_core::BlockNumber,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn get_serializable_transaction_snapshot<'a>(
+        snapshot: &'a mut SnapshotData<'static>,
+        mcx: mcx::Mcx<'static>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn release_predicate_locks(is_commit: bool, is_read_only_safe: bool) -> PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn check_table_for_serializable_conflict_in<'a, 'mcx>(
+        rel: &'a RelationData<'mcx>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // C gates inside on PredXact->SxactGlobalXmin, not caller isolation — call unconditionally.
+    pub fn transfer_predicate_locks_to_heap_relation<'a, 'mcx>(
+        rel: &'a RelationData<'mcx>,
     ) -> PgResult<()>
 );

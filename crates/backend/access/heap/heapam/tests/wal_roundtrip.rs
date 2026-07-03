@@ -154,6 +154,8 @@ fn install_seams() {
     multixact_seams::multi_xact_id_set_oldest_member::set(|| Ok(()));
     multixact_seams::multi_xact_id_is_running::set(|_, _| Ok(false));
     predicate_seams::check_for_serializable_conflict_in::set(|_rel, _tid, _blk| Ok(()));
+    predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+    predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
     freespace_seams::get_page_with_free_space::set(|_rel, _need| Ok(InvalidBlockNumber));
     freespace_seams::record_and_get_page_with_free_space::set(|_rel, _old, _avail, _need| {
         Ok(InvalidBlockNumber)

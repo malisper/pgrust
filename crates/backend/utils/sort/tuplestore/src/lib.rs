@@ -81,6 +81,29 @@ fn spill_unported(allowed_mem: i64) -> ! {
     )
 }
 
+// C's tuplestore_begin_heap creates no memory context; our two-context shell
+// must not be a per-call create+destroy pair (nested stores fall back to
+// fresh construction).
+mod ts_pool {
+    thread_local! {
+        static SLOT: core::cell::RefCell<Option<super::Tuplestore>> =
+            const { core::cell::RefCell::new(None) };
+    }
+
+    pub(crate) fn take() -> Option<super::Tuplestore> {
+        SLOT.with(|s| s.borrow_mut().take())
+    }
+
+    pub(crate) fn park(ts: super::Tuplestore) {
+        SLOT.with(|s| {
+            let mut slot = s.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(ts);
+            }
+        });
+    }
+}
+
 impl Tuplestore {
     /// `inter_xact` only matters to the BufFile arm, which is loud.
     pub fn begin_heap(random_access: bool, _inter_xact: bool, max_kbytes: i32) -> Tuplestore {
@@ -89,6 +112,21 @@ impl Tuplestore {
         } else {
             EXEC_FLAG_REWIND
         };
+        if let Some(mut ts) = ts_pool::take() {
+            ts.0.with_mut(|st| {
+                debug_assert!(st.tuples == 0 && st.memtuples.is_empty());
+                let allowed_mem = i64::from(max_kbytes) * 1024;
+                st.eflags = eflags;
+                st.allowed_mem = allowed_mem;
+                st.avail_mem = allowed_mem - aset_chunk_space(st.memtuples.capacity() * PTR_SIZE);
+                st.grow_memtuples = true;
+                st.max_space = 0;
+                st.readptrs.clear();
+                st.readptrs.push(ReadPointer { eflags, eof_reached: false, current: 0 });
+                st.activeptr = 0;
+            });
+            return ts;
+        }
         let owned = McxOwned::try_new(MemoryContext::new("tuplestore"), |mcx| {
             let allowed_mem = i64::from(max_kbytes) * 1024;
             let memtuples = PgVec::with_capacity_in(INITIAL_MEMTUPSIZE, mcx);
@@ -206,7 +244,16 @@ impl Tuplestore {
         })
     }
 
-    pub fn end(self) {}
+    pub fn end(mut self) {
+        // A grown store takes the destroy path so a big result can't pin memory.
+        let park = self.0.with_mut(|st| {
+            st.memtuples.capacity() <= INITIAL_MEMTUPSIZE && st.readptrs.capacity() <= 8
+        });
+        if park {
+            self.clear();
+            ts_pool::park(self);
+        }
+    }
 
     pub fn tuple_count(&self) -> i64 {
         self.0.with(|st| st.tuples)

@@ -54,6 +54,7 @@ pub fn CalculateShmemSize(cfg: &ProcGlobalConfig) -> PgResult<(usize, i32)> {
     let mut size: usize = 100000;
     size = shmem::add_size(size, dsm_core::dsm::dsm_estimate_size())?;
     size = shmem::add_size(size, lock::LockManagerShmemSize(cfg.max_prepared_xacts))?;
+    size = shmem::add_size(size, predicate::PredicateLockShmemSize(cfg.max_prepared_xacts))?;
     size = shmem::add_size(size, lmgr_proc::ProcGlobalShmemSize(cfg)?)?;
     size = shmem::add_size(size, varsup::VarsupShmemSize())?;
     size = shmem::add_size(size, transam_xlog::XLOGShmemSize())?;
@@ -118,6 +119,7 @@ pub fn CreateOrAttachShmemStructs(cfg: &ProcGlobalConfig) -> PgResult<()> {
     bufmgr::BufferManagerShmemInit()?;
 
     lock::LockManagerShmemInit(cfg.max_prepared_xacts)?;
+    predicate::PredicateLockShmemInit(cfg.max_prepared_xacts)?;
 
     if !g::IsUnderPostmaster() {
         lmgr_proc::InitProcGlobal(cfg);
@@ -158,6 +160,7 @@ pub fn ResetShmemAfterCrash() -> PgResult<()> {
     bufmgr::BufferManagerShmemResetAfterCrash();
 
     lock::LockManagerShmemResetAfterCrash();
+    predicate::PredicateLockShmemResetAfterCrash();
 
     lmgr_proc::ProcGlobalResetAfterCrash();
     procarray::ProcArrayShmemResetAfterCrash();

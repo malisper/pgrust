@@ -40,9 +40,7 @@ pub fn index_drop<'mcx>(mcx: Mcx<'mcx>, indexId: Oid, concurrent: bool) -> PgRes
 
     catalog_heap::CheckTableNotInUse(&userIndexRelation, "DROP INDEX")?;
 
-    if xact::IsolationIsSerializable() {
-        unported("index_drop: TransferPredicateLocksToHeapRelation (predicate.c)");
-    }
+    predicate_seams::transfer_predicate_locks_to_heap_relation::call(&userIndexRelation)?;
 
     if types_rel::RELKIND_HAS_STORAGE(userIndexRelation.rd_rel.relkind) {
         catalog_storage::RelationDropStorage(&userIndexRelation)?;
