@@ -3,7 +3,9 @@
 
 mod constraints;
 mod drop;
+mod truncate;
 pub use drop::RemoveRelations;
+pub use truncate::ExecuteTruncate;
 
 use mcx::Mcx;
 use types_core::{AttrNumber, InvalidOid, Oid, NAMEDATALEN};

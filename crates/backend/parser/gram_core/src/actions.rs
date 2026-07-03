@@ -2,9 +2,10 @@ use types_core::catalog::RELPERSISTENCE_PERMANENT;
 use types_error::PgResult;
 use types_nodes::parsenodes::{
     CTEMaterialize, CommonTableExpr, CopyStmt, DeallocateStmt, DefElem, DefElemAction,
-    DiscardMode, DiscardStmt, DropBehavior, DropStmt, ExecuteStmt, ListenStmt, NotifyStmt,
-    ObjectType, PrepareStmt, TransactionStmt, TransactionStmtKind, UnlistenStmt, VacuumRelation,
-    VacuumStmt, VariableSetKind, VariableSetStmt, VariableShowStmt, WithClause,
+    CommentStmt, CreateSchemaStmt, DiscardMode, DiscardStmt, DropBehavior, DropStmt,
+    ExecuteStmt, ListenStmt, NotifyStmt, ObjectType, PrepareStmt, TransactionStmt,
+    TransactionStmtKind, TruncateStmt, UnlistenStmt, VacuumRelation, VacuumStmt,
+    VariableSetKind, VariableSetStmt, VariableShowStmt, WithClause,
 };
 use types_nodes::primnodes::{CaseExpr, CaseWhen, CoalesceExpr, JoinExpr, MinMaxExpr, MinMaxOp};
 use types_nodes::JoinType;
@@ -2218,6 +2219,47 @@ impl<'mcx> Parser<'mcx> {
                 let s = view.v(1).str_val();
                 let mut list = view.v(2).list();
                 list.lcons(mcx, Node::mk_string(mcx, s)?)?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // CreateSchemaStmt (AUTHORIZATION forms 189/191 and non-empty
+            // element lists 193 stay unimplemented-rule louds).
+            190 | 192 => {
+                let (name, elts) = if rule == 190 { (3, 4) } else { (6, 7) };
+                let mut n = Node::build::<CreateSchemaStmt>(mcx)?;
+                n.schemaname = Some(view.v(name).str_val());
+                n.schemaElts = view.v(elts).list();
+                n.if_not_exists = rule == 192;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            967 => {
+                let mut n = Node::build::<TruncateStmt>(mcx)?;
+                n.relations = view.v(3).list();
+                n.restart_seqs = view.v(4).boolean();
+                n.behavior = drop_behavior(view.v(5).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            968 | 970 => *yyval = YYSTYPE::Boolean(false),
+            969 => *yyval = YYSTYPE::Boolean(true),
+            // CommentStmt TABLE/COLUMN arms (object forms 973-988 stay louds).
+            971 | 972 => {
+                let mut n = Node::build::<CommentStmt>(mcx)?;
+                n.objtype = if rule == 972 {
+                    ObjectType::OBJECT_COLUMN
+                } else {
+                    object_type(view.v(3).ival())
+                };
+                n.object = Some(Node::mk_list(mcx, view.v(4).list())?);
+                let c = view.v(6);
+                n.comment = if c.is_null_node() { None } else { Some(c.str_val()) };
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1876 => {
+                let n = view.v(1).node().expect("relation_expr");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, n)?);
+            }
+            1877 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("relation_expr"))?;
                 *yyval = YYSTYPE::List(list);
             }
             _ => unimplemented_rule(rule),
