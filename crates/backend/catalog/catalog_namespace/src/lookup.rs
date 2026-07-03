@@ -310,6 +310,28 @@ pub fn TypenameGetTypidExtended(typname: &str, temp_ok: bool) -> PgResult<Oid> {
     Ok(InvalidOid)
 }
 
+// TypeIsVisible (namespace.c): first path entry owning the name decides.
+pub fn TypeIsVisible(typid: Oid) -> PgResult<bool> {
+    let Some(t) = syscache_seams::pg_type_domain_shape::call(typid)? else {
+        return Err(Box::new(types_error::PgError::error(format!(
+            "cache lookup failed for type {typid}"
+        ))));
+    };
+    let typname = core::str::from_utf8(t.typname.name_str())
+        .unwrap_or_else(|_| panic!("non-UTF-8 type name"));
+    recomputeNamespacePath()?;
+    for i in 0..base_path_len() {
+        let namespace_id = base_path_nth(i);
+        if namespace_id == t.typnamespace {
+            return Ok(true);
+        }
+        if OidIsValid(syscache_seams::lookup_pg_type_oid_by_name::call(typname, namespace_id)?) {
+            return Ok(false);
+        }
+    }
+    Ok(false)
+}
+
 pub fn RangeVarGetRelid(
     relation: &RangeVar<'_>,
     lockmode: LOCKMODE,

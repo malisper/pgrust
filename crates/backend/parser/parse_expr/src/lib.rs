@@ -1149,6 +1149,16 @@ fn transformColumnRef<'mcx>(
         return Err(column_ref_not_allowed(pstate, cref));
     }
 
+    if let parser_small1::PreColumnRefHook::DomainValue(dv) = pstate.p_pre_columnref_hook {
+        if let [field1] = cref.fields.as_slice() {
+            if field1.as_string().map(|s| s.sval) == Some("value") {
+                let mut copy = dv;
+                copy.location = cref.location;
+                return Node::mk(mcx, copy);
+            }
+        }
+    }
+
     let field_str = |n: Node<'mcx>| n.as_string().map(|s| s.sval);
     let fields = cref.fields.as_slice();
 

@@ -65,7 +65,7 @@ pub struct WinBind<'a, 'mcx> {
 }
 
 #[derive(Clone, Copy)]
-enum Bind<'a, 'mcx> {
+pub(crate) enum Bind<'a, 'mcx> {
     Agg(AggBind),
     Win(WinBind<'a, 'mcx>),
 }
@@ -82,7 +82,7 @@ fn unported(what: &str) -> ! {
 
 // C ExprEvalPushStep's growth shape: 16 steps up front (new_in), doubling.
 #[inline(always)]
-fn push_step(state: &mut ExprState<'_>, mcx: Mcx<'_>, step: Step) -> PgResult<()> {
+pub(crate) fn push_step(state: &mut ExprState<'_>, mcx: Mcx<'_>, step: Step) -> PgResult<()> {
     if state.steps.len() == state.steps.capacity() {
         grow_steps(state, mcx)?;
     }
@@ -728,7 +728,7 @@ pub fn exec_build_grouping_equal<'mcx>(
     Ok(state)
 }
 
-fn alloc_nullable_datum(mcx: Mcx<'_>) -> PgResult<NonNull<::datum::NullableDatum>> {
+pub(crate) fn alloc_nullable_datum(mcx: Mcx<'_>) -> PgResult<NonNull<::datum::NullableDatum>> {
     let layout = core::alloc::Layout::new::<::datum::NullableDatum>();
     let raw = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?;
     let p: NonNull<::datum::NullableDatum> = raw.cast();
@@ -776,6 +776,9 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
+        NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
+        NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeId,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         tag => panic!("execexpr exprType: node family {tag:?} not ported"),
     }
 }
@@ -791,7 +794,7 @@ struct SetupInfo {
 }
 
 #[inline]
-fn create_expr_setup_steps<'mcx>(
+pub(crate) fn create_expr_setup_steps<'mcx>(
     state: &mut ExprState<'mcx>,
     mcx: Mcx<'mcx>,
     nodes: &[Node<'mcx>],
@@ -922,12 +925,14 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
                 setup_walker(e, info);
             }
         }
+        NodeTag::T_CoerceToDomain => setup_walker(node.as_coerce_to_domain().unwrap().arg, info),
+        NodeTag::T_CoerceToDomainValue => {}
         tag => panic!("execexpr setup walker: node family {tag:?} not ported"),
     }
 }
 
 // C ExecInitExprRec over the ported families.
-fn init_expr_rec<'mcx>(
+pub(crate) fn init_expr_rec<'mcx>(
     node: Node<'mcx>,
     state: &mut ExprState<'mcx>,
     mcx: Mcx<'mcx>,
@@ -1201,6 +1206,13 @@ fn init_expr_rec<'mcx>(
             let step = init_row_expr(r, state, mcx, out, agg, params, sub)?;
             push_step(state, mcx, step)
         }
+        NodeTag::T_CoerceToDomain => init_coerce_to_domain(node, state, mcx, out, agg, params, sub),
+        NodeTag::T_CoerceToDomainValue => match state.innermost_domain {
+            Some(src) => push_step(state, mcx, Step::DomainTestval { src, out }),
+            None => unported(
+                "EEOP_DOMAIN_TESTVAL_EXT (CoerceToDomainValue outside a domain-check compile)",
+            ),
+        },
         tag => panic!("execexpr ExecInitExprRec: node family {tag:?} not ported"),
     }
 }
@@ -1399,6 +1411,88 @@ fn init_row_expr<'mcx>(
     }
 
     Ok(Step::RowExprStep { elems, nelems: nelems as u16, frame: frame_ix, desc: desc_ptr, out })
+}
+
+// C ExecInitCoerceToDomain (execExpr.c:3524): constraints baked at compile
+// (post-v10 shape); NOTNULL reads the arg's own out, CHECK evaluates into a
+// shared compile-allocated slot with CoerceToDomainValue reading domainval.
+fn init_coerce_to_domain<'mcx>(
+    node: Node<'mcx>,
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    out: OutRef,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<()> {
+    let cd = node.as_coerce_to_domain().unwrap();
+    init_expr_rec(cd.arg, state, mcx, out, agg, params, sub)?;
+
+    let cref = typcache::DomainConstraintRef::init(cd.resulttype)?;
+    let typlen = cref.typlen();
+    let mut check_slot: Option<NonNull<::datum::NullableDatum>> = None;
+    let mut domainval: Option<OutRef> = None;
+    for con in cref.constraints() {
+        match con.constrainttype {
+            typcache::DomConstraintType::NotNull => {
+                push_step(state, mcx, Step::DomainNotNull { resulttype: cd.resulttype, out })?;
+            }
+            typcache::DomConstraintType::Check => {
+                let check = match check_slot {
+                    Some(c) => c,
+                    None => {
+                        let c = alloc_nullable_datum(mcx)?;
+                        check_slot = Some(c);
+                        c
+                    }
+                };
+                let dv = match domainval {
+                    Some(dv) => dv,
+                    None => {
+                        // R/W expanded inputs must be read R/O by the checks.
+                        let dv = if typlen == -1 {
+                            let ro = OutRef(Some(alloc_nullable_datum(mcx)?));
+                            push_step(state, mcx, Step::MakeReadonly { src: out, out: ro })?;
+                            ro
+                        } else {
+                            out
+                        };
+                        domainval = Some(dv);
+                        dv
+                    }
+                };
+                let save = state.innermost_domain;
+                state.innermost_domain = Some(dv);
+                init_expr_rec(
+                    con.check_expr.expect("CHECK DomainConstraintState carries check_expr"),
+                    state,
+                    mcx,
+                    OutRef(Some(check)),
+                    agg,
+                    params,
+                    sub,
+                )?;
+                state.innermost_domain = save;
+                let name: &'mcx str = str_in(mcx, con.name)?;
+                push_step(
+                    state,
+                    mcx,
+                    Step::DomainCheck {
+                        resulttype: cd.resulttype,
+                        name: NonNull::from(name),
+                        check,
+                    },
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
+    let bytes = ::mcx::slice_borrow_in(mcx, s.as_bytes())?;
+    // SAFETY: byte-for-byte copy of a &str.
+    Ok(unsafe { core::str::from_utf8_unchecked(bytes) })
 }
 
 // C ExecInitExprRec T_BoolExpr: args evaluate into the BoolExpr's own output,
@@ -1846,7 +1940,7 @@ fn init_func<'mcx>(
 // accesses rest on this module's private build invariants (Done-terminated,
 // Qual jumps valid, FuncCall mirrors its frame) — debug-asserted here.
 #[inline]
-fn ready_expr(state: &mut ExprState<'_>) {
+pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
     let steps = state.steps.as_slice();
     let len = steps.len();
     debug_assert!(len >= 1);

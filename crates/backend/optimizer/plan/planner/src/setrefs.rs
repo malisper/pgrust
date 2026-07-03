@@ -880,6 +880,21 @@ fn fix_upper_expr<'mcx>(
                 },
             )
         }
+        NodeTag::T_CoerceToDomain => {
+            let c = node.as_coerce_to_domain().unwrap();
+            let arg = fix_upper_expr(run, c.arg, subplan_tlist, rtoffset, newvarno)?;
+            Node::mk(
+                mcx,
+                types_nodes::CoerceToDomain {
+                    arg,
+                    resulttype: c.resulttype,
+                    resulttypmod: c.resulttypmod,
+                    resultcollid: c.resultcollid,
+                    coercionformat: c.coercionformat,
+                    location: c.location,
+                },
+            )
+        }
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().expect("RelabelType");
             let arg = fix_upper_expr(run, r.arg, subplan_tlist, rtoffset, newvarno, num_exec)?;
@@ -1190,6 +1205,21 @@ fn fix_scan_expr_mutator<'mcx>(
                 },
             )
         }
+        NodeTag::T_CoerceToDomain => {
+            let c = node.as_coerce_to_domain().unwrap();
+            let arg = fix_scan_expr_mutator(run, c.arg, rtoffset)?;
+            Node::mk(
+                mcx,
+                types_nodes::CoerceToDomain {
+                    arg,
+                    resulttype: c.resulttype,
+                    resulttypmod: c.resulttypmod,
+                    resultcollid: c.resultcollid,
+                    coercionformat: c.coercionformat,
+                    location: c.location,
+                },
+            )
+        }
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().unwrap();
             let arg = fix_scan_expr_mutator(run, r.arg, rtoffset, num_exec)?;
@@ -1374,6 +1404,9 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
         NodeTag::T_SQLValueFunction | NodeTag::T_NextValueExpr => Ok(()),
         NodeTag::T_RelabelType => {
             fix_scan_expr_walker(run, node.as_relabel_type().unwrap().arg)
+        }
+        NodeTag::T_CoerceToDomain => {
+            fix_scan_expr_walker(run, node.as_coerce_to_domain().unwrap().arg)
         }
         NodeTag::T_Const => {
             let c = node.as_const().unwrap();
@@ -1838,6 +1871,21 @@ fn fix_join_expr_mutator<'mcx>(
                     inputcollid: o.inputcollid,
                     args,
                     location: o.location,
+                },
+            )
+        }
+        NodeTag::T_CoerceToDomain => {
+            let c = node.as_coerce_to_domain().unwrap();
+            let arg = fix_join_expr_mutator(run, c.arg, outer_tlist, inner_tlist, rtoffset, nrm_match)?;
+            Node::mk(
+                mcx,
+                types_nodes::CoerceToDomain {
+                    arg,
+                    resulttype: c.resulttype,
+                    resulttypmod: c.resulttypmod,
+                    resultcollid: c.resultcollid,
+                    coercionformat: c.coercionformat,
+                    location: c.location,
                 },
             )
         }

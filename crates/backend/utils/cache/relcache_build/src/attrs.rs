@@ -177,7 +177,7 @@ pub(crate) fn relation_build_tuple_desc(
 }
 
 // TextDatumGetCString over a possibly packed/toasted pg_node_tree column.
-fn text_str<'mcx>(mcx: Mcx<'mcx>, scratch: Mcx<'_>, d: Datum) -> PgResult<PgString<'mcx>> {
+pub(crate) fn text_str<'mcx>(mcx: Mcx<'mcx>, scratch: Mcx<'_>, d: Datum) -> PgResult<PgString<'mcx>> {
     let p = d.as_usize() as *const u8;
     // SAFETY: d comes off a not-null text column: a live varlena image
     // readable through its varsize_any extent.

@@ -804,6 +804,20 @@ seam_core::seam!(
     pub fn lookup_pg_type_typcache_shape(typid: Oid) -> PgResult<Option<PgTypeTypcacheShape>>
 );
 
+// The pg_type columns typcache's domain-constraint crawl reads per stack level.
+#[derive(Clone, Copy, Debug)]
+pub struct PgTypeDomainShape {
+    pub typname: NameData,
+    pub typnamespace: Oid,
+    pub typtype: i8,
+    pub typnotnull: bool,
+    pub typbasetype: Oid,
+}
+
+seam_core::seam!(
+    pub fn pg_type_domain_shape(typid: Oid) -> PgResult<Option<PgTypeDomainShape>>
+);
+
 seam_core::seam!(
     // GetSysCacheHashValue1(TYPEOID, typid).
     pub fn syscache_hash_value_typeoid(typid: Oid) -> PgResult<u32>

@@ -51,24 +51,27 @@ fn install_seams() {
         const INT_BTREE_FAM: u32 = 1976;
         const F_BTINT4CMP: u32 = 351;
         syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
-            Ok((typid == INT4OID).then(|| {
-                let mut name = ::types_tuple::NameData::default();
-                name.namestrcpy("int4");
-                syscache_seams::PgTypeTypcacheShape {
-                    typname: name,
-                    typlen: 4,
-                    typbyval: true,
-                    typalign: b'i' as i8,
-                    typstorage: b'p' as i8,
-                    typtype: b'b' as i8,
-                    typisdefined: true,
-                    typrelid: 0,
-                    typsubscript: 0,
-                    typelem: 0,
-                    typarray: 0,
-                    typcollation: 0,
+            Ok(match typid {
+                INT4OID | DOMAIN_OID => {
+                    let mut name = ::types_tuple::NameData::default();
+                    name.namestrcpy(if typid == INT4OID { "int4" } else { "posint" });
+                    Some(syscache_seams::PgTypeTypcacheShape {
+                        typname: name,
+                        typlen: 4,
+                        typbyval: true,
+                        typalign: b'i' as i8,
+                        typstorage: b'p' as i8,
+                        typtype: if typid == INT4OID { b'b' as i8 } else { b'd' as i8 },
+                        typisdefined: true,
+                        typrelid: 0,
+                        typsubscript: 0,
+                        typelem: 0,
+                        typarray: 0,
+                        typcollation: 0,
+                    })
                 }
-            }))
+                _ => None,
+            })
         });
         syscache_seams::syscache_hash_value_typeoid::set(|typid| Ok(typid.wrapping_mul(0x9e3779b1)));
         syscache_seams::lookup_pg_opclass_shape::set(|opclass| {
@@ -88,6 +91,65 @@ fn install_seams() {
                 0
             })
         });
+        install_domain_seams();
+    });
+}
+
+const DOMAIN_OID: u32 = 90001;
+const CONBIN_VALUE_GT_0: &str = "{OPEXPR :opno 521 :opfuncid 147 :opresulttype 16 \
+    :opretset false :opcollid 0 :inputcollid 0 :args ({COERCETODOMAINVALUE \
+    :typeId 23 :typeMod -1 :collation 0 :location 47} {CONST :consttype 23 \
+    :consttypmod -1 :constcollid 0 :constlen 4 :constbyval true :constisnull \
+    false :location 55 :constvalue 4 [ 0 0 0 0 0 0 0 0 ]}) :location 53}";
+
+fn install_domain_seams() {
+    syscache_seams::pg_type_domain_shape::set(|typid| {
+        let mk = |nm: &str, nsp, tt, nn, base| {
+            let mut n = ::types_tuple::NameData::default();
+            n.namestrcpy(nm);
+            syscache_seams::PgTypeDomainShape {
+                typname: n,
+                typnamespace: nsp,
+                typtype: tt,
+                typnotnull: nn,
+                typbasetype: base,
+            }
+        };
+        Ok(match typid {
+            DOMAIN_OID => Some(mk("posint", 2200, b'd' as i8, true, INT4OID)),
+            INT4OID => Some(mk("int4", 11, b'b' as i8, false, 0)),
+            _ => None,
+        })
+    });
+    typcache_seams::scan_domain_check_constraints::set(|mcx, contypid| {
+        let mut rows = ::mcx::vec_with_capacity_in(mcx, 1)?;
+        if contypid == DOMAIN_OID {
+            let mut cn = ::types_tuple::NameData::default();
+            cn.namestrcpy("posint_check");
+            rows.push(typcache_seams::DomainCheckRow { conname: cn, conbin: CONBIN_VALUE_GT_0 });
+        }
+        Ok(rows)
+    });
+    syscache_seams::lookup_pg_proc_shape::set(|funcid| {
+        Ok((funcid == 147).then_some(syscache_seams::PgProcShape {
+            pronamespace: 11,
+            prorettype: BOOLOID,
+            provariadic: 0,
+            prosupport: 0,
+            pronargs: 2,
+            prokind: b'f' as i8,
+            provolatile: b'i' as i8,
+            proparallel: b's' as i8,
+            proretset: false,
+            proisstrict: true,
+            proleakproof: false,
+        }))
+    });
+    namespace_seams::type_is_visible::set(|typid| Ok(typid == DOMAIN_OID));
+    syscache_seams::pg_namespace_nspname::set(|nspid| {
+        let mut n = ::types_tuple::NameData::default();
+        n.namestrcpy(if nspid == 2200 { "public" } else { "pg_catalog" });
+        Ok(Some(n))
     });
 }
 
@@ -1143,4 +1205,74 @@ fn case_expr_searched_form() {
         assert!(eval(Some(2)).isnull);
         assert!(eval(None).isnull);
     });
+fn mk_domain_coercion(mcx: Mcx<'_>, value: Option<i32>) -> Node<'_> {
+    let konst = Node::mk_const(
+        mcx,
+        INT4OID,
+        -1,
+        0,
+        4,
+        value.map_or(Datum::null(), Datum::from_i32),
+        value.is_none(),
+        true,
+    )
+    .unwrap();
+    Node::mk(
+        mcx,
+        ::types_nodes::CoerceToDomain {
+            arg: konst,
+            resulttype: DOMAIN_OID,
+            resulttypmod: -1,
+            resultcollid: 0,
+            coercionformat: ::types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+            location: -1,
+        },
+    )
+    .unwrap()
+}
+
+fn eval_domain(value: Option<i32>) -> Result<::datum::NullableDatum, Box<::types_error::PgError>> {
+    install_seams();
+    with_mcx(|mcx| {
+        let expr = mk_domain_coercion(mcx, value);
+        let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+        state.arm_result_mcx(mcx);
+        exec_eval_expr(&mut state, &mut EvalSlots::default())
+    })
+}
+
+#[test]
+fn coerce_to_domain_valid_value_passes() {
+    let r = eval_domain(Some(5)).unwrap();
+    assert!(!r.isnull);
+    assert_eq!(r.value.as_i32(), 5);
+}
+
+#[test]
+fn coerce_to_domain_check_violation_is_23514() {
+    let e = eval_domain(Some(0)).unwrap_err();
+    assert_eq!(
+        e.message(),
+        "value for domain posint violates check constraint \"posint_check\""
+    );
+    assert_eq!(e.sqlstate(), ::types_error::ERRCODE_CHECK_VIOLATION);
+    assert_eq!(e.constraint_name(), Some("posint_check"));
+    assert_eq!(e.datatype_name(), Some("posint"));
+}
+
+#[test]
+fn coerce_to_domain_null_is_23502() {
+    let e = eval_domain(None).unwrap_err();
+    assert_eq!(e.message(), "domain posint does not allow null values");
+    assert_eq!(e.sqlstate(), ::types_error::ERRCODE_NOT_NULL_VIOLATION);
+}
+
+#[test]
+fn domain_check_input_engine_matches() {
+    install_seams();
+    assert!(crate::domain::domain_check_input(Datum::from_i32(7), false, DOMAIN_OID).is_ok());
+    let e = crate::domain::domain_check_input(Datum::from_i32(-1), false, DOMAIN_OID).unwrap_err();
+    assert_eq!(e.sqlstate(), ::types_error::ERRCODE_CHECK_VIOLATION);
+    let e = crate::domain::domain_check_input(Datum::null(), true, DOMAIN_OID).unwrap_err();
+    assert_eq!(e.sqlstate(), ::types_error::ERRCODE_NOT_NULL_VIOLATION);
 }

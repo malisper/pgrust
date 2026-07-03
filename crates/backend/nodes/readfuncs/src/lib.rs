@@ -324,7 +324,8 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"FUNCEXPR" => self.read_func_expr(),
             b"BOOLEXPR" => self.read_bool_expr(),
             b"RELABELTYPE" => self.read_relabel_type(),
-            b"COERCEVIAIO" => self.read_coerce_via_io(),
+            b"COERCETODOMAIN" => self.read_coerce_to_domain(),
+            b"COERCETODOMAINVALUE" => self.read_coerce_to_domain_value(),
             other => panic!(
                 "parseNodeString (readfuncs.c): {} read arm unported (view SELECT-rule + \
                  DEFAULT/CHECK expr sets only)",
@@ -584,18 +585,6 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         Ok(b.seal())
     }
 
-    fn read_coerce_via_io(&mut self) -> PgResult<Node<'mcx>> {
-        let arg = self.read_node("arg")?.expect("CoerceViaIO has an arg");
-        let c = types_nodes::primnodes::CoerceViaIO {
-            arg,
-            resulttype: self.read_u32("resulttype"),
-            resultcollid: self.read_u32("resultcollid"),
-            coerceformat: coercion_form(self.read_u32("coerceformat")),
-            location: self.read_location("location"),
-        };
-        Node::mk(self.mcx, c)
-    }
-
     fn read_relabel_type(&mut self) -> PgResult<Node<'mcx>> {
         let arg = self.read_node("arg")?.expect("RelabelType has an arg");
         let r = RelabelType {
@@ -607,6 +596,29 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             location: self.read_location("location"),
         };
         Node::mk(self.mcx, r)
+    }
+
+    fn read_coerce_to_domain(&mut self) -> PgResult<Node<'mcx>> {
+        let arg = self.read_node("arg")?.expect("CoerceToDomain has an arg");
+        let c = types_nodes::CoerceToDomain {
+            arg,
+            resulttype: self.read_u32("resulttype"),
+            resulttypmod: self.read_i32("resulttypmod"),
+            resultcollid: self.read_u32("resultcollid"),
+            coercionformat: coercion_form(self.read_u32("coercionformat")),
+            location: self.read_location("location"),
+        };
+        Node::mk(self.mcx, c)
+    }
+
+    fn read_coerce_to_domain_value(&mut self) -> PgResult<Node<'mcx>> {
+        let c = types_nodes::CoerceToDomainValue {
+            typeId: self.read_u32("typeId"),
+            typeMod: self.read_i32("typeMod"),
+            collation: self.read_u32("collation"),
+            location: self.read_location("location"),
+        };
+        Node::mk(self.mcx, c)
     }
 
     // readDatum (readfuncs.c): "<len> [ <byte> ... ]"; byval always carries

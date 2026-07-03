@@ -20,6 +20,7 @@ lsyscache = { path = "../../../utils/cache/lsyscache" }
 syscache_seams = { path = "../../../utils/cache/syscache_seams" }
 fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
 clauses_seams = { path = "../clauses_seams" }
+typcache_seams = { path = "../../../utils/cache/typcache_seams" }
 var_seams = { path = "../var_seams" }
 
 [dev-dependencies]

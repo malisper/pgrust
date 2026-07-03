@@ -7,6 +7,8 @@ publish.workspace = true
 [dependencies]
 datum = { path = "../../../../_support/types/datum" }
 fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+mcx = { path = "../../../../_support/mcx" }
+namespace_seams = { path = "../../../catalog/namespace_seams" }
 keywords = { path = "../../../../common/keywords" }
 mbutils_seams = { path = "../../mb/mbutils_seams" }
 wchar = { path = "../../../../common/wchar" }

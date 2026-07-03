@@ -446,6 +446,26 @@ fn lookup_pg_type_typcache_shape(typid: Oid) -> PgResult<Option<PgTypeTypcacheSh
     Ok(Some(shape))
 }
 
+const ANUM_PG_TYPE_TYPNAMESPACE: i32 = 3;
+const ANUM_PG_TYPE_TYPNOTNULL: i32 = 25;
+
+fn pg_type_domain_shape(typid: Oid) -> PgResult<Option<syscache_seams::PgTypeDomainShape>> {
+    let Some(tuple) = SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(typid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let shape = syscache_seams::PgTypeDomainShape {
+        typname: getattr_name(&t, TYPEOID, ANUM_PG_TYPE_TYPNAME),
+        typnamespace: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPNAMESPACE).as_oid(),
+        typtype: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPTYPE).as_i8(),
+        typnotnull: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPNOTNULL).as_bool(),
+        typbasetype: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPBASETYPE).as_oid(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
 fn lookup_pg_class_relid_by_name(relname: &str, relnamespace: Oid) -> PgResult<Oid> {
     GetSysCacheOid(
         RELNAMENSP,
@@ -1609,6 +1629,7 @@ pub(crate) fn install() {
     syscache_seams::lookup_pg_amop_members_by_operator::set(lookup_pg_amop_members_by_operator);
     syscache_seams::lookup_pg_opfamily_shape::set(lookup_pg_opfamily_shape);
     syscache_seams::pg_type_base_shape::set(pg_type_base_shape);
+    syscache_seams::pg_type_domain_shape::set(pg_type_domain_shape);
     syscache_seams::pg_type_io_shape::set(pg_type_io_shape);
     syscache_seams::pg_type_typarray::set(pg_type_typarray);
     syscache_seams::pg_type_typrelid::set(pg_type_typrelid);

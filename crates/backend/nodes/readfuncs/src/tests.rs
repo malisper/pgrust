@@ -123,3 +123,34 @@ fn rte_join_arm_is_loud() {
         "{RANGETBLENTRY :alias <> :eref <> :rtekind 2 :jointype 0}",
     );
 }
+
+#[test]
+fn coerce_to_domain_value_conbin() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let s = "{OPEXPR :opno 521 :opfuncid 147 :opresulttype 16 :opretset false \
+             :opcollid 0 :inputcollid 0 :args ({COERCETODOMAINVALUE :typeId 23 \
+             :typeMod -1 :collation 0 :location 47} {CONST :consttype 23 \
+             :consttypmod -1 :constcollid 0 :constlen 4 :constbyval true \
+             :constisnull false :location 55 :constvalue 4 [ 0 0 0 0 0 0 0 0 ]}) \
+             :location 53}";
+    let n = stringToNode(mcx, s).unwrap();
+    let op = n.as_op_expr().unwrap();
+    assert_eq!((op.opno, op.opfuncid), (521, 147));
+    let dv = op.args.nth(0).as_coerce_to_domain_value().unwrap();
+    assert_eq!((dv.typeId, dv.typeMod, dv.collation, dv.location), (23, -1, 0, -1));
+}
+
+#[test]
+fn coerce_to_domain_node() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let s = "{COERCETODOMAIN :arg {CONST :consttype 23 :consttypmod -1 \
+             :constcollid 0 :constlen 4 :constbyval true :constisnull false \
+             :location -1 :constvalue 4 [ 5 0 0 0 0 0 0 0 ]} :resulttype 90001 \
+             :resulttypmod -1 :resultcollid 0 :coercionformat 2 :location -1}";
+    let n = stringToNode(mcx, s).unwrap();
+    let cd = n.as_coerce_to_domain().unwrap();
+    assert_eq!((cd.resulttype, cd.resulttypmod), (90001, -1));
+    assert_eq!(cd.arg.as_const().unwrap().constvalue.as_u64(), 5);
+}

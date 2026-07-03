@@ -168,6 +168,17 @@ dependencies = [
 [[package]]
 name = "adt_domains"
 version = "0.1.0"
+dependencies = [
+ "datum",
+ "fmgr_seams",
+ "format_type",
+ "lsyscache",
+ "syscache_seams",
+ "typcache_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
 
 [[package]]
 name = "adt_encode"
@@ -1538,6 +1549,7 @@ dependencies = [
  "mcx",
  "nodes_core",
  "syscache_seams",
+ "typcache_seams",
  "types_core",
  "types_error",
  "types_nodes",
@@ -2452,11 +2464,13 @@ dependencies = [
  "lsyscache",
  "mcx",
  "miscinit_seams",
+ "namespace_seams",
  "pgtz",
  "sequence_seams",
  "syscache_seams",
  "tupdesc",
  "typcache",
+ "typcache_seams",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -2864,6 +2878,7 @@ dependencies = [
  "adt_cash",
  "adt_char",
  "adt_date",
+ "adt_domains",
  "adt_encode",
  "adt_float",
  "adt_formatting",
@@ -2928,6 +2943,8 @@ dependencies = [
  "fmgr_seams",
  "keywords",
  "mbutils_seams",
+ "mcx",
+ "namespace_seams",
  "syscache_seams",
  "types_core",
  "types_error",
@@ -7287,6 +7304,7 @@ dependencies = [
  "relcache_build_seams",
  "table",
  "tupdesc",
+ "typcache_seams",
  "types_array",
  "types_core",
  "types_error",
@@ -9164,6 +9182,7 @@ dependencies = [
 name = "typcache"
 version = "0.1.0"
 dependencies = [
+ "clauses",
  "datum",
  "fmgr_core",
  "fmgr_seams",
@@ -9171,6 +9190,8 @@ dependencies = [
  "inval",
  "lsyscache",
  "mcx",
+ "nodes_core",
+ "readfuncs",
  "relation_seams",
  "syscache_seams",
  "tupdesc",
@@ -9178,6 +9199,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
  "types_rel",
  "types_tuple",
 ]
@@ -9186,6 +9208,7 @@ dependencies = [
 name = "typcache_seams"
 version = "0.0.0"
 dependencies = [
+ "datum",
  "mcx",
  "seam_core",
  "types_core",
@@ -9196,6 +9219,38 @@ dependencies = [
 [[package]]
 name = "typecmds"
 version = "0.1.0"
+dependencies = [
+ "aclchk",
+ "adt_acl",
+ "catalog_namespace",
+ "coerce",
+ "datum",
+ "elog",
+ "fmgr_seams",
+ "format_type",
+ "genam",
+ "lsyscache",
+ "mbutils",
+ "mcx",
+ "miscinit",
+ "outfuncs",
+ "parse_collate",
+ "parse_expr",
+ "parse_utilcmd",
+ "parser_small1",
+ "pg_constraint",
+ "pg_type",
+ "syscache_seams",
+ "table",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+ "vars",
+ "xact",
+]
 
 [[package]]
 name = "types_array"
@@ -9460,6 +9515,7 @@ dependencies = [
  "miscinit",
  "parallel_seams",
  "parse_utilcmd",
+ "parser_small1",
  "portalcmds",
  "portalmem",
  "prepare",
@@ -9473,6 +9529,7 @@ dependencies = [
  "transam_xlog",
  "transam_xlog_seams",
  "twophase_seams",
+ "typecmds",
  "types_core",
  "types_dest",
  "types_error",

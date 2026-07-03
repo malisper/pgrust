@@ -71,3 +71,8 @@ seam_core::seam!(
     // No Mcx: the owner runs its catalog lookups in a scratch context.
     pub fn find_default_conversion_proc(for_encoding: i32, to_encoding: i32) -> PgResult<Oid>
 );
+
+seam_core::seam!(
+    // TypeIsVisible (namespace.c).
+    pub fn type_is_visible(typid: Oid) -> PgResult<bool>
+);

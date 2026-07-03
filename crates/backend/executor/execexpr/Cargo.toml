@@ -29,6 +29,8 @@ clauses_seams = { path = "../../optimizer/util/clauses_seams" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
 
 [features]
 bench-internals = []
@@ -40,5 +42,6 @@ pgtz = { path = "../../timezone/pgtz" }
 elog = { path = "../../utils/error/elog" }
 fd = { path = "../../storage/file/fd" }
 xact_seams = { path = "../../access/transam/xact_seams" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
 indexcmds_seams = { path = "../../commands/indexcmds_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }

@@ -12,7 +12,10 @@ use mcx::{Mcx, PgString};
 use types_error::PgResult;
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::list::NodeList;
-use types_nodes::primnodes::{BoolExpr, BoolExprType, CoerceViaIO, Const, FuncExpr, OpExpr, RelabelType, Var};
+use types_nodes::primnodes::{
+    BoolExpr, BoolExprType, CoerceToDomain, CoerceToDomainValue, Const, FuncExpr, OpExpr,
+    RelabelType, Var,
+};
 use types_nodes::{Node, NodeTag};
 
 pub fn nodeToString<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<PgString<'mcx>> {
@@ -41,8 +44,17 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
         NodeTag::T_RelabelType => {
             out_relabel_type(out, node.as_variant::<RelabelType>().expect("RelabelType"))?
         }
-        NodeTag::T_CoerceViaIO => {
-            out_coerce_via_io(out, node.as_variant::<CoerceViaIO>().expect("CoerceViaIO"))?
+        NodeTag::T_CoerceToDomain => out_coerce_to_domain(
+            out,
+            node.as_variant::<CoerceToDomain>().expect("CoerceToDomain"),
+        )?,
+        NodeTag::T_CoerceToDomainValue => {
+            let v = node.as_variant::<CoerceToDomainValue>().expect("CoerceToDomainValue");
+            w!(
+                out,
+                "{{COERCETODOMAINVALUE :typeId {} :typeMod {} :collation {} :location -1}}",
+                v.typeId, v.typeMod, v.collation
+            );
         }
         other => panic!(
             "outNode (outfuncs.c): {other:?} write arm unported (DEFAULT/CHECK expr set only)"
@@ -202,6 +214,17 @@ fn out_bool_expr(out: &mut PgString<'_>, b: &BoolExpr<'_>) -> PgResult<()> {
     Ok(())
 }
 
+fn out_coerce_to_domain(out: &mut PgString<'_>, c: &CoerceToDomain<'_>) -> PgResult<()> {
+    w!(out, "{{COERCETODOMAIN :arg ");
+    out_node(out, c.arg)?;
+    w!(
+        out,
+        " :resulttype {} :resulttypmod {} :resultcollid {} :coercionformat {} :location -1}}",
+        c.resulttype, c.resulttypmod, c.resultcollid, c.coercionformat as u32
+    );
+    Ok(())
+}
+
 fn out_relabel_type(out: &mut PgString<'_>, r: &RelabelType<'_>) -> PgResult<()> {
     w!(out, "{{RELABELTYPE :arg ");
     out_node(out, r.arg)?;
@@ -209,17 +232,6 @@ fn out_relabel_type(out: &mut PgString<'_>, r: &RelabelType<'_>) -> PgResult<()>
         out,
         " :resulttype {} :resulttypmod {} :resultcollid {} :relabelformat {} :location -1}}",
         r.resulttype, r.resulttypmod, r.resultcollid, r.relabelformat as u32
-    );
-    Ok(())
-}
-
-fn out_coerce_via_io(out: &mut PgString<'_>, c: &CoerceViaIO<'_>) -> PgResult<()> {
-    w!(out, "{{COERCEVIAIO :arg ");
-    out_node(out, c.arg)?;
-    w!(
-        out,
-        " :resulttype {} :resultcollid {} :coerceformat {} :location -1}}",
-        c.resulttype, c.resultcollid, c.coerceformat as u32
     );
     Ok(())
 }

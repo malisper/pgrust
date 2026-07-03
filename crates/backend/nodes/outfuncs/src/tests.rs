@@ -2,7 +2,7 @@ use datum::Datum;
 use mcx::MemoryContext;
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::list::NodeList;
-use types_nodes::primnodes::{Const, OpExpr, Var};
+use types_nodes::primnodes::{CoerceToDomainValue, Const, OpExpr, Var};
 use types_nodes::Node;
 
 use crate::nodeToString;
@@ -126,4 +126,39 @@ fn funcexpr_matches_live_adbin_and_round_trips() {
     let fx = back.as_variant::<types_nodes::primnodes::FuncExpr>().unwrap();
     assert_eq!(fx.funcid, 481);
     assert_eq!(fx.args.len(), 1);
+}
+
+// Captured from live PostgreSQL 18.3:
+// CREATE DOMAIN posint AS int CHECK (VALUE > 0) NOT NULL.
+const CONBIN_POSINT_CHECK: &str = "{OPEXPR :opno 521 :opfuncid 147 :opresulttype 16 \
+    :opretset false :opcollid 0 :inputcollid 0 :args ({COERCETODOMAINVALUE :typeId 23 \
+    :typeMod -1 :collation 0 :location -1} {CONST :consttype 23 :consttypmod -1 \
+    :constcollid 0 :constlen 4 :constbyval true :constisnull false :location -1 \
+    :constvalue 4 [ 0 0 0 0 0 0 0 0 ]}) :location -1}";
+
+#[test]
+fn domain_check_matches_live_conbin() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let domval = Node::mk(
+        mcx,
+        CoerceToDomainValue { typeId: 23, typeMod: -1, collation: 0, location: 35 },
+    )
+    .unwrap();
+    let zero = Node::mk(mcx, int4_const(0)).unwrap();
+    let op = Node::mk(
+        mcx,
+        OpExpr {
+            opno: 521,
+            opfuncid: 147,
+            opresulttype: 16,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args: NodeList::make2(mcx, domval, zero).unwrap(),
+            location: 41,
+        },
+    )
+    .unwrap();
+    assert_eq!(nodeToString(mcx, op).unwrap().as_str(), CONBIN_POSINT_CHECK);
 }

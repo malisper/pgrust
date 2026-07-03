@@ -10,8 +10,6 @@ const COMPOSITE_OID: Oid = 90004;
 const COMPOSITE_REL: Oid = 5001;
 const DOMAIN_OID: Oid = 90001;
 const RANGE_OID: Oid = 90005;
-const MULTI_OID: Oid = 90007;
-const F_INT4RANGE_CANONICAL: Oid = 3914;
 const SHELL_OID: Oid = 90003;
 const NOHASH_OID: Oid = 90006;
 
@@ -70,7 +68,6 @@ static SEAMS: Once = Once::new();
 fn install() {
     SEAMS.call_once(|| {
         use syscache_seams as s;
-        fmgr_core::init_seams();
         s::lookup_pg_type_typcache_shape::set(|typid| {
             Ok(match typid {
                 INT4OID => Some(typrow("int4", b'b' as i8, true, InvalidOid, InvalidOid, InvalidOid)),
@@ -85,7 +82,6 @@ fn install() {
                 COMPOSITE_OID => Some(typrow("comp", b'c' as i8, true, COMPOSITE_REL, InvalidOid, InvalidOid)),
                 DOMAIN_OID => Some(typrow("dom", b'd' as i8, true, InvalidOid, InvalidOid, InvalidOid)),
                 RANGE_OID => Some(typrow("rng", b'r' as i8, true, InvalidOid, InvalidOid, InvalidOid)),
-                MULTI_OID => Some(typrow("mrng", b'm' as i8, true, InvalidOid, InvalidOid, InvalidOid)),
                 SHELL_OID => Some(typrow("shell", b'b' as i8, false, InvalidOid, InvalidOid, InvalidOid)),
                 NOHASH_OID => Some(typrow("nohash", b'b' as i8, true, InvalidOid, InvalidOid, InvalidOid)),
                 _ => None,
@@ -178,21 +174,62 @@ fn install() {
                     typelem: InvalidOid,
                     typsubscript: InvalidOid,
                 }),
+                DOMAIN_OID => Some(s::PgTypeBaseShape {
+                    typtype: b'd' as i8,
+                    typbasetype: INT4OID,
+                    typtypmod: -1,
+                    typelem: InvalidOid,
+                    typsubscript: InvalidOid,
+                }),
                 _ => None,
             })
         });
-        s::lookup_pg_range_shape::set(|range_oid| {
-            Ok((range_oid == RANGE_OID).then_some(s::PgRangeShape {
-                rngsubtype: INT4OID,
-                rngmultitypid: MULTI_OID,
-                rngcollation: InvalidOid,
-                rngsubopc: INT4_BTREE_OPCLASS,
-                rngcanonical: F_INT4RANGE_CANONICAL,
-                rngsubdiff: InvalidOid,
+        s::pg_type_typrelid::set(|_| Ok(Some(InvalidOid)));
+        s::pg_type_domain_shape::set(|typid| {
+            Ok(match typid {
+                DOMAIN_OID => Some(s::PgTypeDomainShape {
+                    typname: name("dom"),
+                    typnamespace: 2200,
+                    typtype: b'd' as i8,
+                    typnotnull: true,
+                    typbasetype: INT4OID,
+                }),
+                INT4OID => Some(s::PgTypeDomainShape {
+                    typname: name("int4"),
+                    typnamespace: 11,
+                    typtype: b'b' as i8,
+                    typnotnull: false,
+                    typbasetype: InvalidOid,
+                }),
+                _ => None,
+            })
+        });
+        s::lookup_pg_proc_shape::set(|funcid| {
+            Ok((funcid == 147).then_some(s::PgProcShape {
+                pronamespace: 11,
+                prorettype: 16,
+                provariadic: InvalidOid,
+                prosupport: InvalidOid,
+                pronargs: 2,
+                prokind: b'f' as i8,
+                provolatile: b'i' as i8,
+                proparallel: b's' as i8,
+                proretset: false,
+                proisstrict: true,
+                proleakproof: false,
             }))
         });
-        s::lookup_pg_range_by_multirange::set(|mr| {
-            Ok((mr == MULTI_OID).then_some(RANGE_OID))
+        typcache_seams::scan_domain_check_constraints::set(|mcx, contypid| {
+            let mut rows = mcx::vec_with_capacity_in(mcx, 2)?;
+            if contypid == DOMAIN_OID {
+                for nm in ["dom_check_b", "dom_check_a"] {
+                    rows.push(typcache_seams::DomainCheckRow {
+                        conname: name(nm),
+                        conbin: CONBIN_VALUE_GT_0,
+                    });
+                }
+            }
+            Ok(rows)
         });
         indexcmds_seams::get_default_opclass::set(|type_id, am_id| {
             Ok(match (type_id, am_id) {
@@ -357,36 +394,39 @@ fn composite_tupdesc_lane_is_loud() {
 }
 
 #[test]
-fn range_info_fills_and_links_elem() {
+#[should_panic(expected = "RANGE_INFO lane not ported")]
+fn range_lane_is_loud() {
     install();
-    let e = lookup_type_cache(RANGE_OID, TYPECACHE_RANGE_INFO).unwrap();
-    assert_eq!(e.rng_collation(), InvalidOid);
-    assert_eq!(e.rng_opfamily(), INT_BTREE_FAM);
-    assert_eq!(e.rng_cmp_proc_finfo().fn_oid, F_BTINT4CMP);
-    assert_eq!(e.rng_canonical_finfo().fn_oid, F_INT4RANGE_CANONICAL);
-    let elem = e.rngelemtype().expect("rngelemtype linked");
-    assert_eq!(elem.type_id, INT4OID);
-    // Re-request re-verifies the elem entry, per C, and stays the same pin.
-    let e2 = lookup_type_cache(RANGE_OID, TYPECACHE_RANGE_INFO).unwrap();
-    assert!(Rc::ptr_eq(&e, &e2));
+    let _ = lookup_type_cache(RANGE_OID, TYPECACHE_RANGE_INFO);
+}
+
+const CONBIN_VALUE_GT_0: &str = "{OPEXPR :opno 521 :opfuncid 147 :opresulttype 16 \
+    :opretset false :opcollid 0 :inputcollid 0 :args ({COERCETODOMAINVALUE \
+    :typeId 23 :typeMod -1 :collation 0 :location 47} {CONST :consttype 23 \
+    :consttypmod -1 :constcollid 0 :constlen 4 :constbyval true :constisnull \
+    false :location 55 :constvalue 4 [ 0 0 0 0 0 0 0 0 ]}) :location 53}";
+
+#[test]
+fn domain_base_info_lane() {
+    install();
+    let e = lookup_type_cache(DOMAIN_OID, TYPECACHE_DOMAIN_BASE_INFO).unwrap();
+    assert_eq!(e.domain_base_type(), INT4OID);
+    assert_eq!(e.domain_base_typmod(), -1);
 }
 
 #[test]
-fn multirange_info_links_range_entry() {
+fn domain_constraints_order_and_update() {
     install();
-    let e = lookup_type_cache(MULTI_OID, TYPECACHE_MULTIRANGE_INFO).unwrap();
-    let rt = e.rngtype().expect("rngtype linked");
-    assert_eq!(rt.type_id, RANGE_OID);
-    assert!(rt.rngelemtype().is_some());
-    let e2 = lookup_type_cache(MULTI_OID, TYPECACHE_MULTIRANGE_INFO).unwrap();
-    assert!(Rc::ptr_eq(&e, &e2));
-}
-
-#[test]
-#[should_panic(expected = "DOMAIN_BASE_INFO lane not ported")]
-fn domain_base_lane_is_loud() {
-    install();
-    let _ = lookup_type_cache(DOMAIN_OID, TYPECACHE_DOMAIN_BASE_INFO);
+    assert!(DomainHasConstraints(DOMAIN_OID).unwrap());
+    let mut r = crate::domain::DomainConstraintRef::init(DOMAIN_OID).unwrap();
+    let names: Vec<&str> = r.constraints().iter().map(|c| c.name).collect();
+    assert_eq!(names, ["NOT NULL", "dom_check_a", "dom_check_b"]);
+    assert_eq!(r.constraints()[0].constrainttype, DomConstraintType::NotNull);
+    assert!(r.constraints()[1].check_expr.is_some());
+    assert!(!r.update().unwrap());
+    invalidate::TypeCacheConstrCallback(Datum::from_oid(InvalidOid), 19, 0);
+    assert!(r.update().unwrap());
+    assert_eq!(r.constraints().len(), 3);
 }
 
 #[test]
