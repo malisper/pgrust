@@ -33,7 +33,8 @@ pub fn make_one_rel<'mcx>(
     for rti in 1..run.root.simple_rel_array_size as usize {
         let Some(brel) = run.root.simple_rel_array[rti] else { continue };
         debug_assert_eq!(run.root.rel(brel).relid as usize, rti);
-        if run.root.rel(brel).reloptkind == RELOPT_BASEREL
+        if (run.root.rel(brel).reloptkind == RELOPT_BASEREL
+            || run.root.rel(brel).reloptkind == types_pathnodes::RELOPT_OTHER_MEMBER_REL)
             && !crate::joinrels::is_dummy_rel(&run.root, brel)
         {
             total_pages += run.root.rel(brel).pages as f64;
@@ -73,16 +74,21 @@ fn set_base_rel_pathlists(run: &mut PlannerRun<'_>) -> PgResult<()> {
 }
 
 fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
-    if relation_excluded_by_constraints(run, rel) {
+    if run.root.rel(rel).reloptkind == RELOPT_BASEREL
+        && relation_excluded_by_constraints(run, rel, rti)
+    {
         set_dummy_rel_pathlist(run, rel)?;
         return Ok(());
     }
     let rte = run.rte(rti);
-    assert!(!rte.inh, "set_append_rel_size (allpaths.c): M2 partition lane");
+    if rte.inh {
+        return set_append_rel_size(run, rel, rti);
+    }
     match rte.rtekind {
         RTEKind::RTE_RELATION => {
             // Toast relations are plain heaps in C's set_plain_rel_size arm
-            // (direct SELECT from pg_toast.* is legal).
+            // (direct SELECT from pg_toast.* is legal). A partitioned rel
+            // without inh only reaches here dummy (C matches).
             debug_assert!(
                 rte.relkind == types_rel::RELKIND_RELATION
                     || rte.relkind == types_rel::RELKIND_TOASTVALUE
@@ -227,9 +233,10 @@ fn set_subquery_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
 }
 
 // relation_excluded_by_constraints (plancat.c): the unconditional
-// constant-FALSE-or-NULL restriction scan; predicate proofs beyond it only
-// run under constraint_exclusion=on (loud) or for otherrels (inh is loud).
-fn relation_excluded_by_constraints(run: &mut PlannerRun<'_>, rel: RelId) -> bool {
+// constant-FALSE-or-NULL restriction scan; predicate proofs beyond it are
+// loud where C would attempt them (constraint_exclusion=on, or otherrels with
+// CHECK constraints under the default 'partition' setting).
+fn relation_excluded_by_constraints(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> bool {
     if run.root.rel(rel).baserestrictinfo.is_empty() {
         return false;
     }
@@ -242,10 +249,30 @@ fn relation_excluded_by_constraints(run: &mut PlannerRun<'_>, rel: RelId) -> boo
             }
         }
     }
-    if crate::gucs::constraint_exclusion() == guc_tables::consts::CONSTRAINT_EXCLUSION_ON {
-        panic!(
+    match crate::gucs::constraint_exclusion() {
+        guc_tables::consts::CONSTRAINT_EXCLUSION_ON => panic!(
             "relation_excluded_by_constraints (plancat.c): constraint_exclusion=on \
              needs predicate_refuted_by; constraint-exclusion lane unported"
+        ),
+        guc_tables::consts::CONSTRAINT_EXCLUSION_OFF => return false,
+        _ => {}
+    }
+    if run.root.rel(rel).reloptkind == types_pathnodes::RELOPT_OTHER_MEMBER_REL {
+        // C proves exclusion from the child's CHECK constraints
+        // (get_relation_constraints + predicate_refuted_by).
+        let rte = run.rte(rti);
+        let has_checks = table::table_open(run.mcx, rte.relid, types_rel::NoLock)
+            .and_then(|r| {
+                let n = r.rd_att.constr.as_deref().map(|c| c.num_check).unwrap_or(0);
+                r.close(types_rel::NoLock)?;
+                Ok(n)
+            })
+            .unwrap_or(0)
+            > 0;
+        assert!(
+            !has_checks,
+            "relation_excluded_by_constraints (plancat.c): child CHECK constraints \
+             under constraint_exclusion=partition; constraint-exclusion lane unported"
         );
     }
     false
@@ -295,19 +322,260 @@ fn set_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResul
         return set_cheapest(run, rel);
     }
     let rte = run.rte(rti);
-    debug_assert!(!rte.inh);
-    match rte.rtekind {
-        RTEKind::RTE_RELATION => set_plain_rel_pathlist(run, rel)?,
-        RTEKind::RTE_FUNCTION => set_function_pathlist(run, rel, rti)?,
-        RTEKind::RTE_VALUES => set_values_pathlist(run, rel)?,
-        RTEKind::RTE_SUBQUERY => {} // fully handled during set_rel_size
-        RTEKind::RTE_CTE => {} // fully handled during set_rel_size
-        other => panic!("set_rel_pathlist (allpaths.c): {other:?}; M2 scan lane"),
+    if rte.inh {
+        set_append_rel_pathlist(run, rel, rti)?;
+    } else {
+        match rte.rtekind {
+            RTEKind::RTE_RELATION => set_plain_rel_pathlist(run, rel)?,
+            RTEKind::RTE_FUNCTION => set_function_pathlist(run, rel, rti)?,
+            RTEKind::RTE_VALUES => set_values_pathlist(run, rel)?,
+            RTEKind::RTE_SUBQUERY => {} // fully handled during set_rel_size
+            RTEKind::RTE_CTE => {} // fully handled during set_rel_size
+            other => panic!("set_rel_pathlist (allpaths.c): {other:?}; M2 scan lane"),
+        }
     }
 
     debug_assert!(run.root.rel(rel).partial_pathlist.is_empty());
     set_cheapest(run, rel)?;
     Ok(())
+}
+
+// set_append_rel_size (allpaths.c): size each live child, then aggregate.
+// Partitionwise joins and child ECs stay dead (no ECs exist on this lane).
+fn set_append_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
+    let mcx = run.mcx;
+    debug_assert!(
+        run.root.rel(rel).reloptkind == RELOPT_BASEREL
+            || run.root.rel(rel).reloptkind == types_pathnodes::RELOPT_OTHER_MEMBER_REL
+    );
+    assert!(
+        run.root.rel(rel).joininfo.is_empty(),
+        "set_append_rel_size (allpaths.c): joininfo translation \
+         (adjust_appendrel_attrs over RestrictInfo); inherited-join lane"
+    );
+    debug_assert!(run.root.eq_classes.is_empty());
+
+    let mut has_live_children = false;
+    let mut parent_tuples = 0.0f64;
+    let mut parent_rows = 0.0f64;
+    let mut parent_size = 0.0f64;
+    let (min_attr, max_attr) = {
+        let r = run.root.rel(rel);
+        (r.min_attr, r.max_attr)
+    };
+    let nattrs = (max_attr - min_attr + 1) as usize;
+    let mut parent_attrsizes = mcx::vec_from_elem_in(mcx, 0.0f64, nattrs);
+
+    for ai in 0..run.root.append_rel_list.len() {
+        let (parent_relid, child_rti) = {
+            let a = &run.root.append_rel_list[ai];
+            (a.parent_relid, a.child_relid)
+        };
+        if parent_relid != rti as u32 {
+            continue;
+        }
+        let childrel = crate::relnode::find_base_rel(&run.root, child_rti as i32);
+        debug_assert!(
+            run.root.rel(childrel).reloptkind == types_pathnodes::RELOPT_OTHER_MEMBER_REL
+        );
+        if crate::joinrels::is_dummy_rel(&run.root, childrel) {
+            continue;
+        }
+        if relation_excluded_by_constraints(run, childrel, child_rti as usize) {
+            set_dummy_rel_pathlist(run, childrel)?;
+            continue;
+        }
+
+        // Child reltarget = parent reltarget translated.
+        let appinfo = run.root.append_rel_array[child_rti as usize]
+            .clone()
+            .expect("child AppendRelInfo");
+        let parent_exprs =
+            crate::relnode::pgvec_clone_shallow(mcx, &run.root.rel_reltarget(rel).exprs);
+        let mut child_exprs: mcx::PgVec<'_, types_pathnodes::NodeId> = mcx::PgVec::new_in(mcx);
+        for &eid in parent_exprs.iter() {
+            let e = *run.root.expr_node(eid);
+            let translated = crate::inherit::adjust_appendrel_attrs(run, e, &appinfo)?;
+            child_exprs.push(run.intern_expr(translated));
+        }
+        let child_target = run.rel_reltarget_id(childrel);
+        run.root.pathtarget_mut(child_target).exprs = child_exprs;
+
+        if run.glob.parallel_mode_ok && run.root.rel(rel).consider_parallel {
+            set_rel_consider_parallel(run, childrel, child_rti as usize)?;
+        }
+
+        set_rel_size(run, childrel, child_rti as usize)?;
+
+        if crate::joinrels::is_dummy_rel(&run.root, childrel) {
+            continue;
+        }
+        has_live_children = true;
+        if !run.root.rel(childrel).consider_parallel {
+            run.root.rel_mut(rel).consider_parallel = false;
+        }
+
+        debug_assert!(run.root.rel(childrel).rows > 0.0);
+        let child_rows = run.root.rel(childrel).rows;
+        parent_tuples += run.root.rel(childrel).tuples;
+        parent_rows += child_rows;
+        parent_size += run.root.rel_reltarget(childrel).width as f64 * child_rows;
+
+        let n = run.root.rel_reltarget(rel).exprs.len();
+        debug_assert_eq!(n, run.root.rel_reltarget(childrel).exprs.len());
+        for i in 0..n {
+            let pid = run.root.rel_reltarget(rel).exprs[i];
+            let parentvar = *run.root.expr_node(pid);
+            let cid = run.root.rel_reltarget(childrel).exprs[i];
+            let childvar = *run.root.expr_node(cid);
+            let Some(pv) = parentvar.as_var() else { continue };
+            if pv.varno != rti as i32 {
+                continue;
+            }
+            let pndx = (pv.varattno - min_attr) as usize;
+            let mut child_width = 0i32;
+            if let Some(cv) = childvar.as_var() {
+                if cv.varno == run.root.rel(childrel).relid as i32 {
+                    let cndx = (cv.varattno - run.root.rel(childrel).min_attr) as usize;
+                    child_width = run.root.rel(childrel).attr_widths[cndx];
+                }
+            }
+            if child_width <= 0 {
+                let (typid, typmod) = crate::costsize::expr_type_typmod(childvar);
+                child_width = lsyscache::get_typavgwidth(typid, typmod)?;
+            }
+            debug_assert!(child_width > 0);
+            parent_attrsizes[pndx] += child_width as f64 * child_rows;
+        }
+    }
+
+    if has_live_children {
+        debug_assert!(parent_rows > 0.0);
+        {
+            let r = run.root.rel_mut(rel);
+            r.tuples = parent_tuples;
+            r.rows = parent_rows;
+        }
+        run.root.rel_reltarget_mut(rel).width = (parent_size / parent_rows).round() as i32;
+        for i in 0..nattrs {
+            run.root.rel_mut(rel).attr_widths[i] =
+                (parent_attrsizes[i] / parent_rows).round() as i32;
+        }
+        // rel->pages stays zero: appendrels must not double-count in
+        // total_table_pages.
+    } else {
+        set_dummy_rel_pathlist(run, rel)?;
+    }
+    Ok(())
+}
+
+// set_append_rel_pathlist + add_paths_to_append_rel (allpaths.c), serial
+// unparameterized arm; ordered/parameterized appends are loud below.
+fn set_append_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
+    let mcx = run.mcx;
+    let mut live_childrels: mcx::PgVec<'_, RelId> = mcx::PgVec::new_in(mcx);
+    for ai in 0..run.root.append_rel_list.len() {
+        let (parent_relid, child_rti) = {
+            let a = &run.root.append_rel_list[ai];
+            (a.parent_relid, a.child_relid)
+        };
+        if parent_relid != rti as u32 {
+            continue;
+        }
+        let childrel = crate::relnode::find_base_rel(&run.root, child_rti as i32);
+        if !run.root.rel(rel).consider_parallel {
+            run.root.rel_mut(childrel).consider_parallel = false;
+        }
+        set_rel_pathlist(run, childrel, child_rti as usize)?;
+        if crate::joinrels::is_dummy_rel(&run.root, childrel) {
+            continue;
+        }
+        live_childrels.push(childrel);
+    }
+    add_paths_to_append_rel(run, rel, &live_childrels)
+}
+
+fn add_paths_to_append_rel(
+    run: &mut PlannerRun<'_>,
+    rel: RelId,
+    live_childrels: &[RelId],
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    let mut subpaths: mcx::PgVec<'_, types_pathnodes::PathId> = mcx::PgVec::new_in(mcx);
+    let mut startup_subpaths: mcx::PgVec<'_, types_pathnodes::PathId> = mcx::PgVec::new_in(mcx);
+    let mut startup_valid = run.root.rel(rel).consider_startup;
+    for &childrel in live_childrels {
+        debug_assert!(run.root.rel(childrel).partial_pathlist.is_empty());
+        let cheapest_total = run.root.rel(childrel).cheapest_total_path;
+        match cheapest_total {
+            Some(p) if run.root.path(p).base().param_info.is_none() => {
+                accumulate_append_subpath(&run.root, p, &mut subpaths);
+            }
+            _ => panic!(
+                "add_paths_to_append_rel (allpaths.c): parameterized-only child; \
+                 parameterized-append lane"
+            ),
+        }
+        if startup_valid {
+            match run.root.rel(childrel).cheapest_startup_path {
+                Some(p) => {
+                    let chosen = if run.root.tuple_fraction > 0.0 {
+                        crate::pathnode::get_cheapest_fractional_path(
+                            run,
+                            childrel,
+                            run.root.tuple_fraction,
+                        )
+                    } else {
+                        p
+                    };
+                    debug_assert!(run.root.path(chosen).base().param_info.is_none());
+                    accumulate_append_subpath(&run.root, chosen, &mut startup_subpaths);
+                }
+                None => startup_valid = false,
+            }
+        }
+        // all_child_pathkeys / all_child_outers: MergeAppend and parameterized
+        // appends. A losing sorted child path can't change the chosen plan
+        // here — C only builds *extra* candidates from them — but a winning
+        // one could; stay loud only when the parent has useful pathkeys.
+        if !run.root.query_pathkeys.is_empty() {
+            for &cp in run.root.rel(childrel).pathlist.iter() {
+                assert!(
+                    run.root.path(cp).base().pathkeys.is_empty(),
+                    "generate_orderedappend_paths (allpaths.c): sorted child paths \
+                     with query_pathkeys; MergeAppend lane"
+                );
+            }
+        }
+    }
+
+    let pid = crate::pathnode::create_append_path(run, rel, subpaths, -1.0)?;
+    add_path(run, rel, pid);
+    if startup_valid {
+        let pid = crate::pathnode::create_append_path(run, rel, startup_subpaths, -1.0)?;
+        add_path(run, rel, pid);
+    }
+    Ok(())
+}
+
+// accumulate_append_subpath (allpaths.c), non-parallel arm: flatten nested
+// serial Appends (multi-level partitioning); MergeAppend children can't
+// exist (ordered append is loud above).
+fn accumulate_append_subpath(
+    root: &types_pathnodes::PlannerInfo<'_>,
+    path: types_pathnodes::PathId,
+    subpaths: &mut mcx::PgVec<'_, types_pathnodes::PathId>,
+) {
+    if let types_pathnodes::PathNode::AppendPath(a) = root.path(path) {
+        if !a.path.parallel_aware {
+            debug_assert!(a.first_partial_path as usize == a.subpaths.len());
+            for &sp in a.subpaths.iter() {
+                subpaths.push(sp);
+            }
+            return;
+        }
+    }
+    subpaths.push(path);
 }
 
 // set_function_pathlist (allpaths.c); the ORDINALITY pathkey leg is dead

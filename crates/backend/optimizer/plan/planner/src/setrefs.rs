@@ -11,7 +11,7 @@ const FIRST_UNPINNED_OBJECT_ID: u32 = 12000;
 // it because plancache.c registers PlanCacheObjectCallback for PROCOID.
 const PROCOID: i32 = 47;
 
-// No appendrels, no AlternativeSubPlans.
+// No AlternativeSubPlans.
 pub fn set_plan_references<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
     let rtoffset = run.glob.finalrtable.len() as i32;
@@ -23,7 +23,6 @@ pub fn set_plan_references<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>) -
         rc.prti += rtoffset as u32;
         run.glob.finalrowmarks.lappend(mcx, Node::mk(mcx, rc)?)?;
     }
-    debug_assert!(run.root.append_rel_list.is_empty());
     set_plan_refs(run, plan, rtoffset)
 }
 

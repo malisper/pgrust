@@ -83,9 +83,11 @@ pub fn query_planner<'mcx>(
 
     // fix_placeholder_input_needed_levels / self-join removal / lateral join
     // info / match_foreign_keys_to_quals / extract_restriction_or_clauses /
-    // add_other_rels_to_query / row identity vars: all no-ops with no
-    // placeholders, no lateral refs, no fkeys and no OR clauses.
+    // row identity vars: all no-ops with no placeholders, no lateral refs,
+    // no fkeys and no OR clauses.
     debug_assert!(run.root.placeholder_list.is_empty() && run.root.fkey_list.is_empty());
+
+    crate::inherit::add_other_rels_to_query(run)?;
 
     let final_rel = crate::allpaths::make_one_rel(run, &joinlist)?;
     if run.root.rel(final_rel).cheapest_total_path.is_none()
