@@ -11313,6 +11313,7 @@ dependencies = [
  "catalog",
  "catalog_indexing",
  "catcache",
+ "crypt",
  "datum",
  "elog",
  "fmgr_seams",

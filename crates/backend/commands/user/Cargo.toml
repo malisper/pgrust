@@ -21,6 +21,7 @@ adt_acl = { path = "../../utils/adt/acl" }
 adt_bool = { path = "../../utils/adt/bool" }
 adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
 varlena = { path = "../../utils/adt/varlena" }
+crypt = { path = "../../libpq/crypt" }
 mbutils = { path = "../../utils/mb/mbutils" }
 cache_syscache = { path = "../../utils/cache/cache_syscache" }
 catcache = { path = "../../utils/cache/catcache" }
