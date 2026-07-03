@@ -63,6 +63,7 @@ pub enum PlanStateNode<'mcx> {
 pub struct ModifyTablePlanState<'mcx> {
     pub mt: ::nodemodifytable::ModifyTableState<'mcx>,
     pub subplan: PlanStateNode<'mcx>,
+    pub epq: crate::epq::EpqState<'mcx>,
 }
 
 // The bitmapqual subtree lives here, not in nodebitmapheapscan (crate cycle
@@ -627,9 +628,16 @@ pub fn exec_init_node<'mcx>(
             )?;
             let subplan = exec_init_node(mt_plan.plan.lefttree, estate, eflags)?
                 .expect("ModifyTable has a subplan");
+            // EvalPlanQualInit + EvalPlanQualSetPlan; relsubs alloc deferred
+            // to first EPQ use (EStateData::epq_ensure).
+            let epq = crate::epq::EpqState {
+                plan: mt_plan.plan.lefttree,
+                recheck: None,
+                result_rti: mt.result_rti,
+            };
             PlanStateNode::ModifyTable(::mcx::alloc_in(
                 mcx,
-                ModifyTablePlanState { mt, subplan },
+                ModifyTablePlanState { mt, subplan, epq },
             )?)
         }
         tag => unported_nodes!(tag, {
@@ -879,7 +887,13 @@ fn modify_table_arm<'mcx>(
 ) -> ProcResult {
     let mps = &mut **mps;
     let subplan = &mut mps.subplan;
-    ::nodemodifytable::exec_modify_table(&mut mps.mt, estate, |e| exec_proc_node(subplan, e))
+    let epq = &mut mps.epq;
+    ::nodemodifytable::exec_modify_table(
+        &mut mps.mt,
+        estate,
+        |e| exec_proc_node(subplan, e),
+        |e, inputslot| crate::epq::eval_plan_qual(epq, e, inputslot),
+    )
 }
 
 #[inline(never)]
@@ -1064,6 +1078,7 @@ pub fn exec_end_node<'mcx>(
         }
         PlanStateNode::ModifyTable(mps) => {
             let mps = &mut **mps;
+            crate::epq::eval_plan_qual_end(&mut mps.epq, estate)?;
             ::nodemodifytable::exec_end_modify_table(&mut mps.mt);
             exec_end_node(&mut mps.subplan, estate)
         }

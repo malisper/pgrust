@@ -9,6 +9,7 @@ use std::cell::Cell;
 use ::mcx::{Mcx, MemoryContext};
 use ::types_error::PgResult;
 
+mod epq;
 mod execami;
 mod execmain;
 mod noderesult;

@@ -19,6 +19,7 @@ exectuples = { path = "../exectuples" }
 execindexing = { path = "../execindexing" }
 tableam = { path = "../../access/table/tableam" }
 tableam_vocab = { path = "../../access/table/tableam_vocab" }
+xact = { path = "../../access/transam/xact" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 datum = { path = "../../../_support/types/datum" }

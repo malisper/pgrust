@@ -1,8 +1,8 @@
 // nodeModifyTable.c, single-relation INSERT/UPDATE/DELETE arms. The subplan
 // stays with the ExecProcNode dispatcher (execmain owns the node enum;
-// nodesort precedent) — exec_modify_table takes a fetch closure. MERGE, ON
-// CONFLICT, triggers, FDW batching and EvalPlanQual (single-session M4) are
-// loud named panics; RETURNING projects OLD/NEW-free lists (those are loud at
+// nodesort precedent) — exec_modify_table takes fetch and EvalPlanQual
+// closures. MERGE, ON CONFLICT, triggers and FDW batching are loud named
+// panics; RETURNING projects OLD/NEW-free lists (those are loud at
 // projection build).
 #![allow(non_snake_case)]
 
@@ -12,11 +12,14 @@ use datum::Datum;
 use execexpr::{exec_build_projection_info, EvalSlots, ExprState};
 use executils::{EStateData, ExecSlotId};
 use mcx::PgBox;
-use tableam_vocab::{LockTupleMode, TM_FailureData, TM_Result, TU_UpdateIndexes};
+use tableam_vocab::{
+    LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result, TU_UpdateIndexes,
+    TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
+};
 use types_error::{
     PgError, PgResult, ERRCODE_CHECK_VIOLATION, ERRCODE_DATATYPE_MISMATCH,
-    ERRCODE_NOT_NULL_VIOLATION,
-    ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION,
+    ERRCODE_NOT_NULL_VIOLATION, ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION,
+    ERRCODE_T_R_SERIALIZATION_FAILURE,
 };
 use types_nodes::nodes_enums::CmdType;
 use types_nodes::plannodes::ModifyTable;
@@ -195,10 +198,13 @@ fn check_valid_result_rel(rel: &Relation<'_>) {
 }
 
 /// `ExecModifyTable` (nodeModifyTable.c), INSERT/UPDATE/DELETE loop.
+/// `epq_eval` is execMain's `EvalPlanQual` over the caller-owned EPQState
+/// (input = the locked latest row version in the EvalPlanQualSlot).
 pub fn exec_modify_table<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     mut fetch_outer: impl FnMut(&mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>,
+    mut epq_eval: impl FnMut(&mut EStateData<'mcx>, ExecSlotId) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<Option<ExecSlotId>> {
     if mt.mt_done {
         return Ok(None);
@@ -223,34 +229,20 @@ pub fn exec_modify_table<'mcx>(
                 }
             }
             CmdType::CMD_UPDATE => {
-                let tupleid = fetch_row_id(mt, estate, plan_slot);
+                let mut tupleid = fetch_row_id(mt, estate, plan_slot);
                 if !mt.ri_projectNewInfoValid {
                     exec_init_update_projection(mt, estate)?;
                 }
-                let old_slot = mt.ri_oldTupleSlot.expect("ExecInitUpdateProjection ran");
-                let found = {
-                    let EStateData { es_relations, es_tupleTable, es_query_cxt, .. } = estate;
-                    let rel = es_relations[(mt.result_rti - 1) as usize]
-                        .as_ref()
-                        .expect("result relation opened");
-                    tableam::table_tuple_fetch_row_version(
-                        *es_query_cxt,
-                        rel,
-                        &tupleid,
-                        &mt.snapshot_any,
-                        &mut es_tupleTable[old_slot.0 as usize],
-                    )?
-                };
-                assert!(found, "failed to fetch tuple being updated");
+                fetch_old_row_version(mt, estate, &tupleid)?;
                 let slot = exec_get_update_new_tuple(mt, estate, plan_slot)?;
-                let modified = exec_update(mt, estate, &tupleid, slot)?;
+                let modified = exec_update(mt, estate, &mut tupleid, slot, &mut epq_eval)?;
                 if modified && mt.project_returning.is_some() {
                     return Ok(Some(exec_process_returning(mt, estate, slot, plan_slot)?));
                 }
             }
             CmdType::CMD_DELETE => {
-                let tupleid = fetch_row_id(mt, estate, plan_slot);
-                let modified = exec_delete(mt, estate, &tupleid)?;
+                let mut tupleid = fetch_row_id(mt, estate, plan_slot);
+                let modified = exec_delete(mt, estate, &mut tupleid, &mut epq_eval)?;
                 if modified && mt.project_returning.is_some() {
                     let old_slot = exec_delete_fetch_old(mt, estate, &tupleid)?;
                     return Ok(Some(exec_process_returning(mt, estate, old_slot, plan_slot)?));
@@ -543,65 +535,183 @@ fn exec_get_update_new_tuple<'mcx>(
     Ok(new_id)
 }
 
+// ExecModifyTable's UPDATE row-identity block + the EPQ redo's "fetch the
+// most recent version of old tuple" step: latest version at tupleid into
+// ri_oldTupleSlot under SnapshotAny.
+fn fetch_old_row_version<'mcx>(
+    mt: &ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    tupleid: &ItemPointerData,
+) -> PgResult<()> {
+    let old_slot = mt.ri_oldTupleSlot.expect("ExecInitUpdateProjection ran");
+    let EStateData { es_relations, es_tupleTable, es_query_cxt, .. } = estate;
+    let rel = es_relations[(mt.result_rti - 1) as usize]
+        .as_ref()
+        .expect("result relation opened");
+    let found = tableam::table_tuple_fetch_row_version(
+        *es_query_cxt,
+        rel,
+        tupleid,
+        &mt.snapshot_any,
+        &mut es_tupleTable[old_slot.0 as usize],
+    )?;
+    assert!(found, "failed to fetch tuple being updated");
+    Ok(())
+}
+
+// EvalPlanQualSlot (execMain.c): the per-result-rel EPQ test slot,
+// created on first use into the shared tuple table.
+fn eval_plan_qual_slot<'mcx>(
+    mt: &ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> ExecSlotId {
+    let rti = mt.result_rti;
+    estate.epq_ensure(rti);
+    let idx = (rti - 1) as usize;
+    if let Some(id) = estate.es_epq.as_ref().expect("just ensured").relsubs_slot[idx] {
+        return id;
+    }
+    let mcx = estate.es_query_cxt;
+    let (kind, desc) = {
+        let rel = estate.es_relations[idx].as_ref().expect("result relation opened");
+        (tableam::table_slot_callbacks(rel), rel.rd_att.clone())
+    };
+    let slot = exectuples::make_tuple_table_slot(mcx, kind, Some(desc));
+    let id = ExecSlotId(estate.es_tupleTable.len() as u32);
+    estate.es_tupleTable.push(slot);
+    estate.es_epq.as_mut().expect("just ensured").relsubs_slot[idx] = Some(id);
+    id
+}
+
 // ExecUpdate + ExecUpdatePrologue/Act/Epilogue (nodeModifyTable.c), plain-heap
-// single-session arm: no triggers/FDW/partitions; concurrent-update outcomes
-// (EvalPlanQual) are loud.
+// arm: no triggers/FDW/partitions. Concurrent TM_Updated runs the EPQ
+// recheck (redo_act loop); the ri_needLockTagTuple relock is omitted —
+// inplace-update catalogs never reach this executor path.
 fn exec_update<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
-    tupleid: &ItemPointerData,
+    tupleid: &mut ItemPointerData,
     slot_id: ExecSlotId,
+    epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<bool> {
-    let mcx = estate.es_query_cxt;
     let output_cid = estate.es_output_cid;
-    let EStateData { es_relations, es_tupleTable, es_snapshot, .. } = estate;
-    let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
+    let mut slot_id = slot_id;
+    let mut tmfd = TM_FailureData::default();
+    let mut lockmode = LockTupleMode::LockTupleExclusive;
+    let mut update_indexes = TU_UpdateIndexes::TU_None;
+
+    // redo_act:
+    loop {
+        let mcx = estate.es_query_cxt;
+        let result = {
+            let EStateData { es_relations, es_tupleTable, es_snapshot, .. } = &mut *estate;
+            let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
+            let rel = es_relations[(mt.result_rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened");
+            let slot = &mut es_tupleTable[slot_id.0 as usize];
+
+            exectuples::exec_materialize_slot(slot, mcx)?;
+            slot.base_mut().tts_tableOid = rel.rd_id;
+
+            if rel.rd_rel.relhasindex && mt.indexes.is_none() {
+                mt.indexes = Some(execindexing::ExecOpenIndices(mcx, rel, false)?);
+            }
+
+            exec_constraints(mcx, &mut mt.check_exprs, rel, slot)?;
+
+            tableam::table_tuple_update(
+                mcx,
+                rel,
+                tupleid,
+                slot,
+                output_cid,
+                snapshot,
+                &None,
+                true,
+                &mut tmfd,
+                &mut lockmode,
+                &mut update_indexes,
+            )?
+        };
+
+        match result {
+            TM_Result::TM_Ok => break,
+            TM_Result::TM_SelfModified => {
+                if tmfd.cmax != output_cid {
+                    return Err(self_modified_violation("updated"));
+                }
+                return Ok(false);
+            }
+            TM_Result::TM_Updated => {
+                if xact::IsolationUsesXactSnapshot() {
+                    return Err(serialization_conflict("update"));
+                }
+                let inputslot = eval_plan_qual_slot(mt, estate);
+                let lock_result = {
+                    let EStateData { es_relations, es_tupleTable, es_snapshot, .. } =
+                        &mut *estate;
+                    let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
+                    let rel = es_relations[(mt.result_rti - 1) as usize]
+                        .as_ref()
+                        .expect("result relation opened");
+                    tableam::table_tuple_lock(
+                        mcx,
+                        rel,
+                        tupleid,
+                        snapshot,
+                        &mut es_tupleTable[inputslot.0 as usize],
+                        output_cid,
+                        lockmode,
+                        LockWaitPolicy::LockWaitBlock,
+                        TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
+                        &mut tmfd,
+                    )?
+                };
+                match lock_result {
+                    TM_Result::TM_Ok => {
+                        debug_assert!(tmfd.traversed);
+                        // The locked latest version's tid (C: table_tuple_lock
+                        // writes through tupleid); read before EvalPlanQual
+                        // clears the test slot.
+                        *tupleid = estate.slot(inputslot).base().tts_tid;
+                        let Some(epqslot) = epq_eval(estate, inputslot)? else {
+                            return Ok(false);
+                        };
+                        debug_assert!(mt.ri_projectNewInfoValid);
+                        fetch_old_row_version(mt, estate, tupleid)?;
+                        slot_id = exec_get_update_new_tuple(mt, estate, epqslot)?;
+                        continue;
+                    }
+                    TM_Result::TM_Deleted => return Ok(false),
+                    TM_Result::TM_SelfModified => {
+                        if tmfd.cmax != output_cid {
+                            return Err(self_modified_violation("updated"));
+                        }
+                        return Ok(false);
+                    }
+                    other => panic!(
+                        "ExecUpdate (nodeModifyTable.c): unexpected \
+                         table_tuple_lock status: {other:?}"
+                    ),
+                }
+            }
+            TM_Result::TM_Deleted => {
+                if xact::IsolationUsesXactSnapshot() {
+                    return Err(serialization_conflict("delete"));
+                }
+                return Ok(false);
+            }
+            other => panic!("ExecUpdate (nodeModifyTable.c): unexpected {other:?}"),
+        }
+    }
+
+    let mcx = estate.es_query_cxt;
+    let EStateData { es_relations, es_tupleTable, .. } = estate;
     let rel = es_relations[(mt.result_rti - 1) as usize]
         .as_ref()
         .expect("result relation opened");
     let slot = &mut es_tupleTable[slot_id.0 as usize];
-
-    exectuples::exec_materialize_slot(slot, mcx)?;
-    slot.base_mut().tts_tableOid = rel.rd_id;
-
-    if rel.rd_rel.relhasindex && mt.indexes.is_none() {
-        mt.indexes = Some(execindexing::ExecOpenIndices(mcx, rel, false)?);
-    }
-
-    exec_constraints(mcx, &mut mt.check_exprs, rel, slot)?;
-
-    let mut tmfd = TM_FailureData::default();
-    let mut lockmode = LockTupleMode::LockTupleExclusive;
-    let mut update_indexes = TU_UpdateIndexes::TU_None;
-    let result = tableam::table_tuple_update(
-        mcx,
-        rel,
-        tupleid,
-        slot,
-        output_cid,
-        &snapshot,
-        &None,
-        true,
-        &mut tmfd,
-        &mut lockmode,
-        &mut update_indexes,
-    )?;
-
-    match result {
-        TM_Result::TM_Ok => {}
-        TM_Result::TM_SelfModified => {
-            if tmfd.cmax != output_cid {
-                return Err(self_modified_violation("updated"));
-            }
-            return Ok(false);
-        }
-        TM_Result::TM_Updated | TM_Result::TM_Deleted => panic!(
-            "ExecUpdate (nodeModifyTable.c): concurrent {result:?} needs \
-             EvalPlanQual (single-session M4)"
-        ),
-        other => panic!("ExecUpdate (nodeModifyTable.c): unexpected {other:?}"),
-    }
-
     if let Some(indexes) = mt.indexes.as_mut() {
         if indexes.num_indices() > 0 && update_indexes != TU_UpdateIndexes::TU_None {
             if update_indexes == TU_UpdateIndexes::TU_Summarizing {
@@ -621,52 +731,118 @@ fn exec_update<'mcx>(
 }
 
 // ExecDelete + ExecDeletePrologue/Act/Epilogue (nodeModifyTable.c), plain-heap
-// single-session arm.
+// arm; concurrent TM_Updated runs the EPQ recheck (ldelete loop).
 fn exec_delete<'mcx>(
     mt: &ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
-    tupleid: &ItemPointerData,
+    tupleid: &mut ItemPointerData,
+    epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<bool> {
-    let mcx = estate.es_query_cxt;
     let output_cid = estate.es_output_cid;
-    let EStateData { es_relations, es_snapshot, .. } = &*estate;
-    let snapshot: &tableam_vocab::Snapshot<'mcx> = es_snapshot;
-    let rel = es_relations[(mt.result_rti - 1) as usize]
-        .as_ref()
-        .expect("result relation opened");
-
     let mut tmfd = TM_FailureData::default();
-    let result = tableam::table_tuple_delete(
-        mcx,
-        rel,
-        tupleid,
-        output_cid,
-        &snapshot,
-        &None,
-        true,
-        &mut tmfd,
-        false,
-    )?;
 
-    match result {
-        TM_Result::TM_Ok => {}
-        TM_Result::TM_SelfModified => {
-            if tmfd.cmax != output_cid {
-                return Err(self_modified_violation("deleted"));
+    // ldelete:
+    loop {
+        let mcx = estate.es_query_cxt;
+        let result = {
+            let EStateData { es_relations, es_snapshot, .. } = &*estate;
+            let snapshot: &tableam_vocab::Snapshot<'mcx> = es_snapshot;
+            let rel = es_relations[(mt.result_rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened");
+            tableam::table_tuple_delete(
+                mcx,
+                rel,
+                tupleid,
+                output_cid,
+                snapshot,
+                &None,
+                true,
+                &mut tmfd,
+                false,
+            )?
+        };
+
+        match result {
+            TM_Result::TM_Ok => break,
+            TM_Result::TM_SelfModified => {
+                if tmfd.cmax != output_cid {
+                    return Err(self_modified_violation("deleted"));
+                }
+                return Ok(false);
             }
-            return Ok(false);
+            TM_Result::TM_Updated => {
+                if xact::IsolationUsesXactSnapshot() {
+                    return Err(serialization_conflict("update"));
+                }
+                let inputslot = eval_plan_qual_slot(mt, estate);
+                let lock_result = {
+                    let EStateData { es_relations, es_tupleTable, es_snapshot, .. } =
+                        &mut *estate;
+                    let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
+                    let rel = es_relations[(mt.result_rti - 1) as usize]
+                        .as_ref()
+                        .expect("result relation opened");
+                    tableam::table_tuple_lock(
+                        mcx,
+                        rel,
+                        tupleid,
+                        snapshot,
+                        &mut es_tupleTable[inputslot.0 as usize],
+                        output_cid,
+                        LockTupleMode::LockTupleExclusive,
+                        LockWaitPolicy::LockWaitBlock,
+                        TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
+                        &mut tmfd,
+                    )?
+                };
+                match lock_result {
+                    TM_Result::TM_Ok => {
+                        debug_assert!(tmfd.traversed);
+                        *tupleid = estate.slot(inputslot).base().tts_tid;
+                        // epqreturnslot only exists on the cross-partition
+                        // UPDATE path (loud at init).
+                        if epq_eval(estate, inputslot)?.is_none() {
+                            return Ok(false);
+                        }
+                        continue;
+                    }
+                    TM_Result::TM_SelfModified => {
+                        if tmfd.cmax != output_cid {
+                            return Err(self_modified_violation("deleted"));
+                        }
+                        return Ok(false);
+                    }
+                    TM_Result::TM_Deleted => return Ok(false),
+                    other => panic!(
+                        "ExecDelete (nodeModifyTable.c): unexpected \
+                         table_tuple_lock status: {other:?}"
+                    ),
+                }
+            }
+            TM_Result::TM_Deleted => {
+                if xact::IsolationUsesXactSnapshot() {
+                    return Err(serialization_conflict("delete"));
+                }
+                return Ok(false);
+            }
+            other => panic!("ExecDelete (nodeModifyTable.c): unexpected {other:?}"),
         }
-        TM_Result::TM_Updated | TM_Result::TM_Deleted => panic!(
-            "ExecDelete (nodeModifyTable.c): concurrent {result:?} needs \
-             EvalPlanQual (single-session M4)"
-        ),
-        other => panic!("ExecDelete (nodeModifyTable.c): unexpected {other:?}"),
     }
 
     if mt.canSetTag {
         estate.es_processed += 1;
     }
     Ok(true)
+}
+
+#[cold]
+#[inline(never)]
+fn serialization_conflict(kind: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("could not serialize access due to concurrent {kind}"))
+            .with_sqlstate(ERRCODE_T_R_SERIALIZATION_FAILURE),
+    )
 }
 
 // ExecDelete's RETURNING arm: re-fetch the deleted tuple under SnapshotAny

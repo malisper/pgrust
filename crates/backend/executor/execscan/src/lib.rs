@@ -51,6 +51,17 @@ pub trait ScanNode<'mcx> {
     fn ss_mut(&mut self) -> &mut ScanState<'mcx>;
     /// Access method; stores into `ss_ScanTupleSlot`, false = end of scan.
     fn scan_next(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<bool>;
+    /// C `ExecScanRecheckMtd` over an EPQ test tuple already in `slot`.
+    fn epq_recheck(
+        &mut self,
+        _estate: &mut EStateData<'mcx>,
+        _slot: ExecSlotId,
+    ) -> PgResult<bool> {
+        panic!(
+            "ExecScanFetch (execScan.h): EPQ recheck for {} not ported",
+            core::any::type_name::<Self>()
+        );
+    }
 }
 
 #[cold]
@@ -66,13 +77,64 @@ fn check_for_interrupts() {
     }
 }
 
-#[inline(always)]
-fn exec_scan_fetch<'mcx, N: ScanNode<'mcx>>(
+enum EpqFetch {
+    Tuple(ExecSlotId),
+    Empty,
+    FallThrough,
+}
+
+// ExecScanFetch's es_epq_active arm: test-tuple substitution.
+fn epq_fetch<'mcx, N: ScanNode<'mcx>>(
     node: &mut N,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<bool> {
+) -> PgResult<EpqFetch> {
+    let scanrelid = node.ss_mut().scanrelid;
+    assert!(
+        scanrelid > 0,
+        "ExecScanFetch (execScan.h): scanrelid == 0 EPQ arm (FDW/CustomScan \
+         join pushdown) not ported"
+    );
+    let idx = (scanrelid - 1) as usize;
+    let mcx = estate.es_query_cxt;
+    let subs = estate.es_epq.as_mut().expect("EPQ scan variant under an installed EPQ state");
+    if subs.relsubs_done[idx] {
+        let ss_slot = node.ss_mut().ss_ScanTupleSlot;
+        exectuples::exec_clear_tuple(estate.slot_mut(ss_slot), mcx);
+        return Ok(EpqFetch::Empty);
+    }
+    if let Some(test) = subs.relsubs_slot[idx] {
+        subs.relsubs_done[idx] = true;
+        if estate.slot(test).base().is_empty() {
+            return Ok(EpqFetch::Empty);
+        }
+        if !node.epq_recheck(estate, test)? {
+            exectuples::exec_clear_tuple(estate.slot_mut(test), mcx);
+            return Ok(EpqFetch::Empty);
+        }
+        return Ok(EpqFetch::Tuple(test));
+    }
+    // relsubs_rowmark arm unreachable (rowmarks loud at plan init); a rel
+    // without a test tuple falls through to the access method, per C.
+    Ok(EpqFetch::FallThrough)
+}
+
+#[inline(always)]
+fn exec_scan_fetch<'mcx, N: ScanNode<'mcx>, const EPQ: bool>(
+    node: &mut N,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
     check_for_interrupts();
-    node.scan_next(estate)
+    if EPQ {
+        match epq_fetch(node, estate)? {
+            EpqFetch::Tuple(id) => return Ok(Some(id)),
+            EpqFetch::Empty => return Ok(None),
+            EpqFetch::FallThrough => {}
+        }
+    }
+    if node.scan_next(estate)? {
+        return Ok(Some(node.ss_mut().ss_ScanTupleSlot));
+    }
+    Ok(None)
 }
 
 /// `ExecScanExtended`: QUAL/PROJ mirror C's const-NULL argument elimination;
@@ -82,19 +144,38 @@ pub fn exec_scan_extended<'mcx, N: ScanNode<'mcx>, const QUAL: bool, const PROJ:
     node: &mut N,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
+    exec_scan_impl::<N, QUAL, PROJ, false>(node, estate)
+}
+
+/// `ExecScanExtended` with a live `epqstate` (the ExecSeqScanEPQ shape).
+pub fn exec_scan_epq<'mcx, N: ScanNode<'mcx>>(
+    node: &mut N,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    let ss = node.ss_mut();
+    match (ss.qual.is_some(), ss.ps_ProjInfo.is_some()) {
+        (false, false) => exec_scan_impl::<_, false, false, true>(node, estate),
+        (true, false) => exec_scan_impl::<_, true, false, true>(node, estate),
+        (false, true) => exec_scan_impl::<_, false, true, true>(node, estate),
+        (true, true) => exec_scan_impl::<_, true, true, true>(node, estate),
+    }
+}
+
+#[inline(always)]
+fn exec_scan_impl<'mcx, N: ScanNode<'mcx>, const QUAL: bool, const PROJ: bool, const EPQ: bool>(
+    node: &mut N,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
     debug_assert_eq!(QUAL, node.ss_mut().qual.is_some());
     debug_assert_eq!(PROJ, node.ss_mut().ps_ProjInfo.is_some());
 
     estate.ecxt_mut(node.ss_mut().ps_ExprContext).reset();
     if !QUAL && !PROJ {
-        if exec_scan_fetch(node, estate)? {
-            return Ok(Some(node.ss_mut().ss_ScanTupleSlot));
-        }
-        return Ok(None);
+        return exec_scan_fetch::<_, EPQ>(node, estate);
     }
 
     loop {
-        if !exec_scan_fetch(node, estate)? {
+        let Some(scan_id) = exec_scan_fetch::<_, EPQ>(node, estate)? else {
             let mcx = estate.es_query_cxt;
             let ss = node.ss_mut();
             if PROJ {
@@ -102,10 +183,9 @@ pub fn exec_scan_extended<'mcx, N: ScanNode<'mcx>, const QUAL: bool, const PROJ:
                 exectuples::exec_clear_tuple(estate.slot_mut(proj.pi_result_slot), mcx);
             }
             return Ok(None);
-        }
+        };
 
         let ss = node.ss_mut();
-        let scan_id = ss.ss_ScanTupleSlot;
         estate.ecxt_mut(ss.ps_ExprContext).ecxt_scantuple = Some(scan_id);
 
         // ExecEvalParamExec's pending-initplan arm, hoisted out of the
@@ -183,10 +263,16 @@ fn slot_pair<'a, 'mcx>(
     }
 }
 
-/// `ExecScanReScan`; the es_epq_active relsubs reset arm lands with EPQState.
+/// `ExecScanReScan`.
 pub fn exec_scan_rescan<'mcx>(ss: &mut ScanState<'mcx>, estate: &mut EStateData<'mcx>) {
     let mcx = estate.es_query_cxt;
     exectuples::exec_clear_tuple(estate.slot_mut(ss.ss_ScanTupleSlot), mcx);
+    if estate.es_epq_active {
+        assert!(ss.scanrelid > 0, "ExecScanReScan (execScan.c): scanrelid == 0 EPQ reset not ported");
+        let idx = (ss.scanrelid - 1) as usize;
+        let subs = estate.es_epq.as_mut().expect("EPQ rescan under an installed EPQ state");
+        subs.relsubs_done[idx] = subs.relsubs_blocked[idx];
+    }
 }
 
 /// `ExecAssignScanProjectionInfo`: `ExecConditionalAssignProjectionInfo` over
