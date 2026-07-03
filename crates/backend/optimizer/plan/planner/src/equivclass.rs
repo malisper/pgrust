@@ -1275,7 +1275,7 @@ fn strip_ojrelid_nulling<'mcx>(
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().unwrap();
             let arg = strip_ojrelid_nulling(mcx, r.arg, ojrelid)?;
-            if arg.ptr_eq(&r.arg) {
+            if arg.ptr_eq(r.arg) {
                 return Ok(node);
             }
             Node::mk(mcx, types_nodes::primnodes::RelabelType { arg, ..*r })

@@ -783,3 +783,40 @@ pub fn get_cheapest_fractional_path_for_pathkeys(
     }
     matched_path
 }
+
+// exprCollation (nodeFuncs.c) over the sort-key shapes this lane carries.
+pub fn expr_collation(node: Node<'_>) -> u32 {
+    use types_nodes::NodeTag;
+    match node.node_tag() {
+        NodeTag::T_Var => node.as_var().unwrap().varcollid,
+        NodeTag::T_Const => node.as_const().unwrap().constcollid,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
+        NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
+        NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().opcollid,
+        NodeTag::T_BooleanTest | NodeTag::T_RowExpr | NodeTag::T_BoolExpr | NodeTag::T_NullTest => 0,
+        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
+        NodeTag::T_Param => node.as_param().unwrap().paramcollid,
+        NodeTag::T_Aggref => node.as_aggref().unwrap().aggcollid,
+        NodeTag::T_WindowFunc => node.as_window_func().unwrap().wincollid,
+        NodeTag::T_SubPlan => {
+            use types_nodes::primnodes::SubLinkType;
+            let sp = node.as_sub_plan().unwrap();
+            match sp.subLinkType {
+                SubLinkType::EXPR_SUBLINK | SubLinkType::ARRAY_SUBLINK => sp.firstColCollation,
+                SubLinkType::MULTIEXPR_SUBLINK => {
+                    panic!("exprCollation (nodeFuncs.c): MULTIEXPR SubPlan not ported")
+                }
+                _ => 0,
+            }
+        }
+        NodeTag::T_AlternativeSubPlan => expr_collation(
+            node.as_alternative_sub_plan().unwrap().subplans.first().expect("alternatives"),
+        ),
+        NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
+        NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().collation,
+        NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resultcollid,
+        NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resultcollid,
+        NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().collation,
+        other => panic!("exprCollation (nodeFuncs.c): {other:?}; M2 expression lane"),
+    }
+}
