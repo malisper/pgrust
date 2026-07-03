@@ -472,6 +472,7 @@ version = "0.1.0"
 dependencies = [
  "datum",
  "hashfn",
+ "hyperloglog",
  "mcx",
  "pqformat",
  "stringinfo",
@@ -698,6 +699,7 @@ dependencies = [
  "fd",
  "guc_tables",
  "hashfn",
+ "hyperloglog",
  "libc",
  "mcx",
  "pg_strong_random",
@@ -4085,6 +4087,10 @@ dependencies = [
  "types_error",
  "types_tuple",
 ]
+
+[[package]]
+name = "hyperloglog"
+version = "0.1.0"
 
 [[package]]
 name = "ifaddr"
@@ -9899,7 +9905,9 @@ name = "tuplesort"
 version = "0.1.0"
 dependencies = [
  "adt_datetime",
+ "adt_network",
  "adt_timestamp",
+ "adt_uuid",
  "datum",
  "exectuples",
  "fmgr_seams",
@@ -10500,6 +10508,7 @@ dependencies = [
  "format_type",
  "guc_tables",
  "hashfn",
+ "hyperloglog",
  "lsyscache",
  "mbutils",
  "mbutils_seams",

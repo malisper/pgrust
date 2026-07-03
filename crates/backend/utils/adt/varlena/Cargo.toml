@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 hashfn = { path = "../../../../common/hashfn" }
+hyperloglog = { path = "../../../lib/hyperloglog" }
 mcx = { path = "../../../../_support/mcx" }
 datum = { path = "../../../../_support/types/datum" }
 types_core = { path = "../../../../_support/types/types_core" }
