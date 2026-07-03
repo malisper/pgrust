@@ -125,6 +125,26 @@ const ANUM_PG_CAST_CASTCONTEXT: i32 = 5;
 const ANUM_PG_CAST_CASTMETHOD: i32 = 6;
 
 fn tupdesc_for(cache_id: i32) -> &'static TupleDescData<'static> {
+    use core::cell::Cell;
+    use crate::cacheinfo::SYS_CACHE_SIZE;
+    thread_local! {
+        // cc_tupdesc is written once at phase-2 init and never replaced, so
+        // this flat memo cannot go stale (getattr calls this per column).
+        static TDS: [Cell<Option<&'static TupleDescData<'static>>>; SYS_CACHE_SIZE] =
+            const { [const { Cell::new(None) }; SYS_CACHE_SIZE] };
+    }
+    TDS.with(|a| match a[cache_id as usize].get() {
+        Some(td) => td,
+        None => {
+            let td = tupdesc_for_slow(cache_id);
+            a[cache_id as usize].set(Some(td));
+            td
+        }
+    })
+}
+
+#[cold]
+fn tupdesc_for_slow(cache_id: i32) -> &'static TupleDescData<'static> {
     match catcache::cache_tupdesc(cache_id) {
         Some(td) => td,
         None => {
