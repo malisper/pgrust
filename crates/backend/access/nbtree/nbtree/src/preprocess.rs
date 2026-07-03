@@ -742,7 +742,7 @@ fn bt_preprocess_array_keys<'mcx>(
     so.arrayKeys.clear();
     so.arrayKeys.reserve(num_array_keys);
     so.orderProcs.clear();
-    so.orderProcs.resize_with(input_keys.len(), FmgrInfo::empty);
+    so.orderProcs.resize_with(input_keys.len(), FmgrInfo::unresolved);
 
     let mut origarrayatt: i16 = 0;
     let mut origarraykey: i32 = -1;
