@@ -380,18 +380,24 @@ fn nonvariadic_masks_variadic_with_same_expansion() {
 }
 
 #[test]
-fn defaults_candidate_admitted_with_ndargs() {
+fn defaults_candidate_conflicts_with_exact_arity_sibling() {
     install_fakes();
     install_proc_candidates();
     set_search_path("public");
 
+    // C's own ambiguity example: f(int) vs f(int, int DEFAULT ...) at one
+    // arg — dedup ignores defaulted args, preference is undecidable.
     let ctx = MemoryContext::new("t");
     let cands = crate::FuncnameGetCandidates(ctx.mcx(), &["df"], 1, true, true).unwrap();
-    assert_eq!(cands.len(), 2);
-    let d = cands.iter().find(|c| c.oid == 9008).unwrap();
-    assert_eq!(d.ndargs, 1);
-    assert_eq!(d.nargs, 2);
-    assert_eq!(d.args.as_slice(), &[23, 23]);
+    assert_eq!(cands.len(), 1);
+    assert_eq!(cands[0].oid, InvalidOid);
+    assert_eq!(cands[0].args.as_slice(), &[23]);
+
+    // At two args only the defaulted signature matches; no expansion needed.
+    let cands = crate::FuncnameGetCandidates(ctx.mcx(), &["df"], 2, true, true).unwrap();
+    assert_eq!(cands.len(), 1);
+    assert_eq!(cands[0].oid, 9008);
+    assert_eq!(cands[0].ndargs, 0);
 }
 
 #[test]
