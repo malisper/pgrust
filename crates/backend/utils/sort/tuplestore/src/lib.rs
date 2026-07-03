@@ -1,6 +1,6 @@
 // tuplestore.c, TSS_INMEM arms only. Spill to tape (TSS_WRITEFILE/READFILE
-// over BufFile), extra read pointers, backward fetch, and trim are loud
-// panics naming their C lanes.
+// over BufFile), extra read pointers, and trim are loud panics naming their
+// C lanes.
 #![allow(non_snake_case)]
 
 use core::mem;
@@ -253,10 +253,20 @@ impl<'m> TuplestoreData<'m> {
     fn gettuple(&mut self, forward: bool) -> Option<*mut MinimalTupleData> {
         if !forward {
             debug_assert!(self.eflags & EXEC_FLAG_BACKWARD != 0);
-            panic!(
-                "tuplestore backward fetch: TSS_INMEM backward arm \
-                 (SCROLL cursor lane, tuplestore.c) not ported"
-            );
+            // C's memtupdeleted floor is 0 here (trim unported).
+            if self.eof_reached {
+                self.current = self.memtuples.len();
+                self.eof_reached = false;
+            } else {
+                if self.current == 0 {
+                    return None;
+                }
+                self.current -= 1;
+            }
+            if self.current == 0 {
+                return None;
+            }
+            return Some(self.memtuples[self.current - 1]);
         }
         if self.eof_reached {
             return None;

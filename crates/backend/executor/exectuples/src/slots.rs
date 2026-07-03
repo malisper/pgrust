@@ -26,12 +26,6 @@ use crate::deform::{slot_getallattrs, slot_getmissingattrs, TupleImage};
 
 #[cold]
 #[inline(never)]
-fn bufmgr_unported() -> ! {
-    panic!("buffer pin management not ported; storage-bufmgr unit owns ReleaseBuffer/IncrBufferRefCount")
-}
-
-#[cold]
-#[inline(never)]
 fn expanded_datum_unported() -> ! {
     panic!("EOH_flatten_into not ported; expandeddatum unit owns it")
 }
@@ -831,11 +825,28 @@ pub fn exec_copy_slot<'mcx, 'src>(
             Ok(())
         }
         SlotData::BufferHeap(_) => {
-            // The same-kind pin-sharing fastpath needs bufmgr; every reachable
-            // source today (different kind / materialized / virtual) copies.
-            let pin_share = matches!(src, SlotData::BufferHeap(s) if !s.base.base.should_free() && s.base.tuple.is_some());
-            if pin_share {
-                bufmgr_unported();
+            // C tts_buffer_heap_copyslot: a same-kind unmaterialized source
+            // shares its buffer pin; only the HeapTupleData header is copied.
+            if let SlotData::BufferHeap(s) = src {
+                if !s.base.base.should_free() {
+                    if let Some(t) = s.base.tuple.as_ref() {
+                        debug_assert!(BufferIsValid(s.buffer));
+                        // SAFETY: the image lives in the pinned buffer page,
+                        // not src's mcx; store_buffer takes dst's own pin, so
+                        // the page outlives dst's view (C memcpys the header
+                        // for the same reason).
+                        let tuple = unsafe {
+                            HeapTupleData::from_raw_parts(
+                                t.header_ptr(),
+                                t.t_len,
+                                t.t_self,
+                                t.t_tableOid,
+                            )
+                        };
+                        store_buffer(dst, dst_mcx, tuple, s.buffer, false);
+                        return Ok(());
+                    }
+                }
             }
             exec_clear_tuple(dst, dst_mcx);
             let tuple = exec_copy_slot_heap_tuple(src, src_mcx, dst_mcx)?;

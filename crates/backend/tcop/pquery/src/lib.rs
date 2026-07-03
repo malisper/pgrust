@@ -239,7 +239,9 @@ pub fn FetchPortalTargetList<'a, 'mcx>(
             if tag == Some(NodeTag::T_FetchStmt) || tag == Some(NodeTag::T_ExecuteStmt) {
                 panic!(
                     "FetchStatementTargetList (pquery.c:349): FETCH/EXECUTE target-list \
-                     recursion not ported (portalcmds/prepare lanes)"
+                     recursion not ported — FETCH needs the portalcmds lane + FetchStmt \
+                     grammar payload; EXECUTE needs FetchPreparedStatementTargetList \
+                     wiring into the landed prepare crate"
                 );
             }
             return Ok(());
@@ -532,12 +534,7 @@ fn PortalRunSelect(
         }
     } else {
         if (portal.borrow().cursorOptions & CURSOR_OPT_NO_SCROLL) != 0 {
-            return Err(ereport(ERROR)
-                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
-                .errmsg("cursor can only scan forward")
-                .errhint("Declare it with SCROLL option to enable backward scan.")
-                .into_error()
-                .into());
+            return Err(no_scroll_error());
         }
 
         if portal.borrow().atStart || count <= 0 {
@@ -888,16 +885,139 @@ fn PortalRunMulti<'mcx>(
     Ok(())
 }
 
+#[cold]
+#[inline(never)]
+fn no_scroll_error() -> Box<types_error::PgError> {
+    Box::new(
+        ereport(ERROR)
+            .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .errmsg("cursor can only scan forward")
+            .errhint("Declare it with SCROLL option to enable backward scan.")
+            .into_error(),
+    )
+}
+
 pub fn PortalRunFetch(
-    _portal: &Portal<'static>,
-    _fdirection: FetchDirection,
-    _count: i64,
-    _dest: &mut DestReceiver<'_>,
+    portal: &Portal<'static>,
+    fdirection: FetchDirection,
+    count: i64,
+    dest: &mut DestReceiver<'_>,
 ) -> PgResult<u64> {
-    panic!(
-        "PortalRunFetch (pquery.c:1377) not ported: FETCH/MOVE arrive via \
-         portalcmds (its lane carries DoPortalRunFetch/DoPortalRewind)"
-    );
+    portalmem::MarkPortalActive(portal)?;
+
+    let result = run_protected(portal, || -> PgResult<u64> {
+        let strategy = portal.borrow().strategy;
+        match strategy {
+            PORTAL_ONE_SELECT => DoPortalRunFetch(portal, fdirection, count, dest),
+            PORTAL_ONE_RETURNING | PORTAL_ONE_MOD_WITH | PORTAL_UTIL_SELECT => {
+                if portal.borrow().holdStore.is_null() {
+                    FillPortalStore(portal, false)?;
+                }
+                DoPortalRunFetch(portal, fdirection, count, dest)
+            }
+            other => Err(ereport(ERROR)
+                .errmsg_internal(format!("unsupported portal strategy: {}", other as u32))
+                .into_error()
+                .into()),
+        }
+    })?;
+
+    portal.borrow_mut().status = PORTAL_READY;
+
+    Ok(result)
+}
+
+fn DoPortalRunFetch(
+    portal: &Portal<'static>,
+    mut fdirection: FetchDirection,
+    mut count: i64,
+    dest: &mut DestReceiver<'_>,
+) -> PgResult<u64> {
+    match fdirection {
+        FetchDirection::FETCH_FORWARD => {
+            if count < 0 {
+                fdirection = FetchDirection::FETCH_BACKWARD;
+                count = -count;
+            }
+        }
+        FetchDirection::FETCH_BACKWARD => {
+            if count < 0 {
+                fdirection = FetchDirection::FETCH_FORWARD;
+                count = -count;
+            }
+        }
+        FetchDirection::FETCH_ABSOLUTE => panic!(
+            "DoPortalRunFetch (pquery.c): FETCH_ABSOLUTE arm unported — \
+             unit backend-tcop-pquery"
+        ),
+        FetchDirection::FETCH_RELATIVE => panic!(
+            "DoPortalRunFetch (pquery.c): FETCH_RELATIVE arm unported — \
+             unit backend-tcop-pquery"
+        ),
+    }
+
+    let mut forward = fdirection == FetchDirection::FETCH_FORWARD;
+
+    // Zero count re-fetches the current row, if any (per SQL).
+    if count == 0 {
+        let on_row = {
+            let p = portal.borrow();
+            !p.atStart && !p.atEnd
+        };
+        if dest.mydest() == CommandDest::None {
+            // MOVE 0 reports whether FETCH 0 would return a row.
+            return Ok(u64::from(on_row));
+        }
+        if on_row {
+            let mut none = DestReceiver::DoNothing;
+            PortalRunSelect(portal, false, 1, &mut none)?;
+            count = 1;
+            forward = true;
+        }
+    }
+
+    // MOVE BACKWARD ALL is a rewind.
+    if !forward && count == FETCH_ALL && dest.mydest() == CommandDest::None {
+        let mut result = portal.borrow().portalPos;
+        if result > 0 && !portal.borrow().atEnd {
+            result -= 1;
+        }
+        DoPortalRewind(portal)?;
+        return Ok(result);
+    }
+
+    PortalRunSelect(portal, forward, count, dest)
+}
+
+fn DoPortalRewind(portal: &Portal<'static>) -> PgResult<()> {
+    {
+        let p = portal.borrow();
+        if p.atStart && !p.atEnd {
+            return Ok(());
+        }
+        if (p.cursorOptions & CURSOR_OPT_NO_SCROLL) != 0 {
+            return Err(no_scroll_error());
+        }
+    }
+
+    let hold_store = portal.borrow().holdStore;
+    if !hold_store.is_null() {
+        tuplestore_hold_seams::tuplestore_rescan::call(hold_store);
+    }
+
+    let query_desc = portal.borrow().queryDesc;
+    if !query_desc.is_null() {
+        panic!(
+            "DoPortalRewind (pquery.c): ExecutorRewind over a live executor \
+             unported — unit backend-tcop-pquery live-cursor lane"
+        );
+    }
+
+    let mut p = portal.borrow_mut();
+    p.atStart = true;
+    p.atEnd = false;
+    p.portalPos = 0;
+    Ok(())
 }
 
 pub fn PlannedStmtRequiresSnapshot(pstmt: &PlannedStmt<'_>) -> bool {

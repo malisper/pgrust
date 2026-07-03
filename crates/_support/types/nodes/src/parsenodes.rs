@@ -306,6 +306,27 @@ pub struct ExecuteStmt<'mcx> {
     pub params: NodeList<'mcx>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum FetchDirection {
+    #[default]
+    FETCH_FORWARD = 0,
+    FETCH_BACKWARD,
+    FETCH_ABSOLUTE,
+    FETCH_RELATIVE,
+}
+
+// C: #define FETCH_ALL LONG_MAX (parsenodes.h).
+pub const FETCH_ALL: i64 = i64::MAX;
+
+#[derive(Default)]
+pub struct FetchStmt<'mcx> {
+    pub direction: FetchDirection,
+    pub howMany: i64,
+    pub portalname: Option<&'mcx str>,
+    pub ismove: bool,
+}
+
 // C: isall is redundant with name == NULL but kept for query jumbling.
 pub struct DeallocateStmt<'mcx> {
     pub name: Option<&'mcx str>,
@@ -352,6 +373,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for PrepareStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for ExecuteStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_ExecuteStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for FetchStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_FetchStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for DeallocateStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_DeallocateStmt;
@@ -410,6 +434,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_execute_stmt(self) -> Option<&'mcx ExecuteStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_fetch_stmt(self) -> Option<&'mcx FetchStmt<'mcx>> {
         self.as_variant()
     }
 

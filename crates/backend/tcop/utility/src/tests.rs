@@ -338,3 +338,30 @@ fn explain_log_level_and_descriptor() {
     assert_eq!(desc.attr(0).atttypid, types_core::TEXTOID);
     assert_eq!(desc.attr(0).attname.name_str(), b"QUERY PLAN");
 }
+
+#[test]
+fn fetch_stmt_tag_returns_and_descriptor() {
+    use types_nodes::parsenodes::FetchStmt;
+
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+
+    let fetch = Node::mk(
+        mcx,
+        FetchStmt { portalname: Some("nope"), ..FetchStmt::default() },
+    )
+    .unwrap();
+    assert_eq!(CreateCommandTag(fetch), CMDTAG_FETCH);
+    // Unknown portal is not our error to raise here (C returns false/NULL).
+    assert!(!UtilityReturnsTuples(fetch));
+    assert!(UtilityTupleDescriptor(fetch).unwrap().is_none());
+
+    let mv = Node::mk(
+        mcx,
+        FetchStmt { portalname: Some("nope"), ismove: true, ..FetchStmt::default() },
+    )
+    .unwrap();
+    assert_eq!(CreateCommandTag(mv), CMDTAG_MOVE);
+    assert!(!UtilityReturnsTuples(mv));
+    assert!(UtilityTupleDescriptor(mv).unwrap().is_none());
+}

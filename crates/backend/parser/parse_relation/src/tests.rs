@@ -161,6 +161,12 @@ fn install() {
         relation_seams::relation_open::set(fake_relation_open);
         relation_seams::relation_openrv_extended::set(fake_relation_openrv_extended);
         namespace_seams::range_var_get_relid::set(fake_range_var_get_relid);
+        mbutils_seams::pg_mbstrlen_with_len::set(mbutils::pg_mbstrlen_with_len);
+        mbutils_seams::pg_mblen_range::set(mbutils::pg_mblen_range);
+        // System columns exist in pg_attribute for every fixture relation but U_OID.
+        syscache_seams::search_syscache_exists_attnum::set(|relid, attnum| {
+            Ok(attnum < 0 && relid != U_OID)
+        });
         table::init_seams();
     });
 }
@@ -415,7 +421,7 @@ fn error_missing_column_exact_match_arm() {
     // RTE exists in the rangetable but is not visible in the namespace.
     let _ = add(mcx, &mut pstate, "t", None);
 
-    let err = errorMissingColumn(&pstate, None, "x", 7);
+    let err = errorMissingColumn(mcx, &pstate, None, "x", 7);
     assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_COLUMN);
     assert_eq!(err.message, "column \"x\" does not exist");
     assert_eq!(
@@ -550,8 +556,7 @@ fn add_ns_item_to_query_sets_flags_and_joinlist() {
 }
 
 #[test]
-#[should_panic(expected = "specialAttNum")]
-fn system_column_lane_is_loud() {
+fn system_columns_resolve_with_catalog_types() {
     install();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
@@ -559,16 +564,153 @@ fn system_column_lane_is_loud() {
 
     let nsitem = add(mcx, &mut pstate, "t", None);
     pstate.p_namespace.push(nsitem);
-    let _ = colNameToVar(mcx, &pstate, "ctid", false, -1);
+
+    let expect = [
+        ("ctid", -1i16, types_core::catalog::TIDOID),
+        ("xmin", -2, types_core::catalog::XIDOID),
+        ("cmin", -3, types_core::catalog::CIDOID),
+        ("xmax", -4, types_core::catalog::XIDOID),
+        ("cmax", -5, types_core::catalog::CIDOID),
+        ("tableoid", -6, types_core::catalog::OIDOID),
+    ];
+    for (name, attnum, typid) in expect {
+        let node = colNameToVar(mcx, &pstate, name, false, 7).unwrap().unwrap();
+        let var = node.as_var().unwrap();
+        assert_eq!((var.varno, var.varattno), (1, attnum));
+        assert_eq!((var.vartype, var.vartypmod, var.varcollid), (typid, -1, InvalidOid));
+        assert_eq!((var.varnosyn, var.varattnosyn), (1, attnum));
+    }
+
+    let perminfo = pstate.p_rteperminfos.nth(0).as_rte_permission_info().unwrap();
+    assert!(perminfo.selectedCols.is_member(-1 - FirstLowInvalidHeapAttributeNumber));
+
+    // A user column alias shadows a system column name.
+    let mut colnames = NodeList::nil();
+    for n in ["ctid", "y2"] {
+        colnames.lappend(mcx, Node::mk_string(mcx, n).unwrap()).unwrap();
+    }
+    let alias = Node::mk_mut(mcx, Alias { aliasname: Some("c"), colnames }).unwrap().seal_ref();
+    let mut p2 = make_parsestate(mcx, None);
+    let n2 = add(mcx, &mut p2, "t", Some(alias));
+    p2.p_namespace.push(n2);
+    let node = colNameToVar(mcx, &p2, "ctid", false, 7).unwrap().unwrap();
+    assert_eq!(node.as_var().unwrap().varattno, 1);
 }
 
 #[test]
-#[should_panic(expected = "varstr_levenshtein")]
-fn fuzzy_hint_lane_is_loud() {
+fn system_column_without_pg_attribute_row_is_no_match() {
+    install();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let nsitem = add(mcx, &mut pstate, "u", None);
+    pstate.p_namespace.push(nsitem);
+    assert!(colNameToVar(mcx, &pstate, "ctid", false, 7).unwrap().is_none());
+}
+
+#[test]
+fn system_column_in_check_constraint_is_42p10() {
+    install();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_expr_kind = parser_small1::ParseExprKind::EXPR_KIND_CHECK_CONSTRAINT;
+
+    let nsitem = add(mcx, &mut pstate, "t", None);
+    pstate.p_namespace.push(nsitem);
+
+    let err = colNameToVar(mcx, &pstate, "xmin", false, 7).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_INVALID_COLUMN_REFERENCE);
+    assert_eq!(err.message, "system column \"xmin\" reference in check constraint is invalid");
+    let ok = colNameToVar(mcx, &pstate, "tableoid", false, 7).unwrap().unwrap();
+    assert_eq!(ok.as_var().unwrap().varattno, -6);
+}
+
+#[test]
+fn attname_attnum_sys_col_ok_returns_negative_attnum() {
+    install();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let rel = make(mcx, T_OID, "t", &T_COLS);
+    assert_eq!(attnameAttNum(&rel, "x", true), 1);
+    assert_eq!(attnameAttNum(&rel, "ctid", true), -1);
+    assert_eq!(attnameAttNum(&rel, "ctid", false), 0);
+    assert_eq!(attnameAttNum(&rel, "nope", true), 0);
+}
+
+#[test]
+fn error_missing_column_single_fuzzy_hint() {
+    install();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    let _ = add(mcx, &mut pstate, "d", None);
+
+    let err = errorMissingColumn(mcx, &pstate, None, "aa", 7);
+    assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_COLUMN);
+    assert_eq!(err.message, "column \"aa\" does not exist");
+    assert_eq!(err.hint(), Some("Perhaps you meant to reference the column \"d.a\"."));
+}
+
+#[test]
+fn error_missing_column_two_fuzzy_hints() {
+    install();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    let _ = add(mcx, &mut pstate, "d", None);
+
+    let err = errorMissingColumn(mcx, &pstate, None, "ab", 7);
+    assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_COLUMN);
+    assert_eq!(
+        err.hint(),
+        Some(
+            "Perhaps you meant to reference the column \"d.a\" or the column \"d.b\"."
+        )
+    );
+}
+
+#[test]
+fn error_missing_column_three_equidistant_matches_gives_bald_error() {
     install();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut pstate = make_parsestate(mcx, None);
     let _ = add(mcx, &mut pstate, "t", None);
-    let _ = errorMissingColumn(&pstate, None, "nosuchcol", -1);
+    let _ = add(mcx, &mut pstate, "u", None);
+
+    let err = errorMissingColumn(mcx, &pstate, None, "xy", 7);
+    assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_COLUMN);
+    assert_eq!(err.message, "column \"xy\" does not exist");
+    assert_eq!(err.hint(), None);
+}
+
+#[test]
+fn error_missing_column_no_candidates_is_bald_42703() {
+    install();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    let _ = add(mcx, &mut pstate, "t", None);
+
+    let err = errorMissingColumn(mcx, &pstate, None, "nosuchcol", 7);
+    assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_COLUMN);
+    assert_eq!(err.message, "column \"nosuchcol\" does not exist");
+    assert_eq!(err.hint(), None);
+    assert_eq!(err.detail(), None);
+}
+
+#[test]
+fn error_missing_column_qualified_message_and_rte_penalty() {
+    install();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    let _ = add(mcx, &mut pstate, "t", None);
+
+    let err = errorMissingColumn(mcx, &pstate, Some("t"), "xx", 7);
+    assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_COLUMN);
+    assert_eq!(err.message, "column t.xx does not exist");
+    assert_eq!(err.hint(), Some("Perhaps you meant to reference the column \"t.x\"."));
 }

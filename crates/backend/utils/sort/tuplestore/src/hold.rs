@@ -106,8 +106,13 @@ fn gettupleslot_hold(
     with_store(h, |store| store.gettupleslot(forward, copy, slot, mcx))
 }
 
+fn rescan_hold(h: TuplestoreHandle) {
+    with_store(h, |store| store.rescan())
+}
+
 pub(crate) fn install_seams() {
     tuplestore_hold_seams::tuplestore_begin_heap_hold::set(begin_heap_hold);
     tuplestore_hold_seams::tuplestore_end::set(end);
     tuplestore_hold_seams::tuplestore_gettupleslot::set(gettupleslot_hold);
+    tuplestore_hold_seams::tuplestore_rescan::set(rescan_hold);
 }

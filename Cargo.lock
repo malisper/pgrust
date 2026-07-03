@@ -705,8 +705,10 @@ dependencies = [
 name = "catalog_seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam_core",
  "types_core",
+ "types_error",
  "types_rel",
 ]
 
@@ -5875,14 +5877,20 @@ name = "visibilitymap"
 version = "0.1.0"
 dependencies = [
  "bufmgr_seams",
+ "guc_tables",
+ "init_small",
  "inval",
  "mcx",
+ "rmgr",
  "smgr_seams",
+ "transam_xlog_seams",
  "types_core",
  "types_error",
  "types_rel",
  "types_storage",
  "types_tuple",
+ "xloginsert_seams",
+ "xlogutils_seams",
 ]
 
 [[package]]

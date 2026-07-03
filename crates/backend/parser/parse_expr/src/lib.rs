@@ -249,6 +249,7 @@ fn transformColumnRef<'mcx>(
                 Err(parse_relation::errorMissingRTE(mcx, pstate, rv))
             } else {
                 Err(parse_relation::errorMissingColumn(
+                    mcx,
                     pstate,
                     relname,
                     colname.expect("no-column arm always has a colname"),

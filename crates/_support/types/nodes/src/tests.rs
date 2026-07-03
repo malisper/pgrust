@@ -645,6 +645,16 @@ fn variable_set_stmt_field_order_matches_c() {
     assert_eq!(c_struct_fields(parse_h, "ExplainStmt"), ["query", "options"]);
     let crate::parsenodes::ExplainStmt { query: _, options: _ } =
         crate::parsenodes::ExplainStmt::default();
+
+    assert_eq!(
+        c_struct_fields(parse_h, "FetchStmt"),
+        ["direction", "howMany", "portalname", "ismove"]
+    );
+    let crate::parsenodes::FetchStmt { direction, howMany, portalname: _, ismove: _ } =
+        crate::parsenodes::FetchStmt::default();
+    assert_eq!(direction, crate::parsenodes::FetchDirection::FETCH_FORWARD);
+    assert_eq!(howMany, 0);
+    assert_eq!(crate::parsenodes::FETCH_ALL, i64::MAX);
 }
 
 #[test]
