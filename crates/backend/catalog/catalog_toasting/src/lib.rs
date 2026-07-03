@@ -98,7 +98,7 @@ fn create_toast_table<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<bo
     let mut attnums = [0 as AttrNumber; INDEX_MAX_KEYS as usize];
     attnums[0] = 1;
     attnums[1] = 2;
-    let indexInfo = IndexInfo {
+    let mut indexInfo = IndexInfo {
         ii_NumIndexAttrs: 2,
         ii_NumIndexKeyAttrs: 2,
         ii_IndexAttrNumbers: attnums,
@@ -118,7 +118,7 @@ fn create_toast_table<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<bo
         &toast_rel,
         &toast_idxname,
         InvalidOid,
-        &indexInfo,
+        &mut indexInfo,
         &["chunk_id", "chunk_seq"],
         catalog_index::BTREE_AM_OID,
         rel.rd_rel.reltablespace,
