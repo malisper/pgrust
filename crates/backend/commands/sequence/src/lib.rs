@@ -1128,3 +1128,106 @@ fn seqrelid_key(relid: Oid) -> types_scan::scankey::ScanKeyData {
     key.sk_argument = Datum::from_oid(relid);
     key
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx() -> &'static mcx::MemoryContext {
+        Box::leak(Box::new(mcx::MemoryContext::new("seq-test")))
+    }
+
+    fn defel<'mcx>(mcx: Mcx<'mcx>, name: &'mcx str, arg: Option<Node<'mcx>>) -> Node<'mcx> {
+        Node::mk(
+            mcx,
+            DefElem {
+                defnamespace: None,
+                defname: Some(name),
+                arg,
+                defaction: types_nodes::parsenodes::DefElemAction::DEFELEM_UNSPEC,
+                location: -1,
+            },
+        )
+        .unwrap()
+    }
+
+    fn int_arg(mcx: Mcx<'_>, v: i64) -> Option<Node<'_>> {
+        if let Ok(i) = i32::try_from(v) {
+            Some(Node::mk(mcx, types_nodes::Integer { ival: i }).unwrap())
+        } else {
+            let s = mcx::PgString::from_str_in(&v.to_string(), mcx).unwrap();
+            let s = unsafe { core::str::from_utf8_unchecked(s.into_bytes().leak()) };
+            Some(Node::mk(mcx, types_nodes::Float { fval: s }).unwrap())
+        }
+    }
+
+    #[test]
+    fn init_params_defaults_match_c() {
+        let mcx = ctx().mcx();
+        let p = init_params(mcx, &NodeList::nil()).unwrap();
+        assert_eq!(p.form.seqtypid, INT8OID);
+        assert_eq!(p.form.seqincrement, 1);
+        assert_eq!(p.form.seqmin, 1);
+        assert_eq!(p.form.seqmax, i64::MAX);
+        assert_eq!(p.form.seqstart, 1);
+        assert_eq!(p.form.seqcache, 1);
+        assert!(!p.form.seqcycle);
+        assert_eq!(p.dataform.last_value, 1);
+    }
+
+    #[test]
+    fn init_params_descending_defaults() {
+        let mcx = ctx().mcx();
+        let opts = NodeList::make1(mcx, defel(mcx, "increment", int_arg(mcx, -3))).unwrap();
+        let p = init_params(mcx, &opts).unwrap();
+        assert_eq!(p.form.seqmax, -1);
+        assert_eq!(p.form.seqmin, i64::MIN);
+        assert_eq!(p.form.seqstart, -1);
+    }
+
+    #[test]
+    fn init_params_error_arms() {
+        let mcx = ctx().mcx();
+        for (name, v, frag) in [
+            ("increment", 0, "INCREMENT must not be zero"),
+            ("cache", 0, "CACHE (0) must be greater than zero"),
+            ("start", 0, "START value (0) cannot be less than MINVALUE (1)"),
+        ] {
+            let opts = NodeList::make1(mcx, defel(mcx, name, int_arg(mcx, v))).unwrap();
+            let e = init_params(mcx, &opts).err().expect("error expected");
+            assert!(e.message().contains(frag), "{name}: {}", e.message());
+            assert_eq!(e.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
+        }
+        let mut opts =
+            NodeList::make1(mcx, defel(mcx, "increment", int_arg(mcx, 1))).unwrap();
+        opts.lappend(mcx, defel(mcx, "increment", int_arg(mcx, 2))).unwrap();
+        let e = init_params(mcx, &opts).err().expect("error expected");
+        assert!(e.message().contains("conflicting or redundant options"));
+    }
+
+    #[test]
+    fn init_params_defget_int64_via_float_node() {
+        let mcx = ctx().mcx();
+        let opts =
+            NodeList::make1(mcx, defel(mcx, "maxvalue", int_arg(mcx, 9223372036854775806)))
+                .unwrap();
+        let p = init_params(mcx, &opts).unwrap();
+        assert_eq!(p.form.seqmax, 9223372036854775806);
+    }
+
+    #[test]
+    fn seq_tuple_layout_roundtrip() {
+        let mut img = [0u8; 64];
+        let hoff = 24u8;
+        img[22] = hoff; // t_hoff offset within HeapTupleHeaderData
+        let tup = SeqTuple { data: img.as_mut_ptr(), t_len: 64 };
+        tup.set(0x1122334455667788, 32, true);
+        assert_eq!(tup.last_value(), 0x1122334455667788);
+        assert_eq!(tup.log_cnt(), 32);
+        assert!(tup.is_called());
+        tup.set(-9, 0, false);
+        assert_eq!(tup.last_value(), -9);
+        assert_eq!(tup.log_cnt(), 0);
+        assert!(!tup.is_called());
+    }
+}
