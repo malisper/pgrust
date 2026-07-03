@@ -950,6 +950,54 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
     }
 }
 
+// C ExecInitExprRec whole-row Var + ExecEvalWholeRowVar's first-eval split:
+// the composite tupdesc resolves here (plan-stable typcache row; C defers to
+// first eval only to reach the slot). RECORD legs (subquery/join whole-row,
+// junk filtering) and RETURNING OLD/NEW stay loud.
+fn init_whole_row<'mcx>(
+    variable: &::types_nodes::primnodes::Var<'mcx>,
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    out: OutRef,
+) -> PgResult<()> {
+    use crate::steps::{SlotSrc, WholeRowState};
+    if variable.varreturningtype != VarReturningType::VAR_RETURNING_DEFAULT {
+        unported("EEOP_WHOLEROW OLD/NEW (RETURNING)");
+    }
+    if variable.vartype == ::types_core::catalog::RECORDOID {
+        unported("EEOP_WHOLEROW RECORD leg (subquery/CTE whole-row + junkfilter)");
+    }
+    let src = match variable.varno {
+        INNER_VAR => SlotSrc::Inner,
+        OUTER_VAR => SlotSrc::Outer,
+        _ => SlotSrc::Scan,
+    };
+    let desc = typcache::lookup_rowtype_tupdesc_copy(mcx, variable.vartype, -1)?;
+    let desc_layout = core::alloc::Layout::new::<::types_tuple::TupleDescData<'static>>();
+    let desc_ptr: NonNull<::types_tuple::TupleDescData<'static>> =
+        mcx.allocate(desc_layout).map_err(|_| mcx.oom(desc_layout.size()))?.cast();
+    // SAFETY: fresh exact-layout allocation; the plan mcx outlives every eval
+    // of this step, so the 'static restamp never escapes it.
+    unsafe {
+        desc_ptr.as_ptr().write(core::mem::transmute::<
+            ::types_tuple::TupleDescData<'mcx>,
+            ::types_tuple::TupleDescData<'static>,
+        >(desc));
+    }
+    let wr_layout = core::alloc::Layout::new::<WholeRowState>();
+    let wr: NonNull<WholeRowState> =
+        mcx.allocate(wr_layout).map_err(|_| mcx.oom(wr_layout.size()))?.cast();
+    // SAFETY: fresh exact-layout allocation.
+    unsafe { wr.as_ptr().write(WholeRowState { tupdesc: desc_ptr, first: true, slow: false }) };
+
+    let frame_ix = state.frames.len() as u32;
+    let frame = FuncFrame::new_in(mcx, FmgrInfo::unresolved(), 0, 0)?;
+    state.frames.try_reserve(1).map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+    state.frames.push(frame);
+
+    push_step(state, mcx, Step::WholeRow { src, wr, frame: frame_ix, out })
+}
+
 // C ExecInitExprRec over the ported families.
 pub(crate) fn init_expr_rec<'mcx>(
     node: Node<'mcx>,
@@ -964,7 +1012,7 @@ pub(crate) fn init_expr_rec<'mcx>(
         NodeTag::T_Var => {
             let variable = node.as_var().unwrap();
             if variable.varattno == 0 {
-                unported("EEOP_WHOLEROW");
+                return init_whole_row(variable, state, mcx, out);
             }
             if variable.varattno < 0 {
                 let attnum = variable.varattno;

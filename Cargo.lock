@@ -2604,6 +2604,7 @@ dependencies = [
  "fmgr_core",
  "format_type",
  "guc_tables",
+ "heaptoast_seams",
  "heaptuple",
  "indexcmds_seams",
  "lsyscache",
