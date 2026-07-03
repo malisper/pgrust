@@ -1392,6 +1392,7 @@ dependencies = [
  "pg_constraint",
  "pg_depend",
  "pg_type",
+ "rewrite_define_seams",
  "sequence_seams",
  "statscmds",
  "table",
@@ -2617,6 +2618,25 @@ dependencies = [
  "types_nodes",
  "types_storage",
  "xact",
+]
+
+[[package]]
+name = "dropcmds"
+version = "0.1.0"
+dependencies = [
+ "catalog_dependency",
+ "catalog_namespace",
+ "elog_seams",
+ "mcx",
+ "pg_depend",
+ "rel_vocab",
+ "relcache",
+ "rewrite_define",
+ "table",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
 ]
 
 [[package]]
@@ -6042,6 +6062,7 @@ dependencies = [
  "parser_small1",
  "rel_vocab",
  "relation_seams",
+ "rewrite_manip",
  "stack_depth",
  "syscache_seams",
  "table",
@@ -8014,16 +8035,24 @@ dependencies = [
  "catalog",
  "catalog_dependency",
  "catalog_indexing",
+ "catalog_namespace",
  "datum",
  "fmgr_seams",
+ "format_type",
  "genam",
  "heaptuple",
+ "init_small",
+ "inval",
  "lsyscache",
  "mcx",
  "outfuncs",
  "parse_expr",
+ "parser_analyze",
  "pg_depend",
+ "rel_vocab",
  "relcache",
+ "rewrite_define_seams",
+ "rewrite_manip",
  "table",
  "types_core",
  "types_error",
@@ -8032,6 +8061,16 @@ dependencies = [
  "types_scan",
  "types_tuple",
  "varlena",
+]
+
+[[package]]
+name = "rewrite_define_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_core",
+ "types_error",
 ]
 
 [[package]]
@@ -8116,6 +8155,7 @@ dependencies = [
  "relcache_seams",
  "resowner",
  "rewrite_handler_seams",
+ "rewrite_manip",
  "rmgr",
  "s_lock_seams",
  "scan_fgram",
@@ -8175,8 +8215,12 @@ dependencies = [
 name = "rewrite_manip"
 version = "0.1.0"
 dependencies = [
+ "datum",
+ "lsyscache",
  "mcx",
  "nodes_core",
+ "outfuncs",
+ "readfuncs",
  "types_core",
  "types_error",
  "types_nodes",
@@ -8545,6 +8589,7 @@ dependencies = [
  "relmapper",
  "relpath",
  "resowner",
+ "rewrite_define",
  "rewrite_handler",
  "ri_triggers",
  "rmgr",
@@ -9597,6 +9642,7 @@ dependencies = [
  "relation_seams",
  "relcache",
  "relcache_seams",
+ "rewrite_define",
  "rewrite_handler",
  "rewrite_manip",
  "snapmgr",
@@ -10348,6 +10394,7 @@ dependencies = [
  "copy_cmd",
  "dbcommands",
  "discard",
+ "dropcmds",
  "elog",
  "elog_seams",
  "explain",
@@ -10368,6 +10415,7 @@ dependencies = [
  "portalmem",
  "prepare",
  "rel_vocab",
+ "rewrite_define",
  "schemacmds",
  "sequence",
  "statscmds",

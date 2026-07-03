@@ -90,6 +90,7 @@ pub fn init_all() {
     session::init_seams();
     relpath::init_seams();
     rewrite_handler::init_seams();
+    rewrite_define::init_seams();
     aio_config::init_seams();
     bufmgr::init_seams();
     fd::init_seams();

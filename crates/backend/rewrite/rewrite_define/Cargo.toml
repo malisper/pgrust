@@ -29,3 +29,11 @@ pg_depend = { path = "../../catalog/pg_depend" }
 relcache = { path = "../../utils/cache/relcache" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 parse_expr = { path = "../../parser/parse_expr" }
+parser_analyze = { path = "../../parser/parser_analyze" }
+rewrite_manip = { path = "../rewrite_manip" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+format_type = { path = "../../utils/adt/format_type" }
+init_small = { path = "../../utils/init/init_small" }
+inval = { path = "../../utils/cache/inval" }
+rewrite_define_seams = { path = "../rewrite_define_seams" }

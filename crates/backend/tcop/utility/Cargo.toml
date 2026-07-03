@@ -8,6 +8,8 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+rewrite_define = { path = "../../rewrite/rewrite_define" }
+dropcmds = { path = "../../commands/dropcmds" }
 aclchk = { path = "../../catalog/aclchk" }
 parse_utilcmd = { path = "../../parser/parse_utilcmd" }
 parse_clause = { path = "../../parser/parse_clause" }
