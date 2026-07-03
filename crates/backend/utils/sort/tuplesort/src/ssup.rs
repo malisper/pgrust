@@ -16,6 +16,7 @@ const F_TIMESTAMP_SORTSUPPORT: Oid = 3137;
 const F_BTTEXTSORTSUPPORT: Oid = 3255;
 const F_UUID_SORTSUPPORT: Oid = 3300;
 const F_NETWORK_SORTSUPPORT: Oid = 5033;
+const F_RANGE_SORTSUPPORT: Oid = 6391;
 const F_INTERVAL_CMP: Oid = 1315;
 const F_BPCHAR_SORTSUPPORT: Oid = 3328;
 
@@ -304,10 +305,10 @@ pub fn comparator_for_opfamily(
                 SortComparator::TextC
             }
         }
-        // C DIVERGENCE: uuid 3300 / network 5033 name abbrev sortsupport
-        // routines (unported); the shim on their BTORDER_PROC is
-        // order-identical (CATALOG perf watch).
-        0 | F_UUID_SORTSUPPORT | F_NETWORK_SORTSUPPORT => {
+        // C DIVERGENCE: uuid 3300 / network 5033 abbrev routines and
+        // range_sortsupport 6391 (range_fast_cmp) are unported; the shim on
+        // their BTORDER_PROC is order-identical (CATALOG perf watch).
+        0 | F_UUID_SORTSUPPORT | F_NETWORK_SORTSUPPORT | F_RANGE_SORTSUPPORT => {
             // C: PrepareSortSupportComparisonShim — fmgr_info the BTORDER_PROC
             // once; comparisons go through the resolved fn pointer.
             let sort_function =

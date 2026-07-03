@@ -24,11 +24,33 @@ fn arg_multirange<'m>(fcinfo: &Fcinfo, i: usize, mcx: Mcx<'m>) -> PgResult<Range
     arg_range(fcinfo, i, mcx)
 }
 
+// Flinfo-less callers (the tuplesort comparison shim) memo here; see the
+// rangetypes SHIM_RI note.
+std::thread_local! {
+    static SHIM_MI: core::cell::UnsafeCell<Option<core::mem::ManuallyDrop<MultirangeInfo>>> =
+        const { core::cell::UnsafeCell::new(None) };
+}
+
 fn flinfo_mi<'f>(
     flinfo: Option<&'f mut FmgrInfo>,
     mltrngtypid: Oid,
 ) -> PgResult<&'f mut MultirangeInfo> {
-    cached_multirange_info(flinfo.expect("multirange function: NULL flinfo"), mltrngtypid)
+    if let Some(fl) = flinfo {
+        return cached_multirange_info(fl, mltrngtypid);
+    }
+    SHIM_MI.with(|c| {
+        // SAFETY: single-threaded backend; not re-entered across the borrow.
+        let slot = unsafe { &mut *c.get() };
+        let stale = match slot {
+            Some(mi) => mi.mltrngtypid != mltrngtypid,
+            None => true,
+        };
+        if stale {
+            *slot = Some(core::mem::ManuallyDrop::new(MultirangeInfo::lookup(mltrngtypid)?));
+        }
+        // SAFETY: as above.
+        Ok(unsafe { &mut *(&mut **slot.as_mut().unwrap() as *mut MultirangeInfo) })
+    })
 }
 
 fn mr_result(fcinfo: &Fcinfo, img: &[u8]) -> PgResult<Datum> {
