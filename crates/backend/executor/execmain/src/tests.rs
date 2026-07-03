@@ -57,6 +57,23 @@ fn install_seams() {
                 _ => None,
             })
         });
+        syscache_seams::pg_type_io_shape::set(|typid| {
+            Ok((typid == INT8OID).then_some(syscache_seams::PgTypeIoShape {
+                oid: INT8OID,
+                typinput: 460,
+                typoutput: 461,
+                typreceive: 2408,
+                typsend: 2409,
+                typmodin: 0,
+                typmodout: 0,
+                typelem: 0,
+                typlen: 8,
+                typbyval: true,
+                typalign: ::types_tuple::TYPALIGN_DOUBLE,
+                typdelim: b',' as i8,
+                typisdefined: true,
+            }))
+        });
         // pg_aggregate.dat rows for count() 2803 / sum(int4) 2108.
         syscache_seams::lookup_pg_aggregate_shape::set(|aggfnoid| {
             Ok(match aggfnoid {

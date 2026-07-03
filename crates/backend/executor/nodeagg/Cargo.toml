@@ -16,7 +16,6 @@ types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
 types_pathnodes = { path = "../../../_support/types/pathnodes" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
-adt_int8 = { path = "../../utils/adt/int8" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 lsyscache = { path = "../../utils/cache/lsyscache" }

@@ -565,6 +565,57 @@ fn run_program<'mcx>(
                     }
                 }
             }
+            Step::AggPlainTransInitStrictByRef { call, pergroup, byref } => {
+                // SAFETY: once-allocated stable pergroup, sole access here.
+                unsafe {
+                    let pg = pergroup.as_ptr();
+                    if (*pg).no_trans_value {
+                        agg_init_group(call, pg, *byref)?;
+                    } else if !(*pg).trans_value_is_null {
+                        agg_plain_trans_byref(frames, call, pg, *byref)?;
+                    }
+                }
+            }
+            Step::AggPlainTransStrictByRef { call, pergroup, byref } => {
+                // SAFETY: as AggPlainTransInitStrictByRef.
+                unsafe {
+                    let pg = pergroup.as_ptr();
+                    if !(*pg).trans_value_is_null {
+                        agg_plain_trans_byref(frames, call, pg, *byref)?;
+                    }
+                }
+            }
+            Step::AggPlainTransByRef { call, pergroup, byref } => {
+                // SAFETY: as AggPlainTransInitStrictByRef.
+                unsafe { agg_plain_trans_byref(frames, call, pergroup.as_ptr(), *byref)? }
+            }
+            Step::AggTransInitStrictByRefIndirect { call, base, transno, byref } => {
+                // SAFETY: as AggTransByValIndirect + AggPlainTransByRef.
+                unsafe {
+                    let pg = base.read().as_ptr().add(*transno as usize);
+                    if (*pg).no_trans_value {
+                        agg_init_group(call, pg, *byref)?;
+                    } else if !(*pg).trans_value_is_null {
+                        agg_plain_trans_byref(frames, call, pg, *byref)?;
+                    }
+                }
+            }
+            Step::AggTransStrictByRefIndirect { call, base, transno, byref } => {
+                // SAFETY: as AggTransInitStrictByRefIndirect.
+                unsafe {
+                    let pg = base.read().as_ptr().add(*transno as usize);
+                    if !(*pg).trans_value_is_null {
+                        agg_plain_trans_byref(frames, call, pg, *byref)?;
+                    }
+                }
+            }
+            Step::AggTransByRefIndirect { call, base, transno, byref } => {
+                // SAFETY: as AggTransInitStrictByRefIndirect.
+                unsafe {
+                    let pg = base.read().as_ptr().add(*transno as usize);
+                    agg_plain_trans_byref(frames, call, pg, *byref)?
+                }
+            }
             Step::HashDatumSetInitVal { init_value, out } => {
                 write_out(*out, &mut regs, *init_value, false);
             }
@@ -640,6 +691,90 @@ fn invoke(
     fcinfo.isnull = false;
     let d = (call.fn_addr)(Some(&mut f.flinfo), fcinfo)?;
     Ok((d, fcinfo.isnull))
+}
+
+// C ExecAggInitGroup. SAFETY contract: live >=2-arg fcinfo image, `pg` the
+// sole live pergroup pointer, `byref.agg` a live AggStateNode.
+unsafe fn agg_init_group(
+    call: &FuncCall,
+    pg: *mut crate::steps::AggPerGroup,
+    byref: crate::steps::AggByRef,
+) -> PgResult<()> {
+    // SAFETY: forwarded caller contract.
+    unsafe {
+        let v = crate::steps::arg_slot_of(call.fcinfo, 1).read();
+        debug_assert!(!v.isnull);
+        let copied = agg_datum_copy(byref.agg.as_ref().aggcontext(), v.value, byref.translen)?;
+        (*pg).trans_value = copied;
+        (*pg).trans_value_is_null = false;
+        (*pg).no_trans_value = false;
+    }
+    Ok(())
+}
+
+// C ExecAggPlainTransByRef + ExecAggCopyTransValue; C pfrees the replaced
+// transvalue, the bump aggcontext reclaims it at group reset instead.
+// SAFETY contract: as agg_init_group, with `frames` owning `call`'s frame.
+unsafe fn agg_plain_trans_byref(
+    frames: &mut [crate::steps::FuncFrame<'_>],
+    call: &FuncCall,
+    pg: *mut crate::steps::AggPerGroup,
+    byref: crate::steps::AggByRef,
+) -> PgResult<()> {
+    // SAFETY: forwarded caller contract.
+    unsafe {
+        crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
+            value: (*pg).trans_value,
+            isnull: (*pg).trans_value_is_null,
+        });
+        let (new_val, isnull) = invoke(frames, call)?;
+        // NULL transvalues stay at word 0, so the raw compare is null-safe.
+        let new_val = if new_val.as_usize() != (*pg).trans_value.as_usize() {
+            if !isnull {
+                agg_datum_copy(byref.agg.as_ref().aggcontext(), new_val, byref.translen)?
+            } else {
+                Datum::null()
+            }
+        } else {
+            new_val
+        };
+        (*pg).trans_value = new_val;
+        (*pg).trans_value_is_null = isnull;
+    }
+    Ok(())
+}
+
+/// datumCopy (datum.c), by-ref arms, at palloc (max) alignment.
+/// # Safety: `value` is a non-null by-ref datum readable for its full size.
+pub unsafe fn agg_datum_copy(
+    mcx: ::mcx::Mcx<'_>,
+    value: Datum,
+    typlen: i16,
+) -> PgResult<Datum> {
+    let p = value.as_usize() as *const u8;
+    // SAFETY: forwarded caller contract.
+    let size = unsafe {
+        match typlen {
+            -1 => {
+                if ::types_tuple::varatt::varatt_is_1b_e(p) {
+                    panic!(
+                        "datumCopy (datum.c): external/expanded varlena transvalue — \
+                         detoast/expanded-object units not ported"
+                    );
+                }
+                ::types_tuple::varatt::varsize_any(p)
+            }
+            n if n > 0 => n as usize,
+            n => panic!("datumCopy (datum.c): by-ref transtype with typlen {n} not ported"),
+        }
+    };
+    let layout = core::alloc::Layout::from_size_align(size, 8).expect("datumCopy layout");
+    let dst: core::ptr::NonNull<u8> = ::mcx::Allocator::allocate(&mcx, layout)
+        .map_err(|_| mcx.oom(size))?
+        .cast();
+    // SAFETY: fresh `size`-byte allocation; source readable per caller contract.
+    unsafe { core::ptr::copy_nonoverlapping(p, dst.as_ptr(), size) };
+    Ok(Datum::from_usize(dst.as_ptr() as usize))
 }
 
 #[cold]

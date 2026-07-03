@@ -1,6 +1,7 @@
 // nodeAgg.c, AGG_PLAIN/AGG_SORTED/AGG_HASHED single-grouping-set slice: byval
-// transtype only (INTERNAL is a byval pointer datum; its state lives in the
-// AggStateNode aggcontext the transfn reaches via fcinfo->context), finalfn
+// and by-ref transtypes (INTERNAL is a byval pointer datum; its state lives in
+// the AggStateNode aggcontext the transfn reaches via fcinfo->context; by-ref
+// transvalues copy into that aggcontext at C's datumCopy points), finalfn
 // via resolve-once peragg carriers, no FILTER/DISTINCT/ORDER BY; transitions
 // compile into one execexpr program (C's evaltrans). AGG_MIXED, aggsplit
 // variants, grouping sets and spill are loud panics.
@@ -21,7 +22,7 @@ use ::execgrouping::TupleHashTable;
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::mcx::{vec_with_capacity_in, Allocator, MemoryContext, PgBox, PgVec};
 use ::types_core::catalog::PROCEDURE_RELATION_ID;
-use ::types_core::{Oid, INT8OID};
+use ::types_core::Oid;
 use ::types_error::{PgError, PgResult};
 use ::types_nodes::node_tree::Node;
 use ::types_nodes::plannodes::Agg;
@@ -52,6 +53,7 @@ pub struct AggStateData<'mcx> {
     evaltrans: PgBox<'mcx, ExprState<'mcx>>,
     peragg: PgVec<'mcx, PerAggData>,
     trans_init: PgVec<'mcx, NullableDatum>,
+    trans_typ: PgVec<'mcx, TransTyp>,
     // Owners of once-allocated arrays; all element access goes through the
     // *_base pointers so the step-held pointers stay valid (steps.rs note).
     _pergroup: PgVec<'mcx, AggPerGroup>,
@@ -63,6 +65,14 @@ pub struct AggStateData<'mcx> {
     perhash: Option<PerHashData<'mcx>>,
     persort: Option<PerSortData<'mcx>>,
     qual: Option<PgBox<'mcx, ExprState<'mcx>>>,
+}
+
+// C AggStatePerTransData's transtypeLen/transtypeByVal pair, indexed by
+// transno (drives the initval datumCopy at group init).
+#[derive(Clone, Copy)]
+struct TransTyp {
+    len: i16,
+    byval: bool,
 }
 
 // AGG_SORTED state: firstSlot/grp_firstTuple as two swappable minimal slots
@@ -157,13 +167,14 @@ fn collect_aggrefs<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, &'mcx Aggref<'m
     }
 }
 
-// GetAggInitVal (nodeAgg.c): C dispatches through the transtype's typinput;
-// only the int8 arm is live (count/sum transtypes).
-fn get_agg_init_val(text: &str, transtype: Oid) -> PgResult<Datum> {
-    if transtype != INT8OID {
-        panic!("GetAggInitVal (nodeAgg.c): typinput dispatch for transtype {transtype} not ported");
-    }
-    Ok(Datum::from_i64(::adt_int8::int8in(text, None)?))
+// GetAggInitVal (nodeAgg.c): initval text through the transtype's typinput;
+// by-ref results land in the query context (C's CurrentMemoryContext there).
+fn get_agg_init_val(mcx: ::mcx::Mcx<'_>, text: &str, transtype: Oid) -> PgResult<Datum> {
+    let (typinput, typioparam) = lsyscache::getTypeInputInfo(transtype)?;
+    let mut flinfo = fmgr_core::fmgr_info(typinput)?;
+    let cstr = std::ffi::CString::new(text)
+        .expect("agginitval text contains an interior NUL");
+    ::types_fmgr::input_function_call(&mut flinfo, Some(&cstr), typioparam, -1, mcx)
 }
 
 /// `ExecInitAgg` (nodeAgg.c). The caller (execProcnode's T_Agg arm) inits the
@@ -256,6 +267,8 @@ pub fn exec_init_agg<'mcx>(
     trans_aggref.resize(numtrans, None);
     let mut trans_fnoid: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, numtrans)?;
     trans_fnoid.resize(numtrans, 0);
+    let mut trans_typ: PgVec<'mcx, TransTyp> = vec_with_capacity_in(mcx, numtrans)?;
+    trans_typ.resize(numtrans, TransTyp { len: 0, byval: true });
 
     for aggno in 0..numaggs {
         let aggref = by_aggno[aggno].expect("planner aggno numbering has gaps");
@@ -284,12 +297,7 @@ pub fn exec_init_agg<'mcx>(
         }
         let transtype = aggref.aggtranstype;
         assert!(transtype != 0, "Aggref.aggtranstype unset (planner must resolve it)");
-        let (_len, byval) = lsyscache::get_typlenbyval(transtype)?;
-        if !byval {
-            panic!(
-                "ExecAggCopyTransValue (nodeAgg.c): by-ref transtype {transtype} not ported"
-            );
-        }
+        let (translen, transbyval) = lsyscache::get_typlenbyval(transtype)?;
 
         let finalfn = if shape.aggfinalfn != 0 {
             // Divergence: C aclchecks as the aggregate owner (proowner
@@ -320,22 +328,39 @@ pub fn exec_init_agg<'mcx>(
             resulttype_len,
         });
         match trans_aggref[transno] {
+            // find_compatible_trans keys sharing on the transition state.
             Some(prev) => assert!(
-                prev.aggfnoid == aggref.aggfnoid,
-                "shared transno across different transfns not ported (find_compatible_trans)"
+                trans_fnoid[transno] == shape.aggtransfn
+                    && prev.aggtranstype == aggref.aggtranstype,
+                "shared transno with diverging transition state"
             ),
             None => {
                 trans_aggref[transno] = Some(aggref);
                 trans_fnoid[transno] = shape.aggtransfn;
+                trans_typ[transno] = TransTyp { len: translen, byval: transbyval };
                 let initval = syscache_seams::pg_aggregate_agginitval::call(mcx, aggref.aggfnoid)?
                     .ok_or_else(|| agg_lookup_failed(aggref.aggfnoid))?;
                 trans_init[transno] = match initval {
                     None => NullableDatum::null(),
                     Some(text) => NullableDatum {
-                        value: get_agg_init_val(&text, transtype)?,
+                        value: get_agg_init_val(mcx, &text, transtype)?,
                         isnull: false,
                     },
                 };
+                if trans_init[transno].isnull
+                    && fmgr_core::fmgr_info(shape.aggtransfn)?.fn_strict
+                {
+                    // C requires IsBinaryCoercible(input, transtype) here; the
+                    // exact-match arm covers every live agg (min/max).
+                    let input_type = aggref.aggargtypes.iter().last();
+                    if input_type != Some(transtype) {
+                        panic!(
+                            "ExecInitAgg (nodeAgg.c): strict transfn with NULL initval and \
+                             input type {input_type:?} != transtype {transtype} \
+                             (IsBinaryCoercible not ported)"
+                        );
+                    }
+                }
             }
         }
     }
@@ -368,10 +393,12 @@ pub fn exec_init_agg<'mcx>(
             init_value_is_null: trans_init[transno].isnull,
             args: &aggref.args,
             pergroup: pg,
+            transtype_byval: trans_typ[transno].byval,
+            transtype_len: trans_typ[transno].len,
         });
     }
     let params = estate.param_bind();
-    let (evaltrans, perhash) = if node.aggstrategy == AGG_HASHED {
+    let (mut evaltrans, perhash) = if node.aggstrategy == AGG_HASHED {
         let ph = init_perhash(node, estate, numtrans)?;
         let evaltrans =
             exec_build_agg_trans_hashed(mcx, &specs, ph.pergroup_cell, fm_agg_node, params)?;
@@ -379,6 +406,10 @@ pub fn exec_init_agg<'mcx>(
     } else {
         (exec_build_agg_trans(mcx, &specs, fm_agg_node, params)?, None)
     };
+    // C invokes transfns in the tmpcontext per-tuple memory; by-ref call
+    // results ride the armed result mcx there, reset per tuple.
+    // SAFETY: the tmpcontext ExprContext outlives the program (same estate).
+    unsafe { evaltrans.arm_result_mcx_raw(estate.ecxt(tmpcontext).per_tuple_mcx()) };
     let persort = if node.aggstrategy == AGG_SORTED {
         Some(init_persort(node, estate)?)
     } else {
@@ -399,6 +430,7 @@ pub fn exec_init_agg<'mcx>(
         evaltrans,
         peragg,
         trans_init,
+        trans_typ,
         _pergroup: pergroup,
         pergroup_base,
         agg_values_base,
@@ -671,19 +703,34 @@ pub fn hash_agg_set_limits(
     (mem_limit, ngroups_limit, npartitions)
 }
 
-// initialize_aggregates (nodeAgg.c), byval slice: no datumCopy, no sortstates.
-fn initialize_aggregates(node: &mut AggStateData<'_>) {
+// initialize_aggregates (nodeAgg.c), no sortstates; by-ref initvals datumCopy
+// into the aggcontext.
+fn initialize_aggregates(node: &mut AggStateData<'_>) -> PgResult<()> {
     for (transno, init) in node.trans_init.iter().enumerate() {
+        let typ = node.trans_typ[transno];
+        let value = if !init.isnull && !typ.byval {
+            // SAFETY: node-lifetime initval datum; agg_node is live, no &mut.
+            unsafe {
+                ::execexpr::agg_datum_copy(
+                    node.agg_node.as_ref().aggcontext(),
+                    init.value,
+                    typ.len,
+                )?
+            }
+        } else {
+            init.value
+        };
         // SAFETY: transno < the pergroup array's once-allocated length; the
         // base pointer is the sole access path (struct invariant).
         unsafe {
             node.pergroup_base.as_ptr().add(transno).write(AggPerGroup {
-                trans_value: init.value,
+                trans_value: value,
                 trans_value_is_null: init.isnull,
                 no_trans_value: init.isnull,
             });
         }
     }
+    Ok(())
 }
 
 /// `ExecAgg` -> `agg_retrieve_direct` (nodeAgg.c), single-group arm: drain the
@@ -709,7 +756,7 @@ where
     if node.plan.aggstrategy == AGG_SORTED {
         return agg_retrieve_sorted(node, estate, &mut fetch_outer);
     }
-    initialize_aggregates(node);
+    initialize_aggregates(node)?;
 
     while let Some(outer_id) = fetch_outer(estate)? {
         estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
@@ -745,13 +792,23 @@ fn finalize_aggregates<'mcx>(
     pergroup: NonNull<AggPerGroup>,
 ) -> PgResult<()> {
     let per_tuple = estate.ecxt(node.ps_ExprContext).per_tuple_mcx();
-    let AggStateData { peragg, agg_node, agg_values_base, agg_nulls_base, .. } = node;
+    let AggStateData { peragg, trans_typ, agg_node, agg_values_base, agg_nulls_base, .. } = node;
     for (aggno, pa) in peragg.iter_mut().enumerate() {
         // SAFETY: transno < the once-allocated pergroup array length; base
         // pointers are the sole access paths (struct invariants).
         let pg = unsafe { &*pergroup.as_ptr().add(pa.transno as usize) };
+        // C MakeExpandedObjectReadOnly on the transvalue (both arms).
+        // SAFETY: a non-null by-ref transvalue points at a live image.
+        let trans_value = if !pg.trans_value_is_null && trans_typ[pa.transno as usize].len == -1
+        {
+            unsafe {
+                datum::expandeddatum::make_expanded_object_read_only_internal(pg.trans_value)
+            }
+        } else {
+            pg.trans_value
+        };
         let (value, isnull) = match pa.finalfn.as_mut() {
-            None => (pg.trans_value, pg.trans_value_is_null),
+            None => (trans_value, pg.trans_value_is_null),
             Some(flinfo) => {
                 assert!(
                     (pa.num_final_args as usize) <= MAX_FINAL_ARGS,
@@ -765,7 +822,7 @@ fn finalize_aggregates<'mcx>(
                 // single call.
                 unsafe { fcinfo.set_result_mcx(per_tuple) };
                 fcinfo.args[0] =
-                    NullableDatum { value: pg.trans_value, isnull: pg.trans_value_is_null };
+                    NullableDatum { value: trans_value, isnull: pg.trans_value_is_null };
                 let anynull = pg.trans_value_is_null || pa.num_final_args > 1;
                 if flinfo.fn_strict && anynull {
                     (Datum::null(), true)
@@ -832,7 +889,7 @@ where
                 }
             }
         }
-        initialize_aggregates(node);
+        initialize_aggregates(node)?;
         {
             let AggStateData { persort, evaltrans, .. } = node;
             let ps = persort.as_mut().expect("sorted Agg has persort");
@@ -936,7 +993,7 @@ fn lookup_hash_entry<'mcx>(
     outer_id: ExecSlotId,
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
-    let AggStateData { perhash, trans_init, agg_node, .. } = node;
+    let AggStateData { perhash, trans_init, trans_typ, agg_node, .. } = node;
     let ph = perhash.as_mut().expect("hashed Agg has perhash");
     // SAFETY: read of the once-allocated node; no &mut is live to it.
     let table_mcx = unsafe { agg_node.as_ref() }.aggcontext();
@@ -976,12 +1033,20 @@ fn lookup_hash_entry<'mcx>(
             .cast::<AggPerGroup>();
         if isnew {
             for (transno, init) in trans_init.iter().enumerate() {
+                let typ = trans_typ[transno];
+                let value = if !init.isnull && !typ.byval {
+                    // SAFETY: node-lifetime initval datum copied into the
+                    // table context (C's hashcontext datumCopy).
+                    unsafe { ::execexpr::agg_datum_copy(table_mcx, init.value, typ.len)? }
+                } else {
+                    init.value
+                };
                 // SAFETY: the entry's additional block holds numtrans
                 // AggPerGroup slots, zeroed at creation (execgrouping
                 // contract).
                 unsafe {
                     pergroup.as_ptr().add(transno).write(AggPerGroup {
-                        trans_value: init.value,
+                        trans_value: value,
                         trans_value_is_null: init.isnull,
                         no_trans_value: init.isnull,
                     });

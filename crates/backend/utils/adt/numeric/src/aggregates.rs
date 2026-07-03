@@ -1,61 +1,100 @@
+use ::mcx::{Allocator, Mcx};
 use types_error::PgResult;
 
-use crate::arith::{add_var, mul_var};
+use crate::arith::{add_var, cmp_var, div_var, mul_var, select_div_scale, sub_var};
+use crate::math::sqrt_var;
 use crate::ops::numeric_avg_div;
-use crate::var::{make_result, NumericImage, NumericVar, VarView};
+use crate::var::{int64_to_var, make_result, NumericImage, NumericVar, VarView};
 use crate::{Num, NumericDigit, NBASE, NUMERIC_NEG, NUMERIC_POS};
 
 /// C's NumericSumAccum: 32-bit digit limbs with lazy carry, positive and
-/// negative inputs accumulated separately. Owned by aggregate state (agg
-/// lifetime), so std Vec with retained capacity mirrors C's agg_context
-/// buffers.
-#[derive(Default)]
+/// negative inputs accumulated separately. Digit buffers live in the agg
+/// context arena the state itself occupies (C pallocs them in agg_context and
+/// pfrees on rescale; the arena reclaims wholesale instead), so the state
+/// stays drop-free — every method taking `Mcx` must get that same context.
 pub struct NumericSumAccum {
     ndigits: i32,
     weight: i32,
     dscale: i32,
     num_uncarried: i32,
     have_carry_space: bool,
-    pos_digits: Vec<i32>,
-    neg_digits: Vec<i32>,
+    pos_digits: *mut i32,
+    neg_digits: *mut i32,
+}
+
+const _: () = assert!(!core::mem::needs_drop::<NumericSumAccum>());
+
+impl Default for NumericSumAccum {
+    fn default() -> Self {
+        NumericSumAccum::new()
+    }
+}
+
+fn alloc_zeroed_digits(mcx: Mcx<'_>, n: usize) -> PgResult<*mut i32> {
+    let layout = core::alloc::Layout::array::<i32>(n).expect("digit buffer layout");
+    let raw: core::ptr::NonNull<u8> =
+        mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?.cast();
+    let p = raw.as_ptr().cast::<i32>();
+    // SAFETY: fresh allocation of n i32 slots.
+    unsafe { core::ptr::write_bytes(p, 0, n) };
+    Ok(p)
 }
 
 impl NumericSumAccum {
     pub fn new() -> NumericSumAccum {
-        NumericSumAccum::default()
+        NumericSumAccum {
+            ndigits: 0,
+            weight: 0,
+            dscale: 0,
+            num_uncarried: 0,
+            have_carry_space: false,
+            pos_digits: core::ptr::null_mut(),
+            neg_digits: core::ptr::null_mut(),
+        }
+    }
+
+    #[inline]
+    fn pos(&mut self) -> &mut [i32] {
+        if self.ndigits == 0 {
+            return &mut [];
+        }
+        // SAFETY: non-zero ndigits implies live same-arena buffers of that
+        // length (alloc_zeroed_digits in rescale); sole access path.
+        unsafe { core::slice::from_raw_parts_mut(self.pos_digits, self.ndigits as usize) }
+    }
+
+    #[inline]
+    fn neg(&mut self) -> &mut [i32] {
+        if self.ndigits == 0 {
+            return &mut [];
+        }
+        // SAFETY: as `pos`.
+        unsafe { core::slice::from_raw_parts_mut(self.neg_digits, self.ndigits as usize) }
     }
 
     pub fn reset(&mut self) {
         self.dscale = 0;
-        for d in self.pos_digits.iter_mut() {
-            *d = 0;
-        }
-        for d in self.neg_digits.iter_mut() {
-            *d = 0;
-        }
+        self.pos().fill(0);
+        self.neg().fill(0);
         self.num_uncarried = 0;
     }
 
-    pub fn add(&mut self, val: VarView<'_>) {
+    /// C `accum_sum_add`; `mcx` is the owning agg context (rescale target).
+    pub fn add(&mut self, mcx: Mcx<'_>, val: VarView<'_>) -> PgResult<()> {
         if self.num_uncarried == NBASE - 1 {
             self.carry();
         }
 
-        self.rescale(val);
+        self.rescale(mcx, val)?;
 
-        let accum_digits = if val.sign == NUMERIC_POS {
-            &mut self.pos_digits
-        } else {
-            &mut self.neg_digits
-        };
-
-        let mut i = (self.weight - val.weight) as usize;
-        for &d in val.digits {
-            accum_digits[i] += d as i32;
-            i += 1;
+        let start = (self.weight - val.weight) as usize;
+        let accum_digits = if val.sign == NUMERIC_POS { self.pos() } else { self.neg() };
+        for (i, &d) in val.digits.iter().enumerate() {
+            accum_digits[start + i] += d as i32;
         }
 
         self.num_uncarried += 1;
+        Ok(())
     }
 
     fn carry(&mut self) {
@@ -63,46 +102,40 @@ impl NumericSumAccum {
             return;
         }
 
-        debug_assert!(self.pos_digits[0] == 0 && self.neg_digits[0] == 0);
-
         let ndigits = self.ndigits as usize;
+        debug_assert!(ndigits == 0 || (self.pos()[0] == 0 && self.neg()[0] == 0));
 
-        let mut newdig = 0i32;
-        let mut carry = 0i32;
-        for i in (0..ndigits).rev() {
-            newdig = self.pos_digits[i] + carry;
-            if newdig >= NBASE {
-                carry = newdig / NBASE;
-                newdig -= carry * NBASE;
-            } else {
-                carry = 0;
+        let mut spilled = false;
+        for digits in [self.pos_digits, self.neg_digits] {
+            if ndigits == 0 {
+                break;
             }
-            self.pos_digits[i] = newdig;
-        }
-        if newdig > 0 {
-            self.have_carry_space = false;
-        }
-
-        let mut newdig = 0i32;
-        let mut carry = 0i32;
-        for i in (0..ndigits).rev() {
-            newdig = self.neg_digits[i] + carry;
-            if newdig >= NBASE {
-                carry = newdig / NBASE;
-                newdig -= carry * NBASE;
-            } else {
-                carry = 0;
+            // SAFETY: as `pos` — live same-arena buffers of ndigits length.
+            let digits = unsafe { core::slice::from_raw_parts_mut(digits, ndigits) };
+            let mut newdig = 0i32;
+            let mut carry = 0i32;
+            for i in (0..ndigits).rev() {
+                newdig = digits[i] + carry;
+                if newdig >= NBASE {
+                    carry = newdig / NBASE;
+                    newdig -= carry * NBASE;
+                } else {
+                    carry = 0;
+                }
+                digits[i] = newdig;
             }
-            self.neg_digits[i] = newdig;
+            if newdig > 0 {
+                spilled = true;
+            }
         }
-        if newdig > 0 {
+        if spilled {
             self.have_carry_space = false;
         }
 
         self.num_uncarried = 0;
     }
 
-    fn rescale(&mut self, val: VarView<'_>) {
+    fn rescale(&mut self, mcx: Mcx<'_>, val: VarView<'_>) -> PgResult<()> {
         let old_weight = self.weight;
         let old_ndigits = self.ndigits;
         let mut accum_weight = old_weight;
@@ -125,13 +158,24 @@ impl NumericSumAccum {
         if accum_ndigits != old_ndigits || accum_weight != old_weight {
             let weightdiff = (accum_weight - old_weight) as usize;
 
-            let mut new_pos = vec![0i32; accum_ndigits as usize];
-            let mut new_neg = vec![0i32; accum_ndigits as usize];
-            if !self.pos_digits.is_empty() {
-                new_pos[weightdiff..weightdiff + old_ndigits as usize]
-                    .copy_from_slice(&self.pos_digits);
-                new_neg[weightdiff..weightdiff + old_ndigits as usize]
-                    .copy_from_slice(&self.neg_digits);
+            let new_pos = alloc_zeroed_digits(mcx, accum_ndigits as usize)?;
+            let new_neg = alloc_zeroed_digits(mcx, accum_ndigits as usize)?;
+            if old_ndigits > 0 {
+                // SAFETY: fresh buffers of accum_ndigits >= weightdiff +
+                // old_ndigits slots; old buffers live per the arena contract.
+                // C pfrees the old pair; the bump arena reclaims at reset.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        self.pos_digits,
+                        new_pos.add(weightdiff),
+                        old_ndigits as usize,
+                    );
+                    core::ptr::copy_nonoverlapping(
+                        self.neg_digits,
+                        new_neg.add(weightdiff),
+                        old_ndigits as usize,
+                    );
+                }
             }
             self.pos_digits = new_pos;
             self.neg_digits = new_neg;
@@ -139,15 +183,17 @@ impl NumericSumAccum {
             self.weight = accum_weight;
             self.ndigits = accum_ndigits;
 
-            debug_assert!(self.pos_digits[0] == 0 && self.neg_digits[0] == 0);
+            debug_assert!(self.pos()[0] == 0 && self.neg()[0] == 0);
             self.have_carry_space = true;
         }
 
         if val.dscale > self.dscale {
             self.dscale = val.dscale;
         }
+        Ok(())
     }
 
+    /// C `accum_sum_final`.
     pub fn finalize(&mut self, result: &mut NumericVar) {
         if self.ndigits == 0 {
             result.set_zero();
@@ -171,14 +217,14 @@ impl NumericSumAccum {
 
         {
             let pd = pos_var.digits_mut();
-            for (dst, src) in pd.iter_mut().zip(&self.pos_digits) {
+            for (dst, src) in pd.iter_mut().zip(self.pos().iter()) {
                 debug_assert!(*src < NBASE);
                 *dst = *src as NumericDigit;
             }
         }
         {
             let nd = neg_var.digits_mut();
-            for (dst, src) in nd.iter_mut().zip(&self.neg_digits) {
+            for (dst, src) in nd.iter_mut().zip(self.neg().iter()) {
                 debug_assert!(*src < NBASE);
                 *dst = *src as NumericDigit;
             }
@@ -188,20 +234,37 @@ impl NumericSumAccum {
         result.strip();
     }
 
-    pub fn copy_from(&mut self, src: &NumericSumAccum) {
-        self.pos_digits = src.pos_digits.clone();
-        self.neg_digits = src.neg_digits.clone();
+    /// C `accum_sum_copy`.
+    pub fn copy_from(&mut self, mcx: Mcx<'_>, src: &mut NumericSumAccum) -> PgResult<()> {
+        let n = src.ndigits as usize;
+        if n > 0 {
+            let pos = alloc_zeroed_digits(mcx, n)?;
+            let neg = alloc_zeroed_digits(mcx, n)?;
+            // SAFETY: fresh n-slot buffers; src buffers live per the arena
+            // contract.
+            unsafe {
+                core::ptr::copy_nonoverlapping(src.pos_digits, pos, n);
+                core::ptr::copy_nonoverlapping(src.neg_digits, neg, n);
+            }
+            self.pos_digits = pos;
+            self.neg_digits = neg;
+        } else {
+            self.pos_digits = core::ptr::null_mut();
+            self.neg_digits = core::ptr::null_mut();
+        }
         self.num_uncarried = src.num_uncarried;
         self.ndigits = src.ndigits;
         self.weight = src.weight;
         self.dscale = src.dscale;
         self.have_carry_space = src.have_carry_space;
+        Ok(())
     }
 
-    pub fn combine(&mut self, other: &mut NumericSumAccum) {
+    /// C `accum_sum_combine`.
+    pub fn combine(&mut self, mcx: Mcx<'_>, other: &mut NumericSumAccum) -> PgResult<()> {
         let mut tmp = NumericVar::new();
         other.finalize(&mut tmp);
-        self.add(tmp.view());
+        self.add(mcx, tmp.view())
     }
 }
 
@@ -216,6 +279,8 @@ pub struct NumericAggState {
     pub pinf_count: i64,
     pub ninf_count: i64,
 }
+
+const _: () = assert!(!core::mem::needs_drop::<NumericAggState>());
 
 impl NumericAggState {
     pub fn new(calc_sum_x2: bool) -> NumericAggState {
@@ -237,7 +302,12 @@ impl NumericAggState {
     }
 }
 
-pub fn do_numeric_accum(state: &mut NumericAggState, newval: Num<'_>) {
+/// `mcx` is the agg context owning the state (C `state->agg_context`).
+pub fn do_numeric_accum(
+    state: &mut NumericAggState,
+    mcx: Mcx<'_>,
+    newval: Num<'_>,
+) -> PgResult<()> {
     if newval.is_special() {
         if newval.is_pinf() {
             state.pinf_count += 1;
@@ -246,7 +316,7 @@ pub fn do_numeric_accum(state: &mut NumericAggState, newval: Num<'_>) {
         } else {
             state.nan_count += 1;
         }
-        return;
+        return Ok(());
     }
 
     let x = newval.view();
@@ -263,15 +333,21 @@ pub fn do_numeric_accum(state: &mut NumericAggState, newval: Num<'_>) {
         let mut x2 = NumericVar::new();
         mul_var(x, x, &mut x2, x.dscale * 2);
         state.n += 1;
-        state.sum_x.add(x);
-        state.sum_x2.add(x2.view());
+        state.sum_x.add(mcx, x)?;
+        state.sum_x2.add(mcx, x2.view())?;
     } else {
         state.n += 1;
-        state.sum_x.add(x);
+        state.sum_x.add(mcx, x)?;
     }
+    Ok(())
 }
 
-pub fn do_numeric_discard(state: &mut NumericAggState, newval: Num<'_>) -> bool {
+/// `Ok(false)` = un-aggregation impossible (C's re-aggregate signal).
+pub fn do_numeric_discard(
+    state: &mut NumericAggState,
+    mcx: Mcx<'_>,
+    newval: Num<'_>,
+) -> PgResult<bool> {
     if newval.is_special() {
         if newval.is_pinf() {
             state.pinf_count -= 1;
@@ -280,7 +356,7 @@ pub fn do_numeric_discard(state: &mut NumericAggState, newval: Num<'_>) -> bool 
         } else {
             state.nan_count -= 1;
         }
-        return true;
+        return Ok(true);
     }
 
     let x = newval.view();
@@ -293,7 +369,7 @@ pub fn do_numeric_discard(state: &mut NumericAggState, newval: Num<'_>) -> bool 
             state.max_scale_count = 0;
         } else {
             // Correct new max_scale is unknowable; force re-aggregation.
-            return false;
+            return Ok(false);
         }
     }
 
@@ -313,12 +389,12 @@ pub fn do_numeric_discard(state: &mut NumericAggState, newval: Num<'_>) -> bool 
         } else {
             NUMERIC_POS
         };
-        state.sum_x.add(neg_x);
+        state.sum_x.add(mcx, neg_x)?;
 
         if let Some(x2) = x2 {
             let mut v = x2.view();
             v.sign = NUMERIC_NEG;
-            state.sum_x2.add(v);
+            state.sum_x2.add(mcx, v)?;
         }
     } else {
         debug_assert_eq!(state.n, 0);
@@ -328,12 +404,16 @@ pub fn do_numeric_discard(state: &mut NumericAggState, newval: Num<'_>) -> bool 
         }
     }
 
-    true
+    Ok(true)
 }
 
-pub fn do_numeric_accum_int64(state: &mut NumericAggState, newval: i64) {
+pub fn do_numeric_accum_int64(
+    state: &mut NumericAggState,
+    mcx: Mcx<'_>,
+    newval: i64,
+) -> PgResult<()> {
     let img = crate::ops::int64_to_numeric(newval);
-    do_numeric_accum(state, img.num());
+    do_numeric_accum(state, mcx, img.num())
 }
 
 /// SUM(numeric) final. None = SQL NULL.
@@ -379,6 +459,93 @@ pub fn numeric_avg(state: Option<&mut NumericAggState>) -> PgResult<Option<Numer
     state.sum_x.finalize(&mut sum);
     let sum_img = make_result(sum.view())?;
     Ok(Some(numeric_avg_div(sum_img.num(), state.n)?))
+}
+
+// The arithmetic tail of C numeric_stddev_internal, shared with the poly lane.
+fn stddev_from_sums(
+    n: i64,
+    vsum_x: &NumericVar,
+    vsum_x2: NumericVar,
+    variance: bool,
+    sample: bool,
+) -> PgResult<NumericImage> {
+    let v_n = int64_to_var(n);
+    let one = int64_to_var(1);
+    let mut v_nminus1 = NumericVar::new();
+    sub_var(v_n.view(), one.view(), &mut v_nminus1);
+
+    let rscale = vsum_x.dscale * 2;
+
+    let mut vsum_x_sq = NumericVar::new();
+    mul_var(vsum_x.view(), vsum_x.view(), &mut vsum_x_sq, rscale);
+    let mut n_sum_x2 = NumericVar::new();
+    mul_var(v_n.view(), vsum_x2.view(), &mut n_sum_x2, rscale);
+    let mut numerator = NumericVar::new();
+    sub_var(n_sum_x2.view(), vsum_x_sq.view(), &mut numerator);
+
+    let zero = int64_to_var(0);
+    if cmp_var(numerator.view(), zero.view()) <= 0 {
+        // Roundoff error can produce a negative numerator (C comment).
+        return make_result(zero.view());
+    }
+
+    let mut denom = NumericVar::new();
+    if sample {
+        mul_var(v_n.view(), v_nminus1.view(), &mut denom, 0);
+    } else {
+        mul_var(v_n.view(), v_n.view(), &mut denom, 0);
+    }
+    let rscale = select_div_scale(numerator.view(), denom.view());
+    let mut result = NumericVar::new();
+    div_var(numerator.view(), denom.view(), &mut result, rscale, true, true)?;
+    if !variance {
+        let arg = core::mem::replace(&mut result, NumericVar::new());
+        sqrt_var(arg.view(), &mut result, rscale)?;
+    }
+
+    make_result(result.view())
+}
+
+/// C `numeric_stddev_internal`. None = SQL NULL.
+pub fn numeric_stddev_internal(
+    state: Option<&mut NumericAggState>,
+    variance: bool,
+    sample: bool,
+) -> PgResult<Option<NumericImage>> {
+    let Some(state) = state else { return Ok(None) };
+    let tot_count = state.total_count();
+    if tot_count == 0 || (sample && tot_count <= 1) {
+        return Ok(None);
+    }
+
+    // Any NaN or infinity input produces NaN output (C float8 analogy).
+    if state.nan_count > 0 || state.pinf_count > 0 || state.ninf_count > 0 {
+        return Ok(Some(NumericImage::nan()));
+    }
+
+    let mut vsum_x = NumericVar::new();
+    let mut vsum_x2 = NumericVar::new();
+    state.sum_x.finalize(&mut vsum_x);
+    state.sum_x2.finalize(&mut vsum_x2);
+    Ok(Some(stddev_from_sums(state.n, &vsum_x, vsum_x2, variance, sample)?))
+}
+
+/// C `numeric_poly_stddev_internal` (HAVE_INT128). None = SQL NULL.
+pub fn numeric_poly_stddev_internal(
+    state: Option<&Int128AggState>,
+    variance: bool,
+    sample: bool,
+) -> PgResult<Option<NumericImage>> {
+    let Some(state) = state else { return Ok(None) };
+    if state.n == 0 || (sample && state.n <= 1) {
+        return Ok(None);
+    }
+
+    let mut vsum_x = NumericVar::new();
+    let mut vsum_x2 = NumericVar::new();
+    crate::var::int128_to_var(state.sum_x, &mut vsum_x);
+    crate::var::int128_to_var(state.sum_x2, &mut vsum_x2);
+    Ok(Some(stddev_from_sums(state.n, &vsum_x, vsum_x2, variance, sample)?))
 }
 
 /// C's Int128AggState (HAVE_INT128 poly aggregate fast path).

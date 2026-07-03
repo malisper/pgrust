@@ -6,7 +6,7 @@ use ::datum::{Datum, NullableDatum};
 use ::mcx::{Allocator, Mcx, PgVec};
 use ::types_core::Oid;
 use ::types_error::PgResult;
-use ::types_fmgr::{FmgrInfo, FunctionCallInfoBaseData, LocalFcinfo, PGFunction};
+use ::types_fmgr::{AggStateNode, FmgrInfo, FunctionCallInfoBaseData, LocalFcinfo, PGFunction};
 
 pub const EEO_FLAG_IS_QUAL: u8 = 1 << 0;
 pub const EEO_FLAG_INTERPRETER_INITIALIZED: u8 = 1 << 5;
@@ -76,6 +76,10 @@ pub enum Step {
     AggStrictInputCheck1 { arg: NonNull<NullableDatum>, jumpnull: u32 },
     AggPlainTransByVal { call: FuncCall, pergroup: NonNull<AggPerGroup> },
     AggPlainTransStrictByVal { call: FuncCall, pergroup: NonNull<AggPerGroup> },
+    // C EEOP_AGG_PLAIN_TRANS_[INIT_][STRICT_]BYREF.
+    AggPlainTransInitStrictByRef { call: FuncCall, pergroup: NonNull<AggPerGroup>, byref: AggByRef },
+    AggPlainTransStrictByRef { call: FuncCall, pergroup: NonNull<AggPerGroup>, byref: AggByRef },
+    AggPlainTransByRef { call: FuncCall, pergroup: NonNull<AggPerGroup>, byref: AggByRef },
     // Hashed-agg trans: pergroup resolves per tuple through a cell nodeAgg
     // repoints after each hash lookup (C's setoff into all_pergroups).
     AggTransByValIndirect { call: FuncCall, base: NonNull<NonNull<AggPerGroup>>, transno: u16 },
@@ -83,6 +87,24 @@ pub enum Step {
         call: FuncCall,
         base: NonNull<NonNull<AggPerGroup>>,
         transno: u16,
+    },
+    AggTransInitStrictByRefIndirect {
+        call: FuncCall,
+        base: NonNull<NonNull<AggPerGroup>>,
+        transno: u16,
+        byref: AggByRef,
+    },
+    AggTransStrictByRefIndirect {
+        call: FuncCall,
+        base: NonNull<NonNull<AggPerGroup>>,
+        transno: u16,
+        byref: AggByRef,
+    },
+    AggTransByRefIndirect {
+        call: FuncCall,
+        base: NonNull<NonNull<AggPerGroup>>,
+        transno: u16,
+        byref: AggByRef,
     },
     HashDatumSetInitVal { init_value: Datum, out: OutRef },
     HashDatumFirst { call: FuncCall, out: OutRef },
@@ -92,6 +114,13 @@ pub enum Step {
     // slots: nelems compile-allocated NullableDatum arg targets (C's
     // d.minmax.values/nulls); call is the type's btree cmp proc.
     MinMax { call: FuncCall, slots: NonNull<NullableDatum>, nelems: u16, least: bool, out: OutRef },
+}
+
+// By-ref copy target: C d.agg_trans.aggcontext + the transtype's typlen.
+#[derive(Clone, Copy, Debug)]
+pub struct AggByRef {
+    pub agg: NonNull<AggStateNode>,
+    pub translen: i16,
 }
 
 // C nodeAgg.h AggStatePerGroupData; the trans steps read/write it in place.
@@ -425,6 +454,16 @@ impl<'mcx> ExprState<'mcx> {
             // SAFETY: the frame's fcinfo image is live for 'mcx and this is
             // the sole reference; 'mcx also bounds the armed context, so it
             // outlives every call through the frame.
+            unsafe { fcinfo_mut(f.fcinfo, f.nargs).set_result_mcx(mcx) };
+        }
+    }
+
+    /// Lifetime-erased [`Self::arm_result_mcx`] (nodeAgg tmpcontext).
+    /// # Safety: `mcx`'s context outlives every evaluation of this program.
+    pub unsafe fn arm_result_mcx_raw(&mut self, mcx: Mcx<'_>) {
+        for f in self.frames.iter() {
+            // SAFETY: frame image live for 'mcx, sole reference; the caller
+            // guarantees the armed context outlives every call.
             unsafe { fcinfo_mut(f.fcinfo, f.nargs).set_result_mcx(mcx) };
         }
     }
