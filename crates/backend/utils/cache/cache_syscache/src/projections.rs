@@ -17,7 +17,7 @@ use crate::{
     SearchSysCache3, SearchSysCache4, SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1,
     SysCacheKey,
 };
-use crate::cacheinfo::{AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TYPENAMENSP, OPEROID, PROCOID, RELNAMENSP, RELOID, STATRELATTINH, TYPEOID};
+use crate::cacheinfo::{AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TYPENAMENSP, OPEROID, PROCOID, RELNAMENSP, RELOID, STATRELATTINH, TYPEOID};
 
 const ANUM_PG_CLASS_OID: i32 = 1;
 const ANUM_PG_CLASS_RELISSHARED: i32 = 16;
@@ -26,6 +26,8 @@ const ANUM_PG_TYPE_TYPNAME: i32 = 2;
 const ANUM_PG_TYPE_TYPLEN: i32 = 5;
 const ANUM_PG_TYPE_TYPBYVAL: i32 = 6;
 const ANUM_PG_TYPE_TYPTYPE: i32 = 7;
+const ANUM_PG_TYPE_TYPCATEGORY: i32 = 8;
+const ANUM_PG_TYPE_TYPISPREFERRED: i32 = 9;
 const ANUM_PG_TYPE_TYPISDEFINED: i32 = 10;
 const ANUM_PG_TYPE_TYPRELID: i32 = 12;
 const ANUM_PG_TYPE_TYPSUBSCRIPT: i32 = 13;
@@ -74,6 +76,18 @@ const STATISTIC_NUM_SLOTS: i32 = 5;
 const ANUM_PG_ATTRIBUTE_ATTSTATTARGET: i32 = 21;
 const ANUM_PG_TYPE_TYPANALYZE: i32 = 22;
 const FLOAT4OID: Oid = 700;
+const ANUM_PG_AGGREGATE_AGGKIND: i32 = 2;
+const ANUM_PG_AGGREGATE_AGGNUMDIRECTARGS: i32 = 3;
+const ANUM_PG_AGGREGATE_AGGTRANSFN: i32 = 4;
+const ANUM_PG_AGGREGATE_AGGFINALFN: i32 = 5;
+const ANUM_PG_AGGREGATE_AGGCOMBINEFN: i32 = 6;
+const ANUM_PG_AGGREGATE_AGGSERIALFN: i32 = 7;
+const ANUM_PG_AGGREGATE_AGGDESERIALFN: i32 = 8;
+const ANUM_PG_AGGREGATE_AGGFINALEXTRA: i32 = 12;
+const ANUM_PG_AGGREGATE_AGGFINALMODIFY: i32 = 14;
+const ANUM_PG_AGGREGATE_AGGTRANSTYPE: i32 = 17;
+const ANUM_PG_AGGREGATE_AGGTRANSSPACE: i32 = 18;
+const ANUM_PG_AGGREGATE_AGGINITVAL: i32 = 21;
 const ANUM_PG_CAST_OID: i32 = 1;
 const ANUM_PG_CAST_CASTFUNC: i32 = 4;
 const ANUM_PG_CAST_CASTCONTEXT: i32 = 5;
@@ -174,6 +188,55 @@ fn pg_type_typtype(typid: Oid) -> PgResult<Option<i8>> {
     drop(t);
     ReleaseSysCache(tuple);
     Ok(Some(typtype))
+}
+
+fn pg_type_category(typid: Oid) -> PgResult<Option<(i8, bool)>> {
+    let Some(tuple) = SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(typid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let category = getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPCATEGORY).as_i8();
+    let preferred = getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPISPREFERRED).as_bool();
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some((category, preferred)))
+}
+
+fn pg_type_element_shape(
+    typid: Oid,
+) -> PgResult<Option<syscache_seams::PgTypeElementShape>> {
+    let Some(tuple) = SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(typid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let shape = syscache_seams::PgTypeElementShape {
+        typelem: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPELEM).as_oid(),
+        typsubscript: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPSUBSCRIPT).as_oid(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
+const ANUM_PG_OPCLASS_OPCMETHOD: i32 = 2;
+const ANUM_PG_OPCLASS_OPCFAMILY: i32 = 6;
+const ANUM_PG_OPCLASS_OPCINTYPE: i32 = 7;
+
+fn lookup_pg_opclass_shape(
+    opclass: Oid,
+) -> PgResult<Option<syscache_seams::PgOpclassShape>> {
+    let Some(tuple) = SearchSysCache1(CLAOID, SysCacheKey::Value(Datum::from_oid(opclass)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let shape = syscache_seams::PgOpclassShape {
+        opcmethod: getattr(&t, CLAOID, ANUM_PG_OPCLASS_OPCMETHOD).as_oid(),
+        opcfamily: getattr(&t, CLAOID, ANUM_PG_OPCLASS_OPCFAMILY).as_oid(),
+        opcintype: getattr(&t, CLAOID, ANUM_PG_OPCLASS_OPCINTYPE).as_oid(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
 }
 
 fn lookup_authid_by_rolname(rolname: &str) -> PgResult<Option<(Oid, bool)>> {
@@ -715,6 +778,28 @@ fn lookup_pg_operator_candidates<'mcx>(
     Ok(out)
 }
 
+fn lookup_pg_operator_name_candidates<'mcx>(
+    mcx: Mcx<'mcx>,
+    opername: &str,
+) -> PgResult<PgVec<'mcx, syscache_seams::PgOperatorNameCandidate>> {
+    let list = SearchSysCacheList1(OPERNAMENSP, SysCacheKey::Str(opername))?;
+    let n = list.n_members() as usize;
+    let mut out = mcx::vec_with_capacity_in(mcx, n)?;
+    for i in 0..n {
+        let m = list.member(i);
+        let t = m.tuple();
+        out.push(syscache_seams::PgOperatorNameCandidate {
+            oid: getattr(&t, OPERNAMENSP, ANUM_PG_OPERATOR_OID).as_oid(),
+            oprnamespace: getattr(&t, OPERNAMENSP, ANUM_PG_OPERATOR_OPRNAMESPACE).as_oid(),
+            oprkind: getattr(&t, OPERNAMENSP, ANUM_PG_OPERATOR_OPRKIND).as_i8(),
+            oprleft: getattr(&t, OPERNAMENSP, ANUM_PG_OPERATOR_OPRLEFT).as_oid(),
+            oprright: getattr(&t, OPERNAMENSP, ANUM_PG_OPERATOR_OPRRIGHT).as_oid(),
+        });
+    }
+    ReleaseSysCacheList(list);
+    Ok(out)
+}
+
 fn pg_operator_name_candidates_exist(opername: &str, oprkind: i8) -> PgResult<bool> {
     let list = SearchSysCacheList1(OPERNAMENSP, SysCacheKey::Str(opername))?;
     let n = list.n_members() as usize;
@@ -933,6 +1018,53 @@ fn lookup_pg_statistic_bundle<'mcx>(
     Ok(Some(bundle))
 }
 
+fn lookup_pg_aggregate_shape(
+    aggfnoid: Oid,
+) -> PgResult<Option<syscache_seams::PgAggregateShape>> {
+    let Some(tuple) = SearchSysCache1(AGGFNOID, SysCacheKey::Value(Datum::from_oid(aggfnoid)))?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let shape = syscache_seams::PgAggregateShape {
+        aggkind: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGKIND).as_i8(),
+        aggnumdirectargs: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGNUMDIRECTARGS).as_i16(),
+        aggtransfn: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGTRANSFN).as_oid(),
+        aggfinalfn: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGFINALFN).as_oid(),
+        aggcombinefn: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGCOMBINEFN).as_oid(),
+        aggserialfn: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGSERIALFN).as_oid(),
+        aggdeserialfn: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGDESERIALFN).as_oid(),
+        aggfinalextra: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGFINALEXTRA).as_bool(),
+        aggfinalmodify: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGFINALMODIFY).as_i8(),
+        aggtranstype: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGTRANSTYPE).as_oid(),
+        aggtransspace: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGTRANSSPACE).as_i32(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
+fn pg_aggregate_agginitval<'mcx>(
+    mcx: Mcx<'mcx>,
+    aggfnoid: Oid,
+) -> PgResult<Option<Option<PgString<'mcx>>>> {
+    let Some(tuple) = SearchSysCache1(AGGFNOID, SysCacheKey::Value(Datum::from_oid(aggfnoid)))?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let out = match varlena_image(mcx, &t, AGGFNOID, ANUM_PG_AGGREGATE_AGGINITVAL)? {
+        Some(img) => {
+            let s = core::str::from_utf8(&img[4..]).expect("agginitval is server-encoding text");
+            Some(PgString::from_str_in(s, mcx)?)
+        }
+        None => None,
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(out))
+}
+
 fn lookup_pg_statistic_shape(
     relid: Oid,
     attnum: types_core::AttrNumber,
@@ -971,6 +1103,9 @@ pub(crate) fn install() {
     syscache_seams::lookup_pg_type_shape::set(lookup_pg_type_shape);
     syscache_seams::pg_type_isdefined::set(pg_type_isdefined);
     syscache_seams::pg_type_typtype::set(pg_type_typtype);
+    syscache_seams::pg_type_category::set(pg_type_category);
+    syscache_seams::pg_type_element_shape::set(pg_type_element_shape);
+    syscache_seams::lookup_pg_opclass_shape::set(lookup_pg_opclass_shape);
     syscache_seams::lookup_authid_rolname::set(lookup_authid_rolname);
     syscache_seams::lookup_authid_by_rolname::set(lookup_authid_by_rolname);
     syscache_seams::lookup_authid_session_by_rolname::set(lookup_authid_session_by_rolname);
@@ -997,10 +1132,13 @@ pub(crate) fn install() {
     syscache_seams::lookup_pg_proc_name_candidates::set(lookup_pg_proc_name_candidates);
     syscache_seams::lookup_pg_operator_candidates::set(lookup_pg_operator_candidates);
     syscache_seams::pg_operator_name_candidates_exist::set(pg_operator_name_candidates_exist);
+    syscache_seams::lookup_pg_operator_name_candidates::set(lookup_pg_operator_name_candidates);
     syscache_seams::lookup_pg_cast_shape::set(lookup_pg_cast_shape);
     syscache_seams::pg_proc_cost_shape::set(pg_proc_cost_shape);
     syscache_seams::lookup_pg_attribute_stattarget::set(lookup_pg_attribute_stattarget);
     syscache_seams::pg_type_typanalyze::set(pg_type_typanalyze);
+    syscache_seams::lookup_pg_aggregate_shape::set(lookup_pg_aggregate_shape);
+    syscache_seams::pg_aggregate_agginitval::set(pg_aggregate_agginitval);
     install_pg_statistic();
 }
 

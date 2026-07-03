@@ -49,7 +49,9 @@ pub struct DrPrinttup<'mcx> {
     conv_needed: bool,
     // C's per-row tmpcontext, but only for binary columns: send fns build a
     // bytea per row (text out fns use retained scratch and need none). Reset
-    // after each row (C printtup.c:379). None until a format-1 column appears.
+    // after each row; must be a bump context — the row's byteas are reclaimed
+    // wholesale, never freed (exact-accounting backends assert that as a leak).
+    // None until a format-1 column appears.
     send_ctx: Option<MemoryContext>,
 }
 
@@ -190,7 +192,7 @@ impl<'mcx> DrPrinttup<'mcx> {
         }
         if info.iter().any(|e| e.format == 1) {
             if self.send_ctx.is_none() {
-                self.send_ctx = Some(MemoryContext::new("PrinttupSend"));
+                self.send_ctx = Some(MemoryContext::new_bump("PrinttupSend"));
             }
         } else {
             self.send_ctx = None;
