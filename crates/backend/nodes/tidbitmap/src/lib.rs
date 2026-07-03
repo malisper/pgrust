@@ -79,7 +79,6 @@ pub struct TIDBitmap<'mcx> {
     // is read-only once iterating, so by-value copies are equivalent).
     spages: Option<PgVec<'mcx, PagetableEntry>>,
     schunks: Option<PgVec<'mcx, PagetableEntry>>,
-    lossify_scratch: PgVec<'mcx, BlockNumber>,
 }
 
 pub struct TbmPrivateIterator {
@@ -147,7 +146,6 @@ impl<'mcx> TIDBitmap<'mcx> {
             entry1: PagetableEntry::zeroed(0),
             spages: None,
             schunks: None,
-            lossify_scratch: PgVec::new_in(mcx),
         }
     }
 
@@ -412,43 +410,45 @@ impl<'mcx> TIDBitmap<'mcx> {
         Ok(())
     }
 
+    #[cold]
+    #[inline(never)]
     fn lossify(&mut self) -> PgResult<()> {
         debug_assert!(self.iterating == TbmIterating::Not);
         debug_assert!(self.status == TbmStatus::Hash);
-        // C divergence: simplehash resumes mid-table via lossify_start; here a
-        // key snapshot rotated by lossify_start (same fairness, same result
-        // set — lossify order is unspecified in C too). Retained scratch +
-        // two linear ranges: no per-page div (bench: %-indexing cost 1.16x).
-        let table = self.pagetable.as_ref().expect("TBM_HASH without pagetable");
-        let mut candidates =
-            core::mem::replace(&mut self.lossify_scratch, PgVec::new_in(self.mcx));
-        candidates.clear();
-        candidates
-            .try_reserve(table.len())
-            .map_err(|_| self.mcx.oom(table.len() * core::mem::size_of::<BlockNumber>()))?;
-        for (blockno, page) in table.iter() {
-            if !page.ischunk && *blockno as usize % PAGES_PER_CHUNK != 0 {
-                candidates.push(*blockno);
-            }
-        }
-        let n = candidates.len();
-        let mut broke_early = false;
-        if n > 0 {
-            let start = self.lossify_start % n;
-            'scan: for range in [start..n, 0..start] {
-                for k in range {
-                    let blockno = candidates[k];
-                    self.mark_page_lossy(blockno)?;
-                    if self.nentries <= self.maxentries / 2 {
-                        self.lossify_start = if k + 1 == n { 0 } else { k + 1 };
-                        broke_early = true;
-                        break 'scan;
-                    }
+        // C's resumable simplehash walk (tbm_lossify + start_iterate_at):
+        // scan raw buckets from lossify_start, wrapping once over the bucket
+        // count captured at entry. mark_page_lossy inserts/deletes (and may
+        // grow the table) mid-walk; skipping a moved entry or visiting a new
+        // one is tolerated — C's walk has the identical race and tolerates it
+        // the same way. Growth never shrinks the table, so a stale index
+        // stays in bounds.
+        let nbuckets =
+            self.pagetable.as_ref().expect("TBM_HASH without pagetable").raw_table().buckets();
+        let mask = nbuckets - 1;
+        let start = self.lossify_start & mask;
+        for k in 0..nbuckets {
+            let idx = (start + k) & mask;
+            let table =
+                self.pagetable.as_ref().expect("TBM_HASH without pagetable").raw_table();
+            // SAFETY: idx < nbuckets <= table.buckets() (grow-only), and the
+            // bucket reference is copied out before any table mutation.
+            let (blockno, ischunk) = unsafe {
+                if !table.is_bucket_full(idx) {
+                    continue;
                 }
+                let (blockno, page) = table.bucket(idx).as_ref();
+                (*blockno, page.ischunk)
+            };
+            if ischunk || blockno as usize % PAGES_PER_CHUNK == 0 {
+                continue;
+            }
+            self.mark_page_lossy(blockno)?;
+            if self.nentries <= self.maxentries / 2 {
+                self.lossify_start = idx + 1;
+                return Ok(());
             }
         }
-        self.lossify_scratch = candidates;
-        if !broke_early && self.nentries > self.maxentries / 2 {
+        if self.nentries > self.maxentries / 2 {
             self.maxentries = self.nentries.min((i32::MAX - 1) / 2) * 2;
         }
         Ok(())

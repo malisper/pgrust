@@ -14,4 +14,4 @@ types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
 types_storage = { path = "../../../_support/types/types_storage" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
-hashbrown = { version = "0.14", default-features = false, features = ["allocator-api2", "inline-more"] }
+hashbrown = { version = "0.14", default-features = false, features = ["allocator-api2", "inline-more", "raw"] }

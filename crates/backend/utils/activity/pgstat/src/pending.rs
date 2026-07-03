@@ -154,8 +154,7 @@ fn timestamp_difference_exceeds(start: TimestampTz, stop: TimestampTz, msec: i64
 pub fn pgstat_report_stat(mut force: bool) -> i64 {
     debug_assert!(!xact_seams::is_transaction_or_transaction_block::call());
 
-    // One TLS block, three plain loads and no stores — C's early-exit shape
-    // (pgstat.c:692): forced or not, nothing-pending returns 0.
+    // C's early-exit shape: one TLS block, plain loads, nothing-pending returns 0.
     if FORCE_NEXT_FLUSH.with(|c| c.get()) {
         FORCE_NEXT_FLUSH.with(|c| c.set(false));
         force = true;
@@ -165,6 +164,13 @@ pub fn pgstat_report_stat(mut force: bool) -> i64 {
         return 0;
     }
 
+    report_stat_slow(force)
+}
+
+// Outlined so the nothing-pending exit stays frameless (the 39-v-7 regression).
+#[cold]
+#[inline(never)]
+fn report_stat_slow(mut force: bool) -> i64 {
     if pending_is_empty() && !pgstat_report_fixed() {
         HAVE_PENDING.with(|c| c.set(false));
         return 0;

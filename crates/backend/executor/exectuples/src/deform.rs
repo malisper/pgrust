@@ -58,6 +58,8 @@ impl TupleImage {
 /// points at a live tuple image whose attributes match `atts`; `*offp` is a
 /// valid resume offset for `attnum` (C slot_deform_heap_tuple_internal
 /// contract). Always-inline so literal slow/hasnulls fold like C's.
+/// The walk must stay call-free (an in-loop call spills the walk state around
+/// every call site): the cstring arm exits with `.1 == true` instead.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 unsafe fn deform_internal(
@@ -71,7 +73,7 @@ unsafe fn deform_internal(
     hasnulls: bool,
     offp: &mut usize,
     slowp: &mut bool,
-) -> usize {
+) -> (usize, bool) {
     let mut slownext = false;
     let tp = img.tp;
 
@@ -87,7 +89,7 @@ unsafe fn deform_internal(
             }
             if !slow {
                 *slowp = true;
-                return attnum + 1;
+                return (attnum + 1, false);
             }
             attnum += 1;
             continue;
@@ -124,16 +126,62 @@ unsafe fn deform_internal(
 
             *values.get_unchecked_mut(attnum) = fetch_att(tp.add(*offp), attbyval, attlen);
 
-            *offp = att_addlength_pointer(*offp, attlen, tp.add(*offp));
+            if attlen > 0 {
+                *offp += attlen as usize;
+            } else if attlen == -1 {
+                *offp += ::types_tuple::varatt::varsize_any(tp.add(*offp));
+            } else {
+                debug_assert!(attlen == -2);
+                *slowp = true;
+                return (attnum, true);
+            }
         }
 
         if !slow && (slownext || attlen <= 0) {
             *slowp = true;
-            return attnum + 1;
+            return (attnum + 1, false);
         }
         attnum += 1;
     }
 
+    (natts, false)
+}
+
+/// # Safety
+/// As [`deform_internal`], resumed at its `(attnum, true)` exit: datum stored,
+/// `*offp` at the cstring; slow is provably true, cacheoff branches drop out.
+#[inline]
+unsafe fn deform_cstring_rest(
+    values: &mut [Datum],
+    isnull: &mut [bool],
+    atts: &[CompactAttribute],
+    img: TupleImage,
+    attnum: usize,
+    natts: usize,
+    offp: &mut usize,
+) -> usize {
+    let tp = img.tp;
+    // SAFETY: caller contract — the walk covers attributes present in the tuple.
+    unsafe {
+        *offp = att_addlength_pointer(*offp, -2, tp.add(*offp));
+        for i in attnum + 1..natts {
+            let thisatt = atts.get_unchecked(i);
+            if img.hasnulls && att_isnull(i, img.bp) {
+                *values.get_unchecked_mut(i) = Datum::null();
+                *isnull.get_unchecked_mut(i) = true;
+                continue;
+            }
+            *isnull.get_unchecked_mut(i) = false;
+            let attlen = thisatt.attlen as i32;
+            if attlen == -1 {
+                *offp = att_pointer_alignby(*offp, thisatt.attalignby, -1, tp.add(*offp));
+            } else {
+                *offp = att_nominal_alignby(*offp, thisatt.attalignby);
+            }
+            *values.get_unchecked_mut(i) = fetch_att(tp.add(*offp), thisatt.attbyval, attlen);
+            *offp = att_addlength_pointer(*offp, attlen, tp.add(*offp));
+        }
+    }
     natts
 }
 
@@ -173,19 +221,20 @@ pub(crate) fn slot_deform_heap_tuple(
         // SAFETY: natts <= atts.len() == values.len() == isnull.len() (slot
         // invariant + clamp above); img is the slot's live stored tuple.
         unsafe {
+            let mut cstring = false;
             if !slow {
                 if !img.hasnulls {
-                    attnum = deform_internal(
+                    (attnum, cstring) = deform_internal(
                         values, isnull, atts, img, attnum, natts, false, false, &mut off, &mut slow,
                     );
                 } else {
-                    attnum = deform_internal(
+                    (attnum, cstring) = deform_internal(
                         values, isnull, atts, img, attnum, natts, false, true, &mut off, &mut slow,
                     );
                 }
             }
-            if attnum < natts {
-                attnum = deform_internal(
+            if !cstring && attnum < natts {
+                (attnum, cstring) = deform_internal(
                     values,
                     isnull,
                     atts,
@@ -198,6 +247,11 @@ pub(crate) fn slot_deform_heap_tuple(
                     &mut slow,
                 );
             }
+            if cstring {
+                // Tail exit (finalizes the slot itself): no caller state may
+                // survive a call on the hot path.
+                return deform_cstring_tail(base, img, offp, attnum, natts, off);
+            }
         }
     }
 
@@ -208,6 +262,45 @@ pub(crate) fn slot_deform_heap_tuple(
     } else {
         base.tts_flags &= !TTS_FLAG_SLOW;
     }
+}
+
+#[cold]
+#[inline(never)]
+fn deform_cstring_tail(
+    base: &mut SlotBase<'_>,
+    img: TupleImage,
+    offp: &mut u32,
+    attnum: usize,
+    natts: usize,
+    mut off: usize,
+) {
+    {
+        let SlotBase {
+            tts_tupleDescriptor,
+            tts_values,
+            tts_isnull,
+            ..
+        } = base;
+        let atts: &[CompactAttribute] = &tts_tupleDescriptor
+            .as_ref()
+            .expect("deform_cstring_tail without descriptor")
+            .compact_attrs;
+        // SAFETY: deform_internal's (attnum, true) exit, same slot invariants.
+        unsafe {
+            deform_cstring_rest(
+                tts_values.as_mut_slice(),
+                tts_isnull.as_mut_slice(),
+                atts,
+                img,
+                attnum,
+                natts,
+                &mut off,
+            );
+        }
+    }
+    base.tts_nvalid = natts as AttrNumber;
+    *offp = off as u32;
+    base.tts_flags |= TTS_FLAG_SLOW;
 }
 
 pub fn slot_getmissingattrs(base: &mut SlotBase<'_>, start_attnum: i32, last_attnum: i32) {
@@ -254,14 +347,31 @@ fn virtual_getsomeattrs() -> ! {
     panic!("getsomeattrs is not required to be called on a virtual tuple table slot")
 }
 
+// The missing-attr pad leaves at entry: a call after the walk would pin
+// base/attnum in callee-saved registers across the whole deform.
+#[inline(always)]
+fn getsome_common(base: &mut SlotBase<'_>, img: TupleImage, offp: &mut u32, attnum: i32) {
+    if img.tuple_natts < attnum {
+        return getsome_narrow(base, img, offp, attnum);
+    }
+    slot_deform_heap_tuple(base, img, offp, attnum);
+    debug_assert!(base.tts_nvalid as i32 >= attnum);
+}
+
+#[cold]
+#[inline(never)]
+fn getsome_narrow(base: &mut SlotBase<'_>, img: TupleImage, offp: &mut u32, attnum: i32) {
+    slot_deform_heap_tuple(base, img, offp, attnum);
+    finish_getsomeattrs(base, attnum);
+}
+
 #[inline]
 pub(crate) fn heap_getsomeattrs_int(h: &mut HeapTupleTableSlot<'_>, attnum: i32) {
     let HeapTupleTableSlot { base, tuple, off } = h;
     debug_assert!(!base.is_empty());
     check_attnum(base, attnum);
     let img = TupleImage::from_heap(tuple.as_ref().expect("heap slot without tuple"));
-    slot_deform_heap_tuple(base, img, off, attnum);
-    finish_getsomeattrs(base, attnum);
+    getsome_common(base, img, off, attnum);
 }
 
 #[inline]
@@ -271,8 +381,7 @@ pub(crate) fn minimal_getsomeattrs_int(m: &mut MinimalTupleTableSlot<'_>, attnum
     // SAFETY: the stored mintuple is live until the slot is cleared/overwritten
     // (slot invariant).
     let img = unsafe { TupleImage::from_minimal(m.mintuple.expect("minimal slot without tuple")) };
-    slot_deform_heap_tuple(&mut m.base, img, &mut m.off, attnum);
-    finish_getsomeattrs(&mut m.base, attnum);
+    getsome_common(&mut m.base, img, &mut m.off, attnum);
 }
 
 #[inline]
@@ -377,8 +486,7 @@ pub fn heap_slot_getattr(h: &mut HeapTupleTableSlot<'_>, attnum: i32, isnull: &m
     base.slot_getattr(attnum, isnull, |b, n| {
         check_attnum(b, n);
         let img = TupleImage::from_heap(tuple.as_ref().expect("heap slot without tuple"));
-        slot_deform_heap_tuple(b, img, off, n);
-        finish_getsomeattrs(b, n);
+        getsome_common(b, img, off, n);
     })
 }
 
@@ -399,8 +507,7 @@ pub fn minimal_slot_getattr(
         // SAFETY: the stored mintuple is live until cleared/overwritten.
         let img =
             unsafe { TupleImage::from_minimal(mintuple.expect("minimal slot without tuple")) };
-        slot_deform_heap_tuple(b, img, off, n);
-        finish_getsomeattrs(b, n);
+        getsome_common(b, img, off, n);
     })
 }
 
