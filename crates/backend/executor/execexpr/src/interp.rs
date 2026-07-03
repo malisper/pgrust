@@ -680,9 +680,25 @@ fn run_program<'mcx>(
                     Op::SVFOP_LOCALTIMESTAMP | Op::SVFOP_LOCALTIMESTAMP_N => {
                         Datum::from_i64(adt_timestamp::GetSQLLocalTimestamp(*typmod)?)
                     }
+                    Op::SVFOP_CURRENT_ROLE | Op::SVFOP_CURRENT_USER | Op::SVFOP_USER
+                    | Op::SVFOP_SESSION_USER => {
+                        let roleid = if *op == Op::SVFOP_SESSION_USER {
+                            miscinit_seams::get_session_user_id::call()
+                        } else {
+                            miscinit_seams::get_user_id::call()
+                        };
+                        let name = syscache_seams::lookup_authid_rolname_data::call(roleid)?
+                            .ok_or_else(|| invalid_role_oid(roleid))?;
+                        // SAFETY: compile-allocated 64-byte 8-aligned NameData
+                        // slot owned by this step (steps.rs note).
+                        unsafe {
+                            timetz.as_ptr().cast::<::types_tuple::NameData>().write(name);
+                        }
+                        Datum::from_usize(timetz.as_ptr() as usize)
+                    }
                     other => panic!(
                         "execexpr EEOP_SQLVALUEFUNCTION: name op {other:?} unported \
-                         (grammar arms 2149-2155 are louds)"
+                         (CURRENT_CATALOG/CURRENT_SCHEMA)"
                     ),
                 };
                 write_out(*out, value, false);
@@ -1603,4 +1619,10 @@ fn row_type_mismatch_dropped(i: usize) -> alloc::boxed::Box<PgError> {
                 i + 1
             )),
     )
+}
+
+#[cold]
+#[inline(never)]
+fn invalid_role_oid(roleid: ::types_core::Oid) -> Box<::types_error::PgError> {
+    Box::new(::types_error::PgError::error(format!("invalid role OID: {roleid}")))
 }

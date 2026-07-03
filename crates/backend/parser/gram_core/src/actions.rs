@@ -3418,6 +3418,34 @@ impl<'mcx> Parser<'mcx> {
                 )?;
                 *yyval = YYSTYPE::Node(Some(f.seal()));
             }
+            // CURRENT_ROLE..CURRENT_SCHEMA name ops (makeSQLValueFunction;
+            // SYSTEM_USER 2152 is a system_user FuncCall).
+            2149 | 2150 | 2151 | 2153 | 2154 | 2155 => {
+                use SQLValueFunctionOp as Op;
+                let op = match rule {
+                    2149 => Op::SVFOP_CURRENT_ROLE,
+                    2150 => Op::SVFOP_CURRENT_USER,
+                    2151 => Op::SVFOP_SESSION_USER,
+                    2153 => Op::SVFOP_USER,
+                    2154 => Op::SVFOP_CURRENT_CATALOG,
+                    _ => Op::SVFOP_CURRENT_SCHEMA,
+                };
+                let n = Node::mk(
+                    mcx,
+                    SQLValueFunction { op, r#type: 0, typmod: -1, location: view.l(1) },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            2152 => {
+                let f = make_func_call(
+                    mcx,
+                    system_func_name(mcx, "system_user")?,
+                    NodeList::nil(),
+                    CoercionForm::COERCE_SQL_SYNTAX,
+                    view.l(1),
+                )?;
+                *yyval = YYSTYPE::Node(Some(f.seal()));
+            }
             // CURRENT_DATE .. LOCALTIMESTAMP[(n)] (makeSQLValueFunction).
             2140..=2148 => {
                 use SQLValueFunctionOp as Op;

@@ -479,6 +479,7 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
     mt.project_returning = None;
     mt.on_conflict = None;
     mt.check_exprs = None;
+    mt.wco_exprs.clear();
     mt.trigdesc = None;
     mt.generated_exprs = None;
     // ExecCleanupTupleRouting: close routed leaves (Relation Drop = NoLock
@@ -2060,10 +2061,11 @@ const _: () = assert!(!core::mem::needs_drop::<CmdType>());
 mcx::forget_safe_struct!(
     CheckExpr<'_> { name; state },
     GeneratedExpr<'_> { attnum; state },
+    WcoExpr<'_> { kind, relname, polname; state },
     ModifyTableState<'_> { plan, canSetTag, mt_done, result_rti,
         ri_newTupleSlot, ri_oldTupleSlot, ri_ReturningSlot,
         ri_projectNewInfoValid, ri_RowIdAttNo, update_cols, returning_slot;
         operation, indexes, snapshot_any, project_returning, on_conflict,
         check_exprs, trigdesc, generated_exprs, router, leaf_indexes, leaf_checks,
-        index_eval_cx },
+        index_eval_cx, wco_exprs },
 );

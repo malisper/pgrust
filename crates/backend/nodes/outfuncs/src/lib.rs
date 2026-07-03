@@ -71,6 +71,16 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
                 v.typeId, v.typeMod, v.collation
             );
         }
+        NodeTag::T_SQLValueFunction => {
+            let v = node
+                .as_variant::<types_nodes::primnodes::SQLValueFunction>()
+                .expect("SQLValueFunction");
+            w!(
+                out,
+                "{{SQLVALUEFUNCTION :op {} :type {} :typmod {} :location -1}}",
+                v.op as u32, v.r#type, v.typmod
+            );
+        }
         NodeTag::T_PartitionBoundSpec => out_partition_bound_spec(
             out,
             node.as_variant::<PartitionBoundSpec>().expect("PartitionBoundSpec"),

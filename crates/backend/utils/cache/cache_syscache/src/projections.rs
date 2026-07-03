@@ -373,6 +373,18 @@ fn lookup_authid_session_by_oid(
     Ok(Some(shape))
 }
 
+fn lookup_authid_rolname_data(roleid: Oid) -> PgResult<Option<types_tuple::NameData>> {
+    let Some(tuple) = SearchSysCache1(AUTHOID, SysCacheKey::Value(Datum::from_oid(roleid)))? else {
+        return Ok(None);
+    };
+    let d = getattr(&tuple.tuple(), AUTHOID, ANUM_PG_AUTHID_ROLNAME);
+    // SAFETY: rolname is a NameData column; the datum points at its 64-byte
+    // buffer inside the pinned tuple image.
+    let name = unsafe { *(d.as_usize() as *const types_tuple::NameData) };
+    ReleaseSysCache(tuple);
+    Ok(Some(name))
+}
+
 fn lookup_authid_rolname<'mcx>(mcx: Mcx<'mcx>, roleid: Oid) -> PgResult<Option<PgString<'mcx>>> {
     let Some(tuple) = SearchSysCache1(AUTHOID, SysCacheKey::Value(Datum::from_oid(roleid)))? else {
         return Ok(None);
@@ -1902,6 +1914,7 @@ pub(crate) fn install() {
     syscache_seams::pg_type_element_shape::set(pg_type_element_shape);
     syscache_seams::lookup_pg_opclass_shape::set(lookup_pg_opclass_shape);
     syscache_seams::lookup_authid_rolname::set(lookup_authid_rolname);
+    syscache_seams::lookup_authid_rolname_data::set(lookup_authid_rolname_data);
     syscache_seams::lookup_authid_by_rolname::set(lookup_authid_by_rolname);
     syscache_seams::lookup_authid_session_by_rolname::set(lookup_authid_session_by_rolname);
     syscache_seams::lookup_authid_session_by_oid::set(lookup_authid_session_by_oid);

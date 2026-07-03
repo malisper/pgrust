@@ -89,6 +89,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // lookup_authid_rolname, NameData-by-value shape (no allocation; the
+    // executor's CURRENT_USER family reads it per eval).
+    pub fn lookup_authid_rolname_data(roleid: Oid) -> PgResult<Option<types_tuple::NameData>>
+);
+
+seam_core::seam!(
     // SearchSysCache1(AUTHNAME, rolname) projected to (oid, rolsuper) — the
     // check_session_authorization/check_role read; None mirrors !HeapTupleIsValid.
     pub fn lookup_authid_by_rolname(rolname: &str) -> PgResult<Option<(Oid, bool)>>
