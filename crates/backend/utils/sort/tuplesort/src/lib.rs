@@ -1259,9 +1259,10 @@ impl<'m> TuplesortData<'m> {
 
     /// TSS_BOUNDED arm; out of line so the TSS_INITIAL fast path stays lean
     /// (C's shape: the arm's work is behind the comparetup fn pointer).
-    /// Discard leg inline (per-put; C reaches it in one call, we'd pay two),
-    /// sift leg outlined.
-    #[inline]
+    /// Discard leg in the body, sift leg outlined; kept out of line itself —
+    /// inlining it into the put spine cost the qsort lanes 7% instr
+    /// (microbench 1c6520c3: tsort_int4_* 0.84x -> 0.90x).
+    #[inline(never)]
     fn puttuple_bounded(&mut self, tuple: SortTuple) -> PgResult<()> {
         let compare = {
             let ctx = ctx!(self);
