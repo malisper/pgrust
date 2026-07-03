@@ -131,6 +131,7 @@ fn dbase_redo(record: &mut XLogReaderState) -> PgResult<()> {
 unported_redo! {
     tblspc_redo => "backend-commands-tablespace";
     gin_redo => "backend-access-gin-xlog";
+    hash_redo => "backend-access-hash-xlog";
     gist_redo => "backend-access-gist-xlog";
     spg_redo => "backend-access-spgist-xlog";
     brin_redo => "backend-access-brin-xlog";
@@ -169,6 +170,7 @@ unported_mask! {
     heap_mask => "backend-access-heap-heapam-xlog";
     btree_mask => "backend-access-nbtree-nbtxlog";
     gin_mask => "backend-access-gin-xlog";
+    hash_mask => "backend-access-hash-xlog";
     gist_mask => "backend-access-gist-xlog";
     seq_mask => "backend-commands-sequence";
     spg_mask => "backend-access-spgist-xlog";
@@ -298,12 +300,12 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     },
     RmgrData {
         rm_name: "Gin",
-        rm_redo: gin_redo,
+        rm_redo: gin_xlog::gin_redo,
         rm_desc: gin_desc,
         rm_identify: gin_identify,
         rm_startup: None,
         rm_cleanup: None,
-        rm_mask: Some(gin_mask),
+        rm_mask: Some(gin_xlog::gin_mask),
     },
     RmgrData {
         rm_name: "Gist",

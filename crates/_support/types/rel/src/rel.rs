@@ -50,6 +50,9 @@ pub struct RelationData<'mcx> {
     pub rd_amcache: Cell<Option<RdAmCacheBtree>>,
     // C rd_amcache, hash arm (HashMetaPageData is 4.5KB - boxed, read via borrow).
     pub rd_amcache_hash: RefCell<Option<std::boxed::Box<types_hash::HashMetaPageData>>>,
+    // C rd_amcache, gin arm (resolved opclass dispatch; gin crate owns the
+    // tag mapping — 0 == jsonb_ops).
+    pub rd_amcache_gin: Cell<Option<RdAmCacheGin>>,
     // C rd_support/rd_supportinfo (rule-5 cache), resolved once per column;
     // std Vec justified: Rc-owned owner structure outside the arenas, FmgrInfo is droppy.
     pub rd_supportinfo: RefCell<Vec<Option<FmgrInfo>>>,
@@ -73,6 +76,16 @@ pub struct RdIndexList {
 }
 
 pub type RdAmCacheBtree = BTMetaPageData;
+
+/// GIN's resolved opclass state (gin's GinState mirror).
+#[derive(Clone, Copy, Debug)]
+pub struct RdAmCacheGin {
+    pub opclass: u8,
+    pub support_collation: Oid,
+    pub can_partial_match: bool,
+    pub key_byval: bool,
+    pub key_len: i16,
+}
 
 impl<'mcx> RelationData<'mcx> {
     #[inline]
@@ -320,6 +333,7 @@ mod tests {
             pgstat_enabled: Cell::new(false),
             rd_amcache: Default::default(),
             rd_amcache_hash: Default::default(),
+            rd_amcache_gin: Default::default(),
             rd_supportinfo: Default::default(),
             rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),

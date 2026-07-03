@@ -1,0 +1,380 @@
+//! GIN vocabulary: on-disk block layouts (ginblock.h), GinState carrier,
+//! scan opaque (gin_private.h), and WAL constants (ginxlog.h). Plain data
+//! only; behavior lives in the `gin` crate.
+#![allow(non_snake_case)]
+#![allow(non_upper_case_globals)]
+#![allow(non_camel_case_types)]
+
+use ::datum::Datum;
+use ::mcx::{Mcx, PgBox, PgVec};
+use ::tidbitmap::{TbmPrivateIterator, TIDBitmap, TBM_MAX_TUPLES_PER_PAGE};
+use ::types_core::{
+    uint16, uint32, BlockNumber, Buffer, InvalidBlockNumber, InvalidBuffer, OffsetNumber, Oid,
+    BLCKSZ,
+};
+use ::types_error::PgResult;
+use ::types_scan::scankey::StrategyNumber;
+use ::types_tuple::itemptr::{
+    BlockIdData, BlockIdGetBlockNumber, BlockIdSet, ItemPointerData,
+    ItemPointerGetBlockNumberNoCheck, ItemPointerGetOffsetNumberNoCheck,
+};
+
+pub const GIN_DATA: uint16 = 1 << 0;
+pub const GIN_LEAF: uint16 = 1 << 1;
+pub const GIN_DELETED: uint16 = 1 << 2;
+pub const GIN_META: uint16 = 1 << 3;
+pub const GIN_LIST: uint16 = 1 << 4;
+pub const GIN_LIST_FULLROW: uint16 = 1 << 5;
+pub const GIN_INCOMPLETE_SPLIT: uint16 = 1 << 6;
+pub const GIN_COMPRESSED: uint16 = 1 << 7;
+
+pub const GIN_METAPAGE_BLKNO: BlockNumber = 0;
+pub const GIN_ROOT_BLKNO: BlockNumber = 1;
+
+pub const GIN_CURRENT_VERSION: i32 = 2;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GinPageOpaqueData {
+    pub rightlink: BlockNumber,
+    pub maxoff: OffsetNumber,
+    pub flags: uint16,
+}
+
+const _: () = assert!(core::mem::size_of::<GinPageOpaqueData>() == 8);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GinMetaPageData {
+    pub head: BlockNumber,
+    pub tail: BlockNumber,
+    pub tailFreeSize: uint32,
+    pub nPendingPages: BlockNumber,
+    pub nPendingHeapTuples: i64,
+    pub nTotalPages: BlockNumber,
+    pub nEntryPages: BlockNumber,
+    pub nDataPages: BlockNumber,
+    pub nEntries: i64,
+    pub ginVersion: i32,
+}
+
+const _: () = assert!(core::mem::size_of::<GinMetaPageData>() == 56);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GinStatsData {
+    pub nPendingPages: BlockNumber,
+    pub nTotalPages: BlockNumber,
+    pub nEntryPages: BlockNumber,
+    pub nDataPages: BlockNumber,
+    pub nEntries: i64,
+    pub ginVersion: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PostingItem {
+    pub child_blkno: BlockIdData,
+    pub key: ItemPointerData,
+}
+
+const _: () = assert!(core::mem::size_of::<PostingItem>() == 10);
+const _: () = assert!(core::mem::align_of::<PostingItem>() == 2);
+
+#[inline]
+pub fn PostingItemGetBlockNumber(p: &PostingItem) -> BlockNumber {
+    BlockIdGetBlockNumber(&p.child_blkno)
+}
+
+#[inline]
+pub fn PostingItemSetBlockNumber(p: &mut PostingItem, blkno: BlockNumber) {
+    BlockIdSet(&mut p.child_blkno, blkno);
+}
+
+pub type GinNullCategory = i8;
+
+pub const GIN_CAT_NORM_KEY: GinNullCategory = 0;
+pub const GIN_CAT_NULL_KEY: GinNullCategory = 1;
+pub const GIN_CAT_EMPTY_ITEM: GinNullCategory = 2;
+pub const GIN_CAT_NULL_ITEM: GinNullCategory = 3;
+pub const GIN_CAT_EMPTY_QUERY: GinNullCategory = -1;
+
+pub type GinTernaryValue = i8;
+pub const GIN_FALSE: GinTernaryValue = 0;
+pub const GIN_TRUE: GinTernaryValue = 1;
+pub const GIN_MAYBE: GinTernaryValue = 2;
+
+pub const GIN_SEARCH_MODE_DEFAULT: i32 = 0;
+pub const GIN_SEARCH_MODE_INCLUDE_EMPTY: i32 = 1;
+pub const GIN_SEARCH_MODE_ALL: i32 = 2;
+pub const GIN_SEARCH_MODE_EVERYTHING: i32 = 3;
+
+pub const GIN_COMPARE_PROC: uint16 = 1;
+pub const GIN_EXTRACTVALUE_PROC: uint16 = 2;
+pub const GIN_EXTRACTQUERY_PROC: uint16 = 3;
+pub const GIN_CONSISTENT_PROC: uint16 = 4;
+pub const GIN_COMPARE_PARTIAL_PROC: uint16 = 5;
+pub const GIN_TRICONSISTENT_PROC: uint16 = 6;
+pub const GIN_OPTIONS_PROC: uint16 = 7;
+pub const GINNProcs: usize = 7;
+
+pub const GIN_DEFAULT_USE_FASTUPDATE: bool = true;
+
+#[inline]
+pub fn gin_item_pointer_block(p: &ItemPointerData) -> BlockNumber {
+    ItemPointerGetBlockNumberNoCheck(p)
+}
+
+#[inline]
+pub fn gin_item_pointer_offset(p: &ItemPointerData) -> OffsetNumber {
+    ItemPointerGetOffsetNumberNoCheck(p)
+}
+
+#[inline]
+pub fn item_pointer_set_min(p: &mut ItemPointerData) {
+    *p = ItemPointerData::new(0, 0);
+}
+
+#[inline]
+pub fn item_pointer_is_min(p: &ItemPointerData) -> bool {
+    gin_item_pointer_offset(p) == 0 && gin_item_pointer_block(p) == 0
+}
+
+#[inline]
+pub fn item_pointer_set_max(p: &mut ItemPointerData) {
+    *p = ItemPointerData::new(InvalidBlockNumber, 0xffff);
+}
+
+#[inline]
+pub fn item_pointer_set_lossy_page(p: &mut ItemPointerData, b: BlockNumber) {
+    *p = ItemPointerData::new(b, 0xffff);
+}
+
+#[inline]
+pub fn item_pointer_is_lossy_page(p: &ItemPointerData) -> bool {
+    gin_item_pointer_offset(p) == 0xffff && gin_item_pointer_block(p) != InvalidBlockNumber
+}
+
+#[inline]
+pub fn ginCompareItemPointers(a: &ItemPointerData, b: &ItemPointerData) -> i32 {
+    let ia = ((gin_item_pointer_block(a) as u64) << 32) | gin_item_pointer_offset(a) as u64;
+    let ib = ((gin_item_pointer_block(b) as u64) << 32) | gin_item_pointer_offset(b) as u64;
+    if ia < ib {
+        -1
+    } else {
+        (ia > ib) as i32
+    }
+}
+
+pub const fn MAXALIGN(x: usize) -> usize {
+    (x + 7) & !7
+}
+
+pub const fn SHORTALIGN(x: usize) -> usize {
+    (x + 1) & !1
+}
+
+pub const SizeOfPageHeaderData: usize = 24;
+const SizeOfItemIdData: usize = 4;
+pub const INDEX_SIZE_MASK: usize = 0x1FFF;
+
+pub const GinMaxItemSize: usize = {
+    let v = (BLCKSZ
+        - MAXALIGN(SizeOfPageHeaderData + 3 * SizeOfItemIdData)
+        - MAXALIGN(core::mem::size_of::<GinPageOpaqueData>()))
+        / 3;
+    let v = v & !7;
+    if v < INDEX_SIZE_MASK {
+        v
+    } else {
+        INDEX_SIZE_MASK
+    }
+};
+
+pub const GinDataPageMaxDataSize: usize = BLCKSZ
+    - MAXALIGN(SizeOfPageHeaderData)
+    - MAXALIGN(core::mem::size_of::<ItemPointerData>())
+    - MAXALIGN(core::mem::size_of::<GinPageOpaqueData>());
+
+pub const GinListPageSize: usize =
+    BLCKSZ - SizeOfPageHeaderData - MAXALIGN(core::mem::size_of::<GinPageOpaqueData>());
+
+pub const GinDataPageDataOffset: usize =
+    MAXALIGN(SizeOfPageHeaderData) + MAXALIGN(core::mem::size_of::<ItemPointerData>());
+
+pub const SizeOfGinPostingListHeader: usize = 8;
+
+#[inline]
+pub const fn size_of_gin_posting_list(nbytes: usize) -> usize {
+    SizeOfGinPostingListHeader + SHORTALIGN(nbytes)
+}
+
+/// Closed opclass set (rule 4): support-proc OIDs map to a tag at
+/// initGinState; unknown opclasses panic loudly there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GinOpclass {
+    JsonbOps,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GinState {
+    pub opclass: GinOpclass,
+    pub support_collation: Oid,
+    pub can_partial_match: bool,
+    pub key_byval: bool,
+    pub key_len: i16,
+}
+
+// Scan opaque: entry sharing is u32 handles into GinScanWork.entries (C
+// shares pointers); the 'static lifetimes are an erasure over key_ctx.
+
+pub struct GinScanKeyData {
+    pub nentries: u32,
+    pub nuserentries: u32,
+    pub scanEntry: PgVec<'static, u32>,
+    pub requiredEntries: PgVec<'static, u32>,
+    pub additionalEntries: PgVec<'static, u32>,
+    pub entryRes: PgVec<'static, GinTernaryValue>,
+    pub query: Datum,
+    pub queryValues: PgVec<'static, Datum>,
+    pub queryCategories: PgVec<'static, GinNullCategory>,
+    pub strategy: StrategyNumber,
+    pub searchMode: i32,
+    pub attnum: OffsetNumber,
+    pub excludeOnly: bool,
+    pub curItem: ItemPointerData,
+    pub curItemMatches: bool,
+    pub recheckCurItem: bool,
+    pub isFinished: bool,
+}
+
+pub struct GinScanEntryData {
+    pub queryKey: Datum,
+    pub queryCategory: GinNullCategory,
+    pub isPartialMatch: bool,
+    pub strategy: StrategyNumber,
+    pub searchMode: i32,
+    pub attnum: OffsetNumber,
+
+    pub buffer: Buffer,
+    pub curItem: ItemPointerData,
+
+    pub matchBitmap: Option<TIDBitmap<'static>>,
+    pub matchIterator: Option<TbmPrivateIterator>,
+    // Extracted TBMIterateResult snapshot (C keeps a borrow into the bitmap).
+    pub matchBlockno: BlockNumber,
+    pub matchLossy: bool,
+    pub matchNtuples: i32,
+    pub matchOffsets: PgVec<'static, OffsetNumber>,
+
+    pub list: PgVec<'static, ItemPointerData>,
+    pub offset: usize,
+
+    pub isFinished: bool,
+    pub reduceResult: bool,
+    pub predictNumberResult: u32,
+    // Posting-tree root of the entry stream (only root block is state).
+    pub postingRoot: BlockNumber,
+}
+
+impl GinScanEntryData {
+    /// # Safety
+    /// `mcx` must be the scan's key_ctx; the entry must not outlive it.
+    pub unsafe fn new(mcx: Mcx<'_>) -> PgResult<Self> {
+        let offsets: PgVec<'_, OffsetNumber> =
+            mcx::vec_from_elem_in(mcx, 0 as OffsetNumber, TBM_MAX_TUPLES_PER_PAGE);
+        Ok(GinScanEntryData {
+            queryKey: Datum::null(),
+            queryCategory: GIN_CAT_NORM_KEY,
+            isPartialMatch: false,
+            strategy: 0,
+            searchMode: GIN_SEARCH_MODE_DEFAULT,
+            attnum: 0,
+            buffer: InvalidBuffer,
+            curItem: ItemPointerData::invalid(),
+            matchBitmap: None,
+            matchIterator: None,
+            matchBlockno: InvalidBlockNumber,
+            matchLossy: false,
+            matchNtuples: -1,
+            matchOffsets: unsafe { core::mem::transmute(offsets) },
+            list: unsafe { core::mem::transmute(mcx::vec_new_in::<ItemPointerData>(mcx)) },
+            offset: 0,
+            isFinished: false,
+            reduceResult: false,
+            predictNumberResult: 0,
+            postingRoot: InvalidBlockNumber,
+        })
+    }
+}
+
+/// Per-(re)scan key state: C's keyCtx plus everything allocated in it.
+/// Dropped as a unit on rescan/endscan (vectors first, then the context).
+pub struct GinScanWork {
+    pub keys: PgVec<'static, GinScanKeyData>,
+    pub entries: PgVec<'static, PgBox<'static, GinScanEntryData>>,
+    pub key_ctx: Box<mcx::MemoryContext>,
+}
+
+impl GinScanWork {
+    pub fn new() -> Self {
+        let key_ctx = Box::new(mcx::MemoryContext::new_bump("Gin scan key context"));
+        // SAFETY: erasure over key_ctx; both vecs die (in declaration order)
+        // before key_ctx in Drop.
+        let keys = unsafe {
+            core::mem::transmute::<PgVec<'_, GinScanKeyData>, PgVec<'static, GinScanKeyData>>(
+                PgVec::new_in(key_ctx.mcx()),
+            )
+        };
+        let entries = unsafe {
+            core::mem::transmute::<
+                PgVec<'_, PgBox<'_, GinScanEntryData>>,
+                PgVec<'static, PgBox<'static, GinScanEntryData>>,
+            >(PgVec::new_in(key_ctx.mcx()))
+        };
+        GinScanWork {
+            keys,
+            entries,
+            key_ctx,
+        }
+    }
+
+    /// # Safety
+    /// Anything allocated from it must be stored in this GinScanWork.
+    pub unsafe fn kcx(&self) -> Mcx<'static> {
+        unsafe { core::mem::transmute(self.key_ctx.mcx()) }
+    }
+}
+
+impl Default for GinScanWork {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct GinScanOpaqueData {
+    pub ginstate: Option<GinState>,
+    pub work: Option<GinScanWork>,
+    pub isVoidRes: bool,
+}
+
+pub const XLOG_GIN_CREATE_PTREE: u8 = 0x10;
+pub const XLOG_GIN_INSERT: u8 = 0x20;
+pub const XLOG_GIN_SPLIT: u8 = 0x30;
+pub const XLOG_GIN_VACUUM_PAGE: u8 = 0x40;
+pub const XLOG_GIN_VACUUM_DATA_LEAF_PAGE: u8 = 0x90;
+pub const XLOG_GIN_DELETE_PAGE: u8 = 0x50;
+pub const XLOG_GIN_UPDATE_META_PAGE: u8 = 0x60;
+pub const XLOG_GIN_INSERT_LISTPAGE: u8 = 0x70;
+pub const XLOG_GIN_DELETE_LISTPAGE: u8 = 0x80;
+
+pub const GIN_INSERT_ISDATA: uint16 = 0x01;
+pub const GIN_INSERT_ISLEAF: uint16 = 0x02;
+pub const GIN_SPLIT_ROOT: uint16 = 0x04;
+
+pub const GIN_SEGMENT_UNMODIFIED: u8 = 0;
+pub const GIN_SEGMENT_DELETE: u8 = 1;
+pub const GIN_SEGMENT_INSERT: u8 = 2;
+pub const GIN_SEGMENT_REPLACE: u8 = 3;
+pub const GIN_SEGMENT_ADDITEMS: u8 = 4;
+
+pub const GIN_NDELETE_AT_ONCE: usize = 16;

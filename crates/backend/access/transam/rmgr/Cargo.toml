@@ -28,3 +28,4 @@ hash_xlog = { path = "../../hash/hash_xlog" }
 sequence_xlog = { path = "../../../commands/sequence_xlog" }
 xact = { path = "../xact" }
 rmgrdesc = { path = "../../rmgrdesc" }
+gin_xlog = { path = "../../gin/gin_xlog" }

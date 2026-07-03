@@ -144,7 +144,7 @@ fn finish_relcache_entries() -> PgResult<()> {
             rd_options: scanned.options,
             pgstat_enabled: core::cell::Cell::new(rel.pgstat_enabled.get()),
             rd_amcache: Default::default(),
-            rd_amcache_hash: Default::default(),
+            rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
             rd_supportinfo: Default::default(),
             rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),

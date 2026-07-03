@@ -56,6 +56,8 @@ visibilitymap = { path = "../../../access/heap/visibilitymap" }
 procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
 exectuples = { path = "../../../executor/exectuples" }
 
+gin = { path = "../../../access/gin/gin" }
+
 [dev-dependencies]
 clauses_seams = { path = "../../util/clauses_seams" }
 relcache = { path = "../../../utils/cache/relcache" }

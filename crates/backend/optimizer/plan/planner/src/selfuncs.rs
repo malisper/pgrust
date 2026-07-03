@@ -1124,6 +1124,7 @@ pub fn amcostestimate(
     match types_relscan::IndexAmKind::from_relam(relam) {
         types_relscan::IndexAmKind::Btree => btcostestimate(run, path_id, loop_count),
         types_relscan::IndexAmKind::Hash => hashcostestimate(run, path_id, loop_count),
+        types_relscan::IndexAmKind::Gin => gincostestimate(run, path_id, loop_count),
         #[allow(unreachable_patterns)]
         other => panic!("amcostestimate (selfuncs.c): {other:?}; M2 index-AM lane"),
     }
@@ -2263,4 +2264,374 @@ pub fn estimate_array_length(node: Node<'_>) -> f64 {
         return a.elements.len() as f64;
     }
     10.0
+}
+
+// generic_restriction_selectivity (selfuncs.c).
+fn generic_restriction_selectivity<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    oproid: Oid,
+    collation: Oid,
+    args: &[NodeId],
+    varrelid: i32,
+    default_selectivity: f64,
+) -> PgResult<f64> {
+    let Some((vardata, other, varonleft)) = get_restriction_variable(run, args, varrelid)? else {
+        return Ok(default_selectivity);
+    };
+
+    let mut selec;
+    if let Some(c) = other.as_const() {
+        if c.constisnull {
+            return Ok(0.0);
+        }
+        let constval = c.constvalue;
+        let opcode = lsyscache::get_opcode(oproid)?;
+        let mut opproc = fmgr_core::fmgr_info(opcode)?;
+        // Matching operators (jsonb @> …) detoast/allocate: arm the frames
+        // with a bump scratch (C leaks into the planner context).
+        let scratch = ::mcx::MemoryContext::new_bump("generic_restriction_selectivity");
+        let smcx = scratch.mcx();
+        let armed_test = |opproc: &mut FmgrInfo, v: Datum| -> PgResult<bool> {
+            let (a0, a1) = if varonleft { (v, constval) } else { (constval, v) };
+            Ok(types_fmgr::function_call2_coll_in(opproc, collation, smcx, a0, a1)?.as_bool())
+        };
+
+        let (mut mcvsel, mut mcvsum) = (0.0f64, 0.0f64);
+        if let Some(sslot) = vardata.slot(STATISTIC_KIND_MCV, 0) {
+            for (i, &v) in sslot.values()?.iter().enumerate() {
+                if armed_test(&mut opproc, v)? {
+                    mcvsel += sslot.numbers()?[i] as f64;
+                }
+                mcvsum += sslot.numbers()?[i] as f64;
+            }
+        }
+
+        let (hist_selec, hist_size) = {
+            let mut hs = -1.0f64;
+            let mut n = 0usize;
+            if let Some(sslot) = vardata.slot(STATISTIC_KIND_HISTOGRAM, 0) {
+                let values = sslot.values()?;
+                n = values.len();
+                if n >= 10 {
+                    let mut nmatch = 0usize;
+                    for &v in &values[1..n - 1] {
+                        if armed_test(&mut opproc, v)? {
+                            nmatch += 1;
+                        }
+                    }
+                    hs = nmatch as f64 / (n - 2) as f64;
+                }
+            }
+            (hs, n)
+        };
+        selec = if hist_selec < 0.0 {
+            default_selectivity
+        } else if hist_size < 100 {
+            let hist_weight = hist_size as f64 / 100.0;
+            hist_selec * hist_weight + default_selectivity * (1.0 - hist_weight)
+        } else {
+            hist_selec
+        };
+
+        selec = selec.clamp(0.0001, 0.9999);
+
+        let nullfrac = vardata.nullfrac();
+        selec *= 1.0 - nullfrac - mcvsum;
+        selec += mcvsel;
+    } else {
+        selec = default_selectivity;
+    }
+
+    Ok(clamp_probability(selec))
+}
+
+// matchingsel (selfuncs.c). DEFAULT_MATCHING_SEL = 2 * DEFAULT_EQ_SEL.
+pub fn matchingsel<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    operator: Oid,
+    args: &[NodeId],
+    varrelid: i32,
+    collation: Oid,
+) -> PgResult<f64> {
+    const DEFAULT_MATCHING_SEL: f64 = 0.010;
+    generic_restriction_selectivity(run, operator, collation, args, varrelid, DEFAULT_MATCHING_SEL)
+}
+
+#[derive(Default)]
+struct GinQualCounts {
+    att_has_full_scan: bool,
+    att_has_normal_scan: bool,
+    partial_entries: f64,
+    exact_entries: f64,
+    search_entries: f64,
+    array_scans: f64,
+}
+
+// gincost_pattern (selfuncs.c), single key column.
+fn gincost_pattern(
+    opfamily: Oid,
+    opcintype: Oid,
+    clause_op: Oid,
+    query: Datum,
+    counts: &mut GinQualCounts,
+) -> PgResult<bool> {
+    const GIN_SEARCH_MODE_DEFAULT: i32 = 0;
+    const GIN_SEARCH_MODE_INCLUDE_EMPTY: i32 = 1;
+    let _strategy = lsyscache::amop::get_op_opfamily_strategy(clause_op, opfamily)?;
+    let strategy = _strategy as u16;
+
+    let (nentries, search_mode) =
+        gin::gincost_extract_query(opfamily, opcintype, query, strategy)?;
+
+    if nentries <= 0 && search_mode == GIN_SEARCH_MODE_DEFAULT {
+        return Ok(false);
+    }
+    // The closed opclass set has no partial matches.
+    counts.exact_entries += nentries as f64;
+    counts.search_entries += nentries as f64;
+
+    if search_mode == GIN_SEARCH_MODE_DEFAULT {
+        counts.att_has_normal_scan = true;
+    } else if search_mode == GIN_SEARCH_MODE_INCLUDE_EMPTY {
+        counts.att_has_normal_scan = true;
+        counts.exact_entries += 1.0;
+        counts.search_entries += 1.0;
+    } else {
+        counts.att_has_full_scan = true;
+    }
+    Ok(true)
+}
+
+// gincostestimate (selfuncs.c).
+fn gincostestimate(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    loop_count: f64,
+) -> PgResult<AmCostEstimate> {
+    let (index_quals, index_pages, index_tuples, index_rel, reltablespace, gin_stats, opfamily0, opcintype0) = {
+        let PathNode::IndexPath(ip) = run.root.path(path_id) else { unreachable!() };
+        let index = ip.indexinfo.as_ref().expect("indexinfo set");
+        debug_assert!(index.indpred.is_empty());
+        (
+            get_quals_from_indexclauses(run, path_id),
+            index.pages,
+            index.tuples,
+            index.rel.expect("index rel set"),
+            index.reltablespace,
+            index.gin_stats.expect("gin stats captured at plancat"),
+            index.opfamily[0],
+            index.opcintype[0],
+        )
+    };
+    let index_rel_relid = run.root.rel(index_rel).relid as i32;
+
+    let mut num_pages = index_pages as f64;
+    let num_tuples = index_tuples;
+
+    let num_pending_pages = if (gin_stats.pending_pages as f64) < num_pages {
+        gin_stats.pending_pages as f64
+    } else {
+        0.0
+    };
+
+    let num_entry_pages;
+    let num_data_pages;
+    let mut num_entries;
+    if num_pages > 0.0
+        && (gin_stats.total_pages as f64) <= num_pages
+        && (gin_stats.total_pages as f64) > num_pages / 4.0
+        && gin_stats.entry_pages > 0
+        && gin_stats.entries > 0
+    {
+        let scale = num_pages / gin_stats.total_pages as f64;
+        let mut ep = (gin_stats.entry_pages as f64 * scale).ceil();
+        let mut dp = (gin_stats.data_pages as f64 * scale).ceil();
+        num_entries = (gin_stats.entries as f64 * scale).ceil();
+        ep = ep.min(num_pages - num_pending_pages);
+        dp = dp.min(num_pages - num_pending_pages - ep);
+        num_entry_pages = ep;
+        num_data_pages = dp;
+    } else {
+        num_pages = num_pages.max(10.0);
+        num_entry_pages = ((num_pages - num_pending_pages) * 0.90).floor();
+        num_data_pages = num_pages - num_pending_pages - num_entry_pages;
+        num_entries = (num_entry_pages * 100.0).floor();
+    }
+    if num_entries < 1.0 {
+        num_entries = 1.0;
+    }
+
+    // add_predicate_to_index_quals: identity for a non-partial index.
+    let index_selectivity = crate::clausesel::clauselist_selectivity(
+        run,
+        &index_quals,
+        index_rel_relid,
+        JOIN_INNER,
+        None,
+    )?;
+
+    let (spc_random_page_cost, _) = crate::costsize::get_tablespace_page_costs(reltablespace);
+
+    // Examine quals: search-entry and partial-match counts.
+    let mut counts = GinQualCounts {
+        array_scans: 1.0,
+        ..Default::default()
+    };
+    let mut match_possible = true;
+    'quals: {
+        let iclauses = {
+            let PathNode::IndexPath(ip) = run.root.path(path_id) else { unreachable!() };
+            ip.indexclauses.clone()
+        };
+        for ic in iclauses.iter() {
+            for &rid in ic.indexquals.iter() {
+                let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+                match clause.node_tag() {
+                    NodeTag::T_OpExpr => {
+                        // gincost_opexpr: fixed indexquals put the indexkey on
+                        // the left; the operand is args[1].
+                        let op = clause.as_op_expr().unwrap();
+                        let operand = op.args.nth(1);
+                        match operand.as_const() {
+                            None => {
+                                counts.exact_entries += 1.0;
+                                counts.search_entries += 1.0;
+                            }
+                            Some(c) if c.constisnull => {
+                                match_possible = false;
+                                break 'quals;
+                            }
+                            Some(c) => {
+                                if !gincost_pattern(
+                                    opfamily0,
+                                    opcintype0,
+                                    op.opno,
+                                    c.constvalue,
+                                    &mut counts,
+                                )? {
+                                    match_possible = false;
+                                    break 'quals;
+                                }
+                            }
+                        }
+                    }
+                    NodeTag::T_ScalarArrayOpExpr => {
+                        panic!("gincostestimate: ScalarArrayOpExpr GIN qual; arrays lane")
+                    }
+                    other => panic!("unsupported GIN indexqual type: {other:?}"),
+                }
+            }
+        }
+    }
+
+    if !match_possible {
+        return Ok(AmCostEstimate {
+            index_startup_cost: 0.0,
+            index_total_cost: 0.0,
+            index_selectivity: 0.0,
+            index_correlation: 0.0,
+            index_pages: 0.0,
+        });
+    }
+
+    let full_index_scan = counts.att_has_full_scan && !counts.att_has_normal_scan;
+    if full_index_scan || index_quals.is_empty() {
+        counts.partial_entries = 0.0;
+        counts.exact_entries = num_entries;
+        counts.search_entries = num_entries;
+    }
+
+    let outer_scans = loop_count;
+    let cpu_operator_cost = gucs::cpu_operator_cost();
+
+    let mut entry_pages_fetched = num_pending_pages;
+    // C: ceil(searchEntries * rint(pow(numEntryPages, 0.15))).
+    entry_pages_fetched +=
+        (counts.search_entries * num_entry_pages.powf(0.15).round_ties_even()).ceil();
+
+    let partial_scale = (counts.partial_entries / num_entries).min(1.0);
+    entry_pages_fetched += (num_entry_pages * partial_scale).ceil();
+
+    let mut data_pages_fetched = (num_data_pages * partial_scale).ceil();
+
+    let mut index_startup_cost = 0.0;
+    let mut index_total_cost = 0.0;
+
+    if num_entries > 1.0 {
+        let descent_cost = (num_entries.ln() / 2f64.ln()).ceil() * cpu_operator_cost;
+        index_startup_cost += descent_cost * counts.search_entries;
+        index_total_cost += counts.array_scans * descent_cost * counts.search_entries;
+    }
+
+    index_startup_cost += entry_pages_fetched * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
+    index_total_cost +=
+        entry_pages_fetched * counts.array_scans * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
+
+    index_startup_cost += DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost * data_pages_fetched;
+    index_total_cost += data_pages_fetched
+        * (counts.array_scans - 1.0)
+        * DEFAULT_PAGE_CPU_MULTIPLIER
+        * cpu_operator_cost;
+
+    if outer_scans > 1.0 || counts.array_scans > 1.0 {
+        entry_pages_fetched *= outer_scans * counts.array_scans;
+        entry_pages_fetched = crate::costsize::index_pages_fetched(
+            run,
+            entry_pages_fetched,
+            num_entry_pages as u32,
+            num_entry_pages,
+        );
+        entry_pages_fetched /= outer_scans;
+        data_pages_fetched *= outer_scans * counts.array_scans;
+        data_pages_fetched = crate::costsize::index_pages_fetched(
+            run,
+            data_pages_fetched,
+            num_data_pages as u32,
+            num_data_pages,
+        );
+        data_pages_fetched /= outer_scans;
+    }
+
+    index_startup_cost += (entry_pages_fetched + data_pages_fetched) * spc_random_page_cost;
+
+    let mut data_pages_fetched =
+        (num_data_pages * counts.exact_entries / num_entries).ceil();
+    let data_pages_fetched_by_sel =
+        (index_selectivity * (num_tuples / (8192.0 / 3.0))).ceil();
+    if data_pages_fetched_by_sel > data_pages_fetched {
+        data_pages_fetched = data_pages_fetched_by_sel;
+    }
+
+    index_startup_cost += DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost * counts.search_entries;
+    index_total_cost +=
+        data_pages_fetched * counts.array_scans * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
+
+    if outer_scans > 1.0 || counts.array_scans > 1.0 {
+        data_pages_fetched *= outer_scans * counts.array_scans;
+        data_pages_fetched = crate::costsize::index_pages_fetched(
+            run,
+            data_pages_fetched,
+            num_data_pages as u32,
+            num_data_pages,
+        );
+        data_pages_fetched /= outer_scans;
+    }
+
+    index_total_cost += index_startup_cost + data_pages_fetched * spc_random_page_cost;
+
+    let qual_arg_cost = index_other_operands_eval_cost(run, &index_quals)?;
+    let qual_op_cost = cpu_operator_cost * index_quals.len() as f64;
+
+    index_startup_cost += qual_arg_cost;
+    index_total_cost += qual_arg_cost;
+    index_total_cost += counts.search_entries * counts.array_scans * qual_op_cost;
+    index_total_cost += num_tuples * index_selectivity * gucs::cpu_index_tuple_cost();
+
+    Ok(AmCostEstimate {
+        index_startup_cost,
+        index_total_cost,
+        index_selectivity,
+        index_correlation: 0.0,
+        index_pages: data_pages_fetched,
+    })
 }

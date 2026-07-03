@@ -70,6 +70,13 @@ impl<'mcx> ScanNode<'mcx> for BitmapHeapScanState<'mcx> {
                 let ecxt = self.ss.ps_ExprContext;
                 estate.ecxt_mut(ecxt).ecxt_scantuple = Some(slot_id);
                 let passes = {
+                    // Per-tuple result mcx for arg-detoasting rechecks
+                    // (jsonb @> ...); the ecxt reset below frees it.
+                    let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
+                    if let Some(q) = self.bitmapqualorig.as_deref_mut() {
+                        // SAFETY: reset-only context, outlives the plan.
+                        unsafe { q.arm_result_mcx_raw(per_tuple) };
+                    }
                     let mut slots = EvalSlots {
                         scan: Some(estate.slot_mut(slot_id)),
                         inner: None,

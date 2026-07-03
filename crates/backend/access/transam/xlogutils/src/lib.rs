@@ -493,7 +493,7 @@ pub fn CreateFakeRelcacheEntry(rlocator: RelFileLocator) -> FakeRelcacheEntry {
             rd_options: None,
             pgstat_enabled: Cell::new(false),
             rd_amcache: Default::default(),
-            rd_amcache_hash: Default::default(),
+            rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
             rd_supportinfo: Default::default(),
             rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),

@@ -171,6 +171,7 @@ pub fn index_bulk_delete<'mcx>(
     relation_checks(info.index)?;
     match IndexAmKind::from_relam(info.index.rd_rel.relam) {
         IndexAmKind::Btree => nbtree::btbulkdelete(mcx, info, istat, dead_items),
+        IndexAmKind::Gin => gin::ginbulkdelete(),
         #[cfg(test)]
         IndexAmKind::Mock => Ok(istat.unwrap_or_default()),
         #[allow(unreachable_patterns)]
@@ -187,6 +188,15 @@ pub fn index_vacuum_cleanup<'mcx>(
     relation_checks(info.index)?;
     match IndexAmKind::from_relam(info.index.rd_rel.relam) {
         IndexAmKind::Btree => nbtree::btvacuumcleanup(mcx, info, istat),
+        // ginvacuumcleanup's analyze_only arm is a C no-op; the rest is the
+        // loud vacuum lane.
+        IndexAmKind::Gin => {
+            if info.analyze_only {
+                Ok(istat)
+            } else {
+                gin::ginvacuumcleanup()
+            }
+        }
         #[cfg(test)]
         IndexAmKind::Mock => Ok(istat),
         #[allow(unreachable_patterns)]
@@ -256,6 +266,7 @@ fn am_getbitmap(
     match scan.opaque {
         IndexScanOpaque::Btree(_) => nbtree::btgetbitmap(scan, bitmap),
         IndexScanOpaque::Hash(_) => hash::hashgetbitmap(scan, bitmap),
+        IndexScanOpaque::Gin(_) => gin::gingetbitmap(scan, bitmap),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => unreachable!("Mock lacks amgetbitmap"),
         #[allow(unreachable_patterns)]
@@ -470,6 +481,7 @@ fn am_beginscan<'mcx>(
     match kind {
         IndexAmKind::Btree => nbtree::btbeginscan(mcx, indexRelation, nkeys, norderbys),
         IndexAmKind::Hash => hash::hashbeginscan(mcx, indexRelation, nkeys, norderbys),
+        IndexAmKind::Gin => gin::ginbeginscan(mcx, indexRelation, nkeys, norderbys),
         #[cfg(test)]
         IndexAmKind::Mock => Ok(mock::beginscan(mcx, indexRelation, nkeys, norderbys)),
         #[allow(unreachable_patterns)]
@@ -486,6 +498,7 @@ fn am_rescan(
     match scan.opaque {
         IndexScanOpaque::Btree(_) => nbtree::btrescan(scan, keys),
         IndexScanOpaque::Hash(_) => hash::hashrescan(scan, keys),
+        IndexScanOpaque::Gin(_) => gin::ginrescan(scan, keys),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(mock::rescan(scan)),
         #[allow(unreachable_patterns)]
@@ -497,6 +510,7 @@ fn am_endscan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
     match scan.opaque {
         IndexScanOpaque::Btree(_) => nbtree::btendscan(scan),
         IndexScanOpaque::Hash(_) => hash::hashendscan(scan),
+        IndexScanOpaque::Gin(_) => gin::ginendscan(scan),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(()),
         #[allow(unreachable_patterns)]
@@ -508,6 +522,7 @@ fn am_markpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
     match scan.opaque {
         IndexScanOpaque::Btree(_) => nbtree::btmarkpos(scan),
         IndexScanOpaque::Hash(_) => unreachable!("hash lacks ammarkpos (guarded by has_ammarkpos)"),
+        IndexScanOpaque::Gin(_) => unreachable!("gin lacks ammarkpos (guarded by has_ammarkpos)"),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(mock::markpos(scan)),
         #[allow(unreachable_patterns)]
@@ -519,6 +534,7 @@ fn am_restrpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
     match scan.opaque {
         IndexScanOpaque::Btree(_) => nbtree::btrestrpos(scan),
         IndexScanOpaque::Hash(_) => unreachable!("hash lacks amrestrpos (guarded by has_amrestrpos)"),
+        IndexScanOpaque::Gin(_) => unreachable!("gin lacks amrestrpos (guarded by has_amrestrpos)"),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => unreachable!("Mock lacks amrestrpos"),
         #[allow(unreachable_patterns)]
@@ -532,6 +548,10 @@ fn am_gettuple(scan: &mut IndexScanDescData<'_>, direction: ScanDirection) -> Pg
     match scan.opaque {
         IndexScanOpaque::Btree(_) => nbtree::btgettuple(scan, direction),
         IndexScanOpaque::Hash(_) => hash::hashgettuple(scan, direction),
+        IndexScanOpaque::Gin(_) => panic!(
+            "index \"{}\" does not support amgettuple (bitmap-only AM)",
+            scan.indexRelation.name()
+        ),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(mock::gettuple(scan)),
         #[allow(unreachable_patterns)]
@@ -570,6 +590,14 @@ fn am_insert<'mcx>(
             heap_t_ctid,
             heapRelation,
         ),
+        IndexAmKind::Gin => gin::gininsert(
+            mcx,
+            indexRelation,
+            values,
+            isnull,
+            heap_t_ctid,
+            heapRelation,
+        ),
         #[cfg(test)]
         IndexAmKind::Mock => Ok(true),
         #[allow(unreachable_patterns)]
@@ -582,6 +610,7 @@ fn am_insert_cleanup(kind: IndexAmKind, indexRelation: &Relation<'_>) -> PgResul
     match kind {
         IndexAmKind::Btree => unported("nbtree aminsertcleanup (insert lane is phase 2)"),
         IndexAmKind::Hash => unreachable!("hash lacks aminsertcleanup (guarded)"),
+        IndexAmKind::Gin => unreachable!("gin lacks aminsertcleanup (guarded)"),
         #[cfg(test)]
         IndexAmKind::Mock => Ok(()),
         #[allow(unreachable_patterns)]

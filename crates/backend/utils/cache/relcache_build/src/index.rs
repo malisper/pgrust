@@ -25,6 +25,9 @@ const BTNProcs: usize = 6;
 // both committed AMs.
 const BTORDER_PROC: usize = 1;
 const HASHNProcs: usize = 3;
+const GIN_AM_OID: Oid = 2742;
+const GINNProcs: usize = 7;
+const MAX_AM_PROCS: usize = GINNProcs;
 
 const Anum_pg_amproc_amprocfamily: i32 = 2;
 const Anum_pg_amproc_amproclefttype: i32 = 3;
@@ -95,9 +98,10 @@ pub(crate) fn relation_init_index_access_info(
     let amsupport = match form.relam {
         BTREE_AM_OID => BTNProcs,
         HASH_AM_OID => HASHNProcs,
+        GIN_AM_OID => GINNProcs,
         other => panic!(
             "relcache_build: index AM {other} for index {relid} unported \
-             (amapi closed set is btree+hash)"
+             (amapi closed set is btree+hash+gin)"
         ),
     };
     let mut opfamily: PgVec<'static, Oid> = mcx::vec_with_capacity_in(mcx, nkey)?;
@@ -110,7 +114,14 @@ pub(crate) fn relation_init_index_access_info(
         let ent = lookup_opclass_info(opc, amsupport)?;
         opfamily.push(ent.opcfamily);
         opcintype.push(ent.opcintype);
-        let proc = ent.support[BTORDER_PROC - 1];
+        // Preload slot 0 (BTORDER_PROC/HASHSTANDARD_PROC) for btree/hash; gin
+        // dispatches its support procs by OID (rule-4 closed set), never
+        // through FmgrInfo.
+        let proc = if form.relam == GIN_AM_OID {
+            0
+        } else {
+            ent.support[BTORDER_PROC - 1]
+        };
         supportinfo.push(if proc != 0 {
             Some(fmgr_seams::fmgr_info::call(proc)?)
         } else {
@@ -146,7 +157,7 @@ pub(crate) fn relation_init_index_access_info(
 struct OpClassEnt {
     opcfamily: Oid,
     opcintype: Oid,
-    support: [types_core::primitive::RegProcedure; BTNProcs],
+    support: [types_core::primitive::RegProcedure; MAX_AM_PROCS],
 }
 
 thread_local! {
@@ -173,7 +184,7 @@ fn lookup_opclass_info(opc: Oid, amsupport: usize) -> PgResult<OpClassEnt> {
 }
 
 fn load_opclass(opc: Oid, amsupport: usize) -> PgResult<OpClassEnt> {
-    debug_assert!(amsupport <= BTNProcs);
+    debug_assert!(amsupport <= MAX_AM_PROCS);
     let cx = MemoryContext::new("LookupOpclassInfo");
     let mcx = cx.mcx();
     let rel = table::table_open(mcx, OPERATOR_CLASS_RELATION_ID, AccessShareLock)?;
@@ -188,7 +199,7 @@ fn load_opclass(opc: Oid, amsupport: usize) -> PgResult<OpClassEnt> {
         Some(tup) => OpClassEnt {
             opcfamily: req(rel.descr(), tup, Anum_pg_opclass_opcfamily)?.as_oid(),
             opcintype: req(rel.descr(), tup, Anum_pg_opclass_opcintype)?.as_oid(),
-            support: [0; BTNProcs],
+            support: [0; MAX_AM_PROCS],
         },
         None => return Err(opclass_not_found(opc)),
     };
