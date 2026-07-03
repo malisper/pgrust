@@ -3,7 +3,9 @@
 //! the common indextuple unit when that lands.
 
 use ::datum::Datum;
-use ::types_core::AttrNumber;
+use ::mcx::{Mcx, PgVec};
+use ::types_core::{AttrNumber, INDEX_MAX_KEYS};
+use ::types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 use ::types_nbtree::{
     BT_IS_POSTING, BT_OFFSET_MASK, BT_PIVOT_HEAP_TID_ATTR, INDEX_ALT_TID_MASK,
 };
@@ -118,6 +120,218 @@ pub unsafe fn bt_tuple_get_max_heap_tid(itup: ITup) -> ItemPointerData {
     } else {
         t_tid(itup)
     }
+}
+
+pub(crate) const fn maxalign(l: usize) -> usize {
+    (l + 7) & !7
+}
+
+/// # Safety
+/// `itup` per module contract; the image is writable (owned scratch, never a
+/// locked page).
+#[inline]
+pub(crate) unsafe fn set_t_info(itup: *mut u8, info: u16) {
+    itup.add(6).cast::<u16>().write(info);
+}
+
+/// # Safety
+/// As [`set_t_info`].
+#[inline]
+pub(crate) unsafe fn set_t_tid(itup: *mut u8, tid: ItemPointerData) {
+    itup.cast::<ItemPointerData>().write_unaligned(tid);
+}
+
+/// BTreeTupleSetNAtts.
+///
+/// # Safety
+/// As [`set_t_info`].
+pub(crate) unsafe fn bt_tuple_set_natts(itup: *mut u8, nkeyatts: u16, heaptid: bool) {
+    debug_assert!(nkeyatts <= INDEX_MAX_KEYS as u16);
+    debug_assert!(nkeyatts & BT_STATUS_OFFSET_MASK == 0);
+    debug_assert!(!heaptid || nkeyatts != 0);
+    set_t_info(itup, t_info(itup) | INDEX_ALT_TID_MASK);
+    let mut tid = t_tid(itup);
+    tid.ip_posid = if heaptid {
+        nkeyatts | BT_PIVOT_HEAP_TID_ATTR
+    } else {
+        nkeyatts
+    };
+    set_t_tid(itup, tid);
+}
+
+const BT_STATUS_OFFSET_MASK: u16 = !BT_OFFSET_MASK;
+
+/// BTreeTupleSetDownLink.
+///
+/// # Safety
+/// As [`set_t_info`].
+pub(crate) unsafe fn bt_tuple_set_downlink(itup: *mut u8, blkno: ::types_core::BlockNumber) {
+    let mut tid = t_tid(itup);
+    tid.ip_blkid.bi_hi = (blkno >> 16) as u16;
+    tid.ip_blkid.bi_lo = (blkno & 0xffff) as u16;
+    set_t_tid(itup, tid);
+}
+
+#[cold]
+#[inline(never)]
+fn index_row_too_large(size: usize) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "index row requires {size} bytes, maximum size is {}",
+            INDEX_SIZE_MASK
+        ))
+        .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+    )
+}
+
+pub const INDEX_TUPLE_HEADER_SIZE: usize = 8;
+
+// MAXALIGNed index-tuple image (u64-backed: PgVec<u8> only guarantees align 1,
+// the itup module contract requires 8).
+pub struct ItupBuf<'mcx>(PgVec<'mcx, u64>);
+
+impl<'mcx> ItupBuf<'mcx> {
+    pub fn with_size(mcx: Mcx<'mcx>, size: usize) -> PgResult<Self> {
+        debug_assert!(size == maxalign(size));
+        Ok(ItupBuf(::mcx::vec_from_elem_in(mcx, 0u64, size / 8)))
+    }
+
+    #[inline]
+    pub fn as_ptr(&self) -> ITup {
+        self.0.as_ptr().cast()
+    }
+
+    #[inline]
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.0.as_mut_ptr().cast()
+    }
+
+    #[inline]
+    pub fn size(&self) -> usize {
+        self.0.len() * 8
+    }
+}
+
+/// index_form_tuple (indextuple.c), MAXALIGNed image in an mcx-backed buffer.
+/// The TOAST_INDEX_HACK external/compress arms are the toast lane.
+pub fn index_form_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    tupdesc: &TupleDescData<'_>,
+    values: &[Datum],
+    isnull: &[bool],
+) -> PgResult<ItupBuf<'mcx>> {
+    use ::types_tuple::varatt::{varatt_is_1b_e, varsize_any};
+
+    let natts = tupdesc.natts as usize;
+    debug_assert!(natts <= INDEX_MAX_KEYS as usize);
+
+    for i in 0..natts {
+        let att = tupdesc.compact_attr(i);
+        if isnull[i] || att.attlen != -1 {
+            continue;
+        }
+        // SAFETY: non-null varlena datums carry live pointers (caller contract).
+        unsafe {
+            let p = values[i].as_usize() as *const u8;
+            if varatt_is_1b_e(p) {
+                crate::unported_phase2("index_form_tuple TOAST_INDEX_HACK (detoast lane)");
+            }
+            const TOAST_INDEX_TARGET: usize = 8160 / 4; // MaximumBytesPerTuple(4)
+            if varsize_any(p) > TOAST_INDEX_TARGET {
+                crate::unported_phase2("index_form_tuple in-line compression (toast lane)");
+            }
+        }
+    }
+
+    let hasnull = isnull[..natts].contains(&true);
+    let mut infomask: u16 = if hasnull { INDEX_NULL_MASK } else { 0 };
+    let hoff = index_info_find_data_offset(infomask);
+    let data_size = ::heaptuple::heap_compute_data_size(tupdesc, values, isnull);
+    let size = maxalign(hoff + data_size);
+    if size & INDEX_SIZE_MASK as usize != size {
+        return Err(index_row_too_large(size));
+    }
+
+    let mut buf = ItupBuf::with_size(mcx, size)?;
+    let tp = buf.as_mut_ptr();
+    let mut tupmask: u16 = 0;
+    // SAFETY: buf holds hoff + data_size zeroed bytes; bitmap area pre-zeroed.
+    unsafe {
+        ::heaptuple::heap_fill_tuple(
+            tupdesc,
+            values,
+            isnull,
+            tp.add(hoff),
+            data_size,
+            &mut tupmask,
+            if hasnull {
+                Some(tp.add(INDEX_TUPLE_HEADER_SIZE))
+            } else {
+                None
+            },
+        );
+        if tupmask & ::types_tuple::HEAP_HASVARWIDTH != 0 {
+            infomask |= INDEX_VAR_MASK;
+        }
+        infomask |= size as u16;
+        set_t_info(tp, infomask);
+    }
+    Ok(buf)
+}
+
+/// CopyIndexTuple.
+///
+/// # Safety
+/// `itup` per module contract.
+pub(crate) unsafe fn copy_index_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    itup: ITup,
+) -> PgResult<ItupBuf<'mcx>> {
+    let size = maxalign(index_tuple_size(itup));
+    let mut buf = ItupBuf::with_size(mcx, size)?;
+    core::ptr::copy_nonoverlapping(itup, buf.as_mut_ptr(), index_tuple_size(itup));
+    Ok(buf)
+}
+
+/// index_truncate_tuple: `source` copied with only `leavenatts` attributes.
+///
+/// # Safety
+/// `source` per module contract; `leavenatts <= tupdesc.natts`.
+pub(crate) unsafe fn index_truncate_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    tupdesc: &TupleDescData<'_>,
+    source: ITup,
+    leavenatts: usize,
+) -> PgResult<ItupBuf<'mcx>> {
+    debug_assert!(leavenatts <= tupdesc.natts as usize);
+    if leavenatts == tupdesc.natts as usize {
+        return copy_index_tuple(mcx, source);
+    }
+
+    // CreateTupleDescTruncatedCopy: fill only reads compact_attrs[..natts].
+    let mut compact = ::mcx::vec_with_capacity_in(mcx, leavenatts)?;
+    for i in 0..leavenatts {
+        compact.push(tupdesc.compact_attr(i).clone());
+    }
+    let truncdesc = TupleDescData {
+        natts: leavenatts as i32,
+        tdtypeid: tupdesc.tdtypeid,
+        tdtypmod: tupdesc.tdtypmod,
+        tdrefcount: -1,
+        constr: None,
+        compact_attrs: compact,
+        attrs: PgVec::new_in(mcx),
+    };
+
+    let mut values = [Datum::null(); INDEX_MAX_KEYS as usize];
+    let mut isnull = [false; INDEX_MAX_KEYS as usize];
+    for i in 0..leavenatts {
+        values[i] = index_getattr(source, (i + 1) as AttrNumber, tupdesc, &mut isnull[i]);
+    }
+    let mut truncated = index_form_tuple(mcx, &truncdesc, &values[..leavenatts], &isnull[..leavenatts])?;
+    set_t_tid(truncated.as_mut_ptr(), t_tid(source));
+    debug_assert!(index_tuple_size(truncated.as_ptr()) <= index_tuple_size(source));
+    Ok(truncated)
 }
 
 /// index_getattr: borrowed deform — by-ref values point into the page image

@@ -216,3 +216,7 @@ pub(crate) fn for_each_held(mut f: impl FnMut(Buffer, i32)) {
 pub(crate) fn overflow_count() -> u32 {
     with(|p| p.overflowed)
 }
+
+pub(crate) fn overflowed_count() -> u32 {
+    with(|p| p.overflowed)
+}

@@ -86,6 +86,19 @@ pub fn CheckForSerializableConflictOut(
     unported_sxact();
 }
 
+// C gates on PredXact->SxactGlobalXmin (any serializable xact system-wide);
+// single-backend approximation matches the rest of this crate.
+pub fn PredicateLockPageSplit(
+    _rel: &RelationData<'_>,
+    _oldblkno: BlockNumber,
+    _newblkno: BlockNumber,
+) -> PgResult<()> {
+    if !MY_SERIALIZABLE_XACT_SET.with(|c| c.get()) {
+        return Ok(());
+    }
+    unported_sxact();
+}
+
 pub fn CheckForSerializableConflictIn(
     rel: &RelationData<'_>,
     _tid: Option<&ItemPointerData>,
@@ -133,6 +146,7 @@ pub fn init_seams() {
     );
     predicate_seams::check_for_serializable_conflict_out::set(CheckForSerializableConflictOut);
     predicate_seams::check_for_serializable_conflict_in::set(CheckForSerializableConflictIn);
+    predicate_seams::predicate_lock_page_split::set(PredicateLockPageSplit);
     predicate_seams::pre_commit_check_for_serialization_failure::set(
         PreCommit_CheckForSerializationFailure,
     );

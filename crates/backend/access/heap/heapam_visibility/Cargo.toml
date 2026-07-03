@@ -21,9 +21,9 @@ multixact_seams = { path = "../../transam/multixact_seams" }
 combocid_seams = { path = "../../../utils/time/combocid_seams" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+mcx = { path = "../../../../_support/mcx" }
 
 [dev-dependencies]
-mcx = { path = "../../../../_support/mcx" }
 init_small = { path = "../../../utils/init/init_small" }
 lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
 lwlock = { path = "../../../storage/lmgr/lwlock" }

@@ -8,16 +8,20 @@
 #![allow(irrefutable_let_patterns)]
 
 mod fcframe;
+mod insert;
 pub mod itup;
 mod page;
 mod preprocess;
 mod search;
+mod splitloc;
 mod utils;
+mod wal;
 
 #[cfg(test)]
 mod tests;
 
-pub use page::{bt_getrootheight, bt_metaversion};
+pub use insert::btinsert;
+pub use page::{bt_getrootheight, bt_initmetapage, bt_metaversion};
 
 use ::mcx::Mcx;
 use ::types_core::{BLCKSZ, InvalidSubTransactionId};
@@ -105,7 +109,7 @@ pub fn btbeginscan<'mcx>(
 }
 
 // RelationNeedsWAL (rel.h); XLogIsNeeded ≡ the xlog_standby_info_active seam.
-fn relation_needs_wal(rel: &Relation<'_>) -> bool {
+pub(crate) fn relation_needs_wal(rel: &Relation<'_>) -> bool {
     rel.is_permanent()
         && (transam_xlog_seams::xlog_standby_info_active::call()
             || (rel.rd_createSubid.get() == InvalidSubTransactionId
@@ -180,6 +184,38 @@ pub fn btgettuple(scan: &mut IndexScanDescData<'_>, dir: ScanDirection) -> PgRes
         unported_phase2("_bt_start_prim_scan (SAOP/skip-scan lane)");
     }
     Ok(res)
+}
+
+/// btgetbitmap: drain all matching heap TIDs into `tbm`, forward only.
+pub fn btgetbitmap(
+    scan: &mut IndexScanDescData<'_>,
+    tbm: &mut tidbitmap::TIDBitmap<'_>,
+) -> PgResult<i64> {
+    debug_assert!(scan.heapRelation.is_none());
+    let mut ntids: i64 = 0;
+
+    let mut ctx = split_scan!(&mut *scan);
+    if bt_first(&mut ctx, ::types_scan::sdir::ForwardScanDirection)? {
+        tbm.add_tuples(core::slice::from_ref(ctx.xs_heaptid), false)?;
+        ntids += 1;
+
+        loop {
+            ctx.so.currPos.itemIndex += 1;
+            if ctx.so.currPos.itemIndex > ctx.so.currPos.lastItem {
+                if !search::bt_next(&mut ctx, ::types_scan::sdir::ForwardScanDirection)? {
+                    break;
+                }
+            }
+            // SAFETY: itemIndex in [firstItem, lastItem], written by bt_readpage.
+            let item = unsafe { ctx.so.currPos.item(ctx.so.currPos.itemIndex as usize) };
+            tbm.add_tuples(core::slice::from_ref(&item.heapTid), false)?;
+            ntids += 1;
+        }
+    }
+    if ctx.so.numArrayKeys != 0 {
+        unported_phase2("_bt_start_prim_scan (SAOP/skip-scan lane)");
+    }
+    Ok(ntids)
 }
 
 /// btendscan. Storage is freed with the scan value (mcx lifetime).

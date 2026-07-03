@@ -1062,8 +1062,10 @@ pub fn HeapTupleSatisfiesVisibility(
     }
 }
 
-// Read-lane marshal for the &SnapshotData seam; DIRTY's snapshot write-back
-// needs &mut and lands with the DML lane.
+// Read-lane marshal for the &SnapshotData seam. DIRTY runs against a scratch
+// snapshot: the write-back fields (xmin/xmax/speculativeToken) only matter to
+// callers that wait on in-flight xacts, and that wait lane is unported —
+// panic exactly when C would have handed back a valid xwait.
 fn heap_tuple_satisfies_visibility_read(
     htup: &mut HeapTupleData<'_>,
     snapshot: &SnapshotData<'_>,
@@ -1074,12 +1076,26 @@ fn heap_tuple_satisfies_visibility_read(
         SNAPSHOT_SELF => HeapTupleSatisfiesSelf(htup, buffer),
         SNAPSHOT_ANY => HeapTupleSatisfiesAny(htup, buffer),
         SNAPSHOT_TOAST => HeapTupleSatisfiesToast(htup, buffer),
-        SNAPSHOT_DIRTY => unported("SNAPSHOT_DIRTY snapshot write-back (DML lane)"),
+        SNAPSHOT_DIRTY => DIRTY_SCRATCH.with(|cx| {
+            let mut dirty = SnapshotData::sentinel(cx.mcx(), SNAPSHOT_DIRTY);
+            let r = HeapTupleSatisfiesDirty(htup, &mut dirty, buffer)?;
+            if dirty.xmin != InvalidTransactionId
+                || dirty.xmax != InvalidTransactionId
+                || dirty.speculativeToken != 0
+            {
+                unported("SNAPSHOT_DIRTY write-back (in-flight xact wait lane)");
+            }
+            Ok(r)
+        }),
         SNAPSHOT_HISTORIC_MVCC => {
             unported("HeapTupleSatisfiesHistoricMVCC (reorderbuffer/logical decoding)")
         }
         SNAPSHOT_NON_VACUUMABLE => HeapTupleSatisfiesNonVacuumable(htup, snapshot, buffer),
     }
+}
+
+thread_local! {
+    static DIRTY_SCRATCH: ::mcx::MemoryContext = ::mcx::MemoryContext::new("DirtySnapshotScratch");
 }
 
 pub fn init_seams() {
