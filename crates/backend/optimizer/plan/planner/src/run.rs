@@ -85,8 +85,13 @@ pub struct PlannerRun<'mcx> {
     pub suspended_roots: PgVec<'mcx, SubrootState<'mcx>>,
     /// C glob->subroots, index-aligned with glob.subplans.
     pub subroots: PgVec<'mcx, SubrootState<'mcx>>,
+    /// C rel->subroot for planned RTE_SUBQUERY rels, keyed by
+    /// RelOptInfo.subroot_idx (RelOptInfo can't own a PlannerRun-tlist pair).
+    pub rel_subroots: PgVec<'mcx, SubrootState<'mcx>>,
     /// C qp_extra.activeWindows (WindowClause nodes in execution order).
     pub active_windows: PgVec<'mcx, types_nodes::Node<'mcx>>,
+    /// C qp_extra.setop.
+    pub qp_setop: Option<&'mcx types_nodes::parsenodes::SetOperationStmt<'mcx>>,
 }
 
 // A run is forgotten at the planner boundary (mcx reset reclaims), never
@@ -100,7 +105,8 @@ mcx::forget_safe_struct!(
         param_exec_types, all_relids, prunable_relids },
     SubrootState<'_> { root, processed_tlist },
     PlannerRun<'_> { mcx, root, glob, queries, processed_tlist,
-        assess_parallel, suspended_roots, subroots, active_windows },
+        assess_parallel, suspended_roots, subroots, rel_subroots,
+        active_windows, qp_setop },
 );
 
 impl<'mcx> PlannerRun<'mcx> {
@@ -114,7 +120,9 @@ impl<'mcx> PlannerRun<'mcx> {
             assess_parallel: false,
             suspended_roots: PgVec::new_in(mcx),
             subroots: PgVec::new_in(mcx),
+            rel_subroots: PgVec::new_in(mcx),
             active_windows: PgVec::new_in(mcx),
+            qp_setop: None,
         }
     }
 
@@ -143,6 +151,24 @@ impl<'mcx> PlannerRun<'mcx> {
         let sub_tlist = core::mem::replace(&mut self.processed_tlist, parent.processed_tlist);
         self.subroots.push(SubrootState { root: sub, processed_tlist: sub_tlist });
         self.subroots.len() - 1
+    }
+
+    /// Restore the parent level, detaching the finished child into
+    /// rel_subroots (C: rel->subroot). Returns the rel_subroots index.
+    pub fn pop_root_to_rel_subroot(&mut self) -> usize {
+        let parent = self.suspended_roots.pop().expect("pop_root_to_rel_subroot without push");
+        let sub = core::mem::replace(&mut self.root, parent.root);
+        let sub_tlist = core::mem::replace(&mut self.processed_tlist, parent.processed_tlist);
+        self.rel_subroots.push(SubrootState { root: sub, processed_tlist: sub_tlist });
+        self.rel_subroots.len() - 1
+    }
+
+    /// Swap the current level with a stored subquery subroot (symmetric; call
+    /// twice to enter and leave, as C passes rel->subroot to the callee).
+    pub fn swap_with_rel_subroot(&mut self, idx: usize) {
+        let s = &mut self.rel_subroots[idx];
+        core::mem::swap(&mut self.root, &mut s.root);
+        core::mem::swap(&mut self.processed_tlist, &mut s.processed_tlist);
     }
 
     // SS_identify_outer_params (subselect.c) over the ancestor chain,

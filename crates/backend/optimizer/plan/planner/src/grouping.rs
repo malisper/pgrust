@@ -11,7 +11,11 @@ use crate::prep::preprocess_targetlist;
 use crate::run::PlannerRun;
 use crate::{is_parallel_safe_exprs, is_parallel_safe_opt};
 
-pub fn grouping_planner<'mcx>(run: &mut PlannerRun<'mcx>, tuple_fraction: f64) -> PgResult<()> {
+pub fn grouping_planner<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    tuple_fraction: f64,
+    setops: Option<&'mcx types_nodes::parsenodes::SetOperationStmt<'mcx>>,
+) -> PgResult<()> {
     let parse = run.parse();
     let mut tuple_fraction = tuple_fraction;
     let mut offset_est: i64 = 0;
@@ -26,7 +30,38 @@ pub fn grouping_planner<'mcx>(run: &mut PlannerRun<'mcx>, tuple_fraction: f64) -
     run.root.tuple_fraction = tuple_fraction;
 
     if parse.setOperations.is_some() {
-        panic!("plan_set_operations (prepunion.c): M2 setop lane");
+        let current_rel = crate::prepunion::plan_set_operations(run)?;
+        assert_eq!(parse.commandType, CmdType::CMD_SELECT);
+        let fixed = postprocess_setop_tlist(run, run.processed_tlist(), &parse.targetList)?;
+        run.processed_tlist = Some(fixed);
+        let cheapest = run
+            .root
+            .rel(current_rel)
+            .cheapest_total_path
+            .expect("setop rel has a cheapest path");
+        let final_target = run
+            .root
+            .path(cheapest)
+            .base()
+            .pathtarget_id
+            .expect("setop path has a pathtarget");
+        let final_target_parallel_safe = is_parallel_safe_exprs(run, final_target)?;
+        debug_assert!(!parse.hasTargetSRFs);
+        debug_assert!(parse.rowMarks.is_nil() && parse.distinctClause.is_nil());
+        run.root.sort_pathkeys = crate::pathkeys::make_pathkeys_for_sortclauses(
+            run,
+            &parse.sortClause,
+            run.processed_tlist(),
+        )?;
+        return grouping_planner_tail(
+            run,
+            current_rel,
+            final_target,
+            final_target_parallel_safe,
+            limit_tuples,
+            offset_est,
+            count_est,
+        );
     }
     if !parse.groupingSets.is_nil() {
         panic!("preprocess_grouping_sets (planner.c): M3 grouping-sets lane");
@@ -80,6 +115,7 @@ pub fn grouping_planner<'mcx>(run: &mut PlannerRun<'mcx>, tuple_fraction: f64) -
         limit_tuples
     };
 
+    run.qp_setop = setops;
     let current_rel = query_planner(run, standard_qp_callback)?;
 
     let final_target = create_pathtarget(run, run.processed_tlist())?;
@@ -156,6 +192,29 @@ pub fn grouping_planner<'mcx>(run: &mut PlannerRun<'mcx>, tuple_fraction: f64) -
         current_rel = create_distinct_paths(run, current_rel, sort_input_target)?;
     }
 
+    grouping_planner_tail(
+        run,
+        current_rel,
+        final_target,
+        final_target_parallel_safe,
+        limit_tuples,
+        offset_est,
+        count_est,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn grouping_planner_tail<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    current_rel: RelId,
+    final_target: types_pathnodes::PtId,
+    final_target_parallel_safe: bool,
+    limit_tuples: f64,
+    offset_est: i64,
+    count_est: i64,
+) -> PgResult<()> {
+    let parse = run.parse();
+    let mut current_rel = current_rel;
     if !parse.sortClause.is_nil() {
         current_rel = create_ordered_paths(
             run,
@@ -609,7 +668,7 @@ fn create_grouping_paths<'mcx>(
 
 #[cold]
 #[inline(never)]
-fn could_not_implement(what: &str) -> Box<types_error::PgError> {
+pub(crate) fn could_not_implement(what: &str) -> Box<types_error::PgError> {
     Box::new(
         types_error::PgError::error(format!("could not implement {what}"))
             .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
@@ -1065,8 +1124,8 @@ fn create_ordered_paths<'mcx>(
     Ok(ordered_rel)
 }
 
-// standard_qp_callback (planner.c): grouping sets/windows/setops loud
-// upstream; setop_pathkeys always NIL.
+// standard_qp_callback (planner.c); qp_extra arrives as run.qp_setop /
+// run.active_windows.
 fn standard_qp_callback<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
     let parse = run.parse();
     let tlist = run.processed_tlist();
@@ -1122,16 +1181,75 @@ fn standard_qp_callback<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
     run.root.sort_pathkeys =
         crate::pathkeys::make_pathkeys_for_sortclauses(run, &parse.sortClause, tlist)?;
 
+    run.root.setop_pathkeys = mcx::PgVec::new_in(run.mcx);
+    if let Some(op) = run.qp_setop {
+        let mut group_clauses = crate::prepunion::generate_setop_child_grouplist(run, op, tlist)?;
+        if !group_clauses.is_empty() {
+            let (pathkeys, sortable) = crate::pathkeys::make_pathkeys_for_sortclauses_extended(
+                run,
+                &mut group_clauses,
+                tlist,
+                false,
+                false,
+            )?;
+            if sortable {
+                run.root.setop_pathkeys = pathkeys;
+            }
+        }
+    }
+
     run.root.query_pathkeys = if !run.root.group_pathkeys.is_empty() {
         crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.group_pathkeys)
     } else if !run.root.window_pathkeys.is_empty() {
         crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.window_pathkeys)
     } else if run.root.distinct_pathkeys.len() > run.root.sort_pathkeys.len() {
         crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.distinct_pathkeys)
-    } else {
+    } else if !run.root.sort_pathkeys.is_empty() {
         crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.sort_pathkeys)
+    } else {
+        crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.setop_pathkeys)
     };
     Ok(())
+}
+
+// postprocess_setop_tlist (planner.c): transpose sort-key refs from the parse
+// tlist onto flat copies of the setop tlist.
+fn postprocess_setop_tlist<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    new_tlist: &types_nodes::list::NodeList<'mcx>,
+    orig_tlist: &types_nodes::list::NodeList<'mcx>,
+) -> PgResult<&'mcx types_nodes::list::NodeList<'mcx>> {
+    let mcx = run.mcx;
+    let mut out = types_nodes::list::NodeList::nil();
+    let mut orig = orig_tlist.iter();
+    for new_node in new_tlist {
+        let new_tle = new_node.as_target_entry().expect("tlist cell");
+        debug_assert!(!new_tle.resjunk);
+        let orig_tle = orig
+            .next()
+            .expect("setop tlist longer than parse tlist")
+            .as_target_entry()
+            .expect("tlist cell");
+        assert!(!orig_tle.resjunk, "resjunk output columns are not implemented");
+        debug_assert_eq!(new_tle.resno, orig_tle.resno);
+        out.lappend(
+            mcx,
+            types_nodes::Node::mk(
+                mcx,
+                types_nodes::primnodes::TargetEntry {
+                    expr: new_tle.expr,
+                    resno: new_tle.resno,
+                    resname: new_tle.resname,
+                    ressortgroupref: orig_tle.ressortgroupref,
+                    resorigtbl: new_tle.resorigtbl,
+                    resorigcol: new_tle.resorigcol,
+                    resjunk: new_tle.resjunk,
+                },
+            )?,
+        )?;
+    }
+    assert!(orig.next().is_none(), "resjunk output columns are not implemented");
+    Ok(mcx::leak_in(mcx::alloc_in(mcx, out)?))
 }
 
 // Unpartitioned, SRF-free arm.

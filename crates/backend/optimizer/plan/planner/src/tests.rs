@@ -659,7 +659,7 @@ fn bitmap_heap_path_plans_to_bitmap_scan_nodes() {
     let mcx = cx.mcx();
     let parse = table_query(mcx, Some(eq_qual(mcx, 1, 42)));
     let mut run = crate::run::PlannerRun::new(mcx);
-    crate::subquery::subquery_planner(&mut run, parse, 0.0).unwrap();
+    crate::subquery::subquery_planner(&mut run, parse, 0.0, None).unwrap();
     let final_rel = crate::planmain::fetch_final_rel(&mut run);
     // The bitmap heap path was generated but is dominated by the plain index
     // scan (as C); rebuild one over the surviving index path to plan it.
@@ -750,7 +750,7 @@ fn competing_paths_pick_cheapest_total_and_startup() {
     // tuple_fraction > 0 sets consider_startup: the seqscan (startup 0) and
     // the index scan (cheaper total) both survive add_path's fuzzy compare.
     let mut run = crate::run::PlannerRun::new(mcx);
-    crate::subquery::subquery_planner(&mut run, parse, 0.1).unwrap();
+    crate::subquery::subquery_planner(&mut run, parse, 0.1, None).unwrap();
     let final_rel = crate::planmain::fetch_final_rel(&mut run);
     let rel = run.root.rel(final_rel);
     assert_eq!(rel.pathlist.len(), 2);
@@ -3522,5 +3522,354 @@ mod dummy_rel {
         let rcq = result.resconstantqual.expect("one-time filter").as_list().unwrap();
         assert_eq!(rcq.len(), 1);
         assert!(!rcq.nth(0).as_const().unwrap().constvalue.as_bool());
+    }
+}
+
+mod setops {
+    use super::*;
+    use types_nodes::list::{IntList, OidList};
+    use types_nodes::parsenodes::{SetOperation, SetOperationStmt, SortGroupClause};
+
+    fn subquery_rte<'mcx>(
+        mcx: Mcx<'mcx>,
+        subquery: Query<'mcx>,
+        name: &'mcx str,
+        colnames: &[&'mcx str],
+    ) -> Node<'mcx> {
+        let mut cols = NodeList::nil();
+        for c in colnames {
+            cols.lappend(mcx, Node::mk_string(mcx, c).unwrap()).unwrap();
+        }
+        let eref = alloc_leak_in(
+            mcx,
+            types_nodes::primnodes::Alias { aliasname: Some(name), colnames: cols },
+        )
+        .unwrap();
+        let mut rte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+        rte.rtekind = RTEKind::RTE_SUBQUERY;
+        rte.subquery = Some(alloc_leak_in(mcx, subquery).unwrap());
+        rte.eref = Some(eref);
+        rte.alias = Some(eref);
+        rte.inFromCl = false;
+        rte.seal()
+    }
+
+    fn int4_group_clause(mcx: Mcx<'_>) -> Node<'_> {
+        Node::mk(
+            mcx,
+            SortGroupClause {
+                tleSortGroupRef: 0,
+                eqop: INT4EQ_OP,
+                sortop: INT4_LT_OP,
+                reverse_sort: false,
+                nulls_first: false,
+                hashable: true,
+            },
+        )
+        .unwrap()
+    }
+
+    fn setop_query<'mcx>(
+        mcx: Mcx<'mcx>,
+        op: SetOperation,
+        all: bool,
+        left: Query<'mcx>,
+        right: Query<'mcx>,
+        ncols: usize,
+        colnames: &[&'mcx str],
+    ) -> Query<'mcx> {
+        let mut rtable = NodeList::make1(mcx, subquery_rte(mcx, left, "*SELECT* 1", colnames))
+            .unwrap();
+        rtable
+            .lappend(mcx, subquery_rte(mcx, right, "*SELECT* 2", colnames))
+            .unwrap();
+        let mut col_types = OidList::nil();
+        let mut col_typmods = IntList::nil();
+        let mut col_collations = OidList::nil();
+        let mut group_clauses = NodeList::nil();
+        let mut tlist = NodeList::nil();
+        for i in 0..ncols {
+            col_types.lappend(mcx, 23).unwrap();
+            col_typmods.lappend(mcx, -1).unwrap();
+            col_collations.lappend(mcx, 0).unwrap();
+            if !all {
+                group_clauses.lappend(mcx, int4_group_clause(mcx)).unwrap();
+            }
+            let v = Node::mk_var(mcx, 1, (i + 1) as i16, 23, -1, 0, 0).unwrap();
+            tlist
+                .lappend(
+                    mcx,
+                    Node::mk_target_entry(mcx, v, (i + 1) as i16, Some(colnames[i]), false)
+                        .unwrap(),
+                )
+                .unwrap();
+        }
+        let stmt = Node::mk(
+            mcx,
+            SetOperationStmt {
+                op,
+                all,
+                larg: Some(Node::mk_range_tbl_ref(mcx, 1).unwrap()),
+                rarg: Some(Node::mk_range_tbl_ref(mcx, 2).unwrap()),
+                colTypes: col_types,
+                colTypmods: col_typmods,
+                colCollations: col_collations,
+                groupClauses: group_clauses,
+            },
+        )
+        .unwrap();
+        let jointree =
+            alloc_leak_in(mcx, FromExpr { fromlist: NodeList::nil(), quals: None }).unwrap();
+        Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            jointree: Some(jointree),
+            rtable,
+            targetList: tlist,
+            setOperations: Some(stmt),
+            stmt_location: 0,
+            stmt_len: 40,
+            ..Query::default()
+        }
+    }
+
+    fn select_const_query(mcx: Mcx<'_>, v: i32) -> Query<'_> {
+        let konst =
+            Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(v), false, true).unwrap();
+        let tle = Node::mk_target_entry(mcx, konst, 1, Some("?column?"), false).unwrap();
+        let jointree =
+            alloc_leak_in(mcx, FromExpr { fromlist: NodeList::nil(), quals: None }).unwrap();
+        Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            jointree: Some(jointree),
+            targetList: NodeList::make1(mcx, tle).unwrap(),
+            stmt_location: 0,
+            stmt_len: 8,
+            ..Query::default()
+        }
+    }
+
+    fn val_only_table_query(mcx: Mcx<'_>) -> Query<'_> {
+        let mut parse = table_query(mcx, None);
+        let val = Node::mk_var(mcx, 1, 2, 23, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, val, 1, Some("val"), false).unwrap();
+        parse.targetList = NodeList::make1(mcx, tle).unwrap();
+        parse
+    }
+
+    #[test]
+    fn union_all_of_consts_plans_to_append_of_results() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let parse = setop_query(
+            mcx,
+            SetOperation::SETOP_UNION,
+            true,
+            select_const_query(mcx, 1),
+            select_const_query(mcx, 2),
+            1,
+            &["?column?"],
+        );
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT 1 UNION ALL SELECT 2",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+
+        let plan = stmt.planTree.unwrap();
+        assert_eq!(plan.node_tag(), NodeTag::T_Append);
+        let a = plan.as_append().unwrap();
+        assert_eq!(a.appendplans.len(), 2);
+        // Trivial SubqueryScans are elided; the leaf Results surface directly.
+        assert_eq!(a.appendplans.nth(0).node_tag(), NodeTag::T_Result);
+        assert_eq!(a.appendplans.nth(1).node_tag(), NodeTag::T_Result);
+        assert_eq!(a.plan.plan_rows, 2.0);
+        // Parent rtable (2 subquery RTEs) + each child's RTE_RESULT.
+        assert_eq!(stmt.rtable.len(), 4);
+        let c0 = a.appendplans.nth(0).as_result().unwrap();
+        assert!(c0.plan.targetlist.nth(0).as_target_entry().unwrap().expr.as_const().is_some());
+    }
+
+    #[test]
+    fn union_of_consts_plans_to_hashagg_over_append() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        let mcx = cx.mcx();
+        let parse = setop_query(
+            mcx,
+            SetOperation::SETOP_UNION,
+            false,
+            select_const_query(mcx, 1),
+            select_const_query(mcx, 2),
+            1,
+            &["?column?"],
+        );
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT 1 UNION SELECT 2",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+
+        // Two const rows: C picks Sort+Unique over HashAggregate (verified
+        // on live PG 18.3: Unique 0.04..0.05, Sort 0.04..0.05, Append
+        // 0.00..0.03, Result 0.00..0.01).
+        let plan = stmt.planTree.unwrap();
+        assert_eq!(plan.node_tag(), NodeTag::T_Unique);
+        let uplan = plan.as_plan().unwrap();
+        let sort = uplan.lefttree.unwrap();
+        assert_eq!(sort.node_tag(), NodeTag::T_Sort);
+        let append = sort.as_plan().unwrap().lefttree.unwrap();
+        assert_eq!(append.node_tag(), NodeTag::T_Append);
+        assert!((uplan.total_cost - 0.05).abs() < 0.005, "{}", uplan.total_cost);
+        assert!((append.as_plan().unwrap().total_cost - 0.03).abs() < 0.005);
+    }
+
+    #[test]
+    fn union_all_order_by_limit_plans_to_limit_sort_append() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        let mcx = cx.mcx();
+        let mut parse = setop_query(
+            mcx,
+            SetOperation::SETOP_UNION,
+            true,
+            val_only_table_query(mcx),
+            val_only_table_query(mcx),
+            1,
+            &["val"],
+        );
+        let tle = parse.targetList.nth(0);
+        // SAFETY: freshly built tlist; no other reference is live.
+        unsafe {
+            tle.with_mut::<types_nodes::primnodes::TargetEntry, _>(|t| t.ressortgroupref = 1)
+        }
+        .unwrap();
+        parse.sortClause = NodeList::make1(
+            mcx,
+            Node::mk(
+                mcx,
+                SortGroupClause {
+                    tleSortGroupRef: 1,
+                    eqop: INT4EQ_OP,
+                    sortop: INT4_LT_OP,
+                    reverse_sort: false,
+                    nulls_first: false,
+                    hashable: true,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        parse.limitCount =
+            Some(Node::mk_const(mcx, 20, -1, 0, 8, Datum::from_i64(5), false, true).unwrap());
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT val FROM t UNION ALL SELECT val FROM t ORDER BY 1 LIMIT 5",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+
+        let plan = stmt.planTree.unwrap();
+        assert_eq!(plan.node_tag(), NodeTag::T_Limit);
+        let sort = plan.as_plan().unwrap().lefttree.unwrap();
+        assert_eq!(sort.node_tag(), NodeTag::T_Sort);
+        let append = sort.as_plan().unwrap().lefttree.unwrap();
+        assert_eq!(append.node_tag(), NodeTag::T_Append);
+        assert_eq!(append.as_append().unwrap().appendplans.len(), 2);
+    }
+
+    #[test]
+    fn union_of_table_scans_plans_to_hashagg_over_append() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        let mcx = cx.mcx();
+        let parse = setop_query(
+            mcx,
+            SetOperation::SETOP_UNION,
+            false,
+            val_only_table_query(mcx),
+            val_only_table_query(mcx),
+            1,
+            &["val"],
+        );
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT val FROM t UNION SELECT val FROM t",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+
+        let plan = stmt.planTree.unwrap();
+        assert_eq!(plan.node_tag(), NodeTag::T_Agg);
+        let agg = plan.as_agg().unwrap();
+        assert_eq!(agg.aggstrategy, types_pathnodes::AGG_HASHED);
+        assert_eq!(agg.numCols, 1);
+        let child = agg.plan.lefttree.unwrap();
+        assert_eq!(child.node_tag(), NodeTag::T_Append);
+        let a = child.as_append().unwrap();
+        assert_eq!(a.appendplans.len(), 2);
+        assert_eq!(a.appendplans.nth(0).node_tag(), NodeTag::T_SeqScan);
+    }
+
+    #[test]
+    fn intersect_of_table_scans_plans_to_hashsetop() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        let mcx = cx.mcx();
+        let parse = setop_query(
+            mcx,
+            SetOperation::SETOP_INTERSECT,
+            false,
+            val_only_table_query(mcx),
+            val_only_table_query(mcx),
+            1,
+            &["val"],
+        );
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT val FROM t INTERSECT SELECT val FROM t",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+
+        let plan = stmt.planTree.unwrap();
+        assert_eq!(plan.node_tag(), NodeTag::T_SetOp);
+        let so = plan.as_set_op().unwrap();
+        assert_eq!(so.cmd, types_pathnodes::SETOPCMD_INTERSECT);
+        assert_eq!(so.strategy, types_pathnodes::SETOP_HASHED);
+        assert_eq!(so.numCols, 1);
+        assert_eq!(so.cmpOperators, &[INT4EQ_OP]);
+        assert_eq!(so.plan.lefttree.unwrap().node_tag(), NodeTag::T_SeqScan);
+        assert_eq!(so.plan.righttree.unwrap().node_tag(), NodeTag::T_SeqScan);
+        // Each SeqScan renumbers into its own flattened-rtable slot.
+        let lscan = so.plan.lefttree.unwrap().as_seq_scan().unwrap();
+        let rscan = so.plan.righttree.unwrap().as_seq_scan().unwrap();
+        assert_eq!(lscan.scan.scanrelid, 3);
+        assert_eq!(rscan.scan.scanrelid, 4);
     }
 }

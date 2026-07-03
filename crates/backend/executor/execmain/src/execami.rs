@@ -161,6 +161,30 @@ pub fn exec_re_scan<'mcx>(
             ::nodemergejoin::exec_rescan_merge_join(&mut mj.state, estate);
             Ok(())
         }
+        // ExecReScanAppend: every subplan rescanned (chgParam always NULL).
+        PlanStateNode::Append(a) => {
+            let a = &mut **a;
+            for sub in a.substates.iter_mut() {
+                exec_re_scan(sub, estate)?;
+            }
+            ::nodeappend::exec_rescan_append(&mut a.state);
+            Ok(())
+        }
+        // ExecReScanSubqueryScan: subplan rescanned (chgParam always NULL).
+        PlanStateNode::SubqueryScan(s) => {
+            let s = &mut **s;
+            ::execscan::exec_scan_rescan(&mut s.ss, estate);
+            exec_re_scan(&mut s.subplan, estate)
+        }
+        // ExecReScanSetOp: hashed re-walks the table; sorted re-reads both.
+        PlanStateNode::SetOp(s) => {
+            let s = &mut **s;
+            if ::nodesetop::exec_rescan_set_op(&mut s.state, estate) {
+                exec_re_scan(&mut s.outer, estate)?;
+                exec_re_scan(&mut s.inner, estate)?;
+            }
+            Ok(())
+        }
         // execAmi.c has no ModifyTable rescan arm ("node type not supported").
         PlanStateNode::ModifyTable(_) => {
             panic!("ExecReScan (execAmi.c): node type 232 does not support ExecReScan")

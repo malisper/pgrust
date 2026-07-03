@@ -2126,6 +2126,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "nodeagg",
+ "nodeappend",
  "nodebitmapheapscan",
  "nodebitmapindexscan",
  "nodectescan",
@@ -2141,6 +2142,7 @@ dependencies = [
  "nodemodifytable",
  "nodenestloop",
  "nodeseqscan",
+ "nodesetop",
  "nodesort",
  "nodeunique",
  "nodevaluesscan",
@@ -3962,6 +3964,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodeappend"
+version = "0.1.0"
+dependencies = [
+ "executils",
+ "init_small",
+ "postgres_seams",
+ "types_error",
+ "types_nodes",
+ "types_scan",
+ "types_slot",
+]
+
+[[package]]
 name = "nodebitmapheapscan"
 version = "0.1.0"
 dependencies = [
@@ -4426,6 +4441,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodesetop"
+version = "0.1.0"
+dependencies = [
+ "aclchk_seams",
+ "datum",
+ "execgrouping",
+ "exectuples",
+ "executils",
+ "guc_tables",
+ "init_small",
+ "mcx",
+ "miscinit_seams",
+ "postgres_seams",
+ "syscache_seams",
+ "tuplesort",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_pathnodes",
+ "types_slot",
+ "types_tuple",
+]
+
+[[package]]
 name = "nodesort"
 version = "0.1.0"
 dependencies = [
@@ -4787,12 +4826,14 @@ dependencies = [
  "parse_clause",
  "parse_collate",
  "parse_expr",
+ "parse_oper",
  "parse_relation",
  "parse_target",
  "parser_seams",
  "parser_small1",
  "rel_vocab",
  "relation_seams",
+ "stack_depth",
  "syscache_seams",
  "table",
  "tupdesc",
@@ -5249,6 +5290,7 @@ dependencies = [
  "bufmgr_seams",
  "clauses",
  "clauses_seams",
+ "coerce",
  "datum",
  "execmain",
  "fmgr_core",
@@ -5262,6 +5304,7 @@ dependencies = [
  "nodehash",
  "nodes_core",
  "parse_relation",
+ "parser_small1",
  "planner_seams",
  "relation_seams",
  "relcache",

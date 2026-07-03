@@ -22,6 +22,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
         NodeTag::T_BoolExpr | NodeTag::T_NullTest => types_core::catalog::BOOLOID,
+        NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().typeId,
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
@@ -71,6 +72,7 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_Var => node.as_var().unwrap().vartypmod,
         NodeTag::T_Param => node.as_param().unwrap().paramtypmod,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttypmod,
+        NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().typeMod,
         NodeTag::T_OpExpr
         | NodeTag::T_FuncExpr
         | NodeTag::T_Aggref
@@ -135,6 +137,7 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resultcollid,
         NodeTag::T_BoolExpr | NodeTag::T_NullTest => types_core::InvalidOid,
+        NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().collation,
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescecollid,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxcollid,
@@ -216,6 +219,7 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         NodeTag::T_ParamRef => node.as_param_ref().unwrap().location,
         NodeTag::T_ResTarget => node.as_res_target().unwrap().location,
         NodeTag::T_SubLink => node.as_sub_link().unwrap().location,
+        NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().location,
         NodeTag::T_CoerceViaIO => {
             let c = node.as_coerce_via_io().unwrap();
             leftmost_loc(c.location, expr_location(c.arg))

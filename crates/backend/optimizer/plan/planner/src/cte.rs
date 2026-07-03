@@ -49,7 +49,7 @@ pub fn ss_process_ctes<'mcx>(run: &mut PlannerRun<'mcx>, parse: &Query<'mcx>) ->
 
         debug_assert!(run.root.plan_params.is_empty());
         run.push_root()?;
-        crate::subquery::subquery_planner(run, subquery, 0.0)?;
+        crate::subquery::subquery_planner(run, subquery, 0.0, None)?;
         let final_rel = fetch_final_rel(run);
         let best_path = get_cheapest_fractional_path(run, final_rel, 0.0);
         let plan = create_plan(run, best_path)?;

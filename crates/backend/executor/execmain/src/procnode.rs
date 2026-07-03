@@ -7,7 +7,7 @@ use ::types_error::PgResult;
 use ::types_nodes::node_tree::Node;
 use ::types_nodes::plannodes::Plan;
 use ::types_nodes::NodeTag;
-use ::types_slot::SlotData;
+use ::types_slot::{SlotData, TupleSlotKind};
 use ::types_tuple::TupleDescData;
 
 use crate::noderesult::{exec_end_result, exec_init_result, exec_result, ResultState};
@@ -53,35 +53,69 @@ pub enum PlanStateNode<'mcx> {
     HashJoin(PgBox<'mcx, HashJoinNode<'mcx>>),
     MergeJoin(PgBox<'mcx, MergeJoinNode<'mcx>>),
     WindowAgg(PgBox<'mcx, WindowAggNode<'mcx>>),
+    Append(PgBox<'mcx, AppendNode<'mcx>>),
+    SubqueryScan(PgBox<'mcx, SubqueryScanNode<'mcx>>),
+    SetOp(PgBox<'mcx, SetOpNode<'mcx>>),
     // Last variant: existing discriminants keep their values, so the
     // uninstrumented jump-table dispatch compiles unchanged.
     Instrumented(PgBox<'mcx, InstrumentedNode<'mcx>>),
 }
 
-// ModifyTable's subplan lives here too (nodesort/nodeagg precedent) —
-// exec_proc passes a fetch closure.
+// The subplans live here (BitmapCombineState precedent; indexed fetch).
+pub struct AppendNode<'mcx> {
+    pub state: ::nodeappend::AppendState<'mcx>,
+    pub substates: ::mcx::PgVec<'mcx, PlanStateNode<'mcx>>,
+}
+
+// nodeSubqueryscan.c lives here whole (crate cycle with the node-enum owner).
+pub struct SubqueryScanNode<'mcx> {
+    pub ss: ::execscan::ScanState<'mcx>,
+    pub subplan: PgBox<'mcx, PlanStateNode<'mcx>>,
+}
+
+impl<'mcx> ::execscan::ScanNode<'mcx> for SubqueryScanNode<'mcx> {
+    #[inline(always)]
+    fn ss_mut(&mut self) -> &mut ::execscan::ScanState<'mcx> {
+        &mut self.ss
+    }
+
+    // SubqueryNext: the subplan's slot goes to the driver uncopied, as C.
+    fn scan_next(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
+        let Some(id) = exec_proc_node(&mut self.subplan, estate)? else {
+            return Ok(false);
+        };
+        self.ss.ss_ScanTupleSlot = id;
+        Ok(true)
+    }
+}
+
+// Both children live here (nodesort/nodeagg precedent; fetch closures).
+pub struct SetOpNode<'mcx> {
+    pub state: ::nodesetop::SetOpState<'mcx>,
+    pub outer: PlanStateNode<'mcx>,
+    pub inner: PlanStateNode<'mcx>,
+}
+
+// The subplan lives here (nodesort/nodeagg precedent; fetch closure).
 pub struct ModifyTablePlanState<'mcx> {
     pub mt: ::nodemodifytable::ModifyTableState<'mcx>,
     pub subplan: PlanStateNode<'mcx>,
     pub epq: crate::epq::EpqState<'mcx>,
 }
 
-// The bitmapqual subtree lives here, not in nodebitmapheapscan (crate cycle
-// with the node-enum owner; Agg precedent) — exec_proc runs MultiExec on it.
+// The bitmapqual subtree lives here (crate cycle with the node-enum owner).
 pub struct BitmapHeapPlanState<'mcx> {
     pub scan: ::nodebitmapheapscan::BitmapHeapScanState<'mcx>,
     pub bitmapqual: PlanStateNode<'mcx>,
 }
 
-// nodeBitmapAnd.c/nodeBitmapOr.c state: only the subplan list (the And/Or
-// MultiExec bodies live in multi_exec_bitmap_node below, next to the
-// recursion they need).
+// nodeBitmapAnd.c/nodeBitmapOr.c state: only the subplan list (the MultiExec
+// bodies live in multi_exec_bitmap_node, next to the recursion they need).
 pub struct BitmapCombineState<'mcx> {
     pub substates: ::mcx::PgVec<'mcx, PlanStateNode<'mcx>>,
 }
 
-// The Agg node's outer child lives here, not in nodeagg (crate cycle with the
-// node-enum owner; nodesort precedent) — exec_proc passes a fetch closure.
+// The outer child lives here (crate cycle with the node-enum owner).
 pub struct AggPlanState<'mcx> {
     pub agg: ::nodeagg::AggStateData<'mcx>,
     pub outer: PlanStateNode<'mcx>,
@@ -121,16 +155,14 @@ pub struct UniqueNode<'mcx> {
     pub outer: PlanStateNode<'mcx>,
 }
 
-// Both children live here (nodesort/nodeagg precedent); nodenestloop drives
-// them through the NestLoopChild trait.
+// Both children live here; nodenestloop drives them via NestLoopChild.
 pub struct NestLoopNode<'mcx> {
     pub state: ::nodenestloop::NestLoopState<'mcx>,
     pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
     pub inner: PgBox<'mcx, PlanStateNode<'mcx>>,
 }
 
-// The inner Hash sub-node (its own HashState + the real inner scan child); the
-// HashJoin drives its build via nodehash's HashBuildInput.
+// The inner Hash sub-node: its own HashState + the real inner scan child.
 pub struct HashSubNode<'mcx> {
     pub state: ::nodehash::HashState<'mcx>,
     pub child: PgBox<'mcx, PlanStateNode<'mcx>>,
@@ -142,8 +174,7 @@ pub struct HashJoinNode<'mcx> {
     pub hash: PgBox<'mcx, HashSubNode<'mcx>>,
 }
 
-// Both children live here (nestloop precedent); nodemergejoin drives them
-// through the MergeJoinOuter/MergeJoinInner traits.
+// Both children live here; nodemergejoin drives them via the MergeJoin traits.
 pub struct MergeJoinNode<'mcx> {
     pub state: ::nodemergejoin::MergeJoinState<'mcx>,
     pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
@@ -180,6 +211,10 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::MergeJoin(mj) => Some(mj.state.ps_ExprContext),
             PlanStateNode::WindowAgg(w) => Some(w.state.ps_ExprContext),
             PlanStateNode::BitmapHeapScan(b) => Some(b.scan.ss.ps_ExprContext),
+            // C's ExecInitAppend assigns no ExprContext.
+            PlanStateNode::Append(_) => None,
+            PlanStateNode::SubqueryScan(s) => Some(s.ss.ps_ExprContext),
+            PlanStateNode::SetOp(s) => Some(s.state.ps_ExprContext),
             PlanStateNode::BitmapIndexScan(_)
             | PlanStateNode::BitmapAnd(_)
             | PlanStateNode::BitmapOr(_)
@@ -208,7 +243,9 @@ impl<'mcx> PlanStateNode<'mcx> {
             | PlanStateNode::IndexScan(_)
             | PlanStateNode::IndexOnlyScan(_)
             | PlanStateNode::Limit(_)
-            | PlanStateNode::BitmapHeapScan(_) => crate::exec_type_from_tl(&plan.targetlist),
+            | PlanStateNode::BitmapHeapScan(_)
+            | PlanStateNode::Append(_)
+            | PlanStateNode::SubqueryScan(_) => crate::exec_type_from_tl(&plan.targetlist),
             // The tlist is NIL (empty type) without RETURNING, else the first
             // RETURNING list setrefs installed.
             PlanStateNode::ModifyTable(_) => crate::exec_type_from_tl(&plan.targetlist),
@@ -221,6 +258,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::HashJoin(hj) => Ok(hj.state.ps_ResultTupleDesc.clone()),
             PlanStateNode::MergeJoin(mj) => Ok(mj.state.ps_ResultTupleDesc.clone()),
             PlanStateNode::WindowAgg(w) => Ok(w.state.ps_ResultTupleDesc.clone()),
+            PlanStateNode::SetOp(s) => Ok(s.state.ps_ResultTupleDesc.clone()),
             PlanStateNode::BitmapIndexScan(_)
             | PlanStateNode::BitmapAnd(_)
             | PlanStateNode::BitmapOr(_) => {
@@ -610,6 +648,80 @@ pub fn exec_init_node<'mcx>(
                 },
             )?)
         }
+        NodeTag::T_Append => {
+            let mcx = estate.es_query_cxt;
+            let ap_plan = node.as_append().unwrap();
+            let mut substates: ::mcx::PgVec<'mcx, PlanStateNode<'mcx>> =
+                ::mcx::PgVec::new_in(mcx);
+            substates
+                .try_reserve_exact(ap_plan.appendplans.len())
+                .map_err(|_| mcx.oom(ap_plan.appendplans.len()))?;
+            for subplan in ap_plan.appendplans.iter() {
+                let state = exec_init_node(Some(subplan), estate, eflags)?
+                    .expect("Append subplan list holds plan nodes");
+                substates.push(state);
+            }
+            let state =
+                ::nodeappend::exec_init_append(ap_plan, estate, eflags, substates.len())?;
+            PlanStateNode::Append(::mcx::alloc_in(mcx, AppendNode { state, substates })?)
+        }
+        NodeTag::T_SubqueryScan => {
+            let mcx = estate.es_query_cxt;
+            let sq_plan = node.as_subquery_scan().unwrap();
+            debug_assert!(
+                sq_plan.scan.plan.lefttree.is_none() && sq_plan.scan.plan.righttree.is_none()
+            );
+            let sub_node = sq_plan.subplan.unwrap_or_else(|| {
+                panic!("ExecInitSubqueryScan (nodeSubqueryscan.c): SubqueryScan without a subplan")
+            });
+            let subplan = exec_init_node(Some(sub_node), estate, eflags)?
+                .expect("SubqueryScan subplan initialized");
+            let scan_desc = subplan.exec_get_result_type(sub_node.as_plan().unwrap())?;
+            let ps_ExprContext = estate.exec_assign_expr_context();
+            // Desc carrier only: scan_next repoints it at the subplan's slot.
+            let ss_ScanTupleSlot =
+                estate.exec_init_extra_tuple_slot(Some(scan_desc), TupleSlotKind::Virtual);
+            let mut ss = ::execscan::ScanState {
+                qual: None,
+                ps_ProjInfo: None,
+                ps_ExprContext,
+                scanrelid: sq_plan.scan.scanrelid,
+                ss_currentRelation: None,
+                ss_currentScanDesc: None,
+                ss_ScanTupleSlot,
+            };
+            ::execscan::exec_assign_scan_projection_info(
+                mcx,
+                estate,
+                &mut ss,
+                &sq_plan.scan.plan.targetlist,
+            )?;
+            ss.qual =
+                ::execexpr::exec_init_qual(mcx, &sq_plan.scan.plan.qual, estate.param_bind())?;
+            PlanStateNode::SubqueryScan(::mcx::alloc_in(
+                mcx,
+                SubqueryScanNode { ss, subplan: ::mcx::alloc_in(mcx, subplan)? },
+            )?)
+        }
+        NodeTag::T_SetOp => {
+            let mcx = estate.es_query_cxt;
+            let so_plan = node.as_set_op().unwrap();
+            let child_eflags = ::nodesetop::child_eflags(so_plan.strategy, eflags);
+            let outer = exec_init_node(so_plan.plan.lefttree, estate, child_eflags)?
+                .unwrap_or_else(|| {
+                    panic!("ExecInitSetOp (nodeSetOp.c): SetOp without an outer plan")
+                });
+            let inner = exec_init_node(so_plan.plan.righttree, estate, child_eflags)?
+                .unwrap_or_else(|| {
+                    panic!("ExecInitSetOp (nodeSetOp.c): SetOp without an inner plan")
+                });
+            let outer_desc =
+                outer.exec_get_result_type(so_plan.plan.lefttree.unwrap().as_plan().unwrap())?;
+            let result_desc = crate::exec_type_from_tl(&so_plan.plan.targetlist)?;
+            let state =
+                ::nodesetop::exec_init_set_op(so_plan, estate, eflags, &outer_desc, result_desc)?;
+            PlanStateNode::SetOp(::mcx::alloc_in(mcx, SetOpNode { state, outer, inner })?)
+        }
         NodeTag::T_ModifyTable => {
             let mcx = estate.es_query_cxt;
             let mt_plan = node.as_modify_table().unwrap();
@@ -642,13 +754,11 @@ pub fn exec_init_node<'mcx>(
         }
         tag => unported_nodes!(tag, {
             T_ProjectSet => "nodeProjectSet.c",
-            T_Append => "nodeAppend.c",
             T_MergeAppend => "nodeMergeAppend.c",
             T_RecursiveUnion => "nodeRecursiveunion.c",
             T_SampleScan => "nodeSamplescan.c",
             T_TidScan => "nodeTidscan.c",
             T_TidRangeScan => "nodeTidrangescan.c",
-            T_SubqueryScan => "nodeSubqueryscan.c",
             T_TableFuncScan => "nodeTableFuncscan.c",
             T_ValuesScan => "nodeValuesscan.c",
             T_NamedTuplestoreScan => "nodeNamedtuplestorescan.c",
@@ -662,7 +772,6 @@ pub fn exec_init_node<'mcx>(
             T_Gather => "nodeGather.c",
             T_GatherMerge => "nodeGatherMerge.c",
             T_Hash => "nodeHash.c",
-            T_SetOp => "nodeSetOp.c",
             T_LockRows => "nodeLockRows.c",
         }),
     };
@@ -743,6 +852,9 @@ pub fn exec_proc_node<'mcx>(
             panic!("bitmap-producing node does not support ExecProcNode call convention")
         }
         PlanStateNode::ModifyTable(mps) => modify_table_arm(mps, estate),
+        PlanStateNode::Append(a) => append_arm(a, estate),
+        PlanStateNode::SubqueryScan(s) => subquery_scan_arm(s, estate),
+        PlanStateNode::SetOp(s) => set_op_arm(s, estate),
         PlanStateNode::NestLoop(nl) => nest_loop_arm(nl, estate),
         PlanStateNode::HashJoin(hj) => hash_join_arm(hj, estate),
         PlanStateNode::MergeJoin(mj) => merge_join_arm(mj, estate),
@@ -893,6 +1005,37 @@ fn modify_table_arm<'mcx>(
         estate,
         |e| exec_proc_node(subplan, e),
         |e, inputslot| crate::epq::eval_plan_qual(epq, e, inputslot),
+    )
+}
+
+#[inline(never)]
+fn append_arm<'mcx>(
+    a: &mut PgBox<'mcx, AppendNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    let AppendNode { state, substates } = &mut **a;
+    ::nodeappend::exec_append(state, estate, |e, i| exec_proc_node(&mut substates[i], e))
+}
+
+#[inline(never)]
+fn subquery_scan_arm<'mcx>(
+    s: &mut PgBox<'mcx, SubqueryScanNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    ::execscan::exec_scan(&mut **s, estate)
+}
+
+#[inline(never)]
+fn set_op_arm<'mcx>(
+    s: &mut PgBox<'mcx, SetOpNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    let SetOpNode { state, outer, inner } = &mut **s;
+    ::nodesetop::exec_set_op(
+        state,
+        estate,
+        |e| exec_proc_node(outer, e),
+        |e| exec_proc_node(inner, e),
     )
 }
 
@@ -1082,6 +1225,21 @@ pub fn exec_end_node<'mcx>(
             ::nodemodifytable::exec_end_modify_table(&mut mps.mt);
             exec_end_node(&mut mps.subplan, estate)
         }
+        PlanStateNode::Append(a) => {
+            let a = &mut **a;
+            ::nodeappend::exec_end_append(&mut a.state);
+            for sub in a.substates.iter_mut() {
+                exec_end_node(sub, estate)?;
+            }
+            Ok(())
+        }
+        PlanStateNode::SubqueryScan(s) => exec_end_node(&mut s.subplan, estate),
+        PlanStateNode::SetOp(s) => {
+            let s = &mut **s;
+            ::nodesetop::exec_end_set_op(&mut s.state);
+            exec_end_node(&mut s.outer, estate)?;
+            exec_end_node(&mut s.inner, estate)
+        }
         PlanStateNode::NestLoop(nl) => {
             ::nodenestloop::exec_end_nest_loop(&mut nl.state);
             exec_end_node(&mut nl.outer, estate)?;
@@ -1133,6 +1291,17 @@ pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>, estate: &mut ESt
             }
         }
         PlanStateNode::ModifyTable(mps) => exec_shutdown_node(&mut mps.subplan, estate),
+        PlanStateNode::Append(a) => {
+            for sub in a.substates.iter_mut() {
+                exec_shutdown_node(sub, estate);
+            }
+        }
+        PlanStateNode::SubqueryScan(s) => exec_shutdown_node(&mut s.subplan, estate),
+        PlanStateNode::SetOp(s) => {
+            let s = &mut **s;
+            exec_shutdown_node(&mut s.outer, estate);
+            exec_shutdown_node(&mut s.inner, estate);
+        }
         PlanStateNode::NestLoop(nl) => {
             exec_shutdown_node(&mut nl.outer, estate);
             exec_shutdown_node(&mut nl.inner, estate);
@@ -1152,10 +1321,9 @@ pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>, estate: &mut ESt
     }
 }
 
-/// `ExecSetTupleBound` (execProcnode.c): Sort gets the bound, Result passes
-/// it through to its child; every other ported variant is C's silent no-op
-/// fall-through (Agg included — C only descends Sort/IncrementalSort/
-/// MergeAppend/Result/SubqueryScan/Gather/GatherMerge).
+/// `ExecSetTupleBound` (execProcnode.c): Sort gets the bound; Result, Append
+/// members, and qual-less SubqueryScan pass it through; every other ported
+/// variant is C's silent no-op fall-through (Agg included).
 pub fn exec_set_tuple_bound<'mcx>(tuples_needed: i64, node: &mut PlanStateNode<'mcx>) {
     match node {
         PlanStateNode::Instrumented(w) => exec_set_tuple_bound(tuples_needed, &mut w.inner),
@@ -1166,6 +1334,17 @@ pub fn exec_set_tuple_bound<'mcx>(tuples_needed: i64, node: &mut PlanStateNode<'
         PlanStateNode::Result(rs) => {
             if let Some(outer) = rs.outer.as_deref_mut() {
                 exec_set_tuple_bound(tuples_needed, outer);
+            }
+        }
+        PlanStateNode::Append(a) => {
+            for sub in a.substates.iter_mut() {
+                exec_set_tuple_bound(tuples_needed, sub);
+            }
+        }
+        PlanStateNode::SubqueryScan(s) => {
+            let s = &mut **s;
+            if s.ss.qual.is_none() {
+                exec_set_tuple_bound(tuples_needed, &mut s.subplan);
             }
         }
         _ => {}

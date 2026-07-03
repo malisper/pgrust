@@ -1,7 +1,8 @@
 use types_error::PgResult;
 use types_nodes::list::{NodeList, OidList};
 use types_nodes::plannodes::{
-    Agg, Hash, HashJoin, IndexScan, Plan, Result as ResultPlan, SeqScan, WindowAgg,
+    Agg, Append, Hash, HashJoin, IndexScan, Plan, Result as ResultPlan, SeqScan, SetOp,
+    SubqueryScan, WindowAgg,
 };
 use types_nodes::primnodes::{OpExpr, TargetEntry};
 use types_nodes::{Node, NodeTag};
@@ -49,6 +50,9 @@ fn create_plan_recurse<'mcx>(
         }
         PathNode::IndexPath(_) => create_scan_plan(run, path_id, flags),
         PathNode::BitmapHeapPath(_) => create_scan_plan(run, path_id, flags),
+        PathNode::SubqueryScanPath(_) => create_scan_plan(run, path_id, flags),
+        PathNode::AppendPath(_) => create_append_plan(run, path_id, flags),
+        PathNode::SetOpPath(_) => create_setop_plan(run, path_id, flags),
         PathNode::ProjectionPath(_) => create_projection_plan(run, path_id, flags),
         PathNode::GroupResultPath(_) => create_group_result_plan(run, path_id),
         PathNode::AggPath(_) => create_agg_plan(run, path_id),
@@ -216,6 +220,9 @@ fn create_scan_plan<'mcx>(
         }
         t if t == crate::pathnode::tag16(NodeTag::T_CteScan) => {
             create_ctescan_plan(run, best_path, tlist, scan_clauses)?
+        }
+        t if t == crate::pathnode::tag16(NodeTag::T_SubqueryScan) => {
+            create_subqueryscan_plan(run, best_path, tlist, scan_clauses)?
         }
         other => panic!("create_scan_plan (createplan.c): pathtype {other}; M2 scan lane"),
     };
@@ -1292,7 +1299,7 @@ fn build_path_tlist<'mcx>(run: &mut PlannerRun<'mcx>, target_id: PtId) -> PgResu
 }
 
 // Copies the querytree tlist's decoration onto the plan tlist, in place as C.
-fn apply_tlist_labeling<'mcx>(plan: Node<'mcx>, src_tlist: &NodeList<'mcx>) {
+pub(crate) fn apply_tlist_labeling<'mcx>(plan: Node<'mcx>, src_tlist: &NodeList<'mcx>) {
     let dest_tlist = &plan.as_plan().expect("plan node").targetlist;
     assert_eq!(dest_tlist.len(), src_tlist.len());
     for (dest_node, src_node) in dest_tlist.iter().zip(src_tlist.iter()) {
@@ -2089,4 +2096,173 @@ fn create_mergejoin_plan<'mcx>(
     join_plan.join.joinqual = joinclauses;
     copy_generic_path_info(run, &mut join_plan.join.plan, path_id);
     Ok(join_plan.seal())
+}
+
+// create_append_plan (createplan.c), unordered serial arm: the pathkeys/
+// prepare_sort_from_pathkeys leg is the MergeAppend/ordered-append lane, and
+// async/partition-pruning legs have no lane.
+fn create_append_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let _ = flags;
+    let mcx = run.mcx;
+    let (rel_id, target_id, subpaths, first_partial, pathkeys_empty) = match run.root.path(path_id)
+    {
+        PathNode::AppendPath(a) => (
+            a.path.parent,
+            a.path.pathtarget_id.expect("Append path has a pathtarget"),
+            crate::relnode::pgvec_clone_shallow(mcx, &a.subpaths),
+            a.first_partial_path,
+            a.path.pathkeys.is_empty(),
+        ),
+        _ => unreachable!(),
+    };
+    assert!(
+        pathkeys_empty,
+        "create_append_plan (createplan.c): ordered append; MergeAppend lane unported (set-ops lane)"
+    );
+    let tlist = build_path_tlist(run, target_id)?;
+
+    if subpaths.is_empty() {
+        // Dummy rel: a Result plan with a constant-FALSE gating qual.
+        let konst = clauses::make_bool_const(mcx, false, false)?;
+        let mut plan = Node::build::<ResultPlan<'mcx>>(mcx)?;
+        plan.plan.targetlist = tlist;
+        plan.resconstantqual = Some(Node::mk_list(mcx, NodeList::make1(mcx, konst)?)?);
+        copy_generic_path_info(run, &mut plan.plan, path_id);
+        return Ok(plan.seal());
+    }
+
+    let mut appendplans = NodeList::nil();
+    for &sp in subpaths.iter() {
+        appendplans.lappend(mcx, create_plan_recurse(run, sp, CP_EXACT_TLIST)?)?;
+    }
+
+    let mut apprelids = types_nodes::bitmapset::Bitmapset::empty();
+    for m in crate::relnode::relids_members(&run.root.rel(rel_id).relids) {
+        apprelids.add_member(mcx, m)?;
+    }
+
+    let mut plan = Node::build::<Append<'mcx>>(mcx)?;
+    plan.plan.targetlist = tlist;
+    plan.apprelids = apprelids;
+    plan.appendplans = appendplans;
+    plan.nasyncplans = 0;
+    plan.first_partial_plan = first_partial;
+    plan.part_prune_index = -1;
+    copy_generic_path_info(run, &mut plan.plan, path_id);
+    Ok(plan.seal())
+}
+
+// create_setop_plan + make_setop (createplan.c).
+fn create_setop_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let (target_id, leftpath, rightpath, cmd, strategy, group_ids, num_groups) =
+        match run.root.path(path_id) {
+            PathNode::SetOpPath(s) => (
+                s.path.pathtarget_id.expect("SetOp path has a pathtarget"),
+                s.leftpath.expect("SetOp leftpath"),
+                s.rightpath.expect("SetOp rightpath"),
+                s.cmd,
+                s.strategy,
+                crate::relnode::pgvec_clone_shallow(mcx, &s.groupList),
+                s.numGroups,
+            ),
+            _ => unreachable!(),
+        };
+    let tlist = build_path_tlist(run, target_id)?;
+    // SetOp doesn't project: tlist requirements pass through, and the
+    // grouping columns must be labeled.
+    let leftplan = create_plan_recurse(run, leftpath, flags | CP_LABEL_TLIST)?;
+    let rightplan = create_plan_recurse(run, rightpath, flags | CP_LABEL_TLIST)?;
+
+    let mut cmp_col_idx: mcx::PgVec<'mcx, i16> = mcx::PgVec::new_in(mcx);
+    let mut cmp_operators: mcx::PgVec<'mcx, u32> = mcx::PgVec::new_in(mcx);
+    let mut cmp_collations: mcx::PgVec<'mcx, u32> = mcx::PgVec::new_in(mcx);
+    let mut cmp_nulls_first: mcx::PgVec<'mcx, bool> = mcx::PgVec::new_in(mcx);
+    for &gid in group_ids.iter() {
+        let sortcl = *run
+            .root
+            .expr_node(gid)
+            .as_sort_group_clause()
+            .expect("groupList holds SortGroupClauses");
+        let tle = tlist
+            .iter()
+            .map(|n| n.as_target_entry().expect("tlist cell"))
+            .find(|t| t.ressortgroupref == sortcl.tleSortGroupRef)
+            .expect("grouping column matches a tlist entry");
+        cmp_col_idx.push(tle.resno);
+        let op = if strategy == types_pathnodes::SETOP_HASHED {
+            sortcl.eqop
+        } else {
+            sortcl.sortop
+        };
+        debug_assert!(op != 0);
+        cmp_operators.push(op);
+        cmp_collations.push(expr_collation(tle.expr));
+        cmp_nulls_first.push(sortcl.nulls_first);
+    }
+
+    let mut plan = Node::build::<SetOp<'mcx>>(mcx)?;
+    plan.plan.targetlist = tlist;
+    plan.plan.lefttree = Some(leftplan);
+    plan.plan.righttree = Some(rightplan);
+    plan.cmd = cmd;
+    plan.strategy = strategy;
+    plan.numCols = cmp_col_idx.len() as i32;
+    plan.cmpColIdx = mcx::slice_borrow_in(mcx, &cmp_col_idx)?;
+    plan.cmpOperators = mcx::slice_borrow_in(mcx, &cmp_operators)?;
+    plan.cmpCollations = mcx::slice_borrow_in(mcx, &cmp_collations)?;
+    plan.cmpNullsFirst = mcx::slice_borrow_in(mcx, &cmp_nulls_first)?;
+    plan.numGroups = clamp_cardinality_to_long(num_groups);
+    copy_generic_path_info(run, &mut plan.plan, path_id);
+    Ok(plan.seal())
+}
+
+// create_subqueryscan_plan (createplan.c); the subplan is created under the
+// rel's subroot (C: create_plan(rel->subroot, best_path->subpath)).
+fn create_subqueryscan_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: NodeList<'mcx>,
+    scan_clauses: mcx::PgVec<'mcx, RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let (rel_id, sub_pid) = match run.root.path(best_path) {
+        PathNode::SubqueryScanPath(p) => {
+            (p.path.parent, p.subroot_subpath.expect("SubqueryScanPath subpath"))
+        }
+        _ => unreachable!(),
+    };
+    let scan_relid = run.root.rel(rel_id).relid;
+    debug_assert!(scan_relid > 0);
+    debug_assert!(
+        run.root.rel(rel_id).rtekind
+            == types_nodes::parsenodes::RTEKind::RTE_SUBQUERY as u32
+    );
+    let idx = run.root.rel(rel_id).subroot_idx.expect("subquery rel has a subroot");
+
+    run.swap_with_rel_subroot(idx);
+    let subplan = crate::createplan::create_plan(run, sub_pid);
+    run.swap_with_rel_subroot(idx);
+    let subplan = subplan?;
+
+    let ordered = order_qual_clauses(run, &scan_clauses)?;
+    let qual = extract_actual_clauses(run, &ordered);
+    debug_assert!(run.root.path(best_path).base().param_info.is_none());
+
+    let mut plan = Node::build::<SubqueryScan<'mcx>>(mcx)?;
+    plan.scan.plan.targetlist = tlist;
+    plan.scan.plan.qual = qual;
+    plan.scan.scanrelid = scan_relid;
+    plan.subplan = Some(subplan);
+    plan.scanstatus = 0;
+    copy_generic_path_info(run, &mut plan.scan.plan, best_path);
+    Ok(plan.seal())
 }

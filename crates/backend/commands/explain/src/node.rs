@@ -21,6 +21,15 @@ use crate::format::{
 use crate::options::str_in;
 use crate::state::{ExplainState, EXPLAIN_FORMAT_TEXT};
 
+// SetOpCmd/SetOpStrategy wire values (nodes.h; canonical consts live in
+// types_pathnodes, not a dep of this crate).
+const SETOP_SORTED: u32 = 0;
+const SETOP_HASHED: u32 = 1;
+const SETOPCMD_INTERSECT: u32 = 0;
+const SETOPCMD_INTERSECT_ALL: u32 = 1;
+const SETOPCMD_EXCEPT: u32 = 2;
+const SETOPCMD_EXCEPT_ALL: u32 = 3;
+
 const BOOLOID: u32 = 16;
 const INT4OID: u32 = 23;
 const UNKNOWNOID: u32 = 705;
@@ -102,6 +111,18 @@ fn ExplainPreScanNode<'mcx>(
             rels_used
                 .add_member(mcx, node.as_bitmap_heap_scan().unwrap().scan.scanrelid as i32)?;
         }
+        NodeTag::T_SubqueryScan => {
+            let sq = node.as_subquery_scan().unwrap();
+            rels_used.add_member(mcx, sq.scan.scanrelid as i32)?;
+            ExplainPreScanNode(mcx, sq.subplan.expect("SubqueryScan subplan"), subplans, rels_used)?;
+        }
+        NodeTag::T_Append => {
+            let a = node.as_append().unwrap();
+            rels_used.add_members(mcx, &a.apprelids)?;
+            for child in &a.appendplans {
+                ExplainPreScanNode(mcx, child, subplans, rels_used)?;
+            }
+        }
         _ => {}
     }
     let plan = plan_of(node);
@@ -164,14 +185,20 @@ fn plan_is_disabled(node: Node<'_>) -> bool {
     if plan.disabled_nodes == 0 {
         return false;
     }
-    // Append/MergeAppend/SubqueryScan/CustomScan child sums: vocabulary
-    // unported, plan_of already panicked on those tags.
     let mut child_disabled = 0;
-    if let Some(l) = plan.lefttree {
-        child_disabled += plan_of(l).disabled_nodes;
-    }
-    if let Some(r) = plan.righttree {
-        child_disabled += plan_of(r).disabled_nodes;
+    if let Some(a) = node.as_append() {
+        for child in &a.appendplans {
+            child_disabled += plan_of(child).disabled_nodes;
+        }
+    } else if let Some(sq) = node.as_subquery_scan() {
+        child_disabled += plan_of(sq.subplan.expect("SubqueryScan subplan")).disabled_nodes;
+    } else {
+        if let Some(l) = plan.lefttree {
+            child_disabled += plan_of(l).disabled_nodes;
+        }
+        if let Some(r) = plan.righttree {
+            child_disabled += plan_of(r).disabled_nodes;
+        }
     }
     plan.disabled_nodes > child_disabled
 }
@@ -187,6 +214,16 @@ pub fn ExplainNode<'mcx>(
 
     let pname = match node.node_tag() {
         NodeTag::T_Result => "Result",
+        NodeTag::T_Append => "Append",
+        NodeTag::T_MergeAppend => {
+            node_gap("ExplainNode", "MergeAppend display; MergeAppend lane unported (set-ops lane)")
+        }
+        NodeTag::T_SubqueryScan => "Subquery Scan",
+        NodeTag::T_SetOp => match node.as_set_op().expect("SetOp plan node").strategy {
+            SETOP_SORTED => "SetOp",
+            SETOP_HASHED => "HashSetOp",
+            other => node_gap("ExplainNode", &format!("SetOp strategy {other} unrecognized")),
+        },
         NodeTag::T_SeqScan => "Seq Scan",
         NodeTag::T_IndexScan => "Index Scan",
         NodeTag::T_IndexOnlyScan => "Index Only Scan",
@@ -268,6 +305,16 @@ pub fn ExplainNode<'mcx>(
             append!(es, " Join");
         }
     }
+    if let Some(so) = node.as_set_op() {
+        let setopcmd = match so.cmd {
+            SETOPCMD_INTERSECT => "Intersect",
+            SETOPCMD_INTERSECT_ALL => "Intersect All",
+            SETOPCMD_EXCEPT => "Except",
+            SETOPCMD_EXCEPT_ALL => "Except All",
+            other => node_gap("ExplainNode", &format!("SetOp command {other} unrecognized")),
+        };
+        append!(es, " {setopcmd}");
+    }
     es.indent += 1;
 
     if node.node_tag() == NodeTag::T_SeqScan {
@@ -283,6 +330,9 @@ pub fn ExplainNode<'mcx>(
     }
     if node.node_tag() == NodeTag::T_CteScan {
         ExplainScanTarget(node.as_cte_scan().unwrap().scan.scanrelid, es)?;
+    }
+    if node.node_tag() == NodeTag::T_SubqueryScan {
+        ExplainScanTarget(node.as_subquery_scan().unwrap().scan.scanrelid, es)?;
     }
     if let Some(fs) = node.as_function_scan() {
         ExplainFunctionTarget(fs, es)?;
@@ -431,8 +481,12 @@ pub fn ExplainNode<'mcx>(
                 );
             }
         }
-        // Unique and Limit show nothing extra without ANALYZE.
-        NodeTag::T_Unique | NodeTag::T_Limit => {}
+        NodeTag::T_SubqueryScan => {
+            show_scan_qual(&plan.qual, "Filter", node, es)?;
+            filtered_count_gap(&plan.qual, es);
+        }
+        // Unique, Limit, Append and SetOp show nothing extra without ANALYZE.
+        NodeTag::T_Unique | NodeTag::T_Limit | NodeTag::T_Append | NodeTag::T_SetOp => {}
         _ => unreachable!(),
     }
 
@@ -453,7 +507,10 @@ pub fn ExplainNode<'mcx>(
             .nth(sp.plan_id as usize - 1);
         ExplainNode(child, Some("InitPlan"), sp.plan_name, es)?;
     }
-    let haschildren = plan.lefttree.is_some() || plan.righttree.is_some();
+    let haschildren = plan.lefttree.is_some()
+        || plan.righttree.is_some()
+        || node.node_tag() == NodeTag::T_Append
+        || node.node_tag() == NodeTag::T_SubqueryScan;
     if haschildren {
         ExplainOpenGroup("Plans", Some("Plans"), false, es);
     }
@@ -462,6 +519,14 @@ pub fn ExplainNode<'mcx>(
     }
     if let Some(r) = plan.righttree {
         ExplainNode(r, Some("Inner"), None, es)?;
+    }
+    if let Some(a) = node.as_append() {
+        for child in &a.appendplans {
+            ExplainNode(child, Some("Member"), None, es)?;
+        }
+    }
+    if let Some(sq) = node.as_subquery_scan() {
+        ExplainNode(sq.subplan.expect("SubqueryScan subplan"), Some("Subquery"), None, es)?;
     }
     if haschildren {
         ExplainCloseGroup("Plans", Some("Plans"), false, es);
@@ -477,8 +542,9 @@ fn show_plan_tlist<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgRes
     if plan.targetlist.is_nil() {
         return Ok(());
     }
-    // Append/MergeAppend/RecursiveUnion/ForeignScan suppression arms: those
-    // tags already panic in plan_of.
+    if node.node_tag() == NodeTag::T_Append {
+        return Ok(());
+    }
     let mcx = es.str.allocator();
     let useprefix = es.rtable_size > 1;
     let mut result: PgVec<'mcx, PgString<'mcx>> = PgVec::new_in(mcx);
@@ -747,7 +813,7 @@ fn show_window_def<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgRes
     let wagg = node.as_window_agg().expect("WindowAgg node");
     let mcx = es.str.allocator();
     let mut buf = PgString::new_in(mcx);
-    buf.try_push_str(quote_identifier(wagg.winname.expect("named window (name_active_windows)")))?;
+    buf.try_push_str(&quote_identifier(wagg.winname.expect("named window (name_active_windows)")))?;
     buf.try_push_str(" AS (")?;
     let child = wagg.plan.lefttree;
     let mut needspace = false;
@@ -908,7 +974,13 @@ fn deparse_plan_var<'mcx>(
         let child_plan = plan_of(child);
         let tle = get_tle_by_resno(&child_plan.targetlist, var.varattno)
             .unwrap_or_else(|| node_gap("get_variable", "bogus varattno for OUTER_VAR"));
-        return deparse_plan_var(child_plan.lefttree, tle.expr, useprefix, es, buf);
+        if tle.expr.as_var().is_none() {
+            buf.try_push('(')?;
+            deparse_expr(es, child, tle.expr, useprefix, buf)?;
+            buf.try_push(')')?;
+            return Ok(());
+        }
+        return deparse_plan_var(outer_child(child), tle.expr, useprefix, es, buf);
     }
     if var.varno <= 0 || var.varno as usize > es.rtable_size as usize {
         node_gap("get_variable", "INNER_VAR/INDEX_VAR deparse unported (ruleutils lane)");
@@ -924,7 +996,7 @@ fn deparse_plan_var<'mcx>(
         let refname = es.rtable_names[var.varno as usize - 1]
             .or(eref.aliasname)
             .expect("deparsed Var's RTE has a refname");
-        buf.try_push_str(quote_identifier(refname))?;
+        buf.try_push_str(&quote_identifier(refname))?;
         buf.try_push('.')?;
     }
     debug_assert!(var.varattno > 0, "system/whole-row Var deparse is a loud upstream lane");
@@ -934,7 +1006,7 @@ fn deparse_plan_var<'mcx>(
         .as_string()
         .expect("eref colnames hold String nodes")
         .sval;
-    buf.try_push_str(quote_identifier(colname))?;
+    buf.try_push_str(&quote_identifier(colname))?;
     Ok(())
 }
 
@@ -1074,7 +1146,7 @@ fn show_scan_qual<'mcx>(
     node: Node<'mcx>,
     es: &mut ExplainState<'mcx>,
 ) -> PgResult<()> {
-    let useprefix = es.verbose;
+    let useprefix = node.node_tag() == NodeTag::T_SubqueryScan || es.verbose;
     show_qual(qual, qlabel, node, useprefix, es)
 }
 
@@ -1297,7 +1369,16 @@ fn deparse_var<'mcx>(
     useprefix: bool,
     buf: &mut PgString<'mcx>,
 ) -> PgResult<()> {
-    let (varno, varattno) = resolve_plan_var(plan_node, var.varno, var.varattno);
+    let (varno, varattno) = match resolve_plan_var(plan_node, var.varno, var.varattno) {
+        ResolvedVar::Base(v, a) => (v, a),
+        // C get_variable: a non-Var referent prints parenthesized.
+        ResolvedVar::Expr(expr, ctx) => {
+            buf.try_push('(')?;
+            deparse_expr(es, ctx, expr, useprefix, buf)?;
+            buf.try_push(')')?;
+            return Ok(());
+        }
+    };
     if varattno <= 0 {
         node_gap("get_variable", "whole-row/system column deparse (ruleutils lane)");
     }
@@ -1321,7 +1402,20 @@ fn deparse_var<'mcx>(
     push_identifier(buf, colname)
 }
 
-fn resolve_plan_var(plan_node: Node<'_>, varno: i32, varattno: i16) -> (i32, i16) {
+// ruleutils set_deparse_plan: Append's OUTER referent is its first member.
+fn outer_child(plan_node: Node<'_>) -> Option<Node<'_>> {
+    match plan_node.as_append() {
+        Some(a) => Some(a.appendplans.nth(0)),
+        None => plan_of(plan_node).lefttree,
+    }
+}
+
+enum ResolvedVar<'mcx> {
+    Base(i32, i16),
+    Expr(Node<'mcx>, Node<'mcx>),
+}
+
+fn resolve_plan_var<'mcx>(plan_node: Node<'mcx>, varno: i32, varattno: i16) -> ResolvedVar<'mcx> {
     // INDEX_VAR: dpns->index_tlist (set_deparse_plan); entries are heap Vars.
     if varno == types_nodes::primnodes::INDEX_VAR {
         let Some(ios) = plan_node.as_index_only_scan() else {
@@ -1331,12 +1425,12 @@ fn resolve_plan_var(plan_node: Node<'_>, varno: i32, varattno: i16) -> (i32, i16
         let Some(v) = tle.expr.as_var() else {
             node_gap("get_variable", "non-Var indextlist deparse (ruleutils lane)");
         };
-        return (v.varno, v.varattno);
+        return ResolvedVar::Base(v.varno, v.varattno);
     }
     let child = match varno {
-        types_nodes::primnodes::OUTER_VAR => plan_of(plan_node).lefttree,
+        types_nodes::primnodes::OUTER_VAR => outer_child(plan_node),
         types_nodes::primnodes::INNER_VAR => plan_of(plan_node).righttree,
-        _ => return (varno, varattno),
+        _ => return ResolvedVar::Base(varno, varattno),
     };
     let child = child.expect("OUTER/INNER var without child plan");
     let tle = plan_of(child)
@@ -1345,10 +1439,10 @@ fn resolve_plan_var(plan_node: Node<'_>, varno: i32, varattno: i16) -> (i32, i16
         .as_target_entry()
         .expect("tlist cell");
     debug_assert_eq!(tle.resno, varattno);
-    let Some(v) = tle.expr.as_var() else {
-        node_gap("get_variable", "non-Var child tlist deparse (ruleutils lane)");
-    };
-    resolve_plan_var(child, v.varno, v.varattno)
+    match tle.expr.as_var() {
+        Some(v) => resolve_plan_var(child, v.varno, v.varattno),
+        None => ResolvedVar::Expr(tle.expr, child),
+    }
 }
 
 // indexed_tlist probes match on resno, not list position (resjunk entries
@@ -1526,6 +1620,7 @@ fn ExplainTargetRel<'mcx>(rti: types_core::Index, es: &mut ExplainState<'mcx>) -
             relname.as_ref().map(|s| s.as_str())
         }
         RTEKind::RTE_CTE => rte.ctename,
+        RTEKind::RTE_SUBQUERY => None,
         other => node_gap(
             "ExplainTargetRel",
             &format!("{other:?} target arm unported (M2+ plan lanes)"),
@@ -1550,9 +1645,9 @@ fn ExplainTargetRel<'mcx>(rti: types_core::Index, es: &mut ExplainState<'mcx>) -
     Ok(())
 }
 
-// ruleutils.c quote_identifier slice: bare-safe identifiers pass through,
-// anything that C would quote is loud.
-fn quote_identifier(ident: &str) -> &str {
+// ruleutils.c quote_identifier: bare-safe identifiers pass through, others
+// come back double-quoted (format_type hosts the shared implementation).
+fn quote_identifier(ident: &str) -> std::borrow::Cow<'_, str> {
     let bytes = ident.as_bytes();
     let safe = !bytes.is_empty()
         && (bytes[0].is_ascii_lowercase() || bytes[0] == b'_')
@@ -1567,7 +1662,7 @@ fn quote_identifier(ident: &str) -> &str {
                     == keywords::KeywordCategory::Unreserved
         };
     if !safe {
-        node_gap("quote_identifier", "quoted-identifier form unported (ruleutils lane)");
+        return format_type::quote_identifier(ident);
     }
-    ident
+    std::borrow::Cow::Borrowed(ident)
 }

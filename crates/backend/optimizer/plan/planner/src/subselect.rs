@@ -731,7 +731,7 @@ fn make_subplan<'mcx>(
 
     debug_assert!(run.root.plan_params.is_empty());
     run.push_root()?;
-    crate::subquery::subquery_planner(run, subquery, tuple_fraction)?;
+    crate::subquery::subquery_planner(run, subquery, tuple_fraction, None)?;
 
     let final_rel = fetch_final_rel(run);
     let best_path = get_cheapest_fractional_path(run, final_rel, tuple_fraction);
