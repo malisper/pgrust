@@ -40,7 +40,7 @@ pub struct Parser<'a, 'mcx> {
     pub scratch: mcx::Mcx<'mcx>,
 }
 
-type Tok = (i32, Yystype, i32);
+type Tok = (i32, Yystype, i32, i32);
 
 impl<'a, 'mcx> Parser<'a, 'mcx> {
     fn yylex(&mut self) -> PgResult<Tok> {
@@ -48,7 +48,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
     }
 
     fn push_back(&mut self, t: &Tok) -> PgResult<()> {
-        self.sc.push_back_token(t.0, &t.1, t.2)
+        self.sc.push_back_token(t.0, &t.1, t.2, t.3)
     }
 
     fn peek(&mut self) -> PgResult<i32> {
@@ -76,6 +76,22 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
     #[cold]
     fn gram_err(&self, code: types_error::SqlState, msg: String) -> Box<PgError> {
         Box::new(elog::ereport(ERROR).errcode(code).errmsg(msg).into_error())
+    }
+
+    #[cold]
+    fn gram_err_pos(
+        &self,
+        code: types_error::SqlState,
+        msg: String,
+        location: i32,
+    ) -> Box<PgError> {
+        Box::new(
+            elog::ereport(ERROR)
+                .errcode(code)
+                .errmsg(msg)
+                .errposition(self.sc.errposition(location))
+                .into_error(),
+        )
     }
 
     fn expect(&mut self, tok: i32, expected_msg: &str) -> PgResult<Tok> {
@@ -112,10 +128,10 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
     }
 
     fn word_is_not_variable(&self, ident: &str, loc: i32) -> Box<PgError> {
-        let _ = loc;
-        self.gram_err(
+        self.gram_err_pos(
             ERRCODE_SYNTAX_ERROR,
             format!("\"{ident}\" is not a known variable"),
+            loc,
         )
     }
 
@@ -143,12 +159,21 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
 
     // check_sql_expr: raw-parse the saved text early so statement-boundary
     // confusion surfaces at CREATE time (only when check_function_bodies).
-    fn check_sql_expr(&self, query: &str, mode: RawParseMode, _location: i32) -> PgResult<()> {
+    fn check_sql_expr(&self, query: &str, mode: RawParseMode, location: i32) -> PgResult<()> {
         if !self.check_syntax {
             return Ok(());
         }
-        parser_seams::raw_parser::call(self.scratch, query, mode)?;
-        Ok(())
+        match parser_seams::raw_parser::call(self.scratch, query, mode) {
+            Ok(_) => Ok(()),
+            Err(mut e) => {
+                // plpgsql_sql_error_callback: expr-relative cursor becomes a
+                // function-source cursor (both 1-based char positions).
+                if let Some(p) = e.cursor_position.filter(|&p| p > 0) {
+                    e.cursor_position = Some(self.sc.errposition(location) + p - 1);
+                }
+                Err(e)
+            }
+        }
     }
 
     // read_sql_construct (pl_gram.y).
@@ -194,9 +219,10 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                     return Err(self.yyerror("mismatched parentheses", lloc));
                 }
                 let what = if isexpression { "expression" } else { "statement" };
-                return Err(self.gram_err(
+                return Err(self.gram_err_pos(
                     ERRCODE_SYNTAX_ERROR,
                     format!("missing \"{expected}\" at end of SQL {what}"),
+                    lloc,
                 ));
             }
             endlocation = lloc + self.sc.token_length();
@@ -393,7 +419,16 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
     // pl_function: comp_options pl_block opt_semi (entry point).
     pub fn parse_function_body(&mut self) -> PgResult<PlBlock> {
         self.parse_comp_options()?;
-        let block = self.parse_block_after_label(None, None)?;
+        let t = self.yylex()?;
+        let label = if t.0 == LESS_LESS {
+            let (label, _) = self.any_identifier()?;
+            self.expect(GREATER_GREATER, "syntax error")?;
+            Some(label)
+        } else {
+            self.push_back(&t)?;
+            None
+        };
+        let block = self.parse_block_after_label(label, None)?;
         // opt_semi, then EOF.
         let t = self.yylex()?;
         if t.0 == (';' as i32) {
@@ -460,16 +495,17 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
     }
 
     fn check_labels(&self, start: Option<&str>, end: Option<&str>, end_loc: i32) -> PgResult<()> {
-        let _ = end_loc;
         if let Some(el) = end {
             match start {
-                None => Err(self.gram_err(
+                None => Err(self.gram_err_pos(
                     ERRCODE_SYNTAX_ERROR,
                     format!("end label \"{el}\" specified for unlabeled block"),
+                    end_loc,
                 )),
-                Some(sl) if sl != el => Err(self.gram_err(
+                Some(sl) if sl != el => Err(self.gram_err_pos(
                     ERRCODE_SYNTAX_ERROR,
                     format!("end label \"{el}\" differs from block's label \"{sl}\""),
+                    end_loc,
                 )),
                 _ => Ok(()),
             }
@@ -608,8 +644,10 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
 
         // decl_notnull.
         let mut notnull = false;
+        let mut notnull_loc = name_loc;
         let t = self.yylex()?;
         if t.0 == K_NOT {
+            notnull_loc = t.2;
             self.expect(K_NULL, "syntax error")?;
             notnull = true;
         } else {
@@ -629,11 +667,12 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         let lineno = self.lineno(name_loc);
         let dno = self.comp.build_variable(&name, lineno, datatype, true)?;
         if notnull && default_val.is_none() {
-            return Err(self.gram_err(
+            return Err(self.gram_err_pos(
                 types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED,
                 format!(
                     "variable \"{name}\" must have a default value, since it's declared NOT NULL"
                 ),
+                notnull_loc,
             ));
         }
         if let PlDatum::Var(v) = &mut self.comp.datums[dno as usize] {
@@ -861,9 +900,10 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         match &self.comp.datums[dno as usize] {
             PlDatum::Var(v) => {
                 if v.isconst {
-                    return Err(self.gram_err(
+                    return Err(self.gram_err_pos(
                         types_error::ERRCODE_ERROR_IN_ASSIGNMENT,
                         format!("variable \"{}\" is declared CONSTANT", v.refname),
+                        location,
                     ));
                 }
                 Ok(())
@@ -1048,9 +1088,10 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                 None
             };
             if scalar.is_some() && rowrec.is_some() {
-                return Err(self.gram_err(
+                return Err(self.gram_err_pos(
                     ERRCODE_SYNTAX_ERROR,
                     "integer FOR loop must have only one target variable".to_string(),
+                    var_loc,
                 ));
             }
             let fvar = self.comp.build_variable(
@@ -1074,10 +1115,10 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             })
         } else {
             if reverse {
-                let _ = tokloc;
-                return Err(self.gram_err(
+                return Err(self.gram_err_pos(
                     ERRCODE_SYNTAX_ERROR,
                     "cannot specify REVERSE in query FOR loop".to_string(),
+                    tokloc,
                 ));
             }
             self.check_sql_expr(&expr1.query, expr1.parse_mode, expr1loc)?;
@@ -1087,10 +1128,11 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             } else if let Some(s) = scalar {
                 self.make_scalar_list1(&name, s, var_lineno, var_loc)?
             } else {
-                return Err(self.gram_err(
+                return Err(self.gram_err_pos(
                     types_error::ERRCODE_DATATYPE_MISMATCH,
                     "loop variable of loop over rows must be a record variable or list of scalar variables"
                         .to_string(),
+                    var_loc,
                 ));
             };
             let (body, end_label, end_loc) = self.parse_loop_body()?;
@@ -1136,9 +1178,10 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                         } else {
                             w.idents.join(".")
                         };
-                        return Err(self.gram_err(
+                        return Err(self.gram_err_pos(
                             ERRCODE_SYNTAX_ERROR,
                             format!("\"{nm}\" is not a scalar variable"),
+                            vt.2,
                         ));
                     }
                     _ => varnos.push(w.dno),
@@ -1164,21 +1207,22 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         };
 
         if let Some(lbl) = &label {
-            let _ = label_loc;
             match self.comp.ns_lookup_label(self.comp.ns_top, lbl) {
                 None => {
-                    return Err(self.gram_err(
+                    return Err(self.gram_err_pos(
                         ERRCODE_SYNTAX_ERROR,
                         format!(
                             "there is no label \"{lbl}\" attached to any block or loop enclosing this statement"
                         ),
+                        label_loc,
                     ));
                 }
                 Some(idx) => {
                     if self.comp.ns[idx as usize].itemno != LABEL_LOOP && !is_exit {
-                        return Err(self.gram_err(
+                        return Err(self.gram_err_pos(
                             ERRCODE_SYNTAX_ERROR,
                             format!("block label \"{lbl}\" cannot be used in CONTINUE"),
+                            label_loc,
                         ));
                     }
                 }
@@ -1189,7 +1233,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             } else {
                 "CONTINUE cannot be used outside a loop"
             };
-            return Err(self.gram_err(ERRCODE_SYNTAX_ERROR, msg.to_string()));
+            return Err(self.gram_err_pos(ERRCODE_SYNTAX_ERROR, msg.to_string(), lloc));
         }
 
         Ok(PlStmt::ExitContinue {
@@ -1332,7 +1376,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                         Some(&mut term),
                     )?;
                     params.push(expr);
-                    tok = (term, Yystype::default(), 0);
+                    tok = (term, Yystype::default(), 0, 0);
                 }
                 t = tok;
             } else if t.0 != K_USING {
@@ -1523,9 +1567,10 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                         } else {
                             w.idents.join(".")
                         };
-                        return Err(self.gram_err(
+                        return Err(self.gram_err_pos(
                             ERRCODE_SYNTAX_ERROR,
                             format!("\"{nm}\" is not a scalar variable"),
+                            vt.2,
                         ));
                     }
                     _ => w.dno,
@@ -1549,10 +1594,11 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                 );
             };
             if is_stacked {
-                return Err(self.gram_err(
+                return Err(self.gram_err_pos(
                     ERRCODE_SYNTAX_ERROR,
                     "diagnostics item ROW_COUNT is not allowed in GET STACKED DIAGNOSTICS"
                         .to_string(),
+                    lloc,
                 ));
             }
             items.push(GetDiagItem { kind, target });
@@ -1710,10 +1756,11 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                     self.check_assignable(w.dno, t.2)?;
                     let nt = self.yylex()?;
                     if nt.0 == (',' as i32) {
-                        return Err(self.gram_err(
+                        return Err(self.gram_err_pos(
                             ERRCODE_SYNTAX_ERROR,
                             "record variable cannot be part of multiple-item INTO list"
                                 .to_string(),
+                            nt.2,
                         ));
                     }
                     self.push_back(&nt)?;

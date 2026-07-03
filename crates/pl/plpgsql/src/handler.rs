@@ -355,8 +355,9 @@ fn do_compile(
     };
     let parse_result = parser.parse_function_body();
     let latest_line = parser.sc.latest_lineno();
-    let action =
-        parse_result.map_err(|e| attach_compile_context(e, &proc.proname, latest_line))?;
+    let action = parse_result.map_err(|e| {
+        attach_compile_context(e, &proc.proname, latest_line, for_validator, &proc.prosrc)
+    })?;
 
     let fn_signature = format_signature(&proc.proname, &proc.argtypes)?;
     Ok(PlFunction {
@@ -391,8 +392,14 @@ fn attach_compile_context(
     mut e: Box<types_error::PgError>,
     fname: &str,
     line: i32,
+    for_validator: bool,
+    prosrc: &str,
 ) -> Box<types_error::PgError> {
-    // plpgsql_compile_error_callback.
+    // plpgsql_compile_error_callback: at validation the cursor transposes
+    // onto the CREATE statement (no context line); otherwise a context line.
+    if for_validator && pg_proc::function_parse_error_transpose(&mut e, prosrc) {
+        return e;
+    }
     if e.context.is_none() {
         e.context = Some(format!(
             "compilation of PL/pgSQL function \"{fname}\" near line {line}"

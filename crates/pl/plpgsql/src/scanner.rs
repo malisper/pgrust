@@ -447,8 +447,14 @@ impl<'mcx> PlScanner<'mcx> {
         Ok(())
     }
 
-    pub fn push_back_token(&mut self, token: i32, lval: &Yystype, lloc: i32) -> PgResult<()> {
-        let aux = TokenAux { lval: lval.clone(), lloc, leng: 0 };
+    pub fn push_back_token(
+        &mut self,
+        token: i32,
+        lval: &Yystype,
+        lloc: i32,
+        leng: i32,
+    ) -> PgResult<()> {
+        let aux = TokenAux { lval: lval.clone(), lloc, leng };
         self.push_back(token, &aux)
     }
 
@@ -492,8 +498,11 @@ impl<'mcx> PlScanner<'mcx> {
         }
     }
 
-    // plpgsql_yylex (pl_scanner.c).
-    pub fn yylex(&mut self, resolver: &mut dyn WordResolver) -> PgResult<(i32, Yystype, i32)> {
+    // plpgsql_yylex (pl_scanner.c); returns (token, lval, lloc, leng).
+    pub fn yylex(
+        &mut self,
+        resolver: &mut dyn WordResolver,
+    ) -> PgResult<(i32, Yystype, i32, i32)> {
         let mut aux1 = TokenAux::default();
         let mut tok1 = self.internal_yylex(&mut aux1)?;
 
@@ -563,7 +572,7 @@ impl<'mcx> PlScanner<'mcx> {
         self.yyleng = aux1.leng;
         self.yytoken = tok1;
         self.latest_lloc = aux1.lloc;
-        Ok((tok1, aux1.lval, aux1.lloc))
+        Ok((tok1, aux1.lval, aux1.lloc, aux1.leng))
     }
 
     /// plpgsql_token_length.
@@ -582,7 +591,16 @@ impl<'mcx> PlScanner<'mcx> {
         location_to_lineno(self.scanbuf, self.latest_lloc)
     }
 
-    /// plpgsql_scanner_errposition/yyerror: "syntax error at or near ..."
+    /// plpgsql_scanner_errposition (pl_scanner.c): 1-based char position.
+    pub fn errposition(&self, location: i32) -> i32 {
+        parser_small1::parser_errposition_source(
+            Some(self.scanbuf),
+            location,
+            wchar::PG_UTF8,
+        )
+    }
+
+    /// plpgsql_yyerror: "syntax error at or near ..." with position.
     pub fn syntax_error(&self, message: &str, lloc: i32) -> Box<PgError> {
         let end = self.scanbuf.len() as i32;
         let mut e = lloc;
@@ -597,6 +615,7 @@ impl<'mcx> PlScanner<'mcx> {
             elog::ereport(types_error::ERROR)
                 .errcode(types_error::ERRCODE_SYNTAX_ERROR)
                 .errmsg(format!("{message} at or near \"{near}\""))
+                .errposition(self.errposition(lloc))
                 .into_error(),
         )
     }
