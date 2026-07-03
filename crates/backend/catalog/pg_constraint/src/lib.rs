@@ -938,3 +938,105 @@ pub fn get_constraint_deferrability<'mcx>(mcx: Mcx<'mcx>, con_id: Oid) -> PgResu
     con_rel.close(AccessShareLock)?;
     Ok((deferrable, deferred))
 }
+
+pub fn get_relation_idx_constraint_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation_id: Oid,
+    index_id: Oid,
+) -> PgResult<Oid> {
+    let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
+    let keys = [eq_key(Anum_pg_constraint_conrelid, F_OIDEQ, Datum::from_oid(relation_id))];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &con_rel,
+        ConstraintRelidTypidNameIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+    let mut constraint_id = InvalidOid;
+    let desc = con_rel.descr();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let mut isnull = false;
+        // SAFETY (each): fixed NOT NULL pg_constraint columns under its
+        // descriptor.
+        let contype = unsafe {
+            types_tuple::heap_getattr(tup, Anum_pg_constraint_contype as i32, desc, &mut isnull)
+        }
+        .as_i8() as u8;
+        if contype != CONSTRAINT_PRIMARY && contype != CONSTRAINT_UNIQUE
+            && contype != CONSTRAINT_EXCLUSION
+        {
+            continue;
+        }
+        // SAFETY: as above.
+        let conindid = unsafe {
+            types_tuple::heap_getattr(tup, Anum_pg_constraint_conindid as i32, desc, &mut isnull)
+        }
+        .as_oid();
+        if conindid == index_id {
+            // SAFETY: as above.
+            constraint_id = unsafe {
+                types_tuple::heap_getattr(tup, Anum_pg_constraint_oid as i32, desc, &mut isnull)
+            }
+            .as_oid();
+            break;
+        }
+    }
+    genam::systable_endscan(mcx, scan)?;
+    con_rel.close(AccessShareLock)?;
+    Ok(constraint_id)
+}
+
+// ConstraintSetParentConstraint, attach direction only (parent valid); the
+// detach arm rides the DETACH PARTITION lane.
+pub fn ConstraintSetParentConstraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    child_constr_id: Oid,
+    parent_constr_id: Oid,
+    child_table_id: Oid,
+) -> PgResult<()> {
+    debug_assert!(parent_constr_id != InvalidOid);
+    let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, RowExclusiveLock)?;
+    let keys = [eq_key(Anum_pg_constraint_oid, F_OIDEQ, Datum::from_oid(child_constr_id))];
+    let mut scan =
+        genam::systable_beginscan(mcx, &con_rel, CONSTRAINT_OID_INDEX_ID, true, None, &keys)?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for constraint {child_constr_id}"));
+    let desc = con_rel.descr();
+    let mut isnull = false;
+    // SAFETY: conparentid is a fixed NOT NULL pg_constraint column.
+    let conparentid = unsafe {
+        types_tuple::heap_getattr(tup, Anum_pg_constraint_conparentid as i32, desc, &mut isnull)
+    }
+    .as_oid();
+    if conparentid != InvalidOid {
+        panic!("constraint {child_constr_id} already has a parent constraint");
+    }
+    let natts = desc.natts as usize;
+    let mut values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut nulls: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut replace: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    values.resize(natts, Datum::null());
+    nulls.resize(natts, false);
+    replace.resize(natts, false);
+    let mut set = |anum: AttrNumber, v: Datum| {
+        values[anum as usize - 1] = v;
+        replace[anum as usize - 1] = true;
+    };
+    set(Anum_pg_constraint_conislocal, Datum::from_bool(false));
+    set(Anum_pg_constraint_coninhcount, Datum::from_i16(1));
+    set(Anum_pg_constraint_conparentid, Datum::from_oid(parent_constr_id));
+    let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
+    let otid = tup.t_self;
+    genam::systable_endscan(mcx, scan)?;
+    catalog_indexing::CatalogTupleUpdate(mcx, &con_rel, &otid, &mut newtup)?;
+
+    let depender = ObjectAddress::set(CONSTRAINT_RELATION_ID, child_constr_id);
+    let parent = ObjectAddress::set(CONSTRAINT_RELATION_ID, parent_constr_id);
+    pg_depend::recordDependencyOn(mcx, &depender, &parent, pg_depend::DependencyType::PartitionPri)?;
+    let tbl = ObjectAddress::set(types_core::RELATION_RELATION_ID, child_table_id);
+    pg_depend::recordDependencyOn(mcx, &depender, &tbl, pg_depend::DependencyType::PartitionSec)?;
+
+    con_rel.close(RowExclusiveLock)
+}

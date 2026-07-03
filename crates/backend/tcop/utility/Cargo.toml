@@ -10,6 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 rewrite_define = { path = "../../rewrite/rewrite_define" }
 dropcmds = { path = "../../commands/dropcmds" }
+pg_inherits = { path = "../../catalog/pg_inherits" }
 aclchk = { path = "../../catalog/aclchk" }
 parse_utilcmd = { path = "../../parser/parse_utilcmd" }
 parse_clause = { path = "../../parser/parse_clause" }

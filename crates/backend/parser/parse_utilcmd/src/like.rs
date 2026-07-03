@@ -1,7 +1,6 @@
 // LIKE arm: transformTableLikeClause + expandTableLikeClause +
 // generateClonedIndexStmt. LOUD: identity/generated/compression copy,
-// non-default opclass/collation, expression/partial/INCLUDE/non-btree
-// indexes, extended statistics.
+// non-default opclass/collation, INCLUDE, extended statistics.
 use mcx::{Mcx, PgVec};
 use types_core::{AttrNumber, InvalidOid, Oid, NAMEDATALEN, RELATION_RELATION_ID};
 use types_error::{
@@ -433,7 +432,7 @@ pub fn expandTableLikeClause<'mcx>(
         for &parent_index_oid in parent_indexes.iter() {
             let parent_index = indexam::index_open(mcx, parent_index_oid, AccessShareLock)?;
             let mut index_stmt =
-                generateClonedIndexStmt(mcx, heap_rel, &parent_index, &attmap)?;
+                generateClonedIndexStmt(mcx, Some(heap_rel), &parent_index, &attmap)?.0;
             if (options & CREATE_TABLE_LIKE_COMMENTS) != 0 {
                 if let Some(comment) =
                     commands_comment::GetComment(mcx, parent_index_oid, RELATION_RELATION_ID, 0)?
@@ -467,18 +466,26 @@ fn whole_row_error(detail: String) -> Box<PgError> {
     )
 }
 
-fn generateClonedIndexStmt<'mcx>(
+pub fn generateClonedIndexStmt<'mcx>(
     mcx: Mcx<'mcx>,
-    heap_rel: &'mcx RangeVar<'mcx>,
+    heap_rel: Option<&'mcx RangeVar<'mcx>>,
     source_idx: &Relation<'mcx>,
     attmap: &[AttrNumber],
-) -> PgResult<IndexStmt<'mcx>> {
+) -> PgResult<(IndexStmt<'mcx>, Oid)> {
     let idxrec = source_idx.rd_index.as_ref().expect("index relation without rd_index");
     let indrelid = idxrec.indrelid;
+    let mut constraint_oid = InvalidOid;
 
-    if source_idx.rd_rel.relam != BTREE_AM_OID {
-        unported("generateClonedIndexStmt: non-btree access methods");
-    }
+    // get_am_name over the closed AM set (AMOID syscache unported).
+    let amname = match source_idx.rd_rel.relam {
+        BTREE_AM_OID => "btree",
+        405 => "hash",
+        2742 => "gin",
+        783 => "gist",
+        4000 => "spgist",
+        3580 => "brin",
+        other => unported(&format!("generateClonedIndexStmt: index AM {other}")),
+    };
     if source_idx.rd_rel.reltablespace != InvalidOid {
         unported("generateClonedIndexStmt: TABLESPACE");
     }
@@ -493,8 +500,8 @@ fn generateClonedIndexStmt<'mcx>(
     }
 
     let mut stmt = IndexStmt {
-        relation: Some(heap_rel),
-        accessMethod: Some("btree"),
+        relation: heap_rel,
+        accessMethod: Some(amname),
         unique: idxrec.indisunique,
         nulls_not_distinct: idxrec.indnullsnotdistinct,
         primary: idxrec.indisprimary,
@@ -510,6 +517,7 @@ fn generateClonedIndexStmt<'mcx>(
                 pg_constraint::get_constraint_deferrability(mcx, constraint_id)?;
             stmt.deferrable = condeferrable;
             stmt.initdeferred = condeferred;
+            constraint_oid = constraint_id;
         }
     }
 
@@ -556,7 +564,9 @@ fn generateClonedIndexStmt<'mcx>(
         if indcollation != InvalidOid && indcollation != typcollation {
             unported("generateClonedIndexStmt: non-default collations");
         }
-        if indclass[keyno] != indexcmds_seams::get_default_opclass::call(keycoltype, BTREE_AM_OID)? {
+        if indclass[keyno]
+            != indexcmds_seams::get_default_opclass::call(keycoltype, source_idx.rd_rel.relam)?
+        {
             unported("generateClonedIndexStmt: non-default operator classes");
         }
 
@@ -599,7 +609,7 @@ fn generateClonedIndexStmt<'mcx>(
         }
         stmt.whereClause = Some(mapped);
     }
-    Ok(stmt)
+    Ok((stmt, constraint_oid))
 }
 
 fn read_indclass<'mcx>(mcx: Mcx<'mcx>, index_id: Oid, nkeys: usize) -> PgResult<PgVec<'mcx, Oid>> {

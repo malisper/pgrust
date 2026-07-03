@@ -5,7 +5,7 @@
 #![allow(non_snake_case)]
 
 mod like;
-pub use like::expandTableLikeClause;
+pub use like::{expandTableLikeClause, generateClonedIndexStmt};
 
 use mcx::{Mcx, PgString};
 use types_core::catalog::ATTRIBUTE_GENERATED_STORED;
