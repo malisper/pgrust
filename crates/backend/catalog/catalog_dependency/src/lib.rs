@@ -54,6 +54,7 @@ const InitPrivsRelationId: Oid = 3394;
 const InitPrivsObjIndexId: Oid = 3395;
 const SecLabelRelationId: Oid = 3596;
 const AttrDefaultRelationId: Oid = 2604;
+const PolicyRelationId: Oid = 3256;
 const ConstraintRelationId: Oid = 2606;
 const RewriteRelationId: Oid = 2618;
 const AuthMemRelationId: Oid = 1261;
@@ -200,7 +201,7 @@ fn scankey(attno: usize, func: types_core::primitive::RegProcedure, arg: Datum) 
     key
 }
 
-fn oid_key(attno: usize, oid: Oid) -> ScanKeyData {
+pub(crate) fn oid_key(attno: usize, oid: Oid) -> ScanKeyData {
     scankey(attno, types_core::fmgr::F_OIDEQ, Datum::from_oid(oid))
 }
 
@@ -703,6 +704,7 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
             }
         }
         TYPE_RELATION_ID => pg_type::RemoveTypeById(mcx, object.objectId)?,
+        PolicyRelationId => policy_seams::remove_policy_by_id::call(mcx, object.objectId)?,
         AttrDefaultRelationId => pg_attrdef::RemoveAttrDefaultById(mcx, object.objectId)?,
         ConstraintRelationId => pg_constraint::RemoveConstraintById(mcx, object.objectId)?,
         statscmds::StatisticExtRelationId => statscmds::RemoveStatisticsById(mcx, object.objectId)?,
@@ -757,7 +759,7 @@ pub fn deleteDependencyRecordsFor<'mcx>(
 
 // deleteSharedDependencyRecordsFor (pg_shdepend.c) via shdepDropDependency's
 // dependent-object scan.
-fn deleteSharedDependencyRecordsFor<'mcx>(
+pub fn deleteSharedDependencyRecordsFor<'mcx>(
     mcx: Mcx<'mcx>,
     classId: Oid,
     objectId: Oid,
