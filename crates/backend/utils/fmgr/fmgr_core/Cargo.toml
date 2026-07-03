@@ -18,6 +18,7 @@ adt_bool = { path = "../../adt/bool" }
 arrayfuncs = { path = "../../adt/arrayfuncs" }
 adt_scalar = { path = "../../adt/scalar" }
 adt_cash = { path = "../../adt/cash" }
+adt_char = { path = "../../adt/char" }
 adt_date = { path = "../../adt/adt_date" }
 adt_encode = { path = "../../adt/encode" }
 adt_float = { path = "../../adt/float" }
@@ -34,6 +35,7 @@ adt_pseudotypes = { path = "../../adt/pseudotypes" }
 name = { path = "../../adt/name" }
 nbt_compare = { path = "../../../access/nbtree/compare" }
 varlena = { path = "../../adt/varlena" }
+adt_windowfuncs = { path = "../../adt/windowfuncs" }
 
 [dev-dependencies]
 mcx = { path = "../../../../_support/mcx" }

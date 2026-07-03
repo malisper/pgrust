@@ -2,12 +2,13 @@
 // compile-to-steps + execExprInterp.c). Ported step families: DONE_RETURN/
 // DONE_NO_RETURN, INNER/OUTER/SCAN_FETCHSOME, INNER/OUTER/SCAN_VAR,
 // ASSIGN_*_VAR, ASSIGN_TMP[_MAKE_RO], CONST, FUNCEXPR[_STRICT[_1|_2]], QUAL,
-// PARAM_EXTERN/PARAM_EXEC (compile-resolved; ParamBind).
+// PARAM_EXTERN/PARAM_EXEC (compile-resolved; ParamBind), MINMAX.
 // Deferred families (loud-panic at compile): WHOLEROW, SYSVAR, OLD/NEW
 // (RETURNING), PARAM_CALLBACK, BOOL_AND/OR/NOT + JUMP_* + NULLTEST +
-// BOOLTEST + CASE/COALESCE (BoolExpr/NullTest/CaseExpr node families
-// unported), FUSAGE, SQLVALUEFUNCTION, row/array/subscript/domain/hash/
-// json/xml/agg/window/subplan sets.
+// BOOLTEST + CASE/COALESCE (eval_const_expressions folds the all-Const
+// forms; non-const forms wait for their vocabularies), FUSAGE,
+// SQLVALUEFUNCTION, row/array/subscript/domain/hash/json/xml/agg/window/
+// subplan sets.
 #![allow(clippy::too_many_arguments)]
 
 extern crate alloc;
@@ -20,9 +21,10 @@ mod tests;
 
 pub use compile::{
     exec_build_agg_projection_info, exec_build_agg_qual, exec_build_agg_trans,
+    exec_build_window_projection_info,
     exec_build_agg_trans_hashed, exec_build_grouping_equal,
     exec_build_hash32_from_attrs, exec_build_projection_info, exec_init_expr, exec_init_qual,
-    expr_type, AggBind, AggTransSpec, INDEX_VAR, INNER_VAR, OUTER_VAR,
+    expr_type, AggBind, AggTransSpec, WinBind, INDEX_VAR, INNER_VAR, OUTER_VAR,
 };
 pub use interp::{exec_eval_expr, exec_project, exec_qual, EvalSlots};
 pub use steps::{AggPerGroup, CmpOp, ExprState, Kernel, OutRef, SlotSrc, Step};

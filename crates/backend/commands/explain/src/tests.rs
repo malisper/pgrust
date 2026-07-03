@@ -141,6 +141,8 @@ fn install_fixtures() {
         backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
         backend_status_seams::pgstat_report_query_id::set(|_, _| {});
         resowner_seams::current_resource_owner::set(|| types_resowner::ResourceOwner::NULL);
+        resowner_seams::set_current_resource_owner::set(|_| {});
+        resowner_seams::top_transaction_resource_owner::set(|| types_resowner::ResourceOwner::NULL);
         resowner_seams::resource_owner_enlarge::set(|_| Ok(()));
         resowner_seams::resource_owner_remember_snapshot::set(|_, _| {});
         resowner_seams::resource_owner_forget_snapshot::set(|_, _| {});

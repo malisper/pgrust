@@ -86,7 +86,7 @@ fn aborted_xact_error() -> Box<types_error::PgError> {
         .into()
 }
 
-fn pg_analyze_and_rewrite_varparams<'mcx>(
+pub fn pg_analyze_and_rewrite_varparams<'mcx>(
     mcx: Mcx<'mcx>,
     parsetree: &RawStmt<'mcx>,
     query_string: &str,

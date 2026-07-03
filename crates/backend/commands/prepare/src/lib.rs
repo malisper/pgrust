@@ -78,7 +78,7 @@ pub fn PrepareQuery(
     let tag = utility_seams::create_command_tag::call(query);
     let plansource = plancache::CreateCachedPlan(Some(&rawstmt), source_text, tag)?;
 
-    let filled = fill_plansource(plansource, source_text, stmt, stmt_location);
+    let filled = fill_plansource(plansource, source_text, stmt_location);
     if let Err(e) = filled {
         // C leaves the transient plansource to transaction-abort cleanup; the
         // registry has no abort hook yet, so reclaim it here.
@@ -97,22 +97,8 @@ pub fn PrepareQuery(
 fn fill_plansource(
     plansource: CachedPlanSourceHandle,
     source_text: &str,
-    stmt: &PrepareStmt<'_>,
     stmt_location: ParseLoc,
 ) -> PgResult<()> {
-    if !stmt.argtypes.is_nil() {
-        panic!(
-            "PrepareQuery (prepare.c): declared argtypes need typenameTypeId + \
-             pg_analyze_and_rewrite_varparams (varparams lane)"
-        );
-    }
-    if has_dollar_param(source_text) {
-        panic!(
-            "PrepareQuery (prepare.c): $n parameters need \
-             pg_analyze_and_rewrite_varparams (varparams lane)"
-        );
-    }
-
     // C copyObject-retains the message-arena raw tree; here the statement is
     // re-parsed into the plansource's query arena (once per PREPARE, cold).
     let qmcx = plancache::SourceQueryMcx(plansource);
@@ -136,25 +122,31 @@ fn fill_plansource(
         stmt_len: 0,
     };
 
-    let query_list = postgres::pg_analyze_and_rewrite_fixedparams(
+    let mut argtypes: mcx::PgVec<'_, types_core::Oid> =
+        mcx::vec_with_capacity_in(qmcx, reparsed.argtypes.len())?;
+    for tn_node in reparsed.argtypes.iter() {
+        let tn = tn_node.as_type_name().expect("PREPARE argtypes are TypeNames");
+        argtypes.push(parse_utilcmd::typenameTypeIdAndMod(qmcx, tn)?.0);
+    }
+
+    let (query_list, resolved) = postgres::pg_analyze_and_rewrite_varparams(
         qmcx,
         &inner,
         source_text,
-        &[],
+        &argtypes,
         QueryEnvHandle::NULL,
     )?;
 
-    plancache::CompleteCachedPlan(plansource, query_list, &[], CURSOR_OPT_PARALLEL_OK, true)
-}
-
-fn has_dollar_param(text: &str) -> bool {
-    let b = text.as_bytes();
-    (1..b.len()).any(|i| b[i - 1] == b'$' && b[i].is_ascii_digit())
+    plancache::CompleteCachedPlan(plansource, query_list, &resolved, CURSOR_OPT_PARALLEL_OK, true)
 }
 
 pub fn ExecuteQuery<'mcx>(
-    stmt: &ExecuteStmt<'_>,
-    params: ParamListHandle,
+    mcx: Mcx<'mcx>,
+    stmt: &ExecuteStmt<'mcx>,
+    source_text: &str,
+    // C threads the caller's params into the EState for nested references;
+    // evaluate_expr has no binding, so they are unused here (loud in interp).
+    _params: ParamListHandle,
     dest: &mut DestReceiver<'mcx>,
     qc: Option<&mut QueryCompletion>,
 ) -> PgResult<()> {
@@ -168,18 +160,17 @@ pub fn ExecuteQuery<'mcx>(
             .into());
     }
 
-    if plancache::CachedPlanNumParams(entry.plansource) > 0 {
-        panic!(
-            "ExecuteQuery (prepare.c): EvaluateParams needs transformExpr/\
-             coerce_to_target_type + a real ParamListInfo (execute-params lane)"
-        );
-    }
+    let param_li = if plancache::CachedPlanNumParams(entry.plansource) > 0 {
+        EvaluateParams(mcx, &entry, name, &stmt.params, source_text)?
+    } else {
+        ParamListHandle::NULL
+    };
 
     let portal = portalmem::CreateNewPortal()?;
     portal.borrow_mut().visible = false;
 
     let query_string = plancache::CachedPlanQueryString(entry.plansource);
-    let cplan = plancache::GetCachedPlan(entry.plansource, params, None, QueryEnvHandle::NULL)?;
+    let cplan = plancache::GetCachedPlan(entry.plansource, param_li, None, QueryEnvHandle::NULL)?;
     let stmt_slice = plancache::CachedPlanStmtList(cplan);
     // SAFETY: the cplan refcount taken by GetCachedPlan pins stmt_slice until
     // PortalDrop releases it; the handle is freed right after.
@@ -195,14 +186,110 @@ pub fn ExecuteQuery<'mcx>(
         cplan,
     )?;
 
-    pquery::PortalStart(&portal, params, 0, Some(snapmgr::GetActiveSnapshot()))?;
+    pquery::PortalStart(&portal, param_li, 0, Some(snapmgr::GetActiveSnapshot()))?;
 
     let _ = pquery::PortalRun(&portal, FETCH_ALL, false, dest, None, qc)?;
 
     portalmem::PortalDrop(&portal, false)?;
     pquery::stmt_list::free(stmts);
+    types_portal::params::free(param_li);
 
     Ok(())
+}
+
+// EvaluateParams (prepare.c). Divergences: expression evaluation rides
+// execexpr::evaluate_expr (no EState), so a parameter expression that itself
+// references an outer $n has no binding and fails loudly in the interpreter.
+fn EvaluateParams<'mcx>(
+    mcx: Mcx<'mcx>,
+    entry: &PreparedStatement,
+    stmt_name: &str,
+    params_list: &types_nodes::NodeList<'mcx>,
+    source_text: &str,
+) -> PgResult<ParamListHandle> {
+    let param_types = plancache::CachedPlanParamTypes(entry.plansource);
+    let num_params = param_types.len();
+    let nparams = params_list.len();
+
+    if nparams != num_params {
+        return Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+            .errmsg(format!(
+                "wrong number of parameters for prepared statement \"{stmt_name}\""
+            ))
+            .errdetail(format!("Expected {num_params} parameters but got {nparams}."))
+            .into_error()
+            .into());
+    }
+    if num_params == 0 {
+        return Ok(ParamListHandle::NULL);
+    }
+
+    let mut pstate = parser_small1::make_parsestate(mcx, None);
+    pstate.p_sourcetext = Some(mcx::slice_in(mcx, source_text.as_bytes())?.leak());
+
+    let mut out: mcx::PgVec<'mcx, types_portal::params::ParamExternData> =
+        mcx::vec_with_capacity_in(mcx, num_params)?;
+    for (i, raw) in params_list.iter().enumerate() {
+        let expected_type_id = param_types[i];
+        let expr = parse_expr::transformExpr(
+            mcx,
+            &mut pstate,
+            raw,
+            parser_small1::ParseExprKind::EXPR_KIND_EXECUTE_PARAMETER,
+        )?;
+        let given_type_id = parse_expr::expr_type(expr);
+        let coerced = coerce::coerce_to_target_type(
+            mcx,
+            &pstate,
+            expr,
+            given_type_id,
+            expected_type_id,
+            -1,
+            coerce::CoercionContext::COERCION_ASSIGNMENT,
+            types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+            -1,
+        )?;
+        let Some(coerced) = coerced else {
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
+                .errmsg(format!(
+                    "parameter ${} of type {} cannot be coerced to the expected type {}",
+                    i + 1,
+                    format_type::format_type_be(given_type_id)?,
+                    format_type::format_type_be(expected_type_id)?,
+                ))
+                .errhint("You will need to rewrite or cast the expression.")
+                .errposition(parser_small1::parser_errposition(
+                    &pstate,
+                    parse_expr::expr_location(expr),
+                    mbutils::GetDatabaseEncoding(),
+                ))
+                .into_error()
+                .into());
+        };
+        parse_collate::assign_expr_collations(mcx, &pstate, coerced)?;
+
+        let evaluated = execexpr::evaluate_expr(
+            mcx,
+            coerced,
+            parse_expr::expr_type(coerced),
+            parse_expr::expr_typmod(coerced),
+            parse_expr::expr_collation(coerced),
+        )?;
+        let c = evaluated.as_const().expect("evaluate_expr returns a Const");
+        out.push(types_portal::params::ParamExternData {
+            value: c.constvalue,
+            isnull: c.constisnull,
+            pflags: types_portal::params::PARAM_FLAG_CONST,
+            ptype: expected_type_id,
+        });
+    }
+    parser_small1::free_parsestate(pstate)?;
+
+    // SAFETY: the slice is mcx-leaked (statement lifetime); ExecuteQuery
+    // frees the handle after PortalDrop, inside that lifetime.
+    Ok(unsafe { types_portal::params::register(out.leak()) })
 }
 
 pub fn StorePreparedStatement(

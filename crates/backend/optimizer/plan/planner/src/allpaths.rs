@@ -72,6 +72,12 @@ fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()
         RTEKind::RTE_FUNCTION => {
             crate::costsize::set_function_size_estimates(run, rel)?;
         }
+        RTEKind::RTE_VALUES => {
+            crate::costsize::set_values_size_estimates(run, rel)?;
+        }
+        RTEKind::RTE_CTE => {
+            crate::cte::set_cte_pathlist(run, rel, rti)?;
+        }
         RTEKind::RTE_RESULT => {
             unreachable!("RTE_RESULT is handled by query_planner's trivial arm");
         }
@@ -87,6 +93,8 @@ fn set_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResul
     match rte.rtekind {
         RTEKind::RTE_RELATION => set_plain_rel_pathlist(run, rel)?,
         RTEKind::RTE_FUNCTION => set_function_pathlist(run, rel, rti)?,
+        RTEKind::RTE_VALUES => set_values_pathlist(run, rel)?,
+        RTEKind::RTE_CTE => {} // fully handled during set_rel_size
         other => panic!("set_rel_pathlist (allpaths.c): {other:?}; M2 scan lane"),
     }
 
@@ -104,6 +112,14 @@ fn set_function_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
     add_path(run, rel, path);
     Ok(())
 }
+// set_values_pathlist (allpaths.c); required_outer empty (LATERAL loud upstream).
+fn set_values_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
+    debug_assert!(run.root.rel(rel).lateral_relids.is_none());
+    let path = crate::pathnode::create_valuesscan_path(run, rel)?;
+    add_path(run, rel, path);
+    Ok(())
+}
+
 fn set_plain_rel_size(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
     crate::indxpath::check_index_predicates(run, rel);
     crate::costsize::set_baserel_size_estimates(run, rel)?;
@@ -121,10 +137,14 @@ fn set_rel_consider_parallel(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -
             }
             debug_assert!(rte.tablesample.is_none());
         }
-        RTEKind::RTE_FUNCTION => {
-            // C tests is_parallel_safe over the funcexprs; parallel plans are
-            // loud on this lane, so the flag stays conservatively false.
+        RTEKind::RTE_FUNCTION | RTEKind::RTE_VALUES => {
+            // C tests is_parallel_safe over the funcexprs/values_lists;
+            // parallel plans are loud on this lane, so the flag stays
+            // conservatively false.
             return Ok(());
+        }
+        RTEKind::RTE_CTE => {
+            return Ok(()); // tuplestores aren't shared among workers
         }
         other => panic!("set_rel_consider_parallel (allpaths.c): {other:?}; M2 lane"),
     }

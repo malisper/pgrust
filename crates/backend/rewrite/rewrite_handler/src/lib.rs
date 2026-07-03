@@ -72,11 +72,16 @@ fn RewriteQuery<'mcx>(
 ) -> PgResult<PgVec<'mcx, Query<'mcx>>> {
     let event = parsetree.commandType;
 
-    if !parsetree.cteList.is_nil() {
-        panic!(
-            "RewriteQuery (rewriteHandler.c): WITH-clause rewrite needs CommonTableExpr \
-             (types_nodes parsenodes unported)"
-        );
+    // C's CTE loop only acts on data-modifying CTEs; SELECT CTEs `continue`.
+    for cte_node in &parsetree.cteList {
+        let cte = cte_node.as_common_table_expr().expect("cteList cell");
+        let ctequery = cte.ctequery.and_then(|n| n.as_query()).expect("analyzed CTE query");
+        if ctequery.commandType != CmdType::CMD_SELECT {
+            panic!(
+                "RewriteQuery (rewriteHandler.c): data-modifying CTE; \
+                 nodeModifyTable WITH lane"
+            );
+        }
     }
 
     match event {
@@ -189,10 +194,9 @@ fn rewrite_update_delete_query<'mcx>(
 
 // rewriteTargetListIU, INSERT/UPDATE arms: reorder non-junk TLEs into
 // attribute order (junk entries keep their post-column resnos and trail the
-// list) and apply defaults for unassigned INSERT columns (no stored default
-// => the planner NULL-fills). Identity/generated columns, multiple assignment
-// merges (process_matched_tle) and real pg_attrdef defaults
-// (build_column_default) are loud.
+// list) and apply stored pg_attrdef defaults for unassigned INSERT columns
+// (no stored default => the planner NULL-fills). Identity/generated columns
+// and multiple assignment merges (process_matched_tle) are loud.
 fn rewriteTargetListIU<'mcx>(
     mcx: Mcx<'mcx>,
     target_list: &types_nodes::NodeList<'mcx>,
@@ -254,12 +258,28 @@ fn rewriteTargetListIU<'mcx>(
             );
         }
         debug_assert!(r#override == types_nodes::OverridingKind::OVERRIDING_NOT_SET);
-        if apply_default && att.atthasdef {
-            panic!(
-                "rewriteTargetListIU (rewriteHandler.c): build_column_default \
-                 (pg_attrdef adbin evaluation) not ported"
-            );
-        }
+        let new_tle = if apply_default && att.atthasdef {
+            let expr = build_column_default(mcx, target_relation, attrno)?;
+            let resname = core::str::from_utf8(att.attname.name_str()).expect("attname");
+            let mut buf: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, resname.len())?;
+            mcx::vec_append_bytes(&mut buf, resname.as_bytes())?;
+            Some(types_nodes::Node::mk(
+                mcx,
+                types_nodes::primnodes::TargetEntry {
+                    expr,
+                    resno: attrno as i16,
+                    resname: Some(
+                        core::str::from_utf8(buf.leak()).expect("was UTF-8"),
+                    ),
+                    ressortgroupref: 0,
+                    resorigtbl: 0,
+                    resorigcol: 0,
+                    resjunk: false,
+                },
+            )?)
+        } else {
+            new_tle
+        };
         // No stored default: C omits the entry; the planner inserts the NULL
         // (expand_insert_targetlist).
         if let Some(tle) = new_tle {
@@ -270,16 +290,82 @@ fn rewriteTargetListIU<'mcx>(
     Ok(new_tlist)
 }
 
+// build_column_default (rewriteHandler.c), atthasdef arm: the stored adbin
+// deserialized and coerced to the column type. get_typdefault (pg_type
+// typdefaultbin) stays with the domain lane; callers gate on atthasdef.
+fn build_column_default<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    attrno: usize,
+) -> PgResult<types_nodes::Node<'mcx>> {
+    let att = rel.rd_att.attr(attrno - 1);
+    debug_assert!(att.attidentity == 0 && att.atthasdef);
+    let constr = rel.rd_att.constr.as_deref();
+    let adbin = constr
+        .and_then(|c| c.defval.iter().find(|d| d.adnum == attrno as i16))
+        .and_then(|d| d.adbin.as_ref());
+    let adbin = match adbin {
+        Some(s) => s,
+        None => return Err(default_expression_not_found(attrno, rel)),
+    };
+    let expr = readfuncs::stringToNode(mcx, adbin.as_str())?;
+    let exprtype = parse_expr::expr_type(expr);
+    let pstate = parser_small1::make_parsestate(mcx, None);
+    let coerced = coerce::coerce_to_target_type(
+        mcx,
+        &pstate,
+        expr,
+        exprtype,
+        att.atttypid,
+        att.atttypmod,
+        coerce::CoercionContext::COERCION_ASSIGNMENT,
+        types_nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST,
+        -1,
+    )?;
+    match coerced {
+        Some(e) => Ok(e),
+        None => Err(default_type_mismatch(att.attname.name_str(), att.atttypid, exprtype)),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn default_expression_not_found(attrno: usize, rel: &types_rel::Relation<'_>) -> Box<PgError> {
+    let relname = String::from_utf8_lossy(rel.rd_rel.relname.name_str()).into_owned();
+    Box::new(PgError::error(format!(
+        "default expression not found for attribute {attrno} of relation \"{relname}\""
+    )))
+}
+
+#[cold]
+#[inline(never)]
+fn default_type_mismatch(attname: &[u8], atttypid: Oid, exprtype: Oid) -> Box<PgError> {
+    let attname = String::from_utf8_lossy(attname).into_owned();
+    let want = format_type::format_type_be(atttypid).unwrap_or_else(|_| "???".into());
+    let got = format_type::format_type_be(exprtype).unwrap_or_else(|_| "???".into());
+    Box::new(
+        PgError::error(format!(
+            "column \"{attname}\" is of type {want} but default expression is of type {got}"
+        ))
+        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
+        .with_hint("You will need to rewrite or cast the expression."),
+    )
+}
+
 fn fireRIRrules<'mcx>(
     mcx: Mcx<'mcx>,
     parsetree: &Query<'mcx>,
     active_rirs: &mut PgVec<'mcx, Oid>,
 ) -> PgResult<()> {
-    if !parsetree.cteList.is_nil() {
-        panic!(
-            "fireRIRrules (rewriteHandler.c): CTE descent + rewriteSearchAndCycle need \
-             CommonTableExpr (types_nodes parsenodes unported)"
-        );
+    // C reassigns cte->ctequery = fireRIRrules(...); fireRIRrules returns its
+    // argument mutated in place, so the shared-ref recursion is equivalent.
+    for cte_node in &parsetree.cteList {
+        let cte = cte_node.as_common_table_expr().expect("cteList cell");
+        let ctequery = cte.ctequery.and_then(|n| n.as_query()).expect("analyzed CTE query");
+        fireRIRrules(mcx, ctequery, active_rirs)?;
+        if cte.search_clause.is_some() || cte.cycle_clause.is_some() {
+            panic!("rewriteSearchAndCycle (rewriteSearchCycle.c): SEARCH/CYCLE lane");
+        }
     }
     debug_assert!(parsetree.onConflict.is_none());
     let orig_result_relation = parsetree.resultRelation;
@@ -608,11 +694,10 @@ pub fn AcquireRewriteLocks<'mcx>(
         }
     }
 
-    if !parsetree.cteList.is_nil() {
-        panic!(
-            "AcquireRewriteLocks (rewriteHandler.c): WITH descent needs CommonTableExpr \
-             (types_nodes parsenodes unported)"
-        );
+    for cte_node in &parsetree.cteList {
+        let cte = cte_node.as_common_table_expr().expect("cteList cell");
+        let ctequery = cte.ctequery.and_then(|n| n.as_query()).expect("analyzed CTE query");
+        AcquireRewriteLocks(mcx, ctequery, forExecute, false)?;
     }
 
     if parsetree.hasSubLinks {

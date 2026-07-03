@@ -16,6 +16,7 @@ use crate::run::PlannerRun;
 pub const EXPRKIND_QUAL: i32 = 0;
 pub const EXPRKIND_TARGET: i32 = 1;
 pub const EXPRKIND_RTFUNC: i32 = 2;
+pub const EXPRKIND_VALUES: i32 = 4;
 pub const EXPRKIND_LIMIT: i32 = 6;
 
 // Top-level arm plus the make_subplan recursion (run.push_root pre-sets the
@@ -37,7 +38,7 @@ pub fn subquery_planner<'mcx>(
     run.root.join_domains.push(JoinDomain::default());
 
     if !parse.cteList.is_nil() {
-        panic!("SS_process_ctes (subselect.c): M2 CTE lane");
+        crate::cte::ss_process_ctes(run, &parse)?;
     }
     if parse.commandType == CmdType::CMD_MERGE {
         panic!("transform_MERGE_to_join (prepjointree.c): M2 MERGE lane");
@@ -56,7 +57,8 @@ pub fn subquery_planner<'mcx>(
 
     let mut has_outer_joins = false;
     let mut has_result_rtes = false;
-    for rte_node in &parse.rtable {
+    let mut join_rtes: mcx::PgVec<'mcx, i32> = mcx::PgVec::new_in(mcx);
+    for (rti0, rte_node) in parse.rtable.iter().enumerate() {
         let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
         match rte.rtekind {
             RTEKind::RTE_RELATION => {
@@ -84,6 +86,7 @@ pub fn subquery_planner<'mcx>(
             RTEKind::RTE_RESULT => has_result_rtes = true,
             RTEKind::RTE_JOIN => {
                 run.root.hasJoinRTEs = true;
+                join_rtes.push(rti0 as i32 + 1);
                 if rte.jointype != types_nodes::jointype::JoinType::JOIN_INNER {
                     has_outer_joins = true;
                 }
@@ -99,10 +102,31 @@ pub fn subquery_planner<'mcx>(
                 // resolve on this lane; EXPRKIND_RTFUNC preprocess_expression
                 // skipped (grammar-Const args).
             }
-            RTEKind::RTE_TABLEFUNC | RTEKind::RTE_VALUES => {
+            RTEKind::RTE_VALUES => {
+                assert!(!rte.lateral, "preprocess_expression (planner.c): EXPRKIND_VALUES_LATERAL; M2 lateral lane");
+                let lists = preprocess_expression_list(
+                    run,
+                    rte.values_lists.clone_in(mcx)?,
+                    EXPRKIND_VALUES,
+                    parse.hasSubLinks,
+                )?;
+                // SAFETY: as the RTE_RELATION arm above.
+                unsafe {
+                    rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                        r.values_lists = lists
+                    })
+                };
+            }
+            RTEKind::RTE_TABLEFUNC => {
                 panic!("preprocess_function_rtes (prepjointree.c): {:?}; M2 lane", rte.rtekind)
             }
-            RTEKind::RTE_CTE | RTEKind::RTE_NAMEDTUPLESTORE => {
+            RTEKind::RTE_CTE => {
+                assert!(
+                    !rte.self_reference,
+                    "subquery_planner (planner.c): recursive self-reference; M2 recursive-CTE lane"
+                );
+            }
+            RTEKind::RTE_NAMEDTUPLESTORE => {
                 panic!("subquery_planner (planner.c): {:?} RTE; M2 lane", rte.rtekind)
             }
             RTEKind::RTE_GROUP => {
@@ -131,8 +155,11 @@ pub fn subquery_planner<'mcx>(
     preprocess_qual_conditions(run, &mut parse, has_sublinks)?;
     parse.havingQual =
         preprocess_expression(run, parse.havingQual, EXPRKIND_QUAL, has_sublinks)?;
-    if !parse.windowClause.is_nil() {
-        panic!("preprocess_expression (planner.c): window frame offsets; M2 window lane");
+    for wc_node in &parse.windowClause {
+        let wc = wc_node.as_window_clause().expect("windowClause cell");
+        if wc.startOffset.is_some() || wc.endOffset.is_some() {
+            panic!("preprocess_expression (planner.c): window frame offsets (explicit frames unported)");
+        }
     }
     parse.limitOffset =
         preprocess_expression(run, parse.limitOffset, EXPRKIND_LIMIT, has_sublinks)?;
@@ -184,6 +211,10 @@ pub fn subquery_planner<'mcx>(
     let sealed: &'mcx Query<'mcx> = alloc_leak_in(mcx, parse)?;
     run.root.parse = run.intern_query(sealed);
 
+    if run.root.hasJoinRTEs {
+        assert_no_join_alias_vars(sealed, &join_rtes)?;
+    }
+
     // Deferred half of standard_planner's parallel-mode assessment (lib.rs).
     // Guarded to the top level: C scans only the top query (recursing itself);
     // a sub-level scan would clobber the verdict (Gather consumers are loud).
@@ -218,10 +249,10 @@ pub fn preprocess_expression<'mcx>(
 ) -> PgResult<Option<Node<'mcx>>> {
     let Some(mut expr) = expr else { return Ok(None) };
 
-    if run.root.hasJoinRTEs {
-        // vars::flatten_join_alias_vars is itself a loud panic today.
-        panic!("flatten_join_alias_vars (var.c): M2 join lane");
-    }
+    // flatten_join_alias_vars: INNER JOIN ... ON produces no join-alias Vars
+    // (join nscolumns reference the base rels), so C's rewrite is the identity
+    // here; the post-seal assert_no_join_alias_vars sweep keeps the merged
+    // USING/NATURAL and whole-row shapes loud.
     if kind != EXPRKIND_RTFUNC {
         expr = clauses::eval_const_expressions_with_params(
             run.mcx,
@@ -298,24 +329,84 @@ fn move_qual_to_where<'mcx>(
     Ok(())
 }
 
-// C mutates jointree->quals in place; the FromExpr is shared here, so an
-// equivalent one carries the preprocessed quals.
+// C mutates jointree quals in place; the FromExpr/JoinExpr nodes are shared
+// here, so rebuilt equivalents carry the preprocessed quals.
 fn preprocess_qual_conditions<'mcx>(
     run: &mut PlannerRun<'mcx>,
     parse: &mut Query<'mcx>,
     has_sublinks: bool,
 ) -> PgResult<()> {
     let f = parse.jointree.expect("jointree is a FromExpr");
+    let mut fromlist = types_nodes::list::NodeList::nil();
     for child in &f.fromlist {
-        match child.node_tag() {
-            NodeTag::T_RangeTblRef => {}
-            other => panic!("preprocess_qual_conditions (planner.c): {other:?}; M2 join lane"),
-        }
+        fromlist.lappend(run.mcx, preprocess_jointree_quals(run, child, has_sublinks)?)?;
     }
     let quals = preprocess_expression(run, f.quals, EXPRKIND_QUAL, has_sublinks)?;
     parse.jointree = Some(alloc_leak_in(
         run.mcx,
-        types_nodes::primnodes::FromExpr { fromlist: f.fromlist.clone_in(run.mcx)?, quals },
+        types_nodes::primnodes::FromExpr { fromlist, quals },
     )?);
+    Ok(())
+}
+
+fn preprocess_jointree_quals<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    node: Node<'mcx>,
+    has_sublinks: bool,
+) -> PgResult<Node<'mcx>> {
+    match node.node_tag() {
+        NodeTag::T_RangeTblRef => Ok(node),
+        NodeTag::T_JoinExpr => {
+            let j = node.as_join_expr().expect("JoinExpr");
+            let larg = preprocess_jointree_quals(run, j.larg, has_sublinks)?;
+            let rarg = preprocess_jointree_quals(run, j.rarg, has_sublinks)?;
+            let quals = preprocess_expression(run, j.quals, EXPRKIND_QUAL, has_sublinks)?;
+            Node::mk(
+                run.mcx,
+                types_nodes::JoinExpr {
+                    jointype: j.jointype,
+                    isNatural: j.isNatural,
+                    larg,
+                    rarg,
+                    usingClause: j.usingClause.clone_in(run.mcx)?,
+                    join_using_alias: j.join_using_alias,
+                    quals,
+                    alias: j.alias,
+                    rtindex: j.rtindex,
+                },
+            )
+        }
+        other => panic!("preprocess_qual_conditions (planner.c): {other:?}; M2 join lane"),
+    }
+}
+
+// flatten_join_alias_vars (var.c), detection form: a Var whose varno names an
+// RTE_JOIN entry only arises from merged USING/NATURAL columns or a join
+// whole-row reference — both unported. INNER ... ON join columns carry base
+// relids, so C's rewrite is the identity on everything that parses today.
+fn assert_no_join_alias_vars<'mcx>(
+    sealed: &'mcx Query<'mcx>,
+    join_rtes: &[i32],
+) -> PgResult<()> {
+    struct W<'a> {
+        join_rtes: &'a [i32],
+    }
+    impl<'mcx> nodes_core::NodeWalker<'mcx> for W<'_> {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            if let Some(v) = node.as_var() {
+                if v.varlevelsup == 0 && self.join_rtes.contains(&v.varno) {
+                    panic!(
+                        "flatten_join_alias_vars (var.c): join alias Var (varno {}); \
+                         join-using lane",
+                        v.varno
+                    );
+                }
+                return Ok(false);
+            }
+            nodes_core::expression_tree_walker(node, self)
+        }
+    }
+    let mut w = W { join_rtes };
+    nodes_core::query_tree_walker(sealed, &mut w, 0)?;
     Ok(())
 }

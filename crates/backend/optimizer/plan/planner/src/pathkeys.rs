@@ -302,14 +302,15 @@ pub fn make_canonical_pathkey(
     pk
 }
 
-// pathkey_is_redundant (pathkeys.c): EC-const case can't arise while quals
-// skip the EC detour (initsplan divergence note).
 fn pathkey_is_redundant(run: &PlannerRun<'_>, new_pathkey: PathKey, pathkeys: &[PathKey]) -> bool {
-    debug_assert!(!run.root.ec(new_pathkey.pk_eclass.unwrap()).ec_has_const);
+    // EC_MUST_BE_REDUNDANT: a const EC admits only one key value.
+    if run.root.ec(new_pathkey.pk_eclass.unwrap()).ec_has_const {
+        return true;
+    }
     pathkeys.iter().any(|old| old.pk_eclass == new_pathkey.pk_eclass)
 }
 
-// create_it=true, rel=NULL; the jdomain const leg is vacuous (no const EMs).
+// create_it=true, rel=NULL; jdomain is always the top domain here.
 fn get_eclass_for_sort_expr<'mcx>(
     run: &mut PlannerRun<'mcx>,
     expr: Node<'mcx>,
@@ -339,7 +340,9 @@ fn get_eclass_for_sort_expr<'mcx>(
             if em.em_is_child {
                 continue;
             }
-            debug_assert!(!em.em_is_const);
+            // C skips const members from a different JoinDomain; every EC
+            // built here carries the top domain (em_jdomain None), so const
+            // members always match.
             if opcintype == em.em_datatype && types_nodes::equal(*run.root.expr_node(em.em_expr), expr)
             {
                 return Ok(id);
@@ -351,14 +354,23 @@ fn get_eclass_for_sort_expr<'mcx>(
     let has_volatile = clauses::contain_volatile_functions(expr)?;
     assert!(!(has_volatile && sortref == 0), "volatile EquivalenceClass has no sortref");
     let expr_relids = pull_varnos_relids(run, expr)?;
-    let is_const = expr_relids.is_none() && !has_volatile;
-    assert!(!is_const, "get_eclass_for_sort_expr (equivclass.c): const sort expr; M2 lane");
+    // make_eq_member marks empty-relids members const; get_eclass_for_sort_expr
+    // then un-marks when volatile/SRF/agg/window can hide in a sort expr.
+    let mut em_is_const = expr_relids.is_none();
+    if em_is_const
+        && (has_volatile
+            || expression_returns_set(expr)?
+            || clauses::contain_agg_clause(expr)?
+            || clauses::contain_window_function(expr)?)
+    {
+        em_is_const = false;
+    }
     // C copyObject's the expr into the EC; the arena share is our copy model.
     let em_expr = run.intern_expr(expr);
     let em = run.root.alloc_em(EquivalenceMember {
         em_expr,
         em_relids: expr_relids,
-        em_is_const: false,
+        em_is_const,
         em_is_child: false,
         em_datatype: opcintype,
         em_jdomain: None,
@@ -370,6 +382,7 @@ fn get_eclass_for_sort_expr<'mcx>(
     ec.ec_collation = collation;
     ec.ec_members.push(em);
     ec.ec_relids = pull_varnos_relids(run, expr)?;
+    ec.ec_has_const = em_is_const;
     ec.ec_has_volatile = has_volatile;
     ec.ec_sortref = sortref;
     ec.ec_min_security = u32::MAX;
@@ -412,8 +425,37 @@ pub fn expr_collation(node: Node<'_>) -> u32 {
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
         NodeTag::T_Param => node.as_param().unwrap().paramcollid,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggcollid,
+        NodeTag::T_WindowFunc => node.as_window_func().unwrap().wincollid,
         other => panic!("exprCollation (nodeFuncs.c): {other:?}; M2 expression lane"),
     }
+}
+
+// expression_returns_set (nodeFuncs.c); lives here rather than nodes_core to
+// keep this lane out of a concurrently-edited crate.
+fn expression_returns_set(expr: Node<'_>) -> PgResult<bool> {
+    struct W;
+    impl<'mcx> nodes_core::NodeWalker<'mcx> for W {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            use types_nodes::NodeTag;
+            match node.node_tag() {
+                NodeTag::T_FuncExpr => {
+                    if node.as_func_expr().unwrap().funcretset {
+                        return Ok(true);
+                    }
+                    nodes_core::expression_tree_walker(node, self)
+                }
+                NodeTag::T_OpExpr => {
+                    if node.as_op_expr().unwrap().opretset {
+                        return Ok(true);
+                    }
+                    nodes_core::expression_tree_walker(node, self)
+                }
+                NodeTag::T_Aggref | NodeTag::T_GroupingFunc | NodeTag::T_WindowFunc => Ok(false),
+                _ => nodes_core::expression_tree_walker(node, self),
+            }
+        }
+    }
+    nodes_core::NodeWalker::visit(&mut W, expr)
 }
 
 fn pull_varnos_relids<'mcx>(

@@ -18,6 +18,10 @@ rewrite_handler_seams = { path = "../rewrite_handler_seams" }
 nodes_core = { path = "../../nodes/nodes_core" }
 readfuncs = { path = "../../nodes/readfuncs" }
 relcache = { path = "../../utils/cache/relcache" }
+coerce = { path = "../../parser/coerce" }
+parse_expr = { path = "../../parser/parse_expr" }
+parser_small1 = { path = "../../parser/parser_small1" }
+format_type = { path = "../../utils/adt/format_type" }
 
 [dev-dependencies]
 transam_seams = { path = "../../access/transam/transam_seams" }
@@ -73,7 +77,6 @@ namespace_seams = { path = "../../catalog/namespace_seams" }
 nodeseqscan = { path = "../../executor/nodeseqscan" }
 origin_seams = { path = "../../replication/origin_seams" }
 parallel_seams = { path = "../../access/transam/parallel_seams" }
-parse_expr = { path = "../../parser/parse_expr" }
 parser_analyze = { path = "../../parser/parser_analyze" }
 parser_driver = { path = "../../parser/parser_driver" }
 parser_seams = { path = "../../parser/parser_seams" }

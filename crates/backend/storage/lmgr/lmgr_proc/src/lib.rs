@@ -344,6 +344,129 @@ pub fn InitProcGlobal(cfg: &ProcGlobalConfig) {
         .unwrap_or_else(|_| panic!("InitProcGlobal called twice"));
 }
 
+/// Crash-cycle reset in place (notes/crash-restart-design.md): restores the
+/// post-InitProcGlobal image — per-PGPROC state, header lists/counters, and
+/// the freelists relinked exactly as construction built them. Sizes and the
+/// leaked arenas (semaphores, fast-path views, tranche ids) are boot-stable.
+pub fn ProcGlobalResetAfterCrash() {
+    let hdr = ProcGlobal();
+    let cfg = PROC_CONFIG.get().expect("InitProcGlobal has not run");
+    let max_backends = g::MaxBackends();
+    let runnable = (max_backends + NUM_AUXILIARY_PROCS) as usize;
+    assert_eq!(
+        hdr.allProcs.len(),
+        (max_backends + NUM_AUXILIARY_PROCS + cfg.max_prepared_xacts) as usize
+    );
+
+    let groups = hdr.fpLockGroupsPerBackend as usize;
+    for (i, proc) in hdr.allProcs.iter().enumerate() {
+        proc.links.set(proclist_node::detached());
+        proc.waitStatus.store(PROC_WAIT_STATUS_OK, Relaxed);
+        proc.procLatch.is_set.store(0, Relaxed);
+        proc.procLatch.maybe_sleeping.store(0, Relaxed);
+        proc.procLatch.owner_pid.store(0, Relaxed);
+        proc.xid.value.store(InvalidTransactionId, Relaxed);
+        proc.xmin.value.store(InvalidTransactionId, Relaxed);
+        proc.pid.store(0, Relaxed);
+        proc.pgxactoff.store(0, Relaxed);
+        proc.vxid.procNumber.store(0, Relaxed);
+        proc.vxid.lxid.store(0, Relaxed);
+        proc.databaseId.store(InvalidOid, Relaxed);
+        proc.roleId.store(InvalidOid, Relaxed);
+        proc.tempNamespaceId.store(InvalidOid, Relaxed);
+        proc.isRegularBackend.store(false, Relaxed);
+        proc.recoveryConflictPending.store(false, Relaxed);
+        proc.lwWaiting.store(LW_WS_NOT_WAITING, Relaxed);
+        proc.lwWaitMode.store(0, Relaxed);
+        proc.lwWaitLink.set(proclist_node::default());
+        proc.cvWaitLink.set(proclist_node::default());
+        proc.waitLock.set(core::ptr::null_mut());
+        proc.waitProcLock.set(core::ptr::null_mut());
+        proc.waitLockMode.set(0);
+        proc.heldLocks.set(0);
+        proc.waitStart.write(0);
+        proc.delayChkptFlags.store(0, Relaxed);
+        proc.statusFlags.store(0, Relaxed);
+        proc.waitLSN.store(0, Relaxed);
+        proc.syncRepState.set(0);
+        proc.syncRepLinks.set(proclist_node::detached());
+        for part in proc.myProcLocks.iter() {
+            part.set(types_storage::ilist::dlist_head::new());
+        }
+        proc.subxidStatus.set(XidCacheStatus::default());
+        proc.subxids.set(types_storage::storage::XidCache::default());
+        proc.procArrayGroupMember.store(false, Relaxed);
+        proc.procArrayGroupNext
+            .value
+            .store(INVALID_PROC_NUMBER as u32, Relaxed);
+        proc.procArrayGroupMemberXid
+            .store(InvalidTransactionId, Relaxed);
+        proc.wait_event_info.store(0, Relaxed);
+        proc.clogGroupMember.store(false, Relaxed);
+        proc.clogGroupNext
+            .value
+            .store(INVALID_PROC_NUMBER as u32, Relaxed);
+        proc.clogGroupMemberXid.store(InvalidTransactionId, Relaxed);
+        proc.clogGroupMemberXidStatus.store(0, Relaxed);
+        proc.clogGroupMemberPage.store(0, Relaxed);
+        proc.clogGroupMemberLsn.store(0, Relaxed);
+        if i < runnable {
+            proc.fpInfoLock
+                .state
+                .value
+                .store(lwlock::LW_FLAG_RELEASE_OK, Relaxed);
+            // SAFETY: exclusive postmaster-thread access (all children dead).
+            unsafe { *proc.fpInfoLock.waiters.ptr() = proclist_head::default() };
+            // SAFETY: fixed leaked views sized groups/slots by InitProcGlobal.
+            unsafe {
+                for cell in proc.fp_lock_bits(groups) {
+                    cell.set(0);
+                }
+                for cell in proc.fp_rel_id(groups) {
+                    cell.set(InvalidOid);
+                }
+            }
+        }
+        proc.fpVXIDLock.store(false, Relaxed);
+        proc.fpLocalTransactionId
+            .store(InvalidLocalTransactionId, Relaxed);
+        proc.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
+        proc.lockGroupMembers.set(proclist_head::default());
+        proc.lockGroupLink.set(proclist_node::detached());
+    }
+
+    for xid in hdr.xids.iter() {
+        xid.value.store(0, Relaxed);
+    }
+    for st in hdr.subxidStates.iter() {
+        st.set(XidCacheStatus::default());
+    }
+    for flags in hdr.statusFlags.iter() {
+        flags.store(0, Relaxed);
+    }
+
+    hdr.freeProcs.set(proclist_head::default());
+    hdr.autovacFreeProcs.set(proclist_head::default());
+    hdr.bgworkerFreeProcs.set(proclist_head::default());
+    hdr.walsenderFreeProcs.set(proclist_head::default());
+    for i in 0..max_backends {
+        if let Some(list) = hdr.allProcs[i as usize].procgloballist.get() {
+            plist_push_tail(hdr, freelist(hdr, list), i, links_of);
+        }
+    }
+    hdr.procArrayGroupFirst
+        .value
+        .store(INVALID_PROC_NUMBER as u32, Relaxed);
+    hdr.clogGroupFirst
+        .value
+        .store(INVALID_PROC_NUMBER as u32, Relaxed);
+    hdr.walwriterProc.store(INVALID_PROC_NUMBER, Relaxed);
+    hdr.checkpointerProc.store(INVALID_PROC_NUMBER, Relaxed);
+    hdr.spins_per_delay.set(DEFAULT_SPINS_PER_DELAY);
+    hdr.startupBufferPinWaitBufId.store(-1, Relaxed);
+    ProcStructLock.unlock();
+}
+
 pub fn AuxiliaryProcsBase() -> ProcNumber {
     ProcGlobal().allProcCount as ProcNumber - NUM_AUXILIARY_PROCS
 }

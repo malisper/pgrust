@@ -30,9 +30,29 @@ fn make_numeric_typmod(precision: i32, scale: i32) -> i32 {
     ((precision << 16) | (scale & 0x7ff)) + VARHDRSZ as i32
 }
 
-fn cstr(b: &[u8]) -> Vec<u8> {
-    let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
-    b[..end].to_vec()
+// Retained per-call buffers (numstr/inout); C's equivalents are bump pallocs.
+std::thread_local! {
+    static NUM_SCRATCH: std::cell::RefCell<Vec<Vec<u8>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn scratch_take() -> Vec<u8> {
+    NUM_SCRATCH
+        .with(|s| s.borrow_mut().pop())
+        .map(|mut v| {
+            v.clear();
+            v
+        })
+        .unwrap_or_default()
+}
+
+fn scratch_put(v: Vec<u8>) {
+    NUM_SCRATCH.with(|s| {
+        let mut p = s.borrow_mut();
+        if p.len() < 4 {
+            p.push(v);
+        }
+    });
 }
 
 type Fmt = std::rc::Rc<[FormatNode]>;
@@ -58,7 +78,10 @@ fn num_tochar_finish(
     sign: i32,
     fmt_len: usize,
 ) -> PgResult<Vec<u8>> {
-    let inout = vec![0u8; fmt_len * NUM_MAX_ITEM_SIZ + 1];
+    // C pallocs (unzeroed) and relies on strcpy NUL-termination; the writers
+    // resize on demand, so reserve-only is the same bytes without the memset.
+    let mut inout = scratch_take();
+    inout.reserve(fmt_len * NUM_MAX_ITEM_SIZ + 1);
     let processed = num_processor(
         format,
         num,
@@ -70,6 +93,7 @@ fn num_tochar_finish(
         true,
         InvalidOid,
     )?;
+    scratch_put(processed.number);
     Ok(processed.out)
 }
 
@@ -188,7 +212,9 @@ pub fn numeric_to_char<'mcx>(
     }
 
     let out = num_tochar_finish(&format, &mut num, numstr, out_pre_spaces, sign, len)?;
-    text_result(mcx, &cstr(&out))
+    let res = text_result(mcx, &out);
+    scratch_put(out);
+    res
 }
 
 // C: numeric_out(numeric_round(val, post)) — make_result normalizes a
@@ -198,14 +224,15 @@ fn render_var(x: &NumericVar) -> PgResult<Vec<u8>> {
         return Ok(s.to_vec());
     }
     let img = make_result(x.view())?;
-    let mut buf = Vec::new();
+    let mut buf = scratch_take();
     ::numeric::numeric_out_into(img.num(), &mut buf);
     Ok(buf)
 }
 
-fn strip_sign(orgnum: Vec<u8>) -> (Vec<u8>, i32) {
+fn strip_sign(mut orgnum: Vec<u8>) -> (Vec<u8>, i32) {
     if orgnum.first() == Some(&b'-') {
-        (orgnum[1..].to_vec(), b'-' as i32)
+        orgnum.remove(0);
+        (orgnum, b'-' as i32)
     } else {
         (orgnum, b'+' as i32)
     }
@@ -265,11 +292,15 @@ pub fn int4_to_char<'mcx>(mcx: Mcx<'mcx>, value: i32, fmt: &[u8]) -> PgResult<Va
         let (np, ns) = adjust_pre(padded, pre as i32, &num);
         out_pre_spaces = np;
         let out = num_tochar_finish(&format, &mut num, ns, out_pre_spaces, sign, len)?;
-        return text_result(mcx, &cstr(&out));
+        let res = text_result(mcx, &out);
+        scratch_put(out);
+        return res;
     }
 
     let out = num_tochar_finish(&format, &mut num, numstr, out_pre_spaces, sign, len)?;
-    text_result(mcx, &cstr(&out))
+    let res = text_result(mcx, &out);
+    scratch_put(out);
+    res
 }
 
 pub fn int8_to_char<'mcx>(mcx: Mcx<'mcx>, value: i64, fmt: &[u8]) -> PgResult<Varlena<'mcx>> {
@@ -320,11 +351,15 @@ pub fn int8_to_char<'mcx>(mcx: Mcx<'mcx>, value: i64, fmt: &[u8]) -> PgResult<Va
         let (np, ns) = adjust_pre(padded, pre as i32, &num);
         out_pre_spaces = np;
         let out = num_tochar_finish(&format, &mut num, ns, out_pre_spaces, sign, len)?;
-        return text_result(mcx, &cstr(&out));
+        let res = text_result(mcx, &out);
+        scratch_put(out);
+        return res;
     }
 
     let out = num_tochar_finish(&format, &mut num, numstr, out_pre_spaces, sign, len)?;
-    text_result(mcx, &cstr(&out))
+    let res = text_result(mcx, &out);
+    scratch_put(out);
+    res
 }
 
 pub fn float4_to_char<'mcx>(mcx: Mcx<'mcx>, value: f32, fmt: &[u8]) -> PgResult<Varlena<'mcx>> {
@@ -383,11 +418,15 @@ pub fn float4_to_char<'mcx>(mcx: Mcx<'mcx>, value: f32, fmt: &[u8]) -> PgResult<
         let (np, ns) = adjust_pre(sb.clone(), pre_len(&sb), &num);
         out_pre_spaces = np;
         let out = num_tochar_finish(&format, &mut num, ns, out_pre_spaces, sign, len)?;
-        return text_result(mcx, &cstr(&out));
+        let res = text_result(mcx, &out);
+        scratch_put(out);
+        return res;
     }
 
     let out = num_tochar_finish(&format, &mut num, numstr, out_pre_spaces, sign, len)?;
-    text_result(mcx, &cstr(&out))
+    let res = text_result(mcx, &out);
+    scratch_put(out);
+    res
 }
 
 pub fn float8_to_char<'mcx>(mcx: Mcx<'mcx>, value: f64, fmt: &[u8]) -> PgResult<Varlena<'mcx>> {
@@ -446,11 +485,15 @@ pub fn float8_to_char<'mcx>(mcx: Mcx<'mcx>, value: f64, fmt: &[u8]) -> PgResult<
         let (np, ns) = adjust_pre(sb.clone(), pre_len(&sb), &num);
         out_pre_spaces = np;
         let out = num_tochar_finish(&format, &mut num, ns, out_pre_spaces, sign, len)?;
-        return text_result(mcx, &cstr(&out));
+        let res = text_result(mcx, &out);
+        scratch_put(out);
+        return res;
     }
 
     let out = num_tochar_finish(&format, &mut num, numstr, out_pre_spaces, sign, len)?;
-    text_result(mcx, &cstr(&out))
+    let res = text_result(mcx, &out);
+    scratch_put(out);
+    res
 }
 
 fn pad_post(orgnum: Vec<u8>, pre: usize, num: &NUMDesc) -> Vec<u8> {
@@ -505,7 +548,7 @@ pub fn numeric_to_number<'mcx>(
     let scale = num.post;
     let precision = num.pre + num.multi + scale;
 
-    let s = String::from_utf8_lossy(&cstr(&processed.out)).into_owned();
+    let s = String::from_utf8_lossy(&processed.out).into_owned();
     let img = numeric_in(&s, make_numeric_typmod(precision, scale), None)?
         .expect("numeric_in without soft-error context yields Some");
 

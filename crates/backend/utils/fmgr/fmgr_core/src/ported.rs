@@ -5,6 +5,7 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::adt_bool::builtins::BOOL_BUILTINS,
     ::arrayfuncs::builtins::ARRAYFUNCS_BUILTINS,
     ::adt_cash::builtins::CASH_BUILTINS,
+    ::adt_char::builtins::CHAR_BUILTINS,
     ::adt_date::builtins::DATE_BUILTINS,
     ::adt_encode::builtins::ENCODE_BUILTINS,
     ::adt_float::builtins::FLOAT_BUILTINS,
@@ -22,6 +23,7 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::name::builtins::NAME_BUILTINS,
     ::nbt_compare::builtins::NBT_BUILTINS,
     ::varlena::builtins::VARLENA_BUILTINS,
+    ::adt_windowfuncs::WINDOWFUNCS_BUILTINS,
 ];
 
 const fn total() -> usize {

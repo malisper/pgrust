@@ -1,5 +1,7 @@
 #![allow(non_snake_case)]
 
+pub mod parse_cte;
+
 #[cfg(test)]
 mod tests;
 
@@ -199,10 +201,7 @@ pub fn transformStmt<'mcx>(
         NodeTag::T_SelectStmt => {
             let n = parse_tree.as_select_stmt().unwrap();
             if !n.valuesLists.is_nil() {
-                panic!(
-                    "transformStmt (analyze.c): transformValuesClause unported — \
-                     unit backend-parser-analyze"
-                );
+                transformValuesClause(mcx, pstate, n)?
             } else if n.op == types_nodes::parsenodes::SetOperation::SETOP_NONE {
                 transformSelectStmt(mcx, pstate, n)?
             } else {
@@ -246,15 +245,24 @@ pub fn transformStmt<'mcx>(
     Ok(result)
 }
 
-// transformExplainStmt; the GENERIC_PLAN variable-parameter leg is dead
-// (options never parse: the gram options arms are loud).
 fn transformExplainStmt<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
     explain_node: Node<'mcx>,
 ) -> PgResult<Query<'mcx>> {
     let stmt = explain_node.as_explain_stmt().unwrap();
-    debug_assert!(stmt.options.is_nil());
+    if matches!(pstate.p_ref_hook_state, parser_small1::ParseRefHookState::None) {
+        for opt in stmt.options.iter() {
+            let opt = opt.as_def_elem().expect("EXPLAIN options are DefElems");
+            // C checks defGetBoolean; GENERIC_PLAN in any form is loud here.
+            if opt.defname == Some("generic_plan") {
+                panic!(
+                    "transformExplainStmt (analyze.c): GENERIC_PLAN variable-parameter \
+                     setup unported"
+                );
+            }
+        }
+    }
     let inner = stmt.query.expect("ExplainStmt has a query");
     let analyzed = transformOptionalSelectInto(mcx, pstate, inner)?;
     let query_node = Node::mk(mcx, analyzed)?;
@@ -300,11 +308,10 @@ fn transformSelectStmt<'mcx>(
     let mut qry = Query::default();
     qry.commandType = CmdType::CMD_SELECT;
 
-    if stmt.withClause.is_some() {
-        panic!(
-            "transformSelectStmt (analyze.c): transformWithClause (parse_cte.c) \
-             unported — unit backend-parser-medium1"
-        );
+    if let Some(with) = stmt.withClause {
+        qry.hasRecursive = with.as_with_clause().expect("withClause").recursive;
+        qry.cteList = parse_cte::transformWithClause(mcx, pstate, with)?;
+        qry.hasModifyingCTE = pstate.p_hasModifyingCTE;
     }
 
     if stmt.intoClause.is_some() {
@@ -404,7 +411,7 @@ fn transformSelectStmt<'mcx>(
     qry.limitOption = stmt.limitOption;
 
     let windowdefs = mem::take(&mut pstate.p_windowdefs);
-    qry.windowClause = transformWindowDefinitions(pstate, &windowdefs, &mut qry.targetList)?;
+    qry.windowClause = transformWindowDefinitions(mcx, pstate, &windowdefs, &mut qry.targetList)?;
 
     if pstate.p_resolve_unknowns {
         resolveTargetListUnknowns(mcx, pstate, &qry.targetList)?;
@@ -438,6 +445,176 @@ fn transformSelectStmt<'mcx>(
     {
         parse_agg::parseCheckAggregates(pstate, &qry)?;
     }
+
+    Ok(qry)
+}
+
+fn transformValuesClause<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    stmt: &SelectStmt<'mcx>,
+) -> PgResult<Query<'mcx>> {
+    let mut qry = Query::default();
+    qry.commandType = CmdType::CMD_SELECT;
+
+    debug_assert!(matches!(stmt.distinctClause, types_nodes::rawnodes::DistinctClause::None));
+    debug_assert!(stmt.intoClause.is_none());
+    debug_assert!(stmt.targetList.is_nil());
+    debug_assert!(stmt.fromClause.is_nil());
+    debug_assert!(stmt.whereClause.is_none());
+    debug_assert!(stmt.groupClause.is_nil());
+    debug_assert!(stmt.havingClause.is_none());
+    debug_assert!(stmt.windowClause.is_nil());
+    debug_assert!(stmt.op == types_nodes::parsenodes::SetOperation::SETOP_NONE);
+
+    if stmt.withClause.is_some() {
+        panic!(
+            "transformValuesClause (analyze.c): transformWithClause (parse_cte.c) \
+             unported — unit backend-parser-medium1"
+        );
+    }
+
+    let mut colexprs: mcx::PgVec<'mcx, types_nodes::NodeList<'mcx>> = mcx::PgVec::new_in(mcx);
+    let mut sublist_length: i64 = -1;
+    for sublist_node in &stmt.valuesLists {
+        let sublist = sublist_node.as_list().expect("VALUES row is a List");
+        let sublist = parse_target::transformExpressionList(
+            mcx,
+            pstate,
+            sublist,
+            ParseExprKind::EXPR_KIND_VALUES,
+            false,
+        )?;
+        if sublist_length < 0 {
+            sublist_length = sublist.len() as i64;
+            colexprs.try_reserve_exact(sublist.len()).map_err(|_| mcx.oom(sublist.len()))?;
+            for _ in 0..sublist.len() {
+                colexprs.push(types_nodes::NodeList::nil());
+            }
+        } else if sublist_length != sublist.len() as i64 {
+            return Err(values_length_mismatch(pstate, &sublist));
+        }
+        for (i, col) in sublist.iter().enumerate() {
+            colexprs[i].lappend(mcx, col)?;
+        }
+    }
+
+    let mut coltypes = types_nodes::list::OidList::nil();
+    let mut coltypmods = types_nodes::list::IntList::nil();
+    let mut colcollations = types_nodes::list::OidList::nil();
+    for column in colexprs.iter_mut() {
+        let mut type_locs: mcx::PgVec<'_, (Oid, types_core::ParseLoc)> =
+            mcx::vec_with_capacity_in(mcx, column.len())?;
+        for col in column.iter() {
+            type_locs.push((parse_expr::expr_type(col), parse_expr::expr_location(col)));
+        }
+        let coltype = coerce::select_common_type(pstate, &type_locs, Some("VALUES"))?;
+
+        let mut coerced = types_nodes::NodeList::nil();
+        let mut type_mods: mcx::PgVec<'_, (Oid, i32)> =
+            mcx::vec_with_capacity_in(mcx, column.len())?;
+        for col in column.iter() {
+            let col = coerce::coerce_to_common_type(
+                mcx,
+                pstate,
+                col,
+                parse_expr::expr_type(col),
+                parse_expr::expr_location(col),
+                coltype,
+                "VALUES",
+            )?;
+            type_mods.push((parse_expr::expr_type(col), parse_expr::expr_typmod(col)));
+            coerced.lappend(mcx, col)?;
+        }
+        *column = coerced;
+
+        let coltypmod = coerce::select_common_typmod(&type_mods, coltype);
+        let colcoll = parse_collate::select_common_collation(mcx, pstate, column, true)?;
+
+        coltypes.lappend(mcx, coltype)?;
+        coltypmods.lappend(mcx, coltypmod)?;
+        colcollations.lappend(mcx, colcoll)?;
+    }
+
+    let mut exprs_lists = types_nodes::NodeList::nil();
+    for r in 0..stmt.valuesLists.len() {
+        let mut row = types_nodes::NodeList::nil();
+        for column in colexprs.iter() {
+            row.lappend(mcx, column.nth(r))?;
+        }
+        exprs_lists.lappend(mcx, Node::mk_list(mcx, row)?)?;
+    }
+
+    // C marks the RTE LATERAL when NEW/OLD Vars appear (CREATE RULE only);
+    // no rule machinery can put an RTE in this pstate yet.
+    if !pstate.p_rtable.is_nil() {
+        panic!(
+            "transformValuesClause (analyze.c): contain_vars_of_level LATERAL arm \
+             (CREATE RULE NEW/OLD) unported — unit backend-parser-analyze"
+        );
+    }
+
+    let nsitem = parse_relation::addRangeTableEntryForValues(
+        mcx,
+        pstate,
+        exprs_lists,
+        coltypes,
+        coltypmods,
+        colcollations,
+        None,
+        false,
+        true,
+    )?;
+    // C calls addNSItemToQuery before expandNSItemAttrs; swapped because the
+    // former consumes the &mut nsitem, and neither reads the other's effects.
+    debug_assert_eq!(pstate.p_next_resno, 1);
+    qry.targetList = parse_relation::expandNSItemAttrs(mcx, pstate, nsitem, 0, true, -1)?;
+    parse_relation::addNSItemToQuery(mcx, pstate, nsitem, true, true, true)?;
+
+    qry.sortClause = transformSortClause(
+        mcx,
+        pstate,
+        &stmt.sortClause,
+        &mut qry.targetList,
+        ParseExprKind::EXPR_KIND_ORDER_BY,
+        false,
+    )?;
+
+    qry.limitOffset = transformLimitClause(
+        mcx,
+        pstate,
+        stmt.limitOffset,
+        ParseExprKind::EXPR_KIND_OFFSET,
+        "OFFSET",
+        stmt.limitOption,
+    )?;
+    qry.limitCount = transformLimitClause(
+        mcx,
+        pstate,
+        stmt.limitCount,
+        ParseExprKind::EXPR_KIND_LIMIT,
+        "LIMIT",
+        stmt.limitOption,
+    )?;
+    qry.limitOption = stmt.limitOption;
+
+    if !stmt.lockingClause.is_nil() {
+        panic!(
+            "transformValuesClause (analyze.c): \"cannot be applied to VALUES\" ereport \
+             needs LCS_asString (LockingClause vocabulary) — unit backend-parser-analyze"
+        );
+    }
+
+    qry.rtable = mem::take(&mut pstate.p_rtable);
+    qry.rteperminfos = mem::take(&mut pstate.p_rteperminfos);
+    qry.jointree = Some(
+        Node::mk_mut(mcx, FromExpr { fromlist: mem::take(&mut pstate.p_joinlist), quals: None })?
+            .seal_ref(),
+    );
+
+    qry.hasSubLinks = pstate.p_hasSubLinks;
+
+    assign_query_collations(mcx, pstate, &qry)?;
 
     Ok(qry)
 }
@@ -592,10 +769,16 @@ fn transformInsertStmt<'mcx>(
     qry.targetList = target_list;
 
     if stmt.returningClause.is_some() {
-        panic!(
-            "transformInsertStmt (analyze.c): transformReturningClause unported — \
-             unit backend-parser-analyze"
-        );
+        pstate.p_namespace.clear();
+        let nsitem = returning_target_nsitem(mcx, pstate)?;
+        parse_relation::addNSItemToQuery(mcx, pstate, nsitem, false, true, true)?;
+        transformReturningClause(
+            mcx,
+            pstate,
+            &mut qry,
+            stmt.returningClause,
+            ParseExprKind::EXPR_KIND_RETURNING,
+        )?;
     }
 
     qry.rtable = mem::take(&mut pstate.p_rtable);
@@ -653,12 +836,13 @@ fn transformDeleteStmt<'mcx>(
         "WHERE",
     )?;
 
-    if stmt.returningClause.is_some() {
-        panic!(
-            "transformDeleteStmt (analyze.c): transformReturningClause unported — \
-             unit backend-parser-analyze"
-        );
-    }
+    transformReturningClause(
+        mcx,
+        pstate,
+        &mut qry,
+        stmt.returningClause,
+        ParseExprKind::EXPR_KIND_RETURNING,
+    )?;
 
     qry.rtable = mem::take(&mut pstate.p_rtable);
     qry.rteperminfos = mem::take(&mut pstate.p_rteperminfos);
@@ -723,12 +907,13 @@ fn transformUpdateStmt<'mcx>(
         "WHERE",
     )?;
 
-    if stmt.returningClause.is_some() {
-        panic!(
-            "transformUpdateStmt (analyze.c): transformReturningClause unported — \
-             unit backend-parser-analyze"
-        );
-    }
+    transformReturningClause(
+        mcx,
+        pstate,
+        &mut qry,
+        stmt.returningClause,
+        ParseExprKind::EXPR_KIND_RETURNING,
+    )?;
 
     qry.targetList = transformUpdateTargetList(mcx, pstate, &stmt.targetList)?;
 
@@ -925,6 +1110,131 @@ fn insert_row_length_error(
             .into_error()
             .with_error_location(ErrorLocation::new("analyze.c", 0, "transformInsertRow")),
     )
+}
+
+// C transformReturningClause (analyze.c). Divergences: the WITH(...) options
+// list (PG18 OLD/NEW aliases) is loud, and instead of adding old/new namespace
+// items we panic when a RETURNING expression would resolve through one; the
+// Query alias fields still get C's "old"/"new" defaults when unmasked.
+fn transformReturningClause<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    qry: &mut Query<'mcx>,
+    returning_clause: Option<Node<'mcx>>,
+    expr_kind: ParseExprKind,
+) -> PgResult<()> {
+    let Some(rc_node) = returning_clause else {
+        return Ok(());
+    };
+    let rc = rc_node.as_returning_clause().expect("grammar builds ReturningClause");
+    if !rc.options.is_nil() {
+        panic!(
+            "transformReturningClause (analyze.c): RETURNING WITH (OLD/NEW AS ...) \
+             — PG18 OLD/NEW alias lane unported (addNSItemForReturning)"
+        );
+    }
+
+    if parse_relation::refnameNamespaceItem(pstate, None, "old", -1, None)?.is_none() {
+        check_no_old_new_columnref(&rc.exprs, "old")?;
+        qry.returningOldAlias = Some("old");
+    }
+    if parse_relation::refnameNamespaceItem(pstate, None, "new", -1, None)?.is_none() {
+        check_no_old_new_columnref(&rc.exprs, "new")?;
+        qry.returningNewAlias = Some("new");
+    }
+
+    let save_next_resno = pstate.p_next_resno;
+    pstate.p_next_resno = 1;
+
+    qry.returningList = transformTargetList(mcx, pstate, &rc.exprs, expr_kind)?;
+
+    if qry.returningList.is_nil() {
+        return Err(returning_no_columns(pstate, &rc.exprs));
+    }
+
+    markTargetListOrigins(pstate, &qry.returningList)?;
+    if pstate.p_resolve_unknowns {
+        resolveTargetListUnknowns(mcx, pstate, &qry.returningList)?;
+    }
+
+    pstate.p_next_resno = save_next_resno;
+    Ok(())
+}
+
+// The loud stand-in for C's implicit addNSItemForReturning("old"/"new"): any
+// ColumnRef whose leading field is the (unmasked) alias would have resolved
+// through the OLD/NEW namespace item in C.
+fn check_no_old_new_columnref<'mcx>(
+    exprs: &types_nodes::NodeList<'mcx>,
+    alias: &'static str,
+) -> PgResult<()> {
+    struct W {
+        alias: &'static str,
+    }
+    impl<'mcx> nodes_core::NodeWalker<'mcx> for W {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            if let Some(cr) = node.as_column_ref() {
+                if let Some(s) = cr.fields.iter().next().and_then(|f| f.as_string()) {
+                    if s.sval == self.alias {
+                        panic!(
+                            "transformReturningClause (analyze.c): RETURNING {0}.* / \
+                             {0}.<col> — PG18 OLD/NEW alias lane unported",
+                            self.alias
+                        );
+                    }
+                }
+                return Ok(false);
+            }
+            nodes_core::raw_expression_tree_walker(node, self)
+        }
+    }
+    nodes_core::walk_list(exprs, &mut W { alias })?;
+    Ok(())
+}
+
+#[cold]
+fn returning_no_columns(
+    pstate: &ParseState<'_, '_>,
+    exprs: &types_nodes::NodeList<'_>,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, ERROR};
+    let location =
+        exprs.iter().next().and_then(|n| n.as_res_target()).map(|r| r.location).unwrap_or(-1);
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg("RETURNING must have at least one column".to_string())
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("analyze.c", 0, "transformReturningClause")),
+    )
+}
+
+// The INSERT arm's stand-in for C's addNSItemToQuery(p_target_nsitem, ...):
+// p_target_nsitem is a shared borrow here, so the namespace entry is a fresh
+// copy with the visibility flags C would have scribbled in place.
+fn returning_target_nsitem<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+) -> PgResult<&'mcx mut parser_small1::ParseNamespaceItem<'mcx>> {
+    let t = pstate.p_target_nsitem.expect("setTargetTable set p_target_nsitem");
+    let nsitem = parser_small1::ParseNamespaceItem {
+        p_names: t.p_names,
+        p_rte: t.p_rte,
+        p_rtindex: t.p_rtindex,
+        p_perminfo: t.p_perminfo,
+        p_nscolumns: t.p_nscolumns,
+        p_rel_visible: true,
+        p_cols_visible: true,
+        p_lateral_only: false,
+        p_lateral_ok: true,
+        p_returning_type: t.p_returning_type,
+    };
+    Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
 }
 
 #[cold]

@@ -76,3 +76,8 @@ seam_core::seam!(
     // GetCurrentTransactionId (xact.c): assigns an XID if none yet.
     pub fn get_current_transaction_id() -> types_error::PgResult<types_core::TransactionId>
 );
+
+seam_core::seam!(
+    // `MyXactFlags |= flags` (xact.h); C callers OR the global directly.
+    pub fn or_my_xact_flags(flags: i32)
+);

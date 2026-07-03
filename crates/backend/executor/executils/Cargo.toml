@@ -18,6 +18,7 @@ types_portal = { path = "../../../_support/types/portal" }
 table = { path = "../../access/table/table" }
 lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
 exectuples = { path = "../exectuples" }
+tuplestore = { path = "../../utils/sort/tuplestore" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 queryenvironment = { path = "../../utils/misc/queryenvironment" }
 mbutils_seams = { path = "../../utils/mb/mbutils_seams" }

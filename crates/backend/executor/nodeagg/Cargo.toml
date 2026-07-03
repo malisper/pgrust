@@ -17,6 +17,8 @@ types_nodes = { path = "../../../_support/types/nodes" }
 types_pathnodes = { path = "../../../_support/types/pathnodes" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 adt_int8 = { path = "../../utils/adt/int8" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
@@ -29,5 +31,6 @@ executils = { path = "../executils" }
 types_slot = { path = "../../../_support/types/types_slot" }
 
 [dev-dependencies]
+adt_numeric = { path = "../../utils/adt/numeric" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 init_small = { path = "../../utils/init/init_small" }

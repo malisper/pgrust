@@ -31,6 +31,7 @@ pub fn init_all() {
     catalog_storage::init_seams();
     pg_database::init_seams();
     pg_db_role_setting::init_seams();
+    indexcmds::init_seams();
     dbcommands::init_seams();
     executils::init_seams();
     execexpr::init_seams();
@@ -41,6 +42,7 @@ pub fn init_all() {
     nodeindexscan::init_seams();
     nodeindexonlyscan::init_seams();
     nodeagg::init_seams();
+    nodewindowagg::init_seams();
     nodesort::init_seams();
     nodeunique::init_seams();
     nodelimit::init_seams();
@@ -153,6 +155,7 @@ pub fn init_all() {
     timeout::init_seams();
     tuplestore::init_seams();
     resowner::init_seams();
+    combocid::init_seams();
     snapmgr::init_seams();
     pg_prng::init_seams();
     regex_core::init_seams();

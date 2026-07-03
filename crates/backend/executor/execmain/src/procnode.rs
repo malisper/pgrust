@@ -34,6 +34,8 @@ pub enum PlanStateNode<'mcx> {
     Result(ResultState<'mcx>),
     SeqScan(::nodeseqscan::SeqScanState<'mcx>),
     FunctionScan(PgBox<'mcx, ::nodefunctionscan::FunctionScanState<'mcx>>),
+    ValuesScan(PgBox<'mcx, ::nodevaluesscan::ValuesScanState<'mcx>>),
+    CteScan(PgBox<'mcx, ::nodectescan::CteScanState<'mcx>>),
     IndexScan(::nodeindexscan::IndexScanState<'mcx>),
     IndexOnlyScan(::nodeindexonlyscan::IndexOnlyScanState<'mcx>),
     Agg(PgBox<'mcx, AggPlanState<'mcx>>),
@@ -48,6 +50,7 @@ pub enum PlanStateNode<'mcx> {
     NestLoop(NestLoopNode<'mcx>),
     HashJoin(PgBox<'mcx, HashJoinNode<'mcx>>),
     MergeJoin(PgBox<'mcx, MergeJoinNode<'mcx>>),
+    WindowAgg(PgBox<'mcx, WindowAggNode<'mcx>>),
     // Last variant: existing discriminants keep their values, so the
     // uninstrumented jump-table dispatch compiles unchanged.
     Instrumented(PgBox<'mcx, InstrumentedNode<'mcx>>),
@@ -78,6 +81,12 @@ pub struct BitmapCombineState<'mcx> {
 // node-enum owner; nodesort precedent) — exec_proc passes a fetch closure.
 pub struct AggPlanState<'mcx> {
     pub agg: ::nodeagg::AggStateData<'mcx>,
+    pub outer: PlanStateNode<'mcx>,
+}
+
+// The WindowAgg node's outer child lives here (nodesort/nodeagg precedent).
+pub struct WindowAggNode<'mcx> {
+    pub state: ::nodewindowagg::WindowAggStateData<'mcx>,
     pub outer: PlanStateNode<'mcx>,
 }
 
@@ -139,6 +148,8 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Result(rs) => rs.ps.ps_ExprContext,
             PlanStateNode::SeqScan(ss) => Some(ss.ss.ps_ExprContext),
             PlanStateNode::FunctionScan(fs) => Some(fs.ss.ps_ExprContext),
+            PlanStateNode::ValuesScan(vs) => Some(vs.ss.ps_ExprContext),
+            PlanStateNode::CteScan(cs) => Some(cs.ss.ps_ExprContext),
             PlanStateNode::IndexScan(is) => Some(is.ss.ps_ExprContext),
             PlanStateNode::IndexOnlyScan(ios) => Some(ios.ss.ps_ExprContext),
             PlanStateNode::Agg(aps) => Some(aps.agg.ps_ExprContext),
@@ -149,6 +160,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::NestLoop(nl) => Some(nl.state.ps_ExprContext),
             PlanStateNode::HashJoin(hj) => Some(hj.state.ps_ExprContext),
             PlanStateNode::MergeJoin(mj) => Some(mj.state.ps_ExprContext),
+            PlanStateNode::WindowAgg(w) => Some(w.state.ps_ExprContext),
             PlanStateNode::BitmapHeapScan(b) => Some(b.scan.ss.ps_ExprContext),
             PlanStateNode::BitmapIndexScan(_)
             | PlanStateNode::BitmapAnd(_)
@@ -173,11 +185,14 @@ impl<'mcx> PlanStateNode<'mcx> {
                 .expect("ResultState without a result type")),
             PlanStateNode::SeqScan(_)
             | PlanStateNode::FunctionScan(_)
+            | PlanStateNode::ValuesScan(_)
+            | PlanStateNode::CteScan(_)
             | PlanStateNode::IndexScan(_)
             | PlanStateNode::IndexOnlyScan(_)
             | PlanStateNode::Limit(_)
             | PlanStateNode::BitmapHeapScan(_) => crate::exec_type_from_tl(&plan.targetlist),
-            // No RETURNING: the tlist is NIL and the result type is empty.
+            // The tlist is NIL (empty type) without RETURNING, else the first
+            // RETURNING list setrefs installed.
             PlanStateNode::ModifyTable(_) => crate::exec_type_from_tl(&plan.targetlist),
             PlanStateNode::Agg(aps) => Ok(aps.agg.ps_ResultTupleDesc.clone()),
             PlanStateNode::Sort(s) => Ok(::nodesort::sort_result_type(&s.state)),
@@ -185,6 +200,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::NestLoop(nl) => Ok(nl.state.ps_ResultTupleDesc.clone()),
             PlanStateNode::HashJoin(hj) => Ok(hj.state.ps_ResultTupleDesc.clone()),
             PlanStateNode::MergeJoin(mj) => Ok(mj.state.ps_ResultTupleDesc.clone()),
+            PlanStateNode::WindowAgg(w) => Ok(w.state.ps_ResultTupleDesc.clone()),
             PlanStateNode::BitmapIndexScan(_)
             | PlanStateNode::BitmapAnd(_)
             | PlanStateNode::BitmapOr(_) => {
@@ -238,6 +254,46 @@ pub fn exec_init_node<'mcx>(
                 eflags,
             )?;
             PlanStateNode::FunctionScan(::mcx::alloc_in(mcx, state)?)
+        }
+        NodeTag::T_ValuesScan => {
+            let mcx = estate.es_query_cxt;
+            let state = ::nodevaluesscan::exec_init_values_scan(
+                mcx,
+                node.as_values_scan().unwrap(),
+                estate,
+            )?;
+            PlanStateNode::ValuesScan(::mcx::alloc_in(mcx, state)?)
+        }
+        NodeTag::T_CteScan => {
+            let mcx = estate.es_query_cxt;
+            let cte_plan = node.as_cte_scan().unwrap();
+            let idx = (cte_plan.ctePlanId - 1) as usize;
+            let scan_desc = {
+                let cell = estate.es_subplanstates.get(idx).unwrap_or_else(|| {
+                    panic!(
+                        "ExecInitCteScan (nodeCtescan.c): could not find plan for \
+                         ctePlanId {}",
+                        cte_plan.ctePlanId
+                    )
+                });
+                // SAFETY: es_subplanstates cells are arena-live
+                // *mut Option<PlanStateNode> installed by InitPlan.
+                let sub = unsafe { &*cell.0.cast::<Option<PlanStateNode>>().as_ptr() }
+                    .as_ref()
+                    .expect("CTE subplan state present at CteScan init");
+                let sub_plan = estate
+                    .es_plannedstmt
+                    .expect("es_plannedstmt set before plan init")
+                    .subplans
+                    .nth(idx)
+                    .as_plan()
+                    .expect("subplans cell is a plan tree");
+                sub.exec_get_result_type(sub_plan)?
+            };
+            let state = ::nodectescan::exec_init_cte_scan(
+                mcx, cte_plan, estate, eflags, scan_desc,
+            )?;
+            PlanStateNode::CteScan(::mcx::alloc_in(mcx, state)?)
         }
         NodeTag::T_IndexScan => {
             let mcx = estate.es_query_cxt;
@@ -354,6 +410,25 @@ pub fn exec_init_node<'mcx>(
             let agg = ::nodeagg::exec_init_agg(agg_plan, estate, eflags, desc)?;
             PlanStateNode::Agg(::mcx::alloc_in(mcx, AggPlanState { agg, outer })?)
         }
+        NodeTag::T_WindowAgg => {
+            let mcx = estate.es_query_cxt;
+            let wa_plan = node.as_window_agg().unwrap();
+            let outer = exec_init_node(wa_plan.plan.lefttree, estate, eflags)?
+                .unwrap_or_else(|| {
+                    panic!("ExecInitWindowAgg (nodeWindowAgg.c): WindowAgg without an outer plan")
+                });
+            let outer_desc =
+                outer.exec_get_result_type(wa_plan.plan.lefttree.unwrap().as_plan().unwrap())?;
+            let result_desc = crate::exec_type_from_tl(&wa_plan.plan.targetlist)?;
+            let state = ::nodewindowagg::exec_init_window_agg(
+                wa_plan,
+                estate,
+                eflags,
+                &outer_desc,
+                result_desc,
+            )?;
+            PlanStateNode::WindowAgg(::mcx::alloc_in(mcx, WindowAggNode { state, outer })?)
+        }
         NodeTag::T_NestLoop => {
             let mcx = estate.es_query_cxt;
             let nl_plan = node.as_nest_loop().unwrap();
@@ -469,7 +544,19 @@ pub fn exec_init_node<'mcx>(
         NodeTag::T_ModifyTable => {
             let mcx = estate.es_query_cxt;
             let mt_plan = node.as_modify_table().unwrap();
-            let mt = ::nodemodifytable::exec_init_modify_table(mt_plan, estate, eflags)?;
+            // With RETURNING, setrefs set the visible targetlist to the first
+            // RETURNING list; its descriptor shapes the node's result slot.
+            let returning_desc = if mt_plan.returningLists.is_nil() {
+                None
+            } else {
+                Some(crate::exec_type_from_tl(&mt_plan.plan.targetlist)?)
+            };
+            let mt = ::nodemodifytable::exec_init_modify_table(
+                mt_plan,
+                estate,
+                eflags,
+                returning_desc,
+            )?;
             let subplan = exec_init_node(mt_plan.plan.lefttree, estate, eflags)?
                 .expect("ModifyTable has a subplan");
             PlanStateNode::ModifyTable(::mcx::alloc_in(
@@ -488,7 +575,6 @@ pub fn exec_init_node<'mcx>(
             T_SubqueryScan => "nodeSubqueryscan.c",
             T_TableFuncScan => "nodeTableFuncscan.c",
             T_ValuesScan => "nodeValuesscan.c",
-            T_CteScan => "nodeCtescan.c",
             T_NamedTuplestoreScan => "nodeNamedtuplestorescan.c",
             T_WorkTableScan => "nodeWorktablescan.c",
             T_ForeignScan => "nodeForeignscan.c",
@@ -562,6 +648,8 @@ pub fn exec_proc_node<'mcx>(
         PlanStateNode::Result(rs) => exec_result(rs, estate),
         PlanStateNode::SeqScan(ss) => ::nodeseqscan::exec_seq_scan(ss, estate),
         PlanStateNode::FunctionScan(fs) => ::nodefunctionscan::exec_function_scan(fs, estate),
+        PlanStateNode::ValuesScan(vs) => ::nodevaluesscan::exec_values_scan(vs, estate),
+        PlanStateNode::CteScan(cs) => ::nodectescan::exec_cte_scan(cs, estate),
         PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_index_scan(is, estate),
         PlanStateNode::IndexOnlyScan(ios) => {
             ::nodeindexonlyscan::exec_index_only_scan(ios, estate)
@@ -570,6 +658,11 @@ pub fn exec_proc_node<'mcx>(
             let aps = &mut **aps;
             let outer = &mut aps.outer;
             ::nodeagg::exec_agg(&mut aps.agg, estate, |e| exec_proc_node(outer, e))
+        }
+        PlanStateNode::WindowAgg(w) => {
+            let w = &mut **w;
+            let outer = &mut w.outer;
+            ::nodewindowagg::exec_window_agg(&mut w.state, estate, |e| exec_proc_node(outer, e))
         }
         PlanStateNode::Sort(s) => {
             let SortNode { state, outer, outer_desc } = s;
@@ -731,6 +824,14 @@ pub fn exec_end_node<'mcx>(
             ::nodefunctionscan::exec_end_function_scan(fs);
             Ok(())
         }
+        PlanStateNode::ValuesScan(vs) => {
+            ::nodevaluesscan::exec_end_values_scan(vs);
+            Ok(())
+        }
+        PlanStateNode::CteScan(cs) => {
+            ::nodectescan::exec_end_cte_scan(cs, estate);
+            Ok(())
+        }
         PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_end_index_scan(is),
         PlanStateNode::IndexOnlyScan(ios) => {
             ::nodeindexonlyscan::exec_end_index_only_scan(ios)
@@ -738,6 +839,10 @@ pub fn exec_end_node<'mcx>(
         PlanStateNode::Agg(aps) => {
             ::nodeagg::exec_end_agg(&mut aps.agg);
             exec_end_node(&mut aps.outer, estate)
+        }
+        PlanStateNode::WindowAgg(w) => {
+            ::nodewindowagg::exec_end_window_agg(&mut w.state);
+            exec_end_node(&mut w.outer, estate)
         }
         PlanStateNode::Sort(s) => {
             ::nodesort::exec_end_sort(&mut s.state);
@@ -800,10 +905,13 @@ pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>) {
         }
         PlanStateNode::SeqScan(_)
         | PlanStateNode::FunctionScan(_)
+        | PlanStateNode::ValuesScan(_)
+        | PlanStateNode::CteScan(_)
         | PlanStateNode::IndexScan(_)
         | PlanStateNode::IndexOnlyScan(_)
         | PlanStateNode::BitmapIndexScan(_) => {}
         PlanStateNode::Agg(aps) => exec_shutdown_node(&mut aps.outer),
+        PlanStateNode::WindowAgg(w) => exec_shutdown_node(&mut w.outer),
         PlanStateNode::Sort(s) => exec_shutdown_node(&mut s.outer),
         PlanStateNode::Unique(u) => exec_shutdown_node(&mut u.outer),
         PlanStateNode::Limit(l) => exec_shutdown_node(&mut l.outer),

@@ -108,6 +108,37 @@ fn receive_all() -> (Vec<SharedInvalidationMessage>, bool) {
 }
 
 #[test]
+fn reset_after_crash_restores_boot_image() {
+    let _s = serial();
+    setup();
+    let seg = current_seg();
+
+    let mark = backend_init(1, 9101, false);
+    SendSharedInvalidMessages(&[relcache_msg(41), relcache_msg(42)]).unwrap();
+    assert!(seg.hdr().maxMsgNum.load(Relaxed) > 0);
+
+    SharedInvalShmemResetAfterCrash();
+
+    assert_eq!(seg.hdr().minMsgNum.load(Relaxed), 0);
+    assert_eq!(seg.hdr().maxMsgNum.load(Relaxed), 0);
+    assert_eq!(seg.hdr().nextThreshold.load(Relaxed), CLEANUP_MIN);
+    assert!(seg.hdr().msgnumLock.is_free());
+    assert_eq!(seg.hdr().numProcs.load(Relaxed), 0);
+    for state in seg.proc_states() {
+        assert_eq!(state.procPid.load(Relaxed), 0);
+        assert_eq!(state.nextMsgNum.load(Relaxed), 0);
+        assert!(!state.resetState.load(Relaxed));
+        assert!(!state.signaled.load(Relaxed));
+        assert!(!state.hasMessages.load(Relaxed));
+        assert!(!state.sendOnly.load(Relaxed));
+        assert_eq!(state.nextLXID.load(Relaxed), InvalidLocalTransactionId);
+    }
+    // The dead backend's exit callback must not fire against the reset image.
+    EXIT_CALLBACKS.lock().unwrap().truncate(mark);
+    LOCAL.with(|st| st.my_procno.set(-1));
+}
+
+#[test]
 fn backend_lifecycle_and_lxid_handoff() {
     let _s = serial();
     setup();

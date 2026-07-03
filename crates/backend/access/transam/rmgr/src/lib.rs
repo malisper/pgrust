@@ -154,7 +154,6 @@ macro_rules! unported_mask {
 unported_redo! {
     dbase_redo => "backend-commands-dbcommands";
     tblspc_redo => "backend-commands-tablespace";
-    standby_redo => "backend-storage-ipc-standby";
     btree_redo => "backend-access-nbtree-nbtxlog";
     hash_redo => "backend-access-hash-xlog";
     gin_redo => "backend-access-gin-xlog";
@@ -310,7 +309,7 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     },
     RmgrData {
         rm_name: "Standby",
-        rm_redo: standby_redo,
+        rm_redo: standby::standby_redo,
         rm_desc: standby_desc,
         rm_identify: standby_identify,
         rm_startup: None,

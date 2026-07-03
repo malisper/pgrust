@@ -4,6 +4,12 @@ use std::sync::Once;
 use super::*;
 
 static BE_STATUS_INITS: AtomicUsize = AtomicUsize::new(0);
+static BE_STATUS_RESETS: AtomicUsize = AtomicUsize::new(0);
+
+// Recorded on_shmem_exit registry: lets the reset test replay shmem_exit(1)
+// (LIFO) so the dsm control segment is torn down before the walk re-creates it.
+static SHMEM_EXIT_CBS: std::sync::Mutex<Vec<(fn(i32, usize), usize)>> =
+    std::sync::Mutex::new(Vec::new());
 
 const MAX_LIVE_CHILDREN: i32 = 286;
 
@@ -36,7 +42,9 @@ fn bringup() {
     ONCE.call_once(|| {
         shmem::init_seams();
         pg_prng::init_seams();
-        ipc_seams::on_shmem_exit::set(|_cb, _arg| {});
+        ipc_seams::on_shmem_exit::set(|cb, arg| {
+            SHMEM_EXIT_CBS.lock().unwrap().push((cb, arg));
+        });
         ipc_seams::proc_exit::set(|code, _pid| panic!("proc_exit({code})"));
         xact_seams::is_in_parallel_mode::set(|| false);
         guc_tables::init_seams();
@@ -55,6 +63,9 @@ fn bringup() {
         backend_status_seams::backend_status_shmem_init::set(|| {
             BE_STATUS_INITS.fetch_add(1, Ordering::Relaxed);
             Ok(())
+        });
+        backend_status_seams::backend_status_shmem_reset_after_crash::set(|| {
+            BE_STATUS_RESETS.fetch_add(1, Ordering::Relaxed);
         });
         transam_xlog::init_seams();
         install_test_gucs();
@@ -92,6 +103,27 @@ fn create_shared_memory_and_semaphores_end_to_end() {
         semas.parse::<i32>().unwrap(),
         lmgr_proc::ProcGlobalSemas()
     );
+
+    // Crash-cycle reset walk over the same live structures: dirty a probe per
+    // reset family, replay shmem_exit(1) (LIFO — tears down the dsm control
+    // segment), then assert the boot image is restored.
+    varsup::TransamVariables().nextOid.store(777, Ordering::Relaxed);
+    let lock0 = lwlock::main_lock(0);
+    lock0
+        .state
+        .store(lwlock::LW_FLAG_RELEASE_OK | 5, Ordering::Relaxed);
+    let cbs: Vec<_> = SHMEM_EXIT_CBS.lock().unwrap().drain(..).collect();
+    for (cb, arg) in cbs.into_iter().rev() {
+        cb(1, arg);
+    }
+
+    ResetShmemAfterCrash().unwrap();
+
+    assert_eq!(varsup::TransamVariables().nextOid.load(Ordering::Relaxed), 0);
+    assert_eq!(lock0.state.load(Ordering::Relaxed), lwlock::LW_FLAG_RELEASE_OK);
+    assert_eq!(BE_STATUS_RESETS.load(Ordering::Relaxed), 1);
+    pmsignal::MarkPostmasterChildSlotAssigned(1).unwrap();
+    assert!(pmsignal::MarkPostmasterChildSlotUnassigned(1));
 }
 
 #[test]

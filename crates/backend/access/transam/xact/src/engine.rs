@@ -82,11 +82,7 @@ fn RecordTransactionCommitGuts(xp: XsPtr, mcx: mcx::Mcx<'_>) -> PgResult<Transac
     } else {
         // Uninstalled origin seams = C defaults (origin.c globals): origins
         // and commit_ts are unported units (wal.rs/xloginsert precedent).
-        let session_origin = if origin_seams::replorigin_session_origin::is_installed() {
-            origin_seams::replorigin_session_origin::call()
-        } else {
-            types_core::InvalidRepOriginId
-        };
+        let session_origin = crate::wal::session_origin_or_default();
         let replorigin = session_origin != types_core::InvalidRepOriginId
             && session_origin != DoNotReplicateId;
 
@@ -194,7 +190,7 @@ fn RecordTransactionAbort(is_subxact: bool) -> PgResult<TransactionId> {
         )));
     }
 
-    let session_origin = origin_seams::replorigin_session_origin::call();
+    let session_origin = crate::wal::session_origin_or_default();
     let replorigin =
         session_origin != types_core::InvalidRepOriginId && session_origin != DoNotReplicateId;
 

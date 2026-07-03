@@ -340,11 +340,90 @@ fn install_type_fixture() {
                     proisstrict: false,
                     proleakproof: false,
                 }),
+                // sum(int4) 2108 / sum(int8) 2107; row_number/rank/dense_rank
+                // 3100-3102.
+                2107 => Some(syscache_seams::PgProcShape {
+                    pronamespace: 11,
+                    prorettype: 1700,
+                    provariadic: InvalidOid,
+                    prosupport: InvalidOid,
+                    pronargs: 1,
+                    prokind: b'a' as i8,
+                    provolatile: b'i' as i8,
+                    proparallel: b's' as i8,
+                    proretset: false,
+                    proisstrict: false,
+                    proleakproof: false,
+                }),
+                2108 => Some(syscache_seams::PgProcShape {
+                    pronamespace: 11,
+                    prorettype: 20,
+                    provariadic: InvalidOid,
+                    prosupport: InvalidOid,
+                    pronargs: 1,
+                    prokind: b'a' as i8,
+                    provolatile: b'i' as i8,
+                    proparallel: b's' as i8,
+                    proretset: false,
+                    proisstrict: false,
+                    proleakproof: false,
+                }),
+                3100 | 3101 | 3102 => Some(syscache_seams::PgProcShape {
+                    pronamespace: 11,
+                    prorettype: 20,
+                    provariadic: InvalidOid,
+                    prosupport: InvalidOid,
+                    pronargs: 0,
+                    prokind: b'w' as i8,
+                    provolatile: b'i' as i8,
+                    proparallel: b's' as i8,
+                    proretset: false,
+                    proisstrict: false,
+                    proleakproof: false,
+                }),
                 _ => None,
             })
         });
         syscache_seams::lookup_pg_proc_name_candidates::set(|mcx, proname| {
             let mut v = mcx::PgVec::new_in(mcx);
+            if proname == "sum" {
+                let mut int4arg = mcx::vec_with_capacity_in(mcx, 1)?;
+                int4arg.push(23);
+                v.push(syscache_seams::PgProcCandidate {
+                    oid: 2108,
+                    pronamespace: 11,
+                    pronargs: 1,
+                    pronargdefaults: 0,
+                    provariadic: InvalidOid,
+                    proargtypes: int4arg,
+                });
+                let mut int8arg = mcx::vec_with_capacity_in(mcx, 1)?;
+                int8arg.push(20);
+                v.push(syscache_seams::PgProcCandidate {
+                    oid: 2107,
+                    pronamespace: 11,
+                    pronargs: 1,
+                    pronargdefaults: 0,
+                    provariadic: InvalidOid,
+                    proargtypes: int8arg,
+                });
+            }
+            let winoid = match proname {
+                "row_number" => Some(3100),
+                "rank" => Some(3101),
+                "dense_rank" => Some(3102),
+                _ => None,
+            };
+            if let Some(oid) = winoid {
+                v.push(syscache_seams::PgProcCandidate {
+                    oid,
+                    pronamespace: 11,
+                    pronargs: 0,
+                    pronargdefaults: 0,
+                    provariadic: InvalidOid,
+                    proargtypes: mcx::PgVec::new_in(mcx),
+                });
+            }
             if proname == "count" {
                 let mut anyarg = mcx::vec_with_capacity_in(mcx, 1)?;
                 anyarg.push(2276);
@@ -368,7 +447,7 @@ fn install_type_fixture() {
             Ok(v)
         });
         syscache_seams::lookup_pg_aggregate_shape::set(|aggfnoid| {
-            Ok((aggfnoid == 2803).then_some(syscache_seams::PgAggregateShape {
+            Ok((aggfnoid == 2803 || aggfnoid == 2108 || aggfnoid == 2107).then_some(syscache_seams::PgAggregateShape {
                 aggkind: b'n' as i8,
                 aggnumdirectargs: 0,
                 aggtransfn: 1219,
@@ -420,6 +499,16 @@ fn install_type_fixture() {
             }))
         });
         syscache_seams::syscache_hash_value_typeoid::set(|typid| Ok(typid.wrapping_mul(31)));
+        // pg_type.dat typcategory/typispreferred for the fixture types.
+        syscache_seams::pg_type_category::set(|typid| {
+            Ok(match typid {
+                TEXTOID => Some((b'S' as i8, true)),
+                INT4OID | INT8OID => Some((b'N' as i8, false)),
+                BOOLOID => Some((b'B' as i8, true)),
+                UNKNOWNOID => Some((b'X' as i8, false)),
+                _ => None,
+            })
+        });
         // 1978/1979 = int4 btree/hash default opclasses over the 1976/1977
         // integer_ops families (pg_opclass.dat) — the ORDER BY operator spine.
         syscache_seams::lookup_pg_opclass_shape::set(|opclass| {
@@ -695,6 +784,9 @@ mod from_where {
         INIT.call_once(|| {
             super::install_type_fixture();
             relation_seams::relation_openrv_extended::set(fake_openrv_extended);
+            // errorMissingRTE's searchRangeTableForRel probe; InvalidOid =
+            // "no such relation", falling back to eref-alias matching.
+            namespace_seams::range_var_get_relid::set(|_, _, _, _| Ok(types_core::InvalidOid));
             table::init_seams();
             super::init_seams_once();
         });
@@ -761,6 +853,217 @@ mod from_where {
         );
     }
 
+    #[test]
+    fn window_functions_end_to_end() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(
+            mcx,
+            "SELECT x, row_number() OVER (PARTITION BY x ORDER BY x), \
+             rank() OVER (ORDER BY x), sum(x) OVER (PARTITION BY x) FROM t",
+        )
+        .unwrap();
+
+        assert!(q.hasWindowFuncs);
+        assert!(!q.hasAggs);
+        assert_eq!(q.windowClause.len(), 3);
+
+        let wf1 = q.targetList.nth(1).as_target_entry().unwrap().expr.as_window_func().unwrap();
+        assert_eq!((wf1.winfnoid, wf1.wintype, wf1.winref, wf1.winagg), (3100, 20, 1, false));
+        let wf2 = q.targetList.nth(2).as_target_entry().unwrap().expr.as_window_func().unwrap();
+        assert_eq!((wf2.winfnoid, wf2.winref, wf2.winagg), (3101, 2, false));
+        let wf3 = q.targetList.nth(3).as_target_entry().unwrap().expr.as_window_func().unwrap();
+        assert_eq!((wf3.winfnoid, wf3.winref, wf3.winagg), (2108, 3, true));
+        assert_eq!(wf3.args.len(), 1);
+
+        let wc1 = q.windowClause.nth(0).as_window_clause().unwrap();
+        assert_eq!(wc1.winref, 1);
+        assert_eq!(wc1.partitionClause.len(), 1);
+        assert_eq!(wc1.orderClause.len(), 1);
+        assert_eq!(
+            wc1.frameOptions,
+            types_nodes::rawnodes::FRAMEOPTION_DEFAULTS
+        );
+        let part = wc1.partitionClause.nth(0).as_sort_group_clause().unwrap();
+        let t0 = q.targetList.nth(0).as_target_entry().unwrap();
+        assert_eq!(part.tleSortGroupRef, t0.ressortgroupref);
+        let ord = wc1.orderClause.nth(0).as_sort_group_clause().unwrap();
+        // ORDER BY x reuses the non-junk x entry (SQL99 Var-equality leg).
+        assert_eq!(ord.tleSortGroupRef, t0.ressortgroupref);
+
+        let wc2 = q.windowClause.nth(1).as_window_clause().unwrap();
+        assert_eq!((wc2.winref, wc2.partitionClause.len(), wc2.orderClause.len()), (2, 0, 1));
+        let wc3 = q.windowClause.nth(2).as_window_clause().unwrap();
+        assert_eq!((wc3.winref, wc3.partitionClause.len(), wc3.orderClause.len()), (3, 1, 0));
+    }
+
+    #[test]
+    fn window_duplicate_over_specs_share_one_clause() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(
+            mcx,
+            "SELECT rank() OVER (ORDER BY x), dense_rank() OVER (ORDER BY x) FROM t",
+        )
+        .unwrap();
+        assert_eq!(q.windowClause.len(), 1);
+        let wf1 = q.targetList.nth(0).as_target_entry().unwrap().expr.as_window_func().unwrap();
+        let wf2 = q.targetList.nth(1).as_target_entry().unwrap().expr.as_window_func().unwrap();
+        assert_eq!((wf1.winref, wf2.winref), (1, 1));
+        assert_eq!(wf2.winfnoid, 3102);
+    }
+
+    #[test]
+    fn named_window_end_to_end() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(
+            mcx,
+            "SELECT count(*) OVER w FROM t WINDOW w AS (PARTITION BY x ORDER BY x DESC)",
+        )
+        .unwrap();
+        assert_eq!(q.windowClause.len(), 1);
+        let wc = q.windowClause.nth(0).as_window_clause().unwrap();
+        assert_eq!(wc.name, Some("w"));
+        assert_eq!(wc.winref, 1);
+        assert_eq!(wc.partitionClause.len(), 1);
+        let ord = wc.orderClause.nth(0).as_sort_group_clause().unwrap();
+        assert!(ord.reverse_sort);
+        let wf = q.targetList.nth(0).as_target_entry().unwrap().expr.as_window_func().unwrap();
+        assert_eq!((wf.winfnoid, wf.winref, wf.winagg, wf.winstar), (2803, 1, true, true));
+    }
+
+    #[test]
+    fn window_refname_copies_partition() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(
+            mcx,
+            "SELECT rank() OVER (w ORDER BY x) FROM t WINDOW w AS (PARTITION BY x)",
+        )
+        .unwrap();
+        assert_eq!(q.windowClause.len(), 2);
+        let wc2 = q.windowClause.nth(1).as_window_clause().unwrap();
+        assert_eq!(wc2.refname, Some("w"));
+        assert_eq!(wc2.partitionClause.len(), 1);
+        assert_eq!(wc2.orderClause.len(), 1);
+        assert!(!wc2.copiedOrder);
+    }
+
+    #[test]
+    fn window_function_without_over_is_42809() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(mcx, "SELECT rank() FROM t").map(|_| ()).unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_WRONG_OBJECT_TYPE);
+        assert_eq!(err.message(), "window function rank requires an OVER clause");
+    }
+
+    #[test]
+    fn window_function_in_where_is_42p20() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(mcx, "SELECT 1 FROM t WHERE row_number() OVER () = 1")
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_WINDOWING_ERROR);
+        assert_eq!(err.message(), "window functions are not allowed in WHERE");
+    }
+
+    #[test]
+    fn undefined_window_is_42704() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(mcx, "SELECT count(*) OVER w FROM t").map(|_| ()).unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_OBJECT);
+        assert_eq!(err.message(), "window \"w\" does not exist");
+    }
+
+    #[test]
+    fn duplicate_window_name_is_42p20() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(mcx, "SELECT 1 FROM t WINDOW w AS (), w AS ()")
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_WINDOWING_ERROR);
+        assert_eq!(err.message(), "window \"w\" is already defined");
+    }
+
+    #[test]
+    fn nested_window_calls_are_42p20() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(mcx, "SELECT sum(rank() OVER ()) OVER () FROM t")
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_WINDOWING_ERROR);
+        assert_eq!(err.message(), "window function calls cannot be nested");
+    }
+
+    #[test]
+    fn window_arg_must_be_grouped_42803() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(mcx, "SELECT sum(x) OVER () FROM t HAVING true")
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_GROUPING_ERROR);
+        assert!(err.message().contains("column \"t.x\" must appear"), "{}", err.message());
+    }
+
+    #[test]
+    fn cannot_override_partition_by_42p20() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(
+            mcx,
+            "SELECT rank() OVER (w PARTITION BY x) FROM t WINDOW w AS (PARTITION BY x)",
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_WINDOWING_ERROR);
+        assert_eq!(err.message(), "cannot override PARTITION BY clause of window \"w\"");
+    }
+
+    #[test]
+    fn cannot_override_order_by_42p20() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(
+            mcx,
+            "SELECT rank() OVER (w ORDER BY x) FROM t WINDOW w AS (ORDER BY x)",
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_WINDOWING_ERROR);
+        assert_eq!(err.message(), "cannot override ORDER BY clause of window \"w\"");
+    }
+
 
     // transformFromClause appends one RTE + RangeTblRef per comma-separated
     // from-item (parse_clause.c); explicit JOIN syntax stays loud in
@@ -794,6 +1097,111 @@ mod from_where {
         let rv = qual.args.nth(1).as_var().unwrap();
         assert_eq!((lv.varno, lv.varattno), (1, 1));
         assert_eq!((rv.varno, rv.varattno), (2, 1));
+    }
+
+    // Query shape asserted against C 18.3 for
+    // `SELECT t.x FROM t JOIN t u ON t.x = u.x` over t(x int4, y text).
+    #[test]
+    fn explicit_join_on_end_to_end() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "SELECT t.x FROM t JOIN t u ON t.x = u.x").unwrap();
+
+        assert_eq!(q.rtable.len(), 3);
+        assert_eq!(q.rteperminfos.len(), 2);
+        let jrte = q.rtable.nth(2).as_range_tbl_entry().unwrap();
+        assert_eq!(jrte.rtekind, RTEKind::RTE_JOIN);
+        assert_eq!(jrte.jointype, types_nodes::JoinType::JOIN_INNER);
+        assert_eq!(jrte.joinmergedcols, 0);
+        assert!(jrte.join_using_alias.is_none() && jrte.alias.is_none());
+        assert_eq!(jrte.perminfoindex, 0);
+        assert!(jrte.inFromCl && !jrte.lateral);
+        let eref = jrte.eref.unwrap();
+        assert_eq!(eref.aliasname, Some("unnamed_join"));
+        let names: Vec<_> =
+            eref.colnames.iter().map(|n| n.as_string().unwrap().sval).collect();
+        assert_eq!(names, ["x", "y", "x", "y"]);
+        assert_eq!(jrte.joinaliasvars.len(), 4);
+        for (i, (varno, attno)) in [(1, 1), (1, 2), (2, 1), (2, 2)].iter().enumerate() {
+            let v = jrte.joinaliasvars.nth(i).as_var().unwrap();
+            assert_eq!((v.varno, v.varattno as i32), (*varno, *attno));
+        }
+        let lcols: Vec<_> = jrte.joinleftcols.iter().collect();
+        let rcols: Vec<_> = jrte.joinrightcols.iter().collect();
+        assert_eq!(lcols, [1, 2]);
+        assert_eq!(rcols, [1, 2]);
+
+        let jt = q.jointree.unwrap();
+        assert_eq!(jt.fromlist.len(), 1);
+        assert!(jt.quals.is_none());
+        let j = jt.fromlist.nth(0).as_join_expr().unwrap();
+        assert_eq!(j.jointype, types_nodes::JoinType::JOIN_INNER);
+        assert_eq!(j.rtindex, 3);
+        assert_eq!(j.larg.as_range_tbl_ref().unwrap().rtindex, 1);
+        assert_eq!(j.rarg.as_range_tbl_ref().unwrap().rtindex, 2);
+        let qual = j.quals.unwrap().as_op_expr().unwrap();
+        assert_eq!(qual.opno, 96);
+        let lv = qual.args.nth(0).as_var().unwrap();
+        let rv = qual.args.nth(1).as_var().unwrap();
+        assert_eq!((lv.varno, lv.varattno), (1, 1));
+        assert_eq!((rv.varno, rv.varattno), (2, 1));
+
+        // The tlist var resolves through the base rel, not the join RTE.
+        let t0 = q.targetList.nth(0).as_target_entry().unwrap();
+        let v = t0.expr.as_var().unwrap();
+        assert_eq!((v.varno, v.varattno), (1, 1));
+
+        // SELECT * expands the join nsitem to base-rel Vars.
+        let q = analyze_sql(mcx, "SELECT * FROM t JOIN t u ON t.x = u.x").unwrap();
+        let vars: Vec<_> = q
+            .targetList
+            .iter()
+            .map(|n| {
+                let v = n.as_target_entry().unwrap().expr.as_var().unwrap();
+                (v.varno, v.varattno)
+            })
+            .collect();
+        assert_eq!(vars, [(1, 1), (1, 2), (2, 1), (2, 2)]);
+
+        // Unqualified refs resolve through the join namespace: ambiguous here.
+        let err =
+            analyze_sql(mcx, "SELECT x FROM t JOIN t u ON t.x = u.x").map(|_| ()).unwrap_err();
+        assert_eq!(err.message(), "column reference \"x\" is ambiguous");
+
+        // Join alias hides the inputs.
+        let err = analyze_sql(mcx, "SELECT t.x FROM (t JOIN t u ON t.x = u.x) j")
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(
+            err.message(),
+            "invalid reference to FROM-clause entry for table \"t\""
+        );
+        let q =
+            analyze_sql(mcx, "SELECT j.a FROM (t JOIN t u ON t.x = u.x) AS j(a, b, c, d)")
+                .unwrap();
+        let jrte = q.rtable.nth(2).as_range_tbl_entry().unwrap();
+        assert_eq!(jrte.alias.unwrap().aliasname, Some("j"));
+        let eref = jrte.eref.unwrap();
+        assert_eq!(eref.aliasname, Some("j"));
+        let names: Vec<_> =
+            eref.colnames.iter().map(|n| n.as_string().unwrap().sval).collect();
+        assert_eq!(names, ["a", "b", "c", "d"]);
+        let v = q.targetList.nth(0).as_target_entry().unwrap().expr.as_var().unwrap();
+        assert_eq!((v.varno, v.varattno), (1, 1));
+
+        // Nested joins chain left-deep with a second join RTE.
+        let q = analyze_sql(
+            mcx,
+            "SELECT t.x FROM t JOIN t u ON t.x = u.x JOIN t v ON u.x = v.x",
+        )
+        .unwrap();
+        assert_eq!(q.rtable.len(), 5);
+        let j = q.jointree.unwrap().fromlist.nth(0).as_join_expr().unwrap();
+        assert_eq!(j.rtindex, 5);
+        assert_eq!(j.larg.as_join_expr().unwrap().rtindex, 3);
+        assert_eq!(j.rarg.as_range_tbl_ref().unwrap().rtindex, 4);
     }
 
     // Query shape asserted against C 18.3: field-by-field vs the Query that
@@ -990,6 +1398,215 @@ mod from_where {
     }
 
     #[test]
+    fn bare_values_order_by_end_to_end() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "VALUES (3), (1), (2) ORDER BY 1").unwrap();
+        assert_eq!(q.commandType, CmdType::CMD_SELECT);
+        assert_eq!(q.rtable.len(), 1);
+        let rte = q.rtable.nth(0).as_range_tbl_entry().unwrap();
+        assert_eq!(rte.rtekind, RTEKind::RTE_VALUES);
+        assert!(rte.inFromCl && !rte.lateral);
+        assert_eq!(rte.values_lists.len(), 3);
+        assert_eq!(rte.coltypes.nth(0), INT4OID);
+        assert_eq!(rte.coltypmods.nth(0), -1);
+        assert_eq!(rte.colcollations.nth(0), types_core::InvalidOid);
+        let eref = rte.eref.unwrap();
+        assert_eq!(eref.aliasname, Some("*VALUES*"));
+        assert_eq!(eref.colnames.nth(0).as_string().unwrap().sval, "column1");
+        let row0 = rte.values_lists.nth(0).as_list().unwrap();
+        let c = row0.nth(0).as_const().unwrap();
+        assert_eq!((c.consttype, c.constvalue.as_i32()), (INT4OID, 3));
+
+        assert_eq!(q.targetList.len(), 1);
+        let te = q.targetList.nth(0).as_target_entry().unwrap();
+        assert_eq!((te.resno, te.resname, te.ressortgroupref), (1, Some("column1"), 1));
+        let var = te.expr.as_var().unwrap();
+        assert_eq!((var.varno, var.varattno, var.vartype), (1, 1, INT4OID));
+
+        assert_eq!(q.sortClause.len(), 1);
+        let s = q.sortClause.nth(0).as_sort_group_clause().unwrap();
+        assert_eq!((s.tleSortGroupRef, s.eqop, s.sortop), (1, 96, 97));
+
+        let jt = q.jointree.unwrap();
+        assert_eq!(jt.fromlist.len(), 1);
+        assert_eq!(jt.fromlist.nth(0).as_range_tbl_ref().unwrap().rtindex, 1);
+        assert!(jt.quals.is_none());
+    }
+
+    #[test]
+    fn bare_values_desc_limit() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "VALUES (3), (1), (2) ORDER BY 1 DESC LIMIT 2").unwrap();
+        let s = q.sortClause.nth(0).as_sort_group_clause().unwrap();
+        assert_eq!((s.eqop, s.sortop), (96, 521));
+        assert!(s.nulls_first);
+        assert_eq!(
+            q.limitOption,
+            types_nodes::nodes_enums::LimitOption::LIMIT_OPTION_COUNT
+        );
+        let f = q.limitCount.unwrap().as_func_expr().unwrap();
+        assert_eq!(f.funcid, 481);
+        assert_eq!(f.args.nth(0).as_const().unwrap().constvalue.as_i32(), 2);
+    }
+
+    #[test]
+    fn bare_values_unknown_resolves_to_text() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "VALUES ('a'), ('b')").unwrap();
+        let rte = q.rtable.nth(0).as_range_tbl_entry().unwrap();
+        assert_eq!(rte.coltypes.nth(0), TEXTOID);
+        assert_eq!(rte.colcollations.nth(0), 100);
+        for row in &rte.values_lists {
+            let c = row.as_list().unwrap().nth(0).as_const().unwrap();
+            assert_eq!(c.consttype, TEXTOID);
+        }
+        let te = q.targetList.nth(0).as_target_entry().unwrap();
+        assert_eq!(te.expr.as_var().unwrap().vartype, TEXTOID);
+    }
+
+    #[test]
+    fn bare_values_length_mismatch_is_42601() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(mcx, "VALUES (1), (2, 3)").map(|_| ()).unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+        assert_eq!(err.message, "VALUES lists must all be the same length");
+    }
+
+    #[test]
+    fn values_in_from_subquery_with_column_aliases() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        // Raw tree built by hand: the AS v(n, s) gram action is another lane's.
+        let rows = [
+            [int_c(mcx, 2), str_c(mcx, "b")],
+            [int_c(mcx, 1), str_c(mcx, "a")],
+        ];
+        let mut values_lists = types_nodes::NodeList::nil();
+        for row in rows {
+            let l = types_nodes::NodeList::from_slice(mcx, &row).unwrap();
+            values_lists
+                .lappend(mcx, types_nodes::Node::mk_list(mcx, l).unwrap())
+                .unwrap();
+        }
+        let sub = types_nodes::Node::mk(
+            mcx,
+            types_nodes::rawnodes::SelectStmt { valuesLists: values_lists, ..Default::default() },
+        )
+        .unwrap();
+        let mut colnames = types_nodes::NodeList::nil();
+        for name in ["n", "s"] {
+            colnames
+                .lappend(
+                    mcx,
+                    types_nodes::Node::mk_string(mcx, name).unwrap(),
+                )
+                .unwrap();
+        }
+        let alias = &*mcx::leak_in(
+            mcx::alloc_in(
+                mcx,
+                types_nodes::Alias { aliasname: Some("v"), colnames },
+            )
+            .unwrap(),
+        );
+        let rss = types_nodes::Node::mk(
+            mcx,
+            types_nodes::rawnodes::RangeSubselect {
+                lateral: false,
+                subquery: Some(sub),
+                alias: Some(alias),
+            },
+        )
+        .unwrap();
+        let star = types_nodes::NodeList::make1(
+            mcx,
+            types_nodes::Node::mk_a_star(mcx).unwrap(),
+        )
+        .unwrap();
+        let star_ref = types_nodes::Node::mk_column_ref(mcx, star, 7).unwrap();
+        let target =
+            types_nodes::Node::mk_res_target(mcx, None, types_nodes::NodeList::nil(), Some(star_ref), 7)
+                .unwrap();
+        let stmt = types_nodes::Node::mk(
+            mcx,
+            types_nodes::rawnodes::SelectStmt {
+                targetList: types_nodes::NodeList::make1(mcx, target).unwrap(),
+                fromClause: types_nodes::NodeList::make1(mcx, rss).unwrap(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let raw_stmt = types_nodes::rawnodes::RawStmt {
+            stmt: Some(stmt),
+            stmt_location: 0,
+            stmt_len: 44,
+        };
+
+        let q = parse_analyze_fixedparams(
+            mcx,
+            &raw_stmt,
+            "SELECT * FROM (VALUES (2, 'b'), (1, 'a')) AS v(n, s)",
+            &[],
+            Default::default(),
+        )
+        .unwrap();
+
+        assert_eq!(q.rtable.len(), 1);
+        let rte = q.rtable.nth(0).as_range_tbl_entry().unwrap();
+        assert_eq!(rte.rtekind, RTEKind::RTE_SUBQUERY);
+        let eref = rte.eref.unwrap();
+        assert_eq!(eref.aliasname, Some("v"));
+        assert_eq!(eref.colnames.nth(0).as_string().unwrap().sval, "n");
+        assert_eq!(eref.colnames.nth(1).as_string().unwrap().sval, "s");
+        let sub = rte.subquery.unwrap();
+        assert_eq!(sub.commandType, CmdType::CMD_SELECT);
+        assert_eq!(
+            sub.rtable.nth(0).as_range_tbl_entry().unwrap().rtekind,
+            RTEKind::RTE_VALUES
+        );
+
+        assert_eq!(q.targetList.len(), 2);
+        let t0 = q.targetList.nth(0).as_target_entry().unwrap();
+        assert_eq!((t0.resname, t0.expr.as_var().unwrap().vartype), (Some("n"), INT4OID));
+        let v0 = t0.expr.as_var().unwrap();
+        assert_eq!((v0.varno, v0.varattno), (1, 1));
+        let t1 = q.targetList.nth(1).as_target_entry().unwrap();
+        assert_eq!((t1.resname, t1.expr.as_var().unwrap().vartype), (Some("s"), TEXTOID));
+    }
+
+    fn int_c(mcx: Mcx<'_>, ival: i32) -> types_nodes::Node<'_> {
+        types_nodes::Node::mk_a_const(
+            mcx,
+            Some(types_nodes::rawnodes::ValUnion::Integer(types_nodes::Integer { ival })),
+            -1,
+        )
+        .unwrap()
+    }
+
+    fn str_c<'m>(mcx: Mcx<'m>, s: &'m str) -> types_nodes::Node<'m> {
+        types_nodes::Node::mk_a_const(
+            mcx,
+            Some(types_nodes::rawnodes::ValUnion::String(types_nodes::String { sval: s })),
+            -1,
+        )
+        .unwrap()
+    }
+
+    #[test]
     fn update_set_where_end_to_end() {
         install();
         let ctx = MemoryContext::new("t");
@@ -1144,6 +1761,144 @@ mod from_where {
             .unwrap_err();
         assert_eq!(err.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
         assert!(err.message().contains("subquery must return only one column"), "{}", err.message());
+    }
+
+    #[test]
+    fn with_cte_single_reference() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "WITH w AS (SELECT x FROM t WHERE x > 5) SELECT * FROM w")
+            .unwrap();
+        assert!(!q.hasRecursive && !q.hasModifyingCTE);
+        assert_eq!(q.cteList.len(), 1);
+        let cte = q.cteList.nth(0).as_common_table_expr().unwrap();
+        assert_eq!(cte.ctename, Some("w"));
+        assert!(!cte.cterecursive);
+        assert_eq!(cte.cterefcount, 1);
+        assert_eq!(cte.ctecolnames.len(), 1);
+        assert_eq!(cte.ctecolnames.nth(0).as_string().unwrap().sval, "x");
+        assert_eq!(cte.ctecoltypes.as_slice(), &[INT4OID]);
+        let cq = cte.ctequery.unwrap().as_query().unwrap();
+        assert_eq!(cq.commandType, CmdType::CMD_SELECT);
+        assert!(!cq.canSetTag);
+
+        assert_eq!(q.rtable.len(), 1);
+        let rte = q.rtable.nth(0).as_range_tbl_entry().unwrap();
+        assert_eq!(rte.rtekind, types_nodes::RTEKind::RTE_CTE);
+        assert_eq!(rte.ctename, Some("w"));
+        assert_eq!(rte.ctelevelsup, 0);
+        assert!(!rte.self_reference);
+        assert_eq!(rte.coltypes.as_slice(), &[INT4OID]);
+
+        let te = q.targetList.nth(0).as_target_entry().unwrap();
+        assert_eq!(te.resname, Some("x"));
+        let var = te.expr.as_var().unwrap();
+        assert_eq!((var.varno, var.varattno, var.vartype), (1, 1, INT4OID));
+    }
+
+    #[test]
+    fn with_cte_two_references_bumps_refcount() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(
+            mcx,
+            "WITH w AS (SELECT x FROM t WHERE x > 5) SELECT * FROM w, w w2",
+        )
+        .unwrap();
+        assert_eq!(q.cteList.len(), 1);
+        let cte = q.cteList.nth(0).as_common_table_expr().unwrap();
+        assert_eq!(cte.cterefcount, 2);
+        assert_eq!(q.rtable.len(), 2);
+        let rte2 = q.rtable.nth(1).as_range_tbl_entry().unwrap();
+        assert_eq!(rte2.rtekind, types_nodes::RTEKind::RTE_CTE);
+        assert_eq!(rte2.eref.unwrap().aliasname, Some("w2"));
+        assert_eq!(q.targetList.len(), 2);
+    }
+
+    #[test]
+    fn with_cte_alias_columns_and_aliasing() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "WITH w (a, b) AS (SELECT x, y FROM t) SELECT a, b FROM w")
+            .unwrap();
+        let cte = q.cteList.nth(0).as_common_table_expr().unwrap();
+        assert_eq!(cte.ctecolnames.len(), 2);
+        assert_eq!(cte.ctecolnames.nth(0).as_string().unwrap().sval, "a");
+        assert_eq!(cte.ctecolnames.nth(1).as_string().unwrap().sval, "b");
+        assert_eq!(cte.ctecoltypes.as_slice(), &[INT4OID, TEXTOID]);
+        assert_eq!(cte.ctecolcollations.as_slice(), &[types_core::InvalidOid, 100]);
+    }
+
+    #[test]
+    fn with_duplicate_cte_name_is_42712() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(mcx, "WITH w AS (SELECT 1), w AS (SELECT 2) SELECT 1")
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_DUPLICATE_ALIAS);
+        assert_eq!(err.message(), "WITH query name \"w\" specified more than once");
+    }
+
+    #[test]
+    fn with_too_many_alias_columns_is_42p10() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(mcx, "WITH w (a, b) AS (SELECT 1) SELECT a FROM w")
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_COLUMN_REFERENCE);
+        assert!(err.message().contains("has 1 columns available but 2 columns specified"));
+    }
+
+    #[test]
+    fn with_forward_reference_gets_future_cte_hint() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(
+            mcx,
+            "WITH a AS (SELECT * FROM b), b AS (SELECT 1) SELECT * FROM a",
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_TABLE);
+        assert!(err.message().contains("relation \"b\" does not exist"), "{}", err.message());
+        assert!(
+            err.detail().unwrap_or_default().contains("There is a WITH item named \"b\""),
+            "{:?}",
+            err.detail()
+        );
+    }
+
+    #[test]
+    fn with_recursive_is_loud() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = analyze_sql(mcx, "WITH RECURSIVE w AS (SELECT 1) SELECT * FROM w");
+        }));
+        let payload = r.expect_err("must be loud");
+        let msg = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .map(std::string::String::from)
+            .or_else(|| payload.downcast_ref::<std::string::String>().cloned())
+            .unwrap();
+        assert!(msg.contains("WITH RECURSIVE"), "{msg}");
     }
 }
 

@@ -1,6 +1,8 @@
 // DefineRelation plain-table lane; BuildDescForRelation rides here as in 18.3.
 #![allow(non_snake_case)]
 
+mod constraints;
+
 use mcx::Mcx;
 use types_core::{AttrNumber, InvalidOid, Oid, NAMEDATALEN};
 use types_error::{PgError, PgResult, ERRCODE_UNDEFINED_SCHEMA, ERROR};
@@ -65,10 +67,10 @@ pub fn BuildDescForRelation<'mcx>(
 
 pub fn DefineRelation<'mcx>(
     mcx: Mcx<'mcx>,
-    stmt: &CreateStmt<'_>,
+    stmt: &CreateStmt<'mcx>,
     relkind: u8,
     owner_id: Oid,
-    _query_string: &str,
+    query_string: &str,
 ) -> PgResult<Oid> {
     debug_assert!(relkind == RELKIND_RELATION);
     let rv = stmt.relation.expect("CreateStmt.relation");
@@ -143,5 +145,34 @@ pub fn DefineRelation<'mcx>(
     )?;
 
     xact::CommandCounterIncrement()?;
+
+    let raw_defaults = constraints::collect_raw_defaults(mcx, &stmt.tableElts)?;
+    if !raw_defaults.is_empty() || !stmt.constraints.is_nil() || !stmt.nnconstraints.is_nil() {
+        let rel = table::table_open(mcx, relation_id, types_rel::AccessExclusiveLock)?;
+        if !raw_defaults.is_empty() {
+            constraints::add_relation_new_constraints(
+                mcx,
+                &rel,
+                &raw_defaults,
+                &types_nodes::NodeList::nil(),
+                query_string,
+            )?;
+            xact::CommandCounterIncrement()?;
+        }
+        if !stmt.constraints.is_nil() {
+            constraints::add_relation_new_constraints(
+                mcx,
+                &rel,
+                &[],
+                &stmt.constraints,
+                query_string,
+            )?;
+        }
+        if !stmt.nnconstraints.is_nil() {
+            constraints::add_relation_not_null_constraints(mcx, &rel, &stmt.nnconstraints)?;
+        }
+        table::table_close(rel, types_rel::NoLock)?;
+        xact::CommandCounterIncrement()?;
+    }
     Ok(relation_id)
 }

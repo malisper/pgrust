@@ -557,6 +557,12 @@ pub fn check_transaction_buffers(newval: i32) -> (bool, Option<String>) {
     check_slru_buffers("transaction_buffers", newval)
 }
 
+/// Crash-cycle reset in place (notes/crash-restart-design.md); StartupCLOG
+/// re-seeds as after C's shmem re-create.
+pub fn CLOGShmemResetAfterCrash() {
+    slru::SimpleLruResetAfterCrash(XactCtl());
+}
+
 pub fn BootStrapCLOG() -> PgResult<()> {
     let ctl = XactCtl();
     let mut bank = LwGuard::acquire(SimpleLruGetBankLock(ctl, 0), LW_EXCLUSIVE)?;

@@ -64,3 +64,20 @@ seam_core::seam!(
     // RelationCacheInitFileRemove() (relcache.c init file half).
     pub fn relation_cache_init_file_remove()
 );
+
+// Attnum lists stand in for C's rd_attrsvalid bitmapsets (indexed attnums are
+// few); sorted ascending, deduplicated.
+pub struct IndexAttrBitmaps {
+    pub hot_blocking: mcx::PgVec<'static, i16>,
+    pub summarized: mcx::PgVec<'static, i16>,
+    pub key: mcx::PgVec<'static, i16>,
+    pub identity: mcx::PgVec<'static, i16>,
+}
+
+seam_core::seam!(
+    // RelationGetIndexAttrBitmap (relcache.c), all four kinds at once; cached
+    // on the implementation side, invalidation clears it.
+    pub fn relation_get_index_attr_bitmap(
+        relid: Oid,
+    ) -> PgResult<Rc<IndexAttrBitmaps>>
+);

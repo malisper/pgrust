@@ -10,6 +10,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn set_current_resource_owner(owner: types_resowner::ResourceOwner)
+);
+
+seam_core::seam!(
+    pub fn top_transaction_resource_owner() -> types_resowner::ResourceOwner
+);
+
+seam_core::seam!(
     pub fn resource_owner_enlarge(owner: types_resowner::ResourceOwner) -> PgResult<()>
 );
 

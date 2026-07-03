@@ -1,21 +1,23 @@
 // heap.c DDL half, plain-table lane. Out of scope (loud or WARNING'd below):
 // TOAST, typed/partitioned/shared/mapped rels, constraints/defaults,
-// pg_type rowtype + array type rows, pg_depend/pg_shdepend recording,
-// default ACLs.
+// pg_shdepend recording, default ACLs.
 use std::rc::Rc;
 
+use catalog::AccessMethodRelationId;
 use datum::Datum;
 use mcx::Mcx;
+use pg_depend::ObjectAddress;
 use types_core::{
     AttrNumber, InvalidOid, InvalidRelFileNumber, MultiXactId, Oid, TransactionId,
-    ATTRIBUTE_RELATION_ID, RELATION_RELATION_ID,
+    ATTRIBUTE_RELATION_ID, DEFAULT_COLLATION_OID, RELATION_RELATION_ID, TYPE_RELATION_ID,
 };
 use types_error::{PgError, PgResult, ERRCODE_DUPLICATE_COLUMN, ERRCODE_DUPLICATE_TABLE, ERROR};
 use types_rel::{
-    AccessExclusiveLock, Relation, RelationData, RowExclusiveLock, RELKIND_COMPOSITE_TYPE, RELKIND_HAS_STORAGE,
-    RELKIND_HAS_TABLESPACE, RELKIND_HAS_TABLE_AM, RELKIND_RELATION, RELKIND_VIEW,
+    AccessExclusiveLock, AccessShareLock, Relation, RelationData, RowExclusiveLock,
+    RELKIND_COMPOSITE_TYPE, RELKIND_HAS_STORAGE, RELKIND_HAS_TABLESPACE, RELKIND_HAS_TABLE_AM,
+    RELKIND_RELATION, RELKIND_VIEW,
 };
-use types_tuple::{FormData_pg_attribute, TupleDescData};
+use types_tuple::{FormData_pg_attribute, TupleDescData, TYPALIGN_DOUBLE, TYPSTORAGE_EXTENDED};
 
 use crate::SysAtt;
 
@@ -66,6 +68,7 @@ pub fn heap_create<'mcx>(
     relnamespace: Oid,
     reltablespace: Oid,
     relid: Oid,
+    reltype: Oid,
     relfilenumber: types_core::RelFileNumber,
     accessmtd: Oid,
     tupdesc: &TupleDescData<'_>,
@@ -106,6 +109,7 @@ pub fn heap_create<'mcx>(
         relnamespace,
         tupdesc,
         relid,
+        reltype,
         accessmtd,
         relfilenumber,
         reltablespace,
@@ -239,9 +243,26 @@ fn AddNewAttributeTuples<'mcx>(
     let mut indstate = catalog_indexing::CatalogOpenIndexes(mcx, &rel)?;
 
     for i in 0..tupdesc.natts as usize {
-        insert_pg_attribute_tuple(mcx, &rel, &tupdesc.attrs[i], new_rel_oid, &mut indstate)?;
-        // C: recordDependencyOn(rel-column -> type/collation) — pg_depend
-        // recording unported; DROP-side consistency rides with pg_depend.
+        let att = &tupdesc.attrs[i];
+        insert_pg_attribute_tuple(mcx, &rel, att, new_rel_oid, &mut indstate)?;
+
+        let myself = ObjectAddress::sub_set(RELATION_RELATION_ID, new_rel_oid, i as i32 + 1);
+        let referenced = ObjectAddress::set(TYPE_RELATION_ID, att.atttypid);
+        pg_depend::recordDependencyOn(
+            mcx,
+            &myself,
+            &referenced,
+            pg_depend::DependencyType::Normal,
+        )?;
+        if att.attcollation != InvalidOid && att.attcollation != DEFAULT_COLLATION_OID {
+            let referenced = ObjectAddress::set(catalog::CollationRelationId, att.attcollation);
+            pg_depend::recordDependencyOn(
+                mcx,
+                &myself,
+                &referenced,
+                pg_depend::DependencyType::Normal,
+            )?;
+        }
     }
 
     if relkind != RELKIND_VIEW && relkind != RELKIND_COMPOSITE_TYPE {
@@ -282,6 +303,20 @@ pub fn heap_create_with_catalog<'mcx>(
         ));
     }
 
+    let old_type_oid =
+        syscache_seams::lookup_pg_type_oid_by_name::call(p.relname, p.relnamespace)?;
+    if old_type_oid != InvalidOid && !pg_type::moveArrayTypeName(old_type_oid, p.relname, p.relnamespace)? {
+        return Err(err(
+            format!("type \"{}\" already exists", p.relname),
+            types_error::ERRCODE_DUPLICATE_OBJECT,
+        )
+        .with_hint(
+            "A relation has an associated type of the same name, so you must use a name \
+             that doesn't conflict with any existing type.",
+        )
+        .into());
+    }
+
     let relid = catalog::GetNewRelFileNumber(
         mcx,
         p.reltablespace,
@@ -289,6 +324,23 @@ pub fn heap_create_with_catalog<'mcx>(
         p.relpersistence,
     )?;
     lmgr::LockRelationOid(relid, AccessExclusiveLock)?;
+
+    // C allocates the array-type oid after heap_create and the composite oid
+    // inside TypeCreate; both are hoisted here so the relcache entry can carry
+    // reltype at build time. GetNewObjectId order (relid, array, composite)
+    // and both TypeCreate calls' catalog effects are unchanged.
+    let new_array_oid = pg_type::AssignTypeArrayOid(mcx)?;
+    let new_type_oid = {
+        let pg_type_rel = table::table_open(mcx, types_core::TYPE_RELATION_ID, AccessShareLock)?;
+        let oid = catalog::GetNewOidWithIndex(
+            mcx,
+            &pg_type_rel,
+            pg_type::TypeOidIndexId,
+            pg_type::Anum_pg_type_oid,
+        )?;
+        pg_type_rel.close(AccessShareLock)?;
+        oid
+    };
 
     // relacl: get_user_default_acl unported; pg_default_acl entries (if any)
     // are not honored — relacl is always NULL here.
@@ -298,6 +350,7 @@ pub fn heap_create_with_catalog<'mcx>(
         p.relnamespace,
         p.reltablespace,
         relid,
+        new_type_oid,
         InvalidRelFileNumber,
         p.accessmtd,
         tupdesc,
@@ -306,13 +359,52 @@ pub fn heap_create_with_catalog<'mcx>(
         p.allow_system_table_mods,
     )?;
 
-    elog::elog(
-        types_error::WARNING,
-        format!(
-            "AddNewRelationType unported (backend-catalog-heap): relation \"{}\" gets \
-             reltype = 0, no composite/array pg_type rows, no pg_depend/pg_shdepend rows",
-            p.relname
-        ),
+    AddNewRelationType(
+        mcx,
+        p.relname,
+        p.relnamespace,
+        relid,
+        p.relkind,
+        p.ownerid,
+        new_type_oid,
+        new_array_oid,
+    )?;
+
+    let relarrayname = pg_type::makeArrayTypeName(p.relname, p.relnamespace)?;
+    pg_type::TypeCreate(
+        mcx,
+        &pg_type::TypeCreateParams {
+            newTypeOid: new_array_oid,
+            typeName: core::str::from_utf8(relarrayname.name_str()).expect("non-UTF-8 array type name"),
+            typeNamespace: p.relnamespace,
+            relationOid: InvalidOid,
+            relationKind: 0,
+            ownerId: p.ownerid,
+            internalSize: -1,
+            typeType: pg_type::TYPTYPE_BASE,
+            typeCategory: pg_type::TYPCATEGORY_ARRAY,
+            typePreferred: false,
+            typDelim: pg_type::DEFAULT_TYPDELIM,
+            inputProcedure: pg_type::F_ARRAY_IN,
+            outputProcedure: pg_type::F_ARRAY_OUT,
+            receiveProcedure: pg_type::F_ARRAY_RECV,
+            sendProcedure: pg_type::F_ARRAY_SEND,
+            typmodinProcedure: InvalidOid,
+            typmodoutProcedure: InvalidOid,
+            analyzeProcedure: pg_type::F_ARRAY_TYPANALYZE,
+            subscriptProcedure: pg_type::F_ARRAY_SUBSCRIPT_HANDLER,
+            elementType: new_type_oid,
+            isImplicitArray: true,
+            arrayType: InvalidOid,
+            baseType: InvalidOid,
+            passedByValue: false,
+            alignment: TYPALIGN_DOUBLE,
+            storage: TYPSTORAGE_EXTENDED,
+            typeMod: -1,
+            typNDims: 0,
+            typeNotNull: false,
+            typeCollation: InvalidOid,
+        },
     )?;
 
     InsertPgClassTuple(
@@ -327,6 +419,72 @@ pub fn heap_create_with_catalog<'mcx>(
 
     AddNewAttributeTuples(mcx, relid, &new_rel_desc.rd_att, p.relkind)?;
 
+    if !miscinit_seams::is_bootstrap_processing_mode::call() {
+        let myself = ObjectAddress::set(RELATION_RELATION_ID, relid);
+        pg_depend::recordDependencyOnOwner(RELATION_RELATION_ID, relid, p.ownerid);
+        // recordDependencyOnNewAcl: relacl is always NULL here (divergence
+        // above) and the owner needs no entry, so C records nothing.
+        // recordDependencyOnCurrentExtension: extension.c unported; C no-ops
+        // outside CREATE EXTENSION scripts.
+        let mut addrs = [
+            ObjectAddress::set(catalog::NamespaceRelationId, p.relnamespace),
+            ObjectAddress::set(AccessMethodRelationId, p.accessmtd),
+        ];
+        pg_depend::record_object_address_dependencies(
+            mcx,
+            &myself,
+            &mut addrs,
+            pg_depend::DependencyType::Normal,
+        )?;
+    }
+
     pg_class_desc.close(RowExclusiveLock)?;
     Ok(relid)
+}
+
+fn AddNewRelationType<'mcx>(
+    mcx: Mcx<'mcx>,
+    typeName: &str,
+    typeNamespace: Oid,
+    new_rel_oid: Oid,
+    new_rel_kind: u8,
+    ownerid: Oid,
+    new_row_type: Oid,
+    new_array_type: Oid,
+) -> PgResult<ObjectAddress> {
+    pg_type::TypeCreate(
+        mcx,
+        &pg_type::TypeCreateParams {
+            newTypeOid: new_row_type,
+            typeName,
+            typeNamespace,
+            relationOid: new_rel_oid,
+            relationKind: new_rel_kind,
+            ownerId: ownerid,
+            internalSize: -1,
+            typeType: pg_type::TYPTYPE_COMPOSITE,
+            typeCategory: pg_type::TYPCATEGORY_COMPOSITE,
+            typePreferred: false,
+            typDelim: pg_type::DEFAULT_TYPDELIM,
+            inputProcedure: pg_type::F_RECORD_IN,
+            outputProcedure: pg_type::F_RECORD_OUT,
+            receiveProcedure: pg_type::F_RECORD_RECV,
+            sendProcedure: pg_type::F_RECORD_SEND,
+            typmodinProcedure: InvalidOid,
+            typmodoutProcedure: InvalidOid,
+            analyzeProcedure: InvalidOid,
+            subscriptProcedure: InvalidOid,
+            elementType: InvalidOid,
+            isImplicitArray: false,
+            arrayType: new_array_type,
+            baseType: InvalidOid,
+            passedByValue: false,
+            alignment: TYPALIGN_DOUBLE,
+            storage: TYPSTORAGE_EXTENDED,
+            typeMod: -1,
+            typNDims: 0,
+            typeNotNull: false,
+            typeCollation: InvalidOid,
+        },
+    )
 }

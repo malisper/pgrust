@@ -15,11 +15,14 @@ use types_tuple::{NameData, TupleConstr, TupleDescData};
 use crate::build::RelationInitPhysicalAddr;
 use crate::{cache_mcx, store, with_state};
 
+// reltype is a build-time parameter (C's AddNewRelationTuple pokes it into
+// rd_rel/rd_att after the fact; rd_rel is not interior-mutable here).
 pub fn RelationBuildLocalRelation(
     relname: &str,
     relnamespace: Oid,
     tupDesc: &TupleDescData<'_>,
     relid: Oid,
+    reltype: Oid,
     accessmtd: Oid,
     relfilenumber: RelFileNumber,
     reltablespace: Oid,
@@ -37,6 +40,8 @@ pub fn RelationBuildLocalRelation(
     let mcx = cache_mcx();
     let mut rd_att = tupdesc::CreateTupleDescCopy(mcx, tupDesc)?;
     rd_att.tdrefcount = 1;
+    rd_att.tdtypeid = if reltype != InvalidOid { reltype } else { types_core::RECORDOID };
+    rd_att.tdtypmod = -1;
     let mut has_not_null = false;
     for i in 0..rd_att.natts as usize {
         let src = &tupDesc.attrs[i];
@@ -77,7 +82,7 @@ pub fn RelationBuildLocalRelation(
     let rd_rel = FormData_pg_class {
         relname: name,
         relnamespace,
-        reltype: InvalidOid,
+        reltype,
         relowner: InvalidOid,
         relam: accessmtd,
         relfilenode: relfilenumber,

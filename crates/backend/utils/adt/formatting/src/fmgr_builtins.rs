@@ -19,7 +19,12 @@ pub fn fc_numeric_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     // SAFETY: strict fn — args 0/1 are non-null numeric/text varlenas.
     let (val, fmt) = unsafe { (fcinfo.arg_varlena_packed(0), fcinfo.arg_varlena_packed(1)) };
     let mcx = fcinfo.result_mcx();
-    let n = Num::from_payload(val.data());
+    // C's PG_GETARG_NUMERIC detoast: 1B-short images realign into the result mcx.
+    let n = Num::from_payload(if val.is_short() {
+        val.data_expanded(mcx)?
+    } else {
+        val.data()
+    });
     Ok(varlena_result(num_entry::numeric_to_char(mcx, n, fmt.data())?))
 }
 

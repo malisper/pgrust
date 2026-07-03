@@ -15,6 +15,8 @@ types_portal = { path = "../../../_support/types/portal" }
 types_slot = { path = "../../../_support/types/types_slot" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+typcache = { path = "../../utils/cache/typcache" }
+format_type = { path = "../../utils/adt/format_type" }
 exectuples = { path = "../exectuples" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 clauses_seams = { path = "../../optimizer/util/clauses_seams" }
@@ -27,5 +29,6 @@ bench-internals = []
 
 [dev-dependencies]
 adt_int = { path = "../../utils/adt/int" }
+indexcmds_seams = { path = "../../commands/indexcmds_seams" }
 heaptuple = { path = "../../access/common/heaptuple" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }

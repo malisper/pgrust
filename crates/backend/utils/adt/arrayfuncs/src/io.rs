@@ -545,7 +545,7 @@ pub fn array_out<'mcx>(
 
     let mut out: PgVec<u8> = vec_new_in(mcx);
     if nitems == 0 {
-        out.extend_from_slice(b"{}\0");
+        ::mcx::vec_append_bytes(&mut out, b"{}\0")?;
         return Ok(out);
     }
 
@@ -556,61 +556,89 @@ pub fn array_out<'mcx>(
     if needdims {
         for i in 0..ndim as usize {
             let s = alloc::format!("[{}:{}]", lb[i], lb[i] + dims[i] - 1);
-            out.extend_from_slice(s.as_bytes());
+            ::mcx::vec_append_bytes(&mut out, s.as_bytes())?;
         }
         out.push(b'=');
     }
 
     out.push(b'{');
     let ndim_u = ndim as usize;
+    let nulls_s: &[bool] = &elem_nulls;
+    let elems_s: &[Datum] = &elems;
     let mut indx = [0i32; MAXDIM];
     let mut j = 0i32;
     let mut k = 0usize;
     loop {
-        let mut i = j as usize;
-        while i < ndim_u - 1 {
-            out.push(b'{');
-            i += 1;
-        }
         // Element k's output string is produced on demand; the out proc's
         // returned cstring aliases reusable scratch, so it is copied here
-        // (with quoting) before the next element's out call.
-        if elem_nulls[k] {
-            out.extend_from_slice(b"NULL");
+        // (with quoting) before the next element's out call. One reserve
+        // covers this iteration's worst case; emission is unchecked cursor
+        // writes (per-byte push costs ~15 instr/output byte vs C's strcpy).
+        // SAFETY: k < nitems = length of both deconstruct vecs.
+        let is_null = unsafe { *nulls_s.get_unchecked(k) };
+        let bytes: &[u8] = if is_null {
+            b"NULL"
         } else {
-            let d = function_call1_coll(proc, InvalidOid, elems[k])?;
-            let bytes = cstring_datum(d);
-            if element_needs_quote(bytes, meta.typdelim) {
-                out.push(b'"');
+            // SAFETY: as above.
+            let d = function_call1_coll(proc, InvalidOid, unsafe { *elems_s.get_unchecked(k) })?;
+            cstring_datum(d)
+        };
+        let quote = !is_null && element_needs_quote(bytes, meta.typdelim);
+        let n = bytes.len();
+        let extra = 2 * n + 2 + 2 * ndim_u + 2;
+        if out.capacity() - out.len() < extra {
+            out.try_reserve(extra).map_err(|_| mcx.oom(extra))?;
+        }
+        // SAFETY: `extra` bounds every write below (braces/delims <= 2*ndim_u+1,
+        // element <= 2n+2); set_len covers exactly the bytes written.
+        unsafe {
+            let base = out.as_mut_ptr();
+            let mut w = out.len();
+            let mut i = j as usize;
+            while i < ndim_u - 1 {
+                *base.add(w) = b'{';
+                w += 1;
+                i += 1;
+            }
+            if quote {
+                *base.add(w) = b'"';
+                w += 1;
                 for &ch in bytes {
                     if ch == b'"' || ch == b'\\' {
-                        out.push(b'\\');
+                        *base.add(w) = b'\\';
+                        w += 1;
                     }
-                    out.push(ch);
+                    *base.add(w) = ch;
+                    w += 1;
                 }
-                out.push(b'"');
+                *base.add(w) = b'"';
+                w += 1;
             } else {
-                out.extend_from_slice(bytes);
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(w), n);
+                w += n;
             }
-        }
-        k += 1;
+            k += 1;
 
-        let mut ii = ndim - 1;
-        loop {
-            indx[ii as usize] += 1;
-            if indx[ii as usize] < dims[ii as usize] {
-                out.push(meta.typdelim);
-                break;
-            } else {
-                indx[ii as usize] = 0;
-                out.push(b'}');
+            let mut ii = ndim - 1;
+            loop {
+                indx[ii as usize] += 1;
+                if indx[ii as usize] < dims[ii as usize] {
+                    *base.add(w) = meta.typdelim;
+                    w += 1;
+                    break;
+                } else {
+                    indx[ii as usize] = 0;
+                    *base.add(w) = b'}';
+                    w += 1;
+                }
+                ii -= 1;
+                if ii < 0 {
+                    break;
+                }
             }
-            ii -= 1;
-            if ii < 0 {
-                break;
-            }
+            j = ii;
+            out.set_len(w);
         }
-        j = ii;
         if j == -1 {
             break;
         }

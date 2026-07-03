@@ -1,0 +1,21 @@
+[package]
+name = "pg_depend"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_depend"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_rel = { path = "../../../_support/types/rel" }
+heaptuple = { path = "../../access/common/heaptuple" }
+table = { path = "../../access/table/table" }
+catalog = { path = "../catalog" }
+catalog_indexing = { path = "../catalog_indexing" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }

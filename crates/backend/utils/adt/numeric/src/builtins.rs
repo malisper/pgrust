@@ -54,13 +54,21 @@ fc_sum! {
     fc_int2_sum: int2_sum(as_i16);
 }
 
+/// C's PG_GETARG_NUMERIC: a 1B-short image (tuple-packed numerics land here
+/// with misaligned digits) expands into the frame's result mcx, mirroring
+/// DatumGetNumeric's detoast into CurrentMemoryContext.
 /// # Safety
-/// Arg `i` is a non-null numeric varlena (strict fn); 1B-short images panic
-/// in `Num::digits` (C's DatumGetNumeric detoast-expand is a caller concern).
+/// Arg `i` is a non-null numeric varlena (strict fn).
 #[inline]
-unsafe fn num_arg(fcinfo: &Fcinfo, i: usize) -> Num<'_> {
+unsafe fn num_arg(fcinfo: &Fcinfo, i: usize) -> PgResult<Num<'_>> {
     // SAFETY: forwarded caller contract.
-    Num::from_payload(unsafe { fcinfo.arg_varlena_packed(i) }.data())
+    let v = unsafe { fcinfo.arg_varlena_packed(i) };
+    let payload = if v.is_short() {
+        v.data_expanded(fcinfo.result_mcx())?
+    } else {
+        v.data()
+    };
+    Ok(Num::from_payload(payload))
 }
 
 fn img_result(fcinfo: &Fcinfo, img: &NumericImage) -> PgResult<Datum> {
@@ -92,7 +100,7 @@ pub fn fc_numeric_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
         panic!("numeric_out: cstring result needs a resolved FmgrInfo's scratch")
     };
     // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
-    let num = unsafe { num_arg(fcinfo, 0) };
+    let num = unsafe { num_arg(fcinfo, 0) }?;
     if !flinfo.has_fn_extra() {
         flinfo.set_fn_extra(OutBuf(Vec::new()));
     }
@@ -113,14 +121,14 @@ pub fn fc_numeric_recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
 
 pub fn fc_numeric_send(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
-    let num = unsafe { num_arg(fcinfo, 0) };
+    let num = unsafe { num_arg(fcinfo, 0) }?;
     let mcx = fcinfo.result_mcx();
     Ok(varlena_result(crate::numeric_send(mcx, num)?))
 }
 
 pub fn fc_numeric(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
-    let num = unsafe { num_arg(fcinfo, 0) };
+    let num = unsafe { num_arg(fcinfo, 0) }?;
     let img = crate::numeric_apply_typmod(num, fcinfo.arg_i32(1))?;
     img_result(fcinfo, &img)
 }
@@ -129,7 +137,7 @@ macro_rules! fc_num_binop {
     ($($fc:ident: $core:ident;)*) => {$(
         pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             // SAFETY: catalog args are non-null numeric varlenas (strict fn).
-            let (a, b) = unsafe { (num_arg(fcinfo, 0), num_arg(fcinfo, 1)) };
+            let (a, b) = unsafe { (num_arg(fcinfo, 0)?, num_arg(fcinfo, 1)?) };
             let img = crate::$core(a, b)?;
             img_result(fcinfo, &img)
         }
@@ -153,7 +161,7 @@ macro_rules! fc_num_cmp {
     ($($fc:ident: $core:ident -> $conv:ident;)*) => {$(
         pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             // SAFETY: catalog args are non-null numeric varlenas (strict fn).
-            let (a, b) = unsafe { (num_arg(fcinfo, 0), num_arg(fcinfo, 1)) };
+            let (a, b) = unsafe { (num_arg(fcinfo, 0)?, num_arg(fcinfo, 1)?) };
             Ok(Datum::$conv(crate::$core(a, b)))
         }
     )*};
@@ -173,7 +181,7 @@ macro_rules! fc_num_unary {
     ($($fc:ident: $core:ident;)*) => {$(
         pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
-            let num = unsafe { num_arg(fcinfo, 0) };
+            let num = unsafe { num_arg(fcinfo, 0) }?;
             let img = crate::$core(num);
             img_result(fcinfo, &img)
         }
@@ -190,7 +198,7 @@ macro_rules! fc_num_unary_res {
     ($($fc:ident: $core:ident;)*) => {$(
         pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
-            let num = unsafe { num_arg(fcinfo, 0) };
+            let num = unsafe { num_arg(fcinfo, 0) }?;
             let img = crate::$core(num)?;
             img_result(fcinfo, &img)
         }
@@ -214,7 +222,7 @@ pub fn fc_width_bucket_numeric(
 ) -> PgResult<Datum> {
     // SAFETY: catalog args 0-2 are non-null numeric varlenas (strict fn).
     let (operand, b1, b2) =
-        unsafe { (num_arg(fcinfo, 0), num_arg(fcinfo, 1), num_arg(fcinfo, 2)) };
+        unsafe { (num_arg(fcinfo, 0)?, num_arg(fcinfo, 1)?, num_arg(fcinfo, 2)?) };
     let count = fcinfo.arg_i32(3);
     Ok(Datum::from_i32(crate::width_bucket_numeric(
         operand, b1, b2, count,
@@ -224,7 +232,7 @@ pub fn fc_width_bucket_numeric(
 // C returns one of the input pointers — so do smaller/larger.
 pub fn fc_numeric_larger(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog args are non-null numeric varlenas (strict fn).
-    let (a, b) = unsafe { (num_arg(fcinfo, 0), num_arg(fcinfo, 1)) };
+    let (a, b) = unsafe { (num_arg(fcinfo, 0)?, num_arg(fcinfo, 1)?) };
     Ok(if crate::cmp_numerics(a, b) >= 0 {
         fcinfo.arg(0)
     } else {
@@ -234,7 +242,7 @@ pub fn fc_numeric_larger(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
 
 pub fn fc_numeric_smaller(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog args are non-null numeric varlenas (strict fn).
-    let (a, b) = unsafe { (num_arg(fcinfo, 0), num_arg(fcinfo, 1)) };
+    let (a, b) = unsafe { (num_arg(fcinfo, 0)?, num_arg(fcinfo, 1)?) };
     Ok(if crate::cmp_numerics(a, b) <= 0 {
         fcinfo.arg(0)
     } else {
@@ -262,6 +270,82 @@ pub fn fc_float4_numeric(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
 pub fn fc_float8_numeric(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let img = crate::float8_numeric(fcinfo.arg_f64(0))?;
     img_result(fcinfo, &img)
+}
+
+pub fn fc_numeric_int4(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
+    let num = unsafe { num_arg(fcinfo, 0) }?;
+    Ok(Datum::from_i32(crate::numeric_int4(num)?))
+}
+
+pub fn fc_numeric_float8(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
+    let num = unsafe { num_arg(fcinfo, 0) }?;
+    Ok(Datum::from_f64(crate::numeric_float8(num)?))
+}
+
+// C PolyNumAggState under HAVE_INT128 = Int128AggState, allocated by the
+// transfn in the aggcontext bump arena (fcinfo->context/AggCheckCallContext);
+// the arena is wholesale-reset, so the state must stay drop-free.
+const _: () = assert!(!core::mem::needs_drop::<crate::aggregates::Int128AggState>());
+
+#[cold]
+#[inline(never)]
+fn non_aggregate_context() -> Box<::types_error::PgError> {
+    Box::new(::types_error::PgError::error(
+        "aggregate function called in non-aggregate context",
+    ))
+}
+
+pub fn fc_int8_avg_accum(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    use crate::aggregates::Int128AggState;
+    let [a, b] = *fcinfo.args_n::<2>();
+    let state: *mut Int128AggState = if a.isnull {
+        // SAFETY: context, if set, is the evaltrans build's AggStateNode,
+        // live across every call through this frame.
+        let Some(agg_mcx) = (unsafe { fcinfo.agg_context() }) else {
+            return Err(non_aggregate_context());
+        };
+        let layout = core::alloc::Layout::new::<Int128AggState>();
+        let raw = ::mcx::Allocator::allocate(&agg_mcx, layout)
+            .map_err(|_| agg_mcx.oom(layout.size()))?;
+        let p = raw.cast::<Int128AggState>().as_ptr();
+        // SAFETY: fresh allocation of the exact layout.
+        unsafe { p.write(Int128AggState::new(false)) };
+        p
+    } else {
+        a.value.as_usize() as *mut Int128AggState
+    };
+    if !b.isnull {
+        // SAFETY: a non-null arg0 is the aggcontext-lived state this transfn
+        // chain returned; no other reference is live during the call.
+        unsafe { crate::aggregates::do_int128_accum(&mut *state, b.value.as_i64() as i128) };
+    }
+    Ok(Datum::from_usize(state as usize))
+}
+
+macro_rules! fc_poly_final {
+    ($($fc:ident: $core:ident;)*) => {$(
+        pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            let a = fcinfo.args_n::<1>()[0];
+            // SAFETY: a non-null arg0 is the aggcontext-lived Int128AggState
+            // (transfn contract); read-only here.
+            let state = (!a.isnull)
+                .then(|| unsafe { &*(a.value.as_usize() as *const crate::aggregates::Int128AggState) });
+            match crate::aggregates::$core(state)? {
+                Some(img) => img_result(fcinfo, &img),
+                None => {
+                    fcinfo.isnull = true;
+                    Ok(Datum::null())
+                }
+            }
+        }
+    )*};
+}
+
+fc_poly_final! {
+    fc_numeric_poly_sum: numeric_poly_sum;
+    fc_numeric_poly_avg: numeric_poly_avg;
 }
 
 const fn b(foid: ::types_core::Oid, name: &'static str, nargs: i16, strict: bool, func: PGFunction) -> FmgrBuiltin {
@@ -300,6 +384,8 @@ pub const NUMERIC_BUILTINS: &[FmgrBuiltin] = &[
     b(1740, "int4_numeric", 1, true, fc_int4_numeric),
     b(1742, "float4_numeric", 1, true, fc_float4_numeric),
     b(1743, "float8_numeric", 1, true, fc_float8_numeric),
+    b(1744, "numeric_int4", 1, true, fc_numeric_int4),
+    b(1746, "numeric_float8", 1, true, fc_numeric_float8),
     b(1766, "numeric_smaller", 2, true, fc_numeric_smaller),
     b(1767, "numeric_larger", 2, true, fc_numeric_larger),
     b(1769, "numeric_cmp", 2, true, fc_numeric_cmp),
@@ -314,6 +400,9 @@ pub const NUMERIC_BUILTINS: &[FmgrBuiltin] = &[
     b(2170, "width_bucket", 4, true, fc_width_bucket_numeric),
     b(2460, "numeric_recv", 3, true, fc_numeric_recv),
     b(2461, "numeric_send", 1, true, fc_numeric_send),
+    b(2746, "int8_avg_accum", 2, false, fc_int8_avg_accum),
+    b(3388, "numeric_poly_sum", 1, false, fc_numeric_poly_sum),
+    b(3389, "numeric_poly_avg", 1, false, fc_numeric_poly_avg),
     b(5048, "gcd", 2, true, fc_numeric_gcd),
     b(5049, "lcm", 2, true, fc_numeric_lcm),
 ];

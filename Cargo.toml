@@ -138,9 +138,11 @@ members = [
     "crates/backend/executor/execindexing",
     "crates/backend/executor/nodemodifytable",
     "crates/backend/executor/nodefunctionscan",
+    "crates/backend/executor/nodevaluesscan",
     "crates/backend/executor/nodeseqscan",
     "crates/backend/executor/nodeindexscan",
     "crates/backend/executor/nodebitmapindexscan",
+    "crates/backend/executor/nodectescan",
     "crates/backend/executor/nodebitmapheapscan",
     "crates/backend/executor/nodeindexonlyscan",
     "crates/backend/executor/nodesort",
@@ -151,6 +153,7 @@ members = [
     "crates/backend/executor/nodemergejoin",
     "crates/backend/executor/nodenestloop",
     "crates/backend/executor/nodeagg",
+    "crates/backend/executor/nodewindowagg",
     "crates/backend/utils/sort/tuplesort",
     "crates/backend/utils/sort/tuplestore",
     "crates/backend/executor/tstore_receiver",
@@ -245,9 +248,11 @@ members = [
     "crates/backend/executor/spi",
     "crates/backend/executor/spi_seams",
     "crates/backend/utils/time/combocid_seams",
+    "crates/backend/utils/time/combocid",
     "crates/backend/utils/cache/typcache_seams",
     "crates/backend/utils/cache/typcache",
     "crates/backend/commands/indexcmds_seams",
+    "crates/backend/commands/indexcmds",
     "crates/backend/utils/adt/timestamp_seams",
     "crates/backend/utils/activity/backend_status_seams",
     "crates/backend/utils/activity/backend_status",
@@ -280,7 +285,12 @@ members = [
     "crates/backend/utils/cache/plancache_portal_seams",
     "crates/backend/utils/cache/plancache",
     "crates/backend/nodes/nodes_core",
+    "crates/backend/nodes/outfuncs",
     "crates/backend/nodes/readfuncs",
+    "crates/backend/catalog/pg_attrdef",
+    "crates/backend/catalog/pg_constraint",
+    "crates/backend/catalog/pg_depend",
+    "crates/backend/catalog/pg_type",
     "crates/backend/nodes/tidbitmap",
     "crates/backend/utils/mmgr/portalmem",
     "crates/backend/utils/resowner/resowner_portal_seams",
@@ -314,6 +324,7 @@ members = [
     "crates/backend/storage/smgr/smgr",
     "crates/backend/utils/adt/scalar_seams",
     "crates/backend/utils/adt/bool",
+    "crates/backend/utils/adt/char",
     "crates/backend/utils/adt/scalar",
     "crates/backend/utils/adt/cash",
     "crates/backend/utils/adt/mac",
@@ -323,6 +334,7 @@ members = [
     "crates/backend/utils/adt/formatting",
     "crates/backend/utils/adt/formatting_seams",
     "crates/backend/utils/adt/pseudotypes",
+    "crates/backend/utils/adt/windowfuncs",
     "crates/backend/catalog/aclchk_seams",
     "crates/backend/utils/misc/guc",
     "crates/_support/types/types_startup",
@@ -447,6 +459,12 @@ codegen-units = 1
 inherits = "release"
 lto = "fat"
 codegen-units = 1
+
+# dist codegen with symbols kept — for perf attribution only, never a reported number's binary.
+[profile.dist-prof]
+inherits = "dist"
+strip = false
+debug = 1
 
 [profile.profiling]
 inherits = "release"

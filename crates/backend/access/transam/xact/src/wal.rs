@@ -12,7 +12,7 @@ use types_storage::{RelFileLocator, SharedInvalidationMessage, SHARED_INVALIDATI
 
 // C default: replorigin_session_origin = InvalidRepOriginId (origin.c);
 // seam uninstalled until replication origins land.
-fn session_origin_or_default() -> types_core::RepOriginId {
+pub(crate) fn session_origin_or_default() -> types_core::RepOriginId {
     if origin_seams::replorigin_session_origin::is_installed() {
         origin_seams::replorigin_session_origin::call()
     } else {

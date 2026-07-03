@@ -83,6 +83,7 @@ fn quit_signal_reason_roundtrip() {
 #[test]
 fn child_slot_lifecycle() {
     setup();
+    let _guard = serial();
     let slot = 3;
     g::SetMyPMChildSlot(slot);
 
@@ -115,6 +116,7 @@ fn child_slot_lifecycle() {
 #[test]
 fn register_seam_delegates() {
     setup();
+    let _guard = serial();
     assert!(pmsignal_seams::register_postmaster_child_active::is_installed());
     let slot = 5;
     g::SetMyPMChildSlot(slot);
@@ -124,6 +126,29 @@ fn register_seam_delegates() {
         state().PMChildFlags[(slot - 1) as usize].load(Acquire),
         PM_CHILD_ACTIVE
     );
+}
+
+#[test]
+fn reset_after_crash_restores_boot_image() {
+    setup();
+    let _guard = serial();
+    g::SetIsUnderPostmaster(true);
+    g::SetPostmasterPid(4321);
+
+    SendPostmasterSignal(PMSignalReason::PMSIGNAL_RECOVERY_STARTED);
+    SetQuitSignalReason(QuitSignalReason::PMQUIT_FOR_CRASH);
+    let slot = 7;
+    MarkPostmasterChildSlotAssigned(slot).unwrap();
+
+    PMSignalShmemResetAfterCrash();
+
+    assert!(!CheckPostmasterSignal(PMSignalReason::PMSIGNAL_RECOVERY_STARTED));
+    assert_eq!(GetQuitSignalReason(), QuitSignalReason::PMQUIT_NOT_SENT);
+    for flag in state().PMChildFlags {
+        assert_eq!(flag.load(Acquire), PM_CHILD_UNUSED);
+    }
+    MarkPostmasterChildSlotAssigned(slot).unwrap();
+    assert!(MarkPostmasterChildSlotUnassigned(slot));
 }
 
 #[test]

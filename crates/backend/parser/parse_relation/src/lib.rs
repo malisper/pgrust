@@ -634,11 +634,24 @@ pub fn parserOpenTable<'mcx>(
     match table::table_openrv_extended(mcx, &rv, lockmode, true)? {
         Some(rel) => Ok(rel),
         None => {
-            if relation.schemaname.is_none() && !pstate.p_future_ctes.is_nil() {
-                panic!(
-                    "parserOpenTable (parse_relation.c): isFutureCTE hint needs the \
-                     CommonTableExpr vocabulary — unit backend-parser-medium1"
-                );
+            let relname = relation.relname.expect("grammar always sets relname");
+            if relation.schemaname.is_none() && isFutureCTE(pstate, relname) {
+                return Err(Box::new(
+                    elog::ereport(ERROR)
+                        .errcode(ERRCODE_UNDEFINED_TABLE)
+                        .errmsg(format!("relation \"{relname}\" does not exist"))
+                        .errdetail(format!(
+                            "There is a WITH item named \"{relname}\", but it cannot be \
+                             referenced from this part of the query."
+                        ))
+                        .errhint(
+                            "Use WITH RECURSIVE, or re-order the WITH items to remove \
+                             forward references.",
+                        )
+                        .errposition(errpos(pstate, relation.location))
+                        .into_error()
+                        .with_error_location(loc("parserOpenTable")),
+                ));
             }
             Err(undefined_table(pstate, relation))
         }
@@ -943,6 +956,318 @@ pub fn addRangeTableEntryForValues<'mcx>(
             p_dontexpand: false,
         });
     }
+    let nsitem = ParseNamespaceItem {
+        p_names: rte.eref.expect("rte has eref"),
+        p_rte: rte,
+        p_rtindex: rtindex,
+        p_perminfo: None,
+        p_nscolumns: nscolumns.leak(),
+        p_rel_visible: true,
+        p_cols_visible: true,
+        p_lateral_only: false,
+        p_lateral_ok: true,
+        p_returning_type: VarReturningType::VAR_RETURNING_DEFAULT,
+    };
+    Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
+}
+
+/// C addRangeTableEntryForSubquery; the caller passes one
+/// `(resname, exprType, exprTypmod, exprCollation)` tuple per non-junk
+/// tlist entry (the nodeFuncs slice lives in parse_expr).
+pub fn addRangeTableEntryForSubquery<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    subquery: &'mcx types_nodes::parsenodes::Query<'mcx>,
+    columns: &[(Option<&'mcx str>, Oid, i32, Oid)],
+    alias: Option<&'mcx Alias<'mcx>>,
+    lateral: bool,
+    inFromCl: bool,
+) -> PgResult<&'mcx mut ParseNamespaceItem<'mcx>> {
+    let (aliasname, mut eref_colnames) = match alias {
+        // C: eref = copyObject(alias) — eref grows default colnames below.
+        Some(a) => (a.aliasname, a.colnames.clone_in(mcx)?),
+        None => (Some("unnamed_subquery"), NodeList::nil()),
+    };
+    let numaliases = eref_colnames.len();
+
+    let mut nscolumns: PgVec<'mcx, ParseNamespaceColumn> =
+        mcx::vec_with_capacity_in(mcx, columns.len())?;
+    for (i, &(resname, coltype, coltypmod, colcoll)) in columns.iter().enumerate() {
+        if i >= numaliases {
+            let name = resname.expect("non-junk subquery tlist entry has resname");
+            eref_colnames.lappend(mcx, Node::mk_string(mcx, name)?)?;
+        }
+        nscolumns.push(ParseNamespaceColumn {
+            p_varno: 0,
+            p_varattno: i as AttrNumber + 1,
+            p_vartype: coltype,
+            p_vartypmod: coltypmod,
+            p_varcollid: colcoll,
+            p_varreturningtype: VarReturningType::VAR_RETURNING_DEFAULT,
+            p_varnosyn: 0,
+            p_varattnosyn: i as AttrNumber + 1,
+            p_dontexpand: false,
+        });
+    }
+    if columns.len() < numaliases {
+        return Err(too_many_aliases(aliasname.unwrap_or(""), columns.len(), numaliases));
+    }
+    let eref = Node::mk_mut(mcx, Alias { aliasname, colnames: eref_colnames })?.seal_ref();
+
+    let rte = RangeTblEntry {
+        rtekind: RTEKind::RTE_SUBQUERY,
+        subquery: Some(subquery),
+        alias,
+        eref: Some(eref),
+        lateral,
+        inFromCl,
+        ..Default::default()
+    };
+    let rte_node = Node::mk(mcx, rte)?;
+    pstate.p_rtable.lappend(mcx, rte_node)?;
+    let rtindex = pstate.p_rtable.len() as i32;
+    for c in nscolumns.iter_mut() {
+        c.p_varno = rtindex as Index;
+        c.p_varnosyn = rtindex as Index;
+    }
+
+    let rte = rte_node.as_range_tbl_entry().expect("just built");
+    let nsitem = ParseNamespaceItem {
+        p_names: rte.eref.expect("rte has eref"),
+        p_rte: rte,
+        p_rtindex: rtindex,
+        p_perminfo: None,
+        p_nscolumns: nscolumns.leak(),
+        p_rel_visible: alias.is_some(),
+        p_cols_visible: true,
+        p_lateral_only: false,
+        p_lateral_ok: true,
+        p_returning_type: VarReturningType::VAR_RETURNING_DEFAULT,
+    };
+    Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
+}
+
+pub fn scanNameSpaceForCTE<'mcx>(
+    pstate: &ParseState<'_, 'mcx>,
+    refname: &str,
+) -> Option<(Node<'mcx>, Index)> {
+    let mut ps: Option<&ParseState<'_, 'mcx>> = Some(pstate);
+    let mut levelsup: Index = 0;
+    while let Some(p) = ps {
+        for cte_node in &p.p_ctenamespace {
+            let cte = cte_node.as_common_table_expr().expect("ctenamespace cell");
+            if cte.ctename == Some(refname) {
+                return Some((cte_node, levelsup));
+            }
+        }
+        ps = p.parentParseState;
+        levelsup += 1;
+    }
+    None
+}
+
+fn isFutureCTE(pstate: &ParseState<'_, '_>, refname: &str) -> bool {
+    let mut ps: Option<&ParseState<'_, '_>> = Some(pstate);
+    while let Some(p) = ps {
+        for cte_node in &p.p_future_ctes {
+            let cte = cte_node.as_common_table_expr().expect("future_ctes cell");
+            if cte.ctename == Some(refname) {
+                return true;
+            }
+        }
+        ps = p.parentParseState;
+    }
+    false
+}
+
+pub fn GetCTEForRTE<'mcx>(
+    pstate: &ParseState<'_, 'mcx>,
+    rte: &RangeTblEntry<'mcx>,
+    rtelevelsup: i32,
+) -> Node<'mcx> {
+    debug_assert_eq!(rte.rtekind, RTEKind::RTE_CTE);
+    let ctename = rte.ctename.expect("CTE RTE has ctename");
+    let mut ps: Option<&ParseState<'_, 'mcx>> = Some(pstate);
+    for _ in 0..(rte.ctelevelsup as i32 + rtelevelsup) {
+        ps = ps.and_then(|p| p.parentParseState);
+    }
+    let p = ps.unwrap_or_else(|| panic!("bad levelsup for CTE \"{ctename}\""));
+    for cte_node in &p.p_ctenamespace {
+        let cte = cte_node.as_common_table_expr().expect("ctenamespace cell");
+        if cte.ctename == Some(ctename) {
+            return cte_node;
+        }
+    }
+    panic!("could not find CTE \"{ctename}\"")
+}
+
+pub fn addRangeTableEntryForCTE<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    cte_node: Node<'mcx>,
+    levelsup: Index,
+    rv: &types_nodes::RangeVar<'mcx>,
+    inFromCl: bool,
+) -> PgResult<&'mcx mut ParseNamespaceItem<'mcx>> {
+    let cte = cte_node.as_common_table_expr().expect("CTE reference");
+    debug_assert!(cte.search_clause.is_none() && cte.cycle_clause.is_none());
+
+    // Analysis completed iff ctequery is a Query; the recursive lane (the only
+    // producer of self-references) is loud upstream.
+    let self_reference = cte.ctequery.expect("CTE has query").as_query().is_none();
+    assert!(!self_reference, "addRangeTableEntryForCTE: self-reference; recursive CTE lane");
+    debug_assert_eq!(
+        cte.ctequery.unwrap().as_query().unwrap().commandType,
+        types_nodes::nodes_enums::CmdType::CMD_SELECT
+    );
+
+    let alias = rv.alias;
+    let refname = alias.and_then(|a| a.aliasname).or(cte.ctename).expect("cte name");
+    let (aliasname, mut eref_colnames) = match alias {
+        Some(a) => (a.aliasname, a.colnames.clone_in(mcx)?),
+        None => (Some(refname), NodeList::nil()),
+    };
+    let numaliases = eref_colnames.len();
+    let numcols = cte.ctecolnames.len();
+    for i in numaliases..numcols {
+        eref_colnames.lappend(mcx, cte.ctecolnames.nth(i))?;
+    }
+    if numcols < numaliases {
+        return Err(too_many_aliases(refname, numcols, numaliases));
+    }
+    let eref = Node::mk_mut(mcx, Alias { aliasname, colnames: eref_colnames })?.seal_ref();
+
+    let rte = RangeTblEntry {
+        rtekind: RTEKind::RTE_CTE,
+        ctename: cte.ctename,
+        ctelevelsup: levelsup,
+        self_reference: false,
+        coltypes: cte.ctecoltypes.clone_in(mcx)?,
+        coltypmods: cte.ctecoltypmods.clone_in(mcx)?,
+        colcollations: cte.ctecolcollations.clone_in(mcx)?,
+        alias,
+        eref: Some(eref),
+        lateral: false,
+        inFromCl,
+        ..Default::default()
+    };
+    // SAFETY: shared CommonTableExpr node mutated during analysis; no live
+    // derived refs (the `cte` borrow above is dead past the field reads).
+    unsafe { cte_node.with_mut::<types_nodes::parsenodes::CommonTableExpr, _>(|c| c.cterefcount += 1) };
+
+    let rte_node = Node::mk(mcx, rte)?;
+    pstate.p_rtable.lappend(mcx, rte_node)?;
+    let rtindex = pstate.p_rtable.len() as i32;
+
+    let rte = rte_node.as_range_tbl_entry().expect("just built");
+    let numcolumns = rte.coltypes.len();
+    let mut nscolumns: PgVec<'mcx, ParseNamespaceColumn> =
+        mcx::vec_with_capacity_in(mcx, numcolumns)?;
+    for varattno in 0..numcolumns {
+        nscolumns.push(ParseNamespaceColumn {
+            p_varno: rtindex as Index,
+            p_varattno: varattno as AttrNumber + 1,
+            p_vartype: rte.coltypes.nth(varattno),
+            p_vartypmod: rte.coltypmods.nth(varattno),
+            p_varcollid: rte.colcollations.nth(varattno),
+            p_varreturningtype: VarReturningType::VAR_RETURNING_DEFAULT,
+            p_varnosyn: rtindex as Index,
+            p_varattnosyn: varattno as AttrNumber + 1,
+            p_dontexpand: false,
+        });
+    }
+    let nsitem = ParseNamespaceItem {
+        p_names: rte.eref.expect("rte has eref"),
+        p_rte: rte,
+        p_rtindex: rtindex,
+        p_perminfo: None,
+        p_nscolumns: nscolumns.leak(),
+        p_rel_visible: true,
+        p_cols_visible: true,
+        p_lateral_only: false,
+        p_lateral_ok: true,
+        p_returning_type: VarReturningType::VAR_RETURNING_DEFAULT,
+    };
+    Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
+}
+
+// buildVarFromNSColumn (parse_relation.c): joinaliasvars entries; no column
+// SELECT privilege is requested here.
+pub fn buildVarFromNSColumn<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+    nscol: &ParseNamespaceColumn,
+) -> PgResult<Node<'mcx>> {
+    debug_assert!(nscol.p_varno > 0);
+    let mut var = Var {
+        varno: nscol.p_varno as i32,
+        varattno: nscol.p_varattno,
+        vartype: nscol.p_vartype,
+        vartypmod: nscol.p_vartypmod,
+        varcollid: nscol.p_varcollid,
+        varnullingrels: types_nodes::Bitmapset::empty(),
+        varlevelsup: 0,
+        varreturningtype: nscol.p_varreturningtype,
+        varnosyn: nscol.p_varnosyn,
+        varattnosyn: nscol.p_varattnosyn,
+        location: -1,
+    };
+    markNullableIfNeeded(mcx, pstate, &mut var)?;
+    Node::mk(mcx, var)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn addRangeTableEntryForJoin<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    colnames: &NodeList<'mcx>,
+    nscolumns: PgVec<'mcx, ParseNamespaceColumn>,
+    jointype: types_nodes::JoinType,
+    nummergedcols: i32,
+    aliasvars: NodeList<'mcx>,
+    leftcols: types_nodes::list::IntList<'mcx>,
+    rightcols: types_nodes::list::IntList<'mcx>,
+    join_using_alias: Option<&'mcx Alias<'mcx>>,
+    alias: Option<&'mcx Alias<'mcx>>,
+    inFromCl: bool,
+) -> PgResult<&'mcx mut ParseNamespaceItem<'mcx>> {
+    if aliasvars.len() > i16::MAX as usize {
+        return Err(too_many_join_columns());
+    }
+
+    let (aliasname, mut eref_colnames) = match alias {
+        Some(a) => (a.aliasname, a.colnames.clone_in(mcx)?),
+        None => (Some("unnamed_join"), NodeList::nil()),
+    };
+    let numaliases = eref_colnames.len();
+    for i in numaliases..colnames.len() {
+        eref_colnames.lappend(mcx, colnames.nth(i))?;
+    }
+    if numaliases > colnames.len() {
+        return Err(too_many_join_aliases(aliasname.unwrap_or(""), colnames.len(), numaliases));
+    }
+    let eref = Node::mk_mut(mcx, Alias { aliasname, colnames: eref_colnames })?.seal_ref();
+
+    // Joins are never checked for access rights: no addRTEPermissionInfo.
+    let rte = RangeTblEntry {
+        rtekind: RTEKind::RTE_JOIN,
+        jointype,
+        joinmergedcols: nummergedcols,
+        joinaliasvars: aliasvars,
+        joinleftcols: leftcols,
+        joinrightcols: rightcols,
+        join_using_alias,
+        alias,
+        eref: Some(eref),
+        lateral: false,
+        inFromCl,
+        ..Default::default()
+    };
+    let rte_node = Node::mk(mcx, rte)?;
+    pstate.p_rtable.lappend(mcx, rte_node)?;
+    let rtindex = pstate.p_rtable.len() as i32;
+
+    let rte = rte_node.as_range_tbl_entry().expect("just built");
     let nsitem = ParseNamespaceItem {
         p_names: rte.eref.expect("rte has eref"),
         p_rte: rte,
@@ -1689,6 +2014,33 @@ fn too_many_aliases(aliasname: &str, available: usize, specified: usize) -> Box<
             ))
             .into_error()
             .with_error_location(loc("buildRelationAliases")),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn too_many_join_columns() -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+            .errmsg(format!("joins can have at most {} columns", i16::MAX))
+            .into_error()
+            .with_error_location(loc("addRangeTableEntryForJoin")),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn too_many_join_aliases(aliasname: &str, available: usize, specified: usize) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_INVALID_COLUMN_REFERENCE)
+            .errmsg(format!(
+                "join expression \"{aliasname}\" has {available} columns available but \
+                 {specified} columns specified"
+            ))
+            .into_error()
+            .with_error_location(loc("addRangeTableEntryForJoin")),
     )
 }
 

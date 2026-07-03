@@ -111,7 +111,7 @@ pub fn binary_decode<'mcx>(mcx: Mcx<'mcx>, data: &[u8], name: &[u8]) -> PgResult
 }
 
 impl Codec {
-    fn encode_len(self, data: &[u8]) -> u64 {
+    pub fn encode_len(self, data: &[u8]) -> u64 {
         match self {
             Codec::Hex => (data.len() as u64) << 1,
             Codec::Base64 => b64_enc_len(data.len()),
@@ -119,7 +119,7 @@ impl Codec {
         }
     }
 
-    fn decode_len(self, data: &[u8]) -> PgResult<u64> {
+    pub fn decode_len(self, data: &[u8]) -> PgResult<u64> {
         match self {
             Codec::Hex => Ok((data.len() as u64) >> 1),
             Codec::Base64 => Ok(((data.len() as u64) * 3) >> 2),
@@ -127,7 +127,7 @@ impl Codec {
         }
     }
 
-    fn encode(self, data: &[u8], out: &mut PgVec<'_, u8>) {
+    pub fn encode(self, data: &[u8], out: &mut PgVec<'_, u8>) {
         match self {
             Codec::Hex => varlena::bytea::hex_encode_into(data, out),
             Codec::Base64 => b64_encode(data, out),
@@ -135,7 +135,7 @@ impl Codec {
         }
     }
 
-    fn decode(self, data: &[u8], out: &mut PgVec<'_, u8>) -> PgResult<()> {
+    pub fn decode(self, data: &[u8], out: &mut PgVec<'_, u8>) -> PgResult<()> {
         match self {
             Codec::Hex => varlena::bytea::hex_decode_into(data, None, out).map(|_| ()),
             Codec::Base64 => b64_decode(data, out),
@@ -164,35 +164,48 @@ fn b64_enc_len(srclen: usize) -> u64 {
 }
 
 fn b64_encode(src: &[u8], out: &mut PgVec<'_, u8>) {
+    let old = out.len();
+    assert!(out.capacity() - old >= b64_enc_len(src.len()) as usize);
     let mut pos: i32 = 2;
     let mut buf: u32 = 0;
     let mut linelen: usize = 0;
-    for &c in src {
-        buf |= (c as u32) << (pos << 3);
-        pos -= 1;
-        if pos < 0 {
-            out.push(B64[((buf >> 18) & 0x3f) as usize]);
-            out.push(B64[((buf >> 12) & 0x3f) as usize]);
-            out.push(B64[((buf >> 6) & 0x3f) as usize]);
-            out.push(B64[(buf & 0x3f) as usize]);
-            linelen += 4;
-            pos = 2;
-            buf = 0;
+    // SAFETY: output is bounded by b64_enc_len — 4 chars per started 3-byte
+    // group plus one LF per 57 input bytes — asserted against spare capacity;
+    // set_len covers exactly the bytes written through p.
+    unsafe {
+        let base = out.as_mut_ptr().add(old);
+        let mut p = base;
+        for &c in src {
+            buf |= (c as u32) << (pos << 3);
+            pos -= 1;
+            if pos < 0 {
+                p.write(B64[((buf >> 18) & 0x3f) as usize]);
+                p.add(1).write(B64[((buf >> 12) & 0x3f) as usize]);
+                p.add(2).write(B64[((buf >> 6) & 0x3f) as usize]);
+                p.add(3).write(B64[(buf & 0x3f) as usize]);
+                p = p.add(4);
+                linelen += 4;
+                pos = 2;
+                buf = 0;
+            }
+            if linelen >= 76 {
+                p.write(b'\n');
+                p = p.add(1);
+                linelen = 0;
+            }
         }
-        if linelen >= 76 {
-            out.push(b'\n');
-            linelen = 0;
+        if pos != 2 {
+            p.write(B64[((buf >> 18) & 0x3f) as usize]);
+            p.add(1).write(B64[((buf >> 12) & 0x3f) as usize]);
+            p.add(2).write(if pos == 0 {
+                B64[((buf >> 6) & 0x3f) as usize]
+            } else {
+                b'='
+            });
+            p.add(3).write(b'=');
+            p = p.add(4);
         }
-    }
-    if pos != 2 {
-        out.push(B64[((buf >> 18) & 0x3f) as usize]);
-        out.push(B64[((buf >> 12) & 0x3f) as usize]);
-        out.push(if pos == 0 {
-            B64[((buf >> 6) & 0x3f) as usize]
-        } else {
-            b'='
-        });
-        out.push(b'=');
+        out.set_len(old + p.offset_from(base) as usize);
     }
 }
 
@@ -229,6 +242,9 @@ fn b64_invalid_end() -> Box<PgError> {
 }
 
 fn b64_decode(src: &[u8], out: &mut PgVec<'_, u8>) -> PgResult<()> {
+    let old = out.len();
+    let spare = out.capacity() - old;
+    let mut written = 0usize;
     let mut buf: u32 = 0;
     let mut pos: i32 = 0;
     let mut end: i32 = 0;
@@ -264,12 +280,21 @@ fn b64_decode(src: &[u8], out: &mut PgVec<'_, u8>) -> PgResult<()> {
         buf = (buf << 6).wrapping_add(b as u32);
         pos += 1;
         if pos == 4 {
-            out.push(((buf >> 16) & 255) as u8);
-            if end == 0 || end > 1 {
-                out.push(((buf >> 8) & 255) as u8);
-            }
-            if end == 0 || end > 2 {
-                out.push((buf & 255) as u8);
+            assert!(written + 3 <= spare);
+            // SAFETY: this quad writes at most 3 bytes at old+written, within
+            // the asserted spare capacity past old.
+            unsafe {
+                let p = out.as_mut_ptr().add(old + written);
+                p.write(((buf >> 16) & 255) as u8);
+                written += 1;
+                if end == 0 || end > 1 {
+                    p.add(1).write(((buf >> 8) & 255) as u8);
+                    written += 1;
+                }
+                if end == 0 || end > 2 {
+                    p.add(2).write((buf & 255) as u8);
+                    written += 1;
+                }
             }
             buf = 0;
             pos = 0;
@@ -278,6 +303,8 @@ fn b64_decode(src: &[u8], out: &mut PgVec<'_, u8>) -> PgResult<()> {
     if pos != 0 {
         return Err(b64_invalid_end());
     }
+    // SAFETY: the first `written` bytes past old were initialized above.
+    unsafe { out.set_len(old + written) };
     Ok(())
 }
 
@@ -305,18 +332,30 @@ fn esc_enc_len(src: &[u8]) -> u64 {
 }
 
 fn esc_encode(src: &[u8], out: &mut PgVec<'_, u8>) {
-    for &c in src {
-        if c == 0 || (c & 0x80) != 0 {
-            out.push(b'\\');
-            out.push(b'0' + (c >> 6));
-            out.push(b'0' + ((c >> 3) & 7));
-            out.push(b'0' + (c & 7));
-        } else if c == b'\\' {
-            out.push(b'\\');
-            out.push(b'\\');
-        } else {
-            out.push(c);
+    let old = out.len();
+    assert!(out.capacity() - old >= esc_enc_len(src) as usize);
+    // SAFETY: each byte emits the same 1/2/4 bytes esc_enc_len counted for it,
+    // asserted against spare capacity; set_len covers exactly those bytes.
+    unsafe {
+        let base = out.as_mut_ptr().add(old);
+        let mut p = base;
+        for &c in src {
+            if c == 0 || (c & 0x80) != 0 {
+                p.write(b'\\');
+                p.add(1).write(b'0' + (c >> 6));
+                p.add(2).write(b'0' + ((c >> 3) & 7));
+                p.add(3).write(b'0' + (c & 7));
+                p = p.add(4);
+            } else if c == b'\\' {
+                p.write(b'\\');
+                p.add(1).write(b'\\');
+                p = p.add(2);
+            } else {
+                p.write(c);
+                p = p.add(1);
+            }
         }
+        out.set_len(old + p.offset_from(base) as usize);
     }
 }
 
@@ -345,25 +384,35 @@ fn esc_dec_len(src: &[u8]) -> PgResult<u64> {
 
 fn esc_decode(src: &[u8], out: &mut PgVec<'_, u8>) -> PgResult<()> {
     let n = src.len();
+    let old = out.len();
+    // Revalidates (same checks, same error) to bound the raw writes below.
+    assert!(out.capacity() - old >= esc_dec_len(src)? as usize);
+    let mut written = 0usize;
     let mut i = 0usize;
     while i < n {
+        let val;
         if src[i] != b'\\' {
-            out.push(src[i]);
+            val = src[i];
             i += 1;
         } else if i + 3 < n
             && (b'0'..=b'3').contains(&src[i + 1])
             && (b'0'..=b'7').contains(&src[i + 2])
             && (b'0'..=b'7').contains(&src[i + 3])
         {
-            let val = ((src[i + 1] - b'0') << 6) | ((src[i + 2] - b'0') << 3) | (src[i + 3] - b'0');
-            out.push(val);
+            val = ((src[i + 1] - b'0') << 6) | ((src[i + 2] - b'0') << 3) | (src[i + 3] - b'0');
             i += 4;
         } else if i + 1 < n && src[i + 1] == b'\\' {
-            out.push(b'\\');
+            val = b'\\';
             i += 2;
         } else {
             return Err(esc_invalid_bytea());
         }
+        // SAFETY: one output byte per unit esc_dec_len counted, within the
+        // asserted spare capacity past old.
+        unsafe { out.as_mut_ptr().add(old + written).write(val) };
+        written += 1;
     }
+    // SAFETY: the first `written` bytes past old were initialized above.
+    unsafe { out.set_len(old + written) };
     Ok(())
 }

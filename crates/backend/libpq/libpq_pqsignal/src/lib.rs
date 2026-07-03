@@ -115,9 +115,12 @@ pub fn unblock_sig_add(signal: c_int) {
 }
 
 fn install_mask(set: &sigset_t) {
-    // SAFETY: `set` is initialized; sigprocmask with a null oldset only reads it.
+    // Must be pthread_sigmask: Darwin sigprocmask from a secondary thread
+    // blocks process-directed delivery process-wide (a backend thread's
+    // block_signals() ate the postmaster's SIGINT).
+    // SAFETY: `set` is initialized; a null oldset is only read.
     unsafe {
-        libc::sigprocmask(libc::SIG_SETMASK, set, core::ptr::null_mut());
+        libc::pthread_sigmask(libc::SIG_SETMASK, set, core::ptr::null_mut());
     }
 }
 

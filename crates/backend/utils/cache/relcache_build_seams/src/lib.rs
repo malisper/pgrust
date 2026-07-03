@@ -10,6 +10,8 @@ use types_tuple::TupleDescData;
 // options: RelationParseRelOptions folds into the installer (parsed form only).
 pub struct ScannedPgClass {
     pub form: FormData_pg_class,
+    // Threaded beside the trimmed form (relchecks was dropped from it).
+    pub relchecks: i16,
     pub options: Option<RdOptions>,
 }
 
@@ -38,6 +40,7 @@ seam_core::seam!(
         mcx: Mcx<'static>,
         relid: Oid,
         form: &FormData_pg_class,
+        relchecks: i16,
     ) -> PgResult<Rc<TupleDescData<'static>>>
 );
 

@@ -43,8 +43,29 @@ pub fn grouping_planner<'mcx>(run: &mut PlannerRun<'mcx>, tuple_fraction: f64) -
             crate::prepagg::preprocess_aggrefs_node(run, having)?;
         }
     }
+    run.active_windows = mcx::PgVec::new_in(run.mcx);
+    let mut wflists = None;
     if parse.hasWindowFuncs {
-        panic!("find_window_functions (clauses.c): M2 window lane");
+        let tlist_node = types_nodes::Node::mk_list(
+            run.mcx,
+            run.processed_tlist().clone_in(run.mcx)?,
+        )?;
+        let wfl = clauses::classify::find_window_functions(
+            run.mcx,
+            tlist_node,
+            parse.windowClause.len() as u32,
+        )?;
+        if wfl.num_window_funcs > 0 {
+            // optimize_window_clauses (planner.c) unported: frame-option
+            // rewrites + run conditions are pure executor-speed levers.
+            let active = crate::window::select_active_windows(run, &wfl)?;
+            crate::window::name_active_windows(run.mcx, &active)?;
+            run.active_windows = active;
+            wflists = Some(wfl);
+        }
+        // C clears parse->hasWindowFuncs when every WindowFunc const-folded
+        // away; limit_tuples below reads the original flag (unreachable
+        // difference on this lane: nothing folds a WindowFunc).
     }
     debug_assert!(!parse.hasTargetSRFs);
     run.root.limit_tuples = if !parse.groupClause.is_nil()
@@ -75,9 +96,13 @@ pub fn grouping_planner<'mcx>(run: &mut PlannerRun<'mcx>, tuple_fraction: f64) -
     } else {
         (final_target, final_target_parallel_safe)
     };
-    // No window functions: grouping_target = sort_input_target.
-    let grouping_target = sort_input_target;
-    let grouping_target_parallel_safe = sort_input_target_parallel_safe;
+    let (grouping_target, grouping_target_parallel_safe) =
+        if !run.active_windows.is_empty() {
+            let t = crate::window::make_window_input_target(run, final_target)?;
+            (t, is_parallel_safe_exprs(run, t)?)
+        } else {
+            (sort_input_target, sort_input_target_parallel_safe)
+        };
     let have_grouping =
         parse.hasAggs || !parse.groupClause.is_nil() || run.root.hasHavingQual;
     let scanjoin_target = if have_grouping {
@@ -113,6 +138,19 @@ pub fn grouping_planner<'mcx>(run: &mut PlannerRun<'mcx>, tuple_fraction: f64) -
     } else {
         current_rel
     };
+
+    if let Some(wfl) = &wflists {
+        if !run.active_windows.is_empty() {
+            current_rel = crate::window::create_window_paths(
+                run,
+                current_rel,
+                grouping_target,
+                sort_input_target,
+                sort_input_target_parallel_safe,
+                wfl,
+            )?;
+        }
+    }
 
     if !parse.distinctClause.is_nil() {
         current_rel = create_distinct_paths(run, current_rel, sort_input_target)?;
@@ -167,10 +205,18 @@ pub fn grouping_planner<'mcx>(run: &mut PlannerRun<'mcx>, tuple_fraction: f64) -
             if parse.commandType == CmdType::CMD_MERGE {
                 panic!("create_modifytable_path (pathnode.c): MERGE; M4 MERGE lane");
             }
-            debug_assert!(parse.withCheckOptions.is_nil() && parse.returningList.is_nil());
+            debug_assert!(parse.withCheckOptions.is_nil());
             debug_assert!(parse.onConflict.is_none() && run.root.rowMarks.is_empty());
             let update_colnos = (parse.commandType == CmdType::CMD_UPDATE).then(|| {
                 crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.update_colnos)
+            });
+            let returning_list = (!parse.returningList.is_nil()).then(|| {
+                let mut ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
+                    mcx::PgVec::new_in(run.mcx);
+                for tle in &parse.returningList {
+                    ids.push(run.root.alloc_expr_node(tle));
+                }
+                ids
             });
             let mtpath = crate::pathnode::create_modifytable_path(
                 run,
@@ -180,6 +226,7 @@ pub fn grouping_planner<'mcx>(run: &mut PlannerRun<'mcx>, tuple_fraction: f64) -
                 parse.canSetTag,
                 parse.resultRelation as u32,
                 update_colnos,
+                returning_list,
             );
             path_id = run.root.alloc_path(mtpath);
         }
@@ -554,7 +601,7 @@ fn could_not_implement(what: &str) -> Box<types_error::PgError> {
 }
 
 // get_sortgrouplist_exprs (tlist.c) into estimate_num_groups' input shape.
-fn sortgrouplist_exprs<'mcx>(
+pub(crate) fn sortgrouplist_exprs<'mcx>(
     run: &mut PlannerRun<'mcx>,
     clauses: &[types_pathnodes::NodeId],
     tlist: &types_nodes::list::NodeList<'mcx>,
@@ -1040,11 +1087,21 @@ fn standard_qp_callback<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
         run.root.distinct_pathkeys = mcx::PgVec::new_in(run.mcx);
     }
 
+    if !run.active_windows.is_empty() {
+        let wc = run.active_windows[0];
+        let pk = crate::window::make_pathkeys_for_window(run, wc, tlist)?;
+        run.root.window_pathkeys = pk;
+    } else {
+        run.root.window_pathkeys = mcx::PgVec::new_in(run.mcx);
+    }
+
     run.root.sort_pathkeys =
         crate::pathkeys::make_pathkeys_for_sortclauses(run, &parse.sortClause, tlist)?;
 
     run.root.query_pathkeys = if !run.root.group_pathkeys.is_empty() {
         crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.group_pathkeys)
+    } else if !run.root.window_pathkeys.is_empty() {
+        crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.window_pathkeys)
     } else if run.root.distinct_pathkeys.len() > run.root.sort_pathkeys.len() {
         crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.distinct_pathkeys)
     } else {

@@ -162,6 +162,18 @@ fn reclaim_ctx(ctx: *mut MemoryContext) {
 pub fn init_seams() {
     plancache_portal_seams::init_plan_cache::set(InitPlanCache);
     plancache_portal_seams::release_cached_plan::set(ReleaseCachedPlan);
+    // C: plancache.c owns `int plan_cache_mode = PLAN_CACHE_MODE_AUTO`.
+    thread_local! {
+        static PLAN_CACHE_MODE: core::cell::Cell<i32> =
+            const { core::cell::Cell::new(guc_tables::consts::PLAN_CACHE_MODE_AUTO) };
+    }
+    // installed() guard: test fixtures shim this slot before init_seams.
+    if !guc_tables::vars::plan_cache_mode.installed() {
+        guc_tables::vars::plan_cache_mode.install(guc_tables::GucVarAccessors {
+            get: || PLAN_CACHE_MODE.with(core::cell::Cell::get),
+            set: |v| PLAN_CACHE_MODE.with(|c| c.set(v)),
+        });
+    }
 }
 
 pub fn InitPlanCache() -> PgResult<()> {
@@ -872,9 +884,14 @@ fn ScanQueryForLocks(query: &Query<'static>, acquire: bool) -> PgResult<()> {
             _ => {}
         }
     }
-    if !query.cteList.is_nil() || query.hasSubLinks {
+    for cte_node in &query.cteList {
+        let cte = cte_node.as_common_table_expr().expect("cteList cell");
+        let ctequery = cte.ctequery.and_then(|n| n.as_query()).expect("analyzed CTE query");
+        ScanQueryForLocks(ctequery, acquire)?;
+    }
+    if query.hasSubLinks {
         panic!(
-            "ScanQueryForLocks (plancache.c): CTE/sublink recursion needs the \
+            "ScanQueryForLocks (plancache.c): sublink recursion needs the \
              query_tree_walker lane"
         );
     }
@@ -887,9 +904,14 @@ fn extract_query_relation_deps(
     query: &Query<'static>,
     out: &mut PgVec<'static, Oid>,
 ) -> PgResult<()> {
-    if query.hasSubLinks || !query.cteList.is_nil() {
+    for cte_node in &query.cteList {
+        let cte = cte_node.as_common_table_expr().expect("cteList cell");
+        let ctequery = cte.ctequery.and_then(|n| n.as_query()).expect("analyzed CTE query");
+        extract_query_relation_deps(ctequery, out)?;
+    }
+    if query.hasSubLinks {
         panic!(
-            "extract_query_dependencies (setrefs.c): CTE/sublink walk needs the \
+            "extract_query_dependencies (setrefs.c): sublink walk needs the \
              query_tree_walker lane"
         );
     }

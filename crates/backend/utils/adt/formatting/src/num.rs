@@ -78,11 +78,11 @@ struct NumProc<'a> {
     inout_p: usize,
     last_relevant: Option<usize>,
 
-    l_negative_sign: Vec<u8>,
-    l_positive_sign: Vec<u8>,
-    decimal: Vec<u8>,
-    l_thousands_sep: Vec<u8>,
-    l_currency_symbol: Vec<u8>,
+    l_negative_sign: &'static [u8],
+    l_positive_sign: &'static [u8],
+    decimal: &'static [u8],
+    l_thousands_sep: &'static [u8],
+    l_currency_symbol: &'static [u8],
 }
 
 impl NumProc<'_> {
@@ -216,28 +216,28 @@ fn num_prepare_locale(np: &mut NumProc) {
         let l = ::pg_locale::pglc_localeconv();
 
         np.l_negative_sign = if !l.negative_sign.is_empty() {
-            l.negative_sign.as_bytes().to_vec()
+            l.negative_sign.as_bytes()
         } else {
-            b"-".to_vec()
+            b"-"
         };
         np.l_positive_sign = if !l.positive_sign.is_empty() {
-            l.positive_sign.as_bytes().to_vec()
+            l.positive_sign.as_bytes()
         } else {
-            b"+".to_vec()
+            b"+"
         };
-        np.decimal = b".".to_vec();
-        np.l_thousands_sep = b",".to_vec();
+        np.decimal = b".";
+        np.l_thousands_sep = b",";
         np.l_currency_symbol = if !l.currency_symbol.is_empty() {
-            l.currency_symbol.as_bytes().to_vec()
+            l.currency_symbol.as_bytes()
         } else {
-            b" ".to_vec()
+            b" "
         };
     } else {
-        np.l_negative_sign = b"-".to_vec();
-        np.l_positive_sign = b"+".to_vec();
-        np.decimal = b".".to_vec();
-        np.l_thousands_sep = b",".to_vec();
-        np.l_currency_symbol = b" ".to_vec();
+        np.l_negative_sign = b"-";
+        np.l_positive_sign = b"+";
+        np.decimal = b".";
+        np.l_thousands_sep = b",";
+        np.l_currency_symbol = b" ";
     }
 }
 
@@ -424,11 +424,11 @@ fn num_numpart_to_char(np: &mut NumProc, id: i32) -> PgResult<()> {
         if np.num.is_lsign() {
             if np.num.lsign == NUM_LSIGN_PRE {
                 let s = if np.sign == b'-' as i32 {
-                    np.l_negative_sign.clone()
+                    np.l_negative_sign
                 } else {
-                    np.l_positive_sign.clone()
+                    np.l_positive_sign
                 };
-                inout_write(np, &s);
+                inout_write(np, s);
                 np.sign_wrote = true;
             }
         } else if np.num.is_bracket() {
@@ -465,11 +465,11 @@ fn num_numpart_to_char(np: &mut NumProc, id: i32) -> PgResult<()> {
                     .map(|lr| np.number_at(lr) == b'.')
                     .unwrap_or(false);
                 if np.last_relevant.is_none() || !lr_is_dot {
-                    let dec = np.decimal.clone();
-                    inout_write(np, &dec);
+                    let dec = np.decimal;
+                    inout_write(np, dec);
                 } else if np.num.is_fillmode() && lr_is_dot {
-                    let dec = np.decimal.clone();
-                    inout_write(np, &dec);
+                    let dec = np.decimal;
+                    inout_write(np, dec);
                 }
             } else {
                 let skip = np.last_relevant.is_some()
@@ -513,11 +513,11 @@ fn num_numpart_to_char(np: &mut NumProc, id: i32) -> PgResult<()> {
                 inout_put(np, c);
             } else if np.num.is_lsign() && np.num.lsign == NUM_LSIGN_POST {
                 let s = if np.sign == b'-' as i32 {
-                    np.l_negative_sign.clone()
+                    np.l_negative_sign
                 } else {
-                    np.l_positive_sign.clone()
+                    np.l_positive_sign
                 };
-                inout_write(np, &s);
+                inout_write(np, s);
             }
         }
     }
@@ -542,6 +542,8 @@ fn num_eat_non_data_chars(np: &mut NumProc, mut n: i32, input_len: usize) -> PgR
 
 pub struct NumProcessed {
     pub out: Vec<u8>,
+    // The consumed numstr buffer, handed back so callers can pool it.
+    pub number: Vec<u8>,
 }
 
 pub fn num_processor(
@@ -572,11 +574,11 @@ pub fn num_processor(
         inout,
         inout_p: 0,
         last_relevant: None,
-        l_negative_sign: Vec::new(),
-        l_positive_sign: Vec::new(),
-        decimal: Vec::new(),
-        l_thousands_sep: Vec::new(),
-        l_currency_symbol: Vec::new(),
+        l_negative_sign: b"",
+        l_positive_sign: b"",
+        decimal: b"",
+        l_thousands_sep: b"",
+        l_currency_symbol: b"",
     };
 
     if np.num.zero_start != 0 {
@@ -589,9 +591,10 @@ pub fn num_processor(
                 .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
                 .into());
         }
-        return Ok(NumProcessed {
-            out: cstr(&np.number),
-        });
+        let n = cstrlen(&np.number);
+        let mut out = std::mem::take(&mut np.number);
+        out.truncate(n);
+        return Ok(NumProcessed { out, number: Vec::new() });
     }
 
     if is_to_char {
@@ -697,7 +700,7 @@ pub fn num_processor(
                     }
                 }
                 NUM_G => {
-                    let pattern = np.l_thousands_sep.clone();
+                    let pattern = np.l_thousands_sep;
                     let mut pattern_len = pattern.len();
                     if np.is_to_char {
                         if !np.num_in {
@@ -733,9 +736,9 @@ pub fn num_processor(
                     }
                 }
                 NUM_L => {
-                    let pattern = np.l_currency_symbol.clone();
+                    let pattern = np.l_currency_symbol;
                     if np.is_to_char {
-                        inout_overlay(&mut np, &pattern);
+                        inout_overlay(&mut np, pattern);
                         np.inout_p += pattern.len() - 1;
                     } else {
                         let cnt = pg_mbstrlen(&pattern);
@@ -751,13 +754,17 @@ pub fn num_processor(
                         } else {
                             cstr_from(&np.number, np.number_p)
                         };
+                        // Overlaid bytes are NUL-free, so C's strlen(inout_p) over the
+                        // zero-filled tail equals the overlay length.
+                        let written;
                         if np.num.is_fillmode() {
                             inout_overlay(&mut np, &number_p);
+                            written = number_p.len();
                         } else {
                             let padded = fmt_pad_str(15, &String::from_utf8_lossy(&number_p));
                             inout_overlay(&mut np, padded.as_bytes());
+                            written = padded.len();
                         }
-                        let written = cstrlen(&np.inout[np.inout_p..]);
                         np.inout_p += written - 1;
                     } else {
                         let roman_result = roman_to_int(&mut np, input_len);
@@ -891,9 +898,12 @@ pub fn num_processor(
     }
 
     if np.is_to_char {
-        Ok(NumProcessed {
-            out: cstr(&np.inout[..np.inout_p.min(np.inout.len())]),
-        })
+        let end = np.inout_p.min(np.inout.len());
+        let n = cstrlen(&np.inout[..end]);
+        let mut out = std::mem::take(&mut np.inout);
+        out.truncate(n);
+        let number = std::mem::take(&mut np.number);
+        Ok(NumProcessed { out, number })
     } else {
         if np.number_p >= 1 && np.number_at(np.number_p - 1) == b'.' {
             np.number[np.number_p - 1] = 0;
@@ -903,9 +913,10 @@ pub fn num_processor(
             np.number.push(0);
         }
         np.num.post = np.read_post;
-        Ok(NumProcessed {
-            out: cstr(&np.number),
-        })
+        let n = cstrlen(&np.number);
+        let mut out = std::mem::take(&mut np.number);
+        out.truncate(n);
+        Ok(NumProcessed { out, number: Vec::new() })
     }
 }
 

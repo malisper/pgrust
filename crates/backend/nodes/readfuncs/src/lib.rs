@@ -13,7 +13,8 @@ use types_nodes::list::{IntList, NodeList, OidList};
 use types_nodes::nodes_enums::{CmdType, LimitOption};
 use types_nodes::parsenodes::{Query, QuerySource, RTEKind, RTEPermissionInfo, RangeTblEntry};
 use types_nodes::primnodes::{
-    Alias, Const, FromExpr, OverridingKind, RangeTblRef, TargetEntry, Var, VarReturningType,
+    Alias, BoolExpr, BoolExprType, CoercionForm, Const, FromExpr, FuncExpr, OpExpr,
+    OverridingKind, RangeTblRef, RelabelType, TargetEntry, Var, VarReturningType,
 };
 use types_nodes::Node;
 
@@ -319,8 +320,13 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"TARGETENTRY" => self.read_target_entry(),
             b"VAR" => self.read_var(),
             b"CONST" => self.read_const(),
+            b"OPEXPR" => self.read_op_expr(),
+            b"FUNCEXPR" => self.read_func_expr(),
+            b"BOOLEXPR" => self.read_bool_expr(),
+            b"RELABELTYPE" => self.read_relabel_type(),
             other => panic!(
-                "parseNodeString (readfuncs.c): {} read arm unported (view SELECT-rule set only)",
+                "parseNodeString (readfuncs.c): {} read arm unported (view SELECT-rule + \
+                 DEFAULT/CHECK expr sets only)",
                 String::from_utf8_lossy(other)
             ),
         }
@@ -529,6 +535,67 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         )
     }
 
+    fn read_op_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut o = Node::build::<OpExpr>(mcx)?;
+        o.opno = self.read_u32("opno");
+        o.opfuncid = self.read_u32("opfuncid");
+        o.opresulttype = self.read_u32("opresulttype");
+        o.opretset = self.read_bool("opretset");
+        o.opcollid = self.read_u32("opcollid");
+        o.inputcollid = self.read_u32("inputcollid");
+        o.args = self.read_node_list("args")?;
+        o.location = self.read_location("location");
+        Ok(o.seal())
+    }
+
+    fn read_func_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut f = Node::build::<FuncExpr>(mcx)?;
+        f.funcid = self.read_u32("funcid");
+        f.funcresulttype = self.read_u32("funcresulttype");
+        f.funcretset = self.read_bool("funcretset");
+        f.funcvariadic = self.read_bool("funcvariadic");
+        f.funcformat = coercion_form(self.read_u32("funcformat"));
+        f.funccollid = self.read_u32("funccollid");
+        f.inputcollid = self.read_u32("inputcollid");
+        f.args = self.read_node_list("args")?;
+        f.location = self.read_location("location");
+        Ok(f.seal())
+    }
+
+    // _readBoolExpr (readfuncs.c, handwritten): boolop stored as a word.
+    fn read_bool_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut b = Node::build::<BoolExpr>(mcx)?;
+        self.label("boolop");
+        b.boolop = match self.token("boolop") {
+            b"and" => BoolExprType::AND_EXPR,
+            b"or" => BoolExprType::OR_EXPR,
+            b"not" => BoolExprType::NOT_EXPR,
+            other => panic!(
+                "_readBoolExpr (readfuncs.c): unrecognized boolop \"{}\"",
+                String::from_utf8_lossy(other)
+            ),
+        };
+        b.args = self.read_node_list("args")?;
+        b.location = self.read_location("location");
+        Ok(b.seal())
+    }
+
+    fn read_relabel_type(&mut self) -> PgResult<Node<'mcx>> {
+        let arg = self.read_node("arg")?.expect("RelabelType has an arg");
+        let r = RelabelType {
+            arg,
+            resulttype: self.read_u32("resulttype"),
+            resulttypmod: self.read_i32("resulttypmod"),
+            resultcollid: self.read_u32("resultcollid"),
+            relabelformat: coercion_form(self.read_u32("relabelformat")),
+            location: self.read_location("location"),
+        };
+        Node::mk(self.mcx, r)
+    }
+
     // readDatum (readfuncs.c): "<len> [ <byte> ... ]"; byval always carries
     // sizeof(Datum) byte tokens regardless of the leading length.
     fn read_datum(&mut self, typbyval: bool) -> PgResult<Datum> {
@@ -620,5 +687,15 @@ fn var_returning_type(v: u32) -> VarReturningType {
         1 => VarReturningType::VAR_RETURNING_OLD,
         2 => VarReturningType::VAR_RETURNING_NEW,
         other => panic!("readfuncs.c: bad VarReturningType {other}"),
+    }
+}
+
+fn coercion_form(v: u32) -> CoercionForm {
+    match v {
+        0 => CoercionForm::COERCE_EXPLICIT_CALL,
+        1 => CoercionForm::COERCE_EXPLICIT_CAST,
+        2 => CoercionForm::COERCE_IMPLICIT_CAST,
+        3 => CoercionForm::COERCE_SQL_SYNTAX,
+        other => panic!("readfuncs.c: bad CoercionForm {other}"),
     }
 }

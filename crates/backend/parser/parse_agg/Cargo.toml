@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 elog = { path = "../../utils/error/elog" }
+nodes_core = { path = "../../nodes/nodes_core" }
 mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
 parser_small1 = { path = "../parser_small1" }

@@ -115,3 +115,5 @@ postgres_seams = { path = "../../../tcop/postgres_seams" }
 typcache_seams = { path = "../../../utils/cache/typcache_seams" }
 waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 transam_seams = { path = "../transam_seams" }
+resowner = { path = "../../../utils/resowner/resowner" }
+types_resowner = { path = "../../../../_support/types/types_resowner" }

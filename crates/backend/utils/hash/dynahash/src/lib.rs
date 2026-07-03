@@ -540,6 +540,37 @@ pub fn hash_destroy(hashp: *mut HTAB) {
     }
 }
 
+/// Crash-cycle reset in place (notes/crash-restart-design.md): unlinks every
+/// live entry back onto the freelists and re-arms freelist counts/spinlocks,
+/// restoring the post-create boot image without reallocating. Only for fully
+/// preallocated shared tables — bucket geometry never changed since create.
+///
+/// # Safety
+/// Caller must have exclusive access to the table (crash choreography: every
+/// child is dead, only the postmaster thread runs).
+pub unsafe fn hash_reset_after_crash(hashp: *mut HTAB) {
+    let hctl = (*hashp).hctl;
+    assert!((*hashp).isshared && (*hashp).isfixed);
+    for bucket in 0..=(*hctl).max_bucket as i64 {
+        let segp = *(*hashp).dir.offset((bucket >> (*hashp).sshift) as isize);
+        let slot = segp.offset(MOD(bucket, (*hashp).ssize) as isize);
+        let mut el = *slot;
+        while !el.is_null() {
+            let next = (*el).link;
+            let idx = FREELIST_IDX(hctl, (*el).hashvalue);
+            (*el).link = (*hctl).freeList[idx].freeList;
+            (*hctl).freeList[idx].freeList = el;
+            el = next;
+        }
+        *slot = ptr::null_mut();
+    }
+    let nlists = if IS_PARTITIONED(hctl) { NUM_FREELISTS } else { 1 };
+    for i in 0..nlists {
+        (*hctl).freeList[i].nentries = 0;
+        SpinLockInit(&mut (*hctl).freeList[i].mutex);
+    }
+}
+
 pub fn get_hash_value(hashp: *mut HTAB, key_ptr: *const u8) -> u32 {
     unsafe { do_hash(hashp, key_ptr) }
 }

@@ -18,6 +18,7 @@ controldata_utils = { path = "../../../../common/controldata_utils" }
 fd = { path = "../../../storage/file/fd" }
 lwlock = { path = "../../../storage/lmgr/lwlock" }
 lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
+lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
 latch = { path = "../../../storage/ipc/latch" }
 procarray = { path = "../../../storage/ipc/procarray" }
 init_small = { path = "../../../utils/init/init_small" }

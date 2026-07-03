@@ -322,6 +322,35 @@ fn insert_flush_smoke() {
     let magic = u16::from_ne_bytes(file[page2..page2 + 2].try_into().unwrap());
     assert_eq!(magic, XLOG_PAGE_MAGIC);
 
+    // Crash-cycle reset over the maximally dirty XLogCtl: boot image restored.
+    XLOGShmemResetAfterCrash();
+    assert_eq!(ctl.Insert.CurrBytePos.load(Relaxed), 0);
+    assert_eq!(ctl.Insert.PrevBytePos.load(Relaxed), 0);
+    assert_eq!(ctl.Insert.RedoRecPtr.load(Relaxed), InvalidXLogRecPtr);
+    assert!(!ctl.Insert.fullPageWrites.load(Relaxed));
+    for l in &ctl.Insert.WALInsertLocks {
+        assert_eq!(l.lock.state.load(Relaxed), lwlock::LW_FLAG_RELEASE_OK);
+        assert_eq!(l.insertingAt.load(Relaxed), InvalidXLogRecPtr);
+        assert_eq!(l.lastImportantAt.load(Relaxed), InvalidXLogRecPtr);
+    }
+    assert_eq!(ctl.RedoRecPtr.load(Relaxed), InvalidXLogRecPtr);
+    assert_eq!(ctl.LogwrtRqstWrite.load(Relaxed), 0);
+    assert_eq!(ctl.LogwrtRqstFlush.load(Relaxed), 0);
+    assert_eq!(ctl.logInsertResult.load(Relaxed), InvalidXLogRecPtr);
+    assert_eq!(ctl.logWriteResult.load(Relaxed), InvalidXLogRecPtr);
+    assert_eq!(ctl.logFlushResult.load(Relaxed), InvalidXLogRecPtr);
+    assert_eq!(ctl.InitializedUpTo.load(Relaxed), InvalidXLogRecPtr);
+    assert_eq!(ctl.InsertTimeLineID.load(Relaxed), 0);
+    assert_eq!(ctl.SharedRecoveryState.load(Relaxed), RECOVERY_STATE_CRASH);
+    assert!(!ctl.InstallXLogFileSegmentActive.load(Relaxed));
+    for b in ctl.xlblocks.iter() {
+        assert_eq!(b.load(Relaxed), InvalidXLogRecPtr);
+    }
+    unsafe {
+        let page = ctl.page_ptr(first_idx);
+        assert!(std::slice::from_raw_parts(page, XLOG_BLCKSZ).iter().all(|&b| b == 0));
+    }
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

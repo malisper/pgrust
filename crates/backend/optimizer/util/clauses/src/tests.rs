@@ -327,3 +327,228 @@ fn nonstrict_and_srf_rows() {
     assert!(!contain_subplans(strict).unwrap());
     assert!(!contain_context_dependent_node(strict).unwrap());
 }
+
+fn bool_c(mcx: Mcx<'_>, v: Option<bool>) -> Node<'_> {
+    let (val, isnull) = match v {
+        Some(v) => (Datum::from_bool(v), false),
+        None => (Datum::null(), true),
+    };
+    Node::mk_const(mcx, 16, -1, 0, 1, val, isnull, true).unwrap()
+}
+
+fn bool_expr<'mcx>(
+    mcx: Mcx<'mcx>,
+    op: types_nodes::BoolExprType,
+    args: &[Node<'mcx>],
+) -> Node<'mcx> {
+    Node::mk(
+        mcx,
+        types_nodes::BoolExpr {
+            boolop: op,
+            args: NodeList::from_slice(mcx, args).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn eval_const_bool_and_or_not() {
+    use types_nodes::BoolExprType::*;
+    let ctx = cx();
+    let mcx = ctx.mcx();
+
+    // true AND false -> false (forceFalse).
+    let e = bool_expr(mcx, AND_EXPR, &[bool_c(mcx, Some(true)), bool_c(mcx, Some(false))]);
+    let c = eval_const_expressions(mcx, e).unwrap().as_const().unwrap().clone();
+    assert!(!c.constvalue.as_bool() && !c.constisnull && c.consttype == 16);
+
+    // true OR false -> true (forceTrue).
+    let e = bool_expr(mcx, OR_EXPR, &[bool_c(mcx, Some(true)), bool_c(mcx, Some(false))]);
+    let c = eval_const_expressions(mcx, e).unwrap().as_const().unwrap().clone();
+    assert!(c.constvalue.as_bool() && !c.constisnull);
+
+    // NOT true -> false via negate_clause.
+    let e = bool_expr(mcx, NOT_EXPR, &[bool_c(mcx, Some(true))]);
+    let c = eval_const_expressions(mcx, e).unwrap().as_const().unwrap().clone();
+    assert!(!c.constvalue.as_bool() && !c.constisnull);
+
+    // NULL AND true -> NULL bool (haveNull, all non-forcing consts dropped).
+    let e = bool_expr(mcx, AND_EXPR, &[bool_c(mcx, None), bool_c(mcx, Some(true))]);
+    let c = eval_const_expressions(mcx, e).unwrap().as_const().unwrap().clone();
+    assert!(c.constisnull && c.consttype == 16);
+
+    // Nested OR flattens: (x OR false) OR false -> x.
+    let var = Node::mk_var(mcx, 1, 1, 16, -1, 0, 0).unwrap();
+    let inner = bool_expr(mcx, OR_EXPR, &[var, bool_c(mcx, Some(false))]);
+    let e = bool_expr(mcx, OR_EXPR, &[inner, bool_c(mcx, Some(false))]);
+    let out = eval_const_expressions(mcx, e).unwrap();
+    assert!(out.as_var().is_some());
+
+    // x AND false -> false even with a non-const input.
+    let var = Node::mk_var(mcx, 1, 1, 16, -1, 0, 0).unwrap();
+    let e = bool_expr(mcx, AND_EXPR, &[var, bool_c(mcx, Some(false))]);
+    let c = eval_const_expressions(mcx, e).unwrap().as_const().unwrap().clone();
+    assert!(!c.constvalue.as_bool() && !c.constisnull);
+}
+
+fn case_when<'mcx>(mcx: Mcx<'mcx>, cond: Node<'mcx>, result: Node<'mcx>) -> Node<'mcx> {
+    Node::mk(
+        mcx,
+        types_nodes::primnodes::CaseWhen { expr: Some(cond), result: Some(result), location: -1 },
+    )
+    .unwrap()
+}
+
+fn case_expr<'mcx>(
+    mcx: Mcx<'mcx>,
+    arg: Option<Node<'mcx>>,
+    whens: &[Node<'mcx>],
+    defresult: Node<'mcx>,
+) -> Node<'mcx> {
+    Node::mk(
+        mcx,
+        types_nodes::primnodes::CaseExpr {
+            casetype: 23,
+            casecollid: 0,
+            arg,
+            args: NodeList::from_slice(mcx, whens).unwrap(),
+            defresult: Some(defresult),
+            location: -1,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn eval_const_case_expr() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+
+    // CASE WHEN true THEN 1 ELSE 2 END -> 1 (const TRUE prunes to result).
+    let e = case_expr(
+        mcx,
+        None,
+        &[case_when(mcx, bool_c(mcx, Some(true)), int4_const(mcx, Some(1)))],
+        int4_const(mcx, Some(2)),
+    );
+    let c = eval_const_expressions(mcx, e).unwrap().as_const().unwrap().clone();
+    assert_eq!(c.constvalue.as_i32(), 1);
+
+    // CASE WHEN false THEN 1 ELSE 2 END -> 2 (all-FALSE reduces to ELSE).
+    let e = case_expr(
+        mcx,
+        None,
+        &[case_when(mcx, bool_c(mcx, Some(false)), int4_const(mcx, Some(1)))],
+        int4_const(mcx, Some(2)),
+    );
+    let c = eval_const_expressions(mcx, e).unwrap().as_const().unwrap().clone();
+    assert_eq!(c.constvalue.as_i32(), 2);
+
+    // NULL condition drops the alternative, like FALSE.
+    let e = case_expr(
+        mcx,
+        None,
+        &[case_when(mcx, bool_c(mcx, None), int4_const(mcx, Some(1)))],
+        int4_const(mcx, Some(2)),
+    );
+    let c = eval_const_expressions(mcx, e).unwrap().as_const().unwrap().clone();
+    assert_eq!(c.constvalue.as_i32(), 2);
+
+    // Non-const condition: WHEN kept, FALSE sibling dropped, TRUE tail folds
+    // into the new default.
+    let var = Node::mk_var(mcx, 1, 1, 16, -1, 0, 0).unwrap();
+    let e = case_expr(
+        mcx,
+        None,
+        &[
+            case_when(mcx, bool_c(mcx, Some(false)), int4_const(mcx, Some(1))),
+            case_when(mcx, var, int4_const(mcx, Some(2))),
+            case_when(mcx, bool_c(mcx, Some(true)), int4_const(mcx, Some(3))),
+        ],
+        int4_const(mcx, Some(4)),
+    );
+    let out = eval_const_expressions(mcx, e).unwrap();
+    let ce = out.as_case_expr().expect("still a CaseExpr");
+    assert_eq!(ce.args.len(), 1);
+    let w = ce.args.nth(0).as_case_when().unwrap();
+    assert!(w.expr.unwrap().as_var().is_some());
+    assert_eq!(ce.defresult.unwrap().as_const().unwrap().constvalue.as_i32(), 3);
+}
+
+#[test]
+fn eval_const_coalesce() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+
+    fn coalesce<'mcx>(mcx: Mcx<'mcx>, args: &[Node<'mcx>]) -> Node<'mcx> {
+        Node::mk(
+            mcx,
+            types_nodes::primnodes::CoalesceExpr {
+                coalescetype: 23,
+                coalescecollid: 0,
+                args: NodeList::from_slice(mcx, args).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap()
+    }
+
+    // COALESCE(NULL, 42) -> 42.
+    let e = coalesce(mcx, &[int4_const(mcx, None), int4_const(mcx, Some(42))]);
+    let c = eval_const_expressions(mcx, e).unwrap().as_const().unwrap().clone();
+    assert_eq!(c.constvalue.as_i32(), 42);
+    assert!(!c.constisnull);
+
+    // All-null -> typed NULL Const.
+    let e = coalesce(mcx, &[int4_const(mcx, None), int4_const(mcx, None)]);
+    let c = eval_const_expressions(mcx, e).unwrap().as_const().unwrap().clone();
+    assert!(c.constisnull && c.consttype == 23);
+
+    // Var head: null dropped, first following non-null const kept, tail cut.
+    let var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+    let e = coalesce(
+        mcx,
+        &[var, int4_const(mcx, None), int4_const(mcx, Some(7)), int4_const(mcx, Some(8))],
+    );
+    let out = eval_const_expressions(mcx, e).unwrap();
+    let co = out.as_coalesce_expr().expect("still a CoalesceExpr");
+    assert_eq!(co.args.len(), 2);
+    assert!(co.args.nth(0).as_var().is_some());
+    assert_eq!(co.args.nth(1).as_const().unwrap().constvalue.as_i32(), 7);
+}
+
+fn minmax<'mcx>(mcx: Mcx<'mcx>, least: bool, args: &[Node<'mcx>]) -> Node<'mcx> {
+    use types_nodes::primnodes::{MinMaxExpr, MinMaxOp};
+    Node::mk(
+        mcx,
+        MinMaxExpr {
+            minmaxtype: 23,
+            minmaxcollid: 0,
+            inputcollid: 0,
+            op: if least { MinMaxOp::IS_LEAST } else { MinMaxOp::IS_GREATEST },
+            args: NodeList::from_slice(mcx, args).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn eval_const_minmax_nonconst_keeps_node() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+    let e = minmax(mcx, false, &[var, int4_const(mcx, Some(2))]);
+    let out = eval_const_expressions(mcx, e).unwrap();
+    assert!(out.as_min_max_expr().is_some());
+}
+
+#[test]
+#[should_panic(expected = "seam not installed")]
+fn eval_const_minmax_all_const_defers_to_evaluate_expr_seam() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let e = minmax(mcx, true, &[int4_const(mcx, Some(1)), int4_const(mcx, Some(2))]);
+    let _ = eval_const_expressions(mcx, e);
+}

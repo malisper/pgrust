@@ -184,12 +184,21 @@ pub fn PortalCleanup(portal: &Portal<'static>) -> PgResult<()> {
         execmain_seams::release_query_desc::call(query_desc);
         return Ok(());
     }
-    // C: CurrentResourceOwner switched to portal->resowner around the
-    // shutdown; resources are RAII-owned here.
-    execmain_seams::executor_finish::call(query_desc)?;
-    execmain_seams::executor_end::call(query_desc)?;
-    execmain_seams::free_query_desc::call(query_desc);
-    Ok(())
+    // ExecutorEnd unregisters es_snapshot from CurrentResourceOwner, so the
+    // portal's owner must be current for the shutdown (portalcmds.c:279).
+    let save_owner = resowner_seams::current_resource_owner::call();
+    let portal_owner = portal.borrow().resowner;
+    if !portal_owner.is_null() {
+        resowner_seams::set_current_resource_owner::call(portal_owner);
+    }
+    let result = (|| -> PgResult<()> {
+        execmain_seams::executor_finish::call(query_desc)?;
+        execmain_seams::executor_end::call(query_desc)?;
+        execmain_seams::free_query_desc::call(query_desc);
+        Ok(())
+    })();
+    resowner_seams::set_current_resource_owner::call(save_owner);
+    result
 }
 
 pub fn PersistHoldablePortal(_portal: &Portal<'static>) -> PgResult<()> {

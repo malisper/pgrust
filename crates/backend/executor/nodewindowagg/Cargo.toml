@@ -1,0 +1,28 @@
+[package]
+name = "nodewindowagg"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+adt_int8 = { path = "../../utils/adt/int8" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+execexpr = { path = "../execexpr" }
+exectuples = { path = "../exectuples" }
+executils = { path = "../executils" }
+tuplestore = { path = "../../utils/sort/tuplestore" }
+init_small = { path = "../../utils/init/init_small" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+
+[dev-dependencies]
+guc_tables = { path = "../../utils/misc/guc_tables" }

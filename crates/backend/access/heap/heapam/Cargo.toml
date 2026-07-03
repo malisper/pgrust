@@ -27,6 +27,7 @@ heapam_visibility_seams = { path = "../heapam_visibility_seams" }
 heaptoast_seams = { path = "../heaptoast_seams" }
 procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
 snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
 subtrans_seams = { path = "../../transam/subtrans_seams" }
 multixact_seams = { path = "../../transam/multixact_seams" }
 xact_seams = { path = "../../transam/xact_seams" }

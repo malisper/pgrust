@@ -213,6 +213,44 @@ pub struct SortGroupClause {
     pub hashable: bool,
 }
 
+pub struct WindowClause<'mcx> {
+    pub name: Option<&'mcx str>,
+    pub refname: Option<&'mcx str>,
+    pub partitionClause: NodeList<'mcx>,
+    pub orderClause: NodeList<'mcx>,
+    pub frameOptions: i32,
+    pub startOffset: Option<Node<'mcx>>,
+    pub endOffset: Option<Node<'mcx>>,
+    pub startInRangeFunc: Oid,
+    pub endInRangeFunc: Oid,
+    pub inRangeColl: Oid,
+    pub inRangeAsc: bool,
+    pub inRangeNullsFirst: bool,
+    pub winref: Index,
+    pub copiedOrder: bool,
+}
+
+impl Default for WindowClause<'_> {
+    fn default() -> Self {
+        WindowClause {
+            name: None,
+            refname: None,
+            partitionClause: NodeList::nil(),
+            orderClause: NodeList::nil(),
+            frameOptions: crate::rawnodes::FRAMEOPTION_DEFAULTS,
+            startOffset: None,
+            endOffset: None,
+            startInRangeFunc: 0,
+            endInRangeFunc: 0,
+            inRangeColl: 0,
+            inRangeAsc: true,
+            inRangeNullsFirst: false,
+            winref: 0,
+            copiedOrder: false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum TransactionStmtKind {
@@ -378,6 +416,64 @@ pub struct ClosePortalStmt<'mcx> {
     pub portalname: Option<&'mcx str>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum CTEMaterialize {
+    #[default]
+    CTEMaterializeDefault = 0,
+    CTEMaterializeAlways = 1,
+    CTEMaterializeNever = 2,
+}
+
+pub struct WithClause<'mcx> {
+    pub ctes: NodeList<'mcx>,
+    pub recursive: bool,
+    pub location: ParseLoc,
+}
+
+impl Default for WithClause<'_> {
+    fn default() -> Self {
+        WithClause { ctes: NodeList::nil(), recursive: false, location: -1 }
+    }
+}
+
+/// search_clause/cycle_clause stay None (SEARCH/CYCLE are loud in the grammar).
+pub struct CommonTableExpr<'mcx> {
+    pub ctename: Option<&'mcx str>,
+    pub aliascolnames: NodeList<'mcx>,
+    pub ctematerialized: CTEMaterialize,
+    pub ctequery: Option<Node<'mcx>>,
+    pub search_clause: Option<Node<'mcx>>,
+    pub cycle_clause: Option<Node<'mcx>>,
+    pub location: ParseLoc,
+    pub cterecursive: bool,
+    pub cterefcount: i32,
+    pub ctecolnames: NodeList<'mcx>,
+    pub ctecoltypes: OidList<'mcx>,
+    pub ctecoltypmods: IntList<'mcx>,
+    pub ctecolcollations: OidList<'mcx>,
+}
+
+impl Default for CommonTableExpr<'_> {
+    fn default() -> Self {
+        CommonTableExpr {
+            ctename: None,
+            aliascolnames: NodeList::nil(),
+            ctematerialized: CTEMaterialize::CTEMaterializeDefault,
+            ctequery: None,
+            search_clause: None,
+            cycle_clause: None,
+            location: -1,
+            cterecursive: false,
+            cterefcount: 0,
+            ctecolnames: NodeList::nil(),
+            ctecoltypes: OidList::nil(),
+            ctecoltypmods: IntList::nil(),
+            ctecolcollations: OidList::nil(),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct VacuumStmt<'mcx> {
     pub options: NodeList<'mcx>,
@@ -422,6 +518,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for RTEPermissionInfo<'mcx> {
 unsafe impl NodeVariant<'_> for SortGroupClause {
     const TAG: NodeTag = NodeTag::T_SortGroupClause;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for WindowClause<'mcx> {
+    const TAG: NodeTag = NodeTag::T_WindowClause;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for TransactionStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_TransactionStmt;
 }
@@ -458,6 +557,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for ClosePortalStmt<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for DeallocateStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_DeallocateStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for WithClause<'mcx> {
+    const TAG: NodeTag = NodeTag::T_WithClause;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CommonTableExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CommonTableExpr;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for VacuumStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_VacuumStmt;
 }
@@ -477,6 +582,16 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_with_clause(self) -> Option<&'mcx WithClause<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_common_table_expr(self) -> Option<&'mcx CommonTableExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_range_tbl_function(self) -> Option<&'mcx RangeTblFunction<'mcx>> {
         self.as_variant()
     }
@@ -488,6 +603,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_sort_group_clause(self) -> Option<&'mcx SortGroupClause> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_window_clause(self) -> Option<&'mcx WindowClause<'mcx>> {
         self.as_variant()
     }
 

@@ -691,8 +691,21 @@ pub fn create_material_path(run: &mut PlannerRun<'_>, rel: RelId, subpath: PathI
 fn cost_rescan(run: &PlannerRun<'_>, path: PathId) -> (f64, f64) {
     let p = run.root.path(path).base();
     let pathtype = p.pathtype;
-    if pathtype == tag16(NodeTag::T_Material) || pathtype == tag16(NodeTag::T_Sort) {
-        let mut run_cost = gucs::cpu_operator_cost() * p.rows;
+    if pathtype == tag16(NodeTag::T_Material)
+        || pathtype == tag16(NodeTag::T_Sort)
+        || pathtype == tag16(NodeTag::T_CteScan)
+        || pathtype == tag16(NodeTag::T_WorkTableScan)
+    {
+        // C charges Material/Sort rescans cpu_operator_cost per row and
+        // CteScan/WorkTableScan rescans cpu_tuple_cost per row.
+        let per_row = if pathtype == tag16(NodeTag::T_CteScan)
+            || pathtype == tag16(NodeTag::T_WorkTableScan)
+        {
+            gucs::cpu_tuple_cost()
+        } else {
+            gucs::cpu_operator_cost()
+        };
+        let mut run_cost = per_row * p.rows;
         let width = run.root.path_pathtarget(path).width;
         let nbytes = crate::costsize::relation_byte_size(p.rows, width);
         let work_mem_bytes = init_small::globals::work_mem() as f64 * 1024.0;
@@ -703,8 +716,6 @@ fn cost_rescan(run: &PlannerRun<'_>, path: PathId) -> (f64, f64) {
         (0.0, run_cost)
     } else if pathtype == tag16(NodeTag::T_FunctionScan)
         || pathtype == tag16(NodeTag::T_HashJoin)
-        || pathtype == tag16(NodeTag::T_CteScan)
-        || pathtype == tag16(NodeTag::T_WorkTableScan)
         || pathtype == tag16(NodeTag::T_Memoize)
     {
         panic!("cost_rescan (costsize.c): pathtype {pathtype}; M2 lane");

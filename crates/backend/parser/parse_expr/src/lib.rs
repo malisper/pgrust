@@ -75,6 +75,11 @@ pub fn transformExprRecurse<'mcx>(
                 ),
             }
         }
+        NodeTag::T_TypeCast => transformTypeCast(mcx, pstate, expr),
+        NodeTag::T_BoolExpr => transformBoolExpr(mcx, pstate, expr),
+        NodeTag::T_CaseExpr => transformCaseExpr(mcx, pstate, expr),
+        NodeTag::T_CoalesceExpr => transformCoalesceExpr(mcx, pstate, expr),
+        NodeTag::T_MinMaxExpr => transformMinMaxExpr(mcx, pstate, expr),
         NodeTag::T_ColumnRef => transformColumnRef(mcx, pstate, expr),
         NodeTag::T_FuncCall => transformFuncCall(mcx, pstate, expr),
         NodeTag::T_SubLink => transformSubLink(mcx, pstate, expr),
@@ -130,6 +135,338 @@ fn transformAExprOp<'mcx>(
     let ltypeId = lexpr.map_or(types_core::InvalidOid, expr_type);
     let rtypeId = rexpr.map_or(types_core::InvalidOid, expr_type);
     parse_oper::make_op(mcx, pstate, &a.name, lexpr, rexpr, ltypeId, rtypeId, last_srf, a.location)
+}
+
+fn transformTypeCast<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let tc = expr.as_type_cast().unwrap();
+    let tn = tc
+        .typeName
+        .expect("TypeCast.typeName")
+        .as_variant::<types_nodes::TypeName>()
+        .expect("TypeName");
+    let (target_type, target_typmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, tn)?;
+
+    let arg = tc.arg.expect("TypeCast.arg");
+    if arg.node_tag() == NodeTag::T_A_ArrayExpr {
+        panic!(
+            "transformTypeCast (parse_expr.c): A_ArrayExpr arm (transformArrayExpr with \
+             pushed-down element type) unported — unit backend-parser-expr"
+        );
+    }
+    let arg = transformExprRecurse(mcx, pstate, arg)?;
+
+    let input_type = expr_type(arg);
+    if input_type == types_core::InvalidOid {
+        return Ok(arg);
+    }
+
+    let mut location = tc.location;
+    if location < 0 {
+        location = tn.location;
+    }
+
+    match coerce::coerce_to_target_type(
+        mcx,
+        pstate,
+        arg,
+        input_type,
+        target_type,
+        target_typmod,
+        coerce::COERCION_EXPLICIT,
+        types_nodes::CoercionForm::COERCE_EXPLICIT_CAST,
+        location,
+    )? {
+        Some(result) => Ok(result),
+        None => Err(cannot_cast_error(pstate, input_type, target_type, location, arg)),
+    }
+}
+
+#[cold]
+fn cannot_cast_error(
+    pstate: &ParseState<'_, '_>,
+    input_type: types_core::Oid,
+    target_type: types_core::Oid,
+    location: types_core::ParseLoc,
+    arg: Node<'_>,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_CANNOT_COERCE, ERROR};
+    // C parser_coercion_errposition: coerce location, else the arg's.
+    let pos_loc = if location >= 0 { location } else { expr_location(arg) };
+    let src = format_type::format_type_be(input_type).unwrap_or_else(|_| input_type.to_string());
+    let dst = format_type::format_type_be(target_type).unwrap_or_else(|_| target_type.to_string());
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_CANNOT_COERCE)
+            .errmsg(format!("cannot cast type {src} to {dst}"))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                pos_loc,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformTypeCast")),
+    )
+}
+
+fn transformBoolExpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    use types_nodes::BoolExprType::*;
+    let b = expr.as_bool_expr().unwrap();
+    let opname = match b.boolop {
+        AND_EXPR => "AND",
+        OR_EXPR => "OR",
+        NOT_EXPR => "NOT",
+    };
+
+    let mut args = types_nodes::NodeList::nil();
+    for arg in &b.args {
+        let arg = transformExprRecurse(mcx, pstate, arg)?;
+        let arg = coerce::coerce_to_boolean(
+            mcx,
+            pstate,
+            arg,
+            expr_type(arg),
+            expr_location(arg),
+            opname,
+        )?;
+        args.lappend(mcx, arg)?;
+    }
+
+    Node::mk(
+        mcx,
+        types_nodes::BoolExpr { boolop: b.boolop, args, location: b.location },
+    )
+}
+
+// C mutates each CaseWhen/arg node in place after select_common_type; sealed
+// nodes force the two-phase shape (transform all, pick type, coerce, build) —
+// the output tree is identical.
+fn transformCaseExpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let c = expr.as_case_expr().unwrap();
+    let last_srf = pstate.p_last_srf;
+
+    if c.arg.is_some() {
+        panic!(
+            "transformCaseExpr (parse_expr.c): CASE arg WHEN form (CaseTestExpr placeholder \
+             needs assign_expr_collations across the parse_collate dep cycle) unported — \
+             unit backend-parser-expr"
+        );
+    }
+
+    let mut whens: mcx::PgVec<'mcx, (Node<'mcx>, Node<'mcx>, types_core::ParseLoc)> =
+        mcx::vec_with_capacity_in(mcx, c.args.len())?;
+    for w in &c.args {
+        let w = w.as_case_when().expect("CaseWhen");
+        let cond = transformExprRecurse(mcx, pstate, w.expr.expect("CaseWhen.expr"))?;
+        let cond = coerce::coerce_to_boolean(
+            mcx,
+            pstate,
+            cond,
+            expr_type(cond),
+            expr_location(cond),
+            "CASE/WHEN",
+        )?;
+        let result = transformExprRecurse(mcx, pstate, w.result.expect("CaseWhen.result"))?;
+        whens.push((cond, result, w.location));
+    }
+
+    let defresult = match c.defresult {
+        Some(d) => d,
+        None => Node::mk_a_const(mcx, None, -1)?,
+    };
+    let defresult = transformExprRecurse(mcx, pstate, defresult)?;
+
+    // C: resultexprs = lcons(defresult, ...) — the default result is the most
+    // significant type for preferred-type resolution.
+    let mut typelocs: mcx::PgVec<'mcx, (types_core::Oid, types_core::ParseLoc)> =
+        mcx::vec_with_capacity_in(mcx, whens.len() + 1)?;
+    typelocs.push((expr_type(defresult), expr_location(defresult)));
+    for &(_, result, _) in whens.iter() {
+        typelocs.push((expr_type(result), expr_location(result)));
+    }
+    let ptype = coerce::select_common_type(pstate, typelocs.as_slice(), Some("CASE"))?;
+    debug_assert!(types_core::OidIsValid(ptype));
+
+    let defresult = coerce::coerce_to_common_type(
+        mcx,
+        pstate,
+        defresult,
+        expr_type(defresult),
+        expr_location(defresult),
+        ptype,
+        "CASE/ELSE",
+    )?;
+    let mut args = types_nodes::NodeList::nil();
+    for &(cond, result, location) in whens.iter() {
+        let result = coerce::coerce_to_common_type(
+            mcx,
+            pstate,
+            result,
+            expr_type(result),
+            expr_location(result),
+            ptype,
+            "CASE/WHEN",
+        )?;
+        args.lappend(
+            mcx,
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::CaseWhen {
+                    expr: Some(cond),
+                    result: Some(result),
+                    location,
+                },
+            )?,
+        )?;
+    }
+
+    check_srf_in_construct(pstate, last_srf, "CASE")?;
+
+    Node::mk(
+        mcx,
+        types_nodes::primnodes::CaseExpr {
+            casetype: ptype,
+            casecollid: types_core::InvalidOid,
+            arg: None,
+            args,
+            defresult: Some(defresult),
+            location: c.location,
+        },
+    )
+}
+
+fn transformCoalesceExpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let c = expr.as_coalesce_expr().unwrap();
+    let last_srf = pstate.p_last_srf;
+
+    let mut newargs: mcx::PgVec<'mcx, Node<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, c.args.len())?;
+    let mut typelocs: mcx::PgVec<'mcx, (types_core::Oid, types_core::ParseLoc)> =
+        mcx::vec_with_capacity_in(mcx, c.args.len())?;
+    for e in &c.args {
+        let newe = transformExprRecurse(mcx, pstate, e)?;
+        typelocs.push((expr_type(newe), expr_location(newe)));
+        newargs.push(newe);
+    }
+
+    let coalescetype = coerce::select_common_type(pstate, typelocs.as_slice(), Some("COALESCE"))?;
+
+    let mut coerced = types_nodes::NodeList::nil();
+    for (&e, &(typ, loc)) in newargs.iter().zip(typelocs.iter()) {
+        coerced.lappend(
+            mcx,
+            coerce::coerce_to_common_type(mcx, pstate, e, typ, loc, coalescetype, "COALESCE")?,
+        )?;
+    }
+
+    check_srf_in_construct(pstate, last_srf, "COALESCE")?;
+
+    Node::mk(
+        mcx,
+        types_nodes::primnodes::CoalesceExpr {
+            coalescetype,
+            coalescecollid: types_core::InvalidOid,
+            args: coerced,
+            location: c.location,
+        },
+    )
+}
+
+fn transformMinMaxExpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    use types_nodes::primnodes::MinMaxOp;
+    let m = expr.as_min_max_expr().unwrap();
+    let funcname = if m.op == MinMaxOp::IS_GREATEST { "GREATEST" } else { "LEAST" };
+
+    let mut newargs: mcx::PgVec<'mcx, Node<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, m.args.len())?;
+    let mut typelocs: mcx::PgVec<'mcx, (types_core::Oid, types_core::ParseLoc)> =
+        mcx::vec_with_capacity_in(mcx, m.args.len())?;
+    for e in &m.args {
+        let newe = transformExprRecurse(mcx, pstate, e)?;
+        typelocs.push((expr_type(newe), expr_location(newe)));
+        newargs.push(newe);
+    }
+
+    let minmaxtype = coerce::select_common_type(pstate, typelocs.as_slice(), Some(funcname))?;
+
+    let mut coerced = types_nodes::NodeList::nil();
+    for (&e, &(typ, loc)) in newargs.iter().zip(typelocs.iter()) {
+        coerced.lappend(
+            mcx,
+            coerce::coerce_to_common_type(mcx, pstate, e, typ, loc, minmaxtype, funcname)?,
+        )?;
+    }
+
+    Node::mk(
+        mcx,
+        types_nodes::primnodes::MinMaxExpr {
+            minmaxtype,
+            minmaxcollid: types_core::InvalidOid,
+            inputcollid: types_core::InvalidOid,
+            op: m.op,
+            args: coerced,
+            location: m.location,
+        },
+    )
+}
+
+fn check_srf_in_construct(
+    pstate: &ParseState<'_, '_>,
+    last_srf: Option<Node<'_>>,
+    construct: &str,
+) -> PgResult<()> {
+    let same = match (pstate.p_last_srf, last_srf) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.ptr_eq(b),
+        _ => false,
+    };
+    if !same {
+        return Err(srf_not_allowed_in(pstate, construct));
+    }
+    Ok(())
+}
+
+#[cold]
+fn srf_not_allowed_in(
+    pstate: &ParseState<'_, '_>,
+    construct: &str,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+    let loc = pstate.p_last_srf.map_or(-1, expr_location);
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!("set-returning functions are not allowed in {construct}"))
+            .errhint(
+                "You might be able to move the set-returning function into a LATERAL FROM item.",
+            )
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                loc,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformCaseExpr")),
+    )
 }
 
 // C's PreParseColumnRefHook/PostParseColumnRefHook slots are absent: the

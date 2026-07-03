@@ -218,6 +218,17 @@ fn install_real() {
     sync::InitSync().unwrap();
     lmgr_proc::InitProcess(BackendType::Backend).unwrap();
     procarray::ProcArrayAdd(lmgr_proc::MyProc().unwrap()).unwrap();
+
+    // Buffer pins register with CurrentResourceOwner; recovery runs under the
+    // aux-process owner in C (CreateAuxProcessResourceOwner).
+    if resowner::CurrentResourceOwner().is_null() {
+        let owner = resowner::ResourceOwnerCreate(
+            types_resowner::ResourceOwner::NULL,
+            "crash-recovery-test",
+        )
+        .unwrap();
+        resowner::SetCurrentResourceOwner(owner);
+    }
 }
 
 fn int4_tupdesc<'mcx>(mcx: Mcx<'mcx>) -> Rc<TupleDescData<'mcx>> {

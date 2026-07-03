@@ -406,6 +406,46 @@ fn partitioned_shared_fixed_create_works() {
 }
 
 #[test]
+fn reset_after_crash_restores_boot_image() {
+    install_test_seams();
+    let mut info = ctl(4, 8);
+    info.num_partitions = 4;
+    let table = hash_create(
+        "part_shared_reset",
+        128,
+        &info,
+        HASH_ELEM | HASH_BLOBS | HASH_PARTITION | HASH_SHARED_MEM | HASH_FIXED_SIZE,
+    )
+    .unwrap();
+    unsafe {
+        for i in 0u32..128 {
+            let (p, _) = search(table, i.to_ne_bytes().as_ptr(), HASH_ENTER).unwrap();
+            assert!(!p.is_null());
+        }
+        assert_eq!(hash_get_num_entries(table), 128);
+        // Crash leaves a freelist spinlock held; reset must re-arm it.
+        SpinLockAcquire(&mut (*(*table).hctl).freeList[0].mutex);
+
+        hash_reset_after_crash(table);
+
+        assert_eq!(hash_get_num_entries(table), 0);
+        for i in 0u32..128 {
+            let (p, found) = search(table, i.to_ne_bytes().as_ptr(), HASH_FIND).unwrap();
+            assert!(!found);
+            assert!(p.is_null());
+        }
+        // The fixed table must again hold its full preallocated population.
+        for i in 1000u32..1128 {
+            let (p, found) = search(table, i.to_ne_bytes().as_ptr(), HASH_ENTER).unwrap();
+            assert!(!found);
+            assert!(!p.is_null());
+        }
+        assert_eq!(hash_get_num_entries(table), 128);
+    }
+    hash_destroy(table);
+}
+
+#[test]
 #[should_panic(expected = "HASH_SHARED_MEM requires HASH_FIXED_SIZE")]
 fn shared_without_fixed_size_panics() {
     install_test_seams();

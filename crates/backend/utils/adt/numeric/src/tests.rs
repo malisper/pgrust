@@ -705,6 +705,39 @@ mod fc_results {
     }
 
     #[test]
+    fn short_header_arg_expands_aligned() {
+        let ctx = MemoryContext::new_bump("t");
+        let img = crate::int64_to_numeric(42);
+        let payload = img.payload();
+        let total = 1 + payload.len();
+        // 2-aligned base puts the 1B-packed image's digits at an odd address.
+        let mut buf = [0u16; 16];
+        let p = buf.as_mut_ptr().cast::<u8>();
+        // SAFETY: total <= 32; buf is live for the whole test.
+        unsafe {
+            *p = ((total as u8) << 1) | 1;
+            core::ptr::copy_nonoverlapping(payload.as_ptr(), p.add(1), payload.len());
+        }
+        let d = Datum::from_usize(p as usize);
+
+        let mut flinfo = FmgrInfo::new(fc_numeric_out, 1702, 1, true, false);
+        let mut fci = LocalFcinfo::<1>::fresh(0);
+        // SAFETY: ctx outlives every call through the frame.
+        unsafe { fci.set_result_mcx(ctx.mcx()) };
+        fci.set_arg(0, d);
+        let out = flinfo.invoke(&mut fci).unwrap();
+        // SAFETY: numeric_out result is a live NUL-terminated cstring scratch.
+        let s = unsafe { core::ffi::CStr::from_ptr((out.as_usize() as *const u8).cast()) };
+        assert_eq!(s.to_bytes(), b"42");
+
+        let d2 = direct_function_call2_coll_in(fc_numeric_add, 0, ctx.mcx(), d, d).unwrap();
+        assert_eq!(
+            crate::cmp_numerics(result_num(d2), crate::int64_to_numeric(84).num()),
+            0
+        );
+    }
+
+    #[test]
     fn int_and_typmod_rows() {
         let ctx = MemoryContext::new_bump("t");
         let d = direct_function_call1_coll_in(fc_int8_numeric, 0, ctx.mcx(), Datum::from_i64(-9))

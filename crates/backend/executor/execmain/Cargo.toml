@@ -26,6 +26,8 @@ instrument = { path = "../instrument" }
 execexpr = { path = "../execexpr" }
 execscan = { path = "../execscan" }
 nodefunctionscan = { path = "../nodefunctionscan" }
+nodevaluesscan = { path = "../nodevaluesscan" }
+nodectescan = { path = "../nodectescan" }
 nodeseqscan = { path = "../nodeseqscan" }
 nodeindexscan = { path = "../nodeindexscan" }
 nodeindexonlyscan = { path = "../nodeindexonlyscan" }
@@ -39,6 +41,7 @@ nodelimit = { path = "../nodelimit" }
 nodehash = { path = "../nodehash" }
 nodehashjoin = { path = "../nodehashjoin" }
 nodemergejoin = { path = "../nodemergejoin" }
+nodewindowagg = { path = "../nodewindowagg" }
 nodenestloop = { path = "../nodenestloop" }
 exectuples = { path = "../exectuples" }
 tupdesc = { path = "../../access/common/tupdesc" }

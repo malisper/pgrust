@@ -2562,3 +2562,267 @@ fn exists_initplan_empty_subquery_gates_to_zero_rows() {
     assert_eq!(rows, Vec::<i32>::new());
     scanfix::quiesced();
 }
+
+// WindowAgg(part by g, ord by a) over Sort(g,a) over SeqScan: SELECT g, a,
+// row_number() OVER w, rank() OVER w, dense_rank() OVER w, sum(a) OVER w
+// FROM t WINDOW w AS (PARTITION BY g ORDER BY a).
+fn mk_windowagg_pstmt<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    relid: u32,
+    with_order_by: bool,
+) -> &'mcx PlannedStmt<'mcx> {
+    use ::types_nodes::bitmapset::Bitmapset;
+    use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+    use ::types_nodes::plannodes::{Plan, Scan, SeqScan, Sort, WindowAgg};
+    use ::types_nodes::primnodes::{WindowFunc, OUTER_VAR};
+
+    let mk_tlist = |varno: i32| {
+        let g = Node::mk_var(mcx, varno, 1, INT4OID, -1, 0, 0).unwrap();
+        let a = Node::mk_var(mcx, varno, 2, INT4OID, -1, 0, 0).unwrap();
+        NodeList::make2(
+            mcx,
+            Node::mk_target_entry(mcx, g, 1, Some("g"), false).unwrap(),
+            Node::mk_target_entry(mcx, a, 2, Some("a"), false).unwrap(),
+        )
+        .unwrap()
+    };
+
+    let scan = Node::mk(
+        mcx,
+        SeqScan {
+            scan: Scan {
+                plan: Plan { targetlist: mk_tlist(1), ..Default::default() },
+                scanrelid: 1,
+            },
+        },
+    )
+    .unwrap();
+
+    let mut sort = Node::build::<Sort>(mcx).unwrap();
+    sort.plan.targetlist = mk_tlist(OUTER_VAR);
+    sort.plan.lefttree = Some(scan);
+    sort.numCols = 2;
+    sort.sortColIdx = ::mcx::slice_borrow_in(mcx, &[1i16, 2]).unwrap();
+    sort.sortOperators = ::mcx::slice_borrow_in(mcx, &[INT4_LT, INT4_LT]).unwrap();
+    sort.collations = ::mcx::slice_borrow_in(mcx, &[0u32, 0]).unwrap();
+    sort.nullsFirst = ::mcx::slice_borrow_in(mcx, &[false, false]).unwrap();
+
+    let mk_wfunc = |fnoid: u32, winagg: bool| {
+        let mut w = Node::build::<WindowFunc>(mcx).unwrap();
+        w.winfnoid = fnoid;
+        w.wintype = INT8OID;
+        w.winref = 1;
+        w.winagg = winagg;
+        if winagg {
+            w.args = NodeList::make1(
+                mcx,
+                Node::mk_var(mcx, OUTER_VAR, 2, INT4OID, -1, 0, 0).unwrap(),
+            )
+            .unwrap();
+        }
+        w.seal()
+    };
+
+    let mut tlist = mk_tlist(OUTER_VAR);
+    tlist
+        .lappend(mcx, Node::mk_target_entry(mcx, mk_wfunc(3100, false), 3, Some("rn"), false).unwrap())
+        .unwrap();
+    tlist
+        .lappend(mcx, Node::mk_target_entry(mcx, mk_wfunc(3101, false), 4, Some("rank"), false).unwrap())
+        .unwrap();
+    tlist
+        .lappend(
+            mcx,
+            Node::mk_target_entry(mcx, mk_wfunc(3102, false), 5, Some("dense"), false).unwrap(),
+        )
+        .unwrap();
+    tlist
+        .lappend(mcx, Node::mk_target_entry(mcx, mk_wfunc(2108, true), 6, Some("sum"), false).unwrap())
+        .unwrap();
+
+    let mut wa = Node::build::<WindowAgg>(mcx).unwrap();
+    wa.plan.targetlist = tlist;
+    wa.plan.lefttree = Some(sort.seal());
+    wa.winref = 1;
+    wa.partNumCols = 1;
+    wa.partColIdx = ::mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+    wa.partOperators = ::mcx::slice_borrow_in(mcx, &[INT4_EQ]).unwrap();
+    wa.partCollations = ::mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+    if with_order_by {
+        wa.ordNumCols = 1;
+        wa.ordColIdx = ::mcx::slice_borrow_in(mcx, &[2i16]).unwrap();
+        wa.ordOperators = ::mcx::slice_borrow_in(mcx, &[INT4_EQ]).unwrap();
+        wa.ordCollations = ::mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+    }
+    wa.topWindow = true;
+
+    let rte = Node::mk(
+        mcx,
+        RangeTblEntry {
+            rtekind: RTEKind::RTE_RELATION,
+            relid,
+            relkind: ::types_rel::RELKIND_RELATION,
+            rellockmode: ::types_rel::AccessShareLock,
+            perminfoindex: 1,
+            inFromCl: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let perminfo = Node::mk(
+        mcx,
+        RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+    )
+    .unwrap();
+    let mut unpruned = Bitmapset::empty();
+    unpruned.add_member(mcx, 1).unwrap();
+
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(wa.seal());
+    pstmt.rtable = NodeList::make1(mcx, rte).unwrap();
+    pstmt.permInfos = NodeList::make1(mcx, perminfo).unwrap();
+    pstmt.unprunableRelids = unpruned;
+    pstmt.seal_ref()
+}
+
+type WinRow = (i32, i32, i64, i64, i64, i64);
+
+fn drain_window_rows<'mcx>(
+    ps: &mut crate::procnode::PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> Vec<WinRow> {
+    let mut got = Vec::new();
+    loop {
+        let Some(slot_id) = exec_proc_node(ps, estate).unwrap() else {
+            break;
+        };
+        let base = estate.slot_mut(slot_id).base();
+        assert!(base.tts_isnull.iter().all(|n| !n));
+        got.push((
+            base.tts_values[0].as_i32(),
+            base.tts_values[1].as_i32(),
+            base.tts_values[2].as_i64(),
+            base.tts_values[3].as_i64(),
+            base.tts_values[4].as_i64(),
+            base.tts_values[5].as_i64(),
+        ));
+    }
+    got
+}
+
+#[test]
+fn window_agg_rank_family_and_sum_end_to_end() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let relid: u32 = 70021;
+    // (g, a) unsorted on purpose: the Sort below the WindowAgg orders them.
+    scanfix::register_table_2col(
+        relid,
+        &[&[(2, 5), (1, 10), (3, 7), (1, 20)], &[(2, 5), (1, 10), (2, 5)]],
+    );
+    let pstmt = mk_windowagg_pstmt(mcx, relid, true);
+    let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+    let snapshot: snapmgr::Snapshot = std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+        snap_ctx.mcx(),
+        ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+    ));
+    with_exec_data(pstmt, |data, pstmt| {
+        data.estate.es_snapshot = Some(snapshot);
+        let desc = crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+        assert_eq!(desc.natts, 6);
+        assert_eq!(desc.attr(2).atttypid, INT8OID);
+
+        let ExecData { estate, planstate } = data;
+        let ps = planstate.as_mut().unwrap();
+        let got = drain_window_rows(ps, estate);
+        // Peer groups share rank/sum; rank jumps by peer count, dense by 1.
+        let want: Vec<WinRow> = vec![
+            (1, 10, 1, 1, 1, 20),
+            (1, 10, 2, 1, 1, 20),
+            (1, 20, 3, 3, 2, 40),
+            (2, 5, 1, 1, 1, 15),
+            (2, 5, 2, 1, 1, 15),
+            (2, 5, 3, 1, 1, 15),
+            (3, 7, 1, 1, 1, 7),
+        ];
+        assert_eq!(got, want);
+
+        // Rescan replays identically (ExecReScanWindowAgg).
+        crate::execami::exec_re_scan(ps, estate).unwrap();
+        let again = drain_window_rows(ps, estate);
+        assert_eq!(again, want);
+
+        crate::exec_end_node(ps, estate).unwrap();
+        estate.exec_reset_tuple_table(false);
+        estate.exec_close_range_table_relations().unwrap();
+    });
+    scanfix::quiesced();
+}
+
+#[test]
+fn window_agg_no_order_by_whole_partition_frame() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let relid: u32 = 70022;
+    scanfix::register_table_2col(relid, &[&[(1, 10), (2, 5), (1, 20), (2, 6)]]);
+    let pstmt = mk_windowagg_pstmt(mcx, relid, false);
+    let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+    let snapshot: snapmgr::Snapshot = std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+        snap_ctx.mcx(),
+        ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+    ));
+    with_exec_data(pstmt, |data, pstmt| {
+        data.estate.es_snapshot = Some(snapshot);
+        crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+        let ExecData { estate, planstate } = data;
+        let ps = planstate.as_mut().unwrap();
+        let got = drain_window_rows(ps, estate);
+        // No ORDER BY: every partition row is a peer, so rank/dense stay 1
+        // and the frame is the whole partition (sum = partition total).
+        let want: Vec<WinRow> = vec![
+            (1, 10, 1, 1, 1, 30),
+            (1, 20, 2, 1, 1, 30),
+            (2, 5, 1, 1, 1, 11),
+            (2, 6, 2, 1, 1, 11),
+        ];
+        assert_eq!(got, want);
+        crate::exec_end_node(ps, estate).unwrap();
+        estate.exec_reset_tuple_table(false);
+        estate.exec_close_range_table_relations().unwrap();
+    });
+    scanfix::quiesced();
+}
+
+#[test]
+fn window_agg_empty_input_end_to_end() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let relid: u32 = 70023;
+    scanfix::register_table_2col(relid, &[]);
+    let pstmt = mk_windowagg_pstmt(mcx, relid, true);
+    let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+    let snapshot: snapmgr::Snapshot = std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+        snap_ctx.mcx(),
+        ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+    ));
+    with_exec_data(pstmt, |data, pstmt| {
+        data.estate.es_snapshot = Some(snapshot);
+        crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+        let ExecData { estate, planstate } = data;
+        let ps = planstate.as_mut().unwrap();
+        assert!(exec_proc_node(ps, estate).unwrap().is_none());
+        assert!(exec_proc_node(ps, estate).unwrap().is_none());
+        crate::exec_end_node(ps, estate).unwrap();
+        estate.exec_reset_tuple_table(false);
+        estate.exec_close_range_table_relations().unwrap();
+    });
+    scanfix::quiesced();
+}

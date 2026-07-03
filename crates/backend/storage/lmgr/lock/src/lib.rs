@@ -24,7 +24,8 @@ pub use locallock::{
     LockHeldByMe, MarkLockClear, ResetAwaitedLock,
 };
 pub use shared::{
-    GrantLock, LockCheckConflicts, LockManagerShmemInit, LockManagerShmemSize, LockTagHashCode,
+    GetRunningTransactionLocks, GrantLock, LockCheckConflicts, LockManagerShmemInit,
+    LockManagerShmemResetAfterCrash, LockManagerShmemSize, LockTagHashCode,
 };
 pub use waitqueue::{
     CheckDeadLock, GetLockHoldersAndWaiters, ProcLockWakeup, ProcSleep, ProcWakeup,
@@ -213,6 +214,8 @@ pub fn init_seams() {
     s::grant_awaited_lock::set(GrantAwaitedLock);
     s::reset_awaited_lock::set(ResetAwaitedLock);
     s::remove_from_wait_queue::set(RemoveFromWaitQueue);
+    s::lock_reassign_current_owner::set(LockReassignCurrentOwner);
+    s::lock_release_current_owner::set(LockReleaseCurrentOwner);
 
     use guc_tables::{vars, GucVarAccessors};
     vars::max_locks_per_xact.install(GucVarAccessors {

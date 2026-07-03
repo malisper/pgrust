@@ -138,8 +138,8 @@ pub fn build_simple_rel<'mcx>(
     relid: u32,
     rtekind: RTEKind,
 ) -> types_error::PgResult<RelId> {
-    let function_max_attr = match rtekind {
-        RTEKind::RTE_FUNCTION => {
+    let eref_max_attr = match rtekind {
+        RTEKind::RTE_FUNCTION | RTEKind::RTE_VALUES | RTEKind::RTE_CTE => {
             run.rte(relid as usize).eref.expect("RTE has eref").colnames.len() as i16
         }
         _ => 0,
@@ -171,9 +171,9 @@ pub fn build_simple_rel<'mcx>(
             rel.min_attr = 0;
             rel.max_attr = -1;
         }
-        RTEKind::RTE_FUNCTION => {
+        RTEKind::RTE_FUNCTION | RTEKind::RTE_VALUES | RTEKind::RTE_CTE => {
             rel.min_attr = 0;
-            rel.max_attr = function_max_attr;
+            rel.max_attr = eref_max_attr;
             let span = (rel.max_attr - rel.min_attr + 1) as usize;
             rel.attr_widths = mcx::vec_from_elem_in(mcx, 0i32, span);
             rel.attr_needed = mcx::PgVec::new_in(mcx);

@@ -132,6 +132,42 @@ pub fn CreateOrAttachShmemStructs(cfg: &ProcGlobalConfig) -> PgResult<()> {
     Ok(())
 }
 
+/// Crash-cycle CreateSharedMemoryAndSemaphores: in-place resets to the
+/// post-ShmemInit boot image, CreateOrAttachShmemStructs order. Caller:
+/// postmaster thread, children dead, after `ipc::shmem_exit(1)`
+/// (notes/crash-restart-design.md).
+pub fn ResetShmemAfterCrash() -> PgResult<()> {
+    lwlock::LWLockResetAfterCrash();
+
+    if dsm_core::dsm::dsm_estimate_size() != 0 {
+        panic!(
+            "crash-restart reinit blocked: dsm main region has no reset surface \
+             (min_dynamic_shared_memory > 0; storage-ipc-dsm)"
+        );
+    }
+
+    varsup::VarsupShmemReset();
+    transam_xlog::XLOGShmemResetAfterCrash();
+    clog::CLOGShmemResetAfterCrash();
+    subtrans::SUBTRANSShmemResetAfterCrash();
+    multixact::MultiXactShmemResetAfterCrash();
+    bufmgr::BufferManagerShmemResetAfterCrash();
+
+    lock::LockManagerShmemResetAfterCrash();
+
+    lmgr_proc::ProcGlobalResetAfterCrash();
+    procarray::ProcArrayShmemResetAfterCrash();
+    backend_status_seams::backend_status_shmem_reset_after_crash::call();
+
+    sinval::SharedInvalShmemResetAfterCrash();
+
+    pmsignal::PMSignalShmemResetAfterCrash();
+    procsignal::ProcSignalShmemResetAfterCrash();
+    checkpointer::CheckpointerShmemResetAfterCrash();
+
+    dsm_core::dsm::dsm_postmaster_startup_after_crash()
+}
+
 pub fn InitializeShmemGUCs(fastpath_lock_groups_per_backend: i32) -> PgResult<()> {
     let cfg = proc_global_config(fastpath_lock_groups_per_backend);
     let (size_b, num_semas) = CalculateShmemSize(&cfg)?;

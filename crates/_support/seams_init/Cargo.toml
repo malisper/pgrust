@@ -39,6 +39,7 @@ catalog_storage = { path = "../../backend/catalog/catalog_storage" }
 catalog = { path = "../../backend/catalog/catalog" }
 pg_database = { path = "../../backend/catalog/pg_database" }
 pg_db_role_setting = { path = "../../backend/catalog/pg_db_role_setting" }
+indexcmds = { path = "../../backend/commands/indexcmds" }
 dbcommands = { path = "../../backend/commands/dbcommands" }
 executils = { path = "../../backend/executor/executils" }
 execexpr = { path = "../../backend/executor/execexpr" }
@@ -49,6 +50,7 @@ nodeseqscan = { path = "../../backend/executor/nodeseqscan" }
 nodeindexscan = { path = "../../backend/executor/nodeindexscan" }
 nodeindexonlyscan = { path = "../../backend/executor/nodeindexonlyscan" }
 nodeagg = { path = "../../backend/executor/nodeagg" }
+nodewindowagg = { path = "../../backend/executor/nodewindowagg" }
 nodesort = { path = "../../backend/executor/nodesort" }
 nodeunique = { path = "../../backend/executor/nodeunique" }
 nodelimit = { path = "../../backend/executor/nodelimit" }
@@ -151,6 +153,7 @@ superuser = { path = "../../backend/utils/misc/superuser" }
 timeout = { path = "../../backend/utils/misc/timeout" }
 tuplestore = { path = "../../backend/utils/sort/tuplestore" }
 resowner = { path = "../../backend/utils/resowner/resowner" }
+combocid = { path = "../../backend/utils/time/combocid" }
 snapmgr = { path = "../../backend/utils/time/snapmgr" }
 pg_prng = { path = "../../common/pg_prng" }
 regex_core = { path = "../../backend/regex/regex_core" }

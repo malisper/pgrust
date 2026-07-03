@@ -26,6 +26,14 @@ pub(crate) fn exec_init_sub_plan<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
+    // C: setParam wiring skips CTE_SUBLINK — the cteParam slot carries the
+    // leader handshake (nodeCtescan), never an execPlan trampoline.
+    if subplan.subLinkType == SubLinkType::CTE_SUBLINK {
+        debug_assert!(
+            subplan.parParam.is_nil() && !subplan.useHashTable && subplan.testexpr.is_none()
+        );
+        return Ok(());
+    }
     if !subplan.parParam.is_nil() || subplan.useHashTable || subplan.testexpr.is_some() {
         panic!(
             "ExecInitSubPlan (nodeSubplan.c): correlated/hashed/testexpr SubPlan \
@@ -77,6 +85,26 @@ pub(crate) fn exec_init_sub_plan<'mcx>(
         estate.es_param_subplans[pid] = Some(erased);
     }
     Ok(())
+}
+
+/// The [`executils::CteProcHook`] impl: one ExecProcNode pull from an
+/// es_subplanstates cell (CteScanNext's subplan fetch). Take-out protocol as
+/// exec_set_param_plan: same-cell re-entry is a loud panic, not aliasing.
+///
+/// # Safety
+/// `cell` is an es_subplanstates entry installed by InitPlan on this estate.
+pub(crate) unsafe fn cte_proc_hook<'mcx>(
+    cell: ::executils::SubplanStateCell,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<::executils::ExecSlotId>> {
+    // SAFETY: caller contract; the 'mcx erased here is the estate's own.
+    let slot = unsafe { &mut *cell.0.cast::<Option<PlanStateNode<'mcx>>>().as_ptr() };
+    let mut ps = slot
+        .take()
+        .unwrap_or_else(|| panic!("recursive CTE plan execution (nodeCtescan.c)"));
+    let result = exec_proc_node(&mut ps, estate);
+    *slot = Some(ps);
+    result
 }
 
 /// The [`executils::SubplanHook`] impl; installed once per query in InitPlan.

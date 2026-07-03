@@ -417,6 +417,11 @@ pub const fn errcode_is_category(sqlstate: SqlState) -> bool {
     (sqlstate.0 & !((1 << 12) - 1)) == 0
 }
 
+/// elog PANIC's unwind payload — C abort()'s thread rendering: the unwind must
+/// end the whole backend thread (the postmaster's crash choreography consumes
+/// the death). Panic-to-error converters re-raise it, never map it to ERROR.
+pub struct PanicExitThread;
+
 #[cfg(test)]
 mod tests {
     use super::*;

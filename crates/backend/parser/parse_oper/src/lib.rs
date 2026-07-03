@@ -15,7 +15,8 @@ use syscache_seams::PgOperatorShape;
 use types_core::catalog::UNKNOWNOID;
 use types_core::{InvalidOid, Oid, OidIsValid, ParseLoc};
 use types_error::{
-    ErrorLocation, PgError, PgResult, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_FUNCTION, ERROR,
+    ErrorLocation, PgError, PgResult, ERRCODE_AMBIGUOUS_FUNCTION, ERRCODE_SYNTAX_ERROR,
+    ERRCODE_UNDEFINED_FUNCTION, ERROR,
 };
 use types_nodes::{CoercionForm, Node, NodeList, OpExpr};
 
@@ -146,6 +147,8 @@ pub fn oper(
 ) -> PgResult<Option<Operator>> {
     let mut buf = [""; 4];
     let parts = name_parts(opname, &mut buf);
+    let mut ltypeId = ltypeId;
+    let mut rtypeId = rtypeId;
 
     let mut key = OprCacheKey {
         oprname: [0; NAMEDATALEN],
@@ -164,15 +167,35 @@ pub fn oper(
         }
     }
 
-    let operOid = binary_oper_exact(parts, ltypeId, rtypeId)?;
+    let mut fd_multiple = false;
+    let mut operOid = binary_oper_exact(parts, ltypeId, rtypeId)?;
     if !OidIsValid(operOid) {
-        let (_, opername) = catalog_namespace::DeconstructQualifiedName(parts)?;
-        if syscache_seams::pg_operator_name_candidates_exist::call(opername, b'b' as i8)? {
-            panic!(
-                "oper (parse_oper.c): inexact operator resolution (OpernameGetCandidates/\
-                 oper_select_candidate/func_match_argtypes) unported — unit \
-                 backend-parser-parse-oper; operator \"{opername}\" ({ltypeId}, {rtypeId})"
-            );
+        // Per-call scratch: cold path behind the OprCache memo (C pallocs the
+        // candidate space per call too).
+        let scratch = MemoryContext::new("oper candidates");
+        let clist =
+            catalog_namespace::OpernameGetCandidates(scratch.mcx(), parts, b'b' as i8, false)?;
+        if !clist.is_empty() {
+            if rtypeId == InvalidOid {
+                rtypeId = ltypeId;
+            } else if ltypeId == InvalidOid {
+                ltypeId = rtypeId;
+            }
+            let input_typeids = [ltypeId, rtypeId];
+            // oper_select_candidate (parse_oper.c).
+            let matched =
+                parse_func::func_match_argtypes(scratch.mcx(), &input_typeids, clist.as_slice())?;
+            operOid = match matched.len() {
+                0 => InvalidOid,
+                1 => matched[0].oid,
+                _ => match parse_func::func_select_candidate(&input_typeids, matched)? {
+                    Some(c) => c.oid,
+                    None => {
+                        fd_multiple = true;
+                        InvalidOid
+                    }
+                },
+            };
         }
     }
 
@@ -186,7 +209,7 @@ pub fn oper(
             Ok(Some(Operator { oid: operOid, shape }))
         }
         None if noError => Ok(None),
-        None => Err(op_error(pstate, parts, ltypeId, rtypeId, location)),
+        None => Err(op_error(pstate, parts, ltypeId, rtypeId, fd_multiple, location)),
     }
 }
 
@@ -429,19 +452,35 @@ fn op_error(
     parts: &[&str],
     arg1: Oid,
     arg2: Oid,
+    fd_multiple: bool,
     location: ParseLoc,
 ) -> Box<PgError> {
     let encoding = mbutils::GetDatabaseEncoding();
+    let sig = match op_signature_string(parts, arg1, arg2) {
+        Ok(sig) => sig,
+        Err(e) => return e,
+    };
+    if fd_multiple {
+        return Box::new(
+            elog::ereport(ERROR)
+                .errcode(ERRCODE_AMBIGUOUS_FUNCTION)
+                .errmsg(format!("operator is not unique: {sig}"))
+                .errhint(
+                    "Could not choose a best candidate operator. You might need to add \
+                     explicit type casts."
+                        .to_string(),
+                )
+                .errposition(parser_errposition(pstate, location, encoding))
+                .into_error()
+                .with_error_location(ErrorLocation::new("parse_oper.c", 0, "op_error")),
+        );
+    }
     let hint = if !OidIsValid(arg1) || !OidIsValid(arg2) {
         "No operator matches the given name and argument type. \
          You might need to add an explicit type cast."
     } else {
         "No operator matches the given name and argument types. \
          You might need to add explicit type casts."
-    };
-    let sig = match op_signature_string(parts, arg1, arg2) {
-        Ok(sig) => sig,
-        Err(e) => return e,
     };
     Box::new(
         elog::ereport(ERROR)

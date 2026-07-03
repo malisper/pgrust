@@ -233,6 +233,73 @@ pub fn XLOGShmemInit() {
     XLOG_CTL.set(ctl).unwrap_or_else(|_| panic!("XLOGShmemInit raced"));
 }
 
+fn reset_lwlock_in_place(lock: &LWLock) {
+    lock.state.store(lwlock::LW_FLAG_RELEASE_OK, Ordering::Relaxed);
+    // SAFETY: crash choreography drained every child before reset; the
+    // postmaster thread has exclusive access, so no holder or waiter exists.
+    unsafe {
+        *lock.waiters.get() = lmgr_proc_seams::proclist_head {
+            head: types_core::INVALID_PROC_NUMBER,
+            tail: types_core::INVALID_PROC_NUMBER,
+        };
+    }
+}
+
+/// Crash-cycle reset in place to the post-XLOGShmemInit boot image
+/// (notes/crash-restart-design.md); StartupXLOG re-seeds from pg_control/WAL.
+pub fn XLOGShmemResetAfterCrash() {
+    let ctl = XLogCtl();
+    assert_eq!(ctl.XLogCacheBlck, xlog_buffers() - 1);
+
+    let ins = &ctl.Insert;
+    ins.insertpos_lck.0.store(false, Ordering::Relaxed);
+    ins.CurrBytePos.store(0, Ordering::Relaxed);
+    ins.PrevBytePos.store(0, Ordering::Relaxed);
+    ins.RedoRecPtr.store(InvalidXLogRecPtr, Ordering::Relaxed);
+    ins.fullPageWrites.store(false, Ordering::Relaxed);
+    ins.runningBackups.store(0, Ordering::Relaxed);
+    ins.lastBackupStart.store(InvalidXLogRecPtr, Ordering::Relaxed);
+    for l in &ins.WALInsertLocks {
+        reset_lwlock_in_place(&l.lock);
+        l.insertingAt.store(InvalidXLogRecPtr, Ordering::Relaxed);
+        l.lastImportantAt.store(InvalidXLogRecPtr, Ordering::Relaxed);
+    }
+
+    ctl.info_lck.0.store(false, Ordering::Relaxed);
+    ctl.LogwrtRqstWrite.store(0, Ordering::Relaxed);
+    ctl.LogwrtRqstFlush.store(0, Ordering::Relaxed);
+    ctl.RedoRecPtr.store(InvalidXLogRecPtr, Ordering::Relaxed);
+    ctl.ckptFullXid.store(0, Ordering::Relaxed);
+    ctl.asyncXactLSN.store(InvalidXLogRecPtr, Ordering::Relaxed);
+    ctl.replicationSlotMinLSN.store(InvalidXLogRecPtr, Ordering::Relaxed);
+    ctl.lastCheckPointRecPtr.store(InvalidXLogRecPtr, Ordering::Relaxed);
+    ctl.lastCheckPointEndPtr.store(InvalidXLogRecPtr, Ordering::Relaxed);
+    // SAFETY: exclusive access as above (C protocol: info_lck).
+    unsafe { *ctl.lastCheckPoint.get() = CheckPoint::ZEROED };
+    ctl.lastFpwDisableRecPtr.store(InvalidXLogRecPtr, Ordering::Relaxed);
+    ctl.InsertTimeLineID.store(0, Ordering::Relaxed);
+    ctl.PrevTimeLineID.store(0, Ordering::Relaxed);
+    ctl.SharedRecoveryState.store(RECOVERY_STATE_CRASH, Ordering::Relaxed);
+    ctl.WalWriterSleeping.store(false, Ordering::Relaxed);
+    ctl.lastRemovedSegNo.store(0, Ordering::Relaxed);
+    ctl.unloggedLSN.store(InvalidXLogRecPtr, Ordering::Relaxed);
+    ctl.lastSegSwitchTime.store(0, Ordering::Relaxed);
+    ctl.lastSegSwitchLSN.store(InvalidXLogRecPtr, Ordering::Relaxed);
+    ctl.logInsertResult.store(InvalidXLogRecPtr, Ordering::Relaxed);
+    ctl.logWriteResult.store(InvalidXLogRecPtr, Ordering::Relaxed);
+    ctl.logFlushResult.store(InvalidXLogRecPtr, Ordering::Relaxed);
+    ctl.InitializedUpTo.store(InvalidXLogRecPtr, Ordering::Relaxed);
+    for b in ctl.xlblocks.iter() {
+        b.store(InvalidXLogRecPtr, Ordering::Relaxed);
+    }
+    // SAFETY: exclusive access as above; the allocation spans
+    // XLOG_BLCKSZ * (XLogCacheBlck + 1) bytes.
+    unsafe {
+        std::ptr::write_bytes(ctl.pages, 0, XLOG_BLCKSZ * (ctl.XLogCacheBlck as usize + 1));
+    }
+    ctl.InstallXLogFileSegmentActive.store(false, Ordering::Relaxed);
+}
+
 pub fn NextBufIdx(idx: i32) -> i32 {
     if idx == XLogCtl().XLogCacheBlck {
         0

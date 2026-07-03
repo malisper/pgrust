@@ -9,11 +9,12 @@ use parser_small1::{parser_errposition, ParseExprKind, ParseState};
 use types_core::{Oid, ParseLoc};
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_GROUPING_ERROR,
-    ERROR,
+    ERRCODE_UNDEFINED_OBJECT, ERRCODE_WINDOWING_ERROR, ERROR,
 };
 use types_nodes::parsenodes::Query;
-use types_nodes::primnodes::Aggref;
-use types_nodes::{Node, NodeList, NodeTag};
+use types_nodes::primnodes::{Aggref, WindowFunc};
+use types_nodes::rawnodes::FRAMEOPTION_DEFAULTS;
+use types_nodes::{equal_opt, Node, NodeEqual, NodeList, NodeTag};
 
 pub fn transformAggregateCall<'mcx>(
     mcx: Mcx<'mcx>,
@@ -303,6 +304,247 @@ fn check_agg_arguments_walker<'mcx>(
     }
 }
 
+pub fn transformWindowFuncCall<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    wfunc: &mut WindowFunc<'mcx>,
+    windef_node: Node<'mcx>,
+) -> PgResult<()> {
+    let windef = windef_node.as_window_def().expect("OVER clause holds a WindowDef");
+
+    if pstate.p_hasWindowFuncs {
+        if let Some(loc) = locate_windowfunc_in_list(&wfunc.args) {
+            return Err(windowing_error(
+                pstate,
+                "window function calls cannot be nested".into(),
+                loc,
+                "transformWindowFuncCall",
+            ));
+        }
+    }
+
+    let err: Option<&'static str> = match pstate.p_expr_kind {
+        ParseExprKind::EXPR_KIND_NONE => {
+            panic!("transformWindowFuncCall (parse_agg.c): EXPR_KIND_NONE cannot happen")
+        }
+        ParseExprKind::EXPR_KIND_OTHER
+        | ParseExprKind::EXPR_KIND_SELECT_TARGET
+        | ParseExprKind::EXPR_KIND_ORDER_BY
+        | ParseExprKind::EXPR_KIND_DISTINCT_ON => None,
+        ParseExprKind::EXPR_KIND_JOIN_ON | ParseExprKind::EXPR_KIND_JOIN_USING => {
+            Some("window functions are not allowed in JOIN conditions")
+        }
+        ParseExprKind::EXPR_KIND_FROM_FUNCTION => {
+            Some("window functions are not allowed in functions in FROM")
+        }
+        ParseExprKind::EXPR_KIND_POLICY => {
+            Some("window functions are not allowed in policy expressions")
+        }
+        ParseExprKind::EXPR_KIND_WINDOW_PARTITION
+        | ParseExprKind::EXPR_KIND_WINDOW_ORDER
+        | ParseExprKind::EXPR_KIND_WINDOW_FRAME_RANGE
+        | ParseExprKind::EXPR_KIND_WINDOW_FRAME_ROWS
+        | ParseExprKind::EXPR_KIND_WINDOW_FRAME_GROUPS => {
+            Some("window functions are not allowed in window definitions")
+        }
+        ParseExprKind::EXPR_KIND_MERGE_WHEN => {
+            Some("window functions are not allowed in MERGE WHEN conditions")
+        }
+        ParseExprKind::EXPR_KIND_CHECK_CONSTRAINT | ParseExprKind::EXPR_KIND_DOMAIN_CHECK => {
+            Some("window functions are not allowed in check constraints")
+        }
+        ParseExprKind::EXPR_KIND_COLUMN_DEFAULT | ParseExprKind::EXPR_KIND_FUNCTION_DEFAULT => {
+            Some("window functions are not allowed in DEFAULT expressions")
+        }
+        ParseExprKind::EXPR_KIND_INDEX_EXPRESSION => {
+            Some("window functions are not allowed in index expressions")
+        }
+        ParseExprKind::EXPR_KIND_STATS_EXPRESSION => {
+            Some("window functions are not allowed in statistics expressions")
+        }
+        ParseExprKind::EXPR_KIND_INDEX_PREDICATE => {
+            Some("window functions are not allowed in index predicates")
+        }
+        ParseExprKind::EXPR_KIND_ALTER_COL_TRANSFORM => {
+            Some("window functions are not allowed in transform expressions")
+        }
+        ParseExprKind::EXPR_KIND_EXECUTE_PARAMETER => {
+            Some("window functions are not allowed in EXECUTE parameters")
+        }
+        ParseExprKind::EXPR_KIND_TRIGGER_WHEN => {
+            Some("window functions are not allowed in trigger WHEN conditions")
+        }
+        ParseExprKind::EXPR_KIND_PARTITION_BOUND => {
+            Some("window functions are not allowed in partition bound")
+        }
+        ParseExprKind::EXPR_KIND_PARTITION_EXPRESSION => {
+            Some("window functions are not allowed in partition key expressions")
+        }
+        ParseExprKind::EXPR_KIND_CALL_ARGUMENT => {
+            Some("window functions are not allowed in CALL arguments")
+        }
+        ParseExprKind::EXPR_KIND_COPY_WHERE => {
+            Some("window functions are not allowed in COPY FROM WHERE conditions")
+        }
+        ParseExprKind::EXPR_KIND_GENERATED_COLUMN => {
+            Some("window functions are not allowed in column generation expressions")
+        }
+        ParseExprKind::EXPR_KIND_FROM_SUBSELECT
+        | ParseExprKind::EXPR_KIND_WHERE
+        | ParseExprKind::EXPR_KIND_HAVING
+        | ParseExprKind::EXPR_KIND_FILTER
+        | ParseExprKind::EXPR_KIND_INSERT_TARGET
+        | ParseExprKind::EXPR_KIND_UPDATE_SOURCE
+        | ParseExprKind::EXPR_KIND_UPDATE_TARGET
+        | ParseExprKind::EXPR_KIND_GROUP_BY
+        | ParseExprKind::EXPR_KIND_LIMIT
+        | ParseExprKind::EXPR_KIND_OFFSET
+        | ParseExprKind::EXPR_KIND_RETURNING
+        | ParseExprKind::EXPR_KIND_MERGE_RETURNING
+        | ParseExprKind::EXPR_KIND_VALUES
+        | ParseExprKind::EXPR_KIND_VALUES_SINGLE
+        | ParseExprKind::EXPR_KIND_CYCLE_MARK => {
+            return Err(windowing_error(
+                pstate,
+                format!(
+                    "window functions are not allowed in {}",
+                    parse_expr_kind_name(pstate.p_expr_kind)
+                ),
+                wfunc.location,
+                "transformWindowFuncCall",
+            ));
+        }
+    };
+    if let Some(msg) = err {
+        return Err(windowing_error(pstate, msg.into(), wfunc.location, "transformWindowFuncCall"));
+    }
+
+    if let Some(name) = windef.name {
+        debug_assert!(
+            windef.refname.is_none()
+                && windef.partitionClause.is_nil()
+                && windef.orderClause.is_nil()
+                && windef.frameOptions == FRAMEOPTION_DEFAULTS
+        );
+        let mut winref = 0u32;
+        let mut found = false;
+        for refwin_node in &pstate.p_windowdefs {
+            let refwin = refwin_node.as_window_def().expect("p_windowdefs cell");
+            winref += 1;
+            if refwin.name == Some(name) {
+                wfunc.winref = winref;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(Box::new(
+                ereport(ERROR)
+                    .errcode(ERRCODE_UNDEFINED_OBJECT)
+                    .errmsg(format!("window \"{name}\" does not exist"))
+                    .errposition(parser_errposition(
+                        pstate,
+                        windef.location,
+                        mbutils::GetDatabaseEncoding(),
+                    ))
+                    .into_error()
+                    .with_error_location(ErrorLocation::new(
+                        "parse_agg.c",
+                        0,
+                        "transformWindowFuncCall",
+                    )),
+            ));
+        }
+    } else {
+        let mut winref = 0u32;
+        let mut found = false;
+        for refwin_node in &pstate.p_windowdefs {
+            let refwin = refwin_node.as_window_def().expect("p_windowdefs cell");
+            winref += 1;
+            let refname_match = match (refwin.refname, windef.refname) {
+                (Some(a), Some(b)) => a == b,
+                (None, None) => true,
+                _ => false,
+            };
+            if !refname_match {
+                continue;
+            }
+            if refwin.partitionClause.node_equal(&windef.partitionClause)
+                && refwin.orderClause.node_equal(&windef.orderClause)
+                && refwin.frameOptions == windef.frameOptions
+                && equal_opt(refwin.startOffset, windef.startOffset)
+                && equal_opt(refwin.endOffset, windef.endOffset)
+            {
+                wfunc.winref = winref;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            pstate.p_windowdefs.lappend(mcx, windef_node)?;
+            wfunc.winref = pstate.p_windowdefs.len() as u32;
+        }
+    }
+
+    pstate.p_hasWindowFuncs = true;
+    Ok(())
+}
+
+// contain_windowfuncs/locate_windowfunc (rewriteManip.c) fused: first
+// current-level WindowFunc's location, None if none.
+pub fn locate_windowfunc_in_list(nodes: &NodeList<'_>) -> Option<ParseLoc> {
+    struct W {
+        loc: ParseLoc,
+    }
+    impl<'mcx> nodes_core::NodeWalker<'mcx> for W {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            if let Some(wf) = node.as_window_func() {
+                self.loc = wf.location;
+                return Ok(true);
+            }
+            nodes_core::expression_tree_walker(node, self)
+        }
+    }
+    let mut w = W { loc: -1 };
+    match nodes_core::walk_list(nodes, &mut w) {
+        Ok(true) => Some(w.loc),
+        _ => None,
+    }
+}
+
+pub fn locate_windowfunc(node: Node<'_>) -> ParseLoc {
+    struct W {
+        loc: ParseLoc,
+    }
+    impl<'mcx> nodes_core::NodeWalker<'mcx> for W {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            if let Some(wf) = node.as_window_func() {
+                self.loc = wf.location;
+                return Ok(true);
+            }
+            nodes_core::expression_tree_walker(node, self)
+        }
+    }
+    let mut w = W { loc: -1 };
+    match nodes_core::NodeWalker::visit(&mut w, node) {
+        Ok(true) => w.loc,
+        _ => -1,
+    }
+}
+
+pub fn contain_windowfuncs(node: Node<'_>) -> bool {
+    struct W;
+    impl<'mcx> nodes_core::NodeWalker<'mcx> for W {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            if node.node_tag() == NodeTag::T_WindowFunc {
+                return Ok(true);
+            }
+            nodes_core::expression_tree_walker(node, self)
+        }
+    }
+    matches!(nodes_core::NodeWalker::visit(&mut W, node), Ok(true))
+}
+
 /// DIVERGENCE from C 18.3: substitute_grouped_columns' RTE_GROUP rewrite
 /// (grouped Vars retargeted at an RTE_GROUP entry, qry.hasGroupRTE) is not
 /// performed — the Query keeps the pre-18 direct-Var shape and the planner's
@@ -407,6 +649,16 @@ fn check_ungrouped_columns<'mcx>(
                  unported — backend-parser-agg"
             );
         }
+        NodeTag::T_WindowFunc => {
+            let wf = node.as_window_func().unwrap();
+            for arg in &wf.args {
+                check_ungrouped_columns(pstate, qry, arg)?;
+            }
+            match wf.aggfilter {
+                Some(f) => check_ungrouped_columns(pstate, qry, f),
+                None => Ok(()),
+            }
+        }
         NodeTag::T_TargetEntry => {
             check_ungrouped_columns(pstate, qry, node.as_target_entry().unwrap().expr)
         }
@@ -447,6 +699,8 @@ fn check_ungrouped_columns<'mcx>(
 // renders are reachable through check_agglevels_and_constraints.
 fn parse_expr_kind_name(kind: ParseExprKind) -> &'static str {
     match kind {
+        ParseExprKind::EXPR_KIND_FROM_SUBSELECT => "FROM",
+        ParseExprKind::EXPR_KIND_HAVING => "HAVING",
         ParseExprKind::EXPR_KIND_WHERE | ParseExprKind::EXPR_KIND_COPY_WHERE => "WHERE",
         ParseExprKind::EXPR_KIND_FILTER => "FILTER",
         ParseExprKind::EXPR_KIND_INSERT_TARGET => "INSERT",
@@ -466,6 +720,25 @@ fn parse_expr_kind_name(kind: ParseExprKind) -> &'static str {
              check_agglevels_and_constraints"
         ),
     }
+}
+
+#[cold]
+#[inline(never)]
+fn windowing_error(
+    pstate: &ParseState<'_, '_>,
+    msg: String,
+    location: ParseLoc,
+    funcname: &'static str,
+) -> Box<PgError> {
+    let encoding = mbutils::GetDatabaseEncoding();
+    Box::new(
+        ereport(ERROR)
+            .errcode(ERRCODE_WINDOWING_ERROR)
+            .errmsg(msg)
+            .errposition(parser_errposition(pstate, location, encoding))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_agg.c", 0, funcname)),
+    )
 }
 
 #[cold]

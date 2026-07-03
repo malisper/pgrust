@@ -19,6 +19,7 @@ inval = { path = "../../utils/cache/inval" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
+parse_func = { path = "../parse_func" }
 parser_small1 = { path = "../parser_small1" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 typcache = { path = "../../utils/cache/typcache" }

@@ -24,10 +24,18 @@ const F_HASHINT4: u32 = 450;
 const INT_HASH_FAM: u32 = 1977;
 
 const COUNT_STAR_OID: u32 = 2803;
+const COUNT_ANY_OID: u32 = 2147;
 const SUM_INT4_OID: u32 = 2108;
+const SUM_INT8_OID: u32 = 2107;
 const INT8INC_OID: u32 = 1219;
+const INT8INC_ANY_OID: u32 = 2804;
 const INT4_SUM_OID: u32 = 1841;
+const INT8_AVG_ACCUM_OID: u32 = 2746;
+const NUMERIC_POLY_SUM_OID: u32 = 3388;
+const INT8_AVG_COMBINE_OID: u32 = 2785;
 const INT8PL_OID: u32 = 463;
+const INTERNALOID: u32 = 2281;
+const NUMERICOID: u32 = 1700;
 
 static SEAMS: Once = Once::new();
 
@@ -49,6 +57,20 @@ fn install_seams() {
                     typbyval: true,
                     typalign: TYPALIGN_DOUBLE,
                     typstorage: TYPSTORAGE_PLAIN,
+                    typcollation: 0,
+                }),
+                INTERNALOID => Some(PgTypeShape {
+                    typlen: 8,
+                    typbyval: true,
+                    typalign: TYPALIGN_DOUBLE,
+                    typstorage: TYPSTORAGE_PLAIN,
+                    typcollation: 0,
+                }),
+                NUMERICOID => Some(PgTypeShape {
+                    typlen: -1,
+                    typbyval: false,
+                    typalign: TYPALIGN_INT,
+                    typstorage: b'm' as i8,
                     typcollation: 0,
                 }),
                 _ => None,
@@ -74,6 +96,32 @@ fn install_seams() {
                     aggkind: b'n' as i8,
                     aggnumdirectargs: 0,
                     aggtransfn: INT4_SUM_OID,
+                    aggfinalfn: 0,
+                    aggcombinefn: INT8PL_OID,
+                    aggserialfn: 0,
+                    aggdeserialfn: 0,
+                    aggfinalextra: false,
+                    aggfinalmodify: b'r' as i8,
+                    aggtranstype: INT8OID,
+                    aggtransspace: 0,
+                }),
+                SUM_INT8_OID => Some(PgAggregateShape {
+                    aggkind: b'n' as i8,
+                    aggnumdirectargs: 0,
+                    aggtransfn: INT8_AVG_ACCUM_OID,
+                    aggfinalfn: NUMERIC_POLY_SUM_OID,
+                    aggcombinefn: INT8_AVG_COMBINE_OID,
+                    aggserialfn: 2786,
+                    aggdeserialfn: 2787,
+                    aggfinalextra: false,
+                    aggfinalmodify: b'r' as i8,
+                    aggtranstype: INTERNALOID,
+                    aggtransspace: 48,
+                }),
+                COUNT_ANY_OID => Some(PgAggregateShape {
+                    aggkind: b'n' as i8,
+                    aggnumdirectargs: 0,
+                    aggtransfn: INT8INC_ANY_OID,
                     aggfinalfn: 0,
                     aggcombinefn: INT8PL_OID,
                     aggserialfn: 0,
@@ -129,8 +177,10 @@ fn install_seams() {
         }
         syscache_seams::pg_aggregate_agginitval::set(|mcx, aggfnoid| {
             Ok(match aggfnoid {
-                COUNT_STAR_OID => Some(Some(::mcx::PgString::from_str_in("0", mcx).unwrap())),
-                SUM_INT4_OID => Some(None),
+                COUNT_STAR_OID | COUNT_ANY_OID => {
+                    Some(Some(::mcx::PgString::from_str_in("0", mcx).unwrap()))
+                }
+                SUM_INT4_OID | SUM_INT8_OID => Some(None),
                 _ => None,
             })
         });
@@ -639,5 +689,331 @@ fn sorted_group_by_rescan_reruns() {
             got.push((base.tts_values[0].as_i32(), base.tts_values[1].as_i64()));
         }
         assert_eq!(got, vec![(4, 2), (5, 1)]);
+    });
+}
+
+fn numeric_datum_text(d: Datum) -> String {
+    // SAFETY: numeric results are 4B-header varlena images in live memory.
+    let v = unsafe { ::datum::varlena::VarlenaRef::from_ptr(d.as_usize() as *const u8) };
+    let mut buf = Vec::new();
+    ::adt_numeric::numeric_out_into(::adt_numeric::Num::from_payload(v.data()), &mut buf);
+    String::from_utf8(buf).unwrap()
+}
+
+fn mk_sum_int8_agg(mcx: Mcx<'_>) -> &Agg<'_> {
+    let var = Node::mk_var(mcx, OUTER_VAR, 1, INT8OID, -1, 0, 0).unwrap();
+    let arg_tle = Node::mk_target_entry(mcx, var, 1, None, false).unwrap();
+    let mut aggref = Node::build::<Aggref>(mcx).unwrap();
+    aggref.aggfnoid = SUM_INT8_OID;
+    aggref.aggtype = NUMERICOID;
+    aggref.aggtranstype = INTERNALOID;
+    aggref.args = NodeList::make1(mcx, arg_tle).unwrap();
+    aggref.aggno = 0;
+    aggref.aggtransno = 0;
+    let tle = Node::mk_target_entry(mcx, aggref.seal(), 1, Some("sum"), false).unwrap();
+    let mut agg = Node::build::<Agg>(mcx).unwrap();
+    agg.plan.targetlist = NodeList::make1(mcx, tle).unwrap();
+    agg.numGroups = 1;
+    agg.seal_ref()
+}
+
+fn int8_feeder<'mcx>(
+    outer_id: ExecSlotId,
+    rows: &'static [Option<i64>],
+) -> impl FnMut(&mut EStateData<'mcx>) -> ::types_error::PgResult<Option<ExecSlotId>> {
+    let mut i = 0usize;
+    move |estate| {
+        if i >= rows.len() {
+            return Ok(None);
+        }
+        let mcx = estate.es_query_cxt;
+        let slot = estate.slot_mut(outer_id);
+        exectuples::exec_clear_tuple(slot, mcx);
+        match rows[i] {
+            Some(v) => {
+                slot.base_mut().tts_values[0] = Datum::from_i64(v);
+                slot.base_mut().tts_isnull[0] = false;
+            }
+            None => {
+                slot.base_mut().tts_values[0] = Datum::null();
+                slot.base_mut().tts_isnull[0] = true;
+            }
+        }
+        exectuples::exec_store_virtual_tuple(slot);
+        i += 1;
+        Ok(Some(outer_id))
+    }
+}
+
+// sum(int8): transfn-built Int128AggState + numeric_poly_sum finalfn.
+#[test]
+fn sum_int8_internal_state_and_finalfn() {
+    install_seams();
+    let agg = mk_sum_int8_agg(leaked_mcx());
+    let estate_owner = create_executor_state(Box::leak(Box::new(MemoryContext::new("q"))));
+    let mut estate_owner = estate_owner.unwrap();
+    estate_owner.with_mut(|estate| {
+        let mcx = estate.es_query_cxt;
+        let outer_desc = one_col_desc(mcx, INT8OID, 8, TYPALIGN_DOUBLE);
+        let outer_id = estate.exec_init_extra_tuple_slot(Some(outer_desc), TupleSlotKind::Virtual);
+        let result_desc = {
+            let att = FormData_pg_attribute {
+                attnum: 1,
+                atttypid: NUMERICOID,
+                atttypmod: -1,
+                attlen: -1,
+                attbyval: false,
+                attalign: TYPALIGN_INT,
+                attstorage: b'm' as i8,
+                ..Default::default()
+            };
+            let m = leaked_mcx();
+            let mut attrs = PgVec::new_in(m);
+            let mut compact = PgVec::new_in(m);
+            compact.push(CompactAttribute::populate_from(&att));
+            attrs.push(att);
+            Rc::new(TupleDescData {
+                natts: 1,
+                tdtypeid: 0,
+                tdtypmod: -1,
+                tdrefcount: -1,
+                constr: None,
+                compact_attrs: compact,
+                attrs,
+            })
+        };
+        // SAFETY: agg is leaked ('static) and read-only.
+        let agg = unsafe { shorten(agg) };
+        let mut state = exec_init_agg(agg, estate, 0, result_desc).unwrap();
+
+        let rows: &'static [Option<i64>] = &[Some(5), None, Some(7), Some(3)];
+        let slot_id = exec_agg(&mut state, estate, int8_feeder(outer_id, rows))
+            .unwrap()
+            .expect("plain agg returns one row");
+        {
+            let base = estate.slot_mut(slot_id).base();
+            assert!(!base.tts_isnull[0]);
+            assert_eq!(numeric_datum_text(base.tts_values[0]), "15");
+        }
+        assert!(exec_agg(&mut state, estate, int8_feeder(outer_id, &[])).unwrap().is_none());
+
+        exec_rescan_agg(&mut state, estate);
+        let rows2: &'static [Option<i64>] = &[Some(40), Some(2)];
+        let again = exec_agg(&mut state, estate, int8_feeder(outer_id, rows2)).unwrap().unwrap();
+        let base = estate.slot_mut(again).base();
+        assert_eq!(numeric_datum_text(base.tts_values[0]), "42");
+    });
+}
+
+#[test]
+fn sum_int8_of_empty_input_is_null() {
+    install_seams();
+    let agg = mk_sum_int8_agg(leaked_mcx());
+    let estate_owner = create_executor_state(Box::leak(Box::new(MemoryContext::new("q"))));
+    let mut estate_owner = estate_owner.unwrap();
+    estate_owner.with_mut(|estate| {
+        let mcx = estate.es_query_cxt;
+        let outer_desc = one_col_desc(mcx, INT8OID, 8, TYPALIGN_DOUBLE);
+        let outer_id = estate.exec_init_extra_tuple_slot(Some(outer_desc), TupleSlotKind::Virtual);
+        let result_desc = one_col_desc(leaked_mcx(), NUMERICOID, -1, TYPALIGN_INT);
+        // SAFETY: agg is leaked ('static) and read-only.
+        let agg = unsafe { shorten(agg) };
+        let mut state = exec_init_agg(agg, estate, 0, result_desc).unwrap();
+        let slot_id =
+            exec_agg(&mut state, estate, int8_feeder(outer_id, &[])).unwrap().unwrap();
+        let base = estate.slot_mut(slot_id).base();
+        assert!(base.tts_isnull[0]);
+    });
+}
+
+// count(a): strict transfn behind the strict-input check skips NULLs.
+#[test]
+fn count_any_skips_nulls() {
+    install_seams();
+    let mcx = leaked_mcx();
+    let agg = {
+        let var = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+        let arg_tle = Node::mk_target_entry(mcx, var, 1, None, false).unwrap();
+        let mut aggref = Node::build::<Aggref>(mcx).unwrap();
+        aggref.aggfnoid = COUNT_ANY_OID;
+        aggref.aggtype = INT8OID;
+        aggref.aggtranstype = INT8OID;
+        aggref.args = NodeList::make1(mcx, arg_tle).unwrap();
+        aggref.aggno = 0;
+        aggref.aggtransno = 0;
+        let tle = Node::mk_target_entry(mcx, aggref.seal(), 1, Some("count"), false).unwrap();
+        let mut agg = Node::build::<Agg>(mcx).unwrap();
+        agg.plan.targetlist = NodeList::make1(mcx, tle).unwrap();
+        agg.numGroups = 1;
+        agg.seal_ref()
+    };
+    let estate_owner = create_executor_state(Box::leak(Box::new(MemoryContext::new("q"))));
+    let mut estate_owner = estate_owner.unwrap();
+    estate_owner.with_mut(|estate| {
+        let mcx = estate.es_query_cxt;
+        let outer_desc = one_col_desc(mcx, INT4OID, 4, TYPALIGN_INT);
+        let outer_id = estate.exec_init_extra_tuple_slot(Some(outer_desc), TupleSlotKind::Virtual);
+        let result_desc = one_col_desc(leaked_mcx(), INT8OID, 8, TYPALIGN_DOUBLE);
+        // SAFETY: agg is leaked ('static) and read-only.
+        let agg = unsafe { shorten(agg) };
+        let mut state = exec_init_agg(agg, estate, 0, result_desc).unwrap();
+
+        let rows: &'static [Option<i32>] = &[Some(1), None, Some(3), None, Some(5)];
+        let mut i = 0usize;
+        let mut feed = move |estate: &mut EStateData<'_>| {
+            if i >= rows.len() {
+                return Ok(None);
+            }
+            let mcx = estate.es_query_cxt;
+            let slot = estate.slot_mut(outer_id);
+            exectuples::exec_clear_tuple(slot, mcx);
+            match rows[i] {
+                Some(v) => {
+                    slot.base_mut().tts_values[0] = Datum::from_i32(v);
+                    slot.base_mut().tts_isnull[0] = false;
+                }
+                None => {
+                    slot.base_mut().tts_values[0] = Datum::null();
+                    slot.base_mut().tts_isnull[0] = true;
+                }
+            }
+            exectuples::exec_store_virtual_tuple(slot);
+            i += 1;
+            Ok(Some(outer_id))
+        };
+        let slot_id = exec_agg(&mut state, estate, &mut feed).unwrap().unwrap();
+        let base = estate.slot_mut(slot_id).base();
+        assert!(!base.tts_isnull[0]);
+        assert_eq!(base.tts_values[0].as_i64(), 3);
+    });
+}
+
+fn mk_hashed_sum_int8_agg(mcx: Mcx<'_>) -> &Agg<'_> {
+    let g_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let g_tle = Node::mk_target_entry(mcx, g_var, 1, Some("g"), false).unwrap();
+    let b_var = Node::mk_var(mcx, 1, 2, INT8OID, -1, 0, 0).unwrap();
+    let b_tle = Node::mk_target_entry(mcx, b_var, 2, Some("b"), false).unwrap();
+    let outer_plan = {
+        let mut r = Node::build::<types_nodes::plannodes::Result>(mcx).unwrap();
+        let mut tl = NodeList::make1(mcx, g_tle).unwrap();
+        tl.lappend(mcx, b_tle).unwrap();
+        r.plan.targetlist = tl;
+        r.plan.plan_width = 12;
+        r.seal()
+    };
+
+    let group_var = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+    let group_tle = Node::mk_target_entry(mcx, group_var, 1, Some("g"), false).unwrap();
+    let sum_arg = Node::mk_var(mcx, OUTER_VAR, 2, INT8OID, -1, 0, 0).unwrap();
+    let sum_arg_tle = Node::mk_target_entry(mcx, sum_arg, 1, None, false).unwrap();
+    let mut aggref = Node::build::<Aggref>(mcx).unwrap();
+    aggref.aggfnoid = SUM_INT8_OID;
+    aggref.aggtype = NUMERICOID;
+    aggref.aggtranstype = INTERNALOID;
+    aggref.args = NodeList::make1(mcx, sum_arg_tle).unwrap();
+    aggref.aggno = 0;
+    aggref.aggtransno = 0;
+    let sum_tle = Node::mk_target_entry(mcx, aggref.seal(), 2, Some("sum"), false).unwrap();
+
+    let mut agg = Node::build::<Agg>(mcx).unwrap();
+    let mut tlist = NodeList::make1(mcx, group_tle).unwrap();
+    tlist.lappend(mcx, sum_tle).unwrap();
+    agg.plan.targetlist = tlist;
+    agg.plan.lefttree = Some(outer_plan);
+    agg.aggstrategy = 2;
+    agg.numCols = 1;
+    agg.grpColIdx = mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+    agg.grpOperators = mcx::slice_borrow_in(mcx, &[INT4_EQ]).unwrap();
+    agg.grpCollations = mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+    agg.numGroups = 4;
+    agg.seal_ref()
+}
+
+// GROUP BY g, sum(b): one Int128AggState per hash entry.
+#[test]
+fn hashed_group_by_sum_int8() {
+    install_seams();
+    let agg = mk_hashed_sum_int8_agg(leaked_mcx());
+    let estate_owner = create_executor_state(Box::leak(Box::new(MemoryContext::new("q"))));
+    let mut estate_owner = estate_owner.unwrap();
+    estate_owner.with_mut(|estate| {
+        let mcx = estate.es_query_cxt;
+        let outer_desc = two_col_desc(mcx);
+        let outer_id = estate.exec_init_extra_tuple_slot(Some(outer_desc), TupleSlotKind::Virtual);
+        let result_desc = {
+            let a1 = FormData_pg_attribute {
+                attnum: 1,
+                atttypid: INT4OID,
+                atttypmod: -1,
+                attlen: 4,
+                attbyval: true,
+                attalign: TYPALIGN_INT,
+                attstorage: TYPSTORAGE_PLAIN,
+                ..Default::default()
+            };
+            let a2 = FormData_pg_attribute {
+                attnum: 2,
+                atttypid: NUMERICOID,
+                atttypmod: -1,
+                attlen: -1,
+                attbyval: false,
+                attalign: TYPALIGN_INT,
+                attstorage: b'm' as i8,
+                ..Default::default()
+            };
+            let m = leaked_mcx();
+            let mut attrs = PgVec::new_in(m);
+            let mut compact = PgVec::new_in(m);
+            compact.push(CompactAttribute::populate_from(&a1));
+            compact.push(CompactAttribute::populate_from(&a2));
+            attrs.push(a1);
+            attrs.push(a2);
+            Rc::new(TupleDescData {
+                natts: 2,
+                tdtypeid: 0,
+                tdtypmod: -1,
+                tdrefcount: -1,
+                constr: None,
+                compact_attrs: compact,
+                attrs,
+            })
+        };
+        // SAFETY: agg is leaked ('static) and read-only.
+        let agg = unsafe { shorten(agg) };
+        let mut state = exec_init_agg(agg, estate, 0, result_desc).unwrap();
+
+        let rows: &'static [(i32, i64)] = &[(1, 10), (2, 5), (1, 20), (3, 7), (2, 5)];
+        let mut i = 0usize;
+        let mut feed = move |estate: &mut EStateData<'_>| {
+            if i >= rows.len() {
+                return Ok(None);
+            }
+            let mcx = estate.es_query_cxt;
+            let slot = estate.slot_mut(outer_id);
+            exectuples::exec_clear_tuple(slot, mcx);
+            let (g, b) = rows[i];
+            slot.base_mut().tts_values[0] = Datum::from_i32(g);
+            slot.base_mut().tts_isnull[0] = false;
+            slot.base_mut().tts_values[1] = Datum::from_i64(b);
+            slot.base_mut().tts_isnull[1] = false;
+            exectuples::exec_store_virtual_tuple(slot);
+            i += 1;
+            Ok(Some(outer_id))
+        };
+        let mut got: Vec<(i32, String)> = Vec::new();
+        while let Some(slot_id) = exec_agg(&mut state, estate, &mut feed).unwrap() {
+            let base = estate.slot_mut(slot_id).base();
+            assert!(!base.tts_isnull[0] && !base.tts_isnull[1]);
+            got.push((base.tts_values[0].as_i32(), numeric_datum_text(base.tts_values[1])));
+        }
+        got.sort_unstable();
+        assert_eq!(
+            got,
+            vec![
+                (1, "30".to_string()),
+                (2, "10".to_string()),
+                (3, "7".to_string())
+            ]
+        );
     });
 }

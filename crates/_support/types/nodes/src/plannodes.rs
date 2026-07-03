@@ -213,6 +213,21 @@ pub struct FunctionScan<'mcx> {
     pub funcordinality: bool,
 }
 
+#[derive(Default)]
+#[repr(C)]
+pub struct CteScan<'mcx> {
+    pub scan: Scan<'mcx>,
+    pub ctePlanId: i32,
+    pub cteParam: i32,
+}
+
+#[derive(Default)]
+#[repr(C)]
+pub struct ValuesScan<'mcx> {
+    pub scan: Scan<'mcx>,
+    pub values_lists: NodeList<'mcx>,
+}
+
 /// Per-key arrays are C's `pg_node_attr(array_size(numCols))` parallel arrays.
 #[derive(Default)]
 #[repr(C)]
@@ -234,6 +249,62 @@ pub struct Unique<'mcx> {
     pub uniqColIdx: &'mcx [i16],
     pub uniqOperators: &'mcx [Oid],
     pub uniqCollations: &'mcx [Oid],
+}
+
+/// Per-key arrays as in [`Sort`]; frameOptions bits as in rawnodes FRAMEOPTION_*.
+#[repr(C)]
+pub struct WindowAgg<'mcx> {
+    pub plan: Plan<'mcx>,
+    pub winname: Option<&'mcx str>,
+    pub winref: Index,
+    pub partNumCols: i32,
+    pub partColIdx: &'mcx [i16],
+    pub partOperators: &'mcx [Oid],
+    pub partCollations: &'mcx [Oid],
+    pub ordNumCols: i32,
+    pub ordColIdx: &'mcx [i16],
+    pub ordOperators: &'mcx [Oid],
+    pub ordCollations: &'mcx [Oid],
+    pub frameOptions: i32,
+    pub startOffset: Option<Node<'mcx>>,
+    pub endOffset: Option<Node<'mcx>>,
+    pub runCondition: NodeList<'mcx>,
+    pub runConditionOrig: NodeList<'mcx>,
+    pub startInRangeFunc: Oid,
+    pub endInRangeFunc: Oid,
+    pub inRangeColl: Oid,
+    pub inRangeAsc: bool,
+    pub inRangeNullsFirst: bool,
+    pub topWindow: bool,
+}
+
+impl Default for WindowAgg<'_> {
+    fn default() -> Self {
+        WindowAgg {
+            plan: Plan::default(),
+            winname: None,
+            winref: 0,
+            partNumCols: 0,
+            partColIdx: &[],
+            partOperators: &[],
+            partCollations: &[],
+            ordNumCols: 0,
+            ordColIdx: &[],
+            ordOperators: &[],
+            ordCollations: &[],
+            frameOptions: crate::rawnodes::FRAMEOPTION_DEFAULTS,
+            startOffset: None,
+            endOffset: None,
+            runCondition: NodeList::nil(),
+            runConditionOrig: NodeList::nil(),
+            startInRangeFunc: 0,
+            endInRangeFunc: 0,
+            inRangeColl: 0,
+            inRangeAsc: true,
+            inRangeNullsFirst: false,
+            topWindow: false,
+        }
+    }
 }
 
 /// `aggstrategy`/`aggsplit` carry the C AggStrategy/AggSplit values
@@ -450,6 +521,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for BitmapHeapScan<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for FunctionScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_FunctionScan;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for CteScan<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CteScan;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ValuesScan<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ValuesScan;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for Sort<'mcx> {
     const TAG: NodeTag = NodeTag::T_Sort;
 }
@@ -458,6 +535,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for Unique<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for Agg<'mcx> {
     const TAG: NodeTag = NodeTag::T_Agg;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for WindowAgg<'mcx> {
+    const TAG: NodeTag = NodeTag::T_WindowAgg;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for ModifyTable<'mcx> {
     const TAG: NodeTag = NodeTag::T_ModifyTable;
@@ -495,6 +575,10 @@ unsafe impl<'mcx> PlanVariant<'mcx> for BitmapIndexScan<'mcx> {}
 unsafe impl<'mcx> PlanVariant<'mcx> for BitmapHeapScan<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
 unsafe impl<'mcx> PlanVariant<'mcx> for FunctionScan<'mcx> {}
+// SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
+unsafe impl<'mcx> PlanVariant<'mcx> for CteScan<'mcx> {}
+// SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
+unsafe impl<'mcx> PlanVariant<'mcx> for ValuesScan<'mcx> {}
 // SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for Sort<'mcx> {}
 // SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
@@ -552,6 +636,14 @@ const _: () = {
     assert!(
         offset_of!(NodeRep<FunctionScan>, payload) == offset_of!(NodeRep<Plan>, payload)
     );
+    assert!(offset_of!(CteScan, scan) == 0);
+    assert!(
+        offset_of!(NodeRep<CteScan>, payload) == offset_of!(NodeRep<Plan>, payload)
+    );
+    assert!(offset_of!(ValuesScan, scan) == 0);
+    assert!(
+        offset_of!(NodeRep<ValuesScan>, payload) == offset_of!(NodeRep<Plan>, payload)
+    );
     assert!(offset_of!(Sort, plan) == 0);
     assert!(offset_of!(NodeRep<Sort>, payload) == offset_of!(NodeRep<Plan>, payload));
     assert!(offset_of!(Unique, plan) == 0);
@@ -593,9 +685,12 @@ fn is_plan_tag(tag: NodeTag) -> bool {
             | NodeTag::T_BitmapIndexScan
             | NodeTag::T_BitmapHeapScan
             | NodeTag::T_FunctionScan
+            | NodeTag::T_CteScan
+            | NodeTag::T_ValuesScan
             | NodeTag::T_Sort
             | NodeTag::T_Unique
             | NodeTag::T_Agg
+            | NodeTag::T_WindowAgg
             | NodeTag::T_ModifyTable
             | NodeTag::T_Limit
             | NodeTag::T_NestLoop
@@ -657,6 +752,16 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_cte_scan(self) -> Option<&'mcx CteScan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_values_scan(self) -> Option<&'mcx ValuesScan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_sort(self) -> Option<&'mcx Sort<'mcx>> {
         self.as_variant()
     }
@@ -668,6 +773,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_agg(self) -> Option<&'mcx Agg<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_window_agg(self) -> Option<&'mcx WindowAgg<'mcx>> {
         self.as_variant()
     }
 

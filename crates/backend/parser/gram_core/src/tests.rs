@@ -305,6 +305,33 @@ fn insert_values_shapes() {
 }
 
 #[test]
+fn returning_clause_shapes() {
+    let list = parse("INSERT INTO t VALUES (1, 2) RETURNING id;");
+    let ins = only_stmt(&list).stmt.unwrap().as_insert_stmt().expect("InsertStmt");
+    let ret = ins.returningClause.unwrap().as_returning_clause().expect("ReturningClause");
+    assert!(ret.options.is_nil());
+    assert_eq!(ret.exprs.len(), 1);
+    let rt = ret.exprs.nth(0).as_res_target().expect("ResTarget");
+    assert!(rt.name.is_none());
+    let cr = rt.val.unwrap().as_column_ref().expect("ColumnRef");
+    assert_eq!(cr.fields.nth(0).as_string().unwrap().sval, "id");
+
+    let list = parse("UPDATE t SET a = 1 WHERE b = 2 RETURNING a, b + 1 AS c;");
+    let upd = only_stmt(&list).stmt.unwrap().as_update_stmt().expect("UpdateStmt");
+    let ret = upd.returningClause.unwrap().as_returning_clause().unwrap();
+    assert_eq!(ret.exprs.len(), 2);
+    assert_eq!(ret.exprs.nth(1).as_res_target().unwrap().name, Some("c"));
+
+    let list = parse("DELETE FROM t WHERE a = 1 RETURNING *;");
+    let del = only_stmt(&list).stmt.unwrap().as_delete_stmt().expect("DeleteStmt");
+    let ret = del.returningClause.unwrap().as_returning_clause().unwrap();
+    assert_eq!(ret.exprs.len(), 1);
+    let rt = ret.exprs.nth(0).as_res_target().unwrap();
+    let cr = rt.val.unwrap().as_column_ref().unwrap();
+    assert!(cr.fields.nth(0).as_a_star().is_some());
+}
+
+#[test]
 fn copy_stmt_to_file() {
     let list = parse("COPY foo TO '/tmp/x.dat'");
     let cs = only_stmt(&list).stmt.unwrap().as_copy_stmt().expect("CopyStmt");
@@ -494,4 +521,120 @@ fn create_table_two_columns() {
         let last = tn.names.nth(tn.names.len() - 1).as_string().expect("name").sval;
         assert_eq!(last, *tyname);
     }
+}
+
+#[test]
+fn with_clause_select() {
+    use types_nodes::parsenodes::{CTEMaterialize, CommonTableExpr, WithClause};
+    let list = parse("WITH x AS (SELECT 1) SELECT * FROM x");
+    let rs = only_stmt(&list);
+    let sel = rs.stmt.expect("stmt").as_select_stmt().expect("SelectStmt");
+    let wc = sel
+        .withClause
+        .expect("withClause")
+        .as_variant::<WithClause>()
+        .expect("WithClause");
+    assert!(!wc.recursive);
+    assert_eq!(wc.location, 0);
+    assert_eq!(wc.ctes.len(), 1);
+    let cte = wc.ctes.nth(0).as_variant::<CommonTableExpr>().expect("CommonTableExpr");
+    assert_eq!(cte.ctename, Some("x"));
+    assert!(cte.aliascolnames.is_nil());
+    assert_eq!(cte.ctematerialized, CTEMaterialize::CTEMaterializeDefault);
+    assert_eq!(cte.location, 5);
+    assert!(!cte.cterecursive && cte.cterefcount == 0);
+    let cq = cte.ctequery.expect("ctequery").as_select_stmt().expect("SelectStmt");
+    assert_eq!(cq.targetList.len(), 1);
+    assert!(cte.search_clause.is_none() && cte.cycle_clause.is_none());
+}
+
+#[test]
+fn with_clause_variants() {
+    use types_nodes::parsenodes::{CTEMaterialize, CommonTableExpr, WithClause};
+    let list = parse(
+        "WITH RECURSIVE x (a, b) AS MATERIALIZED (SELECT 1, 2), \
+         y AS NOT MATERIALIZED (SELECT 3) \
+         SELECT a FROM x ORDER BY a LIMIT 2",
+    );
+    let rs = only_stmt(&list);
+    let sel = rs.stmt.expect("stmt").as_select_stmt().expect("SelectStmt");
+    assert_eq!(sel.sortClause.len(), 1);
+    assert!(sel.limitCount.is_some());
+    let wc = sel
+        .withClause
+        .expect("withClause")
+        .as_variant::<WithClause>()
+        .expect("WithClause");
+    assert!(wc.recursive);
+    assert_eq!(wc.ctes.len(), 2);
+    let x = wc.ctes.nth(0).as_variant::<CommonTableExpr>().expect("cte");
+    assert_eq!(x.ctename, Some("x"));
+    assert_eq!(x.aliascolnames.len(), 2);
+    assert_eq!(x.aliascolnames.nth(0).as_string().expect("colname").sval, "a");
+    assert_eq!(x.ctematerialized, CTEMaterialize::CTEMaterializeAlways);
+    let y = wc.ctes.nth(1).as_variant::<CommonTableExpr>().expect("cte");
+    assert_eq!(y.ctematerialized, CTEMaterialize::CTEMaterializeNever);
+}
+
+#[test]
+fn multiple_with_clauses_rejected() {
+    let e = parse_err("WITH x AS (SELECT 1) (WITH y AS (SELECT 2) SELECT 1) SELECT 1");
+    assert_eq!(e.message(), "multiple WITH clauses not allowed");
+}
+
+#[test]
+fn join_on_shapes() {
+    use types_nodes::JoinType;
+    let list = parse("SELECT t1.g FROM t t1 JOIN t t2 ON t1.pk = t2.fk;");
+    let sel = select_of(only_stmt(&list));
+    assert_eq!(sel.fromClause.len(), 1);
+    let j = sel.fromClause.nth(0).as_join_expr().expect("JoinExpr");
+    assert_eq!(j.jointype, JoinType::JOIN_INNER);
+    assert!(!j.isNatural && j.usingClause.is_nil() && j.join_using_alias.is_none());
+    assert!(j.alias.is_none() && j.rtindex == 0);
+    let l = j.larg.as_range_var().expect("larg RangeVar");
+    assert_eq!(l.alias.unwrap().aliasname, Some("t1"));
+    let e = j.quals.expect("ON quals").as_a_expr().expect("A_Expr");
+    assert_eq!(e.name.nth(0).as_string().unwrap().sval, "=");
+
+    let list = parse("SELECT * FROM a INNER JOIN b ON true;");
+    let j = select_of(only_stmt(&list)).fromClause.nth(0).as_join_expr().unwrap();
+    assert_eq!(j.jointype, JoinType::JOIN_INNER);
+    assert!(j.quals.is_some());
+
+    let list = parse("SELECT * FROM a CROSS JOIN b;");
+    let j = select_of(only_stmt(&list)).fromClause.nth(0).as_join_expr().unwrap();
+    assert_eq!(j.jointype, JoinType::JOIN_INNER);
+    assert!(j.quals.is_none());
+
+    let list = parse("SELECT * FROM (a JOIN b ON a.x = b.x) c;");
+    let j = select_of(only_stmt(&list)).fromClause.nth(0).as_join_expr().unwrap();
+    assert_eq!(j.alias.expect("alias").aliasname, Some("c"));
+
+    let list = parse("SELECT * FROM a JOIN b ON a.x = b.x JOIN c ON b.y = c.y;");
+    let j = select_of(only_stmt(&list)).fromClause.nth(0).as_join_expr().unwrap();
+    assert!(j.larg.as_join_expr().is_some());
+    assert!(j.rarg.as_range_var().is_some());
+
+    let list = parse("SELECT * FROM a LEFT OUTER JOIN b ON a.x = b.x;");
+    let j = select_of(only_stmt(&list)).fromClause.nth(0).as_join_expr().unwrap();
+    assert_eq!(j.jointype, JoinType::JOIN_LEFT);
+    let list = parse("SELECT * FROM a RIGHT JOIN b ON a.x = b.x;");
+    let j = select_of(only_stmt(&list)).fromClause.nth(0).as_join_expr().unwrap();
+    assert_eq!(j.jointype, JoinType::JOIN_RIGHT);
+    let list = parse("SELECT * FROM a FULL JOIN b ON a.x = b.x;");
+    let j = select_of(only_stmt(&list)).fromClause.nth(0).as_join_expr().unwrap();
+    assert_eq!(j.jointype, JoinType::JOIN_FULL);
+}
+
+#[test]
+#[should_panic(expected = "JOIN USING unimplemented")]
+fn join_using_is_loud() {
+    let _ = parse("SELECT * FROM a JOIN b USING (x);");
+}
+
+#[test]
+#[should_panic(expected = "NATURAL JOIN unimplemented")]
+fn natural_join_is_loud() {
+    let _ = parse("SELECT * FROM a NATURAL JOIN b;");
 }

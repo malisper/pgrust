@@ -5,6 +5,7 @@
 
 extern crate alloc;
 
+pub mod agg;
 pub mod fcinfo;
 pub mod getarg;
 pub mod result;
@@ -12,6 +13,7 @@ pub mod rsinfo;
 pub mod soft;
 pub mod wire;
 
+pub use agg::*;
 pub use fcinfo::*;
 pub use getarg::*;
 pub use result::*;

@@ -1,26 +1,30 @@
 // nodeModifyTable.c, single-relation INSERT/UPDATE/DELETE arms. The subplan
 // stays with the ExecProcNode dispatcher (execmain owns the node enum;
 // nodesort precedent) — exec_modify_table takes a fetch closure. MERGE, ON
-// CONFLICT, triggers, FDW batching, RETURNING and EvalPlanQual (single-session
-// M4) are loud named panics.
+// CONFLICT, triggers, FDW batching and EvalPlanQual (single-session M4) are
+// loud named panics; RETURNING projects OLD/NEW-free lists (those are loud at
+// projection build).
 #![allow(non_snake_case)]
 
 use std::rc::Rc;
 
 use datum::Datum;
+use execexpr::{exec_build_projection_info, EvalSlots, ExprState};
 use executils::{EStateData, ExecSlotId};
+use mcx::PgBox;
 use tableam_vocab::{LockTupleMode, TM_FailureData, TM_Result, TU_UpdateIndexes};
 use types_error::{
-    PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_NOT_NULL_VIOLATION,
+    PgError, PgResult, ERRCODE_CHECK_VIOLATION, ERRCODE_DATATYPE_MISMATCH,
+    ERRCODE_NOT_NULL_VIOLATION,
     ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION,
 };
 use types_nodes::nodes_enums::CmdType;
 use types_nodes::plannodes::ModifyTable;
 use types_nodes::{Node, NodeTag};
 use types_rel::{Relation, RELKIND_RELATION};
-use types_slot::{SlotData, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
+use types_slot::{SlotData, TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 use types_snapshot::{SnapshotData, SNAPSHOT_ANY};
-use types_tuple::ItemPointerData;
+use types_tuple::{ItemPointerData, TupleDescData};
 
 // ExecBuildUpdateProjection's step stream, resolved once per statement onto a
 // flat per-target-column source map (rule 4: known-set dispatch, no ExprState).
@@ -39,18 +43,32 @@ pub struct ModifyTableState<'mcx> {
     pub result_rti: u32,
     ri_newTupleSlot: Option<ExecSlotId>,
     ri_oldTupleSlot: Option<ExecSlotId>,
+    ri_ReturningSlot: Option<ExecSlotId>,
     ri_projectNewInfoValid: bool,
     ri_RowIdAttNo: i16,
     update_cols: mcx::PgVec<'mcx, NewColSrc>,
     indexes: Option<execindexing::ResultRelIndexState<'mcx>>,
     snapshot_any: Option<Rc<SnapshotData<'mcx>>>,
+    returning_slot: Option<ExecSlotId>,
+    project_returning: Option<PgBox<'mcx, ExprState<'mcx>>>,
+    // ri_CheckConstraintExprs (built on first ExecRelCheck, per C); each
+    // compiled qual rides with its constraint name for the 23514 report.
+    check_exprs: Option<mcx::PgVec<'mcx, CheckExpr<'mcx>>>,
 }
 
-/// `ExecInitModifyTable` (nodeModifyTable.c); the caller inits the subplan.
+struct CheckExpr<'mcx> {
+    name: mcx::PgString<'mcx>,
+    state: Option<PgBox<'mcx, ExprState<'mcx>>>,
+}
+
+/// `ExecInitModifyTable` (nodeModifyTable.c); the caller inits the subplan
+/// and, when RETURNING is present, passes the result descriptor built from
+/// the node's targetlist (C's ExecInitResultTupleSlotTL).
 pub fn exec_init_modify_table<'mcx>(
     node: &'mcx ModifyTable<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
+    returning_desc: Option<Rc<TupleDescData<'mcx>>>,
 ) -> PgResult<ModifyTableState<'mcx>> {
     assert!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0);
     if !matches!(
@@ -66,12 +84,11 @@ pub fn exec_init_modify_table<'mcx>(
         panic!("ExecInitModifyTable (nodeModifyTable.c): ON CONFLICT arm not ported");
     }
     if !node.withCheckOptionLists.is_nil()
-        || !node.returningLists.is_nil()
         || !node.mergeActionLists.is_nil()
         || !node.fdwPrivLists.is_nil()
     {
         panic!(
-            "ExecInitModifyTable (nodeModifyTable.c): WCO/RETURNING/MERGE/FDW \
+            "ExecInitModifyTable (nodeModifyTable.c): WCO/MERGE/FDW \
              lists not ported"
         );
     }
@@ -103,6 +120,32 @@ pub fn exec_init_modify_table<'mcx>(
         assert!(rowid_attno > 0, "could not find junk ctid column");
     }
 
+    // The RETURNING projection: scan vars read the returned tuple (result
+    // relation descriptor), OUTER_VARs the plan tuple; the result slot is
+    // virtual over the caller-built descriptor.
+    let mut returning_slot = None;
+    let mut project_returning = None;
+    if !node.returningLists.is_nil() {
+        assert_eq!(node.returningLists.len(), 1);
+        let rlist = node
+            .returningLists
+            .nth(0)
+            .as_list()
+            .expect("returningLists cell is a List");
+        let params = estate.param_bind();
+        let mcx = estate.es_query_cxt;
+        let proj = {
+            let rel = estate.es_relations[(rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened");
+            exec_build_projection_info(mcx, rlist, Some(&rel.rd_att), params)?
+        };
+        let desc = returning_desc.expect("caller passes the RETURNING result descriptor");
+        returning_slot =
+            Some(estate.exec_init_extra_tuple_slot(Some(desc), TupleSlotKind::Virtual));
+        project_returning = Some(proj);
+    }
+
     // fireBSTriggers/ExecSetupTransitionCaptureState: the trimmed relcache
     // entry carries no trigger descriptor, so statement triggers are
     // undetectable until pg_trigger lands (none exist without CREATE TRIGGER).
@@ -114,11 +157,15 @@ pub fn exec_init_modify_table<'mcx>(
         result_rti: rti,
         ri_newTupleSlot: None,
         ri_oldTupleSlot: None,
+        ri_ReturningSlot: None,
         ri_projectNewInfoValid: false,
         ri_RowIdAttNo: rowid_attno,
         update_cols: mcx::PgVec::new_in(estate.es_query_cxt),
         indexes: None,
         snapshot_any: Some(Rc::new(SnapshotData::sentinel(estate.es_query_cxt, SNAPSHOT_ANY))),
+        returning_slot,
+        project_returning,
+        check_exprs: None,
     })
 }
 
@@ -171,6 +218,9 @@ pub fn exec_modify_table<'mcx>(
                 }
                 let slot = exec_get_insert_new_tuple(mt, estate, plan_slot)?;
                 exec_insert(mt, estate, slot)?;
+                if mt.project_returning.is_some() {
+                    return Ok(Some(exec_process_returning(mt, estate, slot, plan_slot)?));
+                }
             }
             CmdType::CMD_UPDATE => {
                 let tupleid = fetch_row_id(mt, estate, plan_slot);
@@ -193,15 +243,21 @@ pub fn exec_modify_table<'mcx>(
                 };
                 assert!(found, "failed to fetch tuple being updated");
                 let slot = exec_get_update_new_tuple(mt, estate, plan_slot)?;
-                exec_update(mt, estate, &tupleid, slot)?;
+                let modified = exec_update(mt, estate, &tupleid, slot)?;
+                if modified && mt.project_returning.is_some() {
+                    return Ok(Some(exec_process_returning(mt, estate, slot, plan_slot)?));
+                }
             }
             CmdType::CMD_DELETE => {
                 let tupleid = fetch_row_id(mt, estate, plan_slot);
-                exec_delete(mt, estate, &tupleid)?;
+                let modified = exec_delete(mt, estate, &tupleid)?;
+                if modified && mt.project_returning.is_some() {
+                    let old_slot = exec_delete_fetch_old(mt, estate, &tupleid)?;
+                    return Ok(Some(exec_process_returning(mt, estate, old_slot, plan_slot)?));
+                }
             }
             other => panic!("ExecModifyTable (nodeModifyTable.c): {other:?} arm not ported"),
         }
-        // RETURNING is loud at init; every row yields None to the caller.
     }
 
     debug_assert!(estate.es_insert_pending_result_relations.is_empty());
@@ -495,7 +551,7 @@ fn exec_update<'mcx>(
     estate: &mut EStateData<'mcx>,
     tupleid: &ItemPointerData,
     slot_id: ExecSlotId,
-) -> PgResult<()> {
+) -> PgResult<bool> {
     let mcx = estate.es_query_cxt;
     let output_cid = estate.es_output_cid;
     let EStateData { es_relations, es_tupleTable, es_snapshot, .. } = estate;
@@ -512,7 +568,7 @@ fn exec_update<'mcx>(
         mt.indexes = Some(execindexing::ExecOpenIndices(mcx, rel, false)?);
     }
 
-    exec_constraints(rel, slot)?;
+    exec_constraints(mcx, &mut mt.check_exprs, rel, slot)?;
 
     let mut tmfd = TM_FailureData::default();
     let mut lockmode = LockTupleMode::LockTupleExclusive;
@@ -537,7 +593,7 @@ fn exec_update<'mcx>(
             if tmfd.cmax != output_cid {
                 return Err(self_modified_violation("updated"));
             }
-            return Ok(());
+            return Ok(false);
         }
         TM_Result::TM_Updated | TM_Result::TM_Deleted => panic!(
             "ExecUpdate (nodeModifyTable.c): concurrent {result:?} needs \
@@ -561,7 +617,7 @@ fn exec_update<'mcx>(
     if mt.canSetTag {
         estate.es_processed += 1;
     }
-    Ok(())
+    Ok(true)
 }
 
 // ExecDelete + ExecDeletePrologue/Act/Epilogue (nodeModifyTable.c), plain-heap
@@ -570,7 +626,7 @@ fn exec_delete<'mcx>(
     mt: &ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     tupleid: &ItemPointerData,
-) -> PgResult<()> {
+) -> PgResult<bool> {
     let mcx = estate.es_query_cxt;
     let output_cid = estate.es_output_cid;
     let EStateData { es_relations, es_snapshot, .. } = &*estate;
@@ -598,7 +654,7 @@ fn exec_delete<'mcx>(
             if tmfd.cmax != output_cid {
                 return Err(self_modified_violation("deleted"));
             }
-            return Ok(());
+            return Ok(false);
         }
         TM_Result::TM_Updated | TM_Result::TM_Deleted => panic!(
             "ExecDelete (nodeModifyTable.c): concurrent {result:?} needs \
@@ -610,7 +666,75 @@ fn exec_delete<'mcx>(
     if mt.canSetTag {
         estate.es_processed += 1;
     }
-    Ok(())
+    Ok(true)
+}
+
+// ExecDelete's RETURNING arm: re-fetch the deleted tuple under SnapshotAny
+// into a lazily-built table-format slot (C ExecGetReturningSlot).
+fn exec_delete_fetch_old<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    tupleid: &ItemPointerData,
+) -> PgResult<ExecSlotId> {
+    if mt.ri_ReturningSlot.is_none() {
+        let mcx = estate.es_query_cxt;
+        let (kind, desc) = {
+            let rel = estate.es_relations[(mt.result_rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened");
+            (tableam::table_slot_callbacks(rel), rel.rd_att.clone())
+        };
+        let slot = exectuples::make_tuple_table_slot(mcx, kind, Some(desc));
+        let id = ExecSlotId(estate.es_tupleTable.len() as u32);
+        estate.es_tupleTable.push(slot);
+        mt.ri_ReturningSlot = Some(id);
+    }
+    let slot_id = mt.ri_ReturningSlot.expect("just initialized");
+    let found = {
+        let EStateData { es_relations, es_tupleTable, es_query_cxt, .. } = estate;
+        let rel = es_relations[(mt.result_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        tableam::table_tuple_fetch_row_version(
+            *es_query_cxt,
+            rel,
+            tupleid,
+            &mt.snapshot_any,
+            &mut es_tupleTable[slot_id.0 as usize],
+        )?
+    };
+    assert!(found, "failed to fetch deleted tuple for DELETE RETURNING");
+    Ok(slot_id)
+}
+
+// ExecProcessReturning (nodeModifyTable.c): scan slot = the returned tuple,
+// outer slot = the plan tuple, projected into the node's virtual result slot
+// (C's econtext scantuple/outertuple + ExecProject).
+fn exec_process_returning<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    tuple_slot: ExecSlotId,
+    plan_slot: ExecSlotId,
+) -> PgResult<ExecSlotId> {
+    let result_id = mt.returning_slot.expect("RETURNING slot initialized");
+    let state = mt.project_returning.as_deref_mut().expect("RETURNING projection built");
+    let mcx = estate.es_query_cxt;
+    let table: &mut [SlotData<'mcx>] = &mut estate.es_tupleTable;
+    let (t, p, r) = (tuple_slot.0 as usize, plan_slot.0 as usize, result_id.0 as usize);
+    assert!(t < table.len() && p < table.len() && r < table.len());
+    assert!(r != t && r != p);
+    let base = table.as_mut_ptr();
+    // SAFETY: bounds-checked, result distinct from both inputs; when the plan
+    // slot IS the tuple slot (INSERT without slot coercion) only one &mut is
+    // derived and OUTER_VAR references panic loudly in the interpreter.
+    let scan = unsafe { &mut *base.add(t) };
+    // SAFETY: as above; p != t makes the borrows disjoint.
+    let outer = if p != t { Some(unsafe { &mut *base.add(p) }) } else { None };
+    // SAFETY: as above; r is distinct from t and p.
+    let result = unsafe { &mut *base.add(r) };
+    let mut slots = EvalSlots { scan: Some(scan), inner: None, outer };
+    execexpr::exec_project(state, &mut slots, result, mcx)?;
+    Ok(result_id)
 }
 
 #[cold]
@@ -630,10 +754,10 @@ fn self_modified_violation(verb: &str) -> Box<PgError> {
 }
 
 // ExecInsert (nodeModifyTable.c): the plain-heap arm — materialize, check
-// NOT NULL constraints, table_tuple_insert, count. Index inserts are the nbt
+// constraints, table_tuple_insert, count. Index inserts are the nbt
 // insert lane's (loud); row triggers are undetectable (no TrigDesc yet).
 fn exec_insert<'mcx>(
-    mt: &ModifyTableState<'mcx>,
+    mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     slot_id: ExecSlotId,
 ) -> PgResult<()> {
@@ -655,7 +779,7 @@ fn exec_insert<'mcx>(
         );
     }
 
-    exec_constraints(rel, slot)?;
+    exec_constraints(mcx, &mut mt.check_exprs, rel, slot)?;
 
     tableam::table_tuple_insert(mcx, rel, slot, output_cid, 0, None)?;
 
@@ -665,47 +789,199 @@ fn exec_insert<'mcx>(
     Ok(())
 }
 
-// ExecConstraints (execMain.c): CHECK constraints loud, NOT NULL live.
-fn exec_constraints<'mcx>(rel: &Relation<'mcx>, slot: &mut SlotData<'mcx>) -> PgResult<()> {
+// ExecConstraints (execMain.c): NOT NULL + CHECK arms live.
+fn exec_constraints<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    check_exprs: &mut Option<mcx::PgVec<'mcx, CheckExpr<'mcx>>>,
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<()> {
     if let Some(constr) = rel.rd_att.constr.as_deref() {
-        if constr.num_check > 0 || !constr.check.is_empty() {
-            panic!("ExecConstraints (execMain.c): CHECK constraints not ported");
-        }
         debug_assert!(!constr.has_generated_stored && !constr.has_generated_virtual);
         if constr.has_not_null {
-            exec_not_null_constraints(rel, slot)?;
+            exec_not_null_constraints(mcx, rel, slot)?;
+        }
+        if constr.num_check > 0 {
+            if let Some(failed) = exec_rel_check(mcx, check_exprs, rel, slot)? {
+                return Err(check_violation(mcx, rel, slot, failed));
+            }
         }
     }
     Ok(())
 }
 
-// ExecConstraints (execMain.c), NOT NULL arm.
+// ExecRelCheck (execMain.c): compile once into check_exprs, evaluate with the
+// slot as the scan tuple; ExecCheck semantics (NULL result passes). Returns
+// the failing constraint's index.
+fn exec_rel_check<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    check_exprs: &mut Option<mcx::PgVec<'mcx, CheckExpr<'mcx>>>,
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<Option<usize>> {
+    let constr = rel.rd_att.constr.as_deref().expect("caller checked");
+    assert!(
+        constr.check.len() == constr.num_check as usize,
+        "{} pg_constraint record(s) missing for relation \"{}\"",
+        constr.num_check as usize - constr.check.len(),
+        String::from_utf8_lossy(rel.rd_rel.relname.name_str()),
+    );
+    if check_exprs.is_none() {
+        let mut compiled: mcx::PgVec<'mcx, CheckExpr<'mcx>> = mcx::PgVec::new_in(mcx);
+        compiled.try_reserve_exact(constr.check.len()).map_err(|_| {
+            Box::new(mcx.oom(constr.check.len() * core::mem::size_of::<CheckExpr<'_>>()))
+        })?;
+        for c in constr.check.iter() {
+            let name = c.ccname.as_ref().expect("ccname").clone_in(mcx)?;
+            if !c.ccenforced {
+                compiled.push(CheckExpr { name, state: None });
+                continue;
+            }
+            let ccbin = c.ccbin.as_ref().expect("ccbin");
+            let node = readfuncs::stringToNode(mcx, ccbin.as_str())?;
+            let state = execexpr::exec_init_expr(mcx, Some(node), execexpr::ParamBind::NONE)?
+                .expect("check constraint expr");
+            compiled.push(CheckExpr { name, state: Some(state) });
+        }
+        *check_exprs = Some(compiled);
+    }
+    for (i, ce) in check_exprs.as_mut().expect("just built").iter_mut().enumerate() {
+        let Some(state) = ce.state.as_deref_mut() else { continue };
+        let mut slots = EvalSlots { scan: Some(slot), inner: None, outer: None };
+        let r = execexpr::exec_eval_expr(state, &mut slots)?;
+        if !r.isnull && !r.value.as_bool() {
+            return Ok(Some(i));
+        }
+    }
+    Ok(None)
+}
+
+// ExecConstraints (execMain.c), NOT NULL arm (ReportNotNullViolationError).
 fn exec_not_null_constraints<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
 ) -> PgResult<()> {
     for i in 0..rel.rd_att.natts as usize {
         let att = rel.rd_att.attr(i);
         if att.attnotnull && exectuples::slot_attisnull(slot, i as i32 + 1) {
-            return Err(not_null_violation(rel, i));
+            return Err(not_null_violation(mcx, rel, slot, i));
         }
     }
     Ok(())
 }
 
+// ExecBuildSlotValueDescription (execMain.c), table-SELECT-permission arm
+// (single-superuser boot: column-ACL filtering and RLS are unreachable).
+fn slot_value_description<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<String> {
+    const MAX_FIELD_LEN: usize = 64;
+    exectuples::slot_getallattrs(slot);
+    let mut buf = String::from("(");
+    let mut write_comma = false;
+    for i in 0..rel.rd_att.natts as usize {
+        let att = rel.rd_att.attr(i);
+        if att.attisdropped {
+            continue;
+        }
+        if write_comma {
+            buf.push_str(", ");
+        }
+        write_comma = true;
+        let base = slot.base();
+        if base.tts_isnull[i] {
+            buf.push_str("null");
+            continue;
+        }
+        let value = base.tts_values[i];
+        let (foutoid, _) = lsyscache::typ::getTypeOutputInfo(att.atttypid)?;
+        let mut finfo = fmgr_core::fmgr_info(foutoid)?;
+        let out = fmgr_core::function_call1_coll_in(&mut finfo, 0, mcx, value)?;
+        // SAFETY: output fns return a NUL-terminated cstring datum.
+        let s = unsafe {
+            core::ffi::CStr::from_ptr(out.as_usize() as *const core::ffi::c_char)
+        }
+        .to_bytes();
+        let s = core::str::from_utf8(s).expect("type output is UTF-8");
+        if s.len() <= MAX_FIELD_LEN {
+            buf.push_str(s);
+        } else {
+            let mut end = MAX_FIELD_LEN;
+            while !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            buf.push_str(&s[..end]);
+            buf.push_str("...");
+        }
+    }
+    buf.push(')');
+    Ok(buf)
+}
+
 #[cold]
 #[inline(never)]
-fn not_null_violation(rel: &Relation<'_>, attidx: usize) -> Box<PgError> {
+fn schema_name_of(mcx: mcx::Mcx<'_>, rel: &Relation<'_>) -> String {
+    lsyscache::misc::get_namespace_name(mcx, rel.rd_rel.relnamespace)
+        .ok()
+        .flatten()
+        .map(|s| s.as_str().to_owned())
+        .unwrap_or_default()
+}
+
+#[cold]
+#[inline(never)]
+fn not_null_violation<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+    attidx: usize,
+) -> Box<PgError> {
     let att = rel.rd_att.attr(attidx);
     let col = String::from_utf8_lossy(att.attname.name_str()).into_owned();
     let table = String::from_utf8_lossy(rel.rd_rel.relname.name_str()).into_owned();
-    Box::new(
-        PgError::error(format!(
-            "null value in column \"{col}\" of relation \"{table}\" violates \
-             not-null constraint"
-        ))
-        .with_sqlstate(ERRCODE_NOT_NULL_VIOLATION),
-    )
+    let mut e = PgError::error(format!(
+        "null value in column \"{col}\" of relation \"{table}\" violates \
+         not-null constraint"
+    ))
+    .with_sqlstate(ERRCODE_NOT_NULL_VIOLATION)
+    .with_schema_name(schema_name_of(mcx, rel))
+    .with_table_name(table);
+    if let Ok(desc) = slot_value_description(mcx, rel, slot) {
+        e = e.with_detail(format!("Failing row contains {desc}."));
+    }
+    e.column_name = Some(col);
+    Box::new(e)
+}
+
+#[cold]
+#[inline(never)]
+fn check_violation<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+    failed: usize,
+) -> Box<PgError> {
+    let constr = rel.rd_att.constr.as_deref().expect("has checks");
+    let ccname = constr.check[failed]
+        .ccname
+        .as_ref()
+        .map(|s| s.as_str().to_owned())
+        .unwrap_or_default();
+    let table = String::from_utf8_lossy(rel.rd_rel.relname.name_str()).into_owned();
+    let mut e = PgError::error(format!(
+        "new row for relation \"{table}\" violates check constraint \"{ccname}\""
+    ))
+    .with_sqlstate(ERRCODE_CHECK_VIOLATION)
+    .with_schema_name(schema_name_of(mcx, rel))
+    .with_table_name(table)
+    .with_constraint_name(ccname);
+    if let Ok(desc) = slot_value_description(mcx, rel, slot) {
+        e = e.with_detail(format!("Failing row contains {desc}."));
+    }
+    Box::new(e)
 }
 
 #[cold]

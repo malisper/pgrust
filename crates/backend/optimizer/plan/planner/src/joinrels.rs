@@ -79,17 +79,16 @@ fn join_search_one_level(run: &mut PlannerRun<'_>, level: usize) -> PgResult<()>
     let prev = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.join_rel_level[1]);
     for (i, &old_rel) in prev.iter().enumerate() {
         debug_assert!(run.root.join_info_list.is_empty());
-        if run.root.rel(old_rel).joininfo.is_empty() && !run.root.rel(old_rel).has_eclass_joins {
-            panic!(
-                "make_rels_by_clauseless_joins (joinrels.c): cartesian product; M2 join lane"
-            );
-        }
+        let clauseless =
+            run.root.rel(old_rel).joininfo.is_empty() && !run.root.rel(old_rel).has_eclass_joins;
         for &other_rel in prev[i + 1..].iter() {
             let overlap = relids_overlap(
                 &run.root.rel(old_rel).relids,
                 &run.root.rel(other_rel).relids,
             );
-            if !overlap && have_relevant_joinclause(run, old_rel, other_rel) {
+            // make_rels_by_clauseless_joins arm: a clause-free rel joins
+            // every other rel (cartesian product), as C.
+            if !overlap && (clauseless || have_relevant_joinclause(run, old_rel, other_rel)) {
                 make_join_rel(run, old_rel, other_rel)?;
             }
         }
