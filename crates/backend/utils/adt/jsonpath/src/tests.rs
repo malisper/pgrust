@@ -79,6 +79,57 @@ fn soft_errors_are_recorded_not_raised() {
     }
 }
 
+// Bison expr/predicate class + method-keyword disambiguation + scanner
+// edge cases from the audit (C 18.3 behavior derived from the grammar/flex
+// rules; not present in regress).
+static EXTRA_OK: &[(&str, &str)] = &[
+    ("$.type", "$.\"type\""),
+    ("$.size", "$.\"size\""),
+    ("$.datetime", "$.\"datetime\""),
+    ("$.decimal", "$.\"decimal\""),
+    ("$.timestamp_tz", "$.\"timestamp_tz\""),
+    ("(1).type()", "(1).type()"),
+];
+
+static EXTRA_ERR: &[(&str, &str)] = &[
+    ("1 && 2", "syntax error at or near \"&&\" of jsonpath input"),
+    ("$ ? (@)", "syntax error at or near \")\" of jsonpath input"),
+    ("$?(1)", "syntax error at or near \")\" of jsonpath input"),
+    ("exists(1 == 2)", "syntax error at or near \"==\" of jsonpath input"),
+    ("!(1)", "syntax error at or near \")\" of jsonpath input"),
+    ("(1) is unknown", "syntax error at or near \"is\" of jsonpath input"),
+    ("$[1 == 1]", "syntax error at or near \"==\" of jsonpath input"),
+    ("(1 == 1) + 2", "syntax error at or near \"+\" of jsonpath input"),
+    ("exists($.a) + 1", "syntax error at or near \"+\" of jsonpath input"),
+    ("-(1 == 1)", "syntax error at end of jsonpath input"),
+    ("1 == !(true)", "syntax error at or near \"!\" of jsonpath input"),
+    ("\"abc\\", "unexpected end after backslash at or near \"\\\" of jsonpath input"),
+    ("\"a\\\nb\"", "unexpected end after backslash at or near \"\\\" of jsonpath input"),
+    ("1 2 \"x", "syntax error at or near \"2\" of jsonpath input"),
+];
+
+#[test]
+fn audit_extra_vectors() {
+    setup();
+    for (input, expected) in EXTRA_OK {
+        let cx = MemoryContext::new("jsonpath extra ok");
+        let image = jsonpath_in(cx.mcx(), input.as_bytes(), None)
+            .unwrap_or_else(|e| panic!("jsonpath_in({input:?}): {}", e.message()))
+            .expect("hard path returns Some");
+        assert_eq!(&out_text(&image), expected, "canonical form of {input:?}");
+    }
+    for (input, msg) in EXTRA_ERR {
+        let cx = MemoryContext::new("jsonpath extra err");
+        match jsonpath_in(cx.mcx(), input.as_bytes(), None) {
+            Err(e) => assert_eq!(e.message(), *msg, "message for {input:?}"),
+            Ok(v) => panic!(
+                "expected error {msg:?} for {input:?}, got {:?}",
+                v.map(|img| out_text(&img))
+            ),
+        }
+    }
+}
+
 #[test]
 fn header_flags() {
     setup();
