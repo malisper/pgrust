@@ -894,7 +894,27 @@ fn match_opclause_to_indexcol<'mcx>(
         && !relids_is_member(index_relid as i32, &run.root.rinfo(rinfo).left_relids)
         && !clauses::contain_volatile_functions(leftop)?
     {
-        panic!("commute_restrictinfo (indxpath.c): const-op-indexkey; M2 commutation lane");
+        if index_coll_matches_expr_coll(idxcollation, op.inputcollid) {
+            let comm_op = lsyscache::get_commutator(op.opno)?;
+            if comm_op != 0 && lsyscache::op_in_opfamily(comm_op, opfamily)? {
+                let commrinfo = crate::initsplan::commute_restrictinfo(run, rinfo, comm_op)?;
+                return Ok(Some(IndexClause {
+                    rinfo: Some(rinfo),
+                    indexquals: {
+                        let mut v = PgVec::new_in(run.mcx);
+                        v.push(commrinfo);
+                        v
+                    },
+                    lossy: false,
+                    indexcol: indexcol as i16,
+                    indexcols: PgVec::new_in(run.mcx),
+                }));
+            }
+        }
+        let opfuncid = lsyscache::get_opcode(op.opno)?;
+        if let Some(ic) = get_index_clause_from_support(run, rinfo, opfuncid, 1, indexcol, index)? {
+            return Ok(Some(ic));
+        }
     }
 
     Ok(None)
