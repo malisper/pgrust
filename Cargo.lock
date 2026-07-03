@@ -968,6 +968,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "commands_analyze"
+version = "0.0.0"
+
+[[package]]
 name = "commands_vacuum"
 version = "0.0.0"
 
@@ -3534,6 +3538,7 @@ dependencies = [
 name = "parser_driver"
 version = "0.0.0"
 dependencies = [
+ "gram_core",
  "mcx",
  "parser_seams",
  "parser_small1",
@@ -4081,6 +4086,7 @@ dependencies = [
  "deadlock_seams",
  "elog",
  "execmain",
+ "execmain_seams",
  "fmgr_seams",
  "gram_core",
  "guc",
@@ -4096,6 +4102,7 @@ dependencies = [
  "latch_seams",
  "libc",
  "lmgr_proc",
+ "lock",
  "lock_seams",
  "logical_seams",
  "logical_worker_seams",
@@ -4131,6 +4138,7 @@ dependencies = [
  "pqcomm",
  "pqformat",
  "pquery",
+ "predicate_seams",
  "prepare",
  "prepare_seams",
  "printtup",
@@ -5029,7 +5037,6 @@ dependencies = [
  "aclchk_seams",
  "adt_bool",
  "adt_float",
- "adt_int",
  "aio_seams",
  "async_seams",
  "autovacuum_seams",
@@ -5140,6 +5147,7 @@ dependencies = [
  "xact_seams",
  "xloginsert",
  "xloginsert_seams",
+ "xlogutils",
 ]
 
 [[package]]
@@ -5307,6 +5315,7 @@ dependencies = [
  "pgstat",
  "pgtz",
  "plancache",
+ "planner",
  "pmchild",
  "pmsignal",
  "portalcmds",

@@ -198,6 +198,7 @@ members = [
     "crates/backend/access/heap/heapam_handler",
     "crates/backend/access/heap/visibilitymap",
     "crates/backend/access/heap/vacuumlazy",
+    "crates/backend/commands/analyze",
     "crates/backend/commands/vacuum",
     "crates/backend/utils/fmgr/fmgr_core",
     "crates/backend/access/transam/subtrans_seams",

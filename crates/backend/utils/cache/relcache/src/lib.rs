@@ -4,6 +4,7 @@ pub mod build;
 pub mod indexlist;
 pub mod initfile;
 pub mod invalidate;
+pub mod rules;
 pub mod schemapg;
 pub mod store;
 #[cfg(test)]
@@ -28,6 +29,7 @@ pub use invalidate::{
     AtEOSubXact_RelationCache, AtEOXact_RelationCache, RelationCacheInvalidate,
     RelationCacheInvalidateEntry, RelationForgetRelation,
 };
+pub use rules::RelationGetRules;
 pub use store::RelationIdGetRelation;
 
 pub const MAX_EOXACT_LIST: usize = 32;
@@ -51,6 +53,7 @@ pub(crate) struct InProgressEnt {
 pub(crate) struct RelcacheState {
     pub(crate) mcx: Mcx<'static>,
     pub(crate) id_cache: PgHashMap<'static, Oid, RelCacheEnt>,
+    pub(crate) rules_cache: PgHashMap<'static, Oid, std::rc::Rc<rules::RdRules>>,
     pub(crate) in_progress: PgVec<'static, InProgressEnt>,
     pub(crate) eoxact_list: [Oid; MAX_EOXACT_LIST],
     pub(crate) eoxact_list_len: usize,
@@ -75,6 +78,7 @@ pub(crate) fn with_state<R>(f: impl FnOnce(&mut RelcacheState) -> R) -> R {
             ManuallyDrop::new(RelcacheState {
                 mcx,
                 id_cache: PgHashMap::with_capacity_in(INITRELCACHESIZE, mcx),
+                rules_cache: PgHashMap::new_in(mcx),
                 in_progress: PgVec::new_in(mcx),
                 eoxact_list: [0; MAX_EOXACT_LIST],
                 eoxact_list_len: 0,

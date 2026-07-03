@@ -19,6 +19,10 @@ pub struct IndexAccessInfo {
     pub opfamily: PgVec<'static, Oid>,
     pub indoption: PgVec<'static, i16>,
     pub indcollation: PgVec<'static, Oid>,
+    // C's IndexSupportInitialize preload of rd_support/rd_supportinfo, one
+    // BTORDER_PROC slot per key column (std Vec: rd_supportinfo's shape);
+    // without it the first scan of pg_amproc's own index recurses.
+    pub supportinfo: Vec<Option<types_fmgr::FmgrInfo>>,
 }
 
 seam_core::seam!(
@@ -43,6 +47,25 @@ seam_core::seam!(
         relid: Oid,
         form: &FormData_pg_class,
     ) -> PgResult<IndexAccessInfo>
+);
+
+// One pg_rewrite row (RelationBuildRuleLock's scan); ev_qual/ev_action are
+// the detoasted nodeToString texts ("<>" = NULL tree).
+pub struct PgRewriteRuleShape<'mcx> {
+    pub rule_id: Oid,
+    pub ev_type: u8,
+    pub ev_enabled: u8,
+    pub is_instead: bool,
+    pub ev_qual: &'mcx str,
+    pub ev_action: &'mcx str,
+}
+
+seam_core::seam!(
+    // pg_rewrite scan over RewriteRelRulenameIndexId (name order, as C).
+    pub fn scan_pg_rewrite<'mcx>(
+        mcx: Mcx<'mcx>,
+        ev_class: Oid,
+    ) -> PgResult<PgVec<'mcx, PgRewriteRuleShape<'mcx>>>
 );
 
 pub struct PgIndexListShape {
