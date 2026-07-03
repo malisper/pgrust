@@ -84,7 +84,7 @@ fn fetch_fp_info<'mcx>(mcx: Mcx<'mcx>, func_id: Oid) -> PgResult<FpInfo> {
             .into());
     };
     let fname = match syscache_seams::pg_proc_proname::call(func_id)? {
-        Some(name) => name.as_str().to_string(),
+        Some(name) => String::from_utf8_lossy(name.name_str()).into_owned(),
         None => String::new(),
     };
 
@@ -180,7 +180,7 @@ pub fn HandleFunctionRequest<'mcx>(
         let nspname = lsyscache::get_namespace_name(mcx, fip.namespace)?;
         aclchk::aclcheck_error(
             aclresult,
-            ObjectType::Schema,
+            ObjectType::OBJECT_SCHEMA,
             nspname.as_ref().map_or("", |s| s.as_str()),
         )?;
     }
@@ -195,7 +195,7 @@ pub fn HandleFunctionRequest<'mcx>(
         let funcname = lsyscache::get_func_name(mcx, fid)?;
         aclchk::aclcheck_error(
             aclresult,
-            ObjectType::Function,
+            ObjectType::OBJECT_FUNCTION,
             funcname.as_ref().map_or("", |s| s.as_str()),
         )?;
     }

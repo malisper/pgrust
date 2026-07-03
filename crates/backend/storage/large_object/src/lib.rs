@@ -17,8 +17,8 @@ use types_tuple::varatt;
 use types_tuple::{HeapTupleData, ItemPointerData};
 
 use pg_largeobject::{
-    Anum_pg_largeobject_loid, Anum_pg_largeobject_pageno, LargeObjectLOidPNIndexId,
-    LargeObjectRelationId, Snapshot,
+    Anum_pg_largeobject_data, Anum_pg_largeobject_loid, Anum_pg_largeobject_pageno,
+    LargeObjectLOidPNIndexId, LargeObjectRelationId, Snapshot,
 };
 
 pub type LargeObjectDesc = types_storage::large_object::LargeObjectDesc<Option<Snapshot>>;
@@ -176,7 +176,6 @@ fn read_lo_page<'mcx>(
     Ok(())
 }
 
-use pg_largeobject::Anum_pg_largeobject_data;
 
 pub fn inv_create<'mcx>(mcx: Mcx<'mcx>, lobjId: Oid) -> PgResult<Oid> {
     let lobjId_new = pg_largeobject::LargeObjectCreate(mcx, lobjId)?;
@@ -275,13 +274,8 @@ pub fn inv_close(obj_desc: LargeObjectDesc) -> PgResult<()> {
 }
 
 pub fn inv_drop<'mcx>(mcx: Mcx<'mcx>, lobjId: Oid) -> PgResult<i32> {
-    let object = catalog_dependency::ObjectAddress::set(LargeObjectRelationId, lobjId);
-    catalog_dependency::performDeletion(
-        mcx,
-        &object,
-        catalog_dependency::DropBehavior::Cascade,
-        0,
-    )?;
+    let object = pg_depend::ObjectAddress::set(LargeObjectRelationId, lobjId);
+    catalog_dependency::performDeletion(mcx, &object, catalog_dependency::DropBehavior::DROP_CASCADE, 0)?;
 
     xact::CommandCounterIncrement()?;
 
