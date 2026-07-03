@@ -21,6 +21,7 @@ mbutils = { path = "../../utils/mb/mbutils" }
 coerce = { path = "../coerce" }
 elog = { path = "../../utils/error/elog" }
 parse_relation = { path = "../parse_relation" }
+pg_class_seams = { path = "../../catalog/pg_class_seams" }
 parse_expr = { path = "../parse_expr" }
 analyze_seams = { path = "../analyze_seams" }
 backend_status = { path = "../../utils/activity/backend_status" }

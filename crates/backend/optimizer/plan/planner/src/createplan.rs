@@ -1248,11 +1248,7 @@ fn create_modifytable_plan<'mcx>(
     let mcx = run.mcx;
     let (subpath_id, operation, can_set_tag, nominal, root_rel, result_relations, epq_param, onconflict_id) = {
         let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
-        debug_assert!(
-            p.withCheckOptionLists.is_empty()
-                && p.rowMarks.is_empty()
-                && p.mergeActionLists.is_empty()
-        );
+        debug_assert!(p.withCheckOptionLists.is_empty() && p.rowMarks.is_empty());
         (
             p.subpath.expect("ModifyTablePath has a subpath"),
             p.operation,
@@ -1269,7 +1265,8 @@ fn create_modifytable_plan<'mcx>(
         x if x == CmdType::CMD_INSERT as u32 => CmdType::CMD_INSERT,
         x if x == CmdType::CMD_UPDATE as u32 => CmdType::CMD_UPDATE,
         x if x == CmdType::CMD_DELETE as u32 => CmdType::CMD_DELETE,
-        other => panic!("make_modifytable (createplan.c): operation {other}; M4 MERGE lane"),
+        x if x == CmdType::CMD_MERGE as u32 => CmdType::CMD_MERGE,
+        other => panic!("make_modifytable (createplan.c): operation {other} unported"),
     };
 
     let subplan = create_plan_recurse(run, subpath_id, CP_EXACT_TLIST)?;
@@ -1344,6 +1341,44 @@ fn create_modifytable_plan<'mcx>(
         plan.arbiterIndexes = crate::plancat::infer_arbiter_indexes(run, oc)?;
         plan.exclRelRTI = oc.exclRelIndex as u32;
         plan.exclRelTlist = oc.exclRelTlist.clone_in(mcx)?;
+    }
+    {
+        let (action_lists, join_conds) = {
+            let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
+            debug_assert!(p.mergeActionLists.len() <= 1);
+            let mut lists: mcx::PgVec<'mcx, mcx::PgVec<'mcx, types_pathnodes::NodeId>> =
+                mcx::PgVec::new_in(mcx);
+            for al in p.mergeActionLists.iter() {
+                lists.push(crate::relnode::pgvec_clone_shallow(mcx, al));
+            }
+            let mut conds: mcx::PgVec<'mcx, Option<types_pathnodes::NodeId>> =
+                mcx::PgVec::new_in(mcx);
+            for &c in p.mergeJoinConditions.iter() {
+                conds.push(c);
+            }
+            (lists, conds)
+        };
+        let mut mal = types_nodes::list::NodeList::nil();
+        for al in action_lists.iter() {
+            let mut nl = types_nodes::list::NodeList::nil();
+            for &id in al.iter() {
+                nl.lappend(mcx, *run.root.expr_node(id))?;
+            }
+            mal.lappend(mcx, Node::mk_list(mcx, nl)?)?;
+        }
+        plan.mergeActionLists = mal;
+        let mut mjc = types_nodes::list::NodeList::nil();
+        for &c in join_conds.iter() {
+            // A None condition (no BY SOURCE actions) rides as an empty
+            // implicit-AND list: ExecQual over it is constant true, matching
+            // C's NULL-condition semantics.
+            let cell = match c {
+                Some(id) => *run.root.expr_node(id),
+                None => Node::mk_list(mcx, types_nodes::list::NodeList::nil())?,
+            };
+            mjc.lappend(mcx, cell)?;
+        }
+        plan.mergeJoinConditions = mjc;
     }
     copy_generic_path_info(run, &mut plan.plan, path_id);
     Ok(plan.seal())
