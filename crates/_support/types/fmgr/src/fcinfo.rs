@@ -4,6 +4,7 @@ use core::any::Any;
 use core::ptr::NonNull;
 
 use ::datum::{Datum, NullableDatum};
+use ::mcx::{Mcx, MemoryContext};
 use ::types_core::fmgr::FnExprErased;
 use ::types_core::Oid;
 use ::types_error::{PgError, PgResult};
@@ -43,6 +44,9 @@ pub struct FmgrInfo {
 pub struct FunctionCallInfoBaseData<A: ?Sized = [NullableDatum]> {
     pub context: FmNodePtr,
     pub resultinfo: FmNodePtr,
+    // Result-mcx convention (C's CurrentMemoryContext for fmgr results): the
+    // caller arms it pre-invoke; by-ref-returning wrappers allocate there.
+    result_mcx: Option<NonNull<MemoryContext>>,
     pub fncollation: Oid,
     pub isnull: bool,
     pub nargs: i16,
@@ -51,9 +55,9 @@ pub struct FunctionCallInfoBaseData<A: ?Sized = [NullableDatum]> {
 
 pub type LocalFcinfo<const N: usize> = FunctionCallInfoBaseData<[NullableDatum; N]>;
 
-// Layout vs C fmgr.h (LP64): NullableDatum 16 == 16; header 24 <= 32 (flinfo
-// is a parameter); fcinfo(2) 56 <= 64; FmgrInfo 56 vs 48 (two fat erased
-// slots +8 each, dropped fn_mcxt -8; resolve-once type, rule-9 cap 128).
+// Layout vs C fmgr.h (LP64): NullableDatum 16 == 16; header 32 == 32
+// (result_mcx rides where C keeps flinfo); fcinfo(2) 64 <= 64; FmgrInfo 56
+// vs 48 (fat erased slots +8 each, fn_mcxt dropped; rule-9 cap 128).
 const _: () = {
     assert!(core::mem::size_of::<NullableDatum>() == 16);
     assert!(core::mem::offset_of!(LocalFcinfo<0>, args) <= 32);
@@ -68,6 +72,7 @@ impl<const N: usize> LocalFcinfo<N> {
         Self {
             context: None,
             resultinfo: None,
+            result_mcx: None,
             fncollation: collation,
             isnull: false,
             nargs: N as i16,
@@ -149,9 +154,28 @@ impl FunctionCallInfoBaseData {
     pub fn init(&mut self, nargs: i16, collation: Oid, context: FmNodePtr, resultinfo: FmNodePtr) {
         self.context = context;
         self.resultinfo = resultinfo;
+        self.result_mcx = None;
         self.fncollation = collation;
         self.isnull = false;
         self.nargs = nargs;
+    }
+
+    /// # Safety
+    /// The armed context must stay live (and un-reset) across every later
+    /// call through this frame until it is re-armed or the frame dies.
+    #[inline]
+    pub unsafe fn set_result_mcx(&mut self, mcx: Mcx<'_>) {
+        self.result_mcx = Some(NonNull::from(mcx.context()));
+    }
+
+    /// The armed result-ownership context; panics if never armed.
+    #[inline]
+    pub fn result_mcx(&self) -> Mcx<'_> {
+        match self.result_mcx {
+            // SAFETY: set_result_mcx's contract — the context outlives the call.
+            Some(p) => unsafe { p.as_ref() }.mcx(),
+            None => result_mcx_unarmed(),
+        }
     }
 
     #[inline]
@@ -216,6 +240,12 @@ impl FunctionCallInfoBaseData {
         self.isnull = true;
         Datum::null()
     }
+}
+
+#[cold]
+#[inline(never)]
+fn result_mcx_unarmed() -> ! {
+    panic!("fmgr: by-ref result needs a result mcx but the caller never armed the frame");
 }
 
 #[cold]
@@ -339,7 +369,7 @@ pub fn function_call0_coll(flinfo: &mut FmgrInfo, collation: Oid) -> PgResult<Da
 }
 
 macro_rules! define_calls {
-    ($($fname:ident $dname:ident $n:literal ($($arg:ident $idx:tt),+);)*) => {$(
+    ($($fname:ident $dname:ident $fmname:ident $dmname:ident $n:literal ($($arg:ident $idx:tt),+);)*) => {$(
         #[inline]
         pub fn $fname(
             flinfo: &mut FmgrInfo,
@@ -365,19 +395,55 @@ macro_rules! define_calls {
             }
             Ok(result)
         }
+
+        #[inline]
+        pub fn $fmname(
+            flinfo: &mut FmgrInfo,
+            collation: Oid,
+            mcx: Mcx<'_>,
+            $($arg: Datum,)+
+        ) -> PgResult<Datum> {
+            let mut fcinfo = LocalFcinfo::<$n>::fresh(collation);
+            // SAFETY: `mcx` outlives this stack frame's single call.
+            unsafe { fcinfo.set_result_mcx(mcx) };
+            $(fcinfo.set_arg($idx, $arg);)+
+            let result = flinfo.invoke(&mut fcinfo)?;
+            if fcinfo.isnull {
+                return Err(returned_null_oid(flinfo.fn_oid));
+            }
+            Ok(result)
+        }
+
+        #[inline]
+        pub fn $dmname(
+            func: PGFunction,
+            collation: Oid,
+            mcx: Mcx<'_>,
+            $($arg: Datum,)+
+        ) -> PgResult<Datum> {
+            let mut fcinfo = LocalFcinfo::<$n>::fresh(collation);
+            // SAFETY: `mcx` outlives this stack frame's single call.
+            unsafe { fcinfo.set_result_mcx(mcx) };
+            $(fcinfo.set_arg($idx, $arg);)+
+            let result = func(None, &mut fcinfo)?;
+            if fcinfo.isnull {
+                return Err(returned_null_direct(func));
+            }
+            Ok(result)
+        }
     )*};
 }
 
 define_calls! {
-    function_call1_coll direct_function_call1_coll 1 (arg1 0);
-    function_call2_coll direct_function_call2_coll 2 (arg1 0, arg2 1);
-    function_call3_coll direct_function_call3_coll 3 (arg1 0, arg2 1, arg3 2);
-    function_call4_coll direct_function_call4_coll 4 (arg1 0, arg2 1, arg3 2, arg4 3);
-    function_call5_coll direct_function_call5_coll 5 (arg1 0, arg2 1, arg3 2, arg4 3, arg5 4);
-    function_call6_coll direct_function_call6_coll 6 (arg1 0, arg2 1, arg3 2, arg4 3, arg5 4, arg6 5);
-    function_call7_coll direct_function_call7_coll 7 (arg1 0, arg2 1, arg3 2, arg4 3, arg5 4, arg6 5, arg7 6);
-    function_call8_coll direct_function_call8_coll 8 (arg1 0, arg2 1, arg3 2, arg4 3, arg5 4, arg6 5, arg7 6, arg8 7);
-    function_call9_coll direct_function_call9_coll 9 (arg1 0, arg2 1, arg3 2, arg4 3, arg5 4, arg6 5, arg7 6, arg8 7, arg9 8);
+    function_call1_coll direct_function_call1_coll function_call1_coll_in direct_function_call1_coll_in 1 (arg1 0);
+    function_call2_coll direct_function_call2_coll function_call2_coll_in direct_function_call2_coll_in 2 (arg1 0, arg2 1);
+    function_call3_coll direct_function_call3_coll function_call3_coll_in direct_function_call3_coll_in 3 (arg1 0, arg2 1, arg3 2);
+    function_call4_coll direct_function_call4_coll function_call4_coll_in direct_function_call4_coll_in 4 (arg1 0, arg2 1, arg3 2, arg4 3);
+    function_call5_coll direct_function_call5_coll function_call5_coll_in direct_function_call5_coll_in 5 (arg1 0, arg2 1, arg3 2, arg4 3, arg5 4);
+    function_call6_coll direct_function_call6_coll function_call6_coll_in direct_function_call6_coll_in 6 (arg1 0, arg2 1, arg3 2, arg4 3, arg5 4, arg6 5);
+    function_call7_coll direct_function_call7_coll function_call7_coll_in direct_function_call7_coll_in 7 (arg1 0, arg2 1, arg3 2, arg4 3, arg5 4, arg6 5, arg7 6);
+    function_call8_coll direct_function_call8_coll function_call8_coll_in direct_function_call8_coll_in 8 (arg1 0, arg2 1, arg3 2, arg4 3, arg5 4, arg6 5, arg7 6, arg8 7);
+    function_call9_coll direct_function_call9_coll function_call9_coll_in direct_function_call9_coll_in 9 (arg1 0, arg2 1, arg3 2, arg4 3, arg5 4, arg6 5, arg7 6, arg8 7, arg9 8);
 }
 
 #[derive(Clone, Copy, Debug)]

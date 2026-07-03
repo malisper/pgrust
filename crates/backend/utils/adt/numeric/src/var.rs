@@ -144,6 +144,47 @@ pub const CONST_ZERO: VarView<'static> = VarView {
     digits: &[],
 };
 
+pub const CONST_ONE: VarView<'static> = VarView {
+    ndigits: 1,
+    weight: 0,
+    sign: NUMERIC_POS,
+    dscale: 0,
+    digits: &[1],
+};
+
+pub(crate) const CONST_MINUS_ONE: VarView<'static> = VarView {
+    ndigits: 1,
+    weight: 0,
+    sign: NUMERIC_NEG,
+    dscale: 0,
+    digits: &[1],
+};
+
+pub(crate) const CONST_TWO: VarView<'static> = VarView {
+    ndigits: 1,
+    weight: 0,
+    sign: NUMERIC_POS,
+    dscale: 0,
+    digits: &[2],
+};
+
+// DEC_DIGITS == 4 digit encodings (C's #if ladder).
+pub(crate) const CONST_ZERO_POINT_NINE: VarView<'static> = VarView {
+    ndigits: 1,
+    weight: -1,
+    sign: NUMERIC_POS,
+    dscale: 1,
+    digits: &[9000],
+};
+
+pub(crate) const CONST_ONE_POINT_ONE: VarView<'static> = VarView {
+    ndigits: 2,
+    weight: 0,
+    sign: NUMERIC_POS,
+    dscale: 1,
+    digits: &[1, 1000],
+};
+
 /// Owned working form (C's NumericVar with a palloc'd buf). Digits live at
 /// `buf[offset .. offset+ndigits]`; `offset >= 1` whenever a buffer is
 /// allocated, so one spare zero digit sits below for rounding carry-out.

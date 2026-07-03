@@ -144,3 +144,69 @@ fn embedded_nul_stops_case_walk() {
     let mcx = ctx.mcx();
     assert_eq!(lower(mcx, b"AB\x00CD", C_COLLATION_OID).unwrap().data(), b"ab\x00CD");
 }
+
+mod fc_results {
+    use datum::{Datum, VarlenaRef};
+    use mcx::MemoryContext;
+    use types_core::C_COLLATION_OID;
+    use types_fmgr::{
+        direct_function_call1_coll_in, direct_function_call2_coll_in,
+        direct_function_call3_coll_in,
+    };
+
+    use crate::builtins::*;
+
+    fn text_image(s: &[u8]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(4 + s.len());
+        v.extend_from_slice(&datum::varlena::set_varsize_4b(4 + s.len()));
+        v.extend_from_slice(s);
+        v
+    }
+
+    fn text_of(d: Datum) -> &'static [u8] {
+        // SAFETY: test results are live 4B-header varlenas kept in the ctx.
+        unsafe { VarlenaRef::from_ptr(d.as_usize() as *const u8) }.data()
+    }
+
+    #[test]
+    fn case_pad_trim_chr() {
+        let ctx = MemoryContext::new_bump("t");
+        let mixed = text_image(b"AbC");
+        let d = direct_function_call1_coll_in(
+            fc_lower,
+            C_COLLATION_OID,
+            ctx.mcx(),
+            Datum::from_usize(mixed.as_ptr() as usize),
+        )
+        .unwrap();
+        assert_eq!(text_of(d), b"abc");
+
+        let s = text_image(b"hi");
+        let fill = text_image(b"xy");
+        let d = direct_function_call3_coll_in(
+            fc_lpad,
+            0,
+            ctx.mcx(),
+            Datum::from_usize(s.as_ptr() as usize),
+            Datum::from_i32(5),
+            Datum::from_usize(fill.as_ptr() as usize),
+        )
+        .unwrap();
+        assert_eq!(text_of(d), b"xyxhi");
+
+        let padded = text_image(b"zzhellozz");
+        let set = text_image(b"z");
+        let d = direct_function_call2_coll_in(
+            fc_btrim,
+            0,
+            ctx.mcx(),
+            Datum::from_usize(padded.as_ptr() as usize),
+            Datum::from_usize(set.as_ptr() as usize),
+        )
+        .unwrap();
+        assert_eq!(text_of(d), b"hello");
+
+        let d = direct_function_call1_coll_in(fc_chr, 0, ctx.mcx(), Datum::from_i32(65)).unwrap();
+        assert_eq!(text_of(d), b"A");
+    }
+}

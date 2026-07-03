@@ -138,6 +138,7 @@ name = "adt_int"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "hashfn",
  "mcx",
  "numutils",
  "types_array",
@@ -151,6 +152,7 @@ name = "adt_int8"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "hashfn",
  "numutils",
  "types_core",
  "types_error",
@@ -206,6 +208,7 @@ version = "0.1.0"
 dependencies = [
  "adt_float",
  "datum",
+ "mcx",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -240,6 +243,16 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "varlena",
+]
+
+[[package]]
+name = "adt_scalar"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "types_core",
+ "types_error",
+ "types_fmgr",
 ]
 
 [[package]]
@@ -1039,6 +1052,14 @@ dependencies = [
 [[package]]
 name = "deadlock"
 version = "0.0.0"
+dependencies = [
+ "deadlock_seams",
+ "init_small",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_storage",
+]
 
 [[package]]
 name = "deadlock_seams"
@@ -1161,6 +1182,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "execgrouping"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "execexpr",
+ "exectuples",
+ "executils",
+ "fmgr_core",
+ "guc_tables",
+ "hashbrown",
+ "hashfn",
+ "heaptuple",
+ "lsyscache",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_slot",
+ "types_tuple",
+]
+
+[[package]]
 name = "execmain"
 version = "0.1.0"
 dependencies = [
@@ -1184,6 +1227,7 @@ dependencies = [
  "nodeindexonlyscan",
  "nodeindexscan",
  "nodelimit",
+ "nodemodifytable",
  "nodeseqscan",
  "nodesort",
  "postgres_seams",
@@ -1424,8 +1468,10 @@ dependencies = [
  "adt_numeric",
  "adt_oracle_compat",
  "adt_pseudotypes",
+ "adt_scalar",
  "datum",
  "fmgr_seams",
+ "mcx",
  "name",
  "nbt_compare",
  "types_core",
@@ -1860,6 +1906,14 @@ dependencies = [
  "types_snapshot",
  "types_tuple",
 ]
+
+[[package]]
+name = "heaptoast"
+version = "0.1.0"
+
+[[package]]
+name = "heaptoast_seams"
+version = "0.0.0"
 
 [[package]]
 name = "heaptuple"
@@ -2736,14 +2790,103 @@ dependencies = [
 name = "nodemodifytable"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
+ "aio_seams",
+ "async_seams",
+ "autovacuum_seams",
+ "backend_progress_seams",
+ "backend_status_seams",
+ "be_fsstubs_seams",
+ "bufmgr_seams",
+ "catalog_index_seams",
+ "catalog_seams",
+ "catalog_storage_seams",
+ "clog",
+ "combocid_seams",
+ "commit_ts_seams",
+ "condition_variable_seams",
+ "controldata_utils",
+ "deadlock_seams",
+ "execmain",
+ "execmain_seams",
  "exectuples",
  "executils",
+ "fd",
+ "freespace_seams",
+ "gram_core",
+ "guc_tables",
+ "heapam_visibility",
+ "init_small",
+ "inval",
+ "ipc_seams",
+ "latch_seams",
+ "lmgr_proc",
+ "lmgr_seams",
+ "lock_seams",
+ "logical_seams",
+ "lwlock",
  "mcx",
+ "miscinit_seams",
+ "multixact_seams",
+ "namespace_seams",
+ "nodeseqscan",
+ "origin_seams",
+ "parallel_seams",
+ "parse_expr",
+ "parser_analyze",
+ "parser_driver",
+ "parser_seams",
+ "pg_enum_seams",
+ "pg_sema_seams",
+ "pgstat",
+ "planner",
+ "pmsignal_seams",
+ "predicate_seams",
+ "procarray",
+ "pruneheap_seams",
+ "rel_vocab",
+ "relation_seams",
+ "rewrite_handler",
+ "rmgr",
+ "s_lock_seams",
+ "scan_fgram",
+ "shmem",
+ "snapbuild_seams",
+ "snapmgr",
+ "spi_seams",
+ "subtrans",
+ "syncrep_seams",
+ "syscache_seams",
+ "table",
  "tableam",
+ "tableam_vocab",
+ "tablecmds_seams",
+ "tcop_dest",
+ "timeout_seams",
+ "timestamp_seams",
+ "transam",
+ "transam_xlog",
+ "transam_xlog_seams",
+ "trigger_seams",
+ "typcache_seams",
+ "types_core",
+ "types_dest",
  "types_error",
  "types_nodes",
+ "types_portal",
  "types_rel",
+ "types_scan",
  "types_slot",
+ "types_storage",
+ "types_tuple",
+ "varsup",
+ "waitevent_seams",
+ "xact",
+ "xloginsert",
+ "xloginsert_seams",
+ "xlogreader",
+ "xlogreader_seams",
+ "xlogutils",
 ]
 
 [[package]]
@@ -2969,18 +3112,21 @@ dependencies = [
 name = "parse_relation"
 version = "0.0.0"
 dependencies = [
+ "catalog_heap",
  "catalog_namespace",
  "datum",
  "elog",
  "lmgr_seams",
  "lsyscache",
  "mbutils",
+ "mbutils_seams",
  "mcx",
  "namespace_seams",
  "parser_small1",
  "pg_class_seams",
  "rel_vocab",
  "relation_seams",
+ "syscache_seams",
  "table",
  "tupdesc",
  "types_core",
@@ -2988,6 +3134,7 @@ dependencies = [
  "types_nodes",
  "types_rel",
  "types_tuple",
+ "varlena",
 ]
 
 [[package]]
@@ -3072,8 +3219,10 @@ dependencies = [
 name = "parser_small1"
 version = "0.0.0"
 dependencies = [
+ "adt_numeric",
  "datum",
  "elog",
+ "format_type",
  "libc",
  "lsyscache",
  "mbutils",
@@ -3190,6 +3339,10 @@ dependencies = [
  "types_core",
  "types_error",
 ]
+
+[[package]]
+name = "pg_path"
+version = "0.1.0"
 
 [[package]]
 name = "pg_prng"
@@ -3803,6 +3956,14 @@ dependencies = [
 [[package]]
 name = "predicate"
 version = "0.0.0"
+dependencies = [
+ "predicate_seams",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_snapshot",
+ "types_tuple",
+]
 
 [[package]]
 name = "predicate_seams"
@@ -3979,6 +4140,18 @@ dependencies = [
 [[package]]
 name = "pruneheap"
 version = "0.0.0"
+dependencies = [
+ "bufmgr_seams",
+ "mcx",
+ "procarray_seams",
+ "pruneheap_seams",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_storage",
+ "types_tuple",
+]
 
 [[package]]
 name = "pruneheap_seams"
@@ -4336,8 +4509,10 @@ dependencies = [
  "catcache",
  "checkpointer",
  "clog",
+ "condition_variable",
  "conffiles",
  "dbcommands",
+ "deadlock",
  "detoast",
  "dsm_core",
  "elog",
@@ -4378,6 +4553,7 @@ dependencies = [
  "nodelimit",
  "nodeseqscan",
  "nodesort",
+ "parallel",
  "parse_expr",
  "parser_analyze",
  "parser_driver",
@@ -4385,6 +4561,7 @@ dependencies = [
  "pg_locale",
  "pg_prng",
  "pg_sema",
+ "pg_string",
  "pgstat",
  "pgtz",
  "plancache",
@@ -4396,9 +4573,11 @@ dependencies = [
  "pqcomm",
  "pqformat",
  "pquery",
+ "predicate",
  "printtup",
  "procarray",
  "procsignal",
+ "pruneheap",
  "ps_status",
  "queryenvironment",
  "relation",
@@ -4416,6 +4595,7 @@ dependencies = [
  "slot",
  "smgr",
  "snapmgr",
+ "spi",
  "stack_depth",
  "subtrans",
  "superuser",
@@ -4427,6 +4607,7 @@ dependencies = [
  "timeout",
  "transam",
  "transam_xlog",
+ "trigger",
  "tuplesort",
  "tuplestore",
  "twophase_config",
@@ -5495,6 +5676,18 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode_case"
+version = "0.1.0"
+dependencies = [
+ "unicode_category",
+ "wchar",
+]
+
+[[package]]
+name = "unicode_category"
+version = "0.1.0"
 
 [[package]]
 name = "utility"

@@ -10,6 +10,7 @@
 
 pub mod builtins;
 pub mod bytea;
+pub mod levenshtein;
 #[cfg(test)]
 mod tests;
 

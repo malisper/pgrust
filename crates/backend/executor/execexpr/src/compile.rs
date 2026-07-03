@@ -48,16 +48,23 @@ fn unported(what: &str) -> ! {
 }
 
 // C ExprEvalPushStep's growth shape: 16 steps up front (new_in), doubling.
-#[inline]
+#[inline(always)]
 fn push_step(state: &mut ExprState<'_>, mcx: Mcx<'_>, step: Step) -> PgResult<()> {
     if state.steps.len() == state.steps.capacity() {
-        let add = state.steps.capacity().max(16);
-        state
-            .steps
-            .try_reserve(add)
-            .map_err(|_| mcx.oom(add * core::mem::size_of::<Step>()))?;
+        grow_steps(state, mcx)?;
     }
     state.steps.push(step);
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn grow_steps(state: &mut ExprState<'_>, mcx: Mcx<'_>) -> PgResult<()> {
+    let add = state.steps.capacity().max(16);
+    state
+        .steps
+        .try_reserve(add)
+        .map_err(|_| mcx.oom(add * core::mem::size_of::<Step>()))?;
     Ok(())
 }
 
@@ -276,6 +283,7 @@ struct SetupInfo {
     last_scan: i16,
 }
 
+#[inline]
 fn create_expr_setup_steps<'mcx>(
     state: &mut ExprState<'mcx>,
     mcx: Mcx<'mcx>,
@@ -288,6 +296,7 @@ fn create_expr_setup_steps<'mcx>(
     push_fetch_steps(state, mcx, &info)
 }
 
+#[inline]
 fn push_fetch_steps<'mcx>(
     state: &mut ExprState<'mcx>,
     mcx: Mcx<'mcx>,
@@ -353,7 +362,18 @@ fn init_expr_rec<'mcx>(
                 unported("EEOP_WHOLEROW");
             }
             if variable.varattno < 0 {
-                unported("EEOP_*_SYSVAR");
+                let attnum = variable.varattno;
+                let step = match variable.varno {
+                    INNER_VAR => Step::InnerSysVar { attnum, out },
+                    OUTER_VAR => Step::OuterSysVar { attnum, out },
+                    _ => match variable.varreturningtype {
+                        VarReturningType::VAR_RETURNING_DEFAULT => {
+                            Step::ScanSysVar { attnum, out }
+                        }
+                        _ => unported("EEOP_OLD_SYSVAR/EEOP_NEW_SYSVAR (RETURNING)"),
+                    },
+                };
+                return push_step(state, mcx, step);
             }
             let attnum = (variable.varattno - 1) as u16;
             let vartype = variable.vartype;
@@ -551,6 +571,7 @@ fn init_func<'mcx>(
 // invariants of this module's private program build (Done-terminated, Qual
 // jumps patched to a valid index, FuncCall mirrors its pushed frame) —
 // debug-asserted here, unreachable to break from outside the crate.
+#[inline]
 fn ready_expr(state: &mut ExprState<'_>) {
     let steps = state.steps.as_slice();
     let len = steps.len();

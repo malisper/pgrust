@@ -164,3 +164,20 @@ fn parse_bool_seam_installed() {
     assert_eq!(scalar_seams::parse_bool::call("yes"), Some(true));
     assert_eq!(scalar_seams::parse_bool::call("nyet"), None);
 }
+
+#[test]
+fn fc_booltext_result_mcx() {
+    let ctx = mcx::MemoryContext::new_bump("t");
+    for (b, want) in [(true, &b"true"[..]), (false, &b"false"[..])] {
+        let d = types_fmgr::direct_function_call1_coll_in(
+            crate::builtins::fc_booltext,
+            0,
+            ctx.mcx(),
+            datum::Datum::from_bool(b),
+        )
+        .unwrap();
+        // SAFETY: booltext result is a live 4B-header varlena in ctx.
+        let r = unsafe { datum::VarlenaRef::from_ptr(d.as_usize() as *const u8) };
+        assert_eq!(r.data(), want);
+    }
+}

@@ -21,8 +21,8 @@ fn always_null(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut FunctionCallInfoBase
 #[test]
 fn frame_layout_matches_c_budget() {
     assert_eq!(core::mem::size_of::<NullableDatum>(), 16);
-    assert_eq!(core::mem::offset_of!(LocalFcinfo<0>, args), 24);
-    assert_eq!(core::mem::size_of::<LocalFcinfo<2>>(), 24 + 2 * 16);
+    assert_eq!(core::mem::offset_of!(LocalFcinfo<0>, args), 32);
+    assert_eq!(core::mem::size_of::<LocalFcinfo<2>>(), 32 + 2 * 16);
     assert_eq!(core::mem::size_of::<FmgrInfo>(), 56);
     assert!(core::mem::size_of::<FmgrInfo>() <= 128);
 }
@@ -236,5 +236,112 @@ mod byref {
             assert_eq!(fci.arg_fixed(1, UUID_LEN), &[0xAB; UUID_LEN]);
             assert_eq!(fci.arg_uuid(1).as_ptr(), uuid.as_ptr());
         }
+    }
+}
+
+mod result_mcx {
+    use ::datum::{Datum, Varlena, VarlenaRef};
+    use ::mcx::MemoryContext;
+    use ::types_error::PgResult;
+
+    use crate::fcinfo::*;
+    use crate::result::*;
+
+    fn text_datum_of_arg0(
+        _flinfo: Option<&mut FmgrInfo>,
+        fcinfo: &mut FunctionCallInfoBaseData,
+    ) -> PgResult<Datum> {
+        // SAFETY: test arg 0 is a live NUL-terminated cstring.
+        let s = unsafe { fcinfo.arg_cstring(0) }.to_bytes();
+        let mcx = fcinfo.result_mcx();
+        let mut image = ::mcx::vec_with_capacity_in(mcx, 4 + s.len())?;
+        image.resize(4, 0);
+        image.extend_from_slice(s);
+        Ok(varlena_result(Varlena::from_image(image)))
+    }
+
+    fn armed_fci(ctx: &MemoryContext, arg: &'static [u8]) -> LocalFcinfo<1> {
+        let mut fci = LocalFcinfo::<1>::fresh(0);
+        // SAFETY: every test's ctx outlives its calls through the frame.
+        unsafe { fci.set_result_mcx(ctx.mcx()) };
+        fci.set_arg(0, Datum::from_usize(arg.as_ptr() as usize));
+        fci
+    }
+
+    fn text_of(d: Datum) -> &'static [u8] {
+        // SAFETY: test results are live 4B-header varlenas kept in the ctx.
+        unsafe { VarlenaRef::from_ptr(d.as_usize() as *const u8) }.data()
+    }
+
+    #[test]
+    fn armed_frame_allocates_in_context_and_reset_frees() {
+        let mut ctx = MemoryContext::new_bump("fc-result");
+        let before = ctx.used();
+        {
+            let mut fci = armed_fci(&ctx, b"hi\0");
+            let d = text_datum_of_arg0(None, &mut fci).unwrap();
+            assert_eq!(text_of(d), b"hi");
+            assert!(ctx.used() > before);
+        }
+        ctx.reset();
+        let keeper = ctx.used();
+        for _ in 0..64 {
+            let mut fci = armed_fci(&ctx, b"hi\0");
+            let _ = text_datum_of_arg0(None, &mut fci).unwrap();
+            ctx.reset();
+        }
+        assert_eq!(ctx.used(), keeper);
+    }
+
+    #[test]
+    fn direct_call_in_arms_the_frame() {
+        let ctx = MemoryContext::new_bump("fc-result");
+        let d = direct_function_call1_coll_in(
+            text_datum_of_arg0,
+            0,
+            ctx.mcx(),
+            Datum::from_usize(b"abc\0".as_ptr() as usize),
+        )
+        .unwrap();
+        assert_eq!(text_of(d), b"abc");
+    }
+
+    #[test]
+    #[should_panic(expected = "never armed")]
+    fn unarmed_frame_panics_loudly() {
+        let mut fci = LocalFcinfo::<1>::fresh(0);
+        fci.set_arg(0, Datum::from_usize(b"x\0".as_ptr() as usize));
+        let _ = text_datum_of_arg0(None, &mut fci);
+    }
+
+    #[test]
+    fn byref_result_copies_at_palloc_alignment() {
+        let ctx = MemoryContext::new_bump("fc-result");
+        let image = [1u8, 2, 3, 4, 5, 6, 7];
+        let d = byref_result(ctx.mcx(), &image).unwrap();
+        let p = d.as_usize() as *const u8;
+        assert_eq!(p as usize % 8, 0);
+        // SAFETY: 7 bytes just copied into ctx at p.
+        assert_eq!(unsafe { core::slice::from_raw_parts(p, 7) }, &image);
+    }
+
+    #[test]
+    fn cstring_result_leaks_the_buffer_in_place() {
+        let ctx = MemoryContext::new_bump("fc-result");
+        let mut v = ::mcx::vec_with_capacity_in(ctx.mcx(), 3).unwrap();
+        v.extend_from_slice(b"ab\0");
+        let want = v.as_ptr() as usize;
+        let d = cstring_result(v);
+        assert_eq!(d.as_usize(), want);
+    }
+
+    #[test]
+    fn rearm_preserves_the_result_mcx() {
+        let ctx = MemoryContext::new_bump("fc-result");
+        let mut fci = armed_fci(&ctx, b"kept\0");
+        fci.rearm(0);
+        fci.set_arg(0, Datum::from_usize(b"kept\0".as_ptr() as usize));
+        let d = text_datum_of_arg0(None, &mut fci).unwrap();
+        assert_eq!(text_of(d), b"kept");
     }
 }
