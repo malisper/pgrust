@@ -529,16 +529,6 @@ pub fn insert_record(
     })
 }
 
-const EMPTY_BLOCK: RegBlock<'static> = RegBlock {
-    block_id: 0,
-    rlocator: RelFileLocator::new(0, 0, 0),
-    forknum: ForkNumber::MAIN_FORKNUM,
-    block: 0,
-    page: &[],
-    flags: 0,
-    bufdata: &[],
-};
-
 fn xlog_insert_record_seam(
     rmid: u8,
     info: u8,
@@ -553,15 +543,14 @@ fn xlog_insert_record_seam(
             "too many registered buffers".to_string(),
         )));
     }
-    // Fixed stack array: the insert path allocates nothing.
-    let blocks: [RegBlock<'_>; XLR_MAX_BLOCK_ID + 1] = core::array::from_fn(|i| {
-        if i >= n {
-            return EMPTY_BLOCK;
-        }
-        let b = &bufs[i];
+    // Fixed stack array, only the live prefix written: the insert path
+    // allocates nothing.
+    let mut blocks: [core::mem::MaybeUninit<RegBlock<'_>>; XLR_MAX_BLOCK_ID + 1] =
+        [const { core::mem::MaybeUninit::uninit() }; XLR_MAX_BLOCK_ID + 1];
+    for (slot, b) in blocks.iter_mut().zip(bufs) {
         let tag = bufmgr::BufferGetTag(b.buffer);
         let page = bufmgr::BufferGetPagePtr(b.buffer).as_ptr() as *const u8;
-        RegBlock {
+        slot.write(RegBlock {
             block_id: b.block_id,
             rlocator: RelFileLocator::new(tag.spcOid, tag.dbOid, tag.relNumber),
             forknum: tag.forkNum,
@@ -571,9 +560,12 @@ fn xlog_insert_record_seam(
             page: unsafe { core::slice::from_raw_parts(page, BLCKSZ) },
             flags: b.flags,
             bufdata: b.bufdata,
-        }
-    });
-    insert_record(rmid, info, record_flags, main_data, &blocks[..n])
+        });
+    }
+    // SAFETY: blocks[..n] initialized by the loop above (n <= array len).
+    let blocks =
+        unsafe { core::slice::from_raw_parts(blocks.as_ptr().cast::<RegBlock<'_>>(), n) };
+    insert_record(rmid, info, record_flags, main_data, blocks)
 }
 
 fn xlog_insert_seam(rmid: u8, info: u8, fragments: &[&[u8]]) -> PgResult<XLogRecPtr> {
