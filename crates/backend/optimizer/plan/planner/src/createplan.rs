@@ -2917,17 +2917,18 @@ fn create_append_plan<'mcx>(
 ) -> PgResult<Node<'mcx>> {
     let _ = flags;
     let mcx = run.mcx;
-    let (rel_id, target_id, subpaths, first_partial, pathkeys_empty) = match run.root.path(path_id)
-    {
-        PathNode::AppendPath(a) => (
-            a.path.parent,
-            a.path.pathtarget_id.expect("Append path has a pathtarget"),
-            crate::relnode::pgvec_clone_shallow(mcx, &a.subpaths),
-            a.first_partial_path,
-            a.path.pathkeys.is_empty(),
-        ),
-        _ => unreachable!(),
-    };
+    let (rel_id, target_id, subpaths, first_partial, pathkeys_empty, has_param_info) =
+        match run.root.path(path_id) {
+            PathNode::AppendPath(a) => (
+                a.path.parent,
+                a.path.pathtarget_id.expect("Append path has a pathtarget"),
+                crate::relnode::pgvec_clone_shallow(mcx, &a.subpaths),
+                a.first_partial_path,
+                a.path.pathkeys.is_empty(),
+                a.path.param_info.is_some(),
+            ),
+            _ => unreachable!(),
+        };
     assert!(
         pathkeys_empty,
         "create_append_plan (createplan.c): ordered append; MergeAppend lane unported (set-ops lane)"
@@ -2954,13 +2955,34 @@ fn create_append_plan<'mcx>(
         apprelids.add_member(mcx, m)?;
     }
 
+    let mut part_prune_index = -1;
+    if crate::gucs::enable_partition_pruning() {
+        assert!(
+            !has_param_info,
+            "create_append_plan (createplan.c): parameterized Append prunequal \
+             (replace_nestloop_params) unported"
+        );
+        let rinfos = crate::relnode::pgvec_clone_shallow(mcx, &run.root.rel(rel_id).baserestrictinfo);
+        let mut prunequal: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+        for &rid in rinfos.iter() {
+            if run.root.rinfo(rid).pseudoconstant {
+                continue;
+            }
+            prunequal.push(*run.root.expr_node(run.root.rinfo(rid).clause));
+        }
+        if !prunequal.is_empty() {
+            part_prune_index =
+                crate::partprune::make_partition_pruneinfo(run, rel_id, &subpaths, &prunequal)?;
+        }
+    }
+
     let mut plan = Node::build::<Append<'mcx>>(mcx)?;
     plan.plan.targetlist = tlist;
     plan.apprelids = apprelids;
     plan.appendplans = appendplans;
     plan.nasyncplans = 0;
     plan.first_partial_plan = first_partial;
-    plan.part_prune_index = -1;
+    plan.part_prune_index = part_prune_index;
     copy_generic_path_info(run, &mut plan.plan, path_id);
     Ok(plan.seal())
 }

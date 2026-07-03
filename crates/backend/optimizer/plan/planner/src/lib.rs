@@ -20,6 +20,7 @@ pub mod pathkeys;
 pub mod planagg;
 pub mod pathnode;
 pub mod plancat;
+pub mod partprune;
 pub mod like_support;
 pub mod multirangetypes_selfuncs;
 pub mod network_selfuncs;
@@ -137,6 +138,7 @@ pub mod gucs {
     bool_guc!(JIT_ENABLED, jit_enabled, set_jit_enabled, true);
     bool_guc!(JIT_EXPRESSIONS, jit_expressions, set_jit_expressions, true);
     bool_guc!(JIT_TUPLE_DEFORMING, jit_tuple_deforming, set_jit_tuple_deforming, true);
+    bool_guc!(ENABLE_PARTITION_PRUNING, enable_partition_pruning, set_enable_partition_pruning, true);
 }
 
 pub fn init_seams() {
@@ -164,6 +166,10 @@ pub fn init_seams() {
     });
     guc_tables::vars::enable_seqscan
         .install(GucVarAccessors { get: gucs::enable_seqscan, set: gucs::set_enable_seqscan });
+    guc_tables::vars::enable_partition_pruning.install(GucVarAccessors {
+        get: gucs::enable_partition_pruning,
+        set: gucs::set_enable_partition_pruning,
+    });
     guc_tables::vars::enable_indexscan
         .install(GucVarAccessors { get: gucs::enable_indexscan, set: gucs::set_enable_indexscan });
     guc_tables::vars::enable_indexonlyscan.install(GucVarAccessors {
