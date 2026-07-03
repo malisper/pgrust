@@ -403,8 +403,11 @@ fn install() {
         s::lookup_pg_range_shape::set(|range_oid| {
             Ok((range_oid == 3904).then_some(PgRangeShape {
                 rngsubtype: INT4OID,
-                rngcollation: InvalidOid,
                 rngmultitypid: 4451,
+                rngcollation: InvalidOid,
+                rngsubopc: 1978,
+                rngcanonical: 3914,
+                rngsubdiff: 3922,
             }))
         });
         s::lookup_pg_range_by_multirange::set(|mr| Ok((mr == 4451).then_some(3904)));

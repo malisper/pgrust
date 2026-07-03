@@ -17,7 +17,7 @@ use crate::{
     SearchSysCache3, SearchSysCache4, SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1,
     SysCacheKey,
 };
-use crate::cacheinfo::{COLLOID, AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TYPENAMENSP, ATTNAME, OPEROID, PROCOID, RELNAMENSP, RELOID, SEQRELID, STATRELATTINH, TYPEOID};
+use crate::cacheinfo::{COLLOID, AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TYPENAMENSP, ATTNAME, OPEROID, PROCOID, RANGEMULTIRANGE, RANGETYPE, RELNAMENSP, RELOID, SEQRELID, STATRELATTINH, TYPEOID};
 
 const ANUM_PG_CLASS_OID: i32 = 1;
 const ANUM_PG_CLASS_RELISSHARED: i32 = 16;
@@ -631,6 +631,9 @@ const ANUM_PG_RANGE_RNGTYPID: i32 = 1;
 const ANUM_PG_RANGE_RNGSUBTYPE: i32 = 2;
 const ANUM_PG_RANGE_RNGMULTITYPID: i32 = 3;
 const ANUM_PG_RANGE_RNGCOLLATION: i32 = 4;
+const ANUM_PG_RANGE_RNGSUBOPC: i32 = 5;
+const ANUM_PG_RANGE_RNGCANONICAL: i32 = 6;
+const ANUM_PG_RANGE_RNGSUBDIFF: i32 = 7;
 const ANUM_PG_PROC_PROARGDEFAULTS: i32 = 24;
 const ANUM_PG_PROC_PROLANG: i32 = 5;
 const ANUM_PG_PROC_PROSRC: i32 = 26;
@@ -1394,10 +1397,14 @@ fn lookup_pg_range_shape(
     let t = tuple.tuple();
     let shape = syscache_seams::PgRangeShape {
         rngsubtype: getattr(&t, crate::cacheinfo::RANGETYPE, ANUM_PG_RANGE_RNGSUBTYPE).as_oid(),
-        rngcollation: getattr(&t, crate::cacheinfo::RANGETYPE, ANUM_PG_RANGE_RNGCOLLATION)
-            .as_oid(),
         rngmultitypid: getattr(&t, crate::cacheinfo::RANGETYPE, ANUM_PG_RANGE_RNGMULTITYPID)
             .as_oid(),
+        rngcollation: getattr(&t, crate::cacheinfo::RANGETYPE, ANUM_PG_RANGE_RNGCOLLATION)
+            .as_oid(),
+        rngsubopc: getattr(&t, crate::cacheinfo::RANGETYPE, ANUM_PG_RANGE_RNGSUBOPC).as_oid(),
+        rngcanonical: getattr(&t, crate::cacheinfo::RANGETYPE, ANUM_PG_RANGE_RNGCANONICAL)
+            .as_oid(),
+        rngsubdiff: getattr(&t, crate::cacheinfo::RANGETYPE, ANUM_PG_RANGE_RNGSUBDIFF).as_oid(),
     };
     drop(t);
     ReleaseSysCache(tuple);
