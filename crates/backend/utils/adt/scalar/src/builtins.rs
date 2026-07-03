@@ -391,6 +391,20 @@ pub fn fc_hashtidextended(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
     Ok(Datum::from_u64(::hashfn::hash_bytes_extended(b, seed)))
 }
 
+
+pub fn fc_oidvectoreq(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict catalog args are non-null plain-storage oidvectors;
+    // dim1 Oids follow the 24-byte header (buildoidvector shape).
+    let read = |d: Datum| unsafe {
+        let p = d.as_usize() as *const ::array::oidvector;
+        let v = &*p;
+        debug_assert!(v.ndim == 1 && v.dataoffset == 0);
+        core::slice::from_raw_parts(p.add(1) as *const Oid, v.dim1.max(0) as usize)
+    };
+    let [a, b] = fcinfo.args_n::<2>();
+    Ok(Datum::from_bool(read(a.value) == read(b.value)))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -409,6 +423,7 @@ pub const SCALAR_BUILTINS: &[FmgrBuiltin] = &[
     b(3308, "xidneq", 2, fc_xidneq),
     b(184, "oideq", 2, fc_oideq),
     b(185, "oidne", 2, fc_oidne),
+    b(679, "oidvectoreq", 2, fc_oidvectoreq),
     b(716, "oidlt", 2, fc_oidlt),
     b(717, "oidle", 2, fc_oidle),
     b(1638, "oidgt", 2, fc_oidgt),
