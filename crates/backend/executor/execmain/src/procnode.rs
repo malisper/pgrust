@@ -1368,6 +1368,7 @@ pub fn planstate_instr_extra<'mcx>(
             }
         }
         PlanStateNode::Agg(aps) => walk!(&mut aps.outer),
+        PlanStateNode::ProjectSet(ps) => walk!(&mut ps.outer),
         PlanStateNode::WindowAgg(w) => walk!(&mut w.outer),
         PlanStateNode::Sort(s) => walk!(&mut *s.outer),
         PlanStateNode::IncrementalSort(s) => walk!(&mut s.outer),
