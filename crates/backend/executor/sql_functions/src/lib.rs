@@ -31,6 +31,7 @@ use cache_syscache::{ReleaseSysCache, SearchSysCache1, SysCacheGetAttr, SysCache
 
 pub use retval::check_sql_stmt_retval;
 
+const ANUM_PG_PROC_PRONAME: i32 = 2;
 const ANUM_PG_PROC_PROLANG: i32 = 5;
 const ANUM_PG_PROC_PRORETSET: i32 = 14;
 const ANUM_PG_PROC_PROVOLATILE: i32 = 15;
@@ -38,6 +39,7 @@ const ANUM_PG_PROC_PRONARGS: i32 = 17;
 const ANUM_PG_PROC_PRORETTYPE: i32 = 19;
 const ANUM_PG_PROC_PROARGTYPES: i32 = 20;
 const ANUM_PG_PROC_PROARGMODES: i32 = 22;
+const ANUM_PG_PROC_PROARGNAMES: i32 = 23;
 const ANUM_PG_PROC_PROSRC: i32 = 26;
 const ANUM_PG_PROC_PROSQLBODY: i32 = 28;
 
@@ -98,11 +100,62 @@ fn lookup_failed(fn_oid: Oid) -> Box<PgError> {
 }
 
 struct ProcRow<'mcx> {
+    proname: PgString<'mcx>,
     prosrc: PgString<'mcx>,
     argtypes: PgVec<'mcx, Oid>,
+    argnames: PgVec<'mcx, PgString<'mcx>>,
     rettype: Oid,
     provolatile: i8,
     proretset: bool,
+}
+
+fn name_str<'mcx>(mcx: Mcx<'mcx>, d: Datum) -> PgResult<PgString<'mcx>> {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: NameData attr from a live syscache tuple — 64 NUL-padded bytes.
+    let bytes = unsafe { core::slice::from_raw_parts(p, 64) };
+    let len = bytes.iter().position(|&b| b == 0).unwrap_or(64);
+    let s = core::str::from_utf8(&bytes[..len]).expect("proname is server-encoding text");
+    PgString::from_str_in(s, mcx)
+}
+
+fn varlena_bytes<'mcx>(mcx: Mcx<'mcx>, d: Datum) -> PgResult<PgVec<'mcx, u8>> {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: as varlena_str — image spans its header-declared size.
+    let src = unsafe {
+        let b0 = *p;
+        let len = if b0 == 0x01 {
+            2 + types_tuple::varatt::vartag_size(*p.add(1))
+        } else if b0 & 0x01 != 0 {
+            (b0 as usize >> 1) & 0x7F
+        } else {
+            (u32::from_ne_bytes(*(p as *const [u8; 4])) >> 2) as usize
+        };
+        core::slice::from_raw_parts(p, len)
+    };
+    detoast::detoast_attr(mcx, src)
+}
+
+fn read_argnames_attr<'mcx>(
+    mcx: Mcx<'mcx>,
+    d: Datum,
+    isnull: bool,
+    nargs: usize,
+) -> PgResult<PgVec<'mcx, PgString<'mcx>>> {
+    let mut out: PgVec<'mcx, PgString<'mcx>> = PgVec::new_in(mcx);
+    out.try_reserve_exact(nargs).map_err(|_| mcx.oom(nargs))?;
+    if isnull {
+        for _ in 0..nargs {
+            out.push(PgString::from_str_in("", mcx)?);
+        }
+        return Ok(out);
+    }
+    let img = varlena_bytes(mcx, d)?;
+    let elems = datum::array_build::deconstruct_array_image(mcx, &img, -1, false, b'i')?;
+    assert!(elems.len() >= nargs, "proargnames shorter than pronargs");
+    for i in 0..nargs {
+        out.push(varlena_str(mcx, elems[i])?);
+    }
+    Ok(out)
 }
 
 fn varlena_str<'mcx>(mcx: Mcx<'mcx>, d: Datum) -> PgResult<PgString<'mcx>> {
@@ -169,10 +222,16 @@ fn read_proc_row<'mcx>(mcx: Mcx<'mcx>, fn_oid: Oid) -> PgResult<ProcRow<'mcx>> {
     let (prosrc_d, prosrc_null) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROSRC)?;
     assert!(!prosrc_null, "null prosrc for function {fn_oid}");
     let prosrc = varlena_str(mcx, prosrc_d)?;
+    let (proname_d, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PRONAME)?;
+    let proname = name_str(mcx, proname_d)?;
+    let (argnames_d, argnames_null) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROARGNAMES)?;
+    let argnames = read_argnames_attr(mcx, argnames_d, argnames_null, argtypes.len())?;
     ReleaseSysCache(tup);
     Ok(ProcRow {
+        proname,
         prosrc,
         argtypes,
+        argnames,
         rettype,
         provolatile: provolatile.as_i8(),
         proretset: proretset.as_bool(),
@@ -206,13 +265,17 @@ fn analyze_and_rewrite(
     qmcx: Mcx<'static>,
     raw: &types_nodes::rawnodes::RawStmt<'static>,
     src: &str,
+    fname: &str,
     argtypes: &[Oid],
+    argnames: &[&str],
 ) -> PgResult<PgVec<'static, Query<'static>>> {
-    let query = analyze_seams::parse_analyze_fixedparams::call(
+    let query = analyze_seams::parse_analyze_sql_fn::call(
         qmcx,
         raw,
         src,
+        fname,
         argtypes,
+        argnames,
         QueryEnvHandle::NULL,
     )?;
     if query.commandType == CmdType::CMD_UTILITY {
@@ -232,7 +295,9 @@ fn analyze_and_rewrite(
 fn build_sources<'mcx>(
     mcx: Mcx<'mcx>,
     prosrc: &str,
+    fname: &str,
     argtypes: &[Oid],
+    argnames: &[&str],
     rettype: Oid,
 ) -> PgResult<PgVec<'mcx, plancache::CachedPlanSourceHandle>> {
     let scratch = MemoryContext::new("fmgr_sql parse");
@@ -258,7 +323,7 @@ fn build_sources<'mcx>(
                 parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
             )?;
             let raw2 = reparsed.get(i).expect("re-parse reproduces the statement");
-            let mut query_list = analyze_and_rewrite(qmcx, raw2, src, argtypes)?;
+            let mut query_list = analyze_and_rewrite(qmcx, raw2, src, fname, argtypes, argnames)?;
             for q in query_list.iter() {
                 check_body_utility_query(q)?;
             }
@@ -345,7 +410,21 @@ fn build_fcache(fn_oid: Oid, fn_retset: bool) -> PgResult<SqlFcacheGuard> {
         if row.proretset || fn_retset {
             panic!("fmgr_sql: SETOF SQL functions unported (function {fn_oid})");
         }
-        let sources = build_sources(mcx, &row.prosrc, &row.argtypes, row.rettype)?;
+        let mut name_refs: PgVec<'_, &str> = PgVec::new_in(mcx);
+        name_refs
+            .try_reserve_exact(row.argnames.len())
+            .map_err(|_| mcx.oom(row.argnames.len()))?;
+        for n in row.argnames.iter() {
+            name_refs.push(n.as_str());
+        }
+        let sources = build_sources(
+            mcx,
+            &row.prosrc,
+            row.proname.as_str(),
+            &row.argtypes,
+            &name_refs,
+            row.rettype,
+        )?;
         let (typlen, typbyval) = if row.rettype == VOIDOID {
             (4, true)
         } else {
@@ -702,6 +781,10 @@ fn fc_fmgr_sql_validator(
     let (prosrc_d, prosrc_null) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROSRC)?;
     assert!(!prosrc_null, "null prosrc for function {funcoid}");
     let prosrc = varlena_str(mcx, prosrc_d)?;
+    let (proname_d, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PRONAME)?;
+    let proname = name_str(mcx, proname_d)?;
+    let (argnames_d, argnames_null) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROARGNAMES)?;
+    let argnames = read_argnames_attr(mcx, argnames_d, argnames_null, argtypes.len())?;
     ReleaseSysCache(tup);
 
     if lsyscache::typ::get_typtype(rettype)? == b'p' as i8
@@ -749,12 +832,19 @@ fn fc_fmgr_sql_validator(
         )?;
         let n = raw_list.len();
         let mut last_list: Option<PgVec<'_, Query<'_>>> = None;
+        let mut name_refs: PgVec<'_, &str> = PgVec::new_in(mcx);
+        name_refs.try_reserve_exact(argnames.len()).map_err(|_| mcx.oom(argnames.len()))?;
+        for n in argnames.iter() {
+            name_refs.push(n.as_str());
+        }
         for (i, raw) in raw_list.iter().enumerate() {
-            let query = analyze_seams::parse_analyze_fixedparams::call(
+            let query = analyze_seams::parse_analyze_sql_fn::call(
                 mcx,
                 raw,
                 &prosrc,
+                proname.as_str(),
                 &argtypes,
+                &name_refs,
                 QueryEnvHandle::NULL,
             )?;
             let list = if query.commandType == CmdType::CMD_UTILITY {

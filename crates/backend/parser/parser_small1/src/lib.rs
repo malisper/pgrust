@@ -143,8 +143,10 @@ pub use parse_node::{
 };
 pub use parse_param::{
     check_variable_parameters, fixed_paramref_hook, query_contains_extern_params,
-    setup_parse_fixed_parameters, setup_parse_variable_parameters, variable_coerce_param_hook,
-    variable_paramref_hook, FixedParamState, ParseRefHookState, VarParamState,
+    setup_parse_fixed_parameters, setup_parse_sql_fn_parameters,
+    setup_parse_variable_parameters, sql_fn_make_param, sql_fn_paramref_hook,
+    sql_fn_resolve_param_name, variable_coerce_param_hook, variable_paramref_hook,
+    FixedParamState, ParseRefHookState, SqlFnParamState, VarParamState,
 };
 
 #[cfg(test)]
