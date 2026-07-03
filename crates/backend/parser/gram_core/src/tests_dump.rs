@@ -60,6 +60,22 @@ fn node_field(out: &mut String, name: &str, v: Option<Node<'_>>) {
     }
 }
 
+fn int_list_field(out: &mut String, name: &str, v: &types_nodes::list::IntList<'_>) {
+    out.push_str(" :");
+    out.push_str(name);
+    out.push(' ');
+    if v.is_nil() {
+        out.push_str("<>");
+        return;
+    }
+    // outfuncs.c _outList int-list form: "(i 1 2 3)".
+    out.push_str("(i");
+    for x in v.as_slice() {
+        out.push_str(&format!(" {x}"));
+    }
+    out.push(')');
+}
+
 fn list_field(out: &mut String, name: &str, v: &NodeList<'_>) {
     out.push_str(" :");
     out.push_str(name);
@@ -162,6 +178,20 @@ fn node(out: &mut String, n: Node<'_>) {
         int_field(out, "sortby_nulls", sb.sortby_nulls as i32);
         list_field(out, "useOp", &sb.useOp);
         int_field(out, "location", sb.location);
+        out.push('}');
+    } else if let Some(gs) = n.as_grouping_set() {
+        out.push_str("{GROUPINGSET");
+        int_field(out, "kind", gs.kind as i32);
+        list_field(out, "content", &gs.content);
+        int_field(out, "location", gs.location);
+        out.push('}');
+    } else if let Some(gf) = n.as_grouping_func() {
+        out.push_str("{GROUPINGFUNC");
+        list_field(out, "args", &gf.args);
+        int_list_field(out, "refs", &gf.refs);
+        int_list_field(out, "cols", &gf.cols);
+        int_field(out, "agglevelsup", gf.agglevelsup as i32);
+        int_field(out, "location", gf.location);
         out.push('}');
     } else if let Some(wd) = n.as_window_def() {
         out.push_str("{WINDOWDEF");
