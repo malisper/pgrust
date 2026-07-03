@@ -205,6 +205,55 @@ pub struct BitmapHeapScan<'mcx> {
     pub bitmapqualorig: NodeList<'mcx>,
 }
 
+/// apprelids empty and part_prune_index -1 outside the appendrel/pruning lanes.
+#[repr(C)]
+pub struct Append<'mcx> {
+    pub plan: Plan<'mcx>,
+    pub apprelids: Bitmapset<'mcx>,
+    pub appendplans: NodeList<'mcx>,
+    pub nasyncplans: i32,
+    pub first_partial_plan: i32,
+    pub part_prune_index: i32,
+}
+
+impl Default for Append<'_> {
+    fn default() -> Self {
+        Append {
+            plan: Plan::default(),
+            apprelids: Bitmapset::empty(),
+            appendplans: NodeList::nil(),
+            nasyncplans: 0,
+            first_partial_plan: 0,
+            part_prune_index: -1,
+        }
+    }
+}
+
+/// `scanstatus` carries the C SubqueryScanStatus value (0 = UNKNOWN).
+#[derive(Default)]
+#[repr(C)]
+pub struct SubqueryScan<'mcx> {
+    pub scan: Scan<'mcx>,
+    pub subplan: Option<Node<'mcx>>,
+    pub scanstatus: u32,
+}
+
+/// `cmd`/`strategy` carry the C SetOpCmd/SetOpStrategy values (canonical
+/// consts in types_pathnodes); per-key arrays as in [`Sort`].
+#[derive(Default)]
+#[repr(C)]
+pub struct SetOp<'mcx> {
+    pub plan: Plan<'mcx>,
+    pub cmd: u32,
+    pub strategy: u32,
+    pub numCols: i32,
+    pub cmpColIdx: &'mcx [i16],
+    pub cmpOperators: &'mcx [Oid],
+    pub cmpCollations: &'mcx [Oid],
+    pub cmpNullsFirst: &'mcx [bool],
+    pub numGroups: i64,
+}
+
 #[derive(Default)]
 #[repr(C)]
 pub struct FunctionScan<'mcx> {
@@ -533,6 +582,15 @@ unsafe impl<'mcx> NodeVariant<'mcx> for BitmapIndexScan<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for BitmapHeapScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_BitmapHeapScan;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for Append<'mcx> {
+    const TAG: NodeTag = NodeTag::T_Append;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for SubqueryScan<'mcx> {
+    const TAG: NodeTag = NodeTag::T_SubqueryScan;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for SetOp<'mcx> {
+    const TAG: NodeTag = NodeTag::T_SetOp;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for FunctionScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_FunctionScan;
 }
@@ -594,6 +652,12 @@ unsafe impl<'mcx> PlanVariant<'mcx> for BitmapOr<'mcx> {}
 unsafe impl<'mcx> PlanVariant<'mcx> for BitmapIndexScan<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
 unsafe impl<'mcx> PlanVariant<'mcx> for BitmapHeapScan<'mcx> {}
+// SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
+unsafe impl<'mcx> PlanVariant<'mcx> for Append<'mcx> {}
+// SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
+unsafe impl<'mcx> PlanVariant<'mcx> for SubqueryScan<'mcx> {}
+// SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
+unsafe impl<'mcx> PlanVariant<'mcx> for SetOp<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
 unsafe impl<'mcx> PlanVariant<'mcx> for FunctionScan<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
@@ -657,6 +721,14 @@ const _: () = {
     assert!(
         offset_of!(NodeRep<BitmapHeapScan>, payload) == offset_of!(NodeRep<Plan>, payload)
     );
+    assert!(offset_of!(Append, plan) == 0);
+    assert!(offset_of!(NodeRep<Append>, payload) == offset_of!(NodeRep<Plan>, payload));
+    assert!(offset_of!(SubqueryScan, scan) == 0);
+    assert!(
+        offset_of!(NodeRep<SubqueryScan>, payload) == offset_of!(NodeRep<Plan>, payload)
+    );
+    assert!(offset_of!(SetOp, plan) == 0);
+    assert!(offset_of!(NodeRep<SetOp>, payload) == offset_of!(NodeRep<Plan>, payload));
     assert!(offset_of!(FunctionScan, scan) == 0);
     assert!(
         offset_of!(NodeRep<FunctionScan>, payload) == offset_of!(NodeRep<Plan>, payload)
@@ -713,6 +785,9 @@ fn is_plan_tag(tag: NodeTag) -> bool {
             | NodeTag::T_BitmapOr
             | NodeTag::T_BitmapIndexScan
             | NodeTag::T_BitmapHeapScan
+            | NodeTag::T_Append
+            | NodeTag::T_SubqueryScan
+            | NodeTag::T_SetOp
             | NodeTag::T_FunctionScan
             | NodeTag::T_CteScan
             | NodeTag::T_ValuesScan
@@ -809,6 +884,21 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_unique(self) -> Option<&'mcx Unique<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_append(self) -> Option<&'mcx Append<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_subquery_scan(self) -> Option<&'mcx SubqueryScan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_set_op(self) -> Option<&'mcx SetOp<'mcx>> {
         self.as_variant()
     }
 

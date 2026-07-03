@@ -118,6 +118,19 @@ pub struct Query<'mcx> {
     pub stmt_len: ParseLoc,
 }
 
+/// larg/rarg are SetOperationStmt or RangeTblRef; groupClauses NIL iff UNION ALL.
+#[derive(Default)]
+pub struct SetOperationStmt<'mcx> {
+    pub op: SetOperation,
+    pub all: bool,
+    pub larg: Option<Node<'mcx>>,
+    pub rarg: Option<Node<'mcx>>,
+    pub colTypes: OidList<'mcx>,
+    pub colTypmods: IntList<'mcx>,
+    pub colCollations: OidList<'mcx>,
+    pub groupClauses: NodeList<'mcx>,
+}
+
 #[derive(Default)]
 pub struct RangeTblEntry<'mcx> {
     pub alias: Option<&'mcx Alias<'mcx>>,
@@ -741,6 +754,9 @@ impl Default for DeallocateStmt<'_> {
 unsafe impl<'mcx> NodeVariant<'mcx> for Query<'mcx> {
     const TAG: NodeTag = NodeTag::T_Query;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for SetOperationStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_SetOperationStmt;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for RangeTblEntry<'mcx> {
     const TAG: NodeTag = NodeTag::T_RangeTblEntry;
 }
@@ -843,6 +859,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_range_tbl_entry(self) -> Option<&'mcx RangeTblEntry<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_set_operation_stmt(self) -> Option<&'mcx SetOperationStmt<'mcx>> {
         self.as_variant()
     }
 
