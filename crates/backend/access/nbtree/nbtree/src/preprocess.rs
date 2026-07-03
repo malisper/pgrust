@@ -680,7 +680,7 @@ fn bt_unmark_keys(so: &mut BTScanOpaqueData<'_>) -> PgResult<()> {
 
 // _bt_num_array_keys, SAOP arm: counts SK_SEARCHARRAY input keys; any needed
 // skip-array backfill (PG 18 skip scan) is phase 2 and panics loudly.
-fn bt_num_array_keys(rel: &Relation<'_>, input_keys: &[ScanKeyData]) -> usize {
+fn bt_num_array_keys(input_keys: &[ScanKeyData]) -> usize {
     let n_saop = input_keys
         .iter()
         .filter(|k| k.sk_flags & SK_SEARCHARRAY != 0)
@@ -729,7 +729,7 @@ fn bt_preprocess_array_keys<'mcx>(
     so: &mut BTScanOpaqueData<'mcx>,
     input_keys: &[ScanKeyData],
 ) -> PgResult<Option<PgVec<'mcx, ScanKeyData>>> {
-    let num_array_keys = bt_num_array_keys(rel, input_keys);
+    let num_array_keys = bt_num_array_keys(input_keys);
     so.skipScan = false;
 
     if num_array_keys == 0 {
@@ -834,7 +834,6 @@ fn bt_preprocess_array_keys<'mcx>(
         let sortproc = sortproc.as_mut().expect("sortproc requested");
 
         let reverse = (indoption[cur.sk_attno as usize - 1] as i32) & 0x0001 != 0;
-        let mut elem_values = elem_values;
         bt_sort_array_elements(&mut frame, &cur, sortproc, reverse, &mut elem_values)?;
 
         if origarrayatt == cur.sk_attno {
@@ -925,7 +924,8 @@ fn bt_preprocess_array_keys_final(
             continue;
         }
 
-        so.orderProcs[output_ikey] = so.orderProcs[input_ikey].clone();
+        let reordered = so.orderProcs[input_ikey].clone();
+        so.orderProcs[output_ikey] = reordered;
 
         while arrayidx < so.numArrayKeys as usize {
             debug_assert!(so.arrayKeys[arrayidx].num_elems > 0);

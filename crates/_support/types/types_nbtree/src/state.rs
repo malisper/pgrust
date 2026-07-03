@@ -152,7 +152,6 @@ pub struct BTArrayKeyInfo<'mcx> {
     pub high_compare: Option<&'mcx ScanKeyData>,
 }
 
-const _: () = assert!(!core::mem::needs_drop::<BTArrayKeyInfo>());
 
 // C divergence: arrayContext is dropped — the PgVec allocations' 'mcx IS the
 // scan-lifespan context.

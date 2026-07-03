@@ -296,7 +296,8 @@ pub fn btrestrpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         restore_scanpos(so);
         // Reset the scan's array keys (see _bt_steppage for why).
         if so.numArrayKeys != 0 {
-            utils::bt_start_array_keys(so, so.currPos.dir);
+            let dir = so.currPos.dir;
+            utils::bt_start_array_keys(so, dir);
             so.needPrimScan = false;
         }
     } else {
