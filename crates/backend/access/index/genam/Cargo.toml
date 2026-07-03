@@ -14,6 +14,7 @@ types_scan = { path = "../../../../_support/types/types_scan" }
 types_snapshot = { path = "../../../../_support/types/snapshot" }
 types_slot = { path = "../../../../_support/types/types_slot" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
+heapam = { path = "../../heap/heapam" }
 indexam = { path = "../indexam" }
 genam_seams = { path = "../genam_seams" }
 relation_seams = { path = "../../common/relation_seams" }

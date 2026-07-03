@@ -294,6 +294,74 @@ fn heap_xlog_insert(record: &mut XLogReaderState) -> PgResult<()> {
     Ok(())
 }
 
+fn heap_xlog_inplace(record: &mut XLogReaderState) -> PgResult<()> {
+    let lsn = record.EndRecPtr;
+    // xl_heap_inplace layout (heapam_xlog.h).
+    const MIN_SIZE_OF_HEAP_INPLACE: usize = 20;
+    let xlrec = main_data(record).to_vec();
+    let offnum = u16::from_ne_bytes(xlrec[0..2].try_into().unwrap());
+    let db_id = u32::from_ne_bytes(xlrec[4..8].try_into().unwrap());
+    let ts_id = u32::from_ne_bytes(xlrec[8..12].try_into().unwrap());
+    let relcache_init_file_inval = xlrec[12] != 0;
+    let nmsgs = i32::from_ne_bytes(xlrec[16..20].try_into().unwrap());
+
+    let (action, buffer) = XLogReadBufferForRedo(record, 0)?;
+    if action == BLK_NEEDS_REDO {
+        let blk = record.block(0);
+        debug_assert!(blk.has_data);
+        // SAFETY: block data points into the decode buffer, live for this arm.
+        let newtup = unsafe { blk.data_bytes() };
+        let newlen = newtup.len();
+
+        // SAFETY: pin + exclusive lock per the redo protocol (module contract).
+        let mut pm = unsafe { page_mut(buffer) };
+        let page = pm.as_ref();
+        let lp = if page.max_offset_number() >= offnum {
+            Some(page.item_id(offnum))
+        } else {
+            None
+        };
+        let Some(lp) = lp.filter(|id| id.is_normal()) else {
+            return Err(panic_err("invalid lp".into()));
+        };
+        let (ptr, len) = page.item_raw(lp);
+        // SAFETY: in-page tuple image under the pin+lock; exclusive for this arm.
+        let hoff = unsafe { (*(ptr.cast::<HeapTupleHeaderData>())).t_hoff } as usize;
+        if len as usize - hoff != newlen {
+            return Err(panic_err("wrong tuple length".into()));
+        }
+        // SAFETY: destination within the item's storage, bounds checked above.
+        unsafe {
+            core::ptr::copy_nonoverlapping(newtup.as_ptr(), ptr.cast_mut().add(hoff), newlen);
+        }
+        pm.set_lsn(lsn);
+        bufmgr_seams::mark_buffer_dirty::call(buffer)?;
+    }
+    if buffer != InvalidBuffer {
+        unlock_release(buffer)?;
+    }
+
+    // C sends unconditionally; the port's shared-inval queue only attaches
+    // for standby redo (xact_redo_commit's STANDBY_DISABLED guard shape).
+    if xlogutils::standby_state() == xlogutils::STANDBY_DISABLED {
+        return Ok(());
+    }
+    let mut msgs = Vec::with_capacity(nmsgs.max(0) as usize);
+    for i in 0..nmsgs as usize {
+        let off = MIN_SIZE_OF_HEAP_INPLACE + i * 16;
+        let raw: [u8; 16] = xlrec[off..off + 16].try_into().unwrap();
+        if let Some(m) = types_storage::SharedInvalidationMessage::from_wire_bytes(raw) {
+            msgs.push(m);
+        }
+    }
+    inval::eoxact::ProcessCommittedInvalidationMessages(
+        &msgs,
+        relcache_init_file_inval,
+        db_id,
+        ts_id,
+    )
+}
+
 pub fn heap_redo(record: &mut XLogReaderState) -> PgResult<()> {
     let info = record.record.as_ref().expect("heap_redo with no decoded record").xl_info
         & !XLR_INFO_MASK;
@@ -306,7 +374,7 @@ pub fn heap_redo(record: &mut XLogReaderState) -> PgResult<()> {
         XLOG_HEAP_HOT_UPDATE => panic!("heap_redo arm not ported: heap_xlog_update (HOT)"),
         XLOG_HEAP_CONFIRM => panic!("heap_redo arm not ported: heap_xlog_confirm"),
         XLOG_HEAP_LOCK => panic!("heap_redo arm not ported: heap_xlog_lock"),
-        XLOG_HEAP_INPLACE => panic!("heap_redo arm not ported: heap_xlog_inplace"),
+        XLOG_HEAP_INPLACE => heap_xlog_inplace(record),
         other => Err(panic_err(format!("heap_redo: unknown op code {other}"))),
     }
 }

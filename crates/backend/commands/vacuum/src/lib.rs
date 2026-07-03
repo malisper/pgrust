@@ -452,10 +452,114 @@ pub fn vac_estimate_reltuples(
     (old_density * unscanned_pages + scanned_tuples + 0.5).floor()
 }
 
-/// vac_update_relstats (vacuum.c) is unported: the pg_class overwrite rides
-/// systable_inplace_update_*, whose heapam lane is a loud panic.
-pub fn vac_update_relstats(_rel: &RelationData<'_>) -> ! {
-    unported("vac_update_relstats (heap inplace-update lane)");
+const RelationRelationId: Oid = 1259;
+const ClassOidIndexId: Oid = 2662;
+const Natts_pg_class: usize = 34;
+const Anum_pg_class_oid: usize = 1;
+const Anum_pg_class_relpages: usize = 10;
+const Anum_pg_class_reltuples: usize = 11;
+const Anum_pg_class_relallvisible: usize = 12;
+const Anum_pg_class_relallfrozen: usize = 13;
+const Anum_pg_class_relhasindex: usize = 15;
+const Anum_pg_class_relhasrules: usize = 21;
+const Anum_pg_class_relhastriggers: usize = 22;
+const RowExclusiveLock: LOCKMODE = 3;
+
+fn getattr(
+    tup: &::types_tuple::HeapTupleData<'_>,
+    attnum: usize,
+    desc: &::types_tuple::TupleDescData<'_>,
+) -> ::datum::Datum {
+    let mut isnull = false;
+    // SAFETY: pg_class row copied under pg_class's descriptor; fixed columns
+    // are never null.
+    let d = unsafe { ::types_tuple::heap_getattr(tup, attnum as i32, desc, &mut isnull) };
+    debug_assert!(!isnull);
+    d
+}
+
+/// vac_update_relstats (vacuum.c), ANALYZE subset: the seam carries no
+/// frozenxid/minmulti (C's ANALYZE passes Invalid); the VACUUM freeze arm
+/// rides with its lane.
+pub fn vac_update_relstats(
+    relation: &RelationData<'_>,
+    num_pages: BlockNumber,
+    num_tuples: f64,
+    num_all_visible_pages: BlockNumber,
+    num_all_frozen_pages: BlockNumber,
+    hasindex: bool,
+    in_outer_xact: bool,
+) -> PgResult<()> {
+    let relid = relation.rd_id;
+    let cx = ::mcx::MemoryContext::new("vac_update_relstats");
+    let mcx = cx.mcx();
+    let rd = table::table_open(mcx, RelationRelationId, RowExclusiveLock)?;
+
+    let mut key = ::types_scan::scankey::ScanKeyData::empty();
+    key.sk_attno = Anum_pg_class_oid as i16;
+    key.sk_strategy = ::types_scan::scankey::BTEqualStrategyNumber;
+    key.sk_collation = 0;
+    key.sk_func = fmgr_seams::fmgr_info::call(::types_core::fmgr::F_OIDEQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
+    key.sk_argument = ::datum::Datum::from_oid(relid);
+
+    let Some((ctup, inplace_state)) =
+        genam::systable_inplace_update_begin(mcx, &rd, ClassOidIndexId, true, &[key])?
+    else {
+        return Err(::types_error::PgError::error(format!(
+            "pg_class entry for relid {relid} vanished during vacuuming"
+        ))
+        .into());
+    };
+
+    let desc = rd.descr();
+    let old = ctup.as_tuple();
+    let mut values = [::datum::Datum::null(); Natts_pg_class];
+    let nulls = [false; Natts_pg_class];
+    let mut replaces = [false; Natts_pg_class];
+    let mut dirty = false;
+    let set = |anum: usize, d: ::datum::Datum, values: &mut [::datum::Datum],
+                   replaces: &mut [bool], dirty: &mut bool| {
+        values[anum - 1] = d;
+        replaces[anum - 1] = true;
+        *dirty = true;
+    };
+
+    if getattr(old, Anum_pg_class_relpages, desc).as_i32() != num_pages as i32 {
+        set(Anum_pg_class_relpages, ::datum::Datum::from_i32(num_pages as i32), &mut values, &mut replaces, &mut dirty);
+    }
+    if getattr(old, Anum_pg_class_reltuples, desc).as_f32() != num_tuples as f32 {
+        set(Anum_pg_class_reltuples, ::datum::Datum::from_f32(num_tuples as f32), &mut values, &mut replaces, &mut dirty);
+    }
+    if getattr(old, Anum_pg_class_relallvisible, desc).as_i32() != num_all_visible_pages as i32 {
+        set(Anum_pg_class_relallvisible, ::datum::Datum::from_i32(num_all_visible_pages as i32), &mut values, &mut replaces, &mut dirty);
+    }
+    if getattr(old, Anum_pg_class_relallfrozen, desc).as_i32() != num_all_frozen_pages as i32 {
+        set(Anum_pg_class_relallfrozen, ::datum::Datum::from_i32(num_all_frozen_pages as i32), &mut values, &mut replaces, &mut dirty);
+    }
+
+    if !in_outer_xact {
+        if getattr(old, Anum_pg_class_relhasindex, desc).as_bool() && !hasindex {
+            set(Anum_pg_class_relhasindex, ::datum::Datum::from_bool(false), &mut values, &mut replaces, &mut dirty);
+        }
+        // C clears relhasrules/relhastriggers off rd_rules/trigdesc; neither
+        // exists here (rules/trigger lanes unported), so a set flag is loud.
+        if getattr(old, Anum_pg_class_relhasrules, desc).as_bool()
+            || getattr(old, Anum_pg_class_relhastriggers, desc).as_bool()
+        {
+            unported("vac_update_relstats relhasrules/relhastriggers clear (rules/trigger lanes)");
+        }
+    }
+
+    if dirty {
+        let newtup =
+            heaptuple::heap_modify_tuple(mcx, old, desc, &values, &nulls, &replaces)?;
+        genam::systable_inplace_update_finish(mcx, inplace_state, newtup.as_tuple())?;
+    } else {
+        genam::systable_inplace_update_cancel(mcx, inplace_state)?;
+    }
+    table::table_close(rd, RowExclusiveLock)?;
+    Ok(())
 }
 
 macro_rules! vacuum_guc_int {
@@ -491,7 +595,7 @@ pub fn init_seams() {
         get: || VACUUM_TRUNCATE.load(Relaxed),
         set: |v| VACUUM_TRUNCATE.store(v, Relaxed),
     });
-    vacuum_seams::vac_update_relstats::set(|rel, _, _, _, _, _, _| vac_update_relstats(rel));
+    vacuum_seams::vac_update_relstats::set(vac_update_relstats);
 }
 
 pub fn vacuum_delay_point(_is_analyze: bool) -> PgResult<()> {

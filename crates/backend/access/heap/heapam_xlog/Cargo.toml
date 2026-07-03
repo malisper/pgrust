@@ -15,6 +15,7 @@ xlogreader_seams = { path = "../../transam/xlogreader_seams" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 freespace = { path = "../../../storage/freespace/freespace" }
 visibilitymap = { path = "../visibilitymap" }
+inval = { path = "../../../utils/cache/inval" }
 
 [dev-dependencies]
 heapam = { path = "../heapam" }
