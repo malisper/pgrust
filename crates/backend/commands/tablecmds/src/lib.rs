@@ -90,6 +90,36 @@ pub(crate) fn unported(what: &str) -> ! {
     panic!("unported: tablecmds {what}")
 }
 
+// GetColumnDefCollation (parse_type.c).
+fn GetColumnDefCollation(coldef: &ColumnDef<'_>, type_oid: Oid) -> PgResult<Oid> {
+    let typcollation = syscache_seams::lookup_pg_type_shape::call(type_oid)?
+        .expect("pg_type row vanished")
+        .typcollation;
+    if let Some(cc) = coldef.collClause {
+        let cc = cc.as_collate_clause().expect("CollateClause");
+        let mut names: [&str; 4] = [""; 4];
+        let nnames = cc.collname.len();
+        assert!((1..=3).contains(&nnames), "improper collation name list length");
+        for (i, n) in cc.collname.iter().enumerate() {
+            names[i] = n.as_string().expect("collname cell").sval;
+        }
+        let result = catalog_namespace::get_collation_oid(&names[..nnames], false)?;
+        if typcollation == types_core::InvalidOid {
+            return Err(types_error::PgError::error(format!(
+                "collations are not supported by type {}",
+                format_type::format_type_be(type_oid)?
+            ))
+            .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
+            .into());
+        }
+        return Ok(result);
+    }
+    if coldef.collOid != types_core::InvalidOid {
+        return Ok(coldef.collOid);
+    }
+    Ok(typcollation)
+}
+
 // BuildDescForRelation (tablecmds.c in 18.3).
 pub fn BuildDescForRelation<'mcx>(
     mcx: Mcx<'mcx>,
@@ -111,15 +141,7 @@ pub fn BuildDescForRelation<'mcx>(
             .as_variant::<TypeName>()
             .expect("TypeName");
         let (atttypid, atttypmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
-        // GetColumnDefCollation: collClause is loud upstream; collOid is the
-        // pre-cooked (LIKE) carrier, else the type's default.
-        let attcollation = if entry.collOid != InvalidOid {
-            entry.collOid
-        } else {
-            syscache_seams::lookup_pg_type_shape::call(atttypid)?
-                .expect("pg_type row vanished")
-                .typcollation
-        };
+        let attcollation = GetColumnDefCollation(entry, atttypid)?;
         tupdesc::TupleDescInitEntry(&mut desc, attnum, Some(colname), atttypid, atttypmod, 0)?;
         tupdesc::TupleDescInitEntryCollation(&mut desc, attnum, attcollation);
 

@@ -18,8 +18,6 @@ enum CollateStrength {
     None = 0,
     Implicit = 1,
     Conflict = 2,
-    // Constructed only by the CollateExpr arm (loud until it lands).
-    #[allow(dead_code)]
     Explicit = 3,
 }
 
@@ -232,6 +230,14 @@ fn assign_collations_walker<'mcx>(
                 assign_collations_walker(expr, &mut loccontext)?;
             }
             return Ok(());
+        }
+        NodeTag::T_CollateExpr => {
+            let c = node.as_collate_expr().unwrap();
+            assign_collations_walker(c.arg, &mut loccontext)?;
+            collation = c.collOid;
+            debug_assert!(OidIsValid(collation));
+            strength = CollateStrength::Explicit;
+            location = c.location;
         }
         NodeTag::T_RangeTblRef | NodeTag::T_SortGroupClause => return Ok(()),
         NodeTag::T_Query => {

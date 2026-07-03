@@ -326,6 +326,9 @@ fn check_agg_arguments_walker<'mcx>(
         NodeTag::T_RelabelType => {
             check_agg_arguments_walker(pstate, node.as_relabel_type().unwrap().arg, ctx)
         }
+        NodeTag::T_CollateExpr => {
+            check_agg_arguments_walker(pstate, node.as_collate_expr().unwrap().arg, ctx)
+        }
         NodeTag::T_BoolExpr => {
             for arg in &node.as_bool_expr().unwrap().args {
                 check_agg_arguments_walker(pstate, arg, ctx)?;
@@ -829,6 +832,9 @@ fn finalize_grouping_exprs<'mcx>(
         NodeTag::T_RelabelType => {
             finalize_grouping_exprs(mcx, pstate, qry, node.as_relabel_type().unwrap().arg)
         }
+        NodeTag::T_CollateExpr => {
+            finalize_grouping_exprs(mcx, pstate, qry, node.as_collate_expr().unwrap().arg)
+        }
         NodeTag::T_BoolExpr => {
             for arg in &node.as_bool_expr().unwrap().args {
                 finalize_grouping_exprs(mcx, pstate, qry, arg)?;
@@ -966,6 +972,9 @@ fn check_ungrouped_columns<'mcx>(
         }
         NodeTag::T_RelabelType => {
             check_ungrouped_columns(pstate, qry, node.as_relabel_type().unwrap().arg)
+        }
+        NodeTag::T_CollateExpr => {
+            check_ungrouped_columns(pstate, qry, node.as_collate_expr().unwrap().arg)
         }
         NodeTag::T_BoolExpr => {
             for arg in &node.as_bool_expr().unwrap().args {

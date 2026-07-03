@@ -288,10 +288,6 @@ fn ComputeIndexAttrs<'mcx>(
         if !attribute.opclass.is_nil() || !attribute.opclassopts.is_nil() {
             unported("ComputeIndexAttrs: named operator classes (ResolveOpClass)");
         }
-        if !attribute.collation.is_nil() {
-            unported("ComputeIndexAttrs: COLLATE overrides (get_collation_oid)");
-        }
-
         let desc = rel.descr();
         let mut found = None;
         for i in 0..desc.natts as usize {
@@ -311,7 +307,26 @@ fn ComputeIndexAttrs<'mcx>(
         };
         indexInfo.ii_IndexAttrNumbers[attn] = attform.attnum;
         let atttype = attform.atttypid;
-        let attcollation = attform.attcollation;
+        let mut attcollation = attform.attcollation;
+
+        if !attribute.collation.is_nil() {
+            if !lsyscache::type_is_collatable(atttype)? {
+                return Err(err(
+                    format!(
+                        "collations are not supported by type {}",
+                        format_type::format_type_be(atttype)?
+                    ),
+                    ERRCODE_DATATYPE_MISMATCH,
+                ));
+            }
+            let mut names: [&str; 4] = [""; 4];
+            let nnames = attribute.collation.len();
+            assert!((1..=3).contains(&nnames), "improper collation name list length");
+            for (i, n) in attribute.collation.iter().enumerate() {
+                names[i] = n.as_string().expect("collation name cell").sval;
+            }
+            attcollation = catalog_namespace::get_collation_oid(&names[..nnames], false)?;
+        }
 
         if lsyscache::type_is_collatable(atttype)? {
             if attcollation == InvalidOid {

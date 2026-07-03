@@ -542,16 +542,24 @@ impl<'mcx> Parser<'mcx> {
                 let quals = view.v(6).list();
                 // SplitColQualList: COLLATE splits out; Constraints stay.
                 let mut constraints = NodeList::nil();
+                let mut coll_clause: Option<Node<'_>> = None;
                 for q in quals.iter() {
                     match q.node_tag() {
                         NodeTag::T_Constraint => constraints.lappend(mcx, q)?,
-                        NodeTag::T_CollateClause => panic!(
-                            "gram_core: SplitColQualList COLLATE arm unported"
-                        ),
+                        NodeTag::T_CollateClause => {
+                            if coll_clause.is_some() {
+                                return Err(self.errposition_error(
+                                    "multiple COLLATE clauses not allowed".into(),
+                                    q.as_collate_clause().unwrap().location,
+                                ));
+                            }
+                            coll_clause = Some(q);
+                        }
                         other => panic!("unexpected node type {other:?} in ColQualList"),
                     }
                 }
                 let mut n = Node::build::<ColumnDef>(mcx)?;
+                n.collClause = coll_clause;
                 n.colname = Some(colname);
                 n.typeName = type_name;
                 n.storage_name = storage_name;
@@ -561,6 +569,14 @@ impl<'mcx> Parser<'mcx> {
                 n.fdwoptions = fdwoptions;
                 n.location = view.l(1);
                 *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ColConstraintElem: COLLATE any_name
+            498 => {
+                let collname = view.v(2).list();
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    CollateClause { arg: None, collname, location: view.l(1) },
+                )?));
             }
             // ColQualList: ColQualList ColConstraint
             493 => {
