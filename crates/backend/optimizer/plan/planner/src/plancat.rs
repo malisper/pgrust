@@ -401,7 +401,6 @@ pub fn restriction_selectivity<'mcx>(
         3169 => crate::rangetypes_selfuncs::rangesel(run, operatorid, args, varrelid)?,
         4243 => crate::multirangetypes_selfuncs::multirangesel(run, operatorid, args, varrelid)?,
         3560 => crate::network_selfuncs::networksel(run, operatorid, args, varrelid)?,
-        5040 => crate::selfuncs::matchingsel(run, operatorid, args, varrelid, inputcollid)?,
         other => panic!(
             "restriction_selectivity (plancat.c): oprrest {other}; M2 selfuncs lane"
         ),

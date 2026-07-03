@@ -1977,59 +1977,6 @@ pub(crate) fn get_join_variables<'mcx>(
 
 pub const DEFAULT_MATCHING_SEL: f64 = 0.010;
 
-// matchingsel (selfuncs.c).
-pub fn matchingsel<'mcx>(
-    run: &mut PlannerRun<'mcx>,
-    operator: Oid,
-    args: &[NodeId],
-    varrelid: i32,
-    collation: Oid,
-) -> PgResult<f64> {
-    generic_restriction_selectivity(run, operator, collation, args, varrelid, DEFAULT_MATCHING_SEL)
-}
-
-// generic_restriction_selectivity (selfuncs.c).
-pub(crate) fn generic_restriction_selectivity<'mcx>(
-    run: &mut PlannerRun<'mcx>,
-    oproid: Oid,
-    collation: Oid,
-    args: &[NodeId],
-    varrelid: i32,
-    default_selectivity: f64,
-) -> PgResult<f64> {
-    let Some((vardata, other, varonleft)) = get_restriction_variable(run, args, varrelid)?
-    else {
-        return Ok(default_selectivity);
-    };
-    let selec = match other.as_const() {
-        Some(c) if c.constisnull => return Ok(0.0),
-        Some(c) => {
-            let constval = c.constvalue;
-            let mut opproc = opproc_for(oproid)?;
-            let (mcvsel, mcvsum) =
-                mcv_selectivity(run, &vardata, &mut opproc, collation, constval, varonleft)?;
-            let (hist_selec, hist_size) = histogram_selectivity(
-                &vardata, &mut opproc, collation, constval, varonleft, 10, 1,
-            )?;
-            let mut selec = if hist_selec < 0.0 {
-                default_selectivity
-            } else if hist_size < 100 {
-                let hist_weight = hist_size as f64 / 100.0;
-                hist_selec * hist_weight + default_selectivity * (1.0 - hist_weight)
-            } else {
-                hist_selec
-            };
-            selec = selec.clamp(0.0001, 0.9999);
-            let nullfrac = vardata.nullfrac();
-            selec *= 1.0 - nullfrac - mcvsum;
-            selec += mcvsel;
-            selec
-        }
-        None => default_selectivity,
-    };
-    Ok(clamp_probability(selec))
-}
-
 // eqjoinsel_semi (selfuncs.c), non-MCV arm (the MCV-x-MCV arm panics above).
 #[allow(clippy::too_many_arguments)]
 fn eqjoinsel_semi(
@@ -2674,7 +2621,7 @@ fn generic_restriction_selectivity<'mcx>(
     Ok(clamp_probability(selec))
 }
 
-// matchingsel (selfuncs.c). DEFAULT_MATCHING_SEL = 2 * DEFAULT_EQ_SEL.
+// matchingsel (selfuncs.c); DEFAULT_MATCHING_SEL = 2 * DEFAULT_EQ_SEL.
 pub fn matchingsel<'mcx>(
     run: &mut PlannerRun<'mcx>,
     operator: Oid,
@@ -2682,7 +2629,6 @@ pub fn matchingsel<'mcx>(
     varrelid: i32,
     collation: Oid,
 ) -> PgResult<f64> {
-    const DEFAULT_MATCHING_SEL: f64 = 0.010;
     generic_restriction_selectivity(run, operator, collation, args, varrelid, DEFAULT_MATCHING_SEL)
 }
 
