@@ -26,6 +26,21 @@ pub type RmRedo = fn(record: &mut XLogReaderState) -> PgResult<()>;
 fn xlog_redo(record: &mut XLogReaderState) -> PgResult<()> {
     transam_xlog_seams::xlog_redo::call(record)
 }
+
+fn xact_redo(record: &mut XLogReaderState) -> PgResult<()> {
+    let rec = record.record.as_ref().expect("xact_redo with no decoded record");
+    // SAFETY: main_data points into the reader's decode buffer, valid for the
+    // redo callback's duration.
+    let data = unsafe { rec.main_data_bytes() };
+    xact::xact_redo(xact::XactRedoInfo {
+        info: rec.xl_info,
+        xid: rec.xl_xid,
+        origin_id: rec.record_origin,
+        read_rec_ptr: record.ReadRecPtr,
+        end_rec_ptr: record.EndRecPtr,
+        data,
+    })
+}
 pub type RmDesc = for<'mcx> fn(buf: &mut StringInfo<'mcx>, record: &XLogReaderState) -> PgResult<()>;
 pub type RmIdentify = fn(info: u8) -> Option<&'static str>;
 // C rm_startup is void(void); the btree/gin/gist/spgist impls create their
@@ -126,26 +141,6 @@ macro_rules! unported_identify {
     )+};
 }
 
-macro_rules! unported_startup {
-    ($($name:ident => $unit:literal;)+) => {$(
-        #[cold]
-        #[inline(never)]
-        fn $name(_parent: Mcx<'_>) -> PgResult<()> {
-            panic!(concat!("rmgr callback not ported: ", stringify!($name), " — land ", $unit))
-        }
-    )+};
-}
-
-macro_rules! unported_cleanup {
-    ($($name:ident => $unit:literal;)+) => {$(
-        #[cold]
-        #[inline(never)]
-        fn $name() {
-            panic!(concat!("rmgr callback not ported: ", stringify!($name), " — land ", $unit))
-        }
-    )+};
-}
-
 macro_rules! unported_mask {
     ($($name:ident => $unit:literal;)+) => {$(
         #[cold]
@@ -157,14 +152,10 @@ macro_rules! unported_mask {
 }
 
 unported_redo! {
-    xact_redo => "backend-access-transam-xact";
     smgr_redo => "backend-catalog-storage";
     dbase_redo => "backend-commands-dbcommands";
     tblspc_redo => "backend-commands-tablespace";
-    multixact_redo => "backend-access-transam-multixact";
     standby_redo => "backend-storage-ipc-standby";
-    heap2_redo => "backend-access-heap-heapam-xlog";
-    heap_redo => "backend-access-heap-heapam-xlog";
     btree_redo => "backend-access-nbtree-nbtxlog";
     hash_redo => "backend-access-hash-xlog";
     gin_redo => "backend-access-gin-xlog";
@@ -228,20 +219,9 @@ unported_identify! {
     logicalmsg_identify => "backend-access-rmgrdesc-small";
 }
 
-unported_startup! {
-    btree_xlog_startup => "backend-access-nbtree-nbtxlog";
-    gin_xlog_startup => "backend-access-gin-xlog";
-    gist_xlog_startup => "backend-access-gist-xlog";
-    spg_xlog_startup => "backend-access-spgist-xlog";
-}
-
-unported_cleanup! {
-    btree_xlog_cleanup => "backend-access-nbtree-nbtxlog";
-    gin_xlog_cleanup => "backend-access-gin-xlog";
-    gist_xlog_cleanup => "backend-access-gist-xlog";
-    spg_xlog_cleanup => "backend-access-spgist-xlog";
-}
-
+// btree/gin/gist/spgist rm_startup/rm_cleanup only allocate the recovery
+// scratch their (loud, unported) redo callbacks read; the rows carry None
+// until those xlog units land so RmgrStartup can run for crash recovery.
 unported_mask! {
     heap_mask => "backend-access-heap-heapam-xlog";
     btree_mask => "backend-access-nbtree-nbtxlog";
@@ -313,7 +293,7 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     },
     RmgrData {
         rm_name: "MultiXact",
-        rm_redo: multixact_redo,
+        rm_redo: multixact::multixact_redo,
         rm_desc: multixact_desc,
         rm_identify: multixact_identify,
         rm_startup: None,
@@ -340,7 +320,7 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     },
     RmgrData {
         rm_name: "Heap2",
-        rm_redo: heap2_redo,
+        rm_redo: heapam_xlog::heap2_redo,
         rm_desc: heap2_desc,
         rm_identify: heap2_identify,
         rm_startup: None,
@@ -349,7 +329,7 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     },
     RmgrData {
         rm_name: "Heap",
-        rm_redo: heap_redo,
+        rm_redo: heapam_xlog::heap_redo,
         rm_desc: heap_desc,
         rm_identify: heap_identify,
         rm_startup: None,
@@ -361,8 +341,8 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
         rm_redo: btree_redo,
         rm_desc: btree_desc,
         rm_identify: btree_identify,
-        rm_startup: Some(btree_xlog_startup),
-        rm_cleanup: Some(btree_xlog_cleanup),
+        rm_startup: None,
+        rm_cleanup: None,
         rm_mask: Some(btree_mask),
     },
     RmgrData {
@@ -379,8 +359,8 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
         rm_redo: gin_redo,
         rm_desc: gin_desc,
         rm_identify: gin_identify,
-        rm_startup: Some(gin_xlog_startup),
-        rm_cleanup: Some(gin_xlog_cleanup),
+        rm_startup: None,
+        rm_cleanup: None,
         rm_mask: Some(gin_mask),
     },
     RmgrData {
@@ -388,8 +368,8 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
         rm_redo: gist_redo,
         rm_desc: gist_desc,
         rm_identify: gist_identify,
-        rm_startup: Some(gist_xlog_startup),
-        rm_cleanup: Some(gist_xlog_cleanup),
+        rm_startup: None,
+        rm_cleanup: None,
         rm_mask: Some(gist_mask),
     },
     RmgrData {
@@ -406,8 +386,8 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
         rm_redo: spg_redo,
         rm_desc: spg_desc,
         rm_identify: spg_identify,
-        rm_startup: Some(spg_xlog_startup),
-        rm_cleanup: Some(spg_xlog_cleanup),
+        rm_startup: None,
+        rm_cleanup: None,
         rm_mask: Some(spg_mask),
     },
     RmgrData {
