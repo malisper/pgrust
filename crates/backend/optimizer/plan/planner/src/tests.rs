@@ -559,8 +559,6 @@ fn install_scan_fixtures() {
                 indisvalid: true,
                 indisreplident: false,
                 has_indpred: false,
-        indexprs_src: None,
-        indpred_src: None,
             });
         }
         Ok(v)
