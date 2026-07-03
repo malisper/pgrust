@@ -355,9 +355,14 @@ fn transientrel_startup<'mcx>(
     _operation: i32,
     _typeinfo: &TupleDescData<'_>,
 ) -> PgResult<()> {
-    let rel = table::table_open(state.mcx, state.transientoid, NoLock)?;
+    // C's heap_create_with_catalog leaves the new heap AccessExclusive-locked;
+    // ours does not, so the lock moves to this first open (same end state).
+    let rel = table::table_open(state.mcx, state.transientoid, AccessExclusiveLock)?;
     state.output_cid = xact::GetCurrentCommandId(true)?;
-    state.ti_options = tableam_vocab::TABLE_INSERT_SKIP_FSM | tableam_vocab::TABLE_INSERT_FROZEN;
+    // C adds TABLE_INSERT_FROZEN; the frozen insert's visibilitymap_pin lane
+    // is unported (hio.rs) — rows carry a live committed xmin instead, same
+    // visibility, page vm/PD_ALL_VISIBLE bits diverge until that lane lands.
+    state.ti_options = tableam_vocab::TABLE_INSERT_SKIP_FSM;
     state.bistate = Some(heapam::GetBulkInsertState());
     state.rel = Some(rel);
     Ok(())
