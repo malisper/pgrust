@@ -158,7 +158,7 @@ fn ExplainOneQuery<'mcx>(
     query_env: QueryEnvHandle,
 ) -> PgResult<()> {
     if query.commandType == CmdType::CMD_UTILITY {
-        return ExplainOneUtility(query.utilityStmt, es);
+        return ExplainOneUtility(mcx, query.utilityStmt, es, query_string, params, query_env);
     }
     // ExplainOneQuery_hook: no plugin surface exists.
     standard_ExplainOneQuery(mcx, query, cursor_options, es, query_string, params, query_env)
@@ -195,8 +195,12 @@ pub fn standard_ExplainOneQuery<'mcx>(
 
 // "into" (CreateTableAsStmt) callers are loud in the CTAS arm.
 fn ExplainOneUtility<'mcx>(
+    mcx: Mcx<'mcx>,
     utility_stmt: Option<Node<'mcx>>,
     es: &mut ExplainState<'mcx>,
+    query_string: &str,
+    params: ParamListHandle,
+    query_env: QueryEnvHandle,
 ) -> PgResult<()> {
     let Some(stmt) = utility_stmt else {
         return Ok(());
@@ -210,9 +214,52 @@ fn ExplainOneUtility<'mcx>(
             "ExplainOneUtility (explain.c): DECLARE CURSOR arm needs \
              DeclareCursorStmt vocabulary (portalcmds lane)"
         ),
-        NodeTag::T_ExecuteStmt => panic!(
-            "ExplainOneUtility (explain.c): ExplainExecuteQuery unported (prepare lane)"
-        ),
+        NodeTag::T_ExecuteStmt => {
+            if es.memory {
+                panic!(
+                    "ExplainOneUtility (explain.c): MEMORY needs \
+                     MemoryContextMemConsumed accounting (mcxt lane)"
+                );
+            }
+            let exec_stmt = stmt.as_execute_stmt().expect("tag checked");
+            let bufusage_start =
+                if es.buffers { Some(instrument::pg_buffer_usage()) } else { None };
+            let mut bufusage: Option<BufferUsage> = None;
+            return prepare::ExplainExecuteQuery(
+                mcx,
+                exec_stmt,
+                query_string,
+                params,
+                query_env,
+                &mut |pstmt, prepared_query, param_li, planduration, is_last| {
+                    if bufusage.is_none() {
+                        bufusage = bufusage_start.map(|start| {
+                            let mut b = BufferUsage::default();
+                            instrument::buffer_usage_accum_diff(
+                                &mut b,
+                                &instrument::pg_buffer_usage(),
+                                &start,
+                            );
+                            b
+                        });
+                    }
+                    ExplainOnePlanRef(
+                        mcx,
+                        pstmt,
+                        es,
+                        prepared_query,
+                        param_li,
+                        query_env,
+                        planduration,
+                        bufusage.as_ref(),
+                    )?;
+                    if !is_last {
+                        ExplainSeparatePlans(es)?;
+                    }
+                    Ok(())
+                },
+            );
+        }
         NodeTag::T_NotifyStmt => {
             if es.format == EXPLAIN_FORMAT_TEXT {
                 es.str.append_str("NOTIFY\n")?;
@@ -242,7 +289,22 @@ pub fn ExplainOnePlan<'mcx>(
     planduration: std::time::Duration,
     bufusage: Option<&BufferUsage>,
 ) -> PgResult<()> {
-    debug_assert!(plan.commandType != CmdType::CMD_UTILITY);
+    let pstmt: &'mcx PlannedStmt<'mcx> = mcx::alloc_leak_in(mcx, plan)?;
+    ExplainOnePlanRef(mcx, pstmt, es, query_string, params, query_env, planduration, bufusage)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ExplainOnePlanRef<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstmt: &'mcx PlannedStmt<'mcx>,
+    es: &mut ExplainState<'mcx>,
+    query_string: &str,
+    params: ParamListHandle,
+    query_env: QueryEnvHandle,
+    planduration: std::time::Duration,
+    bufusage: Option<&BufferUsage>,
+) -> PgResult<()> {
+    debug_assert!(pstmt.commandType != CmdType::CMD_UTILITY);
     debug_assert_eq!(es.serialize, EXPLAIN_SERIALIZE_NONE);
 
     let mut instrument_option = 0;
@@ -270,7 +332,6 @@ pub fn ExplainOnePlan<'mcx>(
     snapmgr::UpdateActiveSnapshotCommandId()?;
 
     // C: dest = None_Receiver (no CTAS/SERIALIZE receivers in this lane).
-    let pstmt: &'mcx PlannedStmt<'mcx> = mcx::alloc_leak_in(mcx, plan)?;
     let qd = execmain_seams::create_query_desc::call(
         pstmt,
         query_string,

@@ -2434,6 +2434,7 @@ dependencies = [
  "pmsignal_seams",
  "postgres",
  "pqcomm_seams",
+ "prepare",
  "printtup",
  "procarray",
  "relation_seams",

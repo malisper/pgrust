@@ -32,6 +32,7 @@ nodes_core = { path = "../../nodes/nodes_core" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 typcache = { path = "../../utils/cache/typcache" }
 postgres = { path = "../../tcop/postgres" }
+prepare = { path = "../prepare" }
 rewrite_handler_seams = { path = "../../rewrite/rewrite_handler_seams" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 tcop_dest = { path = "../../tcop/dest" }
