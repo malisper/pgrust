@@ -195,7 +195,9 @@ impl<'mcx> JsonSem<'mcx> for GetState<'_, 'mcx> {
 
     fn scalar(&mut self, lex: &JsonLex<'_>, token: JsonSemToken<'mcx>) -> PgResult<bool> {
         if lex.lex_level == 0 && self.npath == 0 {
-            if self.normalize && lex.token_type == JsonToken::String {
+            // C keys off the callback's tokentype: the lexer has already
+            // advanced past the scalar here.
+            if self.normalize && matches!(token, JsonSemToken::String(_)) {
                 self.next_scalar = true;
             } else if self.normalize && matches!(token, JsonSemToken::Null) {
                 self.tresult = None;
