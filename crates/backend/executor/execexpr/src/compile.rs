@@ -814,6 +814,14 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeId,
+        NodeTag::T_JsonValueExpr => {
+            expr_type(node.as_json_value_expr().unwrap().formatted_expr.expect("formatted_expr"))
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            node.as_json_constructor_expr().unwrap().returning.expect("returning").typid
+        }
+        NodeTag::T_JsonIsPredicate => ::types_core::catalog::BOOLOID,
+        NodeTag::T_JsonExpr => node.as_json_expr().unwrap().returning.expect("returning").typid,
         tag => panic!("execexpr exprType: node family {tag:?} not ported"),
     }
 }
