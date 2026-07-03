@@ -137,7 +137,7 @@ pub fn gistXLogSplit(
     for (i, d) in dist.iter().enumerate() {
         bufs.push(XLogRegBuf {
             block_id: (i + 1) as u8,
-            buffer: d.buffer.as_ref().expect("split half has a buffer").buffer(),
+            buffer: d.buf,
             flags: REGBUF_WILL_INIT,
             bufdata: &bufdatas[i],
         });

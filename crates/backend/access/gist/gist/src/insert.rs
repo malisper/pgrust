@@ -447,15 +447,19 @@ pub fn gistdoinsert<'mcx>(
             gistcheckpage(state.r, state.frames[cur].pin.as_ref().expect("pinned"))?;
         }
 
-        let pin_page = state.frames[cur].pin.as_ref().expect("pinned").page();
-        state.frames[cur].lsn = if xlocked {
-            pin_page.lsn()
+        let lsn_now = if xlocked {
+            state.frames[cur].pin.as_ref().expect("pinned").page().lsn()
         } else {
             bufmgr::buffer_get_lsn_atomic::call(buffer)
         };
-        debug_assert!(!relation_needs_wal(state.r) || state.frames[cur].lsn != 0);
+        state.frames[cur].lsn = lsn_now;
+        debug_assert!(!relation_needs_wal(state.r) || lsn_now != 0);
 
-        if GistFollowRight(&pin_page) {
+        let follow_right = {
+            let page = state.frames[cur].pin.as_ref().expect("pinned").page();
+            GistFollowRight(&page)
+        };
+        if follow_right {
             if !xlocked {
                 unlock(buffer)?;
                 lock(buffer, GIST_EXCLUSIVE)?;
@@ -565,8 +569,9 @@ pub fn gistdoinsert<'mcx>(
                 unlock(buffer)?;
                 lock(buffer, GIST_EXCLUSIVE)?;
                 xlocked = true;
+                let page_lsn = state.frames[cur].pin.as_ref().expect("pinned").page().lsn();
+                state.frames[cur].lsn = page_lsn;
                 let page = state.frames[cur].pin.as_ref().expect("pinned").page();
-                state.frames[cur].lsn = page.lsn();
 
                 if state.frames[cur].blkno == GIST_ROOT_BLKNO {
                     if !GistPageIsLeaf(&page) {

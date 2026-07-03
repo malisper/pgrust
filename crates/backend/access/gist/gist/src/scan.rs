@@ -56,8 +56,7 @@ pub fn gistbeginscan<'mcx>(
         fetch_buf: Vec::new(),
     };
 
-    let so = ::mcx::PgBox::new_in(so, mcx)
-        .map_err(|_| -> Box<::types_error::PgError> { Box::new(mcx.oom(4096)) })?;
+    let so = ::mcx::PgBox::new_in(so, mcx);
     let scan = relation_get_index_scan(
         mcx,
         r,
