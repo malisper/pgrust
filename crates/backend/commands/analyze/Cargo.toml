@@ -1,0 +1,122 @@
+[package]
+name = "commands_analyze"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "commands_analyze"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+pg_prng = { path = "../../../common/pg_prng" }
+table = { path = "../../access/table/table" }
+tableam = { path = "../../access/table/tableam" }
+heapam = { path = "../../access/heap/heapam" }
+heaptuple = { path = "../../access/common/heaptuple" }
+visibilitymap = { path = "../../access/heap/visibilitymap" }
+genam = { path = "../../access/index/genam" }
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+procarray = { path = "../../storage/ipc/procarray" }
+xact = { path = "../../access/transam/xact" }
+typcache = { path = "../../utils/cache/typcache" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+vacuum_seams = { path = "../vacuum_seams" }
+miscinit = { path = "../../utils/init/miscinit" }
+tableam_vocab = { path = "../../access/table/tableam_vocab" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+
+[dev-dependencies]
+adt_bool = { path = "../../utils/adt/bool" }
+adt_float = { path = "../../utils/adt/float" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+aio_seams = { path = "../../storage/aio/aio_seams" }
+async_seams = { path = "../async_seams" }
+autovacuum_seams = { path = "../../postmaster/autovacuum_seams" }
+backend_progress_seams = { path = "../../utils/activity/backend_progress_seams" }
+backend_status_seams = { path = "../../utils/activity/backend_status_seams" }
+be_fsstubs_seams = { path = "../../libpq/be_fsstubs_seams" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+catalog_index_seams = { path = "../../catalog/catalog_index_seams" }
+catalog_seams = { path = "../../catalog/catalog_seams" }
+catalog_storage_seams = { path = "../../catalog/storage_seams" }
+catcache = { path = "../../utils/cache/catcache" }
+clog = { path = "../../access/transam/clog" }
+combocid_seams = { path = "../../utils/time/combocid_seams" }
+commit_ts_seams = { path = "../../access/transam/commit_ts_seams" }
+condition_variable_seams = { path = "../../storage/lmgr/condition_variable_seams" }
+controldata_utils = { path = "../../../common/controldata_utils" }
+dbcommands_seams = { path = "../../commands/dbcommands_seams" }
+deadlock_seams = { path = "../../storage/lmgr/deadlock_seams" }
+exectuples = { path = "../../executor/exectuples" }
+fd = { path = "../../storage/file/fd" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+freespace_seams = { path = "../../storage/freespace/freespace_seams" }
+guc = { path = "../../utils/misc/guc" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+heapam_visibility = { path = "../../access/heap/heapam_visibility" }
+indexcmds_seams = { path = "../indexcmds_seams" }
+init_small = { path = "../../utils/init/init_small" }
+inval = { path = "../../utils/cache/inval" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
+lock = { path = "../../storage/lmgr/lock" }
+lock_seams = { path = "../../storage/lmgr/lock_seams" }
+logical_seams = { path = "../../replication/logical_seams" }
+logical_worker_seams = { path = "../../replication/logical_worker_seams" }
+lwlock = { path = "../../storage/lmgr/lwlock" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+multixact_seams = { path = "../../access/transam/multixact_seams" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
+origin_seams = { path = "../../replication/origin_seams" }
+parallel_seams = { path = "../../access/transam/parallel_seams" }
+pg_enum_seams = { path = "../../catalog/pg_enum_seams" }
+pg_sema_seams = { path = "../../port/pg_sema_seams" }
+pgstat = { path = "../../utils/activity/pgstat" }
+pmsignal_seams = { path = "../../storage/ipc/pmsignal_seams" }
+predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
+pruneheap_seams = { path = "../../access/heap/pruneheap_seams" }
+relation_seams = { path = "../../access/common/relation_seams" }
+resowner = { path = "../../utils/resowner/resowner" }
+rmgr = { path = "../../access/transam/rmgr" }
+s_lock_seams = { path = "../../storage/lmgr/s_lock_seams" }
+shmem = { path = "../../storage/ipc/shmem" }
+sinval_seams = { path = "../../storage/ipc/sinval_seams" }
+smgr_seams = { path = "../../storage/smgr/smgr_seams" }
+snapbuild_seams = { path = "../../replication/snapbuild_seams" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+spi_seams = { path = "../../executor/spi_seams" }
+subtrans = { path = "../../access/transam/subtrans" }
+sync_seams = { path = "../../storage/sync/sync_seams" }
+syncrep_seams = { path = "../../replication/syncrep_seams" }
+tablecmds_seams = { path = "../tablecmds_seams" }
+timeout_seams = { path = "../../utils/misc/timeout_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+transam = { path = "../../access/transam/transam" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+trigger_seams = { path = "../trigger_seams" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
+types_snapshot = { path = "../../../_support/types/snapshot" }
+types_storage = { path = "../../../_support/types/types_storage" }
+varsup = { path = "../../access/transam/varsup" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+xloginsert = { path = "../../access/transam/xloginsert" }
+xloginsert_seams = { path = "../../access/transam/xloginsert_seams" }
+xlogutils = { path = "../../access/transam/xlogutils" }
+planner = { path = "../../optimizer/plan/planner" }
+types_portal = { path = "../../../_support/types/portal" }
