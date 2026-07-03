@@ -21,7 +21,7 @@ use crate::gram::Parser;
 use crate::scanner::PlScanner;
 
 const ANUM_PG_PROC_PRONAME: i32 = 2;
-const ANUM_PG_PROC_PROKIND: i32 = 12;
+const ANUM_PG_PROC_PROKIND: i32 = 10;
 const ANUM_PG_PROC_PRORETSET: i32 = 14;
 const ANUM_PG_PROC_PROVOLATILE: i32 = 15;
 const ANUM_PG_PROC_PRONARGS: i32 = 17;
