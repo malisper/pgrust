@@ -23,6 +23,8 @@ use crate::state::{ExplainState, EXPLAIN_FORMAT_TEXT};
 
 const BOOLOID: u32 = 16;
 const INT4OID: u32 = 23;
+const UNKNOWNOID: u32 = 705;
+const NUMERICOID: u32 = 1700;
 
 #[cold]
 #[inline(never)]
@@ -301,9 +303,8 @@ fn show_scan_qual<'mcx>(
     Ok(())
 }
 
-// ruleutils.c deparse_expression slice: only the Const shapes the M1 planner
-// lane emits; everything else is loud. Its CATALOG row stays todo and points
-// here.
+// ruleutils.c deparse_expression slice: Const deparse is complete; every
+// other node tag is loud. Its CATALOG row stays todo and points here.
 fn deparse_expression_minimal<'mcx>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,
@@ -315,32 +316,99 @@ fn deparse_expression_minimal<'mcx>(
             &format!("{:?} deparse unported (ruleutils lane)", node.node_tag()),
         );
     };
-    deparse_const_minimal(mcx, c)
+    let mut buf = PgString::new_in(mcx);
+    get_const_expr(c, &mut buf, 0)?;
+    Ok(buf)
 }
 
-fn deparse_const_minimal<'mcx>(mcx: Mcx<'mcx>, c: &Const) -> PgResult<PgString<'mcx>> {
+pub(crate) fn get_const_expr(c: &Const, buf: &mut PgString<'_>, showtype: i32) -> PgResult<()> {
     if c.constisnull {
-        node_gap("get_const_expr", "NULL const needs the ::type cast form (ruleutils lane)");
-    }
-    let mut out = PgString::new_in(mcx);
-    match c.consttype {
-        BOOLOID => out.try_push_str(if c.constvalue.as_bool() { "true" } else { "false" })?,
-        INT4OID => {
-            let v = c.constvalue.as_i32();
-            if v < 0 {
-                node_gap(
-                    "get_const_expr",
-                    "negative int const needs the quoted-cast form (ruleutils lane)",
-                );
-            }
-            write!(out, "{v}").expect("PgString write");
+        buf.try_push_str("NULL")?;
+        if showtype >= 0 {
+            let t = format_type::format_type_with_typemod(c.consttype, c.consttypmod)?;
+            write!(buf, "::{t}").expect("PgString write");
+            get_const_collation(c, buf)?;
         }
-        other => node_gap(
-            "get_const_expr",
-            &format!("const type {other} needs typoutput deparse (ruleutils lane)"),
-        ),
+        return Ok(());
     }
-    Ok(out)
+
+    let (typoutput, _typisvarlena) = lsyscache::typ::getTypeOutputInfo(c.consttype)?;
+    let mut finfo = fmgr_seams::fmgr_info::call(typoutput)?;
+    let mut fcinfo = types_fmgr::LocalFcinfo::<1>::fresh(types_core::primitive::InvalidOid);
+    fcinfo.set_arg(0, c.constvalue);
+    let out = finfo.invoke(&mut fcinfo)?;
+    // SAFETY: text output fns return a NUL-terminated cstring datum (the
+    // contract C's DatumGetCString trusts).
+    let extval = unsafe { core::ffi::CStr::from_ptr(out.as_usize() as *const core::ffi::c_char) };
+    let extval = core::str::from_utf8(extval.to_bytes()).expect("typoutput yields server encoding");
+
+    let mut needlabel = false;
+    match c.consttype {
+        // Negative INT4 deparses as '-nnn'::integer so it re-parses as a
+        // constant, not constant-plus-operator (INT_MIN breaks the paren
+        // form).
+        INT4OID => {
+            if !extval.starts_with('-') {
+                buf.try_push_str(extval)?;
+            } else {
+                write!(buf, "'{extval}'").expect("PgString write");
+                needlabel = true;
+            }
+        }
+        NUMERICOID => {
+            if extval.as_bytes()[0].is_ascii_digit() && extval.contains(['e', 'E', '.']) {
+                buf.try_push_str(extval)?;
+            } else {
+                write!(buf, "'{extval}'").expect("PgString write");
+                needlabel = true;
+            }
+        }
+        BOOLOID => buf.try_push_str(if extval == "t" { "true" } else { "false" })?,
+        _ => simple_quote_literal(buf, extval)?,
+    }
+
+    if showtype < 0 {
+        return Ok(());
+    }
+
+    match c.consttype {
+        BOOLOID | UNKNOWNOID => needlabel = false,
+        INT4OID => {}
+        NUMERICOID => needlabel |= c.consttypmod >= 0,
+        _ => needlabel = true,
+    }
+    if needlabel || showtype > 0 {
+        let t = format_type::format_type_with_typemod(c.consttype, c.consttypmod)?;
+        write!(buf, "::{t}").expect("PgString write");
+    }
+    get_const_collation(c, buf)?;
+    Ok(())
+}
+
+fn get_const_collation(c: &Const, _buf: &mut PgString<'_>) -> PgResult<()> {
+    if c.constcollid != types_core::primitive::InvalidOid {
+        let typcollation = lsyscache::typ::get_typcollation(c.consttype)?;
+        if c.constcollid != typcollation {
+            node_gap(
+                "get_const_collation",
+                "COLLATE deparse needs generate_collation_name (ruleutils lane)",
+            );
+        }
+    }
+    Ok(())
+}
+
+fn simple_quote_literal(buf: &mut PgString<'_>, val: &str) -> PgResult<()> {
+    let std_strings = guc_tables::vars::standard_conforming_strings.read();
+    buf.try_push('\'')?;
+    for ch in val.chars() {
+        if ch == '\'' || (ch == '\\' && !std_strings) {
+            buf.try_push(ch)?;
+        }
+        buf.try_push(ch)?;
+    }
+    buf.try_push('\'')?;
+    Ok(())
 }
 
 fn ExplainScanTarget(scanrelid: types_core::Index, es: &mut ExplainState<'_>) -> PgResult<()> {

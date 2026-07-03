@@ -22,6 +22,7 @@ use types_snapshot::{SnapshotData, SNAPSHOT_MVCC};
 use crate::*;
 
 const INT4OID: u32 = 23;
+const INT4OUT: u32 = 43;
 const TEXTOUT: u32 = 47;
 
 thread_local! {
@@ -35,6 +36,17 @@ fn textout_fn(
     // SAFETY: test datum is a live 4B-header text varlena.
     let v = unsafe { VarlenaRef::from_ptr(fcinfo.arg(0).as_usize() as *const u8) };
     let mut s = v.data().to_vec();
+    s.push(0);
+    Ok(Datum::from_usize(
+        Box::leak(s.into_boxed_slice()).as_ptr() as usize
+    ))
+}
+
+fn int4out_fn(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    let mut s = fcinfo.arg(0).as_i32().to_string().into_bytes();
     s.push(0);
     Ok(Datum::from_usize(
         Box::leak(s.into_boxed_slice()).as_ptr() as usize
@@ -161,9 +173,74 @@ fn install_fixtures() {
             types_core::TEXTOID => Ok((TEXTOUT, true)),
             _ => panic!("get_type_output_info: unexpected oid {oid}"),
         });
+        syscache_seams::pg_type_io_shape::set(|typid| {
+            Ok(match typid {
+                INT4OID => Some(syscache_seams::PgTypeIoShape {
+                    oid: INT4OID,
+                    typinput: 42,
+                    typoutput: INT4OUT,
+                    typreceive: 2406,
+                    typsend: 2407,
+                    typmodin: 0,
+                    typmodout: 0,
+                    typelem: 0,
+                    typlen: 4,
+                    typbyval: true,
+                    typalign: b'i' as i8,
+                    typdelim: b',' as i8,
+                    typisdefined: true,
+                }),
+                types_core::TEXTOID => Some(syscache_seams::PgTypeIoShape {
+                    oid: types_core::TEXTOID,
+                    typinput: 46,
+                    typoutput: TEXTOUT,
+                    typreceive: 2414,
+                    typsend: 2415,
+                    typmodin: 0,
+                    typmodout: 0,
+                    typelem: 0,
+                    typlen: -1,
+                    typbyval: false,
+                    typalign: b'i' as i8,
+                    typdelim: b',' as i8,
+                    typisdefined: true,
+                }),
+                _ => None,
+            })
+        });
+        syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
+            let mk = |name: &str| {
+                let mut typname = types_tuple::NameData::default();
+                typname.namestrcpy(name);
+                syscache_seams::PgTypeTypcacheShape {
+                    typname,
+                    typlen: 4,
+                    typbyval: true,
+                    typalign: b'i' as i8,
+                    typstorage: b'p' as i8,
+                    typtype: b'b' as i8,
+                    typisdefined: true,
+                    typrelid: 0,
+                    typsubscript: 0,
+                    typelem: 0,
+                    typarray: 0,
+                    typcollation: 0,
+                }
+            };
+            Ok(match typid {
+                INT4OID => Some(mk("int4")),
+                types_core::TEXTOID => Some(mk("text")),
+                _ => None,
+            })
+        });
         fmgr_seams::fmgr_info::set(|oid| match oid {
             TEXTOUT => Ok(FmgrInfo::new(textout_fn, TEXTOUT, 1, true, false)),
+            INT4OUT => Ok(FmgrInfo::new(int4out_fn, INT4OUT, 1, true, false)),
             _ => panic!("fmgr_info: unexpected oid {oid}"),
+        });
+        guc_tables::vars::standard_conforming_strings.install(guc_tables::GucVarAccessors {
+            get: || true,
+            set: |_| {},
         });
     });
 }
@@ -295,6 +372,34 @@ fn run_explain(options: &[&'static str]) -> Vec<String> {
 #[test]
 fn explain_select_1_matches_pg() {
     assert_eq!(run_explain(&[]), ["Result  (cost=0.00..0.01 rows=1 width=4)"]);
+}
+
+#[test]
+fn get_const_expr_matches_ruleutils() {
+    install_fixtures();
+    let mcx = leaked_mcx();
+    let deparse = |c: Node<'static>| {
+        let mut buf = mcx::PgString::new_in(mcx);
+        crate::node::get_const_expr(c.as_const().unwrap(), &mut buf, 0).unwrap();
+        buf.as_str().to_string()
+    };
+
+    let int = |v: i32, isnull: bool| {
+        Node::mk_const(mcx, INT4OID, -1, 0, 4, Datum::from_i32(v), isnull, true).unwrap()
+    };
+    assert_eq!(deparse(int(1, false)), "1");
+    assert_eq!(deparse(int(-42, false)), "'-42'::integer");
+    assert_eq!(deparse(int(0, true)), "NULL::integer");
+
+    let text = |s: &str| {
+        let hdr = (((4 + s.len()) as u32) << 2).to_le_bytes();
+        let mut image = hdr.to_vec();
+        image.extend_from_slice(s.as_bytes());
+        let d = Datum::from_usize(Box::leak(image.into_boxed_slice()).as_ptr() as usize);
+        Node::mk_const(mcx, types_core::TEXTOID, -1, 0, -1, d, false, false).unwrap()
+    };
+    assert_eq!(deparse(text("hello")), "'hello'::text");
+    assert_eq!(deparse(text("it's")), "'it''s'::text");
 }
 
 #[test]

@@ -138,6 +138,24 @@ fn install_type_fixture() {
                 typcollation: if typid == TEXTOID { 100 } else { InvalidOid },
             }))
         });
+        syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
+            let mut typname = types_tuple::NameData::default();
+            typname.namestrcpy(if typid == TEXTOID { "text" } else { "int4" });
+            Ok(Some(syscache_seams::PgTypeTypcacheShape {
+                typname,
+                typlen: 4,
+                typbyval: true,
+                typalign: b'i' as i8,
+                typstorage: b'p' as i8,
+                typtype: b'b' as i8,
+                typisdefined: true,
+                typrelid: InvalidOid,
+                typsubscript: InvalidOid,
+                typelem: InvalidOid,
+                typarray: InvalidOid,
+                typcollation: InvalidOid,
+            }))
+        });
         syscache_seams::pg_type_base_shape::set(|typid| {
             Ok(Some(if typid == DOMAIN_OID {
                 syscache_seams::PgTypeBaseShape {
@@ -254,12 +272,22 @@ fn make_const_natural_types() {
 }
 
 #[test]
-#[should_panic(expected = "numeric_in")]
-fn make_const_numeric_literal_is_deferred() {
+fn make_const_numeric_literal_uses_numeric_in() {
     let ctx = MemoryContext::new("t");
     let pstate = make_parsestate(ctx.mcx(), None);
     let f = A_Const { val: Some(ValUnion::Float(Float { fval: "1.5" })), location: 0 };
-    let _ = make_const(ctx.mcx(), &pstate, &f);
+    let node = make_const(ctx.mcx(), &pstate, &f).unwrap();
+    let c = node.as_const().unwrap();
+    assert_eq!(c.consttype, types_core::catalog::NUMERICOID);
+    assert_eq!(c.constlen, -1);
+    assert!(!c.constbyval && !c.constisnull);
+    let expect = adt_numeric::io::numeric_in("1.5", -1, None).unwrap().unwrap();
+    let img = expect.as_bytes();
+    // SAFETY: the const datum points at a live numeric varlena of img.len() bytes.
+    let got = unsafe {
+        core::slice::from_raw_parts(c.constvalue.as_usize() as *const u8, img.len())
+    };
+    assert_eq!(got, img);
 }
 
 #[test]
@@ -364,6 +392,14 @@ fn variable_coerce_param_hook_backwrites_type() {
     // Non-extern / known params fall through to normal coercion.
     param.paramkind = ParamKind::PARAM_EXEC;
     assert!(!variable_coerce_param_hook(&pstate, &mut param, TEXTOID, -1, -1, PG_UTF8).unwrap());
+
+    // A conflicting re-coercion is the C ereport, detail via format_type_be.
+    param.paramkind = ParamKind::PARAM_EXTERN;
+    param.paramtype = UNKNOWNOID;
+    let err =
+        variable_coerce_param_hook(&pstate, &mut param, INT4OID, -1, -1, PG_UTF8).unwrap_err();
+    assert_eq!(err.message(), "inconsistent types deduced for parameter $1");
+    assert_eq!(err.detail(), Some("text versus integer"));
 }
 
 #[test]
@@ -387,7 +423,7 @@ fn enr_lookup_through_pstate() {
     let mut env = queryenvironment::create_queryEnv(mcx);
     queryenvironment::register_ENR(
         &mut env,
-        queryenvironment::EphemeralNamedRelationData {
+        queryenvironment::EphemeralNamedRelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
             md: queryenvironment::EphemeralNamedRelationMetadataData {
                 name: mcx::PgString::from_str_in("new_rows", mcx).unwrap(),
                 reliddesc: 1234,

@@ -215,11 +215,21 @@ pub fn variable_coerce_param_hook(
     } else if param_types[idx] == target_type_id {
         // Previously resolved, and it matches.
     } else {
-        panic!(
-            "variable_coerce_param_hook (parse_param.c): inconsistent types deduced for \
-             parameter ${paramno}; the errdetail needs format_type_be (adt-format-type \
-             unported; direct dep when it lands)"
-        );
+        let old = format_type::format_type_be(param_types[idx])?;
+        let new = format_type::format_type_be(target_type_id)?;
+        let errpos = parser_errposition(pstate, param.location, encoding);
+        drop(param_types);
+        return Err(Box::new(
+            ereport(ERROR)
+                .errcode(types_error::ERRCODE_AMBIGUOUS_PARAMETER)
+                .errmsg(alloc::format!(
+                    "inconsistent types deduced for parameter ${paramno}"
+                ))
+                .errdetail(alloc::format!("{old} versus {new}"))
+                .errposition(errpos)
+                .into_error()
+                .with_error_location(loc("variable_coerce_param_hook")),
+        ));
     }
     drop(param_types);
 
