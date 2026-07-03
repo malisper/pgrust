@@ -674,12 +674,20 @@ fn convert_to_scalar(
     const TEXTOID: Oid = 25;
     const BPCHAROID: Oid = 1042;
     const VARCHAROID: Oid = 1043;
+    const INETOID: Oid = 869;
+    const CIDROID: Oid = 650;
     match valuetypid {
         CHAROID | BPCHAROID | VARCHAROID | TEXTOID | NAMEOID => {
             let val = convert_string_datum(mcx, value, valuetypid, collid)?;
             let lostr = convert_string_datum(mcx, lobound, boundstypid, collid)?;
             let histr = convert_string_datum(mcx, hibound, boundstypid, collid)?;
             Some(convert_string_to_scalar(val, lostr, histr))
+        }
+        INETOID | CIDROID => {
+            let v = convert_network_to_scalar(value, valuetypid)?;
+            let lo = convert_network_to_scalar(lobound, boundstypid)?;
+            let hi = convert_network_to_scalar(hibound, boundstypid)?;
+            Some((v, lo, hi))
         }
         _ => {
             let v = convert_numeric_to_scalar(value, valuetypid)?;
@@ -688,6 +696,23 @@ fn convert_to_scalar(
             Some((v, lo, hi))
         }
     }
+}
+
+// convert_network_to_scalar (selfuncs.c), inet/cidr arm (mac arms deferred).
+fn convert_network_to_scalar(value: Datum, typid: Oid) -> Option<f64> {
+    const INETOID: Oid = 869;
+    const CIDROID: Oid = 650;
+    if typid != INETOID && typid != CIDROID {
+        return None;
+    }
+    let ip = crate::network_selfuncs::inet_ref(value);
+    let len = if ip.family == adt_network::PGSQL_AF_INET { 4 } else { 16 };
+    let mut res = ip.family as f64;
+    for i in 0..len {
+        res *= 256.0;
+        res += ip.addr[i] as f64;
+    }
+    Some(res)
 }
 
 // convert_string_datum (selfuncs.c); the non-C-collation pg_strxfrm leg is
@@ -939,6 +964,14 @@ pub fn examine_variable<'mcx>(
     let (vartype, _) = crate::costsize::expr_type_typmod(node);
     let mut vardata =
         VariableStatData { var: None, rel: None, vartype, isunique: false, stats: None };
+
+    // C: look inside any binary-compatible relabeling (vartype stays the
+    // exposed type; the Var is returned without relabeling).
+    let (basenode, node_id) = match node.as_relabel_type() {
+        Some(r) => (r.arg, run.intern_expr(r.arg)),
+        None => (node, node_id),
+    };
+    let node = basenode;
 
     if let Some(var) = node.as_var() {
         if varrelid == 0 || varrelid == var.varno {
