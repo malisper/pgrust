@@ -330,7 +330,9 @@ fn do_analyze_rel<'mcx>(
     )?;
 
     if numrows > 0 {
-        let mut col_cx = anl.new_child("Analyze Column");
+        // Bump: armed cmp frames detoast packed by-ref args here per comparison,
+        // freed wholesale at the per-column reset (C pfrees per call).
+        let mut col_cx = anl.new_child_bump("Analyze Column");
         let src = FetchSource::Heap { tupdesc, rows: &rows[..numrows as usize] };
         for s in vacattrstats.iter_mut() {
             match s.compute {
@@ -443,7 +445,7 @@ fn compute_index_stats<'mcx>(
     const MAX_KEYS: usize = types_core::fmgr::INDEX_MAX_KEYS as usize;
     let mut values = [Datum::null(); MAX_KEYS];
     let mut isnull = [false; MAX_KEYS];
-    let mut ind_cx = anl.new_child("Analyze Index");
+    let mut ind_cx = anl.new_child_bump("Analyze Index");
     for thisdata in indexdata.iter_mut() {
         let attr_cnt = thisdata.vacattrstats.len();
         if attr_cnt == 0 && thisdata.index_info.ii_Predicate.is_nil() {
@@ -451,7 +453,7 @@ fn compute_index_stats<'mcx>(
         }
         {
             let ind_mcx = ind_cx.mcx();
-            let mut per_tuple = ind_cx.new_child("Analyze Index per-tuple");
+            let mut per_tuple = ind_cx.new_child_bump("Analyze Index per-tuple");
             let mut slot = exectuples::make_tuple_table_slot(
                 anl_mcx,
                 types_slot::TupleSlotKind::HeapTuple,
