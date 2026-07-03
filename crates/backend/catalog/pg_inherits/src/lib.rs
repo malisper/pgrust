@@ -50,9 +50,8 @@ pub fn StoreSingleInheritance<'mcx>(
     rel.close(RowExclusiveLock)
 }
 
-// find_inheritance_children (children sorted by OID, then locked in that
-// order as C does to avoid deadlock; the concurrent-DROP recheck arm is
-// subsumed by the lock model — a locked child cannot vanish before open).
+// Children sorted by OID, then locked in that order (C's deadlock-avoidance
+// contract; a locked child cannot vanish, so no concurrent-DROP recheck).
 pub fn find_inheritance_children<'mcx>(
     mcx: Mcx<'mcx>,
     parent_rel_id: Oid,
@@ -100,7 +99,6 @@ pub fn find_inheritance_children<'mcx>(
     Ok(result)
 }
 
-// find_all_inheritors (numparents callers unported; BFS agenda order kept).
 pub fn find_all_inheritors<'mcx>(
     mcx: Mcx<'mcx>,
     parent_rel_id: Oid,
