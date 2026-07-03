@@ -829,7 +829,7 @@ fn pg_proc_result_arrays<'mcx>(
         Some(img) => {
             proc_array_elemtype_check(&img, TEXTOID, "proargnames")?;
             let elems = datum::array_build::deconstruct_array_image(mcx, &img, -1, false, b'i')?;
-            let mut v: PgVec<'mcx, PgString<'mcx>> = mcx::vec_with_capacity_in(mcx, elems.len())?;
+            let mut v: PgVec<'mcx, PgString<'mcx>> = PgVec::new_in(mcx);
             for d in elems.iter() {
                 let s = core::str::from_utf8(text_elem_str(*d))
                     .expect("proargnames holds server-encoding text");
