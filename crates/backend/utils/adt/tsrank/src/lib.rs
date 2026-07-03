@@ -1,3 +1,6 @@
-pub mod builtins {
-    pub const TSRANK_BUILTINS: &[::types_fmgr::FmgrBuiltin] = &[];
-}
+pub mod builtins;
+pub mod rank;
+pub mod rank_cd;
+
+#[cfg(test)]
+mod tests;
