@@ -278,6 +278,12 @@ pub fn fc_numeric_int4(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     Ok(Datum::from_i32(crate::numeric_int4(num)?))
 }
 
+pub fn fc_numeric_int8(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
+    let num = unsafe { num_arg(fcinfo, 0) }?;
+    Ok(Datum::from_i64(crate::numeric_int8(num)?))
+}
+
 pub fn fc_numeric_float8(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
     let num = unsafe { num_arg(fcinfo, 0) }?;
@@ -603,6 +609,7 @@ pub const NUMERIC_BUILTINS: &[FmgrBuiltin] = &[
     b(1743, "float8_numeric", 1, true, fc_float8_numeric),
     b(1744, "numeric_int4", 1, true, fc_numeric_int4),
     b(1746, "numeric_float8", 1, true, fc_numeric_float8),
+    b(1779, "numeric_int8", 1, true, fc_numeric_int8),
     b(1766, "numeric_smaller", 2, true, fc_numeric_smaller),
     b(1767, "numeric_larger", 2, true, fc_numeric_larger),
     b(1769, "numeric_cmp", 2, true, fc_numeric_cmp),

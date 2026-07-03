@@ -25,6 +25,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
+        NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().r#type,
         NodeTag::T_SubLink => {
             let (sl, tent) = sublink_first_col(node);
             match sl.subLinkType {
@@ -103,6 +104,7 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
             let m = node.as_min_max_expr().unwrap();
             uniform_args_typmod(&m.args, m.minmaxtype)
         }
+        NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().typmod,
         NodeTag::T_SubLink => {
             let (sl, tent) = sublink_first_col(node);
             match sl.subLinkType {
@@ -136,6 +138,13 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescecollid,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxcollid,
+        NodeTag::T_SQLValueFunction => {
+            if node.as_sql_value_function().unwrap().r#type == types_core::catalog::NAMEOID {
+                types_core::catalog::C_COLLATION_OID
+            } else {
+                types_core::InvalidOid
+            }
+        }
         NodeTag::T_SubLink => {
             let (sl, tent) = sublink_first_col(node);
             match sl.subLinkType {
@@ -216,6 +225,7 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         NodeTag::T_CaseWhen => node.as_case_when().unwrap().location,
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().location,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().location,
+        NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().location,
         NodeTag::T_BoolExpr => {
             let b = node.as_bool_expr().unwrap();
             leftmost_loc(b.location, list_location(&b.args))

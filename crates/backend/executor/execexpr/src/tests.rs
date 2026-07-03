@@ -961,3 +961,72 @@ fn boolexpr_three_valued_truth_tables() {
         }
     });
 }
+
+fn mk_svf<'mcx>(
+    mcx: Mcx<'mcx>,
+    op: ::types_nodes::primnodes::SQLValueFunctionOp,
+    typ: u32,
+    typmod: i32,
+) -> Node<'mcx> {
+    use ::types_nodes::primnodes::SQLValueFunction;
+    Node::mk(mcx, SQLValueFunction { op, r#type: typ, typmod, location: -1 }).unwrap()
+}
+
+#[test]
+fn sql_value_function_datetime_ops() {
+    use ::types_nodes::primnodes::SQLValueFunctionOp as Op;
+    static TZ: Once = Once::new();
+    TZ.call_once(|| {
+        // SAFETY: single-threaded test init, before any getenv (adt_date
+        // tests' precedent).
+        unsafe { std::env::set_var("PGRUST_TZDIR", "/usr/share/zoneinfo") };
+        pgtz::init_seams();
+        adt_timestamp::init_seams();
+        guc_tables::init_seams();
+        elog::init_seams();
+        fd::init_seams();
+        xact_seams::get_current_sub_transaction_id::set(|| 1);
+    });
+    adt_datetime::tz::pg_timezone_initialize();
+
+    with_mcx(|mcx| {
+        let mut eval = |node| {
+            let mut state = exec_init_expr(mcx, Some(node), ParamBind::NONE).unwrap().unwrap();
+            let mut slots = EvalSlots::default();
+            exec_eval_expr(&mut state, &mut slots).unwrap()
+        };
+
+        let r = eval(mk_svf(mcx, Op::SVFOP_CURRENT_TIMESTAMP, 1184, -1));
+        assert!(!r.isnull);
+        assert_eq!(r.value.as_i64(), adt_timestamp::GetSQLCurrentTimestamp(-1));
+
+        // Statement start is fixed, so typmod-0 rounding matches exactly.
+        let r = eval(mk_svf(mcx, Op::SVFOP_CURRENT_TIMESTAMP_N, 1184, 0));
+        assert_eq!(r.value.as_i64(), adt_timestamp::GetSQLCurrentTimestamp(0));
+        assert_eq!(r.value.as_i64() % 1_000_000, 0);
+
+        let r = eval(mk_svf(mcx, Op::SVFOP_LOCALTIMESTAMP, 1114, -1));
+        assert_eq!(r.value.as_i64(), adt_timestamp::GetSQLLocalTimestamp(-1).unwrap());
+
+        let r = eval(mk_svf(mcx, Op::SVFOP_CURRENT_DATE, 1082, -1));
+        assert_eq!(r.value.as_i32(), adt_date::GetSQLCurrentDate());
+
+        let r = eval(mk_svf(mcx, Op::SVFOP_LOCALTIME_N, 1083, 0));
+        assert_eq!(r.value.as_i64() % 1_000_000, 0);
+
+        // CURRENT_TIME yields a by-ref TimeTz image (time i64, zone i32).
+        let r = eval(mk_svf(mcx, Op::SVFOP_CURRENT_TIME, 1266, -1));
+        assert!(!r.isnull);
+        let p = r.value.as_usize() as *const u8;
+        // SAFETY: step-owned 12-byte image written by the eval above.
+        let (time, zone) = unsafe {
+            (
+                p.cast::<i64>().read(),
+                p.add(8).cast::<i32>().read(),
+            )
+        };
+        assert!((0..86_400_000_000).contains(&time));
+        // GMT session zone (pg_timezone_initialize default).
+        assert_eq!(zone, 0);
+    });
+}

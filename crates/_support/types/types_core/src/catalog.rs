@@ -64,6 +64,7 @@ pub const INTERVALOID: Oid = 1186;
 pub const JSONOID: Oid = 114;
 pub const BPCHAROID: Oid = 1042;
 pub const VARCHAROID: Oid = 1043;
+pub const DATEOID: Oid = 1082;
 pub const TIMEOID: Oid = 1083;
 pub const TIMETZOID: Oid = 1266;
 pub const TIMESTAMPOID: Oid = 1114;

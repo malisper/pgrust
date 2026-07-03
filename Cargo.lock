@@ -131,6 +131,7 @@ dependencies = [
  "localtime",
  "numutils",
  "pgtz",
+ "timestamp_seams",
  "types_core",
  "types_error",
  "xact_seams",
@@ -351,12 +352,25 @@ name = "adt_timestamp"
 version = "0.1.0"
 dependencies = [
  "adt_datetime",
+ "adt_numeric",
+ "datum",
+ "elog",
+ "fd",
+ "guc_tables",
+ "hashfn",
  "libc",
+ "localtime",
+ "mcx",
  "pgtz",
+ "pqformat",
+ "strftime",
+ "stringinfo",
  "timestamp_seams",
  "types_core",
  "types_error",
+ "types_fmgr",
  "xact",
+ "xact_seams",
 ]
 
 [[package]]
@@ -1902,10 +1916,15 @@ name = "execexpr"
 version = "0.1.0"
 dependencies = [
  "aclchk_seams",
+ "adt_date",
+ "adt_datetime",
  "adt_int",
+ "adt_timestamp",
  "clauses_seams",
  "datum",
+ "elog",
  "exectuples",
+ "fd",
  "fmgr_core",
  "format_type",
  "guc_tables",
@@ -1914,6 +1933,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "miscinit_seams",
+ "pgtz",
  "syscache_seams",
  "typcache",
  "types_core",
@@ -1923,6 +1943,7 @@ dependencies = [
  "types_portal",
  "types_slot",
  "types_tuple",
+ "xact_seams",
 ]
 
 [[package]]
@@ -2310,6 +2331,7 @@ dependencies = [
  "adt_oracle_compat",
  "adt_pseudotypes",
  "adt_scalar",
+ "adt_timestamp",
  "adt_windowfuncs",
  "arrayfuncs",
  "conv",

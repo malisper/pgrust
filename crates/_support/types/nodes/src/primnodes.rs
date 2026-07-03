@@ -410,6 +410,35 @@ pub struct MinMaxExpr<'mcx> {
     pub location: ParseLoc,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum SQLValueFunctionOp {
+    #[default]
+    SVFOP_CURRENT_DATE = 0,
+    SVFOP_CURRENT_TIME = 1,
+    SVFOP_CURRENT_TIME_N = 2,
+    SVFOP_CURRENT_TIMESTAMP = 3,
+    SVFOP_CURRENT_TIMESTAMP_N = 4,
+    SVFOP_LOCALTIME = 5,
+    SVFOP_LOCALTIME_N = 6,
+    SVFOP_LOCALTIMESTAMP = 7,
+    SVFOP_LOCALTIMESTAMP_N = 8,
+    SVFOP_CURRENT_ROLE = 9,
+    SVFOP_CURRENT_USER = 10,
+    SVFOP_USER = 11,
+    SVFOP_SESSION_USER = 12,
+    SVFOP_CURRENT_CATALOG = 13,
+    SVFOP_CURRENT_SCHEMA = 14,
+}
+
+#[derive(Default)]
+pub struct SQLValueFunction {
+    pub op: SQLValueFunctionOp,
+    pub r#type: Oid,
+    pub typmod: i32,
+    pub location: ParseLoc,
+}
+
 #[derive(Default)]
 pub struct FuncExpr<'mcx> {
     pub funcid: Oid,
@@ -486,6 +515,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CoalesceExpr<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for MinMaxExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_MinMaxExpr;
+}
+unsafe impl NodeVariant<'_> for SQLValueFunction {
+    const TAG: NodeTag = NodeTag::T_SQLValueFunction;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for SubLink<'mcx> {
     const TAG: NodeTag = NodeTag::T_SubLink;
@@ -709,6 +741,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_min_max_expr(self) -> Option<&'mcx MinMaxExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_sql_value_function(self) -> Option<&'mcx SQLValueFunction> {
         self.as_variant()
     }
 

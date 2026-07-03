@@ -21,12 +21,6 @@ pub use pgtz::{
 
 use localtime::{NextDstBoundary, TZ_STRLEN_MAX};
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("adt_datetime tz boundary: {what} not ported");
-}
-
 pub fn pg_tz_acceptable(tz: &PgTz) -> bool {
     localtime::pg_tz_acceptable(tz)
 }
@@ -291,15 +285,42 @@ pub fn FetchDynamicTimeZone<'a>(
     }
 }
 
-/// C `GetCurrentDateTime` (needs timestamp2tm + session_timezone).
-/// Port requirement when implemented: the `cache_ts`/`cache_timezone`
-/// per-backend memo in C's GetCurrentTimeUsec, not a recompute per call.
+/// C `pg_interpret_timezone_abbrev` with the upcase C's callers apply first
+/// (DetermineTimeZoneAbbrevOffsetTS needs it from adt_timestamp).
+pub fn interpret_timezone_abbrev_at(abbr: &[u8], t: i64, tzp: &PgTz) -> Option<(i64, i32)> {
+    let (up, n) = upcase_abbrev(abbr);
+    localtime::pg_interpret_timezone_abbrev(&up[..n], t, tzp)
+}
+
+fn from_snapshot(s: &timestamp_seams::CurrentTimeUsec, tm: &mut pg_tm) {
+    tm.tm_sec = s.tm_sec;
+    tm.tm_min = s.tm_min;
+    tm.tm_hour = s.tm_hour;
+    tm.tm_mday = s.tm_mday;
+    tm.tm_mon = s.tm_mon;
+    tm.tm_year = s.tm_year;
+    tm.tm_wday = s.tm_wday;
+    tm.tm_yday = s.tm_yday;
+    tm.tm_isdst = s.tm_isdst;
+    tm.tm_gmtoff = s.tm_gmtoff;
+    tm.tm_zone = s.tm_zone;
+}
+
+// DIVERGENCE: C ereports "timestamp out of range" (22008); the callers here
+// (DecodeDateTime and friends) return dterr codes and cannot carry a PgError,
+// so an out-of-range transaction timestamp panics instead.
 #[allow(non_snake_case)]
-pub fn GetCurrentDateTime(_tm: &mut pg_tm) {
-    unported("GetCurrentDateTime (timestamp2tm/xact)");
+pub fn GetCurrentDateTime(tm: &mut pg_tm) {
+    let s = timestamp_seams::get_current_datetime::call().expect("timestamp out of range");
+    from_snapshot(&s, tm);
 }
 
 #[allow(non_snake_case)]
-pub fn GetCurrentTimeUsec(_tm: &mut pg_tm, _fsec: &mut fsec_t, _tzp: Option<&mut i32>) {
-    unported("GetCurrentTimeUsec (timestamp2tm/xact)");
+pub fn GetCurrentTimeUsec(tm: &mut pg_tm, fsec: &mut fsec_t, tzp: Option<&mut i32>) {
+    let s = timestamp_seams::get_current_time_usec::call().expect("timestamp out of range");
+    from_snapshot(&s, tm);
+    *fsec = s.fsec;
+    if let Some(tzp) = tzp {
+        *tzp = s.tz;
+    }
 }

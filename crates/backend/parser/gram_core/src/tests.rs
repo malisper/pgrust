@@ -731,6 +731,75 @@ fn reset_and_show_forms() {
     }
 }
 
+fn target_expr<'a>(list: &NodeList<'a>) -> types_nodes::Node<'a> {
+    let sel = select_of(only_stmt(list));
+    sel.targetList.nth(0).as_res_target().expect("ResTarget").val.expect("val")
+}
+
+#[track_caller]
+fn assert_system_func<'a>(
+    f: &types_nodes::FuncCall<'a>,
+    name: &str,
+    nargs: usize,
+) {
+    assert_eq!(f.funcname.len(), 2);
+    assert_eq!(f.funcname.nth(0).as_string().unwrap().sval, "pg_catalog");
+    assert_eq!(f.funcname.nth(1).as_string().unwrap().sval, name);
+    assert_eq!(f.args.len(), nargs);
+    assert_eq!(f.funcformat, types_nodes::CoercionForm::COERCE_SQL_SYNTAX);
+}
+
+#[test]
+fn at_time_zone_and_at_local() {
+    let list = parse("SELECT x AT TIME ZONE 'UTC';");
+    let f = target_expr(&list).as_func_call().expect("FuncCall");
+    assert_system_func(f, "timezone", 2);
+    // C arg order: (zone, operand).
+    let z = f.args.nth(0).as_a_const().expect("A_Const");
+    let Some(ValUnion::String(s)) = z.val else { panic!("String") };
+    assert_eq!(s.sval, "UTC");
+    assert!(f.args.nth(1).as_column_ref().is_some());
+    assert_eq!(f.location, 9);
+
+    let list = parse("SELECT x AT LOCAL;");
+    let f = target_expr(&list).as_func_call().expect("FuncCall");
+    assert_system_func(f, "timezone", 1);
+    assert!(f.args.nth(0).as_column_ref().is_some());
+    assert_eq!(f.location, -1);
+}
+
+#[test]
+fn extract_shapes() {
+    let list = parse("SELECT EXTRACT(EPOCH FROM x);");
+    let f = target_expr(&list).as_func_call().expect("FuncCall");
+    assert_system_func(f, "extract", 2);
+    let a = f.args.nth(0).as_a_const().expect("A_Const");
+    let Some(ValUnion::String(s)) = a.val else { panic!("String") };
+    assert_eq!(s.sval, "epoch");
+    assert!(f.args.nth(1).as_column_ref().is_some());
+
+    let list = parse("SELECT EXTRACT('timezone_hour' FROM x);");
+    let f = target_expr(&list).as_func_call().expect("FuncCall");
+    let a = f.args.nth(0).as_a_const().expect("A_Const");
+    let Some(ValUnion::String(s)) = a.val else { panic!("String") };
+    assert_eq!(s.sval, "timezone_hour");
+
+    for (sql, kw) in [
+        ("SELECT EXTRACT(YEAR FROM x);", "year"),
+        ("SELECT EXTRACT(MONTH FROM x);", "month"),
+        ("SELECT EXTRACT(DAY FROM x);", "day"),
+        ("SELECT EXTRACT(HOUR FROM x);", "hour"),
+        ("SELECT EXTRACT(MINUTE FROM x);", "minute"),
+        ("SELECT EXTRACT(SECOND FROM x);", "second"),
+    ] {
+        let list = parse(sql);
+        let f = target_expr(&list).as_func_call().expect("FuncCall");
+        let a = f.args.nth(0).as_a_const().expect("A_Const");
+        let Some(ValUnion::String(s)) = a.val else { panic!("String") };
+        assert_eq!(s.sval, kw);
+    }
+}
+
 #[test]
 fn set_time_zone() {
     use types_nodes::parsenodes::VariableSetKind::*;
@@ -872,5 +941,29 @@ fn create_index_statements_parse() {
     ] {
         let l = parse(s);
         assert_eq!(l.len(), 1, "{s}");
+    }
+}
+
+#[test]
+fn sql_value_functions() {
+    use types_nodes::primnodes::SQLValueFunctionOp as Op;
+
+    for (sql, op, typmod) in [
+        ("SELECT CURRENT_DATE;", Op::SVFOP_CURRENT_DATE, -1),
+        ("SELECT CURRENT_TIME;", Op::SVFOP_CURRENT_TIME, -1),
+        ("SELECT CURRENT_TIME(2);", Op::SVFOP_CURRENT_TIME_N, 2),
+        ("SELECT CURRENT_TIMESTAMP;", Op::SVFOP_CURRENT_TIMESTAMP, -1),
+        ("SELECT CURRENT_TIMESTAMP(3);", Op::SVFOP_CURRENT_TIMESTAMP_N, 3),
+        ("SELECT LOCALTIME;", Op::SVFOP_LOCALTIME, -1),
+        ("SELECT LOCALTIME(1);", Op::SVFOP_LOCALTIME_N, 1),
+        ("SELECT LOCALTIMESTAMP;", Op::SVFOP_LOCALTIMESTAMP, -1),
+        ("SELECT LOCALTIMESTAMP(6);", Op::SVFOP_LOCALTIMESTAMP_N, 6),
+    ] {
+        let list = parse(sql);
+        let svf = target_expr(&list).as_sql_value_function().expect("SQLValueFunction");
+        assert_eq!(svf.op, op, "{sql}");
+        assert_eq!(svf.typmod, typmod, "{sql}");
+        assert_eq!(svf.r#type, 0);
+        assert_eq!(svf.location, 7);
     }
 }

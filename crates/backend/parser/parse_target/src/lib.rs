@@ -734,6 +734,25 @@ fn FigureColnameInternal<'mcx>(node: Node<'mcx>, name: &mut Option<&'mcx str>) -
             });
             2
         }
+        NodeTag::T_SQLValueFunction => {
+            use types_nodes::primnodes::SQLValueFunctionOp as Op;
+            *name = Some(match node.as_sql_value_function().unwrap().op {
+                Op::SVFOP_CURRENT_DATE => "current_date",
+                Op::SVFOP_CURRENT_TIME | Op::SVFOP_CURRENT_TIME_N => "current_time",
+                Op::SVFOP_CURRENT_TIMESTAMP | Op::SVFOP_CURRENT_TIMESTAMP_N => {
+                    "current_timestamp"
+                }
+                Op::SVFOP_LOCALTIME | Op::SVFOP_LOCALTIME_N => "localtime",
+                Op::SVFOP_LOCALTIMESTAMP | Op::SVFOP_LOCALTIMESTAMP_N => "localtimestamp",
+                Op::SVFOP_CURRENT_ROLE => "current_role",
+                Op::SVFOP_CURRENT_USER => "current_user",
+                Op::SVFOP_USER => "user",
+                Op::SVFOP_SESSION_USER => "session_user",
+                Op::SVFOP_CURRENT_CATALOG => "current_catalog",
+                Op::SVFOP_CURRENT_SCHEMA => "current_schema",
+            });
+            2
+        }
         NodeTag::T_FuncCall => {
             let fc = node.as_func_call().unwrap();
             match fc.funcname.last().and_then(|n| n.as_string()) {

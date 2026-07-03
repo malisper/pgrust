@@ -229,6 +229,7 @@ fn assign_collations_walker<'mcx>(
         | NodeTag::T_CoerceToDomainValue
         | NodeTag::T_CaseTestExpr
         | NodeTag::T_SetToDefault
+        | NodeTag::T_SQLValueFunction
         | NodeTag::T_CurrentOfExpr => {
             collation = expr_collation(node);
             strength = if OidIsValid(collation) {

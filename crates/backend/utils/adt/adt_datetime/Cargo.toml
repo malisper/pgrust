@@ -14,6 +14,7 @@ types_error = { path = "../../../../_support/types/types_error" }
 numutils = { path = "../numutils" }
 localtime = { path = "../../../timezone/localtime" }
 pgtz = { path = "../../../timezone/pgtz" }
+timestamp_seams = { path = "../timestamp_seams" }
 
 [dev-dependencies]
 guc_tables = { path = "../../misc/guc_tables" }
