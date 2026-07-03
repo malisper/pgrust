@@ -111,11 +111,15 @@ fn expand_partitioned_rtentry<'mcx>(
         r.part_rels = mcx::vec_from_elem_in(mcx, None, oids.len());
         r.all_partrels = None;
     }
-    run.root.rel_mut(relinfo).live_parts = if live_parts.is_empty() {
-        None
-    } else {
-        Some(mcx::alloc_in(mcx, live_parts.clone_in(mcx)?)?)
-    };
+    {
+        let mut lp: types_pathnodes::Relids<'mcx> = None;
+        let mut m = live_parts.next_member(-1);
+        while m >= 0 {
+            lp = crate::relnode::relids_add_member(mcx, &lp, m as u32);
+            m = live_parts.next_member(m);
+        }
+        run.root.rel_mut(relinfo).live_parts = lp;
+    }
     let mut i = live_parts.next_member(-1);
     while i >= 0 {
         let child_oid = oids[i as usize];

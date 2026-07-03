@@ -12,6 +12,7 @@ use types_nodes::list::{IntList, NodeList, OidList};
 use types_nodes::primnodes::{BoolExprType, BoolTestType, NullTestType, ParamKind};
 use types_nodes::{Node, NodeTag};
 use types_pathnodes::RelId;
+use clauses::NodeWalker;
 
 use partprune::{
     BTEqualStrategyNumber, BTGreaterEqualStrategyNumber, BTGreaterStrategyNumber,
@@ -1336,7 +1337,7 @@ fn match_boolean_partition_clause<'mcx>(
 
 struct ExecParamWalker(bool);
 
-impl<'mcx> clauses::NodeWalker<'mcx> for ExecParamWalker {
+impl<'mcx> NodeWalker<'mcx> for ExecParamWalker {
     fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
         if let Some(p) = node.as_param() {
             if p.paramkind == ParamKind::PARAM_EXEC {
@@ -1361,7 +1362,7 @@ struct ExecParamIdsWalker<'mcx> {
     ids: Bitmapset<'mcx>,
 }
 
-impl<'mcx> clauses::NodeWalker<'mcx> for ExecParamIdsWalker<'mcx> {
+impl<'mcx> NodeWalker<'mcx> for ExecParamIdsWalker<'mcx> {
     fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
         if let Some(p) = node.as_param() {
             if p.paramkind == ParamKind::PARAM_EXEC {

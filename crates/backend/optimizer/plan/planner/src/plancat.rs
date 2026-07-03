@@ -357,11 +357,11 @@ fn find_partition_scheme<'mcx>(
             ps.partcollation.push(key.partcollation[i]);
             ps.parttyplen.push(key.parttyplen[i]);
             ps.parttypbyval.push(key.parttypbyval[i]);
-            let fn_oid = key.partsupfunc[i].borrow().fn_oid;
-            ps.partsupfunc.push(
-                fmgr_core::fmgr_info(fn_oid)
-                    .unwrap_or_else(|e| panic!("fmgr_info({fn_oid}) failed: {e:?}")),
-            );
+            // fn_oid-only record: the scheme's supfuncs are compared by oid
+            // (PartialEq) and pruning resolves callables per step.
+            let mut f = types_core::fmgr::FmgrInfo::default();
+            f.fn_oid = key.partsupfunc[i].borrow().fn_oid;
+            ps.partsupfunc.push(f);
         }
         Ok(ps)
     };
