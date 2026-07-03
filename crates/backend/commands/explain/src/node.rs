@@ -91,6 +91,17 @@ fn ExplainPreScanNode<'mcx>(
         NodeTag::T_CteScan => {
             rels_used.add_member(mcx, node.as_cte_scan().unwrap().scan.scanrelid as i32)?;
         }
+        NodeTag::T_IndexScan => {
+            rels_used.add_member(mcx, node.as_index_scan().unwrap().scan.scanrelid as i32)?;
+        }
+        NodeTag::T_IndexOnlyScan => {
+            rels_used
+                .add_member(mcx, node.as_index_only_scan().unwrap().scan.scanrelid as i32)?;
+        }
+        NodeTag::T_BitmapHeapScan => {
+            rels_used
+                .add_member(mcx, node.as_bitmap_heap_scan().unwrap().scan.scanrelid as i32)?;
+        }
         _ => {}
     }
     let plan = plan_of(node);
@@ -177,6 +188,8 @@ pub fn ExplainNode<'mcx>(
     let pname = match node.node_tag() {
         NodeTag::T_Result => "Result",
         NodeTag::T_SeqScan => "Seq Scan",
+        NodeTag::T_IndexScan => "Index Scan",
+        NodeTag::T_IndexOnlyScan => "Index Only Scan",
         NodeTag::T_FunctionScan => "Function Scan",
         NodeTag::T_CteScan => "CTE Scan",
         // C interpolates the join type into the node name in TEXT format:
@@ -260,6 +273,14 @@ pub fn ExplainNode<'mcx>(
     if node.node_tag() == NodeTag::T_SeqScan {
         ExplainScanTarget(node.as_seq_scan().unwrap().scan.scanrelid, es)?;
     }
+    if let Some(is) = node.as_index_scan() {
+        ExplainIndexScanDetails(is.indexid, is.indexorderdir, es)?;
+        ExplainScanTarget(is.scan.scanrelid, es)?;
+    }
+    if let Some(ios) = node.as_index_only_scan() {
+        ExplainIndexScanDetails(ios.indexid, ios.indexorderdir, es)?;
+        ExplainScanTarget(ios.scan.scanrelid, es)?;
+    }
     if node.node_tag() == NodeTag::T_CteScan {
         ExplainScanTarget(node.as_cte_scan().unwrap().scan.scanrelid, es)?;
     }
@@ -316,6 +337,37 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_SeqScan | NodeTag::T_FunctionScan | NodeTag::T_CteScan => {
             show_scan_qual(&plan.qual, "Filter", node, es)?;
             filtered_count_gap(&plan.qual, es);
+        }
+        NodeTag::T_IndexScan => {
+            let s = node.as_index_scan().unwrap();
+            show_scan_qual(&s.indexqualorig, "Index Cond", node, es)?;
+            if !s.indexqualorig.is_nil() {
+                show_instrumentation_count("Rows Removed by Index Recheck", 2, &instrument, es);
+            }
+            show_scan_qual(&s.indexorderbyorig, "Order By", node, es)?;
+            show_scan_qual(&plan.qual, "Filter", node, es)?;
+            filtered_count_gap(&plan.qual, es);
+            show_indexsearches_info(es);
+        }
+        NodeTag::T_IndexOnlyScan => {
+            let s = node.as_index_only_scan().unwrap();
+            show_scan_qual(&s.indexqual, "Index Cond", node, es)?;
+            if !s.recheckqual.is_nil() {
+                show_instrumentation_count("Rows Removed by Index Recheck", 2, &instrument, es);
+            }
+            show_scan_qual(&s.indexorderby, "Order By", node, es)?;
+            show_scan_qual(&plan.qual, "Filter", node, es)?;
+            filtered_count_gap(&plan.qual, es);
+            if es.analyze {
+                crate::format::ExplainPropertyFloat(
+                    "Heap Fetches",
+                    None,
+                    instrument.as_ref().map_or(0.0, |i| i.ntuples2),
+                    0,
+                    es,
+                );
+            }
+            show_indexsearches_info(es);
         }
         NodeTag::T_NestLoop => {
             let nl = node.as_nest_loop().unwrap();
@@ -828,6 +880,53 @@ fn show_one_time_filter<'mcx>(
     Ok(())
 }
 
+// ExplainIndexScanDetails (explain.c), TEXT arm (nontext gapped upstream).
+fn ExplainIndexScanDetails(
+    indexid: types_core::Oid,
+    indexorderdir: i32,
+    es: &mut ExplainState<'_>,
+) -> PgResult<()> {
+    let mcx = es.str.allocator();
+    let indexname = lsyscache::get_rel_name(mcx, indexid)?
+        .unwrap_or_else(|| panic!("cache lookup failed for index {indexid}"));
+    if indexorderdir < 0 {
+        append!(es, " Backward");
+    }
+    append!(es, " using {}", quote_identifier(indexname.as_str()));
+    Ok(())
+}
+
+// show_instrumentation_count (explain.c). Correct only where the executor
+// counts nfiltered — index-recheck (which=2) on btree never filters, so the
+// zero is genuine; the qual lane (which=1) keeps filtered_count_gap instead.
+fn show_instrumentation_count(
+    qlabel: &str,
+    which: i32,
+    instrument: &Option<types_core::instrument::Instrumentation>,
+    es: &mut ExplainState<'_>,
+) {
+    if !es.analyze {
+        return;
+    }
+    let Some(i) = instrument else { return };
+    let nfiltered = if which == 2 { i.nfiltered2 } else { i.nfiltered1 };
+    if i.nloops > 0.0 && (nfiltered > 0.0 || es.format != EXPLAIN_FORMAT_TEXT) {
+        crate::format::ExplainPropertyFloat(qlabel, None, nfiltered / i.nloops, 0, es);
+    }
+}
+
+// show_indexsearches_info (explain.c): the AM never counts nsearches
+// (IndexScanInstrumentation lane), so ANALYZE output would silently print 0
+// where C reports the real descent count.
+fn show_indexsearches_info(es: &ExplainState<'_>) {
+    if es.analyze {
+        node_gap(
+            "show_indexsearches_info",
+            "Index Searches needs nsearches counting (nbtree IndexScanInstrumentation lane)",
+        );
+    }
+}
+
 // show_instrumentation_count's nfiltered read: the executor never counts
 // qual-filtered tuples (InstrCountFiltered, execScan.c), so printing would be
 // silently wrong whenever a filter removed rows.
@@ -1065,6 +1164,17 @@ fn deparse_var<'mcx>(
 }
 
 fn resolve_plan_var(plan_node: Node<'_>, varno: i32, varattno: i16) -> (i32, i16) {
+    // INDEX_VAR: dpns->index_tlist (set_deparse_plan); entries are heap Vars.
+    if varno == types_nodes::primnodes::INDEX_VAR {
+        let Some(ios) = plan_node.as_index_only_scan() else {
+            node_gap("get_variable", "INDEX_VAR outside IndexOnlyScan (ruleutils lane)");
+        };
+        let tle = find_tle_by_resno(&ios.indextlist, varattno);
+        let Some(v) = tle.expr.as_var() else {
+            node_gap("get_variable", "non-Var indextlist deparse (ruleutils lane)");
+        };
+        return (v.varno, v.varattno);
+    }
     let child = match varno {
         types_nodes::primnodes::OUTER_VAR => plan_of(plan_node).lefttree,
         types_nodes::primnodes::INNER_VAR => plan_of(plan_node).righttree,
@@ -1081,6 +1191,21 @@ fn resolve_plan_var(plan_node: Node<'_>, varno: i32, varattno: i16) -> (i32, i16
         node_gap("get_variable", "non-Var child tlist deparse (ruleutils lane)");
     };
     resolve_plan_var(child, v.varno, v.varattno)
+}
+
+// indexed_tlist probes match on resno, not list position (resjunk entries
+// may be interspersed).
+fn find_tle_by_resno<'a, 'mcx>(
+    tlist: &'a NodeList<'mcx>,
+    resno: i16,
+) -> &'mcx types_nodes::primnodes::TargetEntry<'mcx> {
+    for tle_node in tlist.iter() {
+        let tle = tle_node.as_target_entry().expect("TargetEntry");
+        if tle.resno == resno {
+            return tle;
+        }
+    }
+    node_gap("get_variable", "INDEX_VAR resno missing from indextlist");
 }
 
 fn push_identifier<'mcx>(buf: &mut PgString<'mcx>, name: &str) -> PgResult<()> {

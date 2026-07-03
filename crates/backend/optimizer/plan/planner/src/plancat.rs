@@ -174,6 +174,26 @@ pub fn get_relation_info<'mcx>(
             info.tuples = run.root.rel(rel).tuples;
             info.tree_height = Cell::new(nbtree::bt_getrootheight(&index_rel)?);
 
+            // build_index_tlist, simple-column arm (expression columns
+            // panicked above; system columns can't reach indexkeys here).
+            for i in 0..ncolumns as usize {
+                let indexkey = info.indexkeys[i];
+                debug_assert!(indexkey > 0);
+                let att = &relation.rd_att.attrs[indexkey as usize - 1];
+                let var = types_nodes::Node::mk_var(
+                    mcx,
+                    varno as i32,
+                    indexkey as i16,
+                    att.atttypid,
+                    att.atttypmod,
+                    att.attcollation,
+                    0,
+                )?;
+                let tle =
+                    types_nodes::Node::mk_target_entry(mcx, var, (i + 1) as i16, None, false)?;
+                info.indextlist.push(run.root.alloc_expr_node(tle));
+            }
+
             indexam::index_close(index_rel, NoLock)?;
             indexinfos.insert(0, &*mcx::forget_box_in(mcx, info)?);
         }

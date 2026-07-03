@@ -150,6 +150,7 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             fix_scan_list(run, &s.indexorderby, rtoffset)?;
             fix_scan_list(run, &s.indexorderbyorig, rtoffset)?;
         }
+        NodeTag::T_IndexOnlyScan => set_indexonlyscan_references(run, plan, rtoffset)?,
         NodeTag::T_BitmapIndexScan => {
             let s = plan.as_bitmap_index_scan().unwrap();
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
@@ -351,7 +352,7 @@ fn set_upper_references<'mcx>(
             None
         };
         if newexpr.is_none() {
-            newexpr = Some(fix_upper_expr(run, tle.expr, subplan_tlist, rtoffset)?);
+            newexpr = Some(fix_upper_expr(run, tle.expr, subplan_tlist, rtoffset, types_nodes::primnodes::OUTER_VAR)?);
         }
         let newexpr = newexpr.unwrap();
         // flatCopyTargetEntry + new expr.
@@ -371,7 +372,7 @@ fn set_upper_references<'mcx>(
     }
     let mut output_qual = NodeList::nil();
     for qual_node in &base.qual {
-        output_qual.lappend(mcx, fix_upper_expr(run, qual_node, subplan_tlist, rtoffset)?)?;
+        output_qual.lappend(mcx, fix_upper_expr(run, qual_node, subplan_tlist, rtoffset, types_nodes::primnodes::OUTER_VAR)?)?;
     }
     // SAFETY: exclusive plan-tree ownership (C rewrites the same lists in place).
     unsafe {
@@ -381,6 +382,78 @@ fn set_upper_references<'mcx>(
         })
     }
     .expect("plan node");
+    Ok(())
+}
+
+// set_indexonlyscan_references (setrefs.c): heap Vars in tlist/qual/
+// recheckqual retarget to INDEX_VAR positions through the stripped indextlist.
+fn set_indexonlyscan_references<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    plan: Node<'mcx>,
+    rtoffset: i32,
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    assert_eq!(rtoffset, 0, "set_plan_refs (setrefs.c): IndexOnlyScan in a subplan; M2 lane");
+    let (stripped, tlist, qual, recheckqual) = {
+        let s = plan.as_index_only_scan().expect("IndexOnlyScan node");
+        debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
+        debug_assert!(s.indexorderby.is_nil());
+        let mut stripped = NodeList::nil();
+        for tle_node in &s.indextlist {
+            if !tle_node.as_target_entry().expect("TargetEntry").resjunk {
+                stripped.lappend(mcx, tle_node)?;
+            }
+        }
+        (
+            stripped,
+            s.scan.plan.targetlist.clone_in(mcx)?,
+            s.scan.plan.qual.clone_in(mcx)?,
+            s.recheckqual.clone_in(mcx)?,
+        )
+    };
+    const INDEX_VAR: i32 = types_nodes::primnodes::INDEX_VAR;
+    let mut new_tlist = NodeList::nil();
+    for tle_node in &tlist {
+        let tle = tle_node.as_target_entry().expect("TargetEntry");
+        let newexpr = fix_upper_expr(run, tle.expr, &stripped, rtoffset, INDEX_VAR)?;
+        new_tlist.lappend(
+            mcx,
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::TargetEntry {
+                    expr: newexpr,
+                    resno: tle.resno,
+                    resname: tle.resname,
+                    ressortgroupref: tle.ressortgroupref,
+                    resorigtbl: tle.resorigtbl,
+                    resorigcol: tle.resorigcol,
+                    resjunk: tle.resjunk,
+                },
+            )?,
+        )?;
+    }
+    let mut new_qual = NodeList::nil();
+    for qual_node in &qual {
+        new_qual.lappend(mcx, fix_upper_expr(run, qual_node, &stripped, rtoffset, INDEX_VAR)?)?;
+    }
+    let mut new_recheck = NodeList::nil();
+    for qual_node in &recheckqual {
+        new_recheck.lappend(mcx, fix_upper_expr(run, qual_node, &stripped, rtoffset, INDEX_VAR)?)?;
+    }
+    {
+        let s = plan.as_index_only_scan().unwrap();
+        fix_scan_list(run, &s.indexqual, rtoffset)?;
+        fix_scan_list(run, &s.indextlist, rtoffset)?;
+    }
+    // SAFETY: exclusive plan-tree ownership (prologue note).
+    unsafe {
+        plan.with_mut::<types_nodes::plannodes::IndexOnlyScan, _>(|s| {
+            s.scan.plan.targetlist = new_tlist;
+            s.scan.plan.qual = new_qual;
+            s.recheckqual = new_recheck;
+        })
+    }
+    .expect("IndexOnlyScan node");
     Ok(())
 }
 
@@ -442,6 +515,7 @@ fn fix_upper_expr<'mcx>(
     node: Node<'mcx>,
     subplan_tlist: &NodeList<'mcx>,
     rtoffset: i32,
+    newvarno: i32,
 ) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
     // search_indexed_tlist_for_non_var: an upper node consuming a value the
@@ -455,7 +529,7 @@ fn fix_upper_expr<'mcx>(
                 return Node::mk(
                     mcx,
                     types_nodes::primnodes::Var {
-                        varno: types_nodes::primnodes::OUTER_VAR,
+                        varno: newvarno,
                         varattno: tle.resno,
                         vartype,
                         vartypmod,
@@ -475,7 +549,7 @@ fn fix_upper_expr<'mcx>(
     match node.node_tag() {
         NodeTag::T_Var => {
             let var = node.as_var().expect("Var");
-            search_indexed_tlist_for_var(run, var, subplan_tlist, rtoffset)
+            search_indexed_tlist_for_var(run, var, subplan_tlist, rtoffset, newvarno)
         }
         NodeTag::T_Const | NodeTag::T_Param => {
             fix_scan_expr_walker(run, node)?;
@@ -489,7 +563,7 @@ fn fix_upper_expr<'mcx>(
             let mut args = NodeList::nil();
             for arg_node in &a.args {
                 let arg = arg_node.as_target_entry().expect("agg arg is a TLE");
-                let newexpr = fix_upper_expr(run, arg.expr, subplan_tlist, rtoffset)?;
+                let newexpr = fix_upper_expr(run, arg.expr, subplan_tlist, rtoffset, newvarno)?;
                 let new_tle = Node::mk(
                     mcx,
                     types_nodes::primnodes::TargetEntry {
@@ -536,7 +610,7 @@ fn fix_upper_expr<'mcx>(
             debug_assert!(wf.aggfilter.is_none() && wf.runCondition.is_nil());
             let mut args = NodeList::nil();
             for arg in &wf.args {
-                args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset)?)?;
+                args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset, newvarno)?)?;
             }
             Node::mk(
                 mcx,
@@ -561,7 +635,7 @@ fn fix_upper_expr<'mcx>(
             record_plan_function_dependency(run, opfuncid)?;
             let mut args = NodeList::nil();
             for arg in &o.args {
-                args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset)?)?;
+                args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset, newvarno)?)?;
             }
             Node::mk(
                 mcx,
@@ -582,7 +656,7 @@ fn fix_upper_expr<'mcx>(
             record_plan_function_dependency(run, f.funcid)?;
             let mut args = NodeList::nil();
             for arg in &f.args {
-                args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset)?)?;
+                args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset, newvarno)?)?;
             }
             Node::mk(
                 mcx,
@@ -601,7 +675,7 @@ fn fix_upper_expr<'mcx>(
         }
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().expect("RelabelType");
-            let arg = fix_upper_expr(run, r.arg, subplan_tlist, rtoffset)?;
+            let arg = fix_upper_expr(run, r.arg, subplan_tlist, rtoffset, newvarno)?;
             Node::mk(
                 mcx,
                 types_nodes::primnodes::RelabelType {
@@ -618,7 +692,7 @@ fn fix_upper_expr<'mcx>(
             let b = node.as_bool_expr().expect("BoolExpr");
             let mut args = NodeList::nil();
             for arg in &b.args {
-                args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset)?)?;
+                args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset, newvarno)?)?;
             }
             Node::mk(
                 mcx,
@@ -627,7 +701,7 @@ fn fix_upper_expr<'mcx>(
         }
         NodeTag::T_NullTest => {
             let nt = node.as_null_test().unwrap();
-            let arg = fix_upper_expr(run, nt.arg.expect("NullTest.arg"), subplan_tlist, rtoffset)?;
+            let arg = fix_upper_expr(run, nt.arg.expect("NullTest.arg"), subplan_tlist, rtoffset, newvarno)?;
             Node::mk(
                 mcx,
                 types_nodes::primnodes::NullTest {
@@ -648,6 +722,7 @@ fn search_indexed_tlist_for_var<'mcx>(
     var: &types_nodes::primnodes::Var<'mcx>,
     subplan_tlist: &NodeList<'mcx>,
     rtoffset: i32,
+    newvarno: i32,
 ) -> PgResult<Node<'mcx>> {
     debug_assert!(var.varlevelsup == 0 && var.varnullingrels.is_empty());
     for tle_node in subplan_tlist {
@@ -655,7 +730,7 @@ fn search_indexed_tlist_for_var<'mcx>(
         let Some(sub) = tle.expr.as_var() else { continue };
         if sub.varno == var.varno && sub.varattno == var.varattno {
             let mut newvar = types_nodes::primnodes::Var {
-                varno: types_nodes::primnodes::OUTER_VAR,
+                varno: newvarno,
                 varattno: tle.resno,
                 vartype: var.vartype,
                 vartypmod: var.vartypmod,
