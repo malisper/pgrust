@@ -293,6 +293,45 @@ pub struct ColumnDef<'mcx> {
     pub location: ParseLoc,
 }
 
+// C ConstrType (parsenodes.h).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ConstrType {
+    #[default]
+    CONSTR_NULL = 0,
+    CONSTR_NOTNULL,
+    CONSTR_DEFAULT,
+    CONSTR_IDENTITY,
+    CONSTR_GENERATED,
+    CONSTR_CHECK,
+    CONSTR_PRIMARY,
+    CONSTR_UNIQUE,
+    CONSTR_EXCLUSION,
+    CONSTR_FOREIGN,
+    CONSTR_ATTR_DEFERRABLE,
+    CONSTR_ATTR_NOT_DEFERRABLE,
+    CONSTR_ATTR_DEFERRED,
+    CONSTR_ATTR_IMMEDIATE,
+    CONSTR_ATTR_ENFORCED,
+    CONSTR_ATTR_NOT_ENFORCED,
+}
+
+// DEFAULT/CHECK slice of C's Constraint; index/FK fields arrive with their DDL.
+#[derive(Default)]
+pub struct Constraint<'mcx> {
+    pub contype: ConstrType,
+    pub conname: Option<&'mcx str>,
+    pub deferrable: bool,
+    pub initdeferred: bool,
+    pub is_enforced: bool,
+    pub skip_validation: bool,
+    pub initially_valid: bool,
+    pub is_no_inherit: bool,
+    pub raw_expr: Option<Node<'mcx>>,
+    pub cooked_expr: Option<&'mcx str>,
+    pub keys: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
 // SAFETY (each): tag/type pairing mirrors parsenodes.h.
 unsafe impl<'mcx> NodeVariant<'mcx> for RawStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_RawStmt;
@@ -487,4 +526,7 @@ impl<'mcx> Node<'mcx> {
     pub fn as_type_cast(self) -> Option<&'mcx TypeCast<'mcx>> {
         self.as_variant()
     }
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for Constraint<'mcx> {
+    const TAG: NodeTag = NodeTag::T_Constraint;
 }

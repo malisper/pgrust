@@ -363,6 +363,23 @@ seam_core::seam!(
     pub fn pg_operator_name_candidates_exist(opername: &str, oprkind: i8) -> PgResult<bool>
 );
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgOperatorNameCandidate {
+    pub oid: Oid,
+    pub oprnamespace: Oid,
+    pub oprkind: i8,
+    pub oprleft: Oid,
+    pub oprright: Oid,
+}
+
+seam_core::seam!(
+    // SearchSysCacheList1(OPERNAMENSP, oprname), catcache list order.
+    pub fn lookup_pg_operator_name_candidates<'mcx>(
+        mcx: Mcx<'mcx>,
+        opername: &str,
+    ) -> PgResult<PgVec<'mcx, PgOperatorNameCandidate>>
+);
+
 seam_core::seam!(
     pub fn lookup_pg_collation_shape(colloid: Oid) -> PgResult<Option<PgCollationShape>>
 );
