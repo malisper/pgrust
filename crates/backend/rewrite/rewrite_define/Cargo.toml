@@ -24,6 +24,9 @@ table = { path = "../../access/table/table" }
 genam = { path = "../../access/index/genam" }
 catalog = { path = "../../catalog/catalog" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
+inval = { path = "../../utils/cache/inval" }
+init_small = { path = "../../utils/init/init_small" }
+rewrite_define_seams = { path = "../rewrite_define_seams" }
 catalog_dependency = { path = "../../catalog/catalog_dependency" }
 pg_depend = { path = "../../catalog/pg_depend" }
 relcache = { path = "../../utils/cache/relcache" }
