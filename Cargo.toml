@@ -143,6 +143,7 @@ members = [
     "crates/backend/executor/nodebitmapheapscan",
     "crates/backend/executor/nodeindexonlyscan",
     "crates/backend/executor/nodesort",
+    "crates/backend/executor/nodeunique",
     "crates/backend/executor/nodelimit",
     "crates/backend/executor/nodehash",
     "crates/backend/executor/nodehashjoin",
@@ -172,6 +173,8 @@ members = [
     "crates/backend/access/common/tupdesc",
     "crates/backend/utils/hash/dynahash",
     "crates/backend/utils/adt/int",
+    "crates/backend/utils/adt/arrayfuncs",
+    "crates/backend/utils/adt/arrayutils",
     "crates/backend/utils/adt/int8",
     "crates/backend/access/index/amapi",
     "crates/backend/access/index/indexam_seams",
@@ -308,6 +311,8 @@ members = [
     "crates/backend/utils/adt/mac8",
     "crates/backend/utils/adt/like",
     "crates/backend/utils/adt/oracle_compat",
+    "crates/backend/utils/adt/formatting",
+    "crates/backend/utils/adt/formatting_seams",
     "crates/backend/utils/adt/pseudotypes",
     "crates/backend/catalog/aclchk_seams",
     "crates/backend/utils/misc/guc",
@@ -404,6 +409,7 @@ members = [
     "crates/backend/timezone/strftime",
     "crates/_support/seams_init",
     "crates/backend/main/main_main",
+    "crates/backend/utils/adt/json",
 ]
 
 [workspace.package]

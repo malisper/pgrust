@@ -15,7 +15,7 @@ use ::types_error::PgResult;
 
 pub use ::fmgr::{
     direct_input_function_call_safe, input_function_call, input_function_call_safe,
-    ErrorSaveNode,
+    receive_function_call, send_function_call, ErrorSaveNode,
 };
 pub use ::fmgr::{
     direct_function_call1_coll, direct_function_call1_coll_in, direct_function_call2_coll,
