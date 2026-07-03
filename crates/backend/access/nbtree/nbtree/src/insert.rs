@@ -1,8 +1,8 @@
 //! nbtinsert.c: descent-for-insert (rightmost-block fastpath cache),
 //! _bt_check_unique (UNIQUE_CHECK_YES arm), _bt_findinsertloc, _bt_insertonpg
 //! incl. posting splits (_bt_binsrch_posting, _bt_swap_posting), _bt_split +
-//! parent insertion + root split. Loud: dedup (nbtdedup unit), posting split
-//! during a page split, deletion, deferred unique checks, !heapkeyspace.
+//! parent insertion + root split, dedup trigger (dedup.rs). Loud: posting
+//! split during a page split, deletion, deferred unique checks, !heapkeyspace.
 
 use std::cell::Cell;
 
@@ -841,17 +841,18 @@ unsafe fn bt_delete_or_dedup_one_page(
     checkingunique: bool,
     uniquedup: bool,
 ) -> PgResult<()> {
-    let _ = rel;
-    let pin = insertstate.buf.as_ref().expect("pinned");
-    let page = pin.page();
-    let opaque = page_opaque(&page);
-    debug_assert!(P_ISLEAF(&opaque));
+    {
+        let pin = insertstate.buf.as_ref().expect("pinned");
+        let page = pin.page();
+        let opaque = page_opaque(&page);
+        debug_assert!(P_ISLEAF(&opaque));
 
-    let minoff = P_FIRSTDATAKEY(&opaque);
-    let maxoff = page.max_offset_number();
-    for offnum in minoff..=maxoff {
-        if page.item_id(offnum).is_dead() {
-            unported_phase2("_bt_simpledel_pass (simple index deletion lane)");
+        let minoff = P_FIRSTDATAKEY(&opaque);
+        let maxoff = page.max_offset_number();
+        for offnum in minoff..=maxoff {
+            if page.item_id(offnum).is_dead() {
+                unported_phase2("_bt_simpledel_pass (simple index deletion lane)");
+            }
         }
     }
 
@@ -861,13 +862,16 @@ unsafe fn bt_delete_or_dedup_one_page(
 
     insertstate.bounds_valid = false;
 
+    // indexUnchanged is folded into uniquedup by our caller (C keeps both;
+    // the bottomup trigger and dedup's bottomupdedup arg are their OR).
     if uniquedup {
         unported_phase2("_bt_bottomupdel_pass (bottom-up deletion lane)");
     }
 
     // BTGetDeduplicateItems: index reloptions unported, default is on.
     if insertstate.itup_key.allequalimage {
-        unported_phase2("_bt_dedup_pass (nbtdedup unit, own CATALOG row)");
+        let pin = insertstate.buf.as_ref().expect("pinned");
+        crate::dedup::bt_dedup_pass(rel, pin, insertstate.itup, insertstate.itemsz, uniquedup)?;
     }
     Ok(())
 }
@@ -1194,7 +1198,12 @@ unsafe fn bt_split<'mcx>(
 
         let itup_key = itup_key.expect("leaf split has an insertion key");
         lefthighkey_owned = bt_truncate(mcx, rel, lastleft, firstright, itup_key, frame)?;
-        (lefthighkey_owned.as_ptr(), lefthighkey_owned.size())
+        // IndexTupleSize, not the buffer size: the posting-chop arm of
+        // _bt_truncate shrinks t_info below the allocation.
+        (
+            lefthighkey_owned.as_ptr(),
+            maxalign(index_tuple_size(lefthighkey_owned.as_ptr())),
+        )
     } else {
         (firstright, maxalign(firstright_sz))
     };

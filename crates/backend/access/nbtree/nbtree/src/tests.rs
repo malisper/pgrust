@@ -985,17 +985,116 @@ fn unique_index_rejects_live_duplicate() {
 }
 
 #[test]
-#[should_panic(expected = "nbtdedup")]
-fn allequalimage_full_page_routes_to_loud_dedup_arm() {
+fn allequalimage_distinct_keys_dedup_is_noop_then_split() {
     install();
     build_empty_index(true);
     let cx = MemoryContext::new("t");
     let rel = index_rel(cx.mcx());
     prime_supportinfo(&rel);
 
+    // all-distinct page full: dedup pass finds zero intervals (no WAL, no
+    // page change) and the split proceeds as on an allequalimage=false index.
     for k in 1..=500i32 {
         insert_key(&rel, &rel, k, tid(k as u32, 1));
     }
+
+    let infos = wal_infos();
+    assert!(!infos.contains(&::types_nbtree::XLOG_BTREE_DEDUP));
+    assert!(infos.contains(&::types_nbtree::XLOG_BTREE_SPLIT_R));
+
+    let seen = drain_forward(cx.mcx(), &rel);
+    assert_eq!(seen.len(), 500);
+    assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
+}
+
+#[test]
+fn dedup_pass_merges_duplicates_onto_one_leaf() {
+    install();
+    build_empty_index(true);
+    let cx = MemoryContext::new("t");
+    let rel = index_rel(cx.mcx());
+    prime_supportinfo(&rel);
+
+    // one key, ascending TIDs: every page-full dedups instead of splitting.
+    let n = 1200u32;
+    for i in 1..=n {
+        insert_key(&rel, &rel, 42, tid(i, 1));
+    }
+
+    let infos = wal_infos();
+    let dedups = infos.iter().filter(|i| **i == ::types_nbtree::XLOG_BTREE_DEDUP).count();
+    assert!(dedups >= 1, "expected dedup passes, saw none");
+    assert!(
+        !infos.contains(&::types_nbtree::XLOG_BTREE_SPLIT_R)
+            && !infos.contains(&::types_nbtree::XLOG_BTREE_SPLIT_L),
+        "1200 duplicates of one int4 key must fit a single deduplicated leaf"
+    );
+
+    let seen = drain_forward(cx.mcx(), &rel);
+    assert_eq!(seen.len(), n as usize);
+    for (i, t) in seen.iter().enumerate() {
+        assert_eq!(ItemPointerGetBlockNumber(t), i as u32 + 1, "TID order preserved");
+    }
+    assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
+}
+
+#[test]
+fn single_value_strategy_splits_after_six_capped_postings() {
+    install();
+    build_empty_index(true);
+    let cx = MemoryContext::new("t");
+    let rel = index_rel(cx.mcx());
+    prime_supportinfo(&rel);
+
+    // enough duplicates of one key to overflow even a fully deduplicated
+    // page: single value strategy caps six posting lists, then splits.
+    let n = 4000u32;
+    for i in 1..=n {
+        insert_key(&rel, &rel, 42, tid(i, 1));
+    }
+
+    let infos = wal_infos();
+    assert!(infos.iter().any(|i| *i == ::types_nbtree::XLOG_BTREE_DEDUP));
+    assert!(infos
+        .iter()
+        .any(|i| *i == ::types_nbtree::XLOG_BTREE_SPLIT_R || *i == ::types_nbtree::XLOG_BTREE_SPLIT_L));
+
+    let seen = drain_forward(cx.mcx(), &rel);
+    assert_eq!(seen.len(), n as usize);
+    for (i, t) in seen.iter().enumerate() {
+        assert_eq!(ItemPointerGetBlockNumber(t), i as u32 + 1);
+    }
+    assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
+}
+
+#[test]
+fn dedup_mixed_keys_only_merges_equal_runs() {
+    install();
+    build_empty_index(true);
+    let cx = MemoryContext::new("t");
+    let rel = index_rel(cx.mcx());
+    prime_supportinfo(&rel);
+
+    // 40 duplicate-heavy even keys interleaved, plus unique odd spacers.
+    let mut expect: Vec<(i32, u32)> = Vec::new();
+    for round in 0..30u32 {
+        for k in 0..40i32 {
+            insert_key(&rel, &rel, k * 2, tid(1 + k as u32 * 1000 + round, 1));
+            expect.push((k * 2, 1 + k as u32 * 1000 + round));
+        }
+    }
+    for k in 0..40i32 {
+        insert_key(&rel, &rel, k * 2 + 1, tid(500_000 + k as u32, 1));
+        expect.push((k * 2 + 1, 500_000 + k as u32));
+    }
+    expect.sort();
+
+    let seen = drain_forward(cx.mcx(), &rel);
+    assert_eq!(seen.len(), expect.len());
+    for (t, (_, blk)) in seen.iter().zip(expect.iter()) {
+        assert_eq!(ItemPointerGetBlockNumber(t), *blk);
+    }
+    assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
 }
 
 #[test]

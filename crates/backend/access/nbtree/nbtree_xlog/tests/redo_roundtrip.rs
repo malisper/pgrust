@@ -380,7 +380,7 @@ fn empty_meta_page() -> Box<TestPage> {
         btm_fastlevel: 0,
         btm_last_cleanup_num_delpages: 0,
         btm_last_cleanup_num_heap_tuples: -1.0,
-        btm_allequalimage: false,
+        btm_allequalimage: true,
     }
     .page_image();
     p.0[SizeOfPageHeaderData..SizeOfPageHeaderData + 48].copy_from_slice(&img);
@@ -569,13 +569,6 @@ fn btree_redo_rebuilds_pages_byte_exact() {
     // (PageAddItem + INSERT_LEAF record + LSN), then insert a duplicate whose
     // TID falls inside its range: INSERT_POST on the write side, replayed via
     // the redo-side _bt_swap_posting.
-    // The fixture metapage says allequalimage=false so the split phases skip
-    // the loud _bt_dedup_pass lane; the posting phase needs the key-space
-    // flag, which descents read from the rd_amcache copy.
-    let mut amc = rel.rd_amcache.get().expect("amcache primed by inserts");
-    amc.btm_allequalimage = true;
-    rel.rd_amcache.set(Some(amc));
-
     let postkey = evens + 2;
     let rightmost_leaf: BlockNumber = {
         let nblocks = with_fake(|f| f.pages.len());
@@ -629,6 +622,16 @@ fn btree_redo_rebuilds_pages_byte_exact() {
     }
     insert_tid(postkey, 3);
 
+    // Dedup lane: duplicates of one bigger key until the rightmost leaf goes
+    // page-full and _bt_dedup_pass emits XLOG_BTREE_DEDUP (no split: merged
+    // posting lists free enough space).
+    let dupkey = postkey + 2;
+    let before = with_fake(|f| f.pages.len());
+    for i in 1..=800u16 {
+        insert_tid(dupkey, i);
+    }
+    assert_eq!(with_fake(|f| f.pages.len()), before, "dedup avoided the split");
+
     with_fake(|f| assert!(f.pins.iter().all(|p| *p == 0), "leaked pins"));
 
     let nblocks = with_fake(|f| f.pages.len());
@@ -675,6 +678,10 @@ fn btree_redo_rebuilds_pages_byte_exact() {
         seen[(types_nbtree::XLOG_BTREE_INSERT_POST >> 4) as usize],
         1,
         "INSERT_POST replayed"
+    );
+    assert!(
+        seen[(types_nbtree::XLOG_BTREE_DEDUP >> 4) as usize] >= 1,
+        "DEDUP replayed"
     );
 
     with_fake(|f| assert!(f.pins.iter().all(|p| *p == 0), "replay leaked pins"));

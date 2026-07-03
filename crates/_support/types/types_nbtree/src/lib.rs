@@ -3,6 +3,7 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+pub mod dedup;
 pub mod genam;
 pub mod page;
 pub mod state;
