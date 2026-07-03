@@ -342,3 +342,44 @@ fn running_transaction_data_reports_assigned_xids_and_holds_locks() {
 
     other_proc_end(other, 190);
 }
+
+#[test]
+fn proc_number_transaction_ids_and_pid_lookup() {
+    let _g = test_lock();
+    let _me = my_backend();
+
+    assert_eq!(
+        ProcNumberGetTransactionIds(-1),
+        (InvalidTransactionId, InvalidTransactionId, 0, false)
+    );
+    assert_eq!(
+        ProcNumberGetTransactionIds(ProcGlobal().allProcs.len() as ProcNumber),
+        (InvalidTransactionId, InvalidTransactionId, 0, false)
+    );
+
+    let other = claim_other();
+    other_proc_running(other, 700);
+    let proc = GetPGProcByNumber(other);
+    proc.xmin.value.store(695, Relaxed);
+    proc.subxidStatus.set(types_storage::storage::XidCacheStatus {
+        count: 2,
+        overflowed: true,
+    });
+
+    // pid == 0: dummy PGPROC, ids withheld and PID lookup never matches.
+    assert_eq!(
+        ProcNumberGetTransactionIds(other),
+        (InvalidTransactionId, InvalidTransactionId, 0, false)
+    );
+    assert!(BackendPidGetProc(0).is_none());
+
+    proc.pid.store(9911, Relaxed);
+    assert_eq!(ProcNumberGetTransactionIds(other), (700, 695, 2, true));
+    assert!(std::ptr::eq(BackendPidGetProc(9911).unwrap(), proc));
+    assert!(BackendPidGetProc(555_555).is_none());
+
+    proc.pid.store(0, Relaxed);
+    proc.xmin.value.store(InvalidTransactionId, Relaxed);
+    proc.subxidStatus.set(Default::default());
+    other_proc_end(other, 700);
+}

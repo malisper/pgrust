@@ -960,21 +960,35 @@ name = "backend_status"
 version = "0.0.0"
 dependencies = [
  "adt_timestamp",
+ "autovacuum_seams",
  "backend_status_seams",
+ "condition_variable_seams",
+ "deadlock_seams",
  "guc_seams",
  "guc_tables",
  "init_small",
  "ip",
  "ipc_seams",
+ "latch_seams",
  "lmgr_proc",
+ "lock_seams",
+ "lwlock",
  "mbutils",
  "miscinit",
+ "miscinit_seams",
+ "pg_sema_seams",
  "pgstat",
+ "pmsignal_seams",
+ "procarray",
+ "s_lock_seams",
  "shmem",
  "superuser_seams",
+ "syncrep_seams",
+ "timeout_seams",
  "types_core",
  "types_error",
  "types_storage",
+ "waitevent_seams",
  "xact",
 ]
 
@@ -3066,6 +3080,7 @@ dependencies = [
  "mcx",
  "name",
  "nbt_compare",
+ "pgstatfuncs",
  "pseudorandomfuncs",
  "sequence_seams",
  "stringinfo",
@@ -3154,17 +3169,21 @@ dependencies = [
  "catalog_seams",
  "datum",
  "detoast_seams",
+ "exectuples",
  "fmgr_seams",
  "format_type",
+ "init_small",
  "lsyscache",
  "mcx",
  "syscache_seams",
  "tupdesc",
+ "tuplestore",
  "typcache_seams",
  "types_core",
  "types_error",
  "types_fmgr",
  "types_nodes",
+ "types_slot",
  "types_tuple",
  "varlena",
 ]
@@ -4997,6 +5016,7 @@ dependencies = [
  "datum",
  "execexpr",
  "execscan",
+ "exectuples",
  "executils",
  "fmgr_core",
  "funcapi",
@@ -5769,6 +5789,7 @@ dependencies = [
  "syscache_seams",
  "table",
  "tupdesc",
+ "typcache_seams",
  "types_core",
  "types_error",
  "types_nodes",
@@ -6347,6 +6368,8 @@ version = "0.1.0"
 name = "pgstat"
 version = "0.0.0"
 dependencies = [
+ "backend_status_seams",
+ "catalog_seams",
  "datum",
  "guc_tables",
  "hashbrown",
@@ -6355,6 +6378,7 @@ dependencies = [
  "mcx",
  "miscinit",
  "pgstat_seams",
+ "rustc-hash",
  "timestamp_seams",
  "types_core",
  "types_error",
@@ -6369,6 +6393,31 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "pgstatfuncs"
+version = "0.1.0"
+dependencies = [
+ "acl_seams",
+ "backend_status",
+ "backend_status_seams",
+ "datum",
+ "funcapi",
+ "init_small",
+ "libc",
+ "lmgr_proc",
+ "mcx",
+ "miscinit",
+ "pgstat",
+ "procarray",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_storage",
+ "varlena",
+ "waitevent",
 ]
 
 [[package]]
@@ -7598,6 +7647,7 @@ dependencies = [
  "cache_syscache",
  "catalog_seams",
  "datum",
+ "detoast",
  "fmgr_seams",
  "genam",
  "heaptuple",
@@ -7762,6 +7812,7 @@ dependencies = [
  "backend_status_seams",
  "be_fsstubs_seams",
  "bufmgr_seams",
+ "cache_syscache",
  "catalog_index_seams",
  "catalog_seams",
  "catalog_storage_seams",
@@ -7782,6 +7833,7 @@ dependencies = [
  "fd",
  "format_type",
  "freespace_seams",
+ "funcapi",
  "gram_core",
  "guc",
  "guc_tables",
@@ -10175,6 +10227,7 @@ dependencies = [
 name = "waitevent"
 version = "0.0.0"
 dependencies = [
+ "lwlock",
  "waitevent_seams",
 ]
 

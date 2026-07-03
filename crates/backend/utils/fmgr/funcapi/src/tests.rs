@@ -339,3 +339,126 @@ fn multi_func_call_requires_rsinfo() {
         .message()
         .contains("set-valued function called in context that cannot accept a set"));
 }
+
+fn materialize_rsinfo(allowed: u32) -> ::fmgr::ReturnSetInfo {
+    ::fmgr::ReturnSetInfo::new(allowed)
+}
+
+fn int4_pair_desc(mcx: Mcx<'_>) -> TupleDescData<'_> {
+    let mut d = tupdesc::CreateTemplateTupleDesc(mcx, 2).unwrap();
+    tupdesc::TupleDescInitEntry(&mut d, 1, Some("a"), INT4OID, -1, 0).unwrap();
+    tupdesc::TupleDescInitEntry(&mut d, 2, Some("b"), INT4OID, -1, 0).unwrap();
+    d
+}
+
+#[test]
+fn materialized_srf_expected_desc_roundtrip() {
+    use ::fmgr::{SetFunctionReturnMode, SFRM_Materialize, SFRM_ValuePerCall};
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let desc = int4_pair_desc(mcx);
+
+    let mut rsinfo = materialize_rsinfo(SFRM_ValuePerCall | SFRM_Materialize);
+    rsinfo.expectedDesc = Some(core::ptr::NonNull::from(&desc).cast());
+    let mut flinfo = flinfo_for(F_RECORD_OUT);
+    let mut fcinfo = LocalFcinfo::<0>::new(InvalidOid);
+    fcinfo.resultinfo = rsinfo.as_fmnode_ptr();
+
+    let mut srf =
+        InitMaterializedSRF(mcx, &mut flinfo, &mut fcinfo, MAT_SRF_USE_EXPECTED_DESC).unwrap();
+    assert_eq!(srf.tupdesc.natts, 2);
+    srf.putvalues(&[Datum::from_i32(1), Datum::from_i32(2)], &[false, false]).unwrap();
+    srf.putvalues(&[Datum::from_i32(3), Datum::from_i32(4)], &[false, true]).unwrap();
+    let result = srf.finish(&mut fcinfo);
+    assert_eq!(result.as_usize(), 0);
+    assert!(!fcinfo.isnull);
+
+    assert_eq!(rsinfo.returnMode, SetFunctionReturnMode::Materialize);
+    let mut store = *rsinfo
+        .setResult
+        .take()
+        .expect("finish armed setResult")
+        .downcast::<::tuplestore::Tuplestore>()
+        .expect("setResult is a Tuplestore");
+    assert_eq!(store.tuple_count(), 2);
+
+    let mut slot = exectuples::make_tuple_table_slot(
+        mcx,
+        types_slot::TupleSlotKind::MinimalTuple,
+        Some(std::rc::Rc::new(desc)),
+    );
+    assert!(store.gettupleslot(true, false, &mut slot, mcx).unwrap());
+    exectuples::slot_getallattrs(&mut slot);
+    assert_eq!(slot.base().tts_values[0].as_i32(), 1);
+    assert_eq!(slot.base().tts_values[1].as_i32(), 2);
+    assert!(store.gettupleslot(true, false, &mut slot, mcx).unwrap());
+    exectuples::slot_getallattrs(&mut slot);
+    assert_eq!(slot.base().tts_values[0].as_i32(), 3);
+    assert!(slot.base().tts_isnull[1]);
+    assert!(!store.gettupleslot(true, false, &mut slot, mcx).unwrap());
+    store.end();
+}
+
+#[test]
+fn materialized_srf_derives_tupdesc_from_pg_proc() {
+    use ::fmgr::SFRM_Materialize;
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let mut rsinfo = materialize_rsinfo(SFRM_Materialize);
+    let mut flinfo = flinfo_for(F_RECORD_OUT);
+    let mut fcinfo = LocalFcinfo::<0>::new(InvalidOid);
+    fcinfo.resultinfo = rsinfo.as_fmnode_ptr();
+
+    let srf = InitMaterializedSRF(ctx.mcx(), &mut flinfo, &mut fcinfo, 0).unwrap();
+    assert_eq!(srf.tupdesc.natts, 2);
+    assert_eq!(srf.tupdesc.attr(0).attname.name_str(), b"b");
+    assert_eq!(srf.tupdesc.attr(1).attname.name_str(), b"column2");
+}
+
+#[test]
+fn materialized_srf_requires_rsinfo() {
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let mut flinfo = flinfo_for(F_RECORD_OUT);
+    let mut fcinfo = LocalFcinfo::<0>::new(InvalidOid);
+    let err = InitMaterializedSRF(ctx.mcx(), &mut flinfo, &mut fcinfo, 0).unwrap_err();
+    assert!(err
+        .message()
+        .contains("set-valued function called in context that cannot accept a set"));
+}
+
+#[test]
+fn materialized_srf_requires_materialize_mode() {
+    use ::fmgr::{SFRM_Materialize, SFRM_ValuePerCall};
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let mut flinfo = flinfo_for(F_RECORD_OUT);
+
+    let mut rsinfo = materialize_rsinfo(SFRM_ValuePerCall);
+    let mut fcinfo = LocalFcinfo::<0>::new(InvalidOid);
+    fcinfo.resultinfo = rsinfo.as_fmnode_ptr();
+    let err = InitMaterializedSRF(ctx.mcx(), &mut flinfo, &mut fcinfo, 0).unwrap_err();
+    assert!(err.message().contains("materialize mode required"));
+
+    // MAT_SRF_USE_EXPECTED_DESC with no expectedDesc is the same error.
+    let mut rsinfo = materialize_rsinfo(SFRM_ValuePerCall | SFRM_Materialize);
+    let mut fcinfo = LocalFcinfo::<0>::new(InvalidOid);
+    fcinfo.resultinfo = rsinfo.as_fmnode_ptr();
+    let err = InitMaterializedSRF(ctx.mcx(), &mut flinfo, &mut fcinfo, MAT_SRF_USE_EXPECTED_DESC)
+        .unwrap_err();
+    assert!(err.message().contains("materialize mode required"));
+}
+
+#[test]
+fn materialized_srf_rejects_scalar_result() {
+    use ::fmgr::SFRM_Materialize;
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let mut flinfo = flinfo_for(F_SCALAR);
+    let mut rsinfo = materialize_rsinfo(SFRM_Materialize);
+    let mut fcinfo = LocalFcinfo::<0>::new(InvalidOid);
+    fcinfo.resultinfo = rsinfo.as_fmnode_ptr();
+    let err = InitMaterializedSRF(ctx.mcx(), &mut flinfo, &mut fcinfo, 0).unwrap_err();
+    assert!(err.message().contains("return type must be a row type"));
+}
