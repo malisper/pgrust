@@ -146,7 +146,7 @@ pub fn BeginCopyFrom<'mcx, 's>(
         // build_column_default/ExecInitExpr are the rewrite gap: a column the
         // input does not supply keeps NULL here, which silently diverges when
         // a default exists.
-        if att.atthasdef && !attnumlist.contains(&(i as i16 + 1)) {
+        if (att.atthasdef || att.attidentity != 0) && !attnumlist.contains(&(i as i16 + 1)) {
             unported("FROM with omitted defaulted column (build_column_default lane)");
         }
     }

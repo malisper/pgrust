@@ -77,9 +77,8 @@ pub fn BuildDescForRelation<'mcx>(
         att.attnotnull = entry.is_not_null;
         att.attislocal = entry.is_local;
         att.attinhcount = entry.inhcount;
-        if entry.identity != 0 || entry.generated != 0 {
-            unported("identity/generated columns");
-        }
+        att.attidentity = entry.identity as i8;
+        att.attgenerated = entry.generated as i8;
         if entry.compression.is_some() {
             unported("GetAttributeCompression (per-column COMPRESSION)");
         }

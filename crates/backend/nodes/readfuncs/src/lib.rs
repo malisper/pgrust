@@ -324,6 +324,7 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"FUNCEXPR" => self.read_func_expr(),
             b"BOOLEXPR" => self.read_bool_expr(),
             b"RELABELTYPE" => self.read_relabel_type(),
+            b"COERCEVIAIO" => self.read_coerce_via_io(),
             other => panic!(
                 "parseNodeString (readfuncs.c): {} read arm unported (view SELECT-rule + \
                  DEFAULT/CHECK expr sets only)",
@@ -581,6 +582,18 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         b.args = self.read_node_list("args")?;
         b.location = self.read_location("location");
         Ok(b.seal())
+    }
+
+    fn read_coerce_via_io(&mut self) -> PgResult<Node<'mcx>> {
+        let arg = self.read_node("arg")?.expect("CoerceViaIO has an arg");
+        let c = types_nodes::primnodes::CoerceViaIO {
+            arg,
+            resulttype: self.read_u32("resulttype"),
+            resultcollid: self.read_u32("resultcollid"),
+            coerceformat: coercion_form(self.read_u32("coerceformat")),
+            location: self.read_location("location"),
+        };
+        Node::mk(self.mcx, c)
     }
 
     fn read_relabel_type(&mut self) -> PgResult<Node<'mcx>> {

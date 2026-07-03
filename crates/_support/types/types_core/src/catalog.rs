@@ -23,6 +23,11 @@ pub const ATTR_DEFAULT_RELATION_ID: Oid = 2604;
 pub const ATTR_DEFAULT_INDEX_ID: Oid = 2656;
 pub const ATTR_DEFAULT_OID_INDEX_ID: Oid = 2657;
 
+pub const ATTRIBUTE_IDENTITY_ALWAYS: u8 = b'a';
+pub const ATTRIBUTE_IDENTITY_BY_DEFAULT: u8 = b'd';
+pub const ATTRIBUTE_GENERATED_STORED: u8 = b's';
+pub const ATTRIBUTE_GENERATED_VIRTUAL: u8 = b'v';
+
 pub const PG_CATALOG_NAMESPACE: Oid = 11;
 pub const PG_TOAST_NAMESPACE: Oid = 99;
 pub const BOOTSTRAP_SUPERUSERID: Oid = 10;

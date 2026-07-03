@@ -62,6 +62,14 @@ pub struct ModifyTableState<'mcx> {
     check_exprs: Option<mcx::PgVec<'mcx, CheckExpr<'mcx>>>,
     // C ri_TrigDesc; Rc clone of the relcache entry's desc (CopyTriggerDesc).
     trigdesc: Option<Rc<types_trigger::TriggerDesc<'static>>>,
+    // ri_GeneratedExprsI/U collapsed to one set: the UPDATE updatedCols skip
+    // is perf-only (values are immutable functions of non-generated columns).
+    generated_exprs: Option<mcx::PgVec<'mcx, GeneratedExpr<'mcx>>>,
+}
+
+struct GeneratedExpr<'mcx> {
+    attnum: usize,
+    state: PgBox<'mcx, ExprState<'mcx>>,
 }
 
 // ri_onConflict (OnConflictSetState) + ri_onConflictArbiterIndexes. The DO
@@ -288,6 +296,7 @@ pub fn exec_init_modify_table<'mcx>(
         on_conflict,
         check_exprs: None,
         trigdesc,
+        generated_exprs: None,
     })
 }
 
@@ -405,6 +414,7 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
     mt.on_conflict = None;
     mt.check_exprs = None;
     mt.trigdesc = None;
+    mt.generated_exprs = None;
 }
 
 // ExecInitInsertProjection (nodeModifyTable.c). INSERT subplans carry no junk
@@ -492,6 +502,9 @@ fn expr_type(node: Node<'_>) -> u32 {
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
+        NodeTag::T_NextValueExpr => {
+            node.as_variant::<types_nodes::primnodes::NextValueExpr>().unwrap().typeId
+        }
         other => panic!("ExecCheckPlanOutput exprType arm for {other:?} not ported"),
     }
 }
@@ -737,6 +750,10 @@ fn exec_update<'mcx>(
                 .expect("result relation opened");
             let slot = &mut es_tupleTable[slot_id.0 as usize];
 
+            slot.base_mut().tts_tableOid = rel.rd_id;
+            if rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored) {
+                exec_compute_stored_generated(mcx, &mut mt.generated_exprs, rel, slot)?;
+            }
             exectuples::exec_materialize_slot(slot, mcx)?;
             slot.base_mut().tts_tableOid = rel.rd_id;
 
@@ -1095,6 +1112,10 @@ fn exec_insert<'mcx>(
             .expect("result relation opened");
         let slot = &mut es_tupleTable[slot_id.0 as usize];
 
+        slot.base_mut().tts_tableOid = rel.rd_id;
+        if rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored) {
+            exec_compute_stored_generated(mcx, &mut mt.generated_exprs, rel, slot)?;
+        }
         exectuples::exec_materialize_slot(slot, mcx)?;
         slot.base_mut().tts_tableOid = rel.rd_id;
 
@@ -1477,6 +1498,111 @@ fn cardinality_violation() -> Box<PgError> {
     )
 }
 
+// ExecComputeStoredGenerated + ExecInitGenerated (nodeModifyTable.c). The
+// slot must be virtual: retained by-ref values point at subplan/projection
+// memory that survives the clear+restore (C datumCopies instead).
+fn exec_compute_stored_generated<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    generated_exprs: &mut Option<mcx::PgVec<'mcx, GeneratedExpr<'mcx>>>,
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<()> {
+    let constr = rel.rd_att.constr.as_deref().expect("caller checked");
+    if generated_exprs.is_none() {
+        let mut compiled: mcx::PgVec<'mcx, GeneratedExpr<'mcx>> = mcx::PgVec::new_in(mcx);
+        for i in 0..rel.rd_att.natts as usize {
+            if rel.rd_att.attr(i).attgenerated == 0 {
+                continue;
+            }
+            let adbin = constr
+                .defval
+                .iter()
+                .find(|d| d.adnum == (i + 1) as i16)
+                .and_then(|d| d.adbin.as_ref())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no generation expression found for column number {} of table \"{}\"",
+                        i + 1,
+                        String::from_utf8_lossy(rel.rd_rel.relname.name_str())
+                    )
+                });
+            // cookDefault coerced the stored tree to the column type, so
+            // build_column_default's re-coercion is a no-op; skipped.
+            let node = readfuncs::stringToNode(mcx, adbin.as_str())?;
+            let mut state = execexpr::exec_init_expr(mcx, Some(node), execexpr::ParamBind::NONE)?
+                .expect("generation expr");
+            state.arm_result_mcx(mcx);
+            compiled.push(GeneratedExpr { attnum: i, state });
+        }
+        *generated_exprs = Some(compiled);
+    }
+
+    exectuples::slot_getallattrs(slot);
+    let exprs = generated_exprs.as_mut().expect("just built");
+    let mut results: mcx::PgVec<'mcx, (usize, Datum, bool)> = mcx::PgVec::new_in(mcx);
+    results
+        .try_reserve_exact(exprs.len())
+        .map_err(|_| Box::new(mcx.oom(exprs.len() * 24)))?;
+    for ge in exprs.iter_mut() {
+        let mut slots = EvalSlots { scan: Some(slot), inner: None, outer: None };
+        let r = execexpr::exec_eval_expr(&mut ge.state, &mut slots)?;
+        results.push((ge.attnum, r.value, r.isnull));
+    }
+    // C copies every by-ref datum (old and computed) before the clear frees
+    // the backing image; the copies live in the query context, not C's
+    // per-tuple context — WATCH bulk-insert memory growth.
+    let natts = rel.rd_att.natts as usize;
+    let mut values: mcx::PgVec<'mcx, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut nulls: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    {
+        let base = slot.base_mut();
+        values.extend(base.tts_values.iter().copied());
+        nulls.extend(base.tts_isnull.iter().copied());
+    }
+    for &(attnum, value, isnull) in results.iter() {
+        values[attnum] = value;
+        nulls[attnum] = isnull;
+    }
+    for i in 0..natts {
+        let att = rel.rd_att.attr(i);
+        if !nulls[i] && !att.attbyval {
+            values[i] = copy_by_ref_datum(mcx, values[i], att.attlen)?;
+        }
+    }
+    exectuples::exec_clear_tuple(slot, mcx);
+    let base = slot.base_mut();
+    for i in 0..natts {
+        base.tts_values[i] = values[i];
+        base.tts_isnull[i] = nulls[i];
+    }
+    exectuples::exec_store_virtual_tuple(slot);
+    Ok(())
+}
+
+fn copy_by_ref_datum<'mcx>(mcx: mcx::Mcx<'mcx>, d: Datum, attlen: i16) -> PgResult<Datum> {
+    let p = d.as_usize() as *const u8;
+    let size = match attlen {
+        // SAFETY: non-null by-ref datum points at a live varlena image.
+        -1 => unsafe { types_tuple::varatt::varsize_any(p) },
+        // SAFETY: cstring datum is NUL-terminated.
+        -2 => unsafe {
+            let mut n = 0usize;
+            while *p.add(n) != 0 {
+                n += 1;
+            }
+            n + 1
+        },
+        l => l as usize,
+    };
+    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, size)?;
+    // SAFETY: size bytes are readable per the attlen contract above.
+    unsafe {
+        core::ptr::copy_nonoverlapping(p, buf.as_mut_ptr(), size);
+        buf.set_len(size);
+    }
+    Ok(Datum::from_usize(buf.leak().as_ptr() as usize))
+}
+
 // ExecConstraints (execMain.c): NOT NULL + CHECK arms live.
 fn exec_constraints<'mcx>(
     mcx: mcx::Mcx<'mcx>,
@@ -1485,7 +1611,9 @@ fn exec_constraints<'mcx>(
     slot: &mut SlotData<'mcx>,
 ) -> PgResult<()> {
     if let Some(constr) = rel.rd_att.constr.as_deref() {
-        debug_assert!(!constr.has_generated_stored && !constr.has_generated_virtual);
+        if constr.has_generated_virtual {
+            panic!("unported: virtual generated columns");
+        }
         if constr.has_not_null {
             exec_not_null_constraints(mcx, rel, slot)?;
         }
@@ -1684,15 +1812,16 @@ fn plan_output_mismatch(detail: &'static str) -> Box<PgError> {
 
 mcx::forget_safe_nodrop!(NewColSrc);
 
-// Exempt: indexes/snapshot_any/project_returning/on_conflict/check_exprs/trigdesc (and
-// each CheckExpr's state) are released in exec_end_modify_table; CmdType is
-// no-drop, const-proven below.
+// Exempt: indexes/snapshot_any/project_returning/on_conflict/check_exprs/
+// trigdesc/generated_exprs (and each CheckExpr's/GeneratedExpr's state) are
+// released in exec_end_modify_table; CmdType is no-drop, const-proven below.
 const _: () = assert!(!core::mem::needs_drop::<CmdType>());
 mcx::forget_safe_struct!(
     CheckExpr<'_> { name; state },
+    GeneratedExpr<'_> { attnum; state },
     ModifyTableState<'_> { plan, canSetTag, mt_done, result_rti,
         ri_newTupleSlot, ri_oldTupleSlot, ri_ReturningSlot,
         ri_projectNewInfoValid, ri_RowIdAttNo, update_cols, returning_slot;
         operation, indexes, snapshot_any, project_returning, on_conflict,
-        check_exprs, trigdesc },
+        check_exprs, trigdesc, generated_exprs },
 );

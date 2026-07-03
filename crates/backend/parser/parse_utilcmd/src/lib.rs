@@ -8,6 +8,7 @@ mod like;
 pub use like::expandTableLikeClause;
 
 use mcx::{Mcx, PgString};
+use types_core::catalog::ATTRIBUTE_GENERATED_STORED;
 use types_core::{InvalidOid, Oid, INT2OID, INT4OID, INT8OID, NAMEDATALEN};
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR,
@@ -349,6 +350,7 @@ fn transformColumnDefinition<'mcx>(
     column_node: Node<'mcx>,
     column: &ColumnDef<'mcx>,
     relation: &RangeVar<'mcx>,
+    src: Option<&str>,
     cxt: &mut CreateStmtCxt<'mcx>,
     ckconstraints: &mut NodeList<'mcx>,
     nnconstraints: &mut NodeList<'mcx>,
@@ -394,8 +396,16 @@ fn transformColumnDefinition<'mcx>(
 
     let mut need_notnull = false;
     if is_serial_oid != InvalidOid {
-        let (snamespace, sname) =
-            generateSerialExtraStmts(mcx, relation, column_node, column, is_serial_oid, cxt)?;
+        let (snamespace, sname) = generateSerialExtraStmts(
+            mcx,
+            relation,
+            column_node,
+            column,
+            is_serial_oid,
+            NodeList::nil(),
+            false,
+            cxt,
+        )?;
 
         // DEFAULT nextval('snamespace.sname'::regclass), raw form.
         let qstring = leak_str(quote_qualified_identifier(mcx, Some(snamespace), sname)?);
@@ -435,9 +445,11 @@ fn transformColumnDefinition<'mcx>(
         need_notnull = true;
     }
 
-    let mut saw_default = false;
     let mut saw_nullable = false;
+    let mut saw_default = false;
     let mut col_not_null = column.is_not_null;
+    let mut saw_identity = false;
+    let mut saw_generated = false;
     for cnode in column.constraints.iter() {
         let constraint = cnode.as_variant::<Constraint>().expect("column constraint");
         match constraint.contype {
@@ -457,6 +469,86 @@ fn transformColumnDefinition<'mcx>(
                         .expect("ColumnDef");
                 }
                 saw_default = true;
+            }
+            ConstrType::CONSTR_IDENTITY => {
+                let tn = column
+                    .typeName
+                    .expect("ColumnDef.typeName")
+                    .as_variant::<TypeName>()
+                    .expect("TypeName");
+                let (type_oid, _typmod) = typenameTypeIdAndMod(mcx, None, tn)?;
+                if saw_identity {
+                    return Err(column_syntax_error(
+                        format_args!(
+                            "multiple identity specifications for column \"{}\" of table \"{}\"",
+                            column.colname.unwrap_or(""),
+                            relname
+                        ),
+                        src,
+                        constraint.location,
+                    ));
+                }
+                generateSerialExtraStmts(
+                    mcx,
+                    relation,
+                    column_node,
+                    column,
+                    type_oid,
+                    // C list_copy: generateSerialExtraStmts prepends AS.
+                    constraint.options.clone_in(mcx)?,
+                    true,
+                    cxt,
+                )?;
+                let when = constraint.generated_when;
+                // SAFETY: parse tree is analyze-owned; no derived refs live.
+                unsafe {
+                    column_node
+                        .with_mut::<ColumnDef, _>(|c| c.identity = when)
+                        .expect("ColumnDef");
+                }
+                saw_identity = true;
+                if !saw_nullable {
+                    need_notnull = true;
+                } else if !column.is_not_null {
+                    return Err(column_syntax_error(
+                        format_args!(
+                            "conflicting NULL/NOT NULL declarations for column \"{}\" of table \"{}\"",
+                            column.colname.unwrap_or(""),
+                            relname
+                        ),
+                        src,
+                        constraint.location,
+                    ));
+                }
+            }
+            ConstrType::CONSTR_GENERATED => {
+                if saw_generated {
+                    return Err(column_syntax_error(
+                        format_args!(
+                            "multiple generation clauses specified for column \"{}\" of table \"{}\"",
+                            column.colname.unwrap_or(""),
+                            relname
+                        ),
+                        src,
+                        constraint.location,
+                    ));
+                }
+                if constraint.generated_kind != ATTRIBUTE_GENERATED_STORED {
+                    unported("GENERATED ... VIRTUAL columns");
+                }
+                let kind = constraint.generated_kind;
+                let raw_expr = constraint.raw_expr;
+                debug_assert!(constraint.cooked_expr.is_none());
+                // SAFETY: parse tree is analyze-owned; no derived refs live.
+                unsafe {
+                    column_node
+                        .with_mut::<ColumnDef, _>(|c| {
+                            c.generated = kind;
+                            c.raw_default = raw_expr;
+                        })
+                        .expect("ColumnDef");
+                }
+                saw_generated = true;
             }
             ConstrType::CONSTR_CHECK => ckconstraints.lappend(mcx, cnode)?,
             ConstrType::CONSTR_NOTNULL => {
@@ -511,11 +603,41 @@ fn transformColumnDefinition<'mcx>(
             }
             other => unported(match other {
                 ConstrType::CONSTR_NULL => "NULL column constraints",
-                ConstrType::CONSTR_IDENTITY | ConstrType::CONSTR_GENERATED => {
-                    "identity/generated column constraints"
-                }
                 _ => "constraint attributes (transformConstraintAttrs)",
             }),
+        }
+        if saw_default && saw_identity {
+            return Err(column_syntax_error(
+                format_args!(
+                    "both default and identity specified for column \"{}\" of table \"{}\"",
+                    column.colname.unwrap_or(""),
+                    relname
+                ),
+                src,
+                constraint.location,
+            ));
+        }
+        if saw_default && saw_generated {
+            return Err(column_syntax_error(
+                format_args!(
+                    "both default and generation expression specified for column \"{}\" of table \"{}\"",
+                    column.colname.unwrap_or(""),
+                    relname
+                ),
+                src,
+                constraint.location,
+            ));
+        }
+        if saw_identity && saw_generated {
+            return Err(column_syntax_error(
+                format_args!(
+                    "both identity and generation expression specified for column \"{}\" of table \"{}\"",
+                    column.colname.unwrap_or(""),
+                    relname
+                ),
+                src,
+                constraint.location,
+            ));
         }
     }
     if need_notnull && !(saw_nullable && col_not_null) {
@@ -530,9 +652,6 @@ fn transformColumnDefinition<'mcx>(
     }
     if column.collClause.is_some() || column.collOid != InvalidOid {
         unported("COLLATE clauses");
-    }
-    if column.identity != 0 || column.generated != 0 {
-        unported("identity/generated columns");
     }
     if column.is_from_type {
         unported("is_from_type columns (OF type / LIKE)");
@@ -590,6 +709,7 @@ pub fn transformCreateStmt<'mcx>(
                     elt,
                     cd,
                     relation,
+                    Some(query_string),
                     &mut cxt,
                     &mut ckconstraints,
                     &mut nnconstraints,
@@ -906,16 +1026,26 @@ fn leak_str(s: PgString<'_>) -> &str {
     unsafe { core::str::from_utf8_unchecked(s.into_bytes().leak()) }
 }
 
-// generateSerialExtraStmts, CREATE TABLE serial arm (identity/ALTER lanes and
-// SEQUENCE NAME/LOGGED/UNLOGGED options are unreachable from it).
+// generateSerialExtraStmts, CREATE TABLE serial+identity arms (ALTER lanes
+// and SEQUENCE NAME/LOGGED/UNLOGGED options are loud).
 fn generateSerialExtraStmts<'mcx>(
     mcx: Mcx<'mcx>,
     relation: &RangeVar<'mcx>,
     column_node: Node<'mcx>,
     column: &ColumnDef<'mcx>,
     seqtypid: Oid,
+    seqoptions: NodeList<'mcx>,
+    for_identity: bool,
     cxt: &mut CreateStmtCxt<'mcx>,
 ) -> PgResult<(&'mcx str, &'mcx str)> {
+    for opt in seqoptions.iter() {
+        let defel = opt.as_variant::<DefElem>().expect("DefElem in seqoptions");
+        match defel.defname {
+            Some("sequence_name") => unported("identity SEQUENCE NAME option"),
+            Some("logged") | Some("unlogged") => unported("identity LOGGED/UNLOGGED options"),
+            _ => {}
+        }
+    }
     let snamespaceid = RangeVarGetCreationNamespace(mcx, relation)?;
     let snamespace = leak_str(
         lsyscache::get_namespace_name(mcx, snamespaceid)?
@@ -955,10 +1085,12 @@ fn generateSerialExtraStmts<'mcx>(
         },
     )?;
 
+    let mut options = seqoptions;
+    options.lcons(mcx, as_defel)?;
     let mut seqstmt = Node::build::<CreateSeqStmt>(mcx)?;
-    seqstmt.for_identity = false;
+    seqstmt.for_identity = for_identity;
     seqstmt.sequence = Some(seq_rv);
-    seqstmt.options = NodeList::make1(mcx, as_defel)?;
+    seqstmt.options = options;
     seqstmt.ownerId = InvalidOid;
     cxt.blist.lappend(mcx, seqstmt.seal())?;
 
@@ -985,7 +1117,7 @@ fn generateSerialExtraStmts<'mcx>(
     let mut altseqstmt = Node::build::<AlterSeqStmt>(mcx)?;
     altseqstmt.sequence = Some(seq_rv);
     altseqstmt.options = NodeList::make1(mcx, owned_defel)?;
-    altseqstmt.for_identity = false;
+    altseqstmt.for_identity = for_identity;
     cxt.alist.lappend(mcx, altseqstmt.seal())?;
 
     Ok((snamespace, sname))
@@ -1162,6 +1294,7 @@ pub fn transformAlterTableCmd<'mcx>(
                 defnode,
                 cd,
                 &rv,
+                None,
                 &mut cxt,
                 &mut ckconstraints,
                 &mut nnconstraints,
@@ -1172,7 +1305,7 @@ pub fn transformAlterTableCmd<'mcx>(
                 unported("ALTER TABLE ADD COLUMN with PRIMARY KEY/UNIQUE/REFERENCES");
             }
             if !cxt.blist.is_nil() || !cxt.alist.is_nil() {
-                unported("ALTER TABLE ADD COLUMN serial (extra sequence statements)");
+                unported("ALTER TABLE ADD COLUMN serial/identity (extra statements)");
             }
             // SAFETY: parse tree is analyze-owned; no derived refs live.
             unsafe {
@@ -1277,6 +1410,24 @@ fn duplicate_key_column(colname: &str, primary: bool, _location: i32) -> Box<PgE
             format!("column \"{colname}\" appears twice in {what} constraint"),
         )
         .with_sqlstate(types_error::ERRCODE_DUPLICATE_COLUMN),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn column_syntax_error(
+    msg: core::fmt::Arguments<'_>,
+    src: Option<&str>,
+    location: i32,
+) -> Box<PgError> {
+    Box::new(
+        PgError::new(ERROR, msg.to_string())
+            .with_sqlstate(ERRCODE_SYNTAX_ERROR)
+            .with_cursor_position(parser_small1::parser_errposition_source(
+                src.map(str::as_bytes),
+                location,
+                mbutils::GetDatabaseEncoding(),
+            )),
     )
 }
 

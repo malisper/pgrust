@@ -647,7 +647,7 @@ fn ATExecAddColumn<'mcx>(
         crate::constraints::add_relation_new_constraints(
             mcx,
             &rel2,
-            &[(newattnum as AttrNumber, raw_default)],
+            &[(newattnum as AttrNumber, raw_default, col_def.generated)],
             &NodeList::nil(),
             query_string,
         )?;
@@ -864,12 +864,19 @@ fn ATExecColumnDefault<'mcx>(
     if find_inheritance_children_exist(mcx, rel.rd_id)? {
         unported("ATExecColumnDefault inheritance recursion");
     }
+    let att = rel.rd_att.attr(attnum as usize - 1);
+    if att.attidentity != 0 {
+        unported("ATExecColumnDefault on an identity column (C 42809 + SET GENERATED hint)");
+    }
+    if att.attgenerated != 0 {
+        unported("ATExecColumnDefault on a generated column (C 42809 + DROP EXPRESSION hint)");
+    }
     RemoveAttrDefault(mcx, rel.rd_id, attnum, false, cmd.def.is_some())?;
     if let Some(def) = cmd.def {
         crate::constraints::add_relation_new_constraints(
             mcx,
             rel,
-            &[(attnum, def)],
+            &[(attnum, def, 0)],
             &NodeList::nil(),
             query_string,
         )?;

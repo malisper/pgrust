@@ -516,6 +516,8 @@ pub struct Constraint<'mcx> {
     pub is_no_inherit: bool,
     pub raw_expr: Option<Node<'mcx>>,
     pub cooked_expr: Option<&'mcx str>,
+    pub generated_when: u8,
+    pub generated_kind: u8,
     pub nulls_not_distinct: bool,
     pub keys: NodeList<'mcx>,
     pub including: NodeList<'mcx>,

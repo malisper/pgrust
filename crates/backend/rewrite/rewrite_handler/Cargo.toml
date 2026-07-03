@@ -23,6 +23,9 @@ coerce = { path = "../../parser/coerce" }
 parse_expr = { path = "../../parser/parse_expr" }
 parser_small1 = { path = "../../parser/parser_small1" }
 format_type = { path = "../../utils/adt/format_type" }
+pg_depend = { path = "../../catalog/pg_depend" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
 
 [dev-dependencies]
 transam_seams = { path = "../../access/transam/transam_seams" }

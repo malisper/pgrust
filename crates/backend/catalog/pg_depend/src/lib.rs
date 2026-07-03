@@ -232,6 +232,7 @@ pub fn updateAclDependencies(
 
 const Anum_pg_depend_classid: usize = 1;
 const Anum_pg_depend_objid: usize = 2;
+const Anum_pg_depend_objsubid: usize = 3;
 const Anum_pg_depend_refclassid: usize = 4;
 const Anum_pg_depend_refobjid: usize = 5;
 const Anum_pg_depend_refobjsubid: usize = 6;
@@ -245,6 +246,17 @@ fn oid_key(attno: usize, oid: Oid) -> types_scan::scankey::ScanKeyData {
     key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
         .unwrap_or_else(|e| panic!("fmgr_info(oideq) failed: {e:?}"));
     key.sk_argument = Datum::from_oid(oid);
+    key
+}
+
+fn int4_key(attno: usize, v: i32) -> types_scan::scankey::ScanKeyData {
+    let mut key = types_scan::scankey::ScanKeyData::empty();
+    key.sk_attno = attno as types_core::AttrNumber;
+    key.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+    key.sk_collation = 0;
+    key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_INT4EQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(int4eq) failed: {e:?}"));
+    key.sk_argument = Datum::from_i32(v);
     key
 }
 
@@ -298,6 +310,50 @@ pub fn sequenceIsOwned<'mcx>(
     }
     genam::systable_endscan(mcx, scan)?;
     rel.close(types_rel::AccessShareLock)?;
+    Ok(result)
+}
+
+// getIdentitySequence (pg_depend.c) over getOwnedSequences_internal: the
+// INTERNAL pg_depend edge from the sequence to (relid, attnum). DIVERGENCE:
+// C also probes get_rel_relkind == RELKIND_SEQUENCE; INTERNAL deps of a
+// column from pg_class are only identity sequences in every ported lane.
+pub fn getIdentitySequence<'mcx>(mcx: Mcx<'mcx>, relid: Oid, attnum: i32) -> PgResult<Oid> {
+    let rel = table::table_open(mcx, DependRelationId, types_rel::AccessShareLock)?;
+    let keys = [
+        oid_key(Anum_pg_depend_refclassid, types_core::RELATION_RELATION_ID),
+        oid_key(Anum_pg_depend_refobjid, relid),
+        int4_key(Anum_pg_depend_refobjsubid, attnum),
+    ];
+    let mut scan = genam::systable_beginscan(mcx, &rel, DependReferenceIndexId, true, None, &keys)?;
+    let mut result = types_core::InvalidOid;
+    let desc = rel.descr();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        // SAFETY: aliases the slot-held image for this iteration's reads only.
+        let view = unsafe {
+            types_tuple::HeapTupleData::from_raw_parts(
+                tup.header_ptr().cast_mut(),
+                tup.t_len,
+                tup.t_self,
+                tup.t_tableOid,
+            )
+        };
+        if dep_attr(&view, Anum_pg_depend_classid, desc).as_oid()
+            == types_core::RELATION_RELATION_ID
+            && dep_attr(&view, Anum_pg_depend_objsubid, desc).as_i32() == 0
+            && dep_attr(&view, Anum_pg_depend_deptype, desc).as_i8()
+                == DependencyType::Internal.as_char()
+        {
+            if result != types_core::InvalidOid {
+                panic!("more than one owned sequence found for column {relid}.{attnum}");
+            }
+            result = dep_attr(&view, Anum_pg_depend_objid, desc).as_oid();
+        }
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(types_rel::AccessShareLock)?;
+    if result == types_core::InvalidOid {
+        panic!("no owned sequence found for identity column {relid}.{attnum}");
+    }
     Ok(result)
 }
 

@@ -416,6 +416,16 @@ fn run_program<'mcx>(
                 let nd = read_var(need_slot(&mut outer), *attnum);
                 write_out(*out, &mut regs, nd.value, nd.isnull);
             }
+            Step::NextValueExpr { seqid, seqtypid, out } => {
+                let newval = sequence_seams::nextval_internal::call(*seqid, false)?;
+                let d = match *seqtypid {
+                    types_core::INT2OID => Datum::from_i16(newval as i16),
+                    types_core::INT4OID => Datum::from_i32(newval as i32),
+                    types_core::INT8OID => Datum::from_i64(newval),
+                    other => panic!("unsupported sequence type {other}"),
+                };
+                write_out(*out, &mut regs, d, false);
+            }
             Step::ScanSysVar { attnum, out } => {
                 let mut isnull = false;
                 let d = exectuples::slot_getsysattr(need_slot(&mut scan), *attnum as i32, &mut isnull)?;

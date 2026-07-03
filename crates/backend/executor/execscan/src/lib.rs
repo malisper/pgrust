@@ -463,6 +463,7 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         }
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttypmod,
         NodeTag::T_CoerceViaIO => -1,
+        NodeTag::T_NextValueExpr => -1,
         tag => panic!("exprTypmod (nodeFuncs.c): node family {tag:?} not ported"),
     }
 }
@@ -517,7 +518,8 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_BoolExpr
         | NodeTag::T_NullTest
         | NodeTag::T_BooleanTest
-        | NodeTag::T_RowExpr => ::types_core::InvalidOid,
+        | NodeTag::T_RowExpr
+        | NodeTag::T_NextValueExpr => ::types_core::InvalidOid,
         NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().opcollid,
         tag => panic!("exprCollation (nodeFuncs.c): node family {tag:?} not ported"),
     }

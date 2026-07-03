@@ -42,7 +42,7 @@ pub fn build_base_rel_tlists<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
 pub(crate) fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<'mcx>>) {
     match node.node_tag() {
         NodeTag::T_Var => out.push(node),
-        NodeTag::T_Const => {}
+        NodeTag::T_Const | NodeTag::T_NextValueExpr => {}
         NodeTag::T_Aggref => {
             let a = node.as_aggref().unwrap();
             debug_assert!(a.agglevelsup == 0);

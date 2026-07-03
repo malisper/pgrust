@@ -8,6 +8,7 @@ publish.workspace = true
 mcx = { path = "../../../_support/mcx" }
 datum = { path = "../../../_support/types/datum" }
 types_core = { path = "../../../_support/types/types_core" }
+sequence_seams = { path = "../../commands/sequence_seams" }
 types_error = { path = "../../../_support/types/types_error" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 types_nodes = { path = "../../../_support/types/nodes" }

@@ -758,6 +758,9 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         | NodeTag::T_DistinctExpr => 16,
         NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,
         NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
+        NodeTag::T_NextValueExpr => {
+            node.as_variant::<::types_nodes::primnodes::NextValueExpr>().unwrap().typeId
+        }
         NodeTag::T_SubPlan => {
             use ::types_nodes::primnodes::SubLinkType;
             let sp = node.as_sub_plan().unwrap();
@@ -833,7 +836,8 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
                 },
             }
         }
-        NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_SQLValueFunction => {}
+        NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_SQLValueFunction
+        | NodeTag::T_NextValueExpr => {}
         // C expr_setup_walker: Aggref/WindowFunc args never eval in the
         // caller's econtext.
         NodeTag::T_Aggref | NodeTag::T_WindowFunc | NodeTag::T_GroupingFunc => {}
@@ -1170,6 +1174,16 @@ fn init_expr_rec<'mcx>(
         }
         NodeTag::T_RelabelType => {
             init_expr_rec(node.as_relabel_type().unwrap().arg, state, mcx, out, agg, params, sub)
+        }
+        NodeTag::T_NextValueExpr => {
+            let nve = node
+                .as_variant::<::types_nodes::primnodes::NextValueExpr>()
+                .unwrap();
+            push_step(
+                state,
+                mcx,
+                Step::NextValueExpr { seqid: nve.seqid, seqtypid: nve.typeId, out },
+            )
         }
         NodeTag::T_CoerceViaIO => init_coerce_via_io(node, state, mcx, out, agg, params, sub),
         NodeTag::T_ScalarArrayOpExpr => {

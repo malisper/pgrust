@@ -31,7 +31,7 @@ pub(crate) struct CookedCon<'mcx> {
 pub(crate) fn add_relation_new_constraints<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    new_col_defaults: &[(AttrNumber, Node<'mcx>)],
+    new_col_defaults: &[(AttrNumber, Node<'mcx>, u8)],
     new_constraints: &NodeList<'mcx>,
     query_string: &str,
 ) -> PgResult<PgVec<'mcx, CookedCon<'mcx>>> {
@@ -54,7 +54,7 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
     parse_relation::addNSItemToQuery(mcx, &mut pstate, nsitem, true, true, true)?;
     let mut cooked: PgVec<'mcx, CookedCon<'mcx>> = PgVec::new_in(mcx);
 
-    for &(attnum, raw_default) in new_col_defaults {
+    for &(attnum, raw_default, generated) in new_col_defaults {
         let att = rel.rd_att.attr(attnum as usize - 1);
         let attname = core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8");
         let expr = cook_default(
@@ -64,11 +64,16 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
             att.atttypid,
             att.atttypmod,
             attname,
+            generated,
+            rel,
         )?;
-        // C skips the pg_attrdef entry for a bare NULL Const default.
-        if let Some(c) = expr.as_variant::<types_nodes::primnodes::Const>() {
-            if c.constisnull {
-                continue;
+        // C skips the pg_attrdef entry for a bare NULL Const default (never
+        // for generated: cookDefault's coercion keeps the expression form).
+        if generated == 0 {
+            if let Some(c) = expr.as_variant::<types_nodes::primnodes::Const>() {
+                if c.constisnull {
+                    continue;
+                }
             }
         }
         let def_oid = pg_attrdef::StoreAttrDefault(mcx, rel, attnum, expr)?;
@@ -264,14 +269,36 @@ fn cook_default<'mcx>(
     atttypid: Oid,
     atttypmod: i32,
     attname: &str,
+    attgenerated: u8,
+    rel: &Relation<'mcx>,
 ) -> PgResult<Node<'mcx>> {
     let expr = parse_expr::transformExpr(
         mcx,
         pstate,
         raw_default,
-        ParseExprKind::EXPR_KIND_COLUMN_DEFAULT,
+        if attgenerated != 0 {
+            ParseExprKind::EXPR_KIND_GENERATED_COLUMN
+        } else {
+            ParseExprKind::EXPR_KIND_COLUMN_DEFAULT
+        },
     )?;
-    debug_assert!(!vars::contain_var_clause(expr)?);
+    if attgenerated != 0 {
+        check_nested_generated(pstate, rel, expr)?;
+        // DIVERGENCE: C runs contain_mutable_functions_after_planning
+        // (expression_planner inlines SQL functions first); this checks the
+        // un-inlined tree.
+        if clauses::contain_mutable_functions(expr)? {
+            return Err(Box::new(
+                PgError::new(
+                    types_error::ERROR,
+                    "generation expression is not immutable".to_string(),
+                )
+                .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
+            ));
+        }
+    } else {
+        debug_assert!(!vars::contain_var_clause(expr)?);
+    }
     let type_id = parse_expr::expr_type(expr);
     let expr = match coerce::coerce_to_target_type(
         mcx,
@@ -289,6 +316,71 @@ fn cook_default<'mcx>(
     };
     parse_collate::assign_expr_collations(mcx, pstate, expr)?;
     Ok(expr)
+}
+
+// check_nested_generated (heap.c): generation expressions may not reference
+// generated columns or the whole row. DIVERGENCE: C names the first offender
+// in expression order with a cursor; this walk reports in Var-visit order
+// without a cursor.
+fn check_nested_generated<'mcx>(
+    pstate: &ParseState<'_, 'mcx>,
+    rel: &Relation<'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<()> {
+    struct W<'a, 'p, 'mcx> {
+        pstate: &'a ParseState<'p, 'mcx>,
+        rel: &'a Relation<'mcx>,
+    }
+    impl<'a, 'p, 'mcx> nodes_core::NodeWalker<'mcx> for W<'a, 'p, 'mcx> {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            if let Some(v) = node.as_var() {
+                debug_assert!(v.varno == 1 && v.varlevelsup == 0);
+                let cursor = parser_small1::parser_errposition(
+                    self.pstate,
+                    v.location,
+                    mbutils::GetDatabaseEncoding(),
+                );
+                if v.varattno == 0 {
+                    return Err(Box::new(
+                        PgError::new(
+                            types_error::ERROR,
+                            "cannot use whole-row variable in column generation expression"
+                                .to_string(),
+                        )
+                        .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+                        .with_detail(
+                            "This would cause the generated column to depend on its own value.",
+                        )
+                        .with_cursor_position(cursor),
+                    ));
+                }
+                if v.varattno > 0
+                    && self.rel.rd_att.attr(v.varattno as usize - 1).attgenerated != 0
+                {
+                    let att = self.rel.rd_att.attr(v.varattno as usize - 1);
+                    let name =
+                        core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8");
+                    return Err(Box::new(
+                        PgError::new(
+                            types_error::ERROR,
+                            format!(
+                                "cannot use generated column \"{name}\" in column generation \
+                                 expression"
+                            ),
+                        )
+                        .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+                        .with_detail(
+                            "A generated column cannot reference another generated column.",
+                        )
+                        .with_cursor_position(cursor),
+                    ));
+                }
+            }
+            nodes_core::expression_tree_walker(node, self)
+        }
+    }
+    nodes_core::NodeWalker::visit(&mut W { pstate, rel }, expr)?;
+    Ok(())
 }
 
 fn cook_constraint<'mcx>(
@@ -404,8 +496,8 @@ pub(crate) fn set_relation_num_checks<'mcx>(
 pub(crate) fn collect_raw_defaults<'mcx>(
     mcx: Mcx<'mcx>,
     table_elts: &NodeList<'mcx>,
-) -> PgResult<PgVec<'mcx, (AttrNumber, Node<'mcx>)>> {
-    let mut out: PgVec<'mcx, (AttrNumber, Node<'mcx>)> = PgVec::new_in(mcx);
+) -> PgResult<PgVec<'mcx, (AttrNumber, Node<'mcx>, u8)>> {
+    let mut out: PgVec<'mcx, (AttrNumber, Node<'mcx>, u8)> = PgVec::new_in(mcx);
     for (i, elt) in table_elts.iter().enumerate() {
         if elt.node_tag() != NodeTag::T_ColumnDef {
             continue;
@@ -417,7 +509,7 @@ pub(crate) fn collect_raw_defaults<'mcx>(
             panic!("DefineRelation (tablecmds.c): cooked_default (inheritance) unported");
         }
         if let Some(raw) = cd.raw_default {
-            out.push(((i + 1) as AttrNumber, raw));
+            out.push(((i + 1) as AttrNumber, raw, cd.generated));
         }
     }
     Ok(out)

@@ -43,6 +43,8 @@ pg_attrdef = { path = "../../catalog/pg_attrdef" }
 pg_constraint = { path = "../../catalog/pg_constraint" }
 readfuncs = { path = "../../nodes/readfuncs" }
 clauses = { path = "../../optimizer/util/clauses" }
+nodes_core = { path = "../../nodes/nodes_core" }
+mbutils = { path = "../../utils/mb/mbutils" }
 execexpr = { path = "../../executor/execexpr" }
 rewrite_handler = { path = "../../rewrite/rewrite_handler" }
 catalog_toasting = { path = "../../catalog/catalog_toasting" }
@@ -71,7 +73,6 @@ trigger = { path = "../trigger" }
 exectuples = { path = "../../executor/exectuples" }
 tableam_vocab = { path = "../../access/table/tableam_vocab" }
 heapam = { path = "../../access/heap/heapam" }
-nodes_core = { path = "../../nodes/nodes_core" }
 types_slot = { path = "../../../_support/types/types_slot" }
 pg_type = { path = "../../catalog/pg_type" }
 commands_cluster = { path = "../cluster" }

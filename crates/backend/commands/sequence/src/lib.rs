@@ -355,7 +355,11 @@ struct InitParamsOut<'mcx> {
 
 // init_params, isInit half (the ALTER isInit=false lane is loud at the
 // AlterSequence gate below).
-fn init_params<'mcx>(mcx: Mcx<'mcx>, options: &NodeList<'mcx>) -> PgResult<InitParamsOut<'mcx>> {
+fn init_params<'mcx>(
+    mcx: Mcx<'mcx>,
+    options: &NodeList<'mcx>,
+    for_identity: bool,
+) -> PgResult<InitParamsOut<'mcx>> {
     let mut as_type: Option<&DefElem<'_>> = None;
     let mut start_value: Option<&DefElem<'_>> = None;
     let mut restart_value: Option<&DefElem<'_>> = None;
@@ -419,7 +423,11 @@ fn init_params<'mcx>(mcx: Mcx<'mcx>, options: &NodeList<'mcx>) -> PgResult<InitP
         let (newtypid, _) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
         if newtypid != INT2OID && newtypid != INT4OID && newtypid != INT8OID {
             return Err(err(
-                "sequence type must be smallint, integer, or bigint".into(),
+                if for_identity {
+                    "identity column type must be smallint, integer, or bigint".into()
+                } else {
+                    "sequence type must be smallint, integer, or bigint".into()
+                },
                 ERRCODE_INVALID_PARAMETER_VALUE,
             ));
         }
@@ -578,7 +586,7 @@ pub fn DefineSequence<'mcx>(mcx: Mcx<'mcx>, seq: &CreateSeqStmt<'mcx>) -> PgResu
         unported("temp/unlogged sequences");
     }
 
-    let p = init_params(mcx, &seq.options)?;
+    let p = init_params(mcx, &seq.options, seq.for_identity)?;
 
     let mut elts = NodeList::make1(mcx, make_column_def(mcx, "last_value", INT8OID)?)?;
     elts.lappend(mcx, make_column_def(mcx, "log_cnt", INT8OID)?)?;
@@ -1164,7 +1172,7 @@ mod tests {
     #[test]
     fn init_params_defaults_match_c() {
         let mcx = ctx().mcx();
-        let p = init_params(mcx, &NodeList::nil()).unwrap();
+        let p = init_params(mcx, &NodeList::nil(), false).unwrap();
         assert_eq!(p.form.seqtypid, INT8OID);
         assert_eq!(p.form.seqincrement, 1);
         assert_eq!(p.form.seqmin, 1);
@@ -1179,7 +1187,7 @@ mod tests {
     fn init_params_descending_defaults() {
         let mcx = ctx().mcx();
         let opts = NodeList::make1(mcx, defel(mcx, "increment", int_arg(mcx, -3))).unwrap();
-        let p = init_params(mcx, &opts).unwrap();
+        let p = init_params(mcx, &opts, false).unwrap();
         assert_eq!(p.form.seqmax, -1);
         assert_eq!(p.form.seqmin, i64::MIN);
         assert_eq!(p.form.seqstart, -1);
@@ -1194,14 +1202,14 @@ mod tests {
             ("start", 0, "START value (0) cannot be less than MINVALUE (1)"),
         ] {
             let opts = NodeList::make1(mcx, defel(mcx, name, int_arg(mcx, v))).unwrap();
-            let e = init_params(mcx, &opts).err().expect("error expected");
+            let e = init_params(mcx, &opts, false).err().expect("error expected");
             assert!(e.message().contains(frag), "{name}: {}", e.message());
             assert_eq!(e.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
         }
         let mut opts =
             NodeList::make1(mcx, defel(mcx, "increment", int_arg(mcx, 1))).unwrap();
         opts.lappend(mcx, defel(mcx, "increment", int_arg(mcx, 2))).unwrap();
-        let e = init_params(mcx, &opts).err().expect("error expected");
+        let e = init_params(mcx, &opts, false).err().expect("error expected");
         assert!(e.message().contains("conflicting or redundant options"));
     }
 
@@ -1211,7 +1219,7 @@ mod tests {
         let opts =
             NodeList::make1(mcx, defel(mcx, "maxvalue", int_arg(mcx, 9223372036854775806)))
                 .unwrap();
-        let p = init_params(mcx, &opts).unwrap();
+        let p = init_params(mcx, &opts, false).unwrap();
         assert_eq!(p.form.seqmax, 9223372036854775806);
     }
 
