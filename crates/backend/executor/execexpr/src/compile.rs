@@ -1567,7 +1567,7 @@ fn init_json_constructor<'mcx>(
         let nargs = ctor.args.len();
         let n = nargs.max(1);
         let slots: NonNull<::datum::NullableDatum> = alloc_array(mcx, n)?;
-        let values: NonNull<Datum> = alloc_array(mcx, n)?;
+        let values: NonNull<::datum::Datum> = alloc_array(mcx, n)?;
         let nulls: NonNull<bool> = alloc_array(mcx, n)?;
         let types: NonNull<::types_core::Oid> = alloc_array(mcx, n)?;
 

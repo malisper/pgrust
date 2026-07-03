@@ -71,7 +71,7 @@ fn mk_format<'mcx>(
     Ok(Node::mk_mut(mcx, JsonFormat { format_type, encoding, location })?.seal_ref())
 }
 
-fn jve<'a, 'mcx>(n: Node<'mcx>, what: &str) -> &'mcx JsonValueExpr<'mcx> {
+fn jve<'mcx>(n: Node<'mcx>, what: &str) -> &'mcx JsonValueExpr<'mcx> {
     n.as_json_value_expr().unwrap_or_else(|| panic!("{what}: expected JsonValueExpr"))
 }
 
@@ -326,7 +326,7 @@ fn transformJsonOutput<'mcx>(
 
     let tn_node = output.typeName.expect("typeName");
     let tn = tn_node.as_variant::<TypeName>().expect("TypeName");
-    let (typid, typmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, Some(pstate), tn)?;
+    let (typid, typmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, Some(&*pstate), tn)?;
 
     if tn.setof {
         return Err(err(
