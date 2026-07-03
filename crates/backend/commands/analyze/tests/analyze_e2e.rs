@@ -685,6 +685,7 @@ fn boot() {
     fd::init_seams();
     guc_tables::init_seams();
     guc::init_seams();
+    commands_analyze::init_seams();
     adt_bool::init_seams();
     adt_float::init_seams();
     fmgr_core::init_seams();
