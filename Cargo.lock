@@ -6085,6 +6085,7 @@ version = "0.0.0"
 dependencies = [
  "analyze_seams",
  "backend_status",
+ "catalog_namespace",
  "coerce",
  "datum",
  "elog",

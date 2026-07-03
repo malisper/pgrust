@@ -40,6 +40,7 @@ indexcmds_seams = { path = "../../commands/indexcmds_seams" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 namespace_seams = { path = "../../catalog/namespace_seams" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
 gram_core = { path = "../gram_core" }
 parser_seams = { path = "../parser_seams" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }

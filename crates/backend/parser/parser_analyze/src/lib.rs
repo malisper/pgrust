@@ -384,16 +384,15 @@ fn transformCreateTableAsStmt<'mcx>(
     Ok(result)
 }
 
-// isQueryUsingTempRelation (rewriteManip.c). C walks sublinks too via
-// query_tree_walker; temp relations inside sublink subselects are not
-// reachable through rtable alone — a hasSubLinks query is refused loudly
-// rather than checked incompletely.
+// isQueryUsingTempRelation (rewriteManip.c). C also walks sublinks via
+// query_tree_walker; that leg is loud, gated on a live temp namespace so it
+// cannot fire while no temp relation can exist in-session.
 fn is_query_using_temp_relation<'mcx>(
     mcx: Mcx<'mcx>,
     query: &Query<'mcx>,
 ) -> PgResult<bool> {
     use types_nodes::parsenodes::RTEKind;
-    if query.hasSubLinks {
+    if query.hasSubLinks && catalog_namespace::my_temp_namespace() != types_core::InvalidOid {
         panic!(
             "isQueryUsingTempRelation (rewriteManip.c): sublink walk unported \
              (query_tree_walker) — unit backend-commands-matview"
