@@ -888,6 +888,29 @@ fn node(out: &mut String, n: Node<'_>) {
         int_field(out, "strength", lc.strength as i32);
         int_field(out, "waitPolicy", lc.waitPolicy as i32);
         out.push('}');
+    } else if let Some(m) = n.as_merge_stmt() {
+        out.push_str("{MERGESTMT");
+        node_field(out, "relation", m.relation);
+        node_field(out, "sourceRelation", m.sourceRelation);
+        node_field(out, "joinCondition", m.joinCondition);
+        list_field(out, "mergeWhenClauses", &m.mergeWhenClauses);
+        node_field(out, "returningClause", m.returningClause);
+        node_field(out, "withClause", m.withClause);
+        out.push('}');
+    } else if let Some(w) = n.as_merge_when_clause() {
+        out.push_str("{MERGEWHENCLAUSE");
+        int_field(out, "matchKind", w.matchKind as i32);
+        int_field(out, "commandType", w.commandType as i32);
+        int_field(out, "override", w.r#override as i32);
+        node_field(out, "condition", w.condition);
+        list_field(out, "targetList", &w.targetList);
+        list_field(out, "values", &w.values);
+        out.push('}');
+    } else if let Some(rc) = n.as_returning_clause() {
+        out.push_str("{RETURNINGCLAUSE");
+        list_field(out, "options", &rc.options);
+        list_field(out, "exprs", &rc.exprs);
+        out.push('}');
     } else {
         panic!("tests_dump: unrendered node tag {:?}", n.node_tag());
     }

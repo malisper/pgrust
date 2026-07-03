@@ -276,6 +276,16 @@ fn assign_collations_walker<'mcx>(
                     .unwrap();
             }
         }
+        NodeTag::T_MergeAction => {
+            let a = node.as_merge_action().unwrap();
+            if let Some(q) = a.qual {
+                assign_collations_walker(q, &mut loccontext)?;
+            }
+            for tle in &a.targetList {
+                assign_collations_walker(tle, &mut loccontext)?;
+            }
+            return Ok(());
+        }
         NodeTag::T_Query => {
             let qtree = node.as_query().unwrap();
             let Some(first) = qtree.targetList.first() else {

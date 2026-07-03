@@ -888,6 +888,11 @@ seam_core::seam!(
     pub fn relation_has_sys_cache(relid: Oid) -> bool
 );
 
+seam_core::seam!(
+    // RelationSupportsSysCache (syscache.c): rel OR supporting-index oid.
+    pub fn relation_supports_sys_cache(relid: Oid) -> bool
+);
+
 // The pg_type columns lookup_type_cache copies into a TypeCacheEntry, plus
 // the typisdefined/typname pair its shell-type ereport needs.
 #[derive(Clone, Copy, Debug)]

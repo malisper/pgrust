@@ -1012,8 +1012,15 @@ fn examine_simple_variable<'mcx>(
     let rte = run.rte(varno as usize);
     match rte.rtekind {
         RTEKind::RTE_RELATION => {}
-        // C falls through with no stats for these RTE kinds.
-        RTEKind::RTE_FUNCTION | RTEKind::RTE_VALUES | RTEKind::RTE_JOIN => return Ok(None),
+        // C falls through with no stats for these RTE kinds. For SUBQUERY/CTE
+        // the drill into rel->subroot targetlists is unported — no stats is
+        // C's own fallback whenever that drill fails, so estimates only
+        // differ where the sub-SELECT output is itself a plain column.
+        RTEKind::RTE_FUNCTION
+        | RTEKind::RTE_VALUES
+        | RTEKind::RTE_JOIN
+        | RTEKind::RTE_SUBQUERY
+        | RTEKind::RTE_CTE => return Ok(None),
         other => panic!("examine_simple_variable (selfuncs.c): {other:?}; M2 lane"),
     }
     syscache_seams::lookup_pg_statistic_bundle::call(run.mcx, rte.relid, varattno, rte.inh)
