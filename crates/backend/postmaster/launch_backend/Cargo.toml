@@ -21,6 +21,8 @@ checkpointer = { path = "../checkpointer" }
 postmaster_startup = { path = "../startup" }
 walwriter = { path = "../walwriter" }
 postmaster_seams = { path = "../postmaster_seams" }
+interrupt = { path = "../interrupt" }
+procsignal = { path = "../../storage/ipc/procsignal" }
 ipc = { path = "../../storage/ipc/ipc" }
 libc = "0.2"
 

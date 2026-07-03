@@ -72,6 +72,16 @@ pub fn proc_exit(code: i32, my_pid: i32) -> ! {
     std::panic::resume_unwind(Box::new(ProcExitThread { code }));
 }
 
+// _exit(code)'s thread rendering: end this backend thread without running the
+// exit-callback stacks (quickdie/SignalHandlerForCrashExit contract). Stack
+// Drop glue still runs, unlike C's _exit — a documented divergence
+// (notes/crash-restart-design.md).
+pub fn exit_thread_raw(code: i32) -> ! {
+    PROC_EXIT_INPROGRESS.with(|c| c.set(true));
+    elog::config::set_proc_exit_inprogress(true);
+    std::panic::resume_unwind(Box::new(ProcExitThread { code }));
+}
+
 fn proc_exit_prepare(code: i32) {
     // Committed to exit: elog now promotes ERROR to FATAL.
     PROC_EXIT_INPROGRESS.with(|c| c.set(true));

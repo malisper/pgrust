@@ -67,6 +67,7 @@ pub fn CalculateShmemSize(cfg: &ProcGlobalConfig) -> PgResult<(usize, i32)> {
         pmsignal::PMSignalShmemSize(pmchild_seams::max_live_postmaster_children::call())?,
     )?;
     size = shmem::add_size(size, procsignal::ProcSignalShmemSize()?)?;
+    size = shmem::add_size(size, checkpointer::CheckpointerShmemSize(g::NBuffers()))?;
 
     size = shmem::add_size(size, TOTAL_ADDIN_REQUEST.get())?;
 
@@ -124,6 +125,7 @@ pub fn CreateOrAttachShmemStructs(cfg: &ProcGlobalConfig) -> PgResult<()> {
 
     pmsignal::PMSignalShmemInit(pmchild_seams::max_live_postmaster_children::call());
     procsignal::ProcSignalShmemInit();
+    checkpointer::CheckpointerShmemInit(g::NBuffers());
 
     Ok(())
 }

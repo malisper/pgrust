@@ -17,6 +17,7 @@ types_startup = { path = "../../../_support/types/types_startup" }
 types_guc = { path = "../../../_support/types/types_guc" }
 elog = { path = "../../utils/error/elog" }
 init_small = { path = "../../utils/init/init_small" }
+pg_path = { path = "../../../port/pg_path" }
 miscinit = { path = "../../utils/init/miscinit" }
 postinit = { path = "../../utils/init/postinit" }
 guc = { path = "../../utils/misc/guc" }
@@ -27,6 +28,10 @@ waiteventset = { path = "../../storage/ipc/waiteventset" }
 pmsignal = { path = "../../storage/ipc/pmsignal" }
 procsignal = { path = "../../storage/ipc/procsignal" }
 fd = { path = "../../storage/file/fd" }
+ipc = { path = "../../storage/ipc/ipc" }
+lwlock = { path = "../../storage/lmgr/lwlock" }
+dsm_core = { path = "../../storage/ipc/dsm_core" }
+varsup = { path = "../../access/transam/varsup" }
 transam_xlog = { path = "../../access/transam/transam_xlog" }
 launch_backend = { path = "../launch_backend" }
 libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
@@ -49,3 +54,11 @@ xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 types_dest = { path = "../../../_support/types/types_dest" }
 libc = "0.2"
+
+[dev-dependencies]
+pmchild = { path = "../pmchild" }
+shmem = { path = "../../storage/ipc/shmem" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+s_lock_seams = { path = "../../storage/lmgr/s_lock_seams" }
+pg_sema_seams = { path = "../../port/pg_sema_seams" }
+controldata_utils = { path = "../../../common/controldata_utils" }

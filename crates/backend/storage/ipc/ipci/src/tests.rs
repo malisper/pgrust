@@ -61,8 +61,7 @@ fn bringup() {
         init_seams();
     });
     guc::store::initialize_guc_options().unwrap();
-    // Unseeded global prng is the xoroshiro zero fixed point; postmaster's
-    // InitProcessGlobals seeds it before ipci runs.
+    // Unseeded prng = xoroshiro zero fixed point; InitProcessGlobals seeds it.
     pg_prng::global_prng(|prng| prng.seed(42));
     g::SetNBuffers(16);
     g::SetMaxConnections(100);

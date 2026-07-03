@@ -163,13 +163,17 @@ dependencies = [
 name = "adt_like"
 version = "0.1.0"
 dependencies = [
+ "adt_oracle_compat",
  "datum",
  "mbutils",
+ "mcx",
  "pg_locale",
  "stack_depth",
+ "syscache_seams",
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_tuple",
  "wchar",
 ]
 
@@ -225,9 +229,11 @@ dependencies = [
  "mcx",
  "pg_locale",
  "pg_locale_seams",
+ "syscache_seams",
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_tuple",
  "varlena",
  "wchar",
 ]
@@ -733,6 +739,7 @@ version = "0.1.0"
 dependencies = [
  "catcache_seams",
  "datum",
+ "fmgr_seams",
  "genam_seams",
  "hashfn",
  "indexam",
@@ -1206,6 +1213,55 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_slot",
+ "types_tuple",
+]
+
+[[package]]
+name = "execindexing"
+version = "0.1.0"
+dependencies = [
+ "bufmgr_seams",
+ "datum",
+ "exectuples",
+ "executils",
+ "freespace_seams",
+ "heapam",
+ "heapam_visibility",
+ "indexam",
+ "mcx",
+ "nbtree",
+ "nodeindexscan",
+ "predicate_seams",
+ "relation_seams",
+ "relcache_seams",
+ "seam_core",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nbtree",
+ "types_rel",
+ "types_relscan",
+ "types_scan",
+ "types_slot",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+ "xloginsert_seams",
+]
+
+[[package]]
+name = "execjunk"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "execscan",
+ "exectuples",
+ "executils",
+ "mcx",
+ "types_error",
+ "types_nodes",
  "types_slot",
  "types_tuple",
 ]
@@ -1784,6 +1840,7 @@ dependencies = [
  "guc_tables",
  "heapam_visibility",
  "heapam_visibility_seams",
+ "heaptoast_seams",
  "heaptuple",
  "init_small",
  "inval",
@@ -1916,8 +1973,68 @@ dependencies = [
 ]
 
 [[package]]
+name = "heapam_xlog"
+version = "0.1.0"
+dependencies = [
+ "bufmgr_seams",
+ "elog",
+ "freespace",
+ "heapam",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "types_tuple",
+ "xlogreader_seams",
+ "xlogutils",
+]
+
+[[package]]
 name = "heaptoast"
 version = "0.1.0"
+dependencies = [
+ "adt_int",
+ "adt_scalar",
+ "bufmgr_seams",
+ "catalog_seams",
+ "combocid_seams",
+ "datum",
+ "detoast",
+ "freespace_seams",
+ "genam",
+ "heapam",
+ "heapam_visibility_seams",
+ "heaptoast_seams",
+ "heaptuple",
+ "indexam",
+ "init_small",
+ "mcx",
+ "miscinit_seams",
+ "multixact_seams",
+ "nbt_compare",
+ "pglz",
+ "predicate_seams",
+ "procarray_seams",
+ "pruneheap_seams",
+ "relation_seams",
+ "relcache_seams",
+ "snapmgr",
+ "table",
+ "tableam_vocab",
+ "toast_internals_seams",
+ "toastdesc",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nbtree",
+ "types_rel",
+ "types_scan",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+ "xact_seams",
+ "xloginsert_seams",
+]
 
 [[package]]
 name = "heaptoast_seams"
@@ -2650,12 +2767,16 @@ dependencies = [
  "bufmgr_seams",
  "datum",
  "fmgr_core",
+ "freespace",
+ "heaptuple",
  "init_small",
  "lsyscache",
  "mcx",
  "nbt_compare",
  "predicate_seams",
+ "rmgr",
  "seam_core",
+ "tableam",
  "tidbitmap",
  "transam_xlog_seams",
  "types_core",
@@ -2670,6 +2791,7 @@ dependencies = [
  "types_tuple",
  "varlena",
  "xact",
+ "xloginsert_seams",
 ]
 
 [[package]]
@@ -2680,6 +2802,8 @@ dependencies = [
  "adt_int8",
  "datum",
  "execexpr",
+ "execgrouping",
+ "execscan",
  "exectuples",
  "executils",
  "lsyscache",
@@ -2867,6 +2991,7 @@ dependencies = [
  "fd",
  "freespace_seams",
  "gram_core",
+ "guc",
  "guc_tables",
  "heapam_visibility",
  "init_small",
@@ -2899,6 +3024,7 @@ dependencies = [
  "pruneheap_seams",
  "rel_vocab",
  "relation_seams",
+ "relcache_seams",
  "rewrite_handler",
  "rmgr",
  "s_lock_seams",
@@ -3561,6 +3687,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "nbtree",
+ "nodeagg",
  "parse_relation",
  "planner_seams",
  "relation_seams",
@@ -3809,6 +3936,8 @@ version = "0.0.0"
 dependencies = [
  "auth_seams",
  "autovacuum_seams",
+ "controldata_utils",
+ "dsm_core",
  "elog",
  "fd",
  "guc",
@@ -3816,6 +3945,7 @@ dependencies = [
  "guc_seams",
  "guc_tables",
  "init_small",
+ "ipc",
  "ipc_seams",
  "ipci_seams",
  "latch",
@@ -3823,11 +3953,15 @@ dependencies = [
  "launcher_seams",
  "libc",
  "libpq_pqsignal",
+ "lmgr_proc",
+ "lwlock",
  "mcx",
  "miscinit",
  "miscinit_seams",
  "pg_path",
  "pg_prng",
+ "pg_sema_seams",
+ "pmchild",
  "pmchild_seams",
  "pmsignal",
  "postgres_seams",
@@ -3835,6 +3969,8 @@ dependencies = [
  "postmaster_seams",
  "pqcomm_seams",
  "procsignal",
+ "s_lock_seams",
+ "shmem",
  "syslogger_seams",
  "timestamp_seams",
  "transam_xlog",
@@ -3845,6 +3981,7 @@ dependencies = [
  "types_guc",
  "types_startup",
  "types_storage",
+ "varsup",
  "waiteventset",
  "xlogrecovery_seams",
 ]
@@ -4204,15 +4341,22 @@ name = "pruneheap"
 version = "0.0.0"
 dependencies = [
  "bufmgr_seams",
+ "heapam",
+ "heapam_visibility",
+ "init_small",
  "mcx",
+ "pgstat",
  "procarray_seams",
  "pruneheap_seams",
+ "rmgr",
  "transam_xlog_seams",
  "types_core",
  "types_error",
  "types_rel",
+ "types_snapshot",
  "types_storage",
  "types_tuple",
+ "xloginsert_seams",
 ]
 
 [[package]]
@@ -4487,12 +4631,14 @@ version = "0.0.0"
 dependencies = [
  "clog",
  "elog",
+ "heapam_xlog",
  "mcx",
  "relmapper",
  "stringinfo",
  "transam_xlog_seams",
  "types_core",
  "types_error",
+ "xact",
  "xlogreader_seams",
 ]
 
@@ -4594,6 +4740,7 @@ dependencies = [
  "guc_tables",
  "hba",
  "heapam_visibility",
+ "heaptoast",
  "indexam",
  "init_small",
  "interrupt",
@@ -4824,6 +4971,7 @@ dependencies = [
  "types_error",
  "types_rel",
  "types_storage",
+ "types_tuple",
  "waitevent_seams",
  "xact_seams",
  "xlogutils",
@@ -4951,6 +5099,7 @@ name = "startup_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_error",
 ]
 
 [[package]]
@@ -5166,6 +5315,7 @@ dependencies = [
  "heapam",
  "heapam_handler",
  "mcx",
+ "smgr",
  "tableam_vocab",
  "tidbitmap",
  "types_core",
@@ -6151,10 +6301,12 @@ dependencies = [
  "miscinit",
  "origin_seams",
  "pglz",
+ "postgres_seams",
  "shmem",
  "transam_xlog",
  "types_core",
  "types_error",
+ "types_rel",
  "types_storage",
  "waitevent_seams",
  "xact",
@@ -6214,10 +6366,14 @@ dependencies = [
  "libc",
  "mcx",
  "miscinit",
+ "pmsignal",
  "ps_status_seams",
+ "rmgr",
+ "startup_seams",
  "transam_xlog",
  "types_core",
  "types_error",
+ "varsup",
  "xlogreader",
  "xlogreader_seams",
  "xlogrecovery_seams",

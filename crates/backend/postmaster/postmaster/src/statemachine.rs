@@ -1,7 +1,6 @@
 //! Shutdown sequencing: process_pm_shutdown_request, PostmasterStateMachine,
-//! child signaling, child launch, ExitPostmaster. Child bookkeeping crosses
-//! the pmchild seams; crash recovery (FatalError restart) and the reaper are
-//! named deferrals.
+//! HandleFatalError, the crash-reinit arm, child signaling, child launch,
+//! ExitPostmaster. Child bookkeeping crosses the pmchild seams.
 
 use std::sync::atomic::Ordering;
 
@@ -72,6 +71,48 @@ pub fn TerminateChildren(signal: i32) {
     {
         with_pm(|pm| pm.startup_status = StartupStatusEnum::Signaled);
     }
+}
+
+pub(crate) fn HandleFatalError(
+    reason: pmsignal::QuitSignalReason,
+    consider_sigabrt: bool,
+) -> PgResult<()> {
+    debug_assert!(with_pm(|pm| !pm.fatal_error));
+    debug_assert!(with_pm(|pm| pm.shutdown != ImmediateShutdown));
+
+    pmsignal::SetQuitSignalReason(reason);
+
+    let sigtosend = if consider_sigabrt && guc_tables::vars::send_abort_for_crash.read() {
+        libc::SIGABRT
+    } else {
+        libc::SIGQUIT
+    };
+    TerminateChildren(sigtosend);
+
+    with_pm(|pm| pm.fatal_error = true);
+
+    match with_pm(|pm| pm.pm_state) {
+        PMState::PM_INIT | PMState::PM_STARTUP => debug_assert!(false),
+        PMState::PM_RECOVERY
+        | PMState::PM_HOT_STANDBY
+        | PMState::PM_RUN
+        | PMState::PM_STOP_BACKENDS => UpdatePMState(PMState::PM_WAIT_BACKENDS),
+        PMState::PM_WAIT_BACKENDS => {}
+        PMState::PM_WAIT_XLOG_SHUTDOWN
+        | PMState::PM_WAIT_XLOG_ARCHIVAL
+        | PMState::PM_WAIT_CHECKPOINTER
+        | PMState::PM_WAIT_IO_WORKERS => {
+            ConfigurePostmasterWaitSet(false)?;
+            UpdatePMState(PMState::PM_WAIT_DEAD_END);
+        }
+        PMState::PM_WAIT_DEAD_END | PMState::PM_NO_CHILDREN => {}
+    }
+
+    if with_pm(|pm| pm.abort_start_time) == 0 {
+        with_pm(|pm| pm.abort_start_time = now_secs());
+    }
+    let _ = loc(2701, "HandleFatalError");
+    Ok(())
 }
 
 pub fn process_pm_shutdown_request() -> PgResult<()> {
@@ -221,7 +262,7 @@ pub fn PostmasterStateMachine() -> PgResult<()> {
                         UpdatePMState(PMState::PM_WAIT_XLOG_SHUTDOWN);
                     }
                     None => {
-                        panic!("PostmasterStateMachine: checkpointer launch failed; HandleFatalError path needs the reaper (backend-postmaster-pmchild)");
+                        HandleFatalError(pmsignal::QuitSignalReason::PMQUIT_FOR_CRASH, false)?;
                     }
                 }
             }
@@ -280,7 +321,37 @@ pub fn PostmasterStateMachine() -> PgResult<()> {
     }
 
     if with_pm(|pm| pm.fatal_error && pm.pm_state == PMState::PM_NO_CHILDREN) {
-        panic!("PostmasterStateMachine: crash reinitialization needs the reaper + shmem reset (backend-postmaster-pmchild, ipci)");
+        report(
+            LOG,
+            "all server processes terminated; reinitializing".into(),
+            3205,
+            "PostmasterStateMachine",
+        );
+
+        if guc_tables::vars::remove_temp_files_after_crash.read() {
+            fd::RemovePgTempFiles()?;
+        }
+        // ResetBackgroundWorkerCrashTimes: bgworker registry statically empty.
+
+        ipc::shmem_exit(1)?;
+
+        transam_xlog::LocalProcessControlFile(true)?;
+
+        crate::crash_reset::reset_shared_memory_after_crash();
+
+        UpdatePMState(PMState::PM_STARTUP);
+
+        crate::serverloop::maybe_adjust_io_workers();
+
+        let startup = StartChildProcess(BackendType::Startup);
+        debug_assert!(startup.is_some());
+        with_pm(|pm| {
+            pm.startup = startup;
+            pm.startup_status = StartupStatusEnum::Running;
+            pm.abort_start_time = 0;
+        });
+
+        ConfigurePostmasterWaitSet(true)?;
     }
 
     Ok(())

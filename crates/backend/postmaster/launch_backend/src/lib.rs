@@ -1,12 +1,11 @@
 //! launch_backend.c under the thread model: postmaster_child_launch spawns a
 //! backend THREAD. fork's implicit inheritance becomes an explicit snapshot
 //! (captured in the launcher, applied as the child's first act) followed by
-//! C's child-init sequence in order — EXEC_BACKEND-shaped, with
-//! save/restore_backend_variables as the C ancestor of `Inherited`.
-//! One-address-space divergences: ClosePostmasterPorts/dsm-detach are no-ops,
-//! the returned "pid" is a reserved synthetic MyProcPid, reaping is pmchild
-//! design, and session identity is MyProcPid/MyProcNumber, never the thread
-//! id (docs/strategy.md M5: backend state must stay schedulable).
+//! C's child-init sequence in order — EXEC_BACKEND-shaped (`Inherited` is
+//! save/restore_backend_variables). One-address-space divergences:
+//! ClosePostmasterPorts/dsm-detach are no-ops, the returned "pid" is a
+//! reserved synthetic MyProcPid, and session identity is MyProcPid/
+//! MyProcNumber, never the thread id (docs/strategy.md M5).
 
 use std::sync::atomic::{AtomicI32, Ordering};
 
@@ -18,6 +17,10 @@ mod tests;
 
 fn is_external_connection_backend(backend_type: BackendType) -> bool {
     backend_type == BackendType::Backend || backend_type == BackendType::WalSender
+}
+
+fn default_sigquit_handler() {
+    interrupt::SignalHandlerForCrashExit()
 }
 
 type ChildMainFn = fn(&StartupData) -> !;
@@ -230,8 +233,7 @@ pub fn postmaster_child_launch(
         .spawn(move || {
             inherited.apply();
 
-            // C records the base once in main() and forked children inherit
-            // it; a spawned thread's stack is its own, so record at spawn.
+            // C records the stack base once in main(); each thread owns its own.
             let _ = stack_depth::set_stack_base();
 
             if is_external_connection_backend(child_type) {
@@ -246,6 +248,11 @@ pub fn postmaster_child_launch(
             // ClosePostmasterPorts: no-op, shared fd table (module doc).
             miscinit::InitPostmasterChild(child_pid)
                 .unwrap_or_else(|e| panic!("InitPostmasterChild failed: {e:?}"));
+            // InitPostmasterChild's SIGQUIT default; miscinit can't reach interrupt.
+            procsignal::pqsignal_thread(
+                libc::SIGQUIT,
+                procsignal::ThreadSignalHandler::Simple(default_sigquit_handler),
+            );
 
             // !shmem_attach detach + context switch: no-ops (module doc).
             init_small::globals::SetMyPMChildSlot(child_slot);
@@ -258,8 +265,7 @@ pub fn postmaster_child_launch(
             })) else {
                 unreachable!("child main_fn returns !")
             };
-            // C wait-status encoding: proc_exit(code) == WIFEXITED(code<<8);
-            // any other unwind payload is a crash == WTERMSIG(SIGABRT).
+            // C wait status: ProcExitThread == WIFEXITED; other payloads == WTERMSIG(SIGABRT).
             let exitstatus = payload
                 .downcast_ref::<ipc::ProcExitThread>()
                 .map(|p| p.code << 8)

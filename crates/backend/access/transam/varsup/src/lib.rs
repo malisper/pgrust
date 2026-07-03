@@ -69,31 +69,57 @@ pub fn VarsupShmemSize() -> Size {
     core::mem::size_of::<TransamVariablesShared>()
 }
 
+fn boot_image() -> TransamVariablesShared {
+    TransamVariablesShared {
+        nextOid: AtomicU32::new(0),
+        oidCount: AtomicU32::new(0),
+        // DIVERGENCE: C memsets to zero and StartupXLOG seeds from the
+        // checkpoint; FirstNormal seeds stand in until xlog owns startup.
+        nextXid: AtomicU64::new(
+            FullTransactionId::from_epoch_and_xid(0, FirstNormalTransactionId).value,
+        ),
+        oldestXid: AtomicU32::new(FirstNormalTransactionId),
+        xidVacLimit: AtomicU32::new(0),
+        xidWarnLimit: AtomicU32::new(0),
+        xidStopLimit: AtomicU32::new(0),
+        xidWrapLimit: AtomicU32::new(0),
+        oldestXidDB: AtomicU32::new(0),
+        oldestCommitTsXid: AtomicU32::new(0),
+        newestCommitTsXid: AtomicU32::new(0),
+        latestCompletedXid: AtomicU64::new(
+            FullTransactionId::from_epoch_and_xid(0, FirstNormalTransactionId).value,
+        ),
+        xactCompletionCount: AtomicU64::new(1),
+        oldestClogXid: AtomicU32::new(FirstNormalTransactionId),
+    }
+}
+
 pub fn VarsupShmemInit() {
     TRANSAM_VARIABLES
-        .set(TransamVariablesShared {
-            nextOid: AtomicU32::new(0),
-            oidCount: AtomicU32::new(0),
-            // DIVERGENCE: C memsets to zero and StartupXLOG seeds from the
-            // checkpoint; FirstNormal seeds stand in until xlog owns startup.
-            nextXid: AtomicU64::new(
-                FullTransactionId::from_epoch_and_xid(0, FirstNormalTransactionId).value,
-            ),
-            oldestXid: AtomicU32::new(FirstNormalTransactionId),
-            xidVacLimit: AtomicU32::new(0),
-            xidWarnLimit: AtomicU32::new(0),
-            xidStopLimit: AtomicU32::new(0),
-            xidWrapLimit: AtomicU32::new(0),
-            oldestXidDB: AtomicU32::new(0),
-            oldestCommitTsXid: AtomicU32::new(0),
-            newestCommitTsXid: AtomicU32::new(0),
-            latestCompletedXid: AtomicU64::new(
-                FullTransactionId::from_epoch_and_xid(0, FirstNormalTransactionId).value,
-            ),
-            xactCompletionCount: AtomicU64::new(1),
-            oldestClogXid: AtomicU32::new(FirstNormalTransactionId),
-        })
+        .set(boot_image())
         .unwrap_or_else(|_| panic!("VarsupShmemInit called twice"));
+}
+
+/// Crash-cycle reset in place (notes/crash-restart-design.md); startup re-seeds
+/// from the checkpoint as after C's shmem re-create.
+pub fn VarsupShmemReset() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let live = TransamVariables();
+    let boot = boot_image();
+    live.nextOid.store(boot.nextOid.load(Relaxed), Relaxed);
+    live.oidCount.store(boot.oidCount.load(Relaxed), Relaxed);
+    live.nextXid.store(boot.nextXid.load(Relaxed), Relaxed);
+    live.oldestXid.store(boot.oldestXid.load(Relaxed), Relaxed);
+    live.xidVacLimit.store(boot.xidVacLimit.load(Relaxed), Relaxed);
+    live.xidWarnLimit.store(boot.xidWarnLimit.load(Relaxed), Relaxed);
+    live.xidStopLimit.store(boot.xidStopLimit.load(Relaxed), Relaxed);
+    live.xidWrapLimit.store(boot.xidWrapLimit.load(Relaxed), Relaxed);
+    live.oldestXidDB.store(boot.oldestXidDB.load(Relaxed), Relaxed);
+    live.oldestCommitTsXid.store(boot.oldestCommitTsXid.load(Relaxed), Relaxed);
+    live.newestCommitTsXid.store(boot.newestCommitTsXid.load(Relaxed), Relaxed);
+    live.latestCompletedXid.store(boot.latestCompletedXid.load(Relaxed), Relaxed);
+    live.xactCompletionCount.store(boot.xactCompletionCount.load(Relaxed), Relaxed);
+    live.oldestClogXid.store(boot.oldestClogXid.load(Relaxed), Relaxed);
 }
 
 #[cold]

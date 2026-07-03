@@ -355,10 +355,9 @@ pub fn quickdie() -> ! {
             .finish(loc(3000, "quickdie")),
     };
 
-    // C's _exit(2): no cleanup callbacks; one address space takes every
-    // backend, as C's crash/immediate-shutdown cycle does anyway.
-    // SAFETY: _exit has no preconditions.
-    unsafe { libc::_exit(2) }
+    // C's _exit(2), thread rendering: exit code 2 without exit callbacks; the
+    // postmaster's crash/immediate-shutdown cycle reaps it (WIFEXITED(2)).
+    ipc::exit_thread_raw(2)
 }
 
 pub fn FloatExceptionHandler() -> PgResult<()> {

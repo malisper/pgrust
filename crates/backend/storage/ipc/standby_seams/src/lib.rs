@@ -23,3 +23,13 @@ seam_core::seam!(
     // LogAccessExclusiveLock(dbOid, relOid) (standby.c).
     pub fn log_access_exclusive_lock(db_oid: types_core::Oid, rel_oid: types_core::Oid) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    // LogStandbySnapshot() (standby.c); bgwriter's periodic running-xacts record.
+    pub fn log_standby_snapshot() -> PgResult<types_core::XLogRecPtr>
+);
+
+seam_core::seam!(
+    // ShutdownRecoveryTransactionEnvironment() (standby.c).
+    pub fn shutdown_recovery_transaction_environment() -> PgResult<()>
+);
