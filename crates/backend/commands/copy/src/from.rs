@@ -58,6 +58,11 @@ pub struct CopyFromState<'mcx, 's> {
     pub(crate) attnames: PgVec<'mcx, NameData>,
     pub(crate) force_notnull_flags: PgVec<'mcx, bool>,
     pub(crate) force_null_flags: PgVec<'mcx, bool>,
+    // Per physical attribute; defmap lists attrs absent from attnumlist whose
+    // default fills the column, defaults[] carries per-row DEFAULT markers.
+    pub(crate) defexprs: PgVec<'mcx, Option<mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>>>,
+    pub(crate) defmap: PgVec<'mcx, usize>,
+    pub(crate) defaults: PgVec<'mcx, bool>,
     pub(crate) bytes_processed: u64,
 }
 
@@ -83,9 +88,6 @@ pub fn BeginCopyFrom<'mcx, 's>(
     let opts = ProcessCopyOptions(true, options, source_text)?;
     if opts.binary {
         unported("FORMAT binary (text-only lane)");
-    }
-    if opts.default_print.is_some() {
-        unported("DEFAULT marker (defaults rewrite gap)");
     }
     if opts.on_error == crate::CopyOnErrorChoice::Ignore {
         unported("ON_ERROR ignore (soft-error skip lane)");
@@ -153,15 +155,42 @@ pub fn BeginCopyFrom<'mcx, 's>(
         typioparams.push(typioparam);
         atttypmods.push(att.atttypmod);
     }
+    let mut defexprs: PgVec<'mcx, Option<mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>>> =
+        PgVec::new_in(mcx);
+    let mut defmap: PgVec<'mcx, usize> = PgVec::new_in(mcx);
+    let mut volatile_defexprs = false;
     for i in 0..num_phys_attrs {
         let att = tup_desc.attr(i);
         attnames.push(att.attname);
-        // build_column_default/ExecInitExpr are the rewrite gap: a column the
-        // input does not supply keeps NULL here, which silently diverges when
-        // a default exists.
-        if (att.atthasdef || att.attidentity != 0) && !attnumlist.contains(&(i as i16 + 1)) {
-            unported("FROM with omitted defaulted column (build_column_default lane)");
+        defexprs.push(None);
+        if att.attisdropped {
+            continue;
         }
+        let in_list = attnumlist.contains(&(i as i16 + 1));
+        if (opts.default_print.is_some() || !in_list)
+            && att.attgenerated == 0
+            && (att.atthasdef || att.attidentity != 0)
+        {
+            let defexpr = rewrite_handler::build_column_default(mcx, rel, i + 1)?;
+            let defexpr = clauses::eval_const_expressions(mcx, defexpr)?;
+            nodes_core::fix_opfuncids(defexpr)?;
+            let mut state = execexpr::exec_init_expr(mcx, Some(defexpr), execexpr::ParamBind::NONE)?
+                .expect("column default expression");
+            // SAFETY: default results land in the statement mcx, which
+            // outlives every next_copy_from call (C per-tuple econtext;
+            // WATCH: unbounded for very large loads, as the input values).
+            unsafe { state.arm_result_mcx_raw(mcx) };
+            defexprs[i] = Some(state);
+            if !in_list {
+                defmap.push(i);
+            }
+            if !volatile_defexprs {
+                volatile_defexprs = clauses::contain_volatile_functions_not_nextval(defexpr)?;
+            }
+        }
+    }
+    if volatile_defexprs {
+        unported("FROM with volatile default expressions (CIM_SINGLE lane)");
     }
     if tup_desc
         .constr
@@ -238,6 +267,9 @@ pub fn BeginCopyFrom<'mcx, 's>(
         attnames,
         force_notnull_flags,
         force_null_flags,
+        defexprs,
+        defmap,
+        defaults: vec_from_elem_in(mcx, false, num_phys_attrs),
         bytes_processed: 0,
     })
 }

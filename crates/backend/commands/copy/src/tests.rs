@@ -118,6 +118,9 @@ fn mk_state<'mcx>(
         attnames: PgVec::new_in(mcx),
         force_notnull_flags: PgVec::new_in(mcx),
         force_null_flags: PgVec::new_in(mcx),
+        defexprs: PgVec::new_in(mcx),
+        defmap: PgVec::new_in(mcx),
+        defaults: mcx::vec_from_elem_in(mcx, false, 8),
         bytes_processed: 0,
     }
 }

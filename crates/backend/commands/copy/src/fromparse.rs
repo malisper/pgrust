@@ -42,6 +42,16 @@ const PQ_LARGE_MESSAGE_LIMIT: i32 = 0x3fffffff - 1;
 
 #[cold]
 #[inline(never)]
+fn unexpected_default_marker(attname: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error("unexpected default marker in COPY data")
+            .with_sqlstate(ERRCODE_BAD_COPY_FILE_FORMAT)
+            .with_detail(format!("Column \"{attname}\" has no default value.")),
+    )
+}
+
+#[cold]
+#[inline(never)]
 fn unexpected_eof() -> Box<PgError> {
     Box::new(
         PgError::error("unexpected EOF on client connection with an open transaction")
@@ -534,6 +544,7 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
 
         let line: &[u8] = &self.line_buf;
         let null_print = self.opts.null_print.as_bytes();
+        let default_print = self.opts.default_print.map(str::as_bytes);
         let out = &mut self.attribute_buf;
         out.clear();
         self.raw_fields.clear();
@@ -628,6 +639,17 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
                 if raw_field == null_print {
                     op = field_start;
                     self.raw_fields.push(-1);
+                } else if fieldno < self.attnumlist.len()
+                    && default_print.is_some_and(|d| d == raw_field)
+                {
+                    let m = self.attnumlist[fieldno] as usize - 1;
+                    if self.defexprs[m].is_none() {
+                        return Err(unexpected_default_marker(&self.attname(m)));
+                    }
+                    self.defaults[m] = true;
+                    self.raw_fields.push(field_start.offset_from(dst) as i32);
+                    op.write(0);
+                    op = op.add(1);
                 } else {
                     if saw_non_ascii {
                         let fld = core::slice::from_raw_parts(
@@ -666,6 +688,7 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
 
         let line: &[u8] = &self.line_buf;
         let null_print = self.opts.null_print.as_bytes();
+        let default_print = self.opts.default_print.map(str::as_bytes);
         let out = &mut self.attribute_buf;
         out.clear();
         self.raw_fields.clear();
@@ -727,6 +750,15 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
                 out.truncate(field_start);
                 self.raw_fields.push(-1);
             } else {
+                if fieldno < self.attnumlist.len()
+                    && default_print.is_some_and(|d| d == &line[start..end])
+                {
+                    let m = self.attnumlist[fieldno] as usize - 1;
+                    if self.defexprs[m].is_none() {
+                        return Err(unexpected_default_marker(&self.attname(m)));
+                    }
+                    self.defaults[m] = true;
+                }
                 self.raw_fields.push(field_start as i32);
                 out.push(0);
             }
@@ -753,6 +785,9 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
         }
         for n in nulls.iter_mut() {
             *n = true;
+        }
+        for d in self.defaults.iter_mut() {
+            *d = false;
         }
 
         // C's COPY_HEADER_TRUE arm: consume and discard the header line.
@@ -811,19 +846,35 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
             } else {
                 nulls[m] = true;
             }
-            let in_fn: &mut FmgrInfo = &mut self.in_functions[i];
-            let ok = input_function_call_safe(
-                in_fn,
-                cstr,
-                self.typioparams[i],
-                self.atttypmods[i],
-                row_mcx,
-                None,
-                &mut values[m],
-            )?;
-            debug_assert!(ok);
+            if self.defaults[m] {
+                let state = self.defexprs[m].as_mut().expect("DEFAULT marker sans defexpr");
+                let mut slots = execexpr::EvalSlots { scan: None, inner: None, outer: None };
+                let r = execexpr::exec_eval_expr(state, &mut slots)?;
+                values[m] = r.value;
+                nulls[m] = r.isnull;
+            } else {
+                let in_fn: &mut FmgrInfo = &mut self.in_functions[i];
+                let ok = input_function_call_safe(
+                    in_fn,
+                    cstr,
+                    self.typioparams[i],
+                    self.atttypmods[i],
+                    row_mcx,
+                    None,
+                    &mut values[m],
+                )?;
+                debug_assert!(ok);
+            }
             self.cur_attidx = None;
             self.cur_attval_off = None;
+        }
+        for k in 0..self.defmap.len() {
+            let m = self.defmap[k];
+            let state = self.defexprs[m].as_mut().expect("defmap entry sans defexpr");
+            let mut slots = execexpr::EvalSlots { scan: None, inner: None, outer: None };
+            let r = execexpr::exec_eval_expr(state, &mut slots)?;
+            values[m] = r.value;
+            nulls[m] = r.isnull;
         }
         Ok(true)
     }
@@ -981,6 +1032,9 @@ pub mod bench_internals {
             attnames: PgVec::new_in(mcx),
             force_notnull_flags: PgVec::new_in(mcx),
             force_null_flags: PgVec::new_in(mcx),
+            defexprs: PgVec::new_in(mcx),
+            defmap: PgVec::new_in(mcx),
+            defaults: mcx::vec_from_elem_in(mcx, false, max_fields),
             bytes_processed: 0,
         }
     }
