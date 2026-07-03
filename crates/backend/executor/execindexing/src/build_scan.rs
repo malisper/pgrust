@@ -180,6 +180,7 @@ where
         }
     }
 
+    exectuples::exec_clear_tuple(&mut slot, mcx);
     heapam::heap_endscan(scan)?;
     Ok(reltuples)
 }

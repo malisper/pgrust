@@ -996,6 +996,9 @@ impl<'m> TuplesortData<'m> {
                     SortComparator::Int16 => qsort_tuple(&mut tuples, |a, b| {
                         ctx.comparetup_spec(SortComparator::Int16, a, b)
                     }),
+                    SortComparator::Uint32 => qsort_tuple(&mut tuples, |a, b| {
+                        ctx.comparetup_spec(SortComparator::Uint32, a, b)
+                    }),
                     SortComparator::TextC => qsort_tuple(&mut tuples, |a, b| {
                         ctx.comparetup_spec(SortComparator::TextC, a, b)
                     }),

@@ -11,6 +11,7 @@ const F_BTINT8SORTSUPPORT: Oid = 3131;
 const F_DATE_SORTSUPPORT: Oid = 3136;
 const F_TIMESTAMP_SORTSUPPORT: Oid = 3137;
 const F_BTTEXTSORTSUPPORT: Oid = 3255;
+const F_BTOIDSORTSUPPORT: Oid = 3134;
 
 /// C's `ssup->comparator` fn pointer as a closed enum: identity is switchable
 /// (tuplesort_sort_memtuples specialization dispatch) and calls monomorphize.
@@ -24,6 +25,8 @@ pub enum SortComparator {
     Int32,
     /// `btint2fastcmp` (btint2sortsupport).
     Int16,
+    /// `btoidfastcmp` (btoidsortsupport): unsigned 32-bit.
+    Uint32,
     /// `varstrfastcmp_c`, no abbreviation (bttextsortsupport, collate-is-C
     /// only); datums must point at live untoasted varlenas.
     TextC,
@@ -55,6 +58,10 @@ pub fn apply_cmp(cmp: SortComparator, x: Datum, y: Datum) -> i32 {
         }
         SortComparator::Int16 => {
             let (x, y) = (x.as_i16(), y.as_i16());
+            (x > y) as i32 - (x < y) as i32
+        }
+        SortComparator::Uint32 => {
+            let (x, y) = (x.as_u32(), y.as_u32());
             (x > y) as i32 - (x < y) as i32
         }
         // SAFETY: TextC contract (enum doc) — both datums are live untoasted
@@ -197,6 +204,7 @@ pub fn comparator_for_index_col(
         F_BTINT4SORTSUPPORT | F_DATE_SORTSUPPORT => SortComparator::Int32,
         F_BTINT8SORTSUPPORT | F_TIMESTAMP_SORTSUPPORT => SortComparator::SignedI64,
         F_BTINT2SORTSUPPORT => SortComparator::Int16,
+        F_BTOIDSORTSUPPORT => SortComparator::Uint32,
         F_BTTEXTSORTSUPPORT => {
             let locale = pg_locale::pg_newlocale_from_collation(collation)?;
             if !locale.collate_is_c {

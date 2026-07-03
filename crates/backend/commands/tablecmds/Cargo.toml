@@ -35,6 +35,8 @@ superuser = { path = "../../utils/misc/superuser" }
 init_small = { path = "../../utils/init/init_small" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
+catalog_index = { path = "../../catalog/catalog_index" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
 pg_attrdef = { path = "../../catalog/pg_attrdef" }
 pg_constraint = { path = "../../catalog/pg_constraint" }
 outfuncs = { path = "../../nodes/outfuncs" }

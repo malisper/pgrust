@@ -948,16 +948,19 @@ fn exec_insert<'mcx>(
     exectuples::exec_materialize_slot(slot, mcx)?;
     slot.base_mut().tts_tableOid = rel.rd_id;
 
-    if rel.rd_rel.relhasindex {
-        panic!(
-            "ExecInsert (nodeModifyTable.c): ExecOpenIndices/ExecInsertIndexTuples \
-             not ported (nbtree insert lane)"
-        );
+    if rel.rd_rel.relhasindex && mt.indexes.is_none() {
+        mt.indexes = Some(execindexing::ExecOpenIndices(mcx, rel, false)?);
     }
 
     exec_constraints(mcx, &mut mt.check_exprs, rel, slot)?;
 
     tableam::table_tuple_insert(mcx, rel, slot, output_cid, 0, None)?;
+
+    if let Some(indexes) = mt.indexes.as_mut() {
+        if indexes.num_indices() > 0 {
+            execindexing::ExecInsertIndexTuples(mcx, indexes, rel, slot)?;
+        }
+    }
 
     if mt.canSetTag {
         estate.es_processed += 1;

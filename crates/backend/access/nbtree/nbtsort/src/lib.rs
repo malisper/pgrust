@@ -124,7 +124,6 @@ fn leafbuild<'mcx>(
         pages_alloced: BTREE_METAPAGE + 1,
     };
 
-    // levels[i] is level i's in-progress page (C's btps_next chain).
     let mut levels: Vec<BTPageState<'mcx>> = Vec::new();
     while let Some(itup) = sortstate.getindextuple(true)? {
         if levels.is_empty() {
@@ -156,7 +155,6 @@ fn blnewpage(wstate: &mut BTWriteState<'_, '_>, level: u32) -> BulkWriteBuffer {
             btpo_cycleid: 0,
         },
     );
-    // Make the P_HIKEY line pointer appear allocated.
     let lower = page.as_ref().pd_lower();
     page.set_pd_lower(lower + core::mem::size_of::<ItemIdData>() as u16);
     buf
@@ -193,8 +191,6 @@ fn slideleft(page: &mut PageMut<'_>) {
     page.set_pd_lower(lower - core::mem::size_of::<ItemIdData>() as u16);
 }
 
-/// _bt_sortaddtup.
-///
 /// # Safety
 /// `itup` is a live index-tuple image of `itemsize` bytes.
 unsafe fn sortaddtup(
@@ -223,7 +219,6 @@ unsafe fn sortaddtup(
 }
 
 /// _bt_buildadd, truncextra fixed 0 (no posting lists).
-///
 /// # Safety
 /// `itup` is a live index-tuple image.
 unsafe fn buildadd<'mcx>(
@@ -254,7 +249,6 @@ unsafe fn buildadd<'mcx>(
         0
     };
     if pgspc < itupsz + tid_space || (pgspc < levels[level_idx].full && last_off > P_FIRSTKEY) {
-        // Finish off the old page: its last item becomes the high key.
         let obuf_blkno = levels[level_idx].blkno;
         let level = levels[level_idx].level;
         let nblkno = wstate.pages_alloced;
@@ -271,7 +265,6 @@ unsafe fn buildadd<'mcx>(
             let mut npage = page_mut_of(&mut nbuf);
             sortaddtup(&mut npage, olen as usize, optr, P_FIRSTKEY, level > 0)?;
 
-            // Move the last item into the high key slot on opage.
             opage.set_item_id(P_HIKEY, ii);
             let mut unused = ii;
             unused.set_unused();
@@ -323,7 +316,6 @@ unsafe fn buildadd<'mcx>(
             state.lowkey = Some(copied);
         }
 
-        // Sibling links; write out the old page.
         {
             let state = &mut levels[level_idx];
             let mut opage = page_mut_of(&mut state.buf);
@@ -339,7 +331,8 @@ unsafe fn buildadd<'mcx>(
         let obuf = core::mem::replace(&mut levels[level_idx].buf, nbuf);
         bulkwrite::smgr_bulk_write(&mut wstate.bulkstate, obuf_blkno, obuf, true)?;
         levels[level_idx].blkno = nblkno;
-        levels[level_idx].lastoff = P_HIKEY;
+        // The moved last item sits at P_FIRSTKEY on the new page.
+        levels[level_idx].lastoff = P_FIRSTKEY;
     }
 
     // First item on its entire level gets a minus-infinity low key.

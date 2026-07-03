@@ -815,20 +815,84 @@ fn btcostestimate(
         ip.indexinfo.as_ref().unwrap().pages
     };
 
+    let index_indexkeys = {
+        let PathNode::IndexPath(ip) = run.root.path(path_id) else { unreachable!() };
+        ip.indexinfo.as_ref().unwrap().indexkeys.clone()
+    };
+    let index_opcintype = {
+        let PathNode::IndexPath(ip) = run.root.path(path_id) else { unreachable!() };
+        ip.indexinfo.as_ref().unwrap().opcintype.clone()
+    };
+
     let mut index_bound_quals: mcx::PgVec<'_, RinfoId> = mcx::PgVec::new_in(run.mcx);
+    let mut index_skip_quals: mcx::PgVec<'_, RinfoId> = mcx::PgVec::new_in(run.mcx);
     let mut indexcol: i32 = 0;
     let mut eq_qual_here = false;
-    let num_sa_scans = 1.0f64;
+    let mut found_array = false;
+    let mut num_sa_scans = 1.0f64;
 
-    for iclause in indexclauses.iter() {
+    'buildquals: for iclause in indexclauses.iter() {
         if indexcol < iclause.indexcol as i32 {
-            // A column gap means nbtree would consider skip arrays.
+            // nbtree backfills skip arrays for index columns lacking an '='
+            // qual (selfuncs.c:7397 gap arm).
+            let num_sa_scans_prev_cols = num_sa_scans;
             if eq_qual_here {
                 indexcol += 1;
+                index_skip_quals.clear();
             }
             eq_qual_here = false;
-            if indexcol < iclause.indexcol as i32 {
-                panic!("btcostestimate (selfuncs.c): skip-array column gap; M2 skip-scan lane");
+            while indexcol < iclause.indexcol as i32 {
+                found_array = true;
+                let attno = index_indexkeys[indexcol as usize];
+                if attno == 0 {
+                    panic!("btcostestimate (selfuncs.c): expression index column; M2 lane");
+                }
+                // examine_indexcol_variable, simple-column arm.
+                let rte = run.rte(index_rel_relid as usize);
+                let stats = syscache_seams::lookup_pg_statistic_bundle::call(
+                    run.mcx,
+                    rte.relid,
+                    attno as i16,
+                    rte.inh,
+                )?;
+                let vardata = VariableStatData {
+                    var: None,
+                    rel: Some(index_rel),
+                    vartype: index_opcintype[indexcol as usize],
+                    isunique: false,
+                    stats,
+                };
+                let (mut ndistinct, isdefault) = get_variable_numdistinct(run, &vardata);
+                // btcost_correlation-in-passing arm folds into the shared
+                // leading-column correlation block below (same stats row).
+                if isdefault {
+                    num_sa_scans = num_sa_scans_prev_cols;
+                    break 'buildquals;
+                }
+                if !index_skip_quals.is_empty() {
+                    let ndistinctfrac = crate::clausesel::clauselist_selectivity(
+                        run,
+                        &index_skip_quals,
+                        index_rel_relid,
+                        JOIN_INNER,
+                        None,
+                    )?;
+                    if ndistinctfrac < 0.005 {  // DEFAULT_RANGE_INEQ_SEL
+                        num_sa_scans = num_sa_scans_prev_cols;
+                        break 'buildquals;
+                    }
+                    ndistinct = (ndistinct * ndistinctfrac).round_ties_even().max(1.0);
+                }
+                if index_skip_quals.is_empty() {
+                    ndistinct += 1.0;
+                }
+                num_sa_scans *= ndistinct;
+                if (index_pages as f64) < num_sa_scans {
+                    num_sa_scans = num_sa_scans_prev_cols;
+                    break 'buildquals;
+                }
+                indexcol += 1;
+                index_skip_quals.clear();
             }
         }
         debug_assert!(indexcol == iclause.indexcol as i32);
@@ -846,12 +910,16 @@ fn btcostestimate(
                 eq_qual_here = true;
             }
             index_bound_quals.push(rid);
+            if !eq_qual_here && indexcol < index_nkeycolumns - 1 {
+                index_skip_quals.push(rid);
+            }
         }
     }
 
     let num_index_tuples = if index_unique
         && indexcol == index_nkeycolumns - 1
         && eq_qual_here
+        && !found_array
     {
         1.0
     } else {
@@ -863,7 +931,7 @@ fn btcostestimate(
             None,
         )?;
         let nit = btree_selectivity * index_rel_tuples;
-        debug_assert!(num_sa_scans == 1.0);
+        num_sa_scans = num_sa_scans.min((index_pages as f64 * 0.3333333).ceil()).max(1.0);
         (nit / num_sa_scans).round_ties_even()
     };
 
