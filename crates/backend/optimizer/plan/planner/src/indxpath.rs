@@ -55,9 +55,12 @@ pub fn create_index_paths<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgRes
         ec.ec_members.len() > 1 || ec.ec_has_const
     });
     assert!(
-        run.root.rel(rel).joininfo.is_empty() && !ec_can_derive,
-        "match_join_clauses_to_index/match_eclass_clauses_to_index (indxpath.c): M2 join lane"
+        !ec_can_derive,
+        "match_eclass_clauses_to_index (indxpath.c): M2 join lane"
     );
+    // DIVERGENCE: match_join_clauses_to_index is skipped -- it only yields
+    // parameterized index paths, which every consumer on this lane rejects
+    // loudly; plan choice (not results) can differ where one would win.
 
     let mut bitindexpaths: PgVec<'mcx, PathId> = PgVec::new_in(run.mcx);
     let nindexes = run.root.rel(rel).indexlist.len();
