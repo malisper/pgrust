@@ -126,6 +126,7 @@ backend_status = { path = "../../backend/utils/activity/backend_status" }
 waitevent = { path = "../../backend/utils/activity/waitevent" }
 pgstat = { path = "../../backend/utils/activity/pgstat" }
 adt_acl = { path = "../../backend/utils/adt/acl" }
+adt_misc = { path = "../../backend/utils/adt/adt_misc" }
 adt_timestamp = { path = "../../backend/utils/adt/adt_timestamp" }
 pgtz = { path = "../../backend/timezone/pgtz" }
 adt_bool = { path = "../../backend/utils/adt/bool" }

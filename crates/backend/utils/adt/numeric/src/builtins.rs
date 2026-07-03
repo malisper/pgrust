@@ -577,6 +577,55 @@ pub fn fc_int8_avg(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     img_result(fcinfo, &img)
 }
 
+
+pub fn fc_numerictypmodin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    use ::types_error::{PgError, ERRCODE_INVALID_PARAMETER_VALUE};
+    let mcx = fcinfo.result_mcx();
+    // SAFETY: catalog arg 0 of numerictypmodin is a non-null cstring[] datum
+    // (strict fn); typenameTypeMod builds it flat (never toasted).
+    let arr = unsafe { fcinfo.arg_varlena_raw(0) };
+    let tl = ::arrayfuncs::array_get_integer_typmods(mcx, arr)?;
+
+    #[cold]
+    #[inline(never)]
+    fn param_err(msg: String) -> PgResult<Datum> {
+        Err(Box::new(
+            PgError::error(msg).with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        ))
+    }
+
+    let typmod = match tl.len() {
+        2 => {
+            if tl[0] < 1 || tl[0] > crate::NUMERIC_MAX_PRECISION {
+                return param_err(format!(
+                    "NUMERIC precision {} must be between 1 and {}",
+                    tl[0], crate::NUMERIC_MAX_PRECISION
+                ));
+            }
+            if tl[1] < crate::NUMERIC_MIN_SCALE || tl[1] > crate::NUMERIC_MAX_SCALE {
+                return param_err(format!(
+                    "NUMERIC scale {} must be between {} and {}",
+                    tl[1], crate::NUMERIC_MIN_SCALE, crate::NUMERIC_MAX_SCALE
+                ));
+            }
+            crate::ops::make_numeric_typmod(tl[0], tl[1])
+        }
+        1 => {
+            if tl[0] < 1 || tl[0] > crate::NUMERIC_MAX_PRECISION {
+                return param_err(format!(
+                    "NUMERIC precision {} must be between 1 and {}",
+                    tl[0], crate::NUMERIC_MAX_PRECISION
+                ));
+            }
+            crate::ops::make_numeric_typmod(tl[0], 0)
+        }
+        _ => {
+            return param_err(String::from("invalid NUMERIC type modifier"));
+        }
+    };
+    Ok(Datum::from_i32(typmod))
+}
+
 const fn b(foid: ::types_core::Oid, name: &'static str, nargs: i16, strict: bool, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict, retset: false, func }
 }
@@ -645,6 +694,7 @@ pub const NUMERIC_BUILTINS: &[FmgrBuiltin] = &[
     b(2596, "numeric_stddev_pop", 1, false, fc_numeric_stddev_pop),
     b(2746, "int8_avg_accum", 2, false, fc_int8_avg_accum),
     b(2858, "numeric_avg_accum", 2, false, fc_numeric_avg_accum),
+    b(2917, "numerictypmodin", 1, true, fc_numerictypmodin),
     b(3178, "numeric_sum", 1, false, fc_numeric_sum),
     b(3388, "numeric_poly_sum", 1, false, fc_numeric_poly_sum),
     b(3389, "numeric_poly_avg", 1, false, fc_numeric_poly_avg),

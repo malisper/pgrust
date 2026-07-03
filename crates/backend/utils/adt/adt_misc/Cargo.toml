@@ -1,22 +1,17 @@
 [package]
-name = "arrayfuncs"
+name = "adt_misc"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-mcx = { path = "../../../../_support/mcx" }
 datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+funcapi = { path = "../../fmgr/funcapi" }
+heaptuple = { path = "../../../access/common/heaptuple" }
 lsyscache = { path = "../../cache/lsyscache" }
-stringinfo = { path = "../../../../_support/types/stringinfo" }
-pqformat = { path = "../../../libpq/pqformat" }
-detoast_seams = { path = "../../../access/common/detoast_seams" }
-arrayutils = { path = "../arrayutils" }
-numutils = { path = "../numutils" }
-
-[dev-dependencies]
-adt_int = { path = "../int" }
+parse_utilcmd = { path = "../../../parser/parse_utilcmd" }

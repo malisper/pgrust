@@ -347,6 +347,7 @@ members = [
     "crates/backend/storage/smgr/smgr",
     "crates/backend/storage/smgr/bulkwrite",
     "crates/backend/utils/adt/scalar_seams",
+    "crates/backend/utils/adt/adt_misc",
     "crates/backend/utils/adt/bool",
     "crates/backend/utils/adt/char",
     "crates/backend/utils/adt/scalar",
