@@ -50,3 +50,30 @@ pub fn NamespaceCreate<'mcx>(
     pg_depend::recordDependencyOnOwner(NAMESPACE_RELATION_ID, nspoid, ownerId);
     Ok(nspoid)
 }
+
+// RemoveSchemaById (schemacmds.c), hosted here: schemacmds reaches
+// catalog_dependency (cycle).
+pub fn RemoveSchemaById<'mcx>(mcx: Mcx<'mcx>, schemaOid: Oid) -> PgResult<()> {
+    let rel = table::table_open(mcx, NAMESPACE_RELATION_ID, RowExclusiveLock)?;
+    let mut key = types_scan::scankey::ScanKeyData::empty();
+    key.sk_attno = Anum_pg_namespace_oid;
+    key.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+    key.sk_collation = 0;
+    key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
+    key.sk_argument = Datum::from_oid(schemaOid);
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &rel,
+        NamespaceOidIndexId,
+        true,
+        None,
+        core::slice::from_ref(&key),
+    )?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for namespace {schemaOid}"));
+    let tid = tup.t_self;
+    catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(RowExclusiveLock)
+}

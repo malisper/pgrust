@@ -1415,6 +1415,7 @@ dependencies = [
  "pg_attrdef",
  "pg_constraint",
  "pg_depend",
+ "pg_namespace",
  "pg_type",
  "rewrite_remove",
  "sequence_seams",
@@ -6504,6 +6505,8 @@ dependencies = [
  "catalog",
  "catalog_indexing",
  "datum",
+ "fmgr_seams",
+ "genam",
  "heaptuple",
  "mcx",
  "pg_depend",
@@ -6512,6 +6515,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_rel",
+ "types_scan",
  "types_tuple",
 ]
 
