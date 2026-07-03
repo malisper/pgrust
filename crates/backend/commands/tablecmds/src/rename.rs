@@ -161,10 +161,22 @@ fn rename_constraint_internal<'mcx>(
         pg_constraint::CONSTRAINT_CHECK | pg_constraint::CONSTRAINT_NOTNULL
     ) && !con.connoinherit
     {
-        if find_inheritance_children_exist(mcx, myrelid)? {
-            unported("rename_constraint_internal inheritance recursion");
+        if recurse {
+            if find_inheritance_children_exist(mcx, myrelid)? {
+                unported("rename_constraint_internal inheritance recursion");
+            }
+        } else if find_inheritance_children_exist(mcx, myrelid)? {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "inherited constraint \"{oldconname}\" must be renamed in child \
+                         tables too"
+                    ),
+                )
+                .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+            ));
         }
-        let _ = recurse;
         if con.coninhcount > 0 {
             return Err(Box::new(
                 PgError::new(

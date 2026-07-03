@@ -316,7 +316,10 @@ fn ATPrepCmd<'mcx>(
         | AlterTableType::AT_EnableAlwaysRule
         | AlterTableType::AT_EnableReplicaRule
         | AlterTableType::AT_DisableRule => AT_PASS_MISC,
-        AlterTableType::AT_SetStatistics => AT_PASS_MISC,
+        AlterTableType::AT_SetStatistics => {
+            set_recurse();
+            AT_PASS_MISC
+        }
         AlterTableType::AT_SetStorage => {
             set_recurse();
             AT_PASS_MISC
@@ -383,6 +386,9 @@ fn ATRewriteCatalogs<'mcx>(
                             newcmd.subtype = AlterTableType::AT_AddIndex;
                             newcmd.def = Some(istmt);
                             tab.subcmds[AT_PASS_ADD_INDEX].lappend(mcx, newcmd.seal())?;
+                        }
+                        ConstrType::CONSTR_NOTNULL if pass == AT_PASS_ADD_CONSTR => {
+                            tab.subcmds[AT_PASS_COL_ATTRS].lappend(mcx, cnode)?;
                         }
                         ConstrType::CONSTR_NOTNULL => {
                             ATExecAddNotNullConstraint(mcx, tab, &rel, constr)?;
@@ -1039,6 +1045,18 @@ fn ATExecDropNotNull<'mcx>(
     if attnum <= 0 {
         return Err(cannot_alter_system_column(col_name));
     }
+    if rel.rd_att.attr(attnum as usize - 1).attidentity != 0 {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!("column \"{col_name}\" of relation \"{relname}\" is an identity column"),
+            )
+            .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
+        ));
+    }
+    if rel.rd_rel.relispartition {
+        unported("ATExecDropNotNull on a partition");
+    }
     let con = pg_constraint::findNotNullConstraintAttnum(mcx, rel.rd_id, attnum)?
         .unwrap_or_else(|| {
             panic!(
@@ -1074,19 +1092,26 @@ fn check_notnull_droppable<'mcx>(
     attnum: AttrNumber,
     col_name: &str,
 ) -> PgResult<()> {
-    let indexes = relcache::RelationGetIndexList(mcx, rel.rd_id)?;
-    for &indexoid in indexes.iter() {
-        let (isprimary, isreplident, keys) = pg_index_shape(mcx, indexoid)?;
-        if !keys.contains(&attnum) {
-            continue;
-        }
-        if isprimary {
+    // C reads the rd_pkindex/rd_replidindex bitmaps (key columns only), so the
+    // guards see only what RelationGetIndexList validated (indisvalid etc.).
+    relcache::RelationGetIndexList(mcx, rel.rd_id)?;
+    let (pkindex, replidindex) = {
+        let cached = rel.rd_indexlist.borrow();
+        let l = cached.as_ref().expect("rd_indexlist populated by RelationGetIndexList");
+        (l.pkindex, l.replidindex)
+    };
+    if pkindex != InvalidOid {
+        let (_, _, keys) = pg_index_shape(mcx, pkindex)?;
+        if keys.contains(&attnum) {
             return Err(Box::new(
                 PgError::new(ERROR, format!("column \"{col_name}\" is in a primary key"))
                     .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
             ));
         }
-        if isreplident {
+    }
+    if replidindex != InvalidOid {
+        let (_, _, keys) = pg_index_shape(mcx, replidindex)?;
+        if keys.contains(&attnum) {
             return Err(Box::new(
                 PgError::new(
                     ERROR,
@@ -1274,9 +1299,10 @@ fn create_notnull_constraint<'mcx>(
     Ok(())
 }
 
-// ATPrepAddPrimaryKey: queue an ADD CONSTRAINT NOT NULL subcommand (pass
-// AT_PASS_COL_ATTRS, as C's ATParseTransformCmd reschedule lands) for every
-// PK column lacking a compatible not-null constraint.
+// ATPrepAddPrimaryKey: queue an ADD CONSTRAINT NOT NULL subcommand into
+// AT_PASS_ADD_CONSTR (C's inner ATPrepCmd) for every PK column lacking a
+// compatible not-null constraint; exec reschedules it to AT_PASS_COL_ATTRS
+// exactly where C's ATParseTransformCmd does, preserving within-pass order.
 fn ATPrepAddPrimaryKey<'mcx>(
     mcx: Mcx<'mcx>,
     tab: &mut AlteredTableInfo<'mcx>,
@@ -1314,7 +1340,7 @@ fn ATPrepAddPrimaryKey<'mcx>(
         newcmd.subtype = AlterTableType::AT_AddConstraint;
         newcmd.recurse = true;
         newcmd.def = Some(nn.seal());
-        tab.subcmds[AT_PASS_COL_ATTRS].lappend(mcx, newcmd.seal())?;
+        tab.subcmds[AT_PASS_ADD_CONSTR].lappend(mcx, newcmd.seal())?;
     }
     Ok(())
 }
@@ -1478,6 +1504,8 @@ fn dropconstraint_internal<'mcx>(
     }
     if con.contype == pg_constraint::CONSTRAINT_FOREIGN && con.confrelid != rel.rd_id {
         // Must match the lock RemoveTriggerById takes on the referenced rel.
+        // C CheckAlterTableIsSafe = CheckTableNotInUse + RELATION_IS_OTHER_TEMP
+        // (const-false single-backend).
         let frel = table::table_open(mcx, con.confrelid, AccessExclusiveLock)?;
         catalog_heap::CheckTableNotInUse(&frel, "ALTER TABLE")?;
         frel.close(NoLock)?;
@@ -1542,11 +1570,25 @@ fn ATExecSetStatistics<'mcx>(
             )?;
         }
     }
+    if cmd.recurse && find_inheritance_children_exist(mcx, rel.rd_id)? {
+        unported("ATExecSetStatistics inheritance recursion");
+    }
     let Some((attnum, _)) = attname_lookup(mcx, rel.rd_id, col_name, false)? else {
         return Err(undefined_column(col_name, &relname));
     };
     if attnum <= 0 {
         return Err(cannot_alter_system_column(col_name));
+    }
+    if rel.rd_att.attr(attnum as usize - 1).attgenerated == b'v' as i8 {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "cannot alter statistics on virtual generated column \"{col_name}\""
+                ),
+            )
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
     }
     update_pg_attribute_nullable(
         mcx,
@@ -1573,6 +1615,9 @@ fn ATExecSetStorage<'mcx>(
         .as_string()
         .expect("AT_SetStorage String")
         .sval;
+    if cmd.recurse && find_inheritance_children_exist(mcx, rel.rd_id)? {
+        unported("ATExecSetStorage inheritance recursion");
+    }
     let Some((attnum, _)) = attname_lookup(mcx, rel.rd_id, col_name, false)? else {
         return Err(undefined_column(col_name, &relname));
     };
@@ -1634,14 +1679,20 @@ fn set_index_storage_properties<'mcx>(
 ) -> PgResult<()> {
     let indexes = relcache::RelationGetIndexList(mcx, rel.rd_id)?;
     for &indexoid in indexes.iter() {
+        // C index_open(lockmode); AT_SetStorage's lock level is AEL.
+        let indrel = relation_seams::relation_open::call(mcx, indexoid, AccessExclusiveLock)?;
         let keys = pg_index_all_keys(mcx, indexoid)?;
-        let Some(pos) = keys.iter().position(|&k| k == attnum) else { continue };
+        let Some(pos) = keys.iter().position(|&k| k == attnum) else {
+            indrel.close(AccessExclusiveLock)?;
+            continue;
+        };
         update_pg_attribute(
             mcx,
             indexoid,
             (pos + 1) as AttrNumber,
             &[(Anum_pg_attribute_attstorage, Datum::from_i8(newstorage as i8))],
         )?;
+        indrel.close(AccessExclusiveLock)?;
     }
     Ok(())
 }

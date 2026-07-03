@@ -3,7 +3,7 @@
 // opclasses/collations, WITH options, TABLESPACE, exclusion/WITHOUT OVERLAPS,
 // partitioned tables, non-btree/hash AMs.
 use catalog_index::{
-    IndexCreateExtra, BTREE_AM_OID, INDEX_CONSTR_CREATE_MARK_AS_PRIMARY,
+    IndexCreateExtra, BTREE_AM_OID,
     INDEX_CREATE_ADD_CONSTRAINT, INDEX_CREATE_IS_PRIMARY,
 };
 use datum::Datum;
@@ -286,7 +286,7 @@ pub fn DefineIndex<'mcx>(
         &IndexCreateExtra {
             flags: (if stmt.primary { INDEX_CREATE_IS_PRIMARY } else { 0 })
                 | (if stmt.isconstraint { INDEX_CREATE_ADD_CONSTRAINT } else { 0 }),
-            constr_flags: if stmt.primary { INDEX_CONSTR_CREATE_MARK_AS_PRIMARY } else { 0 },
+            constr_flags: 0,
             allow_system_table_mods: false,
             is_internal: !check_rights,
         },
@@ -391,6 +391,13 @@ fn ComputeIndexAttrs<'mcx>(
                 if !att.attisdropped && att.attname.name_str() == name.as_bytes() {
                     found = Some(*att);
                     break;
+                }
+            }
+            // C SearchSysCacheAttName resolves system columns to negative
+            // attnums; DefineIndex then rejects them with 0A000.
+            if found.is_none() {
+                if let Some(sysatt) = catalog_heap::SystemAttributeByName(name) {
+                    found = Some(*sysatt);
                 }
             }
             let Some(attform) = found else {

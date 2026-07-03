@@ -101,7 +101,7 @@ pub fn index_check_primary_key<'mcx>(
     indexInfo: &IndexInfo<'mcx>,
     is_alter_table: bool,
 ) -> PgResult<()> {
-    if is_alter_table && relationHasPrimaryKey(mcx, heapRel)? {
+    if (is_alter_table || heapRel.rd_rel.relispartition) && relationHasPrimaryKey(mcx, heapRel)? {
         return Err(err(
             format!(
                 "multiple primary keys for table \"{}\" are not allowed",
