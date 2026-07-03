@@ -1313,7 +1313,7 @@ pub fn cost_sort(
     p.total_cost = total_cost;
 }
 
-// cost_windowagg (costsize.c); aggfilter cost leg dead (FILTER loud upstream).
+// cost_windowagg (costsize.c).
 #[allow(clippy::too_many_arguments)]
 pub fn cost_windowagg<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -1343,9 +1343,13 @@ pub fn cost_windowagg<'mcx>(
             argcosts.startup += c.startup;
             argcosts.per_tuple += c.per_tuple;
         }
-        debug_assert!(wf.aggfilter.is_none());
         startup_cost += argcosts.startup;
         wfunccost += argcosts.per_tuple;
+        if let Some(f) = wf.aggfilter {
+            let c = cost_qual_eval_node(f)?;
+            startup_cost += c.startup;
+            wfunccost += c.per_tuple;
+        }
         total_cost += wfunccost * input_tuples;
     }
 
