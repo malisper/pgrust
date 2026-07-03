@@ -645,7 +645,7 @@ pub fn EnableDisableRule<'mcx>(
     }
     pg_rewrite.close(RowExclusiveLock)?;
     if changed {
-        inval::CacheInvalidateRelcache(rel)?;
+        inval::invalidate::CacheInvalidateRelcache(rel)?;
     }
     Ok(())
 }
@@ -686,7 +686,7 @@ pub fn RemoveRewriteRuleById<'mcx>(mcx: Mcx<'mcx>, rule_oid: Oid) -> PgResult<()
     catalog_indexing::CatalogTupleDelete(&pg_rewrite, &tid)?;
     genam::systable_endscan(mcx, scan)?;
     pg_rewrite.close(RowExclusiveLock)?;
-    inval::CacheInvalidateRelcache(&event_relation)?;
+    inval::invalidate::CacheInvalidateRelcache(&event_relation)?;
     // Close rel, but keep lock till commit.
     event_relation.close(types_rel::NoLock)?;
     Ok(())

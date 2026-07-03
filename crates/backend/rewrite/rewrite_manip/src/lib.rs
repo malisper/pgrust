@@ -1029,7 +1029,7 @@ fn rv_query_inplace<'mcx>(
         Some(jt) => {
             let fl = rv_mutate_list(&jt.fromlist, ctx)?;
             let quals = rv_mutate_opt(jt.quals, ctx)?;
-            if fl.is_some() || quals != jt.quals {
+            if fl.is_some() || quals.is_some() {
                 Some(mcx::alloc_leak_in(
                     mcx,
                     FromExpr {
