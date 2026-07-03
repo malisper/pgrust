@@ -17,6 +17,7 @@ pub mod plancat;
 pub mod selfuncs;
 pub mod planmain;
 pub mod prep;
+pub mod prepunion;
 pub mod prepqual;
 pub mod prepjointree;
 pub mod prepagg;
@@ -275,7 +276,7 @@ pub fn standard_planner<'mcx>(
         0.0
     };
 
-    subquery_planner(&mut run, parse, tuple_fraction)?;
+    subquery_planner(&mut run, parse, tuple_fraction, None)?;
 
     let final_rel = fetch_final_rel(&mut run);
     let best_path = get_cheapest_fractional_path(&run, final_rel, tuple_fraction);

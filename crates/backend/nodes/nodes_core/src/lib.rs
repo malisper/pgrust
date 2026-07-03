@@ -161,6 +161,11 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             Ok(w.visit(j.larg)? || w.visit(j.rarg)? || walk_opt(j.quals, w)?)
         }
         NodeTag::T_Query => Ok(false),
+        NodeTag::T_SetOperationStmt => {
+            // C walks only larg/rarg (groupClauses deemed uninteresting).
+            let s = node.as_set_operation_stmt().unwrap();
+            Ok(walk_opt(s.larg, w)? || walk_opt(s.rarg, w)?)
+        }
         NodeTag::T_CommonTableExpr => {
             // C walks only ctequery (search/cycle clauses uninteresting here).
             let cte = node.as_common_table_expr().unwrap();

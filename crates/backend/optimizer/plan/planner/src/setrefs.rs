@@ -75,12 +75,35 @@ fn add_rtes_to_flat_rtable(run: &mut PlannerRun<'_>) -> PgResult<()> {
             },
         )?;
         run.glob.finalrtable.lappend(mcx, newrte)?;
-        if rte.rtekind == RTEKind::RTE_RELATION {
+        if rte.rtekind == RTEKind::RTE_RELATION
+            || (rte.rtekind == RTEKind::RTE_SUBQUERY && rte.relid != 0)
+        {
             run.glob.relation_oids.lappend(mcx, rte.relid)?;
             let rti = run.glob.finalrtable.len() as i32;
             run.glob.all_relids.add_member(mcx, rti)?;
         }
-        // Dead-subquery flattening unreachable: RTE_SUBQUERY panicked earlier.
+    }
+    // C's dead-subquery pass: planned subqueries not referenced by the plan
+    // tree must contribute their RTEs anyway. Live setop leaves are always
+    // scanned; a subquery rel without a subroot means it was never planned.
+    for (i, rte_node) in parse.rtable.iter().enumerate() {
+        let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+        let rti = (i + 1) as i32;
+        if rte.rtekind == RTEKind::RTE_SUBQUERY
+            && !rte.inh
+            && rti < run.root.simple_rel_array_size
+        {
+            if let Some(rel) = run.root.simple_rel_array[rti as usize] {
+                assert!(
+                    run.root.rel(rel).subroot_idx.is_some(),
+                    "flatten_unplanned_rtes (setrefs.c): unplanned subquery RTE; \
+                     constraint-exclusion lane unported"
+                );
+                // IS_DUMMY_REL recursion arm: dummy children still surface as
+                // SubqueryScan(Result) plans here, so their rtables flatten
+                // through the plan walk.
+            }
+        }
     }
     Ok(())
 }
@@ -311,6 +334,17 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 unsafe { plan.with_plan_mut(|p| p.targetlist = first) }.expect("plan node");
             }
         }
+        NodeTag::T_Append => {
+            return set_append_references(run, plan, rtoffset);
+        }
+        NodeTag::T_SubqueryScan => {
+            return set_subqueryscan_references(run, plan, rtoffset);
+        }
+        NodeTag::T_SetOp => {
+            // SetOp returns its input tuples unmodified; dummy tlist for EXPLAIN.
+            set_dummy_tlist_references(run, plan, rtoffset)?;
+            debug_assert!(plan.as_plan().unwrap().qual.is_nil());
+        }
         other => panic!("set_plan_refs (setrefs.c): {other:?}; M2 plan lane"),
     }
 
@@ -324,7 +358,7 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
     if let Some(child) = base.righttree {
         debug_assert!(matches!(
             plan.node_tag(),
-            NodeTag::T_NestLoop | NodeTag::T_MergeJoin | NodeTag::T_HashJoin
+            NodeTag::T_NestLoop | NodeTag::T_MergeJoin | NodeTag::T_HashJoin | NodeTag::T_SetOp
         ));
         let new_child = set_plan_refs(run, child, rtoffset)?;
         // SAFETY: same exclusive plan-tree ownership as the prologue above.
@@ -1358,4 +1392,192 @@ fn search_join_tlist_for_var<'mcx>(
         }
     }
     Ok(None)
+}
+
+// set_append_references (setrefs.c); part_prune_index and parallel-aware legs
+// have no lane.
+fn set_append_references<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    plan: Node<'mcx>,
+    rtoffset: i32,
+) -> PgResult<Node<'mcx>> {
+    let aplan = plan.as_append().expect("Append node");
+    debug_assert!(aplan.plan.qual.is_nil());
+    assert!(aplan.part_prune_index < 0, "set_append_references (setrefs.c): partition pruning lane");
+
+    let mut new_children = NodeList::nil();
+    for child in &aplan.appendplans {
+        new_children.lappend(run.mcx, set_plan_refs(run, child, rtoffset)?)?;
+    }
+    let single = (new_children.len() == 1).then(|| new_children.nth(0));
+    // SAFETY: exclusive plan-tree ownership (prologue note in set_plan_refs).
+    unsafe {
+        plan.with_mut::<types_nodes::plannodes::Append, _>(|p| p.appendplans = new_children)
+    }
+    .expect("Append node");
+
+    if let Some(child) = single {
+        if child.as_plan().expect("plan node").parallel_aware
+            == plan.as_plan().unwrap().parallel_aware
+        {
+            return clean_up_removed_plan_level(run, plan, child);
+        }
+    }
+
+    set_dummy_tlist_references(run, plan, rtoffset)?;
+    if rtoffset != 0 {
+        let old = &plan.as_append().unwrap().apprelids;
+        let mut shifted = types_nodes::bitmapset::Bitmapset::empty();
+        let mut m = old.next_member(-1);
+        while m >= 0 {
+            shifted.add_member(run.mcx, m + rtoffset)?;
+            m = old.next_member(m);
+        }
+        // SAFETY: exclusive plan-tree ownership (prologue note).
+        unsafe {
+            plan.with_mut::<types_nodes::plannodes::Append, _>(|p| p.apprelids = shifted)
+        }
+        .expect("Append node");
+    }
+    debug_assert!(plan.as_plan().unwrap().lefttree.is_none());
+    debug_assert!(plan.as_plan().unwrap().righttree.is_none());
+    Ok(plan)
+}
+
+// set_subqueryscan_references (setrefs.c): the subplan is processed under the
+// rel's subroot; trivial scans are elided.
+fn set_subqueryscan_references<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    plan: Node<'mcx>,
+    rtoffset: i32,
+) -> PgResult<Node<'mcx>> {
+    let s = plan.as_subquery_scan().expect("SubqueryScan node");
+    let rel = crate::relnode::find_base_rel(&run.root, s.scan.scanrelid as i32);
+    let idx = run.root.rel(rel).subroot_idx.expect("subquery rel has a subroot");
+    let subplan = s.subplan.expect("SubqueryScan has a subplan");
+
+    run.swap_with_rel_subroot(idx);
+    let new_subplan = set_plan_references(run, subplan);
+    run.swap_with_rel_subroot(idx);
+    let new_subplan = new_subplan?;
+    // SAFETY: exclusive plan-tree ownership (prologue note).
+    unsafe {
+        plan.with_mut::<types_nodes::plannodes::SubqueryScan, _>(|p| {
+            p.subplan = Some(new_subplan)
+        })
+    }
+    .expect("SubqueryScan node");
+
+    if trivial_subqueryscan(plan) {
+        return clean_up_removed_plan_level(run, plan, new_subplan);
+    }
+
+    let s = plan.as_subquery_scan().unwrap();
+    let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset)?;
+    let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset)?;
+    // SAFETY: exclusive plan-tree ownership (prologue note).
+    unsafe {
+        plan.with_mut::<types_nodes::plannodes::SubqueryScan, _>(|p| {
+            if let Some(tl) = tl {
+                p.scan.plan.targetlist = tl;
+            }
+            if let Some(q) = qual {
+                p.scan.plan.qual = q;
+            }
+            p.scan.scanrelid += rtoffset as u32;
+        })
+    }
+    .expect("SubqueryScan node");
+    Ok(plan)
+}
+
+const SUBQUERY_SCAN_TRIVIAL: u32 = 1;
+const SUBQUERY_SCAN_NONTRIVIAL: u32 = 2;
+
+// trivial_subqueryscan (setrefs.c), scanstatus memo included.
+fn trivial_subqueryscan(plan: Node<'_>) -> bool {
+    let s = plan.as_subquery_scan().expect("SubqueryScan node");
+    match s.scanstatus {
+        SUBQUERY_SCAN_TRIVIAL => return true,
+        SUBQUERY_SCAN_NONTRIVIAL => return false,
+        _ => {}
+    }
+    let set_status = |v: u32| {
+        // SAFETY: exclusive plan-tree ownership (prologue note); scanstatus is
+        // a memo the executor also reads.
+        unsafe {
+            plan.with_mut::<types_nodes::plannodes::SubqueryScan, _>(|p| p.scanstatus = v)
+        }
+        .expect("SubqueryScan node");
+    };
+    set_status(SUBQUERY_SCAN_NONTRIVIAL);
+
+    if !s.scan.plan.qual.is_nil() {
+        return false;
+    }
+    let sub_tlist = &s.subplan.expect("SubqueryScan has a subplan").as_plan().unwrap().targetlist;
+    if s.scan.plan.targetlist.len() != sub_tlist.len() {
+        return false;
+    }
+    for (attrno, (p_node, c_node)) in
+        s.scan.plan.targetlist.iter().zip(sub_tlist.iter()).enumerate()
+    {
+        let ptle = p_node.as_target_entry().expect("tlist cell");
+        let ctle = c_node.as_target_entry().expect("tlist cell");
+        if ptle.resjunk != ctle.resjunk {
+            return false;
+        }
+        if let Some(var) = ptle.expr.as_var() {
+            debug_assert!(var.varno as u32 == s.scan.scanrelid && var.varlevelsup == 0);
+            if var.varattno != (attrno + 1) as i16 {
+                return false;
+            }
+        } else if ptle.expr.node_tag() == NodeTag::T_Const {
+            if !types_nodes::equal(ptle.expr, ctle.expr) {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+    set_status(SUBQUERY_SCAN_TRIVIAL);
+    true
+}
+
+// clean_up_removed_plan_level (setrefs.c).
+fn clean_up_removed_plan_level<'mcx>(
+    run: &PlannerRun<'mcx>,
+    parent: Node<'mcx>,
+    child: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let pplan = parent.as_plan().expect("plan node");
+    if !pplan.initPlan.is_nil() {
+        // SS_compute_initplan_cost: move the initplans and their run costs.
+        let mut initplan_cost = 0.0;
+        let mut unsafe_initplans = false;
+        for sp_node in &pplan.initPlan {
+            let sp = sp_node.as_sub_plan().expect("initPlan holds SubPlan nodes");
+            initplan_cost += sp.startup_cost + sp.per_call_cost;
+            if !sp.parallel_safe {
+                unsafe_initplans = true;
+            }
+        }
+        let mcx = run.mcx;
+        let mut merged = pplan.initPlan.clone_in(mcx)?;
+        merged.concat(mcx, &child.as_plan().unwrap().initPlan)?;
+        // SAFETY: exclusive plan-tree ownership (prologue note).
+        unsafe {
+            child.with_plan_mut(|c| {
+                c.startup_cost += initplan_cost;
+                c.total_cost += initplan_cost;
+                if unsafe_initplans {
+                    c.parallel_safe = false;
+                }
+                c.initPlan = merged;
+            })
+        }
+        .expect("plan node");
+    }
+    crate::createplan::apply_tlist_labeling(child, &pplan.targetlist);
+    Ok(child)
 }

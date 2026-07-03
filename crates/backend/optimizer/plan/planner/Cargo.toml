@@ -41,6 +41,8 @@ nbtree = { path = "../../../access/nbtree/nbtree" }
 nodeagg = { path = "../../../executor/nodeagg" }
 nodehash = { path = "../../../executor/nodehash" }
 vars = { path = "../../util/vars" }
+coerce = { path = "../../../parser/coerce" }
+parser_small1 = { path = "../../../parser/parser_small1" }
 
 [dev-dependencies]
 clauses_seams = { path = "../../util/clauses_seams" }

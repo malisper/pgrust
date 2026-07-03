@@ -98,35 +98,7 @@ fn node(out: &mut String, n: Node<'_>) {
         int_field(out, "stmt_len", rs.stmt_len);
         out.push('}');
     } else if let Some(s) = n.as_select_stmt() {
-        out.push_str("{SELECTSTMT");
-        // C: plain DISTINCT is a one-NULL-cell list -> "(<>)".
-        out.push_str(" :distinctClause ");
-        match &s.distinctClause {
-            types_nodes::DistinctClause::None => out.push_str("<>"),
-            types_nodes::DistinctClause::All => out.push_str("(<>)"),
-            types_nodes::DistinctClause::On(l) => list(out, l),
-        }
-        node_field(out, "intoClause", s.intoClause);
-        list_field(out, "targetList", &s.targetList);
-        list_field(out, "fromClause", &s.fromClause);
-        node_field(out, "whereClause", s.whereClause);
-        list_field(out, "groupClause", &s.groupClause);
-        bool_field(out, "groupDistinct", s.groupDistinct);
-        node_field(out, "havingClause", s.havingClause);
-        list_field(out, "windowClause", &s.windowClause);
-        list_field(out, "valuesLists", &s.valuesLists);
-        list_field(out, "sortClause", &s.sortClause);
-        node_field(out, "limitOffset", s.limitOffset);
-        node_field(out, "limitCount", s.limitCount);
-        int_field(out, "limitOption", s.limitOption as i32);
-        list_field(out, "lockingClause", &s.lockingClause);
-        node_field(out, "withClause", s.withClause);
-        int_field(out, "op", s.op as i32);
-        bool_field(out, "all", s.all);
-        out.push_str(" :larg <>");
-        assert!(s.larg.is_none() && s.rarg.is_none(), "set ops unrendered");
-        out.push_str(" :rarg <>");
-        out.push('}');
+        select_stmt(out, s);
     } else if let Some(rt) = n.as_res_target() {
         out.push_str("{RESTARGET");
         string_field(out, "name", rt.name);
@@ -575,6 +547,45 @@ fn char_field(out: &mut String, name: &str, c: u8) {
     } else {
         out_token(out, Some(std::str::from_utf8(std::slice::from_ref(&c)).unwrap()));
     }
+}
+
+fn select_stmt(out: &mut String, s: &types_nodes::SelectStmt<'_>) {
+    out.push_str("{SELECTSTMT");
+    // C: plain DISTINCT is a one-NULL-cell list -> "(<>)".
+    out.push_str(" :distinctClause ");
+    match &s.distinctClause {
+        types_nodes::DistinctClause::None => out.push_str("<>"),
+        types_nodes::DistinctClause::All => out.push_str("(<>)"),
+        types_nodes::DistinctClause::On(l) => list(out, l),
+    }
+    node_field(out, "intoClause", s.intoClause);
+    list_field(out, "targetList", &s.targetList);
+    list_field(out, "fromClause", &s.fromClause);
+    node_field(out, "whereClause", s.whereClause);
+    list_field(out, "groupClause", &s.groupClause);
+    bool_field(out, "groupDistinct", s.groupDistinct);
+    node_field(out, "havingClause", s.havingClause);
+    list_field(out, "windowClause", &s.windowClause);
+    list_field(out, "valuesLists", &s.valuesLists);
+    list_field(out, "sortClause", &s.sortClause);
+    node_field(out, "limitOffset", s.limitOffset);
+    node_field(out, "limitCount", s.limitCount);
+    int_field(out, "limitOption", s.limitOption as i32);
+    list_field(out, "lockingClause", &s.lockingClause);
+    node_field(out, "withClause", s.withClause);
+    int_field(out, "op", s.op as i32);
+    bool_field(out, "all", s.all);
+    out.push_str(" :larg ");
+    match s.larg {
+        Some(l) => select_stmt(out, l),
+        None => out.push_str("<>"),
+    }
+    out.push_str(" :rarg ");
+    match s.rarg {
+        Some(r) => select_stmt(out, r),
+        None => out.push_str("<>"),
+    }
+    out.push('}');
 }
 
 fn alias(out: &mut String, a: &types_nodes::Alias<'_>) {

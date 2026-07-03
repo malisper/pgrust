@@ -1213,3 +1213,148 @@ fn get_windowclause_startup_tuples<'mcx>(
     };
     Ok(clamp_row_est(return_tuples))
 }
+
+const APPEND_CPU_COST_MULTIPLIER: f64 = 0.5;
+
+// cost_append (costsize.c), serial unordered arm; the ordered arm belongs to
+// the MergeAppend/set-ops ordered lane and parallel append has no lane.
+pub fn cost_append(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId) {
+    let (subpaths, parallel_aware, pathkeys_empty) = match run.root.path(path_id) {
+        types_pathnodes::PathNode::AppendPath(a) => (
+            crate::relnode::pgvec_clone_shallow(run.mcx, &a.subpaths),
+            a.path.parallel_aware,
+            a.path.pathkeys.is_empty(),
+        ),
+        _ => panic!("cost_append: not an AppendPath"),
+    };
+    assert!(!parallel_aware, "cost_append (costsize.c): parallel append; M3 parallel lane");
+    {
+        let p = run.root.path_mut(path_id).base_mut();
+        p.disabled_nodes = 0;
+        p.startup_cost = 0.0;
+        p.total_cost = 0.0;
+        p.rows = 0.0;
+    }
+    if subpaths.is_empty() {
+        return;
+    }
+    assert!(
+        pathkeys_empty,
+        "cost_append (costsize.c): ordered append; MergeAppend lane unported (set-ops lane)"
+    );
+    let mut rows = 0.0;
+    let mut disabled = 0;
+    let mut total = 0.0;
+    let startup = run.root.path(subpaths[0]).base().startup_cost;
+    for &sp in subpaths.iter() {
+        let s = run.root.path(sp).base();
+        rows += s.rows;
+        disabled += s.disabled_nodes;
+        total += s.total_cost;
+    }
+    total += gucs::cpu_tuple_cost() * APPEND_CPU_COST_MULTIPLIER * rows;
+    let p = run.root.path_mut(path_id).base_mut();
+    p.rows = rows;
+    p.disabled_nodes = disabled;
+    p.startup_cost = startup;
+    p.total_cost = total;
+}
+
+// cost_subqueryscan (costsize.c); param_info is always None on this lane.
+pub fn cost_subqueryscan(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    rel: RelId,
+    sub: &crate::pathnode::SubqueryScanInfo,
+    trivial_pathtarget: bool,
+) -> PgResult<()> {
+    debug_assert!(run.root.rel(rel).relid > 0);
+    debug_assert!(
+        run.root.rel(rel).rtekind
+            == types_nodes::parsenodes::RTEKind::RTE_SUBQUERY as u32
+    );
+    let qpquals =
+        crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(rel).baserestrictinfo);
+    let selec = crate::clausesel::clauselist_selectivity(
+        run,
+        &qpquals,
+        0,
+        types_pathnodes::JOIN_INNER,
+        None,
+    )?;
+    let rows = clamp_row_est(sub.rows * selec);
+    {
+        let p = run.root.path_mut(path_id).base_mut();
+        p.rows = rows;
+        p.disabled_nodes = sub.disabled_nodes;
+        p.startup_cost = sub.startup_cost;
+        p.total_cost = sub.total_cost;
+    }
+    // With no quals and a trivial target, setrefs elides the SubqueryScan.
+    if qpquals.is_empty() && trivial_pathtarget {
+        return Ok(());
+    }
+
+    let qpqual_cost = get_restriction_qual_cost(run, rel);
+    let mut startup_cost = qpqual_cost.startup;
+    let cpu_per_tuple = gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
+    let mut run_cost = cpu_per_tuple * sub.rows;
+
+    let target = run.root.path_pathtarget(path_id);
+    startup_cost += target.cost.startup;
+    run_cost += target.cost.per_tuple * rows;
+
+    let p = run.root.path_mut(path_id).base_mut();
+    p.startup_cost += startup_cost;
+    p.total_cost += startup_cost + run_cost;
+    Ok(())
+}
+
+// set_subquery_size_estimates (costsize.c).
+pub fn set_subquery_size_estimates(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
+    debug_assert!(run.root.rel(rel).relid > 0);
+    let idx = run.root.rel(rel).subroot_idx.expect("subquery rel has a subroot");
+
+    run.swap_with_rel_subroot(idx);
+    let (tuples, widths) = {
+        let final_rel = crate::planmain::fetch_final_rel(run);
+        let cheapest = run
+            .root
+            .rel(final_rel)
+            .cheapest_total_path
+            .expect("subquery final rel has a cheapest path");
+        let tuples = run.root.path(cheapest).base().rows;
+        let sub_parse = run.parse();
+        let mut widths: mcx::PgVec<'_, (i16, i32)> = mcx::PgVec::new_in(run.mcx);
+        for tle_node in &sub_parse.targetList {
+            let te = tle_node.as_target_entry().expect("tlist cell");
+            if te.resjunk {
+                continue;
+            }
+            let mut item_width = 0;
+            if let Some(v) = te.expr.as_var() {
+                if sub_parse.setOperations.is_none() {
+                    let subrel_id = crate::relnode::find_base_rel(&run.root, v.varno);
+                    let subrel = run.root.rel(subrel_id);
+                    item_width = subrel.attr_widths[(v.varattno - subrel.min_attr) as usize];
+                }
+            }
+            widths.push((te.resno, item_width));
+        }
+        (tuples, widths)
+    };
+    run.swap_with_rel_subroot(idx);
+
+    run.root.rel_mut(rel).tuples = tuples;
+    let (min_attr, max_attr) = {
+        let r = run.root.rel(rel);
+        (r.min_attr, r.max_attr)
+    };
+    for &(resno, w) in widths.iter() {
+        if resno < min_attr || resno > max_attr {
+            continue;
+        }
+        run.root.rel_mut(rel).attr_widths[(resno - min_attr) as usize] = w;
+    }
+    set_baserel_size_estimates(run, rel)
+}

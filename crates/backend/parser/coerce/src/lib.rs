@@ -1637,39 +1637,50 @@ pub fn select_common_type(
     exprs: &[(Oid, ParseLoc)],
     context: Option<&str>,
 ) -> PgResult<Oid> {
+    select_common_type_pick(pstate, exprs, context).map(|(t, _)| t)
+}
+
+/// [`select_common_type`] plus C's `which_expr` out-parameter, returned as
+/// the index of the winning expr.
+pub fn select_common_type_pick(
+    pstate: &ParseState<'_, '_>,
+    exprs: &[(Oid, ParseLoc)],
+    context: Option<&str>,
+) -> PgResult<(Oid, usize)> {
     debug_assert!(!exprs.is_empty());
     let mut ptype = exprs[0].0;
-    let mut rest = &exprs[1..];
+    let mut pick = 0usize;
+    let mut next = 1usize;
 
     if ptype != UNKNOWNOID {
-        let mut i = 0;
-        while i < rest.len() && rest[i].0 == ptype {
-            i += 1;
+        while next < exprs.len() && exprs[next].0 == ptype {
+            next += 1;
         }
-        if i == rest.len() {
-            return Ok(ptype);
+        if next == exprs.len() {
+            return Ok((ptype, pick));
         }
-        rest = &rest[i..];
     }
 
     ptype = lsyscache::getBaseType(ptype)?;
     let (mut pcategory, mut pispreferred) = lsyscache::get_type_category_preferred(ptype)?;
 
-    for &(rawtype, nloc) in rest {
+    for (i, &(rawtype, nloc)) in exprs.iter().enumerate().skip(next) {
         let ntype = lsyscache::getBaseType(rawtype)?;
         if ntype != UNKNOWNOID && ntype != ptype {
             let (ncategory, nispreferred) = lsyscache::get_type_category_preferred(ntype)?;
             if ptype == UNKNOWNOID {
+                pick = i;
                 ptype = ntype;
                 pcategory = ncategory;
                 pispreferred = nispreferred;
             } else if ncategory != pcategory {
-                let Some(context) = context else { return Ok(InvalidOid) };
+                let Some(context) = context else { return Ok((InvalidOid, pick)) };
                 return Err(common_type_mismatch(pstate, context, ptype, ntype, nloc));
             } else if !pispreferred
                 && can_coerce_type(&[ptype], &[ntype], COERCION_IMPLICIT)?
                 && !can_coerce_type(&[ntype], &[ptype], COERCION_IMPLICIT)?
             {
+                pick = i;
                 ptype = ntype;
                 pcategory = ncategory;
                 pispreferred = nispreferred;
@@ -1680,7 +1691,7 @@ pub fn select_common_type(
     if ptype == UNKNOWNOID {
         ptype = types_core::catalog::TEXTOID;
     }
-    Ok(ptype)
+    Ok((ptype, pick))
 }
 
 /// C `coerce_to_common_type`; precomputed exprType/exprLocation divergence as

@@ -25,6 +25,7 @@ pub fn subquery_planner<'mcx>(
     run: &mut PlannerRun<'mcx>,
     mut parse: Query<'mcx>,
     tuple_fraction: f64,
+    setops: Option<&'mcx types_nodes::parsenodes::SetOperationStmt<'mcx>>,
 ) -> PgResult<()> {
     let mcx = run.mcx;
     if run.suspended_roots.is_empty() {
@@ -93,8 +94,9 @@ pub fn subquery_planner<'mcx>(
             }
             RTEKind::RTE_SUBQUERY => {
                 // Simple subqueries were pulled up above (non-pullable ones
-                // panicked there); only the dangling flattened RTE remains.
-                debug_assert!(rte.subquery.is_none());
+                // panicked there); only dangling flattened RTEs remain --
+                // except set-operation leaves, which live outside the jointree.
+                debug_assert!(rte.subquery.is_none() || parse.setOperations.is_some());
             }
             RTEKind::RTE_FUNCTION => {
                 // preprocess_function_rtes: inline_set_returning_function is a
@@ -239,7 +241,7 @@ pub fn subquery_planner<'mcx>(
         remove_useless_result_rtes(run, sealed);
     }
 
-    grouping_planner(run, tuple_fraction)?;
+    grouping_planner(run, tuple_fraction, setops)?;
 
     // SS_identify_outer_params ran at run.push_root (see run.rs); correlated
     // plan_params cannot exist on this lane.

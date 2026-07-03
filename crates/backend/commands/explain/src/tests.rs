@@ -269,6 +269,70 @@ fn select_1_query(mcx: Mcx<'_>) -> Query<'_> {
     }
 }
 
+fn union_all_query(mcx: Mcx<'static>) -> Query<'static> {
+    use types_nodes::list::{IntList, OidList};
+    let leaf = |v: i32| {
+        let konst = Node::mk_const(mcx, INT4OID, -1, 0, 4, Datum::from_i32(v), false, true).unwrap();
+        let tle = Node::mk_target_entry(mcx, konst, 1, Some("?column?"), false).unwrap();
+        let jointree =
+            mcx::alloc_leak_in(mcx, FromExpr { fromlist: NodeList::nil(), quals: None }).unwrap();
+        Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            jointree: Some(jointree),
+            targetList: NodeList::make1(mcx, tle).unwrap(),
+            stmt_location: 0,
+            stmt_len: 8,
+            ..Query::default()
+        }
+    };
+    let rte = |q: Query<'static>, name: &'static str| {
+        let colnames = NodeList::make1(mcx, Node::mk_string(mcx, "?column?").unwrap()).unwrap();
+        let eref = mcx::alloc_leak_in(
+            mcx,
+            types_nodes::primnodes::Alias { aliasname: Some(name), colnames },
+        )
+        .unwrap();
+        let mut rte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+        rte.rtekind = types_nodes::parsenodes::RTEKind::RTE_SUBQUERY;
+        rte.subquery = Some(mcx::alloc_leak_in(mcx, q).unwrap());
+        rte.eref = Some(eref);
+        rte.alias = Some(eref);
+        rte.seal()
+    };
+    let mut rtable = NodeList::make1(mcx, rte(leaf(1), "*SELECT* 1")).unwrap();
+    rtable.lappend(mcx, rte(leaf(2), "*SELECT* 2")).unwrap();
+    let stmt = Node::mk(
+        mcx,
+        types_nodes::parsenodes::SetOperationStmt {
+            op: types_nodes::parsenodes::SetOperation::SETOP_UNION,
+            all: true,
+            larg: Some(Node::mk_range_tbl_ref(mcx, 1).unwrap()),
+            rarg: Some(Node::mk_range_tbl_ref(mcx, 2).unwrap()),
+            colTypes: OidList::make1(mcx, INT4OID).unwrap(),
+            colTypmods: IntList::make1(mcx, -1).unwrap(),
+            colCollations: OidList::make1(mcx, 0).unwrap(),
+            groupClauses: NodeList::nil(),
+        },
+    )
+    .unwrap();
+    let v = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let tle = Node::mk_target_entry(mcx, v, 1, Some("?column?"), false).unwrap();
+    let jointree =
+        mcx::alloc_leak_in(mcx, FromExpr { fromlist: NodeList::nil(), quals: None }).unwrap();
+    Query {
+        commandType: CmdType::CMD_SELECT,
+        canSetTag: true,
+        jointree: Some(jointree),
+        rtable,
+        targetList: NodeList::make1(mcx, tle).unwrap(),
+        setOperations: Some(stmt),
+        stmt_location: 0,
+        stmt_len: 27,
+        ..Query::default()
+    }
+}
+
 fn opt<'mcx>(mcx: Mcx<'mcx>, name: &'static str, arg: Option<Node<'mcx>>) -> Node<'mcx> {
     Node::mk(mcx, DefElem { defname: Some(name), arg, ..DefElem::default() }).unwrap()
 }
@@ -375,6 +439,26 @@ fn run_explain(options: &[&'static str]) -> Vec<String> {
 #[test]
 fn explain_select_1_matches_pg() {
     assert_eq!(run_explain(&[]), ["Result  (cost=0.00..0.01 rows=1 width=4)"]);
+}
+
+#[test]
+fn explain_union_all_matches_pg() {
+    install_fixtures();
+    let mcx = leaked_mcx();
+    let query = Node::mk(mcx, union_all_query(mcx)).unwrap();
+    let stmt = mcx::alloc_leak_in(
+        mcx,
+        ExplainStmt { query: Some(query), options: NodeList::nil() },
+    )
+    .unwrap();
+    assert_eq!(
+        run_explain_stmt(mcx, stmt),
+        [
+            "Append  (cost=0.00..0.03 rows=2 width=4)",
+            "  ->  Result  (cost=0.00..0.01 rows=1 width=4)",
+            "  ->  Result  (cost=0.00..0.01 rows=1 width=4)",
+        ]
+    );
 }
 
 #[test]

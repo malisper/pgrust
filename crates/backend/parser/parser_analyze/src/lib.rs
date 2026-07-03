@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 pub mod parse_cte;
+mod set_op;
 
 #[cfg(test)]
 mod tests;
@@ -205,10 +206,7 @@ pub fn transformStmt<'mcx>(
             } else if n.op == types_nodes::parsenodes::SetOperation::SETOP_NONE {
                 transformSelectStmt(mcx, pstate, n)?
             } else {
-                panic!(
-                    "transformStmt (analyze.c): transformSetOperationStmt unported — \
-                     unit backend-parser-analyze"
-                );
+                set_op::transformSetOperationStmt(mcx, pstate, n)?
             }
         }
         NodeTag::T_InsertStmt => {

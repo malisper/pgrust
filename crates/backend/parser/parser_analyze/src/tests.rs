@@ -1906,6 +1906,203 @@ mod from_where {
             .unwrap();
         assert!(msg.contains("WITH RECURSIVE"), "{msg}");
     }
+
+    #[test]
+    fn union_all_int_consts_query_shape() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "SELECT 1 UNION ALL SELECT 2").unwrap();
+
+        assert_eq!(q.commandType, CmdType::CMD_SELECT);
+        let so = q.setOperations.unwrap().as_set_operation_stmt().unwrap();
+        assert_eq!(so.op, types_nodes::SetOperation::SETOP_UNION);
+        assert!(so.all);
+        assert_eq!(so.larg.unwrap().as_range_tbl_ref().unwrap().rtindex, 1);
+        assert_eq!(so.rarg.unwrap().as_range_tbl_ref().unwrap().rtindex, 2);
+        assert_eq!(so.colTypes.len(), 1);
+        assert_eq!(so.colTypes.nth(0), INT4OID);
+        assert_eq!(so.colTypmods.nth(0), -1);
+        assert_eq!(so.colCollations.nth(0), types_core::InvalidOid);
+        assert!(so.groupClauses.is_nil());
+
+        assert_eq!(q.rtable.len(), 2);
+        for (i, rte_node) in q.rtable.iter().enumerate() {
+            let rte = rte_node.as_range_tbl_entry().unwrap();
+            assert_eq!(rte.rtekind, RTEKind::RTE_SUBQUERY);
+            let eref = rte.eref.unwrap();
+            assert_eq!(eref.aliasname, Some(if i == 0 { "*SELECT* 1" } else { "*SELECT* 2" }));
+            assert!(!rte.inFromCl);
+            let sub = rte.subquery.unwrap();
+            assert_eq!(sub.commandType, CmdType::CMD_SELECT);
+            assert!(sub.canSetTag);
+            let te = sub.targetList.nth(0).as_target_entry().unwrap();
+            let c = te.expr.as_const().unwrap();
+            assert_eq!(c.consttype, INT4OID);
+            assert_eq!(c.constvalue, Datum::from_i32(i as i32 + 1));
+        }
+
+        assert_eq!(q.targetList.len(), 1);
+        let te = q.targetList.nth(0).as_target_entry().unwrap();
+        assert_eq!(te.resno, 1);
+        assert_eq!(te.resname, Some("?column?"));
+        assert!(!te.resjunk);
+        let v = te.expr.as_var().unwrap();
+        assert_eq!((v.varno, v.varattno), (1, 1));
+        assert_eq!((v.vartype, v.vartypmod, v.varcollid), (INT4OID, -1, types_core::InvalidOid));
+        assert_eq!(v.varlevelsup, 0);
+        assert_eq!((v.varnosyn, v.varattnosyn), (1, 1));
+        assert_eq!(v.location, 7);
+
+        let jt = q.jointree.unwrap();
+        assert!(jt.fromlist.is_nil() && jt.quals.is_none());
+        assert!(q.sortClause.is_nil() && q.limitCount.is_none() && q.limitOffset.is_none());
+    }
+
+    #[test]
+    fn union_distinct_carries_group_clauses() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "SELECT 1 UNION SELECT 2").unwrap();
+
+        let so = q.setOperations.unwrap().as_set_operation_stmt().unwrap();
+        assert!(!so.all);
+        assert_eq!(so.groupClauses.len(), 1);
+        let g = so.groupClauses.nth(0).as_sort_group_clause().unwrap();
+        assert_eq!(g.tleSortGroupRef, 0);
+        assert_eq!((g.eqop, g.sortop), (96, 97));
+        assert!(!g.reverse_sort && !g.nulls_first && g.hashable);
+    }
+
+    #[test]
+    fn except_and_intersect_ops() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "SELECT 1 EXCEPT SELECT 2").unwrap();
+        let so = q.setOperations.unwrap().as_set_operation_stmt().unwrap();
+        assert_eq!(so.op, types_nodes::SetOperation::SETOP_EXCEPT);
+        assert_eq!(so.groupClauses.len(), 1);
+
+        let q = analyze_sql(mcx, "SELECT 1 INTERSECT ALL SELECT 2").unwrap();
+        let so = q.setOperations.unwrap().as_set_operation_stmt().unwrap();
+        assert_eq!(so.op, types_nodes::SetOperation::SETOP_INTERSECT);
+        assert!(so.all);
+        assert_eq!(so.groupClauses.len(), 1);
+    }
+
+    #[test]
+    fn union_all_unknown_consts_resolve_to_text() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "SELECT 'a' UNION ALL SELECT 'b'").unwrap();
+
+        let so = q.setOperations.unwrap().as_set_operation_stmt().unwrap();
+        assert_eq!(so.colTypes.nth(0), TEXTOID);
+        assert_eq!(so.colCollations.nth(0), 100);
+        for rte_node in q.rtable.iter() {
+            let sub = rte_node.as_range_tbl_entry().unwrap().subquery.unwrap();
+            let te = sub.targetList.nth(0).as_target_entry().unwrap();
+            assert_eq!(te.expr.as_const().unwrap().consttype, TEXTOID);
+        }
+        let v = q.targetList.nth(0).as_target_entry().unwrap().expr.as_var().unwrap();
+        assert_eq!((v.vartype, v.varcollid), (TEXTOID, 100));
+    }
+
+    #[test]
+    fn nested_union_keeps_tree_shape() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "SELECT 1 UNION ALL (SELECT 2 UNION ALL SELECT 3)").unwrap();
+
+        let so = q.setOperations.unwrap().as_set_operation_stmt().unwrap();
+        assert_eq!(so.larg.unwrap().as_range_tbl_ref().unwrap().rtindex, 1);
+        let inner = so.rarg.unwrap().as_set_operation_stmt().unwrap();
+        assert_eq!(inner.larg.unwrap().as_range_tbl_ref().unwrap().rtindex, 2);
+        assert_eq!(inner.rarg.unwrap().as_range_tbl_ref().unwrap().rtindex, 3);
+        assert_eq!(q.rtable.len(), 3);
+        assert_eq!(q.targetList.nth(0).as_target_entry().unwrap().expr.as_var().unwrap().varno, 1);
+    }
+
+    #[test]
+    fn union_from_table_column_names_and_order_by() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "SELECT x FROM t UNION ALL SELECT 2 ORDER BY x").unwrap();
+
+        let te = q.targetList.nth(0).as_target_entry().unwrap();
+        assert_eq!(te.resname, Some("x"));
+        assert_eq!(te.ressortgroupref, 1);
+        assert_eq!(q.sortClause.len(), 1);
+        let s = q.sortClause.nth(0).as_sort_group_clause().unwrap();
+        assert_eq!((s.tleSortGroupRef, s.eqop, s.sortop), (1, 96, 97));
+        // The ORDER BY join RTE is truncated away; only the two leaves stay.
+        assert_eq!(q.rtable.len(), 2);
+        assert_eq!(q.targetList.len(), 1);
+    }
+
+    // The 0A000 "invalid UNION/INTERSECT/EXCEPT ORDER BY clause" arm is
+    // ported but unreachable: expression sort keys panic loudly upstream in
+    // findTargetlistEntrySQL99 (equalfuncs unported for non-Var exprs).
+    #[test]
+    fn union_order_by_expression_is_loud() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = analyze_sql(mcx, "SELECT 1 AS x UNION ALL SELECT 2 ORDER BY x + 1");
+        }));
+        let payload = r.expect_err("must be loud");
+        let msg = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .map(std::string::String::from)
+            .or_else(|| payload.downcast_ref::<std::string::String>().cloned())
+            .unwrap();
+        assert!(msg.contains("findTargetlistEntrySQL99"), "{msg}");
+    }
+
+    #[test]
+    fn union_column_count_mismatch_is_42601() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(mcx, "SELECT 1 UNION ALL SELECT 1, 2").map(|_| ()).unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+        assert!(
+            err.message().contains("each UNION query must have the same number of columns"),
+            "{}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn union_limit_offset_transformed_on_top_query() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "SELECT 1 UNION ALL SELECT 2 LIMIT 1").unwrap();
+
+        assert!(q.limitCount.is_some());
+        assert!(q.limitOffset.is_none());
+        for rte_node in q.rtable.iter() {
+            let sub = rte_node.as_range_tbl_entry().unwrap().subquery.unwrap();
+            assert!(sub.limitCount.is_none());
+        }
+    }
 }
 
 fn count_star_call(mcx: Mcx<'_>) -> Node<'_> {

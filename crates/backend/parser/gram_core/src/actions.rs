@@ -4,7 +4,7 @@ use types_nodes::parsenodes::{
     AlterTableCmd, AlterTableStmt, AlterTableType, CTEMaterialize, ClosePortalStmt, CommentStmt, CommonTableExpr, CopyStmt, CreateSchemaStmt,
     DeallocateStmt, DeclareCursorStmt, DefElem, DefElemAction, DiscardMode, DiscardStmt,
     DropBehavior, DropStmt, ExecuteStmt, FetchStmt, ListenStmt, NotifyStmt, ObjectType,
-    PrepareStmt, TransactionStmt, TransactionStmtKind, TruncateStmt, UnlistenStmt, VacuumRelation,
+    PrepareStmt, SetOperation, TransactionStmt, TransactionStmtKind, TruncateStmt, UnlistenStmt, VacuumRelation,
     VacuumStmt, VariableSetKind, VariableSetStmt, VariableShowStmt, WithClause,
     CURSOR_OPT_ASENSITIVE, CURSOR_OPT_BINARY, CURSOR_OPT_FAST_PLAN, CURSOR_OPT_HOLD,
     CURSOR_OPT_INSENSITIVE, CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL, FETCH_ALL,
@@ -575,6 +575,21 @@ impl<'mcx> Parser<'mcx> {
                 let limit = view.v(limit_i).limit();
                 self.insert_select_options(stmt, sort, locking, limit, view.v(1).node())?;
                 *yyval = YYSTYPE::Node(Some(stmt));
+            }
+            // simple_select: select_clause {UNION|INTERSECT|EXCEPT} set_quantifier select_clause
+            1723 | 1724 | 1725 => {
+                let mut n = Node::build::<SelectStmt>(mcx)?;
+                n.op = match rule {
+                    1723 => SetOperation::SETOP_UNION,
+                    1724 => SetOperation::SETOP_INTERSECT,
+                    _ => SetOperation::SETOP_EXCEPT,
+                };
+                n.all = view.v(3).ival() == 1;
+                n.larg =
+                    Some(view.v(1).node().and_then(Node::as_select_stmt).expect("select_clause"));
+                n.rarg =
+                    Some(view.v(4).node().and_then(Node::as_select_stmt).expect("select_clause"));
+                *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // with_clause: WITH cte_list | WITH_LA cte_list | WITH RECURSIVE cte_list
             1726 | 1727 | 1728 => {

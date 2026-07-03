@@ -39,6 +39,8 @@ nodematerial = { path = "../nodematerial" }
 nodesort = { path = "../nodesort" }
 nodeincrementalsort = { path = "../nodeincrementalsort" }
 nodeunique = { path = "../nodeunique" }
+nodeappend = { path = "../nodeappend" }
+nodesetop = { path = "../nodesetop" }
 nodelimit = { path = "../nodelimit" }
 nodehash = { path = "../nodehash" }
 nodehashjoin = { path = "../nodehashjoin" }

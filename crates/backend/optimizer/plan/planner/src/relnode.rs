@@ -193,7 +193,8 @@ pub fn build_simple_rel<'mcx>(
     rtekind: RTEKind,
 ) -> types_error::PgResult<RelId> {
     let eref_max_attr = match rtekind {
-        RTEKind::RTE_FUNCTION | RTEKind::RTE_VALUES | RTEKind::RTE_CTE => {
+        RTEKind::RTE_FUNCTION | RTEKind::RTE_VALUES | RTEKind::RTE_CTE
+        | RTEKind::RTE_SUBQUERY => {
             run.rte(relid as usize).eref.expect("RTE has eref").colnames.len() as i16
         }
         _ => 0,
@@ -225,7 +226,8 @@ pub fn build_simple_rel<'mcx>(
             rel.min_attr = 0;
             rel.max_attr = -1;
         }
-        RTEKind::RTE_FUNCTION | RTEKind::RTE_VALUES | RTEKind::RTE_CTE => {
+        RTEKind::RTE_FUNCTION | RTEKind::RTE_VALUES | RTEKind::RTE_CTE
+        | RTEKind::RTE_SUBQUERY => {
             rel.min_attr = 0;
             rel.max_attr = eref_max_attr;
             let span = (rel.max_attr - rel.min_attr + 1) as usize;
@@ -250,11 +252,18 @@ pub fn build_simple_rel<'mcx>(
     Ok(id)
 }
 
-// fetch_upper_rel (relnode.c); only the relids=NULL form exists pre-partition.
+// fetch_upper_rel (relnode.c), relids=NULL form.
 pub fn fetch_upper_rel<'mcx>(root: &mut PlannerInfo<'mcx>, kind: UpperRelationKind) -> RelId {
-    let none: Relids<'mcx> = None;
+    fetch_upper_rel_with_relids(root, kind, None)
+}
+
+pub fn fetch_upper_rel_with_relids<'mcx>(
+    root: &mut PlannerInfo<'mcx>,
+    kind: UpperRelationKind,
+    relids: Relids<'mcx>,
+) -> RelId {
     for &id in root.upper_rels[kind as usize].iter() {
-        if relids_equal(&root.rel(id).relids, &none) {
+        if relids_equal(&root.rel(id).relids, &relids) {
             return id;
         }
     }
@@ -262,6 +271,7 @@ pub fn fetch_upper_rel<'mcx>(root: &mut PlannerInfo<'mcx>, kind: UpperRelationKi
     let mcx = root.mcx;
     let mut upperrel = RelOptInfo::new(mcx);
     upperrel.reloptkind = RELOPT_UPPER_REL;
+    upperrel.relids = relids;
     upperrel.consider_startup = root.tuple_fraction > 0.0;
     upperrel.nparts = -1;
     upperrel.rel_parallel_workers = -1;

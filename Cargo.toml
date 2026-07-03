@@ -150,6 +150,8 @@ members = [
     "crates/backend/executor/nodesort",
     "crates/backend/executor/nodeincrementalsort",
     "crates/backend/executor/nodeunique",
+    "crates/backend/executor/nodeappend",
+    "crates/backend/executor/nodesetop",
     "crates/backend/executor/nodelimit",
     "crates/backend/executor/nodehash",
     "crates/backend/executor/nodehashjoin",

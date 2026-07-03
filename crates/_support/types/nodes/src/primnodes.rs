@@ -304,6 +304,14 @@ pub struct RangeTblRef {
     pub rtindex: i32,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SetToDefault {
+    pub typeId: Oid,
+    pub typeMod: i32,
+    pub collation: Oid,
+    pub location: ParseLoc,
+}
+
 #[derive(Default)]
 pub struct OpExpr<'mcx> {
     pub opno: Oid,
@@ -482,6 +490,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for FromExpr<'mcx> {
 }
 unsafe impl NodeVariant<'_> for RangeTblRef {
     const TAG: NodeTag = NodeTag::T_RangeTblRef;
+}
+unsafe impl NodeVariant<'_> for SetToDefault {
+    const TAG: NodeTag = NodeTag::T_SetToDefault;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for JoinExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_JoinExpr;
@@ -664,6 +675,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_range_tbl_ref(self) -> Option<&'mcx RangeTblRef> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_set_to_default(self) -> Option<&'mcx SetToDefault> {
         self.as_variant()
     }
 

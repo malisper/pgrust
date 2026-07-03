@@ -97,6 +97,8 @@ pub fn is_projection_capable_pathtype(pathtype: u16) -> bool {
         t if t == tag16(NodeTag::T_IndexScan) => true,
         t if t == tag16(NodeTag::T_IndexOnlyScan) => true,
         t if t == tag16(NodeTag::T_CteScan) => true,
+        t if t == tag16(NodeTag::T_SubqueryScan) => true,
+        t if t == tag16(NodeTag::T_SetOp) => false,
         t if t == tag16(NodeTag::T_NestLoop) => true,
         t if t == tag16(NodeTag::T_MergeJoin) => true,
         t if t == tag16(NodeTag::T_HashJoin) => true,
@@ -1427,4 +1429,190 @@ fn relation_has_unique_index_for<'mcx>(
         }
     }
     Ok(false)
+}
+
+/// Subpath fields copied out of a subquery's subroot arena (cross-root PathId
+/// can't be dereferenced through the outer root).
+#[derive(Clone, Copy)]
+pub struct SubqueryScanInfo {
+    pub rows: f64,
+    pub disabled_nodes: i32,
+    pub startup_cost: f64,
+    pub total_cost: f64,
+    pub parallel_safe: bool,
+    pub parallel_workers: i32,
+}
+
+// create_subqueryscan_path (pathnode.c); required_outer/lateral empty on this
+// lane, so param_info stays None.
+pub fn create_subqueryscan_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    subroot_subpath: PathId,
+    trivial_pathtarget: bool,
+    pathkeys: PgVec<'mcx, PathKey>,
+    sub: &SubqueryScanInfo,
+) -> PgResult<PathId> {
+    let mut path = base_path(run, NodeTag::T_SubqueryScanPath, NodeTag::T_SubqueryScan, rel_id);
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel && sub.parallel_safe;
+    path.parallel_workers = sub.parallel_workers;
+    path.pathkeys = pathkeys;
+    let id = run.root.alloc_path(PathNode::SubqueryScanPath(types_pathnodes::SubqueryScanPath {
+        path,
+        subpath: None,
+        subroot_subpath: Some(subroot_subpath),
+    }));
+    crate::costsize::cost_subqueryscan(run, id, rel_id, sub, trivial_pathtarget)?;
+    Ok(id)
+}
+
+// create_append_path (pathnode.c), serial arm: no partial subpaths, no
+// parallel append, no required_outer, pathkeys always NIL (ordered-append is
+// the MergeAppend/set-ops ordered lane).
+pub fn create_append_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    subpaths: PgVec<'mcx, PathId>,
+    rows: f64,
+) -> PgResult<PathId> {
+    let mut path = base_path(run, NodeTag::T_AppendPath, NodeTag::T_Append, rel_id);
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    let first_partial_path = subpaths.len() as i32;
+    let limit_tuples = if crate::relnode::relids_equal(
+        &run.root.rel(rel_id).relids,
+        &run.root.all_query_rels,
+    ) {
+        run.root.limit_tuples
+    } else {
+        -1.0
+    };
+    for &sp in subpaths.iter() {
+        let s = run.root.path(sp).base();
+        debug_assert!(s.param_info.is_none());
+        path.parallel_safe = path.parallel_safe && s.parallel_safe;
+    }
+    let single = (subpaths.len() == 1).then(|| subpaths[0]);
+    let id = run.root.alloc_path(PathNode::AppendPath(types_pathnodes::AppendPath {
+        path,
+        subpaths,
+        first_partial_path,
+        limit_tuples,
+    }));
+    match single {
+        // A single non-parallel-aware child makes the Append a no-op that
+        // setrefs removes: inherit its size, cost and pathkeys.
+        Some(child_id) => {
+            let (c_rows, c_startup, c_total, c_keys) = {
+                let c = run.root.path(child_id).base();
+                debug_assert!(!c.parallel_aware);
+                (
+                    c.rows,
+                    c.startup_cost,
+                    c.total_cost,
+                    crate::relnode::pgvec_clone_shallow(run.mcx, &c.pathkeys),
+                )
+            };
+            let p = run.root.path_mut(id).base_mut();
+            p.rows = c_rows;
+            p.startup_cost = c_startup;
+            p.total_cost = c_total;
+            p.pathkeys = c_keys;
+        }
+        None => crate::costsize::cost_append(run, id),
+    }
+    if rows >= 0.0 {
+        run.root.path_mut(id).base_mut().rows = rows;
+    }
+    Ok(id)
+}
+
+// create_setop_path (pathnode.c).
+#[allow(clippy::too_many_arguments)]
+pub fn create_setop_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    leftpath: PathId,
+    rightpath: PathId,
+    cmd: types_pathnodes::SetOpCmd,
+    strategy: types_pathnodes::SetOpStrategy,
+    group_list: PgVec<'mcx, types_pathnodes::NodeId>,
+    num_groups: f64,
+    output_rows: f64,
+) -> PathId {
+    let mcx = run.mcx;
+    let n_group_cols = group_list.len() as f64;
+    let (l_startup, l_total, l_rows, l_disabled, l_safe, l_workers, l_keys, l_width) = {
+        let l = run.root.path(leftpath).base();
+        (
+            l.startup_cost,
+            l.total_cost,
+            l.rows,
+            l.disabled_nodes,
+            l.parallel_safe,
+            l.parallel_workers,
+            crate::relnode::pgvec_clone_shallow(mcx, &l.pathkeys),
+            run.root.path_pathtarget(leftpath).width,
+        )
+    };
+    let (r_startup, r_total, r_rows, r_disabled, r_safe, r_workers) = {
+        let r = run.root.path(rightpath).base();
+        (r.startup_cost, r.total_cost, r.rows, r.disabled_nodes, r.parallel_safe, r.parallel_workers)
+    };
+    let rel = run.root.rel(rel_id);
+    let mut path = Path {
+        type_: tag16(NodeTag::T_SetOpPath),
+        pathtype: tag16(NodeTag::T_SetOp),
+        parent: rel_id,
+        pathtarget_id: rel.pathtarget_id,
+        param_info: None,
+        parallel_aware: false,
+        parallel_safe: rel.consider_parallel && l_safe && r_safe,
+        parallel_workers: l_workers + r_workers,
+        rows: output_rows,
+        disabled_nodes: l_disabled + r_disabled,
+        startup_cost: 0.0,
+        total_cost: 0.0,
+        pathkeys: if strategy == types_pathnodes::SETOP_SORTED {
+            l_keys
+        } else {
+            PgVec::new_in(mcx)
+        },
+    };
+    if strategy == types_pathnodes::SETOP_SORTED {
+        // Sorted mode emits incrementally: one comparison per column per
+        // input tuple.
+        path.startup_cost = l_startup + r_startup;
+        path.total_cost = l_total
+            + r_total
+            + gucs::cpu_operator_cost() * (l_rows + r_rows) * n_group_cols
+            + gucs::cpu_operator_cost() * output_rows;
+    } else {
+        path.startup_cost = l_total
+            + r_total
+            + gucs::cpu_operator_cost() * (l_rows + r_rows) * n_group_cols;
+        path.total_cost = path.startup_cost + gucs::cpu_operator_cost() * output_rows;
+        if !gucs::enable_hashagg() {
+            path.disabled_nodes += 1;
+        }
+        let hashentrysize = maxalign8(l_width.max(0) as usize)
+            + maxalign8(types_tuple::SizeofMinimalTupleHeader);
+        if hashentrysize as f64 * num_groups > ::nodehash::get_hash_memory_limit() as f64 {
+            path.disabled_nodes += 1;
+        }
+    }
+    run.root.alloc_path(PathNode::SetOpPath(types_pathnodes::SetOpPath {
+        path,
+        leftpath: Some(leftpath),
+        rightpath: Some(rightpath),
+        cmd,
+        strategy,
+        groupList: group_list,
+        numGroups: num_groups,
+    }))
+}
+
+const fn maxalign8(n: usize) -> usize {
+    (n + 7) & !7
 }
