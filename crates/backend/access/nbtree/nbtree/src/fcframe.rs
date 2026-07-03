@@ -65,6 +65,52 @@ impl OrderProcFrame {
     pub fn test(&mut self, key: &mut ScanKeyData, left: Datum, right: Datum) -> PgResult<bool> {
         Ok(self.call(key, left, right)?.as_bool())
     }
+
+    /// FunctionCall2Coll(orderproc, …) returning int32 — the so->orderProcs
+    /// form used by array binary searches; same known-set dispatch as `cmp`.
+    #[inline]
+    pub fn cmp_proc(
+        &mut self,
+        proc: &mut ::types_fmgr::FmgrInfo,
+        collation: ::types_core::Oid,
+        left: Datum,
+        right: Datum,
+    ) -> PgResult<i32> {
+        match proc.fn_oid {
+            351 => Ok(::nbt_compare::btint4cmp(left.as_i32(), right.as_i32())),
+            842 => Ok(::nbt_compare::btint8cmp(left.as_i64(), right.as_i64())),
+            356 => Ok(::nbt_compare::btoidcmp(left.as_oid(), right.as_oid())),
+            360 if (collation == C_COLLATION_OID || collation == POSIX_COLLATION_OID)
+                && unsafe { inline_image(left) && inline_image(right) } =>
+            {
+                // SAFETY: text BTORDER args are live non-null (possibly
+                // packed) varlenas for the duration of the compare.
+                let (a, b) = unsafe {
+                    (
+                        PackedVarlena::from_ptr(left.as_usize() as *const u8),
+                        PackedVarlena::from_ptr(right.as_usize() as *const u8),
+                    )
+                };
+                Ok(::varlena::varstrfastcmp_c(a.data(), b.data()))
+            }
+            _ => {
+                self.fcinfo.rearm(collation);
+                self.fcinfo.set_arg(0, left);
+                self.fcinfo.set_arg(1, right);
+                let r = proc.invoke(&mut self.fcinfo)?;
+                if self.fcinfo.isnull {
+                    return Err(proc_returned_null(proc.fn_oid));
+                }
+                Ok(r.as_i32())
+            }
+        }
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn proc_returned_null(fn_oid: ::types_core::Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("function {fn_oid} returned NULL")))
 }
 
 /// # Safety: `d` is a non-null varlena datum with a readable header byte.
