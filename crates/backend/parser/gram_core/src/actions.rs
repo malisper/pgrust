@@ -8,6 +8,7 @@ use types_nodes::parsenodes::{
     AlterTableCmd, AlterTableStmt, AlterTableType, CTEMaterialize, ClosePortalStmt, CommentStmt, CommonTableExpr, CopyStmt, CreateFunctionStmt, CreateSchemaStmt,
     DeallocateStmt, DeclareCursorStmt, DefElem, DefElemAction, DiscardMode, DiscardStmt, FunctionParameter, FunctionParameterMode, CheckPointStmt, LoadStmt, LockStmt,
     AccessPriv, DropBehavior, DropStmt, ExecuteStmt, FetchStmt, GrantStmt, GrantTargetType,
+    AlterPolicyStmt, CreatePolicyStmt,
     GroupingSetKind, ListenStmt, NotifyStmt, ObjectType, PrepareStmt, RenameStmt, RoleSpec,
     RoleSpecType, SetOperation, TransactionStmt, TransactionStmtKind, TruncateStmt, UnlistenStmt,
     VacuumRelation, ReplicaIdentityStmt,
@@ -4262,6 +4263,18 @@ impl<'mcx> Parser<'mcx> {
                 n.missing_ok = rule == 1295;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // RenameStmt: ALTER POLICY [IF_P EXISTS] name ON qualified_name
+            // RENAME TO name
+            1286 | 1287 => {
+                let (sub, rv, nm) = if rule == 1286 { (3, 5, 8) } else { (5, 7, 10) };
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = ObjectType::OBJECT_POLICY;
+                n.relation = view.v(rv).node().expect("qualified_name").as_variant::<RangeVar>();
+                n.subname = Some(view.v(sub).str_val());
+                n.newname = Some(view.v(nm).str_val());
+                n.missing_ok = rule == 1287;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // RenameStmt: ALTER TABLE [IF_P EXISTS] relation_expr RENAME
             // opt_column name TO name
             1306 | 1307 => {
@@ -4294,6 +4307,17 @@ impl<'mcx> Parser<'mcx> {
                 n.subtype = AlterTableType::AT_DropColumn;
                 n.name = Some(view.v(3).str_val());
                 n.behavior = drop_behavior(view.v(4).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // alter_table_cmd: [ENABLE|DISABLE|FORCE|NO FORCE] ROW LEVEL SECURITY
+            359..=362 => {
+                let mut n = Node::build::<AlterTableCmd>(mcx)?;
+                n.subtype = match rule {
+                    359 => AlterTableType::AT_EnableRowSecurity,
+                    360 => AlterTableType::AT_DisableRowSecurity,
+                    361 => AlterTableType::AT_ForceRowSecurity,
+                    _ => AlterTableType::AT_NoForceRowSecurity,
+                };
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // alter_table_cmd: ALTER [COLUMN] col forms (execution is the
@@ -4637,7 +4661,7 @@ impl<'mcx> Parser<'mcx> {
             }
             // DropStmt: DROP {object_type_any_name any_name_list |
             // drop_type_name name_list} [IF EXISTS] opt_drop_behavior
-            // (TYPE/DOMAIN/INDEX CONCURRENTLY/ON-name forms 922-929 stay loud).
+            // (TYPE/DOMAIN/INDEX CONCURRENTLY forms 924-929 stay loud).
             918 | 920 => {
                 let mut n = Node::build::<DropStmt>(mcx)?;
                 n.removeType = object_type(view.v(2).ival());
@@ -4653,6 +4677,95 @@ impl<'mcx> Parser<'mcx> {
                 n.behavior = drop_behavior(view.v(4).ival());
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // DropStmt: DROP object_type_name_on_any_name [IF_P EXISTS] name
+            // ON any_name opt_drop_behavior
+            922 | 923 => {
+                let (nm, any, beh) = if rule == 922 { (3, 5, 6) } else { (5, 7, 8) };
+                let mut inner = view.v(any).list();
+                inner.lappend(mcx, Node::mk_string(mcx, view.v(nm).str_val())?)?;
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = object_type(view.v(2).ival());
+                n.objects = NodeList::make1(mcx, Node::mk_list(mcx, inner)?)?;
+                n.behavior = drop_behavior(view.v(beh).ival());
+                n.missing_ok = rule == 923;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // CreatePolicyStmt: CREATE POLICY name ON qualified_name
+            // RowSecurityDefaultPermissive RowSecurityDefaultForCmd
+            // RowSecurityDefaultToRole RowSecurityOptionalExpr
+            // RowSecurityOptionalWithCheck
+            762 => {
+                let n = CreatePolicyStmt {
+                    policy_name: Some(view.v(3).str_val()),
+                    table: view.v(5).node().expect("qualified_name").as_variant::<RangeVar>(),
+                    cmd_name: Some(view.v(7).str_val()),
+                    permissive: view.v(6).boolean(),
+                    roles: view.v(8).list(),
+                    qual: view.v(9).node(),
+                    with_check: view.v(10).node(),
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(mcx, n)?));
+            }
+            // AlterPolicyStmt: ALTER POLICY name ON qualified_name
+            // RowSecurityOptionalToRole RowSecurityOptionalExpr
+            // RowSecurityOptionalWithCheck
+            763 => {
+                let n = AlterPolicyStmt {
+                    policy_name: Some(view.v(3).str_val()),
+                    table: view.v(5).node().expect("qualified_name").as_variant::<RangeVar>(),
+                    roles: view.v(6).list(),
+                    qual: view.v(7).node(),
+                    with_check: view.v(8).node(),
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(mcx, n)?));
+            }
+            // RowSecurityOptionalExpr: USING '(' a_expr ')' | EMPTY
+            764 => *yyval = YYSTYPE::Node(view.v(3).node()),
+            765 => *yyval = YYSTYPE::Node(None),
+            // RowSecurityOptionalWithCheck: WITH CHECK '(' a_expr ')' | EMPTY
+            766 => *yyval = YYSTYPE::Node(view.v(4).node()),
+            767 => *yyval = YYSTYPE::Node(None),
+            // RowSecurityDefaultToRole: TO role_list | EMPTY -> [PUBLIC]
+            768 => *yyval = YYSTYPE::List(view.v(2).list()),
+            769 => {
+                let mut n = Node::build::<RoleSpec>(mcx)?;
+                n.roletype = RoleSpecType::ROLESPEC_PUBLIC;
+                n.location = -1;
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, n.seal())?);
+            }
+            // RowSecurityOptionalToRole: TO role_list | EMPTY -> NIL
+            770 => *yyval = YYSTYPE::List(view.v(2).list()),
+            771 => *yyval = YYSTYPE::List(NodeList::nil()),
+            // RowSecurityDefaultPermissive: AS IDENT | EMPTY -> true
+            772 => {
+                let s = view.v(2).str_val();
+                let v = match s {
+                    "permissive" => true,
+                    "restrictive" => false,
+                    _ => {
+                        return Err(Box::new(
+                            (*self.errposition_error(
+                                format!("unrecognized row security option \"{s}\""),
+                                view.l(2),
+                            ))
+                            .with_hint(
+                                "Only PERMISSIVE or RESTRICTIVE policies are supported currently.",
+                            ),
+                        ))
+                    }
+                };
+                *yyval = YYSTYPE::Boolean(v);
+            }
+            773 => *yyval = YYSTYPE::Boolean(true),
+            // RowSecurityDefaultForCmd: FOR row_security_cmd | EMPTY -> "all"
+            774 => *yyval = YYSTYPE::Str(view.v(2).str_val()),
+            775 => *yyval = YYSTYPE::Str("all"),
+            // row_security_cmd
+            776 => *yyval = YYSTYPE::Str("all"),
+            777 => *yyval = YYSTYPE::Str("select"),
+            778 => *yyval = YYSTYPE::Str("insert"),
+            779 => *yyval = YYSTYPE::Str("update"),
+            780 => *yyval = YYSTYPE::Str("delete"),
             // object_type_any_name / object_type_name / drop_type_name /
             // object_type_name_on_any_name constants (943 rides DISPATCH).
             930..=942 => *yyval = YYSTYPE::Ival(OBJECT_TYPE_ANY_NAME[rule - 930] as i32),
@@ -4967,6 +5080,16 @@ impl<'mcx> Parser<'mcx> {
                     _ => RoleSpecType::ROLESPEC_SESSION_USER,
                 };
                 *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // role_list: RoleSpec | role_list ',' RoleSpec
+            2462 => {
+                let n = view.v(1).node().expect("RoleSpec");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, n)?);
+            }
+            2463 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("RoleSpec"))?;
+                *yyval = YYSTYPE::List(list);
             }
             968 | 970 => *yyval = YYSTYPE::Boolean(false),
             969 => *yyval = YYSTYPE::Boolean(true),
