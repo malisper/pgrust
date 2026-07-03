@@ -77,8 +77,7 @@ enum SortVariant {
     Heap {
         tup_desc: std::rc::Rc<TupleDescData<'static>>,
     },
-    // byref_typlen: 0 = by-value datums (tuple stays NULL); -1/positive =
-    // by-ref datums copied into tuplecontext at put (C base->tuples).
+    // byref_typlen 0 = by-value; else datums copy into tuplecontext (C base->tuples).
     Datum { byref_typlen: i16 },
     Index {
         tup_desc: std::rc::Rc<TupleDescData<'static>>,
@@ -674,8 +673,7 @@ impl Tuplesort {
                 let datum1 = if is_null { Datum::null() } else { val };
                 return st.puttuple_common(core::ptr::null_mut(), datum1, is_null, 0);
             }
-            // C datumCopy into tuplecontext; the copy is the canonical value
-            // (tuplesort_getdatum returns it, valid until reset/end).
+            // C datumCopy: the copy is canonical, valid until reset/end.
             let src = val.as_usize() as *const u8;
             // SAFETY: a non-null by-ref datum is readable for its full size.
             let size = unsafe {

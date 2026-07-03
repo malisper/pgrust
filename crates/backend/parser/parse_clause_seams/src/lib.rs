@@ -5,7 +5,6 @@ use types_error::PgResult;
 use types_nodes::NodeList;
 
 seam_core::seam!(
-    // -> (aggorder, aggdistinct, recomputed non-junk arg type oids).
     pub fn transform_agg_order_distinct<'a, 'p, 'mcx>(
         mcx: Mcx<'mcx>,
         pstate: &'a mut ParseState<'p, 'mcx>,
