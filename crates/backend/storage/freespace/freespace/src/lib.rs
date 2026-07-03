@@ -132,8 +132,41 @@ pub fn XLogRecordPageWithFreeSpace(
     Ok(())
 }
 
-pub fn FreeSpaceMapPrepareTruncateRel(_rel: &RelationData<'_>, _nblocks: BlockNumber) -> ! {
-    unported("FreeSpaceMapPrepareTruncateRel (rel truncate lane, freespace.c)");
+// InRecovery arm unreachable (redo path unported for smgr truncate callers).
+pub fn FreeSpaceMapPrepareTruncateRel(
+    rel: &RelationData<'_>,
+    nblocks: BlockNumber,
+) -> PgResult<BlockNumber> {
+    let rlocator = bufmgr_seams::relation_smgr_locator::call(rel);
+    if !smgr_seams::smgr_exists::call(rlocator, ForkNumber::FSM_FORKNUM)? {
+        return Ok(InvalidBlockNumber);
+    }
+
+    let (first_removed_address, first_removed_slot) = fsm_get_location(nblocks);
+
+    if first_removed_slot > 0 {
+        let Some(pin) = fsm_readbuf(rel, first_removed_address, false)? else {
+            return Ok(InvalidBlockNumber);
+        };
+        let guard = pin.lock_exclusive()?;
+        // SAFETY: exclusive content lock held for `guard`'s lifetime.
+        let page =
+            unsafe { FsmPage::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+        fsm_truncate_avail(page, first_removed_slot as i32);
+        bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;
+        if relation_needs_wal(rel) && xlog_hint_bit_is_needed() {
+            xloginsert_seams::log_newpage_buffer::call(pin.buffer(), false)?;
+        }
+        guard.unlock();
+        pin.release();
+        Ok(fsm_logical_to_physical(first_removed_address) + 1)
+    } else {
+        let new_nfsmblocks = fsm_logical_to_physical(first_removed_address);
+        if smgr_seams::smgr_nblocks::call(rlocator, ForkNumber::FSM_FORKNUM)? <= new_nfsmblocks {
+            return Ok(InvalidBlockNumber);
+        }
+        Ok(new_nfsmblocks)
+    }
 }
 
 pub fn FreeSpaceMapVacuum(rel: &RelationData<'_>) -> PgResult<()> {
@@ -503,6 +536,24 @@ fn invalid_fsm_request_size(needed: Size) -> Box<PgError> {
 
 #[cold]
 #[inline(never)]
+// RelationNeedsWAL (rel.h) / XLogHintBitIsNeeded (xlog.h); uninstalled
+// slots read as boot defaults (bufmgr precedent).
+fn relation_needs_wal(rel: &RelationData<'_>) -> bool {
+    let xlog_is_needed = guc_tables::vars::wal_level.installed()
+        && guc_tables::vars::wal_level.read() >= 1;
+    rel.rd_rel.relpersistence == types_core::RELPERSISTENCE_PERMANENT
+        && (xlog_is_needed
+            || (rel.rd_createSubid.get() == types_core::InvalidSubTransactionId
+                && rel.rd_firstRelfilelocatorSubid.get()
+                    == types_core::InvalidSubTransactionId))
+}
+
+fn xlog_hint_bit_is_needed() -> bool {
+    (guc_tables::vars::wal_log_hints.installed() && guc_tables::vars::wal_log_hints.read())
+        || (transam_xlog_seams::data_checksums_enabled::is_installed()
+            && transam_xlog_seams::data_checksums_enabled::call())
+}
+
 fn unported(unit: &'static str) -> ! {
     panic!("unported callee reached from freespace.c: {unit}");
 }
