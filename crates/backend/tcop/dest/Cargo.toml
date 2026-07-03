@@ -18,3 +18,4 @@ printtup = { path = "../../access/common/printtup" }
 tstore_receiver = { path = "../../executor/tstore_receiver" }
 pqformat = { path = "../../libpq/pqformat" }
 xact_seams = { path = "../../access/transam/xact_seams" }
+spi_seams = { path = "../../executor/spi_seams" }
