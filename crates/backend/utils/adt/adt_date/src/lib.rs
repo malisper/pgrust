@@ -139,6 +139,10 @@ struct Decoded {
     tz: i32,
 }
 
+// Inlined: a by-value Decoded return across an outlined call is an sret
+// buffer whose narrow stores stall the caller's reload on Neoverse V2
+// (bench-crate §3b; date_in_iso measured 1.20x ns at instr parity before).
+#[inline(always)]
 fn decode_str(
     s: &str,
     workbuf: &mut [u8; DATE_WORKBUF],

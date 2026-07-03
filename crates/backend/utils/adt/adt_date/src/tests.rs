@@ -5,6 +5,9 @@ use types_error::{ERRCODE_DATETIME_FIELD_OVERFLOW, ERRCODE_INVALID_DATETIME_FORM
 fn gmt_session() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
+        // SAFETY: single-threaded test init, before any getenv (adt_datetime
+        // tests' precedent).
+        unsafe { std::env::set_var("PGRUST_TZDIR", "/usr/share/zoneinfo") };
         pgtz::init_seams();
         guc_tables::init_seams();
         elog::init_seams();
