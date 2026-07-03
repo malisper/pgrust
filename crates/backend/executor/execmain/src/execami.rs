@@ -110,6 +110,9 @@ pub fn exec_re_scan<'mcx>(
             ::nodelimit::exec_rescan_limit(state, &mut **outer, estate)?;
             exec_re_scan(outer, estate)
         }
+        // ExecReScanLockRows: child rescanned when its chgParam is NULL
+        // (always, until the Param lanes land).
+        PlanStateNode::LockRows(l) => exec_re_scan(&mut l.outer, estate),
         // ExecReScanBitmapHeapScan: bitmapqual rescanned when chgParam is
         // NULL (always, until the Param lanes land).
         PlanStateNode::BitmapHeapScan(b) => {

@@ -49,6 +49,7 @@ pub fn init_all() {
     nodesort::init_seams();
     nodeunique::init_seams();
     nodelimit::init_seams();
+    nodelockrows::init_seams();
     nodenestloop::init_seams();
     nodemergejoin::init_seams();
     nodematerial::init_seams();

@@ -153,6 +153,7 @@ members = [
     "crates/backend/executor/nodeappend",
     "crates/backend/executor/nodesetop",
     "crates/backend/executor/nodelimit",
+    "crates/backend/executor/nodelockrows",
     "crates/backend/executor/nodehash",
     "crates/backend/executor/nodehashjoin",
     "crates/backend/executor/nodematerial",

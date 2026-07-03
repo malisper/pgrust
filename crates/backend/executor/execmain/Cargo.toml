@@ -63,6 +63,8 @@ backend_status_seams = { path = "../../utils/activity/backend_status_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 datum = { path = "../../../_support/types/datum" }
+types_rel = { path = "../../../_support/types/rel" }
+nodelockrows = { path = "../nodelockrows" }
 
 [dev-dependencies]
 syscache_seams = { path = "../../utils/cache/syscache_seams" }

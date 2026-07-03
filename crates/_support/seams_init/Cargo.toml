@@ -57,6 +57,7 @@ nodewindowagg = { path = "../../backend/executor/nodewindowagg" }
 nodesort = { path = "../../backend/executor/nodesort" }
 nodeunique = { path = "../../backend/executor/nodeunique" }
 nodelimit = { path = "../../backend/executor/nodelimit" }
+nodelockrows = { path = "../../backend/executor/nodelockrows" }
 nodenestloop = { path = "../../backend/executor/nodenestloop" }
 nodemergejoin = { path = "../../backend/executor/nodemergejoin" }
 nodematerial = { path = "../../backend/executor/nodematerial" }

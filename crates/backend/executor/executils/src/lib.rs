@@ -40,9 +40,25 @@ macro_rules! p3 {
 // Unconstructible placeholders: provably None until the owning unit lands.
 p3!(
     PartPruneP3,
-    RowMarkP3,
     ModifyTableP3,
 );
+
+/// C ExecRowMark (execnodes.h). The open relation is es_relations[rti-1]
+/// (C stores the same pointer ExecGetRangeTableRelation returns); ermExtra
+/// belongs to FDW rowmarks, loud upstream.
+#[derive(Debug, Clone, Copy)]
+#[allow(non_snake_case)]
+pub struct ExecRowMark {
+    pub relid: ::types_core::Oid,
+    pub rti: u32,
+    pub prti: u32,
+    pub rowmarkId: u32,
+    pub markType: ::types_nodes::plannodes::RowMarkType,
+    pub strength: ::types_nodes::LockClauseStrength,
+    pub waitPolicy: ::types_nodes::LockWaitPolicy,
+    pub ermActive: bool,
+    pub curCtid: ::types_tuple::ItemPointerData,
+}
 
 /// C `PlanState *` cell of es_subplanstates, type-erased against the
 /// executils<->execmain crate cycle (execmain owns both sides of the cast).
@@ -346,7 +362,7 @@ pub struct EStateData<'mcx> {
     pub es_range_table: PgVec<'mcx, &'mcx RangeTblEntry<'mcx>>,
     pub es_range_table_size: u32,
     pub es_relations: PgVec<'mcx, Option<Relation<'mcx>>>,
-    pub es_rowmarks: PgVec<'mcx, Option<RowMarkP3>>,
+    pub es_rowmarks: PgVec<'mcx, Option<ExecRowMark>>,
     pub es_rteperminfos: Option<&'mcx NodeList<'mcx>>,
     pub es_plannedstmt: Option<&'mcx PlannedStmt<'mcx>>,
     pub es_part_prune_infos: Option<PartPruneP3>,
