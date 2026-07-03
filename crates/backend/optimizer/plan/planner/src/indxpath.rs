@@ -26,10 +26,6 @@ impl<'mcx> IndexClauseSet<'mcx> {
     }
 }
 
-// check_index_predicates (indxpath.c). generate_join_implied_equalities is a
-// no-op under eclass-lite ECs (joinrels.rs note): derivable join equalities
-// stay in joininfo, which the movable-clause scan below already covers; the
-// richer-EC case stays loud.
 pub fn check_index_predicates<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<()> {
     let mcx = run.mcx;
     let nindexes = run.root.rel(rel).indexlist.len();
