@@ -41,8 +41,6 @@ SELECT x, a, b, c, y FROM t6;
 INSERT INTO t6 (a) VALUES (-5);
 
 CREATE TABLE t7 (LIKE t1 INCLUDING COMMENTS);
-SELECT objsubid, description FROM pg_description
- WHERE objoid = (SELECT oid FROM pg_class WHERE relname = 't7');
 
 CREATE TABLE t8 (LIKE t1 EXCLUDING ALL);
 INSERT INTO t8 (b) VALUES ('nodefault');
