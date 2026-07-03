@@ -1001,8 +1001,7 @@ pub fn AcquireRewriteLocks<'mcx>(
     forExecute: bool,
     forUpdatePushedDown: bool,
 ) -> PgResult<()> {
-    for (i, node) in parsetree.rtable.iter().enumerate() {
-        let rt_index = i as i32 + 1;
+    for node in parsetree.rtable.iter() {
         let rtekind = rte_of(node).rtekind;
         match rtekind {
             RTEKind::RTE_RELATION => {
@@ -1029,39 +1028,12 @@ pub fn AcquireRewriteLocks<'mcx>(
                 unsafe { node.with_mut::<RangeTblEntry, _>(|r| r.relkind = relkind) };
             }
             RTEKind::RTE_JOIN => {
-                // C rebuilds joinaliasvars with dropped-column Vars replaced
-                // by NULL cells; NodeList has no NULL cell, so the (initdb-
-                // impossible for system views) dropped hit is a loud panic
-                // and the no-drop path leaves the list shared, unrebuilt.
-                let rte = rte_of(node);
-                let mut curinputvarno: i32 = 0;
-                let mut curinputrte: Option<&RangeTblEntry<'mcx>> = None;
-                for aliasitem in &rte.joinaliasvars {
-                    let aliasvar = nodes_core::strip_implicit_coercions(aliasitem);
-                    let Some(v) = aliasvar.as_var() else { continue };
-                    debug_assert_eq!(v.varlevelsup, 0);
-                    if v.varno != curinputvarno {
-                        curinputvarno = v.varno;
-                        if curinputvarno >= rt_index {
-                            return Err(internal_error(&format!(
-                                "unexpected varno {curinputvarno} in JOIN RTE {rt_index}"
-                            )));
-                        }
-                        curinputrte =
-                            Some(rte_of(parsetree.rtable.nth(curinputvarno as usize - 1)));
-                    }
-                    if get_rte_attribute_is_dropped(
-                        mcx,
-                        curinputrte.expect("input RTE resolved"),
-                        v.varattno,
-                    )? {
-                        panic!(
-                            "AcquireRewriteLocks (rewriteHandler.c): joinaliasvars entry \
-                             references a dropped column; the NULL-cell replacement has \
-                             no NodeList representation"
-                        );
-                    }
-                }
+                panic!(
+                    "AcquireRewriteLocks (rewriteHandler.c): dropped-column fixup of \
+                     joinaliasvars needs strip_implicit_coercions (nodeFuncs.c) + \
+                     get_rte_attribute_is_dropped — both still missing from the landed \
+                     nodes_core/parse_relation crates"
+                );
             }
             RTEKind::RTE_SUBQUERY => {
                 let pushed_down = forUpdatePushedDown || {
@@ -1100,93 +1072,4 @@ pub fn AcquireRewriteLocks<'mcx>(
 
 fn rte_of<'mcx>(node: Node<'mcx>) -> &'mcx RangeTblEntry<'mcx> {
     node.as_range_tbl_entry().expect("rtable holds RangeTblEntry nodes")
-}
-
-// get_rte_attribute_is_dropped (parse_relation.c); lives here until the
-// parse_relation crate grows the expression-vocabulary deps it needs.
-fn get_rte_attribute_is_dropped<'mcx>(
-    mcx: Mcx<'mcx>,
-    rte: &RangeTblEntry<'mcx>,
-    attnum: i16,
-) -> PgResult<bool> {
-    const ANUM_PG_ATTRIBUTE_ATTISDROPPED: i32 = 17;
-    match rte.rtekind {
-        RTEKind::RTE_RELATION => {
-            let Some(tp) = cache_syscache::SearchSysCache2(
-                cache_syscache::ATTNUM,
-                cache_syscache::SysCacheKey::Value(datum::Datum::from_oid(rte.relid)),
-                cache_syscache::SysCacheKey::Value(datum::Datum::from_i16(attnum)),
-            )?
-            else {
-                return Err(internal_error(&format!(
-                    "cache lookup failed for attribute {attnum} of relation {}",
-                    rte.relid
-                )));
-            };
-            let (d, _) = cache_syscache::SysCacheGetAttr(
-                cache_syscache::ATTNUM,
-                &tp,
-                ANUM_PG_ATTRIBUTE_ATTISDROPPED,
-            )?;
-            let dropped = d.as_bool();
-            cache_syscache::ReleaseSysCache(tp);
-            Ok(dropped)
-        }
-        RTEKind::RTE_SUBQUERY
-        | RTEKind::RTE_TABLEFUNC
-        | RTEKind::RTE_VALUES
-        | RTEKind::RTE_CTE
-        | RTEKind::RTE_GROUP => Ok(false),
-        RTEKind::RTE_NAMEDTUPLESTORE => {
-            if attnum <= 0 || attnum as usize > rte.coltypes.len() {
-                return Err(internal_error(&format!("invalid varattno {attnum}")));
-            }
-            Ok(rte.coltypes.nth(attnum as usize - 1) == InvalidOid)
-        }
-        RTEKind::RTE_JOIN => {
-            if attnum <= 0 || attnum as usize > rte.joinaliasvars.len() {
-                return Err(internal_error(&format!("invalid varattno {attnum}")));
-            }
-            // C signals dropped via a NULL joinaliasvars cell; NodeList cells
-            // are non-null, so nothing here can be dropped.
-            Ok(false)
-        }
-        RTEKind::RTE_FUNCTION => {
-            let mut atts_done: i16 = 0;
-            for f in &rte.functions {
-                let rtfunc = f.as_range_tbl_function().expect("functions holds RangeTblFunction");
-                let colcount = rtfunc.funccolcount as i16;
-                if attnum > atts_done && attnum <= atts_done + colcount {
-                    if !rtfunc.funccolnames.is_nil() {
-                        return Ok(false);
-                    }
-                    if let Some(tupdesc) =
-                        funcapi::get_expr_result_tupdesc(mcx, rtfunc.funcexpr, true)?
-                    {
-                        debug_assert!((attnum - atts_done) as i32 <= tupdesc.natts);
-                        return Ok(tupdesc.attr((attnum - atts_done - 1) as usize).attisdropped);
-                    }
-                    return Ok(false);
-                }
-                atts_done += colcount;
-            }
-            if rte.funcordinality && attnum == atts_done + 1 {
-                return Ok(false);
-            }
-            Err(Box::new(
-                PgError::error(format!(
-                    "column {attnum} of relation \"{}\" does not exist",
-                    rte.eref.and_then(|e| e.aliasname).unwrap_or("")
-                ))
-                .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN),
-            ))
-        }
-        RTEKind::RTE_RESULT => Err(Box::new(
-            PgError::error(format!(
-                "column {attnum} of relation \"{}\" does not exist",
-                rte.eref.and_then(|e| e.aliasname).unwrap_or("")
-            ))
-            .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN),
-        )),
-    }
 }

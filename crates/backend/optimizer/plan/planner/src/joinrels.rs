@@ -44,12 +44,14 @@ pub fn standard_join_search<'mcx>(
     levels_needed: usize,
     initial_rels: PgVec<'mcx, RelId>,
 ) -> PgResult<RelId> {
+    assert!(
+        levels_needed == 2,
+        "standard_join_search (allpaths.c): {levels_needed}-way join; M2 multi-join lane"
+    );
     debug_assert!(run.root.join_rel_level.is_empty());
     run.root.join_rel_level.push(PgVec::new_in(run.mcx));
     run.root.join_rel_level.push(initial_rels);
-    for _ in 2..=levels_needed {
-        run.root.join_rel_level.push(PgVec::new_in(run.mcx));
-    }
+    run.root.join_rel_level.push(PgVec::new_in(run.mcx));
 
     for lev in 2..=levels_needed {
         join_search_one_level(run, lev)?;
@@ -74,67 +76,24 @@ pub fn standard_join_search<'mcx>(
 }
 
 fn join_search_one_level(run: &mut PlannerRun<'_>, level: usize) -> PgResult<()> {
-    debug_assert!(run.root.join_rel_level[level].is_empty());
+    debug_assert!(level == 2);
     run.root.join_cur_level = level as i32;
-    let prev = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.join_rel_level[level - 1]);
-    let ones = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.join_rel_level[1]);
-
+    let prev = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.join_rel_level[1]);
     for (i, &old_rel) in prev.iter().enumerate() {
-        let has_clauses = !run.root.rel(old_rel).joininfo.is_empty()
+        let restricted = !run.root.rel(old_rel).joininfo.is_empty()
             || run.root.rel(old_rel).has_eclass_joins
             || has_join_restriction(run, old_rel);
-        let others: &[RelId] = if level == 2 { &ones[i + 1..] } else { &ones[..] };
-        for &other_rel in others {
-            if relids_overlap(&run.root.rel(old_rel).relids, &run.root.rel(other_rel).relids) {
-                continue;
-            }
-            if !has_clauses
-                || have_relevant_joinclause(run, old_rel, other_rel)
-                || have_join_order_restriction(run, old_rel, other_rel)
+        for &other_rel in prev[i + 1..].iter() {
+            let overlap = relids_overlap(
+                &run.root.rel(old_rel).relids,
+                &run.root.rel(other_rel).relids,
+            );
+            if !overlap
+                && (!restricted
+                    || have_relevant_joinclause(run, old_rel, other_rel)
+                    || have_join_order_restriction(run, old_rel, other_rel))
             {
                 make_join_rel(run, old_rel, other_rel)?;
-            }
-        }
-    }
-
-    // Bushy plans: join k-level rels to (level-k)-level rels.
-    for k in 2.. {
-        let other_level = level - k;
-        if k > other_level {
-            break;
-        }
-        let krels = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.join_rel_level[k]);
-        let orels =
-            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.join_rel_level[other_level]);
-        for (i, &old_rel) in krels.iter().enumerate() {
-            if run.root.rel(old_rel).joininfo.is_empty()
-                && !run.root.rel(old_rel).has_eclass_joins
-                && !has_join_restriction(run, old_rel)
-            {
-                continue;
-            }
-            let others: &[RelId] = if k == other_level { &orels[i + 1..] } else { &orels[..] };
-            for &new_rel in others {
-                if relids_overlap(&run.root.rel(old_rel).relids, &run.root.rel(new_rel).relids) {
-                    continue;
-                }
-                if have_relevant_joinclause(run, old_rel, new_rel)
-                    || have_join_order_restriction(run, old_rel, new_rel)
-                {
-                    make_join_rel(run, old_rel, new_rel)?;
-                }
-            }
-        }
-    }
-
-    // Last-ditch: Cartesian products against the initial rels.
-    if run.root.join_rel_level[level].is_empty() {
-        for &old_rel in prev.iter() {
-            for &other_rel in ones.iter() {
-                if !relids_overlap(&run.root.rel(old_rel).relids, &run.root.rel(other_rel).relids)
-                {
-                    make_join_rel(run, old_rel, other_rel)?;
-                }
             }
         }
     }
@@ -225,11 +184,7 @@ pub fn init_dummy_sjinfo<'mcx>(
     }
 }
 
-pub fn make_join_rel(
-    run: &mut PlannerRun<'_>,
-    rel1: RelId,
-    rel2: RelId,
-) -> PgResult<Option<RelId>> {
+pub fn make_join_rel(run: &mut PlannerRun<'_>, rel1: RelId, rel2: RelId) -> PgResult<RelId> {
     debug_assert!(!relids_overlap(&run.root.rel(rel1).relids, &run.root.rel(rel2).relids));
     if is_dummy_rel(&run.root, rel1) || is_dummy_rel(&run.root, rel2) {
         panic!(
@@ -242,10 +197,8 @@ pub fn make_join_rel(
         &run.root.rel(rel1).relids,
         &run.root.rel(rel2).relids,
     );
-    // C returns NULL for an illegal pair; the search loops just skip it.
-    let Some((match_sjinfo, reversed)) = join_is_legal(run, rel1, rel2, &joinrelids)? else {
-        return Ok(None);
-    };
+    let (match_sjinfo, reversed) = join_is_legal(run, rel1, rel2, &joinrelids)?
+        .unwrap_or_else(|| panic!("make_join_rel (joinrels.c): invalid join path attempted"));
 
     if let Some(sj) = &match_sjinfo {
         if sj.ojrelid != 0 {
@@ -313,7 +266,7 @@ pub fn make_join_rel(
              covers INNER/LEFT/SEMI/ANTI"
         ),
     }
-    Ok(Some(joinrel))
+    Ok(joinrel)
 }
 
 // join_is_legal (joinrels.c): None = illegal. The LATERAL legs are dead;

@@ -1,5 +1,4 @@
-// tablecmds.c on_commits machinery. LOUD: ONCOMMIT_DELETE_ROWS pre-commit
-// truncation (heap_truncate rides with the TRUNCATE lane).
+// tablecmds.c on_commits machinery.
 use std::cell::RefCell;
 
 use mcx::{Mcx, MemoryContext};
@@ -65,7 +64,9 @@ pub fn PreCommit_on_commit_actions() -> PgResult<()> {
     });
 
     if !oids_to_truncate.is_empty() {
-        panic!("unported: tablecmds heap_truncate (ON COMMIT DELETE ROWS; TRUNCATE lane)");
+        let scratch = MemoryContext::new("PreCommit_on_commit_actions");
+        let mcx: Mcx<'_> = scratch.mcx();
+        catalog_heap::heap_truncate(mcx, &oids_to_truncate)?;
     }
 
     if !oids_to_drop.is_empty() {

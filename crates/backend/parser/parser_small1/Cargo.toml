@@ -16,7 +16,6 @@ libc = "0.2"
 lsyscache = { path = "../../utils/cache/lsyscache" }
 mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
-adt_varbit = { path = "../../utils/adt/varbit" }
 adt_numeric = { path = "../../utils/adt/numeric" }
 numutils = { path = "../../utils/adt/numutils" }
 queryenvironment = { path = "../../utils/misc/queryenvironment" }

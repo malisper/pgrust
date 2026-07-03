@@ -97,12 +97,6 @@ fn my_temp_toast_namespace() -> Oid {
     MY_TEMP_TOAST_NAMESPACE.with(Cell::get)
 }
 
-#[cold]
-#[inline(never)]
-pub(crate) fn deferred(what: &str) -> ! {
-    panic!("catalog_namespace: {what} is not ported (namespace.c temp-namespace-creation/DDL half)")
-}
-
 pub fn isTempNamespace(namespaceId: Oid) -> bool {
     let mtn = my_temp_namespace();
     OidIsValid(mtn) && mtn == namespaceId

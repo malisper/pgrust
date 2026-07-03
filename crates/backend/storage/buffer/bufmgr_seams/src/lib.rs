@@ -207,7 +207,6 @@ seam_core::seam!(
 );
 
 pub mod pin;
-pub mod targblock;
 pub use pin::{BufferPin, ContentLockGuard};
 
 // C's `extern char *BufferBlocks` header global: keeps BufferGetPage a header

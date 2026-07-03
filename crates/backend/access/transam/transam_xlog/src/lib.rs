@@ -29,7 +29,7 @@ pub use control_file::{
 };
 pub use ctl::{XLOGShmemInit, XLOGShmemResetAfterCrash, XLOGShmemSize};
 pub use insert::{
-    GetFullPageWriteInfo, GetInsertRecPtr, GetLastImportantRecPtr, GetRedoRecPtr, GetXLogInsertRecPtr,
+    GetFullPageWriteInfo, GetInsertRecPtr, GetLastImportantRecPtr, GetRedoRecPtr,
     RecoveryInProgress, XLogInsertAllowed, XLogInsertRecord,
 };
 pub use startup::{CreateCheckPoint, ShutdownXLOG, StartupXLOG, UpdateFullPageWrites};

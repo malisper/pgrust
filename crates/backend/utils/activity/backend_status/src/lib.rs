@@ -1,16 +1,13 @@
 #![allow(non_snake_case)]
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::sync::atomic::{fence, AtomicI32, Ordering::Acquire, Ordering::Relaxed};
 use std::sync::OnceLock;
 
 use init_small::globals as g;
 use ip::SockAddr;
 use types_core::init::BackendType;
-use types_core::{
-    InvalidOid, InvalidTransactionId, Oid, ProcNumber, TimestampTz, TransactionId,
-    INVALID_PROC_NUMBER, NAMEDATALEN,
-};
+use types_core::{Oid, ProcNumber, TimestampTz, InvalidOid, NAMEDATALEN, INVALID_PROC_NUMBER};
 use types_error::PgResult;
 use types_storage::storage::{SyncCell, NUM_AUXILIARY_PROCS};
 
@@ -563,134 +560,9 @@ pub fn appname_of(beentry: &PgBackendStatus) -> String {
     name_to_string(&beentry.st_appname.get())
 }
 
-#[derive(Clone)]
-pub struct LocalPgBackendStatus {
-    pub st_procpid: i32,
-    pub st_backendType: BackendType,
-    pub st_proc_start_timestamp: TimestampTz,
-    pub st_xact_start_timestamp: TimestampTz,
-    pub st_activity_start_timestamp: TimestampTz,
-    pub st_state_start_timestamp: TimestampTz,
-    pub st_databaseid: Oid,
-    pub st_userid: Oid,
-    pub st_clientaddr: SockAddr,
-    pub st_clienthostname: String,
-    pub st_ssl: bool,
-    pub st_gss: bool,
-    pub st_state: BackendState,
-    pub st_appname: String,
-    pub st_activity_raw: String,
-    pub st_progress_command: i32,
-    pub st_progress_command_target: Oid,
-    pub st_progress_param: [i64; PGSTAT_NUM_PROGRESS_PARAM],
-    pub st_query_id: i64,
-    pub st_plan_id: i64,
-    pub proc_number: ProcNumber,
-    pub backend_xid: TransactionId,
-    pub backend_xmin: TransactionId,
-    pub backend_subxact_count: i32,
-    pub backend_subxact_overflowed: bool,
-}
-
-thread_local! {
-    // Cold stats path: std Vec/String stand in for C's palloc'd
-    // localBackendStatusTable, which also lives outside the query arenas.
-    static LOCAL_BACKEND_STATUS_TABLE: RefCell<Option<Vec<LocalPgBackendStatus>>> =
-        const { RefCell::new(None) };
-}
-
-// Ascending-slot iteration keeps the table sorted by proc_number;
-// pgstat_get_beentry_by_proc_number's binary search depends on that.
-fn pgstat_read_current_status() {
-    if LOCAL_BACKEND_STATUS_TABLE.with(|t| t.borrow().is_some()) {
-        return;
-    }
-    let array = backend_status_array();
-    let mut table: Vec<LocalPgBackendStatus> = Vec::new();
-    for (slot, beentry) in array.iter().enumerate() {
-        let entry = loop {
-            let before = begin_read_activity(beentry);
-            let procpid = beentry.st_procpid.get();
-            // Skip the copy work if the entry is not in use, but still
-            // validate the changecount bracket, as C does.
-            let entry = (procpid > 0).then(|| LocalPgBackendStatus {
-                st_procpid: procpid,
-                st_backendType: beentry.st_backendType.get(),
-                st_proc_start_timestamp: beentry.st_proc_start_timestamp.get(),
-                st_xact_start_timestamp: beentry.st_xact_start_timestamp.get(),
-                st_activity_start_timestamp: beentry.st_activity_start_timestamp.get(),
-                st_state_start_timestamp: beentry.st_state_start_timestamp.get(),
-                st_databaseid: beentry.st_databaseid.get(),
-                st_userid: beentry.st_userid.get(),
-                st_clientaddr: beentry.st_clientaddr.get(),
-                st_clienthostname: name_to_string(&beentry.st_clienthostname.get()),
-                st_ssl: beentry.st_ssl.get(),
-                st_gss: beentry.st_gss.get(),
-                st_state: beentry.st_state.get(),
-                st_appname: name_to_string(&beentry.st_appname.get()),
-                st_activity_raw: String::from_utf8_lossy(&read_activity(beentry.slot))
-                    .into_owned(),
-                st_progress_command: beentry.st_progress_command.get(),
-                st_progress_command_target: beentry.st_progress_command_target.get(),
-                st_progress_param: std::array::from_fn(|i| beentry.st_progress_param[i].get()),
-                st_query_id: beentry.st_query_id.get(),
-                st_plan_id: beentry.st_plan_id.get(),
-                proc_number: slot as ProcNumber,
-                backend_xid: InvalidTransactionId,
-                backend_xmin: InvalidTransactionId,
-                backend_subxact_count: 0,
-                backend_subxact_overflowed: false,
-            });
-            let after = end_read_activity(beentry);
-            if read_activity_complete(before, after) {
-                break entry;
-            }
-            std::hint::spin_loop();
-        };
-        if let Some(mut local) = entry {
-            let (xid, xmin, nsubxid, overflowed) =
-                procarray::ProcNumberGetTransactionIds(local.proc_number);
-            local.backend_xid = xid;
-            local.backend_xmin = xmin;
-            local.backend_subxact_count = nsubxid;
-            local.backend_subxact_overflowed = overflowed;
-            table.push(local);
-        }
-    }
-    LOCAL_BACKEND_STATUS_TABLE.with(|t| *t.borrow_mut() = Some(table));
-}
-
-pub fn pgstat_fetch_stat_numbackends() -> i32 {
-    pgstat_read_current_status();
-    LOCAL_BACKEND_STATUS_TABLE.with(|t| t.borrow().as_ref().unwrap().len() as i32)
-}
-
-// C hands out pointers into the local table; owned clones per row on this
-// cold stats path.
-pub fn pgstat_get_local_beentry_by_index(idx: i32) -> Option<LocalPgBackendStatus> {
-    pgstat_read_current_status();
-    if idx < 1 {
-        return None;
-    }
-    LOCAL_BACKEND_STATUS_TABLE
-        .with(|t| t.borrow().as_ref().unwrap().get(idx as usize - 1).cloned())
-}
-
-pub fn pgstat_get_beentry_by_proc_number(proc_number: ProcNumber) -> Option<LocalPgBackendStatus> {
-    pgstat_read_current_status();
-    LOCAL_BACKEND_STATUS_TABLE.with(|t| {
-        let table = t.borrow();
-        let table = table.as_ref().unwrap();
-        table
-            .binary_search_by_key(&proc_number, |e| e.proc_number)
-            .ok()
-            .map(|i| table[i].clone())
-    })
-}
-
-pub fn pgstat_clear_backend_status_snapshot() {
-    LOCAL_BACKEND_STATUS_TABLE.with(|t| *t.borrow_mut() = None);
-}
+// The transaction-local snapshot half (pgstat_read_current_status and the
+// localBackendStatusTable accessors) lands with its only consumer, the
+// pg_stat_activity SRF unit; it needs procarray's ProcNumberGetTransactionIds.
 
 // The two GUCs backend_status.c owns; C static initializers, overwritten by
 // GUC boot values.
@@ -718,5 +590,4 @@ pub fn init_seams() {
     s::pgstat_report_query_id::set(pgstat_report_query_id);
     s::pgstat_report_plan_id::set(pgstat_report_plan_id);
     s::pgstat_report_xact_timestamp::set(pgstat_report_xact_timestamp);
-    s::pgstat_clear_backend_status_snapshot::set(pgstat_clear_backend_status_snapshot);
 }

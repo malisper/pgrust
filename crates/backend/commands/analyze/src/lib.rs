@@ -36,6 +36,8 @@ const ANUM_PG_STATISTIC_STAVALUES1: usize = 27;
 
 const FLOAT4OID: Oid = 700;
 const WIDTH_THRESHOLD: usize = 1024;
+// default_statistics_target GUC; unregistered in guc_tables, boot default.
+const DEFAULT_STATISTICS_TARGET: i32 = 100;
 
 const SHARE_UPDATE_EXCLUSIVE_LOCK: types_rel::LOCKMODE = 4;
 const ROW_EXCLUSIVE_LOCK: types_rel::LOCKMODE = 3;
@@ -219,27 +221,12 @@ fn do_analyze_rel(
         }
     }
 
-    let mut colstats: PgVec<'_, statistics::ColStats> = PgVec::new_in(anl_mcx);
-    for s in vacattrstats.iter() {
-        colstats.push(statistics::ColStats {
-            tupattnum: s.tupattnum,
-            attstattarget: s.attstattarget,
-            attrtypid: s.attrtypid,
-            attrcollid: s.attrcollid,
-            typlen: s.typlen,
-            typbyval: s.typbyval,
-        });
-    }
-
+    // ComputeExtStatisticsRows: no CREATE STATISTICS lane, so no extended
+    // statistics objects can exist; contributes 0.
     let mut targrows: i32 = 100;
     for s in vacattrstats.iter() {
         targrows = targrows.max(s.minrows);
     }
-    targrows = targrows.max(statistics::ComputeExtStatisticsRows(
-        anl_mcx,
-        onerel.rd_id,
-        &colstats,
-    )?);
 
     let mut totalrows = 0.0f64;
     let mut totaldeadrows = 0.0f64;
@@ -267,15 +254,6 @@ fn do_analyze_rel(
             col_cx.reset();
         }
         update_attstats(onerel.rd_id, false, &vacattrstats)?;
-
-        statistics::BuildRelationExtStatistics(
-            anl_mcx,
-            onerel,
-            false,
-            totalrows,
-            &rows[..numrows as usize],
-            &colstats,
-        )?;
     }
 
     let (relallvisible, relallfrozen) = visibilitymap::visibilitymap_count(onerel)?;
@@ -367,7 +345,7 @@ fn examine_attribute<'mcx>(
 
 fn std_typanalyze(stats: &mut VacAttrStats<'_>) -> PgResult<bool> {
     if stats.attstattarget < 0 {
-        stats.attstattarget = guc_tables::vars::default_statistics_target.read();
+        stats.attstattarget = DEFAULT_STATISTICS_TARGET;
     }
     let entry = typcache::lookup_type_cache(
         stats.attrtypid,
@@ -1075,15 +1053,4 @@ mod tests {
         let counts = [15000, 9000, 6000];
         assert_eq!(analyze_mcv_list(&counts, 3, 103.0, 0.0, 30000, 1_000_000.0), 3);
     }
-}
-
-static DEFAULT_STATISTICS_TARGET: std::sync::atomic::AtomicI32 =
-    std::sync::atomic::AtomicI32::new(100);
-
-pub fn init_seams() {
-    use std::sync::atomic::Ordering::Relaxed;
-    guc_tables::vars::default_statistics_target.install(guc_tables::GucVarAccessors {
-        get: || DEFAULT_STATISTICS_TARGET.load(Relaxed),
-        set: |v| DEFAULT_STATISTICS_TARGET.store(v, Relaxed),
-    });
 }

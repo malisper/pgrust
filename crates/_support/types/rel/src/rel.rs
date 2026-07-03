@@ -53,8 +53,6 @@ pub struct RelationData<'mcx> {
     // C rd_amcache, gin arm (resolved opclass dispatch; gin crate owns the
     // tag mapping — 0 == jsonb_ops).
     pub rd_amcache_gin: Cell<Option<RdAmCacheGin>>,
-    // C rd_support: nkey x amsupport support-proc OIDs, row-major.
-    pub rd_support: PgVec<'mcx, Oid>,
     // C rd_support/rd_supportinfo (rule-5 cache), resolved once per column;
     // std Vec justified: Rc-owned owner structure outside the arenas, FmgrInfo is droppy.
     pub rd_supportinfo: RefCell<Vec<Option<FmgrInfo>>>,
@@ -336,7 +334,6 @@ mod tests {
             rd_amcache: Default::default(),
             rd_amcache_hash: Default::default(),
             rd_amcache_gin: Default::default(),
-            rd_support: PgVec::new_in(mcx),
             rd_supportinfo: Default::default(),
             rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),

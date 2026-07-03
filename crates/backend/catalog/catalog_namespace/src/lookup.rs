@@ -410,10 +410,23 @@ pub fn RangeVarGetRelidExtended(
             inval_seams::accept_invalidation_messages::call()?;
         } else if (flags & (RVR_NOWAIT | RVR_SKIP_LOCKED)) == 0 {
             lmgr_seams::lock_relation_oid::call(relId, lockmode)?;
-        } else {
-            // No ConditionalLockRelationOid consumer in-tree; the
-            // parse/analyze spine never passes these flags.
-            crate::deferred("RangeVarGetRelidExtended RVR_NOWAIT/RVR_SKIP_LOCKED");
+        } else if !lmgr_seams::conditional_lock_relation_oid::call(relId, lockmode)? {
+            if (flags & RVR_SKIP_LOCKED) != 0 {
+                // C ereports DEBUG1 here; no elog-level channel below ERROR.
+                return Ok(InvalidOid);
+            }
+            let msg = match relation.schemaname {
+                Some(schema) => format!(
+                    "could not obtain lock on relation \"{schema}.{}\"",
+                    relation.relname
+                ),
+                None => format!("could not obtain lock on relation \"{}\"", relation.relname),
+            };
+            return Err(::elog::ereport(types_error::ERROR)
+                .errcode(types_error::ERRCODE_LOCK_NOT_AVAILABLE)
+                .errmsg(msg)
+                .into_error()
+                .into());
         }
 
         if inval_count == sinval::SharedInvalidMessageCounter() {

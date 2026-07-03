@@ -23,7 +23,6 @@ fn setup() {
         xact_seams::get_current_transaction_nest_level::set(|| NEST_LEVEL.with(|c| c.get()));
         xact_seams::get_current_transaction_stop_timestamp::set(|| NOW.with(|c| c.get()));
         xact_seams::is_transaction_or_transaction_block::set(|| false);
-        backend_status_seams::pgstat_clear_backend_status_snapshot::set(|| {});
         crate::init_seams();
     });
     SetMyDatabaseId(5);
@@ -434,127 +433,6 @@ fn session_end_cause_fatal_only_upgrades_normal() {
         database::pgstat_session_end_cause(),
         SessionEndType::DisconnectKilled
     );
-}
-
-#[test]
-fn flush_applies_to_shared_store_and_fetch_returns_sum() {
-    setup();
-    SetMyDatabaseId(601);
-    crate::set_pgstat_fetch_consistency(crate::PGSTAT_FETCH_CONSISTENCY_NONE);
-    relation::pgstat_count_heap_scan(6001, false);
-    relation::pgstat_count_heap_getnext(6001, false);
-    relation::pgstat_count_heap_insert(6001, false, 4);
-    xact::AtEOXact_PgStat(true, false);
-    assert_eq!(pending::pgstat_report_stat(true), 0);
-    relation::pgstat_count_heap_insert(6001, false, 1);
-    xact::AtEOXact_PgStat(true, false);
-    pending::pgstat_force_next_flush();
-    assert_eq!(pending::pgstat_report_stat(false), 0);
-
-    let t = relation::pgstat_fetch_stat_tabentry_ext(false, 6001).unwrap();
-    assert_eq!(t.numscans, 1);
-    assert_eq!(t.tuples_returned, 1);
-    assert_eq!(t.tuples_inserted, 5);
-    assert_eq!(t.live_tuples, 5);
-    assert_eq!(t.ins_since_vacuum, 5);
-    assert_eq!(t.mod_since_analyze, 5);
-    assert!(t.lastscan > 0);
-
-    let db = database::pgstat_fetch_stat_dbentry(601).unwrap();
-    assert_eq!(db.tuples_inserted, 5);
-    assert_eq!(db.xact_commit, 2);
-    assert!(database::pgstat_fetch_stat_dbentry(699).is_none());
-}
-
-#[test]
-fn truncdrop_flush_resets_live_dead_ins() {
-    setup();
-    SetMyDatabaseId(605);
-    crate::set_pgstat_fetch_consistency(crate::PGSTAT_FETCH_CONSISTENCY_NONE);
-    relation::pgstat_count_heap_insert(6006, false, 5);
-    xact::AtEOXact_PgStat(true, false);
-    pending::pgstat_report_stat(true);
-
-    relation::pgstat_count_truncate(6006, false);
-    relation::pgstat_count_heap_insert(6006, false, 2);
-    xact::AtEOXact_PgStat(true, false);
-    pending::pgstat_force_next_flush();
-    pending::pgstat_report_stat(false);
-
-    let t = relation::pgstat_fetch_stat_tabentry_ext(false, 6006).unwrap();
-    assert_eq!(t.tuples_inserted, 7);
-    assert_eq!(t.live_tuples, 2);
-    assert_eq!(t.dead_tuples, 0);
-    assert_eq!(t.ins_since_vacuum, 2);
-}
-
-#[test]
-fn cache_consistency_is_stable_until_clear() {
-    setup();
-    SetMyDatabaseId(602);
-    crate::set_pgstat_fetch_consistency(crate::PGSTAT_FETCH_CONSISTENCY_CACHE);
-    relation::pgstat_count_heap_getnext(6002, false);
-    pending::pgstat_force_next_flush();
-    pending::pgstat_report_stat(false);
-
-    let v1 = relation::pgstat_fetch_stat_tabentry_ext(false, 6002).unwrap();
-    assert_eq!(v1.tuples_returned, 1);
-    assert!(relation::pgstat_fetch_stat_tabentry_ext(false, 6007).is_none());
-
-    relation::pgstat_count_heap_getnext(6002, false);
-    relation::pgstat_count_heap_getnext(6007, false);
-    pending::pgstat_force_next_flush();
-    pending::pgstat_report_stat(false);
-
-    let v2 = relation::pgstat_fetch_stat_tabentry_ext(false, 6002).unwrap();
-    assert_eq!(v2.tuples_returned, 1);
-    // negative lookups are cached too, as in C
-    assert!(relation::pgstat_fetch_stat_tabentry_ext(false, 6007).is_none());
-
-    pending::pgstat_clear_snapshot();
-    let v3 = relation::pgstat_fetch_stat_tabentry_ext(false, 6002).unwrap();
-    assert_eq!(v3.tuples_returned, 2);
-    assert!(relation::pgstat_fetch_stat_tabentry_ext(false, 6007).is_some());
-}
-
-#[test]
-fn snapshot_consistency_excludes_later_entries() {
-    setup();
-    SetMyDatabaseId(603);
-    crate::set_pgstat_fetch_consistency(crate::PGSTAT_FETCH_CONSISTENCY_SNAPSHOT);
-    relation::pgstat_count_heap_getnext(6003, false);
-    pending::pgstat_force_next_flush();
-    pending::pgstat_report_stat(false);
-    assert!(relation::pgstat_fetch_stat_tabentry_ext(false, 6003).is_some());
-
-    relation::pgstat_count_heap_getnext(6004, false);
-    pending::pgstat_force_next_flush();
-    pending::pgstat_report_stat(false);
-    assert!(relation::pgstat_fetch_stat_tabentry_ext(false, 6004).is_none());
-
-    pending::pgstat_clear_snapshot();
-    assert!(relation::pgstat_fetch_stat_tabentry_ext(false, 6004).is_some());
-}
-
-#[test]
-fn have_entry_sees_pending_flushed_and_fixed() {
-    setup();
-    SetMyDatabaseId(604);
-    assert!(!crate::pgstat_have_entry(PGSTAT_KIND_RELATION.0, 604, 6005));
-    relation::pgstat_count_heap_getnext(6005, false);
-    assert!(crate::pgstat_have_entry(PGSTAT_KIND_RELATION.0, 604, 6005));
-    pending::pgstat_force_next_flush();
-    pending::pgstat_report_stat(false);
-    assert!(crate::pgstat_have_entry(PGSTAT_KIND_RELATION.0, 604, 6005));
-    assert!(crate::pgstat_have_entry(pending::PGSTAT_KIND_SLRU.0, 0, 0));
-
-    let items = [types_core::xact::XlXactStatsItem {
-        kind: PGSTAT_KIND_RELATION.0 as i32,
-        dboid: 604,
-        objid: 6005,
-    }];
-    xact::pgstat_execute_transactional_drops(&items, false).unwrap();
-    assert!(!crate::pgstat_have_entry(PGSTAT_KIND_RELATION.0, 604, 6005));
 }
 
 #[test]

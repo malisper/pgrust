@@ -75,19 +75,36 @@ const ACL_INSERT: u64 = 1 << 0;
 const ACL_SELECT: u64 = 1 << 1;
 const ACLCHECK_OK: i32 = 0;
 
-// ExecCheckXactReadOnly: SELECT-only permission targets pass vacuously;
-// anything that could write panics until PreventCommandIfReadOnly lands.
-fn exec_check_xact_read_only(pstmt: &PlannedStmt<'_>) {
+// ExecCheckXactReadOnly (execMain.c); temp-table writes pass (session-local).
+fn exec_check_xact_read_only(pstmt: &PlannedStmt<'_>) -> PgResult<()> {
     for pi_node in pstmt.permInfos.iter() {
         let pi = pi_node.as_rte_permission_info().expect("permInfos cell");
-        if pi.requiredPerms & !ACL_SELECT != 0 {
-            panic!(
-                "ExecCheckXactReadOnly (execMain.c): PreventCommandIfReadOnly not ported"
-            );
+        if pi.requiredPerms & !ACL_SELECT == 0 {
+            continue;
         }
+        let namespace_id = syscache_seams::lookup_pg_class_ls_shape::call(pi.relid)?
+            .map(|s| s.relnamespace)
+            .unwrap_or(::types_core::InvalidOid);
+        if namespace_seams::is_temp_namespace::call(namespace_id) {
+            continue;
+        }
+        xact::PreventCommandIfReadOnly(create_command_name(pstmt))?;
     }
     if pstmt.commandType != CmdType::CMD_SELECT || pstmt.hasModifyingCTE {
-        panic!("ExecCheckXactReadOnly (execMain.c): PreventCommandIfParallelMode not ported");
+        xact::PreventCommandIfParallelMode(create_command_name(pstmt))?;
+    }
+    Ok(())
+}
+
+// CreateCommandName over a PlannedStmt: the CreateCommandTag commandType arm.
+fn create_command_name(pstmt: &PlannedStmt<'_>) -> &'static str {
+    match pstmt.commandType {
+        CmdType::CMD_SELECT => "SELECT",
+        CmdType::CMD_INSERT => "INSERT",
+        CmdType::CMD_UPDATE => "UPDATE",
+        CmdType::CMD_DELETE => "DELETE",
+        CmdType::CMD_MERGE => "MERGE",
+        _ => "???",
     }
 }
 
@@ -254,7 +271,7 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
     if (guc_tables::vars::XactReadOnly.read() || xact::IsInParallelMode())
         && eflags & EXEC_FLAG_EXPLAIN_ONLY == 0
     {
-        exec_check_xact_read_only(pstmt);
+        exec_check_xact_read_only(pstmt)?;
     }
 
     if !qd.query_env.is_null() {

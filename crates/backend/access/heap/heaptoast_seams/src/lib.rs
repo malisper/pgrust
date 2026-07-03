@@ -14,16 +14,6 @@ seam_core::seam!(
     ) -> PgResult<Option<HeapTuple<'mcx>>>
 );
 
-// Cycle: brin_tuple's TOAST_INDEX_HACK compresses oversized stored values
-// while heaptoast's own insert path calls back through indexam.
-seam_core::seam!(
-    pub fn toast_compress_datum<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        value: &[u8],
-        cmethod: i8,
-    ) -> PgResult<Option<mcx::PgVec<'mcx, u8>>>
-);
-
 seam_core::seam!(
     pub fn heap_toast_delete(
         mcx: mcx::Mcx<'_>,

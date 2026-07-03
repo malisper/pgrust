@@ -54,13 +54,6 @@ pub fn get_rel_relkind(relid: Oid) -> PgResult<i8> {
     })
 }
 
-pub fn get_rel_relhassubclass(relid: Oid) -> PgResult<bool> {
-    Ok(match syscache_seams::lookup_pg_class_ls_shape::call(relid)? {
-        Some(reltup) => reltup.relhassubclass,
-        None => false,
-    })
-}
-
 pub fn get_rel_relispartition(relid: Oid) -> PgResult<bool> {
     Ok(match syscache_seams::lookup_pg_class_ls_shape::call(relid)? {
         Some(reltup) => reltup.relispartition,

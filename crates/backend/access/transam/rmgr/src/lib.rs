@@ -131,7 +131,10 @@ fn dbase_redo(record: &mut XLogReaderState) -> PgResult<()> {
 unported_redo! {
     tblspc_redo => "backend-commands-tablespace";
     gin_redo => "backend-access-gin-xlog";
+    hash_redo => "backend-access-hash-xlog";
+    gist_redo => "backend-access-gist-xlog";
     spg_redo => "backend-access-spgist-xlog";
+    brin_redo => "backend-access-brin-xlog";
     commit_ts_redo => "backend-access-transam-commit-ts";
     replorigin_redo => "backend-replication-origin";
     generic_redo => "backend-access-transam-generic-xlog";
@@ -143,6 +146,7 @@ unported_desc! {
     gin_desc => "backend-rmgrdesc-next";
     gist_desc => "backend-rmgrdesc-next";
     spg_desc => "backend-rmgrdesc-next";
+    brin_desc => "backend-rmgrdesc-next";
     commit_ts_desc => "backend-access-rmgrdesc-small";
     replorigin_desc => "backend-rmgrdesc-extra-small";
     logicalmsg_desc => "backend-access-rmgrdesc-small";
@@ -153,6 +157,7 @@ unported_identify! {
     gin_identify => "backend-rmgrdesc-next";
     gist_identify => "backend-rmgrdesc-next";
     spg_identify => "backend-rmgrdesc-next";
+    brin_identify => "backend-rmgrdesc-next";
     commit_ts_identify => "backend-access-rmgrdesc-small";
     replorigin_identify => "backend-rmgrdesc-extra-small";
     logicalmsg_identify => "backend-access-rmgrdesc-small";
@@ -165,6 +170,8 @@ unported_mask! {
     heap_mask => "backend-access-heap-heapam-xlog";
     btree_mask => "backend-access-nbtree-nbtxlog";
     gin_mask => "backend-access-gin-xlog";
+    hash_mask => "backend-access-hash-xlog";
+    gist_mask => "backend-access-gist-xlog";
     seq_mask => "backend-commands-sequence";
     spg_mask => "backend-access-spgist-xlog";
     brin_mask => "backend-access-brin-xlog";
@@ -302,12 +309,12 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     },
     RmgrData {
         rm_name: "Gist",
-        rm_redo: gist_xlog::gist_redo,
+        rm_redo: gist_redo,
         rm_desc: gist_desc,
         rm_identify: gist_identify,
         rm_startup: None,
         rm_cleanup: None,
-        rm_mask: Some(gist_xlog::gist_mask),
+        rm_mask: Some(gist_mask),
     },
     RmgrData {
         rm_name: "Sequence",
@@ -329,9 +336,9 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     },
     RmgrData {
         rm_name: "BRIN",
-        rm_redo: brin_xlog::brin_redo,
-        rm_desc: rmgrdesc::brindesc::brin_desc,
-        rm_identify: rmgrdesc::brindesc::brin_identify,
+        rm_redo: brin_redo,
+        rm_desc: brin_desc,
+        rm_identify: brin_identify,
         rm_startup: None,
         rm_cleanup: None,
         rm_mask: Some(brin_mask),

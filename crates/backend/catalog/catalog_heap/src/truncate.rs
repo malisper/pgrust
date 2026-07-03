@@ -10,10 +10,22 @@ use pg_constraint::{
 
 use crate::drop::oid_scankey;
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported: heap.c {what}")
+pub fn heap_truncate<'mcx>(mcx: Mcx<'mcx>, relids: &[Oid]) -> PgResult<()> {
+    // std Vec: Relation is a pin/lock guard (drop glue), banned from mcx vecs.
+    let mut relations: Vec<Relation<'mcx>> = Vec::with_capacity(relids.len());
+    for &rid in relids {
+        relations.push(table::table_open(mcx, rid, AccessExclusiveLock)?);
+    }
+
+    heap_truncate_check_FKs(mcx, &relations, true)?;
+
+    for rel in relations.iter() {
+        heap_truncate_one_rel(mcx, rel)?;
+    }
+    for rel in relations {
+        rel.close(NoLock)?;
+    }
+    Ok(())
 }
 
 pub fn heap_truncate_one_rel<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<()> {
@@ -36,18 +48,13 @@ pub fn heap_truncate_one_rel<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgRe
 
 // C uses BuildDummyIndexInfo to avoid evaluating expression/predicate code;
 // both are loud inside BuildIndexInfo here, so the full form is equivalent.
-#[allow(unused_variables)]
 fn RelationTruncateIndexes<'mcx>(mcx: Mcx<'mcx>, heapRelation: &Relation<'mcx>) -> PgResult<()> {
     let indexIds = relcache::indexlist::RelationGetIndexList(mcx, heapRelation.rd_id)?;
     for &indexId in indexIds.iter() {
         let currentIndex = indexam::index_open(mcx, indexId, AccessExclusiveLock)?;
-
-        unported("RelationTruncateIndexes: RelationTruncate (storage.c lane)");
-        #[allow(unreachable_code)]
-        {
-            catalog_index_seams::index_build_dummy::call(mcx, heapRelation, &currentIndex, true)?;
-            indexam::index_close(currentIndex, NoLock)?;
-        }
+        catalog_storage::RelationTruncate(&currentIndex, 0)?;
+        catalog_index_seams::index_build_dummy::call(mcx, heapRelation, &currentIndex, true)?;
+        indexam::index_close(currentIndex, NoLock)?;
     }
     Ok(())
 }

@@ -10,7 +10,6 @@ use types_nodes::list::NodeList;
 use types_nodes::node_tree::Node;
 use types_nodes::nodes_enums::CmdType;
 use types_nodes::parsenodes::{Query, QuerySource, RTEKind, RangeTblEntry};
-use types_nodes::primnodes::{CoercionForm, FuncExpr, Var};
 use types_rel::{
     AccessShareLock, FormData_pg_class, LockInfoData, LockRelId, NoLock, Relation, RelationData,
     RowExclusiveLock, RowShareLock, LOCKMODE, RELKIND_MATVIEW, RELKIND_RELATION, RELKIND_VIEW,
@@ -18,7 +17,7 @@ use types_rel::{
 };
 use types_tuple::{NameData, TupleDescData};
 
-use crate::{rte_of, AcquireRewriteLocks, QueryRewrite};
+use crate::{AcquireRewriteLocks, QueryRewrite};
 
 const TBL: Oid = 1;
 const VIEW: Oid = 2;
@@ -137,7 +136,6 @@ fn make<'mcx>(mcx: Mcx<'mcx>, oid: Oid, name: &str, relkind: u8, rls: bool) -> R
         pgstat_enabled: std::cell::Cell::new(false),
         rd_amcache: Default::default(),
         rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
-        rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
@@ -536,60 +534,22 @@ fn row_security_defers_loud() {
     let _ = QueryRewrite(mcx, query);
 }
 
-fn join_query<'mcx>(mcx: Mcx<'mcx>, aliasvars: NodeList<'mcx>) -> Query<'mcx> {
-    let values = rte_node(
-        mcx,
-        RangeTblEntry { rtekind: RTEKind::RTE_VALUES, inFromCl: true, ..Default::default() },
-    );
-    let join = rte_node(
-        mcx,
-        RangeTblEntry {
-            rtekind: RTEKind::RTE_JOIN,
-            joinaliasvars: aliasvars,
-            ..Default::default()
-        },
-    );
-    let mut query = select1(mcx);
-    query.rtable = NodeList::make2(mcx, values, join).unwrap();
-    query
-}
-
-fn alias_var<'mcx>(mcx: Mcx<'mcx>, varno: i32, varattno: i16) -> Node<'mcx> {
-    Node::mk(mcx, Var { varno, varattno, vartype: 23, vartypmod: -1, ..Default::default() })
-        .unwrap()
-}
-
 #[test]
-fn acquire_locks_join_rte_scans_aliasvars() {
+#[should_panic(expected = "dropped-column fixup of joinaliasvars")]
+fn join_alias_fixup_defers_loud() {
     install();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
-    let coerced = Node::mk(
+    let mut query = select1(mcx);
+    query.rtable = NodeList::make1(
         mcx,
-        FuncExpr {
-            funcid: 480,
-            funcresulttype: 20,
-            funcformat: CoercionForm::COERCE_IMPLICIT_CAST,
-            args: NodeList::make1(mcx, alias_var(mcx, 1, 2)).unwrap(),
-            ..Default::default()
-        },
+        rte_node(
+            mcx,
+            RangeTblEntry { rtekind: RTEKind::RTE_JOIN, ..Default::default() },
+        ),
     )
     .unwrap();
-    let aliasvars = NodeList::make2(mcx, alias_var(mcx, 1, 1), coerced).unwrap();
-    let query = join_query(mcx, aliasvars);
-    AcquireRewriteLocks(mcx, &query, true, false).unwrap();
-    assert_eq!(rte_of(query.rtable.nth(1)).joinaliasvars.len(), 2);
-}
-
-#[test]
-fn join_rte_forward_varno_is_internal_error() {
-    install();
-    let ctx = MemoryContext::new("t");
-    let mcx = ctx.mcx();
-    let aliasvars = NodeList::make1(mcx, alias_var(mcx, 2, 1)).unwrap();
-    let query = join_query(mcx, aliasvars);
-    let err = AcquireRewriteLocks(mcx, &query, true, false).unwrap_err();
-    assert!(err.message.contains("unexpected varno 2 in JOIN RTE 2"));
+    let _ = AcquireRewriteLocks(mcx, &query, true, false);
 }
 
 #[test]

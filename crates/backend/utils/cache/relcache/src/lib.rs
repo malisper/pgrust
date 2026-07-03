@@ -7,7 +7,6 @@ pub mod initfile;
 pub mod invalidate;
 pub mod local;
 pub mod indexattr;
-pub mod statextlist;
 pub mod rules;
 pub mod schemapg;
 pub mod store;
@@ -61,7 +60,6 @@ pub(crate) struct RelcacheState {
     pub(crate) rules_cache: PgHashMap<'static, Oid, std::rc::Rc<rules::RdRules>>,
     pub(crate) indexattr_cache:
         PgHashMap<'static, Oid, std::rc::Rc<relcache_seams::IndexAttrBitmaps>>,
-    pub(crate) statext_cache: PgHashMap<'static, Oid, std::rc::Rc<[Oid]>>,
     pub(crate) in_progress: PgVec<'static, InProgressEnt>,
     pub(crate) eoxact_list: [Oid; MAX_EOXACT_LIST],
     pub(crate) eoxact_list_len: usize,
@@ -88,7 +86,6 @@ pub(crate) fn with_state<R>(f: impl FnOnce(&mut RelcacheState) -> R) -> R {
                 id_cache: PgHashMap::with_capacity_in(INITRELCACHESIZE, mcx),
                 rules_cache: PgHashMap::new_in(mcx),
                 indexattr_cache: PgHashMap::new_in(mcx),
-                statext_cache: PgHashMap::new_in(mcx),
                 in_progress: PgVec::new_in(mcx),
                 eoxact_list: [0; MAX_EOXACT_LIST],
                 eoxact_list_len: 0,
@@ -119,7 +116,6 @@ pub fn init_seams() {
     relcache_seams::critical_shared_relcaches_built::set(criticalSharedRelcachesBuilt);
     relcache_seams::relation_id_get_relation::set(store::RelationIdGetRelation);
     relcache_seams::relation_get_index_list::set(indexlist::RelationGetIndexList);
-    relcache_seams::relation_get_stat_ext_list::set(statextlist::RelationGetStatExtList);
     relcache_seams::relation_get_index_attr_bitmap::set(indexattr::RelationGetIndexAttrBitmap);
     relcache_seams::relation_cache_invalidate::set(invalidate::RelationCacheInvalidate);
     relcache_seams::relation_cache_invalidate_entry::set(invalidate::RelationCacheInvalidateEntry);

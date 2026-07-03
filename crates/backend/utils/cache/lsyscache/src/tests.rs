@@ -330,7 +330,6 @@ fn install() {
                 relkind: b'r' as i8,
                 relpersistence: b'p' as i8,
                 relispartition: false,
-                relhassubclass: false,
             }))
         });
         s::pg_class_relname::set(|relid| Ok((relid == REL_OID).then(|| name("t1"))));

@@ -39,14 +39,10 @@ types_tuple = { path = "../../../../_support/types/types_tuple" }
 types_relscan = { path = "../../../access/index/relscan" }
 syscache_seams = { path = "../../../utils/cache/syscache_seams" }
 relcache_seams = { path = "../../../utils/cache/relcache_seams" }
-statistics = { path = "../../../statistics/statistics" }
-fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 table = { path = "../../../access/table/table" }
 tableam = { path = "../../../access/table/tableam" }
 indexam = { path = "../../../access/index/indexam" }
-brin = { path = "../../../access/brin/brin" }
-gist = { path = "../../../access/gist/gist" }
 nbtree = { path = "../../../access/nbtree/nbtree" }
 nodeagg = { path = "../../../executor/nodeagg" }
 nodehash = { path = "../../../executor/nodehash" }

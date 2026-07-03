@@ -407,8 +407,8 @@ mod heap {
         Ok((freeze_xid, min_multi))
     }
 
-    pub(super) fn relation_nontransactional_truncate(_rel: &Relation<'_>) -> PgResult<()> {
-        unported("backend-catalog-storage (RelationTruncate)")
+    pub(super) fn relation_nontransactional_truncate(rel: &Relation<'_>) -> PgResult<()> {
+        catalog_storage::RelationTruncate(rel, 0)
     }
 
     pub(super) fn relation_needs_toast_table(rel: &Relation<'_>) -> bool {

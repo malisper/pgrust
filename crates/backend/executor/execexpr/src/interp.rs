@@ -426,15 +426,6 @@ fn run_program<'mcx>(
                 };
                 write_out(*out, &mut regs, d, false);
             }
-            Step::WholeRow { src, wr, frame, out } => {
-                let slot = match src {
-                    crate::steps::SlotSrc::Scan => need_slot(&mut scan),
-                    crate::steps::SlotSrc::Inner => need_slot(&mut inner),
-                    crate::steps::SlotSrc::Outer => need_slot(&mut outer),
-                };
-                let (value, isnull) = eval_whole_row(frames, slot, *wr, *frame)?;
-                write_out(*out, &mut regs, value, isnull);
-            }
             Step::ScanSysVar { attnum, out } => {
                 let mut isnull = false;
                 let d = exectuples::slot_getsysattr(need_slot(&mut scan), *attnum as i32, &mut isnull)?;
@@ -1417,81 +1408,6 @@ fn errdatatype(e: &mut PgError, typid: u32) {
     }
 }
 
-// C ExecEvalWholeRowVar, named-composite leg. First eval checks the slot's
-// physical rowtype against the Var's declared rowtype (dropped-column
-// storage mismatches downgrade to the per-row slow path); every eval
-// flattens the slot into a composite datum in the armed per-eval mcx.
-fn eval_whole_row(
-    frames: &mut [crate::steps::FuncFrame<'_>],
-    slot: &mut SlotData<'_>,
-    wr: core::ptr::NonNull<crate::steps::WholeRowState>,
-    frame: u32,
-) -> PgResult<(Datum, bool)> {
-    // SAFETY: compile-allocated state, single-threaded interpreter.
-    let wr = unsafe { &mut *wr.as_ptr() };
-    // SAFETY: compile-allocated plan-mcx tupdesc, live for the plan.
-    let var_desc = unsafe { wr.tupdesc.as_ref() };
-    if wr.first {
-        wr.slow = false;
-        let slot_desc =
-            slot.base().tts_tupleDescriptor.as_ref().expect("slot has a descriptor").clone();
-        if var_desc.natts != slot_desc.natts {
-            return Err(row_type_mismatch_natts(slot_desc.natts, var_desc.natts));
-        }
-        for i in 0..var_desc.natts as usize {
-            let vattr = &var_desc.attrs[i];
-            let sattr = &slot_desc.attrs[i];
-            if vattr.atttypid == sattr.atttypid {
-                continue;
-            }
-            if !vattr.attisdropped {
-                return Err(row_type_mismatch_type(sattr.atttypid, i, vattr.atttypid));
-            }
-            if vattr.attlen != sattr.attlen || vattr.attalign != sattr.attalign {
-                wr.slow = true;
-            }
-        }
-        wr.first = false;
-    }
-    exectuples::slot_getallattrs(slot);
-    let base = slot.base();
-    let slot_desc = base.tts_tupleDescriptor.as_ref().expect("slot has a descriptor");
-    if wr.slow {
-        for i in 0..var_desc.natts as usize {
-            let vattr = &var_desc.compact_attrs[i];
-            let sattr = &slot_desc.compact_attrs[i];
-            if !var_desc.attrs[i].attisdropped {
-                continue;
-            }
-            if base.tts_isnull[i] {
-                continue;
-            }
-            if vattr.attlen != sattr.attlen || vattr.attalignby != sattr.attalignby {
-                return Err(row_type_mismatch_dropped(i));
-            }
-        }
-    }
-    let f = &mut frames[frame as usize];
-    // SAFETY: the argless frame's fcinfo image is live; armed per eval.
-    let mcx = unsafe { fcinfo_mut(f.fcinfo, 0) }.result_mcx();
-    let mut tuple = ::heaptoast::toast_build_flattened_tuple(
-        mcx,
-        slot_desc.as_ref(),
-        &base.tts_values,
-        &base.tts_isnull,
-    )?;
-    let img = tuple.image_mut();
-    // SAFETY: the header is at the image start (heap_form_tuple contract).
-    unsafe {
-        let td = &mut *(img.as_mut_ptr() as *mut ::types_tuple::HeapTupleHeaderData);
-        td.set_type_id(var_desc.tdtypeid);
-        td.set_typmod(var_desc.tdtypmod);
-    }
-    let d = Datum::from_usize(tuple.image().as_ptr() as usize);
-    core::mem::forget(tuple);
-    Ok((d, false))
-}
-
 #[cold]
 #[inline(never)]
 pub(crate) fn domain_not_null_violation(typid: u32) -> Box<PgError> {
@@ -1500,19 +1416,6 @@ pub(crate) fn domain_not_null_violation(typid: u32) -> Box<PgError> {
         .with_sqlstate(::types_error::ERRCODE_NOT_NULL_VIOLATION);
     errdatatype(&mut e, typid);
     Box::new(e)
-}
-
-#[cold]
-#[inline(never)]
-fn row_type_mismatch_natts(slot_natts: i32, var_natts: i32) -> alloc::boxed::Box<PgError> {
-    let att = if slot_natts == 1 { "attribute" } else { "attributes" };
-    alloc::boxed::Box::new(
-        PgError::error("table row type and query-specified row type do not match")
-            .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH)
-            .with_detail(alloc::format!(
-                "Table row contains {slot_natts} {att}, but query expects {var_natts}."
-            )),
-    )
 }
 
 #[cold]
@@ -1526,38 +1429,4 @@ pub(crate) fn domain_check_violation(typid: u32, name: &str) -> Box<PgError> {
     errdatatype(&mut e, typid);
     e.constraint_name = Some(name.to_string());
     Box::new(e)
-}
-
-#[cold]
-#[inline(never)]
-fn row_type_mismatch_type(
-    slot_type: ::types_core::Oid,
-    i: usize,
-    var_type: ::types_core::Oid,
-) -> alloc::boxed::Box<PgError> {
-    let st = ::format_type::format_type_be(slot_type)
-        .unwrap_or_else(|_| alloc::format!("{slot_type}"));
-    let vt = ::format_type::format_type_be(var_type)
-        .unwrap_or_else(|_| alloc::format!("{var_type}"));
-    alloc::boxed::Box::new(
-        PgError::error("table row type and query-specified row type do not match")
-            .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH)
-            .with_detail(alloc::format!(
-                "Table has type {st} at ordinal position {}, but query expects {vt}.",
-                i + 1
-            )),
-    )
-}
-
-#[cold]
-#[inline(never)]
-fn row_type_mismatch_dropped(i: usize) -> alloc::boxed::Box<PgError> {
-    alloc::boxed::Box::new(
-        PgError::error("table row type and query-specified row type do not match")
-            .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH)
-            .with_detail(alloc::format!(
-                "Physical storage mismatch on dropped attribute at ordinal position {}.",
-                i + 1
-            )),
-    )
 }

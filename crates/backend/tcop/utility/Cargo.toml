@@ -14,7 +14,6 @@ tablecmds = { path = "../../commands/tablecmds" }
 schemacmds = { path = "../../commands/schemacmds" }
 dbcommands = { path = "../../commands/dbcommands" }
 functioncmds = { path = "../../commands/functioncmds" }
-statscmds = { path = "../../commands/statscmds" }
 commands_comment = { path = "../../commands/comment" }
 elog_seams = { path = "../../utils/error/elog_seams" }
 sequence = { path = "../../commands/sequence" }
@@ -32,6 +31,7 @@ prepare = { path = "../../commands/prepare" }
 guc_funcs = { path = "../../utils/misc/guc_funcs" }
 mcx = { path = "../../../_support/mcx" }
 types_core = { path = "../../../_support/types/types_core" }
+types_storage = { path = "../../../_support/types/types_storage" }
 types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
 types_portal = { path = "../../../_support/types/portal" }
@@ -39,6 +39,9 @@ types_tuple = { path = "../../../_support/types/types_tuple" }
 elog = { path = "../../utils/error/elog" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 miscinit = { path = "../../utils/init/miscinit" }
+acl_seams = { path = "../../utils/adt/acl_seams" }
+checkpointer_seams = { path = "../../postmaster/checkpointer_seams" }
+lockcmds = { path = "../../commands/lockcmds" }
 transam_xlog = { path = "../../access/transam/transam_xlog" }
 twophase_seams = { path = "../../access/transam/twophase_seams" }
 xact = { path = "../../access/transam/xact" }

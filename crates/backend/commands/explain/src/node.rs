@@ -1702,13 +1702,14 @@ fn deparse_expr<'mcx>(
             let a = expr.as_aggref().unwrap();
             if !a.aggdistinct.is_nil()
                 || !a.aggorder.is_nil()
+                || a.aggfilter.is_some()
                 || a.aggvariadic
                 || !a.aggdirectargs.is_nil()
                 || a.aggsplit != types_nodes::primnodes::AGGSPLIT_SIMPLE
             {
                 node_gap(
                     "get_agg_expr",
-                    "DISTINCT/ORDER BY/variadic/ordered-set/partial \
+                    "DISTINCT/ORDER BY/FILTER/variadic/ordered-set/partial \
                      aggregate deparse (ruleutils lane)",
                 );
             }
@@ -1733,11 +1734,6 @@ fn deparse_expr<'mcx>(
                 }
             }
             buf.try_push(')')?;
-            if let Some(f) = a.aggfilter {
-                buf.try_push_str(" FILTER (WHERE ")?;
-                deparse_expr(es, plan_node, ancestors, f, useprefix, buf)?;
-                buf.try_push(')')?;
-            }
             Ok(())
         }
         // get_rule_expr T_SQLValueFunction (datetime ops; name ops are loud
@@ -2092,22 +2088,13 @@ fn deparse_var<'mcx>(
             return Ok(());
         }
     };
-    if varattno < 0 {
-        node_gap("get_variable", "system column deparse (ruleutils lane)");
+    if varattno <= 0 {
+        node_gap("get_variable", "whole-row/system column deparse (ruleutils lane)");
     }
     let rtable = es.rtable.expect("deparse before rtable capture");
     debug_assert!(varno >= 1 && varno as usize <= rtable.len());
     let rte = rtable.nth(varno as usize - 1).as_range_tbl_entry().expect("rtable cell");
     let eref = rte.eref.expect("analyzed RTE always has eref");
-    // C get_variable: whole-row prints refname regardless of varprefix.
-    if varattno == 0 {
-        let refname = es.rtable_names[varno as usize - 1]
-            .or(eref.aliasname)
-            .expect("relation RTE has a refname");
-        push_identifier(buf, refname)?;
-        buf.try_push_str(".*")?;
-        return Ok(());
-    }
     if useprefix {
         let refname = es.rtable_names[varno as usize - 1]
             .or(eref.aliasname)

@@ -1029,12 +1029,6 @@ pub fn heap_rescan(
 
 pub fn heap_endscan(mut scan: HeapScanDescData<'_>) -> PgResult<()> {
     scan.rs_ctup = None;
-    pgstat::relation::pgstat_count_heap_scan_batched(
-        scan.rs_base.rs_rd.rd_id,
-        scan.rs_base.rs_rd.rd_rel.relisshared,
-        scan.rs_pgstat_numscans,
-        scan.rs_pgstat_getnext,
-    );
     if let Some(pin) = scan.rs_cbuf.take() {
         pin.release();
     }

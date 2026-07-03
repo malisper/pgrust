@@ -533,6 +533,19 @@ pub struct DiscardStmt {
     pub target: DiscardMode,
 }
 
+pub struct LoadStmt<'mcx> {
+    pub filename: &'mcx str,
+}
+
+pub struct LockStmt<'mcx> {
+    pub relations: NodeList<'mcx>,
+    pub mode: i32,
+    pub nowait: bool,
+}
+
+#[derive(Default)]
+pub struct CheckPointStmt {}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum CTEMaterialize {
@@ -1026,6 +1039,15 @@ unsafe impl<'mcx> NodeVariant<'mcx> for UnlistenStmt<'mcx> {
 unsafe impl NodeVariant<'_> for DiscardStmt {
     const TAG: NodeTag = NodeTag::T_DiscardStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for LoadStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_LoadStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for LockStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_LockStmt;
+}
+unsafe impl NodeVariant<'_> for CheckPointStmt {
+    const TAG: NodeTag = NodeTag::T_CheckPointStmt;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for DeallocateStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_DeallocateStmt;
 }
@@ -1259,6 +1281,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_discard_stmt(self) -> Option<&'mcx DiscardStmt> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_load_stmt(self) -> Option<&'mcx LoadStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_lock_stmt(self) -> Option<&'mcx LockStmt<'mcx>> {
         self.as_variant()
     }
 

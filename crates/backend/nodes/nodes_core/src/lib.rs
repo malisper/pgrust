@@ -752,28 +752,6 @@ where
                 )?)),
             }
         }
-        NodeTag::T_RangeTblFunction => {
-            let rtf = node.as_range_tbl_function().unwrap();
-            let funcexpr = match rtf.funcexpr {
-                Some(f) => m(f)?.map(Some),
-                None => None,
-            };
-            match funcexpr {
-                None => Ok(None),
-                Some(funcexpr) => Ok(Some(Node::mk(
-                    mcx,
-                    types_nodes::RangeTblFunction {
-                        funcexpr,
-                        funccolcount: rtf.funccolcount,
-                        funccolnames: rtf.funccolnames.clone_in(mcx)?,
-                        funccoltypes: rtf.funccoltypes.clone_in(mcx)?,
-                        funccoltypmods: rtf.funccoltypmods.clone_in(mcx)?,
-                        funccolcollations: rtf.funccolcollations.clone_in(mcx)?,
-                        funcparams: rtf.funcparams.clone_in(mcx)?,
-                    },
-                )?)),
-            }
-        }
         NodeTag::T_CoerceViaIO => {
             let c = node.as_coerce_via_io().unwrap();
             match m(c.arg)? {

@@ -230,12 +230,10 @@ fn check_agg_arguments<'mcx>(
     filter: Option<Node<'mcx>>,
     _agglocation: ParseLoc,
 ) -> PgResult<i32> {
+    debug_assert!(filter.is_none());
     let mut ctx = AggArgContext { min_varlevel: -1, min_agglevel: -1, agg_loc: -1 };
     for node in args {
         check_agg_arguments_walker(pstate, node, &mut ctx)?;
-    }
-    if let Some(f) = filter {
-        check_agg_arguments_walker(pstate, f, &mut ctx)?;
     }
 
     let agglevel = match (ctx.min_varlevel, ctx.min_agglevel) {

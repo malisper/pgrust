@@ -177,7 +177,6 @@ fn drop_entry_local(st: &mut PgStatState, item: &XlXactStatsItem) {
         objid: item.objid,
     };
     st.delete_pending_entry(key);
-    crate::shmem::drop_entry(key);
 }
 
 fn create_drop_transactional_internal(kind: PgStat_Kind, dboid: Oid, objid: u64, is_create: bool) {

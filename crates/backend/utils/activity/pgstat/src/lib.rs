@@ -1,8 +1,9 @@
 // backend-utils-activity-pgstat — pgstat.c's per-backend half: the pending-entry
-// model, pgstat_report_stat batching, the relation/xact/database/slru/
-// checkpointer counting layers, and the shared store the flush paths apply
-// into plus its fetch/snapshot readers. Still unported: stats reset, 2PC
-// record registration, and connstat session times (needs MyBackendType).
+// model, pgstat_report_stat batching, and the relation/xact/database/slru/
+// checkpointer counting layers. Phase 2 (pgstat_shmem.c + readers): the
+// shared-memory apply in flush paths, entry drop/GC of shared entries,
+// snapshot/fetch/reset, pgstat_initialize/shutdown, 2PC record registration,
+// and connstat session times (needs MyBackendType).
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
@@ -13,14 +14,8 @@ pub mod checkpointer;
 pub mod database;
 pub mod pending;
 pub mod relation;
-pub mod shmem;
 pub mod slru;
 pub mod xact;
-
-pub use database::pgstat_fetch_stat_dbentry;
-pub use pending::pgstat_clear_snapshot;
-pub use relation::{pgstat_fetch_stat_tabentry, pgstat_fetch_stat_tabentry_ext};
-pub use shmem::{pgstat_have_entry, PgStat_StatTabEntry};
 
 pub type PgStat_Counter = i64;
 

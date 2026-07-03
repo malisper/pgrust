@@ -277,7 +277,9 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
         relfrozenxid: 3,
         relminmxid: 1,
     };
-    let data = ::types_rel::RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
+    let data = ::types_rel::RelationData {
+        rd_locator: std::cell::Cell::new(::types_storage::RelFileLocator::new(1663, 5, oid)),
+        rd_smgr: Default::default(),
         rd_id: oid,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,
@@ -300,7 +302,6 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
         pgstat_enabled: std::cell::Cell::new(true),
         rd_amcache: Default::default(),
         rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
-        rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
