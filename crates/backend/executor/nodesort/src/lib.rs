@@ -126,15 +126,26 @@ where
         }
 
         if node.datumSort {
-            ts.putdatum_batch(|p| {
+            if ts.datum_sort_is_byref() {
+                // By-ref datums must go through the datumCopy arm — the batch
+                // putter parks raw slot pointers the next fetch recycles.
                 while let Some(id) = fetch_outer(estate)? {
                     let slot = estate.slot_mut(id);
                     exectuples::slot_getsomeattrs(slot, 1);
                     let base = slot.base();
-                    p.put(base.tts_values[0], base.tts_isnull[0])?;
+                    ts.putdatum(base.tts_values[0], base.tts_isnull[0])?;
                 }
-                Ok(())
-            })?;
+            } else {
+                ts.putdatum_batch(|p| {
+                    while let Some(id) = fetch_outer(estate)? {
+                        let slot = estate.slot_mut(id);
+                        exectuples::slot_getsomeattrs(slot, 1);
+                        let base = slot.base();
+                        p.put(base.tts_values[0], base.tts_isnull[0])?;
+                    }
+                    Ok(())
+                })?;
+            }
         } else {
             while let Some(id) = fetch_outer(estate)? {
                 ts.puttupleslot(estate.slot_mut(id), mcx)?;

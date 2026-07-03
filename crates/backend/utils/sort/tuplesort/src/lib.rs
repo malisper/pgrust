@@ -678,6 +678,11 @@ impl Tuplesort {
             // SAFETY: a non-null by-ref datum is readable for its full size.
             let size = unsafe {
                 if byref_typlen == -1 {
+                    // Verbatim toast-pointer copies dangle (C flattens/detoasts).
+                    assert!(
+                        !::types_tuple::varatt::varatt_is_1b_e(src),
+                        "tuplesort_putdatum: external/expanded varlena datum (detoast lane)"
+                    );
                     ::types_tuple::varatt::varsize_any(src)
                 } else {
                     byref_typlen as usize
@@ -700,6 +705,12 @@ impl Tuplesort {
         })
     }
 
+    #[inline]
+    pub fn datum_sort_is_byref(&self) -> bool {
+        self.0
+            .with(|st| matches!(st.variant, SortVariant::Datum { byref_typlen } if byref_typlen != 0))
+    }
+
     /// C divergence (structural lever): batched putdatum — the per-call len
     /// memory round-trip is ~43 cyc/put on V2 (docs/benchmarks/tuplesort.md).
     #[inline]
@@ -708,7 +719,11 @@ impl Tuplesort {
         f: impl for<'a, 'm> FnOnce(&mut DatumPutter<'a, 'm>) -> PgResult<R>,
     ) -> PgResult<R> {
         self.0.with_mut(|st| {
-            debug_assert!(matches!(st.variant, SortVariant::Datum { byref_typlen: 0 }));
+            // The batch putter parks raw pointers — by-ref needs putdatum's copy.
+            assert!(
+                matches!(st.variant, SortVariant::Datum { byref_typlen: 0 }),
+                "tuplesort_putdatum_batch: by-ref datum sort requires putdatum"
+            );
             let mut putter = DatumPutter::new(st);
             let result = f(&mut putter);
             putter.flush();
@@ -1073,11 +1088,11 @@ impl<'m> TuplesortData<'m> {
     /// discarded bounded-sort tuples are reclaimed at end, not per-tuple as
     /// C's aset pfree does (memory-footprint divergence, not behavior).
     fn free_sort_tuple(&mut self, stup: &SortTuple) {
-        if !stup.tuple.is_null() {
-            // SAFETY: live tuplecontext image.
-            let t_len = unsafe { (*stup.tuple).t_len } as usize;
-            self.avail_mem += maxalign(t_len) as i64;
-        }
+        let datum_byref = match self.variant {
+            SortVariant::Datum { byref_typlen } => Some(byref_typlen),
+            _ => None,
+        };
+        self.avail_mem += freed_space_v(datum_byref, stup);
     }
 
     /// `tuplesort_sort_memtuples`: comparator-identity specialization dispatch.
@@ -1149,6 +1164,10 @@ impl<'m> TuplesortData<'m> {
         self.reversedirection();
 
         let mut tuples = mem::replace(&mut self.memtuples, PgVec::new_in(self.mcx));
+        let datum_byref = match self.variant {
+            SortVariant::Datum { byref_typlen } => Some(byref_typlen),
+            _ => None,
+        };
         let mut freed: i64 = 0;
         let result = (|| {
             let ctx = ctx!(self);
@@ -1158,11 +1177,11 @@ impl<'m> TuplesortData<'m> {
                     let stup = tuples[i];
                     heap_insert(&ctx, &mut tuples, &mut count, stup)?;
                 } else if ctx.comparetup(&tuples[i], &tuples[0]) <= 0 {
-                    freed += freed_space(&tuples[i]);
+                    freed += freed_space_v(datum_byref, &tuples[i]);
                     cfi()?;
                 } else {
                     let stup = tuples[i];
-                    freed += freed_space(&tuples[0]);
+                    freed += freed_space_v(datum_byref, &tuples[0]);
                     heap_replace_top(&ctx, &mut tuples, count, stup)?;
                 }
             }
@@ -1243,13 +1262,21 @@ impl<'m> TuplesortData<'m> {
     }
 }
 
-fn freed_space(stup: &SortTuple) -> i64 {
+fn freed_space_v(datum_byref: Option<i16>, stup: &SortTuple) -> i64 {
     if stup.tuple.is_null() {
-        0
-    } else {
-        // SAFETY: live tuplecontext image.
-        maxalign(unsafe { (*stup.tuple).t_len } as usize) as i64
+        return 0;
     }
+    let size = match datum_byref {
+        // Datum sorts park the datumCopy image in `tuple` — no t_len header.
+        Some(typlen) if typlen > 0 => typlen as usize,
+        // SAFETY: live tuplecontext varlena image.
+        Some(_) => unsafe {
+            ::types_tuple::varatt::varsize_any(stup.tuple.cast_const().cast::<u8>())
+        },
+        // SAFETY: live tuplecontext image.
+        None => (unsafe { (*stup.tuple).t_len }) as usize,
+    };
+    maxalign(size) as i64
 }
 
 fn heap_insert(
