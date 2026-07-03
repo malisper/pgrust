@@ -1393,6 +1393,193 @@ fn insert_values_plans_to_modifytable_over_result() {
     assert_eq!(c1.consttype, 23);
 }
 
+// INSERT ... ON CONFLICT lane over t(pk unique via IDX, val).
+mod on_conflict {
+    use super::*;
+    use types_nodes::primnodes::{InferenceElem, OnConflictAction, OnConflictExpr, INNER_VAR};
+
+    fn pk_arbiter_elems(mcx: Mcx<'_>) -> NodeList<'_> {
+        let var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let elem =
+            Node::mk(mcx, InferenceElem { expr: Some(var), infercollid: 0, inferopclass: 0 })
+                .unwrap();
+        NodeList::make1(mcx, elem).unwrap()
+    }
+
+    // The analyzer's output for the excluded pseudo-rel (RTI 2) targetlist.
+    fn excluded_tlist(mcx: Mcx<'_>) -> NodeList<'_> {
+        let pk = Node::mk_var(mcx, 2, 1, 23, -1, 0, 0).unwrap();
+        let val = Node::mk_var(mcx, 2, 2, 23, -1, 0, 0).unwrap();
+        let mut tl =
+            NodeList::make1(mcx, Node::mk_target_entry(mcx, pk, 1, Some("pk"), false).unwrap())
+                .unwrap();
+        tl.lappend(mcx, Node::mk_target_entry(mcx, val, 2, Some("val"), false).unwrap())
+            .unwrap();
+        tl
+    }
+
+    fn upsert_query<'mcx>(mcx: Mcx<'mcx>, oc: OnConflictExpr<'mcx>) -> Query<'mcx> {
+        let mut parse = insert_query(mcx);
+        if oc.exclRelIndex != 0 {
+            let mut excl = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+            excl.rtekind = RTEKind::RTE_RELATION;
+            excl.relid = TBL;
+            excl.relkind = b'c';
+            excl.rellockmode = 3;
+            excl.perminfoindex = 2;
+            parse.rtable.lappend(mcx, excl.seal()).unwrap();
+            let perminfo = Node::mk(
+                mcx,
+                types_nodes::parsenodes::RTEPermissionInfo { relid: TBL, ..Default::default() },
+            )
+            .unwrap();
+            parse.rteperminfos.lappend(mcx, perminfo).unwrap();
+        }
+        parse.onConflict = Some(Node::mk(mcx, oc).unwrap());
+        parse
+    }
+
+    fn plan<'mcx>(
+        mcx: Mcx<'mcx>,
+        parse: Query<'mcx>,
+    ) -> &'mcx types_nodes::plannodes::ModifyTable<'mcx> {
+        let stmt = planner(
+            mcx,
+            parse,
+            "INSERT INTO t (pk) VALUES (7) ON CONFLICT ...",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        stmt.planTree.unwrap().as_modify_table().unwrap()
+    }
+
+    #[test]
+    fn do_nothing_without_infer_has_no_arbiters() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let parse = upsert_query(
+            mcx,
+            OnConflictExpr {
+                action: OnConflictAction::ONCONFLICT_NOTHING,
+                ..Default::default()
+            },
+        );
+        let mt = plan(mcx, parse);
+        assert_eq!(mt.onConflictAction, OnConflictAction::ONCONFLICT_NOTHING as u32);
+        assert!(mt.arbiterIndexes.is_nil());
+        assert!(mt.onConflictSet.is_nil() && mt.onConflictWhere.is_none());
+        assert_eq!(mt.exclRelRTI, 0);
+    }
+
+    #[test]
+    fn do_nothing_infers_unique_index_arbiter() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let parse = upsert_query(
+            mcx,
+            OnConflictExpr {
+                action: OnConflictAction::ONCONFLICT_NOTHING,
+                arbiterElems: pk_arbiter_elems(mcx),
+                ..Default::default()
+            },
+        );
+        let mt = plan(mcx, parse);
+        let mut arbiters = mt.arbiterIndexes.iter();
+        assert_eq!((arbiters.next(), arbiters.next()), (Some(IDX), None));
+    }
+
+    #[test]
+    fn no_matching_index_is_42p10() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let val_var = Node::mk_var(mcx, 1, 2, 23, -1, 0, 0).unwrap();
+        let elem = Node::mk(
+            mcx,
+            InferenceElem { expr: Some(val_var), infercollid: 0, inferopclass: 0 },
+        )
+        .unwrap();
+        let parse = upsert_query(
+            mcx,
+            OnConflictExpr {
+                action: OnConflictAction::ONCONFLICT_NOTHING,
+                arbiterElems: NodeList::make1(mcx, elem).unwrap(),
+                ..Default::default()
+            },
+        );
+        let err = planner(
+            mcx,
+            parse,
+            "INSERT INTO t (pk) VALUES (7) ON CONFLICT (val) DO NOTHING",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        );
+        let err = match err {
+            Err(e) => e,
+            Ok(_) => panic!("expected 42P10, planner succeeded"),
+        };
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_COLUMN_REFERENCE);
+    }
+
+    #[test]
+    fn do_update_retags_excluded_vars_to_inner() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        // SET val = excluded.val WHERE t.val < 0; parser resnos are attnos.
+        let excl_val = Node::mk_var(mcx, 2, 2, 23, -1, 0, 0).unwrap();
+        let set_tle = Node::mk_target_entry(mcx, excl_val, 2, Some("val"), false).unwrap();
+        let t_val = Node::mk_var(mcx, 1, 2, 23, -1, 0, 0).unwrap();
+        let zero = Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(0), false, true).unwrap();
+        let where_clause = Node::mk(
+            mcx,
+            types_nodes::primnodes::OpExpr {
+                opno: INT4_LT_OP,
+                opfuncid: 66,
+                opresulttype: 16,
+                opretset: false,
+                opcollid: 0,
+                inputcollid: 0,
+                args: NodeList::make2(mcx, t_val, zero).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap();
+        let parse = upsert_query(
+            mcx,
+            OnConflictExpr {
+                action: OnConflictAction::ONCONFLICT_UPDATE,
+                arbiterElems: pk_arbiter_elems(mcx),
+                onConflictSet: NodeList::make1(mcx, set_tle).unwrap(),
+                onConflictWhere: Some(where_clause),
+                exclRelIndex: 2,
+                exclRelTlist: excluded_tlist(mcx),
+                ..Default::default()
+            },
+        );
+        let mt = plan(mcx, parse);
+
+        assert_eq!(mt.onConflictAction, OnConflictAction::ONCONFLICT_UPDATE as u32);
+        assert_eq!(mt.exclRelRTI, 2);
+        let mut arbiters = mt.arbiterIndexes.iter();
+        assert_eq!((arbiters.next(), arbiters.next()), (Some(IDX), None));
+
+        // extract_update_targetlist_colnos: resno renumbered, attno saved.
+        let mut cols = mt.onConflictCols.iter();
+        assert_eq!((cols.next(), cols.next()), (Some(2), None));
+        let tle = mt.onConflictSet.nth(0).as_target_entry().unwrap();
+        assert_eq!(tle.resno, 1);
+        let set_var = tle.expr.as_var().unwrap();
+        assert_eq!((set_var.varno, set_var.varattno), (INNER_VAR, 2));
+
+        // WHERE's result-rel Var passes through as a scan Var.
+        let where_list = mt.onConflictWhere.unwrap().as_list().unwrap();
+        assert_eq!(where_list.len(), 1);
+        let op = where_list.nth(0).as_op_expr().unwrap();
+        let where_var = op.args.nth(0).as_var().unwrap();
+        assert_eq!((where_var.varno, where_var.varattno), (1, 2));
+    }
+}
+
 // GROUP BY hashed lane: SELECT pk, count(*) FROM t GROUP BY pk.
 // planagg lane: SELECT max(pk)/min(pk) FROM t rewrites to a Param-fed Result
 // over an InitPlan Limit -> ordered Index Only Scan.
