@@ -1983,3 +1983,33 @@ fn count_star_in_where_is_42803() {
         err.message()
     );
 }
+
+#[test]
+fn select_current_timestamp_end_to_end() {
+    use types_nodes::primnodes::{SQLValueFunction, SQLValueFunctionOp};
+
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let svf = Node::mk(
+        mcx,
+        SQLValueFunction {
+            op: SQLValueFunctionOp::SVFOP_CURRENT_TIMESTAMP,
+            r#type: 0,
+            typmod: -1,
+            location: 7,
+        },
+    )
+    .unwrap();
+    let target = Node::mk_res_target(mcx, None, NodeList::nil(), Some(svf), 7).unwrap();
+    let raw_stmt = raw(select_stmt(mcx, &[target]), 24);
+
+    let q = analyze(mcx, "SELECT CURRENT_TIMESTAMP", &raw_stmt);
+
+    assert_eq!(q.targetList.len(), 1);
+    let te = q.targetList.nth(0).as_target_entry().unwrap();
+    assert_eq!(te.resname, Some("current_timestamp"));
+    let out = te.expr.as_sql_value_function().unwrap();
+    assert_eq!(out.op, SQLValueFunctionOp::SVFOP_CURRENT_TIMESTAMP);
+    assert_eq!(out.r#type, types_core::catalog::TIMESTAMPTZOID);
+    assert_eq!(out.typmod, -1);
+}

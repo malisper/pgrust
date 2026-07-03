@@ -13,10 +13,13 @@ pub mod settings;
 pub mod tables;
 pub mod tz;
 
-pub use calendar::{date2j, isleap, j2date, j2day, DAYS, DAY_TAB, MONTHS};
+pub use calendar::{
+    date2isoweek, date2isoyear, date2isoyearday, date2j, isleap, isoweek2date, isoweek2j,
+    isoweekdate2date, j2date, j2day, DAYS, DAY_TAB, MONTHS,
+};
 pub use consts::*;
 pub use decode::{
-    datebsearch, dt2time, time_overflows, CheckDateTokenTables, ClearTimeZoneAbbrevCache,
+    datebsearch, dt2time, float_time_overflows, time_overflows, CheckDateTokenTables, ClearTimeZoneAbbrevCache,
     DecodeDate, DecodeDateTime, DecodeNumber, DecodeNumberField, DecodeSpecial, DecodeTime,
     DecodeTimeOnly, DecodeTimezone, DecodeTimezoneAbbrev, DecodeUnits, ParseDateTime,
     ParseFraction, ParseFractionalSecond, ValidateDate,

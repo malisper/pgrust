@@ -468,3 +468,59 @@ fn case_when_common_type_text_with_default_else() {
     assert_eq!(expr_type(out), types_core::catalog::TEXTOID);
     assert_eq!(expr_location(out), 7);
 }
+
+#[test]
+fn sql_value_function_transform_assigns_type() {
+    use types_core::catalog::{DATEOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID};
+    use types_nodes::primnodes::{SQLValueFunction, SQLValueFunctionOp as Op};
+
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    for (op, typmod, typ, want_typmod) in [
+        (Op::SVFOP_CURRENT_DATE, -1, DATEOID, -1),
+        (Op::SVFOP_CURRENT_TIME, -1, TIMETZOID, -1),
+        (Op::SVFOP_CURRENT_TIME_N, 2, TIMETZOID, 2),
+        (Op::SVFOP_CURRENT_TIMESTAMP, -1, TIMESTAMPTZOID, -1),
+        (Op::SVFOP_CURRENT_TIMESTAMP_N, 3, TIMESTAMPTZOID, 3),
+        (Op::SVFOP_LOCALTIME, -1, TIMEOID, -1),
+        (Op::SVFOP_LOCALTIME_N, 6, TIMEOID, 6),
+        (Op::SVFOP_LOCALTIMESTAMP, -1, TIMESTAMPOID, -1),
+        (Op::SVFOP_LOCALTIMESTAMP_N, 0, TIMESTAMPOID, 0),
+    ] {
+        let raw =
+            Node::mk(mcx, SQLValueFunction { op, r#type: 0, typmod, location: 7 }).unwrap();
+        let out =
+            transformExpr(mcx, &mut pstate, raw, ParseExprKind::EXPR_KIND_SELECT_TARGET)
+                .unwrap();
+        let svf = out.as_sql_value_function().unwrap();
+        assert_eq!(svf.op, op);
+        assert_eq!(svf.r#type, typ);
+        assert_eq!(svf.typmod, want_typmod);
+        assert_eq!(svf.location, 7);
+        assert_eq!(expr_type(out), typ);
+        assert_eq!(expr_collation(out), InvalidOid);
+        assert_eq!(expr_location(out), 7);
+        assert_eq!(crate::expr_typmod(out), want_typmod);
+    }
+}
+
+#[test]
+fn sql_value_function_negative_precision_is_22023() {
+    use types_nodes::primnodes::{SQLValueFunction, SQLValueFunctionOp as Op};
+
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    let raw = Node::mk(
+        mcx,
+        SQLValueFunction { op: Op::SVFOP_CURRENT_TIMESTAMP_N, r#type: 0, typmod: -2, location: 7 },
+    )
+    .unwrap();
+    let err = transformExpr(mcx, &mut pstate, raw, ParseExprKind::EXPR_KIND_SELECT_TARGET)
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_PARAMETER_VALUE);
+    assert!(err.message().contains("precision must not be negative"));
+}

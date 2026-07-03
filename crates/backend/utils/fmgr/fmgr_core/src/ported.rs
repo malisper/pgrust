@@ -20,6 +20,7 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::adt_oracle_compat::builtins::ORACLE_COMPAT_BUILTINS,
     ::adt_pseudotypes::builtins::PSEUDOTYPES_BUILTINS,
     ::adt_scalar::builtins::SCALAR_BUILTINS,
+    ::adt_timestamp::builtins::TIMESTAMP_BUILTINS,
     ::name::builtins::NAME_BUILTINS,
     ::nbt_compare::builtins::NBT_BUILTINS,
     ::varlena::builtins::VARLENA_BUILTINS,

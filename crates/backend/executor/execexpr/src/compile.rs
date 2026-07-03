@@ -581,6 +581,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wintype,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
+        NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().r#type,
         NodeTag::T_BoolExpr | NodeTag::T_NullTest => 16,
         tag => panic!("execexpr exprType: node family {tag:?} not ported"),
     }
@@ -642,7 +643,7 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
                 },
             }
         }
-        NodeTag::T_Const | NodeTag::T_Param => {}
+        NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_SQLValueFunction => {}
         // C expr_setup_walker: Aggref/WindowFunc args never eval in the
         // caller's econtext.
         NodeTag::T_Aggref | NodeTag::T_WindowFunc => {}
@@ -797,6 +798,16 @@ fn init_expr_rec<'mcx>(
             let mm = node.as_min_max_expr().unwrap();
             let step = init_minmax(node, mm, state, mcx, out, agg, params)?;
             push_step(state, mcx, step)
+        }
+        NodeTag::T_SQLValueFunction => {
+            let svf = node.as_sql_value_function().unwrap();
+            let layout = core::alloc::Layout::from_size_align(12, 8).expect("timetz layout");
+            let timetz = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?.cast();
+            push_step(
+                state,
+                mcx,
+                Step::SqlValueFunction { op: svf.op, typmod: svf.typmod, timetz, out },
+            )
         }
         NodeTag::T_BoolExpr => init_bool_expr(node, state, mcx, out, agg, params),
         NodeTag::T_NullTest => {

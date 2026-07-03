@@ -519,6 +519,7 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
         | NodeTag::T_Const
         | NodeTag::T_RangeTblRef
         | NodeTag::T_CurrentOfExpr
+        | NodeTag::T_SQLValueFunction
         | NodeTag::T_SortGroupClause => Ok(None),
         // Aggref takes C's default ece_generic_processing arm: fold inside
         // the aggregate's arguments, never the Aggref itself. SubLink likewise

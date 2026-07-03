@@ -329,6 +329,23 @@ pub fn time_overflows(hour: i32, min: i32, sec: i32, fsec: fsec_t) -> bool {
         > USECS_PER_DAY
 }
 
+/// `float_time_overflows` (date.c core; timestamp.c's make_* need it too).
+pub fn float_time_overflows(hour: i32, min: i32, sec: f64) -> bool {
+    if hour < 0 || hour > HOURS_PER_DAY || min < 0 || min >= MINS_PER_HOUR {
+        return true;
+    }
+    if sec.is_nan() {
+        return true;
+    }
+    // round before range-checking, as C does with rint()
+    let sec = (sec * USECS_PER_SEC as f64).round_ties_even();
+    if sec < 0.0 || sec > (SECS_PER_MINUTE as i64 * USECS_PER_SEC) as f64 {
+        return true;
+    }
+    ((hour * MINS_PER_HOUR + min) * SECS_PER_MINUTE) as i64 * USECS_PER_SEC + sec as i64
+        > USECS_PER_DAY
+}
+
 pub fn ParseDateTime<'w>(
     timestr: &[u8],
     workbuf: &'w mut [u8],

@@ -417,6 +417,36 @@ fn run_program<'mcx>(
                 }
                 write_out(*out, &mut regs, value, isnull);
             }
+            Step::SqlValueFunction { op, typmod, timetz, out } => {
+                use ::types_nodes::primnodes::SQLValueFunctionOp as Op;
+                let value = match op {
+                    Op::SVFOP_CURRENT_DATE => Datum::from_i32(adt_date::GetSQLCurrentDate()),
+                    Op::SVFOP_CURRENT_TIME | Op::SVFOP_CURRENT_TIME_N => {
+                        let t = adt_date::GetSQLCurrentTime(*typmod);
+                        // SAFETY: compile-allocated 12-byte 8-aligned image
+                        // slot owned by this step (steps.rs note).
+                        unsafe {
+                            timetz.as_ptr().cast::<i64>().write(t.time);
+                            timetz.as_ptr().add(8).cast::<i32>().write(t.zone);
+                        }
+                        Datum::from_usize(timetz.as_ptr() as usize)
+                    }
+                    Op::SVFOP_CURRENT_TIMESTAMP | Op::SVFOP_CURRENT_TIMESTAMP_N => {
+                        Datum::from_i64(adt_timestamp::GetSQLCurrentTimestamp(*typmod))
+                    }
+                    Op::SVFOP_LOCALTIME | Op::SVFOP_LOCALTIME_N => {
+                        Datum::from_i64(adt_date::GetSQLLocalTime(*typmod))
+                    }
+                    Op::SVFOP_LOCALTIMESTAMP | Op::SVFOP_LOCALTIMESTAMP_N => {
+                        Datum::from_i64(adt_timestamp::GetSQLLocalTimestamp(*typmod)?)
+                    }
+                    other => panic!(
+                        "execexpr EEOP_SQLVALUEFUNCTION: name op {other:?} unported \
+                         (grammar arms 2149-2155 are louds)"
+                    ),
+                };
+                write_out(*out, &mut regs, value, false);
+            }
             Step::Qual { jumpdone } => {
                 if regs.isnull || !regs.value.as_bool() {
                     regs.value = Datum::from_bool(false);

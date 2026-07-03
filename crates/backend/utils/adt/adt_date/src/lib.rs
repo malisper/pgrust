@@ -14,7 +14,7 @@ use adt_datetime::{
     date2j, fsec_t, j2date, pg_tm, DateTimeErrorExtra, DateTimeParseError, DecodeDateTime,
     DecodeTimeOnly, EncodeDateOnly, EncodeTimeOnly, ParseDateTime, Timestamp, TimeOffset,
     ValidateDate, DTERR_BAD_FORMAT, DTK_DATE, DTK_DATE_M, DTK_EARLY, DTK_EPOCH, DTK_LATE,
-    HOURS_PER_DAY, IS_VALID_JULIAN, MAXDATEFIELDS, MAXDATELEN, MAX_TIME_PRECISION,
+    IS_VALID_JULIAN, MAXDATEFIELDS, MAXDATELEN, MAX_TIME_PRECISION,
     MINS_PER_HOUR, POSTGRES_EPOCH_JDATE, SECS_PER_MINUTE, USECS_PER_DAY, USECS_PER_HOUR,
     USECS_PER_MINUTE, USECS_PER_SEC,
 };
@@ -548,21 +548,7 @@ pub fn tm2time(tm: &pg_tm, fsec: fsec_t) -> TimeADT {
         + fsec as i64
 }
 
-pub fn float_time_overflows(hour: i32, min: i32, sec: f64) -> bool {
-    if hour < 0 || hour > HOURS_PER_DAY || min < 0 || min >= MINS_PER_HOUR {
-        return true;
-    }
-    if sec.is_nan() {
-        return true;
-    }
-    // round before range-checking, as C does with rint()
-    let sec = (sec * USECS_PER_SEC as f64).round_ties_even();
-    if sec < 0.0 || sec > (SECS_PER_MINUTE as i64 * USECS_PER_SEC) as f64 {
-        return true;
-    }
-    ((hour * MINS_PER_HOUR + min) * SECS_PER_MINUTE) as i64 * USECS_PER_SEC + sec as i64
-        > USECS_PER_DAY
-}
+pub use adt_datetime::float_time_overflows;
 
 pub fn time2tm(mut time: TimeADT, tm: &mut pg_tm, fsec: &mut fsec_t) {
     tm.tm_hour = (time / USECS_PER_HOUR) as i32;

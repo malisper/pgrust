@@ -1109,6 +1109,36 @@ fn deparse_expr<'mcx>(
             buf.try_push(')')?;
             Ok(())
         }
+        // get_rule_expr T_SQLValueFunction (datetime ops; name ops are loud
+        // with their grammar arms).
+        NodeTag::T_SQLValueFunction => {
+            use types_nodes::primnodes::SQLValueFunctionOp as Op;
+            let svf = expr.as_sql_value_function().unwrap();
+            let kw = match svf.op {
+                Op::SVFOP_CURRENT_DATE => "CURRENT_DATE",
+                Op::SVFOP_CURRENT_TIME | Op::SVFOP_CURRENT_TIME_N => "CURRENT_TIME",
+                Op::SVFOP_CURRENT_TIMESTAMP | Op::SVFOP_CURRENT_TIMESTAMP_N => {
+                    "CURRENT_TIMESTAMP"
+                }
+                Op::SVFOP_LOCALTIME | Op::SVFOP_LOCALTIME_N => "LOCALTIME",
+                Op::SVFOP_LOCALTIMESTAMP | Op::SVFOP_LOCALTIMESTAMP_N => "LOCALTIMESTAMP",
+                other => node_gap(
+                    "get_rule_expr",
+                    &format!("SQLValueFunction {other:?} deparse (ruleutils lane)"),
+                ),
+            };
+            buf.try_push_str(kw)?;
+            if matches!(
+                svf.op,
+                Op::SVFOP_CURRENT_TIME_N
+                    | Op::SVFOP_CURRENT_TIMESTAMP_N
+                    | Op::SVFOP_LOCALTIME_N
+                    | Op::SVFOP_LOCALTIMESTAMP_N
+            ) {
+                write!(buf, "({})", svf.typmod).expect("PgString write");
+            }
+            Ok(())
+        }
         other => node_gap(
             "deparse_expression",
             &format!("{other:?} deparse unported (ruleutils lane)"),

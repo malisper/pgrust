@@ -9,7 +9,10 @@ use types_nodes::parsenodes::{
     CURSOR_OPT_ASENSITIVE, CURSOR_OPT_BINARY, CURSOR_OPT_FAST_PLAN, CURSOR_OPT_HOLD,
     CURSOR_OPT_INSENSITIVE, CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL, FETCH_ALL,
 };
-use types_nodes::primnodes::{CaseExpr, CaseWhen, CoalesceExpr, JoinExpr, MinMaxExpr, MinMaxOp};
+use types_nodes::primnodes::{
+    CaseExpr, CaseWhen, CoalesceExpr, JoinExpr, MinMaxExpr, MinMaxOp, SQLValueFunction,
+    SQLValueFunctionOp,
+};
 use types_nodes::JoinType;
 use types_nodes::rawnodes::A_Expr_Kind::AEXPR_OP;
 use types_nodes::rawnodes::{
@@ -1902,6 +1905,81 @@ impl<'mcx> Parser<'mcx> {
                 n.jumble_args = true;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // a_expr AT TIME ZONE a_expr | a_expr AT LOCAL.
+            2023 => {
+                let args = NodeList::make2(
+                    mcx,
+                    view.v(5).node().expect("a_expr"),
+                    view.v(1).node().expect("a_expr"),
+                )?;
+                let f = make_func_call(
+                    mcx,
+                    system_func_name(mcx, "timezone")?,
+                    args,
+                    CoercionForm::COERCE_SQL_SYNTAX,
+                    view.l(2),
+                )?;
+                *yyval = YYSTYPE::Node(Some(f.seal()));
+            }
+            2024 => {
+                let args = NodeList::make1(mcx, view.v(1).node().expect("a_expr"))?;
+                let f = make_func_call(
+                    mcx,
+                    system_func_name(mcx, "timezone")?,
+                    args,
+                    CoercionForm::COERCE_SQL_SYNTAX,
+                    -1,
+                )?;
+                *yyval = YYSTYPE::Node(Some(f.seal()));
+            }
+            // CURRENT_DATE .. LOCALTIMESTAMP[(n)] (makeSQLValueFunction; the
+            // CURRENT_ROLE..CURRENT_SCHEMA name ops 2149-2155 stay louds).
+            2140..=2148 => {
+                use SQLValueFunctionOp as Op;
+                let (op, typmod) = match rule {
+                    2140 => (Op::SVFOP_CURRENT_DATE, -1),
+                    2141 => (Op::SVFOP_CURRENT_TIME, -1),
+                    2142 => (Op::SVFOP_CURRENT_TIME_N, view.v(3).ival()),
+                    2143 => (Op::SVFOP_CURRENT_TIMESTAMP, -1),
+                    2144 => (Op::SVFOP_CURRENT_TIMESTAMP_N, view.v(3).ival()),
+                    2145 => (Op::SVFOP_LOCALTIME, -1),
+                    2146 => (Op::SVFOP_LOCALTIME_N, view.v(3).ival()),
+                    2147 => (Op::SVFOP_LOCALTIMESTAMP, -1),
+                    _ => (Op::SVFOP_LOCALTIMESTAMP_N, view.v(3).ival()),
+                };
+                let n = Node::mk(
+                    mcx,
+                    SQLValueFunction { op, r#type: 0, typmod, location: view.l(1) },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            // EXTRACT '(' extract_list ')'.
+            2157 => {
+                let f = make_func_call(
+                    mcx,
+                    system_func_name(mcx, "extract")?,
+                    view.v(3).list(),
+                    CoercionForm::COERCE_SQL_SYNTAX,
+                    view.l(1),
+                )?;
+                *yyval = YYSTYPE::Node(Some(f.seal()));
+            }
+            // extract_list: extract_arg FROM a_expr.
+            2306 => {
+                let s = Node::mk_a_const(
+                    mcx,
+                    Some(ValUnion::String(types_nodes::String { sval: view.v(1).str_val() })),
+                    view.l(1),
+                )?;
+                let e = view.v(3).node().expect("a_expr");
+                *yyval = YYSTYPE::List(NodeList::make2(mcx, s, e)?);
+            }
+            // extract_arg keyword forms (IDENT/Sconst ride DISPATCH).
+            2308..=2313 => {
+                *yyval = YYSTYPE::Str(
+                    ["year", "month", "day", "hour", "minute", "second"][rule - 2308],
+                );
+            }
             // generic_set: var_name TO var_list | var_name '=' var_list.
             207 | 208 => {
                 let mut n = Node::build::<VariableSetStmt>(mcx)?;
@@ -2914,6 +2992,15 @@ fn make_type_name<'mcx>(
             arrayBounds: NodeList::nil(),
             location,
         },
+    )
+}
+
+// SystemFuncName (parse_type.h shape): pg_catalog-qualified function name.
+fn system_func_name<'mcx>(mcx: mcx::Mcx<'mcx>, name: &'mcx str) -> PgResult<NodeList<'mcx>> {
+    NodeList::make2(
+        mcx,
+        Node::mk_string(mcx, "pg_catalog")?,
+        Node::mk_string(mcx, name)?,
     )
 }
 

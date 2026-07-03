@@ -9,6 +9,7 @@ fn gmt_session() {
         // tests' precedent).
         unsafe { std::env::set_var("PGRUST_TZDIR", "/usr/share/zoneinfo") };
         pgtz::init_seams();
+        adt_timestamp::init_seams();
         guc_tables::init_seams();
         elog::init_seams();
         fd::init_seams();
@@ -205,20 +206,23 @@ fn time_in_out_goldens() {
     assert_eq!(e.sqlstate(), ERRCODE_INVALID_DATETIME_FORMAT);
 }
 
-// Locks on the concurrently-porting timezone unit: these go live (and this
-// test starts failing, on purpose) when tz::GetCurrentDateTime lands.
 #[test]
-#[should_panic(expected = "GetCurrentDateTime")]
-fn zoneless_time_in_blocks_on_tz_lane() {
+fn zoneless_time_in_lives_on_tz_seams() {
     gmt_session();
-    let _ = time_in("12:34:56", -1, None);
+    assert_eq!(t_out(t_in("12:34:56", -1)), "12:34:56");
 }
 
 #[test]
-#[should_panic(expected = "GetCurrentTimeUsec")]
-fn sql_current_time_blocks_on_tz_lane() {
+fn sql_current_time_lives_on_tz_seams() {
     gmt_session();
-    let _ = GetSQLLocalTime(-1);
+    let t = GetSQLLocalTime(-1);
+    assert!((0..=USECS_PER_DAY).contains(&t));
+    let ct = GetSQLCurrentTime(-1);
+    assert!((0..=USECS_PER_DAY).contains(&ct.time));
+    let d = GetSQLCurrentDate();
+    // repeat hits the SQL_CURRENT_DATE_CACHE memo
+    assert_eq!(GetSQLCurrentDate(), d);
+    assert!(IS_VALID_DATE(d));
 }
 
 #[test]

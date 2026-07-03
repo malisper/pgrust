@@ -114,6 +114,14 @@ pub enum Step {
     // slots: nelems compile-allocated NullableDatum arg targets (C's
     // d.minmax.values/nulls); call is the type's btree cmp proc.
     MinMax { call: FuncCall, slots: NonNull<NullableDatum>, nelems: u16, least: bool, out: OutRef },
+    // timetz: compile-allocated 12-byte TimeTz image, rewritten per eval —
+    // valid until the next eval, the window C's per-tuple context reset gives.
+    SqlValueFunction {
+        op: ::types_nodes::primnodes::SQLValueFunctionOp,
+        typmod: i32,
+        timetz: NonNull<u8>,
+        out: OutRef,
+    },
 }
 
 // By-ref copy target: C d.agg_trans.aggcontext + the transtype's typlen.

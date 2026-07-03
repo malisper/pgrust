@@ -20,6 +20,7 @@ adt_scalar = { path = "../../adt/scalar" }
 adt_cash = { path = "../../adt/cash" }
 adt_char = { path = "../../adt/char" }
 adt_date = { path = "../../adt/adt_date" }
+adt_timestamp = { path = "../../adt/adt_timestamp" }
 adt_encode = { path = "../../adt/encode" }
 adt_float = { path = "../../adt/float" }
 adt_formatting = { path = "../../adt/formatting" }

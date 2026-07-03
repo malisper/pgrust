@@ -80,6 +80,7 @@ pub fn transformExprRecurse<'mcx>(
         NodeTag::T_CaseExpr => transformCaseExpr(mcx, pstate, expr),
         NodeTag::T_CoalesceExpr => transformCoalesceExpr(mcx, pstate, expr),
         NodeTag::T_MinMaxExpr => transformMinMaxExpr(mcx, pstate, expr),
+        NodeTag::T_SQLValueFunction => transformSQLValueFunction(mcx, expr),
         NodeTag::T_ColumnRef => transformColumnRef(mcx, pstate, expr),
         NodeTag::T_FuncCall => transformFuncCall(mcx, pstate, expr),
         NodeTag::T_SubLink => transformSubLink(mcx, pstate, expr),
@@ -461,6 +462,72 @@ fn transformMinMaxExpr<'mcx>(
             location: m.location,
         },
     )
+}
+
+fn transformSQLValueFunction<'mcx>(mcx: Mcx<'mcx>, expr: Node<'mcx>) -> PgResult<Node<'mcx>> {
+    use types_core::catalog::{DATEOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID};
+    use types_nodes::primnodes::{SQLValueFunction, SQLValueFunctionOp as Op};
+
+    let svf = expr.as_sql_value_function().unwrap();
+    let (typ, typmod) = match svf.op {
+        Op::SVFOP_CURRENT_DATE => (DATEOID, svf.typmod),
+        Op::SVFOP_CURRENT_TIME => (TIMETZOID, svf.typmod),
+        Op::SVFOP_CURRENT_TIME_N => (TIMETZOID, anytime_typmod_check(true, svf.typmod)?),
+        Op::SVFOP_CURRENT_TIMESTAMP => (TIMESTAMPTZOID, svf.typmod),
+        Op::SVFOP_CURRENT_TIMESTAMP_N => {
+            (TIMESTAMPTZOID, anytimestamp_typmod_check(true, svf.typmod)?)
+        }
+        Op::SVFOP_LOCALTIME => (TIMEOID, svf.typmod),
+        Op::SVFOP_LOCALTIME_N => (TIMEOID, anytime_typmod_check(false, svf.typmod)?),
+        Op::SVFOP_LOCALTIMESTAMP => (TIMESTAMPOID, svf.typmod),
+        Op::SVFOP_LOCALTIMESTAMP_N => {
+            (TIMESTAMPOID, anytimestamp_typmod_check(false, svf.typmod)?)
+        }
+        other => panic!(
+            "transformSQLValueFunction (parse_expr.c): name-returning op {other:?} unported \
+             (grammar arms 2149-2155 are louds) — unit backend-parser-expr"
+        ),
+    };
+    Node::mk(
+        mcx,
+        SQLValueFunction { op: svf.op, r#type: typ, typmod, location: svf.location },
+    )
+}
+
+// DIVERGENCE: anytime/anytimestamp_typmod_check live in adt date.c/timestamp.c
+// in C; duplicated here until the adt lane exports them (both MAX precisions
+// are 6, see date.h/timestamp.h).
+fn anytime_typmod_check(istz: bool, typmod: i32) -> PgResult<i32> {
+    typmod_check("TIME", istz, typmod)
+}
+
+fn anytimestamp_typmod_check(istz: bool, typmod: i32) -> PgResult<i32> {
+    typmod_check("TIMESTAMP", istz, typmod)
+}
+
+fn typmod_check(what: &str, istz: bool, typmod: i32) -> PgResult<i32> {
+    use types_error::{ErrorLocation, ERRCODE_INVALID_PARAMETER_VALUE, ERROR, WARNING};
+    const MAX_PRECISION: i32 = 6;
+    let tz = if istz { " WITH TIME ZONE" } else { "" };
+    if typmod < 0 {
+        return Err(Box::new(
+            elog::ereport(ERROR)
+                .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg(format!("{what}({typmod}){tz} precision must not be negative"))
+                .into_error()
+                .with_error_location(ErrorLocation::new("parse_expr.c", 0, "typmod_check")),
+        ));
+    }
+    if typmod > MAX_PRECISION {
+        elog::ereport(WARNING)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg(format!(
+                "{what}({typmod}){tz} precision reduced to maximum allowed, {MAX_PRECISION}"
+            ))
+            .finish(ErrorLocation::new("parse_expr.c", 0, "typmod_check"))?;
+        return Ok(MAX_PRECISION);
+    }
+    Ok(typmod)
 }
 
 fn check_srf_in_construct(
