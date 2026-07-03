@@ -217,33 +217,29 @@ pub fn PortalCleanup(portal: &Portal<'static>) -> PgResult<()> {
     if query_desc.is_null() {
         return Ok(());
     }
-    if failed {
-        // C leaves the QueryDesc to die with the abort cleanup; the registry
-        // entry is owning, so release it here (execmain audit E-4 precedent).
-        // Dropping executor state releases scan pins remembered under the
-        // portal's owner at FETCH — that owner must be current for the drop.
-        let save_owner = resowner_seams::current_resource_owner::call();
-        let portal_owner = portal.borrow().resowner;
-        if !portal_owner.is_null() {
-            resowner_seams::set_current_resource_owner::call(portal_owner);
-        }
-        execmain_seams::release_query_desc::call(query_desc);
-        resowner_seams::set_current_resource_owner::call(save_owner);
-        return Ok(());
-    }
-    // ExecutorEnd unregisters es_snapshot from CurrentResourceOwner, so the
-    // portal's owner must be current for the shutdown (portalcmds.c:279).
+    // Both arms need CurrentResourceOwner = portal->resowner (portalcmds.c:279):
+    // ExecutorEnd unregisters es_snapshot from it, and on the failed arm the
+    // exec bundle's guard drops (buffer pins, relation closers) forget from it
+    // — the pins were remembered under the portal's owner, not the abort-time
+    // TopTransaction owner (C never drops here; its resowner walk releases).
     let save_owner = resowner_seams::current_resource_owner::call();
     let portal_owner = portal.borrow().resowner;
     if !portal_owner.is_null() {
         resowner_seams::set_current_resource_owner::call(portal_owner);
     }
-    let result = (|| -> PgResult<()> {
-        execmain_seams::executor_finish::call(query_desc)?;
-        execmain_seams::executor_end::call(query_desc)?;
-        execmain_seams::free_query_desc::call(query_desc);
+    let result = if failed {
+        // C leaves the QueryDesc to die with the abort cleanup; the registry
+        // entry is owning, so release it here (execmain audit E-4 precedent).
+        execmain_seams::release_query_desc::call(query_desc);
         Ok(())
-    })();
+    } else {
+        (|| -> PgResult<()> {
+            execmain_seams::executor_finish::call(query_desc)?;
+            execmain_seams::executor_end::call(query_desc)?;
+            execmain_seams::free_query_desc::call(query_desc);
+            Ok(())
+        })()
+    };
     resowner_seams::set_current_resource_owner::call(save_owner);
     result
 }
