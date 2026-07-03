@@ -3204,6 +3204,9 @@ dependencies = [
 [[package]]
 name = "pg_string"
 version = "0.0.0"
+dependencies = [
+ "string_seams",
+]
 
 [[package]]
 name = "pglz"
@@ -5342,6 +5345,7 @@ version = "0.1.0"
 dependencies = [
  "mcx",
  "types_core",
+ "types_nodes",
  "types_resowner",
  "types_snapshot",
  "types_tuple",

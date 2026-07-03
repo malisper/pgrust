@@ -3,6 +3,7 @@
 
 pub mod aggregates;
 pub mod arith;
+pub mod builtins;
 pub mod io;
 pub mod ops;
 pub mod var;

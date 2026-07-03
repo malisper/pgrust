@@ -9,6 +9,11 @@ name = "parser_analyze"
 path = "src/lib.rs"
 
 [dependencies]
+types_tuple = { path = "../../../_support/types/types_tuple" }
+mbutils = { path = "../../utils/mb/mbutils" }
+elog = { path = "../../utils/error/elog" }
+parse_relation = { path = "../parse_relation" }
+parse_expr = { path = "../parse_expr" }
 analyze_seams = { path = "../analyze_seams" }
 backend_status = { path = "../../utils/activity/backend_status" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
