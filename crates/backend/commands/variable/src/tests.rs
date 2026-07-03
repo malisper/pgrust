@@ -124,11 +124,31 @@ fn timezone_iana_zone_through_real_engine() {
 }
 
 #[test]
-#[should_panic(expected = "load_tzoffsets")]
-fn timezone_abbreviations_non_null_panics_until_tzparser_lands() {
+fn timezone_abbreviations_load_and_install() {
     setup();
+    let installs = [
+        "/tmp/pgrust_pginstall/share/postgresql",
+        "/opt/homebrew/share/postgresql@18",
+    ];
+    let Some(share) = installs
+        .into_iter()
+        .find(|d| std::path::Path::new(&format!("{d}/timezonesets")).is_dir())
+    else {
+        return;
+    };
+    std::env::set_var("PGRUST_PGSHAREDIR", share);
+
+    let mut extra = None;
     let mut val = Some("Default".to_string());
-    let _ = check_timezone_abbreviations(&mut val, &mut None, PGC_S_SESSION);
+    assert!(check_timezone_abbreviations(&mut val, &mut extra, PGC_S_SESSION).unwrap());
+    assert!(extra.is_some());
+    assign_timezone_abbreviations(val.as_deref(), extra.as_ref());
+    let tbl = tz::zoneabbrevtbl().expect("table installed");
+    let est = adt_datetime::decode::datebsearch(b"est", tbl.abbrevs).expect("est known");
+    assert_eq!(est.value, -18000);
+
+    let mut bad = Some("NoSuchFileHere".to_string());
+    assert!(!check_timezone_abbreviations(&mut bad, &mut None, PGC_S_SESSION).unwrap());
 }
 
 #[test]

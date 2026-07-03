@@ -3595,6 +3595,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "relpath"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "relpath_seams",
+ "types_core",
+ "types_error",
+ "types_storage",
+]
+
+[[package]]
 name = "relpath_seams"
 version = "0.0.0"
 dependencies = [
@@ -3852,6 +3863,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "session"
+version = "0.0.0"
+dependencies = [
+ "session_seams",
+ "types_error",
+]
+
+[[package]]
 name = "session_seams"
 version = "0.0.0"
 dependencies = [
@@ -3914,6 +3933,16 @@ dependencies = [
  "types_core",
  "types_error",
  "types_storage",
+]
+
+[[package]]
+name = "slot"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "ipc_seams",
+ "slot_seams",
+ "types_error",
 ]
 
 [[package]]
@@ -4832,6 +4861,7 @@ dependencies = [
 name = "utility_seams"
 version = "0.1.0"
 dependencies = [
+ "mcx",
  "seam_core",
  "tcop_dest",
  "types_core",
@@ -4977,6 +5007,19 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "visibilitymap"
+version = "0.1.0"
+dependencies = [
+ "bufmgr_seams",
+ "inval",
+ "smgr_seams",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_storage",
+]
 
 [[package]]
 name = "waitevent_seams"
