@@ -155,7 +155,16 @@ pub fn type_maximum_size(type_oid: Oid, typemod: i32) -> i32 {
                 wchar::pg_encoding_max_length(mbutils_seams::get_database_encoding::call());
             (typemod - VARHDRSZ) * max_len + VARHDRSZ
         }
-        NUMERICOID => adt_numeric::numeric_maximum_size(typemod),
+        NUMERICOID => {
+            // numeric_maximum_size (numeric.c) inlined: a direct adt_numeric dep
+            // closes the cycle arrayfuncs->lsyscache->format_type->adt_numeric->arrayfuncs.
+            if typemod < 4 {
+                return -1;
+            }
+            let precision = ((typemod - 4) >> 16) & 0xffff;
+            let numeric_digits = (precision + 2 * (4 - 1)) / 4;
+            8 + numeric_digits * 2
+        }
         VARBITOID | BITOID => (typemod + 7) / 8 + 2 * 4,
         _ => -1,
     }
