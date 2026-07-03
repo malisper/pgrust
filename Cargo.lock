@@ -3944,8 +3944,11 @@ dependencies = [
 name = "parse_expr"
 version = "0.0.0"
 dependencies = [
+ "aclchk_seams",
  "analyze_seams",
+ "coerce",
  "elog",
+ "format_type",
  "guc_tables",
  "mbutils",
  "mcx",
@@ -3953,12 +3956,14 @@ dependencies = [
  "parse_func",
  "parse_oper",
  "parse_relation",
+ "parse_utilcmd",
  "parser_small1",
  "stack_depth",
  "syscache_seams",
  "types_core",
  "types_error",
  "types_nodes",
+ "types_tuple",
  "wchar",
 ]
 
