@@ -250,6 +250,8 @@ members = [
     "crates/backend/access/transam/multixact_seams",
     "crates/backend/access/transam/parallel",
     "crates/backend/access/transam/parallel_seams",
+    "crates/backend/access/transam/twophase",
+    "crates/backend/access/transam/twophase_rmgr",
     "crates/backend/access/transam/twophase_seams",
     "crates/backend/access/transam/twophase_config",
     "crates/backend/catalog/catalog_index_seams",

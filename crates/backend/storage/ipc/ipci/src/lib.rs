@@ -60,6 +60,7 @@ pub fn CalculateShmemSize(cfg: &ProcGlobalConfig) -> PgResult<(usize, i32)> {
     size = shmem::add_size(size, clog::CLOGShmemSize())?;
     size = shmem::add_size(size, subtrans::SUBTRANSShmemSize())?;
     size = shmem::add_size(size, multixact::MultiXactShmemSize())?;
+    size = shmem::add_size(size, twophase::TwoPhaseShmemSize())?;
     size = shmem::add_size(size, lwlock::LWLockShmemSize()?)?;
     size = shmem::add_size(size, backend_status_seams::backend_status_shmem_size::call()?)?;
     size = shmem::add_size(size, sinval::SharedInvalShmemSize()?)?;
@@ -123,6 +124,7 @@ pub fn CreateOrAttachShmemStructs(cfg: &ProcGlobalConfig) -> PgResult<()> {
     }
     procarray::ProcArrayShmemInit();
     backend_status_seams::backend_status_shmem_init::call()?;
+    twophase::TwoPhaseShmemInit();
 
     sinval::SharedInvalShmemInit()?;
 
@@ -160,6 +162,7 @@ pub fn ResetShmemAfterCrash() -> PgResult<()> {
     lmgr_proc::ProcGlobalResetAfterCrash();
     procarray::ProcArrayShmemResetAfterCrash();
     backend_status_seams::backend_status_shmem_reset_after_crash::call();
+    twophase::TwoPhaseStateResetAfterCrash();
 
     sinval::SharedInvalShmemResetAfterCrash();
 

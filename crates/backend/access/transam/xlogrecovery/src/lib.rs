@@ -912,6 +912,43 @@ fn recovery_oldest_active_xid() -> TransactionId {
 
 pub fn init_seams() {
     use xlogrecovery_seams as s;
+
+    // timeline.c's read-side trio over the reduced single-timeline history
+    // (a real .history file panics loudly in read_timeline_history); homed
+    // here until the timeline unit lands.
+    timeline_seams::read_timeline_history::set(|mcx, target_tli| {
+        let tles = read_timeline_history(target_tli);
+        let mut v = mcx::PgVec::new_in(mcx);
+        for t in tles {
+            v.push(timeline_seams::TimeLineHistoryEntry {
+                tli: t.tli,
+                begin: t.begin,
+                end: t.end,
+            });
+        }
+        Ok(v)
+    });
+    timeline_seams::tli_of_point_in_history::set(|ptr, history| {
+        for t in history {
+            if t.begin <= ptr && (t.end == InvalidXLogRecPtr || ptr < t.end) {
+                return t.tli;
+            }
+        }
+        panic!("timeline of point {ptr:X} not found in history");
+    });
+    // tliSwitchPoint (timeline.c): history is newest-first; entries before
+    // the match are the future timelines, the last one seen is nextTLI.
+    timeline_seams::tli_switch_point::set(|tli, history| {
+        let mut next_tli: TimeLineID = 0;
+        for t in history {
+            if t.tli == tli {
+                return (t.end, next_tli);
+            }
+            next_tli = t.tli;
+        }
+        panic!("could not find timeline {tli} in history");
+    });
+
     s::reached_consistency::set(|| REACHED_CONSISTENCY.load(Relaxed));
     s::get_xlog_replay_rec_ptr::set(GetXLogReplayRecPtr);
     s::xlog_request_wal_receiver_reply::set(XLogRequestWalReceiverReply);
