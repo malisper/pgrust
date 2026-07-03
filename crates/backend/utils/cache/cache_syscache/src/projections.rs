@@ -17,7 +17,7 @@ use crate::{
     SearchSysCache3, SearchSysCache4, SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1,
     SysCacheKey,
 };
-use crate::cacheinfo::{COLLOID, AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TYPENAMENSP, OPEROID, PROCOID, RELNAMENSP, RELOID, STATRELATTINH, TYPEOID};
+use crate::cacheinfo::{COLLOID, AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TYPENAMENSP, OPEROID, PROCOID, RELNAMENSP, RELOID, SEQRELID, STATRELATTINH, TYPEOID};
 
 const ANUM_PG_CLASS_OID: i32 = 1;
 const ANUM_PG_CLASS_RELISSHARED: i32 = 16;
@@ -36,6 +36,13 @@ const ANUM_PG_TYPE_TYPARRAY: i32 = 15;
 const ANUM_PG_TYPE_TYPALIGN: i32 = 23;
 const ANUM_PG_TYPE_TYPSTORAGE: i32 = 24;
 const ANUM_PG_TYPE_TYPCOLLATION: i32 = 29;
+const ANUM_PG_SEQUENCE_SEQTYPID: i32 = 2;
+const ANUM_PG_SEQUENCE_SEQSTART: i32 = 3;
+const ANUM_PG_SEQUENCE_SEQINCREMENT: i32 = 4;
+const ANUM_PG_SEQUENCE_SEQMAX: i32 = 5;
+const ANUM_PG_SEQUENCE_SEQMIN: i32 = 6;
+const ANUM_PG_SEQUENCE_SEQCACHE: i32 = 7;
+const ANUM_PG_SEQUENCE_SEQCYCLE: i32 = 8;
 const ANUM_PG_ATTRIBUTE_ATTRELID: i32 = 1;
 const ANUM_PG_INDEX_INDEXRELID: i32 = 1;
 const ANUM_PG_INDEX_INDNATTS: i32 = 3;
@@ -212,6 +219,25 @@ fn lookup_pg_type_shape(typid: Oid) -> PgResult<Option<PgTypeShape>> {
     drop(t);
     ReleaseSysCache(tuple);
     Ok(Some(shape))
+}
+
+fn lookup_pg_sequence_form(relid: Oid) -> PgResult<Option<syscache_seams::PgSequenceForm>> {
+    let Some(tuple) = SearchSysCache1(SEQRELID, SysCacheKey::Value(Datum::from_oid(relid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let form = syscache_seams::PgSequenceForm {
+        seqtypid: getattr(&t, SEQRELID, ANUM_PG_SEQUENCE_SEQTYPID).as_oid(),
+        seqstart: getattr(&t, SEQRELID, ANUM_PG_SEQUENCE_SEQSTART).as_i64(),
+        seqincrement: getattr(&t, SEQRELID, ANUM_PG_SEQUENCE_SEQINCREMENT).as_i64(),
+        seqmax: getattr(&t, SEQRELID, ANUM_PG_SEQUENCE_SEQMAX).as_i64(),
+        seqmin: getattr(&t, SEQRELID, ANUM_PG_SEQUENCE_SEQMIN).as_i64(),
+        seqcache: getattr(&t, SEQRELID, ANUM_PG_SEQUENCE_SEQCACHE).as_i64(),
+        seqcycle: getattr(&t, SEQRELID, ANUM_PG_SEQUENCE_SEQCYCLE).as_bool(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(form))
 }
 
 fn pg_type_isdefined(typid: Oid) -> PgResult<Option<bool>> {
@@ -1444,6 +1470,7 @@ pub(crate) fn install() {
     syscache_seams::pg_index_indexrelid::set(pg_index_indexrelid);
     syscache_seams::pg_constraint_fk_target::set(pg_constraint_fk_target);
     syscache_seams::lookup_pg_type_shape::set(lookup_pg_type_shape);
+    syscache_seams::lookup_pg_sequence_form::set(lookup_pg_sequence_form);
     syscache_seams::pg_type_isdefined::set(pg_type_isdefined);
     syscache_seams::pg_type_typtype::set(pg_type_typtype);
     syscache_seams::pg_type_category::set(pg_type_category);

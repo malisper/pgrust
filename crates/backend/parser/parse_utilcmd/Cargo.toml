@@ -21,3 +21,5 @@ elog = { path = "../../utils/error/elog" }
 mbutils = { path = "../../utils/mb/mbutils" }
 gram_core = { path = "../gram_core" }
 parser_seams = { path = "../parser_seams" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+keywords = { path = "../../../common/keywords" }

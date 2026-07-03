@@ -17,6 +17,8 @@ fmgr_seams = { path = "../fmgr_seams" }
 adt_bool = { path = "../../adt/bool" }
 arrayfuncs = { path = "../../adt/arrayfuncs" }
 adt_scalar = { path = "../../adt/scalar" }
+sequence_seams = { path = "../../../commands/sequence_seams" }
+adt_regproc = { path = "../../adt/regproc" }
 adt_cash = { path = "../../adt/cash" }
 adt_char = { path = "../../adt/char" }
 adt_date = { path = "../../adt/adt_date" }
@@ -32,7 +34,6 @@ adt_mac = { path = "../../adt/mac" }
 adt_mac8 = { path = "../../adt/mac8" }
 adt_uuid = { path = "../../adt/uuid" }
 adt_network = { path = "../../adt/network" }
-adt_regproc = { path = "../../adt/regproc" }
 adt_numeric = { path = "../../adt/numeric" }
 adt_like = { path = "../../adt/like" }
 adt_regexp = { path = "../../adt/regexp" }

@@ -16,6 +16,10 @@ types_error = { path = "../../../_support/types/types_error" }
 types_rel = { path = "../../../_support/types/rel" }
 heaptuple = { path = "../../access/common/heaptuple" }
 table = { path = "../../access/table/table" }
+genam = { path = "../../access/index/genam" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 catalog = { path = "../catalog" }
 catalog_indexing = { path = "../catalog_indexing" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }

@@ -12,6 +12,7 @@ pub fn init_all() {
     vacuumlazy::init_seams();
     commands_vacuum::init_seams();
     commands_tablespace::init_seams();
+    sequence::init_seams();
     clog::init_seams();
     multixact::init_seams();
     rmgr::init_seams();

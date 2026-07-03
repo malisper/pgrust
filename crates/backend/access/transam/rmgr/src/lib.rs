@@ -132,7 +132,6 @@ unported_redo! {
     tblspc_redo => "backend-commands-tablespace";
     gin_redo => "backend-access-gin-xlog";
     gist_redo => "backend-access-gist-xlog";
-    seq_redo => "backend-commands-sequence";
     spg_redo => "backend-access-spgist-xlog";
     brin_redo => "backend-access-brin-xlog";
     commit_ts_redo => "backend-access-transam-commit-ts";
@@ -317,7 +316,7 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     },
     RmgrData {
         rm_name: "Sequence",
-        rm_redo: seq_redo,
+        rm_redo: sequence_xlog::seq_redo,
         rm_desc: rmgrdesc::seqdesc::seq_desc,
         rm_identify: rmgrdesc::seqdesc::seq_identify,
         rm_startup: None,

@@ -185,3 +185,110 @@ pub fn updateAclDependencies(
         check(r, newmembers);
     }
 }
+
+const Anum_pg_depend_classid: usize = 1;
+const Anum_pg_depend_objid: usize = 2;
+const Anum_pg_depend_refclassid: usize = 4;
+const Anum_pg_depend_refobjid: usize = 5;
+const Anum_pg_depend_refobjsubid: usize = 6;
+const Anum_pg_depend_deptype: usize = 7;
+
+fn oid_key(attno: usize, oid: Oid) -> types_scan::scankey::ScanKeyData {
+    let mut key = types_scan::scankey::ScanKeyData::empty();
+    key.sk_attno = attno as types_core::AttrNumber;
+    key.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+    key.sk_collation = 0;
+    key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(oideq) failed: {e:?}"));
+    key.sk_argument = Datum::from_oid(oid);
+    key
+}
+
+fn dep_attr(
+    tup: &types_tuple::HeapTupleData<'_>,
+    attnum: usize,
+    desc: &types_tuple::TupleDescData<'_>,
+) -> Datum {
+    let mut isnull = false;
+    // SAFETY: fixed NOT NULL pg_depend column under the relation's descriptor.
+    let d = unsafe { types_tuple::heap_getattr(tup, attnum as i32, desc, &mut isnull) };
+    debug_assert!(!isnull);
+    d
+}
+
+// sequenceIsOwned: Some((table_relid, attnum)) iff a pg_depend row records
+// (RelationRelationId, seqId, 0) -> (RelationRelationId, ., .) with deptype.
+pub fn sequenceIsOwned<'mcx>(
+    mcx: Mcx<'mcx>,
+    seqId: Oid,
+    deptype: DependencyType,
+) -> PgResult<Option<(Oid, i32)>> {
+    let rel = table::table_open(mcx, DependRelationId, types_rel::AccessShareLock)?;
+    let keys = [
+        oid_key(Anum_pg_depend_classid, types_core::RELATION_RELATION_ID),
+        oid_key(Anum_pg_depend_objid, seqId),
+    ];
+    let mut scan = genam::systable_beginscan(mcx, &rel, DependDependerIndexId, true, None, &keys)?;
+    let mut result = None;
+    let desc = rel.descr();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        // SAFETY: aliases the slot-held image for this iteration's reads only.
+        let view = unsafe {
+            types_tuple::HeapTupleData::from_raw_parts(
+                tup.header_ptr().cast_mut(),
+                tup.t_len,
+                tup.t_self,
+                tup.t_tableOid,
+            )
+        };
+        if dep_attr(&view, Anum_pg_depend_refclassid, desc).as_oid()
+            == types_core::RELATION_RELATION_ID
+            && dep_attr(&view, Anum_pg_depend_deptype, desc).as_i8() == deptype.as_char()
+        {
+            result = Some((
+                dep_attr(&view, Anum_pg_depend_refobjid, desc).as_oid(),
+                dep_attr(&view, Anum_pg_depend_refobjsubid, desc).as_i32(),
+            ));
+            break;
+        }
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(types_rel::AccessShareLock)?;
+    Ok(result)
+}
+
+pub fn deleteDependencyRecordsForClass<'mcx>(
+    mcx: Mcx<'mcx>,
+    classId: Oid,
+    objectId: Oid,
+    refclassId: Oid,
+    deptype: DependencyType,
+) -> PgResult<i64> {
+    let rel = table::table_open(mcx, DependRelationId, RowExclusiveLock)?;
+    let keys = [oid_key(Anum_pg_depend_classid, classId), oid_key(Anum_pg_depend_objid, objectId)];
+    let mut scan = genam::systable_beginscan(mcx, &rel, DependDependerIndexId, true, None, &keys)?;
+    let mut count = 0i64;
+    let desc = rel.descr();
+    loop {
+        let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else { break };
+        let tid = tup.t_self;
+        // SAFETY: aliases the slot-held image for this iteration's reads only.
+        let view = unsafe {
+            types_tuple::HeapTupleData::from_raw_parts(
+                tup.header_ptr().cast_mut(),
+                tup.t_len,
+                tup.t_self,
+                tup.t_tableOid,
+            )
+        };
+        if dep_attr(&view, Anum_pg_depend_refclassid, desc).as_oid() == refclassId
+            && dep_attr(&view, Anum_pg_depend_deptype, desc).as_i8() == deptype.as_char()
+        {
+            catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
+            count += 1;
+        }
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(RowExclusiveLock)?;
+    Ok(count)
+}

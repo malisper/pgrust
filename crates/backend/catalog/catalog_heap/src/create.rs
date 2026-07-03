@@ -203,11 +203,14 @@ fn AddNewRelationTuple<'mcx>(
     relfrozenxid: TransactionId,
     relminmxid: MultiXactId,
 ) -> PgResult<()> {
-    debug_assert!(relkind != types_rel::RELKIND_SEQUENCE);
     let mut form = new_rel_desc.rd_rel.clone();
     form.relpages = 0;
     form.reltuples = -1.0;
     form.relallvisible = 0;
+    if relkind == types_rel::RELKIND_SEQUENCE {
+        form.relpages = 1;
+        form.reltuples = 1.0;
+    }
     form.relfrozenxid = relfrozenxid;
     form.relminmxid = relminmxid;
     form.relowner = relowner;
@@ -313,10 +316,15 @@ pub fn heap_create_with_catalog<'mcx>(
     tupdesc: &TupleDescData<'_>,
 ) -> PgResult<Oid> {
     debug_assert!(
-        p.relkind == RELKIND_RELATION || p.relkind == types_rel::RELKIND_TOASTVALUE,
-        "only plain tables and toast tables ported"
+        p.relkind == RELKIND_RELATION
+            || p.relkind == types_rel::RELKIND_TOASTVALUE
+            || p.relkind == types_rel::RELKIND_SEQUENCE,
+        "only plain tables, toast tables and sequences ported"
     );
-    let make_rowtype = p.relkind != types_rel::RELKIND_TOASTVALUE;
+    // C: no rowtype/array pg_type entry where the relation is an
+    // implementation detail (toast, sequences, indexes).
+    let make_rowtype = p.relkind != types_rel::RELKIND_TOASTVALUE
+        && p.relkind != types_rel::RELKIND_SEQUENCE;
     let pg_class_desc = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
 
     CheckAttributeNamesTypes(tupdesc, p.relkind)?;
@@ -463,10 +471,11 @@ pub fn heap_create_with_catalog<'mcx>(
             ObjectAddress::set(catalog::NamespaceRelationId, p.relnamespace),
             ObjectAddress::set(AccessMethodRelationId, p.accessmtd),
         ];
+        let live = if p.accessmtd != InvalidOid { 2 } else { 1 };
         pg_depend::record_object_address_dependencies(
             mcx,
             &myself,
-            &mut addrs,
+            &mut addrs[..live],
             pg_depend::DependencyType::Normal,
         )?;
     }

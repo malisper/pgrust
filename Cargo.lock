@@ -1084,6 +1084,7 @@ dependencies = [
  "pg_constraint",
  "pg_depend",
  "pg_type",
+ "sequence_seams",
  "table",
  "types_core",
  "types_error",
@@ -1117,6 +1118,7 @@ dependencies = [
  "pg_depend",
  "pg_type",
  "pgstat",
+ "relation",
  "relcache",
  "syscache_seams",
  "table",
@@ -2727,6 +2729,7 @@ dependencies = [
  "mcx",
  "name",
  "nbt_compare",
+ "sequence_seams",
  "stringinfo",
  "types_core",
  "types_error",
@@ -5262,6 +5265,8 @@ dependencies = [
  "elog",
  "fmgr_core",
  "gram_core",
+ "keywords",
+ "lsyscache",
  "mbutils",
  "mcx",
  "parser_seams",
@@ -5502,6 +5507,8 @@ dependencies = [
  "catalog",
  "catalog_indexing",
  "datum",
+ "fmgr_seams",
+ "genam",
  "heaptuple",
  "mcx",
  "miscinit_seams",
@@ -5509,6 +5516,8 @@ dependencies = [
  "types_core",
  "types_error",
  "types_rel",
+ "types_scan",
+ "types_tuple",
 ]
 
 [[package]]
@@ -7240,6 +7249,7 @@ dependencies = [
  "nbtree_xlog",
  "relmapper",
  "rmgrdesc",
+ "sequence_xlog",
  "standby",
  "storage_xlog",
  "stringinfo",
@@ -7481,6 +7491,7 @@ dependencies = [
  "rmgr",
  "s_lock",
  "scan_fgram",
+ "sequence",
  "session",
  "shmem",
  "sinval",
@@ -7520,6 +7531,71 @@ dependencies = [
  "xloginsert",
  "xlogreader",
  "xlogrecovery",
+ "xlogutils",
+]
+
+[[package]]
+name = "sequence"
+version = "0.1.0"
+dependencies = [
+ "aclchk",
+ "adt_acl",
+ "adt_int8",
+ "bufmgr",
+ "bufmgr_seams",
+ "catalog_indexing",
+ "datum",
+ "fmgr_seams",
+ "genam",
+ "heaptuple",
+ "init_small",
+ "lmgr",
+ "lmgr_proc",
+ "lsyscache",
+ "mcx",
+ "miscinit",
+ "namespace_seams",
+ "parse_utilcmd",
+ "pg_depend",
+ "rel_vocab",
+ "relation",
+ "sequence_seams",
+ "sequence_xlog",
+ "syscache_seams",
+ "table",
+ "tablecmds",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_storage",
+ "types_tuple",
+ "xact",
+ "xloginsert_seams",
+]
+
+[[package]]
+name = "sequence_seams"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
+name = "sequence_xlog"
+version = "0.1.0"
+dependencies = [
+ "bufmgr_seams",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "xlogreader_seams",
  "xlogutils",
 ]
 
@@ -8929,6 +9005,7 @@ dependencies = [
  "prepare",
  "rel_vocab",
  "schemacmds",
+ "sequence",
  "superuser",
  "syscache_seams",
  "tablecmds",

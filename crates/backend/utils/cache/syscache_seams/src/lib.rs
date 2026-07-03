@@ -62,6 +62,23 @@ seam_core::seam!(
     pub fn lookup_pg_type_shape(typid: Oid) -> PgResult<Option<PgTypeShape>>
 );
 
+#[derive(Clone, Copy, Debug)]
+pub struct PgSequenceForm {
+    pub seqtypid: Oid,
+    pub seqstart: i64,
+    pub seqincrement: i64,
+    pub seqmax: i64,
+    pub seqmin: i64,
+    pub seqcache: i64,
+    pub seqcycle: bool,
+}
+
+seam_core::seam!(
+    // SearchSysCache1(SEQRELID, relid) decoded whole (nextval reads 5 of 8
+    // fields per miss); None mirrors !HeapTupleIsValid(tup).
+    pub fn lookup_pg_sequence_form(relid: Oid) -> PgResult<Option<PgSequenceForm>>
+);
+
 seam_core::seam!(
     // SearchSysCache1(AUTHOID, roleid) projected to pg_authid.rolname
     // (GetUserNameFromId's single-field read); None mirrors !HeapTupleIsValid.

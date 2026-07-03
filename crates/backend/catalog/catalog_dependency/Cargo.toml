@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 dependency_seams = { path = "../dependency_seams" }
+sequence_seams = { path = "../../commands/sequence_seams" }
 catalog = { path = "../catalog" }
 catalog_heap = { path = "../catalog_heap" }
 catalog_index = { path = "../catalog_index" }
