@@ -1,5 +1,6 @@
 use types_core::catalog::{RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP};
 use types_error::PgResult;
+use types_nodes::parsenodes;
 use types_nodes::parsenodes::{
     AlterTableCmd, AlterTableStmt, AlterTableType, CTEMaterialize, ClosePortalStmt, CommentStmt, CommonTableExpr, CopyStmt, CreateSchemaStmt,
     DeallocateStmt, DeclareCursorStmt, DefElem, DefElemAction, DiscardMode, DiscardStmt,
@@ -3582,6 +3583,246 @@ impl<'mcx> Parser<'mcx> {
                 n.comment = if c.is_null_node() { None } else { Some(c.str_val()) };
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // DefineStmt: CREATE OPERATOR any_operator definition
+            850 => {
+                let mut n = Node::build::<parsenodes::DefineStmt>(mcx)?;
+                n.kind = ObjectType::OBJECT_OPERATOR;
+                n.defnames = view.v(3).list();
+                n.definition = view.v(4).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            865 => {
+                let el = view.v(1).node().expect("def_elem");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            866 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("def_elem"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            867 => *yyval = def_elem(mcx, view.v(1).str_val(), view.v(3).node(), view.l(1))?,
+            868 => *yyval = def_elem(mcx, view.v(1).str_val(), Option::None, view.l(1))?,
+            // def_arg / operator_def_arg: func_type | reserved_keyword |
+            // qual_all_Op | NumericOnly | Sconst | NONE (872/873 = the
+            // NumericOnly/Sconst def_arg arms already in the hot match).
+            869 | 1374 | 1377 | 1378 => *yyval = YYSTYPE::Node(view.v(1).node()),
+            870 | 874 | 1375 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk_string(mcx, view.v(1).str_val())?));
+            }
+            871 | 1376 => *yyval = YYSTYPE::Node(Some(Node::mk_list(mcx, view.v(1).list())?)),
+            // CreateOpClassStmt: CREATE OPERATOR CLASS any_name opt_default
+            // FOR TYPE_P Typename USING name opt_opfamily AS opclass_item_list
+            890 => {
+                let mut n = Node::build::<parsenodes::CreateOpClassStmt>(mcx)?;
+                n.opclassname = view.v(4).list();
+                n.isDefault = view.v(5).boolean();
+                n.datatype = view.v(8).node();
+                n.amname = Some(view.v(10).str_val());
+                n.opfamilyname = view.v(11).list();
+                n.items = view.v(13).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            891 | 908 => {
+                let el = view.v(1).node().expect("opclass item");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            892 | 909 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("opclass item"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // opclass_item: OPERATOR Iconst {any_operator|operator_with_argtypes}
+            // opclass_purpose | FUNCTION Iconst ['(' type_list ')']
+            // function_with_argtypes | STORAGE Typename
+            893 => {
+                let mut owa = Node::build::<parsenodes::ObjectWithArgs>(mcx)?;
+                owa.objname = view.v(3).list();
+                let mut n = Node::build::<parsenodes::CreateOpClassItem>(mcx)?;
+                n.itemtype = parsenodes::OPCLASS_ITEM_OPERATOR;
+                n.name = Some(owa.seal());
+                n.number = view.v(2).ival();
+                n.order_family = view.v(4).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            894 => {
+                let mut n = Node::build::<parsenodes::CreateOpClassItem>(mcx)?;
+                n.itemtype = parsenodes::OPCLASS_ITEM_OPERATOR;
+                n.name = view.v(3).node();
+                n.number = view.v(2).ival();
+                n.order_family = view.v(4).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            895 | 896 => {
+                let mut n = Node::build::<parsenodes::CreateOpClassItem>(mcx)?;
+                n.itemtype = parsenodes::OPCLASS_ITEM_FUNCTION;
+                n.number = view.v(2).ival();
+                if rule == 896 {
+                    n.class_args = view.v(4).list();
+                    n.name = view.v(6).node();
+                } else {
+                    n.name = view.v(3).node();
+                }
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            897 => {
+                let mut n = Node::build::<parsenodes::CreateOpClassItem>(mcx)?;
+                n.itemtype = parsenodes::OPCLASS_ITEM_STORAGETYPE;
+                n.storedtype = view.v(2).node();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            898 => *yyval = YYSTYPE::Boolean(true),
+            899 => *yyval = YYSTYPE::Boolean(false),
+            // CreateOpFamilyStmt: CREATE OPERATOR FAMILY any_name USING name
+            905 => {
+                let mut n = Node::build::<parsenodes::CreateOpFamilyStmt>(mcx)?;
+                n.opfamilyname = view.v(4).list();
+                n.amname = Some(view.v(6).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterOpFamilyStmt: ALTER OPERATOR FAMILY any_name USING name
+            // {ADD_P opclass_item_list | DROP opclass_drop_list}
+            906 | 907 => {
+                let mut n = Node::build::<parsenodes::AlterOpFamilyStmt>(mcx)?;
+                n.opfamilyname = view.v(4).list();
+                n.amname = Some(view.v(6).str_val());
+                n.isDrop = rule == 907;
+                n.items = view.v(8).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // opclass_drop: {OPERATOR|FUNCTION} Iconst '(' type_list ')'
+            910 | 911 => {
+                let mut n = Node::build::<parsenodes::CreateOpClassItem>(mcx)?;
+                n.itemtype = if rule == 910 {
+                    parsenodes::OPCLASS_ITEM_OPERATOR
+                } else {
+                    parsenodes::OPCLASS_ITEM_FUNCTION
+                };
+                n.number = view.v(2).ival();
+                n.class_args = view.v(4).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1134 => {
+                let el = view.v(1).node().expect("func_arg");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            1135 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("func_arg"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // function_with_argtypes: func_name func_args |
+            // type_func_name_keyword | ColId [indirection]
+            1138 => {
+                let mut owa = Node::build::<parsenodes::ObjectWithArgs>(mcx)?;
+                owa.objname = view.v(1).list();
+                let fargs = view.v(2).list();
+                owa.objargs = extract_arg_types(mcx, &fargs)?;
+                owa.objfuncargs = fargs;
+                *yyval = YYSTYPE::Node(Some(owa.seal()));
+            }
+            1139 | 1140 => {
+                let mut owa = Node::build::<parsenodes::ObjectWithArgs>(mcx)?;
+                let name = Node::mk_string(mcx, view.v(1).str_val())?;
+                owa.objname = NodeList::make1(mcx, name)?;
+                owa.args_unspecified = true;
+                *yyval = YYSTYPE::Node(Some(owa.seal()));
+            }
+            1141 => {
+                let name = view.v(1).str_val();
+                let mut list = view.v(2).list();
+                for n in &list {
+                    if n.as_string().is_none() {
+                        return Err(self.parser_yyerror("syntax error"));
+                    }
+                }
+                list.lcons(mcx, Node::mk_string(mcx, name)?)?;
+                let mut owa = Node::build::<parsenodes::ObjectWithArgs>(mcx)?;
+                owa.objname = list;
+                owa.args_unspecified = true;
+                *yyval = YYSTYPE::Node(Some(owa.seal()));
+            }
+            // func_arg: [arg_class] [param_name] func_type permutations
+            1146..=1150 => {
+                let mut n = Node::build::<parsenodes::FunctionParameter>(mcx)?;
+                match rule {
+                    1146 => {
+                        n.mode = view.v(1).ival() as i8;
+                        n.name = Some(view.v(2).str_val());
+                        n.argType = view.v(3).node();
+                    }
+                    1147 => {
+                        n.name = Some(view.v(1).str_val());
+                        n.mode = view.v(2).ival() as i8;
+                        n.argType = view.v(3).node();
+                    }
+                    1148 => {
+                        n.name = Some(view.v(1).str_val());
+                        n.argType = view.v(2).node();
+                    }
+                    1149 => {
+                        n.mode = view.v(1).ival() as i8;
+                        n.argType = view.v(2).node();
+                    }
+                    _ => n.argType = view.v(1).node(),
+                }
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1151 => *yyval = YYSTYPE::Ival(parsenodes::FUNC_PARAM_IN as i32),
+            1152 => *yyval = YYSTYPE::Ival(parsenodes::FUNC_PARAM_OUT as i32),
+            1153 | 1154 => *yyval = YYSTYPE::Ival(parsenodes::FUNC_PARAM_INOUT as i32),
+            1155 => *yyval = YYSTYPE::Ival(parsenodes::FUNC_PARAM_VARIADIC as i32),
+            // oper_argtypes: NONE arms (1236/1237) stay loud — NodeList cells
+            // cannot carry C's NULL TypeName cell.
+            1234 => {
+                return Err(Box::new(
+                    (*self.errposition_error("missing argument".into(), view.l(3)))
+                        .with_hint(
+                            "Use NONE to denote the missing argument of a unary operator.",
+                        ),
+                ));
+            }
+            1235 => {
+                let l = view.v(2).node().expect("Typename");
+                let r = view.v(4).node().expect("Typename");
+                let mut list = NodeList::make1(mcx, l)?;
+                list.lappend(mcx, r)?;
+                *yyval = YYSTYPE::List(list);
+            }
+            1240 => {
+                let el = view.v(1).node().expect("operator_with_argtypes");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            1241 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("operator_with_argtypes"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            1242 => {
+                let mut owa = Node::build::<parsenodes::ObjectWithArgs>(mcx)?;
+                owa.objname = view.v(1).list();
+                owa.objargs = view.v(2).list();
+                *yyval = YYSTYPE::Node(Some(owa.seal()));
+            }
+            // AlterOperatorStmt: ALTER OPERATOR operator_with_argtypes SET
+            // '(' operator_def_list ')'
+            1368 => {
+                let mut n = Node::build::<parsenodes::AlterOperatorStmt>(mcx)?;
+                n.opername = view.v(3).node();
+                n.options = view.v(6).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1369 => {
+                let el = view.v(1).node().expect("operator_def_elem");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            1370 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("operator_def_elem"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            1371 | 1373 => *yyval = def_elem(mcx, view.v(1).str_val(), Option::None, view.l(1))?,
+            1372 => *yyval = def_elem(mcx, view.v(1).str_val(), view.v(3).node(), view.l(1))?,
             1876 => {
                 let n = view.v(1).node().expect("relation_expr");
                 *yyval = YYSTYPE::List(NodeList::make1(mcx, n)?);
@@ -4098,6 +4339,26 @@ fn make_a_const<'mcx>(
         panic!("make_a_const: unexpected node type {:?}", v.node_tag())
     };
     Ok(YYSTYPE::Node(Some(Node::mk_a_const(mcx, Some(val), location)?)))
+}
+
+// extractArgTypes (gram.y): pull input-argument TypeNames off a
+// FunctionParameter list.
+fn extract_arg_types<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    parameters: &NodeList<'mcx>,
+) -> PgResult<NodeList<'mcx>> {
+    let mut result = NodeList::nil();
+    for n in parameters {
+        let p = n
+            .as_variant::<types_nodes::parsenodes::FunctionParameter>()
+            .expect("FunctionParameter");
+        if p.mode != types_nodes::parsenodes::FUNC_PARAM_OUT
+            && p.mode != types_nodes::parsenodes::FUNC_PARAM_TABLE
+        {
+            result.lappend(mcx, p.argType.expect("func_arg argType"))?;
+        }
+    }
+    Ok(result)
 }
 
 // makeDefElem (makefuncs.c).
