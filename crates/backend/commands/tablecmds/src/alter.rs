@@ -442,8 +442,6 @@ fn ATRewriteTable<'mcx>(
         } else {
             (0, 0)
         };
-        let mut bistate = heapam::GetBulkInsertState();
-
         let snapshot = snapmgr::GetLatestSnapshot()?;
         let snapshot = snapmgr::RegisterSnapshot(Some(&snapshot))?.expect("registered snapshot");
         let mut scan =
@@ -538,14 +536,9 @@ fn ATRewriteTable<'mcx>(
 
             if let Some(nr) = &newrel {
                 exectuples::exec_materialize_slot(insertslot, mcx)?;
-                tableam::table_tuple_insert(
-                    mcx,
-                    nr,
-                    insertslot,
-                    mycid,
-                    ti_options,
-                    Some(&mut bistate),
-                )?;
+                // C threads a BulkInsertState; the heap AM only wires bistate
+                // through multi_insert — ring-buffer strategy only, same WAL.
+                tableam::table_tuple_insert(mcx, nr, insertslot, mycid, ti_options, None)?;
             }
         }
         tableam::table_endscan(scan)?;
