@@ -28,21 +28,21 @@ fn check_string_len(
 }
 
 // C: JsonbInState + the jsonb_in_* semantic actions.
-struct JsonbInSink<'mcx, 'e> {
+struct JsonbInSink<'s, 'mcx, 'e> {
     mcx: Mcx<'mcx>,
-    state: JsonbBuildState<'mcx>,
-    res: Option<JsonbValue<'mcx>>,
+    state: &'s mut JsonbBuildState<'mcx>,
+    res: &'s mut Option<JsonbValue<'mcx>>,
     unique_keys: bool,
     escontext: Option<&'e mut SoftErrorContext>,
 }
 
-impl<'mcx> JsonbInSink<'mcx, '_> {
+impl<'mcx> JsonbInSink<'_, 'mcx, '_> {
     // C: jsonb_in_scalar tail — lone scalars get the raw-scalar array wrap.
     fn push_scalar(&mut self, v: JsonbValue<'mcx>) -> PgResult<()> {
         if self.state.depth() == 0 {
             self.state.begin_array(true)?;
             self.state.push_elem(v)?;
-            self.res = self.state.end_array()?;
+            *self.res = self.state.end_array()?;
         } else {
             self.push_container_child(v)?;
         }
@@ -59,7 +59,7 @@ impl<'mcx> JsonbInSink<'mcx, '_> {
     }
 }
 
-impl<'mcx> JsonSem<'mcx> for JsonbInSink<'mcx, '_> {
+impl<'mcx> JsonSem<'mcx> for JsonbInSink<'_, 'mcx, '_> {
     fn object_start(&mut self) -> PgResult<bool> {
         self.state.begin_object(self.unique_keys)?;
         Ok(true)
@@ -67,7 +67,7 @@ impl<'mcx> JsonSem<'mcx> for JsonbInSink<'mcx, '_> {
 
     fn object_end(&mut self) -> PgResult<bool> {
         if let Some(done) = self.state.end_object()? {
-            self.res = Some(done);
+            *self.res = Some(done);
         }
         Ok(true)
     }
@@ -79,7 +79,7 @@ impl<'mcx> JsonSem<'mcx> for JsonbInSink<'mcx, '_> {
 
     fn array_end(&mut self) -> PgResult<bool> {
         if let Some(done) = self.state.end_array()? {
-            self.res = Some(done);
+            *self.res = Some(done);
         }
         Ok(true)
     }
@@ -116,6 +116,40 @@ impl<'mcx> JsonSem<'mcx> for JsonbInSink<'mcx, '_> {
     }
 }
 
+// C: checkStringLen with a NULL escontext (hard-error path).
+pub(crate) fn check_string_len_hard(len: usize) -> PgResult<()> {
+    check_string_len(len, None).map(|_| ())
+}
+
+/// C: datum_to_jsonb_internal's JSONTYPE_JSON arm — parse json text straight
+/// into an open push state via the jsonb_in_* semantic actions.
+pub(crate) fn parse_json_into<'mcx>(
+    mcx: Mcx<'mcx>,
+    ps: &mut crate::mutate::JsonbPush<'mcx>,
+    json: &[u8],
+) -> PgResult<()> {
+    let (state, res) = ps.parts();
+    let mut lex = JsonLexDe::new(mcx, json, mbutils::GetDatabaseEncoding());
+    let mut sink = JsonbInSink {
+        mcx,
+        state,
+        res,
+        unique_keys: false,
+        escontext: None,
+    };
+    let result = parse_sem(&mut lex, &mut sink)?;
+    match result {
+        JsonError::Success => Ok(()),
+        JsonError::SemActionFailed => {
+            panic!("JSON semantic action function did not provide error information")
+        }
+        err => {
+            adt_json::errsave_parse_error(err, &lex.lex, None)?;
+            unreachable!("hard errsave without escontext returns Err")
+        }
+    }
+}
+
 /// C: jsonb_from_cstring. `None` = a soft-error context absorbed the failure.
 pub fn jsonb_from_cstring<'mcx>(
     mcx: Mcx<'mcx>,
@@ -124,10 +158,12 @@ pub fn jsonb_from_cstring<'mcx>(
     mut escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     let mut lex = JsonLexDe::new(mcx, json, mbutils::GetDatabaseEncoding());
+    let mut state = JsonbBuildState::new(mcx)?;
+    let mut res = None;
     let mut sink = JsonbInSink {
         mcx,
-        state: JsonbBuildState::new(mcx)?,
-        res: None,
+        state: &mut state,
+        res: &mut res,
         unique_keys,
         escontext: escontext.as_deref_mut(),
     };
@@ -146,7 +182,8 @@ pub fn jsonb_from_cstring<'mcx>(
             return Ok(None);
         }
     }
-    let val = sink.res.expect("parse succeeded without a result");
+    drop(sink);
+    let val = res.expect("parse succeeded without a result");
     Ok(Some(convert_to_jsonb(mcx, &val)?))
 }
 
@@ -197,24 +234,60 @@ fn put_escaped_value(
     }
 }
 
-/// C: JsonbToCString(Worker), indent=false (JsonbToCStringIndent serves
-/// jsonb_pretty — LOUD). Appends to `out` without a trailing NUL.
+/// C: JsonbToCString — indent=false. Appends to `out` without a trailing NUL.
 pub fn jsonb_to_cstring_into<'mcx>(
     mcx: Mcx<'mcx>,
     out: &mut StringInfo<'_>,
     container: &[u8],
     estimated_len: usize,
 ) -> PgResult<()> {
+    jsonb_to_cstring_worker(mcx, out, container, estimated_len, false)
+}
+
+/// C: JsonbToCStringIndent (jsonb_pretty).
+pub fn jsonb_to_cstring_indent_into<'mcx>(
+    mcx: Mcx<'mcx>,
+    out: &mut StringInfo<'_>,
+    container: &[u8],
+    estimated_len: usize,
+) -> PgResult<()> {
+    jsonb_to_cstring_worker(mcx, out, container, estimated_len, true)
+}
+
+fn add_indent(out: &mut StringInfo<'_>, indent: bool, level: i32) -> PgResult<()> {
+    if indent {
+        out.append_byte(b'\n')?;
+        for _ in 0..level * 4 {
+            out.append_byte(b' ')?;
+        }
+    }
+    Ok(())
+}
+
+// C: JsonbToCStringWorker.
+fn jsonb_to_cstring_worker<'mcx>(
+    mcx: Mcx<'mcx>,
+    out: &mut StringInfo<'_>,
+    container: &[u8],
+    estimated_len: usize,
+    indent: bool,
+) -> PgResult<()> {
     let mut first = true;
     let mut redo: Option<(WjbToken, JsonbItem<'_>)> = None;
     let mut raw_scalar = false;
     let mut level = 0i32;
     let mut numscratch = alloc::vec::Vec::new();
+    // C: ispaces — no space after commas when indenting.
+    let comma: &[u8] = if indent { b"," } else { b", " };
+    let mut use_indent = false;
+    let mut last_was_key = false;
 
     out.enlarge(estimated_len.max(64))?;
     let mut it = JsonbIterator::init(mcx, container)?;
 
     loop {
+        let was_key = last_was_key;
+        last_was_key = false;
         let (tok, v) = match redo.take() {
             Some(tv) => tv,
             None => it.next(false),
@@ -223,12 +296,13 @@ pub fn jsonb_to_cstring_into<'mcx>(
             WjbToken::Done => break,
             WjbToken::BeginArray => {
                 if !first {
-                    out.append_bytes(b", ")?;
+                    out.append_bytes(comma)?;
                 }
                 let JsonbItem::Array { raw_scalar: rs, .. } = v else {
                     unreachable!()
                 };
                 if !rs {
+                    add_indent(out, use_indent && !was_key, level)?;
                     out.append_byte(b'[')?;
                 } else {
                     raw_scalar = true;
@@ -238,17 +312,19 @@ pub fn jsonb_to_cstring_into<'mcx>(
             }
             WjbToken::BeginObject => {
                 if !first {
-                    out.append_bytes(b", ")?;
+                    out.append_bytes(comma)?;
                 }
+                add_indent(out, use_indent && !was_key, level)?;
                 out.append_byte(b'{')?;
                 first = true;
                 level += 1;
             }
             WjbToken::Key => {
                 if !first {
-                    out.append_bytes(b", ")?;
+                    out.append_bytes(comma)?;
                 }
                 first = true;
+                add_indent(out, use_indent, level)?;
                 put_escaped_value(out, &v, &mut numscratch)?;
                 out.append_bytes(b": ")?;
                 let (vtok, vv) = it.next(false);
@@ -258,29 +334,36 @@ pub fn jsonb_to_cstring_into<'mcx>(
                 } else {
                     debug_assert!(matches!(vtok, WjbToken::BeginObject | WjbToken::BeginArray));
                     redo = Some((vtok, vv));
+                    last_was_key = true;
                 }
             }
             WjbToken::Elem => {
                 if !first {
-                    out.append_bytes(b", ")?;
+                    out.append_bytes(comma)?;
                 }
                 first = false;
+                if !raw_scalar {
+                    add_indent(out, use_indent, level)?;
+                }
                 put_escaped_value(out, &v, &mut numscratch)?;
             }
             WjbToken::EndArray => {
                 level -= 1;
                 if !raw_scalar {
+                    add_indent(out, use_indent, level)?;
                     out.append_byte(b']')?;
                 }
                 first = false;
             }
             WjbToken::EndObject => {
                 level -= 1;
+                add_indent(out, use_indent, level)?;
                 out.append_byte(b'}')?;
                 first = false;
             }
             WjbToken::Value => panic!("unknown jsonb iterator token type"),
         }
+        use_indent = indent;
     }
     debug_assert_eq!(level, 0);
     Ok(())

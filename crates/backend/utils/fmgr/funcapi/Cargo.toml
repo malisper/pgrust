@@ -17,6 +17,9 @@ format_type = { path = "../../adt/format_type" }
 lsyscache = { path = "../../cache/lsyscache" }
 syscache_seams = { path = "../../cache/syscache_seams" }
 typcache_seams = { path = "../../cache/typcache_seams" }
+arrayfuncs = { path = "../../adt/arrayfuncs" }
+detoast_seams = { path = "../../../access/common/detoast_seams" }
+varlena = { path = "../../adt/varlena" }
 
 [dev-dependencies]
 catalog_seams = { path = "../../../catalog/catalog_seams" }

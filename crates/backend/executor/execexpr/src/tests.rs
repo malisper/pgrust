@@ -559,6 +559,7 @@ fn agg_trans_and_aggref_eval_steps() {
         let specs = [
             // count(*): int8inc (1219), strict, non-null init, 0 inputs.
             AggTransSpec {
+                arg_types: &[],
                 transtype_byval: true,
                 transtype_len: 8,
                 transfn_oid: 1219,
@@ -569,6 +570,7 @@ fn agg_trans_and_aggref_eval_steps() {
             },
             // sum(int4): int4_sum (1841), non-strict, null init, 1 input.
             AggTransSpec {
+                arg_types: &[],
                 transtype_byval: true,
                 transtype_len: 8,
                 transfn_oid: 1841,
@@ -658,6 +660,7 @@ fn agg_trans_strict_input_check_skips_nulls() {
         let specs = [
             // count(a): int8inc_any (2804), strict, 1 input, non-null init.
             AggTransSpec {
+                arg_types: &[],
                 transtype_byval: true,
                 transtype_len: 8,
                 transfn_oid: 2804,
@@ -668,6 +671,7 @@ fn agg_trans_strict_input_check_skips_nulls() {
             },
             // sum(int4): int4_sum (1841), non-strict, null init.
             AggTransSpec {
+                arg_types: &[],
                 transtype_byval: true,
                 transtype_len: 8,
                 transfn_oid: 1841,

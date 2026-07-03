@@ -333,12 +333,23 @@ fn funcname_candidates_filter_arity_and_visibility() {
 }
 
 #[test]
-#[should_panic(expected = "expand_variadic")]
-fn variadic_candidate_panics_loudly() {
+fn variadic_candidate_expands() {
     install_fakes();
     install_proc_candidates();
     set_search_path("public");
 
     let ctx = MemoryContext::new("t");
-    let _ = crate::FuncnameGetCandidates(ctx.mcx(), &["vf"], 3, true, true);
+    let cands = crate::FuncnameGetCandidates(ctx.mcx(), &["vf"], 3, true, true).unwrap();
+    assert_eq!(cands.len(), 1);
+    assert_eq!(cands[0].oid, 9004);
+    assert_eq!(cands[0].nargs, 3);
+    assert_eq!(cands[0].nvargs, 3);
+    assert_eq!(cands[0].va_elem_type, 2283);
+    assert_eq!(cands[0].args.as_slice(), &[2283, 2283, 2283]);
+
+    // expand_variadic=false: the raw signature.
+    let cands = crate::FuncnameGetCandidates(ctx.mcx(), &["vf"], 1, false, true).unwrap();
+    assert_eq!(cands.len(), 1);
+    assert_eq!(cands[0].nvargs, 0);
+    assert_eq!(cands[0].args.as_slice(), &[2277]);
 }

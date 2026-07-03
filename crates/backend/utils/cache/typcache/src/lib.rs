@@ -249,6 +249,8 @@ pub(crate) struct TypCacheState {
     pub(crate) first_domain_type_entry: Oid,
     pub(crate) in_progress: PgVec<'static, Oid>,
     pub(crate) callbacks_registered: bool,
+    // C's RecordCacheArray: anonymous rowtypes registered by typmod index.
+    pub(crate) record_types: Vec<types_tuple::TupleDescData<'static>>,
 }
 
 thread_local! {
@@ -269,6 +271,7 @@ pub(crate) fn with_state<R>(f: impl FnOnce(&mut TypCacheState) -> R) -> R {
                 first_domain_type_entry: InvalidOid,
                 in_progress: PgVec::new_in(mcx),
                 callbacks_registered: false,
+                record_types: Vec::new(),
             })
         });
         f(st)
@@ -783,4 +786,82 @@ pub(crate) fn compute_ready(e: &TypeCacheEntry) -> i32 {
 pub fn init_seams() {
     typcache_seams::at_eoxact_type_cache::set(AtEOXact_TypeCache);
     typcache_seams::at_eosubxact_type_cache::set(AtEOSubXact_TypeCache);
+    typcache_seams::assign_record_type_typmod::set(assign_record_type_typmod);
+    typcache_seams::lookup_rowtype_tupdesc_copy::set(lookup_rowtype_tupdesc_copy);
+}
+
+// C: equalRowTypes (attname/atttypid/atttypmod/natts).
+fn row_types_equal(a: &types_tuple::TupleDescData<'_>, b: &types_tuple::TupleDescData<'_>) -> bool {
+    if a.natts != b.natts || a.tdtypeid != b.tdtypeid {
+        return false;
+    }
+    for i in 0..a.natts as usize {
+        let (x, y) = (a.attr(i), b.attr(i));
+        if x.attname.name_str() != y.attname.name_str()
+            || x.atttypid != y.atttypid
+            || x.atttypmod != y.atttypmod
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// C: assign_record_type_typmod (typcache.c) over a linear RecordCacheArray
+/// (hash dedup unneeded at this registry's size).
+pub fn assign_record_type_typmod(tupdesc: &mut types_tuple::TupleDescData<'_>) -> PgResult<()> {
+    debug_assert_eq!(tupdesc.tdtypeid, types_core::catalog::RECORDOID);
+    with_state(|st| {
+        for (i, d) in st.record_types.iter().enumerate() {
+            if row_types_equal(d, tupdesc) {
+                tupdesc.tdtypmod = i as i32;
+                return Ok(());
+            }
+        }
+        let mcx = st.mcx;
+        let mut copy = tupdesc::CreateTupleDescCopy(mcx, tupdesc)?;
+        copy.tdtypmod = st.record_types.len() as i32;
+        tupdesc.tdtypmod = copy.tdtypmod;
+        st.record_types.push(copy);
+        Ok(())
+    })
+}
+
+#[cold]
+fn record_type_not_registered() -> Box<PgError> {
+    Box::new(
+        PgError::error("record type has not been registered")
+            .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+    )
+}
+
+/// C: lookup_rowtype_tupdesc_copy (typcache.c) — registered records by
+/// typmod; named composites via the relation's descriptor.
+pub fn lookup_rowtype_tupdesc_copy<'mcx>(
+    mcx: Mcx<'mcx>,
+    type_id: Oid,
+    typmod: i32,
+) -> PgResult<types_tuple::TupleDescData<'mcx>> {
+    if type_id == types_core::catalog::RECORDOID {
+        return with_state(|st| {
+            let Some(d) = usize::try_from(typmod).ok().and_then(|i| st.record_types.get(i))
+            else {
+                return Err(record_type_not_registered());
+            };
+            tupdesc::CreateTupleDescCopy(mcx, d)
+        });
+    }
+    let typrelid = lsyscache::get_typ_typrelid(type_id)?;
+    if !types_core::OidIsValid(typrelid) {
+        return Err(Box::new(
+            PgError::error(format!("type {type_id} is not composite"))
+                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+        ));
+    }
+    let rel = relation_seams::relation_open::call(mcx, typrelid, types_rel::lock::AccessShareLock)?;
+    let mut d = tupdesc::CreateTupleDescCopy(mcx, rel.descr())?;
+    d.tdtypeid = type_id;
+    d.tdtypmod = -1;
+    rel.close(types_rel::lock::AccessShareLock)?;
+    Ok(d)
 }

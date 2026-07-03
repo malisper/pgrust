@@ -523,6 +523,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // SysCacheGetAttr(PROCOID, proargdefaults): the nodeToString'd default
+    // expression list; inner None = attisnull, outer None = no such proc.
+    pub fn pg_proc_proargdefaults<'mcx>(
+        mcx: Mcx<'mcx>,
+        funcid: Oid,
+    ) -> PgResult<Option<Option<PgString<'mcx>>>>
+);
+
+seam_core::seam!(
     pub fn lookup_pg_range_shape(range_oid: Oid) -> PgResult<Option<PgRangeShape>>
 );
 

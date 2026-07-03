@@ -1115,6 +1115,17 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::Node(Some(t));
             }
+            // opt_array_bounds: bounds accumulate as Integer(-1)/Integer(n).
+            1942 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, Node::mk_integer(mcx, -1)?)?;
+                *yyval = YYSTYPE::List(list);
+            }
+            1943 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, Node::mk_integer(mcx, view.v(3).ival())?)?;
+                *yyval = YYSTYPE::List(list);
+            }
             // ConstInterval opt_interval (non-empty opt_interval is loud).
             1950 => {
                 let t = view.v(1).node().expect("ConstInterval");

@@ -36,6 +36,8 @@ pub struct AggTransSpec<'a, 'mcx> {
     pub transfn_oid: Oid,
     pub inputcollid: Oid,
     pub init_value_is_null: bool,
+    // C build_aggregate_transfn_expr's arg types: [transtype, input types..].
+    pub arg_types: &'a [Oid],
     pub args: &'a NodeList<'mcx>,
     pub pergroup: NonNull<AggPerGroup>,
     pub transtype_byval: bool,
@@ -378,7 +380,14 @@ fn build_agg_trans<'mcx>(
         if nargs > FUNC_MAX_ARGS {
             return Err(too_many_args(nargs));
         }
-        let flinfo = fmgr_core::fmgr_info(spec.transfn_oid)?;
+        let mut flinfo = fmgr_core::fmgr_info(spec.transfn_oid)?;
+        // SAFETY: arg_types is arena-backed for the query (leaked into
+        // es_query_cxt by the caller) and this flinfo dies with the plan it
+        // serves — from_node_ref's contract; the carrier stays drop-free.
+        let argtypes: &'static [Oid] = unsafe { core::mem::transmute(spec.arg_types) };
+        let agg_argtypes = ::mcx::alloc_leak_in(mcx, ::types_core::fmgr::AggFnArgTypes(argtypes))?;
+        // SAFETY: agg_argtypes is arena-backed for the query, see above.
+        flinfo.fn_expr = Some(unsafe { FnExprErased::from_node_ref(agg_argtypes) });
         if flinfo.fn_retset {
             return Err(retset_error());
         }

@@ -856,10 +856,14 @@ pub fn addRangeTableEntryForFunction<'mcx>(
             tupdesc::TupleDescInitEntryCollation(&mut d, 1, collation);
             d
         }
-        funcapi::TypeFuncClass::Composite | funcapi::TypeFuncClass::CompositeDomain => panic!(
-            "addRangeTableEntryForFunction (parse_relation.c): composite-returning \
-             function in FROM unported — record/composite lane"
-        ),
+        funcapi::TypeFuncClass::Composite | funcapi::TypeFuncClass::CompositeDomain => {
+            resolved.result_tuple_desc.unwrap_or_else(|| {
+                panic!(
+                    "addRangeTableEntryForFunction (parse_relation.c): composite result \
+                     without a tupdesc"
+                )
+            })
+        }
         funcapi::TypeFuncClass::Record => panic!(
             "addRangeTableEntryForFunction (parse_relation.c): RECORD-returning \
              function needs a column definition list — coldeflist lane"

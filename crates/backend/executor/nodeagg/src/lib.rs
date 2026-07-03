@@ -395,10 +395,17 @@ pub fn exec_init_agg<'mcx>(
         let aggref = trans_aggref[transno].expect("planner aggtransno numbering has gaps");
         // SAFETY: transno < numtrans elements of the once-allocated pergroup.
         let pg = unsafe { NonNull::new_unchecked(pergroup_base.as_ptr().add(transno)) };
+        let mut arg_types: PgVec<'mcx, Oid> =
+            vec_with_capacity_in(mcx, aggref.aggargtypes.len() + 1)?;
+        arg_types.push(aggref.aggtranstype);
+        for t in aggref.aggargtypes.iter() {
+            arg_types.push(t);
+        }
         specs.push(AggTransSpec {
             transfn_oid: trans_fnoid[transno],
             inputcollid: aggref.inputcollid,
             init_value_is_null: trans_init[transno].isnull,
+            arg_types: arg_types.leak(),
             args: &aggref.args,
             pergroup: pg,
             transtype_byval: trans_typ[transno].byval,

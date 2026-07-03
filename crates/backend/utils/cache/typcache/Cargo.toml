@@ -16,6 +16,10 @@ inval = { path = "../inval" }
 syscache_seams = { path = "../syscache_seams" }
 typcache_seams = { path = "../typcache_seams" }
 indexcmds_seams = { path = "../../../commands/indexcmds_seams" }
+relation_seams = { path = "../../../access/common/relation_seams" }
+tupdesc = { path = "../../../access/common/tupdesc" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
 
 [dev-dependencies]
 types_tuple = { path = "../../../../_support/types/types_tuple" }

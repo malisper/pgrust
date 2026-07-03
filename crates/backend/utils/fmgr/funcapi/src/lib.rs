@@ -16,6 +16,7 @@ mod tests;
 
 pub use srf::{
     end_MultiFuncCall, init_MultiFuncCall, per_MultiFuncCall, srf_return_done, srf_return_next,
+    srf_return_next_null,
     FuncCallContext, InitMaterializedSRF, MAT_SRF_BLESS, MAT_SRF_USE_EXPECTED_DESC,
 };
 
@@ -89,6 +90,12 @@ fn expr_type(expr: Option<Node<'_>>) -> Oid {
         NodeTag::T_Param => node.as_param().unwrap().paramtype,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
+        NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
+        NodeTag::T_WindowFunc => node.as_window_func().unwrap().wintype,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
+        NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
+        NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
+        NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
         tag => panic!("funcapi exprType: node family {tag:?} not ported"),
     }
 }
@@ -98,6 +105,153 @@ fn call_expr_node(flinfo: &FmgrInfo) -> Option<Node<'static>> {
         *e.downcast_ref::<Node<'static>>()
             .expect("funcapi: fn_expr does not carry a Node")
     })
+}
+
+/// C: get_fn_expr_argtype (fmgr.c). Aggregate transfns carry an
+/// `AggFnArgTypes` vector where C builds a fake transfn FuncExpr.
+pub fn get_fn_expr_argtype(flinfo: Option<&FmgrInfo>, argnum: usize) -> Oid {
+    let Some(e) = flinfo.and_then(|f| f.fn_expr.as_ref()) else {
+        return InvalidOid;
+    };
+    if let Some(agg) = e.downcast_ref::<types_core::fmgr::AggFnArgTypes>() {
+        return agg.0.get(argnum).copied().unwrap_or(InvalidOid);
+    }
+    let node = *e
+        .downcast_ref::<Node<'static>>()
+        .expect("get_fn_expr_argtype: fn_expr does not carry a Node");
+    get_call_expr_argtype(node, argnum)
+}
+
+/// C: get_call_expr_argtype (fmgr.c) over the ported call-expression
+/// families; unknown families return InvalidOid exactly as C does.
+pub fn get_call_expr_argtype(node: Node<'_>, argnum: usize) -> Oid {
+    let args = match node.node_tag() {
+        NodeTag::T_FuncExpr => &node.as_func_expr().unwrap().args,
+        NodeTag::T_OpExpr => &node.as_op_expr().unwrap().args,
+        _ => return InvalidOid,
+    };
+    if argnum >= args.len() {
+        return InvalidOid;
+    }
+    expr_type(Some(args.nth(argnum)))
+}
+
+/// C: get_fn_expr_arg_stable (fmgr.c) — Const or external Param arguments.
+pub fn get_fn_expr_arg_stable(flinfo: Option<&FmgrInfo>, argnum: usize) -> bool {
+    let Some(e) = flinfo.and_then(|f| f.fn_expr.as_ref()) else {
+        return false;
+    };
+    let Some(node) = e.downcast_ref::<Node<'static>>() else {
+        return false;
+    };
+    let args = match node.node_tag() {
+        NodeTag::T_FuncExpr => &node.as_func_expr().unwrap().args,
+        NodeTag::T_OpExpr => &node.as_op_expr().unwrap().args,
+        _ => return false,
+    };
+    if argnum >= args.len() {
+        return false;
+    }
+    let arg = args.nth(argnum);
+    match arg.node_tag() {
+        NodeTag::T_Const => true,
+        NodeTag::T_Param => {
+            arg.as_param().unwrap().paramkind == nodes::primnodes::ParamKind::PARAM_EXTERN
+        }
+        _ => false,
+    }
+}
+
+pub struct VariadicArgs<'mcx> {
+    pub args: PgVec<'mcx, datum::Datum>,
+    pub types: PgVec<'mcx, Oid>,
+    pub nulls: PgVec<'mcx, bool>,
+}
+
+/// C: extract_variadic_args (funcapi.c). Ok(None) is C's -1 (an explicit
+/// VARIADIC NULL array argument).
+pub fn extract_variadic_args<'mcx>(
+    mcx: Mcx<'mcx>,
+    flinfo: Option<&FmgrInfo>,
+    fcinfo: &fmgr::FunctionCallInfoBaseData,
+    variadic_start: usize,
+    convert_unknown: bool,
+) -> PgResult<Option<VariadicArgs<'mcx>>> {
+    use types_core::catalog::{TEXTOID, UNKNOWNOID};
+    if get_fn_expr_variadic(flinfo) {
+        debug_assert_eq!(fcinfo.nargs(), variadic_start + 1);
+        if fcinfo.argisnull(variadic_start) {
+            return Ok(None);
+        }
+        // SAFETY: checked non-null; a variadic-any last arg is an array datum.
+        let p = unsafe { fcinfo.arg_ptr(variadic_start) };
+        // SAFETY: a live varlena readable through its full VARSIZE_ANY.
+        let raw =
+            unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+        let flat: &'mcx [u8] = detoast_seams::detoast_attr::call(mcx, raw)?.leak();
+        let element_type = arrayfuncs::arr_elemtype(flat);
+        let (typlen, typbyval, typalign) = lsyscache::get_typlenbyvalalign(element_type)?;
+        let (args, nulls) = arrayfuncs::deconstruct_array(
+            mcx,
+            flat,
+            typlen as i32,
+            typbyval,
+            typalign as u8,
+            true,
+        )?;
+        let mut types = vec_with_capacity_in(mcx, args.len())?;
+        types.resize(args.len(), element_type);
+        return Ok(Some(VariadicArgs { args, types, nulls }));
+    }
+
+    let nargs = fcinfo.nargs() - variadic_start;
+    debug_assert!(nargs > 0);
+    let mut args: PgVec<'mcx, datum::Datum> = vec_with_capacity_in(mcx, nargs)?;
+    let mut types: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, nargs)?;
+    let mut nulls: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, nargs)?;
+    for i in 0..nargs {
+        let argno = i + variadic_start;
+        let isnull = fcinfo.argisnull(argno);
+        let mut typ = get_fn_expr_argtype(flinfo, argno);
+        let val;
+        // C: unknown-type literals arrive as cstring pointers.
+        if convert_unknown && typ == UNKNOWNOID && get_fn_expr_arg_stable(flinfo, argno) {
+            typ = TEXTOID;
+            val = if isnull {
+                datum::Datum::null()
+            } else {
+                // SAFETY: a non-null unknown literal is a live cstring.
+                let s = unsafe { fcinfo.arg_cstring(argno) }.to_bytes();
+                fmgr::varlena_result(varlena::cstring_to_text(mcx, s)?)
+            };
+        } else {
+            val = fcinfo.arg(argno);
+        }
+        if !types_core::OidIsValid(typ) || (convert_unknown && typ == UNKNOWNOID) {
+            return Err(Box::new(
+                PgError::error(format!("could not determine data type for argument {}", i + 1))
+                    .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+            ));
+        }
+        args.push(val);
+        types.push(typ);
+        nulls.push(isnull);
+    }
+    Ok(Some(VariadicArgs { args, types, nulls }))
+}
+
+/// C: get_fn_expr_variadic (fmgr.c) — FuncExpr.funcvariadic; false elsewhere.
+pub fn get_fn_expr_variadic(flinfo: Option<&FmgrInfo>) -> bool {
+    let Some(e) = flinfo.and_then(|f| f.fn_expr.as_ref()) else {
+        return false;
+    };
+    let Some(node) = e.downcast_ref::<Node<'static>>() else {
+        return false;
+    };
+    match node.node_tag() {
+        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcvariadic,
+        _ => false,
+    }
 }
 
 #[cold]
