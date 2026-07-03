@@ -1,7 +1,6 @@
-//! vacuumlazy.c phase I (scan/prune) + phase III (mark LP_UNUSED) for the
-//! no-index and single-table lanes. Loud named panics: index vacuuming
-//! (phase II), lazy_scan_noprune, rel truncation, parallel vacuum, eager
-//! scanning. C divergences (recorded): no HEAP_PAGE_PRUNE_FREEZE (pruneheap's
+//! vacuumlazy.c phases I (scan/prune), II (index vacuum via ambulkdelete),
+//! and III (mark LP_UNUSED), single-table lane. Loud named panics:
+//! lazy_scan_noprune, rel truncation, parallel vacuum, eager scanning. C divergences (recorded): no HEAP_PAGE_PRUNE_FREEZE (pruneheap's
 //! freeze lane is loud), so page all-visibility is recomputed by
 //! heap_page_is_all_visible after pruning — the shape C asserts equivalent;
 //! relfrozenxid advancement and pg_class relstats writes are skipped
@@ -13,9 +12,14 @@
 #![allow(non_upper_case_globals)]
 
 use ::commands_vacuum::{
-    vac_estimate_reltuples, vacuum_delay_point, vacuum_get_cutoffs, vacuum_xid_failsafe_check,
+    vac_bulkdel_one_index, vac_cleanup_one_index, vac_close_indexes, vac_estimate_reltuples,
+    vac_open_indexes, vacuum_delay_point, vacuum_get_cutoffs, vacuum_xid_failsafe_check,
     SetVacuumFailsafeActive, VacuumFailsafeActive,
 };
+use ::nbtree::IndexVacuumInfo;
+use ::types_nbtree::IndexBulkDeleteResult;
+use ::types_rel::lock::{NoLock, RowExclusiveLock};
+use ::types_rel::Relation;
 use ::mcx::{Mcx, PgVec};
 use ::tableam_vocab::{
     VacOptValue, VacuumCutoffs, VacuumParams, VACOPT_DISABLE_PAGE_SKIPPING, VACOPT_VERBOSE,
@@ -28,8 +32,6 @@ use ::types_core::{
     TransactionId, BLCKSZ,
 };
 use ::types_error::PgResult;
-use ::types_core::Oid;
-use ::types_rel::lock::RowExclusiveLock;
 use ::types_rel::RelationData;
 use ::types_snapshot::HTSV_Result;
 use ::types_storage::buf::BufferAccessStrategy;
@@ -61,9 +63,11 @@ const REL_TRUNCATE_FRACTION: BlockNumber = 16;
 const BYPASS_THRESHOLD_PAGES: f64 = 0.02;
 
 pub struct LVRelState<'a, 'mcx> {
+    mcx: Mcx<'mcx>,
     rel: &'a RelationData<'mcx>,
+    indrels: ::mcx::PgVec<'mcx, Relation<'mcx>>,
+    indstats: ::mcx::PgVec<'mcx, Option<IndexBulkDeleteResult>>,
     nindexes: usize,
-    index_oids: PgVec<'mcx, Oid>,
     bstrategy: BufferAccessStrategy,
 
     aggressive: bool,
@@ -122,11 +126,12 @@ pub fn heap_vacuum_rel<'mcx>(
     debug_assert!(params.index_cleanup != VacOptValue::Unspecified);
     debug_assert!(!matches!(params.truncate, VacOptValue::Unspecified | VacOptValue::Auto));
 
-    // C divergence (recorded): vac_open_indexes opens each index under
-    // RowExclusiveLock; the index list here only sizes nindexes — the index
-    // vacuum lane itself is loud (lazy_vacuum_all_indexes).
-    let index_oids = relcache_seams::relation_get_index_list::call(mcx, rel.rd_id)?;
-    let nindexes = index_oids.len();
+    let indrels = vac_open_indexes(mcx, rel, RowExclusiveLock)?;
+    let nindexes = indrels.len();
+    let mut indstats = ::mcx::PgVec::with_capacity_in(nindexes, mcx);
+    for _ in 0..nindexes {
+        indstats.push(None);
+    }
 
     SetVacuumFailsafeActive(false);
     let mut do_index_vacuuming = true;
@@ -158,9 +163,11 @@ pub fn heap_vacuum_rel<'mcx>(
     // pages exactly as a normal vacuum with the failure cap exhausted).
 
     let mut vacrel = LVRelState {
+        mcx,
         rel,
+        indrels,
+        indstats,
         nindexes,
-        index_oids,
         bstrategy,
         aggressive,
         skipwithvm,
@@ -204,8 +211,12 @@ pub fn heap_vacuum_rel<'mcx>(
 
     lazy_scan_heap(&mut vacrel, mcx)?;
 
-    // C's update_relstats_all_indexes: with no index stats produced (the only
-    // live cleanup arm returns none) the loop is a no-op.
+    if vacrel.do_index_cleanup {
+        update_relstats_all_indexes(&mut vacrel)?;
+    }
+
+    let indrels = core::mem::replace(&mut vacrel.indrels, ::mcx::PgVec::new_in(mcx));
+    vac_close_indexes(indrels, NoLock)?;
 
     if should_attempt_truncation(&vacrel) {
         unported("lazy_truncate_heap (rel truncation lane)");
@@ -223,10 +234,18 @@ pub fn heap_vacuum_rel<'mcx>(
     if new_rel_allfrozen > new_rel_allvisible {
         new_rel_allfrozen = new_rel_allvisible;
     }
-    let _ = (new_rel_pages, new_rel_allvisible, new_rel_allfrozen, orig_rel_pages);
-    // C divergence (recorded): vac_update_relstats + pgstat_report_vacuum are
-    // skipped — pg_class inplace-update and cumulative-stats lanes unported
-    // (commands_vacuum::vac_update_relstats is the loud stub).
+    let _ = orig_rel_pages;
+    // C divergence (recorded): relfrozenxid/relminmxid advancement skipped
+    // (freeze lane); pgstat_report_vacuum skipped (cumulative-stats lane).
+    vacuum_seams::vac_update_relstats::call(
+        rel,
+        new_rel_pages,
+        vacrel.new_live_tuples,
+        new_rel_allvisible,
+        new_rel_allfrozen,
+        vacrel.nindexes > 0,
+        false,
+    )?;
     Ok(())
 }
 
@@ -237,7 +256,13 @@ fn dead_items_add(
 ) -> PgResult<()> {
     vacrel.dead_items.reserve(offsets.len());
     for &off in offsets {
-        vacrel.dead_items.push(ItemPointerData::new(blkno, off));
+        let tid = ItemPointerData::new(blkno, off);
+        // The flat TidStore substitute relies on append-in-TID-order.
+        debug_assert!(vacrel
+            .dead_items
+            .last()
+            .is_none_or(|prev| ::types_tuple::itemptr::ItemPointerCompare(prev, &tid) < 0));
+        vacrel.dead_items.push(tid);
     }
     Ok(())
 }
@@ -355,19 +380,7 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>) -> PgResult<()>
     }
 
     if vacrel.nindexes > 0 && vacrel.do_index_cleanup {
-        lazy_cleanup_all_indexes(vacrel, mcx)?;
-    }
-    Ok(())
-}
-
-// C divergence (recorded): vac_open_indexes opens the indexes once up front;
-// this opens each at the same RowExclusiveLock for the cleanup call only.
-fn lazy_cleanup_all_indexes<'m>(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'m>) -> PgResult<()> {
-    debug_assert!(vacrel.nindexes > 0);
-    for i in 0..vacrel.index_oids.len() {
-        let indrel = indexam::index_open(mcx, vacrel.index_oids[i], RowExclusiveLock)?;
-        indexam::index_vacuum_cleanup(&indrel, false)?;
-        indexam::index_close(indrel, RowExclusiveLock)?;
+        lazy_cleanup_all_indexes(vacrel)?;
     }
     Ok(())
 }
@@ -657,11 +670,106 @@ fn lazy_vacuum(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
 
     if bypass {
         vacrel.do_index_vacuuming = false;
+    } else if lazy_vacuum_all_indexes(vacrel)? {
+        lazy_vacuum_heap_rel(vacrel)?;
     } else {
-        unported("lazy_vacuum_all_indexes (ambulkdelete; nbtree vacuum lane)");
+        debug_assert!(VacuumFailsafeActive());
     }
 
     vacrel.dead_items.clear();
+    Ok(())
+}
+
+/// lazy_vacuum_all_indexes: one ambulkdelete round over every index. `false`
+/// only in the wraparound-failsafe case.
+fn lazy_vacuum_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool> {
+    let mut allindexes = true;
+    let old_live_tuples = vacrel.rel.rd_rel.reltuples as f64;
+
+    debug_assert!(vacrel.nindexes > 0);
+    debug_assert!(vacrel.do_index_vacuuming);
+    debug_assert!(vacrel.do_index_cleanup);
+
+    if lazy_check_wraparound_failsafe(vacrel)? {
+        return Ok(false);
+    }
+
+    for idx in 0..vacrel.nindexes {
+        let istat = vacrel.indstats[idx].take();
+        let new_istat = {
+            let ivinfo = IndexVacuumInfo {
+                index: &vacrel.indrels[idx],
+                heaprel: vacrel.rel,
+                analyze_only: false,
+                estimated_count: true,
+                num_heap_tuples: old_live_tuples,
+                strategy: vacrel.bstrategy.clone(),
+            };
+            vac_bulkdel_one_index(vacrel.mcx, &ivinfo, istat, &vacrel.dead_items)?
+        };
+        vacrel.indstats[idx] = Some(new_istat);
+
+        if lazy_check_wraparound_failsafe(vacrel)? {
+            allindexes = false;
+            break;
+        }
+    }
+
+    debug_assert!(
+        vacrel.num_index_scans > 0 || vacrel.dead_items.len() as i64 == vacrel.lpdead_items
+    );
+    debug_assert!(allindexes || VacuumFailsafeActive());
+
+    vacrel.num_index_scans += 1;
+    Ok(allindexes)
+}
+
+/// lazy_cleanup_all_indexes: amvacuumcleanup for every index.
+fn lazy_cleanup_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
+    debug_assert!(vacrel.do_index_cleanup);
+    debug_assert!(vacrel.nindexes > 0);
+
+    let reltuples = vacrel.new_rel_tuples;
+    let estimated_count = vacrel.scanned_pages < vacrel.rel_pages;
+
+    for idx in 0..vacrel.nindexes {
+        let istat = vacrel.indstats[idx].take();
+        let new_istat = {
+            let ivinfo = IndexVacuumInfo {
+                index: &vacrel.indrels[idx],
+                heaprel: vacrel.rel,
+                analyze_only: false,
+                estimated_count,
+                num_heap_tuples: reltuples,
+                strategy: vacrel.bstrategy.clone(),
+            };
+            vac_cleanup_one_index(vacrel.mcx, &ivinfo, istat)?
+        };
+        vacrel.indstats[idx] = new_istat;
+    }
+    Ok(())
+}
+
+/// update_relstats_all_indexes: index pg_class stats where accurate.
+fn update_relstats_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
+    debug_assert!(vacrel.do_index_cleanup);
+    for idx in 0..vacrel.nindexes {
+        let Some(istat) = &vacrel.indstats[idx] else {
+            continue;
+        };
+        if istat.estimated_count {
+            continue;
+        }
+        vacuum_seams::vac_update_relstats::call(
+            &vacrel.indrels[idx],
+            istat.num_pages,
+            istat.num_index_tuples,
+            0,
+            0,
+            false,
+            false,
+        )?;
+    }
     Ok(())
 }
 

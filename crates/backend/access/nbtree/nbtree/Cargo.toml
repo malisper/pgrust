@@ -36,6 +36,9 @@ heaptuple = { path = "../../common/heaptuple" }
 tableam = { path = "../../table/tableam" }
 freespace = { path = "../../../storage/freespace/freespace" }
 rmgr = { path = "../../transam/rmgr" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+varsup = { path = "../../transam/varsup" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
 xloginsert_seams = { path = "../../transam/xloginsert_seams" }
 
 [dev-dependencies]
@@ -49,9 +52,7 @@ xlogreader = { path = "../../transam/xlogreader" }
 xlogreader_seams = { path = "../../transam/xlogreader_seams" }
 transam_xlog = { path = "../../transam/transam_xlog" }
 xlogutils = { path = "../../transam/xlogutils" }
-varsup = { path = "../../transam/varsup" }
 controldata_utils = { path = "../../../../common/controldata_utils" }
-guc_tables = { path = "../../../utils/misc/guc_tables" }
 shmem = { path = "../../../storage/ipc/shmem" }
 fd = { path = "../../../storage/file/fd" }
 lwlock = { path = "../../../storage/lmgr/lwlock" }

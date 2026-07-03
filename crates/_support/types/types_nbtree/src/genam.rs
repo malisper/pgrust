@@ -10,6 +10,18 @@ pub enum IndexUniqueCheck {
 
 pub use IndexUniqueCheck::*;
 
+// IndexBulkDeleteResult (access/genam.h).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct IndexBulkDeleteResult {
+    pub num_pages: types_core::BlockNumber,
+    pub estimated_count: bool,
+    pub num_index_tuples: f64,
+    pub tuples_removed: f64,
+    pub pages_newly_deleted: types_core::BlockNumber,
+    pub pages_deleted: types_core::BlockNumber,
+    pub pages_free: types_core::BlockNumber,
+}
+
 #[cfg(test)]
 mod genam_tests {
     use super::*;

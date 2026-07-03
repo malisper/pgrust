@@ -14,7 +14,7 @@ use types_core::Oid;
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_WRONG_OBJECT_TYPE,
 };
-use types_nbtree::IndexUniqueCheck;
+use types_nbtree::{IndexBulkDeleteResult, IndexUniqueCheck};
 use types_rel::{
     MaxLockMode, NoLock, Relation, RelationData, LOCKMODE, RELKIND_INDEX,
     RELKIND_PARTITIONED_INDEX,
@@ -160,14 +160,35 @@ pub fn index_insert<'mcx>(
     )
 }
 
-/// index_vacuum_cleanup, the amvacuumcleanup dispatch; only the
-/// bulkdelete-free arm is live (nbtree keeps the scan lane loud).
-pub fn index_vacuum_cleanup(indexRelation: &Relation<'_>, analyze_only: bool) -> PgResult<()> {
-    relation_checks(indexRelation)?;
-    match IndexAmKind::from_relam(indexRelation.rd_rel.relam) {
-        IndexAmKind::Btree => nbtree::btvacuumcleanup(indexRelation, analyze_only),
+/// index_bulk_delete. C divergence (recorded): the callback is monomorphized
+/// to the sorted dead-TID slice — vac_tid_reaped is its only producer.
+pub fn index_bulk_delete<'mcx>(
+    mcx: Mcx<'mcx>,
+    info: &nbtree::IndexVacuumInfo<'_, 'mcx>,
+    istat: Option<IndexBulkDeleteResult>,
+    dead_items: &[ItemPointerData],
+) -> PgResult<IndexBulkDeleteResult> {
+    relation_checks(info.index)?;
+    match IndexAmKind::from_relam(info.index.rd_rel.relam) {
+        IndexAmKind::Btree => nbtree::btbulkdelete(mcx, info, istat, dead_items),
         #[cfg(test)]
-        IndexAmKind::Mock => Ok(()),
+        IndexAmKind::Mock => Ok(istat.unwrap_or_default()),
+        #[allow(unreachable_patterns)]
+        _ => mock_outside_tests(),
+    }
+}
+
+/// index_vacuum_cleanup.
+pub fn index_vacuum_cleanup<'mcx>(
+    mcx: Mcx<'mcx>,
+    info: &nbtree::IndexVacuumInfo<'_, 'mcx>,
+    istat: Option<IndexBulkDeleteResult>,
+) -> PgResult<Option<IndexBulkDeleteResult>> {
+    relation_checks(info.index)?;
+    match IndexAmKind::from_relam(info.index.rd_rel.relam) {
+        IndexAmKind::Btree => nbtree::btvacuumcleanup(mcx, info, istat),
+        #[cfg(test)]
+        IndexAmKind::Mock => Ok(istat),
         #[allow(unreachable_patterns)]
         _ => mock_outside_tests(),
     }

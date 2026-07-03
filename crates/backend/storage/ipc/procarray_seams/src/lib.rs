@@ -65,6 +65,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // GlobalVisCheckRemovableFullXid(rel, fxid) (procarray.c).
+    pub fn global_vis_check_removable_full_xid<'a, 'mcx>(
+        rel: &'a types_rel::RelationData<'mcx>,
+        fxid: types_core::xact::FullTransactionId,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    // GetOldestNonRemovableTransactionId(rel) (procarray.c).
+    pub fn get_oldest_non_removable_transaction_id<'a, 'mcx>(
+        rel: &'a types_rel::RelationData<'mcx>,
+    ) -> PgResult<TransactionId>
+);
+
+seam_core::seam!(
     // CountDBConnections(databaseid) (procarray.c) — dense-array walk, phase 2.
     pub fn count_db_connections(databaseid: types_core::Oid) -> PgResult<i32>
 );

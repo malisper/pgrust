@@ -3,12 +3,14 @@
 //! arms stay loud.
 
 use ::bufmgr_seams::{self as bufmgr, BufferPin};
+use ::types_core::xact::{FirstNormalFullTransactionId, FullTransactionId};
 use ::types_core::{BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, BLCKSZ};
 use ::types_error::{PgError, PgResult, ERRCODE_INDEX_CORRUPTED};
 use ::types_nbtree::{
-    BTMetaPageData, BTPageOpaqueData, BTP_LEAF, BTP_META, BTP_ROOT, P_IGNORE, P_ISMETA,
+    BTDeletedPageData, BTMetaPageData, BTPageOpaqueData, BTP_DELETED, BTP_HALF_DEAD,
+    BTP_HAS_FULLXID, BTP_LEAF, BTP_META, BTP_ROOT, P_HAS_FULLXID, P_IGNORE, P_ISDELETED, P_ISMETA,
     P_LEFTMOST, P_RIGHTMOST, BTREE_MAGIC, BTREE_METAPAGE, BTREE_MIN_VERSION, BTREE_NOVAC_VERSION,
-    BTREE_VERSION, BT_READ, BT_WRITE, P_NONE, XLOG_BTREE_NEWROOT,
+    BTREE_VERSION, BT_READ, BT_WRITE, P_NONE, XLOG_BTREE_NEWROOT, XLOG_BTREE_REUSE_PAGE,
 };
 use ::types_rel::Relation;
 use ::types_storage::bufpage::{ItemIdData, PageMut, PageRef, SizeOfPageHeaderData};
@@ -119,6 +121,69 @@ pub(crate) fn bt_unlockbuf(_rel: &Relation<'_>, pin: &BufferPin) -> PgResult<()>
     bufmgr::lock_buffer::call(pin.buffer(), bufmgr::BUFFER_LOCK_UNLOCK)
 }
 
+/// _bt_upgradelockbufcleanup.
+pub(crate) fn bt_upgradelockbufcleanup(rel: &Relation<'_>, pin: &BufferPin) -> PgResult<()> {
+    bt_unlockbuf(rel, pin)?;
+    bufmgr::lock_buffer_for_cleanup::call(pin.buffer())
+}
+
+/// BTPageSetDeleted.
+pub(crate) fn bt_page_set_deleted(pm: &mut PageMut<'_>, safexid: FullTransactionId) {
+    let mut opaque = page_opaque(&pm.as_ref());
+    opaque.btpo_flags &= !BTP_HALF_DEAD;
+    opaque.btpo_flags |= BTP_DELETED | BTP_HAS_FULLXID;
+    write_opaque(pm, &opaque);
+    pm.set_pd_lower(
+        (maxalign_hdr() + core::mem::size_of::<BTDeletedPageData>()) as u16,
+    );
+    pm.set_pd_upper(pm.as_ref().pd_special());
+    // SAFETY: PageGetContents at MAXALIGN(SizeOfPageHeaderData), 8-aligned,
+    // 8B in-bounds; caller holds the exclusive lock.
+    unsafe {
+        pm.as_ref()
+            .as_ptr()
+            .cast_mut()
+            .add(maxalign_hdr())
+            .cast::<FullTransactionId>()
+            .write(safexid)
+    };
+}
+
+const fn maxalign_hdr() -> usize {
+    (SizeOfPageHeaderData + 7) & !7
+}
+
+/// BTPageGetDeleteXid.
+pub(crate) fn bt_page_get_delete_xid(page: &PageRef<'_>) -> FullTransactionId {
+    debug_assert!(!page.is_new());
+    let opaque = page_opaque(page);
+    debug_assert!(P_ISDELETED(&opaque));
+    if !P_HAS_FULLXID(&opaque) {
+        return FirstNormalFullTransactionId;
+    }
+    // SAFETY: deleted pages store BTDeletedPageData at PageGetContents.
+    unsafe {
+        page.as_ptr()
+            .add(maxalign_hdr())
+            .cast::<FullTransactionId>()
+            .read()
+    }
+}
+
+/// BTPageIsRecyclable.
+pub(crate) fn bt_page_is_recyclable(
+    page: &PageRef<'_>,
+    heaprel: &::types_rel::RelationData<'_>,
+) -> PgResult<bool> {
+    debug_assert!(!page.is_new());
+    let opaque = page_opaque(page);
+    if P_ISDELETED(&opaque) {
+        let safexid = bt_page_get_delete_xid(page);
+        return procarray_seams::global_vis_check_removable_full_xid::call(heaprel, safexid);
+    }
+    Ok(false)
+}
+
 /// _bt_getbuf: pin + lock + checkpage.
 pub(crate) fn bt_getbuf(
     rel: &Relation<'_>,
@@ -170,8 +235,12 @@ fn amcache_sane(metad: &BTMetaPageData) -> bool {
 }
 
 /// _bt_getroot: the pinned+read-locked (fast) root. `None` for an empty index
-/// under BT_READ; BT_WRITE creates the first root page.
-pub(crate) fn bt_getroot(rel: &Relation<'_>, access: i32) -> PgResult<Option<BufferPin>> {
+/// under BT_READ; BT_WRITE creates the first root page (heaprel required, as C).
+pub(crate) fn bt_getroot<'mcx>(
+    rel: &Relation<'mcx>,
+    heaprel: Option<&::types_rel::RelationData<'mcx>>,
+    access: i32,
+) -> PgResult<Option<BufferPin>> {
     if let Some(metad) = rel.rd_amcache.get() {
         debug_assert!(amcache_sane(&metad));
         let rootblkno = metad.btm_fastroot;
@@ -208,10 +277,10 @@ pub(crate) fn bt_getroot(rel: &Relation<'_>, access: i32) -> PgResult<Option<Buf
         // C's create-root race recheck; single lock trade keeps the shape.
         if page_meta(&metapin.page()).btm_root != P_NONE {
             bt_relbuf(rel, metapin)?;
-            return bt_getroot(rel, access);
+            return bt_getroot(rel, heaprel, access);
         }
 
-        let rootpin = bt_allocbuf(rel)?;
+        let rootpin = bt_allocbuf(rel, heaprel.expect("BT_WRITE getroot requires heaprel"))?;
         let rootblkno = rootpin.block_number();
         {
             let mut rootpage = page_of_mut(&rootpin);
@@ -340,23 +409,6 @@ pub fn bt_getrootheight(rel: &Relation<'_>) -> PgResult<i32> {
     Ok(metad.btm_fastlevel as i32)
 }
 
-/// _bt_vacuum_needs_cleanup (nbtree.c): does btvacuumcleanup need a
-/// cleanup-only scan of a bulkdelete-free index?
-pub fn bt_vacuum_needs_cleanup(rel: &Relation<'_>) -> PgResult<bool> {
-    let metapin = bt_getbuf(rel, BTREE_METAPAGE, BT_READ)?;
-    let metad = page_meta(&metapin.page());
-    if metad.btm_version < BTREE_NOVAC_VERSION {
-        bt_relbuf(rel, metapin)?;
-        return Ok(true);
-    }
-    let prev_num_delpages = metad.btm_last_cleanup_num_delpages;
-    bt_relbuf(rel, metapin)?;
-
-    let rel_blocks =
-        bufmgr::relation_get_number_of_blocks_in_fork::call(rel, ForkNumber::MAIN_FORKNUM)?;
-    Ok(prev_num_delpages > 0 && prev_num_delpages > rel_blocks / 20)
-}
-
 /// _bt_metaversion -> (heapkeyspace, allequalimage).
 pub fn bt_metaversion(rel: &Relation<'_>) -> PgResult<(bool, bool)> {
     if let Some(uncached) = prime_amcache(rel)? {
@@ -467,10 +519,8 @@ pub(crate) fn bt_conditionallockbuf(_rel: &Relation<'_>, pin: &BufferPin) -> PgR
     bufmgr::conditional_lock_buffer::call(pin.buffer())
 }
 
-/// _bt_allocbuf: a write-locked, freshly initialized page. C divergence:
-/// heaprel isn't threaded — it only feeds the FSM-recycle conflict horizon,
-/// and page deletion (the only producer of recyclable pages) is unported.
-pub(crate) fn bt_allocbuf(rel: &Relation<'_>) -> PgResult<BufferPin> {
+/// _bt_allocbuf: a write-locked, freshly initialized page.
+pub(crate) fn bt_allocbuf(rel: &Relation<'_>, heaprel: &::types_rel::RelationData<'_>) -> PgResult<BufferPin> {
     loop {
         let blkno = ::freespace::GetFreeIndexPage(rel)?;
         if blkno == InvalidBlockNumber {
@@ -483,7 +533,30 @@ pub(crate) fn bt_allocbuf(rel: &Relation<'_>) -> PgResult<BufferPin> {
                 bt_pageinit(&mut page_of_mut(&pin));
                 return Ok(pin);
             }
-            unported_phase2("BTPageIsRecyclable reuse (vacuum/page-deletion lane)");
+
+            if bt_page_is_recyclable(&pin.page(), heaprel)? {
+                if crate::relation_needs_wal(rel)
+                    && transam_xlog_seams::xlog_standby_info_active::call()
+                {
+                    // RelationIsAccessibleInLogicalDecoding const-false
+                    // (pruneheap precedent): isCatalogRel = false.
+                    let xlrec = crate::wal::xl_btree_reuse_page(
+                        rel.rd_locator.get(),
+                        blkno,
+                        bt_page_get_delete_xid(&pin.page()),
+                    );
+                    ::xloginsert_seams::xlog_insert_record::call(
+                        ::rmgr::RM_BTREE_ID as u8,
+                        XLOG_BTREE_REUSE_PAGE,
+                        0,
+                        &[&xlrec],
+                        &[],
+                    )?;
+                }
+                bt_pageinit(&mut page_of_mut(&pin));
+                return Ok(pin);
+            }
+            bt_unlockbuf(rel, &pin)?;
         }
         pin.release();
     }

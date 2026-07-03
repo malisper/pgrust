@@ -161,6 +161,24 @@ pub unsafe fn bt_tuple_set_natts(itup: *mut u8, nkeyatts: u16, heaptid: bool) {
 
 const BT_STATUS_OFFSET_MASK: u16 = !BT_OFFSET_MASK;
 
+/// BTreeTupleSetPosting.
+///
+/// # Safety
+/// As [`set_t_info`].
+pub unsafe fn bt_tuple_set_posting(itup: *mut u8, nhtids: u16, postingoffset: usize) {
+    debug_assert!(nhtids > 1);
+    debug_assert!(nhtids & BT_STATUS_OFFSET_MASK == 0);
+    debug_assert!(postingoffset == maxalign(postingoffset));
+    debug_assert!(postingoffset < INDEX_SIZE_MASK as usize);
+    debug_assert!(!bt_tuple_is_pivot(itup));
+    set_t_info(itup, t_info(itup) | INDEX_ALT_TID_MASK);
+    let mut tid = t_tid(itup);
+    tid.ip_posid = nhtids | BT_IS_POSTING;
+    tid.ip_blkid.bi_hi = (postingoffset >> 16) as u16;
+    tid.ip_blkid.bi_lo = (postingoffset & 0xffff) as u16;
+    set_t_tid(itup, tid);
+}
+
 /// BTreeTupleSetDownLink.
 ///
 /// # Safety

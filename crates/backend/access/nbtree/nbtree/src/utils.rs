@@ -626,10 +626,66 @@ pub unsafe fn bt_check_third_page(
     ))
 }
 
-// _bt_vacuum_cycleid: reads the shared vacuum-cycle array, which is empty
-// until the vacuum lane lands — C returns 0 when no vacuum is active.
-pub(crate) fn bt_vacuum_cycleid(_rel: &Relation<'_>) -> u16 {
-    0
+// btvacinfo: cross-backend shared state, a process static guarded by a Mutex
+// standing in for C's shmem area + BtreeVacuumLock. Keyed by (dbOid, relId)
+// per C's LockRelId. Bare Vec: shared registry outside any mcx, cold path.
+struct BtVacInfo {
+    cycle_ctr: ::types_nbtree::BTCycleId,
+    vacuums: Vec<(::types_core::Oid, ::types_core::Oid, ::types_nbtree::BTCycleId)>,
+}
+
+static BTVACINFO: std::sync::Mutex<BtVacInfo> = std::sync::Mutex::new(BtVacInfo {
+    cycle_ctr: 0,
+    vacuums: Vec::new(),
+});
+
+fn vac_key(rel: &Relation<'_>) -> (::types_core::Oid, ::types_core::Oid) {
+    (rel.rd_locator.get().dbOid, rel.rd_id)
+}
+
+/// _bt_vacuum_cycleid: 0 when no vacuum is active on this index.
+pub(crate) fn bt_vacuum_cycleid(rel: &Relation<'_>) -> ::types_nbtree::BTCycleId {
+    let info = BTVACINFO.lock().unwrap();
+    let key = vac_key(rel);
+    info.vacuums
+        .iter()
+        .find(|v| (v.0, v.1) == key)
+        .map_or(0, |v| v.2)
+}
+
+/// _bt_start_vacuum. Caller pairs with bt_end_vacuum even on error exit.
+pub(crate) fn bt_start_vacuum(rel: &Relation<'_>) -> PgResult<::types_nbtree::BTCycleId> {
+    let mut info = BTVACINFO.lock().unwrap();
+    if info.cycle_ctr == 0 {
+        // C seeds from time() at shmem init; any nonzero start works.
+        info.cycle_ctr = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |d| d.as_secs()) as ::types_nbtree::BTCycleId)
+            | 1;
+    }
+    info.cycle_ctr = info.cycle_ctr.wrapping_add(1);
+    if info.cycle_ctr == 0 || info.cycle_ctr > ::types_nbtree::MAX_BT_CYCLE_ID {
+        info.cycle_ctr = 1;
+    }
+    let result = info.cycle_ctr;
+    let key = vac_key(rel);
+    if info.vacuums.iter().any(|v| (v.0, v.1) == key) {
+        return Err(Box::new(::types_error::PgError::error(format!(
+            "multiple active vacuums for index \"{}\"",
+            rel.name()
+        ))));
+    }
+    info.vacuums.push((key.0, key.1, result));
+    Ok(result)
+}
+
+/// _bt_end_vacuum; silent when no entry exists, as C.
+pub(crate) fn bt_end_vacuum(rel: &Relation<'_>) {
+    let mut info = BTVACINFO.lock().unwrap();
+    let key = vac_key(rel);
+    if let Some(i) = info.vacuums.iter().position(|v| (v.0, v.1) == key) {
+        info.vacuums.swap_remove(i);
+    }
 }
 
 /// _bt_mkscankey; `itup: None` is the utility-statement arm. C divergence:

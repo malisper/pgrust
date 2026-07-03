@@ -1074,6 +1074,34 @@ pub fn GlobalVisTestIsRemovableXid(
     Ok(false)
 }
 
+pub fn GlobalVisTestIsRemovableFullXid(
+    handle: types_core::GlobalVisStateHandle,
+    fxid: FullTransactionId,
+) -> PgResult<bool> {
+    let state = vis_state_cell(handle, |c| c.get());
+
+    if fxid.value < state.maybe_needed.value {
+        return Ok(true);
+    }
+    if fxid.value >= state.definitely_needed.value {
+        return Ok(false);
+    }
+    if GlobalVisTestShouldUpdate(state) {
+        ComputeXidHorizons()?;
+        let state = vis_state_cell(handle, |c| c.get());
+        debug_assert!(fxid.value < state.definitely_needed.value);
+        return Ok(fxid.value < state.maybe_needed.value);
+    }
+    Ok(false)
+}
+
+pub fn GlobalVisCheckRemovableFullXid(
+    rel: &types_rel::RelationData<'_>,
+    fxid: FullTransactionId,
+) -> PgResult<bool> {
+    GlobalVisTestIsRemovableFullXid(GlobalVisTestFor(rel), fxid)
+}
+
 pub fn init_seams() {
     procarray_seams::proc_array_add::set(ProcArrayAdd);
     procarray_seams::proc_array_remove::set(ProcArrayRemove);
@@ -1086,5 +1114,13 @@ pub fn init_seams() {
     }
     if !procarray_seams::global_vis_test_is_removable_xid::is_installed() {
         procarray_seams::global_vis_test_is_removable_xid::set(GlobalVisTestIsRemovableXid);
+    }
+    if !procarray_seams::global_vis_check_removable_full_xid::is_installed() {
+        procarray_seams::global_vis_check_removable_full_xid::set(GlobalVisCheckRemovableFullXid);
+    }
+    if !procarray_seams::get_oldest_non_removable_transaction_id::is_installed() {
+        procarray_seams::get_oldest_non_removable_transaction_id::set(
+            GetOldestNonRemovableTransactionId,
+        );
     }
 }
