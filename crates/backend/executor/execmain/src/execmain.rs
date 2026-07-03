@@ -306,13 +306,17 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
     let operation = qd.operation;
     let params = qd.params;
 
-    let mut exec = McxOwned::<ExecTy>::try_new(
+    let mut exec = McxOwned::<ExecTy>::try_new_in_place(
         MemoryContext::new_bump("ExecutorState"),
-        |mcx| {
-            Ok(ExecData {
-                estate: EStateData::new_in(mcx),
-                planstate: None,
-            })
+        |mcx, slot| {
+            let d = slot.as_mut_ptr();
+            // SAFETY: field-wise init of the whole uninit slot; sret lands
+            // EStateData directly in the arena (no ~1.2KB stack round trip).
+            unsafe {
+                (&raw mut (*d).estate).write(EStateData::new_in(mcx));
+                (&raw mut (*d).planstate).write(None);
+            }
+            Ok(())
         },
     )?;
     let tup_desc = exec.with_mut_mcx(|_mcx, data| {
