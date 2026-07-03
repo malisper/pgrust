@@ -908,10 +908,10 @@ pub fn RelationIdIsInInitFile(relationId: Oid) -> bool {
         || relationId == SHARED_SEC_LABEL_OBJECT_INDEX_ID
     {
         // Init-file members without syscache support (C asserts the same).
-        debug_assert!(!syscache_seams::relation_has_sys_cache::call(relationId));
+        debug_assert!(!syscache_seams::relation_supports_sys_cache::call(relationId));
         return true;
     }
-    syscache_seams::relation_has_sys_cache::call(relationId)
+    syscache_seams::relation_supports_sys_cache::call(relationId)
 }
 
 fn unlink_initfile(path: &Path, error_level: bool) -> PgResult<()> {
