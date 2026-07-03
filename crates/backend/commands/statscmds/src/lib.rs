@@ -42,10 +42,7 @@ const STATS_EXT_NDISTINCT: u8 = b'd';
 const STATS_EXT_DEPENDENCIES: u8 = b'f';
 const STATS_EXT_MCV: u8 = b'm';
 
-const RELKIND_RELATION: i8 = b'r' as i8;
-const RELKIND_MATVIEW: i8 = b'm' as i8;
-const RELKIND_FOREIGN_TABLE: i8 = b'f' as i8;
-const RELKIND_PARTITIONED_TABLE: i8 = b'p' as i8;
+use types_rel::{RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
 
 const ShareUpdateExclusiveLock: types_rel::LOCKMODE = 4;
 const RowExclusiveLock: types_rel::LOCKMODE = 3;
@@ -53,8 +50,12 @@ const NoLock: types_rel::LOCKMODE = 0;
 
 const STATEXTNAMENSP: i32 = 63;
 
-fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation { filename: Some("statscmds.c"), lineno: 0, funcname: Some(funcname) }
+fn loc(funcname: &str) -> ErrorLocation {
+    ErrorLocation {
+        filename: Some("statscmds.c".into()),
+        lineno: 0,
+        funcname: Some(funcname.into()),
+    }
 }
 
 fn err(code: types_error::SqlState, msg: String) -> Box<PgError> {
@@ -365,7 +366,7 @@ pub fn CreateStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateStatsStmt<'_>) -> PgR
 
     statrel.close(RowExclusiveLock)?;
 
-    inval::CacheInvalidateRelcache(&rel)?;
+    inval::invalidate::CacheInvalidateRelcache(&rel)?;
 
     rel.close(NoLock)?;
 
@@ -488,7 +489,7 @@ pub fn RemoveStatisticsById(mcx: Mcx<'_>, statsOid: Oid) -> PgResult<()> {
     RemoveStatisticsDataById(mcx, statsOid, true)?;
     RemoveStatisticsDataById(mcx, statsOid, false)?;
 
-    inval::CacheInvalidateRelcacheByRelid(relid)?;
+    inval::invalidate::CacheInvalidateRelcacheByRelid(relid)?;
 
     catalog_indexing::CatalogTupleDelete(&relation, &tid)?;
 
