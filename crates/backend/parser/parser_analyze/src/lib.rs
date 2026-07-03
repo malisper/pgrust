@@ -32,6 +32,7 @@ use types_portal::QueryEnvHandle;
 
 pub fn init_seams() {
     analyze_seams::parse_analyze_fixedparams::set(parse_analyze_fixedparams);
+    analyze_seams::parse_analyze_sql_fn::set(parse_analyze_sql_fn);
     analyze_seams::parse_analyze_varparams::set(parse_analyze_varparams);
     analyze_seams::analyze_requires_snapshot::set(analyze_requires_snapshot);
     analyze_seams::parse_sub_analyze::set(parse_sub_analyze);
@@ -63,6 +64,46 @@ pub fn parse_analyze_fixedparams<'a, 'mcx>(
     if is_query_id_enabled() {
         panic!(
             "parse_analyze_fixedparams (analyze.c): JumbleQuery (queryjumble.c) unported \
+             — compute_query_id is on"
+        );
+    }
+
+    free_parsestate(pstate)?;
+
+    backend_status::pgstat_report_query_id(query.queryId, false);
+
+    Ok(query)
+}
+
+pub fn parse_analyze_sql_fn<'a, 'mcx>(
+    mcx: Mcx<'mcx>,
+    parse_tree: &'a RawStmt<'mcx>,
+    source_text: &'a str,
+    fname: &'a str,
+    argtypes: &'a [Oid],
+    argnames: &'a [&'a str],
+    query_env: QueryEnvHandle,
+) -> PgResult<Query<'mcx>> {
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_sourcetext = Some(mcx::slice_in(mcx, source_text.as_bytes())?.leak());
+
+    parser_small1::setup_parse_sql_fn_parameters(
+        &mut pstate,
+        parser_small1::SqlFnParamState { fname, argtypes, argnames },
+    );
+
+    if !query_env.is_null() {
+        panic!(
+            "parse_analyze_sql_fn (analyze.c): QueryEnvHandle resolution unported \
+             (SPI/trigger transition tables) — unit backend-parser-analyze"
+        );
+    }
+
+    let query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
+
+    if is_query_id_enabled() {
+        panic!(
+            "parse_analyze_sql_fn (analyze.c): JumbleQuery (queryjumble.c) unported \
              — compute_query_id is on"
         );
     }

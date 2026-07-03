@@ -1237,6 +1237,9 @@ fn transformColumnRef<'mcx>(
     match node {
         Some(node) => Ok(node),
         None => {
+            if let Some(p) = sql_fn_post_column_ref(mcx, pstate, fields, cref.location)? {
+                return Ok(p);
+            }
             if relname.is_some() && colname.is_none() {
                 let rv = Node::mk_mut(
                     mcx,
@@ -1260,6 +1263,69 @@ fn transformColumnRef<'mcx>(
             }
         }
     }
+}
+
+
+// C sql_fn_post_column_ref (executor/functions.c): resolve unmatched column
+// references against SQL-function parameter names. Runs only after normal
+// column resolution missed, matching C's hook precedence.
+fn sql_fn_post_column_ref<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+    fields: &[Node<'mcx>],
+    location: types_core::ParseLoc,
+) -> PgResult<Option<Node<'mcx>>> {
+    let Some(state) = pstate.p_ref_hook_state.as_sql_fn_params() else {
+        return Ok(None);
+    };
+    let mut nnames = fields.len();
+    if nnames == 0 || nnames > 3 {
+        return Ok(None);
+    }
+    let star = fields[nnames - 1].node_tag() == NodeTag::T_A_Star;
+    if star {
+        nnames -= 1;
+        if nnames == 0 {
+            return Ok(None);
+        }
+    }
+    let name = |i: usize| fields[i].as_string().map(|s| s.sval);
+    let resolve = |i: usize| {
+        name(i).and_then(|n| parser_small1::sql_fn_resolve_param_name(state, n))
+    };
+    let (param, has_subfield) = match nnames {
+        1 => (resolve(0), false),
+        2 => {
+            if name(0) == Some(state.fname) {
+                match resolve(1) {
+                    Some(p) => (Some(p), false),
+                    None => (resolve(0), true),
+                }
+            } else {
+                (resolve(0), true)
+            }
+        }
+        _ => {
+            if name(0) != Some(state.fname) {
+                return Ok(None);
+            }
+            (resolve(1), true)
+        }
+    };
+    let Some((paramno, ptype)) = param else { return Ok(None) };
+    if star {
+        panic!(
+            "sql_fn_post_column_ref (functions.c): whole-row reference to a SQL \
+             function parameter unported"
+        );
+    }
+    if has_subfield {
+        panic!(
+            "sql_fn_post_column_ref (functions.c): composite-parameter field \
+             selection (ParseFuncOrColumn on a Param) unported"
+        );
+    }
+    Ok(Some(parser_small1::sql_fn_make_param(mcx, paramno, ptype, location)?))
 }
 
 fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
@@ -1307,6 +1373,9 @@ fn transformParamRef<'mcx>(
         }
         ParseRefHookState::VarParams(_) => {
             parser_small1::variable_paramref_hook(mcx, pstate, pref, encoding)
+        }
+        ParseRefHookState::SqlFnParams(_) => {
+            parser_small1::sql_fn_paramref_hook(mcx, pstate, pref, encoding)
         }
         ParseRefHookState::None => Err(no_parameter_error(pstate, pref, encoding)),
     }
