@@ -1,15 +1,19 @@
 //! nbtinsert.c: descent-for-insert (rightmost-block fastpath cache),
-//! _bt_check_unique (UNIQUE_CHECK_YES arm), _bt_findinsertloc, _bt_insertonpg
-//! incl. posting splits (_bt_binsrch_posting, _bt_swap_posting), _bt_split +
-//! parent insertion + root split, dedup trigger (dedup.rs). Loud: posting
-//! split during a page split, deletion, deferred unique checks, !heapkeyspace.
+//! _bt_check_unique (YES + PARTIAL arms, with the conflict-wait restart),
+//! _bt_findinsertloc, _bt_insertonpg incl. posting splits (_bt_binsrch_posting,
+//! _bt_swap_posting), _bt_split + parent insertion + root split, dedup trigger
+//! (dedup.rs). Loud: posting split during a page split, deletion, deferred
+//! unique rechecks (UNIQUE_CHECK_EXISTING), !heapkeyspace.
 
 use std::cell::Cell;
 
 use ::bufmgr_seams::{self as bufmgr, BufferPin};
 use ::datum::Datum;
 use ::mcx::Mcx;
-use ::types_core::{AttrNumber, BlockNumber, InvalidBlockNumber, OffsetNumber, Oid, INDEX_MAX_KEYS};
+use ::types_core::xact::{InvalidTransactionId, TransactionIdIsValid};
+use ::types_core::{
+    AttrNumber, BlockNumber, InvalidBlockNumber, OffsetNumber, Oid, TransactionId, INDEX_MAX_KEYS,
+};
 use ::types_error::{PgError, PgResult, ERRCODE_UNIQUE_VIOLATION};
 use ::types_nbtree::{
     BTMetaPageData, BTPageOpaqueData, BTP_HAS_GARBAGE, BTP_INCOMPLETE_SPLIT, BTP_ROOT,
@@ -110,11 +114,8 @@ fn bt_doinsert<'mcx>(
 ) -> PgResult<bool> {
     let mut is_unique = false;
     let mut checkingunique = !matches!(check_unique, IndexUniqueCheck::UNIQUE_CHECK_NO);
-    if matches!(
-        check_unique,
-        IndexUniqueCheck::UNIQUE_CHECK_PARTIAL | IndexUniqueCheck::UNIQUE_CHECK_EXISTING
-    ) {
-        unported_phase2("UNIQUE_CHECK_PARTIAL/EXISTING (speculative/deferred unique lane)");
+    if matches!(check_unique, IndexUniqueCheck::UNIQUE_CHECK_EXISTING) {
+        unported_phase2("UNIQUE_CHECK_EXISTING (deferred unique recheck lane)");
     }
 
     let mut itup_key = bt_mkscankey(rel, Some(itup))?;
@@ -142,17 +143,50 @@ fn bt_doinsert<'mcx>(
     };
 
     let mut stack: ::mcx::PgVec<'mcx, StackEntry> = ::mcx::PgVec::new_in(mcx);
-    bt_search_insert(rel, &mut insertstate, &mut frame, &mut stack)?;
+    // C's `goto search` restart after waiting out a conflicting inserter.
+    loop {
+        bt_search_insert(rel, &mut insertstate, &mut frame, &mut stack)?;
 
-    if checkingunique {
+        if !checkingunique {
+            break;
+        }
         // SAFETY: insertstate.buf pinned + write-locked by the search.
-        unsafe { bt_check_unique(mcx, rel, &mut insertstate, heap_rel, &mut frame)? };
-        is_unique = true;
+        let (xwait, speculative_token) = unsafe {
+            bt_check_unique(
+                mcx,
+                rel,
+                &mut insertstate,
+                heap_rel,
+                check_unique,
+                &mut is_unique,
+                &mut frame,
+            )?
+        };
+        if TransactionIdIsValid(xwait) {
+            let pin = insertstate.buf.take().expect("leaf pinned");
+            bt_relbuf(rel, pin)?;
+            // Speculative insertion: wait for its verdict, not the whole xact.
+            let heap_tid = unsafe { t_tid(itup) };
+            if speculative_token != 0 {
+                lmgr::SpeculativeInsertionWait(xwait, speculative_token)?;
+            } else {
+                lmgr::XactLockTableWait(
+                    xwait,
+                    Some(rel),
+                    Some(&heap_tid),
+                    ::types_storage::lock::XLTW_Oper::InsertIndex,
+                )?;
+            }
+            stack.clear();
+            debug_assert!(!insertstate.bounds_valid);
+            continue;
+        }
 
         if insertstate.itup_key.heapkeyspace {
             // SAFETY: owned image.
             insertstate.itup_key.scantid = Some(unsafe { t_tid(itup) });
         }
+        break;
     }
 
     {
@@ -524,8 +558,11 @@ fn invalid_duplicate_tuple(
     )
 }
 
-/// _bt_check_unique, UNIQUE_CHECK_YES arm: dirty-snapshot visibility recheck
-/// through the tableam; conflicts with in-flight xacts hit the loud wait arm.
+/// _bt_check_unique, YES + PARTIAL arms: dirty-snapshot visibility recheck
+/// through the tableam. Returns (xwait, speculativeToken): a valid xwait means
+/// the caller must wait it out and restart the search; PARTIAL never waits —
+/// it reports the potential conflict via `is_unique` and lets the insert
+/// proceed.
 ///
 /// # Safety
 /// `insertstate.buf` pinned + write-locked.
@@ -534,13 +571,17 @@ unsafe fn bt_check_unique<'mcx>(
     rel: &Relation<'mcx>,
     insertstate: &mut InsertState<'_>,
     heap_rel: &Relation<'mcx>,
+    check_unique: IndexUniqueCheck,
+    is_unique: &mut bool,
     frame: &mut OrderProcFrame,
-) -> PgResult<()> {
+) -> PgResult<(TransactionId, u32)> {
     let itup = insertstate.itup;
     let mut nbuf: Option<BufferPin> = None;
 
-    // The wait lane (valid xwait from the dirty snapshot) panics inside the
-    // visibility read marshal; the sentinel here never sees the write-back.
+    *is_unique = true;
+
+    // The dirty write-back (xmin/xmax/speculativeToken) comes back through
+    // the snapshot's dirty_* Cells (visibility read-marshal contract).
     let mut snapshot_dirty: ::tableam::Snapshot<'mcx> = Some(std::rc::Rc::new(
         SnapshotData::sentinel(mcx, SnapshotType::SNAPSHOT_DIRTY),
     ));
@@ -585,6 +626,39 @@ unsafe fn bt_check_unique<'mcx>(
                     &mut snapshot_dirty,
                     Some(&mut all_dead),
                 )? {
+                    // Potential conflict is enough for PARTIAL: report it and
+                    // leave the conclusive check to the speculative recheck.
+                    // Don't invalidate binary search bounds.
+                    if matches!(check_unique, IndexUniqueCheck::UNIQUE_CHECK_PARTIAL) {
+                        if let Some(pin) = nbuf.take() {
+                            bt_relbuf(rel, pin)?;
+                        }
+                        *is_unique = false;
+                        return Ok((InvalidTransactionId, 0));
+                    }
+
+                    let (dirty_xmin, dirty_xmax, dirty_token) = {
+                        let snap = snapshot_dirty.as_deref().expect("dirty snapshot");
+                        (
+                            snap.dirty_xmin.get(),
+                            snap.dirty_xmax.get(),
+                            snap.dirty_speculative_token.get(),
+                        )
+                    };
+                    let xwait = if TransactionIdIsValid(dirty_xmin) {
+                        dirty_xmin
+                    } else {
+                        dirty_xmax
+                    };
+                    if TransactionIdIsValid(xwait) {
+                        if let Some(pin) = nbuf.take() {
+                            bt_relbuf(rel, pin)?;
+                        }
+                        // Caller releases the lock on insertstate.buf.
+                        insertstate.bounds_valid = false;
+                        return Ok((xwait, dirty_token));
+                    }
+
                     let mut selftid = t_tid(itup);
                     let mut snapshot_self: ::tableam::Snapshot<'mcx> = Some(std::rc::Rc::new(
                         SnapshotData::sentinel(mcx, SnapshotType::SNAPSHOT_SELF),
@@ -662,7 +736,7 @@ unsafe fn bt_check_unique<'mcx>(
     if let Some(pin) = nbuf {
         bt_relbuf(rel, pin)?;
     }
-    Ok(())
+    Ok((InvalidTransactionId, 0))
 }
 
 #[cold]

@@ -224,6 +224,41 @@ pub fn XactLockTableDelete(xid: TransactionId) -> PgResult<()> {
     Ok(())
 }
 
+// C keeps this as a static local in lmgr.c; one backend = one thread here.
+thread_local! {
+    static SPECULATIVE_INSERTION_TOKEN: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+pub fn SpeculativeInsertionLockAcquire(xid: TransactionId) -> PgResult<u32> {
+    let token = SPECULATIVE_INSERTION_TOKEN.with(|t| {
+        // Zero means no token is held, so skip it on wrap-around.
+        let next = t.get().wrapping_add(1).max(1);
+        t.set(next);
+        next
+    });
+    acquire(LOCKTAG::speculative_insertion(xid, token), ExclusiveLock, false)?;
+    Ok(token)
+}
+
+pub fn SpeculativeInsertionLockRelease(xid: TransactionId) -> PgResult<()> {
+    let token = SPECULATIVE_INSERTION_TOKEN.with(|t| t.get());
+    lock_seams::lock_release::call(
+        LOCKTAG::speculative_insertion(xid, token),
+        ExclusiveLock,
+        false,
+    )?;
+    Ok(())
+}
+
+pub fn SpeculativeInsertionWait(xid: TransactionId, token: u32) -> PgResult<()> {
+    debug_assert!(xid != 0);
+    debug_assert!(token != 0);
+    let tag = LOCKTAG::speculative_insertion(xid, token);
+    acquire(tag, ShareLock, false)?;
+    lock_seams::lock_release::call(tag, ShareLock, false)?;
+    Ok(())
+}
+
 // C installs an error_context_stack callback around the wait; per the elog
 // stack design, ERROR-path context attaches on propagation instead.
 pub fn XactLockTableWait(

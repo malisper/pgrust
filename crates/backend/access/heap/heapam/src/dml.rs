@@ -36,6 +36,7 @@ use heapam_visibility_seams as hv_seam;
 
 pub const XLOG_HEAP_INSERT: u8 = 0x00;
 pub const XLOG_HEAP_DELETE: u8 = 0x10;
+pub const XLOG_HEAP_CONFIRM: u8 = 0x50;
 pub const XLOG_HEAP_UPDATE: u8 = 0x20;
 pub const XLOG_HEAP_HOT_UPDATE: u8 = 0x40;
 pub const XLOG_HEAP_LOCK: u8 = 0x60;
@@ -45,6 +46,7 @@ pub const XLOG_HEAP_INIT_PAGE: u8 = 0x80;
 pub const XLH_INSERT_ALL_VISIBLE_CLEARED: u8 = 1 << 0;
 pub const XLH_INSERT_IS_SPECULATIVE: u8 = 1 << 2;
 pub const XLH_DELETE_ALL_VISIBLE_CLEARED: u8 = 1 << 0;
+pub const XLH_DELETE_IS_SUPER: u8 = 1 << 3;
 pub const XLH_DELETE_IS_PARTITION_MOVE: u8 = 1 << 4;
 pub const XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED: u8 = 1 << 0;
 pub const XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED: u8 = 1 << 1;
@@ -1358,6 +1360,152 @@ pub fn simple_heap_delete(relation: &RelationData<'_>, tid: &ItemPointerData) ->
             "unexpected heap_delete status: {result:?}"
         )))),
     }
+}
+
+/// `heap_finish_speculative`: replace the speculative token in t_ctid with a
+/// real self-pointing ctid.
+pub fn heap_finish_speculative(
+    relation: &RelationData<'_>,
+    tid: &ItemPointerData,
+) -> PgResult<()> {
+    let block = ItemPointerGetBlockNumber(tid);
+    let pin = BufferPin::adopt(bufmgr_seams::read_buffer::call(relation, block)?)
+        .expect("ReadBuffer returned InvalidBuffer");
+    bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+
+    let offnum = ItemPointerGetOffsetNumber(tid);
+    let page = pin.page();
+    if page.max_offset_number() < offnum || !page.item_id(offnum).is_normal() {
+        return Err(Box::new(PgError::error("invalid lp")));
+    }
+    let lp = page.item_id(offnum);
+    // SAFETY: pin + exclusive lock held.
+    let mut tp = unsafe { page_tuple(pin.page(), lp, *tid, relation) };
+    debug_assert!(tp.t_data().is_speculative());
+
+    bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;
+    tp.t_data_mut().t_ctid = *tid;
+
+    if relation_needs_wal(relation) {
+        let xlrec = offnum.to_ne_bytes();
+        let recptr = xloginsert_seams::xlog_insert_record::call(
+            RM_HEAP_ID,
+            XLOG_HEAP_CONFIRM,
+            XLOG_INCLUDE_ORIGIN,
+            &[&xlrec],
+            &[XLogRegBuf {
+                block_id: 0,
+                buffer: pin.buffer(),
+                flags: REGBUF_STANDARD,
+                bufdata: &[],
+            }],
+        )?;
+        // SAFETY: pin + exclusive lock held.
+        let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+        pm.set_lsn(recptr);
+    }
+
+    bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
+    pin.release();
+    Ok(())
+}
+
+/// `heap_abort_speculative`: super-delete — xmin goes invalid so the tuple is
+/// immediately dead to everyone, including our own transaction.
+pub fn heap_abort_speculative(
+    relation: &RelationData<'_>,
+    tid: &ItemPointerData,
+) -> PgResult<()> {
+    let xid = xact_seams::get_current_transaction_id::call()?;
+
+    let block = ItemPointerGetBlockNumber(tid);
+    let pin = BufferPin::adopt(bufmgr_seams::read_buffer::call(relation, block)?)
+        .expect("ReadBuffer returned InvalidBuffer");
+    bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+    debug_assert!(!pin.page().is_all_visible());
+
+    let lp = pin.page().item_id(ItemPointerGetOffsetNumber(tid));
+    debug_assert!(lp.is_normal());
+    // SAFETY: pin + exclusive lock held.
+    let mut tp = unsafe { page_tuple(pin.page(), lp, *tid, relation) };
+
+    if tp.t_data().xmin_raw() != xid {
+        return Err(Box::new(PgError::error(
+            "attempted to kill a tuple inserted by another transaction",
+        )));
+    }
+    if !tp.t_data().is_speculative() {
+        return Err(Box::new(PgError::error("attempted to kill a non-speculative tuple")));
+    }
+    debug_assert!(!tp.t_data().is_heap_only());
+
+    {
+        // The tuple is DEAD immediately; the oldest cheap wraparound-safe
+        // prune hint is TransactionXmin, clamped to relfrozenxid.
+        let txmin = snapmgr_seams::transaction_xmin::call();
+        debug_assert!(TransactionIdIsValid(txmin));
+        let prune_xid = if ::types_core::xact::TransactionIdPrecedes(
+            txmin,
+            relation.rd_rel.relfrozenxid,
+        ) {
+            relation.rd_rel.relfrozenxid
+        } else {
+            txmin
+        };
+        // SAFETY: pin + exclusive lock held.
+        let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+        page_set_prunable(&mut pm, prune_xid);
+    }
+
+    let self_tid = tp.t_self;
+    let hdr = tp.t_data_mut();
+    hdr.t_infomask &= !(HEAP_XMAX_BITS | HEAP_MOVED);
+    hdr.t_infomask2 &= !HEAP_KEYS_UPDATED;
+    hdr.set_xmin(InvalidTransactionId);
+    hdr.t_ctid = self_tid;
+
+    bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;
+
+    if relation_needs_wal(relation) {
+        let mut xlrec = [0u8; 8];
+        xlrec[0..4].copy_from_slice(&xid.to_ne_bytes());
+        xlrec[4..6].copy_from_slice(&ItemPointerGetOffsetNumber(&tp.t_self).to_ne_bytes());
+        xlrec[6] = compute_infobits(tp.t_data().t_infomask, tp.t_data().t_infomask2);
+        xlrec[7] = XLH_DELETE_IS_SUPER;
+
+        let recptr = xloginsert_seams::xlog_insert_record::call(
+            RM_HEAP_ID,
+            XLOG_HEAP_DELETE,
+            0,
+            &[&xlrec],
+            &[XLogRegBuf {
+                block_id: 0,
+                buffer: pin.buffer(),
+                flags: REGBUF_STANDARD,
+                bufdata: &[],
+            }],
+        )?;
+        // SAFETY: pin + exclusive lock held.
+        let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+        pm.set_lsn(recptr);
+    }
+
+    bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
+
+    if tp.has_external() {
+        // cold: per-toasted-delete scratch (deform arrays die here)
+        let toast_ctx = ::mcx::MemoryContext::new("heap_toast_delete");
+        heaptoast_seams::heap_toast_delete::call(toast_ctx.mcx(), relation, &tp, true)?;
+    }
+
+    inval::invalidate::CacheInvalidateHeapTuple(relation, &tp, None)?;
+
+    if relation.pgstat_enabled.get() {
+        pgstat::relation::pgstat_count_heap_delete(relation.rd_id, relation.rd_rel.relisshared);
+    }
+
+    pin.release();
+    Ok(())
 }
 
 // PageClearAllVisible + visibilitymap_clear, pin-at-clear (heap_insert shape).

@@ -725,6 +725,29 @@ fn heap_redo_rebuilds_pages_byte_exact() {
     assert_eq!(r, TM_Result::TM_Ok);
     drop(pin);
 
+    // Writer-driven speculative legs on page 1: insert+CONFIRM, then
+    // insert+super-DELETE. The parked token is unlogged, so both must
+    // resolve before the byte-compare (redo of the INSERT reconstructs
+    // t_ctid = self); abort's prune hint is TransactionXmin, which must
+    // equal the record xid the redo side stamps.
+    procarray::set_transaction_xmin(XID);
+    let img = raw_tuple(0, (0, 0), &[0x44; 8]);
+    let mut spec1 = make_writable_tuple(&img);
+    spec1.t_data_mut().set_speculative_token(4242);
+    heap_insert(&rel, &mut spec1, 0, heapam::hio::HEAP_INSERT_SPECULATIVE).unwrap();
+    assert_eq!(spec1.t_self, ItemPointerData::new(1, 2));
+    assert!(tuple_hdr(1, 2).is_speculative());
+    heapam::heap_finish_speculative(&rel, &spec1.t_self).unwrap();
+    assert!(!tuple_hdr(1, 2).is_speculative());
+
+    let img = raw_tuple(0, (0, 0), &[0x55; 8]);
+    let mut spec2 = make_writable_tuple(&img);
+    spec2.t_data_mut().set_speculative_token(4243);
+    heap_insert(&rel, &mut spec2, 0, heapam::hio::HEAP_INSERT_SPECULATIVE).unwrap();
+    assert_eq!(spec2.t_self, ItemPointerData::new(1, 3));
+    heapam::heap_abort_speculative(&rel, &spec2.t_self).unwrap();
+    assert_eq!(tuple_hdr(1, 3).xmin_raw(), 0);
+
     // Page 2 carries the C-writer record shapes, applied to the write-side
     // page exactly as C's write paths would and hand-encoded per heapam_xlog.h.
     with_fake(|f| {
@@ -896,12 +919,12 @@ fn heap_redo_rebuilds_pages_byte_exact() {
     }
     assert_eq!(reader.v.EndRecPtr, last_lsn);
 
-    assert_eq!(heap_seen[(XLOG_HEAP_INSERT >> 4) as usize], 4, "INSERT x4");
+    assert_eq!(heap_seen[(XLOG_HEAP_INSERT >> 4) as usize], 6, "INSERT x6");
     assert_eq!(heap_seen[(XLOG_HEAP_HOT_UPDATE >> 4) as usize], 1, "HOT_UPDATE");
     assert_eq!(heap_seen[(XLOG_HEAP_LOCK >> 4) as usize], 2, "LOCK x2");
     assert_eq!(heap_seen[(XLOG_HEAP_UPDATE >> 4) as usize], 2, "UPDATE x2");
-    assert_eq!(heap_seen[(XLOG_HEAP_DELETE >> 4) as usize], 1, "DELETE");
-    assert_eq!(heap_seen[(XLOG_HEAP_CONFIRM >> 4) as usize], 1, "CONFIRM");
+    assert_eq!(heap_seen[(XLOG_HEAP_DELETE >> 4) as usize], 2, "DELETE x2 (one super)");
+    assert_eq!(heap_seen[(XLOG_HEAP_CONFIRM >> 4) as usize], 2, "CONFIRM x2");
     assert_eq!(heap2_seen[(XLOG_HEAP2_MULTI_INSERT >> 4) as usize], 2, "MULTI_INSERT x2");
     assert_eq!(heap2_seen[(XLOG_HEAP2_LOCK_UPDATED >> 4) as usize], 1, "LOCK_UPDATED");
 
@@ -909,7 +932,7 @@ fn heap_redo_rebuilds_pages_byte_exact() {
     assert_eq!(with_fake(|f| f.pages.len()), nblocks);
 
     let cid_tuples: [&[(usize, u16)]; 3] =
-        [&[(0, 1), (0, 2), (0, 3), (0, 4), (0, 5)], &[(1, 1)], &[]];
+        [&[(0, 1), (0, 2), (0, 3), (0, 4), (0, 5)], &[(1, 1), (1, 2), (1, 3)], &[]];
     for blk in 0..nblocks {
         let mut got = page_bytes(blk).to_vec();
         let mut want = expected[blk].to_vec();

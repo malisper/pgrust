@@ -428,3 +428,25 @@ fn relation_init_lock_info_matches_c() {
 fn lockmode_bounds_for_relation_open_assert() {
     assert!(AccessShareLock >= types_rel::NoLock && AccessShareLock <= MaxLockMode);
 }
+
+#[test]
+fn speculative_insertion_lock_cycle() {
+    install();
+    let _ = take_events();
+    let t1 = SpeculativeInsertionLockAcquire(700).unwrap();
+    let t2 = SpeculativeInsertionLockAcquire(700).unwrap();
+    assert!(t1 != 0 && t2 == t1 + 1, "monotonic nonzero tokens");
+    SpeculativeInsertionLockRelease(700).unwrap();
+    SpeculativeInsertionWait(701, t1).unwrap();
+    let evs = take_events();
+    assert_eq!(
+        evs,
+        vec![
+            Ev::Acquire(LOCKTAG::speculative_insertion(700, t1), ExclusiveLock, false, false, true, false),
+            Ev::Acquire(LOCKTAG::speculative_insertion(700, t2), ExclusiveLock, false, false, true, false),
+            Ev::Release(LOCKTAG::speculative_insertion(700, t2), ExclusiveLock, false),
+            Ev::Acquire(LOCKTAG::speculative_insertion(701, t1), ShareLock, false, false, true, false),
+            Ev::Release(LOCKTAG::speculative_insertion(701, t1), ShareLock, false),
+        ]
+    );
+}

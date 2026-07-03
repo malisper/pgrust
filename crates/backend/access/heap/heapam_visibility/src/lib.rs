@@ -1063,9 +1063,9 @@ pub fn HeapTupleSatisfiesVisibility(
 }
 
 // Read-lane marshal for the &SnapshotData seam. DIRTY runs against a scratch
-// snapshot: the write-back fields (xmin/xmax/speculativeToken) only matter to
-// callers that wait on in-flight xacts, and that wait lane is unported —
-// panic exactly when C would have handed back a valid xwait.
+// snapshot and hands the write-back fields (xmin/xmax/speculativeToken) to
+// the caller through the snapshot's dirty_* Cells; every probe overwrites
+// them (C overwrites the plain fields per call the same way).
 fn heap_tuple_satisfies_visibility_read(
     htup: &mut HeapTupleData<'_>,
     snapshot: &SnapshotData<'_>,
@@ -1079,12 +1079,9 @@ fn heap_tuple_satisfies_visibility_read(
         SNAPSHOT_DIRTY => DIRTY_SCRATCH.with(|cx| {
             let mut dirty = SnapshotData::sentinel(cx.mcx(), SNAPSHOT_DIRTY);
             let r = HeapTupleSatisfiesDirty(htup, &mut dirty, buffer)?;
-            if dirty.xmin != InvalidTransactionId
-                || dirty.xmax != InvalidTransactionId
-                || dirty.speculativeToken != 0
-            {
-                unported("SNAPSHOT_DIRTY write-back (in-flight xact wait lane)");
-            }
+            snapshot.dirty_xmin.set(dirty.xmin);
+            snapshot.dirty_xmax.set(dirty.xmax);
+            snapshot.dirty_speculative_token.set(dirty.speculativeToken);
             Ok(r)
         }),
         SNAPSHOT_HISTORIC_MVCC => {

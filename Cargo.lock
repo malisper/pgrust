@@ -4069,6 +4069,7 @@ dependencies = [
  "init_small",
  "ipc_seams",
  "latch_seams",
+ "lmgr",
  "lmgr_proc",
  "lock_seams",
  "lsyscache",
@@ -4906,6 +4907,7 @@ name = "parse_clause"
 version = "0.0.0"
 dependencies = [
  "analyze_seams",
+ "catalog",
  "coerce",
  "datum",
  "elog",
