@@ -310,8 +310,11 @@ fn fmgr_info_pg_proc(function_id: Oid, finfo: &mut FmgrInfo) -> PgResult<()> {
     finfo.fn_nargs = row.pronargs;
     finfo.fn_strict = row.proisstrict;
     finfo.fn_retset = row.proretset;
-    finfo.fn_stats =
-        if row.prolang == SQL_LANGUAGE_ID { ::fmgr::TRACK_FUNC_PL } else { TRACK_FUNC_ALL };
+    // DIVERGENCE: C sets TRACK_FUNC_PL for SQL functions (fmgr.c:252); ALL
+    // keeps execexpr off the pgstat_track_functions slot, whose owner
+    // (pgstat) is unported — same opcodes as C's default track_functions=off,
+    // and SET track_functions is loud on the uninstalled slot.
+    finfo.fn_stats = TRACK_FUNC_ALL;
     finfo.fn_extra = None;
     finfo.fn_expr = None;
     finfo.fn_oid = function_id;
