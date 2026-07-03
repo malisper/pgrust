@@ -182,6 +182,9 @@ pub fn DefineIndex<'mcx>(
         ii_Summarizing: false,
         ii_Concurrent: false,
         ii_BrokenHotChain: false,
+        ii_UniqueOps: [0; INDEX_MAX_KEYS as usize],
+        ii_UniqueProcs: [0; INDEX_MAX_KEYS as usize],
+        ii_UniqueStrats: [0; INDEX_MAX_KEYS as usize],
     };
 
     let mut collationIds = [InvalidOid; INDEX_MAX_KEYS as usize];

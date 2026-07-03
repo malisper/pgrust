@@ -777,6 +777,9 @@ pub fn addRangeTableEntryForRelation<'mcx>(
         ..Default::default()
     };
     let perminfo = addRTEPermissionInfo(mcx, &mut pstate.p_rteperminfos, &mut rte)?;
+    // SAFETY: the perminfo node was created just above; no derived reference exists.
+    unsafe { perminfo.with_mut::<RTEPermissionInfo, _>(|p| p.requiredPerms = ACL_SELECT) }
+        .expect("node built as RTEPermissionInfo");
 
     let rte_node = Node::mk(mcx, rte)?;
     pstate.p_rtable.lappend(mcx, rte_node)?;
