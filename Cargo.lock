@@ -30,6 +30,7 @@ dependencies = [
  "mcx",
  "miscinit",
  "pg_depend",
+ "pg_largeobject",
  "rel_vocab",
  "superuser",
  "table",
@@ -1091,6 +1092,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "be_fsstubs"
+version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "be_fsstubs_seams",
+ "datum",
+ "elog",
+ "guc_tables",
+ "large_object",
+ "mcx",
+ "miscinit",
+ "pg_largeobject",
+ "resowner_seams",
+ "snapmgr",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_storage",
+ "xact",
+]
+
+[[package]]
 name = "be_fsstubs_seams"
 version = "0.0.0"
 dependencies = [
@@ -1439,6 +1462,7 @@ dependencies = [
  "pg_attrdef",
  "pg_constraint",
  "pg_depend",
+ "pg_largeobject",
  "pg_type",
  "rewrite_define_seams",
  "sequence_seams",
@@ -3342,6 +3366,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastpath"
+version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "adt_acl",
+ "datum",
+ "elog",
+ "fmgr_seams",
+ "guc_tables",
+ "lsyscache",
+ "mbutils",
+ "mcx",
+ "miscinit",
+ "postgres_seams",
+ "pqformat",
+ "snapmgr",
+ "stringinfo",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "xact",
+]
+
+[[package]]
 name = "fd"
 version = "0.0.0"
 dependencies = [
@@ -4629,6 +4679,37 @@ dependencies = [
 [[package]]
 name = "keywords"
 version = "0.1.0"
+
+[[package]]
+name = "large_object"
+version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "adt_acl",
+ "catalog_dependency",
+ "catalog_indexing",
+ "datum",
+ "detoast",
+ "elog",
+ "fmgr_seams",
+ "genam",
+ "guc_tables",
+ "heaptuple",
+ "indexam",
+ "mcx",
+ "miscinit",
+ "pg_depend",
+ "pg_largeobject",
+ "snapmgr",
+ "table",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_scan",
+ "types_storage",
+ "types_tuple",
+ "xact",
+]
 
 [[package]]
 name = "latch"
@@ -6772,6 +6853,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_largeobject"
+version = "0.0.0"
+dependencies = [
+ "catalog",
+ "catalog_indexing",
+ "datum",
+ "detoast",
+ "fmgr_seams",
+ "genam",
+ "heaptuple",
+ "mcx",
+ "miscinit",
+ "table",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_scan",
+ "types_snapshot",
+ "types_tuple",
+]
+
+[[package]]
 name = "pg_locale"
 version = "0.0.0"
 dependencies = [
@@ -7440,6 +7543,7 @@ dependencies = [
  "elog",
  "execmain",
  "execmain_seams",
+ "fastpath",
  "fmgr_core",
  "fmgr_seams",
  "gram_core",
@@ -8969,6 +9073,7 @@ dependencies = [
  "auxprocess",
  "backend_startup",
  "backend_status",
+ "be_fsstubs",
  "be_secure",
  "bgwriter",
  "brin_minmax_multi",

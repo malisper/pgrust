@@ -5,7 +5,8 @@ use ::mcx::{Mcx, MemoryContext, PgVec};
 use ::stringinfo::StringInfo;
 use ::types_dest::CommandDest;
 use ::types_error::{
-    PgError, PgResult, ERRCODE_CONNECTION_FAILURE, ERRCODE_PROTOCOL_VIOLATION, ERROR, FATAL,
+    ErrorLocation, PgError, PgResult, ERRCODE_CONNECTION_FAILURE, ERRCODE_PROTOCOL_VIOLATION,
+    ERROR, FATAL, LOG,
 };
 
 use crate::{
@@ -345,10 +346,36 @@ fn dispatch_message<'mcx>(
         }
 
         x if x == pqmsg::FUNCTION_CALL => {
-            panic!(
-                "PostgresMain: fastpath function call ('F') not ported \
-                 (HandleFunctionRequest, tcop/fastpath.c)"
-            );
+            use backend_status_seams::BackendState;
+
+            xact::SetCurrentStatementStartTimestamp();
+
+            backend_status_seams::pgstat_report_activity::call(BackendState::STATE_FASTPATH, None);
+            ps_status_seams::set_ps_display::call("<FASTPATH>");
+
+            simple_query::start_xact_command()?;
+
+            let was_logged = fastpath::HandleFunctionRequest(mcx, input_message)?;
+
+            match simple_query::check_log_duration(was_logged) {
+                (1, msec_str) => {
+                    ereport(LOG)
+                        .errmsg(format!("duration: {msec_str} ms"))
+                        .errhidestmt(true)
+                        .finish(ErrorLocation::new("fastpath.c", 312, "HandleFunctionRequest"))?;
+                }
+                (2, msec_str) => {
+                    ereport(LOG)
+                        .errmsg(format!("duration: {msec_str} ms  fastpath function call"))
+                        .errhidestmt(true)
+                        .finish(ErrorLocation::new("fastpath.c", 316, "HandleFunctionRequest"))?;
+                }
+                _ => {}
+            }
+
+            simple_query::finish_xact_command()?;
+
+            state.send_ready_for_query = true;
         }
 
         x if x == pqmsg::CLOSE => {

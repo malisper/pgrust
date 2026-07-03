@@ -29,6 +29,7 @@ pub fn init_all() {
     twophase::init_seams();
     twophase_config::init_seams();
     aclchk::init_seams();
+    be_fsstubs::init_seams();
     catalog_namespace::init_seams();
     catalog_dependency::init_seams();
     tablecmds::init_seams();
@@ -164,6 +165,7 @@ pub fn init_all() {
     fmgr_core::register_late_builtins(adt_misc::MISC_BUILTINS);
     fmgr_core::register_late_builtins(dbcommands::builtins::DBCOMMANDS_BUILTINS);
     fmgr_core::register_late_builtins(adt_rowtypes::ROWTYPES_BUILTINS);
+    fmgr_core::register_late_builtins(be_fsstubs::fmgr_builtins::FSSTUBS_BUILTINS);
     sql_functions::init_seams();
     plpgsql::init_seams();
     fmgr_core::register_late_builtins(adt_geo::builtins::GEO_BUILTINS);

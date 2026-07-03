@@ -704,6 +704,9 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
             }
         }
         TYPE_RELATION_ID => pg_type::RemoveTypeById(mcx, object.objectId)?,
+        pg_largeobject::LargeObjectRelationId => {
+            pg_largeobject::LargeObjectDrop(mcx, object.objectId)?
+        }
         AttrDefaultRelationId => pg_attrdef::RemoveAttrDefaultById(mcx, object.objectId)?,
         ConstraintRelationId => pg_constraint::RemoveConstraintById(mcx, object.objectId)?,
         TriggerRelationId => trigger::RemoveTriggerById(mcx, object.objectId)?,
