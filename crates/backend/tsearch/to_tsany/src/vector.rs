@@ -18,7 +18,9 @@ pub fn unique_words<'mcx>(mcx: Mcx<'mcx>, prs: &mut ParsedText<'mcx>) -> PgResul
     let mut words = core::mem::replace(&mut prs.words, PgVec::new_in(mcx));
     words.sort_unstable_by(compare_word);
 
-    let mut out: PgVec<'mcx, ParsedWord<'mcx>> = ::mcx::vec_with_capacity_in(mcx, words.len())?;
+    let mut out: PgVec<'mcx, ParsedWord<'mcx>> = PgVec::new_in(mcx);
+    out.try_reserve_exact(words.len())
+        .map_err(|_| mcx.oom(words.len()))?;
     for mut w in words {
         let pos = limitpos(w.pos as u32);
         match out.last_mut() {
@@ -32,7 +34,7 @@ pub fn unique_words<'mcx>(mcx: Mcx<'mcx>, prs: &mut ParsedText<'mcx>) -> PgResul
                 }
             }
             _ => {
-                w.apos = ::mcx::vec_with_capacity_in(mcx, 2)?;
+                w.apos = PgVec::new_in(mcx);
                 w.apos.push(pos);
                 out.push(w);
             }

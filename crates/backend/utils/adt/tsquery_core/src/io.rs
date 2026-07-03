@@ -284,7 +284,8 @@ pub fn collect_values<'mcx>(
     mcx: Mcx<'mcx>,
     q: TsQueryRef<'_>,
 ) -> PgResult<PgVec<'mcx, PgVec<'mcx, u8>>> {
-    let mut vals: PgVec<PgVec<u8>> = vec_with_capacity_in(mcx, q.size())?;
+    let mut vals: PgVec<PgVec<u8>> = PgVec::new_in(mcx);
+    vals.try_reserve_exact(q.size()).map_err(|_| mcx.oom(q.size()))?;
     for i in 0..q.size() {
         if let Item::Val(op) = q.item(i) {
             let mut v = vec_with_capacity_in(mcx, op.length)?;

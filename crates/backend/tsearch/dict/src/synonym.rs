@@ -130,7 +130,7 @@ pub fn dsynonym_lexize<'mcx>(
     let found = &d.syn[idx];
     let mut lexeme = vec_with_capacity_in(mcx, found.output.len())?;
     lexeme.extend_from_slice(&found.output);
-    let mut out = vec_with_capacity_in(mcx, 1)?;
+    let mut out = PgVec::new_in(mcx);
     out.push(TsLexeme { nvariant: 0, flags: found.flags, lexeme });
     Ok(Some(LexizeResult(out)))
 }

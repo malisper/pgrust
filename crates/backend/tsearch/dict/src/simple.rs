@@ -50,7 +50,7 @@ pub fn dsimple_lexize<'mcx>(
         return Ok(Some(LexizeResult(PgVec::new_in(mcx))));
     }
     if d.accept {
-        let mut out = vec_with_capacity_in(mcx, 1)?;
+        let mut out = PgVec::new_in(mcx);
         out.push(TsLexeme { nvariant: 0, flags: 0, lexeme: txt });
         return Ok(Some(LexizeResult(out)));
     }

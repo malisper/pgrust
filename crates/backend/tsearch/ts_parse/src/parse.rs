@@ -32,7 +32,7 @@ pub struct ParsedText<'mcx> {
 impl<'mcx> ParsedText<'mcx> {
     pub fn with_capacity(mcx: Mcx<'mcx>, n: usize) -> PgResult<Self> {
         Ok(ParsedText {
-            words: ::mcx::vec_with_capacity_in(mcx, n)?,
+            words: { let mut v = ::mcx::PgVec::new_in(mcx); v.try_reserve_exact(n).map_err(|_| mcx.oom(n))?; v },
             pos: 0,
         })
     }

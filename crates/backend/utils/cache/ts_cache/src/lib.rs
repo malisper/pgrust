@@ -378,7 +378,8 @@ pub fn lookup_ts_config_cache(cfgId: Oid) -> PgResult<Rc<TSConfigCacheEntry>> {
         maxtokentype = toktype as usize;
     }
     let lenmap = if rows.is_empty() { 0 } else { maxtokentype + 1 };
-    let mut map: PgVec<'static, ListDictionary> = vec_with_capacity_in(state_mcx, lenmap)?;
+    let mut map: PgVec<'static, ListDictionary> = PgVec::new_in(state_mcx);
+    map.try_reserve_exact(lenmap).map_err(|_| state_mcx.oom(lenmap))?;
     for _ in 0..lenmap {
         map.push(ListDictionary { dict_ids: PgVec::new_in(state_mcx) });
     }

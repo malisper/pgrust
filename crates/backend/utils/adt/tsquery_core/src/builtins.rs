@@ -79,7 +79,8 @@ fn join_tsqueries<'mcx>(
     oper: i8,
     distance: u16,
 ) -> PgResult<PgVec<'mcx, u8>> {
-    let mut children: PgVec<QtNode> = vec_with_capacity_in(mcx, 2)?;
+    let mut children: PgVec<QtNode> = PgVec::new_in(mcx);
+    children.try_reserve_exact(2).map_err(|_| mcx.oom(2))?;
     children.push(qt2qtn(mcx, b, 0)?);
     children.push(qt2qtn(mcx, a, 0)?);
     let res = QtNode {
@@ -142,7 +143,8 @@ pub fn fc_tsquery_not(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
     if a.size() == 0 {
         return Ok(image_result(copy_image(mcx, a)?));
     }
-    let mut children: PgVec<QtNode> = vec_with_capacity_in(mcx, 1)?;
+    let mut children: PgVec<QtNode> = PgVec::new_in(mcx);
+    children.try_reserve_exact(1).map_err(|_| mcx.oom(1))?;
     children.push(qt2qtn(mcx, a, 0)?);
     let res = QtNode {
         item: Item::Opr(Operator { oper: OP_NOT, distance: 0, left: 0 }),
