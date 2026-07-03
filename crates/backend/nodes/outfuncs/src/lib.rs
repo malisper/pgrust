@@ -16,8 +16,8 @@ use types_nodes::list::{IntList, NodeList, OidList};
 use types_nodes::parsenodes::{Query, RTEKind, RTEPermissionInfo, RangeTblEntry, SortGroupClause};
 use types_nodes::primnodes::{
     Aggref, Alias, BoolExpr, BoolExprType, CoerceToDomain, CoerceToDomainValue, CoerceViaIO,
-    Const, FromExpr, FuncExpr, JoinExpr, OpExpr, RangeTblRef, RelabelType, SubLink, TargetEntry,
-    Var,
+    Const, FromExpr, FuncExpr, JoinExpr, NullTest, OpExpr, RangeTblRef, RelabelType,
+    ScalarArrayOpExpr, SubLink, TargetEntry, Var,
 };
 use types_nodes::rawnodes::{PartitionBoundSpec, PartitionRangeDatum};
 use types_nodes::{Boolean, Float, Integer, Node, NodeTag};
@@ -71,6 +71,13 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
                 v.typeId, v.typeMod, v.collation
             );
         }
+        NodeTag::T_NullTest => {
+            out_null_test(out, node.as_variant::<NullTest>().expect("NullTest"))?
+        }
+        NodeTag::T_ScalarArrayOpExpr => out_scalar_array_op_expr(
+            out,
+            node.as_variant::<ScalarArrayOpExpr>().expect("ScalarArrayOpExpr"),
+        )?,
         NodeTag::T_PartitionBoundSpec => out_partition_bound_spec(
             out,
             node.as_variant::<PartitionBoundSpec>().expect("PartitionBoundSpec"),
@@ -761,6 +768,31 @@ fn out_sub_link(out: &mut PgString<'_>, s: &SubLink<'_>) -> PgResult<()> {
     out_list(out, &s.operName)?;
     w!(out, " :subselect ");
     out_node(out, s.subselect)?;
+    w!(out, " :location -1}}");
+    Ok(())
+}
+
+fn out_null_test(out: &mut PgString<'_>, n: &NullTest<'_>) -> PgResult<()> {
+    w!(out, "{{NULLTEST :arg ");
+    match n.arg {
+        Some(a) => out_node(out, a)?,
+        None => w!(out, "<>"),
+    }
+    w!(out, " :nulltesttype {} :argisrow ", n.nulltesttype as u32);
+    out_bool(out, n.argisrow);
+    w!(out, " :location -1}}");
+    Ok(())
+}
+
+fn out_scalar_array_op_expr(out: &mut PgString<'_>, s: &ScalarArrayOpExpr<'_>) -> PgResult<()> {
+    w!(
+        out,
+        "{{SCALARARRAYOPEXPR :opno {} :opfuncid {} :hashfuncid {} :negfuncid {} :useOr ",
+        s.opno, s.opfuncid, s.hashfuncid, s.negfuncid
+    );
+    out_bool(out, s.useOr);
+    w!(out, " :inputcollid {} :args ", s.inputcollid);
+    out_list(out, &s.args)?;
     w!(out, " :location -1}}");
     Ok(())
 }
