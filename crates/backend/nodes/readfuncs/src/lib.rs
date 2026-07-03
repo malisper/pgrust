@@ -350,12 +350,22 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"SORTGROUPCLAUSE" => self.read_sort_group_clause(),
             b"AGGREF" => self.read_aggref(),
             b"SETTODEFAULT" => self.read_set_to_default(),
+            b"BOOLEANTEST" => self.read_boolean_test(),
             other => panic!(
                 "parseNodeString (readfuncs.c): {} read arm unported (view SELECT-rule + \
                  DEFAULT/CHECK expr sets only)",
                 String::from_utf8_lossy(other)
             ),
         }
+    }
+
+    fn read_boolean_test(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut bt = Node::build::<types_nodes::primnodes::BooleanTest>(mcx)?;
+        bt.arg = self.read_node("arg")?;
+        bt.booltesttype = bool_test_type(self.read_u32("booltesttype"));
+        bt.location = self.read_location("location");
+        Ok(bt.seal())
     }
 
     fn read_set_to_default(&mut self) -> PgResult<Node<'mcx>> {
@@ -742,6 +752,19 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         }
         self.expect("]");
         Ok(Datum::from_usize(v.leak().as_ptr() as usize))
+    }
+}
+
+fn bool_test_type(v: u32) -> types_nodes::primnodes::BoolTestType {
+    use types_nodes::primnodes::BoolTestType::*;
+    match v {
+        0 => IS_TRUE,
+        1 => IS_NOT_TRUE,
+        2 => IS_FALSE,
+        3 => IS_NOT_FALSE,
+        4 => IS_UNKNOWN,
+        5 => IS_NOT_UNKNOWN,
+        other => panic!("readfuncs.c: bad BoolTestType {other}"),
     }
 }
 

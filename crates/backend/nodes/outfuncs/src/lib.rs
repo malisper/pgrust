@@ -56,6 +56,14 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
         NodeTag::T_CoerceViaIO => {
             out_coerce_via_io(out, node.as_variant::<CoerceViaIO>().expect("CoerceViaIO"))?
         }
+        NodeTag::T_BooleanTest => {
+            let bt = node
+                .as_variant::<types_nodes::primnodes::BooleanTest>()
+                .expect("BooleanTest");
+            w!(out, "{{BOOLEANTEST :arg ");
+            out_opt_node(out, bt.arg)?;
+            w!(out, " :booltesttype {} :location -1}}", bt.booltesttype as u32);
+        }
         NodeTag::T_SetToDefault => {
             let d = node
                 .as_variant::<types_nodes::primnodes::SetToDefault>()
@@ -194,6 +202,15 @@ fn out_datum(out: &mut PgString<'_>, value: Datum, typlen: i32, typbyval: bool) 
         -1 => {
             // SAFETY: byref const datum points at a live in-line varlena.
             unsafe { varlena_size(p) }
+        }
+        -2 => {
+            // cstring (unknown-type Consts): NUL included, as C's strlen+1.
+            let mut n = 0usize;
+            // SAFETY: byref cstring datum points at a live NUL-terminated string.
+            while unsafe { *p.add(n) } != 0 {
+                n += 1;
+            }
+            n + 1
         }
         other => panic!("_outDatum (outfuncs.c): typlen {other} unported"),
     };
