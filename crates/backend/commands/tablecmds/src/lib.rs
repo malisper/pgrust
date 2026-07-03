@@ -226,7 +226,7 @@ pub fn DefineRelation<'mcx>(
             mcx,
             &stmt.tableElts,
             &inherit_oids,
-            relpersistence,
+            relpersistence as u8,
         )?)
     } else {
         None
