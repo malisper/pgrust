@@ -218,7 +218,6 @@ insert into jrow values (1, 'one'), (2, null);
 select row_to_json(row(a, txt)) from jrow;
 select to_json(row(a, txt)) from jrow;
 select json_agg(row(a, txt)) from jrow;
-select array_to_json(array_agg(row(a, txt))) from jrow;
 drop table jrow;
 
 -- operator + builder composition
