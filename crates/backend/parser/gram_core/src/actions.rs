@@ -1,7 +1,7 @@
 use types_core::catalog::RELPERSISTENCE_PERMANENT;
 use types_error::PgResult;
 use types_nodes::parsenodes::{
-    CTEMaterialize, ClosePortalStmt, CommentStmt, CommonTableExpr, CopyStmt, CreateSchemaStmt,
+    AlterTableCmd, AlterTableStmt, AlterTableType, CTEMaterialize, ClosePortalStmt, CommentStmt, CommonTableExpr, CopyStmt, CreateSchemaStmt,
     DeallocateStmt, DeclareCursorStmt, DefElem, DefElemAction, DiscardMode, DiscardStmt,
     DropBehavior, DropStmt, ExecuteStmt, FetchStmt, ListenStmt, NotifyStmt, ObjectType,
     PrepareStmt, TransactionStmt, TransactionStmtKind, TruncateStmt, UnlistenStmt, VacuumRelation,
@@ -1253,6 +1253,38 @@ impl<'mcx> Parser<'mcx> {
                         },
                     )?
                 }));
+            }
+            // b_expr: the a_expr forms without boolean/IS tails (DISTINCT and
+            // IS DOCUMENT arms 2108-2111 stay unimplemented-rule loud).
+            2091 => {
+                let arg = view.v(1).node();
+                let t = view.v(3).node().expect("Typename");
+                *yyval = YYSTYPE::Node(Some(make_type_cast(mcx, arg, t, view.l(2))?));
+            }
+            2092 => {
+                let r = view.v(2).node();
+                *yyval = self.simple_a_expr("+", None, r, view.l(1))?;
+            }
+            2093 => {
+                let n = view.v(2).node().expect("b_expr");
+                *yyval = self.do_negate(n, view.l(1))?;
+            }
+            2094..=2105 => {
+                let op = MATH_OPS[rule - 2094];
+                let l = view.v(1).node();
+                let r = view.v(3).node();
+                *yyval = self.simple_a_expr(op, l, r, view.l(2))?;
+            }
+            2106 => {
+                let name = view.v(2).list();
+                let l = view.v(1).node();
+                let r = view.v(3).node();
+                *yyval = YYSTYPE::Node(Some(make_a_expr(mcx, name, l, r, view.l(2))?));
+            }
+            2107 => {
+                let name = view.v(1).list();
+                let r = view.v(2).node();
+                *yyval = YYSTYPE::Node(Some(make_a_expr(mcx, name, None, r, view.l(1))?));
             }
             2039 => {
                 let name = view.v(2).list();
@@ -2557,6 +2589,62 @@ impl<'mcx> Parser<'mcx> {
             // opt_drop_behavior: CASCADE | RESTRICT | /*EMPTY*/.
             143 => *yyval = YYSTYPE::Ival(DropBehavior::DROP_CASCADE as i32),
             144 | 145 => *yyval = YYSTYPE::Ival(DropBehavior::DROP_RESTRICT as i32),
+            // AlterTableStmt: ALTER TABLE [IF_P EXISTS] relation_expr
+            // alter_table_cmds (partition/tablespace forms 277-279 stay loud).
+            275 | 276 => {
+                let (rv, cmds) = if rule == 275 {
+                    (view.v(3), view.v(4))
+                } else {
+                    (view.v(5), view.v(6))
+                };
+                let mut n = Node::build::<AlterTableStmt>(mcx)?;
+                n.relation = rv.node().expect("relation_expr").as_variant::<RangeVar>();
+                n.cmds = cmds.list();
+                n.objtype = ObjectType::OBJECT_TABLE;
+                n.missing_ok = rule == 276;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // alter_table_cmds: alter_table_cmd | alter_table_cmds ',' alter_table_cmd
+            296 => {
+                let el = view.v(1).node().expect("alter_table_cmd");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            297 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("alter_table_cmd"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // alter_table_cmd: ADD_P [COLUMN] [IF_P NOT EXISTS] columnDef
+            // (other alter_table_cmd forms stay unimplemented-rule loud).
+            302 | 303 | 304 | 305 => {
+                let def = match rule {
+                    302 => view.v(2),
+                    303 => view.v(5),
+                    304 => view.v(3),
+                    _ => view.v(6),
+                };
+                let mut n = Node::build::<AlterTableCmd>(mcx)?;
+                n.subtype = AlterTableType::AT_AddColumn;
+                n.def = def.node();
+                n.missing_ok = rule == 303 || rule == 305;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // alter_table_cmd: DROP opt_column [IF_P EXISTS] ColId opt_drop_behavior
+            322 => {
+                let mut n = Node::build::<AlterTableCmd>(mcx)?;
+                n.subtype = AlterTableType::AT_DropColumn;
+                n.name = Some(view.v(5).str_val());
+                n.behavior = drop_behavior(view.v(6).ival());
+                n.missing_ok = true;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            323 => {
+                let mut n = Node::build::<AlterTableCmd>(mcx)?;
+                n.subtype = AlterTableType::AT_DropColumn;
+                n.name = Some(view.v(3).str_val());
+                n.behavior = drop_behavior(view.v(4).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // DropStmt: DROP {object_type_any_name any_name_list |
             // drop_type_name name_list} [IF EXISTS] opt_drop_behavior
             // (TYPE/DOMAIN/INDEX CONCURRENTLY/ON-name forms 922-929 stay loud).

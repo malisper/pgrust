@@ -5,8 +5,8 @@
 
 pub mod create;
 pub mod drop;
-pub use create::{heap_create, heap_create_with_catalog, HeapCreateParams, InsertPgClassTuple};
-pub use drop::{heap_drop_with_catalog, CheckTableNotInUse, DeleteAttributeTuples, DeleteRelationTuple, RemoveStatistics};
+pub use create::{heap_create, heap_create_with_catalog, insert_pg_attribute_tuple, CheckAttributeNamesTypes, HeapCreateParams, InsertPgClassTuple, StoreAttrMissingVal};
+pub use drop::{heap_drop_with_catalog, CheckTableNotInUse, DeleteAttributeTuples, DeleteRelationTuple, RemoveAttributeById, RemoveStatistics};
 
 use types_core::catalog::{CIDOID, OIDOID, TIDOID, XIDOID};
 use types_core::{AttrNumber, InvalidOid, NAMEDATALEN};

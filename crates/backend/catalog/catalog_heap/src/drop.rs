@@ -17,7 +17,20 @@ const StatisticRelidAttnumInhIndexId: Oid = 2696;
 const AttributeRelidNumIndexId: Oid = 2659;
 const Anum_pg_inherits_inhrelid: usize = 1;
 const Anum_pg_statistic_starelid: usize = 1;
+const Anum_pg_statistic_staattnum: usize = 2;
 const Anum_pg_attribute_attrelid: usize = 1;
+const Anum_pg_attribute_attname: usize = 2;
+const Anum_pg_attribute_atttypid: usize = 3;
+const Anum_pg_attribute_attnum: usize = 5;
+const Anum_pg_attribute_attnotnull: usize = 12;
+const Anum_pg_attribute_atthasmissing: usize = 14;
+const Anum_pg_attribute_attgenerated: usize = 16;
+const Anum_pg_attribute_attisdropped: usize = 17;
+const Anum_pg_attribute_attstattarget: usize = 21;
+const Anum_pg_attribute_attacl: usize = 22;
+const Anum_pg_attribute_attoptions: usize = 23;
+const Anum_pg_attribute_attfdwoptions: usize = 24;
+const Anum_pg_attribute_attmissingval: usize = 25;
 const Anum_pg_class_oid: usize = 1;
 
 #[cold]
@@ -34,6 +47,17 @@ pub(crate) fn oid_scankey(attno: usize, oid: Oid) -> ScanKeyData {
     key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
         .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
     key.sk_argument = Datum::from_oid(oid);
+    key
+}
+
+pub(crate) fn int2_scankey(attno: usize, v: i16) -> ScanKeyData {
+    let mut key = ScanKeyData::empty();
+    key.sk_attno = attno as AttrNumber;
+    key.sk_strategy = BTEqualStrategyNumber;
+    key.sk_collation = 0;
+    key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_INT2EQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(F_INT2EQ) failed: {e:?}"));
+    key.sk_argument = Datum::from_i16(v);
     key
 }
 
@@ -138,7 +162,8 @@ pub fn RemoveStatistics<'mcx>(mcx: Mcx<'mcx>, relid: Oid, attnum: AttrNumber) ->
     let nkeys = if attnum == 0 {
         1
     } else {
-        unported("RemoveStatistics: per-attribute deletion (F_INT2EQ key)");
+        keys[1] = int2_scankey(Anum_pg_statistic_staattnum, attnum);
+        2
     };
     let mut scan = genam::systable_beginscan(
         mcx,
@@ -167,6 +192,70 @@ pub fn DeleteAttributeTuples<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
     }
     genam::systable_endscan(mcx, scan)?;
     attrel.close(RowExclusiveLock)
+}
+
+// RemoveAttributeById: mark dropped in place, never physically delete —
+// the attribute row keeps attlen/attalign so stored tuples still deform.
+pub fn RemoveAttributeById<'mcx>(mcx: Mcx<'mcx>, relid: Oid, attnum: AttrNumber) -> PgResult<()> {
+    if attnum <= 0 {
+        unported("RemoveAttributeById: system attributes (never dropped)");
+    }
+    let rel = table::table_open(mcx, relid, AccessExclusiveLock)?;
+    let attr_rel = table::table_open(mcx, ATTRIBUTE_RELATION_ID, RowExclusiveLock)?;
+
+    let keys = [
+        oid_scankey(Anum_pg_attribute_attrelid, relid),
+        int2_scankey(Anum_pg_attribute_attnum, attnum),
+    ];
+    let mut scan =
+        genam::systable_beginscan(mcx, &attr_rel, AttributeRelidNumIndexId, true, None, &keys)?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?.unwrap_or_else(|| {
+        panic!("cache lookup failed for attribute {attnum} of relation {relid}")
+    });
+
+    let natts = attr_rel.descr().natts as usize;
+    let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut isnull: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut replace: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    values.resize(natts, Datum::null());
+    isnull.resize(natts, false);
+    replace.resize(natts, false);
+
+    let mut newname = types_tuple::NameData::default();
+    let name = format!("........pg.dropped.{attnum}........");
+    newname.namestrcpy(&name);
+
+    let mut set = |anum: usize, v: Datum| {
+        values[anum - 1] = v;
+        replace[anum - 1] = true;
+    };
+    set(Anum_pg_attribute_attname, Datum::from_usize(newname.data.as_ptr() as usize));
+    set(Anum_pg_attribute_atttypid, Datum::from_oid(types_core::InvalidOid));
+    set(Anum_pg_attribute_attnotnull, Datum::from_bool(false));
+    set(Anum_pg_attribute_attgenerated, Datum::from_char(0));
+    set(Anum_pg_attribute_attisdropped, Datum::from_bool(true));
+    set(Anum_pg_attribute_atthasmissing, Datum::from_bool(false));
+    for anum in [
+        Anum_pg_attribute_attmissingval,
+        Anum_pg_attribute_attstattarget,
+        Anum_pg_attribute_attacl,
+        Anum_pg_attribute_attoptions,
+        Anum_pg_attribute_attfdwoptions,
+    ] {
+        isnull[anum - 1] = true;
+        replace[anum - 1] = true;
+    }
+
+    let mut newtup =
+        heaptuple::heap_modify_tuple(mcx, tup, attr_rel.descr(), &values, &isnull, &replace)?;
+    let otid = tup.t_self;
+    genam::systable_endscan(mcx, scan)?;
+    catalog_indexing::CatalogTupleUpdate(mcx, &attr_rel, &otid, &mut newtup)?;
+
+    attr_rel.close(RowExclusiveLock)?;
+    // The pg_attribute update fired the owning relation's relcache inval.
+    rel.close(NoLock)?;
+    RemoveStatistics(mcx, relid, attnum)
 }
 
 // C fetches the row via SearchSysCache1(RELOID) and deletes by t_self; the

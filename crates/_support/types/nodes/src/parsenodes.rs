@@ -631,6 +631,99 @@ pub struct CommentStmt<'mcx> {
     pub comment: Option<&'mcx str>,
 }
 
+// C AlterTableType (parsenodes.h); discriminants are outfuncs-visible.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum AlterTableType {
+    #[default]
+    AT_AddColumn = 0,
+    AT_AddColumnToView,
+    AT_ColumnDefault,
+    AT_CookedColumnDefault,
+    AT_DropNotNull,
+    AT_SetNotNull,
+    AT_SetExpression,
+    AT_DropExpression,
+    AT_SetStatistics,
+    AT_SetOptions,
+    AT_ResetOptions,
+    AT_SetStorage,
+    AT_SetCompression,
+    AT_DropColumn,
+    AT_AddIndex,
+    AT_ReAddIndex,
+    AT_AddConstraint,
+    AT_ReAddConstraint,
+    AT_ReAddDomainConstraint,
+    AT_AlterConstraint,
+    AT_ValidateConstraint,
+    AT_AddIndexConstraint,
+    AT_DropConstraint,
+    AT_ReAddComment,
+    AT_AlterColumnType,
+    AT_AlterColumnGenericOptions,
+    AT_ChangeOwner,
+    AT_ClusterOn,
+    AT_DropCluster,
+    AT_SetLogged,
+    AT_SetUnLogged,
+    AT_DropOids,
+    AT_SetAccessMethod,
+    AT_SetTableSpace,
+    AT_SetRelOptions,
+    AT_ResetRelOptions,
+    AT_ReplaceRelOptions,
+    AT_EnableTrig,
+    AT_EnableAlwaysTrig,
+    AT_EnableReplicaTrig,
+    AT_DisableTrig,
+    AT_EnableTrigAll,
+    AT_DisableTrigAll,
+    AT_EnableTrigUser,
+    AT_DisableTrigUser,
+    AT_EnableRule,
+    AT_EnableAlwaysRule,
+    AT_EnableReplicaRule,
+    AT_DisableRule,
+    AT_AddInherit,
+    AT_DropInherit,
+    AT_AddOf,
+    AT_DropOf,
+    AT_ReplicaIdentity,
+    AT_EnableRowSecurity,
+    AT_DisableRowSecurity,
+    AT_ForceRowSecurity,
+    AT_NoForceRowSecurity,
+    AT_GenericOptions,
+    AT_AttachPartition,
+    AT_DetachPartition,
+    AT_DetachPartitionFinalize,
+    AT_AddIdentity,
+    AT_SetIdentity,
+    AT_DropIdentity,
+    AT_ReAddStatistics,
+}
+
+#[derive(Default)]
+pub struct AlterTableCmd<'mcx> {
+    pub subtype: AlterTableType,
+    pub name: Option<&'mcx str>,
+    pub num: i16,
+    pub newowner: Option<Node<'mcx>>,
+    pub def: Option<Node<'mcx>>,
+    pub behavior: DropBehavior,
+    pub missing_ok: bool,
+    pub recurse: bool,
+}
+
+#[derive(Default)]
+pub struct AlterTableStmt<'mcx> {
+    pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub cmds: NodeList<'mcx>,
+    pub objtype: ObjectType,
+    pub missing_ok: bool,
+}
+
 // C: isall is redundant with name == NULL but kept for query jumbling.
 pub struct DeallocateStmt<'mcx> {
     pub name: Option<&'mcx str>,
@@ -722,6 +815,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CreateSchemaStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for CommentStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CommentStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterTableStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterTableStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterTableCmd<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterTableCmd;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for WithClause<'mcx> {
     const TAG: NodeTag = NodeTag::T_WithClause;

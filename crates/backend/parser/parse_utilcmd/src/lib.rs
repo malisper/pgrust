@@ -239,6 +239,48 @@ pub fn transformCreateStmt<'mcx>(
     NodeList::make1(mcx, stmt_node)
 }
 
+// transformAlterTableStmt's per-subcommand slice (ATParseTransformCmd's
+// working half): reuses the CREATE-lane transformColumnDefinition; any
+// queued constraint subcommand (CHECK / NOT NULL / index) is an unported
+// ALTER lane. The subcommand is transformed in place (C rebuilds an equal
+// newcmds list).
+pub fn transformAlterTableCmd<'mcx>(
+    mcx: Mcx<'mcx>,
+    relname: &str,
+    cnode: Node<'mcx>,
+) -> PgResult<()> {
+    use types_nodes::parsenodes::{AlterTableCmd, AlterTableType};
+    let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
+    let mut ckconstraints = NodeList::nil();
+    let mut nnconstraints = NodeList::nil();
+    match cmd.subtype {
+        AlterTableType::AT_AddColumn => {
+            let defnode = cmd.def.expect("AT_AddColumn ColumnDef");
+            let cd = defnode.as_variant::<ColumnDef>().expect("ColumnDef");
+            transformColumnDefinition(
+                mcx,
+                defnode,
+                cd,
+                relname,
+                &mut ckconstraints,
+                &mut nnconstraints,
+            )?;
+            // SAFETY: parse tree is analyze-owned; no derived refs live.
+            unsafe {
+                defnode
+                    .with_mut::<ColumnDef, _>(|c| c.constraints = NodeList::nil())
+                    .expect("ColumnDef");
+            }
+        }
+        AlterTableType::AT_DropColumn => {}
+        other => unported(&format!("transformAlterTableStmt {other:?} arm")),
+    }
+    if !ckconstraints.is_nil() || !nnconstraints.is_nil() {
+        unported("ALTER TABLE ADD COLUMN with CHECK/NOT NULL (AT_AddConstraint lane)");
+    }
+    Ok(())
+}
+
 #[cold]
 #[inline(never)]
 fn multiple_defaults(colname: &str, relname: &str) -> Box<PgError> {

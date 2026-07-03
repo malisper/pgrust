@@ -1,6 +1,6 @@
-//! pg_attrdef.c, StoreAttrDefault lane. Dependency recording
-//! (recordDependencyOn/recordDependencyOnSingleRelExpr) is unported: DROP of a
-//! defaulted column/table leaves the pg_attrdef row behind (pg_depend unit).
+//! pg_attrdef.c, StoreAttrDefault/RemoveAttrDefaultById lane.
+//! recordDependencyOnSingleRelExpr is sliced: defaults whose expressions
+//! reference non-pinned objects are loud.
 
 #![allow(non_snake_case, non_upper_case_globals)]
 
@@ -98,7 +98,119 @@ pub fn StoreAttrDefault<'mcx>(
     catalog_indexing::CatalogTupleUpdate(mcx, &attrrel, &otid, &mut newtup)?;
     attrrel.close(RowExclusiveLock)?;
 
+    // attgenerated is '\0' in every ported lane (identity/generated loud
+    // upstream), so the default depends AUTO on the column.
+    let defobject = pg_depend::ObjectAddress::set(ATTR_DEFAULT_RELATION_ID, attrdef_oid);
+    let colobject =
+        pg_depend::ObjectAddress::sub_set(types_core::RELATION_RELATION_ID, rel.rd_id, attnum as i32);
+    pg_depend::recordDependencyOn(mcx, &defobject, &colobject, pg_depend::DependencyType::Auto)?;
+    assert_only_pinned_expr_refs(expr)?;
+
     Ok(attrdef_oid)
+}
+
+// recordDependencyOnSingleRelExpr slice: pinned references record nothing, so
+// the walk only needs to prove every referenced object is pinned.
+fn assert_only_pinned_expr_refs<'mcx>(expr: Node<'mcx>) -> PgResult<()> {
+    struct W;
+    impl<'mcx> nodes_core::NodeWalker<'mcx> for W {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            use types_nodes::NodeTag::*;
+            const TYPE_CLASS: Oid = types_core::TYPE_RELATION_ID;
+            const PROC_CLASS: Oid = 1255;
+            const OPER_CLASS: Oid = 2617;
+            const COLL_CLASS: Oid = 3456;
+            let pinned = |class: Oid, oid: Oid| oid == 0 || catalog::IsPinnedObject(class, oid);
+            let ok = match node.node_tag() {
+                T_Const => {
+                    let c = node.as_const().expect("Const");
+                    pinned(TYPE_CLASS, c.consttype) && pinned(COLL_CLASS, c.constcollid)
+                }
+                T_FuncExpr => {
+                    let f = node.as_func_expr().expect("FuncExpr");
+                    pinned(PROC_CLASS, f.funcid) && pinned(TYPE_CLASS, f.funcresulttype)
+                }
+                T_OpExpr => {
+                    let o = node.as_op_expr().expect("OpExpr");
+                    pinned(OPER_CLASS, o.opno) && pinned(TYPE_CLASS, o.opresulttype)
+                }
+                T_RelabelType | T_CoerceViaIO | T_BoolExpr | T_CaseExpr | T_CaseWhen
+                | T_NullTest | T_CoalesceExpr | T_MinMaxExpr | T_List => true,
+                other => panic!(
+                    "unported: recordDependencyOnSingleRelExpr over {other:?} default expression"
+                ),
+            };
+            if !ok {
+                panic!(
+                    "unported: recordDependencyOnSingleRelExpr non-pinned reference in \
+                     default expression"
+                );
+            }
+            nodes_core::expression_tree_walker(node, self)
+        }
+    }
+    nodes_core::NodeWalker::visit(&mut W, expr)?;
+    Ok(())
+}
+
+pub fn RemoveAttrDefaultById<'mcx>(mcx: Mcx<'mcx>, attrdef_id: Oid) -> PgResult<()> {
+    let adrel = table::table_open(mcx, ATTR_DEFAULT_RELATION_ID, RowExclusiveLock)?;
+    let keys = [eq_key(Anum_pg_attrdef_oid, F_OIDEQ, Datum::from_oid(attrdef_id))];
+    let mut scan =
+        genam::systable_beginscan(mcx, &adrel, ATTR_DEFAULT_OID_INDEX_ID, true, None, &keys)?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("could not find tuple for attrdef {attrdef_id}"));
+    let desc = adrel.descr();
+    let get = |anum: i32| {
+        let mut isnull = false;
+        // SAFETY: fixed NOT NULL pg_attrdef columns under its descriptor.
+        let d = unsafe { types_tuple::heap_getattr(tup, anum, desc, &mut isnull) };
+        debug_assert!(!isnull);
+        d
+    };
+    let myrelid = get(Anum_pg_attrdef_adrelid as i32).as_oid();
+    let myattnum = get(Anum_pg_attrdef_adnum as i32).as_i16();
+
+    let myrel = table::table_open(mcx, myrelid, types_rel::AccessExclusiveLock)?;
+
+    let tid = tup.t_self;
+    catalog_indexing::CatalogTupleDelete(&adrel, &tid)?;
+    genam::systable_endscan(mcx, scan)?;
+    adrel.close(RowExclusiveLock)?;
+
+    let attrrel = table::table_open(mcx, ATTRIBUTE_RELATION_ID, RowExclusiveLock)?;
+    let keys = [
+        eq_key(Anum_pg_attribute_attrelid, F_OIDEQ, Datum::from_oid(myrelid)),
+        eq_key(Anum_pg_attribute_attnum, F_INT2EQ, Datum::from_i16(myattnum)),
+    ];
+    let mut scan =
+        genam::systable_beginscan(mcx, &attrrel, AttributeRelidNumIndexId, true, None, &keys)?;
+    let atttup = match genam::systable_getnext(mcx, &mut scan)? {
+        Some(t) => t,
+        None => return Err(attr_lookup_failed(myattnum, myrelid)),
+    };
+    let natts = attrrel.descr().natts as usize;
+    let mut repl_values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut repl_isnull: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut repl: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    repl_values.resize(natts, Datum::null());
+    repl_isnull.resize(natts, false);
+    repl.resize(natts, false);
+    repl_values[(Anum_pg_attribute_atthasdef - 1) as usize] = Datum::from_bool(false);
+    repl[(Anum_pg_attribute_atthasdef - 1) as usize] = true;
+    let mut newtup = heaptuple::heap_modify_tuple(
+        mcx,
+        atttup,
+        attrrel.descr(),
+        &repl_values,
+        &repl_isnull,
+        &repl,
+    )?;
+    let otid = atttup.t_self;
+    genam::systable_endscan(mcx, scan)?;
+    catalog_indexing::CatalogTupleUpdate(mcx, &attrrel, &otid, &mut newtup)?;
+    attrrel.close(RowExclusiveLock)?;
+    myrel.close(types_rel::NoLock)
 }
 
 // Aligned with C's ATTNUM cache-lookup elog.

@@ -598,7 +598,11 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
                     flags & PERFORM_DELETION_CONCURRENTLY != 0,
                 )?;
             } else if object.objectSubId != 0 {
-                unported("doDeletion: RemoveAttributeById (DROP COLUMN lane)");
+                catalog_heap::RemoveAttributeById(
+                    mcx,
+                    object.objectId,
+                    object.objectSubId as types_core::AttrNumber,
+                )?;
             } else if matches!(relKind, RELKIND_RELATION | RELKIND_TOASTVALUE) {
                 catalog_heap::heap_drop_with_catalog(mcx, object.objectId)?;
             } else {
@@ -606,9 +610,7 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
             }
         }
         TYPE_RELATION_ID => pg_type::RemoveTypeById(mcx, object.objectId)?,
-        AttrDefaultRelationId => {
-            unported("doDeletion: RemoveAttrDefaultById (pg_attrdef.c)");
-        }
+        AttrDefaultRelationId => pg_attrdef::RemoveAttrDefaultById(mcx, object.objectId)?,
         ConstraintRelationId => {
             unported("doDeletion: RemoveConstraintById (pg_constraint.c)");
         }

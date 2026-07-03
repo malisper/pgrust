@@ -485,6 +485,37 @@ fn dispatch_switch<'mcx>(
             )?;
         }
 
+        T_AlterTableStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::AlterTableStmt>()
+                .expect("AlterTableStmt");
+            // Retention contract as unify_stmt_lifetime: nothing derived from
+            // the statement arena escapes the utility call.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::AlterTableStmt<'_>,
+                    &types_nodes::parsenodes::AlterTableStmt<'mcx>,
+                >(stmt)
+            };
+            // DETACH CONCURRENTLY transaction-block fence: unported subtypes
+            // are loud inside AlterTableGetLockLevel.
+            let lockmode = tablecmds::AlterTableGetLockLevel(&stmt.cmds);
+            let relid = tablecmds::AlterTableLookupRelation(mcx, stmt, lockmode)?;
+            if relid != types_core::InvalidOid {
+                // Event triggers absent by design (EventTriggerAlterTable*).
+                tablecmds::AlterTable(mcx, relid, lockmode, stmt, source_text)?;
+            } else {
+                elog_seams::ereport_msg::call(
+                    types_error::NOTICE,
+                    format!(
+                        "relation \"{}\" does not exist, skipping",
+                        stmt.relation.and_then(|r| r.relname).unwrap_or("")
+                    ),
+                    None,
+                )?;
+            }
+        }
+
         // Everything else — the GRANT/DROP/RENAME/ALTER.../COMMENT/SECURITY
         // LABEL fast paths and the event-trigger-fenced DDL fan-out.
         T_CreateStmt => {
