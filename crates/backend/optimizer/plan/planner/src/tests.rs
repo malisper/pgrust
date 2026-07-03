@@ -830,14 +830,14 @@ fn guc_boot_values_match_the_settings_tables() {
 
 #[test]
 #[should_panic(expected = "M2")]
-fn from_relation_panics_loudly() {
+fn from_cte_rte_panics_loudly() {
     let cx = cx();
     let mcx = cx.mcx();
     let mut parse = select_1_query(mcx);
     let mut rte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
-    rte.rtekind = RTEKind::RTE_RELATION;
+    // Relations plan for real since the M2 landing; CTE RTEs are still loud.
+    rte.rtekind = RTEKind::RTE_CTE;
     rte.relid = 16384;
-    rte.inh = true;
     parse.rtable = NodeList::make1(mcx, rte.seal()).unwrap();
     let rtr = Node::mk_range_tbl_ref(mcx, 1).unwrap();
     let jointree = alloc_leak_in(

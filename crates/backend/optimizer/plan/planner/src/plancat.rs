@@ -294,8 +294,15 @@ pub fn restriction_selectivity<'mcx>(
     if oprrest == 0 {
         return Ok(0.5);
     }
+    const F_SCALARLTSEL: Oid = 103;
+    const F_SCALARGTSEL: Oid = 104;
+    const F_SCALARLESEL: Oid = 336;
+    const F_SCALARGESEL: Oid = 337;
     let result = match oprrest {
         F_EQSEL => crate::selfuncs::eqsel(run, operatorid, args, varrelid, inputcollid)?,
+        F_SCALARLTSEL | F_SCALARGTSEL | F_SCALARLESEL | F_SCALARGESEL => {
+            crate::selfuncs::scalarineqsel_wrapper(run, args, varrelid)?
+        }
         other => panic!(
             "restriction_selectivity (plancat.c): oprrest {other}; M2 selfuncs lane"
         ),

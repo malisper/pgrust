@@ -1,6 +1,6 @@
 // explain.c / explain_state.c / explain_format.c, M1 lane: text format,
-// costs on/off, VERBOSE tlist, Result/SeqScan nodes; ANALYZE, non-text
-// formats, buffers/wal/memory/settings and ruleutils deparse are loud.
+// costs on/off, VERBOSE tlist, ANALYZE/BUFFERS over the ported node set;
+// non-text formats, wal/memory/settings and ruleutils deparse are loud.
 #![allow(non_snake_case)]
 
 use std::rc::Rc;
@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use mcx::Mcx;
 use tcop_dest::DestReceiver;
+use types_core::instrument::{BufferUsage, INSTRUMENT_BUFFERS, INSTRUMENT_ROWS, INSTRUMENT_TIMER};
 use types_core::{Oid, TEXTOID};
 use types_error::PgResult;
 use types_nodes::nodes_enums::CmdType;
@@ -176,20 +177,20 @@ pub fn standard_ExplainOneQuery<'mcx>(
     if es.memory {
         panic!(
             "standard_ExplainOneQuery (explain.c): MEMORY needs \
-             MemoryContextMemConsumed accounting (instrument lane)"
+             MemoryContextMemConsumed accounting (mcxt lane)"
         );
     }
-    if es.buffers {
-        panic!(
-            "standard_ExplainOneQuery (explain.c): BUFFERS needs pgBufferUsage \
-             accounting (instrument lane)"
-        );
-    }
+    let bufusage_start = if es.buffers { Some(instrument::pg_buffer_usage()) } else { None };
     let planstart = Instant::now();
     let plan = postgres::simple_query::pg_plan_query(mcx, query, query_string, cursor_options, params)?
         .expect("planner will not cope with utility statements");
     let planduration = planstart.elapsed();
-    ExplainOnePlan(mcx, plan, es, query_string, params, query_env, planduration)
+    let bufusage = bufusage_start.map(|start| {
+        let mut b = BufferUsage::default();
+        instrument::buffer_usage_accum_diff(&mut b, &instrument::pg_buffer_usage(), &start);
+        b
+    });
+    ExplainOnePlan(mcx, plan, es, query_string, params, query_env, planduration, bufusage.as_ref())
 }
 
 // "into" (CreateTableAsStmt) callers are loud in the CTAS arm.
@@ -239,12 +240,31 @@ pub fn ExplainOnePlan<'mcx>(
     params: ParamListHandle,
     query_env: QueryEnvHandle,
     planduration: std::time::Duration,
+    bufusage: Option<&BufferUsage>,
 ) -> PgResult<()> {
     debug_assert!(plan.commandType != CmdType::CMD_UTILITY);
-    if es.analyze {
-        panic!("ExplainOnePlan (explain.c): ANALYZE needs the instrument unit (instrument lane)");
-    }
     debug_assert_eq!(es.serialize, EXPLAIN_SERIALIZE_NONE);
+
+    let mut instrument_option = 0;
+    if es.analyze && es.timing {
+        instrument_option |= INSTRUMENT_TIMER;
+    } else if es.analyze {
+        instrument_option |= INSTRUMENT_ROWS;
+    }
+    if es.buffers {
+        instrument_option |= INSTRUMENT_BUFFERS;
+    }
+    if es.wal {
+        panic!(
+            "ExplainOnePlan (explain.c): WAL needs pgWalUsage counters + \
+             show_wal_usage (xloginsert lane)"
+        );
+    }
+
+    // C: statement-level timing is always collected for SUMMARY, even with
+    // node-level TIMING OFF.
+    let mut starttime = instrument::instr_time_current();
+    let mut totaltime = 0.0f64;
 
     snapmgr::PushCopiedSnapshot(&snapmgr::GetActiveSnapshot())?;
     snapmgr::UpdateActiveSnapshotCommandId()?;
@@ -259,20 +279,49 @@ pub fn ExplainOnePlan<'mcx>(
         types_dest::CommandDest::None,
         params,
         query_env,
-        0,
+        instrument_option,
     )?;
-    let mut eflags = EXEC_FLAG_EXPLAIN_ONLY;
+    let mut eflags = if es.analyze { 0 } else { EXEC_FLAG_EXPLAIN_ONLY };
     if es.generic {
         eflags |= EXEC_FLAG_EXPLAIN_GENERIC;
     }
     execmain_seams::executor_start::call(qd, eflags)?;
 
+    if es.analyze {
+        // CTAS WITH NO DATA's NoMovement arm is loud upstream (no CTAS lane).
+        let mut dest = tcop_dest::NONE_RECEIVER;
+        execmain_seams::executor_run::call(
+            qd,
+            types_scan::sdir::ScanDirection::ForwardScanDirection,
+            0,
+            &mut dest,
+        )?;
+        execmain_seams::executor_finish::call(qd)?;
+        totaltime += elapsed_time(&starttime);
+    }
+
     ExplainOpenGroup("Query", None, true, es);
+    es.qd = qd;
     ExplainPrintPlan(mcx, es, pstmt)?;
+    es.qd = types_portal::QueryDescHandle::NULL;
+
+    if bufusage.is_some_and(|bu| peek_buffer_usage(es, bu)) {
+        ExplainOpenGroup("Planning", Some("Planning"), true, es);
+        ExplainIndentText(es);
+        es.str.append_str("Planning:\n")?;
+        es.indent += 1;
+        show_buffer_usage(es, bufusage.expect("peeked above"));
+        es.indent -= 1;
+        ExplainCloseGroup("Planning", Some("Planning"), true, es);
+    }
 
     if es.summary {
         ExplainPropertyFloat("Planning Time", Some("ms"), 1000.0 * planduration.as_secs_f64(), 3, es);
     }
+
+    // ExplainPrintTriggers: no CREATE TRIGGER path exists, so every result
+    // relation's ri_TrigDesc is provably absent and report_triggers emits
+    // nothing; the Triggers Open/CloseGroup pair is a text-format no-op.
 
     // ExplainPrintJITSummary: jitFlags is pinned 0 by the planner lane, so
     // C's PGJIT_PERFORM check makes it a no-op.
@@ -280,9 +329,147 @@ pub fn ExplainOnePlan<'mcx>(
         panic!("ExplainPrintJITSummary (explain.c): JIT display unported (jit lane)");
     }
 
+    starttime = instrument::instr_time_current();
     execmain_seams::executor_end::call(qd)?;
     execmain_seams::free_query_desc::call(qd);
     snapmgr::PopActiveSnapshot()?;
+    if es.analyze {
+        xact::CommandCounterIncrement()?;
+    }
+    totaltime += elapsed_time(&starttime);
+
+    if es.summary && es.analyze {
+        ExplainPropertyFloat("Execution Time", Some("ms"), 1000.0 * totaltime, 3, es);
+    }
     ExplainCloseGroup("Query", None, true, es);
     Ok(())
+}
+
+// explain.c elapsed_time().
+fn elapsed_time(starttime: &types_core::instrument::instr_time) -> f64 {
+    let mut endtime = instrument::instr_time_current();
+    endtime.subtract(*starttime);
+    endtime.get_double()
+}
+
+pub(crate) fn peek_buffer_usage(es: &ExplainState<'_>, usage: &BufferUsage) -> bool {
+    if es.format != EXPLAIN_FORMAT_TEXT {
+        return true;
+    }
+    buffer_usage_flags(usage) != (false, false, false, false, false, false)
+}
+
+fn buffer_usage_flags(u: &BufferUsage) -> (bool, bool, bool, bool, bool, bool) {
+    (
+        u.shared_blks_hit > 0
+            || u.shared_blks_read > 0
+            || u.shared_blks_dirtied > 0
+            || u.shared_blks_written > 0,
+        u.local_blks_hit > 0
+            || u.local_blks_read > 0
+            || u.local_blks_dirtied > 0
+            || u.local_blks_written > 0,
+        u.temp_blks_read > 0 || u.temp_blks_written > 0,
+        !u.shared_blk_read_time.is_zero() || !u.shared_blk_write_time.is_zero(),
+        !u.local_blk_read_time.is_zero() || !u.local_blk_write_time.is_zero(),
+        !u.temp_blk_read_time.is_zero() || !u.temp_blk_write_time.is_zero(),
+    )
+}
+
+pub(crate) fn show_buffer_usage(es: &mut ExplainState<'_>, usage: &BufferUsage) {
+    if es.format != EXPLAIN_FORMAT_TEXT {
+        format::nontext_gap(es, "show_buffer_usage");
+    }
+    let (has_shared, has_local, has_temp, has_shared_timing, has_local_timing, has_temp_timing) =
+        buffer_usage_flags(usage);
+
+    if has_shared || has_local || has_temp {
+        ExplainIndentText(es);
+        append!(es, "Buffers:");
+        if has_shared {
+            append!(es, " shared");
+            if usage.shared_blks_hit > 0 {
+                append!(es, " hit={}", usage.shared_blks_hit);
+            }
+            if usage.shared_blks_read > 0 {
+                append!(es, " read={}", usage.shared_blks_read);
+            }
+            if usage.shared_blks_dirtied > 0 {
+                append!(es, " dirtied={}", usage.shared_blks_dirtied);
+            }
+            if usage.shared_blks_written > 0 {
+                append!(es, " written={}", usage.shared_blks_written);
+            }
+            if has_local || has_temp {
+                append!(es, ",");
+            }
+        }
+        if has_local {
+            append!(es, " local");
+            if usage.local_blks_hit > 0 {
+                append!(es, " hit={}", usage.local_blks_hit);
+            }
+            if usage.local_blks_read > 0 {
+                append!(es, " read={}", usage.local_blks_read);
+            }
+            if usage.local_blks_dirtied > 0 {
+                append!(es, " dirtied={}", usage.local_blks_dirtied);
+            }
+            if usage.local_blks_written > 0 {
+                append!(es, " written={}", usage.local_blks_written);
+            }
+            if has_temp {
+                append!(es, ",");
+            }
+        }
+        if has_temp {
+            append!(es, " temp");
+            if usage.temp_blks_read > 0 {
+                append!(es, " read={}", usage.temp_blks_read);
+            }
+            if usage.temp_blks_written > 0 {
+                append!(es, " written={}", usage.temp_blks_written);
+            }
+        }
+        append!(es, "\n");
+    }
+
+    if has_shared_timing || has_local_timing || has_temp_timing {
+        ExplainIndentText(es);
+        append!(es, "I/O Timings:");
+        if has_shared_timing {
+            append!(es, " shared");
+            if !usage.shared_blk_read_time.is_zero() {
+                append!(es, " read={:.3}", usage.shared_blk_read_time.get_millisec());
+            }
+            if !usage.shared_blk_write_time.is_zero() {
+                append!(es, " write={:.3}", usage.shared_blk_write_time.get_millisec());
+            }
+            if has_local_timing || has_temp_timing {
+                append!(es, ",");
+            }
+        }
+        if has_local_timing {
+            append!(es, " local");
+            if !usage.local_blk_read_time.is_zero() {
+                append!(es, " read={:.3}", usage.local_blk_read_time.get_millisec());
+            }
+            if !usage.local_blk_write_time.is_zero() {
+                append!(es, " write={:.3}", usage.local_blk_write_time.get_millisec());
+            }
+            if has_temp_timing {
+                append!(es, ",");
+            }
+        }
+        if has_temp_timing {
+            append!(es, " temp");
+            if !usage.temp_blk_read_time.is_zero() {
+                append!(es, " read={:.3}", usage.temp_blk_read_time.get_millisec());
+            }
+            if !usage.temp_blk_write_time.is_zero() {
+                append!(es, " write={:.3}", usage.temp_blk_write_time.get_millisec());
+            }
+        }
+        append!(es, "\n");
+    }
 }

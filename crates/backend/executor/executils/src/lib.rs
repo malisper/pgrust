@@ -13,6 +13,7 @@ use ::datum::Datum;
 use ::mcx::{Mcx, McxOwned, MemoryContext, PgVec};
 use ::queryenvironment::QueryEnvironment;
 use ::snapmgr::Snapshot;
+use ::types_core::instrument::Instrumentation;
 use ::types_core::CommandId;
 use ::types_error::{PgError, PgResult};
 use ::types_nodes::bitmapset::Bitmapset;
@@ -35,14 +36,28 @@ macro_rules! p3 {
 // Unconstructible placeholders: provably None until the owning unit lands.
 p3!(
     PartPruneP3,
-    JunkFilterP3,
-    ResultRelInfoP3,
     RowMarkP3,
     ModifyTableP3,
     ParamListInfoP3,
     ParamExecP3,
     PlanStateP3,
 );
+
+/// C JunkFilter (execnodes.h); construction/filtering live in execjunk.
+#[allow(non_snake_case)]
+pub struct JunkFilter<'mcx> {
+    pub jf_cleanTupType: Rc<TupleDescData<'mcx>>,
+    /// One entry per clean attribute: 1-based resno in the dirty tuple, 0 = NULL.
+    pub jf_cleanMap: &'mcx [i16],
+    pub jf_resultSlot: ExecSlotId,
+}
+
+/// C ResultRelInfo slice; the open relation is es_relations[rti-1].
+#[derive(Debug, Clone, Copy)]
+#[allow(non_snake_case)]
+pub struct ResultRelInfo {
+    pub ri_RangeTableIndex: u32,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EcxtId(pub u32);
@@ -155,13 +170,13 @@ pub struct EStateData<'mcx> {
     pub es_plannedstmt: Option<&'mcx PlannedStmt<'mcx>>,
     pub es_part_prune_infos: Option<PartPruneP3>,
     pub es_unpruned_relids: Bitmapset<'mcx>,
-    pub es_junkFilter: Option<JunkFilterP3>,
+    pub es_junkFilter: Option<JunkFilter<'mcx>>,
     pub es_output_cid: CommandId,
-    pub es_result_relations: PgVec<'mcx, Option<ResultRelInfoP3>>,
-    pub es_opened_result_relations: PgVec<'mcx, ResultRelInfoP3>,
-    pub es_tuple_routing_result_relations: PgVec<'mcx, ResultRelInfoP3>,
-    pub es_trig_target_relations: PgVec<'mcx, ResultRelInfoP3>,
-    pub es_insert_pending_result_relations: PgVec<'mcx, ResultRelInfoP3>,
+    pub es_result_relations: PgVec<'mcx, Option<ResultRelInfo>>,
+    pub es_opened_result_relations: PgVec<'mcx, ResultRelInfo>,
+    pub es_tuple_routing_result_relations: PgVec<'mcx, ResultRelInfo>,
+    pub es_trig_target_relations: PgVec<'mcx, ResultRelInfo>,
+    pub es_insert_pending_result_relations: PgVec<'mcx, ResultRelInfo>,
     pub es_insert_pending_modifytables: PgVec<'mcx, ModifyTableP3>,
     pub es_param_list_info: Option<ParamListInfoP3>,
     pub es_param_exec_vals: PgVec<'mcx, ParamExecP3>,
@@ -171,6 +186,8 @@ pub struct EStateData<'mcx> {
     pub es_total_processed: u64,
     pub es_top_eflags: i32,
     pub es_instrument: i32,
+    // Keyed by plan_node_id (C: per-PlanState); empty when es_instrument == 0.
+    pub es_instrumentation: PgVec<'mcx, Instrumentation>,
     pub es_finished: bool,
     es_exprcontexts: PgVec<'mcx, Option<ExprContextData<'mcx>>>,
     pub es_subplanstates: PgVec<'mcx, PlanStateP3>,
@@ -214,6 +231,7 @@ impl<'mcx> EStateData<'mcx> {
             es_total_processed: 0,
             es_top_eflags: 0,
             es_instrument: 0,
+            es_instrumentation: PgVec::new_in(mcx),
             es_finished: false,
             es_exprcontexts: PgVec::new_in(mcx),
             es_subplanstates: PgVec::new_in(mcx),
@@ -236,8 +254,7 @@ impl<'mcx> EStateData<'mcx> {
         id
     }
 
-    /// `CreateWorkExprContext`. C caps AllocSet block size by work_mem; the
-    /// bump backend has no block-size dial (growth policy is the arena's).
+    /// `CreateWorkExprContext`; the bump backend has no work_mem block dial.
     pub fn create_work_expr_context(&mut self) -> EcxtId {
         self.create_expr_context()
     }
@@ -404,6 +421,24 @@ impl<'mcx> EStateData<'mcx> {
             self.es_relations[idx] = Some(rel);
         }
         Ok(self.es_relations[idx].as_ref().unwrap())
+    }
+
+    pub fn exec_init_result_relation(&mut self, rti: u32) -> PgResult<()> {
+        self.exec_get_range_table_relation(rti, true)?;
+        if self.es_result_relations.len() < self.es_range_table_size as usize {
+            let n = self.es_range_table_size as usize - self.es_result_relations.len();
+            self.es_result_relations.extend((0..n).map(|_| None));
+        }
+        let info = ResultRelInfo { ri_RangeTableIndex: rti };
+        self.es_result_relations[(rti - 1) as usize] = Some(info);
+        self.es_opened_result_relations.push(info);
+        Ok(())
+    }
+
+    // ExecCloseResultRelations index/trigger lanes are loud upstream.
+    pub fn exec_close_result_relations(&mut self) {
+        self.es_opened_result_relations.clear();
+        debug_assert!(self.es_trig_target_relations.is_empty());
     }
 
     /// `ExecCloseRangeTableRelations(estate)`: locks are kept, as in C.

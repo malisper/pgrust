@@ -6266,6 +6266,7 @@ name = "utility"
 version = "0.1.0"
 dependencies = [
  "cmdtag",
+ "copy_cmd",
  "elog",
  "explain",
  "guc_funcs",

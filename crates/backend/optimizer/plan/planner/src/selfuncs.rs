@@ -10,6 +10,7 @@ use crate::gucs;
 use crate::run::PlannerRun;
 
 pub const DEFAULT_EQ_SEL: f64 = 0.005;
+pub const DEFAULT_INEQ_SEL: f64 = 0.3333333333333333;
 pub const DEFAULT_NUM_DISTINCT: f64 = 200.0;
 const DEFAULT_PAGE_CPU_MULTIPLIER: f64 = 50.0;
 const BOOLOID: u32 = 16;
@@ -26,6 +27,24 @@ pub struct VariableStatData {
     pub rel: Option<RelId>,
     pub vartype: u32,
     pub isunique: bool,
+}
+
+// scalarltsel/scalargtsel family (selfuncs.c), no-statsTuple arm: without a
+// pg_statistic row the mcv/histogram fractions are absent and C lands on
+// DEFAULT_INEQ_SEL; a live stats tuple panics inside examine_variable.
+pub fn scalarineqsel_wrapper<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    args: &[NodeId],
+    varrelid: i32,
+) -> PgResult<f64> {
+    let Some((_vardata, other, _varonleft)) = get_restriction_variable(run, args, varrelid)?
+    else {
+        return Ok(DEFAULT_INEQ_SEL);
+    };
+    match other.as_const() {
+        Some(c) if c.constisnull => Ok(0.0),
+        _ => Ok(DEFAULT_INEQ_SEL),
+    }
 }
 
 pub fn eqsel<'mcx>(

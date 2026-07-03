@@ -166,6 +166,8 @@ pub fn ExplainNode<'mcx>(
     let pname = match node.node_tag() {
         NodeTag::T_Result => "Result",
         NodeTag::T_SeqScan => "Seq Scan",
+        NodeTag::T_Sort => "Sort",
+        NodeTag::T_Limit => "Limit",
         t => node_gap("ExplainNode", &format!("{t:?} display arm unported (M2+ plan lanes)")),
     };
 
@@ -208,8 +210,28 @@ pub fn ExplainNode<'mcx>(
         );
     }
 
-    if es.analyze {
-        node_gap("ExplainNode", "ANALYZE needs Instrumentation (instrument lane)");
+    // C reads planstate->instrument; the walk here is over the sealed Plan
+    // tree, so per-node Instrumentation comes from the executor keyed by
+    // plan_node_id (the fetch also runs C's forced InstrEndLoop).
+    let instrument = if es.qd.is_null() {
+        None
+    } else {
+        execmain_seams::query_desc_instrument::call(es.qd, plan.plan_node_id)
+    };
+    match instrument {
+        Some(i) if es.analyze && i.nloops > 0.0 => {
+            let nloops = i.nloops;
+            let startup_ms = 1000.0 * i.startup / nloops;
+            let total_ms = 1000.0 * i.total / nloops;
+            let rows = i.ntuples / nloops;
+            append!(es, " (actual ");
+            if es.timing {
+                append!(es, "time={startup_ms:.3}..{total_ms:.3} ");
+            }
+            append!(es, "rows={rows:.2} loops={nloops:.0})");
+        }
+        _ if es.analyze => append!(es, " (never executed)"),
+        _ => {}
     }
     append!(es, "\n");
 
@@ -225,14 +247,33 @@ pub fn ExplainNode<'mcx>(
     match node.node_tag() {
         NodeTag::T_SeqScan => {
             show_scan_qual(&plan.qual, "Filter", es)?;
+            filtered_count_gap(&plan.qual, es);
         }
         NodeTag::T_Result => {
             if let Some(q) = node.as_result().unwrap().resconstantqual {
                 show_one_time_filter(q, es)?;
             }
             show_scan_qual(&plan.qual, "Filter", es)?;
+            filtered_count_gap(&plan.qual, es);
         }
+        NodeTag::T_Sort => {
+            show_sort_keys(node, es)?;
+            if es.analyze {
+                node_gap(
+                    "show_sort_info",
+                    "Sort Method display needs tuplesort_get_stats (sort instrumentation lane)",
+                );
+            }
+        }
+        // Limit shows nothing extra without ANALYZE.
+        NodeTag::T_Limit => {}
         _ => unreachable!(),
+    }
+
+    if es.buffers {
+        if let Some(i) = &instrument {
+            crate::show_buffer_usage(es, &i.bufusage);
+        }
     }
 
     if !plan.initPlan.is_nil() {
@@ -275,6 +316,134 @@ fn show_plan_tlist<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgRes
     Ok(())
 }
 
+// show_sort_keys -> show_sort_group_keys (explain.c), Var-only sort keys.
+fn show_sort_keys<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResult<()> {
+    let sort = node.as_sort().expect("Sort node");
+    if sort.numCols <= 0 {
+        return Ok(());
+    }
+    let mcx = es.str.allocator();
+    let useprefix = es.rtable_size > 1 || es.verbose;
+    let mut result: PgVec<'mcx, PgString<'mcx>> = PgVec::new_in(mcx);
+    for keyno in 0..sort.numCols as usize {
+        let resno = sort.sortColIdx[keyno];
+        let tle = get_tle_by_resno(&sort.plan.targetlist, resno)
+            .unwrap_or_else(|| node_gap("show_sort_group_keys", "no tlist entry for key column"));
+        let mut buf = PgString::new_in(mcx);
+        deparse_plan_var(sort.plan.lefttree, tle.expr, useprefix, es, &mut buf)?;
+        show_sortorder_options(
+            &mut buf,
+            tle.expr,
+            sort.sortOperators[keyno],
+            sort.collations[keyno],
+            sort.nullsFirst[keyno],
+        )?;
+        result.push(buf);
+    }
+    ExplainPropertyList("Sort Key", &result, es);
+    Ok(())
+}
+
+fn get_tle_by_resno<'a, 'mcx>(
+    tlist: &'a NodeList<'mcx>,
+    resno: i16,
+) -> Option<&'mcx types_nodes::primnodes::TargetEntry<'mcx>> {
+    tlist
+        .iter()
+        .map(|n| n.as_target_entry().expect("targetlist holds TargetEntries"))
+        .find(|tle| tle.resno == resno)
+}
+
+// get_rule_expr/get_variable (ruleutils.c) reduced to the plan-tree Var walk:
+// OUTER_VAR resolves through the child tlist, base Vars through eref colnames.
+fn deparse_plan_var<'mcx>(
+    child: Option<Node<'mcx>>,
+    expr: Node<'mcx>,
+    useprefix: bool,
+    es: &ExplainState<'mcx>,
+    buf: &mut PgString<'mcx>,
+) -> PgResult<()> {
+    let Some(var) = expr.as_var() else {
+        node_gap(
+            "deparse_expression",
+            &format!("{:?} deparse unported (ruleutils lane)", expr.node_tag()),
+        );
+    };
+    if var.varno == types_nodes::primnodes::OUTER_VAR {
+        let child = child.unwrap_or_else(|| node_gap("get_variable", "OUTER_VAR without child"));
+        let child_plan = plan_of(child);
+        let tle = get_tle_by_resno(&child_plan.targetlist, var.varattno)
+            .unwrap_or_else(|| node_gap("get_variable", "bogus varattno for OUTER_VAR"));
+        return deparse_plan_var(child_plan.lefttree, tle.expr, useprefix, es, buf);
+    }
+    if var.varno <= 0 || var.varno as usize > es.rtable_size as usize {
+        node_gap("get_variable", "INNER_VAR/INDEX_VAR deparse unported (ruleutils lane)");
+    }
+    let rte: &RangeTblEntry<'_> = es
+        .rtable
+        .expect("deparse before ExplainPrintPlan")
+        .nth(var.varno as usize - 1)
+        .as_range_tbl_entry()
+        .expect("rtable holds RTEs");
+    let eref = rte.eref.expect("RTE without eref");
+    if useprefix {
+        let refname = es.rtable_names[var.varno as usize - 1]
+            .or(eref.aliasname)
+            .expect("deparsed Var's RTE has a refname");
+        buf.try_push_str(quote_identifier(refname))?;
+        buf.try_push('.')?;
+    }
+    debug_assert!(var.varattno > 0, "system/whole-row Var deparse is a loud upstream lane");
+    let colname = eref
+        .colnames
+        .nth(var.varattno as usize - 1)
+        .as_string()
+        .expect("eref colnames hold String nodes")
+        .sval;
+    buf.try_push_str(quote_identifier(colname))?;
+    Ok(())
+}
+
+// show_sortorder_options (explain.c); USING and COLLATE arms are loud.
+fn show_sortorder_options(
+    buf: &mut PgString<'_>,
+    sortexpr: Node<'_>,
+    sort_operator: types_core::primitive::Oid,
+    collation: types_core::primitive::Oid,
+    nulls_first: bool,
+) -> PgResult<()> {
+    let sortcoltype = execscan_expr_type(sortexpr);
+    let typentry = typcache::lookup_type_cache(
+        sortcoltype,
+        typcache::TYPECACHE_LT_OPR | typcache::TYPECACHE_GT_OPR,
+    )?;
+    if collation != types_core::primitive::InvalidOid
+        && collation != lsyscache::typ::get_typcollation(sortcoltype)?
+    {
+        node_gap("show_sortorder_options", "COLLATE needs generate_collation_name");
+    }
+    let reverse = if sort_operator == typentry.lt_opr() {
+        false
+    } else if sort_operator == typentry.gt_opr() {
+        buf.try_push_str(" DESC")?;
+        true
+    } else {
+        node_gap("show_sortorder_options", "USING <op> needs get_opname + opfamily probe");
+    };
+    if nulls_first != reverse {
+        buf.try_push_str(if nulls_first { " NULLS FIRST" } else { " NULLS LAST" })?;
+    }
+    Ok(())
+}
+
+// exprType over the sort-key shapes this display lane can carry.
+fn execscan_expr_type(node: Node<'_>) -> types_core::primitive::Oid {
+    match node.as_var() {
+        Some(v) => v.vartype,
+        None => node_gap("exprType", "non-Var sort key (nodeFuncs lane)"),
+    }
+}
+
 // show_upper_qual on Result.resconstantqual: C stores it as a bare expression
 // (not an implicit-AND list).
 fn show_one_time_filter<'mcx>(qual: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResult<()> {
@@ -283,6 +452,18 @@ fn show_one_time_filter<'mcx>(qual: Node<'mcx>, es: &mut ExplainState<'mcx>) -> 
     let s = deparse_expression_minimal(mcx, qual, useprefix)?;
     crate::format::ExplainPropertyText("One-Time Filter", s.as_str(), es);
     Ok(())
+}
+
+// show_instrumentation_count's nfiltered read: the executor never counts
+// qual-filtered tuples (InstrCountFiltered, execScan.c), so printing would be
+// silently wrong whenever a filter removed rows.
+fn filtered_count_gap(qual: &NodeList<'_>, es: &ExplainState<'_>) {
+    if es.analyze && !qual.is_nil() {
+        node_gap(
+            "show_instrumentation_count",
+            "Rows Removed by Filter needs nfiltered counting (InstrCountFiltered, execScan.c)",
+        );
+    }
 }
 
 fn show_scan_qual<'mcx>(
