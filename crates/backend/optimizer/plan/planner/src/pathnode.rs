@@ -99,6 +99,7 @@ pub fn is_projection_capable_pathtype(pathtype: u16) -> bool {
         t if t == tag16(NodeTag::T_CteScan) => true,
         t if t == tag16(NodeTag::T_NestLoop) => true,
         t if t == tag16(NodeTag::T_MergeJoin) => true,
+        t if t == tag16(NodeTag::T_HashJoin) => true,
         _ => panic!(
             "is_projection_capable_path (createplan.c): pathtype {pathtype}; \
              M2 plan lane"

@@ -258,7 +258,6 @@ impl<'mcx> HashJoinTable<'mcx> {
                 query_mcx,
             )?;
         }
-        self.total_tuples += 1.0;
         Ok(())
     }
 
@@ -599,10 +598,9 @@ pub fn multi_exec_hash<'mcx, C: HashBuildInput<'mcx>>(
             r.value.as_u32()
         };
         let ecxt = hs.ps_ExprContext;
-        hs.table
-            .as_mut()
-            .expect("hash table created")
-            .insert(estate, slot_id, ecxt, hashvalue)?;
+        let table = hs.table.as_mut().expect("hash table created");
+        table.insert(estate, slot_id, ecxt, hashvalue)?;
+        table.total_tuples += 1.0;
     }
     hs.table.as_mut().expect("hash table created").finish_build(mcx)?;
     Ok(())
