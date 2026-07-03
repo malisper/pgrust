@@ -25,6 +25,7 @@ lsyscache = { path = "../../utils/cache/lsyscache" }
 miscinit = { path = "../../utils/init/miscinit" }
 mcx = { path = "../../../_support/mcx" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+gistbuild = { path = "../../access/gist/gistbuild" }
 nbtsort = { path = "../../access/nbtree/nbtsort" }
 hashsort = { path = "../../access/hash/hashsort" }
 pg_depend = { path = "../pg_depend" }

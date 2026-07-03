@@ -235,6 +235,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_geo"
+version = "0.1.0"
+dependencies = [
+ "adt_float",
+ "datum",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
 name = "adt_int"
 version = "0.1.0"
 dependencies = [
@@ -1261,6 +1273,7 @@ dependencies = [
  "fmgr_seams",
  "genam",
  "ginbuild",
+ "gistbuild",
  "guc",
  "hashsort",
  "heaptuple",
@@ -3190,6 +3203,82 @@ dependencies = [
 ]
 
 [[package]]
+name = "gist"
+version = "0.1.0"
+dependencies = [
+ "bufmgr_seams",
+ "datum",
+ "fmgr_seams",
+ "freespace",
+ "init_small",
+ "mcx",
+ "nbtree",
+ "pg_prng",
+ "predicate_seams",
+ "tidbitmap",
+ "transam_xlog",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_gist",
+ "types_rel",
+ "types_relscan",
+ "types_scan",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+ "xact",
+ "xloginsert",
+ "xloginsert_seams",
+]
+
+[[package]]
+name = "gist_xlog"
+version = "0.1.0"
+dependencies = [
+ "bufmgr_seams",
+ "types_core",
+ "types_error",
+ "types_gist",
+ "types_storage",
+ "xlogreader_seams",
+ "xlogutils",
+]
+
+[[package]]
+name = "gistbuild"
+version = "0.1.0"
+dependencies = [
+ "bufmgr",
+ "bufmgr_seams",
+ "execindexing",
+ "gist",
+ "guc_tables",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_gist",
+ "types_rel",
+ "types_tuple",
+ "xloginsert",
+]
+
+[[package]]
+name = "gistproc"
+version = "0.1.0"
+dependencies = [
+ "adt_float",
+ "adt_geo",
+ "datum",
+ "gist",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_gist",
+]
+
+[[package]]
 name = "gram_core"
 version = "0.1.0"
 dependencies = [
@@ -3760,6 +3849,7 @@ version = "0.1.0"
 dependencies = [
  "datum",
  "gin",
+ "gist",
  "hash",
  "indexam_seams",
  "mcx",
@@ -6253,6 +6343,7 @@ dependencies = [
  "exectuples",
  "fmgr_core",
  "gin",
+ "gist",
  "guc_tables",
  "indexam",
  "init_small",
@@ -7751,6 +7842,7 @@ dependencies = [
  "dbcommands_seams",
  "elog",
  "gin_xlog",
+ "gist_xlog",
  "hash_xlog",
  "heapam_xlog",
  "mcx",
@@ -7876,6 +7968,7 @@ dependencies = [
  "adt_acl",
  "adt_bool",
  "adt_float",
+ "adt_geo",
  "adt_misc",
  "adt_regexp",
  "adt_timestamp",
@@ -7922,6 +8015,7 @@ dependencies = [
  "funcapi",
  "genam",
  "gin",
+ "gistproc",
  "guc",
  "guc_file",
  "guc_funcs",
@@ -9384,6 +9478,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "types_gist"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_storage",
+ "types_tuple",
+]
+
+[[package]]
 name = "types_guc"
 version = "0.0.0"
 
@@ -9470,6 +9577,7 @@ dependencies = [
  "tableam",
  "types_core",
  "types_error",
+ "types_gist",
  "types_hash",
  "types_nbtree",
  "types_rel",

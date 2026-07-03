@@ -95,6 +95,7 @@ pub const ANYCOMPATIBLEMULTIRANGEOID: Oid = 4538;
 pub const BTREE_AM_OID: Oid = 403;
 pub const HASH_AM_OID: Oid = 405;
 pub const GIN_AM_OID: Oid = 2742;
+pub const GIST_AM_OID: Oid = 783;
 
 pub const INDEX_AM_HANDLEROID: Oid = 325;
 

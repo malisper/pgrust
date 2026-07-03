@@ -393,6 +393,7 @@ fn insert_dispatches_through_am() {
     let heap = make(ctx.mcx(), TBL, "tbl", RELKIND_RELATION, 2);
     let idx = make(ctx.mcx(), IDX, "idx", RELKIND_INDEX, MOCK_AM_OID);
     let t = tid(1, 1);
+    let mut am_cache: Option<Box<dyn core::any::Any>> = None;
     let ok = index_insert(
         ctx.mcx(),
         &idx,
@@ -402,6 +403,8 @@ fn insert_dispatches_through_am() {
         &heap,
         types_nbtree::UNIQUE_CHECK_NO,
         false,
+    
+        &mut am_cache,
     )
     .unwrap();
     assert!(ok);

@@ -11,6 +11,7 @@ mock = []
 mcx = { path = "../../../../_support/mcx" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
+types_gist = { path = "../../../../_support/types/gist" }
 types_nbtree = { path = "../../../../_support/types/types_nbtree" }
 types_rel = { path = "../../../../_support/types/rel" }
 types_scan = { path = "../../../../_support/types/types_scan" }

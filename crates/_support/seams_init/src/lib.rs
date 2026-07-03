@@ -154,6 +154,8 @@ pub fn init_all() {
     fmgr_core::register_late_builtins(adt_misc::MISC_BUILTINS);
     fmgr_core::register_late_builtins(dbcommands::builtins::DBCOMMANDS_BUILTINS);
     sql_functions::init_seams();
+    fmgr_core::register_late_builtins(adt_geo::builtins::GEO_BUILTINS);
+    fmgr_core::register_late_builtins(gistproc::GISTPROC_BUILTINS);
     funcapi::init_seams();
     init_small::init_seams();
     miscinit::init_seams();

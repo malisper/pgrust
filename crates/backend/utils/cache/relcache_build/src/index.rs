@@ -20,14 +20,16 @@ const OID_BTREE_OPS_OID: Oid = 1981;
 const INT2_BTREE_OPS_OID: Oid = 1979;
 const BTREE_AM_OID: Oid = 403;
 const HASH_AM_OID: Oid = 405;
+const GIST_AM_OID: Oid = 783;
 const BTNProcs: usize = 6;
+const GISTNProcs: usize = 12;
+const MAX_AM_PROCS: usize = GISTNProcs;
 // BTORDER_PROC == HASHSTANDARD_PROC == 1: slot 0 is the preloaded proc for
-// both committed AMs.
+// btree and hash.
 const BTORDER_PROC: usize = 1;
 const HASHNProcs: usize = 3;
 const GIN_AM_OID: Oid = 2742;
 const GINNProcs: usize = 7;
-const MAX_AM_PROCS: usize = GINNProcs;
 
 const Anum_pg_amproc_amprocfamily: i32 = 2;
 const Anum_pg_amproc_amproclefttype: i32 = 3;
@@ -99,14 +101,17 @@ pub(crate) fn relation_init_index_access_info(
         BTREE_AM_OID => BTNProcs,
         HASH_AM_OID => HASHNProcs,
         GIN_AM_OID => GINNProcs,
+        GIST_AM_OID => GISTNProcs,
         other => panic!(
             "relcache_build: index AM {other} for index {relid} unported \
-             (amapi closed set is btree+hash+gin)"
+             (amapi closed set is btree+hash+gin+gist)"
         ),
     };
     let mut opfamily: PgVec<'static, Oid> = mcx::vec_with_capacity_in(mcx, nkey)?;
     let mut opcintype: PgVec<'static, Oid> = mcx::vec_with_capacity_in(mcx, nkey)?;
     let mut supportinfo: Vec<Option<types_fmgr::FmgrInfo>> = Vec::with_capacity(nkey);
+    // C rd_support: nkey x amsupport proc OIDs, row-major.
+    let mut support: PgVec<'static, Oid> = mcx::vec_with_capacity_in(mcx, nkey * amsupport)?;
     for &opc in &classvals[..nkey] {
         if opc == InvalidOid {
             return Err(bogus_pg_index(relid));
@@ -114,10 +119,11 @@ pub(crate) fn relation_init_index_access_info(
         let ent = lookup_opclass_info(opc, amsupport)?;
         opfamily.push(ent.opcfamily);
         opcintype.push(ent.opcintype);
-        // Preload slot 0 (BTORDER_PROC/HASHSTANDARD_PROC) for btree/hash; gin
-        // dispatches its support procs by OID (rule-4 closed set), never
-        // through FmgrInfo.
-        let proc = if form.relam == GIN_AM_OID {
+        support.extend_from_slice(&ent.support[..amsupport]);
+        // slot-0 FmgrInfo preload: BTORDER_PROC == HASHSTANDARD_PROC == 1; gin
+        // dispatches its support procs by OID (rule-4 closed set); gist
+        // resolves its procs in initGISTstate.
+        let proc = if form.relam == GIN_AM_OID || form.relam == GIST_AM_OID {
             0
         } else {
             ent.support[BTORDER_PROC - 1]
@@ -150,7 +156,7 @@ pub(crate) fn relation_init_index_access_info(
     };
     ReleaseSysCache(tup);
 
-    Ok(IndexAccessInfo { index, opcintype, opfamily, indoption, indcollation, supportinfo })
+    Ok(IndexAccessInfo { index, opcintype, opfamily, indoption, indcollation, supportinfo, support })
 }
 
 #[derive(Clone, Copy)]

@@ -19,6 +19,7 @@ relation_seams = { path = "../../common/relation_seams" }
 tableam = { path = "../../table/tableam" }
 indexam_seams = { path = "../indexam_seams" }
 types_relscan = { path = "../relscan" }
+gist = { path = "../../gist/gist" }
 nbtree = { path = "../../nbtree/nbtree" }
 hash = { path = "../../hash/hash" }
 tidbitmap = { path = "../../../nodes/tidbitmap" }
