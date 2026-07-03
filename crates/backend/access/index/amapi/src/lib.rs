@@ -13,6 +13,7 @@ use types_scan::scankey::{BTMaxStrategyNumber, InvalidStrategy, StrategyNumber};
 pub const F_BTHANDLER: Oid = 330;
 pub const F_HASHHANDLER: Oid = 331;
 pub const F_GINHANDLER: Oid = 333;
+pub const F_GISTHANDLER: Oid = 332;
 const AMTYPE_INDEX: i8 = b'i' as i8;
 const Anum_pg_am_amname: i32 = 2;
 const Anum_pg_am_amhandler: i32 = 3;
@@ -27,6 +28,7 @@ pub fn GetIndexAmRoutine(amhandler: Oid) -> IndexAmKind {
         F_BTHANDLER => IndexAmKind::Btree,
         F_HASHHANDLER => IndexAmKind::Hash,
         F_GINHANDLER => IndexAmKind::Gin,
+        F_GISTHANDLER => IndexAmKind::Gist,
         other => unported_handler(other),
     }
 }
@@ -90,6 +92,8 @@ pub fn IndexAmTranslateStrategy(
         }
         // gin has no amtranslatestrategy.
         IndexAmKind::Gin => COMPARE_INVALID,
+        // amtranslatestrategy == NULL for gist.
+        IndexAmKind::Gist => COMPARE_INVALID,
         #[allow(unreachable_patterns)]
         _ => unported_translate(amoid),
     };
@@ -127,6 +131,10 @@ pub fn IndexAmTranslateCompareType(
         }
         // gin has no amtranslatecmptype.
         IndexAmKind::Gin => InvalidStrategy,
+        IndexAmKind::Gist => panic!(
+            "unported: gisttranslatecmptype (AMPROCNUM proc-12 lookup; \
+             temporal/WITHOUT OVERLAPS lane)"
+        ),
         #[allow(unreachable_patterns)]
         _ => unported_translate(amoid),
     };

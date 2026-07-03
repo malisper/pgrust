@@ -403,6 +403,11 @@ impl<'a> PageMut<'a> {
     }
 
     #[inline]
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.ptr.as_ptr()
+    }
+
+    #[inline]
     fn write_u16(&mut self, off: usize, v: uint16) {
         debug_assert!(off + 2 <= BLCKSZ && off % 2 == 0);
         // SAFETY: in-bounds, 2-aligned (from_raw contract).

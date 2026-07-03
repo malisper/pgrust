@@ -27,6 +27,8 @@ pub struct IndexAccessInfo {
     // BTORDER_PROC slot per key column (std Vec: rd_supportinfo's shape);
     // without it the first scan of pg_amproc's own index recurses.
     pub supportinfo: Vec<Option<types_fmgr::FmgrInfo>>,
+    // C rd_support: nkey x amsupport proc OIDs, row-major.
+    pub support: PgVec<'static, Oid>,
 }
 
 seam_core::seam!(

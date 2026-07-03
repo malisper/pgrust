@@ -29,3 +29,4 @@ sequence_xlog = { path = "../../../commands/sequence_xlog" }
 xact = { path = "../xact" }
 rmgrdesc = { path = "../../rmgrdesc" }
 gin_xlog = { path = "../../gin/gin_xlog" }
+gist_xlog = { path = "../../gist/gist_xlog" }
