@@ -597,6 +597,7 @@ fn agg_trans_and_aggref_eval_steps() {
             values: NonNull::new(aggvalues.as_mut_ptr()).unwrap(),
             nulls: NonNull::new(aggnulls.as_mut_ptr()).unwrap(),
             naggs: 2,
+            grouping: None,
         };
         let mut agg0 = Node::build::<Aggref>(mcx).unwrap();
         agg0.aggfnoid = 2803;

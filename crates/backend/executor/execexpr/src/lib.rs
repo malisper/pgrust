@@ -23,7 +23,7 @@ mod tests;
 pub use compile::{
     erase_fn_expr, exec_build_agg_projection_info, exec_build_agg_qual, exec_build_agg_trans,
     exec_build_window_projection_info,
-    exec_build_agg_trans_hashed, exec_build_grouping_equal,
+    exec_build_agg_trans_gsets, exec_build_agg_trans_hashed, exec_build_grouping_equal,
     exec_build_hash32_from_attrs, exec_build_projection_info,
     exec_build_projection_info_subplans, exec_init_expr, exec_init_expr_subplans,
     exec_init_qual, exec_init_qual_subplans, expr_type, AggBind, AggTransSpec,
@@ -33,7 +33,7 @@ pub use interp::{
     agg_datum_copy, exec_eval_expr, exec_eval_expr_outcome, exec_project, exec_project_outcome,
     exec_qual, exec_qual_outcome, EvalOutcome, EvalSlots, QualOutcome, Resume, Suspension,
 };
-pub use steps::{AggPerGroup, CmpOp, ExprState, Kernel, OutRef, SlotSrc, Step};
+pub use steps::{AggPerGroup, CmpOp, ExprState, GroupedColsCell, Kernel, OutRef, SlotSrc, Step};
 pub use types_portal::params::ParamBind;
 
 /// evaluate_expr (clauses.c): run a const-foldable expression once, Const-wrap.

@@ -727,6 +727,27 @@ fn run_program<'mcx>(
                 let (v, n) = unsafe { (value.read(), null.read()) };
                 write_out(*out, &mut regs, v, n);
             }
+            Step::GroupingFuncEval { cols, ncols, current, out } => {
+                let mut result: i64 = 0;
+                if let Some(cell) = current {
+                    // SAFETY: once-allocated AggState arrays, repointed
+                    // before projection.
+                    let (grouped, cols) = unsafe {
+                        let c = cell.read();
+                        (
+                            core::slice::from_raw_parts(c.ptr, c.len),
+                            core::slice::from_raw_parts(cols.as_ptr(), *ncols as usize),
+                        )
+                    };
+                    for &attno in cols {
+                        result <<= 1;
+                        if !grouped.contains(&(attno as i16)) {
+                            result |= 1;
+                        }
+                    }
+                }
+                write_out(*out, &mut regs, Datum::from_i32(result as i32), false);
+            }
             Step::AggPlainTransByVal { call, pergroup } => {
                 // SAFETY: once-allocated stable pergroup; sole access here.
                 unsafe {

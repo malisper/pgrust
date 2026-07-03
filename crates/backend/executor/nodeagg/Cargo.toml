@@ -28,6 +28,9 @@ execscan = { path = "../execscan" }
 exectuples = { path = "../exectuples" }
 executils = { path = "../executils" }
 types_slot = { path = "../../../_support/types/types_slot" }
+types_portal = { path = "../../../_support/types/portal" }
+tuplesort = { path = "../../utils/sort/tuplesort" }
+init_small = { path = "../../utils/init/init_small" }
 
 [dev-dependencies]
 adt_numeric = { path = "../../utils/adt/numeric" }
