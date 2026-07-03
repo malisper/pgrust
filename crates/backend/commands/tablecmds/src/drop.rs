@@ -86,6 +86,7 @@ pub fn RemoveRelations<'mcx>(mcx: Mcx<'mcx>, drop: &DropStmt<'mcx>) -> PgResult<
     }
     let expected_relkind = match drop.removeType {
         ObjectType::OBJECT_TABLE => RELKIND_RELATION,
+        ObjectType::OBJECT_INDEX => types_rel::RELKIND_INDEX,
         other => unported(&format!(
             "RemoveRelations: removeType {other:?} (its DDL lane does not exist)"
         )),
@@ -204,7 +205,14 @@ fn RangeVarCallbackForDropRelation<'mcx>(
     }
 
     if expected_relkind == types_rel::RELKIND_INDEX {
-        unported("RangeVarCallbackForDropRelation: DROP INDEX heap-lock ordering");
+        // C locks the index's heap before the index (deadlock ordering).
+        // DIVERGENCE: the lookup-retry unlock bookkeeping (state->heapOid)
+        // is dropped; a stale-lookup retry leaves an extra heap lock held
+        // until end of transaction.
+        let heap_oid = catalog_index::IndexGetRelation(mcx, relOid, true)?;
+        if heap_oid != InvalidOid {
+            lmgr::LockRelationOid(heap_oid, AccessExclusiveLock)?;
+        }
     }
     let _ = rel;
     Ok(())

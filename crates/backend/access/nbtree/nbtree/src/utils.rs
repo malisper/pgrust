@@ -633,8 +633,7 @@ pub(crate) fn bt_vacuum_cycleid(_rel: &Relation<'_>) -> u16 {
 }
 
 /// _bt_mkscankey; `itup: None` is the utility-statement arm. C divergence:
-/// C's defensive never-read SK_ISNULL scankeys past keysz are not built;
-/// anynullkeys still counts truncated attributes.
+/// Keys past tupnatts are SK_ISNULL with unset arguments, per C.
 pub fn bt_mkscankey(rel: &Relation<'_>, itup: Option<ITup>) -> PgResult<BtScanInsert> {
     let tupdesc: &TupleDescData<'_> = &rel.rd_att;
     let indnkeyatts = rel.indnkeyatts();
@@ -657,18 +656,23 @@ pub fn bt_mkscankey(rel: &Relation<'_>, itup: Option<ITup>) -> PgResult<BtScanIn
         _ => None,
     };
 
-    let keysz = indnkeyatts.min(tupnatts);
-    for i in 0..keysz as usize {
+    for i in 0..indnkeyatts as usize {
         let sk_func = crate::search::order_procinfo(rel, i + 1)?;
-        let mut is_null = false;
-        // SAFETY: itup is Some (keysz <= tupnatts) and attribute i+1 <= tupnatts.
-        let arg = unsafe {
-            index_getattr(
-                itup.expect("keysz > 0 implies a tuple"),
-                (i + 1) as AttrNumber,
-                tupdesc,
-                &mut is_null,
-            )
+        let mut is_null = true;
+        // Past tupnatts: C's SK_ISNULL key with an unset argument — the
+        // utility arm (nbtsort) reads sk_func/sk_collation off these.
+        let arg = if (i as i32) < tupnatts as i32 {
+            // SAFETY: i < tupnatts implies itup is Some and i+1 <= tupnatts.
+            unsafe {
+                index_getattr(
+                    itup.expect("tupnatts > 0 implies a tuple"),
+                    (i + 1) as AttrNumber,
+                    tupdesc,
+                    &mut is_null,
+                )
+            }
+        } else {
+            Datum::null()
         };
         if is_null {
             key.anynullkeys = true;
@@ -683,9 +687,6 @@ pub fn bt_mkscankey(rel: &Relation<'_>, itup: Option<ITup>) -> PgResult<BtScanIn
             sk_func,
             sk_argument: arg,
         });
-    }
-    if tupnatts < indnkeyatts {
-        key.anynullkeys = true; // truncated attributes count as null keys
     }
 
     if rel.rd_index.as_ref().is_some_and(|i| i.indnullsnotdistinct) {

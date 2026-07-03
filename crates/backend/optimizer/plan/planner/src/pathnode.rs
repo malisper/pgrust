@@ -583,14 +583,55 @@ pub fn create_ctescan_path<'mcx>(run: &mut PlannerRun<'mcx>, rel_id: RelId) -> P
     Ok(id)
 }
 
-// choose_bitmap_and (indxpath.c), single-candidate arm: with one input path
-// there is nothing to AND.
-pub fn choose_bitmap_and(_run: &PlannerRun<'_>, _rel_id: RelId, paths: &[PathId]) -> PathId {
+// choose_bitmap_and (indxpath.c), single-candidate + all-clauseless arms.
+pub fn choose_bitmap_and(run: &PlannerRun<'_>, _rel_id: RelId, paths: &[PathId]) -> PathId {
     debug_assert!(!paths.is_empty());
     if paths.len() == 1 {
         return paths[0];
     }
-    panic!("choose_bitmap_and (indxpath.c): AND/OR path reduction; M2 bitmap-combine lane");
+    // Bounded greedy arm: sort by path_usage_comparator (selectivity, then
+    // cost), take the first; every other candidate whose clause set is a
+    // subset of the winner's is subsumed exactly as in C's inner loop. A
+    // candidate with a clause the winner lacks is the genuine AND lane.
+    let clauseids = |p: types_pathnodes::PathId| -> mcx::PgVec<'_, u32> {
+        let mut ids: mcx::PgVec<'_, u32> = mcx::PgVec::new_in(run.mcx);
+        if let types_pathnodes::PathNode::IndexPath(ip) = run.root.path(p) {
+            for ic in ip.indexclauses.iter() {
+                ids.push(ic.rinfo.expect("IndexClause rinfo").0);
+            }
+        }
+        ids.sort_unstable();
+        ids
+    };
+    let mut best = paths[0];
+    for &p in &paths[1..] {
+        let (ps, pc) = {
+            let types_pathnodes::PathNode::IndexPath(ip) = run.root.path(p) else {
+                panic!("choose_bitmap_and: non-IndexPath candidate; M2 bitmap-combine lane")
+            };
+            (ip.indexselectivity, ip.path.total_cost)
+        };
+        let (bs, bc) = {
+            let types_pathnodes::PathNode::IndexPath(ip) = run.root.path(best) else {
+                unreachable!()
+            };
+            (ip.indexselectivity, ip.path.total_cost)
+        };
+        if ps < bs || (ps == bs && pc < bc) {
+            best = p;
+        }
+    }
+    let best_ids = clauseids(best);
+    for &p in paths {
+        if p == best {
+            continue;
+        }
+        let ids = clauseids(p);
+        if !ids.iter().all(|id| best_ids.contains(id)) {
+            panic!("choose_bitmap_and (indxpath.c): AND/OR path reduction; M2 bitmap-combine lane");
+        }
+    }
+    best
 }
 
 // create_bitmap_heap_path (pathnode.c); required_outer/parallel loud upstream.

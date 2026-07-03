@@ -1106,10 +1106,14 @@ fn mkscankey_builds_insertion_key() {
     assert_eq!(keys[0].sk_flags, 0);
     assert_eq!(keys[0].sk_func.fn_oid, 351);
 
-    // Utility-statement arm: no tuple, no metapage read.
+    // Utility-statement arm: no tuple, no metapage read; keys are built
+    // SK_ISNULL with unset arguments (nbtsort reads sk_func/sk_collation).
     let mut key = crate::bt_mkscankey(&rel, None).unwrap();
     assert!(key.heapkeyspace && !key.allequalimage);
     assert!(key.anynullkeys, "truncated attributes count as null keys");
     assert_eq!(key.scantid, None);
-    assert_eq!(key.keys_mut().len(), 0);
+    let keys = key.keys_mut();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].sk_flags & types_scan::scankey::SK_ISNULL, types_scan::scankey::SK_ISNULL);
+    assert_eq!(keys[0].sk_func.fn_oid, 351);
 }
