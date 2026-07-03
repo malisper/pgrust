@@ -259,6 +259,7 @@ fn ExtendBufferedRelShared(
         let victim_buf = buffers[i];
         let victim_desc = GetBufferDescriptor(victim_buf - 1);
         ReservePrivateRefCountEntry();
+        crate::pin::resowner_enlarge_for_pin()?;
 
         let tag = types_storage::buf::buftag {
             spcOid: smgr.locator.spcOid,
@@ -335,7 +336,7 @@ fn ExtendBufferedRelShared(
         if lock {
             LWLockAcquire(&desc.content_lock, LW_EXCLUSIVE, init_small::globals::MyProcNumber())?;
         }
-        TerminateBufferIO(desc, false, BM_VALID);
+        TerminateBufferIO(desc, false, BM_VALID, true);
     }
 
     for _ in 0..extend_by {

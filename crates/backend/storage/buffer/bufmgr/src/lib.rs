@@ -30,7 +30,8 @@ use types_rel::rel::RelationData;
 
 pub use buf_hdr::{
     BufferDesc, BufferDescriptorGetBuffer, BufferGetBlockPtr, BufferManagerShmemInit,
-    GetBufferDescriptor, LockBufHdr, NBuffersInited, UnlockBufHdr, BUFFERDESC_PAD_TO_SIZE,
+    BufferManagerShmemResetAfterCrash, GetBufferDescriptor, LockBufHdr, NBuffersInited,
+    UnlockBufHdr, BUFFERDESC_PAD_TO_SIZE,
 };
 pub use buf_table::{BufMappingPartitionLock, BufTableHashCode, BufTableLookup};
 pub use freelist::{
@@ -365,6 +366,7 @@ pub mod bench {
     #[inline]
     pub fn pin_unpin(buffer: Buffer) {
         crate::privref::ReservePrivateRefCountEntry();
+        crate::pin::resowner_enlarge_for_pin().expect("ResourceOwnerEnlarge");
         let desc = crate::buf_hdr::GetBufferDescriptor(buffer - 1);
         crate::pin::PinBuffer(desc, &None);
         crate::pin::UnpinBuffer(desc);
