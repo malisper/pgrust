@@ -78,3 +78,147 @@ fn assign_param_for_var<'mcx>(run: &mut PlannerRun<'mcx>, var: &Var<'mcx>) -> Pg
     target.plan_params.push(pp);
     Ok(param_id)
 }
+
+/// replace_nestloop_param_var (paramassign.c): PARAM_EXEC Param for a Var
+/// supplied by a nestloop outer rel, parked on root->curOuterParams.
+pub(crate) fn replace_nestloop_param_var<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    var: &Var<'mcx>,
+    var_node: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    for i in 0..run.root.curOuterParams.len() {
+        let id = run.root.curOuterParams[i];
+        let nlp = run
+            .root
+            .expr_node(id)
+            .as_nest_loop_param()
+            .expect("curOuterParams holds NestLoopParam nodes");
+        if types_nodes::equal(var_node, nlp.paramval) {
+            return Node::mk(
+                mcx,
+                Param {
+                    paramkind: ParamKind::PARAM_EXEC,
+                    paramid: nlp.paramno,
+                    paramtype: var.vartype,
+                    paramtypmod: var.vartypmod,
+                    paramcollid: var.varcollid,
+                    location: var.location,
+                },
+            );
+        }
+    }
+    let (mut prm, _) = crate::subselect::generate_new_exec_param(
+        run,
+        var.vartype,
+        var.vartypmod,
+        var.varcollid,
+    )?;
+    prm.location = var.location;
+    let paramval = Node::mk(
+        mcx,
+        Var { varnullingrels: var.varnullingrels.clone_in(mcx)?, ..*var },
+    )?;
+    let nlp = Node::mk(
+        mcx,
+        types_nodes::plannodes::NestLoopParam { paramno: prm.paramid, paramval },
+    )?;
+    let id = run.intern_expr(nlp);
+    run.root.curOuterParams.push(id);
+    Node::mk(mcx, prm)
+}
+
+/// process_subquery_nestloop_params (paramassign.c), Var arm (PHVs are loud
+/// upstream).
+pub(crate) fn process_subquery_nestloop_params<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    subplan_params: &[types_pathnodes::NodeId],
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    for &pid in subplan_params {
+        let (param_id, item_id) = {
+            let pitem = run.root.planner_param_item(pid);
+            (pitem.paramId, pitem.item)
+        };
+        let item = *run.root.expr_node(item_id);
+        let var = item.as_var().unwrap_or_else(|| {
+            panic!("process_subquery_nestloop_params (paramassign.c): non-Var subquery parameter")
+        });
+        if !crate::relnode::relids_is_member(var.varno, &run.root.curOuterRels) {
+            panic!("non-LATERAL parameter required by subquery");
+        }
+        let mut present = false;
+        for i in 0..run.root.curOuterParams.len() {
+            let id = run.root.curOuterParams[i];
+            let nlp = run
+                .root
+                .expr_node(id)
+                .as_nest_loop_param()
+                .expect("curOuterParams holds NestLoopParam nodes");
+            if nlp.paramno == param_id {
+                debug_assert!(types_nodes::equal(item, nlp.paramval));
+                present = true;
+                break;
+            }
+        }
+        if !present {
+            let paramval = Node::mk(
+                mcx,
+                Var { varnullingrels: var.varnullingrels.clone_in(mcx)?, ..*var },
+            )?;
+            let nlp = Node::mk(
+                mcx,
+                types_nodes::plannodes::NestLoopParam { paramno: param_id, paramval },
+            )?;
+            let id = run.intern_expr(nlp);
+            run.root.curOuterParams.push(id);
+        }
+    }
+    Ok(())
+}
+
+/// identify_current_nestloop_params (paramassign.c), Var arm; returns the
+/// nestParams this join must supply and removes them from curOuterParams.
+pub(crate) fn identify_current_nestloop_params<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    leftrelids: &types_pathnodes::Relids<'mcx>,
+) -> PgResult<types_nodes::NodeList<'mcx>> {
+    let mcx = run.mcx;
+    let mut result = types_nodes::NodeList::nil();
+    let mut i = 0;
+    while i < run.root.curOuterParams.len() {
+        let id = run.root.curOuterParams[i];
+        let (paramno, paramval) = {
+            let nlp = run
+                .root
+                .expr_node(id)
+                .as_nest_loop_param()
+                .expect("curOuterParams holds NestLoopParam nodes");
+            (nlp.paramno, nlp.paramval)
+        };
+        let var = paramval
+            .as_var()
+            .expect("NestLoopParam values are Vars (PHVs are loud upstream)");
+        if crate::relnode::relids_is_member(var.varno, leftrelids) {
+            run.root.curOuterParams.remove(i);
+            let rel = crate::relnode::find_base_rel(&run.root, var.varno);
+            let nulling = {
+                let nr = &run.root.rel(rel).nulling_relids;
+                crate::relnode::relids_intersect(mcx, nr, leftrelids)
+            };
+            let mut nullingrels = types_nodes::Bitmapset::empty();
+            for x in crate::relnode::relids_members(&nulling) {
+                nullingrels.add_member(mcx, x)?;
+            }
+            let newvar = Node::mk(mcx, Var { varnullingrels: nullingrels, ..*var })?;
+            let nlp_node = Node::mk(
+                mcx,
+                types_nodes::plannodes::NestLoopParam { paramno, paramval: newvar },
+            )?;
+            result.lappend(mcx, nlp_node)?;
+        } else {
+            i += 1;
+        }
+    }
+    Ok(result)
+}

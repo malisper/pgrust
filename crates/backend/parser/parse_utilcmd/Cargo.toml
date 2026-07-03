@@ -41,7 +41,8 @@ pg_constraint = { path = "../../catalog/pg_constraint" }
 pg_depend = { path = "../../catalog/pg_depend" }
 commands_comment = { path = "../../commands/comment" }
 readfuncs = { path = "../../nodes/readfuncs" }
+nodes_core = { path = "../../nodes/nodes_core" }
 outfuncs = { path = "../../nodes/outfuncs" }
-rewrite_manip = { path = "../../rewrite/rewrite_manip" }
 relcache = { path = "../../utils/cache/relcache" }
 indexcmds_seams = { path = "../../commands/indexcmds_seams" }
+rewrite_manip = { path = "../../rewrite/rewrite_manip" }

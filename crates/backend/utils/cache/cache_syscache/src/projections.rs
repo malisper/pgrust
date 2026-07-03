@@ -17,7 +17,7 @@ use crate::{
     SearchSysCache3, SearchSysCache4, SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1,
     SysCacheGetAttr, SysCacheKey,
 };
-use crate::cacheinfo::{COLLNAMEENCNSP, COLLOID, AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, ENUMOID, ENUMTYPOIDNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TYPENAMENSP, ATTNAME, OPEROID, PROCOID, RANGEMULTIRANGE, RANGETYPE, RELNAMENSP, RELOID, SEQRELID, STATEXTDATASTXOID, STATEXTOID, STATRELATTINH, TYPEOID};
+use crate::cacheinfo::{COLLNAMEENCNSP, COLLOID, AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAAMNAMENSP, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, ENUMOID, ENUMTYPOIDNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TYPENAMENSP, ATTNAME, OPEROID, PROCOID, RANGEMULTIRANGE, RANGETYPE, RELNAMENSP, RELOID, SEQRELID, STATEXTDATASTXOID, STATEXTOID, STATRELATTINH, TYPEOID};
 
 const ANUM_PG_CLASS_OID: i32 = 1;
 const ANUM_PG_CLASS_RELISSHARED: i32 = 16;
@@ -300,6 +300,7 @@ fn pg_type_element_shape(
     Ok(Some(shape))
 }
 
+const ANUM_PG_OPCLASS_OID: i32 = 1;
 const ANUM_PG_OPCLASS_OPCMETHOD: i32 = 2;
 const ANUM_PG_OPCLASS_OPCFAMILY: i32 = 6;
 const ANUM_PG_OPCLASS_OPCINTYPE: i32 = 7;
@@ -1003,6 +1004,21 @@ fn lookup_pg_proc_name_candidates<'mcx>(
     }
     ReleaseSysCacheList(list);
     Ok(out)
+}
+
+fn lookup_pg_opclass_oid_by_name(amid: Oid, opcname: &str, opcnamespace: Oid) -> PgResult<Oid> {
+    let Some(tuple) = SearchSysCache3(
+        CLAAMNAMENSP,
+        SysCacheKey::Value(Datum::from_oid(amid)),
+        SysCacheKey::Str(opcname),
+        SysCacheKey::Value(Datum::from_oid(opcnamespace)),
+    )?
+    else {
+        return Ok(0);
+    };
+    let oid = getattr(&tuple.tuple(), CLAAMNAMENSP, ANUM_PG_OPCLASS_OID).as_oid();
+    ReleaseSysCache(tuple);
+    Ok(oid)
 }
 
 fn lookup_pg_operator_oid_exact(
@@ -1880,6 +1896,7 @@ pub(crate) fn install() {
     syscache_seams::lookup_pg_namespace_oid_by_name::set(lookup_pg_namespace_oid_by_name);
     syscache_seams::lookup_pg_operator_shape::set(lookup_pg_operator_shape);
     syscache_seams::pg_operator_oprname::set(pg_operator_oprname);
+    syscache_seams::lookup_pg_opclass_oid_by_name::set(lookup_pg_opclass_oid_by_name);
     syscache_seams::lookup_pg_operator_oid_exact::set(lookup_pg_operator_oid_exact);
     syscache_seams::lookup_pg_amproc::set(lookup_pg_amproc);
     syscache_seams::lookup_pg_amproc_members::set(lookup_pg_amproc_members);

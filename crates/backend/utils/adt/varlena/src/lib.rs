@@ -9,6 +9,7 @@
 //! through detoast_seams / pg_locale_seams.
 
 pub mod builtins;
+pub mod abbrev;
 pub mod bytea;
 pub mod concat_format;
 pub mod levenshtein;

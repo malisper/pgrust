@@ -136,7 +136,9 @@ backend_status = { path = "../../backend/utils/activity/backend_status" }
 waitevent = { path = "../../backend/utils/activity/waitevent" }
 pgstat = { path = "../../backend/utils/activity/pgstat" }
 adt_geo = { path = "../../backend/utils/adt/geo" }
+spgist_text = { path = "../../backend/access/spgist/spgist_text" }
 gistproc = { path = "../../backend/access/gist/gistproc" }
+brin_minmax_multi = { path = "../../backend/access/brin/brin_minmax_multi" }
 adt_acl = { path = "../../backend/utils/adt/acl" }
 adt_misc = { path = "../../backend/utils/adt/adt_misc" }
 adt_rowtypes = { path = "../../backend/utils/adt/rowtypes" }

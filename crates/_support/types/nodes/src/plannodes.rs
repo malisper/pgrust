@@ -488,6 +488,14 @@ pub struct NestLoop<'mcx> {
     pub nestParams: NodeList<'mcx>,
 }
 
+/// nestParams cell: outer-Var source for one PARAM_EXEC slot the nestloop
+/// sets before each inner rescan.
+#[repr(C)]
+pub struct NestLoopParam<'mcx> {
+    pub paramno: i32,
+    pub paramval: Node<'mcx>,
+}
+
 /// Per-clause arrays parallel `mergeclauses` (C's `array_size(mergeclauses)`).
 #[derive(Default)]
 #[repr(C)]
@@ -674,6 +682,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for Limit<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for NestLoop<'mcx> {
     const TAG: NodeTag = NodeTag::T_NestLoop;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for NestLoopParam<'mcx> {
+    const TAG: NodeTag = NodeTag::T_NestLoopParam;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for MergeJoin<'mcx> {
     const TAG: NodeTag = NodeTag::T_MergeJoin;
@@ -993,6 +1004,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_limit(self) -> Option<&'mcx Limit<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_nest_loop_param(self) -> Option<&'mcx NestLoopParam<'mcx>> {
         self.as_variant()
     }
 

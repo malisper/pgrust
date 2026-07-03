@@ -448,6 +448,12 @@ seam_core::seam!(
     pub fn lookup_pg_opclass_shape(opclass: Oid) -> PgResult<Option<PgOpclassShape>>
 );
 
+// GetSysCacheOid3(CLAAMNAMENSP): pg_opclass by (opcmethod, opcname,
+// opcnamespace); InvalidOid when absent.
+seam_core::seam!(
+    pub fn lookup_pg_opclass_oid_by_name(amid: Oid, opcname: &str, opcnamespace: Oid) -> PgResult<Oid>
+);
+
 seam_core::seam!(
     pub fn lookup_pg_opfamily_shape(opfid: Oid) -> PgResult<Option<PgOpfamilyShape>>
 );

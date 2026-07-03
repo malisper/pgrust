@@ -15,3 +15,4 @@ types_storage = { path = "../../../../_support/types/types_storage" }
 heaptuple = { path = "../../common/heaptuple" }
 detoast = { path = "../../common/detoast" }
 heaptoast_seams = { path = "../../heap/heaptoast_seams" }
+brin_minmax_multi = { path = "../brin_minmax_multi" }

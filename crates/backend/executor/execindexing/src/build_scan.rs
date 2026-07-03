@@ -1,8 +1,8 @@
 // heapam_index_build_range_scan (heapam_handler.c), serial non-concurrent
 // whole-relation lane; boundary hoisted above heapam_handler (execindexing
 // already sits above the AM stack — a heapam_handler home would cycle).
-// Loud: concurrent builds, parallel scans, predicates/expressions, foreign
-// in-progress xacts (XactLockTableWait lane).
+// Loud: concurrent builds, parallel scans, foreign in-progress xacts
+// (XactLockTableWait lane).
 use ::datum::Datum;
 use ::mcx::{Mcx, PgVec};
 use ::types_core::{INDEX_MAX_KEYS, InvalidBlockNumber};
@@ -15,13 +15,13 @@ use ::types_tuple::itemptr::{InvalidOffsetNumber, ItemPointerData};
 use ::types_tuple::HeapTupleData;
 use tableam_vocab::{SO_ALLOW_STRAT, SO_ALLOW_SYNC, SO_TYPE_SEQSCAN};
 
-use crate::{unported, FormIndexDatum, IndexInfo};
+use crate::{index_predicate_passes, unported, FormIndexDatum, IndexInfo};
 
 pub fn table_index_build_scan<'mcx, F>(
     mcx: Mcx<'mcx>,
     heap_relation: &Relation<'mcx>,
     index_relation: &Relation<'mcx>,
-    index_info: &mut IndexInfo,
+    index_info: &mut IndexInfo<'mcx>,
     allow_sync: bool,
     mut callback: F,
 ) -> PgResult<f64>
@@ -62,8 +62,13 @@ where
     let mut root_offsets = [InvalidOffsetNumber; MaxHeapTuplesPerPage];
     let mut values = [Datum::null(); INDEX_MAX_KEYS as usize];
     let mut isnull = [false; INDEX_MAX_KEYS as usize];
+    // C's per-tuple econtext reset (heapam_handler.c:1611): expression and
+    // predicate results land here, consumed by `callback` within the
+    // iteration, freed before the next tuple.
+    let mut per_tuple = mcx::MemoryContext::new_bump("IndexBuildPerTuple");
 
     loop {
+        per_tuple.reset();
         let Some((mut tuple, buffer)) = next_tuple(&mut scan)? else {
             break;
         };
@@ -150,9 +155,21 @@ where
         }
 
         exectuples::exec_store_buffer_heap_tuple(&mut slot, mcx, tuple, buffer);
-        // Predicate/expression evaluation would go here (loud in BuildIndexInfo).
 
-        FormIndexDatum(index_info, &mut slot, &mut values[..], &mut isnull[..])?;
+        if !index_info.ii_Predicate.is_nil()
+            && !index_predicate_passes(mcx, per_tuple.mcx(), index_info, &mut slot)?
+        {
+            continue;
+        }
+
+        FormIndexDatum(
+            mcx,
+            per_tuple.mcx(),
+            index_info,
+            &mut slot,
+            &mut values[..],
+            &mut isnull[..],
+        )?;
 
         let self_tid = slot_tid(&slot);
         if slot_is_heap_only(&slot) {

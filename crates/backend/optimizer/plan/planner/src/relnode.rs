@@ -149,6 +149,24 @@ pub fn relids_members<'a>(a: &'a Relids<'_>) -> impl Iterator<Item = i32> + 'a {
         })
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SubsetCmp {
+    Equal,
+    Subset1,
+    Subset2,
+    Different,
+}
+
+// bms_subset_compare (bitmapset.c).
+pub fn relids_subset_compare(a: &Relids<'_>, b: &Relids<'_>) -> SubsetCmp {
+    match (relids_is_subset(a, b), relids_is_subset(b, a)) {
+        (true, true) => SubsetCmp::Equal,
+        (true, false) => SubsetCmp::Subset1,
+        (false, true) => SubsetCmp::Subset2,
+        (false, false) => SubsetCmp::Different,
+    }
+}
+
 pub fn relids_copy<'mcx>(mcx: Mcx<'mcx>, a: &Relids<'mcx>) -> Relids<'mcx> {
     a.as_ref().map(|b| {
         let mut words = PgVec::new_in(mcx);

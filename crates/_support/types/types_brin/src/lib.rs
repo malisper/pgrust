@@ -8,7 +8,9 @@ use std::rc::Rc;
 
 use ::datum::Datum;
 use ::fmgr::FmgrInfo;
-use ::mcx::MemoryContext;
+use ::mcx::{vec_append_bytes, vec_with_capacity_in, Mcx, MemoryContext, PgVec};
+use ::types_error::PgResult;
+use ::types_tuple::varatt::varsize_any;
 use ::types_core::{BlockNumber, Buffer, InvalidBlockNumber, Oid, BLCKSZ};
 use ::types_storage::bufpage::{PageMut, PageRef, SizeOfPageHeaderData};
 use ::types_tuple::itemptr::ItemPointerData;
@@ -348,9 +350,12 @@ pub const F_BRIN_BLOOM_OPCINFO: Oid = 4591;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BrinOpcKind {
     MinMax,
+    MinMaxMulti,
 }
 
 pub const BRIN_MAX_NSTORED: usize = 2;
+
+pub const PG_BRIN_MINMAX_MULTI_SUMMARYOID: Oid = 4601;
 
 pub struct MinmaxOpaque {
     pub cached_subtype: Cell<Oid>,
@@ -370,7 +375,49 @@ pub struct BrinColInfo {
     pub oi_nstored: u16,
     pub oi_regular_nulls: bool,
     pub kind: BrinOpcKind,
+    pub oi_typids: [Oid; BRIN_MAX_NSTORED],
     pub minmax: MinmaxOpaque,
+    pub distance_procinfo: RefCell<Option<FmgrInfo>>,
+}
+
+/// datumCopy; by-ref copies land in `mcx`.
+pub fn datum_copy<'mcx>(
+    mcx: Mcx<'mcx>,
+    value: Datum,
+    typbyval: bool,
+    typlen: i16,
+) -> PgResult<Datum> {
+    if typbyval {
+        return Ok(value);
+    }
+    let p = value.as_usize() as *const u8;
+    // SAFETY: by-ref datum is live per caller contract; size from its varlena
+    // header or the fixed typlen.
+    let sz = unsafe {
+        if typlen == -1 {
+            varsize_any(p)
+        } else {
+            debug_assert!(typlen > 0);
+            typlen as usize
+        }
+    };
+    let mut v: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, sz)?;
+    // SAFETY: as above.
+    vec_append_bytes(&mut v, unsafe { core::slice::from_raw_parts(p, sz) })?;
+    Ok(Datum::from_usize(v.leak().as_ptr() as usize))
+}
+
+pub struct MinMaxMultiRanges {
+    pub typid: Oid,
+    pub colloid: Oid,
+    pub attno: u16,
+    pub cmp: FmgrInfo,
+    pub nranges: i32,
+    pub nsorted: i32,
+    pub nvalues: i32,
+    pub maxvalues: i32,
+    pub target_maxvalues: i32,
+    pub values: Vec<Datum>,
 }
 
 // BrinDesc (brin_internal.h). Owner structure holding droppy caches (Rc,
@@ -382,7 +429,9 @@ pub struct BrinDesc<'mcx> {
     // Decode-once copies of bd_index fields the opclasses read (rule 6);
     // BrinDesc carries no Relation handle.
     pub bd_opfamily: Vec<Oid>,
+    pub bd_opcintype: Vec<Oid>,
     pub bd_indcollation: Vec<Oid>,
+    pub bd_pages_per_range: BlockNumber,
     pub bd_info: Vec<BrinColInfo>,
 }
 
@@ -398,6 +447,7 @@ pub struct BrinValues {
     pub bv_hasnulls: bool,
     pub bv_allnulls: bool,
     pub bv_values: [Datum; BRIN_MAX_NSTORED],
+    pub bv_mem_value: Option<Box<MinMaxMultiRanges>>,
 }
 
 // BrinMemTuple; bt_context owns the datumCopy'd by-ref values and is reset by

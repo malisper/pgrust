@@ -74,7 +74,7 @@ pub fn multi_exec_bitmap_index_scan_into<'mcx>(
 
     let scandesc = node.biss_ScanDesc.as_deref_mut().expect("scan desc initialized above");
     let n_tuples = index_getbitmap(scandesc, tbm)? as f64;
-    check_for_interrupts();
+    check_for_interrupts()?;
     Ok(n_tuples)
 }
 
@@ -109,17 +109,12 @@ pub fn exec_rescan_bitmap_index_scan(node: &mut BitmapIndexScanState<'_>) -> PgR
     Ok(())
 }
 
-#[cold]
-#[inline(never)]
-fn interrupt_unported() -> ! {
-    panic!("nodebitmapindexscan: ProcessInterrupts (tcop/postgres.c) unported")
-}
-
 #[inline(always)]
-fn check_for_interrupts() {
+fn check_for_interrupts() -> types_error::PgResult<()> {
     if init_small::globals::InterruptPending() {
-        interrupt_unported();
+        postgres_seams::check_for_interrupts::call()?;
     }
+    Ok(())
 }
 
 // Exempt (every field): droppy owners, all released in

@@ -96,6 +96,7 @@ pub const BTREE_AM_OID: Oid = 403;
 pub const HASH_AM_OID: Oid = 405;
 pub const GIN_AM_OID: Oid = 2742;
 pub const BRIN_AM_OID: Oid = 3580;
+pub const SPGIST_AM_OID: Oid = 4000;
 pub const GIST_AM_OID: Oid = 783;
 
 pub const INDEX_AM_HANDLEROID: Oid = 325;

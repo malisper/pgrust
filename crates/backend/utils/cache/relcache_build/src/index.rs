@@ -21,9 +21,11 @@ const INT2_BTREE_OPS_OID: Oid = 1979;
 const BTREE_AM_OID: Oid = 403;
 const HASH_AM_OID: Oid = 405;
 const BRIN_AM_OID: Oid = 3580;
+const SPGIST_AM_OID: Oid = 4000;
 const GIST_AM_OID: Oid = 783;
 const BTNProcs: usize = 6;
 const GISTNProcs: usize = 12;
+const SPGISTNProcs: usize = 7;
 // BRIN_LAST_OPTIONAL_PROCNUM (brin_internal.h).
 const BRINNProcs: usize = 15;
 const MAX_AM_PROCS: usize = BRINNProcs;
@@ -57,6 +59,7 @@ const Anum_pg_index_indkey: i32 = 16;
 const Anum_pg_index_indcollation: i32 = 17;
 const Anum_pg_index_indclass: i32 = 18;
 const Anum_pg_index_indoption: i32 = 19;
+const Anum_pg_index_indexprs: i32 = 20;
 const Anum_pg_index_indpred: i32 = 21;
 
 const Anum_pg_opclass_opcfamily: i32 = 6;
@@ -105,10 +108,11 @@ pub(crate) fn relation_init_index_access_info(
         HASH_AM_OID => HASHNProcs,
         GIN_AM_OID => GINNProcs,
         GIST_AM_OID => GISTNProcs,
+        SPGIST_AM_OID => SPGISTNProcs,
         BRIN_AM_OID => BRINNProcs,
         other => panic!(
             "relcache_build: index AM {other} for index {relid} unported \
-             (amapi closed set is btree+hash+gin+gist+brin)"
+             (amapi closed set is btree+hash+gin+gist+spgist+brin)"
         ),
     };
     let mut opfamily: PgVec<'static, Oid> = mcx::vec_with_capacity_in(mcx, nkey)?;
@@ -129,6 +133,7 @@ pub(crate) fn relation_init_index_access_info(
         // resolves its procs in initGISTstate; brin via lsyscache at use.
         let proc = if form.relam == GIN_AM_OID
             || form.relam == GIST_AM_OID
+            || form.relam == SPGIST_AM_OID
             || form.relam == BRIN_AM_OID
         {
             0
@@ -160,6 +165,14 @@ pub(crate) fn relation_init_index_access_info(
         indisready: get(Anum_pg_index_indisready)?.as_bool(),
         indkey,
         has_indpred: !SysCacheGetAttr(INDEXRELID, &tup, Anum_pg_index_indpred)?.1,
+        indexprs_src: {
+            let (d, isnull) = SysCacheGetAttr(INDEXRELID, &tup, Anum_pg_index_indexprs)?;
+            if isnull { None } else { Some(crate::attrs::text_str(mcx, mcx, d)?) }
+        },
+        indpred_src: {
+            let (d, isnull) = SysCacheGetAttr(INDEXRELID, &tup, Anum_pg_index_indpred)?;
+            if isnull { None } else { Some(crate::attrs::text_str(mcx, mcx, d)?) }
+        },
     };
     ReleaseSysCache(tup);
 

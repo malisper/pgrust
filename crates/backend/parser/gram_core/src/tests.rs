@@ -1305,48 +1305,6 @@ fn create_procedure() {
 }
 
 #[test]
-fn create_view_stmt() {
-    let list = parse("CREATE VIEW v1 AS SELECT t1.a, t2.d FROM t1 JOIN t2 ON t1.a = t2.a WHERE t1.b > 10");
-    let rs = only_stmt(&list);
-    let v = rs.stmt.expect("stmt").as_variant::<types_nodes::rawnodes::ViewStmt>().expect("ViewStmt");
-    assert_eq!(v.view.expect("view").relname, Some("v1"));
-    assert!(!v.replace);
-    assert!(v.aliases.is_nil() && v.options.is_nil());
-    assert_eq!(v.withCheckOption, types_nodes::rawnodes::ViewCheckOption::NO_CHECK_OPTION);
-    let sel = v.query.expect("query").as_select_stmt().expect("SelectStmt");
-    assert_eq!(sel.targetList.len(), 2);
-    assert!(sel.whereClause.is_some());
-}
-
-#[test]
-fn create_or_replace_view_with_aliases() {
-    let list = parse("CREATE OR REPLACE VIEW v2 (x, y) AS SELECT 1, 2");
-    let rs = only_stmt(&list);
-    let v = rs.stmt.expect("stmt").as_variant::<types_nodes::rawnodes::ViewStmt>().expect("ViewStmt");
-    assert!(v.replace);
-    assert_eq!(v.aliases.len(), 2);
-    assert_eq!(v.aliases.nth(0).as_string().unwrap().sval, "x");
-    assert_eq!(v.withCheckOption, types_nodes::rawnodes::ViewCheckOption::NO_CHECK_OPTION);
-}
-
-#[test]
-fn create_view_with_check_option_kinds() {
-    for (sql, want) in [
-        ("CREATE VIEW vc AS SELECT 1 WITH CHECK OPTION",
-         types_nodes::rawnodes::ViewCheckOption::CASCADED_CHECK_OPTION),
-        ("CREATE VIEW vc AS SELECT 1 WITH CASCADED CHECK OPTION",
-         types_nodes::rawnodes::ViewCheckOption::CASCADED_CHECK_OPTION),
-        ("CREATE VIEW vc AS SELECT 1 WITH LOCAL CHECK OPTION",
-         types_nodes::rawnodes::ViewCheckOption::LOCAL_CHECK_OPTION),
-    ] {
-        let list = parse(sql);
-        let v = only_stmt(&list).stmt.unwrap()
-            .as_variant::<types_nodes::rawnodes::ViewStmt>().expect("ViewStmt");
-        assert_eq!(v.withCheckOption, want, "{sql}");
-    }
-}
-
-#[test]
 fn parses_sql_value_functions() {
     use types_nodes::SQLValueFunctionOp::*;
     for (sql, op) in [
@@ -1366,12 +1324,6 @@ fn parses_sql_value_functions() {
         assert_eq!(svf.typmod, -1);
         assert_eq!(svf.location, 7);
     }
-}
-
-#[test]
-#[should_panic(expected = "unimplemented grammar action")]
-fn create_recursive_view_is_loud() {
-    let _ = parse("CREATE RECURSIVE VIEW vr (n) AS SELECT 1");
 }
 
 #[test]
@@ -1554,4 +1506,147 @@ fn constraint_statements_parse() {
     let con = cd.constraints.nth(0).as_variant::<Constraint>().unwrap();
     assert_eq!(con.contype, ConstrType::CONSTR_UNIQUE);
     assert!(con.nulls_not_distinct);
+}
+
+#[test]
+fn create_view_stmt() {
+    let list = parse("CREATE VIEW v1 AS SELECT t1.a, t2.d FROM t1 JOIN t2 ON t1.a = t2.a WHERE t1.b > 10");
+    let rs = only_stmt(&list);
+    let v = rs.stmt.expect("stmt").as_variant::<types_nodes::rawnodes::ViewStmt>().expect("ViewStmt");
+    assert_eq!(v.view.expect("view").relname, Some("v1"));
+    assert!(!v.replace);
+    assert!(v.aliases.is_nil() && v.options.is_nil());
+    assert_eq!(v.withCheckOption, types_nodes::rawnodes::ViewCheckOption::NO_CHECK_OPTION);
+    let sel = v.query.expect("query").as_select_stmt().expect("SelectStmt");
+    assert_eq!(sel.targetList.len(), 2);
+    assert!(sel.whereClause.is_some());
+}
+
+#[test]
+fn create_or_replace_view_with_aliases() {
+    let list = parse("CREATE OR REPLACE VIEW v2 (x, y) AS SELECT 1, 2");
+    let rs = only_stmt(&list);
+    let v = rs.stmt.expect("stmt").as_variant::<types_nodes::rawnodes::ViewStmt>().expect("ViewStmt");
+    assert!(v.replace);
+    assert_eq!(v.aliases.len(), 2);
+    assert_eq!(v.aliases.nth(0).as_string().unwrap().sval, "x");
+    assert_eq!(v.withCheckOption, types_nodes::rawnodes::ViewCheckOption::NO_CHECK_OPTION);
+}
+
+#[test]
+fn create_view_with_check_option_kinds() {
+    for (sql, want) in [
+        ("CREATE VIEW vc AS SELECT 1 WITH CHECK OPTION",
+         types_nodes::rawnodes::ViewCheckOption::CASCADED_CHECK_OPTION),
+        ("CREATE VIEW vc AS SELECT 1 WITH CASCADED CHECK OPTION",
+         types_nodes::rawnodes::ViewCheckOption::CASCADED_CHECK_OPTION),
+        ("CREATE VIEW vc AS SELECT 1 WITH LOCAL CHECK OPTION",
+         types_nodes::rawnodes::ViewCheckOption::LOCAL_CHECK_OPTION),
+    ] {
+        let list = parse(sql);
+        let v = only_stmt(&list).stmt.unwrap()
+            .as_variant::<types_nodes::rawnodes::ViewStmt>().expect("ViewStmt");
+        assert_eq!(v.withCheckOption, want, "{sql}");
+    }
+}
+
+#[test]
+#[should_panic(expected = "unimplemented grammar action")]
+fn create_recursive_view_is_loud() {
+    let _ = parse("CREATE RECURSIVE VIEW vr (n) AS SELECT 1");
+}
+
+#[test]
+fn create_rule_full_shape() {
+    let list = parse(
+        "CREATE OR REPLACE RULE r1 AS ON UPDATE TO s.t WHERE old.a = 1 DO INSTEAD \
+         (INSERT INTO log VALUES (new.a); DELETE FROM log2)",
+    );
+    let rs = only_stmt(&list);
+    let r = rs
+        .stmt
+        .expect("stmt")
+        .as_variant::<types_nodes::rawnodes::RuleStmt>()
+        .expect("RuleStmt");
+    assert!(r.replace);
+    assert_eq!(r.rulename, "r1");
+    assert_eq!(r.event, types_nodes::nodes_enums::CmdType::CMD_UPDATE);
+    assert!(r.instead);
+    assert!(r.whereClause.is_some());
+    let rel = r.relation.expect("relation");
+    assert_eq!(rel.schemaname, Some("s"));
+    assert_eq!(rel.relname, Some("t"));
+    assert_eq!(r.actions.len(), 2);
+    assert!(r.actions.nth(0).as_insert_stmt().is_some());
+    assert!(r.actions.nth(1).as_delete_stmt().is_some());
+}
+
+#[test]
+fn create_rule_events_and_nothing() {
+    for (sql, event, instead, nact) in [
+        ("CREATE RULE r AS ON INSERT TO t DO ALSO NOTHING",
+         types_nodes::nodes_enums::CmdType::CMD_INSERT, false, 0),
+        ("CREATE RULE r AS ON DELETE TO t DO INSTEAD NOTHING",
+         types_nodes::nodes_enums::CmdType::CMD_DELETE, true, 0),
+        ("CREATE RULE r AS ON SELECT TO t DO INSTEAD SELECT 1",
+         types_nodes::nodes_enums::CmdType::CMD_SELECT, true, 1),
+        ("CREATE RULE r AS ON UPDATE TO t DO UPDATE t2 SET a = 1",
+         types_nodes::nodes_enums::CmdType::CMD_UPDATE, false, 1),
+    ] {
+        let list = parse(sql);
+        let r = only_stmt(&list)
+            .stmt
+            .unwrap()
+            .as_variant::<types_nodes::rawnodes::RuleStmt>()
+            .expect("RuleStmt");
+        assert_eq!(r.event, event, "{sql}");
+        assert_eq!(r.instead, instead, "{sql}");
+        assert_eq!(r.actions.len(), nact, "{sql}");
+        assert!(!r.replace);
+        assert!(r.whereClause.is_none());
+    }
+}
+
+#[test]
+fn drop_rule_shapes() {
+    let list = parse("DROP RULE r1 ON s.t CASCADE");
+    let d = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_drop_stmt()
+        .expect("DropStmt");
+    assert_eq!(d.removeType, types_nodes::parsenodes::ObjectType::OBJECT_RULE);
+    assert!(!d.missing_ok);
+    assert_eq!(d.behavior, types_nodes::parsenodes::DropBehavior::DROP_CASCADE);
+    let names = d.objects.nth(0).as_list().expect("name list");
+    assert_eq!(names.len(), 3);
+    assert_eq!(names.nth(2).as_string().unwrap().sval, "r1");
+
+    let list = parse("DROP RULE IF EXISTS r1 ON t");
+    let d = only_stmt(&list).stmt.unwrap().as_drop_stmt().expect("DropStmt");
+    assert!(d.missing_ok);
+    let names = d.objects.nth(0).as_list().expect("name list");
+    assert_eq!(names.len(), 2);
+    assert_eq!(names.nth(1).as_string().unwrap().sval, "r1");
+}
+
+#[test]
+fn alter_table_enable_disable_rule() {
+    use types_nodes::parsenodes::{AlterTableCmd, AlterTableType};
+    for (sql, subtype, name) in [
+        ("ALTER TABLE t ENABLE RULE r", AlterTableType::AT_EnableRule, "r"),
+        ("ALTER TABLE t ENABLE ALWAYS RULE r", AlterTableType::AT_EnableAlwaysRule, "r"),
+        ("ALTER TABLE t ENABLE REPLICA RULE r", AlterTableType::AT_EnableReplicaRule, "r"),
+        ("ALTER TABLE t DISABLE RULE r", AlterTableType::AT_DisableRule, "r"),
+    ] {
+        let list = parse(sql);
+        let a = only_stmt(&list)
+            .stmt
+            .unwrap()
+            .as_variant::<types_nodes::parsenodes::AlterTableStmt>()
+            .expect("AlterTableStmt");
+        let cmd = a.cmds.nth(0).as_variant::<AlterTableCmd>().expect("AlterTableCmd");
+        assert_eq!(cmd.subtype, subtype, "{sql}");
+        assert_eq!(cmd.name, Some(name), "{sql}");
+    }
 }

@@ -3836,19 +3836,25 @@ impl<'mcx> Parser<'mcx> {
                 n.options = view.v(3).list();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            // table_ref: select_with_parens opt_alias_clause.
-            1838 => {
+            // table_ref: select_with_parens opt_alias_clause
+            //          | LATERAL_P select_with_parens opt_alias_clause.
+            1838 | 1839 => {
+                let off = if rule == 1839 { 1 } else { 0 };
                 let mut n = Node::build::<RangeSubselect>(mcx)?;
-                n.lateral = false;
-                n.subquery = view.v(1).node();
-                n.alias = view.v(2).alias();
+                n.lateral = rule == 1839;
+                n.subquery = view.v(1 + off).node();
+                n.alias = view.v(2 + off).alias();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            // alias_clause: AS ColId '(' name_list ')'.
-            1850 => {
+            // alias_clause: AS ColId '(' name_list ')' | ColId '(' name_list ')'.
+            1850 | 1852 => {
+                let off = if rule == 1850 { 1 } else { 0 };
                 let a = Node::mk_mut(
                     mcx,
-                    Alias { aliasname: Some(view.v(2).str_val()), colnames: view.v(4).list() },
+                    Alias {
+                        aliasname: Some(view.v(1 + off).str_val()),
+                        colnames: view.v(3 + off).list(),
+                    },
                 )?;
                 *yyval = YYSTYPE::Alias(Some(a.seal_ref()));
             }
@@ -5119,6 +5125,73 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::Node(Some(make_string_const_cast(mcx, s, sloc, t)?));
             }
+            // --- rules-lane arms (append-only; splice after grammar-batch) ---
+            // RuleStmt: CREATE opt_or_replace RULE name AS ON event TO
+            // qualified_name where_clause DO opt_instead RuleActionList
+            1432 => {
+                let relation = view.v(9).node().expect("qualified_name");
+                let n = Node::mk(
+                    mcx,
+                    types_nodes::rawnodes::RuleStmt {
+                        relation: relation.as_variant::<RangeVar>(),
+                        rulename: view.v(4).str_val(),
+                        whereClause: view.v(10).node(),
+                        event: int_to_cmd_type(view.v(7).ival()),
+                        instead: view.v(12).boolean(),
+                        actions: view.v(13).list(),
+                        replace: view.v(2).boolean(),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            // RuleActionList single / RuleActionMulti
+            1434 => {
+                let n = view.v(1).node().expect("RuleActionStmt");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, n)?);
+            }
+            1436 => {
+                let mut list = view.v(1).list();
+                if let Some(n) = view.v(3).node() {
+                    list.lappend(mcx, n)?;
+                }
+                *yyval = YYSTYPE::List(list);
+            }
+            1437 => {
+                *yyval = YYSTYPE::List(match view.v(1).node() {
+                    Some(n) => NodeList::make1(mcx, n)?,
+                    None => NodeList::nil(),
+                });
+            }
+            // event
+            1445 => *yyval = YYSTYPE::Ival(types_nodes::nodes_enums::CmdType::CMD_SELECT as i32),
+            1446 => *yyval = YYSTYPE::Ival(types_nodes::nodes_enums::CmdType::CMD_UPDATE as i32),
+            1447 => *yyval = YYSTYPE::Ival(types_nodes::nodes_enums::CmdType::CMD_DELETE as i32),
+            1448 => *yyval = YYSTYPE::Ival(types_nodes::nodes_enums::CmdType::CMD_INSERT as i32),
+            // opt_instead: INSTEAD | ALSO | empty
+            1449 => *yyval = YYSTYPE::Boolean(true),
+            1450 | 1451 => *yyval = YYSTYPE::Boolean(false),
+            // DropStmt: DROP object_type_name_on_any_name [IF_P EXISTS] name
+            // ON any_name opt_drop_behavior
+            922 => {
+                let mut objects = view.v(5).list();
+                objects.lappend(mcx, Node::mk_string(mcx, view.v(3).str_val())?)?;
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = object_type(view.v(2).ival());
+                n.objects = NodeList::make1(mcx, Node::mk_list(mcx, objects)?)?;
+                n.behavior = drop_behavior(view.v(6).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            923 => {
+                let mut objects = view.v(7).list();
+                objects.lappend(mcx, Node::mk_string(mcx, view.v(5).str_val())?)?;
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = object_type(view.v(2).ival());
+                n.objects = NodeList::make1(mcx, Node::mk_list(mcx, objects)?)?;
+                n.behavior = drop_behavior(view.v(8).ival());
+                n.missing_ok = true;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // alter_table_cmd ENABLE/DISABLE RULE
             _ => unimplemented_rule(rule),
         }
         Ok(())
@@ -5825,6 +5898,17 @@ fn make_func_call<'mcx>(
             location,
         },
     )
+}
+
+fn int_to_cmd_type(v: i32) -> types_nodes::nodes_enums::CmdType {
+    use types_nodes::nodes_enums::CmdType::*;
+    match v {
+        1 => CMD_SELECT,
+        2 => CMD_UPDATE,
+        3 => CMD_INSERT,
+        4 => CMD_DELETE,
+        other => panic!("gram_core: unexpected CmdType value {other}"),
+    }
 }
 
 fn leftmost_loc(loc1: i32, loc2: i32) -> i32 {
