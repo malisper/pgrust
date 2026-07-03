@@ -363,9 +363,7 @@ fn seams_installed() {
     assert!(mbutils_seams::pg_server_to_client::call(ctx.mcx(), b"x")
         .unwrap()
         .is_none());
-    assert!(mbutils_seams::pg_client_to_server::call(ctx.mcx(), b"x")
-        .unwrap()
-        .is_none());
+    assert!(pg_client_to_server(ctx.mcx(), b"x").unwrap().is_none());
     assert_eq!(ctx.used(), 0);
 }
 

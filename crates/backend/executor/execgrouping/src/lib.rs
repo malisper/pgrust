@@ -7,6 +7,7 @@
 use core::ptr::NonNull;
 use std::rc::Rc;
 
+use ::datum::Datum;
 use ::execexpr::{
     exec_build_grouping_equal, exec_build_hash32_from_attrs, exec_eval_expr, exec_qual,
     EvalSlots, ExprState,
@@ -50,16 +51,47 @@ fn no_hash_function(eq_opr: Oid) -> Box<PgError> {
     )))
 }
 
+// key/key_isnull: first key datum cached at insert (datum1 idea); valid only
+// under a byval ProbeKernel, whose match skips the stored-tuple deform.
 #[derive(Clone, Copy)]
 pub struct TupleHashEntryData {
     first_tuple: NonNull<MinimalTupleData>,
     hash: u32,
+    key_isnull: bool,
+    key: Datum,
+}
+
+const _: () = assert!(core::mem::size_of::<TupleHashEntryData>() == 24);
+
+// Monomorphized single-byval-key probe kernel selected at build from the
+// hash/eq fn oids (execexpr CmpOp precedent): C-exact hash + NOT DISTINCT
+// inline, no compiled-program walk (C only has the interpreted path non-JIT).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProbeKernel {
+    Expr,
+    Int4 { att: u16 },
+    Int8 { att: u16 },
+}
+
+impl ProbeKernel {
+    fn select(key_col_idx: &[i16], eqfuncoids: &[Oid], hashfunctions: &[Oid]) -> ProbeKernel {
+        if let ([col], [eq], [hash]) = (key_col_idx, eqfuncoids, hashfunctions) {
+            let att = (col - 1) as u16;
+            match (*hash, *eq) {
+                (450, 65) => return ProbeKernel::Int4 { att },
+                (949, 467) => return ProbeKernel::Int8 { att },
+                _ => {}
+            }
+        }
+        ProbeKernel::Expr
+    }
 }
 
 pub struct TupleHashTable<'mcx> {
     entries: PgVec<'mcx, TupleHashEntryData>,
     hashtab: hashbrown::HashTable<u32>,
     additionalsize: usize,
+    kernel: ProbeKernel,
     tab_hash_expr: PgBox<'mcx, ExprState<'mcx>>,
     tab_eq_func: PgBox<'mcx, ExprState<'mcx>>,
     tableslot: SlotData<'mcx>,
@@ -116,6 +148,7 @@ pub fn build_tuple_hash_table<'mcx>(
         entries: vec_with_capacity_in(metacxt, nbuckets)?,
         hashtab: hashbrown::HashTable::with_capacity(nbuckets),
         additionalsize,
+        kernel: ProbeKernel::select(key_col_idx, eqfuncoids, hashfunctions),
         tab_hash_expr,
         tab_eq_func,
         tableslot,
@@ -142,10 +175,25 @@ pub fn get_hash_memory_limit() -> usize {
 impl<'mcx> TupleHashTable<'mcx> {
     /// C `TupleHashTableHash`; the caller resets its per-tuple context.
     pub fn hash_slot(&mut self, input_slot: &mut SlotData<'mcx>) -> PgResult<u32> {
-        let mut slots = EvalSlots { scan: None, inner: Some(input_slot), outer: None };
-        let r = exec_eval_expr(&mut self.tab_hash_expr, &mut slots)?;
-        debug_assert!(!r.isnull);
-        Ok(::hashfn::murmurhash32(r.value.as_u32()))
+        // NULL hashes as 0, as EEOP_HASHDATUM_FIRST does.
+        match self.kernel {
+            ProbeKernel::Int4 { att } => {
+                let (key, isnull) = kernel_key(input_slot, att);
+                let h = if isnull { 0 } else { ::hashfn::hash_bytes_uint32(key.as_u32()) };
+                Ok(::hashfn::murmurhash32(h))
+            }
+            ProbeKernel::Int8 { att } => {
+                let (key, isnull) = kernel_key(input_slot, att);
+                let h = if isnull { 0 } else { ::hashfn::hash_bytes_uint32(hashint8_fold(key)) };
+                Ok(::hashfn::murmurhash32(h))
+            }
+            ProbeKernel::Expr => {
+                let mut slots = EvalSlots { scan: None, inner: Some(input_slot), outer: None };
+                let r = exec_eval_expr(&mut self.tab_hash_expr, &mut slots)?;
+                debug_assert!(!r.isnull);
+                Ok(::hashfn::murmurhash32(r.value.as_u32()))
+            }
+        }
     }
 
     /// C `LookupTupleHashEntryHash`; None `table_mcx` = C's find-only mode.
@@ -156,33 +204,62 @@ impl<'mcx> TupleHashTable<'mcx> {
         table_mcx: Option<Mcx<'_>>,
         slot_mcx: Mcx<'mcx>,
     ) -> PgResult<(Option<u32>, bool)> {
-        let TupleHashTable { entries, hashtab, tab_eq_func, tableslot, .. } = self;
+        let TupleHashTable { entries, hashtab, tab_eq_func, tableslot, kernel, .. } = self;
         let mut eq_err: Option<Box<PgError>> = None;
         let input_slot = input_slot;
-        let found = hashtab
-            .find(hash as u64, |ix: &u32| {
-                let e = &entries[*ix as usize];
-                if e.hash != hash {
-                    return false;
-                }
-                // SAFETY: entry images live in table_mcx until reset().
-                unsafe {
-                    exectuples::exec_store_minimal_tuple_ptr(tableslot, slot_mcx, e.first_tuple)
-                };
-                let mut slots = EvalSlots {
-                    scan: None,
-                    inner: Some(&mut *input_slot),
-                    outer: Some(&mut *tableslot),
-                };
-                match exec_qual(Some(tab_eq_func), &mut slots) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        eq_err = Some(e);
-                        false
+        // Kernel match = NOT DISTINCT over the entry's cached key datum.
+        let found = match *kernel {
+            ProbeKernel::Int4 { att } => {
+                let (key, isnull) = kernel_key(input_slot, att);
+                hashtab
+                    .find(hash as u64, |ix: &u32| {
+                        let e = &entries[*ix as usize];
+                        e.hash == hash
+                            && match (isnull, e.key_isnull) {
+                                (false, false) => e.key.as_i32() == key.as_i32(),
+                                (a, b) => a & b,
+                            }
+                    })
+                    .copied()
+            }
+            ProbeKernel::Int8 { att } => {
+                let (key, isnull) = kernel_key(input_slot, att);
+                hashtab
+                    .find(hash as u64, |ix: &u32| {
+                        let e = &entries[*ix as usize];
+                        e.hash == hash
+                            && match (isnull, e.key_isnull) {
+                                (false, false) => e.key.as_i64() == key.as_i64(),
+                                (a, b) => a & b,
+                            }
+                    })
+                    .copied()
+            }
+            ProbeKernel::Expr => hashtab
+                .find(hash as u64, |ix: &u32| {
+                    let e = &entries[*ix as usize];
+                    if e.hash != hash {
+                        return false;
                     }
-                }
-            })
-            .copied();
+                    // SAFETY: entry images live in table_mcx until reset().
+                    unsafe {
+                        exectuples::exec_store_minimal_tuple_ptr(tableslot, slot_mcx, e.first_tuple)
+                    };
+                    let mut slots = EvalSlots {
+                        scan: None,
+                        inner: Some(&mut *input_slot),
+                        outer: Some(&mut *tableslot),
+                    };
+                    match exec_qual(Some(tab_eq_func), &mut slots) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            eq_err = Some(e);
+                            false
+                        }
+                    }
+                })
+                .copied(),
+        };
         if let Some(e) = eq_err {
             return Err(e);
         }
@@ -204,6 +281,10 @@ impl<'mcx> TupleHashTable<'mcx> {
             .expect("minimal tuple image is non-null");
         core::mem::forget(tup);
 
+        let (key, key_isnull) = match self.kernel {
+            ProbeKernel::Int4 { att } | ProbeKernel::Int8 { att } => kernel_key(input_slot, att),
+            ProbeKernel::Expr => (Datum::null(), true),
+        };
         let ix = self.entries.len() as u32;
         if self.entries.len() == self.entries.capacity() {
             let add = self.entries.capacity().max(16);
@@ -211,7 +292,7 @@ impl<'mcx> TupleHashTable<'mcx> {
                 .try_reserve(add)
                 .map_err(|_| oom_entries(*self.entries.allocator(), add))?;
         }
-        self.entries.push(TupleHashEntryData { first_tuple, hash });
+        self.entries.push(TupleHashEntryData { first_tuple, hash, key_isnull, key });
         let entries = &self.entries;
         self.hashtab
             .insert_unique(hash as u64, ix, |i| entries[*i as usize].hash as u64);
@@ -243,6 +324,22 @@ impl<'mcx> TupleHashTable<'mcx> {
         self.entries.clear();
         self.hashtab.clear();
     }
+}
+
+#[inline(always)]
+fn kernel_key(input_slot: &mut SlotData<'_>, att: u16) -> (Datum, bool) {
+    exectuples::slot_getsomeattrs(input_slot, att as i32 + 1);
+    let base = input_slot.base();
+    (base.tts_values[att as usize], base.tts_isnull[att as usize])
+}
+
+// hashfunc.c hashint8's cross-type-compatible fold to 32 bits.
+#[inline(always)]
+fn hashint8_fold(key: Datum) -> u32 {
+    let val = key.as_i64();
+    let lohalf = val as u32;
+    let hihalf = (val >> 32) as u32;
+    lohalf ^ if val >= 0 { hihalf } else { !hihalf }
 }
 
 #[cold]

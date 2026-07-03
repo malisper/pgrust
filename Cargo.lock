@@ -134,6 +134,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_formatting"
+version = "0.1.0"
+dependencies = [
+ "adt_cash",
+ "adt_date",
+ "adt_datetime",
+ "adt_numeric",
+ "adt_timestamp",
+ "datum",
+ "formatting_seams",
+ "init_small",
+ "mbutils",
+ "mcx",
+ "pg_locale",
+ "pg_locale_seams",
+ "seam_core",
+ "timestamp_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "wchar",
+]
+
+[[package]]
 name = "adt_int"
 version = "0.1.0"
 dependencies = [
@@ -159,6 +183,23 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+]
+
+[[package]]
+name = "adt_json"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mbutils",
+ "mcx",
+ "pqformat",
+ "stack_depth",
+ "stringinfo",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "varlena",
+ "wchar",
 ]
 
 [[package]]
@@ -348,6 +389,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrayfuncs"
+version = "0.1.0"
+
+[[package]]
+name = "arrayutils"
+version = "0.1.0"
+dependencies = [
+ "types_error",
+]
+
+[[package]]
 name = "async_seams"
 version = "0.0.0"
 dependencies = [
@@ -403,10 +455,41 @@ dependencies = [
 name = "autovacuum"
 version = "0.0.0"
 dependencies = [
+ "aio_seams",
  "autovacuum_seams",
+ "bufmgr",
+ "dynahash",
  "elog",
+ "fd",
+ "guc",
+ "guc_file_seams",
  "guc_tables",
+ "init_small",
+ "interrupt",
+ "ipc",
+ "latch",
+ "libc",
+ "libpq_pqsignal",
+ "lmgr_proc",
+ "lwlock",
+ "mcx",
+ "mcxt_seams",
+ "miscinit",
+ "postgres",
+ "postinit",
+ "procsignal",
+ "resowner",
+ "sinval",
+ "smgr",
+ "timeout_seams",
+ "types_core",
  "types_error",
+ "types_guc",
+ "types_startup",
+ "types_storage",
+ "varsup",
+ "waitevent_seams",
+ "xact",
 ]
 
 [[package]]
@@ -1024,10 +1107,62 @@ dependencies = [
 [[package]]
 name = "commands_analyze"
 version = "0.0.0"
+dependencies = [
+ "bufmgr",
+ "bufmgr_seams",
+ "datum",
+ "fmgr_seams",
+ "genam",
+ "heapam",
+ "heaptuple",
+ "mcx",
+ "miscinit",
+ "pg_prng",
+ "procarray",
+ "relcache_seams",
+ "syscache_seams",
+ "table",
+ "tableam",
+ "typcache",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_slot",
+ "types_tuple",
+ "vacuum_seams",
+ "visibilitymap",
+ "xact",
+]
 
 [[package]]
 name = "commands_vacuum"
 version = "0.0.0"
+dependencies = [
+ "bufmgr_seams",
+ "elog",
+ "explain",
+ "guc_tables",
+ "init_small",
+ "mcx",
+ "multixact",
+ "namespace_seams",
+ "procarray",
+ "rel_vocab",
+ "relation",
+ "snapmgr",
+ "tableam_seams",
+ "tableam_vocab",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_storage",
+ "varsup",
+ "xact",
+]
 
 [[package]]
 name = "commit_ts_seams"
@@ -1301,6 +1436,7 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_nodes",
+ "types_portal",
  "types_slot",
  "types_tuple",
 ]
@@ -1420,6 +1556,7 @@ dependencies = [
  "nodenestloop",
  "nodeseqscan",
  "nodesort",
+ "nodeunique",
  "postgres_seams",
  "predicate_seams",
  "procarray_seams",
@@ -1536,6 +1673,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_nodes",
+ "types_portal",
  "types_rel",
  "types_scan",
  "types_slot",
@@ -1704,6 +1842,16 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_tuple",
+]
+
+[[package]]
+name = "formatting_seams"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_core",
+ "types_error",
 ]
 
 [[package]]
@@ -2447,6 +2595,7 @@ dependencies = [
 name = "launch_backend"
 version = "0.0.0"
 dependencies = [
+ "autovacuum",
  "backend_startup",
  "bgwriter",
  "checkpointer",
@@ -3370,6 +3519,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodeunique"
+version = "0.1.0"
+dependencies = [
+ "execexpr",
+ "exectuples",
+ "executils",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "postgres_seams",
+ "types_error",
+ "types_nodes",
+ "types_slot",
+ "types_tuple",
+]
+
+[[package]]
 name = "numutils"
 version = "0.1.0"
 dependencies = [
@@ -3433,9 +3599,11 @@ dependencies = [
  "lsyscache",
  "mbutils",
  "mcx",
+ "parse_collate",
  "parse_expr",
  "parse_oper",
  "parse_relation",
+ "parse_target",
  "parser_small1",
  "stack_depth",
  "syscache_seams",
@@ -3538,6 +3706,8 @@ dependencies = [
  "catalog_namespace",
  "datum",
  "elog",
+ "format_type",
+ "funcapi",
  "lmgr_seams",
  "lsyscache",
  "mbutils",
@@ -5391,6 +5561,7 @@ dependencies = [
  "nodenestloop",
  "nodeseqscan",
  "nodesort",
+ "nodeunique",
  "parallel",
  "parse_expr",
  "parser_analyze",
@@ -5970,12 +6141,15 @@ name = "tableam"
 version = "0.1.0"
 dependencies = [
  "bufmgr_seams",
+ "catalog_storage",
  "exectuples",
  "guc_tables",
  "heapam",
  "heapam_handler",
  "heapam_visibility_seams",
  "mcx",
+ "multixact",
+ "procarray",
  "smgr",
  "tableam_vocab",
  "tidbitmap",
@@ -6391,6 +6565,7 @@ version = "0.1.0"
 dependencies = [
  "datum",
  "mcx",
+ "stringinfo",
  "types_core",
  "types_error",
  "types_tuple",
