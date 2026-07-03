@@ -495,9 +495,6 @@ pub fn exec_init_agg<'mcx>(
         {
             panic!("ExecInitAgg (nodeAgg.c): DISTINCT/ORDER BY under AGG_HASHED cannot happen");
         }
-        if aggref.aggfilter.is_some() {
-            panic!("ExecInitAgg (nodeAgg.c): FILTER not ported");
-        }
         let transtype = aggref.aggtranstype;
         assert!(transtype != 0, "Aggref.aggtranstype unset (planner must resolve it)");
         let (translen, transbyval) = lsyscache::get_typlenbyval(transtype)?;
@@ -623,6 +620,7 @@ pub fn exec_init_agg<'mcx>(
             init_value_is_null: trans_init[transno].isnull,
             arg_types: arg_types.leak(),
             args: &aggref.args,
+            aggfilter: aggref.aggfilter,
             pergroup: pg,
             transtype_byval: trans_typ[transno].byval,
             transtype_len: trans_typ[transno].len,

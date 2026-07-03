@@ -1702,14 +1702,13 @@ fn deparse_expr<'mcx>(
             let a = expr.as_aggref().unwrap();
             if !a.aggdistinct.is_nil()
                 || !a.aggorder.is_nil()
-                || a.aggfilter.is_some()
                 || a.aggvariadic
                 || !a.aggdirectargs.is_nil()
                 || a.aggsplit != types_nodes::primnodes::AGGSPLIT_SIMPLE
             {
                 node_gap(
                     "get_agg_expr",
-                    "DISTINCT/ORDER BY/FILTER/variadic/ordered-set/partial \
+                    "DISTINCT/ORDER BY/variadic/ordered-set/partial \
                      aggregate deparse (ruleutils lane)",
                 );
             }
@@ -1734,6 +1733,11 @@ fn deparse_expr<'mcx>(
                 }
             }
             buf.try_push(')')?;
+            if let Some(f) = a.aggfilter {
+                buf.try_push_str(" FILTER (WHERE ")?;
+                deparse_expr(es, plan_node, ancestors, f, useprefix, buf)?;
+                buf.try_push(')')?;
+            }
             Ok(())
         }
         // get_rule_expr T_SQLValueFunction (datetime ops; name ops are loud

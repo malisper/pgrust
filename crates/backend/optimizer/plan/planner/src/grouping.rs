@@ -498,9 +498,12 @@ fn pull_agg_input_vars<'mcx>(
         NodeTag::T_Const => {}
         NodeTag::T_Aggref => {
             let a = node.as_aggref().unwrap();
-            debug_assert!(a.aggdirectargs.is_nil() && a.aggfilter.is_none());
+            debug_assert!(a.aggdirectargs.is_nil());
             for arg in &a.args {
                 pull_agg_input_vars(arg, out);
+            }
+            if let Some(f) = a.aggfilter {
+                pull_agg_input_vars(f, out);
             }
         }
         // PVC_RECURSE_AGGREGATES treats GroupingFunc like Aggref.

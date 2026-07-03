@@ -39,6 +39,7 @@ pub struct AggTransSpec<'a, 'mcx> {
     // C build_aggregate_transfn_expr's arg types: [transtype, input types..].
     pub arg_types: &'a [Oid],
     pub args: &'a NodeList<'mcx>,
+    pub aggfilter: Option<Node<'mcx>>,
     pub pergroup: NonNull<AggPerGroup>,
     pub transtype_byval: bool,
     pub transtype_len: i16,
@@ -387,6 +388,9 @@ fn build_agg_trans<'mcx>(
         for tle in spec.args.iter() {
             setup_walker(tle, &mut info);
         }
+        if let Some(f) = spec.aggfilter {
+            setup_walker(f, &mut info);
+        }
     }
     push_fetch_steps(&mut state, mcx, &info)?;
 
@@ -425,6 +429,16 @@ fn build_agg_trans<'mcx>(
             .try_reserve(1)
             .map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
         state.frames.push(frame);
+        let mut filter_jump: Option<usize> = None;
+        if let Some(f) = spec.aggfilter {
+            init_expr_rec(f, &mut state, mcx, OutRef::RESULT, None, params, None)?;
+            filter_jump = Some(state.steps.len());
+            push_step(
+                &mut state,
+                mcx,
+                Step::JumpIfNotTrue { jumpdone: u32::MAX, out: OutRef::RESULT },
+            )?;
+        }
         for (argno, tle_node) in spec.args.iter().enumerate() {
             let tle = tle_node.as_target_entry().unwrap_or_else(|| {
                 panic!("Aggref.args cell: expected TargetEntry, got {:?}", tle_node.node_tag())
@@ -521,8 +535,14 @@ fn build_agg_trans<'mcx>(
                 push_step(&mut state, mcx, step)?;
             }
         }
+        let target = state.steps.len() as u32;
+        if let Some(ix) = filter_jump {
+            match &mut state.steps[ix] {
+                Step::JumpIfNotTrue { jumpdone, .. } => *jumpdone = target,
+                _ => unreachable!(),
+            }
+        }
         if let Some(ix) = bailout {
-            let target = state.steps.len() as u32;
             match &mut state.steps[ix] {
                 Step::AggStrictInputCheck { jumpnull, .. }
                 | Step::AggStrictInputCheck1 { jumpnull, .. } => *jumpnull = target,

@@ -46,16 +46,21 @@ pub(crate) fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<
         NodeTag::T_Aggref => {
             let a = node.as_aggref().unwrap();
             debug_assert!(a.agglevelsup == 0);
-            debug_assert!(a.aggdirectargs.is_nil() && a.aggfilter.is_none());
+            debug_assert!(a.aggdirectargs.is_nil());
             for arg in &a.args {
                 pull_var_nodes(arg, out);
+            }
+            if let Some(f) = a.aggfilter {
+                pull_var_nodes(f, out);
             }
         }
         NodeTag::T_WindowFunc => {
             let wf = node.as_window_func().unwrap();
-            debug_assert!(wf.aggfilter.is_none());
             for arg in &wf.args {
                 pull_var_nodes(arg, out);
+            }
+            if let Some(f) = wf.aggfilter {
+                pull_var_nodes(f, out);
             }
         }
         NodeTag::T_GroupingFunc => {
