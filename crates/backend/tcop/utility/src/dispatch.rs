@@ -446,7 +446,8 @@ fn dispatch_switch<'mcx>(
         }
         T_ConstraintsSetStmt => {
             xact::WarnNoTransactionBlock(is_top_level, "SET CONSTRAINTS")?;
-            handler_gap("AfterTriggerSetState (trigger lane)")
+            let stmt = parsetree.as_constraints_set_stmt().unwrap();
+            trigger::AfterTriggerSetState(mcx, stmt)?;
         }
         T_CheckPointStmt => {
             if !acl_seams::has_privs_of_role::call(

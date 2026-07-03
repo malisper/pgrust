@@ -50,3 +50,6 @@ rel_vocab = { path = "../../../_support/types/rel_vocab" }
 elog_seams = { path = "../../utils/error/elog_seams" }
 dependency_seams = { path = "../../catalog/dependency_seams" }
 mbutils = { path = "../../utils/mb/mbutils" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+types_trigger_call = { path = "../../../_support/types/types_trigger_call" }

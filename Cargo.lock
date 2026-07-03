@@ -3142,6 +3142,7 @@ dependencies = [
  "sequence_seams",
  "stringinfo",
  "syscache_seams",
+ "trigfuncs",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -5448,6 +5449,7 @@ dependencies = [
  "types_snapshot",
  "types_storage",
  "types_trigger",
+ "types_trigger_call",
  "types_tuple",
  "varsup",
  "waitevent_seams",
@@ -9616,6 +9618,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "trigfuncs"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_trigger",
+ "types_trigger_call",
+ "types_tuple",
+]
+
+[[package]]
 name = "trigger"
 version = "0.0.0"
 dependencies = [
@@ -9647,16 +9662,19 @@ dependencies = [
  "rel_vocab",
  "relcache",
  "ri_triggers_seams",
+ "snapmgr",
  "superuser",
  "table",
  "trigger_seams",
  "types_core",
  "types_error",
+ "types_fmgr",
  "types_nodes",
  "types_rel",
  "types_scan",
  "types_snapshot",
  "types_trigger",
+ "types_trigger_call",
  "types_tuple",
  "vars",
  "xact",
@@ -10058,6 +10076,18 @@ version = "0.1.0"
 dependencies = [
  "mcx",
  "types_core",
+]
+
+[[package]]
+name = "types_trigger_call"
+version = "0.1.0"
+dependencies = [
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_rel",
+ "types_trigger",
+ "types_tuple",
 ]
 
 [[package]]

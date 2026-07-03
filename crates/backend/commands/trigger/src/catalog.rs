@@ -56,6 +56,8 @@ pub struct InternalTriggerArgs<'a> {
     pub index_oid: Oid,
     pub funcoid: Oid,
     pub tgtype: i16,
+    pub deferrable: bool,
+    pub initdeferred: bool,
 }
 
 #[cold]
@@ -90,8 +92,8 @@ pub fn CreateTriggerInternal<'mcx>(
         columns: NodeList::nil(),
         whenClause: None,
         transitionRels: NodeList::nil(),
-        deferrable: false,
-        initdeferred: false,
+        deferrable: args.deferrable,
+        initdeferred: args.initdeferred,
         constrrel: None,
     };
     CreateTriggerFiringOn(

@@ -114,9 +114,6 @@ fn at_add_foreign_key_constraint<'mcx>(
     if fkconstraint.fk_matchtype != FKCONSTR_MATCH_SIMPLE {
         unported("MATCH FULL/PARTIAL (fk_matchtype beyond simple)");
     }
-    if fkconstraint.deferrable || fkconstraint.initdeferred {
-        unported("DEFERRABLE/INITIALLY DEFERRED");
-    }
     if !fkconstraint.is_enforced {
         unported("NOT ENFORCED");
     }
@@ -338,7 +335,7 @@ fn at_add_foreign_key_constraint<'mcx>(
     )?;
 
     create_foreign_key_action_triggers(mcx, rel.rd_id, pkrel.rd_id, fkconstraint, constr_oid, index_oid)?;
-    create_foreign_key_check_triggers(mcx, rel.rd_id, pkrel.rd_id, constr_oid, index_oid)?;
+    create_foreign_key_check_triggers(mcx, rel.rd_id, pkrel.rd_id, fkconstraint, constr_oid, index_oid)?;
 
     let validate = if !fkconstraint.skip_validation && fkconstraint.is_enforced {
         debug_assert!(rel.rd_rel.relkind == RELKIND_RELATION);
@@ -757,6 +754,10 @@ fn create_foreign_key_action_triggers<'mcx>(
             index_oid,
             funcoid: del_func,
             tgtype: TRIGGER_TYPE_ROW | TRIGGER_TYPE_DELETE,
+            deferrable: fkconstraint.deferrable
+                && fkconstraint.fk_del_action == FKCONSTR_ACTION_NOACTION,
+            initdeferred: fkconstraint.initdeferred
+                && fkconstraint.fk_del_action == FKCONSTR_ACTION_NOACTION,
         },
     )?;
     xact::CommandCounterIncrement()?;
@@ -778,6 +779,10 @@ fn create_foreign_key_action_triggers<'mcx>(
             index_oid,
             funcoid: upd_func,
             tgtype: TRIGGER_TYPE_ROW | TRIGGER_TYPE_UPDATE,
+            deferrable: fkconstraint.deferrable
+                && fkconstraint.fk_upd_action == FKCONSTR_ACTION_NOACTION,
+            initdeferred: fkconstraint.initdeferred
+                && fkconstraint.fk_upd_action == FKCONSTR_ACTION_NOACTION,
         },
     )?;
     Ok(())
@@ -789,6 +794,7 @@ fn create_foreign_key_check_triggers<'mcx>(
     mcx: Mcx<'mcx>,
     my_rel_oid: Oid,
     ref_rel_oid: Oid,
+    fkconstraint: &Constraint<'_>,
     constraint_oid: Oid,
     index_oid: Oid,
 ) -> PgResult<()> {
@@ -802,6 +808,8 @@ fn create_foreign_key_check_triggers<'mcx>(
             index_oid,
             funcoid: F_RI_FKEY_CHECK_INS,
             tgtype: TRIGGER_TYPE_ROW | TRIGGER_TYPE_INSERT,
+            deferrable: fkconstraint.deferrable,
+            initdeferred: fkconstraint.initdeferred,
         },
     )?;
     xact::CommandCounterIncrement()?;
@@ -815,6 +823,8 @@ fn create_foreign_key_check_triggers<'mcx>(
             index_oid,
             funcoid: F_RI_FKEY_CHECK_UPD,
             tgtype: TRIGGER_TYPE_ROW | TRIGGER_TYPE_UPDATE,
+            deferrable: fkconstraint.deferrable,
+            initdeferred: fkconstraint.initdeferred,
         },
     )?;
     xact::CommandCounterIncrement()?;
