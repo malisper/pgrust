@@ -883,8 +883,9 @@ fn FigureColnameInternal<'mcx>(node: Node<'mcx>, name: &mut Option<&'mcx str>) -
             });
             2
         }
-        // NullTest/BooleanTest take C's default arm: no name.
-        NodeTag::T_A_Const
+        // NullTest/BooleanTest/JsonIsPredicate take C's default arm: no name.
+        NodeTag::T_JsonIsPredicate
+        | NodeTag::T_A_Const
         | NodeTag::T_ParamRef
         | NodeTag::T_BoolExpr
         | NodeTag::T_NullTest

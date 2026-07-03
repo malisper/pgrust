@@ -224,6 +224,42 @@ fn walker<'w, 'mcx: 'w>(
             walk_list(list, context)
         }
         NodeTag::T_Query => walk_query(node.as_query().unwrap(), context),
+        NodeTag::T_JsonValueExpr => {
+            let j = node.as_json_value_expr().unwrap();
+            for e in [j.raw_expr, j.formatted_expr].into_iter().flatten() {
+                walker(e, context)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            let c = node.as_json_constructor_expr().unwrap();
+            walk_list(&c.args, context)?;
+            for e in [c.func, c.coercion].into_iter().flatten() {
+                walker(e, context)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_JsonIsPredicate => {
+            match node.as_json_is_predicate().unwrap().expr {
+                Some(e) => walker(e, context),
+                None => Ok(()),
+            }
+        }
+        NodeTag::T_JsonBehavior => match node.as_json_behavior().unwrap().expr {
+            Some(e) => walker(e, context),
+            None => Ok(()),
+        },
+        NodeTag::T_JsonExpr => {
+            let j = node.as_json_expr().unwrap();
+            for e in [j.formatted_expr, j.path_spec, j.on_empty, j.on_error]
+                .into_iter()
+                .flatten()
+            {
+                walker(e, context)?;
+            }
+            walk_list(&j.passing_values, context)?;
+            Ok(())
+        }
         other => walker_unported(&format!("node tag {other:?}")),
     }
 }

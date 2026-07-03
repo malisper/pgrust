@@ -76,6 +76,46 @@ fn preprocess_aggrefs_walker<'mcx>(
             }
             Ok(())
         }
+        NodeTag::T_JsonValueExpr => {
+            let j = node.as_json_value_expr().unwrap();
+            for e in [j.raw_expr, j.formatted_expr].into_iter().flatten() {
+                preprocess_aggrefs_walker(run, e)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            let c = node.as_json_constructor_expr().unwrap();
+            for a in &c.args {
+                preprocess_aggrefs_walker(run, a)?;
+            }
+            for e in [c.func, c.coercion].into_iter().flatten() {
+                preprocess_aggrefs_walker(run, e)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_JsonIsPredicate => {
+            match node.as_json_is_predicate().unwrap().expr {
+                Some(e) => preprocess_aggrefs_walker(run, e),
+                None => Ok(()),
+            }
+        }
+        NodeTag::T_JsonBehavior => match node.as_json_behavior().unwrap().expr {
+            Some(e) => preprocess_aggrefs_walker(run, e),
+            None => Ok(()),
+        },
+        NodeTag::T_JsonExpr => {
+            let j = node.as_json_expr().unwrap();
+            for e in [j.formatted_expr, j.path_spec, j.on_empty, j.on_error]
+                .into_iter()
+                .flatten()
+            {
+                preprocess_aggrefs_walker(run, e)?;
+            }
+            for v in &j.passing_values {
+                preprocess_aggrefs_walker(run, v)?;
+            }
+            Ok(())
+        }
         other => panic!(
             "preprocess_aggrefs_walker (prepagg.c): {other:?}; M3 expression lane"
         ),

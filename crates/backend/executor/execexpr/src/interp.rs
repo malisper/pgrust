@@ -590,26 +590,10 @@ fn run_program<'mcx>(
                 write_out(*out, value, isnull);
             }
             Step::JsonConstructor { jcstate, frame, out } => {
-                // SAFETY: plan-mcx state, exclusive during this step.
-                let jc = unsafe { jcstate.as_ref() };
-                let (value, isnull) = eval_json_constructor(frames, jc, *frame)?;
-                write_out(*out, value, isnull);
+                eval_json_constructor_step(frames, *jcstate, *frame, *out)?;
             }
             Step::IsJson { exprtype, item_type, unique_keys, frame, out } => {
-                let nd = read_out(*out);
-                if nd.isnull {
-                    write_out(*out, Datum::from_bool(false), false);
-                } else {
-                    let res = eval_is_json(
-                        frames,
-                        nd.value,
-                        *exprtype,
-                        *item_type,
-                        *unique_keys,
-                        *frame,
-                    )?;
-                    write_out(*out, Datum::from_bool(res), false);
-                }
+                eval_is_json_step(frames, *exprtype, *item_type, *unique_keys, *frame, *out)?;
             }
             Step::FuncExprStrict1 { call, out } => {
                 // SAFETY: arg 0 of the call's live fcinfo image.
@@ -1259,6 +1243,43 @@ fn eval_row_expr(
     let d = Datum::from_usize(tuple.image().as_ptr() as usize);
     core::mem::forget(tuple);
     Ok((d, false))
+}
+
+// Out of line: json steps are cold relative to the dispatch loop; keeping the
+// arm a bare call protects the loop's register allocation (graviton.md flat
+// interpreter rule; M3 A/B measured the fat-arm form at +0.3-1.8% instr on
+// interpreter-bound lanes).
+#[inline(never)]
+fn eval_json_constructor_step(
+    frames: &mut [crate::steps::FuncFrame<'_>],
+    jcstate: core::ptr::NonNull<crate::steps::JsonConstructorState>,
+    frame: u32,
+    out: crate::steps::OutRef,
+) -> PgResult<()> {
+    // SAFETY: plan-mcx state, exclusive during this step.
+    let jc = unsafe { jcstate.as_ref() };
+    let (value, isnull) = eval_json_constructor(frames, jc, frame)?;
+    write_out(out, value, isnull);
+    Ok(())
+}
+
+#[inline(never)]
+fn eval_is_json_step(
+    frames: &mut [crate::steps::FuncFrame<'_>],
+    exprtype: ::types_core::Oid,
+    item_type: ::types_nodes::primnodes::JsonValueType,
+    unique_keys: bool,
+    frame: u32,
+    out: crate::steps::OutRef,
+) -> PgResult<()> {
+    let nd = read_out(out);
+    if nd.isnull {
+        write_out(out, Datum::from_bool(false), false);
+        return Ok(());
+    }
+    let res = eval_is_json(frames, nd.value, exprtype, item_type, unique_keys, frame)?;
+    write_out(out, Datum::from_bool(res), false);
+    Ok(())
 }
 
 // C ExecEvalJsonConstructor (execExprInterp.c:4657); results in the armed
