@@ -615,7 +615,9 @@ fn copy_ts_lexeme<'m>(
     mcx: Mcx<'m>,
     ts: &TheSubstitute,
 ) -> PgResult<PgVec<'m, TsLexeme<'m>>> {
-    let mut res = vec_with_capacity_in(mcx, ts.reslen as usize)?;
+    let mut res = PgVec::new_in(mcx);
+    res.try_reserve_exact(ts.reslen as usize)
+        .map_err(|_| mcx.oom(ts.reslen as usize))?;
     for lex in ts.res[..ts.reslen as usize].iter() {
         let mut lexeme = vec_with_capacity_in(mcx, lex.lexeme.len())?;
         lexeme.extend_from_slice(&lex.lexeme);

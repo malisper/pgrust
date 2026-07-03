@@ -128,12 +128,12 @@ fn calc_rank_and(
     if item.len() < 2 {
         return calc_rank_or(mcx, w, t, q);
     }
+    let posnull: [WordEntryPos; 1] = [POSNULL_POS];
     // pos[i]: last-seen (positions, is_posnull_dummy) for deduped item i.
     let mut pos: PgVec<Option<(&[WordEntryPos], bool)>> = vec_with_capacity_in(mcx, q.size())?;
     for _ in 0..q.size() {
         pos.push(None);
     }
-    let posnull: [WordEntryPos; 1] = [POSNULL_POS];
     let mut res = -1.0f32;
 
     for (i, it) in item.iter().enumerate() {

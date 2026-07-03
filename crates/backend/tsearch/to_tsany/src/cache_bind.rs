@@ -17,7 +17,9 @@ pub struct ConfigMap<'mcx> {
 
 pub fn config_map<'mcx>(mcx: Mcx<'mcx>, cfg: Oid) -> PgResult<ConfigMap<'mcx>> {
     let entry = ::ts_cache::lookup_ts_config_cache(cfg)?;
-    let mut map = ::mcx::vec_with_capacity_in(mcx, entry.map.len())?;
+    let mut map: PgVec<'mcx, PgVec<'mcx, Oid>> = PgVec::new_in(mcx);
+    map.try_reserve_exact(entry.map.len())
+        .map_err(|_| mcx.oom(entry.map.len()))?;
     for ld in entry.map.iter() {
         let mut dicts: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, ld.dict_ids.len())?;
         for &d in ld.dict_ids.iter() {
