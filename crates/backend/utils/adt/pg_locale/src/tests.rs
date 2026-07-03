@@ -146,8 +146,7 @@ fn init_database_collation_builtin() {
 }
 
 #[test]
-#[should_panic(expected = "libc locale_t arm not ported")]
-fn init_database_collation_libc_noncc_defers_loud() {
+fn init_database_collation_libc_noncc_builds_collator() {
     install_db_stub();
     TEST_DB_ROW.with(|r| {
         r.set(Some(TestDbRow {
@@ -157,7 +156,13 @@ fn init_database_collation_libc_noncc_defers_loud() {
             locale: None,
         }))
     });
-    let _ = init_database_collation();
+    init_database_collation().unwrap();
+    let l = pg_newlocale_from_collation(DEFAULT_COLLATION_OID).unwrap();
+    assert!(l.is_default && l.deterministic);
+    assert!(!l.collate_is_c && !l.ctype_is_c);
+    // en_US.UTF-8 strcoll: case-insensitive-ish primary weights, unlike memcmp.
+    assert!(l.pg_strncoll(b"apple", b"Banana") < 0);
+    assert!(l.pg_strncoll(b"a", b"a") == 0);
 }
 
 #[test]
@@ -300,4 +305,106 @@ fn seams_install_and_dispatch() {
     )
     .unwrap());
     assert_eq!(guc_tables::vars::icu_validation_level.read(), WARNING.0);
+}
+
+// Differential vs live PostgreSQL 18.3 (same-machine libc). Gated on
+// PG_LOCALE_DIFF_DIR = dir holding scratchpad/locale-diff outputs.
+#[test]
+fn live_pg_differential() {
+    let Ok(dir) = std::env::var("PG_LOCALE_DIFF_DIR") else {
+        return;
+    };
+    mbutils::SetDatabaseEncoding(6).unwrap();
+    let ctx = MemoryContext::new("diff");
+    let mcx = ctx.mcx();
+
+    let builtin = |full: bool| PgLocale {
+        provider: COLLPROVIDER_BUILTIN,
+        deterministic: true,
+        collate_is_c: true,
+        ctype_is_c: false,
+        is_default: false,
+        builtin_locale: None,
+        builtin_casemap_full: full,
+        lt: libc_locale::LibcLocale::NONE,
+    };
+
+    let run = |f: fn(Mcx<'_>, &mut [u8], &[u8], &PgLocale) -> PgResult<usize>,
+               src: &[u8],
+               loc: &PgLocale|
+     -> String {
+        let mut dst = vec![0u8; src.len() + 1];
+        let mut n = f(mcx, &mut dst, src, loc).unwrap();
+        if n + 1 > dst.len() {
+            dst.resize(n + 1, 0);
+            n = f(mcx, &mut dst, src, loc).unwrap();
+        }
+        let end = dst[..n].iter().position(|&b| b == 0).unwrap_or(n);
+        String::from_utf8(dst[..end].to_vec()).unwrap()
+    };
+
+    let mut checked = 0usize;
+    for (file, full) in [
+        ("expected_case_cutf8.tsv", false),
+        ("expected_case_pgufast.tsv", true),
+    ] {
+        let loc = builtin(full);
+        let data = std::fs::read_to_string(format!("{dir}/{file}")).unwrap();
+        for line in data.lines() {
+            let f: Vec<&str> = line.split('\t').collect();
+            assert_eq!(f.len(), 5, "{file}: {line}");
+            let s = f[0].as_bytes();
+            assert_eq!(run(pg_strlower, s, &loc), f[1], "lower({}) full={full}", f[0]);
+            assert_eq!(run(pg_strupper, s, &loc), f[2], "upper({}) full={full}", f[0]);
+            assert_eq!(run(pg_strtitle, s, &loc), f[3], "initcap({}) full={full}", f[0]);
+            assert_eq!(run(pg_strfold, s, &loc), f[4], "casefold({}) full={full}", f[0]);
+            checked += 4;
+        }
+    }
+
+    for (locname, file) in [
+        ("en_US.UTF-8", "expected_order_enus.tsv"),
+        ("de_DE.UTF-8", "expected_order_de_DE.tsv"),
+        ("fr_FR.UTF-8", "expected_order_fr_FR.tsv"),
+        ("sv_SE.UTF-8", "expected_order_sv_SE.tsv"),
+        ("tr_TR.UTF-8", "expected_order_tr_TR.tsv"),
+    ] {
+        let loc = create_pg_locale_libc(locname, locname).unwrap();
+        let data = std::fs::read_to_string(format!("{dir}/{file}")).unwrap();
+        let expected: Vec<&str> = data.lines().collect();
+        let mut ours: Vec<&str> = expected.clone();
+        ours.sort_by(|a, b| {
+            varstr_cmp_locale_with(&loc, a.as_bytes(), b.as_bytes()).cmp(&0)
+        });
+        assert_eq!(ours, expected, "{locname} strcoll order");
+        checked += expected.len();
+    }
+    eprintln!("live_pg_differential: {checked} comparisons OK");
+}
+
+#[cfg(test)]
+fn varstr_cmp_locale_with(locale: &PgLocale, arg1: &[u8], arg2: &[u8]) -> i32 {
+    if locale.collate_is_c {
+        return varlena::varstrfastcmp_c(arg1, arg2);
+    }
+    if arg1 == arg2 {
+        return 0;
+    }
+    let result = locale.pg_strncoll(arg1, arg2);
+    if result == 0 && locale.deterministic {
+        return varlena::varstrfastcmp_c(arg1, arg2);
+    }
+    result
+}
+
+// Message/SQLSTATE verified verbatim against live PG 18.3 on this platform
+// (ERROR 22023 + report_newlocale_failure detail).
+#[test]
+fn newlocale_failure_matches_c() {
+    let err = create_pg_locale_libc("xx_XX.UTF-8", "xx_XX.UTF-8").unwrap_err();
+    assert_eq!(
+        err.message(),
+        "could not create locale \"xx_XX.UTF-8\": No such file or directory"
+    );
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_PARAMETER_VALUE);
 }

@@ -179,22 +179,19 @@ pub fn fc_byteacat(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     )?))
 }
 
-#[cold]
-#[inline(never)]
-fn soft_context_unported(name: &str) -> ! {
-    panic!("{name}: fcinfo.context soft-error demux is fmgr-core's unit (not ported)")
-}
-
 pub fn fc_byteain(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    if fcinfo.context.is_some() {
-        soft_context_unported("byteain");
-    }
     // SAFETY: catalog arg 0 of byteain is a non-null cstring (strict fn).
     let s = unsafe { fcinfo.arg_cstring(0) }.to_bytes();
     let mcx = fcinfo.result_mcx();
-    let v = crate::bytea::byteain(mcx, s, None)?
-        .expect("byteain: soft-error escape without an escontext");
-    Ok(varlena_result(v))
+    // SAFETY: context, if set, rides per the ErrorSaveNode contract for this call.
+    let esc = unsafe { fcinfo.soft_error_context() };
+    let had_esc = esc.is_some();
+    match crate::bytea::byteain(mcx, s, esc)? {
+        Some(v) => Ok(varlena_result(v)),
+        // Soft error already saved; the value is C's garbage datum.
+        None if had_esc => Ok(Datum::null()),
+        None => panic!("byteain: soft-error escape without an escontext"),
+    }
 }
 
 pub fn fc_unknownin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {

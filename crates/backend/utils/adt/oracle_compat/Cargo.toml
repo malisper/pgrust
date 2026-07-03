@@ -16,3 +16,7 @@ types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 varlena = { path = "../varlena" }
 wchar = { path = "../../../../common/wchar" }
+
+[dev-dependencies]
+syscache_seams = { path = "../../cache/syscache_seams" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }

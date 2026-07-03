@@ -1,9 +1,11 @@
 //! like.c + like_match.c. C stamps the matcher four ways via #include; here one
-//! generic body is monomorphized per mode. Live: SB, UTF8, SB_I, ILIKE ASCII
-//! casemap. Loud: non-UTF8 multibyte matchers, nondeterministic collations,
-//! non-C ctype folds, like_support.c (selfuncs lane).
+//! generic body is monomorphized per mode. Live: SB, UTF8, SB_I, ILIKE folds
+//! (ASCII, libc tolower_l, non-C ctype via casemap). Loud: non-UTF8 multibyte
+//! matchers, nondeterministic collations (ICU-only), like_support.c
+//! (selfuncs lane).
 
-use pg_locale::{PgLocale, COLLPROVIDER_ICU, COLLPROVIDER_LIBC};
+use mcx::Mcx;
+use pg_locale::{PgLocale, COLLPROVIDER_ICU};
 use types_core::{Oid, OidIsValid};
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INDETERMINATE_COLLATION,
@@ -16,15 +18,7 @@ pub const LIKE_FALSE: i32 = 0;
 pub const LIKE_ABORT: i32 = -1;
 
 // C's locale-0 callers (bytealike, lowered ILIKE): deterministic, never folded.
-const LOCALE_NONE: PgLocale = PgLocale {
-    provider: COLLPROVIDER_LIBC,
-    deterministic: true,
-    collate_is_c: true,
-    ctype_is_c: true,
-    is_default: false,
-    builtin_locale: None,
-    builtin_casemap_full: false,
-};
+const LOCALE_NONE: PgLocale = pg_locale::C_LOCALE;
 
 #[cold]
 #[inline(never)]
@@ -69,25 +63,7 @@ fn mb_matchtext_unported(encoding: pg_enc) -> ! {
 #[cold]
 #[inline(never)]
 fn nondeterministic_unported() -> ! {
-    panic!("MatchText: nondeterministic-collation substring arm requires pg_strncoll (pg_locale collate lane)")
-}
-
-#[cold]
-#[inline(never)]
-fn tolower_l_unported() -> ! {
-    panic!("SB_lower_char: tolower_l arm requires the pg_locale ctype lane (locale info.lt unported)")
-}
-
-#[cold]
-#[inline(never)]
-fn pg_tolower_highbit_unported(c: u8) -> ! {
-    panic!("pg_tolower: high-bit byte {c:#x} fold requires libc ctype (pgstrcasecmp lane)")
-}
-
-#[cold]
-#[inline(never)]
-fn str_tolower_unported() -> ! {
-    panic!("Generic_Text_IC_like: non-C ctype lower() requires the pg_locale casemap lane (pg_strlower unported)")
+    panic!("MatchText: nondeterministic-collation substring arm unreachable without ICU (pg_locale_icu.c unported)")
 }
 
 #[inline]
@@ -96,24 +72,13 @@ fn pg_ascii_tolower(c: u8) -> u8 {
 }
 
 #[inline]
-fn pg_tolower(c: u8) -> u8 {
-    if c.is_ascii_uppercase() {
-        c + (b'a' - b'A')
-    } else if c >= 0x80 {
-        pg_tolower_highbit_unported(c)
-    } else {
-        c
-    }
-}
-
-#[inline]
 fn sb_lower_char(c: u8, locale: &PgLocale) -> u8 {
     if locale.ctype_is_c {
         pg_ascii_tolower(c)
     } else if locale.is_default {
-        pg_tolower(c)
+        pg_locale::pg_tolower(c)
     } else {
-        tolower_l_unported()
+        locale.tolower_l(c)
     }
 }
 
@@ -292,8 +257,7 @@ pub struct IcScratch {
 }
 
 // C's lower() -> str_tolower(ctype_is_c) -> asc_tolower: fold stops at an
-// embedded NUL (adt_oracle_compat's casemap shape); non-C ctype is loud there
-// and loud here.
+// embedded NUL (adt_oracle_compat's casemap shape).
 fn lower_into(dst: &mut Vec<u8>, src: &[u8]) {
     dst.clear();
     dst.extend_from_slice(src);
@@ -306,6 +270,7 @@ fn lower_into(dst: &mut Vec<u8>, src: &[u8]) {
 }
 
 pub fn generic_text_ic_like(
+    mcx: Mcx<'_>,
     s: &[u8],
     p: &[u8],
     collation: Oid,
@@ -323,7 +288,15 @@ pub fn generic_text_ic_like(
 
     if mbutils::pg_database_encoding_max_length() > 1 || locale.provider == COLLPROVIDER_ICU {
         if !locale.ctype_is_c {
-            str_tolower_unported()
+            // C: DirectFunctionCall1Coll(lower) per operand (formatting.c
+            // str_tolower non-C tail).
+            let pat = adt_oracle_compat::casemap::str_tolower(mcx, p, collation)?;
+            let str_ = adt_oracle_compat::casemap::str_tolower(mcx, s, collation)?;
+            return if mbutils::GetDatabaseEncoding() == PG_UTF8 {
+                match_text::<Utf8Cs>(&str_, &pat, &LOCALE_NONE)
+            } else {
+                mb_matchtext_unported(mbutils::GetDatabaseEncoding())
+            };
         }
         lower_into(&mut scratch.p, p);
         lower_into(&mut scratch.s, s);
@@ -369,34 +342,43 @@ pub fn byteanlike(s: &[u8], pat: &[u8]) -> PgResult<bool> {
 }
 
 pub fn nameiclike(
+    mcx: Mcx<'_>,
     name: &[u8],
     pat: &[u8],
     collation: Oid,
     scratch: &mut IcScratch,
 ) -> PgResult<bool> {
-    Ok(generic_text_ic_like(name_str(name), pat, collation, scratch)? == LIKE_TRUE)
+    Ok(generic_text_ic_like(mcx, name_str(name), pat, collation, scratch)? == LIKE_TRUE)
 }
 
 pub fn nameicnlike(
+    mcx: Mcx<'_>,
     name: &[u8],
     pat: &[u8],
     collation: Oid,
     scratch: &mut IcScratch,
 ) -> PgResult<bool> {
-    Ok(generic_text_ic_like(name_str(name), pat, collation, scratch)? != LIKE_TRUE)
+    Ok(generic_text_ic_like(mcx, name_str(name), pat, collation, scratch)? != LIKE_TRUE)
 }
 
-pub fn texticlike(s: &[u8], pat: &[u8], collation: Oid, scratch: &mut IcScratch) -> PgResult<bool> {
-    Ok(generic_text_ic_like(s, pat, collation, scratch)? == LIKE_TRUE)
-}
-
-pub fn texticnlike(
+pub fn texticlike(
+    mcx: Mcx<'_>,
     s: &[u8],
     pat: &[u8],
     collation: Oid,
     scratch: &mut IcScratch,
 ) -> PgResult<bool> {
-    Ok(generic_text_ic_like(s, pat, collation, scratch)? != LIKE_TRUE)
+    Ok(generic_text_ic_like(mcx, s, pat, collation, scratch)? == LIKE_TRUE)
+}
+
+pub fn texticnlike(
+    mcx: Mcx<'_>,
+    s: &[u8],
+    pat: &[u8],
+    collation: Oid,
+    scratch: &mut IcScratch,
+) -> PgResult<bool> {
+    Ok(generic_text_ic_like(mcx, s, pat, collation, scratch)? != LIKE_TRUE)
 }
 
 trait EscMode {

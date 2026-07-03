@@ -17,6 +17,9 @@ elog = { path = "../../error/elog" }
 guc_tables = { path = "../../misc/guc_tables" }
 init_small = { path = "../../init/init_small" }
 mbutils = { path = "../../mb/mbutils" }
+unicode_case = { path = "../../../../common/unicode_case" }
+unicode_category = { path = "../../../../common/unicode_category" }
+wchar = { path = "../../../../common/wchar" }
 lsyscache = { path = "../../cache/lsyscache" }
 varlena = { path = "../varlena" }
 pg_locale_seams = { path = "../pg_locale_seams" }

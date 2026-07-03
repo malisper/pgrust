@@ -88,6 +88,7 @@ macro_rules! fc_iclike {
             // SAFETY: catalog args are non-null per the row's types (strict fn).
             let (s, p) = unsafe { (fcinfo.$arg0(0), fcinfo.arg_varlena_packed(1)) };
             Ok(Datum::from_bool(crate::$core(
+                fcinfo.result_mcx(),
                 arg_bytes!($arg0, s),
                 p.data(),
                 fcinfo.get_collation(),

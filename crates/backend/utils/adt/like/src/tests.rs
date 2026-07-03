@@ -111,6 +111,8 @@ fn like_single_byte_encoding() {
 #[test]
 fn ilike_utf8_ascii_fold() {
     utf8();
+    let ctx = mcx::MemoryContext::new("t");
+    let mcx = ctx.mcx();
     let mut scratch = IcScratch::default();
     for (s, p, want) in [
         ("HELLO", "hello", true),
@@ -121,12 +123,12 @@ fn ilike_utf8_ascii_fold() {
         ("ÄBC", "äbc", false),
     ] {
         assert_eq!(
-            texticlike(s.as_bytes(), p.as_bytes(), C, &mut scratch).unwrap(),
+            texticlike(mcx, s.as_bytes(), p.as_bytes(), C, &mut scratch).unwrap(),
             want,
             "{s:?} ILIKE {p:?}"
         );
         assert_eq!(
-            texticnlike(s.as_bytes(), p.as_bytes(), C, &mut scratch).unwrap(),
+            texticnlike(mcx, s.as_bytes(), p.as_bytes(), C, &mut scratch).unwrap(),
             !want
         );
     }
@@ -135,11 +137,13 @@ fn ilike_utf8_ascii_fold() {
 #[test]
 fn ilike_single_byte_fold() {
     latin1();
+    let ctx = mcx::MemoryContext::new("t");
+    let mcx = ctx.mcx();
     let mut scratch = IcScratch::default();
-    assert!(texticlike(b"HELLO", b"hello", C, &mut scratch).unwrap());
-    assert!(texticlike(b"HeLLo", b"%ell%", C, &mut scratch).unwrap());
+    assert!(texticlike(mcx, b"HELLO", b"hello", C, &mut scratch).unwrap());
+    assert!(texticlike(mcx, b"HeLLo", b"%ell%", C, &mut scratch).unwrap());
     // C ctype: high-bit bytes don't fold.
-    assert!(!texticlike(b"\xc4bc", b"\xe4bc", C, &mut scratch).unwrap());
+    assert!(!texticlike(mcx, b"\xc4bc", b"\xe4bc", C, &mut scratch).unwrap());
     utf8();
 }
 
@@ -158,6 +162,8 @@ fn bytea_like() {
 #[test]
 fn name_like() {
     utf8();
+    let ctx = mcx::MemoryContext::new("t");
+    let mcx = ctx.mcx();
     let mut name = [0u8; 64];
     name[..8].copy_from_slice(b"pg_class");
     assert!(namelike(&name, b"pg\\_%", C).unwrap());
@@ -165,18 +171,20 @@ fn name_like() {
     assert!(!namelike(&name, b"pg_class_", C).unwrap());
     assert!(namenlike(&name, b"pg_index", C).unwrap());
     let mut scratch = IcScratch::default();
-    assert!(nameiclike(&name, b"PG\\_CLASS", C, &mut scratch).unwrap());
-    assert!(nameicnlike(&name, b"PG\\_INDEX", C, &mut scratch).unwrap());
+    assert!(nameiclike(mcx, &name, b"PG\\_CLASS", C, &mut scratch).unwrap());
+    assert!(nameicnlike(mcx, &name, b"PG\\_INDEX", C, &mut scratch).unwrap());
 }
 
 #[test]
 fn indeterminate_and_abort_paths() {
     utf8();
+    let ctx = mcx::MemoryContext::new("t");
+    let mcx = ctx.mcx();
     let err = textlike(b"a", b"a", 0).unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_INDETERMINATE_COLLATION);
     assert!(err.message().contains("for LIKE"));
     let mut scratch = IcScratch::default();
-    let err = texticlike(b"a", b"a", 0, &mut scratch).unwrap_err();
+    let err = texticlike(mcx, b"a", b"a", 0, &mut scratch).unwrap_err();
     assert!(err.message().contains("for ILIKE"));
 
     // LIKE_ABORT propagation: late-% pattern longer than text.
@@ -232,7 +240,10 @@ fn fc_wrappers_and_oids() {
     };
     let s = text(b"Hello");
     let p = text(b"h%");
+    let ctx = mcx::MemoryContext::new("t");
     let mut fcinfo = LocalFcinfo::<2>::new(C);
+    // SAFETY: ctx outlives every call through this frame.
+    unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
     fcinfo.set_arg(0, datum::Datum::from_usize(s.as_ptr() as usize));
     fcinfo.set_arg(1, datum::Datum::from_usize(p.as_ptr() as usize));
     assert!(!builtins::fc_textlike(None, &mut fcinfo)
@@ -280,4 +291,76 @@ fn like_support_rows_are_loud() {
     }));
     let msg = *r.unwrap_err().downcast::<&'static str>().unwrap();
     assert!(msg.contains("textlike_support"));
+}
+
+const COLL_LIBC_LATIN1: Oid = 40001;
+const COLL_BUILTIN_CUTF8: Oid = 40002;
+
+fn install_collation_stub() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        syscache_seams::lookup_pg_collation_locale_row::set(|mcx, collid| {
+            let s = |v: &str| mcx::PgString::from_str_in(v, mcx);
+            let mut collname = types_tuple::NameData::default();
+            collname.namestrcpy("like_test");
+            let (provider, collate, ctype, locale) = match collid {
+                COLL_LIBC_LATIN1 => (
+                    pg_locale::COLLPROVIDER_LIBC,
+                    Some("en_US.ISO8859-1"),
+                    Some("en_US.ISO8859-1"),
+                    None,
+                ),
+                COLL_BUILTIN_CUTF8 => (pg_locale::COLLPROVIDER_BUILTIN, None, None, Some("C.UTF-8")),
+                _ => return Ok(None),
+            };
+            Ok(Some(syscache_seams::PgCollationLocaleRow {
+                collname,
+                collnamespace: 11,
+                collprovider: provider,
+                collisdeterministic: true,
+                collcollate: collate.map(s).transpose()?,
+                collctype: ctype.map(s).transpose()?,
+                colllocale: locale.map(s).transpose()?,
+                collversion: None,
+            }))
+        });
+    });
+}
+
+// Expectations verified against live PG 18.3 (builtin C.UTF-8 database).
+#[test]
+fn ilike_non_c_ctype_folds() {
+    utf8();
+    install_collation_stub();
+    let ctx = mcx::MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut scratch = IcScratch::default();
+    for (s, p, want) in [
+        ("ΣΟΦΟΣ", "σοφοσ", true),
+        ("İstanbul", "i%", true),
+        ("STRASSE", "straße", false),
+        ("Ёлка", "ёлка", true),
+        ("Wörld", "w_rld", true),
+    ] {
+        assert_eq!(
+            texticlike(mcx, s.as_bytes(), p.as_bytes(), COLL_BUILTIN_CUTF8, &mut scratch).unwrap(),
+            want,
+            "{s:?} ILIKE {p:?}"
+        );
+    }
+}
+
+#[test]
+fn ilike_sb_tolower_l_fold() {
+    latin1();
+    install_collation_stub();
+    let ctx = mcx::MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut scratch = IcScratch::default();
+    // 0xC4/0xE4 = Ä/ä in LATIN1; tolower_l folds them under en_US.ISO8859-1.
+    assert!(texticlike(mcx, b"\xc4bc", b"\xe4bc", COLL_LIBC_LATIN1, &mut scratch).unwrap());
+    assert!(texticlike(mcx, b"\xc4bc", b"\xe4b_", COLL_LIBC_LATIN1, &mut scratch).unwrap());
+    assert!(!texticlike(mcx, b"\xc4bc", b"\xe9bc", COLL_LIBC_LATIN1, &mut scratch).unwrap());
+    utf8();
 }
