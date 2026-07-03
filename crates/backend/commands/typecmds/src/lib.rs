@@ -598,7 +598,12 @@ pub fn DefineEnum<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateEnumStmt<'mcx>) -> PgResult
 
 pub fn AlterEnum<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterEnumStmt<'mcx>) -> PgResult<ObjectAddress> {
     // C shares the list pointer (makeTypeNameFromNameList); cold DDL copy.
-    let typename = TypeName { names: stmt.typeName.clone_in(mcx)?, ..Default::default() };
+    let typename = TypeName {
+        names: stmt.typeName.clone_in(mcx)?,
+        typemod: -1,
+        location: -1,
+        ..Default::default()
+    };
     let (enum_type_oid, _typmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, &typename)?;
 
     checkEnumOwner(enum_type_oid)?;
