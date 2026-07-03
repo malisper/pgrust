@@ -990,9 +990,10 @@ fn check_notnull_droppable<'mcx>(
 }
 
 const IndexRelidIndexId: Oid = 2679;
+const Anum_pg_index_indnkeyatts: usize = 4;
 const Anum_pg_index_indisprimary: usize = 7;
-const Anum_pg_index_indisreplident: usize = 10;
-const Anum_pg_index_indkey: usize = 20;
+const Anum_pg_index_indisreplident: usize = 15;
+const Anum_pg_index_indkey: usize = 16;
 
 fn pg_index_shape<'mcx>(
     mcx: Mcx<'mcx>,
@@ -1006,26 +1007,22 @@ fn pg_index_shape<'mcx>(
         .unwrap_or_else(|| panic!("cache lookup failed for index {indexoid}"));
     let desc = pg_index.descr();
     let mut isnull = false;
-    // SAFETY (each): fixed NOT NULL pg_index columns under its descriptor.
-    let isprimary = unsafe {
-        types_tuple::heap_getattr(tup, Anum_pg_index_indisprimary as i32, desc, &mut isnull)
-    }
-    .as_bool();
-    // SAFETY: as above.
-    let isreplident = unsafe {
-        types_tuple::heap_getattr(tup, Anum_pg_index_indisreplident as i32, desc, &mut isnull)
-    }
-    .as_bool();
-    // SAFETY: indkey is a NOT NULL int2vector; live through the scan.
-    let d = unsafe {
-        types_tuple::heap_getattr(tup, Anum_pg_index_indkey as i32, desc, &mut isnull)
+    let mut get = |attnum: usize| {
+        // SAFETY: fixed NOT NULL pg_index columns under its descriptor.
+        let d = unsafe { types_tuple::heap_getattr(tup, attnum as i32, desc, &mut isnull) };
+        assert!(!isnull, "unexpected null pg_index attnum {attnum} for index {indexoid}");
+        d
     };
+    let nkeyatts = get(Anum_pg_index_indnkeyatts).as_i16();
+    let isprimary = get(Anum_pg_index_indisprimary).as_bool();
+    let isreplident = get(Anum_pg_index_indisreplident).as_bool();
+    let d = get(Anum_pg_index_indkey);
     let p = d.as_usize() as *const u8;
-    // SAFETY: as above.
+    // SAFETY: indkey is a NOT NULL int2vector (null-asserted above); live through the scan.
     let image = unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
     let elems = datum::array_build::deconstruct_array_image(mcx, image, 2, true, b's')?;
     let mut keys: PgVec<'mcx, AttrNumber> = mcx::vec_with_capacity_in(mcx, elems.len())?;
-    keys.extend(elems.iter().map(|d| d.as_i16()));
+    keys.extend(elems.iter().take(nkeyatts as usize).map(|d| d.as_i16()));
     genam::systable_endscan(mcx, scan)?;
     pg_index.close(types_rel::AccessShareLock)?;
     Ok((isprimary, isreplident, keys))
