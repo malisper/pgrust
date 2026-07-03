@@ -992,8 +992,7 @@ fn allequalimage_distinct_keys_dedup_is_noop_then_split() {
     let rel = index_rel(cx.mcx());
     prime_supportinfo(&rel);
 
-    // all-distinct page full: dedup pass finds zero intervals (no WAL, no
-    // page change) and the split proceeds as on an allequalimage=false index.
+    // all-distinct page full: zero intervals, no WAL, split proceeds.
     for k in 1..=500i32 {
         insert_key(&rel, &rel, k, tid(k as u32, 1));
     }
@@ -1015,7 +1014,6 @@ fn dedup_pass_merges_duplicates_onto_one_leaf() {
     let rel = index_rel(cx.mcx());
     prime_supportinfo(&rel);
 
-    // one key, ascending TIDs: every page-full dedups instead of splitting.
     let n = 1200u32;
     for i in 1..=n {
         insert_key(&rel, &rel, 42, tid(i, 1));
@@ -1046,8 +1044,6 @@ fn single_value_strategy_splits_after_six_capped_postings() {
     let rel = index_rel(cx.mcx());
     prime_supportinfo(&rel);
 
-    // enough duplicates of one key to overflow even a fully deduplicated
-    // page: single value strategy caps six posting lists, then splits.
     let n = 4000u32;
     for i in 1..=n {
         insert_key(&rel, &rel, 42, tid(i, 1));
@@ -1075,7 +1071,6 @@ fn dedup_mixed_keys_only_merges_equal_runs() {
     let rel = index_rel(cx.mcx());
     prime_supportinfo(&rel);
 
-    // 40 duplicate-heavy even keys interleaved, plus unique odd spacers.
     let mut expect: Vec<(i32, u32)> = Vec::new();
     for round in 0..30u32 {
         for k in 0..40i32 {
