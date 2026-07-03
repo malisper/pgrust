@@ -2,9 +2,9 @@ use types_core::catalog::RELPERSISTENCE_PERMANENT;
 use types_error::PgResult;
 use types_nodes::parsenodes::{
     CTEMaterialize, CommonTableExpr, CopyStmt, DeallocateStmt, DefElem, DefElemAction,
-    DropBehavior, DropStmt, ExecuteStmt, ObjectType, PrepareStmt, TransactionStmt,
-    TransactionStmtKind, VacuumRelation, VacuumStmt, VariableSetKind, VariableSetStmt,
-    VariableShowStmt, WithClause,
+    DiscardMode, DiscardStmt, DropBehavior, DropStmt, ExecuteStmt, ListenStmt, NotifyStmt,
+    ObjectType, PrepareStmt, TransactionStmt, TransactionStmtKind, UnlistenStmt, VacuumRelation,
+    VacuumStmt, VariableSetKind, VariableSetStmt, VariableShowStmt, WithClause,
 };
 use types_nodes::primnodes::{CaseExpr, CaseWhen, CoalesceExpr, JoinExpr, MinMaxExpr, MinMaxOp};
 use types_nodes::JoinType;
@@ -1695,9 +1695,9 @@ impl<'mcx> Parser<'mcx> {
                 n.va_cols = view.v(2).list();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            // VariableSetStmt: SET set_rest / SET LOCAL set_rest.
-            201 | 202 => {
-                let n = view.v(if rule == 202 { 3 } else { 2 }).node().expect("set_rest");
+            // VariableSetStmt: SET set_rest / SET LOCAL set_rest / SET SESSION set_rest.
+            201 | 202 | 203 => {
+                let n = view.v(if rule == 201 { 2 } else { 3 }).node().expect("set_rest");
                 let local = rule == 202;
                 // SAFETY: as rule 8 — parser-owned tree, no live derived refs.
                 unsafe {
@@ -1705,6 +1705,15 @@ impl<'mcx> Parser<'mcx> {
                         .expect("set_rest is VariableSetStmt");
                 }
                 *yyval = YYSTYPE::Node(Some(n));
+            }
+            // set_rest: TRANSACTION / SESSION CHARACTERISTICS mode lists.
+            204 | 205 => {
+                let mut n = Node::build::<VariableSetStmt>(mcx)?;
+                n.kind = VariableSetKind::VAR_SET_MULTI;
+                n.name = Some(if rule == 204 { "TRANSACTION" } else { "SESSION CHARACTERISTICS" });
+                n.args = view.v(if rule == 204 { 2 } else { 5 }).list();
+                n.jumble_args = true;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // generic_set: var_name TO var_list | var_name '=' var_list.
             207 | 208 => {
@@ -1715,7 +1724,64 @@ impl<'mcx> Parser<'mcx> {
                 n.location = view.l(3);
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // set_rest_more: var_name TO/= DEFAULT | var_name FROM CURRENT.
+            209 | 210 | 212 => {
+                let mut n = Node::build::<VariableSetStmt>(mcx)?;
+                n.kind = if rule == 212 {
+                    VariableSetKind::VAR_SET_CURRENT
+                } else {
+                    VariableSetKind::VAR_SET_DEFAULT
+                };
+                n.name = Some(view.v(1).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             211 => *yyval = view.v(1),
+            // set_rest_more: TIME ZONE zone_value (NULL zone_value = DEFAULT).
+            213 => {
+                let mut n = Node::build::<VariableSetStmt>(mcx)?;
+                n.kind = VariableSetKind::VAR_SET_VALUE;
+                n.name = Some("timezone");
+                n.jumble_args = true;
+                match view.v(3).node() {
+                    Some(z) => n.args = NodeList::make1(mcx, z)?,
+                    None => n.kind = VariableSetKind::VAR_SET_DEFAULT,
+                }
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // set_rest_more: SESSION AUTHORIZATION NonReservedWord_or_Sconst | DEFAULT.
+            218 => {
+                let mut n = Node::build::<VariableSetStmt>(mcx)?;
+                n.kind = VariableSetKind::VAR_SET_VALUE;
+                n.name = Some("session_authorization");
+                let s = Node::mk_a_const(
+                    mcx,
+                    Some(ValUnion::String(types_nodes::String { sval: view.v(3).str_val() })),
+                    view.l(3),
+                )?;
+                n.args = NodeList::make1(mcx, s)?;
+                n.location = view.l(3);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            219 => {
+                let mut n = Node::build::<VariableSetStmt>(mcx)?;
+                n.kind = VariableSetKind::VAR_SET_DEFAULT;
+                n.name = Some("session_authorization");
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // set_rest: TRANSACTION SNAPSHOT Sconst.
+            221 => {
+                let mut n = Node::build::<VariableSetStmt>(mcx)?;
+                n.kind = VariableSetKind::VAR_SET_MULTI;
+                n.name = Some("TRANSACTION SNAPSHOT");
+                let s = Node::mk_a_const(
+                    mcx,
+                    Some(ValUnion::String(types_nodes::String { sval: view.v(3).str_val() })),
+                    view.l(3),
+                )?;
+                n.args = NodeList::make1(mcx, s)?;
+                n.location = view.l(3);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // var_name: var_name '.' ColId (psprintf "%s.%s").
             223 => {
                 let a = view.v(1).str_val();
@@ -1745,7 +1811,38 @@ impl<'mcx> Parser<'mcx> {
                     view.l(1),
                 )?;
             }
+            227 => {
+                let v = view.v(1).node().expect("NumericOnly");
+                *yyval = make_a_const(mcx, v, view.l(1))?;
+            }
+            228 => *yyval = YYSTYPE::Str("read uncommitted"),
+            229 => *yyval = YYSTYPE::Str("read committed"),
+            230 => *yyval = YYSTYPE::Str("repeatable read"),
+            231 => *yyval = YYSTYPE::Str("serializable"),
+            // zone_value: Sconst | IDENT | NumericOnly (interval arms stay unported).
+            236 | 237 => {
+                let s = view.v(1).str_val();
+                *yyval = self.a_const(
+                    ValUnion::String(types_nodes::String { sval: s }),
+                    view.l(1),
+                )?;
+            }
+            240 => {
+                let v = view.v(1).node().expect("NumericOnly");
+                *yyval = make_a_const(mcx, v, view.l(1))?;
+            }
             248 => *yyval = view.v(2),
+            // reset_rest: TIME ZONE / TRANSACTION ISOLATION LEVEL / SESSION AUTHORIZATION.
+            250 | 251 | 252 => {
+                let mut n = Node::build::<VariableSetStmt>(mcx)?;
+                n.kind = VariableSetKind::VAR_RESET;
+                n.name = Some(match rule {
+                    250 => "timezone",
+                    251 => "transaction_isolation",
+                    _ => "session_authorization",
+                });
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // generic_reset: var_name.
             253 => {
                 let mut n = Node::build::<VariableSetStmt>(mcx)?;
@@ -1754,9 +1851,76 @@ impl<'mcx> Parser<'mcx> {
                 n.location = -1;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // generic_reset: ALL.
+            254 => {
+                let mut n = Node::build::<VariableSetStmt>(mcx)?;
+                n.kind = VariableSetKind::VAR_RESET_ALL;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // VariableShowStmt: var_name and the four keyword SHOW forms.
             259 => {
                 let n = Node::mk(mcx, VariableShowStmt { name: Some(view.v(2).str_val()) })?;
                 *yyval = YYSTYPE::Node(Some(n));
+            }
+            260 | 261 | 262 | 263 => {
+                let name = match rule {
+                    260 => "timezone",
+                    261 => "transaction_isolation",
+                    262 => "session_authorization",
+                    _ => "all",
+                };
+                let n = Node::mk(mcx, VariableShowStmt { name: Some(name) })?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            // DiscardStmt: DISCARD ALL/TEMP/TEMPORARY/PLANS/SEQUENCES.
+            270 | 271 | 272 | 273 | 274 => {
+                let target = match rule {
+                    270 => DiscardMode::DISCARD_ALL,
+                    271 | 272 => DiscardMode::DISCARD_TEMP,
+                    273 => DiscardMode::DISCARD_PLANS,
+                    _ => DiscardMode::DISCARD_SEQUENCES,
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(mcx, DiscardStmt { target })?));
+            }
+            // NumericOnly: FCONST | '+' FCONST | '-' FCONST | SignedIconst.
+            660 => *yyval = YYSTYPE::Node(Some(Node::mk_float(mcx, view.v(1).str_val())?)),
+            661 => *yyval = YYSTYPE::Node(Some(Node::mk_float(mcx, view.v(2).str_val())?)),
+            662 => {
+                *yyval =
+                    YYSTYPE::Node(Some(Node::mk_float(mcx, negate_float(mcx, view.v(2).str_val())?)?));
+            }
+            663 => *yyval = YYSTYPE::Node(Some(Node::mk_integer(mcx, view.v(1).ival())?)),
+            // NotifyStmt/ListenStmt/UnlistenStmt: parse is C-complete; execution is the loud async lane.
+            1452 => {
+                let n = Node::mk(
+                    mcx,
+                    NotifyStmt {
+                        conditionname: Some(view.v(2).str_val()),
+                        payload: opt_str(view.v(3)),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            1455 => {
+                let n = Node::mk(mcx, ListenStmt { conditionname: Some(view.v(2).str_val()) })?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            1456 | 1457 => {
+                let conditionname = if rule == 1456 { Some(view.v(2).str_val()) } else { None };
+                *yyval = YYSTYPE::Node(Some(Node::mk(mcx, UnlistenStmt { conditionname })?));
+            }
+            // TransactionStmt: ABORT [chain] / START TRANSACTION modes.
+            1458 => {
+                let mut n = Node::build::<TransactionStmt>(mcx)?;
+                n.kind = TransactionStmtKind::TRANS_STMT_ROLLBACK;
+                n.chain = view.v(3).boolean();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1459 => {
+                let mut n = Node::build::<TransactionStmt>(mcx)?;
+                n.kind = TransactionStmtKind::TRANS_STMT_START;
+                n.options = view.v(3).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // TransactionStmt: COMMIT/ROLLBACK [chain], SAVEPOINT, RELEASE
             // SAVEPOINT, ROLLBACK TO SAVEPOINT; TransactionStmtLegacy BEGIN.
@@ -1790,7 +1954,44 @@ impl<'mcx> Parser<'mcx> {
                 n.location = -1;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            1487 => *yyval = YYSTYPE::Boolean(false),
+            // TransactionStmtLegacy: END [chain].
+            1471 => {
+                let mut n = Node::build::<TransactionStmt>(mcx)?;
+                n.kind = TransactionStmtKind::TRANS_STMT_COMMIT;
+                n.chain = view.v(3).boolean();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // transaction_mode_item -> DefElem.
+            1475 => {
+                let s = Node::mk_a_const(
+                    mcx,
+                    Some(ValUnion::String(types_nodes::String { sval: view.v(3).str_val() })),
+                    view.l(3),
+                )?;
+                *yyval = def_elem(mcx, "transaction_isolation", Some(s), view.l(1))?;
+            }
+            1476 | 1477 => {
+                let c = make_int_const(mcx, (rule == 1476) as i32, view.l(1))?;
+                *yyval = def_elem(mcx, "transaction_read_only", Some(c), view.l(1))?;
+            }
+            1478 | 1479 => {
+                let c = make_int_const(mcx, (rule == 1478) as i32, view.l(1))?;
+                *yyval = def_elem(mcx, "transaction_deferrable", Some(c), view.l(1))?;
+            }
+            // transaction_mode_list ( ',' | nothing ) transaction_mode_item.
+            1480 => {
+                let item = view.v(1).node().expect("transaction_mode_item");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, item)?);
+            }
+            1481 | 1482 => {
+                let mut list = view.v(1).list();
+                let at = if rule == 1481 { 3 } else { 2 };
+                list.lappend(mcx, view.v(at).node().expect("transaction_mode_item"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // opt_transaction_chain: AND CHAIN | AND NO CHAIN | empty (1487).
+            1485 => *yyval = YYSTYPE::Boolean(true),
+            1486 | 1487 => *yyval = YYSTYPE::Boolean(false),
             1589 => {
                 let mut n = Node::build::<types_nodes::parsenodes::ExplainStmt>(mcx)?;
                 n.query = view.v(5).node();
@@ -2250,6 +2451,22 @@ fn opt_str<'mcx>(v: YYSTYPE<'mcx>) -> Option<&'mcx str> {
     } else {
         Some(v.str_val())
     }
+}
+
+// makeAConst (makefuncs.c): wrap a bare Integer/Float value node.
+fn make_a_const<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    v: Node<'mcx>,
+    location: i32,
+) -> PgResult<YYSTYPE<'mcx>> {
+    let val = if let Some(i) = v.as_integer() {
+        ValUnion::Integer(Integer { ival: i.ival })
+    } else if let Some(f) = v.as_float() {
+        ValUnion::Float(Float { fval: f.fval })
+    } else {
+        panic!("make_a_const: unexpected node type {:?}", v.node_tag())
+    };
+    Ok(YYSTYPE::Node(Some(Node::mk_a_const(mcx, Some(val), location)?)))
 }
 
 // makeDefElem (makefuncs.c).

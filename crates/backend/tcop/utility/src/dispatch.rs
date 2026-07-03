@@ -352,7 +352,7 @@ fn dispatch_switch<'mcx>(
         }
         T_DiscardStmt => {
             CheckRestrictedOperation("DISCARD")?;
-            handler_gap("DiscardCommand (discard lane)")
+            discard::DiscardCommand(parsetree.as_discard_stmt().unwrap(), is_top_level)?;
         }
 
         T_CreateEventTrigStmt => handler_gap("CreateEventTrigger (event_trigger lane)"),

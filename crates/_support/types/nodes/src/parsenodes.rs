@@ -416,6 +416,38 @@ pub struct ClosePortalStmt<'mcx> {
     pub portalname: Option<&'mcx str>,
 }
 
+#[derive(Default)]
+pub struct NotifyStmt<'mcx> {
+    pub conditionname: Option<&'mcx str>,
+    pub payload: Option<&'mcx str>,
+}
+
+#[derive(Default)]
+pub struct ListenStmt<'mcx> {
+    pub conditionname: Option<&'mcx str>,
+}
+
+// C: conditionname == NULL means UNLISTEN *.
+#[derive(Default)]
+pub struct UnlistenStmt<'mcx> {
+    pub conditionname: Option<&'mcx str>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum DiscardMode {
+    #[default]
+    DISCARD_ALL = 0,
+    DISCARD_PLANS = 1,
+    DISCARD_SEQUENCES = 2,
+    DISCARD_TEMP = 3,
+}
+
+#[derive(Default)]
+pub struct DiscardStmt {
+    pub target: DiscardMode,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum CTEMaterialize {
@@ -629,6 +661,18 @@ unsafe impl<'mcx> NodeVariant<'mcx> for DeclareCursorStmt<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for ClosePortalStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_ClosePortalStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for NotifyStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_NotifyStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ListenStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ListenStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for UnlistenStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_UnlistenStmt;
+}
+unsafe impl NodeVariant<'_> for DiscardStmt {
+    const TAG: NodeTag = NodeTag::T_DiscardStmt;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for DeallocateStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_DeallocateStmt;
 }
@@ -751,6 +795,26 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_close_portal_stmt(self) -> Option<&'mcx ClosePortalStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_notify_stmt(self) -> Option<&'mcx NotifyStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_listen_stmt(self) -> Option<&'mcx ListenStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_unlisten_stmt(self) -> Option<&'mcx UnlistenStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_discard_stmt(self) -> Option<&'mcx DiscardStmt> {
         self.as_variant()
     }
 

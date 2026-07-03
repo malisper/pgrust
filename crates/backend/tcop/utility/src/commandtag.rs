@@ -171,7 +171,15 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
             }
         }
         T_VariableShowStmt => CMDTAG_SHOW,
-        T_DiscardStmt => payload_gap("CreateCommandTag", "DiscardStmt"),
+        T_DiscardStmt => {
+            use types_nodes::parsenodes::DiscardMode::*;
+            match parsetree.as_discard_stmt().unwrap().target {
+                DISCARD_ALL => CMDTAG_DISCARD_ALL,
+                DISCARD_PLANS => CMDTAG_DISCARD_PLANS,
+                DISCARD_SEQUENCES => CMDTAG_DISCARD_SEQUENCES,
+                DISCARD_TEMP => CMDTAG_DISCARD_TEMP,
+            }
+        }
         T_CreateTransformStmt => CMDTAG_CREATE_TRANSFORM,
         T_CreateTrigStmt => CMDTAG_CREATE_TRIGGER,
         T_CreateEventTrigStmt => CMDTAG_CREATE_EVENT_TRIGGER,

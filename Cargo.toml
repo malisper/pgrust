@@ -283,6 +283,7 @@ members = [
     "crates/backend/tcop/pquery_seams",
     "crates/backend/access/common/printtup",
     "crates/backend/access/transam/xact_portal_seams",
+    "crates/backend/commands/discard",
     "crates/backend/commands/portalcmds",
     "crates/backend/commands/portalcmds_seams",
     "crates/backend/storage/ipc/ipc_portal_seams",
