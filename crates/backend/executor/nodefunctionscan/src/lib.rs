@@ -18,13 +18,11 @@ use ::types_fmgr::{
 };
 use ::types_nodes::plannodes::FunctionScan;
 use ::types_nodes::RangeTblFunction;
-use ::types_slot::TupleSlotKind;
+use ::types_slot::{TupleSlotKind, EXEC_FLAG_BACKWARD};
 use ::types_tuple::TupleDescData;
 use ::tuplestore::Tuplestore;
 
 pub fn init_seams() {}
-
-const EXEC_FLAG_BACKWARD: i32 = 0x0008;
 
 // SetExprState resolved once at init; fn_extra carries the SRF frame.
 struct SetExprState<'mcx> {

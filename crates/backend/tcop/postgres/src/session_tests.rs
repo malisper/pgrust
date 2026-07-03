@@ -202,9 +202,28 @@ fn int4_type_shape() -> types_tuple::PgTypeShape {
     }
 }
 
+const INT8OID: u32 = 20;
+
 fn install_catalog_fixture() {
     syscache_seams::lookup_pg_type_shape::set(|typid| {
-        Ok((typid == INT4OID).then(int4_type_shape))
+        Ok(match typid {
+            INT4OID => Some(int4_type_shape()),
+            INT8OID => Some(types_tuple::PgTypeShape {
+                typlen: 8,
+                typbyval: true,
+                typalign: b'd' as i8,
+                typstorage: types_tuple::TYPSTORAGE_PLAIN,
+                typcollation: 0,
+            }),
+            25 => Some(types_tuple::PgTypeShape {
+                typlen: -1,
+                typbyval: false,
+                typalign: b'i' as i8,
+                typstorage: b'x' as i8,
+                typcollation: 100,
+            }),
+            _ => None,
+        })
     });
     syscache_seams::pg_type_base_shape::set(|typid| {
         Ok(Some(syscache_seams::PgTypeBaseShape {
@@ -216,26 +235,162 @@ fn install_catalog_fixture() {
         }))
     });
     syscache_seams::pg_type_io_shape::set(|typid| {
-        Ok((typid == INT4OID).then(|| syscache_seams::PgTypeIoShape {
-            oid: INT4OID,
-            typinput: INT4IN,
-            typoutput: INT4OUT,
-            typreceive: 2406,
-            typsend: 2407,
-            typmodin: 0,
-            typmodout: 0,
-            typelem: 0,
-            typlen: 4,
-            typbyval: true,
-            typalign: b'i' as i8,
-            typdelim: b',' as i8,
-            typisdefined: true,
+        Ok(match typid {
+            INT4OID => Some(syscache_seams::PgTypeIoShape {
+                oid: INT4OID,
+                typinput: INT4IN,
+                typoutput: INT4OUT,
+                typreceive: 2406,
+                typsend: 2407,
+                typmodin: 0,
+                typmodout: 0,
+                typelem: 0,
+                typlen: 4,
+                typbyval: true,
+                typalign: b'i' as i8,
+                typdelim: b',' as i8,
+                typisdefined: true,
+            }),
+            INT8OID => Some(syscache_seams::PgTypeIoShape {
+                oid: INT8OID,
+                typinput: 460,
+                typoutput: 461,
+                typreceive: 2408,
+                typsend: 2409,
+                typmodin: 0,
+                typmodout: 0,
+                typelem: 0,
+                typlen: 8,
+                typbyval: true,
+                typalign: b'd' as i8,
+                typdelim: b',' as i8,
+                typisdefined: true,
+            }),
+            25 => Some(syscache_seams::PgTypeIoShape {
+                oid: 25,
+                typinput: 46,
+                typoutput: 47,
+                typreceive: 2414,
+                typsend: 2415,
+                typmodin: 0,
+                typmodout: 0,
+                typelem: 0,
+                typlen: -1,
+                typbyval: false,
+                typalign: b'i' as i8,
+                typdelim: b',' as i8,
+                typisdefined: true,
+            }),
+            _ => None,
+        })
+    });
+    // The real builtin table covers every io/transition function these
+    // sessions reach.
+    fmgr_seams::fmgr_info::set(fmgr_core::fmgr_info);
+    syscache_seams::lookup_pg_proc_name_candidates::set(|mcx, proname| {
+        let mut v = mcx::PgVec::new_in(mcx);
+        match proname {
+            "generate_series" => {
+                let mut two = mcx::vec_with_capacity_in(mcx, 2)?;
+                two.extend([INT4OID, INT4OID]);
+                v.push(syscache_seams::PgProcCandidate {
+                    oid: 1067,
+                    pronamespace: 11,
+                    pronargs: 2,
+                    pronargdefaults: 0,
+                    provariadic: 0,
+                    proargtypes: two,
+                });
+                let mut three = mcx::vec_with_capacity_in(mcx, 3)?;
+                three.extend([INT4OID, INT4OID, INT4OID]);
+                v.push(syscache_seams::PgProcCandidate {
+                    oid: 1066,
+                    pronamespace: 11,
+                    pronargs: 3,
+                    pronargdefaults: 0,
+                    provariadic: 0,
+                    proargtypes: three,
+                });
+            }
+            "count" => {
+                v.push(syscache_seams::PgProcCandidate {
+                    oid: 2803,
+                    pronamespace: 11,
+                    pronargs: 0,
+                    pronargdefaults: 0,
+                    provariadic: 0,
+                    proargtypes: mcx::PgVec::new_in(mcx),
+                });
+            }
+            _ => {}
+        }
+        Ok(v)
+    });
+    syscache_seams::lookup_pg_proc_shape::set(|funcid| {
+        Ok(match funcid {
+            1066 | 1067 => Some(syscache_seams::PgProcShape {
+                pronamespace: 11,
+                prorettype: INT4OID,
+                provariadic: 0,
+                prosupport: 3994,
+                pronargs: if funcid == 1066 { 3 } else { 2 },
+                prokind: b'f' as i8,
+                provolatile: b'i' as i8,
+                proparallel: b's' as i8,
+                proretset: true,
+                proisstrict: true,
+                proleakproof: false,
+            }),
+            2803 => Some(syscache_seams::PgProcShape {
+                pronamespace: 11,
+                prorettype: INT8OID,
+                provariadic: 0,
+                prosupport: 0,
+                pronargs: 0,
+                prokind: b'a' as i8,
+                provolatile: b'i' as i8,
+                proparallel: b's' as i8,
+                proretset: false,
+                proisstrict: false,
+                proleakproof: false,
+            }),
+            _ => None,
+        })
+    });
+    syscache_seams::pg_proc_cost_shape::set(|funcid| {
+        Ok(Some(syscache_seams::PgProcCostShape {
+            procost: 1.0,
+            prorows: if funcid == 1066 || funcid == 1067 { 1000.0 } else { 0.0 },
+            prosupport: if funcid == 1066 || funcid == 1067 { 3994 } else { 0 },
         }))
     });
-    fmgr_seams::fmgr_info::set(|oid| match oid {
-        INT4IN => Ok(FmgrInfo::new(adt_int::builtins::fc_int4in, INT4IN, 1, true, false)),
-        INT4OUT => Ok(FmgrInfo::new(adt_int::builtins::fc_int4out, INT4OUT, 1, true, false)),
-        other => panic!("fmgr_info: unexpected oid {other}"),
+    syscache_seams::pg_type_typtype::set(|_| Ok(Some(b'b' as i8)));
+    aclchk_seams::object_aclcheck::set(|_, _, _, _| Ok(0));
+    syscache_seams::pg_aggregate_agginitval::set(|mcx, aggfnoid| {
+        debug_assert_eq!(aggfnoid, 2803);
+        Ok(Some(Some(mcx::PgString::from_str_in("0", mcx)?)))
+    });
+    syscache_seams::pg_proc_result_arrays::set(|_, _| {
+        Ok(Some(syscache_seams::PgProcResultArraysShape {
+            proallargtypes: None,
+            proargmodes: None,
+            proargnames: None,
+        }))
+    });
+    syscache_seams::lookup_pg_aggregate_shape::set(|aggfnoid| {
+        Ok((aggfnoid == 2803).then_some(syscache_seams::PgAggregateShape {
+            aggkind: b'n' as i8,
+            aggnumdirectargs: 0,
+            aggtransfn: 1219,
+            aggfinalfn: 0,
+            aggcombinefn: 463,
+            aggserialfn: 0,
+            aggdeserialfn: 0,
+            aggfinalextra: false,
+            aggfinalmodify: b'r' as i8,
+            aggtranstype: INT8OID,
+            aggtransspace: 0,
+        }))
     });
     mbutils_seams::server_to_client_conversion_needed::set(|| false);
     mbutils_seams::pg_server_to_client::set(|_, _| Ok(None));
@@ -435,6 +590,23 @@ fn bind_msg(portal: &str, stmt: &str, params: &[&[u8]]) -> Vec<u8> {
     msg(b'B', &b)
 }
 
+// Bind with one binary (format=1) param format and one binary result format,
+// broadcast to all params/columns (protocol's single-format-code shorthand).
+fn bind_msg_binary(portal: &str, stmt: &str, params: &[&[u8]]) -> Vec<u8> {
+    let mut b = cstr(portal);
+    b.extend(cstr(stmt));
+    b.extend(1u16.to_be_bytes()); /* 1 param format code ... */
+    b.extend(1i16.to_be_bytes()); /* ... = binary */
+    b.extend((params.len() as u16).to_be_bytes());
+    for p in params {
+        b.extend((p.len() as i32).to_be_bytes());
+        b.extend(*p);
+    }
+    b.extend(1u16.to_be_bytes()); /* 1 result format code = binary */
+    b.extend(1i16.to_be_bytes());
+    msg(b'B', &b)
+}
+
 fn execute_msg(portal: &str, max_rows: i32) -> Vec<u8> {
     let mut b = cstr(portal);
     b.extend(max_rows.to_be_bytes());
@@ -521,6 +693,15 @@ fn scripted_batches() -> Vec<(&'static str, Vec<u8>)> {
         (
             "bind_missing_stmt_skip_till_sync",
             cat(&[bind_msg("", "nope", &[b"1"]), execute_msg("", 0), sync_msg()]),
+        ),
+        (
+            "binary_param_and_result",
+            cat(&[
+                parse_msg("", "SELECT $1", &[INT4OID]),
+                bind_msg_binary("", "", &[&42i32.to_be_bytes()]),
+                execute_msg("", 0),
+                sync_msg(),
+            ]),
         ),
     ]
 }
@@ -625,4 +806,111 @@ fn extended_query_session_matches_live_pg_trace() {
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+// The extended-query lane's recorded loud: a GENERIC cached plan keeps
+// T_Param(PARAM_EXTERN) in the plan tree, so the executor must read the
+// portal's params registry (no Const folding).
+#[test]
+fn generic_plan_reads_param_extern_from_bind() {
+    install_fixtures();
+    guc_tables::vars::plan_cache_mode
+        .write(guc_tables::consts::PLAN_CACHE_MODE_FORCE_GENERIC_PLAN);
+
+    let input: Vec<u8> = [
+        parse_msg("g1", "SELECT $1", &[INT4OID]),
+        bind_msg("", "g1", &[b"42"]),
+        execute_msg("", 0),
+        sync_msg(),
+    ]
+    .concat();
+    let wire = run_session(input);
+    let all = frames(&wire);
+
+    let types: Vec<u8> = all.iter().map(|(t, _)| *t).collect();
+    assert_eq!(types, vec![b'Z', b'1', b'2', b'D', b'C', b'Z'], "reply shape");
+    let datarow = &all[3].1;
+    let mut exp = Vec::new();
+    exp.extend(1u16.to_be_bytes());
+    exp.extend(2i32.to_be_bytes());
+    exp.extend(b"42");
+    assert_eq!(datarow, &exp, "Bind(42) -> DataRow(42) through the generic plan");
+    assert_eq!(all[4].1, b"SELECT 1\0", "CommandComplete tag");
+
+    let (generic, custom) = crate::extended_query::plan_cache_counts("g1").unwrap();
+    assert_eq!((generic, custom), (1, 0), "plan cache chose the generic plan");
+}
+
+fn install_generate_series_fixture() {
+    install_fixtures();
+}
+
+fn simple_query_msg(sql: &str) -> Vec<u8> {
+    msg(b'Q', &cstr(sql))
+}
+
+#[test]
+fn simple_query_generate_series_returns_10_rows() {
+    install_generate_series_fixture();
+
+    let input: Vec<u8> =
+        [simple_query_msg("SELECT * FROM generate_series(1, 10)"), msg(b'X', &[])].concat();
+    let wire = run_session(input);
+    let all = frames(&wire);
+
+    let datarows: Vec<&Vec<u8>> = all.iter().filter(|(t, _)| *t == b'D').map(|(_, b)| b).collect();
+    assert_eq!(datarows.len(), 10, "frame types: {:?}", all.iter().map(|f| f.0 as char).collect::<Vec<_>>());
+    for (i, row) in datarows.iter().enumerate() {
+        let text = &row[6..];
+        assert_eq!(
+            core::str::from_utf8(text).unwrap(),
+            format!("{}", i + 1),
+            "row {i}"
+        );
+    }
+    let complete = all.iter().find(|(t, _)| *t == b'C').expect("CommandComplete");
+    assert_eq!(complete.1, b"SELECT 10\0");
+}
+
+#[test]
+fn simple_query_count_over_generate_series() {
+    install_generate_series_fixture();
+
+    let input: Vec<u8> = [
+        simple_query_msg("SELECT count(*) FROM generate_series(1, 1000)"),
+        msg(b'X', &[]),
+    ]
+    .concat();
+    let wire = run_session(input);
+    let all = frames(&wire);
+
+    let datarows: Vec<&Vec<u8>> = all.iter().filter(|(t, _)| *t == b'D').map(|(_, b)| b).collect();
+    assert_eq!(datarows.len(), 1, "frame types: {:?}", all.iter().map(|f| f.0 as char).collect::<Vec<_>>());
+    assert_eq!(core::str::from_utf8(&datarows[0][6..]).unwrap(), "1000");
+}
+
+#[test]
+fn explain_generate_series_matches_live_pg_shape() {
+    install_generate_series_fixture();
+
+    let input: Vec<u8> = [
+        simple_query_msg("EXPLAIN SELECT * FROM generate_series(1, 10)"),
+        msg(b'X', &[]),
+    ]
+    .concat();
+    let wire = run_session(input);
+    let all = frames(&wire);
+
+    let datarows: Vec<&Vec<u8>> = all.iter().filter(|(t, _)| *t == b'D').map(|(_, b)| b).collect();
+    let errs: Vec<String> = all
+        .iter()
+        .filter(|(t, _)| *t == b'E')
+        .filter_map(|(_, b)| error_field(b, b'M'))
+        .collect();
+    assert_eq!(datarows.len(), 1, "errors: {errs:?}");
+    let line = core::str::from_utf8(&datarows[0][6..]).unwrap();
+    assert_eq!(
+        line,
+        "Function Scan on generate_series  (cost=0.00..0.10 rows=10 width=4)"
+    );
 }

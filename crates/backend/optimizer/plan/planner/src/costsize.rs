@@ -69,7 +69,7 @@ pub fn cost_qual_eval_node(node: Node<'_>) -> PgResult<QualCost> {
 
 fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
     match node.node_tag() {
-        NodeTag::T_Var | NodeTag::T_Const => Ok(()),
+        NodeTag::T_Var | NodeTag::T_Const | NodeTag::T_Param => Ok(()),
         // C charges nothing for the Aggref itself and does not descend:
         // aggregate costs are get_agg_clause_costs' job (prepagg.c).
         NodeTag::T_Aggref => Ok(()),
@@ -132,6 +132,86 @@ pub fn cost_seqscan(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, 
     p.disabled_nodes = if gucs::enable_seqscan() { 0 } else { 1 };
     p.startup_cost = startup_cost;
     p.total_cost = startup_cost + cpu_run_cost + disk_run_cost;
+}
+
+// cost_functionscan (costsize.c): function eval is all startup cost (the
+// executor materializes into a tuplestore before returning rows).
+pub fn cost_functionscan(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    rel: RelId,
+) -> PgResult<()> {
+    let (relid, rtekind, tuples, base_rows) = {
+        let baserel = run.root.rel(rel);
+        (baserel.relid, baserel.rtekind, baserel.tuples, baserel.rows)
+    };
+    debug_assert!(relid > 0 && rtekind == types_pathnodes::RTE_FUNCTION);
+    assert!(
+        run.root.path(path_id).base().param_info.is_none(),
+        "cost_functionscan (costsize.c): parameterized path; M2 lateral lane"
+    );
+    let rows = base_rows;
+
+    let mut startup_cost = 0.0;
+    let mut exprcost = QualCost::default();
+    for rtfunc_node in &run.rte(relid as usize).functions {
+        let rtfunc = rtfunc_node.as_range_tbl_function().expect("functions cell");
+        if let Some(fexpr) = rtfunc.funcexpr {
+            cost_qual_eval_walker(fexpr, &mut exprcost)?;
+        }
+    }
+    startup_cost += exprcost.startup + exprcost.per_tuple;
+
+    let qpqual_cost = get_restriction_qual_cost(run, rel);
+    startup_cost += qpqual_cost.startup;
+    let cpu_per_tuple = gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
+    let mut run_cost = cpu_per_tuple * tuples;
+
+    let target = run.root.path_pathtarget(path_id);
+    startup_cost += target.cost.startup;
+    run_cost += target.cost.per_tuple * rows;
+
+    let p = run.root.path_mut(path_id).base_mut();
+    p.rows = rows;
+    p.disabled_nodes = 0;
+    p.startup_cost = startup_cost;
+    p.total_cost = startup_cost + run_cost;
+    Ok(())
+}
+
+// set_function_size_estimates (costsize.c).
+pub fn set_function_size_estimates<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<()> {
+    let rti = run.root.rel(rel).relid as usize;
+    let mut funcexprs: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(run.mcx);
+    for rtfunc_node in &run.rte(rti).functions {
+        let rtfunc = rtfunc_node.as_range_tbl_function().expect("functions cell");
+        if let Some(fexpr) = rtfunc.funcexpr {
+            funcexprs.push(fexpr);
+        }
+    }
+    let mut tuples = 0.0f64;
+    for &fexpr in funcexprs.iter() {
+        let ntup = expression_returns_set_rows(fexpr)?;
+        if ntup > tuples {
+            tuples = ntup;
+        }
+    }
+    run.root.rel_mut(rel).tuples = tuples;
+    set_baserel_size_estimates(run, rel)
+}
+
+// expression_returns_set_rows (clauses.c); the OpExpr opretset arm is dead
+// (no set-returning operators resolve on this lane).
+fn expression_returns_set_rows(clause: Node<'_>) -> PgResult<f64> {
+    if let Some(fe) = clause.as_func_expr() {
+        if fe.funcretset {
+            return Ok(clamp_row_est(crate::plancat::get_function_rows(
+                fe.funcid,
+                Some(clause),
+            )?));
+        }
+    }
+    Ok(1.0)
 }
 
 // cost_index (costsize.c); nestloop loop_count and partial paths are loud.
@@ -593,6 +673,10 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
         NodeTag::T_OpExpr => (node.as_op_expr().unwrap().opresulttype, -1),
         NodeTag::T_FuncExpr => (node.as_func_expr().unwrap().funcresulttype, -1),
         NodeTag::T_Aggref => (node.as_aggref().unwrap().aggtype, -1),
+        NodeTag::T_Param => {
+            let p = node.as_param().unwrap();
+            (p.paramtype, p.paramtypmod)
+        }
         other => panic!("exprType (nodeFuncs.c): {other:?}; M2 expression lane"),
     }
 }
@@ -720,6 +804,28 @@ fn cost_tuplesort(
     (startup_cost, gucs::cpu_operator_cost() * tuples)
 }
 
+/// The cost_sort computation without a Path to write into (C's dummy
+/// `Path sort_path` callers); returns (disabled_nodes, startup, total).
+#[allow(clippy::too_many_arguments)]
+pub fn cost_sort_shape(
+    input_disabled_nodes: i32,
+    input_cost: f64,
+    tuples: f64,
+    width: i32,
+    comparison_cost: f64,
+    sort_mem: i32,
+    limit_tuples: f64,
+) -> (i32, f64, f64) {
+    let (startup, run_cost) =
+        cost_tuplesort(tuples, width, comparison_cost, sort_mem, limit_tuples);
+    let startup_cost = startup + input_cost;
+    (
+        input_disabled_nodes + if gucs::enable_sort() { 0 } else { 1 },
+        startup_cost,
+        startup_cost + run_cost,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn cost_sort(
     run: &mut PlannerRun<'_>,
@@ -732,12 +838,18 @@ pub fn cost_sort(
     sort_mem: i32,
     limit_tuples: f64,
 ) {
-    let (startup, run_cost) =
-        cost_tuplesort(tuples, width, comparison_cost, sort_mem, limit_tuples);
-    let startup_cost = startup + input_cost;
+    let (disabled_nodes, startup_cost, total_cost) = cost_sort_shape(
+        input_disabled_nodes,
+        input_cost,
+        tuples,
+        width,
+        comparison_cost,
+        sort_mem,
+        limit_tuples,
+    );
     let p = run.root.path_mut(path_id).base_mut();
     p.rows = tuples;
-    p.disabled_nodes = input_disabled_nodes + if gucs::enable_sort() { 0 } else { 1 };
+    p.disabled_nodes = disabled_nodes;
     p.startup_cost = startup_cost;
-    p.total_cost = startup_cost + run_cost;
+    p.total_cost = total_cost;
 }

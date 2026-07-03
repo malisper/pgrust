@@ -562,6 +562,15 @@ pub fn process_pm_child_exit() -> PgResult<()> {
             continue;
         }
 
+        if with_pm(|pm| pm.autovac_launcher.map(|c| c.pid)) == Some(pid) {
+            let launcher = with_pm(|pm| pm.autovac_launcher.take()).expect("checked");
+            pmchild_seams::release_postmaster_child_slot::call(launcher.child_slot);
+            if !status0 {
+                handle_child_crash("autovacuum launcher process", pid, exitstatus)?;
+            }
+            continue;
+        }
+
         match pmchild_seams::find_postmaster_child_by_pid::call(pid) {
             Some((child_slot, btype))
                 if matches!(btype, BackendType::Backend | BackendType::DeadEndBackend) =>

@@ -15,14 +15,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    pub fn xact_lock_table_insert(xid: types_core::TransactionId) -> types_error::PgResult<()>
-);
-
-seam_core::seam!(
-    pub fn xact_lock_table_delete(xid: types_core::TransactionId) -> types_error::PgResult<()>
-);
-
-seam_core::seam!(
     // DescribeLockTag(&buf, tag) marshaled to the built text (lmgr.c).
     pub fn describe_lock_tag(tag: types_storage::lock::LOCKTAG) -> std::string::String
 );

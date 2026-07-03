@@ -637,9 +637,19 @@ fn varlena_image<'mcx>(
     // SAFETY: non-null varlena attr datum points into the live tuple.
     let b0 = unsafe { *p };
     assert!(
-        b0 & 0x01 == 0 && b0 & 0x03 != 0x02,
+        b0 != 0x01 && (b0 & 0x03) != 0x02,
         "pg_statistic array attr is toasted/compressed: detoast (heaptoast) gap in stats decode"
     );
+    if b0 & 0x01 != 0 {
+        // PG_DETOAST_DATUM's short-header expansion to a 4-byte-header image.
+        let raw = (b0 as usize >> 1) & 0x7F;
+        let total = raw - 1 + 4;
+        let mut out: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+        out.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+        // SAFETY: short varlena addresses `raw` in-tuple bytes.
+        out.extend_from_slice(unsafe { core::slice::from_raw_parts(p.add(1), raw - 1) });
+        return Ok(Some(out));
+    }
     let len = {
         // SAFETY: 4-byte varlena header verified above.
         let w = unsafe { u32::from_ne_bytes(*(p as *const [u8; 4])) };
@@ -687,7 +697,8 @@ fn lookup_pg_statistic_bundle<'mcx>(
             match varlena_image(mcx, &t, STATRELATTINH, ANUM_PG_STATISTIC_STAVALUES1 + i)? {
                 Some(img) => {
                     let elemtype = datum::array_build::array_image_elemtype(&img);
-                    let ty = lookup_pg_type_shape(elemtype)?.expect("stavalues element type");
+                    let ty = syscache_seams::lookup_pg_type_shape::call(elemtype)?
+                        .expect("stavalues element type");
                     let values = datum::array_build::deconstruct_array_image(
                         mcx, &img, ty.typlen, ty.typbyval, ty.typalign as u8,
                     )?;

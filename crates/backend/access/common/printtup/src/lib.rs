@@ -16,7 +16,7 @@ use ::stringinfo::StringInfo;
 use ::types_core::{primitive::InvalidOid, Oid, NAMEDATALEN};
 use ::types_dest::CommandDest;
 use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
-use ::types_fmgr::{function_call1_coll, FmgrInfo, PackedVarlena};
+use ::types_fmgr::{function_call1_coll, send_function_call, FmgrInfo, PackedVarlena};
 use ::types_portal::Portal;
 use ::types_slot::SlotData;
 use ::types_tuple::TupleDescData;
@@ -47,6 +47,10 @@ pub struct DrPrinttup<'mcx> {
     nattrs: i32,
     myinfo: Option<PgVec<'static, PrinttupAttrInfo>>,
     conv_needed: bool,
+    // C's per-row tmpcontext, but only for binary columns: send fns build a
+    // bytea per row (text out fns use retained scratch and need none). Reset
+    // after each row (C printtup.c:379). None until a format-1 column appears.
+    send_ctx: Option<MemoryContext>,
 }
 
 // C allocates the wire buf/myinfo in es_query_cxt per executor (printtup.c:120,
@@ -94,6 +98,7 @@ pub fn printtup_create_DR<'mcx>(dest: CommandDest) -> DrPrinttup<'mcx> {
         nattrs: 0,
         myinfo: None,
         conv_needed: false,
+        send_ctx: None,
     }
 }
 
@@ -183,6 +188,13 @@ impl<'mcx> DrPrinttup<'mcx> {
             };
             info.push(entry);
         }
+        if info.iter().any(|e| e.format == 1) {
+            if self.send_ctx.is_none() {
+                self.send_ctx = Some(MemoryContext::new("PrinttupSend"));
+            }
+        } else {
+            self.send_ctx = None;
+        }
         self.myinfo = Some(info);
         Ok(())
     }
@@ -208,6 +220,7 @@ impl<'mcx> DrPrinttup<'mcx> {
             Some(v) => &mut v[..],
             None => &mut [],
         };
+        let mut send_ctx = self.send_ctx.as_mut();
         let natts = self.nattrs as usize;
 
         pq_beginmessage_reuse(buf, PQMSG_DATA_ROW);
@@ -235,7 +248,11 @@ impl<'mcx> DrPrinttup<'mcx> {
                     buf.append_bytes_nt(s)?;
                 }
             } else {
-                let out = output_function_call(&mut thisState.finfo, attr)?;
+                let mcx = send_ctx
+                    .as_deref()
+                    .expect("printtup: binary column without send_ctx")
+                    .mcx();
+                let out = send_function_call(&mut thisState.finfo, attr, mcx)?;
                 // SAFETY: send fns return an untoasted bytea image (C's
                 // DatumGetByteaP); external/compressed panics in from_ptr.
                 let v = unsafe { PackedVarlena::from_ptr(out.as_usize() as *const u8) };
@@ -246,6 +263,10 @@ impl<'mcx> DrPrinttup<'mcx> {
         }
 
         pq_endmessage_reuse(buf)?;
+        // C resets the per-row tmpcontext here; the byteas were copied above.
+        if let Some(ctx) = send_ctx.as_deref_mut() {
+            ctx.reset();
+        }
         Ok(true)
     }
 

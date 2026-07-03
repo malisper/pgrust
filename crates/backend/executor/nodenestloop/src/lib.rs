@@ -66,9 +66,10 @@ pub fn exec_init_nest_loop<'mcx>(
 
     let ps_ResultTupleSlot =
         estate.exec_init_extra_tuple_slot(Some(result_desc.clone()), TupleSlotKind::Virtual);
-    let proj = exec_build_projection_info(mcx, &node.join.plan.targetlist, None)?;
-    let otherqual = exec_init_qual(mcx, &node.join.plan.qual)?;
-    let joinqual = exec_init_qual(mcx, &node.join.joinqual)?;
+    let params = estate.param_bind();
+    let proj = exec_build_projection_info(mcx, &node.join.plan.targetlist, None, params)?;
+    let otherqual = exec_init_qual(mcx, &node.join.plan.qual, params)?;
+    let joinqual = exec_init_qual(mcx, &node.join.joinqual, params)?;
 
     Ok(NestLoopState {
         plan: node,

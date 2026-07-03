@@ -1,13 +1,17 @@
 use core::cell::RefCell;
 
-use types_error::{ereturn, PgResult, SoftErrorContext};
+use datum::Bytea;
+use mcx::Mcx;
+use stringinfo::StringInfo;
+use types_error::{ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_BINARY_REPRESENTATION};
 
 use crate::arith::{add_var, mul_var};
 use crate::ops::{apply_typmod, apply_typmod_special};
-use crate::var::{int64_to_var, make_result_opt_error, NumericImage, NumericVar, VarView};
+use crate::var::{int64_to_var, make_result, make_result_opt_error, NumericImage, NumericVar, VarView};
 use crate::{
-    invalid_numeric_syntax, numeric_overflow_error, Num, NumericDigit, DEC_DIGITS, NUMERIC_NEG,
-    NUMERIC_POS, NUMERIC_WEIGHT_MAX,
+    invalid_numeric_syntax, numeric_overflow_error, Num, NumericDigit, DEC_DIGITS, NBASE,
+    NUMERIC_DSCALE_MASK, NUMERIC_NAN, NUMERIC_NEG, NUMERIC_NINF, NUMERIC_PINF, NUMERIC_POS,
+    NUMERIC_WEIGHT_MAX,
 };
 
 // C's palloc'd decdigits scratch in set_var_from_str; retained TLS (rule 7).
@@ -139,6 +143,67 @@ pub fn numeric_in(
         Some(img) => Ok(Some(img)),
         None => ereturn(escontext, None, numeric_overflow_error()),
     }
+}
+
+pub fn numeric_recv(buf: &mut StringInfo<'_>, typmod: i32) -> PgResult<NumericImage> {
+    let len = pqformat::pq_getmsgint(buf, 2)? as i32;
+    let mut value = NumericVar::new();
+    value.alloc(len);
+    value.weight = pqformat::pq_getmsgint(buf, 2)? as u16 as i16 as i32;
+
+    let sign = pqformat::pq_getmsgint(buf, 2)? as u16;
+    if !(sign == NUMERIC_POS
+        || sign == NUMERIC_NEG
+        || sign == NUMERIC_NAN
+        || sign == NUMERIC_PINF
+        || sign == NUMERIC_NINF)
+    {
+        return Err(recv_error("invalid sign in external \"numeric\" value"));
+    }
+    value.sign = sign;
+
+    let dscale = pqformat::pq_getmsgint(buf, 2)? as u16;
+    if dscale & NUMERIC_DSCALE_MASK != dscale {
+        return Err(recv_error("invalid scale in external \"numeric\" value"));
+    }
+    value.dscale = dscale as i32;
+
+    for slot in value.digits_mut() {
+        let d = pqformat::pq_getmsgint(buf, 2)? as u16 as NumericDigit;
+        if d < 0 || d as i32 >= NBASE {
+            return Err(recv_error("invalid digit in external \"numeric\" value"));
+        }
+        *slot = d;
+    }
+
+    if sign == NUMERIC_POS || sign == NUMERIC_NEG {
+        let ds = value.dscale;
+        value.trunc(ds);
+        apply_typmod(&mut value, typmod, None)?;
+        make_result(value.view())
+    } else {
+        let res = make_result(value.view())?;
+        apply_typmod_special(res.num(), typmod, None)?;
+        Ok(res)
+    }
+}
+
+pub fn numeric_send<'mcx>(mcx: Mcx<'mcx>, num: Num<'_>) -> PgResult<Bytea<'mcx>> {
+    let mut buf = pqformat::pq_begintypsend(mcx)?;
+    pqformat::pq_sendint16(&mut buf, num.ndigits() as u16)?;
+    pqformat::pq_sendint16(&mut buf, num.weight() as i16 as u16)?;
+    pqformat::pq_sendint16(&mut buf, num.sign())?;
+    pqformat::pq_sendint16(&mut buf, num.dscale() as u16)?;
+    for &d in num.digits() {
+        pqformat::pq_sendint16(&mut buf, d as u16)?;
+    }
+    Ok(pqformat::pq_endtypsend(buf))
+}
+
+#[cold]
+#[inline(never)]
+fn recv_error(msg: &'static str) -> Box<PgError> {
+    PgError::error(msg).with_sqlstate(ERRCODE_INVALID_BINARY_REPRESENTATION).into()
 }
 
 fn set_var_from_str(s: &[u8], mut cp: usize, dest: &mut NumericVar) -> Result<usize, NumErr> {

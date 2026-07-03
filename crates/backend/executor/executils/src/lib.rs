@@ -19,6 +19,7 @@ use ::types_error::{PgError, PgResult};
 use ::types_nodes::bitmapset::Bitmapset;
 use ::types_nodes::list::NodeList;
 use ::types_nodes::parsenodes::{RTEKind, RangeTblEntry};
+use ::types_portal::params::{ParamBind, ParamExecData, ParamExternData};
 use ::types_nodes::plannodes::PlannedStmt;
 use ::types_rel::{AccessShareLock, NoLock, Relation};
 use ::types_scan::ScanDirection;
@@ -38,10 +39,41 @@ p3!(
     PartPruneP3,
     RowMarkP3,
     ModifyTableP3,
-    ParamListInfoP3,
-    ParamExecP3,
-    PlanStateP3,
 );
+
+/// C `PlanState *` cell of es_subplanstates, type-erased against the
+/// executils<->execmain crate cycle (execmain owns both sides of the cast).
+#[derive(Debug, Clone, Copy)]
+pub struct SubplanStateCell(pub core::ptr::NonNull<()>);
+
+/// ExecSetParamPlan dispatch slot (nodeSubplan.c lives in execmain).
+pub type SubplanHook =
+    for<'a, 'mcx> unsafe fn(core::ptr::NonNull<()>, &'a mut EStateData<'mcx>) -> PgResult<()>;
+
+/// C ExecEvalParamExec's pending-initplan arm, hoisted to the owning node.
+pub fn exec_eval_param_exec_params(
+    estate: &mut EStateData<'_>,
+    deps: &[u32],
+) -> PgResult<()> {
+    for &pid in deps {
+        if estate.es_param_exec_vals[pid as usize].exec_plan {
+            exec_set_param_plan(estate, pid)?;
+        }
+    }
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn exec_set_param_plan(estate: &mut EStateData<'_>, pid: u32) -> PgResult<()> {
+    let sstate = estate.es_param_subplans[pid as usize]
+        .expect("pending PARAM_EXEC without an initplan SubPlanState");
+    let hook = estate
+        .es_subplan_hook
+        .expect("pending PARAM_EXEC before execmain installed the subplan hook");
+    // SAFETY: cell installed by execmain's ExecInitSubPlan on this estate.
+    unsafe { hook(sstate.0, estate) }
+}
 
 /// C JunkFilter (execnodes.h); construction/filtering live in execjunk.
 #[allow(non_snake_case)]
@@ -79,8 +111,8 @@ pub struct ExprContextData<'mcx> {
     pub ecxt_scantuple: Option<ExecSlotId>,
     pub ecxt_innertuple: Option<ExecSlotId>,
     pub ecxt_outertuple: Option<ExecSlotId>,
-    pub ecxt_param_exec_vals: Option<ParamExecP3>,
-    pub ecxt_param_list_info: Option<ParamListInfoP3>,
+    pub ecxt_param_exec_vals: Option<core::ptr::NonNull<ParamExecData>>,
+    pub ecxt_param_list_info: Option<&'mcx [ParamExternData]>,
     pub ecxt_aggvalues: PgVec<'mcx, Datum>,
     pub ecxt_aggnulls: PgVec<'mcx, bool>,
     pub caseValue_datum: Datum,
@@ -178,8 +210,8 @@ pub struct EStateData<'mcx> {
     pub es_trig_target_relations: PgVec<'mcx, ResultRelInfo>,
     pub es_insert_pending_result_relations: PgVec<'mcx, ResultRelInfo>,
     pub es_insert_pending_modifytables: PgVec<'mcx, ModifyTableP3>,
-    pub es_param_list_info: Option<ParamListInfoP3>,
-    pub es_param_exec_vals: PgVec<'mcx, ParamExecP3>,
+    pub es_param_list_info: Option<&'mcx [ParamExternData]>,
+    pub es_param_exec_vals: PgVec<'mcx, ParamExecData>,
     pub es_queryEnv: Option<&'mcx QueryEnvironment<'mcx>>,
     pub es_tupleTable: PgVec<'mcx, SlotData<'mcx>>,
     pub es_processed: u64,
@@ -190,7 +222,10 @@ pub struct EStateData<'mcx> {
     pub es_instrumentation: PgVec<'mcx, Instrumentation>,
     pub es_finished: bool,
     es_exprcontexts: PgVec<'mcx, Option<ExprContextData<'mcx>>>,
-    pub es_subplanstates: PgVec<'mcx, PlanStateP3>,
+    pub es_subplanstates: PgVec<'mcx, SubplanStateCell>,
+    /// paramid -> initplan SubPlanState (C's ParamExecData.execPlan pointer).
+    pub es_param_subplans: PgVec<'mcx, Option<SubplanStateCell>>,
+    pub es_subplan_hook: Option<SubplanHook>,
     pub es_auxmodifytables: PgVec<'mcx, ModifyTableP3>,
     es_per_tuple_exprcontext: Option<EcxtId>,
     pub es_sourceText: Option<&'mcx str>,
@@ -235,6 +270,8 @@ impl<'mcx> EStateData<'mcx> {
             es_finished: false,
             es_exprcontexts: PgVec::new_in(mcx),
             es_subplanstates: PgVec::new_in(mcx),
+            es_param_subplans: PgVec::new_in(mcx),
+            es_subplan_hook: None,
             es_auxmodifytables: PgVec::new_in(mcx),
             es_per_tuple_exprcontext: None,
             es_sourceText: None,
@@ -248,10 +285,23 @@ impl<'mcx> EStateData<'mcx> {
     /// `CreateExprContext(estate)`.
     pub fn create_expr_context(&mut self) -> EcxtId {
         let per_tuple = self.es_query_cxt.context().new_child_bump("ExprContext");
-        let ecxt = ExprContextData::new(self.es_query_cxt, per_tuple);
+        let mut ecxt = ExprContextData::new(self.es_query_cxt, per_tuple);
+        ecxt.ecxt_param_list_info = self.es_param_list_info;
+        ecxt.ecxt_param_exec_vals = core::ptr::NonNull::new(self.es_param_exec_vals.as_mut_ptr());
         let id = EcxtId(self.es_exprcontexts.len() as u32);
         self.es_exprcontexts.push(Some(ecxt));
         id
+    }
+
+    /// Resolve-once binding for expression compile; es_param_exec_vals is
+    /// sized at ExecutorStart and never grown, so its element pointers are
+    /// stable for the query.
+    pub fn param_bind(&mut self) -> ParamBind<'mcx> {
+        ParamBind {
+            extern_params: self.es_param_list_info,
+            exec_vals: core::ptr::NonNull::new(self.es_param_exec_vals.as_mut_ptr()),
+            n_exec: self.es_param_exec_vals.len() as u32,
+        }
     }
 
     /// `CreateWorkExprContext`; the bump backend has no work_mem block dial.
@@ -366,7 +416,7 @@ impl<'mcx> EStateData<'mcx> {
                 .as_range_tbl_entry()
                 .expect("rtable cell is a RangeTblEntry");
             match rte.rtekind {
-                RTEKind::RTE_RELATION | RTEKind::RTE_RESULT => {}
+                RTEKind::RTE_RELATION | RTEKind::RTE_RESULT | RTEKind::RTE_FUNCTION => {}
                 // A pulled-up (dead) subquery RTE stays in the range table
                 // for its lock/ACL surface, as in C; a live subquery is the
                 // unported SubqueryScan lane.

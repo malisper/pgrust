@@ -22,9 +22,11 @@ transam_seams = { path = "../../../access/transam/transam_seams" }
 subtrans_seams = { path = "../../../access/transam/subtrans_seams" }
 transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
 varsup = { path = "../../../access/transam/varsup" }
+types_rel = { path = "../../../../_support/types/rel" }
+catalog_seams = { path = "../../../catalog/catalog_seams" }
+init_small = { path = "../../../utils/init/init_small" }
 
 [dev-dependencies]
-init_small = { path = "../../../utils/init/init_small" }
 pg_sema_seams = { path = "../../../port/pg_sema_seams" }
 s_lock_seams = { path = "../../lmgr/s_lock_seams" }
 latch_seams = { path = "../latch_seams" }

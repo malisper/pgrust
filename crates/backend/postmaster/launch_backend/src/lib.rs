@@ -52,7 +52,7 @@ static CHILD_PROCESS_KINDS: [ChildProcessKind; BACKEND_NUM_TYPES] = [
     },
     ChildProcessKind {
         name: "autovacuum launcher",
-        main_fn: Main::Unported("AutoVacLauncherMain (backend-postmaster-autovacuum)"),
+        main_fn: Main::Ported(autovacuum::AutoVacLauncherMain),
         shmem_attach: true,
     },
     ChildProcessKind {
@@ -130,9 +130,8 @@ fn reserve_child_pid() -> pid_t {
     NEXT_CHILD_PID.fetch_add(1, Ordering::Relaxed)
 }
 
-// Fork-inherited postmaster globals, applied to the fresh thread's TLS first.
-// Per-child state (MyProcPid, MyLatch, MyStartTime*, MyProcNumber, interrupt
-// flags, MyDatabase*) is deliberately absent: the child-init sequence owns it.
+// Fork-inherited postmaster globals, applied to the fresh thread's TLS first;
+// per-child state is deliberately absent (the child-init sequence owns it).
 macro_rules! inherited {
     ($($field:ident : $ty:ty = $get:ident / $set:ident;)+) => {
         struct Inherited {

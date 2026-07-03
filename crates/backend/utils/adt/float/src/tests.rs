@@ -492,7 +492,7 @@ fn fmgr_wrappers_and_table() {
     let n = oids.len();
     oids.dedup();
     assert_eq!(n, oids.len());
-    assert_eq!(n, 124);
+    assert_eq!(n, 128);
     for b in FLOAT_BUILTINS {
         assert!(b.strict && !b.retset);
         let c = fmgr_core::CANONICAL

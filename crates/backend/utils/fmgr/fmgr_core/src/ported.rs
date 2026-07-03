@@ -8,6 +8,7 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::adt_date::builtins::DATE_BUILTINS,
     ::adt_encode::builtins::ENCODE_BUILTINS,
     ::adt_float::builtins::FLOAT_BUILTINS,
+    ::adt_formatting::fmgr_builtins::FORMATTING_BUILTINS,
     ::adt_int::builtins::INT_BUILTINS,
     ::adt_int8::builtins::INT8_BUILTINS,
     ::adt_json::builtins::JSON_BUILTINS,

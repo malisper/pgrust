@@ -13,6 +13,7 @@ use ::types_tuple::{
 };
 
 use crate::compile::{exec_build_projection_info, exec_init_expr, exec_init_qual};
+use ::types_portal::params::ParamBind;
 use crate::interp::{exec_eval_expr, exec_project, exec_qual, EvalSlots};
 use crate::steps::{CmpOp, ExprState, Kernel, SlotSrc, Step};
 
@@ -162,7 +163,7 @@ fn mk_opexpr<'mcx>(
 
 fn qual_state<'mcx>(mcx: Mcx<'mcx>, expr: Node<'mcx>) -> PgBox<'mcx, ExprState<'mcx>> {
     let qual = NodeList::make1(mcx, expr).unwrap();
-    exec_init_qual(mcx, &qual).unwrap().unwrap()
+    exec_init_qual(mcx, &qual, ParamBind::NONE).unwrap().unwrap()
 }
 
 fn run_qual<'mcx>(mcx: Mcx<'mcx>, state: &mut ExprState<'mcx>, values: &[Option<i32>]) -> bool {
@@ -185,7 +186,7 @@ fn run_qual_heap<'mcx>(
 fn empty_qual_is_true() {
     with_mcx(|mcx| {
         let qual = NodeList::default();
-        assert!(exec_init_qual(mcx, &qual).unwrap().is_none());
+        assert!(exec_init_qual(mcx, &qual, ParamBind::NONE).unwrap().is_none());
         let mut slots = EvalSlots::default();
         assert!(exec_qual(None, &mut slots).unwrap());
     });
@@ -194,7 +195,7 @@ fn empty_qual_is_true() {
 #[test]
 fn just_const_expr() {
     with_mcx(|mcx| {
-        let mut state = exec_init_expr(mcx, Some(mk_int4_const(mcx, Some(42)))).unwrap().unwrap();
+        let mut state = exec_init_expr(mcx, Some(mk_int4_const(mcx, Some(42))), ParamBind::NONE).unwrap().unwrap();
         assert!(matches!(state.kernel(), Kernel::JustConst { .. }));
         assert_eq!(state.steps().len(), 2);
         let mut slots = EvalSlots::default();
@@ -209,7 +210,7 @@ fn select1_projection_fused_kernel() {
     with_mcx(|mcx| {
         let tle = Node::mk_target_entry(mcx, mk_int4_const(mcx, Some(1)), 1, None, false).unwrap();
         let tlist = NodeList::make1(mcx, tle).unwrap();
-        let mut state = exec_build_projection_info(mcx, &tlist, None).unwrap();
+        let mut state = exec_build_projection_info(mcx, &tlist, None, ParamBind::NONE).unwrap();
         assert!(matches!(state.kernel(), Kernel::JustConstAssign { resultnum: 0, .. }));
 
         let mut result =
@@ -308,7 +309,7 @@ fn multi_qual_short_circuits() {
                 .unwrap(),
         );
         let qual = NodeList::make2(mcx, q1, q2).unwrap();
-        let mut state = exec_init_qual(mcx, &qual).unwrap().unwrap();
+        let mut state = exec_init_qual(mcx, &qual, ParamBind::NONE).unwrap().unwrap();
         assert!(matches!(state.kernel(), Kernel::Program));
         assert!(run_qual(mcx, &mut state, &[Some(1), Some(11)]));
         assert!(!run_qual(mcx, &mut state, &[Some(1), Some(10)]));
@@ -323,7 +324,7 @@ fn just_func_kernel_const_args() {
         let args =
             NodeList::make2(mcx, mk_int4_const(mcx, Some(40)), mk_int4_const(mcx, Some(2)))
                 .unwrap();
-        let mut state = exec_init_expr(mcx, Some(mk_opexpr(mcx, 177, INT4OID, args)))
+        let mut state = exec_init_expr(mcx, Some(mk_opexpr(mcx, 177, INT4OID, args)), ParamBind::NONE)
             .unwrap()
             .unwrap();
         assert!(matches!(state.kernel(), Kernel::JustFunc { nargs: 2, strict: true, .. }));
@@ -339,7 +340,7 @@ fn just_func_kernel_strict_null_const() {
     with_mcx(|mcx| {
         let args =
             NodeList::make2(mcx, mk_int4_const(mcx, Some(40)), mk_int4_const(mcx, None)).unwrap();
-        let mut state = exec_init_expr(mcx, Some(mk_opexpr(mcx, 177, INT4OID, args)))
+        let mut state = exec_init_expr(mcx, Some(mk_opexpr(mcx, 177, INT4OID, args)), ParamBind::NONE)
             .unwrap()
             .unwrap();
         let mut slots = EvalSlots::default();
@@ -353,7 +354,7 @@ fn func_strict2_with_var_arg_null_propagation() {
     with_mcx(|mcx| {
         let args = NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(2)))
             .unwrap();
-        let mut state = exec_init_expr(mcx, Some(mk_opexpr(mcx, 177, INT4OID, args)))
+        let mut state = exec_init_expr(mcx, Some(mk_opexpr(mcx, 177, INT4OID, args)), ParamBind::NONE)
             .unwrap()
             .unwrap();
         assert!(matches!(state.kernel(), Kernel::Program));
@@ -378,7 +379,7 @@ fn nested_funcexpr_two_frames() {
                 .unwrap();
         let inner = mk_opexpr(mcx, 177, INT4OID, inner_args);
         let outer_args = NodeList::make2(mcx, inner, mk_int4_const(mcx, Some(2))).unwrap();
-        let mut state = exec_init_expr(mcx, Some(mk_opexpr(mcx, 177, INT4OID, outer_args)))
+        let mut state = exec_init_expr(mcx, Some(mk_opexpr(mcx, 177, INT4OID, outer_args)), ParamBind::NONE)
             .unwrap()
             .unwrap();
 
@@ -392,7 +393,7 @@ fn nested_funcexpr_two_frames() {
 #[test]
 fn just_var_kernel_reads_deformed_lane() {
     with_mcx(|mcx| {
-        let mut state = exec_init_expr(mcx, Some(mk_scan_var(mcx, 2, INT4OID)))
+        let mut state = exec_init_expr(mcx, Some(mk_scan_var(mcx, 2, INT4OID)), ParamBind::NONE)
             .unwrap()
             .unwrap();
         assert!(matches!(state.kernel(), Kernel::JustVar { src: SlotSrc::Scan, attnum: 1 }));
@@ -410,7 +411,7 @@ fn projection_safe_var_kernel_and_assign_tmp_path() {
         let desc = desc_int4(mcx, 2);
         let tle = Node::mk_target_entry(mcx, mk_scan_var(mcx, 2, INT4OID), 1, None, false).unwrap();
         let tlist = NodeList::make1(mcx, tle).unwrap();
-        let mut state = exec_build_projection_info(mcx, &tlist, Some(&desc)).unwrap();
+        let mut state = exec_build_projection_info(mcx, &tlist, Some(&desc), ParamBind::NONE).unwrap();
         assert!(matches!(
             state.kernel(),
             Kernel::JustAssignVar { src: SlotSrc::Scan, attnum: 1, resultnum: 0 }
@@ -427,7 +428,7 @@ fn projection_safe_var_kernel_and_assign_tmp_path() {
         let tle =
             Node::mk_target_entry(mcx, mk_scan_var(mcx, 2, INT8OID), 1, None, false).unwrap();
         let tlist = NodeList::make1(mcx, tle).unwrap();
-        let state = exec_build_projection_info(mcx, &tlist, Some(&desc)).unwrap();
+        let state = exec_build_projection_info(mcx, &tlist, Some(&desc), ParamBind::NONE).unwrap();
         assert!(matches!(state.steps()[2], Step::AssignTmp { resultnum: 0 }));
     });
 }
@@ -435,7 +436,7 @@ fn projection_safe_var_kernel_and_assign_tmp_path() {
 #[test]
 fn still_valid_check_rejects_type_mismatch() {
     with_mcx(|mcx| {
-        let mut state = exec_init_expr(mcx, Some(mk_scan_var(mcx, 1, INT8OID)))
+        let mut state = exec_init_expr(mcx, Some(mk_scan_var(mcx, 1, INT8OID)), ParamBind::NONE)
             .unwrap()
             .unwrap();
         let mut slot = virtual_slot(mcx, &[Some(1)]);
@@ -532,7 +533,7 @@ fn agg_trans_and_aggref_eval_steps() {
                 pergroup: unsafe { NonNull::new_unchecked(base.as_ptr().add(1)) },
             },
         ];
-        let mut trans = exec_build_agg_trans(mcx, &specs).unwrap();
+        let mut trans = exec_build_agg_trans(mcx, &specs, ParamBind::NONE).unwrap();
         for v in [7i32, 35] {
             let mut outer = virtual_slot(mcx, &[Some(v)]);
             let mut slots =
@@ -562,7 +563,7 @@ fn agg_trans_and_aggref_eval_steps() {
         let tle0 = Node::mk_target_entry(mcx, agg0.seal(), 1, None, false).unwrap();
         let tle1 = Node::mk_target_entry(mcx, agg1.seal(), 2, None, false).unwrap();
         let tlist = NodeList::make2(mcx, tle0, tle1).unwrap();
-        let mut proj = exec_build_agg_projection_info(mcx, &tlist, None, bind).unwrap();
+        let mut proj = exec_build_agg_projection_info(mcx, &tlist, None, bind, ParamBind::NONE).unwrap();
         let mut result = exectuples::make_tuple_table_slot(
             mcx,
             TupleSlotKind::Virtual,
@@ -603,7 +604,7 @@ fn agg_trans_strict_with_args_panics() {
             args: &args,
             pergroup: NonNull::from(&mut pg),
         }];
-        let _ = exec_build_agg_trans(mcx, &specs);
+        let _ = exec_build_agg_trans(mcx, &specs, ParamBind::NONE);
     });
 }
 
@@ -613,7 +614,7 @@ fn eval_sysvar<'m>(
     attno: i16,
     typ: u32,
 ) -> ::types_error::PgResult<::datum::NullableDatum> {
-    let mut state = exec_init_expr(mcx, Some(mk_scan_var(mcx, attno, typ))).unwrap().unwrap();
+    let mut state = exec_init_expr(mcx, Some(mk_scan_var(mcx, attno, typ)), ParamBind::NONE).unwrap().unwrap();
     assert!(matches!(state.kernel(), Kernel::Program));
     let mut slots = EvalSlots { scan: Some(slot), inner: None, outer: None };
     exec_eval_expr(&mut state, &mut slots)
@@ -649,5 +650,106 @@ fn sysvar_steps_read_slot_and_tuple_header() {
         assert_eq!(eval_sysvar(mcx, &mut vslot, -6, 26).unwrap().value.as_oid(), 7);
         let err = eval_sysvar(mcx, &mut vslot, -2, 28).unwrap_err();
         assert_eq!(err.message, "cannot retrieve a system column in this context");
+    });
+}
+
+fn mk_param<'mcx>(
+    mcx: Mcx<'mcx>,
+    kind: ::types_nodes::primnodes::ParamKind,
+    paramid: i32,
+    typ: u32,
+) -> Node<'mcx> {
+    Node::mk(
+        mcx,
+        ::types_nodes::primnodes::Param {
+            paramkind: kind,
+            paramid,
+            paramtype: typ,
+            paramtypmod: -1,
+            paramcollid: 0,
+            location: -1,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn param_extern_step_is_one_resolved_load() {
+    use ::types_nodes::primnodes::ParamKind;
+    use ::types_portal::params::{ParamExternData, PARAM_FLAG_CONST};
+    with_mcx(|mcx| {
+        let externs = [ParamExternData {
+            value: Datum::from_i32(42),
+            isnull: false,
+            pflags: PARAM_FLAG_CONST,
+            ptype: INT4OID,
+        }];
+        let bind = ParamBind { extern_params: Some(&externs), ..ParamBind::NONE };
+        let node = mk_param(mcx, ParamKind::PARAM_EXTERN, 1, INT4OID);
+        let mut state = exec_init_expr(mcx, Some(node), bind).unwrap().unwrap();
+        assert!(matches!(state.steps()[0], Step::ParamExtern { .. }));
+        let mut slots = EvalSlots::default();
+        let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+        assert!(!r.isnull);
+        assert_eq!(r.value.as_i32(), 42);
+    });
+}
+
+#[test]
+fn param_extern_missing_value_errors_42704() {
+    use ::types_nodes::primnodes::ParamKind;
+    with_mcx(|mcx| {
+        let node = mk_param(mcx, ParamKind::PARAM_EXTERN, 2, INT4OID);
+        let Err(err) = exec_init_expr(mcx, Some(node), ParamBind::NONE) else {
+            panic!("unbound PARAM_EXTERN must fail at compile");
+        };
+        assert_eq!(err.message, "no value found for parameter 2");
+        assert_eq!(err.sqlstate, ::types_error::ERRCODE_UNDEFINED_OBJECT);
+    });
+}
+
+#[test]
+fn param_exec_step_reads_estate_slot() {
+    use ::types_nodes::primnodes::ParamKind;
+    use ::types_portal::params::ParamExecData;
+    with_mcx(|mcx| {
+        let mut vals = [ParamExecData::EMPTY, ParamExecData::EMPTY];
+        let base = vals.as_mut_ptr();
+        // SAFETY: in-bounds writes through the same pointer the steps read.
+        unsafe {
+            *base.add(1) =
+                ParamExecData { value: Datum::from_i32(7), isnull: false, exec_plan: false };
+        }
+        let bind = ParamBind {
+            extern_params: None,
+            exec_vals: core::ptr::NonNull::new(base),
+            n_exec: 2,
+        };
+        let node = mk_param(mcx, ParamKind::PARAM_EXEC, 1, INT4OID);
+        let mut state = exec_init_expr(mcx, Some(node), bind).unwrap().unwrap();
+        assert!(matches!(state.steps()[0], Step::ParamExec { .. }));
+        let mut slots = EvalSlots::default();
+        let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+        assert_eq!(r.value.as_i32(), 7);
+
+        // ExecSetParamPlan's write side is the subplan lane; a pending
+        // initplan must be loud, not a stale read.
+        // SAFETY: as above; the interp must observe the pending-plan bit.
+        unsafe { (*base.add(1)).exec_plan = true };
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut slots = EvalSlots::default();
+            let _ = exec_eval_expr(&mut state, &mut slots);
+        }));
+        assert!(panicked.is_err());
+    });
+}
+
+#[test]
+#[should_panic(expected = "must not reach the executor")]
+fn param_sublink_is_loud() {
+    use ::types_nodes::primnodes::ParamKind;
+    with_mcx(|mcx| {
+        let node = mk_param(mcx, ParamKind::PARAM_SUBLINK, 1, INT4OID);
+        let _ = exec_init_expr(mcx, Some(node), ParamBind::NONE);
     });
 }

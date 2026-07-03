@@ -152,7 +152,6 @@ macro_rules! unported_mask {
 }
 
 unported_redo! {
-    smgr_redo => "backend-catalog-storage";
     dbase_redo => "backend-commands-dbcommands";
     tblspc_redo => "backend-commands-tablespace";
     standby_redo => "backend-storage-ipc-standby";
@@ -257,7 +256,7 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     },
     RmgrData {
         rm_name: "Storage",
-        rm_redo: smgr_redo,
+        rm_redo: storage_xlog::smgr_redo,
         rm_desc: smgr_desc,
         rm_identify: smgr_identify,
         rm_startup: None,

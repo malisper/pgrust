@@ -55,7 +55,7 @@ impl<'mcx> ScanNode<'mcx> for IndexScanState<'mcx> {
                 .expect("index scan requires es_snapshot");
             let mut scandesc = index_beginscan(
                 mcx,
-                &self.ss.ss_currentRelation,
+                self.ss.ss_currentRelation.as_ref().expect("indexscan has a relation"),
                 self.iss_RelationDesc.as_ref().expect("index relation open"),
                 snapshot,
                 self.iss_ScanKeys.len() as i32,
@@ -159,13 +159,14 @@ pub fn exec_init_index_scan_rel<'mcx>(
         ps_ProjInfo: None,
         ps_ExprContext,
         scanrelid: node.scan.scanrelid,
-        ss_currentRelation: rel,
+        ss_currentRelation: Some(rel),
         ss_currentScanDesc: None,
         ss_ScanTupleSlot,
     };
     execscan::exec_assign_scan_projection_info(mcx, estate, &mut ss, &node.scan.plan.targetlist)?;
-    ss.qual = exec_init_qual(mcx, &node.scan.plan.qual)?;
-    let indexqualorig = exec_init_qual(mcx, &node.indexqualorig)?;
+    let params = estate.param_bind();
+    ss.qual = exec_init_qual(mcx, &node.scan.plan.qual, params)?;
+    let indexqualorig = exec_init_qual(mcx, &node.indexqualorig, params)?;
 
     if !node.indexorderby.is_nil() || !node.indexorderbyorig.is_nil() {
         orderby_unported();

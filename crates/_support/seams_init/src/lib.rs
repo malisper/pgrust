@@ -32,6 +32,7 @@ pub fn init_all() {
     pg_db_role_setting::init_seams();
     dbcommands::init_seams();
     executils::init_seams();
+    execexpr::init_seams();
     execjunk::init_seams();
     execmain::init_seams();
     execscan::init_seams();

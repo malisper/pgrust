@@ -128,6 +128,15 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             let te = node.as_variant::<TargetEntry>().unwrap();
             w.visit(te.expr)
         }
+        NodeTag::T_SubLink => {
+            let sl = node.as_sub_link().unwrap();
+            // C walks the subselect Query node too, so walkers can recurse.
+            Ok(walk_opt(sl.testexpr, w)? || w.visit(sl.subselect)?)
+        }
+        NodeTag::T_SubPlan => {
+            let sp = node.as_sub_plan().unwrap();
+            Ok(walk_opt(sp.testexpr, w)? || walk_list(&sp.args, w)?)
+        }
         NodeTag::T_FromExpr => {
             let f = node.as_variant::<FromExpr>().unwrap();
             walk_from_expr(f, w)
@@ -513,6 +522,27 @@ where
             None => Ok(None),
             Some(l) => Ok(Some(Node::mk_list(mcx, l)?)),
         },
+        // C mutates testexpr only; the subselect Query is shared untouched.
+        NodeTag::T_SubLink => {
+            let sl = node.as_sub_link().unwrap();
+            match sl.testexpr {
+                None => Ok(None),
+                Some(te) => match m(te)? {
+                    None => Ok(None),
+                    Some(new_te) => Ok(Some(Node::mk(
+                        mcx,
+                        types_nodes::SubLink {
+                            subLinkType: sl.subLinkType,
+                            subLinkId: sl.subLinkId,
+                            testexpr: Some(new_te),
+                            operName: sl.operName.clone_in(mcx)?,
+                            subselect: sl.subselect,
+                            location: sl.location,
+                        },
+                    )?)),
+                },
+            }
+        }
         other => deferred("expression_tree_mutator", other),
     }
 }

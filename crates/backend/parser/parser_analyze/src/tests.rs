@@ -27,6 +27,12 @@ fn raw<'mcx>(stmt: Node<'mcx>, len: i32) -> RawStmt<'mcx> {
     RawStmt { stmt: Some(stmt), stmt_location: 0, stmt_len: len }
 }
 
+// init_seams panics on double-install; every test-side installer funnels here.
+fn init_seams_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(crate::init_seams);
+}
+
 fn analyze<'mcx>(
     mcx: Mcx<'mcx>,
     source: &str,
@@ -183,7 +189,7 @@ fn requires_parse_analysis_and_snapshot_split_by_tag() {
 fn seams_install_and_dispatch() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
-    crate::init_seams();
+    init_seams_once();
 
     let target = Node::mk_res_target(mcx, None, NodeList::nil(), Some(int_const(mcx, 1, 7)), 7)
         .unwrap();
@@ -690,6 +696,7 @@ mod from_where {
             super::install_type_fixture();
             relation_seams::relation_openrv_extended::set(fake_openrv_extended);
             table::init_seams();
+            super::init_seams_once();
         });
     }
 
@@ -1089,6 +1096,54 @@ mod from_where {
         assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_TABLE);
         assert_eq!(err.message, "relation \"nope\" does not exist");
         assert_eq!(err.cursor_position(), Some(15));
+    }
+
+    // EXISTS/scalar sublinks through gram + analyze: the SubLink carries the
+    // transformed sub-Query and the outer Query flags hasSubLinks.
+    #[test]
+    fn exists_sublink_end_to_end() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "SELECT x FROM t WHERE EXISTS (SELECT 1 FROM t)").unwrap();
+        assert!(q.hasSubLinks);
+        let sl = q.jointree.unwrap().quals.unwrap().as_sub_link().unwrap();
+        assert_eq!(sl.subLinkType, types_nodes::SubLinkType::EXISTS_SUBLINK);
+        assert!(sl.testexpr.is_none() && sl.operName.is_nil());
+        let sub = sl.subselect.as_query().expect("transformed to Query");
+        assert_eq!(sub.commandType, CmdType::CMD_SELECT);
+        assert!(!sub.hasSubLinks);
+        assert_eq!(sub.rtable.len(), 1);
+    }
+
+    #[test]
+    fn scalar_sublink_end_to_end() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "SELECT x FROM t WHERE x = (SELECT x FROM t)").unwrap();
+        assert!(q.hasSubLinks);
+        let op = q.jointree.unwrap().quals.unwrap().as_op_expr().unwrap();
+        assert_eq!(op.opno, 96);
+        let sl = op.args.nth(1).as_sub_link().unwrap();
+        assert_eq!(sl.subLinkType, types_nodes::SubLinkType::EXPR_SUBLINK);
+        let sub = sl.subselect.as_query().unwrap();
+        assert_eq!(sub.targetList.len(), 1);
+    }
+
+    #[test]
+    fn scalar_sublink_multi_column_is_42601() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(mcx, "SELECT x FROM t WHERE x = (SELECT x, y FROM t)")
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+        assert!(err.message().contains("subquery must return only one column"), "{}", err.message());
     }
 }
 

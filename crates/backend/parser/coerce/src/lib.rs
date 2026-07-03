@@ -728,6 +728,10 @@ fn expression_returns_set(node: Node<'_>) -> bool {
             node.as_null_test().unwrap().arg.is_some_and(expression_returns_set)
         }
         NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_Var | NodeTag::T_CaseTestExpr => false,
+        // SubLink is not set-returning; C's walker does not enter subselects.
+        NodeTag::T_SubLink => {
+            node.as_sub_link().unwrap().testexpr.is_some_and(expression_returns_set)
+        }
         other => panic!(
             "expression_returns_set (nodeFuncs.c): arm for {other:?} unported — \
              backend-nodes-core lane"

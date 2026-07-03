@@ -105,7 +105,7 @@ pub fn bitmap_table_scan_setup<'mcx>(
             .expect("bitmap heap scan requires es_snapshot");
         node.ss.ss_currentScanDesc = Some(table_beginscan_bm(
             estate.es_query_cxt,
-            &node.ss.ss_currentRelation,
+            node.ss.ss_currentRelation.as_ref().expect("bitmap heap scan has a relation"),
             Some(snapshot),
         )?);
     }
@@ -154,13 +154,14 @@ pub fn exec_init_bitmap_heap_scan_rel<'mcx>(
         ps_ProjInfo: None,
         ps_ExprContext,
         scanrelid: node.scan.scanrelid,
-        ss_currentRelation: rel,
+        ss_currentRelation: Some(rel),
         ss_currentScanDesc: None,
         ss_ScanTupleSlot,
     };
     execscan::exec_assign_scan_projection_info(mcx, estate, &mut ss, &node.scan.plan.targetlist)?;
-    ss.qual = exec_init_qual(mcx, &node.scan.plan.qual)?;
-    let bitmapqualorig = exec_init_qual(mcx, &node.bitmapqualorig)?;
+    let params = estate.param_bind();
+    ss.qual = exec_init_qual(mcx, &node.scan.plan.qual, params)?;
+    let bitmapqualorig = exec_init_qual(mcx, &node.bitmapqualorig, params)?;
 
     Ok(BitmapHeapScanState {
         ss,

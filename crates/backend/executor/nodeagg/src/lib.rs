@@ -1,10 +1,9 @@
-// nodeAgg.c, AGG_PLAIN + AGG_HASHED single-grouping-set slice: byval
-// transtype, no finalfn/FILTER/DISTINCT/ORDER BY/HAVING; the transition loop
-// is compiled into one execexpr program (C's phase->evaltrans), hashed groups
-// resolve pergroup through a cell repointed per hash lookup. The outer child
-// stays with the ExecProcNode dispatcher via a monomorphized fetch closure
-// (nodesort precedent). AGG_SORTED/AGG_MIXED, aggsplit variants, grouping
-// sets and the spill machinery are loud panics.
+// nodeAgg.c, AGG_PLAIN/AGG_SORTED/AGG_HASHED single-grouping-set slice: byval
+// transtype, no finalfn/FILTER/DISTINCT/ORDER BY; transitions compile into one
+// execexpr program (C's evaltrans), hashed pergroup resolves through a
+// repointed cell, sorted boundaries and HAVING run compiled programs. Outer
+// child stays with the ExecProcNode dispatcher (fetch closure). AGG_MIXED,
+// aggsplit variants, grouping sets and spill are loud panics.
 #![allow(non_snake_case)]
 
 use core::alloc::Layout;
@@ -13,8 +12,9 @@ use std::rc::Rc;
 
 use ::datum::{Datum, NullableDatum};
 use ::execexpr::{
-    exec_build_agg_projection_info, exec_build_agg_trans, exec_build_agg_trans_hashed,
-    exec_eval_expr, exec_project, AggBind, AggPerGroup, AggTransSpec, EvalSlots, ExprState,
+    exec_build_agg_projection_info, exec_build_agg_qual, exec_build_agg_trans,
+    exec_build_agg_trans_hashed, exec_eval_expr, exec_project, exec_qual, AggBind, AggPerGroup,
+    AggTransSpec, EvalSlots, ExprState,
 };
 use ::execgrouping::TupleHashTable;
 use ::executils::{EStateData, EcxtId, ExecSlotId};
@@ -26,7 +26,7 @@ use ::types_nodes::node_tree::Node;
 use ::types_nodes::plannodes::Agg;
 use ::types_nodes::primnodes::{Aggref, AGGKIND_NORMAL};
 use ::types_nodes::NodeTag;
-use ::types_pathnodes::{AGGSPLIT_SIMPLE, AGG_HASHED, AGG_PLAIN};
+use ::types_pathnodes::{AGGSPLIT_SIMPLE, AGG_HASHED, AGG_PLAIN, AGG_SORTED};
 use ::types_slot::{SlotData, TupleSlotKind};
 use ::types_tuple::TupleDescData;
 
@@ -58,6 +58,18 @@ pub struct AggStateData<'mcx> {
     agg_done: bool,
     numtrans: usize,
     perhash: Option<PerHashData<'mcx>>,
+    persort: Option<PerSortData<'mcx>>,
+    qual: Option<PgBox<'mcx, ExprState<'mcx>>>,
+}
+
+// AGG_SORTED state: firstSlot/grp_firstTuple as two swappable minimal slots
+// (the pending slot holds C's grp_firstTuple copy), the grouping-boundary
+// program is C's phase->eqfunctions[numCols-1].
+struct PerSortData<'mcx> {
+    first_slot: SlotData<'mcx>,
+    pending_slot: SlotData<'mcx>,
+    eq: PgBox<'mcx, ExprState<'mcx>>,
+    have_pending: bool,
 }
 
 // C AggStatePerHashData, single grouping set (find_hash_columns order:
@@ -134,9 +146,12 @@ pub fn exec_init_agg<'mcx>(
     result_desc: Rc<TupleDescData<'static>>,
 ) -> PgResult<AggStateData<'mcx>> {
     let mcx = estate.es_query_cxt;
-    if node.aggstrategy != AGG_PLAIN && node.aggstrategy != AGG_HASHED {
+    if node.aggstrategy != AGG_PLAIN
+        && node.aggstrategy != AGG_HASHED
+        && node.aggstrategy != AGG_SORTED
+    {
         panic!(
-            "ExecInitAgg (nodeAgg.c): aggstrategy {} (AGG_SORTED/MIXED) not ported",
+            "ExecInitAgg (nodeAgg.c): aggstrategy {} (AGG_MIXED) not ported",
             node.aggstrategy
         );
     }
@@ -149,9 +164,10 @@ pub fn exec_init_agg<'mcx>(
     if node.aggstrategy == AGG_PLAIN && node.numCols != 0 {
         panic!("ExecInitAgg (nodeAgg.c): AGG_PLAIN with grouping columns cannot happen");
     }
-    if !node.plan.qual.is_nil() {
-        panic!("ExecInitAgg (nodeAgg.c): HAVING qual not ported");
-    }
+    assert!(
+        node.aggstrategy != AGG_SORTED || node.numCols > 0,
+        "ExecInitAgg (nodeAgg.c): AGG_SORTED without grouping columns cannot happen"
+    );
 
     let aggcontext = estate.create_work_expr_context();
     let tmpcontext = estate.create_expr_context();
@@ -163,8 +179,16 @@ pub fn exec_init_agg<'mcx>(
     for tle in node.plan.targetlist.iter() {
         collect_aggrefs(tle, &mut aggrefs);
     }
-    let numaggs = aggrefs.len();
-    assert!(numaggs > 0, "ExecInitAgg: Agg node without Aggrefs");
+    for q in node.plan.qual.iter() {
+        collect_aggrefs(q, &mut aggrefs);
+    }
+    // tlist and qual Aggrefs can share aggnos (find_compatible_agg);
+    // numaggs == 0 is C's hashed-DISTINCT shape.
+    let numaggs = aggrefs.iter().map(|a| a.aggno + 1).max().unwrap_or(0) as usize;
+    assert!(
+        numaggs > 0 || node.aggstrategy == AGG_HASHED,
+        "ExecInitAgg: Agg node without Aggrefs outside AGG_HASHED"
+    );
 
     let mut by_aggno: PgVec<'mcx, Option<&'mcx Aggref<'mcx>>> =
         vec_with_capacity_in(mcx, numaggs)?;
@@ -287,15 +311,22 @@ pub fn exec_init_agg<'mcx>(
             pergroup: pg,
         });
     }
+    let params = estate.param_bind();
     let (evaltrans, perhash) = if node.aggstrategy == AGG_HASHED {
         let ph = init_perhash(node, estate, numtrans)?;
-        let evaltrans = exec_build_agg_trans_hashed(mcx, &specs, ph.pergroup_cell)?;
+        let evaltrans = exec_build_agg_trans_hashed(mcx, &specs, ph.pergroup_cell, params)?;
         (evaltrans, Some(ph))
     } else {
-        (exec_build_agg_trans(mcx, &specs)?, None)
+        (exec_build_agg_trans(mcx, &specs, params)?, None)
+    };
+    let persort = if node.aggstrategy == AGG_SORTED {
+        Some(init_persort(node, estate)?)
+    } else {
+        None
     };
     let bind = AggBind { values: agg_values_base, nulls: agg_nulls_base, naggs: numaggs as u16 };
-    let proj = exec_build_agg_projection_info(mcx, &node.plan.targetlist, None, bind)?;
+    let proj = exec_build_agg_projection_info(mcx, &node.plan.targetlist, None, bind, params)?;
+    let qual = exec_build_agg_qual(mcx, &node.plan.qual, bind, params)?;
 
     Ok(AggStateData {
         plan: node,
@@ -315,7 +346,44 @@ pub fn exec_init_agg<'mcx>(
         agg_done: false,
         numtrans,
         perhash,
+        persort,
+        qual,
     })
+}
+
+// The AGG_SORTED half of ExecInitAgg: outer-format slots + the grouping-
+// boundary program (execTuplesMatchPrepare -> ExecBuildGroupingEqual).
+fn init_persort<'mcx>(
+    node: &'mcx Agg<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<PerSortData<'mcx>> {
+    let mcx = estate.es_query_cxt;
+    let outer_plan = node
+        .plan
+        .lefttree
+        .and_then(Node::as_plan)
+        .unwrap_or_else(|| panic!("ExecInitAgg (nodeAgg.c): Agg without an outer plan"));
+    let outer_desc = execscan::exec_type_from_tl(mcx, &outer_plan.targetlist)?;
+
+    let num_cols = node.numCols as usize;
+    debug_assert!(node.grpColIdx.len() == num_cols && node.grpOperators.len() == num_cols);
+    let mut eqfuncoids: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, num_cols)?;
+    for &op in node.grpOperators {
+        eqfuncoids.push(lsyscache::get_opcode(op)?);
+    }
+    let eq = ::execexpr::exec_build_grouping_equal(
+        mcx,
+        &outer_desc,
+        &outer_desc,
+        node.grpColIdx,
+        &eqfuncoids,
+        node.grpCollations,
+    )?;
+    let first_slot =
+        exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(outer_desc.clone()));
+    let pending_slot =
+        exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(outer_desc));
+    Ok(PerSortData { first_slot, pending_slot, eq, have_pending: false })
 }
 
 // find_cols (nodeAgg.c): outer columns referenced outside aggregate args.
@@ -366,6 +434,9 @@ fn init_perhash<'mcx>(
     base_cols.resize(outer_natts, false);
     for tle in node.plan.targetlist.iter() {
         collect_base_var_cols(tle, &mut base_cols);
+    }
+    for q in node.plan.qual.iter() {
+        collect_base_var_cols(q, &mut base_cols);
     }
 
     let mut hash_grp_col_idx_input: PgVec<'mcx, i16> =
@@ -569,6 +640,9 @@ where
         }
         return agg_retrieve_hash_table(node, estate);
     }
+    if node.plan.aggstrategy == AGG_SORTED {
+        return agg_retrieve_sorted(node, estate, &mut fetch_outer);
+    }
     initialize_aggregates(node);
 
     while let Some(outer_id) = fetch_outer(estate)? {
@@ -578,9 +652,24 @@ where
         exec_eval_expr(&mut node.evaltrans, &mut slots)?;
         estate.reset_expr_context(node.tmpcontext);
     }
+    finalize_group(node);
+    node.agg_done = true;
 
-    // finalize_aggregates: no finalfn in the live set, so the result is the
-    // (byval) transvalue itself.
+    // project_aggregates: the HAVING qual (var-free here) gates the one row.
+    let mut slots = EvalSlots { scan: None, inner: None, outer: None };
+    if !exec_qual(node.qual.as_deref_mut(), &mut slots)? {
+        return Ok(None);
+    }
+    let mcx = estate.es_query_cxt;
+    let result_slot = estate.slot_mut(node.ps_ResultTupleSlot);
+    let mut slots = EvalSlots { scan: None, inner: None, outer: None };
+    exec_project(&mut node.proj, &mut slots, result_slot, mcx)?;
+    Ok(Some(node.ps_ResultTupleSlot))
+}
+
+// finalize_aggregates (nodeAgg.c): no finalfn in the live set, so the result
+// is the (byval) transvalue itself.
+fn finalize_group(node: &mut AggStateData<'_>) {
     for (aggno, transno) in node.peragg_transno.iter().enumerate() {
         // SAFETY: indices bounded by the once-allocated array lengths; base
         // pointers are the sole access paths (struct invariant).
@@ -590,13 +679,94 @@ where
             node.agg_nulls_base.as_ptr().add(aggno).write((*pg).trans_value_is_null);
         }
     }
+}
 
+// agg_retrieve_direct (nodeAgg.c), AGG_SORTED single-set arm: one group per
+// pass; the boundary tuple is copied into the pending slot and swapped in as
+// the next group's first tuple. Group copies live in the query context
+// (C pfrees each; bump arenas reclaim at query end).
+fn agg_retrieve_sorted<'mcx, F>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    fetch_outer: &mut F,
+) -> PgResult<Option<ExecSlotId>>
+where
+    F: FnMut(&mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>,
+{
     let mcx = estate.es_query_cxt;
-    let result_slot = estate.slot_mut(node.ps_ResultTupleSlot);
-    let mut slots = EvalSlots { scan: None, inner: None, outer: None };
-    exec_project(&mut node.proj, &mut slots, result_slot, mcx)?;
-    node.agg_done = true;
-    Ok(Some(node.ps_ResultTupleSlot))
+    while !node.agg_done {
+        estate.reset_expr_context(node.ps_ExprContext);
+        estate.ecxt_mut(node.aggcontext).rescan();
+
+        {
+            let AggStateData { persort, .. } = node;
+            let ps = persort.as_mut().expect("sorted Agg has persort");
+            if ps.have_pending {
+                core::mem::swap(&mut ps.first_slot, &mut ps.pending_slot);
+                ps.have_pending = false;
+            } else {
+                match fetch_outer(estate)? {
+                    Some(outer_id) => {
+                        let outer_slot = estate.slot_mut(outer_id);
+                        exectuples::exec_copy_slot(&mut ps.first_slot, outer_slot, mcx, mcx)?;
+                    }
+                    None => {
+                        node.agg_done = true;
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+        initialize_aggregates(node);
+        {
+            let AggStateData { persort, evaltrans, .. } = node;
+            let ps = persort.as_mut().expect("sorted Agg has persort");
+            let mut slots =
+                EvalSlots { scan: None, inner: None, outer: Some(&mut ps.first_slot) };
+            exec_eval_expr(evaltrans, &mut slots)?;
+        }
+        estate.reset_expr_context(node.tmpcontext);
+        loop {
+            let Some(outer_id) = fetch_outer(estate)? else {
+                node.agg_done = true;
+                break;
+            };
+            let AggStateData { persort, evaltrans, .. } = node;
+            let ps = persort.as_mut().expect("sorted Agg has persort");
+            let outer_slot = estate.slot_mut(outer_id);
+            let mut slots = EvalSlots {
+                scan: None,
+                inner: Some(&mut ps.first_slot),
+                outer: Some(&mut *outer_slot),
+            };
+            let same_group = exec_qual(Some(&mut ps.eq), &mut slots)?;
+            if !same_group {
+                exectuples::exec_copy_slot(&mut ps.pending_slot, outer_slot, mcx, mcx)?;
+                ps.have_pending = true;
+                break;
+            }
+            let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+            exec_eval_expr(evaltrans, &mut slots)?;
+            estate.reset_expr_context(node.tmpcontext);
+        }
+        finalize_group(node);
+
+        {
+            let AggStateData { persort, qual, .. } = node;
+            let ps = persort.as_mut().expect("sorted Agg has persort");
+            let mut slots =
+                EvalSlots { scan: None, inner: None, outer: Some(&mut ps.first_slot) };
+            if !exec_qual(qual.as_deref_mut(), &mut slots)? {
+                continue;
+            }
+        }
+        let result_slot = estate.slot_mut(node.ps_ResultTupleSlot);
+        let ps = node.persort.as_mut().unwrap();
+        let mut slots = EvalSlots { scan: None, inner: None, outer: Some(&mut ps.first_slot) };
+        exec_project(&mut node.proj, &mut slots, result_slot, mcx)?;
+        return Ok(Some(node.ps_ResultTupleSlot));
+    }
+    Ok(None)
 }
 
 // agg_fill_hash_table (nodeAgg.c): drain the child through the hash lookup +
@@ -654,7 +824,6 @@ fn lookup_hash_entry<'mcx>(
     let (ix, isnew) =
         ph.hashtable.lookup(&mut ph.hashslot, hash, Some(ph.hash_tablecxt.mcx()), mcx)?;
     let ix = ix.expect("creating lookup always yields an entry");
-    let pergroup = ph.hashtable.entry_additional(ix).cast::<AggPerGroup>();
     if isnew {
         ph.hash_ngroups_current += 1;
         if ph.hash_ngroups_current > ph.hash_ngroups_limit {
@@ -664,79 +833,98 @@ fn lookup_hash_entry<'mcx>(
                 ph.hash_ngroups_current, ph.hash_ngroups_limit
             );
         }
-        for (transno, init) in trans_init.iter().enumerate() {
-            // SAFETY: the entry's additional block holds numtrans AggPerGroup
-            // slots, zeroed at creation (execgrouping contract).
-            unsafe {
-                pergroup.as_ptr().add(transno).write(AggPerGroup {
-                    trans_value: init.value,
-                    trans_value_is_null: init.isnull,
-                    no_trans_value: init.isnull,
-                });
+    }
+    if !trans_init.is_empty() {
+        let pergroup = ph.hashtable.entry_additional(ix).cast::<AggPerGroup>();
+        if isnew {
+            for (transno, init) in trans_init.iter().enumerate() {
+                // SAFETY: the entry's additional block holds numtrans
+                // AggPerGroup slots, zeroed at creation (execgrouping
+                // contract).
+                unsafe {
+                    pergroup.as_ptr().add(transno).write(AggPerGroup {
+                        trans_value: init.value,
+                        trans_value_is_null: init.isnull,
+                        no_trans_value: init.isnull,
+                    });
+                }
             }
         }
+        // SAFETY: the cell is a once-allocated live slot the trans steps read.
+        unsafe { ph.pergroup_cell.write(pergroup) };
     }
-    // SAFETY: the cell is a once-allocated live slot the trans steps read.
-    unsafe { ph.pergroup_cell.write(pergroup) };
     Ok(())
 }
 
-// agg_retrieve_hash_table(_in_memory) (nodeAgg.c): one group per call, the
-// representative tuple rebuilt into the outer-format first_slot.
+// agg_retrieve_hash_table(_in_memory) (nodeAgg.c): one qual-passing group per
+// call, the representative tuple rebuilt into the outer-format first_slot.
 fn agg_retrieve_hash_table<'mcx>(
     node: &mut AggStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
     let mcx = estate.es_query_cxt;
-    estate.reset_expr_context(node.ps_ExprContext);
+    loop {
+        estate.reset_expr_context(node.ps_ExprContext);
 
-    let done = {
-        let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
-        ph.hashiter >= ph.hashtable.num_entries()
-    };
-    if done {
-        node.agg_done = true;
-        return Ok(None);
-    }
-    let AggStateData { perhash, peragg_transno, agg_values_base, agg_nulls_base, .. } = node;
-    let ph = perhash.as_mut().expect("hashed Agg has perhash");
-    let ix = ph.hashiter as u32;
-    ph.hashiter += 1;
-
-    let tup = ph.hashtable.entry_tuple(ix);
-    // SAFETY: entry images live in hash_tablecxt for the table's lifetime.
-    unsafe { exectuples::exec_store_minimal_tuple_ptr(&mut ph.retrieve_slot, mcx, tup) };
-    exectuples::slot_getallattrs(&mut ph.retrieve_slot);
-
-    exectuples::exec_store_all_null_tuple(&mut ph.first_slot, mcx);
-    {
-        let PerHashData { retrieve_slot: hashslot, first_slot, hash_grp_col_idx_input, .. } =
-            &mut *ph;
-        let src = hashslot.base();
-        let dst = first_slot.base_mut();
-        for (i, &attno) in hash_grp_col_idx_input.iter().enumerate() {
-            let v = (attno - 1) as usize;
-            dst.tts_values[v] = src.tts_values[i];
-            dst.tts_isnull[v] = src.tts_isnull[i];
+        let done = {
+            let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
+            ph.hashiter >= ph.hashtable.num_entries()
+        };
+        if done {
+            node.agg_done = true;
+            return Ok(None);
         }
-    }
+        let AggStateData { perhash, peragg_transno, agg_values_base, agg_nulls_base, .. } = node;
+        let ph = perhash.as_mut().expect("hashed Agg has perhash");
+        let ix = ph.hashiter as u32;
+        ph.hashiter += 1;
 
-    let pergroup = ph.hashtable.entry_additional(ix).cast::<AggPerGroup>();
-    for (aggno, transno) in peragg_transno.iter().enumerate() {
-        // SAFETY: bounded by the once-allocated array lengths (struct
-        // invariants; entry pergroup written by lookup_hash_entry).
-        unsafe {
-            let pg = pergroup.as_ptr().add(*transno as usize);
-            agg_values_base.as_ptr().add(aggno).write((*pg).trans_value);
-            agg_nulls_base.as_ptr().add(aggno).write((*pg).trans_value_is_null);
+        let tup = ph.hashtable.entry_tuple(ix);
+        // SAFETY: entry images live in hash_tablecxt for the table's lifetime.
+        unsafe { exectuples::exec_store_minimal_tuple_ptr(&mut ph.retrieve_slot, mcx, tup) };
+        exectuples::slot_getallattrs(&mut ph.retrieve_slot);
+
+        exectuples::exec_store_all_null_tuple(&mut ph.first_slot, mcx);
+        {
+            let PerHashData { retrieve_slot: hashslot, first_slot, hash_grp_col_idx_input, .. } =
+                &mut *ph;
+            let src = hashslot.base();
+            let dst = first_slot.base_mut();
+            for (i, &attno) in hash_grp_col_idx_input.iter().enumerate() {
+                let v = (attno - 1) as usize;
+                dst.tts_values[v] = src.tts_values[i];
+                dst.tts_isnull[v] = src.tts_isnull[i];
+            }
         }
-    }
 
-    let result_slot = estate.slot_mut(node.ps_ResultTupleSlot);
-    let ph = node.perhash.as_mut().unwrap();
-    let mut slots = EvalSlots { scan: None, inner: None, outer: Some(&mut ph.first_slot) };
-    exec_project(&mut node.proj, &mut slots, result_slot, mcx)?;
-    Ok(Some(node.ps_ResultTupleSlot))
+        if !peragg_transno.is_empty() {
+            let pergroup = ph.hashtable.entry_additional(ix).cast::<AggPerGroup>();
+            for (aggno, transno) in peragg_transno.iter().enumerate() {
+                // SAFETY: bounded by the once-allocated array lengths (struct
+                // invariants; entry pergroup written by lookup_hash_entry).
+                unsafe {
+                    let pg = pergroup.as_ptr().add(*transno as usize);
+                    agg_values_base.as_ptr().add(aggno).write((*pg).trans_value);
+                    agg_nulls_base.as_ptr().add(aggno).write((*pg).trans_value_is_null);
+                }
+            }
+        }
+
+        {
+            let AggStateData { perhash, qual, .. } = node;
+            let ph = perhash.as_mut().unwrap();
+            let mut slots =
+                EvalSlots { scan: None, inner: None, outer: Some(&mut ph.first_slot) };
+            if !exec_qual(qual.as_deref_mut(), &mut slots)? {
+                continue;
+            }
+        }
+        let result_slot = estate.slot_mut(node.ps_ResultTupleSlot);
+        let ph = node.perhash.as_mut().unwrap();
+        let mut slots = EvalSlots { scan: None, inner: None, outer: Some(&mut ph.first_slot) };
+        exec_project(&mut node.proj, &mut slots, result_slot, mcx)?;
+        return Ok(Some(node.ps_ResultTupleSlot));
+    }
 }
 
 /// `ExecEndAgg` node-local half; the caller ends the outer child (contexts
@@ -752,6 +940,9 @@ pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, estate: &mut EStateD
         // resets (the caller's child rescan is then redundant but harmless).
         ph.hashiter = 0;
         return;
+    }
+    if let Some(ps) = node.persort.as_mut() {
+        ps.have_pending = false;
     }
     estate.ecxt_mut(node.aggcontext).rescan();
 }

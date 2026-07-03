@@ -15,6 +15,8 @@ types_array = { path = "../../../../_support/types/array" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
+pqformat = { path = "../../../libpq/pqformat" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
 guc_tables = { path = "../../misc/guc_tables" }
 
 [dev-dependencies]

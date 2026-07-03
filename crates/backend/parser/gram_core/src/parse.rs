@@ -1,7 +1,7 @@
 use core::mem;
 
 use mcx::Mcx;
-use scan_fgram::{tokens, CoreYYSTYPE, Scanner, ScannerSettings, Token};
+use scan_fgram::{tokens, CoreVal, CoreYYSTYPE, Scanner, ScannerSettings};
 use types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR};
 use types_nodes::NodeList;
 
@@ -49,15 +49,19 @@ impl<'mcx> Parser<'mcx> {
 
     // parser.c base_yylex: the one-token-lookahead merge filter keeping the
     // grammar LALR(1) (FORMAT/NOT/NULLS/WITH/WITHOUT + UIDENT/USCONST merges).
-    fn base_yylex(&mut self) -> PgResult<(i32, YYSTYPE<'mcx>, i32)> {
-        let (cur_tok, cur_val, cur_loc) = if self.have_lookahead {
+    // C's exact boundary: token code returned, value/location written through
+    // the caller's yylval/yylloc.
+    fn base_yylex(&mut self, lvalp: &mut YYSTYPE<'mcx>, llocp: &mut i32) -> PgResult<i32> {
+        let cur_tok = if self.have_lookahead {
             self.have_lookahead = false;
-            (self.la_tok, mem::take(&mut self.la_val), self.la_loc)
+            *lvalp = mem::take(&mut self.la_val);
+            *llocp = self.la_loc;
+            self.la_tok
         } else {
-            self.next_token()?
+            self.next_token(lvalp, llocp)?
         };
 
-        self.last_yylloc = cur_loc;
+        self.last_yylloc = *llocp;
         match cur_tok {
             t if t == tokens::FORMAT
                 || t == tokens::NOT
@@ -70,10 +74,12 @@ impl<'mcx> Parser<'mcx> {
                      + str_udeescape) not ported"
                 )
             }
-            _ => return Ok((cur_tok, cur_val, cur_loc)),
+            _ => return Ok(cur_tok),
         }
 
-        let (next_tok, next_val, next_loc) = self.next_token()?;
+        let mut next_val = YYSTYPE::None;
+        let mut next_loc = 0;
+        let next_tok = self.next_token(&mut next_val, &mut next_loc)?;
         self.la_tok = next_tok;
         self.la_val = next_val;
         self.la_loc = next_loc;
@@ -103,7 +109,7 @@ impl<'mcx> Parser<'mcx> {
             t if t == tokens::WITHOUT && next_tok == tokens::TIME => tokens::WITHOUT_LA,
             t => t,
         };
-        Ok((merged, cur_val, cur_loc))
+        Ok(merged)
     }
 
     // gram.y parser_yyerror: scanner_yyerror at the current token.
@@ -125,9 +131,11 @@ impl<'mcx> Parser<'mcx> {
         )
     }
 
-    fn next_token(&mut self) -> PgResult<(i32, YYSTYPE<'mcx>, i32)> {
-        let tok = self.scanner.core_yylex()?;
-        Ok((tok.token, yystype_from(tok.value), tok.location))
+    fn next_token(&mut self, lvalp: &mut YYSTYPE<'mcx>, llocp: &mut i32) -> PgResult<i32> {
+        let mut v = CoreYYSTYPE::None;
+        let tok = self.scanner.core_yylex(&mut v, llocp)?;
+        *lvalp = yystype_from(v);
+        Ok(tok)
     }
 
     // gram.c yyparse; gram.y has no error-recovery productions and yyerror
@@ -169,10 +177,7 @@ impl<'mcx> Parser<'mcx> {
             'decide: {
                 if pact != YYPACT_NINF {
                     if yychar == YYEMPTY {
-                        let (t, v, l) = self.base_yylex()?;
-                        yychar = t;
-                        yylval = v;
-                        yylloc = l;
+                        yychar = self.base_yylex(&mut yylval, &mut yylloc)?;
                     }
                     let yytoken = if yychar <= YYEOF { YYEOF } else { yytranslate(yychar) };
                     let idx = pact + yytoken;
@@ -240,9 +245,8 @@ impl<'mcx> Parser<'mcx> {
         unsafe {
             match DISPATCH[rule] {
                 0 => {
-                    stk.set_sp(*sp);
                     let mut yyval = YYSTYPE::None;
-                    self.reduce(stk, rule, yylen, &mut yyval, yyloc)?;
+                    self.reduce(stk.action_view(base), rule, &mut yyval, yyloc)?;
                     stk.ensure(self.mcx, base + 1)?;
                     stk.write_val(base, yyval, yyloc);
                 }
@@ -329,20 +333,24 @@ impl<'mcx> Parser<'mcx> {
     fn token_extent(&self, loc: usize) -> usize {
         let sub = &self.scanbuf[loc..];
         let mut s = Scanner::new(sub, self.mcx, self.settings);
-        let Ok(reference) = s.core_yylex() else {
+        let mut ref_val = CoreYYSTYPE::None;
+        let mut ref_loc = 0;
+        let Ok(ref_tok) = s.core_yylex(&mut ref_val, &mut ref_loc) else {
             return self.scanbuf.len();
         };
-        if reference.token == YYEOF {
+        if ref_tok == YYEOF {
             return loc;
         }
-        let ub = match s.core_yylex() {
-            Ok(t2) if t2.token != YYEOF => t2.location as usize,
+        let mut v2 = CoreYYSTYPE::None;
+        let mut l2 = 0;
+        let ub = match s.core_yylex(&mut v2, &mut l2) {
+            Ok(t2) if t2 != YYEOF => l2 as usize,
             _ => sub.len(),
         };
         let (mut lo, mut hi) = (1usize, ub);
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            if self.first_token_eq(&sub[..mid], &reference) {
+            if self.first_token_eq(&sub[..mid], ref_tok, &ref_val, ref_loc) {
                 hi = mid;
             } else {
                 lo = mid + 1;
@@ -351,30 +359,36 @@ impl<'mcx> Parser<'mcx> {
         loc + lo
     }
 
-    fn first_token_eq(&self, prefix: &'mcx [u8], reference: &Token<'mcx>) -> bool {
+    fn first_token_eq(
+        &self,
+        prefix: &'mcx [u8],
+        ref_tok: i32,
+        ref_val: &CoreYYSTYPE<'mcx>,
+        ref_loc: i32,
+    ) -> bool {
         let mut s = Scanner::new(prefix, self.mcx, self.settings);
-        match s.core_yylex() {
-            Ok(t) => {
-                t.token == reference.token
-                    && t.location == reference.location
-                    && t.value == reference.value
-            }
+        let mut v = CoreYYSTYPE::None;
+        let mut l = 0;
+        match s.core_yylex(&mut v, &mut l) {
+            Ok(t) => t == ref_tok && l == ref_loc && v == *ref_val,
             Err(_) => false,
         }
     }
 }
 
+// Bit-identical repack (both sides are p + (tag | len<<32) with aligned tag
+// values); LLVM folds the match to a two-register copy.
 fn yystype_from(v: CoreYYSTYPE<'_>) -> YYSTYPE<'_> {
-    match v {
-        CoreYYSTYPE::None => YYSTYPE::None,
-        CoreYYSTYPE::Ival(i) => YYSTYPE::Ival(i),
-        CoreYYSTYPE::Str(bytes) => {
+    match v.get() {
+        CoreVal::None => YYSTYPE::None,
+        CoreVal::Ival(i) => YYSTYPE::Ival(i),
+        CoreVal::Str(bytes) => {
             // Input is &str and the scanner verifies escape-built literals,
             // so values are valid UTF-8 while the server encoding is UTF-8.
             debug_assert!(core::str::from_utf8(bytes).is_ok());
             // SAFETY: see above.
             YYSTYPE::Str(unsafe { core::str::from_utf8_unchecked(bytes) })
         }
-        CoreYYSTYPE::Keyword(kw) => YYSTYPE::Keyword(kw),
+        CoreVal::Keyword(kw) => YYSTYPE::Keyword(kw),
     }
 }

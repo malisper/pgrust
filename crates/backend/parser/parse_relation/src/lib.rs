@@ -762,6 +762,126 @@ pub fn addRangeTableEntryForRelation<'mcx>(
     Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
 }
 
+// chooseScalarFunctionAlias; nfuncs fixed at 1 on this slice.
+fn chooseScalarFunctionAlias<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcexpr: Node<'mcx>,
+    funcname: &'mcx str,
+    alias: Option<&'mcx Alias<'mcx>>,
+) -> PgResult<&'mcx str> {
+    if let Some(fe) = funcexpr.as_func_expr() {
+        if let Some(pname) = funcapi::get_func_result_name(mcx, fe.funcid)? {
+            return Ok(pname);
+        }
+    }
+    if let Some(name) = alias.and_then(|a| a.aliasname) {
+        return Ok(name);
+    }
+    Ok(funcname)
+}
+
+// Single-function scalar-result slice of C's addRangeTableEntryForFunction;
+// coldeflists never arrive (transformRangeFunction louds them out).
+pub fn addRangeTableEntryForFunction<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    funcname: &'mcx str,
+    funcexpr: Node<'mcx>,
+    alias: Option<&'mcx Alias<'mcx>>,
+    funcordinality: bool,
+    lateral: bool,
+    inFromCl: bool,
+) -> PgResult<&'mcx mut ParseNamespaceItem<'mcx>> {
+    if funcordinality {
+        panic!(
+            "addRangeTableEntryForFunction (parse_relation.c): WITH ORDINALITY \
+             merged-tupdesc arm unported — unit backend-parser-relation"
+        );
+    }
+
+    let aliasname = alias.and_then(|a| a.aliasname).unwrap_or(funcname);
+
+    let resolved = funcapi::get_expr_result_type(mcx, Some(funcexpr))?;
+    let tupdesc = match resolved.class {
+        funcapi::TypeFuncClass::Scalar => {
+            let colname = chooseScalarFunctionAlias(mcx, funcexpr, funcname, alias)?;
+            // exprTypmod/exprCollation of the grammar-guaranteed FuncExpr:
+            // no FuncExpr arm in exprTypmod (-1); collation is funccollid.
+            let (typmod, collation) = match funcexpr.as_func_expr() {
+                Some(fe) => (-1, fe.funccollid),
+                None => panic!(
+                    "addRangeTableEntryForFunction (parse_relation.c): non-FuncExpr \
+                     scalar function item (planner-folded expr) unported"
+                ),
+            };
+            let mut d = tupdesc::CreateTemplateTupleDesc(mcx, 1)?;
+            tupdesc::TupleDescInitEntry(
+                &mut d,
+                1,
+                Some(colname),
+                resolved.result_type_id,
+                typmod,
+                0,
+            )?;
+            tupdesc::TupleDescInitEntryCollation(&mut d, 1, collation);
+            d
+        }
+        funcapi::TypeFuncClass::Composite | funcapi::TypeFuncClass::CompositeDomain => panic!(
+            "addRangeTableEntryForFunction (parse_relation.c): composite-returning \
+             function in FROM unported — record/composite lane"
+        ),
+        funcapi::TypeFuncClass::Record => panic!(
+            "addRangeTableEntryForFunction (parse_relation.c): RECORD-returning \
+             function needs a column definition list — coldeflist lane"
+        ),
+        funcapi::TypeFuncClass::Other => {
+            return Err(unsupported_function_return_type(
+                pstate,
+                funcname,
+                resolved.result_type_id,
+            ))
+        }
+    };
+
+    let rtfunc = Node::mk(
+        mcx,
+        types_nodes::RangeTblFunction {
+            funcexpr: Some(funcexpr),
+            funccolcount: tupdesc.natts,
+            ..Default::default()
+        },
+    )?;
+    let mut functions = NodeList::nil();
+    functions.lappend(mcx, rtfunc)?;
+
+    let (eref, rebuilt_alias) =
+        buildRelationAliases(mcx, &tupdesc, alias, str_in(mcx, aliasname)?)?;
+
+    // Functions are never checked for access rights: no addRTEPermissionInfo.
+    let rte = RangeTblEntry {
+        rtekind: RTEKind::RTE_FUNCTION,
+        alias: rebuilt_alias,
+        functions,
+        funcordinality,
+        eref: Some(eref),
+        lateral,
+        inFromCl,
+        ..Default::default()
+    };
+    let rte_node = Node::mk(mcx, rte)?;
+    pstate.p_rtable.lappend(mcx, rte_node)?;
+    let rtindex = pstate.p_rtable.len() as i32;
+
+    let nsitem = buildNSItemFromTupleDesc(
+        mcx,
+        rte_node.as_range_tbl_entry().expect("just built"),
+        rtindex,
+        None,
+        &tupdesc,
+    )?;
+    Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
+}
+
 pub fn addRangeTableEntryForValues<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
@@ -1534,6 +1654,26 @@ fn undefined_table(
             .errposition(errpos(pstate, relation.location))
             .into_error()
             .with_error_location(loc("parserOpenTable")),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn unsupported_function_return_type(
+    _pstate: &ParseState<'_, '_>,
+    funcname: &str,
+    rettype: Oid,
+) -> Box<PgError> {
+    let typename = format_type::format_type_be(rettype)
+        .unwrap_or_else(|_| format!("type {rettype}"));
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
+            .errmsg(format!(
+                "function \"{funcname}\" in FROM has unsupported return type {typename}"
+            ))
+            .into_error()
+            .with_error_location(loc("addRangeTableEntryForFunction")),
     )
 }
 

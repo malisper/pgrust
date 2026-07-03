@@ -1,6 +1,6 @@
 use types_error::PgResult;
-use types_nodes::list::NodeList;
-use types_nodes::plannodes::{Agg, IndexScan, Plan, Result as ResultPlan, SeqScan};
+use types_nodes::list::{NodeList, OidList};
+use types_nodes::plannodes::{Agg, Hash, HashJoin, IndexScan, Plan, Result as ResultPlan, SeqScan};
 use types_nodes::primnodes::{OpExpr, TargetEntry};
 use types_nodes::{Node, NodeTag};
 use types_pathnodes::{IndexOptInfo, PathId, PathNode, PtId, RinfoId};
@@ -25,8 +25,7 @@ pub fn create_plan<'mcx>(run: &mut PlannerRun<'mcx>, best_path: PathId) -> PgRes
     if plan.node_tag() != NodeTag::T_ModifyTable {
         apply_tlist_labeling(plan, run.processed_tlist());
     }
-    // SS_attach_initplans: no initplans exist on this lane.
-    debug_assert!(run.root.init_plans.is_empty());
+    crate::subselect::ss_attach_initplans(run, plan)?;
     assert!(run.root.curOuterParams.is_empty(), "unassigned NestLoopParams");
     run.root.plan_params.clear();
     Ok(plan)
@@ -38,7 +37,10 @@ fn create_plan_recurse<'mcx>(
     flags: i32,
 ) -> PgResult<Node<'mcx>> {
     match run.root.path(path_id) {
-        PathNode::Path(p) if p.pathtype == crate::pathnode::tag16(NodeTag::T_SeqScan) => {
+        PathNode::Path(p)
+            if p.pathtype == crate::pathnode::tag16(NodeTag::T_SeqScan)
+                || p.pathtype == crate::pathnode::tag16(NodeTag::T_FunctionScan) =>
+        {
             create_scan_plan(run, path_id, flags)
         }
         PathNode::IndexPath(_) => create_scan_plan(run, path_id, flags),
@@ -46,8 +48,11 @@ fn create_plan_recurse<'mcx>(
         PathNode::ProjectionPath(_) => create_projection_plan(run, path_id, flags),
         PathNode::GroupResultPath(_) => create_group_result_plan(run, path_id),
         PathNode::AggPath(_) => create_agg_plan(run, path_id),
+        PathNode::UpperUniquePath(_) => create_upper_unique_plan(run, path_id, flags),
         PathNode::SortPath(_) => create_sort_plan(run, path_id, flags),
         PathNode::NestPath(_) => create_join_plan(run, path_id),
+        PathNode::MergePath(_) => create_mergejoin_plan(run, path_id),
+        PathNode::HashPath(_) => create_hashjoin_plan(run, path_id),
         PathNode::LimitPath(_) => create_limit_plan(run, path_id, flags),
         PathNode::ModifyTablePath(_) => create_modifytable_plan(run, path_id),
         other => panic!(
@@ -148,8 +153,9 @@ fn create_scan_plan<'mcx>(
     };
     debug_assert!(run.root.path(best_path).base().param_info.is_none());
 
-    // get_gating_quals: pseudoconstant quals panicked in the qual lane.
-    debug_assert!(scan_clauses.iter().all(|&r| !run.root.rinfo(r).pseudoconstant));
+    let gating_clauses = get_gating_quals(run, &scan_clauses)?;
+    // A gating Result can project, so the scan needn't honor tlist flags.
+    let flags = if gating_clauses.is_nil() { flags } else { 0 };
 
     let tlist = if flags == CP_IGNORE_TLIST {
         NodeList::nil()
@@ -165,21 +171,80 @@ fn create_scan_plan<'mcx>(
         build_path_tlist(run, target_id)?
     };
 
-    match pathtype {
+    let plan = match pathtype {
         t if t == crate::pathnode::tag16(NodeTag::T_SeqScan) => {
-            create_seqscan_plan(run, best_path, tlist, scan_clauses)
+            create_seqscan_plan(run, best_path, tlist, scan_clauses)?
         }
         t if t == crate::pathnode::tag16(NodeTag::T_IndexScan) => {
-            create_indexscan_plan(run, best_path, tlist, scan_clauses)
+            create_indexscan_plan(run, best_path, tlist, scan_clauses)?
         }
         t if t == crate::pathnode::tag16(NodeTag::T_IndexOnlyScan) => {
             panic!("create_indexscan_plan (createplan.c): index-only scan; M2 IOS lane")
         }
         t if t == crate::pathnode::tag16(NodeTag::T_BitmapHeapScan) => {
-            create_bitmap_scan_plan(run, best_path, tlist, scan_clauses)
+            create_bitmap_scan_plan(run, best_path, tlist, scan_clauses)?
+        }
+        t if t == crate::pathnode::tag16(NodeTag::T_FunctionScan) => {
+            create_functionscan_plan(run, best_path, tlist, scan_clauses)?
         }
         other => panic!("create_scan_plan (createplan.c): pathtype {other}; M2 scan lane"),
+    };
+
+    if !gating_clauses.is_nil() {
+        return create_gating_plan(run, best_path, plan, gating_clauses);
     }
+    Ok(plan)
+}
+
+// get_gating_quals (createplan.c).
+fn get_gating_quals<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    quals: &[RinfoId],
+) -> PgResult<NodeList<'mcx>> {
+    if !run.root.hasPseudoConstantQuals {
+        return Ok(NodeList::nil());
+    }
+    let ordered = order_qual_clauses(run, quals)?;
+    let mut out = NodeList::nil();
+    for &rid in ordered.iter() {
+        if run.root.rinfo(rid).pseudoconstant {
+            out.lappend(run.mcx, *run.root.expr_node(run.root.rinfo(rid).clause))?;
+        }
+    }
+    Ok(out)
+}
+
+// create_gating_plan (createplan.c): a Result node evaluating the
+// pseudoconstant quals as one-time quals atop the scan plan.
+fn create_gating_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+    plan: Node<'mcx>,
+    gating_quals: NodeList<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    debug_assert!(!gating_quals.is_nil());
+    let splan = match plan.as_result() {
+        Some(r) if r.plan.lefttree.is_none() && r.resconstantqual.is_none() => None,
+        _ => Some(plan),
+    };
+    let target_id = run.root.path(path_id).base().pathtarget_id.unwrap();
+    let tlist = build_path_tlist(run, target_id)?;
+
+    let mut gplan = Node::build::<ResultPlan<'mcx>>(mcx)?;
+    gplan.plan.targetlist = tlist;
+    gplan.resconstantqual = Some(Node::mk_list(mcx, gating_quals)?);
+    gplan.plan.lefttree = splan;
+    // copy_plan_costsize: gating changes no cost or size estimates.
+    let child = plan.as_plan().expect("plan node");
+    gplan.plan.disabled_nodes = child.disabled_nodes;
+    gplan.plan.startup_cost = child.startup_cost;
+    gplan.plan.total_cost = child.total_cost;
+    gplan.plan.plan_rows = child.plan_rows;
+    gplan.plan.plan_width = child.plan_width;
+    gplan.plan.parallel_aware = false;
+    gplan.plan.parallel_safe = run.root.path(path_id).base().parallel_safe;
+    Ok(gplan.seal())
 }
 
 // order_qual_clauses (createplan.c): stable sort by ascending eval cost.
@@ -249,6 +314,41 @@ fn create_seqscan_plan<'mcx>(
     plan.scan.plan.targetlist = tlist;
     plan.scan.plan.qual = qpqual;
     plan.scan.scanrelid = scan_relid;
+    copy_generic_path_info(run, &mut plan.scan.plan, best_path);
+    Ok(plan.seal())
+}
+
+// create_functionscan_plan (createplan.c); replace_nestloop_params is dead
+// (param_info asserted None upstream).
+fn create_functionscan_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: NodeList<'mcx>,
+    scan_clauses: mcx::PgVec<'mcx, RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let rel_id = run.root.path(best_path).base().parent;
+    let scan_relid = run.root.rel(rel_id).relid;
+    debug_assert!(scan_relid > 0);
+    let rte = run.rte(scan_relid as usize);
+    debug_assert!(rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_FUNCTION);
+    // C shares the list pointer; the header is re-copied cell-by-cell (the
+    // RangeTblFunction nodes stay shared).
+    let mut functions = NodeList::nil();
+    for f in &rte.functions {
+        functions.lappend(mcx, f)?;
+    }
+    let funcordinality = rte.funcordinality;
+
+    let ordered = order_qual_clauses(run, &scan_clauses)?;
+    let qpqual = extract_actual_clauses(run, &ordered);
+
+    let mut plan = Node::build::<types_nodes::plannodes::FunctionScan<'mcx>>(mcx)?;
+    plan.scan.plan.targetlist = tlist;
+    plan.scan.plan.qual = qpqual;
+    plan.scan.scanrelid = scan_relid;
+    plan.functions = functions;
+    plan.funcordinality = funcordinality;
     copy_generic_path_info(run, &mut plan.scan.plan, best_path);
     Ok(plan.seal())
 }
@@ -687,26 +787,22 @@ fn create_group_result_plan<'mcx>(
     Ok(plan.seal())
 }
 
-// create_agg_plan + make_agg (createplan.c); HAVING quals are the M3 lane.
+// create_agg_plan + make_agg (createplan.c).
 fn create_agg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResult<Node<'mcx>> {
-    let (subpath_id, target_id, aggstrategy, aggsplit, num_groups, transition_space) =
+    let (subpath_id, target_id, aggstrategy, aggsplit, num_groups, transition_space, qual_ids) =
         match run.root.path(path_id) {
-            PathNode::AggPath(ap) => {
-                assert!(
-                    ap.qual.is_empty(),
-                    "create_agg_plan (createplan.c): HAVING quals; M3 having lane"
-                );
-                (
-                    ap.subpath.expect("AggPath has a subpath"),
-                    ap.path.pathtarget_id.unwrap(),
-                    ap.aggstrategy,
-                    ap.aggsplit,
-                    ap.numGroups,
-                    ap.transitionSpace,
-                )
-            }
+            PathNode::AggPath(ap) => (
+                ap.subpath.expect("AggPath has a subpath"),
+                ap.path.pathtarget_id.unwrap(),
+                ap.aggstrategy,
+                ap.aggsplit,
+                ap.numGroups,
+                ap.transitionSpace,
+                crate::relnode::pgvec_clone_shallow(run.mcx, &ap.qual),
+            ),
             _ => unreachable!(),
         };
+    let qual = order_bare_qual_clauses(run, &qual_ids)?;
 
     // Agg can project, so no need to be picky about the child tlist, but the
     // grouping columns must be available (CP_LABEL_TLIST).
@@ -747,7 +843,7 @@ fn create_agg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResul
 
     let mut plan = Node::build::<Agg>(run.mcx)?;
     plan.plan.targetlist = tlist;
-    plan.plan.qual = NodeList::nil();
+    plan.plan.qual = qual;
     plan.plan.lefttree = Some(subplan);
     plan.aggstrategy = aggstrategy;
     plan.aggsplit = aggsplit;
@@ -757,6 +853,106 @@ fn create_agg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResul
     plan.grpCollations = mcx::vec_borrow_in(run.mcx, grp_collations)?;
     plan.numGroups = clamp_cardinality_to_long(num_groups);
     plan.transitionSpace = transition_space;
+    copy_generic_path_info(run, &mut plan.plan, path_id);
+    Ok(plan.seal())
+}
+
+// order_qual_clauses (createplan.c) over bare expressions (AggPath.qual
+// carries no RestrictInfos, as C).
+fn order_bare_qual_clauses<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    quals: &[types_pathnodes::NodeId],
+) -> PgResult<NodeList<'mcx>> {
+    let mcx = run.mcx;
+    let mut items: mcx::PgVec<'_, (Node<'mcx>, f64)> = mcx::PgVec::new_in(mcx);
+    for &q in quals {
+        let clause = *run.root.expr_node(q);
+        let cost = crate::costsize::cost_qual_eval_node(clause)?;
+        items.push((clause, cost.per_tuple));
+    }
+    if items.len() > 1 {
+        items.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    }
+    let mut out = NodeList::nil();
+    for (clause, _) in items.iter() {
+        out.lappend(mcx, *clause)?;
+    }
+    Ok(out)
+}
+
+// create_upper_unique_plan + make_unique_from_pathkeys (createplan.c).
+fn create_upper_unique_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let (subpath_id, pathkeys, numkeys) = {
+        let PathNode::UpperUniquePath(up) = run.root.path(path_id) else { unreachable!() };
+        (
+            up.subpath.expect("UpperUniquePath has a subpath"),
+            crate::relnode::pgvec_clone_shallow(mcx, &up.path.pathkeys),
+            up.numkeys,
+        )
+    };
+    // Unique doesn't project; grouping columns must be labeled.
+    let subplan = create_plan_recurse(run, subpath_id, flags | CP_LABEL_TLIST)?;
+
+    let tlist = NodeList::from_slice(
+        mcx,
+        subplan.as_plan().expect("plan node").targetlist.as_slice(),
+    )?;
+    let mut uniq_col_idx: mcx::PgVec<'mcx, i16> = mcx::PgVec::new_in(mcx);
+    let mut uniq_operators: mcx::PgVec<'mcx, u32> = mcx::PgVec::new_in(mcx);
+    let mut uniq_collations: mcx::PgVec<'mcx, u32> = mcx::PgVec::new_in(mcx);
+    for pathkey in pathkeys.iter() {
+        if uniq_col_idx.len() >= numkeys as usize {
+            break;
+        }
+        let ec = pathkey.pk_eclass.expect("canonical pathkey has an eclass");
+        assert!(
+            !run.root.ec(ec).ec_has_volatile,
+            "make_unique_from_pathkeys (createplan.c): volatile sortref leg; M2 lane"
+        );
+        let mut found: Option<(i16, u32)> = None;
+        for tle_node in &tlist {
+            let tle = tle_node.as_target_entry().expect("TargetEntry");
+            if let Some(em_id) = find_ec_member_matching_expr(run, ec, tle.expr) {
+                found = Some((tle.resno, run.root.em(em_id).em_datatype));
+                break;
+            }
+        }
+        let Some((resno, pk_datatype)) = found else {
+            panic!("could not find pathkey item to sort");
+        };
+        let eqop = lsyscache::amop::get_opfamily_member_for_cmptype(
+            pathkey.pk_opfamily,
+            pk_datatype,
+            pk_datatype,
+            types_pathnodes::COMPARE_EQ,
+        )?;
+        assert!(
+            eqop != 0,
+            "missing operator {}({},{}) in opfamily {}",
+            types_pathnodes::COMPARE_EQ,
+            pk_datatype,
+            pk_datatype,
+            pathkey.pk_opfamily
+        );
+        uniq_col_idx.push(resno);
+        uniq_operators.push(eqop);
+        uniq_collations.push(run.root.ec(ec).ec_collation);
+    }
+    assert_eq!(uniq_col_idx.len(), numkeys as usize);
+
+    let mut plan = Node::build::<types_nodes::plannodes::Unique>(mcx)?;
+    plan.plan.targetlist = tlist;
+    plan.plan.qual = NodeList::nil();
+    plan.plan.lefttree = Some(subplan);
+    plan.numCols = numkeys;
+    plan.uniqColIdx = mcx::slice_borrow_in(mcx, &uniq_col_idx)?;
+    plan.uniqOperators = mcx::slice_borrow_in(mcx, &uniq_operators)?;
+    plan.uniqCollations = mcx::slice_borrow_in(mcx, &uniq_collations)?;
     copy_generic_path_info(run, &mut plan.plan, path_id);
     Ok(plan.seal())
 }
@@ -1047,4 +1243,410 @@ fn create_join_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResu
     plan.nestParams = NodeList::nil();
     copy_generic_path_info(run, &mut plan.join.plan, path_id);
     Ok(plan.seal())
+}
+
+// create_hashjoin_plan (createplan.c), JOIN_INNER arm. Skew fields default to
+// invalid (the executor's skew fast path is loud, so they are never consumed);
+// otherclauses is NIL for inner joins.
+fn create_hashjoin_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let (outer_path, inner_path, jointype, inner_unique, restrict, hash_rinfos, target_id, num_batches) =
+        match run.root.path(path_id) {
+            PathNode::HashPath(hp) => {
+                debug_assert!(hp.jpath.path.param_info.is_none());
+                (
+                    hp.jpath.outerjoinpath.expect("hashjoin outer path"),
+                    hp.jpath.innerjoinpath.expect("hashjoin inner path"),
+                    hp.jpath.jointype,
+                    hp.jpath.inner_unique,
+                    crate::relnode::pgvec_clone_shallow(mcx, &hp.jpath.joinrestrictinfo),
+                    crate::relnode::pgvec_clone_shallow(mcx, &hp.path_hashclauses),
+                    hp.jpath.path.pathtarget_id.unwrap(),
+                    hp.num_batches,
+                )
+            }
+            other => panic!(
+                "create_hashjoin_plan (createplan.c): pathtype {}",
+                other.base().pathtype
+            ),
+        };
+    assert!(
+        jointype == types_pathnodes::JOIN_INNER,
+        "create_hashjoin_plan (createplan.c): jointype {jointype}; M2 outer-join lane"
+    );
+
+    let tlist = build_path_tlist(run, target_id)?;
+    let outer_flags = if num_batches > 1 { CP_SMALL_TLIST } else { 0 };
+    let outer_plan = create_plan_recurse(run, outer_path, outer_flags)?;
+    let inner_plan = create_plan_recurse(run, inner_path, CP_SMALL_TLIST)?;
+
+    let ordered = order_qual_clauses(run, &restrict)?;
+    let joinclauses = extract_actual_clauses(run, &ordered);
+    // hashclauses (plain OpExpr form) removed from joinclauses (no double eval).
+    let hashclauses_actual = get_actual_clauses(run, &hash_rinfos);
+    let joinclauses = list_difference(mcx, &joinclauses, &hashclauses_actual);
+
+    // Rearrange so the outer variable is on the left, per outer rel relids.
+    let outer_relids =
+        crate::relnode::relids_copy(mcx, &run.root.rel(run.root.path(outer_path).base().parent).relids);
+    let switched = get_switched_clauses(run, &hash_rinfos, &outer_relids)?;
+
+    let mut hashoperators: OidList<'mcx> = OidList::nil();
+    let mut hashcollations: OidList<'mcx> = OidList::nil();
+    let mut outer_hashkeys = NodeList::nil();
+    let mut inner_hashkeys = NodeList::nil();
+    for clause_node in switched.iter() {
+        let op = clause_node.as_op_expr().expect("switched hashclause is an OpExpr");
+        hashoperators.lappend(mcx, op.opno)?;
+        hashcollations.lappend(mcx, op.inputcollid)?;
+        outer_hashkeys.lappend(mcx, op.args.nth(0))?;
+        inner_hashkeys.lappend(mcx, op.args.nth(1))?;
+    }
+
+    // make_hash: tlist shares the inner plan's, hashkeys are the inner keys.
+    let mut hash_plan = Node::build::<Hash>(mcx)?;
+    let mut inner_tlist = NodeList::nil();
+    for te in inner_plan.as_plan().expect("inner plan").targetlist.iter() {
+        inner_tlist.lappend(mcx, te)?;
+    }
+    let (i_startup, i_total, i_rows, i_width) = {
+        let p = inner_plan.as_plan().unwrap();
+        (p.startup_cost, p.total_cost, p.plan_rows, p.plan_width)
+    };
+    hash_plan.plan.targetlist = inner_tlist;
+    hash_plan.plan.qual = NodeList::nil();
+    hash_plan.plan.lefttree = Some(inner_plan);
+    hash_plan.plan.righttree = None;
+    hash_plan.hashkeys = inner_hashkeys;
+    // copy_plan_costsize + Hash startup == total (EXPLAIN-only).
+    hash_plan.plan.plan_rows = i_rows;
+    hash_plan.plan.plan_width = i_width;
+    hash_plan.plan.total_cost = i_total;
+    hash_plan.plan.startup_cost = i_total;
+    let _ = i_startup;
+    let hash_node = hash_plan.seal();
+
+    // make_hashjoin.
+    let mut join_plan = Node::build::<HashJoin>(mcx)?;
+    join_plan.join.plan.targetlist = tlist;
+    join_plan.join.plan.qual = NodeList::nil();
+    join_plan.join.plan.lefttree = Some(outer_plan);
+    join_plan.join.plan.righttree = Some(hash_node);
+    join_plan.hashclauses = switched;
+    join_plan.hashoperators = hashoperators;
+    join_plan.hashcollations = hashcollations;
+    join_plan.hashkeys = outer_hashkeys;
+    join_plan.join.jointype = types_nodes::JoinType::JOIN_INNER;
+    join_plan.join.inner_unique = inner_unique;
+    join_plan.join.joinqual = joinclauses;
+    copy_generic_path_info(run, &mut join_plan.join.plan, path_id);
+    Ok(join_plan.seal())
+}
+
+// get_actual_clauses (clauses.c): the clause of each non-pseudoconstant rinfo.
+fn get_actual_clauses<'mcx>(run: &PlannerRun<'mcx>, rinfos: &[RinfoId]) -> NodeList<'mcx> {
+    let mut out = NodeList::nil();
+    for &rid in rinfos {
+        debug_assert!(!run.root.rinfo(rid).pseudoconstant);
+        out.lappend(run.mcx, *run.root.expr_node(run.root.rinfo(rid).clause))
+            .expect("lappend");
+    }
+    out
+}
+
+// list_difference over shared arena nodes (Node pointer identity).
+fn list_difference<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    a: &NodeList<'mcx>,
+    b: &NodeList<'mcx>,
+) -> NodeList<'mcx> {
+    let mut out = NodeList::nil();
+    for n in a.iter() {
+        if !b.iter().any(|m| Node::ptr_eq(n, m)) {
+            out.lappend(mcx, n).expect("lappend");
+        }
+    }
+    out
+}
+
+// get_switched_clauses (createplan.c): commute so the outer var is on the left,
+// setting outer_is_left. CommuteOpExpr swaps args + opno->commutator.
+fn get_switched_clauses<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    hash_rinfos: &[RinfoId],
+    outer_relids: &types_pathnodes::Relids<'mcx>,
+) -> PgResult<NodeList<'mcx>> {
+    let mcx = run.mcx;
+    let mut out = NodeList::nil();
+    for &rid in hash_rinfos {
+        let right_relids = run.root.rinfo(rid).right_relids.clone();
+        let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+        let op = clause.as_op_expr().expect("hashclause is an OpExpr");
+        if crate::relnode::relids_is_subset(&right_relids, outer_relids) {
+            let commutator = lsyscache::get_commutator(op.opno)?;
+            assert!(commutator != 0, "get_switched_clauses: no commutator for {}", op.opno);
+            let mut temp = Node::build::<OpExpr>(mcx)?;
+            temp.opno = commutator;
+            temp.opfuncid = 0;
+            temp.opresulttype = op.opresulttype;
+            temp.opretset = op.opretset;
+            temp.opcollid = op.opcollid;
+            temp.inputcollid = op.inputcollid;
+            temp.args = NodeList::make2(mcx, op.args.nth(1), op.args.nth(0))?;
+            temp.location = op.location;
+            out.lappend(mcx, temp.seal())?;
+            run.root.rinfo_mut(rid).outer_is_left = false;
+        } else {
+            out.lappend(mcx, clause)?;
+            run.root.rinfo_mut(rid).outer_is_left = true;
+        }
+    }
+    Ok(out)
+}
+
+// label_sort_with_costsize (createplan.c): explicit merge-input sorts get
+// their own cost labels (the path cost already includes them).
+fn label_sort_with_costsize<'mcx>(
+    run: &PlannerRun<'mcx>,
+    sort_plan: Node<'mcx>,
+    limit_tuples: f64,
+) {
+    let _ = run;
+    let lefttree = sort_plan
+        .as_plan()
+        .expect("Sort embeds a Plan base")
+        .lefttree
+        .expect("Sort has a child");
+    let child = lefttree.as_plan().expect("plan node");
+    let (disabled, rows, width, total, parallel_safe) = (
+        sort_plan.as_plan().unwrap().disabled_nodes,
+        child.plan_rows,
+        child.plan_width,
+        child.total_cost,
+        child.parallel_safe,
+    );
+    let (_, startup_cost, total_cost) = crate::costsize::cost_sort_shape(
+        disabled,
+        total,
+        rows,
+        width,
+        0.0,
+        init_small::globals::work_mem(),
+        limit_tuples,
+    );
+    // SAFETY: sort_plan was freshly built by make_sort_from_pathkeys; no other
+    // handle to it exists yet.
+    unsafe {
+        sort_plan.with_plan_mut(|p| {
+            p.startup_cost = startup_cost;
+            p.total_cost = total_cost;
+            p.plan_rows = rows;
+            p.plan_width = width;
+            p.parallel_aware = false;
+            p.parallel_safe = parallel_safe;
+        })
+    }
+    .expect("Sort embeds a Plan base");
+}
+
+// create_mergejoin_plan + make_mergejoin (createplan.c), JOIN_INNER arm:
+// otherclauses is NIL; the materialize_inner arm is loud (nodeMaterial
+// unported); replace_nestloop_params is dead (param_info always None).
+fn create_mergejoin_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let (
+        outer_path,
+        inner_path,
+        jointype,
+        inner_unique,
+        restrict,
+        merge_rinfos,
+        outersortkeys,
+        innersortkeys,
+        skip_mark_restore,
+        materialize_inner,
+        outer_presorted_keys,
+        target_id,
+    ) = match run.root.path(path_id) {
+        PathNode::MergePath(mp) => {
+            debug_assert!(mp.jpath.path.param_info.is_none());
+            (
+                mp.jpath.outerjoinpath.expect("mergejoin outer path"),
+                mp.jpath.innerjoinpath.expect("mergejoin inner path"),
+                mp.jpath.jointype,
+                mp.jpath.inner_unique,
+                crate::relnode::pgvec_clone_shallow(mcx, &mp.jpath.joinrestrictinfo),
+                crate::relnode::pgvec_clone_shallow(mcx, &mp.path_mergeclauses),
+                crate::relnode::pgvec_clone_shallow(mcx, &mp.outersortkeys),
+                crate::relnode::pgvec_clone_shallow(mcx, &mp.innersortkeys),
+                mp.skip_mark_restore,
+                mp.materialize_inner,
+                mp.outer_presorted_keys,
+                mp.jpath.path.pathtarget_id.unwrap(),
+            )
+        }
+        other => panic!(
+            "create_mergejoin_plan (createplan.c): pathtype {}",
+            other.base().pathtype
+        ),
+    };
+    assert!(
+        jointype == types_pathnodes::JOIN_INNER,
+        "create_mergejoin_plan (createplan.c): jointype {jointype}; M2 outer-join lane"
+    );
+    debug_assert!(restrict.iter().all(|&r| !run.root.rinfo(r).pseudoconstant));
+
+    let tlist = build_path_tlist(run, target_id)?;
+    // Request small tlists from inputs that will be re-sorted.
+    let outer_flags = if outersortkeys.is_empty() { 0 } else { CP_SMALL_TLIST };
+    let inner_flags = if innersortkeys.is_empty() { 0 } else { CP_SMALL_TLIST };
+    let mut outer_plan = create_plan_recurse(run, outer_path, outer_flags)?;
+    let mut inner_plan = create_plan_recurse(run, inner_path, inner_flags)?;
+
+    let ordered = order_qual_clauses(run, &restrict)?;
+    // Inner join: all clauses alike become joinquals, otherclauses stay NIL.
+    let joinclauses = extract_actual_clauses(run, &ordered);
+    // NB: mergeclauses keep RestrictInfo order (never reordered by cost).
+    let merge_actual = get_actual_clauses(run, &merge_rinfos);
+    let joinclauses = list_difference(mcx, &joinclauses, &merge_actual);
+
+    let outer_relids = crate::relnode::relids_copy(
+        mcx,
+        &run.root.rel(run.root.path(outer_path).base().parent).relids,
+    );
+    let mergeclauses = get_switched_clauses(run, &merge_rinfos, &outer_relids)?;
+
+    let outerpathkeys: mcx::PgVec<'mcx, types_pathnodes::PathKey>;
+    if !outersortkeys.is_empty() {
+        assert!(
+            !(crate::gucs::enable_incremental_sort() && outer_presorted_keys > 0),
+            "create_mergejoin_plan (createplan.c): incremental-sort outer; M2 incsort lane"
+        );
+        let sort_plan = make_sort_from_pathkeys(run, outer_plan, &outersortkeys)?;
+        label_sort_with_costsize(run, sort_plan, -1.0);
+        outer_plan = sort_plan;
+        outerpathkeys = outersortkeys;
+    } else {
+        outerpathkeys = crate::relnode::pgvec_clone_shallow(
+            mcx,
+            &run.root.path(outer_path).base().pathkeys,
+        );
+    }
+
+    let innerpathkeys: mcx::PgVec<'mcx, types_pathnodes::PathKey>;
+    if !innersortkeys.is_empty() {
+        let sort_plan = make_sort_from_pathkeys(run, inner_plan, &innersortkeys)?;
+        label_sort_with_costsize(run, sort_plan, -1.0);
+        inner_plan = sort_plan;
+        innerpathkeys = innersortkeys;
+    } else {
+        innerpathkeys = crate::relnode::pgvec_clone_shallow(
+            mcx,
+            &run.root.path(inner_path).base().pathkeys,
+        );
+    }
+
+    assert!(
+        !materialize_inner,
+        "create_mergejoin_plan (createplan.c): materialize_inner; nodeMaterial.c unported"
+    );
+
+    // Per-clause opfamily/collation/reversal/nullsfirst arrays, matching the
+    // (possibly redundant) mergeclauses against the input pathkeys.
+    let n_clauses = merge_rinfos.len();
+    let mut merge_families: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(mcx);
+    let mut merge_collations: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(mcx);
+    let mut merge_reversals: mcx::PgVec<'mcx, bool> = mcx::PgVec::new_in(mcx);
+    let mut merge_nulls_first: mcx::PgVec<'mcx, bool> = mcx::PgVec::new_in(mcx);
+
+    let mut opathkey: Option<types_pathnodes::PathKey> = None;
+    let mut opeclass: Option<types_pathnodes::EcId> = None;
+    let mut lop = 0usize;
+    let mut lip = 0usize;
+    for &rid in merge_rinfos.iter() {
+        let (oeclass, ieclass) = {
+            let ri = run.root.rinfo(rid);
+            if ri.outer_is_left {
+                (ri.left_ec, ri.right_ec)
+            } else {
+                (ri.right_ec, ri.left_ec)
+            }
+        };
+        debug_assert!(oeclass.is_some() && ieclass.is_some());
+
+        if oeclass != opeclass {
+            assert!(lop < outerpathkeys.len(), "outer pathkeys do not match mergeclauses");
+            let opk = outerpathkeys[lop];
+            lop += 1;
+            opathkey = Some(opk);
+            opeclass = opk.pk_eclass;
+            assert!(oeclass == opeclass, "outer pathkeys do not match mergeclauses");
+        }
+
+        let mut ipathkey: Option<types_pathnodes::PathKey> = None;
+        let mut ipeclass: Option<types_pathnodes::EcId> = None;
+        let mut first_inner_match = false;
+        if lip < innerpathkeys.len() {
+            let ipk = innerpathkeys[lip];
+            if ieclass == ipk.pk_eclass {
+                lip += 1;
+                ipathkey = Some(ipk);
+                ipeclass = ipk.pk_eclass;
+                first_inner_match = true;
+            }
+        }
+        if !first_inner_match {
+            // Redundant clause: must match some earlier inner pathkey.
+            for &ipk in innerpathkeys[..lip].iter() {
+                ipathkey = Some(ipk);
+                ipeclass = ipk.pk_eclass;
+                if ieclass == ipeclass {
+                    break;
+                }
+            }
+            assert!(ieclass == ipeclass, "inner pathkeys do not match mergeclauses");
+        }
+
+        let opk = opathkey.unwrap();
+        let ipk = ipathkey.unwrap();
+        assert!(
+            opk.pk_opfamily == ipk.pk_opfamily
+                && run.root.ec(opk.pk_eclass.unwrap()).ec_collation
+                    == run.root.ec(ipk.pk_eclass.unwrap()).ec_collation,
+            "left and right pathkeys do not match in mergejoin"
+        );
+        assert!(
+            !first_inner_match
+                || (opk.pk_cmptype == ipk.pk_cmptype
+                    && opk.pk_nulls_first == ipk.pk_nulls_first),
+            "left and right pathkeys do not match in mergejoin"
+        );
+
+        merge_families.push(opk.pk_opfamily);
+        merge_collations.push(run.root.ec(opk.pk_eclass.unwrap()).ec_collation);
+        merge_reversals.push(opk.pk_cmptype == types_pathnodes::COMPARE_GT);
+        merge_nulls_first.push(opk.pk_nulls_first);
+    }
+    debug_assert_eq!(merge_families.len(), n_clauses);
+
+    // make_mergejoin.
+    let mut join_plan = Node::build::<types_nodes::plannodes::MergeJoin>(mcx)?;
+    join_plan.join.plan.targetlist = tlist;
+    join_plan.join.plan.qual = NodeList::nil();
+    join_plan.join.plan.lefttree = Some(outer_plan);
+    join_plan.join.plan.righttree = Some(inner_plan);
+    join_plan.skip_mark_restore = skip_mark_restore;
+    join_plan.mergeclauses = mergeclauses;
+    join_plan.mergeFamilies = mcx::vec_borrow_in(mcx, merge_families)?;
+    join_plan.mergeCollations = mcx::vec_borrow_in(mcx, merge_collations)?;
+    join_plan.mergeReversals = mcx::vec_borrow_in(mcx, merge_reversals)?;
+    join_plan.mergeNullsFirst = mcx::vec_borrow_in(mcx, merge_nulls_first)?;
+    join_plan.join.jointype = types_nodes::JoinType::JOIN_INNER;
+    join_plan.join.inner_unique = inner_unique;
+    join_plan.join.joinqual = joinclauses;
+    copy_generic_path_info(run, &mut join_plan.join.plan, path_id);
+    Ok(join_plan.seal())
 }

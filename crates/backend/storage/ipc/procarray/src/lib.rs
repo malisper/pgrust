@@ -17,9 +17,12 @@ use types_core::{
 use types_error::{PgError, PgResult, ERRCODE_TOO_MANY_CONNECTIONS, FATAL};
 use types_snapshot::SnapshotData;
 use types_storage::storage::{
-    SyncCell, NUM_AUXILIARY_PROCS, PGPROC, PGPROC_MAX_CACHED_SUBXIDS, PROC_IN_LOGICAL_DECODING,
-    PROC_IN_VACUUM, PROC_VACUUM_STATE_MASK,
+    SyncCell, NUM_AUXILIARY_PROCS, PGPROC, PGPROC_MAX_CACHED_SUBXIDS,
+    PROC_AFFECTS_ALL_HORIZONS, PROC_IN_LOGICAL_DECODING, PROC_IN_VACUUM, PROC_VACUUM_STATE_MASK,
 };
+
+mod running;
+pub use running::{GetRunningTransactionData, RunningTransactions};
 
 #[cfg(test)]
 mod tests;
@@ -801,9 +804,205 @@ fn transaction_id_is_in_progress_scan(xid: TransactionId) -> PgResult<bool> {
     })
 }
 
+struct ComputeXidHorizonsResult {
+    latest_completed: FullTransactionId,
+    shared_oldest_nonremovable: TransactionId,
+    catalog_oldest_nonremovable: TransactionId,
+    data_oldest_nonremovable: TransactionId,
+    temp_oldest_nonremovable: TransactionId,
+}
+
+thread_local! {
+    static COMPUTE_XID_HORIZONS_RESULT_LAST_XMIN: Cell<TransactionId> =
+        const { Cell::new(InvalidTransactionId) };
+}
+
+fn ComputeXidHorizons() -> PgResult<ComputeXidHorizonsResult> {
+    if transam_xlog_seams::recovery_in_progress::call() {
+        panic!(
+            "ComputeXidHorizons in recovery is not ported: KnownAssignedXids \
+             (src/backend/storage/ipc/procarray.c, phase 2)"
+        );
+    }
+    let arrayP = procArray();
+    let hdr = ProcGlobal();
+    let my_proc = GetPGProcByNumber(MyProc().expect("ComputeXidHorizons requires MyProc"));
+    let my_database_id = init_small::globals::MyDatabaseId();
+
+    LWLockAcquire(ProcArrayLock(), LW_SHARED, MyProc().unwrap())?;
+
+    let latest_completed = latest_completed_xid();
+    let mut initial = latest_completed.xid();
+    debug_assert!(TransactionIdIsValid(initial));
+    TransactionIdAdvance(&mut initial);
+
+    let mut h = ComputeXidHorizonsResult {
+        latest_completed,
+        shared_oldest_nonremovable: initial,
+        catalog_oldest_nonremovable: InvalidTransactionId,
+        data_oldest_nonremovable: initial,
+        temp_oldest_nonremovable: if TransactionIdIsValid(my_proc.xid.read()) {
+            my_proc.xid.read()
+        } else {
+            initial
+        },
+    };
+
+    let slot_xmin = arrayP.replication_slot_xmin.get();
+    let slot_catalog_xmin = arrayP.replication_slot_catalog_xmin.get();
+
+    for index in 0..arrayP.numProcs.get() as usize {
+        let pgprocno = arrayP.pgprocnos[index].get();
+        let proc = &hdr.allProcs[pgprocno as usize];
+        let status_flags = hdr.statusFlags[index].load(Relaxed);
+        let xid = hdr.xids[index].read();
+        let xmin = TransactionIdOlder(proc.xmin.read(), xid);
+
+        if !TransactionIdIsValid(xmin) {
+            continue;
+        }
+        if status_flags & (PROC_IN_VACUUM | PROC_IN_LOGICAL_DECODING) != 0 {
+            continue;
+        }
+
+        h.shared_oldest_nonremovable =
+            TransactionIdOlder(h.shared_oldest_nonremovable, xmin);
+        if proc.databaseId.load(Relaxed) == my_database_id
+            || my_database_id == types_core::InvalidOid
+            || (status_flags & PROC_AFFECTS_ALL_HORIZONS) != 0
+        {
+            h.data_oldest_nonremovable = TransactionIdOlder(h.data_oldest_nonremovable, xmin);
+        }
+    }
+
+    LWLockRelease(ProcArrayLock())?;
+
+    h.shared_oldest_nonremovable =
+        TransactionIdOlder(h.shared_oldest_nonremovable, slot_xmin);
+    h.data_oldest_nonremovable = TransactionIdOlder(h.data_oldest_nonremovable, slot_xmin);
+    h.shared_oldest_nonremovable =
+        TransactionIdOlder(h.shared_oldest_nonremovable, slot_catalog_xmin);
+    h.catalog_oldest_nonremovable =
+        TransactionIdOlder(h.data_oldest_nonremovable, slot_catalog_xmin);
+
+    GlobalVisUpdateApply(&h);
+    Ok(h)
+}
+
+fn GlobalVisUpdateApply(h: &ComputeXidHorizonsResult) {
+    let apply = |cell: &Cell<GlobalVisState>, nonremovable: TransactionId, temp: bool| {
+        let mut s = cell.get();
+        s.maybe_needed = FullXidRelativeTo(h.latest_completed, nonremovable);
+        s.definitely_needed = if temp {
+            s.maybe_needed
+        } else {
+            FullTransactionIdNewer(s.maybe_needed, s.definitely_needed)
+        };
+        cell.set(s);
+    };
+    GLOBAL_VIS_SHARED_RELS.with(|c| apply(c, h.shared_oldest_nonremovable, false));
+    GLOBAL_VIS_CATALOG_RELS.with(|c| apply(c, h.catalog_oldest_nonremovable, false));
+    GLOBAL_VIS_DATA_RELS.with(|c| apply(c, h.data_oldest_nonremovable, false));
+    GLOBAL_VIS_TEMP_RELS.with(|c| apply(c, h.temp_oldest_nonremovable, true));
+    COMPUTE_XID_HORIZONS_RESULT_LAST_XMIN.set(RECENT_XMIN.get());
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GlobalVisHorizonKind {
+    Shared = 1,
+    Catalog = 2,
+    Data = 3,
+    Temp = 4,
+}
+
+fn GlobalVisHorizonKindForRel(rel: &types_rel::RelationData<'_>) -> GlobalVisHorizonKind {
+    if rel.rd_rel.relisshared || transam_xlog_seams::recovery_in_progress::call() {
+        GlobalVisHorizonKind::Shared
+    // C also classifies RelationIsAccessibleInLogicalDecoding rels as catalog;
+    // that predicate is false while wal_level < logical (the only shipped level).
+    } else if catalog_seams::is_catalog_relation::call(rel) {
+        GlobalVisHorizonKind::Catalog
+    } else if !(rel.rd_islocaltemp || rel.rd_createSubid.get() != types_core::InvalidSubTransactionId)
+    {
+        GlobalVisHorizonKind::Data
+    } else {
+        GlobalVisHorizonKind::Temp
+    }
+}
+
+pub fn GetOldestNonRemovableTransactionId(
+    rel: &types_rel::RelationData<'_>,
+) -> PgResult<TransactionId> {
+    let h = ComputeXidHorizons()?;
+    Ok(match GlobalVisHorizonKindForRel(rel) {
+        GlobalVisHorizonKind::Shared => h.shared_oldest_nonremovable,
+        GlobalVisHorizonKind::Catalog => h.catalog_oldest_nonremovable,
+        GlobalVisHorizonKind::Data => h.data_oldest_nonremovable,
+        GlobalVisHorizonKind::Temp => h.temp_oldest_nonremovable,
+    })
+}
+
+fn vis_state_cell<R>(handle: types_core::GlobalVisStateHandle, f: impl FnOnce(&Cell<GlobalVisState>) -> R) -> R {
+    match handle.id {
+        1 => GLOBAL_VIS_SHARED_RELS.with(f),
+        2 => GLOBAL_VIS_CATALOG_RELS.with(f),
+        3 => GLOBAL_VIS_DATA_RELS.with(f),
+        4 => GLOBAL_VIS_TEMP_RELS.with(f),
+        id => panic!("invalid GlobalVisStateHandle {id}"),
+    }
+}
+
+pub fn GlobalVisTestFor(rel: &types_rel::RelationData<'_>) -> types_core::GlobalVisStateHandle {
+    let handle = types_core::GlobalVisStateHandle::new(GlobalVisHorizonKindForRel(rel) as u64);
+    debug_assert!(vis_state_cell(handle, |c| {
+        let s = c.get();
+        s.definitely_needed.is_valid() && s.maybe_needed.is_valid()
+    }));
+    handle
+}
+
+fn GlobalVisTestShouldUpdate(state: GlobalVisState) -> bool {
+    if !TransactionIdIsValid(COMPUTE_XID_HORIZONS_RESULT_LAST_XMIN.get()) {
+        return true;
+    }
+    if state.maybe_needed.value >= state.definitely_needed.value {
+        return false;
+    }
+    RECENT_XMIN.get() != COMPUTE_XID_HORIZONS_RESULT_LAST_XMIN.get()
+}
+
+pub fn GlobalVisTestIsRemovableXid(
+    handle: types_core::GlobalVisStateHandle,
+    xid: TransactionId,
+) -> PgResult<bool> {
+    let state = vis_state_cell(handle, |c| c.get());
+    let fxid = FullXidRelativeTo(state.definitely_needed, xid);
+
+    if fxid.value < state.maybe_needed.value {
+        return Ok(true);
+    }
+    if fxid.value >= state.definitely_needed.value {
+        return Ok(false);
+    }
+    if GlobalVisTestShouldUpdate(state) {
+        ComputeXidHorizons()?;
+        let state = vis_state_cell(handle, |c| c.get());
+        debug_assert!(fxid.value < state.definitely_needed.value);
+        return Ok(fxid.value < state.maybe_needed.value);
+    }
+    Ok(false)
+}
+
 pub fn init_seams() {
     procarray_seams::proc_array_add::set(ProcArrayAdd);
     procarray_seams::proc_array_remove::set(ProcArrayRemove);
     procarray_seams::proc_array_end_transaction::set(ProcArrayEndTransaction);
     procarray_seams::transaction_id_is_in_progress::set(TransactionIdIsInProgress);
+    // Tests pre-install controllable global-vis fakes; keep them.
+    if !procarray_seams::global_vis_test_for::is_installed() {
+        procarray_seams::global_vis_test_for::set(GlobalVisTestFor);
+    }
+    if !procarray_seams::global_vis_test_is_removable_xid::is_installed() {
+        procarray_seams::global_vis_test_is_removable_xid::set(GlobalVisTestIsRemovableXid);
+    }
 }

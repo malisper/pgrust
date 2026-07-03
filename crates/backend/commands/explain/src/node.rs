@@ -166,6 +166,7 @@ pub fn ExplainNode<'mcx>(
     let pname = match node.node_tag() {
         NodeTag::T_Result => "Result",
         NodeTag::T_SeqScan => "Seq Scan",
+        NodeTag::T_FunctionScan => "Function Scan",
         NodeTag::T_Sort => "Sort",
         NodeTag::T_Limit => "Limit",
         t => node_gap("ExplainNode", &format!("{t:?} display arm unported (M2+ plan lanes)")),
@@ -197,6 +198,9 @@ pub fn ExplainNode<'mcx>(
 
     if node.node_tag() == NodeTag::T_SeqScan {
         ExplainScanTarget(node.as_seq_scan().unwrap().scan.scanrelid, es)?;
+    }
+    if let Some(fs) = node.as_function_scan() {
+        ExplainFunctionTarget(fs, es)?;
     }
 
     if es.costs {
@@ -245,7 +249,7 @@ pub fn ExplainNode<'mcx>(
     }
 
     match node.node_tag() {
-        NodeTag::T_SeqScan => {
+        NodeTag::T_SeqScan | NodeTag::T_FunctionScan => {
             show_scan_qual(&plan.qual, "Filter", es)?;
             filtered_count_gap(&plan.qual, es);
         }
@@ -594,6 +598,52 @@ fn simple_quote_literal(buf: &mut PgString<'_>, val: &str) -> PgResult<()> {
 
 fn ExplainScanTarget(scanrelid: types_core::Index, es: &mut ExplainState<'_>) -> PgResult<()> {
     ExplainTargetRel(scanrelid, es)
+}
+
+// ExplainTargetRel's T_FunctionScan arm: objectname is the function's name
+// when the RTE holds exactly one FuncExpr item.
+fn ExplainFunctionTarget<'mcx>(
+    fs: &types_nodes::plannodes::FunctionScan<'mcx>,
+    es: &mut ExplainState<'mcx>,
+) -> PgResult<()> {
+    let mcx = es.str.allocator();
+    let rti = fs.scan.scanrelid;
+    let rte: &RangeTblEntry<'_> = es
+        .rtable
+        .expect("ExplainFunctionTarget before ExplainPrintPlan")
+        .nth(rti as usize - 1)
+        .as_range_tbl_entry()
+        .expect("rtable holds RTEs");
+    debug_assert_eq!(rte.rtekind, RTEKind::RTE_FUNCTION);
+    let mut objectname = None;
+    if rte.functions.len() == 1 {
+        let rtfunc = rte
+            .functions
+            .nth(0)
+            .as_range_tbl_function()
+            .expect("functions cell");
+        if let Some(fe) = rtfunc.funcexpr.and_then(|n| n.as_func_expr()) {
+            objectname = lsyscache::get_func_name(mcx, fe.funcid)?;
+        }
+    }
+    let objectname = objectname.as_ref().map(|s| s.as_str());
+    if es.verbose {
+        node_gap(
+            "ExplainTargetRel",
+            "VERBOSE schema qualification needs get_namespace_name_or_temp (lsyscache lane)",
+        );
+    }
+    let refname = es.rtable_names[rti as usize - 1]
+        .or_else(|| rte.eref.expect("RTE without eref").aliasname)
+        .expect("scan RTE has a refname");
+    append!(es, " on");
+    if let Some(obj) = objectname {
+        append!(es, " {}", quote_identifier(obj));
+    }
+    if objectname != Some(refname) {
+        append!(es, " {}", quote_identifier(refname));
+    }
+    Ok(())
 }
 
 fn ExplainTargetRel<'mcx>(rti: types_core::Index, es: &mut ExplainState<'mcx>) -> PgResult<()> {

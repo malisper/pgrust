@@ -240,8 +240,25 @@ pub fn heap_insert(
 
     RelationPutHeapTuple(relation, &pin, heaptup, (options & HEAP_INSERT_SPECULATIVE) != 0)?;
 
+    // C pins the VM page inside RelationGetBufferForTuple, before the content
+    // lock, so the clear here never does IO under the lock; this pin-at-clear
+    // shape is a recorded divergence (single-backend lane).
+    let mut all_visible_cleared = false;
     if pin.page().is_all_visible() {
-        unported("visibilitymap_clear (visibilitymap.c)");
+        all_visible_cleared = true;
+        let mut vmb = visibilitymap::VmBuffer::new();
+        visibilitymap::visibilitymap_pin(relation, pin.block_number(), &mut vmb)?;
+        // SAFETY: pinned + exclusive content lock since RelationGetBufferForTuple.
+        let mut pm =
+            unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+        pm.clear_all_visible();
+        visibilitymap::visibilitymap_clear(
+            relation,
+            pin.block_number(),
+            &vmb,
+            visibilitymap::VISIBILITYMAP_VALID_BITS,
+        )?;
+        vmb.release();
     }
 
     bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;
@@ -258,6 +275,9 @@ pub fn heap_insert(
         }
 
         let mut flags = 0u8;
+        if all_visible_cleared {
+            flags |= XLH_INSERT_ALL_VISIBLE_CLEARED;
+        }
         if (options & HEAP_INSERT_SPECULATIVE) != 0 {
             flags |= XLH_INSERT_IS_SPECULATIVE;
         }

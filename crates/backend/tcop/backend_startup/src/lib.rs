@@ -632,8 +632,9 @@ pub fn validate_log_connections_options(elemlist: &[String]) -> Result<u32, Stri
 }
 
 pub fn check_log_connections(mcx: Mcx<'_>, newval: &str) -> PgResult<Result<u32, String>> {
-    // GetDatabaseEncoding() is SQL_ASCII until mbutils arms it — the same
-    // default this fallback takes while the mbutils unit is unported.
+    // mbutils is ported; the fallback covers early-boot callers that run
+    // before init_seams installs get_database_encoding (same SQL_ASCII
+    // default C reports pre-initialization).
     let encoding = if mbutils_seams::get_database_encoding::is_installed() {
         mbutils_seams::get_database_encoding::call()
     } else {

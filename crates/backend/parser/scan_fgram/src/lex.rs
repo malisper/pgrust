@@ -22,7 +22,14 @@ enum Lex<'mcx> {
 }
 
 impl<'mcx> Scanner<'mcx> {
-    pub fn core_yylex(&mut self) -> PgResult<Token<'mcx>> {
+    // C core_yylex's exact boundary: token code in the return register,
+    // value/location written through the parser's own slots (no >16B struct
+    // return crossing the per-token call).
+    pub fn core_yylex(
+        &mut self,
+        lvalp: &mut CoreYYSTYPE<'mcx>,
+        llocp: &mut i32,
+    ) -> PgResult<i32> {
         loop {
             self.tok_start = self.pos;
             let (mut act, mut end) = self.dfa_match();
@@ -31,7 +38,9 @@ impl<'mcx> Scanner<'mcx> {
             }
             self.pos = end;
             if let Lex::Tok(tok) = self.do_action(act)? {
-                return Ok(tok);
+                *lvalp = tok.value;
+                *llocp = tok.location;
+                return Ok(tok.token);
             }
         }
     }

@@ -159,7 +159,7 @@ fn install_seams() {
         Ok(())
     });
     bufmgr_seams::conditional_lock_buffer_for_cleanup::set(|buf| {
-        with_fake(|f| {
+        Ok(with_fake(|f| {
             let l = &mut f.locks[(buf - 1) as usize];
             if *l != 0 || f.pins[(buf - 1) as usize] != 1 {
                 return false;
@@ -167,7 +167,7 @@ fn install_seams() {
             *l += 1;
             f.cleanup_locked = true;
             true
-        })
+        }))
     });
     bufmgr_seams::mark_buffer_dirty::set(|_buf| Ok(()));
     bufmgr_seams::mark_buffer_dirty_hint::set(|_buf, _std| Ok(()));

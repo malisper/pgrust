@@ -102,6 +102,29 @@ pub fn int2out(arg1: i16, a: &mut [u8]) -> usize {
     pg_itoa(arg1, a)
 }
 
+use ::datum::Bytea;
+use ::stringinfo::StringInfo;
+
+pub fn int2recv(buf: &mut StringInfo<'_>) -> PgResult<i16> {
+    Ok(pqformat::pq_getmsgint(buf, 2)? as u16 as i16)
+}
+
+pub fn int2send<'mcx>(mcx: Mcx<'mcx>, arg1: i16) -> PgResult<Bytea<'mcx>> {
+    let mut b = pqformat::pq_begintypsend(mcx)?;
+    pqformat::pq_sendint16(&mut b, arg1 as u16)?;
+    Ok(pqformat::pq_endtypsend(b))
+}
+
+pub fn int4recv(buf: &mut StringInfo<'_>) -> PgResult<i32> {
+    Ok(pqformat::pq_getmsgint(buf, 4)? as i32)
+}
+
+pub fn int4send<'mcx>(mcx: Mcx<'mcx>, arg1: i32) -> PgResult<Bytea<'mcx>> {
+    let mut b = pqformat::pq_begintypsend(mcx)?;
+    pqformat::pq_sendint32(&mut b, arg1 as u32)?;
+    Ok(pqformat::pq_endtypsend(b))
+}
+
 pub const INT2VECTOR_HDRSZ: usize = core::mem::size_of::<types_array::int2vector>();
 
 #[inline]

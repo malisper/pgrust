@@ -108,19 +108,33 @@ pub fn prepare_sort_support_from_ordering_op(
         panic!("operator {ordering_op} is not a valid ordering operator");
     };
     let ssup_reverse = cmptype == COMPARE_GT;
+    let comparator = comparator_for_opfamily(opfamily, opcintype, opcintype)?;
 
+    Ok(SortSupport {
+        ssup_collation: ssup.ssup_collation,
+        ssup_reverse,
+        ssup_nulls_first: ssup.ssup_nulls_first,
+        ssup_attno: ssup.ssup_attno,
+        comparator,
+    })
+}
+
+/// The MJExamineQuals (nodeMergejoin.c) comparator resolve: BTSORTSUPPORT_PROC
+/// for (lefttype,righttype), else the BTORDER_PROC shim — which, like every
+/// out-of-enum sortsupport routine, panics loudly.
+pub fn comparator_for_opfamily(
+    opfamily: Oid,
+    lefttype: Oid,
+    righttype: Oid,
+) -> PgResult<SortComparator> {
     let sort_support_function =
-        lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, BTSORTSUPPORT_PROC as i16)?;
-    let comparator = match sort_support_function {
+        lsyscache::get_opfamily_proc(opfamily, lefttype, righttype, BTSORTSUPPORT_PROC as i16)?;
+    Ok(match sort_support_function {
         F_BTINT4SORTSUPPORT | F_DATE_SORTSUPPORT => SortComparator::Int32,
         F_BTINT8SORTSUPPORT | F_TIMESTAMP_SORTSUPPORT => SortComparator::SignedI64,
         0 => {
-            let sort_function = lsyscache::get_opfamily_proc(
-                opfamily,
-                opcintype,
-                opcintype,
-                BTORDER_PROC as i16,
-            )?;
+            let sort_function =
+                lsyscache::get_opfamily_proc(opfamily, lefttype, righttype, BTORDER_PROC as i16)?;
             panic!(
                 "PrepareSortSupportComparisonShim (sortsupport.c) not ported: \
                  btree comparison proc {sort_function} for opfamily {opfamily}"
@@ -130,14 +144,6 @@ pub fn prepare_sort_support_from_ordering_op(
             "sortsupport routine {other} (opfamily {opfamily}) has no comparator arm; \
              abbreviated-key sortsupport (e.g. bttextsortsupport) not ported"
         ),
-    };
-
-    Ok(SortSupport {
-        ssup_collation: ssup.ssup_collation,
-        ssup_reverse,
-        ssup_nulls_first: ssup.ssup_nulls_first,
-        ssup_attno: ssup.ssup_attno,
-        comparator,
     })
 }
 

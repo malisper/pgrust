@@ -12,6 +12,7 @@ use ::types_error::PgResult;
 mod execami;
 mod execmain;
 mod noderesult;
+mod nodesubplan;
 mod procnode;
 mod querydesc;
 mod typefromtl;

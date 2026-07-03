@@ -33,10 +33,12 @@ pub struct InstrumentedNode<'mcx> {
 pub enum PlanStateNode<'mcx> {
     Result(ResultState<'mcx>),
     SeqScan(::nodeseqscan::SeqScanState<'mcx>),
+    FunctionScan(PgBox<'mcx, ::nodefunctionscan::FunctionScanState<'mcx>>),
     IndexScan(::nodeindexscan::IndexScanState<'mcx>),
     IndexOnlyScan(::nodeindexonlyscan::IndexOnlyScanState<'mcx>),
     Agg(PgBox<'mcx, AggPlanState<'mcx>>),
     Sort(SortNode<'mcx>),
+    Unique(PgBox<'mcx, UniqueNode<'mcx>>),
     Limit(LimitNode<'mcx>),
     BitmapHeapScan(PgBox<'mcx, BitmapHeapPlanState<'mcx>>),
     BitmapIndexScan(::nodebitmapindexscan::BitmapIndexScanState<'mcx>),
@@ -44,6 +46,8 @@ pub enum PlanStateNode<'mcx> {
     BitmapOr(PgBox<'mcx, BitmapCombineState<'mcx>>),
     ModifyTable(PgBox<'mcx, ModifyTablePlanState<'mcx>>),
     NestLoop(NestLoopNode<'mcx>),
+    HashJoin(PgBox<'mcx, HashJoinNode<'mcx>>),
+    MergeJoin(PgBox<'mcx, MergeJoinNode<'mcx>>),
     // Last variant: existing discriminants keep their values, so the
     // uninstrumented jump-table dispatch compiles unchanged.
     Instrumented(PgBox<'mcx, InstrumentedNode<'mcx>>),
@@ -88,10 +92,37 @@ pub struct LimitNode<'mcx> {
     pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
 }
 
+// The Unique node's outer child lives here (nodesort/nodeagg precedent).
+pub struct UniqueNode<'mcx> {
+    pub state: ::nodeunique::UniqueState<'mcx>,
+    pub outer: PlanStateNode<'mcx>,
+}
+
 // Both children live here (nodesort/nodeagg precedent); nodenestloop drives
 // them through the NestLoopChild trait.
 pub struct NestLoopNode<'mcx> {
     pub state: ::nodenestloop::NestLoopState<'mcx>,
+    pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
+    pub inner: PgBox<'mcx, PlanStateNode<'mcx>>,
+}
+
+// The inner Hash sub-node (its own HashState + the real inner scan child); the
+// HashJoin drives its build via nodehash's HashBuildInput.
+pub struct HashSubNode<'mcx> {
+    pub state: ::nodehash::HashState<'mcx>,
+    pub child: PgBox<'mcx, PlanStateNode<'mcx>>,
+}
+
+pub struct HashJoinNode<'mcx> {
+    pub state: ::nodehashjoin::HashJoinState<'mcx>,
+    pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
+    pub hash: PgBox<'mcx, HashSubNode<'mcx>>,
+}
+
+// Both children live here (nestloop precedent); nodemergejoin drives them
+// through the MergeJoinOuter/MergeJoinInner traits.
+pub struct MergeJoinNode<'mcx> {
+    pub state: ::nodemergejoin::MergeJoinState<'mcx>,
     pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
     pub inner: PgBox<'mcx, PlanStateNode<'mcx>>,
 }
@@ -107,13 +138,17 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Instrumented(_) => None,
             PlanStateNode::Result(rs) => rs.ps.ps_ExprContext,
             PlanStateNode::SeqScan(ss) => Some(ss.ss.ps_ExprContext),
+            PlanStateNode::FunctionScan(fs) => Some(fs.ss.ps_ExprContext),
             PlanStateNode::IndexScan(is) => Some(is.ss.ps_ExprContext),
             PlanStateNode::IndexOnlyScan(ios) => Some(ios.ss.ps_ExprContext),
             PlanStateNode::Agg(aps) => Some(aps.agg.ps_ExprContext),
             // C sorts have no ExprContext.
             PlanStateNode::Sort(_) => None,
+            PlanStateNode::Unique(u) => Some(u.state.ps_ExprContext),
             PlanStateNode::Limit(l) => Some(l.state.ps_ExprContext),
             PlanStateNode::NestLoop(nl) => Some(nl.state.ps_ExprContext),
+            PlanStateNode::HashJoin(hj) => Some(hj.state.ps_ExprContext),
+            PlanStateNode::MergeJoin(mj) => Some(mj.state.ps_ExprContext),
             PlanStateNode::BitmapHeapScan(b) => Some(b.scan.ss.ps_ExprContext),
             PlanStateNode::BitmapIndexScan(_)
             | PlanStateNode::BitmapAnd(_)
@@ -137,6 +172,7 @@ impl<'mcx> PlanStateNode<'mcx> {
                 .clone()
                 .expect("ResultState without a result type")),
             PlanStateNode::SeqScan(_)
+            | PlanStateNode::FunctionScan(_)
             | PlanStateNode::IndexScan(_)
             | PlanStateNode::IndexOnlyScan(_)
             | PlanStateNode::Limit(_)
@@ -145,7 +181,10 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::ModifyTable(_) => crate::exec_type_from_tl(&plan.targetlist),
             PlanStateNode::Agg(aps) => Ok(aps.agg.ps_ResultTupleDesc.clone()),
             PlanStateNode::Sort(s) => Ok(::nodesort::sort_result_type(&s.state)),
+            PlanStateNode::Unique(u) => Ok(u.state.ps_ResultTupleDesc.clone()),
             PlanStateNode::NestLoop(nl) => Ok(nl.state.ps_ResultTupleDesc.clone()),
+            PlanStateNode::HashJoin(hj) => Ok(hj.state.ps_ResultTupleDesc.clone()),
+            PlanStateNode::MergeJoin(mj) => Ok(mj.state.ps_ResultTupleDesc.clone()),
             PlanStateNode::BitmapIndexScan(_)
             | PlanStateNode::BitmapAnd(_)
             | PlanStateNode::BitmapOr(_) => {
@@ -189,6 +228,16 @@ pub fn exec_init_node<'mcx>(
                 estate,
                 eflags,
             )?)
+        }
+        NodeTag::T_FunctionScan => {
+            let mcx = estate.es_query_cxt;
+            let state = ::nodefunctionscan::exec_init_function_scan(
+                mcx,
+                node.as_function_scan().unwrap(),
+                estate,
+                eflags,
+            )?;
+            PlanStateNode::FunctionScan(::mcx::alloc_in(mcx, state)?)
         }
         NodeTag::T_IndexScan => {
             let mcx = estate.es_query_cxt;
@@ -270,6 +319,20 @@ pub fn exec_init_node<'mcx>(
                 outer_desc,
             })
         }
+        NodeTag::T_Unique => {
+            let mcx = estate.es_query_cxt;
+            let uq_plan = node.as_unique().unwrap();
+            let outer = exec_init_node(uq_plan.plan.lefttree, estate, eflags)?
+                .unwrap_or_else(|| {
+                    panic!("ExecInitUnique (nodeUnique.c): Unique without an outer plan")
+                });
+            let outer_desc =
+                outer.exec_get_result_type(uq_plan.plan.lefttree.unwrap().as_plan().unwrap())?;
+            let result_desc = crate::exec_type_from_tl(&uq_plan.plan.targetlist)?;
+            let state =
+                ::nodeunique::exec_init_unique(uq_plan, estate, eflags, &outer_desc, result_desc)?;
+            PlanStateNode::Unique(::mcx::alloc_in(mcx, UniqueNode { state, outer })?)
+        }
         NodeTag::T_Limit => {
             let limit_plan = node.as_limit().unwrap();
             let outer = exec_init_node(limit_plan.plan.lefttree, estate, eflags)?
@@ -316,6 +379,93 @@ pub fn exec_init_node<'mcx>(
                 inner: ::mcx::alloc_in(mcx, inner)?,
             })
         }
+        NodeTag::T_HashJoin => {
+            let mcx = estate.es_query_cxt;
+            let hj_plan = node.as_hash_join().unwrap();
+            let outer_p = hj_plan
+                .join
+                .plan
+                .lefttree
+                .unwrap_or_else(|| panic!("ExecInitHashJoin (nodeHashjoin.c): HashJoin without an outer plan"));
+            let outer = exec_init_node(Some(outer_p), estate, eflags)?
+                .expect("HashJoin outer plan initialized");
+            let outer_desc = outer.exec_get_result_type(outer_p.as_plan().unwrap())?;
+
+            // The inner is a Hash node; init its own child (the real inner scan).
+            let hash_plan_node = hj_plan
+                .join
+                .plan
+                .righttree
+                .unwrap_or_else(|| panic!("ExecInitHashJoin (nodeHashjoin.c): HashJoin without a Hash inner plan"))
+                .as_hash()
+                .unwrap_or_else(|| panic!("ExecInitHashJoin (nodeHashjoin.c): HashJoin inner is not a Hash node"));
+            let hash_child_p = hash_plan_node
+                .plan
+                .lefttree
+                .unwrap_or_else(|| panic!("ExecInitHash (nodeHash.c): Hash without an outer plan"));
+            let hash_child = exec_init_node(Some(hash_child_p), estate, eflags)?
+                .expect("Hash child plan initialized");
+            let inner_desc = hash_child.exec_get_result_type(hash_child_p.as_plan().unwrap())?;
+
+            let result_desc = crate::exec_type_from_tl(&hj_plan.join.plan.targetlist)?;
+            let (state, hash_state) = ::nodehashjoin::exec_init_hash_join(
+                hj_plan,
+                estate,
+                eflags,
+                result_desc,
+                &outer_desc,
+                inner_desc,
+                |es, idesc, iattnums, ihashfns, colls| {
+                    ::nodehash::exec_init_hash(hash_plan_node, es, idesc, iattnums, ihashfns, colls)
+                },
+            )?;
+            PlanStateNode::HashJoin(::mcx::alloc_in(
+                mcx,
+                HashJoinNode {
+                    state,
+                    outer: ::mcx::alloc_in(mcx, outer)?,
+                    hash: ::mcx::alloc_in(
+                        mcx,
+                        HashSubNode { state: hash_state, child: ::mcx::alloc_in(mcx, hash_child)? },
+                    )?,
+                },
+            )?)
+        }
+        NodeTag::T_MergeJoin => {
+            let mcx = estate.es_query_cxt;
+            let mj_plan = node.as_merge_join().unwrap();
+            let outer_p = mj_plan.join.plan.lefttree.unwrap_or_else(|| {
+                panic!("ExecInitMergeJoin (nodeMergejoin.c): MergeJoin without an outer plan")
+            });
+            let outer = exec_init_node(Some(outer_p), estate, eflags)?
+                .expect("MergeJoin outer plan initialized");
+            let inner_p = mj_plan.join.plan.righttree.unwrap_or_else(|| {
+                panic!("ExecInitMergeJoin (nodeMergejoin.c): MergeJoin without an inner plan")
+            });
+            let inner_eflags =
+                ::nodemergejoin::inner_child_eflags(eflags, mj_plan.skip_mark_restore);
+            let inner = exec_init_node(Some(inner_p), estate, inner_eflags)?
+                .expect("MergeJoin inner plan initialized");
+            let inner_desc = inner.exec_get_result_type(inner_p.as_plan().unwrap())?;
+            let result_desc = crate::exec_type_from_tl(&mj_plan.join.plan.targetlist)?;
+            let inner_is_material = inner_p.node_tag() == NodeTag::T_Material;
+            let state = ::nodemergejoin::exec_init_merge_join(
+                mj_plan,
+                estate,
+                eflags,
+                &inner_desc,
+                result_desc,
+                inner_is_material,
+            )?;
+            PlanStateNode::MergeJoin(::mcx::alloc_in(
+                mcx,
+                MergeJoinNode {
+                    state,
+                    outer: ::mcx::alloc_in(mcx, outer)?,
+                    inner: ::mcx::alloc_in(mcx, inner)?,
+                },
+            )?)
+        }
         NodeTag::T_ModifyTable => {
             let mcx = estate.es_query_cxt;
             let mt_plan = node.as_modify_table().unwrap();
@@ -336,7 +486,6 @@ pub fn exec_init_node<'mcx>(
             T_TidScan => "nodeTidscan.c",
             T_TidRangeScan => "nodeTidrangescan.c",
             T_SubqueryScan => "nodeSubqueryscan.c",
-            T_FunctionScan => "nodeFunctionscan.c",
             T_TableFuncScan => "nodeTableFuncscan.c",
             T_ValuesScan => "nodeValuesscan.c",
             T_CteScan => "nodeCtescan.c",
@@ -344,14 +493,11 @@ pub fn exec_init_node<'mcx>(
             T_WorkTableScan => "nodeWorktablescan.c",
             T_ForeignScan => "nodeForeignscan.c",
             T_CustomScan => "nodeCustom.c",
-            T_MergeJoin => "nodeMergejoin.c",
-            T_HashJoin => "nodeHashjoin.c",
             T_Material => "nodeMaterial.c",
             T_IncrementalSort => "nodeIncrementalSort.c",
             T_Memoize => "nodeMemoize.c",
             T_Group => "nodeGroup.c",
             T_WindowAgg => "nodeWindowAgg.c",
-            T_Unique => "nodeUnique.c",
             T_Gather => "nodeGather.c",
             T_GatherMerge => "nodeGatherMerge.c",
             T_Hash => "nodeHash.c",
@@ -359,8 +505,9 @@ pub fn exec_init_node<'mcx>(
             T_LockRows => "nodeLockRows.c",
         }),
     };
-    if !node.as_plan().expect("plan-tree node").initPlan.is_nil() {
-        panic!("ExecInitNode (execProcnode.c): initPlan lane (nodeSubplan.c) not ported");
+    for sp_node in &node.as_plan().expect("plan-tree node").initPlan {
+        let sp = sp_node.as_sub_plan().expect("initPlan cell is a SubPlan");
+        crate::nodesubplan::exec_init_sub_plan(sp, estate)?;
     }
     if estate.es_instrument != 0 {
         return Ok(Some(instrument_node(result, node, estate)?));
@@ -414,6 +561,7 @@ pub fn exec_proc_node<'mcx>(
         PlanStateNode::Instrumented(w) => exec_proc_node_instr(w, estate),
         PlanStateNode::Result(rs) => exec_result(rs, estate),
         PlanStateNode::SeqScan(ss) => ::nodeseqscan::exec_seq_scan(ss, estate),
+        PlanStateNode::FunctionScan(fs) => ::nodefunctionscan::exec_function_scan(fs, estate),
         PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_index_scan(is, estate),
         PlanStateNode::IndexOnlyScan(ios) => {
             ::nodeindexonlyscan::exec_index_only_scan(ios, estate)
@@ -428,6 +576,11 @@ pub fn exec_proc_node<'mcx>(
             ::nodesort::exec_sort(state, estate, outer_desc.clone(), |es| {
                 exec_proc_node(outer, es)
             })
+        }
+        PlanStateNode::Unique(u) => {
+            let u = &mut **u;
+            let outer = &mut u.outer;
+            ::nodeunique::exec_unique(&mut u.state, estate, |e| exec_proc_node(outer, e))
         }
         PlanStateNode::Limit(l) => {
             let LimitNode { state, outer } = l;
@@ -456,6 +609,21 @@ pub fn exec_proc_node<'mcx>(
         PlanStateNode::NestLoop(nl) => {
             let NestLoopNode { state, outer, inner } = nl;
             ::nodenestloop::exec_nest_loop(state, &mut **outer, &mut **inner, estate)
+        }
+        PlanStateNode::HashJoin(hj) => {
+            let hj = &mut **hj;
+            let HashSubNode { state: hstate, child } = &mut *hj.hash;
+            ::nodehashjoin::exec_hash_join(
+                &mut hj.state,
+                &mut *hj.outer,
+                hstate,
+                &mut **child,
+                estate,
+            )
+        }
+        PlanStateNode::MergeJoin(mj) => {
+            let MergeJoinNode { state, outer, inner } = &mut **mj;
+            ::nodemergejoin::exec_merge_join(state, &mut **outer, &mut **inner, estate)
         }
     }
 }
@@ -559,6 +727,10 @@ pub fn exec_end_node<'mcx>(
         PlanStateNode::Instrumented(w) => exec_end_node(&mut w.inner, estate),
         PlanStateNode::Result(rs) => exec_end_result(rs, estate),
         PlanStateNode::SeqScan(ss) => ::nodeseqscan::exec_end_seq_scan(ss),
+        PlanStateNode::FunctionScan(fs) => {
+            ::nodefunctionscan::exec_end_function_scan(fs);
+            Ok(())
+        }
         PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_end_index_scan(is),
         PlanStateNode::IndexOnlyScan(ios) => {
             ::nodeindexonlyscan::exec_end_index_only_scan(ios)
@@ -570,6 +742,10 @@ pub fn exec_end_node<'mcx>(
         PlanStateNode::Sort(s) => {
             ::nodesort::exec_end_sort(&mut s.state);
             exec_end_node(&mut s.outer, estate)
+        }
+        PlanStateNode::Unique(u) => {
+            ::nodeunique::exec_end_unique(&mut u.state);
+            exec_end_node(&mut u.outer, estate)
         }
         // C ExecEndLimit only ends the child.
         PlanStateNode::Limit(l) => exec_end_node(&mut l.outer, estate),
@@ -597,6 +773,18 @@ pub fn exec_end_node<'mcx>(
             exec_end_node(&mut nl.outer, estate)?;
             exec_end_node(&mut nl.inner, estate)
         }
+        PlanStateNode::HashJoin(hj) => {
+            let hj = &mut **hj;
+            ::nodehashjoin::exec_end_hash_join(&mut hj.state, &mut hj.hash.state);
+            exec_end_node(&mut hj.outer, estate)?;
+            exec_end_node(&mut hj.hash.child, estate)
+        }
+        PlanStateNode::MergeJoin(mj) => {
+            let mj = &mut **mj;
+            ::nodemergejoin::exec_end_merge_join(&mut mj.state);
+            exec_end_node(&mut mj.outer, estate)?;
+            exec_end_node(&mut mj.inner, estate)
+        }
     }
 }
 
@@ -611,11 +799,13 @@ pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>) {
             }
         }
         PlanStateNode::SeqScan(_)
+        | PlanStateNode::FunctionScan(_)
         | PlanStateNode::IndexScan(_)
         | PlanStateNode::IndexOnlyScan(_)
         | PlanStateNode::BitmapIndexScan(_) => {}
         PlanStateNode::Agg(aps) => exec_shutdown_node(&mut aps.outer),
         PlanStateNode::Sort(s) => exec_shutdown_node(&mut s.outer),
+        PlanStateNode::Unique(u) => exec_shutdown_node(&mut u.outer),
         PlanStateNode::Limit(l) => exec_shutdown_node(&mut l.outer),
         PlanStateNode::BitmapHeapScan(b) => exec_shutdown_node(&mut b.bitmapqual),
         PlanStateNode::BitmapAnd(bc) | PlanStateNode::BitmapOr(bc) => {
@@ -627,6 +817,14 @@ pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>) {
         PlanStateNode::NestLoop(nl) => {
             exec_shutdown_node(&mut nl.outer);
             exec_shutdown_node(&mut nl.inner);
+        }
+        PlanStateNode::HashJoin(hj) => {
+            exec_shutdown_node(&mut hj.outer);
+            exec_shutdown_node(&mut hj.hash.child);
+        }
+        PlanStateNode::MergeJoin(mj) => {
+            exec_shutdown_node(&mut mj.outer);
+            exec_shutdown_node(&mut mj.inner);
         }
     }
 }
@@ -665,6 +863,50 @@ impl<'mcx> ::nodenestloop::NestLoopChild<'mcx> for PlanStateNode<'mcx> {
 
     fn rescan(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
         crate::execami::exec_re_scan(self, estate)
+    }
+}
+
+impl<'mcx> ::nodehashjoin::HashJoinOuter<'mcx> for PlanStateNode<'mcx> {
+    fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> {
+        exec_proc_node(self, estate)
+    }
+
+    fn rescan(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        crate::execami::exec_re_scan(self, estate)
+    }
+}
+
+impl<'mcx> ::nodehash::HashBuildInput<'mcx> for PlanStateNode<'mcx> {
+    fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> {
+        exec_proc_node(self, estate)
+    }
+}
+
+impl<'mcx> ::nodemergejoin::MergeJoinOuter<'mcx> for PlanStateNode<'mcx> {
+    fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> {
+        exec_proc_node(self, estate)
+    }
+
+    fn rescan(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        crate::execami::exec_re_scan(self, estate)
+    }
+}
+
+impl<'mcx> ::nodemergejoin::MergeJoinInner<'mcx> for PlanStateNode<'mcx> {
+    fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> {
+        exec_proc_node(self, estate)
+    }
+
+    fn rescan(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        crate::execami::exec_re_scan(self, estate)
+    }
+
+    fn mark_pos(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        crate::execami::exec_mark_pos(self, estate)
+    }
+
+    fn restr_pos(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        crate::execami::exec_restr_pos(self, estate)
     }
 }
 

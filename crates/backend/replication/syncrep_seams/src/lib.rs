@@ -5,3 +5,8 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn sync_rep_wait_for_lsn(lsn: types_core::XLogRecPtr, commit: bool) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    // SyncRepUpdateSyncStandbysDefined() (syncrep.c); checkpointer-only caller.
+    pub fn sync_rep_update_sync_standbys_defined()
+);

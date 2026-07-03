@@ -145,7 +145,7 @@ pub fn heap_page_prune_opt(rel: &RelationData<'_>, buffer: Buffer) -> PgResult<(
         .max(BLCKSZ / 10);
 
     if page.is_full() || page.heap_free_space() < minfree {
-        if !bufmgr_seams::conditional_lock_buffer_for_cleanup::call(buffer) {
+        if !bufmgr_seams::conditional_lock_buffer_for_cleanup::call(buffer)? {
             return Ok(());
         }
 

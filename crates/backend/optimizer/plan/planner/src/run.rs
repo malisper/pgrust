@@ -63,6 +63,13 @@ impl Glob<'_> {
     }
 }
 
+// One planning level's PlannerInfo plus its tlist share (C keeps these on the
+// PlannerInfo itself; glob->subroots is the list of them).
+pub struct SubrootState<'mcx> {
+    pub root: PlannerInfo<'mcx>,
+    pub processed_tlist: Option<&'mcx NodeList<'mcx>>,
+}
+
 pub struct PlannerRun<'mcx> {
     pub mcx: Mcx<'mcx>,
     pub root: PlannerInfo<'mcx>,
@@ -74,6 +81,10 @@ pub struct PlannerRun<'mcx> {
     /// standard_planner's cheap parallel-mode tests; the tree scan they gate
     /// runs after the Query is sealed (see standard_planner).
     pub assess_parallel: bool,
+    /// C's parent_root chain: levels suspended while a sub-Query is planned.
+    pub suspended_roots: PgVec<'mcx, SubrootState<'mcx>>,
+    /// C glob->subroots, index-aligned with glob.subplans.
+    pub subroots: PgVec<'mcx, SubrootState<'mcx>>,
 }
 
 impl<'mcx> PlannerRun<'mcx> {
@@ -85,7 +96,75 @@ impl<'mcx> PlannerRun<'mcx> {
             queries: PgVec::new_in(mcx),
             processed_tlist: None,
             assess_parallel: false,
+            suspended_roots: PgVec::new_in(mcx),
+            subroots: PgVec::new_in(mcx),
         }
+    }
+
+    /// Suspend the current level and make a fresh child root current
+    /// (C: subquery_planner building a child PlannerInfo with parent_root).
+    /// outer_params is materialized here instead of C's end-of-level
+    /// SS_identify_outer_params: ancestors are frozen while a child plans on
+    /// the uncorrelated lane (correlated plan_params writes are loud panics),
+    /// so the push-time snapshot equals C's end-of-level read.
+    pub fn push_root(&mut self) -> types_error::PgResult<()> {
+        let outer = self.identify_outer_params()?;
+        let mut new_root = PlannerInfo::new(self.mcx);
+        new_root.query_level = self.root.query_level + 1;
+        new_root.outer_params = outer;
+        let old = core::mem::replace(&mut self.root, new_root);
+        let processed_tlist = self.processed_tlist.take();
+        self.suspended_roots.push(SubrootState { root: old, processed_tlist });
+        Ok(())
+    }
+
+    /// Restore the parent level; the finished child joins glob's subroots.
+    /// Returns the subroot index (plan_id - 1).
+    pub fn pop_root_to_subroot(&mut self) -> usize {
+        let parent = self.suspended_roots.pop().expect("pop_root_to_subroot without push");
+        let sub = core::mem::replace(&mut self.root, parent.root);
+        let sub_tlist = core::mem::replace(&mut self.processed_tlist, parent.processed_tlist);
+        self.subroots.push(SubrootState { root: sub, processed_tlist: sub_tlist });
+        self.subroots.len() - 1
+    }
+
+    // SS_identify_outer_params (subselect.c) over the ancestor chain,
+    // current root included (it is the child's immediate parent).
+    fn identify_outer_params(&mut self) -> types_error::PgResult<types_pathnodes::Relids<'mcx>> {
+        if self.glob.param_exec_types.is_nil() {
+            return Ok(None);
+        }
+        let mcx = self.mcx;
+        let mut outer: types_pathnodes::Relids<'mcx> = None;
+        let scan = |outer: &mut types_pathnodes::Relids<'mcx>, root: &PlannerInfo<'mcx>| {
+            let mut add = |outer: &mut types_pathnodes::Relids<'mcx>, id: i32| {
+                *outer = crate::relnode::relids_union(
+                    mcx,
+                    outer,
+                    &crate::relnode::relids_singleton(mcx, id as u32),
+                );
+            };
+            for &pid in root.plan_params.iter() {
+                add(outer, root.planner_param_item(pid).paramId);
+            }
+            for &ipid in root.init_plans.iter() {
+                let sp = root
+                    .expr_node(ipid)
+                    .as_sub_plan()
+                    .expect("init_plans holds SubPlan nodes");
+                for p in sp.setParam.iter() {
+                    add(outer, p);
+                }
+            }
+            if root.wt_param_id >= 0 {
+                add(outer, root.wt_param_id);
+            }
+        };
+        for s in self.suspended_roots.iter() {
+            scan(&mut outer, &s.root);
+        }
+        scan(&mut outer, &self.root);
+        Ok(outer)
     }
 
     pub fn intern_query(&mut self, parse: &'mcx Query<'mcx>) -> QueryId {

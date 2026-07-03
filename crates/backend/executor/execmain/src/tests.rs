@@ -1861,3 +1861,704 @@ fn nestloop_with_empty_inner_returns_nothing() {
     scanfix::quiesced();
 }
 
+
+// HashJoin(hashclause a = c) over two fake-heap seqscans, in the post-setrefs
+// shape: outer keys OUTER_VAR, the Hash inner node carries the inner keys
+// (OUTER_VAR of its own child). The equijoin clause is the hashclause, so
+// joinqual is empty.
+fn mk_hashjoin_pstmt<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    outer_relid: u32,
+    inner_relid: u32,
+) -> &'mcx PlannedStmt<'mcx> {
+    use ::types_nodes::bitmapset::Bitmapset;
+    use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+    use ::types_nodes::plannodes::{Hash, HashJoin, Join, Plan, Scan, SeqScan};
+    use ::types_nodes::primnodes::{INNER_VAR, OUTER_VAR};
+
+    let scan_tlist = |varno: i32| {
+        let a = Node::mk_var(mcx, varno, 1, INT4OID, -1, 0, 0).unwrap();
+        let b = Node::mk_var(mcx, varno, 2, INT4OID, -1, 0, 0).unwrap();
+        NodeList::make2(
+            mcx,
+            Node::mk_target_entry(mcx, a, 1, Some("c1"), false).unwrap(),
+            Node::mk_target_entry(mcx, b, 2, Some("c2"), false).unwrap(),
+        )
+        .unwrap()
+    };
+    let mk_scan = |scanrelid: u32, varno: i32| {
+        Node::mk(
+            mcx,
+            SeqScan {
+                scan: Scan {
+                    plan: Plan { targetlist: scan_tlist(varno), ..Default::default() },
+                    scanrelid,
+                },
+            },
+        )
+        .unwrap()
+    };
+
+    let mut join_tlist = NodeList::nil();
+    for (i, (varno, attno)) in
+        [(OUTER_VAR, 1i16), (OUTER_VAR, 2), (INNER_VAR, 1), (INNER_VAR, 2)]
+            .into_iter()
+            .enumerate()
+    {
+        let v = Node::mk_var(mcx, varno, attno, INT4OID, -1, 0, 0).unwrap();
+        join_tlist
+            .lappend(mcx, Node::mk_target_entry(mcx, v, i as i16 + 1, Some("x"), false).unwrap())
+            .unwrap();
+    }
+    let hashclause = {
+        let l = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+        let r = Node::mk_var(mcx, INNER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+        Node::mk(
+            mcx,
+            ::types_nodes::primnodes::OpExpr {
+                opno: 96,     // int4eq
+                opfuncid: 65, // pg_proc int4eq
+                opresulttype: BOOLOID,
+                opretset: false,
+                opcollid: 0,
+                inputcollid: 0,
+                args: NodeList::make2(mcx, l, r).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap()
+    };
+
+    // Hash inner node: hashkeys reference its own child (OUTER_VAR att1).
+    let inner_hashkey = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+    let mut hash_node = Node::build::<Hash>(mcx).unwrap();
+    hash_node.plan = Plan {
+        targetlist: scan_tlist(2),
+        lefttree: Some(mk_scan(2, 2)),
+        ..Default::default()
+    };
+    hash_node.hashkeys = NodeList::make1(mcx, inner_hashkey).unwrap();
+
+    let outer_hashkey = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+    let mut hj = Node::build::<HashJoin>(mcx).unwrap();
+    hj.join = Join {
+        plan: Plan {
+            targetlist: join_tlist,
+            lefttree: Some(mk_scan(1, 1)),
+            righttree: Some(hash_node.seal()),
+            ..Default::default()
+        },
+        jointype: ::types_nodes::JoinType::JOIN_INNER,
+        inner_unique: false,
+        joinqual: NodeList::nil(),
+    };
+    hj.hashclauses = NodeList::make1(mcx, hashclause).unwrap();
+    let mut hashoperators = ::types_nodes::list::OidList::nil();
+    hashoperators.lappend(mcx, 96).unwrap();
+    let mut hashcollations = ::types_nodes::list::OidList::nil();
+    hashcollations.lappend(mcx, 0).unwrap();
+    hj.hashoperators = hashoperators;
+    hj.hashcollations = hashcollations;
+    hj.hashkeys = NodeList::make1(mcx, outer_hashkey).unwrap();
+
+    let mk_rte = |relid: u32, perminfoindex: u32| {
+        Node::mk(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_RELATION,
+                relid,
+                relkind: ::types_rel::RELKIND_RELATION,
+                rellockmode: ::types_rel::AccessShareLock,
+                perminfoindex,
+                inFromCl: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    let mk_perm = |relid: u32| {
+        Node::mk(mcx, RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() })
+            .unwrap()
+    };
+    let mut rtable = NodeList::make1(mcx, mk_rte(outer_relid, 1)).unwrap();
+    rtable.lappend(mcx, mk_rte(inner_relid, 2)).unwrap();
+    let mut perms = NodeList::make1(mcx, mk_perm(outer_relid)).unwrap();
+    perms.lappend(mcx, mk_perm(inner_relid)).unwrap();
+    let mut unpruned = Bitmapset::empty();
+    unpruned.add_member(mcx, 1).unwrap();
+    unpruned.add_member(mcx, 2).unwrap();
+
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(hj.seal());
+    pstmt.rtable = rtable;
+    pstmt.permInfos = perms;
+    pstmt.unprunableRelids = unpruned;
+    pstmt.seal_ref()
+}
+
+// Same fixtures as the nestloop e2e; the hash join returns the identical set
+// (bucket-chain order differs, so compare sorted). Second pass exercises
+// ExecReScanHashJoin (single-batch table reuse).
+#[test]
+fn hashjoin_inner_join_matches_nestloop_result() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let outer: u32 = 70030;
+    let inner: u32 = 70031;
+    scanfix::register_table_2col(outer, &[&[(1, 10), (2, 20), (3, 30)]]);
+    scanfix::register_table_2col(inner, &[&[(2, 200), (3, 300), (3, 301), (4, 400)]]);
+    let mut expected = vec![vec![2, 20, 2, 200], vec![3, 30, 3, 300], vec![3, 30, 3, 301]];
+    expected.sort();
+
+    let runs = drain_wide_rows(mk_hashjoin_pstmt(mcx, outer, inner), 4, 2);
+    for run in &runs {
+        let mut got = run.clone();
+        got.sort();
+        assert_eq!(got, expected, "hash join result set must equal the nestloop result set");
+    }
+    assert_eq!(runs.len(), 2);
+    scanfix::quiesced();
+}
+
+#[test]
+fn hashjoin_with_empty_inner_returns_nothing() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let outer: u32 = 70032;
+    let inner: u32 = 70033;
+    scanfix::register_table_2col(outer, &[&[(1, 10), (2, 20)]]);
+    scanfix::register_table_2col(inner, &[]);
+    let runs = drain_wide_rows(mk_hashjoin_pstmt(mcx, outer, inner), 4, 1);
+    assert_eq!(runs, vec![Vec::<Vec<i32>>::new()]);
+    scanfix::quiesced();
+}
+
+fn mk_param_pstmt<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    kind: ::types_nodes::primnodes::ParamKind,
+    paramid: i32,
+    n_exec_types: usize,
+) -> &'mcx PlannedStmt<'mcx> {
+    let param = Node::mk(
+        mcx,
+        ::types_nodes::primnodes::Param {
+            paramkind: kind,
+            paramid,
+            paramtype: INT4OID,
+            paramtypmod: -1,
+            paramcollid: 0,
+            location: -1,
+        },
+    )
+    .unwrap();
+    let tle = Node::mk_target_entry(mcx, param, 1, Some("?column?"), false).unwrap();
+    let mut result = Node::build::<ResultPlan>(mcx).unwrap();
+    result.plan.targetlist = NodeList::make1(mcx, tle).unwrap();
+    let plan_node = result.seal();
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(plan_node);
+    for _ in 0..n_exec_types {
+        pstmt.paramExecTypes.lappend(mcx, INT4OID).unwrap();
+    }
+    pstmt.seal_ref()
+}
+
+fn run_param_qd(pstmt: &'static PlannedStmt<'static>, params: ParamListHandle) {
+    let qd = execmain_seams::create_query_desc::call(
+        pstmt,
+        "SELECT $1",
+        None,
+        None,
+        CommandDest::None,
+        params,
+        QueryEnvHandle::NULL,
+        0,
+    )
+    .unwrap();
+    execmain_seams::executor_start::call(qd, 0).unwrap();
+    let mut dest = DestReceiver::DoNothing;
+    execmain_seams::executor_run::call(qd, ForwardScanDirection, 0, &mut dest).unwrap();
+    assert_eq!(execmain_seams::query_desc_es_processed::call(qd), 1);
+    execmain_seams::executor_finish::call(qd).unwrap();
+    execmain_seams::executor_end::call(qd).unwrap();
+    execmain_seams::free_query_desc::call(qd);
+}
+
+#[test]
+fn executor_start_wires_bound_params_to_estate() {
+    use ::types_portal::params::{ParamExternData, PARAM_FLAG_CONST};
+    install_seams();
+    let mcx = leaked_mcx();
+    let pstmt = mk_param_pstmt(mcx, ::types_nodes::primnodes::ParamKind::PARAM_EXTERN, 1, 0);
+
+    let externs: &'static [ParamExternData] = Box::leak(Box::new([ParamExternData {
+        value: Datum::from_i32(42),
+        isnull: false,
+        pflags: PARAM_FLAG_CONST,
+        ptype: INT4OID,
+    }]));
+    // SAFETY: leaked, outlives the registry entry.
+    let h = unsafe { ::types_portal::params::register(externs) };
+    run_param_qd(pstmt, h);
+    ::types_portal::params::free(h);
+
+    // Without the handle the compile-time resolve must surface C's ereport.
+    let qd = execmain_seams::create_query_desc::call(
+        pstmt,
+        "SELECT $1",
+        None,
+        None,
+        CommandDest::None,
+        ParamListHandle::NULL,
+        QueryEnvHandle::NULL,
+        0,
+    )
+    .unwrap();
+    let err = execmain_seams::executor_start::call(qd, 0).unwrap_err();
+    assert_eq!(err.message, "no value found for parameter 1");
+    execmain_seams::release_query_desc::call(qd);
+}
+
+#[test]
+fn executor_start_sizes_param_exec_vals() {
+    install_seams();
+    let mcx = leaked_mcx();
+    let pstmt = mk_param_pstmt(mcx, ::types_nodes::primnodes::ParamKind::PARAM_EXEC, 1, 2);
+    run_param_qd(pstmt, ParamListHandle::NULL);
+}
+
+// DISTINCT sorted strategy e2e: Unique over Sort over SeqScan dedups through
+// the real InitPlan path (rescan pinned).
+#[test]
+fn unique_over_sort_dedups_end_to_end() {
+    use ::types_nodes::bitmapset::Bitmapset;
+    use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+    use ::types_nodes::plannodes::{Plan, Scan, SeqScan, Sort, Unique};
+    use ::types_nodes::primnodes::OUTER_VAR;
+
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let relid: u32 = 70090;
+    scanfix::register_table(relid, &[&[3, 1, 2, 1], &[3, 2, 1]]);
+
+    let scan_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let scan_tle = Node::mk_target_entry(mcx, scan_var, 1, Some("a"), false).unwrap();
+    let scan = Node::mk(
+        mcx,
+        SeqScan {
+            scan: Scan {
+                plan: Plan {
+                    targetlist: NodeList::make1(mcx, scan_tle).unwrap(),
+                    ..Default::default()
+                },
+                scanrelid: 1,
+            },
+        },
+    )
+    .unwrap();
+
+    let outer_tle = |mcx| {
+        let v = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+        NodeList::make1(mcx, Node::mk_target_entry(mcx, v, 1, Some("a"), false).unwrap())
+            .unwrap()
+    };
+    let mut sort = Node::build::<Sort>(mcx).unwrap();
+    sort.plan.targetlist = outer_tle(mcx);
+    sort.plan.lefttree = Some(scan);
+    sort.numCols = 1;
+    sort.sortColIdx = ::mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+    sort.sortOperators = ::mcx::slice_borrow_in(mcx, &[INT4_LT]).unwrap();
+    sort.collations = ::mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+    sort.nullsFirst = ::mcx::slice_borrow_in(mcx, &[false]).unwrap();
+
+    let mut uq = Node::build::<Unique>(mcx).unwrap();
+    uq.plan.targetlist = outer_tle(mcx);
+    uq.plan.lefttree = Some(sort.seal());
+    uq.numCols = 1;
+    uq.uniqColIdx = ::mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+    uq.uniqOperators = ::mcx::slice_borrow_in(mcx, &[INT4_EQ]).unwrap();
+    uq.uniqCollations = ::mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+
+    let rte = Node::mk(
+        mcx,
+        RangeTblEntry {
+            rtekind: RTEKind::RTE_RELATION,
+            relid,
+            relkind: ::types_rel::RELKIND_RELATION,
+            rellockmode: ::types_rel::AccessShareLock,
+            perminfoindex: 1,
+            inFromCl: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let perminfo = Node::mk(
+        mcx,
+        RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+    )
+    .unwrap();
+    let mut unpruned = Bitmapset::empty();
+    unpruned.add_member(mcx, 1).unwrap();
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(uq.seal());
+    pstmt.rtable = NodeList::make1(mcx, rte).unwrap();
+    pstmt.permInfos = NodeList::make1(mcx, perminfo).unwrap();
+    pstmt.unprunableRelids = unpruned;
+    let pstmt = pstmt.seal_ref();
+
+    let runs = drain_int4_rows(pstmt, true);
+    assert_eq!(runs, vec![vec![1, 2, 3], vec![1, 2, 3]]);
+    scanfix::quiesced();
+}
+
+// --- nodeSubplan.c initplan slice ---
+
+fn mk_initplan_sub_seqscan<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    with_tlist: bool,
+) -> Node<'mcx> {
+    use ::types_nodes::plannodes::{Plan, Scan, SeqScan};
+    let tlist = if with_tlist {
+        let var = Node::mk_var(mcx, 2, 1, INT4OID, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, var, 1, Some("b"), false).unwrap();
+        NodeList::make1(mcx, tle).unwrap()
+    } else {
+        NodeList::nil()
+    };
+    Node::mk(
+        mcx,
+        SeqScan {
+            scan: Scan {
+                plan: Plan { targetlist: tlist, ..Default::default() },
+                scanrelid: 2,
+            },
+        },
+    )
+    .unwrap()
+}
+
+fn mk_two_rel_pstmt_parts<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    t1: u32,
+    t2: u32,
+) -> (NodeList<'mcx>, NodeList<'mcx>, ::types_nodes::bitmapset::Bitmapset<'mcx>) {
+    use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+    let mk_rte = |relid| {
+        Node::mk(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_RELATION,
+                relid,
+                relkind: ::types_rel::RELKIND_RELATION,
+                rellockmode: ::types_rel::AccessShareLock,
+                perminfoindex: if relid == t1 { 1 } else { 2 },
+                inFromCl: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    let mk_pi = |relid| {
+        Node::mk(mcx, RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() })
+            .unwrap()
+    };
+    let mut rtable = NodeList::make1(mcx, mk_rte(t1)).unwrap();
+    rtable.lappend(mcx, mk_rte(t2)).unwrap();
+    let mut perms = NodeList::make1(mcx, mk_pi(t1)).unwrap();
+    perms.lappend(mcx, mk_pi(t2)).unwrap();
+    let mut unpruned = ::types_nodes::bitmapset::Bitmapset::empty();
+    unpruned.add_member(mcx, 1).unwrap();
+    unpruned.add_member(mcx, 2).unwrap();
+    (rtable, perms, unpruned)
+}
+
+fn mk_sub_plan_node<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    link: ::types_nodes::SubLinkType,
+    first_col_type: u32,
+) -> Node<'mcx> {
+    Node::mk(
+        mcx,
+        ::types_nodes::SubPlan {
+            subLinkType: link,
+            plan_id: 1,
+            plan_name: Some("InitPlan 1"),
+            firstColType: first_col_type,
+            firstColTypmod: -1,
+            setParam: ::types_nodes::IntList::make1(mcx, 0).unwrap(),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+}
+
+// `SELECT a FROM t1 WHERE a < (SELECT b FROM t2)` as an initplan PlannedStmt.
+fn mk_expr_initplan_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, t1: u32, t2: u32) -> &'mcx PlannedStmt<'mcx> {
+    use ::types_nodes::plannodes::{Plan, Scan, SeqScan};
+    use ::types_nodes::primnodes::{Param, ParamKind};
+
+    let var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let tle = Node::mk_target_entry(mcx, var, 1, Some("a"), false).unwrap();
+    let qual_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let prm = Node::mk(
+        mcx,
+        Param {
+            paramkind: ParamKind::PARAM_EXEC,
+            paramid: 0,
+            paramtype: INT4OID,
+            paramtypmod: -1,
+            paramcollid: 0,
+            location: -1,
+        },
+    )
+    .unwrap();
+    let qual = Node::mk(
+        mcx,
+        ::types_nodes::OpExpr {
+            opno: INT4_LT,
+            opfuncid: 66,
+            opresulttype: 16,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args: NodeList::make2(mcx, qual_var, prm).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let scan = Node::mk(
+        mcx,
+        SeqScan {
+            scan: Scan {
+                plan: Plan {
+                    targetlist: NodeList::make1(mcx, tle).unwrap(),
+                    qual: NodeList::make1(mcx, qual).unwrap(),
+                    initPlan: NodeList::make1(
+                        mcx,
+                        mk_sub_plan_node(mcx, ::types_nodes::SubLinkType::EXPR_SUBLINK, INT4OID),
+                    )
+                    .unwrap(),
+                    ..Default::default()
+                },
+                scanrelid: 1,
+            },
+        },
+    )
+    .unwrap();
+
+    let (rtable, perms, unpruned) = mk_two_rel_pstmt_parts(mcx, t1, t2);
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(scan);
+    pstmt.subplans = NodeList::make1(mcx, mk_initplan_sub_seqscan(mcx, true)).unwrap();
+    pstmt.paramExecTypes = ::types_nodes::list::OidList::make1(mcx, INT4OID).unwrap();
+    pstmt.rtable = rtable;
+    pstmt.permInfos = perms;
+    pstmt.unprunableRelids = unpruned;
+    pstmt.seal_ref()
+}
+
+// `SELECT a FROM t1 WHERE EXISTS (SELECT 1 FROM t2)`: gating Result with a
+// one-time filter over $0.
+fn mk_exists_initplan_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, t1: u32, t2: u32) -> &'mcx PlannedStmt<'mcx> {
+    use ::types_nodes::plannodes::{Plan, Result as ResultPlan, Scan, SeqScan};
+    use ::types_nodes::primnodes::{Param, ParamKind, OUTER_VAR};
+
+    let var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let tle = Node::mk_target_entry(mcx, var, 1, Some("a"), false).unwrap();
+    let scan = Node::mk(
+        mcx,
+        SeqScan {
+            scan: Scan {
+                plan: Plan {
+                    targetlist: NodeList::make1(mcx, tle).unwrap(),
+                    ..Default::default()
+                },
+                scanrelid: 1,
+            },
+        },
+    )
+    .unwrap();
+
+    let out_var = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+    let out_tle = Node::mk_target_entry(mcx, out_var, 1, Some("a"), false).unwrap();
+    let prm = Node::mk(
+        mcx,
+        Param {
+            paramkind: ParamKind::PARAM_EXEC,
+            paramid: 0,
+            paramtype: 16,
+            paramtypmod: -1,
+            paramcollid: 0,
+            location: -1,
+        },
+    )
+    .unwrap();
+    let rcq = Node::mk_list(mcx, NodeList::make1(mcx, prm).unwrap()).unwrap();
+    let mut result = Node::build::<ResultPlan>(mcx).unwrap();
+    result.plan.targetlist = NodeList::make1(mcx, out_tle).unwrap();
+    result.plan.lefttree = Some(scan);
+    result.plan.initPlan = NodeList::make1(
+        mcx,
+        mk_sub_plan_node(mcx, ::types_nodes::SubLinkType::EXISTS_SUBLINK, 2278),
+    )
+    .unwrap();
+    result.resconstantqual = Some(rcq);
+    let top = result.seal();
+
+    let (rtable, perms, unpruned) = mk_two_rel_pstmt_parts(mcx, t1, t2);
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(top);
+    pstmt.subplans = NodeList::make1(mcx, mk_initplan_sub_seqscan(mcx, false)).unwrap();
+    pstmt.paramExecTypes = ::types_nodes::list::OidList::make1(mcx, 16).unwrap();
+    pstmt.rtable = rtable;
+    pstmt.permInfos = perms;
+    pstmt.unprunableRelids = unpruned;
+    pstmt.seal_ref()
+}
+
+fn run_initplan_pstmt(pstmt: &'static PlannedStmt<'static>) -> Result<Vec<i32>, Box<types_error::PgError>> {
+    let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+    let snapshot: snapmgr::Snapshot = std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+        snap_ctx.mcx(),
+        ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+    ));
+    with_exec_data(pstmt, |data, pstmt| {
+        data.estate.es_snapshot = Some(snapshot);
+        {
+            let n = pstmt.paramExecTypes.len();
+            let es = &mut data.estate;
+            es.es_param_exec_vals.extend(core::iter::repeat_n(
+                ::types_portal::params::ParamExecData::EMPTY,
+                n,
+            ));
+            es.es_param_subplans.extend(core::iter::repeat_n(None, n));
+        }
+        crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+
+        let ExecData { estate, planstate } = data;
+        let ps = planstate.as_mut().unwrap();
+        let mut out = Vec::new();
+        let mut run_err = None;
+        loop {
+            match exec_proc_node(ps, estate) {
+                Ok(Some(slot_id)) => {
+                    let base = estate.slot_mut(slot_id).base();
+                    out.push(base.tts_values[0].as_i32());
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    run_err = Some(e);
+                    break;
+                }
+            }
+        }
+        crate::exec_end_node(ps, estate).unwrap();
+        for i in 0..estate.es_subplanstates.len() {
+            let cell = estate.es_subplanstates[i];
+            // SAFETY: init_plan's arena cell (standard_executor_end's shape).
+            let slot = unsafe {
+                &mut *cell.0.cast::<Option<crate::PlanStateNode<'_>>>().as_ptr()
+            };
+            if let Some(mut sub) = slot.take() {
+                crate::exec_end_node(&mut sub, estate).unwrap();
+            }
+        }
+        estate.exec_reset_tuple_table(false);
+        estate.exec_close_range_table_relations().unwrap();
+        match run_err {
+            Some(e) => Err(e),
+            None => Ok(out),
+        }
+    })
+}
+
+#[test]
+fn expr_initplan_over_fake_heaps_end_to_end() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let (t1, t2) = (70110u32, 70111u32);
+    scanfix::register_table(t1, &[&[1, 8, 3, 12, 5]]);
+    scanfix::register_table(t2, &[&[6]]);
+    // a < (SELECT b FROM t2) = a < 6.
+    let rows = run_initplan_pstmt(mk_expr_initplan_pstmt(mcx, t1, t2)).unwrap();
+    assert_eq!(rows, vec![1, 3, 5]);
+    scanfix::quiesced();
+}
+
+#[test]
+fn expr_initplan_empty_subquery_yields_null_param() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let (t1, t2) = (70112u32, 70113u32);
+    scanfix::register_table(t1, &[&[1, 2, 3]]);
+    scanfix::register_table(t2, &[]);
+    // $0 is NULL, so the strict `<` never passes.
+    let rows = run_initplan_pstmt(mk_expr_initplan_pstmt(mcx, t1, t2)).unwrap();
+    assert_eq!(rows, Vec::<i32>::new());
+    scanfix::quiesced();
+}
+
+#[test]
+fn expr_initplan_two_rows_is_cardinality_violation() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let (t1, t2) = (70114u32, 70115u32);
+    scanfix::register_table(t1, &[&[1, 2, 3]]);
+    scanfix::register_table(t2, &[&[6, 7]]);
+    let err = run_initplan_pstmt(mk_expr_initplan_pstmt(mcx, t1, t2)).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_CARDINALITY_VIOLATION);
+    assert!(err
+        .message()
+        .contains("more than one row returned by a subquery used as an expression"));
+    scanfix::quiesced();
+}
+
+#[test]
+fn exists_initplan_gates_scan_end_to_end() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let (t1, t2) = (70116u32, 70117u32);
+    scanfix::register_table(t1, &[&[4, 9]]);
+    scanfix::register_table(t2, &[&[42]]);
+    let rows = run_initplan_pstmt(mk_exists_initplan_pstmt(mcx, t1, t2)).unwrap();
+    assert_eq!(rows, vec![4, 9]);
+    scanfix::quiesced();
+}
+
+#[test]
+fn exists_initplan_empty_subquery_gates_to_zero_rows() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let (t1, t2) = (70118u32, 70119u32);
+    scanfix::register_table(t1, &[&[4, 9]]);
+    scanfix::register_table(t2, &[]);
+    let rows = run_initplan_pstmt(mk_exists_initplan_pstmt(mcx, t1, t2)).unwrap();
+    assert_eq!(rows, Vec::<i32>::new());
+    scanfix::quiesced();
+}

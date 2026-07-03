@@ -25,6 +25,7 @@ executils = { path = "../executils" }
 instrument = { path = "../instrument" }
 execexpr = { path = "../execexpr" }
 execscan = { path = "../execscan" }
+nodefunctionscan = { path = "../nodefunctionscan" }
 nodeseqscan = { path = "../nodeseqscan" }
 nodeindexscan = { path = "../nodeindexscan" }
 nodeindexonlyscan = { path = "../nodeindexonlyscan" }
@@ -33,7 +34,11 @@ nodebitmapheapscan = { path = "../nodebitmapheapscan" }
 tidbitmap = { path = "../../nodes/tidbitmap" }
 nodeagg = { path = "../nodeagg" }
 nodesort = { path = "../nodesort" }
+nodeunique = { path = "../nodeunique" }
 nodelimit = { path = "../nodelimit" }
+nodehash = { path = "../nodehash" }
+nodehashjoin = { path = "../nodehashjoin" }
+nodemergejoin = { path = "../nodemergejoin" }
 nodenestloop = { path = "../nodenestloop" }
 exectuples = { path = "../exectuples" }
 tupdesc = { path = "../../access/common/tupdesc" }
@@ -45,6 +50,7 @@ postgres_seams = { path = "../../tcop/postgres_seams" }
 backend_status_seams = { path = "../../utils/activity/backend_status_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
+datum = { path = "../../../_support/types/datum" }
 
 [dev-dependencies]
 syscache_seams = { path = "../../utils/cache/syscache_seams" }

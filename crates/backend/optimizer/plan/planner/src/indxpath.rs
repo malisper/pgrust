@@ -383,7 +383,7 @@ fn collect_varattnos(run: &PlannerRun<'_>, node: Node<'_>, relid: i32, out: &mut
                 out.push(v.varattno);
             }
         }
-        NodeTag::T_Const => {}
+        NodeTag::T_Const | NodeTag::T_Param => {}
         NodeTag::T_OpExpr => {
             for a in &node.as_op_expr().unwrap().args {
                 collect_varattnos(run, a, relid, out);

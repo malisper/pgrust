@@ -23,6 +23,7 @@ pub mod relnode;
 pub mod run;
 pub mod setrefs;
 pub mod subquery;
+pub mod subselect;
 
 #[cfg(test)]
 mod tests;
@@ -103,8 +104,12 @@ pub mod gucs {
     bool_guc!(ENABLE_HASHAGG, enable_hashagg, set_enable_hashagg, true);
     bool_guc!(ENABLE_SORT, enable_sort, set_enable_sort, true);
     bool_guc!(ENABLE_NESTLOOP, enable_nestloop, set_enable_nestloop, true);
+    bool_guc!(ENABLE_HASHJOIN, enable_hashjoin, set_enable_hashjoin, true);
+    bool_guc!(ENABLE_MERGEJOIN, enable_mergejoin, set_enable_mergejoin, true);
     bool_guc!(ENABLE_MATERIAL, enable_material, set_enable_material, true);
     bool_guc!(ENABLE_INCREMENTAL_SORT, enable_incremental_sort, set_enable_incremental_sort, true);
+    bool_guc!(ENABLE_GROUP_BY_REORDERING, enable_group_by_reordering, set_enable_group_by_reordering, true);
+    bool_guc!(ENABLE_DISTINCT_REORDERING, enable_distinct_reordering, set_enable_distinct_reordering, true);
     real_guc!(CURSOR_TUPLE_FRACTION, cursor_tuple_fraction, set_cursor_tuple_fraction, 0.1);
     real_guc!(JIT_ABOVE_COST, jit_above_cost, set_jit_above_cost, 100000.0);
     real_guc!(JIT_OPTIMIZE_ABOVE_COST, jit_optimize_above_cost, set_jit_optimize_above_cost, 500000.0);
@@ -155,11 +160,25 @@ pub fn init_seams() {
         .install(GucVarAccessors { get: gucs::enable_sort, set: gucs::set_enable_sort });
     guc_tables::vars::enable_nestloop
         .install(GucVarAccessors { get: gucs::enable_nestloop, set: gucs::set_enable_nestloop });
+    guc_tables::vars::enable_hashjoin
+        .install(GucVarAccessors { get: gucs::enable_hashjoin, set: gucs::set_enable_hashjoin });
+    guc_tables::vars::enable_mergejoin
+        .install(GucVarAccessors { get: gucs::enable_mergejoin, set: gucs::set_enable_mergejoin });
     guc_tables::vars::enable_material
         .install(GucVarAccessors { get: gucs::enable_material, set: gucs::set_enable_material });
     guc_tables::vars::enable_incremental_sort.install(GucVarAccessors {
         get: gucs::enable_incremental_sort,
         set: gucs::set_enable_incremental_sort,
+    });
+    guc_tables::vars::enable_hashagg
+        .install(GucVarAccessors { get: gucs::enable_hashagg, set: gucs::set_enable_hashagg });
+    guc_tables::vars::enable_group_by_reordering.install(GucVarAccessors {
+        get: gucs::enable_group_by_reordering,
+        set: gucs::set_enable_group_by_reordering,
+    });
+    guc_tables::vars::enable_distinct_reordering.install(GucVarAccessors {
+        get: gucs::enable_distinct_reordering,
+        set: gucs::set_enable_distinct_reordering,
     });
     guc_tables::vars::cursor_tuple_fraction.install(GucVarAccessors {
         get: gucs::cursor_tuple_fraction,
@@ -253,12 +272,36 @@ pub fn standard_planner<'mcx>(
         panic!("standard_planner (planner.c): debug_parallel_query Gather; M3 parallel lane");
     }
     if !run.glob.param_exec_types.is_nil() {
-        panic!("SS_finalize_plan (subselect.c): M2 param lane");
+        // C: subplans are finalized before the main plan (they set the params
+        // the main plan's extParam computation validates against).
+        debug_assert_eq!(run.subroots.len(), run.glob.subplans.len());
+        for i in 0..run.glob.subplans.len() {
+            let subplan = run.glob.subplans.nth(i);
+            crate::subselect::ss_finalize_plan(&run, subplan, &run.subroots[i].root.outer_params)?;
+        }
+        crate::subselect::ss_finalize_plan(&run, top_plan, &run.root.outer_params)?;
     }
 
     debug_assert!(run.glob.finalrtable.is_nil());
     let top_plan = set_plan_references(&mut run, top_plan)?;
-    debug_assert!(run.glob.subplans.is_nil());
+    // ... and the subplans, each under its own root (C's forboth over
+    // glob->subplans/glob->subroots).
+    if !run.glob.subplans.is_nil() {
+        let mut fixed_subplans = NodeList::nil();
+        for i in 0..run.glob.subplans.len() {
+            let subplan = run.glob.subplans.nth(i);
+            let placeholder = types_pathnodes::PlannerInfo::new(mcx);
+            let sub_root = core::mem::replace(&mut run.subroots[i].root, placeholder);
+            let top_root = core::mem::replace(&mut run.root, sub_root);
+            let top_tlist =
+                core::mem::replace(&mut run.processed_tlist, run.subroots[i].processed_tlist);
+            let fixed = set_plan_references(&mut run, subplan)?;
+            run.subroots[i].root = core::mem::replace(&mut run.root, top_root);
+            run.processed_tlist = top_tlist;
+            fixed_subplans.lappend(mcx, fixed)?;
+        }
+        run.glob.subplans = fixed_subplans;
+    }
 
     let parse = run.parse();
     let total_cost = top_plan.as_plan().expect("plan node").total_cost;

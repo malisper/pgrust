@@ -49,6 +49,9 @@ pub fn exec_re_scan<'mcx>(
         }
         PlanStateNode::Result(rs) => exec_re_scan_result(rs, estate),
         PlanStateNode::SeqScan(ss) => ::nodeseqscan::exec_rescan_seq_scan(ss, estate),
+        PlanStateNode::FunctionScan(fs) => {
+            ::nodefunctionscan::exec_rescan_function_scan(fs, estate)
+        }
         PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_rescan_index_scan(is, estate),
         PlanStateNode::IndexOnlyScan(ios) => {
             ::nodeindexonlyscan::exec_rescan_index_only_scan(ios, estate)
@@ -66,6 +69,12 @@ pub fn exec_re_scan<'mcx>(
                 exec_re_scan(&mut s.outer, estate)?;
             }
             Ok(())
+        }
+        // ExecReScanUnique: outer child rescanned when chgParam is NULL
+        // (always, until the Param lanes land).
+        PlanStateNode::Unique(u) => {
+            ::nodeunique::exec_rescan_unique(&mut u.state, estate);
+            exec_re_scan(&mut u.outer, estate)
         }
         PlanStateNode::Limit(l) => {
             let crate::procnode::LimitNode { state, outer } = l;
@@ -96,10 +105,65 @@ pub fn exec_re_scan<'mcx>(
             ::nodenestloop::exec_rescan_nest_loop(&mut nl.state);
             Ok(())
         }
+        // ExecReScanHashJoin: single-batch reuse keeps the built table and
+        // jumps to HJ_NEED_NEW_OUTER; the outer child is rescanned (chgParam
+        // NULL until the Param lanes land). The Hash sub-node's child is NOT
+        // rescanned here (the table is reused, not rebuilt).
+        PlanStateNode::HashJoin(hj) => {
+            let hj = &mut **hj;
+            exec_re_scan(&mut hj.outer, estate)?;
+            ::nodehashjoin::exec_rescan_hash_join(&mut hj.state, &hj.hash.state);
+            Ok(())
+        }
+        // ExecReScanMergeJoin: both children rescanned (chgParam NULL until the
+        // Param lanes land); node-local half clears the marked slot + state.
+        PlanStateNode::MergeJoin(mj) => {
+            let mj = &mut **mj;
+            exec_re_scan(&mut mj.outer, estate)?;
+            exec_re_scan(&mut mj.inner, estate)?;
+            ::nodemergejoin::exec_rescan_merge_join(&mut mj.state, estate);
+            Ok(())
+        }
         // execAmi.c has no ModifyTable rescan arm ("node type not supported").
         PlanStateNode::ModifyTable(_) => {
             panic!("ExecReScan (execAmi.c): node type 232 does not support ExecReScan")
         }
+    }
+}
+
+/// `ExecMarkPos` (execAmi.c): remember `node`'s current scan position. Only the
+/// mark-capable ported nodes have arms; the planner routes an unmarkable merge
+/// inner through a Sort/Material, so anything else is a loud panic.
+pub fn exec_mark_pos<'mcx>(
+    node: &mut PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    match node {
+        PlanStateNode::Instrumented(w) => exec_mark_pos(&mut w.inner, estate),
+        PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_index_mark_pos(is),
+        PlanStateNode::IndexOnlyScan(ios) => ::nodeindexonlyscan::exec_index_only_mark_pos(ios),
+        PlanStateNode::Sort(s) => {
+            ::nodesort::exec_sort_mark_pos(&mut s.state);
+            Ok(())
+        }
+        _ => panic!("ExecMarkPos (execAmi.c): node type does not support mark/restore"),
+    }
+}
+
+/// `ExecRestrPos` (execAmi.c): restore `node` to its last marked position.
+pub fn exec_restr_pos<'mcx>(
+    node: &mut PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    match node {
+        PlanStateNode::Instrumented(w) => exec_restr_pos(&mut w.inner, estate),
+        PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_index_restr_pos(is),
+        PlanStateNode::IndexOnlyScan(ios) => ::nodeindexonlyscan::exec_index_only_restr_pos(ios),
+        PlanStateNode::Sort(s) => {
+            ::nodesort::exec_sort_restr_pos(&mut s.state);
+            Ok(())
+        }
+        _ => panic!("ExecRestrPos (execAmi.c): node type does not support mark/restore"),
     }
 }
 

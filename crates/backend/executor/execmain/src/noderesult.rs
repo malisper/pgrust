@@ -34,16 +34,17 @@ pub fn exec_init_result<'mcx>(
 
     let desc = exec_type_from_tl(&node.plan.targetlist)?;
     let slot = estate.exec_init_extra_tuple_slot(Some(desc.clone()), TupleSlotKind::Virtual);
-    let proj = exec_build_projection_info(mcx, &node.plan.targetlist, None)?;
+    let params = estate.param_bind();
+    let proj = exec_build_projection_info(mcx, &node.plan.targetlist, None, params)?;
 
-    let qual = exec_init_qual(mcx, &node.plan.qual)?;
+    let qual = exec_init_qual(mcx, &node.plan.qual, params)?;
     let resconstantqual = match node.resconstantqual {
         None => None,
         Some(n) => {
             let list = n
                 .as_list()
                 .unwrap_or_else(|| panic!("Result.resconstantqual: expected List, got {:?}", n.node_tag()));
-            exec_init_qual(mcx, list)?
+            exec_init_qual(mcx, list, params)?
         }
     };
 
@@ -77,6 +78,12 @@ pub fn exec_result<'mcx>(
     let ecxt = node.ps.ps_ExprContext.expect("ResultState without ExprContext");
 
     if node.rs_checkqual {
+        // C runs pending initplans lazily inside ExecQual (ExecEvalParamExec);
+        // the One-Time Filter's $n params resolve here instead (execscan note).
+        let deps = node.resconstantqual.as_deref().unwrap().param_exec_deps();
+        if !deps.is_empty() {
+            ::executils::exec_eval_param_exec_params(estate, deps)?;
+        }
         let resconstantqual = node.resconstantqual.as_deref_mut();
         let qual_result =
             with_eval_slots(estate, ecxt, None, |slots, _, _| exec_qual(resconstantqual, slots))?;
@@ -103,6 +110,17 @@ pub fn exec_result<'mcx>(
     }
 
     let result_slot = node.ps.ps_ResultTupleSlot.expect("ResultState without result slot");
+    if !node
+        .ps
+        .ps_ProjInfo
+        .as_deref()
+        .expect("ResultState without projection")
+        .param_exec_deps()
+        .is_empty()
+    {
+        let deps = node.ps.ps_ProjInfo.as_deref().unwrap().param_exec_deps();
+        ::executils::exec_eval_param_exec_params(estate, deps)?;
+    }
     let proj = node.ps.ps_ProjInfo.as_deref_mut().expect("ResultState without projection");
     with_eval_slots(estate, ecxt, Some(result_slot), |slots, result, mcx| {
         exec_project(proj, slots, result.unwrap(), mcx)

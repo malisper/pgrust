@@ -1,8 +1,11 @@
 use std::any::Any;
 
-use fmgr::{FmgrInfo, FunctionCallInfoBaseData};
+use datum::Datum;
+use fmgr::{ExprDoneCond, FmgrInfo, FunctionCallInfoBaseData};
 use nodes::NodeTag;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
+
+const _: () = assert!(fmgr::RETURN_SET_INFO_TAG == NodeTag::T_ReturnSetInfo as u32);
 
 // funcapi.h
 pub const MAT_SRF_USE_EXPECTED_DESC: u32 = 0x01;
@@ -75,6 +78,37 @@ pub fn end_MultiFuncCall(flinfo: &mut FmgrInfo) {
     // shutdown_MultiFuncCall: unbind from flinfo and delete the multi-call
     // context — one assignment under Box ownership.
     flinfo.fn_extra = None;
+}
+
+#[cold]
+fn no_rsinfo() -> ! {
+    panic!("SRF_RETURN: fcinfo.resultinfo is not a ReturnSetInfo");
+}
+
+// SRF_RETURN_NEXT minus the macro's `return`: bump call_cntr, flag
+// ExprMultipleResult, hand back the row datum.
+pub fn srf_return_next(
+    flinfo: &mut FmgrInfo,
+    fcinfo: &mut FunctionCallInfoBaseData,
+    result: Datum,
+) -> Datum {
+    per_MultiFuncCall(flinfo).call_cntr += 1;
+    match fcinfo.rsinfo_mut() {
+        Some(rsi) => rsi.isDone = ExprDoneCond::ExprMultipleResult,
+        None => no_rsinfo(),
+    }
+    fcinfo.isnull = false;
+    result
+}
+
+// SRF_RETURN_DONE: teardown + ExprEndResult + a null result.
+pub fn srf_return_done(flinfo: &mut FmgrInfo, fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    end_MultiFuncCall(flinfo);
+    match fcinfo.rsinfo_mut() {
+        Some(rsi) => rsi.isDone = ExprDoneCond::ExprEndResult,
+        None => no_rsinfo(),
+    }
+    fcinfo.return_null()
 }
 
 pub fn InitMaterializedSRF(_fcinfo: &mut FunctionCallInfoBaseData, _flags: u32) -> ! {

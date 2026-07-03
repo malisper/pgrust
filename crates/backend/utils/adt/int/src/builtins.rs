@@ -8,13 +8,9 @@ use alloc::string::String;
 use ::datum::Datum;
 use ::types_core::Oid;
 use ::types_error::PgResult;
-use ::types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
-
-#[cold]
-#[inline(never)]
-fn soft_context_unported(name: &str) -> ! {
-    panic!("{name}: fcinfo.context soft-error demux is fmgr-core's unit (not ported)")
-}
+use ::types_fmgr::{
+    varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
+};
 
 // C pallocs each cstring result into the per-row context; here the backend
 // thread owns retained scratch (rules 7/10; fn_extra was measured out: its
@@ -25,18 +21,17 @@ std::thread_local! {
         const { core::cell::UnsafeCell::new([0; 16]) };
 }
 
-fn in_arg<'a>(fcinfo: &'a Fcinfo, name: &'static str) -> alloc::borrow::Cow<'a, str> {
-    if fcinfo.context.is_some() {
-        soft_context_unported(name);
-    }
+fn in_arg<'a>(fcinfo: &'a Fcinfo) -> alloc::borrow::Cow<'a, str> {
     // SAFETY: catalog arg 0 of the in-functions is cstring (typlen -2).
     let s = unsafe { fcinfo.arg_cstring(0) };
     String::from_utf8_lossy(s.to_bytes())
 }
 
 pub fn fc_int2in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let num = in_arg(fcinfo, "int2in");
-    Ok(Datum::from_i16(crate::int2in(&num, None)?))
+    let num = in_arg(fcinfo);
+    // SAFETY: context, if set, rides per the ErrorSaveNode contract for this call.
+    let esc = unsafe { fcinfo.soft_error_context() };
+    Ok(Datum::from_i16(crate::int2in(&num, esc)?))
 }
 
 pub fn fc_int2out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -52,8 +47,10 @@ pub fn fc_int2out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
 }
 
 pub fn fc_int4in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let num = in_arg(fcinfo, "int4in");
-    Ok(Datum::from_i32(crate::int4in(&num, None)?))
+    let num = in_arg(fcinfo);
+    // SAFETY: context, if set, rides per the ErrorSaveNode contract for this call.
+    let esc = unsafe { fcinfo.soft_error_context() };
+    Ok(Datum::from_i32(crate::int4in(&num, esc)?))
 }
 
 pub fn fc_int4out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -66,6 +63,30 @@ pub fn fc_int4out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
         buf[len] = 0;
         Ok(Datum::from_usize(buf.as_ptr() as usize))
     })
+}
+
+pub fn fc_int2recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: recv arg0 is the live StringInfo pointer per the recv ABI.
+    let buf = unsafe { fcinfo.arg_stringinfo(0) };
+    Ok(Datum::from_i16(crate::int2recv(buf)?))
+}
+
+pub fn fc_int2send(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a] = fcinfo.args_n::<1>();
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::int2send(mcx, a.value.as_i16())?))
+}
+
+pub fn fc_int4recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: recv arg0 is the live StringInfo pointer per the recv ABI.
+    let buf = unsafe { fcinfo.arg_stringinfo(0) };
+    Ok(Datum::from_i32(crate::int4recv(buf)?))
+}
+
+pub fn fc_int4send(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a] = fcinfo.args_n::<1>();
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::int4send(mcx, a.value.as_i32())?))
 }
 
 macro_rules! fc1 {
@@ -136,6 +157,13 @@ fc1t! {
     fc_int2um: int2um(as_i16) -> from_i16;
     fc_int4abs: int4abs(as_i32) -> from_i32;
     fc_int2abs: int2abs(as_i16) -> from_i16;
+}
+
+// C home is hashfunc.c (no hash-AM adt crate yet); grouping/hashjoin reach it
+// only through fmgr, so the registry row is the compat surface.
+pub fn fc_hashint4(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a] = fcinfo.args_n::<1>();
+    Ok(Datum::from_u32(::hashfn::hash_bytes_uint32(a.value.as_i32() as u32)))
 }
 
 fc2! {
@@ -211,6 +239,80 @@ fc_in_range! {
     fc_in_range_int2_int8: in_range_int2_int8(as_i16, as_i16, as_i64);
 }
 
+// generate_series_step_int4 (OIDs 1066 3-arg / 1067 2-arg share the C body;
+// PG_NARGS demuxes) over the funcapi ValuePerCall frame.
+pub fn fc_generate_series_step_int4(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("generate_series_int4: NULL flinfo");
+    if !flinfo.has_fn_extra() {
+        let start = fcinfo.arg(0).as_i32();
+        let finish = fcinfo.arg(1).as_i32();
+        let step = if fcinfo.nargs() == 3 { fcinfo.arg(2).as_i32() } else { 1 };
+        let state = crate::series::GenerateSeriesInt4::new(start, finish, step)?;
+        let fctx = ::funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
+        fctx.user_fctx = Some(alloc::boxed::Box::new(state));
+    }
+    let next = ::funcapi::per_MultiFuncCall(flinfo)
+        .user_fctx
+        .as_mut()
+        .expect("generate_series_int4: user_fctx set at first call")
+        .downcast_mut::<crate::series::GenerateSeriesInt4>()
+        .expect("generate_series_int4: user_fctx is GenerateSeriesInt4")
+        .next();
+    match next {
+        Some(v) => Ok(::funcapi::srf_return_next(flinfo, fcinfo, Datum::from_i32(v))),
+        None => Ok(::funcapi::srf_return_done(flinfo, fcinfo)),
+    }
+}
+
+// generate_series_int4_support (OID 3994): SupportRequestRows over all-Const
+// args; anything else returns NULL so callers fall back (C: estimate the
+// planner-folded exprs — we read Consts directly, Param estimation unported).
+pub fn fc_generate_series_int4_support(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let [a] = fcinfo.args_n::<1>();
+    let p = a.value.as_usize() as *mut ();
+    // SAFETY: prosupport contract — the internal arg points at a live
+    // tag-first support-request node exclusively owned by this call.
+    let Some(req) = (unsafe { ::types_nodes::supportnodes::support_request_rows_mut(p) }) else {
+        return Ok(Datum::from_usize(0));
+    };
+    let args = match req.node.and_then(|n| n.as_func_expr()) {
+        Some(fe) => &fe.args,
+        None => return Ok(Datum::from_usize(0)),
+    };
+    let mut vals = [1i32; 3];
+    for (i, arg) in args.iter().enumerate() {
+        match arg.as_const() {
+            Some(c) if c.constisnull => {
+                req.rows = 0.0;
+                return Ok(Datum::from_usize(p as usize));
+            }
+            Some(c) => vals[i] = c.constvalue.as_i32(),
+            None => return Ok(Datum::from_usize(0)),
+        }
+    }
+    match crate::series::generate_series_int4_rows(
+        vals[0] as f64,
+        vals[1] as f64,
+        vals[2] as f64,
+    ) {
+        Some(rows) => {
+            req.rows = rows;
+            Ok(Datum::from_usize(p as usize))
+        }
+        None => Ok(Datum::from_usize(0)),
+    }
+}
+
+const fn srf(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
+    FmgrBuiltin { foid, name, nargs, strict: true, retset: true, func }
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -222,11 +324,17 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
     }
 }
 
-// pg_proc.dat rows for int.c (all proisstrict, none retset). Not present:
-// recv/send (2404-2407), int2vectorin/out (40/41) and int2vectorrecv/send
-// (2410/2411) — see module doc; generate_series[_step]_int4 (1066/1067) and
-// generate_series_int4_support (3994) ride the funcapi/planner frames.
+// pg_proc.dat rows for int.c. Not present: int2vectorin/out (40/41) and
+// int2vectorrecv/send (2410/2411) — see module doc. recv/send ride the
+// binary-wire fmgr frame (types_fmgr::wire).
 pub const INT_BUILTINS: &[FmgrBuiltin] = &[
+    b(2404, "int2recv", 1, fc_int2recv),
+    b(2405, "int2send", 1, fc_int2send),
+    b(2406, "int4recv", 1, fc_int4recv),
+    b(2407, "int4send", 1, fc_int4send),
+    srf(1066, "generate_series_step_int4", 3, fc_generate_series_step_int4),
+    srf(1067, "generate_series_int4", 2, fc_generate_series_step_int4),
+    b(3994, "generate_series_int4_support", 1, fc_generate_series_int4_support),
     b(38, "int2in", 1, fc_int2in),
     b(39, "int2out", 1, fc_int2out),
     b(42, "int4in", 1, fc_int4in),
@@ -286,6 +394,7 @@ pub const INT_BUILTINS: &[FmgrBuiltin] = &[
     b(1253, "int2abs", 1, fc_int2abs),
     b(5044, "int4gcd", 2, fc_int4gcd),
     b(5046, "int4lcm", 2, fc_int4lcm),
+    b(450, "hashint4", 1, fc_hashint4),
     b(768, "int4larger", 2, fc_int4larger),
     b(769, "int4smaller", 2, fc_int4smaller),
     b(770, "int2larger", 2, fc_int2larger),

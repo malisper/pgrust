@@ -95,6 +95,7 @@ pub fn is_projection_capable_pathtype(pathtype: u16) -> bool {
         t if t == tag16(NodeTag::T_IndexScan) => true,
         t if t == tag16(NodeTag::T_IndexOnlyScan) => true,
         t if t == tag16(NodeTag::T_NestLoop) => true,
+        t if t == tag16(NodeTag::T_MergeJoin) => true,
         _ => panic!(
             "is_projection_capable_path (createplan.c): pathtype {pathtype}; \
              M2 plan lane"
@@ -531,6 +532,20 @@ pub fn create_seqscan_path<'mcx>(
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     let id = run.root.alloc_path(PathNode::Path(path));
     crate::costsize::cost_seqscan(run, id, rel_id);
+    Ok(id)
+}
+
+// create_functionscan_path (pathnode.c); pathkeys/required_outer are empty on
+// this lane (ORDINALITY and LATERAL are loud in the parser).
+pub fn create_functionscan_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+) -> PgResult<PathId> {
+    let mut path = base_path(run, NodeTag::T_Path, NodeTag::T_FunctionScan, rel_id);
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    let id = run.root.alloc_path(PathNode::Path(path));
+    crate::costsize::cost_functionscan(run, id, rel_id)?;
     Ok(id)
 }
 

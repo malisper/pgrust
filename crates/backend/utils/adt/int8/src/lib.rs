@@ -119,6 +119,16 @@ pub fn int8out(val: i64, a: &mut [u8]) -> usize {
     pg_lltoa(val, a)
 }
 
+pub fn int8recv(buf: &mut ::stringinfo::StringInfo<'_>) -> PgResult<i64> {
+    pqformat::pq_getmsgint64(buf)
+}
+
+pub fn int8send<'mcx>(mcx: ::mcx::Mcx<'mcx>, arg1: i64) -> PgResult<::datum::Bytea<'mcx>> {
+    let mut b = pqformat::pq_begintypsend(mcx)?;
+    pqformat::pq_sendint64(&mut b, arg1 as u64)?;
+    Ok(pqformat::pq_endtypsend(b))
+}
+
 macro_rules! relops {
     ($($name:ident($ta:ty, $tb:ty): $op:tt;)*) => {$(
         #[inline]

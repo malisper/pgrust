@@ -142,7 +142,6 @@ pub fn global_prng<R>(f: impl FnOnce(&mut PgPrng) -> R) -> R {
 
 pub fn init_seams() {
     pg_prng_seams::global_prng_uint32::set(|| global_prng(PgPrng::next_u32));
-    pg_prng_seams::global_prng_double::set(|| global_prng(PgPrng::next_f64));
 }
 
 #[cfg(test)]

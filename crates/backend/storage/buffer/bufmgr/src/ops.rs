@@ -100,6 +100,30 @@ pub fn LockBufferForCleanup(buffer: Buffer) -> PgResult<()> {
     }
 }
 
+pub fn ConditionalLockBufferForCleanup(buffer: Buffer) -> PgResult<bool> {
+    debug_assert!(BufferIsValid(buffer));
+    debug_assert!(pin_count_wait_buf() == -1);
+    if buffer < 0 {
+        panic!("unported callee reached from bufmgr.c ConditionalLockBufferForCleanup: LocalRefCount (localbuf.c)");
+    }
+    if crate::privref::GetPrivateRefCount(buffer) != 1 {
+        return Ok(false);
+    }
+    if !ConditionalLockBuffer(buffer)? {
+        return Ok(false);
+    }
+    let desc = shared_desc(buffer);
+    let buf_state = LockBufHdr(desc);
+    debug_assert!(buffer_refcount(buf_state) > 0);
+    if buffer_refcount(buf_state) == 1 {
+        UnlockBufHdr(desc, buf_state);
+        return Ok(true);
+    }
+    UnlockBufHdr(desc, buf_state);
+    LockBuffer(buffer, BUFFER_LOCK_UNLOCK)?;
+    Ok(false)
+}
+
 pub fn UnlockReleaseBuffer(buffer: Buffer) -> PgResult<()> {
     LockBuffer(buffer, BUFFER_LOCK_UNLOCK)?;
     ReleaseBuffer(buffer)

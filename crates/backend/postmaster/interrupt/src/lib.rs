@@ -48,7 +48,11 @@ pub fn ProcessMainLoopInterrupts() -> PgResult<()> {
         ipc_seams::proc_exit::call(0, init_small_seams::my_proc_pid::call());
     }
 
-    if mcxt_seams::log_memory_context_pending::call() {
+    // Flag owner (mcxt.c half) unported => the flag can never be set; the
+    // uninstalled skip is C's false arm.
+    if mcxt_seams::log_memory_context_pending::is_installed()
+        && mcxt_seams::log_memory_context_pending::call()
+    {
         mcxt_seams::process_log_memory_context_interrupt::call()?;
     }
 
@@ -61,10 +65,9 @@ pub fn SignalHandlerForConfigReload() {
 }
 
 pub fn SignalHandlerForCrashExit() -> ! {
-    // _exit(2), never proc_exit/atexit: shmem may be corrupt, and exit code 2
-    // forces the postmaster into a crash-reset cycle.
-    // SAFETY: _exit is async-signal-safe and takes no pointers.
-    unsafe { libc::_exit(2) }
+    // _exit(2)'s thread rendering, never proc_exit callbacks: shmem may be
+    // corrupt, and exit code 2 keeps the postmaster in its crash-reset cycle.
+    ipc::exit_thread_raw(2)
 }
 
 pub fn SignalHandlerForShutdownRequest() {

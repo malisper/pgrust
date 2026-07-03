@@ -138,6 +138,12 @@ pub fn build_simple_rel<'mcx>(
     relid: u32,
     rtekind: RTEKind,
 ) -> types_error::PgResult<RelId> {
+    let function_max_attr = match rtekind {
+        RTEKind::RTE_FUNCTION => {
+            run.rte(relid as usize).eref.expect("RTE has eref").colnames.len() as i16
+        }
+        _ => 0,
+    };
     let root = &mut run.root;
     assert!(relid > 0 && (relid as i32) < root.simple_rel_array_size);
     assert!(root.simple_rel_array[relid as usize].is_none(), "rel {relid} already exists");
@@ -164,6 +170,16 @@ pub fn build_simple_rel<'mcx>(
             // RTE_RESULT has no columns, nor could it have a whole-row Var.
             rel.min_attr = 0;
             rel.max_attr = -1;
+        }
+        RTEKind::RTE_FUNCTION => {
+            rel.min_attr = 0;
+            rel.max_attr = function_max_attr;
+            let span = (rel.max_attr - rel.min_attr + 1) as usize;
+            rel.attr_widths = mcx::vec_from_elem_in(mcx, 0i32, span);
+            rel.attr_needed = mcx::PgVec::new_in(mcx);
+            for _ in 0..span {
+                rel.attr_needed.push(None);
+            }
         }
         other => panic!("build_simple_rel (relnode.c): rtekind {other:?}; M2 scan lane"),
     }

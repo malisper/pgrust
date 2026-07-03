@@ -19,8 +19,8 @@ mod ssup;
 mod tests;
 
 pub use ssup::{
-    apply_sort_comparator, prepare_sort_support_from_ordering_op, SortComparator, SortSupport,
-    SortSupportInit,
+    apply_sort_comparator, comparator_for_opfamily, prepare_sort_support_from_ordering_op,
+    SortComparator, SortSupport, SortSupportInit,
 };
 
 use mgetattr::minimal_getattr;

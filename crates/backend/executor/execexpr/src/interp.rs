@@ -45,6 +45,15 @@ fn no_result_slot() -> ! {
     panic!("execexpr: projection step without a result slot")
 }
 
+#[cold]
+#[inline(never)]
+fn param_exec_plan_pending() -> ! {
+    panic!(
+        "execexpr EEOP_PARAM_EXEC: pending initplan — owning node did not run \
+         exec_eval_param_exec_params before evaluation (nodeSubplan.c lane)"
+    )
+}
+
 /// C `ExecEvalExprSwitchContext`/`ExecInterpExprStillValid`: one-time Var
 /// validity check, then kernel dispatch.
 #[inline(always)]
@@ -312,6 +321,19 @@ fn run_program<'mcx>(
             }
             Step::Const { value, isnull, out } => {
                 write_out(*out, &mut regs, *value, *isnull);
+            }
+            Step::ParamExtern { prm, out } => {
+                // SAFETY: compile-resolved pointer, portal-lived (steps.rs note).
+                let p = unsafe { prm.read() };
+                write_out(*out, &mut regs, p.value, p.isnull);
+            }
+            Step::ParamExec { prm, out } => {
+                // SAFETY: compile-resolved pointer into stable es_param_exec_vals.
+                let p = unsafe { prm.read() };
+                if p.exec_plan {
+                    param_exec_plan_pending();
+                }
+                write_out(*out, &mut regs, p.value, p.isnull);
             }
             Step::FuncExpr { call, out } => {
                 let (value, isnull) = invoke(frames, call)?;

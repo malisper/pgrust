@@ -1,6 +1,6 @@
 //! fmgr wrappers (`fc_*`) + `BOOL_BUILTINS` for fmgr-core. Still deferred:
-//! boolrecv/boolsend (pqformat wire frame is a separate unit) and the
-//! bool_accum family (agg internal-state frame); value cores in the crate root.
+//! the bool_accum family (agg internal-state frame); value cores in the crate
+//! root. recv/send ride the binary-wire fmgr frame (types_fmgr::wire).
 
 use alloc::borrow::Cow;
 use alloc::string::String;
@@ -12,24 +12,29 @@ use ::types_fmgr::{
     varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
 };
 
-#[cold]
-#[inline(never)]
-fn soft_context_unported(name: &str) -> ! {
-    panic!("{name}: fcinfo.context soft-error demux is fmgr-core's unit (not ported)")
+pub fn fc_boolrecv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: recv arg0 is the live StringInfo pointer per the recv ABI.
+    let buf = unsafe { fcinfo.arg_stringinfo(0) };
+    Ok(Datum::from_bool(crate::boolrecv(buf)?))
 }
 
-fn in_arg<'a>(fcinfo: &'a Fcinfo, name: &'static str) -> Cow<'a, str> {
-    if fcinfo.context.is_some() {
-        soft_context_unported(name);
-    }
+pub fn fc_boolsend(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a] = fcinfo.args_n::<1>();
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::boolsend(mcx, a.value.as_bool())?))
+}
+
+fn in_arg<'a>(fcinfo: &'a Fcinfo) -> Cow<'a, str> {
     // SAFETY: catalog arg 0 of boolin is cstring (typlen -2).
     let s = unsafe { fcinfo.arg_cstring(0) };
     String::from_utf8_lossy(s.to_bytes())
 }
 
 pub fn fc_boolin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let s = in_arg(fcinfo, "boolin");
-    Ok(Datum::from_bool(crate::boolin(&s, None)?))
+    let s = in_arg(fcinfo);
+    // SAFETY: context, if set, rides per the ErrorSaveNode contract for this call.
+    let esc = unsafe { fcinfo.soft_error_context() };
+    Ok(Datum::from_bool(crate::boolin(&s, esc)?))
 }
 
 // C pallocs the 2-byte cstring per row; the backend thread owns retained
@@ -112,6 +117,8 @@ pub const BOOL_BUILTINS: &[FmgrBuiltin] = &[
     b(1243, "boolout", 1, fc_boolout),
     b(1691, "boolle", 2, fc_boolle),
     b(1692, "boolge", 2, fc_boolge),
+    b(2436, "boolrecv", 1, fc_boolrecv),
+    b(2437, "boolsend", 1, fc_boolsend),
     b(2515, "booland_statefunc", 2, fc_booland_statefunc),
     b(2516, "boolor_statefunc", 2, fc_boolor_statefunc),
     b(2971, "booltext", 1, fc_booltext),

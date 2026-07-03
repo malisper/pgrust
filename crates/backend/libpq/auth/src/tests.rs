@@ -62,6 +62,13 @@ fn setup_backend(pid: i32) {
 fn load_hba_content(name: &str, content: &str) {
     install();
     let _g = GUC_LOCK.lock().unwrap();
+    load_hba_content_locked(name, content);
+}
+
+// hba lines are process-global; callers needing a stable view across their
+// whole body hold GUC_LOCK themselves.
+fn load_hba_content_locked(name: &str, content: &str) {
+    install();
     let dir = std::env::temp_dir().join(format!("pgrust_auth_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(name);
@@ -180,6 +187,71 @@ fn trust_auth_unix_socket_end_to_end() {
     assert_eq!(pqcomm::pq_flush().unwrap(), 0);
     client.join().unwrap();
 
+    pqcomm::RemoveSocketFiles();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// Regression: a FATAL raised while ClientAuthentication holds the MyProcPort
+// borrow (auth_seams entry) must still send to the client — the transport
+// reads pqcomm's socket cells, never re-borrowing the Port RefCell.
+#[test]
+fn auth_fatal_under_port_borrow_reaches_client() {
+    setup_backend(4244);
+    let _g = GUC_LOCK.lock().unwrap();
+    load_hba_content_locked("reject_e2e.conf", "local all all reject\n");
+
+    let dir = std::env::temp_dir().join(format!("pgrust_auth_fatal_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir_s = dir.to_str().unwrap().to_owned();
+    let port_number: u16 = 45456;
+    let sock_path = format!("{dir_s}/.s.PGSQL.{port_number}");
+    let _ = std::fs::remove_file(&sock_path);
+
+    let mut listen_sockets: Vec<i32> = Vec::new();
+    let status = pqcomm::ListenServerPort(
+        libc::AF_UNIX,
+        None,
+        port_number,
+        Some(&dir_s),
+        &mut listen_sockets,
+        64,
+    )
+    .unwrap();
+    assert_eq!(status, 0);
+
+    let client_path = sock_path.clone();
+    let client = std::thread::spawn(move || {
+        let mut stream = UnixStream::connect(client_path).unwrap();
+        let mut header = [0u8; 5];
+        stream.read_exact(&mut header).unwrap();
+        assert_eq!(header[0], b'E');
+        let len = u32::from_be_bytes(header[1..5].try_into().unwrap()) as usize;
+        let mut body = vec![0u8; len - 4];
+        stream.read_exact(&mut body).unwrap();
+        let body = String::from_utf8_lossy(&body).into_owned();
+        assert!(body.contains("28000"), "no SQLSTATE in: {body}");
+        assert!(body.contains("rejects connection"), "wrong message: {body}");
+    });
+
+    let mut client_sock = ClientSocket {
+        sock: PGINVALID_SOCKET,
+        raddr: SockAddr::zeroed(),
+    };
+    while pqcomm::AcceptConnection(listen_sockets[0], &mut client_sock) != 0 {}
+    let mut port = pqcomm_seams::pq_init::call(&client_sock).unwrap();
+    port.user_name = Some("alice".to_string());
+    port.database_name = Some("postgres".to_string());
+    g::SetMyProcPort(port);
+    elog::config::set_where_to_send_output(types_dest::CommandDest::Remote);
+
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let _ = auth_seams::client_authentication::call();
+    }));
+    elog::config::set_where_to_send_output(types_dest::CommandDest::Debug);
+    let msg = payload_str(&result.expect_err("expected FATAL proc_exit"));
+    assert_eq!(msg, "proc_exit(1)", "FATAL send re-entered MyProcPort");
+
+    client.join().unwrap();
     pqcomm::RemoveSocketFiles();
     let _ = std::fs::remove_dir_all(&dir);
 }

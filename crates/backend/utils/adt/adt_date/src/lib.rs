@@ -3,9 +3,9 @@
 //! adt_timestamp. Zero-allocation I/O like adt_timestamp: parse fields borrow
 //! a caller workbuf, output writes into a caller-owned MAXDATELEN buffer.
 //! Interval-typed operators, extract/date_part (numeric image plumbing),
-//! recv/send, typmod in/out, sortsupport/skipsupport, and timetz_zone/izone/
-//! at_local defer; their OIDs stay out of DATE_BUILTINS so fmgr resolves them
-//! to its loud not-ported panic.
+//! typmod in/out, sortsupport/skipsupport, and timetz_zone/izone/at_local
+//! defer; their OIDs stay out of DATE_BUILTINS so fmgr resolves them to its
+//! loud not-ported panic. recv/send ride the binary-wire fmgr frame.
 
 #![allow(non_snake_case)]
 
@@ -22,10 +22,14 @@ use adt_timestamp::{
     timestamp2tm, GetEpochTime, DT_NOBEGIN, DT_NOEND, IS_VALID_TIMESTAMP, MIN_TIMESTAMP,
     TIMESTAMP_IS_NOBEGIN, TIMESTAMP_IS_NOEND, TIMESTAMP_NOT_FINITE,
 };
+use adt_datetime::consts::TZDISP_LIMIT;
+use datum::Bytea;
+use mcx::Mcx;
+use stringinfo::StringInfo;
 use types_core::TimestampTz;
 use types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_DATETIME_FIELD_OVERFLOW,
-    ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+    ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, ERRCODE_INVALID_TIME_ZONE_DISPLACEMENT_VALUE,
 };
 
 pub mod builtins;
@@ -828,3 +832,64 @@ const _: () = {
     assert!(core::mem::offset_of!(TimeTzADT, time) == 0);
     assert!(core::mem::offset_of!(TimeTzADT, zone) == 8);
 };
+
+// Binary wire (date.c recv/send); range checks and typmod adjustment exactly
+// as C. TimeTzADT is returned by value; the fc wrapper builds the 12-byte
+// by-ref image.
+pub fn date_recv(buf: &mut StringInfo<'_>) -> PgResult<DateADT> {
+    let result = pqformat::pq_getmsgint(buf, 4)? as i32;
+    if !DATE_NOT_FINITE(result) && !IS_VALID_DATE(result) {
+        return Err(datetime_out_of_range("date out of range"));
+    }
+    Ok(result)
+}
+
+pub fn date_send<'mcx>(mcx: Mcx<'mcx>, date: DateADT) -> PgResult<Bytea<'mcx>> {
+    let mut b = pqformat::pq_begintypsend(mcx)?;
+    pqformat::pq_sendint32(&mut b, date as u32)?;
+    Ok(pqformat::pq_endtypsend(b))
+}
+
+pub fn time_recv(buf: &mut StringInfo<'_>, typmod: i32) -> PgResult<TimeADT> {
+    let mut result = pqformat::pq_getmsgint64(buf)?;
+    if result < 0 || result > USECS_PER_DAY {
+        return Err(datetime_out_of_range("time out of range"));
+    }
+    AdjustTimeForTypmod(&mut result, typmod);
+    Ok(result)
+}
+
+pub fn time_send<'mcx>(mcx: Mcx<'mcx>, time: TimeADT) -> PgResult<Bytea<'mcx>> {
+    let mut b = pqformat::pq_begintypsend(mcx)?;
+    pqformat::pq_sendint64(&mut b, time as u64)?;
+    Ok(pqformat::pq_endtypsend(b))
+}
+
+pub fn timetz_recv(buf: &mut StringInfo<'_>, typmod: i32) -> PgResult<TimeTzADT> {
+    let mut time = pqformat::pq_getmsgint64(buf)?;
+    if time < 0 || time > USECS_PER_DAY {
+        return Err(datetime_out_of_range("time out of range"));
+    }
+    let zone = pqformat::pq_getmsgint(buf, 4)? as i32;
+    if zone <= -TZDISP_LIMIT || zone >= TZDISP_LIMIT {
+        return Err(Box::new(
+            PgError::error("time zone displacement out of range")
+                .with_sqlstate(ERRCODE_INVALID_TIME_ZONE_DISPLACEMENT_VALUE),
+        ));
+    }
+    AdjustTimeForTypmod(&mut time, typmod);
+    Ok(TimeTzADT { time, zone })
+}
+
+pub fn timetz_send<'mcx>(mcx: Mcx<'mcx>, t: &TimeTzADT) -> PgResult<Bytea<'mcx>> {
+    let mut b = pqformat::pq_begintypsend(mcx)?;
+    pqformat::pq_sendint64(&mut b, t.time as u64)?;
+    pqformat::pq_sendint32(&mut b, t.zone as u32)?;
+    Ok(pqformat::pq_endtypsend(b))
+}
+
+#[cold]
+#[inline(never)]
+fn datetime_out_of_range(msg: &'static str) -> Box<PgError> {
+    Box::new(PgError::error(msg).with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE))
+}

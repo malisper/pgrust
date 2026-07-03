@@ -307,7 +307,16 @@ fn dispatch_switch<'mcx>(
         T_LoadStmt => handler_gap("load_file (dfmgr lane)"),
         T_CallStmt => handler_gap("ExecuteCallStmt (functioncmds lane)"),
         T_ClusterStmt => handler_gap("cluster (cluster lane)"),
-        T_VacuumStmt => handler_gap("ExecVacuum (vacuum lane)"),
+        T_VacuumStmt => {
+            // ExecVacuum's VACUUM half lives in commands_vacuum, the ANALYZE
+            // half in commands_analyze (each panics on the other's lane).
+            let stmt = parsetree.as_vacuum_stmt().unwrap();
+            if stmt.is_vacuumcmd {
+                commands_vacuum::ExecVacuum(mcx, stmt, is_top_level)?;
+            } else {
+                commands_analyze::ExecVacuum(mcx, stmt, is_top_level)?;
+            }
+        }
         T_ExplainStmt => {
             let stmt = parsetree.as_explain_stmt().unwrap();
             // SAFETY: see unify_stmt_lifetime.
@@ -352,6 +361,33 @@ fn dispatch_switch<'mcx>(
 
         // Everything else — the GRANT/DROP/RENAME/ALTER.../COMMENT/SECURITY
         // LABEL fast paths and the event-trigger-fenced DDL fan-out.
+        T_CreateStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmts = parse_utilcmd::transformCreateStmt(mcx, stmt_node, source_text)?;
+            for stmt in stmts.iter() {
+                match stmt.node_tag() {
+                    T_CreateStmt => {
+                        let cstmt = stmt
+                            .as_variant::<types_nodes::rawnodes::CreateStmt>()
+                            .expect("CreateStmt");
+                        tablecmds::DefineRelation(
+                            mcx,
+                            cstmt,
+                            types_rel::RELKIND_RELATION,
+                            types_core::InvalidOid,
+                            source_text,
+                        )?;
+                        xact::CommandCounterIncrement()?;
+                        // NewRelationCreateToastTable: the varlena gate lives
+                        // in DefineRelation; int-only tables need no TOAST.
+                    }
+                    _ => handler_gap("ProcessUtilitySlow side statements (blist/alist)"),
+                }
+            }
+        }
         _ => handler_gap("ProcessUtilitySlow DDL fan-out (utility slow lane)"),
     }
     Ok(())

@@ -1,6 +1,5 @@
-//! autovacuum.c boot surface: the GUC homes, autovac_init, and
-//! AutoVacuumingActive. Launcher/worker mains are unported; the recipe runs
-//! with the daemon path never launching a child.
+//! autovacuum.c: GUC homes, autovac_init, AutoVacuumingActive, and the
+//! launcher main (launcher.rs); AutoVacWorkerMain stays unported.
 
 #![allow(non_snake_case)]
 
@@ -8,6 +7,9 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
 use guc_tables::{vars, GucVarAccessors};
 use types_error::{ErrorLocation, ERRCODE_INVALID_PARAMETER_VALUE, WARNING};
+
+mod launcher;
+pub use launcher::AutoVacLauncherMain;
 
 const AUTOVACUUM_C: &str = "src/backend/postmaster/autovacuum.c";
 

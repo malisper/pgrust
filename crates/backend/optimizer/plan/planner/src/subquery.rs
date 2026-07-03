@@ -18,15 +18,18 @@ pub const EXPRKIND_TARGET: i32 = 1;
 pub const EXPRKIND_RTFUNC: i32 = 2;
 pub const EXPRKIND_LIMIT: i32 = 6;
 
-// Top-level arm; the recursive sub-Query entry (parent_root, hasRecursion,
-// setops) stays behind the SubLink/subquery panics below.
+// Top-level arm plus the make_subplan recursion (run.push_root pre-sets the
+// child root's query_level); hasRecursion/setops stay behind the panics below.
 pub fn subquery_planner<'mcx>(
     run: &mut PlannerRun<'mcx>,
     mut parse: Query<'mcx>,
     tuple_fraction: f64,
 ) -> PgResult<()> {
     let mcx = run.mcx;
-    run.root.query_level = 1;
+    if run.suspended_roots.is_empty() {
+        run.root.query_level = 1;
+    }
+    debug_assert!(run.root.query_level >= 1);
     if parse.resultRelation != 0 {
         run.root.all_result_relids = relids_singleton(mcx, parse.resultRelation as u32);
     }
@@ -41,7 +44,7 @@ pub fn subquery_planner<'mcx>(
     }
     replace_empty_jointree(mcx, &mut parse)?;
     if parse.hasSubLinks {
-        panic!("pull_up_sublinks (prepjointree.c): M2 sublink lane");
+        crate::subselect::pull_up_sublinks(run, &parse)?;
     }
     if parse
         .rtable
@@ -90,7 +93,13 @@ pub fn subquery_planner<'mcx>(
                 // panicked there); only the dangling flattened RTE remains.
                 debug_assert!(rte.subquery.is_none());
             }
-            RTEKind::RTE_FUNCTION | RTEKind::RTE_TABLEFUNC | RTEKind::RTE_VALUES => {
+            RTEKind::RTE_FUNCTION => {
+                // preprocess_function_rtes: inline_set_returning_function is a
+                // no-op for non-SQL-language functions and non-builtins cannot
+                // resolve on this lane; EXPRKIND_RTFUNC preprocess_expression
+                // skipped (grammar-Const args).
+            }
+            RTEKind::RTE_TABLEFUNC | RTEKind::RTE_VALUES => {
                 panic!("preprocess_function_rtes (prepjointree.c): {:?}; M2 lane", rte.rtekind)
             }
             RTEKind::RTE_CTE | RTEKind::RTE_NAMEDTUPLESTORE => {
@@ -113,18 +122,22 @@ pub fn subquery_planner<'mcx>(
     preprocess_rowmarks(&parse);
     run.root.hasHavingQual = parse.havingQual.is_some();
 
+    let has_sublinks = parse.hasSubLinks;
     parse.targetList =
-        preprocess_expression_list(run, parse.targetList, EXPRKIND_TARGET)?;
+        preprocess_expression_list(run, parse.targetList, EXPRKIND_TARGET, has_sublinks)?;
     debug_assert!(parse.withCheckOptions.is_nil());
     parse.returningList =
-        preprocess_expression_list(run, parse.returningList, EXPRKIND_TARGET)?;
-    preprocess_qual_conditions(run, &mut parse)?;
-    parse.havingQual = preprocess_expression(run, parse.havingQual, EXPRKIND_QUAL)?;
+        preprocess_expression_list(run, parse.returningList, EXPRKIND_TARGET, has_sublinks)?;
+    preprocess_qual_conditions(run, &mut parse, has_sublinks)?;
+    parse.havingQual =
+        preprocess_expression(run, parse.havingQual, EXPRKIND_QUAL, has_sublinks)?;
     if !parse.windowClause.is_nil() {
         panic!("preprocess_expression (planner.c): window frame offsets; M2 window lane");
     }
-    parse.limitOffset = preprocess_expression(run, parse.limitOffset, EXPRKIND_LIMIT)?;
-    parse.limitCount = preprocess_expression(run, parse.limitCount, EXPRKIND_LIMIT)?;
+    parse.limitOffset =
+        preprocess_expression(run, parse.limitOffset, EXPRKIND_LIMIT, has_sublinks)?;
+    parse.limitCount =
+        preprocess_expression(run, parse.limitCount, EXPRKIND_LIMIT, has_sublinks)?;
     if parse.onConflict.is_some() || !parse.mergeActionList.is_nil() {
         panic!("preprocess_expression (planner.c): ON CONFLICT/MERGE; M2 DML lane");
     }
@@ -151,15 +164,15 @@ pub fn subquery_planner<'mcx>(
         {
             // keep it in HAVING
         } else if !parse.groupClause.is_nil() {
-            let whereclause =
-                preprocess_expression(run, Some(hc), EXPRKIND_QUAL)?.expect("clause in, clause out");
+            let whereclause = preprocess_expression(run, Some(hc), EXPRKIND_QUAL, has_sublinks)?
+                .expect("clause in, clause out");
             move_qual_to_where(run, &mut parse, whereclause)?;
             parse.havingQual = None;
         } else {
             // Degenerate grouping: a copy goes to WHERE, the clause stays in
             // HAVING (C copyObject; the arena share is our copy model).
-            let whereclause =
-                preprocess_expression(run, Some(hc), EXPRKIND_QUAL)?.expect("clause in, clause out");
+            let whereclause = preprocess_expression(run, Some(hc), EXPRKIND_QUAL, has_sublinks)?
+                .expect("clause in, clause out");
             move_qual_to_where(run, &mut parse, whereclause)?;
         }
     }
@@ -172,7 +185,9 @@ pub fn subquery_planner<'mcx>(
     run.root.parse = run.intern_query(sealed);
 
     // Deferred half of standard_planner's parallel-mode assessment (lib.rs).
-    if run.assess_parallel {
+    // Guarded to the top level: C scans only the top query (recursing itself);
+    // a sub-level scan would clobber the verdict (Gather consumers are loud).
+    if run.assess_parallel && run.root.query_level == 1 {
         run.glob.max_parallel_hazard = clauses::max_parallel_hazard(sealed)?;
         run.glob.parallel_mode_ok = run.glob.max_parallel_hazard != crate::PROPARALLEL_UNSAFE;
     }
@@ -185,10 +200,12 @@ pub fn subquery_planner<'mcx>(
 
     grouping_planner(run, tuple_fraction)?;
 
-    // SS_identify_outer_params/SS_charge_for_initplans: no params, no initplans.
-    debug_assert!(run.root.plan_params.is_empty() && run.root.init_plans.is_empty());
+    // SS_identify_outer_params ran at run.push_root (see run.rs); correlated
+    // plan_params cannot exist on this lane.
+    debug_assert!(run.root.plan_params.is_empty());
 
     let final_rel = fetch_final_rel(run);
+    crate::subselect::ss_charge_for_initplans(run, final_rel)?;
     set_cheapest(run, final_rel)?;
     Ok(())
 }
@@ -197,6 +214,7 @@ pub fn preprocess_expression<'mcx>(
     run: &mut PlannerRun<'mcx>,
     expr: Option<Node<'mcx>>,
     kind: i32,
+    has_sublinks: bool,
 ) -> PgResult<Option<Node<'mcx>>> {
     let Some(mut expr) = expr else { return Ok(None) };
 
@@ -217,9 +235,11 @@ pub fn preprocess_expression<'mcx>(
     if kind == EXPRKIND_QUAL || kind == EXPRKIND_TARGET {
         clauses::convert_saop_to_hashed_saop(expr)?;
     }
-    // SS_process_sublinks unreachable: hasSubLinks panicked in the survey.
+    if has_sublinks {
+        expr = crate::subselect::ss_process_sublinks(run, expr, kind == EXPRKIND_QUAL)?;
+    }
     if run.root.query_level > 1 {
-        panic!("SS_replace_correlation_vars (subselect.c): M2 subquery lane");
+        expr = crate::subselect::ss_replace_correlation_vars(expr)?;
     }
     Ok(Some(expr))
 }
@@ -228,12 +248,14 @@ fn preprocess_expression_list<'mcx>(
     run: &mut PlannerRun<'mcx>,
     list: NodeList<'mcx>,
     kind: i32,
+    has_sublinks: bool,
 ) -> PgResult<NodeList<'mcx>> {
     if list.is_nil() {
         return Ok(list);
     }
     let node = Node::mk_list(run.mcx, list)?;
-    let folded = preprocess_expression(run, Some(node), kind)?.expect("list in, list out");
+    let folded =
+        preprocess_expression(run, Some(node), kind, has_sublinks)?.expect("list in, list out");
     match folded.node_tag() {
         // clone_in copies the 8-byte cells, mirroring C's mutator list_copy.
         NodeTag::T_List => Ok(folded.as_list().unwrap().clone_in(run.mcx)?),
@@ -278,7 +300,11 @@ fn move_qual_to_where<'mcx>(
 
 // C mutates jointree->quals in place; the FromExpr is shared here, so an
 // equivalent one carries the preprocessed quals.
-fn preprocess_qual_conditions<'mcx>(run: &mut PlannerRun<'mcx>, parse: &mut Query<'mcx>) -> PgResult<()> {
+fn preprocess_qual_conditions<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    parse: &mut Query<'mcx>,
+    has_sublinks: bool,
+) -> PgResult<()> {
     let f = parse.jointree.expect("jointree is a FromExpr");
     for child in &f.fromlist {
         match child.node_tag() {
@@ -286,7 +312,7 @@ fn preprocess_qual_conditions<'mcx>(run: &mut PlannerRun<'mcx>, parse: &mut Quer
             other => panic!("preprocess_qual_conditions (planner.c): {other:?}; M2 join lane"),
         }
     }
-    let quals = preprocess_expression(run, f.quals, EXPRKIND_QUAL)?;
+    let quals = preprocess_expression(run, f.quals, EXPRKIND_QUAL, has_sublinks)?;
     parse.jointree = Some(alloc_leak_in(
         run.mcx,
         types_nodes::primnodes::FromExpr { fromlist: f.fromlist.clone_in(run.mcx)?, quals },

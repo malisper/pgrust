@@ -18,8 +18,31 @@ pub(crate) struct Stacks<'mcx> {
     ss: NonNull<i16>,
     cap: usize,
     arena_backed: bool,
-    // Set to the pre-reduce sp before each action call ($n accessors).
-    sp: usize,
+}
+
+// The action fn's window onto the popped RHS slots: two base pointers passed
+// by value, so `Stacks` itself never escapes into the outlined reduce call
+// (C keeps yyvsp/yylsp register-resident the same way).
+#[derive(Clone, Copy)]
+pub(crate) struct ActionView<'mcx> {
+    vs: NonNull<YYSTYPE<'mcx>>,
+    ls: NonNull<i32>,
+}
+
+impl<'mcx> ActionView<'mcx> {
+    // The action's $n / @n (moves; single read per slot, n is 1-based and
+    // bounded by the rule's yylen — the LALR discipline).
+    #[inline(always)]
+    pub(crate) fn v(&self, n: usize) -> YYSTYPE<'mcx> {
+        // SAFETY: base + yylen slots are live (reduce_and_goto contract).
+        unsafe { self.vs.add(n - 1).read() }
+    }
+
+    #[inline(always)]
+    pub(crate) fn l(&self, n: usize) -> i32 {
+        // SAFETY: as v().
+        unsafe { self.ls.add(n - 1).read() }
+    }
 }
 
 fn layout(cap: usize) -> (Layout, usize, usize) {
@@ -46,7 +69,6 @@ impl<'mcx> Stacks<'mcx> {
                 ss: NonNull::new_unchecked(ss),
                 cap,
                 arena_backed: false,
-                sp: 0,
             }
         }
     }
@@ -66,7 +88,6 @@ impl<'mcx> Stacks<'mcx> {
                 ss: base.add(ss_off).cast(),
                 cap,
                 arena_backed: true,
-                sp: 0,
             })
         }
     }
@@ -129,7 +150,7 @@ impl<'mcx> Stacks<'mcx> {
             return Err(Box::new(PgError::error("memory exhausted")));
         }
         let new_cap = (self.cap * 2).clamp(crate::parse::YYINITDEPTH, YYMAXDEPTH);
-        let mut new = Stacks::alloc(mcx, new_cap)?;
+        let new = Stacks::alloc(mcx, new_cap)?;
         // SAFETY: live values/locations and live+1 states are initialized.
         unsafe {
             core::ptr::copy_nonoverlapping(self.vs.as_ptr(), new.vs.as_ptr(), live);
@@ -141,27 +162,16 @@ impl<'mcx> Stacks<'mcx> {
                 mcx.deallocate(self.vs.cast(), old_layout);
             }
         }
-        new.sp = self.sp;
         *self = new;
         Ok(())
     }
 
+    // SAFETY: `base` and the yylen slots above it must be live.
     #[inline(always)]
-    pub(crate) fn set_sp(&mut self, sp: usize) {
-        self.sp = sp;
-    }
-
-    // The action's $n / @n (moves; single read per slot).
-    #[inline(always)]
-    pub(crate) fn v(&mut self, yylen: usize, n: usize) -> YYSTYPE<'mcx> {
-        let i = self.sp - yylen + (n - 1);
-        // SAFETY: n <= yylen <= sp, so i < sp; slot unread since its push.
-        unsafe { self.take_val(i) }
-    }
-
-    #[inline(always)]
-    pub(crate) fn l(&self, yylen: usize, n: usize) -> i32 {
-        // SAFETY: as v().
-        unsafe { self.loc(self.sp - yylen + (n - 1)) }
+    pub(crate) unsafe fn action_view(&self, base: usize) -> ActionView<'mcx> {
+        // SAFETY: caller contract.
+        unsafe {
+            ActionView { vs: NonNull::new_unchecked(self.vs.as_ptr().add(base)), ls: NonNull::new_unchecked(self.ls.as_ptr().add(base)) }
+        }
     }
 }

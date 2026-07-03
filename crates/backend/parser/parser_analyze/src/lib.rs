@@ -221,11 +221,13 @@ pub fn transformStmt<'mcx>(
         NodeTag::T_UpdateStmt => {
             transformUpdateStmt(mcx, pstate, parse_tree.as_update_stmt().unwrap())?
         }
+        NodeTag::T_ExplainStmt => {
+            transformExplainStmt(mcx, pstate, parse_tree)?
+        }
         t @ (NodeTag::T_MergeStmt
         | NodeTag::T_ReturnStmt
         | NodeTag::T_PLAssignStmt
         | NodeTag::T_DeclareCursorStmt
-        | NodeTag::T_ExplainStmt
         | NodeTag::T_CreateTableAsStmt
         | NodeTag::T_CallStmt) => panic!(
             "transformStmt (analyze.c): transform arm for {t:?} unported — \
@@ -241,6 +243,30 @@ pub fn transformStmt<'mcx>(
 
     result.querySource = QuerySource::QSRC_ORIGINAL;
     result.canSetTag = true;
+    Ok(result)
+}
+
+// transformExplainStmt; the GENERIC_PLAN variable-parameter leg is dead
+// (options never parse: the gram options arms are loud).
+fn transformExplainStmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    explain_node: Node<'mcx>,
+) -> PgResult<Query<'mcx>> {
+    let stmt = explain_node.as_explain_stmt().unwrap();
+    debug_assert!(stmt.options.is_nil());
+    let inner = stmt.query.expect("ExplainStmt has a query");
+    let analyzed = transformOptionalSelectInto(mcx, pstate, inner)?;
+    let query_node = Node::mk(mcx, analyzed)?;
+    // SAFETY: raw tree owned by this analysis; no derived reference is live.
+    unsafe {
+        explain_node
+            .with_mut::<types_nodes::parsenodes::ExplainStmt, _>(|e| e.query = Some(query_node))
+            .expect("node built as ExplainStmt");
+    }
+    let mut result = Query::default();
+    result.commandType = CmdType::CMD_UTILITY;
+    result.utilityStmt = Some(explain_node);
     Ok(result)
 }
 

@@ -301,7 +301,11 @@ pub fn restriction_selectivity<'mcx>(
     let result = match oprrest {
         F_EQSEL => crate::selfuncs::eqsel(run, operatorid, args, varrelid, inputcollid)?,
         F_SCALARLTSEL | F_SCALARGTSEL | F_SCALARLESEL | F_SCALARGESEL => {
-            crate::selfuncs::scalarineqsel_wrapper(run, args, varrelid)?
+            let isgt = oprrest == F_SCALARGTSEL || oprrest == F_SCALARGESEL;
+            let iseq = oprrest == F_SCALARLESEL || oprrest == F_SCALARGESEL;
+            crate::selfuncs::scalarineqsel_wrapper(
+                run, operatorid, args, varrelid, inputcollid, isgt, iseq,
+            )?
         }
         other => panic!(
             "restriction_selectivity (plancat.c): oprrest {other}; M2 selfuncs lane"
@@ -347,13 +351,40 @@ pub fn join_selectivity<'mcx>(
     Ok(result)
 }
 
-// add_function_cost (plancat.c), no-prosupport arm.
+// add_function_cost (plancat.c). DIVERGENCE: callers don't thread the calling
+// node, so the support request carries node=None (in-core cost-support
+// functions all tolerate that and fall back to procost).
 pub fn add_function_cost(funcid: Oid, cost: &mut types_pathnodes::QualCost) -> PgResult<()> {
     let shape = syscache_seams::pg_proc_cost_shape::call(funcid)?
         .unwrap_or_else(|| panic!("cache lookup failed for function {funcid}"));
     if shape.prosupport != 0 {
-        panic!("add_function_cost (plancat.c): SupportRequestCost for {funcid}; M2 lane");
+        let mut req = types_nodes::supportnodes::SupportRequestCost::new(funcid, None);
+        let addr = core::ptr::from_mut(&mut req) as usize;
+        let result =
+            fmgr_core::oid_function_call1_coll(shape.prosupport, 0, datum::Datum::from_usize(addr))?;
+        if result.as_usize() == addr {
+            cost.startup += req.startup;
+            cost.per_tuple += req.per_tuple;
+            return Ok(());
+        }
     }
     cost.per_tuple += shape.procost as f64 * crate::gucs::cpu_operator_cost();
     Ok(())
+}
+
+// get_function_rows (plancat.c); root is not threaded (support functions on
+// this lane read only Const args).
+pub fn get_function_rows(funcid: Oid, node: Option<types_nodes::Node<'_>>) -> PgResult<f64> {
+    let shape = syscache_seams::pg_proc_cost_shape::call(funcid)?
+        .unwrap_or_else(|| panic!("cache lookup failed for function {funcid}"));
+    if shape.prosupport != 0 {
+        let mut req = types_nodes::supportnodes::SupportRequestRows::new(funcid, node);
+        let addr = core::ptr::from_mut(&mut req) as usize;
+        let result =
+            fmgr_core::oid_function_call1_coll(shape.prosupport, 0, datum::Datum::from_usize(addr))?;
+        if result.as_usize() == addr {
+            return Ok(req.rows);
+        }
+    }
+    Ok(shape.prorows as f64)
 }

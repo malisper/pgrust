@@ -15,3 +15,6 @@ adt_datetime = { path = "../adt_datetime" }
 timestamp_seams = { path = "../timestamp_seams" }
 xact = { path = "../../../access/transam/xact" }
 libc = "0.2"
+
+[dev-dependencies]
+pgtz = { path = "../../../timezone/pgtz" }

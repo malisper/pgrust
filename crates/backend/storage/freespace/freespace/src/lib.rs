@@ -1,5 +1,5 @@
-//! freespace.c/fsmpage.c/indexfsm.c INSERT lane; the vacuum/truncate/redo
-//! lanes are loud named panics.
+//! freespace.c/fsmpage.c/indexfsm.c INSERT + vacuum-range lanes; the
+//! whole-map-vacuum/truncate/redo lanes are loud named panics.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -112,11 +112,74 @@ pub fn FreeSpaceMapVacuum(_rel: &RelationData<'_>) -> ! {
 }
 
 pub fn FreeSpaceMapVacuumRange(
-    _rel: &RelationData<'_>,
-    _start: BlockNumber,
-    _end: BlockNumber,
-) -> ! {
-    unported("FreeSpaceMapVacuumRange (vacuum lane, freespace.c)");
+    rel: &RelationData<'_>,
+    start: BlockNumber,
+    end: BlockNumber,
+) -> PgResult<()> {
+    if end > start {
+        fsm_vacuum_page(rel, FSM_ROOT_ADDRESS, start, end)?;
+    }
+    Ok(())
+}
+
+/// Returns (max_avail, eof) for the page at `addr`; eof means past FSM end.
+fn fsm_vacuum_page(
+    rel: &RelationData<'_>,
+    addr: FSMAddress,
+    start: BlockNumber,
+    end: BlockNumber,
+) -> PgResult<(u8, bool)> {
+    let Some(pin) = fsm_readbuf(rel, addr, false)? else {
+        return Ok((0, true));
+    };
+    // SAFETY: pinned; per-node writes below follow C's lock discipline.
+    let page = unsafe { FsmPage::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+
+    if addr.level > FSM_BOTTOM_LEVEL {
+        let (mut fsm_start, mut fsm_start_slot) = fsm_get_location(start);
+        let (mut fsm_end, mut fsm_end_slot) = fsm_get_location(end - 1);
+        while fsm_start.level < addr.level {
+            (fsm_start, fsm_start_slot) = fsm_get_parent(fsm_start);
+            (fsm_end, fsm_end_slot) = fsm_get_parent(fsm_end);
+        }
+        debug_assert!(fsm_start.level == addr.level);
+
+        let start_slot: i32 = match fsm_start.logpageno.cmp(&addr.logpageno) {
+            core::cmp::Ordering::Equal => fsm_start_slot as i32,
+            core::cmp::Ordering::Greater => SLOTS_PER_FSM_PAGE,
+            core::cmp::Ordering::Less => 0,
+        };
+        let end_slot: i32 = match fsm_end.logpageno.cmp(&addr.logpageno) {
+            core::cmp::Ordering::Equal => fsm_end_slot as i32,
+            core::cmp::Ordering::Greater => SLOTS_PER_FSM_PAGE - 1,
+            core::cmp::Ordering::Less => -1,
+        };
+
+        let mut eof = false;
+        for slot in start_slot..=end_slot {
+            let child_avail = if !eof {
+                let (avail, child_eof) =
+                    fsm_vacuum_page(rel, fsm_get_child(addr, slot as u16), start, end)?;
+                eof = child_eof;
+                avail
+            } else {
+                0
+            };
+
+            if fsm_get_avail(page, slot) != child_avail {
+                bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+                fsm_set_avail(page, slot, child_avail);
+                bufmgr_seams::mark_buffer_dirty_hint::call(pin.buffer(), false)?;
+                bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
+            }
+        }
+    }
+
+    let max_avail = fsm_get_max_avail(page);
+    // Unlocked hint write, as C: encourages reuse of low-numbered pages.
+    page.set_next_slot(0);
+    pin.release();
+    Ok((max_avail, false))
 }
 
 pub fn GetFreeIndexPage(rel: &RelationData<'_>) -> PgResult<BlockNumber> {

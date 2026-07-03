@@ -1,9 +1,10 @@
 //! fmgr-shaped wrappers (`fc_<cname>`) and the `FLOAT_BUILTINS` registry table
 //! for fmgr-core. Not registrable yet (frame conventions pending, the int.c
-//! precedent): recv/send (2424-2427, wire), btfloat{4,8}sortsupport
-//! (3132/3133, SortSupport node), and the aggregate transition/final rows
-//! (208, 222, 276, 1830-1832, 2512-2513, 2806-2817, 3342 — float8[] transvalue
-//! allocation belongs to the agg frame); their value cores live in the crate.
+//! precedent): btfloat{4,8}sortsupport (3132/3133, SortSupport node), and the
+//! aggregate transition/final rows (208, 222, 276, 1830-1832, 2512-2513,
+//! 2806-2817, 3342 — float8[] transvalue allocation belongs to the agg frame);
+//! their value cores live in the crate. recv/send (2424-2427) ride the
+//! binary-wire fmgr frame (types_fmgr::wire).
 
 use alloc::borrow::Cow;
 use alloc::string::String;
@@ -11,12 +12,37 @@ use alloc::string::String;
 use ::datum::Datum;
 use ::types_core::Oid;
 use ::types_error::PgResult;
-use ::types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
+use ::types_fmgr::{
+    varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
+};
 
-#[cold]
-#[inline(never)]
-fn soft_context_unported(name: &str) -> ! {
-    panic!("{name}: fcinfo.context soft-error demux is fmgr-core's unit (not ported)")
+// C float{4,8}recv/send bodies: pq_getmsgfloat{4,8} (advances the buffer
+// cursor, which the binary-bind whole-buffer check depends on) / begintypsend
+// + pq_sendfloat + endtypsend.
+pub fn fc_float4recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: recv arg0 is the live StringInfo pointer per the recv ABI.
+    let buf = unsafe { fcinfo.arg_stringinfo(0) };
+    Ok(Datum::from_f32(pqformat::pq_getmsgfloat4(buf)?))
+}
+
+pub fn fc_float4send(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a] = fcinfo.args_n::<1>();
+    let mut b = pqformat::pq_begintypsend(fcinfo.result_mcx())?;
+    pqformat::pq_sendfloat4(&mut b, a.value.as_f32())?;
+    Ok(varlena_result(pqformat::pq_endtypsend(b)))
+}
+
+pub fn fc_float8recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: recv arg0 is the live StringInfo pointer per the recv ABI.
+    let buf = unsafe { fcinfo.arg_stringinfo(0) };
+    Ok(Datum::from_f64(pqformat::pq_getmsgfloat8(buf)?))
+}
+
+pub fn fc_float8send(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a] = fcinfo.args_n::<1>();
+    let mut b = pqformat::pq_begintypsend(fcinfo.result_mcx())?;
+    pqformat::pq_sendfloat8(&mut b, a.value.as_f64())?;
+    Ok(varlena_result(pqformat::pq_endtypsend(b)))
 }
 
 // C pallocs each cstring result into the per-row context; the backend thread
@@ -27,23 +53,24 @@ std::thread_local! {
         const { core::cell::UnsafeCell::new([0; crate::MAXDOUBLEWIDTH]) };
 }
 
-fn in_arg<'a>(fcinfo: &'a Fcinfo, name: &'static str) -> Cow<'a, str> {
-    if fcinfo.context.is_some() {
-        soft_context_unported(name);
-    }
+fn in_arg<'a>(fcinfo: &'a Fcinfo) -> Cow<'a, str> {
     // SAFETY: catalog arg 0 of the in-functions is cstring (typlen -2).
     let s = unsafe { fcinfo.arg_cstring(0) };
     String::from_utf8_lossy(s.to_bytes())
 }
 
 pub fn fc_float4in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let num = in_arg(fcinfo, "float4in");
-    Ok(Datum::from_f32(crate::float4in(&num, None)?))
+    let num = in_arg(fcinfo);
+    // SAFETY: context, if set, rides per the ErrorSaveNode contract for this call.
+    let esc = unsafe { fcinfo.soft_error_context() };
+    Ok(Datum::from_f32(crate::float4in(&num, esc)?))
 }
 
 pub fn fc_float8in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let num = in_arg(fcinfo, "float8in");
-    Ok(Datum::from_f64(crate::float8in(&num, None)?))
+    let num = in_arg(fcinfo);
+    // SAFETY: context, if set, rides per the ErrorSaveNode contract for this call.
+    let esc = unsafe { fcinfo.soft_error_context() };
+    Ok(Datum::from_f64(crate::float8in(&num, esc)?))
 }
 
 pub fn fc_float4out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -273,6 +300,10 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
 // (log/ln/round/... over the same prosrc) each get their row, as in C's
 // fmgr_builtins[].
 pub const FLOAT_BUILTINS: &[FmgrBuiltin] = &[
+    b(2424, "float4recv", 1, fc_float4recv),
+    b(2425, "float4send", 1, fc_float4send),
+    b(2426, "float8recv", 1, fc_float8recv),
+    b(2427, "float8send", 1, fc_float8send),
     b(200, "float4in", 1, fc_float4in),
     b(201, "float4out", 1, fc_float4out),
     b(202, "float4mul", 2, fc_float4mul),

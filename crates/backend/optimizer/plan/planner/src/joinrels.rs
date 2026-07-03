@@ -202,7 +202,10 @@ fn build_join_rel<'mcx>(
     let restrictlist = build_joinrel_restrictlist(run, &joinrelids, outer_rel, inner_rel);
     build_joinrel_joinlist(run, joinrel, outer_rel, inner_rel);
 
-    debug_assert!(run.root.eq_classes.is_empty());
+    // generate_join_implied_equalities is a no-op here: eclass-lite ECs are
+    // single-expr and never merged, so join equality clauses stay in the
+    // joininfo lists (initsplan divergence note) and restrictlist already
+    // carries them.
 
     set_joinrel_size_estimates(run, joinrel, outer_rel, inner_rel, sjinfo, &restrictlist)?;
 

@@ -6,7 +6,6 @@
 use types_error::PgResult;
 use types_storage::waiteventset::{WL_LATCH_SET, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE};
 
-use init_small::globals as g;
 
 // WAIT_EVENT_CLIENT_READ / WAIT_EVENT_CLIENT_WRITE: PG_WAIT_CLIENT | 0 / 1.
 const WAIT_EVENT_CLIENT_READ: u32 = 0x0600_0000;
@@ -32,13 +31,14 @@ fn encrypted_arm_unported() -> ! {
     panic!("be-secure: TLS/GSS transport arms are unported (ssl_in_use on a plain-socket build)")
 }
 
+// pqcomm's cells, never MyProcPort: auth-time FATALs send under its borrow.
 fn my_port_state() -> (i32, bool) {
-    g::WithMyProcPort(|p| {
-        if p.ssl_in_use {
-            encrypted_arm_unported();
-        }
-        (p.sock, p.noblock)
-    })
+    let (sock, noblock, ssl_in_use) =
+        pqcomm::client_socket_state().expect("secure_read/write before pq_init");
+    if ssl_in_use {
+        encrypted_arm_unported();
+    }
+    (sock, noblock)
 }
 
 /// The seam's `ssize_t` contract: `Ok(0)` is EOF, `Err(errno)` is the C `-1`.

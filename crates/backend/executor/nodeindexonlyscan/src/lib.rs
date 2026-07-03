@@ -61,7 +61,7 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
                 .expect("index-only scan requires es_snapshot");
             let mut scandesc = index_beginscan(
                 mcx,
-                &self.ss.ss_currentRelation,
+                self.ss.ss_currentRelation.as_ref().expect("IOS has a relation"),
                 self.ioss_RelationDesc.as_ref().expect("index relation open"),
                 snapshot,
                 self.ioss_ScanKeys.len() as i32,
@@ -99,7 +99,7 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
             // Skip the heap fetch when the VM says the TID's page is
             // all-visible; caller-recheck caveats are C's (visibilitymap.c).
             if !::visibilitymap::vm_all_visible(
-                &ss.ss_currentRelation,
+                ss.ss_currentRelation.as_ref().expect("IOS has a relation"),
                 ItemPointerGetBlockNumber(&tid),
                 ioss_VMBuffer,
             )? {
@@ -161,7 +161,7 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
                     .as_deref()
                     .expect("index-only scan requires es_snapshot");
                 predicate_seams::predicate_lock_page::call(
-                    &ss.ss_currentRelation,
+                    ss.ss_currentRelation.as_ref().expect("IOS has a relation"),
                     ItemPointerGetBlockNumber(&tid),
                     snap,
                 )?;
@@ -296,7 +296,7 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
         ps_ProjInfo: None,
         ps_ExprContext,
         scanrelid: node.scan.scanrelid,
-        ss_currentRelation: rel,
+        ss_currentRelation: Some(rel),
         ss_currentScanDesc: None,
         ss_ScanTupleSlot,
     };
@@ -308,8 +308,9 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
         INDEX_VAR as u32,
         &tup_desc,
     )?;
-    ss.qual = exec_init_qual(mcx, &node.scan.plan.qual)?;
-    let recheckqual = exec_init_qual(mcx, &node.recheckqual)?;
+    let params = estate.param_bind();
+    ss.qual = exec_init_qual(mcx, &node.scan.plan.qual, params)?;
+    let recheckqual = exec_init_qual(mcx, &node.recheckqual, params)?;
 
     if !node.indexorderby.is_nil() {
         orderby_unported();

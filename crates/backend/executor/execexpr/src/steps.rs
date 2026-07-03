@@ -50,6 +50,9 @@ pub enum Step {
     AssignTmp { resultnum: u16 },
     AssignTmpMakeRo { resultnum: u16 },
     Const { value: Datum, isnull: bool, out: OutRef },
+    // Param pointers resolve at compile into address-stable params arrays.
+    ParamExtern { prm: NonNull<::types_portal::params::ParamExternData>, out: OutRef },
+    ParamExec { prm: NonNull<::types_portal::params::ParamExecData>, out: OutRef },
     FuncExpr { call: FuncCall, out: OutRef },
     FuncExprStrict1 { call: FuncCall, out: OutRef },
     FuncExprStrict2 { call: FuncCall, out: OutRef },
@@ -355,6 +358,9 @@ pub struct ExprState<'mcx> {
     pub(crate) frames: PgVec<'mcx, FuncFrame<'mcx>>,
     pub(crate) kernel: Kernel,
     pub(crate) flags: u8,
+    // PARAM_EXEC ids this expression reads; the owning node resolves pending
+    // initplans against these before evaluation (nodeSubplan.c lane).
+    pub(crate) param_exec_deps: PgVec<'mcx, u32>,
 }
 
 impl<'mcx> ExprState<'mcx> {
@@ -373,6 +379,7 @@ impl<'mcx> ExprState<'mcx> {
                 frames: PgVec::new_in(mcx),
                 kernel: Kernel::Program,
                 flags: 0,
+                param_exec_deps: PgVec::new_in(mcx),
             });
             Ok(::mcx::PgBox::from_raw_in(p.as_ptr(), mcx))
         }
@@ -380,6 +387,10 @@ impl<'mcx> ExprState<'mcx> {
 
     pub fn steps(&self) -> &[Step] {
         &self.steps
+    }
+
+    pub fn param_exec_deps(&self) -> &[u32] {
+        &self.param_exec_deps
     }
 
     pub fn kernel(&self) -> Kernel {
