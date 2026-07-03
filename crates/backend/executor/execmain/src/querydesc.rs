@@ -261,3 +261,18 @@ pub(crate) fn query_desc_sort_instrument_seam(
         })
     })
 }
+
+pub(crate) fn query_desc_incsort_instrument_seam(
+    h: QueryDescHandle,
+    plan_node_id: i32,
+) -> Option<types_core::instrument::IncrementalSortInfo> {
+    with_qd(h, |qd| {
+        let exec = qd.exec.as_ref()?;
+        exec.with(|d| {
+            d.estate
+                .es_incsort_instrumentation
+                .iter()
+                .find_map(|(id, si)| (*id == plan_node_id).then_some(*si))
+        })
+    })
+}

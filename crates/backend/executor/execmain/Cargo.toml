@@ -37,6 +37,7 @@ tidbitmap = { path = "../../nodes/tidbitmap" }
 nodeagg = { path = "../nodeagg" }
 nodematerial = { path = "../nodematerial" }
 nodesort = { path = "../nodesort" }
+nodeincrementalsort = { path = "../nodeincrementalsort" }
 nodeunique = { path = "../nodeunique" }
 nodelimit = { path = "../nodelimit" }
 nodehash = { path = "../nodehash" }

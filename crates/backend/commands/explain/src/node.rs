@@ -203,6 +203,7 @@ pub fn ExplainNode<'mcx>(
         }
         NodeTag::T_Unique => "Unique",
         NodeTag::T_Sort => "Sort",
+        NodeTag::T_IncrementalSort => "Incremental Sort",
         NodeTag::T_WindowAgg => "WindowAgg",
         NodeTag::T_Limit => "Limit",
         t => node_gap("ExplainNode", &format!("{t:?} display arm unported (M2+ plan lanes)")),
@@ -355,6 +356,10 @@ pub fn ExplainNode<'mcx>(
             show_sort_keys(node, es)?;
             show_sort_info(node, es)?;
         }
+        NodeTag::T_IncrementalSort => {
+            show_incremental_sort_keys(node, es)?;
+            show_incremental_sort_info(node, es)?;
+        }
         NodeTag::T_WindowAgg => {
             show_window_def(node, es)?;
             let w = node.as_window_agg().unwrap();
@@ -440,18 +445,35 @@ fn show_plan_tlist<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgRes
 // show_sort_keys -> show_sort_group_keys (explain.c), Var-only sort keys.
 fn show_sort_keys<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResult<()> {
     let sort = node.as_sort().expect("Sort node");
+    show_sort_node_keys(sort, 0, es)
+}
+
+fn show_incremental_sort_keys<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResult<()> {
+    let isort = node.as_incremental_sort().expect("IncrementalSort node");
+    show_sort_node_keys(&isort.sort, isort.nPresortedCols as usize, es)
+}
+
+fn show_sort_node_keys<'mcx>(
+    sort: &types_nodes::plannodes::Sort<'mcx>,
+    n_presorted_keys: usize,
+    es: &mut ExplainState<'mcx>,
+) -> PgResult<()> {
     if sort.numCols <= 0 {
         return Ok(());
     }
     let mcx = es.str.allocator();
     let useprefix = es.rtable_size > 1 || es.verbose;
     let mut result: PgVec<'mcx, PgString<'mcx>> = PgVec::new_in(mcx);
+    let mut presorted: PgVec<'mcx, PgString<'mcx>> = PgVec::new_in(mcx);
     for keyno in 0..sort.numCols as usize {
         let resno = sort.sortColIdx[keyno];
         let tle = get_tle_by_resno(&sort.plan.targetlist, resno)
             .unwrap_or_else(|| node_gap("show_sort_group_keys", "no tlist entry for key column"));
         let mut buf = PgString::new_in(mcx);
         deparse_plan_var(sort.plan.lefttree, tle.expr, useprefix, es, &mut buf)?;
+        if keyno < n_presorted_keys {
+            presorted.push(PgString::from_str_in(buf.as_str(), mcx)?);
+        }
         show_sortorder_options(
             &mut buf,
             tle.expr,
@@ -462,6 +484,9 @@ fn show_sort_keys<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResu
         result.push(buf);
     }
     ExplainPropertyList("Sort Key", &result, es);
+    if n_presorted_keys > 0 {
+        ExplainPropertyList("Presorted Key", &presorted, es);
+    }
     Ok(())
 }
 
@@ -485,6 +510,71 @@ fn show_sort_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResu
         ExplainPropertyText("Sort Method", sort_method, es);
         ExplainPropertyInteger("Sort Space Used", Some("kB"), si.spaceUsed, es);
         ExplainPropertyText("Sort Space Type", space_type, es);
+    }
+    Ok(())
+}
+
+// show_incremental_sort_group_info (explain.c), text format (non-text gaps
+// upstream). Memory values inherit the sort-info divergence (arena vs palloc
+// accounting) — notes/sort-explain-lane.md.
+fn show_incremental_sort_group_info(
+    group_info: &types_core::instrument::IncrementalSortGroupInfo,
+    group_label: &str,
+    indent: bool,
+    es: &mut ExplainState<'_>,
+) {
+    use types_core::instrument::TuplesortMethod;
+    const METHOD_BITS: [TuplesortMethod; 4] = [
+        TuplesortMethod::TopNHeapsort,
+        TuplesortMethod::Quicksort,
+        TuplesortMethod::ExternalSort,
+        TuplesortMethod::ExternalMerge,
+    ];
+    let nmethods = METHOD_BITS.iter().filter(|m| group_info.sortMethods & m.bit() != 0).count();
+    if indent {
+        for _ in 0..es.indent * 2 {
+            append!(es, " ");
+        }
+    }
+    append!(es, "{} Groups: {}  Sort Method", group_label, group_info.groupCount);
+    append!(es, "{}", if nmethods > 1 { "s: " } else { ": " });
+    let mut emitted = 0;
+    for m in METHOD_BITS.iter().filter(|m| group_info.sortMethods & m.bit() != 0) {
+        if emitted > 0 {
+            append!(es, ", ");
+        }
+        append!(es, "{}", m.name());
+        emitted += 1;
+    }
+    if group_info.maxMemorySpaceUsed > 0 {
+        let avg = group_info.totalMemorySpaceUsed / group_info.groupCount;
+        append!(es, "  Average Memory: {}kB  Peak Memory: {}kB", avg, group_info.maxMemorySpaceUsed);
+    }
+    if group_info.maxDiskSpaceUsed > 0 {
+        let avg = group_info.totalDiskSpaceUsed / group_info.groupCount;
+        append!(es, "  Average Disk: {}kB  Peak Disk: {}kB", avg, group_info.maxDiskSpaceUsed);
+    }
+    append!(es, "\n");
+}
+
+// show_incremental_sort_info (explain.c); the shared_info worker stanza has
+// no parallel lane.
+fn show_incremental_sort_info<'mcx>(
+    node: Node<'mcx>,
+    es: &mut ExplainState<'mcx>,
+) -> PgResult<()> {
+    if !es.analyze || es.qd.is_null() {
+        return Ok(());
+    }
+    let id = plan_of(node).plan_node_id;
+    let Some(info) = execmain_seams::query_desc_incsort_instrument::call(es.qd, id) else {
+        return Ok(());
+    };
+    if info.fullsortGroupInfo.groupCount > 0 {
+        show_incremental_sort_group_info(&info.fullsortGroupInfo, "Full-sort", true, es);
+        if info.prefixsortGroupInfo.groupCount > 0 {
+            show_incremental_sort_group_info(&info.prefixsortGroupInfo, "Pre-sorted", true, es);
+        }
     }
     Ok(())
 }

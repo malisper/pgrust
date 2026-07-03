@@ -85,6 +85,14 @@ pub fn exec_re_scan<'mcx>(
             }
             Ok(())
         }
+        // ExecReScanIncrementalSort: no efficient rescan (single batch in
+        // memory); the outer child is always rescanned (chgParam NULL until
+        // the Param lanes land).
+        PlanStateNode::IncrementalSort(s) => {
+            let s = &mut **s;
+            ::nodeincrementalsort::exec_rescan_incremental_sort(&mut s.state, estate);
+            exec_re_scan(&mut s.outer, estate)
+        }
         // ExecReScanUnique: outer child rescanned when chgParam is NULL
         // (always, until the Param lanes land).
         PlanStateNode::Unique(u) => {

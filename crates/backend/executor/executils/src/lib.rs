@@ -14,7 +14,7 @@ use ::mcx::{Mcx, McxOwned, MemoryContext, PgVec};
 use ::queryenvironment::QueryEnvironment;
 use ::snapmgr::Snapshot;
 use ::types_core::instrument::{
-    AggregateInstrumentation, Instrumentation, TuplesortInstrumentation,
+    AggregateInstrumentation, IncrementalSortInfo, Instrumentation, TuplesortInstrumentation,
 };
 use ::types_core::CommandId;
 use ::types_error::{PgError, PgResult};
@@ -241,6 +241,7 @@ pub struct EStateData<'mcx> {
     // (plan_node_id, metrics); C's AggState fields, hoisted for the Plan walk.
     pub es_agg_instrumentation: PgVec<'mcx, (i32, AggregateInstrumentation)>,
     pub es_sort_instrumentation: PgVec<'mcx, (i32, TuplesortInstrumentation)>,
+    pub es_incsort_instrumentation: PgVec<'mcx, (i32, IncrementalSortInfo)>,
     pub es_finished: bool,
     es_exprcontexts: PgVec<'mcx, Option<ExprContextData<'mcx>>>,
     pub es_subplanstates: PgVec<'mcx, SubplanStateCell>,
@@ -293,6 +294,7 @@ impl<'mcx> EStateData<'mcx> {
             es_instrumentation: PgVec::new_in(mcx),
             es_agg_instrumentation: PgVec::new_in(mcx),
             es_sort_instrumentation: PgVec::new_in(mcx),
+            es_incsort_instrumentation: PgVec::new_in(mcx),
             es_finished: false,
             es_exprcontexts: PgVec::new_in(mcx),
             es_subplanstates: PgVec::new_in(mcx),

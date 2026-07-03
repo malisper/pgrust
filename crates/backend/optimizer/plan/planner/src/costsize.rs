@@ -935,6 +935,102 @@ pub fn cost_sort_shape(
     )
 }
 
+/// cost_incremental_sort (costsize.c) without a Path to write into; returns
+/// (disabled_nodes, startup, total, rows).
+#[allow(clippy::too_many_arguments)]
+pub fn cost_incremental_sort_shape<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    pathkeys: &[types_pathnodes::PathKey],
+    presorted_keys: usize,
+    input_disabled_nodes: i32,
+    input_startup_cost: f64,
+    input_total_cost: f64,
+    input_tuples: f64,
+    width: i32,
+    comparison_cost: f64,
+    sort_mem: i32,
+    limit_tuples: f64,
+) -> PgResult<(i32, f64, f64, f64)> {
+    debug_assert!(presorted_keys > 0 && presorted_keys < pathkeys.len());
+    let input_run_cost = input_total_cost - input_startup_cost;
+    let input_tuples = input_tuples.max(2.0);
+    let mut input_groups = input_tuples.min(crate::selfuncs::DEFAULT_NUM_DISTINCT);
+
+    let mcx = run.mcx;
+    let mut presorted_exprs: mcx::PgVec<'_, (types_pathnodes::NodeId, Node<'mcx>)> =
+        mcx::PgVec::new_in(mcx);
+    let mut unknown_varno = false;
+    for (i, key) in pathkeys.iter().enumerate() {
+        let ec = key.pk_eclass.expect("canonical pathkey has an eclass");
+        let em_id = run.root.ec(ec).ec_members[0];
+        let em_expr = run.root.em(em_id).em_expr;
+        let expr = *run.root.expr_node(em_expr);
+        // Vars with varno 0 (generate_append_tlist) confuse estimate_num_groups.
+        if vars::pull_varnos(mcx, expr)?.is_member(0) {
+            unknown_varno = true;
+            break;
+        }
+        presorted_exprs.push((em_expr, expr));
+        if i + 1 >= presorted_keys {
+            break;
+        }
+    }
+    if !unknown_varno {
+        input_groups = crate::selfuncs::estimate_num_groups(run, &presorted_exprs, input_tuples)?;
+    }
+
+    let group_tuples = input_tuples / input_groups;
+    let group_input_run_cost = input_run_cost / input_groups;
+    let (group_startup_cost, group_run_cost) =
+        cost_tuplesort(group_tuples, width, comparison_cost, sort_mem, limit_tuples);
+
+    let startup_cost = group_startup_cost + input_startup_cost + group_input_run_cost;
+    let mut run_cost = group_run_cost
+        + (group_run_cost + group_startup_cost) * (input_groups - 1.0)
+        + group_input_run_cost * (input_groups - 1.0);
+    run_cost += (gucs::cpu_tuple_cost() + comparison_cost) * input_tuples;
+    run_cost += 2.0 * gucs::cpu_tuple_cost() * input_groups;
+
+    debug_assert!(gucs::enable_incremental_sort());
+    Ok((input_disabled_nodes, startup_cost, startup_cost + run_cost, input_tuples))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn cost_incremental_sort<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: types_pathnodes::PathId,
+    pathkeys: &[types_pathnodes::PathKey],
+    presorted_keys: usize,
+    input_disabled_nodes: i32,
+    input_startup_cost: f64,
+    input_total_cost: f64,
+    input_tuples: f64,
+    width: i32,
+    comparison_cost: f64,
+    sort_mem: i32,
+    limit_tuples: f64,
+) -> PgResult<()> {
+    let (disabled_nodes, startup_cost, total_cost, rows) = cost_incremental_sort_shape(
+        run,
+        pathkeys,
+        presorted_keys,
+        input_disabled_nodes,
+        input_startup_cost,
+        input_total_cost,
+        input_tuples,
+        width,
+        comparison_cost,
+        sort_mem,
+        limit_tuples,
+    )?;
+    let p = run.root.path_mut(path_id).base_mut();
+    p.rows = rows;
+    p.disabled_nodes = disabled_nodes;
+    p.startup_cost = startup_cost;
+    p.total_cost = total_cost;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn cost_sort(
     run: &mut PlannerRun<'_>,

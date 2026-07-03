@@ -432,7 +432,7 @@ fn grouping_is_hashable(run: &PlannerRun<'_>, clauses: &[types_pathnodes::NodeId
     })
 }
 
-// make_ordered_path (planner.c); the incremental-sort leg is loud.
+// make_ordered_path (planner.c).
 fn make_ordered_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel: RelId,
@@ -440,24 +440,31 @@ fn make_ordered_path<'mcx>(
     cheapest_path: types_pathnodes::PathId,
     pathkeys: &mcx::PgVec<'mcx, types_pathnodes::PathKey>,
     limit_tuples: f64,
-) -> Option<types_pathnodes::PathId> {
+) -> PgResult<Option<types_pathnodes::PathId>> {
     let (is_sorted, presorted_keys) = crate::pathkeys::pathkeys_count_contained_in(
         pathkeys,
         &run.root.path(path).base().pathkeys,
     );
     if is_sorted {
-        return Some(path);
+        return Ok(Some(path));
     }
     let use_full_sort = presorted_keys == 0 || !crate::gucs::enable_incremental_sort();
     if path != cheapest_path && use_full_sort {
-        return None;
+        return Ok(None);
     }
-    if use_full_sort {
-        let keys = crate::relnode::pgvec_clone_shallow(run.mcx, pathkeys);
-        Some(crate::pathnode::create_sort_path(run, rel, path, keys, limit_tuples))
+    let keys = crate::relnode::pgvec_clone_shallow(run.mcx, pathkeys);
+    Ok(Some(if use_full_sort {
+        crate::pathnode::create_sort_path(run, rel, path, keys, limit_tuples)
     } else {
-        panic!("create_incremental_sort_path (pathnode.c): M2 incremental-sort lane");
-    }
+        crate::pathnode::create_incremental_sort_path(
+            run,
+            rel,
+            path,
+            keys,
+            presorted_keys,
+            limit_tuples,
+        )?
+    }))
 }
 
 // create_grouping_paths + make_grouping_rel + create_ordinary_grouping_paths
@@ -543,7 +550,7 @@ fn create_grouping_paths<'mcx>(
             let orderings = crate::pathkeys::get_useful_group_keys_orderings(run, &path_keys);
             for info in orderings {
                 let Some(sorted) =
-                    make_ordered_path(run, grouped_rel, path_id, cheapest, &info.pathkeys, -1.0)
+                    make_ordered_path(run, grouped_rel, path_id, cheapest, &info.pathkeys, -1.0)?
                 else {
                     continue;
                 };
@@ -726,7 +733,7 @@ fn create_distinct_paths<'mcx>(
                     cheapest,
                     &useful,
                     limittuples,
-                ) else {
+                )? else {
                     continue;
                 };
                 if run.root.distinct_pathkeys.is_empty() {
@@ -1016,9 +1023,9 @@ fn create_ordered_paths<'mcx>(
             {
                 continue;
             }
+            let sort_pathkeys =
+                crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.sort_pathkeys);
             if presorted_keys == 0 || !crate::gucs::enable_incremental_sort() {
-                let sort_pathkeys =
-                    crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.sort_pathkeys);
                 crate::pathnode::create_sort_path(
                     run,
                     ordered_rel,
@@ -1027,9 +1034,14 @@ fn create_ordered_paths<'mcx>(
                     limit_tuples,
                 )
             } else {
-                panic!(
-                    "create_incremental_sort_path (pathnode.c): M2 incremental-sort lane"
-                );
+                crate::pathnode::create_incremental_sort_path(
+                    run,
+                    ordered_rel,
+                    input_path,
+                    sort_pathkeys,
+                    presorted_keys,
+                    limit_tuples,
+                )?
             }
         };
 

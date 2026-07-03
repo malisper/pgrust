@@ -2013,6 +2013,7 @@ dependencies = [
  "nodefunctionscan",
  "nodehash",
  "nodehashjoin",
+ "nodeincrementalsort",
  "nodeindexonlyscan",
  "nodeindexscan",
  "nodelimit",
@@ -3935,6 +3936,26 @@ dependencies = [
  "types_core",
  "types_error",
  "types_nodes",
+ "types_slot",
+ "types_tuple",
+]
+
+[[package]]
+name = "nodeincrementalsort"
+version = "0.1.0"
+dependencies = [
+ "execexpr",
+ "exectuples",
+ "executils",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "postgres_seams",
+ "tuplesort",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_scan",
  "types_slot",
  "types_tuple",
 ]

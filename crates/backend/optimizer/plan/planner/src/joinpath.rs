@@ -1719,22 +1719,37 @@ fn initial_cost_mergejoin(
             outersortkeys,
             &run.root.path(outer_path).base().pathkeys
         ));
-        assert!(
-            !(gucs::enable_incremental_sort() && outer_presorted_keys > 0),
-            "initial_cost_mergejoin (costsize.c): incremental-sort outer; M2 incsort lane"
-        );
         let outer = run.root.path(outer_path).base();
-        let (o_disabled, o_total) = (outer.disabled_nodes, outer.total_cost);
+        let (o_disabled, o_startup, o_total) =
+            (outer.disabled_nodes, outer.startup_cost, outer.total_cost);
         let width = run.root.path_pathtarget(outer_path).width;
-        let (sort_disabled, sort_startup, sort_total) = crate::costsize::cost_sort_shape(
-            o_disabled,
-            o_total,
-            outer_path_rows,
-            width,
-            0.0,
-            work_mem,
-            -1.0,
-        );
+        let (sort_disabled, sort_startup, sort_total) =
+            if gucs::enable_incremental_sort() && outer_presorted_keys > 0 {
+                let (d, s, t, _) = crate::costsize::cost_incremental_sort_shape(
+                    run,
+                    outersortkeys,
+                    outer_presorted_keys,
+                    o_disabled,
+                    o_startup,
+                    o_total,
+                    outer_path_rows,
+                    width,
+                    0.0,
+                    work_mem,
+                    -1.0,
+                )?;
+                (d, s, t)
+            } else {
+                crate::costsize::cost_sort_shape(
+                    o_disabled,
+                    o_total,
+                    outer_path_rows,
+                    width,
+                    0.0,
+                    work_mem,
+                    -1.0,
+                )
+            };
         disabled_nodes += sort_disabled;
         startup_cost += sort_startup;
         startup_cost += (sort_total - sort_startup) * outerstartsel;

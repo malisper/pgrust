@@ -55,6 +55,7 @@ fn create_plan_recurse<'mcx>(
         PathNode::WindowAggPath(_) => create_windowagg_plan(run, path_id),
         PathNode::UpperUniquePath(_) => create_upper_unique_plan(run, path_id, flags),
         PathNode::SortPath(_) => create_sort_plan(run, path_id, flags),
+        PathNode::IncrementalSortPath(_) => create_incremental_sort_plan(run, path_id, flags),
         PathNode::MaterialPath(_) => create_material_plan(run, path_id, flags),
         PathNode::NestPath(_) => create_join_plan(run, path_id),
         PathNode::MergePath(_) => create_mergejoin_plan(run, path_id),
@@ -1275,23 +1276,7 @@ fn create_sort_plan<'mcx>(
     let subplan = create_plan_recurse(run, subpath_id, flags | CP_SMALL_TLIST)?;
     // IS_OTHER_REL child sorts can't arise (append lanes are loud).
     let plan = make_sort_from_pathkeys(run, subplan, &pathkeys)?;
-    // SAFETY: plan was freshly built above; no other handle exists yet.
-    unsafe {
-        plan.with_plan_mut(|p| {
-            let base = run.root.path(path_id).base();
-            p.disabled_nodes = base.disabled_nodes;
-            p.startup_cost = base.startup_cost;
-            p.total_cost = base.total_cost;
-            p.plan_rows = base.rows;
-            p.plan_width = base
-                .pathtarget_id
-                .map(|id| run.root.pathtarget(id).width)
-                .unwrap_or(0);
-            p.parallel_aware = base.parallel_aware;
-            p.parallel_safe = base.parallel_safe;
-        })
-    }
-    .expect("Sort embeds a Plan base");
+    copy_generic_path_info_node(run, plan, path_id);
     Ok(plan)
 }
 
@@ -1322,13 +1307,21 @@ fn find_ec_member_matching_expr<'mcx>(
     None
 }
 
-// prepare_sort_from_pathkeys + make_sort (createplan.c): every pathkey must
-// match an existing tlist column (the resjunk-entry-injection leg is loud).
-fn make_sort_from_pathkeys<'mcx>(
+struct SortColumns<'mcx> {
+    tlist: NodeList<'mcx>,
+    sort_col_idx: mcx::PgVec<'mcx, i16>,
+    sort_operators: mcx::PgVec<'mcx, u32>,
+    collations: mcx::PgVec<'mcx, u32>,
+    nulls_first: mcx::PgVec<'mcx, bool>,
+}
+
+// prepare_sort_from_pathkeys (createplan.c): every pathkey must match an
+// existing tlist column (the resjunk-entry-injection leg is loud).
+fn prepare_sort_from_pathkeys<'mcx>(
     run: &mut PlannerRun<'mcx>,
     lefttree: Node<'mcx>,
     pathkeys: &[types_pathnodes::PathKey],
-) -> PgResult<Node<'mcx>> {
+) -> PgResult<SortColumns<'mcx>> {
     let mcx = run.mcx;
     // C shares lefttree->targetlist by pointer; flat cell copy, shared nodes.
     let tlist = NodeList::from_slice(mcx, lefttree.as_plan().expect("plan node").targetlist.as_slice())?;
@@ -1376,19 +1369,95 @@ fn make_sort_from_pathkeys<'mcx>(
         collations.push(run.root.ec(ec).ec_collation);
         nulls_first.push(pathkey.pk_nulls_first);
     }
+    Ok(SortColumns { tlist, sort_col_idx, sort_operators, collations, nulls_first })
+}
 
-    let mut plan = Node::build::<types_nodes::plannodes::Sort>(mcx)?;
-    plan.plan.targetlist = tlist;
+fn fill_sort_fields<'mcx>(
+    run: &PlannerRun<'mcx>,
+    plan: &mut types_nodes::plannodes::Sort<'mcx>,
+    lefttree: Node<'mcx>,
+    cols: SortColumns<'mcx>,
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    plan.plan.targetlist = cols.tlist;
     plan.plan.disabled_nodes = lefttree.as_plan().unwrap().disabled_nodes
         + if crate::gucs::enable_sort() { 0 } else { 1 };
     plan.plan.qual = NodeList::nil();
     plan.plan.lefttree = Some(lefttree);
-    plan.numCols = sort_col_idx.len() as i32;
-    plan.sortColIdx = mcx::slice_borrow_in(mcx, &sort_col_idx)?;
-    plan.sortOperators = mcx::slice_borrow_in(mcx, &sort_operators)?;
-    plan.collations = mcx::slice_borrow_in(mcx, &collations)?;
-    plan.nullsFirst = mcx::slice_borrow_in(mcx, &nulls_first)?;
+    plan.numCols = cols.sort_col_idx.len() as i32;
+    plan.sortColIdx = mcx::slice_borrow_in(mcx, &cols.sort_col_idx)?;
+    plan.sortOperators = mcx::slice_borrow_in(mcx, &cols.sort_operators)?;
+    plan.collations = mcx::slice_borrow_in(mcx, &cols.collations)?;
+    plan.nullsFirst = mcx::slice_borrow_in(mcx, &cols.nulls_first)?;
+    Ok(())
+}
+
+fn make_sort_from_pathkeys<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    lefttree: Node<'mcx>,
+    pathkeys: &[types_pathnodes::PathKey],
+) -> PgResult<Node<'mcx>> {
+    let cols = prepare_sort_from_pathkeys(run, lefttree, pathkeys)?;
+    let mut plan = Node::build::<types_nodes::plannodes::Sort>(run.mcx)?;
+    fill_sort_fields(run, &mut plan, lefttree, cols)?;
     Ok(plan.seal())
+}
+
+// make_incrementalsort_from_pathkeys (createplan.c); C's make_incrementalsort
+// leaves disabled_nodes at makeNode's zero (no enable_sort penalty), so the
+// fill_sort_fields value is zeroed back out.
+fn make_incrementalsort_from_pathkeys<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    lefttree: Node<'mcx>,
+    pathkeys: &[types_pathnodes::PathKey],
+    n_presorted_cols: i32,
+) -> PgResult<Node<'mcx>> {
+    let cols = prepare_sort_from_pathkeys(run, lefttree, pathkeys)?;
+    let mut plan = Node::build::<types_nodes::plannodes::IncrementalSort>(run.mcx)?;
+    fill_sort_fields(run, &mut plan.sort, lefttree, cols)?;
+    plan.sort.plan.disabled_nodes = 0;
+    plan.nPresortedCols = n_presorted_cols;
+    Ok(plan.seal())
+}
+
+// create_incrementalsort_plan (createplan.c).
+fn create_incremental_sort_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let (subpath_id, pathkeys, n_presorted) = {
+        let PathNode::IncrementalSortPath(sp) = run.root.path(path_id) else { unreachable!() };
+        (
+            sp.spath.subpath.expect("IncrementalSortPath has a subpath"),
+            crate::relnode::pgvec_clone_shallow(run.mcx, &sp.spath.path.pathkeys),
+            sp.nPresortedCols,
+        )
+    };
+    let subplan = create_plan_recurse(run, subpath_id, flags | CP_SMALL_TLIST)?;
+    let plan = make_incrementalsort_from_pathkeys(run, subplan, &pathkeys, n_presorted)?;
+    copy_generic_path_info_node(run, plan, path_id);
+    Ok(plan)
+}
+
+fn copy_generic_path_info_node<'mcx>(run: &PlannerRun<'mcx>, plan: Node<'mcx>, path_id: PathId) {
+    // SAFETY: plan was freshly built by the caller; no other handle exists yet.
+    unsafe {
+        plan.with_plan_mut(|p| {
+            let base = run.root.path(path_id).base();
+            p.disabled_nodes = base.disabled_nodes;
+            p.startup_cost = base.startup_cost;
+            p.total_cost = base.total_cost;
+            p.plan_rows = base.rows;
+            p.plan_width = base
+                .pathtarget_id
+                .map(|id| run.root.pathtarget(id).width)
+                .unwrap_or(0);
+            p.parallel_aware = base.parallel_aware;
+            p.parallel_safe = base.parallel_safe;
+        })
+    }
+    .expect("plan node embeds a Plan base");
 }
 
 // create_limit_plan + make_limit (createplan.c); WITH TIES is loud.
@@ -1714,6 +1783,53 @@ fn label_sort_with_costsize<'mcx>(
     .expect("Sort embeds a Plan base");
 }
 
+// label_incrementalsort_with_costsize (createplan.c).
+fn label_incrementalsort_with_costsize<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    sort_plan: Node<'mcx>,
+    pathkeys: &[types_pathnodes::PathKey],
+    limit_tuples: f64,
+) -> PgResult<()> {
+    let isort = sort_plan.as_incremental_sort().expect("IncrementalSort plan");
+    let lefttree = isort.sort.plan.lefttree.expect("IncrementalSort has a child");
+    let child = lefttree.as_plan().expect("plan node");
+    let (disabled, startup, total, rows, width, parallel_safe) = (
+        isort.sort.plan.disabled_nodes,
+        child.startup_cost,
+        child.total_cost,
+        child.plan_rows,
+        child.plan_width,
+        child.parallel_safe,
+    );
+    let (_, startup_cost, total_cost, _) = crate::costsize::cost_incremental_sort_shape(
+        run,
+        pathkeys,
+        isort.nPresortedCols as usize,
+        disabled,
+        startup,
+        total,
+        rows,
+        width,
+        0.0,
+        init_small::globals::work_mem(),
+        limit_tuples,
+    )?;
+    // SAFETY: sort_plan was freshly built by make_incrementalsort_from_pathkeys;
+    // no other handle to it exists yet.
+    unsafe {
+        sort_plan.with_plan_mut(|p| {
+            p.startup_cost = startup_cost;
+            p.total_cost = total_cost;
+            p.plan_rows = rows;
+            p.plan_width = width;
+            p.parallel_aware = false;
+            p.parallel_safe = parallel_safe;
+        })
+    }
+    .expect("IncrementalSort embeds a Plan base");
+    Ok(())
+}
+
 // create_mergejoin_plan + make_mergejoin (createplan.c), JOIN_INNER arm:
 // otherclauses is NIL; the materialize_inner arm is loud (nodeMaterial
 // unported); replace_nestloop_params is dead (param_info always None).
@@ -1788,13 +1904,20 @@ fn create_mergejoin_plan<'mcx>(
 
     let outerpathkeys: mcx::PgVec<'mcx, types_pathnodes::PathKey>;
     if !outersortkeys.is_empty() {
-        assert!(
-            !(crate::gucs::enable_incremental_sort() && outer_presorted_keys > 0),
-            "create_mergejoin_plan (createplan.c): incremental-sort outer; M2 incsort lane"
-        );
-        let sort_plan = make_sort_from_pathkeys(run, outer_plan, &outersortkeys)?;
-        label_sort_with_costsize(run, sort_plan, -1.0);
-        outer_plan = sort_plan;
+        if crate::gucs::enable_incremental_sort() && outer_presorted_keys > 0 {
+            let sort_plan = make_incrementalsort_from_pathkeys(
+                run,
+                outer_plan,
+                &outersortkeys,
+                outer_presorted_keys as i32,
+            )?;
+            label_incrementalsort_with_costsize(run, sort_plan, &outersortkeys, -1.0)?;
+            outer_plan = sort_plan;
+        } else {
+            let sort_plan = make_sort_from_pathkeys(run, outer_plan, &outersortkeys)?;
+            label_sort_with_costsize(run, sort_plan, -1.0);
+            outer_plan = sort_plan;
+        }
         outerpathkeys = outersortkeys;
     } else {
         outerpathkeys = crate::relnode::pgvec_clone_shallow(
