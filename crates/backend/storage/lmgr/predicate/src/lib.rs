@@ -79,13 +79,12 @@ pub fn PredicateLockTID(
 pub fn CheckForSerializableConflictOutNeeded(
     rel: &RelationData<'_>,
     snapshot: &SnapshotData<'_>,
-) -> bool {
+) -> PgResult<bool> {
     if !engine::SerializableXactActive() {
-        return false;
+        return Ok(false);
     }
     let f = rel_fields(rel);
     engine::CheckForSerializableConflictOutNeeded(f.rd_id, f.uses_local_buffers, snapshot)
-        .unwrap_or(false)
 }
 
 pub fn CheckForSerializableConflictOut(
@@ -121,6 +120,17 @@ pub fn PredicateLockPageCombine(
     engine::PredicateLockPageCombine(f.db_oid, f.rd_id, f.uses_local_buffers, oldblkno, newblkno)
 }
 
+pub fn CheckTableForSerializableConflictIn(rel: &RelationData<'_>) -> PgResult<()> {
+    let f = rel_fields(rel);
+    engine::CheckTableForSerializableConflictIn(f.db_oid, f.rd_id, f.rd_id, f.uses_local_buffers)
+}
+
+// Gate lives in the engine: PredXact->SxactGlobalXmin, not this backend's
+// isolation level.
+pub fn TransferPredicateLocksToHeapRelation(_rel: &RelationData<'_>) -> PgResult<()> {
+    engine::TransferPredicateLocksToHeapRelation()
+}
+
 pub fn CheckForSerializableConflictIn(
     rel: &RelationData<'_>,
     tid: Option<&ItemPointerData>,
@@ -148,6 +158,12 @@ pub fn init_seams() {
     );
     predicate_seams::check_for_serializable_conflict_out::set(CheckForSerializableConflictOut);
     predicate_seams::check_for_serializable_conflict_in::set(CheckForSerializableConflictIn);
+    predicate_seams::check_table_for_serializable_conflict_in::set(
+        CheckTableForSerializableConflictIn,
+    );
+    predicate_seams::transfer_predicate_locks_to_heap_relation::set(
+        TransferPredicateLocksToHeapRelation,
+    );
     predicate_seams::predicate_lock_page_split::set(PredicateLockPageSplit);
     predicate_seams::predicate_lock_page_combine::set(PredicateLockPageCombine);
     predicate_seams::pre_commit_check_for_serialization_failure::set(
@@ -176,11 +192,6 @@ pub fn init_seams() {
             get: engine::max_predicate_locks_per_page,
             set: engine::set_max_predicate_locks_per_page,
         });
-        guc_tables::vars::serializable_buffers.install(GucVarAccessors {
-            get: engine::serializable_buffers,
-            set: engine::set_serializable_buffers,
-        });
-
         fn check_serial_buffers_hook(
             newval: &mut i32,
             _extra: &mut Option<guc_tables::GucHookExtra>,

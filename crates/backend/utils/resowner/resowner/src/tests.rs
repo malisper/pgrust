@@ -62,6 +62,8 @@ fn setup() {
         init_seams();
         ipc_seams::on_shmem_exit::set(|_cb, _arg| {});
         predicate_seams::release_predicate_locks::set(|_, _| Ok(()));
+        predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+        predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
     });
 }
 

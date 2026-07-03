@@ -50,7 +50,7 @@ seam_core::seam!(
     pub fn check_for_serializable_conflict_out_needed<'a, 'mcx>(
         rel: &'a RelationData<'mcx>,
         snapshot: &'a SnapshotData<'mcx>,
-    ) -> bool
+    ) -> PgResult<bool>
 );
 
 seam_core::seam!(
@@ -105,4 +105,22 @@ seam_core::seam!(
     // ReleasePredicateLocks(isCommit, isReadOnlySafe) (predicate.c); caller is
     // resowner's RESOURCE_RELEASE_LOCKS top-level phase, per C.
     pub fn release_predicate_locks(is_commit: bool, is_read_only_safe: bool) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // CheckTableForSerializableConflictIn (predicate.c): whole-table DDL
+    // (TRUNCATE, heap drop) flags conflicts from SIREAD locks of ANY
+    // granularity on the table, unlike the relation-tag-only conflict_in.
+    pub fn check_table_for_serializable_conflict_in<'a, 'mcx>(
+        rel: &'a RelationData<'mcx>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // TransferPredicateLocksToHeapRelation (predicate.c): DROP INDEX /
+    // REINDEX / CLUSTER. C gates inside on PredXact->SxactGlobalXmin, NOT on
+    // the calling backend's isolation level — call unconditionally.
+    pub fn transfer_predicate_locks_to_heap_relation<'a, 'mcx>(
+        rel: &'a RelationData<'mcx>,
+    ) -> PgResult<()>
 );

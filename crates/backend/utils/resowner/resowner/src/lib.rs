@@ -651,7 +651,9 @@ fn resource_owner_release_internal(
             if is_top_level {
                 if owner == TopTransactionResourceOwner() {
                     let save = CURRENT_OWNER.with(|c| c.replace(owner));
-                    let result = ::lmgr_proc::ProcReleaseLocks(is_commit);
+                    let result = ::lmgr_proc::ProcReleaseLocks(is_commit).and_then(|()| {
+                        predicate_seams::release_predicate_locks::call(is_commit, false)
+                    });
                     CURRENT_OWNER.with(|c| c.set(save));
                     result?;
                 }

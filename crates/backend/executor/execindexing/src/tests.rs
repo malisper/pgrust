@@ -223,7 +223,9 @@ fn install() {
         aclchk_seams::object_aclcheck::set(|_classid, _objid, _roleid, _mode| Ok(0));
 
         predicate_seams::check_for_serializable_conflict_in::set(|_rel, _tid, _blk| Ok(()));
-        predicate_seams::check_for_serializable_conflict_out_needed::set(|_r, _s| false);
+        predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+        predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
+        predicate_seams::check_for_serializable_conflict_out_needed::set(|_r, _s| Ok(false));
         predicate_seams::predicate_lock_relation::set(|_r, _s| Ok(()));
         predicate_seams::predicate_lock_page::set(|_r, _b, _s| Ok(()));
         predicate_seams::predicate_lock_tid::set(|_r, _t, _s, _x| Ok(()));
