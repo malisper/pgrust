@@ -35,6 +35,7 @@ pub struct IndexScanState<'mcx> {
     pub iss_RelationDesc: Option<Relation<'mcx>>,
     pub iss_ScanKeys: PgVec<'mcx, ScanKeyData>,
     pub iss_OrderDir: ScanDirection,
+    pub iss_PlanNodeId: i32,
 }
 
 impl<'mcx> ScanNode<'mcx> for IndexScanState<'mcx> {
@@ -73,7 +74,12 @@ impl<'mcx> ScanNode<'mcx> for IndexScanState<'mcx> {
             // SAFETY: written just above when None; single test+branch like
             // C's scandesc == NULL check.
             let scandesc = unsafe { self.iss_ScanDesc.as_deref_mut().unwrap_unchecked() };
-            if !index_getnext_slot(mcx, scandesc, direction, estate.slot_mut(slot_id))? {
+            let found = index_getnext_slot(mcx, scandesc, direction, estate.slot_mut(slot_id))?;
+            if estate.es_instrument != 0 {
+                let n = scandesc.xs_pgstat_index_scans;
+                estate.instr_set_index_nsearches(self.iss_PlanNodeId, n);
+            }
+            if !found {
                 exectuples::exec_clear_tuple(estate.slot_mut(slot_id), mcx);
                 return Ok(false);
             }
@@ -181,6 +187,7 @@ pub fn exec_init_index_scan_rel<'mcx>(
         iss_RelationDesc: Some(index_rel),
         iss_ScanKeys,
         iss_OrderDir: order_dir(node.indexorderdir),
+        iss_PlanNodeId: node.scan.plan.plan_node_id,
     })
 }
 

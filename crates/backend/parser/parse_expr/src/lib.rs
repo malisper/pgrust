@@ -69,9 +69,15 @@ pub fn transformExprRecurse<'mcx>(
                 | A_Expr_Kind::AEXPR_LIKE
                 | A_Expr_Kind::AEXPR_ILIKE
                 | A_Expr_Kind::AEXPR_SIMILAR => transformAExprOp(mcx, pstate, a),
+                A_Expr_Kind::AEXPR_BETWEEN
+                | A_Expr_Kind::AEXPR_NOT_BETWEEN
+                | A_Expr_Kind::AEXPR_BETWEEN_SYM
+                | A_Expr_Kind::AEXPR_NOT_BETWEEN_SYM => {
+                    transformAExprBetween(mcx, pstate, a)
+                }
                 other => panic!(
                     "transformExprRecurse (parse_expr.c): A_Expr kind {other:?} arm \
-                     (DISTINCT/NULLIF/IN/BETWEEN/ANY/ALL) unported — unit backend-parser-expr"
+                     (DISTINCT/NULLIF/IN/ANY/ALL) unported — unit backend-parser-expr"
                 ),
             }
         }
@@ -245,6 +251,117 @@ fn cannot_cast_error(
             .into_error()
             .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformTypeCast")),
     )
+}
+
+fn between_a_expr<'mcx>(
+    mcx: Mcx<'mcx>,
+    op: &'mcx str,
+    lexpr: Option<Node<'mcx>>,
+    rexpr: Option<Node<'mcx>>,
+    location: i32,
+) -> PgResult<Node<'mcx>> {
+    Node::mk(
+        mcx,
+        types_nodes::A_Expr {
+            kind: A_Expr_Kind::AEXPR_OP,
+            name: types_nodes::list::NodeList::make1(mcx, Node::mk_string(mcx, op)?)?,
+            lexpr,
+            rexpr,
+            rexpr_list_start: 0,
+            rexpr_list_end: 0,
+            location,
+        },
+    )
+}
+
+fn between_bool_expr<'mcx>(
+    mcx: Mcx<'mcx>,
+    boolop: types_nodes::primnodes::BoolExprType,
+    arg1: Node<'mcx>,
+    arg2: Node<'mcx>,
+    location: i32,
+) -> PgResult<Node<'mcx>> {
+    Node::mk(
+        mcx,
+        types_nodes::primnodes::BoolExpr {
+            boolop,
+            args: types_nodes::list::NodeList::make2(mcx, arg1, arg2)?,
+            location,
+        },
+    )
+}
+
+// transformAExprBetween (parse_expr.c): hard-wired >= <= < > comparisons.
+// C copyObject's the re-used raw subexprs; the raw tree is read-only under
+// transform, so the arena share is that copy.
+fn transformAExprBetween<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    a: &types_nodes::A_Expr<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    use types_nodes::primnodes::BoolExprType::{AND_EXPR, OR_EXPR};
+    let aexpr = a.lexpr;
+    let args = a
+        .rexpr
+        .and_then(|r| r.as_list())
+        .expect("BETWEEN rexpr is a two-item List");
+    debug_assert_eq!(args.len(), 2);
+    let bexpr = Some(args.nth(0));
+    let cexpr = Some(args.nth(1));
+    let loc = a.location;
+
+    let result = match a.kind {
+        A_Expr_Kind::AEXPR_BETWEEN => between_bool_expr(
+            mcx,
+            AND_EXPR,
+            between_a_expr(mcx, ">=", aexpr, bexpr, loc)?,
+            between_a_expr(mcx, "<=", aexpr, cexpr, loc)?,
+            loc,
+        )?,
+        A_Expr_Kind::AEXPR_NOT_BETWEEN => between_bool_expr(
+            mcx,
+            OR_EXPR,
+            between_a_expr(mcx, "<", aexpr, bexpr, loc)?,
+            between_a_expr(mcx, ">", aexpr, cexpr, loc)?,
+            loc,
+        )?,
+        A_Expr_Kind::AEXPR_BETWEEN_SYM => {
+            let sub1 = between_bool_expr(
+                mcx,
+                AND_EXPR,
+                between_a_expr(mcx, ">=", aexpr, bexpr, loc)?,
+                between_a_expr(mcx, "<=", aexpr, cexpr, loc)?,
+                loc,
+            )?;
+            let sub2 = between_bool_expr(
+                mcx,
+                AND_EXPR,
+                between_a_expr(mcx, ">=", aexpr, cexpr, loc)?,
+                between_a_expr(mcx, "<=", aexpr, bexpr, loc)?,
+                loc,
+            )?;
+            between_bool_expr(mcx, OR_EXPR, sub1, sub2, loc)?
+        }
+        A_Expr_Kind::AEXPR_NOT_BETWEEN_SYM => {
+            let sub1 = between_bool_expr(
+                mcx,
+                OR_EXPR,
+                between_a_expr(mcx, "<", aexpr, bexpr, loc)?,
+                between_a_expr(mcx, ">", aexpr, cexpr, loc)?,
+                loc,
+            )?;
+            let sub2 = between_bool_expr(
+                mcx,
+                OR_EXPR,
+                between_a_expr(mcx, "<", aexpr, cexpr, loc)?,
+                between_a_expr(mcx, ">", aexpr, bexpr, loc)?,
+                loc,
+            )?;
+            between_bool_expr(mcx, AND_EXPR, sub1, sub2, loc)?
+        }
+        other => panic!("unrecognized A_Expr kind: {other:?}"),
+    };
+    transformExprRecurse(mcx, pstate, result)
 }
 
 fn transformBoolExpr<'mcx>(

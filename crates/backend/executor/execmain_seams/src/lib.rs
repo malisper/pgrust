@@ -116,6 +116,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn query_desc_index_instrument(
+        query_desc: QueryDescHandle,
+        plan_node_id: i32,
+    ) -> Option<u64>
+);
+
+seam_core::seam!(
     pub fn query_desc_hash_instrument(
         query_desc: QueryDescHandle,
         plan_node_id: i32,

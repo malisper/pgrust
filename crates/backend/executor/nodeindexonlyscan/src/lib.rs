@@ -41,6 +41,7 @@ pub struct IndexOnlyScanState<'mcx> {
     pub ioss_OrderDir: ScanDirection,
     pub ioss_NameCStringAttNums: PgVec<'mcx, AttrNumber>,
     pub ioss_VMBuffer: VmBuffer,
+    pub ioss_PlanNodeId: i32,
 }
 
 impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
@@ -83,13 +84,20 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
             ioss_ScanDesc,
             ioss_VMBuffer,
             ioss_NameCStringAttNums,
+            ioss_PlanNodeId,
             ..
         } = self;
+        let plan_node_id = *ioss_PlanNodeId;
         loop {
             // SAFETY: written just above when None; single test+branch like
             // C's scandesc == NULL check.
             let scandesc = unsafe { ioss_ScanDesc.as_deref_mut().unwrap_unchecked() };
-            let Some(tid) = index_getnext_tid(scandesc, direction)? else {
+            let tid = index_getnext_tid(scandesc, direction)?;
+            if estate.es_instrument != 0 {
+                let n = scandesc.xs_pgstat_index_scans;
+                estate.instr_set_index_nsearches(plan_node_id, n);
+            }
+            let Some(tid) = tid else {
                 exectuples::exec_clear_tuple(estate.slot_mut(slot_id), mcx);
                 return Ok(false);
             };
@@ -103,6 +111,14 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
                 ItemPointerGetBlockNumber(&tid),
                 ioss_VMBuffer,
             )? {
+                // InstrCountTuples2: EXPLAIN's Heap Fetches.
+                if estate.es_instrument != 0 {
+                    if let Some(i) =
+                        estate.es_instrumentation.get_mut(plan_node_id as usize)
+                    {
+                        i.ntuples2 += 1.0;
+                    }
+                }
                 if !index_fetch_heap(mcx, scandesc, estate.slot_mut(table_slot_id))? {
                     continue;
                 }
@@ -329,6 +345,7 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
         ioss_OrderDir: order_dir(node.indexorderdir),
         ioss_NameCStringAttNums,
         ioss_VMBuffer: VmBuffer::new(),
+        ioss_PlanNodeId: node.scan.plan.plan_node_id,
     })
 }
 

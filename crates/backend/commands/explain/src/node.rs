@@ -15,8 +15,8 @@ use types_nodes::primnodes::Const;
 use types_nodes::{Node, NodeTag};
 
 use crate::format::{
-    append, ExplainCloseGroup, ExplainOpenGroup, ExplainPropertyBool, ExplainPropertyInteger,
-    ExplainPropertyList, ExplainPropertyText,
+    append, ExplainCloseGroup, ExplainOpenGroup, ExplainPropertyBool, ExplainPropertyFloat,
+    ExplainPropertyInteger, ExplainPropertyList, ExplainPropertyText,
 };
 use crate::options::str_in;
 use crate::state::{ExplainState, EXPLAIN_FORMAT_TEXT};
@@ -96,6 +96,17 @@ fn ExplainPreScanNode<'mcx>(
     match node.node_tag() {
         NodeTag::T_SeqScan => {
             rels_used.add_member(mcx, node.as_seq_scan().unwrap().scan.scanrelid as i32)?;
+        }
+        NodeTag::T_IndexScan => {
+            rels_used.add_member(mcx, node.as_index_scan().unwrap().scan.scanrelid as i32)?;
+        }
+        NodeTag::T_IndexOnlyScan => {
+            rels_used
+                .add_member(mcx, node.as_index_only_scan().unwrap().scan.scanrelid as i32)?;
+        }
+        NodeTag::T_BitmapHeapScan => {
+            rels_used
+                .add_member(mcx, node.as_bitmap_heap_scan().unwrap().scan.scanrelid as i32)?;
         }
         NodeTag::T_CteScan => {
             rels_used.add_member(mcx, node.as_cte_scan().unwrap().scan.scanrelid as i32)?;
@@ -333,6 +344,8 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_SeqScan => "Seq Scan",
         NodeTag::T_IndexScan => "Index Scan",
         NodeTag::T_IndexOnlyScan => "Index Only Scan",
+        NodeTag::T_BitmapIndexScan => "Bitmap Index Scan",
+        NodeTag::T_BitmapHeapScan => "Bitmap Heap Scan",
         NodeTag::T_FunctionScan => "Function Scan",
         NodeTag::T_CteScan => "CTE Scan",
         // C interpolates the join type into the node name in TEXT format:
@@ -435,6 +448,17 @@ pub fn ExplainNode<'mcx>(
         ExplainIndexScanDetails(ios.indexid, ios.indexorderdir, es)?;
         ExplainScanTarget(ios.scan.scanrelid, es)?;
     }
+    if let Some(bhs) = node.as_bitmap_heap_scan() {
+        ExplainScanTarget(bhs.scan.scanrelid, es)?;
+    }
+    if let Some(bis) = node.as_bitmap_index_scan() {
+        // ExplainTargetRel's T_BitmapIndexScan arm: index name only.
+        let mcx = es.str.allocator();
+        let indexname = lsyscache::get_rel_name(mcx, bis.indexid)?
+            .expect("explain_get_index_name: cache lookup failed");
+        let indexname = str_in(mcx, indexname.as_str())?;
+        append!(es, " on {}", quote_identifier(indexname));
+    }
     if node.node_tag() == NodeTag::T_CteScan {
         ExplainScanTarget(node.as_cte_scan().unwrap().scan.scanrelid, es)?;
     }
@@ -525,6 +549,26 @@ pub fn ExplainNode<'mcx>(
                 );
             }
             show_indexsearches_info(es);
+        }
+        NodeTag::T_BitmapIndexScan => {
+            let s = node.as_bitmap_index_scan().unwrap();
+            show_scan_qual(&s.indexqualorig, "Index Cond", node, es)?;
+            show_indexsearches_info(es);
+        }
+        NodeTag::T_BitmapHeapScan => {
+            let s = node.as_bitmap_heap_scan().unwrap();
+            show_scan_qual(&s.bitmapqualorig, "Recheck Cond", node, es)?;
+            if !s.bitmapqualorig.is_nil() {
+                show_instrumentation_count("Rows Removed by Index Recheck", 2, &instrument, es);
+            }
+            show_scan_qual(&plan.qual, "Filter", node, es)?;
+            filtered_count_gap(&plan.qual, es);
+            if es.analyze {
+                node_gap(
+                    "show_tidbitmap_info",
+                    "exact/lossy heap block counts (bitmap instrumentation lane)",
+                );
+            }
         }
         NodeTag::T_NestLoop => {
             let nl = node.as_nest_loop().unwrap();
@@ -1876,6 +1920,50 @@ fn simple_quote_literal(buf: &mut PgString<'_>, val: &str) -> PgResult<()> {
 
 fn ExplainScanTarget(scanrelid: types_core::Index, es: &mut ExplainState<'_>) -> PgResult<()> {
     ExplainTargetRel(scanrelid, es)
+}
+
+// ExplainIndexScanDetails (explain.c), TEXT arm (nontext panics upstream).
+fn ExplainIndexScanDetails(
+    indexid: types_core::primitive::Oid,
+    indexorderdir: i32,
+    es: &mut ExplainState<'_>,
+) -> PgResult<()> {
+    let mcx = es.str.allocator();
+    let indexname = lsyscache::get_rel_name(mcx, indexid)?
+        .expect("explain_get_index_name: cache lookup failed");
+    let indexname = str_in(mcx, indexname.as_str())?;
+    if indexorderdir < 0 {
+        append!(es, " Backward");
+    }
+    append!(es, " using {}", quote_identifier(indexname));
+    Ok(())
+}
+
+// show_indexsearches_info (explain.c); no parallel workers on this lane.
+fn show_indexsearches_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
+    if !es.analyze {
+        return;
+    }
+    let id = plan_of(node).plan_node_id;
+    let nsearches = if es.qd.is_null() {
+        0
+    } else {
+        execmain_seams::query_desc_index_instrument::call(es.qd, id).unwrap_or(0)
+    };
+    ExplainPropertyInteger("Index Searches", None, nsearches as i64, es);
+}
+
+// show_instrumentation_count("Rows Removed by Index Recheck"): the executor
+// counts no nfiltered2; a lossy recheck is unreachable (btree never sets
+// xs_recheck, non-btree AMs loud in plancat), so C's count is provably 0 and
+// TEXT suppresses zero. Assert the invariant rather than print.
+fn recheck_count_gap(node: Node<'_>, es: &ExplainState<'_>, has_recheck: bool) {
+    if es.analyze && has_recheck && node.node_tag() == NodeTag::T_BitmapHeapScan {
+        node_gap(
+            "show_instrumentation_count",
+            "Rows Removed by Index Recheck needs nfiltered2 counting (bitmap lossy lane)",
+        );
+    }
 }
 
 // ExplainTargetRel's T_FunctionScan arm: objectname is the function's name
