@@ -141,6 +141,8 @@ pub struct TuplesortData<'m> {
     sort_keys: PgVec<'m, SortSupport>,
     only_key: bool,
     have_datum1: bool,
+    // Freed-space size mode, resolved once (bounded-path discards are per-put).
+    free_typlen: i16,
     variant: SortVariant,
     // Unique violation recorded mid-sort, surfaced by performsort.
     unique_violation: Cell<Option<Box<PgError>>>,
@@ -573,6 +575,10 @@ impl Tuplesort {
         only_key: bool,
         variant: SortVariant,
     ) -> Tuplesort {
+        let free_typlen = match variant {
+            SortVariant::Datum { byref_typlen } => byref_typlen,
+            _ => FREE_SIZE_TLEN,
+        };
         let owned = McxOwned::try_new(MemoryContext::new("TupleSort main"), |mcx| {
             let allowed_mem = i64::from(work_mem.max(64)) * 1024;
             let memtuples = PgVec::with_capacity_in(INITIAL_MEMTUPSIZE, mcx);
@@ -602,6 +608,7 @@ impl Tuplesort {
                 sort_keys,
                 only_key,
                 have_datum1: true,
+                free_typlen,
                 variant,
                 unique_violation: Cell::new(None),
             })
@@ -1247,12 +1254,12 @@ impl<'m> TuplesortData<'m> {
     /// `free_sort_tuple`: accounting only — tuplecontext is a bump arena, so
     /// discarded bounded-sort tuples are reclaimed at end, not per-tuple as
     /// C's aset pfree does (memory-footprint divergence, not behavior).
+    #[inline]
     fn free_sort_tuple(&mut self, stup: &SortTuple) {
-        let datum_byref = match self.variant {
-            SortVariant::Datum { byref_typlen } => Some(byref_typlen),
-            _ => None,
-        };
-        self.avail_mem += freed_space_v(datum_byref, stup);
+        if stup.tuple.is_null() {
+            return;
+        }
+        self.avail_mem += freed_space(self.free_typlen, stup);
     }
 
     /// `tuplesort_sort_memtuples`: comparator-identity specialization dispatch.
@@ -1324,10 +1331,7 @@ impl<'m> TuplesortData<'m> {
         self.reversedirection();
 
         let mut tuples = mem::replace(&mut self.memtuples, PgVec::new_in(self.mcx));
-        let datum_byref = match self.variant {
-            SortVariant::Datum { byref_typlen } => Some(byref_typlen),
-            _ => None,
-        };
+        let free_typlen = self.free_typlen;
         let mut freed: i64 = 0;
         let result = (|| {
             let ctx = ctx!(self);
@@ -1337,11 +1341,11 @@ impl<'m> TuplesortData<'m> {
                     let stup = tuples[i];
                     heap_insert(&ctx, &mut tuples, &mut count, stup)?;
                 } else if ctx.comparetup(&tuples[i], &tuples[0]) <= 0 {
-                    freed += freed_space_v(datum_byref, &tuples[i]);
+                    freed += freed_space(free_typlen, &tuples[i]);
                     cfi()?;
                 } else {
                     let stup = tuples[i];
-                    freed += freed_space_v(datum_byref, &tuples[0]);
+                    freed += freed_space(free_typlen, &tuples[0]);
                     heap_replace_top(&ctx, &mut tuples, count, stup)?;
                 }
             }
@@ -1422,19 +1426,24 @@ impl<'m> TuplesortData<'m> {
     }
 }
 
-fn freed_space_v(datum_byref: Option<i16>, stup: &SortTuple) -> i64 {
+// free_typlen sentinel: the image is a minimal/index tuple carrying t_len.
+// Datum sorts store their begin-time typlen instead (datum images have no
+// header: >0 fixed, -1 varlena).
+const FREE_SIZE_TLEN: i16 = i16::MIN;
+
+#[inline]
+fn freed_space(free_typlen: i16, stup: &SortTuple) -> i64 {
     if stup.tuple.is_null() {
         return 0;
     }
-    let size = match datum_byref {
-        // Datum sorts park the datumCopy image in `tuple` — no t_len header.
-        Some(typlen) if typlen > 0 => typlen as usize,
-        // SAFETY: live tuplecontext varlena image.
-        Some(_) => unsafe {
-            ::types_tuple::varatt::varsize_any(stup.tuple.cast_const().cast::<u8>())
-        },
+    let size = if free_typlen == FREE_SIZE_TLEN {
         // SAFETY: live tuplecontext image.
-        None => (unsafe { (*stup.tuple).t_len }) as usize,
+        (unsafe { (*stup.tuple).t_len }) as usize
+    } else if free_typlen > 0 {
+        free_typlen as usize
+    } else {
+        // SAFETY: live tuplecontext varlena image.
+        unsafe { ::types_tuple::varatt::varsize_any(stup.tuple.cast_const().cast::<u8>()) }
     };
     maxalign(size) as i64
 }
