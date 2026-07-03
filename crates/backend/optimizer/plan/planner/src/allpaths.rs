@@ -172,7 +172,7 @@ fn set_subquery_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
     let idx = run.pop_root_to_rel_subroot();
     run.root.rel_mut(rel).subroot_idx = Some(idx);
     // Isolate the params needed by this specific subplan.
-    let sp = core::mem::take(&mut run.root.plan_params);
+    let sp = core::mem::replace(&mut run.root.plan_params, mcx::PgVec::new_in(run.mcx));
     run.root.rel_mut(rel).subplan_params = sp;
 
     run.swap_with_rel_subroot(idx);

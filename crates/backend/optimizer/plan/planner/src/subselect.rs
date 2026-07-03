@@ -1767,7 +1767,7 @@ fn finalize_plan<'mcx>(
         }
         NodeTag::T_SubqueryScan => {
             let ss = plan.as_subquery_scan().unwrap();
-            let rel = crate::relnode::find_base_rel(&run.root, ss.scan.scanrelid);
+            let rel = crate::relnode::find_base_rel(&run.root, ss.scan.scanrelid as i32);
             let idx = run.root.rel(rel).subroot_idx.expect("subquery rel has a subroot");
             let sub_outer = &run.rel_subroots[idx].root.outer_params;
             let subplan = ss.subplan.expect("SubqueryScan subplan");

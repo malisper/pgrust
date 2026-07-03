@@ -309,7 +309,11 @@ fn extract_lateral_references<'mcx>(
     for node in &vars {
         let v = node.as_var().expect("pull_vars_of_level returns Vars (PHVs are loud)");
         if levelsup != 0 {
-            let nv = types_nodes::primnodes::Var { varlevelsup: 0, ..*v };
+            let nv = types_nodes::primnodes::Var {
+                varlevelsup: 0,
+                varnullingrels: v.varnullingrels.clone_in(mcx)?,
+                ..*v
+            };
             newvars.push(Node::mk(mcx, nv)?);
         } else {
             newvars.push(node);
