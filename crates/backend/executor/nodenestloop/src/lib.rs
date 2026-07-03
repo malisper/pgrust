@@ -50,9 +50,15 @@ pub struct NestLoopState<'mcx> {
     nl_NullInnerTupleSlot: Option<ExecSlotId>,
     pub nl_NeedNewOuter: bool,
     pub nl_MatchedOuter: bool,
-    // (paramno, outer-tlist attno) per nestParam, resolved once at init.
-    nest_params: ::mcx::PgVec<'mcx, (i32, i16)>,
+    // Outer-tlist source per nestParam, resolved once at init.
+    nest_params: ::mcx::PgVec<'mcx, NestParamSlot>,
     nest_param_set: ::types_nodes::bitmapset::Bitmapset<'mcx>,
+}
+
+#[derive(Clone, Copy)]
+struct NestParamSlot {
+    paramno: i32,
+    attno: i16,
 }
 
 /// `ExecInitNestLoop` minus child linkage: the caller inits the outer child
@@ -90,7 +96,7 @@ pub fn exec_init_nest_loop<'mcx>(
         None
     };
     let mcx = estate.es_query_cxt;
-    let mut nest_params: ::mcx::PgVec<'mcx, (i32, i16)> = ::mcx::PgVec::new_in(mcx);
+    let mut nest_params: ::mcx::PgVec<'mcx, NestParamSlot> = ::mcx::PgVec::new_in(mcx);
     let mut nest_param_set = ::types_nodes::bitmapset::Bitmapset::empty();
     for nlp_node in &node.nestParams {
         let nlp = nlp_node
@@ -101,7 +107,7 @@ pub fn exec_init_nest_loop<'mcx>(
             .as_var()
             .expect("NestLoopParam value is a simple Var");
         debug_assert!(v.varno == ::types_nodes::primnodes::OUTER_VAR && v.varattno > 0);
-        nest_params.push((nlp.paramno, v.varattno));
+        nest_params.push(NestParamSlot { paramno: nlp.paramno, attno: v.varattno });
         nest_param_set.add_member(mcx, nlp.paramno)?;
     }
     let ps_ExprContext = estate.exec_assign_expr_context();
@@ -159,7 +165,7 @@ where
             } else {
                 // Bind the outer Vars into their PARAM_EXEC slots, then
                 // rescan the inner with the changed-param set.
-                for &(paramno, attno) in node.nest_params.iter() {
+                for &NestParamSlot { paramno, attno } in node.nest_params.iter() {
                     let mut isnull = false;
                     let value = exectuples::slot_getattr(
                         &mut estate.es_tupleTable[outer_slot.0 as usize],
@@ -281,6 +287,7 @@ fn project_join_tuple<'mcx>(
 
 // Exempt: all released in exec_end_nest_loop (proj via release_frames).
 mcx::forget_safe_struct!(
+    NestParamSlot { paramno, attno },
     NestLoopState<'_> { plan, ps_ExprContext, ps_ResultTupleSlot,
         js_single_match, nl_fill_outer, nl_NullInnerTupleSlot,
         nl_NeedNewOuter, nl_MatchedOuter, nest_params, nest_param_set;
