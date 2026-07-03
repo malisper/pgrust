@@ -1216,7 +1216,7 @@ fn exec_insert<'mcx>(
 
             let pre_ok = {
                 let oc = mt.on_conflict.as_ref().expect("on_conflict state");
-                let indexes = mt.indexes.as_ref().expect("indexes opened");
+                let indexes = mt.indexes.as_mut().expect("indexes opened");
                 let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
                 let rel = es_relations[(mt.result_rti - 1) as usize]
                     .as_ref()

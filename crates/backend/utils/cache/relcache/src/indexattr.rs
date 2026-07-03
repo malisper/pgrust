@@ -43,21 +43,12 @@ pub fn RelationGetIndexAttrBitmap(relid: Oid) -> PgResult<Rc<IndexAttrBitmaps>> 
         let irel = store::RelationIdGetRelation(index_oid)?
             .ok_or_else(|| index_missing(index_oid))?;
         let form = irel.rd_index.as_ref().ok_or_else(|| index_missing(index_oid))?;
-        if form.has_indpred {
-            panic!(
-                "RelationGetIndexAttrBitmap (relcache.c): partial index {index_oid} \
-                 (indpred var pull unported)"
-            );
-        }
         let summarizing = irel.rd_rel.relam == BRIN_AM_OID;
         let is_key = form.indisunique && form.indimmediate;
         let is_id_key = index_oid == replident_index;
         for (i, &attnum) in form.indkey.iter().enumerate() {
             if attnum == 0 {
-                panic!(
-                    "RelationGetIndexAttrBitmap (relcache.c): expression index \
-                     {index_oid} (indexprs var pull unported)"
-                );
+                continue;
             }
             assert!(attnum > 0, "system-column index key");
             if summarizing {
@@ -73,6 +64,15 @@ pub fn RelationGetIndexAttrBitmap(relid: Oid) -> PgResult<Rc<IndexAttrBitmaps>> 
                     add(&mut bm.identity, attnum);
                 }
             }
+        }
+        // pull_varattnos over indexprs/indpred (the RelationGetIndexExpressions/
+        // Predicate result; eval_const_expressions matches C's parsed form).
+        for src in [form.indexprs_src.as_ref(), form.indpred_src.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            let target = if summarizing { &mut bm.summarized } else { &mut bm.hot_blocking };
+            pull_expr_attrs(src.as_str(), target)?;
         }
     }
     let built = Rc::new(bm);
@@ -93,4 +93,29 @@ fn index_missing(index_oid: Oid) -> Box<PgError> {
         PgError::error(format!("could not open index {index_oid} for attr bitmap"))
             .with_sqlstate(ERRCODE_INTERNAL_ERROR),
     )
+}
+
+fn pull_expr_attrs(src: &str, out: &mut PgVec<'static, i16>) -> PgResult<()> {
+    struct W<'a> {
+        out: &'a mut PgVec<'static, i16>,
+    }
+    impl<'mcx> nodes_core::NodeWalker<'mcx> for W<'_> {
+        fn visit(&mut self, node: types_nodes::Node<'mcx>) -> PgResult<bool> {
+            if let Some(v) = node.as_var() {
+                assert!(
+                    v.varno == 1 && v.varlevelsup == 0 && v.varattno > 0,
+                    "pull_varattnos (relcache index lane): unexpected Var shape"
+                );
+                add(self.out, v.varattno);
+                return Ok(false);
+            }
+            nodes_core::expression_tree_walker(node, self)
+        }
+    }
+    let cx = mcx::MemoryContext::new("IndexAttrExprPull");
+    let smcx = cx.mcx();
+    let node = readfuncs::stringToNode(smcx, src)?;
+    let node = clauses::eval_const_expressions(smcx, node)?;
+    nodes_core::NodeWalker::visit(&mut W { out }, node)?;
+    Ok(())
 }

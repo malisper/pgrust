@@ -643,6 +643,96 @@ pub fn transformWhereClause<'mcx>(
     Ok(Some(qual))
 }
 
+// transformIndexStmt (parse_utilcmd.c), hosted here because parse_utilcmd ->
+// parse_expr would cycle (parse_expr uses parse_utilcmd::typenameTypeIdAndMod).
+pub fn transformIndexStmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    stmt_node: Node<'mcx>,
+    query_string: &str,
+) -> PgResult<()> {
+    use types_nodes::rawnodes::{IndexElem, IndexStmt};
+    let (transformed, where_clause, params) = {
+        let stmt = stmt_node.as_variant::<IndexStmt>().expect("IndexStmt");
+        (stmt.transformed, stmt.whereClause, stmt.indexParams)
+    };
+    if transformed {
+        return Ok(());
+    }
+
+    let mut pstate = parser_small1::make_parsestate(mcx, None);
+    pstate.p_sourcetext = Some(bytes_in(mcx, query_string.as_bytes())?);
+
+    let rel = table::table_open(mcx, relid, types_rel::NoLock)?;
+    let nsitem = parse_relation::addRangeTableEntryForRelation(
+        mcx,
+        &mut pstate,
+        &rel,
+        types_rel::AccessShareLock,
+        None,
+        false,
+        true,
+    )?;
+    parse_relation::addNSItemToQuery(mcx, &mut pstate, nsitem, false, true, true)?;
+
+    if let Some(wc) = where_clause {
+        let qual = transformWhereClause(
+            mcx,
+            &mut pstate,
+            Some(wc),
+            ParseExprKind::EXPR_KIND_INDEX_PREDICATE,
+            "WHERE",
+        )?
+        .expect("WHERE clause present");
+        parse_collate::assign_expr_collations(mcx, &mut pstate, qual)?;
+        // SAFETY: analyze-owned parse tree; no derived refs live.
+        unsafe { stmt_node.with_mut::<IndexStmt, _>(|s| s.whereClause = Some(qual)) }
+            .expect("IndexStmt");
+    }
+
+    for node in params.iter() {
+        let raw = node.as_variant::<IndexElem>().expect("IndexElem").expr;
+        let Some(raw) = raw else { continue };
+        let figured = parse_target::FigureIndexColname(raw);
+        let expr = transformExpr(mcx, &mut pstate, raw, ParseExprKind::EXPR_KIND_INDEX_EXPRESSION)?;
+        parse_collate::assign_expr_collations(mcx, &mut pstate, expr)?;
+        // SAFETY: analyze-owned parse tree; no derived refs live.
+        unsafe {
+            node.with_mut::<IndexElem, _>(|e| {
+                if e.indexcolname.is_none() {
+                    e.indexcolname = figured;
+                }
+                e.expr = Some(expr);
+            })
+        }
+        .expect("IndexElem");
+    }
+
+    if pstate.p_rtable.len() != 1 {
+        return Err(index_expr_other_table());
+    }
+    parser_small1::free_parsestate(pstate)?;
+    rel.close(types_rel::NoLock)?;
+    // SAFETY: analyze-owned parse tree; no derived refs live.
+    unsafe { stmt_node.with_mut::<IndexStmt, _>(|s| s.transformed = true) }.expect("IndexStmt");
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn index_expr_other_table() -> Box<PgError> {
+    Box::new(
+        PgError::error("index expressions and predicates can refer only to the table being indexed")
+            .with_sqlstate(ERRCODE_INVALID_COLUMN_REFERENCE),
+    )
+}
+
+fn bytes_in<'mcx>(mcx: Mcx<'mcx>, b: &[u8]) -> PgResult<&'mcx [u8]> {
+    let mut v: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, b.len())?;
+    mcx::vec_append_bytes(&mut v, b)?;
+    Ok(v.leak())
+}
+
 /// C `transformOnConflictArbiter` (parse_clause.c); returns
 /// (arbiterElems, arbiterWhere, constraint).
 pub fn transformOnConflictArbiter<'mcx>(

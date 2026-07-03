@@ -1055,7 +1055,7 @@ fn fix_indexqual_clause<'mcx>(
     }
 }
 
-// fix_indexqual_operand (createplan.c), simple-column arm.
+// fix_indexqual_operand (createplan.c).
 fn fix_indexqual_operand<'mcx>(
     run: &mut PlannerRun<'mcx>,
     index: &IndexOptInfo<'mcx>,
@@ -1067,9 +1067,11 @@ fn fix_indexqual_operand<'mcx>(
         node = node.as_relabel_type().unwrap().arg;
     }
     let index_relid = run.root.rel(index.rel.expect("index rel set")).relid;
-    if let Some(var) = node.as_var() {
-        if var.varno as u32 == index_relid && index.indexkeys[indexcol as usize] != 0 {
-            if index.indexkeys[indexcol as usize] == var.varattno as i32 {
+    if index.indexkeys[indexcol as usize] != 0 {
+        if let Some(var) = node.as_var() {
+            if var.varno as u32 == index_relid
+                && index.indexkeys[indexcol as usize] == var.varattno as i32
+            {
                 return Node::mk_var(
                     mcx,
                     INDEX_VAR,
@@ -1080,10 +1082,33 @@ fn fix_indexqual_operand<'mcx>(
                     0,
                 );
             }
-            panic!("index key does not match expected index column");
+        }
+        panic!("index key does not match expected index column");
+    }
+    let mut pos = 0usize;
+    for i in 0..indexcol as usize {
+        if index.indexkeys[i] == 0 {
+            pos += 1;
         }
     }
-    panic!("fix_indexqual_operand (createplan.c): expression column; M2 lane");
+    let id = *index.indexprs.get(pos).expect("too few entries in indexprs list");
+    let raw = *run.root.expr_node(id);
+    let mut indexkey = raw;
+    if indexkey.node_tag() == NodeTag::T_RelabelType {
+        indexkey = indexkey.as_relabel_type().unwrap().arg;
+    }
+    if types_nodes::equal(node, indexkey) {
+        return Node::mk_var(
+            mcx,
+            INDEX_VAR,
+            (indexcol + 1) as i16,
+            nodes_core::expr_type(raw),
+            -1,
+            nodes_core::expr_collation(raw),
+            0,
+        );
+    }
+    panic!("index key does not match expected index column");
 }
 
 // use_physical_tlist is false on every reachable input: the parent rel is

@@ -196,7 +196,7 @@ pub fn reindex_index<'mcx>(
         unported("reindex_index: TransferPredicateLocksToHeapRelation (predicate.c)");
     }
 
-    let mut indexInfo = execindexing::BuildIndexInfo(&iRel);
+    let mut indexInfo = execindexing::BuildIndexInfo(mcx, &iRel)?;
     let mut skipped_constraint = false;
     if skip_constraint_checks {
         // exclusion constraints are loud inside BuildIndexInfo

@@ -137,10 +137,6 @@ pub fn get_relation_info<'mcx>(
             {
                 panic!("get_relation_info (plancat.c): index AM {relam}; M2 index-AM lane");
             }
-            if ind.has_indpred {
-                panic!("get_relation_info (plancat.c): partial index; M2 partial-index lane");
-            }
-
             let ncolumns = ind.indnatts as i32;
             let nkeycolumns = ind.indnkeyatts as i32;
             let mut info = IndexOptInfo::new(mcx);
@@ -150,11 +146,7 @@ pub fn get_relation_info<'mcx>(
             info.ncolumns = ncolumns;
             info.nkeycolumns = nkeycolumns;
             for i in 0..ncolumns as usize {
-                let key = ind.indkey[i] as i32;
-                if key == 0 {
-                    panic!("get_relation_info (plancat.c): expression index; M2 lane");
-                }
-                info.indexkeys.push(key);
+                info.indexkeys.push(ind.indkey[i] as i32);
                 info.indexcollations.push(
                     index_rel.rd_indcollation.get(i).copied().unwrap_or(0),
                 );
@@ -190,24 +182,59 @@ pub fn get_relation_info<'mcx>(
                 }
             }
 
-            // build_index_tlist (plancat.c): simple columns only (expression
-            // columns panicked above); system attrs are unreachable in an
-            // index key.
+            // RelationGetIndexExpressions/Predicate + ChangeVarNodes(1, varno):
+            // parsed from the Form's nodeToString sources (pg_index.rs note).
+            if let Some(src) = ind.indexprs_src.as_ref() {
+                let node = readfuncs::stringToNode(mcx, src.as_str())?;
+                let list = node.as_list().expect("indexprs is a List");
+                for e in list.iter() {
+                    let e = clauses::eval_const_expressions(mcx, e)?;
+                    if varno != 1 {
+                        change_var_nodes(e, varno as i32);
+                    }
+                    info.indexprs.push(run.intern_expr(e));
+                }
+            }
+            if let Some(src) = ind.indpred_src.as_ref() {
+                let node = readfuncs::stringToNode(mcx, src.as_str())?;
+                let folded = clauses::eval_const_expressions(mcx, node)?;
+                let canon = crate::prepqual::canonicalize_qual(mcx, folded, false)?;
+                let implicit = clauses::make_ands_implicit(mcx, Some(canon))?;
+                for e in implicit.iter() {
+                    if varno != 1 {
+                        change_var_nodes(e, varno as i32);
+                    }
+                    info.indpred.push(run.intern_expr(e));
+                }
+            }
+
+            // build_index_tlist (plancat.c); system attrs are unreachable in
+            // an index key.
+            let mut indexpr_next = 0usize;
             for i in 0..ncolumns as usize {
                 let indexkey = info.indexkeys[i];
-                assert!(indexkey > 0, "build_index_tlist: system-attribute index key");
-                let att = relation.rd_att.attrs[indexkey as usize - 1];
-                let var = types_nodes::Node::mk_var(
-                    mcx,
-                    varno as i32,
-                    indexkey as i16,
-                    att.atttypid,
-                    att.atttypmod,
-                    att.attcollation,
-                    0,
-                )?;
+                let expr = if indexkey != 0 {
+                    assert!(indexkey > 0, "build_index_tlist: system-attribute index key");
+                    let att = relation.rd_att.attrs[indexkey as usize - 1];
+                    types_nodes::Node::mk_var(
+                        mcx,
+                        varno as i32,
+                        indexkey as i16,
+                        att.atttypid,
+                        att.atttypmod,
+                        att.attcollation,
+                        0,
+                    )?
+                } else {
+                    let id = *info
+                        .indexprs
+                        .get(indexpr_next)
+                        .expect("wrong number of index expressions");
+                    indexpr_next += 1;
+                    *run.root.expr_node(id)
+                };
                 let tle =
-                    types_nodes::Node::mk_target_entry(mcx, var, (i + 1) as i16, None, false)?;
+                    types_nodes::Node::mk_target_entry(mcx, expr, (i + 1) as i16, None, false)?;
                 info.indextlist.push(run.intern_expr(tle));
             }
 
@@ -267,6 +294,53 @@ pub fn get_relation_info<'mcx>(
 }
 fn btcanreturn() -> bool {
     true
+}
+
+// ChangeVarNodes (rewriteManip.c), rt_index 1 arm over freshly parsed index
+// expression trees (exclusively owned, so in-place mutation is safe).
+fn change_var_nodes(node: types_nodes::Node<'_>, new_varno: i32) {
+    use types_nodes::NodeTag;
+    let walk_list = |l: &types_nodes::NodeList<'_>| {
+        for e in l {
+            change_var_nodes(e, new_varno);
+        }
+    };
+    match node.node_tag() {
+        NodeTag::T_Var => {
+            // SAFETY: tree is freshly parsed and exclusively owned here.
+            unsafe {
+                node.with_mut::<types_nodes::primnodes::Var, _>(|v| {
+                    if v.varno == 1 && v.varlevelsup == 0 {
+                        v.varno = new_varno;
+                    }
+                })
+            }
+            .expect("Var");
+        }
+        NodeTag::T_Const | NodeTag::T_Param => {}
+        NodeTag::T_OpExpr => walk_list(&node.as_op_expr().unwrap().args),
+        NodeTag::T_DistinctExpr => walk_list(&node.as_distinct_expr().unwrap().args),
+        NodeTag::T_FuncExpr => walk_list(&node.as_func_expr().unwrap().args),
+        NodeTag::T_BoolExpr => walk_list(&node.as_bool_expr().unwrap().args),
+        NodeTag::T_ScalarArrayOpExpr => {
+            walk_list(&node.as_scalar_array_op_expr().unwrap().args)
+        }
+        NodeTag::T_RelabelType => {
+            change_var_nodes(node.as_relabel_type().unwrap().arg, new_varno)
+        }
+        NodeTag::T_NullTest => {
+            change_var_nodes(node.as_null_test().unwrap().arg.expect("NullTest.arg"), new_varno)
+        }
+        NodeTag::T_BooleanTest => change_var_nodes(
+            node.as_boolean_test().unwrap().arg.expect("BooleanTest.arg"),
+            new_varno,
+        ),
+        NodeTag::T_CoalesceExpr => walk_list(&node.as_coalesce_expr().unwrap().args),
+        NodeTag::T_ArrayExpr => walk_list(&node.as_array_expr().unwrap().elements),
+        NodeTag::T_RowExpr => walk_list(&node.as_row_expr().unwrap().args),
+        NodeTag::T_List => walk_list(node.as_list().unwrap()),
+        other => panic!("ChangeVarNodes (rewriteManip.c): {other:?}; unported lane"),
+    }
 }
 
 const HEAP_OVERHEAD_BYTES_PER_TUPLE: usize = 24 + 4;

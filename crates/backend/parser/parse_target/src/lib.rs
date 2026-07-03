@@ -688,6 +688,13 @@ pub fn FigureColname<'mcx>(node: Node<'mcx>) -> &'mcx str {
     name.unwrap_or("?column?")
 }
 
+// FigureIndexColname (parse_utilcmd.c): None when nothing suggests a name.
+pub fn FigureIndexColname<'mcx>(node: Node<'mcx>) -> Option<&'mcx str> {
+    let mut name = None;
+    FigureColnameInternal(node, &mut name);
+    name
+}
+
 // C's strength contract: 0 = no name, 1 = weak (type-cast name), 2 = good.
 fn FigureColnameInternal<'mcx>(node: Node<'mcx>, name: &mut Option<&'mcx str>) -> i32 {
     match node.node_tag() {
