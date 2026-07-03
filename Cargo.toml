@@ -15,6 +15,7 @@ members = [
     "crates/_support/types/types_guc",
     "crates/_support/types/types_dest",
     "crates/backend/access/common/heaptuple",
+    "crates/backend/lib/hyperloglog",
     "crates/backend/libpq/pqcomm_seams",
     "crates/backend/postmaster/syslogger_seams",
     "crates/backend/postmaster/syslogger",

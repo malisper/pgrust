@@ -20,6 +20,7 @@ const F_RANGE_SORTSUPPORT: Oid = 6391;
 const F_INTERVAL_CMP: Oid = 1315;
 const F_BPCHAR_SORTSUPPORT: Oid = 3328;
 const F_BTNAMESORTSUPPORT: Oid = 3135;
+const F_BYTEA_SORTSUPPORT: Oid = 3331;
 
 /// C's `ssup->comparator` fn pointer as a closed enum: identity is switchable
 /// (tuplesort_sort_memtuples specialization dispatch) and calls monomorphize.
@@ -50,6 +51,10 @@ pub enum SortComparator {
     TextLocale(&'static pg_locale::PgLocale),
     /// `varlenafastcmp_locale` bpchar arm (bpchartruelen trim).
     BpcharLocale(&'static pg_locale::PgLocale),
+    /// `uuid_fast_cmp` (uuid_sortsupport); datums point at live 16-byte uuids.
+    Uuid,
+    /// `network_fast_cmp` (network_sortsupport); live untoasted inet varlenas.
+    Network,
     /// `PrepareSortSupportComparisonShim`: the opfamily's BTORDER_PROC,
     /// resolved once, invoked per comparison (C builds an fcinfo per call
     /// too). Needs an mcx-threaded apply; the mcx-less lane panics.
@@ -126,6 +131,18 @@ pub fn apply_cmp(cmp: SortComparator, x: Datum, y: Datum) -> i32 {
         // SAFETY: as TextC.
         SortComparator::BpcharLocale(locale) => unsafe {
             varstrfastcmp_locale(varlena_payload(x), varlena_payload(y), locale, true)
+        // SAFETY: Uuid contract (enum doc) — live 16-byte images.
+        SortComparator::Uuid => unsafe {
+            let a = &*(x.as_usize() as *const ::adt_uuid::PgUuid);
+            let b = &*(y.as_usize() as *const ::adt_uuid::PgUuid);
+            ::adt_uuid::uuid_internal_cmp(a, b)
+        },
+        // SAFETY: Network contract (enum doc) — live untoasted inet varlenas.
+        SortComparator::Network => unsafe {
+            ::adt_network::network_cmp_internal(
+                ::adt_network::InetRef::from_payload(varlena_payload(x)),
+                ::adt_network::InetRef::from_payload(varlena_payload(y)),
+            )
         },
         SortComparator::Shim(shim) => panic!(
             "comparison shim (proc {}) reached an mcx-less comparator lane \
@@ -195,7 +212,7 @@ fn bpchartruelen(s: &[u8]) -> &[u8] {
 /// # Safety
 /// `d` points at a live untoasted varlena (short 1B or full 4B header).
 #[inline]
-unsafe fn varlena_payload<'a>(d: Datum) -> &'a [u8] {
+pub(crate) unsafe fn varlena_payload<'a>(d: Datum) -> &'a [u8] {
     use ::types_tuple::varatt::{
         varatt_is_1b, varatt_is_1b_e, varatt_is_4b_u, varsize_1b, varsize_4b,
     };
@@ -311,13 +328,40 @@ pub fn apply_sort_comparator_in(
     apply_sort_comparator_as_in(ssup.comparator, mcx, datum1, isnull1, datum2, isnull2, ssup)
 }
 
-/// `PrepareSortSupportFromOrderingOp` (sortsupport.c). The comparator set is
-/// the closed enum above; a sortsupport routine outside it, the btree-proc
-/// shim, and abbreviated keys (bttextsortsupport et al.) all panic loudly.
+/// The `abbrev_converter` identities (closed set); mutable converter state
+/// lives in the sort's `AbbrevState`, not in the Copy SortSupport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AbbrevKind {
+    VarStrC,
+    BpcharC,
+    Uuid,
+    Network,
+}
+
+/// Armed abbreviation: the key's `comparator` becomes `Unsigned` over
+/// converted datum1 words; ties re-compare the ORIGINAL datums (refetched
+/// from the stored tuple — datum1 no longer holds them) with
+/// `full_comparator` (C `abbrev_full_comparator`).
+#[derive(Clone, Copy, Debug)]
+pub struct AbbrevArm {
+    pub kind: AbbrevKind,
+    pub full_comparator: SortComparator,
+}
+
+/// `PrepareSortSupportFromOrderingOp` (sortsupport.c), `abbreviate=false` arm
+/// (nodeSetOp et al.); out-of-enum sortsupport routines panic loudly.
 pub fn prepare_sort_support_from_ordering_op(
     ordering_op: Oid,
     ssup: &SortSupportInit,
 ) -> PgResult<SortSupport> {
+    Ok(prepare_sort_support_abbrev(ordering_op, ssup, false)?.0)
+}
+
+pub fn prepare_sort_support_abbrev(
+    ordering_op: Oid,
+    ssup: &SortSupportInit,
+    abbreviate: bool,
+) -> PgResult<(SortSupport, Option<AbbrevArm>)> {
     let Some((opfamily, opcintype, cmptype)) =
         lsyscache::get_ordering_op_properties(ordering_op)?
     else {
@@ -326,14 +370,36 @@ pub fn prepare_sort_support_from_ordering_op(
     let ssup_reverse = cmptype == COMPARE_GT;
     let comparator =
         comparator_for_opfamily(opfamily, opcintype, opcintype, ssup.ssup_collation)?;
+    let abbrev = if abbreviate {
+        abbrev_arm_for(comparator)
+    } else {
+        None
+    };
 
-    Ok(SortSupport {
-        ssup_collation: ssup.ssup_collation,
-        ssup_reverse,
-        ssup_nulls_first: ssup.ssup_nulls_first,
-        ssup_attno: ssup.ssup_attno,
-        comparator,
-    })
+    Ok((
+        SortSupport {
+            ssup_collation: ssup.ssup_collation,
+            ssup_reverse,
+            ssup_nulls_first: ssup.ssup_nulls_first,
+            ssup_attno: ssup.ssup_attno,
+            comparator: match abbrev {
+                Some(_) => SortComparator::Unsigned,
+                None => comparator,
+            },
+        },
+        abbrev,
+    ))
+}
+
+fn abbrev_arm_for(comparator: SortComparator) -> Option<AbbrevArm> {
+    let kind = match comparator {
+        SortComparator::TextC => AbbrevKind::VarStrC,
+        SortComparator::BpcharC => AbbrevKind::BpcharC,
+        SortComparator::Uuid => AbbrevKind::Uuid,
+        SortComparator::Network => AbbrevKind::Network,
+        _ => return None,
+    };
+    Some(AbbrevArm { kind, full_comparator: comparator })
 }
 
 /// The MJExamineQuals (nodeMergejoin.c) comparator resolve: BTSORTSUPPORT_PROC
@@ -358,10 +424,13 @@ pub fn comparator_for_opfamily(
             varstr_comparator(sort_support_function == F_BPCHAR_SORTSUPPORT, collation)?
         }
         F_BTNAMESORTSUPPORT => SortComparator::NameC,
-        // C DIVERGENCE: uuid 3300 / network 5033 abbrev routines and
-        // range_sortsupport 6391 (range_fast_cmp) are unported; the shim on
-        // their BTORDER_PROC is order-identical (CATALOG perf watch).
-        0 | F_UUID_SORTSUPPORT | F_NETWORK_SORTSUPPORT | F_RANGE_SORTSUPPORT => {
+        // bytea_sortsupport forces the C collation (byteas carry NULs).
+        F_BYTEA_SORTSUPPORT => SortComparator::TextC,
+        F_UUID_SORTSUPPORT => SortComparator::Uuid,
+        F_NETWORK_SORTSUPPORT => SortComparator::Network,
+        // C DIVERGENCE: range_sortsupport 6391 (range_fast_cmp) is unported;
+        // the shim on its BTORDER_PROC is order-identical (CATALOG perf watch).
+        0 | F_RANGE_SORTSUPPORT => {
             // C: PrepareSortSupportComparisonShim — fmgr_info the BTORDER_PROC
             // once; comparisons go through the resolved fn pointer.
             let sort_function =
@@ -425,9 +494,12 @@ pub fn comparator_for_index_col(
         F_BTTEXTSORTSUPPORT | F_BPCHAR_SORTSUPPORT => {
             varstr_comparator(ssup_proc == F_BPCHAR_SORTSUPPORT, collation)?
         }
-        // C DIVERGENCE: uuid/network/range abbrev routines unported; the
-        // BTORDER_PROC shim is order-identical (CATALOG perf watch).
-        0 | F_UUID_SORTSUPPORT | F_NETWORK_SORTSUPPORT | F_RANGE_SORTSUPPORT => {
+        F_BYTEA_SORTSUPPORT => SortComparator::TextC,
+        F_UUID_SORTSUPPORT => SortComparator::Uuid,
+        F_NETWORK_SORTSUPPORT => SortComparator::Network,
+        // C DIVERGENCE: range_sortsupport 6391 (range_fast_cmp) is unported;
+        // the shim on its BTORDER_PROC is order-identical (CATALOG perf watch).
+        0 | F_RANGE_SORTSUPPORT => {
             let sort_function =
                 lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, BTORDER_PROC as i16)?;
             if sort_function == 0 {

@@ -343,7 +343,7 @@ backend-lib-bloomfilter	src/backend/lib/bloomfilter.c	todo			fabled:backend-lib-
 backend-lib-integerset	src/backend/lib/integerset.c	todo			fabled:backend-lib-integerset
 backend-lib-dshash	src/backend/lib/dshash.c	todo			fabled:backend-lib-dshash; m1-dep(stub-ok)
 backend-lib-radixtree	src/include/lib/radixtree.h	todo			fabled:backend-lib-radixtree
-backend-lib-hyperloglog	src/backend/lib/hyperloglog.c	todo			fabled:backend-lib-hyperloglog; m1-dep(stub-ok)
+backend-lib-hyperloglog	src/backend/lib/hyperloglog.c	ported	hyperloglog	cold	bwidth-10 arm only (sole caller width; others panic loudly); inline 1KB register file, no palloc; consumers: varstr/uuid/network abbrev-abort cardinality tracking
 backend-lib-ilist	src/backend/lib/ilist.c	todo			fabled:backend-lib-ilist; m1-dep(stub-ok)
 backend-lib-pairingheap	src/backend/lib/pairingheap.c	todo			fabled:backend-lib-pairingheap
 backend-lib-rbtree	src/backend/lib/rbtree.c	todo			fabled:backend-lib-rbtree
