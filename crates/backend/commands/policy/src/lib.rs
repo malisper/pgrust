@@ -149,8 +149,8 @@ fn oid_array_datum<'mcx>(mcx: Mcx<'mcx>, oids: &[Oid]) -> PgResult<PgVec<'mcx, u
 }
 
 fn text_datum(mcx: Mcx<'_>, s: &str) -> PgResult<Datum> {
-    let t = varlena::cstring_to_text(mcx, s.as_bytes())?;
-    Ok(Datum::from_usize(t.as_bytes().as_ptr() as usize))
+    let img = varlena::cstring_to_text(mcx, s.as_bytes())?.into_image().leak();
+    Ok(Datum::from_usize(img.as_ptr() as usize))
 }
 
 fn get_relkind_objtype(relkind: u8) -> ObjectType {
