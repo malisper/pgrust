@@ -981,7 +981,7 @@ fn show_grouping_set_keys<'mcx>(
                 node_gap("show_sort_group_keys", "no tlist entry for key column")
             });
             let mut buf = PgString::new_in(mcx);
-            deparse_expr(es, child, tle.expr, useprefix, &mut buf)?;
+            deparse_expr(es, child, None, tle.expr, useprefix, &mut buf)?;
             show_sortorder_options(
                 &mut buf,
                 tle.expr,
@@ -1006,7 +1006,7 @@ fn show_grouping_set_keys<'mcx>(
                 node_gap("show_grouping_set_keys", "no tlist entry for key column")
             });
             let mut buf = PgString::new_in(mcx);
-            deparse_expr(es, child, tle.expr, useprefix, &mut buf)?;
+            deparse_expr(es, child, None, tle.expr, useprefix, &mut buf)?;
             result.push(buf);
         }
         if result.is_empty() {
