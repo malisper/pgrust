@@ -1725,11 +1725,30 @@ fn finalize_plan<'mcx>(
                 finalize_primnode(run, cnt, &mut paramids)?;
             }
         }
+        // LockRows: epqParam becomes valid for descendants (EPQ scan_params
+        // leg dead here) and is locally added, never propagated up.
+        NodeTag::T_LockRows => {
+            valid.add_member(mcx, plan.as_lock_rows().unwrap().epqParam)?;
+        }
         NodeTag::T_NestLoop => {
             let nl = plan.as_nest_loop().unwrap();
             debug_assert!(nl.nestParams.is_nil());
             finalize_primnode_list(run, &nl.join.joinqual, &mut paramids)?;
         }
+        NodeTag::T_MergeJoin => {
+            let mj = plan.as_merge_join().unwrap();
+            finalize_primnode_list(run, &mj.join.joinqual, &mut paramids)?;
+            finalize_primnode_list(run, &mj.mergeclauses, &mut paramids)?;
+        }
+        NodeTag::T_HashJoin => {
+            let hj = plan.as_hash_join().unwrap();
+            finalize_primnode_list(run, &hj.join.joinqual, &mut paramids)?;
+            finalize_primnode_list(run, &hj.hashclauses, &mut paramids)?;
+        }
+        NodeTag::T_Hash => {
+            finalize_primnode_list(run, &plan.as_hash().unwrap().hashkeys, &mut paramids)?;
+        }
+        NodeTag::T_Unique => {}
         NodeTag::T_ModifyTable => {
             panic!("finalize_plan (subselect.c): ModifyTable with exec params; M2 DML lane")
         }

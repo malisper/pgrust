@@ -670,6 +670,22 @@ impl<'mcx> Parser<'mcx> {
             1821 => *yyval = YYSTYPE::Ival(LockClauseStrength::LCS_FORNOKEYUPDATE as i32),
             1822 => *yyval = YYSTYPE::Ival(LockClauseStrength::LCS_FORSHARE as i32),
             1823 => *yyval = YYSTYPE::Ival(LockClauseStrength::LCS_FORKEYSHARE as i32),
+            // simple_select setop alternatives: makeSetOp (larg/rarg SelectStmts).
+            1723 | 1724 | 1725 => {
+                let op = match rule {
+                    1723 => types_nodes::parsenodes::SetOperation::SETOP_UNION,
+                    1724 => types_nodes::parsenodes::SetOperation::SETOP_INTERSECT,
+                    _ => types_nodes::parsenodes::SetOperation::SETOP_EXCEPT,
+                };
+                let larg = view.v(1).node().and_then(|n| n.as_select_stmt());
+                let rarg = view.v(4).node().and_then(|n| n.as_select_stmt());
+                let mut n = Node::build::<SelectStmt>(mcx)?;
+                n.op = op;
+                n.all = view.v(3).ival() == 1;
+                n.larg = larg;
+                n.rarg = rarg;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // set_quantifier: ALL | DISTINCT | EMPTY (SetQuantifier values).
             1756 => *yyval = YYSTYPE::Ival(1),
             1757 => *yyval = YYSTYPE::Ival(2),

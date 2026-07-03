@@ -40,6 +40,9 @@ pub struct ExecAuxRowMark {
 pub struct LockRowsState<'mcx> {
     pub plan: &'mcx LockRows<'mcx>,
     pub lr_arowMarks: PgVec<'mcx, ExecAuxRowMark>,
+    /// Non-locking marks (C hands these to EvalPlanQualInit); only an EPQ
+    /// recheck reads them, and that arm is a named panic below.
+    pub lr_epq_arowMarks: PgVec<'mcx, ExecAuxRowMark>,
 }
 
 /// `ExecFindJunkAttributeInTlist` (execJunk.c).
@@ -64,6 +67,7 @@ pub fn exec_init_lock_rows<'mcx>(
 ) -> PgResult<LockRowsState<'mcx>> {
     debug_assert!(eflags & EXEC_FLAG_MARK == 0);
     let mut lr_arowMarks: PgVec<'mcx, ExecAuxRowMark> = PgVec::new_in(estate.es_query_cxt);
+    let mut lr_epq_arowMarks: PgVec<'mcx, ExecAuxRowMark> = PgVec::new_in(estate.es_query_cxt);
     for rc_node in &node.rowMarks {
         let rc = rc_node.as_plan_row_mark().expect("rowMarks cell is a PlanRowMark");
         if rc.isParent {
@@ -77,12 +81,6 @@ pub fn exec_init_lock_rows<'mcx>(
         }
         let erm = estate.es_rowmarks[(rc.rti - 1) as usize]
             .expect("InitPlan built the ExecRowMark for every PlanRowMark rti");
-        if !erm.markType.requires_row_share_lock() {
-            panic!(
-                "ExecInitLockRows (nodeLockRows.c): non-locking rowmark \
-                 (EvalPlanQualInit aux list) — EPQ lane"
-            );
-        }
         let ctid_name = format!("ctid{}", erm.rowmarkId);
         let ctidAttNo = find_junk_attribute_in_tlist(outer_tlist, &ctid_name);
         assert!(ctidAttNo != 0, "could not find junk {ctid_name} column");
@@ -100,15 +98,15 @@ pub fn exec_init_lock_rows<'mcx>(
         };
         let mark_slot =
             estate.exec_init_extra_tuple_slot(Some(desc), TupleSlotKind::BufferHeapTuple);
-        lr_arowMarks.push(ExecAuxRowMark {
-            rti: rc.rti,
-            ctidAttNo,
-            toidAttNo,
-            wholeAttNo: 0,
-            mark_slot,
-        });
+        let aerm =
+            ExecAuxRowMark { rti: rc.rti, ctidAttNo, toidAttNo, wholeAttNo: 0, mark_slot };
+        if erm.markType.requires_row_share_lock() {
+            lr_arowMarks.push(aerm);
+        } else {
+            lr_epq_arowMarks.push(aerm);
+        }
     }
-    Ok(LockRowsState { plan: node, lr_arowMarks })
+    Ok(LockRowsState { plan: node, lr_arowMarks, lr_epq_arowMarks })
 }
 
 /// `ExecLockRows`; C's goto lnext becomes the labeled outer loop.
