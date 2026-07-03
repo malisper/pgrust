@@ -5,7 +5,6 @@ edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "pg_depend"
 path = "src/lib.rs"
 
 [dependencies]
@@ -23,7 +22,3 @@ fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 catalog = { path = "../catalog" }
 catalog_indexing = { path = "../catalog_indexing" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
-genam = { path = "../../access/index/genam" }
-types_scan = { path = "../../../_support/types/types_scan" }
-types_tuple = { path = "../../../_support/types/types_tuple" }
-fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
