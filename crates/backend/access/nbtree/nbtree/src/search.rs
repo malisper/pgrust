@@ -75,7 +75,7 @@ pub(crate) struct ScanCtx<'a, 'mcx> {
 
 // C BTScanInsertData, stack layout; only the live key prefix is initialized
 // (palloc parity).
-pub(crate) struct BtScanInsert {
+pub struct BtScanInsert {
     pub heapkeyspace: bool,
     pub allequalimage: bool,
     pub anynullkeys: bool,
@@ -121,7 +121,7 @@ impl BtScanInsert {
 /// Batched-descent lever (docs/graviton.md §1.5), noted not forced: overlap
 /// the child-page fetch with the tail of the parent's binary search; needs
 /// bufmgr prefetch support and a measured win.
-pub(crate) fn bt_search(
+pub fn bt_search(
     rel: &Relation<'_>,
     key: &mut BtScanInsert,
     frame: &mut OrderProcFrame,
@@ -140,7 +140,8 @@ pub(crate) fn bt_search(
                 break;
             }
             let offnum = bt_binsrch(rel, key, &page, frame)?;
-            let itup = page_item(&page, page.item_id(offnum));
+            // SAFETY: binsrch returns an offset within this page's line array.
+            let itup = page_item(&page, unsafe { page.item_id_unchecked(offnum) });
             // SAFETY: pinned+locked page item.
             unsafe {
                 debug_assert!(bt_tuple_is_pivot(itup) || !key.heapkeyspace);
@@ -200,7 +201,7 @@ fn fell_off_the_end(rel: &Relation<'_>) -> Box<PgError> {
 }
 
 /// _bt_binsrch: first offset >= (or >, when nextkey) the scan key.
-pub(crate) fn bt_binsrch(
+pub fn bt_binsrch(
     rel: &Relation<'_>,
     key: &mut BtScanInsert,
     page: &PageRef<'_>,
@@ -244,7 +245,7 @@ pub(crate) fn bt_binsrch(
 }
 
 /// _bt_compare: insertion scankey vs the tuple at `offnum`; <0 / 0 / >0.
-pub(crate) fn bt_compare(
+pub fn bt_compare(
     rel: &Relation<'_>,
     key: &mut BtScanInsert,
     page: &PageRef<'_>,
@@ -261,7 +262,8 @@ pub(crate) fn bt_compare(
         return Ok(1);
     }
 
-    let itup = page_item(page, page.item_id(offnum));
+    // SAFETY: caller passes an offnum within this page's line array.
+    let itup = page_item(page, unsafe { page.item_id_unchecked(offnum) });
     // SAFETY: pinned+locked page item, offnum from page bounds (caller).
     unsafe {
         let ntupatts = bt_tuple_get_natts(itup, rel.indnatts());
@@ -347,7 +349,7 @@ fn drop_lock_and_maybe_pin(rel: &Relation<'_>, so: &mut BTScanOpaqueData<'_>) ->
 }
 
 /// index_getprocinfo + fmgr_info_copy over the rd_supportinfo rule-5 cache.
-fn order_procinfo(rel: &Relation<'_>, attno: usize) -> PgResult<FmgrInfo> {
+pub fn order_procinfo(rel: &Relation<'_>, attno: usize) -> PgResult<FmgrInfo> {
     let mut cache = rel.rd_supportinfo.borrow_mut();
     if cache.is_empty() {
         cache.resize_with(rel.indnkeyatts() as usize, || None);

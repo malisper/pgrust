@@ -1100,7 +1100,9 @@ dependencies = [
 name = "execmain"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
  "backend_status_seams",
+ "bufmgr_seams",
  "datum",
  "execexpr",
  "execmain_seams",
@@ -1108,14 +1110,22 @@ dependencies = [
  "exectuples",
  "executils",
  "guc_tables",
+ "heapam_visibility_seams",
  "init_small",
  "mcx",
+ "miscinit_seams",
  "nodeindexonlyscan",
  "nodeindexscan",
  "nodeseqscan",
  "postgres_seams",
+ "predicate_seams",
+ "procarray_seams",
+ "pruneheap_seams",
+ "relation_seams",
+ "resowner_seams",
  "snapmgr",
  "syscache_seams",
+ "tableam",
  "tcop_dest",
  "tupdesc",
  "types_core",
@@ -1123,8 +1133,12 @@ dependencies = [
  "types_error",
  "types_nodes",
  "types_portal",
+ "types_rel",
+ "types_resowner",
  "types_scan",
  "types_slot",
+ "types_snapshot",
+ "types_storage",
  "types_tuple",
  "xact",
 ]
@@ -1180,6 +1194,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "exectuples_output"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "exectuples",
+ "fmgr_seams",
+ "lsyscache_seams",
+ "mbutils_seams",
+ "mcx",
+ "pqcomm_seams",
+ "printtup",
+ "tcop_dest",
+ "types_dest",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_portal",
+ "types_slot",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
 name = "executils"
 version = "0.1.0"
 dependencies = [
@@ -1203,6 +1240,29 @@ dependencies = [
 [[package]]
 name = "explain"
 version = "0.1.0"
+dependencies = [
+ "datum",
+ "elog",
+ "execmain_seams",
+ "exectuples_output",
+ "guc_tables",
+ "keywords",
+ "lsyscache",
+ "mcx",
+ "postgres",
+ "rewrite_handler_seams",
+ "snapmgr",
+ "stringinfo",
+ "tcop_dest",
+ "tupdesc",
+ "types_core",
+ "types_dest",
+ "types_error",
+ "types_nodes",
+ "types_portal",
+ "types_slot",
+ "types_tuple",
+]
 
 [[package]]
 name = "fd"
@@ -2159,6 +2219,7 @@ dependencies = [
  "allocator-api2",
  "hashbrown",
  "libc",
+ "rustc-hash",
  "types_error",
 ]
 
@@ -2319,6 +2380,7 @@ dependencies = [
 name = "nodeindexonlyscan"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
  "bufmgr_seams",
  "datum",
  "execexpr",
@@ -2328,6 +2390,7 @@ dependencies = [
  "indexam",
  "init_small",
  "mcx",
+ "miscinit_seams",
  "nbtree",
  "nodeindexscan",
  "predicate_seams",
@@ -2385,6 +2448,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodelimit"
+version = "0.1.0"
+
+[[package]]
 name = "nodes_core"
 version = "0.1.0"
 dependencies = [
@@ -2423,6 +2490,10 @@ dependencies = [
  "types_storage",
  "types_tuple",
 ]
+
+[[package]]
+name = "nodesort"
+version = "0.1.0"
 
 [[package]]
 name = "numutils"
@@ -3614,6 +3685,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustc-hash"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
+
+[[package]]
 name = "ryu"
 version = "0.1.0"
 
@@ -3662,14 +3739,17 @@ dependencies = [
  "aio_config",
  "auth",
  "autovacuum",
+ "auxprocess",
  "backend_startup",
  "backend_status",
  "be_secure",
+ "bgwriter",
  "bufmgr",
  "cache_syscache",
  "catalog",
  "catalog_namespace",
  "catcache",
+ "checkpointer",
  "clog",
  "conffiles",
  "dbcommands",
@@ -3705,6 +3785,8 @@ dependencies = [
  "lsyscache",
  "mbutils",
  "miscinit",
+ "nodeindexonlyscan",
+ "nodeindexscan",
  "nodeseqscan",
  "parse_expr",
  "parser_analyze",
@@ -3721,6 +3803,7 @@ dependencies = [
  "portalmem",
  "postgres",
  "postmaster",
+ "postmaster_startup",
  "pqcomm",
  "pqformat",
  "pquery",
@@ -3760,6 +3843,7 @@ dependencies = [
  "varsup",
  "waiteventset",
  "walsender_config",
+ "walwriter",
  "xact",
  "xloginsert",
  "xlogreader",
@@ -4208,6 +4292,7 @@ dependencies = [
 name = "tableam"
 version = "0.1.0"
 dependencies = [
+ "bufmgr_seams",
  "exectuples",
  "guc_tables",
  "heapam",
@@ -4459,6 +4544,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tuplesort"
+version = "0.1.0"
+
+[[package]]
 name = "tuplestore_hold_seams"
 version = "0.0.0"
 dependencies = [
@@ -4699,8 +4788,13 @@ name = "tzparser"
 version = "0.0.0"
 dependencies = [
  "adt_datetime",
+ "elog",
+ "fd",
  "guc",
+ "guc_tables",
  "mcx",
+ "pgtz",
+ "xact_seams",
 ]
 
 [[package]]
@@ -4783,6 +4877,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_guc",
+ "tzparser",
  "varlena",
  "wchar",
  "xact",

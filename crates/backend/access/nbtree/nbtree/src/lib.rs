@@ -32,6 +32,9 @@ use ::types_snapshot::IsMVCCSnapshot;
 use search::{bt_first, bt_gettuple_continue, pos_unpin_if_pinned, restore_scanpos, ScanCtx};
 use utils::bt_killitems;
 
+pub use search::BtScanInsert;
+pub use utils::bt_mkscankey;
+
 #[cold]
 #[inline(never)]
 pub(crate) fn unported_phase2(what: &str) -> ! {
@@ -78,7 +81,7 @@ macro_rules! split_scan {
     }};
 }
 
-/// btbeginscan; xs_itupdesc has no home yet (index-only scan lane).
+/// btbeginscan.
 pub fn btbeginscan<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
@@ -122,8 +125,7 @@ pub fn btrescan(
             BTScanPosInvalidate(&mut so.currPos);
         }
 
-        // for index-only scans, non-MVCC snapshots, unlogged relations (the
-        // LSN-based TID recycle check needs WAL), and bitmap scans.
+        // off for index-only scans, non-MVCC snapshots, unlogged, bitmap.
         so.dropPin = !scan.xs_want_itup
             && scan.xs_snapshot.as_deref().is_some_and(IsMVCCSnapshot)
             && relation_needs_wal(&scan.indexRelation)
@@ -242,4 +244,11 @@ pub fn btrestrpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         BTScanPosInvalidate(&mut so.currPos);
     }
     Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+pub mod bench_internals {
+    pub use crate::fcframe::OrderProcFrame;
+    pub use crate::page::{bt_relbuf, page_item, page_opaque};
+    pub use crate::search::{bt_binsrch, bt_compare, bt_search, order_procinfo};
 }
