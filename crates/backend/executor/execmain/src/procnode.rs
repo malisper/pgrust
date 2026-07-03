@@ -1882,6 +1882,6 @@ pub(crate) fn with_eval_slots<'mcx, R>(
         IncrementalSort(x), Unique(x), Limit(x), BitmapHeapScan(x),
         BitmapIndexScan(x), Append(x), SubqueryScan(x), SetOp(x), LockRows(x),
         BitmapAnd(x), BitmapOr(x), ModifyTable(x), NestLoop(x), HashJoin(x),
-        MergeJoin(x), WindowAgg(x), ProjectSet(x), Instrumented(x),
+        MergeJoin(x), WindowAgg(x), ProjectSet(x), Memoize(x), Instrumented(x),
     },
 );
