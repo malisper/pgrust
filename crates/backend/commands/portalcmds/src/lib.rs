@@ -11,11 +11,13 @@ use ::types_error::{
 use ::types_nodes::nodes_enums::CmdType;
 use ::types_nodes::parsenodes::{DeclareCursorStmt, FetchStmt, Query};
 use ::types_nodes::plannodes::PlannedStmt;
+use ::types_dest::CommandDest;
 use ::types_portal::{
     CachedPlanHandle, ParamListHandle, Portal, QueryCompletion, QueryDescHandle, CMDTAG_FETCH,
     CMDTAG_MOVE, CMDTAG_SELECT, CURSOR_OPT_HOLD, CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL,
-    PORTAL_FAILED, PORTAL_ONE_SELECT,
+    PORTAL_FAILED, PORTAL_ONE_SELECT, PORTAL_READY,
 };
+use ::types_scan::sdir::{ForwardScanDirection, NoMovementScanDirection};
 
 use ::tcop_dest::DestReceiver;
 
@@ -246,11 +248,82 @@ pub fn PortalCleanup(portal: &Portal<'static>) -> PgResult<()> {
     result
 }
 
-pub fn PersistHoldablePortal(_portal: &Portal<'static>) -> PgResult<()> {
-    panic!(
-        "PersistHoldablePortal (portalcmds.c): WITH HOLD persist-at-commit \
-         unported — unit backend-commands-portalcmds holdable lane"
-    );
+pub fn PersistHoldablePortal(portal: &Portal<'static>) -> PgResult<()> {
+    let query_desc = portal.borrow().queryDesc;
+    assert!(!query_desc.is_null(), "PersistHoldablePortal: portal has no queryDesc");
+    debug_assert!(!portal.borrow().holdStore.is_null());
+    debug_assert!(portal.borrow().holdSnapshot.is_none());
+    // C copies tupDesc into holdContext before ExecutorEnd; the portal's Rc
+    // keeps the desc alive past FreeQueryDesc here.
+
+    portalmem::MarkPortalActive(portal)?;
+
+    pquery::run_protected(portal, false, || -> PgResult<()> {
+        let snap = execmain_seams::query_desc_snapshot::call(query_desc)
+            .expect("queryDesc->snapshot set while executor is active");
+        snapmgr::PushActiveSnapshot(&snap)?;
+
+        // SCROLL stores the whole result (rewind first); no-scroll stores only
+        // the not-yet-fetched rows, and NoMovement if already at end (not all
+        // plan nodes tolerate another fetch after returning NULL).
+        let scroll = portal.borrow().cursorOptions & CURSOR_OPT_SCROLL != 0;
+        let direction = if scroll {
+            execmain_seams::executor_rewind::call(query_desc)?;
+            ForwardScanDirection
+        } else if portal.borrow().atEnd {
+            NoMovementScanDirection
+        } else {
+            ForwardScanDirection
+        };
+
+        let hold_store = portal.borrow().holdStore;
+        // detoast=true: the stored rows must not depend on the snapshot.
+        let mut treceiver = tcop_dest::CreateDestReceiver(CommandDest::Tuplestore);
+        tcop_dest::SetTuplestoreDestReceiverParams(&mut treceiver, hold_store, true);
+        execmain_seams::executor_run::call(query_desc, direction, 0, &mut treceiver)?;
+        treceiver.destroy();
+
+        portal.borrow_mut().queryDesc = QueryDescHandle::NULL;
+        (|| -> PgResult<()> {
+            execmain_seams::executor_finish::call(query_desc)?;
+            execmain_seams::executor_end::call(query_desc)
+        })()
+        .inspect_err(|_| execmain_seams::release_query_desc::call(query_desc))?;
+        execmain_seams::free_query_desc::call(query_desc);
+
+        let (at_end, portal_pos) = {
+            let p = portal.borrow();
+            (p.atEnd, p.portalPos)
+        };
+        if at_end {
+            while tuplestore_hold_seams::tuplestore_skiptuples::call(hold_store, 1_000_000, true) {}
+        } else {
+            tuplestore_hold_seams::tuplestore_rescan::call(hold_store);
+            // No-scroll: the store starts at the not-yet-fetched rows already.
+            if scroll
+                && !tuplestore_hold_seams::tuplestore_skiptuples::call(
+                    hold_store,
+                    portal_pos as i64,
+                    true,
+                )
+            {
+                return Err(ereport(ERROR)
+                    .errmsg_internal("unexpected end of tuple stream")
+                    .into_error()
+                    .into());
+            }
+        }
+        Ok(())
+    })?;
+
+    portal.borrow_mut().status = PORTAL_READY;
+
+    snapmgr::PopActiveSnapshot()?;
+
+    // C: MemoryContextDeleteChildren(portal->portalContext) — the plan arena
+    // (planContext) is still referenced by the stmts registry handle, so it is
+    // retained until PortalDrop.
+    Ok(())
 }
 
 #[cold]

@@ -26,3 +26,12 @@ seam_core::seam!(
     // tuplestore_rescan(state) (tuplestore.c) — active read pointer to start.
     pub fn tuplestore_rescan(store: types_portal::TuplestoreHandle)
 );
+
+seam_core::seam!(
+    // tuplestore_skiptuples(state, ntuples, forward) (tuplestore.c).
+    pub fn tuplestore_skiptuples(
+        store: types_portal::TuplestoreHandle,
+        ntuples: i64,
+        forward: bool,
+    ) -> bool
+);

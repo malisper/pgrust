@@ -69,7 +69,7 @@ fn set_query_completion(qc: &mut QueryCompletion, tag: types_core::CommandTag, n
 // may_commit renders PortalRun's restore rule: a utility inside the portal can
 // commit and destroy the saved owner, so a saved TopTransactionResourceOwner
 // re-targets the exit-time one (pquery.c:816).
-fn run_protected<R>(
+pub fn run_protected<R>(
     portal: &Portal<'static>,
     may_commit: bool,
     body: impl FnOnce() -> PgResult<R>,
